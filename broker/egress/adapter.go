@@ -31,14 +31,35 @@ type Injection struct {
 	Prefix string
 }
 
-// Operation is one declared request shape. Path is a template of literal
-// segments and {name} segments, each of which matches one non-empty
-// segment. Body, when set, requires a JSON object body and constrains it.
+// Operation is one declared request shape. Verb maps it to one verb of the
+// broker's closed list (ADP-2). Path is a template of literal segments and
+// {name} segments, each of which matches one non-empty segment. Body, when
+// set, requires a JSON object body and constrains it.
 type Operation struct {
 	Name   string
+	Verb   string
 	Method string
 	Path   string
 	Body   *BodyRule
+}
+
+// The broker's closed verb list (ADP-2). An adapter maps each operation to
+// one of these; it cannot define its own.
+const (
+	VerbRead          = "read"
+	VerbDraft         = "draft"
+	VerbSend          = "send"
+	VerbPost          = "post"
+	VerbBuy           = "buy"
+	VerbShare         = "share"
+	VerbDeleteRemote  = "delete-remote"
+	VerbChangeAccount = "change-account"
+	VerbRevealSecret  = "reveal-or-create-secret"
+)
+
+var verbs = map[string]bool{
+	VerbRead: true, VerbDraft: true, VerbSend: true, VerbPost: true, VerbBuy: true,
+	VerbShare: true, VerbDeleteRemote: true, VerbChangeAccount: true, VerbRevealSecret: true,
 }
 
 // BodyRule constrains a JSON request body (ADP-10). The proxy decodes the
@@ -72,7 +93,7 @@ func OpenAI(credential string) Adapter {
 		Credential: credential,
 		Inject:     Injection{Header: "Authorization", Prefix: "Bearer "},
 		Operations: []Operation{{
-			Name: "chat.completions", Method: "POST", Path: "/v1/chat/completions",
+			Name: "chat.completions", Verb: VerbRead, Method: "POST", Path: "/v1/chat/completions",
 			Body: &BodyRule{
 				DenyKeys:       []string{"background"},
 				PublicMayFetch: true,
@@ -94,7 +115,7 @@ func Anthropic(credential string) Adapter {
 		Credential: credential,
 		Inject:     Injection{Header: "X-Api-Key"},
 		Operations: []Operation{{
-			Name: "messages", Method: "POST", Path: "/v1/messages",
+			Name: "messages", Verb: VerbRead, Method: "POST", Path: "/v1/messages",
 			Body: &BodyRule{
 				DenyKeys:       []string{"background"},
 				PublicMayFetch: true,
@@ -152,6 +173,9 @@ func (a Adapter) validate() error {
 	for _, op := range a.Operations {
 		if op.Name == "" || op.Method == "" || op.Method != strings.ToUpper(op.Method) {
 			return fmt.Errorf("adapter %s: bad operation %+v", a.Name, op)
+		}
+		if !verbs[op.Verb] {
+			return fmt.Errorf("adapter %s: operation %s: verb %q is not on the broker's list (ADP-2)", a.Name, op.Name, op.Verb)
 		}
 		if _, err := splitPath(op.Path); err != nil {
 			return fmt.Errorf("adapter %s: operation %s: %v", a.Name, op.Name, err)

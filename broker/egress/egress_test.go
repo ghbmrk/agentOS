@@ -22,9 +22,8 @@ import (
 
 // REQ: CRED-1, CRED-5, CRED-7, ADP-10
 //
-// ADP-10 is partly covered: request shapes and body rules are enforced
-// here; the verb-class and intent check before forwarding is not yet
-// (ASSUMPTIONS.md E9).
+// Request shapes and body rules are enforced here; the verb-class check is
+// in verb_test.go.
 
 // fakeProvider stands in for a provider's API. It records every request it
 // receives and answers with whatever reply says.
