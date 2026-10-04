@@ -125,15 +125,21 @@ func TestARC6OwnerChatReachesTheGuestAndBack(t *testing.T) {
 			t.Fatalf("reply: %d %s", st, body)
 		}
 	}
+	// The session-unlock confirmation races the guest's answers; skip it.
+	next := func() string {
+		for {
+			got := recv(t, phone)
+			if strings.Contains(got, "482913") {
+				t.Fatalf("a secret-shaped guest reply went out: %q", got)
+			}
+			if !strings.HasPrefix(got, "Unlocked") {
+				return got
+			}
+		}
+	}
 	reply("Your verification code is 482913, and the plan is ready.")
-	for {
-		got := recv(t, phone)
-		if strings.Contains(got, "482913") {
-			t.Fatalf("a secret-shaped guest reply went out: %q", got)
-		}
-		if !strings.HasPrefix(got, "Unlocked") && !strings.Contains(got, "unlocked") {
-			break // the session-unlock confirmation may come first
-		}
+	if got := next(); !strings.Contains(got, "held back") {
+		t.Fatalf("owner got %q, want the held-back pointer", got)
 	}
 	if _, err := plane.DeliverOwner("agent", "second", false); err != nil {
 		t.Fatal(err)
@@ -147,7 +153,7 @@ func TestARC6OwnerChatReachesTheGuestAndBack(t *testing.T) {
 			t.Logf("%s -> %s: %q", m.From, m.To, m.Text)
 		}
 	}()
-	if got := recv(t, phone); !strings.Contains(got, "dentist") {
+	if got := next(); !strings.Contains(got, "dentist") {
 		t.Fatalf("owner got %q", got)
 	}
 }

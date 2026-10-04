@@ -55,8 +55,8 @@ func main() {
 
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
-			r.SetURL(&url.URL{Scheme: "http", Host: "broker"})
-			r.Out.Host = "broker"
+			r.SetURL(&url.URL{Scheme: "http", Host: "broker.localhost"})
+			r.Out.Host = "broker.localhost"
 		},
 		Transport:     broker.Transport,
 		FlushInterval: -1, // model streams flow through as they arrive
@@ -122,7 +122,7 @@ func owner(broker *http.Client, gateway, model, token string) {
 }
 
 func ownerOnce(broker *http.Client, gateway, model, token string) error {
-	resp, err := broker.Get("http://broker/owner/next")
+	resp, err := broker.Get("http://broker.localhost/owner/next")
 	if err != nil {
 		return err
 	}
@@ -149,7 +149,7 @@ func ownerOnce(broker *http.Client, gateway, model, token string) error {
 		time.Sleep(wait)
 	}
 	out, _ := json.Marshal(map[string]string{"id": msg.ID, "text": answer})
-	resp, err = broker.Post("http://broker/owner/reply", "application/json", bytes.NewReader(out))
+	resp, err = broker.Post("http://broker.localhost/owner/reply", "application/json", bytes.NewReader(out))
 	if err != nil {
 		return err
 	}

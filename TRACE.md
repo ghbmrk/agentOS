@@ -17,15 +17,15 @@ Covered: 41 / 139 requirement IDs
 | HW-7 | — |
 | ARC-1 | `broker/vault/imports_test.go`, `broker/vault/vault_test.go` |
 | ARC-2 | `broker/control/handler_test.go`, `broker/daemon/arc2_test.go`, `broker/daemon/daemon_test.go`, `broker/owner/arc2_test.go` |
-| ARC-3 | `broker/guest/plane_test.go` |
+| ARC-3 | `broker/e2e/openclaw_test.go`, `broker/guest/plane_test.go` |
 | ARC-4 | `broker/vm/gvisor/gvisor_test.go`, `broker/vm/vm_test.go` |
 | ARC-5 | `broker/vm/services_test.go` |
-| REV-1 | `broker/guest/plane_test.go`, `broker/vm/gvisor/gvisor_test.go`, `broker/vm/overlay/overlay_test.go`, `broker/vm/vm_test.go` |
+| REV-1 | `broker/e2e/openclaw_test.go`, `broker/guest/plane_test.go`, `broker/vm/gvisor/gvisor_test.go`, `broker/vm/overlay/overlay_test.go`, `broker/vm/vm_test.go` |
 | REV-2 | — |
 | REV-3 | — |
 | REV-4 | `broker/vm/gvisor/gvisor_test.go`, `broker/vm/overlay/overlay_test.go`, `broker/vm/vm_test.go` |
-| REV-5 | `broker/e2e/a14_test.go`, `broker/guest/plane_test.go`, `broker/vm/vm_test.go` |
-| CH-1 | `broker/modem/modem_test.go`, `broker/owner/channel_test.go` |
+| REV-5 | `broker/e2e/a14_test.go`, `broker/e2e/openclaw_test.go`, `broker/e2e/owner_test.go`, `broker/guest/plane_test.go`, `broker/vm/vm_test.go` |
+| CH-1 | `broker/e2e/owner_test.go`, `broker/modem/modem_test.go`, `broker/owner/channel_test.go` |
 | CH-2 | `broker/control/handler_test.go`, `broker/control/parse_test.go`, `broker/control/text_test.go`, `broker/daemon/daemon_test.go`, `broker/e2e/a9_test.go`, `broker/owner/arc2_test.go`, `broker/owner/channel_test.go`, `broker/owner/review_test.go` |
 | CH-3 | `broker/owner/channel_test.go`, `broker/owner/classify_test.go`, `broker/owner/review_test.go` |
 | CH-4 | `broker/owner/channel_test.go`, `broker/owner/review_test.go`, `broker/owner/secrets_test.go` |
@@ -35,19 +35,19 @@ Covered: 41 / 139 requirement IDs
 | CH-11 | `broker/owner/channel_test.go`, `broker/owner/parse_test.go` |
 | CH-12 | `broker/modem/modem_test.go`, `broker/owner/channel_test.go` |
 | CH-13 | `broker/owner/channel_test.go`, `broker/owner/parse_test.go`, `broker/owner/review_test.go` |
-| CH-14 | `broker/owner/channel_test.go`, `broker/owner/parse_test.go`, `broker/owner/review_test.go` |
+| CH-14 | `broker/e2e/owner_test.go`, `broker/owner/channel_test.go`, `broker/owner/parse_test.go`, `broker/owner/review_test.go` |
 | CH-15 | `broker/owner/review_test.go` |
 | CH-16 | `broker/owner/channel_test.go` |
 | CH-17 | — |
 | CH-18 | `broker/owner/channel_test.go`, `broker/owner/review_test.go` |
-| CH-19 | `broker/owner/channel_test.go`, `broker/owner/disclose_test.go`, `broker/owner/review_test.go` |
+| CH-19 | `broker/e2e/owner_test.go`, `broker/owner/channel_test.go`, `broker/owner/disclose_test.go`, `broker/owner/review_test.go` |
 | CH-7 | — |
 | CH-8 | — |
 | CH-9 | — |
 | CH-20 | — |
 | ID-1 | — |
 | ID-2 | — |
-| CRED-1 | `broker/e2e/a14_test.go`, `broker/egress/egress_test.go`, `broker/guest/plane_test.go`, `broker/meter/meter_test.go`, `broker/vault/imports_test.go`, `broker/vault/redact_test.go`, `broker/vault/vault_test.go` |
+| CRED-1 | `broker/e2e/a14_test.go`, `broker/e2e/openclaw_test.go`, `broker/egress/egress_test.go`, `broker/guest/plane_test.go`, `broker/meter/meter_test.go`, `broker/vault/imports_test.go`, `broker/vault/redact_test.go`, `broker/vault/vault_test.go` |
 | CRED-2 | — |
 | CRED-3 | `broker/owner/disclose_test.go` |
 | CRED-4 | `tests/test_s5_executor.py`, `tests/test_s5_protocol.py` |
@@ -69,7 +69,7 @@ Covered: 41 / 139 requirement IDs
 | ONB-6 | — |
 | ONB-7 | — |
 | ONB-8 | — |
-| OP-1 | `broker/guest/plane_test.go`, `broker/journal/engine_test.go`, `broker/journal/property_test.go` |
+| OP-1 | `broker/e2e/openclaw_test.go`, `broker/guest/plane_test.go`, `broker/journal/engine_test.go`, `broker/journal/property_test.go` |
 | OP-2 | `broker/journal/engine_test.go`, `broker/journal/property_test.go`, `broker/journal/review_test.go` |
 | OP-3 | `broker/journal/engine_test.go`, `broker/journal/property_test.go`, `broker/journal/review_test.go` |
 | OP-4 | `broker/journal/engine_test.go`, `broker/journal/property_test.go`, `broker/journal/review_test.go`, `broker/owner/review_test.go` |
