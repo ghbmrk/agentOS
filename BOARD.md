@@ -16,3 +16,12 @@ States: `queued` → `building` → `in review` → `merged` | `escalated` | `dr
 | S2 | USB LTE modem: SMS and voice under Linux | **Mark: 2 modems + SIM** | test kit ready (same image); waiting on hardware |
 
 Exit of P0: spike results → spec v0.12 diff → Mark approves → budget re-estimate.
+
+## Phase 1: core in a VM
+
+Started before spec v0.12 on parts unlikely to change; each package lists its spec assumptions.
+
+| ID | Package | Needs | State |
+|---|---|---|---|
+| P1-1 | Journal and intent engine (OP-1–7), Go library with property tests ([assumptions](broker/journal/ASSUMPTIONS.md)) | Cloud only | in review |
+| P1-2 | Broker skeleton: sockets, admission classes, STOP/STATUS without inference (ARC-2, CH-2) | P1-1 | queued |
