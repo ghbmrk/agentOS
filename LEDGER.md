@@ -1,7 +1,7 @@
 # LEDGER
 
 Budget: $200 Claude plan, usage credits **off** (hard cap). See PLAN.md §4A.
-Unit: WAU = one week's plan allowance. Harness envelope: ~70% default, adaptive (PLAN.md §4A B-1); only the subscription is a hard limit.
+Unit: WAU = one week's plan allowance. Target: ~100% of the weekly limit used by each reset, ~14%/day (Mark, 2026-10-04; PLAN.md §4B), replacing the 70% envelope; only the subscription is a hard limit.
 
 ## Calibration readings (from Mark's usage screen)
 
@@ -14,7 +14,7 @@ Unit: WAU = one week's plan allowance. Harness envelope: ~70% default, adaptive 
 
 | Week starting | Envelope | Harness used (est.) | Mark's own use | Notes |
 |---|---|---|---|---|
-| 2026-10-04 | 70% | 23% measured on day one (19:50 Sunday; week reset 06:00 Sunday); ≈ 160% if sustained. Pacing rule from 2026-10-04: ≈ 8%/day, ≤ 3 build threads, no new packages until open PRs merge (PLAN.md §4B) | included in the 23% | P0 start; P0 exit prep (spec v0.12) included. S3 (cloud): ~0.22 M tokens by session counter, incl. review fixes; WAU share awaits Mark's screenshot (B-6). S4: ~0.5 M tokens of context (est., unmetered), incl. review fixes; see its RESULT.md. S7: ~0.25 M tokens of context (est., unmetered); see its RESULT.md |
+| 2026-10-04 | ~100% at reset (Mark, 23:55) | 23% measured on day one (19:50 Sunday; week reset 06:00 Sunday); ≈ 160% if sustained. Pace: ~14%/day, spread evenly so the limit isn't hit early; day one is ahead, so the next days run lighter (PLAN.md §4B) | included in the 23% | P0 start; P0 exit prep (spec v0.12) included. S3 (cloud): ~0.22 M tokens by session counter, incl. review fixes; WAU share awaits Mark's screenshot (B-6). S4: ~0.5 M tokens of context (est., unmetered), incl. review fixes; see its RESULT.md. S7: ~0.25 M tokens of context (est., unmetered); see its RESULT.md |
 
 ## Phase allocation (share of total)
 
