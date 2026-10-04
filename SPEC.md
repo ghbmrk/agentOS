@@ -1,0 +1,417 @@
+# AgentOS — Core System Specification v0.11
+
+**Status:** Draft rewrite from first principles. Supersedes v0.10 (Google Doc titled "AgentOS — Specification v0.7"), which is left unedited.
+**Normative language:** MUST / MUST NOT / SHOULD / MAY. Requirements carry IDs (e.g. `DEP-1`), and §15 traces each to an acceptance test.
+**Evidence labels:** [Fact] established or verifiable · [Inference] reasoned, untested · [Risk] known open question.
+
+---
+
+## 0. What changed from v0.10
+
+| v0.10 | v0.11 |
+|---|---|
+| Forked OpenClaw; mediated every escape path inside it | OpenClaw (or any agent runtime) runs **unmodified** as a guest; containment is structural |
+| Process boundary = trust boundary | **Reversibility** = trust boundary: full agent power inside the box, gating only at irreversible effects |
+| Installed Linux appliance on one reference PC | **The drive is the product:** runs from an external SSD on any compatible PC; the N95/8 GB unit is the **floor** |
+| Owner's phone number as canonical address | **The box has its own number** on its own SIM. The owner's number is one signal among several. |
+| Implicit hosted services (telephony, relay, app) | **No service operated by the AgentOS project, no relay, no app-store app, no domain or certificate authority** (§2) |
+| Separate improvement / upstream / sharing mechanisms | **One change pipeline**, three sources, fed by **spare-capacity loops** (improve, secure, maintain) and accumulating into **the open-source project** via decentralized attestations |
+| 12 acceptance tests, one gate | **12 tests, 5 gates**, riskiest first |
+
+---
+
+## 1. Purpose
+
+AgentOS turns frontier AI the owner already pays for into **accepted work**, using a machine the owner physically controls. It **compounds** what it learns and keeps **authority and credentials** under the owner's sole control.
+
+**North-star metric:** owner-minutes per accepted task (lower is better), subject to zero authority or credential violations.
+
+---
+
+## 2. Dependency budget
+
+The product MUST work with only the dependencies in the first two rows.
+
+| Class | Dependency | Why it can't be removed |
+|---|---|---|
+| **Inherent** | Electricity, an internet connection, the owner's phone (any phone that can text and call), and at least one frontier AI account | The purpose is to apply remote frontier intelligence; the owner needs some way to talk to the box |
+| **Commodity (one)** | A **mobile carrier SIM** for the box (any prepaid plan) | A phone number requires a carrier. A SIM is swappable, needs no AgentOS account, and gives the box a backup internet link. |
+| **Optional** | Ethernet; off-box backup target (owner's choice, encrypted); update mirrors; the public project repository and peer installations (§11B); the owner's existing accounts (Google, email…) | Each adds value; none is required to boot, control, or stop the system |
+| **Forbidden** | Any server run by the AgentOS project; a relay; an app-store app; an AgentOS account; vendor activation; a public domain or certificate; telemetry | Each is a single point of failure, control, or surveillance outside the owner's hands |
+
+- **DEP-1** Boot, owner control (status/stop), the journal, and recovery MUST work with only inherent and commodity dependencies, and MUST NOT need AI inference.
+- **DEP-2** No component MAY require a service operated by the AgentOS project, now or after any update.
+- **DEP-3** Every optional dependency MUST be removable without loss of control or data integrity. Losing it degrades capability only.
+- **DEP-4** Software updates MUST be verifiable from content hashes and signatures alone, fetchable from any mirror, and installable offline from a drive. No update MAY be required for the system to keep working.
+
+[Inference] With no relay, the owner reaches the box remotely only by **text and voice** through the SIM. Rich interaction (the live browser view) happens **only on the box's own local Wi-Fi**, which in practice means at home. This is the deliberate cost of zero third-party services (see §6.3).
+
+---
+
+## 3. Physical form
+
+### 3.1 Components the owner receives
+1. **The AgentOS Drive:** a USB4 dual-mode NVMe SSD (falls back to USB 3.x), preloaded with the system image. A short plug-in stick form is preferred, and 1–2 TB is recommended.
+2. **The Owner Card** (printed; keep it like a passport). It carries:
+   - the **setup secret** and its short **setup code**;
+   - the **local Wi-Fi name and password** for the box's own access point;
+   - a QR code joining that Wi-Fi and opening the local setup page;
+   - a **paper approval-code grid** (fallback authenticator);
+   - the **recovery key** (on a separate, detachable sheet).
+3. **Cellular modem with SIM slot**. MVP: a separate USB LTE modem with voice support. Target: built into the drive (§3.3).
+
+- **HW-1** The image MUST NOT contain any per-owner secret not printed on that drive's card. The card and drive are produced as a pair. A drive bought without a card MUST generate a fresh card on first boot only when a local display, printer, or local web session is present (DIY path, §8.4).
+- **HW-2** The modem MUST support SMS and voice to the host over USB. [Risk] Voice-over-USB support varies by modem; qualify specific models.
+
+### 3.2 Host compatibility
+- **HW-3** Supported hosts: x86-64 PCs with UEFI firmware, roughly the last decade. Windows-on-ARM laptops and pre-UEFI PCs are out of scope.
+- **HW-4** **Floor profile:** 4 modest cores, 8 GB RAM, USB 3.2 Gen 2, no accelerator (reference: GEEKOM Air12 Lite, N95). Every requirement MUST pass at the floor. Larger hosts MAY only add throughput, never change semantics, authority, or test outcomes.
+- **HW-5** Secure Boot MUST be supported through a Microsoft-signed shim [Fact: standard for mainstream distributions].
+- **HW-6** Booting from USB without a screen works where firmware already prefers USB, or after a one-time boot-order change. [Risk] For "any PC, never a keyboard", the integrated key (§3.3) presses the boot key from a per-model recipe.
+- **HW-7** Macs are not boot targets [Inference: Apple boot security requires interactive recovery-mode changes]. A macOS host app running the system in a virtual machine is a post-MVP option.
+
+### 3.3 Target integrated form (post-MVP)
+One device holds the NVMe SSD, a microcontroller that acts as a USB keyboard for blind boot selection, a Wi-Fi radio, and an LTE modem with a SIM slot. You plug one thing in.
+
+---
+
+## 4. Architecture
+
+```
+            text / voice (carrier)          local Wi-Fi (box's own AP, card key)
+  owner phone ───────────────▶ SIM modem          owner phone ──▶ local web UI
+                                   │                                  │
+┌──────────────────────── HOST (immutable image on the drive) ───────┼────────┐
+│ BROKER — trusted, small, deterministic, no inference                │        │
+│  journal · grants/budgets · vault · adapters · admission/preemption │        │
+│  owner channel · snapshot custody · change pipeline · release mgr ◀─┘        │
+│      ▲ narrow sockets only                                                    │
+│ ┌────┴─────────────┐ ┌───────────────────┐ ┌───────────────┐ ┌─────────────┐  │
+│ │ AGENT MACHINES   │ │ CREDENTIALED      │ │ LOCAL INFER.  │ │ RECALL INDEX│  │
+│ │ full power,      │ │ EXECUTORS         │ │ CPU/iGPU/NPU  │ │ (broker-    │  │
+│ │ snapshot/fork/   │ │ logged-in browsers│ │ small model,  │ │  owned)     │  │
+│ │ rollback; guests │ │ & provider        │ │ speech,       │ │             │  │
+│ │ e.g. OpenClaw    │ │ adapters (1 acct  │ │ embeddings    │ │             │  │
+│ │ (untrusted)      │ │ each)             │ │               │ │             │  │
+│ └──────────────────┘ └───────────────────┘ └───────────────┘ └─────────────┘  │
+└───────────────────────────────────────────────────────────────────────────────┘
+```
+
+| Component | Trust | Owns |
+|---|---|---|
+| **Host** | Trusted base | Immutable, signed image with A/B updates; an existing distribution, not a custom one |
+| **Broker** | Trusted, minimal | All state that matters: journal, grants, budgets, vault, snapshots, releases, owner channel |
+| **Agent machines** | Untrusted, disposable | Work: planning, code, experiments. Full root inside, no credentials, no direct path out except broker sockets and declared uncredentialed egress |
+| **Credentialed executors** | Broker-controlled | One account each; driven only through the narrow action protocol (§7.3) |
+| **Local inference** | Untrusted service | Small model, speech, embeddings; uses accelerators when present |
+
+- **ARC-1** The broker MUST be the only component holding credentials, signing keys, or snapshot custody.
+- **ARC-2** The broker's control path MUST NOT invoke AI inference.
+- **ARC-3** Agent runtimes MUST run unmodified where their tool/plugin interfaces suffice. A runtime fork is permitted only with a recorded "interface X insufficient because Y."
+- **ARC-4** Agent machines MUST be rebuildable from a known image at any time without losing durable state. Durable state lives only in broker-owned stores.
+
+---
+
+## 5. The trust boundary is reversibility
+
+- **REV-1** Inside the box, agent machines MAY do anything: root, install packages, run code, break things. Every agent machine is snapshotted automatically at each step, and snapshots are broker-held, so the agent cannot delete them.
+- **REV-2** Every **irreversible or external effect** MUST go through a journaled intent (§9). That covers sending, posting, buying, sharing, deleting remotely, disclosing data, changing an account, or creating/revealing a secret.
+- **REV-3** The system SHOULD convert irreversible effects into reversible ones where possible: drafts instead of sends, staging copies, delayed send with an undo window, shadow runs.
+- **REV-4** Agent primitives MUST include `checkpoint`, `fork(n)`, `diff`, `rollback`, `merge` on agent machines.
+
+---
+
+## 6. Owner channel
+
+### 6.1 Text and voice (anywhere)
+- **CH-1** The box's number (its SIM) is the conversational address. Texts and calls reach the broker directly from the modem. No intermediary service is involved beyond the carrier.
+- **CH-2** **STOP** and **STATUS** MUST be handled by the broker with all AI models and guests down.
+- **CH-3** Command tiers:
+
+| Action | Required proof |
+|---|---|
+| STOP (pause all dispatch) | Message from the owner's number (worst case of spoofing: a pause) |
+| Task chat, STATUS | Owner's number + a session unlocked by an approval code within the last N hours |
+| Approve an irreversible intent | Approval code entered in reply to that request's ID |
+| New grant, raise budget, adopt a release, add a trusted host, recovery | Approval code + local confirmation or recovery key, per policy |
+
+- **CH-4** Approval codes come from a standard code generator. [Fact] iPhone's built-in Passwords app generates them; on Android any authenticator works. The **paper grid** on the Owner Card is the fallback. No AgentOS app exists.
+- **CH-5** Live calls: carrier voice → modem → broker → speech (local by default; hosted only by explicit policy) → guest. [Risk] Voice quality and latency over USB modems need qualifying.
+- **CH-6** Secrets MUST NEVER be requested or accepted over text or voice. The carrier sees that traffic, and transcripts reach models.
+
+### 6.2 Local web UI (box's own Wi-Fi only)
+- **CH-7** The broker runs its own Wi-Fi access point, secured with the card's Wi-Fi password, and serves a local web UI on it. The link is encrypted by WPA2/WPA3 with a key only the card holder has. No domain or public certificate is required.
+- **CH-8** The local UI is used for setup, password logins to sites without OAuth (live view of a credentialed browser), reviewing diffs and files, and changing rules. It is never required for daily operation.
+- **CH-9** The local UI MUST NOT be reachable from the home network or the internet.
+
+### 6.3 What is deliberately not possible
+Remote live browser view, remote file browsing, and push notifications, away from the box's Wi-Fi. Everything remote is text and voice. [Inference] OAuth "device code" sign-ins work remotely because they happen on the provider's own site. Scope limits vary by provider.
+
+---
+
+## 7. Identity, credentials, recovery
+
+### 7.1 Owner identity
+- **ID-1** Ownership is proven by the **setup secret** (card), the **approval-code seed** (enrolled once in the owner's code generator, plus the paper grid), and the **recovery key**. The owner's phone number is a signal, never sufficient alone.
+- **ID-2** No developer key, no first-caller enrollment, no account with the AgentOS project.
+
+### 7.2 Invariant C (credential custody)
+- **CRED-1** No reusable authentication material (passwords, session cookies, OAuth/refresh/bearer tokens, API keys, private keys, approval-code seeds, recovery codes) MAY ever exist in memory, storage, snapshots, logs, the recall index, or I/O readable by any model-directed process.
+- **CRED-2** Secure relative to the stated trusted base: host kernel, hypervisor, firmware, broker, credentialed-executor sandboxes. Compromise of that base is out of scope, and the spec says so.
+- **CRED-3** Content the agent legitimately reads may contain secrets (a 2FA code in an email). That is governed by disclosure policy, not custody.
+
+### 7.3 Credentialed executors
+- **CRED-4** Logged-in browsers run in broker-owned sandboxes, one account each. Agents drive them only through a closed, versioned action protocol: navigate, click, type, select, read DOM/accessibility snapshot (password fields omitted), screenshot, download to workspace. Developer tools, arbitrary JavaScript, and cookie/storage/header access MUST NOT exist in the protocol.
+- **CRED-5** A provider CLI MAY hold a consumer login token only if tool execution inside it is disabled and it acts purely as a model-call relay. Otherwise that provider uses an API key, injected by the broker's egress proxy.
+- **CRED-6** Actions that reveal or create secrets (show API key, password reset, add device, export, change recovery) are irreversible intents requiring an approval code, even on allowlisted sites.
+- **CRED-7** The broker MUST redact every vault value from all agent-bound output, logs, and the index. This is defense in depth.
+
+### 7.4 Vault keys and hosts
+- **CRED-8** The vault is encrypted on the drive. On a **trusted host**, an unlock slot is sealed to that PC's TPM, so it restarts unattended. On an unknown host, the box texts the owner, and unlock requires an approval code. A lost drive is ciphertext.
+- **CRED-9** Adding or removing a trusted host is a tier-4 action (CH-3).
+
+### 7.5 Recovery
+- **REC-1** Recovery key + a backup (if the owner configured one), or the drive itself, restores everything onto new hardware.
+- **REC-2** Restore MUST NOT revive revoked grants or spent budgets: restore enters restricted mode until the owner re-confirms standing grants.
+- **REC-3** Lost phone: the owner re-enrolls the code generator using the recovery key. Lost SIM/number: a new SIM plus the recovery key; the new number is announced to the owner's number. A new holder of an old number can do nothing without codes.
+
+---
+
+## 8. Onboarding (normative)
+
+### 8.1 Steps
+1. Insert the SIM into the modem. Plug the drive and modem into the PC (rear ports). Power on. No monitor or keyboard.
+2. If the PC doesn't boot USB by itself: press its boot key once (MVP), or the integrated key does it (target).
+3. The box boots and starts its own Wi-Fi. If Ethernet or a known network is available, it also connects out.
+4. Owner scans the card's QR code. The phone joins the box's Wi-Fi and opens the local setup page.
+5. Setup page:
+   - choose home Wi-Fi (or Ethernet);
+   - enter the owner's phone number;
+   - enroll the approval-code seed into the phone's code generator (one tap on iPhone's Passwords app);
+   - confirm the recovery key is stored;
+   - accept default rules (spend cap, always-approve list, quiet hours);
+   - make this PC a trusted host.
+6. The box texts the owner from its own number: "AgentOS is running on [host, RAM]. Reply with the setup code from your card." The owner replies, and the box confirms. This proves the number path both ways.
+7. **Connect AI:** per provider, an OAuth/device-code sign-in on the phone (works anywhere), or an API key entered on the local setup page. Never by text.
+8. **Connect accounts:** OAuth/device-code where offered; otherwise a password login through the local live view of a credentialed browser.
+9. "All set. What should I work on?"
+
+- **ONB-1** Steps 1–9 MUST be completable with only the PC, drive, modem, SIM, card, and phone. No external service beyond the carrier and the providers being connected.
+- **ONB-2** Disk on the host is never written. AgentOS runs entirely from the drive.
+
+### 8.2 Moving to another PC
+Plug in; the box texts "Unknown host [model]. Reply with an approval code to unlock". Optionally make it trusted.
+
+### 8.3 Daily use
+Text or call. Batched approvals carry evidence. A daily digest arrives at a set time. STOP always works.
+
+### 8.4 DIY drive (no card)
+Flash the image from any computer. First boot generates the card contents and shows them only on the local setup page (or a connected display), for the owner to print. Same flow afterwards.
+
+---
+
+## 9. Operation contract (the one primitive)
+
+```
+intent { id, goal_id, origin(authenticated), action, exact params/recipients/visibility,
+         grant_ref, budget_reservation, preconditions, executor }
+  → authorized | denied
+  → dispatched → observed(result | outcome_unknown) → settled
+```
+
+- **OP-1** Same ID + same params returns the existing state. Same ID + different params is rejected.
+- **OP-2** Once a request may have reached a service, the intent stays `outcome_unknown` until evidence resolves it. A new attempt ID is not proof the previous one did nothing.
+- **OP-3** Authority, recipients, preconditions, and reservations MUST be rechecked immediately before dispatch.
+- **OP-4** Restart = replay the journal. Unresolved intents are reconciled before new dispatch on that account.
+- **OP-5** Grants, budget changes, trusted-host changes, release activations, and skill adoptions are themselves intents: one audit trail, one recovery rule.
+- **OP-6** STOP blocks further dispatch, attempts supported cancellation, and reports unresolved effects. It never claims to undo remote actions.
+- **OP-7** Permission, execution success, and goal quality are recorded separately. An allowed, successful action can still be wrong.
+
+---
+
+## 10. Capability services (the force multipliers)
+
+| ID | Service | Requirement |
+|---|---|---|
+| **CAP-1** | Speculative parallelism | Agents MAY fork N machines, try approaches, test, keep the winner. N is set by measured free RAM; at the floor N may be 1 (sequential). Frontier spend is reserved per fork. |
+| **CAP-2** | Reach | Credentialed browsers (§7.3) for logged-in sites; uncredentialed browsing with full power inside agent machines; local network devices by explicit grant. |
+| **CAP-3** | Recall | A broker-owned local index of everything the system has seen, with provenance. Full text, embeddings, and structured facts. Owner corrections are stored as explicit, editable preferences. Deletion requests propagate. |
+| **CAP-4** | Always-on | An event bus (mail, files, calendar, web changes, timers) triggers work. Interrupts for irreversible decisions only, batched into a digest unless urgent. |
+| **CAP-5** | Compounding | Successful trajectories are recorded as replayable procedures. Recurring ones are compiled into scripts that consult a model only where assumptions fail. Compiled skills go through §11. |
+| **CAP-6** | Attention optimizer | Approvals arrive batched and risk-tiered, with evidence. The system proposes (never assumes) converting always-approved classes into standing grants. |
+| **CAP-7** | Collaboration | Multiple frontier participants may work one task through broker tools. Disagreements are settled preferably by running both (CAP-1), not by debate. This is guest behavior, not infrastructure. |
+
+---
+
+## 11. One change pipeline
+
+Sources: **local** (procedures, skills, routing, configs), **upstream** (new guest images such as OpenClaw releases, new host images), **shared** (packages from other installations).
+
+Path: candidate → build in sandbox → evaluate on the frozen suite → adoption intent → activate with fallback → keep as a rollback point.
+
+- **CHG-1** Held-out evaluation suites live in the broker. Candidates see only a dev split. Cases come from real tasks with owner outcomes (accepted, corrected, rejected) plus security fixtures, never solely from tests the candidate authored.
+- **CHG-2** Changing suites, graders, or adoption policy is an owner-approved intent and cannot be validated by the change itself.
+- **CHG-3** Security updates MAY auto-stage per standing policy. Behavior changes require owner approval unless a standing grant covers that class.
+- **CHG-4** Sharing is opt-in, carries only public inputs and evidence, and works over any git-like channel the owner chooses. No registry or marketplace. The recipient re-qualifies locally and may reject.
+- **CHG-5** Shared packages MUST NOT carry private corpora, sessions, identity material, or authority.
+
+---
+
+## 11A. Autonomous loops on spare capacity
+
+The system improves and defends itself in otherwise-wasted time. Three loops share one scheduler, the change pipeline (§11), and the journal.
+
+### Defaults
+- **LOOP-0** All three loops and open-source contribution (§11B) are **on by default** and **modifiable** at any time, by text ("loops off", "stop sharing") or on the local UI. Settings: per-loop on/off, spare AI budget (default: local compute plus a conservative share of spare quota, shown in the digest), per-category contribution policy, and a global off switch. Onboarding states the defaults in one line, and the owner can change them there.
+
+### Spare capacity
+- **LOOP-1** "Spare" means local compute not needed by foreground or accepted work (RES-1), plus AI quota the owner has designated as spare, e.g. the unused part of a subscription's rate window. Spare work runs in the lowest admission class and MUST yield within the frozen preemption target.
+- **LOOP-2** Spare AI usage has its own budget, separate from work budgets and visible in the digest. [Risk] Some consumer AI plans may restrict automated background use. Such routes are used for loops only if the provider permits it; otherwise loops use API-key routes or local models.
+- **LOOP-3** The scheduler allocates spare capacity across loops by measured return: held-out gain or security findings per unit of cost. A loop that stops producing measured value gets less budget automatically. **When nothing worthwhile remains, the system sleeps.**
+
+### Loop 1: self-improvement
+- **LOOP-4** Mines the journal for failures, owner corrections, slow or expensive steps, and repeated trajectories, and turns each into a hypothesis and then a candidate (procedure, compiled skill, routing rule, context rule, configuration).
+- **LOOP-5** **Counterfactual replay:** candidates are tested by replaying past tasks inside agent machines against recorded external responses, in shadow mode. No live external effects; any unrecorded call fails closed.
+- **LOOP-6** Candidates are adopted only through §11 (held-out suite from real owner outcomes, CHG-1). Loop 1 cannot edit the suite, the graders, or its own budget (CHG-2).
+
+### Loop 2: self-securing
+- **LOOP-7** Continuous adversarial testing *from inside the sandbox*, with no more authority than any guest:
+  - injection corpora against guests and collaborators;
+  - fuzzing of the broker sockets and the credentialed-browser action protocol;
+  - canary hunts (the A5 test, rerun continuously with fresh canaries);
+  - attempts to tamper with evaluators and snapshots;
+  - resource-exhaustion probes.
+- **LOOP-8** Passive checks: image and dependency hashes vs the signed release; known-vulnerability matching against advisories (fetched like updates, DEP-4; works offline with the last snapshot); configuration drift; and expiry of credentials and certificates held in the vault.
+- **LOOP-9** Every finding becomes: contain (pause the affected grant or executor) → preserve evidence → minimized regression case (added to the security suite permanently) → fix candidate through §11 → owner notified per severity.
+- **LOOP-10** A fix that disables a check, widens authority, or reduces coverage of the security suite MUST fail qualification. The security suite only grows, except by owner-approved intent.
+
+### Loop 3: maintenance
+- **LOOP-11** Upstream intake (new OpenClaw or other guest images, host images, dependency updates) is evaluated in spare time through §11. Security updates are prioritized; checks never reported as current when offline.
+
+---
+
+## 11B. Accumulating into the open-source project
+
+Every installation's verified gains can flow into one public project, and every installation benefits from everyone else's, without any runtime dependency on the project.
+
+### What accumulates (public repository contents)
+| Area | Contents | Main source |
+|---|---|---|
+| Core | Broker, host image definition, action protocol, schemas | Maintainers + contributions |
+| Skills library | Compiled skills and procedures with applicability, tests, measured results | Loop 1 |
+| Evaluation suites | Public task cases with expected outcomes (no private data) | Owners who opt in |
+| Security corpus | Attacks, fixtures, minimized regressions | Loop 2 |
+| Hardware database | Per-PC boot recipes (HW-6), modem qualification (HW-2), accelerator results | A1/A2 runs on real installations |
+
+### Contribution flow: clean-room by construction
+
+**Principle:** nothing derived from private data is ever published. Published artifacts are produced only by a process that **never had access** to private data, so leakage is ruled out by information flow, not by filtering or redaction (which can miss things).
+
+- **OSS-1** **Two sides, one narrow bridge.**
+  - The *private side* (journal, recall index, workspaces, real tasks) may emit only a **hint**: a record whose every field is an **enumerated value from a public schema**. Examples: `skill_gap{domain: calendar, format: ics, failure: timezone}` or `vuln{class: prompt_injection, vector: email_html}`.
+  - Hints contain no free text, numbers, names, identifiers, or content. Information crossing the bridge is bounded to choosing among publicly listed options.
+  - Every hint is logged and visible to the owner.
+- **OSS-2** **Clean-room builder.** On receiving a hint, a fresh agent machine is created with **no** access to the vault, journal, recall index, private workspaces, credentialed executors, or owner channel. It sees only the hint, the public repository, public internet (read-only), and synthetic fixtures. It independently builds the generalized skill, test case, or regression from public information, and tests it on synthetic fixtures. **Only clean-room output can be published.**
+- **OSS-3** **Never published, under any setting:** real task cases, private evaluation suites, trajectories, transcripts, compiled skills built from private trajectories (their clean-room re-creations may be), recall content, and owner preferences.
+- **OSS-4** **Structured-only data:** hardware-database entries and attestations use fixed schemas of enumerated fields (vendor, model, firmware version, result class, software version). No serial numbers, free text, or timestamps finer than a day.
+- **OSS-5** **Security findings:** loop 2 runs on synthetic data and canaries. A finding from real traffic crosses only as a `vuln{}` hint, and the regression is rebuilt in the clean room. Findings that could harm other installations go first by encrypted private report to the maintainers, under an embargo.
+- **OSS-6** **Metadata:** each installation publishes under a pseudonymous signing key, unlinkable to the owner's identity, number, or accounts, and rotated periodically. Publications are batched and time-delayed to blur activity patterns. [Inference] Content leakage is structurally zero. The remaining exposure is network metadata (that *some* installation at an IP address published), which the owner can remove by routing publication through an anonymity network (optional setting).
+- **OSS-7** **Owner control:** per-category policy is *automatic* (default, since content is clean-room), *ask each time*, or *never*. Hints are logged locally either way.
+
+### Verification without a central service
+- **OSS-8** **Decentralized qualification:** installations (on by default, LOOP-0) spend spare capacity (LOOP-1) reproducing public candidates and publish signed attestations: "passed/failed, on this hardware class, with these versions." Accumulated attestations replace project-run CI.
+- **OSS-9** Attestations are evidence, never authority. Maintainers decide what enters canonical releases. Each installation still re-qualifies locally before adopting anything (CHG-4). [Risk] Fake installations can forge attestations, so they're weighted by reproducibility and maintainer review, never counted blindly.
+- **OSS-10** Canonical releases flow back to every installation through the update path (DEP-4, UPD-1), per owner policy. Anyone may fork the project, and installations may follow any fork.
+- **OSS-13** Incoming public artifacts are untrusted input: they run only in agent machines, and pass §11 locally before adoption.
+
+### Dependency status
+- **OSS-11** The public repository is a **publication channel, not a runtime dependency**. It can be hosted on any git service, mirrored anywhere, or carried on a drive. With it unreachable, nothing about operation, control, or recovery changes (DEP-3).
+- **OSS-12** The license MUST be chosen before first public release, and upstream notices (OpenClaw and others) preserved. This spec grants no license.
+
+---
+
+## 12. Resources and accelerators
+
+- **RES-1** Admission classes, in priority order: `foreground` (calls, STOP/STATUS, owner chat) > `accepted work` > `experiments`. Experiments MUST be frozen or killed within a frozen target time when foreground needs resources.
+- **RES-2** A per-component memory budget is declared and enforced by cgroups. The broker refuses admission that would breach it. No swap thrashing, no out-of-memory kills of broker or foreground.
+- **RES-3** The broker discovers accelerators (iGPU/NPU/GPU) and exposes them as an admission resource used by local inference. The identical service MUST run on CPU when no accelerator is present. Nothing in the broker depends on an accelerator.
+- **RES-4** Reserve storage for a healthy release, the journal, and the recall index before discretionary downloads or snapshots. Old snapshots are pruned by policy.
+
+---
+
+## 13. Updates, backups, time
+
+- **UPD-1** A/B image updates: stage → test → activate → health-check → commit or fall back. Rollback never rewinds revocations, spent budgets, deletions, or known external effects.
+- **UPD-2** Updates come from content-addressed, signed sources: any mirror, or offline from a drive (DEP-4). The update-signing key is held offline by the project. [Risk] Project key custody and rotation need their own procedure.
+- **UPD-3** **First boot updates before trust.** The preloaded image may be months old. On first network contact, before any AI or personal account is connected, the box fetches the latest **stable** release, verifies it, and activates it through A/B with fallback. Credentials never touch an outdated image. Offline first boot runs the preloaded image and says so, and the update applies when the box is next online.
+- **UPD-4** **Channels:** *stable* (default), *fast* (early adopters, feeds attestations), *pinned* (no automatic updates, security notices only). Changeable by text or local UI.
+- **UPD-5** **Cadence (defaults, modifiable):**
+
+| Change type | Check | Apply |
+|---|---|---|
+| Security fixes | Daily | Auto-staged; applied at the next quiet window, typically within 24 h; automatic rollback on failed health check |
+| Stable releases (host, broker, bundled guests such as OpenClaw) | Daily | After a **soak**: at least 7 days on fast **and** sufficient independent passing attestations (OSS-8), whichever is later, plus local requalification; then at a quiet window with random jitter |
+| Behavior-changing releases | Same | Also need owner approval unless a standing grant covers that class (CHG-3) |
+| Upstream projects directly (e.g. OpenClaw main) | Loop 3, spare time | Never adopted straight from upstream; enter users' boxes only via a qualified AgentOS release |
+| Shared skills | Continuous | Through §11 locally, one at a time |
+
+- **UPD-6** Updates never apply during a call, accepted work, or quiet hours the owner has excluded. Every update is a journaled intent with a rollback point.
+- **UPD-7** [Inference] Soak plus attestations replaces a central staged rollout: early-channel installations act as the canary population without any project-run service.
+- **BAK-1** Backups are optional and owner-chosen: a second local drive, or encrypted upload to storage the owner already has. Without a backup, the drive is the only copy, and the owner is told so plainly.
+- **TIM-1** Time comes from network time when online, with carrier network time (from the modem) as a cross-check. Large disagreements put the broker into restricted mode for time-sensitive checks.
+
+---
+
+## 14. Out of scope (v0.11)
+
+Fleet orchestration; Mac or ARM boot; any hosted AgentOS service; remote rich UI (needs a relay, so excluded by DEP-2); a marketplace; private-data federated training; large local models as a requirement; custom kernel or distribution work.
+
+---
+
+## 15. Acceptance tests and gates
+
+| ID | Test | Requirements |
+|---|---|---|
+| **A1** | On ≥3 unmodified PCs from different vendors, with no monitor or keyboard (one boot keypress allowed in MVP), complete onboarding §8.1 using only the kit and a phone. Record per-model results. | HW-3–6, CH-1, CH-7, ONB-1/2, DEP-1/2 |
+| **A2** | Floor profile: full workload on N95/8 GB with no accelerator, no swap thrashing; a live call preempts an experiment within target. On an accelerator host: discovery, measured benefit, identical behavior when disabled. | HW-4, RES-1–3, CAP-1 |
+| **A3** | Delegated task by text, then a live call; two frontier providers (at least one consumer route, the other either); agent-machine execution; native result in the owner's account, edited on the phone and picked up. | CH-5, CRED-5, CAP-7, OP-7 |
+| **A4** | Kill broker and guest mid-effect; drop an external acknowledgment; reconcile without duplication; STOP by text with all models down. | OP-1–6, CH-2, ARC-2 |
+| **A5** | **Canary test:** canary credentials in the vault and canary sessions in credentialed browsers; an adversarial agent with full root and every protocol verb fails to surface any canary anywhere agent-reachable, across repeated runs. | CRED-1–7, ARC-1 |
+| **A6** | Hostile guest attempts escalation, evaluator tampering, and injection via a collaborator's output; all fail structurally; the guest is rebuilt; a regression is retained. In-box damage is undone by rollback. | ARC-4, REV-1/2, CHG-2 |
+| **A7** | One pipeline: a local candidate passes held-out cases from real tasks; a bad one is rejected; an upstream guest image and a shared package take the same path; rollback works. | CHG-1–5, UPD-1 |
+| **A8** | Portability and recovery: move the drive to an unknown PC (code-gated unlock), then a trusted one (unattended restart). Restore onto a new drive with the recovery key; revoked grants are not revived; the old number's new holder can do nothing. | CRED-8/9, REC-1–3 |
+| **A9** | Dependency audit: with all optional dependencies removed, and with all outbound traffic logged, the system boots, takes STOP/STATUS, and recovers. No traffic to any AgentOS-operated endpoint ever. | DEP-1–4 |
+| **A10** | Leverage vs an unmodified OpenClaw baseline and a direct provider CLI on the same host and accounts: owner-minutes per accepted task, tasks per week, second-run speedup from compiled skills, and approvals split into necessary vs avoidable. | §1, CAP-4–6 |
+| **A11** | Spare-capacity loops: over a fixed period on the floor host, loop 1 adopts at least one candidate with a predeclared held-out gain and rejects a bad one; loop 2 finds a seeded vulnerability, contains it, adds a regression, and qualifies a fix; any live call preempts loops within target; spare budget is never exceeded; a fix that weakens a check is rejected. | LOOP-1–11 |
+| **A12** | Open-source round trip: installation X publishes a public skill and a security regression (embargoed path for the latter); independent installation Y reproduces and attests; a maintainer merges; Z receives it via update, re-qualifies, and adopts or rejects. With the repository unreachable, X, Y, and Z operate normally. **Leakage audit:** canary private data is planted in the journal, the index, and workspaces; the clean room is shown unable to read any of it; no canary or derivative appears in any publication or hint; and hints contain only schema-enumerated values. | OSS-1–13, LOOP-0, DEP-3 |
+
+**Gates (riskiest first):** G1 = A1 (hardware and screenless reality). G2 = A4, A5, A9 on a VM (core correctness). G3 = A2, A3, A6, A8 on real hosts. G4 = A7, A10, A11. G5 = A12 (needs a second and third independent installation).
+
+Before any qualification run, freeze revisions, hardware profile, accounts, workloads, numeric targets, repeats, margins, and rollback triggers. Missing values make a run exploratory, not a pass.
+
+---
+
+## 16. Decisions log
+
+| Date | Decision |
+|---|---|
+| 2026-10-04 | Pairing secret delivered with the media. Now realized as the **Owner Card**. |
+| 2026-10-04 | Frontier access: consumer auth preferred, API keys as a qualified fallback. |
+| 2026-10-04 | Accelerator support stays in MVP acceptance (A2). |
+| 2026-10-04 | Box-owned number. Now realized as **the box's own SIM**, not a telephony service. |
+| 2026-10-04 | Hardware spec is the floor, not the expected machine. |
+| 2026-10-04 | Credentials definitionally secure (Invariant C). |
+| 2026-10-04 | Update to latest stable on first boot before accounts connect; channel-based cadence with soak period (UPD-3–7). |
+| 2026-10-04 | Loops and contribution on by default, modifiable; contribution is clean-room only, so no personal data can be published (§11B). |
+| 2026-10-04 | Spare-capacity self-improvement and self-securing loops; accumulation into an open-source project (§11A, §11B). |
+| 2026-10-04 | Zero or near-zero external dependencies: no AgentOS-operated services, no relay, no app-store app. |
+| Proposed | External-drive-only (no internal install). This spec assumes it; the owner has not formally confirmed. |
+
+## 17. Open risks
+
+1. **Firmware boot selection** without a keyboard on arbitrary PCs (HW-6). The integrated key is the full answer.
+2. **Voice over USB modems** (HW-2, CH-5): model-dependent quality.
+3. **Consumer AI routes** inside a no-tools adapter (CRED-5). The API-key fallback covers it.
+4. **Classifying web actions** as reversible vs irreversible in credentialed browsers. MVP: per-site allowlist, everything else draft-only.
+5. **Remote rich UI is gone by design.** If that proves too limiting, the only fix is an optional, owner-chosen, end-to-end-encrypted relay. That would be a deliberate exception to DEP-2's spirit, never a requirement.
+6. **Project update-signing key** custody (UPD-2).

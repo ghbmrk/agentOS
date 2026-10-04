@@ -1,0 +1,255 @@
+# AgentOS — Build Plan
+
+Builds spec v0.11 (`/mnt/project-files/spec/agentos-core-spec-v0.11.md`) with Claude models under a **finite usage budget**, using nested iterative loops.
+Labels: **[Fact]**, **[Inference]**, **[Rec]**, **[Mark]** = needs Mark's hands, money, or decision.
+
+---
+
+## 1. Planning premises (first principles)
+
+1. **Tokens are the scarce resource; CPU is not.** Anything a machine can check deterministically (compile, test, fuzz, lint, canary scans) MUST be checked by CI, not by a model. Models are used to *produce* and to *judge what can't be computed*.
+2. **The spec is the objective function.** Every requirement ID becomes an executable test or a recorded manual check. "Done" = traced tests pass, never a model saying it's done.
+3. **Retire risk before writing volume.** The spec's riskiest unknowns are physical: screenless boot, modem voice, 8 GB headroom, consumer-AI routes. They're cheap in tokens and expensive if discovered late. Spikes come first.
+4. **Write as little as possible.** Reuse mature components wherever they meet a requirement; the broker is the only large original component. Every line written is a line to review, test, and maintain within budget.
+5. **Loops need stop rules more than they need intelligence.** An unbounded loop converts budget into nothing. Every loop has a budget cap, a progress test, and an escalation target.
+6. **Independent verification.** The model that built something never approves it. A fresh context, ideally a different model tier, reviews against requirement IDs.
+7. **Dogfood the architecture.** The build harness *is* an early version of AgentOS loop 1 (§11A): journal, candidates, held-out tests, adoption. What's learned building it transfers directly.
+
+---
+
+## 2. The nested loops
+
+```
+L0  Mark ─────────── direction, gate sign-off, hardware, money, irreversible calls   (weekly / per gate)
+ └ L1  Program loop ─ plans, allocates budget, judges gates, revises plan            (per milestone, Opus-class)
+    └ L2  Package loop ─ builds one work package to green                           (continuous, Sonnet-class)
+       └ L3  Verify loop ─ adversarial review + CI + fuzz/canary, can reject           (per PR, mixed)
+ L4  Meta loop ─────── tunes L1–L3: prompts, routing, caps, from measured metrics     (weekly, Opus-class, small)
+```
+
+### L0 — Mark
+- Sets priorities and approves each **gate** (spec §15) on evidence.
+- Does **physical** steps: buying hardware, plugging into PCs, inserting SIMs, power-cycling.
+- Makes irreversible or external calls: license, publishing, purchases, accounts.
+- Interface: one weekly digest, plus gate packets (evidence + a one-word decision). Target: under 1 hour per week except during physical test sessions.
+
+### L1 — Program loop
+- **Inputs:** spec, `PLAN.md`, `BOARD.md` (work packages and states), `LEDGER.md` (budget spent vs allocated), CI results, L3 verdicts, the traceability matrix.
+- **Each cycle:**
+  1. Pick the next packages by *risk retired per budget*, respecting dependencies.
+  2. Write each package brief: requirement IDs, interfaces, acceptance tests, token cap, out-of-scope list.
+  3. Dispatch to L2.
+  4. Integrate results and update the board, ledger, and plan.
+  5. When a gate's tests pass, assemble the gate packet for Mark.
+- **Owns spec revisions:** spike findings turn into proposed spec diffs (v0.12, …), which Mark approves.
+- **Stop rule:** if a phase exceeds 120% of its allocation, L1 must re-plan or ask Mark. It may not silently overspend.
+
+### L2 — Package loop (the builder)
+Per package, in a fresh context with only the brief and the relevant code:
+1. **Tests first:** write failing tests for each requirement ID in the brief.
+2. Implement the smallest change that passes them.
+3. Run CI locally (lint, typecheck, unit, relevant integration).
+4. Iterate on failures.
+5. Open a PR with a trace table (requirement ID → test → result).
+
+**Stop rules:**
+- **Cap:** a per-package token cap, set by L1 from package size.
+- **No-progress detector:** the same failing test after 2 fix attempts, or a growing diff with a flat pass count. Stop, write a diagnosis, and escalate to L1.
+- **3-strike rule:** three escalations on one package and L1 must split, redesign, or drop it.
+- **Scope guard:** touching files outside the brief's declared scope fails the PR automatically.
+
+### L3 — Verify loop
+- **Mechanical (free):** CI suite, fuzzers on broker sockets and the action protocol, canary scans (spec A5), dependency audit (A9), and a coverage check that every requirement ID in the brief has a passing test.
+- **Model review (paid):** a fresh-context reviewer gets the diff, the requirement IDs, and the threat model, but *not* the builder's reasoning.
+  - Security-critical paths (broker, vault, executors, clean room, update signing) get the strongest tier.
+  - Other paths get the mid tier.
+  - Verdict is *accept*, *fix-list*, or *reject*, with citations to requirement IDs.
+- **Rule:** L3 can block; only L1 can override, and only with a recorded reason.
+
+### L4 — Meta loop
+- **Weekly, small budget.** Reads metrics:
+  - tokens per merged requirement;
+  - first-pass L3 acceptance rate;
+  - escalation rate;
+  - defects found after merge;
+  - CI flake rate;
+  - spend vs plan by phase and by model tier.
+- **Proposes:** changes to builder/reviewer instructions, model routing, caps, package sizing, and harness tooling. Each change is evaluated like a candidate in the spec's §11: compare on a frozen set of past packages (replay) before adopting.
+- **Cannot** change gate criteria or L3 blocking rules. Those are Mark's.
+
+---
+
+## 3. Phases (mapped to spec gates)
+
+### P0 — Foundations and risk spikes (≈10% of budget)
+**Harness:**
+- repository, CI, `CLAUDE.md` (builder rules);
+- traceability tooling (requirement ID ↔ test);
+- the ledger;
+- the PR template with a trace table;
+- the decision log.
+
+**Spikes** (time-boxed, each ends in a yes/no plus measurements and a proposed spec diff):
+
+| # | Question | Who | Kill/pivot rule |
+|---|---|---|---|
+| S1 | Does a USB4 SSD boot screenless (≤1 keypress) on ≥3 unmodified PCs from different vendors? | **[Mark]** hands; builder prepares the image | <2 of 3 → bring the integrated key forward or accept a documented one-keypress setup |
+| S2 | Does a USB LTE modem do SMS **and** voice under Linux reliably? | **[Mark]** buys 2 modems + SIM; builder tests | No voice → MVP is text-only; voice moves to a later gate |
+| S3 | Agent machines at 8 GB: microVM vs container+sandbox; snapshot/fork/rollback times; how many concurrent | Builder, in a VM then on the N95 | If microVMs don't fit, use a lighter sandbox at the floor and microVMs above it |
+| S4 | Does OpenClaw run unmodified as a guest using only broker tools? | Builder | Insufficient interface → record the exact seam; minimal patch is allowed (ARC-3) |
+| S5 | Credentialed browser: can the narrow action protocol drive 5 real sites without arbitrary JavaScript? | Builder | Too weak → widen verbs carefully, each verb reviewed by L3 |
+| S6 | Consumer AI CLIs in no-tools relay mode: do any work? | Builder + **[Mark]** accounts | None → API-key route only for MVP |
+| S7 | Host foundation: compare 2–3 immutable-image options on A/B updates, Secure Boot shim, USB boot, build time | Builder | Pick by measured properties |
+
+**Exit:** spec v0.12 incorporating spike results, plus a re-estimated budget. **[Mark]** approves.
+
+### P1 — Core in a VM (Gate G2: A4, A5, A9) (≈25%)
+Work packages, in dependency order:
+1. Journal and intent engine (OP-1–7) as a library, with property-based tests.
+2. Broker skeleton: sockets, admission classes, STOP/STATUS without inference (ARC-2, CH-2).
+3. Vault plus egress credential injection (CRED-1, CRED-5 API-key path).
+4. Agent-machine lifecycle: create, snapshot, fork, rollback, destroy (REV-1, REV-4, ARC-4).
+5. Owner channel against a **modem simulator**: SMS in/out, approval codes, tiers (CH-1–4).
+6. Canary harness (A5) and dependency audit harness (A9) as permanent CI jobs.
+7. First guest: OpenClaw wired through broker tools (S4 result).
+
+**Language:** [Rec] Go for the broker. Faster compile–test loops mean fewer wasted tokens on build errors, it's simple to read in review, and it has a strong standard library. Rust is the alternative if L3 finds memory-safety issues cost more than iteration speed. The decision boundary is broker size: if the broker stays small, Go wins on iteration cost.
+
+### P2 — Real hardware (Gate G3: A2, A3, A6, A8) (≈30%)
+1. Image build and boot from the drive (S1, S7 results).
+2. Owner Card generation, local access point, local web UI (CH-7–9, ONB-1).
+3. Real modem integration, SMS plus voice where S2 allows (CH-5).
+4. Trusted-host TPM unlock and unknown-host flow (CRED-8/9).
+5. Resource admission, preemption, memory budgets, accelerator discovery (RES-1–4).
+6. Credentialed browser executor and action protocol (CRED-4, CRED-6, CRED-7).
+7. Provider adapters: two frontier providers (A3).
+8. Recovery and portability (REC-1–3, A8).
+
+**[Mark]** runs the physical test sessions (A1, A8), guided by a printed checklist the builder produces.
+
+### P3 — Compounding (Gate G4: A7, A10, A11) (≈20%)
+- Change pipeline with held-out suites (CHG-1–5).
+- Loops 1–3 (LOOP-0–11).
+- Recall index, event bus, compiled skills, attention optimizer (CAP-3–6).
+- Leverage benchmark vs unmodified OpenClaw (A10). **[Mark]** supplies a real recurring workload.
+
+**Dogfood point:** once P3's pipeline works, the L2/L3/L4 harness migrates onto an AgentOS box. From then on, AgentOS helps build AgentOS. [Inference] This should cut later-phase cost; whether it actually does is measured in L4, not assumed.
+
+### P4 — Open source (Gate G5: A12) (≈5%)
+- Hint schema, clean-room builder, leakage audit (OSS-1–7).
+- Attestations, release signing, channels and cadence (OSS-8–13, UPD-3–7).
+- **[Mark]** chooses the license, publishes the repository, and holds the offline signing key.
+
+### Reserve (≈10%)
+Held back and spent only by L1 with a recorded reason. Unspent reserve rolls into P3 (more leverage work).
+
+---
+
+## 4. Model-tier routing (initial; L4 rebalances)
+
+| Work | Tier | Why |
+|---|---|---|
+| L1 planning, gate judgment, spec diffs, hard design choices | Top tier (Opus-class) | Low volume, high consequence |
+| L3 review of security-critical code | Top tier | Missed defects here are the most expensive |
+| L2 building | Mid tier (Sonnet-class) | Bulk of volume; good cost/quality |
+| L3 review of ordinary code | Mid tier | Fresh context matters more than tier |
+| Log triage, CI failure summaries, doc formatting, test-name generation | Small tier (Haiku-class) | Cheap and repetitive |
+| L4 meta analysis | Top tier, small budget | Leverage over all other spend |
+
+**Initial spend target:** ~25–35% top tier, ~55–65% mid tier, ~5–10% small tier. This is a starting guess, not a measured value. Exact model IDs and prices to be confirmed when the harness is set up; nothing here relies on remembered pricing.
+
+**Budget hygiene:**
+- Prompt caching for the spec and stable code context.
+- Small, focused contexts per package (brief + touched files only).
+- Summaries of prior attempts instead of full transcripts.
+- Never let a model read raw CI logs when a small-tier summary will do.
+
+---
+
+## 4A. Budget reality: the $200 Claude plan (calibrated 2026-10-04)
+
+**Observed** (Mark's usage screen, Sunday 10:58 local):
+
+| Measure | Used | Resets |
+|---|---|---|
+| Current session window | 44% | in 51 min |
+| Weekly, all models | 14% | Sunday 06:00 |
+| Weekly, Fable only | 11% | Sunday 06:00 |
+
+Usage credits are off.
+
+**What it implies:**
+- [Inference] The weekly reset was about 5 hours before the screenshot. Most of the 14% likely came from today's design work in this project.
+- At that rate, unpaced loops would exhaust a week's allowance in roughly 1.5–2 days. **The weekly limit, not the session window, is the binding constraint.** Pacing is mandatory.
+- Phase shares in §3 become shares of **total weeks × weekly allowance**. The plan is budgeted in "weekly allowance units" (WAU): 1 WAU = one week's limit.
+
+**Rules:**
+- **B-1 Envelope:** the build harness may use **at most 70% of each week's allowance**. The other 30% stays for Mark's own use and emergencies. L1 enforces this; the ledger shows weekly burn against the envelope.
+- **B-2 Daily pacing:** about 10% of the weekly allowance per day. Unused budget carries forward within the week, never across weeks (it resets).
+- **B-3 Session windows:** loops pause when a session window reaches ~85% and resume after its reset. Long jobs are cut into window-sized packages.
+- **B-4 Hard cap:** keep usage credits **off**, so the plan can never spend money beyond the subscription.
+- **B-5 Separate pools:** the screen shows a separate "Fable only" weekly limit. L1 should treat it as its own pool and route work to it where that model fits, once its suitability is measured, not assumed.
+- **B-6 Measurement:** [Inference] the harness can't yet read this usage screen programmatically. Until it can, L1 estimates spend from session logs, and **Mark posts this screenshot weekly** (or at gate time) to recalibrate.
+
+**Rough schedule in WAU** [Inference; L1 re-estimates after P0 using measured cost per merged requirement]:
+
+| Phase | Share | Approx. weeks at a 70% envelope |
+|---|---|---|
+| P0 harness + spikes | 10% | 1–2 |
+| P1 core in a VM | 25% | 3–5 |
+| P2 real hardware | 30% | 4–6, partly gated by Mark's physical sessions |
+| P3 compounding | 20% | 3–4 |
+| P4 open source | 5% | 1 |
+| Reserve | 10% | 1–2 |
+
+This totals roughly **3–5 months** of calendar time at this plan level. That figure is a sizing guess, not a commitment. Mark's physical test sessions and spike outcomes will move it more than token efficiency will.
+
+## 5. Artifacts the harness maintains (in the repo)
+
+| File | Purpose | Updated by |
+|---|---|---|
+| `SPEC.md` | Current spec (v0.12+) | L1 (Mark approves) |
+| `PLAN.md` | Phases, packages, dependencies | L1 |
+| `BOARD.md` | Package states: queued, building, in review, merged, escalated | L1/L2 |
+| `LEDGER.md` | Budget allocated, spent, and remaining per phase and tier | L1, automated from usage logs |
+| `TRACE.md` | Requirement ID → tests → status (generated) | CI |
+| `DECISIONS.md` | Every decision with date and evidence | L1 / Mark |
+| `METRICS.md` | L4 inputs and history | CI + L4 |
+| `CLAUDE.md` | Builder and reviewer rules | L4 proposes, L1 adopts |
+
+---
+
+## 6. Failure modes of the plan itself, and guards
+
+| Failure | Guard |
+|---|---|
+| Loops burn budget without progress | Per-package caps, no-progress detector, 3-strike rule, ledger circuit breaker at 120% per phase |
+| Builder and reviewer collude (same blind spots) | Fresh context, no builder reasoning shown, different tier for security code, mechanical checks first |
+| Tests drift from the spec | Traceability matrix generated by CI; uncovered requirement IDs block the gate |
+| Spec churn | Spec changes only via L1 diffs approved by Mark; packages pin a spec version |
+| Hardware assumption fails late | Physical spikes in P0, before any volume |
+| Over-building | "Write as little as possible"; L1 must show why reuse fails before approving new components |
+| Mark becomes the bottleneck | Batched gate packets; everything reversible proceeds without waiting |
+
+---
+
+## 7. What's needed from Mark to start
+
+1. **Repository:** `agentOS` under Mark's GitHub account. Mark creates it (this session can't create repositories), then it's attached to the project.
+2. **Budget:** ✓ the $200 Claude plan, weekly-paced (§4A).
+3. **P0 hardware** (prices unchecked):
+   - the N95 floor box;
+   - 2–3 used PCs from different vendors;
+   - 2 USB4 dual-mode NVMe enclosures plus SSDs;
+   - 2 USB LTE modems with voice support, of different chipsets;
+   - 1–2 prepaid SIMs.
+4. **Approve P0.** With a repository connected, the harness and spikes S3–S7 can start immediately in the cloud. S1 and S2 wait for the hardware.
+
+---
+
+## 8. First concrete steps once approved
+
+1. Scaffold the repository: CI, `CLAUDE.md`, trace generator, ledger, PR template; import the spec as `SPEC.md` with requirement IDs parsed.
+2. Run S7, S3, S4 in parallel in the cloud (no hardware needed).
+3. Produce S1/S2 test images and a printed physical-test checklist for Mark.
+4. First L4 review after the first week of packages; adjust routing and caps.
