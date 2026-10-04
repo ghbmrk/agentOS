@@ -1,0 +1,42 @@
+name: testkit-image
+# Builds the S1/S2 test kit image (spikes/S1S2-testkit) and boots it once under Secure Boot in QEMU.
+# Runs here because GitHub's runners can reach deb.debian.org; the cloud agent sessions cannot.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths: ["spikes/S1S2-testkit/**", ".github/workflows/testkit.yml"]
+  push:
+    branches: [main]
+    paths: ["spikes/S1S2-testkit/**", ".github/workflows/testkit.yml"]
+permissions:
+  contents: read
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build and boot tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends debian-archive-keyring systemd-boot systemd-boot-efi \
+            systemd-container erofs-utils dosfstools mtools e2fsprogs cpio zstd kmod bubblewrap \
+            qemu-system-x86 ovmf swtpm swtpm-tools
+          sudo git clone -q --depth 1 -b v24.3 https://github.com/systemd/mkosi /opt/mkosi
+      - name: Build image
+        run: sudo MKOSI=/opt/mkosi/bin/mkosi spikes/S1S2-testkit/build.sh "$RUNNER_TEMP/out"
+      - name: Boot test (Secure Boot on, until the kit powers off)
+        run: sudo spikes/S1S2-testkit/ci_boot.sh "$RUNNER_TEMP/out/agentos-tk_1.raw" "$RUNNER_TEMP/boot"
+      - name: Keep the console log
+        if: always()
+        run: sudo cp "$RUNNER_TEMP/boot/console.log" "$RUNNER_TEMP/out/qemu-console.log" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: agentos-testkit
+          path: |
+            ${{ runner.temp }}/out/agentos-tk_1.raw
+            ${{ runner.temp }}/out/SHA256SUMS
+            ${{ runner.temp }}/out/qemu-console.log
+          retention-days: 30
+          if-no-files-found: warn
