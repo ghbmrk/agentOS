@@ -42,7 +42,7 @@ L0  Mark ─────────── direction, gate sign-off, hardware, m
   4. Integrate results and update the board, ledger, and plan.
   5. When a gate's tests pass, assemble the gate packet for Mark.
 - **Owns spec revisions:** spike findings turn into proposed spec diffs (v0.12, …), which Mark approves.
-- **Stop rule:** if a phase exceeds 120% of its allocation, L1 must re-plan or ask Mark. It may not silently overspend.
+- **Review trigger:** if a phase runs past ~120% of its forecast, L1 re-plans, re-forecasting the remaining work, and tells Mark in the digest. Continuing is fine when the value case holds; the point is to notice, not to stop.
 
 ### L2 — Package loop (the builder)
 Per package, in a fresh context with only the brief and the relevant code:
@@ -53,7 +53,7 @@ Per package, in a fresh context with only the brief and the relevant code:
 5. Open a PR with a trace table (requirement ID → test → result).
 
 **Stop rules:**
-- **Cap:** a per-package token cap, set by L1 from package size.
+- **Checkpoint, not cap:** L1 sets a per-package *estimate*. At the estimate, the builder checks progress: if tests are moving toward green, it continues and notes the extension; if not, it escalates. At ~2× the estimate, L1 must look.
 - **No-progress detector:** the same failing test after 2 fix attempts, or a growing diff with a flat pass count. Stop, write a diagnosis, and escalate to L1.
 - **3-strike rule:** three escalations on one package and L1 must split, redesign, or drop it.
 - **Scope guard:** touching files outside the brief's declared scope fails the PR automatically.
@@ -183,13 +183,19 @@ Usage credits are off.
 - At that rate, unpaced loops would exhaust a week's allowance in roughly 1.5–2 days. **The weekly limit, not the session window, is the binding constraint.** Pacing is mandatory.
 - Phase shares in §3 become shares of **total weeks × weekly allowance**. The plan is budgeted in "weekly allowance units" (WAU): 1 WAU = one week's limit.
 
-**Rules:**
-- **B-1 Envelope:** the build harness may use **at most 70% of each week's allowance**. The other 30% stays for Mark's own use and emergencies. L1 enforces this; the ledger shows weekly burn against the envelope.
-- **B-2 Daily pacing:** about 10% of the weekly allowance per day. Unused budget carries forward within the week, never across weeks (it resets).
-- **B-3 Session windows:** loops pause when a session window reaches ~85% and resume after its reset. Long jobs are cut into window-sized packages.
-- **B-4 Hard cap:** keep usage credits **off**, so the plan can never spend money beyond the subscription.
-- **B-5 Separate pools:** the screen shows a separate "Fable only" weekly limit. L1 should treat it as its own pool and route work to it where that model fits, once its suitability is measured, not assumed.
-- **B-6 Measurement:** [Inference] the harness can't yet read this usage screen programmatically. Until it can, L1 estimates spend from session logs, and **Mark posts this screenshot weekly** (or at gate time) to recalibrate.
+**Rules (flexible by design):**
+Rigid caps breed waste: work abandoned at 95% done, padding to "use the budget", or allowance that resets unused. So the only **hard** limit is the subscription itself (B-4). Everything else is a **target with a checkpoint**: on reaching it, the loop decides on evidence whether continuing is worth it, and records why.
+
+- **B-1 Weekly envelope (adaptive):** the default target is ~70% of the week for the build, ~30% left for Mark. The weekly allowance resets, so **unspent allowance at week's end is pure waste.**
+  - The protected share for Mark shrinks as the week goes on: from ~30% early in the week to ~10% in the final day, adjusted to his actual recent usage.
+  - Late in the week the build may use what Mark predictably won't.
+  - If Mark's own usage spikes, the build backs off first.
+- **B-2 Pacing (guideline, not a gate):** ~10% per day is the planning average. Front-loading is fine when work is unblocked and productive; idling to stay "on pace" is not.
+- **B-3 Session windows:** near ~85% of a session window, finish the current step cleanly rather than stopping mid-step; heavy new work waits for the reset.
+- **B-4 Hard cap (the only one):** usage credits stay **off**, so spend can never exceed the subscription.
+- **B-5 Separate pools:** treat "Fable only" as its own pool; route work to it where that model fits, once measured.
+- **B-6 Measurement:** session-log estimates, recalibrated from Mark's weekly usage screenshot.
+- **B-7 Value over budget:** the allocation question is always "what's the expected value of the next unit of spend?", never "is there budget left?". Phase shares (§3) and package caps are **forecasts used to notice surprises**, not entitlements or ceilings. Overrunning a forecast triggers a look, not a stop. Underrunning is good news, not a reason to spend.
 
 **Rough schedule in WAU** [Inference; L1 re-estimates after P0 using measured cost per merged requirement]:
 
@@ -223,12 +229,13 @@ This totals roughly **3–5 months** of calendar time at this plan level. That f
 
 | Failure | Guard |
 |---|---|
-| Loops burn budget without progress | Per-package caps, no-progress detector, 3-strike rule, ledger circuit breaker at 120% per phase |
+| Loops burn budget without progress | **Progress-based** stops (no-progress detector, 3-strike rule) instead of fixed caps; checkpoints at forecasts; L1 review past ~120% of a phase forecast |
 | Builder and reviewer collude (same blind spots) | Fresh context, no builder reasoning shown, different tier for security code, mechanical checks first |
 | Tests drift from the spec | Traceability matrix generated by CI; uncovered requirement IDs block the gate |
 | Spec churn | Spec changes only via L1 diffs approved by Mark; packages pin a spec version |
 | Hardware assumption fails late | Physical spikes in P0, before any volume |
 | Over-building | "Write as little as possible"; L1 must show why reuse fails before approving new components |
+| Rigid caps cause waste (abandoned near-done work, unspent weekly allowance) | Only the subscription is a hard limit; adaptive weekly envelope; checkpoints instead of ceilings (B-1–B-7) |
 | Mark becomes the bottleneck | Batched gate packets; everything reversible proceeds without waiting |
 
 ---
