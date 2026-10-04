@@ -13,6 +13,8 @@
 | 2026-10-04 | Self-improvement and self-securing loops on spare capacity; on by default, modifiable | Mark |
 | 2026-10-04 | Open-source contribution is clean-room only; no chance of exposing personal data | Mark |
 | 2026-10-04 | Update to latest stable on first boot; channel-based cadence | Mark |
-| 2026-10-04 | Build on the $200 Claude plan, usage credits off, 70% weekly envelope | Mark |
+| 2026-10-04 | Build on the $200 Claude plan, usage credits off (the only hard cap) | Mark |
+| 2026-10-04 | All other usage limits are flexible targets with checkpoints, not ceilings; weekly envelope adapts so allowance isn't wasted | Mark |
+| 2026-10-04 | Package branches use a `pkg/<id>-<slug>` stem set by the coordinator, plus the server's session suffix; older `claude/…` branches are accepted when the PR title starts with the package ID | Mark, PR reviews thread |
 | Proposed | External-drive-only (no internal install) | Not yet confirmed |
 | Pending | License | Before first public release (OSS-12) |

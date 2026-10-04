@@ -1,7 +1,7 @@
 # LEDGER
 
 Budget: $200 Claude plan, usage credits **off** (hard cap). See PLAN.md §4A.
-Unit: WAU = one week's plan allowance. Harness envelope = 70% of each week.
+Unit: WAU = one week's plan allowance. Harness envelope: ~70% default, adaptive (PLAN.md §4A B-1); only the subscription is a hard limit.
 
 ## Calibration readings (from Mark's usage screen)
 
@@ -13,7 +13,7 @@ Unit: WAU = one week's plan allowance. Harness envelope = 70% of each week.
 
 | Week starting | Envelope | Harness used (est.) | Mark's own use | Notes |
 |---|---|---|---|---|
-| 2026-10-04 | 70% | S7 ≈2–3% (est., unmeasured) | — | P0 start; S7 host spike in review |
+| 2026-10-04 | 70% | — | — | P0 start. S3 (cloud): ~0.22 M tokens by session counter, incl. review fixes; WAU share awaits Mark's screenshot (B-6). S4: ~0.5 M tokens of context (est., unmetered), incl. review fixes; see its RESULT.md. S7: ≈2–3% WAU (est., unmetered); see its RESULT.md |
 
 ## Phase allocation (share of total)
 

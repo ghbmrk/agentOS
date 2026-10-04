@@ -1,0 +1,43 @@
+// Guest config for spike S4. The only reachable endpoint is the stub broker on
+// 127.0.0.1:18080 (model + MCP). Config only: no OpenClaw source changes.
+{
+  models: {
+    mode: "replace",
+    catalogRefresh: { enabled: false },
+    providers: {
+      broker: {
+        baseUrl: "http://127.0.0.1:18080/v1",
+        apiKey: "placeholder-not-a-secret", // broker egress swaps in the vault key
+        api: "openai-completions",
+        models: [{ id: "stub", name: "broker stub", contextWindow: 128000, maxTokens: 4096 }],
+      },
+    },
+  },
+  agents: { defaults: { model: { primary: "broker/stub" }, sandbox: { mode: "off" } } },
+  mcp: { servers: { broker: { url: "http://127.0.0.1:18080/mcp", transport: "streamable-http" } } },
+  tools: {
+    profile: "coding",
+    deny: ["group:web", "group:messaging", "group:ui", "group:nodes", "gateway", "plugins", "openclaw",
+           "automations", "cron", "secrets", "code_execution", "github_identity_status", "github_publish",
+           "conversations_list", "conversations_send", "conversations_turn", "image_generate",
+           "music_generate", "video_generate", "tts", "transcripts", "skill_workshop", "presence"],
+    elevated: { enabled: false },
+    web: { search: { enabled: false }, fetch: { enabled: false } },
+  },
+  skills: { workshop: { autonomous: { mode: "off" } } },
+  commands: { config: false, mcp: false, plugins: false, bash: false, restart: false },
+  telemetry: { enabled: false },
+  update: { checkOnStart: false, auto: { enabled: false } },
+  discovery: { mdns: { mode: "off" } },
+  env: { shellEnv: { enabled: false } },
+  browser: { enabled: false },
+  acp: { enabled: false },
+  hooks: { enabled: false },
+  cron: { enabled: false },
+  // Inbound path for the broker: OpenAI-compatible endpoint on loopback, guest-local token.
+  gateway: {
+    mode: "local", bind: "loopback", auth: { mode: "token" },
+    tailscale: { mode: "off" }, reload: { mode: "off" },
+    http: { endpoints: { chatCompletions: { enabled: true } } },
+  },
+}
