@@ -42,7 +42,12 @@ const H=+process.env.HEAP_MB||0, D=+process.env.DISK_MB||0;
 globalThis.keep=[];for(let i=0;i<H;i++)keep.push(c.randomBytes(1<<20));
 if(D&&!fs.existsSync('/root/data.bin')){const f=fs.openSync('/root/data.bin','w');
 for(let i=0;i<D;i++)fs.writeSync(f,c.randomBytes(1<<20));fs.closeSync(f);}
-console.log('ready');setInterval(()=>{},1<<30);
+// Probe: touch one byte in every 4 KiB page of the heap and report the sum, so an
+// answer proves the guest runs and its whole heap is resident and unchanged.
+const sum=()=>{let s=0;for(const b of keep)for(let i=0;i<b.length;i+=4096)s=(s*31+b[i])%2147483647;return s;};
+setInterval(()=>{if(fs.existsSync('/root/probe')){fs.unlinkSync('/root/probe');
+fs.writeFileSync('/root/probe.tmp',String(sum()));fs.renameSync('/root/probe.tmp','/root/probe.out');}},5);
+console.log('ready');
 """
 WORKLOADS = {
     "sh": ["/bin/sh", "-c", "echo ready; exec sleep infinity"],
@@ -148,7 +153,23 @@ class Bwrap:
         if p:
             os.killpg(p.pid, signal.SIGKILL)
             p.wait()
+        # The guest dies with bwrap's PID namespace, asynchronously; wait until it is gone.
+        procs, t0 = MEM / mid / "cgroup.procs", time.monotonic()
+        while procs.exists() and r(procs).strip() and time.monotonic() - t0 < 10:
+            time.sleep(0.01)
         self.unmount(mid)
+
+    def probe(self, mid, timeout=120):
+        """Ask the guest for its heap checksum; returns the answer or None."""
+        r = WORK / "m" / mid / "root" / "root"
+        (r / "probe.out").unlink(missing_ok=True)
+        (r / "probe").touch()
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < timeout:
+            if (r / "probe.out").exists():
+                return (r / "probe.out").read_text()
+            time.sleep(0.005)
+        return None
 
     def verify(self, mid, disk_mb):
         f = self.dirs(mid)[0] / "root" / "data.bin"
@@ -225,6 +246,16 @@ class Gvisor:
                 os.killpg(p.pid, signal.SIGKILL)
                 p.wait()
         subprocess.run(self.runsc("delete", "-force", self.cid(mid)), stderr=subprocess.DEVNULL)
+
+    def probe(self, mid, timeout=120):
+        sh = ("rm -f /root/probe.out; : > /root/probe; "
+              "while [ ! -s /root/probe.out ]; do sleep 0.005; done; cat /root/probe.out")
+        try:
+            r = subprocess.run(self.runsc("exec", self.cid(mid), "/bin/sh", "-c", sh),
+                               capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return None
+        return r.stdout.strip() or None
 
     def verify(self, mid, disk_mb):
         r = subprocess.run(self.runsc("exec", self.cid(mid), "/usr/bin/stat", "-c", "%s", "/root/data.bin"),
@@ -314,7 +345,14 @@ def du(path):
     return int(subprocess.run(["du", "-sb", str(path)], capture_output=True, text=True).stdout.split()[0])
 
 
+def anon_mib(mid):
+    st = dict(l.split() for l in r(MEM / mid / "memory.stat").splitlines())
+    return (int(st["total_rss"]) + int(st.get("total_shmem", 0))) / MiB
+
+
 def ops(be, heap_mb, disk_mb, forks, reps):
+    """Rollback and fork are timed cold (page cache dropped first) until the guest
+    answers a probe that touches every heap page, not just until it is "running"."""
     env = {"HEAP_MB": heap_mb, "DISK_MB": disk_mb}
     argv = WORKLOADS["agent"]
     snaps = WORK / "snaps"
@@ -323,37 +361,42 @@ def ops(be, heap_mb, disk_mb, forks, reps):
     for rep in range(reps):
         drop_caches()
         p = be.start("src", argv, env)
-        create = wait_ready(p, timeout=120)
+        create = wait_ready(p, timeout=180)
         if create is None:
             raise SystemExit("source machine failed to start")
+        src_sum = be.probe("src")
+        src_mib = anon_mib("src")
         snap = snaps / f"s{rep}"
         t0 = time.monotonic()
         be.checkpoint("src", snap)
         cps.append(time.monotonic() - t0)
         size = du(snap)
         be.stop("src")
+        drop_caches()
         t0 = time.monotonic()
-        _, t = be.restore("rb", snap, argv, env)
-        rbs.append(time.monotonic() - t0 if t is not None else float("nan"))
+        be.restore("rb", snap, argv, env)
+        rb_sum = be.probe("rb")
+        rbs.append(time.monotonic() - t0 if rb_sum else float("nan"))
         intact = be.verify("rb", disk_mb)
         be.stop("rb")
-        before = usage()["usage"]
+        drop_caches()
         t0 = time.monotonic()
-        ok = 0
         for i in range(forks):
-            _, t = be.restore(f"k{i}", snap, argv, env)
-            ok += t is not None
+            be.restore(f"k{i}", snap, argv, env)
+        sums = [be.probe(f"k{i}") for i in range(forks)]
         fks.append(time.monotonic() - t0)
-        time.sleep(2)
-        fork_mem = usage()["usage"] - before
+        fork_mib = [round(anon_mib(f"k{i}"), 1) for i in range(forks)]
         record("ops-rep", backend=be.name, heap_mb=heap_mb, disk_mb=disk_mb, rep=rep, create_s=create,
-               checkpoint_s=cps[-1], snapshot_bytes=size, rollback_s=rbs[-1], rollback_intact=intact, forks=forks, forks_ok=ok,
-               fork_total_s=fks[-1], fork_mem_mib=round(fork_mem / MiB, 1))
+               checkpoint_s=cps[-1], snapshot_bytes=size, src_anon_mib=round(src_mib, 1),
+               rollback_s=rbs[-1], rollback_files_intact=intact, rollback_heap_preserved=rb_sum == src_sum,
+               forks=forks, forks_answered=sum(x is not None for x in sums),
+               forks_heap_preserved=sum(x == src_sum for x in sums), fork_total_s=fks[-1],
+               fork_anon_mib=fork_mib, timing="cold cache, until heap probe answers")
         stop_all(be)
         shutil.rmtree(snap, ignore_errors=True)
     record("ops", backend=be.name, heap_mb=heap_mb, disk_mb=disk_mb, forks=forks,
            checkpoint_s=analysis.summarize(cps), rollback_s=analysis.summarize(rbs),
-           fork_total_s=analysis.summarize(fks))
+           fork_total_s=analysis.summarize(fks), timing="cold cache, until heap probe answers")
 
 
 def main():
