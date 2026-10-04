@@ -13,7 +13,7 @@ Unit: WAU = one week's plan allowance. Harness envelope = 70% of each week.
 
 | Week starting | Envelope | Harness used (est.) | Mark's own use | Notes |
 |---|---|---|---|---|
-| 2026-10-04 | 70% | — | — | P0 start |
+| 2026-10-04 | 70% | S4: ~1.5–3% (est., unmetered) | — | P0 start; S4 estimate in its RESULT.md |
 
 ## Phase allocation (share of total)
 
