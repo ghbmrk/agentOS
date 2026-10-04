@@ -25,5 +25,5 @@ Read SPEC.md for what to build and PLAN.md for how. This file is the working con
 - Keep contexts small: brief + touched files. Summarize CI logs instead of pasting them.
 
 ## Repository conventions
-- Branch per package: `pkg/<id>-<slug>`, or the harness-assigned branch when the environment can only push there; the PR title then starts with the package ID (DECISIONS.md). PRs use the template's trace table.
+- Branch per package: `pkg/<id>-<slug>-<suffix>`. The coordinator sets the `pkg/<id>-<slug>` stem when it starts a thread; the server appends a session-unique suffix. Threads started without a stem keep their assigned `claude/…` branch, and the PR title starts with the package ID (DECISIONS.md). PRs use the template's trace table.
 - SPEC.md changes only through an L1 spec-diff PR that Mark approves.
