@@ -25,3 +25,4 @@ Started before spec v0.12 on parts unlikely to change; each package lists its sp
 |---|---|---|---|
 | P1-1 | Journal and intent engine (OP-1–7), Go library with property tests ([assumptions](broker/journal/ASSUMPTIONS.md)) | Cloud only | in review |
 | P1-2 | Broker skeleton: sockets, admission classes, STOP/STATUS without inference (ARC-2, CH-2) ([assumptions](broker/daemon/ASSUMPTIONS.md)) | P1-1 | in review |
+| P1-3 | Vault and credentialed egress proxy: encrypted vault, key injection into declared inference endpoints only, redaction (CRED-1, CRED-5, CRED-7, ADP-10) ([assumptions](broker/egress/ASSUMPTIONS.md)) | P1-2 | in review |
