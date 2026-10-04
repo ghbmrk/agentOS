@@ -441,8 +441,8 @@ func TestBuiltInRelaysDeclareInferenceOnly(t *testing.T) {
 			if op.Method != "POST" || !(strings.HasSuffix(op.Path, "/chat/completions") || strings.HasSuffix(op.Path, "/messages")) {
 				t.Errorf("%s declares non-inference op %+v", a.Name, op)
 			}
-			if op.Body == nil || !op.Body.ServerTools {
-				t.Errorf("%s %s does not gate server tools", a.Name, op.Name)
+			if op.Body == nil {
+				t.Errorf("%s %s has no body rule", a.Name, op.Name)
 			}
 		}
 	}
@@ -469,6 +469,12 @@ func TestRelayBodiesAdmitClientToolsOnly(t *testing.T) {
 		{"anthropic web fetch", "/anthropic/v1/messages", `{"model":"m","tools":[{"type":"web_fetch_20250910","name":"web_fetch"}]}`},
 		{"anthropic code execution", "/anthropic/v1/messages", `{"model":"m","tools":[{"type":"code_execution_20250522","name":"x"}]}`},
 		{"anthropic container", "/anthropic/v1/messages", `{"model":"m","container":"c"}`},
+		{"openai image by url", "/openai/v1/chat/completions", `{"model":"m","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://attacker.example/x.png?d=secret"}}]}]}`},
+		{"openai image_url string", "/openai/v1/chat/completions", `{"model":"m","messages":[{"role":"user","content":[{"type":"image_url","image_url":"https://attacker.example/x.png"}]}]}`},
+		{"openai url with spaces and case", "/openai/v1/chat/completions", `{"model":"m","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"  HTTPS://attacker.example/"}}]}]}`},
+		{"anthropic image by url", "/anthropic/v1/messages", `{"model":"m","messages":[{"role":"user","content":[{"type":"image","source":{"type":"url","url":"https://attacker.example/x.png?d=secret"}}]}]}`},
+		{"anthropic document by url", "/anthropic/v1/messages", `{"model":"m","messages":[{"role":"user","content":[{"type":"document","source":{"type":"url","url":"https://attacker.example/d.pdf"}}]}]}`},
+		{"anthropic url inside tool_result", "/anthropic/v1/messages", `{"model":"m","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":[{"type":"image","source":{"type":"url","url":"https://attacker.example/i.png"}}]}]}]}`},
 	}
 	for _, c := range deny {
 		t.Run(c.name, func(t *testing.T) {
@@ -488,6 +494,8 @@ func TestRelayBodiesAdmitClientToolsOnly(t *testing.T) {
 	// Client tools pass; store is forced off; a duplicated key reaches the
 	// provider once, as the proxy read it.
 	allow := []struct{ path, body string }{
+		{"/openai/v1/chat/completions", `{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"see https://example.com"},{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgo="}}]}],"tools":[{"type":"function","function":{"name":"fetch","parameters":{"type":"object","properties":{"url":{"type":"string","default":"https://example.com"}}}}}]}`},
+		{"/anthropic/v1/messages", `{"model":"m","messages":[{"role":"assistant","content":[{"type":"tool_use","id":"t","name":"fetch","input":{"url":"https://example.com"}}]},{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}}]}]}`},
 		{"/openai/v1/chat/completions", `{"model":"m","store":true,"tools":[{"type":"function","function":{"name":"f"}}],"tools":[{"type":"custom","name":"g"}]}`},
 		{"/anthropic/v1/messages", `{"model":"m","tools":[{"name":"f","input_schema":{}},{"type":"custom","name":"g","input_schema":{}}]}`},
 	}
@@ -497,7 +505,7 @@ func TestRelayBodiesAdmitClientToolsOnly(t *testing.T) {
 			t.Fatalf("allow %d: got %d %s", i, w.Code, w.Body)
 		}
 	}
-	first := string(r.provider.body[0])
+	first := string(r.provider.body[2])
 	if strings.Count(first, `"tools"`) != 1 || !strings.Contains(first, `"store":false`) || !strings.Contains(first, `"custom"`) {
 		t.Fatalf("forwarded %s", first)
 	}
@@ -634,7 +642,50 @@ func TestServerToolsFollowTheDataLabel(t *testing.T) {
 	if c := send("pub", "/anthropic/v1/messages", `{"model":"m","mcp_servers":[{"url":"https://x.example"}]}`); c != 200 {
 		t.Fatalf("public machine: mcp_servers got %d", c)
 	}
+	urlImage := `{"model":"m","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://x.example/i.png"}}]}]}`
+	if c := send("none", "/openai/v1/chat/completions", urlImage); c != http.StatusForbidden {
+		t.Fatalf("unlabelled machine: url image got %d", c)
+	}
+	if c := send("pub", "/openai/v1/chat/completions", urlImage); c != 200 {
+		t.Fatalf("public machine: url image got %d", c)
+	}
 	if c := send("pub", "/openai/v1/chat/completions", `{"model":"m","background":true}`); c != http.StatusForbidden {
 		t.Fatalf("public machine: background got %d", c)
+	}
+}
+
+// An adapter that declares a body rule without opting in gets the strict
+// form for every machine, public included.
+func TestBodyRuleIsStrictUnlessOptedIn(t *testing.T) {
+	strict := &BodyRule{ServerToolKeys: []string{"mcp_servers"}}
+	for _, body := range []string{
+		`{"tools":[{"type":"web_search"}]}`,
+		`{"mcp_servers":[]}`,
+		`{"messages":[{"content":[{"type":"image","source":{"type":"url","url":"https://x.example"}}]}]}`,
+	} {
+		if _, err := strict.apply([]byte(body), true); err == nil {
+			t.Errorf("public machine passed %s without opt-in", body)
+		}
+	}
+}
+
+// Content-Type is the proxy's, and every Content-Encoding value counts.
+func TestContentHeadersAreTheProxys(t *testing.T) {
+	r := newRig(t, nil)
+	req := chat("/openai/v1/chat/completions")
+	req.Header.Set("Content-Type", "text/plain; charset=evil")
+	if w := r.do(t, "m1", req); w.Code != 200 {
+		t.Fatalf("got %d", w.Code)
+	}
+	if ct := r.provider.seen[0].Header.Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("Content-Type %q", ct)
+	}
+	for _, ce := range [][]string{{"identity", "gzip"}, {"identity, br"}, {" Deflate "}} {
+		if !encoded(http.Header{"Content-Encoding": ce}) {
+			t.Errorf("%q passed as unencoded", ce)
+		}
+	}
+	if encoded(http.Header{"Content-Encoding": {"identity"}}) || encoded(http.Header{}) {
+		t.Error("identity treated as encoded")
 	}
 }

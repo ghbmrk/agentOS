@@ -48,14 +48,15 @@ type Operation struct {
 type BodyRule struct {
 	// DenyKeys are top-level keys that may never appear.
 	DenyKeys []string
-	// ServerTools gates provider-side tools on the calling machine's data
-	// label (REV-5). Server tools (web search, fetch, code execution, file
-	// search, remote MCP) have the provider act on the network with the
-	// owner's key, so they are admitted only for a machine labelled public;
-	// a private or unknown label gets client-executed tools only (a tools[]
-	// entry with no "type", or "function" or "custom"), and none of
-	// ServerToolKeys.
-	ServerTools bool
+	// Every body with a rule is held to the strict form unless
+	// PublicMayFetch is set and the calling machine is labelled public
+	// (REV-5). The strict form keeps the provider off the network with the
+	// owner's key: tools[] entries must be client-executed (no "type", or
+	// "function" or "custom"), none of ServerToolKeys may appear, and no
+	// remote content source may appear (see remoteSource). Server tools,
+	// remote MCP, and URL image or document sources would each have the
+	// provider fetch from an address the guest chose.
+	PublicMayFetch bool
 	// ServerToolKeys are top-level keys that switch on provider-side tools.
 	ServerToolKeys []string
 	// Set forces top-level keys, e.g. store:false.
@@ -74,7 +75,7 @@ func OpenAI(credential string) Adapter {
 			Name: "chat.completions", Method: "POST", Path: "/v1/chat/completions",
 			Body: &BodyRule{
 				DenyKeys:       []string{"background"},
-				ServerTools:    true,
+				PublicMayFetch: true,
 				ServerToolKeys: []string{"web_search_options", "mcp_servers", "container"},
 				Set:            map[string]any{"store": false},
 			},
@@ -96,7 +97,7 @@ func Anthropic(credential string) Adapter {
 			Name: "messages", Method: "POST", Path: "/v1/messages",
 			Body: &BodyRule{
 				DenyKeys:       []string{"background"},
-				ServerTools:    true,
+				PublicMayFetch: true,
 				ServerToolKeys: []string{"mcp_servers", "container"},
 			},
 		}},

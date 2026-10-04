@@ -311,6 +311,11 @@ func (p *Proxy) serve(machine string, w http.ResponseWriter, r *http.Request) {
 			up.Header[http.CanonicalHeaderKey(h)] = append([]string(nil), vs...)
 		}
 	}
+	if op.Body != nil {
+		// The body is the proxy's own JSON encoding; say so, whatever the
+		// guest claimed.
+		up.Header.Set("Content-Type", "application/json")
+	}
 	up.Header.Set("Accept-Encoding", "identity")
 	up.Header.Set(a.Inject.Header, a.Inject.Prefix+sec.Reveal())
 
@@ -326,7 +331,7 @@ func (p *Proxy) serve(machine string, w http.ResponseWriter, r *http.Request) {
 
 	// The redactor reads plain bytes only. A compressed body would pass it
 	// unread and be inflated by the guest.
-	if ce := resp.Header.Get("Content-Encoding"); ce != "" && !strings.EqualFold(ce, "identity") {
+	if encoded(resp.Header) {
 		ev.Allowed, ev.Status, ev.Reason = true, http.StatusBadGateway, "encoded response refused"
 		p.audit.Egress(ev)
 		http.Error(w, "egress: encoded response refused", http.StatusBadGateway)
@@ -385,27 +390,29 @@ func (b *BodyRule) apply(body []byte, public bool) ([]byte, error) {
 			return nil, fmt.Errorf("body key %q not allowed", k)
 		}
 	}
-	if b.ServerTools && !public {
+	strict := !(public && b.PublicMayFetch)
+	if strict {
 		for _, k := range b.ServerToolKeys {
 			if _, ok := obj[k]; ok {
 				return nil, fmt.Errorf("body key %q needs a public machine", k)
 			}
 		}
+		if err := remoteSource(obj, ""); err != nil {
+			return nil, err
+		}
 	}
-	if b.ServerTools {
-		if t, ok := obj["tools"]; ok {
-			tools, ok := t.([]any)
+	if t, ok := obj["tools"]; ok {
+		tools, ok := t.([]any)
+		if !ok {
+			return nil, errors.New("tools is not a list")
+		}
+		for _, e := range tools {
+			m, ok := e.(map[string]any)
 			if !ok {
-				return nil, errors.New("tools is not a list")
+				return nil, errors.New("tool entry is not an object")
 			}
-			for _, e := range tools {
-				m, ok := e.(map[string]any)
-				if !ok {
-					return nil, errors.New("tool entry is not an object")
-				}
-				if typ, has := m["type"]; has && typ != "function" && typ != "custom" && !public {
-					return nil, errors.New("provider-side tools need a public machine")
-				}
+			if typ, has := m["type"]; has && typ != "function" && typ != "custom" && strict {
+				return nil, errors.New("provider-side tools need a public machine")
 			}
 		}
 	}
@@ -419,4 +426,55 @@ func (b *BodyRule) apply(body []byte, public bool) ([]byte, error) {
 		return nil, err
 	}
 	return bytes.TrimSuffix(out.Bytes(), []byte("\n")), nil
+}
+
+// encoded reports whether any Content-Encoding value, in any header line or
+// comma-separated list, is other than identity.
+func encoded(h http.Header) bool {
+	for _, line := range h.Values("Content-Encoding") {
+		for _, v := range strings.Split(line, ",") {
+			if v = strings.TrimSpace(v); v != "" && !strings.EqualFold(v, "identity") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// urlKeys name the fields through which provider APIs take a content
+// source by address: OpenAI image_url parts and Anthropic image and
+// document sources ({"type":"url","url":...}), plus likely variants.
+var urlKeys = map[string]bool{
+	"url": true, "image_url": true, "file_url": true, "document_url": true,
+	"audio_url": true, "video_url": true, "server_url": true,
+}
+
+// remoteSource rejects any content source given by address rather than
+// inline: a string under a urlKeys key that is not a data: URL. It does not
+// look inside JSON schemas (input_schema, parameters) or the arguments of a
+// client tool call the guest already ran (tool_use input), where a "url"
+// property is the guest's own data, not a provider fetch.
+func remoteSource(v any, key string) error {
+	switch t := v.(type) {
+	case map[string]any:
+		for k, c := range t {
+			if k == "input_schema" || k == "parameters" || (k == "input" && t["type"] == "tool_use") {
+				continue
+			}
+			if err := remoteSource(c, k); err != nil {
+				return err
+			}
+		}
+	case []any:
+		for _, c := range t {
+			if err := remoteSource(c, key); err != nil {
+				return err
+			}
+		}
+	case string:
+		if urlKeys[key] && !strings.HasPrefix(strings.ToLower(strings.TrimSpace(t)), "data:") {
+			return errors.New("remote content sources need a public machine; send content inline")
+		}
+	}
+	return nil
 }
