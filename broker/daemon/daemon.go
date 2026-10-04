@@ -17,6 +17,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/control"
+	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/modem"
 	ownerch "github.com/ghbmrk/agentos/broker/owner"
@@ -70,23 +71,28 @@ type Config struct {
 	// Agent receives the owner's task chat: the guest plane's owner inbox
 	// for the agent's machine (ARC-6 (c)). Nil: no agent running.
 	Agent control.Agent
+	// Grants configures the approval policy: adapter verifiers, the local
+	// confirmation page, reply composers. Executors are filled from
+	// Executors below.
+	Grants grants.Config
+	// Executors are the adapters' executors, by name. Grants may name
+	// only these. None exist before P2-6/P2-7.
+	Executors map[string]journal.Executor
+	// Redactor scrubs journaled free text. Nil journals none at all until
+	// the vault's redactor (CRED-7 values plus CH-19 patterns) is wired
+	// with the vault unlock (P2-4).
+	Redactor journal.Redactor
 }
 
 // Daemon is a running broker.
 type Daemon struct {
 	engine *journal.Engine
+	gate   *grants.Gate
 	store  *journal.FileStore
 	owner  *ownerch.Channel
 	srv    *sockets.Server
 	adm    *admission.Controller
 	done   chan struct{}
-}
-
-// denyAll is the policy until grants exist (P1-3): nothing is authorized.
-type denyAll struct{}
-
-func (denyAll) Check(context.Context, journal.Phase, journal.Intent) error {
-	return errors.New("no grants are configured")
 }
 
 // redactAll journals no free text at all until the vault (P1-3) supplies a
@@ -140,7 +146,26 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 	if err != nil {
 		return nil, err
 	}
-	eng, err := journal.Open(store, denyAll{}, map[string]journal.Executor{}, redactAll)
+	// The policy is the grants gate (OP-5, REV-2): with no grants every
+	// effect is refused, and every irreversible effect a grant allows is
+	// asked of the owner unless a pre-allowance covers it.
+	gcfg := cfg.Grants
+	execs := map[string]journal.Executor{}
+	for name, ex := range cfg.Executors {
+		if name == grants.ExecutorName {
+			store.Close()
+			return nil, fmt.Errorf("daemon: executor name %q is reserved", name)
+		}
+		execs[name] = ex
+		gcfg.Executors = append(gcfg.Executors, name)
+	}
+	gate := grants.New(gcfg)
+	execs[grants.ExecutorName] = gate
+	red := cfg.Redactor
+	if red == nil {
+		red = redactAll
+	}
+	eng, err := journal.Open(store, gate, execs, red)
 	if err != nil {
 		store.Close()
 		return nil, err
@@ -152,11 +177,19 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 		if ch, err = ownerch.New(ownerch.Config{
 			Owner: cfg.OwnerNumber, Modem: cfg.Modem, Engine: eng, Agent: cfg.Agent,
 			Machines: adm.Summary, Secrets: cfg.OwnerSecrets, Store: ownerch.FileStore{Path: cfg.OwnerState},
+			Decide: gate.Decide, Narrow: gate.Narrow,
 		}); err != nil {
 			store.Close()
 			return nil, err
 		}
 		handle = ch.Handle
+	}
+	// Attach before the owner channel boots: Boot's restart decisions and
+	// every guest effect go through the gate.
+	if ch != nil {
+		gate.Attach(eng, ch)
+	} else {
+		gate.Attach(eng, nil)
 	}
 
 	modem := cfg.ModemUID
@@ -192,10 +225,11 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 		store.Close()
 		return nil, err
 	}
-	d := &Daemon{engine: eng, store: store, srv: srv, adm: adm, owner: ch, done: make(chan struct{})}
+	d := &Daemon{engine: eng, gate: gate, store: store, srv: srv, adm: adm, owner: ch, done: make(chan struct{})}
 	if ch != nil {
 		go serveOwner(ctx, ch, cfg.Modem != nil)
 	}
+	go gate.Run(ctx, 0)
 	go func() {
 		srv.Wait()
 		store.Close()
@@ -239,6 +273,9 @@ func serveOwner(ctx context.Context, ch *ownerch.Channel, hasModem bool) {
 
 // Owner is the owner channel, or nil when OwnerState is unset.
 func (d *Daemon) Owner() *ownerch.Channel { return d.owner }
+
+// Gate is the approval policy: the guest plane's Effects and Route.
+func (d *Daemon) Gate() *grants.Gate { return d.gate }
 
 // Engine is the daemon's journal engine.
 func (d *Daemon) Engine() *journal.Engine { return d.engine }

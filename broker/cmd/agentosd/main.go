@@ -213,8 +213,17 @@ func openGuestPlane(m *vm.Manager, d *daemon.Daemon, socketDir, meterPath string
 	plane, err := guest.New(guest.Config{
 		Dir:      filepath.Join(socketDir, "guests"),
 		Machines: machines{m},
-		Effects:  eng,
-		Meter:    mtr,
+		// The grants gate decides every effect (OP-5, REV-2) and routes
+		// only accounts a grant connects.
+		Effects: d.Gate(),
+		Route:   d.Gate().Route,
+		Label: func(id string) string {
+			if l, err := m.Label(id); err == nil && l == vm.Public {
+				return "public"
+			}
+			return "private"
+		},
+		Meter: mtr,
 		OwnerReply: func(machine, _, text string) {
 			ch := d.Owner()
 			if ch == nil {

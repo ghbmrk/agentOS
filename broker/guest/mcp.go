@@ -197,6 +197,7 @@ func (p *Plane) callTool(ctx context.Context, machine, name string, raw json.Raw
 		st, err := p.cfg.Effects.Submit(journal.Intent{
 			ID: id, Origin: "guest:" + lineage, Account: a.Account, Action: a.Action,
 			Params: a.Params, Recipients: a.Recipients, Executor: exec,
+			Machine: machine, Label: p.label(machine),
 		})
 		if err != nil {
 			if errors.Is(err, journal.ErrConflict) {
@@ -241,6 +242,16 @@ func (p *Plane) callTool(ctx context.Context, machine, name string, raw json.Raw
 		return state(a.RequestID, st), nil
 	}
 	return effectState{}, fmt.Errorf("no tool %q", clip(name, 64))
+}
+
+// label is the machine's data label for the journal, failing closed.
+func (p *Plane) label(machine string) string {
+	if p.cfg.Label != nil {
+		if l := p.cfg.Label(machine); l == "public" || l == "private" {
+			return l
+		}
+	}
+	return "private"
 }
 
 func state(reqID string, st journal.Status) effectState {

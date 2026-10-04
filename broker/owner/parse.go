@@ -33,6 +33,7 @@ func fields(msg string) []string {
 //	YES [id] [item...] [code]   NO [id] [item...]
 //	UNDO id   MORE id   RUN
 //	RESUME [code]   RESUME token code   UNLOCK [token code]
+//	PAUSE grant   REVOKE grant
 //
 // An id starts with a letter and has at most 3 characters; an item is a
 // number up to 2 digits; a code is 6 to 8 digits.
@@ -46,6 +47,14 @@ func parseReply(msg string) (reply, bool) {
 	switch r.word {
 	case "UNDO", "MORE":
 		if len(args) == 1 && isID(args[0]) {
+			r.id = args[0]
+			return r, true
+		}
+		return reply{}, false
+	case "PAUSE", "REVOKE":
+		// ADP-9: pausing or revoking a grant or pre-allowance needs only
+		// the owner's number, like STOP. Grant IDs are G and 1-4 digits.
+		if len(args) == 1 && isGrantID(args[0]) {
 			r.id = args[0]
 			return r, true
 		}
@@ -97,6 +106,11 @@ func isID(s string) bool {
 		}
 	}
 	return true
+}
+
+// isGrantID is a grant's ID: G and 1 to 4 digits.
+func isGrantID(s string) bool {
+	return len(s) >= 2 && len(s) <= 5 && s[0] == 'G' && allDigits(s[1:])
 }
 
 // isToken is a challenge-mode token: 4 letters or digits.

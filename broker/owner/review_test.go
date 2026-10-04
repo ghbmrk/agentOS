@@ -349,10 +349,12 @@ func TestRestartCancelsAndReportsWhatItDropped(t *testing.T) {
 		t.Fatalf("boot text: %q", got)
 	}
 	ds := r.decisions()
-	if len(ds) != 2 || ds[0].Ref != "a" || ds[0].Why != "restart" || ds[0].Approved {
+	// The queued auto-reply is decided too, so its intent is closed
+	// rather than left waiting for a release that never comes.
+	if len(ds) != 3 || ds[0].Ref != "a" || ds[0].Why != "restart" || ds[0].Approved || ds[2].Ref != "r1" || ds[2].Why != "restart" {
 		t.Fatalf("decisions %+v", ds)
 	}
-	if ex, _ := r.ch.TakeExpired(); len(ex) != 2 {
+	if ex, _ := r.ch.TakeExpired(); len(ex) != 3 {
 		t.Fatalf("digest %+v", ex)
 	}
 	// Nothing is reported twice, and the IDs stay retired.

@@ -71,6 +71,10 @@ type Config struct {
 	// Route picks the executor for an effect on account; false means no
 	// adapter is connected for it and the request is refused.
 	Route func(account string) (executor string, ok bool)
+	// Label reports a machine's data label (REV-5), recorded on each
+	// intent it submits. Nil, or an empty answer, records "private": an
+	// unknown label is never reported as public.
+	Label func(machine string) string
 	// Model returns machine's model egress (the egress proxy's handler).
 	// Nil answers 503: no model access.
 	Model func(machine string) http.Handler

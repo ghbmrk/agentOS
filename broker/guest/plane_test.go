@@ -501,3 +501,35 @@ func TestREV5PublicTaskKeepsTheLabel(t *testing.T) {
 		t.Fatal("delivered to a machine with no socket")
 	}
 }
+
+// REQ: REV-5, OP-1
+
+// TestIntentsRecordTheSubmittingMachineAndLabel: each intent records the
+// machine and its data label, failing closed to private when the label is
+// unknown, and a fork's repeat keeps the first submission's record.
+func TestIntentsRecordTheSubmittingMachineAndLabel(t *testing.T) {
+	r := newRig(t, nil)
+	if st, e := r.tool("m1", "effect_request", send("r1")); st.State != "succeeded" {
+		t.Fatalf("%+v %s", st, e)
+	}
+	if s, _ := r.eng.Get("m1/r1"); s.Intent.Machine != "m1" || s.Intent.Label != "private" {
+		t.Fatalf("no label source: %q %q", s.Intent.Machine, s.Intent.Label)
+	}
+	pub := newRig(t, func(c *Config) {
+		c.Label = func(id string) string {
+			if id == "m1" {
+				return "public"
+			}
+			return "bogus"
+		}
+	})
+	pub.ms.lineage["f1"] = "m1"
+	pub.tool("m1", "effect_request", send("r1"))
+	pub.tool("f1", "effect_request", send("r2"))
+	if s, _ := pub.eng.Get("m1/r1"); s.Intent.Label != "public" {
+		t.Fatalf("public machine recorded %q", s.Intent.Label)
+	}
+	if s, _ := pub.eng.Get("m1/r2"); s.Intent.Machine != "f1" || s.Intent.Label != "private" {
+		t.Fatalf("unknown label recorded %q %q", s.Intent.Machine, s.Intent.Label)
+	}
+}

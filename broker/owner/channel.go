@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -74,6 +75,11 @@ type Config struct {
 	// channel's lock is released. A decision for an item the caller has
 	// already settled (possible after a restart) should be ignored.
 	Decide func(Decision)
+	// Narrow pauses or revokes a grant or pre-allowance ("PAUSE" or
+	// "REVOKE", and its ID) and returns the reply. Like STOP it needs only
+	// the owner's number (ADP-9). It runs outside the channel's lock. Nil
+	// answers that there are no grants.
+	Narrow func(word, id string) string
 }
 
 // Decision is the outcome for one requested item.
@@ -83,7 +89,8 @@ type Decision struct {
 	Ref      string
 	Approved bool
 	// Why: "owner", "expired", "void" (wrong codes), "not chosen" (left
-	// out of a partial YES), or "restart" (dropped by a reboot).
+	// out of a partial YES), "restart" (dropped by a reboot), or "undo"
+	// (an auto-reply the owner cancelled).
 	Why string
 }
 
@@ -191,6 +198,7 @@ type route struct {
 	replies  []string
 	delegate string // text for the control handler
 	run      bool   // delegate goes to the control handler
+	narrow   *reply // PAUSE or REVOKE, run outside the lock
 	// limited: the replies count against ReplyLimit (CH-15).
 	limited bool
 	// alerts have their own limit (one per AlertEvery) and are not counted
@@ -237,6 +245,13 @@ func (c *Channel) finish(ctx context.Context, from string, rt route) []string {
 	replies := rt.replies
 	if rt.run {
 		replies = append(replies, c.ctrl.Handle(ctx, from, rt.delegate)...)
+	}
+	if rt.narrow != nil {
+		if c.cfg.Narrow == nil {
+			replies = append(replies, "There are no grants to "+strings.ToLower(rt.narrow.word)+".")
+		} else {
+			replies = append(replies, c.cfg.Narrow(rt.narrow.word, rt.narrow.id))
+		}
 	}
 	var out []string
 	for _, r := range replies {
@@ -290,7 +305,9 @@ func (c *Channel) routeLocked(text string, now time.Time, decided *[]Decision) r
 			out, accepted := c.resumeLocked(r, now)
 			return route{replies: out, limited: !accepted}
 		case "UNDO":
-			return route{replies: []string{c.undoLocked(r.id, now)}, limited: !unlocked}
+			return route{replies: []string{c.undoLocked(r.id, now, decided)}, limited: !unlocked}
+		case "PAUSE", "REVOKE":
+			return route{narrow: &r, limited: !unlocked}
 		case "MORE":
 			return route{replies: []string{c.moreLocked(r.id)}, limited: !unlocked}
 		case "UNLOCK":

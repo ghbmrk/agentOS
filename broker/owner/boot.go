@@ -14,8 +14,8 @@ type bootReport struct {
 }
 
 // Boot reports what a restart dropped (OP-4, CH-13): each item of a
-// request open at shutdown is decided as denied with Why "restart" and
-// listed for the digest, and the owner is texted which requests were
+// request open at shutdown, and each auto-reply still queued, is decided
+// as denied with Why "restart" and listed for the digest, and the owner is texted which requests were
 // cancelled and which auto-replies were not sent. Run calls it; it does
 // nothing the second time.
 func (c *Channel) Boot() {
@@ -37,6 +37,7 @@ func (c *Channel) Boot() {
 	}
 	for _, q := range b.queued {
 		replies = append(replies, q.ID)
+		decided = append(decided, Decision{Request: q.ID, Item: 1, Ref: q.Ref, Why: "restart"})
 	}
 	c.addExpiredLocked(decided)
 	for _, id := range append(append([]string(nil), reqs...), replies...) {
