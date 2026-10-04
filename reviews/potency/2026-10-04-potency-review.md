@@ -117,8 +117,24 @@ Proposal (CAP-10): the agent may ask with a stated default and a deadline. Witho
 
 ---
 
+## Revisions after L3 review (PR #11)
+The L3 security review found five blocking gaps. All are fixed in the spec diff:
+1. **REV-5 propagation.** Any broker-mediated write from X into Y raises Y to X's class. Rollback restores open only when no higher-class machine can write in. A14 tests a private guest writing into an open worker.
+2. **ADP-10 disclosure.** The composer sees only thread messages that every recipient of the reply received, computed from source headers.
+3. **ADP-11 inbound.** Texts and calls from non-owner numbers are untrusted data, never control words, task chat, or approvals.
+4. **CHG-6 classification.** The broker classifies from artifact type and diff, the security suite runs on every auto-adoption, re-enabling is an owner-approved intent, and "context rule" is defined.
+5. Compiled `.pyc` files were removed and a `.gitignore` added.
+
+Non-blocking changes taken:
+- Allowlisted read sources narrowed to content-addressed mirrors. `fetch` bounds are frozen before A14.
+- CAP-9 routing can never override a data restriction. By default, private data goes only to providers marked as allowed for it.
+
+**Two positions changed:**
+- **D1:** task text is now **private by default**, and the owner can mark a task public. A private machine can start an open research machine through a query bounded like `fetch`. That keeps most of the research potency without making "tell the attacker's URL what the task says" a one-step leak. The potency claim in finding 2 now rests on that research channel.
+- **D2:** a queued reply now sends a text to the owner with `UNDO`, because the undo window is useless if nobody sees it. The reviewer recommends not shipping ADP-10 in MVP.
+
 ## Decisions for Mark
-- **D1** Egress default (REV-5): open machines get full internet, and the owner's task text counts as open (proposed), or task text counts as private (safer, much slower research).
-- **D2** Context-scoped replies (ADP-10): allowed as an opt-in per account (proposed), or not at all.
+- **D1** Egress default (REV-5): task text is private unless marked public, and open research goes through a bounded query (proposed after review), or task text counts as open (more potent, one-step leak risk).
+- **D2** Context-scoped replies (ADP-10): opt-in per account, with a notification and undo for each reply, or not for MVP (reviewer's recommendation). [Rec] Not for MVP; revisit once A14 and A10 data exist.
 - **D3** Box SIM for third-party calls and texts (ADP-11): in the spec now and built after S2 (proposed), or deferred to post-MVP.
 - **D4** Authority-neutral improvements auto-adopt by default (CHG-6, proposed), or each one asks.
