@@ -26,6 +26,9 @@ const (
 	ChallengeBound = 48
 	// ChallengeTTL replaces an unused challenge.
 	ChallengeTTL = 30 * time.Minute
+	// BadTokensToRotate wrong challenges replace the live one, so guessing
+	// the token is not free.
+	BadTokensToRotate = 3
 )
 
 // codes checks approval codes and owns the durable State. It is not safe
@@ -47,6 +50,7 @@ type codes struct {
 	// asks for a new one.
 	unlockCh        string
 	unlockChExpires time.Time
+	badTokens       int
 	// justChallenged is set when a wrong code switched on challenge mode;
 	// the channel reads and clears it to tell the owner.
 	justChallenged bool
@@ -189,7 +193,16 @@ func (c *codes) newChallenge(now time.Time) {
 	for i := range b {
 		b[i] = alphabet[randInt(c.rand, len(alphabet))]
 	}
-	c.unlockCh, c.unlockChExpires = string(b), now.Add(ChallengeTTL)
+	c.unlockCh, c.unlockChExpires, c.badTokens = string(b), now.Add(ChallengeTTL), 0
+}
+
+// badToken records a message that named a wrong challenge, and replaces
+// the live one after BadTokensToRotate of them.
+func (c *codes) badToken(now time.Time) {
+	c.badTokens++
+	if c.badTokens >= BadTokensToRotate {
+		c.newChallenge(now)
+	}
 }
 
 // challengeOK reports whether got is the live token, without spending it.

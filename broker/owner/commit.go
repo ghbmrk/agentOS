@@ -59,7 +59,8 @@ var DefaultVerbs = []string{
 	"commit", "committed",
 	"promise", "promised",
 	"guarantee", "guaranteed",
-	"book", "booked", "order", "ordered", "reserve", "reserved",
+	"book", "booked", "booking", "order", "ordered", "ordering", "reserve", "reserved", "reserving",
+	"paying", "committing", "promising",
 }
 
 var firstPerson = map[string]bool{"i": true, "we": true, "im": true, "ill": true, "ive": true, "id": true,

@@ -32,6 +32,11 @@ var lookalikes = map[rune]string{
 	'ò': "o", 'ó': "o", 'ô': "o", 'õ': "o", 'ö': "o", 'ø': "o",
 	'ù': "u", 'ú': "u", 'û': "u", 'ü': "u", 'ñ': "n", 'ç': "c", 'ý': "y", 'ÿ': "y", 'ß': "ss",
 	'À': "A", 'Á': "A", 'Â': "A", 'Ä': "A", 'Å': "A", 'É': "E", 'È': "E", 'Ö': "O", 'Ü': "U", 'Ñ': "N",
+	// Apostrophes as phone keyboards type them.
+	'\u2018': "'", '\u2019': "'", '\u02BC': "'",
+	// Superscript and subscript digits (not decimal digits in Unicode).
+	'⁰': "0", '¹': "1", '²': "2", '³': "3", '⁴': "4", '⁵': "5", '⁶': "6", '⁷': "7", '⁸': "8", '⁹': "9",
+	'₀': "0", '₁': "1", '₂': "2", '₃': "3", '₄': "4", '₅': "5", '₆': "6", '₇': "7", '₈': "8", '₉': "9",
 	'ℓ': "l", '℮': "e", 'ⅰ': "i", 'ⅼ': "l", '€': " EUR ", '£': " GBP ", '¥': " JPY ",
 }
 
@@ -52,6 +57,15 @@ func fold(s string) string {
 	for _, r := range s {
 		if r >= 0xFF01 && r <= 0xFF5E {
 			r -= 0xFEE0
+		}
+		if r >= 0x1D400 && r <= 0x1D6A3 {
+			// Mathematical alphanumeric letters: styled runs of A-Z a-z.
+			off := (r - 0x1D400) % 52
+			if off < 26 {
+				r = 'A' + off
+			} else {
+				r = 'a' + off - 26
+			}
 		}
 		switch {
 		case r < 0x80:

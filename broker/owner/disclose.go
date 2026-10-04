@@ -36,13 +36,16 @@ var codeWords = map[string]bool{
 
 const codeReach = 4
 
+// signIn joins "sign in" into the code word SIGNIN.
+var signIn = regexp.MustCompile(`(?i)\bsign\s+in\b`)
+
 // SecretShaped reports whether s carries a known token format or a short
 // code next to a code word (CH-19). It runs on folded text, so fullwidth
 // or other Unicode digits and look-alike letters do not slip past, and it
 // joins adjacent digit groups, so "482 913" and "4 8 2 9 1 3" read as one
 // code.
 func SecretShaped(s string) bool {
-	s = fold(s)
+	s = signIn.ReplaceAllString(fold(s), "signin")
 	if tokenFormats.MatchString(s) {
 		return true
 	}

@@ -170,6 +170,13 @@ func TestChallengeModeDropsSpoofedCodesAndOwnerRecovers(t *testing.T) {
 	if r.say(r.totp()) != "" || r.ch.SessionUnlocked(r.clock()) {
 		t.Fatal("bare code worked in challenge mode")
 	}
+	// Wrong challenges rotated the live one, so guessing it is not free.
+	got := r.say("UNLOCK")
+	m := challengeRe.FindStringSubmatch(got)
+	if m == nil || m[1] == tok {
+		t.Fatalf("challenge not rotated after wrong ones: %q", got)
+	}
+	tok = m[1]
 	// Bare UNLOCK re-sends the live challenge; it does not rotate it.
 	if got := r.say("UNLOCK"); !strings.Contains(got, "UNLOCK "+tok+" ") {
 		t.Fatalf("UNLOCK: %q", got)
@@ -213,7 +220,6 @@ func TestChallengeAttemptsHaveAFixedNonSlidingBound(t *testing.T) {
 		}
 		tok = m[1]
 		r.advance(20 * time.Minute) // spread over the day
-		tok = challengeRe.FindStringSubmatch(r.say("UNLOCK"))[1]
 	}
 	// The bound is used up: even the right code is ignored until the
 	// window that began at the first attempt ends.
@@ -247,6 +253,25 @@ func TestChallengeExpiresAndResumeUsesIt(t *testing.T) {
 	}
 	if got := r.say("RESUME " + m[1] + " " + r.totp()); !strings.HasSuffix(got, "Resumed.") || r.eng.Stopped() {
 		t.Fatalf("RESUME: %q", got)
+	}
+}
+
+func TestChallengeTextsHaveTheirOwnLimit(t *testing.T) {
+	r := newRig(t, nil)
+	r.replyLimit = 3
+	r.ch = r.open()
+	enterChallenge(t, r)
+	for i := 0; i < 10; i++ {
+		r.say("HELP") // uses up the shared budget
+	}
+	n := 0
+	for i := 0; i < 10; i++ {
+		if r.say("UNLOCK") != "" {
+			n++
+		}
+	}
+	if n != challengeTextsPerHour {
+		t.Fatalf("%d challenge texts, want %d", n, challengeTextsPerHour)
 	}
 }
 

@@ -101,10 +101,12 @@ type Channel struct {
 	held        *heldMsg
 	limited     []time.Time
 	alertAt     time.Time
-	dropped     int
-	expired     []Decision
-	expiredMore int
-	boot        *bootReport
+	// challengeTexts are the challenge texts sent in the last hour.
+	challengeTexts []time.Time
+	dropped        int
+	expired        []Decision
+	expiredMore    int
+	boot           *bootReport
 }
 
 var _ control.Auth = (*Channel)(nil)
@@ -413,10 +415,13 @@ func (c *Channel) challengeLocked(text string, now time.Time) (route, bool) {
 			return route{replies: []string{"Not stopped. Nothing to resume."}, limited: true}, true
 		}
 		if r.token == "" && r.code == "" {
-			return route{replies: []string{fmt.Sprintf("Codes are locked after too many wrong ones. Reply %s %s and a code from your code generator within %s.",
-				r.word, c.codes.currentChallenge(now), dur(ChallengeTTL))}, limited: true}, true
+			return c.challengeText(now, fmt.Sprintf("Codes are locked after too many wrong ones. Reply %s %s and a code from your code generator within %s.",
+				r.word, c.codes.currentChallenge(now), dur(ChallengeTTL))), true
 		}
 		if r.token == "" || !c.codes.challengeOK(r.token, now) {
+			if r.token != "" {
+				c.codes.badToken(now)
+			}
 			return c.dropLocked(now), true
 		}
 		ok, err := c.codes.takeAttempt(now)
@@ -431,8 +436,8 @@ func (c *Channel) challengeLocked(text string, now time.Time) (route, bool) {
 			return route{replies: []string{stateErr}, limited: true}, true
 		}
 		if res != strongOK {
-			return route{replies: []string{fmt.Sprintf("Wrong code. New challenge: reply %s %s and a code from your code generator.",
-				r.word, c.codes.currentChallenge(now))}, limited: true}, true
+			return c.challengeText(now, fmt.Sprintf("Wrong code. New challenge: reply %s %s and a code from your code generator.",
+				r.word, c.codes.currentChallenge(now))), true
 		}
 		c.held = nil
 		msg := "Unlocked until " + c.untilText() + ". Codes work normally again."
@@ -452,6 +457,20 @@ func (c *Channel) challengeLocked(text string, now time.Time) (route, bool) {
 		return c.dropLocked(now), true
 	}
 	return route{}, false
+}
+
+// challengeTextsPerHour is the challenge texts' own limit, apart from
+// ReplyLimit, so a spoofer's bare UNLOCK texts cannot use up the shared
+// budget and leave the owner without a challenge after a typo.
+const challengeTextsPerHour = 4
+
+func (c *Channel) challengeText(now time.Time, text string) route {
+	c.challengeTexts = since(c.challengeTexts, now.Add(-time.Hour))
+	if len(c.challengeTexts) >= challengeTextsPerHour {
+		return route{}
+	}
+	c.challengeTexts = append(c.challengeTexts, now)
+	return route{replies: []string{text}}
 }
 
 // dropLocked ignores a code-bearing message in challenge mode.

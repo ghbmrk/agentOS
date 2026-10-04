@@ -19,6 +19,9 @@ func TestSecretShapedCatchesTokensAndAnchoredCodes(t *testing.T) {
 		"eyJhbGciOi.eyJzdWIiOiIx.c2lnbmF0dXJl",
 		"-----BEGIN OPENSSH PRIVATE KEY-----",
 		"otpauth://totp/x?secret=CANARY",
+		"code ⁴⁸²⁹¹³",
+		"𝐜𝐨𝐝𝐞 482913",
+		"Use 482913 to sign in",
 	}
 	for _, s := range hits {
 		if !SecretShaped(s) {
