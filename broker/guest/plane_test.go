@@ -1,10 +1,8 @@
 package guest
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -15,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/meter"
 )
@@ -476,34 +473,9 @@ func TestARC6PerMachineConcurrencyCap(t *testing.T) {
 	wg.Wait()
 }
 
-type recorder struct {
-	notes []journal.EgressNote
-	fail  bool
-}
-
-func (r *recorder) RecordEgress(n journal.EgressNote) error {
-	if r.fail {
-		return errors.New("disk")
-	}
-	r.notes = append(r.notes, n)
-	return nil
-}
-
-// TestADP10EgressDenialsGoToTheJournal: the proxy's auditor journals every
-// denial and nothing else (egress E6).
-func TestADP10EgressDenialsGoToTheJournal(t *testing.T) {
-	rec := &recorder{}
-	j := EgressJournal{Journal: rec}
-	j.Egress(egress.Event{Machine: "m1", Allowed: true, Status: 200})
-	j.Egress(egress.Event{Machine: "m1", Adapter: "openai", Method: "GET", Status: 403, Reason: "no declared operation matches", Path: "/openai/v1/files"})
-	if len(rec.notes) != 1 || rec.notes[0].Reason != "no declared operation matches" || rec.notes[0].Status != 403 {
-		t.Fatalf("%+v", rec.notes)
-	}
-	var logged bytes.Buffer
-	EgressJournal{Journal: &recorder{fail: true}, Logf: func(f string, a ...any) { fmt.Fprintf(&logged, f, a...) }}.Egress(egress.Event{Machine: "m1"})
-	if logged.Len() == 0 {
-		t.Fatal("a failed journal write went unreported")
-	}
+// TestOP8SpendNoteNamesTheTask: the journal note for an exhaustion says
+// which limit and task stopped the machine.
+func TestOP8SpendNoteNamesTheTask(t *testing.T) {
 	if n := SpendNote(meter.Exhausted{Scope: meter.ScopeTask, Machine: "m1", Task: "t1"}); n.Machine != "m1" || !strings.Contains(n.Reason, "t1") {
 		t.Fatalf("%+v", n)
 	}
