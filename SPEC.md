@@ -193,7 +193,7 @@ Remote live browser view, remote file browsing, and push notifications, away fro
 
 ### 7.4 Vault keys and hosts
 - **CRED-8** The vault is encrypted on the drive, and nothing stored on the drive alone can release its key. The key is wrapped by independent slots:
-  - **Trusted host:** a slot sealed to that PC's TPM, so it restarts unattended.
+  - **Trusted host:** a slot sealed to that PC's TPM, so it restarts unattended. The owner MAY add a boot PIN to that slot (TPM plus PIN, off by default), which protects a PC stolen with the drive in it at the cost of unattended restart.
   - **Unknown host:** a slot derived from the Owner Card's **vault passphrase** through Argon2id with at least 256 MiB of memory, tuned to about 1 s at the floor (HW-4). The owner scans its QR code from the card on the local Wi-Fi page (CH-8), or types it as a fallback, never by text or voice (CH-6). The short setup code (§8.1) is not derived from it and never unlocks anything. The box also texts the owner and requires a high-tier approval code (CH-4), so an unexpected unlock is visible and a running box refuses one without the owner. The code authorizes the unlock; it does not decrypt anything. Anything that verifies approval codes (the code-generator seed, the grid) lives only inside the vault, since a verifier readable before unlock lets a drive copy compute codes; the code is therefore checked after decryption, in broker memory, and the running box discards the unlocked key if the code fails or does not arrive within the request's expiry.
   - **Recovery:** a slot for the recovery key (REC-1).
 
