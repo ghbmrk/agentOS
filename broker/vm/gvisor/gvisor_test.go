@@ -23,7 +23,8 @@ import (
 	"github.com/ghbmrk/agentos/broker/vm"
 )
 
-// REQ: REV-1, REV-4, ARC-4, RES-1, RES-2, ARC-6
+// REQ: REV-1, REV-4, ARC-4, RES-1, RES-2
+// SPEC v0.12 IDs (PR #15; move into REQ when it merges): ARC-6
 
 // TestOnlyRunscIsExecuted: the one process this package may start is the
 // configured runsc binary (ARC-2 review aid: the guest launcher is not a
