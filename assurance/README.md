@@ -77,7 +77,11 @@ parse). This is the A9 run with every optional dependency removed.
 class, and that nothing matches a forbidden (AgentOS-operated) pattern, even if
 declared (DEP-2).
 
-Register a scenario (it must expect `pass`):
+Each dependency-audit control also names the calls it must have made (and the
+path-trick controls must actually reach a live probe socket), so none can pass
+vacuously.
+
+Register a scenario (it must expect `pass`; no other keys are accepted):
 
 ```json
 {"name": "broker-offline", "cmd": ["broker/test/a9-scenario.sh"]}

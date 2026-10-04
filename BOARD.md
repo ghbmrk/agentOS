@@ -24,5 +24,5 @@ Started before spec v0.12 on parts unlikely to change; each package lists its sp
 | ID | Package | Needs | State |
 |---|---|---|---|
 | P1-1 | Journal and intent engine (OP-1–7), Go library with property tests ([assumptions](broker/journal/ASSUMPTIONS.md)) | Cloud only | in review |
-| P1-2 | Broker skeleton: sockets, admission classes, STOP/STATUS without inference (ARC-2, CH-2) | P1-1 | queued |
+| P1-2 | Broker skeleton: sockets, admission classes, STOP/STATUS without inference (ARC-2, CH-2) ([assumptions](broker/daemon/ASSUMPTIONS.md)) | P1-1 | in review |
 | P1-6 | Canary harness (A5) and dependency audit harness (A9) as permanent CI jobs ([assurance/README.md](assurance/README.md)) | Cloud only | in review |

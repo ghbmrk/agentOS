@@ -134,6 +134,27 @@ class PolicyTest(unittest.TestCase):
         depaudit.load_manifest(json.loads((ROOT / "assurance" / "dependencies.json").read_text()))
 
 
+class JudgeTest(unittest.TestCase):
+    def test_control_whose_own_call_was_never_logged_fails(self):
+        t = {"expect": "violation", "expect_kinds": ["host-socket"], "must_log": [("unix", "/../")]}
+        res = {"outcome": "violation", "violations": [{"kind": "host-socket"}], "logged": ["unix /a/b"]}
+        self.assertFalse(depaudit._judge(t, res)[0])
+        res["logged"].append("unix /w/tmp/../../x/p")
+        self.assertTrue(depaudit._judge(t, res)[0])
+
+    def test_registry_accepts_only_plain_product_scenarios(self):
+        with tempfile.TemporaryDirectory() as d:
+            reg = pathlib.Path(d, "t.json")
+            for t in ({"name": "x", "cmd": ["true"], "keep": ["/"]},
+                      {"name": "x", "cmd": ["true"], "env": {"A": "1"}},
+                      {"name": "x", "cmd": ["true"], "must_log": []}):
+                reg.write_text(json.dumps({"targets": [t]}))
+                with self.assertRaises(ValueError):
+                    depaudit.load_registry(reg)
+            reg.write_text(json.dumps({"targets": [{"name": "x", "cmd": ["true"]}]}))
+            self.assertEqual(len(depaudit.load_registry(reg)), 1)
+
+
 class StaticScanTest(unittest.TestCase):
     def scan(self, files):
         with tempfile.TemporaryDirectory() as d:

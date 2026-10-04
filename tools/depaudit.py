@@ -358,11 +358,11 @@ def _io_uring_disabled():
         return None
 
 
-def _inner(work, timeout, cmd):
+def _inner(work, timeout, cmd, extra_keep=()):
     """Runs inside the fresh user, network, and mount namespaces."""
     work = pathlib.Path(work)
     _loopback_up()
-    keep = {str(work), str(ROOT), os.path.realpath(sys.prefix),
+    keep = {str(work), str(ROOT), os.path.realpath(sys.prefix), *extra_keep,
             os.path.dirname(os.path.realpath(sys.executable))}
     masked = _mask_host_sockets(sorted(keep))
     _place("nameserver 127.0.0.1\n", "/etc/resolv.conf", work, masked)
@@ -398,7 +398,8 @@ def run_target(target, manifest, timeout=600):
     with tempfile.TemporaryDirectory(prefix="depaudit-") as work:
         os.chmod(work, 0o755)
         cmd = ["unshare"] + _unshare_flags() + ["--", sys.executable, str(pathlib.Path(__file__).resolve()),
-                                                "_inner", "--work", work, "--timeout", str(timeout), "--"]
+                                                "_inner", "--work", work, "--timeout", str(timeout)]
+        cmd += sum((["--keep", k] for k in target.get("keep", ())), []) + ["--"]
         env = dict(os.environ, **target.get("env", {}))
         p = subprocess.run(cmd + list(target["cmd"]), env=env, capture_output=True, timeout=timeout + 60)
         res_file = pathlib.Path(work, "result.json")
@@ -412,6 +413,7 @@ def run_target(target, manifest, timeout=600):
         events = parse_strace(trace.read_text(errors="replace") if trace.exists() else "")
         violations = evaluate(events, res["dns"], manifest, profile, work, res["realpaths"])
         out = {"name": target["name"], "profile": profile, "exit": res["rc"], "events": len(events),
+               "logged": sorted({"%s %s" % (e.family, e.addr) for e in events}),
                "violations": violations, "masked": res["masked"], "io_uring_disabled": res["io_uring_disabled"]}
         if res["rc"] != 0:
             out["outcome"] = "scenario-failed"
@@ -434,23 +436,33 @@ def _ipv6_available():
 def control_targets(masked_probe, visible_probe):
     """Built-in controls, hard-coded so that removing one cannot keep CI green.
     masked_probe listens in /tmp (hidden in the sandbox); visible_probe listens in
-    the repository (reachable), so path tricks must be caught by the audit."""
+    a directory bound back into the sandbox (reachable), so path tricks must be
+    caught by the audit. Each control names the calls it must have made, so it
+    cannot pass vacuously (e.g. a path too long to connect at all)."""
     cmd = [sys.executable, str(ROOT / "tools" / "depaudit_controls.py")]
-    home = ["dns", "forbidden", "host-socket", "ipv4"] + (["ipv6"] if _ipv6_available() else [])
+    v6 = _ipv6_available()
+    home = ["dns", "forbidden", "host-socket", "ipv4"] + (["ipv6"] if v6 else [])
     probes = {"DEPAUDIT_PROBE": masked_probe, "DEPAUDIT_PROBE_VISIBLE": visible_probe}
+    keep = [os.path.dirname(visible_probe)]
+    probe_name = os.path.basename(visible_probe)
     return [
-        {"name": "control-offline-clean", "cmd": cmd + ["clean"], "expect": "pass"},
-        {"name": "control-phones-home", "cmd": cmd + ["phones-home"], "expect": "violation", "expect_kinds": home},
-        {"name": "control-needs-network", "cmd": cmd + ["needs-network"], "expect": "scenario-failed"},
+        {"name": "control-offline-clean", "cmd": cmd + ["clean"], "expect": "pass",
+         "must_log": [("inet", "127.0.0.1"), ("unix", "/ctl.sock")]},
+        {"name": "control-phones-home", "cmd": cmd + ["phones-home"], "expect": "violation", "expect_kinds": home,
+         "must_log": [("inet", "192.0.2.10"), ("unix", "/run/systemd/resolve")] + ([("inet6", "2001:db8::1")] if v6 else [])},
+        {"name": "control-needs-network", "cmd": cmd + ["needs-network"], "expect": "scenario-failed",
+         "must_log": [("inet", "192.0.2.10")]},
         # Exits nonzero if it can reach the live socket left listening in /tmp.
         {"name": "control-host-socket-masked", "cmd": cmd + ["host-socket"], "expect": "violation",
-         "expect_kinds": ["host-socket"], "env": probes},
-        {"name": "control-host-socket-dotdot", "cmd": cmd + ["host-socket-dotdot"], "expect": "violation",
-         "expect_kinds": ["host-socket"], "env": probes},
-        {"name": "control-host-socket-symlink", "cmd": cmd + ["host-socket-symlink"], "expect": "violation",
-         "expect_kinds": ["host-socket", "link"], "env": probes},
-        {"name": "control-symlink-removed", "cmd": cmd + ["host-socket-symlink-removed"], "expect": "violation",
-         "expect_kinds": ["link"], "env": probes},
+         "expect_kinds": ["host-socket"], "env": probes, "keep": keep, "must_log": [("unix", masked_probe)]},
+        {"name": "control-host-socket-dotdot", "must_reach": True, "cmd": cmd + ["host-socket-dotdot"], "expect": "violation",
+         "expect_kinds": ["host-socket"], "env": probes, "keep": keep, "must_log": [("unix", "/../")]},
+        {"name": "control-host-socket-symlink", "must_reach": True, "cmd": cmd + ["host-socket-symlink"], "expect": "violation",
+         "expect_kinds": ["host-socket", "link"], "env": probes, "keep": keep,
+         "must_log": [("link", os.path.dirname(visible_probe)), ("unix", "/l/" + probe_name)]},
+        {"name": "control-symlink-removed", "must_reach": True, "cmd": cmd + ["host-socket-symlink-removed"], "expect": "violation",
+         "expect_kinds": ["link"], "env": probes, "keep": keep,
+         "must_log": [("link", os.path.dirname(visible_probe)), ("unix", "/l/" + probe_name)]},
     ]
 
 
@@ -458,6 +470,10 @@ def _judge(target, res):
     expect = target.get("expect", "pass")
     if res["outcome"] != expect:
         return False, "expected %s, got %s" % (expect, res["outcome"])
+    missing = [f + " " + sub for f, sub in target.get("must_log", ())
+               if not any(l.startswith(f + " ") and sub in l for l in res.get("logged", ()))]
+    if missing:
+        return False, "control's own calls were not logged: %s" % missing
     want = target.get("expect_kinds")
     got = sorted({v["kind"] for v in res["violations"]})
     if want is not None and sorted(want) != got:
@@ -468,9 +484,19 @@ def _judge(target, res):
 def load_registry(path):
     targets = json.loads(pathlib.Path(path).read_text())["targets"]
     for t in targets:
-        if t.get("control") or t.get("expect", "pass") != "pass" or "expect_kinds" in t or "env" in t:
+        if set(t) - {"name", "cmd", "expect", "note"} or t.get("expect", "pass") != "pass":
             raise ValueError("%s: product scenarios must expect pass; controls are built in" % t.get("name"))
     return targets
+
+
+def _drain(sock):
+    n = 0
+    while True:
+        try:
+            sock.accept()[0].close()
+            n += 1
+        except BlockingIOError:
+            return n
 
 
 def cmd_static(args):
@@ -494,7 +520,7 @@ def cmd_run(args):
     manifest = load_manifest(json.loads(pathlib.Path(args.manifest).read_text()))
     report, ok_all = {"targets": []}, True
     with tempfile.TemporaryDirectory(prefix="depaudit-probe-", dir="/tmp") as masked_dir, \
-            tempfile.TemporaryDirectory(prefix=".dp-", dir=ROOT) as visible_dir:
+            tempfile.TemporaryDirectory(prefix="dpv-", dir="/tmp") as visible_dir:
         probes = []
         for d in (masked_dir, visible_dir):
             probe = socket.socket(socket.AF_UNIX)
@@ -502,9 +528,13 @@ def cmd_run(args):
             probe.listen(16)
             probes.append(probe)
             os.chmod(d, 0o755)
+        probes[1].setblocking(False)
         for t in control_targets(os.path.join(masked_dir, "p"), os.path.join(visible_dir, "p")) + product:
             res = run_target(t, manifest, timeout=args.timeout)
             ok, why = _judge(t, res)
+            reached = _drain(probes[1])
+            if ok and t.get("must_reach") and not reached:
+                ok, why = False, "never reached the visible probe, so the control tested nothing"
             ok_all &= ok
             res.update(control=t not in product, passed=ok)
             report["targets"].append(res)
@@ -548,10 +578,12 @@ def main(argv=None):
     i = sub.add_parser("_inner")
     i.add_argument("--work", required=True)
     i.add_argument("--timeout", type=int, required=True)
+    i.add_argument("--keep", action="append", default=[])
     i.add_argument("subject", nargs=argparse.REMAINDER)
     args = ap.parse_args(argv)
     if args.cmd == "_inner":
-        return _inner(args.work, args.timeout, args.subject[1:] if args.subject[:1] == ["--"] else args.subject)
+        return _inner(args.work, args.timeout, args.subject[1:] if args.subject[:1] == ["--"] else args.subject,
+                      args.keep)
     return cmd_static(args) if args.cmd == "static" else cmd_run(args)
 
 
