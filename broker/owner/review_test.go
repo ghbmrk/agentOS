@@ -3,7 +3,9 @@ package owner
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -106,15 +108,160 @@ func TestLateGeneratorCodeCannotApproveANewerRequest(t *testing.T) {
 func TestSuccessDoesNotForgiveWrongCodes(t *testing.T) {
 	r := newRig(t, nil)
 	for i := 0; i < 4; i++ {
-		r.say("00000" + string(rune('0'+i)))
+		r.say(wrongCode(i))
 	}
 	r.unlock()
-	r.ch.RequireUnlock()
-	for i := 4; i < WrongToThrottle; i++ {
-		r.say("00000" + string(rune('0'+i)))
+	if len(r.ch.codes.st.Wrong) != 4 {
+		t.Fatal("a success cleared the wrong-code history")
 	}
-	if got := r.say(r.totp()); !strings.HasPrefix(got, "Too many wrong codes. Codes by text are paused until Oct 5 12:00") {
-		t.Fatalf("throttle after a success: %q", got)
+}
+
+func wrongCode(i int) string { return fmt.Sprintf("%06d", 100000+i) }
+
+// enterChallenge makes ten wrong codes and returns the challenge texted.
+func enterChallenge(t *testing.T, r *rig) string {
+	t.Helper()
+	var got string
+	for i := 0; i < WrongToChallenge; i++ {
+		got = r.say(wrongCode(i))
+	}
+	m := challengeRe.FindStringSubmatch(got)
+	if m == nil || !r.ch.codes.st.Challenged {
+		t.Fatalf("no challenge after %d wrong codes: %q", WrongToChallenge, got)
+	}
+	return m[1]
+}
+
+var challengeRe = regexp.MustCompile(`UNLOCK ([A-Z0-9]{4}) and a code`)
+
+// REQ: CH-18, CH-15
+
+func TestChallengeModeDropsSpoofedCodesAndOwnerRecovers(t *testing.T) {
+	r := newRig(t, nil)
+	tok := enterChallenge(t, r)
+	wrongBefore := len(r.ch.codes.st.Wrong)
+
+	// Spoofed bare codes, appended codes, and YES codes are dropped:
+	// no reply after the first alert, nothing counted or consumed.
+	// The entry text was this hour's alert, so the first drop is silent;
+	// an hour later one alert goes out.
+	if got := r.say(wrongCode(50)); got != "" {
+		t.Fatalf("drop inside the alert hour: %q", got)
+	}
+	r.advance(AlertEvery)
+	tok = challengeRe.FindStringSubmatch(r.say("UNLOCK"))[1]
+	if got := r.say(wrongCode(51)); got != "Codes without the current challenge are being ignored. Reply UNLOCK for a one-time challenge." {
+		t.Fatalf("drop alert: %q", got)
+	}
+	for i := 0; i < 20; i++ {
+		for _, m := range []string{wrongCode(60 + i), "status " + wrongCode(80+i), "YES " + wrongCode(90+i), "UNLOCK ZZZZ " + wrongCode(i)} {
+			if got := r.say(m); got != "" {
+				t.Fatalf("%q got a reply: %q", m, got)
+			}
+		}
+	}
+	if len(r.ch.codes.st.Wrong) != wrongBefore || r.ch.codes.st.BoundUsed != 0 {
+		t.Fatal("dropped messages were counted")
+	}
+	if notes := r.ch.TakeDigestNotes(); len(notes) != 1 || notes[0] != "82 code messages without the current challenge were ignored." {
+		t.Fatalf("digest %v", notes)
+	}
+	// A real generator code without the challenge does nothing either.
+	if r.say(r.totp()) != "" || r.ch.SessionUnlocked(r.clock()) {
+		t.Fatal("bare code worked in challenge mode")
+	}
+	// Bare UNLOCK re-sends the live challenge; it does not rotate it.
+	if got := r.say("UNLOCK"); !strings.Contains(got, "UNLOCK "+tok+" ") {
+		t.Fatalf("UNLOCK: %q", got)
+	}
+	// The owner recovers with one challenge reply.
+	if got := r.say("unlock " + tok + " " + r.totp()); !strings.HasPrefix(got, "Unlocked until") {
+		t.Fatalf("recovery: %q", got)
+	}
+	if r.ch.codes.st.Challenged || r.ch.codes.st.LowLocked || !r.ch.SessionUnlocked(r.clock()) {
+		t.Fatal("recovery left a lock in place")
+	}
+	// The token was single use.
+	r.ch.RequireUnlock()
+	if got := r.say("UNLOCK " + tok + " " + r.totp()); !strings.HasPrefix(got, "Codes are not locked") {
+		t.Fatalf("reuse: %q", got)
+	}
+	// Dropped spoofed codes did not re-arm the lock: it takes ten new
+	// wrong codes after the recovery.
+	for i := 0; i < WrongToChallenge-1; i++ {
+		r.say(wrongCode(i))
+	}
+	if r.ch.codes.st.Challenged {
+		t.Fatal("re-armed early")
+	}
+}
+
+func TestChallengeAttemptsHaveAFixedNonSlidingBound(t *testing.T) {
+	r := newRig(t, nil)
+	r.replyLimit = 100000
+	r.ch = r.open()
+	tok := enterChallenge(t, r)
+	start := r.clock()
+	for i := 0; i < ChallengeBound; i++ {
+		got := r.say("UNLOCK " + tok + " " + wrongCode(i))
+		m := regexp.MustCompile(`New challenge: reply UNLOCK ([A-Z0-9]{4})`).FindStringSubmatch(got)
+		if m == nil {
+			t.Fatalf("attempt %d: %q", i, got)
+		}
+		if m[1] == tok {
+			t.Fatal("challenge not replaced after an attempt")
+		}
+		tok = m[1]
+		r.advance(20 * time.Minute) // spread over the day
+		tok = challengeRe.FindStringSubmatch(r.say("UNLOCK"))[1]
+	}
+	// The bound is used up: even the right code is ignored until the
+	// window that began at the first attempt ends.
+	if r.clock().Sub(start) < 15*time.Hour {
+		t.Fatal("test did not spread attempts")
+	}
+	r.say("UNLOCK " + tok + " " + r.totp())
+	if r.ch.SessionUnlocked(r.clock()) {
+		t.Fatal("attempt beyond the bound accepted")
+	}
+	r.advance(start.Add(WrongWindow).Sub(r.clock()))
+	tok = challengeRe.FindStringSubmatch(r.say("UNLOCK"))[1]
+	if got := r.say("UNLOCK " + tok + " " + r.totp()); !strings.HasPrefix(got, "Unlocked") {
+		t.Fatalf("new window: %q", got)
+	}
+}
+
+func TestChallengeExpiresAndResumeUsesIt(t *testing.T) {
+	r := newRig(t, nil)
+	r.say("STOP")
+	tok := enterChallenge(t, r)
+	r.advance(ChallengeTTL)
+	r.say("RESUME " + tok + " " + r.totp()) // expired: dropped
+	if !r.eng.Stopped() {
+		t.Fatal("expired challenge accepted")
+	}
+	got := r.say("RESUME")
+	m := regexp.MustCompile(`RESUME ([A-Z0-9]{4}) and a code`).FindStringSubmatch(got)
+	if m == nil || m[1] == tok {
+		t.Fatalf("RESUME challenge: %q", got)
+	}
+	if got := r.say("RESUME " + m[1] + " " + r.totp()); !strings.HasSuffix(got, "Resumed.") || r.eng.Stopped() {
+		t.Fatalf("RESUME: %q", got)
+	}
+}
+
+func TestChallengeAlertsAreRateLimited(t *testing.T) {
+	r := newRig(t, nil)
+	enterChallenge(t, r)
+	alerts := 0
+	for i := 0; i <= 180; i++ {
+		if r.say(wrongCode(i)) != "" {
+			alerts++
+		}
+		r.advance(time.Minute)
+	}
+	if alerts != 3 {
+		t.Fatalf("%d alerts in 3 hours, want 3 (one per hour after the entry alert)", alerts)
 	}
 }
 

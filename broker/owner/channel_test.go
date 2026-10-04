@@ -613,20 +613,6 @@ func TestWrongCodesVoidRequestsThenLockTheLowTier(t *testing.T) {
 	}
 }
 
-func TestGuessingIsThrottled(t *testing.T) {
-	r := newRig(t, nil)
-	for i := 0; i < WrongToThrottle; i++ {
-		r.say("00000" + string(rune('0'+i)))
-	}
-	if got := r.say(r.totp()); !strings.HasPrefix(got, "Too many wrong codes") {
-		t.Fatalf("not throttled: %q", got)
-	}
-	r.advance(WrongWindow)
-	if got := r.say(r.totp()); !strings.HasPrefix(got, "Unlocked") {
-		t.Fatalf("throttle did not age out: %q", got)
-	}
-}
-
 // REQ: CH-11
 
 func TestResumeNeedsATextedCodeAndStopVoidsIt(t *testing.T) {

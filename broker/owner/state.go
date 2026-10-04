@@ -25,8 +25,14 @@ type State struct {
 	// LowLocked: texted codes are off until a code-generator unlock.
 	LowLocked bool `json:"low_locked"`
 	// ClearedAt is the last code-generator unlock. Only wrong codes after
-	// it count toward WrongToLock; all of them count toward the throttle.
+	// it count toward WrongToLock and WrongToChallenge.
 	ClearedAt time.Time `json:"cleared_at"`
+	// Challenged is challenge mode (O4): codes count only inside a reply
+	// carrying the texted challenge. BoundStart and BoundUsed are the
+	// fixed 24-hour window of counted challenge attempts.
+	Challenged bool      `json:"challenged"`
+	BoundStart time.Time `json:"bound_start"`
+	BoundUsed  int       `json:"bound_used"`
 	// Pending lists open requests and Queued the auto-replies waiting out
 	// their undo window, by reference only (never codes or reply text), so
 	// a restart can report what it dropped (OP-4, CH-13).

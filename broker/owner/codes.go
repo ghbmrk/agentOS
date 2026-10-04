@@ -15,11 +15,17 @@ const (
 	// WrongToLock wrong codes of any kind since the last code-generator
 	// success, within WrongWindow, lock the low tier and the session.
 	WrongToLock = 5
-	// WrongToThrottle wrong codes within WrongWindow, successes or not,
-	// pause code checks by text until the oldest ages out. This bounds
-	// guessing of the 6-digit high-tier codes (assumption O4).
-	WrongToThrottle = 10
-	WrongWindow     = 24 * time.Hour
+	// WrongToChallenge wrong codes since the last code-generator unlock,
+	// within WrongWindow, switch the channel to challenge mode: a code is
+	// checked only inside "UNLOCK <challenge> <code>" (or RESUME), with
+	// the challenge texted to the owner's number (O4, arbitrator ruling).
+	WrongToChallenge = 10
+	WrongWindow      = 24 * time.Hour
+	// ChallengeBound caps counted challenge attempts per fixed 24-hour
+	// window. The window starts at its first attempt and does not slide.
+	ChallengeBound = 48
+	// ChallengeTTL replaces an unused challenge.
+	ChallengeTTL = 30 * time.Minute
 )
 
 // codes checks approval codes and owns the durable State. It is not safe
@@ -36,6 +42,14 @@ type codes struct {
 	rand  io.Reader
 	// challenge is the grid cell last asked for; only it is accepted.
 	challenge string
+	// unlockCh is the current challenge-mode token and its expiry. It is
+	// a texted value, so it is never persisted; after a restart the owner
+	// asks for a new one.
+	unlockCh        string
+	unlockChExpires time.Time
+	// justChallenged is set when a wrong code switched on challenge mode;
+	// the channel reads and clears it to tell the owner.
+	justChallenged bool
 }
 
 // commit applies f to a copy of the state, saves it, and keeps it only if
@@ -56,7 +70,6 @@ type strongResult int
 const (
 	strongWrong strongResult = iota
 	strongOK
-	strongThrottled
 )
 
 // strongOpts says what a successful strong code does besides being spent.
@@ -65,16 +78,6 @@ type strongOpts struct {
 	unlock time.Duration
 	// count records a failure as a wrong code.
 	count bool
-}
-
-// throttled reports whether code checks by text are paused, and until
-// when.
-func (c *codes) throttled(now time.Time) (bool, time.Time) {
-	w := recent(c.st.Wrong, now)
-	if len(w) < WrongToThrottle {
-		return false, time.Time{}
-	}
-	return true, w[len(w)-WrongToThrottle].Add(WrongWindow)
 }
 
 // matchStrong finds which strong code got is, without changing anything:
@@ -103,9 +106,6 @@ func (c *codes) matchStrong(got string, now time.Time) (ok bool, step int64, cel
 // save failure is a failure. locked reports that this wrong code crossed
 // WrongToLock.
 func (c *codes) checkStrong(got string, now time.Time, o strongOpts) (res strongResult, locked bool, err error) {
-	if t, _ := c.throttled(now); t {
-		return strongThrottled, false, nil
-	}
 	ok, step, cell := c.matchStrong(got, now)
 	if !ok {
 		if !o.count {
@@ -125,6 +125,7 @@ func (c *codes) checkStrong(got string, now time.Time, o strongOpts) (res strong
 				s.UnlockedUntil = t
 			}
 			s.LowLocked = false
+			s.Challenged = false
 			s.ClearedAt = now
 		}
 	})
@@ -154,14 +155,64 @@ func (c *codes) wrong(now time.Time) (locked bool, err error) {
 			s.UnlockedUntil = time.Time{}
 			locked = true
 		}
+		if since >= WrongToChallenge && !s.Challenged {
+			s.Challenged = true
+			c.justChallenged = true
+		}
 	})
 	if err != nil {
 		c.st.Wrong = append(recent(c.st.Wrong, now), now)
 		if locked {
 			c.st.LowLocked, c.st.UnlockedUntil = true, time.Time{}
 		}
+		if c.justChallenged {
+			c.st.Challenged = true
+		}
 	}
 	return locked, err
+}
+
+// currentChallenge returns the live challenge-mode token, making a new one
+// when there is none or it is older than ChallengeTTL.
+func (c *codes) currentChallenge(now time.Time) string {
+	if c.unlockCh == "" || !now.Before(c.unlockChExpires) {
+		c.newChallenge(now)
+	}
+	return c.unlockCh
+}
+
+// newChallenge replaces the token: 4 characters, letters (no I or O) and
+// digits 2-9, about 20 bits, single use.
+func (c *codes) newChallenge(now time.Time) {
+	const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+	b := make([]byte, 4)
+	for i := range b {
+		b[i] = alphabet[randInt(c.rand, len(alphabet))]
+	}
+	c.unlockCh, c.unlockChExpires = string(b), now.Add(ChallengeTTL)
+}
+
+// challengeOK reports whether got is the live token, without spending it.
+func (c *codes) challengeOK(got string, now time.Time) bool {
+	return c.unlockCh != "" && now.Before(c.unlockChExpires) && eq(got, c.unlockCh)
+}
+
+// takeAttempt spends the live token and one attempt of the fixed 24-hour
+// bound. It reports false when the bound is used up; the token is spent
+// either way, so each challenge allows one attempt.
+func (c *codes) takeAttempt(now time.Time) (bool, error) {
+	c.unlockCh = ""
+	ok := false
+	err := c.commit(func(s *State) {
+		if s.BoundStart.IsZero() || !now.Before(s.BoundStart.Add(WrongWindow)) {
+			s.BoundStart, s.BoundUsed = now, 0
+		}
+		if s.BoundUsed < ChallengeBound {
+			s.BoundUsed++
+			ok = true
+		}
+	})
+	return ok && err == nil, err
 }
 
 // recent keeps the times inside WrongWindow.

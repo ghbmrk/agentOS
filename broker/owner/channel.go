@@ -100,6 +100,8 @@ type Channel struct {
 	resumeTexts []time.Time
 	held        *heldMsg
 	limited     []time.Time
+	alertAt     time.Time
+	dropped     int
 	expired     []Decision
 	expiredMore int
 	boot        *bootReport
@@ -189,7 +191,10 @@ type route struct {
 	run      bool   // delegate goes to the control handler
 	// limited: the replies count against ReplyLimit (CH-15).
 	limited bool
-	at      time.Time
+	// alerts have their own limit (one per AlertEvery) and are not counted
+	// against ReplyLimit.
+	alerts []string
+	at     time.Time
 }
 
 // Handle processes one text from number from and returns the texts to send
@@ -211,6 +216,13 @@ func (c *Channel) route(from, text string) (route, bool) {
 	c.mu.Lock()
 	decided := c.expireLocked(now)
 	rt := c.routeLocked(text, now, &decided)
+	if c.codes.justChallenged {
+		c.codes.justChallenged = false
+		c.held = nil
+		c.alertAt = now
+		rt.alerts = append(rt.alerts, fmt.Sprintf("Too many wrong codes. Codes by text now need a challenge: reply UNLOCK %s and a code from your code generator within %s.",
+			c.codes.currentChallenge(now), dur(ChallengeTTL)))
+	}
 	c.mu.Unlock()
 	c.decide(decided)
 	rt.at = now
@@ -232,6 +244,9 @@ func (c *Channel) finish(ctx context.Context, from string, rt route) []string {
 	}
 	if rt.limited {
 		out = c.limit(out, rt.at)
+	}
+	for _, a := range rt.alerts {
+		out = append(out, control.Fit(a))
 	}
 	return out
 }
@@ -261,6 +276,11 @@ func (c *Channel) limit(out []string, now time.Time) []string {
 // routeLocked answers the channel's own words and decides what reaches the
 // control handler.
 func (c *Channel) routeLocked(text string, now time.Time, decided *[]Decision) route {
+	if c.codes.st.Challenged {
+		if rt, ok := c.challengeLocked(text, now); ok {
+			return rt
+		}
+	}
 	unlocked := c.codes.unlocked(now)
 	if r, ok := parseReply(text); ok {
 		switch r.word {
@@ -271,6 +291,8 @@ func (c *Channel) routeLocked(text string, now time.Time, decided *[]Decision) r
 			return route{replies: []string{c.undoLocked(r.id, now)}, limited: !unlocked}
 		case "MORE":
 			return route{replies: []string{c.moreLocked(r.id)}, limited: !unlocked}
+		case "UNLOCK":
+			return route{replies: []string{"Codes are not locked. To unlock a session, send a code from your code generator."}, limited: !unlocked}
 		case "RUN":
 			if h := c.held; h != nil && h.ready && unlocked {
 				c.held = nil
@@ -348,9 +370,6 @@ func (c *Channel) lockedLocked(rest, code string, now time.Time) route {
 	switch {
 	case err != nil:
 		return route{replies: []string{stateErr}, limited: true}
-	case res == strongThrottled:
-		c.held = nil
-		return route{replies: []string{c.throttleText(now)}, limited: true}
 	case res == strongWrong:
 		dropped := ""
 		if c.held != nil || rest != "" {
@@ -375,6 +394,89 @@ func (c *Channel) lockedLocked(rest, code string, now time.Time) route {
 	return route{replies: []string{msg}}
 }
 
+// AlertEvery is the least time between two challenge-mode alerts by text;
+// the rest go to the digest (O4).
+const AlertEvery = time.Hour
+
+// challengeLocked handles challenge mode (O4, arbitrator ruling). A code
+// counts only in "UNLOCK <token> <code>" or "RESUME <token> <code>", with
+// the token texted to the owner's number: single use, replaced after each
+// attempt or ChallengeTTL, and attempts are capped at ChallengeBound per
+// fixed 24-hour window. Any other message carrying a code is dropped
+// silently: not counted, nothing consumed, no reply (an alert at most once
+// per AlertEvery, and a digest count). ok is false for messages without a
+// code, which route as usual.
+func (c *Channel) challengeLocked(text string, now time.Time) (route, bool) {
+	r, isReply := parseReply(text)
+	if isReply && (r.word == "UNLOCK" || r.word == "RESUME") {
+		if r.word == "RESUME" && !c.cfg.Engine.Stopped() {
+			return route{replies: []string{"Not stopped. Nothing to resume."}, limited: true}, true
+		}
+		if r.token == "" && r.code == "" {
+			return route{replies: []string{fmt.Sprintf("Codes are locked after too many wrong ones. Reply %s %s and a code from your code generator within %s.",
+				r.word, c.codes.currentChallenge(now), dur(ChallengeTTL))}, limited: true}, true
+		}
+		if r.token == "" || !c.codes.challengeOK(r.token, now) {
+			return c.dropLocked(now), true
+		}
+		ok, err := c.codes.takeAttempt(now)
+		switch {
+		case err != nil:
+			return route{replies: []string{stateErr}, limited: true}, true
+		case !ok:
+			return c.dropLocked(now), true
+		}
+		res, _, err := c.codes.checkStrong(r.code, now, strongOpts{unlock: c.cfg.UnlockFor})
+		if err != nil {
+			return route{replies: []string{stateErr}, limited: true}, true
+		}
+		if res != strongOK {
+			return route{replies: []string{fmt.Sprintf("Wrong code. New challenge: reply %s %s and a code from your code generator.",
+				r.word, c.codes.currentChallenge(now))}, limited: true}, true
+		}
+		c.held = nil
+		msg := "Unlocked until " + c.untilText() + ". Codes work normally again."
+		if r.word == "RESUME" {
+			c.resume = nil
+			if err := c.cfg.Engine.Resume(); err != nil {
+				return route{replies: []string{msg + " RESUME failed to record. Still stopped."}}, true
+			}
+			msg += " Resumed."
+		}
+		return route{replies: []string{msg}}, true
+	}
+	if isReply && r.code != "" {
+		return c.dropLocked(now), true
+	}
+	if _, code := splitCode(text); code != "" {
+		return c.dropLocked(now), true
+	}
+	return route{}, false
+}
+
+// dropLocked ignores a code-bearing message in challenge mode.
+func (c *Channel) dropLocked(now time.Time) route {
+	c.dropped++
+	if !c.alertAt.IsZero() && now.Sub(c.alertAt) < AlertEvery {
+		return route{}
+	}
+	c.alertAt = now
+	return route{alerts: []string{"Codes without the current challenge are being ignored. Reply UNLOCK for a one-time challenge."}}
+}
+
+// TakeDigestNotes returns and clears owner-channel lines for the next
+// digest (O4).
+func (c *Channel) TakeDigestNotes() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []string
+	if c.dropped > 0 {
+		out = append(out, fmt.Sprintf("%d code messages without the current challenge were ignored.", c.dropped))
+		c.dropped = 0
+	}
+	return out
+}
+
 const stateErr = "Could not save the code check, so it did not count. Try again."
 
 func (c *Channel) untilText() string {
@@ -384,6 +486,9 @@ func (c *Channel) untilText() string {
 // unlockPrompt asks for a high-tier code; a texted code never unlocks a
 // session (CH-14, CH-19).
 func (c *Channel) unlockPrompt() string {
+	if c.codes.st.Challenged {
+		return "Codes are locked after too many wrong ones; reply UNLOCK for a one-time challenge."
+	}
 	return "Send a code from your code generator" + c.gridOr() + "."
 }
 
@@ -392,12 +497,6 @@ func (c *Channel) gridOr() string {
 		return ", or grid cell " + cell
 	}
 	return ""
-}
-
-func (c *Channel) throttleText(now time.Time) string {
-	_, until := c.codes.throttled(now)
-	return "Too many wrong codes. Codes by text are paused until " +
-		until.In(c.cfg.Location).Format("Jan 2 15:04") + ". STOP still works."
 }
 
 // lockNote tells the owner that wrong codes locked the low tier (CH-18).
@@ -473,8 +572,6 @@ func (c *Channel) checkLocked(texted, got string, now time.Time) (ok, locked boo
 		switch {
 		case err != nil:
 			return false, false, stateErr
-		case res == strongThrottled:
-			return false, false, c.throttleText(now)
 		}
 		return res == strongOK, locked, ""
 	}

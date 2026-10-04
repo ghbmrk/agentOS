@@ -14,6 +14,7 @@ type reply struct {
 	id    string // request ID, "" if omitted
 	items []int  // batch item numbers, 1-based
 	code  string // trailing code of 6 or more digits
+	token string // challenge-mode token (UNLOCK, RESUME)
 }
 
 // fields upper-cases letters and digits and splits on everything else, as
@@ -30,7 +31,8 @@ func fields(msg string) []string {
 // parseReply reports whether msg is one of the owner channel's words.
 //
 //	YES [id] [item...] [code]   NO [id] [item...]
-//	UNDO id   MORE id   RESUME [code]   RUN
+//	UNDO id   MORE id   RUN
+//	RESUME [code]   RESUME token code   UNLOCK [token code]
 //
 // An id starts with a letter and has at most 3 characters; an item is a
 // number up to 2 digits; a code is 6 to 8 digits.
@@ -53,12 +55,15 @@ func parseReply(msg string) (reply, bool) {
 			return r, true
 		}
 		return reply{}, false
-	case "RESUME":
-		if len(args) == 0 {
+	case "RESUME", "UNLOCK":
+		switch {
+		case len(args) == 0:
 			return r, true
-		}
-		if len(args) == 1 && isCode(args[0]) {
+		case len(args) == 1 && isCode(args[0]) && r.word == "RESUME":
 			r.code = args[0]
+			return r, true
+		case len(args) == 2 && isToken(args[0]) && isCode(args[1]):
+			r.token, r.code = args[0], args[1]
 			return r, true
 		}
 		return reply{}, false
@@ -84,6 +89,19 @@ func parseReply(msg string) (reply, bool) {
 
 func isID(s string) bool {
 	if len(s) == 0 || len(s) > 3 || s[0] < 'A' || s[0] > 'Z' {
+		return false
+	}
+	for _, c := range s {
+		if !(c >= 'A' && c <= 'Z' || c >= '0' && c <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
+// isToken is a challenge-mode token: 4 letters or digits.
+func isToken(s string) bool {
+	if len(s) != 4 {
 		return false
 	}
 	for _, c := range s {
