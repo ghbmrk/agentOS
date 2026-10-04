@@ -125,13 +125,13 @@ One device holds the NVMe SSD, a microcontroller that acts as a USB keyboard for
 
 ### 6.1 Text and voice (anywhere)
 - **CH-1** The box's number (its SIM) is the conversational address. Texts and calls reach the broker directly from the modem. No intermediary service is involved beyond the carrier.
-- **CH-2** **STOP** and **STATUS** MUST be handled by the broker with all AI models and guests down.
+- **CH-2** **STOP** and **STATUS** MUST be handled by the broker with all AI models and guests down. So MUST every control word in CH-11.
 - **CH-3** Command tiers:
 
 | Action | Required proof |
 |---|---|
 | STOP (pause all dispatch) | Message from the owner's number (worst case of spoofing: a pause) |
-| Task chat, STATUS | Owner's number + a session unlocked by an approval code within the last N hours |
+| Task chat, STATUS | Owner's number + a session unlocked by an approval code within the last N days (CH-14) |
 | Approve a low-risk irreversible intent (CH-10) | The texted code from that request, replied from the owner's number |
 | Approve a high-risk irreversible intent (CH-10) | Approval code from the code generator, in reply to that request's ID |
 | New grant, raise budget, adopt a release, add a trusted host, recovery | Approval code + local confirmation or recovery key, per policy |
@@ -143,6 +143,13 @@ One device holds the NVMe SSD, a microcontroller that acts as a USB keyboard for
   - **High risk** means new or wider grants or pre-allowances, money above the owner-set limit, CRED-6 actions, and recovery. These require the code-generator code or the paper grid, which a SIM swap cannot obtain, plus local confirmation where CH-3 already requires it.
   - The owner sets the tier boundaries; changing them is a high-risk intent. The broker applies them to verified data, never to the agent's claims. Unclassifiable requests are high risk.
 - **CH-6** Secrets MUST NEVER be requested or accepted over text or voice. The carrier sees that traffic, and transcripts reach models.
+- **CH-11** **Control words.** The broker parses a closed set of control words: STOP, RESUME, STATUS, HELP, YES, NO, UNDO, MORE, plus pause/revoke commands for pre-allowances (ADP-9) and loops (LOOP-0). A control word counts only when it is the whole message, ignoring case and punctuation (with its arguments, e.g. `YES 1 3 4821`); every other message goes to the agent. HELP returns the list in one text. RESUME needs a low-tier texted code (CH-10), since a spoofed RESUME could restart halted work; STOP, NO, and pause or revoke need none, since their worst case is a pause. Configuration requests in natural language go through the agent and take effect only after the broker renders them back in fixed wording, as in ADP-9.
+- **CH-12** **Message format.** Broker-originated texts use the GSM-7 character set only (no emoji, which halves segment length), target one SMS segment, and never exceed three. Request IDs are at most 3 characters and unique among open requests. An approval text states, from verified fields: verb, object, recipient or amount, reversibility (the undo window, or "cannot be undone"), expiry, and the valid replies. Every text that expects a reply ends with the valid replies. Longer evidence comes by `MORE <id>` or on the local UI.
+- **CH-13** **Batch replies.** Items in a batch are numbered. `YES <code>` approves all; `YES 1 3 <code>` approves the listed items; `NO` or `NO 2` denies without a code. Unanswered items expire as denied and are listed in the next digest.
+- **CH-14** **Inline unlock.** When task chat needs a session unlock (CH-3), the broker holds the owner's message, asks for a code, and then runs the held message; the owner never resends it. A code may also be appended to any message. N is owner-set, default **7 days**. An unlock is also required after a boot on an unknown host and after repeated failed codes.
+- **CH-15** **Pacing.** Unsolicited texts are rate-limited (default 3 per hour, owner-set); everything non-urgent waits for the digest. The owner defines the urgent classes. Quiet hours hold every text except STOP/RESUME confirmations and those classes. The daily digest is always sent, as one line when nothing happened, because a missing digest is how the owner learns the box is down.
+- **CH-16** **Undo.** When an executed effect has an undo window (REV-3), its confirmation includes `UNDO <id>` and the deadline.
+- **CH-17** **Codes on calls.** During a live call, approval and unlock codes are entered on the keypad (preferred) or spoken. The same rules as text apply.
 
 ### 6.2 Local web UI (box's own Wi-Fi only)
 - **CH-7** The broker runs its own Wi-Fi access point, secured with the card's Wi-Fi password, and serves a local web UI on it. The link is encrypted by WPA2/WPA3 with a key only the card holder has. No domain or public certificate is required.
@@ -187,28 +194,33 @@ Remote live browser view, remote file browsing, and push notifications, away fro
 ### 8.1 Steps
 1. Insert the SIM into the modem. Plug the drive and modem into the PC (rear ports). Power on. No monitor or keyboard.
 2. If the PC doesn't boot USB by itself: press its boot key once (MVP), or the integrated key does it (target).
-3. The box boots and starts its own Wi-Fi. If Ethernet or a known network is available, it also connects out.
-4. Owner scans the card's QR code. The phone joins the box's Wi-Fi and opens the local setup page.
-5. Setup page:
+3. The box boots and starts its own Wi-Fi. If Ethernet or a known network is available, it also connects out and starts the first-boot update (UPD-3) in the background.
+4. Owner scans the card's QR code. The phone joins the box's Wi-Fi and the setup page opens by itself (ONB-5). The page shows live progress (ONB-4).
+5. Setup page, one screen per step:
    - choose home Wi-Fi (or Ethernet);
-   - enter the owner's phone number;
-   - enroll the approval-code seed into the phone's code generator (one tap on iPhone's Passwords app);
-   - confirm the recovery key is stored;
-   - accept default rules (spend cap, always-approve list, quiet hours);
-   - make this PC a trusted host.
-6. The box texts the owner from its own number: "AgentOS is running on [host, RAM]. Reply with the setup code from your card." The owner replies, and the box confirms. This proves the number path both ways.
-7. **Connect AI:** per provider, an OAuth/device-code sign-in on the phone (works anywhere), or an API key entered on the local setup page. Never by text.
-8. **Connect accounts:** OAuth/device-code where offered; otherwise a password login through the local live view of a credentialed browser.
-9. "All set. What should I work on?"
+   - tap **Text my box**: the phone's messaging app opens with the box's number and a one-time pairing code already filled in, and the owner presses Send. The box learns the owner's number from that message and replies from its own number ("AgentOS is running on [host, RAM]"), proving the number path both ways. The page offers the box's number as a contact card;
+   - tap **Add approval codes**: the code generator opens from a standard `otpauth://` link; the owner types the code it shows, which confirms enrollment;
+   - tear off the recovery sheet and confirm it is stored;
+   - this PC becomes a trusted host by default (a "not my PC" switch opts out).
+   The defaults (spend cap, what needs approval, quiet hours, digest time, loops and sharing on per LOOP-0) are stated in one line, changeable any time by text or here.
+6. **Connect AI:** one provider is enough to finish; more can be added later. Per provider, an OAuth/device-code sign-in on the phone (works anywhere), or an API key entered on the local setup page. Never by text. Waits for the first-boot update if it hasn't finished.
+7. "All set." The first message offers three example tasks and HELP (ONB-8).
+8. **Connect accounts just-in-time:** when a task first needs an account, the box texts its OAuth/device-code sign-in link; sites without OAuth use a password login through the local live view of a credentialed browser, next time the owner is on the box's Wi-Fi.
 
-- **ONB-1** Steps 1–9 MUST be completable with only the PC, drive, modem, SIM, card, and phone. No external service beyond the carrier and the providers being connected.
+- **ONB-1** Steps 1–8 MUST be completable with only the PC, drive, modem, SIM, card, and phone. No external service beyond the carrier and the providers being connected.
 - **ONB-2** Disk on the host is never written. AgentOS runs entirely from the drive.
+- **ONB-3** **Minimum path.** Setup asks only for: the home network, the owner's number (learned from their first text), code-generator enrollment confirmed by one entered code, the recovery sheet acknowledged, and one AI provider. Everything else starts at a stated default. No account connection is required to finish setup.
+- **ONB-4** **Visible status without a screen.** The box's Wi-Fi MUST appear within a frozen target time after power-on at the floor (HW-4). The setup page shows live progress (booting, updating, ready). The first-boot update (UPD-3) runs in parallel with setup and blocks only AI and account connection.
+- **ONB-5** **Phones stay connected.** The box's Wi-Fi answers phone operating systems' captive-portal checks so the setup page opens automatically. Once the box has an uplink, it passes client traffic through so the phone does not drop the network for lack of internet. CH-9 still holds. [Risk] Current iOS and Android behavior needs a spike.
+- **ONB-6** **No retyping from the card.** Number pairing uses a prefilled `sms:` link and code enrollment an `otpauth://` link. Typing fallbacks (enter the number, type the setup code, scan the seed as a QR) always exist.
+- **ONB-7** **The card is the manual.** The Owner Card carries a quick-start of at most five steps and a "nothing happened" side: the box's Wi-Fi name, how long to wait, and the boot key for major PC brands.
+- **ONB-8** **First value.** The "All set" text offers three example tasks suited to what is connected, plus "HELP for commands".
 
 ### 8.2 Moving to another PC
-Plug in; the box texts "Unknown host [model]. Reply with an approval code to unlock". Optionally make it trusted.
+Plug in; the box texts "Unknown host [model]. Reply with an approval code to unlock, or code + TRUST to also make this PC trusted." One reply covers both.
 
 ### 8.3 Daily use
-Text or call. Batched approvals carry evidence. A daily digest arrives at a set time. STOP always works.
+Text or call. Batched approvals carry evidence and take one reply (CH-12, CH-13). A daily digest arrives at a set time, every day (CH-15). STOP always works; RESUME restarts (CH-11). Owner-facing text says **pre-allowance** for "runs without asking" and **needs approval** for the rest; "grant" is an internal term.
 
 ### 8.4 DIY drive (no card)
 Flash the image from any computer. First boot generates the card contents and shows them only on the local setup page (or a connected display), for the owner to print. Same flow afterwards.
@@ -243,7 +255,7 @@ intent { id, goal_id, origin(authenticated), action, exact params/recipients/vis
 | **CAP-3** | Recall | A broker-owned local index of everything the system has seen, with provenance. Full text, embeddings, and structured facts. Owner corrections are stored as explicit, editable preferences. Deletion requests propagate. |
 | **CAP-4** | Always-on | An event bus (mail, files, calendar, web changes, timers) triggers work. Interrupts for irreversible decisions only, batched into a digest unless urgent. |
 | **CAP-5** | Compounding | Successful trajectories are recorded as replayable procedures. Recurring ones are compiled into scripts that consult a model only where assumptions fail. Compiled skills go through §11. |
-| **CAP-6** | Attention optimizer | Approvals arrive batched and risk-tiered, with evidence. The system proposes (never assumes) converting always-approved classes into standing grants. |
+| **CAP-6** | Attention optimizer | Approvals arrive batched and risk-tiered, with evidence. The system proposes (never assumes) converting always-approved classes into pre-allowances (ADP-9). |
 | **CAP-7** | Collaboration | Multiple frontier participants may work one task through broker tools. Disagreements are settled preferably by running both (CAP-1), not by debate. This is guest behavior, not infrastructure. |
 
 ---
@@ -402,10 +414,10 @@ Fleet orchestration; Mac or ARM boot; macOS-only and iOS-only apps (Apple's lice
 
 | ID | Test | Requirements |
 |---|---|---|
-| **A1** | On ≥3 unmodified PCs from different vendors, with no monitor or keyboard (one boot keypress allowed in MVP), complete onboarding §8.1 using only the kit and a phone. Record per-model results. | HW-3–6, CH-1, CH-7, ONB-1/2, DEP-1/2 |
+| **A1** | On ≥3 unmodified PCs from different vendors, with no monitor or keyboard (one boot keypress allowed in MVP), complete onboarding §8.1 using only the kit and a phone. Record per-model results, plus active owner minutes (excluding waits), typed characters, and errors per run, against frozen targets. At least one run is by a person who has not read this spec. | HW-3–6, CH-1, CH-7, ONB-1–8, DEP-1/2 |
 | **A2** | Floor profile: full workload on N95/8 GB with no accelerator, no swap thrashing; a live call preempts an experiment within target. On an accelerator host: discovery, measured benefit, identical behavior when disabled. | HW-4, RES-1–3, CAP-1 |
-| **A3** | Delegated task by text, then a live call; two frontier providers (at least one consumer route, the other either); agent-machine execution; native result in the owner's account, edited on the phone and picked up. | CH-5, CRED-5, CAP-7, OP-7 |
-| **A4** | Kill broker and guest mid-effect; drop an external acknowledgment; reconcile without duplication; STOP by text with all models down. | OP-1–6, CH-2, ARC-2 |
+| **A3** | Delegated task by text, then a live call; two frontier providers (at least one consumer route, the other either); agent-machine execution; native result in the owner's account, edited on the phone and picked up; a batch approval with a partial reply, an inline unlock that runs the held message, and a code entered by keypad mid-call. | CH-5, CRED-5, CAP-7, OP-7, CH-12–17 |
+| **A4** | Kill broker and guest mid-effect; drop an external acknowledgment; reconcile without duplication; STOP, RESUME, and HELP by text with all models down. | OP-1–6, CH-2, CH-11, ARC-2 |
 | **A5** | **Canary test:** canary credentials in the vault and canary sessions in credentialed browsers; an adversarial agent with full root and every protocol verb fails to surface any canary anywhere agent-reachable, across repeated runs. | CRED-1–7, ARC-1 |
 | **A6** | Hostile guest attempts escalation, evaluator tampering, and injection via a collaborator's output; all fail structurally; the guest cannot obtain or replay a texted low-risk code, and cannot get a high-risk request classed as low risk; the guest is rebuilt; a regression is retained. In-box damage is undone by rollback. | ARC-4, REV-1/2, CHG-2, CH-10 |
 | **A7** | One pipeline: a local candidate passes held-out cases from real tasks; a bad one is rejected; an upstream guest image and a shared package take the same path; rollback works. | CHG-1–5, UPD-1 |
@@ -439,6 +451,7 @@ Before any qualification run, freeze revisions, hardware profile, accounts, work
 | 2026-10-04 | Adapter contract (§10A). Default routing order API → CLI → web → desktop GUI, which loops may improve through §11 like everything else. |
 | 2026-10-04 | Operation labels come from a fixed verb list with a demo-environment mismatch check; the owner answers only for unmapped operations. The owner may pre-allow irreversible operations per service and/or per action with no notification (ADP-9). |
 | 2026-10-04 | Two-tier approval (CH-10): texted one-time codes for low-risk approvals, code-generator codes for high-risk ones; batching and pre-allowances minimize prompts. |
+| 2026-10-04 | Owner UX (review 1, `reviews/ux/`): minimum-path onboarding with just-in-time account connection (ONB-3–8); control words, message format, batch replies, inline unlock, pacing, undo, and call codes (CH-11–17). |
 | Proposed | External-drive-only (no internal install). This spec assumes it; the owner has not formally confirmed. |
 
 ## 17. Open risks
