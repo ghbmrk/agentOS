@@ -1,7 +1,7 @@
 # LEDGER
 
 Budget: $200 Claude plan, usage credits **off** (hard cap). See PLAN.md §4A.
-Unit: WAU = one week's plan allowance. Harness envelope = 70% of each week.
+Unit: WAU = one week's plan allowance. Harness envelope: ~70% default, adaptive (PLAN.md §4A B-1); only the subscription is a hard limit.
 
 ## Calibration readings (from Mark's usage screen)
 
