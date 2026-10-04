@@ -17,8 +17,8 @@ The paired spec diff (same PR) implements findings marked **→ spec**. Findings
 | 2 | Agent-machine egress is "declared" (§4) yet browsing has "full power" (CAP-2); neither says what is open, and open egress from a machine holding private data is an unmediated disclosure path (REV-2) | Open internet by default for machines that hold no private data, instead of a builder defaulting to deny | **Gain:** closes an unstated leak path for machines that do hold private data. Residual: a few bytes can still leak through fetch URLs | None | **Egress follows data**: open and private machine classes → spec REV-6. **Conflict** (residual leak) |
 | 3 | Model access is per guest; no requirement to use all the owner's AI accounts or fail over when one is out of quota | Work continues when one subscription hits its window; each task class goes to the provider that measures best | Private data reaches more providers; mitigated by per-provider data limits | Fewer "out of quota" stalls | **Model routing** across granted providers and local models → spec CAP-9 |
 | 4 | Every Loop 1 improvement is a behavior change needing owner approval (CHG-3, OP-5) unless a standing grant exists, and none is defined | Compounding runs at machine speed instead of owner-attention speed | A bad skill can adopt silently; bounded by held-out suite, unchanged authority, gated irreversible effects, and one-word undo | Fewer prompts; one digest line per adoption | **Default standing grant** for authority-neutral local improvements → spec CHG-6 |
-| 5 | Pre-allowances (ADP-9) allow templated content only, so no reply with agent-written text can ever run without a prompt | The most common routine (answering an existing thread) can run unattended | **Conflict:** an agent-written reply can make a commitment or say something wrong. Disclosure is bounded structurally: the composer sees only that thread | Owner opts in per account; undo window | **Context-scoped replies** → spec ADP-12. **Conflict** |
-| 6 | The box's own SIM is used only for the owner channel | Reach into the phone-only world: book, ask, confirm by call or text | Shares the SIM with the owner channel, so carrier filtering of outbound traffic could take down the owner channel | Owner sees transcripts; carrier-filtering risk (UX review finding 18) | **The SIM as a tool** with disclosure and rate limits → spec ADP-13. **Conflict** (availability), **[Decision]** MVP or later |
+| 5 | Pre-allowances (ADP-9) allow templated content only, so no reply with agent-written text can ever run without a prompt | The most common routine (answering an existing thread) can run unattended | **Conflict:** an agent-written reply can make a commitment or say something wrong. Disclosure is bounded structurally: the composer sees only that thread | Owner opts in per account; undo window | **Context-scoped replies** → spec ADP-11. **Conflict** |
+| 6 | The box's own SIM is used only for the owner channel | Reach into the phone-only world: book, ask, confirm by call or text | Shares the SIM with the owner channel, so carrier filtering of outbound traffic could take down the owner channel | Owner sees transcripts; carrier-filtering risk (UX review finding 18) | **The SIM as a tool** with disclosure and rate limits → spec ADP-12. **Conflict** (availability), **[Decision]** MVP or later |
 | 7 | Away from home, evidence is limited to text (§6.3); reviewing a diff or a document waits for the box's Wi-Fi | Rich review from anywhere without a relay | Content leaves the box to the carrier (MMS) or to an account the owner already uses; destination changes are high-risk intents | Big gain for remote approvals | **Evidence delivery** to an owner-owned destination → spec CH-20, §6.3 |
 | 8 | Owner questions block the task until answered | Work keeps moving overnight on reversible decisions | None: a default carries no authority; irreversible effects stay gated | Fewer blocking questions; defaults listed in the digest | **Default-on-timeout questions** → spec CAP-10 |
 | 9 | Credentialed executors: one account each, one browser at a time at the floor | More accounts served at the floor by time-sharing | Executor snapshots hold sessions; they must stay broker-encrypted | None | Executor parking → later (P2, S5) |
@@ -74,7 +74,7 @@ ADP-9 requires templated content with no free text. That is right for payments a
 
 The risk ADP-9 guards against is disclosure: an agent steered by injected content writing private data to someone. That can be bounded by information flow, the same principle as the clean room (OSS-2), instead of by banning free text.
 
-Proposal (ADP-12): the owner may pre-allow **context-scoped replies**, per account. The recipients are exactly the thread's existing participants, read by the broker from the source. The reply is composed in a fresh machine that receives only that thread plus owner-approved style preferences, with no recall, no other files, and no egress, so it can disclose only what the participants already have. No attachments. It sends after an undo window (default 10 minutes, REV-3) and appears in the digest. Scope bounds, STOP, and the journal apply as in ADP-9. Money, new recipients, and CRED-6 content are excluded.
+Proposal (ADP-11): the owner may pre-allow **context-scoped replies**, per account. The recipients are exactly the thread's existing participants, read by the broker from the source. The reply is composed in a fresh machine that receives only that thread plus owner-approved style preferences, with no recall, no other files, and no egress, so it can disclose only what the participants already have. No attachments. It sends after an undo window (default 10 minutes, REV-3) and appears in the digest. Scope bounds, STOP, and the journal apply as in ADP-9. Money, new recipients, and CRED-6 content are excluded.
 - **Security cost:** disclosure is bounded structurally. **What is not bounded:** a reply can still make a commitment or say something wrong to a real person. The undo window and digest are the mitigations, not prevention. **Conflict** for the arbitrator.
 - **UX cost:** opt-in per account; the owner sees replies in the digest and can undo within the window.
 - **[Decision] D2.**
@@ -82,7 +82,7 @@ Proposal (ADP-12): the owner may pre-allow **context-scoped replies**, per accou
 ### 6. The SIM is idle reach (CAP-2, CH-1)
 The box has its own number. Much of daily life (booking, confirming, asking a business) is still phone-only. The spec uses the SIM only to talk to the owner.
 
-Proposal (ADP-13): the box's SIM is reachable as an adapter for outbound texts and calls to third parties, both mapped to the `send` verb. Calls open with a disclosure that an automated assistant is calling for the owner. Recipients are verified (owner contacts, or a number the broker fetched from a source) or supplied by the owner. Transcripts are journaled. Calls are rate-limited separately from owner texts.
+Proposal (ADP-12): the box's SIM is reachable as an adapter for outbound texts and calls to third parties, both mapped to the `send` verb. Calls open with a disclosure that an automated assistant is calling for the owner. Recipients are verified (owner contacts, or a number the broker fetched from a source) or supplied by the owner. Transcripts are journaled. Calls are rate-limited separately from owner texts.
 - **Security cost:** impersonation risk is limited by the opening disclosure. **Availability conflict:** carrier filtering or suspension caused by outbound traffic would also take down the owner channel (CH-1), which DEP-1 relies on. Mitigation: strict rate limits; a second SIM post-MVP.
 - **[Risk] legal:** automated calls are regulated. [Fact] In February 2024 the US FCC ruled that AI-generated voices count as "artificial" voices under the TCPA, so calls to consumers need prior consent. The default should therefore be business numbers and owner contacts only, and jurisdiction rules need checking before release.
 - **UX cost:** carrier-filtering risk (UX review finding 18); live-call quality depends on S2.
@@ -113,15 +113,15 @@ Proposal (CAP-10): the agent may ask with a stated default and a deadline. Witho
 
 ### Considered, not proposed
 - **Arbitrary JavaScript in credentialed browsers.** It would make logged-in automation much stronger, but page scripts can read non-HttpOnly cookies and stored tokens, which breaks Invariant C (CRED-1). Composite verbs (10) get most of the gain.
-- **Agent-supplied recipients in pre-allowances.** That breaks ADP-9's verified-inputs rule and opens injection-driven sends. ADP-12 keeps recipients broker-verified.
+- **Agent-supplied recipients in pre-allowances.** That breaks ADP-9's verified-inputs rule and opens injection-driven sends. ADP-11 keeps recipients broker-verified.
 
 ---
 
 ## Revisions after L3 review (PR #11)
 The L3 security review found five blocking gaps. All are fixed in the spec diff:
 1. **REV-6 propagation.** Any broker-mediated write from X into Y raises Y to X's class. Rollback restores open only when no higher-class machine can write in. A15 tests a private guest writing into an open worker.
-2. **ADP-12 disclosure.** The composer sees only thread messages that every recipient of the reply received, computed from source headers.
-3. **ADP-13 inbound.** Texts and calls from non-owner numbers are untrusted data, never control words, task chat, or approvals.
+2. **ADP-11 disclosure.** The composer sees only thread messages that every recipient of the reply received, computed from source headers.
+3. **ADP-12 inbound.** Texts and calls from non-owner numbers are untrusted data, never control words, task chat, or approvals.
 4. **CHG-6 classification.** The broker classifies from artifact type and diff, the security suite runs on every auto-adoption, re-enabling is an owner-approved intent, and "context rule" is defined.
 5. Compiled `.pyc` files were removed and a `.gitignore` added.
 
@@ -131,10 +131,18 @@ Non-blocking changes taken:
 
 **Two positions changed:**
 - **D1:** task text is now **private by default**, and the owner can mark a task public. A private machine can start an open research machine through a query bounded like `fetch`. That keeps most of the research potency without making "tell the attacker's URL what the task says" a one-step leak. The potency claim in finding 2 now rests on that research channel.
-- **D2:** a queued reply now sends a text to the owner with `UNDO`, because the undo window is useless if nobody sees it. The reviewer recommends not shipping ADP-12 in MVP.
+- **D2:** a queued reply now sends a text to the owner with `UNDO`, because the undo window is useless if nobody sees it. The reviewer recommends not shipping ADP-11 in MVP.
+
+## Revisions after arbitration 1 (PR #13)
+- **Egress (finding 2).** This PR drops its own egress rule, REV-6. #12's REV-5 (data labels) owns the rule. The arbitrator added link-following and this review's bounded research query to it. Earlier mentions of REV-6 in this doc refer to that withdrawn draft.
+- **Renumbered** to avoid #12: evidence delivery is CH-20, context-scoped replies ADP-11, the SIM as a tool ADP-12, and the test A15.
+- **CH-20 (resolutions 4 and 9).** An MMS carries only what a text may carry (#12 CH-19). Private-source evidence goes only to the fixed destination or the local UI. With a destination set, chat replies with private content go there, and the text carries a summary.
+- **Held:** ADP-11 waits on Mark's D2 card (the arbitrator recommends "Yes, with alert", earned per account and using native scheduled send). ADP-12 waits on fork F2 (the arbitrator recommends a second line, never the owner-channel SIM).
+- **D4 / CHG-6:** accepted by the arbitrator, ordered after #12's ADP-10 (enforced request shapes).
+- **Merge order:** #9, #8, #12, then this PR.
 
 ## Decisions for Mark
 - **D1** Egress default (REV-6): task text is private unless marked public, and open research goes through a bounded query (proposed after review), or task text counts as open (more potent, one-step leak risk).
-- **D2** Context-scoped replies (ADP-12): opt-in per account, with a notification and undo for each reply, or not for MVP (reviewer's recommendation). [Rec] Not for MVP; revisit once A15 and A10 data exist.
-- **D3** Box SIM for third-party calls and texts (ADP-13): in the spec now and built after S2 (proposed), or deferred to post-MVP.
+- **D2** Context-scoped replies (ADP-11): opt-in per account, with a notification and undo for each reply, or not for MVP (reviewer's recommendation). [Rec] Not for MVP; revisit once A15 and A10 data exist.
+- **D3** Box SIM for third-party calls and texts (ADP-12): in the spec now and built after S2 (proposed), or deferred to post-MVP.
 - **D4** Authority-neutral improvements auto-adopt by default (CHG-6, proposed), or each one asks.
