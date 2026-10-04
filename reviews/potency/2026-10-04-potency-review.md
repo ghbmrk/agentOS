@@ -137,7 +137,7 @@ Non-blocking changes taken:
 - **Egress (finding 2).** This PR drops its own egress rule, REV-6. #12's REV-5 (data labels) owns the rule. The arbitrator added link-following and this review's bounded research query to it. Earlier mentions of REV-6 in this doc refer to that withdrawn draft.
 - **Renumbered** to avoid #12: evidence delivery is CH-20, context-scoped replies ADP-11, the SIM as a tool ADP-12, and the test A15.
 - **CH-20 (resolutions 4 and 9).** An MMS carries only what a text may carry (#12 CH-19). Private-source evidence goes only to the fixed destination or the local UI. With a destination set, chat replies with private content go there, and the text carries a summary.
-- **Held:** ADP-11 waits on Mark's D2 card (the arbitrator recommends "Yes, with alert", earned per account and using native scheduled send). ADP-12 waits on fork F2 (the arbitrator recommends a second line, never the owner-channel SIM).
+- **Held:** ADP-11 waits on Mark's D2 card (the arbitrator recommends "Yes, with alert", earned per account and using native scheduled send). ADP-12 is decided: Mark chose F2 (a), so third-party calls and texts use a second line only (dual-SIM or eSIM modem, or an owner-held calling account), never the owner-channel number. Without a second line the tool is unavailable. Spec now, build after S2. This settles D3.
 - **D4 / CHG-6:** accepted by the arbitrator, ordered after #12's ADP-10 (enforced request shapes).
 - **Merge order:** #9, #8, #12, then this PR.
 
