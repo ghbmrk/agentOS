@@ -10,7 +10,7 @@ exec unshare -n -m bash -c '
   set -u
   python3 "$0/netns_up.py"
   echo "nameserver 127.0.0.1" >"$1/resolv.conf"; mount --bind "$1/resolv.conf" /etc/resolv.conf
-  python3 "$0/dns_sink.py" "$1/dns.jsonl" & dpid=$!
+  python3 "$0/dns_sink.py" "$1/dns.jsonl" 2>"$1/dns.err" & dpid=$!
   export HOME="$1/home" OPENCLAW_CONFIG_PATH="$1/home/openclaw.json5" \
     OPENCLAW_NO_AUTO_UPDATE=1 OPENCLAW_DISABLE_BONJOUR=1 DO_NOT_TRACK=1
   mkdir -p "$HOME"; cp "$0/openclaw.json5" "$OPENCLAW_CONFIG_PATH"

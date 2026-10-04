@@ -11,6 +11,7 @@ Serves two things on one loopback port:
 Every request is appended to `events`; with --log, also to a JSONL file.
 Scripted model: a user message containing SCENARIO:<word> makes the model call the
 first offered tool whose name contains <word>, then summarize the tool result.
+SCENARIO:loop calls `exec` forever, to show what bounds a runaway guest.
 """
 import argparse
 import json
@@ -47,6 +48,8 @@ def scripted_reply(messages, tools):
     while convo and convo[-1].get("role") == "user" and "SCENARIO:" not in _text(convo[-1].get("content")):
         convo.pop()
     last = convo[-1] if convo else {}
+    if want == "loop" and "exec" in names:
+        return _call(messages, "exec", {"command": "true"})  # a model that never stops
     if sum(1 for m in convo if m.get("tool_calls")) >= MAX_TOOL_CALLS:
         return {"role": "assistant", "content": "S4 stopping: tool-call cap reached"}
     if last.get("role") == "tool":

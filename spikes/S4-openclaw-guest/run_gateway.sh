@@ -11,7 +11,7 @@ exec unshare -n -m bash -c '
   mkdir -p "$1"
   python3 "$0/netns_up.py"
   echo "nameserver 127.0.0.1" >"$1/resolv.conf"; mount --bind "$1/resolv.conf" /etc/resolv.conf
-  python3 "$0/dns_sink.py" "$1/dns.jsonl" & dpid=$!
+  python3 "$0/dns_sink.py" "$1/dns.jsonl" 2>"$1/dns.err" & dpid=$!
   export HOME="$1/home" OPENCLAW_CONFIG_PATH="$1/home/openclaw.json5" \
     OPENCLAW_NO_AUTO_UPDATE=1 OPENCLAW_DISABLE_BONJOUR=1 DO_NOT_TRACK=1 \
     OPENCLAW_GATEWAY_TOKEN=s4-local-inbound-token
@@ -28,5 +28,7 @@ exec unshare -n -m bash -c '
   t2=$(date +%s.%N)
   echo "gateway ready $(echo "$t1-$t0" | bc) s; turn $(echo "$t2-$t1" | bc) s" >"$1/time.txt"
   ps -o rss=,comm= -g $gpid | grep -v strace | awk "{s+=\$1} END {print s \" KB RSS, gateway and its children, after the turn\"}" >>"$1/time.txt"
+  for p in $(ps -o pid=,comm= -g $gpid | grep -v strace | awk "{print \$1}"); do
+    awk "/^Pss:/ {print \$2}" /proc/$p/smaps_rollup; done | awk "{s+=\$1} END {print s \" KB PSS, same processes (shared pages split)\"}" >>"$1/time.txt"
   kill -- -$gpid; kill $bpid $dpid
 ' "$here" "$1" "$2"

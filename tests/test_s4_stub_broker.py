@@ -75,6 +75,15 @@ class StubBrokerTest(unittest.TestCase):
         done = {"role": "tool", "tool_call_id": "a", "content": '{"state":"authorized"}'}
         self.assertIn("authorized", self.chat([USER, r1, done, ctx], fn("broker__effect_request"))["content"])
 
+    def test_loop_scenario_never_finishes(self):
+        # Reproduces finding 2: a model that keeps calling tools, past the stub's own cap.
+        user = {"role": "user", "content": "SCENARIO:loop"}
+        msgs = [user]
+        for i in range(sb.MAX_TOOL_CALLS + 2):
+            r = self.chat(msgs, fn("exec"))
+            self.assertEqual(r["tool_calls"][0]["function"]["name"], "exec")
+            msgs += [r, {"role": "tool", "tool_call_id": str(i), "content": "ok"}]
+
     def test_mcp_lists_and_journals_effect_request(self):
         init = self.post("/mcp", {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
         self.assertIn("tools", init["result"]["capabilities"])
