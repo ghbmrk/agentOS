@@ -67,6 +67,8 @@ type Handler struct {
 	// texts sent. Neither resets when a new code is issued.
 	wrongAt []time.Time
 	textsAt []time.Time
+	// hintAt is when the STOP hint was last sent.
+	hintAt time.Time
 }
 
 type pendingCode struct {
@@ -104,7 +106,7 @@ func (h *Handler) Handle(ctx context.Context, from, msg string) []string {
 		r = "Not understood, and not sent to your agent. Reply HELP for commands."
 	default:
 		var out []string
-		if StopNearMiss(cmd.Text) {
+		if StopNearMiss(cmd.Text) && h.takeHint() {
 			out = append(out, stopHint)
 		}
 		if !h.Auth.SessionUnlocked(h.now()) {
@@ -124,6 +126,22 @@ func (h *Handler) Handle(ctx context.Context, from, msg string) []string {
 }
 
 const stopHint = "To pause everything, reply STOP."
+
+// HintQuiet is the least time between two STOP hints. The hint answers a
+// message that only proves the owner's number, so spoofed near-misses must
+// not be able to make the box text the owner repeatedly (CH-15).
+const HintQuiet = time.Hour
+
+func (h *Handler) takeHint() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	now := h.now()
+	if !h.hintAt.IsZero() && now.Sub(h.hintAt) < HintQuiet {
+		return false
+	}
+	h.hintAt = now
+	return true
+}
 
 func (h *Handler) deliver(ctx context.Context, cmd Command) bool {
 	if h.Agent == nil {
