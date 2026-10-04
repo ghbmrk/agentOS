@@ -219,12 +219,12 @@ This totals roughly **3–5 months** of calendar time at this plan level. That f
 | 10:58 | 14% | 11% | spec design (mostly Mark's own thread) |
 | 19:50 | 23% | 11% | +9 points: three spikes' review fixes, three lens reviews, arbitration, the spec PRs, PR reviews, this package, and P1-1, P1-2, P1-5 building in parallel |
 
-Day one total: 23%, against the ~10%/day planning pace. B-2 allows front-loading while work is unblocked, and 14 of the 23 points came before 11:00.
+**Pace: tokens are the binding constraint.** The week reset at 06:00 Sunday, so 23% is one day's spend, against the ~10%/day planning pace. Sustained, that is about 160% of the week. **Pacing rule from 2026-10-04 (coordinator, told to Mark):** about 8% per day, at most three build threads at once, and no new packages start until the open PRs merge. Front-loading (B-2) stays allowed only within that rule.
 
 **What changed since §4A.**
 - **Scope grew.** SPEC.md went from 101 requirement IDs and 12 acceptance tests (v0.11 as imported, 25f9b2b) to 144 IDs and 15 tests (v0.12), and from 40 KB to 88 KB. Review 1 added 38 IDs (adapters ADP-1–12, owner channel CH-10–20, onboarding ONB-3–8, data labels, worker machines, routing, TUF); the spikes added 5 (HW-5a, UPD-1a, ARC-6, ARC-7, OP-8). Requirements also got denser, so ID count understates the growth.
-- **P0 cost, measured:** at most **0.23 WAU** for the whole week so far, including the design session and the first P1 packages. That is well inside P0's 10% share (≈ 0.9–1.4 WAU of the §4A total). The earlier per-thread estimates (spikes "2–3% each", P0 ≈ 0.35–0.5 WAU) were about **2× too high**: everything after 10:58, spikes included, fits in 9 points. S1, S2, S5, S6 remain.
-- **Standing overhead.** Four weekly review loops plus PR review now run every week. On the measured rate, a loop run likely costs well under 1% of a week, so the overhead is probably ≈ 3–5%, not the ≈ 10% first estimated [Inference: the 9 points are not split per thread].
+- **P0 cost, measured:** at most **0.23 WAU** in total, and that also covers the design session and the first P1 packages. That is inside P0's 10% share (≈ 0.9–1.4 WAU of the §4A total). The 9 points between the two readings come from two of Mark's screens; how they split across threads is inferred. S1, S2, S5, S6 remain.
+- **Standing overhead.** Four weekly review loops plus PR review now run every week. Their per-run cost isn't split out of the 9 points; ≈ 3–10% of a week is the plausible range [Inference]. Under the 8%/day rule that matters, so loops run on change only (recommendation 2).
 - **No calibration yet for build cost.** P0 merged spikes and spec text, not requirement-covering code, so tokens per merged requirement (the number L1 needs) is first measured in P1.
 
 **Revised forecast** (weeks at the effective envelope; ranges scale each phase by the new IDs that land in it):
@@ -239,11 +239,11 @@ Day one total: 23%, against the ~10%/day planning pace. B-2 allows front-loading
 | Reserve | 10% | — | 1–2 | 1.5–2.5 |
 | **Total** | | | 13–20 (3–5 months) | **17.5–26.5 at 70% (4–6 months)** |
 
-**Reading the forecast after the measurement.** The weeks column still comes from §4A's sizing, which assumed unpaced loops would use a week's allowance in 1.5–2 days. Day one says otherwise: heavy parallel work used about 9 points in 9 hours. If build packages cost about the same per hour, tokens are not the binding constraint, and the calendar is set by build throughput, review turnaround, and Mark's hardware sessions (S1, S2, P2). So treat the forecast as an upper bound on token-limited time, not an expected date. The first P1 packages replace it with a measured cost per merged requirement (recommendation 3).
+**Reading the forecast after the measurement.** The weeks column assumes the 70% envelope is actually spent at a sustainable rate. Day one used tokens far faster than that, so the forecast is not optimistic about tokens: tokens set the pace, and the 8%/day rule (≈ 56% a week) stretches it by about 70/56 ≈ 1.25×, to roughly 22–33 weeks (5–8 months), until P1's measured cost per merged requirement replaces these factors (recommendation 3).
 
 **Recommendations.**
 1. **Start P1 now** on the merged S3/S4/S7 results; S5 (cloud) runs beside P1, and S1, S2, S6 stay open as P0 tails that gate only P2. Nothing in P1 depends on them (§3).
-2. **Run review loops on change only:** a lens loop runs when SPEC.md or security-critical code changed since its last run, else it records "no change" and stops. The saving is smaller than first thought (overhead ≈ 3–5%), but the rule costs nothing and no review of new material is skipped.
+2. **Run review loops on change only:** a lens loop runs when SPEC.md or security-critical code changed since its last run, else it records "no change" and stops. Under the 8%/day rule this saving matters, and no review of new material is skipped.
 3. **Recalibrate after the first three P1 packages** from tokens per merged requirement, and replace the scale factors above with that measurement.
 4. **Hold P1's first package to the smallest end-to-end slice** (journal + broker STOP/STATUS, OP-1–6, ARC-2, CH-2) so the first measurement comes early.
 
