@@ -38,6 +38,13 @@ type Config struct {
 	// sessions locked until the owner channel (P1-5) can unlock them.
 	Auth      control.Auth
 	Admission admission.Config
+	// Preempter stops experiments for higher classes (RES-1). Nil refuses
+	// preemption. The VM lifecycle manager (vm.Manager) supplies it.
+	Preempter admission.Preempter
+	// Pressure is memory pressure (PSI some avg10, %); above MaxPressure
+	// only foreground is admitted (RES-2). Nil disables the check.
+	Pressure    func() float64
+	MaxPressure float64
 }
 
 // Daemon is a running broker.
@@ -45,6 +52,7 @@ type Daemon struct {
 	engine *journal.Engine
 	store  *journal.FileStore
 	srv    *sockets.Server
+	adm    *admission.Controller
 	done   chan struct{}
 }
 
@@ -61,10 +69,12 @@ type ownerOnly struct{ number string }
 func (a ownerOnly) IsOwner(from string) bool       { return from == a.number }
 func (a ownerOnly) SessionUnlocked(time.Time) bool { return false }
 
-// noPreempt refuses preemption until the VM lifecycle (P1-4) can freeze.
+// noPreempt refuses preemption when no machine manager is configured.
 type noPreempt struct{}
 
-func (noPreempt) Preempt(id string) error { return fmt.Errorf("cannot freeze %s yet", id) }
+func (noPreempt) Preempt(id string) error {
+	return fmt.Errorf("cannot stop %s: no machine manager", id)
+}
 
 // Run opens the journal (replaying it, OP-4), starts the sockets, and serves
 // until ctx is done.
@@ -84,7 +94,12 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 		store.Close()
 		return nil, err
 	}
-	adm := admission.New(cfg.Admission, noPreempt{})
+	pre := cfg.Preempter
+	if pre == nil {
+		pre = noPreempt{}
+	}
+	adm := admission.New(cfg.Admission, pre)
+	adm.Pressure, adm.MaxPressure = cfg.Pressure, cfg.MaxPressure
 	h := &control.Handler{Engine: eng, Auth: cfg.Auth, Machines: adm.Summary}
 
 	eps := []sockets.Endpoint{{
@@ -114,7 +129,7 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 		store.Close()
 		return nil, err
 	}
-	d := &Daemon{engine: eng, store: store, srv: srv, done: make(chan struct{})}
+	d := &Daemon{engine: eng, store: store, srv: srv, adm: adm, done: make(chan struct{})}
 	go func() {
 		srv.Wait()
 		store.Close()
@@ -125,6 +140,10 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 
 // Engine is the daemon's journal engine.
 func (d *Daemon) Engine() *journal.Engine { return d.engine }
+
+// Admission is the daemon's admission controller, for the VM lifecycle
+// manager to admit and release machines through.
+func (d *Daemon) Admission() *admission.Controller { return d.adm }
 
 // Wait returns after ctx is done and every socket and the journal are closed.
 func (d *Daemon) Wait() { <-d.done }
