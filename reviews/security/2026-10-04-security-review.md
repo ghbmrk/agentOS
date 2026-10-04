@@ -201,5 +201,7 @@ Unauthenticated control words make the box text the owner. A spoofer can turn th
 | D7 | TPM+PIN option on trusted hosts | Offer, off by default | Unattended restart vs stolen PC with drive |
 | D1, D3 (PR #8) | Unlock period; Wi-Fi passthrough | Acceptable with findings 7, 9, 11 | See "Interactions with PR #8" |
 
+**Mark's answers (2026-10-04):** yes to CH-19's weekly code-generator unlock, yes to D6, and D7 offered as an owner option, off by default (CRED-8). D4 and D5 were settled by arbitration run 1.
+
 ## Next run
 Read what changed on `main` since e841b78 (SPEC.md, merged PRs, spike results). Priority checks: whether PR #8 merged and how D1/D3/CH-17 were settled; S5 (credentialed browser) and S6 (CLI relay) results against findings 8 and 14; the broker's first code (ARC-1/2, ADP-10).
