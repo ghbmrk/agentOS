@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       - name: Install build and boot tools
         run: |
           sudo apt-get update -q
@@ -24,7 +24,8 @@ jobs:
             qemu-system-x86 ovmf swtpm swtpm-tools
           # Ubuntu 24.04 confines user namespaces via AppArmor, which breaks mkosi's bubblewrap sandbox.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          sudo git clone -q -c advice.detachedHead=false --depth 1 -b v24.3 https://github.com/systemd/mkosi /opt/mkosi
+          sudo git clone -q https://github.com/systemd/mkosi /opt/mkosi
+          sudo git -C /opt/mkosi -c advice.detachedHead=false checkout -q 26673f65e17ae099bb0cf65928fe70c93b8a6a37  # v24.3
       - name: Build image
         run: sudo MKOSI=/opt/mkosi/bin/mkosi spikes/S1S2-testkit/build.sh "$RUNNER_TEMP/out"
       - name: Boot test (Secure Boot on, until the kit powers off)
@@ -32,7 +33,7 @@ jobs:
       - name: Keep the console log
         if: always()
         run: sudo cp "$RUNNER_TEMP/boot/console.log" "$RUNNER_TEMP/out/qemu-console.log" || true
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: always()
         with:
           name: agentos-testkit
@@ -40,5 +41,5 @@ jobs:
             ${{ runner.temp }}/out/agentos-tk_1.raw
             ${{ runner.temp }}/out/SHA256SUMS
             ${{ runner.temp }}/out/qemu-console.log
-          retention-days: 30
+          retention-days: 7
           if-no-files-found: warn

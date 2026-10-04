@@ -64,6 +64,21 @@ def machine_id():
     return hashlib.sha256(u.encode()).hexdigest()[:8]
 
 
+def valid_number(n):
+    """E.164 only: also keeps the number safe to pass to mmcli, and stops a typo texting a stranger."""
+    return re.fullmatch(r"\+\d{7,15}", n) is not None
+
+
+def boot_times():
+    """Firmware and loader time from systemd-boot's variables, then kernel start to this probe."""
+    init, exe = efivar("LoaderTimeInitUSec"), efivar("LoaderTimeExecUSec")
+    up = float(read("/proc/uptime", "0 0").split()[0])
+    if init.isdigit() and exe.isdigit():
+        return "firmware %.1f s, boot menu %.1f s, kernel to probe %.1f s" % (
+            int(init) / 1e6, (int(exe) - int(init)) / 1e6, up)
+    return "kernel to probe %.1f s" % up
+
+
 def entry_name(name, tries):
     """Boot Loader Specification counter: NAME+LEFT[-DONE].conf"""
     return "%s+%d.conf" % (name, tries)
@@ -206,7 +221,7 @@ def probe(disk):
         ("boot_disk", "%s, transport %s" % ((disk or {}).get("model") or "?", (disk or {}).get("tran"))),
         ("usb_link", usb_speed(disk)),
         ("tpm", "TPM %s.0 at /dev/tpmrm0" % tpm if tpm and os.path.exists("/dev/tpmrm0") else "none found"),
-        ("boot_time", sh("systemd-analyze time").splitlines()[0] if sh("systemd-analyze time") else "?"),
+        ("boot_time", boot_times()),
         ("usr", "%s %s" % (sh("findmnt -no SOURCE /usr"), sh("veritysetup status usr | grep -m1 status").strip())),
         ("usr_read_verify", read_verify()),
         ("usb_devices", ", ".join(sorted({l.split("ID ")[1][:9] for l in sh("lsusb").splitlines() if "ID " in l}))),
@@ -270,12 +285,14 @@ def main():
         rearm(esp)
     if "s2" in acts and stick:
         conf = dict(re.findall(r"^\s*([A-Z_]+)\s*=\s*(\S*)", read(stick + "/s2.conf"), re.M))
-        if conf.get("RUN_S2", "").lower() == "yes" and conf.get("OWNER_NUMBER"):
+        if conf.get("RUN_S2", "").lower() != "yes":
+            rep.add("s2", "skipped (RUN_S2 is not yes in s2.conf)")
+        elif not valid_number(conf.get("OWNER_NUMBER", "")):
+            rep.add("s2", "skipped: OWNER_NUMBER must be + and country code then 7-15 digits, no spaces")
+        else:
             import s2
             for k, v in s2.run(conf, os.path.join(stick, "private")):
                 rep.add("s2_" + k, v)
-        else:
-            rep.add("s2", "skipped (RUN_S2 is not yes in s2.conf)")
     save(STATE, st)
     if "poweroff" in acts and stick:
         with open(os.path.join(stick, "results", "SUMMARY.csv"), "a") as f:

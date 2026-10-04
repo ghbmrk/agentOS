@@ -121,10 +121,11 @@ def quectel_enable_uac(modem):
     if len(f) < 9 or f[8] == "1":
         return "usbcfg unchanged: %s" % cur
     f[8] = "1"
+    old = m.group(1)
     modem.at('+QCFG="usbcfg",%s' % ",".join(f))
     modem.at("+CFUN=1,1")  # modem restarts and re-enumerates with the audio interface
     time.sleep(20)
-    return "UAC enabled (was %s)" % cur
+    return 'UAC enabled; this setting persists in the modem. To restore: AT+QCFG="usbcfg",%s' % old
 
 
 def simcom_audio_tty():
@@ -243,8 +244,10 @@ def run(conf, private):
     seen = {json.dumps(c, sort_keys=True) for c in m.inbox()}
     ping = wait(lambda: next((c for c in m.inbox() if json.dumps(c, sort_keys=True) not in seen
                               and same_number(c.get("number"), owner)), None), 300, 3)
-    res.append(("sms_in", "PASS: %r after %.0f s" % (ping.get("text", "")[:20], time.monotonic() - t0) if ping
-                else "FAIL: no reply within 5 minutes"))
+    # Never log message content: results/ is the folder the owner uploads.
+    res.append(("sms_in", "PASS (%s) after %.0f s" % (
+        "PING received" if (ping.get("text") or "").strip().upper() == "PING" else "other text",
+        time.monotonic() - t0) if ping else "FAIL: no reply from the owner's number within 5 minutes"))
 
     # Outgoing call
     m.sms(owner, "Next I will call you. Answer, listen for 4 digits, then press them on your keypad.")
@@ -264,8 +267,10 @@ def run(conf, private):
 
     # Incoming call
     m.sms(owner, "Now call this number from your phone within 5 minutes. I will answer and read 4 digits.")
+    # Answer only the owner: any other caller is left ringing and never recorded.
     ring = wait(lambda: next((cid for cid, c in m.calls() if c.get("direction") == "incoming"
-                              and c.get("state") == "ringing-in"), None), 300, 1)
+                              and c.get("state") == "ringing-in" and same_number(c.get("number"), owner)),
+                             None), 300, 1)
     if ring:
         if vendor == "2c7c" and route[0] == "uac":
             m.at("+QPCMV=1,2")
@@ -273,7 +278,7 @@ def run(conf, private):
         ok = wait(lambda: m.call_state(ring) == "active", 20, 1)
         res.append(("call_in", call_test(m, route, ring, private, "in") if ok else "FAIL: could not answer"))
     else:
-        res.append(("call_in", "FAIL: no incoming call within 5 minutes"))
+        res.append(("call_in", "FAIL: no call from the owner's number within 5 minutes (caller ID hidden?)"))
 
     summary = ", ".join("%s %s" % (k.replace("_", " "), v.split(":")[0].lower()) for k, v in res
                         if k in ("sms_out", "sms_in", "call_out", "call_in"))

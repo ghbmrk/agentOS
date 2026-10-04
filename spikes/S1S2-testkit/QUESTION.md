@@ -41,7 +41,8 @@ presses them; the box decodes the keypad tones from uplink audio with [dtmf.py](
 which is also CH-17's premise), and a call in. It records IMS registration (`AT+CIREG?`), since US voice is VoLTE-only.
 
 Privacy: `results/` holds no serial numbers, MAC addresses, IMEI/ICCID/IMSI, or phone numbers, so Mark can upload
-it. Call recordings go to `private/`, which stays on the drive.
+it. Call recordings go to `private/`, which stays on the drive. The box answers only calls from `OWNER_NUMBER`,
+never logs message content, and keeps the journal in RAM (ModemManager's debug log carries modem identifiers).
 
 ## Verified vs. not
 

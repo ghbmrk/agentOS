@@ -87,6 +87,11 @@ class StateMachineTest(unittest.TestCase):
                           "agentos-tk-rollback+0-2.conf": "agentos-tk-rollback+2.conf"})
         self.assertEqual(tk.rearm_names(["agentos-tk-good+3.conf"]), {})
 
+    def test_valid_number(self):
+        self.assertTrue(tk.valid_number("+15550100199"))
+        for bad in ("", "5550100199", "+1 555 010 0199", "+1555'; reboot", "+123456"):
+            self.assertFalse(tk.valid_number(bad), bad)
+
     def test_entry_mode(self):
         self.assertEqual(tk.entry_mode("quiet agentos.tk=rollback systemd.mask=x"), "rollback")
         self.assertEqual(tk.entry_mode("quiet"), "good")
