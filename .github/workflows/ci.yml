@@ -34,3 +34,30 @@ jobs:
         run: go vet ./...
       - name: Tests (race detector)
         run: go test -race -count=1 ./...
+  machines:
+    # Agent-machine lifecycle against the real kernel (P1-4): cgroup v2,
+    # overlayfs, and gVisor. Needs root, so it runs the root-only tests too.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: broker/go.mod
+          cache: false
+      - name: Install gVisor release-20260928.0 (checksum pinned)
+        run: |
+          B=https://storage.googleapis.com/gvisor/releases/release/20260928.0/x86_64
+          curl -fsSLo /tmp/gvisor.tar.bz2 "$B/gvisor.tar.bz2"
+          echo "c8d3a9fd4d4c4f5b8ff213caa4517356be128d18659ec4cde37828fe797f61a9725a602a846c81a8ed19c057a996515d31c081eba343ed4613a89951ba32ed59  /tmp/gvisor.tar.bz2" | sha512sum -c
+          mkdir /tmp/gv && tar -xjf /tmp/gvisor.tar.bz2 -C /tmp/gv
+          sudo install -m 0755 /tmp/gv/runsc /usr/local/bin/runsc
+          sudo mkdir -p /usr/local/bin/gvisor-bin
+          sudo install -m 0755 /tmp/gv/gvisor-bin/* /usr/local/bin/gvisor-bin/
+          runsc --version
+      - name: Machine tests as root
+        working-directory: broker
+        run: |
+          sudo mkdir /sys/fs/cgroup/agentos-ci
+          sudo env "PATH=$PATH" HOME=/root GOCACHE=/tmp/gocache \
+            AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \
+            go test -count=1 -v ./cgroup ./vm/...

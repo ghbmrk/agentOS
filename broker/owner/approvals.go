@@ -1,0 +1,433 @@
+package owner
+
+import (
+	"errors"
+	"fmt"
+	"sort"
+	"strings"
+	"time"
+)
+
+// Bounds on what the channel holds (CH-2: nothing may grow until the
+// channel stalls, STOP included).
+const (
+	// MaxOpen caps open requests plus queued auto-replies.
+	MaxOpen = 50
+	// MaxExpired caps the digest list; older entries are counted, not kept.
+	MaxExpired = 200
+	// RetireFor keeps a closed ID from being reused, so a late reply
+	// cannot land on a new request with the same ID (CH-18).
+	RetireFor = 24 * time.Hour
+)
+
+// ErrFull is returned when MaxOpen requests and replies are already open.
+var ErrFull = errors.New("owner: too many open requests")
+
+type request struct {
+	id      string
+	items   []Item
+	tier    Tier
+	code    string // texted code, low tier only
+	expires time.Time
+	wrong   int
+	done    []bool
+}
+
+// Request opens an approval request for items and texts it to the owner.
+// ttl bounds how long it stays open (0: CodeTTL); a low-tier request never
+// outlives CodeTTL, since its texted code expires then (CH-10).
+func (c *Channel) Request(items []Item, ttl time.Duration) (string, error) {
+	if len(items) == 0 || len(items) > 20 {
+		return "", errors.New("owner: a request has 1 to 20 items")
+	}
+	if c.cfg.Modem == nil {
+		return "", errors.New("owner: no modem")
+	}
+	now := c.cfg.Now()
+	c.mu.Lock()
+	if len(c.open)+len(c.queued) >= MaxOpen {
+		c.mu.Unlock()
+		return "", ErrFull
+	}
+	tier := Low
+	for _, it := range items {
+		if Classify(it.Facts, c.cfg.Limits, now) == High {
+			tier = High
+		}
+	}
+	if c.codes.st.LowLocked {
+		tier = High // texted codes are off (CH-18)
+	}
+	if ttl <= 0 {
+		ttl = c.cfg.CodeTTL
+	}
+	if tier == Low && ttl > c.cfg.CodeTTL {
+		ttl = c.cfg.CodeTTL
+	}
+	id, err := c.newIDLocked(now)
+	if err != nil {
+		c.mu.Unlock()
+		return "", err
+	}
+	r := &request{id: id, items: append([]Item(nil), items...), tier: tier,
+		expires: now.Add(ttl), done: make([]bool, len(items))}
+	if tier == Low {
+		r.code = c.codes.textedCode()
+	}
+	refs := make([]string, len(items))
+	for i, it := range items {
+		refs[i] = it.Ref
+	}
+	if err := c.codes.commit(func(s *State) { s.Pending = append(s.Pending, PendingRef{ID: id, Refs: refs}) }); err != nil {
+		c.mu.Unlock()
+		return "", err
+	}
+	text := c.renderLocked(r)
+	c.open[id] = r
+	c.mu.Unlock()
+	if err := c.cfg.Modem.Send(c.cfg.Owner, text); err != nil {
+		c.mu.Lock()
+		delete(c.open, id)
+		c.retireLocked(id, now)
+		c.mu.Unlock()
+		return "", err
+	}
+	return id, nil
+}
+
+// renderLocked is the approval text (CH-12): fixed wording from verified
+// fields, the expiry, and the valid replies, in GSM-7 within three
+// segments. Items that do not fit are left to MORE.
+func (c *Channel) renderLocked(r *request) string {
+	exp := r.expires.In(c.cfg.Location).Format("15:04")
+	var replies string
+	switch {
+	case r.tier == High && len(r.items) == 1:
+		replies = fmt.Sprintf("Reply YES %s and a code from your code generator%s, or NO %s.", r.id, c.gridOr(), r.id)
+	case r.tier == High:
+		replies = fmt.Sprintf("Reply YES %s and a code from your code generator%s (add item numbers to approve some; the rest are denied), or NO %s.", r.id, c.gridOr(), r.id)
+	case len(r.items) == 1:
+		replies = fmt.Sprintf("Reply YES %s %s or NO %s.", r.id, r.code, r.id)
+	default:
+		replies = fmt.Sprintf("Reply YES %s %s for all, YES %s 1 2 %s for some (the rest are denied), or NO %s.", r.id, r.code, r.id, r.code, r.id)
+	}
+	if len(r.items) == 1 {
+		return fmt.Sprintf("%s: %s. Expires %s. %s", r.id, r.items[0].line(), exp, replies)
+	}
+	for shown := len(r.items); shown >= 0; shown-- {
+		var b strings.Builder
+		fmt.Fprintf(&b, "%s: %d items.", r.id, len(r.items))
+		for i := 0; i < shown; i++ {
+			fmt.Fprintf(&b, " %d %s.", i+1, r.items[i].line())
+		}
+		if shown < len(r.items) {
+			fmt.Fprintf(&b, " Items %d-%d: MORE %s.", shown+1, len(r.items), r.id)
+		}
+		fmt.Fprintf(&b, " Expires %s. %s", exp, replies)
+		if fits(b.String()) {
+			return b.String()
+		}
+	}
+	return fmt.Sprintf("%s: %d items. MORE %s lists them. Expires %s. %s", r.id, len(r.items), r.id, exp, replies)
+}
+
+// moreLocked lists a request's open items (CH-12's MORE).
+func (c *Channel) moreLocked(id string) string {
+	r := c.open[id]
+	if r == nil {
+		return fmt.Sprintf("No open request %s.", id)
+	}
+	var b strings.Builder
+	b.WriteString(id + ":")
+	for i, it := range r.items {
+		if r.done[i] {
+			continue
+		}
+		next := fmt.Sprintf(" %d %s.", i+1, it.line())
+		if !fits(b.String() + next + " Rest on the box's Wi-Fi page.") {
+			b.WriteString(" Rest on the box's Wi-Fi page.")
+			break
+		}
+		b.WriteString(next)
+	}
+	return b.String()
+}
+
+// answerLocked applies YES or NO to a request (CH-13). accepted reports an
+// accepted code; wrong reports a code that counted as wrong.
+func (c *Channel) answerLocked(rp reply, now time.Time, decided *[]Decision) (out []string, accepted, wrong bool) {
+	r, msg := c.findLocked(rp)
+	if r == nil {
+		if rp.word == "YES" && rp.code != "" && rp.id == "" {
+			// A code that names no request is a wrong code, or texted
+			// codes could be guessed without limit (CH-18).
+			locked, err := c.codes.wrong(now)
+			if err != nil {
+				return []string{stateErr}, false, true
+			}
+			return []string{"Wrong code. " + msg + lockNote(locked)}, false, true
+		}
+		return []string{msg}, false, false
+	}
+	for _, n := range rp.items {
+		if n > len(r.items) || r.done[n-1] {
+			return []string{fmt.Sprintf("%s has no open item %d.", r.id, n)}, false, false
+		}
+	}
+	chosen := map[int]bool{}
+	for _, n := range rp.items {
+		chosen[n-1] = true
+	}
+	all := len(rp.items) == 0
+	if rp.word == "NO" {
+		c.closeLocked(r, func(i int) (bool, bool) { return all || chosen[i], false }, "owner", now, decided)
+		if all {
+			return []string{"Denied " + r.id + "."}, false, false
+		}
+		return []string{fmt.Sprintf("Denied %s item %s.", r.id, list(rp.items))}, false, false
+	}
+	strong := r.tier == High || c.codes.st.LowLocked
+	if rp.code == "" || (strong && rp.id == "") {
+		// A code-generator code proves the owner, not which request they
+		// read, so it must come with the ID (CH-3, CH-18).
+		return []string{fmt.Sprintf("Include the ID and the code: YES %s <code>.", r.id)}, false, false
+	}
+	texted := r.code
+	if r.tier == High {
+		texted = ""
+	}
+	ok, locked, emsg := c.checkLocked(texted, rp.code, now)
+	if emsg != "" {
+		return []string{emsg}, false, true
+	}
+	if !ok {
+		r.wrong++
+		if r.wrong >= WrongPerRequest {
+			c.closeLocked(r, func(int) (bool, bool) { return true, false }, "void", now, decided)
+			return []string{fmt.Sprintf("Wrong code 3 times; %s is void and denied.", r.id) + lockNote(locked)}, false, true
+		}
+		return []string{fmt.Sprintf("Wrong code for %s. %d tries left.", r.id, WrongPerRequest-r.wrong) + lockNote(locked)}, false, true
+	}
+	// A partial YES closes the batch: the listed items are approved and the
+	// rest denied, so the single-use code is not left open (O3).
+	var denied []int
+	for i := range r.items {
+		if !r.done[i] && !all && !chosen[i] {
+			denied = append(denied, i+1)
+		}
+	}
+	c.closeLocked(r, func(i int) (bool, bool) { return true, all || chosen[i] }, "", now, decided)
+	if all {
+		return []string{"Approved " + r.id + "."}, true, false
+	}
+	s := fmt.Sprintf("Approved %s item %s.", r.id, list(rp.items))
+	if len(denied) > 0 {
+		s += fmt.Sprintf(" Denied %s.", list(denied))
+	}
+	return []string{s}, true, false
+}
+
+// findLocked resolves which request a reply answers.
+func (c *Channel) findLocked(rp reply) (*request, string) {
+	if rp.id != "" {
+		if r := c.open[rp.id]; r != nil {
+			return r, ""
+		}
+		return nil, fmt.Sprintf("No open request %s.", rp.id)
+	}
+	if len(c.open) == 1 {
+		for _, r := range c.open {
+			return r, ""
+		}
+	}
+	// A texted code names its request (CH-18: bound to one request).
+	if rp.code != "" && !c.codes.st.LowLocked {
+		for _, r := range c.open {
+			if r.tier == Low && eq(rp.code, r.code) {
+				return r, ""
+			}
+		}
+	}
+	if len(c.open) == 0 {
+		return nil, "No open requests."
+	}
+	return nil, fmt.Sprintf("%d requests are open. Reply with an ID: %s.", len(c.open), strings.Join(c.openIDsLocked(), ", "))
+}
+
+// closeLocked settles items: pick(i) says whether item i is settled now and
+// whether it is approved. The request closes, and its ID retires, when no
+// item is left.
+func (c *Channel) closeLocked(r *request, pick func(int) (settle, approve bool), why string, now time.Time, decided *[]Decision) {
+	for i, it := range r.items {
+		if r.done[i] {
+			continue
+		}
+		settle, approve := pick(i)
+		if !settle {
+			continue
+		}
+		w := why
+		if w == "" {
+			w = "owner"
+			if !approve {
+				w = "not chosen"
+			}
+		}
+		r.done[i] = true
+		*decided = append(*decided, Decision{Request: r.id, Item: i + 1, Ref: it.Ref, Approved: approve, Why: w})
+	}
+	for _, d := range r.done {
+		if !d {
+			return
+		}
+	}
+	delete(c.open, r.id)
+	c.retireLocked(r.id, now)
+}
+
+// retireLocked drops an ID from the restart record and keeps it from reuse
+// for RetireFor. The save is best effort: if it fails, a restart reports
+// the request as dropped, and Decide ignores what is already settled.
+func (c *Channel) retireLocked(id string, now time.Time) {
+	_ = c.codes.commit(func(s *State) {
+		var p []PendingRef
+		for _, x := range s.Pending {
+			if x.ID != id {
+				p = append(p, x)
+			}
+		}
+		s.Pending = p
+		var q []QueuedRef
+		for _, x := range s.Queued {
+			if x.ID != id {
+				q = append(q, x)
+			}
+		}
+		s.Queued = q
+		for k, t := range s.Retired {
+			if now.Sub(t) >= RetireFor {
+				delete(s.Retired, k)
+			}
+		}
+		s.Retired[id] = now
+	})
+}
+
+// expireLocked denies requests past their expiry and drops stale held
+// messages and RESUME codes. Expired items are kept for the digest (CH-13).
+func (c *Channel) expireLocked(now time.Time) []Decision {
+	var out []Decision
+	for _, id := range c.openIDsLocked() {
+		r := c.open[id]
+		if now.Before(r.expires) {
+			continue
+		}
+		c.closeLocked(r, func(int) (bool, bool) { return true, false }, "expired", now, &out)
+	}
+	c.addExpiredLocked(out)
+	if c.held != nil && !now.Before(c.held.expires) {
+		c.held = nil
+	}
+	if c.resume != nil && !now.Before(c.resume.expires) {
+		c.resume = nil
+	}
+	return out
+}
+
+func (c *Channel) addExpiredLocked(ds []Decision) {
+	c.expired = append(c.expired, ds...)
+	if n := len(c.expired) - MaxExpired; n > 0 {
+		c.expiredMore += n
+		c.expired = append([]Decision(nil), c.expired[n:]...)
+	}
+}
+
+// Tick expires what is due; Run calls it every minute.
+func (c *Channel) Tick() {
+	c.mu.Lock()
+	d := c.expireLocked(c.cfg.Now())
+	c.mu.Unlock()
+	c.decide(d)
+}
+
+// TakeExpired returns and clears the items that expired or were dropped by
+// a restart, for the next digest (CH-13). more counts entries beyond
+// MaxExpired that were not kept.
+func (c *Channel) TakeExpired() (ds []Decision, more int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ds, more = c.expired, c.expiredMore
+	c.expired, c.expiredMore = nil, 0
+	return ds, more
+}
+
+func (c *Channel) decide(ds []Decision) {
+	if c.cfg.Decide == nil {
+		return
+	}
+	for _, d := range ds {
+		c.cfg.Decide(d)
+	}
+}
+
+func (c *Channel) openIDsLocked() []string {
+	ids := make([]string, 0, len(c.open))
+	for id := range c.open {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// idLetters avoids I and O, which read as 1 and 0.
+const idLetters = "ABCDEFGHJKLMNPQRSTUVWXYZ"
+
+// newIDLocked returns an ID unused by open requests, queued replies, the
+// restart record, and IDs retired in the last RetireFor: a letter and a
+// digit, or a letter and two digits when those run out (CH-12: at most 3
+// characters). It gives up after a bounded search.
+func (c *Channel) newIDLocked(now time.Time) (string, error) {
+	taken := func(id string) bool {
+		if c.open[id] != nil || c.queued[id] != nil {
+			return true
+		}
+		if t, ok := c.codes.st.Retired[id]; ok && now.Sub(t) < RetireFor {
+			return true
+		}
+		for _, p := range c.codes.st.Pending {
+			if p.ID == id {
+				return true
+			}
+		}
+		for _, q := range c.codes.st.Queued {
+			if q.ID == id {
+				return true
+			}
+		}
+		return false
+	}
+	for tries := 0; tries < 64; tries++ {
+		id := fmt.Sprintf("%c%d", idLetters[randInt(c.cfg.Rand, len(idLetters))], 2+randInt(c.cfg.Rand, 8))
+		if !taken(id) {
+			return id, nil
+		}
+	}
+	n := len(idLetters) * 100
+	start := randInt(c.cfg.Rand, n)
+	for i := 0; i < n; i++ {
+		k := (start + i) % n
+		id := fmt.Sprintf("%c%02d", idLetters[k/100], k%100)
+		if !taken(id) {
+			return id, nil
+		}
+	}
+	return "", errors.New("owner: no free request ID")
+}
+
+func list(ns []int) string {
+	s := make([]string, len(ns))
+	for i, n := range ns {
+		s[i] = fmt.Sprint(n)
+	}
+	return strings.Join(s, ", ")
+}

@@ -102,7 +102,9 @@ func (c *Controller) Admit(r Request) (Decision, error) {
 	pressured := false
 	if r.Class != Foreground && c.Pressure != nil {
 		p := c.Pressure()
-		pressured = math.IsNaN(p) || p > c.MaxPressure
+		// NaN or a negative reading (-Inf included) is not a real PSI value,
+		// so it counts as over the limit rather than as no pressure.
+		pressured = math.IsNaN(p) || p < 0 || p > c.MaxPressure
 		if pressured && r.Class == Experiment {
 			return Decision{}, ErrPressure
 		}
@@ -203,7 +205,11 @@ func (c *Controller) Summary() string {
 	for _, r := range s.Running {
 		n[r.Class]++
 	}
-	return fmt.Sprintf("Machines: %d foreground, %d work, %d experiments; %d MB free.", n[0], n[1], n[2], s.FreeMB)
+	free := s.FreeMB
+	if free < 0 {
+		free = 0 // never text a negative figure (or a minus sign) to the owner
+	}
+	return fmt.Sprintf("Machines: %d foreground, %d work, %d experiments; %d MB free.", n[0], n[1], n[2], free)
 }
 
 func (c *Controller) freeLocked() int64 {
