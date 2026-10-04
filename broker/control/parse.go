@@ -18,6 +18,10 @@ const (
 	WordNo     Word = "NO"
 	WordUndo   Word = "UNDO"
 	WordMore   Word = "MORE"
+	// WordUnclear is a message that starts with RESUME, YES, or NO and has
+	// digits but fits no grammar. It may hold a code, so it never goes to
+	// the agent (CH-10: the agent never sees a code).
+	WordUnclear Word = "?"
 )
 
 // Command is a parsed owner message. For task chat, Word is WordNone and
@@ -33,12 +37,7 @@ type Command struct {
 // arguments, is the whole message, ignoring case and punctuation. Anything
 // else is task chat and keeps its original text.
 func Parse(msg string) Command {
-	f := strings.Fields(strings.Map(func(r rune) rune {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			return unicode.ToUpper(r)
-		}
-		return ' '
-	}, msg))
+	f := words(msg)
 	if len(f) > 0 {
 		w, args := Word(f[0]), f[1:]
 		if argsFit(w, args) {
@@ -47,11 +46,32 @@ func Parse(msg string) Command {
 			}
 			return Command{Word: w, Args: args}
 		}
+		if (w == WordResume || w == WordYes || w == WordNo) && strings.ContainsAny(msg, "0123456789") {
+			return Command{Word: WordUnclear}
+		}
 		if w == "PUBLIC" && len(args) > 0 {
 			return Command{Public: true, Text: afterFirstWord(msg)}
 		}
 	}
 	return Command{Text: msg}
+}
+
+// words splits msg into upper-cased words, treating punctuation as space.
+func words(msg string) []string {
+	return strings.Fields(strings.Map(func(r rune) rune {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return unicode.ToUpper(r)
+		}
+		return ' '
+	}, msg))
+}
+
+// StopNearMiss reports whether a task message starts or ends with the word
+// STOP, like "stop everything" or "please stop". Such a message still goes
+// to the agent, and the broker also says how to pause (B4).
+func StopNearMiss(msg string) bool {
+	f := words(msg)
+	return len(f) > 1 && (f[0] == string(WordStop) || f[len(f)-1] == string(WordStop))
 }
 
 // argsFit is each word's argument grammar. A message that does not fit is

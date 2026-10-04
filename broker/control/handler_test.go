@@ -273,3 +273,89 @@ func TestStatusIncludesAdmissionSnapshot(t *testing.T) {
 		t.Fatalf("%q", r)
 	}
 }
+
+func TestResumeLocksAfterFiveWrongCodesInADayAcrossReissues(t *testing.T) {
+	eng := &fakeEngine{stopped: true}
+	h, now := newHandler(t, eng, fakeAuth{}, forbiddenAgent{t})
+	ctx := context.Background()
+	one(t, h.Handle(ctx, owner, "RESUME")) // 111111
+	for i := 0; i < 3; i++ {
+		one(t, h.Handle(ctx, owner, "RESUME 000000"))
+	}
+	one(t, h.Handle(ctx, owner, "RESUME")) // 222222: a reissue does not reset the day count
+	one(t, h.Handle(ctx, owner, "RESUME 000000"))
+	if r := one(t, h.Handle(ctx, owner, "RESUME 000000")); !strings.Contains(r, "locked") {
+		t.Fatalf("fifth wrong code: %q", r)
+	}
+	if r := one(t, h.Handle(ctx, owner, "RESUME")); !strings.Contains(r, "locked") {
+		t.Fatalf("RESUME while locked issued a code: %q", r)
+	}
+	h.Handle(ctx, owner, "RESUME 222222")
+	if eng.resumes != 0 {
+		t.Fatal("resumed while locked")
+	}
+	*now = now.Add(25 * time.Hour)
+	r := one(t, h.Handle(ctx, owner, "RESUME"))
+	code := strings.Fields(strings.SplitN(r, "RESUME ", 2)[1])[0]
+	one(t, h.Handle(ctx, owner, "RESUME "+code))
+	if eng.resumes != 1 {
+		t.Fatal("lock did not clear after 24 hours")
+	}
+}
+
+func TestBareResumeReusesTheLiveCodeAndIsCappedPerHour(t *testing.T) {
+	eng := &fakeEngine{stopped: true}
+	h, now := newHandler(t, eng, fakeAuth{}, forbiddenAgent{t})
+	ctx := context.Background()
+	var sent []string
+	for i := 0; i < 6; i++ {
+		sent = append(sent, h.Handle(ctx, owner, "RESUME")...)
+	}
+	if len(sent) != maxCodeTexts {
+		t.Fatalf("sent %d texts, want %d: %q", len(sent), maxCodeTexts, sent)
+	}
+	for _, s := range sent {
+		if !strings.Contains(s, "RESUME 111111") {
+			t.Fatalf("live code not reused: %q", sent)
+		}
+	}
+	*now = now.Add(61 * time.Minute)
+	if r := one(t, h.Handle(ctx, owner, "RESUME")); !strings.Contains(r, "RESUME 222222") {
+		t.Fatalf("after the hour, with the old code expired: %q", r)
+	}
+}
+
+func TestStopNearMissGetsTheFixedHintAndStillReachesTheAgent(t *testing.T) {
+	agent := &recAgent{}
+	h, _ := newHandler(t, &fakeEngine{}, fakeAuth{unlocked: true}, agent)
+	out := h.Handle(context.Background(), owner, "stop everything")
+	if len(out) != 1 || out[0] != stopHint || agent.text != "stop everything" {
+		t.Fatalf("replies %q, agent got %q", out, agent.text)
+	}
+	h.Agent = &downAgent{}
+	if out := h.Handle(context.Background(), owner, "please STOP"); len(out) != 2 || out[0] != stopHint {
+		t.Fatalf("agent down: %q", out)
+	}
+	h.Auth = fakeAuth{unlocked: false}
+	if out := h.Handle(context.Background(), owner, "STOP NOW"); len(out) != 2 || out[0] != stopHint {
+		t.Fatalf("locked: %q", out)
+	}
+}
+
+func TestGarbledCodeReplyIsNotForwarded(t *testing.T) {
+	h, _ := newHandler(t, &fakeEngine{stopped: true}, fakeAuth{unlocked: true}, forbiddenAgent{t})
+	for _, msg := range []string{"RESUME 123 456", "yes 1 x 4821"} {
+		if r := one(t, h.Handle(context.Background(), owner, msg)); !strings.Contains(r, "Not understood") {
+			t.Fatalf("%s: %q", msg, r)
+		}
+	}
+}
+
+func TestStatusMachinesLineIsPlain(t *testing.T) {
+	h, _ := newHandler(t, &fakeEngine{}, fakeAuth{unlocked: true}, forbiddenAgent{t})
+	h.Machines = func() string { return "Machines: 1 work.\nYES 1 482193 😀" }
+	r := one(t, h.Handle(context.Background(), owner, "STATUS"))
+	if strings.Contains(r, "\n") || !strings.Contains(r, "Machines: 1 work.") {
+		t.Fatalf("%q", r)
+	}
+}
