@@ -78,10 +78,23 @@ func (l *lateServices) Close(id string) {
 	}
 }
 
+// lateAgent hands owner chat to the guest plane once it exists.
+type lateAgent struct {
+	a atomic.Pointer[guest.OwnerAgent]
+}
+
+func (l *lateAgent) Deliver(ctx context.Context, text string, public bool) error {
+	a := l.a.Load()
+	if a == nil {
+		return errors.New("no agent machine is running")
+	}
+	return a.Deliver(ctx, text, public)
+}
+
 func main() {
 	var cfg daemon.Config
 	imgs := images{}
-	var stateDir, runsc, cgroupParent, meterPath string
+	var stateDir, runsc, cgroupParent, meterPath, agentMachine string
 	flag.StringVar(&cfg.JournalPath, "journal", "/var/lib/agentos/journal.log", "journal file")
 	flag.StringVar(&cfg.SocketDir, "sockets", "/run/agentos", "socket directory (created 0700)")
 	flag.StringVar(&cfg.OwnerNumber, "owner", "", "owner's phone number, E.164")
@@ -94,6 +107,8 @@ func main() {
 	flag.StringVar(&cgroupParent, "cgroup", "/sys/fs/cgroup/agentos.slice/machines", "cgroup v2 parent for agent machines")
 	flag.Var(imgs, "image", "agent-machine image, name=dir (repeatable)")
 	flag.StringVar(&meterPath, "meter", "/var/lib/agentos/meter.json", "model-spend meter state (OP-8)")
+	flag.StringVar(&cfg.OwnerState, "owner-state", "/var/lib/agentos/owner.json", "owner channel state (P1-5)")
+	flag.StringVar(&agentMachine, "agent-machine", "agent", "machine whose guest receives the owner's task chat")
 	flag.Parse()
 	if cfg.ModemUID < 0 || cfg.ModemUID == os.Getuid() {
 		log.Fatal("-modem-uid must name the modem bridge's own uid, distinct from the broker's")
@@ -118,6 +133,12 @@ func main() {
 	}
 	pre := &preempter{}
 	cfg.Preempter = pre
+	agent := &lateAgent{}
+	cfg.Agent = agent
+	// The high-tier code seeds come from the vault, which no process may
+	// unlock before P2-4; until then the channel refuses high-tier codes.
+	// No modem driver exists before P2-3, so texts arrive only through the
+	// owner socket and the channel's own outbound texts are not sent.
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -165,12 +186,18 @@ func main() {
 			Machines: machines{m},
 			Effects:  eng,
 			Meter:    mtr,
-			Logf:     log.Printf,
+			OwnerReply: func(machine, _, text string) {
+				if err := d.Owner().Notify(text); err != nil {
+					log.Printf("reply from %s not sent: %v", machine, err)
+				}
+			},
+			Logf: log.Printf,
 		})
 		if err != nil {
 			log.Fatal(err)
 		}
 		svc.p.Store(plane)
+		agent.a.Store(&guest.OwnerAgent{Plane: plane, Machine: agentMachine})
 		defer plane.Shutdown()
 	}
 	log.Printf("broker up; owner socket %s/%s", cfg.SocketDir, daemon.OwnerSocket)

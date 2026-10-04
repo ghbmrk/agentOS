@@ -257,7 +257,7 @@ func TestA14CanaryThroughTheGuestSocket(t *testing.T) {
 			}}}
 		}
 		if a.path == "/owner/next" {
-			plane.DeliverOwner(a.machine, "hello from the owner") // raises m1 to private
+			plane.DeliverOwner(a.machine, "hello from the owner", false) // raises m1 to private
 		}
 		req, _ := http.NewRequest(a.method, "http://broker"+a.path, strings.NewReader(a.body))
 		req.Header.Set("Content-Type", "application/json")

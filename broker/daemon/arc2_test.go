@@ -25,7 +25,9 @@ var controlPath = map[string][]string{
 	"admission": {},
 	"sockets":   {},
 	"cgroup":    {},
-	"daemon":    {"journal", "control", "admission", "sockets"},
+	"owner":     {"control", "journal", "modem"},
+	"modem":     {},
+	"daemon":    {"journal", "control", "admission", "sockets", "owner", "modem"},
 	// The composition root also opens the machine plane (below) and hands
 	// it to admission as a Preempter, and serves the guest plane (below)
 	// on each machine's socket.

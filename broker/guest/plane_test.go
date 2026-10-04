@@ -377,7 +377,7 @@ func TestREV5OwnerMessageRaisesLabelFirst(t *testing.T) {
 	if code, _ := r.do("m1", "GET", "/owner/next", ""); code != 204 {
 		t.Fatalf("empty inbox: %d", code)
 	}
-	id, err := r.p.DeliverOwner("m1", "what is on today?")
+	id, err := r.p.DeliverOwner("m1", "what is on today?", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -406,14 +406,14 @@ func TestREV5OwnerMessageRaisesLabelFirst(t *testing.T) {
 	// At least once: an unanswered message comes back after its lease.
 	lease = 0
 	t.Cleanup(func() { lease = 15 * time.Minute })
-	id2, _ := r.p.DeliverOwner("m1", "second")
+	id2, _ := r.p.DeliverOwner("m1", "second", false)
 	for i := 0; i < 2; i++ {
 		_, body := r.do("m1", "GET", "/owner/next", "")
 		if !strings.Contains(body, id2) {
 			t.Fatalf("delivery %d: %s", i, body)
 		}
 	}
-	if _, err := r.p.DeliverOwner("nope", "x"); err == nil {
+	if _, err := r.p.DeliverOwner("nope", "x", false); err == nil {
 		t.Fatal("delivered to a machine with no socket")
 	}
 }
@@ -425,7 +425,7 @@ func TestOwnerNextWakesOnDelivery(t *testing.T) {
 	r.client("m1")
 	go func() {
 		time.Sleep(100 * time.Millisecond)
-		r.p.DeliverOwner("m1", "hi")
+		r.p.DeliverOwner("m1", "hi", false)
 	}()
 	t0 := time.Now()
 	if code, _ := r.do("m1", "GET", "/owner/next", ""); code != 200 || time.Since(t0) > 5*time.Second {
@@ -468,8 +468,8 @@ func TestARC6PerMachineConcurrencyCap(t *testing.T) {
 	if code, _ := r.do("m2", "POST", "/mcp", `{"jsonrpc":"2.0","id":1,"method":"ping"}`); code != 200 {
 		t.Fatalf("another machine blocked: %d", code)
 	}
-	r.p.DeliverOwner("m1", "a")
-	r.p.DeliverOwner("m1", "b")
+	r.p.DeliverOwner("m1", "a", false)
+	r.p.DeliverOwner("m1", "b", false)
 	wg.Wait()
 }
 
@@ -478,5 +478,26 @@ func TestARC6PerMachineConcurrencyCap(t *testing.T) {
 func TestOP8SpendNoteNamesTheTask(t *testing.T) {
 	if n := SpendNote(meter.Exhausted{Scope: meter.ScopeTask, Machine: "m1", Task: "t1"}); n.Machine != "m1" || !strings.Contains(n.Reason, "t1") {
 		t.Fatalf("%+v", n)
+	}
+}
+
+// TestREV5PublicTaskKeepsTheLabel: a task the owner marked PUBLIC reaches
+// the guest without raising its label; the agent adapter delivers to its
+// one machine.
+func TestREV5PublicTaskKeepsTheLabel(t *testing.T) {
+	r := newRig(t, nil)
+	r.client("m1")
+	a := OwnerAgent{Plane: r.p, Machine: "m1"}
+	if err := a.Deliver(context.Background(), "find bus times", true); err != nil {
+		t.Fatal(err)
+	}
+	if r.ms.private["m1"] {
+		t.Fatal("a PUBLIC task raised the label")
+	}
+	if err := a.Deliver(context.Background(), "read my mail", false); err != nil || !r.ms.private["m1"] {
+		t.Fatalf("owner chat did not raise the label: %v", err)
+	}
+	if err := (OwnerAgent{Plane: r.p, Machine: "absent"}).Deliver(context.Background(), "x", false); err == nil {
+		t.Fatal("delivered to a machine with no socket")
 	}
 }

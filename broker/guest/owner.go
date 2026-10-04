@@ -98,16 +98,19 @@ func (b *inbox) close() {
 	}
 }
 
-// DeliverOwner queues an owner message for machine and returns its ID. The
-// machine's label rises to private first (REV-5: owner chat is owner data),
-// so no message reaches a machine whose label still says public.
-func (p *Plane) DeliverOwner(machine, text string) (string, error) {
+// DeliverOwner queues an owner message for machine and returns its ID.
+// Unless the owner marked the task PUBLIC, the machine's label rises to
+// private first (REV-5: owner chat is owner data), so no private message
+// reaches a machine whose label still says public.
+func (p *Plane) DeliverOwner(machine, text string, public bool) (string, error) {
 	m := p.get(machine)
 	if m == nil {
 		return "", errors.New("guest: machine has no open services")
 	}
-	if err := p.cfg.Machines.RaisePrivate(machine); err != nil {
-		return "", err
+	if !public {
+		if err := p.cfg.Machines.RaisePrivate(machine); err != nil {
+			return "", err
+		}
 	}
 	var b [6]byte
 	rand.Read(b[:])
@@ -163,4 +166,18 @@ func (p *Plane) ownerReply(m *machine, w http.ResponseWriter, r *http.Request) {
 		p.cfg.OwnerReply(m.id, rep.ID, rep.Text)
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// OwnerAgent delivers the owner's task chat to one machine's guest: the
+// control handler's Agent (control.Agent). The guest's answer comes back
+// through Config.OwnerReply.
+type OwnerAgent struct {
+	Plane   *Plane
+	Machine string
+}
+
+// Deliver implements control.Agent.
+func (a OwnerAgent) Deliver(_ context.Context, text string, public bool) error {
+	_, err := a.Plane.DeliverOwner(a.Machine, text, public)
+	return err
 }

@@ -145,7 +145,7 @@ func TestA9OfflineScenario(t *testing.T) {
 	if code, _ := guestCall(t, b, "m1", "POST", "/model/openai/v1/chat/completions", `{}`); code != http.StatusServiceUnavailable {
 		t.Fatalf("model route without egress: %d", code)
 	}
-	if _, err := b.plane.DeliverOwner("m1", "hello"); err != nil {
+	if _, err := b.plane.DeliverOwner("m1", "hello", false); err != nil {
 		t.Fatal(err)
 	}
 	if code, body := guestCall(t, b, "m1", "GET", "/owner/next", ""); code != 200 || !strings.Contains(body, "hello") {
