@@ -12,7 +12,7 @@ Most of the 40-odd proposals don't conflict. Three questions are Mark's. Two are
 
 | # | Conflict | Lenses in tension | Resolution | Outcome |
 |---|---|---|---|---|
-| 1 | Egress of agent machines that hold private data (#11 REV-5 vs #12 REV-5) | Potency vs security | One REV-5 with security's labels, plus **link-following** and #11's bounded research query, which recover most of potency's loss | Resolved; task text private (existing card D1) |
+| 1 | Egress of agent machines that hold private data (#11 REV-5 vs #12 REV-5) | Potency vs security | One REV-5 with security's labels, plus **public-link following** and #11's bounded research query, which recover most of potency's loss | Resolved; task text private (existing card D1) |
 | 2 | Unknown-host unlock (#9 CRED-8 vs #12 CRED-8) | Security vs security, UX | Mark's passphrase from #9; **scan** it as a QR code (words as the fallback); code-generator seed **only inside the vault**, with the code checked after decryption | Resolved inside Mark's #9 decision |
 | 3 | Codes on calls (#8 CH-17 spoken vs #12 CH-5 keypad) | UX vs security | Keypad only for codes; speech stays for chat; a call ends with "I'll text you the batch" when hands are busy | Resolved (security) |
 | 4 | Seven-day unlock vs SIM-swap reads (#8 CH-14 vs #12 CH-19) | UX vs security | Keep 7 days. The unlock needs a code-generator code, and private content goes to the owner's evidence destination instead of SMS when one is set (#11 CH-18) | Resolved (all three gain) |
@@ -31,14 +31,16 @@ Most of the 40-odd proposals don't conflict. Three questions are Mark's. Two are
 **Tension.** Both lenses want a label that only rises. They differ on what a `private` machine may reach: potency allows any URL through a bounded, journaled `fetch`; security allows only an allowlist and treats every other destination as a disclosure intent. Potency's fetch leaves an unbounded channel in the URL itself. Security's rule makes every mixed private-and-research task a prompt or a split.
 
 **What leaks is the request, not the response.** A `private` machine leaks only through what it chooses to send. So the resolution constrains what it can choose:
-- **Link-following is free.** A `private` machine MAY GET, unmodified, any URL that appears verbatim in content delivered to it (a link in an email, a result a public machine returned). This leaks at most which of the existing links it chose, a few bits per fetch, and the broker rate-limits it. [Inference] This covers most "open the link in this message" work.
+- **Public links are free.** A `private` machine MAY GET, unmodified, a URL that appears verbatim in **public** content delivered to it (a result a public machine returned, a public page). The attacker doesn't choose that link set, so the choice among links leaks little, and the broker rate-limits it.
+- **Links from private content are intents.** A link found in private content (an email, a document) is a disclosure intent like any other novel request. Following an action link (confirm, accept, unsubscribe) is an irreversible effect, and an attacker who plants many links in an email turns the choice into a channel (1,024 links carry 10 bits per fetch).
+- **Token-bearing URLs never qualify.** URLs carrying a sign-in, reset, or session token, recognized by fixed patterns (query parameters such as `token`, `code`, `key`, `sig`, `auth`, or high-entropy path segments), are never fetched from an agent machine. Opening one would hand the model a live session, which breaks CRED-1. They go to a credentialed executor as an intent, or to the owner.
 - **Research by bounded query.** A `private` machine MAY start a `public` machine with a query (#11's revised REV-5). The query crosses under journaled size and rate bounds, and results return as untrusted input (public to private is free).
 - **Other novel requests are intents.** Any other URL or request composed by a `private` machine is a disclosure intent (security's rule), pre-allowable per destination (ADP-9).
 - The allowlist, the exclusion of user-content hosts from suggestions, and the inheritance rule stay as #12 wrote them.
 
-**Why it dominates.** Security keeps "no silent exfiltration" and gains a stated, small bound on the residual. Potency keeps link-following and research at full speed and pays only on novel queries from private context. UX adds no prompts for the common cases.
+**Why it dominates.** Security keeps "no silent exfiltration" and gains a stated, small bound on the residual. Potency keeps public-link following and research at full speed and pays only on novel queries from private context. UX adds no prompts for the common cases.
 
-**Task text: private (Mark's card D1, PR reviews thread).** After review, #11 revised to private, which matches #12. With link-following and bounded research queries, private task text costs potency little, so this run supports **Private**. The owner marks one task public by starting it with `PUBLIC`, which is added to CH-11's control words, so the opt-out is one word.
+**Task text: private (Mark's card D1, PR reviews thread).** After review, #11 revised to private, which matches #12. With public-link following and bounded research queries, private task text costs potency little, so this run supports **Private**. The owner marks one task public by starting it with `PUBLIC`, which is added to CH-11's control words, so the opt-out is one word.
 
 ### 2. One CRED-8 (PR #9 and PR #12)
 Mark already chose the card's vault passphrase plus an approval code (#9, DECISIONS.md). #12 reaches the same factor but fixes a weakness in #9: #9 keeps a copy of the code-generator seed outside the vault so the code can be checked before unlock, which means a copy of the drive exposes the seed.
@@ -63,8 +65,9 @@ Disclosure is bounded structurally (the composer sees only the thread and has no
 - **Native undo.** Where the provider supports scheduled send, the reply is scheduled in the owner's own account for the undo window, so the owner can see and cancel it in their usual mail app, with no code needed.
 - **Thread starter verified.** The thread must have been started by the owner or by a contact that meets #12's existence rule (owner-created or older than the hold). An attacker's cold email can't open an auto-reply channel.
 - #12's secret-shaped-content filter (CH-19) applies to the composer's output.
+- **Commitment filter.** The broker matches the reply against fixed patterns: amounts and currency, dates and deadlines, and commitment phrases ("confirm", "agree", "will pay", "approved", "sign", "accept"), in the owner's language list. A match makes that reply a normal approval request. This is a fixed-pattern check, not inference, so ARC-2 allows it.
 
-**Mark's card D2 (PR reviews thread)** offers "Not for MVP", "Yes, with alert", or "Yes, silent". This run recommends **Yes, with alert**, under the three conditions above. Until an account earns it, behavior is identical to "Not for MVP": every reply is prompted, and the prompts produce the evidence. After that, each reply texts an alert with `UNDO <id>` (#8 CH-16). The reviewer's example, a trusted correspondent asking "confirm you'll pay by Friday", is still possible. The alert plus undo window is the mitigation, and money words don't make a reply high-risk by themselves (ARC-2 forbids inference in the broker), so this residual is stated, not removed.
+**Mark's card D2 (PR reviews thread)** offers "Not for MVP", "Yes, with alert", or "Yes, silent". This run recommends **Yes, with alert**, under the three conditions above. Until an account earns it, behavior is identical to "Not for MVP": every reply is prompted, and the prompts produce the evidence. After that, each reply texts an alert with `UNDO <id>` (#8 CH-16). The reviewer's example, a trusted correspondent asking "confirm you'll pay by Friday", now falls back to a prompt through the commitment filter. The residual is a commitment phrased in a way the patterns miss. The alert and undo window cover that case, and the pattern list grows through Loop 2 regressions (LOOP-10).
 
 ### 6. The box's SIM as a tool (ADP-11 in #11)
 Sharing the owner-channel line with third-party traffic risks carrier filtering of the only control path (DEP-1). It also publishes the owner channel's number to businesses, which turns it into an inbound injection surface. A second line removes both problems and keeps all of potency's reach: a dual-SIM or eSIM modem, or an owner-held calling account as an optional dependency (DEP-3). The cost is a second prepaid plan for owners who want this.
@@ -77,7 +80,8 @@ Sharing the owner-channel line with third-party traffic risks carrier filtering 
 - **9.** #11 CH-18: an MMS carries only content a text may carry under CH-19. Private evidence goes to the fixed destination or the local UI.
 - **10.** Folded into 5.
 
-### Decided without Mark (no lens loses)
+### Recommended; Mark confirms by merging
+No lens loses on any of these, but each one lands in SPEC.md, so Mark's merge is the decision.
 - #11 D4, CHG-6 auto-adopt: yes, ordered after #12's ADP-10.
 - #12 D5: superseded by Mark's #9 decision plus resolution 2.
 - #12 D6, security fixes wait for one fast-channel attestation: yes. The cost is hours of delay, against fleet-wide compromise from one stolen key.
@@ -85,11 +89,13 @@ Sharing the owner-channel line with third-party traffic risks carrier filtering 
 - #8 D2, first PC trusted by default: yes. #12 finding 16 is the accepted residual.
 - #8 D3, passthrough: yes, with #12 CH-7 (resolution 7).
 - #11 D1 and #12 D4, data labels: yes, as resolution 1. Task text private, as on Mark's existing card.
-- #12 CH-19, weekly unlock by code-generator code: yes. The owner opens the code generator once a week instead of reading a texted code, and that one step is what makes a 7-day window safe against a SIM swap.
+- **Mark's call:** #12 CH-19, the weekly unlock by code-generator code. This run recommends yes. The owner opens the code generator once a week instead of reading a texted code, and that one step is what makes a 7-day window safe against a SIM swap. It does change something he'll notice every week, so it is his call.
 
 ---
 
 ## ID clashes (renumber before merge)
+
+Checked against #11 at bf968f2, which already applies this table: there is no REV-6 and no separate egress rule (it cites #12's REV-5), replies are ADP-11, the SIM tool is ADP-12, evidence is CH-20, and the potency test is A15. Only one egress requirement, #12's REV-5, lands.
 
 | ID | #8 | #11 | #12 | #9 | Assignment |
 |---|---|---|---|---|---|
@@ -106,8 +112,8 @@ Sharing the owner-channel line with third-party traffic risks carrier filtering 
 
 ## Steering for the lens loops
 - **UX (#8):** CH-14 unlock names the code-generator tier. CH-17 becomes keypad-only. Add `PUBLIC` (mark this task's text public) to CH-11.
-- **Security (#12):** rebase CRED-8 and §8.2 as a delta on #9 (resolution 2). Add link-following and #11's bounded research query to REV-5. Renumber §17.
-- **Potency (#11):** drop REV-5 and cite #12's. Renumber CH-18→CH-20, ADP-10→ADP-11, ADP-11→ADP-12, A14→A15. Apply resolutions 4 and 9 now, and 5 and 6 once Mark answers D2 and F2.
+- **Security (#12):** rebase CRED-8 and §8.2 as a delta on #9 (resolution 2). Add public-link following (public content only; links from private content are intents; token-bearing URLs never fetched) and #11's bounded research query to REV-5. Renumber §17.
+- **Potency (#11):** drop REV-5 and cite #12's. Renumber CH-18→CH-20, ADP-10→ADP-11, ADP-11→ADP-12, A14→A15. Apply resolutions 4 and 9 now, and 5 (including the commitment filter) and 6 once Mark answers D2 and F2.
 - **#9:** no change; merges first.
 
 ## Next run
