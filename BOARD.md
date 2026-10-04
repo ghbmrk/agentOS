@@ -25,3 +25,4 @@ Started before spec v0.12 on parts unlikely to change; each package lists its sp
 |---|---|---|---|
 | P1-1 | Journal and intent engine (OP-1–7), Go library with property tests ([assumptions](broker/journal/ASSUMPTIONS.md)) | Cloud only | in review |
 | P1-2 | Broker skeleton: sockets, admission classes, STOP/STATUS without inference (ARC-2, CH-2) ([assumptions](broker/daemon/ASSUMPTIONS.md)) | P1-1 | in review |
+| P1-5 | Owner channel on a modem simulator: SMS, two-tier approval codes, tiers, inline unlock, code hygiene, disclosure and commitment filters (CH-1–4, CH-10–14, CH-16, CH-18, CH-19, ADP-11) ([assumptions](broker/owner/ASSUMPTIONS.md)) | P1-2 | in review |

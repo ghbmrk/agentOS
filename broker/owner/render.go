@@ -1,0 +1,121 @@
+package owner
+
+import (
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/ghbmrk/agentos/broker/modem"
+)
+
+// MaxSegments caps every broker text (CH-12).
+const MaxSegments = 3
+
+// lookalikes folds characters that imitate Latin letters, so recipients
+// render as plain text (CH-10). Anything else outside fieldChars is dropped.
+var lookalikes = map[rune]string{
+	// Cyrillic
+	'а': "a", 'в': "b", 'е': "e", 'к': "k", 'м': "m", 'н': "h", 'о': "o", 'р': "p", 'с': "c", 'т': "t",
+	'у': "y", 'х': "x", 'і': "i", 'ј': "j", 'ѕ': "s", 'ԁ': "d", 'ԛ': "q", 'ԝ': "w",
+	'А': "A", 'В': "B", 'Е': "E", 'К': "K", 'М': "M", 'Н': "H", 'О': "O", 'Р': "P", 'С': "C", 'Т': "T",
+	'У': "Y", 'Х': "X", 'І': "I", 'Ј': "J", 'Ѕ': "S",
+	// Greek
+	'α': "a", 'ο': "o", 'ν': "v", 'ρ': "p", 'τ': "t", 'υ': "u", 'ι': "i", 'κ': "k",
+	'Α': "A", 'Β': "B", 'Ε': "E", 'Ζ': "Z", 'Η': "H", 'Ι': "I", 'Κ': "K", 'Μ': "M", 'Ν': "N", 'Ο': "O",
+	'Ρ': "P", 'Τ': "T", 'Υ': "Y", 'Χ': "X",
+	// Latin with marks
+	'à': "a", 'á': "a", 'â': "a", 'ã': "a", 'ä': "a", 'å': "a", 'ā': "a",
+	'è': "e", 'é': "e", 'ê': "e", 'ë': "e", 'ē': "e",
+	'ì': "i", 'í': "i", 'î': "i", 'ï': "i", 'ı': "i",
+	'ò': "o", 'ó': "o", 'ô': "o", 'õ': "o", 'ö': "o", 'ø': "o",
+	'ù': "u", 'ú': "u", 'û': "u", 'ü': "u", 'ñ': "n", 'ç': "c", 'ý': "y", 'ÿ': "y", 'ß': "ss",
+	'À': "A", 'Á': "A", 'Â': "A", 'Ä': "A", 'Å': "A", 'É': "E", 'È': "E", 'Ö': "O", 'Ü': "U", 'Ñ': "N",
+	'ℓ': "l", '℮': "e", 'ⅰ': "i", 'ⅼ': "l", '€': "EUR", '£': "GBP", '¥': "JPY",
+}
+
+// fieldChars may appear in a rendered field. No line breaks, no GSM-7
+// extension characters, nothing that renders ambiguously.
+func fieldChar(r rune) bool {
+	return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' ||
+		strings.ContainsRune(" .,:;@+-_/$#%&'()*!?=", r)
+}
+
+// field renders a verified value for a broker text: look-alikes folded,
+// fullwidth forms mapped to ASCII, everything else dropped, whitespace
+// collapsed, cut to max, and replaced if secret-shaped (CH-19).
+func field(s string, max int) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r >= 0xFF01 && r <= 0xFF5E {
+			r -= 0xFEE0
+		}
+		switch {
+		case fieldChar(r):
+			b.WriteRune(r)
+		case lookalikes[r] != "":
+			b.WriteString(lookalikes[r])
+		case r == '\n' || r == '\t' || r == '\r':
+			b.WriteByte(' ')
+		}
+	}
+	out := strings.Join(strings.Fields(b.String()), " ")
+	if SecretShaped(out) {
+		return "[hidden]"
+	}
+	if len(out) > max {
+		out = strings.TrimSpace(out[:max-2]) + ".."
+	}
+	return out
+}
+
+// Item is one action awaiting approval. Every field is broker-verified
+// (CH-12); none is agent text.
+type Item struct {
+	// Ref is the caller's handle (e.g. the journal intent ID). It is not
+	// rendered.
+	Ref    string
+	Verb   string
+	Object string
+	// Recipient is a canonical identifier: address, number, or the last
+	// 4 digits of an account, never a display name.
+	Recipient string
+	// Amount is the verified amount as it should read, e.g. "$120.00".
+	Amount string
+	// UndoWindow is the effect's undo window; zero means it cannot be
+	// undone.
+	UndoWindow time.Duration
+	Facts      Facts
+}
+
+func (it Item) line() string {
+	s := field(it.Verb, 12) + " " + field(it.Object, 40)
+	if it.Recipient != "" {
+		s += " to " + field(it.Recipient, 40)
+	}
+	if it.Amount != "" {
+		s += ", " + field(it.Amount, 16)
+	}
+	if it.UndoWindow > 0 {
+		s += ", undo within " + dur(it.UndoWindow)
+	} else {
+		s += ", cannot be undone"
+	}
+	return s
+}
+
+func dur(d time.Duration) string {
+	switch {
+	case d >= 48*time.Hour:
+		return fmt.Sprintf("%d days", int(d/(24*time.Hour)))
+	case d >= 2*time.Hour:
+		return fmt.Sprintf("%d h", int(d/time.Hour))
+	default:
+		return fmt.Sprintf("%d min", int((d+time.Minute-1)/time.Minute))
+	}
+}
+
+// fits reports whether s is GSM-7 and within MaxSegments.
+func fits(s string) bool {
+	n, gsm := modem.Segments(s)
+	return gsm && n <= MaxSegments
+}
