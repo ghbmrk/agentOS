@@ -332,13 +332,25 @@ func TestStopNearMissGetsTheFixedHintAndStillReachesTheAgent(t *testing.T) {
 	if len(out) != 1 || out[0] != stopHint || agent.text != "stop everything" {
 		t.Fatalf("replies %q, agent got %q", out, agent.text)
 	}
-	h.Agent = &downAgent{}
-	if out := h.Handle(context.Background(), owner, "please STOP"); len(out) != 2 || out[0] != stopHint {
-		t.Fatalf("agent down: %q", out)
+}
+
+func TestStopHintIsSentAtMostOncePerQuietPeriod(t *testing.T) {
+	h, now := newHandler(t, &fakeEngine{}, fakeAuth{unlocked: false}, &downAgent{})
+	ctx := context.Background()
+	if out := h.Handle(ctx, owner, "STOP NOW"); len(out) != 2 || out[0] != stopHint {
+		t.Fatalf("first near-miss: %q", out)
 	}
-	h.Auth = fakeAuth{unlocked: false}
-	if out := h.Handle(context.Background(), owner, "STOP NOW"); len(out) != 2 || out[0] != stopHint {
-		t.Fatalf("locked: %q", out)
+	for i := 0; i < 20; i++ {
+		for _, r := range h.Handle(ctx, owner, "please stop") {
+			if r == stopHint {
+				t.Fatalf("hint repeated within the quiet period (message %d)", i)
+			}
+		}
+	}
+	*now = now.Add(HintQuiet)
+	h.Auth = fakeAuth{unlocked: true}
+	if out := h.Handle(ctx, owner, "please STOP"); len(out) != 2 || out[0] != stopHint {
+		t.Fatalf("after the quiet period, agent down: %q", out)
 	}
 }
 
