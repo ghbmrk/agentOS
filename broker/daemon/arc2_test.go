@@ -4,6 +4,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -30,6 +31,11 @@ var controlPath = map[string][]string{
 	"cmd/agentosd": {"daemon", "cgroup", "vm", "vm/gvisor"},
 }
 
+// compositionRoot links the machine plane, so its transitive dependencies
+// include runsc's launcher; it is excluded from the transitive check, and
+// the machine plane is held to its own rules below.
+const compositionRoot = "cmd/agentosd"
+
 // The machine plane runs agent machines (P1-4). Admission reaches it only
 // through the admission.Preempter interface. It may not open network
 // clients or use third-party code; only vm/gvisor may start a process, and
@@ -39,24 +45,35 @@ var machinePlane = map[string]struct {
 	forbid  []string
 }{
 	"vm":         {[]string{"admission", "cgroup", "vm/overlay"}, forbiddenStd},
-	"vm/overlay": {nil, []string{"net/http", "net/rpc", "net/smtp", "os/exec", "plugin"}},
-	"vm/gvisor":  {[]string{"vm"}, []string{"net/http", "net/rpc", "net/smtp", "plugin"}},
+	"vm/overlay": {nil, []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}},
+	"vm/gvisor":  {[]string{"vm"}, []string{"net", "net/http", "net/rpc", "net/smtp", "plugin", "unsafe", "C"}},
 }
 
-var forbiddenStd = []string{"net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "syscall"}
+var forbiddenStd = []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "syscall", "unsafe", "C"}
+
+// stdExceptions are the forbidden standard packages a control-path package
+// may still use, and why.
+var stdExceptions = map[string][]string{
+	"sockets":      {"net", "syscall"}, // Unix listeners, SO_PEERCRED, flock
+	"cmd/agentosd": {"syscall"},        // signal numbers for shutdown
+	"journal":      {"syscall"},        // flock on the journal file
+}
+
+// Never anywhere in the control path's transitive dependencies.
+var forbiddenDeps = []string{"net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "crypto/tls"}
 
 const module = "github.com/ghbmrk/agentos/broker/"
 
 func TestARC2ControlPathCannotReachInference(t *testing.T) {
 	for pkg, allowed := range controlPath {
-		checkImports(t, pkg, allowed, forbiddenStd)
+		checkImports(t, pkg, allowed, forbiddenStd, stdExceptions[pkg])
 	}
 	for pkg, rule := range machinePlane {
-		checkImports(t, pkg, rule.allowed, rule.forbid)
+		checkImports(t, pkg, rule.allowed, rule.forbid, nil)
 	}
 }
 
-func checkImports(t *testing.T, pkg string, allowed, forbidden []string) {
+func checkImports(t *testing.T, pkg string, allowed, forbidden, exceptions []string) {
 	t.Helper()
 	root := ".."
 	files, err := filepath.Glob(filepath.Join(root, pkg, "*.go"))
@@ -84,8 +101,7 @@ func checkImports(t *testing.T, pkg string, allowed, forbidden []string) {
 				}
 			case strings.Contains(strings.SplitN(p, "/", 2)[0], "."):
 				t.Errorf("%s imports third-party %s (DEP-1, ARC-2)", f, p)
-			case p == "syscall" && pkg == "cmd/agentosd":
-				// Signal numbers for shutdown only.
+			case contains(exceptions, p):
 			case contains(forbidden, p):
 				t.Errorf("%s imports %s; the control path may not open network clients or child processes", f, p)
 			}
@@ -100,4 +116,22 @@ func contains(ss []string, s string) bool {
 		}
 	}
 	return false
+}
+
+func TestARC2TransitiveDepsHaveNoNetworkClientOrLauncher(t *testing.T) {
+	var pkgs []string
+	for pkg := range controlPath {
+		if pkg != compositionRoot {
+			pkgs = append(pkgs, "./"+pkg)
+		}
+	}
+	out, err := exec.Command("go", append([]string{"list", "-C", "..", "-deps"}, pkgs...)...).Output()
+	if err != nil {
+		t.Fatalf("go list: %v", err)
+	}
+	for _, dep := range strings.Fields(string(out)) {
+		if contains(forbiddenDeps, dep) {
+			t.Errorf("control path depends on %s", dep)
+		}
+	}
 }

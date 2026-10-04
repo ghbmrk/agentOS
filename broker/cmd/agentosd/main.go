@@ -50,6 +50,7 @@ func main() {
 	flag.StringVar(&cfg.JournalPath, "journal", "/var/lib/agentos/journal.log", "journal file")
 	flag.StringVar(&cfg.SocketDir, "sockets", "/run/agentos", "socket directory (created 0700)")
 	flag.StringVar(&cfg.OwnerNumber, "owner", "", "owner's phone number, E.164")
+	flag.IntVar(&cfg.ModemUID, "modem-uid", -1, "uid of the modem bridge, the only peer allowed on the owner socket")
 	flag.Int64Var(&cfg.Admission.CapacityMB, "capacity-mb", 4500, "memory for agent machines, MB")
 	flag.Int64Var(&cfg.Admission.HeadroomMB, "headroom-mb", 600, "memory never admitted into, MB")
 	flag.Float64Var(&cfg.MaxPressure, "max-pressure", 10, "memory PSI (some avg10, %) above which only foreground is admitted")
@@ -58,6 +59,9 @@ func main() {
 	flag.StringVar(&cgroupParent, "cgroup", "/sys/fs/cgroup/agentos.slice/machines", "cgroup v2 parent for agent machines")
 	flag.Var(imgs, "image", "agent-machine image, name=dir (repeatable)")
 	flag.Parse()
+	if cfg.ModemUID < 0 || cfg.ModemUID == os.Getuid() {
+		log.Fatal("-modem-uid must name the modem bridge's own uid, distinct from the broker's")
+	}
 
 	var cg *cgroup.Group
 	psiPath := "/proc/pressure/memory"

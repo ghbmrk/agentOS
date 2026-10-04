@@ -15,6 +15,7 @@ package admission
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 )
 
@@ -67,55 +68,110 @@ type Controller struct {
 	cfg Config
 	pre Preempter
 	// Pressure, if set, returns current memory pressure (PSI some avg10, %).
-	// Above MaxPressure only foreground is admitted.
+	// Above MaxPressure, or when the reading is NaN, foreground is admitted
+	// as usual, accepted work only if preempting experiments covers all of
+	// its memory, and experiments not at all.
 	Pressure    func() float64
 	MaxPressure float64
 
-	mu      sync.Mutex
-	running map[string]Request
-	order   []string // admission order, for newest-first preemption
+	mu       sync.Mutex
+	running  map[string]Request
+	order    []string        // admission order, for newest-first preemption
+	yielding map[string]bool // experiments being preempted right now
 }
 
-// New returns a controller for cfg.
-func New(cfg Config, pre Preempter) *Controller {
-	return &Controller{cfg: cfg, pre: pre, running: map[string]Request{}}
+// New returns a controller for cfg, which needs capacity > headroom >= 0.
+func New(cfg Config, pre Preempter) (*Controller, error) {
+	if cfg.HeadroomMB < 0 || cfg.CapacityMB <= cfg.HeadroomMB {
+		return nil, fmt.Errorf("admission: need capacity > headroom >= 0, got %+v", cfg)
+	}
+	return &Controller{cfg: cfg, pre: pre, running: map[string]Request{}, yielding: map[string]bool{}}, nil
 }
 
 // Admit admits r or refuses it, preempting experiments when r outranks them
-// and that makes enough room.
+// and that makes enough room. Preemption runs without the controller lock,
+// so STATUS and other admissions never wait behind a VM freeze; r's memory
+// is reserved meanwhile.
 func (c *Controller) Admit(r Request) (Decision, error) {
 	if r.ID == "" || !r.Class.valid() || r.MemMB <= 0 {
 		return Decision{}, fmt.Errorf("%w: %+v", ErrInvalid, r)
 	}
-	if r.Class != Foreground && c.Pressure != nil && c.Pressure() > c.MaxPressure {
-		return Decision{}, ErrPressure
+	if r.MemMB > c.cfg.CapacityMB-c.cfg.HeadroomMB {
+		return Decision{}, ErrNoRoom
 	}
+	pressured := false
+	if r.Class != Foreground && c.Pressure != nil {
+		p := c.Pressure()
+		// NaN or a negative reading (-Inf included) is not a real PSI value,
+		// so it counts as over the limit rather than as no pressure.
+		pressured = math.IsNaN(p) || p < 0 || p > c.MaxPressure
+		if pressured && r.Class == Experiment {
+			return Decision{}, ErrPressure
+		}
+	}
+
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if _, dup := c.running[r.ID]; dup {
+		c.mu.Unlock()
 		return Decision{}, fmt.Errorf("%w: %s already admitted", ErrInvalid, r.ID)
 	}
 	need := r.MemMB - c.freeLocked()
+	if pressured {
+		// Under pressure, accepted work may only replace experiments.
+		need = r.MemMB
+	}
 	var victims []string
 	for i := len(c.order) - 1; i >= 0 && need > 0; i-- {
 		v := c.running[c.order[i]]
-		if v.Class == Experiment && r.Class.Outranks(Experiment) {
+		if v.Class == Experiment && r.Class.Outranks(Experiment) && !c.yielding[v.ID] {
 			victims = append(victims, v.ID)
 			need -= v.MemMB
 		}
 	}
 	if need > 0 {
-		return Decision{}, ErrNoRoom
-	}
-	for _, id := range victims {
-		if err := c.pre.Preempt(id); err != nil {
-			return Decision{Preempted: victims}, fmt.Errorf("admission: preempting %s: %w", id, err)
+		c.mu.Unlock()
+		if pressured {
+			return Decision{}, ErrPressure
 		}
-		c.removeLocked(id)
+		return Decision{}, ErrNoRoom
 	}
 	c.running[r.ID] = r
 	c.order = append(c.order, r.ID)
-	return Decision{Preempted: victims}, nil
+	for _, id := range victims {
+		c.yielding[id] = true
+	}
+	c.mu.Unlock()
+
+	var done []string
+	var firstErr error
+	for _, id := range victims {
+		if err := c.pre.Preempt(id); err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("admission: preempting %s: %w", id, err)
+			}
+			continue
+		}
+		done = append(done, id)
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, id := range victims {
+		delete(c.yielding, id)
+	}
+	for _, id := range done {
+		c.removeLocked(id)
+	}
+	// Admit if what did yield made enough room; otherwise give the
+	// reservation back. A preempted experiment stays preempted either way.
+	if c.freeLocked() < 0 {
+		c.removeLocked(r.ID)
+		if firstErr == nil {
+			firstErr = ErrNoRoom
+		}
+		return Decision{Preempted: done}, firstErr
+	}
+	return Decision{Preempted: done}, nil
 }
 
 // Release returns a machine's memory.
@@ -149,7 +205,11 @@ func (c *Controller) Summary() string {
 	for _, r := range s.Running {
 		n[r.Class]++
 	}
-	return fmt.Sprintf("Machines: %d foreground, %d work, %d experiments; %d MB free.", n[0], n[1], n[2], s.FreeMB)
+	free := s.FreeMB
+	if free < 0 {
+		free = 0 // never text a negative figure (or a minus sign) to the owner
+	}
+	return fmt.Sprintf("Machines: %d foreground, %d work, %d experiments; %d MB free.", n[0], n[1], n[2], free)
 }
 
 func (c *Controller) freeLocked() int64 {

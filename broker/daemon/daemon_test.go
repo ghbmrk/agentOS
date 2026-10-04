@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
@@ -30,7 +31,9 @@ func start(t *testing.T, dir string) (context.CancelFunc, *Daemon) {
 		JournalPath: filepath.Join(dir, "journal.log"),
 		SocketDir:   filepath.Join(dir, "run"),
 		OwnerNumber: owner,
+		ModemUID:    os.Getuid(),
 		Machines:    []string{"m1"},
+		Admission:   admission.Config{CapacityMB: 4500, HeadroomMB: 600},
 		Auth:        unlocked{},
 	})
 	if err != nil {
@@ -143,5 +146,78 @@ func TestRunRefusesMissingOwnerNumber(t *testing.T) {
 	defer os.RemoveAll(dir)
 	if _, err := Run(context.Background(), Config{JournalPath: filepath.Join(dir, "j"), SocketDir: filepath.Join(dir, "r")}); err == nil {
 		t.Fatal("started with no owner number")
+	}
+}
+
+func TestRunRefusesBadMachineIDsAndAdmissionConfig(t *testing.T) {
+	dir, _ := os.MkdirTemp("", "bk")
+	defer os.RemoveAll(dir)
+	base := Config{JournalPath: filepath.Join(dir, "j"), SocketDir: filepath.Join(dir, "r"), OwnerNumber: owner,
+		Admission: admission.Config{CapacityMB: 1000, HeadroomMB: 100}}
+	for _, ids := range [][]string{{"m1", "m1"}, {"../x"}, {"M1"}} {
+		c := base
+		c.Machines = ids
+		if _, err := Run(context.Background(), c); err == nil {
+			t.Errorf("accepted machines %q", ids)
+		}
+	}
+	c := base
+	c.Admission.HeadroomMB = -1
+	if _, err := Run(context.Background(), c); err == nil {
+		t.Error("accepted negative headroom")
+	}
+}
+
+func TestOwnerSocketRefusesAnyUIDButTheModemBridge(t *testing.T) {
+	dir, _ := os.MkdirTemp("", "bk")
+	defer os.RemoveAll(dir)
+	ctx, cancel := context.WithCancel(context.Background())
+	d, err := Run(ctx, Config{JournalPath: filepath.Join(dir, "j"), SocketDir: filepath.Join(dir, "run"),
+		OwnerNumber: owner, ModemUID: os.Getuid() + 1, Auth: unlocked{},
+		Admission: admission.Config{CapacityMB: 1000, HeadroomMB: 100}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { cancel(); d.Wait() }()
+	r := send(t, filepath.Join(dir, "run", OwnerSocket), "message", map[string]string{"from": owner, "text": "RESUME"})
+	if r.OK || r.Error != string(sockets.ErrPeer) {
+		t.Fatalf("wrong uid reached the owner socket: %+v", r)
+	}
+	if d.Engine().Stopped() {
+		t.Fatal("unreachable")
+	}
+}
+
+func TestCH2IdleOwnerConnectionsAreClosed(t *testing.T) {
+	old := ownerIdle
+	ownerIdle = 100 * time.Millisecond
+	defer func() { ownerIdle = old }()
+	dir, _ := os.MkdirTemp("", "bk")
+	defer os.RemoveAll(dir)
+	cancel, d := start(t, dir)
+	defer func() { cancel(); d.Wait() }()
+	sock := filepath.Join(dir, "run", OwnerSocket)
+	// Fill every slot with silent connections; the owner must still get in.
+	var idle []net.Conn
+	for i := 0; i < 8; i++ {
+		c, err := net.Dial("unix", sock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		idle = append(idle, c)
+	}
+	defer func() {
+		for _, c := range idle {
+			c.Close()
+		}
+	}()
+	time.Sleep(300 * time.Millisecond)
+	idle[0].SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := idle[0].Read(make([]byte, 1)); err == nil {
+		t.Fatal("idle owner connection still open")
+	}
+	r := send(t, sock, "message", map[string]string{"from": owner, "text": "STOP"})
+	if !r.OK || !d.Engine().Stopped() {
+		t.Fatalf("STOP after idle connections: %+v", r)
 	}
 }

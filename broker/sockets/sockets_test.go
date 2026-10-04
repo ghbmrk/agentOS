@@ -39,9 +39,9 @@ func call(t *testing.T, path string, req string) Response {
 	}
 	defer c.Close()
 	c.SetDeadline(time.Now().Add(5 * time.Second))
-	if _, err := c.Write([]byte(req + "\n")); err != nil {
-		t.Fatal(err)
-	}
+	// A refused connection may be closed before the write lands; the
+	// refusal line is still there to read.
+	c.Write([]byte(req + "\n"))
 	line, err := bufio.NewReader(c).ReadBytes('\n')
 	if err != nil {
 		t.Fatal(err)

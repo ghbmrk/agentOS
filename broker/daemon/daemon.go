@@ -24,6 +24,11 @@ import (
 // P1-5) delivers owner texts.
 const OwnerSocket = "owner.sock"
 
+// ownerIdle closes an owner-socket connection that sends nothing for this
+// long, so a stuck or hostile bridge cannot hold all 8 slots and lock the
+// owner out (CH-2). The bridge opens a connection per message (B11).
+var ownerIdle = 60 * time.Second
+
 // GuestSocket is the socket file handed to agent machine id.
 func GuestSocket(id string) string { return "guest-" + id + ".sock" }
 
@@ -32,7 +37,10 @@ type Config struct {
 	JournalPath string
 	SocketDir   string
 	OwnerNumber string
-	// Machines gets one guest socket each.
+	// ModemUID is the only uid allowed on the owner socket: the modem
+	// bridge, which runs as its own user (SO_PEERCRED, B8).
+	ModemUID int
+	// Machines gets one guest socket each. IDs are [a-z0-9-], unique.
 	Machines []string
 	// Auth overrides the default, which knows the owner's number and keeps
 	// sessions locked until the owner channel (P1-5) can unlock them.
@@ -63,6 +71,15 @@ func (denyAll) Check(context.Context, journal.Phase, journal.Intent) error {
 	return errors.New("no grants are configured")
 }
 
+// redactAll journals no free text at all until the vault (P1-3) supplies a
+// redactor that knows the vault values and the CH-19 patterns.
+func redactAll(s string) string {
+	if s == "" {
+		return ""
+	}
+	return "[redacted]"
+}
+
 // ownerOnly is the default Auth.
 type ownerOnly struct{ number string }
 
@@ -85,31 +102,45 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 	if cfg.Auth == nil {
 		cfg.Auth = ownerOnly{cfg.OwnerNumber}
 	}
-	store, err := journal.OpenFile(cfg.JournalPath)
-	if err != nil {
-		return nil, err
-	}
-	eng, err := journal.Open(store, denyAll{}, map[string]journal.Executor{})
-	if err != nil {
-		store.Close()
-		return nil, err
+	seen := map[string]bool{}
+	for _, id := range cfg.Machines {
+		if !validID(id) || seen[id] {
+			return nil, fmt.Errorf("daemon: bad or duplicate machine id %q", id)
+		}
+		seen[id] = true
 	}
 	pre := cfg.Preempter
 	if pre == nil {
 		pre = noPreempt{}
 	}
-	adm := admission.New(cfg.Admission, pre)
+	adm, err := admission.New(cfg.Admission, pre)
+	if err != nil {
+		return nil, err
+	}
 	adm.Pressure, adm.MaxPressure = cfg.Pressure, cfg.MaxPressure
+	store, err := journal.OpenFile(cfg.JournalPath)
+	if err != nil {
+		return nil, err
+	}
+	eng, err := journal.Open(store, denyAll{}, map[string]journal.Executor{}, redactAll)
+	if err != nil {
+		store.Close()
+		return nil, err
+	}
 	h := &control.Handler{Engine: eng, Auth: cfg.Auth, Machines: adm.Summary}
 
+	modem := cfg.ModemUID
 	eps := []sockets.Endpoint{{
-		Name: OwnerSocket,
-		Peer: sockets.Peer{Kind: "owner"},
+		Name:        OwnerSocket,
+		Peer:        sockets.Peer{Kind: "owner"},
+		PeerUID:     &modem,
+		MaxConns:    8,
+		IdleTimeout: ownerIdle,
 		Ops: map[string]sockets.Handler{
 			"message": func(ctx context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
 				var m struct{ From, Text string }
 				if err := json.Unmarshal(args, &m); err != nil {
-					return nil, errors.New("bad message")
+					return nil, sockets.Code("bad message")
 				}
 				return map[string][]string{"replies": h.Handle(ctx, m.From, m.Text)}, nil
 			},
@@ -117,8 +148,10 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 	}}
 	for _, id := range cfg.Machines {
 		eps = append(eps, sockets.Endpoint{
-			Name: GuestSocket(id),
-			Peer: sockets.Peer{Kind: "guest", ID: id},
+			Name:        GuestSocket(id),
+			Peer:        sockets.Peer{Kind: "guest", ID: id},
+			MaxConns:    4,
+			IdleTimeout: 30 * time.Second,
 			Ops: map[string]sockets.Handler{
 				"whoami": func(_ context.Context, p sockets.Peer, _ json.RawMessage) (any, error) { return p, nil },
 			},
@@ -136,6 +169,18 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 		close(d.done)
 	}()
 	return d, nil
+}
+
+func validID(id string) bool {
+	if id == "" || len(id) > 32 {
+		return false
+	}
+	for _, r := range id {
+		if !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9') && r != '-' {
+			return false
+		}
+	}
+	return true
 }
 
 // Engine is the daemon's journal engine.

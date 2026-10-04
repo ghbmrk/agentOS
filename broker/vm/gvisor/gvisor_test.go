@@ -90,7 +90,11 @@ func newRig(t *testing.T, capacityMB int64) *rig {
 	}
 	state := t.TempDir()
 	r := &rig{t: t, rt: &Runtime{Bin: bin, StateDir: filepath.Join(state, "runsc")}}
-	r.adm = admission.New(admission.Config{CapacityMB: capacityMB}, late{&r.m})
+	adm, err := admission.New(admission.Config{CapacityMB: capacityMB}, late{&r.m})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.adm = adm
 	r.cfg = vm.Config{
 		StateDir: filepath.Join(state, "broker"),
 		Images:   map[string]string{"base": img},

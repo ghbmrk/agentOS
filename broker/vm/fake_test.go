@@ -139,7 +139,9 @@ func newEnv(t *testing.T, capacityMB int64) *env {
 	e := &env{t: t, rt: newFake(), img: t.TempDir()}
 	write(t, e.img, "etc/os-release", "image v1")
 	write(t, e.img, "app/main", "main v1")
-	e.adm = admission.New(admission.Config{CapacityMB: capacityMB, HeadroomMB: 0}, preempter{&e.m})
+	adm, err := admission.New(admission.Config{CapacityMB: capacityMB, HeadroomMB: 0}, preempter{&e.m})
+	must(t, err)
+	e.adm = adm
 	e.cfg = Config{
 		StateDir:  filepath.Join(t.TempDir(), "state"),
 		Images:    map[string]string{"base": e.img},
