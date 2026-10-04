@@ -132,11 +132,16 @@ One device holds the NVMe SSD, a microcontroller that acts as a USB keyboard for
 |---|---|
 | STOP (pause all dispatch) | Message from the owner's number (worst case of spoofing: a pause) |
 | Task chat, STATUS | Owner's number + a session unlocked by an approval code within the last N hours |
-| Approve an irreversible intent | Approval code entered in reply to that request's ID |
+| Approve a low-risk irreversible intent (CH-10) | The texted code from that request, replied from the owner's number |
+| Approve a high-risk irreversible intent (CH-10) | Approval code from the code generator, in reply to that request's ID |
 | New grant, raise budget, adopt a release, add a trusted host, recovery | Approval code + local confirmation or recovery key, per policy |
 
 - **CH-4** Approval codes come from a standard code generator. [Fact] iPhone's built-in Passwords app generates them; on Android any authenticator works. The **paper grid** on the Owner Card is the fallback. No AgentOS app exists.
 - **CH-5** Live calls: carrier voice → modem → broker → speech (local by default; hosted only by explicit policy) → guest. [Risk] Voice quality and latency over USB modems need qualifying.
+- **CH-10** **Two-tier approval.** Prompts should be rare in the first place: approvals are batched (one code covers a batch) and owner pre-allowances cover routine actions, so codes are needed only for what remains.
+  - **Low risk** means a recipient already known to the owner's accounts, an amount under an owner-set limit, or an effect reversible within a window. The box texts a one-time code bound to that request (and batch), and the owner replies with it from their number. This still defeats spoofed texts and self-approval by the agent, which never sees the code. [Risk] It does not defeat someone holding the owner's unlocked phone or a SIM swap of the owner's number.
+  - **High risk** means new or wider grants, money above the owner-set limit, CRED-6 actions, and anything CH-3 lists for new grants. These require the code-generator code, which sits behind the phone's biometric lock and is unaffected by a SIM swap.
+  - The tier is decided by the broker from verified data, never by the agent. Unclassifiable requests are high risk. The tier thresholds change only by a high-risk intent.
 - **CH-6** Secrets MUST NEVER be requested or accepted over text or voice. The carrier sees that traffic, and transcripts reach models.
 
 ### 6.2 Local web UI (box's own Wi-Fi only)
@@ -377,7 +382,7 @@ Fleet orchestration; Mac or ARM boot; any hosted AgentOS service; remote rich UI
 | **A3** | Delegated task by text, then a live call; two frontier providers (at least one consumer route, the other either); agent-machine execution; native result in the owner's account, edited on the phone and picked up. | CH-5, CRED-5, CAP-7, OP-7 |
 | **A4** | Kill broker and guest mid-effect; drop an external acknowledgment; reconcile without duplication; STOP by text with all models down. | OP-1–6, CH-2, ARC-2 |
 | **A5** | **Canary test:** canary credentials in the vault and canary sessions in credentialed browsers; an adversarial agent with full root and every protocol verb fails to surface any canary anywhere agent-reachable, across repeated runs. | CRED-1–7, ARC-1 |
-| **A6** | Hostile guest attempts escalation, evaluator tampering, and injection via a collaborator's output; all fail structurally; the guest is rebuilt; a regression is retained. In-box damage is undone by rollback. | ARC-4, REV-1/2, CHG-2 |
+| **A6** | Hostile guest attempts escalation, evaluator tampering, and injection via a collaborator's output; all fail structurally; the guest cannot obtain or replay a texted low-risk code, and cannot get a high-risk request classed as low risk; the guest is rebuilt; a regression is retained. In-box damage is undone by rollback. | ARC-4, REV-1/2, CHG-2, CH-10 |
 | **A7** | One pipeline: a local candidate passes held-out cases from real tasks; a bad one is rejected; an upstream guest image and a shared package take the same path; rollback works. | CHG-1–5, UPD-1 |
 | **A8** | Portability and recovery: move the drive to an unknown PC (code-gated unlock), then a trusted one (unattended restart). Restore onto a new drive with the recovery key; revoked grants are not revived; the old number's new holder can do nothing. | CRED-8/9, REC-1–3 |
 | **A9** | Dependency audit: with all optional dependencies removed, and with all outbound traffic logged, the system boots, takes STOP/STATUS, and recovers. No traffic to any AgentOS-operated endpoint ever. | DEP-1–4 |
@@ -405,6 +410,7 @@ Before any qualification run, freeze revisions, hardware profile, accounts, work
 | 2026-10-04 | Loops and contribution on by default, modifiable; contribution is clean-room only, so no personal data can be published (§11B). |
 | 2026-10-04 | Spare-capacity self-improvement and self-securing loops; accumulation into an open-source project (§11A, §11B). |
 | 2026-10-04 | Zero or near-zero external dependencies: no AgentOS-operated services, no relay, no app-store app. |
+| 2026-10-04 | Two-tier approval (CH-10): texted one-time codes for low-risk approvals, code-generator codes for high-risk ones; batching and pre-allowances minimize prompts. |
 | Proposed | External-drive-only (no internal install). This spec assumes it; the owner has not formally confirmed. |
 
 ## 17. Open risks
