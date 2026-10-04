@@ -17,5 +17,6 @@
 | 2026-10-04 | All other usage limits are flexible targets with checkpoints, not ceilings; weekly envelope adapts so allowance isn't wasted | Mark |
 | 2026-10-04 | Package branches use a `pkg/<id>-<slug>` stem set by the coordinator, plus the server's session suffix; older `claude/…` branches are accepted when the PR title starts with the package ID | Mark, PR reviews thread |
 | 2026-10-04 | Boot integrity (S7, proposed HW-5a): accept for MVP that Secure Boot covers only distribution-signed parts; AgentOS boot files are protected by a TPM policy seal on trusted hosts; unknown-host tampering is a documented risk (owner's guide: after losing custody of the drive, use only a trusted PC). Per-PC key enrollment rejected; own shim deferred past MVP | Mark, S7 thread |
+| 2026-10-04 | Unlock on an unknown PC needs the Owner Card's vault passphrase (entered on the box's Wi-Fi page) plus an approval code; the code alone never decrypts (CRED-8) | Mark, PR reviews thread |
 | Proposed | External-drive-only (no internal install) | Not yet confirmed |
 | Pending | License | Before first public release (OSS-12) |
