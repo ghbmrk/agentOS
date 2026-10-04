@@ -132,11 +132,16 @@ One device holds the NVMe SSD, a microcontroller that acts as a USB keyboard for
 |---|---|
 | STOP (pause all dispatch) | Message from the owner's number (worst case of spoofing: a pause) |
 | Task chat, STATUS | Owner's number + a session unlocked by an approval code within the last N hours |
-| Approve an irreversible intent | Approval code entered in reply to that request's ID |
+| Approve a low-risk irreversible intent (CH-10) | The texted code from that request, replied from the owner's number |
+| Approve a high-risk irreversible intent (CH-10) | Approval code from the code generator, in reply to that request's ID |
 | New grant, raise budget, adopt a release, add a trusted host, recovery | Approval code + local confirmation or recovery key, per policy |
 
-- **CH-4** Approval codes come from a standard code generator. [Fact] iPhone's built-in Passwords app generates them; on Android any authenticator works. The **paper grid** on the Owner Card is the fallback. No AgentOS app exists.
+- **CH-4** Approval codes come from a standard code generator. [Fact] iPhone's built-in Passwords app generates them; on Android any authenticator works. The **paper grid** on the Owner Card is the fallback. No AgentOS app exists. These codes are the high-risk tier of CH-10. Batching (one code per digest batch) and pre-allowances are the main ways to reduce prompts.
 - **CH-5** Live calls: carrier voice → modem → broker → speech (local by default; hosted only by explicit policy) → guest. [Risk] Voice quality and latency over USB modems need qualifying.
+- **CH-10** **Two-tier approval.** Prompts should be rare in the first place: approvals are batched (one code covers a batch) and owner pre-allowances cover routine actions, so codes are needed only for what remains.
+  - **Low risk** means **all** of: the recipient is one the broker verifies already exists in the owner's account (as in ADP-9); any amount is under the owner-set limit; and the operation's verb is not excluded by the owner. Anything else is high risk. The box texts a one-time code bound to that request (or batch), and the owner replies with it from their number. The code works once and expires after a short owner-settable time (default 15 minutes). The request text is rendered by the broker in fixed wording from verified fields, never by the agent. This still defeats spoofed texts and self-approval by the agent, which never sees the code. It proves possession of the owner's number only (§17 risk 9).
+  - **High risk** means new or wider grants or pre-allowances, money above the owner-set limit, CRED-6 actions, and recovery. These require the code-generator code or the paper grid, which a SIM swap cannot obtain, plus local confirmation where CH-3 already requires it.
+  - The owner sets the tier boundaries; changing them is a high-risk intent. The broker applies them to verified data, never to the agent's claims. Unclassifiable requests are high risk.
 - **CH-6** Secrets MUST NEVER be requested or accepted over text or voice. The carrier sees that traffic, and transcripts reach models.
 
 ### 6.2 Local web UI (box's own Wi-Fi only)
@@ -402,7 +407,7 @@ Fleet orchestration; Mac or ARM boot; macOS-only and iOS-only apps (Apple's lice
 | **A3** | Delegated task by text, then a live call; two frontier providers (at least one consumer route, the other either); agent-machine execution; native result in the owner's account, edited on the phone and picked up. | CH-5, CRED-5, CAP-7, OP-7 |
 | **A4** | Kill broker and guest mid-effect; drop an external acknowledgment; reconcile without duplication; STOP by text with all models down. | OP-1–6, CH-2, ARC-2 |
 | **A5** | **Canary test:** canary credentials in the vault and canary sessions in credentialed browsers; an adversarial agent with full root and every protocol verb fails to surface any canary anywhere agent-reachable, across repeated runs. | CRED-1–7, ARC-1 |
-| **A6** | Hostile guest attempts escalation, evaluator tampering, and injection via a collaborator's output; all fail structurally; the guest is rebuilt; a regression is retained. In-box damage is undone by rollback. | ARC-4, REV-1/2, CHG-2 |
+| **A6** | Hostile guest attempts escalation, evaluator tampering, and injection via a collaborator's output; all fail structurally; the guest cannot obtain or replay a texted low-risk code, and cannot get a high-risk request classed as low risk; the guest is rebuilt; a regression is retained. In-box damage is undone by rollback. | ARC-4, REV-1/2, CHG-2, CH-10 |
 | **A7** | One pipeline: a local candidate passes held-out cases from real tasks; a bad one is rejected; an upstream guest image and a shared package take the same path; rollback works. | CHG-1–5, UPD-1 |
 | **A8** | Portability and recovery: move the drive to an unknown PC (code-gated unlock), then a trusted one (unattended restart). Restore onto a new drive with the recovery key; revoked grants are not revived; the old number's new holder can do nothing. | CRED-8/9, REC-1–3 |
 | **A9** | Dependency audit: with all optional dependencies removed, and with all outbound traffic logged, the system boots, takes STOP/STATUS, and recovers. No traffic to any AgentOS-operated endpoint ever. | DEP-1–4 |
@@ -433,6 +438,7 @@ Before any qualification run, freeze revisions, hardware profile, accounts, work
 | 2026-10-04 | Zero or near-zero external dependencies: no AgentOS-operated services, no relay, no app-store app. |
 | 2026-10-04 | Adapter contract (§10A). Default routing order API → CLI → web → desktop GUI, which loops may improve through §11 like everything else. |
 | 2026-10-04 | Operation labels come from a fixed verb list with a demo-environment mismatch check; the owner answers only for unmapped operations. The owner may pre-allow irreversible operations per service and/or per action with no notification (ADP-9). |
+| 2026-10-04 | Two-tier approval (CH-10): texted one-time codes for low-risk approvals, code-generator codes for high-risk ones; batching and pre-allowances minimize prompts. |
 | Proposed | External-drive-only (no internal install). This spec assumes it; the owner has not formally confirmed. |
 
 ## 17. Open risks
@@ -445,3 +451,4 @@ Before any qualification run, freeze revisions, hardware profile, accounts, work
 6. **Project update-signing key** custody (UPD-2).
 7. **Desktop kiosk escape** (ADP-5). A GUI path out of the kiosk (a crash dialog, help browser, or app-embedded file picker) could reach the app's saved login. Mitigations: the login stored outside the UI user's reach, A13's adversarial escape step, and restricting desktop executors to apps where that holds.
 8. **Tampered trusted source** (ADP-9). An attacker who edits the source record a pre-allowance trusts (e.g. a Xero contact's email) passes the predicate. Mitigations: scope bounds, the recent-edit hold, and the journal.
+9. **Low-tier approvals by text** (CH-10). A SIM swap of the owner's number, or a stolen unlocked phone, can approve low-risk requests. Mitigations: the owner-set low-tier limits, reversibility windows, the journal, and STOP.
