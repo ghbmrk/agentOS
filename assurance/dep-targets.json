@@ -1,0 +1,8 @@
+{
+  "targets": [
+    {"name": "control-offline-clean", "cmd": ["python3", "tools/depaudit_controls.py", "clean"], "expect": "pass", "control": true},
+    {"name": "control-phones-home", "cmd": ["python3", "tools/depaudit_controls.py", "phones-home"], "expect": "violation",
+     "expect_kinds": ["dns", "forbidden", "host-socket", "ip"], "control": true},
+    {"name": "control-needs-network", "cmd": ["python3", "tools/depaudit_controls.py", "needs-network"], "expect": "scenario-failed", "control": true}
+  ]
+}

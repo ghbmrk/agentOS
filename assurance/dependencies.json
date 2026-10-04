@@ -1,0 +1,5 @@
+{
+  "note": "Every network endpoint AgentOS code may contact, classed per SPEC.md §2. Checked by tools/depaudit.py (A9). Adding an endpoint is a reviewed change: inherent and commodity endpoints must be justified against §2; optional ones must be removable (DEP-3). AgentOS-operated endpoints are forbidden (DEP-2) and cannot be declared.",
+  "forbidden_host_patterns": ["*agentos*"],
+  "endpoints": []
+}

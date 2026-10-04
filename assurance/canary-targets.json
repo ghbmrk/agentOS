@@ -1,0 +1,9 @@
+{
+  "targets": [
+    {"name": "control-clean", "cmd": ["python3", "tools/canary_controls.py", "clean"], "expect": "clean", "control": true},
+    {"name": "control-leaky-files", "cmd": ["python3", "tools/canary_controls.py", "leaky"], "expect": "leak", "control": true},
+    {"name": "control-leaky-log", "cmd": ["python3", "tools/canary_controls.py", "leaky-log"], "expect": "leak", "control": true},
+    {"name": "control-leaky-memory", "cmd": ["python3", "tools/canary_controls.py", "leaky-memory"], "expect": "leak", "control": true},
+    {"name": "control-crash", "cmd": ["python3", "tools/canary_controls.py", "crash"], "expect": "error", "control": true}
+  ]
+}

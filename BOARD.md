@@ -16,3 +16,9 @@ States: `queued` → `building` → `in review` → `merged` | `escalated` | `dr
 | S2 | USB LTE modem: SMS and voice under Linux | **Mark: 2 modems + SIM** | blocked on hardware |
 
 Exit of P0: spike results → spec v0.12 diff → Mark approves → budget re-estimate.
+
+## Phase 1: core in a VM
+
+| ID | Package | Needs | State |
+|---|---|---|---|
+| P1-6 | Canary harness (A5) and dependency audit harness (A9) as permanent CI jobs ([assurance/README.md](assurance/README.md)) | Cloud only | in review |
