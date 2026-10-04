@@ -15,5 +15,6 @@
 | 2026-10-04 | Update to latest stable on first boot; channel-based cadence | Mark |
 | 2026-10-04 | Build on the $200 Claude plan, usage credits off (the only hard cap) | Mark |
 | 2026-10-04 | All other usage limits are flexible targets with checkpoints, not ceilings; weekly envelope adapts so allowance isn't wasted | Mark |
+| Proposed | Harness-assigned branch names (e.g. `claude/…`) are accepted in place of `pkg/<id>-<slug>` when the PR title starts with the package ID | Suggested in the PR #1 review; awaiting Mark |
 | Proposed | External-drive-only (no internal install) | Not yet confirmed |
 | Pending | License | Before first public release (OSS-12) |
