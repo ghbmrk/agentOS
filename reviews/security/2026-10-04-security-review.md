@@ -72,6 +72,7 @@ Trusted base as CRED-2 states it: host kernel, hypervisor, firmware, broker, exe
 **Proposal (REV-5).** Each agent machine carries a data label that only rises during its life:
 - `public`: has seen only public input (web, public repos, the task text if the owner marks it public). Open uncredentialed egress, as today.
 - `private`: has received owner data (mail, files, recall results, executor reads, owner chat, event-bus content). Outbound traffic goes only through the broker's egress proxy, to destinations on the task's allowlist: model providers, granted adapters, and domains the owner has pre-allowed. Any other destination is a disclosure intent (REV-2).
+- The proxy strips any credential the agent supplies itself, so an attacker's own key can't turn an allowed host into a drop box (L3 review).
 - Data flows freely from public to private. Private to public is a disclosure. Rollback to a pre-label snapshot, or a rebuild, resets the label.
 - Fork and speculative parallelism (CAP-1) inherit the label.
 
@@ -112,14 +113,14 @@ Security fixes keep their fast path but need k-of-n signatures plus at least one
 
 ### 6. The Owner Card holds both factors of a tier-4 action (§3.1, CH-3, CH-4) — High
 **Path.** Tier-4 actions (new grant, raise budget, add a trusted host) need "approval code + local confirmation". The card carries the Wi-Fi password (local presence) **and** the paper approval-code grid (the code). Someone who photographs the card and is in Wi-Fi range has both. Cards often live near the box, and kits can be intercepted in shipping before the owner ever sees them.
-**Proposal.** The paper grid moves to the detachable sheet with the recovery key (§3.1, CH-4). The grid is challenge–response with single-use cells. **REC-4:** every card secret (Wi-Fi password, setup secret, grid, recovery key) can be rotated from the local UI as a tier-4 action, and setup offers it in one line ("print a fresh card if anyone else handled this kit").
+**Proposal.** The paper grid moves to its own detachable sheet, separate from the recovery-key sheet so routine fallback use never takes the recovery key out of storage (§3.1, CH-4). The grid is challenge–response with single-use cells. **REC-4:** every card secret (Wi-Fi password, setup secret, grid, recovery key) can be rotated from the local UI as a tier-4 action, and setup offers it in one line ("print a fresh card if anyone else handled this kit").
 **UX cost.** Low: one more thing to put away, which is the fallback the owner rarely uses. **Potency cost.** None.
 
 ### 7. A SIM swap inside the unlock window reads private data by chat (CH-3, CH-10, CRED-3; PR #8 CH-14 and D1) — High
 **Path.** The session unlock is tied to the owner's number, not their SIM. A SIM swapper (S) inherits an unlocked session, with no code at all, until it lapses. They text "what's the latest code from my bank?" and the agent answers: CRED-3 makes 2FA codes in mail legitimate content, and replies to the owner aren't intents. That is a takeover of the owner's other accounts, not only the box. PR #8's CH-14 says "asks for a code" without a tier; if a texted low-tier code could unlock, the swapper could also re-unlock.
 **Proposal (CH-19).**
 - Session unlock requires a code-generator code or a grid cell, never a texted code.
-- Outbound texts and speech never carry strings that match verification-code or known secret formats (fixed patterns, no inference, ARC-2). Such content is replaced with "shown on the local UI". This extends CRED-7 from vault values to things that look like secrets.
+- Outbound texts and speech never carry verification codes or known secret formats taken from content (fixed, context-anchored patterns, no inference, ARC-2). Such content is replaced with "shown on the local UI". The broker's own texted CH-10 codes are exempt. This extends CRED-7 from vault values to things that look like secrets.
 **UX cost.** Low. An owner who wants a 2FA code from their mail reads it on the local UI or in the mail app itself.
 **Potency cost.** Low: some legitimate numeric strings (order numbers) get masked. The patterns err toward masking.
 **Residual.** Inside the window, a swapper can still read ordinary private data by chat. That is the D1 tradeoff (see the interactions above).
