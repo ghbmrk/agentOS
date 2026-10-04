@@ -89,7 +89,7 @@ No lens loses on any of these, but each one lands in SPEC.md, so Mark's merge is
 - #8 D2, first PC trusted by default: yes. #12 finding 16 is the accepted residual.
 - #8 D3, passthrough: yes, with #12 CH-7 (resolution 7).
 - #11 D1 and #12 D4, data labels: yes, as resolution 1. Task text private, as on Mark's existing card.
-- **Mark's call:** #12 CH-19, the weekly unlock by code-generator code. This run recommends yes. The owner opens the code generator once a week instead of reading a texted code, and that one step is what makes a 7-day window safe against a SIM swap. It does change something he'll notice every week, so it is his call.
+- **Decided (Mark, 2026-10-04): yes.** #12 CH-19, the weekly unlock by code-generator code. This run recommends yes. The owner opens the code generator once a week instead of reading a texted code, and that one step is what makes a 7-day window safe against a SIM swap. It does change something he'll notice every week, so it is his call.
 
 ---
 

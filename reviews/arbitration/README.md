@@ -19,7 +19,7 @@ Reconciles the three lens loops so their proposals compound instead of trading o
    - make the effect reversible (REV-3) so it no longer needs a gate;
    - scope by verified data, not by time or by blanket prompts;
    - make the safe path the shortest path.
-4. **Escalate only real forks.** When no design dominates and the choice changes Mark's goal or an output he will notice, ask one question answerable in one word, with a recommendation. Everything else is decided here with the reasoning written down.
+4. **Decide whenever no lens gets meaningfully worse** (Mark, 2026-10-04). Only a real tradeoff, where some lens loses, goes to Mark: one plain line, a recommendation, and the potency, UX, and security effects, sent to the project coordinator, which asks him in the project chat. Never ask him in a thread. Work continues on the recommendation while he decides.
 
 ## Hard constraints (no trade may weaken)
 
