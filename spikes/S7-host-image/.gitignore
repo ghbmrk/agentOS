@@ -1,3 +1,4 @@
 mkosi/agentos_*
 mkosi/mkosi.cache/
 mkosi/mkosi.output/
+__pycache__/
