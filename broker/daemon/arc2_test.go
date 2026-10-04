@@ -35,6 +35,7 @@ var forbiddenStd = []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec",
 var stdExceptions = map[string][]string{
 	"sockets":      {"net", "syscall"}, // Unix listeners, SO_PEERCRED, flock
 	"cmd/agentosd": {"syscall"},        // signal numbers for shutdown
+	"journal":      {"syscall"},        // flock on the journal file
 }
 
 // Never anywhere in the control path's transitive dependencies.

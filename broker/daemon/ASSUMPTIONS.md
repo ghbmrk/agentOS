@@ -17,6 +17,7 @@ that a reviewer may want to change.
 | B9 | ARC-2 is enforced structurally. `daemon/arc2_test.go` fails if a control-path package imports a network client, a process launcher, `unsafe`, cgo, a third-party module, or a broker package outside the control path (`net` and `syscall` only where listed: sockets, signals). It also checks `go list -deps` for HTTP, RPC, TLS, and process launching anywhere in the transitive dependencies. | ARC-2 | Extend the list when new control-path packages appear. |
 | B10 | The sockets here are control sockets with JSON-lines framing. Model access and MCP (ARC-6 a, b) carry large and streamed bodies, so they will be separate per-machine HTTP listeners, under the same rule that the socket fixes the peer's identity. The 64 KiB cap applies to control ops only. | ARC-6, OP-8 | Documentation only. |
 | B11 | Requests on one connection are handled one at a time, and task chat waits up to 5 s for the agent. STOP on a separate connection is never blocked by it. The modem bridge (P1-5) must use a connection per message, or delivery must become asynchronous, so a slow agent can never delay a STOP (CH-2). | CH-2 | P1-5. |
+| B12 | The journal needs a redactor (P1-1). Until the vault (P1-3) supplies one that knows vault values and the CH-19 patterns, the daemon journals no free text: every evidence, reason, and param string becomes `[redacted]`. Nothing can submit intents yet anyway. | CRED-1, CRED-7 | P1-3 replaces `redactAll`. |
 
 ## Left for P1-5 (from the PR #19 review)
 

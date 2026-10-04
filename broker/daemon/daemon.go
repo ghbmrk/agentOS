@@ -58,6 +58,15 @@ func (denyAll) Check(context.Context, journal.Phase, journal.Intent) error {
 	return errors.New("no grants are configured")
 }
 
+// redactAll journals no free text at all until the vault (P1-3) supplies a
+// redactor that knows the vault values and the CH-19 patterns.
+func redactAll(s string) string {
+	if s == "" {
+		return ""
+	}
+	return "[redacted]"
+}
+
 // ownerOnly is the default Auth.
 type ownerOnly struct{ number string }
 
@@ -93,7 +102,7 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 	if err != nil {
 		return nil, err
 	}
-	eng, err := journal.Open(store, denyAll{}, map[string]journal.Executor{})
+	eng, err := journal.Open(store, denyAll{}, map[string]journal.Executor{}, redactAll)
 	if err != nil {
 		store.Close()
 		return nil, err
