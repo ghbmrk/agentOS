@@ -17,3 +17,20 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Traceability is current
         run: python tools/trace.py --check
+  broker:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: broker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: broker/go.mod
+          cache: false
+      - name: Format
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - name: Vet
+        run: go vet ./...
+      - name: Tests (race detector)
+        run: go test -race -count=1 ./...
