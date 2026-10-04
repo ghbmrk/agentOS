@@ -55,8 +55,10 @@ class Verbs(unittest.TestCase):
         self.bad(verb="type", ref="e1", text=1)
         self.bad(verb="type", ref="e1", text="x", submit="yes")
         self.bad(verb="type", ref="e1", text="x" * (P.MAX_TEXT + 1))
-        with self.assertRaises(P.ProtocolError):
-            P.validate({"v": 1, "verb": "snapshot"})
+        for v in (1, False, 0.0, "0", None):
+            with self.assertRaises(P.ProtocolError):
+                P.validate({"v": v, "verb": "snapshot"})
+        self.bad(verb="click", ref="e1\n")
 
 
 class Origins(unittest.TestCase):
@@ -86,6 +88,17 @@ class Redaction(unittest.TestCase):
         self.assertIn("user=7", text)
         self.assertEqual(n, 1)
 
+    def test_fragment_tokens(self):
+        text, n = P.redact_text("https://app.example/cb#access_token=s5FragQ7xZ2pL9&state=ok")
+        self.assertEqual(text, "https://app.example/cb#access_token=[REDACTED]&state=ok")
+        self.assertEqual(n, 1)
+        self.assertEqual(P.redact_url("https://a.example/page#section-2"),
+                         ("https://a.example/page#section-2", False))
+
+    def test_high_entropy_path_segment(self):
+        text, n = P.redact_text("https://a.example/reset/Q7xZ2pL9mW4vR8tY3nB6cD1fG5hJ0kL/done")
+        self.assertEqual((text, n), ("https://a.example/reset/[REDACTED]/done", 1))
+
     def test_high_entropy_run(self):
         text, n = P.redact_text("session Q7xZ2pL9mW4vR8tY3nB6cD1fG5hJ0kL")
         self.assertEqual((text, n), ("session [REDACTED]", 1))
@@ -93,8 +106,18 @@ class Redaction(unittest.TestCase):
     def test_ordinary_text_untouched(self):
         for s in ("Thank you for your order!", "Sauce Labs Backpack $29.99",
                   "/wiki/Alan_Turing", "internationalization-and-localization",
-                  "Check if you need a UK visa"):
+                  "Check if you need a UK visa",
+                  "https://github.com/microsoft/playwright/issues/12345",
+                  "/microsoft/playwright/blob/main/README.md"):
             self.assertEqual(P.redact_text(s), (s, 0), s)
+
+
+class SnapshotCap(unittest.TestCase):
+    def test_cap(self):
+        self.assertEqual(P.cap_snapshot("abc"), ("abc", False))
+        text, cut = P.cap_snapshot("x" * (P.MAX_SNAPSHOT + 10))
+        self.assertTrue(cut)
+        self.assertTrue(text.endswith("[snapshot truncated]"))
 
 
 class PasswordOmission(unittest.TestCase):

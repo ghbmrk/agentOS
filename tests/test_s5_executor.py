@@ -30,7 +30,7 @@ class FixtureSite(unittest.TestCase):
         from playwright.sync_api import sync_playwright
 
         cls.server = server
-        cls.srv = server.serve()
+        cls.srv, cls.evil = server.serve_pair()
         cls.origin = f"http://127.0.0.1:{cls.srv.server_port}"
         cls.tmp = tempfile.TemporaryDirectory()
         tmp = pathlib.Path(cls.tmp.name)
@@ -50,18 +50,14 @@ class FixtureSite(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.s.close()
-        transcript = json.dumps(cls.s.log) + "".join(
-            json.dumps(r) for r in cls.snapshots)
-        for f in cls.ws.iterdir():
-            transcript += f.read_bytes().decode("latin-1")
         cls.srv.shutdown()
+        cls.evil.shutdown()
         cls.tmp.cleanup()
-        for canary in (cls.server.CANARY_SESSION, cls.server.CANARY_STORAGE,
-                       cls.server.CANARY_PASSWORD, cls.server.CANARY_SHOWN,
-                       "s5CanaryUrlTokenR2d2C3po4BB8Kx9"):
-            assert canary not in transcript, f"canary leaked: {canary[:8]}..."
 
     snapshots = []
+
+    def setUp(self):
+        self.s.do("navigate", url=self.origin + "/app.html")
 
     def look(self):
         snap = self.s.look()
@@ -135,6 +131,56 @@ class FixtureSite(unittest.TestCase):
             self.assertEqual(self.s.call(verb)["error"], "protocol")
         res = self.s.call("navigate", url="javascript:document.cookie")
         self.assertEqual(res["error"], "protocol")
+
+
+    # --- escapes found in L3 review (redirect hops, subframes, URL fragments) ---
+
+    def test_redirect_hop_off_origin_refused(self):
+        self.s.do("navigate", url=self.origin + "/escape.html")
+        self.look()
+        res = self.s.do("click", ref=self.s.ref("link", "Redirect out"))
+        self.assertTrue(any("/stolen" in u for u in res.get("refused_navigations", [])), res)
+        res = self.s.call("navigate", url=self.origin + "/redir?to=" + self.srv.evil_origin + "/stolen")
+        self.assertTrue(any("/stolen" in u for u in res.get("refused_navigations", [])), res)
+        self.assertEqual(self.evil.hits, [])
+
+    def test_redirect_hop_on_origin_keeps_cookie(self):
+        self.s.do("navigate", url=self.origin + "/redir-in")
+        self.assertIn("hop cookie kept", self.look())
+        self.assertTrue(self.s.snap["url"].endswith("/hop-check"))
+
+    def test_form_post_redirect_off_origin_refused(self):
+        self.s.do("navigate", url=self.origin + "/escape.html")
+        self.look()
+        res = self.s.call("type", ref=self.s.ref("textbox", "Note"), text="agent data", submit=True)
+        self.assertTrue(any("/stolen" in u for u in res.get("refused_navigations", [])), res)
+        self.assertEqual(self.evil.hits, [])
+
+    def test_off_origin_iframe_not_loaded(self):
+        self.s.do("navigate", url=self.origin + "/escape.html")
+        snap = self.look()
+        self.assertNotIn("Card", snap)
+        self.assertEqual(self.evil.hits, [])
+
+    def test_fragment_token_redacted_in_url(self):
+        self.s.do("navigate", url=self.origin + "/escape.html")
+        self.look()
+        self.s.do("click", ref=self.s.ref("link", "Fragment token"))
+        snap = self.s.look()
+        type(self).snapshots.append(snap)
+        self.assertIn("access_token=[REDACTED]", snap["url"])
+
+    def test_zz_no_canary_leaves_executor(self):
+        """Runs last (alphabetical order): every response and workspace file so far."""
+        transcript = "".join(self.s.raw)
+        for f in self.ws.iterdir():
+            transcript += f.read_bytes().decode("latin-1")
+        for canary in (self.server.CANARY_SESSION, self.server.CANARY_STORAGE,
+                       self.server.CANARY_PASSWORD, self.server.CANARY_SHOWN,
+                       self.server.CANARY_FRAGMENT, "s5CanaryUrlTokenR2d2C3po4BB8Kx9"):
+            self.assertNotIn(canary, transcript, f"canary leaked: {canary[:8]}...")
+        self.assertGreater(len(self.s.raw), 20)
+        self.assertEqual(self.evil.hits, [])
 
 
 if __name__ == "__main__":

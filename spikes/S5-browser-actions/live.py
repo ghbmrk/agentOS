@@ -200,12 +200,8 @@ def github(s):
 SITES = {
     "wikipedia": (wikipedia, ["https://en.wikipedia.org"], None),
     "govuk": (govuk, ["https://www.gov.uk"], None),
-    "saucedemo": (saucedemo, ["https://www.saucedemo.com"],
-                  ("https://www.saucedemo.com/", [("#user-name", "standard_user"),
-                                                  ("#password", "secret_sauce")], "#login-button")),
-    "herokuapp": (herokuapp, ["https://the-internet.herokuapp.com"],
-                  ("https://the-internet.herokuapp.com/login", [("#username", "tomsmith"),
-                   ("#password", "SuperSecretPassword!")], "button[type=submit]")),
+    "saucedemo": (saucedemo, ["https://www.saucedemo.com"], "saucedemo"),
+    "herokuapp": (herokuapp, ["https://the-internet.herokuapp.com"], "herokuapp"),
     "herokuapp_gaps": (herokuapp_gaps, ["https://the-internet.herokuapp.com"], None),
     "github": (github, ["https://github.com", "https://raw.githubusercontent.com"], None),
 }
@@ -217,6 +213,8 @@ def run(name):
         tmp = pathlib.Path(tmp)
         state = None
         if login:
+            login = json.loads((HERE / "demo_logins.json").read_text())[login]
+            login = (login["url"], login["fields"], login["submit"])
             state = tmp / "owner-state.json"
             owner_login(*login, state)
         s = Session(origins, tmp / "ws", state)

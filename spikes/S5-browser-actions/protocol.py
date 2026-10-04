@@ -12,8 +12,9 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 VERSION = 0
 
-REF = re.compile(r"^(?:f\d+)?e\d+$")
+REF = re.compile(r"(?:f\d+)?e\d+")
 MAX_TEXT = 2000
+MAX_SNAPSHOT = 256 * 1024  # characters returned per snapshot
 
 # verb -> {arg: type}. Nothing else exists: no evaluate, no cookies, no storage,
 # no headers, no devtools, no tabs.
@@ -37,7 +38,7 @@ def validate(req):
     """Return the request if it is a well-formed v0 request, else raise ProtocolError."""
     if not isinstance(req, dict):
         raise ProtocolError("request must be an object")
-    if req.get("v") != VERSION:
+    if type(req.get("v")) is not int or req["v"] != VERSION:
         raise ProtocolError(f"unsupported protocol version {req.get('v')!r}")
     verb = req.get("verb")
     if verb not in VERBS:
@@ -53,7 +54,7 @@ def validate(req):
             raise ProtocolError(f"{verb} needs {arg}")
         if type(req[arg]) is not typ:
             raise ProtocolError(f"{verb}.{arg} must be {typ.__name__}")
-    if "ref" in req and not REF.match(req["ref"]):
+    if "ref" in req and not REF.fullmatch(req["ref"]):
         raise ProtocolError("ref must come from a snapshot (e.g. e12)")
     if verb == "navigate":
         check_url(req["url"])
@@ -96,7 +97,7 @@ TOKEN_PATTERNS = [
     re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}"),                              # Slack
 ]
 SECRET_PARAM = re.compile(r"(token|code|key|sig|auth|session|password|secret)", re.I)
-CANDIDATE = re.compile(r"[A-Za-z0-9+/_=-]{24,}")
+CANDIDATE = re.compile(r"[A-Za-z0-9+_=-]{24,}")  # no "/": path segments are judged one by one
 REDACTED = "[REDACTED]"
 
 
@@ -111,22 +112,30 @@ def high_entropy(s):
     return len(s) >= 24 and classes >= 2 and entropy(s) >= 4.0
 
 
+def _redact_pairs(s):
+    """Redact values of secret-named key=value pairs in a query or fragment string."""
+    out, hit = [], False
+    for k, v in parse_qsl(s, keep_blank_values=True):
+        if v and SECRET_PARAM.search(k):
+            out.append((k, REDACTED))
+            hit = True
+        else:
+            out.append((k, v))
+    return (urlencode(out, safe="[]") if hit else s), hit
+
+
 def redact_url(url):
-    """Drop values of secret-named query parameters (REV-5 patterns)."""
+    """Drop values of secret-named query and fragment parameters (REV-5 patterns),
+    e.g. OAuth implicit-flow tokens in '#access_token=...'."""
     try:
         p = urlsplit(url)
     except ValueError:
         return url, False
-    if not p.query:
+    query, hq = _redact_pairs(p.query) if p.query else (p.query, False)
+    frag, hf = _redact_pairs(p.fragment) if "=" in p.fragment else (p.fragment, False)
+    if not (hq or hf):
         return url, False
-    q, hit = [], False
-    for k, v in parse_qsl(p.query, keep_blank_values=True):
-        if v and SECRET_PARAM.search(k):
-            q.append((k, REDACTED))
-            hit = True
-        else:
-            q.append((k, v))
-    return (urlunsplit(p._replace(query=urlencode(q, safe="[]"))) if hit else url), hit
+    return urlunsplit(p._replace(query=query, fragment=frag)), True
 
 
 URL_IN_TEXT = re.compile(r"https?://[^\s\"'<>]+|(?<=/url: )\S+")
@@ -156,6 +165,12 @@ def redact_text(text):
 
     text = CANDIDATE.sub(sub_entropy, text)
     return text, n
+
+
+def cap_snapshot(text):
+    if len(text) <= MAX_SNAPSHOT:
+        return text, False
+    return text[:MAX_SNAPSHOT] + "\n[snapshot truncated]", True
 
 
 # --- password field omission (CRED-4) ----------------------------------------
