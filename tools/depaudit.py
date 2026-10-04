@@ -58,6 +58,11 @@ _UNIX = re.compile(r'sun_path=(@?)"((?:[^"\\]|\\.)*)"')
 
 # ---- parsing ------------------------------------------------------------------
 
+# Families that stay inside the sandbox's network namespace. Anything else
+# (AF_VSOCK is not namespaced, AF_PACKET, ...) is a violation: fail closed.
+_NAMESPACED = {"NETLINK", "UNSPEC"}
+
+
 def parse_strace(text):
     events = []
     for line in text.splitlines():
@@ -65,16 +70,23 @@ def parse_strace(text):
         if not m:
             continue
         pid, syscall = m.group(1), m.group(2)
-        for fam, body in _SOCKADDR.findall(line):
-            if fam == "INET" and _V4.search(body):
-                port, addr = _V4.search(body).groups()
-                events.append(Event(pid, syscall, "inet", addr, int(port)))
-            elif fam == "INET6" and _V6.search(body):
-                port, addr = _V6.search(body).groups()
-                events.append(Event(pid, syscall, "inet6", addr, int(port)))
-            elif fam == "UNIX" and _UNIX.search(body):
-                at, path = _UNIX.search(body).groups()
-                events.append(Event(pid, syscall, "unix", at + path, None))
+        found = _SOCKADDR.findall(line)
+        for fam, body in found:
+            v4, v6, unix = _V4.search(body), _V6.search(body), _UNIX.search(body)
+            if fam == "INET" and v4:
+                events.append(Event(pid, syscall, "inet", v4.group(2), int(v4.group(1))))
+            elif fam == "INET6" and v6:
+                events.append(Event(pid, syscall, "inet6", v6.group(2), int(v6.group(1))))
+            elif fam == "UNIX" and unix:
+                events.append(Event(pid, syscall, "unix", unix.group(1) + unix.group(2), None))
+            elif fam in _NAMESPACED:
+                continue
+            elif fam in ("INET", "INET6", "UNIX"):
+                events.append(Event(pid, syscall, "unparsed", "AF_" + fam, None))
+            else:
+                events.append(Event(pid, syscall, "other", "AF_" + fam, None))
+        if line.count("sa_family=") > len(found):
+            events.append(Event(pid, syscall, "unparsed", "sockaddr", None))
     return events
 
 
@@ -133,20 +145,27 @@ def evaluate(events, names, manifest, profile, workdir):
 
     work = os.path.realpath(workdir) + os.sep
     for e in events:
+        how = "%s by pid %s" % (e.syscall, e.pid)
         if e.family in ("inet", "inet6"):
-            if _is_local_ip(e.addr):
-                continue
             target = ("[%s]:%d" if e.family == "inet6" else "%s:%d") % (e.addr, e.port)
+            if _is_local_ip(e.addr):
+                if e.port == 53:
+                    add("dns", "loopback:53", how)  # a lookup, even if the name was not logged
+                continue
             if _match(e.addr, manifest.forbidden):
-                add("forbidden", target, "%s by pid %s" % (e.syscall, e.pid))
+                add("forbidden", target, how)
             elif not _allowed(e.addr, manifest, profile):
-                add("ip", target, "%s by pid %s" % (e.syscall, e.pid))
+                add("ipv6" if e.family == "inet6" else "ipv4", target, how)
         elif e.family == "unix":
             # Abstract sockets live in the network namespace; filesystem sockets
             # outside the scenario's own directory reach host services.
             if e.addr.startswith("@") or (e.addr + os.sep).startswith(work):
                 continue
-            add("host-socket", e.addr, "%s by pid %s" % (e.syscall, e.pid))
+            add("host-socket", e.addr, how)
+        elif e.family == "other":
+            add("unknown-family", e.addr, how)
+        else:
+            add("unparsed", e.addr, how)
     for name in names:
         if _match(name, manifest.forbidden):
             add("forbidden", name, "DNS lookup")
@@ -234,9 +253,52 @@ def _loopback_up():
     s.close()
 
 
-def _bind_over(src, dest):
-    if os.path.exists(dest):
-        subprocess.run(["mount", "--bind", str(src), dest], check=True)
+# Host directories that hold filesystem sockets (systemd-resolved, nscd, D-Bus,
+# docker, X11, agents). Each is hidden under an empty tmpfs inside the sandbox,
+# so the egress block is enforced, not only detected; anything the scenario
+# needs from them (its work directory, the repository) is bound back in.
+MASKED_DIRS = ("/run", "/var/run", "/tmp", "/var/tmp")
+
+
+def _mount(*args):
+    subprocess.run(["mount"] + list(args), check=True)
+
+
+def _under(path, base):
+    return (os.path.realpath(path) + os.sep).startswith(os.path.realpath(base) + os.sep)
+
+
+def _mask_host_sockets(keep):
+    fds = {k: os.open(k, os.O_PATH | os.O_DIRECTORY) for k in keep}
+    masked = []
+    for d in MASKED_DIRS:
+        if os.path.isdir(d) and not os.path.islink(d):
+            _mount("-t", "tmpfs", "-o", "mode=1777,nosuid,nodev", "tmpfs", d)
+            masked.append(d)
+    for k, fd in fds.items():
+        if any(_under(k, d) for d in masked):
+            os.makedirs(k, exist_ok=True)
+            _mount("--no-canonicalize", "--bind", "/proc/%d/fd/%d" % (os.getpid(), fd), k)
+        os.close(fd)
+    if os.path.lexists("/dev/log") and not os.path.exists("/dev/log"):
+        pass  # symlink into a masked directory: already gone
+    elif os.path.exists("/dev/log") and not os.path.isfile("/dev/log"):
+        _mount("--bind", "/dev/null", "/dev/log")
+    return masked
+
+
+def _place(content, dest, work, masked):
+    """Make dest read as content inside the sandbox."""
+    if not os.path.lexists(dest):
+        return
+    real = os.path.realpath(dest)
+    if any(_under(real, d) for d in masked):
+        os.makedirs(os.path.dirname(real), exist_ok=True)
+        pathlib.Path(real).write_text(content)
+    else:
+        src = work / ("etc-" + os.path.basename(dest))
+        src.write_text(content)
+        _mount("--bind", str(src), dest)
 
 
 def _dns_sink(sock, names):
@@ -251,17 +313,23 @@ def _dns_sink(sock, names):
         sock.sendto(q[:2] + flags.to_bytes(2, "big") + q[4:6] + b"\0" * 6 + q[12:end], addr)
 
 
+def _io_uring_disabled():
+    try:
+        return pathlib.Path("/proc/sys/kernel/io_uring_disabled").read_text().strip()
+    except OSError:
+        return None
+
+
 def _inner(work, timeout, cmd):
     """Runs inside the fresh user, network, and mount namespaces."""
     work = pathlib.Path(work)
     _loopback_up()
-    (work / "resolv.conf").write_text("nameserver 127.0.0.1\n")
-    _bind_over(work / "resolv.conf", "/etc/resolv.conf")
+    masked = _mask_host_sockets([str(work), str(ROOT)])
+    _place("nameserver 127.0.0.1\n", "/etc/resolv.conf", work, masked)
     if os.path.exists("/etc/nsswitch.conf"):
         lines = [l for l in pathlib.Path("/etc/nsswitch.conf").read_text().splitlines()
                  if not l.startswith("hosts:")]
-        (work / "nsswitch.conf").write_text("\n".join(lines + ["hosts: files dns"]) + "\n")
-        _bind_over(work / "nsswitch.conf", "/etc/nsswitch.conf")
+        _place("\n".join(lines + ["hosts: files dns"]) + "\n", "/etc/nsswitch.conf", work, masked)
     names = []
     sink = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sink.bind(("127.0.0.1", 53))
@@ -275,7 +343,8 @@ def _inner(work, timeout, cmd):
                                  "--"] + cmd, env=env, cwd=ROOT, stdout=out, stderr=err, timeout=timeout).returncode
         except subprocess.TimeoutExpired:
             rc = "timeout"
-    (work / "result.json").write_text(json.dumps({"rc": rc, "dns": names}))
+    (work / "result.json").write_text(json.dumps({"rc": rc, "dns": names, "masked": masked,
+                                                  "io_uring_disabled": _io_uring_disabled()}))
     return 0
 
 
@@ -287,17 +356,20 @@ def run_target(target, manifest, timeout=600):
         os.chmod(work, 0o755)
         cmd = ["unshare"] + _unshare_flags() + ["--", sys.executable, str(pathlib.Path(__file__).resolve()),
                                                 "_inner", "--work", work, "--timeout", str(timeout), "--"]
-        p = subprocess.run(cmd + list(target["cmd"]), capture_output=True, timeout=timeout + 60)
+        env = dict(os.environ, **target.get("env", {}))
+        p = subprocess.run(cmd + list(target["cmd"]), env=env, capture_output=True, timeout=timeout + 60)
         res_file = pathlib.Path(work, "result.json")
         if p.returncode != 0 or not res_file.exists():
             return {"name": target["name"], "outcome": "error", "violations": [],
-                    "detail": p.stderr.decode(errors="replace")[-2000:]}
+                    "detail": "sandbox exit %s, %s\n%s" % (
+                        p.returncode, "result present" if res_file.exists() else "no result",
+                        p.stderr.decode(errors="replace")[-2000:])}
         res = json.loads(res_file.read_text())
         trace = pathlib.Path(work, "net.strace")
         events = parse_strace(trace.read_text(errors="replace") if trace.exists() else "")
         violations = evaluate(events, res["dns"], manifest, profile, work)
         out = {"name": target["name"], "profile": profile, "exit": res["rc"], "events": len(events),
-               "violations": violations}
+               "violations": violations, "masked": res["masked"], "io_uring_disabled": res["io_uring_disabled"]}
         if res["rc"] != 0:
             out["outcome"] = "scenario-failed"
             out["stderr_tail"] = pathlib.Path(work, "stderr").read_bytes()[-2000:].decode(errors="replace")
@@ -306,7 +378,29 @@ def run_target(target, manifest, timeout=600):
         return out
 
 
-# ---- CLI ---------------------------------------------------------------------------
+# ---- controls and CLI -------------------------------------------------------------------
+
+def _ipv6_available():
+    try:
+        socket.socket(socket.AF_INET6, socket.SOCK_DGRAM).close()
+        return True
+    except OSError:
+        return False
+
+
+def control_targets(probe_dir):
+    """Built-in controls, hard-coded so that removing one cannot keep CI green."""
+    cmd = [sys.executable, str(ROOT / "tools" / "depaudit_controls.py")]
+    home = ["dns", "forbidden", "host-socket", "ipv4"] + (["ipv6"] if _ipv6_available() else [])
+    return [
+        {"name": "control-offline-clean", "cmd": cmd + ["clean"], "expect": "pass"},
+        {"name": "control-phones-home", "cmd": cmd + ["phones-home"], "expect": "violation", "expect_kinds": home},
+        {"name": "control-needs-network", "cmd": cmd + ["needs-network"], "expect": "scenario-failed"},
+        # Exits nonzero if it can reach a live socket the harness left listening in /tmp.
+        {"name": "control-host-socket-masked", "cmd": cmd + ["host-socket"], "expect": "violation",
+         "expect_kinds": ["host-socket"], "env": {"DEPAUDIT_PROBE": os.path.join(probe_dir, "probe.sock")}},
+    ]
+
 
 def _judge(target, res):
     expect = target.get("expect", "pass")
@@ -317,6 +411,14 @@ def _judge(target, res):
     if want is not None and sorted(want) != got:
         return False, "expected violation kinds %s, got %s" % (sorted(want), got)
     return True, expect
+
+
+def load_registry(path):
+    targets = json.loads(pathlib.Path(path).read_text())["targets"]
+    for t in targets:
+        if t.get("control") or t.get("expect", "pass") != "pass" or "expect_kinds" in t or "env" in t:
+            raise ValueError("%s: product scenarios must expect pass; controls are built in" % t.get("name"))
+    return targets
 
 
 def cmd_static(args):
@@ -332,27 +434,42 @@ def cmd_run(args):
     if not sandbox_available():
         print("FAIL sandbox unavailable: needs strace and unprivileged user+network namespaces", file=sys.stderr)
         return 2
+    try:
+        product = load_registry(args.targets)
+    except ValueError as e:
+        print("FAIL registry: %s" % e, file=sys.stderr)
+        return 2
     manifest = load_manifest(json.loads(pathlib.Path(args.manifest).read_text()))
-    targets = json.loads(pathlib.Path(args.targets).read_text())["targets"]
     report, ok_all = {"targets": []}, True
-    for t in targets:
-        res = run_target(t, manifest, timeout=args.timeout)
-        ok, why = _judge(t, res)
-        ok_all &= ok
-        res.update(control=bool(t.get("control")), passed=ok)
-        report["targets"].append(res)
-        print("%s %-26s %s (%s; %d socket events, %d violation(s))" % (
-            "PASS" if ok else "FAIL", t["name"], "control" if t.get("control") else "scenario",
-            why, res.get("events", 0), len(res["violations"])))
-        if not ok:
-            for v in res["violations"]:
-                print("    %s %s (%dx, first: %s)" % (v["kind"], v["target"], v["count"], v["first"]))
-            for k in ("detail", "stderr_tail"):
-                if res.get(k):
-                    print("    %s:\n%s" % (k, res[k]))
-    real = [t["name"] for t in targets if not t.get("control")]
-    report["real_targets"] = real
-    if not real:
+    with tempfile.TemporaryDirectory(prefix="depaudit-probe-", dir="/tmp") as probe_dir:
+        probe = socket.socket(socket.AF_UNIX)
+        probe.bind(os.path.join(probe_dir, "probe.sock"))
+        probe.listen()
+        os.chmod(probe_dir, 0o755)
+        for t in control_targets(probe_dir) + product:
+            res = run_target(t, manifest, timeout=args.timeout)
+            ok, why = _judge(t, res)
+            ok_all &= ok
+            res.update(control=t not in product, passed=ok)
+            report["targets"].append(res)
+            print("%s %-28s %s (%s; %d socket events, %d violation(s))" % (
+                "PASS" if ok else "FAIL", t["name"], "scenario" if t in product else "control",
+                why, res.get("events", 0), len(res["violations"])))
+            if not ok:
+                for v in res["violations"]:
+                    print("    %s %s (%dx, first: %s)" % (v["kind"], v["target"], v["count"], v["first"]))
+                for k in ("detail", "stderr_tail"):
+                    if res.get(k):
+                        print("    %s:\n%s" % (k, res[k]))
+        probe.close()
+    uring = {r.get("io_uring_disabled") for r in report["targets"]}
+    report["io_uring_disabled"] = sorted(str(u) for u in uring)
+    if args.require_io_uring_disabled and uring != {"2"}:
+        print("FAIL io_uring is not disabled (kernel.io_uring_disabled=%s); its socket calls bypass strace"
+              % ",".join(report["io_uring_disabled"]))
+        ok_all = False
+    report["real_targets"] = [t["name"] for t in product]
+    if not product:
         print("note: no product scenarios registered yet; only controls ran (see assurance/README.md)")
     if args.report:
         pathlib.Path(args.report).write_text(json.dumps(report, indent=1) + "\n")
@@ -368,6 +485,8 @@ def main(argv=None):
     r.add_argument("--targets", required=True)
     r.add_argument("--manifest", default=str(MANIFEST))
     r.add_argument("--timeout", type=int, default=600)
+    r.add_argument("--require-io-uring-disabled", action="store_true",
+                   help="fail unless kernel.io_uring_disabled=2 (set in CI)")
     r.add_argument("--report")
     i = sub.add_parser("_inner")
     i.add_argument("--work", required=True)

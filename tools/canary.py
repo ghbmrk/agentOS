@@ -6,10 +6,16 @@ A target is any command. Per round the harness mints one canary of every kind,
 writes them to a trusted-only plant file, and runs the target with:
   CANARY_PLANT        path of the plant file (JSON; the target's trusted side
                       loads it into the vault / credentialed browser)
+  CANARY_ACK          where the trusted side writes {"loaded": [fingerprint, ...]}
+                      for every canary it actually loaded (see fingerprint())
   CANARY_SURFACE_DIR  where the target copies everything its adversary could
                       reach (guest files, `canary.py sweep` dumps, protocol
                       transcripts, packet captures)
 The harness scans that directory plus the target's stdout and stderr (logs).
+A round is an error, never clean, if the ack is missing or incomplete, the
+surface is empty, the scan budget runs out, or the target exits nonzero.
+Built-in controls (deliberate leaks the scan must catch) run on every pass;
+the registry holds product targets only, and each must expect "clean".
 Canary values never leave the trusted side and the harness's own memory:
 reports carry fingerprints, kinds, encodings, and locations only.
 
@@ -41,22 +47,41 @@ B64URL = B62 + "-_"
 B64 = B62 + "+/"
 PASSWORD = B62 + "!#$%&*+=?@^_~"  # no '-': cores must survive dash stripping
 
-# kind -> (alphabet, core length, format(core) -> value)
+def _b64url(b):
+    return base64.urlsafe_b64encode(b).rstrip(b"=")
+
+
+# Kinds whose text is itself an encoding are minted from random bytes, so the
+# decoded form (TOTP key bytes, DER key material, token bytes) is well defined.
+# encoding -> (encode bytes -> text bytes, decode text -> bytes)
+_CODECS = {
+    "hex": (lambda b: b.hex().encode(), bytes.fromhex),
+    "base32": (base64.b32encode, base64.b32decode),
+    "base64": (base64.b64encode, base64.b64decode),
+    "base64url": (_b64url, lambda t: base64.urlsafe_b64decode(t + "=" * (-len(t) % 4))),
+}
+
+# kind -> (alphabet, core chars or None, encoding, decoded bytes or None, format(core) -> value)
 _SHAPES = {
-    "api_key": (B62, 40, lambda c: "sk-" + c),
-    "bearer_token": (B64URL, 43, lambda c: c),
-    "session_cookie": (HEX, 64, lambda c: c),
-    "password": (PASSWORD, 24, lambda c: c),
-    "totp_seed": (B32, 32, lambda c: c),
-    "private_key": (B64, 64, lambda c: "-----BEGIN PRIVATE KEY-----\n" + c + "\n-----END PRIVATE KEY-----"),
-    "recovery_code": (B32, 30, lambda c: "-".join(c[i:i + 5] for i in range(0, len(c), 5))),
+    "api_key": (B62, 40, None, None, lambda c: "sk-" + c),
+    "bearer_token": (B64URL, None, "base64url", 32, lambda c: c),
+    "session_cookie": (HEX, None, "hex", 32, lambda c: c),
+    "password": (PASSWORD, 24, None, None, lambda c: c),
+    "totp_seed": (B32, None, "base32", 20, lambda c: c),
+    "private_key": (B64, None, "base64", 48,
+                    lambda c: "-----BEGIN PRIVATE KEY-----\n" + c + "\n-----END PRIVATE KEY-----"),
+    "recovery_code": (B32, 30, None, None, lambda c: "-".join(c[i:i + 5] for i in range(0, len(c), 5))),
 }
 KINDS = tuple(_SHAPES)
+DECODABLE = tuple(k for k, s in _SHAPES.items() if s[2])
 
 # Any contiguous fragment of a core at least WINDOW characters long is detected:
-# cores are indexed as NEEDLE-length pieces every STEP characters.
+# cores are indexed as NEEDLE-length pieces every STEP characters. Decoded bytes
+# likewise: any fragment of at least DECODED_WINDOW bytes.
 NEEDLE, STEP = 12, 4
 WINDOW = NEEDLE + STEP - 1
+DECODED_NEEDLE, DECODED_STEP = 8, 3
+DECODED_WINDOW = DECODED_NEEDLE + DECODED_STEP - 1
 
 CHUNK = 1 << 20
 DEFAULT_MAX_BYTES = 4 << 30
@@ -65,23 +90,42 @@ MEM_SKIP = ("[vvar]", "[vsyscall]", "[vvar_vclock]")
 MAX_HITS_PER_LOCATION = 20
 
 
-class Canary(collections.namedtuple("Canary", "kind value core alphabet")):
+class Canary(collections.namedtuple("Canary", "kind value core alphabet decoded")):
     @property
     def fingerprint(self):
-        return hashlib.sha256(self.value.encode()).hexdigest()[:16]
+        return fingerprint(self.value)
 
     @property
     def entropy_bits(self):
+        if self.decoded is not None:
+            return 8 * len(self.decoded)
         return len(self.core) * math.log2(len(self.alphabet))
 
 
 Hit = collections.namedtuple("Hit", "fingerprint kind form location offset length")
 
 
+def fingerprint(value):
+    """What a target writes to its plant ack for each canary it loaded."""
+    return hashlib.sha256(value.encode()).hexdigest()[:16]
+
+
 def mint(kind):
-    alphabet, n, fmt = _SHAPES[kind]
-    core = "".join(secrets.choice(alphabet) for _ in range(n))
-    return Canary(kind, fmt(core), core, alphabet)
+    alphabet, n, encoding, nbytes, fmt = _SHAPES[kind]
+    if encoding:
+        decoded = secrets.token_bytes(nbytes)
+        core = _CODECS[encoding][0](decoded).decode()
+    else:
+        decoded = None
+        core = "".join(secrets.choice(alphabet) for _ in range(n))
+    return Canary(kind, fmt(core), core, alphabet, decoded)
+
+
+def decode(kind, value):
+    """The decoded bytes of a canary of a DECODABLE kind (for controls)."""
+    encoding = _SHAPES[kind][2]
+    core = value.split("\n")[1] if kind == "private_key" else value
+    return _CODECS[encoding][1](core)
 
 
 def mint_set():
@@ -102,6 +146,13 @@ def _b64_aligned(raw):
     return out
 
 
+def _windows(data, n, step):
+    out = [data[i:i + n] for i in range(0, len(data) - n + 1, step)]
+    if (len(data) - n) % step:
+        out.append(data[-n:])
+    return out
+
+
 def _needles(c):
     raw = c.value.encode()
     forms = [("raw", raw), ("hex", raw.hex().encode()), ("hex", raw.hex().upper().encode()),
@@ -114,10 +165,13 @@ def _needles(c):
     if core != raw:
         forms.append(("raw", core))
         forms += [("base64", b) for b in _b64_aligned(core)]
-    for i in range(0, len(core) - NEEDLE + 1, STEP):
-        forms.append(("fragment", core[i:i + NEEDLE]))
-    if (len(core) - NEEDLE) % STEP:
-        forms.append(("fragment", core[-NEEDLE:]))
+    cased = {core.upper(), core.lower()} - {core} if c.alphabet in (HEX, B32) else set()
+    forms += [("case", v) for v in sorted(cased)]
+    for variant in [core] + sorted(cased):
+        forms += [("fragment", w) for w in _windows(variant, NEEDLE, STEP)]
+    if c.decoded is not None:
+        forms.append(("decoded", c.decoded))
+        forms += [("decoded-fragment", w) for w in _windows(c.decoded, DECODED_NEEDLE, DECODED_STEP)]
     return forms
 
 
@@ -160,14 +214,35 @@ class Detector:
 
 # ---- the root adversary -------------------------------------------------------
 
+class SweepTruncated(Exception):
+    pass
+
+
+class Budget:
+    """Byte budget for a sweep; records whether anything was left unread."""
+
+    def __init__(self, max_bytes):
+        self.left, self.truncated = max_bytes, False
+
+    def take(self, n):
+        n = min(n, self.left)
+        return n
+
+    def spend(self, n):
+        self.left -= n
+
+
 def _file_chunks(path, budget):
     try:
         with open(path, "rb") as f:
-            while budget[0] > 0:
-                b = f.read(min(CHUNK, budget[0]))
+            while True:
+                if budget.left <= 0:
+                    budget.truncated |= bool(f.read(1))
+                    return
+                b = f.read(budget.take(CHUNK))
                 if not b:
                     return
-                budget[0] -= len(b)
+                budget.spend(len(b))
                 yield b
     except OSError:
         return
@@ -175,14 +250,17 @@ def _file_chunks(path, budget):
 
 def _mem_chunks(fd, start, end, budget):
     pos = start
-    while pos < end and budget[0] > 0:
-        try:
-            b = os.pread(fd, min(CHUNK, end - pos, budget[0]), pos)
-        except OSError:
+    while pos < end:
+        if budget.left <= 0:
+            budget.truncated = True
             return
+        try:
+            b = os.pread(fd, budget.take(min(CHUNK, end - pos)), pos)
+        except OSError:
+            return  # guard pages and similar: unreadable to any process
         if not b:
             return
-        budget[0] -= len(b)
+        budget.spend(len(b))
         pos += len(b)
         yield b
 
@@ -192,10 +270,11 @@ def _all_pids():
     return sorted(int(p) for p in os.listdir("/proc") if p.isdigit() and int(p) != me)
 
 
-def sweep(roots=(), pids=(), max_bytes=DEFAULT_MAX_BYTES):
+def sweep(roots=(), pids=(), budget=None):
     """Yield (location, chunk iterator) for everything a root process can read:
-    files under roots, and each process's environment, command line, and memory."""
-    budget = [max_bytes]
+    files under roots, and each process's environment, command line, and memory.
+    Check budget.truncated afterwards: a truncated sweep proves nothing."""
+    budget = budget or Budget(DEFAULT_MAX_BYTES)
     for root in roots:
         for dirpath, dirnames, filenames in os.walk(root):
             if dirpath == "/":
@@ -224,20 +303,46 @@ def sweep(roots=(), pids=(), max_bytes=DEFAULT_MAX_BYTES):
 
 
 def dump(out, roots=(), pids=(), max_bytes=DEFAULT_MAX_BYTES):
-    """Write sweep() output under out, for a target to hand back as a surface."""
+    """Write sweep() output under out, for a target to hand back as a surface.
+    Raises SweepTruncated if the budget ran out."""
     out = pathlib.Path(out)
-    n = 0
-    for loc, chunks in sweep(roots, pids, max_bytes):
+    budget, n = Budget(max_bytes), 0
+    for loc, chunks in sweep(roots, pids, budget):
         dest = out / loc.lstrip("/").replace("@", "_at_")
         dest.parent.mkdir(parents=True, exist_ok=True)
         with open(dest, "wb") as f:
             for b in chunks:
                 f.write(b)
         n += 1
+    if budget.truncated:
+        raise SweepTruncated("sweep budget of %d bytes exhausted after %d locations" % (max_bytes, n))
     return n
 
 
 # ---- target runner --------------------------------------------------------------
+
+# Built-in controls: (name, tools/canary_controls.py mode, expected outcome,
+# kinds that must be caught every round, only forms allowed, error every round
+# must report). Hard-coded so that removing one cannot keep CI green.
+CONTROLS = (
+    ("control-clean", "clean", "clean", (), None, None),
+    ("control-leaky-files", "leaky", "leak", KINDS, None, None),
+    ("control-leaky-log", "leaky-log", "leak", KINDS, None, None),
+    ("control-leaky-memory", "leaky-memory", "leak", KINDS, None, None),
+    ("control-leaky-decoded", "leaky-decoded", "leak", DECODABLE, ("decoded", "decoded-fragment"), None),
+    ("control-crash", "crash", "error", (), None, "exit 3"),
+    ("control-no-ack", "no-ack", "error", (), None, "no valid plant ack"),
+    ("control-partial-ack", "partial-ack", "error", (), None, "plant ack missing kinds"),
+    ("control-empty-surface", "empty-surface", "error", (), None, "empty surface"),
+    ("control-truncated-sweep", "truncated-sweep", "error", (), None, "exit 4"),
+)
+
+
+def control_targets():
+    cmd = [sys.executable, str(ROOT / "tools" / "canary_controls.py")]
+    return [{"name": n, "cmd": cmd + [m], "expect": e, "kinds": list(k), "forms": f, "why": w, "control": True}
+            for n, m, e, k, f, w in CONTROLS]
+
 
 def _hit_dict(h):
     return {"fingerprint": h.fingerprint, "kind": h.kind, "form": h.form,
@@ -253,35 +358,56 @@ def _cap(hits):
     return out
 
 
-def run_target(target, rounds, timeout=600, minted=None):
+def _ack_problem(path, cans):
+    try:
+        loaded = set(json.loads(pathlib.Path(path).read_text())["loaded"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return "no valid plant ack"
+    missing = [c.kind for c in cans if c.fingerprint not in loaded]
+    return "plant ack missing kinds %s" % missing if missing else None
+
+
+def run_target(target, rounds, timeout=600, minted=None, max_bytes=DEFAULT_MAX_BYTES):
     results = []
     for r in range(rounds):
         cans = mint_set()
         if minted is not None:
             minted.extend(cans)
         det = Detector(cans)
+        errors = []
         with tempfile.TemporaryDirectory(prefix="canary-trusted-") as trusted, \
                 tempfile.TemporaryDirectory(prefix="canary-surface-") as surface:
-            plant = pathlib.Path(trusted, "plant.json")
+            plant, ack = pathlib.Path(trusted, "plant.json"), pathlib.Path(trusted, "ack.json")
             fd = os.open(plant, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "w") as f:
                 json.dump({"canaries": [{"kind": c.kind, "value": c.value} for c in cans]}, f)
-            env = dict(os.environ, CANARY_PLANT=str(plant), CANARY_SURFACE_DIR=surface)
+            env = dict(os.environ, CANARY_PLANT=str(plant), CANARY_ACK=str(ack), CANARY_SURFACE_DIR=surface)
             try:
                 p = subprocess.run(target["cmd"], env=env, cwd=ROOT, capture_output=True, timeout=timeout)
                 rc, out, err = p.returncode, p.stdout, p.stderr
             except subprocess.TimeoutExpired as e:
                 rc, out, err = "timeout", e.stdout or b"", e.stderr or b""
+            if rc != 0:
+                errors.append("exit %s" % rc)
+            problem = _ack_problem(ack, cans)
+            if problem:
+                errors.append(problem)
             hits = det.scan_bytes(out, "<stdout>") + det.scan_bytes(err, "<stderr>")
-            for loc, chunks in sweep(roots=[surface]):
+            budget, files = Budget(max_bytes), 0
+            for loc, chunks in sweep(roots=[surface], budget=budget):
+                files += 1
                 hits += det.scan_stream(chunks, "surface/" + os.path.relpath(loc, surface))
-        rnd = {"round": r, "canaries": [c.fingerprint for c in cans], "exit": rc,
-               "kinds_hit": sorted({h.kind for h in hits}), "hit_count": len(hits),
-               "hits": [_hit_dict(h) for h in _cap(hits)]}
-        if rc != 0:
+            if not files:
+                errors.append("empty surface")
+            if budget.truncated:
+                errors.append("surface scan budget of %d bytes exhausted" % max_bytes)
+        rnd = {"round": r, "canaries": [c.fingerprint for c in cans], "exit": rc, "errors": errors,
+               "kinds_hit": sorted({h.kind for h in hits}), "forms_hit": sorted({h.form for h in hits}),
+               "hit_count": len(hits), "hits": [_hit_dict(h) for h in _cap(hits)]}
+        if errors:
             rnd["stderr_tail"] = det.redact(err[-2000:]).decode(errors="replace")
         results.append(rnd)
-    if any(r["exit"] != 0 for r in results):
+    if any(r["errors"] for r in results):
         outcome = "error"
     elif any(r["hits"] for r in results):
         outcome = "leak"
@@ -294,24 +420,44 @@ def _judge(target, res):
     expect = target.get("expect", "clean")
     if res["outcome"] != expect:
         return False, "expected %s, got %s" % (expect, res["outcome"])
+    why = target.get("why")
+    if why and not all(len(r["errors"]) == 1 and why in r["errors"][0] for r in res["rounds"]):
+        return False, "expected only the error %r every round, got %s" % (why, [r["errors"] for r in res["rounds"]])
     if expect == "leak":
-        missed = [r["round"] for r in res["rounds"] if r["kinds_hit"] != sorted(KINDS)]
+        want = sorted(target.get("kinds") or KINDS)
+        missed = [r["round"] for r in res["rounds"] if r["kinds_hit"] != want]
         if missed:
-            return False, "detector missed kinds in rounds %s" % missed
+            return False, "expected exactly kinds %s caught; rounds %s differ" % (want, missed)
+        forms = target.get("forms")
+        stray = sorted({f for r in res["rounds"] for f in r["forms_hit"]} - set(forms or ())) if forms else []
+        if stray:
+            return False, "control leaked forms %s it should not contain" % stray
     return True, expect
 
 
-def cmd_run(args):
-    targets = json.loads(pathlib.Path(args.targets).read_text())["targets"]
-    minted, report, ok_all = [], {"rounds": args.rounds, "targets": []}, True
+def load_registry(path):
+    targets = json.loads(pathlib.Path(path).read_text())["targets"]
     for t in targets:
-        res = run_target(t, args.rounds, timeout=args.timeout, minted=minted)
+        if t.get("control") or t.get("expect", "clean") != "clean":
+            raise ValueError("%s: product targets must expect clean; controls are built in" % t.get("name"))
+    return targets
+
+
+def cmd_run(args):
+    try:
+        product = load_registry(args.targets)
+    except ValueError as e:
+        print("FAIL registry: %s" % e, file=sys.stderr)
+        return 2
+    minted, report, ok_all = [], {"rounds": args.rounds, "targets": []}, True
+    for t in control_targets() + product:
+        res = run_target(t, args.rounds, timeout=args.timeout, minted=minted, max_bytes=args.max_bytes)
         ok, why = _judge(t, res)
         ok_all &= ok
         res.update(control=bool(t.get("control")), expect=t.get("expect", "clean"), passed=ok)
         report["targets"].append(res)
         kinds = len({k for r in res["rounds"] for k in r["kinds_hit"]})
-        print("%s %-22s %s (%s; %d/%d kinds surfaced, %d rounds)" % (
+        print("%s %-24s %s (%s; %d/%d kinds surfaced, %d rounds)" % (
             "PASS" if ok else "FAIL", t["name"], "control" if t.get("control") else "target",
             why, kinds, len(KINDS), args.rounds))
         if not ok:
@@ -319,11 +465,11 @@ def cmd_run(args):
                 for h in r["hits"][:5]:
                     print("    round %d: %s canary as %s at %s+%d" % (
                         r["round"], h["kind"], h["form"], h["location"], h["offset"]))
-                if "stderr_tail" in r:
-                    print("    round %d exit %s; stderr (redacted):\n%s" % (r["round"], r["exit"], r["stderr_tail"]))
-    real = [t["name"] for t in targets if not t.get("control")]
-    report["real_targets"] = real
-    if not real:
+                if r["errors"]:
+                    print("    round %d errors: %s; stderr (redacted):\n%s" % (
+                        r["round"], "; ".join(r["errors"]), r.get("stderr_tail", "")))
+    report["real_targets"] = [t["name"] for t in product]
+    if not product:
         print("note: no product targets registered yet; only controls ran (see assurance/README.md)")
     blob = json.dumps(report, indent=1).encode()
     report["report_scanned_clean"] = not Detector(minted).scan_bytes(blob, "report")
@@ -339,7 +485,11 @@ def cmd_sweep(args):
     pids = []
     for p in args.pid:
         pids += _all_pids() if p == "all" else [int(p)]
-    n = dump(args.out, roots=args.root, pids=pids, max_bytes=args.max_bytes)
+    try:
+        n = dump(args.out, roots=args.root, pids=pids, max_bytes=args.max_bytes)
+    except SweepTruncated as e:
+        print("FAIL %s" % e, file=sys.stderr)
+        return 1
     print("swept %d locations into %s" % (n, args.out))
     return 0
 
@@ -351,6 +501,7 @@ def main(argv=None):
     r.add_argument("--targets", required=True)
     r.add_argument("--rounds", type=int, default=3)
     r.add_argument("--timeout", type=int, default=600)
+    r.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
     r.add_argument("--report")
     s = sub.add_parser("sweep")
     s.add_argument("--root", action="append", default=[])

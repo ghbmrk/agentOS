@@ -3,6 +3,7 @@
 # Makes no coverage claim for DEP-1–4: those are claimed by the packages whose
 # scenarios pass this harness (broker P1-2 onward).
 import json
+import os
 import pathlib
 import sys
 import tempfile
@@ -24,6 +25,10 @@ STRACE = """\
 103 connect(9, {sa_family=AF_UNIX, sun_path="/WORK/tmp/sock"}, 110) = 0
 104 sendmmsg(10, [{msg_hdr={msg_name={sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr("8.8.8.8")}, msg_namelen=16}}], 1, 0) = 1
 104 connect(11, {sa_family=AF_NETLINK, nl_pid=0, nl_groups=00000000}, 12) = 0
+105 connect(12, {sa_family=AF_VSOCK, svm_cid=VMADDR_CID_HOST, svm_port=1024}, 16) = 0
+105 connect(13, {sa_family=AF_INET, sin_port=htons(80), sin_addr=something_new("x")}, 16) = 0
+105 connect(14, {sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr("127.0.0.53")}, 16) = 0
+105 connect(15, {sa_family=AF_UNSPEC, sa_data="\\0\\0"}, 16) = 0
 """
 
 MANIFEST = {
@@ -46,7 +51,14 @@ class ParseTest(unittest.TestCase):
         self.assertIn(("unix", "/run/systemd/resolve/io.systemd.Resolve", None), got)
         self.assertIn(("unix", "@abstract-name", None), got)
         self.assertIn(("inet", "8.8.8.8", 53), got)
-        self.assertFalse(any(e.family == "netlink" for e in ev))
+        self.assertFalse(any(e.addr in ("AF_NETLINK", "AF_UNSPEC") for e in ev))
+
+    def test_fails_closed_on_unknown_or_unparsed_sockaddrs(self):
+        ev = depaudit.parse_strace(STRACE)
+        self.assertIn(("other", "AF_VSOCK"), {(e.family, e.addr) for e in ev})
+        self.assertIn(("unparsed", "AF_INET"), {(e.family, e.addr) for e in ev})
+        nested = '106 sendmsg(3, {msg_name={sa_family=AF_INET, sin_port=htons(1), {weird}}, ...}, 0) = 1'
+        self.assertEqual([e.family for e in depaudit.parse_strace(nested)], ["unparsed"])
 
     def test_parse_dns_query_name(self):
         q = (b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00"
@@ -66,18 +78,21 @@ class PolicyTest(unittest.TestCase):
     def test_offline_profile_allows_only_loopback_and_own_sockets(self):
         got = self.kinds("offline", ["mirror.example.net"])
         self.assertEqual(got, [
+            ("dns", "loopback:53"),
             ("dns", "mirror.example.net"),
             ("host-socket", "/run/systemd/resolve/io.systemd.Resolve"),
-            ("ip", "192.0.2.10:443"),
-            ("ip", "8.8.8.8:53"),
-            ("ip", "[2001:db8::1]:123"),
+            ("ipv4", "192.0.2.10:443"),
+            ("ipv4", "8.8.8.8:53"),
+            ("ipv6", "[2001:db8::1]:123"),
+            ("unknown-family", "AF_VSOCK"),
+            ("unparsed", "AF_INET"),
         ])
 
     def test_full_profile_allows_declared_endpoints_only(self):
         got = self.kinds("full", ["mirror.example.net", "unknown.example.org"])
         self.assertIn(("dns", "unknown.example.org"), got)
         self.assertNotIn(("dns", "mirror.example.net"), got)
-        self.assertIn(("ip", "192.0.2.10:443"), got)
+        self.assertIn(("ipv4", "192.0.2.10:443"), got)
 
     def test_forbidden_is_never_allowed(self):
         got = self.kinds("full", ["telemetry.agentos.example"])
@@ -140,13 +155,37 @@ class OfflineRunTest(unittest.TestCase):
         res = self.run_control("phones-home")
         self.assertEqual(res["outcome"], "violation")
         kinds = {v["kind"] for v in res["violations"]}
-        self.assertEqual(kinds, {"dns", "forbidden", "ip", "host-socket"}, res)
+        self.assertLessEqual({"dns", "forbidden", "ipv4", "host-socket"}, kinds, res)
+        if depaudit._ipv6_available():
+            self.assertIn("ipv6", kinds, res)
 
     def test_subject_that_needs_network_fails_its_scenario(self):
         self.assertEqual(self.run_control("needs-network")["outcome"], "scenario-failed")
 
+    def test_host_sockets_are_masked_not_just_logged(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as d:
+            import socket
+            probe = socket.socket(socket.AF_UNIX)
+            probe.bind(os.path.join(d, "p.sock"))
+            probe.listen()
+            os.chmod(d, 0o755)
+            res = depaudit.run_target({"name": "hs", "cmd": CONTROLS + ["host-socket"],
+                                       "env": {"DEPAUDIT_PROBE": os.path.join(d, "p.sock")}},
+                                      depaudit.load_manifest(MANIFEST))
+            probe.close()
+        self.assertEqual(res["outcome"], "violation", res)
+        self.assertIn("/tmp", res["masked"])
+
     def test_shipped_registry_passes(self):
         self.assertEqual(depaudit.main(["run", "--targets", str(ROOT / "assurance" / "dep-targets.json")]), 0)
+
+    def test_registry_cannot_relax_a_product_scenario(self):
+        with tempfile.TemporaryDirectory() as d:
+            reg = pathlib.Path(d, "t.json")
+            for t in ({"name": "x", "cmd": ["true"], "expect": "violation"},
+                      {"name": "x", "cmd": ["true"], "control": True}):
+                reg.write_text(json.dumps({"targets": [t]}))
+                self.assertEqual(depaudit.main(["run", "--targets", str(reg)]), 2, t)
 
 
 class RepoTest(unittest.TestCase):

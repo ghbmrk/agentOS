@@ -7,6 +7,8 @@ these on every pass alongside the real scenarios.
   phones-home    DNS lookups (one forbidden name), a TCP connect and a UDP send to
                  documentation addresses, a host-wide Unix socket; exits 0
   needs-network  exits nonzero when it cannot reach the network
+  host-socket    connects to the live socket at $DEPAUDIT_PROBE (outside the
+                 sandbox's work directory); exits nonzero if it got through
 """
 import os
 import socket
@@ -53,5 +55,15 @@ def needs_network():
         sys.exit("offline: %s" % e)
 
 
+def host_socket():
+    with socket.socket(socket.AF_UNIX) as s:
+        try:
+            s.connect(os.environ["DEPAUDIT_PROBE"])
+        except OSError:
+            return
+    sys.exit("reached a host socket outside the sandbox")
+
+
 if __name__ == "__main__":
-    {"clean": clean, "phones-home": phones_home, "needs-network": needs_network}[sys.argv[1]]()
+    {"clean": clean, "phones-home": phones_home, "needs-network": needs_network,
+     "host-socket": host_socket}[sys.argv[1]]()

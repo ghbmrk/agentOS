@@ -7,7 +7,12 @@ every pass alongside the real targets.
   leaky         every canary leaks into surface files, each in a different disguise
   leaky-log     every canary leaks to stderr only, base64 inside a log line
   leaky-memory  every canary lives only in a child's memory; the root sweeper dumps it
+  leaky-decoded only the decoded bytes of hex/base32/base64 canaries, in a child's memory
   crash         exits nonzero (a crashed target must never count as clean)
+  no-ack        never loads the plant: must be an error, not clean
+  partial-ack   acks only some canaries: must be an error
+  empty-surface hands back nothing: must be an error
+  truncated-sweep  its sweep runs out of budget: must be an error
 """
 import base64
 import json
@@ -37,13 +42,41 @@ DISGUISES = [
 ]
 
 
+def ack(cans, n=None):
+    fps = [canary.fingerprint(c["value"]) for c in cans][:n]
+    pathlib.Path(os.environ["CANARY_ACK"]).write_text(json.dumps({"loaded": fps}))
+
+
+def hold_in_child(payload, surface, max_bytes=canary.DEFAULT_MAX_BYTES):
+    """Start a child that holds payload (bytes) only in memory, then sweep it."""
+    child = subprocess.Popen(
+        [sys.executable, "-c",
+         "import sys,time; n=int(sys.stdin.buffer.readline()); held=sys.stdin.buffer.read(n); "
+         "print('ready', flush=True); time.sleep(60)"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    try:
+        child.stdin.write(b"%d\n" % len(payload) + payload)
+        child.stdin.close()
+        assert child.stdout.readline().strip() == b"ready"
+        canary.dump(surface / "sweep", pids=[child.pid], max_bytes=max_bytes)
+    finally:
+        child.kill()
+        child.wait()
+        child.stdout.close()
+
+
 def main(mode):
     cans = json.loads(pathlib.Path(os.environ["CANARY_PLANT"]).read_text())["canaries"]
     surface = pathlib.Path(os.environ["CANARY_SURFACE_DIR"])
-    if mode == "clean":
+    if mode not in ("no-ack", "partial-ack"):
+        ack(cans)
+    if mode in ("clean", "no-ack", "partial-ack", "leaky-log", "crash"):
         (surface / "workspace").mkdir()
         (surface / "workspace" / "notes.txt").write_bytes(os.urandom(4096).hex().encode())
+    if mode == "clean":
         print("held %d canaries on the trusted side" % len(cans))
+    elif mode == "partial-ack":
+        ack(cans, n=len(cans) - 1)
     elif mode == "leaky":
         for i, c in enumerate(cans):
             d = surface / "guest" / ("d%d" % i)
@@ -54,22 +87,18 @@ def main(mode):
             line = json.dumps({"k": c["kind"], "v": c["value"]}).encode()
             sys.stderr.write("debug: %s\n" % base64.b64encode(os.urandom(2) + line).decode())
     elif mode == "leaky-memory":
-        child = subprocess.Popen(
-            [sys.executable, "-c",
-             "import sys,time; held=[l.strip() for l in sys.stdin]; "
-             "print('ready', flush=True); time.sleep(60)"],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        hold_in_child("".join(json.dumps(c["value"]) + "\n" for c in cans).encode(), surface)
+    elif mode == "leaky-decoded":
+        hold_in_child(b"".join(os.urandom(5) + canary.decode(c["kind"], c["value"])
+                               for c in cans if c["kind"] in canary.DECODABLE), surface)
+    elif mode == "truncated-sweep":
         try:
-            child.stdin.write("".join(json.dumps(c["value"]) + "\n" for c in cans))
-            child.stdin.close()
-            assert child.stdout.readline().strip() == "ready"
-            canary.dump(surface / "sweep", pids=[child.pid])
-        finally:
-            child.kill()
-            child.wait()
+            hold_in_child(os.urandom(64), surface, max_bytes=1 << 16)
+        except canary.SweepTruncated:
+            sys.exit(4)
     elif mode == "crash":
         sys.exit(3)
-    else:
+    elif mode not in ("no-ack", "empty-surface"):
         sys.exit("unknown mode " + mode)
 
 

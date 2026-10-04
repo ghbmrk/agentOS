@@ -16,6 +16,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -31,19 +33,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Sandbox prerequisites (user namespaces, strace)
+      - name: Sandbox prerequisites (user namespaces, io_uring off, strace)
         run: |
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
+          # io_uring socket operations are invisible to strace; disable them outright.
+          sudo sysctl -w kernel.io_uring_disabled=2
           command -v strace || { sudo apt-get update -q && sudo apt-get install -yq strace; }
       - name: Static endpoint scan (DEP-2)
         run: python3 tools/depaudit.py static
       - name: Offline scenarios with all traffic logged (A9)
-        run: python3 tools/depaudit.py run --targets assurance/dep-targets.json --report dep-report.json
+        run: python3 tools/depaudit.py run --targets assurance/dep-targets.json --require-io-uring-disabled --report dep-report.json
       - name: Harness self-tests inside the sandbox
         run: python3 -m unittest tests.test_depaudit tests.test_canary -v
       - uses: actions/upload-artifact@v4
