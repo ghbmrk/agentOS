@@ -37,3 +37,4 @@ Everything else, including defaults, tiers, and timeouts, is tradable when the t
 | Run | main at | Inputs | Arbitration |
 |---|---|---|---|
 | 0 | e841b78 | loop set up | — |
+| 1 | e841b78 | PRs #8, #9, #11, #12 | [2026-10-04](2026-10-04-arbitration.md) |
