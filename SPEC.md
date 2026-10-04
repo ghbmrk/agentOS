@@ -234,12 +234,25 @@ intent { id, goal_id, origin(authenticated), action, exact params/recipients/vis
 | ID | Service | Requirement |
 |---|---|---|
 | **CAP-1** | Speculative parallelism | Agents MAY fork N machines, try approaches, test, keep the winner. N is set by measured free RAM; at the floor N may be 1 (sequential). Frontier spend is reserved per fork. |
-| **CAP-2** | Reach | Credentialed browsers (§7.3) for logged-in sites; uncredentialed browsing with full power inside agent machines; local network devices by explicit grant. |
+| **CAP-2** | Reach | Any tool through an adapter (§10A). Credentialed browsers (§7.3) for logged-in sites; uncredentialed browsing with full power inside agent machines; local network devices by explicit grant. |
 | **CAP-3** | Recall | A broker-owned local index of everything the system has seen, with provenance. Full text, embeddings, and structured facts. Owner corrections are stored as explicit, editable preferences. Deletion requests propagate. |
 | **CAP-4** | Always-on | An event bus (mail, files, calendar, web changes, timers) triggers work. Interrupts for irreversible decisions only, batched into a digest unless urgent. |
 | **CAP-5** | Compounding | Successful trajectories are recorded as replayable procedures. Recurring ones are compiled into scripts that consult a model only where assumptions fail. Compiled skills go through §11. |
 | **CAP-6** | Attention optimizer | Approvals arrive batched and risk-tiered, with evidence. The system proposes (never assumes) converting always-approved classes into standing grants. |
 | **CAP-7** | Collaboration | Multiple frontier participants may work one task through broker tools. Disagreements are settled preferably by running both (CAP-1), not by debate. This is guest behavior, not infrastructure. |
+
+---
+
+## 10A. Adapters: reaching any tool
+
+AgentOS reaches current and future tools (frontier assistants, SaaS, local apps) through **adapters**. An adapter is a versioned, declarative package that maps a tool's operations onto broker intents. Adding a tool means adding an adapter, not changing the broker.
+
+- **ADP-1** Every external tool is reached through an adapter that declares: tool identity, connection type, the operations it exposes, each operation's reversibility class (§5), and the credential custody it needs (§7). An undeclared operation does not exist for agents.
+- **ADP-2** Connection types, in **default** routing order: (1) API or MCP; (2) the tool's CLI or plugin interface; (3) its web app, in a credentialed browser (CRED-4) when logged in; (4) its desktop app under GUI automation. The router picks the first type that covers the operation and is currently healthy.
+- **ADP-3** **Desktop-app executors.** A desktop app that holds a login runs in a broker-owned VM, one account each, and is driven only through the CRED-4 action protocol (accessibility tree, screenshot, click, type, select); no debugger, profile, or file access to the app's credential store. Linux apps run natively; Windows apps via Wine or a Windows VM where host resources and the owner's license allow; Android apps via an emulator where resources allow. At the floor, at most one desktop-app executor runs at a time [Inference; S3 measures it].
+- **ADP-4** **Routing is self-improving.** The order in ADP-2 is a starting default. Route choice per tool and operation is a Loop 1 candidate class (LOOP-4), scored on measured success, owner outcome, latency, cost, and breakage. A new route is adopted only through §11 (held-out suite, CHG-1) and rolls back on regression. Routing changes MUST NOT change an operation's reversibility class or credential custody; those change only by owner-approved intent.
+- **ADP-5** Adapters are created and changed only through §11, including by agents when a new tool appears: draft the adapter, qualify it on recorded interactions (LOOP-5), and request any new grants from the owner. Adapters with no private content may accumulate publicly via §11B.
+- **ADP-6** An adapter whose observed behavior diverges from its declaration (a changed UI or API) is demoted to its next healthy connection type, or paused if none exists, and Loop 3 receives a repair candidate. Demotion never widens authority.
 
 ---
 
@@ -364,7 +377,7 @@ Every installation's verified gains can flow into one public project, and every 
 
 ## 14. Out of scope (v0.11)
 
-Fleet orchestration; Mac or ARM boot; any hosted AgentOS service; remote rich UI (needs a relay, so excluded by DEP-2); a marketplace; private-data federated training; large local models as a requirement; custom kernel or distribution work.
+Fleet orchestration; Mac or ARM boot; macOS-only and iOS-only apps (no lawful way to run them on the host); any hosted AgentOS service; remote rich UI (needs a relay, so excluded by DEP-2); a marketplace; private-data federated training; large local models as a requirement; custom kernel or distribution work.
 
 ---
 
@@ -383,9 +396,10 @@ Fleet orchestration; Mac or ARM boot; any hosted AgentOS service; remote rich UI
 | **A9** | Dependency audit: with all optional dependencies removed, and with all outbound traffic logged, the system boots, takes STOP/STATUS, and recovers. No traffic to any AgentOS-operated endpoint ever. | DEP-1–4 |
 | **A10** | Leverage vs an unmodified OpenClaw baseline and a direct provider CLI on the same host and accounts: owner-minutes per accepted task, tasks per week, second-run speedup from compiled skills, and approvals split into necessary vs avoidable. | §1, CAP-4–6 |
 | **A11** | Spare-capacity loops: over a fixed period on the floor host, loop 1 adopts at least one candidate with a predeclared held-out gain and rejects a bad one; loop 2 finds a seeded vulnerability, contains it, adds a regression, and qualifies a fix; any live call preempts loops within target; spare budget is never exceeded; a fix that weakens a check is rejected. | LOOP-1–11 |
+| **A13** | Adapters: one tool reachable by API and by web, plus one logged-in Linux desktop app. Default routing picks the API; a simulated API break demotes it to web with unchanged reversibility class; Loop 1 proposes a route change that is adopted only via the held-out suite, and a bad one is rejected; canary sessions in the desktop-app executor are never surfaced (as A5). | ADP-1–6, CAP-2 |
 | **A12** | Open-source round trip: installation X publishes a public skill and a security regression (embargoed path for the latter); independent installation Y reproduces and attests; a maintainer merges; Z receives it via update, re-qualifies, and adopts or rejects. With the repository unreachable, X, Y, and Z operate normally. **Leakage audit:** canary private data is planted in the journal, the index, and workspaces; the clean room is shown unable to read any of it; no canary or derivative appears in any publication or hint; and hints contain only schema-enumerated values. | OSS-1–13, LOOP-0, DEP-3 |
 
-**Gates (riskiest first):** G1 = A1 (hardware and screenless reality). G2 = A4, A5, A9 on a VM (core correctness). G3 = A2, A3, A6, A8 on real hosts. G4 = A7, A10, A11. G5 = A12 (needs a second and third independent installation).
+**Gates (riskiest first):** G1 = A1 (hardware and screenless reality). G2 = A4, A5, A9 on a VM (core correctness). G3 = A2, A3, A6, A8 on real hosts. G4 = A7, A10, A11, A13. G5 = A12 (needs a second and third independent installation).
 
 Before any qualification run, freeze revisions, hardware profile, accounts, workloads, numeric targets, repeats, margins, and rollback triggers. Missing values make a run exploratory, not a pass.
 
@@ -405,6 +419,7 @@ Before any qualification run, freeze revisions, hardware profile, accounts, work
 | 2026-10-04 | Loops and contribution on by default, modifiable; contribution is clean-room only, so no personal data can be published (§11B). |
 | 2026-10-04 | Spare-capacity self-improvement and self-securing loops; accumulation into an open-source project (§11A, §11B). |
 | 2026-10-04 | Zero or near-zero external dependencies: no AgentOS-operated services, no relay, no app-store app. |
+| 2026-10-04 | Adapter contract (§10A). Default routing order API → CLI → web → desktop GUI, which loops may improve through §11 like everything else. |
 | Proposed | External-drive-only (no internal install). This spec assumes it; the owner has not formally confirmed. |
 
 ## 17. Open risks
