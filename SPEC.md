@@ -136,12 +136,12 @@ One device holds the NVMe SSD, a microcontroller that acts as a USB keyboard for
 | Approve a high-risk irreversible intent (CH-10) | Approval code from the code generator, in reply to that request's ID |
 | New grant, raise budget, adopt a release, add a trusted host, recovery | Approval code + local confirmation or recovery key, per policy |
 
-- **CH-4** Approval codes come from a standard code generator. [Fact] iPhone's built-in Passwords app generates them; on Android any authenticator works. The **paper grid** on the Owner Card is the fallback. No AgentOS app exists.
+- **CH-4** Approval codes come from a standard code generator. [Fact] iPhone's built-in Passwords app generates them; on Android any authenticator works. The **paper grid** on the Owner Card is the fallback. No AgentOS app exists. These codes are the high-risk tier of CH-10. Batching (one code per digest batch) and pre-allowances are the main ways to reduce prompts.
 - **CH-5** Live calls: carrier voice → modem → broker → speech (local by default; hosted only by explicit policy) → guest. [Risk] Voice quality and latency over USB modems need qualifying.
 - **CH-10** **Two-tier approval.** Prompts should be rare in the first place: approvals are batched (one code covers a batch) and owner pre-allowances cover routine actions, so codes are needed only for what remains.
-  - **Low risk** means a recipient already known to the owner's accounts, an amount under an owner-set limit, or an effect reversible within a window. The box texts a one-time code bound to that request (and batch), and the owner replies with it from their number. This still defeats spoofed texts and self-approval by the agent, which never sees the code. [Risk] It does not defeat someone holding the owner's unlocked phone or a SIM swap of the owner's number.
-  - **High risk** means new or wider grants, money above the owner-set limit, CRED-6 actions, and anything CH-3 lists for new grants. These require the code-generator code, which sits behind the phone's biometric lock and is unaffected by a SIM swap.
-  - The tier is decided by the broker from verified data, never by the agent. Unclassifiable requests are high risk. The tier thresholds change only by a high-risk intent.
+  - **Low risk** means a recipient already known to the owner's accounts, an amount under an owner-set limit, or an effect reversible within a window. The box texts a one-time code bound to that request (and batch), and the owner replies with it from their number. This still defeats spoofed texts and self-approval by the agent, which never sees the code. It proves possession of the owner's number only (§17 risk 7).
+  - **High risk** means new or wider grants or pre-allowances, money above the owner-set limit, CRED-6 actions, and recovery. These require the code-generator code or the paper grid, which a SIM swap cannot obtain, plus local confirmation where CH-3 already requires it.
+  - The owner sets the tier boundaries; changing them is a high-risk intent. The broker applies them to verified data, never to the agent's claims. Unclassifiable requests are high risk.
 - **CH-6** Secrets MUST NEVER be requested or accepted over text or voice. The carrier sees that traffic, and transcripts reach models.
 
 ### 6.2 Local web UI (box's own Wi-Fi only)
@@ -421,3 +421,4 @@ Before any qualification run, freeze revisions, hardware profile, accounts, work
 4. **Classifying web actions** as reversible vs irreversible in credentialed browsers. MVP: per-site allowlist, everything else draft-only.
 5. **Remote rich UI is gone by design.** If that proves too limiting, the only fix is an optional, owner-chosen, end-to-end-encrypted relay. That would be a deliberate exception to DEP-2's spirit, never a requirement.
 6. **Project update-signing key** custody (UPD-2).
+7. **Low-tier approvals by text** (CH-10). A SIM swap of the owner's number, or a stolen unlocked phone, can approve low-risk requests. Mitigations: the owner-set low-tier limits, reversibility windows, the journal, and STOP.
