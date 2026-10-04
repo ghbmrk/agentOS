@@ -1,6 +1,6 @@
 # AgentOS — Build Plan
 
-Builds spec v0.11 (`/mnt/project-files/spec/agentos-core-spec-v0.11.md`) with Claude models under a **finite usage budget**, using nested iterative loops.
+Builds the spec in `SPEC.md` (v0.12 at P0 exit; v0.11 started at `/mnt/project-files/spec/agentos-core-spec-v0.11.md`) with Claude models under a **finite usage budget**, using nested iterative loops.
 Labels: **[Fact]**, **[Inference]**, **[Rec]**, **[Mark]** = needs Mark's hands, money, or decision.
 
 ---
@@ -209,6 +209,34 @@ Rigid caps breed waste: work abandoned at 95% done, padding to "use the budget",
 | Reserve | 10% | 1–2 |
 
 This totals roughly **3–5 months** of calendar time at this plan level. That figure is a sizing guess, not a commitment. Mark's physical test sessions and spike outcomes will move it more than token efficiency will.
+
+## 4B. Re-estimate at P0 exit (2026-10-04)
+
+[Inference throughout: no usage screenshot since the 10:58 calibration, so no harness spend is measured (B-6). One screenshot now would turn the P0 row into a measurement.]
+
+**What changed since §4A.**
+- **Scope grew.** SPEC.md went from 101 requirement IDs and 12 acceptance tests (v0.11 as imported, 25f9b2b) to 144 IDs and 15 tests (v0.12), and from 40 KB to 88 KB. Review 1 added 38 IDs (adapters ADP-1–12, owner channel CH-10–20, onboarding ONB-3–8, data labels, worker machines, routing, TUF); the spikes added 5 (HW-5a, UPD-1a, ARC-6, ARC-7, OP-8). Requirements also got denser, so ID count understates the growth.
+- **P0 cost** (estimates from the spike results and thread sizes): three cloud spikes ≈ 7–9% of a WAU with review fixes; the spec-design session ≈ 14% (the 10:58 reading); three lens reviews, arbitration, PR reviews and spec PRs ≈ 15–25%. P0 so far ≈ 0.35–0.5 WAU, inside its 10% share (≈ 0.9–1.4 WAU of the §4A total). S1, S2, S5, S6 remain, ≈ 0.1–0.2 WAU.
+- **Standing overhead.** Four weekly review loops plus PR review now run every week. At roughly 2–3% each, that is ≈ 10% of each week, which cuts the build envelope from ~70% to ~60% unless loops skip weeks with nothing new to review.
+- **No calibration yet for build cost.** P0 merged spikes and spec text, not requirement-covering code, so tokens per merged requirement (the number L1 needs) is first measured in P1.
+
+**Revised forecast** (weeks at the effective envelope; ranges scale each phase by the new IDs that land in it):
+
+| Phase | New IDs landing there | Scale | §4A weeks | Revised weeks |
+|---|---|---|---|---|
+| P0 (incl. S1, S2, S5, S6) | — | — | 1–2 | 1–2 (on forecast; S1/S2 wait on hardware) |
+| P1 core in a VM | ARC-5–7, REV-5, OP-8, CAP-8/9, CH-10–19 against the simulator | ×1.5 | 3–5 | 4.5–7.5 |
+| P2 real hardware | ADP-1–3, 5–7, 9–12, ONB-3–8, CRED-10, REC-4, CH-20, HW-5a, UPD-1a | ×1.5 | 4–6 | 6–9 |
+| P3 compounding | CHG-6, CAP-10, ADP-4/8 | ×1.15 | 3–4 | 3.5–4.5 |
+| P4 open source | UPD-8 | ×1.1 | 1 | 1 |
+| Reserve | 10% | — | 1–2 | 1.5–2.5 |
+| **Total** | | | 13–20 (3–5 months) | **17.5–26.5 at 70% (4–6 months); 20–31 at 60% (5–7 months)** |
+
+**Recommendations.**
+1. **Start P1 now** on the merged S3/S4/S7 results; S5 (cloud) runs beside P1, and S1, S2, S6 stay open as P0 tails that gate only P2. Nothing in P1 depends on them (§3).
+2. **Run review loops on change only:** a lens loop runs when SPEC.md or security-critical code changed since its last run, else it records "no change" and stops. That recovers most of the ~10% in quiet weeks without skipping any review of new material.
+3. **Recalibrate after the first three P1 packages** from tokens per merged requirement, and replace the scale factors above with that measurement.
+4. **Hold P1's first package to the smallest end-to-end slice** (journal + broker STOP/STATUS, OP-1–6, ARC-2, CH-2) so the first measurement comes early.
 
 ## 5. Artifacts the harness maintains (in the repo)
 

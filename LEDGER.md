@@ -13,13 +13,13 @@ Unit: WAU = one week's plan allowance. Harness envelope: ~70% default, adaptive 
 
 | Week starting | Envelope | Harness used (est.) | Mark's own use | Notes |
 |---|---|---|---|---|
-| 2026-10-04 | 70% | — | — | P0 start. S3 (cloud): ~0.22 M tokens by session counter, incl. review fixes; WAU share awaits Mark's screenshot (B-6). S4: ~0.5 M tokens of context (est., unmetered), incl. review fixes; see its RESULT.md. S7: ~0.25 M tokens of context (est., unmetered); see its RESULT.md |
+| 2026-10-04 | 70% | ≈ 35–50% (est., see PLAN.md §4B) | — | P0 start; P0 exit prep (spec v0.12) ≈ 2% est. S3 (cloud): ~0.22 M tokens by session counter, incl. review fixes; WAU share awaits Mark's screenshot (B-6). S4: ~0.5 M tokens of context (est., unmetered), incl. review fixes; see its RESULT.md. S7: ~0.25 M tokens of context (est., unmetered); see its RESULT.md |
 
 ## Phase allocation (share of total)
 
 | Phase | Share | Spent |
 |---|---|---|
-| P0 | 10% | — (WAU share awaits B-6 screenshot) |
+| P0 | 10% | ≈ 0.35–0.5 WAU est. (PLAN.md §4B); awaits B-6 screenshot |
 | P1 | 25% | — |
 | P2 | 30% | — |
 | P3 | 20% | — |

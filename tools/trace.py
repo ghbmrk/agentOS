@@ -14,8 +14,8 @@ import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-ID_DEF = re.compile(r"\*\*([A-Z]{2,4}-\d+)\*\*")
-MARKER = re.compile(r"REQ:\s*([A-Z]{2,4}-\d+(?:\s*,\s*[A-Z]{2,4}-\d+)*)")
+ID_DEF = re.compile(r"\*\*([A-Z]{2,4}-\d+[a-z]?)\*\*")
+MARKER = re.compile(r"REQ:\s*([A-Z]{2,4}-\d+[a-z]?(?:\s*,\s*[A-Z]{2,4}-\d+[a-z]?)*)")
 SCAN_DIRS = ("tests", "spikes", "src", "broker")
 SKIP_SUFFIXES = {".png", ".jpg", ".img", ".iso", ".bin"}
 
