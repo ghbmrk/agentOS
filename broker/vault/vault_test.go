@@ -149,7 +149,14 @@ func TestSecretNeverFormatsItsValue(t *testing.T) {
 	s, _ := v.Secret("openai")
 	js, _ := json.Marshal(struct{ S Secret }{s})
 	txt, _ := s.MarshalText()
+	type holder struct{ s Secret } // unexported field: fmt cannot call Format
+	type nested struct {
+		h  holder
+		hp *holder
+	}
 	outs := []string{
+		fmt.Sprintf("%v %+v %#v", holder{s}, holder{s}, holder{s}),
+		fmt.Sprintf("%v %+v %#v", nested{holder{s}, &holder{s}}, nested{h: holder{s}}, &holder{s}),
 		fmt.Sprint(s), fmt.Sprintf("%v %+v %#v %s %q %x %X", s, s, s, s, s, s, s),
 		fmt.Sprintf("%v", []Secret{s}), fmt.Sprintf("%+v", struct{ S Secret }{s}),
 		string(js), string(txt), s.String(), s.GoString(),
@@ -175,5 +182,40 @@ func TestPutValidates(t *testing.T) {
 	}
 	if err := v.Put("x", "", canary(t)); err == nil {
 		t.Error("accepted empty kind")
+	}
+}
+
+// After Close the vault refuses every call, so a late Put cannot rewrite
+// the file with only the new entry.
+func TestClosedVaultRefusesUse(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "vault")
+	key := testKey(t)
+	v, err := Create(path, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Put("a", KindAPIKey, canary(t)); err != nil {
+		t.Fatal(err)
+	}
+	v.Close()
+	if err := v.Put("b", KindAPIKey, canary(t)); err != ErrClosed {
+		t.Fatalf("Put after Close: %v", err)
+	}
+	if err := v.Delete("a"); err != ErrClosed {
+		t.Fatalf("Delete after Close: %v", err)
+	}
+	if _, ok := v.Secret("a"); ok {
+		t.Fatal("Secret after Close")
+	}
+	if _, err := v.Redactor(); err != ErrClosed {
+		t.Fatalf("Redactor after Close: %v", err)
+	}
+	v2, err := Open(path, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v2.Close()
+	if got := v2.List(); len(got) != 1 || got[0].Name != "a" {
+		t.Fatalf("file changed after Close: %v", got)
 	}
 }

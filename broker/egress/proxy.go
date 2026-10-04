@@ -5,14 +5,18 @@
 // placeholder credential. Each request arrives on a handler bound to one
 // agent machine, so identity comes from where the request arrived, never
 // from anything the guest sends. The proxy forwards a request only if it
-// matches a declared operation of an adapter that machine is granted. It
-// then drops every header outside a fixed allowlist (including any
-// credential the guest supplied), writes the vault credential into the
-// adapter's injection header, and sends the request over HTTPS to the
-// adapter's host. Redirects are returned, never followed. The response
+// matches a declared operation of an adapter that machine is granted, and
+// its JSON body passes the operation's BodyRule. It then drops every header
+// outside a fixed allowlist (including any credential the guest supplied),
+// writes the vault credential into the adapter's injection header, and
+// sends the request over HTTPS to the adapter's host. Redirects are
+// returned, never followed; encoded responses are refused. The response
 // comes back with only allowlisted headers, and its headers and body pass
 // the vault redactor (CRED-7), streamed so token streams keep flowing.
 // Every decision is reported to the Auditor; anything else is denied.
+//
+// Not yet here (see ASSUMPTIONS.md): the ADP-10 verb-class and intent check
+// before forwarding, and OP-8 metering.
 //
 // The proxy is not on the control path (ARC-2): STOP, STATUS, and
 // admission never import it.
@@ -20,11 +24,14 @@ package egress
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/vault"
@@ -32,6 +39,9 @@ import (
 
 // DefaultMaxBody caps a request body, in bytes.
 const DefaultMaxBody = 8 << 20
+
+// DefaultMaxConcurrent caps one machine's requests in flight.
+const DefaultMaxConcurrent = 4
 
 // Event is one proxy decision. It carries no header or body content, so it
 // cannot carry a credential.
@@ -47,13 +57,22 @@ type Event struct {
 	Status    int       `json:"status,omitempty"`
 }
 
-// Auditor receives every decision. The broker journals denials (ADP-10).
+// Auditor receives every decision. It is required: the broker journals
+// denials (ADP-10), and a proxy that could drop them is refused.
 type Auditor interface{ Egress(Event) }
 
 // Secrets is the part of the vault the proxy uses.
 type Secrets interface {
 	Secret(name string) (vault.Secret, bool)
-	Redactor() *vault.Redactor
+	Redactor() (*vault.Redactor, error)
+}
+
+// Cap is a hard per-machine ceiling on forwarded requests and on request
+// plus response bytes, until OP-8 metering replaces it. Zero fields are
+// unlimited.
+type Cap struct {
+	Requests int64
+	Bytes    int64
 }
 
 // Config configures New.
@@ -62,13 +81,19 @@ type Config struct {
 	// Grants maps an agent machine to the adapters it may use.
 	Grants map[string][]string
 	Vault  Secrets
+	Audit  Auditor
 	// Transport sends upstream requests; nil means a fresh http.Transport
-	// with no proxy from the environment.
+	// with no proxy from the environment and bounded connect, handshake,
+	// and response-header waits.
 	Transport http.RoundTripper
-	Audit     Auditor
 	// MaxBody caps request bodies; zero means DefaultMaxBody.
 	MaxBody int64
-	Now     func() time.Time
+	// MaxConcurrent caps one machine's requests in flight; zero means
+	// DefaultMaxConcurrent.
+	MaxConcurrent int
+	// Cap is applied to each machine separately.
+	Cap Cap
+	Now func() time.Time
 }
 
 // Proxy is the credentialed egress proxy.
@@ -79,13 +104,27 @@ type Proxy struct {
 	rt       http.RoundTripper
 	audit    Auditor
 	maxBody  int64
+	maxConc  int
+	cap      Cap
 	now      func() time.Time
+
+	mu    sync.Mutex
+	usage map[string]*machineUsage
+}
+
+type machineUsage struct {
+	inFlight int
+	requests int64
+	bytes    int64
 }
 
 // New validates every declaration and grant and returns a proxy.
 func New(cfg Config) (*Proxy, error) {
 	if cfg.Vault == nil {
 		return nil, errors.New("egress: vault required")
+	}
+	if cfg.Audit == nil {
+		return nil, errors.New("egress: auditor required")
 	}
 	p := &Proxy{
 		adapters: map[string]Adapter{},
@@ -94,7 +133,10 @@ func New(cfg Config) (*Proxy, error) {
 		rt:       cfg.Transport,
 		audit:    cfg.Audit,
 		maxBody:  cfg.MaxBody,
+		maxConc:  cfg.MaxConcurrent,
+		cap:      cfg.Cap,
 		now:      cfg.Now,
+		usage:    map[string]*machineUsage{},
 	}
 	for _, a := range cfg.Adapters {
 		if err := a.validate(); err != nil {
@@ -115,23 +157,25 @@ func New(cfg Config) (*Proxy, error) {
 		}
 	}
 	if p.rt == nil {
-		p.rt = &http.Transport{ForceAttemptHTTP2: true, TLSHandshakeTimeout: 10 * time.Second}
+		p.rt = &http.Transport{
+			DialContext:           (&net.Dialer{Timeout: 30 * time.Second}).DialContext,
+			ForceAttemptHTTP2:     true,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 10 * time.Minute,
+			IdleConnTimeout:       90 * time.Second,
+		}
 	}
 	if p.maxBody <= 0 {
 		p.maxBody = DefaultMaxBody
 	}
+	if p.maxConc <= 0 {
+		p.maxConc = DefaultMaxConcurrent
+	}
 	if p.now == nil {
 		p.now = time.Now
 	}
-	if p.audit == nil {
-		p.audit = discard{}
-	}
 	return p, nil
 }
-
-type discard struct{}
-
-func (discard) Egress(Event) {}
 
 // Handler serves one agent machine. The broker gives each machine's VM a
 // listener of its own and serves this handler on it.
@@ -139,14 +183,55 @@ func (p *Proxy) Handler(machine string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { p.serve(machine, w, r) })
 }
 
+// admit takes a concurrency slot and checks the cap; release returns the
+// slot and charges bytes.
+func (p *Proxy) admit(machine string) (string, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	u := p.usage[machine]
+	if u == nil {
+		u = &machineUsage{}
+		p.usage[machine] = u
+	}
+	switch {
+	case u.inFlight >= p.maxConc:
+		return "too many requests in flight", false
+	case p.cap.Requests > 0 && u.requests >= p.cap.Requests:
+		return "request cap reached", false
+	case p.cap.Bytes > 0 && u.bytes >= p.cap.Bytes:
+		return "byte cap reached", false
+	}
+	u.inFlight++
+	return "", true
+}
+
+func (p *Proxy) charge(machine string, requests, bytes int64) {
+	p.mu.Lock()
+	u := p.usage[machine]
+	u.requests += requests
+	u.bytes += bytes
+	p.mu.Unlock()
+}
+
+func (p *Proxy) release(machine string) {
+	p.mu.Lock()
+	p.usage[machine].inFlight--
+	p.mu.Unlock()
+}
+
 func (p *Proxy) serve(machine string, w http.ResponseWriter, r *http.Request) {
-	red := p.vault.Redactor()
-	ev := Event{At: p.now(), Machine: machine, Method: r.Method, Path: string(red.Redact([]byte(r.URL.EscapedPath())))}
+	ev := Event{At: p.now(), Machine: machine, Method: r.Method}
 	deny := func(status int, reason string) {
 		ev.Reason, ev.Status = reason, status
 		p.audit.Egress(ev)
 		http.Error(w, "egress denied: "+reason, status)
 	}
+	red, err := p.vault.Redactor()
+	if err != nil {
+		deny(http.StatusServiceUnavailable, "vault unavailable")
+		return
+	}
+	ev.Path = string(red.Redact([]byte(r.URL.EscapedPath())))
 
 	// Only clean paths with nothing escaped and no query are considered;
 	// everything ambiguous is denied rather than normalized.
@@ -173,6 +258,12 @@ func (p *Proxy) serve(machine string, w http.ResponseWriter, r *http.Request) {
 	}
 	ev.Operation = op.Name
 
+	if reason, ok := p.admit(machine); !ok {
+		deny(http.StatusTooManyRequests, reason)
+		return
+	}
+	defer p.release(machine)
+
 	body, err := io.ReadAll(io.LimitReader(r.Body, p.maxBody+1))
 	if err != nil {
 		deny(http.StatusBadRequest, "unreadable body")
@@ -181,6 +272,12 @@ func (p *Proxy) serve(machine string, w http.ResponseWriter, r *http.Request) {
 	if int64(len(body)) > p.maxBody {
 		deny(http.StatusRequestEntityTooLarge, "body too large")
 		return
+	}
+	if op.Body != nil {
+		if body, err = op.Body.apply(body); err != nil {
+			deny(http.StatusForbidden, err.Error())
+			return
+		}
 	}
 	sec, ok := p.vault.Secret(a.Credential)
 	if !ok {
@@ -198,8 +295,10 @@ func (p *Proxy) serve(machine string, w http.ResponseWriter, r *http.Request) {
 			up.Header[http.CanonicalHeaderKey(h)] = append([]string(nil), vs...)
 		}
 	}
+	up.Header.Set("Accept-Encoding", "identity")
 	up.Header.Set(a.Inject.Header, a.Inject.Prefix+sec.Reveal())
 
+	p.charge(machine, 1, int64(len(body)))
 	resp, err := p.rt.RoundTrip(up)
 	if err != nil {
 		ev.Allowed, ev.Status, ev.Reason = true, http.StatusBadGateway, "upstream unreachable"
@@ -208,6 +307,15 @@ func (p *Proxy) serve(machine string, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
+
+	// The redactor reads plain bytes only. A compressed body would pass it
+	// unread and be inflated by the guest.
+	if ce := resp.Header.Get("Content-Encoding"); ce != "" && !strings.EqualFold(ce, "identity") {
+		ev.Allowed, ev.Status, ev.Reason = true, http.StatusBadGateway, "encoded response refused"
+		p.audit.Egress(ev)
+		http.Error(w, "egress: encoded response refused", http.StatusBadGateway)
+		return
+	}
 
 	for _, h := range append(append([]string(nil), baseResponseHeaders...), a.ResponseHeaders...) {
 		for _, v := range resp.Header.Values(h) {
@@ -221,9 +329,12 @@ func (p *Proxy) serve(machine string, w http.ResponseWriter, r *http.Request) {
 	rw := red.Writer(w)
 	fl, _ := w.(http.Flusher)
 	buf := make([]byte, 32<<10)
+	var n64 int64
+	defer func() { p.charge(machine, 0, n64) }()
 	for {
 		n, rerr := resp.Body.Read(buf)
 		if n > 0 {
+			n64 += int64(n)
 			if _, err := rw.Write(buf[:n]); err != nil {
 				return
 			}
@@ -239,4 +350,50 @@ func (p *Proxy) serve(machine string, w http.ResponseWriter, r *http.Request) {
 	if fl != nil {
 		fl.Flush()
 	}
+}
+
+// apply checks a JSON object body against the rule and returns the body to
+// forward: the proxy's own encoding of what it checked.
+func (b *BodyRule) apply(body []byte) ([]byte, error) {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	var obj map[string]any
+	if err := dec.Decode(&obj); err != nil || obj == nil {
+		return nil, errors.New("body is not a JSON object")
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, errors.New("trailing data after JSON body")
+	}
+	for _, k := range b.DenyKeys {
+		if _, ok := obj[k]; ok {
+			return nil, fmt.Errorf("body key %q not allowed", k)
+		}
+	}
+	if b.ClientToolsOnly {
+		if t, ok := obj["tools"]; ok {
+			tools, ok := t.([]any)
+			if !ok {
+				return nil, errors.New("tools is not a list")
+			}
+			for _, e := range tools {
+				m, ok := e.(map[string]any)
+				if !ok {
+					return nil, errors.New("tool entry is not an object")
+				}
+				if typ, has := m["type"]; has && typ != "function" && typ != "custom" {
+					return nil, errors.New("only client-executed tools are allowed")
+				}
+			}
+		}
+	}
+	for k, v := range b.Set {
+		obj[k] = v
+	}
+	var out bytes.Buffer
+	enc := json.NewEncoder(&out)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(obj); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(out.Bytes(), []byte("\n")), nil
 }

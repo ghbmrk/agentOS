@@ -33,11 +33,28 @@ type Injection struct {
 
 // Operation is one declared request shape. Path is a template of literal
 // segments and {name} segments, each of which matches one non-empty
-// segment.
+// segment. Body, when set, requires a JSON object body and constrains it.
 type Operation struct {
 	Name   string
 	Method string
 	Path   string
+	Body   *BodyRule
+}
+
+// BodyRule constrains a JSON request body (ADP-10). The proxy decodes the
+// body, checks it, applies Set, and forwards its own re-encoding, so the
+// provider parses exactly what was checked (no duplicate keys, no trailing
+// data).
+type BodyRule struct {
+	// DenyKeys are top-level keys that may not appear.
+	DenyKeys []string
+	// ClientToolsOnly admits a tools[] entry only if it is a tool the
+	// guest itself executes (no "type", or "function" or "custom"). Server
+	// tools (web search, fetch, code execution, file search, remote MCP)
+	// would have the provider act on the network with the owner's key.
+	ClientToolsOnly bool
+	// Set forces top-level keys, e.g. store:false.
+	Set map[string]any
 }
 
 // OpenAI is the OpenAI-compatible model relay: inference endpoints only
@@ -48,40 +65,67 @@ func OpenAI(credential string) Adapter {
 		Host:       "api.openai.com",
 		Credential: credential,
 		Inject:     Injection{Header: "Authorization", Prefix: "Bearer "},
-		Operations: []Operation{
-			{Name: "chat.completions", Method: "POST", Path: "/v1/chat/completions"},
-			{Name: "responses", Method: "POST", Path: "/v1/responses"},
-		},
+		Operations: []Operation{{
+			Name: "chat.completions", Method: "POST", Path: "/v1/chat/completions",
+			Body: &BodyRule{
+				DenyKeys:        []string{"web_search_options", "mcp_servers", "container", "background"},
+				ClientToolsOnly: true,
+				Set:             map[string]any{"store": false},
+			},
+		}},
 	}
 }
 
-// Anthropic is the Anthropic Messages relay: inference endpoints only.
+// Anthropic is the Anthropic Messages relay: inference endpoints only. It
+// is not yet qualified as a guest interface (ARC-6 (a) qualifies OpenAI
+// chat completions only); it exists so the declaration is reviewed with
+// the rest. Anthropic-Beta is not forwarded: betas switch on server tools.
 func Anthropic(credential string) Adapter {
 	return Adapter{
-		Name:           "anthropic",
-		Host:           "api.anthropic.com",
-		Credential:     credential,
-		Inject:         Injection{Header: "X-Api-Key"},
-		Operations:     []Operation{{Name: "messages", Method: "POST", Path: "/v1/messages"}},
-		RequestHeaders: []string{"Anthropic-Version", "Anthropic-Beta"},
+		Name:       "anthropic",
+		Host:       "api.anthropic.com",
+		Credential: credential,
+		Inject:     Injection{Header: "X-Api-Key"},
+		Operations: []Operation{{
+			Name: "messages", Method: "POST", Path: "/v1/messages",
+			Body: &BodyRule{
+				DenyKeys:        []string{"mcp_servers", "container", "background"},
+				ClientToolsOnly: true,
+			},
+		}},
+		RequestHeaders: []string{"Anthropic-Version"},
 	}
 }
 
 // Headers a guest may send and a provider may return, for every adapter.
-// Everything else is dropped. Accept-Encoding is deliberately absent so the
-// proxy sees plain bytes to redact.
+// Everything else is dropped. The proxy itself sends Accept-Encoding:
+// identity and refuses encoded responses, so it always redacts plain bytes.
 var (
 	baseRequestHeaders  = []string{"Content-Type", "Accept", "User-Agent"}
 	baseResponseHeaders = []string{"Content-Type", "Retry-After", "X-Request-Id", "Request-Id"}
 )
 
-// Header names that carry credentials, or steer a response somewhere else.
-// No adapter may forward them.
+// Header names no adapter may forward: they carry credentials, pick the
+// account or project billed, or steer a response somewhere else. Any name
+// containing one of credentialWords is refused too.
 var credentialHeaders = map[string]bool{
-	"Authorization": true, "Proxy-Authorization": true, "Cookie": true,
-	"Set-Cookie": true, "X-Api-Key": true, "Api-Key": true,
-	"X-Goog-Api-Key": true, "Location": true, "Www-Authenticate": true,
-	"Proxy-Authenticate": true,
+	"Location": true, "Openai-Organization": true, "Openai-Project": true,
+	"Anthropic-Beta": true, "Accept-Encoding": true, "Content-Encoding": true,
+}
+
+var credentialWords = []string{"auth", "key", "token", "session", "cookie", "secret", "password"}
+
+func forbiddenHeader(canonical string) bool {
+	if credentialHeaders[canonical] {
+		return true
+	}
+	l := strings.ToLower(canonical)
+	for _, w := range credentialWords {
+		if strings.Contains(l, w) {
+			return true
+		}
+	}
+	return false
 }
 
 func (a Adapter) validate() error {
@@ -108,7 +152,7 @@ func (a Adapter) validate() error {
 	inject := http.CanonicalHeaderKey(a.Inject.Header)
 	for _, h := range append(append([]string(nil), a.RequestHeaders...), a.ResponseHeaders...) {
 		c := http.CanonicalHeaderKey(h)
-		if credentialHeaders[c] || c == inject {
+		if forbiddenHeader(c) || c == inject {
 			return fmt.Errorf("adapter %s: may not forward header %s", a.Name, c)
 		}
 	}

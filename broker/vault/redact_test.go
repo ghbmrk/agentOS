@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"net/url"
 	"strings"
 	"testing"
@@ -14,16 +15,34 @@ import (
 func TestRedactCoversCommonEncodings(t *testing.T) {
 	val := canary(t)
 	r := NewRedactor([][]byte{val})
-	for _, form := range []string{
+	hx := []byte(hex.EncodeToString(val))
+	for i := range hx {
+		if i%3 == 0 {
+			hx[i] = bytes.ToUpper(hx[i : i+1])[0]
+		}
+	}
+	js, _ := json.Marshal(string(val) + "<&>")
+	forms := []string{
 		string(val),
 		base64.StdEncoding.EncodeToString(val),
 		base64.RawURLEncoding.EncodeToString(val),
 		hex.EncodeToString(val),
+		strings.ToUpper(hex.EncodeToString(val)),
+		string(hx), // mixed case
 		url.QueryEscape(string(val) + "/+"),
-	} {
+		string(js),
+	}
+	// Inside a larger base64 blob, at every alignment, e.g. an echoed
+	// "Authorization: Bearer <key>" header, base64-encoded.
+	for _, pre := range []string{"Bearer ", "x", "xy", "xyz"} {
+		forms = append(forms,
+			base64.StdEncoding.EncodeToString([]byte(pre+string(val)+"!")),
+			base64.URLEncoding.EncodeToString([]byte(pre+string(val))))
+	}
+	for _, form := range forms {
 		in := []byte(`{"echo":"Bearer ` + form + `","n":1}`)
 		out := r.Redact(in)
-		if bytes.Contains(out, val) || strings.Contains(string(out), form) {
+		if bytes.Contains(out, val) || strings.Contains(string(out), form) || bytes.Contains(out, val[len(val)-16:]) {
 			t.Fatalf("form %q survived: %s", form, out)
 		}
 		if !bytes.Contains(out, []byte(Placeholder)) {

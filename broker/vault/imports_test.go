@@ -12,10 +12,11 @@ import (
 
 // REQ: ARC-1, CRED-1
 
-// Only the egress proxy (and the daemon binary that constructs it) may
-// import the vault. Every other broker package, and above all anything a
-// guest's socket reaches, gets no code path to a credential value.
-var vaultImporters = map[string]bool{"egress": true, "cmd/agentosd": true}
+// Only the egress proxy (and the future egress binary that constructs it)
+// may import the vault. Every other broker package, and above all anything
+// a guest's socket reaches, gets no code path to a credential value. The
+// daemon (cmd/agentosd) is on the ARC-2 control path and may not.
+var vaultImporters = map[string]bool{"egress": true, "cmd/agentos-egress": true}
 
 const vaultPkg = "github.com/ghbmrk/agentos/broker/vault"
 

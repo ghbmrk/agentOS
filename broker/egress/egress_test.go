@@ -2,6 +2,7 @@ package egress
 
 import (
 	"bytes"
+	"compress/flate"
 	"context"
 	"crypto/rand"
 	"crypto/tls"
@@ -20,6 +21,10 @@ import (
 )
 
 // REQ: CRED-1, CRED-5, CRED-7, ADP-10
+//
+// ADP-10 is partly covered: request shapes and body rules are enforced
+// here; the verb-class and intent check before forwarding is not yet
+// (ASSUMPTIONS.md E9).
 
 // fakeProvider stands in for a provider's API. It records every request it
 // receives and answers with whatever reply says.
@@ -72,10 +77,12 @@ func (a *auditLog) last(t *testing.T) Event {
 }
 
 type rig struct {
-	key      string
-	provider *fakeProvider
-	audit    *auditLog
-	proxy    *Proxy
+	vault     *vault.Vault
+	transport http.RoundTripper
+	key       string
+	provider  *fakeProvider
+	audit     *auditLog
+	proxy     *Proxy
 }
 
 func synthetic(t *testing.T, prefix string) string {
@@ -116,11 +123,11 @@ func newRig(t *testing.T, grants map[string][]string) *rig {
 		t.Fatal(err)
 	}
 	if grants == nil {
-		grants = map[string][]string{"m1": {"openai"}}
+		grants = map[string][]string{"m1": {"openai", "anthropic"}}
 	}
 	audit := &auditLog{}
 	p, err := New(Config{
-		Adapters:  []Adapter{OpenAI("openai-key")},
+		Adapters:  []Adapter{OpenAI("openai-key"), Anthropic("openai-key")},
 		Grants:    grants,
 		Vault:     v,
 		Transport: tr,
@@ -129,7 +136,7 @@ func newRig(t *testing.T, grants map[string][]string) *rig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &rig{key: key, provider: fp, audit: audit, proxy: p}
+	return &rig{key: key, provider: fp, audit: audit, proxy: p, vault: v, transport: tr}
 }
 
 func (r *rig) do(t *testing.T, machine string, req *http.Request) *httptest.ResponseRecorder {
@@ -164,8 +171,12 @@ func TestInjectsKeyIntoDeclaredInferenceEndpoint(t *testing.T) {
 	if got.Host != "api.openai.com" || got.URL.Path != "/v1/chat/completions" || got.Method != "POST" {
 		t.Fatalf("forwarded to %s %s%s", got.Method, got.Host, got.URL.Path)
 	}
-	if string(r.provider.body[0]) != `{"model":"m","messages":[]}` {
-		t.Fatalf("body changed: %s", r.provider.body[0])
+	var sent map[string]any
+	if err := json.Unmarshal(r.provider.body[0], &sent); err != nil || sent["model"] != "m" || sent["store"] != false {
+		t.Fatalf("forwarded body %s", r.provider.body[0])
+	}
+	if got.Header.Get("Accept-Encoding") != "identity" {
+		t.Fatalf("Accept-Encoding %q", got.Header.Get("Accept-Encoding"))
 	}
 	if ev := r.audit.last(t); !ev.Allowed || ev.Machine != "m1" || ev.Operation != "chat.completions" {
 		t.Fatalf("audit %+v", ev)
@@ -173,9 +184,9 @@ func TestInjectsKeyIntoDeclaredInferenceEndpoint(t *testing.T) {
 }
 
 // ADP-10: anything that is not a declared operation of a granted adapter
-// is denied before it leaves the box, and journaled. That includes the
+// is denied before it leaves the box, and reported to the Auditor. That includes the
 // provider's key-management, file, and billing endpoints.
-func TestUndeclaredRequestsAreDeniedAndJournaled(t *testing.T) {
+func TestUndeclaredRequestsAreDeniedAndReported(t *testing.T) {
 	r := newRig(t, nil)
 	cases := []struct {
 		name   string
@@ -183,6 +194,10 @@ func TestUndeclaredRequestsAreDeniedAndJournaled(t *testing.T) {
 		path   string
 	}{
 		{"admin keys", "GET", "/openai/v1/organization/admin_api_keys"},
+		{"responses API", "POST", "/openai/v1/responses"},
+		{"models", "GET", "/openai/v1/models"},
+		{"anthropic batches", "POST", "/anthropic/v1/messages/batches"},
+		{"anthropic files", "POST", "/anthropic/v1/files"},
 		{"project keys", "POST", "/openai/v1/organization/projects/p/api_keys"},
 		{"files", "POST", "/openai/v1/files"},
 		{"billing", "GET", "/openai/v1/dashboard/billing/usage"},
@@ -358,27 +373,45 @@ func TestNewRejectsUnsafeDeclarations(t *testing.T) {
 		func(a *Adapter) { a.RequestHeaders = []string{"Authorization"} },
 		func(a *Adapter) { a.RequestHeaders = []string{"Cookie"} },
 		func(a *Adapter) { a.ResponseHeaders = []string{"Location"} },
+		func(a *Adapter) { a.RequestHeaders = []string{"X-Auth-Token"} },
+		func(a *Adapter) { a.RequestHeaders = []string{"X-Session-Id"} },
+		func(a *Adapter) { a.RequestHeaders = []string{"OpenAI-Project"} },
+		func(a *Adapter) { a.RequestHeaders = []string{"OpenAI-Organization"} },
+		func(a *Adapter) { a.RequestHeaders = []string{"Anthropic-Beta"} },
+		func(a *Adapter) { a.RequestHeaders = []string{"Accept-Encoding"} },
+		func(a *Adapter) { a.ResponseHeaders = []string{"Content-Encoding"} },
 	}
+	audit := &auditLog{}
 	for i, mut := range bad {
 		a := ok
 		a.Operations = append([]Operation(nil), ok.Operations...)
 		mut(&a)
-		if _, err := New(Config{Adapters: []Adapter{a}, Vault: emptyVault{}}); err == nil {
+		if _, err := New(Config{Adapters: []Adapter{a}, Vault: emptyVault{}, Audit: audit}); err == nil {
 			t.Errorf("case %d: accepted %+v", i, a)
 		}
 	}
-	if _, err := New(Config{Adapters: []Adapter{ok, ok}, Vault: emptyVault{}}); err == nil {
+	if _, err := New(Config{Adapters: []Adapter{ok}, Vault: emptyVault{}, Audit: audit}); err != nil {
+		t.Errorf("rejected the built-in adapter: %v", err)
+	}
+	if _, err := New(Config{Adapters: []Adapter{ok, ok}, Vault: emptyVault{}, Audit: audit}); err == nil {
 		t.Error("accepted duplicate adapter names")
 	}
-	if _, err := New(Config{Adapters: []Adapter{ok}, Grants: map[string][]string{"m": {"nope"}}, Vault: emptyVault{}}); err == nil {
+	if _, err := New(Config{Adapters: []Adapter{ok}, Grants: map[string][]string{"m": {"nope"}}, Vault: emptyVault{}, Audit: audit}); err == nil {
 		t.Error("accepted a grant to an undeclared adapter")
+	}
+}
+
+// Denials must have somewhere to go: a proxy with no Auditor is refused.
+func TestNewRequiresAuditor(t *testing.T) {
+	if _, err := New(Config{Adapters: []Adapter{OpenAI("k")}, Vault: emptyVault{}}); err == nil {
+		t.Fatal("built a proxy that would discard its decisions")
 	}
 }
 
 type emptyVault struct{}
 
 func (emptyVault) Secret(string) (vault.Secret, bool) { return vault.Secret{}, false }
-func (emptyVault) Redactor() *vault.Redactor          { return vault.NewRedactor(nil) }
+func (emptyVault) Redactor() (*vault.Redactor, error) { return vault.NewRedactor(nil), nil }
 
 // A granted adapter whose credential is missing from the vault fails
 // closed: nothing is sent.
@@ -400,13 +433,160 @@ func TestMissingCredentialFailsClosed(t *testing.T) {
 	}
 }
 
-// The built-in model relays declare inference endpoints only.
+// The built-in model relays declare inference endpoints only, each with a
+// body rule that admits client tools only.
 func TestBuiltInRelaysDeclareInferenceOnly(t *testing.T) {
 	for _, a := range []Adapter{OpenAI("k"), Anthropic("k")} {
 		for _, op := range a.Operations {
-			if op.Method != "POST" || !(strings.HasSuffix(op.Path, "/chat/completions") || strings.HasSuffix(op.Path, "/messages") || strings.HasSuffix(op.Path, "/responses")) {
+			if op.Method != "POST" || !(strings.HasSuffix(op.Path, "/chat/completions") || strings.HasSuffix(op.Path, "/messages")) {
 				t.Errorf("%s declares non-inference op %+v", a.Name, op)
 			}
+			if op.Body == nil || !op.Body.ClientToolsOnly {
+				t.Errorf("%s %s has no client-tools-only body rule", a.Name, op.Name)
+			}
 		}
+	}
+}
+
+// A14 / REV-5: the provider must not become a way out. Bodies that ask
+// the provider to act on the network with the owner's key (server tools,
+// remote MCP, web search) are denied; so are bodies the proxy cannot parse
+// exactly as the provider would.
+func TestRelayBodiesAdmitClientToolsOnly(t *testing.T) {
+	r := newRig(t, nil)
+	deny := []struct{ name, path, body string }{
+		{"not json", "/openai/v1/chat/completions", `model=m`},
+		{"json array", "/openai/v1/chat/completions", `[]`},
+		{"trailing data", "/openai/v1/chat/completions", `{"model":"m"} {"tools":[{"type":"mcp"}]}`},
+		{"openai web search tool", "/openai/v1/chat/completions", `{"model":"m","tools":[{"type":"web_search"}]}`},
+		{"openai mcp tool", "/openai/v1/chat/completions", `{"model":"m","tools":[{"type":"mcp","server_url":"https://evil.example"}]}`},
+		{"openai code interpreter", "/openai/v1/chat/completions", `{"model":"m","tools":[{"type":"function","function":{"name":"f"}},{"type":"code_interpreter"}]}`},
+		{"openai web_search_options", "/openai/v1/chat/completions", `{"model":"m","web_search_options":{}}`},
+		{"openai background", "/openai/v1/chat/completions", `{"model":"m","background":true}`},
+		{"tools not a list", "/openai/v1/chat/completions", `{"model":"m","tools":{"type":"mcp"}}`},
+		{"anthropic mcp_servers", "/anthropic/v1/messages", `{"model":"m","mcp_servers":[{"url":"https://evil.example"}]}`},
+		{"anthropic web fetch", "/anthropic/v1/messages", `{"model":"m","tools":[{"type":"web_fetch_20250910","name":"web_fetch"}]}`},
+		{"anthropic code execution", "/anthropic/v1/messages", `{"model":"m","tools":[{"type":"code_execution_20250522","name":"x"}]}`},
+		{"anthropic container", "/anthropic/v1/messages", `{"model":"m","container":"c"}`},
+	}
+	for _, c := range deny {
+		t.Run(c.name, func(t *testing.T) {
+			w := r.do(t, "m1", httptest.NewRequest("POST", c.path, strings.NewReader(c.body)))
+			if w.Code != http.StatusForbidden {
+				t.Fatalf("got %d", w.Code)
+			}
+			if ev := r.audit.last(t); ev.Allowed {
+				t.Fatalf("audit %+v", ev)
+			}
+		})
+	}
+	if n := r.provider.count(); n != 0 {
+		t.Fatalf("provider saw %d requests", n)
+	}
+
+	// Client tools pass; store is forced off; a duplicated key reaches the
+	// provider once, as the proxy read it.
+	allow := []struct{ path, body string }{
+		{"/openai/v1/chat/completions", `{"model":"m","store":true,"tools":[{"type":"function","function":{"name":"f"}}],"tools":[{"type":"custom","name":"g"}]}`},
+		{"/anthropic/v1/messages", `{"model":"m","tools":[{"name":"f","input_schema":{}},{"type":"custom","name":"g","input_schema":{}}]}`},
+	}
+	for i, c := range allow {
+		w := r.do(t, "m1", httptest.NewRequest("POST", c.path, strings.NewReader(c.body)))
+		if w.Code != 200 {
+			t.Fatalf("allow %d: got %d %s", i, w.Code, w.Body)
+		}
+	}
+	first := string(r.provider.body[0])
+	if strings.Count(first, `"tools"`) != 1 || !strings.Contains(first, `"store":false`) || !strings.Contains(first, `"custom"`) {
+		t.Fatalf("forwarded %s", first)
+	}
+}
+
+// A14 on the Anthropic route: the guest's own X-Api-Key is replaced by the
+// vault key, and beta flags (which switch on server tools) are dropped.
+func TestAnthropicGuestKeyAndBetasAreStripped(t *testing.T) {
+	r := newRig(t, nil)
+	attacker := synthetic(t, "sk-ant-attacker-")
+	req := httptest.NewRequest("POST", "/anthropic/v1/messages", strings.NewReader(`{"model":"m","messages":[]}`))
+	req.Header.Set("X-Api-Key", attacker)
+	req.Header.Set("Authorization", "Bearer "+attacker)
+	req.Header.Set("Anthropic-Version", "2023-06-01")
+	req.Header.Set("Anthropic-Beta", "mcp-client-2025-04-04")
+	if w := r.do(t, "m1", req); w.Code != 200 {
+		t.Fatalf("got %d", w.Code)
+	}
+	got := r.provider.seen[0]
+	if got.Header.Get("X-Api-Key") != r.key || got.Header.Get("Anthropic-Version") != "2023-06-01" {
+		t.Fatalf("headers %v", got.Header)
+	}
+	if got.Header.Get("Anthropic-Beta") != "" || got.Header.Get("Authorization") != "" {
+		t.Fatalf("forwarded %v", got.Header)
+	}
+}
+
+// CRED-7: a compressed response would pass the redactor unread and be
+// inflated by the guest, so any encoded response is refused.
+func TestEncodedResponsesAreRefused(t *testing.T) {
+	r := newRig(t, nil)
+	r.provider.reply = func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Encoding", "deflate")
+		var b bytes.Buffer
+		fw, _ := flate.NewWriter(&b, flate.BestSpeed)
+		io.WriteString(fw, req.Header.Get("Authorization"))
+		fw.Close()
+		w.Write(b.Bytes())
+	}
+	w := r.do(t, "m1", chat("/openai/v1/chat/completions"))
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("got %d", w.Code)
+	}
+	if w.Header().Get("Content-Encoding") != "" || !strings.HasPrefix(w.Body.String(), "egress: encoded response refused") {
+		t.Fatalf("encoded body passed: %v %q", w.Header(), w.Body)
+	}
+}
+
+// One machine cannot hold more than MaxConcurrent requests in flight, nor
+// exceed its hard request cap.
+func TestPerMachineLimits(t *testing.T) {
+	r := newRig(t, nil)
+	block := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	r.provider.reply = func(w http.ResponseWriter, req *http.Request) {
+		entered <- struct{}{}
+		<-block
+		io.WriteString(w, "{}")
+	}
+	p, err := New(Config{
+		Adapters: []Adapter{OpenAI("openai-key")}, Grants: map[string][]string{"m1": {"openai"}, "m2": {"openai"}},
+		Vault: r.vault, Audit: r.audit, Transport: r.transport, MaxConcurrent: 1, Cap: Cap{Requests: 2},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	do := func(m string) int {
+		w := httptest.NewRecorder()
+		p.Handler(m).ServeHTTP(w, chat("/openai/v1/chat/completions"))
+		return w.Code
+	}
+	done := make(chan int)
+	go func() { done <- do("m1") }()
+	<-entered
+	if c := do("m1"); c != http.StatusTooManyRequests {
+		t.Fatalf("second concurrent request: %d", c)
+	}
+	close(block)
+	if c := <-done; c != 200 {
+		t.Fatalf("first request: %d", c)
+	}
+	go func() { <-entered }()
+	if c := do("m1"); c != 200 {
+		t.Fatalf("second request: %d", c)
+	}
+	if c := do("m1"); c != http.StatusTooManyRequests {
+		t.Fatalf("over the cap: %d", c)
+	}
+	go func() { <-entered }()
+	if c := do("m2"); c != 200 {
+		t.Fatalf("other machine: %d", c)
 	}
 }

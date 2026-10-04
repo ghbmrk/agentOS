@@ -66,7 +66,11 @@ type Vault struct {
 
 	mu      sync.RWMutex
 	entries map[string]record
+	closed  bool
 }
+
+// ErrClosed is returned by every method called after Close.
+var ErrClosed = errors.New("vault: closed")
 
 // Create makes a new, empty vault at path. It refuses to replace an
 // existing file.
@@ -124,6 +128,9 @@ func (v *Vault) Put(name, kind string, value []byte) error {
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if v.closed {
+		return ErrClosed
+	}
 	old, had := v.entries[name]
 	v.entries[name] = record{Kind: kind, Value: append([]byte(nil), value...)}
 	if err := v.save(); err != nil {
@@ -144,6 +151,9 @@ func (v *Vault) Put(name, kind string, value []byte) error {
 func (v *Vault) Delete(name string) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if v.closed {
+		return ErrClosed
+	}
 	old, had := v.entries[name]
 	if !had {
 		return nil
@@ -157,7 +167,7 @@ func (v *Vault) Delete(name string) error {
 	return nil
 }
 
-// List names every secret, sorted, without values.
+// List names every secret, sorted, without values. After Close it is empty.
 func (v *Vault) List() []Entry {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
@@ -169,32 +179,38 @@ func (v *Vault) List() []Entry {
 	return out
 }
 
-// Secret returns the named secret.
+// Secret returns the named secret. After Close it finds nothing.
 func (v *Vault) Secret(name string) (Secret, bool) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 	r, ok := v.entries[name]
-	if !ok {
+	if !ok || v.closed {
 		return Secret{}, false
 	}
-	return Secret{b: append([]byte(nil), r.Value...)}, true
+	return Secret{p: &secretBytes{b: append([]byte(nil), r.Value...)}}, true
 }
 
 // Redactor matches every value currently in the vault (CRED-7).
-func (v *Vault) Redactor() *Redactor {
+func (v *Vault) Redactor() (*Redactor, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
+	if v.closed {
+		return nil, ErrClosed
+	}
 	vals := make([][]byte, 0, len(v.entries))
 	for _, r := range v.entries {
 		vals = append(vals, r.Value)
 	}
-	return NewRedactor(vals)
+	return NewRedactor(vals), nil
 }
 
-// Close wipes the decrypted values from memory, as far as Go allows.
+// Close zeroes the vault's own copies of the decrypted values and makes
+// every later call fail. Copies already handed out (Reveal strings,
+// redactor patterns) are immutable Go strings and are not wiped.
 func (v *Vault) Close() error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	v.closed = true
 	for n, r := range v.entries {
 		wipe(r.Value)
 		delete(v.entries, n)
@@ -245,11 +261,15 @@ func (v *Vault) save() error {
 	if err := os.Rename(tmp.Name(), v.path); err != nil {
 		return err
 	}
-	if d, err := os.Open(dir); err == nil {
-		d.Sync()
-		d.Close()
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
 	}
-	return nil
+	serr := d.Sync()
+	if err := d.Close(); serr == nil {
+		serr = err
+	}
+	return serr
 }
 
 func newAEAD(key []byte) (cipher.AEAD, error) {
@@ -272,14 +292,23 @@ func wipe(b []byte) {
 }
 
 // Secret is one credential value. It formats, marshals, and logs as a
-// placeholder; only Reveal returns the value.
-type Secret struct{ b []byte }
+// placeholder; only Reveal returns the value. The bytes sit behind a
+// pointer so that fmt, which cannot call Format on a value in an unexported
+// field, prints an address there rather than the bytes.
+type Secret struct{ p *secretBytes }
+
+type secretBytes struct{ b []byte }
 
 const shown = "[vault secret]"
 
 // Reveal returns the value. Only the egress proxy calls it, to write the
 // value into an outbound request to a declared endpoint (CRED-5, ADP-10).
-func (s Secret) Reveal() string { return string(s.b) }
+func (s Secret) Reveal() string {
+	if s.p == nil {
+		return ""
+	}
+	return string(s.p.b)
+}
 
 // String implements fmt.Stringer with a placeholder.
 func (s Secret) String() string { return shown }
