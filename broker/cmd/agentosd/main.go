@@ -47,6 +47,7 @@ func main() {
 	var cfg daemon.Config
 	imgs := images{}
 	var stateDir, runsc, cgroupParent string
+	var diskReserveMB int64
 	flag.StringVar(&cfg.JournalPath, "journal", "/var/lib/agentos/journal.log", "journal file")
 	flag.StringVar(&cfg.SocketDir, "sockets", "/run/agentos", "socket directory (created 0700)")
 	flag.StringVar(&cfg.OwnerNumber, "owner", "", "owner's phone number, E.164")
@@ -57,6 +58,7 @@ func main() {
 	flag.StringVar(&stateDir, "machines", "/var/lib/agentos/machines", "agent-machine layers and snapshots (created 0700)")
 	flag.StringVar(&runsc, "runsc", "", "gVisor runsc binary; empty runs no agent machines")
 	flag.StringVar(&cgroupParent, "cgroup", "/sys/fs/cgroup/agentos.slice/machines", "cgroup v2 parent for agent machines")
+	flag.Int64Var(&diskReserveMB, "disk-reserve-mb", 2048, "state-disk space snapshots never use (RES-4 reserve), MB")
 	flag.Var(imgs, "image", "agent-machine image, name=dir (repeatable)")
 	flag.Parse()
 	if cfg.ModemUID < 0 || cfg.ModemUID == os.Getuid() {
@@ -97,6 +99,8 @@ func main() {
 			Runtime:  &gvisor.Runtime{Bin: runsc, StateDir: filepath.Join(stateDir, "runsc")},
 			Admit:    d.Admission(),
 			Cgroups:  cg,
+
+			DiskReserveBytes: diskReserveMB << 20,
 		})
 		if err != nil {
 			log.Printf("agent machines disabled: %v", err)

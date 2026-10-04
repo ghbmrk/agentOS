@@ -289,6 +289,16 @@ func Scan(root string) (map[string]Entry, error) {
 // and inodes, each hardlinked inode counted once.
 type Usage struct{ Bytes, Inodes int64 }
 
+// FreeBytes is the space available to the broker on the file system that
+// holds path.
+func FreeBytes(path string) (int64, error) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(path, &st); err != nil {
+		return 0, err
+	}
+	return int64(st.Bavail) * int64(st.Bsize), nil
+}
+
 // Measure returns a layer's usage without following symlinks.
 func Measure(root string) (Usage, error) {
 	var u Usage

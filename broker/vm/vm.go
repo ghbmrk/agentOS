@@ -143,10 +143,16 @@ type Config struct {
 	NoCgroups bool
 	// KillTimeout bounds waiting for a machine's memory to be released.
 	KillTimeout time.Duration
-	// MaxLayerBytes and MaxLayerInodes cap what one machine's layer may
-	// cost on disk before a snapshot of it is refused (RES-4: the state
-	// disk also holds the journal). Zero means 4 GiB and 200,000.
+	// DiskReserveBytes is the state disk's RES-4 reserve (a healthy
+	// release, the journal, the recall index). A snapshot is admitted only
+	// if copying the layer leaves the reserve free, as memory admission
+	// leaves its headroom (RES-2). Zero means 2 GiB.
+	DiskReserveBytes int64
+	// MaxLayerBytes optionally caps one machine's layer on top of that
+	// (zero: no fixed cap). MaxLayerInodes caps its inodes (zero: 200,000).
 	MaxLayerBytes, MaxLayerInodes int64
+	// FreeBytes reports the state disk's free space; nil measures it.
+	FreeBytes func(path string) (int64, error)
 }
 
 var (
@@ -157,7 +163,7 @@ var (
 	ErrConflict = errors.New("vm: merge conflict")
 	ErrImage    = errors.New("vm: snapshots are of different images")
 	ErrRevoked  = errors.New("vm: admission was withdrawn before the machine started")
-	ErrQuota    = errors.New("vm: machine's layer is over its disk quota; snapshot refused")
+	ErrQuota    = errors.New("vm: disk budget exceeded: snapshot refused; free space in the machine (delete files) or roll back, then retry")
 )
 
 var idRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
@@ -193,8 +199,11 @@ func Open(ctx context.Context, cfg Config) (*Manager, error) {
 	if cfg.KillTimeout == 0 {
 		cfg.KillTimeout = 10 * time.Second
 	}
-	if cfg.MaxLayerBytes == 0 {
-		cfg.MaxLayerBytes = 4 << 30
+	if cfg.DiskReserveBytes == 0 {
+		cfg.DiskReserveBytes = 2 << 30
+	}
+	if cfg.FreeBytes == nil {
+		cfg.FreeBytes = overlay.FreeBytes
 	}
 	if cfg.MaxLayerInodes == 0 {
 		cfg.MaxLayerInodes = 200_000
@@ -530,16 +539,26 @@ func (m *Manager) capture(ctx context.Context, mc *machine, t Tier) (Snapshot, e
 	return s, m.saveMachine(mc)
 }
 
-// checkQuota refuses to copy a layer that costs more than the machine's
-// disk quota. Copies keep holes and hardlinks, so the copy costs no more
-// than this measure.
+// checkQuota admits a snapshot of a layer only if copying it leaves the
+// state disk's RES-4 reserve free and the layer is within its caps. Copies
+// keep holes and hardlinks, so a copy costs no more than this measure.
+// Refusal changes nothing: the machine and its existing snapshots stay.
 func (m *Manager) checkQuota(upper string) error {
 	u, err := overlay.Measure(upper)
 	if err != nil {
 		return err
 	}
-	if u.Bytes > m.cfg.MaxLayerBytes || u.Inodes > m.cfg.MaxLayerInodes {
-		return fmt.Errorf("%w (%d bytes, %d inodes)", ErrQuota, u.Bytes, u.Inodes)
+	free, err := m.cfg.FreeBytes(m.cfg.StateDir)
+	if err != nil {
+		return err
+	}
+	switch {
+	case u.Bytes > free-m.cfg.DiskReserveBytes:
+		return fmt.Errorf("%w (layer %d bytes; %d free, %d reserved)", ErrQuota, u.Bytes, free, m.cfg.DiskReserveBytes)
+	case m.cfg.MaxLayerBytes > 0 && u.Bytes > m.cfg.MaxLayerBytes:
+		return fmt.Errorf("%w (layer %d bytes, cap %d)", ErrQuota, u.Bytes, m.cfg.MaxLayerBytes)
+	case u.Inodes > m.cfg.MaxLayerInodes:
+		return fmt.Errorf("%w (layer %d inodes, cap %d)", ErrQuota, u.Inodes, m.cfg.MaxLayerInodes)
 	}
 	return nil
 }

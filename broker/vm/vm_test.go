@@ -581,25 +581,42 @@ func TestREV4MergeConflictsUnderRemovedDirectories(t *testing.T) {
 	}
 }
 
-func TestRES4SnapshotRefusedOverDiskQuota(t *testing.T) {
+func TestRES4SnapshotAdmittedOnlyAboveTheDiskReserve(t *testing.T) {
+	free := int64(1 << 20)
 	e := newEnv(t, 4096)
-	e.cfg.MaxLayerBytes = 64 << 10
+	e.cfg.DiskReserveBytes = 900 << 10 // 1 MiB free, 900 KiB reserved: ~124 KiB budget
+	e.cfg.FreeBytes = func(string) (int64, error) { return free, nil }
 	e.open()
 	e.create("m", admission.Accepted, 100)
 	e.guestWrite("m", "small", "ok")
-	_, err := e.m.Step(bg, "m")
+	s1, err := e.m.Step(bg, "m")
 	must(t, err)
-	e.guestWrite("m", "big", strings.Repeat("x", 128<<10))
-	if _, err := e.m.Step(bg, "m"); !errors.Is(err, ErrQuota) {
-		t.Fatalf("over-quota step: %v", err)
+	e.guestWrite("m", "big", strings.Repeat("x", 256<<10))
+	_, err = e.m.Step(bg, "m")
+	if !errors.Is(err, ErrQuota) || !strings.Contains(err.Error(), "disk budget") {
+		t.Fatalf("over-budget step: %v", err)
+	}
+	// Refusal truncates nothing: the guest's file and old snapshots stay.
+	if len(e.guestRead("m", "big")) != 256<<10 || len(e.m.Snapshots("m")) != 1 || e.m.Snapshots("m")[0].ID != s1.ID {
+		t.Fatal("a refused snapshot changed state")
+	}
+	// The guest acts on the error (deletes the file) and the next step works.
+	must(t, os.Remove(e.upper("m", "big")))
+	if _, err := e.m.Step(bg, "m"); err != nil {
+		t.Fatalf("step after pruning: %v", err)
 	}
 	// A sparse file costs only its data, so it passes.
-	must(t, os.Remove(e.upper("m", "big")))
 	f, err := os.Create(e.upper("m", "sparse"))
 	must(t, err)
 	must(t, f.Truncate(1<<40))
 	f.Close()
 	if _, err := e.m.Step(bg, "m"); err != nil {
 		t.Fatalf("sparse step: %v", err)
+	}
+	// More free space (measured, not fixed) admits the big layer.
+	free = 1 << 30
+	e.guestWrite("m", "big", strings.Repeat("x", 256<<10))
+	if _, err := e.m.Step(bg, "m"); err != nil {
+		t.Fatalf("step with room: %v", err)
 	}
 }
