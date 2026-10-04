@@ -93,11 +93,19 @@ type Config struct {
 	MaxConcurrent int
 	// Cap is applied to each machine separately.
 	Cap Cap
-	Now func() time.Time
+	// Label returns a machine's REV-5 data label. Nil, or any answer other
+	// than LabelPublic, is treated as private: provider-side tools denied.
+	Label func(machine string) string
+	Now   func() time.Time
 }
+
+// LabelPublic is the REV-5 label under which a machine may use
+// provider-side tools.
+const LabelPublic = "public"
 
 // Proxy is the credentialed egress proxy.
 type Proxy struct {
+	labelOf  func(string) string
 	adapters map[string]Adapter
 	grants   map[string]map[string]bool
 	vault    Secrets
@@ -137,6 +145,7 @@ func New(cfg Config) (*Proxy, error) {
 		cap:      cfg.Cap,
 		now:      cfg.Now,
 		usage:    map[string]*machineUsage{},
+		labelOf:  cfg.Label,
 	}
 	for _, a := range cfg.Adapters {
 		if err := a.validate(); err != nil {
@@ -175,6 +184,13 @@ func New(cfg Config) (*Proxy, error) {
 		p.now = time.Now
 	}
 	return p, nil
+}
+
+func (p *Proxy) label(machine string) string {
+	if p.labelOf == nil {
+		return ""
+	}
+	return p.labelOf(machine)
 }
 
 // Handler serves one agent machine. The broker gives each machine's VM a
@@ -274,7 +290,7 @@ func (p *Proxy) serve(machine string, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if op.Body != nil {
-		if body, err = op.Body.apply(body); err != nil {
+		if body, err = op.Body.apply(body, p.label(machine) == LabelPublic); err != nil {
 			deny(http.StatusForbidden, err.Error())
 			return
 		}
@@ -354,7 +370,7 @@ func (p *Proxy) serve(machine string, w http.ResponseWriter, r *http.Request) {
 
 // apply checks a JSON object body against the rule and returns the body to
 // forward: the proxy's own encoding of what it checked.
-func (b *BodyRule) apply(body []byte) ([]byte, error) {
+func (b *BodyRule) apply(body []byte, public bool) ([]byte, error) {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
 	var obj map[string]any
@@ -369,7 +385,14 @@ func (b *BodyRule) apply(body []byte) ([]byte, error) {
 			return nil, fmt.Errorf("body key %q not allowed", k)
 		}
 	}
-	if b.ClientToolsOnly {
+	if b.ServerTools && !public {
+		for _, k := range b.ServerToolKeys {
+			if _, ok := obj[k]; ok {
+				return nil, fmt.Errorf("body key %q needs a public machine", k)
+			}
+		}
+	}
+	if b.ServerTools {
 		if t, ok := obj["tools"]; ok {
 			tools, ok := t.([]any)
 			if !ok {
@@ -380,8 +403,8 @@ func (b *BodyRule) apply(body []byte) ([]byte, error) {
 				if !ok {
 					return nil, errors.New("tool entry is not an object")
 				}
-				if typ, has := m["type"]; has && typ != "function" && typ != "custom" {
-					return nil, errors.New("only client-executed tools are allowed")
+				if typ, has := m["type"]; has && typ != "function" && typ != "custom" && !public {
+					return nil, errors.New("provider-side tools need a public machine")
 				}
 			}
 		}

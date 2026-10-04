@@ -441,17 +441,18 @@ func TestBuiltInRelaysDeclareInferenceOnly(t *testing.T) {
 			if op.Method != "POST" || !(strings.HasSuffix(op.Path, "/chat/completions") || strings.HasSuffix(op.Path, "/messages")) {
 				t.Errorf("%s declares non-inference op %+v", a.Name, op)
 			}
-			if op.Body == nil || !op.Body.ClientToolsOnly {
-				t.Errorf("%s %s has no client-tools-only body rule", a.Name, op.Name)
+			if op.Body == nil || !op.Body.ServerTools {
+				t.Errorf("%s %s does not gate server tools", a.Name, op.Name)
 			}
 		}
 	}
 }
 
-// A14 / REV-5: the provider must not become a way out. Bodies that ask
-// the provider to act on the network with the owner's key (server tools,
-// remote MCP, web search) are denied; so are bodies the proxy cannot parse
-// exactly as the provider would.
+// A14 / REV-5: the provider must not become a way out. For a machine whose
+// label is not public (here: no label source, so every machine is unknown),
+// bodies that ask the provider to act on the network with the owner's key
+// (server tools, remote MCP, web search) are denied; so, for every machine,
+// are bodies the proxy cannot parse exactly as the provider would.
 func TestRelayBodiesAdmitClientToolsOnly(t *testing.T) {
 	r := newRig(t, nil)
 	deny := []struct{ name, path, body string }{
@@ -588,5 +589,52 @@ func TestPerMachineLimits(t *testing.T) {
 	go func() { <-entered }()
 	if c := do("m2"); c != 200 {
 		t.Fatalf("other machine: %d", c)
+	}
+}
+
+// REV-5: provider-side tools follow the calling machine's data label. A
+// public machine may use them; a private machine, a machine with an
+// unknown label, and every machine when no label source is wired, may not.
+// background and store:false hold for every label.
+func TestServerToolsFollowTheDataLabel(t *testing.T) {
+	r := newRig(t, nil)
+	labels := map[string]string{"pub": LabelPublic, "priv": "private", "odd": "PUBLIC "}
+	p, err := New(Config{
+		Adapters: []Adapter{OpenAI("openai-key"), Anthropic("openai-key")},
+		Grants:   map[string][]string{"pub": {"openai", "anthropic"}, "priv": {"openai"}, "odd": {"openai"}, "none": {"openai"}},
+		Vault:    r.vault, Audit: r.audit, Transport: r.transport,
+		Label: func(m string) string { return labels[m] },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	send := func(m, path, body string) int {
+		w := httptest.NewRecorder()
+		p.Handler(m).ServeHTTP(w, httptest.NewRequest("POST", path, strings.NewReader(body)))
+		return w.Code
+	}
+	search := `{"model":"m","tools":[{"type":"web_search"}],"store":true}`
+	for _, m := range []string{"priv", "odd", "none"} {
+		if c := send(m, "/openai/v1/chat/completions", search); c != http.StatusForbidden {
+			t.Errorf("%s: server tool got %d", m, c)
+		}
+		if c := send(m, "/openai/v1/chat/completions", `{"model":"m","web_search_options":{}}`); c != http.StatusForbidden {
+			t.Errorf("%s: web_search_options got %d", m, c)
+		}
+	}
+	if r.provider.count() != 0 {
+		t.Fatalf("provider saw %d requests from non-public machines", r.provider.count())
+	}
+	if c := send("pub", "/openai/v1/chat/completions", search); c != 200 {
+		t.Fatalf("public machine: server tool got %d", c)
+	}
+	if !strings.Contains(string(r.provider.body[0]), `"store":false`) {
+		t.Fatalf("store not forced for a public machine: %s", r.provider.body[0])
+	}
+	if c := send("pub", "/anthropic/v1/messages", `{"model":"m","mcp_servers":[{"url":"https://x.example"}]}`); c != 200 {
+		t.Fatalf("public machine: mcp_servers got %d", c)
+	}
+	if c := send("pub", "/openai/v1/chat/completions", `{"model":"m","background":true}`); c != http.StatusForbidden {
+		t.Fatalf("public machine: background got %d", c)
 	}
 }

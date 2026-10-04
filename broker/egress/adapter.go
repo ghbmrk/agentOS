@@ -46,13 +46,18 @@ type Operation struct {
 // provider parses exactly what was checked (no duplicate keys, no trailing
 // data).
 type BodyRule struct {
-	// DenyKeys are top-level keys that may not appear.
+	// DenyKeys are top-level keys that may never appear.
 	DenyKeys []string
-	// ClientToolsOnly admits a tools[] entry only if it is a tool the
-	// guest itself executes (no "type", or "function" or "custom"). Server
-	// tools (web search, fetch, code execution, file search, remote MCP)
-	// would have the provider act on the network with the owner's key.
-	ClientToolsOnly bool
+	// ServerTools gates provider-side tools on the calling machine's data
+	// label (REV-5). Server tools (web search, fetch, code execution, file
+	// search, remote MCP) have the provider act on the network with the
+	// owner's key, so they are admitted only for a machine labelled public;
+	// a private or unknown label gets client-executed tools only (a tools[]
+	// entry with no "type", or "function" or "custom"), and none of
+	// ServerToolKeys.
+	ServerTools bool
+	// ServerToolKeys are top-level keys that switch on provider-side tools.
+	ServerToolKeys []string
 	// Set forces top-level keys, e.g. store:false.
 	Set map[string]any
 }
@@ -68,9 +73,10 @@ func OpenAI(credential string) Adapter {
 		Operations: []Operation{{
 			Name: "chat.completions", Method: "POST", Path: "/v1/chat/completions",
 			Body: &BodyRule{
-				DenyKeys:        []string{"web_search_options", "mcp_servers", "container", "background"},
-				ClientToolsOnly: true,
-				Set:             map[string]any{"store": false},
+				DenyKeys:       []string{"background"},
+				ServerTools:    true,
+				ServerToolKeys: []string{"web_search_options", "mcp_servers", "container"},
+				Set:            map[string]any{"store": false},
 			},
 		}},
 	}
@@ -89,8 +95,9 @@ func Anthropic(credential string) Adapter {
 		Operations: []Operation{{
 			Name: "messages", Method: "POST", Path: "/v1/messages",
 			Body: &BodyRule{
-				DenyKeys:        []string{"mcp_servers", "container", "background"},
-				ClientToolsOnly: true,
+				DenyKeys:       []string{"background"},
+				ServerTools:    true,
+				ServerToolKeys: []string{"mcp_servers", "container"},
 			},
 		}},
 		RequestHeaders: []string{"Anthropic-Version"},
