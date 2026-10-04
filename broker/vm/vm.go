@@ -108,8 +108,26 @@ type Launch struct {
 	Work   string // overlayfs work directory
 	Root   string // where the merged root is mounted
 	Cgroup string // cgroup v2 directory to start the machine in; "" if none
-	Argv   []string
-	Env    []string
+	// Services is a broker-held host directory holding only this machine's
+	// guest service socket (ARC-6), mounted read-only at ServicesMount; ""
+	// if none. The runtime lets the guest connect to host sockets there and
+	// nowhere else.
+	Services string
+	Argv     []string
+	Env      []string
+}
+
+// ServicesMount is where a machine sees its Launch.Services directory.
+const ServicesMount = "/run/agentos"
+
+// Services hands each machine its own guest service directory (ARC-6). Open
+// is called before every start or restore of machine id and must return the
+// same directory each time. Close is called when the machine is removed
+// (destroyed, or its creation failed) and must be idempotent.
+// Identity comes from the directory: only machine id's sandbox has it.
+type Services interface {
+	Open(id string) (dir string, err error)
+	Close(id string)
 }
 
 // Runtime runs machines. Checkpoint is called on a paused machine and leaves
@@ -142,6 +160,9 @@ type Config struct {
 	NoCgroups bool
 	// KillTimeout bounds waiting for a machine's memory to be released.
 	KillTimeout time.Duration
+	// Services gives each machine its guest service socket (P1-7). Nil
+	// runs machines with no broker services at all.
+	Services Services
 }
 
 var (
@@ -295,6 +316,9 @@ func (m *Manager) unreserve(id string) {
 	m.mu.Lock()
 	delete(m.machines, id)
 	m.mu.Unlock()
+	if m.cfg.Services != nil {
+		m.cfg.Services.Close(id)
+	}
 }
 
 // startFrom (re)builds a machine's layer from snapshot s (or empty when s is
@@ -327,6 +351,13 @@ func (m *Manager) startFrom(ctx context.Context, mc *machine, s *Snapshot) error
 		if _, err := m.cfg.Cgroups.Child(mc.ID, cgroup.Limits{MaxBytes: mc.Spec.MemMB << 20}); err != nil {
 			return err
 		}
+	}
+	if m.cfg.Services != nil {
+		dir, err := m.cfg.Services.Open(mc.ID)
+		if err != nil {
+			return err
+		}
+		l.Services = dir
 	}
 	var err error
 	if s != nil && s.Tier == Full {
@@ -426,6 +457,17 @@ func (m *Manager) RaiseLabel(id string, l Label) error {
 	}
 	mc.Label = l
 	return m.saveMachine(mc)
+}
+
+// Label returns a machine's data label (REV-5).
+func (m *Manager) Label(id string) (Label, error) {
+	mc, err := m.get(id)
+	if err != nil {
+		return 0, err
+	}
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+	return mc.Label, nil
 }
 
 // Step takes the per-step file-system snapshot (REV-1).

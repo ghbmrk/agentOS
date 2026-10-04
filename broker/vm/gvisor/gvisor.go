@@ -48,7 +48,7 @@ func (r *Runtime) platform() string {
 }
 
 func (r *Runtime) cmd(ctx context.Context, args ...string) *exec.Cmd {
-	base := []string{"--root", r.StateDir, "--platform=" + r.platform(), "--network=none", "--ignore-cgroups", "--overlay2=none"}
+	base := []string{"--root", r.StateDir, "--platform=" + r.platform(), "--network=none", "--ignore-cgroups", "--overlay2=none", "--host-uds=open"}
 	return exec.CommandContext(ctx, r.Bin, append(base, args...)...)
 }
 
@@ -138,7 +138,8 @@ func (r *Runtime) Kill(ctx context.Context, l vm.Launch) error {
 }
 
 // writeBundle writes the OCI bundle: root is the overlay mount; no host
-// mounts beyond /proc and a private /tmp; private namespaces; no network.
+// mounts beyond /proc, a private /tmp, and the machine's own services
+// directory (read-only); private namespaces; no network.
 func writeBundle(dir string, l vm.Launch) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
@@ -161,6 +162,12 @@ func writeBundle(dir string, l vm.Launch) error {
 		"linux": map[string]any{
 			"namespaces": []map[string]string{{"type": "pid"}, {"type": "network"}, {"type": "ipc"}, {"type": "uts"}, {"type": "mount"}},
 		},
+	}
+	if l.Services != "" {
+		spec["mounts"] = append(spec["mounts"].([]map[string]any), map[string]any{
+			"destination": vm.ServicesMount, "type": "bind", "source": l.Services,
+			"options": []string{"rbind", "ro", "nosuid", "nodev", "noexec"},
+		})
 	}
 	b, err := json.Marshal(spec)
 	if err != nil {

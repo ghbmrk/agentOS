@@ -1,9 +1,12 @@
 // Command guest is the agent-machine stand-in for gvisor's integration test.
 //
 //	guest serve      hold a random token in memory and serve requests
+//	guest svc SOCK PATH  GET PATH from the broker service socket SOCK and
+//	                 print the status and body
 //	guest <cmd> ...  send one request to the server and print the answer
 //
-// Requests: token; write PATH TEXT; read PATH; stat PATH.
+// Requests: token; write PATH TEXT; read PATH; stat PATH; hold SOCK (keep a
+// connection to SOCK open); heldget PATH (GET over the held connection).
 package main
 
 import (
@@ -11,9 +14,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strings"
+	"time"
 )
 
 const sock = "/tmp/guest.sock"
@@ -21,6 +26,10 @@ const sock = "/tmp/guest.sock"
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "serve" {
 		serve()
+		return
+	}
+	if len(os.Args) == 4 && os.Args[1] == "svc" {
+		fmt.Println(get(os.Args[2], os.Args[3]))
 		return
 	}
 	c, err := net.Dial("unix", sock)
@@ -31,6 +40,24 @@ func main() {
 	fmt.Fprintln(c, strings.Join(os.Args[1:], " "))
 	line, _ := bufio.NewReader(c).ReadString('\n')
 	fmt.Print(line)
+}
+
+var held []net.Conn
+
+// get sends one HTTP/1.0 GET over a Unix socket; the stdlib client would
+// need a custom dialer, and the answer is one short line.
+func get(sock, path string) string {
+	c, err := net.Dial("unix", sock)
+	if err != nil {
+		return "ERR " + err.Error()
+	}
+	defer c.Close()
+	fmt.Fprintf(c, "GET %s HTTP/1.0\r\nHost: broker\r\n\r\n", path)
+	b, _ := io.ReadAll(c)
+	status, rest, _ := strings.Cut(string(b), "\r\n")
+	_, body, _ := strings.Cut(rest, "\r\n\r\n")
+	_, status, _ = strings.Cut(status, " ") // drop the protocol version
+	return status + " " + strings.TrimSpace(body)
 }
 
 func serve() {
@@ -71,6 +98,30 @@ func serve() {
 			} else {
 				out = string(b)
 			}
+		case "hold":
+			if h, err := net.Dial("unix", f[1]); err != nil {
+				out = "ERR " + err.Error()
+			} else {
+				held = append(held, h)
+				out = "ok"
+			}
+		case "heldget":
+			// One keep-alive GET on the newest held connection.
+			if len(held) == 0 {
+				out = "ERR none held"
+				break
+			}
+			h := held[len(held)-1]
+			h.SetDeadline(time.Now().Add(5 * time.Second))
+			fmt.Fprintf(h, "GET %s HTTP/1.1\r\nHost: broker\r\n\r\n", f[1])
+			buf := make([]byte, 4096)
+			n, err := h.Read(buf)
+			if err != nil {
+				out = "ERR " + err.Error()
+				break
+			}
+			_, body, _ := strings.Cut(string(buf[:n]), "\r\n\r\n")
+			out = strings.TrimSpace(body)
 		case "stat":
 			if _, err := os.Stat(f[1]); err != nil {
 				out = "absent"
