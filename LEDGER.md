@@ -13,7 +13,7 @@ Unit: WAU = one week's plan allowance. Harness envelope = 70% of each week.
 
 | Week starting | Envelope | Harness used (est.) | Mark's own use | Notes |
 |---|---|---|---|---|
-| 2026-10-04 | 70% | — | — | P0 start |
+| 2026-10-04 | 70% | — | — | P0 start. S3 (cloud): ~0.17 M tokens by session counter; WAU share awaits Mark's screenshot (B-6) |
 
 ## Phase allocation (share of total)
 
