@@ -53,3 +53,4 @@ Everything else, including defaults, tiers, and timeouts, is tradable when the t
 | PR | Lens verdicts | Conflict | Resolution | Outcome |
 |---|---|---|---|---|
 | #15 (spec v0.12) | Security: block (HW-5a signer). Potency: sign-off. UX: block (OP-8 extension). | OP-8 extension: UX wants it now; potency wants it later, with a daily ceiling | Extend one task by code-generator code, within the overall cap and an owner-set daily ceiling, neither raisable by that reply | Clear once the blockers land |
+| #18 (P1-1 journal) | UX: sign-off. Security: 2 blockers. Potency: 1 blocker. L3: 2 blockers. | None; all additive | Note: an OP-2 refused duplicate is shown to the owner as held behind the unresolved intent | Clear once the fixes land |
