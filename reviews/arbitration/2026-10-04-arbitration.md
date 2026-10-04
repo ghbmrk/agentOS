@@ -69,6 +69,14 @@ Disclosure is bounded structurally (the composer sees only the thread and has no
 
 **Mark's card D2 (PR reviews thread)** offers "Not for MVP", "Yes, with alert", or "Yes, silent". This run recommends **Yes, with alert**, under the three conditions above. Until an account earns it, behavior is identical to "Not for MVP": every reply is prompted, and the prompts produce the evidence. After that, each reply texts an alert with `UNDO <id>` (#8 CH-16). The reviewer's example, a trusted correspondent asking "confirm you'll pay by Friday", now falls back to a prompt through the commitment filter. The residual is a commitment phrased in a way the patterns miss. The alert and undo window cover that case, and the pattern list grows through Loop 2 regressions (LOOP-10).
 
+**Decided (Mark, 2026-10-04 23:55): calendar-fit acceptances.** Once a calendar is connected, an earned auto-reply may go out with the alert and undo window even though it names a date or time, but only when the owner is the one *accepting* ("yes, that works"), never proposing. The broker checks all of these deterministically (no inference, so ARC-2 holds):
+- the time in the reply equals a slot the counterpart proposed in the latest inbound message of the verified thread;
+- that slot is free on the connected calendar, as read by the broker;
+- the counterpart is a known contact;
+- the reply proposes no other time and matches no other commitment pattern (amounts, the six phrases).
+
+Anything else, including a counter-proposal or a new time, still prompts. Routed to the potency loop to spec in a follow-up spec-diff PR, built once a calendar connector exists.
+
 ### 6. The box's SIM as a tool (ADP-11 in #11)
 Sharing the owner-channel line with third-party traffic risks carrier filtering of the only control path (DEP-1). It also publishes the owner channel's number to businesses, which turns it into an inbound injection surface. A second line removes both problems and keeps all of potency's reach: a dual-SIM or eSIM modem, or an owner-held calling account as an optional dependency (DEP-3). The cost is a second prepaid plan for owners who want this.
 
