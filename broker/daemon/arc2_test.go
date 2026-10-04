@@ -31,7 +31,9 @@ var controlPath = map[string][]string{
 	// The composition root also opens the machine plane (below) and hands
 	// it to admission as a Preempter, and serves the guest plane (below)
 	// on each machine's socket.
-	"cmd/agentosd": {"daemon", "cgroup", "vm", "vm/gvisor", "guest", "meter"},
+	// It forwards each machine's model route to the vault process
+	// (modelroute, P2-4) and journals the denials that come back.
+	"cmd/agentosd": {"daemon", "cgroup", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies
@@ -63,6 +65,9 @@ var guestPlane = map[string]struct {
 }{
 	"guest": {[]string{"journal", "meter"}, []string{"os/exec", "plugin", "unsafe", "C"}},
 	"meter": {nil, []string{"net", "os/exec", "plugin", "unsafe", "C"}},
+	// modelroute forwards to the vault process over its Unix socket; it
+	// imports no broker package, so never the vault or the proxy.
+	"modelroute": {nil, []string{"os/exec", "plugin", "unsafe", "C"}},
 }
 
 var forbiddenStd = []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "syscall", "unsafe", "C"}
