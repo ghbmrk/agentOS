@@ -187,3 +187,37 @@ func TestOwnerSocketRefusesAnyUIDButTheModemBridge(t *testing.T) {
 		t.Fatal("unreachable")
 	}
 }
+
+func TestCH2IdleOwnerConnectionsAreClosed(t *testing.T) {
+	old := ownerIdle
+	ownerIdle = 100 * time.Millisecond
+	defer func() { ownerIdle = old }()
+	dir, _ := os.MkdirTemp("", "bk")
+	defer os.RemoveAll(dir)
+	cancel, d := start(t, dir)
+	defer func() { cancel(); d.Wait() }()
+	sock := filepath.Join(dir, "run", OwnerSocket)
+	// Fill every slot with silent connections; the owner must still get in.
+	var idle []net.Conn
+	for i := 0; i < 8; i++ {
+		c, err := net.Dial("unix", sock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		idle = append(idle, c)
+	}
+	defer func() {
+		for _, c := range idle {
+			c.Close()
+		}
+	}()
+	time.Sleep(300 * time.Millisecond)
+	idle[0].SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := idle[0].Read(make([]byte, 1)); err == nil {
+		t.Fatal("idle owner connection still open")
+	}
+	r := send(t, sock, "message", map[string]string{"from": owner, "text": "STOP"})
+	if !r.OK || !d.Engine().Stopped() {
+		t.Fatalf("STOP after idle connections: %+v", r)
+	}
+}
