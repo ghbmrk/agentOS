@@ -38,6 +38,10 @@ type Reservation struct {
 	Unit   string `json:"unit"`
 }
 
+// BrokerAccount is the account of intents that change the broker's own
+// state rather than an external account.
+const BrokerAccount = "broker"
+
 // Broker-state changes are intents too (OP-5): they use these actions, go
 // through the same engine, and share the one journal and recovery rule.
 const (
@@ -47,6 +51,28 @@ const (
 	ActionReleaseActivate   = "meta.release"
 	ActionSkillAdopt        = "meta.skill"
 )
+
+// Authority-narrowing broker-state changes. Pausing or revoking must always
+// work (ADP-9), so on BrokerAccount these are exempt from STOP's hold and
+// from restart fences. They only take authority away, so running one twice
+// or during STOP cannot widen anything.
+const (
+	ActionGrantRevoke = "meta.grant.revoke" // also revokes a pre-allowance
+	ActionGrantPause  = "meta.grant.pause"  // also pauses a pre-allowance or loop
+	ActionBudgetLower = "meta.budget.lower"
+)
+
+// narrowing reports whether an intent only takes authority away.
+func narrowing(in Intent) bool {
+	if in.Account != BrokerAccount {
+		return false
+	}
+	switch in.Action {
+	case ActionGrantRevoke, ActionGrantPause, ActionBudgetLower:
+		return true
+	}
+	return false
+}
 
 // State is an intent's position in the lifecycle.
 type State string
@@ -105,8 +131,14 @@ const (
 	PhaseDispatch  Phase = "dispatch" // the recheck immediately before dispatch (OP-3)
 )
 
-// Policy decides authority, recipients, preconditions, and reservations. It
-// is called with the engine locked, so it must not call back into the engine.
+// Policy decides authority, recipients, preconditions, and reservations.
+//
+// Check runs without the engine lock, so a slow check never delays STOP. The
+// engine commits the decision only if no journal record was written while
+// Check ran; otherwise it checks again. Authority changes are themselves
+// intents (OP-5), so a grant revoked during a check forces a fresh check
+// before dispatch (OP-3). Policy state that can change outside the engine
+// (for example an approval code's expiry) must be read inside Check.
 type Policy interface {
 	Check(ctx context.Context, phase Phase, in Intent) error
 }
@@ -170,6 +202,22 @@ var (
 	ErrNoExecutor   = errors.New("journal: executor not registered")
 	ErrCorrupt      = errors.New("journal: corrupt journal")
 	ErrBroken       = errors.New("journal: a journal write failed; reopen to recover")
+	ErrBusy         = errors.New("journal: state kept changing during the policy check; retry")
+	ErrLocked       = errors.New("journal: journal file is open in another process")
+)
+
+// Redactor rewrites free text before it is journaled, removing secrets
+// (CRED-1, CRED-7). The broker supplies one that strips vault values and the
+// CH-19 secret patterns. It is applied to intent params, recipients and
+// preconditions, and to evidence, reasons, cancel details and quality notes.
+// Identifiers (ID, account, action, executor, grant ref) are not redacted.
+type Redactor func(string) string
+
+// Size limits. An intent larger than MaxIntentBytes is rejected; free text
+// longer than MaxTextBytes is cut and tagged with a hash of the whole.
+const (
+	MaxIntentBytes = 64 << 10
+	MaxTextBytes   = 4 << 10
 )
 
 // normalize deep-copies an intent through its JSON form, so the in-memory
@@ -186,6 +234,22 @@ func normalize(in Intent) (Intent, error) {
 		return Intent{}, fmt.Errorf("%w: %v", ErrInvalid, err)
 	}
 	return out, nil
+}
+
+// effectFingerprint hashes only what decides the external effect: where,
+// what, to whom. Two intents with equal effect fingerprints under different
+// IDs may be the same effect submitted twice (OP-2).
+func effectFingerprint(in Intent) string {
+	b, _ := json.Marshal(struct {
+		Account    string
+		Action     string
+		Params     map[string]any
+		Recipients []string
+		Visibility string
+		Executor   string
+	}{in.Account, in.Action, in.Params, in.Recipients, in.Visibility, in.Executor})
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:])
 }
 
 // fingerprint is a hash over every field of the intent. encoding/json sorts

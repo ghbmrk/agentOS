@@ -42,7 +42,6 @@ func TestParseAnythingElseGoesToTheAgent(t *testing.T) {
 		"YES please",             // YES takes only numbers
 		"undo everything today",  // UNDO takes one ID
 		"more abcd",              // request IDs are at most 3 characters
-		"resume 12ab",            // a code is digits only
 		"",
 		"   ",
 	} {
@@ -64,5 +63,27 @@ func TestParsePublicPrefixMarksTaskPublic(t *testing.T) {
 	}
 	if got := Parse("publicity plan"); got.Public {
 		t.Fatalf("PUBLIC must be a whole word: got %+v", got)
+	}
+}
+
+func TestParseGarbledCodeRepliesNeverReachTheAgent(t *testing.T) {
+	for _, in := range []string{"resume 12ab", "RESUME 123 456", "YES 1 x 4821", "no 2 please 3"} {
+		if got := Parse(in); got.Word != WordUnclear || got.Text != "" {
+			t.Errorf("Parse(%q) = %+v, want unclear with no text", in, got)
+		}
+	}
+	if got := Parse("yes please"); got.Word != WordNone {
+		t.Errorf("no digits, so it is chat: %+v", got)
+	}
+}
+
+func TestStopNearMiss(t *testing.T) {
+	for in, want := range map[string]bool{
+		"stop everything": true, "STOP NOW": true, "please stop!": true,
+		"stop the newsletter": true, "STOP": false, "don't stop believing": false, "plan my week": false,
+	} {
+		if got := StopNearMiss(in); got != want {
+			t.Errorf("StopNearMiss(%q) = %v", in, got)
+		}
 	}
 }

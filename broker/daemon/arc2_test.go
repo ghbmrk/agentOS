@@ -4,6 +4,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -27,7 +28,18 @@ var controlPath = map[string][]string{
 	"cmd/agentosd": {"daemon"},
 }
 
-var forbiddenStd = []string{"net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "syscall"}
+var forbiddenStd = []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "syscall", "unsafe", "C"}
+
+// stdExceptions are the forbidden standard packages a control-path package
+// may still use, and why.
+var stdExceptions = map[string][]string{
+	"sockets":      {"net", "syscall"}, // Unix listeners, SO_PEERCRED, flock
+	"cmd/agentosd": {"syscall"},        // signal numbers for shutdown
+	"journal":      {"syscall"},        // flock on the journal file
+}
+
+// Never anywhere in the control path's transitive dependencies.
+var forbiddenDeps = []string{"net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "crypto/tls"}
 
 const module = "github.com/ghbmrk/agentos/broker/"
 
@@ -59,8 +71,7 @@ func TestARC2ControlPathCannotReachInference(t *testing.T) {
 					}
 				case strings.Contains(strings.SplitN(p, "/", 2)[0], "."):
 					t.Errorf("%s imports third-party %s (DEP-1, ARC-2)", f, p)
-				case p == "syscall" && pkg == "cmd/agentosd":
-					// Signal numbers for shutdown only.
+				case contains(stdExceptions[pkg], p):
 				case contains(forbiddenStd, p):
 					t.Errorf("%s imports %s; the control path may not open network clients or child processes", f, p)
 				}
@@ -76,4 +87,20 @@ func contains(ss []string, s string) bool {
 		}
 	}
 	return false
+}
+
+func TestARC2TransitiveDepsHaveNoNetworkClientOrLauncher(t *testing.T) {
+	var pkgs []string
+	for pkg := range controlPath {
+		pkgs = append(pkgs, "./"+pkg)
+	}
+	out, err := exec.Command("go", append([]string{"list", "-C", "..", "-deps"}, pkgs...)...).Output()
+	if err != nil {
+		t.Fatalf("go list: %v", err)
+	}
+	for _, dep := range strings.Fields(string(out)) {
+		if contains(forbiddenDeps, dep) {
+			t.Errorf("control path depends on %s", dep)
+		}
+	}
 }

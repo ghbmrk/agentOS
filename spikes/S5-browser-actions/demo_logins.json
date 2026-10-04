@@ -1,0 +1,5 @@
+{
+  "_note": "Public demo credentials that each site prints on its own login page (saucedemo.com, the-internet.herokuapp.com). Not personal data or secrets; kept out of code per CLAUDE.md, and used only by the out-of-band owner-login stand-in, never sent through the protocol.",
+  "saucedemo": {"url": "https://www.saucedemo.com/", "fields": [["#user-name", "standard_user"], ["#password", "secret_sauce"]], "submit": "#login-button"},
+  "herokuapp": {"url": "https://the-internet.herokuapp.com/login", "fields": [["#username", "tomsmith"], ["#password", "SuperSecretPassword!"]], "submit": "button[type=submit]"}
+}

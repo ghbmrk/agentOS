@@ -17,7 +17,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 ID_DEF = re.compile(r"\*\*([A-Z]{2,4}-\d+)\*\*")
 MARKER = re.compile(r"REQ:\s*([A-Z]{2,4}-\d+(?:\s*,\s*[A-Z]{2,4}-\d+)*)")
 SCAN_DIRS = ("tests", "spikes", "src", "broker")
-SKIP_SUFFIXES = {".png", ".jpg", ".img", ".iso", ".bin"}
+SKIP_SUFFIXES = {".png", ".jpg", ".img", ".iso", ".bin", ".pyc"}
 
 
 def spec_ids(spec_text):
