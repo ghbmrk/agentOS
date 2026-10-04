@@ -9,8 +9,9 @@
 // directory, which is never mounted into a guest: the guest sees only its
 // merged root, so it cannot read, change, or delete its snapshots (REV-1).
 //
-// Locking: admission calls Preempt while holding its own lock, so the
-// manager never calls admission while holding a machine's lock.
+// Locking: the manager never calls admission while holding a machine's
+// lock, and Preempt takes only the victim's lock, so admission and the
+// manager cannot deadlock whichever side starts.
 package vm
 
 import (
@@ -167,6 +168,16 @@ type Config struct {
 	// Services gives each machine its guest service socket (P1-7). Nil
 	// runs machines with no broker services at all.
 	Services Services
+	// DiskReserveBytes is the state disk's RES-4 reserve (a healthy
+	// release, the journal, the recall index). A snapshot is admitted only
+	// if copying the layer leaves the reserve free, as memory admission
+	// leaves its headroom (RES-2). Zero means 2 GiB.
+	DiskReserveBytes int64
+	// MaxLayerBytes optionally caps one machine's layer on top of that
+	// (zero: no fixed cap). MaxLayerInodes caps its inodes (zero: 200,000).
+	MaxLayerBytes, MaxLayerInodes int64
+	// FreeBytes reports the state disk's free space; nil measures it.
+	FreeBytes func(path string) (int64, error)
 }
 
 var (
@@ -177,6 +188,7 @@ var (
 	ErrConflict = errors.New("vm: merge conflict")
 	ErrImage    = errors.New("vm: snapshots are of different images")
 	ErrRevoked  = errors.New("vm: admission was withdrawn before the machine started")
+	ErrQuota    = errors.New("vm: disk budget exceeded: snapshot refused; free space in the machine (delete files) or roll back, then retry")
 )
 
 var idRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
@@ -211,6 +223,15 @@ func Open(ctx context.Context, cfg Config) (*Manager, error) {
 	}
 	if cfg.KillTimeout == 0 {
 		cfg.KillTimeout = 10 * time.Second
+	}
+	if cfg.DiskReserveBytes == 0 {
+		cfg.DiskReserveBytes = 2 << 30
+	}
+	if cfg.FreeBytes == nil {
+		cfg.FreeBytes = overlay.FreeBytes
+	}
+	if cfg.MaxLayerInodes == 0 {
+		cfg.MaxLayerInodes = 200_000
 	}
 	for _, d := range []string{cfg.StateDir, filepath.Join(cfg.StateDir, "machines"), filepath.Join(cfg.StateDir, "snapshots")} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
@@ -328,20 +349,34 @@ func (m *Manager) unreserve(id string) {
 	}
 }
 
+// keepLayer, passed to startFrom, restarts a machine on the layer it has.
+var keepLayer = &Snapshot{}
+
 // startFrom (re)builds a machine's layer from snapshot s (or empty when s is
-// nil) and runs it, restoring memory when s is a full checkpoint. Called with
-// mc.mu held and the machine admitted.
+// nil, or as it is when s is keepLayer) and runs it, restoring memory when s
+// is a full checkpoint. Called with mc.mu held and the machine admitted.
 func (m *Manager) startFrom(ctx context.Context, mc *machine, s *Snapshot) error {
 	l := m.launch(mc)
 	if err := os.MkdirAll(l.Dir, 0o700); err != nil {
 		return err
 	}
+	keep := s == keepLayer
+	if keep {
+		s = nil
+	}
 	for _, p := range []string{l.Upper, l.Work} {
+		if keep && p == l.Upper {
+			continue
+		}
 		if err := os.RemoveAll(p); err != nil {
 			return err
 		}
 	}
-	if s == nil {
+	if keep {
+		if fi, err := os.Lstat(l.Upper); err != nil || !fi.IsDir() {
+			return fmt.Errorf("vm: %s has no layer to resume on", mc.ID)
+		}
+	} else if s == nil {
 		if err := os.Mkdir(l.Upper, 0o755); err != nil {
 			return err
 		}
@@ -508,7 +543,9 @@ func (m *Manager) takeLocked(ctx context.Context, mc *machine, t Tier) (s Snapsh
 		return Snapshot{}, err
 	}
 	defer func() {
-		if rerr := m.cfg.Runtime.Resume(ctx, mc.ID); rerr != nil && err == nil {
+		// Resume even if the caller gave up, or the guest stays paused while
+		// recorded as running.
+		if rerr := m.cfg.Runtime.Resume(context.WithoutCancel(ctx), mc.ID); rerr != nil && err == nil {
 			err = rerr
 		}
 	}()
@@ -517,6 +554,9 @@ func (m *Manager) takeLocked(ctx context.Context, mc *machine, t Tier) (s Snapsh
 
 // capture writes a snapshot of a paused (or stopped) machine.
 func (m *Manager) capture(ctx context.Context, mc *machine, t Tier) (Snapshot, error) {
+	if err := m.checkQuota(m.launch(mc).Upper); err != nil {
+		return Snapshot{}, fmt.Errorf("%s: %w", mc.ID, err)
+	}
 	s := Snapshot{ID: m.nextSnapID(), Machine: mc.ID, Tier: t, Label: mc.Label, Image: mc.Spec.Image, Taken: time.Now().UTC()}
 	dir := m.snapDir(s.ID)
 	if err := os.Mkdir(dir, 0o700); err != nil {
@@ -546,6 +586,30 @@ func (m *Manager) capture(ctx context.Context, mc *machine, t Tier) (Snapshot, e
 	m.mu.Unlock()
 	mc.Last = s.ID
 	return s, m.saveMachine(mc)
+}
+
+// checkQuota admits a snapshot of a layer only if copying it leaves the
+// state disk's RES-4 reserve free and the layer is within its caps. Copies
+// keep holes and hardlinks, so a copy costs no more than this measure.
+// Refusal changes nothing: the machine and its existing snapshots stay.
+func (m *Manager) checkQuota(upper string) error {
+	u, err := overlay.Measure(upper)
+	if err != nil {
+		return err
+	}
+	free, err := m.cfg.FreeBytes(m.cfg.StateDir)
+	if err != nil {
+		return err
+	}
+	switch {
+	case u.Bytes > free-m.cfg.DiskReserveBytes:
+		return fmt.Errorf("%w (layer %d bytes; %d free, %d reserved)", ErrQuota, u.Bytes, free, m.cfg.DiskReserveBytes)
+	case m.cfg.MaxLayerBytes > 0 && u.Bytes > m.cfg.MaxLayerBytes:
+		return fmt.Errorf("%w (layer %d bytes, cap %d)", ErrQuota, u.Bytes, m.cfg.MaxLayerBytes)
+	case u.Inodes > m.cfg.MaxLayerInodes:
+		return fmt.Errorf("%w (layer %d inodes, cap %d)", ErrQuota, u.Inodes, m.cfg.MaxLayerInodes)
+	}
+	return nil
 }
 
 func (m *Manager) nextSnapID() string {
@@ -615,22 +679,36 @@ func (m *Manager) restartLocked(ctx context.Context, mc *machine, s *Snapshot) e
 	return err
 }
 
-// Resume restarts a preempted or stopped machine from its newest snapshot.
+// Resume restarts a preempted or stopped machine on the layer it had when
+// it stopped (a cold start: memory is not kept), re-admitting it first. A
+// machine with no layer left restarts from its image.
 func (m *Manager) Resume(ctx context.Context, id string) error {
 	mc, err := m.get(id)
 	if err != nil {
 		return err
 	}
 	mc.mu.Lock()
-	st, last := mc.State, mc.Last
+	st := mc.State
 	mc.mu.Unlock()
 	if st == Running {
 		return fmt.Errorf("%w: %s is running", ErrState, id)
 	}
-	if last == "" {
+	if _, err := os.Lstat(m.launch(mc).Upper); err != nil {
 		return m.Rebuild(ctx, id)
 	}
-	return m.Rollback(ctx, id, last)
+	if err := m.admit(mc); err != nil {
+		return err
+	}
+	mc.mu.Lock()
+	err = claimLocked(mc)
+	if err == nil {
+		err = m.restartLocked(ctx, mc, keepLayer)
+	}
+	mc.mu.Unlock()
+	if err != nil {
+		m.cfg.Admit.Release(id)
+	}
+	return err
 }
 
 // Fork checkpoints machine id and starts one new machine per entry of ids
@@ -787,7 +865,9 @@ func (m *Manager) mergeLocked(ctx context.Context, dm *machine, base, ss Snapsho
 	if dm.State != Running {
 		return Snapshot{}, false, fmt.Errorf("%w: %s is %s", ErrState, dst, dm.State)
 	}
-	ds, err := m.takeLocked(ctx, dm, FS)
+	// A full checkpoint, so the owner can roll dst back to its pre-merge
+	// memory as well as its files.
+	ds, err := m.takeLocked(ctx, dm, Full)
 	if err != nil {
 		return Snapshot{}, false, err
 	}
@@ -795,6 +875,12 @@ func (m *Manager) mergeLocked(ctx context.Context, dm *machine, base, ss Snapsho
 	if err != nil {
 		return Snapshot{}, false, err
 	}
+	mine, err := overlay.Diff(m.view(base), m.view(ds))
+	if err != nil {
+		return Snapshot{}, false, err
+	}
+	conflicts := subtreeConflicts(changes, mine)
+	conflicts = append(conflicts, subtreeConflicts(mine, changes)...)
 	// Build the merged layer beside the snapshots, then publish it as one.
 	out = Snapshot{ID: m.nextSnapID(), Machine: dst, Tier: FS, Label: maxLabel(dm.Label, ss.Label), Image: ds.Image, Taken: time.Now().UTC()}
 	dir := m.snapDir(out.ID)
@@ -809,13 +895,16 @@ func (m *Manager) mergeLocked(ctx context.Context, dm *machine, base, ss Snapsho
 	if err := overlay.Copy(m.view(ds).Upper, merged.Upper); err != nil {
 		return fail(err)
 	}
-	var conflicts []string
 	for _, c := range changes {
 		mine, _, err := m.view(ds).Lookup(c.Path)
 		if err != nil {
 			return fail(err)
 		}
 		switch {
+		case len(conflicts) > 0: // report only; merge nothing
+			if !mine.Same(c.From) && !mine.Same(c.To) {
+				conflicts = append(conflicts, c.Path)
+			}
 		case mine.Same(c.From): // dst left it alone: take the fork's
 			if err := overlay.Put(merged, m.view(ss), c.Path); err != nil {
 				return fail(err)
@@ -826,6 +915,7 @@ func (m *Manager) mergeLocked(ctx context.Context, dm *machine, base, ss Snapsho
 		}
 	}
 	if len(conflicts) > 0 {
+		sort.Strings(conflicts)
 		return fail(fmt.Errorf("%w: %s", ErrConflict, strings.Join(conflicts, ", ")))
 	}
 	if err := writeJSON(filepath.Join(dir, "meta.json"), out); err != nil {
@@ -840,6 +930,36 @@ func (m *Manager) mergeLocked(ctx context.Context, dm *machine, base, ss Snapsho
 		return Snapshot{}, true, err
 	}
 	return out, false, nil
+}
+
+// subtreeConflicts finds directories one side removed or turned into
+// something else while the other side changed a path beneath them in a
+// different way. A per-path comparison would let the removal silently win
+// (or bring the directory back opaque), losing the other side's work.
+func subtreeConflicts(side, other []overlay.Change) []string {
+	otherTo := map[string]overlay.Entry{}
+	for _, c := range other {
+		otherTo[c.Path] = c.To
+	}
+	var out []string
+	for _, c := range side {
+		if c.From.Kind != overlay.Dir || c.To.Kind == overlay.Dir {
+			continue
+		}
+		prefix := c.Path + string(filepath.Separator)
+		for _, o := range other {
+			if !strings.HasPrefix(o.Path, prefix) {
+				continue
+			}
+			// Both sides removed it: the same change, not a conflict.
+			if o.To.Kind == overlay.Absent && c.To.Kind != overlay.Dir {
+				continue
+			}
+			out = append(out, c.Path)
+			break
+		}
+	}
+	return out
 }
 
 // Rebuild throws away a machine's layer and restarts it from its image
@@ -892,10 +1012,12 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 }
 
 // Preempt stops a running machine for a higher admission class (RES-1). It
-// pauses the guest at once, keeps its files as a snapshot, kills it, and
-// returns only once its memory is released, as admission.Preempter
-// requires. Resume restarts it from that snapshot. Preempting a machine that
-// is not running is a no-op.
+// pauses the guest at once, kills it, and returns only once its memory is
+// released, as admission.Preempter requires. Nothing is copied on this
+// path, so its time does not grow with what the guest wrote: the machine's
+// layer stays on disk and Resume restarts it there. Memory since the last
+// full checkpoint is lost. Preempting a machine that is not running is a
+// no-op.
 func (m *Manager) Preempt(id string) error {
 	mc, err := m.get(id)
 	if err != nil {
@@ -910,21 +1032,12 @@ func (m *Manager) Preempt(id string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.KillTimeout)
 	defer cancel()
-	var keepErr error
-	if err := m.cfg.Runtime.Pause(ctx, id); err == nil {
-		_, keepErr = m.capture(ctx, mc, FS)
-	}
+	m.cfg.Runtime.Pause(ctx, id) // stop its CPU use now; the kill follows
 	if err := m.stopRuntime(ctx, mc); err != nil {
 		return err
 	}
 	mc.State = Preempted
-	if err := m.saveMachine(mc); err != nil {
-		return err
-	}
-	// Files written since the last step are lost if the snapshot failed;
-	// memory is released either way, which is what the caller waits for.
-	_ = keepErr
-	return nil
+	return m.saveMachine(mc)
 }
 
 // Machines lists machine IDs, sorted.
@@ -950,7 +1063,7 @@ func (m *Manager) load(ctx context.Context) error {
 	}
 	for _, e := range snaps {
 		var s Snapshot
-		if err := readJSON(filepath.Join(m.snapDir(e.Name()), "meta.json"), &s); err != nil {
+		if err := readJSON(filepath.Join(m.snapDir(e.Name()), "meta.json"), &s); err != nil || s.ID != e.Name() {
 			// A snapshot without metadata was never published: drop it.
 			os.RemoveAll(m.snapDir(e.Name()))
 			continue

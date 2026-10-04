@@ -76,6 +76,9 @@ func (g *Group) Child(name string, l Limits) (*Group, error) {
 		{"memory.max", strconv.FormatInt(l.MaxBytes, 10)},
 		{"memory.high", strconv.FormatInt(high, 10)},
 		{"memory.swap.max", "0"},
+		// An OOM kill takes the whole machine, never one process of it, so
+		// the sandbox is never left half alive.
+		{"memory.oom.group", "1"},
 	} {
 		if err := c.write(kv[0], kv[1]); err != nil {
 			if kv[0] == "memory.swap.max" && errors.Is(err, os.ErrNotExist) {

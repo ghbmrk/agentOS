@@ -13,7 +13,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/cgroup"
 )
 
-// REQ: REV-1, REV-4, ARC-4, RES-1, RES-2, REV-5
+// REQ: REV-1, REV-4, ARC-4, RES-1, RES-2, RES-4, REV-5
 
 var bg = context.Background()
 
@@ -389,8 +389,11 @@ func TestRES1ForegroundPreemptsExperimentWhichKeepsItsFiles(t *testing.T) {
 	if _, ok := e.rt.memOf("exp"); ok {
 		t.Fatal("preempted experiment still running")
 	}
-	if got := readSnap(t, e, mc.Last, "result"); got != "partial" {
+	if got := e.guestRead("exp", "result"); got != "partial" {
 		t.Fatal("preemption lost the experiment's files")
+	}
+	if len(e.m.Snapshots("exp")) != 0 {
+		t.Fatal("preemption copied the layer on the foreground path")
 	}
 	t.Logf("create with preemption took %v (fake runtime)", took)
 
@@ -525,5 +528,95 @@ func TestRES1PreemptionBeforeStartWinsTheRace(t *testing.T) {
 	}
 	if free := e.adm.Snapshot().FreeMB; free != 3900 {
 		t.Fatalf("free = %d, want only src admitted", free)
+	}
+}
+
+// A directory removed (or retyped) on one side while the other side wrote
+// beneath it is a conflict in both directions, never a silent loss.
+func TestREV4MergeConflictsUnderRemovedDirectories(t *testing.T) {
+	// "proj" is not in the image, so deleting it from a layer needs no
+	// whiteout (whiteouts need root; the kernel test covers them).
+	cases := []struct {
+		name      string
+		fork, dst func(e *env)
+	}{
+		{"fork removes dir, parent writes in it",
+			func(e *env) { must(t, os.RemoveAll(e.upper("k", "proj"))) },
+			func(e *env) { e.guestWrite("dst", "proj/new", "parent work") }},
+		{"parent removes dir, fork writes in it",
+			func(e *env) { e.guestWrite("k", "proj/new", "fork work") },
+			func(e *env) { must(t, os.RemoveAll(e.upper("dst", "proj"))) }},
+		{"fork turns dir into a file, parent writes in it",
+			func(e *env) { must(t, os.RemoveAll(e.upper("k", "proj"))); e.guestWrite("k", "proj", "file now") },
+			func(e *env) { e.guestWrite("dst", "proj/new", "parent work") }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t, 8192)
+			e.create("dst", admission.Accepted, 500)
+			e.guestWrite("dst", "proj/main", "v0")
+			_, err := e.m.Fork(bg, "dst", []string{"k"})
+			must(t, err)
+			tc.fork(e)
+			tc.dst(e)
+			before := e.guestRead("dst", "proj/new")
+			if _, err := e.m.Merge(bg, "dst", "k"); !errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), "proj") {
+				t.Fatalf("merge: %v", err)
+			}
+			if e.guestRead("dst", "proj/new") != before {
+				t.Fatal("a refused merge changed dst")
+			}
+		})
+	}
+	// Both sides removing the same directory is not a conflict.
+	e := newEnv(t, 8192)
+	e.create("dst", admission.Accepted, 500)
+	e.guestWrite("dst", "proj/main", "v0")
+	_, err := e.m.Fork(bg, "dst", []string{"k"})
+	must(t, err)
+	must(t, os.RemoveAll(e.upper("k", "proj")))
+	must(t, os.RemoveAll(e.upper("dst", "proj")))
+	if _, err := e.m.Merge(bg, "dst", "k"); err != nil {
+		t.Fatalf("same removal on both sides: %v", err)
+	}
+}
+
+func TestRES4SnapshotAdmittedOnlyAboveTheDiskReserve(t *testing.T) {
+	free := int64(1 << 20)
+	e := newEnv(t, 4096)
+	e.cfg.DiskReserveBytes = 900 << 10 // 1 MiB free, 900 KiB reserved: ~124 KiB budget
+	e.cfg.FreeBytes = func(string) (int64, error) { return free, nil }
+	e.open()
+	e.create("m", admission.Accepted, 100)
+	e.guestWrite("m", "small", "ok")
+	s1, err := e.m.Step(bg, "m")
+	must(t, err)
+	e.guestWrite("m", "big", strings.Repeat("x", 256<<10))
+	_, err = e.m.Step(bg, "m")
+	if !errors.Is(err, ErrQuota) || !strings.Contains(err.Error(), "disk budget") {
+		t.Fatalf("over-budget step: %v", err)
+	}
+	// Refusal truncates nothing: the guest's file and old snapshots stay.
+	if len(e.guestRead("m", "big")) != 256<<10 || len(e.m.Snapshots("m")) != 1 || e.m.Snapshots("m")[0].ID != s1.ID {
+		t.Fatal("a refused snapshot changed state")
+	}
+	// The guest acts on the error (deletes the file) and the next step works.
+	must(t, os.Remove(e.upper("m", "big")))
+	if _, err := e.m.Step(bg, "m"); err != nil {
+		t.Fatalf("step after pruning: %v", err)
+	}
+	// A sparse file costs only its data, so it passes.
+	f, err := os.Create(e.upper("m", "sparse"))
+	must(t, err)
+	must(t, f.Truncate(1<<40))
+	f.Close()
+	if _, err := e.m.Step(bg, "m"); err != nil {
+		t.Fatalf("sparse step: %v", err)
+	}
+	// More free space (measured, not fixed) admits the big layer.
+	free = 1 << 30
+	e.guestWrite("m", "big", strings.Repeat("x", 256<<10))
+	if _, err := e.m.Step(bg, "m"); err != nil {
+		t.Fatalf("step with room: %v", err)
 	}
 }

@@ -5,8 +5,9 @@
 //	                 print the status and body
 //	guest <cmd> ...  send one request to the server and print the answer
 //
-// Requests: token; write PATH TEXT; read PATH; stat PATH; hold SOCK (keep a
-// connection to SOCK open); heldget PATH (GET over the held connection).
+// Requests: token; write PATH TEXT; read PATH; remove PATH; stat PATH;
+// hold SOCK (keep a connection to SOCK open); heldget PATH (GET over the
+// held connection).
 package main
 
 import (
@@ -122,6 +123,12 @@ func serve() {
 			}
 			_, body, _ := strings.Cut(string(buf[:n]), "\r\n\r\n")
 			out = strings.TrimSpace(body)
+		case "remove":
+			if err := os.RemoveAll(f[1]); err != nil {
+				out = "ERR " + err.Error()
+			} else {
+				out = "ok"
+			}
 		case "stat":
 			if _, err := os.Stat(f[1]); err != nil {
 				out = "absent"

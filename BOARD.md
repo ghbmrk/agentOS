@@ -30,3 +30,10 @@ Started before spec v0.12 on parts unlikely to change; each package lists its sp
 | P1-6 | Canary harness (A5) and dependency audit harness (A9) as permanent CI jobs ([assurance/README.md](assurance/README.md)) | Cloud only | merged |
 | P1-5 | Owner channel on a modem simulator: SMS, two-tier approval codes, tiers, inline unlock, code hygiene, disclosure and commitment filters (CH-1–4, CH-10–14, CH-16, CH-18, CH-19, ADP-11) ([assumptions](broker/owner/ASSUMPTIONS.md)). Carry-forward: P2-2's local UI must offer RESUME and a local unlock that clears challenge mode (O4) as defense in depth; P1-7 tells the owner what a restart dropped (`Boot`) and closes approval-pending intents with no live request | P1-2 | merged |
 | P1-7 | OpenClaw as first guest: per-machine guest socket mounted into gVisor, broker tools over MCP with Step after each call, owner chat to the guest and back, OP-8 spend meter, egress denials journaled, verb-class gate, REV-5 labels to the proxy, A14 through the guest socket, A9 offline scenario, real OpenClaw run in CI (ARC-6, ARC-7, OP-8, REV-1, REV-5, OP-1, ADP-10) ([assumptions](broker/guest/ASSUMPTIONS.md)). Carry-forward: P2-4 serves the model route from a process holding the unlocked vault (G8); the grants/approval-policy package takes P1-5's approval-pending close-out (G12) | P1-3, P1-4, P1-5, P1-6 | in review |
+
+P1-4 follow-ups (from the #23 review), for P1-7 or the loop scheduler:
+- Re-admit preempted experiments: nothing calls `Manager.Resume` with retries yet (Potency).
+- Long experiments take an idle-time full checkpoint, so repeated preemption still makes progress (Potency).
+- After a broker restart, accepted work resumes once the journal reconciles, and the boot text names the resumed tasks (UX).
+- Guest sockets follow the B8 per-machine identity rule when P1-7 mounts them (V15, Security). Done in P1-7: identity is the socket (G1).
+- On the N95, measure zram together with the 1/16 `memory.high` margin (Potency).

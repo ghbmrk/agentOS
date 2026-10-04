@@ -2,6 +2,8 @@ package overlay
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -156,8 +158,8 @@ func viewMap(t *testing.T, v View) map[string]string {
 func mount(t *testing.T, v View) string {
 	t.Helper()
 	work, merged := t.TempDir(), t.TempDir()
-	must(t, syscall.Mount("overlay", merged, "overlay", 0,
-		"lowerdir="+v.Lower+",upperdir="+v.Upper+",workdir="+work))
+	must(t, syscall.Mount("overlay", merged, "overlay", syscall.MS_NOSUID|syscall.MS_NODEV,
+		MountOptions(v.Lower, v.Upper, work)))
 	t.Cleanup(func() { syscall.Unmount(merged, 0) })
 	return merged
 }
@@ -246,5 +248,144 @@ func TestREV1CopyKeepsWhiteoutsAndOpaqueMarkers(t *testing.T) {
 	var buf [1]byte
 	if n, _ := syscall.Getxattr(filepath.Join(dst, "d"), opaqueXattr, buf[:]); n != 1 || !bytes.Equal(buf[:], []byte("y")) {
 		t.Error("opaque xattr not copied")
+	}
+}
+
+// An image symlink to an absolute host path (Debian's /var/run -> /run)
+// must never lead a layer operation into the host.
+func TestREV1ImageSymlinksNeverReachTheHost(t *testing.T) {
+	host := t.TempDir()
+	write(t, host, "secret", "CANARY-HOST-FILE")
+	low := image(t)
+	must(t, os.MkdirAll(filepath.Join(low, "var"), 0o755))
+	must(t, os.Symlink(host, filepath.Join(low, "var/run")))
+	fork := View{Lower: low, Upper: t.TempDir()}
+	must(t, os.MkdirAll(filepath.Join(fork.Upper, "var/run"), 0o755)) // guest replaced the link with a dir
+	write(t, fork.Upper, "var/run/mine", "ok")
+
+	for _, rel := range []string{"var/run/secret", "etc/conf/x"} {
+		e, err := Stat(low, rel)
+		must(t, err)
+		if e.Kind != Absent {
+			t.Errorf("Stat(image, %s) = %v, want absent", rel, e.Kind)
+		}
+	}
+	if e, _, _ := fork.Lookup("var/run/secret"); e.Kind != Absent {
+		t.Fatal("view shows a host file through an image symlink")
+	}
+	base := View{Lower: low, Upper: t.TempDir()}
+	ch, err := Diff(base, fork)
+	must(t, err)
+	for _, c := range ch {
+		if strings.Contains(c.Path, "secret") {
+			t.Fatalf("diff reached the host: %v", ops(ch))
+		}
+	}
+	if os.Geteuid() == 0 { // replacing the link with a dir sets an opaque marker
+		dst := View{Lower: low, Upper: t.TempDir()}
+		for _, c := range ch {
+			must(t, Put(dst, fork, c.Path))
+		}
+		must(t, Put(dst, fork, "var/run/secret"))
+		if _, err := os.Stat(filepath.Join(dst.Upper, "var/run/secret")); !os.IsNotExist(err) {
+			t.Fatal("Put copied a host file into a guest layer")
+		}
+	}
+	if _, err := Stat(low, "../etc"); !errors.Is(err, ErrUnsafe) {
+		t.Fatalf("dot-dot path: %v", err)
+	}
+}
+
+func TestREV1SnapshotsCostWhatTheLayerCosts(t *testing.T) {
+	src := t.TempDir()
+	f, err := os.Create(filepath.Join(src, "sparse"))
+	must(t, err)
+	must(t, f.Truncate(1<<30)) // 1 GiB apparent, nothing allocated
+	f.WriteAt([]byte("tail"), 1<<29)
+	f.Close()
+	write(t, src, "a", "linked")
+	for i := 0; i < 20; i++ {
+		must(t, os.Link(filepath.Join(src, "a"), filepath.Join(src, fmt.Sprintf("l%d", i))))
+	}
+	before, err := Measure(src)
+	must(t, err)
+	if before.Bytes > 1<<20 || before.Inodes != 3 { // root, sparse, and one inode for 21 links
+		t.Fatalf("source usage %+v", before)
+	}
+	dst := filepath.Join(t.TempDir(), "c")
+	must(t, Copy(src, dst))
+	after, err := Measure(dst)
+	must(t, err)
+	if after.Bytes > 1<<20 || after.Inodes != before.Inodes {
+		t.Fatalf("copy usage %+v, source %+v: sparse files or hardlinks were expanded", after, before)
+	}
+	a, _ := os.Stat(filepath.Join(dst, "a"))
+	l, _ := os.Stat(filepath.Join(dst, "l7"))
+	if !os.SameFile(a, l) {
+		t.Fatal("hardlinks not kept")
+	}
+	ea, _ := Stat(src, "sparse")
+	eb, _ := Stat(dst, "sparse")
+	if !ea.Same(eb) {
+		t.Fatal("sparse copy differs")
+	}
+}
+
+func TestREV4OwnershipAndCapabilitiesCountAsChanges(t *testing.T) {
+	needRoot(t)
+	low := image(t)
+	a := View{Lower: low, Upper: t.TempDir()}
+	b := View{Lower: low, Upper: t.TempDir()}
+	must(t, Copy(filepath.Join(low, "etc"), filepath.Join(b.Upper, "etc")))
+	must(t, os.Lchown(filepath.Join(b.Upper, "etc/conf"), 1000, 1000))
+	ch, err := Diff(a, b)
+	must(t, err)
+	if got := ops(ch); got != "modified etc/conf" {
+		t.Fatalf("chown diff = %q", got)
+	}
+}
+
+func TestREV1CopyRefusesDevicesAndDropsOverlayPointers(t *testing.T) {
+	needRoot(t)
+	src := t.TempDir()
+	must(t, syscall.Mknod(filepath.Join(src, "sda"), syscall.S_IFBLK|0o600, 8<<8))
+	err := Copy(src, filepath.Join(t.TempDir(), "c"))
+	if !errors.Is(err, ErrUnsafe) || !strings.Contains(err.Error(), "sda") {
+		t.Fatalf("block device copied: %v", err)
+	}
+	src = t.TempDir()
+	must(t, syscall.Mknod(filepath.Join(src, "mem"), syscall.S_IFCHR|0o600, 1<<8|1))
+	if err := Copy(src, filepath.Join(t.TempDir(), "c")); !errors.Is(err, ErrUnsafe) {
+		t.Fatalf("/dev/mem copied: %v", err)
+	}
+	src = t.TempDir()
+	must(t, os.Mkdir(filepath.Join(src, "d"), 0o755))
+	must(t, syscall.Setxattr(filepath.Join(src, "d"), "trusted.overlay.redirect", []byte("/etc"), 0))
+	must(t, syscall.Setxattr(filepath.Join(src, "d"), opaqueXattr, []byte("x"), 0))
+	dst := filepath.Join(t.TempDir(), "c")
+	must(t, Copy(src, dst))
+	for _, n := range []string{"trusted.overlay.redirect", opaqueXattr} {
+		if _, ok := getXattr(filepath.Join(dst, "d"), n); ok {
+			t.Errorf("%s survived the copy", n)
+		}
+	}
+}
+
+// The kernel agrees: an upper directory over an image symlink hides it.
+func TestREV1KernelHidesImageSymlinkUnderUpperDir(t *testing.T) {
+	needRoot(t)
+	host := t.TempDir()
+	write(t, host, "secret", "CANARY-HOST-FILE")
+	low := image(t)
+	must(t, os.MkdirAll(filepath.Join(low, "var"), 0o755))
+	must(t, os.Symlink(host, filepath.Join(low, "var/run")))
+	v := View{Lower: low, Upper: t.TempDir()}
+	must(t, os.MkdirAll(filepath.Join(v.Upper, "var/run"), 0o755))
+	kernel := guestView(t, mount(t, v))
+	if _, ok := kernel["var/run/secret"]; ok {
+		t.Fatal("kernel shows the host file")
+	}
+	if got := viewMap(t, v); !sameMaps(got, kernel) {
+		t.Fatalf("view %v\nkernel %v", got, kernel)
 	}
 }

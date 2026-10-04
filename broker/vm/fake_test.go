@@ -205,3 +205,8 @@ func must(t *testing.T, err error) {
 		t.Fatal(err)
 	}
 }
+
+// upper is a path in machine id's layer, for a guest's deletions.
+func (e *env) upper(id, rel string) string {
+	return filepath.Join(e.cfg.StateDir, "machines", id, "upper", rel)
+}
