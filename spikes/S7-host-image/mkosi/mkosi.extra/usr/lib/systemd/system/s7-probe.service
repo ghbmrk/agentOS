@@ -1,0 +1,8 @@
+[Unit]
+Description=S7 probe: print boot-chain facts to the console
+After=basic.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/s7/probe.sh
+StandardOutput=journal+console

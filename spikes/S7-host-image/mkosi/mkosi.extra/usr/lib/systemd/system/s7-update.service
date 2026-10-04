@@ -1,0 +1,8 @@
+[Unit]
+Description=S7 offline A/B update test
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/s7/update.sh
+StandardOutput=journal+console
