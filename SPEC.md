@@ -255,11 +255,11 @@ AgentOS reaches current and future tools (frontier assistants, SaaS, local apps)
 - **ADP-6** Adapters are created and changed only through §11, including by agents when a new tool appears: draft the adapter, qualify it on recorded interactions (LOOP-5), pass the mismatch check (ADP-8), and request any new grants and the choices for unmapped operations from the owner (ADP-2). An adapter drafted from the owner's interactions is private-derived (OSS-3); only a clean-room re-creation (OSS-2) may be published via §11B.
 - **ADP-7** An adapter whose observed behavior diverges from its declaration (a changed UI or API) is rerouted to its next healthy, already-granted route, or paused if none exists, and Loop 3 receives a repair candidate. Rerouting never widens authority, changes custody, or loosens an operation's class (ADP-2).
 - **ADP-8** **Mismatch check.** Before adoption, an adapter is exercised against the tool's demo or sandbox environment (synthetic data only) where one exists. An operation whose observed effects exceed its verb (any outbound effect from a read- or draft-mapped operation) blocks adoption. [Risk] Effects the demo environment does not show can still be mislabelled; the stricter-verb rule (ADP-2) is the mitigation.
-- **ADP-9** **Owner pre-allowance.** The owner MAY pre-allow irreversible operations, scoped per service, per operation, or both, to run without approval and without notification. A pre-allowance MUST be a broker-checked rule, never trust in the agent:
-  - **Verified inputs.** Every field the rule constrains (recipient, account, amount) is read by the broker from the source system (e.g. the invoice's contact in the tool itself), never taken from the agent.
-  - **Templated content only.** Content comes from an owner-approved template with broker-filled fields.
-  - **Rate limits** per item and per period are part of every rule.
-  - **Optional hold** on records edited in the last N days, so a quietly tampered record cannot take effect at once.
+- **ADP-9** **Owner pre-allowance.** The owner MAY pre-allow irreversible operations, scoped per service, per operation, or both, to run without approval and without notification. A pre-allowance MUST be a deterministic predicate the broker checks (no inference, ARC-2), never a description the agent interprets:
+  - **Verified inputs.** Every field the rule constrains (recipient, account, amount) is read by the broker from the source system (e.g. the invoice's contact in the tool itself) or fixed by the owner. A value the agent supplies never satisfies the predicate.
+  - **Templated content only.** Content comes from an owner-approved template filled only from those fields, with no free text.
+  - **Scope bounds**: per-item frequency, a daily rate, and an amount cap where relevant, in every rule.
+  - **Optional hold** on records edited in the last N days, so a quietly tampered record cannot take effect at once (§17 risk 8).
   - **Fixed-wording approval.** The agent may draft a rule; the broker renders it back to the owner in fixed, spec-defined wording, never the agent's words.
   - **Asymmetric changes.** Granting or widening a rule is a new-grant intent (CH-3: approval code plus local confirmation or recovery key). Pausing or revoking needs only a text from the owner's number, like STOP.
   - **No match, no silence.** An operation that does not match a rule exactly falls back to a normal approval request.
@@ -444,3 +444,4 @@ Before any qualification run, freeze revisions, hardware profile, accounts, work
 5. **Remote rich UI is gone by design.** If that proves too limiting, the only fix is an optional, owner-chosen, end-to-end-encrypted relay. That would be a deliberate exception to DEP-2's spirit, never a requirement.
 6. **Project update-signing key** custody (UPD-2).
 7. **Desktop kiosk escape** (ADP-5). A GUI path out of the kiosk (a crash dialog, help browser, or app-embedded file picker) could reach the app's saved login. Mitigations: the login stored outside the UI user's reach, A13's adversarial escape step, and restricting desktop executors to apps where that holds.
+8. **Tampered trusted source** (ADP-9). An attacker who edits the source record a pre-allowance trusts (e.g. a Xero contact's email) passes the predicate. Mitigations: scope bounds, the recent-edit hold, and the journal.
