@@ -19,7 +19,7 @@
 
 Canaries (all synthetic): the HttpOnly session cookie, a script-readable cookie, a local-storage value, a saved password (also after the page's "Show password" toggle), an API key the page displays without a reveal step, and a token in a link's query. None appears in any response line, snapshot or downloaded file. The displayed key and link token come back as `[REDACTED]`; screenshots of that page are withheld (CRED-10).
 
-Executor memory: one headless Chromium with a small page, **280 MB PSS** (Chromium processes only, shared pages counted once). S3's floor budget is 0.5 GB. Real sites will be measured by `live.py`.
+Executor memory on the fixture page: **165 MB PSS** with Chromium's headless shell, 280 MB with full Chromium in headless mode (browser processes only, shared pages counted once). S3's floor budget is 0.5 GB. Real sites will be measured by `live.py`.
 
 ## Findings so far
 
@@ -27,6 +27,7 @@ Executor memory: one headless Chromium with a small page, **280 MB PSS** (Chromi
 2. **`type` needs a submit flag.** Search boxes without a button submit only on Enter. v0 adds `submit: bool` to `type` rather than a general `press(key)` verb. This is a widening and needs L3 review.
 3. **Refs, not selectors.** Playwright's AI snapshot mode assigns refs across iframes and shadow roots, and the executor resolves them. The agent never sends a selector, so the protocol has no query language to abuse. Stale refs fail closed ("take a new snapshot").
 4. **Password fields refuse `type`.** Credentials are entered by the owner on the live view (CH-8); the protocol has no path to type one.
+5. **The browser makes its own connections, which page-level routing does not see.** Full Chromium (headless mode, Playwright's default flags) connected to `www.google.com` and `android.clients.google.com` within seconds of launch, on a blank page, every run [Measured: egress proxy log]. Ten extra "disable" flags did not stop it. Chromium's headless shell made **none** in the same test. So: (a) the executor runs the headless shell; (b) the live view for owner logins (CH-8) needs a headed browser, which will make such calls, so executor egress must be confined to declared origins by the broker's proxy or network namespace, outside the browser, not by the browser's own request interception.
 
 Expected gaps that `live.py`'s `herokuapp_gaps` task probes (no verb exists for them in v0): JavaScript dialogs (Playwright auto-dismisses them), hover-only menus, and file upload.
 

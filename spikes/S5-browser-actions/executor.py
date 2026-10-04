@@ -21,7 +21,8 @@ import time
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import protocol as P  # noqa: E402
 
-CHROME = os.environ.get("S5_CHROME", "/opt/pw-browsers/chromium-1194/chrome-linux/chrome")
+CHROME = os.environ.get(
+    "S5_CHROME", "/opt/pw-browsers/chromium_headless_shell-1194/chrome-linux/headless_shell")
 MAX_DOWNLOAD = 50 * 1024 * 1024
 PASSWORDISH = re.compile(r"pass(word|wd|code)?|pin\b|secret|otp", re.I)
 

@@ -54,7 +54,7 @@ def chromium_pss_mb(pid):
         p = todo.pop()
         todo += kids.get(p, [])
         try:
-            if "chrom" not in pathlib.Path(f"/proc/{p}/comm").read_text():
+            if not re.search(r"chrom|headless", pathlib.Path(f"/proc/{p}/comm").read_text()):
                 continue
             m = re.search(r"Pss:\s+(\d+)", pathlib.Path(f"/proc/{p}/smaps_rollup").read_text())
             total += int(m.group(1)) if m else 0
