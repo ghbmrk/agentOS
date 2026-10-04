@@ -54,6 +54,13 @@ func TestARC6EachLaunchGetsItsOwnServicesDirectory(t *testing.T) {
 	_, err = e.m.Fork(ctx, "m1", []string{"f1", "f2"})
 	must(t, err)
 	must(t, e.m.Rebuild(ctx, "m1"))
+	_, err = e.m.Fork(ctx, "f2", []string{"g1"})
+	must(t, err)
+	for id, want := range map[string]string{"m1": "m1", "f1": "m1", "f2": "m1", "g1": "m1"} {
+		if mc, _ := e.m.Get(id); mc.Lineage != want {
+			t.Errorf("%s lineage %q, want %q", id, mc.Lineage, want)
+		}
+	}
 	for _, l := range e.rt.launches {
 		if want := filepath.Join(svc.root, l.ID); l.Services != want {
 			t.Errorf("launch of %s got services %q, want %q", l.ID, l.Services, want)

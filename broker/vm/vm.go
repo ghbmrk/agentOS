@@ -86,7 +86,11 @@ type Machine struct {
 	Label    Label
 	State    State
 	ForkBase string // snapshot this machine was forked from, if any
-	Last     string // newest snapshot of this machine
+	// Lineage is the machine this one descends from by fork, or its own
+	// ID. Forks share their source's memory, so the broker treats a
+	// lineage as one requester for idempotency (OP-1).
+	Lineage string
+	Last    string // newest snapshot of this machine
 }
 
 // Snapshot is a broker-held snapshot's record.
@@ -248,7 +252,7 @@ func (m *Manager) Create(ctx context.Context, id string, s Spec) (Machine, error
 	if _, ok := m.cfg.Images[s.Image]; !ok {
 		return Machine{}, fmt.Errorf("%w: image %q", ErrUnknown, s.Image)
 	}
-	mc, err := m.reserve(id, s, s.Label, "")
+	mc, err := m.reserve(id, s, s.Label, "", "")
 	if err != nil {
 		return Machine{}, err
 	}
@@ -298,7 +302,7 @@ func claimLocked(mc *machine) error {
 
 // reserve records a new machine in the table so no one else takes its ID.
 // The returned machine is not yet persisted or started.
-func (m *Manager) reserve(id string, s Spec, l Label, forkBase string) (*machine, error) {
+func (m *Manager) reserve(id string, s Spec, l Label, forkBase, lineage string) (*machine, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.machines[id]; ok {
@@ -307,7 +311,10 @@ func (m *Manager) reserve(id string, s Spec, l Label, forkBase string) (*machine
 	if _, err := os.Lstat(m.machineDir(id)); err == nil {
 		return nil, fmt.Errorf("%w: %s (left on disk)", ErrExists, id)
 	}
-	mc := &machine{Machine: Machine{ID: id, Spec: s, Label: l, State: Stopped, ForkBase: forkBase}}
+	if lineage == "" {
+		lineage = id
+	}
+	mc := &machine{Machine: Machine{ID: id, Spec: s, Label: l, State: Stopped, ForkBase: forkBase, Lineage: lineage}}
 	m.machines[id] = mc
 	return mc, nil
 }
@@ -645,8 +652,11 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 		}
 	}
 	src.mu.Lock()
-	spec, label := src.Spec, src.Label
+	spec, label, lineage := src.Spec, src.Label, src.Lineage
 	src.mu.Unlock()
+	if lineage == "" {
+		lineage = id
+	}
 	spec.Label = label
 
 	var reserved []*machine
@@ -657,7 +667,7 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 		}
 	}
 	for _, f := range ids {
-		mc, err := m.reserve(f, spec, label, "")
+		mc, err := m.reserve(f, spec, label, "", lineage)
 		if err != nil {
 			undo()
 			return Snapshot{}, err
@@ -961,6 +971,9 @@ func (m *Manager) load(ctx context.Context) error {
 		}
 		if mc.State == Running {
 			mc.State = Stopped
+		}
+		if mc.Lineage == "" {
+			mc.Lineage = mc.ID
 		}
 		m.stopRuntime(ctx, mc)
 		m.machines[mc.ID] = mc
