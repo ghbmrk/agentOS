@@ -57,6 +57,7 @@ The product MUST work with only the dependencies in the first two rows.
    - the **local Wi-Fi name and password** for the box's own access point;
    - a QR code joining that Wi-Fi and opening the local setup page;
    - a **paper approval-code grid** (fallback authenticator);
+   - the **vault passphrase** (at least 80 bits, e.g. seven words from a standard 7,776-word list), used to unlock on a PC the box doesn't know (CRED-8);
    - the **recovery key** (on a separate, detachable sheet).
 3. **Cellular modem with SIM slot**. MVP: a separate USB LTE modem with voice support. Target: built into the drive (§3.3).
 
@@ -172,7 +173,12 @@ Remote live browser view, remote file browsing, and push notifications, away fro
 - **CRED-7** The broker MUST redact every vault value from all agent-bound output, logs, and the index. This is defense in depth.
 
 ### 7.4 Vault keys and hosts
-- **CRED-8** The vault is encrypted on the drive. On a **trusted host**, an unlock slot is sealed to that PC's TPM, so it restarts unattended. On an unknown host, the box texts the owner, and unlock requires an approval code. A lost drive is ciphertext.
+- **CRED-8** The vault is encrypted on the drive, and nothing stored on the drive alone can release its key. The key is wrapped by independent slots:
+  - **Trusted host:** a slot sealed to that PC's TPM, so it restarts unattended.
+  - **Unknown host:** a slot derived from the Owner Card's **vault passphrase** through a memory-hard KDF (Argon2id, tuned to about 1 s at the floor, HW-4). The owner enters it on the local Wi-Fi page (CH-8), never by text or voice (CH-6). The box also texts the owner and requires a high-tier approval code (CH-4), so an unexpected unlock is visible and a running box refuses one without the owner. The code authorizes the unlock; it does not decrypt anything.
+  - **Recovery:** a slot for the recovery key (REC-1).
+
+  The owner MAY replace the passphrase on the local UI. A lost drive is ciphertext: without the card, a TPM it was sealed to, or the recovery key, its key is out of reach of offline guessing. [Inference: at 80 bits or more behind Argon2id, offline search is infeasible]
 - **CRED-9** Adding or removing a trusted host is a tier-4 action (CH-3).
 
 ### 7.5 Recovery
@@ -205,7 +211,7 @@ Remote live browser view, remote file browsing, and push notifications, away fro
 - **ONB-2** Disk on the host is never written. AgentOS runs entirely from the drive.
 
 ### 8.2 Moving to another PC
-Plug in; the box texts "Unknown host [model]. Reply with an approval code to unlock". Optionally make it trusted.
+Plug in; the box texts "Unknown host [model]. Join the box's Wi-Fi to unlock." The owner enters the vault passphrase from the Owner Card on the local page and replies to the text with an approval code (CRED-8). Optionally make it trusted.
 
 ### 8.3 Daily use
 Text or call. Batched approvals carry evidence. A daily digest arrives at a set time. STOP always works.
@@ -409,7 +415,7 @@ Fleet orchestration; Mac or ARM boot; macOS-only and iOS-only apps (Apple's lice
 | **A5** | **Canary test:** canary credentials in the vault and canary sessions in credentialed browsers; an adversarial agent with full root and every protocol verb fails to surface any canary anywhere agent-reachable, across repeated runs. | CRED-1–7, ARC-1 |
 | **A6** | Hostile guest attempts escalation, evaluator tampering, and injection via a collaborator's output; all fail structurally; the guest cannot obtain or replay a texted low-risk code, and cannot get a high-risk request classed as low risk; the guest is rebuilt; a regression is retained. In-box damage is undone by rollback. | ARC-4, REV-1/2, CHG-2, CH-10 |
 | **A7** | One pipeline: a local candidate passes held-out cases from real tasks; a bad one is rejected; an upstream guest image and a shared package take the same path; rollback works. | CHG-1–5, UPD-1 |
-| **A8** | Portability and recovery: move the drive to an unknown PC (code-gated unlock), then a trusted one (unattended restart). Restore onto a new drive with the recovery key; revoked grants are not revived; the old number's new holder can do nothing. | CRED-8/9, REC-1–3 |
+| **A8** | Portability and recovery: move the drive to an unknown PC (passphrase on the local page plus approval code; the code alone does not unlock), then a trusted one (unattended restart). A copy of the drive, with the approval codes but without the card, a sealing TPM, or the recovery key, opens no key slot. Restore onto a new drive with the recovery key; revoked grants are not revived; the old number's new holder can do nothing. | CRED-8/9, REC-1–3 |
 | **A9** | Dependency audit: with all optional dependencies removed, and with all outbound traffic logged, the system boots, takes STOP/STATUS, and recovers. No traffic to any AgentOS-operated endpoint ever. | DEP-1–4 |
 | **A10** | Leverage vs an unmodified OpenClaw baseline and a direct provider CLI on the same host and accounts: owner-minutes per accepted task, tasks per week, second-run speedup from compiled skills, and approvals split into necessary vs avoidable. | §1, CAP-4–6 |
 | **A11** | Spare-capacity loops: over a fixed period on the floor host, loop 1 adopts at least one candidate with a predeclared held-out gain and rejects a bad one; loop 2 finds a seeded vulnerability, contains it, adds a regression, and qualifies a fix; any live call preempts loops within target; spare budget is never exceeded; a fix that weakens a check is rejected. | LOOP-1–11 |
@@ -452,3 +458,4 @@ Before any qualification run, freeze revisions, hardware profile, accounts, work
 7. **Desktop kiosk escape** (ADP-5). A GUI path out of the kiosk (a crash dialog, help browser, or app-embedded file picker) could reach the app's saved login. Mitigations: the login stored outside the UI user's reach, A13's adversarial escape step, and restricting desktop executors to apps where that holds.
 8. **Tampered trusted source** (ADP-9). An attacker who edits the source record a pre-allowance trusts (e.g. a Xero contact's email) passes the predicate. Mitigations: scope bounds, the recent-edit hold, and the journal.
 9. **Low-tier approvals by text** (CH-10). A SIM swap of the owner's number, or a stolen unlocked phone, can approve low-risk requests. Mitigations: the owner-set low-tier limits, reversibility windows, the journal, and STOP.
+10. **Owner Card kept with the drive** (CRED-8). The card holds the vault passphrase, so whoever has both can decrypt the vault offline; the approval code gates only a running, unmodified box. Mitigations: the card says to store it apart from the drive, like a passport, and the owner can replace the passphrase on the local UI.
