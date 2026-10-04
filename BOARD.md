@@ -12,7 +12,7 @@ States: `queued` → `building` → `in review` → `merged` | `escalated` | `dr
 | S4 | OpenClaw unmodified as a guest via broker tools; record any missing seam. Result: **yes**, config only, no patch ([result](spikes/S4-openclaw-guest/RESULT.md)) | Cloud only | in review |
 | S5 | Credentialed browser: narrow action protocol vs 5 real sites, no arbitrary JS | Cloud, test accounts | queued |
 | S6 | Consumer AI CLIs in no-tools relay mode | Mark's accounts | queued |
-| S1 | Screenless USB4-SSD boot on ≥3 unmodified PCs (≤1 keypress) | **Mark: hardware + hands** | blocked on hardware |
-| S2 | USB LTE modem: SMS and voice under Linux | **Mark: 2 modems + SIM** | blocked on hardware |
+| S1 | Screenless USB4-SSD boot on ≥3 unmodified PCs (≤1 keypress) | **Mark: hardware + hands** | test kit ready ([checklist](spikes/S1S2-testkit/CHECKLIST.md), [shopping](spikes/S1S2-testkit/SHOPPING.md)); waiting on hardware |
+| S2 | USB LTE modem: SMS and voice under Linux | **Mark: 2 modems + SIM** | test kit ready (same image); waiting on hardware |
 
 Exit of P0: spike results → spec v0.12 diff → Mark approves → budget re-estimate.
