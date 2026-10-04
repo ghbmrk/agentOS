@@ -23,7 +23,7 @@ Covered: 0 / 119 requirement IDs
 | REV-2 | — |
 | REV-3 | — |
 | REV-4 | — |
-| REV-5 | — |
+| REV-6 | — |
 | CH-1 | — |
 | CH-2 | — |
 | CH-3 | — |
@@ -34,7 +34,7 @@ Covered: 0 / 119 requirement IDs
 | CH-7 | — |
 | CH-8 | — |
 | CH-9 | — |
-| CH-18 | — |
+| CH-20 | — |
 | ID-1 | — |
 | ID-2 | — |
 | CRED-1 | — |
@@ -77,8 +77,8 @@ Covered: 0 / 119 requirement IDs
 | ADP-7 | — |
 | ADP-8 | — |
 | ADP-9 | — |
-| ADP-10 | — |
-| ADP-11 | — |
+| ADP-12 | — |
+| ADP-13 | — |
 | CHG-1 | — |
 | CHG-2 | — |
 | CHG-3 | — |
