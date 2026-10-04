@@ -1,0 +1,4 @@
+{
+  "note": "Product targets only; each must expect clean. Deliberate-leak controls are built into tools/canary.py and always run.",
+  "targets": []
+}
