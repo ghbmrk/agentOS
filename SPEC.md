@@ -56,8 +56,7 @@ The product MUST work with only the dependencies in the first two rows.
    - the **setup secret** and its short **setup code**;
    - the **local Wi-Fi name and password** for the box's own access point;
    - a QR code joining that Wi-Fi and opening the local setup page;
-   - a **paper approval-code grid** (fallback authenticator);
-   - the **recovery key** (on a separate, detachable sheet).
+   - on a separate, detachable sheet kept away from the box: the **recovery key** and the **paper approval-code grid** (fallback authenticator, CH-4).
 3. **Cellular modem with SIM slot**. MVP: a separate USB LTE modem with voice support. Target: built into the drive (§3.3).
 
 - **HW-1** The image MUST NOT contain any per-owner secret not printed on that drive's card. The card and drive are produced as a pair. A drive bought without a card MUST generate a fresh card on first boot only when a local display, printer, or local web session is present (DIY path, §8.4).
@@ -109,6 +108,7 @@ One device holds the NVMe SSD, a microcontroller that acts as a USB keyboard for
 - **ARC-2** The broker's control path MUST NOT invoke AI inference.
 - **ARC-3** Agent runtimes MUST run unmodified where their tool/plugin interfaces suffice. A runtime fork is permitted only with a recorded "interface X insufficient because Y."
 - **ARC-4** Agent machines MUST be rebuildable from a known image at any time without losing durable state. Durable state lives only in broker-owned stores.
+- **ARC-5** Agent machines and credentialed executors MUST run under a user-space kernel (e.g. gVisor) or hardware virtualization, never under namespaces alone. Guest code with root MUST NOT reach the host kernel's full system-call surface, because CRED-2 counts that kernel as trusted (S3: gVisor at the floor).
 
 ---
 
@@ -118,6 +118,11 @@ One device holds the NVMe SSD, a microcontroller that acts as a USB keyboard for
 - **REV-2** Every **irreversible or external effect** MUST go through a journaled intent (§9). That covers sending, posting, buying, sharing, deleting remotely, disclosing data, changing an account, or creating/revealing a secret.
 - **REV-3** The system SHOULD convert irreversible effects into reversible ones where possible: drafts instead of sends, staging copies, delayed send with an undo window, shadow runs.
 - **REV-4** Agent primitives MUST include `checkpoint`, `fork(n)`, `diff`, `rollback`, `merge` on agent machines.
+- **REV-5** **Information flow.** Disclosure cannot be rolled back, so it is gated by data label, not by reversibility. Each agent machine carries a label that only rises during its life:
+  - `public`: it has seen only public input. Uncredentialed egress is open (CAP-2).
+  - `private`: it has received owner data (mail, files, recall results, credentialed-executor reads, owner chat, event-bus content). Its outbound traffic goes only through the broker's egress proxy, to the task's allowed destinations: model providers, granted adapters, and destinations the owner has pre-allowed. Any other destination is a disclosure intent (REV-2).
+  - Data flows freely from public to private machines; private to public is a disclosure. Forks inherit the label; rollback to a snapshot taken before the label rose, or a rebuild, resets it.
+  - Suggested pre-allowances (CAP-6) never include hosts that publish user content (paste sites, file shares, URL shorteners), since an attacker can read what those receive.
 
 ---
 
@@ -136,16 +141,18 @@ One device holds the NVMe SSD, a microcontroller that acts as a USB keyboard for
 | Approve a high-risk irreversible intent (CH-10) | Approval code from the code generator, in reply to that request's ID |
 | New grant, raise budget, adopt a release, add a trusted host, recovery | Approval code + local confirmation or recovery key, per policy |
 
-- **CH-4** Approval codes come from a standard code generator. [Fact] iPhone's built-in Passwords app generates them; on Android any authenticator works. The **paper grid** on the Owner Card is the fallback. No AgentOS app exists. These codes are the high-risk tier of CH-10. Batching (one code per digest batch) and pre-allowances are the main ways to reduce prompts.
-- **CH-5** Live calls: carrier voice → modem → broker → speech (local by default; hosted only by explicit policy) → guest. [Risk] Voice quality and latency over USB modems need qualifying.
+- **CH-4** Approval codes come from a standard code generator. [Fact] iPhone's built-in Passwords app generates them; on Android any authenticator works. The **paper grid** on the Owner Card's detachable sheet is the fallback: challenge–response, each cell single-use (CH-18). No AgentOS app exists. These codes are the high-risk tier of CH-10. Batching (one code per digest batch) and pre-allowances are the main ways to reduce prompts.
+- **CH-5** Live calls: carrier voice → modem → broker → speech (local by default; hosted only by explicit policy) → guest. [Risk] Voice quality and latency over USB modems need qualifying. On a call, approval codes and control words are entered by keypad (DTMF), decoded by the broker, and never passed to the speech service or guests, which are untrusted (§4).
+- **CH-18** **Code hygiene.** Texted codes are at least 6 digits, single-use, and bound to one request or batch. Three wrong replies void that request. Five wrong codes of any kind in 24 hours lock the low tier, so approvals need a code-generator code until the owner unlocks, and the owner is told. Paper-grid cells are single-use.
+- **CH-19** **Owner-channel disclosure.** A session unlock (CH-3) requires a code-generator code or a grid cell, never a texted code, because a SIM swap receives texted codes. Outbound texts and speech MUST NOT carry strings matching verification-code or known secret formats (fixed patterns, no inference, ARC-2); such content is replaced by a pointer to the local UI. This extends CRED-7 from vault values to secret-shaped content (CRED-3).
 - **CH-10** **Two-tier approval.** Prompts should be rare in the first place: approvals are batched (one code covers a batch) and owner pre-allowances cover routine actions, so codes are needed only for what remains.
-  - **Low risk** means **all** of: the recipient is one the broker verifies already exists in the owner's account (as in ADP-9); any amount is under the owner-set limit; and the operation's verb is not excluded by the owner. Anything else is high risk. The box texts a one-time code bound to that request (or batch), and the owner replies with it from their number. The code works once and expires after a short owner-settable time (default 15 minutes). The request text is rendered by the broker in fixed wording from verified fields, never by the agent. This still defeats spoofed texts and self-approval by the agent, which never sees the code. It proves possession of the owner's number only (§17 risk 9).
+  - **Low risk** means **all** of: the recipient is one the broker verifies already exists in the owner's account (as in ADP-9), created by the owner or present longer than the owner's hold period (ADP-9), not added automatically by the service; any amount is under the owner-set limit; and the operation's verb is not excluded by the owner. Anything else is high risk. The box texts a one-time code bound to that request (or batch), and the owner replies with it from their number. The code works once and expires after a short owner-settable time (default 15 minutes). The request text is rendered by the broker in fixed wording from verified fields, never by the agent. Recipients appear as canonical identifiers (address, number, last 4 digits of an account), never display names, with look-alike characters folded to plain text. This still defeats spoofed texts and self-approval by the agent, which never sees the code. It proves possession of the owner's number only (§17 risk 9).
   - **High risk** means new or wider grants or pre-allowances, money above the owner-set limit, CRED-6 actions, and recovery. These require the code-generator code or the paper grid, which a SIM swap cannot obtain, plus local confirmation where CH-3 already requires it.
   - The owner sets the tier boundaries; changing them is a high-risk intent. The broker applies them to verified data, never to the agent's claims. Unclassifiable requests are high risk.
 - **CH-6** Secrets MUST NEVER be requested or accepted over text or voice. The carrier sees that traffic, and transcripts reach models.
 
 ### 6.2 Local web UI (box's own Wi-Fi only)
-- **CH-7** The broker runs its own Wi-Fi access point, secured with the card's Wi-Fi password, and serves a local web UI on it. The link is encrypted by WPA2/WPA3 with a key only the card holder has. No domain or public certificate is required.
+- **CH-7** The broker runs its own Wi-Fi access point, secured with the card's Wi-Fi password, and serves a local web UI on it. The link is encrypted by WPA3-SAE (WPA2 only by owner opt-in, for older phones), and the access point isolates clients from each other. No domain or public certificate is required. Wi-Fi membership is not authority: beyond the setup, unlock, and status pages, the local UI requires a sign-in with an approval code, remembered on that device for the CH-3 unlock period.
 - **CH-8** The local UI is used for setup, password logins to sites without OAuth (live view of a credentialed browser), reviewing diffs and files, and changing rules. It is never required for daily operation.
 - **CH-9** The local UI MUST NOT be reachable from the home network or the internet.
 
@@ -167,18 +174,20 @@ Remote live browser view, remote file browsing, and push notifications, away fro
 
 ### 7.3 Credentialed executors
 - **CRED-4** Logged-in browsers run in broker-owned sandboxes, one account each. Agents drive them only through a closed, versioned action protocol: navigate, click, type, select, read DOM/accessibility snapshot (password fields omitted), screenshot, download to workspace. Developer tools, arbitrary JavaScript, and cookie/storage/header access MUST NOT exist in the protocol.
-- **CRED-5** A provider CLI MAY hold a consumer login token only if tool execution inside it is disabled and it acts purely as a model-call relay. Otherwise that provider uses an API key, injected by the broker's egress proxy.
+- **CRED-5** A provider CLI MAY hold a consumer login token only if tool execution inside it is disabled and it acts purely as a model-call relay. Otherwise that provider uses an API key, injected by the broker's egress proxy into declared inference endpoints only (ADP-10). Relay input goes through the CLI's non-interactive mode; slash, bang, and tool syntax in relayed input MUST be inert, shown in S6 with a canary token that never appears in output.
 - **CRED-6** Actions that reveal or create secrets (show API key, password reset, add device, export, change recovery) are irreversible intents requiring an approval code, even on allowlisted sites.
 - **CRED-7** The broker MUST redact every vault value from all agent-bound output, logs, and the index. This is defense in depth.
 
 ### 7.4 Vault keys and hosts
-- **CRED-8** The vault is encrypted on the drive. On a **trusted host**, an unlock slot is sealed to that PC's TPM, so it restarts unattended. On an unknown host, the box texts the owner, and unlock requires an approval code. A lost drive is ciphertext.
+- **CRED-8** The vault is encrypted on the drive. On a **trusted host**, an unlock slot is sealed to that PC's TPM, so it restarts unattended. On an unknown host, unlock requires a high-entropy secret that is not on the drive, entered on the box's local Wi-Fi page and never by text (CH-6): by default the Owner Card's setup secret, scanned, followed by an approval code. Anything that verifies approval codes (the code-generator seed, the grid) lives only inside the vault, since a verifier readable before unlock lets a thief compute codes. A lost drive is ciphertext. A drive and its card together are not, so the card is kept away from the box, like the recovery sheet.
 - **CRED-9** Adding or removing a trusted host is a tier-4 action (CH-3).
+- **CRED-10** **Executor output.** A credentialed executor stays on its account's declared origins (from its adapter); any other origin opens in a separate uncredentialed context. Executor output to agents (DOM text, accessibility snapshot) passes a fixed-pattern detector for known token formats and high-entropy values in secret-labelled fields; matches are redacted as in CRED-7, and screenshots of pages with a match are withheld. This covers secrets a site displays without a reveal step, which the vault does not know.
 
 ### 7.5 Recovery
 - **REC-1** Recovery key + a backup (if the owner configured one), or the drive itself, restores everything onto new hardware.
 - **REC-2** Restore MUST NOT revive revoked grants or spent budgets: restore enters restricted mode until the owner re-confirms standing grants.
 - **REC-3** Lost phone: the owner re-enrolls the code generator using the recovery key. Lost SIM/number: a new SIM plus the recovery key; the new number is announced to the owner's number. A new holder of an old number can do nothing without codes.
+- **REC-4** Every Owner Card secret (Wi-Fi password, setup secret, paper grid, recovery key) can be rotated from the local UI as a tier-4 action, producing a new card to print or copy. Setup offers this in one line, for kits that others may have handled.
 
 ---
 
@@ -205,7 +214,7 @@ Remote live browser view, remote file browsing, and push notifications, away fro
 - **ONB-2** Disk on the host is never written. AgentOS runs entirely from the drive.
 
 ### 8.2 Moving to another PC
-Plug in; the box texts "Unknown host [model]. Reply with an approval code to unlock". Optionally make it trusted.
+Plug in; the box texts "Unknown host [model]. Join the box's Wi-Fi and scan your card to unlock" (CRED-8). The owner scans the card on the local page and enters an approval code. Optionally make it trusted.
 
 ### 8.3 Daily use
 Text or call. Batched approvals carry evidence. A daily digest arrives at a set time. STOP always works.
@@ -240,7 +249,7 @@ intent { id, goal_id, origin(authenticated), action, exact params/recipients/vis
 |---|---|---|
 | **CAP-1** | Speculative parallelism | Agents MAY fork N machines, try approaches, test, keep the winner. N is set by measured free RAM; at the floor N may be 1 (sequential). Frontier spend is reserved per fork. |
 | **CAP-2** | Reach | Any tool through an adapter (§10A). Credentialed browsers (§7.3) for logged-in sites; uncredentialed browsing with full power inside agent machines; local network devices by explicit grant. |
-| **CAP-3** | Recall | A broker-owned local index of everything the system has seen, with provenance. Full text, embeddings, and structured facts. Owner corrections are stored as explicit, editable preferences. Deletion requests propagate. |
+| **CAP-3** | Recall | A broker-owned local index of everything the system has seen, with provenance. Full text, embeddings, and structured facts. Owner corrections are stored as explicit, editable preferences, written only from the authenticated owner channel (owner texts, local UI) with that message as provenance. Results carry their source and reach agents as untrusted content, never as instructions. Deletion requests propagate. |
 | **CAP-4** | Always-on | An event bus (mail, files, calendar, web changes, timers) triggers work. Interrupts for irreversible decisions only, batched into a digest unless urgent. |
 | **CAP-5** | Compounding | Successful trajectories are recorded as replayable procedures. Recurring ones are compiled into scripts that consult a model only where assumptions fail. Compiled skills go through §11. |
 | **CAP-6** | Attention optimizer | Approvals arrive batched and risk-tiered, with evidence. The system proposes (never assumes) converting always-approved classes into standing grants. |
@@ -270,6 +279,7 @@ AgentOS reaches current and future tools (frontier assistants, SaaS, local apps)
   - **No match, no silence.** An operation that does not match a rule exactly falls back to a normal approval request.
   - **Audit.** Covered operations are still journaled (REV-2), visible on request and on the local UI, and halted by STOP.
   - **Exclusions.** CAP-6 may suggest a rule, never enact one. CRED-6 actions keep per-action approval under any rule.
+- **ADP-10** **Enforced request shapes.** Each declared operation also declares the requests it makes: host, method, and path template, and for single-endpoint APIs (GraphQL, JSON-RPC) the operation name and a body schema. The broker's egress proxy injects a credential only into a request matching a declared operation of a granted adapter, and applies that operation's verb class and intent before forwarding. Anything else is denied and journaled. A model relay (CRED-5) declares inference endpoints only, so a provider key never reaches that provider's key-management, file-sharing, or billing endpoints. This makes the verb list (ADP-2) a property of traffic, not of the adapter's honesty.
 
 ---
 
@@ -387,6 +397,7 @@ Every installation's verified gains can flow into one public project, and every 
 
 - **UPD-6** Updates never apply during a call, accepted work, or quiet hours the owner has excluded. Every update is a journaled intent with a rollback point.
 - **UPD-7** [Inference] Soak plus attestations replaces a central staged rollout: early-channel installations act as the canary population without any project-run service.
+- **UPD-8** **Update metadata** follows The Update Framework (TUF; reuse a maintained implementation): releases are signed by a threshold of k-of-n maintainer keys, keys rotate and revoke without reinstalling, timestamp metadata expires so a frozen mirror is detected when online, and no release older than the installed one is accepted, offline included. Security fixes (UPD-5) auto-stage only with the threshold signatures plus at least one independent attestation from the fast channel (OSS-8).
 - **BAK-1** Backups are optional and owner-chosen: a second local drive, or encrypted upload to storage the owner already has. Without a backup, the drive is the only copy, and the owner is told so plainly.
 - **TIM-1** Time comes from network time when online, with carrier network time (from the modem) as a cross-check. Large disagreements put the broker into restricted mode for time-sensitive checks.
 
@@ -409,14 +420,15 @@ Fleet orchestration; Mac or ARM boot; macOS-only and iOS-only apps (Apple's lice
 | **A5** | **Canary test:** canary credentials in the vault and canary sessions in credentialed browsers; an adversarial agent with full root and every protocol verb fails to surface any canary anywhere agent-reachable, across repeated runs. | CRED-1–7, ARC-1 |
 | **A6** | Hostile guest attempts escalation, evaluator tampering, and injection via a collaborator's output; all fail structurally; the guest cannot obtain or replay a texted low-risk code, and cannot get a high-risk request classed as low risk; the guest is rebuilt; a regression is retained. In-box damage is undone by rollback. | ARC-4, REV-1/2, CHG-2, CH-10 |
 | **A7** | One pipeline: a local candidate passes held-out cases from real tasks; a bad one is rejected; an upstream guest image and a shared package take the same path; rollback works. | CHG-1–5, UPD-1 |
-| **A8** | Portability and recovery: move the drive to an unknown PC (code-gated unlock), then a trusted one (unattended restart). Restore onto a new drive with the recovery key; revoked grants are not revived; the old number's new holder can do nothing. | CRED-8/9, REC-1–3 |
+| **A8** | Portability and recovery: move the drive to an unknown PC (unlock by card scan plus approval code; an offline copy of the drive cannot be unlocked with anything stored on it), then a trusted one (unattended restart). Restore onto a new drive with the recovery key; revoked grants are not revived; the old number's new holder can do nothing. | CRED-8/9, REC-1–3 |
 | **A9** | Dependency audit: with all optional dependencies removed, and with all outbound traffic logged, the system boots, takes STOP/STATUS, and recovers. No traffic to any AgentOS-operated endpoint ever. | DEP-1–4 |
 | **A10** | Leverage vs an unmodified OpenClaw baseline and a direct provider CLI on the same host and accounts: owner-minutes per accepted task, tasks per week, second-run speedup from compiled skills, and approvals split into necessary vs avoidable. | §1, CAP-4–6 |
 | **A11** | Spare-capacity loops: over a fixed period on the floor host, loop 1 adopts at least one candidate with a predeclared held-out gain and rejects a bad one; loop 2 finds a seeded vulnerability, contains it, adds a regression, and qualifies a fix; any live call preempts loops within target; spare budget is never exceeded; a fix that weakens a check is rejected. | LOOP-1–11 |
 | **A12** | Open-source round trip: installation X publishes a public skill and a security regression (embargoed path for the latter); independent installation Y reproduces and attests; a maintainer merges; Z receives it via update, re-qualifies, and adopts or rejects. With the repository unreachable, X, Y, and Z operate normally. **Leakage audit:** canary private data is planted in the journal, the index, and workspaces; the clean room is shown unable to read any of it; no canary or derivative appears in any publication or hint; and hints contain only schema-enumerated values. | OSS-1–13, LOOP-0, DEP-3 |
 | **A13** | Adapters: one tool reachable by API and by web, plus one logged-in Linux desktop app. Default routing picks the API; a simulated API break reroutes only to an already-granted route, with unchanged class and custody, and pauses when none exists; an agent-drafted adapter maps its operations to verbs, one deliberately mislabelled "draft" that sends in the demo environment blocks adoption (ADP-8), and an unmapped operation stays draft-only until the owner chooses; an owner pre-allowance lets one irreversible operation run with no approval or notification while still journaled and stopped by STOP, and the same operation with an agent-supplied recipient that differs from the source system falls back to an approval request; Loop 1 proposes a route change that is adopted only via the held-out suite, and a bad one is rejected. **Adversarial:** through the action protocol, an agent tries to reach a shell, a file manager, or the app's credential store from the desktop executor, and fails; canary sessions are never surfaced (as A5). | ADP-1–9, CAP-2 |
+| **A14** | Security hardening: a `private` agent machine cannot reach any destination off its allowlist (direct, DNS, or via a credentialed executor) while a `public` one browses freely, and a fork inherits the label; host-kernel exploit probes from a root guest do not reach host memory; proxy requests matching no declared operation, including provider key-management endpoints, are denied and journaled; a credentialed executor refuses an off-origin navigation in its credentialed context, and a site that shows a canary token without a reveal step never surfaces it; update metadata with too few signatures, expired, or older than the installed release is refused, offline too; wrong-code limits and lockout trigger as specified, and no outbound text carries a canary 2FA code from mail; a Wi-Fi client without sign-in sees only the setup, unlock, and status pages and cannot reach another client; an email asserting a preference creates none; a canary relay prompt with slash and bang syntax is inert. | ARC-5, REV-5, ADP-10, CRED-5, CRED-8, CRED-10, UPD-8, CH-7, CH-18, CH-19, CAP-3 |
 
-**Gates (riskiest first):** G1 = A1 (hardware and screenless reality). G2 = A4, A5, A9 on a VM (core correctness). G3 = A2, A3, A6, A8 on real hosts. G4 = A7, A10, A11, A13. G5 = A12 (needs a second and third independent installation).
+**Gates (riskiest first):** G1 = A1 (hardware and screenless reality). G2 = A4, A5, A9, A14 on a VM (core correctness). G3 = A2, A3, A6, A8 on real hosts. G4 = A7, A10, A11, A13. G5 = A12 (needs a second and third independent installation).
 
 Before any qualification run, freeze revisions, hardware profile, accounts, workloads, numeric targets, repeats, margins, and rollback triggers. Missing values make a run exploratory, not a pass.
 
@@ -439,6 +451,7 @@ Before any qualification run, freeze revisions, hardware profile, accounts, work
 | 2026-10-04 | Adapter contract (§10A). Default routing order API → CLI → web → desktop GUI, which loops may improve through §11 like everything else. |
 | 2026-10-04 | Operation labels come from a fixed verb list with a demo-environment mismatch check; the owner answers only for unmapped operations. The owner may pre-allow irreversible operations per service and/or per action with no notification (ADP-9). |
 | 2026-10-04 | Two-tier approval (CH-10): texted one-time codes for low-risk approvals, code-generator codes for high-risk ones; batching and pre-allowances minimize prompts. |
+| 2026-10-04 | Security review 1 (`reviews/security/`): data labels gate disclosure (REV-5); off-drive factor for unknown-host unlock (CRED-8); enforced adapter request shapes (ADP-10); VM-class isolation (ARC-5); TUF update metadata (UPD-8); code hygiene and owner-channel disclosure (CH-18, CH-19); executor output limits (CRED-10); card rotation (REC-4). |
 | Proposed | External-drive-only (no internal install). This spec assumes it; the owner has not formally confirmed. |
 
 ## 17. Open risks
@@ -448,7 +461,10 @@ Before any qualification run, freeze revisions, hardware profile, accounts, work
 3. **Consumer AI routes** inside a no-tools adapter (CRED-5). The API-key fallback covers it.
 4. **Classifying web actions** as reversible vs irreversible in credentialed browsers. MVP: per-site allowlist, everything else draft-only.
 5. **Remote rich UI is gone by design.** If that proves too limiting, the only fix is an optional, owner-chosen, end-to-end-encrypted relay. That would be a deliberate exception to DEP-2's spirit, never a requirement.
-6. **Project update-signing key** custody (UPD-2).
+6. **Project update-signing key** custody (UPD-2). UPD-8's threshold signing means one stolen key can't sign a release; the custody and rotation procedure is still needed.
 7. **Desktop kiosk escape** (ADP-5). A GUI path out of the kiosk (a crash dialog, help browser, or app-embedded file picker) could reach the app's saved login. Mitigations: the login stored outside the UI user's reach, A13's adversarial escape step, and restricting desktop executors to apps where that holds.
 8. **Tampered trusted source** (ADP-9). An attacker who edits the source record a pre-allowance trusts (e.g. a Xero contact's email) passes the predicate. Mitigations: scope bounds, the recent-edit hold, and the journal.
 9. **Low-tier approvals by text** (CH-10). A SIM swap of the owner's number, or a stolen unlocked phone, can approve low-risk requests. Mitigations: the owner-set low-tier limits, reversibility windows, the journal, and STOP.
+10. **Disclosure through allowed destinations** (REV-5). A `private` machine can still leak through an allowed destination whose received data an attacker can read. Mitigations: a minimal default list, no user-content hosts in suggestions, and the journal.
+11. **SIM swap inside the unlock window** (CH-3, CH-19). A swapper can read ordinary private data by chat until the unlock lapses or the owner notices their phone has lost service. Codes and secret-shaped content are already withheld.
+12. **Drive and card stolen together** (CRED-8). They unlock the vault offline, as drive and recovery sheet already do (REC-1). Mitigation: keep the card away from the box; rotate it (REC-4) if it may have been copied.
