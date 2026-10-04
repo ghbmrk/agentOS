@@ -88,4 +88,4 @@ Setup: a 4-vCPU, 15 GB cloud VM without KVM. Images were built with mkosi 24.3 a
 
 ## Budget
 
-Model usage wasn't measured; the harness can't read the usage screen (PLAN §4A B-6). Estimate: one session of about 60 tool turns with small outputs, ≈2–3% of the weekly allowance [I], inside the ~3% cap. Build and boot compute ran on the cloud VM and used no model tokens.
+Model usage wasn't measured; the harness can't read the usage screen (PLAN §4A B-6). Estimate: one session of about 60 tool turns with small outputs, ≈2–3% of the weekly allowance [I], within the ~3% soft target. More spend would not have helped: the remaining unknowns (Debian 13 signed systemd-boot, bootc builds) are blocked by this box's network policy, not by budget. Build and boot compute ran on the cloud VM and used no model tokens.
