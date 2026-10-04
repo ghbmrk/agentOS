@@ -125,8 +125,18 @@ func TestOP2SameEffectUnderNewIDWaitsForEvidence(t *testing.T) {
 	again.ID, again.GoalID, again.Origin = "pay-2", "goal-retry", "agent"
 	must(e.Submit(again))
 	must(e.Authorize(ctx, "pay-2"))
-	if _, err := e.Dispatch(ctx, "pay-2"); !errors.Is(err, ErrUnreconciled) {
-		t.Fatalf("same effect under new ID: err = %v, want ErrUnreconciled", err)
+	st, err := e.Dispatch(ctx, "pay-2")
+	var held *HeldError
+	if !errors.Is(err, ErrUnreconciled) || !errors.As(err, &held) || held.BlockedBy != "pay-1" {
+		t.Fatalf("same effect under new ID: err = %v, want HeldError behind pay-1", err)
+	}
+	// Held, not lost: still authorized, and listed with what it waits for.
+	if st.State != Authorized {
+		t.Fatalf("held intent state = %s", st.State)
+	}
+	want := []Wait{{ID: "pay-2", BlockedBy: []string{"pay-1"}, Duplicate: true}}
+	if got := e.Waiting(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("waiting = %+v, want %+v", got, want)
 	}
 	// A different effect on the same account is not held up.
 	other := intent("pay-3", "bank")
@@ -141,6 +151,9 @@ func TestOP2SameEffectUnderNewIDWaitsForEvidence(t *testing.T) {
 	}
 	// Once evidence resolves the first, a deliberate repeat may go.
 	must(e.Resolve("pay-1", 1, Outcome{Result: ResultSucceeded, Evidence: "statement"}, "owner"))
+	if len(e.Waiting()) != 0 {
+		t.Fatalf("still waiting after evidence: %+v", e.Waiting())
+	}
 	if st := must(e.Dispatch(ctx, "pay-2")); st.State != Succeeded {
 		t.Fatalf("after evidence: %s", st.State)
 	}
@@ -269,6 +282,10 @@ func TestNarrowingIntentsBypassStopAndFence(t *testing.T) {
 	}
 	if _, err := e2.Dispatch(ctx, "widen"); !errors.Is(err, ErrUnreconciled) {
 		t.Fatalf("widen while fenced: err = %v", err)
+	}
+	if got := e2.Waiting(); len(got) != 1 || got[0].ID != "widen" || got[0].Duplicate ||
+		!reflect.DeepEqual(got[0].BlockedBy, []string{"rel"}) {
+		t.Fatalf("waiting = %+v", got)
 	}
 	// Replay accepts the narrowing dispatches journaled during STOP.
 	mustOpen(t, &MemStore{data: must(cs.MemStore.ReadAll())}, newPolicy(), svc)

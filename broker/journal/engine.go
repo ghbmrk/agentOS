@@ -267,18 +267,85 @@ func (e *Engine) dispatchable(id string) (*entry, Executor, error) {
 		return en, nil, fmt.Errorf("%w: %s", ErrUnreconciled, en.intent.Account)
 	}
 	// The same effect under a new ID while an earlier one may have landed
-	// is not a retry the engine can tell apart from a duplicate (OP-2).
-	for _, oid := range e.order {
-		o := e.intents[oid]
-		if oid != id && o.efp == en.efp && (o.state == OutcomeUnknown || o.state == InFlight) {
-			return en, nil, fmt.Errorf("%w: same effect as unresolved intent %s", ErrUnreconciled, oid)
-		}
+	// is not a retry the engine can tell apart from a duplicate (OP-2). It
+	// stays authorized, held behind the earlier intent (see Waiting).
+	if oid := e.duplicateOf(en); oid != "" {
+		return en, nil, &HeldError{ID: id, BlockedBy: oid}
 	}
 	exec, ok := e.execs[en.intent.Executor]
 	if !ok {
 		return en, nil, fmt.Errorf("%w: %q", ErrNoExecutor, en.intent.Executor)
 	}
 	return en, exec, nil
+}
+
+// duplicateOf returns an unresolved intent with the same effect as en
+// under another ID, or "". Called with e.mu held.
+func (e *Engine) duplicateOf(en *entry) string {
+	for _, oid := range e.order {
+		o := e.intents[oid]
+		if o != en && o.efp == en.efp && (o.state == OutcomeUnknown || o.state == InFlight) {
+			return oid
+		}
+	}
+	return ""
+}
+
+// HeldError says an intent is held behind an unresolved intent with the
+// same effect. It matches ErrUnreconciled with errors.Is.
+type HeldError struct {
+	ID        string
+	BlockedBy string
+}
+
+func (h *HeldError) Error() string {
+	return fmt.Sprintf("%v: %s has the same effect as %s, whose outcome is unknown; "+
+		"%s runs once evidence shows %s did not happen, and is unneeded if it did",
+		ErrUnreconciled, h.ID, h.BlockedBy, h.ID, h.BlockedBy)
+}
+
+func (h *HeldError) Is(target error) bool { return target == ErrUnreconciled }
+
+// Wait describes an authorized intent that cannot dispatch yet and why.
+type Wait struct {
+	ID string
+	// BlockedBy lists the unresolved intents it waits for: a same-effect
+	// intent (OP-2) or the intents fencing its account after a restart
+	// (OP-4). Resolving them, by Reconcile or by owner evidence through
+	// Resolve, releases it.
+	BlockedBy []string
+	Duplicate bool // waiting on a same-effect intent, not only a fence
+}
+
+// Waiting lists authorized intents held behind unresolved ones, so the
+// owner can see a retry that is waiting rather than lost.
+func (e *Engine) Waiting() []Wait {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var out []Wait
+	for _, id := range e.order {
+		en := e.intents[id]
+		if en.state != Authorized && en.state != NotApplied {
+			continue
+		}
+		var w Wait
+		if oid := e.duplicateOf(en); oid != "" {
+			w.BlockedBy, w.Duplicate = append(w.BlockedBy, oid), true
+		}
+		if !narrowing(en.intent) {
+			for fid := range e.fence[en.intent.Account] {
+				if len(w.BlockedBy) == 0 || w.BlockedBy[0] != fid {
+					w.BlockedBy = append(w.BlockedBy, fid)
+				}
+			}
+		}
+		if len(w.BlockedBy) > 0 {
+			w.ID = id
+			sort.Strings(w.BlockedBy)
+			out = append(out, w)
+		}
+	}
+	return out
 }
 
 // ReconcileReport lists intents reconciliation resolved and those it could
