@@ -3,7 +3,7 @@
 //	guest serve      hold a random token in memory and serve requests
 //	guest <cmd> ...  send one request to the server and print the answer
 //
-// Requests: token; write PATH TEXT; read PATH; stat PATH.
+// Requests: token; write PATH TEXT; read PATH; remove PATH; stat PATH.
 package main
 
 import (
@@ -70,6 +70,12 @@ func serve() {
 				out = "ERR " + err.Error()
 			} else {
 				out = string(b)
+			}
+		case "remove":
+			if err := os.RemoveAll(f[1]); err != nil {
+				out = "ERR " + err.Error()
+			} else {
+				out = "ok"
 			}
 		case "stat":
 			if _, err := os.Stat(f[1]); err != nil {

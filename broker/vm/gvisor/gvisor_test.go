@@ -21,39 +21,53 @@ import (
 
 // REQ: REV-1, REV-4, ARC-4, RES-1, RES-2
 
-// TestOnlyRunscIsExecuted: the one process this package may start is the
-// configured runsc binary (ARC-2 review aid: the guest launcher is not a
-// back door to other programs).
+// TestOnlyRunscIsExecuted: in the whole machine plane, the one process that
+// may be started is the configured runsc binary, from one call site (ARC-2
+// review aid: the guest launcher is not a back door to other programs).
 func TestOnlyRunscIsExecuted(t *testing.T) {
-	fs := token.NewFileSet()
-	f, err := parser.ParseFile(fs, "gvisor.go", nil, 0)
-	if err != nil {
-		t.Fatal(err)
+	launchers := map[string]bool{
+		"exec.Command": true, "exec.CommandContext": true, "os.StartProcess": true,
+		"syscall.ForkExec": true, "syscall.Exec": true, "syscall.StartProcess": true,
 	}
+	files, _ := filepath.Glob("../*.go")
+	more, _ := filepath.Glob("../*/*.go")
+	files = append(files, more...)
 	n := 0
-	ast.Inspect(f, func(x ast.Node) bool {
-		call, ok := x.(*ast.CallExpr)
-		if !ok {
-			return true
+	for _, path := range files {
+		if strings.HasSuffix(path, "_test.go") || strings.Contains(path, "testdata") {
+			continue
 		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok {
-			return true
+		fs := token.NewFileSet()
+		f, err := parser.ParseFile(fs, path, nil, 0)
+		if err != nil {
+			t.Fatal(err)
 		}
-		if id, ok := sel.X.(*ast.Ident); ok && id.Name == "exec" {
+		ast.Inspect(f, func(x ast.Node) bool {
+			call, ok := x.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			id, ok := sel.X.(*ast.Ident)
+			if !ok || !launchers[id.Name+"."+sel.Sel.Name] {
+				return true
+			}
 			n++
-			if sel.Sel.Name != "CommandContext" || len(call.Args) < 2 {
-				t.Errorf("%s: exec.%s", fs.Position(call.Pos()), sel.Sel.Name)
+			if filepath.Base(path) != "gvisor.go" || sel.Sel.Name != "CommandContext" || len(call.Args) < 2 {
+				t.Errorf("%s: %s.%s", fs.Position(call.Pos()), id.Name, sel.Sel.Name)
 				return true
 			}
 			if s, ok := call.Args[1].(*ast.SelectorExpr); !ok || s.Sel.Name != "Bin" {
 				t.Errorf("%s: executes something other than r.Bin", fs.Position(call.Pos()))
 			}
-		}
-		return true
-	})
+			return true
+		})
+	}
 	if n != 1 {
-		t.Fatalf("%d exec call sites, want exactly 1", n)
+		t.Fatalf("%d process-launch call sites in vm/..., want exactly 1", n)
 	}
 }
 
@@ -224,6 +238,24 @@ func TestIntegrationLifecycleUnderGVisor(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("diff missing work/b: %v", ch)
+	}
+
+	// A fork that deletes /work (an image directory: real whiteouts) while
+	// the parent writes into it conflicts instead of losing the write.
+	if _, err := r.m.Fork(ctx, "m1", []string{"f3"}); err != nil {
+		t.Fatal(err)
+	}
+	if r.ask("f3", "remove", "/work") != "ok" || r.ask("m1", "write", "/work/c", "parent") != "ok" {
+		t.Fatal("guest commands failed")
+	}
+	if _, err := r.m.Merge(ctx, "m1", "f3"); !errors.Is(err, vm.ErrConflict) {
+		t.Fatalf("merge over a removed directory: %v", err)
+	}
+	if r.ask("m1", "read", "/work/c") != "parent" {
+		t.Fatal("refused merge lost the parent's file")
+	}
+	if err := r.m.Destroy(ctx, "f3"); err != nil {
+		t.Fatal(err)
 	}
 
 	// ARC-4: rebuild from the image.

@@ -24,7 +24,20 @@ import (
 	"syscall"
 
 	"github.com/ghbmrk/agentos/broker/vm"
+	"github.com/ghbmrk/agentos/broker/vm/overlay"
 )
+
+// maxConsoleLog is the size at which a machine's console log is rotated.
+const maxConsoleLog = 4 << 20
+
+// guestCaps is the capability set of root inside the sandbox: the usual
+// container default, enough to install packages and run services (REV-1).
+// gVisor implements them against its own kernel, not the host's (ARC-5).
+var guestCaps = []string{
+	"CAP_CHOWN", "CAP_DAC_OVERRIDE", "CAP_FOWNER", "CAP_FSETID", "CAP_KILL",
+	"CAP_SETGID", "CAP_SETUID", "CAP_SETPCAP", "CAP_NET_BIND_SERVICE",
+	"CAP_NET_RAW", "CAP_SYS_CHROOT", "CAP_MKNOD", "CAP_AUDIT_WRITE", "CAP_SETFCAP",
+}
 
 // Runtime implements vm.Runtime with runsc.
 type Runtime struct {
@@ -81,12 +94,23 @@ func (r *Runtime) launch(ctx context.Context, l vm.Launch, args ...string) error
 	if err := writeBundle(r.bundle(l), l); err != nil {
 		return err
 	}
-	opts := "lowerdir=" + l.Lower + ",upperdir=" + l.Upper + ",workdir=" + l.Work
-	if err := syscall.Mount("overlay", l.Root, "overlay", syscall.MS_NODEV, opts); err != nil {
+	// nosuid and nodev: setuid files and device nodes a guest creates mean
+	// nothing on the host side of its root. Private propagation keeps the
+	// mount out of other mount namespaces.
+	opts := overlay.MountOptions(l.Lower, l.Upper, l.Work)
+	if err := syscall.Mount("overlay", l.Root, "overlay", syscall.MS_NOSUID|syscall.MS_NODEV, opts); err != nil {
 		return fmt.Errorf("mount %s: %w", l.Root, err)
 	}
+	if err := syscall.Mount("", l.Root, "", syscall.MS_PRIVATE, ""); err != nil {
+		syscall.Unmount(l.Root, syscall.MNT_DETACH)
+		return fmt.Errorf("mount %s private: %w", l.Root, err)
+	}
 	c := r.cmd(ctx, args...)
-	log, err := os.OpenFile(filepath.Join(l.Dir, "console.log"), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	logPath := filepath.Join(l.Dir, "console.log")
+	if fi, err := os.Stat(logPath); err == nil && fi.Size() > maxConsoleLog {
+		os.Rename(logPath, logPath+".1") // keep one old log; bounded disk use
+	}
+	log, err := os.OpenFile(logPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
 		syscall.Unmount(l.Root, syscall.MNT_DETACH)
 		return err
@@ -148,6 +172,9 @@ func writeBundle(dir string, l vm.Launch) error {
 		"ociVersion": "1.0.0",
 		"process": map[string]any{
 			"user": map[string]int{"uid": 0, "gid": 0}, // root inside (REV-1)
+			"capabilities": map[string][]string{
+				"bounding": guestCaps, "effective": guestCaps, "permitted": guestCaps,
+			},
 			"args": l.Argv,
 			"cwd":  "/",
 			"env":  env,

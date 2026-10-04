@@ -63,17 +63,18 @@ func main() {
 		log.Fatal("-modem-uid must name the modem bridge's own uid, distinct from the broker's")
 	}
 
+	// The machine plane failing must not take the owner channel down with
+	// it: STOP and STATUS keep working, and no machines run.
 	var cg *cgroup.Group
 	psiPath := "/proc/pressure/memory"
 	if runsc != "" {
-		if err := os.MkdirAll(cgroupParent, 0o755); err != nil {
-			log.Fatal(err)
-		}
-		g, err := cgroup.Open(cgroupParent)
+		g, err := openCgroup(cgroupParent)
 		if err != nil {
-			log.Fatal(err)
+			log.Printf("agent machines disabled: %v", err)
+			runsc = ""
+		} else {
+			cg, psiPath = g, filepath.Join(cgroupParent, "memory.pressure")
 		}
-		cg, psiPath = g, filepath.Join(cgroupParent, "memory.pressure")
 	}
 	if read, ok := cgroup.PressureSource(psiPath); ok {
 		cfg.Pressure = read
@@ -98,10 +99,18 @@ func main() {
 			Cgroups:  cg,
 		})
 		if err != nil {
-			log.Fatal(err)
+			log.Printf("agent machines disabled: %v", err)
+		} else {
+			pre.m.Store(m)
 		}
-		pre.m.Store(m)
 	}
 	log.Printf("broker up; owner socket %s/%s", cfg.SocketDir, daemon.OwnerSocket)
 	d.Wait()
+}
+
+func openCgroup(path string) (*cgroup.Group, error) {
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		return nil, err
+	}
+	return cgroup.Open(path)
 }

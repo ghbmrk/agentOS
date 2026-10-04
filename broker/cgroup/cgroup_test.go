@@ -75,6 +75,9 @@ func TestRES2ChildEnforcesBudgetWithThrottleBelowHardLimitAndNoSwap(t *testing.T
 	if got := read(t, filepath.Join(c.Path, "memory.swap.max")); got != "0" {
 		t.Errorf("memory.swap.max = %s, want 0 (RES-2: no swap thrashing)", got)
 	}
+	if got := read(t, filepath.Join(c.Path, "memory.oom.group")); got != "1" {
+		t.Errorf("memory.oom.group = %s, want 1", got)
+	}
 	if _, err := g.Child("m2", Limits{}); err == nil {
 		t.Error("a machine without a budget was given a group")
 	}
