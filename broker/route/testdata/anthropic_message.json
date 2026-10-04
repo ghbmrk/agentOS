@@ -1,0 +1,13 @@
+{
+  "id": "msg_01SyntheticFixture0001",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-fixture",
+  "content": [
+    {"type": "text", "text": "Checking the weather."},
+    {"type": "tool_use", "id": "toolu_01SyntheticFixture01", "name": "get_weather", "input": {"city": "Paris", "unit": "c"}}
+  ],
+  "stop_reason": "tool_use",
+  "stop_sequence": null,
+  "usage": {"input_tokens": 412, "output_tokens": 57}
+}
