@@ -101,7 +101,7 @@ One device holds the NVMe SSD, a microcontroller that acts as a USB keyboard for
 |---|---|---|
 | **Host** | Trusted base | Immutable, signed image with A/B updates; an existing distribution, not a custom one |
 | **Broker** | Trusted, minimal | All state that matters: journal, grants, budgets, vault, snapshots, releases, owner channel |
-| **Agent machines** | Untrusted, disposable | Work: planning, code, experiments. Full root inside, no credentials, no direct path out except broker sockets and declared uncredentialed egress |
+| **Agent machines** | Untrusted, disposable | Work: planning, code, experiments. Full root inside, no credentials, no direct path out except broker sockets and uncredentialed egress per its class (REV-5) |
 | **Credentialed executors** | Broker-controlled | One account each; driven only through the narrow action protocol (§7.3) |
 | **Local inference** | Untrusted service | Small model, speech, embeddings; uses accelerators when present |
 
@@ -118,6 +118,11 @@ One device holds the NVMe SSD, a microcontroller that acts as a USB keyboard for
 - **REV-2** Every **irreversible or external effect** MUST go through a journaled intent (§9). That covers sending, posting, buying, sharing, deleting remotely, disclosing data, changing an account, or creating/revealing a secret.
 - **REV-3** The system SHOULD convert irreversible effects into reversible ones where possible: drafts instead of sends, staging copies, delayed send with an undo window, shadow runs.
 - **REV-4** Agent primitives MUST include `checkpoint`, `fork(n)`, `diff`, `rollback`, `merge` on agent machines.
+- **REV-5** **Egress follows data.** The broker sets each agent machine's egress class from the data it has delivered to it:
+  - **Open:** the machine has received only public data and the owner's task text. It has full uncredentialed egress (CAP-2).
+  - **Private:** it has received anything else (recall results, owner files, credentialed-executor output, mail or document content). Its egress is limited to owner-allowlisted read sources (e.g. package mirrors, documentation) and a broker `fetch` tool that is journaled and bounded in request size and rate.
+  - The class only escalates during a machine's life. Rolling back to a snapshot taken before the private data arrived restores open. Machines a machine creates inherit its class (CAP-8).
+  - [Risk] A private machine can still leak a few bytes through `fetch` requests; the bound is size, rate, and the journal, not zero. Deliberate disclosure remains an intent (REV-2).
 
 ---
 
@@ -150,7 +155,9 @@ One device holds the NVMe SSD, a microcontroller that acts as a USB keyboard for
 - **CH-9** The local UI MUST NOT be reachable from the home network or the internet.
 
 ### 6.3 What is deliberately not possible
-Remote live browser view, remote file browsing, and push notifications, away from the box's Wi-Fi. Everything remote is text and voice. [Inference] OAuth "device code" sign-ins work remotely because they happen on the provider's own site. Scope limits vary by provider.
+Remote live browser view, remote file browsing, and push notifications, away from the box's Wi-Fi. Everything remote is text and voice, plus evidence delivered to a destination the owner already owns (CH-18). [Inference] OAuth "device code" sign-ins work remotely because they happen on the provider's own site. Scope limits vary by provider.
+
+- **CH-18** **Evidence delivery.** Evidence beyond one text (diffs, screenshots, documents, result files) MAY be delivered as broker-rendered MMS images, or to **one owner-owned destination** (an email address or cloud folder the owner already uses), set at setup or later, through its adapter. Delivery to that fixed destination is a pre-allowed `share` to the owner only; the agent cannot change the destination. Setting or changing it is a high-risk intent (CH-10). CRED-7 redaction applies. It is an optional dependency (DEP-3): without it, text-only operation is unchanged.
 
 ---
 
@@ -238,13 +245,16 @@ intent { id, goal_id, origin(authenticated), action, exact params/recipients/vis
 
 | ID | Service | Requirement |
 |---|---|---|
-| **CAP-1** | Speculative parallelism | Agents MAY fork N machines, try approaches, test, keep the winner. N is set by measured free RAM; at the floor N may be 1 (sequential). Frontier spend is reserved per fork. |
+| **CAP-1** | Speculative parallelism | Agents MAY fork N machines, try approaches, test, keep the winner. N is set by measured free RAM; at the floor N may be 1 (sequential). N counts worker machines (CAP-8), so branches that only run code need not each hold an agent runtime. Frontier spend is reserved per fork. |
 | **CAP-2** | Reach | Any tool through an adapter (§10A). Credentialed browsers (§7.3) for logged-in sites; uncredentialed browsing with full power inside agent machines; local network devices by explicit grant. |
 | **CAP-3** | Recall | A broker-owned local index of everything the system has seen, with provenance. Full text, embeddings, and structured facts. Owner corrections are stored as explicit, editable preferences. Deletion requests propagate. |
 | **CAP-4** | Always-on | An event bus (mail, files, calendar, web changes, timers) triggers work. Interrupts for irreversible decisions only, batched into a digest unless urgent. |
 | **CAP-5** | Compounding | Successful trajectories are recorded as replayable procedures. Recurring ones are compiled into scripts that consult a model only where assumptions fail. Compiled skills go through §11. |
 | **CAP-6** | Attention optimizer | Approvals arrive batched and risk-tiered, with evidence. The system proposes (never assumes) converting always-approved classes into standing grants. |
 | **CAP-7** | Collaboration | Multiple frontier participants may work one task through broker tools. Disagreements are settled preferably by running both (CAP-1), not by debate. This is guest behavior, not infrastructure. |
+| **CAP-8** | Worker machines | A guest MAY create worker machines: agent machines with no agent runtime, built from a base image and driven by the guest through broker tools (exec, files, `checkpoint`, `fork`, `diff`, `rollback`). A worker inherits its creator's isolation, snapshot custody, budget reservation, and egress class (REV-5). RES-2 admission sizes how many run. |
+| **CAP-9** | Model routing | The broker routes each model call across the providers the owner has granted and local models, by task class, scored on measured acceptance, latency, cost, and remaining quota. When a route is exhausted, the call fails over to the next granted route. Routing rules are a Loop 1 candidate class adopted through §11 (as ADP-4); routing never adds a provider the owner has not granted. The owner MAY restrict which data classes reach each provider; the broker enforces this from the calling machine's egress class (REV-5). |
+| **CAP-10** | Default-on-timeout questions | The agent MAY ask the owner a question with a stated default and a deadline. Without a reply by the deadline, work proceeds on the default, which is listed in the digest. A default carries no authority: any irreversible effect that follows needs its own approval (REV-2). |
 
 ---
 
@@ -270,6 +280,14 @@ AgentOS reaches current and future tools (frontier assistants, SaaS, local apps)
   - **No match, no silence.** An operation that does not match a rule exactly falls back to a normal approval request.
   - **Audit.** Covered operations are still journaled (REV-2), visible on request and on the local UI, and halted by STOP.
   - **Exclusions.** CAP-6 may suggest a rule, never enact one. CRED-6 actions keep per-action approval under any rule.
+- **ADP-10** **Context-scoped replies.** The owner MAY pre-allow free-text replies within existing threads, per account, as an exception to ADP-9's templated-content rule. All of the following hold:
+  - The recipients are exactly the thread's existing participants, read by the broker from the source system.
+  - The reply is composed in a fresh agent machine that receives only that thread and owner-approved style preferences: no recall, no other files, no egress. So it can disclose only what the participants already have.
+  - No attachments, no money, no new recipients, and no CRED-6 content.
+  - It sends after an undo window (default 10 minutes, REV-3) and is listed in the digest.
+  - Scope bounds, fixed-wording approval of the rule, asymmetric changes, the journal, and STOP apply as in ADP-9.
+  - [Risk] A reply can still make a commitment or state something wrong; the undo window and digest are mitigations, not prevention.
+- **ADP-11** **The box's SIM as a tool.** Outbound texts and calls to third parties are reachable through an adapter, mapped to the `send` verb. Calls MUST open by stating that an automated assistant is calling for the owner. Recipients are verified by the broker (owner contacts, or a number read from a source) or supplied by the owner; by default only businesses and owner contacts. Transcripts are journaled. Third-party traffic has its own rate limits, set so it cannot endanger the owner channel (CH-1). [Risk] Automated calls are regulated (in the US, AI-generated voices count as artificial voices under the TCPA [Fact: FCC, Feb 2024]); carriers may filter automated traffic.
 
 ---
 
@@ -284,6 +302,7 @@ Path: candidate → build in sandbox → evaluate on the frozen suite → adopti
 - **CHG-3** Security updates MAY auto-stage per standing policy. Behavior changes require owner approval unless a standing grant covers that class.
 - **CHG-4** Sharing is opt-in, carries only public inputs and evidence, and works over any git-like channel the owner chooses. No registry or marketplace. The recipient re-qualifies locally and may reject.
 - **CHG-5** Shared packages MUST NOT carry private corpora, sessions, identity material, or authority.
+- **CHG-6** **Default standing grant for authority-neutral improvements.** Unless the owner turns it off (LOOP-0), a local candidate adopts without a per-change approval when it changes only procedures, compiled skills, routing among already-granted routes, or context rules; passes the held-out suite with no regression (CHG-1); and changes no grant, verb class, custody, check, or security-suite coverage (LOOP-10). Each adoption is journaled, listed in the digest, and reverted by one reply from the owner. Upstream and shared packages keep CHG-3 and UPD-5.
 
 ---
 
@@ -415,8 +434,9 @@ Fleet orchestration; Mac or ARM boot; macOS-only and iOS-only apps (Apple's lice
 | **A11** | Spare-capacity loops: over a fixed period on the floor host, loop 1 adopts at least one candidate with a predeclared held-out gain and rejects a bad one; loop 2 finds a seeded vulnerability, contains it, adds a regression, and qualifies a fix; any live call preempts loops within target; spare budget is never exceeded; a fix that weakens a check is rejected. | LOOP-1–11 |
 | **A12** | Open-source round trip: installation X publishes a public skill and a security regression (embargoed path for the latter); independent installation Y reproduces and attests; a maintainer merges; Z receives it via update, re-qualifies, and adopts or rejects. With the repository unreachable, X, Y, and Z operate normally. **Leakage audit:** canary private data is planted in the journal, the index, and workspaces; the clean room is shown unable to read any of it; no canary or derivative appears in any publication or hint; and hints contain only schema-enumerated values. | OSS-1–13, LOOP-0, DEP-3 |
 | **A13** | Adapters: one tool reachable by API and by web, plus one logged-in Linux desktop app. Default routing picks the API; a simulated API break reroutes only to an already-granted route, with unchanged class and custody, and pauses when none exists; an agent-drafted adapter maps its operations to verbs, one deliberately mislabelled "draft" that sends in the demo environment blocks adoption (ADP-8), and an unmapped operation stays draft-only until the owner chooses; an owner pre-allowance lets one irreversible operation run with no approval or notification while still journaled and stopped by STOP, and the same operation with an agent-supplied recipient that differs from the source system falls back to an approval request; Loop 1 proposes a route change that is adopted only via the held-out suite, and a bad one is rejected. **Adversarial:** through the action protocol, an agent tries to reach a shell, a file manager, or the app's credential store from the desktop executor, and fails; canary sessions are never surfaced (as A5). | ADP-1–9, CAP-2 |
+| **A14** | Potency: on the floor host, one guest drives ≥8 worker machines through fork, test, and keep-the-winner, within RES-2; an open machine reaches an arbitrary public host, and the same machine after receiving recall content cannot, except through journaled, bounded `fetch`; rollback to before the private data restores open; one provider's quota is exhausted mid-task and work fails over to another granted route without adding a provider; an authority-neutral skill adopts unprompted, appears in the digest, and reverts by reply, while a candidate that widens a grant does not adopt; an unanswered default-on-timeout question proceeds and is listed; evidence reaches the owner's destination and the agent cannot change it; a context-scoped reply composer cannot read anything outside its thread (canary content planted elsewhere never appears), and the reply sends only after its undo window; an outbound third-party call opens with the disclosure. | REV-5, CAP-1, CAP-8–10, CHG-6, CH-18, ADP-10/11 |
 
-**Gates (riskiest first):** G1 = A1 (hardware and screenless reality). G2 = A4, A5, A9 on a VM (core correctness). G3 = A2, A3, A6, A8 on real hosts. G4 = A7, A10, A11, A13. G5 = A12 (needs a second and third independent installation).
+**Gates (riskiest first):** G1 = A1 (hardware and screenless reality). G2 = A4, A5, A9 on a VM (core correctness). G3 = A2, A3, A6, A8 on real hosts. G4 = A7, A10, A11, A13, A14. G5 = A12 (needs a second and third independent installation).
 
 Before any qualification run, freeze revisions, hardware profile, accounts, workloads, numeric targets, repeats, margins, and rollback triggers. Missing values make a run exploratory, not a pass.
 
@@ -439,6 +459,7 @@ Before any qualification run, freeze revisions, hardware profile, accounts, work
 | 2026-10-04 | Adapter contract (§10A). Default routing order API → CLI → web → desktop GUI, which loops may improve through §11 like everything else. |
 | 2026-10-04 | Operation labels come from a fixed verb list with a demo-environment mismatch check; the owner answers only for unmapped operations. The owner may pre-allow irreversible operations per service and/or per action with no notification (ADP-9). |
 | 2026-10-04 | Two-tier approval (CH-10): texted one-time codes for low-risk approvals, code-generator codes for high-risk ones; batching and pre-allowances minimize prompts. |
+| 2026-10-04 | Potency (review 1, `reviews/potency/`): egress follows data (REV-5); worker machines, model routing, default-on-timeout questions (CAP-8–10); context-scoped replies and the SIM as a tool (ADP-10/11); auto-adoption of authority-neutral improvements (CHG-6); evidence delivery (CH-18). |
 | Proposed | External-drive-only (no internal install). This spec assumes it; the owner has not formally confirmed. |
 
 ## 17. Open risks
