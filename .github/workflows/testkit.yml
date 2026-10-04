@@ -22,7 +22,9 @@ jobs:
           sudo apt-get install -y -q --no-install-recommends debian-archive-keyring systemd-boot systemd-boot-efi \
             systemd-container erofs-utils dosfstools mtools e2fsprogs cpio zstd kmod bubblewrap \
             qemu-system-x86 ovmf swtpm swtpm-tools
-          sudo git clone -q --depth 1 -b v24.3 https://github.com/systemd/mkosi /opt/mkosi
+          # Ubuntu 24.04 confines user namespaces via AppArmor, which breaks mkosi's bubblewrap sandbox.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo git clone -q -c advice.detachedHead=false --depth 1 -b v24.3 https://github.com/systemd/mkosi /opt/mkosi
       - name: Build image
         run: sudo MKOSI=/opt/mkosi/bin/mkosi spikes/S1S2-testkit/build.sh "$RUNNER_TEMP/out"
       - name: Boot test (Secure Boot on, until the kit powers off)
