@@ -1,6 +1,9 @@
 package owner
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // Tier is CH-10's approval tier.
 type Tier int
@@ -77,7 +80,7 @@ func Classify(f Facts, l Limits, now time.Time) Tier {
 		return High
 	}
 	for _, v := range l.ExcludedVerbs {
-		if v == f.Verb {
+		if strings.EqualFold(v, f.Verb) {
 			return High
 		}
 	}

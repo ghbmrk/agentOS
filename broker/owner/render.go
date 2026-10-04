@@ -2,8 +2,10 @@ package owner
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/ghbmrk/agentos/broker/modem"
 )
@@ -30,7 +32,7 @@ var lookalikes = map[rune]string{
 	'ò': "o", 'ó': "o", 'ô': "o", 'õ': "o", 'ö': "o", 'ø': "o",
 	'ù': "u", 'ú': "u", 'û': "u", 'ü': "u", 'ñ': "n", 'ç': "c", 'ý': "y", 'ÿ': "y", 'ß': "ss",
 	'À': "A", 'Á': "A", 'Â': "A", 'Ä': "A", 'Å': "A", 'É': "E", 'È': "E", 'Ö': "O", 'Ü': "U", 'Ñ': "N",
-	'ℓ': "l", '℮': "e", 'ⅰ': "i", 'ⅼ': "l", '€': "EUR", '£': "GBP", '¥': "JPY",
+	'ℓ': "l", '℮': "e", 'ⅰ': "i", 'ⅼ': "l", '€': " EUR ", '£': " GBP ", '¥': " JPY ",
 }
 
 // fieldChars may appear in a rendered field. No line breaks, no GSM-7
@@ -40,20 +42,58 @@ func fieldChar(r rune) bool {
 		strings.ContainsRune(" .,:;@+-_/$#%&'()*!?=", r)
 }
 
-// field renders a verified value for a broker text: look-alikes folded,
-// fullwidth forms mapped to ASCII, everything else dropped, whitespace
-// collapsed, cut to max, and replaced if secret-shaped (CH-19).
-func field(s string, max int) string {
+// fold maps text to the plain form every fixed-pattern check runs on, a
+// small stand-in for NFKC (golang.org/x/text is third-party, DEP-1):
+// fullwidth forms become ASCII, every Unicode decimal digit becomes its
+// ASCII digit, look-alike letters fold to Latin, and combining marks and
+// format characters (zero-width joiners and the like) are dropped.
+func fold(s string) string {
 	var b strings.Builder
 	for _, r := range s {
 		if r >= 0xFF01 && r <= 0xFF5E {
 			r -= 0xFEE0
 		}
 		switch {
-		case fieldChar(r):
+		case r < 0x80:
 			b.WriteRune(r)
+		case unicode.IsDigit(r):
+			b.WriteByte(byte('0' + digitValue(r)))
 		case lookalikes[r] != "":
 			b.WriteString(lookalikes[r])
+		case unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Cf, r):
+		case unicode.IsSpace(r):
+			b.WriteByte(' ')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// digitValue is a decimal digit's value. Unicode lays every decimal digit
+// set out as ten consecutive code points from zero, so the value is the
+// number of digits just before r, modulo 10.
+func digitValue(r rune) int {
+	n := 0
+	for unicode.IsDigit(r - rune(n) - 1) {
+		n++
+	}
+	return n % 10
+}
+
+// longDigits finds runs of 6 or more digits.
+var longDigits = regexp.MustCompile(`[0-9]{6,}`)
+
+// field renders a verified value for a broker text: folded, everything
+// outside a fixed alphabet dropped, whitespace collapsed, long digit runs
+// cut to their last 4 so no field reads like a code, cut to max, and
+// replaced if secret-shaped (CH-10, CH-12, CH-19).
+func field(s string, max int) string {
+	var b strings.Builder
+	for _, r := range fold(s) {
+		switch {
+		case fieldChar(r):
+			b.WriteRune(r)
 		case r == '\n' || r == '\t' || r == '\r':
 			b.WriteByte(' ')
 		}
@@ -62,6 +102,7 @@ func field(s string, max int) string {
 	if SecretShaped(out) {
 		return "[hidden]"
 	}
+	out = longDigits.ReplaceAllStringFunc(out, func(d string) string { return "..." + d[len(d)-4:] })
 	if len(out) > max {
 		out = strings.TrimSpace(out[:max-2]) + ".."
 	}
@@ -73,8 +114,8 @@ func field(s string, max int) string {
 type Item struct {
 	// Ref is the caller's handle (e.g. the journal intent ID). It is not
 	// rendered.
-	Ref    string
-	Verb   string
+	Ref string
+	// The verb shown is Facts.Verb, the one Classify judged.
 	Object string
 	// Recipient is a canonical identifier: address, number, or the last
 	// 4 digits of an account, never a display name.
@@ -88,7 +129,7 @@ type Item struct {
 }
 
 func (it Item) line() string {
-	s := field(it.Verb, 12) + " " + field(it.Object, 40)
+	s := field(it.Facts.Verb, 12) + " " + field(it.Object, 40)
 	if it.Recipient != "" {
 		s += " to " + field(it.Recipient, 40)
 	}

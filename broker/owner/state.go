@@ -24,6 +24,28 @@ type State struct {
 	Wrong []time.Time `json:"wrong,omitempty"`
 	// LowLocked: texted codes are off until a code-generator unlock.
 	LowLocked bool `json:"low_locked"`
+	// ClearedAt is the last code-generator unlock. Only wrong codes after
+	// it count toward WrongToLock; all of them count toward the throttle.
+	ClearedAt time.Time `json:"cleared_at"`
+	// Pending lists open requests and Queued the auto-replies waiting out
+	// their undo window, by reference only (never codes or reply text), so
+	// a restart can report what it dropped (OP-4, CH-13).
+	Pending []PendingRef `json:"pending,omitempty"`
+	Queued  []QueuedRef  `json:"queued,omitempty"`
+	// Retired holds IDs closed in the last RetireFor, which are not reused.
+	Retired map[string]time.Time `json:"retired,omitempty"`
+}
+
+// PendingRef is an open request as a restart sees it.
+type PendingRef struct {
+	ID   string   `json:"id"`
+	Refs []string `json:"refs"`
+}
+
+// QueuedRef is a queued auto-reply as a restart sees it.
+type QueuedRef struct {
+	ID  string `json:"id"`
+	Ref string `json:"ref"`
 }
 
 // Store persists State.
@@ -53,6 +75,13 @@ func (m *MemStore) Save(s State) error {
 func copyState(s State) State {
 	s.GridUsed = append([]string(nil), s.GridUsed...)
 	s.Wrong = append([]time.Time(nil), s.Wrong...)
+	s.Pending = append([]PendingRef(nil), s.Pending...)
+	s.Queued = append([]QueuedRef(nil), s.Queued...)
+	r := make(map[string]time.Time, len(s.Retired))
+	for k, v := range s.Retired {
+		r[k] = v
+	}
+	s.Retired = r
 	return s
 }
 

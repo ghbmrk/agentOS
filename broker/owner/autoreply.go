@@ -17,7 +17,8 @@ type AutoReply struct {
 	// Recipients are canonical identifiers read from the thread.
 	Recipients []string
 	Body       string
-	// Facts classify the reply if it becomes an approval request.
+	// Facts classify the reply if it becomes an approval request. Verb
+	// defaults to "send".
 	Facts Facts
 }
 
@@ -26,10 +27,6 @@ type Queued struct {
 	ID     string
 	SendAt time.Time
 	Reply  AutoReply
-}
-
-type queuedReply struct {
-	Queued
 }
 
 // QueueResult says what happened to a reply.
@@ -43,9 +40,10 @@ type QueueResult struct {
 }
 
 // QueueAutoReply applies ADP-11. A reply that matches the commitment
-// filter (amounts, dates, commitment phrases, or secret-shaped content)
+// filter (secret-shaped content, amounts, dates, commitment phrases)
 // becomes a normal approval request. Otherwise it is queued for the undo
-// window and the owner is texted its first line and UNDO <id> (CH-16).
+// window and the owner is texted its first line and UNDO <id> (CH-16). If
+// the alert cannot be sent, the reply is dropped.
 func (c *Channel) QueueAutoReply(ar AutoReply) (QueueResult, error) {
 	if c.cfg.Modem == nil {
 		return QueueResult{}, errors.New("owner: no modem")
@@ -55,40 +53,60 @@ func (c *Channel) QueueAutoReply(ar AutoReply) (QueueResult, error) {
 	}
 	to := strings.Join(ar.Recipients, ", ")
 	if m := c.cfg.Commitments.Match(ar.Body); m != "" {
-		id, err := c.Request([]Item{{
-			Ref: ar.Ref, Verb: "send", Object: "reply (" + m + ")", Recipient: to, Facts: ar.Facts,
-		}}, 0)
+		f := ar.Facts
+		if f.Verb == "" {
+			f.Verb = "send"
+		}
+		id, err := c.Request([]Item{{Ref: ar.Ref, Object: "reply (" + m + ")", Recipient: to, Facts: f}}, 0)
 		return QueueResult{Request: id, Matched: m}, err
 	}
 	now := c.cfg.Now()
 	c.mu.Lock()
-	q := &queuedReply{Queued{ID: c.newIDLocked(), SendAt: now.Add(c.cfg.UndoWindow), Reply: ar}}
-	c.queued[q.ID] = q
-	text := fmt.Sprintf("Auto-reply to %s: \"%s\". Sends %s. Reply UNDO %s to stop it.",
-		field(to, 40), field(firstLine(ar.Body), 60), q.SendAt.In(c.cfg.Location).Format("15:04"), q.ID)
-	c.mu.Unlock()
-	if err := c.cfg.Modem.Send(c.cfg.Owner, text); err != nil {
-		// No alert, no send: ADP-11 allows a reply only with its alert.
-		c.mu.Lock()
-		delete(c.queued, q.ID)
+	if len(c.open)+len(c.queued) >= MaxOpen {
+		c.mu.Unlock()
+		return QueueResult{}, ErrFull
+	}
+	id, err := c.newIDLocked(now)
+	if err != nil {
 		c.mu.Unlock()
 		return QueueResult{}, err
 	}
-	out := q.Queued
+	if err := c.codes.commit(func(s *State) { s.Queued = append(s.Queued, QueuedRef{ID: id, Ref: ar.Ref}) }); err != nil {
+		c.mu.Unlock()
+		return QueueResult{}, err
+	}
+	q := &Queued{ID: id, SendAt: now.Add(c.cfg.UndoWindow), Reply: ar}
+	c.queued[id] = q
+	text := fmt.Sprintf("Auto-reply to %s: \"%s\". Sends %s. Reply UNDO %s to stop it.",
+		field(to, 40), field(firstLine(ar.Body), 60), q.SendAt.In(c.cfg.Location).Format("15:04"), id)
+	c.mu.Unlock()
+	if err := c.cfg.Modem.Send(c.cfg.Owner, text); err != nil {
+		c.mu.Lock()
+		delete(c.queued, id)
+		c.retireLocked(id, now)
+		c.mu.Unlock()
+		return QueueResult{}, err
+	}
+	out := *q
 	return QueueResult{Queued: &out}, nil
 }
 
 // DueAutoReplies returns and removes replies whose undo window has passed;
-// the caller sends them through the account's adapter.
+// the caller sends them through the account's adapter. Nothing is released
+// while the broker is stopped (ADP-11: STOP applies).
 func (c *Channel) DueAutoReplies() []Queued {
+	if c.cfg.Engine.Stopped() {
+		return nil
+	}
 	now := c.cfg.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	var out []Queued
 	for id, q := range c.queued {
 		if !now.Before(q.SendAt) {
-			out = append(out, q.Queued)
+			out = append(out, *q)
 			delete(c.queued, id)
+			c.retireLocked(id, now)
 		}
 	}
 	return out
@@ -104,6 +122,7 @@ func (c *Channel) undoLocked(id string, now time.Time) string {
 		return fmt.Sprintf("%s is past its undo window.", id)
 	}
 	delete(c.queued, id)
+	c.retireLocked(id, now)
 	return fmt.Sprintf("Cancelled %s. The reply was not sent.", id)
 }
 

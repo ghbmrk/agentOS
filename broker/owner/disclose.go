@@ -30,20 +30,32 @@ var tokenFormats = regexp.MustCompile(`(?i)` + strings.Join([]string{
 var codeWords = map[string]bool{
 	"CODE": true, "CODES": true, "OTP": true, "VERIFICATION": true, "VERIFY": true,
 	"PIN": true, "PASSCODE": true, "2FA": true, "MFA": true, "ONE-TIME": true,
-	"SECURITY": true, "LOGIN": true, "TOKEN": true,
+	"SECURITY": true, "LOGIN": true, "TOKEN": true, "PASSWORD": true, "PASS": true,
+	"KEY": true, "SIGN-IN": true, "SIGNIN": true,
 }
 
 const codeReach = 4
 
 // SecretShaped reports whether s carries a known token format or a short
-// code next to a code word (CH-19).
+// code next to a code word (CH-19). It runs on folded text, so fullwidth
+// or other Unicode digits and look-alike letters do not slip past, and it
+// joins adjacent digit groups, so "482 913" and "4 8 2 9 1 3" read as one
+// code.
 func SecretShaped(s string) bool {
+	s = fold(s)
 	if tokenFormats.MatchString(s) {
 		return true
 	}
-	words := strings.FieldsFunc(s, func(r rune) bool {
+	var words []string
+	for _, w := range strings.FieldsFunc(s, func(r rune) bool {
 		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-')
-	})
+	}) {
+		if n := len(words); n > 0 && allDigits(w) && allDigits(words[n-1]) && len(words[n-1])+len(w) <= 10 {
+			words[n-1] += w
+			continue
+		}
+		words = append(words, w)
+	}
 	for i, w := range words {
 		if !codeWords[strings.ToUpper(w)] {
 			continue

@@ -2,6 +2,7 @@ package owner
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -75,15 +76,18 @@ type rig struct {
 	agent   *recAgent
 	store   Store
 	down    bool // every model and guest down: no agent
-	ch      *Channel
-	mu      sync.Mutex
-	decided []Decision
+	// replyLimit is high by default so tests see every reply; the CH-15
+	// test sets it low.
+	replyLimit int
+	ch         *Channel
+	mu         sync.Mutex
+	decided    []Decision
 }
 
 func newRig(t *testing.T, store Store) *rig {
 	t.Helper()
 	r := &rig{t: t, now: time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC), carrier: modem.NewCarrier(),
-		eng: &fakeEngine{}, agent: &recAgent{}, store: store}
+		eng: &fakeEngine{}, agent: &recAgent{}, store: store, replyLimit: 1000}
 	if r.store == nil {
 		r.store = &MemStore{}
 	}
@@ -101,8 +105,9 @@ func (r *rig) open() *Channel {
 	}
 	ch, err := New(Config{
 		Owner: ownerNum, Modem: r.box, Engine: r.eng, Agent: agent, Secrets: testSecrets, Store: r.store,
-		Limits:   Limits{Hold: 7 * 24 * time.Hour, AmountLimit: 10000},
-		Location: time.UTC, Now: r.clock,
+		Limits:     Limits{Hold: 7 * 24 * time.Hour, AmountLimit: 10000},
+		ReplyLimit: r.replyLimit,
+		Location:   time.UTC, Now: r.clock,
 		Decide: func(d Decision) { r.mu.Lock(); r.decided = append(r.decided, d); r.mu.Unlock() },
 	})
 	if err != nil {
@@ -178,12 +183,12 @@ var (
 )
 
 func lowItem(ref string) Item {
-	return Item{Ref: ref, Verb: "send", Object: "invoice 1042", Recipient: "billing@acme.example",
+	return Item{Ref: ref, Object: "invoice 1042", Recipient: "billing@acme.example",
 		Facts: Facts{Verb: "send", RecipientChecked: true, RecipientExists: true, RecipientByOwner: true}}
 }
 
 func highItem(ref string) Item {
-	return Item{Ref: ref, Verb: "pay", Object: "invoice 77", Recipient: "acct ...4821", Amount: "$250.00",
+	return Item{Ref: ref, Object: "invoice 77", Recipient: "acct ...4821", Amount: "$250.00",
 		Facts: Facts{Verb: "pay", RecipientChecked: true, RecipientExists: true, RecipientByOwner: true, HasAmount: true, Amount: 25000}}
 }
 
@@ -210,9 +215,10 @@ func TestTextsReachTheBrokerFromTheModemAndControlWordsWorkWithModelsDown(t *tes
 		t.Fatalf("locked STATUS should ask for a code: %q", got)
 	}
 	_ = r.phone.Send(boxNum, r.totp())
-	if got := r.inbox(); !strings.HasPrefix(got, "Unlocked until Oct 11") {
+	if got := r.inbox(); !strings.HasPrefix(got, "Unlocked until Oct 11") || !strings.Contains(got, `Held: "STATUS". Reply RUN`) {
 		t.Fatalf("unlock: %q", got)
 	}
+	_ = r.phone.Send(boxNum, "run")
 	if got := r.inbox(); !strings.HasPrefix(got, "Stopped. 0 may have happened") {
 		t.Fatalf("held STATUS did not run: %q", got)
 	}
@@ -255,6 +261,7 @@ func TestTierMatrix(t *testing.T) {
 		t.Fatalf("locked chat: %q", got)
 	}
 	r.unlock()
+	r.say("RUN")
 	if got := r.agent.got(); len(got) != 1 || got[0] != "book a table for two" {
 		t.Fatalf("held message not run: %v", got)
 	}
@@ -354,10 +361,10 @@ func TestApprovalTextIsFixedWordingFromVerifiedFields(t *testing.T) {
 	}
 }
 
-func TestIDsAreShortAndUniqueAmongOpenRequests(t *testing.T) {
+func TestIDsAreShortUniqueAndNotReusedForADay(t *testing.T) {
 	r := newRig(t, nil)
 	seen := map[string]bool{}
-	for i := 0; i < 60; i++ {
+	for i := 0; i < MaxOpen; i++ {
 		id, err := r.ch.Request([]Item{lowItem("x")}, 0)
 		if err != nil {
 			t.Fatal(err)
@@ -367,6 +374,56 @@ func TestIDsAreShortAndUniqueAmongOpenRequests(t *testing.T) {
 			t.Fatalf("id %q (dup=%v)", id, seen[id])
 		}
 		seen[id] = true
+	}
+	if _, err := r.ch.Request([]Item{lowItem("x")}, 0); err != ErrFull {
+		t.Fatalf("51st request: %v", err)
+	}
+	if _, err := r.ch.QueueAutoReply(AutoReply{Recipients: []string{"a@b.example"}, Body: "Thanks."}); err != ErrFull {
+		t.Fatalf("auto-reply past the cap: %v", err)
+	}
+	// STOP still answers at the cap (CH-2).
+	if got := r.say("STOP"); !strings.HasPrefix(got, "Stopped.") {
+		t.Fatalf("STOP at the cap: %q", got)
+	}
+	// Closed IDs stay retired for RetireFor, across many more requests.
+	r.advance(16 * time.Minute)
+	r.ch.Tick()
+	for i := 0; i < 300; i++ {
+		id, err := r.ch.Request([]Item{lowItem("y")}, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.inbox()
+		if seen[id] {
+			t.Fatalf("ID %s reused within a day", id)
+		}
+		seen[id] = true
+		r.say("NO " + id)
+	}
+}
+
+func TestIDSpaceExhaustionFailsInsteadOfHanging(t *testing.T) {
+	r := newRig(t, nil)
+	r.ch.mu.Lock()
+	for _, l := range idLetters {
+		for d := 0; d < 100; d++ {
+			r.ch.codes.st.Retired[fmt.Sprintf("%c%d", l, d)] = r.clock()
+			r.ch.codes.st.Retired[fmt.Sprintf("%c%02d", l, d)] = r.clock()
+		}
+	}
+	r.ch.mu.Unlock()
+	done := make(chan error, 1)
+	go func() { _, err := r.ch.Request([]Item{lowItem("x")}, 0); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("got an ID from an exhausted space")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Request hung on ID exhaustion")
+	}
+	if got := r.say("STOP"); !strings.HasPrefix(got, "Stopped.") {
+		t.Fatalf("STOP after exhaustion: %q", got)
 	}
 }
 
@@ -409,7 +466,7 @@ func TestBatchRepliesPartialYesNoAndExpiry(t *testing.T) {
 	if len(ds) != 2 || ds[0].Why != "expired" || ds[0].Approved {
 		t.Fatalf("expiry %+v", ds)
 	}
-	if ex := r.ch.TakeExpired(); len(ex) != 2 || ex[0].Request != id3 {
+	if ex, more := r.ch.TakeExpired(); len(ex) != 2 || more != 0 || ex[0].Request != id3 {
 		t.Fatalf("digest list %+v", ex)
 	}
 	if got := r.say("YES " + id3 + " 123456"); got != "No open request "+id3+"." {
@@ -430,7 +487,7 @@ func TestReplyMustNameItsRequestWhenSeveralAreOpen(t *testing.T) {
 	if got := r.say("YES " + a[2]); got != "Approved "+a[1]+"." {
 		t.Fatalf("code-bound YES: %q", got)
 	}
-	if got := r.say("yes"); got != "Include the code: YES "+id+" <code>." {
+	if got := r.say("yes"); got != "Include the ID and the code: YES "+id+" <code>." {
 		t.Fatalf("bare yes: %q", got)
 	}
 	if got := r.say("MORE " + id); !strings.Contains(got, "1 pay invoice 77") {
@@ -461,11 +518,18 @@ func TestInlineUnlockHoldsTheMessageAndAcceptsAnAppendedCode(t *testing.T) {
 	if got := r.say("what's on my calendar"); !strings.Contains(got, "held for 15 min") {
 		t.Fatalf("hold: %q", got)
 	}
-	if got := r.say(r.totp()); got != "Unlocked until Oct 11 12:00. Running your held message." {
+	if got := r.say(r.totp()); got != `Unlocked until Oct 11 12:00. Held: "what's on my calendar". Reply RUN to send it.` {
 		t.Fatalf("unlock: %q", got)
 	}
+	if len(r.agent.got()) != 0 {
+		t.Fatal("a code-only unlock ran the held message")
+	}
+	r.say("RUN")
 	if got := r.agent.got(); len(got) != 1 || got[0] != "what's on my calendar" {
 		t.Fatalf("held: %v", got)
+	}
+	if got := r.say("run"); got != "Nothing is held." || len(r.agent.got()) != 1 {
+		t.Fatalf("RUN with nothing held: %q", got)
 	}
 	// The unlock lasts the default 7 days.
 	r.advance(7*24*time.Hour - time.Minute)
@@ -475,7 +539,7 @@ func TestInlineUnlockHoldsTheMessageAndAcceptsAnAppendedCode(t *testing.T) {
 		t.Fatalf("unlock outlived 7 days: %q", got)
 	}
 	// A code appended to a message unlocks and is stripped.
-	if got := r.say("summarize my mail " + r.totp()); !strings.HasSuffix(got, "Running your held message.") {
+	if got := r.say("summarize my mail " + r.totp()); !strings.HasPrefix(got, "Unlocked until") {
 		t.Fatalf("appended code: %q", got)
 	}
 	if got := r.agent.got(); got[len(got)-1] != "summarize my mail" {
@@ -536,7 +600,12 @@ func TestWrongCodesVoidRequestsThenLockTheLowTier(t *testing.T) {
 	if text := r.inbox(); !strings.Contains(text, "code generator") || lowCodeRe.MatchString(text) {
 		t.Fatalf("low request while locked: %q", text)
 	}
-	if got := r.say("YES " + r.totp()); !strings.HasPrefix(got, "Approved") {
+	c, _ := r.ch.Request([]Item{lowItem("d")}, 0)
+	r.inbox()
+	if got := r.say("YES " + r.totp()); !strings.Contains(got, "Reply with an ID") {
+		t.Fatalf("generator code without ID: %q", got)
+	}
+	if got := r.say("YES " + c + " " + r.totp()); !strings.HasPrefix(got, "Approved") {
 		t.Fatalf("generator code: %q", got)
 	}
 	if r.ch.codes.st.LowLocked {
@@ -572,7 +641,7 @@ func TestResumeNeedsATextedCodeAndStopVoidsIt(t *testing.T) {
 		t.Fatalf("code survived STOP: %q", got)
 	}
 	code = regexp.MustCompile(`RESUME ([0-9]{6})`).FindStringSubmatch(r.say("resume"))[1]
-	if got := r.say("Resume " + code + "."); got != "Resumed. Held actions may now run." || r.eng.Stopped() {
+	if got := r.say("Resume " + code + "."); got != "Resumed. 0 held actions may now run." || r.eng.Stopped() {
 		t.Fatalf("resume: %q", got)
 	}
 	if got := r.say("RESUME " + code); got != "Not stopped. Nothing to resume." {

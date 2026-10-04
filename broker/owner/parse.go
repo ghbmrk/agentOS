@@ -30,7 +30,7 @@ func fields(msg string) []string {
 // parseReply reports whether msg is one of the owner channel's words.
 //
 //	YES [id] [item...] [code]   NO [id] [item...]
-//	UNDO id   MORE id   RESUME [code]
+//	UNDO id   MORE id   RESUME [code]   RUN
 //
 // An id starts with a letter and has at most 3 characters; an item is a
 // number up to 2 digits; a code is 6 to 8 digits.
@@ -45,6 +45,11 @@ func parseReply(msg string) (reply, bool) {
 	case "UNDO", "MORE":
 		if len(args) == 1 && isID(args[0]) {
 			r.id = args[0]
+			return r, true
+		}
+		return reply{}, false
+	case "RUN":
+		if len(args) == 0 {
 			return r, true
 		}
 		return reply{}, false
@@ -100,14 +105,18 @@ func allDigits(s string) bool {
 	return s != ""
 }
 
-// trailingCode splits a message whose last word is a 6-8 digit code from
-// the rest (CH-14: a code may be appended to any message).
+// trailingCode splits a message whose last word is a code of exactly 6
+// digits, separated by a space, from the rest (CH-14: a code may be
+// appended to any message). "room 12" and "flight AB482913" do not count.
 func trailingCode(msg string) (rest, code string, ok bool) {
 	s := strings.TrimRightFunc(msg, func(r rune) bool { return !unicode.IsDigit(r) && !unicode.IsLetter(r) })
-	i := strings.LastIndexFunc(s, func(r rune) bool { return !unicode.IsDigit(r) })
-	code = s[i+1:]
-	if !isCode(code) {
+	i := strings.LastIndexFunc(s, unicode.IsSpace)
+	if i < 0 {
 		return msg, "", false
 	}
-	return strings.TrimSpace(s[:i+1]), code, true
+	code = s[i+1:]
+	if len(code) != codeDigits || !allDigits(code) {
+		return msg, "", false
+	}
+	return strings.TrimSpace(s[:i]), code, true
 }
