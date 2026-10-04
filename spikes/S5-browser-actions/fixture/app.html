@@ -1,0 +1,41 @@
+<!doctype html><title>Fixture app</title>
+<h1>Account</h1>
+<p id=shown>Your API key: sk-ant-s5canaryDisplayedKey0123456789abcdef</p>
+<section aria-label="Controlled input">
+  <label>Search <input id=q></label><p id=echo>echo:</p>
+  <script>
+    // React-style controlled input: only input events update state.
+    q.addEventListener('input', e => echo.textContent = 'echo:' + e.target.value);
+    q.addEventListener('keydown', e => { if (e.key === 'Enter') echo.textContent += ' [submitted]'; });
+  </script>
+</section>
+<section aria-label="Native select">
+  <label>Country <select id=c onchange="cout.textContent='country=' + this.value">
+    <option>Choose</option><option>France</option><option>Kenya</option></select></label>
+  <p id=cout>country=</p>
+</section>
+<section aria-label="Custom listbox">
+  <button id=lb aria-haspopup=listbox aria-expanded=false onclick="opts.hidden=!opts.hidden">Size: none</button>
+  <ul role=listbox id=opts hidden aria-label=Size>
+    <li role=option onclick="lb.textContent='Size: M'; opts.hidden=true">M</li>
+    <li role=option onclick="lb.textContent='Size: L'; opts.hidden=true">L</li></ul>
+</section>
+<section aria-label="Shadow DOM"><div id=host></div>
+  <script>host.attachShadow({mode:'open'}).innerHTML =
+    '<button onclick="this.textContent=\'shadow clicked\'">shadow button</button>';</script>
+</section>
+<section aria-label="Iframe">
+  <iframe title="Payment" src="/frame.html"></iframe>
+</section>
+<section aria-label="Saved password">
+  <label>Saved password <input type=password id=pw></label>
+  <button onclick="pw.type = pw.type === 'password' ? 'text' : 'password'">Show password</button>
+  <script>pw.value = 's5-canary-pw-Zx81'; localStorage.setItem('tok', 's5CanaryStorageK3jH8gF2dS5aP1oI9uY7');</script>
+</section>
+<section aria-label="Links">
+  <a href="http://localhost:1/elsewhere">Off-origin link</a>
+  <a href="http://localhost:1/popup" target=_blank>Off-origin popup</a>
+  <a href="/order?item=7&amp;token=s5CanaryUrlTokenR2d2C3po4BB8Kx9">Token link</a>
+  <a href="/report">Download report</a>
+  <a href="/order?item=7">Place order</a>
+</section>

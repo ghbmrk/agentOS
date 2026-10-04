@@ -2,6 +2,7 @@ package journal
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"sync"
@@ -9,12 +10,13 @@ import (
 )
 
 // Engine runs intents through their lifecycle on top of a journal. All
-// methods are safe for concurrent use. Executors run without the engine lock
-// held; policies run with it held.
+// methods are safe for concurrent use. Executors and policies run without
+// the engine lock held.
 type Engine struct {
 	mu      sync.Mutex
 	store   Store
 	policy  Policy
+	redact  Redactor
 	execs   map[string]Executor
 	now     func() time.Time
 	seq     uint64
@@ -31,6 +33,7 @@ type Engine struct {
 type entry struct {
 	intent     Intent
 	fp         string
+	efp        string // effectFingerprint
 	state      State
 	permission Permission
 	attempts   []Attempt
@@ -46,11 +49,16 @@ func WithClock(now func() time.Time) Option { return func(e *Engine) { e.now = n
 // Open replays the journal in store and returns an engine positioned after
 // it. A torn final record is truncated; any other damage is ErrCorrupt.
 // Attempts that were in flight become outcome_unknown, and their accounts
-// are fenced until those intents are resolved (OP-4).
-func Open(store Store, policy Policy, execs map[string]Executor, opts ...Option) (*Engine, error) {
+// are fenced until those intents are resolved (OP-4). redact is required:
+// nothing reaches the journal without passing through it.
+func Open(store Store, policy Policy, execs map[string]Executor, redact Redactor, opts ...Option) (*Engine, error) {
+	if redact == nil {
+		return nil, fmt.Errorf("%w: a redactor is required", ErrInvalid)
+	}
 	e := &Engine{
 		store:   store,
 		policy:  policy,
+		redact:  redact,
 		execs:   execs,
 		now:     func() time.Time { return time.Now().UTC() },
 		intents: map[string]*entry{},
@@ -115,6 +123,14 @@ func (e *Engine) Submit(in Intent) (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
+	if b, _ := json.Marshal(norm); len(b) > MaxIntentBytes {
+		return Status{}, fmt.Errorf("%w: intent is %d bytes, limit %d", ErrInvalid, len(b), MaxIntentBytes)
+	}
+	// Compare in the form the journal stores: redacted, then round-tripped.
+	raw := norm
+	if norm, err = normalize(e.scrubIntent(raw)); err != nil {
+		return Status{}, err
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.broken != nil {
@@ -126,7 +142,7 @@ func (e *Engine) Submit(in Intent) (Status, error) {
 		}
 		return en.status(), nil
 	}
-	if err := e.commit(Record{Type: RecSubmitted, ID: norm.ID, Intent: &norm}); err != nil {
+	if err := e.commit(Record{Type: RecSubmitted, ID: raw.ID, Intent: &raw}); err != nil {
 		return Status{}, err
 	}
 	return e.intents[norm.ID].status(), nil
@@ -143,8 +159,15 @@ func (e *Engine) Authorize(ctx context.Context, id string) (Status, error) {
 	if en.state != Pending {
 		return en.status(), fmt.Errorf("%w: %s is %s", ErrState, id, en.state)
 	}
+	in := en.intent
+	e.mu.Unlock()
+	perr := e.policy.Check(ctx, PhaseAuthorize, in)
+	e.mu.Lock()
+	if en.state != Pending {
+		return en.status(), fmt.Errorf("%w: %s is %s", ErrState, id, en.state)
+	}
 	r := Record{Type: RecAuthorized, ID: id}
-	if perr := e.policy.Check(ctx, PhaseAuthorize, en.intent); perr != nil {
+	if perr != nil {
 		r = Record{Type: RecDenied, ID: id, Reason: perr.Error()}
 	}
 	if err := e.commit(r); err != nil {
@@ -155,48 +178,61 @@ func (e *Engine) Authorize(ctx context.Context, id string) (Status, error) {
 
 // Dispatch runs one attempt of an authorized intent, or a new attempt of one
 // whose previous attempt has evidence that it did not take effect. The
-// policy is rechecked and the attempt is journaled durably, under one lock,
-// immediately before the executor is called (OP-3).
+// policy is rechecked, and the decision is committed only if nothing was
+// journaled meanwhile; the attempt is journaled durably before the executor
+// is called (OP-3).
 func (e *Engine) Dispatch(ctx context.Context, id string) (Status, error) {
-	e.mu.Lock()
-	en, err := e.lookup(id)
-	if err != nil {
+	var (
+		en   *entry
+		exec Executor
+		in   Intent
+		n    int
+	)
+	for try := 0; ; try++ {
+		e.mu.Lock()
+		var err error
+		if en, exec, err = e.dispatchable(id); err != nil {
+			st := Status{}
+			if en != nil {
+				st = en.status()
+			}
+			e.mu.Unlock()
+			return st, err
+		}
+		seq := e.seq
+		in = en.intent
 		e.mu.Unlock()
-		return Status{}, err
-	}
-	if en.state != Authorized && en.state != NotApplied {
-		e.mu.Unlock()
-		return en.status(), fmt.Errorf("%w: %s is %s", ErrState, id, en.state)
-	}
-	if e.stopped {
-		e.mu.Unlock()
-		return en.status(), ErrStopped
-	}
-	if len(e.fence[en.intent.Account]) > 0 {
-		e.mu.Unlock()
-		return en.status(), fmt.Errorf("%w: %s", ErrUnreconciled, en.intent.Account)
-	}
-	exec, ok := e.execs[en.intent.Executor]
-	if !ok {
-		e.mu.Unlock()
-		return en.status(), fmt.Errorf("%w: %q", ErrNoExecutor, en.intent.Executor)
-	}
-	if perr := e.policy.Check(ctx, PhaseDispatch, en.intent); perr != nil {
-		err := e.commit(Record{Type: RecRecheckFailed, ID: id, Reason: perr.Error()})
-		st := en.status()
-		e.mu.Unlock()
-		if err != nil {
+
+		perr := e.policy.Check(ctx, PhaseDispatch, in)
+
+		e.mu.Lock()
+		if e.seq != seq {
+			// Something was journaled during the check: a STOP, a grant
+			// change, another dispatch. Check again against the new state.
+			st := en.status()
+			e.mu.Unlock()
+			if try >= maxRechecks {
+				return st, ErrBusy
+			}
+			continue
+		}
+		if perr != nil {
+			err := e.commit(Record{Type: RecRecheckFailed, ID: id, Reason: perr.Error()})
+			st := en.status()
+			e.mu.Unlock()
+			if err != nil {
+				return Status{}, err
+			}
+			return st, fmt.Errorf("%w: %v", ErrRecheck, perr)
+		}
+		n = len(en.attempts) + 1
+		if err := e.commit(Record{Type: RecDispatched, ID: id, Attempt: n}); err != nil {
+			e.mu.Unlock()
 			return Status{}, err
 		}
-		return st, fmt.Errorf("%w: %v", ErrRecheck, perr)
-	}
-	n := len(en.attempts) + 1
-	if err := e.commit(Record{Type: RecDispatched, ID: id, Attempt: n}); err != nil {
 		e.mu.Unlock()
-		return Status{}, err
+		break
 	}
-	in := en.intent
-	e.mu.Unlock()
 
 	out := safeCall(func() Outcome { return exec.Execute(ctx, in, n) })
 
@@ -207,6 +243,109 @@ func (e *Engine) Dispatch(ctx context.Context, id string) (Status, error) {
 		return Status{}, err
 	}
 	return en.status(), nil
+}
+
+// maxRechecks bounds how often Dispatch re-runs the policy check when the
+// journal keeps changing under it.
+const maxRechecks = 16
+
+// dispatchable returns the intent and its executor if a new attempt may
+// start now. Called with e.mu held.
+func (e *Engine) dispatchable(id string) (*entry, Executor, error) {
+	en, err := e.lookup(id)
+	if err != nil {
+		return nil, nil, err
+	}
+	if en.state != Authorized && en.state != NotApplied {
+		return en, nil, fmt.Errorf("%w: %s is %s", ErrState, id, en.state)
+	}
+	exempt := narrowing(en.intent)
+	if e.stopped && !exempt {
+		return en, nil, ErrStopped
+	}
+	if len(e.fence[en.intent.Account]) > 0 && !exempt {
+		return en, nil, fmt.Errorf("%w: %s", ErrUnreconciled, en.intent.Account)
+	}
+	// The same effect under a new ID while an earlier one may have landed
+	// is not a retry the engine can tell apart from a duplicate (OP-2). It
+	// stays authorized, held behind the earlier intent (see Waiting).
+	if oid := e.duplicateOf(en); oid != "" {
+		return en, nil, &HeldError{ID: id, BlockedBy: oid}
+	}
+	exec, ok := e.execs[en.intent.Executor]
+	if !ok {
+		return en, nil, fmt.Errorf("%w: %q", ErrNoExecutor, en.intent.Executor)
+	}
+	return en, exec, nil
+}
+
+// duplicateOf returns an unresolved intent with the same effect as en
+// under another ID, or "". Called with e.mu held.
+func (e *Engine) duplicateOf(en *entry) string {
+	for _, oid := range e.order {
+		o := e.intents[oid]
+		if o != en && o.efp == en.efp && (o.state == OutcomeUnknown || o.state == InFlight) {
+			return oid
+		}
+	}
+	return ""
+}
+
+// HeldError says an intent is held behind an unresolved intent with the
+// same effect. It matches ErrUnreconciled with errors.Is.
+type HeldError struct {
+	ID        string
+	BlockedBy string
+}
+
+func (h *HeldError) Error() string {
+	return fmt.Sprintf("%v: %s has the same effect as %s, whose outcome is unknown; "+
+		"%s runs once evidence shows %s did not happen, and is unneeded if it did",
+		ErrUnreconciled, h.ID, h.BlockedBy, h.ID, h.BlockedBy)
+}
+
+func (h *HeldError) Is(target error) bool { return target == ErrUnreconciled }
+
+// Wait describes an authorized intent that cannot dispatch yet and why.
+type Wait struct {
+	ID string
+	// BlockedBy lists the unresolved intents it waits for: a same-effect
+	// intent (OP-2) or the intents fencing its account after a restart
+	// (OP-4). Resolving them, by Reconcile or by owner evidence through
+	// Resolve, releases it.
+	BlockedBy []string
+	Duplicate bool // waiting on a same-effect intent, not only a fence
+}
+
+// Waiting lists authorized intents held behind unresolved ones, so the
+// owner can see a retry that is waiting rather than lost.
+func (e *Engine) Waiting() []Wait {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var out []Wait
+	for _, id := range e.order {
+		en := e.intents[id]
+		if en.state != Authorized && en.state != NotApplied {
+			continue
+		}
+		var w Wait
+		if oid := e.duplicateOf(en); oid != "" {
+			w.BlockedBy, w.Duplicate = append(w.BlockedBy, oid), true
+		}
+		if !narrowing(en.intent) {
+			for fid := range e.fence[en.intent.Account] {
+				if len(w.BlockedBy) == 0 || w.BlockedBy[0] != fid {
+					w.BlockedBy = append(w.BlockedBy, fid)
+				}
+			}
+		}
+		if len(w.BlockedBy) > 0 {
+			w.ID = id
+			sort.Strings(w.BlockedBy)
+			out = append(out, w)
+		}
+	}
+	return out
 }
 
 // ReconcileReport lists intents reconciliation resolved and those it could
@@ -323,7 +462,9 @@ func (e *Engine) Stop(ctx context.Context) (StopReport, error) {
 		en := e.intents[id]
 		switch en.state {
 		case Authorized, NotApplied:
-			rep.Held = append(rep.Held, id)
+			if !narrowing(en.intent) {
+				rep.Held = append(rep.Held, id)
+			}
 		case InFlight, OutcomeUnknown:
 			rep.Unresolved = append(rep.Unresolved, id)
 			jobs = append(jobs, job{en.intent, en.attempts[len(en.attempts)-1].N})
@@ -462,21 +603,28 @@ func (e *Engine) commit(r Record) error {
 	if e.broken != nil {
 		return e.broken
 	}
+	r = e.scrub(r)
 	r.V = recordVersion
 	r.Seq = e.seq + 1
 	r.At = e.now()
-	if err := e.validate(r); err != nil {
-		return fmt.Errorf("%w: %v", ErrState, err)
-	}
 	line, err := encodeRecord(r)
 	if err != nil {
 		return err
+	}
+	// Apply exactly what replay will read back, so live and replayed state
+	// cannot diverge (e.g. on invalid UTF-8, which JSON rewrites).
+	stored, err := decodeLine(line[:len(line)-1])
+	if err != nil {
+		return err
+	}
+	if err := e.validate(stored); err != nil {
+		return fmt.Errorf("%w: %v", ErrState, err)
 	}
 	if err := e.store.Append(line); err != nil {
 		e.broken = fmt.Errorf("%w: %v", ErrBroken, err)
 		return e.broken
 	}
-	e.apply(r)
+	e.apply(stored)
 	return nil
 }
 
@@ -514,7 +662,7 @@ func (e *Engine) validate(r Record) error {
 			return fmt.Errorf("%s: recheck from %s", r.ID, en.state)
 		}
 	case RecDispatched:
-		if e.stopped {
+		if e.stopped && !narrowing(en.intent) {
 			return fmt.Errorf("%s: dispatched while stopped", r.ID)
 		}
 		if en.state != Authorized && en.state != NotApplied {
@@ -567,7 +715,7 @@ func (e *Engine) apply(r Record) {
 		return
 	case RecSubmitted:
 		in := *r.Intent
-		e.intents[r.ID] = &entry{intent: in, fp: fingerprint(in), state: Pending}
+		e.intents[r.ID] = &entry{intent: in, fp: fingerprint(in), efp: effectFingerprint(in), state: Pending}
 		e.order = append(e.order, r.ID)
 		return
 	}

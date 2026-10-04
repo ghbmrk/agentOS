@@ -51,7 +51,7 @@ func (w *world) fail(format string, args ...any) {
 func (w *world) restart() {
 	// Some restarts tear the last write; Open must drop exactly that.
 	w.store = &crashStore{MemStore: w.media, budget: w.rng.Intn(40) + 1, torn: w.rng.Intn(2) == 0}
-	e, err := Open(w.store, w.policy, map[string]Executor{"svc": w.svc})
+	e, err := Open(w.store, w.policy, map[string]Executor{"svc": w.svc}, testRedact)
 	if err != nil {
 		if errors.Is(err, errCrash) {
 			// Crashed while writing restart records; try again.
@@ -161,6 +161,17 @@ func (w *world) step() {
 // check asserts the invariants that must hold after every step.
 func (w *world) check(replay bool) {
 	e := w.eng
+	// No attempt is ever executed twice (OP-2).
+	seen := map[string]bool{}
+	w.svc.mu.Lock()
+	for _, k := range w.svc.executes {
+		if seen[k] {
+			w.svc.mu.Unlock()
+			w.fail("OP-2: attempt %s executed twice", k)
+		}
+		seen[k] = true
+	}
+	w.svc.mu.Unlock()
 	for _, st := range e.List() {
 		id := st.Intent.ID
 		// No duplicated effect, whatever crashed where (OP-2, OP-4).
@@ -194,7 +205,7 @@ func (w *world) check(replay bool) {
 	// Replay reproduces the live state exactly (OP-4). Steps are sequential,
 	// so nothing is in flight here.
 	data, _ := w.media.ReadAll()
-	re, err := Open(&MemStore{data: data}, w.policy, map[string]Executor{"svc": w.svc})
+	re, err := Open(&MemStore{data: data}, w.policy, map[string]Executor{"svc": w.svc}, testRedact)
 	if err != nil {
 		w.fail("replay: %v", err)
 	}

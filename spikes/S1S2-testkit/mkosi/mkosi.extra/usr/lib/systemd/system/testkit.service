@@ -1,0 +1,14 @@
+[Unit]
+Description=AgentOS S1/S2 test kit
+# After blessing, so the good entry's counter is already cleared when testkit re-arms it.
+After=basic.target ModemManager.service systemd-bless-boot.service boot-complete.target
+Wants=ModemManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/lib/testkit/testkit.py
+StandardOutput=journal+console
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=multi-user.target

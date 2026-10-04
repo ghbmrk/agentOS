@@ -16,8 +16,18 @@ import (
 // CodeTTL is how long a texted RESUME code stays valid (CH-10 default).
 const CodeTTL = 15 * time.Minute
 
-// maxWrong wrong replies void a texted code (CH-18).
-const maxWrong = 3
+// Texted-code limits (CH-18). maxWrong wrong replies void one code;
+// maxWrongDay wrong codes in a day lock texted RESUME codes. maxCodeTexts
+// caps the RESUME texts the broker sends per hour, so a spoofer cannot
+// make the box text the owner without limit.
+const (
+	maxWrong     = 3
+	maxWrongDay  = 5
+	maxCodeTexts = 3
+)
+
+// DeliverTimeout bounds how long task chat waits on the agent.
+const DeliverTimeout = 5 * time.Second
 
 // Engine is the part of the journal engine that control words drive.
 type Engine interface {
@@ -53,6 +63,10 @@ type Handler struct {
 
 	mu     sync.Mutex
 	resume *pendingCode
+	// wrongAt and textsAt are the times of wrong RESUME codes and of RESUME
+	// texts sent. Neither resets when a new code is issued.
+	wrongAt []time.Time
+	textsAt []time.Time
 }
 
 type pendingCode struct {
@@ -86,23 +100,45 @@ func (h *Handler) Handle(ctx context.Context, from, msg string) []string {
 		r = "No open requests."
 	case WordUndo, WordMore:
 		r = fmt.Sprintf("No request %s.", cmd.Args[0])
+	case WordUnclear:
+		r = "Not understood, and not sent to your agent. Reply HELP for commands."
 	default:
-		if !h.Auth.SessionUnlocked(h.now()) {
-			r = unlockText
-		} else if h.Agent == nil || h.Agent.Deliver(ctx, cmd.Text, cmd.Public) != nil {
-			r = "Your agent is not running. STOP, RESUME, STATUS and HELP still work."
-		} else {
-			return nil
+		var out []string
+		if StopNearMiss(cmd.Text) {
+			out = append(out, stopHint)
 		}
+		if !h.Auth.SessionUnlocked(h.now()) {
+			out = append(out, unlockText)
+		} else if !h.deliver(ctx, cmd) {
+			out = append(out, "Your agent is not running. STOP, RESUME, STATUS and HELP still work.")
+		}
+		for i := range out {
+			out[i] = Fit(out[i])
+		}
+		return out
+	}
+	if r == "" {
+		return nil
 	}
 	return []string{Fit(r)}
+}
+
+const stopHint = "To pause everything, reply STOP."
+
+func (h *Handler) deliver(ctx context.Context, cmd Command) bool {
+	if h.Agent == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(ctx, DeliverTimeout)
+	defer cancel()
+	return h.Agent.Deliver(ctx, cmd.Text, cmd.Public) == nil
 }
 
 const helpText = "Commands: STOP pauses all actions. RESUME restarts them (needs a texted code). " +
 	"STATUS. YES or NO answers a request, e.g. YES 1 3 <code>. UNDO <id>. MORE <id>. " +
 	"Start a task with PUBLIC to mark it public. Anything else goes to your agent."
 
-const unlockText = "This needs an unlocked session. Send a code from your code generator."
+const unlockText = "This needs an unlocked session. Send a code from your code generator. STOP works without one."
 
 func (h *Handler) stop(ctx context.Context) string {
 	h.mu.Lock()
@@ -110,7 +146,7 @@ func (h *Handler) stop(ctx context.Context) string {
 	h.mu.Unlock()
 	rep, err := h.Engine.Stop(ctx)
 	if err != nil && !h.Engine.Stopped() {
-		return "STOP failed to record. Nothing new will start until the broker restarts."
+		return "STOP failed to record. Nothing new starts now; reply STOP again."
 	}
 	return fmt.Sprintf("Stopped. %d held, %d may have happened, %d cancel requests sent. Nothing was undone. Reply RESUME to restart.",
 		len(rep.Held), len(rep.Unresolved), accepted(rep.Cancels))
@@ -129,15 +165,23 @@ func accepted(cs []journal.CancelAttempt) int {
 func (h *Handler) resumeCmd(args []string) string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	now := h.now()
+	h.wrongAt = since(h.wrongAt, now.Add(-24*time.Hour))
+	h.textsAt = since(h.textsAt, now.Add(-time.Hour))
 	if !h.Engine.Stopped() {
 		h.resume = nil
 		return "Not stopped. Nothing to resume."
 	}
-	now := h.now()
+	if len(h.wrongAt) >= maxWrongDay {
+		h.resume = nil
+		return h.codeText(now, "RESUME is locked after 5 wrong codes in 24 hours. STOP still works.")
+	}
 	if len(args) == 0 {
-		h.resume = &pendingCode{code: h.newCode(), expires: now.Add(CodeTTL)}
-		return fmt.Sprintf("To restart all actions, reply RESUME %s within %d min.",
-			h.resume.code, int(CodeTTL/time.Minute))
+		if h.resume == nil || now.After(h.resume.expires) {
+			h.resume = &pendingCode{code: h.newCode(), expires: now.Add(CodeTTL)}
+		}
+		return h.codeText(now, fmt.Sprintf("To restart all actions, reply RESUME %s within %d min.",
+			h.resume.code, int(h.resume.expires.Sub(now).Round(time.Minute)/time.Minute)))
 	}
 	p := h.resume
 	if p == nil || now.After(p.expires) {
@@ -146,6 +190,11 @@ func (h *Handler) resumeCmd(args []string) string {
 	}
 	if subtle.ConstantTimeCompare([]byte(args[0]), []byte(p.code)) != 1 {
 		p.wrong++
+		h.wrongAt = append(h.wrongAt, now)
+		if len(h.wrongAt) >= maxWrongDay {
+			h.resume = nil
+			return "Wrong code 5 times in 24 hours. RESUME by texted code is locked. STOP still works."
+		}
 		if p.wrong >= maxWrong {
 			h.resume = nil
 			return "Wrong code 3 times; it is void. Reply RESUME for a new one."
@@ -157,6 +206,24 @@ func (h *Handler) resumeCmd(args []string) string {
 		return "RESUME failed to record. Still stopped."
 	}
 	return "Resumed. Held actions may now run."
+}
+
+// codeText sends text unless the hourly cap on RESUME texts is spent, in
+// which case the broker stays silent.
+func (h *Handler) codeText(now time.Time, text string) string {
+	if len(h.textsAt) >= maxCodeTexts {
+		return ""
+	}
+	h.textsAt = append(h.textsAt, now)
+	return text
+}
+
+func since(ts []time.Time, cutoff time.Time) []time.Time {
+	i := 0
+	for i < len(ts) && !ts[i].After(cutoff) {
+		i++
+	}
+	return ts[i:]
 }
 
 func (h *Handler) status() string {
@@ -181,7 +248,7 @@ func (h *Handler) status() string {
 	fmt.Fprintf(&b, " %d may have happened%s", len(unresolved), sample(unresolved))
 	fmt.Fprintf(&b, ", %d waiting to run, %d awaiting a decision.", len(held), len(open))
 	if h.Machines != nil {
-		b.WriteString(" " + h.Machines())
+		b.WriteString(" " + plainLine(h.Machines(), 80))
 	}
 	return b.String()
 }
