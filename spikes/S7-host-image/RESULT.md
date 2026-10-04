@@ -20,14 +20,14 @@ Setup: a 4-vCPU, 15 GB cloud VM without KVM. Images were built with mkosi 24.3 a
 | `/usr` integrity | `/dev/mapper/usr`, read-only, `veritysetup status: verified` on both v1 and v2 | [M] |
 | TPM | `/dev/tpmrm0` present; `systemd-cryptenroll --tpm2` ships in systemd 255 | [M] / [D] |
 | ModemManager, NetworkManager (Wi-Fi AP via NM hotspot), wpa_supplicant | All in the image from the distribution's main archive | [M] |
-| Offline A/B update (DEP-4) | `systemd-sysupdate` found v2 on a second plain ext4 drive, wrote `/usr` and its verity into the empty B slot in **60 s** (TCG), and labelled them `agentos_2`. Verity on the B slot checks out against v2's root hash | [M] |
+| Offline A/B update (DEP-4) | `systemd-sysupdate` found v2 on a second plain ext4 drive, wrote `/usr` and its verity into the empty B slot in **60 s** (TCG), and labelled them `agentos_2`. (The in-VM `lsblk` right after still showed `_empty` for the B data partition: udev's cached label, read before sysupdate's relabel event was processed. The GPT on disk, read afterwards with `sfdisk -d`, shows `agentos_2`; see evidence.md.) Verity on the B slot checks out against v2's root hash | [M] |
 | Boot into B | With GRUB pointed at B and A kept as `fallback`, the box booted `version=2` with verity verified | [M] |
 | Automatic rollback | **Fails on this stack.** With 64 MiB of the B slot overwritten, dm-verity rejected every bad read (32 errors), but the system stayed on B in a degraded state. GRUB's `fallback` only fires when GRUB itself can't load an entry, and Ubuntu's GRUB has no boot counting | [M] |
 
 ## Surprises
 
 1. **Secure Boot stops at the distribution's kernel. [M]** Under shim → GRUB, the kernel is verified but the initrd and `grub.cfg` (which carries `usrhash=`, the root of all `/usr` integrity) are not. Anyone who can write the drive's ESP can point it at a different `/usr`, and Secure Boot still reports "enabled". Covering these files needs one of three things:
-   - a key enrolled into shim (MOK), which takes a one-time confirmation at the firmware console with a screen and keyboard;
+   - a key enrolled into shim (MOK). The MOK list lives in each PC's firmware variables, so enrollment is **per PC, not per drive**: a confirmation at that PC's console, with a screen and keyboard, on every new host. That conflicts with "any PC, screenless" (HW-6);
    - AgentOS's own shim, which needs Microsoft review. That is a one-time project dependency, not a runtime one;
    - TPM measurement instead of verification, which protects only on a host where a TPM seal exists.
 
@@ -69,7 +69,8 @@ Setup: a 4-vCPU, 15 GB cloud VM without KVM. Images were built with mkosi 24.3 a
 -- **HW-5** Secure Boot MUST be supported through a Microsoft-signed shim [Fact: standard for mainstream distributions].
 +- **HW-5** Secure Boot MUST be supported through a Microsoft-signed shim, booting only distribution-signed bootloader and kernel, so no per-PC key enrollment is needed.
 +- **HW-5a** Secure Boot does not cover AgentOS's initrd, kernel command line, or `/usr` root hash. Their integrity MUST rest on TPM measured boot: the vault unlock slot (CRED-8) is sealed to the PCRs that measure them, so a modified boot path cannot unlock on a trusted host.
-+  [Risk] On an unknown host, offline tampering with the drive is not detectable by the box. Options for Mark: (a) accept for MVP and say so in the owner's guide; (b) optional MOK enrollment for owners with a screen; (c) pursue an AgentOS shim through Microsoft review after MVP.
++  The seal MUST be to a **policy**, not to literal PCR values, so an A/B update does not lock the vault: either a signed PCR policy (systemd-stub PCR 11 + `systemd-cryptenroll --tpm2-public-key`, which needs UKIs) or `systemd-pcrlock`, whose prediction the updater extends with the new release before reboot (works with Type #1 entries). [D: systemd man pages] [I: not exercised here]
++  [Risk] On an unknown host, offline tampering with the drive is not detectable by the box. Options for Mark: (a) accept for MVP and say so in the owner's guide; (b) optional MOK enrollment, per PC, for owners with a screen; (c) pursue an AgentOS shim through Microsoft review after MVP.
 
 -- **UPD-1** A/B image updates: stage → test → activate → health-check → commit or fall back. …
 +- **UPD-1** A/B image updates: stage → test → activate → health-check → commit or fall back. Fallback MUST be automatic, using boot-loader boot counting plus a health check, with no owner action. …
@@ -88,4 +89,4 @@ Setup: a 4-vCPU, 15 GB cloud VM without KVM. Images were built with mkosi 24.3 a
 
 ## Budget
 
-Model usage wasn't measured; the harness can't read the usage screen (PLAN §4A B-6). Estimate: one session of about 60 tool turns with small outputs, ≈2–3% of the weekly allowance [I], within the ~3% soft target. More spend would not have helped: the remaining unknowns (Debian 13 signed systemd-boot, bootc builds) are blocked by this box's network policy, not by budget. Build and boot compute ran on the cloud VM and used no model tokens.
+Model usage wasn't measured; the harness can't read the usage screen (PLAN §4A B-6). Estimate: ~0.25 M tokens of context over about 60 tool turns [I], which is roughly 2–3% of a weekly allowance and within the ~3% soft target; the WAU share awaits the B-6 screenshot. More spend would not have helped: the remaining unknowns (Debian 13 signed systemd-boot, bootc builds) are blocked by this box's network policy, not by budget. Build and boot compute ran on the cloud VM and used no model tokens.

@@ -51,6 +51,12 @@ S7U: vdb                      1.3G
 S7U: done
 [  160.560015] systemd[1]: Startup finished in 28.093s (kernel) + 30.641s (initrd) + 1min 41.817s (userspace) = 2min 40.552s.
 ```
+## after boot8: GPT read on the host with `sfdisk -d` (the in-VM lsblk above shows udev's stale `_empty` for vda4)
+```
+disk.raw4 : type=8484680C-…(usr x86-64), name="agentos_2"
+disk.raw5 : type=77FF5F63-…(usr-verity x86-64), name="agentos_2_verity"
+veritysetup verify disk.raw4 disk.raw5 <v2 usrhash> → B-slot-verity-ok
+```
 ## boot9: B slot (v2) via edited grub.cfg, A kept as GRUB fallback
 ```
 S7: version=2
