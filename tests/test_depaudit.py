@@ -29,6 +29,13 @@ STRACE = """\
 105 connect(13, {sa_family=AF_INET, sin_port=htons(80), sin_addr=something_new("x")}, 16) = 0
 105 connect(14, {sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr("127.0.0.53")}, 16) = 0
 105 connect(15, {sa_family=AF_UNSPEC, sa_data="\\0\\0"}, 16) = 0
+106 connect(16, {sa_family=AF_UNIX, sun_path="@relative"}, 12) = -1 ENOENT
+106 connect(17, {sa_family=AF_UNIX, sun_path="/WORK/tmp/../../var/lib/zz.sock"}, 110) = 0
+106 symlink("/var/lib", "/WORK/tmp/l") = 0
+106 symlinkat("sub/dir", AT_FDCWD, "/WORK/tmp/ok") = 0
+106 linkat(AT_FDCWD, "/WORK/tmp/a", AT_FDCWD, "/WORK/tmp/b", 0) = 0
+106 linkat(5, "x", AT_FDCWD, "/WORK/tmp/c", 0) = 0
+106 mount("/var/lib", "/WORK/tmp/m", NULL, MS_BIND, NULL) = 0
 """
 
 MANIFEST = {
@@ -49,7 +56,11 @@ class ParseTest(unittest.TestCase):
         self.assertIn(("inet6", "2001:db8::1", 123), got)
         self.assertIn(("inet6", "::1", 80), got)
         self.assertIn(("unix", "/run/systemd/resolve/io.systemd.Resolve", None), got)
-        self.assertIn(("unix", "@abstract-name", None), got)
+        self.assertIn(("abstract", "abstract-name", None), got)
+        self.assertIn(("unix", "@relative", None), got)
+        self.assertIn(("link", "/var/lib", None), got)
+        self.assertIn(("link", "<dirfd>/x", None), got)
+        self.assertIn(("mount", "mount", None), got)
         self.assertIn(("inet", "8.8.8.8", 53), got)
         self.assertFalse(any(e.addr in ("AF_NETLINK", "AF_UNSPEC") for e in ev))
 
@@ -81,12 +92,23 @@ class PolicyTest(unittest.TestCase):
             ("dns", "loopback:53"),
             ("dns", "mirror.example.net"),
             ("host-socket", "/run/systemd/resolve/io.systemd.Resolve"),
+            ("host-socket", "/w/tmp/../../var/lib/zz.sock"),
+            ("host-socket", "@relative"),
             ("ipv4", "192.0.2.10:443"),
             ("ipv4", "8.8.8.8:53"),
             ("ipv6", "[2001:db8::1]:123"),
+            ("link", "/var/lib"),
+            ("link", "<dirfd>/x"),
+            ("mount", "mount"),
             ("unknown-family", "AF_VSOCK"),
             ("unparsed", "AF_INET"),
         ])
+
+    def test_symlinked_socket_path_is_judged_by_where_it_resolves(self):
+        ev = depaudit.parse_strace('1 connect(3, {sa_family=AF_UNIX, sun_path="/w/tmp/l/p"}, 110) = 0')
+        ok = depaudit.evaluate(ev, [], self.manifest, "offline", "/w", {"/w/tmp/l/p": "/w/tmp/real/p"})
+        bad = depaudit.evaluate(ev, [], self.manifest, "offline", "/w", {"/w/tmp/l/p": "/srv/p"})
+        self.assertEqual((ok, [v["kind"] for v in bad]), ([], ["host-socket"]))
 
     def test_full_profile_allows_declared_endpoints_only(self):
         got = self.kinds("full", ["mirror.example.net", "unknown.example.org"])

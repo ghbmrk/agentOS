@@ -15,7 +15,7 @@ jobs:
   canary:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           persist-credentials: false
       - uses: actions/setup-python@v5
@@ -23,7 +23,7 @@ jobs:
           python-version: "3.12"
       - name: Canary scan (A5), fresh canaries every round
         run: python3 tools/canary.py run --targets assurance/canary-targets.json --rounds 3 --report canary-report.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: always()
         with:
           name: canary-report
@@ -32,7 +32,7 @@ jobs:
   dependency-audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           persist-credentials: false
       - uses: actions/setup-python@v5
@@ -52,7 +52,7 @@ jobs:
         run: python3 tools/depaudit.py run --targets assurance/dep-targets.json --require-io-uring-disabled --report dep-report.json
       - name: Harness self-tests inside the sandbox
         run: python3 -m unittest tests.test_depaudit tests.test_canary -v
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: always()
         with:
           name: dependency-audit-report

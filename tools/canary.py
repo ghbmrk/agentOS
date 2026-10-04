@@ -171,6 +171,8 @@ def _needles(c):
         forms += [("fragment", w) for w in _windows(variant, NEEDLE, STEP)]
     if c.decoded is not None:
         forms.append(("decoded", c.decoded))
+        forms += [("decoded-hex", c.decoded.hex().encode()), ("decoded-hex", c.decoded.hex().upper().encode())]
+        forms += [("decoded-base64", b) for b in _b64_aligned(c.decoded)]
         forms += [("decoded-fragment", w) for w in _windows(c.decoded, DECODED_NEEDLE, DECODED_STEP)]
     return forms
 

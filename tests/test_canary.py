@@ -92,6 +92,8 @@ class DetectorTest(unittest.TestCase):
                 continue
             self.assertEqual(canary.decode(c.kind, c.value), c.decoded)
             self.assertIn(c.fingerprint, self.found(os.urandom(9) + c.decoded + os.urandom(9)), c.kind)
+            self.assertIn(c.fingerprint, self.found(b"=" + c.decoded.hex().encode() + b"="), c.kind)
+            self.assertIn(c.fingerprint, self.found(base64.b64encode(os.urandom(2) + c.decoded + os.urandom(3))), c.kind)
             for start in range(len(c.decoded) - canary.DECODED_WINDOW + 1):
                 frag = c.decoded[start:start + canary.DECODED_WINDOW]
                 self.assertIn(c.fingerprint, self.found(os.urandom(9) + frag + os.urandom(9)), (c.kind, start))

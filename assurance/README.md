@@ -29,8 +29,8 @@ The harness scans that directory and the target's stdout and stderr. A canary is
 caught raw, as hex, URL-encoded, UTF-16, base64 at any alignment inside a larger
 blob, in upper or lower case (hex and base32 kinds), as any fragment of its secret
 core at least 15 characters long, and, for kinds whose text is an encoding (hex
-cookie, base32 TOTP seed, base64 key, base64url token), as its decoded bytes or
-any decoded fragment of at least 10 bytes. Reports carry fingerprints, kinds,
+cookie, base32 TOTP seed, base64 key, base64url token), as its decoded bytes (raw,
+hex, or base64 at any alignment) or any raw decoded fragment of at least 10 bytes. Reports carry fingerprints, kinds,
 encodings, and locations, never values, and the harness checks its own report
 before writing it.
 
@@ -55,9 +55,16 @@ Product targets always expect `clean`; the registry refuses anything else.
 `run` executes each scenario (boot, take STOP and STATUS, recover) in fresh user,
 network, and mount namespaces: loopback only, DNS answered NXDOMAIN by a logging
 sink, and every `connect`/`send*` of the process tree logged by strace. Host
-directories that hold filesystem sockets (`/run`, `/var/run`, `/tmp`, `/var/tmp`,
-and `/dev/log`) are hidden under empty tmpfs mounts, so nscd, systemd-resolved,
-D-Bus and the like are unreachable, not merely logged. CI also sets
+directories that hold or could hold filesystem sockets (`/run`, `/tmp`, `/var`,
+`/home`, `/root`, `/srv`, `/mnt`, `/media`, and `/dev/log`) are hidden under empty
+tmpfs mounts, with only the work directory, the repository, and the Python
+install bound back, so nscd, systemd-resolved, D-Bus and the like are
+unreachable, not merely logged. A filesystem socket path passes only if it is
+absolute, has no `.` or `..` components, lies in the work directory, and resolves
+(symlinks followed, inside the sandbox) to the work directory; relative paths fail
+closed. Any `mount`-family call, and any symlink or hard link whose source could
+lie outside the work directory, is itself a violation, so a path cannot be made
+to lead out even if the link is removed before exit. CI also sets
 `kernel.io_uring_disabled=2` and the run checks it, because io_uring socket calls
 bypass strace. A scenario passes only if it exits 0 and makes no non-loopback
 attempt, no DNS lookup (including any loopback port 53 traffic), no attempt at a
