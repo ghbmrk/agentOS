@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -618,5 +619,121 @@ func TestRES4SnapshotAdmittedOnlyAboveTheDiskReserve(t *testing.T) {
 	e.guestWrite("m", "big", strings.Repeat("x", 256<<10))
 	if _, err := e.m.Step(bg, "m"); err != nil {
 		t.Fatalf("step with room: %v", err)
+	}
+}
+
+// RES-4: every copy is admitted against the disk, not only snapshots, and
+// a fork that does not fit as a whole starts nothing and takes nothing.
+func TestRES4ForkAdmittedOnTheDiskForEveryCopy(t *testing.T) {
+	e := newEnv(t, 4096)
+	const reserve = 1 << 20
+	e.cfg.DiskReserveBytes = reserve
+	// Room for the checkpoint (layer plus 1 MiB memory image) and two
+	// copies of the layer, not five.
+	free := int64(reserve + 1<<20 + 3*(160<<10))
+	e.cfg.FreeBytes = func(string) (int64, error) { return free, nil }
+	e.open()
+	e.create("src", admission.Accepted, 1)
+	e.guestWrite("src", "data", strings.Repeat("x", 128<<10))
+	before := e.adm.Snapshot().FreeMB
+	_, err := e.m.Fork(bg, "src", []string{"f1", "f2", "f3", "f4", "f5"})
+	if !errors.Is(err, ErrQuota) {
+		t.Fatalf("fork(5) over the disk budget: %v", err)
+	}
+	if got := e.m.Machines(); len(got) != 1 || len(e.m.Snapshots("src")) != 0 || e.adm.Snapshot().FreeMB != before {
+		t.Fatalf("refused fork left state behind: machines %v, %d snapshots", got, len(e.m.Snapshots("src")))
+	}
+	if m, _ := e.m.Get("src"); m.State != Running {
+		t.Fatalf("source is %s after a refused fork", m.State)
+	}
+	if _, err := e.m.Fork(bg, "src", []string{"f1", "f2"}); err != nil {
+		t.Fatalf("fork(2) within the budget: %v", err)
+	}
+}
+
+// RES-4: a rollback that the disk cannot hold is refused before the
+// machine is stopped, so the machine keeps running as it was.
+func TestRES4RollbackRefusedLeavesTheMachineRunning(t *testing.T) {
+	e := newEnv(t, 4096)
+	free := int64(1 << 40)
+	e.cfg.DiskReserveBytes = 1 << 20
+	e.cfg.FreeBytes = func(string) (int64, error) { return free, nil }
+	e.open()
+	e.create("m", admission.Accepted, 100)
+	e.guestWrite("m", "data", strings.Repeat("x", 128<<10))
+	s, err := e.m.Step(bg, "m")
+	must(t, err)
+	e.guestWrite("m", "after", "kept")
+	free = 1<<20 + 64<<10
+	if err := e.m.Rollback(bg, "m", s.ID); !errors.Is(err, ErrQuota) {
+		t.Fatalf("rollback over the disk budget: %v", err)
+	}
+	if m, _ := e.m.Get("m"); m.State != Running || e.guestRead("m", "after") != "kept" {
+		t.Fatalf("refused rollback changed the machine: %s", m.State)
+	}
+	free = 1 << 40
+	must(t, e.m.Rollback(bg, "m", s.ID))
+}
+
+// RES-4: reservations held by copies in progress count against the budget,
+// so two copies that each fit alone cannot together eat the reserve.
+func TestRES4DiskReservationsAreSerialized(t *testing.T) {
+	e := newEnv(t, 4096)
+	e.cfg.DiskReserveBytes = 1 << 20
+	e.cfg.FreeBytes = func(string) (int64, error) { return 3 << 20, nil }
+	e.open()
+	h, err := e.m.reserveDisk(1500 << 10)
+	must(t, err)
+	if _, err := e.m.reserveDisk(1500 << 10); !errors.Is(err, ErrQuota) {
+		t.Fatalf("second reservation while the first is held: %v", err)
+	}
+	h.release()
+	h, err = e.m.reserveDisk(1500 << 10)
+	must(t, err)
+	h.release()
+	// Many concurrent reservations never over-commit.
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var held []*diskHold
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if h, err := e.m.reserveDisk(512 << 10); err == nil {
+				mu.Lock()
+				held = append(held, h)
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if len(held) != 4 {
+		t.Fatalf("%d concurrent reservations of 512 KiB granted from 2 MiB", len(held))
+	}
+}
+
+// RES-4: a merge reserves its merged layer and dst's restart up front.
+func TestRES4MergeRefusedLeavesDestinationRunning(t *testing.T) {
+	e := newEnv(t, 4096)
+	free := int64(1 << 40)
+	e.cfg.DiskReserveBytes = 1 << 20
+	e.cfg.FreeBytes = func(string) (int64, error) { return free, nil }
+	e.open()
+	e.create("dst", admission.Accepted, 1)
+	_, err := e.m.Fork(bg, "dst", []string{"k"})
+	must(t, err)
+	e.guestWrite("k", "data", strings.Repeat("x", 256<<10))
+	e.guestWrite("dst", "mine", "kept")
+	// Enough for the fork's step, not for the merged layer and restart.
+	free = 1<<20 + 400<<10
+	if _, err := e.m.Merge(bg, "dst", "k"); !errors.Is(err, ErrQuota) {
+		t.Fatalf("merge over the disk budget: %v", err)
+	}
+	if m, _ := e.m.Get("dst"); m.State != Running || e.guestRead("dst", "mine") != "kept" {
+		t.Fatalf("refused merge changed dst: %s", m.State)
+	}
+	free = 1 << 40
+	if _, err := e.m.Merge(bg, "dst", "k"); err != nil {
+		t.Fatalf("merge with room: %v", err)
 	}
 }

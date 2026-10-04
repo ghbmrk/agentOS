@@ -148,6 +148,8 @@ func newEnv(t *testing.T, capacityMB int64) *env {
 		Runtime:   e.rt,
 		Admit:     e.adm,
 		NoCgroups: true,
+		// Unit tests don't depend on the host's disk; RES-4 tests set this.
+		FreeBytes: func(string) (int64, error) { return 1 << 50, nil },
 	}
 	e.open()
 	return e

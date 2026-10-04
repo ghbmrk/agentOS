@@ -95,8 +95,10 @@ func (r *Runtime) launch(ctx context.Context, l vm.Launch, args ...string) error
 		return err
 	}
 	// nosuid and nodev: setuid files and device nodes a guest creates mean
-	// nothing on the host side of its root. Private propagation keeps the
-	// mount out of other mount namespaces.
+	// nothing on the host side of its root. Private propagation keeps later
+	// mounts under it out of other mount namespaces; the mount itself still
+	// reaches peers of a shared parent, so agentosd runs in its own mount
+	// namespace (ASSUMPTIONS V18).
 	opts := overlay.MountOptions(l.Lower, l.Upper, l.Work)
 	if err := syscall.Mount("overlay", l.Root, "overlay", syscall.MS_NOSUID|syscall.MS_NODEV, opts); err != nil {
 		return fmt.Errorf("mount %s: %w", l.Root, err)
