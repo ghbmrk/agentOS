@@ -306,7 +306,7 @@ func TestOP4CorruptCompleteRecordFailsClosed(t *testing.T) {
 	must(e.Submit(intent("a", "acct")))
 	must(e.Authorize(ctx, "a"))
 	st.data[20] ^= 0x01 // flip a bit inside the first, complete record
-	if _, err := Open(st, newPolicy(), map[string]Executor{"svc": newService()}); !errors.Is(err, ErrCorrupt) {
+	if _, err := Open(st, newPolicy(), map[string]Executor{"svc": newService()}, testRedact); !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("err = %v, want ErrCorrupt", err)
 	}
 }

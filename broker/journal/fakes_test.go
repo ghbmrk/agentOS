@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 )
 
@@ -204,7 +205,7 @@ func intent(id, account string) Intent {
 }
 
 func mustOpen(t interface{ Fatalf(string, ...any) }, st Store, p Policy, svc Executor) *Engine {
-	e, err := Open(st, p, map[string]Executor{"svc": svc})
+	e, err := Open(st, p, map[string]Executor{"svc": svc}, testRedact)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -217,3 +218,9 @@ func must[T any](v T, err error) T {
 	}
 	return v
 }
+
+// canary is a synthetic secret. testRedact removes it, as the broker's
+// vault-value redactor would remove a real one.
+const canary = "CANARY-7f3a91-SECRET"
+
+func testRedact(s string) string { return strings.ReplaceAll(s, canary, "[redacted]") }

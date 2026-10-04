@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"hash/crc32"
 	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -28,13 +30,33 @@ type FileStore struct {
 }
 
 // OpenFile opens or creates the journal file at path, readable by its owner
-// only.
+// only. It takes an exclusive lock, so two engines cannot share one journal,
+// and fsyncs the parent directory, so a newly created file's directory entry
+// is as durable as the records written to it.
 func OpenFile(path string) (*FileStore, error) {
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, err
 	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("%w: %v", ErrLocked, err)
+	}
+	if err := syncDir(filepath.Dir(path)); err != nil {
+		f.Close()
+		return nil, err
+	}
 	return &FileStore{f: f}, nil
+}
+
+// syncDir fsyncs a directory. A variable so tests can observe it.
+var syncDir = func(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 func (s *FileStore) Append(line []byte) error {

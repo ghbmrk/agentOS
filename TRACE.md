@@ -70,11 +70,11 @@ Covered: 7 / 139 requirement IDs
 | ONB-7 | — |
 | ONB-8 | — |
 | OP-1 | `broker/journal/engine_test.go`, `broker/journal/property_test.go` |
-| OP-2 | `broker/journal/engine_test.go`, `broker/journal/property_test.go` |
-| OP-3 | `broker/journal/engine_test.go`, `broker/journal/property_test.go` |
-| OP-4 | `broker/journal/engine_test.go`, `broker/journal/property_test.go` |
+| OP-2 | `broker/journal/engine_test.go`, `broker/journal/property_test.go`, `broker/journal/review_test.go` |
+| OP-3 | `broker/journal/engine_test.go`, `broker/journal/property_test.go`, `broker/journal/review_test.go` |
+| OP-4 | `broker/journal/engine_test.go`, `broker/journal/property_test.go`, `broker/journal/review_test.go` |
 | OP-5 | `broker/journal/engine_test.go`, `broker/journal/property_test.go` |
-| OP-6 | `broker/journal/engine_test.go`, `broker/journal/property_test.go` |
+| OP-6 | `broker/journal/engine_test.go`, `broker/journal/property_test.go`, `broker/journal/review_test.go` |
 | OP-7 | `broker/journal/engine_test.go`, `broker/journal/property_test.go` |
 | CAP-1 | — |
 | CAP-2 | — |
