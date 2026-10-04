@@ -10,7 +10,7 @@ States: `queued` → `building` → `in review` → `merged` | `escalated` | `dr
 | S7 | Host foundation: compare 2–3 immutable-image options (A/B updates, Secure Boot shim, USB boot, build time) | Cloud only | in review: [result](spikes/S7-host-image/RESULT.md), rec. systemd image stack on Debian 13; needs HW-5a decision |
 | S3 | Agent machines at 8 GB: microVM vs container+sandbox; snapshot/fork/rollback timings; max concurrency | Cloud first, then N95 | in review (cloud part; Firecracker + N95 timings need hardware) |
 | S4 | OpenClaw unmodified as a guest via broker tools; record any missing seam. Result: **yes**, config only, no patch ([result](spikes/S4-openclaw-guest/RESULT.md)) | Cloud only | in review |
-| S5 | Credentialed browser: narrow action protocol vs 5 real sites, no arbitrary JS | Cloud, test accounts | queued |
+| S5 | Credentialed browser: narrow action protocol vs 5 real sites, no arbitrary JS | Cloud (needs network access to the 5 sites); demo logins stand in for test accounts | building: fixture suite passes ([interim result](spikes/S5-browser-actions/RESULT.md)); live run blocked on network policy |
 | S6 | Consumer AI CLIs in no-tools relay mode | Mark's accounts | queued |
 | S1 | Screenless USB4-SSD boot on ≥3 unmodified PCs (≤1 keypress) | **Mark: hardware + hands** | blocked on hardware |
 | S2 | USB LTE modem: SMS and voice under Linux | **Mark: 2 modems + SIM** | blocked on hardware |
