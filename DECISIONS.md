@@ -27,5 +27,6 @@
 | 2026-10-04 | Agent machines use gVisor at the floor; re-test Firecracker on the N95 and switch if it measures better (S3; ARC-5 already excludes namespaces alone) | Claude, auto-decided: no lens worse |
 | 2026-10-04 | Host reference stack: Debian 13 systemd image stack (mkosi, systemd-sysupdate, dm-verity `/usr`, signed systemd-boot); fallback bootc on CentOS Stream 10 (S7) | Claude, auto-decided: measured pick per PLAN S7 rule |
 | 2026-10-04 | Spec v0.12 folds S3, S4, S7 and HW-5a | Claude; P0 exit approval is Mark's |
+| 2026-10-04 | CH-11 adds `RUN` (confirms a message held before a code-only unlock) and `UNLOCK <challenge> <code>` (after 10 wrong codes in 24 h, only attempts carrying a one-time challenge texted to the owner count; arbitrator's O4 ruling, PR #22) | Claude, auto-decided: security better, UX and potency not worse |
 | Proposed | External-drive-only (no internal install) | Not yet confirmed |
 | Pending | License | Before first public release (OSS-12) |
