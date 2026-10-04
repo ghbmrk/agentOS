@@ -10,6 +10,15 @@ Reconciles the three lens loops so their proposals compound instead of trading o
 
 **Cadence:** weekly, Mondays after the lens loops (they run ~08:52 Eastern; this runs 10:41 Eastern). Each run reads what the lenses proposed or merged since the last arbitrated commit. It stays quiet when nothing conflicts.
 
+## Per-PR gate (Mark, 2026-10-04)
+
+Every AgentOS feature or addition goes through the three lenses and the arbitrator before it merges, not only the weekly run:
+1. The PR reviewer sends the PR to the security, potency, and UX loops.
+2. Each lens reviews on demand, in proportion to the PR's size: a small PR gets a one-line sign-off. Each replies to the reviewer with a sign-off or blocking findings.
+3. Once all three have answered, the arbitrator reconciles any conflicts using the method below, then tells the reviewer the PR is clear, or sends Mark the real tradeoff.
+
+This gate and the potency/UX/security tradeoff format apply only to OS work: the spec, design, and code. Other communication with Mark stays plain.
+
 ## Method
 
 1. **Collect.** Every open lens proposal (PR or review file), plus merged spec changes since the last run.
