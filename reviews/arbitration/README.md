@@ -47,3 +47,9 @@ Everything else, including defaults, tiers, and timeouts, is tradable when the t
 |---|---|---|---|
 | 0 | e841b78 | loop set up | — |
 | 1 | e841b78 | PRs #8, #9, #11, #12 | [2026-10-04](2026-10-04-arbitration.md) |
+
+## Per-PR log
+
+| PR | Lens verdicts | Conflict | Resolution | Outcome |
+|---|---|---|---|---|
+| #15 (spec v0.12) | Security: block (HW-5a signer). Potency: sign-off. UX: block (OP-8 extension). | OP-8 extension: UX wants it now; potency wants it later, with a daily ceiling | Extend one task by code-generator code, within the overall cap and an owner-set daily ceiling, neither raisable by that reply | Clear once the blockers land |
