@@ -7,7 +7,7 @@ States: `queued` → `building` → `in review` → `merged` | `escalated` | `dr
 | ID | Package | Needs | State |
 |---|---|---|---|
 | H0 | Repo scaffold: docs, trace tool, CI, PR template | — | merged |
-| S7 | Host foundation: compare 2–3 immutable-image options (A/B updates, Secure Boot shim, USB boot, build time) | Cloud only | queued |
+| S7 | Host foundation: compare 2–3 immutable-image options (A/B updates, Secure Boot shim, USB boot, build time) | Cloud only | in review: [result](spikes/S7-host-image/RESULT.md), rec. systemd image stack on Debian 13; needs HW-5a decision |
 | S3 | Agent machines at 8 GB: microVM vs container+sandbox; snapshot/fork/rollback timings; max concurrency | Cloud first, then N95 | in review (cloud part; Firecracker + N95 timings need hardware) |
 | S4 | OpenClaw unmodified as a guest via broker tools; record any missing seam. Result: **yes**, config only, no patch ([result](spikes/S4-openclaw-guest/RESULT.md)) | Cloud only | in review |
 | S5 | Credentialed browser: narrow action protocol vs 5 real sites, no arbitrary JS | Cloud, test accounts | queued |
