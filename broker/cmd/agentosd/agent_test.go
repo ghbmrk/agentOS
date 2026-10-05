@@ -136,6 +136,32 @@ func TestRES1AgentMachineRetriedUntilAdmitted(t *testing.T) {
 	}
 }
 
+// A start that fails after admission may have preempted experiments, so
+// the keeper waits longer each time, up to a cap; admission refusals and
+// success keep the plain interval and reset the backoff.
+func TestRES1AgentStartFailuresBackOff(t *testing.T) {
+	every := time.Second
+	fail := errors.New("runsc: exit status 1")
+	backoff := 1
+	var waits []time.Duration
+	for i := 0; i < 7; i++ {
+		var w time.Duration
+		w, backoff = nextWait(every, backoff, fail)
+		waits = append(waits, w)
+	}
+	want := []time.Duration{1, 2, 4, 8, 16, 16, 16}
+	for i, w := range want {
+		if waits[i] != w*every {
+			t.Fatalf("waits = %v, want %v seconds", waits, want)
+		}
+	}
+	for _, err := range []error{nil, fmt.Errorf("x: %w", admission.ErrNoRoom), admission.ErrPressure} {
+		if w, b := nextWait(every, backoff, err); w != every || b != 1 {
+			t.Errorf("%v: wait %v backoff %d, want %v and 1", err, w, b, every)
+		}
+	}
+}
+
 // The launch file the guest rig ships is what agentosd reads.
 func TestAgentLaunchSpecReadsTheGuestRig(t *testing.T) {
 	argv, env, err := launchSpec("../../../guest/openclaw/launch.json")

@@ -86,13 +86,20 @@ func (k *keeper) ensure(ctx context.Context) error {
 	}
 }
 
-// run calls ensure now and then every k.every until ctx ends. Admission may
-// refuse while other work holds memory, so a failure is retried on the next
-// tick; the log gets each distinct failure once, and the recovery.
+// maxBackoff caps the wait after repeated start failures, as a multiple of
+// every.
+const maxBackoff = 16
+
+// run calls ensure now and again until ctx ends. Admission may refuse while
+// other work holds memory, so that is retried every k.every; admission
+// refused, so nothing was preempted. Any other failure came after
+// admission, which as foreground may have preempted experiments, so the
+// wait doubles each time, up to maxBackoff times every, and a machine that
+// cannot start does not preempt experiments every tick. The log gets each
+// distinct failure once, and the recovery.
 func (k *keeper) run(ctx context.Context) {
-	t := time.NewTicker(k.every)
-	defer t.Stop()
 	last := ""
+	backoff := 1
 	for {
 		err := k.ensure(ctx)
 		k.setStatus(err)
@@ -104,12 +111,28 @@ func (k *keeper) run(ctx context.Context) {
 			last = ""
 			k.logf("agent machine %s running", k.id)
 		}
+		var wait time.Duration
+		wait, backoff = nextWait(k.every, backoff, err)
+		t := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
+			t.Stop()
 			return
 		case <-t.C:
 		}
 	}
+}
+
+// nextWait is how long run waits after err, and the backoff factor after it.
+func nextWait(every time.Duration, backoff int, err error) (time.Duration, int) {
+	if err == nil || errors.Is(err, admission.ErrNoRoom) || errors.Is(err, admission.ErrPressure) {
+		return every, 1
+	}
+	wait := time.Duration(backoff) * every
+	if backoff < maxBackoff {
+		backoff *= 2
+	}
+	return wait, backoff
 }
 
 // launchSpec reads how the agent machine starts (vm.Spec Argv and Env),
