@@ -38,7 +38,7 @@ func TestALocalOnlyItemIsAskedOnThePage(t *testing.T) {
 	// with the fixed wording and not counted.
 	for _, yes := range []string{"YES " + id + " %s", "YES %s", "YES " + id + " 1 %s", "yes " + id + " %s"} {
 		got := r.say(fmt.Sprintf(yes, r.totp()))
-		if !strings.Contains(got, "on my Wi-Fi page: it shows where this goes") || strings.Contains(got, "Wrong") || strings.Contains(got, "Approved") {
+		if got != "Not approved. Approve "+id+" on my Wi-Fi page; it shows where this goes. Or reply NO "+id+"." { // UX on P2-2a 2A
 			t.Fatalf("%q by text: %q", yes, got)
 		}
 	}
@@ -687,5 +687,18 @@ func TestPageDecisionsAreToldNamingThePage(t *testing.T) {
 	}
 	if got := r.inbox(); got != "Denied "+ids[1]+" on my Wi-Fi page at "+at+". Not you? Text STOP." {
 		t.Fatalf("denied: %q", got)
+	}
+	// Coalesced, with the same alert tail.
+	more, _ := r.ch.RequestLocalEach([]Item{confirmItem("g6"), confirmItem("g7")}, []time.Duration{0, 0})
+	r.inbox()
+	at1 := r.clock().Format("15:04")
+	r.ch.LocalAnswer(more[0], r.sum(more[0]), false, "") // within the hour: held
+	r.advance(time.Minute)
+	at2 := r.clock().Format("15:04")
+	r.ch.LocalAnswer(more[1], r.sum(more[1]), false, "")
+	r.advance(SignInAlertEvery)
+	r.ch.FlushLocal()
+	if got := r.inbox(); got != "On my Wi-Fi page: Denied "+more[0]+" at "+at1+", Denied "+more[1]+" at "+at2+". Not you? Text STOP." {
+		t.Fatalf("coalesced: %q", got)
 	}
 }

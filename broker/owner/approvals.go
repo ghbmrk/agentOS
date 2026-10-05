@@ -342,7 +342,7 @@ func (c *Channel) answerLocked(rp reply, now time.Time, decided *[]Decision, pag
 			// (UX U-2A-4).
 			return []string{fmt.Sprintf("Not approved: %s can only be approved on my Wi-Fi page. Use a new code there.", r.id)}, false, false
 		}
-		return []string{fmt.Sprintf("Approve %s on my Wi-Fi page: it shows where this goes. Or reply NO %s.", r.id, r.id)}, false, false
+		return []string{fmt.Sprintf("Not approved. Approve %s on my Wi-Fi page; it shows where this goes. Or reply NO %s.", r.id, r.id)}, false, false
 	}
 	for _, n := range rp.items {
 		if n > len(r.items) || r.done[n-1] {
