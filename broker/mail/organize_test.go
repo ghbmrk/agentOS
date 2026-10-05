@@ -501,7 +501,7 @@ func TestReasonsFitTheDetailCap(t *testing.T) {
 					t.Fatal(err)
 				}
 				name := fmt.Sprintf("bound=%s share=%v alert=%v", bound, share, alert)
-				if n := len([]rune(e.Reason)); n > 40 || strings.Contains(e.Reason, "…") {
+				if n := len(e.Reason); n > 40 || strings.Contains(e.Reason, "…") || alert != strings.Contains(e.Reason, "alert") {
 					t.Fatalf("%s: %q (%d)", name, e.Reason, n)
 				}
 				if (bound == "once") != strings.HasPrefix(e.Reason, "past 1, YES allows 1") ||
@@ -513,5 +513,46 @@ func TestReasonsFitTheDetailCap(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// TestOrganizeActsOnItsOwnCopy: an organize effect judges and moves the
+// copy it acts on, never a Sent twin sharing its Message-ID: an inbox
+// alert reusing the ID of the owner's sent mail is still an alert; with
+// no folder named, the copy outside Sent moves and the thread still
+// resolves; and spam spoofing the owner, with no Sent copy, can be
+// archived or reported.
+func TestOrganizeActsOnItsOwnCopy(t *testing.T) {
+	x := newH(t, nil)
+	thread(x)
+	x.deliver("INBOX", msg{id: "<t1@example.test>", from: "someone@x.example", to: me, subject: "New sign-in on your account", body: "x"})
+	e, err := x.a.Escalate(ctx, x.intent(mail.OpArchive, rec("<t1@example.test>")))
+	if err != nil || e.Verb != verb.ChangeAccount {
+		t.Fatalf("alert sharing a Sent ID: %+v %v", e, err)
+	}
+	v, err := x.a.Verify(ctx, x.intent(mail.OpArchive, rec("<t1@example.test>")))
+	if err != nil || !strings.Contains(v.Item.Object, "someone@x.example") {
+		t.Fatalf("line shows another copy: %+v %v", v.Item, err)
+	}
+
+	y := newH(t, nil)
+	thread(y)
+	y.deliver("INBOX", msg{id: "<t1@example.test>", from: me, to: "sam@example.com", subject: "Lunch",
+		body: "Lunch next week?\r\n--\r\nlist footer"})
+	y.mustRun(y.intent(mail.OpArchive, rec("<t1@example.test>")))
+	if n := len(y.srv.Messages("Sent")); n != 1 {
+		t.Fatalf("archive moved the Sent copy: %d left in Sent", n)
+	}
+	if v, err := y.a.Verify(ctx, y.intent(mail.OpReply, reply("<t2@example.com>", "ok"), "sam@example.com")); err != nil || !v.ThreadVerified {
+		t.Fatalf("thread after archive: %+v %v", v, err)
+	}
+
+	z := newH(t, nil)
+	z.deliver("INBOX", msg{id: "<spam1@example.test>", from: me, to: me, subject: "Win", body: "x"})
+	z.deliver("INBOX", msg{id: "<spam2@example.test>", from: me, to: me, subject: "Win", body: "x"})
+	z.mustRun(z.intent(mail.OpArchive, rec("<spam1@example.test>")))
+	z.mustRun(z.intent(mail.OpReportSpam, rec("<spam2@example.test>")))
+	if f, _, _ := z.srv.Find("<spam2@example.test>"); f != "Junk" {
+		t.Fatalf("spoofed spam reported to %q", f)
 	}
 }

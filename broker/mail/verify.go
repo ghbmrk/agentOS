@@ -36,7 +36,14 @@ func (a *Adapter) Verify(ctx context.Context, in journal.Intent) (grants.Verifie
 	if p[ParamRecord] == "" || o.Name == OpDraft {
 		return grants.Verified{}, ErrUnverifiable
 	}
-	m, err := a.locate(ctx, p[ParamRecord], p[ParamFolder])
+	// A reply reads the message the record is (the owner's Sent copy for
+	// the owner's own); an organize effect's line shows the copy it acts on.
+	var m Message
+	if o.Verb == verb.Send {
+		m, err = a.locate(ctx, p[ParamRecord])
+	} else {
+		m, err = a.place(ctx, p[ParamRecord], p[ParamFolder])
+	}
 	if err != nil {
 		return grants.Verified{}, err
 	}
@@ -105,7 +112,7 @@ func (a *Adapter) threadVerified(ctx context.Context, m Message, rc []string) bo
 			return false
 		}
 		seen[cur.InReplyTo] = true
-		parent, err := a.locate(ctx, cur.InReplyTo, "")
+		parent, err := a.locate(ctx, cur.InReplyTo)
 		if err != nil || !a.participant(cur.From, parent) {
 			return false
 		}
@@ -161,7 +168,7 @@ func (a *Adapter) participant(addr string, x Message) bool {
 // owner's messages are read from Sent, so a planted copy never passes as
 // the owner's text.
 func (a *Adapter) Thread(ctx context.Context, record string) ([]Message, error) {
-	m, err := a.locate(ctx, record, "")
+	m, err := a.locate(ctx, record)
 	if err != nil {
 		return nil, err
 	}
@@ -174,7 +181,7 @@ func (a *Adapter) Thread(ctx context.Context, record string) ([]Message, error) 
 			continue
 		}
 		seen[id] = true
-		x, err := a.locate(ctx, id, "")
+		x, err := a.locate(ctx, id)
 		if errors.Is(err, ErrNotFound) || errors.Is(err, ErrNotSent) {
 			continue
 		}

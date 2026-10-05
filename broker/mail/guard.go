@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
@@ -54,21 +55,22 @@ func (a *Adapter) folders(ctx context.Context) (map[Role]string, map[string]Role
 	return byRole, byName, nil
 }
 
-// locate finds the record: in hint if one is given, else the inbox, the
-// archive, then every other folder but trash, junk, drafts and the
-// all-mail view, which would name a second copy.
-func (a *Adapter) locate(ctx context.Context, record, hint string) (Message, error) {
+// find returns every copy of record in the candidate folders: hint
+// alone if one is given, else the inbox, the archive, and every ordinary
+// and Sent folder (not trash, junk, drafts or an all-mail view, which
+// would name a second copy).
+func (a *Adapter) find(ctx context.Context, record, hint string) ([]Message, map[Role]string, error) {
 	if !idPat.MatchString(record) || len(ids(record)) != 1 || ids(record)[0] != record {
-		return Message{}, fmt.Errorf("mail: record must be one Message-ID: %w", ErrNotFound)
+		return nil, nil, fmt.Errorf("mail: record must be one Message-ID: %w", ErrNotFound)
 	}
 	byRole, byName, err := a.folders(ctx)
 	if err != nil {
-		return Message{}, err
+		return nil, nil, err
 	}
 	var order []string
 	if hint != "" {
 		if _, ok := byName[hint]; !ok {
-			return Message{}, ErrNotFound
+			return nil, nil, ErrNotFound
 		}
 		order = []string{hint}
 	} else {
@@ -85,38 +87,41 @@ func (a *Adapter) locate(ctx context.Context, record, hint string) (Message, err
 		sort.Strings(rest)
 		order = append(order, rest...)
 	}
-	// Every candidate folder is searched: a Message-ID is the sender's
-	// choice, so a second message claiming the same ID makes the record
-	// ambiguous and is refused. Copies of one message (sameMessage, e.g. a
-	// label folder) are not ambiguous.
-	//
-	// A message from the owner is the owner's only as the Sent folder
-	// holds it: its copy there (exactly one, From the owner, in the folder
-	// with the Sent role) is the message, and other copies From the owner
-	// (a mailing list's footer, a gateway's disclaimer, CRLF for LF) are
-	// ignored in its favour. A same-ID copy From anyone else stays
-	// ambiguous, and an owner message with no Sent copy is refused. With a
-	// hint, the Sent folder is searched as well, and the copy in the hint
-	// folder gives the location an organize effect acts on.
-	sent := byRole[Sent]
 	seen := map[string]bool{}
 	var found []Message
-	search := func(f string) error {
-		if f == "" || seen[f] {
-			return nil
+	for _, f := range order {
+		if seen[f] {
+			continue
 		}
 		seen[f] = true
 		ms, err := a.cfg.Store.Find(ctx, f, record)
-		found = append(found, ms...)
-		return err
-	}
-	for _, f := range order {
-		if err := search(f); err != nil {
-			return Message{}, err
+		if err != nil {
+			return nil, nil, err
 		}
+		found = append(found, ms...)
 	}
 	if len(found) == 0 {
-		return Message{}, ErrNotFound
+		return nil, nil, ErrNotFound
+	}
+	return found, byRole, nil
+}
+
+// locate resolves a record to the message it is: the identity a reply,
+// a thread's chain and a composer read. Every candidate folder is
+// searched: a Message-ID is the sender's choice, so a second message
+// claiming the same ID makes the record ambiguous and is refused. Copies
+// of one message (sameMessage, e.g. a label folder) are not ambiguous.
+//
+// A message from the owner is the owner's only as the Sent folder holds
+// it: its copy there (exactly one, From the owner, in the folder with the
+// Sent role) is the message, and other copies From the owner (a mailing
+// list's footer, a gateway's disclaimer, CRLF for LF) are ignored in its
+// favour. A same-ID copy From anyone else stays ambiguous, and an owner
+// message with no Sent copy is refused.
+func (a *Adapter) locate(ctx context.Context, record string) (Message, error) {
+	found, byRole, err := a.find(ctx, record, "")
+	if err != nil {
+		return Message{}, err
 	}
 	var mine, others []Message
 	for _, m := range found {
@@ -127,48 +132,60 @@ func (a *Adapter) locate(ctx context.Context, record, hint string) (Message, err
 		}
 	}
 	if len(mine) == 0 {
-		for _, m := range found[1:] {
-			if !sameMessage(m, found[0]) {
-				return Message{}, ErrAmbiguous
-			}
-		}
-		return found[0], nil
-	}
-	if err := search(sent); err != nil {
-		return Message{}, err
-	}
-	mine, others = mine[:0], others[:0]
-	for _, m := range found {
-		if a.isSelf(m.From) {
-			mine = append(mine, m)
-		} else {
-			others = append(others, m)
-		}
+		return single(found)
 	}
 	if len(others) > 0 {
 		return Message{}, ErrAmbiguous
 	}
 	var inSent []Message
-	var here *Message
-	for i, m := range mine {
-		if sent != "" && m.Folder == sent {
+	for _, m := range mine {
+		if byRole[Sent] != "" && m.Folder == byRole[Sent] {
 			inSent = append(inSent, m)
 		}
-		if hint != "" && m.Folder == hint && here == nil {
-			here = &mine[i]
+	}
+	switch len(inSent) {
+	case 0:
+		return Message{}, ErrNotSent
+	case 1:
+		return inSent[0], nil
+	}
+	return Message{}, ErrAmbiguous
+}
+
+// place finds the copy an organize effect acts on, with its own fields:
+// the guards (alerts, targets) judge the message being moved, never a
+// twin elsewhere. With a hint it is the copy in that folder; without one
+// a copy outside Sent is preferred, so organizing never moves the owner's
+// Sent copy unless no other exists. Differing copies among those
+// considered are ambiguous. An owner-From message with no Sent copy (spam
+// spoofing the owner) can still be organized.
+func (a *Adapter) place(ctx context.Context, record, hint string) (Message, error) {
+	found, byRole, err := a.find(ctx, record, hint)
+	if err != nil {
+		return Message{}, err
+	}
+	if hint == "" && byRole[Sent] != "" {
+		var out []Message
+		for _, m := range found {
+			if m.Folder != byRole[Sent] {
+				out = append(out, m)
+			}
+		}
+		if len(out) > 0 {
+			found = out
 		}
 	}
-	switch {
-	case len(inSent) == 0:
-		return Message{}, ErrNotSent
-	case len(inSent) > 1:
-		return Message{}, ErrAmbiguous
+	return single(found)
+}
+
+// single returns the one message the copies are, or ErrAmbiguous.
+func single(found []Message) (Message, error) {
+	for _, m := range found[1:] {
+		if !sameMessage(m, found[0]) {
+			return Message{}, ErrAmbiguous
+		}
 	}
-	m := inSent[0]
-	if here != nil {
-		m.Folder, m.UID, m.Flags = here.Folder, here.UID, here.Flags
-	}
-	return m, nil
+	return found[0], nil
 }
 
 // sameMessage reports whether two copies carrying one Message-ID are the
@@ -233,7 +250,7 @@ type plan struct {
 // planOrganize resolves an organize (or trash or spam) operation against
 // the source and its guards.
 func (a *Adapter) planOrganize(ctx context.Context, o Op, p map[string]string) (plan, error) {
-	m, err := a.locate(ctx, p[ParamRecord], p[ParamFolder])
+	m, err := a.place(ctx, p[ParamRecord], p[ParamFolder])
 	if err != nil {
 		return plan{}, err
 	}
@@ -421,7 +438,8 @@ func (a *Adapter) Escalate(ctx context.Context, in journal.Intent) (grants.Escal
 	case held:
 		return grants.Escalation{Held: true, Reason: fmt.Sprintf("held past today's %d", a.cfg.DailyLimit)}, nil
 	}
-	short := len(why) > 0
+	alert := pl.hides && pl.alert
+	short := len(why) > 0 || alert
 	if pl.verb == verb.Share {
 		e.Verb = verb.Share
 		switch {
@@ -435,9 +453,9 @@ func (a *Adapter) Escalate(ctx context.Context, in journal.Intent) (grants.Escal
 			why = append(why, "shared label "+clip(p[ParamLabel], 20))
 		}
 	}
-	if pl.hides && pl.alert {
+	if alert {
 		e.Verb = verb.ChangeAccount
-		if short || len(why) > 0 {
+		if len(why) > 0 {
 			why = append(why, "alert hidden")
 		} else {
 			why = append(why, "hides an alert from "+clip(domainOf(pl.msg.From), 20))
@@ -447,17 +465,22 @@ func (a *Adapter) Escalate(ctx context.Context, in journal.Intent) (grants.Escal
 	return e, nil
 }
 
-// maxDetail is the owner channel's cap on an approval line's detail.
+// maxDetail is the owner channel's cap, in bytes, on an approval line's
+// detail.
 const maxDetail = 40
 
-// clip shortens s to n characters, marking the cut with "..." (ASCII:
-// the owner channel drops characters outside its field set).
+// clip shortens s to at most n bytes, cutting at a character boundary
+// and marking the cut with "..." (ASCII: the owner channel drops
+// characters outside its field set).
 func clip(s string, n int) string {
-	r := []rune(s)
-	if len(r) <= n {
+	if len(s) <= n {
 		return s
 	}
-	return string(r[:n-3]) + "..."
+	k := n - 3
+	for k > 0 && !utf8.RuneStart(s[k]) {
+		k--
+	}
+	return s[:k] + "..."
 }
 
 // place is what the day's organize bound says of one effect.

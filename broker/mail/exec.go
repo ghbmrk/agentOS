@@ -160,7 +160,7 @@ func (a *Adapter) draft(ctx context.Context, in journal.Intent, attempt int, p m
 	}
 	subject := p[ParamSubject]
 	if p[ParamRecord] != "" {
-		m, err := a.locate(ctx, p[ParamRecord], "")
+		m, err := a.locate(ctx, p[ParamRecord])
 		if err != nil {
 			return notApplied(err)
 		}
@@ -182,7 +182,7 @@ func (a *Adapter) send(ctx context.Context, in journal.Intent, attempt int, o Op
 	var to, cc []string
 	subject := p[ParamSubject]
 	if o.Name == OpReply {
-		m, err := a.locate(ctx, p[ParamRecord], "")
+		m, err := a.locate(ctx, p[ParamRecord])
 		if err != nil {
 			return notApplied(err)
 		}
