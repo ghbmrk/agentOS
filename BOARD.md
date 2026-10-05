@@ -78,3 +78,18 @@ P1-4 follow-ups (from the #23 review), for P1-7 or the loop scheduler:
 | ID | Package | Needs | State |
 |---|---|---|---|
 | P4-1 | Hint schema: public enumerated schema with structural rules, a sensitive-word backstop, and a 16-bit cap per hint, strict wire parser, canonical form, embargo mark on `vuln`, emitter with owner-visible log, per-category policy (automatic, ask, never), one sorted batch a day at a fixed time, cap of 5 a day with 2 reserved for `vuln`, bounded backlog, 7-day dedupe, broker-computed `frequency` (OSS-1, OSS-5, OSS-7; OSS-6's batching and delay too, but not claimed in TRACE since its pseudonymous key and rotation are the publication package's) ([assumptions](broker/hint/ASSUMPTIONS.md)). OSS-1's "visible to the owner" is partial until P2-2 shows the log. Carry-forward: the wiring conditions K1–K3, UX 1–4 and owner-only `Approve`/`Decline` in the assumptions file bind P2-2, the owner channel, loops 1 and 2 (which emit through `Emitter`), and the clean-room builder (which implements `Outbox` and routes embargoed hints) | — | in review |
+
+## Integration: wiring merged packages into the box
+
+Built packages reach the running box through small wiring PRs, in this order. A row whose precondition is unmet is not wired.
+
+| ID | Wiring | Precondition | Owner | State |
+|---|---|---|---|---|
+| W1 | Agent machine kept running by `agentosd`: created on first start as foreground work, labelled public until owner data reaches it, resumed after a restart or preemption, retried while admission refuses; a seed goes only into a private machine (compile K7, `vm.ErrSeedLabel`) (ARC-4, RES-1, REV-5). **For P2-1:** install `guest/openclaw/launch.json` at `/usr/lib/agentos/guest/launch.json` and register the image as `-image openclaw=<dir>` | — | this package (`pkg/wire-agentosd`) | in review |
+| W2 | Recall as a broker tool on the guest socket, `vm.Manager` labeler, vault-held identity key (recall K1–K9) | P3-3b segmented store | recall thread (P3-3b) | building |
+| W3 | Learning process: change pipeline, loop scheduler and replay evaluator outside the control path (loops L16, replay R8); spare meter opened at the minimal cap, `EvalShare` plus the clean room's `Max`, replay `Model` = `loops.EvalModel` (replay K1–K3, loops L3). Open question first: replay must run beside the machine manager, so either `agentosd` hosts the evaluator behind an evaluation socket for the learning process, or the arbitrator's PR2 split (dependency-free `route`/`update` types) brings the pipeline in-process with only the evaluator out | W1; the process-boundary choice | loops thread (P3-2) | queued |
+| W4 | Managed tree to the live agent machine: a `change.Target` for `procedures/`, `skills/`, `context/` that seeds the agent machine, which must then be private (compile K7) until files carry a public mark | W3, P3-6 merged | — | queued |
+| W5 | Owner channel: loops `ParseText`/`Harvest`, change `Digest`/`Line` with the channel's short-ID allocator (change C11), hint emitter released only by a fixed broker timer (hint K1–K3) | W3 | loops thread | queued |
+| W6 | Recovery into the vault process and local UI (recovery R10a) | `vault.Reencrypt` (#45, P2-4d) merged and used by rotation | — | blocked |
+| W7 | Compiled skills in live use (P3-6) | `suite.go` split | compiled-skills thread | blocked |
+| W8 | Owner builds | P2-4f | — | blocked |

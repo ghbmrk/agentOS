@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -12,7 +13,9 @@ import (
 	"strings"
 	"sync/atomic"
 	"syscall"
+	"time"
 
+	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/cgroup"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/guest"
@@ -98,7 +101,8 @@ func main() {
 	var cfg daemon.Config
 	imgs := images{}
 	var stateDir, runsc, cgroupParent, meterPath, agentMachine, inboxPath, egressSocket, verifySocket string
-	var diskReserveMB int64
+	var agentImage, agentLaunch string
+	var diskReserveMB, agentMemMB int64
 	flag.StringVar(&cfg.JournalPath, "journal", "/var/lib/agentos/journal.log", "journal file")
 	flag.StringVar(&cfg.SocketDir, "sockets", "/run/agentos", "socket directory (created 0700)")
 	flag.StringVar(&cfg.OwnerNumber, "owner", "", "owner's phone number, E.164")
@@ -114,6 +118,9 @@ func main() {
 	flag.StringVar(&meterPath, "meter", "/var/lib/agentos/meter.json", "model-spend meter state (OP-8)")
 	flag.StringVar(&cfg.OwnerState, "owner-state", "/var/lib/agentos/owner.json", "owner channel state (P1-5)")
 	flag.StringVar(&agentMachine, "agent-machine", "agent", "machine whose guest receives the owner's task chat")
+	flag.StringVar(&agentImage, "agent-image", "openclaw", "image the agent machine is created from on first start; empty keeps no agent machine")
+	flag.StringVar(&agentLaunch, "agent-launch", "/usr/lib/agentos/guest/launch.json", "how the agent machine starts: argv and env (guest/openclaw/launch.json)")
+	flag.Int64Var(&agentMemMB, "agent-mem-mb", 1536, "the agent machine's memory budget, MB")
 	flag.StringVar(&inboxPath, "guest-inbox", "/var/lib/agentos/guest-inbox.json", "unanswered owner messages to guests, kept across restarts")
 	flag.StringVar(&egressSocket, "egress", "/run/agentos-egress/model.sock", "the vault process's model socket (agentos-egress); empty serves no model route")
 	flag.StringVar(&verifySocket, "owner-verify", "/run/agentos-egress/verify.sock", "the vault process's verify socket, which checks the owner's code-generator codes; empty refuses high-tier codes")
@@ -183,11 +190,37 @@ func main() {
 				svc.p.Store(plane)
 				agent.a.Store(&guest.OwnerAgent{Plane: plane, Machine: agentMachine})
 				defer plane.Shutdown()
+				if k, err := agentKeeper(m, imgs, agentMachine, agentImage, agentLaunch, agentMemMB); err != nil {
+					log.Printf("no agent machine kept running: %v", err)
+				} else {
+					go k.run(ctx)
+				}
 			}
 		}
 	}
 	log.Printf("broker up; owner socket %s/%s", cfg.SocketDir, daemon.OwnerSocket)
 	d.Wait()
+}
+
+// agentKeeper keeps the owner's agent machine running (keeper).
+func agentKeeper(m *vm.Manager, imgs images, id, image, launch string, memMB int64) (*keeper, error) {
+	if image == "" {
+		return nil, errors.New("-agent-image is empty")
+	}
+	if _, ok := imgs[image]; !ok {
+		return nil, fmt.Errorf("image %q is not registered with -image", image)
+	}
+	argv, env, err := launchSpec(launch)
+	if err != nil {
+		return nil, err
+	}
+	return &keeper{
+		m:     m,
+		id:    id,
+		spec:  vm.Spec{Image: image, Class: admission.Foreground, MemMB: memMB, Argv: argv, Env: env, Label: vm.Public},
+		every: 30 * time.Second,
+		logf:  log.Printf,
+	}, nil
 }
 
 func openCgroup(path string) (*cgroup.Group, error) {
