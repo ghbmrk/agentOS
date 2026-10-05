@@ -249,10 +249,6 @@ func (c *custody) status() (phase, time.Time) {
 	return c.ph, c.expires
 }
 
-// unlock checks the passphrase and, if it opens the vault, returns the
-// ticket its confirm must carry. A passphrase alone never opens the model
-// route. One derivation runs at a time: the phase stays opening until it
-// returns, even if lock cancels it meanwhile.
 // WrongPassNoteEvery bounds how often the owner is told of wrong vault
 // passphrases. They are not counted toward any lockout (nobody without the
 // card can lock the owner out), but repeated ones may be someone on the
@@ -306,6 +302,10 @@ func (c *custody) noteSupersedeLocked(now time.Time) {
 	c.notify(msg)
 }
 
+// unlock checks the passphrase and, if it opens the vault, returns the
+// ticket its confirm must carry. A passphrase alone never opens the model
+// route. One derivation runs at a time: the phase stays opening until it
+// returns, even if lock cancels it meanwhile.
 func (c *custody) unlock(passphrase string) (string, error) {
 	c.mu.Lock()
 	// A pending unlock can be superseded by a new correct passphrase, so a
@@ -381,6 +381,12 @@ func (c *custody) unlock(passphrase string) (string, error) {
 			return "", errRolledBack
 		}
 		return "", errInternal
+	}
+	if until, out := c.lockedOut(c.now()); out {
+		// Wrong codes on the pending unlock reached the cap during the
+		// derivation (#65 L3 follow-up 2).
+		v.Close()
+		return "", errLockedOut(until)
 	}
 	if !hasKind(v, SeedName, vault.KindTOTPSeed) {
 		v.Close()
