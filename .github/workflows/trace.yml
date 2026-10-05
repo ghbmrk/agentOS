@@ -1,0 +1,54 @@
+name: trace
+# Only this workflow writes TRACE.md (PLAN.md §5 artifacts table). Package PRs never
+# commit it, so it stops conflicting on every merge; ci.yml checks markers on a tree it
+# regenerates itself, and this job commits the regenerated file to main after a merge.
+# Same split as metrics.yml: generation runs with a read-only token; only the commit
+# job can write, it runs no repository code, and it changes only TRACE.md.
+# Its push uses GITHUB_TOKEN, which starts no new workflow runs.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: trace
+  cancel-in-progress: false
+jobs:
+  generate:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      trace: ${{ steps.gen.outputs.trace }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Regenerate TRACE.md
+        id: gen
+        run: |
+          python3 tools/trace.py
+          echo "trace=$(base64 -w0 TRACE.md)" >> "$GITHUB_OUTPUT"
+  commit:
+    needs: generate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # commit TRACE.md
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          ref: main
+      - name: Commit TRACE.md if changed
+        env:
+          TRACE_B64: ${{ needs.generate.outputs.trace }}
+        run: |
+          test -n "$TRACE_B64"
+          printf '%s' "$TRACE_B64" | base64 -d > TRACE.md
+          git diff --quiet -- TRACE.md && { echo "TRACE.md unchanged"; exit 0; }
+          test -z "$(git status --porcelain | grep -v ' TRACE.md$')"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -qm "trace: regenerate TRACE.md for ${GITHUB_SHA::7}" -- TRACE.md
+          git pull -q --rebase origin main && git push origin HEAD:main
