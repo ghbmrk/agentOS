@@ -16,7 +16,7 @@ Covered: 127 / 150 requirement IDs
 | HW-5a | `broker/cmd/agentos-egress/trusted_test.go`, `broker/localui/vault_test.go`, `broker/tpmseal/tpmseal_test.go` |
 | HW-6 | — |
 | HW-7 | — |
-| HW-8 | `broker/cmd/agentos-hostdisk/main_test.go`, `broker/hostdisk/ASSUMPTIONS.md`, `broker/hostdisk/fence_test.go`, `broker/hostdisk/hostile_test.go`, `broker/hostdisk/list_test.go`, `broker/hostdisk/probe_test.go`, `broker/hostdisk/udev_test.go`, `broker/vm/gvisor/nodevices_test.go` |
+| HW-8 | `broker/clock/chrony_test.go`, `broker/clock/sync_linux_test.go`, `broker/clock/unverified_test.go`, `broker/cmd/agentos-clock-boot/main_test.go`, `broker/cmd/agentos-hostdisk/main_test.go`, `broker/hostdisk/ASSUMPTIONS.md`, `broker/hostdisk/fence_test.go`, `broker/hostdisk/hostile_test.go`, `broker/hostdisk/list_test.go`, `broker/hostdisk/probe_test.go`, `broker/hostdisk/udev_test.go`, `broker/vm/gvisor/nodevices_test.go` |
 | HW-8a | `broker/hostdisk/hostile_test.go`, `broker/hostdisk/list_test.go`, `broker/hostdisk/probe_test.go` |
 | ARC-1 | `broker/modelroute/modelroute_test.go`, `broker/recovery/imports_test.go`, `broker/tpmseal/imports_test.go`, `broker/vault/imports_test.go`, `broker/vault/vault_test.go` |
 | ARC-2 | `broker/control/handler_test.go`, `broker/daemon/arc2_test.go`, `broker/daemon/daemon_test.go`, `broker/daemon/inference_test.go`, `broker/localui/imports_test.go`, `broker/owner/arc2_test.go`, `broker/smsapi/imports_test.go`, `broker/tpmseal/imports_test.go` |
@@ -153,4 +153,4 @@ Covered: 127 / 150 requirement IDs
 | UPD-8 | `broker/cmd/agentos-release/main_test.go`, `broker/update/attest_test.go`, `broker/update/hardening_test.go`, `broker/update/stage_test.go`, `broker/update/update_test.go` |
 | UPD-9 | — |
 | BAK-1 | `broker/recovery/choice_test.go` |
-| TIM-1 | `broker/clock/clock_test.go`, `broker/clock/hold_test.go`, `broker/clock/sync_linux_test.go`, `broker/cmd/agentosd/questions_test.go`, `broker/cmd/agentosd/sleepsec_test.go`, `broker/control/handler_test.go`, `broker/daemon/daemon_test.go`, `broker/modem/at/nettime_internal_test.go`, `broker/modem/at/nettime_test.go`, `broker/owner/answer_test.go`, `broker/question/question_test.go`, `broker/question/w9a_test.go` |
+| TIM-1 | `broker/clock/chrony_test.go`, `broker/clock/clock_test.go`, `broker/clock/hold_test.go`, `broker/clock/sync_linux_test.go`, `broker/clock/unverified_test.go`, `broker/cmd/agentos-clock-boot/main_test.go`, `broker/cmd/agentosd/questions_test.go`, `broker/cmd/agentosd/sleepsec_test.go`, `broker/control/handler_test.go`, `broker/daemon/daemon_test.go`, `broker/modem/at/nettime_internal_test.go`, `broker/modem/at/nettime_test.go`, `broker/owner/answer_test.go`, `broker/question/question_test.go`, `broker/question/w9a_test.go` |
