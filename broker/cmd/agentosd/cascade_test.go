@@ -42,6 +42,9 @@ func TestLearningForgetRunsTheCascade(t *testing.T) {
 	if err := lp.forgetTask("owner:f1"); err != nil {
 		t.Fatal(err)
 	}
+	if !lp.learn.Forgot("owner:f1") {
+		t.Fatal("Loop 1 was not told of the forget")
+	}
 	cand := func(goal string) change.Candidate {
 		return change.Candidate{Source: change.Local, Goals: []string{goal}, Files: change.Tree{"skills/note": []byte("x")}}
 	}
@@ -93,6 +96,9 @@ func TestLearningOpenReplaysAnInterruptedForget(t *testing.T) {
 	lp, err := openLearning(learnPaths{Dir: dir, Spare: filepath.Join(dir, "spare.json"), Tree: lt}, false, &cfg)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !lp.learn.Forgot("owner:f1") {
+		t.Fatal("the replay did not reach Loop 1")
 	}
 	if lt.files["skills/note.json"] != nil || string(lt.files["skills/greet.json"]) != "hi" || !lt.ready {
 		t.Fatalf("live tree after the replay: %q, ready %v", lt.files, lt.ready)

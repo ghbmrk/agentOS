@@ -406,6 +406,10 @@ func TestForgetGoalKeepsALiveDeleteThatHoldsNothing(t *testing.T) {
 		if _, err := e.p.ForgetGoal(g); err != nil {
 			t.Fatal(err)
 		}
+		// Between the forgets b's delete holds nothing either side.
+		if more, _ := e.p.More(b.Short); !strings.Contains(more[0], "skills/x (removed)") {
+			t.Fatalf("MORE b after forgetting %s: %q", g, more)
+		}
 	}
 	if _, ok := e.p.Files("skills")["skills/x"]; ok {
 		t.Fatal("b's delete was undone by the forgets")
@@ -500,5 +504,78 @@ func TestRecheckSkipsAnAdoptionForgottenMeanwhile(t *testing.T) {
 	ids, err := e.p.Recheck(bg)
 	if err != nil || len(ids) != 0 {
 		t.Fatalf("Recheck: %v %v", ids, err)
+	}
+}
+
+// SHOULD on #160: an empty file one adoption deleted comes back as an
+// empty file when that adoption is forgotten after a restart.
+func TestAnEmptyFileDeletedSurvivesARestart(t *testing.T) {
+	e := newEnv(t, nil)
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	w := e.propose(Candidate{Source: Local, Goals: []string{"owner:g0"}, Files: Tree{"skills/greet": []byte("hello"), "skills/empty": {}}})
+	a := e.propose(Candidate{Source: Local, Goals: []string{"owner:g1"}, Delete: []string{"skills/empty"}})
+	if w.State != StateAdopted || a.State != StateAdopted {
+		t.Fatalf("setup: %+v %+v", w, a)
+	}
+	p, err := New(e.p.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.ForgetGoal("owner:g1"); err != nil {
+		t.Fatal(err)
+	}
+	if b, ok := p.Files("skills")["skills/empty"]; !ok || len(b) != 0 {
+		t.Fatalf("after a restart, the forget left %q, %v; want the empty file", b, ok)
+	}
+}
+
+// The forgotten mark is saved: MORE still says forgotten after a restart.
+func TestTheForgottenMarkSurvivesARestart(t *testing.T) {
+	e := newEnv(t, nil)
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	a := e.propose(Candidate{Source: Local, Goals: []string{"owner:g1"}, Files: Tree{"skills/greet": []byte("hello")}})
+	if a.State != StateAdopted {
+		t.Fatalf("setup: %+v", a)
+	}
+	if _, err := e.p.ForgetGoal("owner:g1"); err != nil {
+		t.Fatal(err)
+	}
+	p, err := New(e.p.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if more, err := p.More(a.Short); err != nil || !strings.Contains(more[0], "skills/greet (forgotten)") {
+		t.Fatalf("MORE after a restart: %q %v", more, err)
+	}
+}
+
+// A later forget leaves an edit an earlier one cleared as it was, though
+// the cleared edit's empty Before matches the delete being forgotten.
+func TestALaterForgetLeavesAClearedEdit(t *testing.T) {
+	e := newEnv(t, nil)
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	v := e.propose(Candidate{Source: Local, Goals: []string{"owner:gv"}, Files: Tree{"skills/greet": []byte("hello"), "skills/x": []byte("v5")}})
+	w := e.propose(Candidate{Source: Local, Goals: []string{"owner:g0"}, Delete: []string{"skills/x"}})
+	a := e.propose(Candidate{Source: Local, Goals: []string{"owner:g1"}, Files: Tree{"skills/x": []byte("v6")}})
+	if v.State != StateAdopted || w.State != StateAdopted || a.State != StateAdopted {
+		t.Fatalf("setup: %+v %+v %+v", v, w, a)
+	}
+	for _, g := range []string{"owner:g1", "owner:g0"} {
+		if _, err := e.p.ForgetGoal(g); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, ad := range e.p.Adoptions() {
+		if ad.ID != a.ID {
+			continue
+		}
+		for _, ed := range ad.Edits {
+			if !ed.Forgotten || ed.Before != nil || ed.After != nil {
+				t.Fatalf("a's cleared edit became %+v", ed)
+			}
+		}
+	}
+	if got := string(e.p.Files("skills")["skills/x"]); got != "v5" {
+		t.Fatalf("x after both forgets: %q, want v's v5", got)
 	}
 }

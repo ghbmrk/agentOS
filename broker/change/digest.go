@@ -523,10 +523,12 @@ func (p *Pipeline) More(ref string) ([]string, error) {
 		switch {
 		case cleared(e):
 			how = "forgotten"
+		case e.After == nil:
+			// Before it, as a delete can hold nothing either side once a
+			// forget took its Before back past a forgotten file (C23).
+			how = "removed"
 		case e.Before == nil:
 			how = "new"
-		case e.After == nil:
-			how = "removed"
 		}
 		files = append(files, safe(e.Path)+" ("+how+")")
 	}
