@@ -64,7 +64,9 @@ type evidence struct {
 
 	mu sync.Mutex
 	// failing is when deliveries started failing; zero while they work.
+	// refused: the last failure was the gate's refusal, not transport.
 	failing time.Time
+	refused bool
 	// shown is the destination the digest last confirmed; digest holds
 	// one-time digest lines (security C3, UX U5).
 	shown  string
@@ -79,18 +81,20 @@ type evidenceJob struct {
 
 // Fixed wording, in the box's first-person voice (UX U7).
 const (
-	keptLong         = "I kept the full reply on the box. Ask me for the rest."
+	keptLong         = "I kept the full reply on the box. Ask for it in shorter parts."
 	capNote          = "I've emailed the most replies I send in a day, so I kept this one on the box."
 	failNote         = "I couldn't email the full reply, so I kept it on the box. Check that your mail account still signs in."
-	evidenceEffect   = "With this on, I email your private replies and texts carry a one-line summary. Send EVIDENCE OFF to stop. A request for your code follows; then confirm on my Wi-Fi page."
+	refusedNote      = "I couldn't email the full reply, so I kept it on the box. Send EMAIL REPLIES ON to set emailing up again."
+	evidenceEffect   = "With this on, I email your private replies and texts carry a one-line summary. Send EMAIL REPLIES OFF to stop. A request for your code follows; then confirm on my Wi-Fi page."
 	evidenceNotYet   = "Emailing private replies is not in this build yet."
 	evidenceOff      = "Private replies come by text again."
 	evidenceNone     = "Private replies already come by text."
 	evidenceStarting = "I'm still starting. Try again in a minute."
 	evidenceFailed   = "I couldn't save that setting. Try again later."
+	evidenceNoPage   = "Not changed: turning this on needs my Wi-Fi page, which this build does not have yet."
 	// offNotice goes to the old destination when it is cleared by text
 	// (security C3 on #148, its wording).
-	offNotice = "Emailing private replies was turned off by text at %s. If that wasn't you, turn it back on from my Wi-Fi page."
+	offNotice = "Emailing private replies was turned off by text at %s. If that wasn't you, send EMAIL REPLIES ON, then confirm on my Wi-Fi page."
 )
 
 // Sizes.
@@ -177,14 +181,21 @@ func (e *evidence) reply(machine string, private bool, text, summary string) {
 	err := e.deliver(g, addr, acct, text, grants.DeliverFromAgent, true)
 	switch {
 	case err == nil:
-		e.setFailing(false)
+		e.setFailing(false, false)
 	case errors.Is(err, errCapped):
 		e.kept.keep(text)
 		tail = capNote
+	case errors.Is(err, errRefused):
+		// Signing in cannot fix a refusal (a dropped alias, a paused
+		// grant): setting it up again can (L3 MUST-2 on #148).
+		e.logf("reply from %s not emailed: %v", machine, err)
+		e.kept.keep(text)
+		e.setFailing(true, true)
+		tail = refusedNote
 	default:
 		e.logf("reply from %s not emailed: %v", machine, err)
 		e.kept.keep(text)
-		e.setFailing(true)
+		e.setFailing(true, false)
 		tail = failNote
 	}
 	e.send(machine, join(summarize(text, summary, smsSegment-len(owner.AgentPrefix)-1-len(tail)), tail))
@@ -196,9 +207,10 @@ func (e *evidence) send(machine, text string) {
 	}
 }
 
-func (e *evidence) setFailing(on bool) {
+func (e *evidence) setFailing(on, refused bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.refused = refused
 	switch {
 	case !on:
 		e.failing = time.Time{}
@@ -329,7 +341,11 @@ func (e *evidence) note() string {
 	if e.failing.IsZero() {
 		return ""
 	}
-	return "Emailing replies: failing since " + e.failing.Local().Format("15:04") + ". Check that your mail account still signs in."
+	since := e.failing.Local().Format("15:04")
+	if e.refused {
+		return "Emailing replies: refused since " + since + ". Send EMAIL REPLIES ON to set it up again."
+	}
+	return "Emailing replies: failing since " + since + ". Check that your mail account still signs in."
 }
 
 // digestLines are the digest's lines: a new destination confirmed once,
@@ -361,7 +377,8 @@ func (e *evidence) digestLines() []string {
 // needs neither, and the old destination is told (security C3).
 func (e *evidence) settings(ctx context.Context, msg string, unlocked bool) (string, bool) {
 	f := strings.Fields(msg)
-	if len(f) > 2 && strings.EqualFold(f[0], "EMAIL") && strings.EqualFold(f[1], "REPLIES") {
+	alias := len(f) > 2 && strings.EqualFold(f[0], "EMAIL") && strings.EqualFold(f[1], "REPLIES")
+	if alias {
 		f = f[1:] // EMAIL REPLIES is EVIDENCE's other name (UX N2)
 	} else if len(f) < 2 || !strings.EqualFold(f[0], "EVIDENCE") {
 		return "", false
@@ -395,8 +412,12 @@ func (e *evidence) settings(ctx context.Context, msg string, unlocked bool) (str
 		addr = main
 	} else {
 		var ok bool
-		if acct, ok = e.mail.Owns(addr); !ok {
-			return "Not changed: I can email replies only to your mail account's own address, " + maskAddress(main) + ". Send EVIDENCE ON to use it.", true
+		if acct, ok = e.mail.Owns(addr); !ok && alias {
+			// "Email replies to bob@corp.example" is a task for the
+			// agent, not this setting (L3 SHOULD 4 on #148).
+			return "", false
+		} else if !ok {
+			return "Not changed: I can email replies only to your mail account's own address, " + maskAddress(main) + ". Send EMAIL REPLIES ON to use it.", true
 		}
 	}
 	id := "owner/evidence/" + randHex(6)
@@ -408,8 +429,12 @@ func (e *evidence) settings(ctx context.Context, msg string, unlocked bool) (str
 	case err != nil:
 		e.logf("evidence setting: %v", err)
 		return evidenceFailed, true
+	case st.State == journal.Denied && strings.Contains(st.Permission.Reason, "local page"):
+		// Gate reasons are not texted verbatim (L3 SHOULD 3 on #148).
+		return evidenceNoPage, true
 	case st.State == journal.Denied:
-		return "Not changed: " + strings.TrimSuffix(st.Permission.Reason, ".") + ".", true
+		e.logf("evidence setting refused: %s", st.Permission.Reason)
+		return evidenceFailed, true
 	}
 	return evidenceEffect, true
 }

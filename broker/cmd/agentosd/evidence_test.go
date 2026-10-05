@@ -297,7 +297,7 @@ func TestAFailedDeliveryIsRetriedThenKept(t *testing.T) {
 	if n := len(r.gate.deliveries()); n != 2 || !strings.HasSuffix(r.texts()[0], pointer) || len(r.ev.kept.list()) != 0 {
 		t.Fatalf("retry that worked: %d %q", n, r.texts())
 	}
-	for _, c := range []struct{ reason, tail string }{{grants.DeliveryCapReason, capNote}, {"no grant", failNote}} {
+	for _, c := range []struct{ reason, tail string }{{grants.DeliveryCapReason, capNote}, {"no grant", refusedNote}} {
 		r := newEvRig(t, destAddr)
 		r.gate.state, r.gate.reason = journal.Denied, c.reason
 		r.ev.reply("agent", true, longReply, "")
@@ -305,6 +305,10 @@ func TestAFailedDeliveryIsRetriedThenKept(t *testing.T) {
 			t.Fatalf("%s: %d attempts, %q", c.reason, n, r.texts())
 		}
 		noPage(t, r.texts()[0])
+		// A refusal is not a sign-in problem (L3 MUST-2 on #148).
+		if note := r.ev.note(); (c.tail == refusedNote) != strings.Contains(note, "refused since") || strings.Contains(note, "signs in") {
+			t.Fatalf("%s: STATUS %q", c.reason, note)
+		}
 	}
 	r = newEvRig(t, destAddr)
 	r.gate.state = journal.Denied
@@ -380,11 +384,20 @@ func TestEvidenceSetting(t *testing.T) {
 		t.Fatalf("to alias: %q", got)
 	}
 	got, _ := r.ev.settings(ctx, "evidence to eve@example.net", true)
-	if len(r.gate.subs) != 2 || !strings.Contains(got, "o***@example.test") || !strings.Contains(got, "EVIDENCE ON") {
+	if len(r.gate.subs) != 2 || !strings.Contains(got, "o***@example.test") || !strings.Contains(got, "EMAIL REPLIES ON") {
 		t.Fatalf("other address: %q", got)
 	}
-	r.gate.state, r.gate.reason = journal.Denied, "no local page"
-	if got, _ := r.ev.settings(ctx, "EVIDENCE ON", true); got != "Not changed: no local page." {
+	// In the EMAIL REPLIES form, another address is a task for the agent.
+	if got, ok := r.ev.settings(ctx, "Email replies to bob@corp.example", true); ok || len(r.gate.subs) != 2 {
+		t.Fatalf("taken from the agent: %q", got)
+	}
+	// Gate reasons are not texted verbatim.
+	r.gate.state, r.gate.reason = journal.Denied, "needs confirmation on the box's local page, which this build does not have yet (CH-20)"
+	if got, _ := r.ev.settings(ctx, "EVIDENCE ON", true); got != evidenceNoPage {
+		t.Fatalf("denied: %q", got)
+	}
+	r.gate.reason = "the destination must be the connected mail account's own address (CH-20)"
+	if got, _ := r.ev.settings(ctx, "EVIDENCE ON", true); got != evidenceFailed {
 		t.Fatalf("denied: %q", got)
 	}
 	if got, _ := r.ev.settings(ctx, "EVIDENCE OFF", true); got != evidenceNone {

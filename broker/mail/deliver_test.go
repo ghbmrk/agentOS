@@ -67,7 +67,7 @@ func TestDeliverGoesToNoOneElse(t *testing.T) {
 			t.Fatalf("recipients %q: %+v", rc, out)
 		}
 	}
-	if out := x.run(x.intent(mail.OpDeliver, map[string]any{mail.ParamBody: "b"}, me)); out.Result != journal.ResultNotApplied {
+	if out := x.run(x.intent(mail.OpDeliver, map[string]any{mail.ParamBody: "b", mail.ParamFrom: mail.FromAgent}, me)); out.Result != journal.ResultNotApplied {
 		t.Fatalf("an agent delivered: %+v", out)
 	}
 	in := deliverIntent(x, "b", me)
@@ -87,7 +87,11 @@ func TestDeliverGoesToNoOneElse(t *testing.T) {
 	if x.a.Address() != me {
 		t.Fatalf("address %q", x.a.Address())
 	}
-	if !x.a.Owns(me) || !x.a.Owns("ALIAS@example.test") || x.a.Owns("sam@example.com") || x.a.Owns("not an address") {
+	plus := strings.Replace(me, "@", "+x@", 1)
+	if out := x.run(deliverIntent(x, "b", plus)); out.Result != journal.ResultNotApplied {
+		t.Fatalf("delivered to a +tag variant: %+v", out)
+	}
+	if !x.a.Owns(me) || !x.a.Owns("ALIAS@example.test") || x.a.Owns(plus) || x.a.Owns("sam@example.com") || x.a.Owns("not an address") {
 		t.Fatal("Owns")
 	}
 }

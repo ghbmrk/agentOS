@@ -650,14 +650,16 @@ func originKey(in journal.Intent) string { return "origin:" + in.Origin }
 
 // mine turns the journal into hypotheses (LOOP-4). A task with a held-out
 // case is never mined, so nothing from the held-out suite reaches a
-// builder (CHG-1). Broker-state intents are not tasks.
+// builder (CHG-1). Broker-state intents, and the broker's own effects
+// (origin "broker:...", such as CH-20's evidence email carrying private
+// replies), are not tasks.
 func (l *Learn) mine(ev Evidence) []Hypothesis {
 	sts := l.cfg.Journal.List()
 	held := heldWithNext(sts, ev)
 	byTask := map[string][]journal.Status{}
 	var order []string
 	for _, s := range sts {
-		if s.Intent.Account == journal.BrokerAccount {
+		if s.Intent.Account == journal.BrokerAccount || strings.HasPrefix(s.Intent.Origin, "broker:") {
 			continue
 		}
 		k := TaskKey(s.Intent)

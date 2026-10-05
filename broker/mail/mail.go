@@ -179,8 +179,9 @@ const (
 
 // Adapter is one connected mail account.
 type Adapter struct {
-	cfg  Config
-	self map[string]bool
+	cfg   Config
+	self  map[string]bool
+	alias map[string]bool // the aliases, exactly
 
 	mu       sync.Mutex
 	reserved map[string]time.Time // organize bound places not yet in the journal
@@ -220,10 +221,10 @@ func New(cfg Config) (*Adapter, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	a := &Adapter{cfg: cfg, self: map[string]bool{addr: true, selfKey(addr): true}, reserved: map[string]time.Time{}}
+	a := &Adapter{cfg: cfg, self: map[string]bool{addr: true, selfKey(addr): true}, alias: map[string]bool{}, reserved: map[string]time.Time{}}
 	for _, x := range cfg.Aliases {
 		if c, ok := canon(x); ok {
-			a.self[c], a.self[selfKey(c)] = true, true
+			a.self[c], a.self[selfKey(c)], a.alias[c] = true, true, true
 		}
 	}
 	a.cfg.Address = addr
@@ -248,9 +249,12 @@ func (a *Adapter) isSelf(addr string) bool {
 
 // Owns reports whether addr is one of the owner's addresses on this
 // account: the evidence destination must be (CH-20).
+//
+// Unlike isSelf it matches exactly: a +tag or Gmail-dot variant of the
+// owner's address is not the destination (L3 SHOULD 5 on #148).
 func (a *Adapter) Owns(addr string) bool {
 	c, ok := canon(addr)
-	return ok && !a.cfg.Box && a.isSelf(c)
+	return ok && !a.cfg.Box && (c == a.cfg.Address || a.alias[c])
 }
 
 // Address is the owner's main address on this account.

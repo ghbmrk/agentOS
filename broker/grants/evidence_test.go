@@ -233,6 +233,11 @@ func TestEvidenceDestinationIsOneBareAddress(t *testing.T) {
 			t.Fatalf("destination %q: %s", addr, st.State)
 		}
 	}
+	extra := EvidenceIntent("owner/evidence/extra", OriginOwner, ownAddr, "mail")
+	extra.Params["note"] = "x"
+	if st := r.submit(extra); st.State != journal.Denied {
+		t.Fatalf("extra param: %s", st.State)
+	}
 	if st := r.setEvidence(OriginOwner, ownAddr, false); st.State != journal.Pending {
 		t.Fatalf("bare address: %s", st.State)
 	}
