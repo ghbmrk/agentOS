@@ -305,4 +305,32 @@ func TestThePageWarnsBeforeTheLocalBound(t *testing.T) {
 	if msg, _ := r.ch.LocalAnswer(id, r.sum(id), true, "000001"); !strings.Contains(msg, "2 more tries on my Wi-Fi today, then approving here pauses until") {
 		t.Fatalf("2 left: %q", msg)
 	}
+	// Security R3: with none left it says the page is paused.
+	id2, _ := r.ch.RequestLocal(localItem("i2"), 0)
+	r.inbox()
+	r.ch.mu.Lock()
+	r.ch.codes.commit(func(s *State) { s.LocalUsed = LocalBound - 1 })
+	r.ch.mu.Unlock()
+	if msg, _ := r.ch.LocalAnswer(id2, r.sum(id2), true, "000002"); !strings.Contains(msg, "Approving here is paused until") || strings.Contains(msg, "0 more") {
+		t.Fatalf("0 left: %q", msg)
+	}
+}
+
+// Security R1 on #165: a code texted with a refused YES is spent, so a
+// text that leaked it cannot be replayed on the page; it still is not
+// counted as wrong.
+func TestARefusedTextedCodeIsSpent(t *testing.T) {
+	r := newRig(t, nil)
+	id, _ := r.ch.RequestLocal(localItem("i1"), 0)
+	r.inbox()
+	code := r.totp()
+	if got := r.say("YES " + id + " " + code); !strings.Contains(got, "on my Wi-Fi page") {
+		t.Fatalf("YES by text: %q", got)
+	}
+	if _, err := r.ch.LocalAnswer(id, r.sum(id), true, code); err != ErrWrongCode {
+		t.Fatalf("replayed on the page: %v", err)
+	}
+	if len(r.decisions()) != 0 {
+		t.Fatal("decided")
+	}
 }

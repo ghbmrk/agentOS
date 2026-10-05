@@ -147,6 +147,9 @@ func (s *Server) mayTry(sess string) bool {
 			s.pageWrong[k] = ts
 		}
 	}
+	if _, ok := s.pageWrong[sess]; !ok && len(s.pageWrong) >= MaxSessions*2 {
+		return false // full: fail closed (Security R2 on #165)
+	}
 	return len(s.pageWrong[sess]) < PageWrongPerMinute
 }
 

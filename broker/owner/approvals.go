@@ -313,6 +313,12 @@ func (c *Channel) answerLocked(rp reply, now time.Time, decided *[]Decision, pag
 	}
 	if r.local && rp.word == "YES" && !page {
 		// Not a wrong code: the owner never saw where it goes (P2-2a).
+		// A valid code is spent all the same, so a text that leaked it
+		// cannot be replayed on the page (Security R1 on #165); a save
+		// failure only leaves it as unspent as before.
+		if rp.code != "" {
+			_, _, _ = c.codes.checkStrong(rp.code, now, strongOpts{silent: true})
+		}
 		return []string{fmt.Sprintf("Approve %s on my Wi-Fi page: it shows where this goes. Or reply NO %s.", r.id, r.id)}, false, false
 	}
 	for _, n := range rp.items {

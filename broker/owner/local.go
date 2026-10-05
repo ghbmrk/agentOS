@@ -473,10 +473,14 @@ func (c *Channel) LocalAnswer(id, sum string, approve bool, code string) (string
 	case wrong:
 		err = ErrWrongCode
 		alerts = c.wrongLocalLocked(now)
-		if left := LocalBound - c.codes.st.LocalUsed; left <= 2 {
+		until := c.clock(c.codes.st.LocalStart.Add(WrongWindow))
+		switch left := LocalBound - c.codes.st.LocalUsed; {
+		case left <= 0:
+			msg += " Approving here is paused until " + until + "." // Security R3 on #165
+		case left <= 2:
 			// Say so before approving here pauses (UX on #165).
 			msg += fmt.Sprintf(" %d more %s on my Wi-Fi today, then approving here pauses until %s.",
-				left, map[bool]string{true: "try", false: "tries"}[left == 1], c.clock(c.codes.st.LocalStart.Add(WrongWindow)))
+				left, map[bool]string{true: "try", false: "tries"}[left == 1], until)
 		}
 		if c.open[id] == nil {
 			note = id + " void after wrong codes"

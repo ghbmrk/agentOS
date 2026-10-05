@@ -268,6 +268,20 @@ func TestWrongCodesFromOnePhoneAreBounded(t *testing.T) {
 		t.Fatalf("deny: %s", w.Body.String())
 	}
 	a.advance(time.Minute)
+	// Security R2: with the per-phone table full, an unknown phone's
+	// approval is refused rather than unbounded.
+	a.srv.mu.Lock()
+	for i := 0; i < MaxSessions*2; i++ {
+		a.srv.pageWrong[fmt.Sprint("other", i)] = []time.Time{a.clock()}
+	}
+	a.srv.mu.Unlock()
+	full, _ := a.ch.RequestLocal(pageItem("k"), 0)
+	if w := a.post("/approvals/", answer(a.form(full), "approve", a.code())); !strings.Contains(w.Body.String(), "Wait a minute") {
+		t.Fatalf("full table: %s", w.Body.String())
+	}
+	a.srv.mu.Lock()
+	a.srv.pageWrong = nil
+	a.srv.mu.Unlock()
 	id, _ := a.ch.RequestLocal(pageItem("j"), 0)
 	if w := a.post("/approvals/", answer(a.form(id), "approve", a.code())); !strings.Contains(w.Body.String(), "Approved.") {
 		t.Fatalf("after a minute: %s", w.Body.String())
