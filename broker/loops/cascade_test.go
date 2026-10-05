@@ -91,3 +91,48 @@ func TestLearnKeepsNoCandidateForgottenInFlight(t *testing.T) {
 		t.Fatalf("%d builds, want 2: a candidate forgotten in flight was kept", n)
 	}
 }
+
+// SPEC CAP-3 (potency on #160): what was learned from a forgotten task is
+// rebuilt from the remaining evidence. A hypothesis tried with the goal is
+// offered again at once, though its evidence did not grow; others stay
+// tried, and the owner backoff on it is lifted.
+func TestForgottenGoalsHypothesisIsTriedAgain(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	for i := range 8 {
+		r.corrected(h, i)
+	}
+	r.failing("x1", "owner:mX1", "refund")
+	r.failing("x2", "owner:mX2", "refund")
+	r.failing("y", "owner:mY", "pay")
+	b := &builder{files: map[string][]byte{"procedures/mail": []byte("v2")}}
+	l, err := NewLearn(LearnConfig{Pipeline: r.p, Journal: r.eng, Harvest: h, Builder: b, MinHeldOut: 1})
+	must(t, err)
+	drain := func() map[string]bool {
+		got := map[string]bool{}
+		for range 20 {
+			job, ok := l.Next(context.Background(), true)
+			if !ok {
+				break
+			}
+			n := len(b.got())
+			job.Run(context.Background())
+			if bs := b.got(); len(bs) > n {
+				got[bs[len(bs)-1].Hypothesis.Key] = true
+			}
+		}
+		return got
+	}
+	const key = "failure:bank/refund"
+	if first := drain(); !first[key] || len(first) < 2 {
+		t.Fatalf("first pass built %v", first)
+	}
+	l.mu.Lock()
+	l.notBefore[key] = time.Now().Add(time.Hour)
+	l.mu.Unlock()
+	l.ForgetGoal("owner:mX1")
+	again := drain()
+	if !again[key] || len(again) != 1 {
+		t.Fatalf("after the forget, built %v; want only %s again", again, key)
+	}
+}
