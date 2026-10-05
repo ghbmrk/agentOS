@@ -187,3 +187,44 @@ func TestUnansweredChangeIsNotADecline(t *testing.T) {
 		t.Fatalf("%q", d)
 	}
 }
+
+// CHG-4, CHG-5 (security lens R1 on #48): turning sharing on changes what
+// leaves the box, so like a grant it needs the local page as well as the
+// owner's code; without that page it is refused at once. Other settings
+// need only the code.
+func TestSharingOnNeedsTheLocalPage(t *testing.T) {
+	r, p := changeRig(t)
+	ctx := context.Background()
+	if err := p.SetSharing(ctx, true); !errors.Is(err, change.ErrPending) {
+		t.Fatal(err)
+	}
+	r.g.Flush()
+	_, items := r.own.last(t)
+	id := items[0].Ref
+	r.decide(true, "owner")
+	if st := r.state(id); st.State != journal.Pending {
+		t.Fatalf("sharing turned on without the local page: %s", st.State)
+	}
+	if err := r.g.ConfirmLocal(id); err != nil {
+		t.Fatal(err)
+	}
+	r.g.Wait()
+	if st := r.state(id); st.State != journal.Succeeded {
+		t.Fatalf("%s %q", st.State, st.Permission.Reason)
+	}
+
+	noUI, q := changeRig(t)
+	noUI.g.cfg.LocalUI = false
+	if err := q.SetSharing(ctx, true); err == nil || !strings.Contains(err.Error(), "local page") {
+		t.Fatalf("sharing on without a local page: %v", err)
+	}
+	// A setting that only needs the code cannot be confirmed locally.
+	if err := q.SetAutoAdopt(ctx, true); !errors.Is(err, change.ErrPending) {
+		t.Fatal(err)
+	}
+	noUI.g.Flush()
+	_, items = noUI.own.last(t)
+	if err := noUI.g.ConfirmLocal(items[0].Ref); err == nil {
+		t.Fatal("confirmed a change that needs no local page")
+	}
+}

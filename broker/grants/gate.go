@@ -600,8 +600,19 @@ func (g *Gate) evaluateChange(ctx context.Context, phase journal.Phase, in journ
 	if err != nil {
 		return verdict{kind: deny, why: err.Error()}
 	}
-	return verdict{kind: ask, item: owner.Item{Ref: in.ID, Object: obj, Undoable: undoable,
+	local := sharingOn(in)
+	if local && !g.cfg.LocalUI {
+		return verdict{kind: deny, why: "turning sharing on needs confirmation on the box's local page, which this build does not have yet (CHG-4)"}
+	}
+	return verdict{kind: ask, local: local, item: owner.Item{Ref: in.ID, Object: obj, Undoable: undoable,
 		Facts: owner.Facts{Kind: owner.GrantChange, Verb: v, NoRecipient: true}}}
+}
+
+// sharingOn reports the intent that turns sharing on: it changes what
+// leaves the box (CHG-4, CHG-5), so like a grant it also needs the local
+// page (CH-3). Turning learning on, or any setting off, needs only the code.
+func sharingOn(in journal.Intent) bool {
+	return in.Action == "meta.change.policy" && strings.HasSuffix(in.ID, ":sharing:on")
 }
 
 // Check is the journal policy (OP-3): it runs at authorize and again
@@ -990,14 +1001,15 @@ func (g *Gate) lapse(d owner.Decision) {
 }
 
 // ConfirmLocal records the owner's confirmation on the local page for a
-// grant intent (CH-3). The local UI (P2-2) calls it after showing
+// grant intent (CH-3) or for turning sharing on (GR17). The local UI (P2-2) calls it after showing
 // Describe; the code and the confirmation may come in either order.
 func (g *Gate) ConfirmLocal(id string) error {
 	st, err := g.eng.Get(id)
 	if err != nil {
 		return err
 	}
-	if st.State != journal.Pending || st.Intent.Account != journal.BrokerAccount || st.Intent.Action != journal.ActionGrantChange {
+	if st.State != journal.Pending || st.Intent.Account != journal.BrokerAccount ||
+		(st.Intent.Action != journal.ActionGrantChange && !sharingOn(st.Intent)) {
 		return errors.New("grants: nothing to confirm for " + clip(id))
 	}
 	g.mu.Lock()
