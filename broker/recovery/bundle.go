@@ -578,8 +578,9 @@ func opaque(p string) (string, bool) {
 // be a directory this restore created, and files are created exclusively
 // without following links, so no entry (a symlink first, a path beneath
 // it next) can write outside dst. Outside the machine layers no owner,
-// setuid or setgid bit, whiteout, or symlink leaving its root (one that is
-// absolute, has a ".." element, or passes through a restored link) is restored;
+// setuid or setgid bit, whiteout, or symlink leaving its root (staysIn:
+// absolute, a ".." element, a target in or above a machine layer, or one
+// that runs through another restored link) is restored;
 // the vault root is forced to the vault's user, 0600 files and 0700
 // directories; top-level directories are 0700. It digests what it
 // restores for the MAC check.
@@ -598,7 +599,7 @@ func (x *extractor) run(tr *tar.Reader) error {
 		return err
 	}
 	dirs := map[string]bool{".": true}
-	links := map[string]bool{} // symlinks restored so far
+	var links linkSet // symlinks restored outside the layers so far
 	type dirMode struct {
 		p    string
 		mode os.FileMode
@@ -692,13 +693,12 @@ func (x *extractor) run(tr *tar.Reader) error {
 				return err
 			}
 		case tar.TypeSymlink:
-			if !layer && !staysIn(top, clean, hd.Linkname, links) {
+			if !layer && !links.staysIn(x.lay, top, clean, hd.Linkname) {
 				return fmt.Errorf("recovery: symlink %q leaves its root", clean)
 			}
 			if err := os.Symlink(hd.Linkname, p); err != nil {
 				return err
 			}
-			links[clean] = true
 		case tar.TypeChar:
 			if !layer {
 				return fmt.Errorf("recovery: whiteout outside a machine layer: %q", clean)
@@ -742,13 +742,25 @@ func (x *extractor) run(tr *tar.Reader) error {
 	return syncDir(x.dst)
 }
 
+// linkSet is the symlinks a restore has accepted outside the machine
+// layers: their names and their joined targets.
+type linkSet struct {
+	names   map[string]bool
+	targets []string
+}
+
 // staysIn reports whether a symlink at clean pointing to link stays inside
-// the root top. Checked one link at a time, a lexical test is not enough:
-// a chain such as a -> ., b -> a/.., c -> b/.. resolves outside on disk
-// (security review 2, finding 2). So the link must be relative with no
-// ".." element, and its target must not pass through a link already
-// restored (links); a link may still point at another link itself.
-func staysIn(top, clean, link string, links map[string]bool) bool {
+// the root top, and if so records it. Checked one link at a time, a
+// lexical test is not enough: a chain such as a -> ., b -> a/.., c -> b/..
+// resolves outside on disk (security review 2, finding 2). So the link
+// must be relative with no ".." element; its target must not be in a
+// machine layer or above one, since layer links are the guest's and may
+// point anywhere on the host (L3 MUST-1 on #151); and no accepted link's
+// target may pass through another accepted link, whichever was restored
+// first, since a drive restore's order follows names an attacker picks
+// (L3 MUST-2). A link may still point at another link itself: with no
+// "..", each resolves at or below its own directory.
+func (ls *linkSet) staysIn(lay Layout, top, clean, link string) bool {
 	if link == "" || path.IsAbs(link) {
 		return false
 	}
@@ -761,11 +773,29 @@ func staysIn(top, clean, link string, links map[string]bool) bool {
 	if t != top && !strings.HasPrefix(t, top+"/") {
 		return false
 	}
-	for p := path.Dir(t); p != "." && p != "/"; p = path.Dir(p) {
-		if links[p] {
+	if lay.inLayer(t) {
+		return false
+	}
+	for _, d := range lay.Layers {
+		if strings.HasPrefix(path.Clean(d), t+"/") {
 			return false
 		}
 	}
+	for p := path.Dir(t); p != "." && p != "/"; p = path.Dir(p) {
+		if ls.names[p] {
+			return false
+		}
+	}
+	for _, o := range ls.targets {
+		if strings.HasPrefix(o, clean+"/") {
+			return false
+		}
+	}
+	if ls.names == nil {
+		ls.names = map[string]bool{}
+	}
+	ls.names[clean] = true
+	ls.targets = append(ls.targets, t)
 	return true
 }
 

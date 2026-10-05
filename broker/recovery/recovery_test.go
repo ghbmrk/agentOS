@@ -351,6 +351,11 @@ func TestRestoreRefusesEntriesThatEscapeTheTarget(t *testing.T) {
 		return buf.Bytes()
 	}
 	build := func(f func(tarWriter)) []byte { return seal(mk, func(tw tarWriter) { base(tw); f(tw) }) }
+	layerDirs := func(tw tarWriter) {
+		for _, d := range []string{"broker", "broker/machines", "broker/machines/m1", "broker/machines/m1/upper"} {
+			dir(tw, d)
+		}
+	}
 	if _, _, err := x.restore(build(func(tw tarWriter) {
 		file(tw, "egress/fine", "x")
 		dir(tw, "broker")
@@ -406,6 +411,36 @@ func TestRestoreRefusesEntriesThatEscapeTheTarget(t *testing.T) {
 			dir(tw, "broker/sub")
 			tw.WriteHeader(&tar.Header{Name: "broker/a", Typeflag: tar.TypeSymlink, Linkname: "sub"})
 			tw.WriteHeader(&tar.Header{Name: "broker/b", Typeflag: tar.TypeSymlink, Linkname: "a/x"})
+		}),
+		// L3 MUST-1 on #151: a link outside the layers that targets a
+		// layer link resolves on the host through the guest's link.
+		"link into a layer's absolute link": build(func(tw tarWriter) {
+			layerDirs(tw)
+			tw.WriteHeader(&tar.Header{Name: "broker/machines/m1/upper/abs", Typeflag: tar.TypeSymlink, Linkname: "/etc"})
+			tw.WriteHeader(&tar.Header{Name: "broker/x", Typeflag: tar.TypeSymlink, Linkname: "machines/m1/upper/abs"})
+		}),
+		"link into a layer's dotdot link": build(func(tw tarWriter) {
+			layerDirs(tw)
+			tw.WriteHeader(&tar.Header{Name: "broker/machines/m1/upper/up", Typeflag: tar.TypeSymlink, Linkname: "../../../../.."})
+			tw.WriteHeader(&tar.Header{Name: "broker/y", Typeflag: tar.TypeSymlink, Linkname: "machines/m1/upper/up"})
+		}),
+		// L3 MUST-2: a link restored after one whose target runs through
+		// its name (the drive walk's order follows names D picks).
+		"link made after a target runs through it": build(func(tw tarWriter) {
+			layerDirs(tw)
+			tw.WriteHeader(&tar.Header{Name: "broker/machines/m1/upper/abs", Typeflag: tar.TypeSymlink, Linkname: "/etc"})
+			tw.WriteHeader(&tar.Header{Name: "broker/n", Typeflag: tar.TypeSymlink, Linkname: "z/m1/upper/abs/passwd"})
+			tw.WriteHeader(&tar.Header{Name: "broker/z", Typeflag: tar.TypeSymlink, Linkname: "machines"})
+		}),
+		"link to an ancestor of a layer": build(func(tw tarWriter) {
+			layerDirs(tw)
+			tw.WriteHeader(&tar.Header{Name: "broker/z", Typeflag: tar.TypeSymlink, Linkname: "machines"})
+		}),
+		"link made after a plain target runs through it": build(func(tw tarWriter) {
+			dir(tw, "broker")
+			dir(tw, "broker/sub")
+			tw.WriteHeader(&tar.Header{Name: "broker/b", Typeflag: tar.TypeSymlink, Linkname: "a/x"})
+			tw.WriteHeader(&tar.Header{Name: "broker/a", Typeflag: tar.TypeSymlink, Linkname: "sub"})
 		}),
 		"dot slash": build(func(tw tarWriter) { file(tw, "./x", "x") }),
 		"duplicate": build(func(tw tarWriter) { file(tw, "egress/vault", "replaced") }),
