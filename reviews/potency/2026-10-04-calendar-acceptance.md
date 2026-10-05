@@ -24,7 +24,7 @@ No lens gets worse under either decision, so both were decided on the recommenda
 
 ## Revisions after L3 review
 
-- **Known contacts.** The sender must pass authentication (aligned DMARC for mail), and every recipient must be in the owner's contacts.
+- **Known contacts.** The sender must pass authentication (aligned DMARC for mail) and be in the owner's contacts. The reply's recipients must be a subset of the inbound message's participants, with no added addresses, so cc's who aren't contacts are allowed (arbitrator).
 - **Hold.** The hold is a draft-class operation with an enforced shape: no attendees, no notifications, private, and a fixed title. The send-time free check ignores the broker's own hold, and tentative events count as busy. The hold is removed when an invite arrives, after 48 h, or before the slot starts, whichever comes first, and the digest lists holds still waiting.
 - **Probing bound.** Acceptances are limited to one per thread per day and 3 per day in total, with holds counted.
 - **Alert.** The alert uses a fixed template. A time with no stated zone takes the zone of the message's `Date` header.
