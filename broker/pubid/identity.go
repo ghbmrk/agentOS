@@ -69,7 +69,9 @@ type identityFile struct {
 // Open reads the identity at path, making one for the current epoch if
 // there is none. now nil means time.Now. A damaged file is an error, never
 // replaced: what the box published under it may still need answering for,
-// and a silent new key would hide that the file was touched.
+// and a silent new key would hide that the file was touched. A file others
+// could read gets a fresh key at once, written 0600: the old one may have
+// been copied, and a new random key reveals nothing (L3 on #163).
 func Open(path string, now func() time.Time) (*Identity, error) {
 	if now == nil {
 		now = time.Now
@@ -89,6 +91,14 @@ func Open(path string, now func() time.Time) (*Identity, error) {
 	if err != nil {
 		return nil, err
 	}
+	if fi, err := os.Stat(path); err != nil {
+		return nil, err
+	} else if fi.Mode().Perm()&0o077 != 0 {
+		if err := id.rotate(EpochOf(now())); err != nil {
+			return nil, err
+		}
+		return id, nil
+	}
 	seed, err := base64.StdEncoding.DecodeString(f.Seed)
 	if err != nil || len(seed) != ed25519.SeedSize {
 		return nil, fmt.Errorf("%w: seed", ErrDamaged)
@@ -97,18 +107,20 @@ func Open(path string, now func() time.Time) (*Identity, error) {
 	return id, nil
 }
 
-// Key is the current epoch's private key and that epoch. When the clock
-// has passed into a later epoch it rotates first. A clock stepped back
-// keeps the newest key: an old key is gone and is never made again.
+// Key is a copy of the current epoch's private key, and that epoch. When
+// the clock is in another epoch than the key's, later or earlier, it
+// rotates first: a key kept past the global boundary would single this box
+// out and link its publications, while a fresh random key reveals nothing
+// (L3 on #163). An old key is gone and is never made again.
 func (id *Identity) Key() (ed25519.PrivateKey, int64, error) {
 	id.mu.Lock()
 	defer id.mu.Unlock()
-	if e := EpochOf(id.now()); e > id.epoch {
+	if e := EpochOf(id.now()); e != id.epoch {
 		if err := id.rotate(e); err != nil {
 			return nil, 0, err
 		}
 	}
-	return id.priv, id.epoch, nil
+	return append(ed25519.PrivateKey(nil), id.priv...), id.epoch, nil
 }
 
 // rotate draws a fresh key for epoch e and replaces the file with it in
@@ -125,7 +137,9 @@ func (id *Identity) rotate(e int64) error {
 	if err := writeAtomic(id.path, b); err != nil {
 		return err
 	}
+	clear(id.priv)
 	id.epoch, id.priv = e, ed25519.NewKeyFromSeed(seed)
+	clear(seed)
 	return nil
 }
 
@@ -177,7 +191,7 @@ func exactKeys(b []byte, keys ...string) error {
 }
 
 // writeAtomic replaces path with b, readable only by the broker
-// (os.CreateTemp makes the file 0600).
+// (os.CreateTemp makes the file 0600), and syncs the directory.
 func writeAtomic(path string, b []byte) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".pubid-*")
 	if err != nil {
@@ -193,5 +207,18 @@ func writeAtomic(path string, b []byte) error {
 	if err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), path)
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return err
+	}
+	// The rename must be on disk before anything relies on it: a batch
+	// confirmed sent, or an old seed taken as gone (L3 on #163).
+	d, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	err = d.Sync()
+	if cerr := d.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }

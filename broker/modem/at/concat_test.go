@@ -1,12 +1,15 @@
 package at_test
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/modem/at"
+	"github.com/ghbmrk/agentos/broker/modem/atsim"
 )
 
 // REQ: CH-1
@@ -113,5 +116,36 @@ func TestCH1BufferHoldsAtMost32TextsInAll(t *testing.T) {
 	}
 	if n := r.m.PendingFrom(ownerNum); n != 4 {
 		t.Fatalf("owner has %d pending, want 4", n)
+	}
+}
+
+// With no country code set, the owner's number arrives in more than one
+// spelling ("+1555…" and "1555…"), each its own sender, but together they
+// still hold only the owner's slots (L3 SHOULD 6 on #163; kills the
+// owner-slots-as-strangers' mutant, which per-sender caps hide when a
+// country code is set).
+func TestCH1OwnerSpellingsShareTheOwnersSlots(t *testing.T) {
+	v := vendors[1]
+	r := &rig{t: t, carrier: modem.NewCarrier(), now: time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)}
+	r.phone = r.carrier.Line(ownerNum)
+	r.dev = atsim.New(v.prof, v.model, r.carrier.Line(boxNum), time.Millisecond)
+	cfg := r.config(v, at.KeysInBand)
+	cfg.CountryCode = ""
+	m, err := at.Open(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.m = m
+	t.Cleanup(func() { _ = m.Close() })
+	for i := 1; i <= 4; i++ {
+		r.firstPart(t, ownerNum, byte(i))
+		r.firstPart(t, strings.TrimPrefix(ownerNum, "+"), byte(10+i))
+	}
+	for i := 0; i < 40; i++ {
+		r.firstPart(t, fmt.Sprintf("+1555700%04d", i), byte(i))
+	}
+	eventually(t, "overflow dropped", func() bool { return r.m.Dropped() == 16 })
+	if n := r.m.PendingTotal(); n != 32 {
+		t.Fatalf("%d texts pending, want 32", n)
 	}
 }

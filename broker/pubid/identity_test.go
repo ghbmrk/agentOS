@@ -3,6 +3,7 @@ package pubid
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"os"
@@ -97,13 +98,71 @@ func TestOSS6KeyIsRandomPerEpochAndRotates(t *testing.T) {
 		t.Fatal("the old epoch's seed is still on disk")
 	}
 
-	// A clock stepped back never brings an old key back, nor makes a
-	// new one: the newest epoch seen stands until time passes it.
+	// A clock in another epoch, earlier or later, gets a fresh key for
+	// that epoch: an old key never comes back, and no key outlives the
+	// global boundary (L3 MUST 1 on #163).
 	c.t = Reference.Add(time.Hour)
 	k5, e5, err := id2.Key()
 	must(t, err)
-	if e5 != 1 || !k5.Equal(k4) {
-		t.Fatalf("clock stepped back changed the key: epoch %d", e5)
+	if e5 != 0 || k5.Equal(k4) || k5.Equal(k1) {
+		t.Fatalf("clock stepped back: epoch %d, an old key %v", e5, k5.Equal(k1))
+	}
+	// A clock far ahead and then corrected: a fresh key each time, never
+	// one kept from the wrong clock.
+	c.t = Reference.Add(100 * 365 * 24 * time.Hour)
+	far, ef, err := id2.Key()
+	must(t, err)
+	c.t = Reference.Add(3*EpochLength + time.Hour)
+	k6, e6, err := id2.Key()
+	must(t, err)
+	if ef <= 3 || e6 != 3 || k6.Equal(far) {
+		t.Fatalf("after a forward step and its correction: epochs %d, %d, same key %v", ef, e6, k6.Equal(far))
+	}
+	// Key hands out a copy: changing it changes nothing inside.
+	k6[0] ^= 0xff
+	k7, _, err := id2.Key()
+	must(t, err)
+	if k7.Equal(k6) {
+		t.Fatal("Key exposed the identity's own key")
+	}
+	// No file in the directory holds an earlier seed.
+	cur, err := os.ReadFile(path)
+	must(t, err)
+	ents, err := os.ReadDir(dir)
+	must(t, err)
+	for _, e := range ents {
+		b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		must(t, err)
+		if bytes.Contains(b, seedField(t, old)) || (e.Name() != "pubid.json" && bytes.Contains(b, seedField(t, cur))) {
+			t.Fatalf("%s holds a seed", e.Name())
+		}
+	}
+	if len(ents) != 1 {
+		t.Fatalf("%d files beside the identity", len(ents)-1)
+	}
+	if id2.rand != rand.Reader {
+		t.Fatal("the key is not drawn from crypto/rand")
+	}
+}
+
+// An identity file others could read gets a fresh key at once, written
+// 0600: the old key may have been copied (L3 SHOULD 8 on #163).
+func TestOSS6LooseIdentityFileGetsAFreshKey(t *testing.T) {
+	c := &clock{Reference.Add(time.Hour)}
+	path := filepath.Join(t.TempDir(), "pubid.json")
+	id, err := Open(path, c.now)
+	must(t, err)
+	k1, _, err := id.Key()
+	must(t, err)
+	must(t, os.Chmod(path, 0o640))
+	id, err = Open(path, c.now)
+	must(t, err)
+	k2, e, err := id.Key()
+	must(t, err)
+	fi, err := os.Stat(path)
+	must(t, err)
+	if k2.Equal(k1) || e != 0 || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("loose file kept its key (%v) or mode %v", k2.Equal(k1), fi.Mode().Perm())
 	}
 }
 
