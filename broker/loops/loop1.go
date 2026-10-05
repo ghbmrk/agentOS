@@ -205,7 +205,41 @@ type Learn struct {
 	heldOut     int
 	lastRecheck time.Time
 	recheckedAt int // held-out count at the last recheck
+	// built keeps a candidate whose evaluation was preempted, by
+	// hypothesis key, so it is proposed again without another build and
+	// the pipeline resumes its evaluation (PE1). In memory only.
+	built map[string]keptCandidate
 }
+
+// keptCandidate is a built candidate and the brief it was built from.
+type keptCandidate struct {
+	cand  change.Candidate
+	brief string // briefDigest of the builder's brief
+	tasks []string
+	at    time.Time
+}
+
+// briefDigest names everything a builder saw: the hypothesis's tasks, its
+// evidence intents and their labels, and the dev cases. A kept candidate
+// is reused only for the same brief (L3 MUST-1 on #103), so a candidate
+// built from a task that is now held out is never scored on that task.
+func briefDigest(h Hypothesis, dev []change.Case) string {
+	var parts []string
+	for _, t := range h.Tasks {
+		parts = append(parts, "t\x00"+t)
+	}
+	for _, s := range h.Evidence {
+		parts = append(parts, "e\x00"+s.Intent.ID+"\x00"+s.Intent.Label)
+	}
+	for _, c := range dev {
+		parts = append(parts, "d\x00"+c.ID)
+	}
+	sort.Strings(parts)
+	return digest(h.Key + "\x01" + strings.Join(parts, "\x01"))
+}
+
+// maxKeptCandidates bounds Learn.built.
+const maxKeptCandidates = 16
 
 // NewLearn checks cfg and returns Loop 1's source.
 func NewLearn(cfg LearnConfig) (*Learn, error) {
@@ -240,7 +274,7 @@ func NewLearn(cfg LearnConfig) (*Learn, error) {
 		cfg.Now = time.Now
 	}
 	return &Learn{cfg: cfg, tried: map[string]int{}, asks: map[string]int{}, notBefore: map[string]time.Time{},
-		lastRecheck: cfg.Now()}, nil
+		lastRecheck: cfg.Now(), built: map[string]keptCandidate{}}, nil
 }
 
 func (l *Learn) Loop() Loop { return Improve }
@@ -368,20 +402,51 @@ func (l *Learn) done(ctx context.Context, key string, n int) {
 var ErrOutOfClass = errors.New("loops: candidate writes outside its hypothesis's namespace")
 
 func (l *Learn) propose(ctx context.Context, h Hypothesis, ev Evidence) (change.Report, error) {
-	built, err := l.cfg.Builder.Build(ctx, Brief{Hypothesis: h, Dev: ev.Dev})
-	if err != nil {
-		return change.Report{}, err
+	brief := briefDigest(h, ev.Dev)
+	l.mu.Lock()
+	k, ok := l.built[h.Key]
+	delete(l.built, h.Key)
+	l.mu.Unlock()
+	cand := k.cand
+	reuse := ok && k.brief == brief && l.cfg.Now().Sub(k.at) <= change.ResumeFor
+	for _, t := range k.tasks {
+		reuse = reuse && !ev.Held(t)
 	}
-	// Checked and proposed bytes are the same: a builder keeps no handle
-	// on what is checked (L3 on #89).
-	cand := owned(built)
-	if err := inClass(h.Class, cand); err != nil {
-		return change.Report{}, err
+	if !reuse {
+		// No kept candidate, or its brief changed, it expired, or one of
+		// its tasks is now held out: build afresh.
+		built, err := l.cfg.Builder.Build(ctx, Brief{Hypothesis: h, Dev: ev.Dev})
+		if err != nil {
+			return change.Report{}, err
+		}
+		// Checked and proposed bytes are the same: a builder keeps no
+		// handle on what is checked (L3 on #89).
+		cand = owned(built)
+		if err := inClass(h.Class, cand); err != nil {
+			return change.Report{}, err
+		}
+		// Source, origin, and the public mark are the broker's, from the
+		// REV-5 labels of every input; the builder asserts none of them.
+		cand.Source, cand.Origin, cand.Public = change.Local, "loop1", public(h, ev.Dev)
 	}
-	// Source, origin, and the public mark are the broker's, from the
-	// REV-5 labels of every input; the builder asserts none of them.
-	cand.Source, cand.Origin, cand.Public = change.Local, "loop1", public(h, ev.Dev)
-	return l.cfg.Pipeline.Propose(ctx, cand)
+	rep, err := l.cfg.Pipeline.Propose(ctx, cand)
+	if errors.Is(err, change.ErrInterrupted) {
+		// Preempted mid-evaluation: keep the checked candidate for the
+		// next offer, so the pipeline can resume its pairs.
+		l.mu.Lock()
+		l.built[h.Key] = keptCandidate{cand: cand, brief: brief, tasks: slices.Clone(h.Tasks), at: l.cfg.Now()}
+		for len(l.built) > maxKeptCandidates {
+			oldest := ""
+			for k, v := range l.built {
+				if oldest == "" || v.at.Before(l.built[oldest].at) || v.at.Equal(l.built[oldest].at) && k < oldest {
+					oldest = k
+				}
+			}
+			delete(l.built, oldest)
+		}
+		l.mu.Unlock()
+	}
+	return rep, err
 }
 
 // owned copies a candidate's files and deletions.
