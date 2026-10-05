@@ -22,7 +22,9 @@ import (
 
 type stillOwner struct{}
 
-func (stillOwner) LocalStatus() owner.LocalStatus                           { return owner.LocalStatus{Stopped: true} }
+func (stillOwner) LocalStatus() owner.LocalStatus {
+	return owner.LocalStatus{Stopped: true, LocalLeft: 24}
+}
 func (stillOwner) LocalGridCell() string                                    { return "C3" }
 func (stillOwner) LocalSignIn(string) (time.Time, error)                    { return time.Time{}, owner.ErrWrongCode }
 func (stillOwner) LocalStop(context.Context) error                          { return nil }
@@ -50,8 +52,9 @@ func TestThePageCallsAgentosdOverItsSocket(t *testing.T) {
 	if err := c.Call(ctx, localapi.OpStatus, struct{}{}, &st); err != nil || !st.Stopped || st.UnlockDays != 7 {
 		t.Fatalf("status: %+v %v", st, err)
 	}
-	if err := c.Call(ctx, localapi.OpSignIn, localapi.SignIn{Code: "000000"}, nil); !refused(err, localapi.RefusedWrongCode) {
-		t.Fatalf("wrong sign-in: %v", err)
+	var ses localapi.Session
+	if err := c.Call(ctx, localapi.OpSignIn, localapi.SignIn{Code: "000000"}, &ses); err != nil || ses.Refusal != localapi.RefusedWrongCode || ses.Token != "" {
+		t.Fatalf("wrong sign-in: %+v %v", ses, err)
 	}
 	if err := c.Call(ctx, localapi.OpRequests, localapi.Auth{}, nil); !refused(err, localapi.ErrUnauthorized) {
 		t.Fatalf("no token: %v", err)
@@ -130,5 +133,53 @@ func TestApprovalsSayWhenTheBoxIsNotAnswering(t *testing.T) {
 	}
 	if limitedText != "Too many wrong codes were tried on this Wi-Fi. Wait a minute, then try again." {
 		t.Fatalf("limited text %q", limitedText) // UX-2wb-4
+	}
+}
+
+type leftOwner struct {
+	stillOwner
+	left int
+}
+
+func (o leftOwner) LocalStatus() owner.LocalStatus {
+	st := owner.LocalStatus{Stopped: true, LocalLeft: o.left}
+	if o.left == 0 {
+		st.LocalReset = "14:05"
+	}
+	return st
+}
+
+// UX-2wb-2 under Security D1: the response to a wrong code says what is
+// left of the day's tries; the sign-in and status pages, fetched, never do.
+func TestTheTriesLeftShowOnlyInTheWrongCodeResponse(t *testing.T) {
+	for _, c := range []struct {
+		left int
+		want string
+	}{
+		{5, wrongCodeText},
+		{2, wrongCodeText + " 2 tries left today."},
+		{0, "No more codes can be tried today. Try again after 14:05, or use your recovery key."},
+	} {
+		s, err := New(Config{AP: testAP()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.SetOwner(InProcess(localsrv.New(localsrv.Config{Owner: leftOwner{left: c.left}}).Ops()))
+		do := func(method, path, form string) string {
+			req := httptest.NewRequest(method, "http://10.42.0.1"+path, strings.NewReader(form))
+			req.RemoteAddr = "10.42.0.20:5000"
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			w := httptest.NewRecorder()
+			s.ServeHTTP(w, req)
+			return w.Body.String()
+		}
+		if body := do("POST", "/unlock", "code=000000"); !strings.Contains(body, html.EscapeString(c.want)) {
+			t.Fatalf("left %d: wrong-code response lacks %q:\n%s", c.left, c.want, body)
+		}
+		for _, p := range []string{"/unlock", "/status"} {
+			if body := do("GET", p, ""); strings.Contains(body, "tries left") || strings.Contains(body, "No more codes") || strings.Contains(body, "14:05") {
+				t.Fatalf("GET %s tells the tries:\n%s", p, body)
+			}
+		}
 	}
 }

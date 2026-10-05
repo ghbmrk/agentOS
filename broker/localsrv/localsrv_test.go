@@ -34,7 +34,11 @@ type fakeOwner struct {
 func (f *fakeOwner) LocalStatus() owner.LocalStatus {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return owner.LocalStatus{Stopped: f.stopped, Locks: f.locks, LocalLeft: f.left}
+	st := owner.LocalStatus{Stopped: f.stopped, Locks: f.locks, LocalLeft: f.left}
+	if f.left <= 0 {
+		st.LocalReset = "14:05"
+	}
+	return st
 }
 func (f *fakeOwner) LocalGridCell() string { return "B4" }
 func (f *fakeOwner) LocalSignIn(code string) (time.Time, error) {
@@ -91,7 +95,7 @@ type rig struct {
 
 func newRig(t *testing.T) *rig {
 	r := &rig{t: t, now: time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)}
-	r.own = &fakeOwner{now: &r.now}
+	r.own = &fakeOwner{now: &r.now, left: 24}
 	r.srv = New(Config{Owner: r.own, LineNote: func() string { return "I can't reach my phone modem." }, Now: func() time.Time { return r.now }})
 	r.ops = r.srv.Ops()
 	return r
@@ -121,6 +125,14 @@ func (r *rig) signIn() string {
 		r.t.Fatal(err)
 	}
 	return out.(localapi.Session).Token
+}
+
+// refusal is a sign-in's refusal, as a code or in the Session.
+func refusal(out any, err error) string {
+	if ses, ok := out.(localapi.Session); ok && err == nil {
+		return ses.Refusal
+	}
+	return code(err)
 }
 
 func code(err error) string {
@@ -267,13 +279,13 @@ func TestSessionsAreBounded(t *testing.T) {
 
 func TestAWrongSignInIsRefusedWithAFixedCode(t *testing.T) {
 	r := newRig(t)
-	if _, err := r.call(localapi.OpSignIn, localapi.SignIn{Code: "000000"}); code(err) != localapi.RefusedWrongCode {
+	if out, err := r.call(localapi.OpSignIn, localapi.SignIn{Code: "000000"}); refusal(out, err) != localapi.RefusedWrongCode {
 		t.Fatalf("wrong sign-in: %v", err)
 	}
 	r.own.answerFn = nil
 	tooMany := &fakeTooMany{fakeOwner: r.own}
 	r.srv.cfg.Owner = tooMany
-	if _, err := r.call(localapi.OpSignIn, localapi.SignIn{Code: good}); code(err) != localapi.RefusedTooMany {
+	if out, err := r.call(localapi.OpSignIn, localapi.SignIn{Code: good}); refusal(out, err) != localapi.RefusedTooMany {
 		t.Fatalf("bound spent: %v", err)
 	}
 }
@@ -288,7 +300,7 @@ func TestWrongCodesOnTheSocketAreLimited(t *testing.T) {
 	r := newRig(t)
 	tok := r.signIn()
 	for i := 0; i < WrongPerMinute; i++ {
-		if _, err := r.call(localapi.OpSignIn, localapi.SignIn{Code: "000000"}); code(err) != localapi.RefusedWrongCode {
+		if out, err := r.call(localapi.OpSignIn, localapi.SignIn{Code: "000000"}); refusal(out, err) != localapi.RefusedWrongCode {
 			t.Fatalf("try %d: %v", i, err)
 		}
 	}
@@ -510,7 +522,7 @@ func TestEveryRefusedSignInCountsTowardTheLimit(t *testing.T) {
 	r.now = r.now.Add(time.Minute)
 	r.srv.cfg.Owner = &fakeTooMany{fakeOwner: r.own}
 	for i := 0; i < 2*WrongPerMinute; i++ {
-		if _, err := r.call(localapi.OpSignIn, localapi.SignIn{Code: good}); code(err) != localapi.RefusedTooMany {
+		if out, err := r.call(localapi.OpSignIn, localapi.SignIn{Code: good}); refusal(out, err) != localapi.RefusedTooMany {
 			t.Fatalf("spent bound %d: %v", i, err)
 		}
 	}
@@ -602,17 +614,50 @@ func TestAWrongResumeCodeTellsTheTriesLeft(t *testing.T) {
 	for _, c := range []struct {
 		left int
 		want string
-	}{{5, ""}, {2, "2 tries left today."}, {1, "1 try left today."}} {
+	}{{5, ""}, {2, "2 tries left today."}, {1, "1 try left today."}, {0, "No more codes can be tried today. Try again after 14:05, or use your recovery key."}} {
 		r.own.mu.Lock()
 		r.own.left = c.left
 		r.own.mu.Unlock()
 		out, err := r.call(localapi.OpResume, localapi.Resume{Token: tok, Code: "000000"})
-		if a := out.(localapi.Answered); err != nil || a.Refusal != localapi.RefusedWrongCode || a.Text != c.want {
+		want := localapi.RefusedWrongCode
+		if c.left == 0 {
+			want = localapi.RefusedTooMany
+		}
+		if a := out.(localapi.Answered); err != nil || a.Refusal != want || a.Text != c.want {
 			t.Fatalf("left %d: %+v %v", c.left, out, err)
 		}
 		r.now = r.now.Add(time.Minute) // past the socket's limit
 	}
-	if _, err := r.call(localapi.OpSignIn, localapi.SignIn{Code: "000000"}); code(err) != localapi.RefusedWrongCode {
-		t.Fatalf("sign-in: %v", err)
+	if out, err := r.call(localapi.OpSignIn, localapi.SignIn{Code: "000000"}); refusal(out, err) != localapi.RefusedTooMany {
+		t.Fatalf("sign-in once none are left: %v", err)
+	}
+}
+
+// UX-2wb-2 under Security D1: a wrong sign-in code's response says what is
+// left of the day's tries; status before sign-in never does.
+func TestAWrongSignInTellsTheTriesLeftOnlyInItsResponse(t *testing.T) {
+	r := newRig(t)
+	for _, c := range []struct {
+		left    int
+		refusal string
+		text    string
+	}{
+		{5, localapi.RefusedWrongCode, ""},
+		{2, localapi.RefusedWrongCode, "2 tries left today."},
+		{0, localapi.RefusedTooMany, "No more codes can be tried today. Try again after 14:05, or use your recovery key."},
+	} {
+		r.own.mu.Lock()
+		r.own.left = c.left
+		r.own.mu.Unlock()
+		out, err := r.call(localapi.OpSignIn, localapi.SignIn{Code: "000000"})
+		if ses := out.(localapi.Session); err != nil || ses.Refusal != c.refusal || ses.Text != c.text || ses.Token != "" {
+			t.Fatalf("left %d: %+v %v", c.left, out, err)
+		}
+		st, _ := r.call(localapi.OpStatus, struct{}{})
+		b, _ := json.Marshal(st)
+		if strings.Contains(string(b), "tries") || strings.Contains(string(b), "14:05") || strings.Contains(string(b), "No more") {
+			t.Fatalf("status before sign-in tells the tries: %s", b)
+		}
+		r.now = r.now.Add(time.Minute)
 	}
 }

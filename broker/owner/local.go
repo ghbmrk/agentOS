@@ -193,6 +193,9 @@ type LocalStatus struct {
 	// LocalLeft is how many local tries the day's bound has left. Only a
 	// signed-in page may show it (Security D1 on P2-2w).
 	LocalLeft int
+	// LocalReset is when the spent bound resets, as the owner's texts show
+	// times ("14:05"); "" while tries are left.
+	LocalReset string
 }
 
 // LocalStatus reports the channel's state for the local UI.
@@ -208,7 +211,17 @@ func (c *Channel) LocalStatus() LocalStatus {
 		Challenged:    c.codes.st.Challenged,
 		Locks:         c.codes.st.Locks,
 		LocalLeft:     c.localLeftLocked(now),
+		LocalReset:    c.localResetLocked(now),
 	}
+}
+
+// localResetLocked is the spent bound's fixed reset time, or "". Tries
+// past the bound are refused unchecked and never move it (takeLocalLocked).
+func (c *Channel) localResetLocked(now time.Time) string {
+	if c.localLeftLocked(now) > 0 {
+		return ""
+	}
+	return c.clock(c.codes.st.LocalStart.Add(WrongWindow))
 }
 
 // localLeftLocked is what the local bound has left at now.

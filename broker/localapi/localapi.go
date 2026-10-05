@@ -82,8 +82,13 @@ type SignIn struct {
 // Session is a sign-in's result: the token, valid until Until unless
 // revoked first (sign-out, a session lock).
 type Session struct {
-	Token string    `json:"token"`
-	Until time.Time `json:"until"`
+	Token string    `json:"token,omitempty"`
+	Until time.Time `json:"until,omitempty"`
+	// Refusal, on a refused sign-in: RefusedWrongCode or RefusedTooMany.
+	// Text then says what is left of the day's tries, in the response to
+	// the code just tried only, never on a status op (Security D1, UX-2wb-2).
+	Refusal string `json:"refusal,omitempty"`
+	Text    string `json:"text,omitempty"`
 }
 
 // Auth carries a token.

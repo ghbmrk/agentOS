@@ -457,6 +457,15 @@ const (
 	limitedText   = "Too many wrong codes were tried on this Wi-Fi. Wait a minute, then try again."
 )
 
+// refusalText is the page's line for a refused code: what is left of the
+// day's tries comes from agentosd, in the response to this code only.
+func refusalText(refusal, left string) string {
+	if refusal == localapi.RefusedTooMany && left != "" {
+		return left
+	}
+	return strings.TrimSpace(wrongCodeText + " " + left)
+}
+
 // checkSignIn returns the new session's token.
 func (s *Server) checkSignIn(w http.ResponseWriter, r *http.Request, code string) (string, error) {
 	if code == "" || len(code) > localapi.MaxCode {
@@ -465,10 +474,8 @@ func (s *Server) checkSignIn(w http.ResponseWriter, r *http.Request, code string
 	var ses localapi.Session
 	err := s.call(r.Context(), localapi.OpSignIn, localapi.SignIn{Code: code}, &ses)
 	switch {
-	case refused(err, localapi.RefusedTooMany):
-		return "", errors.New("Too many tries on the box's Wi-Fi in the last day, so sign-in here is paused for up to 24 hours. Your phone still works: text a code to the box.")
-	case refused(err, localapi.RefusedWrongCode):
-		return "", errors.New(wrongCodeText)
+	case err == nil && ses.Refusal != "":
+		return "", errors.New(refusalText(ses.Refusal, ses.Text))
 	case refused(err, localapi.ErrLimited):
 		return "", errors.New(limitedText)
 	case err != nil:
@@ -529,11 +536,8 @@ func (s *Server) resume(w http.ResponseWriter, r *http.Request) {
 	case localapi.RefusedCodeNeeded:
 		s.statusPageResume(w, r, resumeCodeText)
 		return
-	case localapi.RefusedTooMany:
-		s.statusPageResume(w, r, "Too many tries on the box's Wi-Fi in the last day, so resuming here is paused for up to 24 hours. Text RESUME to the box instead.")
-		return
 	default:
-		s.statusPageResume(w, r, strings.TrimSpace(wrongCodeText+" "+a.Text))
+		s.statusPageResume(w, r, refusalText(a.Refusal, a.Text))
 		return
 	}
 	// The owner channel's text names each held action's new time and UNDO

@@ -160,10 +160,9 @@ func (s *Server) signIn(_ context.Context, _ sockets.Peer, args json.RawMessage)
 	// only the day's spent bound does not, since nothing was tried.
 	s.endTry(err != nil && !errors.Is(err, owner.ErrTooMany))
 	switch {
-	case errors.Is(err, owner.ErrWrongCode):
-		return nil, sockets.Code(localapi.RefusedWrongCode)
-	case errors.Is(err, owner.ErrTooMany):
-		return nil, sockets.Code(localapi.RefusedTooMany)
+	case errors.Is(err, owner.ErrWrongCode), errors.Is(err, owner.ErrTooMany):
+		r, t := s.triesLeft(err)
+		return localapi.Session{Refusal: r, Text: t}, nil
 	case err != nil:
 		return nil, errFailed
 	}
@@ -235,15 +234,9 @@ func (s *Server) resume(_ context.Context, _ sockets.Peer, args json.RawMessage)
 		_, err := s.cfg.Owner.LocalSignIn(in.Code)
 		s.endTry(err != nil && !errors.Is(err, owner.ErrTooMany))
 		switch {
-		case errors.Is(err, owner.ErrWrongCode):
-			// The page is signed in, so the day's tries may be told (UX-2wb-2).
-			a := localapi.Answered{Refusal: localapi.RefusedWrongCode}
-			if left := s.cfg.Owner.LocalStatus().LocalLeft; left <= 2 {
-				a.Text = fmt.Sprintf("%d %s left today.", left, map[bool]string{true: "try", false: "tries"}[left == 1])
-			}
-			return a, nil
-		case errors.Is(err, owner.ErrTooMany):
-			return localapi.Answered{Refusal: localapi.RefusedTooMany}, nil
+		case errors.Is(err, owner.ErrWrongCode), errors.Is(err, owner.ErrTooMany):
+			r, t := s.triesLeft(err)
+			return localapi.Answered{Refusal: r, Text: t}, nil
 		case err != nil:
 			return nil, errFailed
 		}
@@ -304,6 +297,21 @@ func (s *Server) answer(_ context.Context, _ sockets.Peer, args json.RawMessage)
 		return localapi.Answered{Text: msg, Refusal: localapi.RefusedNotSettled}, nil
 	}
 	return nil, errFailed
+}
+
+// triesLeft is the refusal of a wrong or unchecked code and what the day's
+// local tries have left, told only in the response to the code just tried
+// (Security D1, UX-2wb-2): a count once 2 or fewer remain, and once none
+// remain, the bound's fixed reset.
+func (s *Server) triesLeft(err error) (refusal, text string) {
+	st := s.cfg.Owner.LocalStatus()
+	switch {
+	case errors.Is(err, owner.ErrTooMany), st.LocalLeft <= 0:
+		return localapi.RefusedTooMany, "No more codes can be tried today. Try again after " + st.LocalReset + ", or use your recovery key."
+	case st.LocalLeft <= 2:
+		return localapi.RefusedWrongCode, fmt.Sprintf("%d %s left today.", st.LocalLeft, map[bool]string{true: "try", false: "tries"}[st.LocalLeft == 1])
+	}
+	return localapi.RefusedWrongCode, ""
 }
 
 // mint records a session until until, signed in under locks, and returns

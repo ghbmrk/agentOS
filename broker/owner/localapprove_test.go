@@ -1,6 +1,7 @@
 package owner
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -713,5 +714,31 @@ func TestThePageGetsStatusAsThePhoneDoes(t *testing.T) {
 	got := r.ch.LocalStatusLines()
 	if want := r.say("STATUS"); got != want || !strings.Contains(got, "1 waiting for you on my Wi-Fi page.") {
 		t.Fatalf("page %q\nphone %q", got, want)
+	}
+}
+
+// Security on UX-2wb-2: once the day's local tries are spent, a code is
+// refused unchecked, and further tries never move the reset the page
+// tells; before then the reset is not told.
+func TestTheSpentLocalBoundHasAFixedReset(t *testing.T) {
+	r := newRig(t, nil)
+	start := r.clock()
+	if st := r.ch.LocalStatus(); st.LocalLeft != LocalBound || st.LocalReset != "" {
+		t.Fatalf("fresh: %+v", st)
+	}
+	r.ch.codes.commit(func(s *State) { s.LocalStart, s.LocalUsed = start, LocalBound })
+	want := start.Add(WrongWindow).In(time.UTC).Format("15:04")
+	for i := 0; i < 3; i++ {
+		r.advance(time.Hour)
+		code := totpAt(testSecrets.TOTPSeed, r.clock().Unix()) // a right code, refused unchecked
+		if _, err := r.ch.LocalSignIn(code); !errors.Is(err, ErrTooMany) {
+			t.Fatalf("try %d past the bound: %v", i, err)
+		}
+		if st := r.ch.LocalStatus(); st.LocalLeft != 0 || st.LocalReset != want {
+			t.Fatalf("try %d: %+v, want reset %s", i, st, want)
+		}
+	}
+	if r.ch.LocalStatus().Unlocked {
+		t.Fatal("a code past the bound was checked")
 	}
 }

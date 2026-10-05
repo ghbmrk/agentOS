@@ -48,7 +48,7 @@ func TestTheLocalUISocketServesThePageOps(t *testing.T) {
 			t.Errorf("%s without a token: %+v", op, r)
 		}
 	}
-	if r := send(t, sock, localapi.OpSignIn, localapi.SignIn{Code: "000000"}); r.OK || r.Error != localapi.RefusedWrongCode {
+	if r := send(t, sock, localapi.OpSignIn, localapi.SignIn{Code: "000000"}); !r.OK || !strings.Contains(string(r.Result), `"refusal":"`+localapi.RefusedWrongCode+`"`) {
 		t.Fatalf("wrong sign-in: %+v", r)
 	}
 	// The sockets keep their own ops (Security L3).
