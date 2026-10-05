@@ -1,6 +1,6 @@
 package change
 
-// REQ: CHG-1, CHG-2, CHG-3, CHG-6
+// REQ: CHG-1, CHG-2, CHG-3, CHG-6, CAP-3
 
 import (
 	"context"
@@ -604,3 +604,31 @@ func (f *fakeTarget) Apply(t Tree) error {
 }
 
 func itoa(n int) string { return strconv.Itoa(n) }
+
+// CAP-3: deleting a record a task used removes the cases built on that
+// task, durably, without an owner intent; security fixtures stay.
+func TestForgetTasksErasesCasesOfDeletedTasks(t *testing.T) {
+	e := newEnv(t, nil)
+	a := e.taskCase(ClassSkill, "in-a", "out-a", Accepted)
+	b := e.taskCase(ClassSkill, "in-b", "out-b", Accepted)
+	n, err := e.p.ForgetTasks(a.Task, "no-such-task", "")
+	if err != nil || n != 1 {
+		t.Fatalf("forgot %d, %v", n, err)
+	}
+	p, err := New(e.p.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := p.st.Cases[a.ID]; ok {
+		t.Fatal("case of a deleted task survived a reload")
+	}
+	if _, ok := p.st.Cases[b.ID]; !ok {
+		t.Fatal("unrelated case removed")
+	}
+	if _, ok := p.st.Cases["sec-1"]; !ok || p.st.Forgotten != 1 {
+		t.Fatalf("security fixture or count wrong: %d", p.st.Forgotten)
+	}
+	if n, _ := e.p.ForgetTasks(a.Task); n != 0 {
+		t.Fatal("not idempotent")
+	}
+}

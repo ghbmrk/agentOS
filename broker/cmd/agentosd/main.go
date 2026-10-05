@@ -115,8 +115,9 @@ func (r recallLabels) Raise(id string) error { return r.m.RaiseLabel(id, vm.Priv
 // identity key from the vault process (recall K5), and opens recall, its
 // event bus and provenance record, then serves the recall tools. Until then
 // the tools answer that recall opens after the unlock. STOP and STATUS
-// never wait on any of it.
-func openRecall(ctx context.Context, v *modelroute.Verifier, dir string, labels recall.Labeler, late *recalltool.Late) {
+// never wait on any of it. sc carries the labels and where deletions reach
+// (the journal and, when machines run, the machine manager).
+func openRecall(ctx context.Context, v *modelroute.Verifier, sc recalltool.ServiceConfig, late *recalltool.Late) {
 	var key []byte
 	for {
 		k, err := v.RecallKey()
@@ -133,7 +134,8 @@ func openRecall(ctx context.Context, v *modelroute.Verifier, dir string, labels 
 		case <-time.After(10 * time.Second):
 		}
 	}
-	svc, err := recalltool.OpenService(recalltool.ServiceConfig{Dir: dir, Key: key, Labeler: labels, Logf: log.Printf})
+	sc.Key, sc.Logf = key, log.Printf
+	svc, err := recalltool.OpenService(sc)
 	clear(key)
 	if err != nil {
 		log.Printf("recall disabled: %v", err)
@@ -215,7 +217,9 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	var recallLabeler recall.Labeler
+	// Deletions reach the journal's guest intents (CAP-3). The change
+	// pipeline is not run by the broker yet; whoever wires it sets Cases.
+	recallCfg := recalltool.ServiceConfig{Dir: recallDir, Journal: d.Engine()}
 	if runsc != "" {
 		svc := &lateServices{}
 		m, err := vm.Open(ctx, vm.Config{
@@ -232,7 +236,7 @@ func main() {
 			log.Printf("agent machines disabled: %v", err)
 		} else {
 			pre.m.Store(m)
-			recallLabeler = recallLabels{m}
+			recallCfg.Labeler, recallCfg.Machines = recallLabels{m}, m
 			if plane, err := openGuestPlane(m, d, cfg.SocketDir, meterPath, inboxPath, egressSocket, recallTools); err != nil {
 				// Machines cannot start without their guest sockets.
 				log.Printf("agent machines disabled: %v", err)
@@ -246,7 +250,7 @@ func main() {
 	// The recall identity key is vault-held (recall K5): recall opens once
 	// the vault process can hand it over.
 	if recallDir != "" && verifier != nil {
-		go openRecall(ctx, verifier, recallDir, recallLabeler, recallTools)
+		go openRecall(ctx, verifier, recallCfg, recallTools)
 	}
 	log.Printf("broker up; owner socket %s/%s", cfg.SocketDir, daemon.OwnerSocket)
 	d.Wait()

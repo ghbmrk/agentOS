@@ -29,7 +29,12 @@ type ServiceConfig struct {
 	// Labeler reads and raises machine labels (the VM manager). Nil:
 	// searches for owner data are refused, public-only ones still work.
 	Labeler recall.Labeler
-	Logf    func(format string, args ...any)
+	// Journal, Machines and Cases are where a deletion reaches beyond the
+	// index (Reach). Nil ones are not reached.
+	Journal  Journal
+	Machines Machines
+	Cases    Cases
+	Logf     func(format string, args ...any)
 }
 
 // Service is recall wired for the broker: the index, the event bus that
@@ -39,6 +44,7 @@ type Service struct {
 	Bus   *events.Bus
 	Prov  *Provenance
 	Tools *Tools
+	Reach *Reach
 	close []func() error
 }
 
@@ -95,6 +101,12 @@ func OpenService(cfg ServiceConfig) (*Service, error) {
 	if s.Prov, err = OpenProvenance(stores[2]); err != nil {
 		return fail(err)
 	}
+	s.Reach = &Reach{Prov: s.Prov, Journal: cfg.Journal, Machines: cfg.Machines, Cases: cfg.Cases, Logf: cfg.Logf}
+	// Registering replays every tombstone, so a reach a crash cut short
+	// runs again (CAP-3).
+	if err := s.Index.OnDelete(s.Reach.OnDelete); err != nil {
+		cfg.Logf("recall: replaying deletions past the index: %v", err)
+	}
 	label := func(machine string) string {
 		if cfg.Labeler != nil && cfg.Labeler.Label(machine) == recall.Public {
 			return "public"
@@ -107,20 +119,27 @@ func OpenService(cfg ServiceConfig) (*Service, error) {
 	return s, nil
 }
 
-// Run pumps the bus and prunes tombstones once a day by the 30-day policy
-// (K8) until ctx is done.
+// Run pumps the bus, retries pending deletion reach every minute, and
+// prunes tombstones once a day by the 30-day policy (K8) until ctx is done.
 func (s *Service) Run(ctx context.Context, logf func(string, ...any)) {
 	go s.Bus.Run(ctx, time.Second)
-	t := time.NewTicker(24 * time.Hour)
-	defer t.Stop()
+	retry := time.NewTicker(time.Minute)
+	defer retry.Stop()
+	var pruned time.Time
 	for {
-		if _, err := s.Index.PruneTombstones(TombstoneAge); err != nil && logf != nil {
-			logf("recall: pruning tombstones: %v", err)
+		if time.Since(pruned) >= 24*time.Hour {
+			pruned = time.Now()
+			if _, err := s.Index.PruneTombstones(TombstoneAge); err != nil && logf != nil {
+				logf("recall: pruning tombstones: %v", err)
+			}
 		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
+		case <-retry.C:
+			if s.Reach.Pending() > 0 {
+				s.Reach.Retry(ctx) // failures are logged by Reach
+			}
 		}
 	}
 }

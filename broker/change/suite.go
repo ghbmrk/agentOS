@@ -167,3 +167,40 @@ func (p *Pipeline) freezeLocked(classes []Class) frozen {
 	sort.Slice(f.security, func(i, j int) bool { return f.security[i].ID < f.security[j].ID })
 	return f
 }
+
+// ForgetTasks removes every task case recorded on one of tasks, because a
+// record the task used was deleted (CAP-3): the case's input and expected
+// output may hold it. This is erasure, not a suite change, so unlike an
+// owner's removal (CHG-2) it needs no approval; security fixtures carry no
+// task and are never removed this way. A smaller held-out set fails closed:
+// below MinHeldOut no candidate qualifies. Returns how many went.
+func (p *Pipeline) ForgetTasks(tasks ...string) (int, error) {
+	set := map[string]bool{}
+	for _, t := range tasks {
+		if t != "" {
+			set[t] = true
+		}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	next := p.st.copyCases()
+	n := 0
+	for id, c := range next {
+		if !c.Security && set[c.Task] {
+			delete(next, id)
+			n++
+		}
+	}
+	if n == 0 {
+		return 0, nil
+	}
+	old := p.st.Cases
+	p.st.Cases = next
+	p.st.Forgotten += n
+	if err := p.saveLocked(); err != nil {
+		p.st.Cases = old
+		p.st.Forgotten -= n
+		return 0, err
+	}
+	return n, nil
+}

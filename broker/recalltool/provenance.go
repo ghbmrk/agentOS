@@ -181,3 +181,21 @@ func (p *Provenance) compact() error {
 	p.lines = n
 	return nil
 }
+
+// ForgetSince drops what lineage was given at or after since: its machines
+// went back to before then, so it no longer holds those items.
+func (p *Provenance) ForgetSince(lineage string, since time.Time) error {
+	p.mu.Lock()
+	var ids []string
+	for id, t := range p.sets[lineage] {
+		if !t.Before(since) {
+			ids = append(ids, id)
+		}
+	}
+	p.mu.Unlock()
+	if len(ids) == 0 {
+		return nil
+	}
+	sort.Strings(ids)
+	return p.Forget(lineage, ids...)
+}

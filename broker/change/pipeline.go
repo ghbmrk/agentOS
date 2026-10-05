@@ -262,6 +262,9 @@ type state struct {
 	Outages    int             `json:"outages,omitempty"`
 	OutageSeen bool            `json:"outage_seen,omitempty"`
 	Cases      map[string]Case `json:"cases"`
+	// Forgotten counts task cases removed because a record they used
+	// was deleted (ForgetTasks, CAP-3).
+	Forgotten int `json:"forgotten,omitempty"`
 	// Applied lists intents whose effect took place, for Reconcile.
 	Applied map[string]bool `json:"applied"`
 }
