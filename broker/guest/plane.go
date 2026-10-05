@@ -265,8 +265,10 @@ func (p *Plane) get(id string) *machine {
 // redirect (a 307 that keeps the method and body since Go 1.26), so a
 // guest that follows it reaches a declared shape from an undeclared one.
 // Model paths go to the model chain as sent, escapes and dot segments
-// included, so its shape check (egress E1) sees and denies them; every
-// other service needs its exact path with nothing escaped (ADP-10).
+// included, so its shape check sees and denies them: on the box the model
+// router in the vault process, or the egress proxy (E1) where it is served
+// directly. Every other service needs its exact path with nothing escaped
+// (ADP-10).
 func (p *Plane) handler(m *machine) http.Handler {
 	model := p.model(m.id)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
