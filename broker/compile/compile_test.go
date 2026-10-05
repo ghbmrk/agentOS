@@ -656,4 +656,10 @@ func TestLoopBuilder(t *testing.T) {
 	if _, err := b.Build(context.Background(), loops.Brief{Hypothesis: loops.Hypothesis{Signal: loops.SignalRepeat}}); !errors.Is(err, ErrNoSkill) {
 		t.Fatalf("no evidence: %v", err)
 	}
+	if b.Ready(loops.Brief{Hypothesis: loops.Hypothesis{Signal: loops.SignalRepeat}}) {
+		t.Fatal("ready with no evidence")
+	}
+	if !b.Ready(loops.Brief{Hypothesis: loops.Hypothesis{Signal: loops.SignalRepeat, Evidence: r.eng.List()}}) {
+		t.Fatal("not ready with three accepted runs")
+	}
 }

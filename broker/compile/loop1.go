@@ -18,3 +18,13 @@ func (b LoopBuilder) Build(_ context.Context, br loops.Brief) (change.Candidate,
 }
 
 var _ loops.Builder = LoopBuilder{}
+
+// Ready reports whether the evidence holds enough owner-accepted runs of
+// one shape to compile (no model calls); until then Loop 1 waits for more
+// supporting tasks instead of running a job that would yield ErrNoSkill.
+func (b LoopBuilder) Ready(br loops.Brief) bool {
+	_, err := b.C.BuildSkill(br.Hypothesis.Evidence)
+	return err == nil
+}
+
+var _ loops.Readier = LoopBuilder{}
