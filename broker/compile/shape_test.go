@@ -22,7 +22,7 @@ func TestSkillShapeMatchesTrajectoryShape(t *testing.T) {
 			}, Recipients: []string{to}},
 			{Account: "mail", Action: "send", Params: map[string]any{
 				"draft": map[string]any{"ref": "d1", "opts": map[string]any{"Odd Key": 1}},
-				"empty": map[string]any{},
+				"empty": map[string]any{}, // one JSON leaf, never an empty obj (L3 on #89)
 			}},
 		}}
 	}

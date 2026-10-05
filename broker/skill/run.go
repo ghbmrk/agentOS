@@ -1,6 +1,8 @@
 package skill
 
 import (
+	"github.com/ghbmrk/agentos/broker/skill/format"
+
 	"context"
 	"encoding/json"
 	"fmt"
@@ -52,7 +54,7 @@ func ParseRequestID(reqID string) (skillID, runID string, step int, ok bool) {
 		return "", "", 0, false
 	}
 	parts := strings.Split(rest, "-")
-	if len(parts) != 3 || !idRE.MatchString(parts[0]) || !runIDRE.MatchString(parts[1]) {
+	if len(parts) != 3 || !format.ValidID(parts[0]) || !runIDRE.MatchString(parts[1]) {
 		return "", "", 0, false
 	}
 	n := 0

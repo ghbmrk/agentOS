@@ -1,6 +1,7 @@
 package loops
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -14,7 +15,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/route"
-	"github.com/ghbmrk/agentos/broker/skill"
+	"github.com/ghbmrk/agentos/broker/skill/format"
 )
 
 // REQ: LOOP-4, LOOP-6, CHG-1, OP-7
@@ -302,18 +303,28 @@ func TestNotReadyWaitsForMoreTasks(t *testing.T) {
 
 // skillFile is a valid one-step skill or procedure file for account,
 // with the shape its content gives.
-func skillFile(t *testing.T, kind skill.Kind, account string) (shape string, b []byte) {
+func skillFile(t *testing.T, kind format.Kind, account string) (shape string, b []byte) {
 	t.Helper()
-	sk := &skill.Skill{Version: skill.Version, Kind: kind, ID: "k000000000000", Runs: 1,
-		Slots: []skill.Slot{{Name: "to", Type: skill.Email, Max: 64}},
-		Steps: []skill.Step{{Account: account, Action: "send", Recipients: []skill.Node{{Slot: "to"}}}}}
+	return skillWith(t, kind, account, nil)
+}
+
+// skillWith is skillFile with extra params on its step, named after the
+// shape without them.
+func skillWith(t *testing.T, kind format.Kind, account string, params map[string]format.Node) (shape string, b []byte) {
+	t.Helper()
+	sk := &format.Skill{Version: format.Version, Kind: kind, ID: "k000000000000", Runs: 1,
+		Slots: []format.Slot{{Name: "to", Type: format.Email, Max: 64}},
+		Steps: []format.Step{{Account: account, Action: "send", Recipients: []format.Node{{Slot: "to"}}}}}
 	shape = sk.Shape()
 	sk.ID = "k" + shape
-	if kind == skill.KindProcedure {
+	if kind == format.KindProcedure {
 		sk.ID = "p" + shape
 	}
-	if err := sk.Validate(); err != nil {
-		t.Fatal(err)
+	sk.Steps[0].Params = params
+	if params == nil {
+		if err := sk.Validate(); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return shape, sk.Encode()
 }
@@ -323,9 +334,15 @@ func skillFile(t *testing.T, kind skill.Kind, account string) (shape string, b [
 // "Replaces" is the shape the skill file's own steps give, not its name
 // (P3-6e, security R1 on #74).
 func TestSkillMaySupersedeItsProcedure(t *testing.T) {
-	s1, b1 := skillFile(t, skill.KindSkill, "mail")
-	s2, b2 := skillFile(t, skill.KindSkill, "chat")
-	_, pb := skillFile(t, skill.KindProcedure, "mail")
+	s1, b1 := skillFile(t, format.KindSkill, "mail")
+	s2, b2 := skillFile(t, format.KindSkill, "chat")
+	_, pb := skillFile(t, format.KindProcedure, "mail")
+	ps2, pb2 := skillFile(t, format.KindProcedure, "chat")
+	if err := inClass(change.ClassProcedure, change.Candidate{Files: map[string][]byte{"procedures/p" + ps2 + ".json": pb2}}); err != nil {
+		t.Fatal(err)
+	}
+	_, emptyObj := skillWith(t, format.KindSkill, "mail", map[string]format.Node{"zzz": {Obj: map[string]format.Node{}}})
+	dup := bytes.Replace(b1, []byte(`{"version":1,`), []byte(`{"version":1,"kind":"procedure",`), 1)
 	k := func(s string) string { return "skills/k" + s + ".json" }
 	p := func(s string) string { return "procedures/p" + s + ".json" }
 	ok := change.Candidate{Files: map[string][]byte{k(s1): b1}, Delete: []string{p(s1)}}
@@ -347,6 +364,13 @@ func TestSkillMaySupersedeItsProcedure(t *testing.T) {
 		"skill renamed to another shape": {change.ClassSkill, change.Candidate{Files: map[string][]byte{k(s1): b2}, Delete: []string{p(s1)}}},
 		"skill file not a skill":         {change.ClassSkill, change.Candidate{Files: map[string][]byte{k(s1): []byte("{}")}, Delete: []string{p(s1)}}},
 		"procedure file under skills":    {change.ClassSkill, change.Candidate{Files: map[string][]byte{k(s1): pb}, Delete: []string{p(s1)}}},
+		// A task-B procedure named as task A's (security C1 on #89).
+		"procedure mislabelled": {change.ClassProcedure, change.Candidate{Files: map[string][]byte{p(s1): pb2}}},
+		// An empty object adds a {} param but no shape leaf (L3 on #89).
+		"skill with an empty obj":  {change.ClassSkill, change.Candidate{Files: map[string][]byte{k(s1): emptyObj}, Delete: []string{p(s1)}}},
+		"skill with duplicate key": {change.ClassSkill, change.Candidate{Files: map[string][]byte{k(s1): dup}, Delete: []string{p(s1)}}},
+		"skill with trailing }":    {change.ClassSkill, change.Candidate{Files: map[string][]byte{k(s1): append(bytes.Clone(b1), '}')}, Delete: []string{p(s1)}}},
+		"skill not canonical":      {change.ClassSkill, change.Candidate{Files: map[string][]byte{k(s1): append([]byte(" "), b1...)}, Delete: []string{p(s1)}}},
 	} {
 		if err := inClass(c.class, c.cand); !errors.Is(err, ErrOutOfClass) {
 			t.Errorf("%s: %v", name, err)

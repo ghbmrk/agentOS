@@ -1,4 +1,8 @@
-package skill
+// Package format is the compiled-skill file format: its types, strict
+// canonical decoding, validation, and the task shape a file's own steps
+// give. It imports only the standard library (no network), so the broker's
+// checks can use it without linking the skill bridge (ARC-2).
+package format
 
 import (
 	"bytes"
@@ -88,12 +92,24 @@ type Skill struct {
 }
 
 var (
+	// keyRE is a param or object key: compile walks only objects keyed
+	// like this (compile keyRE, security B1), so no other key is structure.
+	keyRE   = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
 	idRE    = regexp.MustCompile(`^[kp][0-9a-f]{12}$`)
 	slotRE  = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
 	nameRE  = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`) // as broker/guest
-	runIDRE = regexp.MustCompile(`^[A-Za-z0-9_]{1,32}$`)
 	emailRE = regexp.MustCompile(`^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$`)
 )
+
+// IsFileName reports whether path has a skill or procedure file's name:
+// skills/ or procedures/, then an ID, then .json. Only such files are
+// offered by the skill bridge or superseded by a skill.
+func IsFileName(path string) bool { return fileRE.MatchString(path) }
+
+var fileRE = regexp.MustCompile(`^(` + SkillsNS + `|` + ProceduresNS + `)/[kp][0-9a-f]{12}\.json$`)
+
+// ValidID reports whether id is a skill or procedure ID: k or p and 12 hex.
+func ValidID(id string) bool { return idRE.MatchString(id) }
 
 // ErrInvalid marks a skill file the runner refuses.
 var ErrInvalid = errors.New("skill: invalid skill file")
@@ -108,7 +124,7 @@ func (s *Skill) Path() string {
 }
 
 // Decode parses and validates a skill file strictly: unknown fields,
-// trailing data, and any rule in Validate refuse it.
+// anything but the canonical encoding, and any rule in Validate refuse it.
 func Decode(b []byte) (*Skill, error) {
 	if len(b) > MaxFile {
 		return nil, fmt.Errorf("%w: larger than %d bytes", ErrInvalid, MaxFile)
@@ -119,13 +135,34 @@ func Decode(b []byte) (*Skill, error) {
 	if err := dec.Decode(&s); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalid, err)
 	}
-	if dec.More() {
-		return nil, fmt.Errorf("%w: trailing data", ErrInvalid)
-	}
 	if err := s.Validate(); err != nil {
 		return nil, err
 	}
+	// Only the canonical encoding is accepted: no duplicate keys, spacing,
+	// or trailing data, so the bytes reviewed are the bytes run (security
+	// C2 on #89).
+	if !bytes.Equal(b, s.Encode()) {
+		return nil, fmt.Errorf("%w: not in canonical form", ErrInvalid)
+	}
 	return &s, nil
+}
+
+// DecodeFile decodes the file at path in the managed tree and checks that
+// its name is its own: path is its kind's namespace plus its ID, and the
+// shape in the ID is the one its steps give (Shape). A file that passes
+// is for exactly the task its name says (P3-6e).
+func DecodeFile(path string, b []byte) (*Skill, error) {
+	s, err := Decode(b)
+	if err != nil {
+		return nil, err
+	}
+	if s.Path() != path {
+		return nil, fmt.Errorf("%w: %s holds %s", ErrInvalid, path, s.Path())
+	}
+	if s.Shape() != s.ID[1:] {
+		return nil, fmt.Errorf("%w: %s holds another task's steps", ErrInvalid, path)
+	}
+	return s, nil
 }
 
 // Encode renders a skill canonically (sorted keys, no spaces).
@@ -181,6 +218,9 @@ func (s *Skill) Validate() error {
 			return bad("step %d: broker-state change", i+1)
 		}
 		for k, n := range st.Params {
+			if !keyRE.MatchString(k) {
+				return bad("step %d param key %q", i+1, k)
+			}
 			if err := checkNode(n, slots, used, 1); err != nil {
 				return bad("step %d param %q: %v", i+1, k, err)
 			}
@@ -253,7 +293,15 @@ func checkNode(n Node, slots, used map[string]bool, depth int) error {
 	}
 	if n.Obj != nil {
 		set++
-		for _, c := range n.Obj {
+		// compile never walks into an empty object (it is one JSON leaf),
+		// so an empty obj would change the skill but not its shape.
+		if len(n.Obj) == 0 {
+			return errors.New("empty object")
+		}
+		for k, c := range n.Obj {
+			if !keyRE.MatchString(k) {
+				return fmt.Errorf("object key %q", k)
+			}
 			if err := checkNode(c, slots, used, depth+1); err != nil {
 				return err
 			}
@@ -401,8 +449,10 @@ func fillNode(n Node, vals map[string]any) (any, error) {
 // Shape is the shape of the task this file was compiled from, recomputed
 // from its own steps: the accounts and actions in order, and every value's
 // position and JSON kind (a slot's kind from its type, a literal's from
-// its value). It equals compile.Shape of the source trajectories, so a
-// file's content, not its name, says which task it is for (P3-6e).
+// its value). It equals compile.Shape of the source trajectories: Validate
+// admits only keys compile walks (keyRE), which need no escaping, and no
+// empty object. So a file's content, not its name, says which task it is
+// for (P3-6e).
 func (s *Skill) Shape() string {
 	types := map[string]SlotType{}
 	for _, sl := range s.Slots {
@@ -440,7 +490,6 @@ func (s *Skill) Shape() string {
 	for i, st := range s.Steps {
 		fmt.Fprintf(h, "step %d %q %q %d\n", i, st.Account, st.Action, len(st.Recipients))
 	}
-	esc := strings.NewReplacer("~", "~0", "/", "~1")
 	for i, st := range s.Steps {
 		var walk func(path string, n Node)
 		walk = func(path string, n Node) {
@@ -449,11 +498,11 @@ func (s *Skill) Shape() string {
 				return
 			}
 			for _, k := range sortedKeys(n.Obj) {
-				walk(path+"/"+esc.Replace(k), n.Obj[k])
+				walk(path+"/"+k, n.Obj[k])
 			}
 		}
 		for _, k := range sortedKeys(st.Params) {
-			walk(esc.Replace(k), st.Params[k])
+			walk(k, st.Params[k])
 		}
 		for r, n := range st.Recipients {
 			fmt.Fprintf(h, "%d/r/%d %c\n", i, r, kind(n))
