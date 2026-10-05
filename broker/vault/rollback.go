@@ -284,8 +284,21 @@ func (v *Vault) advance() error {
 		return err
 	}
 	v.anchors = next
-	v.counter.Increment(a.Ref, v.counterAuth)
+	if err := v.counter.Increment(a.Ref, v.counterAuth); err != nil && v.warn != nil {
+		// The file is one ahead, which the next bind or write finishes;
+		// until then the file before this write still binds.
+		v.warn("this change is saved but not yet protected against an older copy of the drive; it will be at the next change or restart")
+	}
 	return nil
+}
+
+// OnWarn sets a function that tells the owner about a rollback check that
+// could not finish (V6), such as a counter increment that failed after a
+// write.
+func (v *Vault) OnWarn(f func(string)) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.warn = f
 }
 
 // Rebase gives the vault a new ID and counter authorization, drops every
@@ -300,9 +313,10 @@ func (v *Vault) advance() error {
 // a PC whose counter no longer applies, laundering an old copy there. The
 // owner trusts PCs again after a restore (CRED-9).
 //
-// The vault is written first, accepting only the new keys file, then the
-// keys file. A crash between leaves a pair OpenSealed refuses; the restore
-// writes into a fresh directory and starts over (recovery R3).
+// Like a slot change (keysbind.go), the vault is written first holding the
+// new keys file, then the keys file: a crash between rolls forward at the
+// next OpenSealed, where a trusted-host slot from the file before opens
+// nothing.
 func (v *Vault) Rebase(recovery Factor) (dropped int, err error) {
 	defer wipeFactor(recovery)
 	v.mu.Lock()
@@ -327,18 +341,22 @@ func (v *Vault) Rebase(recovery Factor) (dropped int, err error) {
 	if err != nil {
 		return 0, err
 	}
-	id, auth, anchors, counter, bound, keys := v.id, v.counterAuth, v.anchors, v.counter, v.bound, v.keysOK
+	id, auth, anchors, counter, bound := v.id, v.counterAuth, v.anchors, v.counter, v.bound
 	v.id, v.counterAuth, v.anchors, v.counter, v.bound = nil, nil, nil, nil, -1
-	v.keysOK = [][]byte{keysHash(raw)}
+	v.nextKeys = raw
 	err = v.ensureID()
 	if err == nil {
 		err = v.write(nil)
 	}
 	if err != nil {
-		v.id, v.counterAuth, v.anchors, v.counter, v.bound, v.keysOK = id, auth, anchors, counter, bound, keys
+		v.id, v.counterAuth, v.anchors, v.counter, v.bound, v.nextKeys = id, auth, anchors, counter, bound, nil
 		return 0, err
 	}
-	return len(kf.Slots) - len(keep), writeAtomic(v.keysPath, raw)
+	// Decided: the vault holds the new keys file and rolls forward to it.
+	if err := v.finishKeys(); err != nil {
+		return 0, fmt.Errorf("vault: rebase not finished; it completes when the vault next opens: %w", err)
+	}
+	return len(kf.Slots) - len(keep), nil
 }
 
 // Anchors lists the vault's anchors.

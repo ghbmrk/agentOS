@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/go-tpm/tpm2"
 	"github.com/google/go-tpm/tpm2/transport"
@@ -283,10 +284,18 @@ func increment(t transport.TPM, srkName []byte, handle uint32, name, auth []byte
 	}
 	defer flush(t, s.handle)
 	h := tpm2.TPMHandle(handle)
-	_, err = tpm2.NVIncrement{
-		AuthHandle: tpm2.AuthHandle{Handle: h, Name: tpm2.TPM2BName{Buffer: name}, Auth: session(s, auth, nil)},
-		NVIndex:    tpm2.NamedHandle{Handle: h, Name: tpm2.TPM2BName{Buffer: name}},
-	}.Execute(t)
+	// TPM_RC_NV_RATE: the TPM is pacing NV writes to spare its flash;
+	// wait and try again rather than leave the write unprotected.
+	for wait := 50 * time.Millisecond; ; wait *= 4 {
+		_, err = tpm2.NVIncrement{
+			AuthHandle: tpm2.AuthHandle{Handle: h, Name: tpm2.TPM2BName{Buffer: name}, Auth: session(s, auth, nil)},
+			NVIndex:    tpm2.NamedHandle{Handle: h, Name: tpm2.TPM2BName{Buffer: name}},
+		}.Execute(t)
+		if !errors.Is(err, tpm2.TPMRCNVRate) || wait > 2*time.Second {
+			break
+		}
+		time.Sleep(wait)
+	}
 	if err != nil {
 		return fmt.Errorf("tpmseal: advance rollback counter: %w", err)
 	}

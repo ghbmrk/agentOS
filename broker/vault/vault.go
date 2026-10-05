@@ -64,9 +64,12 @@ type payload struct {
 	ID          []byte   `json:"id"`
 	CounterAuth []byte   `json:"counter_auth"`
 	Anchors     []Anchor `json:"anchors,omitempty"`
-	// Keys are the SHA-256 hashes of the keys files this vault goes with
-	// (keysbind.go): one, or two while a slot change is under way.
+	// Keys is the SHA-256 hash of the keys file this vault goes with
+	// (keysbind.go), as a one-element list.
 	Keys [][]byte `json:"keys,omitempty"`
+	// Next is the whole keys file a slot change is moving to, while the
+	// change is under way; OpenSealed rolls forward to it.
+	Next []byte `json:"next_keys,omitempty"`
 }
 
 type envelope struct {
@@ -101,8 +104,12 @@ type Vault struct {
 	bound       int
 	// keyID is the envelope's KeyID (reencrypt.go).
 	keyID []byte
-	// keysOK are the keys files this vault accepts (keysbind.go).
-	keysOK [][]byte
+	// keysOK holds the hash of the keys file this vault accepts, and
+	// nextKeys the keys file a slot change is moving to (keysbind.go).
+	keysOK   [][]byte
+	nextKeys []byte
+	// warn tells the owner about a rollback check left unfinished.
+	warn func(string)
 }
 
 // ErrClosed is returned by every method called after Close.
@@ -158,7 +165,7 @@ func Open(path string, key []byte) (*Vault, error) {
 		p.Entries = map[string]record{}
 	}
 	return &Vault{path: path, aead: aead, entries: p.Entries,
-		id: p.ID, counterAuth: p.CounterAuth, anchors: p.Anchors, bound: -1, keyID: env.KeyID, keysOK: p.Keys}, nil
+		id: p.ID, counterAuth: p.CounterAuth, anchors: p.Anchors, bound: -1, keyID: env.KeyID, keysOK: p.Keys, nextKeys: p.Next}, nil
 }
 
 // Put stores or replaces a secret and writes the vault before returning.
@@ -279,7 +286,7 @@ func (v *Vault) save() error {
 // write seals the entries with anchors and replaces the file. Caller holds
 // mu.
 func (v *Vault) write(anchors []Anchor) error {
-	plain, err := json.Marshal(payload{Entries: v.entries, ID: v.id, CounterAuth: v.counterAuth, Anchors: anchors, Keys: v.keysOK})
+	plain, err := json.Marshal(payload{Entries: v.entries, ID: v.id, CounterAuth: v.counterAuth, Anchors: anchors, Keys: v.keysOK, Next: v.nextKeys})
 	if err != nil {
 		return err
 	}

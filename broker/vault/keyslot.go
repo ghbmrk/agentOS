@@ -211,6 +211,12 @@ func parseKeys(raw []byte) (*keyFile, error) {
 // unwrap returns the data key from the first slot of f's kind that opens,
 // among the slots for key ID want.
 func (kf *keyFile) unwrap(f Factor, want []byte) ([]byte, error) {
+	key, _, err := kf.unwrapSlot(f, want)
+	return key, err
+}
+
+// unwrapSlot is unwrap also returning the slot that opened.
+func (kf *keyFile) unwrapSlot(f Factor, want []byte) ([]byte, Slot, error) {
 	for _, s := range kf.Slots {
 		if s.Kind != f.Kind() || !bytes.Equal(s.KeyID, want) {
 			continue
@@ -220,21 +226,21 @@ func (kf *keyFile) unwrap(f Factor, want []byte) ([]byte, error) {
 			continue
 		}
 		if err != nil {
-			return nil, err
+			return nil, Slot{}, err
 		}
 		aead, err := newAEAD(kek)
 		wipe(kek)
 		if err != nil {
-			return nil, err
+			return nil, Slot{}, err
 		}
 		if len(s.Nonce) != aead.NonceSize() {
 			continue
 		}
 		if key, err := aead.Open(nil, s.Nonce, s.Wrapped, s.aad()); err == nil && len(key) == KeySize {
-			return key, nil
+			return key, s, nil
 		}
 	}
-	return nil, ErrNoSlotOpens
+	return nil, Slot{}, ErrNoSlotOpens
 }
 
 // keyID returns the one key ID every slot in the file shares, or
@@ -452,7 +458,7 @@ func OpenSealed(vaultPath, keysPath string, f Factor) (*Vault, error) {
 	if err != nil {
 		return nil, err
 	}
-	key, err := kf.unwrap(f, want)
+	key, slot, err := kf.unwrapSlot(f, want)
 	if err != nil {
 		return nil, err
 	}
@@ -462,7 +468,7 @@ func OpenSealed(vaultPath, keysPath string, f Factor) (*Vault, error) {
 		return nil, err
 	}
 	v.sealedBy(keysPath, key)
-	if err := v.checkKeys(raw, kf, want); err != nil {
+	if err := v.checkKeys(raw, kf, want, slot); err != nil {
 		v.Close()
 		return nil, err
 	}

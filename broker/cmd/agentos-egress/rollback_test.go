@@ -287,6 +287,15 @@ func TestTrustAnchorsTheVault(t *testing.T) {
 	if err := r.c.v.Bind(&tpmCounter{openTPM: other.Open, srk: srk}); err != nil {
 		t.Fatalf("PC without a counter: %v", err)
 	}
+	// Unlocking on that PC tells the owner it cannot check for an older
+	// copy.
+	bootGood(other)
+	r.notes = nil
+	r.start(t, other)
+	r.unknownHostUnlock(t)
+	if !r.noted(noteUnanchored) {
+		t.Fatalf("owner not told this PC cannot check: %q", r.notes)
+	}
 }
 
 // R10a in the vault process: re-encryption rewraps this PC's TPM slot

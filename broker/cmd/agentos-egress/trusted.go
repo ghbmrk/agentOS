@@ -487,7 +487,7 @@ var errWrongPINReencrypt = errors.New("this PC's boot PIN did not open its slot"
 // counted for the owner to trust again. A crash part way leaves fewer
 // trusted PCs, never a slot under an old key: those PCs fall back to the
 // owner's unlock.
-func (h *tpmHost) reencrypt(v *vault.Vault, pin string, owner []vault.Factor) (int, error) {
+func (h *tpmHost) reencrypt(v *vault.Vault, pin string, owner []vault.Factor) (_ int, err error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	oldKey, err := policyKey(v)
@@ -548,6 +548,24 @@ func (h *tpmHost) reencrypt(v *vault.Vault, pin string, owner []vault.Factor) (i
 	if _, err := v.Reencrypt(owner...); err != nil {
 		return 0, err
 	}
+	// From here every trusted-host slot is gone; a failure leaves the
+	// PCs not yet sealed again for the owner to trust again by name.
+	pending := append([]*tpmseal.Sealed(nil), away...)
+	if here != nil {
+		pending = append([]*tpmseal.Sealed{here}, pending...)
+	}
+	defer func() {
+		if err != nil && len(pending) > 0 {
+			names := make([]string, len(pending))
+			for i, p := range pending {
+				names[i] = p.Host
+				if names[i] == "" {
+					names[i] = "a trusted PC"
+				}
+			}
+			h.say("The vault's new key is in place, but these PCs must be trusted again: " + strings.Join(names, ", "))
+		}
+	}()
 	newKey, err := tpmseal.NewPolicyKey()
 	if err != nil {
 		return 0, err
@@ -587,6 +605,7 @@ func (h *tpmHost) reencrypt(v *vault.Vault, pin string, owner []vault.Factor) (i
 		if err != nil {
 			return dropped + len(away), err
 		}
+		pending = pending[1:]
 	}
 	for i, a := range away {
 		if err := v.AddSlot(&offlineFactor{srkPublic: a.SRKPublic, pub: &newKey.PublicKey, host: a.Host, trusted: a.Trusted}, func(s vault.Slot) bool {
@@ -595,6 +614,7 @@ func (h *tpmHost) reencrypt(v *vault.Vault, pin string, owner []vault.Factor) (i
 		}); err != nil {
 			return dropped + len(away) - i, err
 		}
+		pending = pending[1:]
 	}
 	return dropped, nil
 }
@@ -636,7 +656,23 @@ func (h *tpmHost) bindLocked(v *vault.Vault) error {
 	if err != nil && !errors.Is(err, vault.ErrRolledBack) && !errors.Is(err, vault.ErrCounterMissing) {
 		return fmt.Errorf("%w: %v", errRollbackCheck, err)
 	}
+	if err == nil && len(v.Anchors()) > 0 && !anchoredTo(v, c.Host()) {
+		h.say(noteUnanchored)
+	}
 	return err
+}
+
+// noteUnanchored tells the owner that this PC cannot check the drive for
+// an older copy, because only other PCs hold its counter (V6 limit a).
+const noteUnanchored = "This drive is trusted on another PC, so this PC can't tell whether it's an older copy. Unlock here only if the drive has stayed with you."
+
+func anchoredTo(v *vault.Vault, host string) bool {
+	for _, a := range v.Anchors() {
+		if a.Host == host {
+			return true
+		}
+	}
+	return false
 }
 
 // errRollbackCheck marks a rollback check the TPM did not answer; the

@@ -417,6 +417,7 @@ func (c *custody) serve(v *vault.Vault) error {
 		c.timer.Stop()
 		c.timer = nil
 	}
+	v.OnWarn(c.notify)
 	c.ph, c.v, c.proxy, c.expires, c.ticket, c.needPIN = open, v, p, time.Time{}, "", false
 	c.bootChanged, c.bootUpdated, c.bootSecure = false, false, false
 	return nil
