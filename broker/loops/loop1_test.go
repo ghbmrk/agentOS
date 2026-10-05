@@ -406,8 +406,27 @@ func TestALapsedOwnerRequestBacksOffThenStops(t *testing.T) {
 	if !run() || ap.proposals != 2 {
 		t.Fatal("not re-proposed after the backoff")
 	}
-	// After two lapsed asks it is not proposed again, however long.
-	more(4)
+	// After two lapsed asks it is not proposed again, however long, even
+	// with new mined evidence (so the stop, not a lack of evidence, holds
+	// it back).
+	mined := func() int {
+		ev, err := h.Evidence()
+		must(t, err)
+		n := 0
+		for _, hy := range l.mine(ev) {
+			if hy.Key == "correction:mail/draft" {
+				n = len(hy.Tasks)
+			}
+		}
+		return n
+	}
+	before := mined()
+	for i := 0; i < 40 && mined() <= before; i++ {
+		more(1)
+	}
+	if mined() <= before {
+		t.Fatal("no new mined evidence for the third round")
+	}
 	r.clk.add(30 * 24 * time.Hour)
 	if run() {
 		t.Fatal("proposed a third time; it should wait in the digest")
@@ -568,6 +587,90 @@ func TestAHeldOutGoalsWorkIsNotMinedWhereverItLanded(t *testing.T) {
 	}
 	if !got["failure:bank/move"] {
 		t.Fatalf("a later task of the lineage was not mined: %v", got)
+	}
+}
+
+// heldCase journals intents of goal(i) until one lands held out and
+// returns its ID.
+func heldCase(t *testing.T, r *rig, h *Harvester, prefix string, goal func(i int) string) string {
+	t.Helper()
+	for i := 0; ; i++ {
+		id := fmt.Sprintf("%s-%d", prefix, i)
+		r.task(id, goal(i), "mail", "draft", "private")
+		must(t, h.Harvest(Outcome{Intent: id, Action: Edited, Input: []byte("procedures/mail"), Output: []byte("v1"), Correction: []byte("v2")}))
+		dev := false
+		for _, c := range r.p.Dev(change.ClassTask) {
+			dev = dev || c.ID == id
+		}
+		if !dev {
+			return id
+		}
+	}
+}
+
+// failing journals a failed intent, so mining reports it if it is mined.
+func (r *rig) failing(id, goal, action string) {
+	r.tasks.out[id] = journal.ResultNotApplied
+	r.task(id, goal, "bank", action, "private")
+}
+
+func minedKeys(t *testing.T, r *rig, h *Harvester) map[string]bool {
+	t.Helper()
+	l, err := NewLearn(LearnConfig{Pipeline: r.p, Journal: r.eng, Harvest: h})
+	must(t, err)
+	ev, err := h.Evidence()
+	must(t, err)
+	got := map[string]bool{}
+	for _, hy := range l.mine(ev) {
+		got[hy.Key] = true
+	}
+	return got
+}
+
+// TestAHeldOutUnstampedCaseHoldsTheGoalsAroundIt: a held case with no goal
+// (the guest held two messages open) may be the work of the goal stamped
+// just before it or of the one stamped just after it (#55 L3 round 2).
+func TestAHeldOutUnstampedCaseHoldsTheGoalsAroundIt(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	r.failing("x", "owner:mX", "refund")
+	heldCase(t, r, h, "none", func(int) string { return "" })
+	r.failing("y", "owner:mY", "pay")
+	r.failing("z", "owner:mZ", "move")
+	got := minedKeys(t, r, h)
+	if got["failure:bank/refund"] || got["failure:bank/pay"] {
+		t.Fatalf("a goal around a held unstamped case was mined: %v", got)
+	}
+	if !got["failure:bank/move"] {
+		t.Fatalf("a later goal was not mined: %v", got)
+	}
+}
+
+// TestSeveralHeldGoalsEachHoldTheirNeighbours: with two held goals and
+// interleaved work, each holds the goals in its span and the first after
+// it; goals clear of both are mined.
+func TestSeveralHeldGoalsEachHoldTheirNeighbours(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	a := heldCase(t, r, h, "a", func(i int) string { return fmt.Sprintf("owner:mA%d", i) })
+	r.failing("p", "owner:mP", "send") // first goal after A: held
+	r.failing("q", "owner:mQ", "file") // clear of A: mined
+	b := heldCase(t, r, h, "b", func(i int) string { return fmt.Sprintf("owner:mB%d", i) })
+	r.failing("s", "owner:mS", "post") // inside B's span: held
+	r.task(b+"-again", "owner:mB"+b[len("b-"):], "mail", "label", "private")
+	r.failing("u", "owner:mU", "pay")  // first goal after B: held
+	r.failing("v", "owner:mV", "move") // clear of B: mined
+	_ = a
+	got := minedKeys(t, r, h)
+	for _, k := range []string{"failure:bank/send", "failure:bank/post", "failure:bank/pay"} {
+		if got[k] {
+			t.Errorf("%s mined: %v", k, got)
+		}
+	}
+	for _, k := range []string{"failure:bank/file", "failure:bank/move"} {
+		if !got[k] {
+			t.Errorf("%s not mined: %v", k, got)
+		}
 	}
 }
 

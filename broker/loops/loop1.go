@@ -501,24 +501,36 @@ func (l *Learn) mine(ev Evidence) []Hypothesis {
 	return out
 }
 
-// heldWithNext is the task keys mining skips (arbitrator on #55): every
-// held one; for a held goal of a guest lineage, every other goal of that
-// lineage with an intent inside the held goal's span (its first to its
-// last intent), which ran while it was active; and the first goal the
-// lineage started after that span, since a guest still finishing the held
-// task when handed the next owner message stamps that trailing work with
-// the next goal (guest G14). Order is the journal's submission order.
-// Unstamped work is the origin key, which Evidence already holds for a
-// held guest case.
+// heldWithNext is the task keys mining skips (arbitrator on #55). Every
+// held key; and, around each held case in a lineage, the goals whose work
+// may be the held task's own (guest G14):
+//   - a held goal's span runs from its first to its last intent; every
+//     other goal with an intent inside it ran while it was active;
+//   - a held case with no goal (the lineage held two messages open, or none
+//     was attributable) is a span of that one intent, and the nearest goal
+//     stamped before it is held too, since the unstamped work may be that
+//     goal's;
+//   - after either span, the first goal the lineage started is held: a
+//     guest still finishing the held task when handed the next owner
+//     message stamps that trailing work with the next goal.
+//
+// Each held case is handled on its own, so several held goals each hold
+// their own neighbours. Trailing work that lands past the next goal is
+// still mined (loops L8). Order is the journal's submission order; the
+// unstamped bucket itself is the origin key, which Evidence holds.
 func heldWithNext(sts []journal.Status, ev Evidence) map[string]bool {
 	held := map[string]bool{}
-	type span struct{ first, last int }
-	spans := map[string]*span{} // goal key -> span of its intents
 	type at struct {
 		i int
-		k string
+		k string // goal key; "" for an unstamped intent
 	}
-	byOrigin := map[string][]at{} // origin -> stamped intents in order
+	type span struct{ first, last int }
+	byOrigin := map[string][]at{} // origin -> intents in order
+	goalSpan := map[string]*span{}
+	var points []struct {
+		origin string
+		i      int
+	}
 	for i, s := range sts {
 		in := s.Intent
 		if in.Account == journal.BrokerAccount {
@@ -529,31 +541,56 @@ func heldWithNext(sts []journal.Status, ev Evidence) map[string]bool {
 			held[k] = true
 		}
 		if in.GoalID == "" {
+			byOrigin[in.Origin] = append(byOrigin[in.Origin], at{i, ""})
+			if ev.heldIntents[in.ID] {
+				points = append(points, struct {
+					origin string
+					i      int
+				}{in.Origin, i})
+			}
 			continue
 		}
-		if sp := spans[k]; sp == nil {
-			spans[k] = &span{i, i}
+		if sp := goalSpan[k]; sp == nil {
+			goalSpan[k] = &span{i, i}
 		} else {
 			sp.last = i
 		}
 		byOrigin[in.Origin] = append(byOrigin[in.Origin], at{i, k})
 	}
-	for _, ats := range byOrigin {
+	// around holds the goals of origin within [first, last], the first
+	// goal started after it, and, when before is set, the nearest goal
+	// stamped before it.
+	around := func(origin string, first, last int, before bool) {
+		ats := byOrigin[origin]
 		for _, a := range ats {
-			if !ev.Held(a.k) {
+			if a.k == "" {
 				continue
 			}
-			sp := spans[a.k]
-			for _, b := range ats {
-				if b.i >= sp.first && b.i <= sp.last {
-					held[b.k] = true // ran while the held goal was active
-				}
-				if b.i > sp.last && spans[b.k].first > sp.last {
-					held[b.k] = true // the first goal started after it
+			if a.i >= first && a.i <= last {
+				held[a.k] = true
+			}
+			if a.i > last && goalSpan[a.k].first > last {
+				held[a.k] = true
+				break
+			}
+		}
+		if before {
+			for n := len(ats) - 1; n >= 0; n-- {
+				if a := ats[n]; a.i < first && a.k != "" {
+					held[a.k] = true
 					break
 				}
 			}
 		}
+	}
+	for k, sp := range goalSpan {
+		if ev.Held(k) {
+			// Every intent of a goal shares one origin (its lineage).
+			around(sts[sp.first].Intent.Origin, sp.first, sp.last, false)
+		}
+	}
+	for _, p := range points {
+		around(p.origin, p.i, p.i, true)
 	}
 	return held
 }

@@ -194,6 +194,9 @@ type Evidence struct {
 	HeldOut int
 	// heldTasks are the task keys whose case is held out.
 	heldTasks map[string]bool
+	// heldIntents are the intents held-out cases were recorded on (a
+	// case's ID is its intent's).
+	heldIntents map[string]bool
 	// Dev are the dev-split task cases, the only ones a builder may see.
 	Dev []change.Case
 }
@@ -213,7 +216,7 @@ func (h *Harvester) Evidence() (Evidence, error) {
 	for _, c := range dev {
 		inDev[c.ID] = true
 	}
-	ev := Evidence{heldTasks: map[string]bool{}, Dev: dev}
+	ev := Evidence{heldTasks: map[string]bool{}, heldIntents: map[string]bool{}, Dev: dev}
 	ids := make([]string, 0, len(h.st.Tasks))
 	for id := range h.st.Tasks {
 		ids = append(ids, id)
@@ -226,6 +229,7 @@ func (h *Harvester) Evidence() (Evidence, error) {
 		// A task whose case may be held out is never mined, even if the
 		// pipeline may not have it; only cases it holds count.
 		ev.heldTasks[h.st.Tasks[id]] = true
+		ev.heldIntents[id] = true
 		if o := h.st.Origins[id]; o != "" {
 			ev.heldTasks[o] = true
 		}
