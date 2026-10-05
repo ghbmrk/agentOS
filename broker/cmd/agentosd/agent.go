@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
@@ -135,10 +137,30 @@ func nextWait(every time.Duration, backoff int, err error) (time.Duration, int) 
 	return wait, backoff
 }
 
+// errLaunchWritable refuses a launch file someone other than root or
+// agentosd could have written.
+var errLaunchWritable = errors.New("launch file is writable by others")
+
 // launchSpec reads how the agent machine starts (vm.Spec Argv and Env),
-// as guest/openclaw/launch.json records it.
+// as guest/openclaw/launch.json records it. It sets what a foreground
+// guest runs, so it must come from the signed host image's read-only root
+// filesystem: a file owned by anyone but root or agentosd, or writable by
+// group or others, is refused (L3 R2 on #56).
 func launchSpec(path string) (argv, env []string, err error) {
-	b, err := os.ReadFile(path)
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, nil, err
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok || fi.Mode().Perm()&0o022 != 0 || st.Uid != 0 && int(st.Uid) != os.Geteuid() {
+		return nil, nil, fmt.Errorf("%s: %w (mode %v)", path, errLaunchWritable, fi.Mode().Perm())
+	}
+	b, err := io.ReadAll(io.LimitReader(f, 1<<20))
 	if err != nil {
 		return nil, nil, err
 	}

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -170,6 +172,39 @@ func TestAgentLaunchSpecReadsTheGuestRig(t *testing.T) {
 	}
 	if argv[0] != "/usr/local/bin/agentos-guest-bridge" || len(env) == 0 {
 		t.Fatalf("argv %q env %q", argv, env)
+	}
+}
+
+// launch.json sets Argv and Env for a foreground guest, so it must come
+// from the signed host image, not a writable place: agentosd refuses one
+// that is group- or world-writable or owned by anyone but root or itself.
+func TestRES1AgentLaunchSpecRefusesAWritableFile(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "launch.json")
+	if err := os.WriteFile(p, []byte(`{"Argv":["/bridge"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := launchSpec(p); err != nil {
+		t.Fatalf("0644: %v", err)
+	}
+	for _, mode := range []os.FileMode{0o664, 0o646} {
+		if err := os.Chmod(p, mode); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := launchSpec(p); !errors.Is(err, errLaunchWritable) {
+			t.Errorf("%o: err = %v, want errLaunchWritable", mode, err)
+		}
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("owner check needs root to chown")
+	}
+	if err := os.Chmod(p, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(p, 4242, 4242); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := launchSpec(p); !errors.Is(err, errLaunchWritable) {
+		t.Errorf("owned by 4242: err = %v, want errLaunchWritable", err)
 	}
 }
 
