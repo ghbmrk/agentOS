@@ -208,6 +208,9 @@ func main() {
 	} else if lp, err = openLearning(learn, runsc != "" && egressSocket != "", &cfg); err != nil {
 		log.Printf("learning disabled: %v", err)
 	}
+	if lp == nil {
+		learningOff(&cfg)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

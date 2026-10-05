@@ -360,12 +360,8 @@ func sourceUse(t *testing.T, path, name, rel string) []string {
 			// A unix socket can front a network proxy, so a dial's
 			// address must come from configuration (a field or a
 			// variable), never a literal or an expression built here.
-			if se.Sel.Name != "Listen" && len(n.Args) > i+1 {
-				switch n.Args[i+1].(type) {
-				case *ast.Ident, *ast.SelectorExpr:
-				default:
-					at(n, se.Sel.Name+" to an address not taken from configuration")
-				}
+			if se.Sel.Name != "Listen" && len(n.Args) > i+1 && !configured(n.Args[i+1], f) {
+				at(n, se.Sel.Name+" to an address not taken from configuration")
 			}
 		case *ast.SelectorExpr:
 			if _, isDial := dials[n.Sel.Name]; isDial && !callee[n] {
@@ -388,6 +384,39 @@ func sourceUse(t *testing.T, path, name, rel string) []string {
 		return true
 	})
 	return bad
+}
+
+// configured reports a dial address that comes from configuration: a
+// parameter or local variable of this file, or a field of one (cfg.Socket).
+// A constant, a literal, an expression, a package-qualified name, or an
+// identifier this file does not declare (a package-level const or var in
+// another file) is not (L3 S1 on #90).
+func configured(e ast.Expr, f *ast.File) bool {
+	for {
+		se, ok := e.(*ast.SelectorExpr)
+		if !ok {
+			break
+		}
+		e = se.X
+	}
+	id, ok := e.(*ast.Ident)
+	if !ok || id.Obj == nil || id.Obj.Kind != ast.Var {
+		return false
+	}
+	// A package-level variable can be set at link time or by any file;
+	// only function parameters and locals count.
+	for _, d := range f.Decls {
+		if g, ok := d.(*ast.GenDecl); ok && g.Tok == token.VAR {
+			for _, sp := range g.Specs {
+				for _, n := range sp.(*ast.ValueSpec).Names {
+					if n.Obj == id.Obj {
+						return false
+					}
+				}
+			}
+		}
+	}
+	return true
 }
 
 // setsChecked reports that a client literal sets field key to a value the
@@ -468,6 +497,10 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 		{"loops", src(`"os"`, `var p, _ = os.StartProcess("/bin/sh", nil, nil)`)},
 		{"modelroute", src(`"net"`, `var c, _ = (&net.Dialer{}).Dial("unix", "/run/proxy.sock")`)},
 		{"modelroute", src(`"net"; "path/filepath"`, `var c, _ = (&net.Dialer{}).Dial("unix", filepath.Join("/run", "p.sock"))`)},
+		{"modelroute", src(`"net"`, `const sock = "/run/proxy.sock"; var c, _ = (&net.Dialer{}).Dial("unix", sock)`)},
+		{"modelroute", src(`"net"`, `var sock = "/run/proxy.sock"; var c, _ = (&net.Dialer{}).Dial("unix", sock)`)},
+		{"modelroute", src(`"net"`, `func g() { (&net.Dialer{}).Dial("unix", otherFileSock) }`)},
+		{"modelroute", src(`"net"; "os"`, `func g() { (&net.Dialer{}).Dial("unix", os.DevNull) }`)},
 	} {
 		path := filepath.Join(t.TempDir(), "p.go")
 		if err := os.WriteFile(path, []byte(c.src), 0o600); err != nil {
@@ -477,8 +510,9 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 			t.Errorf("missed in %s:\n%s", c.rel, c.src)
 		}
 	}
-	ok := src(`"net"; "net/http"; "net/http/httputil"`, `var sock string
-func g() {
+	ok := src(`"net"; "net/http"; "net/http/httputil"`, `type config struct{ Socket string }
+func g(sock string, cfg config) {
+	_, _ = (&net.Dialer{}).Dial("unix", cfg.Socket)
 	tr := &http.Transport{DialContext: func() { (&net.Dialer{}).DialContext(nil, "unix", sock) }}
 	_ = &httputil.ReverseProxy{Transport: tr}
 	_ = &http.Client{Transport: &http.Transport{DialContext: func() {}}}
