@@ -30,8 +30,8 @@ type fakeMachines struct {
 	events  []string
 	// locked mimics the manager holding its lock while it calls Open;
 	// a Lineage call then would deadlock on the box.
-	locked bool
-	misuse int
+	locked  bool
+	misuse  int
 	stepErr error // what Step answers; nil succeeds
 }
 

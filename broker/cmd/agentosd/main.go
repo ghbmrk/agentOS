@@ -94,6 +94,51 @@ func (n *stepNotes) Note() string {
 	return ""
 }
 
+// digestPeriod is how long the Undo line stands before the digest
+// carries it too (security R1, UX on SR2-3s).
+const digestPeriod = 24 * time.Hour
+
+// stepDigestKey is the digest notice key for the Undo line STATUS has
+// carried since shown, at now: none in the first digest period, then one
+// a day for 7 days, then one a week (W5's cadence). The key holds the
+// line, so a new reason or since-time is told at once; a success clears
+// the line, and with it any further key.
+func stepDigestKey(line string, shown, now time.Time) (string, bool) {
+	if line == "" || now.Sub(shown) < digestPeriod {
+		return "", false
+	}
+	d := int(now.Sub(shown) / digestPeriod)
+	if d > 7 {
+		d = 8 + (d-8)/7
+	}
+	return fmt.Sprintf("sr2-3s:%d:%s", d, line), true
+}
+
+// digest queues the Undo line for the owner's digest on stepDigestKey's
+// cadence, each minute until ctx ends. The line is the STATUS line,
+// verbatim: the digest adds no wording of its own.
+func (n *stepNotes) digest(ctx context.Context, notice func(key, line string) error) {
+	t := time.NewTicker(time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		p := n.p.Load()
+		if p == nil {
+			continue
+		}
+		line, shown := p.StepLine()
+		if key, ok := stepDigestKey(line, shown, time.Now()); ok {
+			if err := notice(key, line); err != nil {
+				log.Printf("undo digest line: %v", err)
+			}
+		}
+	}
+}
+
 func (a machines) RaisePrivate(id string) error { return a.m.RaiseLabel(id, vm.Private) }
 
 func (a machines) Lineage(id string) (string, error) {
@@ -517,6 +562,9 @@ func main() {
 			} else {
 				services.live.Store(&svc{plane})
 				steps.p.Store(plane)
+				if lp != nil {
+					go steps.digest(ctx, lp.pipe.Notice)
+				}
 				oa := &guest.OwnerAgent{Plane: plane, Machine: agentMachine}
 				if lp != nil {
 					oa.Delivered = lp.delivered
