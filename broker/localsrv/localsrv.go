@@ -15,6 +15,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 	"time"
@@ -235,7 +236,12 @@ func (s *Server) resume(_ context.Context, _ sockets.Peer, args json.RawMessage)
 		s.endTry(err != nil && !errors.Is(err, owner.ErrTooMany))
 		switch {
 		case errors.Is(err, owner.ErrWrongCode):
-			return localapi.Answered{Refusal: localapi.RefusedWrongCode}, nil
+			// The page is signed in, so the day's tries may be told (UX-2wb-2).
+			a := localapi.Answered{Refusal: localapi.RefusedWrongCode}
+			if left := s.cfg.Owner.LocalStatus().LocalLeft; left <= 2 {
+				a.Text = fmt.Sprintf("%d %s left today.", left, map[bool]string{true: "try", false: "tries"}[left == 1])
+			}
+			return a, nil
 		case errors.Is(err, owner.ErrTooMany):
 			return localapi.Answered{Refusal: localapi.RefusedTooMany}, nil
 		case err != nil:

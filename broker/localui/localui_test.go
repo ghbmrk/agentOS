@@ -478,7 +478,7 @@ func TestSignInGatesEverythingButSetupUnlockAndStatus(t *testing.T) {
 			t.Fatalf("%s without sign-in: %d %s", p, w.Code, w.Header().Get("Location"))
 		}
 	}
-	if w := r.post("/unlock", url.Values{"code": {"000000"}, "next": {"/review/"}}); !strings.Contains(w.Body.String(), "did not work") {
+	if w := r.post("/unlock", url.Values{"code": {"000000"}, "next": {"/review/"}}); !strings.Contains(w.Body.String(), html.EscapeString(wrongCodeText)) {
 		t.Fatalf("wrong code: %s", w.Body.String())
 	}
 	w := r.post("/unlock", url.Values{"code": {r.code()}, "next": {"/review/"}})

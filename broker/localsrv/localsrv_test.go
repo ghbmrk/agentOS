@@ -26,6 +26,7 @@ type fakeOwner struct {
 	stopped  bool
 	signIns  int
 	resumes  int
+	left     int
 	answers  []string
 	answerFn func(id, sum string, approve bool, code string) (string, error)
 }
@@ -33,7 +34,7 @@ type fakeOwner struct {
 func (f *fakeOwner) LocalStatus() owner.LocalStatus {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return owner.LocalStatus{Stopped: f.stopped, Locks: f.locks}
+	return owner.LocalStatus{Stopped: f.stopped, Locks: f.locks, LocalLeft: f.left}
 }
 func (f *fakeOwner) LocalGridCell() string { return "B4" }
 func (f *fakeOwner) LocalSignIn(code string) (time.Time, error) {
@@ -591,3 +592,27 @@ func TestNoRandomnessMintsNoToken(t *testing.T) {
 type failingRand struct{}
 
 func (failingRand) Read([]byte) (int, error) { return 0, errors.New("no entropy") }
+
+// UX-2wb-2: a wrong code on a signed-in RESUME tells the day's tries once
+// 2 or fewer remain; before sign-in no count is told (Security D1).
+func TestAWrongResumeCodeTellsTheTriesLeft(t *testing.T) {
+	r := newRig(t)
+	tok := r.signIn()
+	r.now = r.now.Add(localapi.FreshFor)
+	for _, c := range []struct {
+		left int
+		want string
+	}{{5, ""}, {2, "2 tries left today."}, {1, "1 try left today."}} {
+		r.own.mu.Lock()
+		r.own.left = c.left
+		r.own.mu.Unlock()
+		out, err := r.call(localapi.OpResume, localapi.Resume{Token: tok, Code: "000000"})
+		if a := out.(localapi.Answered); err != nil || a.Refusal != localapi.RefusedWrongCode || a.Text != c.want {
+			t.Fatalf("left %d: %+v %v", c.left, out, err)
+		}
+		r.now = r.now.Add(time.Minute) // past the socket's limit
+	}
+	if _, err := r.call(localapi.OpSignIn, localapi.SignIn{Code: "000000"}); code(err) != localapi.RefusedWrongCode {
+		t.Fatalf("sign-in: %v", err)
+	}
+}

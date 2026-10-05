@@ -453,7 +453,7 @@ func (s *Server) proofSignIn(w http.ResponseWriter, r *http.Request, ticket stri
 }
 
 const (
-	wrongCodeText = "That code did not work. Each code works once; wait for the next one."
+	wrongCodeText = "That code didn't work. Try the next code from your code generator." // UX-2wb-2
 	limitedText   = "Too many wrong codes were tried on this Wi-Fi. Wait a minute, then try again."
 )
 
@@ -533,7 +533,7 @@ func (s *Server) resume(w http.ResponseWriter, r *http.Request) {
 		s.statusPageResume(w, r, "Too many tries on the box's Wi-Fi in the last day, so resuming here is paused for up to 24 hours. Text RESUME to the box instead.")
 		return
 	default:
-		s.statusPageResume(w, r, wrongCodeText)
+		s.statusPageResume(w, r, strings.TrimSpace(wrongCodeText+" "+a.Text))
 		return
 	}
 	// The owner channel's text names each held action's new time and UNDO
