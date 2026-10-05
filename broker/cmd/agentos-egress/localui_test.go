@@ -147,13 +147,14 @@ func TestUnfinishedPassphraseChangeReported(t *testing.T) {
 	writeFileT(t, kp+".next", after)
 
 	clk := &clock{t: time.Now()}
+	var notes []string
 	c, err := newCustody(&custody{
 		statePath: filepath.Join(dir, "state", "unlock.json"),
 		open:      func(p string) (*vault.Vault, error) { return vault.OpenSealed(vp, kp, vault.Passphrase(p)) },
 		build:     func(*vault.Vault) (*egress.Proxy, error) { return nil, nil },
 		ttl:       15 * time.Minute,
 		now:       clk.now,
-		notify:    func(string) {},
+		notify:    func(s string) { notes = append(notes, s) },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -181,6 +182,17 @@ func TestUnfinishedPassphraseChangeReported(t *testing.T) {
 	}
 	if st, err := u.Confirm(ctx, ticket, totp(seed, clk.now()), false); err != nil || st.State != "open" || !st.ChangeUnfinished {
 		t.Fatalf("confirm: %+v %v", st, err)
+	}
+	// One owner text when the vault opens, since a trusted PC's unlock
+	// never reaches the page (P2-4h).
+	n := 0
+	for _, s := range notes {
+		if s == noteChangeUnfinished {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("owner notes %q", notes)
 	}
 	c.lock()
 	if st, err := u.Status(ctx); err != nil || st.ChangeUnfinished {

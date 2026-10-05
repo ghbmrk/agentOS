@@ -98,6 +98,11 @@ var (
 	errRolledBack = uerr(http.StatusConflict, "this drive's vault is older than this PC has seen, so it may be an old copy put back; nothing was unlocked. If you did not restore it, keep the drive and restore from your backup with the recovery key")
 )
 
+// noteChangeUnfinished is the owner's notice when the vault opens beside
+// a passphrase change that never took effect (vault ChangeUnfinished,
+// P2-4h), once per unlock: the old passphrase still opens it.
+const noteChangeUnfinished = "Your passphrase change did not finish, so your old passphrase still unlocks the box. Change it again."
+
 // noteCounterReset is the owner's notice, once, when this PC's rollback
 // counter for the vault is gone (vault.ErrCounterMissing; arbitrator
 // ruling on #45, B3). Wording fixed by that ruling.
@@ -546,6 +551,10 @@ func (c *custody) serve(v *vault.Vault) error {
 		c.timer = nil
 	}
 	v.OnWarn(c.notify)
+	if v.ChangeUnfinished() {
+		// A trusted PC's unlock never reaches the local page (P2-4h).
+		c.notify(noteChangeUnfinished)
+	}
 	c.ph, c.v, c.proxy, c.expires, c.ticket, c.needPIN = open, v, p, time.Time{}, "", false
 	c.bootChanged, c.bootUpdated, c.bootSecure = false, false, false
 	return nil
