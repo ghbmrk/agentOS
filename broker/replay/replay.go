@@ -34,6 +34,7 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
@@ -127,6 +128,11 @@ var (
 	// It wraps change.ErrNotEvaluated, which the pipeline counts as not
 	// evaluated (never a pass or a fail).
 	ErrNotEvaluated = fmt.Errorf("replay: changes the image or configuration: %w", change.ErrNotEvaluated)
+	// ErrOverPriceCeiling: the tree routes to a model priced above the
+	// active rule's dearest route, or to one with no known price, so the
+	// vault process refused its model calls (security C1 on #62). It wraps
+	// change.ErrNotEvaluated: never a pass or a fail.
+	ErrOverPriceCeiling = fmt.Errorf("replay: routes above the active price ceiling: %w", change.ErrNotEvaluated)
 )
 
 // destroyTimeout bounds destroying a replay machine after its run.
@@ -204,6 +210,9 @@ type run struct {
 	out   chan []byte
 	fail  chan error
 	once  sync.Once
+	// ceiling is set when the vault process refused a model call over the
+	// price ceiling; the run is then not evaluated whatever the guest says.
+	ceiling atomic.Bool
 }
 
 func (r *run) failed(err error) {
@@ -260,6 +269,9 @@ func (e *Evaluator) Run(ctx context.Context, t change.Tree, c change.Probe) ([]b
 	}
 	select {
 	case out := <-r.out:
+		if r.ceiling.Load() {
+			return nil, fmt.Errorf("replay %s: %w", c.ID, ErrOverPriceCeiling)
+		}
 		return out, nil
 	case err := <-r.fail:
 		return nil, fmt.Errorf("replay %s: %w", c.ID, err)
@@ -303,6 +315,17 @@ func seed(t change.Tree) map[string][]byte {
 		out[path.Join(TreeDir, p)] = b
 	}
 	return out
+}
+
+// OverPriceCeiling records that the vault process refused a model call of
+// replay machine id's run as over the evaluation price ceiling
+// (modelroute.ReasonEvalCeiling): the run ends as ErrOverPriceCeiling. The
+// broker calls it from the evaluation route's denial callback.
+func (e *Evaluator) OverPriceCeiling(id string) {
+	if r := e.get(id); r != nil {
+		r.ceiling.Store(true)
+		r.failed(ErrOverPriceCeiling)
+	}
 }
 
 func (e *Evaluator) get(id string) *run {

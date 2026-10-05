@@ -79,11 +79,56 @@ func modelHandler(c *custody, rt *route.Router, ev *evalRoute) http.Handler {
 // the agent machine From, go out through the proxy under From's adapter
 // grants, and are always private data. Nil: replay machines get no model
 // access, and the broker does not evaluate routing changes.
+//
+// A rule may name only models priced, per token, at most like the dearest
+// route in Active, from Prices; a dearer or unpriced model, or an Active
+// rule with an unpriced route, refuses the call before any provider with
+// modelroute.ReasonEvalCeiling (security C1 on #62). Each replay machine
+// is admitted against its own limits, never From's (L3 R1).
 type evalRoute struct {
 	From      string
 	Grants    []string
 	PrivateOK map[string]bool
 	Active    route.Rule
+	Prices    prices
+}
+
+// price is a model's provider price per million tokens.
+type price struct {
+	Input  float64 `json:"input"`
+	Output float64 `json:"output"`
+}
+
+// prices is this process's price table, keyed "provider/model" (-prices).
+type prices map[string]price
+
+// ceiling is the dearest input and output price among rule's routes; ok is
+// false if any route has no price.
+func (ps prices) ceiling(rule route.Rule) (price, bool) {
+	var c price
+	for _, routes := range rule {
+		for _, r := range routes {
+			p, ok := ps[r.String()]
+			if !ok {
+				return price{}, false
+			}
+			c.Input, c.Output = max(c.Input, p.Input), max(c.Output, p.Output)
+		}
+	}
+	return c, true
+}
+
+// within reports whether every route in rule is priced at most c.
+func (ps prices) within(rule route.Rule, c price) bool {
+	for _, routes := range rule {
+		for _, r := range routes {
+			p, ok := ps[r.String()]
+			if !ok || p.Input > c.Input || p.Output > c.Output {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (ev *evalRoute) serve(c *custody, machine string, w http.ResponseWriter, r *http.Request) {
@@ -103,6 +148,12 @@ func (ev *evalRoute) serve(c *custody, machine string, w http.ResponseWriter, r 
 			"message": "the routing rule under evaluation is not usable", "type": "invalid_request_error"}})
 		return
 	}
+	if ceil, ok := ev.Prices.ceiling(ev.Active); !ok || !ev.Prices.within(rule, ceil) {
+		b, _ := json.Marshal(modelroute.Denial{Adapter: "router", Method: r.Method, Status: http.StatusForbidden, Reason: modelroute.ReasonEvalCeiling})
+		w.Header().Set(modelroute.HeaderDenial, string(b))
+		http.Error(w, modelroute.ReasonEvalCeiling, http.StatusForbidden)
+		return
+	}
 	p := c.model()
 	if p == nil {
 		http.Error(w, "the vault is locked; model egress is unavailable", http.StatusServiceUnavailable)
@@ -110,7 +161,7 @@ func (ev *evalRoute) serve(c *custody, machine string, w http.ResponseWriter, r 
 	}
 	var ca callAudit
 	w.Header().Set("Trailer", modelroute.HeaderUsage)
-	rt.HandlerFor(machine, "private", p.HandlerFor(ev.From, "private", &ca), ca.decide(w)).ServeHTTP(w, r)
+	rt.HandlerFor(machine, "private", p.HandlerWithGrantsOf(machine, ev.From, "private", &ca), ca.decide(w)).ServeHTTP(w, r)
 	if u := ca.usage(); u != "" {
 		w.Header().Set(modelroute.HeaderUsage, u)
 	}

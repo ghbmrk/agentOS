@@ -17,6 +17,13 @@ import (
 
 // REQ: LOOP-5, ADP-4, CAP-9, REV-5
 
+var testPrices = prices{
+	"openai/gpt-test":       {Input: 2, Output: 8},
+	"openai/gpt-eval":       {Input: 1, Output: 8},
+	"anthropic/claude-eval": {Input: 1, Output: 4},
+	"openai/gpt-big":        {Input: 2, Output: 30},
+}
+
 // A replay machine's model calls (LOOP-5) are routed by the rule of the
 // tree under evaluation, but only among the routes the owner granted the
 // agent machine, under its private-data allowance, and always as private
@@ -27,7 +34,7 @@ func TestLOOP5EvaluationRuleOnlyReordersGrantedRoutes(t *testing.T) {
 	var mu sync.Mutex
 	var models []string
 	ev := &evalRoute{From: "agent", Grants: []string{"openai"}, PrivateOK: map[string]bool{"openai": true},
-		Active: route.Rule{"default": {{Provider: "openai", Model: "gpt-test"}}}}
+		Active: route.Rule{"default": {{Provider: "openai", Model: "gpt-test"}}}, Prices: testPrices}
 	sock := serveModel(t, testRouter(t), ev, func(w http.ResponseWriter, r *http.Request) {
 		var body struct{ Model string }
 		json.NewDecoder(r.Body).Decode(&body)
@@ -91,5 +98,61 @@ func TestLOOP5RuleRefusedOutsideEvaluation(t *testing.T) {
 		if w.Code != tc.want {
 			t.Errorf("%s: %d, want %d", tc.machine, w.Code, tc.want)
 		}
+	}
+}
+
+// Security C1 on #62 (arbitrator's amendment): a tree under evaluation may
+// route only to models priced, per token, at most like the dearest route
+// in the active rule, from this process's own price table. A dearer or
+// unpriced model is refused before any provider sees the call, and the
+// refusal names the ceiling so the broker reports the tree as not
+// evaluated, never as passing or failing.
+func TestLOOP5EvaluationRoutesStayUnderTheActivePriceCeiling(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
+	ev := &evalRoute{From: "agent", Grants: []string{"openai"}, PrivateOK: map[string]bool{"openai": true},
+		Active: route.Rule{"default": {{Provider: "openai", Model: "gpt-test"}}}, Prices: testPrices}
+	sock := serveModel(t, testRouter(t), ev, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		io.WriteString(w, `{}`)
+	})
+	var denied []modelroute.Denial
+	evaluation := modelroute.Evaluation(modelroute.Config{Socket: sock, Label: func(string) string { return "private" },
+		Denied: func(_ string, d modelroute.Denial) { denied = append(denied, d) }})
+	for _, model := range []string{"gpt-big", "gpt-unknown"} {
+		rule := `{"default":[{"provider":"openai","model":"gpt-eval"},{"provider":"openai","model":"` + model + `"}]}`
+		resp := chat(evaluation("eval-0a1b", []byte(rule)))
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("%s: %d", model, resp.StatusCode)
+		}
+	}
+	mu.Lock()
+	if calls != 0 {
+		t.Fatalf("a provider saw %d refused calls", calls)
+	}
+	mu.Unlock()
+	if len(denied) != 2 || denied[0].Reason != modelroute.ReasonEvalCeiling || denied[1].Reason != modelroute.ReasonEvalCeiling {
+		t.Fatalf("denials %+v", denied)
+	}
+
+	// An unpriced active rule gives no ceiling: every evaluation call is
+	// refused.
+	unpriced := &evalRoute{From: "agent", Grants: []string{"openai"}, PrivateOK: map[string]bool{"openai": true},
+		Active: route.Rule{"default": {{Provider: "openai", Model: "gpt-unknown"}}}, Prices: testPrices}
+	evaluation = modelroute.Evaluation(modelroute.Config{Socket: serveModel(t, testRouter(t), unpriced, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		io.WriteString(w, `{}`)
+	}), Label: func(string) string { return "private" }, Denied: func(string, modelroute.Denial) {}})
+	if resp := chat(evaluation("eval-0a1b", []byte(`{"default":[{"provider":"openai","model":"gpt-eval"}]}`))); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("unpriced active rule: %d", resp.StatusCode)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("a provider saw %d refused calls", calls)
 	}
 }

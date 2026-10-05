@@ -560,3 +560,30 @@ func TestLOOP5RuleModelCarriesOnlyTheTreesRule(t *testing.T) {
 		t.Fatalf("forwarded %+v", got)
 	}
 }
+
+// Security C1 on #62: when the vault process refuses a replay's model call
+// because the tree routes above the active price ceiling, the broker tells
+// the evaluator, and the run is not evaluated, never a pass or a fail,
+// even if the guest still replies.
+func TestCHG1RouteOverThePriceCeilingIsNotEvaluated(t *testing.T) {
+	mtr, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "meter.json"), MachineCap: meter.DefaultMachineCap, OverallCap: meter.DefaultOverallCap})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ev *Evaluator
+	r := newRig(t, recs{}, func(g *client, _ string) string { modelCall(g); return "replied anyway" }, func(c *Config) {
+		c.Meter = mtr
+		c.Model = func(id string, _ change.Tree) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				ev.OverPriceCeiling(id)
+				http.Error(w, "refused", http.StatusForbidden)
+			})
+		}
+	})
+	ev = r.e
+	_, err = r.e.Run(bg, tree, change.Probe{ID: "p1", Input: []byte("go")})
+	if !errors.Is(err, change.ErrNotEvaluated) || !errors.Is(err, ErrOverPriceCeiling) {
+		t.Fatalf("over the ceiling: %v", err)
+	}
+	r.e.OverPriceCeiling("eval-none") // no run: ignored
+}

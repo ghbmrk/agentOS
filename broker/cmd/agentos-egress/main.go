@@ -153,6 +153,28 @@ func newRouter(rule route.Rule, g map[string][]string, privateOK map[string]bool
 	})
 }
 
+// readPrices reads the evaluation price table; an empty path is an empty
+// table, which refuses every evaluation route.
+func readPrices(path string) (prices, error) {
+	ps := prices{}
+	if path == "" {
+		return ps, nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(b, &ps); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	for k, p := range ps {
+		if p.Input < 0 || p.Output < 0 {
+			return nil, fmt.Errorf("%s: %s has a negative price", path, k)
+		}
+	}
+	return ps, nil
+}
+
 // readRule reads a routing rule: a JSON object from task class to routes
 // in preference order, e.g. {"default":[{"provider":"anthropic","model":"..."}]}.
 func readRule(path string) (route.Rule, error) {
@@ -186,6 +208,7 @@ func serveCmd(args []string) error {
 	g := grants{}
 	fs.Var(g, "grant", "machine=adapter[,adapter] (repeatable)")
 	rulePath := fs.String("rule", "", "routing rule: JSON task class -> routes (P2-7)")
+	pricesPath := fs.String("prices", "", "model price table for evaluation routes: JSON \"provider/model\" -> {input, output} per million tokens; empty refuses every evaluation route")
 	evalFrom := fs.String("eval-from", "", "the agent machine whose model grants replay machines use (LOOP-5); empty (the default) gives replay no model access")
 	privateOK := fs.String("private-ok", "", "providers the owner allowed for private data, comma-separated (CAP-9)")
 	tpmPath := fs.String("tpm", defaultTPM, "this PC's TPM (trusted host, CRED-8); absent means every boot is an unknown host")
@@ -212,7 +235,11 @@ func serveCmd(args []string) error {
 	}
 	var ev *evalRoute
 	if *evalFrom != "" {
-		ev = &evalRoute{From: *evalFrom, Grants: g[*evalFrom], PrivateOK: pok, Active: rule}
+		ps, err := readPrices(*pricesPath)
+		if err != nil {
+			return err
+		}
+		ev = &evalRoute{From: *evalFrom, Grants: g[*evalFrom], PrivateOK: pok, Active: rule, Prices: ps}
 	}
 	for m := range g {
 		if strings.HasPrefix(m, modelroute.EvalPrefix) {

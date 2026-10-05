@@ -46,6 +46,12 @@ const (
 // only for them.
 const EvalPrefix = "eval-"
 
+// ReasonEvalCeiling is the vault process's denial reason when a tree under
+// evaluation routes to a model priced above the active rule's dearest
+// route, or to one with no known price. The broker reports such a tree as
+// not evaluated, never as passing or failing (security C1 on #62).
+const ReasonEvalCeiling = "evaluation route over the active price ceiling"
+
 // MaxRule bounds a forwarded routing rule.
 const MaxRule = 16 << 10
 
