@@ -469,6 +469,41 @@ func TestCAP3IntentsDuringTheResetAreErased(t *testing.T) {
 	}
 }
 
+// #59 L3 fourth review: a record read while the machines go back, and
+// deleted before the approved rollback finishes, is not among what the
+// owner is told was forgotten, and keeps the lineage contained.
+func TestCAP3RecordReadDuringTheResetStaysHeld(t *testing.T) {
+	x, read := newReachRig(t)
+	hose, err := x.r.ix.Ingest(recall.Item{Source: recall.Source{Kind: "web", Ref: "https://hose.example.test/"}, Label: recall.Public, Text: "garden hose prices", Received: x.clock.Add(-time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	x.j.submitted["late"] = read.Add(time.Second)
+	x.del(t, x.mail)
+	q := x.ask.st[x.ask.asked[0]].Intent
+	gone := make(chan struct{})
+	x.vm.during = func() {
+		x.clock = x.clock.Add(time.Minute)
+		x.r.call("root", "root", "recall_search", map[string]any{"query": "hose", "scope": "public"})
+		x.j.submitted["after"] = x.clock.Add(30 * time.Second) // work since that read
+		// The deletion's reach waits for the rollback running now.
+		go func() {
+			defer close(gone)
+			x.r.ix.Delete(hose)
+		}()
+		for !x.r.ix.Deleted(hose) {
+			time.Sleep(time.Millisecond)
+		}
+	}
+	if out := x.reach.Execute(context.Background(), q, 1); out.Evidence != "rolled back" {
+		t.Fatalf("execute: %+v", out)
+	}
+	<-gone
+	if len(x.told) != 1 || !strings.HasPrefix(x.told[0], "Done: root forgot a mail you deleted") || !x.reach.Contained("root") {
+		t.Fatalf("told %q, contained %v", x.told, x.reach.Contained("root"))
+	}
+}
+
 // #59 L3 third review: after a restart, a question left unanswered is not
 // asked again at once; the day starts at the first sighting.
 func TestCAP3ReaskClockStartsAgainAfterARestart(t *testing.T) {
