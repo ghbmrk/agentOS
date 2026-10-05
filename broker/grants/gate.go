@@ -204,6 +204,11 @@ type Config struct {
 	// must not block, and a panic in it is logged and changes nothing
 	// (security V1 on W3-values). Nil: none.
 	Observe func(journal.Intent)
+	// Unpaused is told the ID of a grant whose pause the owner ended by
+	// resuming or revoking it, so Loop 2 stops listing it as paused (loops
+	// S4, W5a). Called outside the gate's lock, never on replay; it must
+	// not block, and a panic in it is logged. Nil: none.
+	Unpaused func(grantID string)
 	// Delivery names, per adapter executor, the one declared share
 	// operation that delivers to the owner's evidence destination (CH-20;
 	// mail.OpDeliver). Only OriginEvidence submits it, and it runs
@@ -864,7 +869,10 @@ func (g *Gate) evaluateBroker(ctx context.Context, phase journal.Phase, in journ
 	case journal.ActionEvidence:
 		return g.evaluateEvidence(in)
 	case journal.ActionGrantPause, journal.ActionGrantRevoke:
-		if in.Origin != OriginOwner {
+		// Loop 2 may pause on a finding (loops K-S2): pausing only
+		// narrows, and revoking stays the owner's.
+		loop2Pause := in.Origin == OriginLoop2 && in.Action == journal.ActionGrantPause
+		if in.Origin != OriginOwner && !loop2Pause {
 			return verdict{kind: deny, why: "only the owner pauses or revokes a grant"}
 		}
 		g.mu.Lock()
@@ -2383,12 +2391,39 @@ func (g *Gate) Narrow(word, id string) string {
 // Execute runs a grant intent: it is the engine executor for ExecutorName.
 func (g *Gate) Execute(_ context.Context, in journal.Intent, _ int) journal.Outcome {
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	id, err := g.applyLocked(in)
+	g.mu.Unlock()
 	if err != nil {
 		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: err.Error()}
 	}
+	if unpauses(in) {
+		g.unpaused(id)
+	}
 	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: id}
+}
+
+// unpauses reports an intent that ends a grant's pause: the owner resumed
+// or revoked it.
+func unpauses(in journal.Intent) bool {
+	if in.Action == journal.ActionGrantRevoke {
+		return true
+	}
+	s, err := parseSpec(in)
+	return in.Action == journal.ActionGrantChange && err == nil && s.Resume != ""
+}
+
+// unpaused calls Config.Unpaused outside the gate's lock; a panic in it is
+// logged and changes nothing.
+func (g *Gate) unpaused(id string) {
+	if g.cfg.Unpaused == nil {
+		return
+	}
+	defer func() {
+		if recover() != nil && g.cfg.Logf != nil {
+			g.cfg.Logf("grants: unpause hook failed")
+		}
+	}()
+	g.cfg.Unpaused(id)
 }
 
 // Reconcile: grant state is rebuilt only from succeeded records, so an

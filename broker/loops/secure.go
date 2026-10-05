@@ -125,7 +125,8 @@ type Finding struct {
 }
 
 // Containment pauses a grant or executor. Pausing only narrows authority
-// (journal A9), so it works during STOP.
+// (journal A9), so it works during STOP. finding is "<check>:<finding
+// ID>", for the pause's record (security L2 on W5a).
 type Containment interface {
 	Contain(ctx context.Context, t Target, finding string) error
 }
@@ -174,6 +175,12 @@ type GuardConfig struct {
 	// feed cannot pause everything; the owner is texted about the rest.
 	// Default 3.
 	MaxPauses int
+	// MaxPausesPerDay caps them per UTC day (security L2 on W5a); past
+	// either cap the owner is texted how to pause instead. Default 10.
+	MaxPausesPerDay int
+	// NotRun is why each check the box cannot run yet does not run
+	// ("needs the updater"), for STATUS and the digest.
+	NotRun map[Check]string
 	// ReText is how long a finding must stay clear to be texted again when
 	// it comes back; sooner, it is in the digest as "again". Default 24
 	// hours.
@@ -198,7 +205,6 @@ type Guard struct {
 	mu    sync.Mutex
 	st    secureState
 	force bool
-	notes []string // checks that could not run on the last pass
 	stale string
 	more  []string // lines held back from the last text, for MORE
 	// held are fix candidates whose evaluation was preempted, by finding
@@ -240,6 +246,16 @@ type secureState struct {
 	// Cleared is when each finding last cleared, so a flapping finding is
 	// not texted again unless it stayed clear for ReText.
 	Cleared map[string]time.Time `json:"cleared,omitempty"`
+	// NotRun are the checks the last pass had no input for, Failed those
+	// whose input errored, and NotRunSaid the set the digest last named
+	// (Digest).
+	NotRun     []string `json:"not_run,omitempty"`
+	Failed     []string `json:"failed,omitempty"`
+	NotRunSaid string   `json:"not_run_said,omitempty"`
+	// PauseDay and Pauses count the automatic pauses on one UTC day
+	// (MaxPausesPerDay).
+	PauseDay string `json:"pause_day,omitempty"`
+	Pauses   int    `json:"pauses,omitempty"`
 }
 
 // Record is a finding's preserved evidence (LOOP-9).
@@ -267,6 +283,9 @@ func NewGuard(cfg GuardConfig) (*Guard, error) {
 	}
 	if cfg.UncomparedAlert <= 0 {
 		cfg.UncomparedAlert = 7 * 24 * time.Hour
+	}
+	if cfg.MaxPausesPerDay <= 0 {
+		cfg.MaxPausesPerDay = 10
 	}
 	if cfg.MaxPauses <= 0 {
 		cfg.MaxPauses = 3
@@ -324,10 +343,7 @@ func (s *Guard) Trigger() {
 // Next offers one pass of the passive checks when one is due. It makes no
 // model calls.
 func (s *Guard) Next(_ context.Context, _ bool) (Job, bool) {
-	s.mu.Lock()
-	due := s.force || s.cfg.Now().Sub(s.st.Last) >= s.cfg.Every
-	s.mu.Unlock()
-	if !due {
+	if !s.Urgent() {
 		return Job{}, false
 	}
 	return Job{Name: "passive", Run: func(ctx context.Context) Result {
@@ -336,14 +352,23 @@ func (s *Guard) Next(_ context.Context, _ bool) (Job, bool) {
 	}}, true
 }
 
+// Urgent reports a pass due: the scheduler then offers Loop 2 work even
+// while L5 parks it for dry runs, since a pass makes no model calls and
+// costs little, so the 6 h cadence holds (S3; potency on #54).
+func (s *Guard) Urgent() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.force || s.cfg.Now().Sub(s.st.Last) >= s.cfg.Every
+}
+
 // Pass runs every passive check and handles each new finding. It returns
 // how many findings were new: Loop 2's measured value (LOOP-3). Passes
 // must not run concurrently; the scheduler runs one job at a time.
 func (s *Guard) Pass(ctx context.Context) (int, error) {
-	found, notes, stale := s.check()
+	found, notes, failed, stale := s.check()
 	now := s.cfg.Now()
 	s.mu.Lock()
-	s.notes, s.stale, s.force = notes, stale, false
+	s.st.NotRun, s.st.Failed, s.stale, s.force = notes, failed, stale, false
 	s.st.Last = now
 	seen := map[string]bool{}
 	var fresh []Finding
@@ -398,14 +423,22 @@ func (s *Guard) Pass(ctx context.Context) (int, error) {
 	var errs []error
 	var ids []string
 	pauses := 0
+	s.mu.Lock()
+	if day := now.UTC().Format(time.DateOnly); s.st.PauseDay != day {
+		s.st.PauseDay, s.st.Pauses = day, 0
+	}
+	s.mu.Unlock()
 	for _, f := range fresh {
 		if ctx.Err() != nil {
 			break
 		}
-		pause := f.Contain != nil && pauses < s.cfg.MaxPauses
+		s.mu.Lock()
+		pause := f.Contain != nil && pauses < s.cfg.MaxPauses && s.st.Pauses < s.cfg.MaxPausesPerDay
 		if pause {
 			pauses++
+			s.st.Pauses++
 		}
+		s.mu.Unlock()
 		rec, err := s.handle(ctx, f, pause)
 		if err != nil {
 			errs = append(errs, err)
@@ -492,7 +525,7 @@ func (s *Guard) handle(ctx context.Context, f Finding, pause bool) (Record, erro
 			rec.Contained = "capped"
 		} else if s.cfg.Contain == nil {
 			rec.Contained = "failed"
-		} else if err := s.cfg.Contain.Contain(ctx, *f.Contain, f.ID); err != nil {
+		} else if err := s.cfg.Contain.Contain(ctx, *f.Contain, string(f.Check)+":"+f.ID); err != nil {
 			rec.Contained = "failed"
 			errs = append(errs, fmt.Errorf("contain %s: %w", f.ID, err))
 		} else {
@@ -503,7 +536,15 @@ func (s *Guard) handle(ctx context.Context, f Finding, pause bool) (Record, erro
 	if t, ok := s.st.Cleared[f.ID]; ok && rec.At.Sub(t) < s.cfg.ReText {
 		rec.Again = true // back too soon: the digest says so instead
 	}
-	rec.Texted = !rec.Again && (f.Severity == High || rec.Contained == "capped")
+	// Every automatic pause is texted at once (security L2 on W5a),
+	// unless the target was still paused from before: a finding back too
+	// soon then stays in the digest as "again".
+	newPause := false
+	if rec.Contained == "paused" {
+		_, still := s.st.Paused[targetKey(*f.Contain)]
+		newPause = !still
+	}
+	rec.Texted = newPause || !rec.Again && (f.Severity == High || rec.Contained == "capped")
 	// Evidence is saved before anything slower runs.
 	s.st.Open[f.ID] = rec
 	if rec.Contained == "paused" {
@@ -518,7 +559,7 @@ func (s *Guard) handle(ctx context.Context, f Finding, pause bool) (Record, erro
 	if f.Rule != nil && !s.cfg.FixturesLive {
 		rec.Fixture = "deferred"
 	} else if f.Rule != nil {
-		c := change.Case{ID: "loop2/" + f.ID, Class: change.ClassConfig, Input: f.Rule, Expect: []byte(FixtureOK)}
+		c := change.Case{ID: change.Loop2Fixture + f.ID, Class: change.ClassConfig, Input: f.Rule, Expect: []byte(FixtureOK)}
 		switch err := s.cfg.Pipeline.AddSecurityCase(c); {
 		case err == nil, errors.Is(err, change.ErrDuplicate):
 			rec.Fixture = c.ID
@@ -709,7 +750,7 @@ func findingID(c Check, subject, detail string) string {
 
 // check runs the passive checks (LOOP-8). Notes name checks that could not
 // run; stale is set when the advisory snapshot is old.
-func (s *Guard) check() (found []Finding, notes []string, stale string) {
+func (s *Guard) check() (found []Finding, notes, failed []string, stale string) {
 	b, now := s.cfg.Box, s.cfg.Now()
 	add := func(c Check, subject, detail string, sev Severity, t *Target, rule []byte) {
 		found = append(found, Finding{ID: findingID(c, subject, detail), Check: c, Subject: subject,
@@ -717,7 +758,7 @@ func (s *Guard) check() (found []Finding, notes []string, stale string) {
 	}
 	note := func(c Check, err error) {
 		if err != nil {
-			notes = append(notes, string(c))
+			failed = append(failed, string(c))
 		}
 	}
 
@@ -838,7 +879,7 @@ func (s *Guard) check() (found []Finding, notes []string, stale string) {
 		notes = append(notes, string(CheckExpiry))
 	}
 	sort.Slice(found, func(i, j int) bool { return found[i].ID < found[j].ID })
-	return found, notes, stale
+	return found, notes, failed, stale
 }
 
 func unionKeys(a, b map[string]string) []string {
@@ -1014,7 +1055,7 @@ func ownerLine(r Record) string {
 	line := findingText(f)
 	switch r.Contained {
 	case "paused":
-		line += " Paused " + label(f.Contain) + ". It stays paused until you turn it back on."
+		line += " Paused " + label(f.Contain) + ". It stays paused until you resume it; the box page will offer that in an update."
 	case "failed":
 		line += " Could not pause " + label(f.Contain) + ". STOP pauses everything."
 	case "capped":
@@ -1100,17 +1141,64 @@ func (s *Guard) Digest() []string {
 			out = append(out, clearedLine(r))
 		}
 	}
-	if len(s.notes) > 0 {
-		var names []string
-		for _, n := range s.notes {
-			names = append(names, plainCheck[Check(n)])
+	// Checks not run: named with their cause once, then again only when
+	// the set changes; a failed check or a pass overdue is said every
+	// time (potency C2,
+	// UX W2 on W5a). Nothing here ever reads as passed (L5).
+	now := s.cfg.Now()
+	if s.overdueLocked(now) {
+		out = append(out, "Loop 2: checks haven't run since "+s.st.Last.Format("Mon 2 Jan")+".")
+	} else if said := strings.Join(s.st.NotRun, ",") + "/" + strings.Join(s.st.Failed, ","); said != s.st.NotRunSaid || len(s.st.Failed) > 0 {
+		// A check that failed is said every time, like an overdue pass.
+		if len(s.st.NotRun)+len(s.st.Failed) > 0 {
+			out = append(out, s.partialLocked())
 		}
-		out = append(out, "Security checks not run: "+strings.Join(names, ", ")+".")
+		s.st.NotRunSaid = said
+		_ = s.saveLocked() // a lost save only says it again
 	}
 	if s.stale != "" {
 		out = append(out, s.stale)
 	}
 	return out
+}
+
+// overdueLocked reports no pass for twice the cadence since the last one.
+func (s *Guard) overdueLocked(now time.Time) bool {
+	return !s.st.Last.IsZero() && now.Sub(s.st.Last) >= 2*s.cfg.Every
+}
+
+// partialLocked names the checks the last pass could not run, with the
+// cause the wiring gave for each, then those whose input failed.
+func (s *Guard) partialLocked() string {
+	var parts []string
+	for _, n := range s.st.NotRun {
+		part := plainCheck[Check(n)]
+		if why := s.cfg.NotRun[Check(n)]; why != "" {
+			part += ", " + why
+		}
+		parts = append(parts, part)
+	}
+	for _, n := range s.st.Failed {
+		parts = append(parts, plainCheck[Check(n)]+", failed")
+	}
+	return "Loop 2: partial (not run: " + strings.Join(parts, "; ") + ")."
+}
+
+// Status is Loop 2's STATUS line: never run yet, overdue, or partial with
+// what was not run and why. It is empty only when every check ran on the
+// last pass; it never says the checks passed (security L5 on W5a).
+func (s *Guard) Status() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch now := s.cfg.Now(); {
+	case s.st.Last.IsZero():
+		return "Loop 2: not run yet."
+	case s.overdueLocked(now):
+		return "Loop 2: checks haven't run since " + s.st.Last.Format("Mon 2 Jan") + "."
+	case len(s.st.NotRun)+len(s.st.Failed) > 0:
+		return s.partialLocked()
+	}
+	return ""
 }
 
 // Evidence returns every recorded finding, oldest first.
