@@ -219,9 +219,9 @@ def floor_fit(meminfo):
     total = int(m.group(1)) >> 10
     pool = total - sum(FLOOR.values())
     need = AGENT_MB + REPLAY_MB
-    return "%s: pool %d MiB (MemTotal %d - host %d - inference %d - browser %d - headroom %d) for agent %d + one replay %d = %d; agentosd -capacity-mb %d here (default 4500)" % (
+    return "%s: pool %d MiB (MemTotal %d - host %d - inference %d - browser %d - headroom %d) for agent %d + one replay %d = %d; agentosd -capacity-mb %d here (its default: this, at most 4500)" % (
         "PASS" if pool >= need else "FAIL", pool, total, FLOOR["host"], FLOOR["inference"], FLOOR["browser"],
-        FLOOR["headroom"], AGENT_MB, REPLAY_MB, need, pool + FLOOR["headroom"])
+        FLOOR["headroom"], AGENT_MB, REPLAY_MB, need, min(pool + FLOOR["headroom"], 4500))
 
 
 def probe(disk):

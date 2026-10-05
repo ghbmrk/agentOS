@@ -130,6 +130,9 @@ class FloorFitTest(unittest.TestCase):
         self.assertTrue(out.startswith("FAIL"), out)
         self.assertIn("pool 1960 MiB", out)
 
+    def test_large_box_capacity_is_capped(self):
+        self.assertIn("-capacity-mb 4500 here", tk.floor_fit("MemTotal: 16777216 kB\n"))
+
     def test_unreadable(self):
         self.assertTrue(tk.floor_fit("").startswith("unknown"))
 

@@ -106,3 +106,35 @@ func TestPE2NoRoomForReplayIsSaid(t *testing.T) {
 	cancel()
 	d.Wait()
 }
+
+// PE6 (R1 on #114): unless -capacity-mb is given, admission's capacity is
+// this box's memory less the rest of the RES-2 floor budget (host,
+// inference, browser), at most the 4500 MB default, so the N95 (pool
+// about 3496 MB) is not over-committed. The figure and its source are
+// logged; an unreadable MemTotal keeps the default and says so.
+func TestPE6CapacityFollowsTheBoxMemory(t *testing.T) {
+	const n95 = "MemTotal:        7864320 kB\nMemAvailable:    7340032 kB\n"
+	for _, c := range []struct {
+		name     string
+		meminfo  string
+		explicit bool
+		flag     int64
+		want     int64
+		says     string
+	}{
+		{"n95", n95, false, defaultCapacityMB, 4096, "MemTotal 7680 MB"},
+		{"large box", "MemTotal: 16777216 kB\n", false, defaultCapacityMB, 4500, "at most 4500"},
+		{"unreadable", "", false, defaultCapacityMB, 4500, "MemTotal unreadable"},
+		{"explicit", n95, true, 5000, 5000, "-capacity-mb"},
+	} {
+		got, why := capacityFor(c.meminfo, c.explicit, c.flag)
+		if got != c.want || !strings.Contains(why, c.says) {
+			t.Errorf("%s: %d MB (%q), want %d MB naming %q", c.name, got, why, c.want, c.says)
+		}
+	}
+	// On the N95 the defaults still hold the agent and one replay machine.
+	n, _ := capacityFor(n95, false, defaultCapacityMB)
+	if err := replayFits(n, defaultHeadroomMB, defaultAgentMemMB, defaultReplayMemMB); err != nil {
+		t.Fatalf("N95: %v", err)
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -131,7 +132,7 @@ func main() {
 	flag.StringVar(&cfg.SocketDir, "sockets", "/run/agentos", "socket directory (created 0700)")
 	flag.StringVar(&cfg.OwnerNumber, "owner", "", "owner's phone number, E.164")
 	flag.IntVar(&cfg.ModemUID, "modem-uid", -1, "uid of the modem bridge, the only peer allowed on the owner socket")
-	flag.Int64Var(&cfg.Admission.CapacityMB, "capacity-mb", defaultCapacityMB, "memory for agent machines, MB")
+	flag.Int64Var(&cfg.Admission.CapacityMB, "capacity-mb", defaultCapacityMB, "memory for agent machines, MB; unset, MemTotal less the floor budget outside the pool, at most the default (PE6)")
 	flag.Int64Var(&cfg.Admission.HeadroomMB, "headroom-mb", defaultHeadroomMB, "memory never admitted into, MB")
 	flag.Float64Var(&cfg.MaxPressure, "max-pressure", 10, "memory PSI (some avg10, %) above which only foreground is admitted")
 	flag.StringVar(&stateDir, "machines", "/var/lib/agentos/machines", "agent-machine layers and snapshots (created 0700)")
@@ -156,6 +157,12 @@ func main() {
 	flag.StringVar(&qcfg.Path, "questions", qcfg.Path, "agents' questions to the owner, kept across restarts (P3-8)")
 	flag.StringVar(&qcfg.ClockPath, "clock-state", qcfg.ClockPath, "the box clock check's state (P2-9)")
 	flag.Parse()
+	capacitySet := false
+	flag.Visit(func(f *flag.Flag) { capacitySet = capacitySet || f.Name == "capacity-mb" })
+	meminfo, _ := os.ReadFile("/proc/meminfo")
+	var why string
+	cfg.Admission.CapacityMB, why = capacityFor(string(meminfo), capacitySet, cfg.Admission.CapacityMB)
+	log.Printf("admission capacity: %d MB (%s)", cfg.Admission.CapacityMB, why)
 	if cfg.ModemUID < 0 || cfg.ModemUID == os.Getuid() {
 		log.Fatal("-modem-uid must name the modem bridge's own uid, distinct from the broker's")
 	}
@@ -299,6 +306,38 @@ const (
 	defaultAgentMemMB  = 1536
 	defaultReplayMemMB = 1024
 )
+
+// The rest of the RES-2 floor budget, MB: what the box keeps outside the
+// agent-machine pool. The S1 test kit's floor_fit uses the same figures.
+const (
+	floorHostMB      = 1024 // host, broker and journal
+	floorInferenceMB = 2048 // local inference
+	floorBrowserMB   = 512  // one credentialed browser
+)
+
+// capacityFor is PE6: unless -capacity-mb was given, admission's capacity
+// is MemTotal less the floor budget outside the pool, at most
+// defaultCapacityMB, so a box smaller than the budget assumed (the N95 has
+// about 7.5 GB usable, not 8) is not over-committed. It returns the
+// capacity and why, for the log.
+func capacityFor(meminfo string, explicit bool, flagMB int64) (int64, string) {
+	if explicit {
+		return flagMB, "set by -capacity-mb"
+	}
+	var kb int64
+	for _, line := range strings.Split(meminfo, "\n") {
+		if v, ok := strings.CutPrefix(line, "MemTotal:"); ok {
+			kb, _ = strconv.ParseInt(strings.TrimSuffix(strings.TrimSpace(v), " kB"), 10, 64)
+		}
+	}
+	if kb <= 0 {
+		return flagMB, "MemTotal unreadable; the default"
+	}
+	total := kb >> 10
+	n := min(total-floorHostMB-floorInferenceMB-floorBrowserMB, defaultCapacityMB)
+	return n, fmt.Sprintf("MemTotal %d MB less host %d, inference %d and browser %d, at most %d",
+		total, floorHostMB, floorInferenceMB, floorBrowserMB, defaultCapacityMB)
+}
 
 // replayFits is PE2: the agent machine and one replay machine must fit in
 // the pool admission hands out (capacity less headroom) at once. If they
