@@ -113,6 +113,11 @@ type Channel struct {
 	// stops counts STOPs; a RESUME code issued before the latest STOP is
 	// void (taken on the fast path, outside mu).
 	stops atomic.Int64
+	// stopMu orders a fast-path STOP against a RESUME: stopNow holds it
+	// across counting and applying the STOP, and resumeUnlessStopped
+	// across its re-check and Resume, so a STOP that arrives while a
+	// RESUME code is being checked is never lifted by it (CH-2).
+	stopMu sync.Mutex
 	// challengeTexts are the challenge texts sent in the last hour.
 	challengeTexts []time.Time
 	dropped        int
@@ -232,15 +237,35 @@ func (c *Channel) stopNow(ctx context.Context, from, text string) ([]string, boo
 	if !c.IsOwner(from) || control.Parse(text).Word != control.WordStop {
 		return nil, false
 	}
+	c.stopMu.Lock()
 	c.stops.Add(1)
+	replies := c.ctrl.Handle(ctx, from, text)
+	c.stopMu.Unlock()
 	var out []string
-	for _, r := range c.ctrl.Handle(ctx, from, text) {
+	for _, r := range replies {
 		if r != "" {
 			out = append(out, control.Fit(r))
 		}
 	}
 	return out, true
 }
+
+// errStoppedMeanwhile reports a RESUME overtaken by a STOP sent while its
+// code was being checked.
+var errStoppedMeanwhile = errors.New("stopped while the code was checked")
+
+// resumeUnlessStopped lifts STOP only if no STOP arrived since stops was
+// gen, checked and applied under stopMu.
+func (c *Channel) resumeUnlessStopped(gen int64) error {
+	c.stopMu.Lock()
+	defer c.stopMu.Unlock()
+	if c.stops.Load() != gen {
+		return errStoppedMeanwhile
+	}
+	return c.cfg.Engine.Resume()
+}
+
+const stoppedMeanwhile = "A STOP arrived while the code was checked, so nothing resumed. Still stopped."
 
 // route makes every decision the channel itself owns, in arrival order.
 func (c *Channel) route(from, text string) (route, bool) {
@@ -465,6 +490,7 @@ func (c *Channel) challengeLocked(text string, now time.Time) (route, bool) {
 			return c.dropLocked(now), true
 		}
 		token, expires := c.codes.unlockCh, c.codes.unlockChExpires
+		gen := c.stops.Load()
 		ok, err := c.codes.takeAttempt(now)
 		switch {
 		case err != nil:
@@ -490,7 +516,10 @@ func (c *Channel) challengeLocked(text string, now time.Time) (route, bool) {
 		msg := "Unlocked until " + c.untilText() + ". Codes work normally again."
 		if r.word == "RESUME" {
 			c.resume = nil
-			if err := c.cfg.Engine.Resume(); err != nil {
+			switch err := c.resumeUnlessStopped(gen); {
+			case err == errStoppedMeanwhile:
+				return route{replies: []string{msg + " " + stoppedMeanwhile}}, true
+			case err != nil:
 				return route{replies: []string{msg + " RESUME failed to record. Still stopped."}}, true
 			}
 			msg += " Resumed."
@@ -689,7 +718,10 @@ func (c *Channel) resumeLocked(r reply, now time.Time) (out []string, accepted b
 		return []string{"Wrong code. Reply RESUME <code>." + lockNote(locked)}, false
 	}
 	c.resume = nil
-	if err := c.cfg.Engine.Resume(); err != nil {
+	switch err := c.resumeUnlessStopped(p.stops); {
+	case err == errStoppedMeanwhile:
+		return []string{stoppedMeanwhile}, true
+	case err != nil:
 		return []string{"RESUME failed to record. Still stopped."}, true
 	}
 	n := 0

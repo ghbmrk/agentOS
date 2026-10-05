@@ -33,7 +33,9 @@ func (f *fakeVerifier) VerifyTOTP(code string, after int64, counted bool) (int64
 	block := f.block
 	f.mu.Unlock()
 	if block != nil {
-		return 0, false, <-block
+		if err := <-block; err != nil {
+			return 0, false, err
+		}
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -295,5 +297,40 @@ func TestGridAnswerDoesNotReachTheVerifier(t *testing.T) {
 	}
 	if f.calls() != n {
 		t.Fatal("grid answer sent to the verifier")
+	}
+}
+
+// CH-2: a STOP sent while a RESUME code is being checked is never lifted
+// by that RESUME, on the RESUME-code path or the challenge path.
+func TestStopDuringAResumeCheckIsNotLifted(t *testing.T) {
+	for _, challenge := range []bool{false, true} {
+		r, f := newVerifierRig(t)
+		ctx := context.Background()
+		r.ch.codes.st.LowLocked = true // RESUME then needs a code-generator code
+		r.say("STOP")
+		var resume string
+		if challenge {
+			r.ch.codes.st.Challenged = true
+			m := tokenRe.FindStringSubmatch(r.say("UNLOCK"))
+			resume = "RESUME " + m[1] + " "
+		} else {
+			r.say("RESUME")
+			resume = "RESUME "
+		}
+		f.mu.Lock()
+		f.block = make(chan error)
+		f.mu.Unlock()
+		n := f.calls()
+		done := make(chan string)
+		code := r.totp()
+		go func() { done <- strings.Join(r.ch.Handle(ctx, ownerNum, resume+code), " | ") }()
+		for f.calls() == n {
+			time.Sleep(time.Millisecond)
+		}
+		r.ch.Handle(ctx, ownerNum, "STOP") // mid-check
+		f.block <- nil                     // the code is right
+		if got := <-done; !strings.Contains(got, "A STOP arrived while the code was checked") || !r.eng.Stopped() {
+			t.Fatalf("challenge=%v: %q, stopped %v", challenge, got, r.eng.Stopped())
+		}
 	}
 }

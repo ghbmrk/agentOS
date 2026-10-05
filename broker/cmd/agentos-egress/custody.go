@@ -337,7 +337,10 @@ func (c *custody) verify(code string, after int64, counted bool) (int64, bool, e
 	if len(*bucket) >= limit {
 		return 0, false, &pausedError{until: (*bucket)[0].Add(VerifyWindow)}
 	}
-	seed, _ := c.v.Secret(SeedName)
+	seed, ok := c.v.Secret(SeedName)
+	if !ok {
+		return 0, false, errInternal
+	}
 	step, ok := owner.MatchTOTP([]byte(seed.Reveal()), code, now, max(after, c.st.LastStep))
 	if !ok {
 		*bucket = append(*bucket, now)
