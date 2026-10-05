@@ -198,9 +198,8 @@ func TestUnstageThatFindsChangesLeavesThemAndSaysSo(t *testing.T) {
 
 // TestReleaseChecksTheStagedCopy (arbitrator on #76): at the window's end
 // the recheck runs first, and anything but a clean send unstages (C2),
-// except a copy the owner deleted (a cancel) or edited. An edited copy is
-// not sent as approved: the owner is asked about the edited version at
-// the normal tier, and the staged copy is left for them.
+// except a copy the owner deleted (a cancel) or one that changed after the
+// approval, which is not sent and is left for the owner with a notice.
 func TestReleaseChecksTheStagedCopy(t *testing.T) {
 	form := reversible.Form{Stage: "draft.save", Inverse: "draft.discard"}
 	r := newRig(t, withForms(map[string]reversible.Form{"invoice.send": form}))
@@ -256,30 +255,34 @@ func TestReleaseChecksTheStagedCopy(t *testing.T) {
 		t.Fatalf("not unstaged after a failed send: %s", st.State)
 	}
 
-	// The owner edited the draft: not sent, not unstaged, and asked anew.
+	// The draft changed after the approval: not sent, not unstaged, and
+	// the owner gets a fixed notice that asks nothing (arbitrator
+	// re-ruling: a YES could not be bound to the edited version).
 	held("agent/s4")
 	r.exec.fail["agent/s4"] = true
 	r.exec.evidence["agent/s4"] = reversible.EvidenceEdited
 	n := r.own.count()
+	waiting := len(r.g.waiting)
 	release()
+	if st := r.state("agent/s4"); st.State != journal.NotApplied {
+		t.Fatalf("edited: %s", st.State)
+	}
 	if _, err := r.g.Get(reversible.InverseID("agent/s4", 1)); err == nil {
 		t.Fatal("unstaged an edited draft")
 	}
-	eid := reversible.EditedID("agent/s4", 1)
-	if st := r.state(eid); st.State != journal.Pending || st.Intent.Params[reversible.ParamEdited] != true {
-		t.Fatalf("edited send: %s %+v", st.State, st.Intent)
-	}
 	r.g.Flush()
-	if r.own.count() != n+1 {
-		t.Fatal("the edited send was not asked")
+	if r.own.count() != n || len(r.g.waiting) != waiting-1 { // only the released hold left
+		t.Fatal("an edited copy created an approval")
 	}
-	_, items := r.own.last(t)
-	if len(items) != 1 || items[0].Ref != eid || items[0].UndoWindow != 0 || items[0].Detail != "your edit stopped the send" || items[0].Facts.Verb != "send" {
-		t.Fatalf("edited item %+v", items)
+	for _, st := range r.eng.List() {
+		if st.State == journal.Pending && strings.HasPrefix(st.Intent.ID, reversible.Prefix) {
+			t.Fatalf("pending derived intent %s", st.Intent.ID)
+		}
 	}
-	r.decide(true, "owner")
-	if st := r.state(eid); st.State != journal.Succeeded || r.exec.params[eid][reversible.ParamStaged] != "done:"+reversible.StageID("agent/s4", 1) {
-		t.Fatalf("approved edited send: %s", st.State)
+	notes := r.own.notes
+	if last := notes[len(notes)-1]; !strings.HasSuffix(last, " not sent: its draft changed after you approved it. Send it from your mail app if you still want it.") ||
+		strings.Contains(last, "YES") {
+		t.Fatalf("edited notice %q", last)
 	}
 }
 

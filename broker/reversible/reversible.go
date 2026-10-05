@@ -32,19 +32,17 @@ const (
 const Origin = "broker:reversible"
 
 // Params the derived intents carry, for the adapter to find the staged
-// copy: the parent intent's ID, for an inverse or an edited send the
-// stage's evidence, and for an edited send ParamEdited (true).
+// copy: the parent intent's ID, and for an inverse the stage's evidence.
 const (
 	ParamParent = "reversible_parent"
 	ParamStaged = "reversible_staged"
-	ParamEdited = "reversible_edited"
 )
 
 // Evidence an adapter returns, with a not-applied result, when the
 // effect is released but its staged copy is not what the stage made
 // (arbitrator on #76). Gone: the owner deleted it in their own app, which
-// is a cancel. Edited: the owner changed it, so it is not sent as
-// approved; the owner is asked about the edited copy instead.
+// is a cancel. Edited: it changed after the owner approved it, so it is
+// not sent; the owner is told and can send it from their own app.
 const (
 	EvidenceGone   = "reversible: the staged copy is gone"
 	EvidenceEdited = "reversible: the staged copy was edited"
@@ -119,12 +117,11 @@ func Check(declared map[string]string, op string, f Form) (Form, error) {
 // take a derived ID first and block it (arbitrator C1 on #76).
 const Prefix = "~reversible/"
 
-// StageID, InverseID, and EditedID name the derived intents of the n-th
+// StageID and InverseID name the derived intents of the n-th
 // hold of parent (from 1), so a retry is the same intent (OP-1) and a
 // parent held again after a restart is staged afresh.
 func StageID(parent string, n int) string   { return derivedID("stage", parent, n) }
 func InverseID(parent string, n int) string { return derivedID("unstage", parent, n) }
-func EditedID(parent string, n int) string  { return derivedID("edited", parent, n) }
 
 func derivedID(kind, parent string, n int) string {
 	return Prefix + kind + "/" + strconv.Itoa(n) + "/" + parent
@@ -139,12 +136,6 @@ func Stage(p journal.Intent, f Form, n int) journal.Intent {
 // the stage's evidence.
 func Inverse(p journal.Intent, f Form, n int, staged string) journal.Intent {
 	return derive(p, InverseID(p.ID, n), f.Inverse, map[string]any{ParamStaged: staged})
-}
-
-// Edited is the intent that sends the owner's edited copy of p's stage,
-// asked of the owner at the normal tier; staged is the stage's evidence.
-func Edited(p journal.Intent, n int, staged string) journal.Intent {
-	return derive(p, EditedID(p.ID, n), p.Action, map[string]any{ParamStaged: staged, ParamEdited: true})
 }
 
 func derive(p journal.Intent, id, op string, extra map[string]any) journal.Intent {
@@ -169,7 +160,7 @@ func Parent(in journal.Intent) (string, int, bool) {
 	mid := strings.TrimSuffix(strings.TrimPrefix(in.ID, Prefix), "/"+p) // kind/n
 	kind, num, ok := strings.Cut(mid, "/")
 	n, err := strconv.Atoi(num)
-	if !ok || err != nil || n < 1 || derivedID(kind, p, n) != in.ID || (kind != "stage" && kind != "unstage" && kind != "edited") {
+	if !ok || err != nil || n < 1 || derivedID(kind, p, n) != in.ID || (kind != "stage" && kind != "unstage") {
 		return "", 0, false
 	}
 	return p, n, true

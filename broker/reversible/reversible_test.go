@@ -84,13 +84,6 @@ func TestDeriveCarriesTheParentAndNothingTheGuestChose(t *testing.T) {
 	if u.ID != "~reversible/unstage/1/agent/s1" || u.Action != "draft.discard" || u.Params[ParamStaged] != "draft-77" || u.Params[ParamParent] != "agent/s1" {
 		t.Fatalf("inverse %+v", u)
 	}
-	e := Edited(p, 1, "draft-77")
-	if e.ID != "~reversible/edited/1/agent/s1" || e.Action != "message.send" || e.Params[ParamStaged] != "draft-77" || e.Params[ParamEdited] != true {
-		t.Fatalf("edited %+v", e)
-	}
-	if par, n, ok := Parent(e); !ok || par != "agent/s1" || n != 1 {
-		t.Fatalf("parent of edited: %q %d %v", par, n, ok)
-	}
 	if _, ok := p.Params[ParamParent]; ok {
 		t.Fatal("derive changed the parent's params")
 	}
@@ -118,17 +111,17 @@ func TestDeriveCarriesTheParentAndNothingTheGuestChose(t *testing.T) {
 // (OP-1), whatever its parent's ID.
 func TestDerivedIDsAreOutsideEveryGuestID(t *testing.T) {
 	for _, parent := range []string{"agent/s1", "agent/private/s1", "a/b/c"} {
-		for _, id := range []string{StageID(parent, 1), InverseID(parent, 2), EditedID(parent, 3)} {
+		for _, id := range []string{StageID(parent, 1), InverseID(parent, 2)} {
 			if !strings.HasPrefix(id, "~") || strings.Count(id, parent) != 1 || !strings.HasSuffix(id, "/"+parent) {
 				t.Errorf("derived ID %q of %q", id, parent)
 			}
 		}
 	}
-	if StageID("x", 1) == InverseID("x", 1) || InverseID("x", 1) == EditedID("x", 1) || StageID("x", 1) == StageID("x", 2) {
+	if StageID("x", 1) == InverseID("x", 1) || StageID("x", 1) == StageID("x", 2) {
 		t.Fatal("derived IDs collide")
 	}
 	// A hold number or kind that does not round-trip names no parent.
-	for _, id := range []string{"~reversible/stage/0/x", "~reversible/stage/01/x", "~reversible/other/1/x", "~reversible/stage//x"} {
+	for _, id := range []string{"~reversible/stage/0/x", "~reversible/stage/01/x", "~reversible/other/1/x", "~reversible/edited/1/x", "~reversible/stage//x"} {
 		if _, _, ok := Parent(journal.Intent{ID: id, Origin: Origin, Params: map[string]any{ParamParent: "x"}}); ok {
 			t.Errorf("%s named a parent", id)
 		}

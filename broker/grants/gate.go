@@ -462,7 +462,7 @@ type verdict struct {
 // is asked of the owner (REV-2).
 func (g *Gate) evaluate(ctx context.Context, phase journal.Phase, in journal.Intent) verdict {
 	if in.Origin == reversible.Origin {
-		return g.evaluateDerived(ctx, phase, in)
+		return g.evaluateDerived(in)
 	}
 	if strings.HasPrefix(in.ID, reversible.Prefix) {
 		return verdict{kind: deny, why: "only the broker submits this intent"}
@@ -624,16 +624,14 @@ func (g *Gate) matches(r Rule, in journal.Intent, v Verified) error {
 	return nil
 }
 
-// evaluateDerived decides a stage, inverse, or edited-send intent (REV-3).
-// It is considered only if this gate submitted it for an effect whose form
-// names its operation, and only while the grant that connects the account
-// is live. A stage is allowed while the owner-approved effect is held, an
-// inverse once the effect was cancelled or not sent; neither needs a grant
-// of its own, since the owner approved the effect they belong to and the
-// form's operations are reversible (reversible.Check). An edited send,
-// after the owner edited the staged copy, is asked of the owner like the
-// effect itself, with no undo window.
-func (g *Gate) evaluateDerived(ctx context.Context, phase journal.Phase, in journal.Intent) verdict {
+// evaluateDerived decides a stage or inverse intent (REV-3). It is
+// allowed only if this gate submitted it for an effect whose form names
+// its operation, and only while the grant that connects the account is
+// live: a stage while its hold is on, an inverse once the effect was
+// cancelled, not sent, or is no longer under that stage's hold. Neither
+// needs a grant of its own: the owner approved the effect they belong to,
+// and the form's operations are reversible (reversible.Check).
+func (g *Gate) evaluateDerived(in journal.Intent) verdict {
 	parent, n, ok := reversible.Parent(in)
 	g.mu.Lock()
 	ours := g.derived[in.ID]
@@ -659,19 +657,6 @@ func (g *Gate) evaluateDerived(ctx context.Context, phase journal.Phase, in jour
 	case in.ID == reversible.StageID(parent, n) && in.Action == f.Stage && live:
 	case in.ID == reversible.InverseID(parent, n) && in.Action == f.Inverse &&
 		(p.State == journal.Denied || p.State == journal.NotApplied || (p.State == journal.Pending && !live)):
-	case in.ID == reversible.EditedID(parent, n) && in.Action == p.Intent.Action && p.State == journal.NotApplied &&
-		lastEvidence(p) == reversible.EvidenceEdited:
-		x := in
-		x.Origin = p.Intent.Origin
-		v := g.evaluateEffect(ctx, phase, x)
-		if v.kind != ask {
-			// Its extra params match no pre-allowance; anything but an
-			// ask here is a fault, so it fails closed.
-			return verdict{kind: deny, why: "the edited copy cannot be sent without the owner"}
-		}
-		v.item.UndoWindow = 0
-		v.item.Detail = "your edit stopped the send"
-		return v
 	default:
 		return verdict{kind: deny, why: "the effect it belongs to is not in a state that allows it"}
 	}
@@ -1322,39 +1307,24 @@ func (g *Gate) hold(d owner.Decision) {
 
 // afterHold settles a held effect's staged copy once the effect is
 // settled (arbitrator on #76). Sent: the copy is the sent message. Gone:
-// the owner deleted it, a cancel. Edited: the owner is asked about the
-// edited copy. Anything else that did not happen (UNDO, a restart, a
+// the owner deleted it, a cancel. Edited: it is not sent and stays for the
+// owner, who is told in a fixed line offering no YES, because an approval
+// could not be bound to the edited version (arbitrator re-ruling).
+// Anything else that did not happen (UNDO, a restart, a
 // recheck denial, a failed send) unstages (C2). An unknown outcome, or an
 // effect STOP still holds, leaves it alone.
 func (g *Gate) afterHold(st journal.Status, hold string) {
 	switch {
 	case st.State == journal.NotApplied && lastEvidence(st) == reversible.EvidenceGone:
 	case st.State == journal.NotApplied && lastEvidence(st) == reversible.EvidenceEdited:
-		g.askEdited(st.Intent)
+		g.mu.Lock()
+		own := g.own
+		g.mu.Unlock()
+		if own != nil {
+			_ = own.Inform(fmt.Sprintf("%s not sent: its draft changed after you approved it. Send it from your mail app if you still want it.", clip(hold)))
+		}
 	case st.State == journal.Denied || st.State == journal.NotApplied:
 		g.unstage(st.Intent, hold)
-	}
-}
-
-// askEdited asks the owner whether to send their edited copy of p's
-// stage, at the normal tier (Authorize batches it like any ask).
-func (g *Gate) askEdited(p journal.Intent) {
-	n, s := g.lastStage(p.ID)
-	if n == 0 || s.State != journal.Succeeded {
-		return
-	}
-	in := reversible.Edited(p, n, lastEvidence(s))
-	g.mu.Lock()
-	g.derived[in.ID] = true
-	g.mu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	_, err := g.eng.Submit(in)
-	if err == nil {
-		_, err = g.Authorize(ctx, in.ID)
-	}
-	if err != nil {
-		g.cfg.Logf("grants: %s: %v", in.ID, err)
 	}
 }
 
