@@ -232,7 +232,7 @@ func (e *env) upper(id, rel string) string {
 
 // Exec runs a few commands against the machine's upper layer: "echo"
 // prints its arguments, "write PATH" stores stdin, "cat PATH" prints the
-// file, "sleep" waits for the context, "hang" ignores it for a second, and
+// file, "sleep" waits for the context, "hang" ignores it for a second, "killed" exits 137 once it ends, and
 // "exit N" exits N.
 func (f *fakeRuntime) Exec(ctx context.Context, id string, c Command) (ExecResult, error) {
 	f.mu.Lock()
@@ -267,6 +267,9 @@ func (f *fakeRuntime) Exec(ctx context.Context, id string, c Command) (ExecResul
 	case "sleep":
 		<-ctx.Done()
 		return ExecResult{ExitCode: -1}, ctx.Err()
+	case "killed": // a runtime that reports a kill as an exit code
+		<-ctx.Done()
+		return ExecResult{ExitCode: 137}, nil
 	case "hang": // a runtime that ignores cancellation
 		time.Sleep(time.Second)
 		return ExecResult{}, ctx.Err()

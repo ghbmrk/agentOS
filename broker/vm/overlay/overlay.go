@@ -299,11 +299,6 @@ func FreeBytes(path string) (int64, error) {
 	return int64(st.Bavail) * int64(st.Bsize), nil
 }
 
-// MaxTreeDepth is how deeply Measure follows nested directories: as deep as
-// a worker's deletes go (CAP-8c's too_deep), with one open directory
-// handle per level.
-const MaxTreeDepth = 256
-
 // ErrTooDeep is a layer nested deeper than MaxTreeDepth. Callers treat it as
 // over the layer's cap: never as no use.
 var ErrTooDeep = errors.New("directories nest more than 256 deep; flatten them")
@@ -334,11 +329,6 @@ func Measure(root string) (Usage, error) {
 	}
 	return w.u, err
 }
-
-// oPath is O_PATH, which syscall leaves undefined on amd64: a handle that
-// can be stat'd and opened relative to, but not read, so an entry is
-// never opened as a device or FIFO to learn what it is.
-const oPath = 0x200000
 
 type measurer struct {
 	u    Usage

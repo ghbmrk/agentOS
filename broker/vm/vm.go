@@ -320,6 +320,10 @@ type machine struct {
 	// execCancel ends a worker's command in flight (Exec), so erasure,
 	// rollback and destroy never wait behind it for the lock.
 	execCancel atomic.Pointer[context.CancelFunc]
+	// label is Label as last saved, read without the lock. Labels only
+	// rise, so it is never above Label: a check that refuses on it would
+	// refuse under the lock too (DeleteFiles, L3 SHOULD-2 on #166).
+	label atomic.Uint32
 }
 
 // lockEndingExec takes mc's lock, ending any worker command that holds or
@@ -560,6 +564,7 @@ func (m *Manager) reserve(id string, s Spec, l Label, forkBase, lineage string) 
 		lineage = id + "." + hex.EncodeToString(b[:])
 	}
 	mc := &machine{Machine: Machine{ID: id, Spec: s, Label: l, State: Stopped, ForkBase: forkBase, Lineage: lineage}}
+	mc.label.Store(uint32(l))
 	if m.cfg.Quota != nil {
 		mc.Project = m.nextProjectLocked()
 	}
@@ -1780,6 +1785,7 @@ func (m *Manager) Machines() []string {
 }
 
 func (m *Manager) saveMachine(mc *machine) error {
+	mc.label.Store(uint32(mc.Label))
 	return writeJSON(filepath.Join(m.machineDir(mc.ID), "meta.json"), mc.Machine)
 }
 
