@@ -190,13 +190,16 @@ type Report struct {
 
 // Score is the evaluation evidence: counts only, no case content.
 type Score struct {
-	HeldOut        int   `json:"held_out"`
-	Passed         int   `json:"passed"`
-	BaselinePassed int   `json:"baseline_passed"`
-	Regressions    int   `json:"regressions"`
-	Security       int   `json:"security"`
-	SecurityPassed int   `json:"security_passed"`
-	example        *Case // first regressed case, for the owner's line
+	HeldOut        int `json:"held_out"`
+	Passed         int `json:"passed"`
+	BaselinePassed int `json:"baseline_passed"`
+	Regressions    int `json:"regressions"`
+	Security       int `json:"security"`
+	SecurityPassed int `json:"security_passed"`
+	// NotEvaluated counts cases the evaluator could not run on this box
+	// (ErrNotEvaluated); they are in no other count.
+	NotEvaluated int   `json:"not_evaluated,omitempty"`
+	example      *Case // first regressed case, for the owner's line
 }
 
 // Adoption is a change that took effect and its rollback point.
@@ -488,7 +491,7 @@ func (p *Pipeline) propose(ctx context.Context, c Candidate, security bool) (Rep
 	case rep.SecurityPassed < rep.Security:
 		rep.State, rep.Reason = StateRejected, "fails the security suite"
 		return rep, nil
-	case rep.Security < p.cfg.MinSecurity:
+	case rep.Security < p.cfg.MinSecurity && rep.NotEvaluated == 0:
 		// Without fixtures nothing shows the evaluator ran at all.
 		rep.State, rep.Reason = StateRejected, "too few security fixtures to qualify anything"
 		return rep, nil
@@ -500,7 +503,10 @@ func (p *Pipeline) propose(ctx context.Context, c Candidate, security bool) (Rep
 		rep.State, rep.Reason = StateRejected, "passes no held-out case"
 		return rep, nil
 	}
-	enough := rep.HeldOut >= p.cfg.MinHeldOut && rep.Security >= p.cfg.MinSecurity
+	// A change the box cannot evaluate is never authority-neutral by
+	// evidence: it goes to the owner, marked not tested, or for an attested
+	// security release rests on the signatures and attestation (UPD-8).
+	enough := rep.HeldOut >= p.cfg.MinHeldOut && rep.Security >= p.cfg.MinSecurity && rep.NotEvaluated == 0
 	switch {
 	case c.Source == Local && cl.neutral && auto && enough:
 		rep.Basis = BasisStanding
@@ -603,9 +609,13 @@ func (p *Pipeline) drop(id string) {
 func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen) Score {
 	var s Score
 	for _, c := range set.heldOut {
+		b, be := p.pass(ctx, base, c)
+		n, ne := p.pass(ctx, next, c)
+		if !be || !ne {
+			s.NotEvaluated++
+			continue
+		}
 		s.HeldOut++
-		b := p.pass(ctx, base, c)
-		n := p.pass(ctx, next, c)
 		if b {
 			s.BaselinePassed++
 		}
@@ -621,24 +631,54 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen) Sc
 		}
 	}
 	for _, c := range set.security {
+		ok, ev := p.pass(ctx, next, c)
+		if !ev {
+			s.NotEvaluated++
+			continue
+		}
 		s.Security++
-		if p.pass(ctx, next, c) {
+		if ok {
 			s.SecurityPassed++
 		}
 	}
 	return s
 }
 
-func (p *Pipeline) pass(ctx context.Context, t Tree, c Case) bool {
+// ErrNotEvaluated is what an Evaluator returns (wrapped is fine) when it
+// cannot exercise a tree on this box, for example a changed image or
+// config that replay does not boot. Such a case is neither a pass nor a
+// fail: it is counted as not evaluated.
+var ErrNotEvaluated = errors.New("change: not evaluated on this box")
+
+// pass reports whether the case passed on t, and whether it was evaluated
+// at all. Any other evaluator error is a fail.
+func (p *Pipeline) pass(ctx context.Context, t Tree, c Case) (ok, evaluated bool) {
 	out, err := p.cfg.Evaluator.Run(ctx, t.clone(), Probe{ID: p.probeID(c.ID), Input: append([]byte(nil), c.Input...)})
+	if errors.Is(err, ErrNotEvaluated) {
+		return false, false
+	}
 	if err != nil {
-		return false
+		return false, true
 	}
 	g := p.cfg.Graders[c.Class]
 	if g == nil {
 		g = DefaultGrader
 	}
-	return g(c, out)
+	return g(c, out), true
+}
+
+// ProbeTask maps a probe ID back to the journal intent of the task case it
+// names, so the replay evaluator can find that task's recordings. Security
+// fixtures and unknown probes give ok=false.
+func (p *Pipeline) ProbeTask(probeID string) (string, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, c := range p.st.Cases {
+		if !c.Security && c.Task != "" && p.probeID(c.ID) == probeID {
+			return c.Task, true
+		}
+	}
+	return "", false
 }
 
 // probeID is an opaque per-installation name for a case, so the evaluator

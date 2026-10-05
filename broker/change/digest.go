@@ -184,11 +184,7 @@ func (p *Pipeline) Digest() []string {
 	for _, a := range p.st.Adoptions {
 		if !a.Listed {
 			line := p.what(a) + "."
-			if a.Score.HeldOut > 0 {
-				line += fmt.Sprintf(" Tested on %d of your past tasks, none worse.", a.Score.HeldOut)
-			} else {
-				line += " No past tasks to test it on yet."
-			}
+			line += testedText(a.Score)
 			switch a.Basis {
 			case BasisOwner:
 				line += " You approved it."
@@ -248,13 +244,19 @@ func (p *Pipeline) Ask(id string) (string, error) {
 		return line + " Approve or decline?", nil
 	}
 	a := &Adoption{Classes: pr.classes, Edits: pr.edits, Origin: pr.cand.Origin, Staged: true}
-	line := p.what(a) + "."
-	if s.HeldOut > 0 {
-		line += fmt.Sprintf(" Tested on %d of your past tasks, none worse.", s.HeldOut)
-	} else {
-		line += " No past tasks to test it on yet."
+	return p.what(a) + "." + testedText(s) + " Approve or decline?", nil
+}
+
+func testedText(s Score) string {
+	switch {
+	case s.HeldOut == 0 && s.NotEvaluated > 0:
+		return " Not tested on this box."
+	case s.HeldOut == 0:
+		return " No past tasks to test it on yet."
+	case s.NotEvaluated > 0:
+		return fmt.Sprintf(" Tested on %d of your past tasks, none worse; %d could not be tested on this box.", s.HeldOut, s.NotEvaluated)
 	}
-	return line + " Approve or decline?", nil
+	return fmt.Sprintf(" Tested on %d of your past tasks, none worse.", s.HeldOut)
 }
 
 // More answers MORE <id>: the files an adoption changed and its counts.
