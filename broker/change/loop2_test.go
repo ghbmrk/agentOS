@@ -50,3 +50,63 @@ func TestOtherSecurityFixturesMustPass(t *testing.T) {
 		t.Fatalf("%+v", r)
 	}
 }
+
+// Potency C1 on W5a: the must-pass switch is per fixture. Of two open
+// findings only the fixed one must pass from then on, across a restart;
+// the other still only must not regress.
+func TestTheMustPassSwitchIsPerFixture(t *testing.T) {
+	e := newEnv(t, nil)
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	for _, c := range []Case{
+		{ID: "loop2/a", Class: ClassSkill, Input: []byte("skills/fix-a"), Expect: []byte("yes")},
+		{ID: "loop2/b", Class: ClassSkill, Input: []byte("skills/fix-b"), Expect: []byte("yes")},
+	} {
+		if err := e.p.AddSecurityCase(c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fix := e.propose(Candidate{Source: Local, Files: Tree{"skills/greet": []byte("hello"), "skills/fix-a": []byte("yes")}})
+	if fix.State != StateAdopted {
+		t.Fatalf("the fix for a: %+v", fix)
+	}
+	e.propose(Candidate{Source: Local, Files: Tree{"skills/note": []byte("1")}}) // the active tree passes a
+	p, err := New(e.p.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.p = p
+	e.p.Attach(e.eng)
+	// The restarted pipeline evaluates on the old journal, so scores are
+	// what count here, not adoption.
+	if r := e.propose(Candidate{Source: Local, Files: Tree{"skills/note": []byte("2")}}); r.Reason == "fails the security suite" || r.SecurityPassed != r.Security {
+		t.Fatalf("b, still open, failed a candidate: %+v", r)
+	}
+	if r := e.propose(Candidate{Source: Local, Files: Tree{"skills/fix-a": []byte("no")}}); r.State != StateRejected || r.Reason != "fails the security suite" {
+		t.Fatalf("a regressed: %+v", r)
+	}
+}
+
+// Security L4 on W5a: the mark is keyed by the fixture's contents, so a
+// fixture replaced under the same ID is open again.
+func TestTheMustPassMarkFollowsTheFixturesContents(t *testing.T) {
+	a := Case{ID: "loop2/a", Input: []byte("in"), Expect: []byte("yes")}
+	b := a
+	b.Expect = []byte("yes, at 3.1")
+	if loop2Key(a) == loop2Key(b) || loop2Key(a) != loop2Key(a) {
+		t.Fatal("the mark key does not follow the contents")
+	}
+}
+
+// Security L3 on W5a: no candidate can add, change or delete a Loop 2
+// fixture. Fixtures are not files in the tree, and a candidate writing a
+// path named for them is rejected before evaluation.
+func TestACandidateCannotTouchLoop2Fixtures(t *testing.T) {
+	e := newEnv(t, nil)
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	for _, path := range []string{"loop2/a", "security/loop2/a", "suites/loop2/a"} {
+		r := e.propose(Candidate{Source: Local, Files: Tree{"skills/greet": []byte("hello"), path: []byte("x")}})
+		if r.State != StateRejected {
+			t.Fatalf("%s: %+v", path, r)
+		}
+	}
+}

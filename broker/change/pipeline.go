@@ -313,8 +313,9 @@ type state struct {
 	// Cuts counts each (candidate, case) pair's cut candidate-side runs
 	// (PE5b), so a restart cannot reset them.
 	Cuts map[string]cutCount `json:"cuts,omitempty"`
-	// Loop2Passed are the Loop 2 fixtures the active tree has passed:
-	// they must pass from then on (PS1).
+	// Loop2Passed are the Loop 2 fixtures the active tree has passed, by
+	// loop2Key: they must pass from then on (PS1). Losing it fails toward
+	// must-not-regress, never toward pass.
 	Loop2Passed map[string]bool `json:"loop2_passed,omitempty"`
 }
 
@@ -1013,7 +1014,7 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 	// Loop 2 fixtures the active tree has never passed (PS1).
 	open := map[string]bool{}
 	for _, c := range set.security {
-		if strings.HasPrefix(c.ID, Loop2Fixture) && !p.st.Loop2Passed[c.ID] {
+		if strings.HasPrefix(c.ID, Loop2Fixture) && !p.st.Loop2Passed[loop2Key(c)] {
 			open[c.ID] = true
 		}
 	}
@@ -1069,7 +1070,7 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 		if c.Security {
 			if open[c.ID] && (pr.BaseOK && baseActive || pr.NextOK && nextActive) {
 				// The active tree passes it: must pass from now on.
-				passed = append(passed, c.ID)
+				passed = append(passed, loop2Key(c))
 			}
 			switch {
 			case open[c.ID] && !pr.BaseOK && !pr.NextOK:
@@ -1128,6 +1129,18 @@ const OutageAlert = 3
 // tree first passes it, it only must not regress; then it must pass for
 // good (loops PS1, C5).
 const Loop2Fixture = "loop2/"
+
+// loop2Key keys a Loop 2 fixture's must-pass mark by its ID and contents,
+// so a fixture replaced under the same ID starts again as must not regress
+// (security L4 on W5a).
+func loop2Key(c Case) string {
+	h := sha256.New()
+	for _, b := range [][]byte{[]byte(c.ID), c.Input, c.Expect} {
+		fmt.Fprintf(h, "%d:", len(b))
+		h.Write(b)
+	}
+	return c.ID + "@" + hex.EncodeToString(h.Sum(nil))[:32]
+}
 
 // strictness says which not-evaluated candidate results count as fails.
 type strictness struct{ heldOut, security bool }
