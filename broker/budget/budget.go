@@ -40,21 +40,29 @@ func Floor() Memory {
 	return Memory{HostMB: 1024, InferenceMB: 2048, BrowserMB: 512, HeadroomMB: 600}
 }
 
-// MaxCapacityMB caps admission's capacity (the pool plus headroom) on a
-// large host: agentosd's 4500 MB default before PE6, kept as the cap by
-// PE6 (R1 on #114). HW-4 would let a larger host grow the pool instead;
-// lifting the cap is left to a measured rule (budget R2).
-const MaxCapacityMB = 4500
+// BaseCapMB is the least cap on admission's capacity (the pool plus
+// headroom): agentosd's 4500 MB default before PE6, kept as the cap by PE6
+// (R1 on #114), and still the cap on a box of five cores or fewer.
+const BaseCapMB = 4500
 
-// ForHost sizes the pool for a host with totalMB of memory: what the
-// declared components leave, with capacity (pool plus headroom) at most
-// MaxCapacityMB. A pool too small for an agent machine is returned as is:
+// CapMB caps admission's capacity on a host with cores CPUs (RES-2c,
+// budget R2): headroom plus one OpenClaw machine per two cores, at least
+// BaseCapMB. HW-4 lets a larger host grow the pool; cores, not memory
+// alone, bound how many machines it runs well, so memory past what its
+// cores can use stays with the host.
+func CapMB(cores int, headroomMB int64) int64 {
+	return max(BaseCapMB, headroomMB+int64(max(cores, 0)/2)*OpenClawMB)
+}
+
+// ForHost sizes the pool for a host with totalMB of memory and cores CPUs:
+// what the declared components leave, with capacity (pool plus headroom)
+// at most CapMB. A pool too small for an agent machine is returned as is:
 // the caller turns the agent off and says so (agentosd planMemory).
-func ForHost(totalMB int64, c Memory) (Memory, error) {
+func ForHost(totalMB int64, cores int, c Memory) (Memory, error) {
 	if c.HostMB <= 0 || c.InferenceMB < 0 || c.BrowserMB < 0 || c.HeadroomMB <= 0 {
 		return Memory{}, fmt.Errorf("budget: every component needs a budget and headroom must be positive: %+v", c)
 	}
-	c.PoolMB = min(totalMB-c.HostMB-c.InferenceMB-c.BrowserMB, MaxCapacityMB) - c.HeadroomMB
+	c.PoolMB = min(totalMB-c.HostMB-c.InferenceMB-c.BrowserMB, CapMB(cores, c.HeadroomMB)) - c.HeadroomMB
 	return c, nil
 }
 

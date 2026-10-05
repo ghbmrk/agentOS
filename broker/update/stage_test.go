@@ -99,8 +99,8 @@ func TestStageRefusesStaleOrForeignChecks(t *testing.T) {
 	f.must(err)
 
 	other := newFixture(t)
-	if err := other.store.Stage(res.Release); err == nil {
-		t.Fatal("staged a release another store checked")
+	if err := other.store.Stage(res.Release); !errors.Is(err, ErrForeignStore) {
+		t.Fatalf("staged a release another store checked: %v", err)
 	}
 
 	// Newer targets.

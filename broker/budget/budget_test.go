@@ -22,7 +22,7 @@ func TestRES2FloorBudgetMatchesTheSpecTable(t *testing.T) {
 
 func TestRES2PoolIsWhatTheDeclaredComponentsLeave(t *testing.T) {
 	// An 8 GB N95 reports about 7.6 GiB: firmware and the iGPU take the rest.
-	m, err := ForHost(7680, Floor())
+	m, err := ForHost(7680, 4, Floor())
 	must(t, err)
 	if m.PoolMB != 7680-4184 {
 		t.Fatalf("pool = %d MiB", m.PoolMB)
@@ -42,30 +42,72 @@ func TestRES2PoolIsWhatTheDeclaredComponentsLeave(t *testing.T) {
 
 func TestRES2LargerHostsKeepEveryOtherBudget(t *testing.T) {
 	// HW-4: a larger host never changes the other budgets. Its pool grows
-	// up to MaxCapacityMB (PE6, R1 on #114), no further.
-	small, err := ForHost(7680, Floor())
+	// up to CapMB for its cores (RES-2c), no further.
+	small, err := ForHost(7680, 4, Floor())
 	must(t, err)
-	big, err := ForHost(32768, Floor())
+	big, err := ForHost(32768, 4, Floor())
 	must(t, err)
 	if big.HostMB != small.HostMB || big.InferenceMB != small.InferenceMB || big.BrowserMB != small.BrowserMB || big.HeadroomMB != small.HeadroomMB {
 		t.Fatalf("components changed with host size: %+v vs %+v", small, big)
 	}
-	if big.PoolMB != MaxCapacityMB-big.HeadroomMB || big.PoolMB <= small.PoolMB {
+	if big.PoolMB != BaseCapMB-big.HeadroomMB || big.PoolMB <= small.PoolMB {
 		t.Fatalf("pool %d MiB on a large host, %d at the floor", big.PoolMB, small.PoolMB)
+	}
+}
+
+// RES-2c (budget R2): the cap on capacity is max(4500, headroom +
+// floor(cores/2) × OpenClawMB), one OpenClaw machine per two cores, so a
+// box with more memory and cores runs more machines. At four cores or
+// fewer it is the 4500 MiB it was, so the N95 floor is unchanged.
+func TestRES2cCapGrowsWithCores(t *testing.T) {
+	h := Floor().HeadroomMB
+	for cores, want := range map[int]int64{
+		0: BaseCapMB, 1: BaseCapMB, 4: BaseCapMB, 5: BaseCapMB,
+		6:  h + 3*OpenClawMB, // 5256
+		8:  h + 4*OpenClawMB,
+		16: h + 8*OpenClawMB,
+		-2: BaseCapMB,
+	} {
+		if got := CapMB(cores, h); got != want {
+			t.Errorf("%d cores: cap %d MiB, want %d", cores, got, want)
+		}
+	}
+	// N95: 4 cores, about 7.5 GiB. Memory binds, as before (4096).
+	n95, err := ForHost(7680, 4, Floor())
+	must(t, err)
+	if n95.PoolMB+n95.HeadroomMB != 4096 {
+		t.Fatalf("N95 capacity %d MiB", n95.PoolMB+n95.HeadroomMB)
+	}
+	// 32 GiB with 16 cores: cores bind, eight OpenClaw machines fit.
+	big, err := ForHost(32768, 16, Floor())
+	must(t, err)
+	if big.PoolMB != 8*OpenClawMB || big.PoolMB/OpenClawMB != 8 {
+		t.Fatalf("16-core 32 GiB pool %d MiB", big.PoolMB)
+	}
+	// 16 GiB with 16 cores: memory binds (16384 - 3584 = 12800 < 13016).
+	mid, err := ForHost(16384, 16, Floor())
+	must(t, err)
+	if mid.PoolMB+mid.HeadroomMB != 16384-1024-2048-512 || mid.Total() != 16384 {
+		t.Fatalf("16-core 16 GiB: %+v", mid)
+	}
+	// A larger headroom setting raises the cap with it, so the machines
+	// a box's cores allow still fit.
+	if CapMB(16, 1000) != 1000+8*OpenClawMB {
+		t.Fatalf("cap with 1000 MiB headroom: %d", CapMB(16, 1000))
 	}
 }
 
 func TestRES2SmallHostPoolAndBadBudgets(t *testing.T) {
 	// A host too small for one machine gets the pool it has; agentosd turns
 	// the agent off and says so.
-	m, err := ForHost(5000, Floor())
+	m, err := ForHost(5000, 4, Floor())
 	must(t, err)
 	if m.PoolMB >= OpenClawMB {
 		t.Fatalf("5000 MiB host: pool %d MiB holds a machine", m.PoolMB)
 	}
 	bad := Floor()
 	bad.HeadroomMB = 0
-	if _, err := ForHost(7680, bad); err == nil {
+	if _, err := ForHost(7680, 4, bad); err == nil {
 		t.Fatal("zero headroom accepted (S3: a group at its limit stalls)")
 	}
 }
@@ -101,7 +143,7 @@ func read(t *testing.T, p string) string {
 // the broker's protection plus the headroom never exceed the host (RES-2).
 func TestRES2ApplyGivesEachComponentItsOwnGroup(t *testing.T) {
 	root := fakeV2(t)
-	m, err := ForHost(7680, Floor())
+	m, err := ForHost(7680, 4, Floor())
 	must(t, err)
 	// The pool's group must accept per-machine children: the kernel lists
 	// the memory controller in its cgroup.controllers once the parent's
@@ -164,7 +206,10 @@ func TestRES2TestKitUsesTheSameFloor(t *testing.T) {
 	if !strings.Contains(string(b), want) {
 		t.Fatalf("testkit.py has no %s", want)
 	}
-	if !strings.Contains(string(b), fmt.Sprintf("min(pool + FLOOR[\"headroom\"], %d)", MaxCapacityMB)) {
-		t.Fatalf("testkit.py does not cap capacity at %d", MaxCapacityMB)
+	if !strings.Contains(string(b), fmt.Sprintf("max(%d, FLOOR[\"headroom\"] + cores // 2 * OPENCLAW_MB)", BaseCapMB)) {
+		t.Fatalf("testkit.py does not cap capacity as CapMB does")
+	}
+	if !strings.Contains(string(b), fmt.Sprintf("OPENCLAW_MB = %d", OpenClawMB)) {
+		t.Fatalf("testkit.py has no OPENCLAW_MB = %d", OpenClawMB)
 	}
 }

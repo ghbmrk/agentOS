@@ -889,7 +889,7 @@ func (s *Store) Stage(v *Verified) error {
 	}
 	defer unlock()
 	if v.storeDir != s.Dir {
-		return errors.New("update: release was checked by another store")
+		return ErrForeignStore
 	}
 	if err := s.trustUnchanged(v); err != nil {
 		return err
@@ -963,6 +963,10 @@ func (s *Store) DropStaged() error {
 	}
 	return nil
 }
+
+// ErrForeignStore: the release was checked by another store; this store
+// stages only what it checked itself.
+var ErrForeignStore = errors.New("update: release was checked by another store")
 
 // ErrTrustMoved: the store's trusted root or targets changed since the
 // release was checked; check again before staging it.
