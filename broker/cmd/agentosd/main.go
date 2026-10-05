@@ -143,7 +143,11 @@ func (l *lateAgent) Deliver(ctx context.Context, text string, public bool) error
 	}
 	err := (*a).Deliver(ctx, text, public)
 	if err == nil {
-		l.delivered(time.Now())
+		now := time.Now
+		if s := l.sleep.Load(); s != nil {
+			now = s.cfg.Now // the clock the sleeper measures the hold on
+		}
+		l.delivered(now())
 	}
 	return err
 }

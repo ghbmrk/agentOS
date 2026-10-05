@@ -790,3 +790,39 @@ func TestCAP8cFailedRestartKeepsTheCodes(t *testing.T) {
 		t.Fatal("a worker that failed to start still holds its admission")
 	}
 }
+
+// A worker raised to Private after it was made refuses a Public delete
+// without ending its command: the lock-free label follows the raise (L3
+// N10 on #166).
+func TestCAP8cRaisedLabelGuardsTheCommand(t *testing.T) {
+	e := newEnv(t, 4096)
+	agent := e.create("agent", admission.Experiment, 500)
+	_, err := e.m.CreateWorker(bg, "wk-a", agent.Lineage, workerSpec(Public))
+	must(t, err)
+	_, err = e.m.Exec(bg, "wk-a", Command{Argv: []string{"echo"}, As: Private}, time.Second) // raises it
+	must(t, err)
+	ctx, cancel := context.WithCancel(bg)
+	done := make(chan error, 1)
+	go func() {
+		_, err := e.m.Exec(ctx, "wk-a", Command{Argv: []string{"sleep"}, As: Private}, time.Minute)
+		done <- err
+	}()
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(time.Millisecond) {
+		if _, ok := e.m.TryGet("wk-a"); !ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the command never started")
+		}
+	}
+	if _, err := e.m.DeleteFiles(bg, "wk-a", Deletion{Paths: []string{"/x"}, As: Public}); !errors.Is(err, ErrLabel) {
+		t.Fatalf("public delete in a raised worker: %v", err)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("a refused delete ended the command: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	cancel()
+	<-done
+}
