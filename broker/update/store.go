@@ -101,6 +101,11 @@ type Options struct {
 	// require, so one stolen key cannot sign a release. Values below 2
 	// count as 2; it can only be raised.
 	MinThreshold int
+	// Attestors is the box's attestor allow-list: the keys pinned in its
+	// image plus those the owner added (D6, arbitrator's correction). Only
+	// these count as independent; empty means none do yet, and a security
+	// fix takes the owner's CH-3 install path.
+	Attestors []ed25519.PublicKey
 	// Now is the clock for online expiry; nil means time.Now.
 	Now func() time.Time
 }
@@ -185,6 +190,7 @@ type Verified struct {
 	files       map[string]File
 	fresh       bool
 	maintainers map[string]bool // keys any accepted root listed (no attestor)
+	allowed     map[string]bool // Options.Attestors
 	operated    map[string]bool // maintainer-operated attestor keys
 	security    bool            // set only by WithAttestations
 }
@@ -374,7 +380,19 @@ func readMeta(src Source, name string) ([]byte, error) {
 // Check reads the repository at src and returns the newest release this
 // box may install (UPD-2, UPD-8). Root rotations are followed and saved;
 // the timestamp and snapshot it accepts are saved for rollback checks.
-func (s *Store) Check(src Source, o Options) (Result, error) {
+func (s *Store) Check(src Source, o Options) (res Result, err error) {
+	// What src serves is untrusted, and a parser panic reachable with only
+	// the online keys (as go-tuf's null targets entry was) must fail closed,
+	// not crash the process.
+	defer func() {
+		if r := recover(); r != nil {
+			res, err = Result{}, fmt.Errorf("%w: %v", ErrBadRepository, r)
+		}
+	}()
+	return s.check(src, o)
+}
+
+func (s *Store) check(src Source, o Options) (Result, error) {
 	unlock, err := s.lock()
 	if err != nil {
 		return Result{}, err
@@ -514,6 +532,15 @@ func (s *Store) Check(src Source, o Options) (Result, error) {
 		return Result{}, err
 	}
 
+	allowed := map[string]bool{}
+	for _, k := range o.Attestors {
+		der, err := x509.MarshalPKIXPublicKey(k)
+		if err != nil || len(k) != ed25519.PublicKeySize {
+			return Result{}, fmt.Errorf("attestor allow-list holds a key that is not Ed25519")
+		}
+		allowed[fingerprint(der)] = true
+	}
+
 	var versions []int64
 	for p := range targets.Signed.Targets {
 		if n, ok := releaseVersion(p); ok && n > installed.Version {
@@ -522,7 +549,7 @@ func (s *Store) Check(src Source, o Options) (Result, error) {
 	}
 	sort.Slice(versions, func(i, j int) bool { return versions[i] > versions[j] })
 	for _, n := range versions {
-		v, err := s.load(src, seen, attestors, targets, n)
+		v, err := s.load(src, seen, attestors, allowed, targets, n)
 		if err != nil {
 			return Result{}, err
 		}
@@ -657,7 +684,7 @@ func fileOf(p string, tf *metadata.TargetFiles) (File, error) {
 	return File{Path: p, Length: tf.Length, SHA256: hex.EncodeToString(sum)}, nil
 }
 
-func (s *Store) load(src Source, seen, attestors map[string]bool, targets *metadata.Metadata[metadata.TargetsType], n int64) (*Verified, error) {
+func (s *Store) load(src Source, seen, attestors, allowed map[string]bool, targets *metadata.Metadata[metadata.TargetsType], n int64) (*Verified, error) {
 	p := ReleasePath(n)
 	man, err := fileOf(p, targets.Signed.Targets[p])
 	if err != nil {
@@ -680,7 +707,7 @@ func (s *Store) load(src Source, seen, attestors map[string]bool, targets *metad
 	if rel.Version != n {
 		return nil, fmt.Errorf("%w: %s holds version %d", ErrBadRepository, p, rel.Version)
 	}
-	v := &Verified{sealed: true, release: rel, manifest: man, files: map[string]File{}, maintainers: seen, operated: attestors}
+	v := &Verified{sealed: true, release: rel, manifest: man, files: map[string]File{}, maintainers: seen, operated: attestors, allowed: allowed}
 	for _, f := range rel.Files {
 		tf, ok := targets.Signed.Targets[f]
 		if !ok {

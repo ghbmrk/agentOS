@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -427,5 +428,23 @@ func TestConcurrentChecksSerialize(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(f.store.Dir, ".lock")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+type panicSource struct{}
+
+func (panicSource) Open(string) (io.ReadCloser, error) { panic("malformed input") }
+
+// A panic while reading what a source serves fails the check closed.
+func TestPanicDuringCheckFailsClosed(t *testing.T) {
+	f := newFixture(t)
+	if _, err := f.store.Check(panicSource{}, Options{}); !errors.Is(err, ErrBadRepository) {
+		t.Fatal(err)
+	}
+	// The lock was released: a normal check still runs.
+	f.release(2, nil)
+	f.publish(0, 1)
+	if res, err := f.check(Options{}); err != nil || res.Release == nil {
+		t.Fatal(res.Release, err)
 	}
 }

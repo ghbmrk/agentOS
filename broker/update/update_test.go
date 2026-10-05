@@ -31,6 +31,17 @@ type fixture struct {
 	now       time.Time
 	files     map[string]string
 	rootHash  string
+	// att are the box's allow-listed attestors (Options.Attestors).
+	att []ed25519.PrivateKey
+}
+
+// attestors is the fixture box's allow-list, plus extra keys.
+func (f *fixture) attestors(extra ...ed25519.PrivateKey) []ed25519.PublicKey {
+	var out []ed25519.PublicKey
+	for _, k := range append(append([]ed25519.PrivateKey(nil), f.att...), extra...) {
+		out = append(out, k.Public().(ed25519.PublicKey))
+	}
+	return out
 }
 
 func genKeys(t *testing.T, dir, prefix string, n int) ([]ed25519.PrivateKey, []ed25519.PublicKey) {
@@ -63,6 +74,7 @@ func newFixture(t *testing.T) *fixture {
 	s, sp := genKeys(t, kdir, "snapshot", 1)
 	ts, tsp := genKeys(t, kdir, "timestamp", 1)
 	f.snap, f.ts = s[0], ts[0]
+	f.att, _ = genKeys(t, kdir, "attestor", 2)
 	r, err := Init(filepath.Join(dir, "repo"), RootConfig{
 		Root: rp, Targets: tp, Snapshot: sp, Timestamp: tsp, RootThreshold: 2, TargetsThreshold: 2,
 	})
@@ -125,6 +137,9 @@ func (f *fixture) publish(signers ...int) {
 func (f *fixture) check(o Options) (Result, error) {
 	if o.Now == nil {
 		o.Now = func() time.Time { return f.now }
+	}
+	if o.Attestors == nil {
+		o.Attestors = f.attestors()
 	}
 	return f.store.Check(DirSource(f.repo.Dir), o)
 }

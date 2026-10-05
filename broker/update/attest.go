@@ -15,14 +15,17 @@ import (
 // Ed25519 public key inside the signed statement.
 //
 // Attestations are evidence, not authority (OSS-9). Their one hard use
-// here is UPD-8 with Mark's D6: a security fix auto-stages only with its
-// threshold signatures plus at least one independent passing attestation
-// from the fast channel. Independent means signed by a key that is not
-// that any root this box has accepted listed (for any role), not marked
-// maintainer-operated, and not this box's own (arbitrator ruling on D6).
+// here is UPD-8 with Mark's D6, as the arbitrator corrected it: a security
+// fix auto-stages only with its threshold signatures plus at least one
+// passing fast-channel attestation from an independent attestor. Anyone
+// can mint a key, a compromised signing quorum included, so independent
+// means on the box's allow-list (Options.Attestors: pinned in the image or
+// added by the owner), and still not a key any accepted root listed, not
+// maintainer-operated, and not the box's own. The list starts empty, so
+// until it has entries every security fix goes to the owner.
 //
-// A maintainer-run CI attestor still attests from day one: its key is in
-// the signed target AttestorsPath and its statements carry Operator
+// A maintainer-run CI attestor runs from day one: its key is in the
+// signed target AttestorsPath and its statements carry Operator
 // "maintainer". Its passes are shown as evidence (MaintainerPasses) and
 // never count as independent.
 
@@ -209,7 +212,8 @@ func (v *Verified) passes(atts [][]byte, own ed25519.PublicKey, f func(fp string
 	}
 }
 
-// IndependentPasses counts distinct independent attestors (see above)
+// IndependentPasses counts distinct allow-listed independent attestors
+// (see above)
 // with a valid, passing, fast-channel attestation for exactly this
 // release. own is this box's key and may be nil.
 func (v *Verified) IndependentPasses(atts [][]byte, own ed25519.PublicKey) int {
@@ -218,7 +222,7 @@ func (v *Verified) IndependentPasses(atts [][]byte, own ed25519.PublicKey) int {
 	}
 	n := 0
 	v.passes(atts, own, func(fp string, st Statement) {
-		if !v.maintainers[fp] && !v.operated[fp] && st.Operator == "" {
+		if v.allowed[fp] && !v.maintainers[fp] && !v.operated[fp] && st.Operator == "" {
 			n++
 		}
 	})
