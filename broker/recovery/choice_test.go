@@ -119,6 +119,8 @@ func TestBadBackupChoicesAreRefused(t *testing.T) {
 		{Kind: BackupDrive, Destination: "USB\nstick"},
 		// A destination is a name, never a place to keep a password.
 		{Kind: BackupUpload, Destination: "https://owner:CANARY-not-a-password@nas.local/backups"},
+		// The name goes into the digest, so it must not look like a code.
+		{Kind: BackupDrive, Destination: "USB stick PIN 482913"},
 	} {
 		if _, err := ChooseBackup(x.b, c, tier4, t0); !errors.Is(err, ErrBadBackupChoice) {
 			t.Fatalf("%+v: %v", c, err)
@@ -149,6 +151,38 @@ func TestOlderBackupsDoNotCountAfterTheRecoveryKeyChanges(t *testing.T) {
 	backedUp(t, x, "USB stick A", t0.Add(time.Hour))
 	if n, _ := OnlyCopyNotice(x.b); n != "" {
 		t.Fatalf("notice after a new backup: %q", n)
+	}
+}
+
+// What counts is the key a backup was sealed to, not the box clock: a
+// backup sealed before the recovery key changed stays old, whatever time
+// it carries (security C1 on #80).
+func TestABackupSealedToTheOldKeyNeverCountsWhateverItsTime(t *testing.T) {
+	x := newBox(t)
+	var buf bytes.Buffer
+	rc, err := BackupSum(x.b, x.roots(), &buf, t0.Add(24*time.Hour)) // clock ahead
+	must(t, err)
+	p, err := BeginRotate(x.b, []Part{PartRecovery}, Auth{Recovery: x.rk}, Proof{}, testGen, nil, t0)
+	must(t, err)
+	_, err = p.Commit(x.b, p.answer, t0)
+	must(t, err)
+	e, err := RecordBackup(x.b, "USB stick A", rc, bytes.NewReader(buf.Bytes()))
+	must(t, err)
+	if !e.Verified {
+		t.Fatal("an intact read-back is not verified")
+	}
+	if n, _ := OnlyCopyNotice(x.b); n != NoticeOldCard {
+		t.Fatalf("an old-key backup cleared the notice: %q", n)
+	}
+	if _, ok, _ := OfferDelete(x.b, func(string) bool { return true }); ok {
+		t.Fatal("an old-key backup opened the delete offer")
+	}
+	if n, _ := OldBackupsNote(x.b); !strings.Contains(n, "USB stick A") {
+		t.Fatalf("an old-key backup is not named as old: %q", n)
+	}
+	backedUp(t, x, "USB stick A", t0.Add(-time.Hour)) // clock behind
+	if n, _ := OnlyCopyNotice(x.b); n != "" {
+		t.Fatalf("a current-key backup did not count: %q", n)
 	}
 }
 

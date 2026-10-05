@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/ghbmrk/agentos/broker/owner"
 )
 
 // Backups are optional and owner-chosen (BAK-1): a second local drive, or
@@ -60,9 +62,9 @@ type choiceValue struct {
 // means; the variant says why.
 const (
 	NoticeUnchosen = "This drive is the only copy of your box. If it is lost or fails, everything on it is gone. To keep a copy, choose a backup on the box's Wi-Fi page: a second drive, or storage you already have."
-	NoticeNone     = "You chose no backup, so this drive is the only copy of your box. If it is lost or fails, everything on it is gone."
+	NoticeNone     = "You chose no backup, so this drive is the only copy of your box. If it is lost or fails, everything on it is gone. You can choose a backup any time on the box's Wi-Fi page."
 	noticeNoneYet  = "No backup has finished yet, so this drive is still the only copy of your box. If it is lost or fails, everything on it is gone. Backups go to %s."
-	NoticeOldCard  = "Your backups open only with your old card, so this drive is the only copy your current card restores. Back up now on the box's Wi-Fi page."
+	NoticeOldCard  = "Your existing backups open only with your old card. Back up now on the box's Wi-Fi page so your current card can restore the box."
 )
 
 // How often the digest repeats the notice: weekly while no backup is
@@ -120,6 +122,10 @@ func (c BackupChoice) valid() error {
 		if unicode.IsControl(r) {
 			return ErrBadBackupChoice
 		}
+	}
+	// The name goes into the digest, so it must not look like a code or key.
+	if owner.SecretShaped(d) {
+		return ErrBadBackupChoice
 	}
 	if strings.Contains(d, "://") {
 		if u, err := url.Parse(d); err != nil || u.User != nil {
@@ -180,12 +186,15 @@ func notice(b *Box, c BackupChoice) (string, error) {
 	if err != nil {
 		return NoticeUnchosen, err
 	}
+	// A backup counts when it was sealed to the drive's backup key now,
+	// never by its timestamp, which comes from the box clock.
+	cur := currentKey(b)
 	older := false
 	for _, e := range l.Entries {
 		if !e.Verified {
 			continue
 		}
-		if l.KeyChangedAt.IsZero() || !e.Created.Before(l.KeyChangedAt) {
+		if cur != "" && e.Key == cur {
 			return "", nil
 		}
 		older = true
