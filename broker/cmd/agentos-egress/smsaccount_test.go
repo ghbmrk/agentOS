@@ -171,7 +171,7 @@ func TestTheBridgeTextsOnlyThroughItsOwnSocket(t *testing.T) {
 
 // Security Q2 and C1: one budget for the whole line. Texts by SIP MESSAGE
 // and over the HTTP account share 30 an hour; calls are held to the same
-// recipients but spend nothing.
+// recipients and spend it too (SR2-5).
 func TestOneBudgetForTheWholeSecondLine(t *testing.T) {
 	r, sms, sign, _ := smsRig(t)
 	ctx := context.Background()
@@ -217,8 +217,9 @@ func TestOneBudgetForTheWholeSecondLine(t *testing.T) {
 	if err := sms.Send(ctx, "+15550799999", "hi"); err != smsapi.ErrLimited {
 		t.Fatalf("text past the cap: %v", err)
 	}
-	if _, err := sign.Sign(ctx, ch("INVITE", "+15550799999")); err != nil {
-		t.Fatalf("a call past the texting cap: %v", err)
+	// SR2-5: calls spend the same budget (L3 SHOULD-1 on #159).
+	if _, err := sign.Sign(ctx, ch("INVITE", "+15550799999")); !errors.Is(err, sipsign.ErrLimited) {
+		t.Fatalf("a call past the cap: %v", err)
 	}
 	r.clk.add(time.Hour)
 	if err := sms.Send(ctx, "+15550799999", "hi"); err != smsapi.ErrUnreachable {
@@ -502,5 +503,48 @@ func TestNationalFormsOfTheOwnersNumberAreRefused(t *testing.T) {
 		if _, err := sign.Sign(ctx, ch("MESSAGE", user)); err != nil {
 			t.Errorf("MESSAGE to %s: %v", user, err)
 		}
+	}
+}
+
+// SR2-5: calls signed for the SIP account have their own cap on top of
+// the shared budget, and premium-rate numbers are refused on either path.
+func TestCallsHaveTheirOwnCap(t *testing.T) {
+	r, sms, sign, _ := smsRig(t)
+	ctx := context.Background()
+	if err := r.c.setSMS(smsSettings, synthetic(t, "canary-sms-")); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.c.setSIP(sipSettings, synthetic(t, "canary-sip-")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (signStore{r.c}).LearnRealm(sipRealm); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.c.confirmRealm(sipRealm); err != nil {
+		t.Fatal(err)
+	}
+	ch := func(method, to string) sipsign.Challenge {
+		c := sipChallenge(sipRealm)
+		c.Method, c.URI = method, "sip:"+to+"@voip.test"
+		return c
+	}
+	for _, to := range []string{"+19005550123", "+449098790123"} {
+		if _, err := sign.Sign(ctx, ch("INVITE", to)); !errors.Is(err, sipsign.ErrRecipient) {
+			t.Errorf("call to %s: %v", to, err)
+		}
+		if err := sms.Send(ctx, to, "hi"); err != smsapi.ErrRecipient {
+			t.Errorf("text to %s: %v", to, err)
+		}
+	}
+	for i := 0; i < smsapi.CallsPerHour; i++ {
+		if _, err := sign.Sign(ctx, ch("INVITE", fmt.Sprintf("+1555070%04d", i))); err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+	}
+	if _, err := sign.Sign(ctx, ch("INVITE", "+15550799999")); !errors.Is(err, sipsign.ErrLimited) {
+		t.Fatalf("call past the call cap: %v", err)
+	}
+	if _, err := sign.Sign(ctx, ch("MESSAGE", "+15550799999")); err != nil {
+		t.Fatalf("a text under the shared cap: %v", err)
 	}
 }

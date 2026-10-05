@@ -175,10 +175,40 @@ func CheckText(text string) error {
 // digits (no short or premium codes), never the owner's number or the
 // line's own.
 func CheckRecipient(to, owner, own string) error {
-	if !e164Re.MatchString(to) || len(to)-1 < 8 || to == owner || to == own {
+	if !e164Re.MatchString(to) || len(to)-1 < 8 || to == owner || to == own || Premium(to) {
 		return ErrRecipient
 	}
 	return nil
+}
+
+// premium are E.164 prefixes of premium-rate and revenue-share ranges
+// (SR2-5; ADP-12: a premium-rate code needs an owner-created contact).
+// The list is not exhaustive: it covers the ranges most open to abuse in
+// the box's first markets, and the shared budget bounds the rest.
+var premium = []string{
+	"+1900", "+1976", // NANP
+	"+449", "+4487", // UK 09 and 087
+	"+49900", "+49137", "+49118", // DE
+	"+3389",                      // FR 089
+	"+39899", "+39892", "+39895", // IT
+	"+34803", "+34806", "+34807", "+34905", // ES
+	"+31900", "+31906", "+31909", // NL
+	"+3290",                      // BE 090x
+	"+41900", "+41901", "+41906", // CH
+	"+43900", "+43930", // AT
+	"+61190", // AU
+	"+64900", // NZ
+	"+35315", // IE 15xx
+}
+
+// Premium says number is in a premium-rate range on the list.
+func Premium(number string) bool {
+	for _, p := range premium {
+		if strings.HasPrefix(number, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // SameNumber says dialed, the digits of a Request-URI on an account that
@@ -203,6 +233,10 @@ const (
 	PerHour          = 30
 	PerDay           = 200
 	PerRecipientHour = 10
+	// Calls spend the same budget and have a lower cap of their own
+	// (SR2-5; L3 SHOULD-1 on #159).
+	CallsPerHour = 10
+	CallsPerDay  = 50
 )
 
 // Budget is the second line's sending budget, held in the vault process
@@ -216,25 +250,37 @@ type Budget struct {
 }
 
 type sent struct {
-	at time.Time
-	to string
+	at   time.Time
+	to   string
+	call bool
 }
 
 // Take spends one text to to at now, or refuses with ErrLimited.
-func (b *Budget) Take(to string, now time.Time) error {
+func (b *Budget) Take(to string, now time.Time) error { return b.take(to, now, false) }
+
+// TakeCall spends one call to to at now, or refuses with ErrLimited.
+func (b *Budget) TakeCall(to string, now time.Time) error { return b.take(to, now, true) }
+
+func (b *Budget) take(to string, now time.Time, call bool) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	kept := b.sent[:0]
-	hour, toHour := 0, 0
+	hour, toHour, calls, callsHour := 0, 0, 0, 0
 	for _, s := range b.sent {
 		if now.Sub(s.at) >= 24*time.Hour {
 			continue
 		}
 		kept = append(kept, s)
+		if s.call {
+			calls++
+		}
 		if now.Sub(s.at) < time.Hour {
 			hour++
 			if s.to == to {
 				toHour++
+			}
+			if s.call {
+				callsHour++
 			}
 		}
 	}
@@ -242,7 +288,10 @@ func (b *Budget) Take(to string, now time.Time) error {
 	if len(kept) >= PerDay || hour >= PerHour || toHour >= PerRecipientHour {
 		return ErrLimited
 	}
-	b.sent = append(b.sent, sent{now, to})
+	if call && (calls >= CallsPerDay || callsHour >= CallsPerHour) {
+		return ErrLimited
+	}
+	b.sent = append(b.sent, sent{now, to, call})
 	return nil
 }
 

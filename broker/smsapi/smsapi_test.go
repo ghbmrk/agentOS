@@ -748,3 +748,71 @@ func TestOnlyTheNextPageIsAskedFor(t *testing.T) {
 		}
 	}
 }
+
+// SR2-5 (ADP-12: "a short or premium-rate code needs an owner-created
+// contact"): premium-rate numbers are refused like short codes.
+func TestPremiumRateNumbersAreRefused(t *testing.T) {
+	for _, n := range []string{"+19005550123", "+19765550123", "+449098790123", "+448712345678", "+499001234567", "+491371234567", "+33899123456", "+61190012345"} {
+		if !Premium(n) {
+			t.Errorf("%s is premium-rate", n)
+		}
+		if err := CheckRecipient(n, ownerNum, lineNum); err != ErrRecipient {
+			t.Errorf("%s: %v", n, err)
+		}
+	}
+	for _, n := range []string{shopNum, "+447700900123", "+4930123456", "+33612345678", "+61212345678", "+18005550123"} {
+		if Premium(n) {
+			t.Errorf("%s is not premium-rate", n)
+		}
+	}
+}
+
+// SR2-5 (L3 SHOULD-1 on #159): a call spends the line's one budget like a
+// text, and calls have a lower cap of their own.
+func TestCallsSpendTheBudgetAndHaveTheirOwnCap(t *testing.T) {
+	var b Budget
+	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < CallsPerHour; i++ {
+		if err := b.TakeCall(fmt.Sprintf("+1555070%04d", i), now); err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+	}
+	if err := b.TakeCall("+15550799999", now); err != ErrLimited {
+		t.Fatalf("call past the cap: %v", err)
+	}
+	for i := CallsPerHour; i < PerHour; i++ {
+		if err := b.Take(fmt.Sprintf("+1555070%04d", i), now); err != nil {
+			t.Fatalf("text %d: %v", i, err)
+		}
+	}
+	if err := b.Take("+15550799999", now); err != ErrLimited {
+		t.Fatalf("calls and texts share the hour: %v", err)
+	}
+	// Calls to one number share its hourly cap with texts.
+	var c Budget
+	for i := 0; i < PerRecipientHour; i++ {
+		if err := c.TakeCall(shopNum, now.Add(time.Duration(i)*7*time.Hour)); err != nil {
+			t.Fatalf("spread call %d: %v", i, err)
+		}
+	}
+	var d Budget
+	for i := 0; i < PerRecipientHour-1; i++ {
+		d.Take(shopNum, now)
+	}
+	if err := d.TakeCall(shopNum, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.TakeCall(shopNum, now); err != ErrLimited {
+		t.Fatalf("per recipient: %v", err)
+	}
+	// The daily call cap.
+	var e Budget
+	for i := 0; i < CallsPerDay; i++ {
+		if err := e.TakeCall(fmt.Sprintf("+1555080%04d", i), now.Add(time.Duration(i)*20*time.Minute)); err != nil {
+			t.Fatalf("day call %d: %v", i, err)
+		}
+	}
+	if err := e.TakeCall("+15550899999", now.Add(CallsPerDay*20*time.Minute)); err != ErrLimited {
+		t.Fatalf("call past the day: %v", err)
+	}
+}

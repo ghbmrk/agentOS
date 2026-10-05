@@ -11,8 +11,10 @@
 // The second line is a second SIM (FromAT) or an owner-held calling
 // account (package sipline); either way its role is bound at setup (Roles).
 //
-// Recipient verification, third-party rate limits and transcript
-// journaling belong to the adapter that calls this tool (the send verb);
+// Recipients are full international numbers or owner contacts, and a
+// second SIM's texts and calls share one budget (ADP-12, SR2-5).
+// Verifying a recipient against owner contacts or a source, and journaling
+// transcripts, belong to the adapter that calls this tool (the send verb);
 // see broker/modem/at/ASSUMPTIONS.md.
 package secondline
 
@@ -24,6 +26,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/modem/at"
+	"github.com/ghbmrk/agentos/broker/smsapi"
 )
 
 // Call is a voice call on the second line.
@@ -97,6 +100,17 @@ type Config struct {
 	Disclosure []byte
 	// AnswerWait bounds how long a call may ring (default 60 s).
 	AnswerWait time.Duration
+	// Contact says the owner created a contact for a number. Recipients
+	// are full international numbers; anything else, a short or
+	// premium-rate code included, is sent to only as an owner contact
+	// (ADP-12, SR2-5). Nil is no contacts.
+	Contact func(number string) bool
+	// Budget is a second SIM's sending budget, shared by its texts and
+	// calls (ADP-12, SR2-5); nil is a new one. A calling account's budget
+	// is the vault process's (egress K16), so it is not spent here.
+	Budget *smsapi.Budget
+	// Now is the clock for the budget; nil is time.Now.
+	Now func() time.Time
 }
 
 // Untrusted is a text that reached the second line: data for the agent,
@@ -145,6 +159,8 @@ var (
 	ErrRecipient   = errors.New("secondline: not a third-party number")
 	ErrNoAnswer    = errors.New("secondline: call not answered")
 	ErrOwnerPhone  = errors.New("secondline: the owner's number and home country code are required")
+	// ErrLimited: the line's budget is spent (sipline.OwnerText words it).
+	ErrLimited = smsapi.ErrLimited
 )
 
 // Check verifies that owner and second are the SIMs recorded for their
@@ -223,6 +239,12 @@ func New(cfg Config) (*Tool, error) {
 	if cfg.AnswerWait == 0 {
 		cfg.AnswerWait = 60 * time.Second
 	}
+	if cfg.Budget == nil {
+		cfg.Budget = &smsapi.Budget{}
+	}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
+	}
 	t := &Tool{cfg: cfg, inbound: make(chan Untrusted, 64)}
 	if cfg.Second == nil {
 		close(t.inbound)
@@ -278,14 +300,27 @@ func same(s Line, o SIM) bool {
 	return any(s) == any(o)
 }
 
-// recipient refuses the owner's own phone and the box's two numbers.
-func (t *Tool) recipient(to string) error {
+// recipient refuses the owner's own phone and the box's two numbers in
+// any form, then anything but a full international number that is not
+// premium-rate, unless the owner made it a contact (SR2-5). It then
+// spends a second SIM's budget.
+func (t *Tool) recipient(to string, call bool) error {
 	for _, n := range []string{t.cfg.OwnerPhone, t.cfg.Owner.Number(), t.cfg.Second.Number()} {
 		if at.SameNumber(to, n, t.cfg.CountryCode) {
 			return ErrRecipient
 		}
 	}
-	return nil
+	contact := t.cfg.Contact != nil && t.cfg.Contact(to)
+	if !contact && smsapi.CheckRecipient(to, "", "") != nil {
+		return ErrRecipient
+	}
+	if _, ok := t.cfg.Second.(Account); ok {
+		return nil
+	}
+	if call {
+		return t.cfg.Budget.TakeCall(to, t.cfg.Now())
+	}
+	return t.cfg.Budget.Take(to, t.cfg.Now())
 }
 
 // Available reports whether third-party texts and calls can be made.
@@ -299,7 +334,7 @@ func (t *Tool) Text(to, text string) error {
 	if err := t.check(); err != nil {
 		return err
 	}
-	if err := t.recipient(to); err != nil {
+	if err := t.recipient(to, false); err != nil {
 		return err
 	}
 	return t.cfg.Second.Send(to, text)
@@ -315,7 +350,7 @@ func (t *Tool) Call(ctx context.Context, to string) (Call, error) {
 	if err := t.check(); err != nil {
 		return nil, err
 	}
-	if err := t.recipient(to); err != nil {
+	if err := t.recipient(to, true); err != nil {
 		return nil, err
 	}
 	c, err := t.cfg.Second.Dial(ctx, to)

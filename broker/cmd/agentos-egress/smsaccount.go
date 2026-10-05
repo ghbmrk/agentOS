@@ -255,9 +255,9 @@ func (c *custody) lineNumbers() []string {
 }
 
 // allowSend applies the second line's recipient rules and spends its
-// shared budget (security C1, Q2 on the #142 design read). Caller holds
-// mu.
-func (c *custody) allowSend(to string, spend bool) error {
+// shared budget (security C1, Q2 on the #142 design read): a text, or a
+// call, which also has a cap of its own (SR2-5). Caller holds mu.
+func (c *custody) allowSend(to string, call bool) error {
 	if err := smsapi.CheckRecipient(to, c.owner, ""); err != nil {
 		return err
 	}
@@ -266,8 +266,8 @@ func (c *custody) allowSend(to string, spend bool) error {
 			return smsapi.ErrRecipient
 		}
 	}
-	if !spend {
-		return nil
+	if call {
+		return c.budget.TakeCall(to, c.now())
 	}
 	return c.budget.Take(to, c.now())
 }
@@ -285,7 +285,7 @@ func (s smsStore) SMSAccount() (smsapi.Settings, string, error) {
 func (s smsStore) AllowText(to string) error {
 	s.c.mu.Lock()
 	defer s.c.mu.Unlock()
-	return s.c.allowSend(to, true)
+	return s.c.allowSend(to, false)
 }
 
 func (s smsStore) Mark() (smsapi.Mark, uint64, error) {
@@ -326,8 +326,8 @@ func (s smsStore) SetMark(m smsapi.Mark, gen uint64) error {
 }
 
 // Allow checks a MESSAGE or INVITE before sign.sock signs it: the same
-// recipient rules, and for a MESSAGE the same budget, as a text over the
-// HTTP account (sipsign.Limiter).
+// recipient rules and the same budget as a text over the HTTP account, a
+// call spending it as a call (sipsign.Limiter; SR2-5).
 func (s signStore) Allow(ch sipsign.Challenge) error {
 	c := s.c
 	c.mu.Lock()
@@ -346,7 +346,7 @@ func (s signStore) Allow(ch sipsign.Challenge) error {
 			}
 		}
 	}
-	switch c.allowSend(to, ch.Method == "MESSAGE") {
+	switch c.allowSend(to, ch.Method == "INVITE") {
 	case nil:
 		return nil
 	case smsapi.ErrLimited:
