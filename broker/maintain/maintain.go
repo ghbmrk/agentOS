@@ -65,6 +65,16 @@ type Config struct {
 	// example releases/12.json). They arrive from anyone and are checked
 	// by update. Nil: none are known.
 	Attestations func(ctx context.Context, release string) ([][]byte, error)
+	// Attestors is the allow-list of attestor keys whose passing reports
+	// count (D6, arbitrator ruling on #53): pinned in the installed image
+	// and the owner's configuration, changed only by an update the current
+	// list attested, or by the owner with a code-generator code and local
+	// confirmation. Empty: no attestor yet, so security fixes go to the
+	// owner (CH-3) and ordinary releases rest on their soak.
+	Attestors []ed25519.PublicKey
+	// AttestWait is how long a security fix waits for a listed attestor
+	// before it goes to the owner instead. Default 24 hours.
+	AttestWait time.Duration
 	// OwnKey is this box's attestation key, which never counts as
 	// independent. Nil: none.
 	OwnKey ed25519.PublicKey
@@ -136,8 +146,10 @@ type state struct {
 	OfflineSince time.Time `json:"offline_since,omitempty"`
 	// Newest is the newest release above the installed one the last good
 	// check found on the box's channel, or 0.
-	Newest  int64    `json:"newest,omitempty"`
-	Pending *pending `json:"pending,omitempty"`
+	Newest int64 `json:"newest,omitempty"`
+	// NewestSecurity: the newest release is marked a security fix.
+	NewestSecurity bool     `json:"newest_security,omitempty"`
+	Pending        *pending `json:"pending,omitempty"`
 	// Seen is when the box first saw each release image, on any channel,
 	// keyed by imageKey: a release promoted from fast to stable keeps its
 	// image, so its soak counts from first sight on fast (UPD-5).
@@ -196,6 +208,9 @@ func New(cfg Config) (*Loop3, error) {
 	}
 	if cfg.Soak <= 0 {
 		cfg.Soak = 7 * 24 * time.Hour
+	}
+	if cfg.AttestWait <= 0 {
+		cfg.AttestWait = 24 * time.Hour
 	}
 	if cfg.MinPasses <= 0 {
 		cfg.MinPasses = 1
@@ -361,7 +376,7 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 			delete(l.st.ProposedAt, v)
 		}
 	}
-	l.st.Newest, l.st.Pending = 0, nil
+	l.st.Newest, l.st.NewestSecurity, l.st.Pending = 0, false, nil
 	l.st.Next = now.Add(l.cfg.Interval)
 	if rel == nil {
 		serr := l.saveLocked()
@@ -369,7 +384,7 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 		return loops.Result{Err: serr}
 	}
 	v := m.Version
-	l.st.Newest = v
+	l.st.Newest, l.st.NewestSecurity = v, m.Security
 	if _, ok := l.st.Seen[key]; !ok {
 		l.st.Seen[key] = now
 	}
@@ -502,17 +517,23 @@ func (l *Loop3) decide(ctx context.Context, rel *update.Verified, m update.Manif
 	if err != nil {
 		return outcome{wait: &pending{Version: m.Version, Security: m.Security, Why: waitPropose}, err: err}
 	}
-	atts, aerr := l.attestations(ctx, mf.Path)
+	all, aerr := l.attestations(ctx, mf.Path)
+	atts := l.listed(all)
 	if m.Security {
-		// UPD-8, D6: a security fix waits for one independent attestation.
-		if err := rel.SecurityAutoStage(atts, l.cfg.OwnKey); err != nil {
+		// UPD-8, D6: a security fix auto-stages only with a passing report
+		// from a listed attestor. Without one it waits a day for one, then
+		// goes to the owner (CH-3); with no attestor listed it goes to the
+		// owner at once.
+		if err := rel.SecurityAutoStage(atts, l.cfg.OwnKey); err != nil &&
+			len(l.cfg.Attestors) > 0 && now.Before(seen.Add(l.cfg.AttestWait)) {
 			return outcome{wait: &pending{Version: m.Version, Security: true, Why: waitAttestation}, err: aerr}
 		}
 	} else if channel != update.ChannelFast {
-		// UPD-5: an ordinary stable release soaks, and needs independent
-		// passing attestations, before it is offered.
+		// UPD-5: an ordinary stable release soaks, and needs passing
+		// reports from listed attestors when any exist, before it is
+		// offered.
 		until := seen.Add(l.cfg.Soak)
-		if now.Before(until) || rel.IndependentPasses(atts, l.cfg.OwnKey) < l.cfg.MinPasses {
+		if now.Before(until) || (len(l.cfg.Attestors) > 0 && rel.IndependentPasses(atts, l.cfg.OwnKey) < l.cfg.MinPasses) {
 			return outcome{wait: &pending{Version: m.Version, Why: waitSoak, Until: until}, err: aerr}
 		}
 	}
@@ -535,6 +556,26 @@ func (l *Loop3) decide(ctx context.Context, rel *update.Verified, m update.Manif
 		o.value = valueRelease
 	}
 	return o
+}
+
+// listed keeps the attestations signed by an allow-listed attestor. What
+// they say is still judged by update (release, result, channel, and never
+// this box's own key).
+func (l *Loop3) listed(atts [][]byte) [][]byte {
+	var out [][]byte
+	for _, b := range atts {
+		_, pub, err := update.ParseAttestation(b)
+		if err != nil {
+			continue
+		}
+		for _, k := range l.cfg.Attestors {
+			if pub.Equal(k) {
+				out = append(out, b)
+				break
+			}
+		}
+	}
+	return out
 }
 
 func (l *Loop3) attestations(ctx context.Context, release string) ([][]byte, error) {
@@ -622,6 +663,9 @@ func (l *Loop3) statusLocked(online bool, set loops.Settings, in update.Installe
 			return Status{Line: fmt.Sprintf("Update %d did worse on this box's tests and was not installed.", st.Newest)}
 		case change.StateAdopted:
 			return Status{Line: fmt.Sprintf("Update %d is ready and installs at the next quiet time.", st.Newest)}
+		}
+		if at, ok := st.ProposedAt[st.Newest]; ok && st.NewestSecurity {
+			return Status{Line: fmt.Sprintf("Security update %d needs your approval: no trusted independent test report yet. Asked %s.", st.Newest, at.Format("Mon 2 Jan"))}
 		}
 		if at, ok := st.ProposedAt[st.Newest]; ok {
 			return Status{Line: fmt.Sprintf("Update %d has been waiting for your approval since %s.", st.Newest, at.Format("Mon 2 Jan"))}

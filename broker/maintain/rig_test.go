@@ -82,6 +82,8 @@ type rig struct {
 	online   bool
 	channel  string
 	atts     [][]byte
+	attestor ed25519.PrivateKey
+	allow    []ed25519.PublicKey
 	own      ed25519.PrivateKey
 	mirrors  []update.Source
 	settings loops.Settings
@@ -142,6 +144,8 @@ func newRig(t *testing.T) *rig {
 		t.Fatal(err)
 	}
 	_, r.own, _ = ed25519.GenerateKey(rand.Reader)
+	_, r.attestor, _ = ed25519.GenerateKey(rand.Reader)
+	r.allow = []ed25519.PublicKey{r.attestor.Public().(ed25519.PublicKey)}
 	r.mirrors = []update.Source{update.DirSource(repo.Dir)}
 	r.l = r.newLoop()
 	return r
@@ -157,11 +161,12 @@ func (r *rig) newLoop() *Loop3 {
 		Attestations: func(context.Context, string) ([][]byte, error) {
 			return r.atts, nil
 		},
-		OwnKey:   r.own.Public().(ed25519.PublicKey),
-		Pipeline: r.p,
-		Settings: func() loops.Settings { return r.settings },
-		State:    r.state,
-		Now:      r.clk.now,
+		OwnKey:    r.own.Public().(ed25519.PublicKey),
+		Attestors: r.allow,
+		Pipeline:  r.p,
+		Settings:  func() loops.Settings { return r.settings },
+		State:     r.state,
+		Now:       r.clk.now,
 	})
 	if err != nil {
 		r.t.Fatal(err)
@@ -216,8 +221,11 @@ func (r *rig) promote(from, to int64) {
 func (r *rig) refresh() { r.must(r.repo.Refresh(r.snap, r.ts)) }
 
 // attest adds a passing fast-channel attestation for the newest release
-// from an independent installation.
-func (r *rig) attest() {
+// from the allow-listed attestor.
+func (r *rig) attest() { r.attestWith(r.attestor) }
+
+// attestWith adds a passing fast-channel attestation signed by k.
+func (r *rig) attestWith(k ed25519.PrivateKey) {
 	r.t.Helper()
 	other, err := update.InitStore(filepath.Join(r.t.TempDir(), "other"), r.rootJSON, 1)
 	r.must(err)
@@ -226,7 +234,6 @@ func (r *rig) attest() {
 	if res.Release == nil {
 		r.t.Fatal("no release to attest")
 	}
-	_, k, _ := ed25519.GenerateKey(rand.Reader)
 	b, err := update.Attest(k, res.Release, update.Statement{Result: update.ResultPass, Channel: update.ChannelFast, HardwareClass: "n95-8g"})
 	r.must(err)
 	r.atts = append(r.atts, b)

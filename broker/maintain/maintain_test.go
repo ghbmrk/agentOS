@@ -4,6 +4,8 @@ package maintain
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -144,51 +146,6 @@ func TestStaleCheckNotCurrent(t *testing.T) {
 	}
 }
 
-func TestSecurityFixWaitsForIndependentAttestation(t *testing.T) {
-	r := newRig(t)
-	r.release(2, func(m *update.Manifest) { m.Security = true })
-	if ok, v := r.tick(); !ok || v >= valueRelease {
-		t.Fatalf("value %v without an attestation", v)
-	}
-	if len(r.p.proposed()) != 0 {
-		t.Fatal("proposed a security fix with no independent attestation (D6)")
-	}
-	if d := r.digest(); !strings.Contains(d, "Security update 2") || !strings.Contains(d, "independent") {
-		t.Fatalf("digest: %q", d)
-	}
-	if r.l.Status().Current {
-		t.Fatal("current with a security fix outstanding")
-	}
-	// Security is prioritised: looked at again within the hour.
-	r.attest()
-	r.clk.add(time.Hour)
-	ok, v := r.tick()
-	if !ok {
-		t.Fatal("no retry for a waiting security fix")
-	}
-	got := r.p.proposed()
-	if len(got) != 1 || !got[0].Security() || got[0].Version() != "2" {
-		t.Fatalf("proposed %+v", got)
-	}
-	if v <= 1 {
-		t.Fatalf("a security fix should count for more than an ordinary release: %v", v)
-	}
-}
-
-func TestOwnAttestationDoesNotCount(t *testing.T) {
-	r := newRig(t)
-	r.release(2, func(m *update.Manifest) { m.Security = true })
-	other, _ := update.InitStore(t.TempDir(), r.rootJSON, 1)
-	res, _ := other.Check(update.DirSource(r.repo.Dir), update.Options{Channel: update.ChannelFast, Now: r.clk.now})
-	b, err := update.Attest(r.own, res.Release, update.Statement{Result: update.ResultPass, Channel: update.ChannelFast})
-	r.must(err)
-	r.atts = [][]byte{b}
-	r.tick()
-	if len(r.p.proposed()) != 0 {
-		t.Fatal("this box's own attestation counted as independent")
-	}
-}
-
 func TestStableReleaseSoaksBeforeProposal(t *testing.T) {
 	r := newRig(t)
 	r.release(2, nil)
@@ -208,24 +165,6 @@ func TestStableReleaseSoaksBeforeProposal(t *testing.T) {
 	got := r.p.proposed()
 	if len(got) != 1 || got[0].Version() != "2" || got[0].Security() {
 		t.Fatalf("after the soak: %+v", got)
-	}
-}
-
-func TestStableReleaseNeedsAnAttestationAfterSoak(t *testing.T) {
-	r := newRig(t)
-	r.release(2, nil)
-	for i := 0; i < 8; i++ {
-		r.tick()
-		r.clk.add(24 * time.Hour)
-		r.refresh()
-	}
-	if len(r.p.proposed()) != 0 {
-		t.Fatal("stable release proposed with no independent passing attestation")
-	}
-	r.attest()
-	r.tick()
-	if len(r.p.proposed()) != 1 {
-		t.Fatal("not proposed once attested")
 	}
 }
 
@@ -495,33 +434,6 @@ func TestOnlineRequired(t *testing.T) {
 	}
 }
 
-func TestWaitingSecurityFixNotParkedByScheduler(t *testing.T) {
-	// LOOP-3 parks a loop after 3 runs without value; a security fix
-	// waiting hourly for its attestation must not be parked for a day.
-	r := newRig(t)
-	r.release(2, func(m *update.Manifest) { m.Security = true })
-	spare, err := meter.Open(meter.Config{
-		Path:       filepath.Join(t.TempDir(), "spare.json"),
-		MachineCap: meter.Limits{Calls: 50, Tokens: 500_000},
-		OverallCap: loops.SpareLimits(loops.DefaultSpareCalls),
-		Now:        r.clk.now,
-	})
-	r.must(err)
-	s, err := loops.New(loops.Config{Store: &change.MemStore{}, Spare: spare, Sources: []loops.Source{r.l}, Now: r.clk.now})
-	r.must(err)
-	for h := 0; h < 6; h++ {
-		if h == 4 {
-			r.attest()
-		}
-		s.Tick(context.Background())
-		r.clk.add(time.Hour)
-	}
-	got := r.p.proposed()
-	if len(got) != 1 || !got[0].Security() {
-		t.Fatalf("security fix attested at hour 4, proposed by hour 6: %+v (share %v)", got, s.Share())
-	}
-}
-
 func TestDriveConfirmedOnlyWhenNothingNewer(t *testing.T) {
 	r := newRig(t)
 	r.release(2, nil)
@@ -597,18 +509,157 @@ func TestWakeUnparksLoop3(t *testing.T) {
 	}
 }
 
-func TestUrgentWhileSecurityFixOrRetryDue(t *testing.T) {
+func TestSecurityFixAutoStagesWithAllowListedAttestation(t *testing.T) {
+	r := newRig(t)
+	r.release(2, func(m *update.Manifest) { m.Security = true })
+	r.attest()
+	ok, v := r.tick()
+	got := r.p.proposed()
+	if !ok || len(got) != 1 || !got[0].Security() || got[0].Version() != "2" {
+		t.Fatalf("proposed %+v", got)
+	}
+	if v <= valueRelease {
+		t.Fatalf("a security fix should count for more than an ordinary release: %v", v)
+	}
+}
+
+func TestUnlistedAttestorsDoNotCount(t *testing.T) {
+	// D6 (arbitrator ruling): only allow-listed attestors count, so a
+	// signing-key holder cannot mint the "independent" test report. This
+	// box's own key never counts, even if listed.
+	for name, k := range map[string]func(r *rig) ed25519.PrivateKey{
+		"unlisted": func(*rig) ed25519.PrivateKey { _, k, _ := ed25519.GenerateKey(rand.Reader); return k },
+		"own": func(r *rig) ed25519.PrivateKey {
+			r.allow = append(r.allow, r.own.Public().(ed25519.PublicKey))
+			return r.own
+		},
+	} {
+		r := newRig(t)
+		r.release(2, func(m *update.Manifest) { m.Security = true })
+		r.attestWith(k(r))
+		r.l = r.newLoop()
+		r.tick()
+		r.clk.add(time.Hour)
+		r.tick()
+		for _, v := range r.p.proposed() {
+			if v.Security() {
+				t.Fatalf("%s attestation counted", name)
+			}
+		}
+	}
+}
+
+func TestSecurityFixGoesToOwnerWithNoAttestors(t *testing.T) {
+	// Until an attestor exists, security fixes take the owner path (CH-3)
+	// at once instead of waiting.
+	r := newRig(t)
+	r.allow = nil
+	r.l = r.newLoop()
+	r.release(2, func(m *update.Manifest) { m.Security = true })
+	r.tick()
+	got := r.p.proposed()
+	if len(got) != 1 || got[0].Security() {
+		t.Fatalf("proposed %+v", got)
+	}
+	if st := r.l.Status(); st.Current || !strings.Contains(st.Line, "Security update 2 needs your approval") {
+		t.Fatalf("status: %q", st.Line)
+	}
+}
+
+func TestSecurityFixWaitsADayForAttestorThenAsksOwner(t *testing.T) {
+	r := newRig(t)
+	r.release(2, func(m *update.Manifest) { m.Security = true })
+	r.tick()
+	if len(r.p.proposed()) != 0 {
+		t.Fatal("did not wait for the listed attestor")
+	}
+	if !r.l.Urgent() {
+		t.Fatal("not urgent while a security fix waits for its attestation")
+	}
+	if d := r.digest(); !strings.Contains(d, "Security update 2") || !strings.Contains(d, "independent") {
+		t.Fatalf("digest: %q", d)
+	}
+	for h := 0; h < 24; h++ {
+		r.clk.add(time.Hour)
+		if h%12 == 11 {
+			r.refresh()
+		}
+		r.tick()
+	}
+	got := r.p.proposed()
+	if len(got) != 1 || got[0].Security() {
+		t.Fatalf("after a day with no attestation: %+v", got)
+	}
+}
+
+func TestFailedChecksNotParkedByScheduler(t *testing.T) {
+	// LOOP-3 parks a loop after 3 runs without value; a failed check
+	// retried hourly must not be parked for a day (arbitrator ruling).
+	r := newRig(t)
+	r.channel = update.ChannelFast
+	r.release(2, func(m *update.Manifest) { m.Channel = update.ChannelFast })
+	r.mirrors = []update.Source{failSource{}}
+	spare, err := meter.Open(meter.Config{
+		Path:       filepath.Join(t.TempDir(), "spare.json"),
+		MachineCap: meter.Limits{Calls: 50, Tokens: 500_000},
+		OverallCap: loops.SpareLimits(loops.DefaultSpareCalls),
+		Now:        r.clk.now,
+	})
+	r.must(err)
+	s, err := loops.New(loops.Config{Store: &change.MemStore{}, Spare: spare, Sources: []loops.Source{r.l}, Now: r.clk.now})
+	r.must(err)
+	for h := 0; h < 6; h++ {
+		if h == 4 {
+			r.mirrors = []update.Source{update.DirSource(r.repo.Dir)}
+		}
+		s.Tick(context.Background())
+		r.clk.add(time.Hour)
+	}
+	if got := r.p.proposed(); len(got) != 1 {
+		t.Fatalf("source back at hour 4, proposed by hour 6: %+v (share %v)", got, s.Share())
+	}
+}
+
+func TestStableReleaseNeedsAnAttestationAfterSoak(t *testing.T) {
+	r := newRig(t)
+	r.release(2, nil)
+	for i := 0; i < 8; i++ {
+		r.tick()
+		r.clk.add(24 * time.Hour)
+		r.refresh()
+	}
+	if len(r.p.proposed()) != 0 {
+		t.Fatal("stable release proposed with no listed attestation")
+	}
+	r.attest()
+	r.tick()
+	if len(r.p.proposed()) != 1 {
+		t.Fatal("not proposed once attested")
+	}
+}
+
+func TestStableReleaseSoakOnlyWithNoAttestors(t *testing.T) {
+	// With no attestor listed, an ordinary stable release is offered to the
+	// owner after its soak alone, rather than never.
+	r := newRig(t)
+	r.allow = nil
+	r.l = r.newLoop()
+	r.release(2, nil)
+	for i := 0; i < 8 && len(r.p.proposed()) == 0; i++ {
+		r.tick()
+		r.clk.add(24 * time.Hour)
+		r.refresh()
+	}
+	if len(r.p.proposed()) != 1 {
+		t.Fatal("not offered after the soak")
+	}
+}
+
+func TestUrgentWhileRetryDue(t *testing.T) {
 	r := newRig(t)
 	r.tick()
 	if r.l.Urgent() {
 		t.Fatal("urgent while current")
-	}
-	r.release(2, func(m *update.Manifest) { m.Security = true })
-	r.clk.add(24 * time.Hour)
-	r.refresh()
-	r.tick()
-	if !r.l.Urgent() {
-		t.Fatal("not urgent while a security fix waits for its attestation")
 	}
 	r2 := newRig(t)
 	r2.mirrors = []update.Source{failSource{}}
