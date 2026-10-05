@@ -129,7 +129,7 @@ func progressiveJPEG(b []byte) bool {
 		case m >= 0xc0 && m <= 0xcf && m != 0xc4 && m != 0xc8 && m != 0xcc:
 			return false
 		}
-		i += 2 + int(b[i+2])<<8 | int(b[i+3])
+		i += 2 + (int(b[i+2])<<8 | int(b[i+3]))
 	}
 	return true
 }

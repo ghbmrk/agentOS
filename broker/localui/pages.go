@@ -6,7 +6,8 @@ import (
 	"net/http"
 )
 
-// Pages carry no script and load nothing from outside the box (ONB-1).
+// Pages load nothing from outside the box and carry no script, except the
+// vault page's one hash-allowed photo shrink (ONB-1, L17).
 // Live progress refreshes with a meta refresh (ONB-4).
 var tmpl = template.Must(template.New("layout").Funcs(template.FuncMap{"phase": phaseText, "boxhost": func() string { return "" }, "shrinkjs": func() template.JS { return template.JS(shrinkJS) }}).Parse(`{{define "head"}}<!doctype html>
 <html lang="en"><head><meta charset="utf-8">

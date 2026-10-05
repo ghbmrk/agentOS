@@ -681,6 +681,25 @@ func TestScanBoundsProgressiveJPEG(t *testing.T) {
 	if _, err := ScanPassphrase(sized(6000, 5000, 0xc0)); !errors.Is(err, ErrPhotoSize) {
 		t.Fatalf("baseline 30 MP: %v", err)
 	}
+	// A segment whose length has bit 1 of its low byte set must not hide
+	// the real frame header behind a fake SOF0 (#50 L3 re-review, F1).
+	prog := sized(5000, 4000, 0xc2)
+	fake := append([]byte{0xff, 0xd8, 0xff, 0xef, 0x00, 0x06, 0x00, 0x00, 0xff, 0xc0}, prog[2:]...)
+	if _, err := ScanPassphrase(fake); !errors.Is(err, ErrPhotoSize) {
+		t.Fatalf("progressive 20 MP behind a fake SOF0: %v", err)
+	}
+	// Every segment length walks to the next marker.
+	for n := 2; n < 600; n++ {
+		j := []byte{0xff, 0xd8, 0xff, 0xe1, byte(n >> 8), byte(n)}
+		j = append(j, make([]byte, n-2)...)
+		j = append(j, 0xff, 0xc2, 0, 8, 8, 0, 8, 0, 8, 1)
+		for k := 6; k < 4+n; k++ {
+			j[k] = 0xc0 // a stray SOF0 marker byte inside the segment
+		}
+		if !progressiveJPEG(j) {
+			t.Fatalf("segment length %d: progressive frame missed", n)
+		}
+	}
 }
 
 // A photo spends an attempt before it is read, even one with no code in
