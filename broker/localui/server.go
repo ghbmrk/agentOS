@@ -455,7 +455,7 @@ func (s *Server) proofSignIn(w http.ResponseWriter, r *http.Request, ticket stri
 const (
 	wrongCodeText = "That code didn't work. Try the next code from your code generator." // UX-2wb-2
 	limitedText   = "Too many wrong codes were tried on this Wi-Fi. Wait a minute, then try again."
-	lockedText    = "No more codes can be tried today. Use your recovery key, or try again later."
+	lockedText    = "No more codes can be tried for now. Use your recovery key, or try again later."
 )
 
 // refusalText is the page's line for a refused code: what is left of the
