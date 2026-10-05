@@ -2,11 +2,14 @@
 
 package clock
 
-import "time"
+import (
+	"errors"
+	"time"
+)
 
-// Synced is false off Linux: the box runs Linux, and builds elsewhere are
-// for development only.
-func Synced() (bool, error) { return false, nil }
+// RTC is unavailable off Linux: the box runs Linux, and builds elsewhere
+// are for development only.
+func RTC() (time.Time, error) { return time.Time{}, errors.New("clock: no hardware clock off Linux") }
 
 var start = time.Now()
 

@@ -120,6 +120,7 @@ func (q *questions) open(ctx context.Context, d *daemon.Daemon, pre *preempter, 
 	// monotonic clock (question Q15).
 	guard, err := clock.New(clock.Config{
 		Synced:    clock.Synced,
+		RTC:       clock.RTC, // learns the hardware clock's offset (HW-8, agentos-clock-boot)
 		StatePath: cfg.ClockPath,
 		Logf:      log.Printf,
 	})

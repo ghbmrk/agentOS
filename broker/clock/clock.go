@@ -89,6 +89,13 @@ type Status struct {
 	Since time.Time
 	// Held is the anchor carried forward to the check, while held.
 	Held time.Time
+	// Verified reports that this boot has had verified time: a verified
+	// NTP sync (Config.Synced), or carrier time agreeing with a box clock at
+	// or after the floor. Until then the box clock came from the host's
+	// hardware clock, which Windows keeps in local time (HW-8).
+	Verified bool
+	// Start is the box clock's reading of when this boot began.
+	Start time.Time
 }
 
 // Restricted reports whether time-sensitive checks must not proceed.
@@ -183,6 +190,9 @@ func zoneLike(skew time.Duration) bool {
 
 // Line is the status for the owner's STATUS reply, with times in loc.
 func (s Status) Line(loc *time.Location) string {
+	if !s.Verified && s.State != Disagree && s.State != Held {
+		return fmt.Sprintf("Time check: not confirmed since start at %s (waiting for network or phone-network time). Nothing to do.", s.Start.In(loc).Format("15:04"))
+	}
 	switch s.State {
 	case Disagree:
 		if s.Skew == 0 {
@@ -224,9 +234,14 @@ func about(d time.Duration) string {
 
 // Config sets up a Guard.
 type Config struct {
-	// Synced reports whether NTP has set the kernel clock (Synced, from
-	// adjtimex, on Linux). An error counts as not synced. Required.
+	// Synced reports a verified NTP sync (Synced: chronyd, through chronyc,
+	// HW-8 and security T4, T5). An error counts as not synced. Required.
 	Synced func() (bool, error)
+	// RTC reads the host's hardware clock as the kernel does, as if UTC
+	// (RTC, from sysfs, on Linux). At a verified sync the guard learns its
+	// offset from UTC for BootEstimate (potency C1, security T7). Nil
+	// learns none. It is never written.
+	RTC func() (time.Time, error)
 	// Carrier reads carrier network time from the modem; nil without a
 	// modem. Any error counts as no carrier time, never as a disagreement.
 	Carrier func(context.Context) (time.Time, error)
@@ -298,6 +313,15 @@ type Guard struct {
 	carrier     time.Time
 	carrierMono time.Duration
 
+	// verified: this boot has had verified time. floor: the latest
+	// verified time ever seen, which true time cannot be before; it bounds
+	// Latest and Earliest while unverified and only advances (security T3).
+	// offset: the hardware clock minus UTC at the last verified sync.
+	verified   bool
+	floor      time.Time
+	offset     time.Duration
+	haveOffset bool
+
 	running atomic.Int32 // Run loops live
 	fmu     sync.Mutex
 	flight  *flight // the check in progress, shared by concurrent callers
@@ -357,6 +381,7 @@ func New(cfg Config) (*Guard, error) {
 	}
 	g := &Guard{cfg: cfg}
 	g.load()
+	g.status.Verified, g.status.Start = g.verified, g.startLocked()
 	return g, nil
 }
 
@@ -463,7 +488,7 @@ func (g *Guard) check(ctx context.Context) Status {
 	// Read the box clock after the modem answers, so the modem's latency
 	// does not count as skew.
 	now, mono := g.cfg.Now(), g.cfg.Elapsed()
-	s := Status{At: now}
+	s := Status{At: now, Start: now.Add(-mono)}
 
 	g.mu.Lock()
 	prev, wasChecked := g.status, g.checked
@@ -504,11 +529,33 @@ func (g *Guard) check(ctx context.Context) Status {
 			s.Since = prev.Since
 		}
 	}
+	// Verified time: a verified NTP sync, or carrier time agreeing with a
+	// box clock at or after the floor (carrier time alone is only a
+	// tie-break, security T4); never while restricted or held.
+	carrierOK := have && (s.State == CarrierOnly || s.State == Agreed) &&
+		(g.floor.IsZero() || !now.Before(g.floor.Add(-g.cfg.Tolerance)))
+	verifiedNow := (synced || carrierOK) && s.State != Disagree && s.State != Held
+	if verifiedNow {
+		g.verified = true
+		switch {
+		case now.After(g.floor):
+			g.floor = now
+		case g.floor.Sub(now) > g.cfg.Tolerance:
+			// Verified time is the authority: a floor ahead of it is a
+			// corrupt or tampered file, never true time.
+			g.cfg.Logf("clock: saved floor %v is ahead of verified time %v; replaced", g.floor, now)
+			g.floor = now
+		}
+		if synced {
+			g.learnOffsetLocked(now)
+		}
+	}
+	s.Verified = g.verified
 	g.status, g.checked, g.mono = s, true, mono
 	text := g.noticeLocked(s, mono)
 	// While alerts count toward the cap, every check saves, so a reboot
 	// finds this boot's uptime no older than the last check (L3 F1, round 4).
-	if !wasChecked || prev.State != s.State || prev.Since != s.Since || text != "" || have || len(g.alerts) > 0 {
+	if !wasChecked || prev.State != s.State || prev.Since != s.Since || text != "" || have || len(g.alerts) > 0 || verifiedNow {
 		g.saveLocked()
 	}
 	if changed := !wasChecked || prev.State != s.State; text != "" || changed {
@@ -613,7 +660,11 @@ func (g *Guard) Latest(ctx context.Context) (time.Time, Status) {
 	mono := g.cfg.Elapsed()
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return g.latestLocked(now, mono), s
+	t := g.latestLocked(now, mono)
+	if !g.verified && g.floor.After(t) {
+		t = g.floor // a clock behind keeps nothing alive past the floor (HW-8)
+	}
+	return t, s
 }
 
 // Earliest is the earliest credible time: the earlier of the box clock (the
@@ -628,6 +679,9 @@ func (g *Guard) Earliest(ctx context.Context) (time.Time, Status) {
 	defer g.mu.Unlock()
 	if c := g.carrierForwardLocked(mono); !c.IsZero() && c.Before(now) {
 		now = c
+	}
+	if !g.verified && !g.floor.IsZero() && g.floor.Before(now) {
+		now = g.floor // a clock ahead ends no wait early (HW-8)
 	}
 	return now, s
 }
@@ -715,6 +769,12 @@ type saved struct {
 	Alerts    []stamp       `json:"alerts"`
 	SavedMono time.Duration `json:"saved_mono"`
 	SavedWall time.Time     `json:"saved_wall"`
+	// HW-8: the boot that had verified time, the floor, and the hardware
+	// clock's offset from UTC (BootEstimate).
+	VerifiedBoot string        `json:"verified_boot,omitempty"`
+	Floor        time.Time     `json:"floor"`
+	Offset       time.Duration `json:"offset"`
+	HaveOffset   bool          `json:"have_offset"`
 }
 
 func (g *Guard) load() {
@@ -740,6 +800,11 @@ func (g *Guard) load() {
 	}
 	g.told = v.Told
 	sameBoot := v.Boot != "" && v.Boot == g.cfg.BootID()
+	g.floor = v.Floor
+	if validOffset(v.Offset) {
+		g.offset, g.haveOffset = v.Offset, v.HaveOffset
+	}
+	g.verified = v.VerifiedBoot != "" && v.VerifiedBoot == g.cfg.BootID()
 	if v.Anchored && sameBoot {
 		g.anchored, g.anchorWall, g.anchorMono = true, v.AnchorWall, v.AnchorMono
 	}
@@ -777,6 +842,10 @@ func (g *Guard) saveLocked() {
 		Alerts: g.alerts, SavedMono: g.cfg.Elapsed(),
 	}
 	v.SavedWall = g.latestLocked(g.cfg.Now(), v.SavedMono)
+	v.Floor, v.Offset, v.HaveOffset = g.floor, g.offset, g.haveOffset
+	if g.verified {
+		v.VerifiedBoot = g.cfg.BootID()
+	}
 	if v.Restricted {
 		v.Skew, v.Since = g.status.Skew, g.status.Since
 	}
@@ -817,4 +886,50 @@ func writeAtomic(path string, v saved) error {
 	}
 	defer d.Close()
 	return d.Sync()
+}
+
+// maxOffset is the largest hardware-clock offset from UTC learned: time
+// zones span UTC-12 to UTC+14.
+const maxOffset = 14 * time.Hour
+
+func validOffset(d time.Duration) bool {
+	return d >= -maxOffset && d <= maxOffset && d%(15*time.Minute) == 0
+}
+
+// learnOffsetLocked records the hardware clock's offset from verified time
+// now, rounded to 15 minutes (time zones are whole quarter hours), if it
+// is within ±14 hours (potency C1, security T7).
+func (g *Guard) learnOffsetLocked(now time.Time) {
+	if g.cfg.RTC == nil {
+		return
+	}
+	rtc, err := g.cfg.RTC()
+	if err != nil || rtc.IsZero() {
+		return
+	}
+	d := rtc.Sub(now).Round(15 * time.Minute)
+	if !validOffset(d) {
+		g.cfg.Logf("clock: hardware clock offset %v outside ±14h; not learned", rtc.Sub(now))
+		return
+	}
+	g.offset, g.haveOffset = d, true
+}
+
+func (g *Guard) startLocked() time.Time { return g.cfg.Now().Add(-g.cfg.Elapsed()) }
+
+// BootEstimate is the box's best time at boot, before any time service:
+// the hardware clock reading rtc less the offset learned at the last
+// verified sync, from the guard's state file. ok is false with no offset
+// learned or no readable file; then the clock is left as the kernel set it.
+// The estimate stays unverified: the guard's floor still bounds it.
+func BootEstimate(statePath string, rtc time.Time) (time.Time, bool) {
+	b, err := os.ReadFile(statePath)
+	if err != nil {
+		return time.Time{}, false
+	}
+	var v saved
+	if json.Unmarshal(b, &v) != nil || !v.HaveOffset || !validOffset(v.Offset) {
+		return time.Time{}, false
+	}
+	return rtc.Add(-v.Offset), true
 }
