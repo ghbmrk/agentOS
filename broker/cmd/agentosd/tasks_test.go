@@ -43,8 +43,8 @@ func TestOwnerVerdictsBecomeCases(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tasks.put("owner:a1", "send Sam the invoice CANARY-task", true)
-	tasks.put("owner:a2", "please refuse CANARY-task", false)
+	tasks.put("owner:a1", "send Sam the invoice CANARY-task", true, viaSMS)
+	tasks.put("owner:a2", "please refuse CANARY-task", false, viaSMS)
 	h := &fakeHarvest{}
 	effect := func(id, goal string) journal.Intent {
 		return journal.Intent{ID: id, GoalID: goal, Origin: "guest:agent", Params: map[string]any{"record": "inv-1042"}}
@@ -61,7 +61,7 @@ func TestOwnerVerdictsBecomeCases(t *testing.T) {
 		t.Fatalf("implicit: %+v", o)
 	}
 	h.got = append(h.got[:1], h.got[2:]...)
-	tasks.put("owner:a3", "capped CANARY-task", false)
+	tasks.put("owner:a3", "capped CANARY-task", false, viaSMS)
 	harvestOutcome(&fakeHarvest{}, tasks, grants.OwnerOutcome{Intent: effect("agent/5", "owner:a3"), Verdict: grants.OwnerAcceptedImplicitly}, logf)
 	if l := logged[len(logged)-1]; l != "learning: owner verdict not harvested: daily cap on implicit acceptances" {
 		t.Fatalf("cap logged %q", l)
@@ -89,14 +89,14 @@ func TestTaskTextsAreBounded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tasks.put("owner:old", "old task", false)
+	tasks.put("owner:old", "old task", false, viaSMS)
 	now = now.Add(keepTasks + time.Minute)
 	if _, ok := tasks.get("owner:old"); ok {
 		t.Fatal("an expired task text was used")
 	}
 	for i := 0; i <= maxTasks; i++ {
 		now = now.Add(time.Second)
-		tasks.put(fmt.Sprintf("owner:%d", i), "task", false)
+		tasks.put(fmt.Sprintf("owner:%d", i), "task", false, viaSMS)
 	}
 	tasks, err = openTaskTexts(store, clock, t.Logf)
 	if err != nil {
@@ -139,8 +139,8 @@ func TestForgetDeletesTheTaskText(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tasks.put("owner:a1", "send Sam the invoice CANARY-forget", false)
-	tasks.put("owner:a2", "book the dentist", false)
+	tasks.put("owner:a1", "send Sam the invoice CANARY-forget", false, viaSMS)
+	tasks.put("owner:a2", "book the dentist", false, viaSMS)
 	if ok, err := tasks.forget("owner:a1"); !ok || err != nil {
 		t.Fatal("forget reported the wrong result", err)
 	}

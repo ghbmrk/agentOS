@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -189,6 +190,21 @@ func (p *Pipeline) ForgetGoal(goal string) ([]string, error) {
 		return nil, err
 	}
 	return ids, nil
+}
+
+// LearnedFrom counts the active adoptions learned from goal: what a
+// ForgetGoal of it would undo now (W3-forget's notice, before anything is
+// deleted). It changes nothing.
+func (p *Pipeline) LearnedFrom(goal string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := 0
+	for _, a := range p.st.Adoptions {
+		if a.Reverted == "" && slices.Contains(a.Goals, goal) {
+			n++
+		}
+	}
+	return n
 }
 
 func (p *Pipeline) addCase(c Case) error {

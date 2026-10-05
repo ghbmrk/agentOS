@@ -62,6 +62,12 @@ const (
 	// since it read a record the owner deleted (recalltool W10): only the
 	// broker submits it, and only the owner approves it.
 	ActionRecallRollback = "meta.recall.rollback"
+	// ActionLearnForget forgets one owner task from what the learning
+	// plane keeps (W3-forget, CAP-3): only the broker submits it, on the
+	// owner's FORGET, and only the owner approves it. It has no params:
+	// the goal ID rides in the intent ID (grants.ForgetID), since the
+	// journal redacts params, and the task's text is never in it.
+	ActionLearnForget = "meta.learn.forget"
 	// ActionEvidence sets or clears the one destination that private
 	// agent replies and evidence go to (CH-20). Clearing it sends them by
 	// text again, so it is not narrowing.

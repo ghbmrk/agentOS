@@ -129,13 +129,15 @@ func TestOnlyTheDaemonUsesTheLoop2Origin(t *testing.T) {
 		ast.Inspect(f, func(n ast.Node) bool {
 			switch x := n.(type) {
 			case *ast.SelectorExpr:
-				if x.Sel.Name == "OriginLoop2" && dir != "cmd/agentosd" {
-					t.Errorf("%s uses grants.OriginLoop2; only cmd/agentosd may", rel)
+				// W3-forget: the forget origin likewise.
+				if (x.Sel.Name == "OriginLoop2" || x.Sel.Name == "OriginForget") && dir != "cmd/agentosd" {
+					t.Errorf("%s uses grants.%s; only cmd/agentosd may", rel, x.Sel.Name)
 				}
 			case *ast.BasicLit:
-				if x.Kind == token.STRING && strings.Contains(x.Value, "loop2") && strings.Contains(x.Value, "broker:") &&
+				if x.Kind == token.STRING && strings.Contains(x.Value, "broker:") &&
+					(strings.Contains(x.Value, "loop2") || strings.Contains(x.Value, "forget")) &&
 					!(dir == "grants" && filepath.Base(rel) == "grant.go") {
-					t.Errorf("%s spells the Loop 2 origin", rel)
+					t.Errorf("%s spells the Loop 2 or forget origin", rel)
 				}
 			}
 			return true
