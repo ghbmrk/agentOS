@@ -135,12 +135,46 @@ func TestSecuritySuiteBlocks(t *testing.T) {
 }
 
 // CHG-6: auto-adoption needs at least MinSecurity fixtures.
-func TestNoSecurityFixturesAsks(t *testing.T) {
+// CHG-1: nothing adopts with fewer than MinSecurity fixtures, even with
+// the owner's approval.
+func TestNoSecurityFixturesRejects(t *testing.T) {
 	e := newEnv(t, func(c *Config) { c.MinSecurity = 2 })
 	e.cases(12, ClassSkill, "skills/greet", "hello")
+	e.owner.approve = true
 	rep := e.propose(Candidate{Source: Local, Files: Tree{"skills/greet": []byte("hello")}})
-	if rep.Basis != BasisOwner {
-		t.Fatalf("auto-adopted with too few fixtures: %+v", rep)
+	if rep.State != StateRejected || len(e.owner.asked) != 0 {
+		t.Fatalf("adopted with too few fixtures: %+v", rep)
+	}
+}
+
+type brokenEvaluator struct{}
+
+func (brokenEvaluator) Run(context.Context, Tree, Case) ([]byte, error) {
+	return nil, errors.New("no model access")
+}
+
+// CHG-1: an evaluator that cannot run fails every case on both sides; that
+// is not "no regression", and nothing adopts.
+func TestBrokenEvaluatorAdoptsNothing(t *testing.T) {
+	e := newEnv(t, nil)
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	e.p.cfg.Evaluator = brokenEvaluator{}
+	e.owner.approve = true
+	for _, c := range []Candidate{
+		{Source: Local, Files: Tree{"skills/greet": []byte("hello")}},
+		{Source: Upstream, Files: Tree{"guest-image/openclaw": []byte("sha256:1")}},
+	} {
+		if rep := e.propose(c); rep.State != StateRejected || len(e.owner.asked) != 0 {
+			t.Fatalf("broken evaluator: %+v", rep)
+		}
+	}
+	// Even with fixtures that the broken evaluator happened to pass, zero
+	// held-out passes rejects.
+	f := newEnv(t, nil)
+	f.cases(12, ClassSkill, "skills/greet", "hello")
+	f.p.cfg.Graders = map[Class]Grader{ClassSkill: func(c Case, _ []byte) bool { return c.Security }}
+	if rep := f.propose(Candidate{Source: Local, Files: Tree{"skills/greet": []byte("hello")}}); rep.State != StateRejected || rep.Reason != "passes no held-out case" {
+		t.Fatalf("zero held-out passes: %+v", rep)
 	}
 }
 

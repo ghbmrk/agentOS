@@ -410,12 +410,21 @@ func (p *Pipeline) Propose(ctx context.Context, c Candidate) (Report, error) {
 	case rep.SecurityPassed < rep.Security:
 		rep.State, rep.Reason = StateRejected, "fails the security suite"
 		return rep, nil
+	case rep.Security < p.cfg.MinSecurity:
+		// Without fixtures nothing shows the evaluator ran at all.
+		rep.State, rep.Reason = StateRejected, "too few security fixtures to qualify anything"
+		return rep, nil
+	case rep.HeldOut > 0 && rep.Passed == 0:
+		// Zero passes on both sides reads as "no regression" when the
+		// evaluator cannot run (no model access, every case erroring).
+		rep.State, rep.Reason = StateRejected, "passes no held-out case"
+		return rep, nil
 	}
 	enough := rep.HeldOut >= p.cfg.MinHeldOut && rep.Security >= p.cfg.MinSecurity
 	switch {
 	case c.Source == Local && cl.neutral && auto && enough:
 		rep.Basis = BasisStanding
-	case c.Source == Upstream && c.Security && p.cfg.SecurityAutoStage && rep.Security >= p.cfg.MinSecurity:
+	case c.Source == Upstream && c.Security && p.cfg.SecurityAutoStage:
 		rep.Basis = BasisSecurity
 	default:
 		rep.Basis = BasisOwner
