@@ -169,9 +169,10 @@ func TestOP8ModelUseIsChargedToTheGoal(t *testing.T) {
 }
 
 // TestOP1LastGoalEndsOnDeliveryOrQuiet: after its answer, a message stays
-// the lineage's goal only until another message is delivered or nothing
-// has served it for GoalQuiet; serving it keeps it fresh. Later requests
-// are unattributed rather than merged into an unrelated task (potency PG1).
+// the lineage's goal only until another message is delivered or GoalQuiet
+// has passed since it was handed out; guest requests do not extend it.
+// Later requests are unattributed rather than merged into an unrelated
+// task (potency PG1; arbitrator on #55).
 func TestOP1LastGoalEndsOnDeliveryOrQuiet(t *testing.T) {
 	now := time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)
 	r := newRig(t, func(c *Config) {
@@ -184,15 +185,13 @@ func TestOP1LastGoalEndsOnDeliveryOrQuiet(t *testing.T) {
 	r.reply("m1", a)
 	now = now.Add(20 * time.Minute)
 	r.tool("m1", "effect_request", send("r1"))
-	now = now.Add(20 * time.Minute) // 40 min after the answer, 20 after r1
-	r.tool("m1", "effect_request", send("r2"))
-	if g1, g2 := r.goalOf("m1/r1"), r.goalOf("m1/r2"); g1 != GoalID(a) || g2 != GoalID(a) {
-		t.Fatalf("served goal not kept fresh: %q %q", g1, g2)
+	if g := r.goalOf("m1/r1"); g != GoalID(a) {
+		t.Fatalf("inside the window: %q", g)
 	}
-	now = now.Add(31 * time.Minute)
+	now = now.Add(11 * time.Minute) // 31 min after the hand-out, 11 after r1
 	r.tool("m1", "effect_request", send("r3"))
 	if g := r.goalOf("m1/r3"); g != "" {
-		t.Fatalf("quiet goal still stamped: %q", g)
+		t.Fatalf("a guest request extended the window: %q", g)
 	}
 	b := r.deliver("m1", "renew the passport")
 	r.fetch("m1")

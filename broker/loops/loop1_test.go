@@ -396,7 +396,9 @@ func TestALapsedOwnerRequestBacksOffThenStops(t *testing.T) {
 		t.Fatal("first proposal not made")
 	}
 	// New evidence, but the owner was just asked: wait for the backoff.
-	more(4)
+	// (Thirteen tasks, so one lands in dev outside the next goal of a
+	// held-out task, which mining also skips; the split is deterministic.)
+	more(13)
 	if run() {
 		t.Fatal("re-proposed inside the backoff")
 	}
@@ -519,6 +521,50 @@ func TestACrashMidHarvestStillKeepsTheTaskFromTheBuilder(t *testing.T) {
 	must(t, h2.Harvest(Outcome{Intent: id, Action: Edited, Input: []byte("procedures/mail"), Output: []byte("v1"), Correction: []byte("v2")}))
 	if ev, _ := h2.Evidence(); ev.HeldOut != 1 {
 		t.Fatalf("after retry: held out %d", ev.HeldOut)
+	}
+}
+
+// TestAHeldOutGoalsWorkIsNotMinedWhereverItLanded: a held-out task's work
+// can land unstamped (the origin bucket) or under the lineage's next goal
+// (guest G14). Neither is mined; a later goal of the same lineage still is,
+// so one held-out case does not stop Loop 1 on a one-guest box (#55 B2).
+func TestAHeldOutGoalsWorkIsNotMinedWhereverItLanded(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	var id string
+	for i := 0; ; i++ {
+		id = fmt.Sprintf("held-%d", i)
+		r.task(id, "owner:m"+id, "mail", "draft", "private")
+		must(t, h.Harvest(Outcome{Intent: id, Action: Edited, Input: []byte("procedures/mail"), Output: []byte("v1"), Correction: []byte("v2")}))
+		dev := false
+		for _, c := range r.p.Dev(change.ClassTask) {
+			dev = dev || c.ID == id
+		}
+		if !dev {
+			break
+		}
+	}
+	for _, x := range []struct{ id, goal, action string }{
+		{"loose", "", "refund"},       // unstamped: the origin bucket
+		{"trail", "owner:mB", "pay"},  // the next goal: may be the held task's trailing work
+		{"later", "owner:mC", "move"}, // a later task of the same lineage
+	} {
+		r.tasks.out[x.id] = journal.ResultNotApplied
+		r.task(x.id, x.goal, "bank", x.action, "private")
+	}
+	l, err := NewLearn(LearnConfig{Pipeline: r.p, Journal: r.eng, Harvest: h})
+	must(t, err)
+	ev, err := h.Evidence()
+	must(t, err)
+	got := map[string]bool{}
+	for _, hy := range l.mine(ev) {
+		got[hy.Key] = true
+	}
+	if got["failure:bank/refund"] || got["failure:bank/pay"] {
+		t.Fatalf("held-out work was mined: %v", got)
+	}
+	if !got["failure:bank/move"] {
+		t.Fatalf("a later task of the lineage was not mined: %v", got)
 	}
 }
 

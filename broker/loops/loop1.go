@@ -398,6 +398,7 @@ func originKey(in journal.Intent) string { return "origin:" + in.Origin }
 // builder (CHG-1). Broker-state intents are not tasks.
 func (l *Learn) mine(ev Evidence) []Hypothesis {
 	sts := l.cfg.Journal.List()
+	held := heldWithNext(sts, ev)
 	byTask := map[string][]journal.Status{}
 	var order []string
 	for _, s := range sts {
@@ -405,7 +406,7 @@ func (l *Learn) mine(ev Evidence) []Hypothesis {
 			continue
 		}
 		k := TaskKey(s.Intent)
-		if ev.Held(k) {
+		if held[k] {
 			continue
 		}
 		if _, ok := byTask[k]; !ok {
@@ -498,6 +499,41 @@ func (l *Learn) mine(ev Evidence) []Hypothesis {
 		return out[i].Key < out[j].Key
 	})
 	return out
+}
+
+// heldWithNext is the task keys mining skips: every held one, and for a
+// held goal, the next goal its origin started after it. A guest that is
+// handed the next owner message while still finishing the held task
+// stamps that trailing work with the next goal (guest G14), so it may be
+// the held task's own work. Goals are ordered by their first intent in
+// the journal (submission order). Unstamped work is the origin key, which
+// Evidence already holds for a held guest case.
+func heldWithNext(sts []journal.Status, ev Evidence) map[string]bool {
+	held := map[string]bool{}
+	goals := map[string][]string{} // origin -> goal keys in order of first intent
+	seen := map[string]bool{}
+	for _, s := range sts {
+		in := s.Intent
+		if in.Account == journal.BrokerAccount {
+			continue
+		}
+		k := TaskKey(in)
+		if ev.Held(k) {
+			held[k] = true
+		}
+		if in.GoalID != "" && !seen[k] {
+			seen[k] = true
+			goals[in.Origin] = append(goals[in.Origin], k)
+		}
+	}
+	for _, ks := range goals {
+		for i := 0; i+1 < len(ks); i++ {
+			if ev.Held(ks[i]) {
+				held[ks[i+1]] = true
+			}
+		}
+	}
+	return held
 }
 
 // durations is how long each dispatched intent took from its first

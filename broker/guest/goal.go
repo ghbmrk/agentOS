@@ -10,9 +10,10 @@ import "time"
 // is fixed by the request's first submission: a repeat keeps it, whatever
 // the lineage is serving by then.
 
-// DefaultGoalQuiet is how long a lineage keeps serving its last owner
-// message after it was answered, counted from the last request or model
-// call that served it.
+// DefaultGoalQuiet is how long a lineage may keep serving its last owner
+// message once none is open, counted from when that message was handed
+// to the guest. Only the owner's side moves it: guest requests and model
+// calls never extend it (arbitrator on #55).
 const DefaultGoalQuiet = 30 * time.Minute
 
 // GoalID is the goal ID of the task an owner message started.
@@ -57,10 +58,10 @@ func (p *Plane) handedOut(m *machine, id string) {
 // goal is the goal a new request from lineage serves. It is the one owner
 // message the lineage's guests hold unanswered; with none, the last one
 // it was handed (work that goes on after the answer still serves it),
-// until a new message is delivered to the lineage or GoalQuiet passes
-// with nothing served; with several, none, since the broker cannot tell
-// which one a request is for and does not guess. Serving a goal keeps it
-// fresh.
+// until a new message is delivered to the lineage or GoalQuiet has passed
+// since it was handed out; with several, none, since the broker cannot
+// tell which one a request is for and does not guess. Work started by
+// events or timers will carry no goal (arbitrator on #55; G14).
 func (p *Plane) goal(lineage string) string {
 	if lineage == "" {
 		return ""
@@ -87,10 +88,8 @@ func (p *Plane) goal(lineage string) string {
 		if g.Msg == "" || now.Sub(g.Last) >= p.cfg.GoalQuiet {
 			return ""
 		}
-		p.store.setGoal(lineage, g.Msg, now)
 		return GoalID(g.Msg)
 	case 1:
-		p.store.setGoal(lineage, open[0], now)
 		return GoalID(open[0])
 	}
 	return ""
