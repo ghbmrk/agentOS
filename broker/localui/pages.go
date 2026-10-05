@@ -135,6 +135,17 @@ form { margin: .6em 0 1.2em; }
 <p>A second line lets the box text and call businesses for you from its own number, a calling (SIP) account you hold with a provider. Your own number stays private.</p>
 <p>First, in your provider's settings: turn on encrypted calls (SRTP), and turn off voicemail on this number, so callers hear the box's message asking them to text instead.</p>
 {{template "lineform" .Form}}
+{{end}}
+<h2>Texts over your provider's web API</h2>
+{{if and .SMSRemoving .SMS.Set}}<p>Remove the texting account? Texts from {{.SMS.Settings.Number}} stop until you add it again with the provider's auth token.</p>
+<form method="post" action="/second-line/"><input type="hidden" name="step" value="sms-remove"><input type="hidden" name="confirm" value="1"><button class="stop">Remove</button></form>
+<p><a href="/second-line/">Cancel</a></p>
+{{else if .SMS.Set}}<p class="ok">Texts go through {{.SMS.ProviderName}} from {{.SMS.Settings.Number}}.</p>
+<details><summary>Change the texting account</summary>{{template "smsform" .SMSForm}}</details>
+<form method="post" action="/second-line/"><input type="hidden" name="step" value="sms-remove"><button class="stop">Remove the texting account</button></form>
+{{else}}<p>Some providers' calling accounts can't send texts. If yours is Twilio or SignalWire, the box can text through the provider's web API instead, from the same number.</p>
+<p class="muted">For a US number, register it for A2P 10DLC (business texting) in your provider's console first, or carriers block the texts.</p>
+<details{{if .SMSForm.Provider}} open{{end}}><summary>Set up texting</summary>{{template "smsform" .SMSForm}}</details>
 {{end}}{{end}}
 <p><a href="/home">More</a> · <a href="/status">Status</a></p>
 {{template "foot"}}{{end}}
@@ -146,6 +157,14 @@ form { margin: .6em 0 1.2em; }
 <label>The account's phone number<input type="tel" name="number" value="{{.Number}}" placeholder="+44 7700 900123" required></label>
 <label><input type="checkbox" name="no_plus" value="1"{{if .NoPlus}} checked{{end}}> My provider dials numbers without the + sign</label><br>
 <label>SIP password your provider generated<input type="password" name="password" autocomplete="off" required></label>
+<button>Save</button></form>{{end}}
+
+{{define "smsform"}}<form method="post" action="/second-line/"><input type="hidden" name="step" value="sms-set">
+<label>Provider<select name="provider"><option value="twilio"{{if eq .Provider "twilio"}} selected{{end}}>Twilio</option><option value="signalwire"{{if eq .Provider "signalwire"}} selected{{end}}>SignalWire</option></select></label>
+<label>SignalWire space (leave empty for Twilio)<input type="text" name="space" value="{{.Space}}" placeholder="your-space" autocapitalize="none" autocorrect="off" spellcheck="false"></label>
+<label>Account SID (Twilio) or Project ID (SignalWire)<input type="text" name="account" value="{{.Account}}" autocapitalize="none" autocorrect="off" spellcheck="false" required></label>
+<label>The number texts come from<input type="tel" name="number" value="{{.Number}}" placeholder="+1 555 010 0000" required></label>
+<label>Auth token from the provider's console<input type="password" name="token" autocomplete="off" required></label>
 <button>Save</button></form>{{end}}
 
 {{define "home"}}{{template "head" ""}}

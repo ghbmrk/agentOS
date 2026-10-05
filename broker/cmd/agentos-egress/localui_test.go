@@ -282,3 +282,49 @@ func TestSecondLinePageClientAgainstVaultProcess(t *testing.T) {
 		t.Fatalf("status while locked: %v", err)
 	}
 }
+
+// TestTextingAccountClientAgainstVaultProcess holds the local UI's texting
+// account client (P2-3c part 5) to the real unlock socket: setup stores
+// it, status never carries the token, a refused field arrives with its
+// fixed reason, and removal clears it.
+func TestTextingAccountClientAgainstVaultProcess(t *testing.T) {
+	r := openRig(t)
+	run := filepath.Join(t.TempDir(), "run")
+	srvs, err := serve(run, r.c, testRouter(t), nil, nil, os.Getuid(), os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		for _, s := range srvs {
+			s.Close()
+		}
+	})
+	ctx := context.Background()
+	u := localui.NewUnlockClient(filepath.Join(run, UnlockSocket))
+	if st, err := u.SMSStatus(ctx); err != nil || st.Set {
+		t.Fatalf("status before setup: %+v %v", st, err)
+	}
+	tok := synthetic(t, "canary-sms-")
+	var ve *localui.VaultError
+	bad := smsSettings
+	bad.Account = "AC1"
+	if err := u.SetSMS(ctx, bad, tok); !errors.As(err, &ve) || ve.Status != http.StatusBadRequest || ve.Msg != errSMSAccount.msg {
+		t.Fatalf("bad account: %v", err)
+	}
+	if err := u.SetSMS(ctx, smsSettings, tok); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := u.SMSStatus(ctx); err != nil || !st.Set || st.Settings != smsSettings {
+		t.Fatalf("status after setup: %+v %v", st, err)
+	}
+	if err := u.RemoveSMS(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := u.SMSStatus(ctx); st.Set {
+		t.Fatalf("set after removal: %+v", st)
+	}
+	r.c.lock()
+	if _, err := u.SMSStatus(ctx); !errors.As(err, &ve) || ve.Status != http.StatusConflict {
+		t.Fatalf("status while locked: %v", err)
+	}
+}
