@@ -462,54 +462,63 @@ func TestUndoSkipsReconciledEvidence(t *testing.T) {
 // comes first so a cut never loses it, and the cut uses ASCII (UX-69-3).
 func TestReasonsFitTheDetailCap(t *testing.T) {
 	const long = "Projects/Client-Accounts-Quarterly-Review"
-	for _, bound := range []string{"", "once", "each"} {
-		for _, share := range []bool{false, true} {
-			for _, alert := range []bool{false, true} {
-				var journaled []journal.Intent
-				x := newH(t, func(c *mail.Config) {
-					c.Shared = append(c.Shared, long)
-					c.DailyLimit, c.DailyCeiling = 1, 1
-					c.Authorized = func(action string, _ time.Time) []journal.Intent {
-						if action != mail.OpMove && action != mail.OpArchive {
-							return nil
+	for _, lim := range [][2]int{{1, 1}, {200, 2000}, {50000, 100000}} {
+		for _, bound := range []string{"", "once", "each"} {
+			for _, share := range []bool{false, true} {
+				for _, alert := range []bool{false, true} {
+					var journaled []journal.Intent
+					x := newH(t, func(c *mail.Config) {
+						c.Shared = append(c.Shared, long)
+						c.DailyLimit, c.DailyCeiling = lim[0], lim[1]
+						c.Authorized = func(action string, _ time.Time) []journal.Intent {
+							if action != mail.OpMove && action != mail.OpArchive {
+								return nil
+							}
+							return journaled
 						}
-						return journaled
+					})
+					x.srv.AddFolder(long, "")
+					m := msg{id: "<m@notifications.security.verylongbank.example>", from: "alerts@notifications.security.verylongbank.example",
+						to: me, subject: "Hello", body: "Twenty percent off."}
+					if alert {
+						m.subject = "New sign-in on your account"
 					}
-				})
-				x.srv.AddFolder(long, "")
-				m := msg{id: "<m@notifications.security.verylongbank.example>", from: "alerts@notifications.security.verylongbank.example",
-					to: me, subject: "Hello", body: "Twenty percent off."}
-				if alert {
-					m.subject = "New sign-in on your account"
-				}
-				x.deliver("INBOX", m)
-				p := map[string]any{mail.ParamRecord: m.id, mail.ParamTo: "Receipts"}
-				if share {
-					p[mail.ParamTo] = long
-				}
-				switch bound {
-				case "once":
-					journaled = []journal.Intent{{ID: "earlier", Account: "mail"}}
-				case "each":
-					journaled = []journal.Intent{{ID: "earlier", Account: "mail"}}
-					asked := x.intent(mail.OpMove, p)
-					x.a.Escalate(ctx, asked)
-					journaled = append(journaled, journal.Intent{ID: asked.ID, Account: "mail"})
-				}
-				e, err := x.a.Escalate(ctx, x.intent(mail.OpMove, p))
-				if err != nil {
-					t.Fatal(err)
-				}
-				name := fmt.Sprintf("bound=%s share=%v alert=%v", bound, share, alert)
-				if n := len(e.Reason); n > 40 || strings.Contains(e.Reason, "…") || alert != strings.Contains(e.Reason, "alert") {
-					t.Fatalf("%s: %q (%d)", name, e.Reason, n)
-				}
-				if (bound == "once") != strings.HasPrefix(e.Reason, "past 1, YES allows 1") ||
-					(bound == "each") != strings.HasPrefix(e.Reason, "past 1 today") {
-					t.Fatalf("%s: bound clause not first: %q", name, e.Reason)
-				}
-				if (share || alert || bound != "") != (e.Reason != "") {
-					t.Fatalf("%s: reason %q", name, e.Reason)
+					x.deliver("INBOX", m)
+					p := map[string]any{mail.ParamRecord: m.id, mail.ParamTo: "Receipts"}
+					if share {
+						p[mail.ParamTo] = long
+					}
+					earlier := func(n int) []journal.Intent {
+						out := make([]journal.Intent, n)
+						for i := range out {
+							out[i] = journal.Intent{ID: fmt.Sprint("earlier/", i), Account: "mail"}
+						}
+						return out
+					}
+					switch bound {
+					case "once":
+						journaled = earlier(lim[0])
+					case "each":
+						journaled = earlier(lim[0])
+						asked := x.intent(mail.OpMove, p)
+						x.a.Escalate(ctx, asked)
+						journaled = append(earlier(lim[1]), journal.Intent{ID: asked.ID, Account: "mail"})
+					}
+					e, err := x.a.Escalate(ctx, x.intent(mail.OpMove, p))
+					if err != nil {
+						t.Fatal(err)
+					}
+					name := fmt.Sprintf("bounds=%v bound=%s share=%v alert=%v", lim, bound, share, alert)
+					if n := len(e.Reason); n > 40 || strings.Contains(e.Reason, "…") || alert != strings.Contains(e.Reason, "alert") {
+						t.Fatalf("%s: %q (%d)", name, e.Reason, n)
+					}
+					if (bound == "once") != strings.HasPrefix(e.Reason, fmt.Sprintf("past %d, YES allows %d", lim[0], lim[1])) ||
+						(bound == "each") != strings.HasPrefix(e.Reason, fmt.Sprintf("past %d today", lim[1])) {
+						t.Fatalf("%s: bound clause not first: %q", name, e.Reason)
+					}
+					if (share || alert || bound != "") != (e.Reason != "") || share && !alert && !strings.Contains(e.Reason, "shared") {
+						t.Fatalf("%s: reason %q", name, e.Reason)
+					}
 				}
 			}
 		}

@@ -453,27 +453,36 @@ func (a *Adapter) Escalate(ctx context.Context, in journal.Intent) (grants.Escal
 	case held:
 		return grants.Escalation{Held: true, Reason: fmt.Sprintf("held past today's %d", a.cfg.DailyLimit)}, nil
 	}
+	// Clauses go in order of what the owner must see: the bound, then
+	// the alert, then the share. Each takes the longest of its forms that
+	// still fits, so the alert is never cut off by a long bound or name.
 	alert := pl.hides && pl.alert
-	short := len(why) > 0 || alert
-	if pl.verb == verb.Share {
-		e.Verb = verb.Share
-		switch {
-		case short:
-			why = append(why, "shared")
-		case contains(a.cfg.Shared, pl.msg.Folder):
-			why = append(why, "in shared folder "+clip(pl.msg.Folder, 20))
-		case pl.to != "":
-			why = append(why, "into shared folder "+clip(pl.to, 20))
-		default:
-			why = append(why, "shared label "+clip(p[ParamLabel], 20))
-		}
-	}
+	var forms [][]string
 	if alert {
 		e.Verb = verb.ChangeAccount
-		if len(why) > 0 {
-			why = append(why, "alert hidden")
-		} else {
-			why = append(why, "hides an alert from "+clip(domainOf(pl.msg.From), 20))
+		forms = append(forms, []string{"hides an alert from " + clip(domainOf(pl.msg.From), 20), "alert hidden", "alert"})
+	}
+	if pl.verb == verb.Share {
+		if !alert {
+			e.Verb = verb.Share
+		}
+		var name string
+		switch {
+		case contains(a.cfg.Shared, pl.msg.Folder):
+			name = "in shared folder " + clip(pl.msg.Folder, 20)
+		case pl.to != "":
+			name = "into shared folder " + clip(pl.to, 20)
+		default:
+			name = "shared label " + clip(p[ParamLabel], 20)
+		}
+		forms = append(forms, []string{name, "shared"})
+	}
+	for _, f := range forms {
+		for _, c := range f {
+			if len(strings.Join(append(append([]string{}, why...), c), "; ")) <= maxDetail {
+				why = append(why, c)
+				break
+			}
 		}
 	}
 	e.Reason = clip(strings.Join(why, "; "), maxDetail)
