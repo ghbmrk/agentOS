@@ -511,7 +511,7 @@ func TestOnlyThisRequestsTextedCodeGetsTheHint(t *testing.T) {
 	if _, err := r.ch.LocalAnswer(a, r.sum(a), true, textedB); err != ErrWrongCode || len(r.ch.codes.st.Wrong) != 1 {
 		t.Fatalf("B's code on A: %v, %d wrong", err, len(r.ch.codes.st.Wrong))
 	}
-	if msg, err := r.ch.LocalAnswer(b, r.sum(b), false, textedB); err != nil || msg != "Denied." {
+	if msg, err := r.ch.LocalAnswer(b, r.sum(b), false, textedB); err != nil || msg != "Denied "+b+"." {
 		t.Fatalf("deny with the code typed in: %q %v", msg, err)
 	}
 	if d := r.decisions(); len(d) != 1 || d[0].Approved || d[0].Ref != "b1" {

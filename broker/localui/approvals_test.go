@@ -383,7 +383,7 @@ func TestARightCodeGivesItsSlotBack(t *testing.T) {
 			t.Fatalf("wrong %d: %s", n, w.Body.String())
 		}
 	}
-	if w := a.post("/approvals/", answer(a.form(ids[2]), "approve", a.code())); !strings.Contains(w.Body.String(), "Approved.") {
+	if w := a.post("/approvals/", answer(a.form(ids[2]), "approve", a.code())); !strings.Contains(w.Body.String(), "Approved "+ids[2]+".") {
 		t.Fatalf("right: %s", w.Body.String())
 	}
 	if w := a.post("/approvals/", answer(a.form(ids[3]), "approve", "000000")); !strings.Contains(w.Body.String(), "Wrong code") {
