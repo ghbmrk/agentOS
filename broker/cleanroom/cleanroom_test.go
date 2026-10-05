@@ -858,3 +858,75 @@ func TestResultStoredAfterFailureIsRemoved(t *testing.T) {
 		t.Fatalf("code %d, %d publishable", w.Code, len(pub))
 	}
 }
+
+// A different batch for a day already taken is refused, not dropped.
+func TestDifferentBatchForTakenDayIsRefused(t *testing.T) {
+	r := newRig(t, nil)
+	if err := r.b.Send("2026-10-04", [][]byte{skillHint(t)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.b.Send("2026-10-04", [][]byte{vulnHint(t)}); !errors.Is(err, ErrDayTaken) {
+		t.Fatalf("different batch for a taken day: %v", err)
+	}
+	if err := r.b.Send("2026-10-04", [][]byte{skillHint(t)}); err != nil {
+		t.Fatalf("resend of the same bytes: %v", err)
+	}
+}
+
+// After an accepted result, another is refused with 409.
+func TestSecondResultIsRefused(t *testing.T) {
+	r := newRig(t, nil)
+	r.f.ms["cr-y"] = &vm.Machine{ID: "cr-y", Spec: vm.Spec{Image: "cleanroom"}}
+	s := &session{b: r.b, id: "cr-y", job: &job{ID: "y", Hint: string(skillHint(t)), Day: "2026-10-04"}, kind: "skill_gap", done: make(chan struct{})}
+	for i, want := range []int{200, 409} {
+		w := httptest.NewRecorder()
+		s.result(w, httptest.NewRequest("POST", "/cleanroom/result", bytes.NewReader(goodResult())))
+		if w.Code != want {
+			t.Fatalf("result %d: %d, want %d", i, w.Code, want)
+		}
+	}
+	a, err := r.b.Store().Get("a-y")
+	if err != nil || a.Manifest().Day != "2026-10-04" {
+		t.Fatalf("artifact %+v %v; its day is the job's", a.Manifest(), err)
+	}
+}
+
+// OSS-3: an artifact staged but not committed before a crash is never
+// publishable, and is cleaned up on restart.
+func TestStagedArtifactIsNotPublishable(t *testing.T) {
+	r := newRig(t, nil)
+	staged, _, err := r.b.store.stage(Manifest{ID: "a-z"}, map[string]string{"f": "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pub, _ := r.b.Store().Publishable(); len(pub) != 0 {
+		t.Fatal("staged artifact is publishable")
+	}
+	if _, err := r.b.Store().Get("a-z"); !errors.Is(err, ErrNoArtifact) {
+		t.Fatal("staged artifact is visible")
+	}
+	if _, err := New(r.cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(staged); !os.IsNotExist(err) {
+		t.Fatal("staged artifact survived a restart")
+	}
+}
+
+// PS1: Requeue keeps vuln jobs parked; their clean rooms stay offline.
+func TestRequeueHoldsVulnJobs(t *testing.T) {
+	r := newRig(t, nil)
+	r.f.guest = func(id, dir string) {
+		call(client(dir), "POST", "/cleanroom/unable", []byte(`{"reason":"needs_public_material"}`))
+	}
+	r.b.Send(nextDay(), [][]byte{vulnHint(t)})
+	r.run()
+	waitFor(t, "parked", func() bool { return len(r.outcomes()) == 1 })
+	r.f.wg.Wait()
+	if n, err := r.b.Requeue(); n != 0 || err != nil {
+		t.Fatalf("requeued %d vuln jobs: %v", n, err)
+	}
+	if len(r.b.parked()) != 1 {
+		t.Fatal("vuln job left the parked set")
+	}
+}

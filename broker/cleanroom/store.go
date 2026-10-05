@@ -160,19 +160,22 @@ func openStore(dir string) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
+	// Staged artifacts a crash left were never committed: not published.
+	if old, err := filepath.Glob(filepath.Join(dir, ".stage-*")); err == nil {
+		for _, d := range old {
+			os.RemoveAll(d)
+		}
+	}
 	return &Store{dir: dir}, nil
 }
 
-// put writes an artifact under a temporary name and renames it into place,
-// so a crash leaves either the whole artifact or none.
-func (s *Store) put(m Manifest, files map[string]string) (Artifact, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	tmp, err := os.MkdirTemp(s.dir, ".put-")
+// stage writes an artifact under a hidden name, which no listing or Get
+// sees, so it is not publishable until commit.
+func (s *Store) stage(m Manifest, files map[string]string) (string, Manifest, error) {
+	tmp, err := os.MkdirTemp(s.dir, ".stage-")
 	if err != nil {
-		return Artifact{}, err
+		return "", m, err
 	}
-	defer os.RemoveAll(tmp)
 	paths := make([]string, 0, len(files))
 	for p := range files {
 		paths = append(paths, p)
@@ -182,19 +185,29 @@ func (s *Store) put(m Manifest, files map[string]string) (Artifact, error) {
 	for _, p := range paths {
 		dst := filepath.Join(tmp, "files", filepath.FromSlash(p))
 		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
-			return Artifact{}, err
+			os.RemoveAll(tmp)
+			return "", m, err
 		}
 		if err := os.WriteFile(dst, []byte(files[p]), 0o600); err != nil {
-			return Artifact{}, err
+			os.RemoveAll(tmp)
+			return "", m, err
 		}
 		sum := sha256.Sum256([]byte(files[p]))
 		m.Files = append(m.Files, File{Path: p, SHA256: hex.EncodeToString(sum[:]), Size: len(files[p])})
 	}
 	if err := writeJSON(filepath.Join(tmp, "manifest.json"), m); err != nil {
-		return Artifact{}, err
+		os.RemoveAll(tmp)
+		return "", m, err
 	}
+	return tmp, m, nil
+}
+
+// commit makes a staged artifact visible under its ID by one rename.
+func (s *Store) commit(staged string, m Manifest) (Artifact, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	dir := filepath.Join(s.dir, m.ID)
-	if err := os.Rename(tmp, dir); err != nil {
+	if err := os.Rename(staged, dir); err != nil {
 		return Artifact{}, err
 	}
 	if err := syncDir(s.dir); err != nil {
@@ -203,16 +216,17 @@ func (s *Store) put(m Manifest, files map[string]string) (Artifact, error) {
 	return Artifact{m: m, dir: dir}, nil
 }
 
-func (s *Store) remove(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, err := s.get(id); err != nil {
-		return err
+// put stages and commits at once.
+func (s *Store) put(m Manifest, files map[string]string) (Artifact, error) {
+	staged, m, err := s.stage(m, files)
+	if err != nil {
+		return Artifact{}, err
 	}
-	if err := os.RemoveAll(filepath.Join(s.dir, id)); err != nil {
-		return err
+	a, err := s.commit(staged, m)
+	if err != nil {
+		os.RemoveAll(staged)
 	}
-	return syncDir(s.dir)
+	return a, err
 }
 
 // Get returns one artifact.

@@ -239,25 +239,32 @@ func (s *session) result(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "result refused", http.StatusForbidden)
 		return
 	}
-	a, err := s.b.store.put(Manifest{
+	// Stage the artifact out of sight, then commit it only while the job
+	// is still live, under s.mu: a job that failed meanwhile, or a crash
+	// before the commit, leaves nothing publishable (OSS-3).
+	staged, man, err := s.b.store.stage(Manifest{
 		ID: artifactID(s.job), Job: s.job.ID, Hint: json.RawMessage(s.job.Hint),
 		Output: Output[s.kind], Embargo: s.embargo,
-		Image: m.Spec.Image, Machine: s.id, Day: s.b.cfg.Now().UTC().Format("2006-01-02"),
+		Image: m.Spec.Image, Machine: s.id, Day: s.job.Day,
 		ClaimedFixtures: res.Fixtures,
 	}, res.Files)
+	var a Artifact
 	s.mu.Lock()
 	s.storing = false
-	stored := err == nil && !s.finished
-	if stored {
-		s.finished, s.artifact = true, a.m.ID
+	stored, late := false, false
+	if err == nil {
+		if s.finished {
+			late = true
+		} else if a, err = s.b.store.commit(staged, man); err == nil {
+			stored = true
+			s.finished, s.artifact = true, a.m.ID
+		}
 	}
 	s.mu.Unlock()
-	if err == nil && !stored {
-		// The job failed (e.g. the machine stopped being clean) while
-		// the result was stored: it publishes nothing.
-		if rerr := s.b.store.remove(a.m.ID); rerr != nil {
-			s.b.cfg.Logf("cleanroom: removing %s: %v", a.m.ID, rerr)
-		}
+	if !stored && staged != "" {
+		os.RemoveAll(staged)
+	}
+	if late {
 		http.Error(w, "this clean room's job is finished", http.StatusConflict)
 		return
 	}

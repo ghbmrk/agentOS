@@ -6,6 +6,12 @@
       "cmd": [
         "broker/test/canary-target.sh"
       ]
+    },
+    {
+      "name": "drive-at-rest-a8",
+      "cmd": [
+        "broker/test/a8-canary-target.sh"
+      ]
     }
   ]
 }

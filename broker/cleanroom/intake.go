@@ -3,6 +3,7 @@ package cleanroom
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -79,12 +80,20 @@ func (b *Builder) Send(day string, batch [][]byte) error {
 	b.qmu.Lock()
 	defer b.qmu.Unlock()
 	marker := filepath.Join(b.cfg.Dir, "days", day)
-	if _, err := os.Stat(marker); err == nil {
+	sum := batchSum(batch)
+	if got, err := os.ReadFile(marker); err == nil {
+		if string(got) != sum {
+			// The emitter resends a day's recorded bytes; anything else
+			// for a day already taken is refused, never dropped silently.
+			b.cfg.Logf("cleanroom: a different batch for %s, already taken, was refused", day)
+			return fmt.Errorf("%w: %s", ErrDayTaken, day)
+		}
 		return nil
 	}
 	if _, err := os.Stat(filepath.Join(b.queueDir(), day)); err == nil {
-		return writeFile(marker, nil) // queued before a crash took the marker
+		return writeFile(marker, []byte(sum)) // queued before a crash took the marker
 	}
+	b.pruneDays(day)
 	jobs, err := b.queued()
 	if err != nil {
 		return err
@@ -99,6 +108,9 @@ func (b *Builder) Send(day string, batch [][]byte) error {
 	}
 	for _, a := range built {
 		have[string(a.m.Hint)] = a.m.ID
+	}
+	for _, j := range b.parked() {
+		have[j.Hint] = "parked job " + j.ID
 	}
 	var fresh [][]byte
 	var merged []Outcome
@@ -138,7 +150,7 @@ func (b *Builder) Send(day string, batch [][]byte) error {
 			return err
 		}
 	}
-	if err := writeFile(marker, nil); err != nil {
+	if err := writeFile(marker, []byte(sum)); err != nil {
 		return err
 	}
 	for _, o := range merged {
@@ -152,6 +164,36 @@ func (b *Builder) Send(day string, batch [][]byte) error {
 	default:
 	}
 	return nil
+}
+
+// ErrDayTaken is returned for a batch that differs from the one already
+// taken for its day.
+var ErrDayTaken = errors.New("cleanroom: a different batch for a day already taken")
+
+// daysKept is how long a day's record is kept: far past any resend, which
+// comes at the emitter's next release after a failure.
+const daysKept = 60
+
+// batchSum identifies a batch's exact bytes.
+func batchSum(batch [][]byte) string {
+	h := sha256.New()
+	for _, c := range batch {
+		fmt.Fprintf(h, "%d:", len(c))
+		h.Write(c)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// pruneDays drops day records more than daysKept days before day.
+func (b *Builder) pruneDays(day string) {
+	t, _ := time.Parse("2006-01-02", day)
+	cut := t.AddDate(0, 0, -daysKept).Format("2006-01-02")
+	ents, _ := os.ReadDir(filepath.Join(b.cfg.Dir, "days"))
+	for _, e := range ents {
+		if e.Name() < cut {
+			os.Remove(filepath.Join(b.cfg.Dir, "days", e.Name()))
+		}
+	}
 }
 
 func (b *Builder) queueDir() string { return filepath.Join(b.cfg.Dir, "queue") }

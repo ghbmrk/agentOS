@@ -399,31 +399,68 @@ func (b *Builder) park(j *job, kind, reason string) error {
 	return syncDir(b.parkDir())
 }
 
+// parked lists parked jobs.
+func (b *Builder) parked() []*job {
+	ents, _ := os.ReadDir(b.parkDir())
+	var out []*job
+	for _, e := range ents {
+		j := &job{}
+		p := filepath.Join(b.parkDir(), e.Name())
+		if readJSON(p, j) == nil {
+			j.path = p
+			out = append(out, j)
+		}
+	}
+	return out
+}
+
 // Requeue puts parked jobs back in the queue with fresh attempts, for when
-// clean rooms can reach the public material they lacked (ARC-6 (d)).
+// clean rooms can reach the public material they lacked (ARC-6 (d)). Jobs
+// from embargo kinds (vuln) stay parked: their clean rooms stay offline
+// (PS1). A parked hint now queued or built is coalesced into it.
 func (b *Builder) Requeue() (int, error) {
 	b.qmu.Lock()
 	defer b.qmu.Unlock()
-	ents, err := os.ReadDir(b.parkDir())
-	if errors.Is(err, os.ErrNotExist) {
-		return 0, nil
-	}
-	if err != nil || len(ents) == 0 {
+	jobs, err := b.queued()
+	if err != nil {
 		return 0, err
+	}
+	have := map[string]string{}
+	for _, j := range jobs {
+		have[j.Hint] = "job " + j.ID
+	}
+	built, err := b.store.list(func(Manifest) bool { return true })
+	if err != nil {
+		return 0, err
+	}
+	for _, a := range built {
+		have[string(a.m.Hint)] = a.m.ID
 	}
 	dir := filepath.Join(b.queueDir(), "requeue-"+newID())
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return 0, err
-	}
 	n := 0
-	for _, e := range ents {
-		p := filepath.Join(b.parkDir(), e.Name())
-		var j job
-		if err := readJSON(p, &j); err != nil {
+	for _, j := range b.parked() {
+		h, embargo, err := parseCanonical(b.cfg.Schema, []byte(j.Hint))
+		if err != nil || embargo {
+			continue
+		}
+		if into, ok := have[j.Hint]; ok {
+			o := Outcome{Job: j.ID, Day: j.Day, Kind: h.Kind, Result: "coalesced", Reason: "same hint as " + into}
+			if !strings.HasPrefix(into, "job ") {
+				o.Artifact = into
+			}
+			if err := b.logOutcome(o); err != nil {
+				return n, err
+			}
+			os.Remove(j.path)
+			continue
+		}
+		have[j.Hint] = "job " + j.ID
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return n, err
 		}
+		p := j.path
 		j.Attempts = 0
-		if err := writeJSON(filepath.Join(dir, e.Name()), j); err != nil {
+		if err := writeJSON(filepath.Join(dir, filepath.Base(p)), j); err != nil {
 			return n, err
 		}
 		if err := os.Remove(p); err != nil {
