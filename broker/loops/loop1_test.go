@@ -998,6 +998,12 @@ func TestImplicitCapsHoldUnderConcurrencyAndRenewedLineages(t *testing.T) {
 	if err := harvest("one-more"); !errors.Is(err, ErrImplicitCap) {
 		t.Fatalf("over the box's daily cap: %v", err)
 	}
+	// L3 SHOULD-B on #109: the counts survive a restart.
+	h2 := &Harvester{J: r.eng, Pipeline: cs, Store: h.Store, Now: h.Now}
+	task("after-restart", "renewed-after")
+	if err := h2.Harvest(Outcome{Intent: "after-restart", Action: Implicit, Input: []byte("task"), Output: []byte("reply")}); !errors.Is(err, ErrImplicitCap) {
+		t.Fatalf("over the box's daily cap after a restart: %v", err)
+	}
 	now = now.Add(24 * time.Hour)
 	task("tomorrow", "renewed-new")
 	must(t, harvest("tomorrow"))
