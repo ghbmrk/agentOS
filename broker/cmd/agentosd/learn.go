@@ -68,6 +68,9 @@ type learning struct {
 	// builderOff is set when -builder-image was given but the builder
 	// did not start (UX-126-1).
 	builderOff atomic.Bool
+	// builderUnset is set when no -builder-image was given (potency R3 on
+	// #126).
+	builderUnset atomic.Bool
 }
 
 // learnPaths are where the learning plane keeps its state.

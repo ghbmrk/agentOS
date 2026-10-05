@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -31,6 +32,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/replay"
 	"github.com/ghbmrk/agentos/broker/vm"
 	"github.com/ghbmrk/agentos/broker/vm/gvisor"
+	"github.com/ghbmrk/agentos/broker/workers"
 )
 
 // images collects -image name=dir flags.
@@ -211,7 +213,7 @@ func main() {
 	flag.StringVar(&cfg.SocketDir, "sockets", "/run/agentos", "socket directory (created 0700)")
 	flag.StringVar(&cfg.OwnerNumber, "owner", "", "owner's phone number, E.164")
 	flag.IntVar(&cfg.ModemUID, "modem-uid", -1, "uid of the modem bridge, the only peer allowed on the owner socket")
-	flag.Int64Var(&cfg.Admission.CapacityMB, "capacity-mb", defaultCapacityMB, "memory for agent machines, MB; unset, MemTotal less the floor budget outside the pool, at most the default (PE6)")
+	flag.Int64Var(&cfg.Admission.CapacityMB, "capacity-mb", defaultCapacityMB, "memory for agent machines, MB; unset, MemTotal less the floor budget outside the pool, at most 4500 or one OpenClaw machine per two cores, whichever is more (PE6, RES-2c)")
 	flag.Int64Var(&floor.HeadroomMB, "headroom-mb", floor.HeadroomMB, "memory never admitted into, MB")
 	flag.Int64Var(&floor.HostMB, "host-mb", floor.HostMB, "budget: host image, broker and journal (protected), MB (RES-2)")
 	flag.Int64Var(&floor.InferenceMB, "inference-mb", floor.InferenceMB, "budget: local inference, MB (RES-2)")
@@ -240,13 +242,18 @@ func main() {
 	flag.StringVar(&builderImage, "builder-image", "", "the minimal image Loop 1's builder machines run (W3-builder), registered with -image; empty runs no model-backed builder")
 	flag.StringVar(&builderLaunch, "builder-launch", "", "how a builder machine starts: argv and env; empty uses the image's own")
 	flag.Int64Var(&builderMemMB, "builder-mem-mb", loopbuild.DefaultMemMB, "a builder machine's memory budget, MB")
+	var workerImage, workerArgv string
+	var workerMaxMB int64
+	flag.StringVar(&workerImage, "worker-image", "", "the base image worker machines are built from (CAP-8), registered with -image; empty offers guests no worker tools")
+	flag.StringVar(&workerArgv, "worker-argv", "sleep infinity", "what a worker machine runs while the guest drives it, space-separated")
+	flag.Int64Var(&workerMaxMB, "worker-max-mb", 2048, "the largest memory budget one worker may ask for, MB; admission still decides (RES-2)")
 	flag.Int64Var(&replayMemMB, "replay-mem-mb", defaultReplayMemMB, "a replay machine's memory budget, MB (LOOP-5); with -agent-mem-mb it must fit in -capacity-mb less -headroom-mb")
 	qcfg := defaultQuestionConfig("/var/lib/agentos")
 	flag.StringVar(&qcfg.Path, "questions", qcfg.Path, "agents' questions to the owner, kept across restarts (P3-8)")
 	flag.StringVar(&qcfg.ClockPath, "clock-state", qcfg.ClockPath, "the box clock check's state (P2-9)")
 	flag.Parse()
 	meminfo, _ := os.ReadFile("/proc/meminfo")
-	mem := planMemory(string(meminfo), flagSet(flag.CommandLine, "capacity-mb"), cfg.Admission.CapacityMB, floor, agentMemMB)
+	mem := planMemory(string(meminfo), runtime.NumCPU(), flagSet(flag.CommandLine, "capacity-mb"), cfg.Admission.CapacityMB, floor, agentMemMB)
 	cfg.Admission = mem.Budget.Admission()
 	log.Printf("admission capacity: %d MB (%s); budget MB: host %d, inference %d, browser %d, headroom %d, machines %d",
 		mem.CapacityMB, mem.Why, mem.Budget.HostMB, mem.Budget.InferenceMB, mem.Budget.BrowserMB, mem.Budget.HeadroomMB, mem.Budget.PoolMB)
@@ -304,7 +311,8 @@ func main() {
 	qs := &questions{}
 	// STATUS notes read in wiring order: the time check, then spare-time
 	// work not running (learningOff, below), then recall's (an agent
-	// holding a deleted record, or memory not open). Keep the clock first.
+	// holding a deleted record, or memory not open), then the second
+	// line's. Keep the clock first.
 	qs.wire(&cfg)
 	agent := &lateAgent{}
 	cfg.Agent = agent
@@ -317,9 +325,13 @@ func main() {
 	// (egress K7). While the vault is locked those checks fail and count
 	// nothing.
 	var verifier *modelroute.Verifier
+	var line *secondLine
 	if verifySocket != "" {
 		verifier = modelroute.NewVerifier(verifySocket)
 		cfg.OwnerVerifier = ownerVerifier{verifier}
+		// The second line's STATUS line (potency R1 on #139); its digest
+		// line waits for the digest's sender.
+		line = &secondLine{get: verifier.SecondLine}
 	}
 	recallTools := &recalltool.Late{}
 	// Rollbacks the owner approves run here (recalltool W10).
@@ -327,6 +339,9 @@ func main() {
 	cfg.Recall = recallExec
 	cfg.Grants.Contained = recallExec.Contained
 	cfg.Notes = append(cfg.Notes, recallExec.Status)
+	if line != nil {
+		cfg.Notes = append(cfg.Notes, line.Note)
+	}
 	// No modem driver exists before P2-3, so texts arrive only through the
 	// owner socket and the channel's own outbound texts are not sent.
 
@@ -396,7 +411,12 @@ func main() {
 			recallCfg.Labeler, recallCfg.Machines = recallLabels{m}, recallMachines{m}
 			go m.RunPruner(vm.PrunePolicy{LowWaterBytes: 1 << 30}, time.Minute, ctx.Done())
 			tree.setMachines(m)
-			if plane, err := openGuestPlane(m, d, cfg.SocketDir, meterPath, inboxPath, egressSocket, toolSet{qs.tools(), tree, recallTools}); err != nil {
+			tools := toolSet{qs.tools(), tree, recallTools}
+			if wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB); wt != nil {
+				tools = append(tools, wt)
+				go reapWorkers(ctx, wt)
+			}
+			if plane, err := openGuestPlane(m, d, cfg.SocketDir, meterPath, inboxPath, egressSocket, tools); err != nil {
 				// Machines cannot start without their guest sockets.
 				log.Printf("agent machines disabled: %v", err)
 			} else {
@@ -424,10 +444,8 @@ func main() {
 					if err != nil {
 						log.Printf("replay evaluation disabled: %v", err)
 					}
-					if builderImage != "" {
-						lp.startBuilder(m, imgs, services, buildConfig{Dir: filepath.Join(cfg.SocketDir, "build"), Image: builderImage, AgentImage: namedAgentImage,
-							Launch: builderLaunch, MemMB: builderMemMB, Egress: egressSocket})
-					}
+					lp.startBuilder(m, imgs, services, buildConfig{Dir: filepath.Join(cfg.SocketDir, "build"), Image: builderImage, AgentImage: namedAgentImage,
+						Launch: builderLaunch, MemMB: builderMemMB, Egress: egressSocket})
 				}
 				spec, err := agentSpec(imgs, agentImage, agentLaunch, agentMemMB)
 				if err != nil {
@@ -447,6 +465,9 @@ func main() {
 	} else {
 		recallExec.Off()
 	}
+	if line != nil {
+		go line.run(ctx)
+	}
 	log.Printf("broker up; owner socket %s/%s", cfg.SocketDir, daemon.OwnerSocket)
 	d.Wait()
 }
@@ -455,7 +476,7 @@ func main() {
 // of about 3.9 GB (capacity less headroom) on the N95. A replay machine
 // gets its own budget, smaller than the agent's (PE2).
 const (
-	defaultCapacityMB  = budget.MaxCapacityMB
+	defaultCapacityMB  = budget.BaseCapMB
 	defaultHeadroomMB  = 600 // budget.Floor's
 	defaultAgentMemMB  = 1536
 	defaultReplayMemMB = 1024
@@ -463,11 +484,12 @@ const (
 
 // capacityFor is PE6: unless -capacity-mb was given, admission's capacity
 // is MemTotal less the floor budget outside the pool (budget.ForHost), at
-// most budget.MaxCapacityMB, so a box smaller than the budget assumed (the
-// N95 has about 7.5 GB usable, not 8) is not over-committed. An unreadable
-// MemTotal gives the N95's figure, the floor (HW-4). It returns the
-// capacity, MemTotal in MB (0 if unreadable), and why, for the log.
-func capacityFor(meminfo string, explicit bool, flagMB int64, floor budget.Memory) (capacity, totalMB int64, why string) {
+// most budget.CapMB for the box's cores (RES-2c), so a box smaller than the
+// budget assumed (the N95 has about 7.5 GB usable, not 8) is not
+// over-committed. An unreadable MemTotal gives the N95's figure, the floor
+// (HW-4). It returns the capacity, MemTotal in MB (0 if unreadable), and
+// why, for the log.
+func capacityFor(meminfo string, cores int, explicit bool, flagMB int64, floor budget.Memory) (capacity, totalMB int64, why string) {
 	var kb int64
 	for _, line := range strings.Split(meminfo, "\n") {
 		if v, ok := strings.CutPrefix(line, "MemTotal:"); ok {
@@ -481,12 +503,12 @@ func capacityFor(meminfo string, explicit bool, flagMB int64, floor budget.Memor
 	case totalMB == 0:
 		return n95CapacityMB, 0, fmt.Sprintf("MemTotal unreadable; the N95 floor's %d", n95CapacityMB)
 	}
-	m, err := budget.ForHost(totalMB, floor)
+	m, err := budget.ForHost(totalMB, cores, floor)
 	if err != nil {
 		return n95CapacityMB, totalMB, fmt.Sprintf("%v; the N95 floor's %d", err, n95CapacityMB)
 	}
-	return m.PoolMB + m.HeadroomMB, totalMB, fmt.Sprintf("MemTotal %d MB less host %d, inference %d and browser %d, at most %d",
-		totalMB, floor.HostMB, floor.InferenceMB, floor.BrowserMB, budget.MaxCapacityMB)
+	return m.PoolMB + m.HeadroomMB, totalMB, fmt.Sprintf("MemTotal %d MB less host %d, inference %d and browser %d, at most %d for %d cores",
+		totalMB, floor.HostMB, floor.InferenceMB, floor.BrowserMB, budget.CapMB(cores, floor.HeadroomMB), cores)
 }
 
 // n95CapacityMB is capacityFor's figure on the N95 (about 7680 MB).
@@ -509,8 +531,8 @@ type memPlan struct {
 // capacity is kept above headroom, so admission still opens and agentosd
 // stays up (STOP, STATUS) instead of failing at start or refusing every
 // launch without a word.
-func planMemory(meminfo string, explicit bool, flagMB int64, floor budget.Memory, agentMB int64) memPlan {
-	c, total, why := capacityFor(meminfo, explicit, flagMB, floor)
+func planMemory(meminfo string, cores int, explicit bool, flagMB int64, floor budget.Memory, agentMB int64) memPlan {
+	c, total, why := capacityFor(meminfo, cores, explicit, flagMB, floor)
 	headroomMB := floor.HeadroomMB
 	p := memPlan{CapacityMB: c, Why: why}
 	if c-headroomMB < agentMB {
@@ -553,6 +575,36 @@ func replayFits(capacityMB, headroomMB, agentMB, replayMB int64) error {
 		return fmt.Errorf("the agent machine (%d MB) and one replay machine (%d MB) do not fit in the %d MB pool (-capacity-mb less -headroom-mb)", agentMB, replayMB, pool)
 	}
 	return nil
+}
+
+// workerTools serves the worker-machine tools (CAP-8) on the live guest
+// plane only: replay and builder machines never get them. Nil, offering
+// none, when no worker image is registered.
+func workerTools(m *vm.Manager, imgs images, image, argv string, maxMB int64) *workers.Tools {
+	if image == "" {
+		return nil
+	}
+	if _, ok := imgs[image]; !ok {
+		log.Printf("worker tools off: image %q is not registered with -image", image)
+		return nil
+	}
+	return &workers.Tools{M: m, Image: image, Argv: strings.Fields(argv), MaxMemMB: maxMB}
+}
+
+// reapWorkers parks idle and orphaned workers every minute (UX-146-1).
+func reapWorkers(ctx context.Context, wt *workers.Tools) {
+	t := time.NewTicker(time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if parked := wt.Reap(ctx); len(parked) > 0 {
+				log.Printf("workers parked: %v", parked)
+			}
+		}
+	}
 }
 
 // agentSpec is how the owner's agent machine starts, from the image flags

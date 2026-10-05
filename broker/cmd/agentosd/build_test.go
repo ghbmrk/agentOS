@@ -172,3 +172,24 @@ func TestOpenBuilderAttachesTheBuilder(t *testing.T) {
 		t.Fatalf("destroyed %v", f.destroyed)
 	}
 }
+
+// Potency R3 on #126 (BOARD W3-builder-tune): with no -builder-image,
+// STATUS says that only repeated routines are learned, so an inert
+// builder is never silent; after LEARNING OFF it says nothing.
+func TestStatusSaysWhenNoBuilderIsSetUp(t *testing.T) {
+	l := testLearning(t)
+	var s lateServices
+	l.startBuilder(nil, images{}, &s, buildConfig{})
+	if n := l.builderNote(); n != builderUnsetNote {
+		t.Fatalf("note %q", n)
+	}
+	if s.build.Load() != nil || l.build.Ready(loops.Brief{}) {
+		t.Fatal("a builder was attached with no image")
+	}
+	if reply, ok := l.sched.Text(context.Background(), "LEARNING OFF", true); !ok || l.learningOn() {
+		t.Fatalf("LEARNING OFF: %q", reply)
+	}
+	if n := l.builderNote(); n != "" {
+		t.Fatalf("note with learning off %q", n)
+	}
+}

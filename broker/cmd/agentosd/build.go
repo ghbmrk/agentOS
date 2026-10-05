@@ -121,9 +121,19 @@ func (l *learning) openBuilder(m builderMachines, imgs images, services *lateSer
 // builder did not start (UX-126-1).
 const builderOffNote = "Learning from failed, corrected, slow or costly tasks: not running. Restarting the box may fix it."
 
+// builderUnsetNote is STATUS's line when no -builder-image is given, so an
+// inert builder is never silent (potency R3 on #126). It states a fact and
+// implies no setting: the owner never sets the flag; the box image does
+// (UX-134-1).
+const builderUnsetNote = "Learning: this box learns from repeated routines only, not yet from mistakes or slow tasks."
+
 // startBuilder opens the builder, and on failure logs it and keeps the
-// STATUS note on.
+// STATUS note on. With no image it opens nothing and says so.
 func (l *learning) startBuilder(m builderMachines, imgs images, services *lateServices, c buildConfig) {
+	if c.Image == "" {
+		l.builderUnset.Store(true)
+		return
+	}
 	if err := l.openBuilder(m, imgs, services, c); err != nil {
 		log.Printf("loop 1 builder machines disabled: %v", err)
 		l.builderOff.Store(true)
@@ -133,8 +143,13 @@ func (l *learning) startBuilder(m builderMachines, imgs images, services *lateSe
 func (l *learning) builderNote() string {
 	// Not after the owner turned learning off: a restart would not
 	// change that (UX R1 on #126).
-	if l.builderOff.Load() && l.learningOn() {
+	switch {
+	case !l.learningOn():
+		return ""
+	case l.builderOff.Load():
 		return builderOffNote
+	case l.builderUnset.Load():
+		return builderUnsetNote
 	}
 	return ""
 }

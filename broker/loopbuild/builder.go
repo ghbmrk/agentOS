@@ -165,6 +165,41 @@ func (b *Builder) Build(ctx context.Context, br loops.Brief) (change.Candidate, 
 		return change.Candidate{}, err
 	}
 	id := Prefix + newID()
+	start := time.Now()
+	cand, err := b.run(ctx, id, ns, brief)
+	b.logJob(id, br, start, err)
+	return cand, err
+}
+
+// logJob writes one count-only line per job: signal, outcome, tokens and
+// time, never brief or candidate content (potency R1 on #126, BOARD
+// W3-builder-tune), so the first jobs' numbers can retune JobTokens and
+// Timeout.
+func (b *Builder) logJob(id string, br loops.Brief, start time.Time, err error) {
+	var tokens int64
+	if b.cfg.Meter != nil {
+		tokens = b.cfg.Meter.Usage(id).Tokens
+	}
+	outcome := "candidate"
+	switch {
+	case err == nil:
+	case errors.Is(err, ErrNoResult):
+		outcome = "no candidate"
+	case errors.Is(err, context.DeadlineExceeded):
+		outcome = "timed out"
+	case errors.Is(err, ErrNotClean), errors.Is(err, ErrMachineUp):
+		outcome = "machine refused"
+	default:
+		outcome = "stopped"
+	}
+	if b.cfg.Meter != nil && tokens >= b.cfg.JobTokens && err != nil {
+		outcome += " (token cap)"
+	}
+	b.cfg.Logf("loopbuild: job %s %s: outcome %s, tokens %d, %s", id, br.Hypothesis.Signal, outcome, tokens, time.Since(start).Round(time.Second))
+}
+
+// run is one job on machine id.
+func (b *Builder) run(ctx context.Context, id, ns string, brief []byte) (change.Candidate, error) {
 	s := &session{b: b, id: id, ns: ns, brief: brief, done: make(chan struct{})}
 	b.mu.Lock()
 	b.sessions[id] = s

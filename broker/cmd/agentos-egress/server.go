@@ -477,7 +477,8 @@ func unlockHandler(c *custody) http.Handler {
 // asks for. The answer is a step and a yes or no, never the seed.
 //
 // POST /recall-key hands agentosd the recall index's identity key (recall
-// K5), only while the vault is open.
+// K5), only while the vault is open. GET /second-line says whether the
+// second line waits on the owner (egress K13), and nothing else.
 func verifyHandler(c *custody) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == "/recall-key" {
@@ -493,8 +494,21 @@ func verifyHandler(c *custody) http.Handler {
 			}
 			return
 		}
+		if r.Method == http.MethodGet && r.URL.Path == "/second-line" {
+			st, err := c.secondLineState()
+			switch {
+			case err == errLocked:
+				http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			case err != nil:
+				http.Error(w, errInternal.Error(), http.StatusInternalServerError)
+			default:
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(map[string]modelroute.SecondLineState{"state": st})
+			}
+			return
+		}
 		if r.Method != http.MethodPost || r.URL.Path != "/verify" {
-			http.Error(w, "POST /verify or /recall-key only", http.StatusMethodNotAllowed)
+			http.Error(w, "POST /verify or /recall-key, or GET /second-line, only", http.StatusMethodNotAllowed)
 			return
 		}
 		var req modelroute.VerifyRequest

@@ -13,3 +13,4 @@ A recurring review of the owner-facing experience (onboarding and everyday use) 
 | Run | main at | Review |
 |---|---|---|
 | 1 | 3176f2d | [2026-10-04](2026-10-04-ux-review.md) |
+| 2 | 044b83b | [2026-10-05](2026-10-05-ux-review.md) |
