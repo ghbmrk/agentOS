@@ -100,6 +100,21 @@ func TestForwardNamesMachineAndLabelAndReturnsDenials(t *testing.T) {
 	}
 }
 
+// The path reaches the vault process byte for byte, escapes and dot
+// segments included, so its shape checks see what the guest sent rather
+// than a decoded or cleaned copy that matches a served path (ADP-10).
+func TestForwardKeepsThePathAsSent(t *testing.T) {
+	fe := &fakeEgress{h: func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, r.RequestURI) }}
+	fwd := Forward(Config{Socket: serveUnix(t, fe), Label: func(string) string { return "public" }, Denied: (&denials{}).add})
+	for _, p := range []string{"/v1/chat%2Fcompletions", "/openai%2Fv1/chat/completions", "/v1/../v1/chat/completions", "/v1/./chat/completions", "/%761/chat/completions"} {
+		w := httptest.NewRecorder()
+		fwd("m1").ServeHTTP(w, httptest.NewRequest("POST", p, strings.NewReader(`{}`)))
+		if w.Body.String() != p {
+			t.Errorf("sent %s, vault process saw %s", p, w.Body)
+		}
+	}
+}
+
 // A machine with no known label is sent as private, never as public.
 func TestUnknownLabelIsSentAsPrivate(t *testing.T) {
 	fe := &fakeEgress{h: func(w http.ResponseWriter, r *http.Request) {}}
