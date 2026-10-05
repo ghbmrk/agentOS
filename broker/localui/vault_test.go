@@ -111,7 +111,7 @@ func (f *fakeVault) Unlock(ctx context.Context, pass string) (VaultStatus, strin
 	}
 	// A new correct passphrase supersedes a pending unlock (P2-4f).
 	f.n++
-	f.state, f.ticket, f.expires = "pending", fmt.Sprintf("tkt-%016d", f.n), time.Date(2026, 10, 5, 9, 15, 0, 0, time.UTC)
+	f.state, f.ticket, f.expires = "pending", fmt.Sprintf("tkt-%016d", f.n), time.Date(2099, 10, 5, 9, 15, 0, 0, time.UTC) // far future: the unlock cookie carries this expiry, and the client drops expired cookies by the wall clock
 	return f.status(), f.ticket, nil
 }
 

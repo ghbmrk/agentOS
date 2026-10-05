@@ -1042,3 +1042,60 @@ func TestKeptCandidatesAreBounded(t *testing.T) {
 		t.Fatal("the newest kept candidate was rebuilt")
 	}
 }
+
+// REQ: RES-1, LOOP-1, LOOP-3
+// PE3: when admission refuses or preempts an evaluation machine with the
+// unit's context still live, the scheduler treats the unit as preempted:
+// it is not measured, the scheduler waits Retry before looking again
+// (no spin while the box has no room), and Loop 1 offers the same
+// candidate again without another build.
+func TestAnEvaluatorInterruptionIsAPreemption(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	b := &builder{files: map[string][]byte{"procedures/mail": []byte("v2")}}
+	l, err := NewLearn(LearnConfig{Pipeline: r.p, Journal: r.eng, Harvest: h, Builder: b, Now: r.clk.now})
+	must(t, err)
+	r.restart(l)
+	for n := 1; ; n++ {
+		ev, err := h.Evidence()
+		must(t, err)
+		if ev.HeldOut >= 6 && len(ev.Dev) > 0 {
+			break
+		}
+		r.corrected(h, n)
+	}
+	refused := fmt.Errorf("admission: no room: %w", change.ErrInterrupted)
+	r.ev.mu.Lock()
+	r.ev.refuse = func(n int) error {
+		if n == 3 {
+			return refused
+		}
+		return nil
+	}
+	r.ev.mu.Unlock()
+	ran, wait := r.s.Tick(context.Background())
+	if !ran || wait != time.Minute {
+		t.Fatalf("interrupted unit: ran %v, wait %v; want a Retry wait", ran, wait)
+	}
+	if len(r.p.Adoptions()) != 0 {
+		t.Fatal("an interrupted evaluation adopted")
+	}
+	r.s.mu.Lock()
+	runs := r.s.loops[Improve].runs
+	r.s.mu.Unlock()
+	if runs != 0 {
+		t.Fatalf("an interrupted unit was measured (%d runs)", runs)
+	}
+	r.ev.mu.Lock()
+	r.ev.refuse = nil
+	r.ev.mu.Unlock()
+	if ran, _ := r.s.Tick(context.Background()); !ran {
+		t.Fatal("the interrupted candidate was not offered again")
+	}
+	if got := r.p.Files("procedures")["procedures/mail"]; string(got) != "v2" {
+		t.Fatalf("procedure is %q after the resumed candidate", got)
+	}
+	if n := len(b.got()); n != 1 {
+		t.Fatalf("%d builds, want 1", n)
+	}
+}
