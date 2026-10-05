@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// REQ: RES-1, RES-2
+// REQ: RES-1, RES-2, CAP-1
 
 type recPreempter struct {
 	frozen []string
@@ -425,5 +425,48 @@ func TestRoomForMirrorsAdmit(t *testing.T) {
 	}
 	if got := c.RoomFor(Experiment); got != 0 {
 		t.Fatalf("room after filling it = %d", got)
+	}
+}
+
+// RoomFor's guards (L3 SHOULD-7 on #158): a NaN or negative reading is
+// pressure, a reading at the limit is not, an experiment already yielding
+// is not offered twice, and an overcommitted budget reads 0, never less.
+func TestRoomForGuards(t *testing.T) {
+	c := newCtl(&recPreempter{})
+	mustAdmit(t, c, Request{ID: "x", Class: Experiment, MemMB: 1000})
+	c.MaxPressure = 10
+	for _, w := range []struct {
+		p          float64
+		exp, accep int64
+	}{{math.NaN(), 0, 1000}, {-1, 0, 1000}, {math.Inf(-1), 0, 1000}, {10, 2900, 3900}, {10.01, 0, 1000}} {
+		c.Pressure = func() float64 { return w.p }
+		if got := c.RoomFor(Experiment); got != w.exp {
+			t.Errorf("pressure %v: RoomFor(Experiment) = %d, want %d", w.p, got, w.exp)
+		}
+		if got := c.RoomFor(Accepted); got != w.accep {
+			t.Errorf("pressure %v: RoomFor(Accepted) = %d, want %d", w.p, got, w.accep)
+		}
+	}
+	c.Pressure = nil
+	// While x yields to a call, it is no longer room for anyone else.
+	p := &recPreempter{}
+	c2 := newCtl(p)
+	mustAdmit(t, c2, Request{ID: "x", Class: Experiment, MemMB: 3000})
+	var during int64 = -1
+	p.during = func() { during = c2.RoomFor(Accepted) }
+	mustAdmit(t, c2, Request{ID: "call", Class: Foreground, MemMB: 1500})
+	if during != 0 { // 3900 - 3000 - 1500 < 0 free, and x is yielding
+		t.Fatalf("RoomFor while x yields = %d, want 0", during)
+	}
+	// Overcommitted (the books can run over while a preemption settles):
+	// free reads 0.
+	c.mu.Lock()
+	c.running["over"] = Request{ID: "over", Class: Foreground, MemMB: 5000}
+	c.mu.Unlock()
+	if got := c.RoomFor(Experiment); got != 0 {
+		t.Fatalf("overcommitted RoomFor(Experiment) = %d", got)
+	}
+	if got := c.RoomFor(Accepted); got != 1000 {
+		t.Fatalf("overcommitted RoomFor(Accepted) = %d, want only the experiment's 1000", got)
 	}
 }

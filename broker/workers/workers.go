@@ -22,7 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -38,6 +38,7 @@ type Machines interface {
 	TryGet(id string) (vm.Machine, bool)
 	Machines() []string
 	Workers(lineage string) []string
+	ForkSiblings(id string) (string, []string, error)
 	CreateWorker(ctx context.Context, id, lineage string, s vm.Spec) (vm.Machine, error)
 	Exec(ctx context.Context, id string, c vm.Command, timeout time.Duration) (vm.ExecResult, error)
 	Checkpoint(ctx context.Context, id string) (vm.Snapshot, error)
@@ -296,6 +297,20 @@ func (t *Tools) worker(c caller, name string) (vm.Machine, error) {
 	return w, nil
 }
 
+// owned resolves name to the ID of one of the caller's lineage's workers
+// from the machine table alone, never a worker's lock, so destroy and
+// keep do not wait behind a command (L3 MUST-1 on #158, K11).
+func (t *Tools) owned(c caller, name string) (string, error) {
+	if !nameRE.MatchString(name) {
+		return "", errors.New("name: lowercase letters, digits and '-', at most 20")
+	}
+	id := workerID(c.lineage, name)
+	if !slices.Contains(t.M.Workers(c.lineage), id) {
+		return "", errNoWorker
+	}
+	return id, nil
+}
+
 // readable refuses a public machine anything from a private worker or
 // snapshot (REV-5).
 func readable(c caller, l vm.Label) error {
@@ -311,15 +326,7 @@ func readable(c caller, l vm.Label) error {
 func (t *Tools) reserve(lineage string, ids []string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	n := map[string]bool{}
-	for _, id := range t.M.Workers(lineage) {
-		n[id] = true
-	}
-	for id, l := range t.pending {
-		if l == lineage {
-			n[id] = true
-		}
-	}
+	n := t.heldLocked(lineage)
 	for _, id := range ids {
 		if n[id] {
 			return false
@@ -336,6 +343,33 @@ func (t *Tools) reserve(lineage string, ids []string) bool {
 		t.pending[id] = lineage
 	}
 	return true
+}
+
+// heldLocked is the set of lineage's workers, made or being made: a
+// worker the manager is still making is in both its table and pending,
+// and counts once (L3 SHOULD-4 on #158).
+func (t *Tools) heldLocked(lineage string) map[string]bool {
+	n := map[string]bool{}
+	for _, id := range t.M.Workers(lineage) {
+		n[id] = true
+	}
+	for id, l := range t.pending {
+		if l == lineage {
+			n[id] = true
+		}
+	}
+	return n
+}
+
+// workerClass is the admission class a caller's workers run on: its own,
+// but never above accepted work, so workers yield to memory pressure and
+// never outrank the owner's foreground machines (L3 SHOULD-1 on #158,
+// K3).
+func workerClass(c caller) admission.Class {
+	if c.spec.Class.Outranks(admission.Accepted) {
+		return admission.Accepted
+	}
+	return c.spec.Class
 }
 
 // settle ends a reservation; made says the workers now exist.
@@ -374,7 +408,7 @@ func (t *Tools) create(ctx context.Context, c caller, raw json.RawMessage) (any,
 	if !t.reserve(c.lineage, []string{id}) {
 		return nil, fmt.Errorf("at most %d workers at once, each with its own name; destroy one first", MaxWorkers)
 	}
-	s := vm.Spec{Image: t.Image, Class: c.spec.Class, MemMB: a.MemMB, Argv: t.Argv, Label: c.label}
+	s := vm.Spec{Image: t.Image, Class: workerClass(c), MemMB: a.MemMB, Argv: t.Argv, Label: c.label}
 	w, err := t.M.CreateWorker(ctx, id, c.lineage, s)
 	t.settle([]string{id}, err == nil)
 	if err != nil {
@@ -607,7 +641,7 @@ func (t *Tools) fork(ctx context.Context, c caller, raw json.RawMessage) (any, e
 	}
 	var skipped []string
 	if a.UpToFit && len(a.Into) > 0 {
-		f := t.fit(c, w.Spec.MemMB)
+		f := t.fit(c, w.Spec.MemMB, w.Spec.Class)
 		if f.Fit == 0 {
 			return nil, fmt.Errorf("no fork fits now: %s", f.Why)
 		}
@@ -758,15 +792,15 @@ func (t *Tools) destroy(ctx context.Context, c caller, raw json.RawMessage) (any
 	if err := decode(raw, &a); err != nil {
 		return nil, err
 	}
-	w, err := t.worker(c, a.Name)
+	id, err := t.owned(c, a.Name)
 	if err != nil {
 		return nil, err
 	}
-	if err := t.M.Destroy(ctx, w.ID); err != nil {
+	if err := t.M.Destroy(ctx, id); err != nil {
 		return nil, workerErr(a.Name, err)
 	}
 	t.mu.Lock()
-	delete(t.used, w.ID)
+	delete(t.used, id)
 	t.mu.Unlock()
 	return map[string]any{"destroyed": a.Name}, nil
 }
@@ -826,17 +860,18 @@ type fitRoom struct {
 // and measured free memory, rounded down to FitStepMB and reused for
 // FitFor per lineage. Unreadable measurement falls back to the declared
 // budget, which admission enforces anyway.
-func (t *Tools) room(c caller) (int64, string) {
+func (t *Tools) room(c caller, class admission.Class) (int64, string) {
 	now := t.now()
+	key := fmt.Sprint(c.lineage, "/", class)
 	t.mu.Lock()
-	if r, ok := t.rooms[c.lineage]; ok && now.Sub(r.at) < FitFor && !now.Before(r.at) {
+	if r, ok := t.rooms[key]; ok && now.Sub(r.at) < FitFor && !now.Before(r.at) {
 		t.mu.Unlock()
 		return r.mb, r.why
 	}
 	t.mu.Unlock()
 	mb, why := int64(-1), ""
 	if t.Free != nil {
-		mb = max(t.Free(c.spec.Class), 0)
+		mb = max(t.Free(class), 0)
 	}
 	if t.Avail != nil {
 		if m, err := t.Avail(); err != nil {
@@ -852,7 +887,7 @@ func (t *Tools) room(c caller) (int64, string) {
 	if t.rooms == nil || len(t.rooms) > 4*MaxWorkers {
 		t.rooms = map[string]fitRoom{}
 	}
-	t.rooms[c.lineage] = fitRoom{mb, now, why}
+	t.rooms[key] = fitRoom{mb, now, why}
 	t.mu.Unlock()
 	return mb, why
 }
@@ -860,18 +895,13 @@ func (t *Tools) room(c caller) (int64, string) {
 // fit counts the workers of memMB the caller could start now, from its
 // lineage's rounded room and what its worker cap leaves. It is advice:
 // each start is still admitted on its own.
-func (t *Tools) fit(c caller, memMB int64) fitAnswer {
+func (t *Tools) fit(c caller, memMB int64, class admission.Class) fitAnswer {
 	a := fitAnswer{MemMB: memMB}
 	t.mu.Lock()
-	n := len(t.M.Workers(c.lineage))
-	for _, l := range t.pending {
-		if l == c.lineage {
-			n++
-		}
-	}
+	n := len(t.heldLocked(c.lineage))
 	t.mu.Unlock()
 	a.WorkersLeft = max(MaxWorkers-n, 0)
-	room, why := t.room(c)
+	room, why := t.room(c, class)
 	whys := []string{}
 	if why != "" {
 		whys = append(whys, why)
@@ -911,7 +941,7 @@ func (t *Tools) fitTool(c caller, raw json.RawMessage) (any, error) {
 	if a.MemMB < MinMemMB || a.MemMB > t.MaxMemMB {
 		return nil, fmt.Errorf("mem_mb must be between %d and %d", MinMemMB, t.MaxMemMB)
 	}
-	return t.fit(c, a.MemMB), nil
+	return t.fit(c, a.MemMB, workerClass(c)), nil
 }
 
 // keep destroys the winner's fork siblings: the caller's other workers
@@ -921,30 +951,44 @@ func (t *Tools) keep(ctx context.Context, c caller, raw json.RawMessage) (any, e
 	if err := decode(raw, &a); err != nil {
 		return nil, err
 	}
-	w, err := t.worker(c, a.Name)
+	id, err := t.owned(c, a.Name)
 	if err != nil {
 		return nil, err
 	}
-	if w.ForkBase == "" {
+	// A fork still starting has no ForkBase yet, so keep would miss it
+	// (L3 SHOULD-5 on #158).
+	t.mu.Lock()
+	starting := false
+	for _, l := range t.pending {
+		starting = starting || l == c.lineage
+	}
+	t.mu.Unlock()
+	if starting {
+		return nil, errors.New("workers are still starting; keep the winner once worker_fork returns")
+	}
+	base, sibs, err := t.M.ForkSiblings(id)
+	if err != nil {
+		return nil, errNoWorker
+	}
+	if base == "" {
 		return nil, fmt.Errorf("worker %s is not a fork: nothing to discard", a.Name)
 	}
+	t.touch(id)
 	destroyed := []string{}
-	for _, id := range t.M.Workers(c.lineage) {
-		if id == w.ID {
-			continue
-		}
-		s, err := t.M.Get(id)
-		if err != nil || s.Lineage != c.lineage || s.ForkBase != w.ForkBase {
-			continue
-		}
-		if err := t.M.Destroy(ctx, id); err != nil {
-			return map[string]any{"kept": a.Name, "destroyed": destroyed}, workerErr(nameOf(c.lineage, id), err)
+	for _, sid := range sibs {
+		if err := t.M.Destroy(ctx, sid); err != nil {
+			// Call returns no answer with an error, so the error says what
+			// went (L3 SHOULD-8 on #158).
+			err = workerErr(nameOf(c.lineage, sid), err)
+			if len(destroyed) > 0 {
+				err = fmt.Errorf("%w (already destroyed: %s)", err, strings.Join(destroyed, ", "))
+			}
+			return nil, err
 		}
 		t.mu.Lock()
-		delete(t.used, id)
+		delete(t.used, sid)
 		t.mu.Unlock()
-		destroyed = append(destroyed, nameOf(c.lineage, id))
+		destroyed = append(destroyed, nameOf(c.lineage, sid))
 	}
-	sort.Strings(destroyed)
 	return map[string]any{"kept": a.Name, "destroyed": destroyed}, nil
 }

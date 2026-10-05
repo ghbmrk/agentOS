@@ -461,11 +461,7 @@ func main() {
 			go m.RunPruner(vm.PrunePolicy{LowWaterBytes: 1 << 30}, time.Minute, ctx.Done())
 			tree.setMachines(m)
 			tools := toolSet{qs.tools(), tree, recallTools}
-			wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB, workerGates{
-				stopped: d.Engine().Stopped,
-				room:    d.Admission().RoomFor,
-				avail:   measuredFree("/proc/meminfo", cfg.Admission.HeadroomMB),
-			})
+			wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB, boxGates(d, "/proc/meminfo", cfg.Admission.HeadroomMB))
 			if wt != nil {
 				tools = append(tools, wt)
 				go reapWorkers(ctx, wt, m, d.Engine().Stopped, 5*time.Second)
@@ -661,6 +657,12 @@ type workerGates struct {
 	stopped func() bool
 	room    func(admission.Class) int64
 	avail   func() (int64, error)
+}
+
+// boxGates reads the worker gates from the running daemon: its STOP,
+// its admission's room, and meminfo less admission's headroom.
+func boxGates(d *daemon.Daemon, meminfo string, headroomMB int64) workerGates {
+	return workerGates{stopped: d.Engine().Stopped, room: d.Admission().RoomFor, avail: measuredFree(meminfo, headroomMB)}
 }
 
 // measuredFree is MemAvailable in meminfo less the headroom admission

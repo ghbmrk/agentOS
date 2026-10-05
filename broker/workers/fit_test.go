@@ -314,3 +314,183 @@ func TestA15EightWorkersWithinRES2(t *testing.T) {
 		t.Fatalf("%d machines admitted after keep, want 3", n)
 	}
 }
+
+// keep and destroy read the machine table, not a worker's lock: a command
+// running in the winner, a sibling or an unrelated worker does not hold
+// them up, and destroy ends a sibling's command (L3 MUST-1 on #158, K11).
+func TestCAP1KeepAndDestroyDoNotWaitBehindACommand(t *testing.T) {
+	r := newRig(t, 16000)
+	r.agent("agent", vm.Public)
+	r.must("agent", toolCreate, m{"name": "src", "mem_mb": MinMemMB}, nil)
+	r.must("agent", toolCreate, m{"name": "other", "mem_mb": MinMemMB}, nil)
+	r.must("agent", toolFork, m{"name": "src", "into": []string{"a", "b", "c"}}, nil)
+	ran := make(chan error, 3)
+	for _, n := range []string{"a", "b", "other"} {
+		go func() {
+			ran <- r.call("agent", toolExec, m{"name": n, "argv": []string{"sleep"}, "timeout_seconds": 600}, nil)
+		}()
+	}
+	time.Sleep(20 * time.Millisecond) // the commands hold their workers
+	done := make(chan struct{})
+	var kept struct {
+		Kept      string
+		Destroyed []string
+	}
+	go func() {
+		defer close(done)
+		r.must("agent", toolKeep, m{"name": "a"}, &kept)
+		r.must("agent", toolDestroy, m{"name": "other"}, nil)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("keep or destroy waited behind a worker's command")
+	}
+	if kept.Kept != "a" || fmt.Sprint(kept.Destroyed) != "[b c]" {
+		t.Fatalf("keep = %+v", kept)
+	}
+	<-ran // b's and other's commands end with their workers
+	<-ran
+	mc, _ := r.m.Get("agent")
+	if err := r.m.Destroy(context.Background(), workerID(mc.Lineage, "a")); err != nil {
+		t.Fatal(err)
+	}
+	<-ran
+}
+
+// A fork still starting has no fork base yet, so keep refuses rather than
+// miss it (L3 SHOULD-5 on #158).
+func TestCAP1KeepWaitsForStartingForks(t *testing.T) {
+	r := newRig(t, 16000)
+	r.agent("agent", vm.Public)
+	r.must("agent", toolCreate, m{"name": "src", "mem_mb": MinMemMB}, nil)
+	r.must("agent", toolFork, m{"name": "src", "into": []string{"a", "b"}}, nil)
+	h := hold{r.m, make(chan struct{}), make(chan struct{})}
+	r.tools.M = h
+	forked := make(chan error, 1)
+	go func() { forked <- r.call("agent", toolFork, m{"name": "a", "into": []string{"late"}}, nil) }()
+	<-h.forking
+	if err := r.call("agent", toolKeep, m{"name": "b"}, nil); err == nil || !strings.Contains(err.Error(), "still starting") {
+		t.Fatalf("keep beside a starting fork: %v", err)
+	}
+	close(h.release)
+	if err := <-forked; err != nil {
+		t.Fatal(err)
+	}
+	var kept struct{ Destroyed []string }
+	r.must("agent", toolKeep, m{"name": "b"}, &kept)
+	if fmt.Sprint(kept.Destroyed) != "[a]" {
+		t.Fatalf("keep after the fork = %+v", kept)
+	}
+}
+
+// A foreground agent's workers run as accepted work: they yield to memory
+// pressure and never outrank the owner's foreground machines. fit asks
+// for that class, and a fork's fit for the worker's own class (L3
+// SHOULD-1, SHOULD-2 on #158).
+func TestCAP1WorkersRunAsAcceptedWorkAtMost(t *testing.T) {
+	r := newRig(t, 16000)
+	ag, err := r.m.Create(context.Background(), "agent", vm.Spec{Image: "base", Class: admission.Foreground, MemMB: 500})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var asked []admission.Class
+	r.tools.Free = func(c admission.Class) int64 { asked = append(asked, c); return 1 << 20 }
+	r.must("agent", toolFit, m{}, nil)
+	r.must("agent", toolCreate, m{"name": "w", "mem_mb": MinMemMB}, nil)
+	w, _ := r.m.Get(workerID(ag.Lineage, "w"))
+	if w.Spec.Class != admission.Accepted || fmt.Sprint(asked) != fmt.Sprint([]admission.Class{admission.Accepted}) {
+		t.Fatalf("worker class %v, fit asked %v; want accepted", w.Spec.Class, asked)
+	}
+	// A worker of another class in the lineage: its fork is sized for it.
+	if _, err := r.m.CreateWorker(context.Background(), workerID(ag.Lineage, "exp"), ag.Lineage, vm.Spec{Image: "base", Class: admission.Experiment, MemMB: MinMemMB}); err != nil {
+		t.Fatal(err)
+	}
+	asked = nil
+	r.must("agent", toolFork, m{"name": "exp", "into": []string{"e1"}, "up_to_fit": true}, nil)
+	if fmt.Sprint(asked) != fmt.Sprint([]admission.Class{admission.Experiment}) {
+		t.Fatalf("fork's fit asked %v, want the worker's experiment class", asked)
+	}
+	// An experiment agent's workers stay experiments.
+	r.agent("exp-agent", vm.Public)
+	r.must("exp-agent", toolCreate, m{"name": "w", "mem_mb": MinMemMB}, nil)
+	ea, _ := r.m.Get("exp-agent")
+	if w, _ := r.m.Get(workerID(ea.Lineage, "w")); w.Spec.Class != admission.Experiment {
+		t.Fatalf("experiment agent's worker class %v", w.Spec.Class)
+	}
+}
+
+// making reports pending as already in the manager's table, as Workers
+// does for a worker the manager is still making.
+type making struct {
+	*vm.Manager
+	extra string
+}
+
+func (k making) Workers(l string) []string { return append(k.Manager.Workers(l), k.extra) }
+
+// A worker being made sits in both the manager's table and the pending
+// reservations; it counts once (L3 SHOULD-4 on #158). A negative
+// measurement reads as no room, not as unbounded (SHOULD-7).
+func TestCAP1FitCountsAWorkerBeingMadeOnce(t *testing.T) {
+	r := newRig(t, 16000)
+	clk := newClock(r)
+	ag := r.agent("agent", vm.Public)
+	r.must("agent", toolCreate, m{"name": "w", "mem_mb": MinMemMB}, nil)
+	id := workerID(ag.Lineage, "being-made")
+	r.tools.M = making{r.m, id}
+	r.tools.pending = map[string]string{id: ag.Lineage}
+	var f fitOut
+	r.must("agent", toolFit, m{"mem_mb": MinMemMB}, &f)
+	if f.WorkersLeft != MaxWorkers-2 {
+		t.Fatalf("workers_left = %d, want %d", f.WorkersLeft, MaxWorkers-2)
+	}
+	clk.next()
+	r.tools.Avail = func() (int64, error) { return -600, nil }
+	f = fitOut{}
+	r.must("agent", toolFit, m{"mem_mb": MinMemMB}, &f)
+	if f.Fit != 0 {
+		t.Fatalf("fit with a negative measurement = %+v", f)
+	}
+}
+
+// up_to_fit sizes the fork by the source worker's own memory, whatever
+// it is (L3 SHOULD-3 on #158).
+func TestCAP1ForkUpToFitUsesTheWorkersSize(t *testing.T) {
+	r := newRig(t, 16000)
+	r.agent("agent", vm.Public)
+	r.must("agent", toolCreate, m{"name": "src", "mem_mb": 384}, nil)
+	r.tools.Avail = func() (int64, error) { return 1600, nil } // rounds to 1536: 4 at 384
+	var out struct{ Workers, Skipped []string }
+	r.must("agent", toolFork, m{"name": "src", "into": []string{"a", "b", "c", "d", "e", "f", "g"}, "up_to_fit": true}, &out)
+	if fmt.Sprint(out.Workers) != "[a b c d]" || fmt.Sprint(out.Skipped) != "[e f g]" {
+		t.Fatalf("fork of a 384 MiB worker = %+v", out)
+	}
+}
+
+// failDestroy refuses to destroy one machine.
+type failDestroy struct {
+	*vm.Manager
+	id string
+}
+
+func (f failDestroy) Destroy(ctx context.Context, id string) error {
+	if id == f.id {
+		return errors.New("disk busy")
+	}
+	return f.Manager.Destroy(ctx, id)
+}
+
+// A keep that fails part way says which siblings already went, since a
+// failed call carries no answer (L3 SHOULD-8 on #158).
+func TestCAP1KeepSaysWhatWentBeforeAnError(t *testing.T) {
+	r := newRig(t, 16000)
+	ag := r.agent("agent", vm.Public)
+	r.must("agent", toolCreate, m{"name": "src", "mem_mb": MinMemMB}, nil)
+	r.must("agent", toolFork, m{"name": "src", "into": []string{"a", "b", "c", "d"}}, nil)
+	r.tools.M = failDestroy{r.m, workerID(ag.Lineage, "c")}
+	err := r.call("agent", toolKeep, m{"name": "a"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "worker c: disk busy (already destroyed: b)") {
+		t.Fatalf("keep with a failed destroy: %v", err)
+	}
+}

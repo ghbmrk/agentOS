@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
+	"github.com/ghbmrk/agentos/broker/daemon"
 )
 
 // Worker tools are offered only with a registered worker image.
@@ -103,5 +104,48 @@ func TestCAP1WorkerToolsReadRoomAndMeasuredMemory(t *testing.T) {
 	}
 	if _, err := measuredFree(filepath.Join(t.TempDir(), "none"), 0)(); err == nil {
 		t.Fatal("missing meminfo read as a value")
+	}
+}
+
+// main wires the daemon's own STOP, admission room and headroom into the
+// worker gates (L3 SHOULD-7 on #158).
+func TestCAP1BoxGatesReadTheRunningDaemon(t *testing.T) {
+	dir := t.TempDir()
+	cfg := daemon.Config{
+		JournalPath: filepath.Join(dir, "journal.log"), SocketDir: filepath.Join(dir, "run"),
+		OwnerNumber: ownerNum, ModemUID: os.Getuid(), Admission: admission.Config{CapacityMB: 4500, HeadroomMB: 600},
+		OwnerState: filepath.Join(dir, "owner.json"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d, err := daemon.Run(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "meminfo")
+	if err := os.WriteFile(p, []byte("MemAvailable: 2097152 kB\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g := boxGates(d, p, cfg.Admission.HeadroomMB)
+	if _, err := d.Admission().Admit(admission.Request{ID: "x", Class: admission.Experiment, MemMB: 1000}); err != nil {
+		t.Fatal(err)
+	}
+	if got := g.room(admission.Experiment); got != 2900 {
+		t.Fatalf("room = %d, want admission's 3900 - 1000", got)
+	}
+	if got := g.room(admission.Accepted); got != 3900 {
+		t.Fatalf("accepted room = %d, want 3900 with the experiment preemptible", got)
+	}
+	if mb, err := g.avail(); err != nil || mb != 2048-600 {
+		t.Fatalf("avail = %d, %v; want MemAvailable less 600 headroom", mb, err)
+	}
+	if g.stopped() {
+		t.Fatal("stopped before STOP")
+	}
+	if _, err := d.Engine().Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !g.stopped() {
+		t.Fatal("stopped does not read the daemon's STOP")
 	}
 }
