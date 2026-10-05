@@ -181,6 +181,10 @@ type custody struct {
 	bootChanged, bootUpdated bool
 	// bootSecure: only the Secure Boot state (PCR 7) changed.
 	bootSecure bool
+	// wrongPassAt is when the owner was last told of a wrong passphrase;
+	// wrongPassQuiet counts those since, untold (WrongPassNoteEvery).
+	wrongPassAt    time.Time
+	wrongPassQuiet int
 	// wrongCounted and wrongSilent are the wrong verifies per bucket.
 	wrongCounted []time.Time
 	wrongSilent  []time.Time
@@ -216,6 +220,27 @@ func (c *custody) status() (phase, time.Time) {
 // ticket its confirm must carry. A passphrase alone never opens the model
 // route. One derivation runs at a time: the phase stays opening until it
 // returns, even if lock cancels it meanwhile.
+// WrongPassNoteEvery bounds how often the owner is told of wrong vault
+// passphrases. They are not counted toward any lockout (nobody without the
+// card can lock the owner out), but repeated ones may be someone on the
+// box's Wi-Fi starving the owner's unlock, so the owner hears of them.
+const WrongPassNoteEvery = 10 * time.Minute
+
+// noteWrongPassLocked tells the owner of a wrong passphrase, at most once
+// per WrongPassNoteEvery, with the count of those not told.
+func (c *custody) noteWrongPassLocked(now time.Time) {
+	if !c.wrongPassAt.IsZero() && now.Sub(c.wrongPassAt) < WrongPassNoteEvery {
+		c.wrongPassQuiet++
+		return
+	}
+	msg := "wrong vault passphrase tried on the box's Wi-Fi"
+	if c.wrongPassQuiet > 0 {
+		msg += fmt.Sprintf(" (%d more since the last notice)", c.wrongPassQuiet)
+	}
+	c.wrongPassAt, c.wrongPassQuiet = now, 0
+	c.notify(msg)
+}
+
 func (c *custody) unlock(passphrase string) (string, error) {
 	c.mu.Lock()
 	if c.ph != locked {
@@ -249,6 +274,7 @@ func (c *custody) unlock(passphrase string) (string, error) {
 	}
 	if err != nil {
 		if errors.Is(err, vault.ErrNoSlotOpens) {
+			c.noteWrongPassLocked(now)
 			return "", errWrongPassphrase
 		}
 		return "", errInternal
@@ -265,6 +291,11 @@ func (c *custody) unlock(passphrase string) (string, error) {
 	c.ph, c.v, c.ticket = pending, v, hex.EncodeToString(b)
 	c.expires = now.Add(c.ttl)
 	c.timer = time.AfterFunc(c.ttl, c.expire)
+	if c.wrongPassQuiet > 0 {
+		// A burst that stopped still reports its total.
+		c.notify(fmt.Sprintf("%d more wrong vault passphrases were tried on the box's Wi-Fi since the last notice", c.wrongPassQuiet))
+		c.wrongPassQuiet = 0
+	}
 	c.notify("vault passphrase accepted; waiting for a code-generator code")
 	return c.ticket, nil
 }
