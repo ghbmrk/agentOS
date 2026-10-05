@@ -82,7 +82,7 @@ Covered: 93 / 144 requirement IDs
 | OP-8 | `broker/cmd/agentos-egress/hostile_test.go`, `broker/cmd/agentos-egress/server_test.go`, `broker/e2e/a14_test.go`, `broker/e2e/openclaw_test.go`, `broker/e2e/routed_test.go`, `broker/guest/plane_test.go`, `broker/loops/model_test.go`, `broker/meter/limit_test.go`, `broker/meter/meter_test.go`, `broker/meter/share_test.go`, `broker/meter/spare_test.go`, `broker/route/handlerfor_test.go` |
 | CAP-1 | — |
 | CAP-2 | — |
-| CAP-3 | `broker/events/bus_test.go`, `broker/recall/recall_test.go`, `broker/recall/review_test.go` |
+| CAP-3 | `broker/events/bus_test.go`, `broker/recall/recall_test.go`, `broker/recall/review_test.go`, `broker/recall/segment_test.go` |
 | CAP-4 | `broker/events/attention_test.go`, `broker/events/bus_test.go` |
 | CAP-5 | — |
 | CAP-6 | — |
