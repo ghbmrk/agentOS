@@ -57,17 +57,20 @@ type Owner interface {
 // import the pipeline: its dependencies are outside the control path
 // (ARC-2).
 type Changes interface {
-	// Check returns nil to allow, an error with NeedsOwner() true
-	// (change.ErrNeedsOwner) to ask the owner, and any other error to deny.
+	// Check returns nil to allow, change.ErrNeedsOwner itself (an error
+	// whose NeedsOwner() is true, not wrapped or joined) to ask the owner,
+	// and any other error to deny.
 	Check(ctx context.Context, phase journal.Phase, in journal.Intent) error
 	// Line is the approval item for an intent Check sends to the owner:
 	// verb, object, detail, how to reverse it, and its kind. The gate sets
 	// Ref, keeps it free of recipients and amounts, and treats any kind
-	// but Ordinary as GrantChange (high tier).
+	// but Ordinary as GrantChange (high tier). Verb "install" marks the
+	// adoption of a release, which also needs the local page (CH-3).
 	Line(in journal.Intent) (owner.Item, error)
 	// Decided is called once the owner's request for a change intent has
-	// closed, answered or not (change C7).
-	Decided(ctx context.Context, in journal.Intent)
+	// closed, answered or not (change C7); declined is true only when the
+	// owner said NO.
+	Decided(ctx context.Context, in journal.Intent, declined bool)
 }
 
 // changeAction reports a change pipeline action.
@@ -386,6 +389,7 @@ type verdict struct {
 	why   string
 	item  owner.Item
 	local bool
+	hold  bool // waits for the local page without texting the owner
 	reply *owner.AutoReply
 }
 
@@ -591,11 +595,13 @@ func (g *Gate) evaluateChange(ctx context.Context, phase journal.Phase, in journ
 		return verdict{kind: deny, why: "the change pipeline is not running"}
 	}
 	err := g.cfg.Changes.Check(ctx, phase, in)
-	var no interface{ NeedsOwner() bool }
+	// Only the sentinel itself asks: an error that wraps or joins it with
+	// a refusal denies (fails closed).
+	no, ok := err.(interface{ NeedsOwner() bool })
 	switch {
 	case err == nil:
 		return verdict{kind: allow}
-	case !errors.As(err, &no) || !no.NeedsOwner():
+	case !ok || !no.NeedsOwner():
 		return verdict{kind: deny, why: err.Error()}
 	}
 	l, err := g.cfg.Changes.Line(in)
@@ -606,11 +612,19 @@ func (g *Gate) evaluateChange(ctx context.Context, phase journal.Phase, in journ
 	if local && !g.cfg.LocalUI {
 		return verdict{kind: deny, why: "turning sharing on needs confirmation on the box's local page, which this build does not have yet (CHG-4)"}
 	}
+	hold := false
+	if l.Facts.Verb == "install" {
+		// Adopting a release needs the code and the local page (CH-3).
+		// Without the page it is held, not denied, so the box can still
+		// take a security fix once the page exists; no code is texted
+		// for a request that cannot complete.
+		local, hold = true, !g.cfg.LocalUI
+	}
 	kind := owner.GrantChange
 	if l.Facts.Kind == owner.Ordinary && !local {
 		kind = owner.Ordinary // a tested, undoable learned change: low tier
 	}
-	return verdict{kind: ask, local: local, item: owner.Item{Ref: in.ID, Object: l.Object, Detail: l.Detail, UndoBy: l.UndoBy,
+	return verdict{kind: ask, local: local, hold: hold, item: owner.Item{Ref: in.ID, Object: l.Object, Detail: l.Detail, UndoBy: l.UndoBy,
 		Facts: owner.Facts{Kind: kind, Verb: l.Facts.Verb, NoRecipient: true}}}
 }
 
@@ -704,7 +718,7 @@ func (g *Gate) Authorize(ctx context.Context, id string) (journal.Status, error)
 	case deny, allow:
 		return g.eng.Authorize(ctx, id)
 	case ask:
-		onlyUI := !owner.SMSApprovable(v.item)
+		onlyUI := !owner.SMSApprovable(v.item) || v.hold
 		g.mu.Lock()
 		fresh := g.waiting[id] == nil
 		if fresh {
@@ -721,7 +735,7 @@ func (g *Gate) Authorize(ctx context.Context, id string) (journal.Status, error)
 		delete(g.failed, id)
 		own := g.own
 		g.mu.Unlock()
-		if fresh && onlyUI && own != nil {
+		if fresh && onlyUI && !v.hold && own != nil {
 			// Recipients that cannot be shown in full are never approved
 			// by text (CH-10, CH-12).
 			n := len(strings.Split(v.item.Recipient, ","))
@@ -1002,12 +1016,13 @@ func (g *Gate) lapse(d owner.Decision) {
 	eng := g.eng
 	g.mu.Unlock()
 	if st, err := eng.Get(d.Ref); err == nil && g.cfg.Changes != nil {
-		g.cfg.Changes.Decided(context.Background(), st.Intent)
+		g.cfg.Changes.Decided(context.Background(), st.Intent, false)
 	}
 }
 
 // ConfirmLocal records the owner's confirmation on the local page for a
-// grant intent (CH-3) or for turning sharing on (GR17). The local UI (P2-2) calls it after showing
+// grant intent (CH-3), or for a change that needs it: turning sharing on
+// or adopting a release (GR17). The local UI (P2-2) calls it after showing
 // Describe; the code and the confirmation may come in either order.
 func (g *Gate) ConfirmLocal(id string) error {
 	st, err := g.eng.Get(id)
@@ -1015,7 +1030,8 @@ func (g *Gate) ConfirmLocal(id string) error {
 		return err
 	}
 	if st.State != journal.Pending || st.Intent.Account != journal.BrokerAccount ||
-		(st.Intent.Action != journal.ActionGrantChange && !sharingOn(st.Intent)) {
+		(st.Intent.Action != journal.ActionGrantChange && !(changeAction(st.Intent.Action) &&
+			g.evaluate(context.Background(), journal.PhaseAuthorize, st.Intent).local)) {
 		return errors.New("grants: nothing to confirm for " + clip(id))
 	}
 	g.mu.Lock()
@@ -1035,6 +1051,9 @@ func (g *Gate) settle(id string) {
 	g.wg.Add(1)
 	go func() {
 		defer g.wg.Done()
+		g.mu.Lock()
+		d := g.decided[id]
+		g.mu.Unlock()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		st, err := g.eng.Authorize(ctx, id)
@@ -1055,7 +1074,9 @@ func (g *Gate) settle(id string) {
 		g.mu.Unlock()
 		if g.cfg.Changes != nil && changeAction(st.Intent.Action) && st.Intent.Account == journal.BrokerAccount &&
 			(st.State == journal.Denied || st.State == journal.Succeeded || st.State == journal.NotApplied) {
-			g.cfg.Changes.Decided(ctx, st.Intent)
+			// Only the owner's NO is a decline; a refusal at the recheck
+			// (stale approval, changed state) is not (change C7).
+			g.cfg.Changes.Decided(ctx, st.Intent, !d.approved && d.why == "owner")
 		}
 		if st.State == journal.Succeeded && st.Intent.Executor == ExecutorName && own != nil && len(st.Attempts) > 0 {
 			if gid := st.Attempts[len(st.Attempts)-1].Evidence; gid != "" {

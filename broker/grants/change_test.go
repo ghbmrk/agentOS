@@ -266,3 +266,102 @@ func TestTestedLearnedChangeIsLowTier(t *testing.T) {
 		t.Fatalf("approved change not adopted: %q", got)
 	}
 }
+
+// CH-3 (L3 B1 on #48): adopting a release needs the code and the local
+// page; without a local page the request is held pending, never texted for
+// a code it cannot complete, and never denied.
+func TestReleaseNeedsTheLocalPage(t *testing.T) {
+	r, p := changeRig(t)
+	ctx := context.Background()
+	rep, err := p.ProposeRelease(ctx, signed(t, "4.0", map[string][]byte{"host-image/release": []byte("h")}))
+	if err != nil || rep.State != change.StateAwaitingOwner {
+		t.Fatalf("%+v %v", rep, err)
+	}
+	id := "chg:" + rep.ID + ":adopt"
+	r.g.Flush()
+	r.decide(true, "owner")
+	if st := r.state(id); st.State != journal.Pending || !strings.Contains(st.Permission.Reason, "local page") {
+		t.Fatalf("release installed on the code alone: %s %q", st.State, st.Permission.Reason)
+	}
+	if err := r.g.ConfirmLocal(id); err != nil {
+		t.Fatal(err)
+	}
+	r.g.Wait()
+	if st := r.state(id); st.State != journal.Succeeded {
+		t.Fatalf("%s %q", st.State, st.Permission.Reason)
+	}
+
+	noUI, q := changeRig(t)
+	noUI.g.cfg.LocalUI = false
+	rep, err = q.ProposeRelease(ctx, signed(t, "4.1", map[string][]byte{"host-image/release": []byte("i")}))
+	if err != nil || rep.State != change.StateAwaitingOwner {
+		t.Fatalf("%+v %v", rep, err)
+	}
+	n := noUI.own.count()
+	noUI.g.Flush()
+	if noUI.own.count() != n {
+		t.Fatal("texted a code that cannot complete without the local page")
+	}
+	if st := noUI.state("chg:" + rep.ID + ":adopt"); st.State != journal.Pending || !strings.Contains(st.Permission.Reason, "local page") {
+		t.Fatalf("%s %q", st.State, st.Permission.Reason)
+	}
+}
+
+// C7 (L3 R1 on #48): an approval refused at dispatch for being older than
+// Fresh is not the owner's no, so no decline is recorded.
+func TestStaleApprovalIsNotADecline(t *testing.T) {
+	r, p := changeRig(t)
+	ctx := context.Background()
+	rep, err := p.ProposeRelease(ctx, signed(t, "5.0", map[string][]byte{"host-image/release": []byte("h")}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.g.Flush()
+	r.decide(true, "owner")
+	r.advance(2 * DefaultFresh)
+	if err := r.g.ConfirmLocal("chg:" + rep.ID + ":adopt"); err != nil {
+		t.Fatal(err)
+	}
+	r.g.Wait()
+	if st := r.state("chg:" + rep.ID + ":adopt"); st.State == journal.Succeeded {
+		t.Fatal("a stale approval installed")
+	}
+	if d := p.Digest(); len(d) != 0 {
+		t.Fatalf("a stale approval reads as a decline: %q", d)
+	}
+}
+
+// fakeChanges answers Check with a fixed error.
+type fakeChanges struct{ err error }
+
+func (f fakeChanges) Check(context.Context, journal.Phase, journal.Intent) error { return f.err }
+func (fakeChanges) Line(journal.Intent) (owner.Item, error) {
+	return owner.Item{Object: "x", Facts: owner.Facts{Verb: "adopt"}}, nil
+}
+func (fakeChanges) Decided(context.Context, journal.Intent, bool) {}
+
+// L3 R2 on #48: only ErrNeedsOwner itself asks; an error that merely wraps
+// or joins it with a refusal denies.
+func TestOnlyNeedsOwnerItselfAsks(t *testing.T) {
+	for _, err := range []error{
+		errors.Join(errors.New("change: no active adoption"), change.ErrNeedsOwner),
+		wrapErr(change.ErrNeedsOwner),
+	} {
+		g := New(Config{Changes: fakeChanges{err}})
+		v := g.evaluateChange(context.Background(), journal.PhaseAuthorize, journal.Intent{ID: "chg:c1:adopt", Action: change.ActionAdopt})
+		if v.kind != deny {
+			t.Fatalf("%v: %v", err, v.kind)
+		}
+	}
+	g := New(Config{Changes: fakeChanges{change.ErrNeedsOwner}})
+	if v := g.evaluateChange(context.Background(), journal.PhaseAuthorize, journal.Intent{ID: "chg:c1:adopt", Action: change.ActionAdopt}); v.kind != ask {
+		t.Fatal(v.kind)
+	}
+}
+
+func wrapErr(err error) error { return &wrapped{err} }
+
+type wrapped struct{ err error }
+
+func (w *wrapped) Error() string { return "wrapped: " + w.err.Error() }
+func (w *wrapped) Unwrap() error { return w.err }

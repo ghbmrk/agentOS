@@ -110,6 +110,7 @@ func TestOwnerLine(t *testing.T) {
 		{journal.Intent{ID: "chg:policy:n9:auto_adopt:on", Action: ActionPolicy}, high("turn on", "learning without asking", "", "LEARN OFF any time")},
 		{journal.Intent{ID: "chg:policy:n9:sharing:on", Action: ActionPolicy}, high("turn on", "sharing learned changes", "", "can be undone later")},
 		{journal.Intent{ID: "chg:suite:n9:remove:nope", Action: ActionSuite}, high("remove", "a past task from the tests", "", "")},
+		{journal.Intent{ID: "chg:suite:n9:remove:sec-1", Action: ActionSuite}, high("remove", "a security check from the tests", "", "")},
 	} {
 		if l, err := e.p.Line(c.in); err != nil || l != c.want {
 			t.Fatalf("%s: %+v %v", c.in.ID, l, err)
@@ -130,7 +131,7 @@ func TestDecidedDropsUnansweredWithoutDecline(t *testing.T) {
 		t.Fatal(r)
 	}
 	st, _ := e.eng.Get(adoptID(r.ID))
-	e.p.Decided(bg, st.Intent) // still pending: the request lapsed
+	e.p.Decided(bg, st.Intent, false) // still pending: the request lapsed
 	if _, err := e.p.Settle(bg, r.ID); err == nil {
 		t.Fatal("a lapsed proposal was kept")
 	}
@@ -147,7 +148,7 @@ func TestDecidedDropsUnansweredWithoutDecline(t *testing.T) {
 	if st.State != journal.Denied {
 		t.Fatal(st.State)
 	}
-	e.p.Decided(bg, st.Intent)
+	e.p.Decided(bg, st.Intent, true)
 	if d := e.p.Digest(); len(d) != 1 || !strings.HasPrefix(d[0], "You declined security update 3.1;") {
 		t.Fatalf("%q", d)
 	}

@@ -312,7 +312,11 @@ func (p *Pipeline) Line(in journal.Intent) (owner.Item, error) {
 		c, ok := p.st.Cases[parts[len(parts)-1]]
 		p.mu.Unlock()
 		obj := "a past task from the tests"
-		if ok && !c.At.IsZero() {
+		switch {
+		case ok && c.Security:
+			// Removing a security fixture weakens LOOP-10; say so.
+			obj = "a security check from the tests"
+		case ok && !c.At.IsZero():
 			obj = "the " + c.At.Format("Jan 2") + " " + string(c.Class) + " task from the tests"
 		}
 		return high("remove", obj, "", ""), nil

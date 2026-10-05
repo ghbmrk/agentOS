@@ -589,12 +589,14 @@ func (p *Pipeline) Settle(ctx context.Context, id string) (Report, error) {
 }
 
 // Decided is the wiring's call once the owner's request for a change
-// intent closes (C7). An adoption the owner answered settles as Settle
-// does, so the owner's no on a security release is recorded as a decline.
-// One still pending was never answered (the request expired, was voided,
-// or was dropped by a restart): its proposal is dropped and nothing is
-// recorded, so silence never reads as a decline. Loop 1 proposes again.
-func (p *Pipeline) Decided(ctx context.Context, in journal.Intent) {
+// intent closes (C7). declined is true only when the owner said NO; then
+// the adoption settles as Settle does, so a declined security release is
+// recorded. One still pending was never answered (the request expired,
+// was voided, or was dropped by a restart), and one denied for any other
+// reason (an approval gone stale before dispatch) is not the owner's no:
+// both drop the proposal and record nothing, so only the owner's NO reads
+// as a decline. Loop 1 proposes again.
+func (p *Pipeline) Decided(ctx context.Context, in journal.Intent, declined bool) {
 	parts := parseID(in.ID)
 	if in.Action != ActionAdopt || parts == nil || in.ID != adoptID(parts[1]) || p.prop(parts[1]) == nil {
 		return
@@ -602,7 +604,7 @@ func (p *Pipeline) Decided(ctx context.Context, in journal.Intent) {
 	st, err := p.j.Get(in.ID)
 	switch {
 	case err != nil:
-	case st.State == journal.Pending:
+	case st.State == journal.Pending, st.State == journal.Denied && !declined:
 		p.drop(parts[1])
 	case st.State == journal.Denied || st.State == journal.Succeeded || st.State == journal.NotApplied:
 		_, _ = p.Settle(ctx, parts[1])
