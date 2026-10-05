@@ -115,16 +115,20 @@ func TestRecoveryKeyAndGridCheckMatchRecovery(t *testing.T) {
 	if !regexp.MustCompile(`^([A-Z2-9]{5}-){7}[A-Z2-9]{5}$`).MatchString(c.RecoveryKey) {
 		t.Fatalf("recovery key shape %q", c.RecoveryKey)
 	}
-	// One mistyped symbol fails its group's check.
-	bad := []byte(c.RecoveryKey)
-	if bad[0] == 'A' {
-		bad[0] = 'B'
-	} else {
-		bad[0] = 'A'
-	}
-	c.RecoveryKey = string(bad)
-	if c.Validate() == nil {
-		t.Fatal("mistyped recovery key accepted")
+	// One mistyped symbol fails its group's check, wherever it is: a key
+	// symbol of the first or last group, or a check symbol.
+	key := c.RecoveryKey
+	for _, i := range []int{0, 37, 4, 22} {
+		bad := []byte(key)
+		if bad[i] == 'A' {
+			bad[i] = 'B'
+		} else {
+			bad[i] = 'A'
+		}
+		c.RecoveryKey = string(bad)
+		if c.Validate() == nil {
+			t.Fatalf("mistyped recovery key accepted (symbol %d)", i)
+		}
 	}
 	page, err := HTML(mustGen(t, 6))
 	if err != nil || !strings.Contains(string(page), "Grid check code: <span class=\"mono\">"+GridCheck(mustGen(t, 6).GridSeed)) {

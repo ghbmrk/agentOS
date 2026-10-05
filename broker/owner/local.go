@@ -234,8 +234,9 @@ func (c *Channel) LocalSignIn(code string) (until time.Time, err error) {
 		}) != nil {
 			// Not recorded, so not coalesced either: tell now.
 			alerts = append(alerts, "A phone signed in on the box's Wi-Fi at "+c.clock(now)+". Not you? Text STOP.")
+		} else {
+			c.local.evicted += evicted
 		}
-		c.local.evicted += evicted
 		signIn, signIns = c.signInTextLocked(now)
 	case err == nil:
 		alerts = append(alerts, c.wrongLocalLocked(now)...)
