@@ -16,8 +16,11 @@ import (
 // Only the egress proxy and the vault process that holds the vault and
 // constructs it (cmd/agentos-egress, P2-4a) may import the vault. Every other broker package, and above all anything
 // a guest's socket reaches, gets no code path to a credential value. The
-// daemon (cmd/agentosd) is on the ARC-2 control path and may not.
-var vaultImporters = map[string]bool{"egress": true, "cmd/agentos-egress": true}
+// daemon (cmd/agentosd) is on the ARC-2 control path and may not. The
+// recovery package (P2-8) runs inside the vault process, and agentos-a8scan
+// is A8's audit tool run by hand on a drive; recovery's imports test keeps
+// every other package from importing it.
+var vaultImporters = map[string]bool{"egress": true, "cmd/agentos-egress": true, "recovery": true, "cmd/agentos-a8scan": true}
 
 const vaultPkg = "github.com/ghbmrk/agentos/broker/vault"
 
