@@ -304,3 +304,30 @@ func TestBusyIsAcceptedWorkOrPressure(t *testing.T) {
 		}
 	}
 }
+
+// PE5: BusyCause reads Busy and whether pressure is over its limit in one
+// call, so the scheduler's cause for a preemption is consistent; an
+// unreadable reading is pressure, as for Busy.
+func TestBusyCauseSaysWhetherPressureHolds(t *testing.T) {
+	p := 0.0
+	c, err := New(Config{CapacityMB: 4000, HeadroomMB: 500}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Pressure, c.MaxPressure = func() float64 { return p }, 10
+	if b, pr := c.BusyCause(); b || pr {
+		t.Fatalf("idle: %v %v", b, pr)
+	}
+	if _, err := c.Admit(Request{ID: "job", Class: Accepted, MemMB: 500}); err != nil {
+		t.Fatal(err)
+	}
+	if b, pr := c.BusyCause(); !b || pr {
+		t.Fatalf("accepted work: %v %v", b, pr)
+	}
+	for _, v := range []float64{11, math.NaN(), -1} {
+		p = v
+		if b, pr := c.BusyCause(); !b || !pr {
+			t.Fatalf("pressure %v: %v %v", v, b, pr)
+		}
+	}
+}

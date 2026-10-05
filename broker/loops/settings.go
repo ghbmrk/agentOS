@@ -11,6 +11,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/owner"
@@ -589,7 +590,8 @@ func (s *Scheduler) Execute(_ context.Context, in journal.Intent, _ int) journal
 	}
 	if s.done != nil && (next.Off || next.Paused[s.runningLoop]) {
 		s.preempted = true // offered again if the loop comes back on
-		s.cancelLocked()
+		// The owner's setting: not a cut a candidate caused (PE5).
+		s.cancelLocked(change.ErrOwnerPreempt)
 	}
 	s.wakeLocked()
 	return journal.Outcome{Result: journal.ResultSucceeded}

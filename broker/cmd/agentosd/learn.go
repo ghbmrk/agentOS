@@ -109,6 +109,7 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		Store:     change.FileStore{Path: filepath.Join(p.Dir, "change.json")},
 		Evaluator: &l.eval,
 		Targets:   targets,
+		Logf:      log.Printf,
 	}); err != nil {
 		return nil, err
 	}
@@ -155,13 +156,14 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	}
 	l.learn = learn
 	if l.sched, err = loops.New(loops.Config{
-		Store:   change.FileStore{Path: filepath.Join(p.Dir, "loops.json")},
-		Spare:   spare,
-		Sources: []loops.Source{learn},
-		Sharing: l.pipe.SetSharing,
-		Busy:    l.busy,
-		Stopped: l.stopped,
-		Logf:    log.Printf,
+		Store:     change.FileStore{Path: filepath.Join(p.Dir, "loops.json")},
+		Spare:     spare,
+		Sources:   []loops.Source{learn},
+		Sharing:   l.pipe.SetSharing,
+		Busy:      l.busy,
+		BusyCause: l.busyCause,
+		Stopped:   l.stopped,
+		Logf:      log.Printf,
 	}); err != nil {
 		return nil, err
 	}
@@ -372,6 +374,17 @@ func (l *learning) record(o grants.OwnerOutcome) {
 func (l *learning) busy() bool {
 	a := l.adm.Load()
 	return a == nil || a.Busy()
+}
+
+// busyCause is admission's BusyCause for the scheduler (PE5). Before the
+// daemon attaches, the box reads as busy under pressure, so a cut then
+// counts.
+func (l *learning) busyCause() (busy, pressure bool) {
+	a := l.adm.Load()
+	if a == nil {
+		return true, true
+	}
+	return a.BusyCause()
 }
 
 func (l *learning) stopped() bool {

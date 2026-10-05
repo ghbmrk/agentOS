@@ -262,6 +262,11 @@ func (e *Evaluator) Run(ctx context.Context, t change.Tree, c change.Probe) ([]b
 	ctx, cancel := context.WithTimeout(ctx, e.cfg.Timeout)
 	defer cancel()
 	if _, err := e.cfg.Machines.CreateSeeded(ctx, r.id, e.cfg.Spec, seed(t)); err != nil {
+		if errors.Is(err, admission.ErrNoRoom) {
+			// No room, reckoned on declared budgets: the owner's work has
+			// the box, which no candidate can cause (PE5).
+			return nil, fmt.Errorf("replay: start %s: %w: %w: %v", c.ID, ErrPreempted, change.ErrOwnerPreempt, err)
+		}
 		if refused(err) {
 			return nil, fmt.Errorf("replay: start %s: %w: %v", c.ID, ErrPreempted, err)
 		}

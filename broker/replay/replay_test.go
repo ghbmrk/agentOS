@@ -760,3 +760,28 @@ func TestRES1PreemptedReplayMachineInterrupts(t *testing.T) {
 		t.Fatal("preempted replay machine not destroyed")
 	}
 }
+
+// REQ: RES-1, CHG-1
+// PE5: a start admission refused for want of room, which it reckons on
+// declared budgets, is the owner's (change.ErrOwnerPreempt) and does not
+// count against the candidate; pressure and a revoke still count, and so
+// does any other error, whatever its text.
+func TestRES1NoRoomIsTheOwners(t *testing.T) {
+	for _, tc := range []struct {
+		cause error
+		owner bool
+	}{
+		{admission.ErrNoRoom, true},
+		{fmt.Errorf("start: %w", admission.ErrNoRoom), true},
+		{admission.ErrPressure, false},
+		{fmt.Errorf("%w: eval-x", vm.ErrRevoked), false},
+		{errors.New(change.ErrOwnerPreempt.Error()), false},
+	} {
+		r := newRig(t, recs{}, func(*client, string) string { return "ok" }, nil)
+		r.ms.createErr = tc.cause
+		_, err := r.e.Run(bg, tree, change.Probe{ID: "p1", Input: []byte("go")})
+		if got := errors.Is(err, change.ErrOwnerPreempt); got != tc.owner {
+			t.Fatalf("%v: owner's %v, want %v (%v)", tc.cause, got, tc.owner, err)
+		}
+	}
+}

@@ -16,6 +16,22 @@ import (
 // error.
 var ErrInterrupted = errors.New("change: evaluation interrupted; completed pairs kept")
 
+// ErrOwnerPreempt marks an interruption no candidate can cause (PE5):
+// STOP, the owner's accepted work arriving without memory pressure, or
+// admission with no room for the replay machine, which it reckons on
+// declared budgets. Such a cut never counts toward MaxInterruptions. Only
+// host code attaches it, as an error value: the loop scheduler as its
+// job context's cause, and the replay evaluator around admission's
+// ErrNoRoom (arbitrator on PE5). It is never derived from replay or guest
+// output, so its text in an error is just text.
+var ErrOwnerPreempt = errors.New("change: interrupted for the owner's work")
+
+// ErrPressurePreempt is the scheduler's cause for a preemption under
+// memory pressure, which a candidate can drive by thrashing in its own
+// machine: it counts, and pressure wins when both hold (arbitrator on
+// PE5).
+var ErrPressurePreempt = errors.New("change: interrupted under memory pressure")
+
 // ResumeFor is how long a preempted evaluation's completed pairs are
 // kept, and MaxKeptPairs how many at most, oldest dropped first.
 const (
@@ -24,12 +40,24 @@ const (
 )
 
 // MaxInterruptions is how many times a candidate-side run of one case may
-// be cut short before the candidate is failed on that case without
-// another run (security F1 on #103). A candidate can drive host memory
+// be cut short, for a cause the candidate could have driven, before the
+// candidate is failed on that case without another run (security F1 on
+// #103; ErrOwnerPreempt's cuts are not counted, PE5). A candidate can drive host memory
 // pressure, and so the scheduler's preemption, by thrashing in its own
 // machine; without a limit it could re-roll a case it is failing until it
 // passes. An owner's preemption seldom lands on the same pair twice.
 const MaxInterruptions = 2
+
+// cutClass is a counted cut's fixed log class, never the error's text.
+func cutClass(cause error, evaluator bool) string {
+	switch {
+	case errors.Is(cause, ErrPressurePreempt):
+		return "pressure"
+	case evaluator:
+		return "refused or revoked"
+	}
+	return "unknown"
+}
 
 // pairResult is one case's outcome on the two trees of an evaluation:
 // booleans only, never case content or output. baseDone and nextDone say

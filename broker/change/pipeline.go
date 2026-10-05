@@ -144,8 +144,11 @@ type Config struct {
 	// resume only under the same ID (PE1, security R1 on #103). Nil: the
 	// evaluator is fixed for the pipeline's life.
 	EvaluatorID func() string
-	Now         func() time.Time
-	Rand        io.Reader
+	// Logf logs each counted candidate cut by a fixed class only (PE5).
+	// Nil: not logged.
+	Logf func(string, ...any)
+	Now  func() time.Time
+	Rand io.Reader
 }
 
 // Bases: why an adoption may run.
@@ -878,13 +881,20 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 		res[r.c.ID] = pr
 	}
 	if interrupted {
+		cause := context.Cause(ctx)
+		if stopped != nil {
+			cause = stopped
+		}
+		// Only a cut the candidate could have caused counts (PE5): any
+		// cause the host did not mark as the owner's, unknown included.
+		counted := cut != nil && cut.cand && !errors.Is(cause, ErrOwnerPreempt)
 		p.mu.Lock()
 		// Every side that finished is kept, so a result once seen is
 		// never run again. The candidate side cut short is counted, so
 		// a candidate that forces preemptions cannot re-roll a case
 		// without limit.
 		for id, pr := range res {
-			if cut != nil && cut.cand && cut.c.ID == id {
+			if counted && cut.c.ID == id {
 				pr.interrupted++
 			}
 			if pr.baseDone || pr.nextDone || pr.interrupted > 0 {
@@ -892,6 +902,9 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 			}
 		}
 		p.mu.Unlock()
+		if counted && p.cfg.Logf != nil {
+			p.cfg.Logf("change: a candidate run was cut short (%s); counted", cutClass(cause, stopped != nil))
+		}
 		if stopped != nil {
 			return Score{}, stopped
 		}

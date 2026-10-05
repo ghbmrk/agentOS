@@ -457,3 +457,20 @@ func TestLoop1BuildsCompiledSkillsOnly(t *testing.T) {
 		t.Fatal("the daemon's redaction mark is not read as redacted")
 	}
 }
+
+// PE5: the scheduler reads admission's BusyCause; before the daemon
+// attaches, the box is busy under pressure, so nothing is the owner's.
+func TestLearningBusyCause(t *testing.T) {
+	var l learning
+	if b, p := l.busyCause(); !b || !p {
+		t.Fatalf("unattached: %v %v", b, p)
+	}
+	c, err := admission.New(admission.Config{CapacityMB: 4000, HeadroomMB: 500}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.adm.Store(c)
+	if b, p := l.busyCause(); b || p {
+		t.Fatalf("idle: %v %v", b, p)
+	}
+}

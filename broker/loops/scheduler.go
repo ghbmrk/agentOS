@@ -87,6 +87,14 @@ type Config struct {
 	// Busy reports that foreground or accepted work needs the box (RES-1,
 	// from admission). No loop work starts while it is true. Nil: never.
 	Busy func() bool
+	// BusyCause, if set, reads Busy together with whether memory pressure
+	// is over its limit, in one call, so a preemption's cause is
+	// consistent (PE5). The job's context is cancelled with
+	// change.ErrOwnerPreempt for STOP or the owner's work without
+	// pressure, which never counts against a candidate, and with
+	// change.ErrPressurePreempt under pressure, which wins when both hold.
+	// Nil: every busy preemption counts. Busy, if nil, is read from it.
+	BusyCause func() (busy, pressure bool)
 	// Stopped reports that STOP is in force; loops pause with everything
 	// else. Nil: never.
 	Stopped func() bool
@@ -132,7 +140,7 @@ type Scheduler struct {
 	mu          sync.Mutex
 	st          state
 	loops       map[Loop]*measure
-	cancel      context.CancelFunc
+	cancel      context.CancelCauseFunc
 	runningLoop Loop
 	done        chan struct{}
 	preempted   bool
@@ -192,7 +200,11 @@ func New(cfg Config) (*Scheduler, error) {
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
 	}
-	if cfg.Busy == nil {
+	switch {
+	case cfg.Busy == nil && cfg.BusyCause != nil:
+		bc := cfg.BusyCause
+		cfg.Busy = func() bool { b, _ := bc(); return b }
+	case cfg.Busy == nil:
 		cfg.Busy = func() bool { return false }
 	}
 	if cfg.Stopped == nil {
@@ -270,7 +282,7 @@ func (s *Scheduler) Preempt() error {
 	done := s.done
 	if done != nil {
 		s.preempted = true
-		s.cancelLocked()
+		s.cancelLocked(s.cause())
 	}
 	s.mu.Unlock()
 	if done == nil {
@@ -286,9 +298,30 @@ func (s *Scheduler) Preempt() error {
 	}
 }
 
-func (s *Scheduler) cancelLocked() {
+// cause is why work is being preempted now (PE5): the owner's
+// (change.ErrOwnerPreempt) only for STOP or the owner's work while memory
+// pressure is within its limit, as BusyCause reads them in one call;
+// pressure otherwise; nil, which counts, when neither is known.
+func (s *Scheduler) cause() error {
+	if s.cfg.BusyCause == nil {
+		if s.cfg.Stopped() && !s.cfg.Busy() {
+			return change.ErrOwnerPreempt
+		}
+		return nil
+	}
+	busy, pressure := s.cfg.BusyCause()
+	switch {
+	case pressure:
+		return change.ErrPressurePreempt
+	case busy || s.cfg.Stopped():
+		return change.ErrOwnerPreempt
+	}
+	return nil
+}
+
+func (s *Scheduler) cancelLocked(cause error) {
 	if s.cancel != nil {
-		s.cancel()
+		s.cancel(cause)
 	}
 }
 
@@ -413,7 +446,7 @@ func (s *Scheduler) decayLocked(now time.Time) {
 // (change.ErrInterrupted with ctx still live): such a unit is treated as
 // preempted, offered again and not measured (PE3).
 func (s *Scheduler) run(ctx context.Context, l Loop, job Job) (interrupted bool) {
-	jctx, cancel := context.WithCancel(ctx)
+	jctx, cancel := context.WithCancelCause(ctx)
 	done := make(chan struct{})
 	s.mu.Lock()
 	s.cancel, s.runningLoop, s.done, s.preempted = cancel, l, done, false
@@ -433,7 +466,7 @@ func (s *Scheduler) run(ctx context.Context, l Loop, job Job) (interrupted bool)
 				if s.cfg.Busy() || s.cfg.Stopped() {
 					s.mu.Lock()
 					s.preempted = true
-					s.cancelLocked()
+					s.cancelLocked(s.cause())
 					s.mu.Unlock()
 					return
 				}
@@ -472,7 +505,7 @@ func (s *Scheduler) run(ctx context.Context, l Loop, job Job) (interrupted bool)
 		}
 	}
 	s.mu.Unlock()
-	cancel()
+	cancel(nil)
 	close(done)
 	if res.Err != nil {
 		s.cfg.Logf("loops: %s %s: %v", l, job.Name, res.Err)

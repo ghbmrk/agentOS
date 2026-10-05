@@ -204,19 +204,27 @@ func (c *Controller) Snapshot() Snapshot {
 // agent machine runs all the time, and when foreground needs memory,
 // Admit preempts experiments for it.
 func (c *Controller) Busy() bool {
+	busy, _ := c.BusyCause()
+	return busy
+}
+
+// BusyCause is Busy, and whether memory pressure is over its limit (an
+// unreadable reading counts as over), read together so the loop
+// scheduler's cause for a preemption is consistent (PE5).
+func (c *Controller) BusyCause() (busy, pressure bool) {
 	if c.Pressure != nil {
 		if p := c.Pressure(); math.IsNaN(p) || p < 0 || p > c.MaxPressure {
-			return true
+			return true, true
 		}
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, r := range c.running {
 		if r.Class == Accepted {
-			return true
+			return true, false
 		}
 	}
-	return false
+	return false, false
 }
 
 // Summary is STATUS's one line about machines, in fixed wording.
