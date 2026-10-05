@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
@@ -143,5 +144,65 @@ func TestHW8ChronyConfig(t *testing.T) {
 	}
 	if !keys["makestep"] || !keys["ntsdumpdir"] {
 		t.Error("makestep or ntsdumpdir missing")
+	}
+}
+
+// TestOnlyChronycIsExecuted: the one process the clock package may start
+// is chronyc at its fixed path, from one call site, with -c -n and only the
+// read-only queries Synced makes (the daemon's import check allows the
+// package os/exec on this ground).
+func TestOnlyChronycIsExecuted(t *testing.T) {
+	launchers := map[string]bool{
+		"exec.Command": true, "exec.CommandContext": true, "os.StartProcess": true,
+		"syscall.ForkExec": true, "syscall.Exec": true, "syscall.StartProcess": true,
+	}
+	files, _ := filepath.Glob("*.go")
+	n := 0
+	for _, path := range files {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		fs := token.NewFileSet()
+		f, err := parser.ParseFile(fs, path, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ast.Inspect(f, func(x ast.Node) bool {
+			call, ok := x.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			id, ok := sel.X.(*ast.Ident)
+			if !ok || !launchers[id.Name+"."+sel.Sel.Name] {
+				return true
+			}
+			n++
+			if path != "chrony.go" || id.Name+"."+sel.Sel.Name != "exec.CommandContext" || len(call.Args) < 2 {
+				t.Errorf("%s: process started at %s", path, fs.Position(call.Pos()))
+				return true
+			}
+			if a, ok := call.Args[1].(*ast.Ident); !ok || a.Name != "chronyc" {
+				t.Errorf("%s: starts something other than chronyc", fs.Position(call.Pos()))
+			}
+			return true
+		})
+	}
+	if n != 1 || chronyc != "/usr/bin/chronyc" {
+		t.Fatalf("%d process starts, chronyc %q", n, chronyc)
+	}
+	var queries []string
+	run := func(_ context.Context, args ...string) ([]byte, error) {
+		queries = append(queries, args...)
+		return nil, errors.New("not run")
+	}
+	chronySynced(context.Background(), run)
+	for _, q := range queries {
+		if q != "tracking" && q != "sources" && q != "authdata" {
+			t.Errorf("chronyc %s", q)
+		}
 	}
 }
