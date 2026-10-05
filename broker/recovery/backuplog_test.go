@@ -18,9 +18,9 @@ func TestOlderBackupsAreNamedAndDeletedOnlyWithApproval(t *testing.T) {
 	logged := func(dest string, at time.Time) {
 		t.Helper()
 		var buf bytes.Buffer
-		sum, err := BackupSum(x.b, x.roots(), &buf, at)
+		rc, err := BackupSum(x.b, x.roots(), &buf, at)
 		must(t, err)
-		e, err := RecordBackup(x.b, dest, at, sum, bytes.NewReader(buf.Bytes()))
+		e, err := RecordBackup(x.b, dest, rc, bytes.NewReader(buf.Bytes()))
 		must(t, err)
 		if !e.Verified {
 			t.Fatal("an intact read-back is not verified")
@@ -29,14 +29,14 @@ func TestOlderBackupsAreNamedAndDeletedOnlyWithApproval(t *testing.T) {
 	logged("USB stick A", t0.Add(-48*time.Hour))
 	logged("Home NAS", t0.Add(-24*time.Hour))
 	// A read-back that differs is not verified.
-	if e, _ := RecordBackup(x.b, "USB stick A", t0.Add(-time.Hour), make([]byte, 32), strings.NewReader("x")); e.Verified {
+	if e, _ := RecordBackup(x.b, "USB stick A", Receipt{t0.Add(-time.Hour), make([]byte, 32)}, strings.NewReader("x")); e.Verified {
 		t.Fatal("a damaged read-back is verified")
 	}
 	if n, _ := OldBackupsNote(x.b); n != "" {
 		t.Fatalf("note before any key change: %q", n)
 	}
 
-	p, err := BeginRotate(x.b, []Part{PartRecovery}, Auth{Recovery: x.rk}, nil, testGen, nil, t0)
+	p, err := BeginRotate(x.b, []Part{PartRecovery}, Auth{Recovery: x.rk}, Proof{}, testGen, nil, t0)
 	must(t, err)
 	_, err = p.Commit(x.b, p.answer, t0)
 	must(t, err)
@@ -55,6 +55,11 @@ func TestOlderBackupsAreNamedAndDeletedOnlyWithApproval(t *testing.T) {
 	// No offer before a verified backup under the new key.
 	if _, ok, _ := OfferDelete(x.b, reach); ok {
 		t.Fatal("offered before the new backup")
+	}
+	// A hand-built offer cannot skip the new-backup gate.
+	early, _, _ := OfferDelete(x.b, reach)
+	if _, err := ApproveDelete(x.b, early, Auth{Code: true, Local: true}); !errors.Is(err, ErrNoFreshBackup) {
+		t.Fatalf("approved before the new backup: %v", err)
 	}
 	logged("USB stick A", t0.Add(time.Hour))
 	off, ok, err := OfferDelete(x.b, reach)
@@ -78,6 +83,11 @@ func TestOlderBackupsAreNamedAndDeletedOnlyWithApproval(t *testing.T) {
 	if len(gone) != 2 {
 		t.Fatalf("deleted %d", len(gone))
 	}
+	// The log keeps them until the caller confirms the deletion.
+	if _, ok, _ := OfferDelete(x.b, reach); !ok {
+		t.Fatal("dropped from the log before deletion was confirmed")
+	}
+	must(t, ForgetBackups(x.b, gone))
 	// The new backup stays; the unreachable one stays named.
 	if n, _ := OldBackupsNote(x.b); !strings.Contains(n, "Delete them from Home NAS once") {
 		t.Fatalf("after delete: %q", n)

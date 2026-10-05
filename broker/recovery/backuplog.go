@@ -72,20 +72,28 @@ func saveLog(b *Box, l backupLog) error {
 	return b.V.Put(BackupLogName, KindBackupLog, enc)
 }
 
-// BackupSum writes a backup like Backup and returns the SHA-256 of the
-// bytes written, for RecordBackup's read-back check.
-func BackupSum(b *Box, roots []Root, w io.Writer, now time.Time) ([]byte, error) {
+// Receipt is what BackupSum wrote: the backup's time and the SHA-256 of
+// its bytes, for RecordBackup.
+type Receipt struct {
+	Created time.Time
+	Sum     []byte
+}
+
+// BackupSum writes a backup like Backup and returns its receipt.
+func BackupSum(b *Box, roots []Root, w io.Writer, now time.Time) (Receipt, error) {
 	h := sha256.New()
 	if err := Backup(b, roots, io.MultiWriter(w, h), now); err != nil {
-		return nil, err
+		return Receipt{}, err
 	}
-	return h.Sum(nil), nil
+	return Receipt{Created: now.UTC(), Sum: h.Sum(nil)}, nil
 }
 
 // RecordBackup logs a backup written to destination (a name the owner
-// recognizes, such as "USB stick SANDISK-1"). readBack is the backup as
-// read again from the destination; it is verified when it matches sum.
-func RecordBackup(b *Box, destination string, created time.Time, sum []byte, readBack io.Reader) (BackupEntry, error) {
+// recognizes, such as "USB stick SANDISK-1"), at the time in its receipt.
+// readBack is the backup as read again from the destination; it is
+// verified when it matches the receipt.
+func RecordBackup(b *Box, destination string, rc Receipt, readBack io.Reader) (BackupEntry, error) {
+	created, sum := rc.Created, rc.Sum
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	destination = strings.TrimSpace(destination)
@@ -126,6 +134,16 @@ func (l backupLog) older() []BackupEntry {
 		}
 	}
 	return out
+}
+
+// freshVerified reports a verified backup made since the key changed.
+func (l backupLog) freshVerified() bool {
+	for _, e := range l.Entries {
+		if e.Verified && !l.KeyChangedAt.IsZero() && !e.Created.Before(l.KeyChangedAt) {
+			return true
+		}
+	}
+	return false
 }
 
 func destinations(es []BackupEntry) []string {
@@ -202,12 +220,9 @@ func OfferDelete(b *Box, reachable func(string) bool) (DeleteOffer, bool, error)
 	if err != nil {
 		return DeleteOffer{}, false, err
 	}
-	fresh := false
-	for _, e := range l.Entries {
-		fresh = fresh || (e.Verified && !l.KeyChangedAt.IsZero() && !e.Created.Before(l.KeyChangedAt))
-	}
 	var off DeleteOffer
 	var far []BackupEntry
+	fresh := l.freshVerified()
 	for _, e := range l.older() {
 		if reachable != nil && reachable(e.Destination) {
 			off.Reachable = append(off.Reachable, e)
@@ -223,9 +238,14 @@ func OfferDelete(b *Box, reachable func(string) bool) (DeleteOffer, bool, error)
 	return off, true, nil
 }
 
-// ApproveDelete is the owner's tier-4 answer (CH-3) to an offer: it drops
-// the offered backups from the log and returns them for the caller to
-// delete. It is never automatic.
+// ErrNoFreshBackup is a deletion asked for before a verified backup under
+// the new recovery key exists.
+var ErrNoFreshBackup = errors.New("recovery: make and verify a new backup before deleting older ones")
+
+// ApproveDelete is the owner's tier-4 answer (CH-3) to an offer. It
+// returns the offered older backups for the caller to delete, and only
+// once a verified backup under the new key exists. It is never automatic.
+// The log keeps them until ForgetBackups confirms the deletion.
 func ApproveDelete(b *Box, off DeleteOffer, auth Auth) ([]BackupEntry, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -236,20 +256,43 @@ func ApproveDelete(b *Box, off DeleteOffer, auth Auth) ([]BackupEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	drop := map[BackupEntry]bool{}
-	for _, e := range off.Reachable {
-		drop[e] = true
+	if !l.freshVerified() {
+		return nil, ErrNoFreshBackup
 	}
-	var keep, gone []BackupEntry
+	offered := map[BackupEntry]bool{}
+	for _, e := range off.Reachable {
+		offered[e] = true
+	}
+	var out []BackupEntry
+	for _, e := range l.older() {
+		if offered[e] {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+// ForgetBackups drops older backups from the log once the caller has
+// confirmed their deletion. Backups since the key change are never dropped.
+func ForgetBackups(b *Box, deleted []BackupEntry) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	l, err := loadLog(b)
+	if err != nil {
+		return err
+	}
+	gone := map[BackupEntry]bool{}
+	for _, e := range deleted {
+		gone[e] = true
+	}
+	var keep []BackupEntry
 	for _, e := range l.Entries {
-		if drop[e] && !l.KeyChangedAt.IsZero() && e.Created.Before(l.KeyChangedAt) {
-			gone = append(gone, e)
-		} else {
+		if !(gone[e] && !l.KeyChangedAt.IsZero() && e.Created.Before(l.KeyChangedAt)) {
 			keep = append(keep, e)
 		}
 	}
 	l.Entries = keep
-	return gone, saveLog(b, l)
+	return saveLog(b, l)
 }
 
 // DeclineDelete keeps the backups and repeats the digest line once.

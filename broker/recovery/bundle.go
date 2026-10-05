@@ -132,6 +132,9 @@ func backupPublic(rk RecoveryKey) ([]byte, error) {
 // backup public key alone, which anyone holding it can seal to, does not
 // make a backup restorable.
 func Backup(b *Box, roots []Root, w io.Writer, now time.Time) error {
+	if _, unfinished := RotationUnfinished(b); unfinished {
+		return ErrRotationUnfinished
+	}
 	pub, err := backupKey(b)
 	if err != nil {
 		return err
@@ -222,7 +225,9 @@ func canonHeader(hd *tar.Header) []byte {
 	field(strconv.Itoa(hd.Gid))
 	field(hd.Linkname)
 	field(strconv.FormatInt(hd.Size, 10))
-	field(hd.PAXRecords["SCHILY.xattr."+opaqueXattr])
+	opq, has := hd.PAXRecords["SCHILY.xattr."+opaqueXattr]
+	field(strconv.FormatBool(has))
+	field(opq)
 	field(strconv.FormatInt(hd.Devmajor, 10) + ":" + strconv.FormatInt(hd.Devminor, 10))
 	return b.Bytes()
 }

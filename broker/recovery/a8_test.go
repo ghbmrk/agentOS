@@ -81,7 +81,7 @@ func TestA8CanaryOnTheDrive(t *testing.T) {
 	must(t, err)
 	_, err = Reconfirm(nb, Answer{Standing: []Standing{{"G1", "x"}}, Keep: []string{"G1"}}, Auth{Recovery: x.rk}, t0)
 	must(t, err)
-	_, err = x.rotate([]Part{PartWiFi, PartGrid, PartSetup}, Auth{Code: true, Local: true}, nil)
+	_, err = x.rotate([]Part{PartWiFi, PartGrid, PartSetup}, Auth{Code: true, Local: true}, Proof{})
 	must(t, err)
 	after, err := x.b.LoadCard()
 	must(t, err)

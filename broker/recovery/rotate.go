@@ -144,7 +144,7 @@ type Pending struct {
 	mu      sync.Mutex
 	parts   map[Part]bool
 	next    Card
-	have    vault.Factor
+	proof   Proof
 	answer  string
 	expires time.Time
 	wrong   int
@@ -172,14 +172,38 @@ var ErrConfirm = errors.New("recovery: that does not match the new card; check t
 // that card, or the owner loses the new values.
 var ErrCardNotStored = errors.New("recovery: part of the new card is in effect but was not saved; print it now")
 
+// Proof is what opens the drive now, for rewriting its slots: the current
+// recovery key or passphrase typed from the old card, or, when the card is
+// lost, the vault process's own TPM factor. The vault wipes a factor's
+// secret bytes after each call, so a fresh factor is built for each use.
+type Proof struct {
+	Recovery   RecoveryKey
+	Passphrase string
+	// Host builds the vault process's TPM factor afresh on each call.
+	Host func() vault.Factor
+}
+
+func (p Proof) factor() vault.Factor {
+	switch {
+	case p.Recovery.Valid():
+		return Factor(p.Recovery)
+	case p.Passphrase != "":
+		return vault.Passphrase(p.Passphrase)
+	case p.Host != nil:
+		return p.Host()
+	}
+	return nil
+}
+
+// lost reports a proof without the current card.
+func (p Proof) lost() bool { return !p.Recovery.Valid() && p.Passphrase == "" && p.Host != nil }
+
 // BeginRotate generates replacements for the chosen card secrets (REC-4).
 // It is a tier-4 action (CH-3). Rewriting the passphrase or recovery slot
-// needs a factor that opens the drive now: the current recovery key or
-// passphrase typed from the old card, or the vault process's own TPM
-// factor when the card is lost, in which case both the passphrase and the
-// recovery key must be among the parts. When have is nil the recovery key
-// in auth serves.
-func BeginRotate(b *Box, parts []Part, auth Auth, have vault.Factor, gen Generator, r io.Reader, now time.Time) (*Pending, error) {
+// needs proof that opens the drive now; when the card is lost (proved by
+// the host), both the passphrase and the recovery key must be among the
+// parts. An empty proof takes the recovery key in auth.
+func BeginRotate(b *Box, parts []Part, auth Auth, proof Proof, gen Generator, r io.Reader, now time.Time) (*Pending, error) {
 	if err := auth.check(b); err != nil {
 		return nil, err
 	}
@@ -195,15 +219,15 @@ func BeginRotate(b *Box, parts []Part, auth Auth, have vault.Factor, gen Generat
 			return nil, fmt.Errorf("recovery: unknown card part %q", p)
 		}
 	}
-	if have == nil && auth.Recovery.Valid() {
-		have = Factor(auth.Recovery)
+	if proof.factor() == nil && auth.Recovery.Valid() {
+		proof.Recovery = auth.Recovery
 	}
-	if (set[PartPassphrase] || set[PartRecovery]) && !b.opensWith(have) {
+	if (set[PartPassphrase] || set[PartRecovery]) && !b.opensWith(proof.factor()) {
 		return nil, errors.New("recovery: replacing the passphrase or recovery key needs the current one from the card")
 	}
-	// No current card (proved by the box's own TPM slot): the lost card
-	// may be in other hands, so both factors it carries are replaced.
-	if have != nil && have.Kind() == vault.SlotTPM && !(set[PartPassphrase] && set[PartRecovery]) {
+	// No current card: the lost card may be in other hands, so both
+	// factors it carries are replaced.
+	if proof.lost() && !(set[PartPassphrase] && set[PartRecovery]) {
 		return nil, ErrLostCardParts
 	}
 	cur, err := b.LoadCard()
@@ -233,7 +257,7 @@ func BeginRotate(b *Box, parts []Part, auth Auth, have vault.Factor, gen Generat
 		}
 		next.RecoveryKey = fresh.RecoveryKey
 	}
-	p := &Pending{parts: set, next: next, have: have, expires: now.Add(PendingTTL)}
+	p := &Pending{parts: set, next: next, proof: proof, expires: now.Add(PendingTTL)}
 	switch {
 	case set[PartRecovery]:
 		p.Prompt = "Type the last group of the new recovery key."
@@ -310,16 +334,30 @@ func (p *Pending) Commit(b *Box, typed string, now time.Time) (Card, error) {
 		}
 		return Card{}, err
 	}
-	have := p.have
+	proof := p.proof
+	var slots []Part
+	for _, q := range []Part{PartPassphrase, PartRecovery} {
+		if p.parts[q] {
+			slots = append(slots, q)
+		}
+	}
+	if len(slots) > 0 {
+		// Recorded before the first slot write and cleared only when a
+		// rotation covering these parts completes, so a crash or failure
+		// between the writes is not silent: Backup refuses meanwhile and
+		// the page asks to rotate again.
+		if err := markRotation(b, slots, now); err != nil {
+			return Card{}, err
+		}
+	}
 	if p.parts[PartPassphrase] {
-		next := vault.Passphrase(p.next.VaultPassphrase)
-		if err := vault.Rekey(b.KeysPath, have, next); err != nil {
+		if err := vault.Rekey(b.KeysPath, proof.factor(), vault.Passphrase(p.next.VaultPassphrase)); err != nil {
 			return fail(err)
 		}
 		wrote = true
 		in.VaultPassphrase = p.next.VaultPassphrase
-		if have.Kind() == vault.SlotPassphrase {
-			have = next
+		if proof.Passphrase != "" {
+			proof.Passphrase = p.next.VaultPassphrase
 		}
 	}
 	if p.parts[PartRecovery] {
@@ -327,7 +365,7 @@ func (p *Pending) Commit(b *Box, typed string, now time.Time) (Card, error) {
 		if err != nil {
 			return fail(err)
 		}
-		if err := vault.Rekey(b.KeysPath, have, Factor(nk)); err != nil {
+		if err := vault.Rekey(b.KeysPath, proof.factor(), Factor(nk)); err != nil {
 			return fail(err)
 		}
 		wrote = true
@@ -354,17 +392,29 @@ func (p *Pending) Commit(b *Box, typed string, now time.Time) (Card, error) {
 	if err := storeCard(b, stored); err != nil {
 		return fail(err)
 	}
+	if err := clearRotation(b, slots); err != nil {
+		return fail(err)
+	}
 	in.WiFiPassword, in.SetupSecret, in.SetupCode, in.GridSeed = p.next.WiFiPassword, p.next.SetupSecret, p.next.SetupCode, p.next.GridSeed
 	return in, nil
 }
 
-// DoneNotes are the actions the local page offers after a rotation.
-func DoneNotes(parts []Part) []string {
+// Lost reports a rotation made without the current card.
+func (p *Pending) Lost() bool { return p.proof.lost() }
+
+// DoneNotes are the actions the local page offers after a rotation; lost
+// is a rotation made without the current card.
+func DoneNotes(parts []Part, lost bool) []string {
 	var out []string
+	if lost {
+		out = append(out, "Your lost card opens every backup made before today. Back up now, then delete them.")
+	}
 	for _, p := range parts {
 		switch p {
 		case PartRecovery:
-			out = append(out, "Back up now. Backups made before today still open with your old card.")
+			if !lost {
+				out = append(out, "Back up now. Backups made before today still open with your old card.")
+			}
 		case PartPassphrase:
 			out = append(out, "Copies of the drive made before now still open with the old passphrase. Destroy the old card's passphrase sheet.")
 		case PartWiFi:
@@ -374,4 +424,86 @@ func DoneNotes(parts []Part) []string {
 		}
 	}
 	return out
+}
+
+// The rotation marker: a vault entry that exists while a rotation that
+// rewrites the passphrase or recovery slot has not completed.
+const (
+	RotationName = "recovery-rotation-pending"
+	KindRotation = "rotation_pending"
+)
+
+type rotationMark struct {
+	Format  string    `json:"format"`
+	Started time.Time `json:"started"`
+	Parts   []Part    `json:"parts"`
+}
+
+// ErrRotationUnfinished is a backup refused while a rotation is unfinished.
+var ErrRotationUnfinished = errors.New("recovery: a card rotation did not finish; rotate the passphrase and recovery key again before backing up")
+
+func markRotation(b *Box, parts []Part, now time.Time) error {
+	raw, ok, err := reserved(b.V, RotationName, KindRotation)
+	if err != nil {
+		return err
+	}
+	m := rotationMark{Format: "agentos-rotation-v1", Started: now.UTC()}
+	if ok {
+		// Keep what an earlier unfinished rotation still owes.
+		var old rotationMark
+		if json.Unmarshal(raw, &old) == nil {
+			m.Parts = old.Parts
+		}
+	}
+	for _, p := range parts {
+		if !containsPart(m.Parts, p) {
+			m.Parts = append(m.Parts, p)
+		}
+	}
+	enc, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	return b.V.Put(RotationName, KindRotation, enc)
+}
+
+// clearRotation removes the marker when this rotation covered every part
+// it owes.
+func clearRotation(b *Box, done []Part) error {
+	raw, ok, err := reserved(b.V, RotationName, KindRotation)
+	if err != nil || !ok {
+		return err
+	}
+	var m rotationMark
+	if err := json.Unmarshal(raw, &m); err == nil {
+		for _, p := range m.Parts {
+			if !containsPart(done, p) {
+				return nil
+			}
+		}
+	}
+	return b.V.Delete(RotationName)
+}
+
+func containsPart(ps []Part, p Part) bool {
+	for _, q := range ps {
+		if q == p {
+			return true
+		}
+	}
+	return false
+}
+
+// RotationUnfinished reports the parts an unfinished rotation still owes,
+// for the local page to resume it.
+func RotationUnfinished(b *Box) ([]Part, bool) {
+	k, ok := entryKind(b.V, RotationName)
+	if !ok {
+		return nil, false
+	}
+	var m rotationMark
+	if s, ok := b.V.Secret(RotationName); ok && k == KindRotation && json.Unmarshal([]byte(s.Reveal()), &m) == nil && len(m.Parts) > 0 {
+		return m.Parts, true
+	}
+	return AllParts, true
 }

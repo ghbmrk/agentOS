@@ -59,7 +59,7 @@ func TestNoKeySeedOrGridMaterialInAnyPlaintextOnTheDriveOrInBackups(t *testing.T
 	oldSeed := x.vaultSeed()
 	_, err = ReEnroll(x.b, x.rk, true, nil)
 	must(t, err)
-	after, err := x.rotate([]Part{PartWiFi, PartGrid, PartPassphrase}, Auth{Code: true, Local: true}, Factor(x.rk))
+	after, err := x.rotate([]Part{PartWiFi, PartGrid, PartPassphrase}, Auth{Code: true, Local: true}, Proof{Recovery: x.rk})
 	must(t, err)
 
 	needles := append(x.needles(before), x.needles(after)...)

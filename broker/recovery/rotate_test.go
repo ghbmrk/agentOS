@@ -34,11 +34,11 @@ func TestEveryCardSecretRotatesAloneAsATier4Action(t *testing.T) {
 	for _, p := range AllParts {
 		x := newBox(t)
 		for _, a := range []Auth{{}, {Code: true}, {Local: true}, {Recovery: mustKey(t)}} {
-			if _, err := BeginRotate(x.b, []Part{p}, a, Factor(x.rk), testGen, nil, t0); !errors.Is(err, ErrNotAuthorized) {
+			if _, err := BeginRotate(x.b, []Part{p}, a, Proof{Recovery: x.rk}, testGen, nil, t0); !errors.Is(err, ErrNotAuthorized) {
 				t.Fatalf("auth %+v: %v", a, err)
 			}
 		}
-		nc, err := x.rotate([]Part{p}, Auth{Code: true, Local: true}, Factor(x.rk))
+		nc, err := x.rotate([]Part{p}, Auth{Code: true, Local: true}, Proof{Recovery: x.rk})
 		must(t, err)
 		// The new card carries the rotated part; the rest are blank (the
 		// owner keeps those parts of the old card).
@@ -81,14 +81,14 @@ func TestEveryCardSecretRotatesAloneAsATier4Action(t *testing.T) {
 // value, or the vault process's TPM factor when the card is lost.
 func TestReplacingAFactorNeedsAFactorThatOpensTheDrive(t *testing.T) {
 	x := newBox(t)
-	for _, have := range []vault.Factor{nil, Factor(mustKey(t)), vault.Passphrase("not the passphrase at all")} {
-		if _, err := BeginRotate(x.b, []Part{PartRecovery}, Auth{Code: true, Local: true}, have, testGen, nil, t0); err == nil {
-			t.Fatalf("rotated with %v", have)
+	for _, proof := range []Proof{{}, {Recovery: mustKey(t)}, {Passphrase: "not the passphrase at all"}} {
+		if _, err := BeginRotate(x.b, []Part{PartRecovery}, Auth{Code: true, Local: true}, proof, testGen, nil, t0); err == nil {
+			t.Fatalf("rotated with %+v", proof)
 		}
 	}
 	// Card lost: the box's own TPM slot proves the drive, and both
 	// factors the lost card carries are replaced.
-	tpm := fakeTPM{[]byte("sealed-to-host-a-tpm")}
+	tpm := Proof{Host: func() vault.Factor { return fakeTPM{[]byte("sealed-to-host-a-tpm")} }}
 	if _, err := x.rotate([]Part{PartRecovery}, Auth{Code: true, Local: true}, tpm); !errors.Is(err, ErrLostCardParts) {
 		t.Fatalf("lost card kept the passphrase: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestReplacingAFactorNeedsAFactorThatOpensTheDrive(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Parts that rewrite no slot need no factor.
-	_, err = x.rotate([]Part{PartWiFi, PartGrid}, Auth{Code: true, Local: true}, nil)
+	_, err = x.rotate([]Part{PartWiFi, PartGrid}, Auth{Code: true, Local: true}, Proof{})
 	must(t, err)
 }
 
@@ -107,7 +107,7 @@ func TestReplacingAFactorNeedsAFactorThatOpensTheDrive(t *testing.T) {
 func TestRotationTakesEffectOnlyWhenTheOwnerHasTheNewCard(t *testing.T) {
 	x := newBox(t)
 	keys, _ := os.ReadFile(x.b.KeysPath)
-	p, err := BeginRotate(x.b, AllParts, Auth{Recovery: x.rk}, nil, testGen, nil, t0)
+	p, err := BeginRotate(x.b, AllParts, Auth{Recovery: x.rk}, Proof{}, testGen, nil, t0)
 	must(t, err)
 	if !strings.Contains(p.Prompt, "recovery key") {
 		t.Fatalf("prompt: %q", p.Prompt)
@@ -132,7 +132,7 @@ func TestRotationTakesEffectOnlyWhenTheOwnerHasTheNewCard(t *testing.T) {
 	}
 	// Three wrong answers, or the time limit, discard it.
 	nk, _ := ParseRecoveryKey(nc.RecoveryKey)
-	q, err := BeginRotate(x.b, []Part{PartGrid}, Auth{Recovery: nk}, nil, testGen, nil, t0)
+	q, err := BeginRotate(x.b, []Part{PartGrid}, Auth{Recovery: nk}, Proof{}, testGen, nil, t0)
 	must(t, err)
 	if q.answer != GridCheck(q.Card().GridSeed) {
 		t.Fatal("grid-only rotation is not confirmed by the grid's check code")
@@ -143,7 +143,7 @@ func TestRotationTakesEffectOnlyWhenTheOwnerHasTheNewCard(t *testing.T) {
 	if _, err := q.Commit(x.b, q.answer, t0); !errors.Is(err, ErrPendingLapsed) {
 		t.Fatalf("after three wrong: %v", err)
 	}
-	r, err := BeginRotate(x.b, []Part{PartWiFi}, Auth{Recovery: nk}, nil, testGen, nil, t0)
+	r, err := BeginRotate(x.b, []Part{PartWiFi}, Auth{Recovery: nk}, Proof{}, testGen, nil, t0)
 	must(t, err)
 	if _, err := r.Commit(x.b, r.answer, t0.Add(PendingTTL+time.Second)); !errors.Is(err, ErrPendingLapsed) {
 		t.Fatalf("after the time limit: %v", err)
@@ -169,7 +169,7 @@ func TestAPartialRotationReturnsWhatIsInEffect(t *testing.T) {
 	x := newBox(t)
 	orig, _ := os.ReadFile(x.b.KeysPath)
 	p, err := BeginRotate(x.b, []Part{PartPassphrase, PartRecovery, PartWiFi}, Auth{Code: true, Local: true},
-		failing{Factor(x.rk), x.b.KeysPath, orig}, testGen, nil, t0)
+		Proof{Host: func() vault.Factor { return failing{Factor(x.rk), x.b.KeysPath, orig} }}, testGen, nil, t0)
 	must(t, err)
 	nc, err := p.Commit(x.b, p.answer, t0)
 	if !errors.Is(err, ErrCardNotStored) {
@@ -181,9 +181,45 @@ func TestAPartialRotationReturnsWhatIsInEffect(t *testing.T) {
 	if _, err := vault.OpenSealed(x.b.VaultPath, x.b.KeysPath, vault.Passphrase(nc.VaultPassphrase)); err != nil {
 		t.Fatal(err)
 	}
-	// Backups still go to the recovery key that still opens the drive.
-	bk := x.backup()
-	if _, _, err := x.restore(bk, x.rk, t0); err != nil {
+	// The unfinished rotation is recorded: no backup is sealed to the
+	// key it was replacing until a rotation covering it completes.
+	if parts, ok := RotationUnfinished(x.b); !ok || len(parts) != 2 {
+		t.Fatalf("unfinished rotation not recorded: %v %v", parts, ok)
+	}
+	var buf bytes.Buffer
+	if err := Backup(x.b, x.roots(), &buf, t0); !errors.Is(err, ErrRotationUnfinished) {
+		t.Fatalf("backup during an unfinished rotation: %v", err)
+	}
+	// A rotation that does not cover what is owed leaves the marker.
+	_, err = x.rotate([]Part{PartWiFi}, Auth{Code: true, Local: true}, Proof{})
+	must(t, err)
+	if _, ok := RotationUnfinished(x.b); !ok {
+		t.Fatal("a Wi-Fi rotation cleared the unfinished one")
+	}
+	// Finishing it clears the marker, and backups resume under the new key.
+	nc, err = x.rotate([]Part{PartPassphrase, PartRecovery}, Auth{Code: true, Local: true}, Proof{Recovery: x.rk})
+	must(t, err)
+	if _, ok := RotationUnfinished(x.b); ok {
+		t.Fatal("marker left after the rotation finished")
+	}
+	nk, _ := ParseRecoveryKey(nc.RecoveryKey)
+	if _, _, err := x.restore(x.backup(), nk, t0); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The vault wipes a factor after each use: a rotation proved by the old
+// passphrase still completes.
+func TestRotationProvedByThePassphrase(t *testing.T) {
+	x := newBox(t)
+	x.withPassphrase()
+	nc, err := x.rotate([]Part{PartPassphrase, PartRecovery}, Auth{Code: true, Local: true}, Proof{Passphrase: x.card.VaultPassphrase})
+	must(t, err)
+	if _, err := vault.OpenSealed(x.b.VaultPath, x.b.KeysPath, vault.Passphrase(nc.VaultPassphrase)); err != nil {
+		t.Fatal(err)
+	}
+	nk, _ := ParseRecoveryKey(nc.RecoveryKey)
+	if _, err := vault.OpenSealed(x.b.VaultPath, x.b.KeysPath, Factor(nk)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -191,7 +227,7 @@ func TestAPartialRotationReturnsWhatIsInEffect(t *testing.T) {
 func TestRotateEverythingWithTheRecoveryKey(t *testing.T) {
 	x := newBox(t)
 	x.withPassphrase()
-	nc, err := x.rotate(AllParts, Auth{Recovery: x.rk}, nil)
+	nc, err := x.rotate(AllParts, Auth{Recovery: x.rk}, Proof{})
 	must(t, err)
 	for _, p := range []string{nc.WiFiPassword, nc.SetupSecret, nc.VaultPassphrase, nc.RecoveryKey} {
 		for _, o := range []string{x.card.WiFiPassword, x.card.SetupSecret, x.card.VaultPassphrase, x.card.RecoveryKey} {
@@ -218,7 +254,7 @@ func TestRotateEverythingWithTheRecoveryKey(t *testing.T) {
 			t.Fatalf("card formats a secret: %q", s)
 		}
 	}
-	if len(DoneNotes(AllParts)) != 4 {
+	if len(DoneNotes(AllParts, false)) != 4 || !strings.HasPrefix(DoneNotes(AllParts, true)[0], "Your lost card opens every backup") {
 		t.Fatal("done page notes")
 	}
 }
@@ -226,7 +262,7 @@ func TestRotateEverythingWithTheRecoveryKey(t *testing.T) {
 func TestRotationProtectsOnlyAgainstLaterCopies(t *testing.T) {
 	x := newBox(t)
 	bk := x.backup() // taken before rotation
-	nc, err := x.rotate([]Part{PartRecovery}, Auth{Code: true, Local: true}, Factor(x.rk))
+	nc, err := x.rotate([]Part{PartRecovery}, Auth{Code: true, Local: true}, Proof{Recovery: x.rk})
 	must(t, err)
 	nk, _ := ParseRecoveryKey(nc.RecoveryKey)
 	// CRED-8: the earlier backup still opens with the old key, as the
@@ -249,7 +285,7 @@ func TestRotationProtectsOnlyAgainstLaterCopies(t *testing.T) {
 // vault read must not outlive a rotation or open past backups.
 func TestTheVaultHoldsNeitherTheRecoveryKeyNorThePassphrase(t *testing.T) {
 	x := newBox(t)
-	nc, err := x.rotate([]Part{PartPassphrase, PartRecovery}, Auth{Recovery: x.rk}, nil)
+	nc, err := x.rotate([]Part{PartPassphrase, PartRecovery}, Auth{Recovery: x.rk}, Proof{})
 	must(t, err)
 	nk, _ := ParseRecoveryKey(nc.RecoveryKey)
 	var bad [][]byte
@@ -305,7 +341,7 @@ func TestReservedEntriesOfAnotherKindFailClosed(t *testing.T) {
 
 func TestCardSecretsAreRedactedFromAgentOutput(t *testing.T) {
 	x := newBox(t)
-	nc, err := x.rotate([]Part{PartWiFi}, Auth{Code: true, Local: true}, nil)
+	nc, err := x.rotate([]Part{PartWiFi}, Auth{Code: true, Local: true}, Proof{})
 	must(t, err)
 	red, err := x.b.V.Redactor()
 	must(t, err)

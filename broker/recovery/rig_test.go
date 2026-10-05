@@ -170,8 +170,8 @@ func openAt(t *testing.T, dst string, rk RecoveryKey) *Box {
 }
 
 // rotate generates and commits a rotation, typing back the prompted value.
-func (x *box) rotate(parts []Part, auth Auth, have vault.Factor) (Card, error) {
-	p, err := BeginRotate(x.b, parts, auth, have, testGen, nil, t0)
+func (x *box) rotate(parts []Part, auth Auth, proof Proof) (Card, error) {
+	p, err := BeginRotate(x.b, parts, auth, proof, testGen, nil, t0)
 	if err != nil {
 		return Card{}, err
 	}

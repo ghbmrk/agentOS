@@ -25,7 +25,9 @@ func TestRestoreKeepsMachineLayerWhiteoutsOpaqueMarkersAndOwners(t *testing.T) {
 	must(t, syscall.Setxattr(od, opaqueXattr, []byte("y"), 0))
 	suid := filepath.Join(up, "su")
 	must(t, os.WriteFile(suid, []byte("bin"), 0o755))
-	must(t, os.Chown(suid, 1000, 1000))
+	if err := os.Chown(suid, 1000, 1000); err != nil {
+		t.Skipf("uid 1000 is not mapped here (user namespace): %v", err)
+	}
 	must(t, os.Chmod(suid, 0o755|os.ModeSetuid))
 	rootSuid := filepath.Join(up, "rootsu")
 	must(t, os.WriteFile(rootSuid, []byte("bin"), 0o755))
