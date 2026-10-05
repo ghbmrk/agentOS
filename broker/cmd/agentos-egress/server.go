@@ -322,6 +322,9 @@ func unlockHandler(c *custody) http.Handler {
 			out["updated"] = updated
 			out["secure_boot"] = sb
 		}
+		if c.changeUnfinished() {
+			out["change_unfinished"] = true
+		}
 		reply(w, http.StatusOK, out)
 	}
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) { status(w) })
@@ -338,7 +341,8 @@ func unlockHandler(c *custody) http.Handler {
 			return
 		}
 		_, exp := c.status()
-		reply(w, http.StatusOK, map[string]any{"state": pending.String(), "expires": exp.UTC().Format(time.RFC3339), "ticket": ticket})
+		reply(w, http.StatusOK, map[string]any{"state": pending.String(), "expires": exp.UTC().Format(time.RFC3339), "ticket": ticket,
+			"change_unfinished": c.changeUnfinished()})
 	})
 	mux.HandleFunc("/confirm", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -357,7 +361,7 @@ func unlockHandler(c *custody) http.Handler {
 			return
 		}
 		ph, _ := c.status()
-		reply(w, http.StatusOK, map[string]any{"state": ph.String(), "kept_trusted": kept})
+		reply(w, http.StatusOK, map[string]any{"state": ph.String(), "kept_trusted": kept, "change_unfinished": c.changeUnfinished()})
 	})
 	// Trusted hosts (CRED-8, CRED-9). The local UI's socket is the local
 	// confirmation; the code is the approval.

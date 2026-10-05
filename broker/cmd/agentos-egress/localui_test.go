@@ -118,3 +118,88 @@ func TestLocalPageClientAgainstVaultProcess(t *testing.T) {
 		t.Fatalf("PIN without a TPM slot: %v", err)
 	}
 }
+
+// P2-4g (UX lens on #63), against the real vault and unlock socket: the
+// old passphrase opens beside a passphrase change that crashed before the
+// vault sealed it, and the vault process reports the change unfinished
+// while the unlock is pending and once open, until the vault is locked.
+func TestUnfinishedPassphraseChangeReported(t *testing.T) {
+	dir := t.TempDir()
+	vp, kp := filepath.Join(dir, "state", "vault"), filepath.Join(dir, "state", "vault.keys")
+	var card bytes.Buffer
+	if err := initCmd([]string{"-vault", vp, "-keys", kp}, &card); err != nil {
+		t.Fatal(err)
+	}
+	pass, seed := readCard(t, card.String())
+	beforeVault, beforeKeys := readFileT(t, vp), readFileT(t, kp)
+	v, err := vault.OpenSealed(vp, kp, vault.Passphrase(pass))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Rekey(vault.Passphrase(pass), vault.Passphrase("violet harbor kettle summit ribbon falcon meadow")); err != nil {
+		t.Fatal(err)
+	}
+	v.Close()
+	// The drive as a crash before the seal leaves it.
+	after := readFileT(t, kp)
+	writeFileT(t, vp, beforeVault)
+	writeFileT(t, kp, beforeKeys)
+	writeFileT(t, kp+".next", after)
+
+	clk := &clock{t: time.Now()}
+	c, err := newCustody(&custody{
+		statePath: filepath.Join(dir, "state", "unlock.json"),
+		open:      func(p string) (*vault.Vault, error) { return vault.OpenSealed(vp, kp, vault.Passphrase(p)) },
+		build:     func(*vault.Vault) (*egress.Proxy, error) { return nil, nil },
+		ttl:       15 * time.Minute,
+		now:       clk.now,
+		notify:    func(string) {},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.lock()
+	run := filepath.Join(dir, "run")
+	srvs, err := serve(run, c, testRouter(t), nil, os.Getuid(), os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		for _, s := range srvs {
+			s.Close()
+		}
+	}()
+	ctx := context.Background()
+	u := localui.NewUnlockClient(filepath.Join(run, UnlockSocket))
+
+	st, ticket, err := u.Unlock(ctx, pass)
+	if err != nil || !st.ChangeUnfinished {
+		t.Fatalf("unlock: %+v %v", st, err)
+	}
+	if st, err := u.Status(ctx); err != nil || st.State != "pending" || !st.ChangeUnfinished {
+		t.Fatalf("pending status: %+v %v", st, err)
+	}
+	if st, err := u.Confirm(ctx, ticket, totp(seed, clk.now()), false); err != nil || st.State != "open" || !st.ChangeUnfinished {
+		t.Fatalf("confirm: %+v %v", st, err)
+	}
+	c.lock()
+	if st, err := u.Status(ctx); err != nil || st.ChangeUnfinished {
+		t.Fatalf("after lock: %+v %v", st, err)
+	}
+}
+
+func readFileT(t *testing.T, p string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func writeFileT(t *testing.T, p string, b []byte) {
+	t.Helper()
+	if err := os.WriteFile(p, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}

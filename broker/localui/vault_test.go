@@ -58,6 +58,10 @@ type fakeVault struct {
 	// "secure_boot" or "other".
 	boot  string
 	keeps []bool
+	// interrupted: a passphrase change is staged, so a wrong passphrase
+	// gets the vault process's interrupted line; unfinished: the
+	// passphrase opened beside a change that never took (P2-4g).
+	interrupted, unfinished bool
 	// n numbers tickets; confirmed is the ticket of the confirmed unlock.
 	n         int
 	confirmed string
@@ -88,6 +92,7 @@ func (f *fakeVault) status() VaultStatus {
 	if f.state == "pending" {
 		st.Expires = f.expires
 	}
+	st.ChangeUnfinished = f.unfinished && f.state != "locked"
 	return st
 }
 
@@ -99,6 +104,9 @@ func (f *fakeVault) Unlock(ctx context.Context, pass string) (VaultStatus, strin
 		return VaultStatus{}, "", &VaultError{409, "an unlock is already in progress or the vault is open"}
 	}
 	if card.NormalizePassphrase(pass) != f.pass {
+		if f.interrupted {
+			return VaultStatus{}, "", &VaultError{403, "a passphrase change was interrupted; try your new passphrase"}
+		}
 		return VaultStatus{}, "", &VaultError{403, "the passphrase does not open this vault"}
 	}
 	// A new correct passphrase supersedes a pending unlock (P2-4f).
@@ -911,5 +919,44 @@ func TestTypedCodeIsNeverAnUnlockProof(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "That code did not work.") {
 		t.Fatalf("typed proof:\n%s", w.Body)
+	}
+}
+
+// P2-4g (UX lens on #63): after an interrupted passphrase change the page
+// says so in fixed words, instead of the plain wrong-passphrase line, and
+// once the old passphrase opened beside a change that never took, it asks
+// the owner to change it again, on the code step and once unlocked.
+func TestVaultInterruptedPassphraseChange(t *testing.T) {
+	r, fv := vaultRig(t)
+	fv.interrupted = true
+	res := r.upload(nil, "not the words")
+	if !strings.Contains(res.Body, "A passphrase change was interrupted. Try your new passphrase, or your old one if that fails.") ||
+		strings.Contains(res.Body, "Those words do not open this box") {
+		t.Fatalf("interrupted change:\n%s", res.Body)
+	}
+
+	fv.interrupted, fv.unfinished = false, true
+	const line = "Your passphrase change did not finish; change it again."
+	if page := r.get("/unlock/vault"); strings.Contains(page, line) {
+		t.Fatalf("shown while locked:\n%s", page)
+	}
+	if res := r.upload(nil, r.card.VaultPassphrase); res.Code != http.StatusSeeOther {
+		t.Fatalf("passphrase: %d\n%s", res.Code, res.Body)
+	}
+	if page := r.get("/unlock/vault"); !strings.Contains(page, line) || !strings.Contains(page, `name="code"`) {
+		t.Fatalf("code step:\n%s", page)
+	}
+	if w := r.post("/unlock/vault", url.Values{"step": {"code"}, "code": {"123456"}}); w.Code != http.StatusSeeOther {
+		t.Fatalf("code: %d\n%s", w.Code, w.Body)
+	}
+	if page := r.get("/unlock/vault"); !strings.Contains(page, line) || !strings.Contains(page, "The box is unlocked.") {
+		t.Fatalf("open page:\n%s", page)
+	}
+	// Another phone on the Wi-Fi learns nothing: the line would tell it
+	// the old passphrase still opens the box (M1, security R1 on #93).
+	other := &rig{t: t, srv: r.srv, ip: "10.42.0.77:40000"}
+	other.jar, _ = cookiejar.New(nil)
+	if page := other.get("/unlock/vault"); strings.Contains(page, line) || !strings.Contains(page, "The box is unlocked.") {
+		t.Fatalf("other phone:\n%s", page)
 	}
 }
