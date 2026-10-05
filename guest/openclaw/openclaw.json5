@@ -1,0 +1,56 @@
+// OpenClaw guest profile for AgentOS (PLAN P1-7), qualified unmodified by
+// spike S4 (ARC-3: OpenClaw 2026.9.8, configuration only). Defense in depth
+// only (ARC-7): the guest is root and can rewrite this file. Containment,
+// custody, and spend limits come from the machine's one socket, the egress
+// proxy, and the OP-8 meter, not from anything here.
+//
+// The only endpoint is the bridge on 127.0.0.1:18080, which passes requests
+// to this machine's broker socket:
+//   /model/openai/v1  model access with a placeholder key (ARC-6 (a)); the
+//                     broker's egress proxy injects the real key (CRED-5)
+//   /mcp              broker tools: effect_request, effect_status (ARC-6 (b))
+// Owner messages arrive on the gateway's chat-completions endpoint, posted
+// by the bridge with a guest-local token (ARC-6 (c)).
+{
+  models: {
+    mode: "replace",
+    catalogRefresh: { enabled: false },
+    providers: {
+      broker: {
+        baseUrl: "http://127.0.0.1:18080/model/openai/v1",
+        apiKey: "placeholder-not-a-secret",
+        api: "openai-completions",
+        // The model name is passed through to the provider. The image build
+        // sets it (build-rootfs.sh MODEL=...); CAP-9 routing replaces this.
+        models: [{ id: "@MODEL@", name: "broker", contextWindow: 128000, maxTokens: 8192 }],
+      },
+    },
+  },
+  agents: { defaults: { model: { primary: "broker/@MODEL@" }, sandbox: { mode: "off" } } },
+  mcp: { servers: { broker: { url: "http://127.0.0.1:18080/mcp", transport: "streamable-http" } } },
+  tools: {
+    profile: "coding",
+    // External-effect and credential-acquiring built-ins (S4, CRED-1).
+    deny: ["group:web", "group:messaging", "group:ui", "group:nodes", "gateway", "plugins", "openclaw",
+           "automations", "cron", "secrets", "code_execution", "github_identity_status", "github_publish",
+           "conversations_list", "conversations_send", "conversations_turn", "image_generate",
+           "music_generate", "video_generate", "tts", "transcripts", "skill_workshop", "presence"],
+    elevated: { enabled: false },
+    web: { search: { enabled: false }, fetch: { enabled: false } },
+  },
+  skills: { workshop: { autonomous: { mode: "off" } } },
+  commands: { config: false, mcp: false, plugins: false, bash: false, restart: false },
+  telemetry: { enabled: false },
+  update: { checkOnStart: false, auto: { enabled: false } },
+  discovery: { mdns: { mode: "off" } },
+  env: { shellEnv: { enabled: false } },
+  browser: { enabled: false },
+  acp: { enabled: false },
+  hooks: { enabled: false },
+  cron: { enabled: false },
+  gateway: {
+    mode: "local", bind: "loopback", auth: { mode: "token" },
+    tailscale: { mode: "off" }, reload: { mode: "off" },
+    http: { endpoints: { chatCompletions: { enabled: true } } },
+  },
+}

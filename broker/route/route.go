@@ -315,6 +315,16 @@ func (r *Router) Handler(machine string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) { r.serve(machine, w, req) })
 }
 
+type usageKey struct{}
+
+// WithUsage returns ctx carrying f, which the router calls with the
+// provider and its usage for each call it serves on ctx, whether or not
+// the guest asked for usage. The guest plane uses it to settle the OP-8
+// meter from what the provider reported.
+func WithUsage(ctx context.Context, f func(provider string, u Usage)) context.Context {
+	return context.WithValue(ctx, usageKey{}, f)
+}
+
 // paths the router serves: the OpenAI base URL at the root, or under the
 // openai adapter's name, which is where a guest configured for the raw
 // proxy already points.
@@ -468,6 +478,9 @@ func (r *Router) serve(machine string, w http.ResponseWriter, req *http.Request)
 		}
 		d.Outcome, d.Status, d.Usage = Served, a.status, a.usage
 		r.cfg.Audit(d)
+		if f, ok := req.Context().Value(usageKey{}).(func(string, Usage)); ok && a.usage != nil {
+			f(rt.Provider, *a.usage)
+		}
 		return
 	}
 	d.Route = ""
@@ -583,21 +596,23 @@ func (r *Router) try(ctx context.Context, machine string, w http.ResponseWriter,
 	}
 	raw, err := io.ReadAll(body)
 	w.Header().Set("Content-Type", "application/json")
-	if err != nil {
+	// A provider answer the router cannot use may still be billed: its
+	// size is reported as unverified output, the meter's floor (OP-8).
+	unusable := func(msg string) *attempt {
+		a.usage = &Usage{OutputChars: body.n}
 		w.WriteHeader(http.StatusBadGateway)
-		w.Write(apiError("provider response unreadable", "server_error", ""))
+		w.Write(apiError(msg, "server_error", ""))
 		return a
 	}
+	if err != nil {
+		return unusable("provider response unreadable")
+	}
 	if body.n >= r.cfg.MaxResponse {
-		w.WriteHeader(http.StatusBadGateway)
-		w.Write(apiError("provider response too large", "server_error", ""))
-		return a
+		return unusable("provider response too large")
 	}
 	translated, u, err := p.Response(raw, chat.Model)
 	if err != nil {
-		w.WriteHeader(http.StatusBadGateway)
-		w.Write(apiError(err.Error(), "server_error", ""))
-		return a
+		return unusable(err.Error())
 	}
 	w.WriteHeader(resp.StatusCode)
 	w.Write(translated)
