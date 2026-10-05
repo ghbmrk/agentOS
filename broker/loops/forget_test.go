@@ -81,6 +81,10 @@ func TestHarvesterRefusesErasedIntents(t *testing.T) {
 	if !errors.Is(err, ErrForgotten) {
 		t.Fatalf("harvest of an erased intent: %v", err)
 	}
+	// A late implicit acceptance (owner LateRelease) is refused too.
+	if err := h.Harvest(Outcome{Intent: "draft-8", Action: Implicit, Input: []byte("procedures/mail"), Output: []byte("v1")}); !errors.Is(err, ErrForgotten) {
+		t.Fatalf("late implicit acceptance of an erased intent: %v", err)
+	}
 	if st, _ := r.eng.Get("draft-8"); st.Quality.Verdict != "" {
 		t.Fatalf("verdict recorded on an erased intent: %+v", st.Quality)
 	}

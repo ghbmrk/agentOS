@@ -303,7 +303,8 @@ func main() {
 	// reaches the agent.
 	qs := &questions{}
 	// STATUS notes read in wiring order: the time check, then spare-time
-	// work not running (learningOff, below). Keep the clock first.
+	// work not running (learningOff, below), then recall's (an agent
+	// holding a deleted record, or memory not open). Keep the clock first.
 	qs.wire(&cfg)
 	agent := &lateAgent{}
 	cfg.Agent = agent

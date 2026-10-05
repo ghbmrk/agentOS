@@ -199,7 +199,7 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 	}
 	for name, ex := range cfg.BrokerExecutors {
 		switch {
-		case name == grants.ExecutorName:
+		case name == grants.ExecutorName, name == grants.RecallExecutor:
 			store.Close()
 			return nil, fmt.Errorf("daemon: executor name %q is reserved", name)
 		case execs[name] != nil:
