@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/verb"
@@ -140,15 +141,31 @@ func (g *Gate) validateLocked(s Spec) error {
 		return errors.New("a grant names an external account")
 	}
 	if s.Rule == nil {
-		if s.Executor == ExecutorName || !g.executors[s.Executor] {
+		declared := g.cfg.Declared[s.Executor]
+		if s.Executor == ExecutorName || declared == nil {
 			return fmt.Errorf("executor %q is not a connected adapter", clip(s.Executor))
 		}
 		if len(s.Ops) == 0 {
-			return errors.New("an adapter grant declares at least one operation")
+			return errors.New("an adapter grant chooses at least one operation")
 		}
 		for op, v := range s.Ops {
-			if op == "" || !verb.Valid(v) {
-				return fmt.Errorf("operation %q: verb %q is not on the broker's list (ADP-2)", clip(op), clip(v))
+			dv, ok := declared[op]
+			if !ok {
+				return fmt.Errorf("operation %q is not one the adapter declares", clip(op))
+			}
+			c, ok := verb.ClassOf(v)
+			dc, _ := verb.ClassOf(dv)
+			if !ok || c < dc {
+				// ADP-2: the adapter's mapping is the floor; a grant can
+				// only make an operation stricter.
+				return fmt.Errorf("operation %q: verb %q is weaker than the adapter's %q or not on the list", clip(op), clip(v), dv)
+			}
+		}
+		for _, x := range g.grants {
+			if x.Spec.Rule == nil && x.Spec.Account == s.Account {
+				// One connection per account, so policy never depends on
+				// which of two grants is found first (OP-5).
+				return fmt.Errorf("%s already connects this account; revoke it first", x.ID)
 			}
 		}
 		return nil
@@ -236,16 +253,23 @@ func short(s Spec) string {
 	case s.Resume != "":
 		return "resume " + s.Resume
 	case s.Rule == nil:
-		vs := map[string]bool{}
-		for _, v := range s.Ops {
-			vs[v] = true
+		// The text names every operation that acts; reads and drafts are
+		// left to the local page's full list.
+		var acts []string
+		for op, v := range s.Ops {
+			if c, ok := verb.ClassOf(v); !ok || c != verb.Reversible {
+				acts = append(acts, op)
+			}
 		}
-		var l []string
-		for v := range vs {
-			l = append(l, v)
+		sort.Strings(acts)
+		o := "connect " + s.Account
+		if len(acts) == 0 {
+			return o + ", reads and drafts only"
 		}
-		sort.Strings(l)
-		return "connect " + s.Account + ": " + strings.Join(l, " ")
+		if l := o + ", acts: " + strings.Join(acts, " "); len(l) <= 40 {
+			return l
+		}
+		return fmt.Sprintf("connect %s, %d acting ops on Wi-Fi page", s.Account, len(acts))
 	case s.Rule.Reply:
 		return fmt.Sprintf("auto-replies on %s, %d/day", s.Account, s.Rule.PerDay)
 	}
@@ -254,9 +278,14 @@ func short(s Spec) string {
 
 func minor(n int64) string { return fmt.Sprintf("%d.%02d", n/100, n%100) }
 
+// clip shortens s to at most 64 bytes on a rune boundary.
 func clip(s string) string {
-	if len(s) > 64 {
-		return s[:64] + "..."
+	if len(s) <= 64 {
+		return s
 	}
-	return s
+	n := 64
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "..."
 }

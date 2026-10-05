@@ -25,6 +25,7 @@ type fakeOwner struct {
 	notes  []string
 	commit bool // QueueAutoReply turns replies into requests
 	down   bool // Request fails
+	active bool // the owner is texting
 }
 
 func (f *fakeOwner) Request(items []owner.Item, _ time.Duration) (string, error) {
@@ -40,6 +41,12 @@ func (f *fakeOwner) Request(items []owner.Item, _ time.Duration) (string, error)
 }
 
 func (f *fakeOwner) Tier(fa owner.Facts) owner.Tier { return owner.Classify(fa, f.limits, f.now()) }
+
+func (f *fakeOwner) Active(time.Duration) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.active
+}
 
 func (f *fakeOwner) QueueAutoReply(ar owner.AutoReply) (owner.QueueResult, error) {
 	if f.commit {
@@ -168,7 +175,7 @@ func (r *rig) advance(d time.Duration) {
 func newRig(t *testing.T, edit func(*Config)) *rig {
 	r := &rig{t: t, store: &journal.MemStore{}, clock: time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC),
 		exec: &fakeExec{ran: map[string]int{}}, ver: &fakeVerifier{records: map[string]Verified{}}}
-	r.cfg = Config{Executors: []string{"mail"}, Verifiers: map[string]Verifier{"mail": r.ver}, LocalUI: true, Now: r.now}
+	r.cfg = Config{Declared: map[string]map[string]string{"mail": mailOps(), "cal": {"event.add": "draft"}}, Verifiers: map[string]Verifier{"mail": r.ver}, LocalUI: true, Now: r.now}
 	if edit != nil {
 		edit(&r.cfg)
 	}
@@ -263,11 +270,14 @@ func (r *rig) grant(s Spec) string {
 	return st.Attempts[len(st.Attempts)-1].Evidence
 }
 
-func mailGrant() Spec {
-	return Spec{Account: "mail", Executor: "mail", Ops: map[string]string{
+// mailOps is the mail adapter's own declaration (ADP-2).
+func mailOps() map[string]string {
+	return map[string]string{
 		"message.list": "read", "draft.save": "draft", "message.send": "send",
-		"invoice.send": "send", "key.create": "reveal-or-create-secret"}}
+		"invoice.send": "send", "key.create": "reveal-or-create-secret"}
 }
+
+func mailGrant() Spec { return Spec{Account: "mail", Executor: "mail", Ops: mailOps()} }
 
 // sam is a contact the owner created, so sends to sam are low risk.
 func sam() Verified {

@@ -2,6 +2,7 @@ package grants
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -64,7 +65,7 @@ func TestIrreversibleEffectsWaitForTheOwner(t *testing.T) {
 		t.Fatal("a duplicate decision ran the effect again")
 	}
 
-	if st := r.effect("agent/x1", "account.delete", nil); st.State != journal.Denied || !strings.Contains(st.Permission.Reason, "not declared") {
+	if st := r.effect("agent/x1", "account.delete", nil); st.State != journal.Denied || !strings.Contains(st.Permission.Reason, "not granted") {
 		t.Fatalf("undeclared operation: %s %q", st.State, st.Permission.Reason)
 	}
 	in := journal.Intent{ID: "agent/b1", Origin: "guest:agent", Account: "bank", Action: "pay", Executor: "mail"}
@@ -93,7 +94,7 @@ func TestUnverifiedAndSecretItemsAreHighRisk(t *testing.T) {
 			t.Fatalf("%s is not high risk: %+v", it.Ref, it.Facts)
 		}
 	}
-	if items[0].Recipient != "eve@example.net" || !strings.Contains(items[0].Object, "unverified") {
+	if items[0].Recipient != "eve@example.net" || !items[0].Unverified {
 		t.Fatalf("unverified line %+v", items[0])
 	}
 	if items[1].Facts.Kind != owner.SecretReveal {
@@ -224,7 +225,7 @@ func TestRestartClosesIntentsWaitingOnTheOwner(t *testing.T) {
 // denies it; a reply that matches the commitment filter becomes a request;
 // a reply from the main agent is asked as usual.
 func TestContextScopedReplies(t *testing.T) {
-	r := newRig(t, func(c *Config) { c.Isolated = func(o string) bool { return strings.HasPrefix(o, "guest:reply-") } })
+	r := newRig(t, func(c *Config) { c.Isolated = func(m string) bool { return m == "reply-1" } })
 	r.grant(mailGrant())
 	r.grant(Spec{Account: "mail", Rule: &Rule{Action: "message.send", PerRecord: 5, PerDay: 20, Reply: true}})
 	thread := Verified{Item: owner.Item{Object: "reply in thread", Recipient: "sam@example.com",
@@ -232,7 +233,7 @@ func TestContextScopedReplies(t *testing.T) {
 		Recipients: []string{"sam@example.com"}, Record: "thr-1", ThreadVerified: true}
 	r.ver.set("thr-1", thread)
 	reply := func(id, origin string) journal.Status {
-		return r.submit(journal.Intent{ID: id, Origin: origin, Account: "mail", Action: "message.send",
+		return r.submit(journal.Intent{ID: id, Origin: origin, Machine: strings.TrimPrefix(origin, "guest:"), Account: "mail", Action: "message.send",
 			Params: map[string]any{"record": "thr-1", "body": "Thanks, got it."}, Recipients: []string{"sam@example.com"}, Executor: "mail"})
 	}
 
@@ -296,5 +297,128 @@ func TestOwnerUnreachableLeavesItPending(t *testing.T) {
 	r.decide(true, "owner")
 	if st := r.state("agent/s1"); st.State != journal.Succeeded {
 		t.Fatalf("after retry: %s", st.State)
+	}
+}
+
+// REQ: ADP-2
+
+// TestGrantCanOnlyMakeAnOperationStricter: a grant may raise an operation
+// to a stricter verb, which then asks; the adapter's verb is the floor.
+func TestGrantCanOnlyMakeAnOperationStricter(t *testing.T) {
+	r := newRig(t, nil)
+	r.grant(Spec{Account: "mail", Executor: "mail", Ops: map[string]string{"draft.save": "send", "message.list": "read"}})
+	if st := r.effect("agent/d1", "draft.save", map[string]any{"body": "hi"}); st.State != journal.Pending {
+		t.Fatalf("stricter verb did not ask: %s", st.State)
+	}
+	if st := r.effect("agent/s1", "message.send", nil, "sam@example.com"); st.State != journal.Denied {
+		t.Fatalf("an operation the grant did not choose ran: %s", st.State)
+	}
+}
+
+// REQ: CH-10, CH-15
+
+// TestRequestsCoalesceAndArePaced: items wait for a quiet gap or the cap,
+// not every tick; an owner in active chat or an urgent item gets them at
+// once; quiet hours hold them; request texts count against the hourly
+// rate.
+func TestRequestsCoalesceAndArePaced(t *testing.T) {
+	quiet := false
+	r := newRig(t, func(c *Config) {
+		c.Quiet = func(time.Time) bool { return quiet }
+		c.Urgent = func(it owner.Item) bool { return it.Object == "urgent" }
+		c.RequestsPerHour = 3 // the grant's request uses one
+	})
+	r.grant(mailGrant())
+	base := r.own.count()
+	ask := func(id string) {
+		t.Helper()
+		x := sam()
+		x.Record = id
+		r.ver.set(id, x)
+		r.effect("agent/"+id, "invoice.send", map[string]any{"record": id}, "sam@example.com")
+	}
+	sent := func() int { return r.own.count() - base }
+
+	ask("a")
+	r.advance(20 * time.Second)
+	ask("b")
+	r.advance(20 * time.Second)
+	r.g.Tick()
+	if sent() != 0 {
+		t.Fatal("sent while items were still arriving")
+	}
+	r.advance(15 * time.Second) // 35 s quiet
+	r.g.Tick()
+	if sent() != 1 {
+		t.Fatalf("after the quiet gap: %d requests", sent())
+	}
+	if _, items := r.own.last(t); len(items) != 2 {
+		t.Fatalf("one request carries both: %+v", items)
+	}
+
+	// A steady trickle is sent at the cap.
+	for i := 0; i < 8; i++ {
+		ask(fmt.Sprintf("c%d", i))
+		r.advance(25 * time.Second)
+		r.g.Tick()
+	}
+	if sent() != 2 {
+		t.Fatalf("trickle: %d requests, want one more at the cap", sent())
+	}
+
+	// The hourly rate is spent: the next batch waits for the hour...
+	r.advance(time.Minute)
+	r.g.Flush() // empties the trickle's tail
+	base, ask2 := r.own.count(), "d"
+	ask(ask2)
+	r.advance(4 * time.Minute)
+	r.g.Tick()
+	if sent() != 0 {
+		t.Fatal("sent beyond the hourly rate")
+	}
+	// ...unless the owner is texting.
+	r.own.active = true
+	r.g.Tick()
+	if sent() != 1 {
+		t.Fatal("not sent to an owner in active chat")
+	}
+	r.own.active = false
+
+	// Quiet hours hold all but urgent items.
+	quiet = true
+	r.advance(2 * time.Hour)
+	ask("e")
+	r.advance(5 * time.Minute)
+	r.g.Tick()
+	if sent() != 1 {
+		t.Fatal("sent in quiet hours")
+	}
+	x := sam()
+	x.Record, x.Item.Object = "u", "urgent"
+	r.ver.set("u", x)
+	r.effect("agent/u", "invoice.send", map[string]any{"record": "u"}, "sam@example.com")
+	r.g.Tick()
+	if sent() != 2 {
+		t.Fatal("an urgent item waited for quiet hours")
+	}
+}
+
+// REQ: CH-10, CH-12
+
+// TestRecipientsThatDoNotFitWaitForTheLocalPage: an action whose recipients
+// cannot be shown in full is never texted for approval; the owner is told
+// it waits on the local page.
+func TestRecipientsThatDoNotFitWaitForTheLocalPage(t *testing.T) {
+	r := newRig(t, func(c *Config) { c.Verifiers = nil })
+	r.grant(mailGrant())
+	base := r.own.count()
+	many := []string{"mom@example.com", "dad@example.com", "sis@example.com", "bro@example.com", "gran@example.com", "x@attacker.example"}
+	st := r.effect("agent/m1", "message.send", map[string]any{"body": "hi"}, many...)
+	r.g.Flush()
+	if st.State != journal.Pending || !strings.Contains(st.Permission.Reason, "local page") || r.own.count() != base {
+		t.Fatalf("%s %q, %d requests", st.State, st.Permission.Reason, r.own.count()-base)
+	}
+	if n := r.own.notes[len(r.own.notes)-1]; n != "An action for 6 recipients needs your approval on the box's Wi-Fi page." {
+		t.Fatalf("notice %q", n)
 	}
 }

@@ -107,6 +107,7 @@ type Channel struct {
 	resumeTexts []time.Time
 	held        *heldMsg
 	limited     []time.Time
+	active      time.Time // last owner message the control handler ran
 	alertAt     time.Time
 	// challengeTexts are the challenge texts sent in the last hour.
 	challengeTexts []time.Time
@@ -244,6 +245,9 @@ func (c *Channel) route(from, text string) (route, bool) {
 func (c *Channel) finish(ctx context.Context, from string, rt route) []string {
 	replies := rt.replies
 	if rt.run {
+		c.mu.Lock()
+		c.active = rt.at
+		c.mu.Unlock()
 		replies = append(replies, c.ctrl.Handle(ctx, from, rt.delegate)...)
 	}
 	if rt.narrow != nil {
@@ -629,6 +633,15 @@ func since(ts []time.Time, cut time.Time) []time.Time {
 		}
 	}
 	return out
+}
+
+// Active reports whether the owner sent a message the control handler
+// ran (task chat, STATUS) within the last d: the owner is at their phone,
+// so an approval request need not wait for its batch (CH-15).
+func (c *Channel) Active(d time.Duration) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return !c.active.IsZero() && c.cfg.Now().Sub(c.active) < d
 }
 
 // Notify texts the owner content that did not come from the broker's own

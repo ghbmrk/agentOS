@@ -39,10 +39,15 @@ var classes = map[string]Class{
 	RevealSecret: Secret,
 }
 
-// ClassOf returns v's class; false if v is not on the list.
+// ClassOf returns v's class; false if v is not on the list. An unknown
+// verb reports Secret, the strictest class, so a caller that ignores ok
+// still fails closed.
 func ClassOf(v string) (Class, bool) {
 	c, ok := classes[v]
-	return c, ok
+	if !ok {
+		return Secret, false
+	}
+	return c, true
 }
 
 // Valid reports whether v is on the list.

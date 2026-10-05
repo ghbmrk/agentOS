@@ -23,6 +23,10 @@ const (
 // ErrFull is returned when MaxOpen requests and replies are already open.
 var ErrFull = errors.New("owner: too many open requests")
 
+// ErrLocalOnly is returned for an item that cannot be approved by text
+// because its recipients do not render in full (SMSApprovable).
+var ErrLocalOnly = errors.New("owner: approvable only on the local page")
+
 type request struct {
 	id      string
 	items   []Item
@@ -42,6 +46,11 @@ func (c *Channel) Request(items []Item, ttl time.Duration) (string, error) {
 	}
 	if c.cfg.Modem == nil {
 		return "", errors.New("owner: no modem")
+	}
+	for _, it := range items {
+		if !SMSApprovable(it) {
+			return "", ErrLocalOnly
+		}
 	}
 	now := c.cfg.Now()
 	c.mu.Lock()

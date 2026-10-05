@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/journal"
@@ -189,21 +190,33 @@ func (p *Plane) callTool(ctx context.Context, machine, name string, raw json.Raw
 		if !requestIDRE.MatchString(a.RequestID) || a.Account == "" || a.Action == "" {
 			return effectState{}, errors.New("request_id (letters, digits, . _ -; at most 64), account, and action are required")
 		}
+		// Broker-state intents (grants, budgets, pause and revoke) are never
+		// a guest's to submit (OP-5, ARC-7).
+		if a.Account == journal.BrokerAccount || strings.HasPrefix(a.Action, "meta.") {
+			return effectState{RequestID: a.RequestID, State: "refused", Reason: "broker actions are not available to agents"}, nil
+		}
 		exec, ok := p.cfg.Route(a.Account)
 		if !ok {
-			return effectState{RequestID: a.RequestID, State: "refused", Reason: "no adapter is connected for account " + clip(a.Account, 64)}, nil
+			return effectState{RequestID: a.RequestID, State: "refused", Reason: "no adapter is connected for that account"}, nil
 		}
-		id := lineage + "/" + a.RequestID
+		label := p.label(machine)
+		id, readOnly := p.intentID(lineage, a.RequestID, label)
 		st, err := p.cfg.Effects.Submit(journal.Intent{
 			ID: id, Origin: "guest:" + lineage, Account: a.Account, Action: a.Action,
 			Params: a.Params, Recipients: a.Recipients, Executor: exec,
-			Machine: machine, Label: p.label(machine),
+			Machine: machine, Label: label,
 		})
 		if err != nil {
 			if errors.Is(err, journal.ErrConflict) {
 				return effectState{}, fmt.Errorf("request_id %s was already used with different arguments", a.RequestID)
 			}
-			return effectState{}, fmt.Errorf("broker refused the request: %v", err)
+			return effectState{}, errors.New("broker refused the request")
+		}
+		if readOnly {
+			// A private machine repeating a request its lineage made while
+			// public sees it but does not drive it, so nothing a private
+			// machine does changes what a public one can observe (REV-5).
+			return state(a.RequestID, st), nil
 		}
 		if st.State == journal.Pending {
 			s2, err := p.cfg.Effects.Authorize(ctx, id)
@@ -235,7 +248,14 @@ func (p *Plane) callTool(ctx context.Context, machine, name string, raw json.Raw
 		if err := json.Unmarshal(raw, &a); err != nil || !requestIDRE.MatchString(a.RequestID) {
 			return effectState{}, errors.New("request_id is required")
 		}
-		st, err := p.cfg.Effects.Get(lineage + "/" + a.RequestID)
+		var st journal.Status
+		err := journal.ErrNotFound
+		if p.label(machine) == "private" {
+			st, err = p.cfg.Effects.Get(privateID(lineage, a.RequestID))
+		}
+		if err != nil {
+			st, err = p.cfg.Effects.Get(lineage + "/" + a.RequestID)
+		}
 		if err != nil {
 			return effectState{}, fmt.Errorf("no request %s", a.RequestID)
 		}
@@ -253,6 +273,29 @@ func (p *Plane) label(machine string) string {
 	}
 	return "private"
 }
+
+// intentID partitions a lineage's requests by data label (REV-5). Public
+// machines use <lineage>/<request_id>; private ones <lineage>/private/<request_id>
+// (request IDs hold no '/', so the two never collide). A public machine
+// never sees, collides with, or learns anything from a private machine's
+// request. A private machine repeating a request its lineage made while
+// public gets that intent, read-only (OP-1: it runs at most once).
+func (p *Plane) intentID(lineage, reqID, label string) (id string, readOnly bool) {
+	pub := lineage + "/" + reqID
+	if label != "private" {
+		return pub, false
+	}
+	priv := privateID(lineage, reqID)
+	if _, err := p.cfg.Effects.Get(priv); err == nil {
+		return priv, false
+	}
+	if _, err := p.cfg.Effects.Get(pub); err == nil {
+		return pub, true
+	}
+	return priv, false
+}
+
+func privateID(lineage, reqID string) string { return lineage + "/private/" + reqID }
 
 func state(reqID string, st journal.Status) effectState {
 	return effectState{RequestID: reqID, State: string(st.State), Reason: st.Permission.Reason}

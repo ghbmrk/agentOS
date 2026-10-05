@@ -132,8 +132,15 @@ type Item struct {
 	// The verb shown is Facts.Verb, the one Classify judged.
 	Object string
 	// Recipient is a canonical identifier: address, number, or the last
-	// 4 digits of an account, never a display name.
+	// 4 digits of an account, never a display name. Several are joined
+	// with ", ". Recipients are never cut, hidden, or digit-collapsed: an
+	// item whose recipients cannot be shown in full is not approvable by
+	// text (SMSApprovable).
 	Recipient string
+	// Unverified marks an item whose fields the broker could not read
+	// from the source; its line starts with a fixed warning outside every
+	// field cap.
+	Unverified bool
 	// Amount is the verified amount as it should read, e.g. "$120.00".
 	Amount string
 	// UndoWindow is the effect's undo window; zero means it cannot be
@@ -144,8 +151,15 @@ type Item struct {
 
 func (it Item) line() string {
 	s := field(it.Facts.Verb, 12) + " " + field(it.Object, 40)
+	if it.Unverified {
+		s = "UNVERIFIED, details on the Wi-Fi page: " + s
+	}
 	if it.Recipient != "" {
-		s += " to " + field(it.Recipient, 40)
+		if r, ok := recipientText(it.Recipient); ok {
+			s += " to " + r
+		} else {
+			s += fmt.Sprintf(" to %d recipients, see the Wi-Fi page", len(strings.Split(it.Recipient, ",")))
+		}
 	}
 	if it.Amount != "" {
 		s += ", " + field(it.Amount, 16)
@@ -156,6 +170,39 @@ func (it Item) line() string {
 		s += ", cannot be undone"
 	}
 	return s
+}
+
+// MaxRecipientChars bounds the recipients an approval text shows. Longer
+// sets are approvable only on the local page.
+const MaxRecipientChars = 100
+
+// recipientText renders recipients in full, folded to plain text (CH-10),
+// or reports that they cannot be: a character outside the fixed alphabet,
+// a line break, secret-shaped content (CH-19), or more than
+// MaxRecipientChars. Nothing is cut, hidden, or collapsed, because a
+// shortened recipient can hide where an effect goes.
+func recipientText(s string) (string, bool) {
+	f := strings.TrimSpace(fold(s))
+	if f == "" || len(f) > MaxRecipientChars || SecretShaped(f) {
+		return "", false
+	}
+	for _, r := range f {
+		if !fieldChar(r) {
+			return "", false
+		}
+	}
+	return f, true
+}
+
+// SMSApprovable reports whether an item can be approved by text: its
+// recipients, if any, render in full. Request refuses any other item
+// (ErrLocalOnly); it waits for the local page.
+func SMSApprovable(it Item) bool {
+	if it.Recipient == "" {
+		return true
+	}
+	_, ok := recipientText(it.Recipient)
+	return ok
 }
 
 func dur(d time.Duration) string {

@@ -20,10 +20,20 @@ const (
 	// recheck before dispatch (OP-3). An intent held longer (by STOP, say)
 	// is refused and must be asked again.
 	DefaultFresh = time.Hour
-	// DefaultTick is how often Run sends batched requests and releases
-	// auto-replies whose undo window has passed. Items asked within one
-	// tick share one request and one code (CH-10).
+	// DefaultTick is how often Run checks the batch and releases
+	// auto-replies whose undo window has passed.
 	DefaultTick = 10 * time.Second
+	// DefaultCoalesce caps how long the first item of a batch waits, and
+	// DefaultCoalesceIdle is the quiet gap after the last item that ends a
+	// batch early (CH-10 batching, CH-15 pacing).
+	DefaultCoalesce     = 3 * time.Minute
+	DefaultCoalesceIdle = 30 * time.Second
+	// DefaultRequestsPerHour is CH-15's default unsolicited-text rate,
+	// applied to approval requests.
+	DefaultRequestsPerHour = 3
+	// activeFor: an owner who texted within this long gets requests at
+	// once.
+	activeFor = 5 * time.Minute
 	// MaxBatch is the owner channel's limit on items per request.
 	MaxBatch = 20
 	// window is the period scope bounds count over (ADP-9: a daily rate).
@@ -34,6 +44,7 @@ const (
 type Owner interface {
 	Request(items []owner.Item, ttl time.Duration) (string, error)
 	Tier(owner.Facts) owner.Tier
+	Active(within time.Duration) bool
 	QueueAutoReply(owner.AutoReply) (owner.QueueResult, error)
 	DueAutoReplies() []owner.Queued
 	Notify(text string) error
@@ -67,9 +78,12 @@ type Verified struct {
 
 // Config configures New.
 type Config struct {
-	// Executors are the adapter executors registered with the engine. A
-	// grant may name only these.
-	Executors []string
+	// Declared maps each adapter executor registered with the engine to
+	// the operations it declares and each one's verb (ADP-2), as the
+	// adapter's own declaration (e.g. egress.Adapter) states them. A grant
+	// may name only these executors and choose only among these
+	// operations, at the declared verb or a stricter one.
+	Declared map[string]map[string]string
 	// Verifiers read source fields, by account. An account without one
 	// gets unverified approval items, which are always high risk, and no
 	// pre-allowance can match on it.
@@ -78,21 +92,30 @@ type Config struct {
 	// grants need it (CH-3); without it they are refused outright rather
 	// than asking the owner for a code that could not complete them.
 	LocalUI bool
-	// Isolated reports whether origin is a reply-composer machine built
+	// Isolated reports whether machine is a reply-composer machine built
 	// as ADP-11 requires (fresh, thread messages only, no recall, no
-	// egress). Nil: none is, so reply rules never match.
-	Isolated func(origin string) bool
-	Fresh    time.Duration
-	Now      func() time.Time
-	Logf     func(format string, args ...any)
+	// egress). It is keyed by machine, not lineage, so a fork of a
+	// composer is not one. Nil: none is, so reply rules never match.
+	Isolated func(machine string) bool
+	// Coalesce, CoalesceIdle, and RequestsPerHour pace approval requests
+	// (CH-15); zero takes the defaults. Urgent marks owner-defined urgent
+	// items, sent at once and in quiet hours. Quiet reports the owner's
+	// quiet hours: non-urgent requests wait for them to end.
+	Coalesce        time.Duration
+	CoalesceIdle    time.Duration
+	RequestsPerHour int
+	Urgent          func(owner.Item) bool
+	Quiet           func(time.Time) bool
+	Fresh           time.Duration
+	Now             func() time.Time
+	Logf            func(format string, args ...any)
 }
 
 // Gate is the approval policy. It is the engine's journal.Policy, the
 // executor of grant intents, the guest plane's Effects, and the owner
 // channel's Decide and Narrow hooks.
 type Gate struct {
-	cfg       Config
-	executors map[string]bool
+	cfg Config
 
 	mu        sync.Mutex
 	eng       *journal.Engine
@@ -100,6 +123,9 @@ type Gate struct {
 	grants    map[string]*Grant
 	waiting   map[string]*wait
 	batch     []string
+	first     time.Time // when the batch's first item arrived
+	last      time.Time // when its latest item arrived
+	sent      []time.Time
 	decided   map[string]decision
 	confirmed map[string]bool
 	failed    map[string]string
@@ -110,6 +136,7 @@ type Gate struct {
 type wait struct {
 	item    owner.Item
 	local   bool   // also needs local confirmation
+	onlyUI  bool   // approvable only on the local page (owner.SMSApprovable)
 	request string // owner request ID, "" while batched
 	reply   string // queued auto-reply ID
 	sendAt  time.Time
@@ -135,12 +162,17 @@ func New(cfg Config) *Gate {
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
 	}
-	g := &Gate{cfg: cfg, executors: map[string]bool{}, grants: map[string]*Grant{},
-		waiting: map[string]*wait{}, decided: map[string]decision{}, confirmed: map[string]bool{}, failed: map[string]string{}}
-	for _, e := range cfg.Executors {
-		g.executors[e] = true
+	if cfg.Coalesce <= 0 {
+		cfg.Coalesce = DefaultCoalesce
 	}
-	return g
+	if cfg.CoalesceIdle <= 0 {
+		cfg.CoalesceIdle = DefaultCoalesceIdle
+	}
+	if cfg.RequestsPerHour <= 0 {
+		cfg.RequestsPerHour = DefaultRequestsPerHour
+	}
+	return &Gate{cfg: cfg, grants: map[string]*Grant{},
+		waiting: map[string]*wait{}, decided: map[string]decision{}, confirmed: map[string]bool{}, failed: map[string]string{}}
 }
 
 // Attach connects the engine and the owner channel (nil if there is
@@ -181,11 +213,12 @@ func (g *Gate) Attach(eng *journal.Engine, own Owner) {
 	}
 }
 
-// Route names the executor for effects on account: the live adapter
-// grant's, or this package's for the broker account. False: no grant.
+// Route names the executor for a guest's effects on account: the live
+// adapter grant's. False: no grant. The broker account never routes, so
+// no guest reaches broker-state actions (OP-5).
 func (g *Gate) Route(account string) (string, bool) {
 	if account == journal.BrokerAccount {
-		return ExecutorName, true
+		return "", false
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -243,6 +276,8 @@ func (g *Gate) evaluate(ctx context.Context, in journal.Intent) verdict {
 	if in.Account == journal.BrokerAccount {
 		return g.evaluateBroker(in)
 	}
+	// Reasons are fixed wording: a guest reads them back through
+	// effect_status, so they never echo what a guest wrote (REV-5).
 	g.mu.Lock()
 	ag := g.adapterLocked(in.Account)
 	var rules []Grant
@@ -259,16 +294,21 @@ func (g *Gate) evaluate(ctx context.Context, in journal.Intent) verdict {
 	}
 	g.mu.Unlock()
 	if ag == nil {
-		return verdict{kind: deny, why: "no grant connects account " + clip(in.Account)}
+		return verdict{kind: deny, why: "no grant connects this account"}
 	}
 	if in.Executor != spec.Executor {
 		return verdict{kind: deny, why: "the executor is not the one the grant connects"}
 	}
 	v, ok := spec.Ops[in.Action]
-	if !ok {
-		return verdict{kind: deny, why: fmt.Sprintf("operation %s is not declared for %s (ADP-1)", clip(in.Action), clip(in.Account))}
+	dv, declared := g.cfg.Declared[spec.Executor][in.Action]
+	if !ok || !declared {
+		return verdict{kind: deny, why: "this operation is not granted for the account (ADP-1)"}
 	}
-	cls, _ := verb.ClassOf(v)
+	v = stricter(v, dv)
+	cls, ok := verb.ClassOf(v)
+	if !ok {
+		return verdict{kind: deny, why: "this operation's verb is not on the broker's list (ADP-2)"}
+	}
 	if cls == verb.Reversible {
 		return verdict{kind: allow}
 	}
@@ -304,9 +344,10 @@ func (g *Gate) evaluate(ctx context.Context, in journal.Intent) verdict {
 // verified, otherwise the intent's own operation and recipients, which are
 // what will run, marked unverified and high risk (CH-10).
 func approvalItem(in journal.Intent, v string, cls verb.Class, ver Verified, verified bool) owner.Item {
-	it := owner.Item{Object: in.Action + " on " + in.Account + ", unverified", Recipient: strings.Join(in.Recipients, ", ")}
+	it := owner.Item{Object: in.Action + " on " + in.Account, Recipient: strings.Join(in.Recipients, ", "), Unverified: true}
 	if verified {
 		it = ver.Item
+		it.Unverified = false
 	}
 	it.Ref = in.ID
 	it.Facts.Verb = v
@@ -358,7 +399,7 @@ func (g *Gate) matches(r Rule, in journal.Intent, v Verified) error {
 	}
 	if r.Reply {
 		body, _ := in.Params[ParamBody].(string)
-		if g.cfg.Isolated == nil || !g.cfg.Isolated(in.Origin) || !v.ThreadVerified || v.Attachments || f.HasAmount || strings.TrimSpace(body) == "" {
+		if g.cfg.Isolated == nil || in.Machine == "" || !g.cfg.Isolated(in.Machine) || !v.ThreadVerified || v.Attachments || f.HasAmount || strings.TrimSpace(body) == "" {
 			return errors.New("not a context-scoped reply (ADP-11)")
 		}
 	}
@@ -380,6 +421,9 @@ func (g *Gate) matches(r Rule, in journal.Intent, v Verified) error {
 
 // evaluateBroker decides broker-state intents (OP-5).
 func (g *Gate) evaluateBroker(in journal.Intent) verdict {
+	if strings.HasPrefix(in.Origin, "guest:") {
+		return verdict{kind: deny, why: "broker actions are not available to agents"}
+	}
 	switch in.Action {
 	case journal.ActionGrantChange:
 		s, err := parseSpec(in)
@@ -405,11 +449,11 @@ func (g *Gate) evaluateBroker(in journal.Intent) verdict {
 		gr := g.grants[in.GrantRef]
 		g.mu.Unlock()
 		if gr == nil {
-			return verdict{kind: deny, why: "no grant " + clip(in.GrantRef)}
+			return verdict{kind: deny, why: "no such grant"}
 		}
 		return verdict{kind: allow}
 	}
-	return verdict{kind: deny, why: "broker action " + clip(in.Action) + " is not handled here"}
+	return verdict{kind: deny, why: "this broker action is not handled here"}
 }
 
 // Check is the journal policy (OP-3): it runs at authorize and again
@@ -494,13 +538,29 @@ func (g *Gate) Authorize(ctx context.Context, id string) (journal.Status, error)
 	case deny, allow:
 		return g.eng.Authorize(ctx, id)
 	case ask:
+		onlyUI := !owner.SMSApprovable(v.item)
 		g.mu.Lock()
-		if g.waiting[id] == nil {
-			g.waiting[id] = &wait{item: v.item, local: v.local}
-			g.batch = append(g.batch, id)
+		fresh := g.waiting[id] == nil
+		if fresh {
+			g.waiting[id] = &wait{item: v.item, local: v.local, onlyUI: onlyUI}
+			if !onlyUI {
+				now := g.cfg.Now()
+				if len(g.batch) == 0 {
+					g.first = now
+				}
+				g.last = now
+				g.batch = append(g.batch, id)
+			}
 		}
 		delete(g.failed, id)
+		own := g.own
 		g.mu.Unlock()
+		if fresh && onlyUI && own != nil {
+			// Recipients that cannot be shown in full are never approved
+			// by text (CH-10, CH-12).
+			n := len(strings.Split(v.item.Recipient, ","))
+			_ = own.Notify(fmt.Sprintf("An action for %d recipients needs your approval on the box's Wi-Fi page.", n))
+		}
 	case autoReply:
 		g.queueReply(id, v)
 	}
@@ -519,7 +579,9 @@ func (g *Gate) annotate(st *journal.Status) {
 	id := st.Intent.ID
 	if d, ok := g.decided[id]; ok && d.approved && d.local && !g.confirmed[id] {
 		st.Permission.Reason = "approved by code; waiting for the owner to confirm on the box's local page"
-	} else if w := g.waiting[id]; w != nil && w.reply != "" {
+	} else if w := g.waiting[id]; w != nil && w.onlyUI {
+		st.Permission.Reason = "waiting for the owner's approval on the box's local page"
+	} else if w != nil && w.reply != "" {
 		st.Permission.Reason = "auto-reply queued; it sends at " + w.sendAt.UTC().Format("15:04") + " UTC unless the owner cancels it"
 	} else if w != nil {
 		st.Permission.Reason = "waiting for the owner's approval"
@@ -558,9 +620,46 @@ func (g *Gate) queueReply(id string, v verdict) {
 	}
 }
 
-// Flush sends batched items: one request per tier, at most MaxBatch
+// flushDue sends the batch when it is due (CH-10, CH-15): at once for an
+// urgent item or an owner active in chat; otherwise once the batch has
+// been quiet for CoalesceIdle or open for Coalesce, outside quiet hours,
+// and within RequestsPerHour.
+func (g *Gate) flushDue() {
+	now := g.cfg.Now()
+	g.mu.Lock()
+	if len(g.batch) == 0 {
+		g.mu.Unlock()
+		return
+	}
+	urgent := false
+	if g.cfg.Urgent != nil {
+		for _, id := range g.batch {
+			if w := g.waiting[id]; w != nil && g.cfg.Urgent(w.item) {
+				urgent = true
+			}
+		}
+	}
+	own := g.own
+	keep := g.sent[:0]
+	for _, t := range g.sent {
+		if now.Sub(t) < time.Hour {
+			keep = append(keep, t)
+		}
+	}
+	g.sent = keep
+	budget := len(g.sent) < g.cfg.RequestsPerHour
+	ripe := now.Sub(g.first) >= g.cfg.Coalesce || now.Sub(g.last) >= g.cfg.CoalesceIdle
+	g.mu.Unlock()
+	active := own != nil && own.Active(activeFor)
+	quiet := g.cfg.Quiet != nil && g.cfg.Quiet(now)
+	if urgent || (!quiet && (active || (ripe && budget))) {
+		g.Flush()
+	}
+}
+
+// Flush sends batched items now: one request per tier, at most MaxBatch
 // items each, so a high-risk item does not raise the code needed for
-// low-risk ones (CH-10). Run calls it every tick.
+// low-risk ones (CH-10). Each request text counts toward RequestsPerHour.
 func (g *Gate) Flush() {
 	g.mu.Lock()
 	ids, own := g.batch, g.own
@@ -589,6 +688,9 @@ func (g *Gate) Flush() {
 				req, err = own.Request(chunk, 0)
 			}
 			g.mu.Lock()
+			if err == nil {
+				g.sent = append(g.sent, g.cfg.Now())
+			}
 			for _, it := range chunk {
 				w := g.waiting[it.Ref]
 				if w == nil {
@@ -617,7 +719,9 @@ func (g *Gate) Decide(d owner.Decision) {
 		g.mu.Unlock()
 		return
 	}
-	if w != nil && d.Request != w.request && d.Request != w.reply {
+	// While the request is being sent its ID is not yet known; the Ref is
+	// unique to this intent, so a decision then can only answer it.
+	if w != nil && w.request != "" && d.Request != w.request && d.Request != w.reply {
 		g.mu.Unlock()
 		return
 	}
@@ -696,7 +800,7 @@ func (g *Gate) settle(id string) {
 // Tick sends batched requests and releases auto-replies whose undo window
 // has passed (ADP-11). The owner channel holds them while STOPped.
 func (g *Gate) Tick() {
-	g.Flush()
+	g.flushDue()
 	g.mu.Lock()
 	own := g.own
 	g.mu.Unlock()
@@ -840,9 +944,31 @@ func (g *Gate) grantIDLocked(intentID string) string {
 	return fmt.Sprintf("G%d", n)
 }
 
+// sameItem compares everything the owner saw or the tier was judged on.
 func sameItem(a, b owner.Item) bool {
+	fa, fb := a.Facts, b.Facts
 	return a.Object == b.Object && a.Recipient == b.Recipient && a.Amount == b.Amount &&
-		a.UndoWindow == b.UndoWindow && a.Facts.Verb == b.Facts.Verb && a.Facts.Kind == b.Facts.Kind
+		a.UndoWindow == b.UndoWindow && a.Unverified == b.Unverified &&
+		fa.Kind == fb.Kind && fa.Verb == fb.Verb && fa.RecipientChecked == fb.RecipientChecked &&
+		fa.NoRecipient == fb.NoRecipient && fa.RecipientExists == fb.RecipientExists &&
+		fa.RecipientByOwner == fb.RecipientByOwner && fa.RecipientSince.Equal(fb.RecipientSince) &&
+		fa.RecipientAutoAdded == fb.RecipientAutoAdded && fa.HasAmount == fb.HasAmount && fa.Amount == fb.Amount
+}
+
+// stricter returns the verb of the stricter class; the declared verb
+// (b) wins a tie. An unknown verb is strictest, so it fails closed.
+func stricter(a, b string) string {
+	ca, oka := verb.ClassOf(a)
+	cb, okb := verb.ClassOf(b)
+	switch {
+	case !oka:
+		return a
+	case !okb:
+		return b
+	case ca > cb:
+		return a
+	}
+	return b
 }
 
 func sameSet(a, b []string) bool {

@@ -25,7 +25,7 @@ import (
 func TestOwnerChannelEndToEnd(t *testing.T) {
 	const ownerNum, boxNum = "+15550000001", "+15550000002"
 	seed := []byte("synthetic-totp-seed-0001") // synthetic canary, not a credential
-	r := newRig(t, func(c *Config) { c.Isolated = func(o string) bool { return o == "guest:reply-1" } })
+	r := newRig(t, func(c *Config) { c.Isolated = func(m string) bool { return m == "reply-1" } })
 	carrier := modem.NewCarrier()
 	carrier.SetClock(r.now)
 	box, phone := carrier.Line(boxNum), carrier.Line(ownerNum)
@@ -57,7 +57,7 @@ func TestOwnerChannelEndToEnd(t *testing.T) {
 		Action: journal.ActionGrantChange, Params: specParams(mailGrant()), Executor: ExecutorName})
 	r.g.Flush()
 	req := text()
-	if !strings.Contains(req, "grant connect mail") || !strings.Contains(req, "code generator") {
+	if !strings.Contains(req, "grant connect mail, 3 acting ops") || !strings.Contains(req, "code generator") {
 		t.Fatalf("grant request %q", req)
 	}
 	id := idRE.FindStringSubmatch(req)[1]
@@ -95,7 +95,7 @@ func TestOwnerChannelEndToEnd(t *testing.T) {
 	r.ver.set("thr-1", Verified{Item: owner.Item{Object: "reply", Recipient: "sam@example.com",
 		Facts: owner.Facts{RecipientChecked: true, RecipientExists: true, RecipientByOwner: true}},
 		Recipients: []string{"sam@example.com"}, Record: "thr-1", ThreadVerified: true})
-	r.submit(journal.Intent{ID: "reply-1/r1", Origin: "guest:reply-1", Account: "mail", Action: "message.send",
+	r.submit(journal.Intent{ID: "reply-1/r1", Origin: "guest:reply-1", Machine: "reply-1", Account: "mail", Action: "message.send",
 		Params: map[string]any{"record": "thr-1", "body": "Thanks, got it."}, Recipients: []string{"sam@example.com"}, Executor: "mail"})
 	alert := text()
 	um := regexp.MustCompile(`UNDO ([A-Z][0-9]{1,2})`).FindStringSubmatch(alert)

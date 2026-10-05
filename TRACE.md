@@ -33,10 +33,10 @@ Covered: 46 / 139 requirement IDs
 | CH-10 | `broker/grants/channel_test.go`, `broker/grants/gate_test.go`, `broker/owner/channel_test.go`, `broker/owner/classify_test.go` |
 | CH-6 | — |
 | CH-11 | `broker/owner/channel_test.go`, `broker/owner/parse_test.go` |
-| CH-12 | `broker/grants/channel_test.go`, `broker/modem/modem_test.go`, `broker/owner/channel_test.go` |
+| CH-12 | `broker/grants/channel_test.go`, `broker/grants/gate_test.go`, `broker/modem/modem_test.go`, `broker/owner/channel_test.go` |
 | CH-13 | `broker/grants/channel_test.go`, `broker/grants/gate_test.go`, `broker/owner/channel_test.go`, `broker/owner/parse_test.go`, `broker/owner/review_test.go` |
 | CH-14 | `broker/e2e/owner_test.go`, `broker/owner/channel_test.go`, `broker/owner/parse_test.go`, `broker/owner/review_test.go` |
-| CH-15 | `broker/owner/review_test.go` |
+| CH-15 | `broker/grants/gate_test.go`, `broker/owner/review_test.go` |
 | CH-16 | `broker/owner/channel_test.go` |
 | CH-17 | — |
 | CH-18 | `broker/owner/channel_test.go`, `broker/owner/review_test.go` |
@@ -73,7 +73,7 @@ Covered: 46 / 139 requirement IDs
 | OP-2 | `broker/journal/engine_test.go`, `broker/journal/property_test.go`, `broker/journal/review_test.go` |
 | OP-3 | `broker/grants/gate_test.go`, `broker/journal/engine_test.go`, `broker/journal/property_test.go`, `broker/journal/review_test.go` |
 | OP-4 | `broker/grants/gate_test.go`, `broker/journal/engine_test.go`, `broker/journal/property_test.go`, `broker/journal/review_test.go`, `broker/owner/review_test.go` |
-| OP-5 | `broker/daemon/grants_wiring_test.go`, `broker/grants/grant_test.go`, `broker/journal/engine_test.go`, `broker/journal/property_test.go` |
+| OP-5 | `broker/daemon/grants_wiring_test.go`, `broker/grants/grant_test.go`, `broker/guest/plane_test.go`, `broker/journal/engine_test.go`, `broker/journal/property_test.go` |
 | OP-6 | `broker/grants/grant_test.go`, `broker/journal/engine_test.go`, `broker/journal/property_test.go`, `broker/journal/review_test.go` |
 | OP-7 | `broker/journal/engine_test.go`, `broker/journal/property_test.go` |
 | CAP-1 | — |
@@ -87,7 +87,7 @@ Covered: 46 / 139 requirement IDs
 | CAP-9 | — |
 | CAP-10 | — |
 | ADP-1 | `broker/grants/gate_test.go` |
-| ADP-2 | `broker/egress/verb_test.go`, `broker/grants/grant_test.go` |
+| ADP-2 | `broker/egress/verb_test.go`, `broker/grants/gate_test.go`, `broker/grants/grant_test.go` |
 | ADP-3 | — |
 | ADP-4 | — |
 | ADP-5 | — |

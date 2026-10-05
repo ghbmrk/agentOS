@@ -71,12 +71,12 @@ type Config struct {
 	// Agent receives the owner's task chat: the guest plane's owner inbox
 	// for the agent's machine (ARC-6 (c)). Nil: no agent running.
 	Agent control.Agent
-	// Grants configures the approval policy: adapter verifiers, the local
-	// confirmation page, reply composers. Executors are filled from
-	// Executors below.
+	// Grants configures the approval policy: each executor's declared
+	// operations and verbs (Declared), adapter verifiers, the local
+	// confirmation page, reply composers, request pacing.
 	Grants grants.Config
-	// Executors are the adapters' executors, by name. Grants may name
-	// only these. None exist before P2-6/P2-7.
+	// Executors are the adapters' executors, by name; each needs its
+	// declaration in Grants.Declared. None exist before P2-6/P2-7.
 	Executors map[string]journal.Executor
 	// Redactor scrubs journaled free text. Nil journals none at all until
 	// the vault's redactor (CRED-7 values plus CH-19 patterns) is wired
@@ -156,8 +156,11 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 			store.Close()
 			return nil, fmt.Errorf("daemon: executor name %q is reserved", name)
 		}
+		if gcfg.Declared[name] == nil {
+			store.Close()
+			return nil, fmt.Errorf("daemon: executor %q declares no operations (ADP-2)", name)
+		}
 		execs[name] = ex
-		gcfg.Executors = append(gcfg.Executors, name)
 	}
 	gate := grants.New(gcfg)
 	execs[grants.ExecutorName] = gate

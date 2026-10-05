@@ -24,7 +24,7 @@ func TestGrantsAreIntentsWithCodeAndLocalConfirmation(t *testing.T) {
 		t.Fatalf("grant ID %q", gid)
 	}
 	_, items := r.own.last(t)
-	if it := items[0]; it.Facts.Kind != owner.GrantChange || r.own.Tier(it.Facts) != owner.High || it.Object != "connect mail: draft read reveal-or-create-secret send" {
+	if it := items[0]; it.Facts.Kind != owner.GrantChange || r.own.Tier(it.Facts) != owner.High || it.Object != "connect mail, 3 acting ops on Wi-Fi page" {
 		t.Fatalf("grant item %+v", it)
 	}
 	if !strings.Contains(r.own.notes[len(r.own.notes)-1], "PAUSE G1") {
@@ -50,7 +50,7 @@ func TestGrantsAreIntentsWithCodeAndLocalConfirmation(t *testing.T) {
 
 	// A code without the local page leaves it pending.
 	r.submit(journal.Intent{ID: "local/g3", Origin: "local", Account: journal.BrokerAccount, Action: journal.ActionGrantChange,
-		Params: specParams(Spec{Account: "cal", Executor: "mail", Ops: map[string]string{"event.add": "draft"}}), Executor: ExecutorName})
+		Params: specParams(Spec{Account: "cal", Executor: "cal", Ops: map[string]string{"event.add": "draft"}}), Executor: ExecutorName})
 	r.g.Flush()
 	r.decide(true, "owner")
 	if st := r.state("local/g3"); st.State != journal.Pending || !strings.Contains(st.Permission.Reason, "local page") {
@@ -58,7 +58,14 @@ func TestGrantsAreIntentsWithCodeAndLocalConfirmation(t *testing.T) {
 	}
 
 	bad := []Spec{
-		{Account: "mail", Executor: "mail", Ops: map[string]string{"x": "wire-money"}},
+		// ADP-2: a grant cannot weaken the adapter's verb, add an
+		// operation the adapter does not declare, or use a verb off the
+		// list; OP-5: one connection per account.
+		{Account: "mail2", Executor: "mail", Ops: map[string]string{"message.send": "read"}},
+		{Account: "mail2", Executor: "mail", Ops: map[string]string{"key.create": "send"}},
+		{Account: "mail2", Executor: "mail", Ops: map[string]string{"wire.money": "send"}},
+		{Account: "mail2", Executor: "mail", Ops: map[string]string{"message.send": "wire-money"}},
+		{Account: "mail", Executor: "mail", Ops: map[string]string{"message.list": "read"}},
 		{Account: "mail", Executor: "shell", Ops: map[string]string{"x": "read"}},
 		{Account: journal.BrokerAccount, Executor: "mail", Ops: map[string]string{"x": "read"}},
 		{Account: "mail", Rule: &Rule{Action: "key.create", PerRecord: 1, PerDay: 1}},
