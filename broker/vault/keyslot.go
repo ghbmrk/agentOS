@@ -459,13 +459,33 @@ func OpenSealed(vaultPath, keysPath string, f Factor) (*Vault, error) {
 		return nil, err
 	}
 	key, slot, err := kf.unwrapSlot(f, want)
+	staged := false
 	if err != nil {
-		return nil, err
+		// A slot change interrupted after its seal: f's slot may be only
+		// in the staged next file (keysbind.go). It counts only if the
+		// vault it opens sealed that same file.
+		nraw, rerr := os.ReadFile(keysPath + nextSuffix)
+		if rerr != nil {
+			return nil, err
+		}
+		nkf, perr := parseKeys(nraw)
+		if perr != nil {
+			return nil, err
+		}
+		nkey, nslot, nerr := nkf.unwrapSlot(f, want)
+		if nerr != nil {
+			return nil, err
+		}
+		raw, kf, key, slot, staged = nraw, nkf, nkey, nslot, true
 	}
 	defer wipe(key)
 	v, err := Open(vaultPath, key)
 	if err != nil {
 		return nil, err
+	}
+	if staged && !v.stagedKeys(raw) {
+		v.Close()
+		return nil, ErrNoSlotOpens
 	}
 	v.sealedBy(keysPath, key)
 	if err := v.checkKeys(raw, kf, want, slot); err != nil {

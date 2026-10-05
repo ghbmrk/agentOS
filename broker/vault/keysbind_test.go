@@ -187,9 +187,157 @@ func TestReencryptCrashBeforeLastKeysWrite(t *testing.T) {
 	crashPoint = func(int) error { return nil }
 
 	putFile(t, kp, old)
+	staged := readBytes(t, kp+nextSuffix)
+	os.Remove(kp + nextSuffix)
 	for name, f := range map[string]Factor{"dropped host": alpha, "old card slot": Passphrase(testPass)} {
 		if _, err := OpenSealed(vp, kp, f); !errors.Is(err, ErrNoSlotOpens) && !errors.Is(err, ErrRolledBack) {
 			t.Fatalf("%s with the keys file before re-encryption: %v", name, err)
 		}
+	}
+	// With the staged next file beside it, the dropped host still opens
+	// nothing; the card opens through the staged file and rolls forward.
+	putFile(t, kp+nextSuffix, staged)
+	if _, err := OpenSealed(vp, kp, alpha); !errors.Is(err, ErrNoSlotOpens) {
+		t.Fatalf("dropped host with the staged file: %v", err)
+	}
+	w, err := OpenSealed(vp, kp, Passphrase(testPass))
+	if err != nil {
+		t.Fatalf("card with the staged file: %v", err)
+	}
+	w.Close()
+	if !bytes.Equal(readBytes(t, kp), staged) {
+		t.Fatal("did not roll forward to the staged file")
+	}
+}
+
+// Defect P2-4d: a passphrase Rekey that crashed right after sealing the
+// next keys file left the old file on the drive. The old passphrase's slot
+// is not in the next file and the new one's slot was in no file on the
+// drive, so neither opened the vault. The next file is now staged beside
+// the keys file before the seal, and the new passphrase opens from it.
+func TestRekeyCrashAfterSealOpensWithNewPassphrase(t *testing.T) {
+	v, vp, kp := openWithPassphrase(t)
+	before := readBytes(t, kp)
+	crashAt(t, 1)
+	if err := v.Rekey(Passphrase(testPass), Passphrase(newPass)); err == nil {
+		t.Fatal("no crash")
+	}
+	v.Close()
+	crashPoint = func(int) error { return nil }
+	if !bytes.Equal(readBytes(t, kp), before) {
+		t.Fatal("keys file changed before the crash point")
+	}
+
+	if _, err := OpenSealed(vp, kp, Passphrase(testPass)); !errors.Is(err, ErrNoSlotOpens) {
+		t.Fatalf("old passphrase after the change was decided: %v", err)
+	}
+	w, err := OpenSealed(vp, kp, Passphrase(newPass))
+	if err != nil {
+		t.Fatalf("new passphrase: %v", err)
+	}
+	if _, ok := w.Secret("openai"); !ok {
+		t.Fatal("entry lost")
+	}
+	w.Close()
+	if _, err := os.Stat(kp + nextSuffix); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("staged file left after roll-forward: %v", err)
+	}
+	w, err = OpenSealed(vp, kp, Passphrase(newPass))
+	if err != nil {
+		t.Fatalf("new passphrase from the keys file: %v", err)
+	}
+	w.Close()
+}
+
+// The staged file opens nothing unless it is the next file the vault
+// sealed: a stale one from a finished change, or one planted beside the
+// keys file, is refused.
+func TestStagedKeysFileMustMatchTheSeal(t *testing.T) {
+	v, vp, kp := openWithPassphrase(t)
+	before := readBytes(t, kp)
+	if err := v.Rekey(Passphrase(testPass), Passphrase(newPass)); err != nil {
+		t.Fatal(err)
+	}
+	after := readBytes(t, kp)
+	v.Close()
+
+	// The finished change's file staged again, with the file before on
+	// the drive: the vault records no change under way.
+	putFile(t, kp, before)
+	putFile(t, kp+nextSuffix, after)
+	if _, err := OpenSealed(vp, kp, Passphrase(newPass)); !errors.Is(err, ErrNoSlotOpens) {
+		t.Fatalf("stale staged file: %v", err)
+	}
+
+	// Mid-change, a staged file other than the sealed one.
+	putFile(t, kp, after)
+	os.Remove(kp + nextSuffix)
+	w, err := OpenSealed(vp, kp, Passphrase(newPass))
+	if err != nil {
+		t.Fatal(err)
+	}
+	crashAt(t, 1)
+	if err := w.Rekey(Passphrase(newPass), Passphrase(testPass)); err == nil {
+		t.Fatal("no crash")
+	}
+	staged := readBytes(t, kp+nextSuffix)
+	w.Close()
+	crashPoint = func(int) error { return nil }
+	var kf keyFile
+	if err := json.Unmarshal(staged, &kf); err != nil {
+		t.Fatal(err)
+	}
+	kf.Slots = append(kf.Slots, kf.Slots[0])
+	planted, _ := json.Marshal(&kf)
+	putFile(t, kp+nextSuffix, planted)
+	if _, err := OpenSealed(vp, kp, Passphrase(testPass)); !errors.Is(err, ErrNoSlotOpens) {
+		t.Fatalf("planted staged file: %v", err)
+	}
+	putFile(t, kp+nextSuffix, staged)
+	if w, err = OpenSealed(vp, kp, Passphrase(testPass)); err != nil {
+		t.Fatalf("sealed staged file: %v", err)
+	}
+	w.Close()
+}
+
+// Re-encryption's last slot change, interrupted after its seal, leaves the
+// keys file holding both slot sets on the drive. The card opens the new
+// key's slot there and rolls forward to the file with only the new slots.
+func TestReencryptRollsForwardFromBothSlotSets(t *testing.T) {
+	v, vp, kp := openWithPassphrase(t)
+	crashAt(t, 2) // 1: both sets; 2: new slots only
+	if _, err := v.Reencrypt(Passphrase(testPass)); err == nil {
+		t.Fatal("no crash")
+	}
+	v.Close()
+	crashPoint = func(int) error { return nil }
+	kf, err := readKeys(kp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := kf.keyID(); !errors.Is(err, ErrReencryptPending) {
+		t.Fatalf("drive should hold both slot sets: %v", err)
+	}
+	w, err := OpenSealed(vp, kp, Passphrase(testPass))
+	if err != nil {
+		t.Fatalf("card: %v", err)
+	}
+	if _, ok := w.Secret("openai"); !ok {
+		t.Fatal("entry lost")
+	}
+	w.Close()
+	kf, err = readKeys(kp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := kf.keyID()
+	if err != nil || len(kf.Slots) != 1 {
+		t.Fatalf("after roll-forward: %d slots, %v", len(kf.Slots), err)
+	}
+	if want, _ := fileKeyID(vp); !bytes.Equal(id, want) {
+		t.Fatal("kept slots are not for the key the vault is under")
+	}
+	if _, err := os.Stat(kp + nextSuffix); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("staged file left: %v", err)
 	}
 }
