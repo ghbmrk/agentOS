@@ -387,14 +387,18 @@ func TaskKey(in journal.Intent) string {
 	if in.GoalID != "" {
 		return "goal:" + in.GoalID
 	}
-	return "origin:" + in.Origin
+	return originKey(in)
 }
+
+// originKey is the task key of in's origin's intents that carry no goal.
+func originKey(in journal.Intent) string { return "origin:" + in.Origin }
 
 // mine turns the journal into hypotheses (LOOP-4). A task with a held-out
 // case is never mined, so nothing from the held-out suite reaches a
 // builder (CHG-1). Broker-state intents are not tasks.
 func (l *Learn) mine(ev Evidence) []Hypothesis {
 	sts := l.cfg.Journal.List()
+	held := heldWithNext(sts, ev)
 	byTask := map[string][]journal.Status{}
 	var order []string
 	for _, s := range sts {
@@ -402,7 +406,7 @@ func (l *Learn) mine(ev Evidence) []Hypothesis {
 			continue
 		}
 		k := TaskKey(s.Intent)
-		if ev.Held(k) {
+		if held[k] {
 			continue
 		}
 		if _, ok := byTask[k]; !ok {
@@ -495,6 +499,102 @@ func (l *Learn) mine(ev Evidence) []Hypothesis {
 		return out[i].Key < out[j].Key
 	})
 	return out
+}
+
+// heldWithNext is the task keys mining skips (arbitrator on #55). Every
+// held key; and, around each held case in a lineage, the goals whose work
+// may be the held task's own (guest G14):
+//   - a held goal's span runs from its first to its last intent; every
+//     other goal with an intent inside it ran while it was active;
+//   - a held case with no goal (the lineage held two messages open, or none
+//     was attributable) is a span of that one intent, and the nearest goal
+//     stamped before it is held too, since the unstamped work may be that
+//     goal's;
+//   - after either span, the first goal the lineage started is held: a
+//     guest still finishing the held task when handed the next owner
+//     message stamps that trailing work with the next goal.
+//
+// Each held case is handled on its own, so several held goals each hold
+// their own neighbours. Trailing work that lands past the next goal is
+// still mined (loops L8). Order is the journal's submission order; the
+// unstamped bucket itself is the origin key, which Evidence holds.
+func heldWithNext(sts []journal.Status, ev Evidence) map[string]bool {
+	held := map[string]bool{}
+	type at struct {
+		i int
+		k string // goal key; "" for an unstamped intent
+	}
+	type span struct{ first, last int }
+	type ok struct{ origin, k string }
+	byOrigin := map[string][]at{} // origin -> intents in order
+	// goalSpan is per origin: a goal's work can reach more than one
+	// lineage (a CAP-8 worker stamped with its creator's goal, G14 (b)).
+	goalSpan := map[ok]*span{}
+	var points []struct {
+		origin string
+		i      int
+	}
+	for i, s := range sts {
+		in := s.Intent
+		if in.Account == journal.BrokerAccount {
+			continue
+		}
+		k := TaskKey(in)
+		if ev.Held(k) {
+			held[k] = true
+		}
+		if in.GoalID == "" {
+			byOrigin[in.Origin] = append(byOrigin[in.Origin], at{i, ""})
+			if ev.heldIntents[in.ID] {
+				points = append(points, struct {
+					origin string
+					i      int
+				}{in.Origin, i})
+			}
+			continue
+		}
+		if sp := goalSpan[ok{in.Origin, k}]; sp == nil {
+			goalSpan[ok{in.Origin, k}] = &span{i, i}
+		} else {
+			sp.last = i
+		}
+		byOrigin[in.Origin] = append(byOrigin[in.Origin], at{i, k})
+	}
+	// around holds the goals of origin within [first, last], the first
+	// goal started after it, and, when before is set, the nearest goal
+	// stamped before it.
+	around := func(origin string, first, last int, before bool) {
+		ats := byOrigin[origin]
+		for _, a := range ats {
+			if a.k == "" {
+				continue
+			}
+			if a.i >= first && a.i <= last {
+				held[a.k] = true
+			}
+			if a.i > last && goalSpan[ok{origin, a.k}].first > last {
+				held[a.k] = true
+				break
+			}
+		}
+		if before {
+			for n := len(ats) - 1; n >= 0; n-- {
+				if a := ats[n]; a.i < first && a.k != "" {
+					held[a.k] = true
+					break
+				}
+			}
+		}
+	}
+	for g, sp := range goalSpan {
+		if ev.Held(g.k) {
+			around(g.origin, sp.first, sp.last, false)
+		}
+	}
+	for _, p := range points {
+		around(p.origin, p.i, p.i, true)
+	}
+	return held
 }
 
 // durations is how long each dispatched intent took from its first
