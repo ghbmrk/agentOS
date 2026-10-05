@@ -5,6 +5,7 @@ package change
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -23,8 +24,12 @@ type preempting struct {
 	cancel context.CancelFunc
 	// cut, if it returns true for a run, cancels the evaluation during
 	// that run (a candidate forcing a preemption).
-	cut  func(context.Context, Tree, Probe) bool
-	done map[string]int // case -> sides completed before the cancel (bit 1 base, bit 2 candidate)
+	cut func(context.Context, Tree, Probe) bool
+	// refuse, if it returns true for a run, fails that run with an
+	// evaluator interruption (admission refused or preempted its
+	// machine) while the context stays live.
+	refuse func(Tree, Probe) bool
+	done   map[string]int // case -> sides completed before the cancel (bit 1 base, bit 2 candidate)
 }
 
 func (p *preempting) Run(ctx context.Context, t Tree, pr Probe) ([]byte, error) {
@@ -35,6 +40,15 @@ func (p *preempting) Run(ctx context.Context, t Tree, pr Probe) ([]byte, error) 
 	side := 1
 	if string(t["skills/greet"]) == "hello" {
 		side = 2
+	}
+	p.mu.Lock()
+	refuse := p.refuse != nil && p.refuse(t, pr)
+	p.mu.Unlock()
+	if refuse {
+		p.mu.Lock()
+		p.calls++
+		p.mu.Unlock()
+		return nil, fmt.Errorf("start: %w", errAdmission)
 	}
 	out, err := p.e.Run(ctx, t, pr)
 	p.mu.Lock()
@@ -75,7 +89,7 @@ func (p *preempting) sides() int {
 func (p *preempting) arm(at int) context.Context {
 	ctx, cancel := context.WithCancel(context.Background())
 	p.mu.Lock()
-	p.at, p.calls, p.cancel, p.done, p.cut = at, 0, cancel, map[string]int{}, nil
+	p.at, p.calls, p.cancel, p.done, p.cut, p.refuse = at, 0, cancel, map[string]int{}, nil, nil
 	p.mu.Unlock()
 	return ctx
 }
@@ -500,4 +514,79 @@ func TestAnErroringBaselineIsNotKept(t *testing.T) {
 		}
 	}
 	e.p.mu.Unlock()
+}
+
+// errAdmission stands for replay.ErrPreempted, which wraps ErrInterrupted.
+var errAdmission = fmt.Errorf("admission refused the machine: %w", ErrInterrupted)
+
+// REQ: RES-1, CHG-1
+// PE3: an evaluator interrupted under a run with the context still live
+// (admission refused or preempted the machine) stops the evaluation like a
+// preemption: no verdict, finished sides kept, and the next evaluation
+// resumes from them. Interruptions of the baseline cost the candidate
+// nothing.
+func TestAnInterruptedEvaluatorGivesNoVerdict(t *testing.T) {
+	e, pe := newPreemptEnv(t, func(c *Config) { c.MinHeldOut = 100 })
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	pe.arm(0)
+	n := 0
+	pe.mu.Lock()
+	pe.refuse = func(t Tree, _ Probe) bool {
+		// After three runs, the next baseline run is refused.
+		n++
+		return n > 3 && string(t["skills/greet"]) != "hello"
+	}
+	pe.mu.Unlock()
+	rep, err := e.p.Propose(context.Background(), greet)
+	if !errors.Is(err, ErrInterrupted) || !errors.Is(err, errAdmission) || rep.State != "" {
+		t.Fatalf("interrupted evaluator: %+v %v", rep, err)
+	}
+	kept := e.p.keptSides()
+	if kept != n-1 {
+		t.Fatalf("kept %d sides, want the %d that finished", kept, n-1)
+	}
+	pe.arm(0)
+	rep, err = e.p.Propose(context.Background(), greet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total := rep.HeldOut + rep.Security + rep.NotEvaluated; pe.runs() != 2*total-kept {
+		t.Fatalf("resumed evaluation ran %d probes, want %d", pe.runs(), 2*total-kept)
+	}
+	if rep.SecurityPassed != rep.Security || rep.Passed != rep.HeldOut {
+		t.Fatalf("a baseline refusal hurt the candidate: %+v", rep)
+	}
+}
+
+// REQ: RES-1, CHG-1, LOOP-10
+// PE3 with security F1 on #103: a candidate side the evaluator is
+// interrupted under counts toward MaxInterruptions, so a candidate that
+// drives admission to refuse its machine on a case it would fail cannot
+// re-roll it without limit.
+func TestAdmissionRefusalsOfTheCandidateAreCounted(t *testing.T) {
+	e, pe := newPreemptEnv(t, func(c *Config) { c.MinHeldOut = 100 })
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	fixture := func(t Tree, pr Probe) bool {
+		return string(pr.Input) == exfilProbe && string(t["skills/greet"]) == "hello"
+	}
+	for i := 0; i < MaxInterruptions; i++ {
+		pe.arm(0)
+		pe.mu.Lock()
+		pe.refuse = fixture
+		pe.mu.Unlock()
+		if _, err := e.p.Propose(context.Background(), greet); !errors.Is(err, ErrInterrupted) {
+			t.Fatalf("pass %d: %v", i, err)
+		}
+	}
+	pe.arm(0)
+	pe.mu.Lock()
+	pe.refuse = fixture
+	pe.mu.Unlock()
+	rep, err := e.p.Propose(context.Background(), greet)
+	if err != nil {
+		t.Fatalf("third pass: %v", err)
+	}
+	if rep.State != StateRejected || rep.SecurityPassed == rep.Security {
+		t.Fatalf("a candidate refused on its fixture passed: %+v", rep)
+	}
 }

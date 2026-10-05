@@ -111,14 +111,14 @@ Covered: 113 / 144 requirement IDs
 | LOOP-0 | `broker/cmd/agentosd/learn_test.go`, `broker/control/settings_test.go`, `broker/daemon/learning_wiring_test.go`, `broker/grants/loops_test.go`, `broker/loops/settings_test.go`, `broker/loops/wiring_test.go`, `broker/owner/settings_test.go` |
 | LOOP-1 | `broker/admission/admission_test.go`, `broker/change/resume_test.go`, `broker/cmd/agentosd/learn_test.go`, `broker/loops/loop1_test.go`, `broker/loops/scheduler_test.go` |
 | LOOP-2 | `broker/cmd/agentosd/learn_test.go`, `broker/loops/scheduler_test.go`, `broker/loops/settings_test.go`, `broker/meter/share_test.go`, `broker/meter/spare_test.go` |
-| LOOP-3 | `broker/loops/scheduler_test.go` |
+| LOOP-3 | `broker/loops/loop1_test.go`, `broker/loops/scheduler_test.go` |
 | LOOP-4 | `broker/loops/loop1_test.go` |
 | LOOP-5 | `broker/cmd/agentos-egress/eval_test.go`, `broker/cmd/agentos-egress/routing_test.go`, `broker/cmd/agentosd/eval_test.go`, `broker/daemon/inference_test.go`, `broker/egress/handlerfor_test.go`, `broker/loops/loop1_test.go`, `broker/loops/scheduler_test.go`, `broker/meter/share_test.go`, `broker/modelroute/modelroute_test.go`, `broker/replay/replay_test.go`, `broker/vm/vm_test.go` |
 | LOOP-6 | `broker/cmd/agentosd/learn_test.go`, `broker/daemon/inference_test.go`, `broker/daemon/learning_wiring_test.go`, `broker/grants/loops_test.go`, `broker/loops/loop1_test.go`, `broker/loops/settings_test.go` |
 | LOOP-7 | — |
 | LOOP-8 | `broker/loops/secure_test.go` |
 | LOOP-9 | `broker/loops/secure_test.go` |
-| LOOP-10 | `broker/change/wiring_test.go`, `broker/loops/secure_test.go` |
+| LOOP-10 | `broker/change/resume_test.go`, `broker/change/wiring_test.go`, `broker/loops/secure_test.go` |
 | LOOP-11 | `broker/maintain/maintain_test.go` |
 | OSS-1 | `broker/hint/emitter_test.go`, `broker/hint/hint_test.go`, `broker/hint/schema_test.go` |
 | OSS-2 | `broker/cleanroom/cleanroom_test.go`, `broker/cleanroom/integration_test.go` |
@@ -133,7 +133,7 @@ Covered: 113 / 144 requirement IDs
 | OSS-13 | — |
 | OSS-11 | — |
 | OSS-12 | — |
-| RES-1 | `broker/admission/admission_test.go`, `broker/cgroup/cgroup_test.go`, `broker/change/resume_test.go`, `broker/cmd/agentosd/agent_test.go`, `broker/daemon/admission_wiring_test.go`, `broker/loops/loop1_test.go`, `broker/loops/scheduler_test.go`, `broker/vm/gvisor/gvisor_test.go`, `broker/vm/vm_test.go` |
+| RES-1 | `broker/admission/admission_test.go`, `broker/cgroup/cgroup_test.go`, `broker/change/resume_test.go`, `broker/cmd/agentosd/agent_test.go`, `broker/daemon/admission_wiring_test.go`, `broker/loops/loop1_test.go`, `broker/loops/scheduler_test.go`, `broker/replay/replay_test.go`, `broker/vm/gvisor/gvisor_test.go`, `broker/vm/vm_test.go` |
 | RES-2 | `broker/admission/admission_test.go`, `broker/cgroup/cgroup_test.go`, `broker/daemon/admission_wiring_test.go`, `broker/vm/gvisor/gvisor_test.go`, `broker/vm/vm_test.go` |
 | RES-3 | — |
 | RES-4 | `broker/vm/vm_test.go` |

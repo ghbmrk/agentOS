@@ -296,7 +296,7 @@ func (s *Scheduler) cancelLocked() {
 func (s *Scheduler) Run(ctx context.Context) {
 	for {
 		ran, wait := s.Tick(ctx)
-		if ran {
+		if ran && wait <= 0 {
 			continue
 		}
 		t := time.NewTimer(wait)
@@ -335,7 +335,12 @@ func (s *Scheduler) Tick(ctx context.Context) (bool, time.Duration) {
 		if s.cfg.Busy() || s.cfg.Stopped() {
 			return false, s.cfg.Retry // the box got busy while the source looked
 		}
-		s.run(ctx, src.Loop(), job)
+		if s.run(ctx, src.Loop(), job) {
+			// Admission refused or preempted an evaluation machine: the
+			// box is busy in a way Busy may not show (no room rather
+			// than pressure), so look again later, not at once (PE3).
+			return true, s.cfg.Retry
+		}
 		return true, 0
 	}
 	// Nothing worthwhile remains: sleep (LOOP-3).
@@ -404,7 +409,10 @@ func (s *Scheduler) decayLocked(now time.Time) {
 	s.last = now
 }
 
-func (s *Scheduler) run(ctx context.Context, l Loop, job Job) {
+// run runs job and reports whether it ended interrupted by the evaluator
+// (change.ErrInterrupted with ctx still live): such a unit is treated as
+// preempted, offered again and not measured (PE3).
+func (s *Scheduler) run(ctx context.Context, l Loop, job Job) (interrupted bool) {
 	jctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	s.mu.Lock()
@@ -440,8 +448,9 @@ func (s *Scheduler) run(ctx context.Context, l Loop, job Job) {
 	after, _ := s.cfg.Spare.Overall()
 	secs := s.cfg.Now().Sub(start).Seconds()
 	cost := float64(max(after.Tokens-before.Tokens, 0)) + math.Max(secs, 0)*s.cfg.ComputeTokens
+	interrupted = errors.Is(res.Err, change.ErrInterrupted)
 	s.mu.Lock()
-	preempted := s.preempted
+	preempted := s.preempted || interrupted
 	s.cancel, s.runningLoop, s.done = nil, "", nil
 	m := s.loops[l]
 	m.spent += cost
@@ -468,6 +477,7 @@ func (s *Scheduler) run(ctx context.Context, l Loop, job Job) {
 	if res.Err != nil {
 		s.cfg.Logf("loops: %s %s: %v", l, job.Name, res.Err)
 	}
+	return interrupted
 }
 
 func (s *Scheduler) safeRun(ctx context.Context, job Job) (res Result) {
