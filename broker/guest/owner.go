@@ -8,8 +8,10 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // Owner messages reach a guest through its own inbound API (ARC-6 (c)).
@@ -27,6 +29,21 @@ const (
 	inboxSize    = 32
 	maxReplyBody = 64 << 10
 )
+
+// Reply is a guest's answer to one owner message (POST /owner/reply, a
+// JSON object with these fields). Summary is optional: the agent's own
+// one-line summary, which the broker texts instead of the reply when the
+// reply goes to the owner's evidence destination (CH-20). The broker keeps
+// it to one line of at most MaxSummary bytes; it is guest-written text
+// like the reply.
+type Reply struct {
+	ID      string `json:"id"`
+	Text    string `json:"text"`
+	Summary string `json:"summary,omitempty"`
+}
+
+// MaxSummary bounds a reply's summary.
+const MaxSummary = 120
 
 var pollWait = 25 * time.Second
 
@@ -248,10 +265,7 @@ func (p *Plane) ownerReply(m *machine, w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
-	var rep struct {
-		ID   string `json:"id"`
-		Text string `json:"text"`
-	}
+	var rep Reply
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxReplyBody+1))
 	if err != nil || len(body) > maxReplyBody || json.Unmarshal(body, &rep) != nil {
 		http.Error(w, "bad reply", http.StatusBadRequest)
@@ -261,8 +275,16 @@ func (p *Plane) ownerReply(m *machine, w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no such pending message", http.StatusNotFound)
 		return
 	}
+	rep.Summary = strings.Join(strings.Fields(rep.Summary), " ")
+	if len(rep.Summary) > MaxSummary {
+		cut := MaxSummary
+		for cut > 0 && !utf8.RuneStart(rep.Summary[cut]) {
+			cut--
+		}
+		rep.Summary = rep.Summary[:cut]
+	}
 	if p.cfg.OwnerReply != nil {
-		p.cfg.OwnerReply(m.id, rep.ID, rep.Text)
+		p.cfg.OwnerReply(m.id, rep)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

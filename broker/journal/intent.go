@@ -62,6 +62,10 @@ const (
 	// since it read a record the owner deleted (recalltool W10): only the
 	// broker submits it, and only the owner approves it.
 	ActionRecallRollback = "meta.recall.rollback"
+	// ActionEvidence sets or clears the one destination that private
+	// agent replies and evidence go to (CH-20). Clearing it sends them by
+	// text again, so it is not narrowing.
+	ActionEvidence = "meta.evidence"
 )
 
 // Authority-narrowing broker-state changes. Pausing or revoking must always

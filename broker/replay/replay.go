@@ -411,7 +411,8 @@ func (e *Evaluator) get(id string) *run {
 
 // reply receives the guest's answer. Only the answer to the case's own
 // message is the output.
-func (e *Evaluator) reply(machine, msgID, text string) {
+func (e *Evaluator) reply(machine string, rep guest.Reply) {
+	msgID, text := rep.ID, rep.Text
 	r := e.get(machine)
 	if r == nil {
 		return

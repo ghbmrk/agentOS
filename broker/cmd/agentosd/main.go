@@ -205,7 +205,7 @@ func main() {
 	var stateDir, runsc, cgroupRoot, accelMode, meterPath, agentMachine, inboxPath, egressSocket, verifySocket, recallDir string
 	var agentImage, agentLaunch string
 	var diskReserveMB, agentMemMB, replayMemMB, builderMemMB int64
-	var builderImage, builderLaunch string
+	var builderImage, builderLaunch, keptPath string
 	var learn learnPaths
 	var cgroupVouched bool
 	floor := budget.Floor()
@@ -248,6 +248,7 @@ func main() {
 	flag.StringVar(&workerArgv, "worker-argv", "sleep infinity", "what a worker machine runs while the guest drives it, space-separated")
 	flag.Int64Var(&workerMaxMB, "worker-max-mb", 2048, "the largest memory budget one worker may ask for, MB; admission still decides (RES-2)")
 	flag.Int64Var(&replayMemMB, "replay-mem-mb", defaultReplayMemMB, "a replay machine's memory budget, MB (LOOP-5); with -agent-mem-mb it must fit in -capacity-mb less -headroom-mb")
+	flag.StringVar(&keptPath, "kept-replies", "/var/lib/agentos/kept-replies.json", "private agent replies that could not be emailed, kept for the local page (CH-20)")
 	qcfg := defaultQuestionConfig("/var/lib/agentos")
 	flag.StringVar(&qcfg.Path, "questions", qcfg.Path, "agents' questions to the owner, kept across restarts (P3-8)")
 	flag.StringVar(&qcfg.ClockPath, "clock-state", qcfg.ClockPath, "the box clock check's state (P2-9)")
@@ -360,6 +361,11 @@ func main() {
 	if lp == nil {
 		learningOff(&cfg)
 	}
+	// Evidence delivery (CH-20): with a destination set, private replies
+	// are emailed to it. No mail account is connected in this process
+	// yet, so none can be set (owns is nil) and replies go by text.
+	ev := newEvidence(keptPath, log.Printf)
+	ev.wire(&cfg)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -367,8 +373,9 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	// Deletions reach the journal's guest intents (CAP-3) and, when
-	// learning runs, what it keeps of them (change C19, learning.ForgetTasks).
+	ev.attach(ctx, d)
+	// Deletions reach the journal's guest intents (CAP-3), when learning
+	// runs what it keeps of them (change C19, learning.ForgetTasks),
 	recallCfg := recalltool.ServiceConfig{Dir: recallDir, Journal: d.Engine(), Ask: d.Gate(), Location: time.Local,
 		Notify: func(text string) error {
 			if ch := d.Owner(); ch != nil {
@@ -376,9 +383,12 @@ func main() {
 			}
 			return errors.New("no owner channel")
 		}}
+	// and every reply kept on the box (CH-20).
+	fan := forgetFan{kept: ev.kept}
 	if lp != nil {
-		recallCfg.Cases = lp
+		fan.cases = lp
 	}
+	recallCfg.Cases = fan
 	if lp != nil {
 		lp.attach(ctx, d)
 	}
@@ -416,7 +426,7 @@ func main() {
 				tools = append(tools, wt)
 				go reapWorkers(ctx, wt)
 			}
-			if plane, err := openGuestPlane(m, d, cfg.SocketDir, meterPath, inboxPath, egressSocket, tools); err != nil {
+			if plane, err := openGuestPlane(m, d, ev, cfg.SocketDir, meterPath, inboxPath, egressSocket, tools); err != nil {
 				// Machines cannot start without their guest sockets.
 				log.Printf("agent machines disabled: %v", err)
 			} else {
@@ -650,7 +660,7 @@ func openPool(root string, mem budget.Memory) (*cgroup.Group, error) {
 
 // openGuestPlane opens the OP-8 meter and the guest plane (ARC-6) over the
 // machine manager. Without them no agent machine can start.
-func openGuestPlane(m *vm.Manager, d *daemon.Daemon, socketDir, meterPath, inboxPath, egressSocket string, tools guest.Tools) (*guest.Plane, error) {
+func openGuestPlane(m *vm.Manager, d *daemon.Daemon, ev *evidence, socketDir, meterPath, inboxPath, egressSocket string, tools guest.Tools) (*guest.Plane, error) {
 	eng := d.Engine()
 	mtr, err := meter.Open(meter.Config{
 		Path:           meterPath,
@@ -674,6 +684,12 @@ func openGuestPlane(m *vm.Manager, d *daemon.Daemon, socketDir, meterPath, inbox
 	// links neither. Labels come from m.DataLabel, which reads private
 	// for any machine it cannot vouch for (REV-5, E10). Until the owner
 	// unlocks the vault, model calls answer 503.
+	label := func(id string) string {
+		if l, err := m.Label(id); err == nil && l == vm.Public {
+			return "public"
+		}
+		return "private"
+	}
 	gcfg := guest.Config{
 		Dir:       filepath.Join(socketDir, "guests"),
 		InboxPath: inboxPath,
@@ -682,22 +698,12 @@ func openGuestPlane(m *vm.Manager, d *daemon.Daemon, socketDir, meterPath, inbox
 		// only accounts a grant connects.
 		Effects: d.Gate(),
 		Route:   d.Gate().Route,
-		Label: func(id string) string {
-			if l, err := m.Label(id); err == nil && l == vm.Public {
-				return "public"
-			}
-			return "private"
-		},
-		Meter: mtr,
-		OwnerReply: func(machine, _, text string) {
-			ch := d.Owner()
-			if ch == nil {
-				log.Printf("reply from %s not sent: no owner channel", machine)
-				return
-			}
-			if err := ch.Notify(text); err != nil {
-				log.Printf("reply from %s not sent: %v", machine, err)
-			}
+		Label:   label,
+		Meter:   mtr,
+		// A private machine's reply goes to the owner's evidence
+		// destination when one is set (CH-20).
+		OwnerReply: func(machine string, rep guest.Reply) {
+			ev.enqueue(machine, label(machine) != "public", rep.Text, rep.Summary)
 		},
 		// Further broker tools: the owner-question tools (W9) and the
 		// managed tree (W4).
