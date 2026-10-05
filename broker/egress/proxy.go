@@ -198,7 +198,24 @@ func (p *Proxy) label(machine string) string {
 // Handler serves one agent machine. The broker gives each machine's VM a
 // listener of its own and serves this handler on it.
 func (p *Proxy) Handler(machine string) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { p.serve(machine, w, r) })
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p.serve(machine, func() string { return p.label(machine) }, p.audit, w, r)
+	})
+}
+
+// HandlerFor serves one request for machine when the proxy runs in a
+// process of its own (P2-4): the broker process that owns the machine's
+// socket names the machine and its REV-5 label, and audit receives this
+// request's decisions in place of Config.Audit. A nil audit refuses the
+// request, as New refuses a proxy without an auditor.
+func (p *Proxy) HandlerFor(machine, label string, audit Auditor) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if audit == nil {
+			http.Error(w, "egress: no auditor", http.StatusInternalServerError)
+			return
+		}
+		p.serve(machine, func() string { return label }, audit, w, r)
+	})
 }
 
 // admit takes a concurrency slot and checks the cap; release returns the
@@ -237,11 +254,11 @@ func (p *Proxy) release(machine string) {
 	p.mu.Unlock()
 }
 
-func (p *Proxy) serve(machine string, w http.ResponseWriter, r *http.Request) {
+func (p *Proxy) serve(machine string, labelOf func() string, audit Auditor, w http.ResponseWriter, r *http.Request) {
 	ev := Event{At: p.now(), Machine: machine, Method: r.Method}
 	deny := func(status int, reason string) {
 		ev.Reason, ev.Status = reason, status
-		p.audit.Egress(ev)
+		audit.Egress(ev)
 		w.Header().Set(DeniedHeader, "1")
 		http.Error(w, "egress denied: "+reason, status)
 	}
@@ -301,7 +318,7 @@ func (p *Proxy) serve(machine string, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if op.Body != nil {
-		if body, err = op.Body.apply(body, p.label(machine) == LabelPublic); err != nil {
+		if body, err = op.Body.apply(body, labelOf() == LabelPublic); err != nil {
 			deny(http.StatusForbidden, err.Error())
 			return
 		}
@@ -334,7 +351,7 @@ func (p *Proxy) serve(machine string, w http.ResponseWriter, r *http.Request) {
 	resp, err := p.rt.RoundTrip(up)
 	if err != nil {
 		ev.Allowed, ev.Status, ev.Reason = true, http.StatusBadGateway, "upstream unreachable"
-		p.audit.Egress(ev)
+		audit.Egress(ev)
 		http.Error(w, "egress: upstream unreachable", http.StatusBadGateway)
 		return
 	}
@@ -344,7 +361,7 @@ func (p *Proxy) serve(machine string, w http.ResponseWriter, r *http.Request) {
 	// unread and be inflated by the guest.
 	if encoded(resp.Header) {
 		ev.Allowed, ev.Status, ev.Reason = true, http.StatusBadGateway, "encoded response refused"
-		p.audit.Egress(ev)
+		audit.Egress(ev)
 		http.Error(w, "egress: encoded response refused", http.StatusBadGateway)
 		return
 	}
@@ -356,7 +373,7 @@ func (p *Proxy) serve(machine string, w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(resp.StatusCode)
 	ev.Allowed, ev.Status = true, resp.StatusCode
-	p.audit.Egress(ev)
+	audit.Egress(ev)
 
 	rw := red.Writer(w)
 	fl, _ := w.(http.Flusher)
