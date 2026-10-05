@@ -215,6 +215,9 @@ type custody struct {
 	// wrongPassQuiet counts those since, untold (WrongPassNoteEvery).
 	wrongPassAt    time.Time
 	wrongPassQuiet int
+	// supersedeAt and supersedeQuiet do the same for restarted unlocks.
+	supersedeAt    time.Time
+	supersedeQuiet int
 	// wrongCounted and wrongSilent are the wrong verifies per bucket.
 	wrongCounted []time.Time
 	wrongSilent  []time.Time
@@ -256,12 +259,23 @@ func (c *custody) status() (phase, time.Time) {
 // box's Wi-Fi starving the owner's unlock, so the owner hears of them.
 const WrongPassNoteEvery = 10 * time.Minute
 
-// noteWrongPassLocked tells the owner of a wrong passphrase, at most once
-// per WrongPassNoteEvery, with the count of those not told.
+// times words a count for the owner: "once", "twice", "3 times".
+func times(n int) string {
+	switch n {
+	case 1:
+		return "once"
+	case 2:
+		return "twice"
+	}
+	return fmt.Sprintf("%d times", n)
+}
+
 // ProofTTL is how long the proof of a confirmed unlock can sign the
 // unlocking phone in (P2-4f).
 const ProofTTL = time.Minute
 
+// noteWrongPassLocked tells the owner of a wrong passphrase, at most once
+// per WrongPassNoteEvery, with the count of those not told.
 func (c *custody) noteWrongPassLocked(now time.Time) {
 	if !c.wrongPassAt.IsZero() && now.Sub(c.wrongPassAt) < WrongPassNoteEvery {
 		c.wrongPassQuiet++
@@ -272,6 +286,23 @@ func (c *custody) noteWrongPassLocked(now time.Time) {
 		msg += fmt.Sprintf(" (%d more since the last notice)", c.wrongPassQuiet)
 	}
 	c.wrongPassAt, c.wrongPassQuiet = now, 0
+	c.notify(msg)
+}
+
+// noteSupersedeLocked tells the owner that a pending unlock was started
+// over, at most once per WrongPassNoteEvery with the count of those not
+// told, so someone on the Wi-Fi holding the card cannot turn restarts into
+// a stream of texts (#65 security R1).
+func (c *custody) noteSupersedeLocked(now time.Time) {
+	if !c.supersedeAt.IsZero() && now.Sub(c.supersedeAt) < WrongPassNoteEvery {
+		c.supersedeQuiet++
+		return
+	}
+	msg := "The box unlock was started over with your card; the earlier one was cancelled."
+	if c.supersedeQuiet > 0 {
+		msg += " It was started over " + times(c.supersedeQuiet) + " more since the last notice."
+	}
+	c.supersedeAt, c.supersedeQuiet = now, 0
 	c.notify(msg)
 }
 
@@ -360,10 +391,11 @@ func (c *custody) unlock(passphrase string) (string, error) {
 		v.Close()
 		return "", errInternal
 	}
-	if c.ph == pending {
+	superseded := c.ph == pending
+	if superseded {
 		c.timer.Stop()
 		c.v.Close()
-		c.notify("The box unlock was started over with your card; the earlier one was cancelled.")
+		c.noteSupersedeLocked(now)
 	}
 	c.ph, c.v, c.ticket = pending, v, hex.EncodeToString(b)
 	c.expires = now.Add(c.ttl)
@@ -373,7 +405,9 @@ func (c *custody) unlock(passphrase string) (string, error) {
 		c.notify(fmt.Sprintf("%d more wrong vault passphrases were tried on the box's Wi-Fi since the last notice", c.wrongPassQuiet))
 		c.wrongPassQuiet = 0
 	}
-	c.notify("vault passphrase accepted; waiting for a code-generator code")
+	if !superseded {
+		c.notify("vault passphrase accepted; waiting for a code-generator code")
+	}
 	return c.ticket, nil
 }
 
@@ -418,9 +452,13 @@ func (c *custody) confirmKeep(ticket, code string, keep bool) (bool, error) {
 	keep = keep && c.bootChanged && c.host != nil
 	c.proof, c.proofStep, c.proofUntil = sha256.Sum256([]byte(ticket)), c.st.LastStep, now.Add(ProofTTL)
 	if err := c.serve(c.v); err != nil {
-		c.proofUntil = time.Time{}
 		c.discard()
 		return false, err
+	}
+	if c.supersedeQuiet > 0 {
+		// Restarts that stopped still report their total.
+		c.notify("The box unlock was started over " + times(c.supersedeQuiet) + " more before it was unlocked.")
+		c.supersedeQuiet = 0
 	}
 	c.notify("vault unlocked")
 	if !keep {
@@ -634,6 +672,8 @@ func (c *custody) discard() {
 		c.v.Close()
 	}
 	c.v, c.proxy, c.ph, c.expires, c.ticket = nil, nil, locked, time.Time{}, ""
+	// The sign-in proof is for this unlock only (#65 security R2).
+	c.proof, c.proofUntil = [32]byte{}, time.Time{}
 }
 
 // model returns the proxy while the vault is open, else nil.

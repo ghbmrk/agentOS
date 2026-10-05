@@ -709,3 +709,57 @@ func TestUnlockProofRedeemsOnce(t *testing.T) {
 		t.Fatal("expired proof signed in")
 	}
 }
+
+// Restarts are told at most once per WrongPassNoteEvery with a count, and
+// a burst that stopped reports its total at the unlock (#65 security R1).
+func TestSupersedeNoticesCoalesce(t *testing.T) {
+	r := newFastRig(t, true)
+	r.unlock(t)
+	count := func(prefix string) int {
+		n := 0
+		for _, s := range r.notes {
+			if strings.HasPrefix(s, prefix) {
+				n++
+			}
+		}
+		return n
+	}
+	for i := 0; i < 4; i++ {
+		r.unlock(t)
+	}
+	if n := count("The box unlock was started over"); n != 1 {
+		t.Fatalf("started-over notes: %d %q", n, r.notes)
+	}
+	if n := count("vault passphrase accepted"); n != 1 {
+		t.Fatalf("accepted notes: %d %q", n, r.notes)
+	}
+	r.clk.add(WrongPassNoteEvery)
+	r.unlock(t)
+	if last := r.notes[len(r.notes)-1]; !strings.HasSuffix(last, "It was started over 3 times more since the last notice.") {
+		t.Fatalf("count not told: %q", last)
+	}
+	tk := r.unlock(t)
+	if err := r.c.confirm(tk, r.code()); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(r.notes, "The box unlock was started over once more before it was unlocked.") {
+		t.Fatalf("burst total not told: %q", r.notes)
+	}
+}
+
+// The sign-in proof does not outlive the unlock that made it (#65
+// security R2).
+func TestUnlockProofEndsWithTheUnlock(t *testing.T) {
+	r := newFastRig(t, true)
+	tk := r.unlock(t)
+	if err := r.c.confirm(tk, r.code()); err != nil {
+		t.Fatal(err)
+	}
+	r.c.lock()
+	r.c.mu.Lock()
+	left := !r.c.proofUntil.IsZero() || r.c.proof != [32]byte{}
+	r.c.mu.Unlock()
+	if left {
+		t.Fatal("proof kept after lock")
+	}
+}
