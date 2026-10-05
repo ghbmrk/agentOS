@@ -140,12 +140,17 @@ type Channel struct {
 	cfg  Config
 	ctrl *control.Handler
 
-	mu          sync.Mutex
-	codes       codes
-	open        map[string]*request
-	queued      map[string]*Queued
-	released    map[string]time.Time // queued IDs released, for UNDO's reply
-	resume      *resumeCode
+	mu       sync.Mutex
+	codes    codes
+	open     map[string]*request
+	queued   map[string]*Queued
+	released map[string]time.Time // queued IDs released, for UNDO's reply
+	lateUndo map[string]bool      // released IDs the owner texted UNDO for
+	resume   *resumeCode
+	// lineFailed is when the box's line last failed to send (unix nanos
+	// of cfg.Now), so a queued reply's silence is not read as the
+	// owner's over a line that was down (security B1(a) on PW3).
+	lineFailed  atomic.Int64
 	resumeTexts []time.Time
 	held        *heldMsg
 	limited     []time.Time
@@ -225,8 +230,11 @@ func New(cfg Config) (*Channel, error) {
 		cfg:    cfg,
 		codes:  codes{sec: cfg.Secrets, verify: cfg.Verifier, st: st, store: cfg.Store, rand: cfg.Rand},
 		open:   map[string]*request{},
-		queued: map[string]*Queued{}, released: map[string]time.Time{},
+		queued: map[string]*Queued{}, released: map[string]time.Time{}, lateUndo: map[string]bool{},
 		boot: &bootReport{pending: st.Pending, queued: st.Queued},
+	}
+	if cfg.Modem != nil {
+		c.cfg.Modem = watchedLine{Modem: cfg.Modem, c: c}
 	}
 	c.ctrl = &control.Handler{Engine: cfg.Engine, Auth: c, Agent: cfg.Agent, Machines: cfg.Machines, Notes: cfg.Notes, Now: cfg.Now,
 		Settings: cfg.Settings, HelpExtra: cfg.HelpExtra, Answer: cfg.Answer}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/journal"
@@ -25,7 +26,30 @@ const (
 	Denied Action = "denied"
 	// Undone: the owner undid the effect (UNDO).
 	Undone Action = "undone"
+	// Implicit: the owner let an auto-reply go unanswered through its
+	// undo window, on time (grants GR20, owner Queued.Late). A weaker
+	// good: recorded under its own source, never the owner's, capped,
+	// and counted at half weight (PK2; security B1, potency C3 on #90).
+	Implicit Action = "accepted-implicitly"
 )
+
+// MaxImplicitPerDay caps the implicit acceptances a guest lineage may turn
+// into cases each day, so one burst of replies an injected guest wrote
+// cannot flood the suite (security B1(c) on #90).
+const MaxImplicitPerDay = 5
+
+// MaxImplicitBoxPerDay caps them across every lineage, so a guest that
+// renews its lineage (a recreated machine) cannot reset its cap (L3
+// MUST-2 on #109).
+const MaxImplicitBoxPerDay = 10
+
+// boxKey is the box-wide count in harvested.Daily; origin keys start
+// "origin:".
+const boxKey = "*"
+
+// ErrImplicitCap is Harvest's refusal of an implicit acceptance over its
+// lineage's daily cap.
+var ErrImplicitCap = errors.New("loops: daily cap on implicit acceptances reached")
 
 // Outcome is one owner action on an item an agent made.
 type Outcome struct {
@@ -46,6 +70,7 @@ type Outcome struct {
 type Harvester struct {
 	J interface {
 		RecordQuality(id string, q journal.Quality) (journal.Status, error)
+		Get(id string) (journal.Status, error)
 	}
 	Pipeline interface {
 		AddTaskCase(change.Case) error
@@ -57,6 +82,8 @@ type Harvester struct {
 	Source string
 	// Wake, if set, is told about new evidence (the scheduler's Wake).
 	Wake func()
+	// Now is the clock for the daily implicit cap. Default time.Now.
+	Now func() time.Time
 
 	mu     sync.Mutex
 	loaded bool
@@ -74,6 +101,15 @@ type harvested struct {
 	// with no goal land there and may be the held-out task's own work
 	// (guest G14, #55 review B2).
 	Origins map[string]string `json:"origins,omitempty"`
+	// Implicit are the cases from implicit acceptances; Daily counts
+	// each lineage's (origin task key's) on its last day.
+	Implicit map[string]bool     `json:"implicit,omitempty"`
+	Daily    map[string]dayCount `json:"daily,omitempty"`
+}
+
+type dayCount struct {
+	Day string `json:"day"`
+	N   int    `json:"n"`
 }
 
 var ErrAction = errors.New("loops: unknown owner action")
@@ -97,11 +133,36 @@ func (h *Harvester) Harvest(o Outcome) error {
 		q.Verdict, c.Outcome, c.Expect = journal.VerdictWrong, change.Corrected, o.Correction
 	case Denied, Undone:
 		q.Verdict, c.Outcome, c.Expect = journal.VerdictWrong, change.Rejected, o.Output
+	case Implicit:
+		q.Source = h.source() + "-implicit"
+		q.Verdict, c.Outcome, c.Expect, c.Implicit = journal.VerdictGood, change.Accepted, o.Output, true
 	default:
 		return ErrAction
 	}
 	if o.Intent == "" || len(o.Input) == 0 {
 		return errors.New("loops: an outcome needs its intent and the owner's task message")
+	}
+	// An implicit case takes its slot under the cap before the verdict is
+	// recorded, under one lock, so concurrent harvests cannot overshoot it
+	// (L3 MUST-1 on #109); kept says the slot is now this case's.
+	var lineage, day string
+	reserved, kept := false, false
+	if c.Implicit {
+		st, err := h.J.Get(o.Intent)
+		if err != nil {
+			return err
+		}
+		lineage, day = originKey(st.Intent), h.now().UTC().Format("2006-01-02")
+		if reserved, err = h.reserve(c.ID, lineage, day); err != nil {
+			return err
+		}
+		defer func() {
+			if reserved && !kept {
+				h.mu.Lock()
+				h.releaseLocked(lineage, day)
+				h.mu.Unlock()
+			}
+		}()
 	}
 	st, err := h.J.RecordQuality(o.Intent, q)
 	if err != nil {
@@ -124,11 +185,16 @@ func (h *Harvester) Harvest(o Outcome) error {
 	if _, ok := h.st.Tasks[c.ID]; !ok {
 		h.st.Tasks[c.ID] = taskKey
 		h.st.Origins[c.ID] = originKey(st.Intent)
+		if c.Implicit {
+			h.st.Implicit[c.ID] = true
+		}
 		if err := h.saveLocked(); err != nil {
 			delete(h.st.Tasks, c.ID)
 			delete(h.st.Origins, c.ID)
+			delete(h.st.Implicit, c.ID)
 			return err
 		}
+		kept = true
 	}
 	// A failure from here on is retryable: calling Harvest again records
 	// the verdict again (the same verdict) and adds the case.
@@ -144,6 +210,49 @@ func (h *Harvester) Harvest(o Outcome) error {
 		h.Wake()
 	}
 	return nil
+}
+
+// reserve takes a slot under the lineage's and the box's daily caps for
+// case id, unless the case is already counted (a retry), and reports
+// whether it took one. Counts from earlier days are dropped.
+func (h *Harvester) reserve(id, lineage, day string) (bool, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if err := h.loadLocked(); err != nil {
+		return false, err
+	}
+	if _, ok := h.st.Tasks[id]; ok {
+		return false, nil
+	}
+	for k, n := range h.st.Daily {
+		if n.Day != day {
+			delete(h.st.Daily, k)
+		}
+	}
+	if h.st.Daily[lineage].N >= MaxImplicitPerDay || h.st.Daily[boxKey].N >= MaxImplicitBoxPerDay {
+		return false, ErrImplicitCap
+	}
+	for _, k := range []string{lineage, boxKey} {
+		h.st.Daily[k] = dayCount{Day: day, N: h.st.Daily[k].N + 1}
+	}
+	return true, nil
+}
+
+// releaseLocked gives back a slot reserve took for a case that was not
+// kept.
+func (h *Harvester) releaseLocked(lineage, day string) {
+	for _, k := range []string{lineage, boxKey} {
+		if n := h.st.Daily[k]; n.Day == day && n.N > 0 {
+			h.st.Daily[k] = dayCount{Day: day, N: n.N - 1}
+		}
+	}
+}
+
+func (h *Harvester) now() time.Time {
+	if h.Now == nil {
+		return time.Now()
+	}
+	return h.Now()
 }
 
 func (h *Harvester) source() string {
@@ -176,6 +285,12 @@ func (h *Harvester) loadLocked() error {
 	if h.st.Origins == nil {
 		h.st.Origins = map[string]string{}
 	}
+	if h.st.Implicit == nil {
+		h.st.Implicit = map[string]bool{}
+	}
+	if h.st.Daily == nil {
+		h.st.Daily = map[string]dayCount{}
+	}
 	h.loaded = true
 	return nil
 }
@@ -191,13 +306,17 @@ func (h *Harvester) saveLocked() error {
 // Evidence is what Loop 1 may know about the harvested cases: which tasks
 // are held out, so it never mines them, and how many there are.
 type Evidence struct {
-	HeldOut int
+	// HeldOut is the held-out evidence: explicit owner cases count one,
+	// implicit ones half (potency C3 on #90), rounded down. Explicit is
+	// the explicit cases alone.
+	HeldOut, Explicit int
 	// heldTasks are the task keys whose case is held out.
 	heldTasks map[string]bool
 	// heldIntents are the intents held-out cases were recorded on (a
 	// case's ID is its intent's).
 	heldIntents map[string]bool
-	// Dev are the dev-split task cases, the only ones a builder may see.
+	// Dev are the dev-split explicit task cases, the only ones a builder
+	// may see.
 	Dev []change.Case
 }
 
@@ -216,7 +335,15 @@ func (h *Harvester) Evidence() (Evidence, error) {
 	for _, c := range dev {
 		inDev[c.ID] = true
 	}
-	ev := Evidence{heldTasks: map[string]bool{}, heldIntents: map[string]bool{}, Dev: dev}
+	ev := Evidence{heldTasks: map[string]bool{}, heldIntents: map[string]bool{}}
+	for _, c := range dev {
+		// A builder never sees an implicit case, not even its ID: it has
+		// no content to learn from (change C17).
+		if !c.Implicit {
+			ev.Dev = append(ev.Dev, c)
+		}
+	}
+	implicit := 0
 	ids := make([]string, 0, len(h.st.Tasks))
 	for id := range h.st.Tasks {
 		ids = append(ids, id)
@@ -234,8 +361,13 @@ func (h *Harvester) Evidence() (Evidence, error) {
 			ev.heldTasks[o] = true
 		}
 		if h.st.Added[id] {
-			ev.HeldOut++
+			if h.st.Implicit[id] {
+				implicit++
+			} else {
+				ev.Explicit++
+			}
 		}
 	}
+	ev.HeldOut = ev.Explicit + implicit/2
 	return ev, nil
 }

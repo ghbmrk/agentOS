@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/modem"
 )
 
 // AutoReply is a context-scoped reply the agent composed under an ADP-11
@@ -30,6 +32,32 @@ type Queued struct {
 	SendAt time.Time
 	Reply  AutoReply
 	Held   bool
+	// Late is set at release on a reply (not a held effect) released more
+	// than LateRelease after its window, or whose window saw the box's
+	// line fail to send: its silence is not the owner's (security B1(a)
+	// on PW3), so it is never read as an implicit acceptance.
+	Late bool
+	// Alerted is when the owner was texted the reply's alert; zero for a
+	// held effect, or before the alert went out.
+	Alerted time.Time
+}
+
+// LateRelease is how long after its window a queued reply may be released
+// and still count as on time: the daemon releases every minute.
+const LateRelease = 2 * time.Minute
+
+// watchedLine records when the box's line fails to send.
+type watchedLine struct {
+	modem.Modem
+	c *Channel
+}
+
+func (w watchedLine) Send(to, text string) error {
+	err := w.Modem.Send(to, text)
+	if err != nil {
+		w.c.lineFailed.Store(w.c.cfg.Now().UnixNano())
+	}
+	return err
 }
 
 // QueueResult says what happened to a reply.
@@ -90,7 +118,10 @@ func (c *Channel) QueueAutoReply(ar AutoReply) (QueueResult, error) {
 		c.mu.Unlock()
 		return QueueResult{}, err
 	}
+	c.mu.Lock()
+	q.Alerted = now
 	out := *q
+	c.mu.Unlock()
 	return QueueResult{Queued: &out}, nil
 }
 
@@ -107,6 +138,10 @@ func (c *Channel) DueAutoReplies() []Queued {
 	var out []Queued
 	for id, q := range c.queued {
 		if !now.Before(q.SendAt) {
+			if !q.Held {
+				failed := time.Unix(0, c.lineFailed.Load())
+				q.Late = now.Sub(q.SendAt) > LateRelease || q.Alerted.IsZero() || !failed.Before(q.Alerted)
+			}
 			out = append(out, *q)
 			delete(c.queued, id)
 			c.retireLocked(id, now)
@@ -116,9 +151,19 @@ func (c *Channel) DueAutoReplies() []Queued {
 	for id, t := range c.released {
 		if now.Sub(t) >= RetireFor {
 			delete(c.released, id)
+			delete(c.lateUndo, id)
 		}
 	}
 	return out
+}
+
+// UndoneAfterRelease reports whether the owner texted UNDO for id after
+// it was released: too late to stop it, but not silence the owner chose,
+// so the gate reports no implicit acceptance for it (L3 MUST-4 on #109).
+func (c *Channel) UndoneAfterRelease(id string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lateUndo[id]
 }
 
 // ResumeWindow is the fresh undo window RESUME gives each held effect or
@@ -133,6 +178,7 @@ func (c *Channel) undoLocked(id string, now time.Time, decided *[]Decision) stri
 	q := c.queued[id]
 	if q == nil {
 		if _, ok := c.released[id]; ok {
+			c.lateUndo[id] = true
 			return fmt.Sprintf("%s is past its undo window; it was released.", id)
 		}
 		return fmt.Sprintf("Nothing to undo for %s.", id)

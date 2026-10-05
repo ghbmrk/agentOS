@@ -84,7 +84,7 @@ Covered: 113 / 144 requirement IDs
 | CAP-2 | — |
 | CAP-3 | `broker/events/bus_test.go`, `broker/mail/watch_test.go`, `broker/recall/recall_test.go`, `broker/recall/review_test.go`, `broker/recall/segment_test.go` |
 | CAP-4 | `broker/events/attention_test.go`, `broker/events/bus_test.go`, `broker/mail/watch_test.go` |
-| CAP-5 | `broker/cmd/agentos-guest-bridge/main_test.go`, `broker/compile/compile_test.go`, `broker/compile/shape_test.go`, `broker/skill/format/format_test.go`, `broker/skill/skill_test.go` |
+| CAP-5 | `broker/cmd/agentos-guest-bridge/main_test.go`, `broker/compile/compile_test.go`, `broker/compile/implicit_test.go`, `broker/compile/shape_test.go`, `broker/skill/format/format_test.go`, `broker/skill/skill_test.go` |
 | CAP-6 | `broker/attention/attention_test.go` |
 | CAP-7 | — |
 | CAP-8 | — |
@@ -102,12 +102,12 @@ Covered: 113 / 144 requirement IDs
 | ADP-10 | `broker/cmd/agentos-egress/routerdenial_test.go`, `broker/cmd/agentos-egress/server_test.go`, `broker/e2e/a14_test.go`, `broker/e2e/openclaw_config_test.go`, `broker/egress/denied_test.go`, `broker/egress/egress_test.go`, `broker/egress/handlerfor_test.go`, `broker/egress/journal_test.go`, `broker/egress/verb_test.go`, `broker/guest/plane_test.go`, `broker/journal/egress_test.go`, `broker/mail/custody_test.go`, `broker/modelroute/journal_test.go`, `broker/modelroute/modelroute_test.go`, `broker/route/route_test.go` |
 | ADP-11 | `broker/attention/attention_test.go`, `broker/grants/channel_test.go`, `broker/grants/gate_test.go`, `broker/grants/outcome_test.go`, `broker/mail/gate_test.go`, `broker/mail/reply_test.go`, `broker/owner/channel_test.go`, `broker/owner/commit_test.go`, `broker/owner/review_test.go` |
 | ADP-12 | `broker/modem/secondline/secondline_test.go`, `broker/modem/sipline/sipline_test.go`, `broker/owner/channel_test.go` |
-| CHG-1 | `broker/change/pipeline_test.go`, `broker/change/resume_test.go`, `broker/change/review_test.go`, `broker/change/split_test.go`, `broker/change/task_test.go`, `broker/change/wiring_test.go`, `broker/cmd/agentosd/eval_test.go`, `broker/cmd/agentosd/tasks_test.go`, `broker/grants/outcome_test.go`, `broker/loops/loop1_test.go`, `broker/loops/wiring_test.go`, `broker/modelroute/modelroute_test.go`, `broker/replay/replay_test.go` |
+| CHG-1 | `broker/change/implicit_test.go`, `broker/change/pipeline_test.go`, `broker/change/resume_test.go`, `broker/change/review_test.go`, `broker/change/split_test.go`, `broker/change/task_test.go`, `broker/change/wiring_test.go`, `broker/cmd/agentosd/eval_test.go`, `broker/cmd/agentosd/tasks_test.go`, `broker/compile/implicit_test.go`, `broker/grants/outcome_test.go`, `broker/loops/loop1_test.go`, `broker/loops/wiring_test.go`, `broker/modelroute/modelroute_test.go`, `broker/replay/replay_test.go` |
 | CHG-2 | `broker/change/pipeline_test.go`, `broker/change/wiring_test.go`, `broker/cmd/agentosd/learn_test.go`, `broker/daemon/learning_wiring_test.go`, `broker/grants/change_test.go`, `broker/grants/loops_test.go` |
 | CHG-3 | `broker/change/pipeline_test.go`, `broker/change/review_test.go`, `broker/change/wiring_test.go`, `broker/grants/change_test.go`, `broker/replay/replay_test.go`, `broker/update/attest_test.go`, `broker/update/hardening_test.go` |
 | CHG-4 | `broker/change/share_test.go` |
 | CHG-5 | `broker/change/share_test.go` |
-| CHG-6 | `broker/change/notice_test.go`, `broker/change/pipeline_test.go`, `broker/change/review_test.go`, `broker/change/routing_test.go`, `broker/change/wiring_test.go`, `broker/grants/change_test.go` |
+| CHG-6 | `broker/change/implicit_test.go`, `broker/change/notice_test.go`, `broker/change/pipeline_test.go`, `broker/change/review_test.go`, `broker/change/routing_test.go`, `broker/change/wiring_test.go`, `broker/grants/change_test.go` |
 | LOOP-0 | `broker/cmd/agentosd/learn_test.go`, `broker/control/settings_test.go`, `broker/daemon/learning_wiring_test.go`, `broker/grants/loops_test.go`, `broker/loops/settings_test.go`, `broker/loops/wiring_test.go`, `broker/owner/settings_test.go` |
 | LOOP-1 | `broker/admission/admission_test.go`, `broker/change/resume_test.go`, `broker/cmd/agentosd/learn_test.go`, `broker/loops/loop1_test.go`, `broker/loops/scheduler_test.go` |
 | LOOP-2 | `broker/cmd/agentosd/learn_test.go`, `broker/loops/scheduler_test.go`, `broker/loops/settings_test.go`, `broker/meter/share_test.go`, `broker/meter/spare_test.go` |
