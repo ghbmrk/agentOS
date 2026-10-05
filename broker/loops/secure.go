@@ -42,7 +42,10 @@ const (
 // Target is what containment pauses: a grant or an executor (LOOP-9).
 type Target struct {
 	Kind string `json:"kind"` // "grant" or "executor"
-	Name string `json:"name"`
+	Name string `json:"name"` // the grant ID or executor name
+	// Label is what the owner calls it ("pre-allowance P4", "the mail
+	// tool"), from the wiring; owner text never says grant or executor.
+	Label string `json:"label,omitempty"`
 }
 
 // Artifact is one hashed thing the signed release names: an image or a
@@ -112,6 +115,8 @@ type Finding struct {
 	Detail   string   `json:"detail"`
 	Severity Severity `json:"severity"`
 	Contain  *Target  `json:"contain,omitempty"`
+	// Fixed is the first fixed version, for an advisory.
+	Fixed string `json:"fixed,omitempty"`
 	// Rule is the regression fixture's input, empty when the finding is
 	// not something a change could reintroduce (expiry, drift).
 	Rule []byte `json:"rule,omitempty"`
@@ -147,14 +152,18 @@ type GuardConfig struct {
 	Contain Containment
 	// Fixer may be nil: findings then wait for a fix from an update.
 	Fixer Fixer
-	// Notify texts the owner a High finding at once, in fixed wording.
-	Notify func(line string)
+	// Notify texts the owner one message per pass with that pass's High
+	// findings, in fixed wording. Urgent marks what may break quiet hours
+	// (CH-15): a tampered file or a vulnerability, not an expiring
+	// credential.
+	Notify func(text string, urgent bool)
 	// MaxPauses caps automatic containment per pass, so a bad advisory
 	// feed cannot pause everything; the owner is texted about the rest.
 	// Default 3.
 	MaxPauses int
-	// ReText is how long a finding that clears and comes back stays
-	// untexted. Default 24 hours.
+	// ReText is how long a finding must stay clear to be texted again when
+	// it comes back; sooner, it is in the digest as "again". Default 24
+	// hours.
 	ReText time.Duration
 	// Every is how often the passive checks run. Default 6 hours.
 	Every time.Duration
@@ -175,6 +184,7 @@ type Guard struct {
 	force bool
 	notes []string // checks that could not run on the last pass
 	stale string
+	more  []string // lines held back from the last text, for MORE
 }
 
 type secureState struct {
@@ -187,9 +197,9 @@ type secureState struct {
 	// Paused are containments still in force, by target, kept after their
 	// finding clears until the owner resumes the target.
 	Paused map[string]Record `json:"paused,omitempty"`
-	// Texted is when each finding was last texted, so a flapping finding
-	// is not texted again within ReText.
-	Texted map[string]time.Time `json:"texted,omitempty"`
+	// Cleared is when each finding last cleared, so a flapping finding is
+	// not texted again unless it stayed clear for ReText.
+	Cleared map[string]time.Time `json:"cleared,omitempty"`
 }
 
 // Record is a finding's preserved evidence (LOOP-9).
@@ -201,6 +211,10 @@ type Record struct {
 	Fix       string    `json:"fix,omitempty"` // pipeline state of the fix, if any
 	FixReason string    `json:"fix_reason,omitempty"`
 	Digest    string    `json:"digest"` // sha256 of the finding, for tamper evidence
+	// Texted marks a finding the owner was texted about; Again one that
+	// came back too soon after clearing to be texted.
+	Texted bool `json:"texted,omitempty"`
+	Again  bool `json:"again,omitempty"`
 	// Seen counts the times the finding appeared; Last is the latest.
 	Seen int       `json:"seen"`
 	Last time.Time `json:"last"`
@@ -230,7 +244,7 @@ func NewGuard(cfg GuardConfig) (*Guard, error) {
 		cfg.Now = time.Now
 	}
 	if cfg.Notify == nil {
-		cfg.Notify = func(string) {}
+		cfg.Notify = func(string, bool) {}
 	}
 	s := &Guard{cfg: cfg, force: true}
 	b, err := cfg.Store.Load()
@@ -248,8 +262,8 @@ func NewGuard(cfg GuardConfig) (*Guard, error) {
 	if s.st.Paused == nil {
 		s.st.Paused = map[string]Record{}
 	}
-	if s.st.Texted == nil {
-		s.st.Texted = map[string]time.Time{}
+	if s.st.Cleared == nil {
+		s.st.Cleared = map[string]time.Time{}
 	}
 	return s, nil
 }
@@ -283,9 +297,10 @@ func (s *Guard) Next(_ context.Context, _ bool) (Job, bool) {
 // how many findings were new: Loop 2's measured value (LOOP-3).
 func (s *Guard) Pass(ctx context.Context) (int, error) {
 	found, notes, stale := s.check()
+	now := s.cfg.Now()
 	s.mu.Lock()
 	s.notes, s.stale, s.force = notes, stale, false
-	s.st.Last = s.cfg.Now()
+	s.st.Last = now
 	seen := map[string]bool{}
 	var fresh []Finding
 	for _, f := range found {
@@ -294,9 +309,19 @@ func (s *Guard) Pass(ctx context.Context) (int, error) {
 			fresh = append(fresh, f)
 		}
 	}
-	for id := range s.st.Open {
-		if !seen[id] {
-			delete(s.st.Open, id) // no longer observed; its evidence stays
+	var lines []string
+	urgent := false
+	for _, id := range sortedKeys(s.st.Open) {
+		rec := s.st.Open[id]
+		if seen[id] {
+			continue
+		}
+		// No longer observed; its evidence stays. A pause it caused stays
+		// too, and the owner hears it cleared where they heard of it.
+		delete(s.st.Open, id)
+		s.st.Cleared[id] = now
+		if rec.Contained == "paused" && rec.Texted {
+			lines = append(lines, clearedLine(rec))
 		}
 	}
 	s.mu.Unlock()
@@ -310,19 +335,78 @@ func (s *Guard) Pass(ctx context.Context) (int, error) {
 		if pause {
 			pauses++
 		}
-		if err := s.handle(ctx, f, pause); err != nil {
+		rec, err := s.handle(ctx, f, pause)
+		if err != nil {
 			errs = append(errs, err)
 		}
+		if rec.Texted {
+			lines = append(lines, ownerLine(rec))
+			urgent = urgent || rec.Finding.Check != CheckExpiry
+		}
 	}
+	text := s.batch(lines)
 	s.mu.Lock()
 	err := s.saveLocked()
 	s.mu.Unlock()
+	if text != "" {
+		s.cfg.Notify(text, urgent)
+	}
 	return len(fresh), errors.Join(append(errs, err)...)
 }
 
+// textBudget is three SMS segments (CH-15).
+const textBudget = 3 * 153
+
+// batch joins a pass's lines into one text within textBudget, holding the
+// rest for MORE.
+func (s *Guard) batch(lines []string) string {
+	if len(lines) == 0 {
+		return ""
+	}
+	const tail = " Reply MORE for the rest."
+	text := "Security checks:"
+	n := 0
+	for ; n < len(lines); n++ {
+		budget := textBudget
+		if n < len(lines)-1 {
+			budget -= len(tail)
+		}
+		if n > 0 && len(text)+1+len(lines[n]) > budget {
+			break
+		}
+		text += " " + lines[n]
+	}
+	s.mu.Lock()
+	s.more = append([]string(nil), lines[n:]...)
+	s.mu.Unlock()
+	if n < len(lines) {
+		text += tail
+	}
+	return text
+}
+
+// More returns the lines the last text held back (the owner's MORE), once.
+func (s *Guard) More() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := s.more
+	s.more = nil
+	return out
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // handle is LOOP-9: contain, preserve evidence, add the regression
-// fixture, propose a fix, notify.
-func (s *Guard) handle(ctx context.Context, f Finding, pause bool) error {
+// fixture, propose a fix. It decides whether the owner is texted; Pass
+// sends the text.
+func (s *Guard) handle(ctx context.Context, f Finding, pause bool) (Record, error) {
 	rec := Record{Finding: f, At: s.cfg.Now(), Contained: "none", Digest: digestOf(f)}
 	var errs []error
 	if f.Contain != nil {
@@ -337,8 +421,12 @@ func (s *Guard) handle(ctx context.Context, f Finding, pause bool) error {
 			rec.Contained = "paused"
 		}
 	}
-	// Evidence is saved before anything slower runs.
 	s.mu.Lock()
+	if t, ok := s.st.Cleared[f.ID]; ok && rec.At.Sub(t) < s.cfg.ReText {
+		rec.Again = true // back too soon: the digest says so instead
+	}
+	rec.Texted = !rec.Again && (f.Severity == High || rec.Contained == "capped")
+	// Evidence is saved before anything slower runs.
 	s.st.Open[f.ID] = rec
 	if rec.Contained == "paused" {
 		s.st.Paused[targetKey(*f.Contain)] = rec
@@ -375,18 +463,8 @@ func (s *Guard) handle(ctx context.Context, f Finding, pause bool) error {
 	s.st.Open[f.ID] = rec
 	e := &s.st.Evidence[ev]
 	e.Fixture, e.Fix, e.FixReason = rec.Fixture, rec.Fix, rec.FixReason
-	text := f.Severity == High || rec.Contained == "capped"
-	if t, ok := s.st.Texted[f.ID]; text && ok && rec.Contained != "paused" && rec.At.Sub(t) < s.cfg.ReText {
-		text = false // flapping: it was texted recently and nothing new was paused
-	}
-	if text {
-		s.st.Texted[f.ID] = rec.At
-	}
 	s.mu.Unlock()
-	if text {
-		s.cfg.Notify(ownerLine(rec))
-	}
-	return errors.Join(errs...)
+	return rec, errors.Join(errs...)
 }
 
 // evidenceLocked records a finding's evidence, once per digest, and
@@ -495,6 +573,7 @@ func (s *Guard) check() (found []Finding, notes []string, stale string) {
 					}
 					add(CheckAdvisory, p.Name, a.ID, sev, p.Contain,
 						fixtureInput(FixtureRule{Check: CheckAdvisory, Subject: p.Name, Fixed: a.Fixed, Scheme: p.Scheme}))
+					found[len(found)-1].Fixed = a.Fixed
 				}
 			}
 		}
@@ -610,18 +689,19 @@ func AnswerFixture(input []byte, f Facts) []byte {
 	return []byte("fails")
 }
 
-var checkWords = map[Check]string{
-	CheckHash:     "a file that does not match the signed release",
-	CheckAdvisory: "a known vulnerability",
-	CheckDrift:    "a setting changed outside the box's change process",
-	CheckExpiry:   "a credential that expires",
+// plainCheck names a check for the owner.
+var plainCheck = map[Check]string{
+	CheckHash:     "file hashes",
+	CheckAdvisory: "known vulnerabilities",
+	CheckDrift:    "settings",
+	CheckExpiry:   "credential expiry",
 }
 
-// safe keeps owner-facing names to a fixed alphabet.
+// safeName keeps owner-facing names to a fixed alphabet.
 func safeName(s string) string {
 	var b strings.Builder
 	for _, r := range s {
-		if r < 128 && (r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("-_./:", r)) {
+		if r < 128 && (r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("-_./: ", r)) {
 			b.WriteRune(r)
 		}
 		if b.Len() >= 48 {
@@ -631,16 +711,63 @@ func safeName(s string) string {
 	return b.String()
 }
 
+func label(t *Target) string {
+	if t == nil || t.Label == "" {
+		return "the affected tool"
+	}
+	return safeName(t.Label)
+}
+
+func capFirst(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
+}
+
+// findingText is one finding in plain words, with the next step.
+func findingText(f Finding) string {
+	sub := safeName(f.Subject)
+	switch f.Check {
+	case CheckHash:
+		switch f.Detail {
+		case "not in the signed release":
+			return "File " + sub + " is not in the signed release."
+		case "could not be measured":
+			return "File " + sub + " could not be checked."
+		}
+		return "File " + sub + " does not match the signed release."
+	case CheckAdvisory:
+		return fmt.Sprintf("Known vulnerability in %s (%s), fixed in %s. The box takes the fix when an update has it.",
+			sub, safeName(f.Detail), safeName(f.Fixed))
+	case CheckDrift:
+		switch f.Detail {
+		case "missing":
+			return "Setting file " + sub + " is missing."
+		case "not adopted":
+			return "Setting file " + sub + " appeared outside the box's change process."
+		}
+		return "Setting file " + sub + " changed outside the box's change process."
+	case CheckExpiry:
+		if f.Detail == "expired" {
+			return "Credential " + sub + " has expired. Replace it on the box page."
+		}
+		return "Credential " + sub + " " + safeName(f.Detail) + ". Replace it on the box page."
+	}
+	return "Security finding on " + sub + "."
+}
+
+// ownerLine is a finding and what was done about it, in fixed wording.
 func ownerLine(r Record) string {
 	f := r.Finding
-	line := fmt.Sprintf("Security check found %s: %s (%s).", checkWords[f.Check], safeName(f.Subject), safeName(f.Detail))
+	line := findingText(f)
 	switch r.Contained {
 	case "paused":
-		line += fmt.Sprintf(" Paused %s %s until it is fixed.", f.Contain.Kind, safeName(f.Contain.Name))
+		line += " Paused " + label(f.Contain) + ". It stays paused until you turn it back on."
 	case "failed":
-		line += " Could not pause it. STOP pauses everything."
+		line += " Could not pause " + label(f.Contain) + ". STOP pauses everything."
 	case "capped":
-		line += " Not paused: too many findings at once."
+		line += " Not paused (too many findings at once)."
 		if f.Contain.Kind == "grant" {
 			line += fmt.Sprintf(" Reply PAUSE %s to pause it, or STOP to pause everything.", safeName(f.Contain.Name))
 		} else {
@@ -650,35 +777,84 @@ func ownerLine(r Record) string {
 	return line
 }
 
-// Digest is Loop 2's lines for the owner's digest: open findings, checks
-// that could not run, and stale advisories. A Low finding is reported only
-// here.
+func clearedLine(r Record) string {
+	return fmt.Sprintf("Cleared: %s. %s is still paused; ask your agent to turn it back on.",
+		safeName(r.Finding.Subject), capFirst(label(r.Finding.Contain)))
+}
+
+// digestCap is how many open-finding lines the digest shows.
+const digestCap = 3
+
+// Digest is Loop 2's lines for the owner's digest: open findings (High
+// first, advisories grouped per package, at most digestCap lines), pauses
+// whose finding cleared, checks that could not run, and stale advisories.
+// A Low finding is reported only here.
 func (s *Guard) Digest() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	type item struct {
+		high bool
+		line string
+	}
+	var items []item
+	pkgs := map[string][]Record{}
+	for _, id := range sortedKeys(s.st.Open) {
+		r := s.st.Open[id]
+		if r.Finding.Check == CheckAdvisory {
+			pkgs[r.Finding.Subject] = append(pkgs[r.Finding.Subject], r)
+			continue
+		}
+		line := ownerLine(r)
+		if r.Again {
+			line = "Again: " + line
+		}
+		items = append(items, item{r.Finding.Severity == High, line})
+	}
+	for _, name := range sortedKeys(pkgs) {
+		rs := pkgs[name]
+		if len(rs) == 1 {
+			line := ownerLine(rs[0])
+			if rs[0].Again {
+				line = "Again: " + line
+			}
+			items = append(items, item{rs[0].Finding.Severity == High, line})
+			continue
+		}
+		high, fixed := false, ""
+		var ids []string
+		for _, r := range rs {
+			high = high || r.Finding.Severity == High
+			ids = append(ids, safeName(r.Finding.Detail))
+			var fr FixtureRule
+			_ = json.Unmarshal(r.Finding.Rule, &fr)
+			if fixed == "" || versionBelow(fr.Scheme, fixed, r.Finding.Fixed) {
+				fixed = r.Finding.Fixed
+			}
+		}
+		items = append(items, item{high, fmt.Sprintf("Known vulnerabilities in %s (%s), all fixed in %s. The box takes the fix when an update has it.",
+			safeName(name), strings.Join(ids, ", "), safeName(fixed))})
+	}
+	sort.SliceStable(items, func(i, j int) bool { return items[i].high && !items[j].high })
 	var out []string
-	ids := make([]string, 0, len(s.st.Open))
-	for id := range s.st.Open {
-		ids = append(ids, id)
+	for i, it := range items {
+		if i == digestCap {
+			out = append(out, fmt.Sprintf("And %d more security findings: ask your agent for the list.", len(items)-digestCap))
+			break
+		}
+		out = append(out, "Security check: "+it.line)
 	}
-	sort.Strings(ids)
-	for _, id := range ids {
-		out = append(out, ownerLine(s.st.Open[id]))
-	}
-	keys := make([]string, 0, len(s.st.Paused))
-	for k := range s.st.Paused {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
+	for _, k := range sortedKeys(s.st.Paused) {
 		r := s.st.Paused[k]
 		if _, open := s.st.Open[r.Finding.ID]; !open {
-			out = append(out, fmt.Sprintf("%s %s is still paused after a security finding that has since cleared.",
-				strings.ToUpper(r.Finding.Contain.Kind[:1])+r.Finding.Contain.Kind[1:], safeName(r.Finding.Contain.Name)))
+			out = append(out, clearedLine(r))
 		}
 	}
 	if len(s.notes) > 0 {
-		out = append(out, "Security checks not run: "+strings.Join(s.notes, ", ")+".")
+		var names []string
+		for _, n := range s.notes {
+			names = append(names, plainCheck[Check(n)])
+		}
+		out = append(out, "Security checks not run: "+strings.Join(names, ", ")+".")
 	}
 	if s.stale != "" {
 		out = append(out, s.stale)

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -30,7 +31,7 @@ func (b *box) Box() Box {
 	return Box{
 		Signed: func() (map[string]string, error) { return b.signed, nil },
 		Artifacts: []Artifact{
-			{Name: "guest-image/openclaw", Contain: &Target{Kind: "executor", Name: "openclaw"}},
+			{Name: "guest-image/openclaw", Contain: &Target{Kind: "executor", Name: "openclaw", Label: "the agent machine"}},
 			{Name: "dep/libfoo"},
 		},
 		Measure: func(n string) (string, error) {
@@ -54,7 +55,7 @@ func cleanBox() *box {
 	return &box{
 		signed:   map[string]string{"guest-image/openclaw": "aa", "dep/libfoo": "bb"},
 		measured: map[string]string{"guest-image/openclaw": "aa", "dep/libfoo": "bb"},
-		pkgs:     []Package{{Name: "openssl", Version: "3.0.15", Contain: &Target{Kind: "executor", Name: "egress"}}},
+		pkgs:     []Package{{Name: "openssl", Version: "3.0.15", Contain: &Target{Kind: "executor", Name: "egress", Label: "the network gateway"}}},
 		snap: Snapshot{Fetched: t0.Add(-time.Hour), Advisories: []Advisory{
 			{ID: "ADV-1", Package: "openssl", Fixed: "3.0.14", Severity: "high"},
 		}},
@@ -140,14 +141,15 @@ func (f *fixer) Fix(context.Context, Finding) (change.Candidate, error) {
 }
 
 type guardRig struct {
-	b     *box
-	p     *change.Pipeline
-	c     *contain
-	fx    *fixer
-	store *change.MemStore
-	now   time.Time
-	texts []string
-	g     *Guard
+	b      *box
+	p      *change.Pipeline
+	c      *contain
+	fx     *fixer
+	store  *change.MemStore
+	now    time.Time
+	texts  []string
+	urgent []bool
+	g      *Guard
 }
 
 func newGuardRig(t *testing.T, b *box) *guardRig {
@@ -160,7 +162,7 @@ func newGuardRig(t *testing.T, b *box) *guardRig {
 func (r *guardRig) reopen(t *testing.T) {
 	t.Helper()
 	cfg := GuardConfig{Box: r.b.Box(), Pipeline: r.p, Store: r.store, Contain: r.c,
-		Notify: func(s string) { r.texts = append(r.texts, s) }, Now: func() time.Time { return r.now }}
+		Notify: func(s string, u bool) { r.texts, r.urgent = append(r.texts, s), append(r.urgent, u) }, Now: func() time.Time { return r.now }}
 	if r.fx != nil {
 		cfg.Fixer = r.fx
 	}
@@ -250,7 +252,7 @@ func TestPassiveChecks(t *testing.T) {
 	if _, err := g.Pass(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if d := strings.Join(g.Digest(), " "); !strings.Contains(d, "not run: hash, advisory, drift, expiry") {
+	if d := strings.Join(g.Digest(), " "); !strings.Contains(d, "not run: file hashes, known vulnerabilities, settings, credential expiry") {
 		t.Errorf("unwired checks: %s", d)
 	}
 }
@@ -269,7 +271,7 @@ func TestFindingHandling(t *testing.T) {
 	if n := r.pass(t); n != 2 {
 		t.Fatalf("findings = %d, want 2", n)
 	}
-	if len(r.c.got) != 1 || r.c.got[0] != (Target{Kind: "executor", Name: "egress"}) {
+	if len(r.c.got) != 1 || r.c.got[0] != (Target{Kind: "executor", Name: "egress", Label: "the network gateway"}) {
 		t.Fatalf("contained %+v", r.c.got)
 	}
 	ev := r.g.Evidence()
@@ -291,7 +293,10 @@ func TestFindingHandling(t *testing.T) {
 		t.Fatalf("fix calls %d, state %q (%s)", r.fx.calls, adv.Fix, adv.FixReason)
 	}
 	// Only the High finding is texted; the Low one is in the digest.
-	if len(r.texts) != 1 || !strings.Contains(r.texts[0], "known vulnerability: openssl") || !strings.Contains(r.texts[0], "Paused executor egress") {
+	if len(r.texts) != 1 || !r.urgent[0] ||
+		!strings.Contains(r.texts[0], "Known vulnerability in openssl (ADV-1), fixed in 3.0.14.") ||
+		!strings.Contains(r.texts[0], "Paused the network gateway. It stays paused until you turn it back on.") ||
+		strings.Contains(r.texts[0], "executor") || strings.Contains(r.texts[0], "grant") {
 		t.Fatalf("texts %q", r.texts)
 	}
 	if d := strings.Join(r.g.Digest(), "\n"); !strings.Contains(d, "cal-cert") {
@@ -304,9 +309,15 @@ func TestFindingHandling(t *testing.T) {
 	if n := r.pass(t); n != 0 || len(r.c.got) != 1 || len(r.texts) != 1 || r.fx.calls != 1 {
 		t.Fatalf("re-handled: n=%d contained=%d texts=%d fixes=%d", n, len(r.c.got), len(r.texts), r.fx.calls)
 	}
-	// Fixed, then back: handled again, and the evidence keeps both.
+	// Fixed: the owner, texted about the pause, is texted that it cleared
+	// and that the pause stays.
 	b.pkgs[0].Version = "3.0.14"
 	r.pass(t)
+	if len(r.texts) != 2 || !strings.Contains(r.texts[1], "Cleared: openssl. The network gateway is still paused; ask your agent to turn it back on.") {
+		t.Fatalf("cleared text %q", r.texts)
+	}
+	// Back within a day: handled again (contained, evidence), but not
+	// texted; the digest says "again".
 	b.pkgs[0].Version = "3.0.13"
 	r.fx.cand.Files = change.Tree{"config/facts.json": facts("3.0.15")}
 	if n := r.pass(t); n != 1 || len(r.c.got) != 2 {
@@ -321,9 +332,11 @@ func TestFindingHandling(t *testing.T) {
 			t.Fatalf("seen %d, want 2", e.Seen)
 		}
 	}
-	// It was paused again, so it was texted again.
 	if len(r.texts) != 2 {
 		t.Fatalf("texts after reappearance: %q", r.texts)
+	}
+	if d := strings.Join(r.g.Digest(), "\n"); !strings.Contains(d, "Security check: Again: Known vulnerability in openssl") {
+		t.Fatalf("digest %s", d)
 	}
 
 	// Containment that fails is recorded and said, never silent.
@@ -334,7 +347,7 @@ func TestFindingHandling(t *testing.T) {
 	if _, err := r2.g.Pass(context.Background()); err == nil {
 		t.Fatal("failed containment returned no error")
 	}
-	if len(r2.texts) != 1 || !strings.Contains(r2.texts[0], "Could not pause it") {
+	if len(r2.texts) != 1 || !strings.Contains(r2.texts[0], "Could not pause the agent machine. STOP pauses everything.") {
 		t.Fatalf("texts %q", r2.texts)
 	}
 }
@@ -356,13 +369,8 @@ func TestPauseCap(t *testing.T) {
 	if len(r.c.got) != 3 {
 		t.Fatalf("paused %d, want 3", len(r.c.got))
 	}
-	capped := 0
-	for _, x := range r.texts {
-		if strings.Contains(x, "Not paused: too many findings at once") {
-			capped++
-		}
-	}
-	if capped != 2 || len(r.texts) != 2 {
+	capped := strings.Count(strings.Join(r.texts, " "), "Not paused (too many findings at once)")
+	if capped != 2 || len(r.texts) != 1 { // one text for the pass
 		t.Fatalf("texts %q", r.texts)
 	}
 }
@@ -407,8 +415,8 @@ func TestFixturesAllowLaterReleases(t *testing.T) {
 }
 
 // LOOP-9 for the owner: a pause outlives its cleared finding in the digest
-// until resumed, and a flapping finding is not re-texted within a day
-// unless something new was paused.
+// until resumed, and a finding that comes back is texted again only if it
+// stayed clear for a day.
 func TestPausedAndFlapping(t *testing.T) {
 	b := cleanBox()
 	b.pkgs[0].Version = "3.0.13"
@@ -417,10 +425,10 @@ func TestPausedAndFlapping(t *testing.T) {
 	b.pkgs[0].Version = "3.0.14"
 	r.pass(t)
 	d := strings.Join(r.g.Digest(), "\n")
-	if !strings.Contains(d, "Executor egress is still paused after a security finding that has since cleared.") {
+	if !strings.Contains(d, "Cleared: openssl. The network gateway is still paused; ask your agent to turn it back on.") {
 		t.Fatalf("digest: %s", d)
 	}
-	must(t, r.g.Resumed(Target{Kind: "executor", Name: "egress"}))
+	must(t, r.g.Resumed(Target{Kind: "executor", Name: "egress", Label: "the network gateway"}))
 	if d := strings.Join(r.g.Digest(), "\n"); strings.Contains(d, "still paused") {
 		t.Fatalf("after resume: %s", d)
 	}
@@ -439,13 +447,55 @@ func TestPausedAndFlapping(t *testing.T) {
 	if len(r2.texts) != 1 {
 		t.Fatalf("flapping texts %d, want 1", len(r2.texts))
 	}
-	r2.now = r2.now.Add(25 * time.Hour)
 	b2.live["config/quiet.json"] = "c1"
 	r2.pass(t)
+	r2.now = r2.now.Add(25 * time.Hour)
 	b2.live["config/quiet.json"] = "edited"
 	r2.pass(t)
 	if len(r2.texts) != 2 {
 		t.Fatalf("texts after a day %d, want 2", len(r2.texts))
+	}
+}
+
+// LOOP-9 owner text: one text per pass within three segments, the rest
+// on MORE; an expiry alone is not urgent; the digest groups advisories per
+// package and shows at most three findings.
+func TestOwnerText(t *testing.T) {
+	b := cleanBox()
+	b.signed, b.measured = map[string]string{}, map[string]string{}
+	for i := 0; i < 8; i++ {
+		b.live[fmt.Sprintf("config/file-number-%d.json", i)] = "x"
+	}
+	r := newGuardRig(t, b)
+	r.pass(t)
+	if len(r.texts) != 1 || len(r.texts[0]) > textBudget || !strings.HasSuffix(r.texts[0], "Reply MORE for the rest.") {
+		t.Fatalf("texts %q", r.texts)
+	}
+	shown := strings.Count(r.texts[0], "Setting file") + strings.Count(r.texts[0], "File ")
+	if more := r.g.More(); shown+len(more) != 10 || len(r.g.More()) != 0 {
+		t.Fatalf("shown %d + more %d, want 10, once", shown, len(more))
+	}
+	d := r.g.Digest()
+	if !strings.Contains(strings.Join(d, "\n"), "And 7 more security findings") {
+		t.Fatalf("digest %q", d)
+	}
+
+	b2 := cleanBox()
+	b2.expiries = []Expiry{{Name: "old-token", NotAfter: t0.Add(-time.Hour)}}
+	b2.pkgs[0].Version = "3.0.15" // no advisory
+	r2 := newGuardRig(t, b2)
+	r2.pass(t)
+	if len(r2.texts) != 1 || r2.urgent[0] || !strings.Contains(r2.texts[0], "Credential old-token has expired. Replace it on the box page.") {
+		t.Fatalf("expiry text %q urgent %v", r2.texts, r2.urgent)
+	}
+
+	b3 := cleanBox()
+	b3.pkgs[0].Version = "3.0.1"
+	b3.snap.Advisories = append(b3.snap.Advisories, Advisory{ID: "ADV-2", Package: "openssl", Fixed: "3.0.12", Severity: "low"})
+	r3 := newGuardRig(t, b3)
+	r3.pass(t)
+	if d := strings.Join(r3.g.Digest(), "\n"); !strings.Contains(d, "Known vulnerabilities in openssl (ADV-1, ADV-2), all fixed in 3.0.14.") {
+		t.Fatalf("grouped digest %s", d)
 	}
 }
 
