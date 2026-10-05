@@ -131,8 +131,8 @@ func main() {
 	flag.StringVar(&cfg.SocketDir, "sockets", "/run/agentos", "socket directory (created 0700)")
 	flag.StringVar(&cfg.OwnerNumber, "owner", "", "owner's phone number, E.164")
 	flag.IntVar(&cfg.ModemUID, "modem-uid", -1, "uid of the modem bridge, the only peer allowed on the owner socket")
-	flag.Int64Var(&cfg.Admission.CapacityMB, "capacity-mb", 4500, "memory for agent machines, MB")
-	flag.Int64Var(&cfg.Admission.HeadroomMB, "headroom-mb", 600, "memory never admitted into, MB")
+	flag.Int64Var(&cfg.Admission.CapacityMB, "capacity-mb", defaultCapacityMB, "memory for agent machines, MB")
+	flag.Int64Var(&cfg.Admission.HeadroomMB, "headroom-mb", defaultHeadroomMB, "memory never admitted into, MB")
 	flag.Float64Var(&cfg.MaxPressure, "max-pressure", 10, "memory PSI (some avg10, %) above which only foreground is admitted")
 	flag.StringVar(&stateDir, "machines", "/var/lib/agentos/machines", "agent-machine layers and snapshots (created 0700)")
 	flag.StringVar(&runsc, "runsc", "", "gVisor runsc binary; empty runs no agent machines")
@@ -144,14 +144,14 @@ func main() {
 	flag.StringVar(&agentMachine, "agent-machine", "agent", "machine whose guest receives the owner's task chat")
 	flag.StringVar(&agentImage, "agent-image", "openclaw", "image the agent machine is created from on first start; empty keeps no agent machine")
 	flag.StringVar(&agentLaunch, "agent-launch", "/usr/lib/agentos/guest/launch.json", "how the agent machine starts: argv and env (guest/openclaw/launch.json)")
-	flag.Int64Var(&agentMemMB, "agent-mem-mb", 1536, "the agent machine's memory budget, MB")
+	flag.Int64Var(&agentMemMB, "agent-mem-mb", defaultAgentMemMB, "the agent machine's memory budget, MB")
 	flag.StringVar(&inboxPath, "guest-inbox", "/var/lib/agentos/guest-inbox.json", "unanswered owner messages to guests, kept across restarts")
 	flag.StringVar(&egressSocket, "egress", "/run/agentos-egress/model.sock", "the vault process's model socket (agentos-egress); empty serves no model route")
 	flag.StringVar(&verifySocket, "owner-verify", "/run/agentos-egress/verify.sock", "the vault process's verify socket, which checks the owner's code-generator codes; empty refuses high-tier codes")
 	flag.StringVar(&learn.Dir, "learn", "/var/lib/agentos/learn", "change pipeline and loop scheduler state (W3)")
 	flag.StringVar(&learn.Spare, "spare-meter", "/var/lib/agentos/spare-meter.json", "spare-time model budget state (LOOP-2), apart from -meter")
 	flag.StringVar(&learn.Routing, "routing", "/run/agentos-egress/routing.sock", "the vault process's routing socket, through which routing changes are read and adopted (W3); empty holds routing changes")
-	flag.Int64Var(&replayMemMB, "replay-mem-mb", 1024, "a replay machine's memory budget, MB (LOOP-5)")
+	flag.Int64Var(&replayMemMB, "replay-mem-mb", defaultReplayMemMB, "a replay machine's memory budget, MB (LOOP-5); with -agent-mem-mb it must fit in -capacity-mb less -headroom-mb")
 	qcfg := defaultQuestionConfig("/var/lib/agentos")
 	flag.StringVar(&qcfg.Path, "questions", qcfg.Path, "agents' questions to the owner, kept across restarts (P3-8)")
 	flag.StringVar(&qcfg.ClockPath, "clock-state", qcfg.ClockPath, "the box clock check's state (P2-9)")
@@ -261,6 +261,11 @@ func main() {
 					// Replay machines run the agent's image and launch.
 					spec, err := agentSpec(imgs, agentImage, agentLaunch, replayMemMB)
 					if err == nil {
+						if err = replayFits(cfg.Admission.CapacityMB, cfg.Admission.HeadroomMB, agentMemMB, replayMemMB); err != nil {
+							lp.noRoom.Store(true) // STATUS and LEARNING ON say so
+						}
+					}
+					if err == nil {
 						var ev *replay.Evaluator
 						if ev, err = lp.openEvaluator(m, services, evalConfig{Dir: filepath.Join(cfg.SocketDir, "replay"), Spec: spec, Egress: egressSocket}); err == nil {
 							defer ev.Shutdown()
@@ -283,6 +288,31 @@ func main() {
 	}
 	log.Printf("broker up; owner socket %s/%s", cfg.SocketDir, daemon.OwnerSocket)
 	d.Wait()
+}
+
+// Memory defaults, MB, from the RES-2 floor budget: an agent-machine pool
+// of about 3.9 GB (capacity less headroom) on the N95. A replay machine
+// gets its own budget, smaller than the agent's (PE2).
+const (
+	defaultCapacityMB  = 4500
+	defaultHeadroomMB  = 600
+	defaultAgentMemMB  = 1536
+	defaultReplayMemMB = 1024
+)
+
+// replayFits is PE2: the agent machine and one replay machine must fit in
+// the pool admission hands out (capacity less headroom) at once. If they
+// do not, admission refuses or preempts every evaluation while the agent
+// runs (replay R6) and learning stalls without a word, so replay
+// evaluation is not opened and the log says why.
+func replayFits(capacityMB, headroomMB, agentMB, replayMB int64) error {
+	if replayMB <= 0 {
+		return fmt.Errorf("-replay-mem-mb is %d", replayMB)
+	}
+	if pool := capacityMB - headroomMB; agentMB+replayMB > pool {
+		return fmt.Errorf("the agent machine (%d MB) and one replay machine (%d MB) do not fit in the %d MB pool (-capacity-mb less -headroom-mb)", agentMB, replayMB, pool)
+	}
+	return nil
 }
 
 // agentSpec is how the owner's agent machine starts, from the image flags
