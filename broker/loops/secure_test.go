@@ -131,10 +131,16 @@ func (c *contain) Contain(_ context.Context, t Target, _ string) error {
 type fixer struct {
 	cand  change.Candidate
 	calls int
+	err   func(ctx context.Context) error // if set, Fix fails with it
 }
 
-func (f *fixer) Fix(context.Context, Finding) (change.Candidate, error) {
+func (f *fixer) Fix(ctx context.Context, _ Finding) (change.Candidate, error) {
 	f.calls++
+	if f.err != nil {
+		if err := f.err(ctx); err != nil {
+			return change.Candidate{}, err
+		}
+	}
 	c := f.cand
 	c.Origin, c.Public = "fixer-claims-this", true // must be overwritten
 	return c, nil
@@ -150,6 +156,7 @@ type guardRig struct {
 	texts         []string
 	urgent        []bool
 	deferFixtures bool
+	pipe          SuitePipeline // overrides p when set
 	g             *Guard
 }
 
@@ -162,7 +169,11 @@ func newGuardRig(t *testing.T, b *box) *guardRig {
 
 func (r *guardRig) reopen(t *testing.T) {
 	t.Helper()
-	cfg := GuardConfig{Box: r.b.Box(), Pipeline: r.p, Store: r.store, Contain: r.c, FixturesLive: !r.deferFixtures,
+	var pipe SuitePipeline = r.p
+	if r.pipe != nil {
+		pipe = r.pipe
+	}
+	cfg := GuardConfig{Box: r.b.Box(), Pipeline: pipe, Store: r.store, Contain: r.c, FixturesLive: !r.deferFixtures,
 		Notify: func(s string, u bool) { r.texts, r.urgent = append(r.texts, s), append(r.urgent, u) }, Now: func() time.Time { return r.now }}
 	if r.fx != nil {
 		cfg.Fixer = r.fx

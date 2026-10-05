@@ -195,6 +195,24 @@ type Guard struct {
 	notes []string // checks that could not run on the last pass
 	stale string
 	more  []string // lines held back from the last text, for MORE
+	// fixes are fix candidates whose evaluation was cut short, by finding
+	// ID, in memory only (PE4).
+	fixes map[string]keptFix
+}
+
+// FixPending is a Record's Fix while its fix's evaluation was cut short
+// (PE4): the next pass offers the fix again.
+const FixPending = "pending"
+
+// maxKeptFixes bounds the kept fix candidates, oldest dropped first.
+const maxKeptFixes = 16
+
+// keptFix is a fixer's candidate, marked by Loop 2, kept for the exact
+// finding it was drafted for.
+type keptFix struct {
+	cand   change.Candidate
+	digest string
+	at     time.Time
 }
 
 type secureState struct {
@@ -316,11 +334,13 @@ func (s *Guard) Pass(ctx context.Context) (int, error) {
 	s.notes, s.stale, s.force = notes, stale, false
 	s.st.Last = now
 	seen := map[string]bool{}
-	var fresh []Finding
+	var fresh, pending []Finding
 	for _, f := range found {
 		seen[f.ID] = true
-		if _, open := s.st.Open[f.ID]; !open {
+		if rec, open := s.st.Open[f.ID]; !open {
 			fresh = append(fresh, f)
+		} else if rec.Fix == FixPending {
+			pending = append(pending, rec.Finding)
 		}
 	}
 	// later holds cleared and uncomparable lines, which follow new
@@ -335,6 +355,7 @@ func (s *Guard) Pass(ctx context.Context) (int, error) {
 		// No longer observed; its evidence stays. A pause it caused stays
 		// too, and the owner hears it cleared where they heard of it.
 		delete(s.st.Open, id)
+		delete(s.fixes, id)
 		s.st.Cleared[id] = now
 		if rec.Contained == "paused" && rec.Texted {
 			later = append(later, clearedLine(rec))
@@ -380,8 +401,28 @@ func (s *Guard) Pass(ctx context.Context) (int, error) {
 			urgent = urgent || rec.Finding.Check != CheckExpiry
 		}
 	}
+	// Fixes cut short on an earlier pass are offered again (PE4).
+	for _, f := range pending {
+		if ctx.Err() != nil || s.cfg.Fixer == nil || f.Rule == nil {
+			break
+		}
+		fix, reason, err := s.proposeFix(ctx, f)
+		if err != nil {
+			errs = append(errs, err)
+		}
+		s.mu.Lock()
+		s.setFixLocked(f, fix, reason)
+		s.mu.Unlock()
+	}
 	text := s.batch(append(lines, later...))
 	s.mu.Lock()
+	// A fix still pending makes the next pass due; after an interrupted
+	// pass the scheduler waits Retry first (loops L20).
+	for _, rec := range s.st.Open {
+		if rec.Fix == FixPending {
+			s.force = true
+		}
+	}
 	err := s.saveLocked()
 	s.mu.Unlock()
 	if text != "" {
@@ -485,16 +526,10 @@ func (s *Guard) handle(ctx context.Context, f Finding, pause bool) (Record, erro
 		}
 	}
 	if s.cfg.Fixer != nil && f.Rule != nil {
-		cand, err := s.cfg.Fixer.Fix(ctx, f)
-		if err == nil {
-			// Loop 2 sets these, never the fixer.
-			cand.Source, cand.Origin, cand.Public = change.Local, "loop2", false
-			var rep change.Report
-			rep, err = s.cfg.Pipeline.Propose(ctx, cand)
-			rec.Fix, rec.FixReason = string(rep.State), rep.Reason
-		}
+		var err error
+		rec.Fix, rec.FixReason, err = s.proposeFix(ctx, f)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("fix %s: %w", f.ID, err))
+			errs = append(errs, err)
 		}
 	}
 	s.mu.Lock()
@@ -503,6 +538,74 @@ func (s *Guard) handle(ctx context.Context, f Finding, pause bool) (Record, erro
 	e.Fixture, e.Fix, e.FixReason = rec.Fixture, rec.Fix, rec.FixReason
 	s.mu.Unlock()
 	return rec, errors.Join(errs...)
+}
+
+// proposeFix drafts a fix for f and proposes it, returning the fix's
+// state and reason. A fix whose drafting or evaluation is cut short is
+// FixPending, and its error wraps change.ErrInterrupted, so the scheduler
+// counts the pass as preempted (loops L20). The candidate, once drafted,
+// is kept for the same finding (by digest) for change.ResumeFor, so the
+// next offer costs no second draft and the pipeline resumes from the
+// pairs that finished (change C15).
+func (s *Guard) proposeFix(ctx context.Context, f Finding) (fix, reason string, err error) {
+	digest, now := digestOf(f), s.cfg.Now()
+	s.mu.Lock()
+	k, ok := s.fixes[f.ID]
+	s.mu.Unlock()
+	if !ok || k.digest != digest || now.Sub(k.at) > change.ResumeFor {
+		cand, err := s.cfg.Fixer.Fix(ctx, f)
+		if err != nil {
+			if ctx.Err() != nil && !errors.Is(err, change.ErrInterrupted) {
+				err = fmt.Errorf("%w: %w", change.ErrInterrupted, err)
+			}
+			if errors.Is(err, change.ErrInterrupted) {
+				return FixPending, "", fmt.Errorf("fix %s: %w", f.ID, err)
+			}
+			return "", "", fmt.Errorf("fix %s: %w", f.ID, err)
+		}
+		// Loop 2 sets these, never the fixer.
+		cand.Source, cand.Origin, cand.Public = change.Local, "loop2", false
+		k = keptFix{cand: cand, digest: digest, at: now}
+	}
+	rep, err := s.cfg.Pipeline.Propose(ctx, k.cand)
+	if err != nil && ctx.Err() != nil && !errors.Is(err, change.ErrInterrupted) {
+		err = fmt.Errorf("%w: %w", change.ErrInterrupted, err)
+	}
+	if errors.Is(err, change.ErrInterrupted) {
+		s.keepFix(f, k.cand, k.at)
+		return FixPending, "", fmt.Errorf("fix %s: %w", f.ID, err)
+	}
+	s.dropFix(f.ID)
+	if err != nil {
+		err = fmt.Errorf("fix %s: %w", f.ID, err)
+	}
+	return string(rep.State), rep.Reason, err
+}
+
+// keepFix keeps a cut-short fix candidate for f, drafted at at, dropping
+// the oldest while over maxKeptFixes.
+func (s *Guard) keepFix(f Finding, cand change.Candidate, at time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.fixes == nil {
+		s.fixes = map[string]keptFix{}
+	}
+	s.fixes[f.ID] = keptFix{cand: cand, digest: digestOf(f), at: at}
+	for len(s.fixes) > maxKeptFixes {
+		oldest := ""
+		for id, k := range s.fixes {
+			if oldest == "" || k.at.Before(s.fixes[oldest].at) {
+				oldest = id
+			}
+		}
+		delete(s.fixes, oldest)
+	}
+}
+
+func (s *Guard) dropFix(id string) {
+	s.mu.Lock()
+	delete(s.fixes, id)
+	s.mu.Unlock()
 }
 
 // evidenceLocked records a finding's evidence, once per digest, and
@@ -518,6 +621,21 @@ func (s *Guard) evidenceLocked(rec Record) int {
 	rec.Seen, rec.Last = 1, rec.At
 	s.st.Evidence = append(s.st.Evidence, rec)
 	return len(s.st.Evidence) - 1
+}
+
+// setFixLocked records a fix's state on the open finding and its
+// evidence.
+func (s *Guard) setFixLocked(f Finding, fix, reason string) {
+	if rec, ok := s.st.Open[f.ID]; ok {
+		rec.Fix, rec.FixReason = fix, reason
+		s.st.Open[f.ID] = rec
+	}
+	d := digestOf(f)
+	for i := range s.st.Evidence {
+		if e := &s.st.Evidence[i]; e.Digest == d {
+			e.Fix, e.FixReason = fix, reason
+		}
+	}
 }
 
 func targetKey(t Target) string { return t.Kind + "/" + t.Name }
