@@ -312,6 +312,34 @@ func TestNotRunIsSaidAndNothingReadsPassed(t *testing.T) {
 	}
 }
 
+// REQ: LOOP-8. Potency C2 on W5a: a check whose input exists but errored
+// is said as failed, in STATUS and in every digest while it fails, not
+// only once like a check that is not wired yet.
+func TestAFailedCheckIsSaidEveryDigest(t *testing.T) {
+	now := t0
+	box := cleanBox().Box()
+	box.Expiries = func() ([]Expiry, error) { return nil, errors.New("vault unreachable") }
+	g, err := NewGuard(GuardConfig{Box: box, Pipeline: newPipe(t), Store: &change.MemStore{}, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.Pass(context.Background())
+	want := "Loop 2: partial (not run: credential expiry, failed)."
+	for i := range 2 {
+		if st, d := g.Status(), strings.Join(g.Digest(), " "); st != want || d != want {
+			t.Fatalf("digest %d: STATUS %q, digest %q", i, st, d)
+		}
+	}
+	// Fixed: nothing to say, and nothing reads as passed.
+	box.Expiries = func() ([]Expiry, error) { return nil, nil }
+	g.cfg.Box = box
+	now = now.Add(6 * time.Hour)
+	g.Pass(context.Background())
+	if st, d := g.Status(), strings.Join(g.Digest(), " "); st != "" || d != "" {
+		t.Fatalf("recovered: STATUS %q, digest %q", st, d)
+	}
+}
+
 // LOOP-9: a finding is contained, its evidence preserved, a regression
 // fixture added to the security suite, a fix proposed through the change
 // pipeline, and the owner told by severity. It is handled once while it

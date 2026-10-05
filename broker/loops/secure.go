@@ -246,9 +246,11 @@ type secureState struct {
 	// Cleared is when each finding last cleared, so a flapping finding is
 	// not texted again unless it stayed clear for ReText.
 	Cleared map[string]time.Time `json:"cleared,omitempty"`
-	// NotRun are the checks the last pass could not run, and NotRunSaid
-	// the set the digest last named (Digest).
+	// NotRun are the checks the last pass had no input for, Failed those
+	// whose input errored, and NotRunSaid the set the digest last named
+	// (Digest).
 	NotRun     []string `json:"not_run,omitempty"`
+	Failed     []string `json:"failed,omitempty"`
 	NotRunSaid string   `json:"not_run_said,omitempty"`
 	// PauseDay and Pauses count the automatic pauses on one UTC day
 	// (MaxPausesPerDay).
@@ -363,10 +365,10 @@ func (s *Guard) Urgent() bool {
 // how many findings were new: Loop 2's measured value (LOOP-3). Passes
 // must not run concurrently; the scheduler runs one job at a time.
 func (s *Guard) Pass(ctx context.Context) (int, error) {
-	found, notes, stale := s.check()
+	found, notes, failed, stale := s.check()
 	now := s.cfg.Now()
 	s.mu.Lock()
-	s.st.NotRun, s.stale, s.force = notes, stale, false
+	s.st.NotRun, s.st.Failed, s.stale, s.force = notes, failed, stale, false
 	s.st.Last = now
 	seen := map[string]bool{}
 	var fresh []Finding
@@ -748,7 +750,7 @@ func findingID(c Check, subject, detail string) string {
 
 // check runs the passive checks (LOOP-8). Notes name checks that could not
 // run; stale is set when the advisory snapshot is old.
-func (s *Guard) check() (found []Finding, notes []string, stale string) {
+func (s *Guard) check() (found []Finding, notes, failed []string, stale string) {
 	b, now := s.cfg.Box, s.cfg.Now()
 	add := func(c Check, subject, detail string, sev Severity, t *Target, rule []byte) {
 		found = append(found, Finding{ID: findingID(c, subject, detail), Check: c, Subject: subject,
@@ -756,7 +758,7 @@ func (s *Guard) check() (found []Finding, notes []string, stale string) {
 	}
 	note := func(c Check, err error) {
 		if err != nil {
-			notes = append(notes, string(c))
+			failed = append(failed, string(c))
 		}
 	}
 
@@ -877,7 +879,7 @@ func (s *Guard) check() (found []Finding, notes []string, stale string) {
 		notes = append(notes, string(CheckExpiry))
 	}
 	sort.Slice(found, func(i, j int) bool { return found[i].ID < found[j].ID })
-	return found, notes, stale
+	return found, notes, failed, stale
 }
 
 func unionKeys(a, b map[string]string) []string {
@@ -1140,13 +1142,15 @@ func (s *Guard) Digest() []string {
 		}
 	}
 	// Checks not run: named with their cause once, then again only when
-	// the set changes; a pass overdue is said every time (potency C2,
+	// the set changes; a failed check or a pass overdue is said every
+	// time (potency C2,
 	// UX W2 on W5a). Nothing here ever reads as passed (L5).
 	now := s.cfg.Now()
 	if s.overdueLocked(now) {
 		out = append(out, "Loop 2: checks haven't run since "+s.st.Last.Format("Mon 2 Jan")+".")
-	} else if said := strings.Join(s.st.NotRun, ","); said != s.st.NotRunSaid {
-		if len(s.st.NotRun) > 0 {
+	} else if said := strings.Join(s.st.NotRun, ",") + "/" + strings.Join(s.st.Failed, ","); said != s.st.NotRunSaid || len(s.st.Failed) > 0 {
+		// A check that failed is said every time, like an overdue pass.
+		if len(s.st.NotRun)+len(s.st.Failed) > 0 {
 			out = append(out, s.partialLocked())
 		}
 		s.st.NotRunSaid = said
@@ -1164,7 +1168,7 @@ func (s *Guard) overdueLocked(now time.Time) bool {
 }
 
 // partialLocked names the checks the last pass could not run, with the
-// cause the wiring gave for each.
+// cause the wiring gave for each, then those whose input failed.
 func (s *Guard) partialLocked() string {
 	var parts []string
 	for _, n := range s.st.NotRun {
@@ -1173,6 +1177,9 @@ func (s *Guard) partialLocked() string {
 			part += ", " + why
 		}
 		parts = append(parts, part)
+	}
+	for _, n := range s.st.Failed {
+		parts = append(parts, plainCheck[Check(n)]+", failed")
 	}
 	return "Loop 2: partial (not run: " + strings.Join(parts, "; ") + ")."
 }
@@ -1188,7 +1195,7 @@ func (s *Guard) Status() string {
 		return "Loop 2: not run yet."
 	case s.overdueLocked(now):
 		return "Loop 2: checks haven't run since " + s.st.Last.Format("Mon 2 Jan") + "."
-	case len(s.st.NotRun) > 0:
+	case len(s.st.NotRun)+len(s.st.Failed) > 0:
 		return s.partialLocked()
 	}
 	return ""
