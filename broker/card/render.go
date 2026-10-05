@@ -13,6 +13,14 @@ import (
 // real PCs; this is the provisional value until then.
 const WaitMinutes = 3
 
+// BoxAddr is the box's address on its own Wi-Fi, the same in every image,
+// and BoxPage the local UI's address printed on the card, so the owner can
+// always get back to it (status, STOP, RESUME, sign-in).
+const (
+	BoxAddr = "10.42.0.1"
+	BoxPage = "http://" + BoxAddr + "/"
+)
+
 // QuickStart is the card's quick-start, at most five steps (ONB-7).
 var QuickStart = []string{
 	"Put the SIM in the modem. Plug the drive and the modem into the back of the PC.",
@@ -53,6 +61,7 @@ type view struct {
 	QuickStart     []string
 	BootKeys       []BootKey
 	WaitMinutes    int
+	BoxPage        string
 	GridCols       []string
 	Grid           []gridRow
 }
@@ -72,7 +81,7 @@ func HTML(c *Card) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	v := view{Card: c, WiFiQR: wq, PassQR: pq, QuickStart: QuickStart, BootKeys: BootKeys, WaitMinutes: WaitMinutes,
+	v := view{Card: c, WiFiQR: wq, PassQR: pq, QuickStart: QuickStart, BootKeys: BootKeys, WaitMinutes: WaitMinutes, BoxPage: BoxPage,
 		GridCols: []string{"A", "B", "C", "D", "E", "F", "G", "H", "I", "J"}}
 	labels := owner.GridLabels()
 	for r := 0; r < 10; r++ {
@@ -120,6 +129,7 @@ table { border-collapse: collapse; } td, th { border: 1px solid #000; padding: 1
 <h2>Box Wi-Fi</h2>
 <p>Name: <span class="mono big">{{.WiFiName}}</span><br>
 Password: <span class="mono big">{{.WiFiPassword}}</span></p>
+<p>Box page: <span class="mono">{{.BoxPage}}</span></p>
 <h2>Quick start</h2>
 <ol>{{range .QuickStart}}<li>{{.}}</li>{{end}}</ol>
 </div></div>
@@ -128,19 +138,19 @@ Password: <span class="mono big">{{.WiFiPassword}}</span></p>
 <div class="card">
 <h2>Nothing happened?</h2>
 <p>Wait {{.WaitMinutes}} minutes after turning the PC on, then look for the Wi-Fi <span class="mono">{{.WiFiName}}</span>.
-If it never appears, the PC did not start from the drive. Turn it off, then on, and press its boot key until a menu appears; choose the USB drive.</p>
+Wi-Fi joined but no page? Open <span class="mono">{{.BoxPage}}</span> in your browser.
+If the Wi-Fi never appears, the PC did not start from the drive. Turn it off, then on, and press its boot key until a menu appears; choose the USB drive.</p>
 <table class="keys">{{range .BootKeys}}<tr><td>{{.Brand}}</td><td>{{.Key}}</td></tr>{{end}}</table>
 </div>
 
 <div class="card">
 <h2>Setup code</h2>
 <p><span class="mono big">{{.SetupCode}}</span> <span class="note">(text it to your box if the setup page asks)</span></p>
-<p class="note">Setup secret: <span class="mono">{{.SetupSecret}}</span></p>
 <h2>Vault passphrase</h2>
 <div class="row">
 {{.PassQR}}
 <div><p class="mono big">{{.VaultPassphrase}}</p>
-<p class="note">Only for starting the box on a PC it does not know: scan or type it on the box's Wi-Fi page. Never send it by text or say it on a call.
+<p class="note">Only for starting the box on a PC it does not know: type it on the box page, or scan this code with your phone's camera, tap Copy, and paste it there. Never send it by text or say it on a call.
 If this drive was out of your hands, unlock it only on your trusted PC.</p></div>
 </div>
 </div>
@@ -148,7 +158,7 @@ If this drive was out of your hands, unlock it only on your trusted PC.</p></div
 
 <section class="sheet">
 <h1>Approval code grid</h1>
-<p class="note">Tear off and keep away from the box. Use it when your phone's code generator is not at hand: the box asks for one cell, such as C7. Each cell works once.</p>
+<p class="note">Tear off and keep apart from the box and from this card. Use it when your phone's code generator is not at hand: the box asks for one cell, such as C7. Each cell works once.</p>
 <table class="grid"><tr><th></th>{{range .GridCols}}<th>{{.}}</th>{{end}}</tr>
 {{range .Grid}}<tr><th>{{.Row}}</th>{{range .Cells}}<td>{{.}}</td>{{end}}</tr>
 {{end}}</table>
@@ -158,6 +168,9 @@ If this drive was out of your hands, unlock it only on your trusted PC.</p></div
 <h1>Recovery key</h1>
 <p class="note">Tear off and store somewhere safe, apart from the drive and the grid. It restores your box onto new hardware and replaces a lost phone or number. You will rarely need it.</p>
 <p class="mono big">{{.RecoveryKey}}</p>
+<h2>Reset secret</h2>
+<p class="note">Only for re-running setup after a reset.</p>
+<p class="mono">{{.SetupSecret}}</p>
 </section>
 </body></html>
 `))

@@ -134,3 +134,24 @@ func TestTOTPMatchesTheChannelsCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Every local sign-in, right or wrong, is texted to the owner: a sign-in
+// lifts locks without the owner's phone, so it must never be silent.
+func TestLocalSignInIsAlwaysTextedToTheOwner(t *testing.T) {
+	r := newRig(t, nil)
+	if _, err := r.ch.LocalSignIn(r.totp()); err != nil {
+		t.Fatal(err)
+	}
+	want := "A phone signed in on the box's Wi-Fi at " + r.clock().Format("15:04") + ". Not you? Text STOP."
+	if got := r.inbox(); got != want {
+		t.Fatalf("sign-in alert: %q", got)
+	}
+	r.advance(time.Second)
+	r.ch.LocalSignIn(wrongCode(1))
+	if got := r.inbox(); !strings.HasPrefix(got, "A wrong code was entered on the box's Wi-Fi") {
+		t.Fatalf("wrong-code alert: %q", got)
+	}
+	if r.ch.UnlockPeriod() != DefaultUnlockFor {
+		t.Fatal("unlock period")
+	}
+}

@@ -121,7 +121,8 @@ func TestRenderedCardIsTheManual(t *testing.T) {
 	}
 	for _, want := range []string{"Nothing happened?", c.WiFiName, htmlEsc(c.WiFiPassword), c.SetupCode, c.SetupSecret,
 		c.VaultPassphrase, c.RecoveryKey, "Dell", "HP", "Lenovo", "ASUS", "Acer",
-		"minutes", "apart from the drive", "<svg"} {
+		"minutes", "apart from the drive", "<svg", "Box page: <span class=\"mono\">" + BoxPage, "Wi-Fi joined but no page?",
+		"apart from the box and from this card", "Reset secret", "tap Copy"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("card lacks %q", want)
 		}
@@ -138,9 +139,11 @@ func TestRenderedCardIsTheManual(t *testing.T) {
 	if len(sheets) != 4 {
 		t.Fatalf("%d sheets", len(sheets)-1)
 	}
+	// The setup secret, only for re-running setup after a reset, rides
+	// with it, off the card.
 	for i, s := range sheets[1:] {
-		if strings.Contains(s, c.RecoveryKey) != (i == 2) {
-			t.Fatalf("recovery key placement wrong on sheet %d", i+1)
+		if strings.Contains(s, c.RecoveryKey) != (i == 2) || strings.Contains(s, c.SetupSecret) != (i == 2) {
+			t.Fatalf("recovery key or setup secret placement wrong on sheet %d", i+1)
 		}
 	}
 	assertSelfContained(t, page)

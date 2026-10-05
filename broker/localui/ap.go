@@ -194,7 +194,7 @@ func NftRules(c APConfig) (string, error) {
 	line("  chain forward {")
 	line("    type filter hook forward priority filter; policy accept;")
 	if c.Passthrough {
-		line(`    iifname "%s" oifname "%s" ip saddr %s ip daddr != { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 100.64.0.0/10, 127.0.0.0/8 } accept`, ap, c.Uplink, subnet)
+		line(`    iifname "%s" oifname "%s" ip saddr %s ip daddr != { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 } accept`, ap, c.Uplink, subnet)
 		line(`    iifname "%s" oifname "%s" ct state established,related accept`, c.Uplink, ap)
 	}
 	line(`    iifname "%s" drop`, ap)

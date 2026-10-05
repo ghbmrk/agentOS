@@ -31,7 +31,7 @@ Covered: 53 / 144 requirement IDs
 | CH-1 | `broker/modem/modem_test.go`, `broker/owner/channel_test.go` |
 | CH-2 | `broker/control/handler_test.go`, `broker/control/parse_test.go`, `broker/control/text_test.go`, `broker/daemon/daemon_test.go`, `broker/owner/arc2_test.go`, `broker/owner/channel_test.go`, `broker/owner/review_test.go` |
 | CH-3 | `broker/owner/channel_test.go`, `broker/owner/classify_test.go`, `broker/owner/review_test.go` |
-| CH-4 | `broker/card/card_test.go`, `broker/owner/channel_test.go`, `broker/owner/review_test.go`, `broker/owner/secrets_test.go` |
+| CH-4 | `broker/card/card_test.go`, `broker/localui/localui_test.go`, `broker/owner/channel_test.go`, `broker/owner/review_test.go`, `broker/owner/secrets_test.go` |
 | CH-5 | — |
 | CH-10 | `broker/owner/channel_test.go`, `broker/owner/classify_test.go` |
 | CH-6 | — |
@@ -57,7 +57,7 @@ Covered: 53 / 144 requirement IDs
 | CRED-5 | `broker/egress/egress_test.go`, `broker/route/route_test.go` |
 | CRED-6 | — |
 | CRED-7 | `broker/egress/egress_test.go`, `broker/vault/redact_test.go` |
-| CRED-8 | `broker/card/card_test.go` |
+| CRED-8 | `broker/card/card_test.go`, `broker/localui/localui_test.go` |
 | CRED-9 | — |
 | CRED-10 | `tests/test_s5_executor.py`, `tests/test_s5_protocol.py` |
 | REC-1 | — |

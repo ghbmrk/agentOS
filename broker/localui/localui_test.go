@@ -49,6 +49,10 @@ type fakeHooks struct {
 	keys      map[string]string
 	finished  string
 	connected bool
+	device    bool // the device-code sign-in completes on the provider's site
+	private   map[string]bool
+	setUp     bool
+	finishes  int
 }
 
 func (f *fakeHooks) Progress() Progress { f.mu.Lock(); defer f.mu.Unlock(); return f.progress }
@@ -83,9 +87,19 @@ func (f *fakeHooks) TrustHost(t bool) error {
 func (f *fakeHooks) Providers() []Provider {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return []Provider{{ID: "anthropic", Name: "Anthropic", APIKey: true, DeviceCode: true, Connected: f.connected},
+	return []Provider{{ID: "anthropic", Name: "Anthropic", APIKey: true, DeviceCode: true, Connected: f.connected, PrivateOK: f.private["anthropic"]},
 		{ID: "openai", Name: "OpenAI", APIKey: true}}
 }
+func (f *fakeHooks) SetPrivateOK(id string, ok bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.private == nil {
+		f.private = map[string]bool{}
+	}
+	f.private[id] = ok
+	return nil
+}
+func (f *fakeHooks) AlreadySetUp() bool { f.mu.Lock(); defer f.mu.Unlock(); return f.setUp }
 func (f *fakeHooks) ConnectAPIKey(id, key string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -97,12 +111,19 @@ func (f *fakeHooks) ConnectAPIKey(id, key string) error {
 	return nil
 }
 func (f *fakeHooks) StartDeviceCode(id string) (string, string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.device {
+		f.connected = true // the owner finishes on the provider's site
+	}
 	return "https://example.invalid/device", "WXYZ-1234", nil
 }
 func (f *fakeHooks) Finish(n string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.finished = n
+	f.finishes++
+	f.setUp = true
 	return nil
 }
 
@@ -131,6 +152,7 @@ type rig struct {
 	eng   *fakeEngine
 	ch    *owner.Channel
 	jar   http.CookieJar
+	ip    string   // the phone's address on the box's Wi-Fi
 	seen  []string // every page body served, for the ONB-1 scan
 }
 
@@ -144,6 +166,7 @@ func newRig(t *testing.T) *rig {
 		hooks: &fakeHooks{progress: Progress{Phase: "updating"}}}
 	r.srv = r.open(&MemStore{})
 	r.jar, _ = cookiejar.New(nil)
+	r.ip = phoneIP
 	return r
 }
 
@@ -167,11 +190,11 @@ func (r *rig) do(method, path string, form url.Values, mod ...func(*http.Request
 		body = strings.NewReader(form.Encode())
 	}
 	req := httptest.NewRequest(method, "http://10.42.0.1"+path, body)
-	req.RemoteAddr = phoneIP
+	req.RemoteAddr = r.ip
 	if form != nil {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
-	u, _ := url.Parse("http://10.42.0.1/")
+	u := req.URL
 	for _, c := range r.jar.Cookies(u) {
 		req.AddCookie(c)
 	}
@@ -230,6 +253,20 @@ func (r *rig) code() string {
 
 // runSetup walks §8.1 steps 5 and 6 as the owner would.
 func (r *rig) runSetup() {
+	r.t.Helper()
+	r.runSetupToAI()
+	r.post("/setup/ai-device", url.Values{"provider": {"anthropic"}, "private": {"1"}})
+	if p := r.get("/setup"); !strings.Contains(p, "WXYZ-1234") {
+		r.t.Fatalf("device code not shown: %s", p)
+	}
+	r.post("/setup/ai-key", url.Values{"provider": {"anthropic"}, "key": {apiCanary}, "private": {"1"}})
+	if r.hooks.keys["anthropic"] != apiCanary || r.hooks.finished != ownerNum || !r.hooks.private["anthropic"] {
+		r.t.Fatalf("setup did not finish: keys=%v finished=%q", len(r.hooks.keys), r.hooks.finished)
+	}
+}
+
+// runSetupToAI walks setup up to Connect AI, with the update finished.
+func (r *rig) runSetupToAI() {
 	t := r.t
 	t.Helper()
 	if loc := r.do("GET", "/", nil).Header().Get("Location"); loc != "/setup" {
@@ -297,13 +334,8 @@ func (r *rig) runSetup() {
 	r.hooks.mu.Lock()
 	r.hooks.progress = Progress{Phase: "ready", Updated: true, Online: true}
 	r.hooks.mu.Unlock()
-	r.post("/setup/ai-device", url.Values{"provider": {"anthropic"}})
-	if p := r.get("/setup"); !strings.Contains(p, "WXYZ-1234") {
-		t.Fatalf("device code not shown: %s", p)
-	}
-	r.post("/setup/ai-key", url.Values{"provider": {"anthropic"}, "key": {apiCanary}})
-	if r.hooks.keys["anthropic"] != apiCanary || r.hooks.finished != ownerNum {
-		t.Fatalf("setup did not finish: keys=%v finished=%q", len(r.hooks.keys), r.hooks.finished)
+	if p := r.get("/setup"); !strings.Contains(p, `name="private" value="1" checked`) {
+		t.Fatalf("no private-data question, ticked: %s", p)
 	}
 }
 
@@ -340,6 +372,7 @@ func TestSetupResumesAfterRestart(t *testing.T) {
 	r := newRig(t)
 	st := &MemStore{}
 	r.srv = r.open(st)
+	r.get("/setup")
 	r.post("/setup/network", url.Values{"ssid": {"Home"}, "password": {"x"}})
 	page := r.get("/setup")
 	code := regexp.MustCompile(`PAIR%20([A-Z2-9]{8})`).FindStringSubmatch(page)[1]
@@ -381,6 +414,7 @@ func TestPairingFallbacks(t *testing.T) {
 
 	r = newRig(t)
 	r.hooks.progress.Online = true
+	r.get("/setup")
 	r.post("/setup/number", url.Values{"number": {"+1 555 000 0001"}})
 	if len(r.hooks.sent) != 1 || r.hooks.sent[0].To != ownerNum {
 		t.Fatalf("no code texted: %+v", r.hooks.sent)
@@ -483,7 +517,7 @@ func TestLocalUnlockClearsChallengeModeAndResume(t *testing.T) {
 	if !r.ch.LocalStatus().Challenged {
 		t.Fatal("setup: not challenged")
 	}
-	if !strings.Contains(r.get("/status"), "Codes by text are locked") {
+	if !strings.Contains(r.get("/status"), "Approvals by text are paused") {
 		t.Fatal("status page does not say codes are locked")
 	}
 	// STOP needs no sign-in (CH-3: its worst case is a pause).
@@ -632,7 +666,7 @@ func TestPagesNeedNothingOutsideTheBox(t *testing.T) {
 
 func TestAllSetText(t *testing.T) {
 	for _, conn := range [][]string{nil, {"email"}, {"email", "calendar", "files"}} {
-		s := AllSetText(conn)
+		s := AllSetText(conn, true)
 		if n, gsm := modem.Segments(s); !gsm || n > 3 {
 			t.Fatalf("breaks CH-12: %d segments: %q", n, s)
 		}
@@ -644,5 +678,185 @@ func TestAllSetText(t *testing.T) {
 				t.Fatalf("no example for %s: %q", c, s)
 			}
 		}
+	}
+}
+
+// asOther runs f as a second phone on the box's Wi-Fi (another card
+// holder), then switches back.
+func (r *rig) asOther(f func()) {
+	jar, ip := r.jar, r.ip
+	r.jar, _ = cookiejar.New(nil)
+	r.ip = "10.42.0.77:52000"
+	defer func() { r.jar, r.ip = jar, ip }()
+	f()
+}
+
+// REQ: ONB-6, CH-4, CRED-8, CH-7
+
+// Once the owner's number is known, only the phone that paired continues
+// setup: a second phone on the Wi-Fi can neither replace the number nor
+// see the code-generator seed.
+func TestOnlyThePairedPhoneContinuesSetup(t *testing.T) {
+	r := newRig(t)
+	r.hooks.progress.Online = true
+	page := html.UnescapeString(r.get("/setup"))
+	code := regexp.MustCompile(`PAIR%20([A-Z2-9]{8})`).FindStringSubmatch(page)[1]
+	var otherCode string
+	r.asOther(func() {
+		p := html.UnescapeString(r.get("/setup"))
+		otherCode = regexp.MustCompile(`PAIR%20([A-Z2-9]{8})`).FindStringSubmatch(p)[1]
+	})
+	if otherCode == code {
+		t.Fatal("two phones share a pairing code")
+	}
+	r.srv.OfferText(ownerNum, "PAIR "+code)
+	page = r.get("/setup")
+	if !strings.Contains(page, "otpauth://") || !strings.Contains(page, "ending 0001") {
+		t.Fatalf("paired phone does not continue: %s", page)
+	}
+	r.asOther(func() {
+		p := r.get("/setup")
+		if strings.Contains(p, "otpauth") || strings.Contains(p, "secret=") || !strings.Contains(p, "Setup is continuing on the phone") {
+			t.Fatalf("second phone sees enrollment: %s", p)
+		}
+		r.post("/setup/number", url.Values{"number": {"+15550009999"}})
+		r.post("/setup/number-code", url.Values{"code": {"123456"}})
+		r.post("/setup/codes", url.Values{"code": {"123456"}})
+		if !strings.Contains(r.setupErr(), "continuing on the phone") {
+			t.Fatal("second phone's post not refused")
+		}
+	})
+	if r.srv.setup.st.Owner != ownerNum || len(r.hooks.sent) != 0 || r.srv.setup.st.Codes {
+		t.Fatalf("second phone changed setup: owner %q, texts %d", r.srv.setup.st.Owner, len(r.hooks.sent))
+	}
+	// The number fallback is refused once a number is paired, even from
+	// the paired phone.
+	r.post("/setup/number", url.Values{"number": {"+15550009999"}})
+	if len(r.hooks.sent) != 0 || r.srv.setup.st.Owner != ownerNum {
+		t.Fatal("number replaced after pairing")
+	}
+}
+
+// Pairing by the card's setup code texts a page code; the phone that types
+// it continues. Wrong page codes text a fresh one, within a bound.
+func TestCardCodePairingIsClaimedWithThePageCode(t *testing.T) {
+	r := newRig(t)
+	r.hooks.progress.Online = true
+	r.get("/setup")
+	reply, _ := r.srv.OfferText(ownerNum, "PAIR "+r.card.SetupCode)
+	pc := regexp.MustCompile(`Page code: ([0-9]{6})\.`).FindStringSubmatch(reply)
+	if pc == nil {
+		t.Fatalf("no page code: %q", reply)
+	}
+	if n, gsm := modem.Segments(reply); !gsm || n > 2 {
+		t.Fatalf("reply breaks CH-12: %q", reply)
+	}
+	if !strings.Contains(r.get("/setup"), "page code") {
+		t.Fatal("no claim step")
+	}
+	r.asOther(func() {
+		r.get("/setup")
+		for i := 0; i < numberCodeTries; i++ {
+			r.post("/setup/claim", url.Values{"code": {"000000"}})
+		}
+	})
+	if len(r.hooks.sent) != 1 || !strings.HasPrefix(r.hooks.sent[0].Text, "AgentOS page code:") || r.hooks.sent[0].To != ownerNum {
+		t.Fatalf("no fresh page code texted to the owner: %+v", r.hooks.sent)
+	}
+	r.post("/setup/claim", url.Values{"code": {pc[1]}})
+	if r.srv.setup.st.Device != "" {
+		t.Fatal("replaced page code still accepted")
+	}
+	fresh := regexp.MustCompile(`[0-9]{6}`).FindString(r.hooks.sent[0].Text)
+	r.post("/setup/claim", url.Values{"code": {fresh}})
+	if !strings.Contains(r.get("/setup"), "otpauth://") {
+		t.Fatal("claiming phone does not continue")
+	}
+	r.asOther(func() {
+		if !strings.Contains(r.get("/setup"), "Setup is continuing on the phone") {
+			t.Fatal("other phone not shut out after the claim")
+		}
+	})
+}
+
+// §8.1 step 6: a device-code sign-in alone finishes setup, once the
+// provider reports it connected, when the owner comes back to the page.
+func TestDeviceCodeSignInAloneFinishesSetup(t *testing.T) {
+	r := newRig(t)
+	r.hooks.device = true
+	r.runSetupToAI()
+	r.post("/setup/ai-device", url.Values{"provider": {"anthropic"}, "private": {"1"}})
+	if r.hooks.finished != ownerNum {
+		t.Fatal("setup did not finish after a device-code sign-in")
+	}
+	for i := 0; i < 3; i++ {
+		r.do("GET", "/setup", nil)
+		r.post("/setup/ai-key", url.Values{"provider": {"anthropic"}, "key": {"x"}})
+	}
+	if r.hooks.finishes != 1 {
+		t.Fatalf("Finish called %d times", r.hooks.finishes)
+	}
+	// Device-code completion seen only on a later page load.
+	r = newRig(t)
+	r.runSetupToAI()
+	r.post("/setup/ai-device", url.Values{"provider": {"anthropic"}})
+	if r.hooks.finished != "" || r.hooks.private["anthropic"] {
+		t.Fatal("finished before the sign-in, or private allowed while unticked")
+	}
+	r.hooks.mu.Lock()
+	r.hooks.connected = true
+	r.hooks.mu.Unlock()
+	if loc := r.do("GET", "/setup", nil).Header().Get("Location"); loc != "/status" || r.hooks.finished != ownerNum {
+		t.Fatalf("page load did not finish setup: %q", loc)
+	}
+}
+
+// A lost setup state file never reopens setup on a box that has an owner.
+func TestLostSetupStateDoesNotReopenSetup(t *testing.T) {
+	r := newRig(t)
+	r.hooks.setUp = true
+	r.srv = r.open(&MemStore{})
+	if loc := r.do("GET", "/setup", nil).Header().Get("Location"); loc != "/status" {
+		t.Fatalf("setup reopened: %q", loc)
+	}
+}
+
+// The owner can always find the box page: its address is in every page's
+// footer and in the contact card.
+func TestBoxPageAddressIsShown(t *testing.T) {
+	r := newRig(t)
+	if !strings.Contains(r.get("/status"), "http://10.42.0.1/") {
+		t.Fatal("no box page address in the footer")
+	}
+	if !strings.Contains(r.get("/box.vcf"), "URL:http://10.42.0.1/") {
+		t.Fatal("no box page address in the contact card")
+	}
+	if card.BoxPage != "http://"+testAP().Addr.Addr().String()+"/" {
+		t.Fatal("card and access point disagree on the box page")
+	}
+}
+
+// A device is signed out when the session locks.
+func TestLockSignsDevicesOut(t *testing.T) {
+	r := newRig(t)
+	r.runSetup()
+	r.startChannel(nil)
+	r.post("/unlock", url.Values{"code": {r.code()}})
+	r.get("/home")
+	if err := r.ch.RequireUnlock(); err != nil {
+		t.Fatal(err)
+	}
+	if w := r.do("GET", "/home", nil); w.Code != http.StatusSeeOther {
+		t.Fatal("device still signed in after the session locked")
+	}
+}
+
+func TestAllSetTextWithoutPrivateData(t *testing.T) {
+	s := AllSetText([]string{"email"}, false)
+	if strings.Contains(s, accountExamples["email"]) || strings.Count(s, "PUBLIC ") != 3 {
+		t.Fatalf("private tasks suggested without a private-data provider: %q", s)
+	}
+	if n, gsm := modem.Segments(s); !gsm || n > 3 {
+		t.Fatalf("breaks CH-12: %q", s)
 	}
 }

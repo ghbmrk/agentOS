@@ -21,7 +21,7 @@ func gsmSafe(s string, max int) string {
 // defaults need nothing but an AI provider.
 var (
 	defaultExamples = []string{
-		"Find 3 well-reviewed dinner spots near me for Friday",
+		"Plan 3 days in Lisbon in May with a rough budget",
 		"Draft a polite note asking my landlord to fix the heater",
 		"Each morning, text me a 3-line news summary",
 	}
@@ -33,10 +33,14 @@ var (
 )
 
 // AllSetText is the first message after setup (ONB-8): three example tasks
-// suited to what is connected, plus HELP. It fits CH-12: GSM-7, at most
-// three segments.
-func AllSetText(connected []string) string {
+// suited to what is connected, plus HELP. When no provider may see private
+// data (CAP-9), private tasks would have no route, so only PUBLIC tasks
+// without accounts are suggested. It fits CH-12: GSM-7, at most three segments.
+func AllSetText(connected []string, privateOK bool) string {
 	var ex []string
+	if !privateOK {
+		connected = nil
+	}
 	for _, k := range []string{"email", "calendar", "files"} {
 		for _, c := range connected {
 			if c == k && len(ex) < 3 {
@@ -47,6 +51,13 @@ func AllSetText(connected []string) string {
 	for _, d := range defaultExamples {
 		if len(ex) < 3 {
 			ex = append(ex, d)
+		}
+	}
+	if !privateOK {
+		// Task text is private by default (§5), so without a provider
+		// allowed private data only PUBLIC tasks have a route (CH-11).
+		for i := range ex {
+			ex[i] = "PUBLIC " + ex[i]
 		}
 	}
 	return "All set. Text me a task, for example:\n1. " + ex[0] + "\n2. " + ex[1] + "\n3. " + ex[2] + "\nHELP for commands."

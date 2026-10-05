@@ -17,7 +17,7 @@ import (
 // at its first attempt, not sliding), so the Wi-Fi is never an unmetered
 // guessing path, including in challenge mode where wrong codes no longer
 // escalate anything.
-const LocalBound = 24
+const LocalBound = 10
 
 // Local sign-in errors.
 var (
@@ -60,7 +60,8 @@ func (c *Channel) LocalGridCell() string {
 // the local UI. On success the session is unlocked for UnlockFor, the
 // low-tier lock and challenge mode end, and until is returned: the local UI
 // remembers the device for the same period (CH-7). A wrong code counts as
-// one (CH-18); crossing a lock texts the owner.
+// one (CH-18). The owner is texted on every attempt, right or wrong, so a
+// sign-in by someone else holding the card is never silent.
 func (c *Channel) LocalSignIn(code string) (until time.Time, err error) {
 	now := c.cfg.Now()
 	c.mu.Lock()
@@ -84,9 +85,16 @@ func (c *Channel) LocalSignIn(code string) (until time.Time, err error) {
 		alerts = append(alerts, fmt.Sprintf("Too many wrong codes, the last on the box's Wi-Fi. Codes by text now need a challenge: reply UNLOCK %s and a code from your code generator within %s.",
 			c.codes.currentChallenge(now), dur(ChallengeTTL)))
 	}
-	if err == nil && res == strongOK {
+	at := now.In(c.cfg.Location).Format("15:04")
+	switch {
+	case err == nil && res == strongOK:
 		until = c.codes.st.UnlockedUntil
 		c.codes.unlockCh = ""
+		// Every local sign-in is told to the owner, since it lifts locks
+		// and challenge mode without the owner's phone (L1).
+		alerts = append(alerts, "A phone signed in on the box's Wi-Fi at "+at+". Not you? Text STOP.")
+	case err == nil && len(alerts) == 0:
+		alerts = append(alerts, "A wrong code was entered on the box's Wi-Fi at "+at+". Not you? Text STOP.")
 	}
 	c.mu.Unlock()
 	for _, a := range alerts {
@@ -156,3 +164,6 @@ func (c *Channel) alert(text string) {
 // TOTP is the code-generator code for seed at t (RFC 6238, SHA-1, 30 s, 6
 // digits), for the local UI's enrollment check (§8.1 step 5).
 func TOTP(seed []byte, t time.Time) string { return totpAt(seed, t.Unix()) }
+
+// UnlockPeriod is CH-14's N, for the local UI's remembered sign-in.
+func (c *Channel) UnlockPeriod() time.Duration { return c.cfg.UnlockFor }

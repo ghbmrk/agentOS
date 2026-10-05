@@ -8,7 +8,7 @@ import (
 
 // Pages carry no script and load nothing from outside the box (ONB-1).
 // Live progress refreshes with a meta refresh (ONB-4).
-var tmpl = template.Must(template.New("layout").Funcs(template.FuncMap{"phase": phaseText}).Parse(`{{define "head"}}<!doctype html>
+var tmpl = template.Must(template.New("layout").Funcs(template.FuncMap{"phase": phaseText, "boxhost": func() string { return "" }}).Parse(`{{define "head"}}<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 {{if .}}<meta http-equiv="refresh" content="{{.}}">{{end}}
@@ -27,7 +27,7 @@ button.plain { background: none; color: var(--accent); padding: .4em 0; }
 .mono { font-family: ui-monospace, Menlo, Consolas, monospace; word-break: break-all; }
 form { margin: .6em 0 1.2em; }
 </style></head><body>{{end}}
-{{define "foot"}}</body></html>{{end}}
+{{define "foot"}}<p class="muted">Box page: <span class="mono">http://{{boxhost}}/</span></p></body></html>{{end}}
 
 {{define "status"}}{{template "head" .Refresh}}
 <h1>AgentOS</h1>
@@ -35,8 +35,7 @@ form { margin: .6em 0 1.2em; }
 <p>Box: <b>{{phase .Progress.Phase}}</b></p>
 {{if .HasOwner}}
 <p>Actions: <b>{{if .Owner.Stopped}}stopped{{else}}running{{end}}</b></p>
-{{if .Owner.Challenged}}<p>Codes by text are locked after too many wrong ones. Sign in here with a code to clear that.</p>
-{{else if .Owner.LowLocked}}<p>Texted codes are off after wrong codes. Sign in here with a code to turn them back on.</p>{{end}}
+{{if or .Owner.Challenged .Owner.LowLocked}}<p>Approvals by text are paused after wrong codes. Sign in here to turn them back on.</p>{{end}}
 {{if .Owner.Stopped}}
 <form method="post" action="/resume">{{if not .SignedIn}}<label>Code from your code generator<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required></label>{{end}}<button>RESUME</button></form>
 {{else}}
@@ -50,7 +49,7 @@ form { margin: .6em 0 1.2em; }
 {{define "unlock"}}{{template "head" ""}}
 <h1>Sign in</h1>
 {{if .HasOwner}}
-{{if .Challenged}}<p>Codes by text are locked after too many wrong ones. A code here unlocks them again.</p>{{end}}
+{{if .Challenged}}<p>Approvals by text are paused after wrong codes. Sign in here to turn them back on.</p>{{end}}
 <form method="post" action="/unlock">
 <input type="hidden" name="next" value="{{.Next}}">
 <label>Code from your code generator{{with .Cell}}, or grid cell <b>{{.}}</b> from your card{{end}}
@@ -58,7 +57,7 @@ form { margin: .6em 0 1.2em; }
 {{with .Err}}<p class="err">{{.}}</p>{{end}}
 <button>Sign in</button>
 </form>
-<p class="muted">This phone stays signed in for as long as a texted unlock lasts. Signing in also unlocks chat by text.</p>
+<p class="muted">This phone stays signed in for {{.Days}} days, or until the box restarts. Signing in also unlocks chat by text, and the box texts you that a phone signed in.</p>
 {{else}}<p>Setup is not finished yet. <a href="/setup">Continue setup</a></p>{{end}}
 {{if .Vault}}<p><a href="/unlock/vault">Unlock the box on a new PC</a></p>{{end}}
 <p><a href="/status">Status</a></p>
@@ -70,6 +69,8 @@ form { margin: .6em 0 1.2em; }
 <p><a href="/status">Status, STOP and RESUME</a></p>
 {{template "foot"}}{{end}}
 
+{{define "private"}}<label><input type="checkbox" name="private" value="1" checked> {{.Name}} may see your private data (mail, files) to do tasks. Recommended.</label><br>{{end}}
+
 {{define "setup"}}{{template "head" .Refresh}}
 <h1>Set up AgentOS</h1>
 <p class="muted">Box: {{phase .Progress.Phase}}</p>
@@ -79,7 +80,7 @@ form { margin: .6em 0 1.2em; }
 <h2>1. Home network</h2>
 <form method="post" action="/setup/network">
 <label>Your home Wi-Fi<select name="ssid">{{range .Networks}}<option>{{.}}</option>{{end}}</select></label>
-<label>Its password<input type="password" name="password" autocomplete="off"></label>
+<label>Its password<input type="text" name="password" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
 <button>Join</button>
 </form>
 <form method="post" action="/setup/network"><input type="hidden" name="ethernet" value="1"><button class="plain">I plugged in an Ethernet cable</button></form>
@@ -96,7 +97,17 @@ form { margin: .6em 0 1.2em; }
 </details>
 <p><a href="/setup">I sent it</a></p>
 
+{{else if eq .Step "claim"}}
+<h2>2. Text your box</h2>
+<p>Your number ({{.Paired}}) is paired. The box texted you a page code; type it here to continue on this phone.</p>
+<form method="post" action="/setup/claim"><label>Page code<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required></label><button>Continue</button></form>
+
+{{else if eq .Step "elsewhere"}}
+<h2>Setup in progress</h2>
+<p>Setup is continuing on the phone that texted the box ({{.Paired}}). Finish it there.</p>
+
 {{else if eq .Step "codes"}}
+<p class="muted">Paired with your number {{.Paired}}.</p>
 <h2>3. Add approval codes</h2>
 <p><a class="button" href="{{.OTPLink}}">Add approval codes</a></p>
 <p class="muted">Your phone's code generator opens (on iPhone, the Passwords app). If it does not, scan this with another device, or type the key.</p>
@@ -121,8 +132,8 @@ form { margin: .6em 0 1.2em; }
 {{else}}<p class="muted">One is enough. You can add more later.</p>
 {{range .Providers}}<h3>{{.Name}}{{if .Connected}}: connected{{end}}</h3>
 {{if not .Connected}}
-{{if .DeviceCode}}{{with index $.Device .ID}}<p>Open <a href="{{index . 0}}">{{index . 0}}</a> and enter <span class="mono">{{index . 1}}</span>.</p><p><a href="/setup">I signed in</a></p>{{else}}<form method="post" action="/setup/ai-device"><input type="hidden" name="provider" value="{{.ID}}"><button>Sign in with {{.Name}}</button></form>{{end}}{{end}}
-{{if .APIKey}}<form method="post" action="/setup/ai-key"><input type="hidden" name="provider" value="{{.ID}}"><label>Or paste an API key<input type="password" name="key" autocomplete="off"></label><button class="plain">Save key</button></form>{{end}}
+{{if .DeviceCode}}{{with index $.Device .ID}}<p>Open <a href="{{index . 0}}">{{index . 0}}</a> and enter <span class="mono">{{index . 1}}</span>.</p><p><a href="/setup">I signed in</a></p>{{else}}<form method="post" action="/setup/ai-device"><input type="hidden" name="provider" value="{{.ID}}">{{template "private" .}}<button>Sign in with {{.Name}}</button></form>{{end}}{{end}}
+{{if .APIKey}}<form method="post" action="/setup/ai-key"><input type="hidden" name="provider" value="{{.ID}}">{{template "private" .}}<label>Or paste an API key<input type="password" name="key" autocomplete="off"></label><button class="plain">Save key</button></form>{{end}}
 {{end}}{{end}}{{end}}
 {{end}}
 {{template "foot"}}{{end}}
@@ -138,11 +149,17 @@ func phaseText(p string) string {
 	return "starting"
 }
 
+// pagesFor returns the page set with this box's address in the footer, so
+// the owner always sees where the box page lives.
+func pagesFor(host string) *template.Template {
+	return template.Must(tmpl.Clone()).Funcs(template.FuncMap{"boxhost": func() string { return host }})
+}
+
 // render writes a page, buffering it so a template error never leaves a
 // half page.
-func render(w http.ResponseWriter, name string, v any) {
+func (s *Server) render(w http.ResponseWriter, name string, v any) {
 	var b bytes.Buffer
-	if err := tmpl.ExecuteTemplate(&b, name, v); err != nil {
+	if err := s.pages.ExecuteTemplate(&b, name, v); err != nil {
 		http.Error(w, "Page error", http.StatusInternalServerError)
 		return
 	}

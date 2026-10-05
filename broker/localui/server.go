@@ -17,6 +17,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"html/template"
 	"io"
 	"net"
 	"net/http"
@@ -37,6 +38,8 @@ type Owner interface {
 	LocalSignIn(code string) (time.Time, error)
 	LocalStop(ctx context.Context) error
 	LocalResume() (string, error)
+	// UnlockPeriod is CH-14's N: how long a sign-in is remembered.
+	UnlockPeriod() time.Duration
 }
 
 // Config configures a Server.
@@ -68,6 +71,8 @@ type Server struct {
 	cfg  Config
 	host string
 	mux  *http.ServeMux
+	// pages carry this box's address in their footer.
+	pages *template.Template
 
 	mu       sync.Mutex
 	owner    Owner
@@ -105,12 +110,15 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Port != 80 {
 		host = net.JoinHostPort(host, strconv.Itoa(cfg.Port))
 	}
-	s := &Server{cfg: cfg, host: host, mux: http.NewServeMux(), sessions: map[string]time.Time{}}
+	s := &Server{cfg: cfg, host: host, mux: http.NewServeMux(), sessions: map[string]time.Time{}, pages: pagesFor(host)}
 	st, err := cfg.Store.Load()
 	if err != nil {
 		return nil, err
 	}
 	s.setup = newSetup(s, st)
+	if err := s.setup.adopt(); err != nil {
+		return nil, err
+	}
 	s.routes()
 	return s, nil
 }
@@ -229,10 +237,17 @@ func (s *Server) isSignedIn(r *http.Request) bool {
 	}
 	k := tokenKey(c.Value)
 	now := s.cfg.Now()
+	// A device is signed out when the session locks (wrong codes, an
+	// unknown-host boot): its sign-in must lie within the current unlock.
+	var until time.Time
+	o := s.getOwner()
+	if o != nil {
+		until = o.LocalStatus().UnlockedUntil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	exp, ok := s.sessions[k]
-	if ok && !now.Before(exp) {
+	if ok && (!now.Before(exp) || (o != nil && exp.After(until))) {
 		delete(s.sessions, k)
 		ok = false
 	}
@@ -316,7 +331,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	if o := s.getOwner(); o != nil {
 		v.HasOwner, v.Owner = true, o.LocalStatus()
 	}
-	render(w, "status", v)
+	s.render(w, "status", v)
 }
 
 type unlockView struct {
@@ -326,11 +341,15 @@ type unlockView struct {
 	Next       string
 	Err        string
 	Vault      bool
+	Days       int
 }
 
 func (s *Server) unlock(w http.ResponseWriter, r *http.Request) {
 	o := s.getOwner()
 	v := unlockView{HasOwner: o != nil, Next: safeNext(r.FormValue("next")), Vault: s.cfg.VaultUnlock != nil}
+	if o != nil {
+		v.Days = int(o.UnlockPeriod() / (24 * time.Hour))
+	}
 	if r.Method == http.MethodPost {
 		if !s.sameOrigin(r) {
 			http.Error(w, "Forbidden", http.StatusForbidden)
@@ -350,7 +369,7 @@ func (s *Server) unlock(w http.ResponseWriter, r *http.Request) {
 		v.Challenged = o.LocalStatus().Challenged
 		v.Cell = o.LocalGridCell()
 	}
-	render(w, "unlock", v)
+	s.render(w, "unlock", v)
 }
 
 // signIn checks a code with the owner channel; on success the device is
@@ -360,7 +379,7 @@ func (s *Server) signIn(w http.ResponseWriter, o Owner, code string) error {
 	until, err := o.LocalSignIn(code)
 	switch {
 	case errors.Is(err, owner.ErrTooMany):
-		return errors.New("Too many tries here today. Use your phone: text a code to the box.")
+		return errors.New("Too many tries on the box's Wi-Fi in the last day, so sign-in here is paused for up to 24 hours. Your phone still works: text a code to the box.")
 	case errors.Is(err, owner.ErrWrongCode):
 		return errors.New("That code did not work. Each code works once; wait for the next one.")
 	case err != nil:
@@ -395,7 +414,8 @@ func (s *Server) resume(w http.ResponseWriter, r *http.Request) {
 	}
 	if !s.isSignedIn(r) {
 		if err := s.signIn(w, o, r.PostFormValue("code")); err != nil {
-			render(w, "unlock", unlockView{HasOwner: true, Next: "/status", Err: err.Error(), Cell: o.LocalGridCell(),
+			s.render(w, "unlock", unlockView{HasOwner: true, Next: "/status", Err: err.Error(), Cell: o.LocalGridCell(),
+				Days:       int(o.UnlockPeriod() / (24 * time.Hour)),
 				Challenged: o.LocalStatus().Challenged, Vault: s.cfg.VaultUnlock != nil})
 			return
 		}
@@ -421,7 +441,7 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	ms := append([]mount(nil), s.mounts...)
 	s.mu.Unlock()
-	render(w, "home", ms)
+	s.render(w, "home", ms)
 }
 
 // contact serves the box's number as a contact card (§8.1 step 5).
@@ -433,7 +453,7 @@ func (s *Server) contact(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/vcard; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="AgentOS.vcf"`)
-	io.WriteString(w, "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:AgentOS\r\nTEL;TYPE=CELL:"+n+"\r\nEND:VCARD\r\n")
+	io.WriteString(w, "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:AgentOS\r\nTEL;TYPE=CELL:"+n+"\r\nURL:http://"+s.host+"/\r\nEND:VCARD\r\n")
 }
 
 var msgs = map[string]string{
