@@ -64,8 +64,12 @@ type Config struct {
 	// P2-4e) is then served at /unlock/vault, open without sign-in like
 	// /unlock.
 	Vault Vault
-	Now   func() time.Time
-	Rand  io.Reader
+	// SecondLine, when set, is the second line's routes on the same
+	// socket (egress K13); its page is served at /second-line/ behind
+	// sign-in (ADP-12, P2-3c). It needs Vault.
+	SecondLine SecondLine
+	Now        func() time.Time
+	Rand       io.Reader
 }
 
 // Server is the local UI.
@@ -113,6 +117,9 @@ func New(cfg Config) (*Server, error) {
 	}
 	if cfg.Hooks == nil || cfg.Store == nil {
 		return nil, errors.New("localui: hooks and store are required")
+	}
+	if cfg.SecondLine != nil && cfg.Vault == nil {
+		return nil, errors.New("localui: the second line needs the vault socket")
 	}
 	if cfg.Port == 0 {
 		cfg.Port = UIPort
@@ -172,6 +179,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/box.vcf", s.contact)
 	if s.cfg.Vault != nil {
 		s.mux.HandleFunc("/unlock/vault", s.vaultUnlock)
+	}
+	if s.cfg.SecondLine != nil {
+		s.Mount("/second-line", "Second line", http.HandlerFunc(s.secondLine))
 	}
 	s.setup.routes(s.mux)
 }

@@ -77,6 +77,9 @@ type sipStatus struct {
 	Realm                  string           `json:"realm,omitempty"`
 	RealmConfirmed         bool             `json:"realm_confirmed"`
 	WaitingForRegistration bool             `json:"waiting_for_registration"`
+	// SetAt is when setup ran (Unix seconds), so the page can say what to
+	// check while the first registration is slow (UX-139-2).
+	SetAt int64 `json:"set_at"`
 }
 
 // sipPassword is a provider-generated password: printable, and long
@@ -217,7 +220,7 @@ func (c *custody) sipStatus() (sipStatus, error) {
 		return sipStatus{}, nil
 	}
 	return sipStatus{Set: true, Settings: rec.Settings, RealmRecorded: rec.Realm != "", Realm: rec.Realm, RealmConfirmed: rec.Confirmed,
-		WaitingForRegistration: c.learning(rec)}, nil
+		WaitingForRegistration: c.learning(rec), SetAt: rec.SetAt}, nil
 }
 
 // signStore is the custody as sign.sock serves it (sipsign.Store).
