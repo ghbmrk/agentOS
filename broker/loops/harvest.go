@@ -372,11 +372,17 @@ func (h *Harvester) ForgetIntents(ids []string) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	// Every call, whatever the harvester's own state: a candidate may have
-	// been kept since the last one.
+	err := h.forgetIntents(ids)
+	// After the marks, on every call whatever they did: Loop 1 drops a
+	// candidate it kept from these intents before them, and keeps none
+	// after them (erasedAny; security F1 on #153).
 	if f := h.erased.Load(); f != nil {
 		(*f)(ids)
 	}
+	return err
+}
+
+func (h *Harvester) forgetIntents(ids []string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if err := h.loadLocked(); err != nil {
@@ -395,6 +401,22 @@ func (h *Harvester) ForgetIntents(ids []string) error {
 		return nil
 	}
 	return h.saveLocked()
+}
+
+// erasedAny reports whether ForgetIntents marked any of ids; true when the
+// state cannot be read, so nothing is kept on a guess.
+func (h *Harvester) erasedAny(ids []string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if err := h.loadLocked(); err != nil {
+		return true
+	}
+	for _, id := range ids {
+		if h.st.Forgotten[id] {
+			return true
+		}
+	}
+	return false
 }
 
 // Evidence is what Loop 1 may know about the harvested cases: which tasks

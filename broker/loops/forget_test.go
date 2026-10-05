@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/change"
+	"github.com/ghbmrk/agentos/broker/journal"
 )
 
 // REQ: CAP-3, CHG-1
@@ -114,7 +115,6 @@ func TestErasedIntentsDropKeptCandidates(t *testing.T) {
 	l.propose(ctx, h1, Evidence{})
 	l.propose(ctx, h2, dev)
 	l.propose(ctx, h3, Evidence{})
-	l.cfg.Harvest.Store = &change.MemStore{}
 	must(t, l.cfg.Harvest.ForgetIntents([]string{"task-b", "task-z"}))
 	l.mu.Lock()
 	_, k1 := l.built["k1"]
@@ -137,5 +137,36 @@ func TestErasedIntentsDropKeptCandidates(t *testing.T) {
 	l.mu.Unlock()
 	if k1 {
 		t.Fatal("a candidate kept between the reach's two calls stayed")
+	}
+}
+
+// erasingPipeline runs the reach's harvester call while the candidate is
+// being evaluated, then reports the evaluation preempted.
+type erasingPipeline struct {
+	interruptingPipeline
+	h *Harvester
+}
+
+func (p *erasingPipeline) Propose(ctx context.Context, c change.Candidate) (change.Report, error) {
+	if err := p.h.ForgetIntents([]string{"task-a"}); err != nil {
+		return change.Report{}, err
+	}
+	return p.interruptingPipeline.Propose(ctx, c)
+}
+
+// Security F1 on #153: a candidate whose intent is erased while it is
+// evaluated is not kept, even with only one reach call.
+func TestAnIntentErasedInFlightKeepsNoCandidate(t *testing.T) {
+	h := &Harvester{Store: &change.MemStore{}}
+	pl := &erasingPipeline{h: h}
+	b := &builder{files: map[string][]byte{"procedures/mail": []byte("v2")}}
+	l, err := NewLearn(LearnConfig{Pipeline: pl, Journal: &journal.Engine{}, Harvest: h, Builder: b})
+	must(t, err)
+	l.propose(context.Background(), hyp("k", "task-a"), Evidence{})
+	l.mu.Lock()
+	_, kept := l.built["k"]
+	l.mu.Unlock()
+	if kept {
+		t.Fatal("a candidate erased in flight was kept")
 	}
 }

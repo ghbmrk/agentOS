@@ -597,9 +597,15 @@ func (l *Learn) propose(ctx context.Context, h Hypothesis, ev Evidence) (change.
 	if errors.Is(err, change.ErrInterrupted) {
 		// Preempted mid-evaluation: keep the checked candidate for the
 		// next offer, so the pipeline can resume its pairs.
+		intents := briefIntents(h, ev.Dev)
 		l.mu.Lock()
+		if l.cfg.Harvest.erasedAny(intents) {
+			// Erased while it was evaluated (security F1 on #153).
+			l.mu.Unlock()
+			return rep, err
+		}
 		l.built[h.Key] = keptCandidate{cand: cand, brief: brief, tasks: slices.Clone(h.Tasks),
-			intents: briefIntents(h, ev.Dev), at: l.cfg.Now()}
+			intents: intents, at: l.cfg.Now()}
 		for len(l.built) > maxKeptCandidates {
 			oldest := ""
 			for k, v := range l.built {
