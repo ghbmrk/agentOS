@@ -371,14 +371,26 @@ func TestOP5GuestCannotRequestBrokerState(t *testing.T) {
 	r := newRig(t, func(c *Config) {
 		c.Route = func(string) (string, bool) { return "mail", true } // every account routes
 	})
-	for _, a := range []map[string]any{
-		{"request_id": "b1", "account": "broker", "action": "meta.budget.lower"},
-		{"request_id": "b2", "account": "Broker", "action": "anything"},
-		{"request_id": "b3", "account": "owner-mail", "action": "META.grant.add"},
+	for i, a := range []map[string]string{
+		{"account": "broker", "action": "meta.budget.lower"},
+		{"account": "Broker", "action": "anything"},
+		{"account": "owner-mail", "action": "META.grant.add"},
+		// Look-alikes: names are strict lowercase ASCII, so none of these
+		// reaches routing or the journal as a different name.
+		{"account": " broker", "action": "send"},
+		{"account": "broker ", "action": "send"},
+		{"account": "bro\u200bker", "action": "send"},
+		{"account": "br\u043e\u043aer", "action": "send"},          // Cyrillic o, k
+		{"account": "owner-mail", "action": "meta\u2024grant.add"}, // one dot leader
+		{"account": "owner-mail", "action": "\u200bmeta.grant.add"},
+		{"account": "owner-mail", "action": "m\u0435ta.grant.add"}, // Cyrillic e
+		{"account": "owner-mail", "action": "meta.grant.add\n"},
+		{"account": "owner\uff0dmail", "action": "send"}, // fullwidth hyphen
 	} {
-		st, e := r.tool("m1", "effect_request", a)
-		if st.State != "refused" || e != "" {
-			t.Fatalf("%v: %+v %s", a, st, e)
+		args := map[string]any{"request_id": fmt.Sprint("b", i), "account": a["account"], "action": a["action"]}
+		st, e := r.tool("m1", "effect_request", args)
+		if st.State != "refused" && e == "" {
+			t.Fatalf("%q: %+v %s", args, st, e)
 		}
 	}
 	if n := len(r.eng.List()); n != 0 || r.ms.stepsOf("m1") != 0 {

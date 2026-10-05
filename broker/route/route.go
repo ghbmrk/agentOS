@@ -315,6 +315,16 @@ func (r *Router) Handler(machine string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) { r.serve(machine, w, req) })
 }
 
+type usageKey struct{}
+
+// WithUsage returns ctx carrying f, which the router calls with the
+// provider and its usage for each call it serves on ctx, whether or not
+// the guest asked for usage. The guest plane uses it to settle the OP-8
+// meter from what the provider reported.
+func WithUsage(ctx context.Context, f func(provider string, u Usage)) context.Context {
+	return context.WithValue(ctx, usageKey{}, f)
+}
+
 // paths the router serves: the OpenAI base URL at the root, or under the
 // openai adapter's name, which is where a guest configured for the raw
 // proxy already points.
@@ -468,6 +478,9 @@ func (r *Router) serve(machine string, w http.ResponseWriter, req *http.Request)
 		}
 		d.Outcome, d.Status, d.Usage = Served, a.status, a.usage
 		r.cfg.Audit(d)
+		if f, ok := req.Context().Value(usageKey{}).(func(string, Usage)); ok && a.usage != nil {
+			f(rt.Provider, *a.usage)
+		}
 		return
 	}
 	d.Route = ""

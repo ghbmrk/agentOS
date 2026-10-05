@@ -71,6 +71,11 @@ var tools = []map[string]any{
 
 var requestIDRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
+// nameRE is an account or action name: lowercase ASCII only, so no
+// spacing, invisible, look-alike, or case variant can pass for another
+// name in the checks below, in routing, or in the journal.
+var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+
 func (p *Plane) mcp(m *machine, w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", "POST")
@@ -201,6 +206,9 @@ func (p *Plane) callTool(ctx context.Context, m *machine, name string, raw json.
 		if !requestIDRE.MatchString(a.RequestID) || a.Account == "" || a.Action == "" {
 			return effectState{}, false, errors.New("request_id (letters, digits, . _ -; at most 64), account, and action are required")
 		}
+		if !nameRE.MatchString(a.Account) || !nameRE.MatchString(a.Action) {
+			return effectState{}, false, errors.New("account and action must be lowercase names (a-z, 0-9, . _ -; at most 64)")
+		}
 		if params, _ := json.Marshal(a.Params); len(params) > maxParamsBytes {
 			return effectState{}, false, fmt.Errorf("params are larger than %d bytes", maxParamsBytes)
 		}
@@ -215,7 +223,7 @@ func (p *Plane) callTool(ctx context.Context, m *machine, name string, raw json.
 		// Broker-state intents (budgets, grants, the broker's own
 		// settings) come from the owner and the broker, never a guest:
 		// some of them narrow and so pass STOP (OP-5, ARC-7).
-		if strings.EqualFold(a.Account, journal.BrokerAccount) || strings.HasPrefix(strings.ToLower(a.Action), "meta.") {
+		if a.Account == journal.BrokerAccount || strings.HasPrefix(a.Action, "meta.") {
 			return effectState{RequestID: a.RequestID, State: "refused", Reason: "broker-state changes are the owner's; a guest cannot request them"}, false, nil
 		}
 		if !m.rate.take(p.cfg.SubmitBurst, p.cfg.SubmitEvery) {

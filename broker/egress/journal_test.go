@@ -54,12 +54,16 @@ func TestADP10DenialFloodsAreCoalesced(t *testing.T) {
 	}
 	j.Egress(Event{Machine: "m2", Status: 403, Reason: "no such adapter"})
 	j.Egress(Event{Machine: "m1", Status: 403, Reason: "body too large"})
-	if len(rec.notes) != 3 {
-		t.Fatalf("journaled %d notes, want 3", len(rec.notes))
+	// A guest-chosen key name in the reason does not open a new entry.
+	for i := 0; i < 100; i++ {
+		j.Egress(Event{Machine: "m1", Status: 403, Reason: fmt.Sprintf("body key %q needs a public machine", fmt.Sprint("k", i))})
+	}
+	if len(rec.notes) != 4 {
+		t.Fatalf("journaled %d notes, want 4", len(rec.notes))
 	}
 	now = now.Add(61 * time.Second)
 	j.Egress(Event{Machine: "m1", Status: 403, Reason: "no such adapter"})
-	if n := rec.notes[len(rec.notes)-1]; len(rec.notes) != 4 || n.Suppressed != 999 {
+	if n := rec.notes[len(rec.notes)-1]; len(rec.notes) != 5 || n.Suppressed != 999 {
 		t.Fatalf("after the window: %+v", rec.notes)
 	}
 }

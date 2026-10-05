@@ -8,14 +8,18 @@
 // box-wide overall cap.
 //
 // A call is charged in two steps. Start charges one call, the request's
-// input estimated from its size, and a reservation for its output sized
-// from the request's own output limit (clamped), so parallel calls cannot
-// pass a limit together. Done settles the charge: a response that
+// input estimated from its size, and a reservation for its output: the
+// request's own output limit, clamped, which is also the limit the
+// provider is sent (inserted when the request has none), so parallel calls
+// cannot pass a limit together. Done settles the charge: a response that
 // completed and carries the provider's usage is charged that usage (hidden
 // reasoning included, cached input at the provider's cached weight);
-// otherwise the content strings the broker counted set the output charge,
-// and on a stream cut off early they are the least output charged. Wrap runs the call to the end even
-// if the guest hangs up, so hanging up does not stop the charge.
+// otherwise the content strings counted set the output charge, and on a
+// response cut off early they are the least output charged. The usage
+// comes from the handler that served the call when it reports it (Report;
+// the model router does), else from the response itself. Wrap runs the
+// call to the end even if the guest hangs up, so hanging up does not stop
+// the charge.
 //
 // On exhaustion further calls are refused and the owner is told once
 // (Notify); the owner may extend one task within a daily ceiling that the
@@ -35,6 +39,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -85,6 +91,9 @@ var (
 	DefaultDailyExtension = Limits{Calls: 300, Tokens: 3_000_000}
 )
 
+// DefaultMaxReserve is the default ceiling on one call's output tokens.
+const DefaultMaxReserve = 32000
+
 // Config configures Open. MachineCap and OverallCap must be set in full:
 // there is no unlimited setting.
 type Config struct {
@@ -94,9 +103,12 @@ type Config struct {
 	DailyExtension Limits        // most the owner may extend tasks by per day
 	Window         time.Duration // rolling window; default 24 h
 	MaxBody        int64         // Wrap's request body cap; default 8 MiB
-	// DefaultReserve is the output reserved for a request that sets no
-	// output limit; MaxReserve clamps any reservation. Defaults 8192 and
-	// 32768 tokens. Done settles the reservation to actual use.
+	// MaxReserve is the most output one call may ask for: every forwarded
+	// output limit is clamped to it and it is reserved at Start. Default
+	// 32000, the model router's ceiling (route.DefaultMaxOutputTokens);
+	// set it to the router's MaxOutputTokens. DefaultReserve is the limit
+	// inserted when a request sets none; default MaxReserve. Done settles
+	// the reservation to actual use.
 	DefaultReserve, MaxReserve int64
 	// CallTimeout bounds one call, which Wrap runs to the end even if the
 	// guest hangs up; default 10 minutes.
@@ -152,11 +164,11 @@ func Open(cfg Config) (*Meter, error) {
 	if cfg.MaxBody <= 0 {
 		cfg.MaxBody = 8 << 20
 	}
-	if cfg.DefaultReserve <= 0 {
-		cfg.DefaultReserve = 8192
-	}
 	if cfg.MaxReserve <= 0 {
-		cfg.MaxReserve = 32768
+		cfg.MaxReserve = DefaultMaxReserve
+	}
+	if cfg.DefaultReserve <= 0 || cfg.DefaultReserve > cfg.MaxReserve {
+		cfg.DefaultReserve = cfg.MaxReserve
 	}
 	if cfg.CallTimeout <= 0 {
 		cfg.CallTimeout = 10 * time.Minute
@@ -470,7 +482,12 @@ func (m *Meter) Wrap(machine string, next http.Handler) http.Handler {
 			return
 		}
 		in := Tokens(int64(len(body)))
-		c, err := m.Start(machine, in, m.reserve(body))
+		body, reserve, err := m.limit(r.URL.Path, body)
+		if err != nil {
+			http.Error(w, "model request body must be one JSON object", http.StatusBadRequest)
+			return
+		}
+		c, err := m.Start(machine, in, reserve)
 		if err != nil {
 			code, msg := http.StatusTooManyRequests, "model spend limit reached for this task; the owner has been told and may extend it"
 			if !errors.Is(err, ErrExhausted) {
@@ -485,34 +502,71 @@ func (m *Meter) Wrap(machine string, next http.Handler) http.Handler {
 		}
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), m.cfg.CallTimeout)
 		defer cancel()
-		r = r.WithContext(ctx)
+		rep := &reportSlot{}
+		r = r.WithContext(context.WithValue(ctx, reportKey{}, rep))
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		r.ContentLength = int64(len(body))
+		r.Header.Del("Content-Length")
 		uw := &usageWriter{w: w, max: m.cfg.MaxBody}
-		defer func() { c.Done(uw.used(in)) }()
+		defer func() { c.Done(uw.used(in, rep.get())) }()
 		next.ServeHTTP(uw, r)
 	})
 }
 
-// reserve sizes a call's output reservation from the request's own output
-// limit (max_tokens, max_completion_tokens, or max_output_tokens; any
-// reasoning budget is inside it), clamped to MaxReserve.
-func (m *Meter) reserve(body []byte) int64 {
-	var req struct {
-		MaxTokens           json.Number `json:"max_tokens"`
-		MaxCompletionTokens json.Number `json:"max_completion_tokens"`
-		MaxOutputTokens     json.Number `json:"max_output_tokens"`
+// limit makes the request's output limit the call's reservation (OP-8).
+// Every output-limit key present (max_tokens, max_completion_tokens,
+// max_output_tokens; any reasoning budget sits inside them) is clamped to
+// MaxReserve, a missing or unusable one counts as MaxReserve, and when
+// none is present the limit is inserted at DefaultReserve, under the key
+// the path's API reads. The body is re-encoded from what was checked, so
+// duplicate keys cannot carry a second, larger limit past the meter. The
+// reservation is the largest limit forwarded, so a provider that honors
+// its limit cannot be charged past what Start reserved. An empty body
+// (a GET) passes unchanged; any other body that is not one JSON object
+// is refused.
+func (m *Meter) limit(path string, body []byte) ([]byte, int64, error) {
+	if len(bytes.TrimSpace(body)) == 0 {
+		return body, m.cfg.DefaultReserve, nil
 	}
-	n := int64(0)
-	if json.Unmarshal(body, &req) == nil {
-		for _, v := range []json.Number{req.MaxTokens, req.MaxCompletionTokens, req.MaxOutputTokens} {
-			if f, err := v.Float64(); err == nil && f > float64(n) {
-				n = int64(min(f, float64(m.cfg.MaxReserve)))
-			}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	var obj map[string]json.RawMessage
+	if err := dec.Decode(&obj); err != nil || obj == nil {
+		return nil, 0, errors.New("body is not a JSON object")
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, 0, errors.New("trailing data after JSON body")
+	}
+	reserve := int64(0)
+	for _, k := range limitKeys {
+		v, ok := obj[k]
+		if !ok {
+			continue
 		}
+		n, err := strconv.ParseInt(string(bytes.TrimSpace(v)), 10, 64)
+		if err != nil || n <= 0 || n > m.cfg.MaxReserve {
+			n = m.cfg.MaxReserve
+		}
+		obj[k] = json.RawMessage(strconv.FormatInt(n, 10))
+		reserve = max(reserve, n)
 	}
-	if n <= 0 {
-		n = m.cfg.DefaultReserve
+	if reserve == 0 {
+		reserve = m.cfg.DefaultReserve
+		k := "max_completion_tokens"
+		switch {
+		case strings.HasSuffix(path, "/messages"):
+			k = "max_tokens" // Anthropic Messages
+		case strings.HasSuffix(path, "/responses"):
+			k = "max_output_tokens" // OpenAI Responses
+		}
+		obj[k] = json.RawMessage(strconv.FormatInt(reserve, 10))
 	}
-	return min(n, m.cfg.MaxReserve)
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return nil, 0, err
+	}
+	return out, reserve, nil
 }
+
+// limitKeys are the request keys that bound a call's output.
+var limitKeys = []string{"max_tokens", "max_completion_tokens", "max_output_tokens"}

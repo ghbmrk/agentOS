@@ -1,6 +1,7 @@
 package egress
 
 import (
+	"strings"
 	"sync"
 	"time"
 
@@ -18,7 +19,8 @@ type Recorder interface {
 // the request was already denied.
 //
 // Denials are coalesced so a looping guest cannot fill the journal: per
-// machine and reason, the first denial in a window (default one minute)
+// machine and reason class (the reason up to any quoted, guest-chosen
+// part, so varying a key name does not open a new entry), the first denial in a window (default one minute)
 // is journaled at once, the rest are counted, and the count rides on the
 // next note for that machine and reason (EgressNote.Suppressed).
 type JournalAuditor struct {
@@ -34,6 +36,15 @@ type JournalAuditor struct {
 type denials struct {
 	since      time.Time
 	suppressed int
+}
+
+// reasonClass is a denial reason without its quoted parts: the fixed
+// text the proxy chose, never anything the request named.
+func reasonClass(reason string) string {
+	if i := strings.IndexByte(reason, '"'); i >= 0 {
+		return reason[:i]
+	}
+	return reason
 }
 
 // maxKeys bounds the coalescing table; past it, expired entries are pruned.
@@ -67,7 +78,7 @@ func (j *JournalAuditor) admit(n *journal.EgressNote) bool {
 	if j.seen == nil {
 		j.seen = map[[2]string]*denials{}
 	}
-	k := [2]string{n.Machine, n.Reason}
+	k := [2]string{n.Machine, reasonClass(n.Reason)}
 	d := j.seen[k]
 	if d != nil && now.Sub(d.since) < win {
 		d.suppressed++
