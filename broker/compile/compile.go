@@ -11,7 +11,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/journal"
-	"github.com/ghbmrk/agentos/broker/skill"
+	skill "github.com/ghbmrk/agentos/broker/skill/format"
 )
 
 // Cases is the part of the change pipeline the compiler uses: the dev

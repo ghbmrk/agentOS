@@ -663,3 +663,32 @@ func TestLoopBuilder(t *testing.T) {
 		t.Fatal("not ready with three accepted runs")
 	}
 }
+
+// W3 step 3a: in the box the journal may keep no values at all (the
+// daemon's default redactor stores a mark for every free text). With the
+// mark reported as redacted, no skill or procedure is compiled from such
+// runs, so a placeholder never becomes a literal.
+func TestAFullyRedactedJournalCompilesNothing(t *testing.T) {
+	r := &rig{t: t, now: time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC), dev: map[string]bool{}}
+	eng, err := journal.Open(&journal.MemStore{}, r, map[string]journal.Executor{"task": ok{}},
+		func(s string) string {
+			if s == "" {
+				return ""
+			}
+			return "[redacted]"
+		}, journal.WithClock(func() time.Time { return r.now }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.eng = eng
+	for i, to := range []string{"ann@example.test", "bo@example.test", "cy@example.test", "dee@example.test"} {
+		r.accepted(fmt.Sprint("g", i), to, 40+i)
+	}
+	c, err := New(Config{Journal: r.eng, Cases: r, Redacted: func(s string) bool { return strings.Contains(s, "[redacted]") }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cs := c.Candidates(change.Tree{}); len(cs) != 0 {
+		t.Fatalf("compiled from redacted runs: %+v", cs)
+	}
+}

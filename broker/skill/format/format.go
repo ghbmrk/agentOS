@@ -519,3 +519,44 @@ func sortedKeys(m map[string]Node) []string {
 	sort.Strings(keys)
 	return keys
 }
+
+// RequestPrefix starts the request ID of every step a skill runs, so the
+// broker can tell skill runs from model-planned ones when it measures them
+// (compile.Measure, A10).
+const RequestPrefix = "skill-"
+
+// RequestID is step i's (0-based) request ID in run runID: stable, so a
+// retried run with the same run ID repeats each request and the broker
+// runs each effect at most once (OP-1).
+func RequestID(skillID, runID string, i int) string {
+	return fmt.Sprintf("%s%s-%s-%d", RequestPrefix, skillID, runID, i+1)
+}
+
+// ParseRequestID splits a skill step's request ID into skill ID, run ID,
+// and 1-based step; ok is false for any other request ID.
+func ParseRequestID(reqID string) (skillID, runID string, step int, ok bool) {
+	rest, found := strings.CutPrefix(reqID, RequestPrefix)
+	if !found {
+		return "", "", 0, false
+	}
+	parts := strings.Split(rest, "-")
+	if len(parts) != 3 || !ValidID(parts[0]) || !ValidRunID(parts[1]) {
+		return "", "", 0, false
+	}
+	n := 0
+	for _, c := range parts[2] {
+		if c < '0' || c > '9' || n > MaxSteps {
+			return "", "", 0, false
+		}
+		n = n*10 + int(c-'0')
+	}
+	if n < 1 || n > MaxSteps {
+		return "", "", 0, false
+	}
+	return parts[0], parts[1], n, true
+}
+
+var runIDRE = regexp.MustCompile(`^[A-Za-z0-9_]{1,32}$`)
+
+// ValidRunID reports a run ID a request ID may carry.
+func ValidRunID(id string) bool { return runIDRE.MatchString(id) }
