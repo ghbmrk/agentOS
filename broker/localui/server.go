@@ -76,7 +76,7 @@ type Server struct {
 
 	mu       sync.Mutex
 	owner    Owner
-	sessions map[string]time.Time // SHA-256 of the cookie token -> expiry
+	sessions map[string]session // by SHA-256 of the cookie token
 	mounts   []mount
 	setup    *setup
 }
@@ -110,7 +110,7 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Port != 80 {
 		host = net.JoinHostPort(host, strconv.Itoa(cfg.Port))
 	}
-	s := &Server{cfg: cfg, host: host, mux: http.NewServeMux(), sessions: map[string]time.Time{}, pages: pagesFor(host)}
+	s := &Server{cfg: cfg, host: host, mux: http.NewServeMux(), sessions: map[string]session{}, pages: pagesFor(host)}
 	st, err := cfg.Store.Load()
 	if err != nil {
 		return nil, err
@@ -238,24 +238,33 @@ func (s *Server) isSignedIn(r *http.Request) bool {
 	k := tokenKey(c.Value)
 	now := s.cfg.Now()
 	// A device is signed out when the session locks (wrong codes, an
-	// unknown-host boot): its sign-in must lie within the current unlock.
-	var until time.Time
+	// unknown-host boot), even if a later unlock by text follows: its
+	// sign-in must come after the last lock.
+	var locks uint64
 	o := s.getOwner()
 	if o != nil {
-		until = o.LocalStatus().UnlockedUntil
+		locks = o.LocalStatus().Locks
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	exp, ok := s.sessions[k]
-	if ok && (!now.Before(exp) || (o != nil && exp.After(until))) {
+	ss, ok := s.sessions[k]
+	if ok && (!now.Before(ss.exp) || (o != nil && ss.locks != locks)) {
 		delete(s.sessions, k)
 		ok = false
 	}
 	return ok
 }
 
-// remember signs the device in until until (CH-7: the CH-3 unlock period).
-func (s *Server) remember(w http.ResponseWriter, until time.Time) error {
+// session is a signed-in device: until when, and the owner channel's lock
+// count when it signed in.
+type session struct {
+	exp   time.Time
+	locks uint64
+}
+
+// remember signs the device in until until (CH-7: the CH-3 unlock period),
+// under lock count locks.
+func (s *Server) remember(w http.ResponseWriter, until time.Time, locks uint64) error {
 	b := make([]byte, 32)
 	if _, err := io.ReadFull(s.cfg.Rand, b); err != nil {
 		return err
@@ -263,8 +272,8 @@ func (s *Server) remember(w http.ResponseWriter, until time.Time) error {
 	tok := hex.EncodeToString(b)
 	now := s.cfg.Now()
 	s.mu.Lock()
-	for k, exp := range s.sessions {
-		if !now.Before(exp) {
+	for k, ss := range s.sessions {
+		if !now.Before(ss.exp) {
 			delete(s.sessions, k)
 		}
 	}
@@ -273,10 +282,10 @@ func (s *Server) remember(w http.ResponseWriter, until time.Time) error {
 		for k := range s.sessions {
 			keys = append(keys, k)
 		}
-		sort.Slice(keys, func(i, j int) bool { return s.sessions[keys[i]].Before(s.sessions[keys[j]]) })
+		sort.Slice(keys, func(i, j int) bool { return s.sessions[keys[i]].exp.Before(s.sessions[keys[j]].exp) })
 		delete(s.sessions, keys[0])
 	}
-	s.sessions[tokenKey(tok)] = until
+	s.sessions[tokenKey(tok)] = session{exp: until, locks: locks}
 	s.mu.Unlock()
 	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: tok, Path: "/", Expires: until,
 		MaxAge: int(until.Sub(now) / time.Second), HttpOnly: true, SameSite: http.SameSiteStrictMode})
@@ -376,6 +385,9 @@ func (s *Server) unlock(w http.ResponseWriter, r *http.Request) {
 // remembered. The returned error is owner-facing text.
 func (s *Server) signIn(w http.ResponseWriter, o Owner, code string) error {
 	code = strings.TrimSpace(code)
+	// The lock count is read first, so a lock racing the sign-in can only
+	// sign the device out, never leave it signed in.
+	locks := o.LocalStatus().Locks
 	until, err := o.LocalSignIn(code)
 	switch {
 	case errors.Is(err, owner.ErrTooMany):
@@ -385,7 +397,7 @@ func (s *Server) signIn(w http.ResponseWriter, o Owner, code string) error {
 	case err != nil:
 		return errors.New("Could not check the code. Try again.")
 	}
-	if err := s.remember(w, until); err != nil {
+	if err := s.remember(w, until, locks); err != nil {
 		return errors.New("Could not remember this device. Try again.")
 	}
 	return nil

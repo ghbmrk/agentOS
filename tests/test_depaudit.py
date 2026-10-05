@@ -195,6 +195,9 @@ class StaticScanTest(unittest.TestCase):
         self.assertEqual(v, [("broker/vendor/x/net.go:1", "meta.example.io"), ("broker/vendor/x/net.go:1", "other.vendor.io"),
                              ("broker/vendor/x/png.go:1", "other.vendor.io")])
         for bad in ({"file": "broker/net.go", "host": "h.io", "why": "x"},
+                    {"file": "broker/x/vendor/y.go", "host": "h.io", "why": "x"},
+                    {"file": "x/broker/vendor/y.go", "host": "h.io", "why": "x"},
+                    {"file": "broker/vendor/../net.go", "host": "h.io", "why": "x"},
                     {"file": "broker/vendor/x.go", "host": "h.io"},
                     {"file": "broker/vendor/x.go", "host": "ping.agentos.io", "why": "x"}):
             with self.assertRaises(ValueError):

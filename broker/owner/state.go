@@ -15,6 +15,9 @@ import (
 type State struct {
 	// UnlockedUntil ends the current session unlock (CH-3, CH-14).
 	UnlockedUntil time.Time `json:"unlocked_until"`
+	// Locks counts session locks. Anything signed in under an earlier
+	// count, such as a local UI device, is signed out.
+	Locks uint64 `json:"locks"`
 	// LastStep is the newest code-generator time step accepted; older and
 	// equal steps are refused, so each generator code works once.
 	LastStep int64 `json:"last_step"`
@@ -37,6 +40,10 @@ type State struct {
 	// sign-in attempts (LocalBound).
 	LocalStart time.Time `json:"local_start"`
 	LocalUsed  int       `json:"local_used"`
+	// LocalSignIns lists local sign-ins not yet texted to the owner, and
+	// LocalAlertAt is the last such text (SignInAlertEvery).
+	LocalSignIns []time.Time `json:"local_sign_ins,omitempty"`
+	LocalAlertAt time.Time   `json:"local_alert_at"`
 	// Pending lists open requests and Queued the auto-replies waiting out
 	// their undo window, by reference only (never codes or reply text), so
 	// a restart can report what it dropped (OP-4, CH-13).
@@ -85,6 +92,7 @@ func (m *MemStore) Save(s State) error {
 func copyState(s State) State {
 	s.GridUsed = append([]string(nil), s.GridUsed...)
 	s.Wrong = append([]time.Time(nil), s.Wrong...)
+	s.LocalSignIns = append([]time.Time(nil), s.LocalSignIns...)
 	s.Pending = append([]PendingRef(nil), s.Pending...)
 	s.Queued = append([]QueuedRef(nil), s.Queued...)
 	r := make(map[string]time.Time, len(s.Retired))

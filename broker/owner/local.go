@@ -24,10 +24,13 @@ const LocalBound = 24
 // sign-ins in between are listed in the next one (CH-15).
 const SignInAlertEvery = time.Hour
 
-// localAlerts coalesces the owner's texts about local sign-ins.
+// localAlerts coalesces the owner's texts about local sign-ins. Sign-ins
+// not yet texted, and the last such text, are durable (State.LocalSignIns,
+// State.LocalAlertAt), so neither a restart nor a failed send loses one.
 type localAlerts struct {
-	signIns  []time.Time // not yet texted
-	lastText time.Time
+	// sending is set while a sign-in text is out, so two callers never
+	// send the same sign-ins.
+	sending bool
 	// wrong lists wrong local codes for the digest; alerted is the
 	// bound window whose first wrong code was already texted.
 	wrong   []time.Time
@@ -36,19 +39,45 @@ type localAlerts struct {
 
 const maxLocalNotes = 200
 
-// signInTextLocked returns the text listing untold sign-ins, or "" while
-// the last one is less than SignInAlertEvery old.
-func (c *Channel) signInTextLocked(now time.Time) string {
-	l := &c.local
-	if len(l.signIns) == 0 || (!l.lastText.IsZero() && now.Sub(l.lastText) < SignInAlertEvery) {
-		return ""
+// maxSignIns caps the untold sign-ins kept while texts fail; the oldest go
+// first, and the text still says how many there were.
+const maxSignIns = 64
+
+// signInTextLocked returns the text listing untold sign-ins and how many it
+// lists, or "" while the last such text is less than SignInAlertEvery old
+// or another is being sent. The caller passes both to sendSignIns.
+func (c *Channel) signInTextLocked(now time.Time) (string, int) {
+	st := c.codes.st
+	if c.local.sending || len(st.LocalSignIns) == 0 ||
+		(!st.LocalAlertAt.IsZero() && now.Sub(st.LocalAlertAt) < SignInAlertEvery) {
+		return "", 0
 	}
-	times := c.clockList(l.signIns, 8)
-	l.signIns, l.lastText = nil, now
-	if strings.Contains(times, ",") {
-		return "Phones signed in on the box's Wi-Fi at " + times + ". Not you? Text STOP."
+	c.local.sending = true
+	n := len(st.LocalSignIns)
+	times := c.clockList(st.LocalSignIns, 8)
+	if n > 1 {
+		return "Phones signed in on the box's Wi-Fi at " + times + ". Not you? Text STOP.", n
 	}
-	return "A phone signed in on the box's Wi-Fi at " + times + ". Not you? Text STOP."
+	return "A phone signed in on the box's Wi-Fi at " + times + ". Not you? Text STOP.", n
+}
+
+// sendSignIns texts a sign-in alert from signInTextLocked and, only once it
+// is sent, drops the n sign-ins it listed. A failed send keeps them for the
+// next Tick. Called without c.mu.
+func (c *Channel) sendSignIns(text string, n int, now time.Time) {
+	err := c.alert(text)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.local.sending = false
+	if err != nil {
+		return
+	}
+	// If this save fails the sign-ins are texted again: a repeat beats a
+	// lost alert.
+	_ = c.codes.commit(func(s *State) {
+		s.LocalSignIns = append([]time.Time(nil), s.LocalSignIns[n:]...)
+		s.LocalAlertAt = now
+	})
 }
 
 // wrongLocalLocked records a wrong local code for the digest and returns
@@ -75,11 +104,12 @@ func (c *Channel) wrongLocalLocked(now time.Time) []string {
 // FlushLocal texts sign-ins held back by SignInAlertEvery once it has
 // passed. Tick calls it.
 func (c *Channel) FlushLocal() {
+	now := c.cfg.Now()
 	c.mu.Lock()
-	t := c.signInTextLocked(c.cfg.Now())
+	t, n := c.signInTextLocked(now)
 	c.mu.Unlock()
 	if t != "" {
-		c.alert(t)
+		c.sendSignIns(t, n, now)
 	}
 }
 
@@ -121,6 +151,9 @@ type LocalStatus struct {
 	UnlockedUntil time.Time
 	LowLocked     bool
 	Challenged    bool
+	// Locks counts session locks; a local device signed in under an
+	// earlier count is signed out.
+	Locks uint64
 }
 
 // LocalStatus reports the channel's state for the local UI.
@@ -134,6 +167,7 @@ func (c *Channel) LocalStatus() LocalStatus {
 		UnlockedUntil: c.codes.st.UnlockedUntil,
 		LowLocked:     c.codes.st.LowLocked,
 		Challenged:    c.codes.st.Challenged,
+		Locks:         c.codes.st.Locks,
 	}
 }
 
@@ -165,6 +199,7 @@ func (c *Channel) LocalSignIn(code string) (until time.Time, err error) {
 	}
 	res, locked, err := c.codes.checkStrong(code, now, strongOpts{unlock: c.cfg.UnlockFor, count: true})
 	var alerts []string
+	signIn, signIns := "", 0
 	if locked {
 		alerts = append(alerts, fmt.Sprintf("%d wrong codes, the last on the box's Wi-Fi. Texted codes are off and the session is locked until you send a code-generator code.", WrongToLock))
 	}
@@ -182,16 +217,25 @@ func (c *Channel) LocalSignIn(code string) (until time.Time, err error) {
 		// Every local sign-in is told to the owner, since it lifts locks
 		// and challenge mode without the owner's phone (L1), coalesced to
 		// one text an hour under CH-15 (arbitrator).
-		c.local.signIns = append(c.local.signIns, now)
-		if t := c.signInTextLocked(now); t != "" {
-			alerts = append(alerts, t)
+		if c.codes.commit(func(s *State) {
+			s.LocalSignIns = append(s.LocalSignIns, now)
+			if k := len(s.LocalSignIns) - maxSignIns; k > 0 {
+				s.LocalSignIns = append([]time.Time(nil), s.LocalSignIns[k:]...)
+			}
+		}) != nil {
+			// Not recorded, so not coalesced either: tell now.
+			alerts = append(alerts, "A phone signed in on the box's Wi-Fi at "+c.clock(now)+". Not you? Text STOP.")
 		}
+		signIn, signIns = c.signInTextLocked(now)
 	case err == nil:
 		alerts = append(alerts, c.wrongLocalLocked(now)...)
 	}
 	c.mu.Unlock()
 	for _, a := range alerts {
 		c.alert(a)
+	}
+	if signIn != "" {
+		c.sendSignIns(signIn, signIns, now)
 	}
 	switch {
 	case err != nil:
@@ -248,10 +292,11 @@ func (c *Channel) LocalResume() (string, error) {
 }
 
 // alert texts the owner a broker template, if a modem is attached.
-func (c *Channel) alert(text string) {
-	if c.cfg.Modem != nil {
-		_ = c.cfg.Modem.Send(c.cfg.Owner, text)
+func (c *Channel) alert(text string) error {
+	if c.cfg.Modem == nil {
+		return nil
 	}
+	return c.cfg.Modem.Send(c.cfg.Owner, text)
 }
 
 // TOTP is the code-generator code for seed at t (RFC 6238, SHA-1, 30 s, 6

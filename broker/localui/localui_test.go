@@ -53,6 +53,7 @@ type fakeHooks struct {
 	private   map[string]bool
 	setUp     bool
 	finishes  int
+	onSave    func() // runs inside SaveCodeSeed, for races
 }
 
 func (f *fakeHooks) Progress() Progress { f.mu.Lock(); defer f.mu.Unlock(); return f.progress }
@@ -73,6 +74,9 @@ func (f *fakeHooks) Send(to, text string) error {
 	return nil
 }
 func (f *fakeHooks) SaveCodeSeed(s []byte) error {
+	if f.onSave != nil {
+		f.onSave()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.seed = append([]byte(nil), s...)
@@ -821,6 +825,80 @@ func TestLostSetupStateDoesNotReopenSetup(t *testing.T) {
 	}
 }
 
+// A reboot mid-setup resumes setup even though a code seed is already in
+// the vault, and so does a reboot after starting over: only a missing state
+// file defers to AlreadySetUp (second re-review on #32).
+func TestRebootMidSetupKeepsSetupOpen(t *testing.T) {
+	r := newRig(t)
+	st := &MemStore{}
+	r.srv = r.open(st)
+	r.runSetupToAI()
+	r.hooks.setUp = true // even a hook that counts the seed alone
+	r.srv = r.open(st)
+	if r.srv.setup.done() || !strings.Contains(r.get("/setup"), `name="private"`) {
+		t.Fatal("reboot after enrollment closed setup before Finish")
+	}
+	r.asOther(func() {
+		r.get("/setup")
+		r.post("/setup/restart", url.Values{"secret": {r.card.SetupSecret}})
+	})
+	if r.srv.setup.st.Owner != "" {
+		t.Fatal("restart refused")
+	}
+	r.srv = r.open(st)
+	if r.srv.setup.done() || r.srv.setup.st.Owner != "" || r.srv.setup.st.Codes {
+		t.Fatal("reboot after starting over closed setup or lost the restart")
+	}
+}
+
+// Pairing codes are evicted oldest first; the setup cookie outlives a
+// browser restart; an enrollment checked against a seed that a restart
+// replaced is not saved (second re-review on #32).
+func TestSetupHousekeeping(t *testing.T) {
+	r := newRig(t)
+	r.hooks.progress.Online = true
+	w := r.do("GET", "/setup", nil)
+	var maxAge int
+	for _, c := range w.Result().Cookies() {
+		if c.Name == setupCookie {
+			maxAge = c.MaxAge
+		}
+	}
+	if maxAge != int(SetupCookieFor/time.Second) {
+		t.Fatalf("setup cookie Max-Age %d", maxAge)
+	}
+	pairCode := func() string {
+		return regexp.MustCompile(`PAIR%20([A-Z2-9]{8})`).FindStringSubmatch(html.UnescapeString(r.get("/setup")))[1]
+	}
+	var second string
+	r.asOther(func() { second = pairCode() })
+	// With this phone's code that is one past the bound: only the
+	// oldest (this phone's) goes.
+	for i := 0; i < maxPairDevices-1; i++ {
+		r.asOther(func() { pairCode() })
+	}
+	if r.srv.OfferText(ownerNum, "PAIR "+second); r.srv.setup.st.Owner != ownerNum {
+		t.Fatal("newer phones voided a pending pairing code")
+	}
+
+	r = newRig(t)
+	r.hooks.progress.Online = true
+	r.srv.OfferText(ownerNum, "PAIR "+pairCode())
+	m := regexp.MustCompile(`secret=([A-Z2-7]+)&`).FindStringSubmatch(html.UnescapeString(r.get("/setup")))
+	seed, _ := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(m[1])
+	r.hooks.onSave = func() {
+		r.hooks.onSave = nil
+		r.asOther(func() {
+			r.get("/setup")
+			r.post("/setup/restart", url.Values{"secret": {r.card.SetupSecret}})
+		})
+	}
+	r.post("/setup/codes", url.Values{"code": {owner.TOTP(seed, r.clock())}})
+	if r.srv.setup.st.Codes || r.srv.setup.st.Owner != "" {
+		t.Fatal("enrollment saved after setup started over")
+	}
+}
+
 // The owner can always find the box page: its address is in every page's
 // footer and in the contact card.
 func TestBoxPageAddressIsShown(t *testing.T) {
@@ -845,6 +923,11 @@ func TestLockSignsDevicesOut(t *testing.T) {
 	r.get("/home")
 	if err := r.ch.RequireUnlock(); err != nil {
 		t.Fatal(err)
+	}
+	// A later unlock by text does not sign the device back in.
+	r.ch.Handle(context.Background(), ownerNum, r.code())
+	if !r.ch.SessionUnlocked(r.clock()) {
+		t.Fatal("text unlock failed")
 	}
 	if w := r.do("GET", "/home", nil); w.Code != http.StatusSeeOther {
 		t.Fatal("device still signed in after the session locked")

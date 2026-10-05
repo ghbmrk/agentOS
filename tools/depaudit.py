@@ -147,7 +147,9 @@ def load_manifest(data):
         for k in ("file", "host", "why"):
             if not e.get(k):
                 raise ValueError("inert literal missing %r: %r" % (k, e))
-        if "/vendor/" not in "/" + e["file"]:
+        # Only a shipping directory's own Go vendor tree: a "vendor" folder
+        # deeper in our code (broker/x/vendor/) is not third-party.
+        if not any(e["file"].startswith(d + "/vendor/") for d in SHIPPING_DIRS) or ".." in e["file"].split("/"):
             raise ValueError("inert literal %s: only vendored third-party files may be exempted" % e["file"])
         if _match(e["host"], forbidden):
             raise ValueError("inert literal %s matches a forbidden pattern (DEP-2)" % e["host"])

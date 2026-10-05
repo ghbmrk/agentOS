@@ -74,8 +74,11 @@ type Hooks interface {
 	// SetPrivateOK records whether a provider may see private data
 	// (CAP-9), as the owner answered at connection.
 	SetPrivateOK(id string, ok bool) error
-	// AlreadySetUp reports that the box already has an owner or an
-	// enrolled code seed, so a lost setup state file never reopens setup.
+	// AlreadySetUp reports that setup finished before: Finish completed
+	// and the owner channel exists. An enrolled code seed alone does not
+	// count, since setup can stop or start over after enrollment. It is
+	// asked only when no setup state was found, so a lost state file never
+	// reopens setup.
 	AlreadySetUp() bool
 	// Finish is called once, when setup completes, with the owner's
 	// number. The caller starts the owner channel, attaches it with
@@ -99,6 +102,9 @@ type SetupState struct {
 	Host        bool   `json:"host"`
 	HostTrusted bool   `json:"host_trusted"`
 	Done        bool   `json:"done"`
+	// Begun is set by every save, so a found state is never the zero
+	// value, even after setup starts over.
+	Begun bool `json:"begun"`
 }
 
 // SetupStore persists SetupState.
@@ -172,6 +178,9 @@ const (
 
 const setupCookie = "agentos_setup"
 
+// SetupCookieFor is how long a phone keeps its setup cookie.
+const SetupCookieFor = 7 * 24 * time.Hour
+
 var (
 	phoneRe = regexp.MustCompile(`^\+[1-9][0-9]{6,14}$`)
 	pairRe  = regexp.MustCompile(`(?i)^\s*pair\s+([a-z0-9 -]{4,20})\s*[.!]?\s*$`)
@@ -192,9 +201,14 @@ type setup struct {
 	st SetupState
 	// pair holds a one-time pairing code per phone (setup cookie hash),
 	// so the text that pairs also names the phone that continues.
-	pair  map[string]string
-	seed  []byte // code-generator seed being enrolled; never stored here
-	wrong []time.Time
+	pair map[string]string
+	// pairOrder lists pair's keys oldest first, for eviction.
+	pairOrder []string
+	seed      []byte // code-generator seed being enrolled; never stored here
+	// seedGen counts seeds made or wiped, so an enrollment checked
+	// against one seed never saves after a restart replaced it.
+	seedGen uint64
+	wrong   []time.Time
 	// number fallback (ONB-6): a code texted to a typed number, accepted
 	// only from the phone that asked for it.
 	numTo      string
@@ -221,10 +235,12 @@ func newSetup(s *Server, st SetupState) *setup {
 
 func (u *setup) done() bool { u.mu.Lock(); defer u.mu.Unlock(); return u.st.Done }
 
-// adopt marks setup done when the box already has an owner or a seed, so a
-// lost state file never reopens setup and re-enrollment.
+// adopt marks setup done when no setup state was found but the box was
+// already set up, so a lost state file never reopens setup and
+// re-enrollment. A found state is authoritative: a reboot mid-setup, or
+// after starting over, resumes where it was.
 func (u *setup) adopt() error {
-	if u.st.Done || !u.s.cfg.Hooks.AlreadySetUp() {
+	if u.st != (SetupState{}) || !u.s.cfg.Hooks.AlreadySetUp() {
 		return nil
 	}
 	u.mu.Lock()
@@ -260,6 +276,7 @@ func (u *setup) mayLocked(key string) bool {
 func (u *setup) save(f func(*SetupState)) error {
 	next := u.st
 	f(&next)
+	next.Begun = true
 	if err := u.s.cfg.Store.Save(next); err != nil {
 		return err
 	}
@@ -281,7 +298,8 @@ func (u *setup) phone(w http.ResponseWriter, r *http.Request, issue bool) string
 		return ""
 	}
 	tok := hex.EncodeToString(b)
-	http.SetCookie(w, &http.Cookie{Name: setupCookie, Value: tok, Path: "/setup", HttpOnly: true, SameSite: http.SameSiteStrictMode})
+	http.SetCookie(w, &http.Cookie{Name: setupCookie, Value: tok, Path: "/setup", MaxAge: int(SetupCookieFor / time.Second),
+		HttpOnly: true, SameSite: http.SameSiteStrictMode})
 	return tokenKey(tok)
 }
 
@@ -396,15 +414,20 @@ func (u *setup) page(w http.ResponseWriter, r *http.Request) {
 	switch v.Step {
 	case "number":
 		if u.pair[key] == "" {
-			if len(u.pair) >= maxPairDevices {
-				u.pair = map[string]string{}
+			// The oldest phone's code goes first, so phones opening
+			// the page cannot void the code a slower phone is texting.
+			for len(u.pair) >= maxPairDevices && len(u.pairOrder) > 0 {
+				delete(u.pair, u.pairOrder[0])
+				u.pairOrder = u.pairOrder[1:]
 			}
 			u.pair[key], err = randomSymbols(u.s.cfg.Rand, 8)
+			u.pairOrder = append(u.pairOrder, key)
 		}
 		v.PairCode = u.pair[key]
 	case "codes":
 		if u.seed == nil {
 			u.seed = make([]byte, 20)
+			u.seedGen++
 			if _, err = io.ReadFull(u.s.cfg.Rand, u.seed); err != nil {
 				u.seed = nil
 			}
@@ -539,7 +562,7 @@ func (s *Server) OfferText(from, text string) (reply string, handled bool) {
 	}
 	err := u.save(func(st *SetupState) { st.Owner, st.Device = from, phone })
 	if err == nil {
-		u.pair = map[string]string{}
+		u.pair, u.pairOrder = map[string]string{}, nil
 		u.numCode, u.numTo, u.numDevice = "", "", ""
 		u.claimCode, u.claimExpires, u.claimTries = claim, now.Add(numberCodeTTL), 0
 	}
@@ -625,7 +648,7 @@ func (u *setup) numberCode(r *http.Request, key string) error {
 	u.numCode, u.numTo, u.numDevice = "", "", ""
 	err := u.save(func(s *SetupState) { s.Owner, s.Device = to, key })
 	if err == nil {
-		u.pair = map[string]string{}
+		u.pair, u.pairOrder = map[string]string{}, nil
 	}
 	u.mu.Unlock()
 	if err != nil {
@@ -711,7 +734,8 @@ func (u *setup) restart(r *http.Request, key string) error {
 		u.seed[i] = 0
 	}
 	u.seed = nil
-	u.pair = map[string]string{}
+	u.seedGen++
+	u.pair, u.pairOrder = map[string]string{}, nil
 	u.claimCode, u.numCode, u.numTo, u.numDevice = "", "", "", ""
 	u.device = map[string][2]string{}
 	return u.save(func(s *SetupState) {
@@ -729,7 +753,7 @@ func (u *setup) codes(r *http.Request, _ string) error {
 		u.mu.Unlock()
 		return errors.New("Start this step again.")
 	}
-	seed := append([]byte(nil), u.seed...)
+	seed, gen := append([]byte(nil), u.seed...), u.seedGen
 	u.mu.Unlock()
 	ok := false
 	// The phone's clock may be a step either side of the box's.
@@ -741,6 +765,14 @@ func (u *setup) codes(r *http.Request, _ string) error {
 	if !ok {
 		return errors.New("That code did not match. Type the code your phone shows now.")
 	}
+	// Setup may have started over while the code was checked.
+	stale := func() bool { return u.seedGen != gen || u.seed == nil || u.st.Owner == "" }
+	u.mu.Lock()
+	if stale() {
+		u.mu.Unlock()
+		return errors.New("Start this step again.")
+	}
+	u.mu.Unlock()
 	if err := u.s.cfg.Hooks.SaveCodeSeed(seed); err != nil {
 		return errors.New("Could not save. Try again.")
 	}
@@ -749,6 +781,11 @@ func (u *setup) codes(r *http.Request, _ string) error {
 	}
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	if stale() {
+		// A restart replaced this seed; the next enrollment overwrites
+		// the one just saved.
+		return errors.New("Start this step again.")
+	}
 	for i := range u.seed {
 		u.seed[i] = 0
 	}

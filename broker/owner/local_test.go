@@ -186,6 +186,40 @@ func TestLocalSignInAlertsAreCoalesced(t *testing.T) {
 	}
 }
 
+// Held-back sign-ins survive a restart, and a failed send keeps them for
+// the next Tick (second re-review on #32).
+func TestLocalSignInAlertsSurviveRestartAndFailedSend(t *testing.T) {
+	r := newRig(t, nil)
+	r.ch.LocalSignIn(r.totp())
+	r.inbox()
+	r.advance(10 * time.Minute)
+	r.ch.LocalSignIn(r.totp())
+	held := r.clock().Format("15:04")
+	r.ch = r.open()
+	r.advance(SignInAlertEvery)
+	r.box.SetDown(true)
+	r.ch.Tick()
+	r.box.SetDown(false)
+	select {
+	case m := <-r.phone.Inbox():
+		t.Fatalf("text while the modem was down: %q", m.Text)
+	default:
+	}
+	r.ch = r.open()
+	r.ch.Tick()
+	if got := r.inbox(); got != "A phone signed in on the box's Wi-Fi at "+held+". Not you? Text STOP." {
+		t.Fatalf("held sign-in after restart and failed send: %q", got)
+	}
+	// Sent once only.
+	r.advance(SignInAlertEvery)
+	r.ch.Tick()
+	select {
+	case m := <-r.phone.Inbox():
+		t.Fatalf("sign-in texted twice: %q", m.Text)
+	default:
+	}
+}
+
 // When the local bound runs out the owner is told until when.
 func TestLocalBoundExhaustionIsTexted(t *testing.T) {
 	r := newRig(t, nil)
