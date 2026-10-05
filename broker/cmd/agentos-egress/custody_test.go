@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/egress"
+	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/vault"
 )
 
@@ -598,5 +599,167 @@ func TestWrongPassphrasesAreToldNotCounted(t *testing.T) {
 	}
 	if !slices.Contains(r.notes, "2 more wrong vault passphrases were tried on the box's Wi-Fi since the last notice") {
 		t.Fatalf("burst not flushed: %q", r.notes)
+	}
+}
+
+// P2-4f (PU1 on #50): a new correct passphrase supersedes a pending
+// unlock, so a phone that lost its ticket does not wait out the expiry; a
+// wrong one leaves the pending unlock as it was.
+func TestNewPassphraseSupersedesPendingUnlock(t *testing.T) {
+	r := newFastRig(t, true)
+	first := r.unlock(t)
+	r.clk.add(MinAttemptGap)
+	if _, err := r.c.unlock("not it"); err != errWrongPassphrase || r.phase() != pending {
+		t.Fatalf("wrong passphrase while pending: %v %v", err, r.phase())
+	}
+	second := r.unlock(t)
+	if second == first || r.phase() != pending {
+		t.Fatalf("supersede: %q %v", second, r.phase())
+	}
+	if !slices.Contains(r.notes, "The box unlock was started over with your card; the earlier one was cancelled.") {
+		t.Fatalf("owner not told: %q", r.notes)
+	}
+	if err := r.c.confirm(first, r.code()); err != errNotPending {
+		t.Fatalf("superseded ticket: %v", err)
+	}
+	if err := r.c.confirm(second, r.code()); err != nil || r.phase() != open {
+		t.Fatalf("new ticket: %v %v", err, r.phase())
+	}
+	// Once open, a passphrase changes nothing.
+	r.clk.add(MinAttemptGap)
+	if _, err := r.c.unlock(goodPass); err != errBusy {
+		t.Fatalf("passphrase on an open vault: %v", err)
+	}
+}
+
+// A confirm that lands while a superseding passphrase is being checked
+// wins; the new derivation is dropped, not swapped in.
+func TestConfirmBeatsSupersedingDerivation(t *testing.T) {
+	r := newFastRig(t, true)
+	first := r.unlock(t)
+	release := make(chan struct{})
+	inner := r.c.open
+	r.c.open = func(p string) (*vault.Vault, error) { <-release; return inner(p) }
+	done := make(chan error)
+	r.clk.add(MinAttemptGap)
+	go func() { _, err := r.c.unlock(goodPass); done <- err }()
+	for {
+		r.c.mu.Lock()
+		d := r.c.deriving
+		r.c.mu.Unlock()
+		if d {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if r.phase() != pending {
+		t.Fatalf("pending unlock hidden during the derivation: %v", r.phase())
+	}
+	r.clk.add(MinAttemptGap)
+	if _, err := r.c.unlock(goodPass); err != errBusy {
+		t.Fatalf("second derivation: %v", err)
+	}
+	if err := r.c.confirm(first, r.code()); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	if err := <-done; err != errBusy || r.phase() != open || r.c.model() == nil {
+		t.Fatalf("after the race: %v %v", err, r.phase())
+	}
+}
+
+// P2-4f: the ticket of a confirmed unlock signs the unlocking phone in
+// once, within ProofTTL, as the step of the code that opened the vault;
+// a wrong ticket counts as a wrong code (UX-50-1 on #50).
+func TestUnlockProofRedeemsOnce(t *testing.T) {
+	r := newFastRig(t, true)
+	tk := r.unlock(t)
+	if _, _, err := r.c.verify(owner.UnlockProofPrefix+tk, 0, true); err != errLocked {
+		t.Fatalf("proof before the code: %v", err)
+	}
+	if err := r.c.confirm(tk, r.code()); err != nil {
+		t.Fatal(err)
+	}
+	step := r.c.st.LastStep
+	if _, ok, _ := r.c.verify(owner.UnlockProofPrefix+"0123456789abcdef0123456789abcdef", 0, true); ok {
+		t.Fatal("a wrong ticket signed in")
+	}
+	if len(r.c.wrongCounted) != 1 {
+		t.Fatalf("wrong ticket not counted: %d", len(r.c.wrongCounted))
+	}
+	if _, ok, _ := r.c.verify(owner.UnlockProofPrefix+tk, step, true); ok {
+		t.Fatal("proof accepted at or before the channel's last step")
+	}
+	got, ok, err := r.c.verify(owner.UnlockProofPrefix+tk, step-1, true)
+	if err != nil || !ok || got != step {
+		t.Fatalf("proof: %d %v %v", got, ok, err)
+	}
+	if _, ok, _ := r.c.verify(owner.UnlockProofPrefix+tk, step-1, true); ok {
+		t.Fatal("proof redeemed twice")
+	}
+
+	// Expired: a minute later it is worthless.
+	r2 := newFastRig(t, true)
+	tk2 := r2.unlock(t)
+	if err := r2.c.confirm(tk2, r2.code()); err != nil {
+		t.Fatal(err)
+	}
+	r2.clk.add(ProofTTL)
+	if _, ok, _ := r2.c.verify(owner.UnlockProofPrefix+tk2, 0, true); ok {
+		t.Fatal("expired proof signed in")
+	}
+}
+
+// Restarts are told at most once per WrongPassNoteEvery with a count, and
+// a burst that stopped reports its total at the unlock (#65 security R1).
+func TestSupersedeNoticesCoalesce(t *testing.T) {
+	r := newFastRig(t, true)
+	r.unlock(t)
+	count := func(prefix string) int {
+		n := 0
+		for _, s := range r.notes {
+			if strings.HasPrefix(s, prefix) {
+				n++
+			}
+		}
+		return n
+	}
+	for i := 0; i < 4; i++ {
+		r.unlock(t)
+	}
+	if n := count("The box unlock was started over"); n != 1 {
+		t.Fatalf("started-over notes: %d %q", n, r.notes)
+	}
+	if n := count("vault passphrase accepted"); n != 1 {
+		t.Fatalf("accepted notes: %d %q", n, r.notes)
+	}
+	r.clk.add(WrongPassNoteEvery)
+	r.unlock(t)
+	if last := r.notes[len(r.notes)-1]; !strings.HasSuffix(last, "It was started over 3 times more since the last notice.") {
+		t.Fatalf("count not told: %q", last)
+	}
+	tk := r.unlock(t)
+	if err := r.c.confirm(tk, r.code()); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(r.notes, "The box unlock was started over once more before it was unlocked.") {
+		t.Fatalf("burst total not told: %q", r.notes)
+	}
+}
+
+// The sign-in proof does not outlive the unlock that made it (#65
+// security R2).
+func TestUnlockProofEndsWithTheUnlock(t *testing.T) {
+	r := newFastRig(t, true)
+	tk := r.unlock(t)
+	if err := r.c.confirm(tk, r.code()); err != nil {
+		t.Fatal(err)
+	}
+	r.c.lock()
+	r.c.mu.Lock()
+	left := !r.c.proofUntil.IsZero() || r.c.proof != [32]byte{}
+	r.c.mu.Unlock()
+	if left {
+		t.Fatal("proof kept after lock")
 	}
 }
