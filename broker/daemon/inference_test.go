@@ -43,7 +43,7 @@ import (
 // linked is the composition root and what W3 links into it.
 // compile is named so a later import of it is checked even if agentosd
 // stops linking it (arbitrator on W3 step 3a).
-var linked = []string{compositionRoot, "change", "loops", "replay", "grants", "compile"}
+var linked = []string{compositionRoot, "change", "loops", "replay", "grants", "compile", "loopbuild"}
 
 // forbidden broker packages: the model router and its provider adapters,
 // and the egress proxy.
@@ -60,6 +60,7 @@ var httpOK = map[string]string{
 	"guest":      "serves the guest plane over the machine socket; never dials",
 	"modelroute": "the one client: forwards model calls to the vault process's unix socket",
 	"replay":     "serves replay machines' plane like guest; never dials",
+	"loopbuild":  "serves Loop 1's builder machines their own socket (W3-builder); never dials",
 }
 
 // allowance is what one package may use of a socket-capable import: the
@@ -79,6 +80,7 @@ var netOK = map[string]allowance{
 			"syscall.SOL_SOCKET", "syscall.SO_PEERCRED", "syscall.Stat_t", "syscall.Ucred"}},
 	"guest":      {"the guest plane's unix listeners", []string{"net.Conn", "net.ErrClosed", "net.Listen", "net.Listener"}},
 	"modelroute": {"dials only the vault process's unix socket", []string{"net.Conn", "net.Dialer", "net.OpError"}},
+	"loopbuild":  {"builder machines' unix listeners, capped (W3-builder)", []string{"net.Listen", "net.Listener", "net.Conn", "net.ErrClosed"}},
 	"journal":    {"flock on the journal file", []string{"syscall.Flock", "syscall.LOCK_EX", "syscall.LOCK_NB"}},
 	"update":     {"flock on the update store", []string{"syscall.Flock", "syscall.LOCK_EX"}},
 	"vm/overlay": {"overlay files: xattrs, device nodes, stat, timestamps, and the FICLONE ioctl for copies",

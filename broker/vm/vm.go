@@ -301,6 +301,11 @@ func (m *Manager) Create(ctx context.Context, id string, s Spec) (Machine, error
 // them, and they cannot be forked or forked into.
 const EvalPrefix = "eval-"
 
+// BuilderPrefix starts the IDs of Loop 1's builder machines (W3-builder),
+// to which the vault process gives the builder's grants. Only Create makes
+// them: no fork or merge makes or touches one (security R1 on #126).
+const BuilderPrefix = "lb-"
+
 // CreateSeeded is Create with files written into the machine's fresh layer
 // before its guest first runs, at paths relative to the guest's root: how
 // the broker hands a machine read-only inputs, such as the managed tree a
@@ -957,9 +962,15 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 	if strings.HasPrefix(id, EvalPrefix) {
 		return Snapshot{}, fmt.Errorf("vm: replay machine %s cannot be forked", id)
 	}
+	if strings.HasPrefix(id, BuilderPrefix) {
+		return Snapshot{}, fmt.Errorf("vm: builder machine %s cannot be forked", id)
+	}
 	for _, f := range ids {
 		if strings.HasPrefix(f, EvalPrefix) {
 			return Snapshot{}, fmt.Errorf("vm: machine ids starting %q are kept for replay", EvalPrefix)
+		}
+		if strings.HasPrefix(f, BuilderPrefix) {
+			return Snapshot{}, fmt.Errorf("vm: machine ids starting %q are kept for Loop 1's builder", BuilderPrefix)
 		}
 		if !idRE.MatchString(f) {
 			return Snapshot{}, fmt.Errorf("vm: bad machine id %q", f)
@@ -1113,6 +1124,9 @@ func (m *Manager) view(s Snapshot) overlay.View {
 func (m *Manager) Merge(ctx context.Context, dst, src string) (Snapshot, error) {
 	if strings.HasPrefix(dst, EvalPrefix) || strings.HasPrefix(src, EvalPrefix) {
 		return Snapshot{}, errors.New("vm: replay machines are not merged")
+	}
+	if strings.HasPrefix(dst, BuilderPrefix) || strings.HasPrefix(src, BuilderPrefix) {
+		return Snapshot{}, errors.New("vm: builder machines are not merged")
 	}
 	sm, err := m.get(src)
 	if err != nil {

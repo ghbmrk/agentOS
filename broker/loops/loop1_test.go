@@ -1329,3 +1329,26 @@ func TestAnUnseededCandidateIsNeverProposed(t *testing.T) {
 		t.Fatalf("a candidate never held is announced: %q", d)
 	}
 }
+
+type privateBuilder struct{ *builder }
+
+func (privateBuilder) Private(Brief) bool { return true }
+
+// C-3c-4 on W3 step 3c: a builder that builds in a private machine never
+// makes a public candidate, even from public inputs; through BySignal too.
+func TestAPrivateBuilderNeverMakesAPublicCandidate(t *testing.T) {
+	for name, wrap := range map[string]func(*builder) Builder{
+		"plain":     func(b *builder) Builder { return b },
+		"private":   func(b *builder) Builder { return privateBuilder{b} },
+		"by signal": func(b *builder) Builder { return BySignal{SignalCorrection: privateBuilder{b}} },
+	} {
+		l, pl, b, _ := newKeepRig(t)
+		l.cfg.Builder = wrap(b)
+		h := hyp("k", "task-a")
+		h.Evidence[0].Intent.Label = "public"
+		l.propose(context.Background(), h, Evidence{}) // the rig's pipeline interrupts; what it got counts
+		if len(pl.got) != 1 || pl.got[0].Public != (name == "plain") {
+			t.Fatalf("%s: proposed %+v", name, pl.got)
+		}
+	}
+}
