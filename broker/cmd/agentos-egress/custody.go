@@ -65,7 +65,13 @@ var (
 	errBootChanged  = uerr(http.StatusConflict, "this PC's boot path changed since it was trusted; unlock with the vault passphrase and a code")
 	errNoSuchHost   = uerr(http.StatusNotFound, "no trusted host with that id")
 	errHostNotSaved = uerr(http.StatusInternalServerError, "could not make this PC trusted; nothing was changed")
+
+	// Rollback (V6): the drive's vault is older than this PC's counter.
+	errRolledBack = uerr(http.StatusConflict, "this drive's vault is older than this PC has seen, so it may be an old copy put back; nothing was unlocked. If you did not restore it, keep the drive and restore from your backup with the recovery key")
 )
+
+// noteRolledBack is the owner's notice for an old copy of the drive (V6).
+const noteRolledBack = "the vault on this drive is older than this PC has seen: it may be an old copy of the drive put back, so it stayed locked. If you did not restore it, the drive was out of your hands; restore from your backup with the recovery key."
 
 func errWrongCode(left int) error {
 	if left == 1 {
@@ -206,6 +212,16 @@ func (c *custody) unlock(passphrase string) (string, error) {
 	c.mu.Unlock()
 
 	v, err := c.open(passphrase)
+	if err == nil && c.host != nil {
+		// V6: before the seed in it is trusted for the code check.
+		if err = c.host.bind(v); err != nil {
+			v.Close()
+			v = nil
+			if !errors.Is(err, vault.ErrRolledBack) {
+				c.notify("this PC's TPM did not answer the vault's rollback check, so the vault stayed locked (" + err.Error() + ")")
+			}
+		}
+	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -219,6 +235,10 @@ func (c *custody) unlock(passphrase string) (string, error) {
 	if err != nil {
 		if errors.Is(err, vault.ErrNoSlotOpens) {
 			return "", errWrongPassphrase
+		}
+		if errors.Is(err, vault.ErrRolledBack) {
+			c.notify(noteRolledBack)
+			return "", errRolledBack
 		}
 		return "", errInternal
 	}
@@ -441,6 +461,10 @@ func (c *custody) put(name string, value []byte) error {
 		}
 	}
 	if err := c.v.Put(name, vault.KindAPIKey, value); err != nil {
+		if errors.Is(err, vault.ErrRolledBack) {
+			c.notify(noteRolledBack)
+			return errRolledBack
+		}
 		return errBadCredential
 	}
 	return nil
@@ -546,6 +570,8 @@ func (c *custody) bootTrusted() {
 	case errors.Is(err, tpmseal.ErrNeedPIN):
 		c.needPIN = true
 		c.notify("trusted host with a boot PIN: enter the PIN on the local page")
+	case errors.Is(err, vault.ErrRolledBack):
+		c.notify(noteRolledBack)
 	case errors.Is(err, vault.ErrNoSlotOpens):
 		c.notify("unknown host: unlock with the vault passphrase and a code")
 	case errors.Is(err, tpmseal.ErrNoPolicy), errors.Is(err, tpmseal.ErrPolicy):
@@ -610,6 +636,9 @@ func (c *custody) unlockPIN(pin string) error {
 		return errNotTrusted
 	case errors.Is(err, tpmseal.ErrNoPolicy), errors.Is(err, tpmseal.ErrPolicy):
 		return errBootChanged
+	case errors.Is(err, vault.ErrRolledBack):
+		c.notify(noteRolledBack)
+		return errRolledBack
 	default:
 		return errInternal
 	}
@@ -651,6 +680,13 @@ func (c *custody) trust(code, pin string) (string, error) {
 	v, err := c.tier4(code)
 	if err != nil {
 		return "", err
+	}
+	// The counter first: a PC is never trusted without it (V6).
+	if err := c.host.anchor(v); err != nil {
+		if errors.Is(err, vault.ErrRolledBack) {
+			return "", errRolledBack
+		}
+		return "", errHostNotSaved
 	}
 	name, err := c.host.enroll(v, pin)
 	if err != nil {

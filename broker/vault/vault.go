@@ -38,9 +38,10 @@ const KindAPIKey = "api_key"
 
 // fileMagic and the version are bound into every seal as associated data,
 // so a file from another format or version fails to open rather than being
-// misread.
+// misread. Version 2 adds the vault ID and the rollback anchors (V6,
+// rollback.go); a version 1 file still opens and is written as version 2.
 const fileMagic = "agentos-vault"
-const fileVersion = 1
+const fileVersion = 2
 
 // Entry describes a stored secret without its value.
 type Entry struct {
@@ -51,6 +52,17 @@ type Entry struct {
 type record struct {
 	Kind  string `json:"kind"`
 	Value []byte `json:"value"`
+}
+
+// payload is what a version 2 file seals. Version 1 sealed Entries alone.
+type payload struct {
+	Entries map[string]record `json:"entries"`
+	// ID names this vault to a rollback counter; CounterAuth is the
+	// counter's authorization value. Both stay the same across writes and
+	// change only on Rebase.
+	ID          []byte   `json:"id"`
+	CounterAuth []byte   `json:"counter_auth"`
+	Anchors     []Anchor `json:"anchors,omitempty"`
 }
 
 type envelope struct {
@@ -72,6 +84,13 @@ type Vault struct {
 	// slots (keyslot.go), for AddSlot; Close wipes key.
 	keysPath string
 	key      []byte
+	// id, counterAuth and anchors are the rollback binding (rollback.go).
+	// counter is the bound counter, whose anchor is anchors[bound].
+	id          []byte
+	counterAuth []byte
+	anchors     []Anchor
+	counter     Counter
+	bound       int
 }
 
 // ErrClosed is returned by every method called after Close.
@@ -89,7 +108,7 @@ func Create(path string, key []byte) (*Vault, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	v := &Vault{path: path, aead: aead, entries: map[string]record{}}
+	v := &Vault{path: path, aead: aead, entries: map[string]record{}, bound: -1}
 	if err := v.save(); err != nil {
 		return nil, err
 	}
@@ -108,19 +127,28 @@ func Open(path string, key []byte) (*Vault, error) {
 		return nil, err
 	}
 	var env envelope
-	if err := json.Unmarshal(raw, &env); err != nil || env.Magic != fileMagic || env.Version != fileVersion || len(env.Nonce) != aead.NonceSize() {
+	if err := json.Unmarshal(raw, &env); err != nil || env.Magic != fileMagic || (env.Version != 1 && env.Version != fileVersion) || len(env.Nonce) != aead.NonceSize() {
 		return nil, errors.New("vault: not a vault file this version can read")
 	}
-	plain, err := aead.Open(nil, env.Nonce, env.Sealed, aad())
+	plain, err := aead.Open(nil, env.Nonce, env.Sealed, aad(env.Version))
 	if err != nil {
 		return nil, errors.New("vault: cannot decrypt (wrong key or modified file)")
 	}
 	defer wipe(plain)
-	entries := map[string]record{}
-	if err := json.Unmarshal(plain, &entries); err != nil {
+	var p payload
+	if env.Version == 1 {
+		err = json.Unmarshal(plain, &p.Entries)
+	} else {
+		err = json.Unmarshal(plain, &p)
+	}
+	if err != nil || (env.Version == fileVersion && (len(p.ID) != idSize || len(p.CounterAuth) != authSize)) {
 		return nil, errors.New("vault: corrupt contents")
 	}
-	return &Vault{path: path, aead: aead, entries: entries}, nil
+	if p.Entries == nil {
+		p.Entries = map[string]record{}
+	}
+	return &Vault{path: path, aead: aead, entries: p.Entries,
+		id: p.ID, counterAuth: p.CounterAuth, anchors: p.Anchors, bound: -1}, nil
 }
 
 // Put stores or replaces a secret and writes the vault before returning.
@@ -225,9 +253,23 @@ func (v *Vault) Close() error {
 }
 
 // save seals the whole vault and replaces the file atomically: a crash
-// leaves either the old file or the new one. Caller holds mu.
+// leaves either the old file or the new one. With a counter bound, the
+// file carries the counter's next value and the counter advances after
+// the write (rollback.go). Caller holds mu.
 func (v *Vault) save() error {
-	plain, err := json.Marshal(v.entries)
+	if err := v.ensureID(); err != nil {
+		return err
+	}
+	if v.counter == nil {
+		return v.write(v.anchors)
+	}
+	return v.advance()
+}
+
+// write seals the entries with anchors and replaces the file. Caller holds
+// mu.
+func (v *Vault) write(anchors []Anchor) error {
+	plain, err := json.Marshal(payload{Entries: v.entries, ID: v.id, CounterAuth: v.counterAuth, Anchors: anchors})
 	if err != nil {
 		return err
 	}
@@ -238,7 +280,7 @@ func (v *Vault) save() error {
 	}
 	raw, err := json.Marshal(envelope{
 		Magic: fileMagic, Version: fileVersion, Nonce: nonce,
-		Sealed: v.aead.Seal(nil, nonce, plain, aad()),
+		Sealed: v.aead.Seal(nil, nonce, plain, aad(fileVersion)),
 	})
 	if err != nil {
 		return err
@@ -295,7 +337,7 @@ func newAEAD(key []byte) (cipher.AEAD, error) {
 	return cipher.NewGCM(block)
 }
 
-func aad() []byte { return []byte(fmt.Sprintf("%s/v%d", fileMagic, fileVersion)) }
+func aad(version int) []byte { return []byte(fmt.Sprintf("%s/v%d", fileMagic, version)) }
 
 func wipe(b []byte) {
 	for i := range b {

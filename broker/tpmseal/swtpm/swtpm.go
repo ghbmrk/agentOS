@@ -7,6 +7,7 @@ package swtpm
 import (
 	"crypto/sha256"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -73,8 +74,11 @@ func (s *TPM) start() {
 	if err := s.cmd.Start(); err != nil {
 		s.t.Fatal(err)
 	}
+	// Wait for swtpm to accept, not just for the socket file: the file
+	// appears at bind, before listen, and a dial in between is refused.
 	for i := 0; ; i++ {
-		if _, err := os.Stat(s.sock()); err == nil {
+		if c, err := net.Dial("unix", s.sock()); err == nil {
+			c.Close()
 			break
 		}
 		if i == 200 {

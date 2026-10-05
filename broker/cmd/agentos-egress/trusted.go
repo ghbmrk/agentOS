@@ -54,6 +54,13 @@ type trustedHost interface {
 	remove(v *vault.Vault, id string) (int, error)
 	// list describes the trusted PCs.
 	list() ([]hostInfo, error)
+	// anchor binds the open vault to this PC's rollback counter, making
+	// the counter if needed (V6); trust calls it before enroll.
+	anchor(v *vault.Vault) error
+	// bind checks an open vault against this PC's rollback counter and
+	// binds it, so every later write advances the counter (V6). It
+	// returns vault.ErrRolledBack for an old copy of the drive.
+	bind(v *vault.Vault) error
 }
 
 // tpmHost is trustedHost over the PC's TPM (package tpmseal). Approved
@@ -208,12 +215,115 @@ func (h *tpmHost) open(pin string) (*vault.Vault, error) {
 	if err != nil {
 		return nil, err
 	}
+	v, err := func() (*vault.Vault, error) {
+		t, err := h.openTPM()
+		if err != nil {
+			return nil, err
+		}
+		defer t.Close()
+		return vault.OpenSealed(h.vaultPath, h.keysPath, &tpmFactor{t: t, pin: pin, policies: pols})
+	}()
+	if err != nil {
+		return nil, err
+	}
+	// The TPM connection is closed: the counter opens its own.
+	if err := h.bindLocked(v); err != nil {
+		v.Close()
+		return nil, err
+	}
+	return v, nil
+}
+
+// tpmCounter is this PC's TPM as the vault's rollback counter (V6,
+// tpmseal/counter.go). Each call opens its own TPM connection, so callers
+// must not hold one while writing the vault.
+type tpmCounter struct {
+	openTPM func() (transport.TPMCloser, error)
+	srk     []byte // this TPM's storage root key name, pinned
+}
+
+func (c *tpmCounter) Host() string { return hex.EncodeToString(c.srk) }
+
+func (c *tpmCounter) with(f func(transport.TPM) error) error {
+	t, err := c.openTPM()
+	if err != nil {
+		return err
+	}
+	defer t.Close()
+	return f(t)
+}
+
+func (c *tpmCounter) Find(id []byte) (ref []byte, ok bool, err error) {
+	err = c.with(func(t transport.TPM) (err error) {
+		ok, err = tpmseal.FindCounter(t, id)
+		return err
+	})
+	return nil, ok, err
+}
+
+func (c *tpmCounter) Define(id, auth []byte) (ref []byte, err error) {
+	err = c.with(func(t transport.TPM) error {
+		r, err := tpmseal.DefineCounter(t, c.srk, id, auth)
+		ref = r.Marshal()
+		return err
+	})
+	return ref, err
+}
+
+func (c *tpmCounter) Read(ref, auth []byte) (n uint64, err error) {
+	r, err := tpmseal.ParseCounterRef(ref)
+	if err != nil {
+		return 0, err
+	}
+	err = c.with(func(t transport.TPM) (err error) {
+		n, err = tpmseal.ReadCounter(t, c.srk, r, auth)
+		return err
+	})
+	return n, err
+}
+
+func (c *tpmCounter) Increment(ref, auth []byte) error {
+	r, err := tpmseal.ParseCounterRef(ref)
+	if err != nil {
+		return err
+	}
+	return c.with(func(t transport.TPM) error { return tpmseal.IncrementCounter(t, c.srk, r, auth) })
+}
+
+// counter returns this PC's TPM as a rollback counter. Caller holds mu.
+func (h *tpmHost) counter() (*tpmCounter, error) {
 	t, err := h.openTPM()
 	if err != nil {
 		return nil, err
 	}
-	defer t.Close()
-	return vault.OpenSealed(h.vaultPath, h.keysPath, &tpmFactor{t: t, pin: pin, policies: pols})
+	id, err := tpmseal.Identity(t)
+	t.Close()
+	if err != nil {
+		return nil, err
+	}
+	return &tpmCounter{openTPM: h.openTPM, srk: id}, nil
+}
+
+func (h *tpmHost) bind(v *vault.Vault) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.bindLocked(v)
+}
+
+// bindLocked binds v to this PC's counter. A TPM that cannot even name
+// itself binds nothing: v.Bind then has no anchor to check, which is the
+// unknown-host case the owner unlocks in person. Caller holds mu.
+func (h *tpmHost) bindLocked(v *vault.Vault) error {
+	c, err := h.counter()
+	if err != nil {
+		if len(v.Anchors()) > 0 {
+			// The vault is anchored somewhere; whether here cannot be
+			// told without the TPM, so refuse rather than guess.
+			return fmt.Errorf("rollback counter: %w", err)
+		}
+		return nil
+	}
+	return v.Bind(c)
 }
 
 // policyKey returns the vault's policy key, making it on first use.
@@ -267,6 +377,19 @@ func (h *tpmHost) enroll(v *vault.Vault, pin string) (string, error) {
 		return "", err
 	}
 	return h.name, nil
+}
+
+// anchor binds the vault to this PC's rollback counter, making the
+// counter if this PC has none for the vault (V6). trust calls it before
+// enroll, so a PC is never trusted without the counter.
+func (h *tpmHost) anchor(v *vault.Vault) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	c, err := h.counter()
+	if err != nil {
+		return err
+	}
+	return v.Anchor(c)
 }
 
 func (h *tpmHost) remove(v *vault.Vault, id string) (int, error) {
