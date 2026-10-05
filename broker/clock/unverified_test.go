@@ -286,6 +286,35 @@ func TestHW8PlainSyncBelowTheFloorDoesNotVerify(t *testing.T) {
 	}
 }
 
+// L3 MUST on #177 (T3/T4 boundary): plain time verifies at exactly
+// floor − Tolerance and not one nanosecond earlier.
+func TestHW8PlainSyncFloorBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		back     time.Duration
+		verified bool
+	}{
+		{DefaultTolerance, true},
+		{DefaultTolerance + time.Nanosecond, false},
+		{DefaultTolerance - time.Second, true},
+		{DefaultTolerance + time.Second, false},
+	} {
+		path := filepath.Join(t.TempDir(), "clock.json")
+		r := newRig()
+		r.carrier = time.Time{}
+		rtc := r.wall
+		rtcGuard(t, r, path, &rtc).Check(bg)
+		floor := readSaved(t, path).Floor
+		r.reboot(floor.Add(-tc.back))
+		g := rtcGuard(t, r, path, &rtc, func(c *Config) {
+			c.Sync = func() (SyncKind, error) { return SyncedPlain, nil }
+		})
+		g.Check(bg)
+		if got := g.Status().Verified; got != tc.verified {
+			t.Errorf("plain sync at floor-%v: verified %v, want %v", tc.back, got, tc.verified)
+		}
+	}
+}
+
 // L3 MUST on #177: a step held within a boot neither verifies nor moves
 // the floor, even with a sync.
 func TestHW8HeldStepDoesNotAdvanceTheFloor(t *testing.T) {
@@ -345,10 +374,12 @@ func TestHW8LearnsTheRTCOffset(t *testing.T) {
 	// A plain NTP sync, which can be forged on path, teaches no offset;
 	// nor does a PC with no UUID.
 	for name, edit := range map[string]func(*Config){
-		"plain":     func(c *Config) { c.Sync = func() (SyncKind, error) { return SyncedPlain, nil } },
-		"no host":   func(c *Config) { c.HostID = func() string { return "" } },
-		"zero UUID": func(c *Config) { c.HostID = func() string { return "00000000-0000-0000-0000-000000000000" } },
-		"F UUID":    func(c *Config) { c.HostID = func() string { return "ffffffff-ffff-ffff-ffff-ffffffffffff" } },
+		"plain":      func(c *Config) { c.Sync = func() (SyncKind, error) { return SyncedPlain, nil } },
+		"no host":    func(c *Config) { c.HostID = func() string { return "" } },
+		"zero UUID":  func(c *Config) { c.HostID = func() string { return "00000000-0000-0000-0000-000000000000" } },
+		"F UUID":     func(c *Config) { c.HostID = func() string { return "ffffffff-ffff-ffff-ffff-ffffffffffff" } },
+		"not a UUID": func(c *Config) { c.HostID = func() string { return "To Be Filled By O.E.M." } },
+		"no HostID":  func(c *Config) { c.HostID = nil },
 	} {
 		p := filepath.Join(t.TempDir(), "clock.json")
 		rp := newRig()
@@ -377,6 +408,10 @@ func TestHW8LearnsTheRTCOffset(t *testing.T) {
 	if v := readSaved(t, path); v.Offset != 2*time.Hour {
 		t.Fatalf("15-hour offset replaced the old: %v", v.Offset)
 	}
+	// A restarted guard keeps the host the offset was learned on.
+	if v := readSaved(t, path); v.OffsetHost != HostKey(testHost) {
+		t.Fatalf("offset host lost across a restart: %q", v.OffsetHost)
+	}
 
 	// No offset known, or a file that cannot be read: no estimate.
 	if _, ok := BootEstimate(path2, later, testHost); ok {
@@ -389,6 +424,14 @@ func TestHW8LearnsTheRTCOffset(t *testing.T) {
 	os.WriteFile(bad, []byte(`{"have_offset":true,"offset":3600000000001}`), 0o600)
 	if _, ok := BootEstimate(bad, later, testHost); ok {
 		t.Fatal("estimate from an offset not on a 15-minute step")
+	}
+	// A file from before offsets were keyed to a PC names no host.
+	old := filepath.Join(t.TempDir(), "old")
+	os.WriteFile(old, []byte(`{"have_offset":true,"offset":3600000000000}`), 0o600)
+	for _, id := range []string{testHost, "", "not-a-uuid"} {
+		if _, ok := BootEstimate(old, later, id); ok {
+			t.Fatalf("estimate from an offset with no host, for PC %q", id)
+		}
 	}
 }
 

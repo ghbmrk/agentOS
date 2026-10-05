@@ -57,9 +57,11 @@ func TestBootSetsRTCLessOffset(t *testing.T) {
 	if run(state, stranger); len(set) != 0 {
 		t.Fatalf("foreign owner: set %v", set)
 	}
-	os.Chmod(state, 0o644)
-	if run(state, env); len(set) != 0 {
-		t.Fatalf("mode 0644: set %v", set)
+	for _, mode := range []os.FileMode{0o644, 0o640, 0o660, 0o602} {
+		os.Chmod(state, mode)
+		if run(state, env); len(set) != 0 {
+			t.Fatalf("mode %o: set %v", mode, set)
+		}
 	}
 	os.Chmod(state, 0o600)
 
