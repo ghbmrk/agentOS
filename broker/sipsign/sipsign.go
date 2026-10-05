@@ -6,7 +6,8 @@
 // sends a challenge and gets back an Authorization value.
 //
 // It links no SIP or SRTP stack, so the vault process can import it while
-// those modules stay in the modem bridge's binary only (ARC-2).
+// those modules, which parse what providers and third parties send, stay in
+// the modem bridge's binary only (#102 security R5, CRED-1).
 package sipsign
 
 import (
@@ -40,11 +41,22 @@ var (
 	ErrMethod    = errors.New("sipsign: not a method the second line signs")
 	ErrChallenge = errors.New("sipsign: unsupported digest challenge")
 	ErrSettings  = errors.New("sipsign: account settings refused")
+	// Per-field refusals from Check; each wraps ErrSettings.
+	ErrServer    = fieldErr("server")
+	ErrDomain    = fieldErr("domain")
+	ErrUser      = fieldErr("user")
+	ErrNumber    = fieldErr("number")
 	ErrLocked    = errors.New("sipsign: the vault is locked")
 	ErrNoAccount = errors.New("sipsign: no calling account is set up")
 	ErrRefused   = errors.New("sipsign: the vault process refused to sign")
 	ErrDown      = errors.New("sipsign: the vault process did not answer")
 )
+
+// fieldErr is a refusal of one setting, which is ErrSettings too.
+type fieldErr string
+
+func (f fieldErr) Error() string        { return "sipsign: account " + string(f) + " refused" }
+func (f fieldErr) Is(target error) bool { return target == ErrSettings }
 
 // signable are the requests the line sends: registering, texts, calls and
 // ending them.
@@ -60,6 +72,10 @@ type Account struct {
 	// registration over verified TLS (sipline SL3). Empty refuses
 	// everything.
 	Realm string
+	// RegisterOnly signs only REGISTER: the realm was recorded from the
+	// first registration and the owner has not confirmed it yet, so until
+	// then the account answers nothing but keeping the line registered.
+	RegisterOnly bool
 }
 
 // String names the account without its password, so a stray log line
@@ -80,7 +96,7 @@ func (a Account) Sign(_ context.Context, c Challenge) (string, error) {
 	if a.Realm == "" || ch.Realm != a.Realm {
 		return "", ErrRealm
 	}
-	if !signable[c.Method] {
+	if !signable[c.Method] || a.RegisterOnly && c.Method != "REGISTER" {
 		return "", ErrMethod
 	}
 	if !digest.CanDigest(ch) || !ch.SupportsQOP("auth") {
@@ -121,15 +137,43 @@ func (s Settings) AOR() string { return "sip:" + s.User + "@" + strings.ToLower(
 func (s Settings) Check() error {
 	host, port, err := net.SplitHostPort(s.Server)
 	if err != nil || !hostName(host) {
-		return ErrSettings
+		return ErrServer
 	}
 	if p, err := strconv.Atoi(port); err != nil || p < 1 || p > 65535 {
-		return ErrSettings
+		return ErrServer
 	}
-	if !hostName(s.Domain) || !userPart(s.User) || !e164(s.Number) {
-		return ErrSettings
+	switch {
+	case !hostName(s.Domain):
+		return ErrDomain
+	case !userPart(s.User):
+		return ErrUser
+	case !e164(s.Number):
+		return ErrNumber
 	}
 	return nil
+}
+
+// DefaultPort is SIP over TLS (RFC 3261 26.2).
+const DefaultPort = "5061"
+
+// Normalize fills in what an owner may leave out or type with separators:
+// the server's port (DefaultPort), surrounding spaces, and spaces, dashes,
+// dots and brackets in the number. It changes nothing Check would refuse
+// into something it accepts by guessing.
+func (s Settings) Normalize() Settings {
+	s.Server, s.Domain, s.User = strings.TrimSpace(s.Server), strings.TrimSpace(s.Domain), strings.TrimSpace(s.User)
+	if s.Server != "" && !strings.HasSuffix(s.Server, "]") {
+		if _, _, err := net.SplitHostPort(s.Server); err != nil && !strings.Contains(s.Server, ":") {
+			s.Server = net.JoinHostPort(s.Server, DefaultPort)
+		}
+	}
+	s.Number = strings.Map(func(r rune) rune {
+		if strings.ContainsRune(" -.()\t", r) {
+			return -1
+		}
+		return r
+	}, strings.TrimSpace(s.Number))
+	return s
 }
 
 // hostName is a DNS name or an IP address literal.

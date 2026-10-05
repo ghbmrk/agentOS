@@ -24,17 +24,49 @@ const SignSocket = "sign.sock"
 // reopens it.
 const RealmWindow = 30 * time.Minute
 
+// Setup refusals: one fixed reason per field, never the value entered
+// (UX-116-1).
 var (
-	errBadSIP          = uerr(http.StatusBadRequest, "those calling account settings were refused")
-	errWeakSIPPassword = uerr(http.StatusBadRequest, "use the SIP password your provider generated, 12 to 256 characters")
+	errSIPServer       = uerr(http.StatusBadRequest, "Enter the server as a host name and port, like sip.example.net:5061.")
+	errSIPDomain       = uerr(http.StatusBadRequest, "Enter the SIP domain as a host name, like example.net.")
+	errSIPUser         = uerr(http.StatusBadRequest, "The SIP user name has a character providers don't use. Copy it exactly from your provider.")
+	errSIPNumber       = uerr(http.StatusBadRequest, "Enter the number with its country code, like +44 7700 900123.")
+	errSIPOtherKind    = uerr(http.StatusBadRequest, "The box already holds a different credential under this name. Remove the second line first, then set it up again.")
+	errWeakSIPPassword = uerr(http.StatusBadRequest, "Use the SIP password your provider generated, 12 to 256 characters. If it is shorter, have the provider generate a new one.")
+	errSIPRealm        = uerr(http.StatusConflict, "That is not the provider name the box recorded. Check it again on this page.")
 )
 
+// Owner notices when the account changes (S2 on #116).
+const (
+	noteSIPReplaced = "The second line's calling account was replaced on the local page."
+	noteSIPRemoved  = "The second line's calling account was removed on the local page."
+)
+
+// sipFieldErr maps a sipsign refusal to its owner wording.
+func sipFieldErr(err error) error {
+	switch err {
+	case sipsign.ErrServer:
+		return errSIPServer
+	case sipsign.ErrDomain:
+		return errSIPDomain
+	case sipsign.ErrUser:
+		return errSIPUser
+	case sipsign.ErrNumber:
+		return errSIPNumber
+	}
+	return errInternal
+}
+
 // sipRecord is the settings entry: the settings, the realm once recorded,
-// and when setup ran (Unix seconds), which opens RealmWindow.
+// whether the owner confirmed it, and when setup ran (Unix seconds), which
+// opens RealmWindow. Until the realm is confirmed only REGISTER is signed
+// (sipsign.Account.RegisterOnly; security R1 on #116, closing K13's
+// residual).
 type sipRecord struct {
 	sipsign.Settings
-	Realm string `json:"realm,omitempty"`
-	SetAt int64  `json:"set_at"`
+	Realm     string `json:"realm,omitempty"`
+	Confirmed bool   `json:"confirmed,omitempty"`
+	SetAt     int64  `json:"set_at"`
 }
 
 // sipStatus is what the local page reads; never the password.
@@ -42,6 +74,8 @@ type sipStatus struct {
 	Set                    bool             `json:"set"`
 	Settings               sipsign.Settings `json:"settings"`
 	RealmRecorded          bool             `json:"realm_recorded"`
+	Realm                  string           `json:"realm,omitempty"`
+	RealmConfirmed         bool             `json:"realm_confirmed"`
 	WaitingForRegistration bool             `json:"waiting_for_registration"`
 }
 
@@ -69,12 +103,17 @@ func (c *custody) setSIP(s sipsign.Settings, password string) error {
 	if c.ph != open {
 		return errLocked
 	}
-	if s.Check() != nil || hasOtherKind(c.v, sipsign.SettingsName, sipsign.KindSettings) || hasOtherKind(c.v, sipsign.PasswordName, sipsign.KindPassword) {
-		return errBadSIP
+	s = s.Normalize()
+	if err := s.Check(); err != nil {
+		return sipFieldErr(err)
+	}
+	if hasOtherKind(c.v, sipsign.SettingsName, sipsign.KindSettings) || hasOtherKind(c.v, sipsign.PasswordName, sipsign.KindPassword) {
+		return errSIPOtherKind
 	}
 	if !sipPassword(password) {
 		return errWeakSIPPassword
 	}
+	replacing := hasKind(c.v, sipsign.SettingsName, sipsign.KindSettings)
 	rec, err := json.Marshal(sipRecord{Settings: s, SetAt: c.now().Unix()})
 	if err != nil {
 		return errInternal
@@ -84,6 +123,9 @@ func (c *custody) setSIP(s sipsign.Settings, password string) error {
 	}
 	if err := c.v.Put(sipsign.SettingsName, sipsign.KindSettings, rec); err != nil {
 		return c.putErr(err)
+	}
+	if replacing {
+		c.notify(noteSIPReplaced)
 	}
 	return nil
 }
@@ -103,6 +145,7 @@ func (c *custody) removeSIP() error {
 	if c.ph != open {
 		return errLocked
 	}
+	removed := false
 	for _, n := range []struct{ name, kind string }{{sipsign.SettingsName, sipsign.KindSettings}, {sipsign.PasswordName, sipsign.KindPassword}} {
 		if !hasKind(c.v, n.name, n.kind) {
 			continue
@@ -110,6 +153,33 @@ func (c *custody) removeSIP() error {
 		if err := c.v.Delete(n.name); err != nil {
 			return c.putErr(err)
 		}
+		removed = true
+	}
+	if removed {
+		c.notify(noteSIPRemoved)
+	}
+	return nil
+}
+
+// confirmRealm records that the owner checked the realm the first
+// registration recorded, which lets the account sign texts and calls.
+func (c *custody) confirmRealm(realm string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	rec, _, err := c.sipAccount()
+	switch {
+	case errors.Is(err, sipsign.ErrLocked):
+		return errLocked
+	case err != nil, rec.Realm == "" || realm != rec.Realm:
+		return errSIPRealm
+	}
+	rec.Confirmed = true
+	raw, err := json.Marshal(rec)
+	if err != nil {
+		return errInternal
+	}
+	if err := c.v.Put(sipsign.SettingsName, sipsign.KindSettings, raw); err != nil {
+		return c.putErr(err)
 	}
 	return nil
 }
@@ -128,7 +198,7 @@ func (c *custody) sipAccount() (sipRecord, sipsign.Account, error) {
 	if !ok1 || !ok2 || json.Unmarshal([]byte(raw.Reveal()), &rec) != nil {
 		return sipRecord{}, sipsign.Account{}, sipsign.ErrNoAccount
 	}
-	return rec, sipsign.Account{Username: rec.User, Password: pw.Reveal(), Realm: rec.Realm}, nil
+	return rec, sipsign.Account{Username: rec.User, Password: pw.Reveal(), Realm: rec.Realm, RegisterOnly: !rec.Confirmed}, nil
 }
 
 // learning reports whether rec may still record a realm.
@@ -146,7 +216,8 @@ func (c *custody) sipStatus() (sipStatus, error) {
 	case err != nil:
 		return sipStatus{}, nil
 	}
-	return sipStatus{Set: true, Settings: rec.Settings, RealmRecorded: rec.Realm != "", WaitingForRegistration: c.learning(rec)}, nil
+	return sipStatus{Set: true, Settings: rec.Settings, RealmRecorded: rec.Realm != "", Realm: rec.Realm, RealmConfirmed: rec.Confirmed,
+		WaitingForRegistration: c.learning(rec)}, nil
 }
 
 // signStore is the custody as sign.sock serves it (sipsign.Store).
@@ -172,7 +243,7 @@ func (s signStore) LearnRealm(realm string) (sipsign.Account, error) {
 	if realm == "" || !c.learning(rec) {
 		return sipsign.Account{}, sipsign.ErrRealm
 	}
-	rec.Realm = realm
+	rec.Realm, rec.Confirmed = realm, false
 	raw, err := json.Marshal(rec)
 	if err != nil {
 		return sipsign.Account{}, err
@@ -181,7 +252,7 @@ func (s signStore) LearnRealm(realm string) (sipsign.Account, error) {
 		c.putErr(err)
 		return sipsign.Account{}, sipsign.ErrRealm
 	}
-	a.Realm = realm
+	a.Realm, a.RegisterOnly = realm, true
 	return a, nil
 }
 
@@ -195,6 +266,9 @@ func serveSign(dir string, c *custody, modemUID int) (*http.Server, error) {
 		return nil, err
 	}
 	srv := newServer(sipsign.Handler(signStore{c}))
+	// A request is a few hundred bytes; a peer that trickles one is cut
+	// off rather than holding a connection (S3 on #116).
+	srv.ReadTimeout = 10 * time.Second
 	go srv.Serve(ln)
 	return srv, nil
 }
@@ -223,6 +297,19 @@ func secondLineRoutes(mux *http.ServeMux, c *custody, read func(http.ResponseWri
 			return
 		}
 		reply(w, http.StatusOK, st)
+	})
+	mux.HandleFunc("/second-line/confirm", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Realm string `json:"realm"`
+		}
+		if !read(w, r, &req) {
+			return
+		}
+		if err := c.confirmRealm(req.Realm); err != nil {
+			fail(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("/second-line/remove", func(w http.ResponseWriter, r *http.Request) {
 		var req struct{}

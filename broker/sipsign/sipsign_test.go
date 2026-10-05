@@ -253,3 +253,53 @@ func TestTheRealmIsLearnedOnlyFromTheFirstRegistration(t *testing.T) {
 		t.Fatalf("learned after the window: %v", err)
 	}
 }
+
+// Each refused setting names its field, so the page can say which one to
+// fix (UX-116-1), and every one is still ErrSettings.
+func TestEachRefusedSettingNamesItsField(t *testing.T) {
+	for want, f := range map[error]func(*sipsign.Settings){
+		sipsign.ErrServer: func(s *sipsign.Settings) { s.Server = "sip voip.test:5061" },
+		sipsign.ErrDomain: func(s *sipsign.Settings) { s.Domain = "a@voip.test" },
+		sipsign.ErrUser:   func(s *sipsign.Settings) { s.User = "a;b" },
+		sipsign.ErrNumber: func(s *sipsign.Settings) { s.Number = "5550000300" },
+	} {
+		s := settings
+		f(&s)
+		if err := s.Check(); err != want || !errors.Is(err, sipsign.ErrSettings) {
+			t.Errorf("%v: got %v", want, err)
+		}
+	}
+}
+
+// What an owner leaves out or types with separators is filled in: the TLS
+// port and the number's spacing (UX R1 on #116).
+func TestSettingsAreNormalizedBeforeTheCheck(t *testing.T) {
+	s := sipsign.Settings{Server: " sip.voip.test ", Domain: "voip.test", User: user, Number: "+1 (555) 000-0300"}.Normalize()
+	if s.Server != "sip.voip.test:5061" || s.Number != "+15550000300" {
+		t.Fatalf("%+v", s)
+	}
+	if err := s.Check(); err != nil {
+		t.Fatal(err)
+	}
+	if got := (sipsign.Settings{Server: "sip.voip.test:5070"}).Normalize().Server; got != "sip.voip.test:5070" {
+		t.Fatalf("port replaced: %q", got)
+	}
+	if err := (sipsign.Settings{Server: "sip.voip.test", Domain: "voip.test", User: user, Number: "15550000300"}).Normalize().Check(); err != sipsign.ErrNumber {
+		t.Fatalf("a number without its country code was guessed: %v", err)
+	}
+}
+
+// Until the owner confirms the recorded realm, the account keeps the line
+// registered and answers nothing else (security R1 on #116).
+func TestAnUnconfirmedRealmSignsOnlyRegistration(t *testing.T) {
+	ctx := context.Background()
+	a := sipsign.Account{Username: user, Password: password, Realm: realm, RegisterOnly: true}
+	if _, err := a.Sign(ctx, sipsign.Challenge{Header: challenge(realm), Method: "REGISTER", URI: "sip:voip.test"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range []string{"MESSAGE", "INVITE", "BYE", "CANCEL"} {
+		if _, err := a.Sign(ctx, sipsign.Challenge{Header: challenge(realm), Method: m, URI: "sip:voip.test"}); !errors.Is(err, sipsign.ErrMethod) {
+			t.Errorf("%s signed before the realm was confirmed: %v", m, err)
+		}
+	}
+}

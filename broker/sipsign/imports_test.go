@@ -6,10 +6,10 @@ import (
 	"testing"
 )
 
-// REQ: ARC-2, CRED-1
+// REQ: CRED-1
 
 // The SIP and SRTP stacks parse what a provider and third parties send, so
-// they stay in the modem bridge's binary (P2-3c, #102 security R5): the
+// they stay in the modem bridge's binary (P2-3c, #102 security R5, CRED-1): the
 // vault process links this package and not them, and agentosd links
 // neither. A binary that newly needs one is a reviewed change here.
 func TestTheSIPStackStaysOutOfTheBrokerAndTheVaultProcess(t *testing.T) {

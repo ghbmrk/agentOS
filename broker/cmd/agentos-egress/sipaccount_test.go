@@ -83,7 +83,7 @@ func TestTheCallingAccountIsSetUpInTheVault(t *testing.T) {
 	// Refused settings and weak passwords change nothing.
 	bad := sipSettings
 	bad.User = "a@evil.test"
-	if err := r.c.setSIP(bad, synthetic(t, "canary-sip-")); err != errBadSIP {
+	if err := r.c.setSIP(bad, synthetic(t, "canary-sip-")); err != errSIPUser {
 		t.Fatalf("bad settings: %v", err)
 	}
 	for _, p := range []string{"", "short-pw", strings.Repeat("x", 257), "bad\npassword-x"} {
@@ -105,7 +105,7 @@ func TestTheCallingAccountIsSetUpInTheVault(t *testing.T) {
 	if err := r.c.v.Put(sipsign.PasswordName, vault.KindAPIKey, []byte(synthetic(t, "sk-"))); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.c.setSIP(sipSettings, pw); err != errBadSIP {
+	if err := r.c.setSIP(sipSettings, pw); err != errSIPOtherKind {
 		t.Fatalf("over another kind: %v", err)
 	}
 }
@@ -246,5 +246,149 @@ func TestTheModemBridgeSignsOnItsOwnSocket(t *testing.T) {
 	defer other.Close()
 	if _, err := sipsign.NewClient(filepath.Join(run2, SignSocket)).Settings(ctx); !errors.Is(err, sipsign.ErrDown) {
 		t.Fatal("another uid was served")
+	}
+}
+
+// UX-116-1: each refused field gets one fixed reason, and no reason
+// carries what was entered.
+func TestSetupRefusalsNameTheFieldAndNeverEchoTheValue(t *testing.T) {
+	r := openRig(t)
+	canary := synthetic(t, "canaryvalue")
+	for want, f := range map[*unlockErr]func(*sipsign.Settings){
+		errSIPServer: func(s *sipsign.Settings) { s.Server = canary + " x:5061" },
+		errSIPDomain: func(s *sipsign.Settings) { s.Domain = canary + "@x" },
+		errSIPUser:   func(s *sipsign.Settings) { s.User = canary + ";x" },
+		errSIPNumber: func(s *sipsign.Settings) { s.Number = canary },
+	} {
+		s := sipSettings
+		f(&s)
+		err := r.c.setSIP(s, synthetic(t, "canary-sip-"))
+		if err != want {
+			t.Errorf("%q: got %v", want.msg, err)
+		}
+		if err != nil && strings.Contains(err.Error(), canary) {
+			t.Errorf("reason echoes the value: %q", err)
+		}
+	}
+	pw := synthetic(t, "x")[:8]
+	if err := r.c.setSIP(sipSettings, pw); err != errWeakSIPPassword || strings.Contains(err.Error(), pw) {
+		t.Fatalf("short password: %v", err)
+	}
+	// A number typed with spaces and a server without its port are
+	// filled in, not refused (UX R1).
+	typed := sipSettings
+	typed.Server, typed.Number = "sip.voip.test", "+1 555 000 0300"
+	if err := r.c.setSIP(typed, synthetic(t, "canary-sip-")); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := r.c.sipStatus(); st.Settings != sipSettings {
+		t.Fatalf("normalized to %+v", st.Settings)
+	}
+}
+
+// The owner hears when the account is replaced or removed (S2 on #116);
+// a first setup is the owner's own act on the page and says nothing.
+func TestTheOwnerIsToldWhenTheAccountChanges(t *testing.T) {
+	r := openRig(t)
+	n := len(r.notes)
+	if err := r.c.setSIP(sipSettings, synthetic(t, "canary-sip-")); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.notes) != n {
+		t.Fatalf("first setup noted: %q", r.notes[n:])
+	}
+	if err := r.c.setSIP(sipSettings, synthetic(t, "canary-sip-")); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.c.removeSIP(); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.c.removeSIP(); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.notes[n:]; len(got) != 2 || got[0] != noteSIPReplaced || got[1] != noteSIPRemoved {
+		t.Fatalf("notes %q", got)
+	}
+}
+
+// Security R1 on #116: the recorded realm signs only REGISTER until the
+// owner confirms it on the local page; a wrong realm confirms nothing.
+func TestTextsAndCallsWaitForTheOwnerToConfirmTheRealm(t *testing.T) {
+	r := openRig(t)
+	st := signStore{r.c}
+	if err := r.c.confirmRealm(sipRealm); err != errSIPRealm {
+		t.Fatalf("confirmed with no account: %v", err)
+	}
+	if err := r.c.setSIP(sipSettings, synthetic(t, "canary-sip-")); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.c.confirmRealm(""); err != errSIPRealm {
+		t.Fatalf("confirmed before registration: %v", err)
+	}
+	a, err := st.LearnRealm(sipRealm)
+	if err != nil || !a.RegisterOnly {
+		t.Fatalf("learned %v %v", a, err)
+	}
+	msg := sipChallenge(sipRealm)
+	msg.Method = "MESSAGE"
+	if _, a, _ := st.Account(); !a.RegisterOnly {
+		t.Fatal("unconfirmed realm signs everything")
+	} else if _, err := a.Sign(context.Background(), msg); !errors.Is(err, sipsign.ErrMethod) {
+		t.Fatalf("text signed before confirmation: %v", err)
+	}
+	if s, _ := r.c.sipStatus(); s.Realm != sipRealm || s.RealmConfirmed {
+		t.Fatalf("status %+v", s)
+	}
+	if err := r.c.confirmRealm("other realm"); err != errSIPRealm {
+		t.Fatalf("wrong realm confirmed: %v", err)
+	}
+	if err := r.c.confirmRealm(sipRealm); err != nil {
+		t.Fatal(err)
+	}
+	if _, a, _ := st.Account(); a.RegisterOnly {
+		t.Fatal("still register-only after confirmation")
+	} else if _, err := a.Sign(context.Background(), msg); err != nil {
+		t.Fatal(err)
+	}
+	if s, _ := r.c.sipStatus(); !s.RealmConfirmed {
+		t.Fatalf("status %+v", s)
+	}
+	// Setting up again starts over.
+	if err := r.c.setSIP(sipSettings, synthetic(t, "canary-sip-")); err != nil {
+		t.Fatal(err)
+	}
+	if s, _ := r.c.sipStatus(); s.RealmRecorded || s.RealmConfirmed {
+		t.Fatalf("status after a new setup %+v", s)
+	}
+}
+
+// CRED-1 (MUST 1 on #116): the modem bridge's uid must be its own, so the
+// sign socket can never be reached by this process, agentosd or the local
+// UI.
+func TestTheModemUIDMustBeTheBridgesOwn(t *testing.T) {
+	self := os.Getuid()
+	broker, ui := self+1, self+2
+	dir := t.TempDir()
+	rule := filepath.Join(dir, "rule.json")
+	if err := os.WriteFile(rule, []byte(`{"default":[{"provider":"openai","model":"gpt-test"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The socket directory's parent is a file, so a guard that let a uid
+	// through fails at serve with another error instead of serving.
+	if err := os.WriteFile(filepath.Join(dir, "file"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run := func(modem int) error {
+		return serveCmd([]string{"-rule", rule, "-broker-uid", fmt.Sprint(broker), "-unlock-uid", fmt.Sprint(ui), "-modem-uid", fmt.Sprint(modem),
+			"-run", filepath.Join(dir, "file", "run"), "-vault", filepath.Join(dir, "vault"), "-keys", filepath.Join(dir, "vault.keys"),
+			"-tpm", filepath.Join(dir, "no-tpm")})
+	}
+	for _, m := range []int{self, broker, ui} {
+		if err := run(m); err == nil || !strings.Contains(err.Error(), "-modem-uid") {
+			t.Errorf("modem uid %d: %v", m, err)
+		}
+	}
+	if err := run(self + 3); err == nil || strings.Contains(err.Error(), "-modem-uid") {
+		t.Fatalf("a distinct modem uid: %v", err)
 	}
 }
