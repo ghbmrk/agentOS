@@ -374,7 +374,19 @@ func readMeta(src Source, name string) ([]byte, error) {
 // Check reads the repository at src and returns the newest release this
 // box may install (UPD-2, UPD-8). Root rotations are followed and saved;
 // the timestamp and snapshot it accepts are saved for rollback checks.
-func (s *Store) Check(src Source, o Options) (Result, error) {
+func (s *Store) Check(src Source, o Options) (res Result, err error) {
+	// What src serves is untrusted, and a parser panic reachable with only
+	// the online keys (as go-tuf's null targets entry was) must fail closed,
+	// not crash the process.
+	defer func() {
+		if r := recover(); r != nil {
+			res, err = Result{}, fmt.Errorf("%w: %v", ErrBadRepository, r)
+		}
+	}()
+	return s.check(src, o)
+}
+
+func (s *Store) check(src Source, o Options) (Result, error) {
 	unlock, err := s.lock()
 	if err != nil {
 		return Result{}, err
