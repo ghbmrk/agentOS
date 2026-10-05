@@ -19,8 +19,6 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
-
-	"github.com/ghbmrk/agentos/broker/owner"
 )
 
 // Vault is the vault process's unlock socket (cmd/agentos-egress, egress
@@ -508,7 +506,7 @@ func (s *Server) vaultCode(w http.ResponseWriter, r *http.Request, code string, 
 	// vault process (P2-4f): no second code, and no codeless sign-in here.
 	// If it fails, the open page offers sign-in with the next code.
 	if o := s.getOwner(); o != nil {
-		s.signIn(w, o, owner.UnlockProofPrefix+ticket)
+		s.proofSignIn(w, o, ticket)
 	}
 	http.Redirect(w, r, "/unlock/vault", http.StatusSeeOther)
 }
