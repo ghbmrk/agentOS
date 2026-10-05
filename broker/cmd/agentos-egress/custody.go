@@ -520,7 +520,7 @@ func (c *custody) confirmKeep(ticket, code string, keep bool) (bool, error) {
 		return false, nil
 	}
 	if err := c.host.approve(c.v); err != nil {
-		// The error stays in the journal; the owner's text has a fixed
+		// The error goes to the log only; the owner's text has a fixed
 		// reason (CH-12).
 		log.Printf("keep this PC trusted: %v", err)
 		c.notify(noteKeepTrustedFailed)
