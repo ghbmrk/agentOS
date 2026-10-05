@@ -131,6 +131,46 @@ func TestALockedSessionTakesOnlyMoreCautiousUpdates(t *testing.T) {
 	}
 }
 
+// The pinned undo names the channel the box was on (L3 on #130).
+func TestPinningFromFastSaysHowToGoBack(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	if _, ok := r.s.Text(ctx, "UPDATES FAST", true); !ok {
+		t.Fatal("UPDATES FAST")
+	}
+	if got, _ := r.s.Text(ctx, "UPDATES PINNED", true); !strings.HasSuffix(got, " Reply UPDATES FAST to undo.") {
+		t.Fatalf("%q", got)
+	}
+}
+
+// Saved update settings read fail-safe: a damaged or tampered state file
+// cannot set a soak outside 7..60 days or a channel that stops checks
+// (L3 MUST on #130).
+func TestSavedUpdateSettingsAreClampedOnLoad(t *testing.T) {
+	r := newRig(t)
+	for _, c := range []struct {
+		saved   string
+		channel string
+		soak    int
+	}{
+		{`{"channel":"nightly","soak_days":1}`, ChannelStable, MinSoakDays},
+		{`{"channel":"pinned","soak_days":400}`, ChannelPinned, MaxSoakDays},
+		{`{"soak_days":-3}`, ChannelStable, DefaultSoakDays},
+	} {
+		must(t, r.store.Save([]byte(`{"seq":1,"settings":{"spare_calls":100,"updates":`+c.saved+`},"applied":{}}`)))
+		r.restart()
+		if u := r.s.Settings().Updates; u.ChannelName() != c.channel || u.Soak() != c.soak {
+			t.Fatalf("%s: %s %d", c.saved, u.ChannelName(), u.Soak())
+		}
+	}
+	// Set refuses a soak outside the bounds, whatever Text let through.
+	for _, d := range []int{MinSoakDays - 1, MaxSoakDays + 1} {
+		if err := r.s.Set(context.Background(), Request{Kind: KindSoak, Days: d}); err == nil {
+			t.Fatalf("soak %d set", d)
+		}
+	}
+}
+
 func TestHelpUpdatesFitsOneSegment(t *testing.T) {
 	r := newRig(t)
 	got, ok := r.s.Text(context.Background(), "help updates", true)

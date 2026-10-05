@@ -84,20 +84,23 @@ type UpdateSettings struct {
 	SecurityAsk bool `json:"security_ask,omitempty"`
 }
 
-// ChannelName is the channel, with the default filled in.
+// ChannelName is the channel, with the default filled in. A saved value
+// that is not a channel reads as stable, so a damaged state file never
+// stops checks or security notices (L3 MUST on #130).
 func (u UpdateSettings) ChannelName() string {
-	if u.Channel == "" {
+	if _, ok := channelRank[u.Channel]; !ok {
 		return ChannelStable
 	}
 	return u.Channel
 }
 
-// Soak is the soak in days, with the default filled in.
+// Soak is the soak in days, with the default filled in and clamped to
+// MinSoakDays..MaxSoakDays whatever the saved state says (L3 MUST on #130).
 func (u UpdateSettings) Soak() int {
 	if u.SoakDays <= 0 {
 		return DefaultSoakDays
 	}
-	return u.SoakDays
+	return min(max(u.SoakDays, MinSoakDays), MaxSoakDays)
 }
 
 // channelRank orders channels from fastest to most cautious.
@@ -273,9 +276,9 @@ func Confirm(r Request, set Settings) string {
 	case KindChannel:
 		switch r.Channel {
 		case ChannelFast:
-			return "Updates: fast channel. New releases are offered as they come out. Reply UPDATES STABLE if this wasn't you."
+			return "Updates: fast channel. New releases are offered as they come out."
 		case ChannelPinned:
-			return "Updates: pinned. Nothing installs on its own; the box still tells you about security fixes. Reply UPDATES STABLE to undo."
+			return "Updates: pinned. Nothing installs on its own; the box still tells you about security fixes."
 		}
 		return fmt.Sprintf("Updates: stable channel. Releases are offered after other boxes have tested them for %d days.", set.Updates.Soak())
 	case KindSoak:
@@ -402,6 +405,17 @@ func (s *Scheduler) Text(ctx context.Context, msg string, unlocked bool) (reply 
 			reply += fmt.Sprintf(" Reply UPDATE SOAK %d if this wasn't you.", prev.Soak())
 		case r.Kind == KindChannel && r.Channel == ChannelStable && prev.ChannelName() == ChannelPinned:
 			reply += " Reply UPDATES PINNED if this wasn't you."
+		case r.Kind == KindChannel && r.Channel != ChannelStable:
+			// The undo names the channel the box was on (L3 on #130).
+			back := prev.ChannelName()
+			if back == r.Channel {
+				back = ChannelStable
+			}
+			if r.Channel == ChannelFast {
+				reply += fmt.Sprintf(" Reply UPDATES %s if this wasn't you.", strings.ToUpper(back))
+			} else {
+				reply += fmt.Sprintf(" Reply UPDATES %s to undo.", strings.ToUpper(back))
+			}
 		}
 		return reply, true
 	case errors.Is(err, ErrPending):
