@@ -137,6 +137,43 @@ func (p *Pipeline) AddSecurityCase(c Case) error {
 	return p.addCase(c)
 }
 
+// ForgetGoal removes every task case harvested from goal and saves the
+// suite without them, returning their IDs, sorted (W3-tasks, CAP-3). It is
+// the owner's deletion of a task: only the broker's handling of an
+// authenticated owner forget calls it, never a candidate or a loop
+// (TestOnlyTheDaemonForgets holds every other package to that), so unlike
+// RemoveCase it takes no second approval (CHG-2 guards the suite against
+// changes the owner did not make). Security fixtures carry no goal and
+// never go. Adoptions whose evidence included these cases stay until the
+// forget cascade removes or rebuilds them (BOARD W3-tasks, security C1 on
+// #120).
+func (p *Pipeline) ForgetGoal(goal string) ([]string, error) {
+	if goal == "" {
+		return nil, errors.New("change: forget needs a goal")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	next := p.st.copyCases()
+	var ids []string
+	for id, c := range next {
+		if !c.Security && c.Goal == goal {
+			delete(next, id)
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	sort.Strings(ids)
+	old := p.st.Cases
+	p.st.Cases = next
+	if err := p.saveLocked(); err != nil {
+		p.st.Cases = old
+		return nil, err
+	}
+	return ids, nil
+}
+
 func (p *Pipeline) addCase(c Case) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()

@@ -37,7 +37,10 @@ type taskTexts struct {
 	logf  func(string, ...any)
 
 	mu sync.Mutex
-	st map[string]taskText
+	// dirty: the last save failed, so memory may hold less than the
+	// file (security R1 on #123).
+	dirty bool
+	st    map[string]taskText
 }
 
 func openTaskTexts(store change.Store, now func() time.Time, logf func(string, ...any)) (*taskTexts, error) {
@@ -77,7 +80,7 @@ func (t *taskTexts) put(goal, text string, public bool) {
 	t.saveLocked()
 }
 
-func (t *taskTexts) saveLocked() {
+func (t *taskTexts) saveLocked() error {
 	b, err := json.Marshal(t.st)
 	if err == nil {
 		err = t.store.Save(b)
@@ -85,6 +88,8 @@ func (t *taskTexts) saveLocked() {
 	if err != nil {
 		t.logf("learning: task texts not saved: %v", err)
 	}
+	t.dirty = err != nil
+	return err
 }
 
 func (t *taskTexts) pruneLocked(now time.Time) {
@@ -103,6 +108,23 @@ func (t *taskTexts) pruneLocked(now time.Time) {
 	for _, g := range goals[maxTasks:] {
 		delete(t.st, g)
 	}
+}
+
+// forget deletes goal's task text (W3-tasks, CAP-3) and reports whether
+// one was kept. A failed save is logged and returned (security F1 on #123).
+func (t *taskTexts) forget(goal string) (bool, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if _, ok := t.st[goal]; !ok {
+		if t.dirty {
+			// An earlier save failed: the entry left memory but may
+			// still be on disk (security R1 on #123).
+			return false, t.saveLocked()
+		}
+		return false, nil
+	}
+	delete(t.st, goal)
+	return true, t.saveLocked()
 }
 
 func (t *taskTexts) get(goal string) (taskText, bool) {

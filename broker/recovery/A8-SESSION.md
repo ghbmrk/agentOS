@@ -15,6 +15,17 @@ TPM, passphrase and recovery slots, and no key, seed, grid seed, passphrase or
 recovery key appears in any plaintext on either drive or in the backup
 (`a8_test.go`, also run by the canary harness every CI run).
 
+**What the learning plane keeps at rest (W3-tasks):** the learn directory
+(`/var/lib/agentos/learn`, broker only, files 0600) holds owner task texts
+(`tasks.json`), the guest's task values and their hash key (`values.json`,
+`values.key`), the change pipeline's state with its cases, and the IDs of
+forgotten goals (`forgotten.json`, no content), all
+plaintext on the box's encrypted volume. Step 10's scan covers it with the
+rest of the drive. Forgetting a task removes its text, values and cases
+from the learn directory only. The journal, skills adopted from it (until
+the forget cascade lands) and backups made before the forget still hold
+them, so the scan may still find a forgotten task's canary there.
+
 **You need:** the box drive (set up on PC-T, your trusted PC), a second PC
 (PC-U) never used with it, a spare drive of at least the same size, a USB
 stick for the backup, the Owner Card with both sheets, your phone with the code

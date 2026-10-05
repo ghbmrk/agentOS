@@ -3,9 +3,13 @@ package main
 // REQ: LOOP-4, CAP-5, CAP-3, CRED-7
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -439,6 +443,215 @@ func TestTaskValuesBounds(t *testing.T) {
 	}
 	if _, err := openTaskValues(store, keyPath, func() time.Time { return r.now }, t.Logf); err == nil {
 		t.Fatal("a key file others can read was used")
+	}
+}
+
+// REQ: CAP-3
+
+// W3-tasks part 1 (W3-values (d)): forgetting a task deletes its kept
+// values with its text.
+func TestForgetDeletesTheTaskValues(t *testing.T) {
+	r := newValuesRig(t)
+	r.weekly("owner:w1", "sam@example.com", 1)
+	r.weekly("owner:w2", "ana@example.com", 1)
+	if ok, err := r.values.forget("owner:w1"); !ok || err != nil {
+		t.Fatal("forget reported the wrong result", err)
+	}
+	if ok, _ := r.values.forget("owner:w1"); ok {
+		t.Fatal("forget reported the wrong result")
+	}
+	raw, err := r.values.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "sam@example.com") || !strings.Contains(string(raw), "ana@example.com") {
+		t.Fatalf("saved values: %s", raw)
+	}
+}
+
+// W3-tasks part 1: the learning plane forgets a task's text and values
+// together (its cases: change TestForgetGoalRemovesItsCases).
+func TestLearningForgetsATask(t *testing.T) {
+	dir := t.TempDir()
+	cfg := daemon.Config{
+		JournalPath: filepath.Join(dir, "journal.log"), SocketDir: filepath.Join(dir, "run"),
+		OwnerNumber: ownerNum, ModemUID: os.Getuid(), Admission: admission.Config{CapacityMB: 4500, HeadroomMB: 600},
+		OwnerState: filepath.Join(dir, "owner.json"),
+	}
+	lp, err := openLearning(learnPaths{Dir: dir, Spare: filepath.Join(dir, "spare.json")}, false, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng, err := journal.Open(&journal.MemStore{}, allowAll{}, map[string]journal.Executor{"task": succeeds{}}, func(string) string { return daemon.Redacted })
+	if err != nil {
+		t.Fatal(err)
+	}
+	lp.pipe.Attach(eng)
+	lp.eng.Store(eng)
+	for _, g := range []string{"f1", "f2"} {
+		id := "agent/" + g
+		if _, err := eng.Submit(journal.Intent{ID: id, GoalID: "owner:" + g, Origin: "guest:agent", Account: "mail", Action: "draft", Executor: "task"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := lp.harvest.Harvest(loops.Outcome{Intent: id, Action: loops.Approved, Input: []byte("pay the CANARY-" + g + " invoice"), Output: []byte("paid")}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lp.tasks.put("owner:f1", "pay the CANARY-forget invoice", false)
+	lp.values.observe(journal.Intent{ID: "agent/1", GoalID: "owner:f1", Origin: "guest:agent", Params: map[string]any{"to": "ann@example.test"}})
+	lp.values.mu.Lock()
+	_, had := lp.values.st["owner:f1"]
+	lp.values.mu.Unlock()
+	if _, ok := lp.tasks.get("owner:f1"); !ok || !had {
+		t.Fatal("nothing kept to forget")
+	}
+	if err := lp.forgetTask("owner:f1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := lp.tasks.get("owner:f1"); ok {
+		t.Fatal("task text kept")
+	}
+	lp.values.mu.Lock()
+	_, kept := lp.values.st["owner:f1"]
+	lp.values.mu.Unlock()
+	if kept {
+		t.Fatal("task values kept")
+	}
+	// Its cases, and the harvester's records of them, are gone from
+	// every file in the learn directory; the other task's stay.
+	var all []byte
+	err = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		b, err := os.ReadFile(path)
+		all = append(all, b...)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A case's input is saved as base64 ([]byte in JSON).
+	holds := func(g string) bool {
+		in := "pay the CANARY-" + g + " invoice"
+		return bytes.Contains(all, []byte(in)) || bytes.Contains(all, []byte(base64.StdEncoding.EncodeToString([]byte(in))))
+	}
+	if bytes.Contains(all, []byte("CANARY-forget")) || holds("f1") || bytes.Contains(all, []byte(`"agent/f1"`)) {
+		t.Fatal("the learn directory still holds the forgotten task")
+	}
+	if !holds("f2") || !bytes.Contains(all, []byte(`"agent/f2"`)) {
+		t.Fatal("the other task's case went too")
+	}
+	// Security F1 on #123: the journal still holds the goal's intents, so
+	// the goal is tombstoned and nothing in learning reads them again: no
+	// hypothesis or brief step (Loop 1 and the compiler read l.mining), no
+	// case, no new text or values.
+	for _, st := range lp.mining.List() {
+		if st.Intent.GoalID == "owner:f1" {
+			t.Fatal("mining still lists the forgotten goal's intent")
+		}
+	}
+	saw := false
+	for _, r := range lp.mining.Trail() {
+		if r.ID == "agent/f1" || r.Intent != nil && r.Intent.GoalID == "owner:f1" {
+			t.Fatal("mining's trail still holds the forgotten goal's intent")
+		}
+		saw = saw || r.ID == "agent/f2"
+	}
+	if !saw {
+		t.Fatal("mining's trail lost the other goal")
+	}
+	lp.delivered("owner:f1", "pay the CANARY-forget invoice", false)
+	lp.observeIntent(journal.Intent{ID: "agent/f1", GoalID: "owner:f1", Origin: "guest:agent", Params: map[string]any{"to": "ann@example.test"}})
+	lp.values.mu.Lock()
+	_, revalued := lp.values.st["owner:f1"]
+	lp.values.mu.Unlock()
+	if _, ok := lp.tasks.get("owner:f1"); ok || revalued {
+		t.Fatal("a forgotten goal's text or values were kept again")
+	}
+	in, err := eng.Get("agent/f1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lp.record(grants.OwnerOutcome{Intent: in.Intent, Verdict: grants.OwnerAccepted})
+	ev, err := lp.harvest.Evidence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.HeldOut+len(ev.Dev) != 1 {
+		t.Fatalf("a forgotten goal made a case again: %d held, %d dev", ev.HeldOut, len(ev.Dev))
+	}
+	// The tombstone keeps goal IDs only, and survives a restart.
+	again, err := openLearning(learnPaths{Dir: dir, Spare: filepath.Join(dir, "spare.json")}, false, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !again.forgotten.has("owner:f1") || again.forgotten.has("owner:f2") {
+		t.Fatal("the tombstone did not survive a restart")
+	}
+	if raw, err := os.ReadFile(filepath.Join(dir, "forgotten.json")); err != nil || bytes.Contains(raw, []byte("CANARY")) {
+		t.Fatalf("tombstone: %s %v", raw, err)
+	}
+	if err := lp.forgetTask(""); err == nil {
+		t.Fatal("forgot with no goal")
+	}
+}
+
+// failSave is a store whose saves fail, as on a full or read-only disk.
+type failSave struct{ change.Store }
+
+func (failSave) Save([]byte) error { return errors.New("disk full") }
+
+// W3-tasks part 1 (security F1 on #123): a forget whose deletion did not
+// reach the disk says so, so the owner is never told a task is gone while
+// its text or values are still at rest. The other stores still forget.
+func TestForgetReportsAFailedSave(t *testing.T) {
+	dir := t.TempDir()
+	cfg := daemon.Config{
+		JournalPath: filepath.Join(dir, "journal.log"), SocketDir: filepath.Join(dir, "run"),
+		OwnerNumber: ownerNum, ModemUID: os.Getuid(), Admission: admission.Config{CapacityMB: 4500, HeadroomMB: 600},
+		OwnerState: filepath.Join(dir, "owner.json"),
+	}
+	lp, err := openLearning(learnPaths{Dir: dir, Spare: filepath.Join(dir, "spare.json")}, false, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, broken := range []string{"tasks", "values"} {
+		goal := "owner:" + broken
+		lp.tasks.put(goal, "pay the CANARY-forget invoice", false)
+		lp.values.observe(journal.Intent{ID: "agent/1", GoalID: goal, Origin: "guest:agent", Params: map[string]any{"to": "ann@example.test"}})
+		tasks, values := lp.tasks.store, lp.values.store
+		if broken == "tasks" {
+			lp.tasks.store = failSave{tasks}
+		} else {
+			lp.values.store = failSave{values}
+		}
+		if _, err := lp.tasks.forget("none"); err != nil {
+			t.Fatalf("%s: nothing to forget still failed: %v", broken, err)
+		}
+		if err := lp.forgetTask(goal); err == nil {
+			t.Fatalf("%s: forget reported success with its save failing", broken)
+		}
+		lp.tasks.store, lp.values.store = tasks, values
+		// Security R1: the entry is gone from memory, so a retried
+		// forget must still save, or the file keeps the text.
+		if err := lp.forgetTask(goal); err != nil {
+			t.Fatalf("%s: retried forget: %v", broken, err)
+		}
+		for _, st := range []change.Store{tasks, values} {
+			if raw, _ := st.Load(); bytes.Contains(raw, []byte("CANARY-forget")) || bytes.Contains(raw, []byte(goal)) {
+				t.Fatalf("%s: a retried forget left the task on disk", broken)
+			}
+		}
+		if _, ok := lp.tasks.get(goal); ok {
+			t.Fatalf("%s: task text kept in memory", broken)
+		}
+		lp.values.mu.Lock()
+		_, kept := lp.values.st[goal]
+		lp.values.mu.Unlock()
+		if kept {
+			t.Fatalf("%s: task values kept in memory", broken)
+		}
 	}
 }
 
