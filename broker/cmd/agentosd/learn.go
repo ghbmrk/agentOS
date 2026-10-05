@@ -59,6 +59,8 @@ type learning struct {
 	running sync.WaitGroup
 	contain loop2Contain
 	notify  loop2Notify
+	// forgetOwner is the owner's FORGET (W3-forget, forget.go).
+	forgetOwner *ownerForget
 	// values are the guest's task values, for the compiler only
 	// (W3-values); mining is the journal everything else in Loop 1 reads,
 	// which keeps none (security V3).
@@ -223,6 +225,10 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	}
 	cfg.BrokerExecutors[change.Executor] = l.pipe
 	cfg.BrokerExecutors[loops.Executor] = l.sched
+	l.forgetOwner = &ownerForget{tasks: l.tasks, learned: l.pipe.LearnedFrom, forget: l.forgetTask, forgotten: l.forgotten.has,
+		inform: func(s string) { l.notify.send(s, false) }, now: time.Now, loc: time.Local, sleep: sleepCtx}
+	cfg.BrokerExecutors[grants.ForgetExecutor] = l.forgetOwner
+	cfg.Grants.ForgetItem = l.forgetOwner.Item
 	cfg.Settings = l.settings
 	cfg.Notes = append(cfg.Notes, l.note, l.builderNote, l.guard.Status)
 	cfg.Narrows = l.sched.Narrows
@@ -297,6 +303,9 @@ func (l *learning) note() string {
 // says nothing new will be adopted, keeping the "if this wasn't you" line
 // (security C1 on #49).
 func (l *learning) settings(ctx context.Context, msg string, unlocked bool) (string, bool) {
+	if _, ok := parseForget(msg); ok {
+		return l.forgetOwner.Text(ctx, msg, unlocked)
+	}
 	reply, ok := l.sched.Text(ctx, msg, unlocked)
 	r, _ := loops.ParseText(msg)
 	if !ok || !l.noRoom.Load() || l.sleep.Load() != nil || r.Kind != loops.KindLoops || !r.On || (r.Loop != "" && r.Loop != loops.Improve) ||
@@ -314,6 +323,9 @@ func (l *learning) settings(ctx context.Context, msg string, unlocked bool) (str
 // cover, and a restart retries opening the plane (UX-92-1).
 const learningOffText = "Spare-time work (learning, self-tests, update checks) is not running on this box. Restarting the box may fix it."
 
+// forgetOffText answers FORGET when the learning plane could not start.
+const forgetOffText = "I can't forget tasks right now: learning isn't running. Restarting the box may fix it."
+
 // learningOffNote is STATUS's line for it, so the owner learns it without
 // sending a loop setting (UX R1 on #92).
 const learningOffNote = "Spare-time work: not running."
@@ -325,6 +337,10 @@ func learningOff(cfg *daemon.Config) {
 	cfg.Settings = func(_ context.Context, msg string, _ bool) (string, bool) {
 		if _, ok := loops.ParseText(msg); ok {
 			return learningOffText, true
+		}
+		if _, ok := parseForget(msg); ok {
+			// Never task chat for the agent (W3-forget).
+			return forgetOffText, true
 		}
 		return "", false
 	}
@@ -342,7 +358,7 @@ func learningOff(cfg *daemon.Config) {
 // 2, security C1 on #120): Loop 1's kept candidates built from it, and
 // every adoption learned from it, undone with its files cleared from the
 // pipeline's history (change C23). Only an authenticated owner forget may
-// call it; none exists yet, so nothing does.
+// call it: the owner's approved FORGET (forget.go).
 func (l *learning) forgetTask(goal string) error {
 	if goal == "" {
 		return errors.New("learning: forget needs a goal")
@@ -407,6 +423,7 @@ func (l *learning) attach(ctx context.Context, d *daemon.Daemon) {
 	l.sched.Attach(eng)
 	if g := d.Gate(); g != nil {
 		l.contain.gate.Store(&pauseGateBox{g})
+		l.forgetOwner.gate.Store(&pauseGateBox{g})
 		// The gate has replayed its journal: Loop 2 drops any pause that
 		// ended while it could not hear it (L3 S1 on #169). This runs
 		// before sched.Run below, so no pass sees the stale list.
@@ -463,7 +480,9 @@ func (l *learning) learningOn() bool { return l.sched.Settings().On(loops.Improv
 // delivered keeps the owner's task text for harvesting (guest G16).
 func (l *learning) delivered(goal, text string, public bool) {
 	if l.learningOn() && !l.forgotten.has(goal) {
-		l.tasks.put(goal, text, public)
+		// Task chat reaches the agent only from the owner channel, whose
+		// transport is the box's SIM.
+		l.tasks.put(goal, text, public, viaSMS)
 	}
 }
 
