@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/journal"
@@ -70,7 +71,12 @@ var tools = []map[string]any{
 
 var requestIDRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
-func (p *Plane) mcp(machine string, w http.ResponseWriter, r *http.Request) {
+// nameRE is an account or action name: lowercase ASCII only, so no
+// spacing, invisible, look-alike, or case variant can pass for another
+// name in the checks below, in routing, or in the journal.
+var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+
+func (p *Plane) mcp(m *machine, w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", "POST")
 		http.Error(w, "this server sends no stream; POST only", http.StatusMethodNotAllowed)
@@ -121,8 +127,10 @@ func (p *Plane) mcp(machine string, w http.ResponseWriter, r *http.Request) {
 			writeRPC(w, req.ID, nil, &rpcError{-32602, "bad params"})
 			return
 		}
-		res, err := p.callTool(r.Context(), machine, call.Name, call.Arguments)
-		p.step(machine)
+		res, submitted, err := p.callTool(r.Context(), m, call.Name, call.Arguments)
+		if submitted {
+			p.step(m) // REV-1: after every effect request the journal took
+		}
 		if err != nil {
 			writeRPC(w, req.ID, toolResult(err.Error(), true), nil)
 			return
@@ -168,15 +176,24 @@ type effectArgs struct {
 	Recipients []string       `json:"recipients"`
 }
 
-// callTool runs one broker tool for machine. Intent IDs and origins are
-// the machine's fork lineage: forks share their source's memory, so a
-// request a fork repeats from its source's history is the same intent and
-// runs at most once (OP-1), while no machine outside the lineage can read
-// or collide with it. The origin therefore names the lineage, not the fork.
-func (p *Plane) callTool(ctx context.Context, machine, name string, raw json.RawMessage) (effectState, error) {
-	lineage, err := p.cfg.Machines.Lineage(machine)
+// Bounds on one effect request's guest-chosen fields.
+const (
+	maxParamsBytes = 16 << 10
+	maxRecipients  = 50
+	maxRecipient   = 320
+)
+
+// callTool runs one broker tool for machine m, and reports whether an
+// effect request reached the journal. Intent IDs and origins are the
+// machine's fork lineage: forks share their source's memory, so a request
+// a fork repeats from its source's history is the same intent and runs at
+// most once (OP-1), while no machine outside the lineage can read or
+// collide with it. The origin therefore names the lineage, not the fork.
+// Errors the guest sees are fixed strings; broker detail goes to Logf.
+func (p *Plane) callTool(ctx context.Context, m *machine, name string, raw json.RawMessage) (effectState, bool, error) {
+	lineage, err := p.cfg.Machines.Lineage(m.id)
 	if err != nil {
-		return effectState{}, errors.New("broker: unknown machine")
+		return effectState{}, false, errors.New("broker: unknown machine")
 	}
 	switch name {
 	case "effect_request":
@@ -184,30 +201,63 @@ func (p *Plane) callTool(ctx context.Context, machine, name string, raw json.Raw
 		dec := json.NewDecoder(bytes.NewReader(raw))
 		dec.UseNumber()
 		if err := dec.Decode(&a); err != nil {
-			return effectState{}, errors.New("arguments must be an object")
+			return effectState{}, false, errors.New("arguments must be an object")
 		}
 		if !requestIDRE.MatchString(a.RequestID) || a.Account == "" || a.Action == "" {
-			return effectState{}, errors.New("request_id (letters, digits, . _ -; at most 64), account, and action are required")
+			return effectState{}, false, errors.New("request_id (letters, digits, . _ -; at most 64), account, and action are required")
+		}
+		if !nameRE.MatchString(a.Account) || !nameRE.MatchString(a.Action) {
+			return effectState{}, false, errors.New("account and action must be lowercase names (a-z, 0-9, . _ -; at most 64)")
+		}
+		if params, _ := json.Marshal(a.Params); len(params) > maxParamsBytes {
+			return effectState{}, false, fmt.Errorf("params are larger than %d bytes", maxParamsBytes)
+		}
+		if len(a.Recipients) > maxRecipients {
+			return effectState{}, false, fmt.Errorf("more than %d recipients", maxRecipients)
+		}
+		for _, r := range a.Recipients {
+			if len(r) > maxRecipient {
+				return effectState{}, false, fmt.Errorf("a recipient is longer than %d bytes", maxRecipient)
+			}
+		}
+		// Broker-state intents (budgets, grants, the broker's own
+		// settings) come from the owner and the broker, never a guest:
+		// some of them narrow and so pass STOP (OP-5, ARC-7).
+		if a.Account == journal.BrokerAccount || strings.HasPrefix(a.Action, "meta.") {
+			return effectState{RequestID: a.RequestID, State: "refused", Reason: "broker-state changes are the owner's; a guest cannot request them"}, false, nil
+		}
+		if !m.rate.take(p.cfg.SubmitBurst, p.cfg.SubmitEvery) {
+			return effectState{}, false, errors.New("too many effect requests from this machine; wait and retry with the same request_id")
 		}
 		exec, ok := p.cfg.Route(a.Account)
 		if !ok {
-			return effectState{RequestID: a.RequestID, State: "refused", Reason: "no adapter is connected for account " + clip(a.Account, 64)}, nil
+			return effectState{RequestID: a.RequestID, State: "refused", Reason: "no adapter is connected for that account"}, false, nil
 		}
-		id := lineage + "/" + a.RequestID
+		label := p.label(m.id)
+		id, readOnly := p.intentID(lineage, a.RequestID, label)
 		st, err := p.cfg.Effects.Submit(journal.Intent{
 			ID: id, Origin: "guest:" + lineage, Account: a.Account, Action: a.Action,
 			Params: a.Params, Recipients: a.Recipients, Executor: exec,
+			Machine: m.id, Label: label,
 		})
 		if err != nil {
 			if errors.Is(err, journal.ErrConflict) {
-				return effectState{}, fmt.Errorf("request_id %s was already used with different arguments", a.RequestID)
+				return effectState{}, false, fmt.Errorf("request_id %s was already used with different arguments", a.RequestID)
 			}
-			return effectState{}, fmt.Errorf("broker refused the request: %v", err)
+			p.cfg.Logf("guest %s: submit %s: %v", m.id, id, err)
+			return effectState{}, false, errors.New("broker refused the request")
+		}
+		if readOnly {
+			// A private machine repeating a request its lineage made while
+			// public sees it but does not drive it, so nothing a private
+			// machine does changes what a public one can observe (REV-5).
+			return state(a.RequestID, st), false, nil
 		}
 		if st.State == journal.Pending {
 			s2, err := p.cfg.Effects.Authorize(ctx, id)
 			if s2.Intent.ID == "" {
-				return effectState{}, fmt.Errorf("broker could not decide: %v", err)
+				p.cfg.Logf("guest %s: authorize %s: %v", m.id, id, err)
+				return effectState{}, true, errors.New("broker could not decide; retry with the same request_id")
 			}
 			st = s2
 		}
@@ -224,24 +274,65 @@ func (p *Plane) callTool(ctx context.Context, machine, name string, raw json.Raw
 		}
 		out := state(a.RequestID, st)
 		if held != nil && out.Reason == "" {
-			out.Reason = "held: " + held.Error()
+			p.cfg.Logf("guest %s: dispatch %s: %v", m.id, id, held)
+			out.Reason = "held by the broker; ask again later with effect_status"
 		}
-		return out, nil
+		return out, true, nil
 	case "effect_status":
 		var a struct {
 			RequestID string `json:"request_id"`
 		}
 		if err := json.Unmarshal(raw, &a); err != nil || !requestIDRE.MatchString(a.RequestID) {
-			return effectState{}, errors.New("request_id is required")
+			return effectState{}, false, errors.New("request_id is required")
 		}
-		st, err := p.cfg.Effects.Get(lineage + "/" + a.RequestID)
+		var st journal.Status
+		err := journal.ErrNotFound
+		if p.label(m.id) == "private" {
+			st, err = p.cfg.Effects.Get(privateID(lineage, a.RequestID))
+		}
 		if err != nil {
-			return effectState{}, fmt.Errorf("no request %s", a.RequestID)
+			st, err = p.cfg.Effects.Get(lineage + "/" + a.RequestID)
 		}
-		return state(a.RequestID, st), nil
+		if err != nil {
+			return effectState{}, false, fmt.Errorf("no request %s", a.RequestID)
+		}
+		return state(a.RequestID, st), false, nil
 	}
-	return effectState{}, fmt.Errorf("no tool %q", clip(name, 64))
+	return effectState{}, false, fmt.Errorf("no tool %q", clip(name, 64))
 }
+
+// label is the machine's data label for the journal, failing closed.
+func (p *Plane) label(machine string) string {
+	if p.cfg.Label != nil {
+		if l := p.cfg.Label(machine); l == "public" || l == "private" {
+			return l
+		}
+	}
+	return "private"
+}
+
+// intentID partitions a lineage's requests by data label (REV-5). Public
+// machines use <lineage>/<request_id>; private ones <lineage>/private/<request_id>
+// (request IDs hold no '/', so the two never collide). A public machine
+// never sees, collides with, or learns anything from a private machine's
+// request. A private machine repeating a request its lineage made while
+// public gets that intent, read-only (OP-1: it runs at most once).
+func (p *Plane) intentID(lineage, reqID, label string) (id string, readOnly bool) {
+	pub := lineage + "/" + reqID
+	if label != "private" {
+		return pub, false
+	}
+	priv := privateID(lineage, reqID)
+	if _, err := p.cfg.Effects.Get(priv); err == nil {
+		return priv, false
+	}
+	if _, err := p.cfg.Effects.Get(pub); err == nil {
+		return pub, true
+	}
+	return priv, false
+}
+
+func privateID(lineage, reqID string) string { return lineage + "/private/" + reqID }
 
 func state(reqID string, st journal.Status) effectState {
 	return effectState{RequestID: reqID, State: string(st.State), Reason: st.Permission.Reason}

@@ -16,6 +16,8 @@ package vm
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -87,8 +89,8 @@ type Machine struct {
 	Label    Label
 	State    State
 	ForkBase string // snapshot this machine was forked from, if any
-	// Lineage is the machine this one descends from by fork, or its own
-	// ID. Forks share their source's memory, so the broker treats a
+	// Lineage names the creation this machine descends from by fork: the
+	// root machine's ID plus a nonce drawn when it was created. Forks share their source's memory, so the broker treats a
 	// lineage as one requester for idempotency (OP-1).
 	Lineage string
 	Last    string // newest snapshot of this machine
@@ -336,7 +338,13 @@ func (m *Manager) reserve(id string, s Spec, l Label, forkBase, lineage string) 
 		return nil, fmt.Errorf("%w: %s (left on disk)", ErrExists, id)
 	}
 	if lineage == "" {
-		lineage = id
+		// A new lineage per creation: an ID reused after destroy must not
+		// inherit an old machine's intent namespace (OP-1).
+		var b [6]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			return nil, err
+		}
+		lineage = id + "." + hex.EncodeToString(b[:])
 	}
 	mc := &machine{Machine: Machine{ID: id, Spec: s, Label: l, State: Stopped, ForkBase: forkBase, Lineage: lineage}}
 	m.machines[id] = mc
@@ -513,6 +521,17 @@ func (m *Manager) Label(id string) (Label, error) {
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
 	return mc.Label, nil
+}
+
+// DataLabel is machine id's REV-5 label as model egress reads it
+// (egress.Config.Label): "public" only for a known machine labelled
+// public. An unknown machine or any error reads "private", so a failed
+// lookup never opens provider-side fetches.
+func (m *Manager) DataLabel(id string) string {
+	if l, err := m.Label(id); err == nil && l == Public {
+		return Public.String()
+	}
+	return Private.String()
 }
 
 // Step takes the per-step file-system snapshot (REV-1).

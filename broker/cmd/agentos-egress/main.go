@@ -36,13 +36,13 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/owner"
+	"github.com/ghbmrk/agentos/broker/route"
 	"github.com/ghbmrk/agentos/broker/vault"
 )
 
 const (
 	defaultVault = "/var/lib/agentos-egress/vault"
 	defaultKeys  = "/var/lib/agentos-egress/vault.keys"
-	defaultState = "/var/lib/agentos-egress/unlock.json"
 	defaultRun   = "/run/agentos-egress"
 )
 
@@ -102,6 +102,57 @@ func newProxy(v *vault.Vault, g map[string][]string, tr http.RoundTripper) (*egr
 	})
 }
 
+// newRouter builds the model router (P2-7) over the grants. Its egress
+// handler, label, and auditor are given per call (modelHandler).
+func newRouter(rule route.Rule, g map[string][]string, privateOK map[string]bool) (*route.Router, error) {
+	return route.New(route.Config{
+		Providers: []route.Provider{route.OpenAI(), route.Anthropic()},
+		Rule:      rule,
+		Granted: func(machine, provider string) bool {
+			for _, a := range g[machine] {
+				if a == provider {
+					return true
+				}
+			}
+			return false
+		},
+		PrivateOK: privateOK,
+		Upstream: func(string) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, "model egress unavailable", http.StatusServiceUnavailable)
+			})
+		},
+		// Decisions carry no content; failovers are logged for the
+		// operator. Denials and usage go back to the broker per call.
+		Audit: func(d route.Decision) {
+			if d.Outcome == route.Failover {
+				log.Printf("model route %s: %s failed over (HTTP %d)", d.Machine, d.Route, d.Status)
+			}
+		},
+		// No modem before P2-3: the owner text is a log line for now.
+		CredentialRejected: func(provider string) {
+			log.Printf("provider %s rejected the vault's API key; replace it with put", provider)
+		},
+	})
+}
+
+// readRule reads a routing rule: a JSON object from task class to routes
+// in preference order, e.g. {"default":[{"provider":"anthropic","model":"..."}]}.
+func readRule(path string) (route.Rule, error) {
+	if path == "" {
+		return nil, errors.New("-rule is required: a JSON file mapping task classes to routes")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var rule route.Rule
+	if err := json.Unmarshal(raw, &rule); err != nil {
+		return nil, fmt.Errorf("rule %s: %w", path, err)
+	}
+	return rule, nil
+}
+
 type noAudit struct{}
 
 func (noAudit) Egress(egress.Event) {}
@@ -110,14 +161,30 @@ func serveCmd(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	vaultPath := fs.String("vault", defaultVault, "sealed vault file")
 	keysPath := fs.String("keys", defaultKeys, "key slots file")
-	statePath := fs.String("state", defaultState, "unlock state: wrong codes and last code step (CH-18)")
+	statePath := fs.String("state", "", "unlock state: wrong codes and last code step (CH-18); default unlock.json beside the keys")
 	run := fs.String("run", defaultRun, "socket directory (created 0711)")
 	brokerUID := fs.Int("broker-uid", -1, "uid of agentosd, the only peer on the model socket")
 	unlockUID := fs.Int("unlock-uid", -1, "uid of the local UI, the only peer on the unlock socket")
 	ttl := fs.Duration("code-ttl", owner.DefaultCodeTTL, "how long a decrypted vault waits for its approval code")
 	g := grants{}
 	fs.Var(g, "grant", "machine=adapter[,adapter] (repeatable)")
+	rulePath := fs.String("rule", "", "routing rule: JSON task class -> routes (P2-7)")
+	privateOK := fs.String("private-ok", "", "providers the owner allowed for private data, comma-separated (CAP-9)")
 	fs.Parse(args)
+	rule, err := readRule(*rulePath)
+	if err != nil {
+		return err
+	}
+	pok := map[string]bool{}
+	for _, p := range strings.Split(*privateOK, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			pok[p] = true
+		}
+	}
+	rt, err := newRouter(rule, g, pok)
+	if err != nil {
+		return err
+	}
 	self := os.Getuid()
 	if *brokerUID < 0 || *brokerUID == self {
 		return errors.New("-broker-uid must name agentosd's own uid, distinct from this process's")
@@ -125,7 +192,11 @@ func serveCmd(args []string) error {
 	if *unlockUID < 0 || *unlockUID == *brokerUID {
 		return errors.New("-unlock-uid must name the local UI's uid, distinct from agentosd's")
 	}
+	if *statePath == "" {
+		*statePath = statePathFor(*keysPath)
+	}
 	c, err := newCustody(&custody{
+		keysPath: *keysPath,
 		open: func(p string) (*vault.Vault, error) {
 			return vault.OpenSealed(*vaultPath, *keysPath, vault.Passphrase(p))
 		},
@@ -144,7 +215,7 @@ func serveCmd(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	srvs, err := serve(*run, c, *brokerUID, *unlockUID)
+	srvs, err := serve(*run, c, rt, *brokerUID, *unlockUID)
 	if err != nil {
 		return err
 	}
@@ -163,7 +234,7 @@ func (emptyVault) Secret(string) (vault.Secret, bool) { return vault.Secret{}, f
 func (emptyVault) Redactor() (*vault.Redactor, error) { return vault.NewRedactor(nil), nil }
 
 // serve opens both sockets in dir and serves them until closed.
-func serve(dir string, c *custody, brokerUID, unlockUID int) ([]*http.Server, error) {
+func serve(dir string, c *custody, rt *route.Router, brokerUID, unlockUID int) ([]*http.Server, error) {
 	if err := runDir(dir); err != nil {
 		return nil, err
 	}
@@ -176,7 +247,7 @@ func serve(dir string, c *custody, brokerUID, unlockUID int) ([]*http.Server, er
 		mln.Close()
 		return nil, err
 	}
-	ms, us := newServer(modelHandler(c)), newServer(unlockHandler(c))
+	ms, us := newServer(modelHandler(c, rt)), newServer(unlockHandler(c))
 	go ms.Serve(mln)
 	go us.Serve(uln)
 	return []*http.Server{ms, us}, nil
@@ -189,7 +260,11 @@ func initCmd(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
 	vaultPath := fs.String("vault", defaultVault, "sealed vault file to create")
 	keysPath := fs.String("keys", defaultKeys, "key slots file to create")
+	statePath := fs.String("state", "", "unlock state to create; default unlock.json beside the keys")
 	fs.Parse(args)
+	if *statePath == "" {
+		*statePath = statePathFor(*keysPath)
+	}
 	pass, err := newPassphrase()
 	if err != nil {
 		return err
@@ -201,6 +276,14 @@ func initCmd(args []string, out io.Writer) error {
 	if err := os.MkdirAll(filepath.Dir(*vaultPath), 0o700); err != nil {
 		return err
 	}
+	// The unlock state goes in place before the keys make the vault
+	// openable, so serve can require it (newCustody).
+	if _, err := os.Lstat(*keysPath); err == nil {
+		return fmt.Errorf("%s already exists; this box already has a vault", *keysPath)
+	}
+	if err := writeFileAtomic(*statePath, []byte("{}")); err != nil {
+		return err
+	}
 	if err := sealNew(*vaultPath, *keysPath, pass, seed); err != nil {
 		return err
 	}
@@ -209,6 +292,11 @@ func initCmd(args []string, out io.Writer) error {
 	fmt.Fprintf(out, "Code generator:   otpauth://totp/AgentOS?secret=%s&issuer=AgentOS\n", secret)
 	fmt.Fprintln(out, "Keep both offline. They are shown once.")
 	return nil
+}
+
+// statePathFor is the default unlock state file, beside the keys file.
+func statePathFor(keysPath string) string {
+	return filepath.Join(filepath.Dir(keysPath), "unlock.json")
 }
 
 // sealNew builds the vault and keys under temporary names, stores the seed,

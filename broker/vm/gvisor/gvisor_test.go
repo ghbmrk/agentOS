@@ -7,6 +7,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -23,8 +24,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/vm"
 )
 
-// REQ: REV-1, REV-4, ARC-4, RES-1, RES-2
-// SPEC v0.12 IDs (PR #15; move into REQ when it merges): ARC-6
+// REQ: REV-1, REV-4, ARC-4, RES-1, RES-2, ARC-6
 
 // TestOnlyRunscIsExecuted: in the whole machine plane, the one process that
 // may be started is the configured runsc binary, from one call site (ARC-2
@@ -437,5 +437,28 @@ func TestIntegrationForkDoesNotInheritServiceIdentity(t *testing.T) {
 	t.Logf("source's connection after checkpoint: %s", r.ask("m1", "heldget", "/"))
 	if got := r.ask("f1", "svc", svcSock, "/"); got != "200 OK machine f1" {
 		t.Fatalf("fork reconnects to %q", got)
+	}
+}
+
+// TestIntegrationHostSocketInImageIsUnreachable: --host-uds=open applies to
+// the whole sandbox, so a host socket file anywhere in a machine's root
+// would be reachable. Only the services mount may lead to one: a socket
+// planted in the image is not a way out.
+func TestIntegrationHostSocketInImageIsUnreachable(t *testing.T) {
+	svc := &services{t: t, root: t.TempDir(), srv: map[string]*http.Server{}}
+	r := newRigWith(t, 4096, svc)
+	l, err := net.Listen("unix", filepath.Join(r.cfg.Images["base"], "planted.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	go http.Serve(l, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, "host") }))
+	r.create("m1", admission.Accepted)
+	if got := r.ask("m1", "stat", "/planted.sock"); got == "absent" {
+		t.Fatal("the planted socket is not in the guest's root: the test proves nothing")
+	}
+	out, _ := r.rt.cmd(context.Background(), "exec", cid("m1"), "/guest", "svc", "/planted.sock", "/").Output()
+	if got := strings.TrimSpace(string(out)); !strings.HasPrefix(got, "ERR") {
+		t.Fatalf("guest reached a host socket in its image: %q", got)
 	}
 }

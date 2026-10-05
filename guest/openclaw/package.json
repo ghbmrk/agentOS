@@ -1,0 +1,7 @@
+{
+  "name": "agentos-openclaw-guest",
+  "private": true,
+  "dependencies": {
+    "openclaw": "2026.9.8"
+  }
+}

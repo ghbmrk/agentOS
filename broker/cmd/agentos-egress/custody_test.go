@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -400,5 +401,49 @@ func TestProxySeesOnlyAPIKeys(t *testing.T) {
 	}
 	if err := r.c.put("openai", []byte(synthetic(t, "sk-"))); err != errBadCredential {
 		t.Fatalf("other kind overwritten: %v", err)
+	}
+}
+
+// CH-18: init writes the unlock state with the keys, 0600, and serve
+// refuses to start while the keys exist without it, so deleting it cannot
+// reset the wrong-code cap or reopen a used code.
+func TestMissingStateFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	vp, kp := filepath.Join(dir, "vault"), filepath.Join(dir, "vault.keys")
+	if err := initCmd([]string{"-vault", vp, "-keys", kp}, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	sp := statePathFor(kp)
+	fi, err := os.Stat(sp)
+	if err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("state after init: %v %v", fi, err)
+	}
+	mk := func() error {
+		_, err := newCustody(&custody{keysPath: kp, statePath: sp, now: time.Now, notify: func(string) {}})
+		return err
+	}
+	if err := mk(); err != nil {
+		t.Fatalf("with state: %v", err)
+	}
+	os.Remove(sp)
+	if err := mk(); err == nil || !strings.Contains(err.Error(), "missing") {
+		t.Fatalf("without state: %v", err)
+	}
+	if err := initCmd([]string{"-vault", vp, "-keys", kp}, io.Discard); err == nil {
+		t.Fatal("init over an existing vault")
+	}
+	if _, err := os.Stat(sp); err == nil {
+		t.Fatal("a refused init wrote fresh state")
+	}
+}
+
+// The state written after a wrong code stays 0600.
+func TestStateFileMode(t *testing.T) {
+	r := newFastRig(t, true)
+	tk := r.unlock(t)
+	r.c.confirm(tk, "000000")
+	fi, err := os.Stat(r.state)
+	if err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("state: %v %v", fi, err)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"go/parser"
 	"go/token"
 	"io"
@@ -100,6 +101,7 @@ type rig struct {
 	now       time.Time
 	grants    map[string][]string
 	labels    map[string]string
+	px        *egress.Proxy
 }
 
 func (r *rig) Egress(e egress.Event) {
@@ -188,6 +190,7 @@ func newRig(t *testing.T, o rigOpts) *rig {
 	if err != nil {
 		t.Fatal(err)
 	}
+	r.px = px
 	r.router, err = New(Config{
 		Providers: []Provider{OpenAI(), Anthropic()},
 		Rule:      o.rule,
@@ -875,5 +878,41 @@ func TestCredentialRejectedToldOncePerDay(t *testing.T) {
 	r.do(t, "m1", simpleChat)
 	if len(told) != 2 {
 		t.Fatalf("told %v after a day", told)
+	}
+}
+
+// TestUsageReachesTheCallersContext: whoever serves the router (the guest
+// plane, inside the OP-8 meter) receives each served call's provider and
+// usage through the request context, also when the guest did not ask for
+// usage and so its stream carries none.
+func TestUsageReachesTheCallersContext(t *testing.T) {
+	r := newRig(t, rigOpts{rule: Rule{"default": {{"openai", "gpt-fixture"}}}})
+	r.up.set(hostOpenAI, serveFixture(200, "text/event-stream", fixture(t, "openai_stream.sse")))
+	var got []string
+	ctx := WithUsage(context.Background(), func(provider string, u Usage) { got = append(got, fmt.Sprint(provider, u)) })
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"default","stream":true,"messages":[{"role":"user","content":"hi"}]}`)).WithContext(ctx)
+	w := httptest.NewRecorder()
+	r.router.Handler("m1").ServeHTTP(w, req)
+	if a := reassemble(t, w.Body.Bytes()); a.usage != nil {
+		t.Fatal("usage chunk sent unasked")
+	}
+	if want := fmt.Sprint("openai", Usage{Input: 9, Output: 2, CacheRead: 10, Reported: true, Complete: true, OutputChars: 2}); len(got) != 1 || got[0] != want {
+		t.Fatalf("reported %q, want [%s]", got, want)
+	}
+	// An answer the router cannot translate is reported by its size.
+	got = nil
+	junk := strings.Repeat("x", 4000)
+	r.up.set(hostOpenAI, serveFixture(200, "application/json", []byte(junk)))
+	req = httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(simpleChat)).WithContext(ctx)
+	r.router.Handler("m1").ServeHTTP(httptest.NewRecorder(), req)
+	if want := fmt.Sprint("openai", Usage{OutputChars: 4000}); len(got) != 1 || got[0] != want {
+		t.Fatalf("unusable answer reported %q, want [%s]", got, want)
+	}
+	// A denied call reports nothing.
+	got = nil
+	req = httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"nope","messages":[]}`)).WithContext(ctx)
+	r.router.Handler("m1").ServeHTTP(httptest.NewRecorder(), req)
+	if len(got) != 0 {
+		t.Fatalf("a denied call reported %q", got)
 	}
 }
