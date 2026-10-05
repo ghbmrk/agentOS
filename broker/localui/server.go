@@ -59,11 +59,13 @@ type Config struct {
 	// Defaults is the one line of stated defaults shown during setup
 	// (§8.1 step 5).
 	Defaults string
-	// VaultUnlock, when set, serves the unknown-host vault unlock page
-	// (CRED-8, P2-4) at /unlock/vault, open without sign-in like /unlock.
-	VaultUnlock http.Handler
-	Now         func() time.Time
-	Rand        io.Reader
+	// Vault, when set, is the vault process's unlock socket
+	// (NewUnlockClient); the unknown-host vault unlock page (CRED-8,
+	// P2-4e) is then served at /unlock/vault, open without sign-in like
+	// /unlock.
+	Vault Vault
+	Now   func() time.Time
+	Rand  io.Reader
 }
 
 // Server is the local UI.
@@ -79,6 +81,17 @@ type Server struct {
 	sessions map[string]session // by SHA-256 of the cookie token
 	mounts   []mount
 	setup    *setup
+	// vaultPend is the pending vault unlock this UI started, bound to the
+	// phone that sent the passphrase.
+	vaultPend *vaultPending
+	// vaultKept: the last unlock kept this PC trusted.
+	vaultKept bool
+	// scanning admits one photo upload at a time.
+	scanning chan struct{}
+	// vaultTries and vaultAll are the unlock attempts in the last hour,
+	// per phone address and in all (vaultTry).
+	vaultTries map[string][]time.Time
+	vaultAll   []time.Time
 }
 
 type mount struct{ Path, Title string }
@@ -110,7 +123,7 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Port != 80 {
 		host = net.JoinHostPort(host, strconv.Itoa(cfg.Port))
 	}
-	s := &Server{cfg: cfg, host: host, mux: http.NewServeMux(), sessions: map[string]session{}, pages: pagesFor(host)}
+	s := &Server{cfg: cfg, host: host, mux: http.NewServeMux(), sessions: map[string]session{}, pages: pagesFor(host), scanning: make(chan struct{}, 1)}
 	st, err := cfg.Store.Load()
 	if err != nil {
 		return nil, err
@@ -153,11 +166,15 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/signout", s.post(s.signout))
 	s.mux.Handle("/home", s.signedIn(http.HandlerFunc(s.home)))
 	s.mux.HandleFunc("/box.vcf", s.contact)
-	if s.cfg.VaultUnlock != nil {
-		s.mux.Handle("/unlock/vault", s.cfg.VaultUnlock)
+	if s.cfg.Vault != nil {
+		s.mux.HandleFunc("/unlock/vault", s.vaultUnlock)
 	}
 	s.setup.routes(s.mux)
 }
+
+// pageCSP allows no script, no framing and no outside source (L6). The
+// vault page adds one hashed script (vaultCSP).
+const pageCSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
 
 // ServeHTTP applies the CH-9 and CH-7 guards to every request, then routes.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -170,7 +187,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h := w.Header()
-	h.Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+	h.Set("Content-Security-Policy", pageCSP)
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("X-Frame-Options", "DENY")
 	h.Set("Referrer-Policy", "no-referrer")
@@ -353,7 +370,7 @@ type unlockView struct {
 
 func (s *Server) unlock(w http.ResponseWriter, r *http.Request) {
 	o := s.getOwner()
-	v := unlockView{HasOwner: o != nil, Next: safeNext(r.FormValue("next")), Vault: s.cfg.VaultUnlock != nil}
+	v := unlockView{HasOwner: o != nil, Next: safeNext(r.FormValue("next")), Vault: s.cfg.Vault != nil}
 	if o != nil {
 		v.Days = int(o.UnlockPeriod() / (24 * time.Hour))
 	}
@@ -426,7 +443,7 @@ func (s *Server) resume(w http.ResponseWriter, r *http.Request) {
 		if err := s.signIn(w, o, r.PostFormValue("code")); err != nil {
 			s.render(w, "unlock", unlockView{HasOwner: true, Next: "/status", Err: err.Error(), Cell: o.LocalGridCell(),
 				Days:       int(o.UnlockPeriod() / (24 * time.Hour)),
-				Challenged: o.LocalStatus().Challenged, Vault: s.cfg.VaultUnlock != nil})
+				Challenged: o.LocalStatus().Challenged, Vault: s.cfg.Vault != nil})
 			return
 		}
 	}

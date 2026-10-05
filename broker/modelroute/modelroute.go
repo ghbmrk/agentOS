@@ -172,7 +172,21 @@ func forward(cfg Config) func(machine string, eval bool, rule []byte) http.Handl
 				http.Error(w, "model egress unavailable", http.StatusServiceUnavailable)
 			},
 		}
-		return rp
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// The guest's request body belongs to the outbound request
+			// until the transport is done with it. In the default
+			// half-duplex mode the server drains and closes that body as
+			// soon as the response starts, which can land between the
+			// transport sending the body and its final EOF read: the
+			// read fails, the transport drops the connection, and the
+			// stream is cut. A writer that wraps the server's without
+			// Unwrap is left as it is: in agentosd, Forward is reached
+			// through meter.Wrap, whose writer has none, so this is a
+			// no-op there; that path is safe already because Wrap reads
+			// the body in full and hands the proxy an in-memory copy.
+			_ = http.NewResponseController(w).EnableFullDuplex()
+			rp.ServeHTTP(w, r)
+		})
 	}
 }
 

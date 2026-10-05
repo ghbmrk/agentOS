@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -554,5 +555,48 @@ func TestStateFileMode(t *testing.T) {
 	fi, err := os.Stat(r.state)
 	if err != nil || fi.Mode().Perm() != 0o600 {
 		t.Fatalf("state: %v %v", fi, err)
+	}
+}
+
+// Wrong passphrases are never counted, but the owner hears of them, at
+// most once per WrongPassNoteEvery with a count, since a stream of them
+// from the box's Wi-Fi can starve the owner's unlock (#50 security B1).
+func TestWrongPassphrasesAreToldNotCounted(t *testing.T) {
+	r := newFastRig(t, true)
+	try := func() {
+		r.clk.add(MinAttemptGap)
+		if _, err := r.c.unlock("not it"); err != errWrongPassphrase {
+			t.Fatalf("wrong passphrase: %v", err)
+		}
+	}
+	notes := func() (n []string) {
+		for _, s := range r.notes {
+			if strings.HasPrefix(s, "wrong vault passphrase") {
+				n = append(n, s)
+			}
+		}
+		return n
+	}
+	for i := 0; i < 5; i++ {
+		try()
+	}
+	if got := notes(); len(got) != 1 || got[0] != "wrong vault passphrase tried on the box's Wi-Fi" {
+		t.Fatalf("notes: %q", got)
+	}
+	r.clk.add(WrongPassNoteEvery)
+	try()
+	if got := notes(); len(got) != 2 || got[1] != "wrong vault passphrase tried on the box's Wi-Fi (4 more since the last notice)" {
+		t.Fatalf("notes: %q", got)
+	}
+	// Still no lockout: the right passphrase opens the pending unlock,
+	// and a burst since the last notice is reported then.
+	try()
+	try()
+	r.unlock(t)
+	if r.phase() != pending {
+		t.Fatalf("phase %v", r.phase())
+	}
+	if !slices.Contains(r.notes, "2 more wrong vault passphrases were tried on the box's Wi-Fi since the last notice") {
+		t.Fatalf("burst not flushed: %q", r.notes)
 	}
 }
