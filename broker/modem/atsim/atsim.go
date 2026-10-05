@@ -61,6 +61,12 @@ type Device struct {
 	iccid    string
 	reg      int // +CEREG stat
 	csq      int
+	netTime  time.Time // last network time update; zero: none yet
+	netAt    time.Time // when it arrived (real time)
+	zone     int       // the network's zone, quarter hours east of UTC
+	ctzu     bool      // AT+CTZU=1: SIMCom clock follows network time
+	born     time.Time // power-up
+	noCTZU   bool
 }
 
 // New attaches a simulated modem of profile p to a carrier line. model is
@@ -69,7 +75,7 @@ type Device struct {
 func New(p *at.Profile, model string, line *modem.Line, tick time.Duration) *Device {
 	host, dev := net.Pipe()
 	d := &Device{prof: p, model: model, line: line, tick: tick, host: host, dev: dev, echo: true,
-		sim: "READY", iccid: iccidFor(line.Number()), reg: 1, csq: 20,
+		born: time.Now(), sim: "READY", iccid: iccidFor(line.Number()), reg: 1, csq: 20,
 		store: map[int]string{}, outParts: map[string]map[int]string{}, outgoing: make(chan *Far, 4), nextCall: 1}
 	go d.serve()
 	go d.receive()
@@ -367,7 +373,28 @@ func (d *Device) handle(cmd string) []string {
 	case quectel && cmd == "AT+CFUN=1,1":
 		go func() { time.Sleep(10 * time.Millisecond); d.Unplug() }()
 		return []string{"OK"}
+	case quectel && cmd == "AT+QLTS=1":
+		t, ok := d.netNowLocked()
+		if !ok {
+			return []string{`+QLTS: ""`, "OK"}
+		}
+		return []string{fmt.Sprintf(`+QLTS: "%s%s,0"`, t.UTC().Format("2006/01/02,15:04:05"), zoneQ(d.zone)), "OK"}
 	// SIMCom
+	case simcom && cmd == "AT+CTZU=1":
+		if d.noCTZU {
+			return []string{"ERROR"}
+		}
+		d.ctzu = true
+		return []string{"OK"}
+	case simcom && cmd == "AT+CCLK?":
+		t, ok := d.netNowLocked()
+		if !ok || !d.ctzu {
+			// The module clock from power-up, never set by the network.
+			t = time.Date(2004, 1, 1, 0, 0, 0, 0, time.UTC).Add(time.Since(d.born))
+			return []string{fmt.Sprintf(`+CCLK: "%s+00"`, t.Format("06/01/02,15:04:05")), "OK"}
+		}
+		local := t.Add(time.Duration(d.zone) * 15 * time.Minute)
+		return []string{fmt.Sprintf(`+CCLK: "%s%s"`, local.UTC().Format("06/01/02,15:04:05"), zoneQ(d.zone)), "OK"}
 	case simcom && cmd == "AT+CPCMFRM=0":
 		return []string{"OK"}
 	case simcom && cmd == "AT+CPCMREG=1":
@@ -387,6 +414,32 @@ func (d *Device) handle(cmd string) []string {
 }
 
 func (d *Device) setCNMI() bool { d.cnmi = true; return true }
+
+// RefuseCTZU makes AT+CTZU=1 answer ERROR, as a firmware without it would.
+func (d *Device) RefuseCTZU() { d.mu.Lock(); d.noCTZU = true; d.mu.Unlock() }
+
+// SetNetworkTime simulates a network time update (NITZ) carrying t, in a
+// zone given in quarter hours east of UTC. The module's clock runs on from
+// t. A zero t means the network has sent none.
+func (d *Device) SetNetworkTime(t time.Time, zoneQuarters int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.netTime, d.netAt, d.zone = t, time.Now(), zoneQuarters
+}
+
+func (d *Device) netNowLocked() (time.Time, bool) {
+	if d.netTime.IsZero() {
+		return time.Time{}, false
+	}
+	return d.netTime.Add(time.Since(d.netAt)), true
+}
+
+func zoneQ(q int) string {
+	if q < 0 {
+		return fmt.Sprintf("-%02d", -q)
+	}
+	return fmt.Sprintf("+%02d", q)
+}
 
 // iccidFor derives a synthetic SIM serial from the line's number, so each
 // simulated SIM has its own.

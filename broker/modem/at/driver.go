@@ -217,6 +217,9 @@ func (m *Modem) init(ctx context.Context) error {
 	// Registration notices, so a lost network shows at once. Best effort.
 	_ = do("AT+CEREG=1")
 	_ = do("AT+CREG=1")
+	if c := m.cfg.Profile.NetTimeOn; c != "" {
+		_ = do(c) // TIM-1 cross-check only
+	}
 	m.readStatus(ctx, 0)
 	if m.number == "" {
 		if lines, err := m.e.Do(ctx, "AT+CNUM", cmdTimeout); err == nil {
