@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // Delete outcomes, one per path asked (CAP-8c, security R-DEL3, R-DEL5).
@@ -23,7 +24,12 @@ const (
 	BadPath       = "bad_path"          // not a clean absolute path below /
 	MoreRemains   = "more_remains"      // the entry budget ran out part way
 	TooDeep       = "too_deep"          // nested deeper than MaxTreeDepth: delete a deeper path first
+	DeleteFailed  = "delete_failed"     // the broker could not finish: nothing more is said to the guest
 )
+
+// ErrDeleteFailed is Delete's only error: the cause, which may name host
+// paths, is DeleteResult.Fault, for the broker's log (L3 S1 on #166).
+var ErrDeleteFailed = errors.New("overlay: delete_failed")
 
 // MaxTreeDepth bounds how deep a recursive delete descends: each level
 // holds a directory handle, so a worker's deep chain of directories must
@@ -31,13 +37,26 @@ const (
 // deeper tree is shortened by deleting a deeper path first.
 const MaxTreeDepth = 256
 
+// deleteTimeout bounds one Delete's wall-clock time; what remains is
+// more_remains (security on #166). clock is the time; tests replace both.
+var (
+	deleteTimeout = 10 * time.Second
+	clock         = time.Now
+)
+
+// unlinkat removes a non-directory entry; tests inject failures.
+var unlinkat = syscall.Unlinkat
+
 // DeleteResult is what Delete did: a code per path, in order, and counts.
 // It names no file beyond the paths asked.
 type DeleteResult struct {
 	Codes []string
 	Files int   // entries removed (files, links, directories)
 	Bytes int64 // bytes of blocks freed, counting files with no other link
-	More  bool  // the budget ran out; asking again continues
+	More  bool  // the budget or the time ran out; asking again continues
+	// Fault is the first failure behind a delete_failed code or
+	// ErrDeleteFailed. It may name host paths: log it, never answer it.
+	Fault error
 }
 
 const (
@@ -62,23 +81,18 @@ const (
 // is created in upper: no whiteout, opaque marker or xattr. So a path
 // only in the base image is refused, and removing an upper copy may bring
 // the base version back, which the code says.
+//
+// A path that fails part way gets delete_failed and the next path is
+// tried; a failure before any path (upper or the mount table unreadable)
+// is ErrDeleteFailed. Either way the cause is only in Fault, so nothing
+// the guest sees names a host path or an errno (L3 S1 on #166).
 func Delete(upper, lower string, paths []string, recursive bool, maxEntries int) (DeleteResult, error) {
 	out, err := deleteAll(upper, lower, paths, recursive, maxEntries)
-	return out, hostless(err)
-}
-
-// hostless drops the host paths from err: the answer goes to a guest,
-// which learns no broker path (L3 S1 on #166).
-func hostless(err error) error {
-	var pe *os.PathError
-	if errors.As(err, &pe) {
-		return errors.New("overlay: delete: " + pe.Op + ": " + pe.Err.Error())
+	if err != nil {
+		out.Fault = err
+		return out, ErrDeleteFailed
 	}
-	var le *os.LinkError
-	if errors.As(err, &le) {
-		return errors.New("overlay: delete: " + le.Op + ": " + le.Err.Error())
-	}
-	return err
+	return out, nil
 }
 
 func deleteAll(upper, lower string, paths []string, recursive bool, maxEntries int) (DeleteResult, error) {
@@ -95,16 +109,20 @@ func deleteAll(upper, lower string, paths []string, recursive bool, maxEntries i
 	if err != nil {
 		return DeleteResult{}, err
 	}
-	d := &deleter{v: View{Lower: lower, Upper: upper}, root: root, dev: st.Dev, left: maxEntries, mounts: mounts, base: base}
+	d := &deleter{v: View{Lower: lower, Upper: upper}, root: root, dev: st.Dev, left: maxEntries, mounts: mounts, base: base,
+		deadline: clock().Add(deleteTimeout)}
 	out := DeleteResult{Codes: make([]string, len(paths))}
 	for i, p := range paths {
-		if d.left <= 0 {
+		if d.spent() {
 			out.Codes[i], out.More = MoreRemains, true
 			continue
 		}
 		code, err := d.one(p, recursive)
 		if err != nil {
-			return out, err
+			code = DeleteFailed
+			if out.Fault == nil {
+				out.Fault = err
+			}
 		}
 		out.Codes[i] = code
 		out.More = out.More || code == MoreRemains
@@ -122,6 +140,13 @@ type deleter struct {
 	bytes  int64
 	mounts map[string]bool // mount points below upper, by host path
 	base   string          // upper's host path, as mountinfo names it
+
+	deadline time.Time
+}
+
+// spent says the entry budget or the time ran out.
+func (d *deleter) spent() bool {
+	return d.left <= 0 || clock().After(d.deadline)
 }
 
 // mounted says whether the entry at parts is a mount point. A bind mount
@@ -335,7 +360,7 @@ func (d *deleter) removeTree(dir int, name string, parts []string, depth int) (d
 	for {
 		ents, rerr := f.ReadDir(256)
 		for _, e := range ents {
-			if d.left <= 0 {
+			if d.spent() {
 				return false, "", nil
 			}
 			cst, err := statAt(fd, e.Name())
@@ -369,7 +394,7 @@ func (d *deleter) removeTree(dir int, name string, parts []string, depth int) (d
 			return false, "", rerr
 		}
 	}
-	if d.left <= 0 {
+	if d.spent() {
 		return false, "", nil
 	}
 	if err := rmdirAt(dir, name); err != nil {
@@ -381,7 +406,7 @@ func (d *deleter) removeTree(dir int, name string, parts []string, depth int) (d
 }
 
 func (d *deleter) unlink(dir int, name string, st syscall.Stat_t) error {
-	if err := syscall.Unlinkat(dir, name); err != nil {
+	if err := unlinkat(dir, name); err != nil {
 		return err
 	}
 	d.files++

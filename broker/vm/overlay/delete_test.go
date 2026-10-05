@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 type delRig struct {
@@ -270,9 +272,113 @@ func TestDeleteNamesNoHostPath(t *testing.T) {
 	if fmt.Sprint(out.Codes) != fmt.Sprint([]string{BadPath, BadPath}) {
 		t.Fatalf("over-long paths = %v", out.Codes)
 	}
-	_, err = Delete(filepath.Join(r.upper, "missing"), r.lower, []string{"/f"}, false, 100)
-	if err == nil || strings.Contains(err.Error(), r.upper) || strings.Contains(err.Error(), "/tmp") {
-		t.Fatalf("error = %v", err)
+	got, err := Delete(filepath.Join(r.upper, "missing"), r.lower, []string{"/f"}, false, 100)
+	if err != ErrDeleteFailed || strings.Contains(err.Error(), "/") || got.Fault == nil {
+		t.Fatalf("error = %v, fault = %v", err, got.Fault)
+	}
+}
+
+// A failure part way answers delete_failed for that path alone: no host
+// path, upper directory or errno reaches the guest; the cause is the
+// Fault, for the broker's log (L3 S1 on #166).
+func TestDeleteFailureSaysOnlyACode(t *testing.T) {
+	r := newDelRig(t)
+	r.file(r.upper, "bad", "x")
+	r.file(r.upper, "ok", "x")
+	defer func(f func(int, string) error) { unlinkat = f }(unlinkat)
+	unlinkat = func(dir int, name string) error {
+		if name == "bad" {
+			return &os.PathError{Op: "unlinkat", Path: filepath.Join(r.upper, name), Err: syscall.EIO}
+		}
+		return syscall.Unlinkat(dir, name)
+	}
+	out, err := Delete(r.upper, r.lower, []string{"/bad", "/ok"}, false, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(out.Codes) != fmt.Sprint([]string{DeleteFailed, Removed}) || out.Files != 1 {
+		t.Fatalf("out = %+v", out)
+	}
+	if answer := fmt.Sprint(out.Codes, out.Files, out.Bytes, out.More); strings.Contains(answer, "/") || strings.Contains(answer, "input/output") {
+		t.Fatalf("answer = %q", answer)
+	}
+	if out.Fault == nil || !strings.Contains(out.Fault.Error(), r.upper) {
+		t.Fatalf("fault = %v", out.Fault)
+	}
+}
+
+// A call runs out of time as it runs out of entries: what is left is
+// more_remains, and asking again finishes (security on #166).
+func TestDeleteTimeBudget(t *testing.T) {
+	r := newDelRig(t)
+	for i := range 50 {
+		r.file(r.upper, fmt.Sprintf("d/f%d", i), "x")
+	}
+	r.file(r.upper, "e", "x")
+	defer func(f func() time.Time) { clock = f }(clock)
+	now := time.Unix(0, 0)
+	clock = func() time.Time { now = now.Add(time.Second); return now } // each look costs a second
+	out := r.del(true, 100_000, "/d", "/e")
+	if fmt.Sprint(out.Codes) != fmt.Sprint([]string{MoreRemains, MoreRemains}) || !out.More || out.Files == 0 || out.Files >= 50 {
+		t.Fatalf("out of time = %+v", out)
+	}
+	clock = time.Now
+	if out := r.del(true, 100_000, "/d", "/e"); fmt.Sprint(out.Codes) != fmt.Sprint([]string{Removed, Removed}) {
+		t.Fatalf("again = %+v", out)
+	}
+}
+
+// A 10,000-deep chain costs a delete only its bounded walk: under the
+// depth bound in handles, and a small heap (security on #166).
+func TestDeleteDeepChainStaysSmall(t *testing.T) {
+	r := newDelRig(t)
+	fd, err := syscall.Open(r.upper, syscall.O_RDONLY|syscall.O_DIRECTORY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 10_000 {
+		if err := syscall.Mkdirat(fd, "c", 0o755); err != nil {
+			t.Fatal(err)
+		}
+		next, err := syscall.Openat(fd, "c", syscall.O_RDONLY|syscall.O_DIRECTORY, 0)
+		syscall.Close(fd)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fd = next
+	}
+	syscall.Close(fd)
+	// Handles: what is open now, the walk's one per level, and headroom.
+	open, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lim syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &lim); err != nil {
+		t.Fatal(err)
+	}
+	tight := lim
+	tight.Cur = uint64(len(open) + MaxTreeDepth + 16)
+	if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &tight); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { syscall.Setrlimit(syscall.RLIMIT_NOFILE, &lim) }) // before TempDir's removal
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	out := r.del(true, 100_000, "/c")
+	runtime.ReadMemStats(&after)
+	if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &lim); err != nil {
+		t.Fatal(err)
+	}
+	if out.Codes[0] != TooDeep || out.Fault != nil {
+		t.Fatalf("out = %+v", out)
+	}
+	if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 8<<20 {
+		t.Fatalf("the walk allocated %d bytes", alloc)
+	}
+	if now, _ := os.ReadDir("/proc/self/fd"); len(now) > len(open) {
+		t.Fatalf("handles leaked: %d then %d", len(open), len(now))
 	}
 }
 

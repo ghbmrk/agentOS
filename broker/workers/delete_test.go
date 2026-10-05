@@ -3,8 +3,11 @@ package workers
 // REQ: CAP-8, RES-4, REV-5, OP-6
 
 import (
+	"context"
 	"fmt"
+	"os"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/vm"
@@ -143,4 +146,22 @@ func TestCAP8cSTOPRefusesStartingWorkers(t *testing.T) {
 	r.must("agent", toolList, m{}, nil) // reads still work
 	stopped = false
 	r.must("agent", toolFork, m{"name": "w", "into": []string{"f"}}, nil)
+}
+
+// failDelete fails every deletion with a cause naming a host path.
+type failDelete struct{ *vm.Manager }
+
+func (failDelete) DeleteFiles(context.Context, string, vm.Deletion) (vm.DeleteReport, error) {
+	return vm.DeleteReport{}, &os.PathError{Op: "openat", Path: "/var/lib/agentos/machines/x/upper", Err: syscall.EIO}
+}
+
+// A broker failure answers delete_failed alone: no host path or errno
+// reaches the agent (L3 S1 on #166).
+func TestCAP8cDeleteFailureNamesNoHostPath(t *testing.T) {
+	r := fullWorker(t)
+	r.tools.M = failDelete{r.m}
+	err := r.call("agent", toolDelete, m{"name": "w", "paths": []string{"/small"}}, nil)
+	if err == nil || !strings.Contains(err.Error(), "delete_failed") || strings.Contains(err.Error(), "/") || strings.Contains(err.Error(), "input/output") {
+		t.Fatalf("broker failure = %v", err)
+	}
 }

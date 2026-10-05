@@ -184,7 +184,7 @@ func (t *Tools) List() []map[string]any {
 				"content_base64": map[string]any{"type": "string", "description": "Binary content, base64; instead of content."}}, "name", "path")},
 		{"name": toolCkpt, "description": "Checkpoint a worker, memory included; returns the snapshot id to roll back to or diff.",
 			"inputSchema": obj(map[string]any{"name": pName}, "name")},
-		{"name": toolDelete, "description": fmt.Sprintf("Delete files from a worker without running anything in it: the way to shrink a worker over its file cap. The broker stops the worker (ending anything running in it, background processes included), removes the paths from what it wrote (a symlink is removed itself, never followed), and starts it again once it is under its cap; files that came with the base image cannot be deleted and free nothing. Up to %d absolute paths; a directory needs recursive, and one nested more than %d deep needs a deeper path deleted first.", vm.MaxDeletePaths, overlay.MaxTreeDepth),
+		{"name": toolDelete, "description": fmt.Sprintf("Delete files from a worker without running anything in it: the way to shrink a worker over its file cap. The broker stops the worker (ending anything running in it, background processes included), removes the paths from what it wrote (a symlink is removed itself, never followed), and starts it again once it is under its cap; files that came with the base image cannot be deleted and free nothing. Up to %d absolute paths; a directory needs recursive. A directory nested more than %d deep answers too_deep: delete a deeper path first, or roll the worker back with worker_rollback or destroy it with worker_destroy. more_remains means the call's entry or time budget ran out: ask again to continue.", vm.MaxDeletePaths, overlay.MaxTreeDepth),
 			"inputSchema": obj(map[string]any{"name": pName,
 				"paths":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": vm.MaxDeletePaths, "description": "Absolute paths inside the worker."},
 				"recursive": map[string]any{"type": "boolean", "description": "Also delete directories and everything in them."}}, "name", "paths")},
@@ -1047,6 +1047,10 @@ func (t *Tools) del(ctx context.Context, c caller, raw json.RawMessage) (any, er
 	rep, err := t.M.DeleteFiles(ctx, id, vm.Deletion{Paths: a.Paths, Recursive: a.Recursive, As: c.label, Hold: t.Stopped})
 	if errors.Is(err, vm.ErrHeld) {
 		return nil, errStopped
+	}
+	if err != nil && !errors.Is(err, vm.ErrLabel) && !errors.Is(err, vm.ErrUnknown) {
+		// The cause may name host paths; the broker logged it (L3 S1 on #166).
+		return nil, fmt.Errorf("worker %s: %s: the broker could not finish the deletion; ask again", a.Name, overlay.DeleteFailed)
 	}
 	if err != nil {
 		return nil, workerErr(a.Name, err)

@@ -373,6 +373,12 @@ func (m *Manager) DeleteFiles(ctx context.Context, id string, d Deletion) (Delet
 	was := mc.State
 	rep, stopped, err := m.deleteLocked(ctx, mc, d)
 	mc.mu.Unlock()
+	// What the guest sees names no host path or errno: any other failure
+	// is logged here and answered as delete_failed (L3 S1 on #166).
+	if err != nil && !errors.Is(err, ErrLabel) && !errors.Is(err, ErrHeld) && !errors.Is(err, ErrUnknown) && !errors.Is(err, overlay.ErrDeleteFailed) {
+		log.Printf("vm: %s: deleting files: %v", id, err)
+		err = fmt.Errorf("%s: %w", id, overlay.ErrDeleteFailed)
+	}
 	if stopped {
 		m.cfg.Admit.Release(id)
 	}
@@ -414,6 +420,9 @@ func (m *Manager) deleteLocked(ctx context.Context, mc *machine, d Deletion) (De
 	var rep DeleteReport
 	var err error
 	rep.DeleteResult, err = overlay.Delete(l.Upper, l.Lower, d.Paths, d.Recursive, deleteEntries)
+	if rep.Fault != nil {
+		log.Printf("vm: %s: deleting files: %v", mc.ID, rep.Fault)
+	}
 	if err != nil {
 		return rep, running, fmt.Errorf("%s: %w", mc.ID, err)
 	}
