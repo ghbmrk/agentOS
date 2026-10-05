@@ -287,3 +287,121 @@ func TestWrongCodesFromOnePhoneAreBounded(t *testing.T) {
 		t.Fatalf("after a minute: %s", w.Body.String())
 	}
 }
+
+// L3 S-b on #165: parallel approvals cannot pass the per-phone bound
+// together. With one slot left, of several wrong codes posted at once only
+// one reaches the owner channel.
+func TestParallelPostsKeepThePerPhoneBound(t *testing.T) {
+	a := newApprovalRig(t)
+	for i := 0; i < PageWrongPerMinute-1; i++ {
+		if i%2 == 0 {
+			a.ch.RequestLocal(pageItem(fmt.Sprint("w", i)), 0)
+		}
+		open := a.ch.LocalRequests()
+		id := open[len(open)-1].ID
+		a.post("/approvals/", answer(a.form(id), "approve", fmt.Sprintf("%06d", i)))
+	}
+	id, _ := a.ch.RequestLocal(pageItem("p"), 0)
+	f := a.form(id)
+	// Each answer takes a while, so the posts overlap in the channel if
+	// the bound lets them through together.
+	a.srv.SetOwner(slowOwner{a.ch})
+	var mu sync.Mutex
+	var wrong, held int
+	var wg sync.WaitGroup
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			body := a.post("/approvals/", answer(f, "approve", fmt.Sprintf("1%05d", i))).Body.String()
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case strings.Contains(body, "Wrong code"):
+				wrong++
+			case strings.Contains(body, "Wait a minute"):
+				held++
+			}
+		}(i)
+	}
+	wg.Wait()
+	if wrong != 1 || held != 4 {
+		t.Fatalf("%d reached the channel as wrong, %d held back", wrong, held)
+	}
+}
+
+type slowOwner struct{ *owner.Channel }
+
+func (o slowOwner) LocalAnswer(id, sum string, approve bool, code string) (string, error) {
+	time.Sleep(50 * time.Millisecond)
+	return o.Channel.LocalAnswer(id, sum, approve, code)
+}
+
+// Security F1 on #171: the texted code offered on the page gets its hint
+// and counts against the phone's page bound, so the page is no uncounted
+// oracle for it; the channel's own bounds still do not count it.
+func TestTheTextedCodeOnThePageCountsForThePhone(t *testing.T) {
+	a := newApprovalRig(t)
+	id, err := a.ch.Request([]owner.Item{pageItemText("t1")}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var texted string
+	for _, m := range a.carrier.Log() {
+		if s := regexp.MustCompile(`Reply YES ` + id + ` (\d+) `).FindStringSubmatch(m.Text); s != nil {
+			texted = s[1]
+		}
+	}
+	if texted == "" {
+		t.Fatal("no texted code")
+	}
+	for i := 0; i < PageWrongPerMinute; i++ {
+		if w := a.post("/approvals/", answer(a.form(id), "approve", texted)); !strings.Contains(w.Body.String(), "That&#39;s the code I texted.") {
+			t.Fatalf("try %d: %s", i, w.Body.String())
+		}
+	}
+	if w := a.post("/approvals/", answer(a.form(id), "approve", texted)); !strings.Contains(w.Body.String(), "Too many wrong codes from this phone.") {
+		t.Fatalf("sixth: %s", w.Body.String())
+	}
+	if len(a.decided()) != 0 || len(a.ch.LocalRequests()) != 1 {
+		t.Fatal("decided or voided")
+	}
+}
+
+// L3 SHOULD on #171: a try that was not wrong gives its slot back, so
+// after 4 wrong codes and a right one, a 5th wrong code still reaches the
+// channel rather than the phone's bound.
+func TestARightCodeGivesItsSlotBack(t *testing.T) {
+	a := newApprovalRig(t)
+	var ids []string
+	for i := 0; i < 4; i++ {
+		id, _ := a.ch.RequestLocal(pageItem(fmt.Sprint("s", i)), 0)
+		ids = append(ids, id)
+	}
+	for n := 0; n < PageWrongPerMinute-1; n++ {
+		if w := a.post("/approvals/", answer(a.form(ids[n/2]), "approve", "000000")); !strings.Contains(w.Body.String(), "Wrong code") {
+			t.Fatalf("wrong %d: %s", n, w.Body.String())
+		}
+	}
+	if w := a.post("/approvals/", answer(a.form(ids[2]), "approve", a.code())); !strings.Contains(w.Body.String(), "Approved.") {
+		t.Fatalf("right: %s", w.Body.String())
+	}
+	if w := a.post("/approvals/", answer(a.form(ids[3]), "approve", "000000")); !strings.Contains(w.Body.String(), "Wrong code") {
+		t.Fatalf("5th wrong: %s", w.Body.String())
+	}
+}
+
+// L3 nit on #171: an unlock proof offered as an approval code counts
+// against the phone's bound like any wrong code.
+func TestAnUnlockProofCountsForThePhone(t *testing.T) {
+	a := newApprovalRig(t)
+	id, _ := a.ch.RequestLocal(pageItem("u1"), 0)
+	for i := 0; i < PageWrongPerMinute; i++ {
+		if w := a.post("/approvals/", answer(a.form(id), "approve", owner.UnlockProofPrefix+"CANARY")); !strings.Contains(w.Body.String(), "That code did not work.") {
+			t.Fatalf("try %d: %s", i, w.Body.String())
+		}
+	}
+	if w := a.post("/approvals/", answer(a.form(id), "approve", a.code())); !strings.Contains(w.Body.String(), "Too many wrong codes from this phone.") {
+		t.Fatalf("sixth: %s", w.Body.String())
+	}
+}
