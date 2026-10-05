@@ -129,7 +129,7 @@ func TestIntegrationCleanRoomCannotReachPrivateData(t *testing.T) {
 	plane := &planeStub{root: filepath.Join(state, "plane"), canary: canary, srv: map[string]*http.Server{}}
 	probes := []string{
 		private["journal"], private["vault"], private["recall"], private["workspace"],
-		filepath.Join(brokerDir, "machines", "owner-task", "upper", "work", "canary"),
+		filepath.Join(brokerDir, "machines", "owner-task", "disk", "upper", "work", "canary"),
 		"/etc/shadow",
 	}
 	socks := []string{filepath.Join(plane.root, "owner-task", Socket)}
@@ -155,7 +155,7 @@ func TestIntegrationCleanRoomCannotReachPrivateData(t *testing.T) {
 	cfg := vm.Config{
 		StateDir: brokerDir,
 		Images:   map[string]string{"cleanroom": img, "base": img},
-		Runtime:  rt, Admit: adm,
+		Runtime:  rt, Admit: adm, NoQuota: true,
 		Services: b.Services(plane),
 	}
 	if p := os.Getenv("AGENTOS_CGROUP_PARENT"); p != "" {

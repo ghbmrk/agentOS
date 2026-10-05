@@ -65,8 +65,10 @@ var controlPath = map[string][]string{
 	// It opens recall (recalltool) once the vault process hands over the
 	// identity key, and serves the recall tools on the guest plane.
 	// It serves the worker-machine tools (workers, CAP-8) on the live guest
-	// plane.
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool", "workers", "modemlink"},
+	// plane. It opens the machines' disk quotas (quota, RES-4); quota
+	// imports golang.org/x/sys/unix, so like clock it is held by
+	// TestAgentosdLinksNoInference through netOK.
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool", "workers", "quota", "modemlink"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies
@@ -82,9 +84,9 @@ var machinePlane = map[string]struct {
 	allowed []string
 	forbid  []string
 }{
-	"vm":         {[]string{"admission", "cgroup", "vm/overlay"}, forbiddenStd},
+	"vm":         {[]string{"admission", "cgroup", "vm/overlay", "quota"}, forbiddenStd},
 	"vm/overlay": {nil, []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}},
-	"vm/gvisor":  {[]string{"vm", "vm/overlay"}, []string{"net", "net/http", "net/rpc", "net/smtp", "plugin", "unsafe", "C"}},
+	"vm/gvisor":  {[]string{"vm", "vm/overlay", "quota"}, []string{"net", "net/http", "net/rpc", "net/smtp", "plugin", "unsafe", "C"}},
 }
 
 // The guest plane serves each machine's ARC-6 socket (P1-7). STOP,

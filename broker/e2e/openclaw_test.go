@@ -304,6 +304,7 @@ func TestIntegrationOpenClawGuest(t *testing.T) {
 		Runtime:   &gvisor.Runtime{Bin: runsc, StateDir: filepath.Join(dir, "runsc")},
 		Admit:     adm,
 		NoCgroups: true,
+		NoQuota:   true,
 		Services:  plane,
 	})
 	if err != nil {

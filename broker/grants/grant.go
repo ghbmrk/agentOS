@@ -41,6 +41,11 @@ const (
 	RecallExecutor = "recall"
 )
 
+// OriginLoop2 marks Loop 2's containment (loops S8, K-S2): a pause of a
+// grant on a finding, and nothing else. Only the broker submits it; guest
+// intents carry "guest:<lineage>".
+const OriginLoop2 = "broker:loop2"
+
 // OriginEvidence marks the broker's delivery of an agent reply to the
 // owner's evidence destination (CH-20): the only origin the gate allows
 // a Config.Delivery operation from, and only for that.

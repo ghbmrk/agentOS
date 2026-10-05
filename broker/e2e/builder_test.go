@@ -83,6 +83,7 @@ func TestIntegrationBuilderImage(t *testing.T) {
 		Runtime:   &gvisor.Runtime{Bin: runsc, StateDir: filepath.Join(dir, "runsc")},
 		Admit:     adm,
 		NoCgroups: true,
+		NoQuota:   true,
 		Services:  ref,
 	})
 	if err != nil {

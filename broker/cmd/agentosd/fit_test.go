@@ -67,10 +67,10 @@ func TestPE2NoRoomForReplayIsSaid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lp.attach(ctx, d)
+	attachForTest(t, lp, ctx, cancel, d)
 	notes := func() (out []string) {
 		for _, n := range cfg.Notes {
-			if s := n(); s != "" {
+			if s := n(); s != "" && !strings.HasPrefix(s, "Loop 2:") { // Loop 2's own line: loop2_test.go
 				out = append(out, s)
 			}
 		}

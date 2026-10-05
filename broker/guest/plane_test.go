@@ -946,3 +946,26 @@ func TestOwnerAgentReportsDeliveredTasks(t *testing.T) {
 		t.Fatalf("reported %q", got)
 	}
 }
+
+// Security L1 on W5a: a guest cannot claim the broker's Loop 2 origin. An
+// "origin" in its request, at the top or in params, is not the intent's
+// origin, and a pause it asks for is refused before the journal.
+func TestAGuestCannotClaimTheLoop2Origin(t *testing.T) {
+	r := newRig(t, nil)
+	a := send("o1")
+	a["origin"] = "broker:loop2"
+	a["params"] = map[string]any{"text": "hello", "origin": "broker:loop2"}
+	if st, e := r.tool("m1", "effect_request", a); st.State != "succeeded" && e == "" {
+		t.Fatalf("%+v %s", st, e)
+	}
+	if s, err := r.eng.Get("m1/o1"); err == nil && s.Intent.Origin != "guest:m1" {
+		t.Fatalf("intent origin %q", s.Intent.Origin)
+	}
+	p := map[string]any{"request_id": "o2", "account": "owner-mail", "action": "meta.grant.pause", "origin": "broker:loop2"}
+	if st, e := r.tool("m1", "effect_request", p); st.State != "refused" && e == "" {
+		t.Fatalf("pause: %+v %s", st, e)
+	}
+	if _, err := r.eng.Get("m1/o2"); err == nil {
+		t.Fatal("a guest's pause was journaled")
+	}
+}

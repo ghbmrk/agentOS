@@ -237,8 +237,8 @@ func main() {
 	imgs := images{}
 	var stateDir, runsc, cgroupRoot, accelMode, meterPath, agentMachine, inboxPath, egressSocket, verifySocket, recallDir string
 	var agentImage, agentLaunch string
-	var diskReserveMB, agentMemMB, replayMemMB, builderMemMB int64
-	var sleepHoursFlag string
+	var diskReserveMB, machineDiskMB, agentMemMB, replayMemMB, builderMemMB int64
+	var diskQuota, sleepHoursFlag string
 	var builderImage, builderLaunch, keptPath string
 	var learn learnPaths
 	var cgroupVouched, modemBridge, ownerMessage bool
@@ -261,6 +261,8 @@ func main() {
 	flag.StringVar(&stateDir, "machines", "/var/lib/agentos/machines", "agent-machine layers and snapshots (created 0700)")
 	flag.StringVar(&runsc, "runsc", "", "gVisor runsc binary; empty runs no agent machines")
 	flag.Int64Var(&diskReserveMB, "disk-reserve-mb", budget.FloorDisk().ReserveBytes()>>20, "state-disk space snapshots never use (RES-4 reserve), MB")
+	flag.StringVar(&diskQuota, "disk-quota", "on", "per-machine disk quotas (RES-4): on needs -machines on a file system mounted with prjquota; off lets a guest fill the disk")
+	flag.Int64Var(&machineDiskMB, "machine-disk-mb", 8192, "each agent machine's disk budget: its hard quota and largest snapshot, MB (RES-4)")
 	flag.Var(imgs, "image", "agent-machine image, name=dir (repeatable)")
 	flag.StringVar(&meterPath, "meter", "/var/lib/agentos/meter.json", "model-spend meter state (OP-8)")
 	flag.StringVar(&cfg.OwnerState, "owner-state", "/var/lib/agentos/owner.json", "owner channel state (P1-5)")
@@ -459,7 +461,18 @@ func main() {
 	}
 	// At exit the question loops stop before the guard's notices flush.
 	defer func() { stop(); qs.wait() }()
+	var mq vm.Quota
+	var noQuota bool
+	var qerr error
 	if runsc != "" {
+		mq, noQuota, qerr = machineQuota(diskQuota, stateDir)
+		if noQuota {
+			log.Printf("-disk-quota=off: agent machines run without disk quotas; a guest can fill the state disk (RES-4)")
+		}
+	}
+	if runsc != "" && qerr != nil {
+		log.Printf("agent machines disabled: %v", qerr)
+	} else if runsc != "" {
 		services := &lateServices{}
 		m, err := vm.Open(ctx, vm.Config{
 			StateDir: stateDir,
@@ -470,6 +483,9 @@ func main() {
 			Services: services,
 
 			DiskReserveBytes: diskReserveMB << 20,
+			Quota:            mq,
+			NoQuota:          noQuota,
+			MachineDiskBytes: machineDiskMB << 20,
 			WorkerLayerBytes: workerLayerBytes(workerLayerMB),
 			// A lineage holding a record the owner deleted is not forked
 			// or merged until that is settled (recall W10).
