@@ -760,7 +760,6 @@ func (m *Manager) stopRuntime(ctx context.Context, mc *machine) error {
 	ctx, cancel := context.WithTimeout(ctx, m.cfg.KillTimeout)
 	defer cancel()
 	l := m.launch(mc)
-	m.uncommitDisk(mc)
 	err := m.cfg.Runtime.Kill(ctx, l)
 	if l.Cgroup != "" {
 		g := &cgroup.Group{Path: l.Cgroup}
@@ -774,6 +773,10 @@ func (m *Manager) stopRuntime(ctx context.Context, mc *machine) error {
 				err = rerr
 			}
 		}
+	}
+	if err == nil {
+		// Only a guest known dead stops counting against the reserve.
+		m.uncommitDisk(mc)
 	}
 	if mc.State == Running {
 		mc.State = Stopped

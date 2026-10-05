@@ -219,3 +219,27 @@ func TestALayerWrittenWithoutAQuotaIsNotResumedUnderOne(t *testing.T) {
 		t.Fatalf("after rebuild: %+v", mc)
 	}
 }
+
+// A guest whose kill failed may still be writing: it stays counted against
+// the reserve until a kill succeeds (security F1 on #152).
+func TestAGuestWhoseKillFailedStaysCounted(t *testing.T) {
+	const budget, reserve = int64(1 << 30), int64(2 << 30)
+	e := newEnv(t, 8192)
+	e.cfg.Quota, e.cfg.MachineDiskBytes, e.cfg.DiskReserveBytes = newFakeQuota(), budget, reserve
+	e.cfg.FreeBytes = func(string) (int64, error) { return reserve + budget + ConsoleMaxBytes + 1<<20, nil }
+	e.open()
+	e.create("m1", admission.Accepted, 100)
+	e.rt.failKill = errors.New("fake: kill failed")
+	if err := e.m.Destroy(bg, "m1"); err == nil {
+		t.Fatal("destroy reported success with the kill failing")
+	}
+	e.rt.failKill = nil
+	e.adm.Release("m1")
+	if _, err := e.m.Create(bg, "m2", Spec{Image: "base", Class: admission.Accepted, MemMB: 100}); !errors.Is(err, ErrDiskFull) {
+		t.Fatalf("started into the room of a guest that may still run: %v", err)
+	}
+	must(t, e.m.Destroy(bg, "m1"))
+	if _, err := e.m.Create(bg, "m2", Spec{Image: "base", Class: admission.Accepted, MemMB: 100}); err != nil {
+		t.Fatalf("after a successful kill: %v", err)
+	}
+}
