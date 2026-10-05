@@ -347,3 +347,32 @@ func TestPruneTombstones(t *testing.T) {
 		t.Fatalf("after prune: %v", replayed)
 	}
 }
+
+// CAP-3 (#59 security B1): nothing derived from a deleted item comes in
+// while its tombstone stands, and a tombstone recall's reach still needs
+// outlives the prune policy.
+func TestDerivedFromDeletedIsRefused(t *testing.T) {
+	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	ix := open(t, NewMemDir(), WithClock(func() time.Time { return now }))
+	parent := mustIngest(t, ix, Item{Source: Source{Kind: "mail", Ref: "<p@x>"}, Text: "synthetic parent", Received: now})
+	if _, err := ix.Delete(parent); err != nil {
+		t.Fatal(err)
+	}
+	note := Item{Source: Source{Kind: "agent", Ref: "l/n", DerivedFrom: []string{parent}}, Text: "summary", Received: now}
+	if _, err := ix.Ingest(note); !errors.Is(err, ErrDeleted) {
+		t.Fatalf("note from a deleted item: %v", err)
+	}
+	ix.KeepTombstones(func(id string) bool { return id == parent })
+	now = now.Add(40 * 24 * time.Hour)
+	note.Received = now
+	if n, err := ix.PruneTombstones(30 * 24 * time.Hour); err != nil || n != 0 {
+		t.Fatalf("prune: %d %v", n, err)
+	}
+	if _, err := ix.Ingest(note); !errors.Is(err, ErrDeleted) {
+		t.Fatalf("after a prune: %v", err)
+	}
+	ix.KeepTombstones(nil)
+	if n, _ := ix.PruneTombstones(30 * 24 * time.Hour); n != 1 {
+		t.Fatal("released tombstone not pruned")
+	}
+}

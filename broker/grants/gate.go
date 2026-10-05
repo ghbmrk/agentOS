@@ -123,6 +123,10 @@ type Config struct {
 	// egress). It is keyed by machine, not lineage, so a fork of a
 	// composer is not one. Nil: none is, so reply rules never match.
 	Isolated func(machine string) bool
+	// Contained reports an agent lineage that still holds a record the
+	// owner deleted (recalltool W10); its intents get no pre-allowance.
+	// Nil: none is.
+	Contained func(lineage string) bool
 	// Changes decides meta.change.* intents. Nil: they are denied.
 	Changes Changes
 	// Coalesce, CoalesceIdle, and RequestsPerHour pace approval requests
@@ -448,7 +452,7 @@ func (g *Gate) evaluate(ctx context.Context, phase journal.Phase, in journal.Int
 		}
 	}
 	item := approvalItem(in, v, cls, ver, verified)
-	if cls == verb.Irreversible && verified {
+	if cls == verb.Irreversible && verified && !g.contained(in.Origin) {
 		sort.Slice(rules, func(i, j int) bool { return rules[i].ID < rules[j].ID })
 		for _, r := range rules {
 			if g.matches(*r.Spec.Rule, in, ver) != nil {
@@ -463,6 +467,14 @@ func (g *Gate) evaluate(ctx context.Context, phase journal.Phase, in journal.Int
 		}
 	}
 	return verdict{kind: ask, item: item}
+}
+
+// contained reports a guest lineage that still holds a record the owner
+// deleted (recalltool W10): no pre-allowance acts for it, so each of its
+// irreversible effects is asked.
+func (g *Gate) contained(origin string) bool {
+	l, ok := strings.CutPrefix(origin, "guest:")
+	return ok && g.cfg.Contained != nil && g.cfg.Contained(l)
 }
 
 // approvalItem is the line the owner approves (CH-12): source fields when
@@ -579,7 +591,7 @@ func (g *Gate) evaluateBroker(ctx context.Context, phase journal.Phase, in journ
 			return verdict{kind: deny, why: "a recall rollback comes only from the broker's recall"}
 		}
 		return verdict{kind: ask, item: owner.Item{Ref: in.ID, Object: obj, Detail: detail,
-			Facts: owner.Facts{Kind: owner.Ordinary, Verb: "undo", NoRecipient: true}}}
+			Facts: owner.Facts{Kind: owner.Ordinary, Verb: "reset", NoRecipient: true}}}
 	case journal.ActionGrantPause, journal.ActionGrantRevoke:
 		if in.Origin != OriginOwner {
 			return verdict{kind: deny, why: "only the owner pauses or revokes a grant"}

@@ -108,6 +108,7 @@ func OpenService(cfg ServiceConfig) (*Service, error) {
 	}
 	s.Reach = &Reach{Prov: s.Prov, Journal: cfg.Journal, Machines: cfg.Machines, Cases: cfg.Cases,
 		Ask: cfg.Ask, Location: cfg.Location, Logf: cfg.Logf}
+	s.Index.KeepTombstones(s.Reach.Needed)
 	// Registering replays every tombstone, so a reach a crash cut short
 	// runs again (CAP-3).
 	if err := s.Index.OnDelete(s.Reach.OnDelete); err != nil {
@@ -198,6 +199,15 @@ func (l *LateExecutor) Execute(ctx context.Context, in journal.Intent, n int) jo
 		return r.Execute(ctx, in, n)
 	}
 	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: approvedOnly + "recall is not open yet"}
+}
+
+// Contained is Reach.Contained once recall is open. Before, nothing is
+// known to be contained; the tombstone replay at open restores it.
+func (l *LateExecutor) Contained(lineage string) bool {
+	if r := l.r.Load(); r != nil {
+		return r.Contained(lineage)
+	}
+	return false
 }
 
 // Reconcile reports an interrupted rollback as approved, to be finished.

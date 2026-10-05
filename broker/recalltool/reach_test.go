@@ -19,6 +19,20 @@ type fakeJournal struct {
 	submitted map[string]time.Time // intent -> when, all from guest:root
 	erased    map[string]bool
 	inFlight  map[string]bool
+	denied    map[string]bool
+}
+
+func (j *fakeJournal) Get(id string) (journal.Status, error) {
+	if _, ok := j.submitted[id]; !ok {
+		return journal.Status{}, errors.New("unknown")
+	}
+	switch {
+	case j.inFlight[id]:
+		return journal.Status{State: journal.InFlight}, nil
+	case j.denied[id]:
+		return journal.Status{State: journal.Denied}, nil
+	}
+	return journal.Status{State: journal.Succeeded}, nil
 }
 
 func (j *fakeJournal) Since(origin string, since time.Time) []string {
@@ -132,14 +146,15 @@ type reachRig struct {
 // read; "bystander" reads only public items.
 func newReachRig(t *testing.T) (*reachRig, time.Time) {
 	r := newRig(t)
-	x := &reachRig{r: r, clock: time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)}
+	x := &reachRig{r: r, clock: time.Now().UTC().Truncate(time.Minute).Add(-time.Hour)} // notes refuse future receipt
 	r.tl.cfg.Now = func() time.Time { return x.clock }
-	x.j = &fakeJournal{submitted: map[string]time.Time{}, erased: map[string]bool{}, inFlight: map[string]bool{}}
+	x.j = &fakeJournal{submitted: map[string]time.Time{}, erased: map[string]bool{}, inFlight: map[string]bool{}, denied: map[string]bool{}}
 	x.vm = &fakeMachines{}
 	x.cs = &fakeCases{forgot: map[string]bool{}}
 	x.ask = &fakeAsk{st: map[string]journal.Status{}}
 	x.reach = &Reach{Prov: r.prov, Journal: x.j, Machines: x.vm, Cases: x.cs, Ask: x.ask}
 	x.ask.reach = x.reach
+	r.ix.KeepTombstones(x.reach.Needed)
 	if err := r.ix.OnDelete(x.reach.OnDelete); err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +216,7 @@ func TestCAP3WorkSinceTheReadWaitsForTheOwnersYes(t *testing.T) {
 	}
 	in := x.ask.st[x.ask.asked[0]].Intent
 	if in.Origin != Origin || in.Executor != ExecutorName || in.Action != journal.ActionRecallRollback ||
-		in.Params["object"] != "root work since 08:01 Oct 5" || in.Params["detail"] != "2 actions since it read a mail you deleted" {
+		in.Params["object"] != "root to "+read.In(x.reach.Location).Format("15:04 Jan 2") || in.Params["detail"] != "its 2 actions since stay done; their details are erased" {
 		t.Fatalf("rollback intent: %+v", in)
 	}
 	// Asking again (Retry) does not ask twice.
@@ -320,5 +335,61 @@ func TestCAP3ServiceReplaysReachAtStart(t *testing.T) {
 func TestRollbackNamesMatchTheGate(t *testing.T) {
 	if Origin != grants.OriginRecall || ExecutorName != grants.RecallExecutor {
 		t.Fatal("recalltool and grants disagree on the rollback intent's names")
+	}
+}
+
+// #59 security B2: an intent that never took effect (denied) is not work,
+// so it does not force a question.
+func TestCAP3DeniedIntentIsNotWork(t *testing.T) {
+	x, read := newReachRig(t)
+	x.j.submitted["junk"] = read.Add(time.Second)
+	x.j.denied["junk"] = true
+	x.r.ix.Delete(x.mail)
+	if len(x.ask.asked) != 0 || len(x.vm.calls) != 1 || x.reach.Pending() != 0 {
+		t.Fatalf("asked %v, reset %v", x.ask.asked, x.vm.calls)
+	}
+}
+
+// #59 security B1, C2: a lineage that keeps a deleted record (asked, then
+// NO) is contained: it can make no note derived from it, its tombstone is
+// kept past the prune policy, and the gate gives it no pre-allowance.
+func TestCAP3DeclinedLineageIsContained(t *testing.T) {
+	x, read := newReachRig(t)
+	x.j.submitted["late"] = read.Add(time.Second)
+	x.r.ix.Delete(x.mail)
+	if !x.reach.Contained("root") || x.reach.Contained("bystander") {
+		t.Fatal("not contained while asked")
+	}
+	x.ask.answer(false)
+	x.reach.Retry(context.Background())
+	if !x.reach.Contained("root") {
+		t.Fatal("not contained after NO")
+	}
+	note := map[string]any{"key": "n", "text": "a summary"}
+	if _, err := x.r.call("root", "root", "recall_note", note); err == nil {
+		t.Fatal("note derived from a deleted record stored")
+	}
+	// Its tombstone outlives the prune policy (recall's
+	// TestDerivedFromDeletedIsRefused covers the prune itself).
+	if !x.reach.Needed(x.mail) {
+		t.Fatal("tombstone of a held record not kept")
+	}
+	if _, err := x.r.call("bystander", "bystander", "recall_note", note); err != nil {
+		t.Fatalf("an unrelated lineage's note refused: %v", err)
+	}
+}
+
+// After YES the lineage is no longer contained.
+func TestCAP3ApprovedLineageIsReleased(t *testing.T) {
+	x, read := newReachRig(t)
+	x.j.submitted["late"] = read.Add(time.Second)
+	x.r.ix.Delete(x.mail)
+	x.ask.answer(true)
+	x.reach.Retry(context.Background())
+	if x.reach.Contained("root") {
+		t.Fatal("still contained after the rollback")
+	}
+	if _, err := x.r.call("root", "root", "recall_note", map[string]any{"key": "n", "text": "fresh"}); err != nil {
+		t.Fatalf("note after the rollback: %v", err)
 	}
 }

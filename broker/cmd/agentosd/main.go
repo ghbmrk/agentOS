@@ -212,6 +212,7 @@ func main() {
 	// Rollbacks the owner approves run here (recalltool W10).
 	recallExec := &recalltool.LateExecutor{}
 	cfg.Recall = recallExec
+	cfg.Grants.Contained = recallExec.Contained
 	// No modem driver exists before P2-3, so texts arrive only through the
 	// owner socket and the channel's own outbound texts are not sent.
 

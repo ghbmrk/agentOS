@@ -20,6 +20,7 @@ import (
 type Journal interface {
 	Since(origin string, since time.Time) []string
 	Erase(ids []string) (erased, held []string, err error)
+	Get(id string) (journal.Status, error)
 }
 
 // Machines is the part of the VM manager deletion reaches (vm.Manager).
@@ -87,6 +88,37 @@ type Reach struct {
 	mu      sync.Mutex
 	pending map[string]bool // deleted item IDs not yet fully reached
 	reset   map[string]bool // lineage@T whose machines are done this run
+	// held: lineages that still hold a deleted item, asked or declined.
+	held map[string]map[string]bool // lineage -> lineage@T
+}
+
+// Contained reports a lineage that still holds a record the owner deleted
+// (asked, declined or unanswered): the grants gate gives its intents no
+// pre-allowance (#59 security C2).
+func (r *Reach) Contained(lineage string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.held[lineage]) > 0
+}
+
+func (r *Reach) hold(lineage string, since time.Time, on bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	k := resetKey(lineage, since)
+	if on {
+		if r.held == nil {
+			r.held = map[string]map[string]bool{}
+		}
+		if r.held[lineage] == nil {
+			r.held[lineage] = map[string]bool{}
+		}
+		r.held[lineage][k] = true
+		return
+	}
+	delete(r.held[lineage], k)
+	if len(r.held[lineage]) == 0 {
+		delete(r.held, lineage)
+	}
 }
 
 // errWaiting keeps a deletion pending while the owner decides.
@@ -167,13 +199,11 @@ func (r *Reach) reach(ctx context.Context, id, kind string) error {
 // decide takes lineage back from since at once, or asks the owner first
 // when it has done work since.
 func (r *Reach) decide(ctx context.Context, lineage string, since time.Time, kind string) error {
-	var work []string
-	if r.Journal != nil {
-		work = r.Journal.Since("guest:"+lineage, since)
-	}
-	if len(work) == 0 {
+	work := r.work(lineage, since)
+	if work == 0 {
 		return r.lineage(ctx, lineage, since, true)
 	}
+	r.hold(lineage, since, true)
 	if r.Ask == nil {
 		return errWaiting
 	}
@@ -185,7 +215,7 @@ func (r *Reach) decide(ctx context.Context, lineage string, since time.Time, kin
 		in := journal.Intent{ID: id, Origin: Origin, Account: journal.BrokerAccount,
 			Action: journal.ActionRecallRollback, Executor: ExecutorName,
 			Params: map[string]any{"lineage": lineage, "since": since.UTC().Format(time.RFC3339Nano),
-				"object": r.line(lineage, since), "detail": detail(len(work), kind)}}
+				"object": r.line(lineage, since), "detail": detail(work, kind)}}
 		if st, err = r.Ask.Submit(in); err != nil {
 			return err
 		}
@@ -208,9 +238,32 @@ func (r *Reach) decide(ctx context.Context, lineage string, since time.Time, kin
 		return r.lineage(ctx, lineage, since, reset)
 	default:
 		// Declined, unanswered, or refused: the lineage keeps its work and
-		// what it read; nothing more is asked for this deletion.
+		// what it read, contained (no pre-allowance, no notes derived from
+		// the item, its tombstone kept); nothing more is asked for it.
 		return nil
 	}
+}
+
+// work counts the intents lineage has carried out since: succeeded, in
+// flight, or of unknown outcome. Denied, refused or never-run intents
+// change nothing outside and do not force a question (#59 security B2).
+func (r *Reach) work(lineage string, since time.Time) int {
+	if r.Journal == nil {
+		return 0
+	}
+	n := 0
+	for _, id := range r.Journal.Since("guest:"+lineage, since) {
+		st, err := r.Journal.Get(id)
+		if err != nil {
+			n++ // unknown: count it, so the owner is asked
+			continue
+		}
+		switch st.State {
+		case journal.Succeeded, journal.InFlight, journal.OutcomeUnknown:
+			n++
+		}
+	}
+	return n
 }
 
 // Execute runs an approved rollback intent (the journal executor named
@@ -271,26 +324,17 @@ func (r *Reach) line(lineage string, since time.Time) string {
 	if i := strings.LastIndex(name, "."); i > 0 {
 		name = name[:i]
 	}
-	return fmt.Sprintf("%s work since %s", name, since.In(loc).Format("15:04 Jan 2"))
+	return fmt.Sprintf("%s to %s", name, since.In(loc).Format("15:04 Jan 2"))
 }
 
-func detail(actions int, kind string) string {
-	what := "a record"
-	switch kind {
-	case "mail":
-		what = "a mail"
-	case "file":
-		what = "a file"
-	case "calendar":
-		what = "an event"
-	case "contact":
-		what = "a contact"
-	}
-	plural := "s"
+// detail says what a reset keeps: actions that took effect stay done (a
+// reset cannot recall a sent mail); only their details leave the box
+// (#59 security C1). kind is accepted for the line's wording later.
+func detail(actions int, _ string) string {
 	if actions == 1 {
-		plural = ""
+		return "its 1 action since stays done; its details are erased"
 	}
-	return fmt.Sprintf("%d action%s since it read %s you deleted", actions, plural, what)
+	return fmt.Sprintf("its %d actions since stay done; their details are erased", actions)
 }
 
 // lineage takes lineage back from since; machines false skips the machine
@@ -339,5 +383,11 @@ func (r *Reach) lineage(ctx context.Context, lineage string, since time.Time, ma
 	r.mu.Lock()
 	delete(r.reset, key)
 	r.mu.Unlock()
+	r.hold(lineage, since, false)
 	return nil
 }
+
+// Needed reports a deleted item some lineage still holds: its tombstone
+// must outlive the prune policy (Index.KeepTombstones), so nothing derived
+// from it comes back and the reach is replayed at each start.
+func (r *Reach) Needed(id string) bool { return len(r.Prov.Holders(id)) > 0 }
