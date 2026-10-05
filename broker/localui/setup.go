@@ -77,8 +77,8 @@ type Hooks interface {
 	// AlreadySetUp reports that setup finished before: Finish completed
 	// and the owner channel exists. An enrolled code seed alone does not
 	// count, since setup can stop or start over after enrollment. It is
-	// asked only when no setup state was found, so a lost state file never
-	// reopens setup.
+	// asked at start whenever setup is not done, so a lost state file or a
+	// failed save after Finish never reopens setup.
 	AlreadySetUp() bool
 	// Finish is called once, when setup completes, with the owner's
 	// number. The caller starts the owner channel, attaches it with
@@ -102,9 +102,6 @@ type SetupState struct {
 	Host        bool   `json:"host"`
 	HostTrusted bool   `json:"host_trusted"`
 	Done        bool   `json:"done"`
-	// Begun is set by every save, so a found state is never the zero
-	// value, even after setup starts over.
-	Begun bool `json:"begun"`
 }
 
 // SetupStore persists SetupState.
@@ -235,17 +232,21 @@ func newSetup(s *Server, st SetupState) *setup {
 
 func (u *setup) done() bool { u.mu.Lock(); defer u.mu.Unlock(); return u.st.Done }
 
-// adopt marks setup done when no setup state was found but the box was
-// already set up, so a lost state file never reopens setup and
-// re-enrollment. A found state is authoritative: a reboot mid-setup, or
-// after starting over, resumes where it was.
-func (u *setup) adopt() error {
-	if u.st != (SetupState{}) || !u.s.cfg.Hooks.AlreadySetUp() {
-		return nil
+// adopt marks setup done when Finish already completed, so neither a lost
+// state file nor a failed save of Done reopens setup and re-enrollment. A
+// reboot mid-setup, or after starting over, resumes where it was, since
+// AlreadySetUp counts only a completed Finish.
+func (u *setup) adopt() {
+	if u.st.Done || !u.s.cfg.Hooks.AlreadySetUp() {
+		return
 	}
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	return u.save(func(s *SetupState) { s.Done = true })
+	if err := u.save(func(s *SetupState) { s.Done = true }); err != nil {
+		// Closed in memory regardless; AlreadySetUp closes it again on
+		// the next start.
+		u.st.Done = true
+	}
 }
 
 // stepLocked names the first unfinished step.
@@ -276,7 +277,6 @@ func (u *setup) mayLocked(key string) bool {
 func (u *setup) save(f func(*SetupState)) error {
 	next := u.st
 	f(&next)
-	next.Begun = true
 	if err := u.s.cfg.Store.Save(next); err != nil {
 		return err
 	}

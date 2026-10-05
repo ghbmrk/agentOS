@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base32"
 	"encoding/json"
+	"errors"
 	"html"
 	"io"
 	"math/rand"
@@ -826,14 +827,13 @@ func TestLostSetupStateDoesNotReopenSetup(t *testing.T) {
 }
 
 // A reboot mid-setup resumes setup even though a code seed is already in
-// the vault, and so does a reboot after starting over: only a missing state
-// file defers to AlreadySetUp (second re-review on #32).
+// the vault, and so does a reboot after starting over: AlreadySetUp counts
+// only a completed Finish (second re-review on #32).
 func TestRebootMidSetupKeepsSetupOpen(t *testing.T) {
 	r := newRig(t)
 	st := &MemStore{}
 	r.srv = r.open(st)
 	r.runSetupToAI()
-	r.hooks.setUp = true // even a hook that counts the seed alone
 	r.srv = r.open(st)
 	if r.srv.setup.done() || !strings.Contains(r.get("/setup"), `name="private"`) {
 		t.Fatal("reboot after enrollment closed setup before Finish")
@@ -896,6 +896,38 @@ func TestSetupHousekeeping(t *testing.T) {
 	r.post("/setup/codes", url.Values{"code": {owner.TOTP(seed, r.clock())}})
 	if r.srv.setup.st.Codes || r.srv.setup.st.Owner != "" {
 		t.Fatal("enrollment saved after setup started over")
+	}
+}
+
+// failDone is a setup store whose save of Done fails.
+type failDone struct{ MemStore }
+
+func (f *failDone) Save(s SetupState) error {
+	if s.Done {
+		return errors.New("disk full")
+	}
+	return f.MemStore.Save(s)
+}
+
+// If saving Done fails after Finish, a reboot still finds setup closed and
+// Finish is not run again (third re-review on #32).
+func TestFailedDoneSaveKeepsSetupClosed(t *testing.T) {
+	r := newRig(t)
+	st := &failDone{}
+	r.srv = r.open(st)
+	r.runSetup()
+	if s, _ := st.Load(); s.Done {
+		t.Fatal("store did not fail")
+	}
+	r.srv = r.open(st)
+	if loc := r.do("GET", "/setup", nil).Header().Get("Location"); loc != "/status" || !r.srv.setup.done() {
+		t.Fatalf("setup reopened after reboot: %q", loc)
+	}
+	r.asOther(func() {
+		r.post("/setup/restart", url.Values{"secret": {r.card.SetupSecret}})
+	})
+	if r.srv.setup.st.Owner != ownerNum || r.hooks.finishes != 1 {
+		t.Fatalf("setup restarted or Finish re-run (%d)", r.hooks.finishes)
 	}
 }
 

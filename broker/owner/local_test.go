@@ -220,6 +220,29 @@ func TestLocalSignInAlertsSurviveRestartAndFailedSend(t *testing.T) {
 	}
 }
 
+// A sign-in recorded while a sign-in text is out stays for the next text,
+// even at the maxSignIns cap (third re-review on #32).
+func TestSignInDuringSendIsKept(t *testing.T) {
+	r := newRig(t, nil)
+	now := r.clock()
+	r.ch.mu.Lock()
+	r.ch.codes.commit(func(s *State) {
+		for i := 0; i < maxSignIns; i++ {
+			s.LocalSignIns = append(s.LocalSignIns, now.Add(time.Duration(i-maxSignIns)*time.Minute))
+		}
+	})
+	text, last := r.ch.signInTextLocked(now)
+	// One more arrives mid-send; the cap pushes out the oldest.
+	r.ch.codes.commit(func(s *State) {
+		s.LocalSignIns = append(s.LocalSignIns[1:], now)
+	})
+	r.ch.mu.Unlock()
+	r.ch.sendSignIns(text, last, now)
+	if got := r.ch.codes.st.LocalSignIns; len(got) != 1 || !got[0].Equal(now) {
+		t.Fatalf("left after send: %v", got)
+	}
+}
+
 // When the local bound runs out the owner is told until when.
 func TestLocalBoundExhaustionIsTexted(t *testing.T) {
 	r := newRig(t, nil)

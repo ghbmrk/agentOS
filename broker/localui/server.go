@@ -116,9 +116,7 @@ func New(cfg Config) (*Server, error) {
 		return nil, err
 	}
 	s.setup = newSetup(s, st)
-	if err := s.setup.adopt(); err != nil {
-		return nil, err
-	}
+	s.setup.adopt()
 	s.routes()
 	return s, nil
 }
