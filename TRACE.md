@@ -113,7 +113,7 @@ Covered: 113 / 144 requirement IDs
 | LOOP-2 | `broker/cmd/agentosd/learn_test.go`, `broker/loops/scheduler_test.go`, `broker/loops/settings_test.go`, `broker/meter/share_test.go`, `broker/meter/spare_test.go` |
 | LOOP-3 | `broker/loops/loop1_test.go`, `broker/loops/scheduler_test.go` |
 | LOOP-4 | `broker/loops/loop1_test.go` |
-| LOOP-5 | `broker/cmd/agentos-egress/eval_test.go`, `broker/cmd/agentos-egress/routing_test.go`, `broker/cmd/agentosd/eval_test.go`, `broker/daemon/inference_test.go`, `broker/egress/handlerfor_test.go`, `broker/loops/loop1_test.go`, `broker/loops/scheduler_test.go`, `broker/meter/share_test.go`, `broker/modelroute/modelroute_test.go`, `broker/replay/replay_test.go`, `broker/vm/vm_test.go` |
+| LOOP-5 | `broker/cmd/agentos-egress/eval_test.go`, `broker/cmd/agentos-egress/routing_test.go`, `broker/cmd/agentosd/eval_test.go`, `broker/cmd/agentosd/fit_test.go`, `broker/daemon/inference_test.go`, `broker/egress/handlerfor_test.go`, `broker/loops/loop1_test.go`, `broker/loops/scheduler_test.go`, `broker/meter/share_test.go`, `broker/modelroute/modelroute_test.go`, `broker/replay/replay_test.go`, `broker/vm/vm_test.go` |
 | LOOP-6 | `broker/cmd/agentosd/learn_test.go`, `broker/daemon/inference_test.go`, `broker/daemon/learning_wiring_test.go`, `broker/grants/loops_test.go`, `broker/loops/loop1_test.go`, `broker/loops/settings_test.go` |
 | LOOP-7 | — |
 | LOOP-8 | `broker/loops/secure_test.go` |
@@ -134,7 +134,7 @@ Covered: 113 / 144 requirement IDs
 | OSS-11 | — |
 | OSS-12 | — |
 | RES-1 | `broker/admission/admission_test.go`, `broker/cgroup/cgroup_test.go`, `broker/change/resume_test.go`, `broker/cmd/agentosd/agent_test.go`, `broker/daemon/admission_wiring_test.go`, `broker/loops/loop1_test.go`, `broker/loops/pe4_test.go`, `broker/loops/scheduler_test.go`, `broker/replay/replay_test.go`, `broker/vm/gvisor/gvisor_test.go`, `broker/vm/vm_test.go` |
-| RES-2 | `broker/admission/admission_test.go`, `broker/cgroup/cgroup_test.go`, `broker/daemon/admission_wiring_test.go`, `broker/vm/gvisor/gvisor_test.go`, `broker/vm/vm_test.go` |
+| RES-2 | `broker/admission/admission_test.go`, `broker/cgroup/cgroup_test.go`, `broker/cmd/agentosd/fit_test.go`, `broker/daemon/admission_wiring_test.go`, `broker/vm/gvisor/gvisor_test.go`, `broker/vm/vm_test.go` |
 | RES-3 | — |
 | RES-4 | `broker/vm/vm_test.go` |
 | UPD-1 | — |
