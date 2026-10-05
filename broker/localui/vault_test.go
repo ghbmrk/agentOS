@@ -509,15 +509,15 @@ func TestVaultUnlockRefusesCrossSitePosts(t *testing.T) {
 
 // A trusted PC that started a boot path the box never approved (P2-4b)
 // falls back to the card. The page says why, and offers "Keep this PC
-// trusted", ticked only when the cause is a box update or changed Secure
-// Boot settings (#42 review).
+// trusted", ticked only when the cause is a box update; the Secure Boot
+// hint is forgeable from the drive (#42 review).
 func TestVaultChangedBootPath(t *testing.T) {
 	cases := []struct {
 		boot, notice string
 		ticked       bool
 	}{
 		{"updated", "Box updated. Unlock once with your passphrase and a code; this PC stays trusted after that.", true},
-		{"secure_boot", "Secure Boot settings on this PC changed. If you updated firmware, unlock with your card to keep this PC trusted.", true},
+		{"secure_boot", "Secure Boot settings on this PC changed. If you updated firmware, unlock with your card to keep this PC trusted.", false},
 		{"other", "This PC started the box in a way it hasn&#39;t before. If you didn&#39;t change anything, the drive may have been tampered with. Unlock only if you&#39;re sure.", false},
 	}
 	for _, c := range cases {

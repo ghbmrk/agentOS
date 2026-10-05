@@ -281,8 +281,10 @@ func (s *Server) vaultPage(w http.ResponseWriter, r *http.Request, errText strin
 	v.State, v.PIN = st.State, st.PIN
 	if st.BootChanged {
 		// Wording and default as ruled in the #42 review: tick "Keep
-		// this PC trusted" only when the cause is known to be benign.
-		v.Keep, v.KeepOn = true, st.Updated || st.SecureBoot
+		// this PC trusted" only for a box update. The Secure Boot hint is
+		// forgeable from the drive (a modified initrd can make only PCR 7
+		// look changed), so it is never ticked by default.
+		v.Keep, v.KeepOn = true, st.Updated && !st.SecureBoot
 		switch {
 		case st.Updated:
 			v.Boot = "Box updated. Unlock once with your passphrase and a code; this PC stays trusted after that."
