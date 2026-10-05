@@ -262,7 +262,7 @@ func TestA14CanaryThroughTheGuestSocket(t *testing.T) {
 			sock := filepath.Join(dir, guest.Socket)
 			clients[a.machine] = &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				return (&net.Dialer{}).DialContext(ctx, "unix", sock)
-			}}}
+			}}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 		}
 		if a.path == "/owner/next" {
 			plane.DeliverOwner(a.machine, "hello from the owner", false) // raises m1 to private
@@ -304,7 +304,9 @@ func TestA14CanaryThroughTheGuestSocket(t *testing.T) {
 		}
 	}
 
-	// A14 assertions that hold whoever minted the canaries.
+	// A14 assertions that hold whoever minted the canaries. The client
+	// does not follow redirects, and the socket must not send one: an
+	// unclean path is denied where it lands, never redirected (ADP-10).
 	want := []int{200, 200, 200, 200, 403, 403, 403, 403, 403, 403, 200, 200, 403, 403, 200, 200, 200, 200, 403, 403, 404, 404}
 	if fmt.Sprint(statuses) != fmt.Sprint(want) {
 		t.Errorf("statuses\n got %v\nwant %v", statuses, want)
