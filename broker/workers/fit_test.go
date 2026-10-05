@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -490,7 +491,8 @@ func TestCAP1KeepSaysWhatWentBeforeAnError(t *testing.T) {
 	r.must("agent", toolFork, m{"name": "src", "into": []string{"a", "b", "c", "d"}}, nil)
 	r.tools.M = failDestroy{r.m, workerID(ag.Lineage, "c")}
 	err := r.call("agent", toolKeep, m{"name": "a"}, nil)
-	if err == nil || !strings.Contains(err.Error(), "worker c: disk busy (already destroyed: b)") {
+	// The cause goes to the broker's log; the guest gets its ref (SR2-3f).
+	if err == nil || !regexp.MustCompile(`^worker c: failed \(ref [0-9a-f]{8}\); the broker's log has the detail \(already destroyed: b\)$`).MatchString(err.Error()) {
 		t.Fatalf("keep with a failed destroy: %v", err)
 	}
 }
