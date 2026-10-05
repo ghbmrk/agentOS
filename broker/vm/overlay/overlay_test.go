@@ -626,3 +626,34 @@ func TestMeasureRefusesARootThatIsNotADirectory(t *testing.T) {
 		}
 	}
 }
+
+// The path limit is exact, for a directory and a file name alike: a path
+// of the most bytes a copy can open under the longest root is measured,
+// one byte more is too long (L3 SHOULD-1 on #174).
+func TestMeasurePathLimitIsExact(t *testing.T) {
+	const room = 300
+	longest := maxPathLen - 1 - room // root + "/" + path + NUL
+	for _, kind := range []string{"dir", "file"} {
+		for _, extra := range []int{0, 1} {
+			root := t.TempDir()
+			top := filepath.Join(root, strings.Repeat("d", 149))
+			if err := os.Mkdir(top, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			leaf := filepath.Join(top, strings.Repeat("e", 149+extra)) // "/d…/e…": 300 bytes, or 301
+			var err error
+			if kind == "dir" {
+				err = os.Mkdir(leaf, 0o755)
+			} else {
+				err = os.WriteFile(leaf, nil, 0o644)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = MeasureUnder(root, longest)
+			if extra == 0 && err != nil || extra == 1 && !errors.Is(err, ErrTooDeep) {
+				t.Fatalf("%s at limit+%d: %v", kind, extra, err)
+			}
+		}
+	}
+}

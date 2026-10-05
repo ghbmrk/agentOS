@@ -305,11 +305,6 @@ func FreeBytes(path string) (int64, error) {
 // use. Its text names no path.
 var ErrTooDeep = fmt.Errorf("directories nest more than %d deep, or a path is too long; flatten them", MaxTreeDepth)
 
-// copySlack is room kept under the host's path limit for the longest other
-// root a layer's paths are copied under (a snapshot's fs, a fork's layer),
-// so a layer Measure accepts can be copied.
-const copySlack = 512
-
 // errOtherFS is an entry on another file system than the layer's root: a
 // mount inside the layer, which a guest cannot make, so the layer is not
 // measured (L3 S1 on #174).
@@ -320,10 +315,16 @@ var errOtherFS = errors.New("a mount inside the layer")
 // mid-walk are skipped. It walks by directory handles, so it holds one
 // open directory per level and never fails on a host path's length
 // (security R4 on #166); a layer nested deeper than MaxTreeDepth, or with
-// a path that under root, plus copySlack, would reach the host's path
-// limit, is ErrTooDeep.
-func Measure(root string) (Usage, error) {
-	w := measurer{seen: map[[2]uint64]bool{}, room: maxPathLen - copySlack - len(root)}
+// a path too long to copy under root, is ErrTooDeep.
+func Measure(root string) (Usage, error) { return MeasureUnder(root, len(root)) }
+
+// MeasureUnder is Measure for a layer copied under roots up to longest
+// bytes long: a path the copy could not open under the longest of them is
+// ErrTooDeep, wherever this copy of the layer is (L3 MUST-A on #174).
+func MeasureUnder(root string, longest int) (Usage, error) {
+	// root, then "/" and a relative path (plen counts both), stays under
+	// the host's limit, which counts the terminating NUL.
+	w := measurer{seen: map[[2]uint64]bool{}, room: maxPathLen - 1 - longest}
 	// Errors name no host path: they can reach a guest's text (security
 	// N2 on #174).
 	fd, err := syscall.Open(root, oPath|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
@@ -349,7 +350,7 @@ type measurer struct {
 	u    Usage
 	seen map[[2]uint64]bool
 	dev  uint64 // the root's file system
-	room int    // the longest relative path a copy can take
+	room int    // the longest "/"-led relative path a copy can take
 }
 
 // handle counts the entry O_PATH handle fd names, depth levels and plen
