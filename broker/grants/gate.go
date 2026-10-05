@@ -569,6 +569,17 @@ func (g *Gate) evaluateBroker(ctx context.Context, phase journal.Phase, in journ
 		}
 		return verdict{kind: ask, local: true, item: owner.Item{Ref: in.ID, Object: short(s),
 			Facts: owner.Facts{Kind: owner.GrantChange, Verb: "grant", NoRecipient: true}}}
+	case journal.ActionRecallRollback:
+		// Recall's deletion reach asks before taking back agent work
+		// (recalltool W10). Only the broker submits it; its line is the
+		// broker's own text.
+		obj, _ := in.Params["object"].(string)
+		detail, _ := in.Params["detail"].(string)
+		if in.Origin != OriginRecall || in.Executor != RecallExecutor || obj == "" {
+			return verdict{kind: deny, why: "a recall rollback comes only from the broker's recall"}
+		}
+		return verdict{kind: ask, item: owner.Item{Ref: in.ID, Object: obj, Detail: detail,
+			Facts: owner.Facts{Kind: owner.Ordinary, Verb: "undo", NoRecipient: true}}}
 	case journal.ActionGrantPause, journal.ActionGrantRevoke:
 		if in.Origin != OriginOwner {
 			return verdict{kind: deny, why: "only the owner pauses or revokes a grant"}

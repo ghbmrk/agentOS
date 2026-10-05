@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/events"
+	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/recall"
 )
 
@@ -34,6 +35,10 @@ type ServiceConfig struct {
 	Journal  Journal
 	Machines Machines
 	Cases    Cases
+	// Ask takes a rollback that would lose agent work to the owner first
+	// (W10; the grants gate). Location is the owner's time zone.
+	Ask      Asker
+	Location *time.Location
 	Logf     func(format string, args ...any)
 }
 
@@ -101,7 +106,8 @@ func OpenService(cfg ServiceConfig) (*Service, error) {
 	if s.Prov, err = OpenProvenance(stores[2]); err != nil {
 		return fail(err)
 	}
-	s.Reach = &Reach{Prov: s.Prov, Journal: cfg.Journal, Machines: cfg.Machines, Cases: cfg.Cases, Logf: cfg.Logf}
+	s.Reach = &Reach{Prov: s.Prov, Journal: cfg.Journal, Machines: cfg.Machines, Cases: cfg.Cases,
+		Ask: cfg.Ask, Location: cfg.Location, Logf: cfg.Logf}
 	// Registering replays every tombstone, so a reach a crash cut short
 	// runs again (CAP-3).
 	if err := s.Index.OnDelete(s.Reach.OnDelete); err != nil {
@@ -175,4 +181,26 @@ func (l *Late) Call(ctx context.Context, machine, lineage, name string, args jso
 		}
 	}
 	return "", false, nil
+}
+
+// LateExecutor is the journal executor for rollback intents (ExecutorName)
+// before and after the service opens. An approved rollback that runs
+// before recall is open is recorded as approved, machines not reset, so
+// Retry carries it through once recall opens.
+type LateExecutor struct{ r atomic.Pointer[Reach] }
+
+// Set makes r the executor.
+func (l *LateExecutor) Set(r *Reach) { l.r.Store(r) }
+
+// Execute runs an approved rollback.
+func (l *LateExecutor) Execute(ctx context.Context, in journal.Intent, n int) journal.Outcome {
+	if r := l.r.Load(); r != nil {
+		return r.Execute(ctx, in, n)
+	}
+	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: approvedOnly + "recall is not open yet"}
+}
+
+// Reconcile reports an interrupted rollback as approved, to be finished.
+func (l *LateExecutor) Reconcile(ctx context.Context, in journal.Intent, n int) journal.Outcome {
+	return (&Reach{}).Reconcile(ctx, in, n)
 }

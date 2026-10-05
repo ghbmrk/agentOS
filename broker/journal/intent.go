@@ -58,6 +58,10 @@ const (
 	ActionTrustedHostChange = "meta.trusted_host"
 	ActionReleaseActivate   = "meta.release"
 	ActionSkillAdopt        = "meta.skill"
+	// ActionRecallRollback takes back from an agent lineage what it did
+	// since it read a record the owner deleted (recalltool W10): only the
+	// broker submits it, and only the owner approves it.
+	ActionRecallRollback = "meta.recall.rollback"
 )
 
 // Authority-narrowing broker-state changes. Pausing or revoking must always

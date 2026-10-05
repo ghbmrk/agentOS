@@ -86,7 +86,7 @@ var guestPlane = map[string]struct {
 	// beyond the in-process hashing embedder (DEP-1).
 	"recall":     {nil, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
 	"events":     {[]string{"recall"}, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
-	"recalltool": {[]string{"recall", "events"}, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
+	"recalltool": {[]string{"recall", "events", "journal"}, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
 }
 
 var forbiddenStd = []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "syscall", "unsafe", "C"}

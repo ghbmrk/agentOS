@@ -2,12 +2,16 @@ package recalltool
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/recall"
 )
 
@@ -29,9 +33,24 @@ type Cases interface {
 	ForgetTasks(tasks ...string) (int, error)
 }
 
+// Asker submits the broker's rollback intents for the owner's approval
+// (the grants gate: Submit, Authorize, Get).
+type Asker interface {
+	Submit(in journal.Intent) (journal.Status, error)
+	Authorize(ctx context.Context, id string) (journal.Status, error)
+	Get(id string) (journal.Status, error)
+}
+
+// The broker's rollback intents (journal.ActionRecallRollback). The grants
+// gate checks the same names (grants.OriginRecall, grants.RecallExecutor).
+const (
+	ExecutorName = "recall"
+	Origin       = "broker:recall"
+)
+
 // Reach carries a recall deletion past the index (CAP-3, K2b). For each
 // fork lineage the provenance record says was given a deleted item, first
-// at T:
+// at T, taking it back means:
 //
 //  1. the lineage's machines go back to before T and its snapshots from T
 //     on are deleted (Machines);
@@ -41,16 +60,28 @@ type Cases interface {
 //  3. change-pipeline cases built on those intents are removed (Cases);
 //  4. the provenance record forgets what the lineage was given from T on.
 //
+// The owner decides when that loses work (Mark, 2026-10-05; W10): a
+// lineage that has submitted nothing since T is taken back at once; one
+// that has is taken back only once the owner approves a rollback intent
+// naming what would be undone (Ask). Until then, or if the owner says no
+// or does not answer, the lineage keeps its work and what it read. The
+// item itself is gone from recall at once either way.
+//
 // An intent still in flight is held: the deletion stays pending and Retry
 // finishes it once the intent settles. A failure keeps it pending too.
 // Provenance is forgotten last, so after a crash the index's replay of its
-// tombstones at start runs the reach again (machines are reset again then:
-// it errs toward taking back too much).
+// tombstones at start runs the reach again; a rollback the journal records
+// as done does not reset the machines a second time.
 type Reach struct {
 	Prov     *Provenance
 	Journal  Journal  // nil: not wired
 	Machines Machines // nil: not wired
 	Cases    Cases    // nil: not wired
+	// Ask is where a rollback that loses work goes for approval. Nil:
+	// such a rollback waits (pending) and nothing is undone.
+	Ask Asker
+	// Location is the owner's time zone for the approval line.
+	Location *time.Location
 	Logf     func(format string, args ...any)
 
 	mu      sync.Mutex
@@ -58,9 +89,16 @@ type Reach struct {
 	reset   map[string]bool // lineage@T whose machines are done this run
 }
 
-// OnDelete is the recall.Index deletion hook.
+// errWaiting keeps a deletion pending while the owner decides.
+var errWaiting = errors.New("waiting for the owner")
+
+// OnDelete is the recall.Index deletion hook. A deletion waiting for the
+// owner is not an error.
 func (r *Reach) OnDelete(d recall.Deleted) error {
-	return r.reach(context.Background(), d.ID)
+	if err := r.reach(context.Background(), d.ID, d.Source.Kind); !errors.Is(err, errWaiting) {
+		return err
+	}
+	return nil
 }
 
 // Retry runs every pending deletion again; Service.Run calls it.
@@ -74,7 +112,9 @@ func (r *Reach) Retry(ctx context.Context) error {
 	sort.Strings(ids)
 	var errs []error
 	for _, id := range ids {
-		errs = append(errs, r.reach(ctx, id))
+		if err := r.reach(ctx, id, ""); err != nil && !errors.Is(err, errWaiting) {
+			errs = append(errs, err)
+		}
 	}
 	return errors.Join(errs...)
 }
@@ -86,7 +126,7 @@ func (r *Reach) Pending() int {
 	return len(r.pending)
 }
 
-func (r *Reach) reach(ctx context.Context, id string) error {
+func (r *Reach) reach(ctx context.Context, id, kind string) error {
 	holders := r.Prov.Holders(id)
 	lineages := make([]string, 0, len(holders))
 	for l := range holders {
@@ -94,8 +134,13 @@ func (r *Reach) reach(ctx context.Context, id string) error {
 	}
 	sort.Strings(lineages)
 	var errs []error
+	waiting := false
 	for _, l := range lineages {
-		if err := r.lineage(ctx, l, holders[l]); err != nil {
+		err := r.decide(ctx, l, holders[l], kind)
+		switch {
+		case errors.Is(err, errWaiting):
+			waiting = true
+		case err != nil:
 			errs = append(errs, fmt.Errorf("deletion reach into %s: %w", l, err))
 		}
 	}
@@ -104,7 +149,7 @@ func (r *Reach) reach(ctx context.Context, id string) error {
 	if r.pending == nil {
 		r.pending = map[string]bool{}
 	}
-	if err != nil {
+	if err != nil || waiting {
 		r.pending[id] = true
 	} else {
 		delete(r.pending, id)
@@ -113,13 +158,147 @@ func (r *Reach) reach(ctx context.Context, id string) error {
 	if err != nil && r.Logf != nil {
 		r.Logf("recall: %v", err)
 	}
+	if err == nil && waiting {
+		return errWaiting
+	}
 	return err
 }
 
-func (r *Reach) lineage(ctx context.Context, lineage string, since time.Time) error {
-	key := lineage + "@" + since.UTC().Format(time.RFC3339Nano)
+// decide takes lineage back from since at once, or asks the owner first
+// when it has done work since.
+func (r *Reach) decide(ctx context.Context, lineage string, since time.Time, kind string) error {
+	var work []string
+	if r.Journal != nil {
+		work = r.Journal.Since("guest:"+lineage, since)
+	}
+	if len(work) == 0 {
+		return r.lineage(ctx, lineage, since, true)
+	}
+	if r.Ask == nil {
+		return errWaiting
+	}
+	id := rollbackID(lineage, since)
+	st, err := r.Ask.Get(id)
+	if err != nil {
+		// First ask: the line is fixed now, so a later count does not
+		// make the same intent disagree with itself (OP-1).
+		in := journal.Intent{ID: id, Origin: Origin, Account: journal.BrokerAccount,
+			Action: journal.ActionRecallRollback, Executor: ExecutorName,
+			Params: map[string]any{"lineage": lineage, "since": since.UTC().Format(time.RFC3339Nano),
+				"object": r.line(lineage, since), "detail": detail(len(work), kind)}}
+		if st, err = r.Ask.Submit(in); err != nil {
+			return err
+		}
+	}
+	switch st.State {
+	case journal.Pending:
+		if _, err := r.Ask.Authorize(ctx, id); err != nil {
+			return err
+		}
+		return errWaiting
+	case journal.Authorized, journal.InFlight, journal.OutcomeUnknown:
+		return errWaiting
+	case journal.Succeeded:
+		// Approved and run (Execute): finish what it left, resetting the
+		// machines only if that had failed.
+		reset := false
+		if n := len(st.Attempts); n > 0 {
+			reset = strings.HasPrefix(st.Attempts[n-1].Evidence, approvedOnly)
+		}
+		return r.lineage(ctx, lineage, since, reset)
+	default:
+		// Declined, unanswered, or refused: the lineage keeps its work and
+		// what it read; nothing more is asked for this deletion.
+		return nil
+	}
+}
+
+// Execute runs an approved rollback intent (the journal executor named
+// ExecutorName).
+func (r *Reach) Execute(ctx context.Context, in journal.Intent, _ int) journal.Outcome {
+	lineage, _ := in.Params["lineage"].(string)
+	s, _ := in.Params["since"].(string)
+	since, err := time.Parse(time.RFC3339Nano, s)
+	if in.Action != journal.ActionRecallRollback || lineage == "" || err != nil {
+		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "malformed recall rollback"}
+	}
+	// The owner's YES is the effect: once approved, the rollback is
+	// carried through by Retry whatever fails now. The evidence says
+	// whether the machines still need resetting.
+	err = r.lineage(ctx, lineage, since, true)
+	switch {
+	case err == nil:
+		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "rolled back"}
+	case r.machinesDone(lineage, since):
+		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "machines reset; finishing: " + err.Error()}
+	}
+	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: approvedOnly + err.Error()}
+}
+
+// approvedOnly starts the evidence of a rollback approved but whose
+// machines are not reset yet.
+const approvedOnly = "approved; machines not reset yet: "
+
+// Reconcile: a rollback a crash interrupted was approved; Retry resets
+// the machines (again, if they had been) and finishes it.
+func (r *Reach) Reconcile(context.Context, journal.Intent, int) journal.Outcome {
+	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: approvedOnly + "interrupted by a restart"}
+}
+
+func (r *Reach) machinesDone(lineage string, since time.Time) bool {
 	r.mu.Lock()
-	done := r.reset[key]
+	defer r.mu.Unlock()
+	return r.reset[resetKey(lineage, since)]
+}
+
+func resetKey(lineage string, since time.Time) string {
+	return lineage + "@" + since.UTC().Format(time.RFC3339Nano)
+}
+
+func rollbackID(lineage string, since time.Time) string {
+	h := sha256.Sum256([]byte(resetKey(lineage, since)))
+	return "recall-rollback-" + hex.EncodeToString(h[:12])
+}
+
+// line is the approval's object: whose work, since when, in the owner's
+// time zone. The agent is named by its lineage's root machine.
+func (r *Reach) line(lineage string, since time.Time) string {
+	loc := r.Location
+	if loc == nil {
+		loc = time.UTC
+	}
+	name := lineage
+	if i := strings.LastIndex(name, "."); i > 0 {
+		name = name[:i]
+	}
+	return fmt.Sprintf("%s work since %s", name, since.In(loc).Format("15:04 Jan 2"))
+}
+
+func detail(actions int, kind string) string {
+	what := "a record"
+	switch kind {
+	case "mail":
+		what = "a mail"
+	case "file":
+		what = "a file"
+	case "calendar":
+		what = "an event"
+	case "contact":
+		what = "a contact"
+	}
+	plural := "s"
+	if actions == 1 {
+		plural = ""
+	}
+	return fmt.Sprintf("%d action%s since it read %s you deleted", actions, plural, what)
+}
+
+// lineage takes lineage back from since; machines false skips the machine
+// reset (already done).
+func (r *Reach) lineage(ctx context.Context, lineage string, since time.Time, machines bool) error {
+	key := resetKey(lineage, since)
+	r.mu.Lock()
+	done := r.reset[key] || !machines
 	r.mu.Unlock()
 	if r.Machines != nil && !done {
 		if err := r.Machines.ForgetSince(ctx, lineage, since); err != nil {

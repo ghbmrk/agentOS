@@ -83,6 +83,10 @@ type Config struct {
 	// Executors are the adapters' executors, by name; each needs its
 	// declaration in Grants.Declared. None exist before P2-6/P2-7.
 	Executors map[string]journal.Executor
+	// Recall runs the broker's recall rollback intents (grants
+	// RecallExecutor, recalltool W10) once the owner approves them. Nil:
+	// none can run.
+	Recall journal.Executor
 	// Redactor scrubs journaled free text. Nil journals none at all until
 	// the vault's redactor (CRED-7 values plus CH-19 patterns) is wired
 	// with the vault unlock (P2-4).
@@ -157,7 +161,7 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 	gcfg := cfg.Grants
 	execs := map[string]journal.Executor{}
 	for name, ex := range cfg.Executors {
-		if name == grants.ExecutorName {
+		if name == grants.ExecutorName || name == grants.RecallExecutor {
 			store.Close()
 			return nil, fmt.Errorf("daemon: executor name %q is reserved", name)
 		}
@@ -169,6 +173,9 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 	}
 	gate := grants.New(gcfg)
 	execs[grants.ExecutorName] = gate
+	if cfg.Recall != nil {
+		execs[grants.RecallExecutor] = cfg.Recall
+	}
 	red := cfg.Redactor
 	if red == nil {
 		red = redactAll

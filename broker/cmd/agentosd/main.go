@@ -117,7 +117,7 @@ func (r recallLabels) Raise(id string) error { return r.m.RaiseLabel(id, vm.Priv
 // the tools answer that recall opens after the unlock. STOP and STATUS
 // never wait on any of it. sc carries the labels and where deletions reach
 // (the journal and, when machines run, the machine manager).
-func openRecall(ctx context.Context, v *modelroute.Verifier, sc recalltool.ServiceConfig, late *recalltool.Late) {
+func openRecall(ctx context.Context, v *modelroute.Verifier, sc recalltool.ServiceConfig, late *recalltool.Late, exec *recalltool.LateExecutor) {
 	var key []byte
 	for {
 		k, err := v.RecallKey()
@@ -142,6 +142,7 @@ func openRecall(ctx context.Context, v *modelroute.Verifier, sc recalltool.Servi
 		return
 	}
 	late.Set(svc.Tools)
+	exec.Set(svc.Reach)
 	log.Printf("recall open: %d items", svc.Index.Len())
 	svc.Run(ctx, log.Printf)
 	svc.Close()
@@ -208,6 +209,9 @@ func main() {
 		cfg.OwnerVerifier = ownerVerifier{verifier}
 	}
 	recallTools := &recalltool.Late{}
+	// Rollbacks the owner approves run here (recalltool W10).
+	recallExec := &recalltool.LateExecutor{}
+	cfg.Recall = recallExec
 	// No modem driver exists before P2-3, so texts arrive only through the
 	// owner socket and the channel's own outbound texts are not sent.
 
@@ -219,7 +223,7 @@ func main() {
 	}
 	// Deletions reach the journal's guest intents (CAP-3). The change
 	// pipeline is not run by the broker yet; whoever wires it sets Cases.
-	recallCfg := recalltool.ServiceConfig{Dir: recallDir, Journal: d.Engine()}
+	recallCfg := recalltool.ServiceConfig{Dir: recallDir, Journal: d.Engine(), Ask: d.Gate(), Location: time.Local}
 	if runsc != "" {
 		svc := &lateServices{}
 		m, err := vm.Open(ctx, vm.Config{
@@ -250,7 +254,7 @@ func main() {
 	// The recall identity key is vault-held (recall K5): recall opens once
 	// the vault process can hand it over.
 	if recallDir != "" && verifier != nil {
-		go openRecall(ctx, verifier, recallCfg, recallTools)
+		go openRecall(ctx, verifier, recallCfg, recallTools, recallExec)
 	}
 	log.Printf("broker up; owner socket %s/%s", cfg.SocketDir, daemon.OwnerSocket)
 	d.Wait()
