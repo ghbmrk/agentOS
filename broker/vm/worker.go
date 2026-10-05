@@ -73,7 +73,8 @@ func (m *Manager) lineageLive(lineage string) bool {
 // Exec runs c in worker id and waits up to timeout. It holds the machine's
 // lock, so no snapshot, rollback or fork of the worker runs meanwhile;
 // preemption does not wait for the lock and ends the command with the
-// machine. Only workers take commands: an agent machine is driven by its
+// machine; erasure, rollback and destroy end the command first. Only
+// workers take commands: an agent machine is driven by its
 // own runtime, never by the broker on a guest's behalf.
 func (m *Manager) Exec(ctx context.Context, id string, c Command, timeout time.Duration) (ExecResult, error) {
 	if !strings.HasPrefix(id, WorkerPrefix) {
@@ -97,9 +98,46 @@ func (m *Manager) Exec(ctx context.Context, id string, c Command, timeout time.D
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	mc.execCancel.Store(&cancel)
+	defer mc.execCancel.Store(nil)
 	r, err := ex.Exec(ctx, id, c)
+	if err != nil && ctx.Err() == context.Canceled {
+		return ExecResult{}, fmt.Errorf("vm: %s: command ended before it finished", id)
+	}
 	if err != nil && ctx.Err() == context.DeadlineExceeded {
 		return ExecResult{TimedOut: true, Stdout: r.Stdout, Stderr: r.Stderr, Truncated: r.Truncated, ExitCode: -1}, nil
 	}
 	return r, err
+}
+
+// Park checkpoints a running worker, memory included, and stops it,
+// handing its memory back to admission (UX-146-1). The checkpoint becomes
+// the worker's newest snapshot; rolling back to it revives the worker as
+// it was.
+func (m *Manager) Park(ctx context.Context, id string) (Snapshot, error) {
+	if !strings.HasPrefix(id, WorkerPrefix) {
+		return Snapshot{}, fmt.Errorf("vm: %s is not a worker", id)
+	}
+	mc, err := m.get(id)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	mc.mu.Lock()
+	if mc.State != Running {
+		mc.mu.Unlock()
+		return Snapshot{}, fmt.Errorf("%w: %s is %s", ErrState, id, mc.State)
+	}
+	s, err := m.takeLocked(ctx, mc, Full)
+	if err == nil {
+		err = m.stopRuntime(ctx, mc)
+		if serr := m.saveMachine(mc); err == nil {
+			err = serr
+		}
+	}
+	stopped := mc.State != Running
+	mc.mu.Unlock()
+	if stopped {
+		m.cfg.Admit.Release(id)
+	}
+	return s, err
 }

@@ -228,6 +228,20 @@ type machine struct {
 	// preempting is set, without the lock, while a preemption is under way
 	// (see Preempt); startFrom refuses to start the machine meanwhile.
 	preempting atomic.Bool
+	// execCancel ends a worker's command in flight (Exec), so erasure,
+	// rollback and destroy never wait behind it for the lock.
+	execCancel atomic.Pointer[context.CancelFunc]
+}
+
+// lockEndingExec takes mc's lock, ending any worker command that holds or
+// takes it meanwhile, so the caller never waits behind one.
+func (mc *machine) lockEndingExec() {
+	for !mc.mu.TryLock() {
+		if c := mc.execCancel.Load(); c != nil {
+			(*c)()
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 // Manager is safe for concurrent use.
@@ -912,7 +926,7 @@ func (m *Manager) Rollback(ctx context.Context, id, snapID string) error {
 	if err != nil {
 		return err
 	}
-	mc.mu.Lock()
+	mc.lockEndingExec()
 	if !inLineage(mc, s) {
 		mc.mu.Unlock()
 		return fmt.Errorf("%w: %s, %s", ErrLineage, id, snapID)
@@ -1396,7 +1410,7 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	mc.mu.Lock()
+	mc.lockEndingExec()
 	err = m.stopRuntime(ctx, mc)
 	if err == nil {
 		err = os.RemoveAll(m.machineDir(id))

@@ -119,7 +119,7 @@ var guestPlane = map[string]struct {
 	// Worker machines (CAP-8): served to guests as tools over the machine
 	// manager; no journal, no executors, no network clients, no processes
 	// (commands run through vm/gvisor's runsc exec).
-	"workers": {[]string{"vm", "vm/overlay"}, forbiddenStd},
+	"workers": {[]string{"admission", "vm", "vm/overlay"}, forbiddenStd},
 	// Agents' questions to the owner (P3-8, W9): served to guests and
 	// answered from the owner channel, through hooks the wiring passes.
 	"question": {nil, forbiddenStd},

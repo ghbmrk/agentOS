@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/vm"
@@ -323,5 +324,62 @@ func TestCAP8ArgumentsAreBounded(t *testing.T) {
 	}
 	if _, handled, _ := r.tools.Call(context.Background(), "agent", "x", "effect_request", nil); handled {
 		t.Fatal("worker tools claimed another tool's name")
+	}
+}
+
+// UX-146-1: an idle worker, or one whose creator has stopped, is parked
+// (checkpointed and stopped) and revives by rollback to its snapshot.
+func TestCAP8IdleAndOrphanedWorkersAreParkedAndRevive(t *testing.T) {
+	r := newRig(t, 8000)
+	now := time.Now()
+	r.tools.Now = func() time.Time { return now }
+	r.agent("agent", vm.Public)
+	r.must("agent", toolCreate, m{"name": "busy"}, nil)
+	r.must("agent", toolCreate, m{"name": "idle"}, nil)
+	r.must("agent", toolWrite, m{"name": "idle", "path": "/f", "content": "kept"}, nil)
+
+	now = now.Add(IdleAfter - time.Minute)
+	r.must("agent", toolExec, m{"name": "busy", "argv": []string{"echo"}}, nil)
+	now = now.Add(2 * time.Minute)
+	parked := r.tools.Reap(context.Background())
+	if len(parked) != 1 || !strings.HasSuffix(parked[0], "-idle") {
+		t.Fatalf("parked %v, want only the idle worker", parked)
+	}
+	var l struct {
+		Workers []struct{ Name, State, Snapshot string }
+	}
+	r.must("agent", toolList, m{}, &l)
+	var snap string
+	for _, w := range l.Workers {
+		if w.Name == "idle" {
+			if w.State != "stopped" || w.Snapshot == "" {
+				t.Fatalf("parked worker listed as %+v", w)
+			}
+			snap = w.Snapshot
+		}
+	}
+	r.must("agent", toolRollback, m{"name": "idle", "snapshot": snap}, nil)
+	var read struct{ Content string }
+	r.must("agent", toolRead, m{"name": "idle", "path": "/f"}, &read)
+	if read.Content != "kept" {
+		t.Fatalf("revived worker lost its file: %q", read.Content)
+	}
+
+	// The creator stops: its workers park at once.
+	if err := r.m.Destroy(context.Background(), "agent"); err != nil {
+		t.Fatal(err)
+	}
+	if parked := r.tools.Reap(context.Background()); len(parked) != 2 {
+		t.Fatalf("with the creator gone, parked %v, want both workers", parked)
+	}
+}
+
+// UX-146-2: a refusal for want of room says what works.
+func TestCAP8NoRoomSaysWhatToDo(t *testing.T) {
+	r := newRig(t, 1000)
+	r.agent("agent", vm.Public)
+	err := r.call("agent", toolCreate, m{"name": "big", "mem_mb": 1024}, nil)
+	if err == nil || !strings.Contains(err.Error(), "destroy a worker, or ask for less memory") {
+		t.Fatalf("refusal = %v", err)
 	}
 }

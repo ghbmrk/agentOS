@@ -22,8 +22,10 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/vm"
 	"github.com/ghbmrk/agentos/broker/vm/overlay"
 )
@@ -41,12 +43,13 @@ type Machines interface {
 	Rollback(ctx context.Context, id, snapID string) error
 	Destroy(ctx context.Context, id string) error
 	RaiseLabel(id string, l vm.Label) error
+	Park(ctx context.Context, id string) (vm.Snapshot, error)
 }
 
 // Limits bound what one lineage may ask for.
 const (
 	MaxWorkers     = 16        // live workers per lineage; A15 needs 8
-	DefaultMemMB   = 512       // a worker's budget when none is asked
+	DefaultMemMB   = 256       // a worker's budget when none is asked; 8 fit beside the N95's agent (potency R1 on #146)
 	MinMemMB       = 64        // below this a base image does not start
 	MaxArgs        = 64        // arguments in one command
 	MaxArgBytes    = 16 << 10  // all arguments together
@@ -55,6 +58,8 @@ const (
 	DefaultTimeout = time.Minute
 	MaxTimeout     = 10 * time.Minute
 	MaxChanges     = 500 // diff entries returned
+	// IdleAfter parks a worker no tool has named for this long (UX-146-1).
+	IdleAfter = time.Hour
 )
 
 // Tools serves the worker tools. Image and Argv build every worker; MaxMemMB
@@ -64,6 +69,28 @@ type Tools struct {
 	Image    string
 	Argv     []string
 	MaxMemMB int64
+	Now      func() time.Time // nil is time.Now
+
+	// mu serializes creating workers, so the per-lineage count cannot be
+	// raced past (security R1 on #146), and guards used.
+	mu   sync.Mutex
+	used map[string]time.Time // worker ID -> last named by a tool
+}
+
+func (t *Tools) now() time.Time {
+	if t.Now != nil {
+		return t.Now()
+	}
+	return time.Now()
+}
+
+func (t *Tools) touch(id string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.used == nil {
+		t.used = map[string]time.Time{}
+	}
+	t.used[id] = t.now()
 }
 
 const (
@@ -107,7 +134,7 @@ func (t *Tools) List() []map[string]any {
 			"inputSchema": obj(map[string]any{"name": pName, "into": strList}, "name", "into")},
 		{"name": toolDiff, "description": "List the files that differ between two snapshots of your workers.",
 			"inputSchema": obj(map[string]any{"a": pSnap, "b": pSnap}, "a", "b")},
-		{"name": toolRollback, "description": "Restart a worker from one of its snapshots (or the one it was forked from).",
+		{"name": toolRollback, "description": "Restart a worker from one of its snapshots (or the one it was forked from). This also revives a stopped worker: the broker checkpoints and stops a worker no tool has named for an hour, or whose creator has stopped, and worker_list shows the snapshot to roll back to.",
 			"inputSchema": obj(map[string]any{"name": pName, "snapshot": pSnap}, "name", "snapshot")},
 		{"name": toolDestroy, "description": "Stop a worker and free its memory. Its snapshots stay in the broker's custody.",
 			"inputSchema": obj(map[string]any{"name": pName}, "name")},
@@ -203,6 +230,7 @@ func (t *Tools) worker(c caller, name string) (vm.Machine, error) {
 	if err != nil || w.Lineage != c.lineage {
 		return vm.Machine{}, errNoWorker
 	}
+	t.touch(w.ID)
 	return w, nil
 }
 
@@ -257,14 +285,21 @@ func (t *Tools) create(ctx context.Context, c caller, raw json.RawMessage) (any,
 	if a.MemMB < MinMemMB || a.MemMB > t.MaxMemMB {
 		return nil, fmt.Errorf("mem_mb must be between %d and %d", MinMemMB, t.MaxMemMB)
 	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	if t.count(c.lineage) >= MaxWorkers {
 		return nil, fmt.Errorf("at most %d workers at once; destroy one first", MaxWorkers)
 	}
 	s := vm.Spec{Image: t.Image, Class: c.spec.Class, MemMB: a.MemMB, Argv: t.Argv, Label: c.label}
-	w, err := t.M.CreateWorker(ctx, workerID(c.lineage, a.Name), c.lineage, s)
+	id := workerID(c.lineage, a.Name)
+	w, err := t.M.CreateWorker(ctx, id, c.lineage, s)
 	if err != nil {
-		return nil, fmt.Errorf("worker %s not started: %w", a.Name, err)
+		return nil, startErr(a.Name, err)
 	}
+	if t.used == nil {
+		t.used = map[string]time.Time{}
+	}
+	t.used[id] = t.now()
 	return map[string]any{"name": a.Name, "label": w.Label.String(), "mem_mb": w.Spec.MemMB}, nil
 }
 
@@ -411,6 +446,8 @@ func (t *Tools) fork(ctx context.Context, c caller, raw json.RawMessage) (any, e
 	if err := readable(c, w.Label); err != nil {
 		return nil, err
 	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	if len(a.Into) == 0 || t.count(c.lineage)+len(a.Into) > MaxWorkers {
 		return nil, fmt.Errorf("into needs 1 or more names, with at most %d workers at once", MaxWorkers)
 	}
@@ -423,7 +460,10 @@ func (t *Tools) fork(ctx context.Context, c caller, raw json.RawMessage) (any, e
 	}
 	s, err := t.M.Fork(ctx, w.ID, ids)
 	if err != nil {
-		return nil, fmt.Errorf("fork of %s: %w", a.Name, err)
+		return nil, startErr(a.Name, err)
+	}
+	for _, id := range ids {
+		t.used[id] = t.now()
 	}
 	return map[string]any{"snapshot": s.ID, "workers": a.Into}, nil
 }
@@ -478,9 +518,63 @@ func (t *Tools) rollback(ctx context.Context, c caller, raw json.RawMessage) (an
 		return nil, err
 	}
 	if err := t.M.Rollback(ctx, w.ID, a.Snapshot); err != nil {
-		return nil, fmt.Errorf("rollback of %s: %w", a.Name, err)
+		return nil, startErr(a.Name, err)
 	}
 	return map[string]any{"name": a.Name, "snapshot": a.Snapshot}, nil
+}
+
+// startErr says what to do when admission has no room (UX-146-2).
+func startErr(name string, err error) error {
+	if errors.Is(err, admission.ErrNoRoom) || errors.Is(err, admission.ErrPressure) {
+		return fmt.Errorf("no room for worker %s now: destroy a worker, or ask for less memory with mem_mb", name)
+	}
+	return fmt.Errorf("worker %s: %w", name, err)
+}
+
+// Reap checkpoints and stops (parks) each running worker that no tool has
+// named for IdleAfter, or whose lineage has no running machine other than
+// workers, so idle workers never hold memory the owner's work needs
+// (UX-146-1). A parked worker revives by worker_rollback to its newest
+// snapshot. agentosd runs it every minute.
+func (t *Tools) Reap(ctx context.Context) []string {
+	ids := t.M.Machines()
+	live := map[string]bool{} // lineages with a running non-worker machine
+	var workers []vm.Machine
+	for _, id := range ids {
+		mc, err := t.M.Get(id)
+		if err != nil {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(id, vm.WorkerPrefix):
+			if mc.State == vm.Running {
+				workers = append(workers, mc)
+			}
+		case mc.State == vm.Running:
+			live[mc.Lineage] = true
+		}
+	}
+	now := t.now()
+	var parked []string
+	for _, w := range workers {
+		t.mu.Lock()
+		if t.used == nil {
+			t.used = map[string]time.Time{}
+		}
+		last, seen := t.used[w.ID]
+		if !seen {
+			// First seen after a broker restart: the hour starts now.
+			t.used[w.ID], last = now, now
+		}
+		t.mu.Unlock()
+		if live[w.Lineage] && now.Sub(last) < IdleAfter {
+			continue
+		}
+		if _, err := t.M.Park(ctx, w.ID); err == nil {
+			parked = append(parked, w.ID)
+		}
+	}
+	return parked
 }
 
 func (t *Tools) destroy(ctx context.Context, c caller, raw json.RawMessage) (any, error) {
@@ -495,6 +589,9 @@ func (t *Tools) destroy(ctx context.Context, c caller, raw json.RawMessage) (any
 	if err := t.M.Destroy(ctx, w.ID); err != nil {
 		return nil, fmt.Errorf("worker %s: %w", a.Name, err)
 	}
+	t.mu.Lock()
+	delete(t.used, w.ID)
+	t.mu.Unlock()
 	return map[string]any{"destroyed": a.Name}, nil
 }
 

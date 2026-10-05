@@ -132,3 +132,98 @@ func TestCAP3ForgetSinceReachesTheLineagesWorkers(t *testing.T) {
 		t.Fatalf("worker still holds %q after ForgetSince", got)
 	}
 }
+
+// Erasure, rollback and destroy never wait behind a worker's command
+// (security F1 on #146): a 10-minute command ends, and ForgetSince
+// finishes with the data gone.
+func TestCAP3ForgetSinceDoesNotWaitForAWorkersCommand(t *testing.T) {
+	e := newEnv(t, 4096)
+	agent := e.create("agent", admission.Experiment, 500)
+	_, err := e.m.CreateWorker(bg, "wk-a", agent.Lineage, workerSpec(Private))
+	must(t, err)
+	since := time.Now()
+	time.Sleep(5 * time.Millisecond)
+	_, err = e.m.Exec(bg, "wk-a", Command{Argv: []string{"write", "secret"}, Stdin: []byte("deleted record")}, time.Second)
+	must(t, err)
+	for _, op := range []struct {
+		name string
+		run  func() error
+	}{
+		{"ForgetSince", func() error { return e.m.ForgetSince(bg, agent.Lineage, since) }},
+		{"Destroy", func() error { return e.m.Destroy(bg, "wk-a") }},
+	} {
+		done := make(chan error, 1)
+		go func() {
+			_, err := e.m.Exec(bg, "wk-a", Command{Argv: []string{"sleep"}}, 10*time.Minute)
+			done <- err
+		}()
+		time.Sleep(20 * time.Millisecond) // the command holds the worker
+		start := time.Now()
+		must(t, op.run())
+		if d := time.Since(start); d > 2*time.Second {
+			t.Fatalf("%s waited %v behind a command", op.name, d)
+		}
+		if err := <-done; err == nil {
+			t.Fatalf("%s: the command in flight reported success", op.name)
+		}
+		if op.name == "ForgetSince" {
+			if got := e.guestRead("wk-a", "secret"); got != "" {
+				t.Fatalf("worker still holds %q", got)
+			}
+		}
+	}
+}
+
+// A worker made after since has no restore point before it: ForgetSince
+// gives it a fresh layer from its image (security R4 on #146).
+func TestCAP3WorkerMadeAfterSinceComesBackEmpty(t *testing.T) {
+	e := newEnv(t, 4096)
+	agent := e.create("agent", admission.Experiment, 500)
+	since := time.Now()
+	time.Sleep(5 * time.Millisecond)
+	_, err := e.m.CreateWorker(bg, "wk-new", agent.Lineage, workerSpec(Private))
+	must(t, err)
+	_, err = e.m.Exec(bg, "wk-new", Command{Argv: []string{"write", "secret"}, Stdin: []byte("deleted record")}, time.Second)
+	must(t, err)
+	must(t, e.m.ForgetSince(bg, agent.Lineage, since))
+	if got := e.guestRead("wk-new", "secret"); got != "" {
+		t.Fatalf("worker made after since still holds %q", got)
+	}
+}
+
+// A parked worker frees its admission and comes back, memory included,
+// by rolling back to its parking checkpoint (UX-146-1).
+func TestCAP8ParkedWorkerFreesMemoryAndRevivesByRollback(t *testing.T) {
+	e := newEnv(t, 1000)
+	agent := e.create("agent", admission.Experiment, 500)
+	_, err := e.m.CreateWorker(bg, "wk-a", agent.Lineage, workerSpec(Public))
+	must(t, err)
+	e.rt.work("wk-a", 7)
+	_, err = e.m.Exec(bg, "wk-a", Command{Argv: []string{"write", "f"}, Stdin: []byte("kept")}, time.Second)
+	must(t, err)
+	s, err := e.m.Park(bg, "wk-a")
+	must(t, err)
+	w, err := e.m.Get("wk-a")
+	must(t, err)
+	if w.State != Stopped || w.Last != s.ID {
+		t.Fatalf("parked worker = %+v", w)
+	}
+	if _, ok := e.rt.memOf("wk-a"); ok {
+		t.Fatal("parked worker still running")
+	}
+	for _, r := range e.adm.Snapshot().Running {
+		if r.ID == "wk-a" {
+			t.Fatal("parked worker still admitted")
+		}
+	}
+	if _, err := e.m.Park(bg, "agent"); err == nil {
+		t.Fatal("parked an agent machine")
+	}
+	must(t, e.m.Rollback(bg, "wk-a", s.ID))
+	if n, ok := e.rt.memOf("wk-a"); !ok || n != 7 {
+		t.Fatalf("revived worker memory = %d (running %v), want 7", n, ok)
+	}
+	if got := e.guestRead("wk-a", "f"); got != "kept" {
+		t.Fatalf("revived worker file = %q", got)
+	}
+}

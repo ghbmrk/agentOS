@@ -411,7 +411,12 @@ func main() {
 			recallCfg.Labeler, recallCfg.Machines = recallLabels{m}, recallMachines{m}
 			go m.RunPruner(vm.PrunePolicy{LowWaterBytes: 1 << 30}, time.Minute, ctx.Done())
 			tree.setMachines(m)
-			if plane, err := openGuestPlane(m, d, cfg.SocketDir, meterPath, inboxPath, egressSocket, toolSet{qs.tools(), tree, recallTools, workerTools(m, imgs, workerImage, workerArgv, workerMaxMB)}); err != nil {
+			tools := toolSet{qs.tools(), tree, recallTools}
+			if wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB); wt != nil {
+				tools = append(tools, wt)
+				go reapWorkers(ctx, wt)
+			}
+			if plane, err := openGuestPlane(m, d, cfg.SocketDir, meterPath, inboxPath, egressSocket, tools); err != nil {
 				// Machines cannot start without their guest sockets.
 				log.Printf("agent machines disabled: %v", err)
 			} else {
@@ -577,7 +582,7 @@ func replayFits(capacityMB, headroomMB, agentMB, replayMB int64) error {
 // workerTools serves the worker-machine tools (CAP-8) on the live guest
 // plane only: replay and builder machines never get them. Nil, offering
 // none, when no worker image is registered.
-func workerTools(m *vm.Manager, imgs images, image, argv string, maxMB int64) guest.Tools {
+func workerTools(m *vm.Manager, imgs images, image, argv string, maxMB int64) *workers.Tools {
 	if image == "" {
 		return nil
 	}
@@ -586,6 +591,22 @@ func workerTools(m *vm.Manager, imgs images, image, argv string, maxMB int64) gu
 		return nil
 	}
 	return &workers.Tools{M: m, Image: image, Argv: strings.Fields(argv), MaxMemMB: maxMB}
+}
+
+// reapWorkers parks idle and orphaned workers every minute (UX-146-1).
+func reapWorkers(ctx context.Context, wt *workers.Tools) {
+	t := time.NewTicker(time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if parked := wt.Reap(ctx); len(parked) > 0 {
+				log.Printf("workers parked: %v", parked)
+			}
+		}
+	}
 }
 
 func agentSpec(imgs images, image, launch string, memMB int64) (vm.Spec, error) {

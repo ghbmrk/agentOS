@@ -78,7 +78,8 @@ func (m *Manager) forgetMachine(ctx context.Context, mc *machine, since time.Tim
 			m.cfg.Admit.Release(mc.ID)
 		}
 	}()
-	mc.mu.Lock()
+	// Erasure never waits behind a worker's command (security F1 on #146).
+	mc.lockEndingExec()
 	defer mc.mu.Unlock()
 	target := m.restoreTarget(mc, since)
 	if mc.State == Running {
