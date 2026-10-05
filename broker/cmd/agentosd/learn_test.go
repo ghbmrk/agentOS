@@ -102,3 +102,27 @@ func TestRoutingAdoptionsAreHeld(t *testing.T) {
 		t.Fatal("a routing adoption applied")
 	}
 }
+
+// L3 S3 on #90: when the learning plane could not start, the owner's loop
+// settings are answered by the box, locked or not, saying it is off, and
+// never go to the agent as chat; HELP says so too.
+func TestLearningOffIsSaid(t *testing.T) {
+	var cfg daemon.Config
+	learningOff(&cfg)
+	for _, msg := range []string{"LOOPS OFF", "SPARE BUDGET 900", "HELP LOOPS"} {
+		for _, unlocked := range []bool{true, false} {
+			if got, ok := cfg.Settings(context.Background(), msg, unlocked); !ok || got != learningOffText {
+				t.Fatalf("%s (unlocked %v): %q %v", msg, unlocked, got, ok)
+			}
+		}
+		if !cfg.Narrows(msg) {
+			t.Fatalf("%s is held for the unlock", msg)
+		}
+	}
+	if _, ok := cfg.Settings(context.Background(), "book a table", true); ok || cfg.Narrows("book a table") {
+		t.Fatal("task chat taken as a setting")
+	}
+	if cfg.HelpExtra != learningOffText {
+		t.Fatalf("HELP: %q", cfg.HelpExtra)
+	}
+}
