@@ -224,6 +224,11 @@ func (v *taskValues) observe(in journal.Intent) {
 		step.Params = v.scrubValue(in.Params).(map[string]any)
 	}
 	g.Steps[in.ID] = step
+	// How often the scrub refuses a value, so whether it blocks real
+	// routines shows (potency on #119); a count only, never the value.
+	if n := placeholders(step.Params, step.Recipients) - placeholders(in.Params, in.Recipients); n > 0 {
+		v.logf("task values: %d values not kept (secret-shaped)", n)
+	}
 	v.pruneLocked(v.now())
 	v.saveLocked()
 }
@@ -435,6 +440,39 @@ func (v *taskValues) values(goal, id string) (valueStep, bool) {
 	return out, true
 }
 
+// placeholders counts the leaves and keys that are the placeholder.
+func placeholders(params map[string]any, recips []string) int {
+	n := 0
+	for _, r := range recips {
+		if r == redactedValue {
+			n++
+		}
+	}
+	var walk func(x any)
+	walk = func(x any) {
+		switch t := x.(type) {
+		case map[string]any:
+			for k, c := range t {
+				if k == redactedValue {
+					n++
+					continue
+				}
+				walk(c)
+			}
+		case []any:
+			for _, c := range t {
+				walk(c)
+			}
+		case string:
+			if t == redactedValue {
+				n++
+			}
+		}
+	}
+	walk(params)
+	return n
+}
+
 func copyValue(x any) any {
 	switch t := x.(type) {
 	case map[string]any:
@@ -541,7 +579,9 @@ func skillBuilder(j compile.Journal, values *taskValues, cases compile.Cases) (l
 		b = compile.LoopBuilder{C: comp}
 	} else {
 		vj := valuedJournal{j, values}
-		comp, err := compile.New(compile.Config{Journal: vj, Cases: cases, Redacted: journalRedacted})
+		// Implicit runs keep keyed hashes, so the compiler hashes explicit
+		// values the same way to compare them (W3-values-mix).
+		comp, err := compile.New(compile.Config{Journal: vj, Cases: cases, Redacted: journalRedacted, Hash: values.hashValue})
 		if err != nil {
 			return nil, err
 		}
