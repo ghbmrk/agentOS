@@ -105,6 +105,10 @@ type Config struct {
 	// InboxPath keeps unanswered owner messages across broker restarts
 	// (created 0600). Empty keeps them in memory only.
 	InboxPath string
+	// GoalQuiet ends a lineage's last owner goal once nothing has served
+	// it for this long (G14); default DefaultGoalQuiet. Now is the clock.
+	GoalQuiet time.Duration
+	Now       func() time.Time
 }
 
 // Plane serves every machine's socket. It implements vm.Services.
@@ -160,6 +164,12 @@ func New(cfg Config) (*Plane, error) {
 	}
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
+	}
+	if cfg.GoalQuiet <= 0 {
+		cfg.GoalQuiet = DefaultGoalQuiet
+	}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
 	}
 	if err := os.MkdirAll(cfg.Dir, 0o700); err != nil {
 		return nil, err
@@ -241,7 +251,7 @@ func (p *Plane) close(id string, forget bool) {
 	m.srv.Close()
 	os.RemoveAll(m.dir)
 	if forget && m.lineage != "" && !p.lineageOpen(m.lineage) {
-		p.store.setGoal(m.lineage, "") // the lineage is gone; so is its goal
+		p.store.setGoal(m.lineage, "", time.Time{}) // the lineage is gone; so is its goal
 	}
 }
 

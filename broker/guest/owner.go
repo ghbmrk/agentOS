@@ -178,6 +178,11 @@ func (p *Plane) DeliverOwner(machine, text string, public bool) (string, error) 
 	if err := m.box.put(msg); err != nil {
 		return "", err
 	}
+	// New work has arrived: the lineage no longer serves its last
+	// answered message (G14). Messages still held open keep their claim.
+	if l := p.lineageOf(m); l != "" {
+		p.store.setGoal(l, "", time.Time{})
+	}
 	return msg.ID, nil
 }
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // REQ: OP-1, OP-7, OP-8
@@ -164,5 +165,41 @@ func TestOP8ModelUseIsChargedToTheGoal(t *testing.T) {
 	}
 	if u := r.meter.GoalUsage(""); u.Calls != 0 {
 		t.Fatalf("unattributed calls counted under the empty goal: %+v", u)
+	}
+}
+
+// TestOP1LastGoalEndsOnDeliveryOrQuiet: after its answer, a message stays
+// the lineage's goal only until another message is delivered or nothing
+// has served it for GoalQuiet; serving it keeps it fresh. Later requests
+// are unattributed rather than merged into an unrelated task (potency PG1).
+func TestOP1LastGoalEndsOnDeliveryOrQuiet(t *testing.T) {
+	now := time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)
+	r := newRig(t, func(c *Config) {
+		c.GoalQuiet = 30 * time.Minute
+		c.Now = func() time.Time { return now }
+	})
+	r.client("m1")
+	a := r.deliver("m1", "book the dentist")
+	r.fetch("m1")
+	r.reply("m1", a)
+	now = now.Add(20 * time.Minute)
+	r.tool("m1", "effect_request", send("r1"))
+	now = now.Add(20 * time.Minute) // 40 min after the answer, 20 after r1
+	r.tool("m1", "effect_request", send("r2"))
+	if g1, g2 := r.goalOf("m1/r1"), r.goalOf("m1/r2"); g1 != GoalID(a) || g2 != GoalID(a) {
+		t.Fatalf("served goal not kept fresh: %q %q", g1, g2)
+	}
+	now = now.Add(31 * time.Minute)
+	r.tool("m1", "effect_request", send("r3"))
+	if g := r.goalOf("m1/r3"); g != "" {
+		t.Fatalf("quiet goal still stamped: %q", g)
+	}
+	b := r.deliver("m1", "renew the passport")
+	r.fetch("m1")
+	r.reply("m1", b)
+	r.deliver("m1", "something new") // delivered, not yet fetched
+	r.tool("m1", "effect_request", send("r4"))
+	if g := r.goalOf("m1/r4"); g != "" {
+		t.Fatalf("a new delivery did not end the last goal: %q", g)
 	}
 }

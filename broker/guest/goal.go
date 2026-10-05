@@ -1,5 +1,7 @@
 package guest
 
+import "time"
+
 // Goal IDs (G14). Every effect request is stamped with the owner message
 // its lineage is serving, so a task is one owner request rather than a
 // whole guest lineage (OP-1's goal_id; compiled skills, Loop 1 mining, and
@@ -7,6 +9,11 @@ package guest
 // sends names one. The goal is part of an intent's identity (OP-1), so it
 // is fixed by the request's first submission: a repeat keeps it, whatever
 // the lineage is serving by then.
+
+// DefaultGoalQuiet is how long a lineage keeps serving its last owner
+// message after it was answered, counted from the last request or model
+// call that served it.
+const DefaultGoalQuiet = 30 * time.Minute
 
 // GoalID is the goal ID of the task an owner message started.
 func GoalID(msgID string) string { return "owner:" + msgID }
@@ -36,15 +43,17 @@ func (p *Plane) lineageOpen(lineage string) bool {
 // on its lineage serves it.
 func (p *Plane) handedOut(m *machine, id string) {
 	if l := p.lineageOf(m); l != "" {
-		p.store.setGoal(l, id)
+		p.store.setGoal(l, id, p.cfg.Now())
 	}
 }
 
 // goal is the goal a new request from lineage serves. It is the one owner
 // message the lineage's guests hold unanswered; with none, the last one
-// it was handed (work that goes on after the answer still serves it);
-// with several, none, since the broker cannot tell which one a request
-// is for and does not guess.
+// it was handed (work that goes on after the answer still serves it),
+// until a new message is delivered to the lineage or GoalQuiet passes
+// with nothing served; with several, none, since the broker cannot tell
+// which one a request is for and does not guess. Serving a goal keeps it
+// fresh.
 func (p *Plane) goal(lineage string) string {
 	if lineage == "" {
 		return ""
@@ -61,13 +70,17 @@ func (p *Plane) goal(lineage string) string {
 	for _, m := range ms {
 		open = append(open, m.box.handed()...)
 	}
+	now := p.cfg.Now()
 	switch len(open) {
 	case 0:
-		if id := p.store.goal(lineage); id != "" {
-			return GoalID(id)
+		g := p.store.goal(lineage)
+		if g.Msg == "" || now.Sub(g.Last) >= p.cfg.GoalQuiet {
+			return ""
 		}
-		return ""
+		p.store.setGoal(lineage, g.Msg, now)
+		return GoalID(g.Msg)
 	case 1:
+		p.store.setGoal(lineage, open[0], now)
 		return GoalID(open[0])
 	}
 	return ""
