@@ -38,6 +38,8 @@ func TestOnlyCandidateCausableCutsCount(t *testing.T) {
 		{name: "no room for the owner's work", refuse: fmt.Errorf("no room: %w: %w", ErrNoRoomPreempt, ErrInterrupted), class: "no-room"},
 		{name: "revoked for the owner's work", refuse: fmt.Errorf("revoked: %w: %w", ErrClassRevoke, ErrInterrupted), class: "class-revoke"},
 		{name: "memory pressure", cut: true, cause: ErrPressurePreempt, struck: true},
+		{name: "no room while the context is cut for pressure", refuse: fmt.Errorf("no room: %w: %w", ErrNoRoomPreempt, ErrInterrupted), cause: ErrPressurePreempt, struck: true},
+		{name: "pressure refusal while the context is cut for the owner", refuse: fmt.Errorf("pressure: %w", ErrInterrupted), cause: ErrOwnerStop, struck: true},
 		{name: "unknown cause", cut: true, struck: true},
 		{name: "guest text claiming the owner", refuse: fmt.Errorf("guest said %q: %w", ErrOwnerPreempt.Error(), ErrInterrupted), struck: true},
 	} {
@@ -55,7 +57,7 @@ func TestOnlyCandidateCausableCutsCount(t *testing.T) {
 				if tc.cut {
 					pe.cut, pe.cause = cutOnFixture, tc.cause
 				} else {
-					pe.refuse, pe.refuseErr = fixture, tc.refuse
+					pe.refuse, pe.refuseErr, pe.cause = fixture, tc.refuse, tc.cause
 				}
 				pe.mu.Unlock()
 				return ctx
@@ -128,11 +130,20 @@ func TestOwnerCutCandidateIsParked(t *testing.T) {
 		}
 	}
 	pe.arm(0)
+	e.p.mu.Lock()
+	seq := e.p.st.Seq
+	e.p.mu.Unlock()
 	if _, err := e.p.Propose(context.Background(), greet); !errors.Is(err, ErrParked) || !errors.Is(err, ErrInterrupted) {
 		t.Fatalf("not parked after %d owner cuts: %v", MaxExempt, err)
 	}
 	if n := pe.runs(); n != 0 {
 		t.Fatalf("a parked candidate ran %d probes", n)
+	}
+	e.p.mu.Lock()
+	spent := e.p.st.Seq != seq
+	e.p.mu.Unlock()
+	if spent {
+		t.Fatal("a parked candidate spent a proposal ID")
 	}
 	other := Candidate{Source: Local, Files: Tree{"skills/greet": []byte("hello there")}}
 	if _, err := e.p.Propose(context.Background(), other); errors.Is(err, ErrParked) {

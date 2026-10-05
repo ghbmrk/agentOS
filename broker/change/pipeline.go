@@ -550,6 +550,11 @@ func (p *Pipeline) proposeInner(ctx context.Context, c Candidate, security bool)
 		p.mu.Unlock()
 		return Report{}, errors.New("change: candidate changes nothing")
 	}
+	if p.exempt[p.candidateKey(base, next)] >= MaxExempt && !IsIdle(ctx) {
+		// Parked (PE5): refused before it spends an ID or a save.
+		p.mu.Unlock()
+		return Report{}, ErrParked
+	}
 	p.st.Seq++
 	id := "c" + strconv.Itoa(p.st.Seq)
 	if err := p.saveLocked(); err != nil {
@@ -892,13 +897,25 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 		res[r.c.ID] = pr
 	}
 	if interrupted {
-		cause := context.Cause(ctx)
-		if stopped != nil {
-			cause = stopped
-		}
 		// Only a cut the candidate could have caused counts (PE5): any
 		// cause the host did not mark as the owner's, unknown included.
-		exempt := errors.Is(cause, ErrOwnerPreempt)
+		// Both the evaluator's interruption and the context's cause are
+		// read, and either one unmarked makes the cut count; that one is
+		// the cause logged.
+		var causes []error
+		if stopped != nil {
+			causes = append(causes, stopped)
+		}
+		if ctx.Err() != nil {
+			causes = append(causes, context.Cause(ctx))
+		}
+		cause, exempt := causes[0], true
+		for _, c := range causes {
+			if !errors.Is(c, ErrOwnerPreempt) {
+				cause, exempt = c, false
+				break
+			}
+		}
 		counted := cut != nil && cut.cand && !exempt
 		p.mu.Lock()
 		if exempt {
@@ -920,7 +937,7 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 		if p.cfg.Logf != nil {
 			switch {
 			case counted:
-				p.cfg.Logf("change: a candidate run was cut short (%s); counted", cutClass(cause, stopped != nil))
+				p.cfg.Logf("change: a candidate run was cut short (%s); counted", cutClass(cause, stopped != nil && cause == stopped))
 			case exempt:
 				p.cfg.Logf("change: a candidate run was cut short (%s); not counted", exemptClass(cause))
 			}

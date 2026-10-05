@@ -49,6 +49,7 @@ type machines struct {
 	// machine's state (Running otherwise).
 	createErr error
 	states    map[string]vm.State
+	specs     map[string]vm.Spec // a machine's spec, for Get
 }
 
 func (m *machines) Get(id string) (vm.Machine, error) {
@@ -61,7 +62,7 @@ func (m *machines) Get(id string) (vm.Machine, error) {
 	if s, ok := m.states[id]; ok {
 		st = s
 	}
-	return vm.Machine{ID: id, State: st}, nil
+	return vm.Machine{ID: id, State: st, Spec: m.specs[id]}, nil
 }
 
 func (m *machines) setState(id string, st vm.State) {
@@ -775,12 +776,15 @@ func TestRES1NoRoomIsTheOwners(t *testing.T) {
 		name     string
 		cause    error
 		leftover bool // another replay machine still holds room
-		forOwner bool // admission recorded the revoke as the owner's
-		want     error
+		// experiment: another experiment (a clean-room build) holds room
+		experiment bool
+		forOwner   bool // admission recorded the revoke as the owner's
+		want       error
 	}{
 		{name: "no room", cause: admission.ErrNoRoom, want: change.ErrNoRoomPreempt},
 		{name: "no room, wrapped", cause: fmt.Errorf("start: %w", admission.ErrNoRoom), want: change.ErrNoRoomPreempt},
 		{name: "no room, replay machine left", cause: admission.ErrNoRoom, leftover: true},
+		{name: "no room, another experiment running", cause: admission.ErrNoRoom, experiment: true},
 		{name: "pressure", cause: admission.ErrPressure},
 		{name: "revoked", cause: fmt.Errorf("%w: eval-x", vm.ErrRevoked)},
 		{name: "revoked for the owner", cause: fmt.Errorf("%w: eval-x", vm.ErrRevoked), forOwner: true, want: change.ErrClassRevoke},
@@ -795,6 +799,10 @@ func TestRES1NoRoomIsTheOwners(t *testing.T) {
 			r.ms.createErr = tc.cause
 			if tc.leftover {
 				r.ms.live[Prefix+"left"] = true
+			}
+			if tc.experiment {
+				r.ms.live["cr-build"] = true
+				r.ms.specs = map[string]vm.Spec{"cr-build": {Class: admission.Experiment}}
 			}
 			_, err := r.e.Run(bg, tree, change.Probe{ID: "p1", Input: []byte("go")})
 			owner := errors.Is(err, change.ErrOwnerPreempt)

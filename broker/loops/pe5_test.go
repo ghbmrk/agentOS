@@ -156,3 +156,71 @@ func TestParkedCandidateWaitsForAnIdleEvaluator(t *testing.T) {
 		t.Fatalf("order %q, want %q", log, want)
 	}
 }
+
+// PE5 (L3 on #127): the owner's LOOPS OFF, or pausing the running loop,
+// cancels the unit with change.ErrOwnerStop; and Preempt carries the same
+// cause the poll would.
+func TestOwnerSettingsAndPreemptCarryTheirCause(t *testing.T) {
+	for _, text := range []string{"LOOPS OFF", "LOOP 1 OFF"} {
+		r := newRig(t)
+		src := &causeSource{started: make(chan struct{}, 1)}
+		r.restart(src)
+		done := make(chan struct{})
+		go func() { r.s.Tick(context.Background()); close(done) }()
+		<-src.started
+		req, _ := ParseText(text)
+		must(t, r.s.Set(context.Background(), req))
+		<-done
+		src.mu.Lock()
+		if !errors.Is(src.cause, change.ErrOwnerStop) {
+			t.Fatalf("%s: cause %v", text, src.cause)
+		}
+		src.mu.Unlock()
+	}
+
+	r := newRig(t)
+	src := &causeSource{started: make(chan struct{}, 1)}
+	var mu sync.Mutex
+	owner := false
+	s, err := New(Config{Store: r.store, Spare: r.spare, Sources: []Source{src}, Now: r.clk.now, Poll: time.Hour,
+		BusyCause: func() (bool, bool, bool) { mu.Lock(); defer mu.Unlock(); return owner, owner, false }})
+	must(t, err)
+	done := make(chan struct{})
+	go func() { s.Tick(context.Background()); close(done) }()
+	<-src.started
+	mu.Lock()
+	owner = true // the owner's work arrives; admission calls Preempt
+	mu.Unlock()
+	must(t, s.Preempt())
+	<-done
+	src.mu.Lock()
+	defer src.mu.Unlock()
+	if !errors.Is(src.cause, change.ErrOwnerWork) {
+		t.Fatalf("Preempt: cause %v", src.cause)
+	}
+}
+
+// PE5 (L3 on #127): with only Busy configured, STOP while busy is not
+// told apart from busy work, so the cut counts.
+func TestStopWhileBusyCountsWithoutBusyCause(t *testing.T) {
+	r := newRig(t)
+	src := &causeSource{started: make(chan struct{}, 1)}
+	var mu sync.Mutex
+	on := false
+	read := func() bool { mu.Lock(); defer mu.Unlock(); return on }
+	s, err := New(Config{Store: r.store, Spare: r.spare, Sources: []Source{src}, Now: r.clk.now, Poll: 10 * time.Millisecond,
+		Busy: read, Stopped: read})
+	must(t, err)
+	done := make(chan struct{})
+	go func() { s.Tick(context.Background()); close(done) }()
+	<-src.started
+	mu.Lock()
+	on = true
+	mu.Unlock()
+	<-done
+	src.mu.Lock()
+	defer src.mu.Unlock()
+	if errors.Is(src.cause, change.ErrOwnerPreempt) {
+		t.Fatalf("STOP while busy marked the owner's: %v", src.cause)
+	}
+}

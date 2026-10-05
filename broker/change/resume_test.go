@@ -52,6 +52,9 @@ func (p *preempting) Run(ctx context.Context, t Tree, pr Probe) ([]byte, error) 
 		p.mu.Lock()
 		p.calls++
 		err := p.refuseErr
+		if p.cause != nil && p.cancel != nil {
+			p.cancel() // the context is cut too, with its own cause
+		}
 		p.mu.Unlock()
 		if err == nil {
 			err = errAdmission

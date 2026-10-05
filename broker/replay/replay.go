@@ -317,10 +317,10 @@ func (e *Evaluator) Run(ctx context.Context, t change.Tree, c change.Probe) ([]b
 // preempted is ErrPreempted for admission's refusal or revoke err of
 // replay machine id, marked the owner's when no candidate can have caused
 // it (PE5): change.ErrNoRoomPreempt for no room while no other replay
-// machine holds room (room is reckoned on the fixed Spec's declared
-// budget, which no tree changes), change.ErrClassRevoke for a revoke
-// admission recorded as for the owner's work. Otherwise the interruption
-// counts. Only these error values mark it, never a machine's or guest's
+// machine or running experiment holds room (room is reckoned on the fixed
+// Spec's declared budget, which no tree changes), change.ErrClassRevoke
+// for a revoke admission recorded as for the owner's work. Otherwise the
+// interruption counts. Only these error values mark it, never a machine's or guest's
 // text, which is kept as text only (security P1).
 func (e *Evaluator) preempted(id string, err error) error {
 	switch {
@@ -332,10 +332,18 @@ func (e *Evaluator) preempted(id string, err error) error {
 	return fmt.Errorf("%w: %v", ErrPreempted, err)
 }
 
-// otherMachines reports whether a replay machine other than id exists.
+// otherMachines reports whether a machine other than id may hold room a
+// candidate's work could have taken: another replay machine, or any
+// running experiment (a clean-room build, L3 on #127).
 func (e *Evaluator) otherMachines(id string) bool {
 	for _, m := range e.cfg.Machines.Machines() {
-		if m != id && strings.HasPrefix(m, Prefix) {
+		if m == id {
+			continue
+		}
+		if strings.HasPrefix(m, Prefix) {
+			return true
+		}
+		if mc, err := e.cfg.Machines.Get(m); err == nil && mc.Spec.Class == admission.Experiment && mc.State == vm.Running {
 			return true
 		}
 	}
