@@ -84,7 +84,7 @@ Covered: 110 / 144 requirement IDs
 | CAP-2 | — |
 | CAP-3 | `broker/events/bus_test.go`, `broker/mail/watch_test.go`, `broker/recall/recall_test.go`, `broker/recall/review_test.go`, `broker/recall/segment_test.go` |
 | CAP-4 | `broker/events/attention_test.go`, `broker/events/bus_test.go`, `broker/mail/watch_test.go` |
-| CAP-5 | `broker/cmd/agentos-guest-bridge/main_test.go`, `broker/compile/compile_test.go`, `broker/skill/skill_test.go` |
+| CAP-5 | `broker/cmd/agentos-guest-bridge/main_test.go`, `broker/compile/compile_test.go`, `broker/compile/shape_test.go`, `broker/skill/format/format_test.go`, `broker/skill/skill_test.go` |
 | CAP-6 | `broker/attention/attention_test.go` |
 | CAP-7 | — |
 | CAP-8 | — |
