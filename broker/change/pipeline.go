@@ -144,6 +144,11 @@ type Config struct {
 	// resume only under the same ID (PE1, security R1 on #103). Nil: the
 	// evaluator is fixed for the pipeline's life.
 	EvaluatorID func() string
+	// ResumeFor is how long a preempted evaluation's pairs are kept;
+	// zero means the package's ResumeFor. A box whose agent sleeps for
+	// learning sets 36 h, so a candidate cut at the end of one night
+	// resumes the next (PE7).
+	ResumeFor time.Duration
 	// Logf logs each counted candidate cut by a fixed class only (PE5).
 	// Nil: not logged.
 	Logf func(string, ...any)
@@ -943,6 +948,7 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 		// never run again.
 		for id, pr := range res {
 			if pr.baseDone || pr.nextDone {
+				pr.base, pr.cand = base.Hash(), ck
 				p.keepLocked(keys[id], pr)
 			}
 		}

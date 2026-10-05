@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // REQ: RES-1, CHG-1, LOOP-1
@@ -180,5 +181,47 @@ func TestParkedCandidatesTakeIdleTurns(t *testing.T) {
 	refused(a)
 	if !ran(cutAny(), a) {
 		t.Fatal("a did not run with nothing else waiting")
+	}
+}
+
+// PE5b (L3 SHOULD-2 on #145), with PE7: a pair's cut counts lapse with
+// its kept sides, after the pipeline's ResumeFor (12 h by default, 36 h
+// on a box whose agent sleeps), and at most maxCuts pairs are kept, the
+// oldest dropped first.
+func TestCutCountsExpireAndAreCapped(t *testing.T) {
+	now := time.Date(2026, 10, 5, 6, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		resumeFor time.Duration
+		after     time.Duration
+		kept      bool
+	}{
+		{0, ResumeFor - time.Minute, true},
+		{0, ResumeFor + time.Minute, false},
+		{36 * time.Hour, 30 * time.Hour, true},
+		{36 * time.Hour, 37 * time.Hour, false},
+	} {
+		at := now
+		p := &Pipeline{cfg: Config{Now: func() time.Time { return at }, ResumeFor: tc.resumeFor}}
+		p.cutLocked("pair", true)
+		at = now.Add(tc.after)
+		if got := p.cutsLocked("pair").Exempt == 1; got != tc.kept {
+			t.Errorf("ResumeFor %v, %v later: kept %v", tc.resumeFor, tc.after, got)
+		}
+	}
+
+	at := now
+	p := &Pipeline{cfg: Config{Now: func() time.Time { return at }}}
+	for i := 0; i <= maxCuts; i++ {
+		at = now.Add(time.Duration(i) * time.Second)
+		p.cutLocked(fmt.Sprintf("pair%04d", i), true)
+	}
+	if len(p.st.Cuts) != maxCuts {
+		t.Fatalf("%d pairs kept, want %d", len(p.st.Cuts), maxCuts)
+	}
+	if _, ok := p.st.Cuts["pair0000"]; ok {
+		t.Fatal("the oldest pair was kept past the cap")
+	}
+	if _, ok := p.st.Cuts[fmt.Sprintf("pair%04d", maxCuts)]; !ok {
+		t.Fatal("the newest pair was dropped")
 	}
 }

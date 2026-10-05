@@ -210,6 +210,10 @@ type LearnConfig struct {
 	Backoff time.Duration
 	MaxAsks int
 	Now     func() time.Time
+	// ResumeFor is how long a preempted candidate is kept for reuse:
+	// change.ResumeFor unless set (36 h when the agent sleeps for
+	// learning, PE7). It matches the pipeline's.
+	ResumeFor time.Duration
 }
 
 // Learn is Loop 1's Source.
@@ -390,6 +394,9 @@ func (l *Learn) Next(ctx context.Context, modelOK bool) (Job, bool) {
 	}
 	sel, _ := l.cfg.Builder.(Handler)
 	ready, _ := l.cfg.Builder.(Readier)
+	if kc, ok := l.cfg.Pipeline.(keptCounter); ok && len(l.built) > 0 {
+		hyps = finishFirst(hyps, l.built, kc)
+	}
 	for _, h := range hyps {
 		if l.tried[h.Key] >= len(h.Tasks) || !l.mayAskLocked(h.Key) {
 			continue // tried with this much evidence already, or the owner was asked lately
@@ -413,6 +420,32 @@ func (l *Learn) Next(ctx context.Context, modelOK bool) (Job, bool) {
 		}}, true
 	}
 	return Job{}, false
+}
+
+func (l *Learn) resumeFor() time.Duration {
+	if l.cfg.ResumeFor > 0 {
+		return l.cfg.ResumeFor
+	}
+	return change.ResumeFor
+}
+
+// keptCounter is the pipeline's count of a candidate's kept pairs
+// (change.Pipeline.KeptPairs).
+type keptCounter interface {
+	KeptPairs(change.Candidate) int
+}
+
+// finishFirst puts the hypotheses whose kept candidate has kept pairs
+// first, most pairs first, so the candidate closest to a verdict is
+// finished before another starts (PE7); the rest keep their order.
+func finishFirst(hyps []Hypothesis, built map[string]keptCandidate, kc keptCounter) []Hypothesis {
+	n := make(map[string]int, len(built))
+	for k, b := range built {
+		n[k] = kc.KeptPairs(b.cand)
+	}
+	out := slices.Clone(hyps)
+	slices.SortStableFunc(out, func(a, b Hypothesis) int { return n[b.Key] - n[a.Key] })
+	return out
 }
 
 // mayAskLocked reports whether key may be proposed now: not while its
@@ -460,7 +493,7 @@ func (l *Learn) propose(ctx context.Context, h Hypothesis, ev Evidence) (change.
 	delete(l.built, h.Key)
 	l.mu.Unlock()
 	cand := k.cand
-	reuse := ok && k.brief == brief && l.cfg.Now().Sub(k.at) <= change.ResumeFor
+	reuse := ok && k.brief == brief && l.cfg.Now().Sub(k.at) <= l.resumeFor()
 	for _, t := range k.tasks {
 		reuse = reuse && !ev.Held(t)
 	}

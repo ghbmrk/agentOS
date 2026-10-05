@@ -99,7 +99,7 @@ type cutCount struct {
 // cutsLocked returns key's cut counts, dropping them once expired.
 func (p *Pipeline) cutsLocked(key string) cutCount {
 	c, ok := p.st.Cuts[key]
-	if ok && p.cfg.Now().Sub(c.At) > ResumeFor {
+	if ok && p.cfg.Now().Sub(c.At) > p.resumeFor() {
 		delete(p.st.Cuts, key)
 		return cutCount{}
 	}
@@ -230,6 +230,10 @@ type pairResult struct {
 	baseDone, nextDone             bool
 	at                             time.Time
 	seq                            uint64 // put order (Pipeline.keptOrder)
+	// base and cand are the pair's base tree hash and candidateKey, so
+	// pairs on a replaced base are dropped and a candidate's are counted
+	// (PE7).
+	base, cand string
 }
 
 // resumeKey binds a pair to the exact base tree, candidate tree, case
@@ -263,7 +267,7 @@ func (p *Pipeline) keptLocked(key string) (pairResult, bool) {
 	if !ok {
 		return pairResult{}, false
 	}
-	if p.cfg.Now().Sub(r.at) > ResumeFor {
+	if p.cfg.Now().Sub(r.at) > p.resumeFor() {
 		delete(p.kept, key)
 		return pairResult{}, false
 	}
@@ -375,4 +379,51 @@ func (p *Pipeline) exemptLocked(key string) {
 		delete(p.parks, p.exemptOrder[0])
 		p.exemptOrder = p.exemptOrder[1:]
 	}
+}
+
+func (p *Pipeline) resumeFor() time.Duration {
+	if p.cfg.ResumeFor > 0 {
+		return p.cfg.ResumeFor
+	}
+	return ResumeFor
+}
+
+// dropOldBasesLocked discards kept pairs evaluated against any base but
+// base: once the active tree changes (an adoption, an UNDO, a reload)
+// they can never be used again (PE7).
+func (p *Pipeline) dropOldBasesLocked(base string) {
+	for k, r := range p.kept {
+		if r.base != base {
+			delete(p.kept, k)
+		}
+	}
+}
+
+// KeptPairs counts candidate c's pairs kept from preempted evaluations
+// on the current active tree, both sides finished, so the candidate
+// closest to a verdict can be finished first (PE7).
+func (p *Pipeline) KeptPairs(c Candidate) int {
+	p.mu.Lock()
+	base := p.st.Active.clone()
+	p.mu.Unlock()
+	next := base.clone()
+	for _, path := range c.Delete {
+		delete(next, path)
+	}
+	for path, b := range c.Files {
+		next[path] = b
+	}
+	ck := p.candidateKey(base, next)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := 0
+	for k, r := range p.kept {
+		if r.cand != ck {
+			continue
+		}
+		if r, ok := p.keptLocked(k); ok && r.baseDone && r.nextDone {
+			n++
+		}
+	}
+	return n
 }
