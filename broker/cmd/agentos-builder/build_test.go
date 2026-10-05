@@ -135,6 +135,14 @@ func TestRefusalsGoBackToTheModel(t *testing.T) {
 	if len(f.asked) != 3 || len(f.submitted) != 2 {
 		t.Fatalf("%d model calls, %d submissions", len(f.asked), len(f.submitted))
 	}
+	// Potency R1 on #131: rounds do not pile up; each resends the brief,
+	// the last answer and its refusal only, so a job does not reach its
+	// token cap by repetition.
+	for i, m := range f.asked {
+		if want := min(i, 1)*2 + 2; len(m) != want {
+			t.Fatalf("round %d sent %d messages, want %d", i+1, len(m), want)
+		}
+	}
 	second, third := f.asked[1], f.asked[2]
 	if !strings.Contains(second[len(second)-1].Content, "under procedures/") ||
 		!strings.Contains(third[len(third)-1].Content, "CANARY-refusal") {

@@ -66,14 +66,17 @@ func (b *builder) run(ctx context.Context) error {
 	if err := json.Unmarshal(raw, &br); err != nil {
 		return fmt.Errorf("brief: %w", err)
 	}
-	msgs := []message{{Role: "system", Content: systemPrompt(br)}, {Role: "user", Content: string(raw)}}
+	// Each round sends the brief, and after a refusal the last answer and
+	// why it was refused: never every earlier round, so a job's input
+	// stays near one brief per round (potency R1 on #131).
+	brief := []message{{Role: "system", Content: systemPrompt(br)}, {Role: "user", Content: string(raw)}}
+	msgs := brief
 	for i := 0; i < b.rounds && ctx.Err() == nil; i++ {
 		reply, err := b.complete(ctx, msgs)
 		if err != nil {
 			b.giveUp(ctx)
 			return err
 		}
-		msgs = append(msgs, message{Role: "assistant", Content: reply})
 		files, err := prepare(br, reply)
 		if err == nil {
 			var accepted bool
@@ -86,7 +89,7 @@ func (b *builder) run(ctx context.Context) error {
 			}
 		}
 		b.logf("builder: round %d refused: %v", i+1, err)
-		msgs = append(msgs, message{Role: "user", Content: "That candidate was refused: " + clip(err.Error(), 2000) +
+		msgs = append(brief[:len(brief):len(brief)], message{Role: "assistant", Content: reply}, message{Role: "user", Content: "That candidate was refused: " + clip(err.Error(), 2000) +
 			"\nFix it and answer again with only the JSON object."})
 	}
 	b.giveUp(ctx)
