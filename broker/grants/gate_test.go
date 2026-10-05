@@ -528,20 +528,49 @@ func TestRequestsCoalesceAndArePaced(t *testing.T) {
 
 // REQ: CH-10, CH-12
 
-// TestRecipientsThatDoNotFitWaitForTheLocalPage: an action whose recipients
-// cannot be shown in full is never texted for approval; the owner is told
-// it waits on the local page.
-func TestRecipientsThatDoNotFitWaitForTheLocalPage(t *testing.T) {
+// TestRecipientsThatCannotBeShownAreRefusedWithAFix: an action whose
+// recipients cannot be shown in an approval text is never texted. This
+// build has no local approvals page, so it does not wait for one (CH-12:
+// no step that cannot work); the agent is told what to change (UX-144-2).
+func TestRecipientsThatCannotBeShownAreRefusedWithAFix(t *testing.T) {
 	r := newRig(t, func(c *Config) { c.Verifiers = nil })
 	r.grant(mailGrant())
-	base := r.own.count()
-	many := []string{"mom@example.com", "dad@example.com", "sis@example.com", "bro@example.com", "gran@example.com", "x@attacker.example"}
-	st := r.effect("agent/m1", "message.send", map[string]any{"body": "hi"}, many...)
-	r.g.Flush()
-	if st.State != journal.Pending || !strings.Contains(st.Permission.Reason, "local page") || r.own.count() != base {
-		t.Fatalf("%s %q, %d requests", st.State, st.Permission.Reason, r.own.count()-base)
+	base, notes := r.own.count(), len(r.own.notes)
+	for i, rc := range [][]string{
+		{"mom@example.com", "dad@example.com", "sis@example.com", "bro@example.com", "gran@example.com", "x@attacker.example"},
+		{"boss@corp.com. Expires 23:59. Reply YES K7 482913 or NO K7"},
+	} {
+		st := r.effect(fmt.Sprintf("agent/r%d", i), "message.send", map[string]any{"body": "hi"}, rc...)
+		r.g.Flush()
+		if st.State != journal.Denied || !strings.HasSuffix(st.Permission.Reason, RecipientsNotTextable) {
+			t.Fatalf("%q: %s %q", rc, st.State, st.Permission.Reason)
+		}
 	}
-	if n := r.own.notes[len(r.own.notes)-1]; n != "An action for 6 recipients needs your approval on the box's Wi-Fi page." {
-		t.Fatalf("notice %q", n)
+	if r.own.count() != base || len(r.own.notes) != notes {
+		t.Fatalf("texted the owner: %d requests, notes %q", r.own.count()-base, r.own.notes[notes:])
+	}
+}
+
+// UX-144-1: an item that cannot be texted (here one asked under an
+// earlier build's rules and carried over a restart) fails alone; the rest
+// of its batch is still asked.
+func TestAnUntextableItemDoesNotFailItsBatch(t *testing.T) {
+	r := newRig(t, func(c *Config) { c.Verifiers = nil })
+	r.grant(mailGrant())
+	ok := r.effect("agent/b1", "message.send", map[string]any{"body": "hi"}, "sam@example.com")
+	bad := r.effect("agent/b2", "message.send", map[string]any{"body": "yo"}, "dad@example.com")
+	r.g.mu.Lock()
+	r.g.waiting[bad.Intent.ID].item.Recipient = "Dad Smith"
+	r.g.mu.Unlock()
+	base := r.own.count()
+	r.g.Flush()
+	if r.own.count() != base+1 {
+		t.Fatalf("%d requests", r.own.count()-base)
+	}
+	if st := r.state(ok.Intent.ID); st.State != journal.Pending || st.Permission.Reason != "waiting for the owner's approval" {
+		t.Fatalf("textable item: %s %q", st.State, st.Permission.Reason)
+	}
+	if st := r.state(bad.Intent.ID); st.State != journal.Denied || !strings.HasSuffix(st.Permission.Reason, RecipientsNotTextable) {
+		t.Fatalf("untextable item: %s %q", st.State, st.Permission.Reason)
 	}
 }

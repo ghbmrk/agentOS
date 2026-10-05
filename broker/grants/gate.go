@@ -288,7 +288,7 @@ type heldImplicit struct {
 type wait struct {
 	item    owner.Item
 	local   bool   // also needs local confirmation
-	onlyUI  bool   // approvable only on the local page (owner.SMSApprovable)
+	onlyUI  bool   // waits for the local page (a hold); never texted
 	request string // owner request ID, "" while batched
 	reply   string // queued auto-reply ID
 	sendAt  time.Time
@@ -485,6 +485,10 @@ func (g *Gate) reissueDue() {
 		g.mu.Unlock()
 	}
 }
+
+// RecipientsNotTextable is the reason an action is refused when its
+// recipients cannot be shown in an approval text (owner.SMSApprovable).
+const RecipientsNotTextable = "can't be approved by text: each recipient must be a plain email address, a full +country number or acct ...1234, at most 100 characters in all; ask again with a new request_id"
 
 // closeIntent denies a pending intent with a fixed reason.
 func (g *Gate) closeIntent(id, why string) {
@@ -1155,7 +1159,15 @@ func (g *Gate) Authorize(ctx context.Context, id string) (journal.Status, error)
 	case deny, allow:
 		return g.eng.Authorize(ctx, id)
 	case ask:
-		onlyUI := !owner.SMSApprovable(v.item) || v.hold
+		if !v.hold && !owner.SMSApprovable(v.item) {
+			// Recipients that cannot be shown in an approval text are never
+			// approved by text (CH-10, CH-12). This build has no local
+			// approvals page to wait for, so the agent is told what to
+			// change (UX-144-2).
+			g.closeIntent(id, RecipientsNotTextable)
+			return g.eng.Get(id)
+		}
+		onlyUI := v.hold
 		g.mu.Lock()
 		fresh := g.waiting[id] == nil
 		if fresh {
@@ -1176,12 +1188,6 @@ func (g *Gate) Authorize(ctx context.Context, id string) (journal.Status, error)
 		if fresh && v.hold && own != nil {
 			// Arbitrator Q1 on #48: one fixed line, no code.
 			_ = own.Inform("Waiting for your confirmation on the box's local page, or your recovery key.")
-		}
-		if fresh && onlyUI && !v.hold && own != nil {
-			// Recipients that cannot be shown in full are never approved
-			// by text (CH-10, CH-12).
-			n := len(strings.Split(v.item.Recipient, ","))
-			_ = own.Inform(fmt.Sprintf("An action for %d recipients needs your approval on the box's Wi-Fi page.", n))
 		}
 	case autoReply:
 		g.queueReply(id, v)
@@ -1446,6 +1452,18 @@ func (g *Gate) flush(paced bool) {
 		g.mu.Unlock()
 	}
 	for _, items := range [][]owner.Item{low, high} {
+		// An item that cannot be texted (one carried over a restart from
+		// an earlier build's rules) fails alone, not with its batch
+		// (UX-144-1).
+		textable := items[:0:0]
+		for _, it := range items {
+			if owner.SMSApprovable(it) {
+				textable = append(textable, it)
+			} else {
+				g.closeIntent(it.Ref, RecipientsNotTextable)
+			}
+		}
+		items = textable
 		for len(items) > 0 {
 			if g.take(paced, 1) == 0 {
 				g.requeue(items)
