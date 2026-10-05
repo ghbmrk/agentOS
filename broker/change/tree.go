@@ -123,7 +123,16 @@ const (
 	ClassAuthority  Class = "authority"
 	ClassGovernance Class = "governance"
 	ClassUnknown    Class = "unknown"
+	// ClassTask is a case class, never a path's: an owner outcome on a
+	// whole task (Loop 1's harvest). It is evidence for every change to
+	// how tasks are done, so it is relevant to each class in taskClasses.
+	ClassTask Class = "task"
 )
+
+// taskClasses are the change classes a ClassTask case is relevant to.
+var taskClasses = map[Class]bool{
+	ClassProcedure: true, ClassSkill: true, ClassRouting: true, ClassContext: true, ClassConfig: true,
+}
 
 // namespaces maps a path's first segment to its class. A namespace not
 // listed is ClassUnknown, which fails qualification.

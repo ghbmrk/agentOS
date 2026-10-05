@@ -109,15 +109,15 @@ func TestARC2ControlPathCannotReachInference(t *testing.T) {
 }
 
 // TestDaemonLinksNoCredentialCustody: the daemon process, which serves the
-// guest sockets, links neither the vault nor the credentialed egress proxy
-// (vault V2, ARC-1). Model egress runs where the vault is unlocked (P2-4).
+// guest sockets, links neither the vault, the credentialed egress proxy,
+// nor the TPM seal (vault V2, ARC-1, P2-4b). Model egress runs where the vault is unlocked (P2-4).
 func TestDaemonLinksNoCredentialCustody(t *testing.T) {
 	out, err := exec.Command("go", "list", "-C", "..", "-deps", "./"+compositionRoot).Output()
 	if err != nil {
 		t.Fatalf("go list: %v", err)
 	}
 	for _, dep := range strings.Fields(string(out)) {
-		if dep == module+"vault" || dep == module+"egress" {
+		if dep == module+"vault" || dep == module+"egress" || dep == module+"tpmseal" {
 			t.Errorf("agentosd links %s", dep)
 		}
 	}
