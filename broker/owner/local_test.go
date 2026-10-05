@@ -231,13 +231,13 @@ func TestSignInDuringSendIsKept(t *testing.T) {
 			s.LocalSignIns = append(s.LocalSignIns, now.Add(time.Duration(i-maxSignIns)*time.Minute))
 		}
 	})
-	text, n := r.ch.signInTextLocked(now)
+	text, n, m := r.ch.signInTextLocked(now)
 	r.ch.mu.Unlock()
 	// One more signs in mid-send; the cap pushes out the oldest.
 	if _, err := r.ch.LocalSignIn(r.totp()); err != nil {
 		t.Fatal(err)
 	}
-	r.ch.sendSignIns(text, n, now)
+	r.ch.sendSignIns(text, n, m, now)
 	if got := r.ch.codes.st.LocalSignIns; len(got) != 1 {
 		t.Fatalf("left after send: %v", got)
 	}
