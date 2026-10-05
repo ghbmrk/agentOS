@@ -17,6 +17,7 @@ type udevProbe struct {
 	cdrom                  bool
 	dmUUID                 string
 	scsiType               string
+	blkidMiss              bool // blkid finds no type (an ambiguous probe, an unprobed boot partition)
 }
 
 // udevDev is a device as the rules see it: its properties and the result
@@ -160,7 +161,7 @@ func runRules(t *testing.T, rules [][]udevKV, d *udevDev, classify func(string) 
 // is a P2-1 VM-test carry (ASSUMPTIONS H8).
 
 func (d *udevDev) blkid() {
-	if d.probe.fsType == "" {
+	if d.probe.fsType == "" || d.probe.blkidMiss {
 		return
 	}
 	d.env["ID_FS_TYPE"], d.env["ID_FS_USAGE"] = d.probe.fsType, d.probe.fsUsage
@@ -181,18 +182,28 @@ func persistentStorage(d *udevDev) {
 	d.blkid()
 }
 
-// persistentStorageDM: dm devices are probed here, whatever the flag says.
+// persistentStorageDM: dm devices are probed here, whatever the
+// persistent-storage flag says, unless the dm disk-rules flag is set.
 func persistentStorageDM(d *udevDev) {
-	if d.action != "remove" && d.subsystem == "block" && strings.HasPrefix(d.kernel, "dm-") {
+	if d.action != "remove" && d.subsystem == "block" && strings.HasPrefix(d.kernel, "dm-") &&
+		d.env["DM_UDEV_DISABLE_DISK_RULES_FLAG"] != "1" {
+		d.blkid()
+	}
+}
+
+// mdArrays: mdadm's 63-md-raid-arrays probes md arrays.
+func mdArrays(d *udevDev) {
+	if d.action != "remove" && d.subsystem == "block" && strings.HasPrefix(d.kernel, "md") {
 		d.blkid()
 	}
 }
 
 // assembly: md assembles a RAID member and LVM scans a PV; bcache-tools
 // probes any device with no type and registers a bcache one. Each is a
-// write to the device.
+// write to the device. The lvm2 and bcache rules skip a dm device with the
+// dm other-rules flag.
 func assembly(d *udevDev) {
-	if d.action == "remove" || d.subsystem != "block" {
+	if d.action == "remove" || d.subsystem != "block" || d.env["DM_UDEV_DISABLE_OTHER_RULES_FLAG"] == "1" {
 		return
 	}
 	switch t := d.env["ID_FS_TYPE"]; {
@@ -228,7 +239,7 @@ type udevStack struct {
 
 func newUdevStack(t *testing.T, classify func(string) string) *udevStack {
 	s := &udevStack{t: t, ours: map[string][][]udevKV{}, classify: classify}
-	for _, f := range []string{"59-agentos-host-disks.rules", "61-agentos-host-disks-assembly.rules", "72-agentos-host-disks-late.rules"} {
+	for _, f := range []string{"59-agentos-host-disks.rules", "64-agentos-host-disks-assembly.rules", "72-agentos-host-disks-late.rules"} {
 		s.ours[f[:2]] = parseRules(t, f)
 	}
 	return s
@@ -245,19 +256,20 @@ func (s *udevStack) run(d *udevDev, parent map[string]string) {
 	runRules(s.t, s.ours["59"], d, s.classify, parent)
 	persistentStorage(d)
 	persistentStorageDM(d)
-	runRules(s.t, s.ours["61"], d, s.classify, parent)
+	mdArrays(d)
+	runRules(s.t, s.ours["64"], d, s.classify, parent)
 	assembly(d)
 	uaccess(d)
 	runRules(s.t, s.ours["72"], d, s.classify, parent)
 	systemdReady(d)
 }
 
-// hidden: the host-disk outcome. A dm device keeps the links
-// 60-persistent-storage-dm made (ASSUMPTIONS H8); nothing else does.
+// hidden: the host-disk outcome. An md array keeps the links mdadm's
+// 63-md-raid-arrays made; it exists only after a root action (H8).
 func hidden(d *udevDev) bool {
 	return d.env["SYSTEMD_READY"] == "0" && d.env["UDISKS_IGNORE"] == "1" && d.env["UDISKS_AUTO"] == "0" &&
 		d.env["ID_FS_TYPE"] == "agentos_held" && d.env["ID_FS_USAGE"] == "" && d.env["ID_FS_LABEL"] == "" &&
-		(len(d.links) == 0 || strings.HasPrefix(d.kernel, "dm-")) && len(d.written) == 0 &&
+		(len(d.links) == 0 || strings.HasPrefix(d.kernel, "md")) && len(d.written) == 0 &&
 		d.owner == "root" && d.group == "root" && d.mode == "0600" &&
 		d.locked["OWNER"] && d.locked["GROUP"] && d.locked["MODE"] && !d.tags["uaccess"]
 }
@@ -356,6 +368,11 @@ func TestUdevRuleHidesHostDisks(t *testing.T) {
 		if got := outcomeOf(c.dev); got != c.want {
 			t.Errorf("%s: %v, want %v (%+v)", c.dev.kernel, got, c.want, c.dev)
 		}
+		// An unknown device's own type stays (99-systemd and 64-btrfs
+		// route on it).
+		if c.want == keptFromUdisks && c.dev.env["ID_FS_TYPE"] != c.dev.probe.fsType {
+			t.Errorf("%s: type %q", c.dev.kernel, c.dev.env["ID_FS_TYPE"])
+		}
 	}
 
 	// Security F1 and L3 on #172: a RAID, LVM or bcache member on an unknown
@@ -375,6 +392,25 @@ func TestUdevRuleHidesHostDisks(t *testing.T) {
 			if d.env["ID_FS_TYPE"] != "agentos_held" || len(d.written) != 0 || outcomeOf(d) != c.want {
 				t.Errorf("%s %s member: %v %+v", c.kernel, typ, outcomeOf(d), d)
 			}
+		}
+	}
+	// A bcache superblock blkid does not name (an ambiguous probe, an
+	// unprobed boot partition) leaves the type empty; 69-bcache would probe
+	// and register it, so the empty type is held too. A host md array,
+	// re-probed by mdadm after 59, is held as well.
+	for _, c := range []struct {
+		kernel, typ string
+		miss        bool
+		want        outcome
+	}{
+		{"sde", "bcache", true, keptFromUdisks}, {"dm-2", "bcache", true, keptFromUdisks},
+		{"sdb", "bcache", true, hiddenFully}, {"md0", "LVM2_member", false, hiddenFully}, {"md0", "bcache", false, hiddenFully},
+	} {
+		d := blockDev(c.kernel, "disk")
+		d.probe.fsType, d.probe.fsUsage, d.probe.blkidMiss = c.typ, "other", c.miss
+		s.run(d, nil)
+		if d.env["ID_FS_TYPE"] != "agentos_held" || len(d.written) != 0 || d.env["SYSTEMD_READY"] == "1" {
+			t.Errorf("%s %s (blkid miss %v): %+v", c.kernel, c.typ, c.miss, d)
 		}
 	}
 	// The drive's own members are left for the stock rules.
@@ -419,7 +455,11 @@ func TestUdevRuleUnknownVerityStaysReady(t *testing.T) {
 			d := blockDev("dm-2", "disk")
 			d.probe = udevProbe{fsType: fs[0], fsUsage: fs[1], dmUUID: uuid}
 			s.run(d, nil)
-			if d.env["ID_FS_USAGE"] != fs[1] || d.env["SYSTEMD_READY"] != "" || outcomeOf(d) != keptFromUdisks {
+			wantType := fs[0]
+			if fs[0] != "erofs" {
+				wantType = "agentos_held"
+			}
+			if d.env["ID_FS_USAGE"] != fs[1] || d.env["ID_FS_TYPE"] != wantType || d.env["SYSTEMD_READY"] != "" || outcomeOf(d) != keptFromUdisks {
 				t.Errorf("unknown %s holding %s: %+v", uuid, fs[0], d)
 			}
 		}

@@ -281,6 +281,14 @@ func TestClassify(t *testing.T) {
 	h.stacked("dm-4", "253:4", "dm-3")
 	h.link("sys/devices/virtual/block/dm-3/slaves/dm-4", h.path("sys/devices/virtual/block/dm-4"))
 	classes(t, s, map[string]Class{"dm-3": ClassUnknown, "dm-4": ClassUnknown})
+	// So is a finite chain deeper than the cap.
+	prev := "sdb"
+	for i := 10; i < 28; i++ {
+		n := "dm-" + strconv.Itoa(i)
+		h.stacked(n, "253:"+strconv.Itoa(i), prev)
+		prev = n
+	}
+	classes(t, s, map[string]Class{"dm-12": ClassHost, prev: ClassUnknown})
 	if got := s.ClassifyEnv("sda"); got != "AGENTOS_DISK=drive\n" {
 		t.Errorf("env %q", got)
 	}
