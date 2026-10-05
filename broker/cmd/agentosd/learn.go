@@ -14,6 +14,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/daemon"
+	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/loops"
 	"github.com/ghbmrk/agentos/broker/meter"
@@ -39,6 +40,10 @@ type learning struct {
 	eng     atomic.Pointer[journal.Engine]
 	adm     atomic.Pointer[admission.Controller]
 	routing *syncedRouting // nil: routing held
+	tasks   *taskTexts     // the owner's task texts, for harvesting
+	// verdicts queues the gate's owner verdicts for harvesting, so a slow
+	// learning plane never holds the gate (security A2 on PW3).
+	verdicts chan grants.OwnerOutcome
 }
 
 // learnPaths are where the learning plane keeps its state.
@@ -89,6 +94,9 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		router = routerOf{sync, l.pipe}
 	}
 	l.harvest = &loops.Harvester{J: lateQuality{&l.eng}, Pipeline: l.pipe, Store: change.FileStore{Path: filepath.Join(p.Dir, "harvest.json")}}
+	if l.tasks, err = openTaskTexts(change.FileStore{Path: filepath.Join(p.Dir, "tasks.json")}, time.Now, log.Printf); err != nil {
+		return nil, err
+	}
 	learn, err := loops.NewLearn(loops.LearnConfig{
 		Pipeline:   l.pipe,
 		Journal:    lateReader{&l.eng},
@@ -127,6 +135,17 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	cfg.Settings = l.sched.Text
 	cfg.Narrows = l.sched.Narrows
 	cfg.HelpExtra = loops.HelpLine
+	// The owner's verdicts on the agent's effects become Loop 1's cases
+	// (loops L6; potency PW3 on #90). Set last, once nothing
+	// can fail, so a plane that did not open has no hook (security F1).
+	l.verdicts = make(chan grants.OwnerOutcome, maxVerdicts)
+	cfg.Grants.Outcome = func(o grants.OwnerOutcome) {
+		select {
+		case l.verdicts <- o:
+		default:
+			log.Printf("learning: owner verdict not harvested: queue full")
+		}
+	}
 	return l, nil
 }
 
@@ -169,6 +188,23 @@ func (l *learning) attach(ctx context.Context, d *daemon.Daemon) {
 		go l.routing.run(ctx, 30*time.Second)
 	}
 	go l.sched.Run(ctx)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case o := <-l.verdicts:
+				func() {
+					defer func() {
+						if recover() != nil {
+							log.Printf("learning: owner verdict not harvested: harvester failed")
+						}
+					}()
+					harvestOutcome(l.harvest, l.tasks, o, log.Printf)
+				}()
+			}
+		}
+	}()
 }
 
 func (l *learning) busy() bool {

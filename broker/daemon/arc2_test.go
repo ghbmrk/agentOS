@@ -46,12 +46,13 @@ var controlPath = map[string][]string{
 	// running as foreground work (admission.Foreground, RES-1). It runs the
 	// learning plane in-process (W3): the change pipeline, the loop
 	// scheduler, and the replay evaluator, whose transitive imports
-	// TestAgentosdLinksNoInference holds free of inference.
+	// TestAgentosdLinksNoInference holds free of inference. It names the
+	// grants gate's types to harvest the owner's verdicts (PW3 on #90).
 	// It runs the owner-question book (W9) on the box clock (P2-9).
 	// clock imports golang.org/x/sys/unix (adjtimex), so it has no entry
 	// below, whose rules refuse third-party imports; TestAgentosdLinks-
 	// NoInference holds it instead, through netOK.
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule"},
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies

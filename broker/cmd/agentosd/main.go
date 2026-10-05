@@ -251,7 +251,11 @@ func main() {
 				log.Printf("agent machines disabled: %v", err)
 			} else {
 				services.live.Store(&svc{plane})
-				agent.a.Store(&guest.OwnerAgent{Plane: plane, Machine: agentMachine})
+				oa := &guest.OwnerAgent{Plane: plane, Machine: agentMachine}
+				if lp != nil {
+					oa.Delivered = lp.tasks.put
+				}
+				agent.a.Store(oa)
 				defer plane.Shutdown()
 				if lp != nil {
 					// Replay machines run the agent's image and launch.

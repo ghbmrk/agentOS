@@ -180,6 +180,12 @@ type Config struct {
 	Changes Changes
 	// Loops decides meta.loops.* intents. Nil: they are denied.
 	Loops Loops
+	// Outcome receives the owner's verdict on an agent's effect once it is
+	// final, for Loop 1's harvesting (W3, potency PW3 on #90). It is
+	// called once per asked intent, outside the gate's lock, on the
+	// settling goroutine, so it must not block; a panic in it is logged
+	// and changes nothing. Nil: none.
+	Outcome func(OwnerOutcome)
 	// Coalesce, CoalesceIdle, and RequestsPerHour pace approval requests
 	// (CH-15); zero takes the defaults. Urgent marks owner-defined urgent
 	// items, sent at once and in quiet hours. Quiet reports the owner's
@@ -213,6 +219,8 @@ type Gate struct {
 	// (Reserve, W9).
 	asked     []time.Time
 	decided   map[string]decision
+	reported  map[string]bool // intents whose owner verdict went to Outcome
+	reportedQ []string        // their order, to bound reported
 	confirmed map[string]bool
 	failed    map[string]string
 	// carried holds the intents a restart left pending until the owner
@@ -259,9 +267,12 @@ type afterRef struct {
 type decision struct {
 	approved bool
 	why      string
-	at       time.Time
-	item     owner.Item
-	local    bool
+	// asked is set when the decision answered a waiting request, and
+	// implicit when it released an auto-reply the owner never answered.
+	asked, implicit bool
+	at              time.Time
+	item            owner.Item
+	local           bool
 	// hold is the UNDO ID a held effect was under, and attempt which hold
 	// of the intent it was (REV-3).
 	hold    string
@@ -295,7 +306,7 @@ func New(cfg Config) *Gate {
 	return &Gate{cfg: cfg, grants: map[string]*Grant{},
 		waiting: map[string]*wait{}, decided: map[string]decision{}, confirmed: map[string]bool{}, failed: map[string]string{},
 		carried: map[string]bool{}, forms: checkForms(cfg), derived: map[string]bool{}, staging: map[string]chan struct{}{},
-		retry: map[string]string{}, after: map[string]afterRef{}}
+		retry: map[string]string{}, after: map[string]afterRef{}, reported: map[string]bool{}}
 }
 
 // checkForms keeps the forms reversible.Check accepts against each
@@ -1392,7 +1403,9 @@ func (g *Gate) Decide(d owner.Decision) {
 			d.Approved, why = false, "its staged copy could not be made"
 		}
 	}
-	g.decided[d.Ref] = decision{approved: d.Approved, why: why, at: g.cfg.Now(), item: item, local: local, hold: hold, attempt: attempt, tries: tries}
+	implicit := d.Approved && d.Why == "undo window passed" && (w == nil || !w.held)
+	g.decided[d.Ref] = decision{approved: d.Approved, why: why, asked: w != nil, implicit: implicit,
+		at: g.cfg.Now(), item: item, local: local, hold: hold, attempt: attempt, tries: tries}
 	wait := d.Approved && local && !g.confirmed[d.Ref]
 	own := g.own
 	g.mu.Unlock()
@@ -1752,12 +1765,94 @@ func (g *Gate) settle(id string) {
 			// (stale approval, changed state) is not (change C7).
 			g.cfg.Changes.Decided(ctx, st.Intent, !d.approved && d.why == "owner")
 		}
+		if v := ownerVerdict(d, st); v != "" && g.cfg.Outcome != nil && g.reportOnce(id) {
+			g.report(OwnerOutcome{Intent: st.Intent, Verdict: v})
+		}
 		if st.State == journal.Succeeded && st.Intent.Executor == ExecutorName && own != nil && len(st.Attempts) > 0 {
 			if gid := st.Attempts[len(st.Attempts)-1].Evidence; gid != "" {
 				_ = own.Inform(fmt.Sprintf("Added %s. Text PAUSE %s or REVOKE %s to stop it.", gid, gid, gid))
 			}
 		}
 	}()
+}
+
+// OwnerVerdict is the owner's final verdict on an agent's effect.
+type OwnerVerdict string
+
+const (
+	// OwnerAccepted: the owner said YES, and for a held effect let its
+	// undo window pass.
+	OwnerAccepted OwnerVerdict = "accepted"
+	// OwnerAcceptedImplicitly: a pre-allowed auto-reply (ADP-11) the
+	// owner was shown and let go without answering (potency PK2).
+	OwnerAcceptedImplicitly OwnerVerdict = "accepted-implicitly"
+	// OwnerDeclined: the owner said NO.
+	OwnerDeclined OwnerVerdict = "declined"
+	// OwnerUndone: the owner said UNDO inside the undo window.
+	OwnerUndone OwnerVerdict = "undone"
+)
+
+// OwnerOutcome is an agent effect and the owner's verdict on it.
+type OwnerOutcome struct {
+	Intent  journal.Intent
+	Verdict OwnerVerdict
+}
+
+// maxReported bounds the intents reportOnce remembers; the harvester
+// itself keeps only the first verdict on an intent (loops L6).
+const maxReported = 4096
+
+// reportOnce reports whether intent id's verdict is not yet reported, and
+// marks it reported (security A1 on PW3).
+func (g *Gate) reportOnce(id string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.reported[id] {
+		return false
+	}
+	g.reported[id] = true
+	g.reportedQ = append(g.reportedQ, id)
+	if len(g.reportedQ) > maxReported {
+		delete(g.reported, g.reportedQ[0])
+		g.reportedQ = g.reportedQ[1:]
+	}
+	return true
+}
+
+// report calls Outcome outside the gate's lock, after the journal has the
+// final state; a panic in it is logged, never the owner's answer's
+// failure (security A2 on PW3).
+func (g *Gate) report(o OwnerOutcome) {
+	defer func() {
+		if recover() != nil {
+			g.cfg.Logf("grants: owner verdict hook failed")
+		}
+	}()
+	g.cfg.Outcome(o)
+}
+
+// ownerVerdict is the owner's verdict d settled st with, or "" when it is
+// not one: an expiry, a restart, a recheck's refusal, a draft changed
+// after the YES or a failed send (not_applied: no correction text is
+// known, and the content was never seen sent), or an intent that is not
+// a guest's effect. An approval STOP holds is still the owner's verdict.
+func ownerVerdict(d decision, st journal.Status) OwnerVerdict {
+	if !d.asked || !strings.HasPrefix(st.Intent.Origin, "guest:") || st.Intent.Account == journal.BrokerAccount {
+		return ""
+	}
+	switch {
+	case d.approved && (st.State == journal.Authorized || st.State == journal.InFlight ||
+		st.State == journal.Succeeded || st.State == journal.OutcomeUnknown):
+		if d.implicit {
+			return OwnerAcceptedImplicitly
+		}
+		return OwnerAccepted
+	case !d.approved && st.State == journal.Denied && d.why == "owner":
+		return OwnerDeclined
+	case !d.approved && st.State == journal.Denied && d.why == "undo":
+		return OwnerUndone
+	}
+	return ""
 }
 
 // Tick sends batched requests and releases auto-replies whose undo window

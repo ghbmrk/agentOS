@@ -16,6 +16,8 @@ import (
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/daemon"
+	"github.com/ghbmrk/agentos/broker/grants"
+	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/loops"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/routerule"
@@ -43,6 +45,13 @@ func TestLearningPlaneRunsInAgentosd(t *testing.T) {
 	}
 	if !lp.busy() || !lp.stopped() {
 		t.Fatal("loop work could start before the daemon runs")
+	}
+	if cfg.Grants.Outcome == nil || lp.tasks == nil {
+		t.Fatal("owner verdicts are not harvested (PW3)")
+	}
+	// A full verdict queue drops, never blocks the gate (security A2).
+	for i := 0; i < maxVerdicts+10; i++ {
+		cfg.Grants.Outcome(grants.OwnerOutcome{Intent: journal.Intent{ID: fmt.Sprint("agent/", i)}, Verdict: grants.OwnerAccepted})
 	}
 	if _, err := lp.eval.Run(context.Background(), change.Tree{}, change.Probe{ID: "p"}); !errors.Is(err, change.ErrNotEvaluated) {
 		t.Fatalf("evaluation with no evaluator: %v", err)
