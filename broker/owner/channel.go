@@ -716,6 +716,9 @@ func (c *Channel) Run(ctx context.Context) error {
 		case <-tick.C:
 			c.Tick()
 		case m := <-c.cfg.Modem.Inbox():
+			if m.Alphanumeric {
+				continue // a sender ID, not a number: never the owner
+			}
 			rt, ok := c.route(m.From, m.Text)
 			if !ok {
 				continue
