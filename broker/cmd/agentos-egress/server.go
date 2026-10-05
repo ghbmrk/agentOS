@@ -460,6 +460,7 @@ func unlockHandler(c *custody) http.Handler {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
+	secondLineRoutes(mux, c, read, reply, fail)
 	return mux
 }
 
