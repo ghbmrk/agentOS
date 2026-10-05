@@ -452,7 +452,7 @@ func TestAnswersCannotCarryCodes(t *testing.T) {
 		"Q100 1:23 456", "Q100 482 9:13", "Q100 12:34:56", "Q100 09:30:12:34",
 		"Q100 $482913", "Q100 $482,913.00", "Q100 48/29/13", "Q100 48.29.13", "Q100 48-29-13",
 		"Q100 4829-13-57", "Q100 4,829.13", "Q100 1,482,913", "Q100 £1,250.00", "Q100 1,234,567",
-		"Q100 2026/31", "Q100 4, 8, 2, 9, 1, 3", "Q100 482_913",
+		"Q100 2026/31", "Q100 4:28, 9:13", "Q100 10:00, 9:30", "Q100 482913 000", "Q100 482913 482913", "Q100 2026-1990", "Q100 4, 8, 2, 9, 1, 3", "Q100 482_913",
 		// Whatever the channel would withhold as secret-shaped (C1).
 		"Q100 sk-live-abc"} {
 		reply, ok := r.answer(a)
@@ -464,14 +464,14 @@ func TestAnswersCannotCarryCodes(t *testing.T) {
 		t.Fatalf("a code-shaped answer was recorded: %+v", st)
 	}
 	// The owner sees the refusals as a guard hit in the digest (R1).
-	if d := r.b.TakeDigest(); len(d) != 1 || !strings.Contains(d[0], "35 answers") {
+	if d := r.b.TakeDigest(); len(d) != 1 || !strings.Contains(d[0], "40 answers") {
 		t.Fatalf("digest %q", d)
 	}
 	// A full phone number or an ordinary sentence is neither.
 	for _, a := range []string{"Q100 call 555 010 0199", "Q100 maybe after lunch, about three or later",
 		"Q100 great sweet happy dance", "Q100 between 9:30, 10:00",
 		"Q100 05/10/2026", "Q100 12/31/2026", "Q100 the 2026/27 season", "Q100 2026-10-05 at 14:30", "Q100 9:30-10:00",
-		"Q100 1250 pounds"} {
+		"Q100 1250 pounds", "Q100 +44 7700 900123", "Q100 from 1990-2026", "Q100 9:30, 9:45, 10:00"} {
 		if reply, _ := r.answer(a); strings.Contains(reply, "only for the box") {
 			t.Fatalf("%q refused: %q", a, reply)
 		}

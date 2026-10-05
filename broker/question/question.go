@@ -454,7 +454,8 @@ var controlWords = map[string]bool{
 // a question must not hand the owner a reply to copy (CH-12).
 var replyShape = regexp.MustCompile(`(?i)\b(yes|no|undo|more|resume|unlock|pause|revoke|run)\b[^a-z0-9]*([a-z][0-9]{1,4}|[0-9]{4,})\b`)
 
-// codeShaped reports a run of 6 to 8 digits, any Unicode digits counted,
+// codeShaped reports a run of 6 or more digits, other than a phone-shaped
+// one (10 or 11 digits, or 10 to 13 after a "+"), any Unicode digits counted,
 // with digit groups joined across up to maxJoin separators ("482 913",
 // "4-8-2-9-1-3"), as owner.SecretShaped does. A run is excused only when
 // the whole run, exactly, is a strict date or a list of clock times
@@ -462,7 +463,9 @@ var replyShape = regexp.MustCompile(`(?i)\b(yes|no|undo|more|resume|unlock|pause
 func codeShaped(s string) bool {
 	start, end, n, gap := -1, 0, 0, 0
 	flush := func() bool {
-		hit := n >= 6 && n <= 8 && !benign(s[start:end])
+		intl := start > 0 && s[start-1] == '+'
+		phone := n == 10 || n == 11 || intl && n >= 10 && n <= 13 // E.164 is at most 15 with the country code; 13 covers most
+		hit := n >= 6 && !phone && !benign(s[start:end])
 		start, n, gap = -1, 0, 0
 		return hit
 	}
@@ -493,14 +496,40 @@ func codeShaped(s string) bool {
 // refused, and the owner writes it another way ("1250 pounds").
 var (
 	clockList = regexp.MustCompile(`^([01]?[0-9]|2[0-3]):[0-5][0-9](( ?[,–-] ?| )([01]?[0-9]|2[0-3]):[0-5][0-9])*$`)
+	clockAt   = regexp.MustCompile(`([0-9]{1,2}):([0-9]{2})`)
+	years     = regexp.MustCompile(`^((?:19|20)[0-9]{2}) ?[–-] ?((?:19|20)[0-9]{2})$`)
 	dmy       = regexp.MustCompile(`^(0?[1-9]|[12][0-9]|3[01])([/.-])(0?[1-9]|[12][0-9]|3[01])([/.-])(19|20)[0-9]{2}$`)
 	iso       = regexp.MustCompile(`^(19|20)[0-9]{2}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$`)
 	season    = regexp.MustCompile(`^((?:19|20)[0-9]{2})/([0-9]{2})$`)
 )
 
 func benign(run string) bool {
-	if clockList.MatchString(run) || iso.MatchString(run) {
+	if iso.MatchString(run) {
 		return true
+	}
+	if clockList.MatchString(run) {
+		// Two or more times pass only as people write them: on the five
+		// minutes and ascending ("9:30, 10:00"). "4:28, 9:13" could be any
+		// code (#71 L3).
+		ts := clockAt.FindAllStringSubmatch(run, -1)
+		if len(ts) == 1 {
+			return true
+		}
+		last := -1
+		for _, t := range ts {
+			h, _ := strconv.Atoi(t[1])
+			m, _ := strconv.Atoi(t[2])
+			if m%5 != 0 || h*60+m <= last {
+				return false
+			}
+			last = h*60 + m
+		}
+		return true
+	}
+	if m := years.FindStringSubmatch(run); m != nil {
+		a, _ := strconv.Atoi(m[1])
+		b, _ := strconv.Atoi(m[2])
+		return a < b
 	}
 	if m := dmy.FindStringSubmatch(run); m != nil {
 		// Day and month in either order, but one of them is a month.
