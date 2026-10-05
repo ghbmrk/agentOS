@@ -707,6 +707,10 @@ func (m *Manager) takeLocked(ctx context.Context, mc *machine, t Tier) (Snapshot
 	// recorded as running.
 	rerr := m.cfg.Runtime.Resume(context.WithoutCancel(ctx), mc.ID)
 	if err != nil {
+		if s.ID != "" {
+			// Published, then the machine record failed to save (L3 on #137).
+			m.withdrawLocked(mc, s.ID, prev)
+		}
 		return Snapshot{}, err
 	}
 	if rerr != nil {
@@ -718,12 +722,14 @@ func (m *Manager) takeLocked(ctx context.Context, mc *machine, t Tier) (Snapshot
 
 // withdrawLocked unpublishes snapshot id, just taken of mc, and deletes it;
 // mc.mu is held. Like a prune, the record goes first, then meta.json, so a
-// crash leaves a directory that load drops.
+// crash or a failed delete leaves a directory that load drops.
 func (m *Manager) withdrawLocked(mc *machine, id, prev string) {
 	if err := m.unpublishSnapshot(id); err != nil {
 		log.Printf("vm: %s: withdrawing snapshot %s: %v", mc.ID, id, err)
 	}
-	os.RemoveAll(m.snapDir(id))
+	if err := os.RemoveAll(m.snapDir(id)); err != nil {
+		log.Printf("vm: %s: deleting withdrawn snapshot %s: %v", mc.ID, id, err)
+	}
 	if mc.Last == id {
 		mc.Last = prev
 		if err := m.saveMachine(mc); err != nil {

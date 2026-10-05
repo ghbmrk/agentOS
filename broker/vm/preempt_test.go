@@ -252,3 +252,32 @@ func TestRES1SnapshotFailingAtResumePublishesNothing(t *testing.T) {
 		t.Fatalf("after restart: %v", ids(got))
 	}
 }
+
+// A snapshot published just before its machine record fails to save is
+// withdrawn too: the error leaves nothing published (L3 on #137).
+func TestRES1SnapshotFailingToSaveTheMachinePublishesNothing(t *testing.T) {
+	e := newEnv(t, 2000)
+	e.create("exp", admission.Experiment, 1500)
+	keep, err := e.m.Checkpoint(bg, "exp")
+	must(t, err)
+	// A directory where the record's temporary file goes makes the save fail.
+	block := filepath.Join(e.cfg.StateDir, "machines", "exp", "meta.json.tmp")
+	must(t, os.MkdirAll(filepath.Join(block, "x"), 0o700))
+	if _, err := e.m.Checkpoint(bg, "exp"); err == nil {
+		t.Fatal("snapshot whose machine record failed to save reported success")
+	}
+	must(t, os.RemoveAll(block))
+	if got := e.m.Snapshots("exp"); len(got) != 1 || got[0].ID != keep.ID {
+		t.Fatalf("snapshots %v, want only %s", ids(got), keep.ID)
+	}
+	entries, err := os.ReadDir(filepath.Join(e.cfg.StateDir, "snapshots"))
+	must(t, err)
+	if len(entries) != 1 {
+		t.Fatalf("%d snapshot directories on disk, want 1", len(entries))
+	}
+	mc, err := e.m.Get("exp")
+	must(t, err)
+	if mc.Last != keep.ID {
+		t.Fatalf("Last = %s, want %s", mc.Last, keep.ID)
+	}
+}
