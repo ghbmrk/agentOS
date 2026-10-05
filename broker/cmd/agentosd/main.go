@@ -182,6 +182,8 @@ func main() {
 	// Agents' questions (W9): owner replies are answered before task chat
 	// reaches the agent.
 	qs := &questions{}
+	// STATUS notes read in wiring order: the time check, then spare-time
+	// work not running (learningOff, below). Keep the clock first.
 	qs.wire(&cfg)
 	agent := &lateAgent{}
 	cfg.Agent = agent
