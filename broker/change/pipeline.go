@@ -449,9 +449,11 @@ func (p *Pipeline) Propose(ctx context.Context, c Candidate) (Report, error) {
 // ProposeRelease runs a verified upstream release through the pipeline.
 // The candidate is built here from the signed image digests, so what is
 // evaluated and staged is exactly what the maintainers signed. Only a
-// release that update.Verify marked as security (signature threshold plus
-// an independent attestation, UPD-8) can use the security standing policy.
-func (p *Pipeline) ProposeRelease(ctx context.Context, v update.Verified) (Report, error) {
+// release whose Security() holds (threshold signatures plus an independent
+// attestation, checked by update.Verified.WithAttestations; UPD-8) can use
+// the security standing policy. Only update.Store.Check makes a
+// *update.Verified; nil or a zero value is refused.
+func (p *Pipeline) ProposeRelease(ctx context.Context, v *update.Verified) (Report, error) {
 	if !v.OK() {
 		return Report{}, errors.New("change: release is not verified")
 	}

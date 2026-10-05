@@ -464,6 +464,13 @@ func TestUnknownClassAndBadRequests(t *testing.T) {
 		{"POST", "/v1/responses", simpleChat, 404},
 		{"GET", "/v1/chat/completions", "", 404},
 		{"POST", "/v1/chat/completions?x=1", simpleChat, 404},
+		// Escapes are refused, not decoded into the served path (ADP-10).
+		{"POST", "/v1/chat%2Fcompletions", simpleChat, 404},
+		{"POST", "/openai%2Fv1/chat/completions", simpleChat, 404},
+		{"POST", "/%761/chat/completions", simpleChat, 404},
+		// Dot segments are not cleaned into the served path.
+		{"POST", "/v1/../v1/chat/completions", simpleChat, 404},
+		{"POST", "/openai/v1/./chat/completions", simpleChat, 404},
 	} {
 		req := httptest.NewRequest(c.method, c.path, strings.NewReader(c.body))
 		w := httptest.NewRecorder()

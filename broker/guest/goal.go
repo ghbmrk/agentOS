@@ -1,0 +1,96 @@
+package guest
+
+import "time"
+
+// Goal IDs (G14). Every effect request is stamped with the owner message
+// its lineage is serving, so a task is one owner request rather than a
+// whole guest lineage (OP-1's goal_id; compiled skills, Loop 1 mining, and
+// replay group by it). The broker chooses the goal; nothing the guest
+// sends names one. The goal is part of an intent's identity (OP-1), so it
+// is fixed by the request's first submission: a repeat keeps it, whatever
+// the lineage is serving by then.
+
+// DefaultGoalQuiet is how long a lineage may keep serving its last owner
+// message once none is open, counted from when that message was handed
+// to the guest. Only the owner's side moves it: guest requests and model
+// calls never extend it (arbitrator on #55).
+const DefaultGoalQuiet = 30 * time.Minute
+
+// GoalID is the goal ID of the task an owner message started.
+func GoalID(msgID string) string { return "owner:" + msgID }
+
+// lineageOf is machine m's fork lineage, or "" if the manager cannot say.
+// It must not be called from Open (the manager holds its lock there).
+func (p *Plane) lineageOf(m *machine) string {
+	if l := m.lineage.Load(); l != nil {
+		return *l
+	}
+	l, err := p.cfg.Machines.Lineage(m.id)
+	if err != nil || l == "" {
+		return ""
+	}
+	m.lineage.Store(&l)
+	return l
+}
+
+// lineageOpen reports whether any open machine is in lineage, as far as
+// the cached lineages tell (Close runs after the manager forgot the
+// machine, so it cannot ask).
+func (p *Plane) lineageOpen(lineage string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, m := range p.ms {
+		if l := m.lineage.Load(); l != nil && *l == lineage {
+			return true
+		}
+	}
+	return false
+}
+
+// handedOut records that m's guest was handed owner message id: from now
+// on its lineage serves it.
+func (p *Plane) handedOut(m *machine, id string) {
+	if l := p.lineageOf(m); l != "" {
+		p.store.setGoal(l, id, p.cfg.Now())
+	}
+}
+
+// goal is the goal a new request from lineage serves. It is the one owner
+// message the lineage's guests hold unanswered; with none, the last one
+// it was handed (work that goes on after the answer still serves it),
+// until a new message is delivered to the lineage or GoalQuiet has passed
+// since it was handed out; with several, none, since the broker cannot
+// tell which one a request is for and does not guess. Work started by
+// events or timers will carry no goal (arbitrator on #55; G14).
+func (p *Plane) goal(lineage string) string {
+	if lineage == "" {
+		return ""
+	}
+	p.mu.Lock()
+	all := make([]*machine, 0, len(p.ms))
+	for _, m := range p.ms {
+		all = append(all, m)
+	}
+	p.mu.Unlock()
+	var open []string
+	// Only cached lineages are read: a machine whose guest was handed a
+	// message has one (handedOut), and asking the manager for the rest
+	// would make one machine's cold start stall every other's calls.
+	for _, m := range all {
+		if l := m.lineage.Load(); l != nil && *l == lineage {
+			open = append(open, m.box.handed()...)
+		}
+	}
+	now := p.cfg.Now()
+	switch len(open) {
+	case 0:
+		g := p.store.goal(lineage)
+		if g.Msg == "" || now.Sub(g.Last) >= p.cfg.GoalQuiet {
+			return ""
+		}
+		return GoalID(g.Msg)
+	case 1:
+		return GoalID(open[0])
+	}
+	return ""
+}
