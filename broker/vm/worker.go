@@ -367,14 +367,24 @@ func (m *Manager) DeleteFiles(ctx context.Context, id string, d Deletion) (Delet
 	if err != nil {
 		return DeleteReport{}, err
 	}
+	// A refused deletion ends nothing: STOP and the label rule are
+	// checked before a command in the worker is ended (L3 SHOULD-2 on
+	// #166), and again under the lock, since either may change meanwhile.
+	if held(d) {
+		return DeleteReport{}, ErrHeld
+	}
+	if Label(mc.label.Load()) > d.As {
+		return DeleteReport{}, ErrLabel
+	}
 	// A command in the worker ends: the deletion stops the worker anyway
 	// (L3 nit on #166).
 	mc.lockEndingExec()
 	was := mc.State
 	rep, stopped, err := m.deleteLocked(ctx, mc, d)
 	mc.mu.Unlock()
-	// What the guest sees names no host path or errno: any other failure
-	// is logged here and answered as delete_failed (L3 S1 on #166).
+	// What the guest sees names no host path or errno: any failure other
+	// than the guards' is logged here and returned as the fixed
+	// overlay.ErrDeleteFailed (L3 S1, security F3 on #166).
 	if err != nil && !errors.Is(err, ErrLabel) && !errors.Is(err, ErrHeld) && !errors.Is(err, ErrUnknown) && !errors.Is(err, overlay.ErrDeleteFailed) {
 		log.Printf("vm: %s: deleting files: %v", id, err)
 		err = fmt.Errorf("%s: %w", id, overlay.ErrDeleteFailed)

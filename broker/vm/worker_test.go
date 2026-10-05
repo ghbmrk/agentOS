@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
+	"github.com/ghbmrk/agentos/broker/vm/overlay"
 )
 
 func workerSpec(l Label) Spec {
@@ -637,7 +639,7 @@ func TestCAP8cDeleteDuringSTOPLeavesTheWorkerStopped(t *testing.T) {
 	_, err = e.m.Exec(bg, "wk-a", Command{Argv: []string{"write", "f"}}, time.Second)
 	must(t, err)
 	calls := 0
-	hold := func() bool { calls++; return calls > 1 } // free at the start, STOP after
+	hold := func() bool { calls++; return calls > 2 } // free at both start checks, STOP after
 	rep, err := e.m.DeleteFiles(bg, "wk-a", Deletion{Paths: []string{"/f"}, Hold: hold})
 	must(t, err)
 	if rep.Restarted || rep.Codes[0] != "removed" {
@@ -669,5 +671,94 @@ func TestCAP8cDeleteDuringSTOPLeavesTheWorkerStopped(t *testing.T) {
 	must(t, err)
 	if w, _ := e.m.Get("wk-a"); rep.Restarted || w.State != Preempted {
 		t.Fatalf("a deletion resumed a preempted worker: %+v, %s", rep, w.State)
+	}
+}
+
+// A refused deletion ends nothing: a command running in the worker
+// carries on (L3 SHOULD-2 on #166).
+func TestCAP8cRefusedDeleteEndsNoCommand(t *testing.T) {
+	e := newEnv(t, 4096)
+	agent := e.create("agent", admission.Experiment, 500)
+	_, err := e.m.CreateWorker(bg, "wk-p", agent.Lineage, workerSpec(Private))
+	must(t, err)
+	ctx, cancel := context.WithCancel(bg)
+	done := make(chan error, 1)
+	go func() {
+		_, err := e.m.Exec(ctx, "wk-p", Command{Argv: []string{"sleep"}, As: Private}, time.Minute)
+		done <- err
+	}()
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(time.Millisecond) {
+		if _, ok := e.m.TryGet("wk-p"); !ok {
+			break // the command holds the worker
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the command never started")
+		}
+	}
+	if _, err := e.m.DeleteFiles(bg, "wk-p", Deletion{Paths: []string{"/x"}, As: Public}); !errors.Is(err, ErrLabel) {
+		t.Fatalf("public delete in a private worker: %v", err)
+	}
+	if _, err := e.m.DeleteFiles(bg, "wk-p", Deletion{Paths: []string{"/x"}, As: Private, Hold: func() bool { return true }}); !errors.Is(err, ErrHeld) {
+		t.Fatalf("delete under STOP: %v", err)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("a refused delete ended the command: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	cancel()
+	<-done
+}
+
+// Any failure past the guards reaches the caller as overlay's fixed
+// error, naming no host path, here a layer too deep for the host to
+// measure (L3 SHOULD-3 on #166).
+func TestCAP8cDeleteFailureNamesNoHostPath(t *testing.T) {
+	e := newEnv(t, 4096)
+	agent := e.create("agent", admission.Experiment, 500)
+	_, err := e.m.CreateWorker(bg, "wk-a", agent.Lineage, workerSpec(Public))
+	must(t, err)
+	_, err = e.m.Exec(bg, "wk-a", Command{Argv: []string{"write", "f"}}, time.Second)
+	must(t, err)
+	fd, err := syscall.Open(e.upper("wk-a", ""), syscall.O_RDONLY|syscall.O_DIRECTORY, 0)
+	must(t, err)
+	name := strings.Repeat("n", 200)
+	for range 25 { // past the host's PATH_MAX under upper
+		must(t, syscall.Mkdirat(fd, name, 0o755))
+		next, err := syscall.Openat(fd, name, syscall.O_RDONLY|syscall.O_DIRECTORY, 0)
+		syscall.Close(fd)
+		must(t, err)
+		fd = next
+	}
+	syscall.Close(fd)
+	_, err = e.m.DeleteFiles(bg, "wk-a", Deletion{Paths: []string{"/f"}})
+	if !errors.Is(err, overlay.ErrDeleteFailed) || strings.Contains(err.Error(), "/") {
+		t.Fatalf("a failed measure = %v", err)
+	}
+}
+
+// A worker that fails to start again after a deletion stays stopped with
+// its admission released, and the deletion's codes are still answered
+// (L3 SHOULD-4 on #166).
+func TestCAP8cFailedRestartKeepsTheCodes(t *testing.T) {
+	e := newEnv(t, 4096)
+	agent := e.create("agent", admission.Experiment, 500)
+	_, err := e.m.CreateWorker(bg, "wk-a", agent.Lineage, workerSpec(Public))
+	must(t, err)
+	_, err = e.m.Exec(bg, "wk-a", Command{Argv: []string{"write", "f"}}, time.Second)
+	must(t, err)
+	e.rt.mu.Lock()
+	e.rt.failNext = errors.New("fake: no start")
+	e.rt.mu.Unlock()
+	rep, err := e.m.DeleteFiles(bg, "wk-a", Deletion{Paths: []string{"/f"}})
+	must(t, err)
+	if rep.Restarted || rep.Codes[0] != "removed" || rep.Files != 1 {
+		t.Fatalf("delete with a failed restart = %+v", rep)
+	}
+	if w, _ := e.m.Get("wk-a"); w.State != Stopped {
+		t.Fatalf("worker is %s, want stopped", w.State)
+	}
+	if _, ok := e.m.cfg.Admit.(*admission.Controller).Snapshot().Running["wk-a"]; ok {
+		t.Fatal("a worker that failed to start still holds its admission")
 	}
 }

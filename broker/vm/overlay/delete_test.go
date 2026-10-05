@@ -239,8 +239,9 @@ func TestDeleteDepthIsBounded(t *testing.T) {
 	}
 }
 
-// Nothing a guest sees names a host path: an over-long path is bad_path,
-// and errors carry no broker directory (L3 S1 on #166).
+// A path past the host's PATH_MAX under upper still resolves, handle by
+// handle; an over-long name is bad_path; errors carry no broker
+// directory (L3 S1 and SHOULD-1 on #166).
 func TestDeleteNamesNoHostPath(t *testing.T) {
 	r := newDelRig(t)
 	name := strings.Repeat("n", 255)
@@ -267,10 +268,18 @@ func TestDeleteNamesNoHostPath(t *testing.T) {
 		}
 		fd = next
 	}
+	leaf, err := syscall.Openat(fd, parts[len(parts)-1], syscall.O_CREAT|syscall.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	syscall.Close(leaf)
 	syscall.Close(fd)
-	out := r.del(false, 100, long, "/"+strings.Repeat("n", 256))
-	if fmt.Sprint(out.Codes) != fmt.Sprint([]string{BadPath, BadPath}) {
-		t.Fatalf("over-long paths = %v", out.Codes)
+	if len(r.upper)+len(long) <= maxPathLen {
+		t.Fatal("the path is within the host's limit")
+	}
+	out := r.del(false, 100, long, "/"+strings.Repeat("n", 256), long+"x")
+	if fmt.Sprint(out.Codes) != fmt.Sprint([]string{Removed, BadPath, BadPath}) {
+		t.Fatalf("long paths = %v", out.Codes)
 	}
 	got, err := Delete(filepath.Join(r.upper, "missing"), r.lower, []string{"/f"}, false, 100)
 	if err != ErrDeleteFailed || strings.Contains(err.Error(), "/") || got.Fault == nil {
@@ -325,6 +334,45 @@ func TestDeleteTimeBudget(t *testing.T) {
 	clock = time.Now
 	if out := r.del(true, 100_000, "/d", "/e"); fmt.Sprint(out.Codes) != fmt.Sprint([]string{Removed, Removed}) {
 		t.Fatalf("again = %+v", out)
+	}
+}
+
+// A path 1,000 directories deep resolves in time linear in its depth,
+// on the real clock, and repeated recursive deletes from the bottom up
+// clear the chain, each removing something (L3 on #166).
+func TestDeleteDeepPathsMakeProgress(t *testing.T) {
+	r := newDelRig(t)
+	const depth = 1000
+	deep := strings.Repeat("/c", depth)
+	if err := os.MkdirAll(filepath.Join(r.upper, deep), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if out := r.del(false, 100_000, deep); out.Codes[0] != Removed {
+		t.Fatalf("the deepest directory = %+v", out)
+	}
+	if took := time.Since(start); took > 2*time.Second {
+		t.Fatalf("resolving %d levels took %v", depth, took)
+	}
+	defer func(d time.Duration) { deleteTimeout = d }(deleteTimeout)
+	deleteTimeout = 0 // the time is always up: progress must still be made
+	for n := depth - 1 - MaxTreeDepth + 1; ; n -= MaxTreeDepth {
+		p := strings.Repeat("/c", max(n, 1))
+		for {
+			out := r.del(true, 100_000, p)
+			if out.Files == 0 {
+				t.Fatalf("no progress at depth %d: %+v", n, out)
+			}
+			if out.Codes[0] == Removed {
+				break
+			}
+			if out.Codes[0] != MoreRemains {
+				t.Fatalf("depth %d = %+v", n, out)
+			}
+		}
+		if n <= 1 {
+			break
+		}
 	}
 }
 

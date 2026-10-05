@@ -38,7 +38,9 @@ var ErrDeleteFailed = errors.New("overlay: delete_failed")
 const MaxTreeDepth = 256
 
 // deleteTimeout bounds one Delete's wall-clock time; what remains is
-// more_remains (security on #166). clock is the time; tests replace both.
+// more_remains (security F2 on #166). clock is the time; tests replace
+// both. time.Now carries the monotonic clock, which Add and After use, so
+// a change of the wall clock neither stretches nor cuts the budget.
 var (
 	deleteTimeout = 10 * time.Second
 	clock         = time.Now
@@ -62,7 +64,6 @@ type DeleteResult struct {
 const (
 	oPath      = 0x200000 // O_PATH: a handle on the entry itself, opens nothing
 	maxPathLen = 4096
-	maxNameLen = 255
 )
 
 // Delete removes paths, as the guest names them, from the upper layer of
@@ -109,7 +110,12 @@ func deleteAll(upper, lower string, paths []string, recursive bool, maxEntries i
 	if err != nil {
 		return DeleteResult{}, err
 	}
-	d := &deleter{v: View{Lower: lower, Upper: upper}, root: root, dev: st.Dev, left: maxEntries, mounts: mounts, base: base,
+	low, err := syscall.Open(lower, oPath|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return DeleteResult{}, &os.PathError{Op: "open", Path: lower, Err: err}
+	}
+	defer syscall.Close(low)
+	d := &deleter{lower: low, root: root, dev: st.Dev, left: maxEntries, mounts: mounts, base: base,
 		deadline: clock().Add(deleteTimeout)}
 	out := DeleteResult{Codes: make([]string, len(paths))}
 	for i, p := range paths {
@@ -132,8 +138,8 @@ func deleteAll(upper, lower string, paths []string, recursive bool, maxEntries i
 }
 
 type deleter struct {
-	v      View
-	root   int
+	root   int // upper
+	lower  int
 	dev    uint64
 	left   int
 	files  int
@@ -144,9 +150,11 @@ type deleter struct {
 	deadline time.Time
 }
 
-// spent says the entry budget or the time ran out.
+// spent says the entry budget ran out, or the time did once this call
+// has removed something: every call makes progress, so asking again
+// always ends (L3 on #166).
 func (d *deleter) spent() bool {
-	return d.left <= 0 || clock().After(d.deadline)
+	return d.left <= 0 || d.files > 0 && clock().After(d.deadline)
 }
 
 // mounted says whether the entry at parts is a mount point. A bind mount
@@ -206,11 +214,6 @@ func guestParts(p string) ([]string, bool) {
 		return nil, false
 	}
 	parts := strings.Split(p[1:], "/")
-	for _, c := range parts {
-		if len(c) > maxNameLen {
-			return nil, false
-		}
-	}
 	// Room for a recursive walk's names, so descending never copies.
 	return append(make([]string, 0, len(parts)+MaxTreeDepth+1), parts...), true
 }
@@ -235,12 +238,12 @@ func (d *deleter) oneParts(parts []string, recursive bool) (string, error) {
 	if code == "" {
 		defer syscall.Close(dir)
 	}
-	switch layer, err := d.v.visible(parts); {
+	switch layer, err := d.visible(parts); {
 	case err != nil:
 		return "", err
-	case layer == "":
+	case layer == inNone:
 		return NotFound, nil
-	case layer == d.v.Lower:
+	case layer == inLower:
 		return BaseImage, nil
 	case code != "":
 		return code, nil // shown from upper yet its parent is missing: never
@@ -282,11 +285,11 @@ func (d *deleter) oneParts(parts []string, recursive bool) (string, error) {
 // after says whether the base image's version shows once the upper copy
 // is gone.
 func (d *deleter) after(parts []string) (string, error) {
-	layer, err := d.v.visible(parts)
+	layer, err := d.visible(parts)
 	if err != nil {
 		return "", err
 	}
-	if layer == d.v.Lower {
+	if layer == inLower {
 		return RemovedBase, nil
 	}
 	return Removed, nil
@@ -438,71 +441,105 @@ func rmdirAt(dir int, name string) error {
 	return syscall.Rmdir("/proc/self/fd/" + strconv.Itoa(dir) + "/" + name)
 }
 
-// visible is the layer a guest path shows from: upper, lower, or "" when
-// the guest sees nothing there. It reads kinds only, never contents, so
-// large files cost nothing (View.Lookup hashes them).
-func (v View) visible(parts []string) (string, error) {
-	lowerHidden := false
-	for i := 1; i <= len(parts); i++ {
-		k, opaque, err := kindAt(v.Upper, parts[:i])
-		if err != nil {
-			return "", err
-		}
-		last := i == len(parts)
+// Layers a guest path shows from.
+const (
+	inNone = iota
+	inUpper
+	inLower
+)
+
+// visible is the layer a guest path shows from: inUpper, inLower, or
+// inNone when the guest sees nothing there. It resolves through handles,
+// one pass per layer, reading kinds only, never contents, so its cost
+// grows with the path's depth alone and no host path is ever formed (L3
+// on #166).
+func (d *deleter) visible(parts []string) (int, error) {
+	layer, lowerHidden := inNone, false
+	err := walkKinds(d.root, parts, func(i int, k Kind, opaque bool) bool {
+		last := i == len(parts)-1
 		switch {
 		case k == Whiteout:
-			return "", nil
-		case last && k != Absent:
-			return v.Upper, nil
-		case !last && k != Absent && k != Dir:
-			return "", nil
-		case k == Dir && opaque:
+			layer, lowerHidden = inNone, true
+			return false
+		case k == Absent:
+			return false
+		case last:
+			layer = inUpper
+			return false
+		case k != Dir:
+			lowerHidden = true // a file above the path hides it
+			return false
+		case opaque:
 			lowerHidden = true
 		}
+		return true
+	})
+	if err != nil || layer != inNone || lowerHidden {
+		return layer, err
 	}
-	if lowerHidden {
-		return "", nil
+	found := false
+	err = walkKinds(d.lower, parts, func(i int, k Kind, _ bool) bool {
+		found = i == len(parts)-1 && k != Absent
+		return true
+	})
+	if err != nil || !found {
+		return inNone, err
 	}
-	k, _, err := kindAt(v.Lower, parts)
-	if err != nil || k == Absent {
-		return "", err
-	}
-	return v.Lower, nil
+	return inLower, nil
 }
 
-// kindAt is what parts names beneath root, with no symlink followed: a
-// path under a symlink or other non-directory is Absent.
-func kindAt(root string, parts []string) (Kind, bool, error) {
-	p := root
-	for i, part := range parts {
-		p = filepath.Join(p, part)
-		fi, err := os.Lstat(p)
-		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
-			return Absent, false, nil
+// walkKinds resolves parts beneath the directory handle root one
+// component at a time, with O_NOFOLLOW, and calls f with each prefix's
+// kind until f returns false, the path ends, or a prefix is not a
+// directory (deeper prefixes are then missing, and not reported). A
+// missing prefix is reported as Absent.
+func walkKinds(root int, parts []string, f func(i int, k Kind, opaque bool) bool) error {
+	cur, err := syscall.Dup(root)
+	if err != nil {
+		return err
+	}
+	defer func() { syscall.Close(cur) }()
+	for i, c := range parts {
+		next, err := syscall.Openat(cur, c, oPath|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+		if errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ENOTDIR) {
+			f(i, Absent, false)
+			return nil
 		}
 		if err != nil {
-			return Absent, false, err
+			return err
 		}
-		if i < len(parts)-1 {
-			if !fi.IsDir() {
-				return Absent, false, nil
-			}
-			continue
+		syscall.Close(cur)
+		cur = next
+		var st syscall.Stat_t
+		if err := syscall.Fstat(cur, &st); err != nil {
+			return err
 		}
-		switch m := fi.Mode(); {
-		case m&fs.ModeCharDevice != 0 && isWhiteoutDev(fi):
-			return Whiteout, false, nil
-		case m.IsDir():
-			var buf [8]byte
-			n, err := syscall.Getxattr(p, opaqueXattr, buf[:])
-			return Dir, err == nil && n == 1 && buf[0] == 'y', nil
-		case m&fs.ModeSymlink != 0:
-			return Symlink, false, nil
-		case m.IsRegular():
-			return File, false, nil
-		default:
-			return Other, false, nil
+		k, opaque := kindOf(cur, &st)
+		if !f(i, k, opaque) || k != Dir {
+			return nil
 		}
 	}
-	return Absent, false, nil
+	return nil
+}
+
+// kindOf is what the entry behind handle fd is, and for a directory
+// whether it is opaque. The xattr is read through the handle's
+// /proc/self/fd link, which names the directory itself.
+func kindOf(fd int, st *syscall.Stat_t) (Kind, bool) {
+	switch st.Mode & syscall.S_IFMT {
+	case syscall.S_IFCHR:
+		if st.Rdev == 0 {
+			return Whiteout, false
+		}
+		return Other, false
+	case syscall.S_IFDIR:
+		var buf [8]byte
+		n, err := syscall.Getxattr("/proc/self/fd/"+strconv.Itoa(fd), opaqueXattr, buf[:])
+		return Dir, err == nil && n == 1 && buf[0] == 'y'
+	case syscall.S_IFLNK:
+		return Symlink, false
+	case syscall.S_IFREG:
+		return File, false
+	}
+	return Other, false
 }
