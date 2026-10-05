@@ -127,9 +127,17 @@ type fakeExec struct {
 	fail   map[string]bool
 	// evidence overrides a failed intent's evidence.
 	evidence map[string]string
+	// block holds an intent's attempts until its channel is closed.
+	block map[string]chan struct{}
 }
 
 func (e *fakeExec) Execute(_ context.Context, in journal.Intent, _ int) journal.Outcome {
+	e.mu.Lock()
+	b := e.block[in.ID]
+	e.mu.Unlock()
+	if b != nil {
+		<-b
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.ran[in.ID]++

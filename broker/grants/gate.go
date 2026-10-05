@@ -887,26 +887,33 @@ func (g *Gate) Check(ctx context.Context, phase journal.Phase, in journal.Intent
 	// The engine commits the dispatch only if nothing was journaled since
 	// this check, so an attempt started by a concurrent Dispatch, before
 	// spend runs, is seen here or forces the check again (GR8).
-	if phase == journal.PhaseDispatch && g.tries(in.ID) != d.tries {
-		return errors.New("the owner's approval was used by an earlier attempt; ask again")
+	if phase == journal.PhaseDispatch {
+		n, err := g.tries(in.ID)
+		if err != nil {
+			return fmt.Errorf("cannot read the intent's attempts: %w", err)
+		}
+		if n != d.tries {
+			return errors.New("the owner's approval was used by an earlier attempt; ask again")
+		}
 	}
 	return nil
 }
 
 // tries is how many attempts the intent has started. The engine is read
-// without g.mu: its policy calls take g.mu.
-func (g *Gate) tries(id string) int {
+// without g.mu: its policy calls take g.mu. An error is a refusal at the
+// recheck, never a count that might match an approval.
+func (g *Gate) tries(id string) (int, error) {
 	g.mu.Lock()
 	eng := g.eng
 	g.mu.Unlock()
 	if eng == nil {
-		return 0
+		return 0, errors.New("grants are not loaded")
 	}
 	st, err := eng.Get(id)
 	if err != nil {
-		return 0
+		return 0, err
 	}
-	return len(st.Attempts)
+	return len(st.Attempts), nil
 }
 
 func (g *Gate) isConfirmed(id string) bool {
@@ -1267,7 +1274,10 @@ func (g *Gate) Decide(d owner.Decision) {
 		return
 	}
 	unstaged := d.Approved && g.unstaged(d.Ref)
-	tries := g.tries(d.Ref)
+	tries, err := g.tries(d.Ref)
+	if err != nil {
+		tries = -1 // matches no count, so the recheck refuses it
+	}
 	g.mu.Lock()
 	w := g.waiting[d.Ref]
 	if w == nil && (d.Approved || g.eng == nil) {
