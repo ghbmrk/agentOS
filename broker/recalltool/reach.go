@@ -121,8 +121,8 @@ type Reach struct {
 	// Retry settles the same lineage does not reset it twice.
 	run     sync.Mutex
 	mu      sync.Mutex
-	pending map[string]bool   // deleted item IDs not yet fully reached
-	kinds   map[string]string // deleted item ID -> source kind, as deleted
+	pending map[string]bool      // deleted item IDs not yet fully reached
+	kinds   map[string]string    // deleted item ID -> source kind, as deleted
 	asked   map[string]time.Time // lineage -> when last asked
 	// held: lineages asked about and not yet taken back (contained);
 	// kept: lineages the owner said NO for, which still hold a deleted
