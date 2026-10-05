@@ -2,6 +2,7 @@ package grants
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -189,6 +190,13 @@ type Config struct {
 	// settling goroutine, so it must not block; a panic in it is logged
 	// and changes nothing. Nil: none.
 	Outcome func(OwnerOutcome)
+	// Observe is shown each guest intent the policy authorized, as the
+	// guest wrote it, before the journal redacts it: the learning plane
+	// keeps the values compiled skills need (W3-values). It gets a deep
+	// copy, after the check passed, never for broker-state intents; it
+	// must not block, and a panic in it is logged and changes nothing
+	// (security V1 on W3-values). Nil: none.
+	Observe func(journal.Intent)
 	// Coalesce, CoalesceIdle, and RequestsPerHour pace approval requests
 	// (CH-15); zero takes the defaults. Urgent marks owner-defined urgent
 	// items, sent at once and in quiet hours. Quiet reports the owner's
@@ -899,6 +907,32 @@ func sharingOn(in journal.Intent) bool {
 // Check is the journal policy (OP-3): it runs at authorize and again
 // immediately before dispatch.
 func (g *Gate) Check(ctx context.Context, phase journal.Phase, in journal.Intent) error {
+	err := g.check(ctx, phase, in)
+	if err == nil && phase == journal.PhaseAuthorize && g.cfg.Observe != nil && in.Account != journal.BrokerAccount {
+		g.observe(in)
+	}
+	return err
+}
+
+// observe hands Observe a deep copy of in; a panic in it is logged.
+func (g *Gate) observe(in journal.Intent) {
+	defer func() {
+		if recover() != nil {
+			g.cfg.Logf("grants: intent observer failed")
+		}
+	}()
+	b, err := json.Marshal(in)
+	if err != nil {
+		return
+	}
+	var cp journal.Intent
+	if json.Unmarshal(b, &cp) != nil {
+		return
+	}
+	g.cfg.Observe(cp)
+}
+
+func (g *Gate) check(ctx context.Context, phase journal.Phase, in journal.Intent) error {
 	g.mu.Lock()
 	d, decided := g.decided[in.ID]
 	ready := g.eng != nil

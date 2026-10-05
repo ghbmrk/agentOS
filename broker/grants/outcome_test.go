@@ -346,3 +346,37 @@ func TestAnUnsentVerdictForAMissingIntentIsDropped(t *testing.T) {
 		t.Fatalf("missing intent: kept %v, reported %+v", kept, got)
 	}
 }
+
+// REQ: LOOP-4, CAP-5
+// W3-values, security V1: Observe sees a guest intent as written once the
+// policy authorized it, as a deep copy, never before the owner's YES, never
+// a refused one, and a panic in it changes nothing.
+func TestObserveSeesAuthorizedIntentsOnly(t *testing.T) {
+	var seen []journal.Intent
+	r := newRig(t, func(c *Config) {
+		c.Observe = func(in journal.Intent) {
+			seen = append(seen, in)
+			in.Params["record"] = "changed by the observer"
+			panic("learning plane down")
+		}
+	})
+	r.grant(mailGrant())
+	r.ver.set("inv-1042", sam())
+	r.effect("agent/1", "invoice.send", map[string]any{"record": "inv-1042"}, "sam@example.com")
+	r.g.Flush()
+	if len(seen) != 0 {
+		t.Fatalf("observed before the owner's YES: %+v", seen)
+	}
+	r.decide(true, "owner")
+	if st := r.state("agent/1"); st.State != journal.Succeeded || st.Intent.Params["record"] != "inv-1042" {
+		t.Fatalf("after an observer that panics and edits: %s %+v", st.State, st.Intent.Params)
+	}
+	if len(seen) != 1 || seen[0].ID != "agent/1" || seen[0].Recipients[0] != "sam@example.com" {
+		t.Fatalf("observed %+v", seen)
+	}
+	r.submit(journal.Intent{ID: "agent/2", Origin: "guest:agent", Account: "bank", Action: "transfer",
+		Params: map[string]any{"amount": 5}, Executor: "mail", Machine: "agent", Label: "private"})
+	if len(seen) != 1 {
+		t.Fatalf("a refused intent was observed: %+v", seen)
+	}
+}

@@ -443,6 +443,13 @@ func TestLoop1BuildsCompiledSkillsOnly(t *testing.T) {
 	if !lp.builder.Handles(loops.SignalRepeat) {
 		t.Fatal("no skill compiler")
 	}
+	// Until W4 seeds them, skills and procedures are held, not asked about
+	// (UX-S3-1); anything else is proposed.
+	for files, want := range map[string]bool{"skills/k1.json": true, "procedures/p1.json": true, "routing/rule.json": false} {
+		if got := unseeded(change.Candidate{Files: map[string][]byte{files: nil}}); got != want {
+			t.Fatalf("unseeded(%s) = %v", files, got)
+		}
+	}
 	if vaultPlaceholder != vault.Placeholder {
 		t.Fatalf("the vault's placeholder is %q", vault.Placeholder)
 	}

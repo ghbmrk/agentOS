@@ -13,8 +13,10 @@
 //	agentos-egress hosts    list the trusted hosts
 //
 // It runs as its own uid. The vault and keys files are readable by it only;
-// the model and verify sockets admit the broker's uid only, and the unlock
-// socket the local UI's uid only.
+// the model and verify sockets admit the broker's uid only, the unlock
+// socket the local UI's uid only, and the sign socket (the second line's
+// calling account, served only with -modem-uid) the modem bridge's uid
+// only.
 package main
 
 import (
@@ -204,6 +206,7 @@ func serveCmd(args []string) error {
 	run := fs.String("run", defaultRun, "socket directory (created 0711)")
 	brokerUID := fs.Int("broker-uid", -1, "uid of agentosd, the only peer on the model socket")
 	unlockUID := fs.Int("unlock-uid", -1, "uid of the local UI, the only peer on the unlock socket")
+	modemUID := fs.Int("modem-uid", -1, "uid of the modem bridge, the only peer on the sign socket (a SIP second line); -1 serves no sign socket")
 	ttl := fs.Duration("code-ttl", owner.DefaultCodeTTL, "how long a decrypted vault waits for its approval code")
 	g := grants{}
 	fs.Var(g, "grant", "machine=adapter[,adapter] (repeatable)")
@@ -261,6 +264,9 @@ func serveCmd(args []string) error {
 	if *unlockUID < 0 || *unlockUID == *brokerUID {
 		return errors.New("-unlock-uid must name the local UI's uid, distinct from agentosd's")
 	}
+	if *modemUID >= 0 && (*modemUID == self || *modemUID == *brokerUID || *modemUID == *unlockUID) {
+		return errors.New("-modem-uid must name the modem bridge's own uid, distinct from this process's, agentosd's and the local UI's")
+	}
 	if *statePath == "" {
 		*statePath = statePathFor(*keysPath)
 	}
@@ -292,6 +298,16 @@ func serveCmd(args []string) error {
 	srvs, err := serve(*run, c, rt, ev, ro, *brokerUID, *unlockUID)
 	if err != nil {
 		return err
+	}
+	if *modemUID >= 0 {
+		sign, err := serveSign(*run, c, *modemUID)
+		if err != nil {
+			for _, s := range srvs {
+				s.Close()
+			}
+			return err
+		}
+		srvs = append(srvs, sign)
 	}
 	c.bootTrusted()
 	ph, _ := c.status()
