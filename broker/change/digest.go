@@ -2,10 +2,13 @@ package change
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
+	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/route"
 )
 
@@ -275,6 +278,96 @@ func (p *Pipeline) Ask(id string) (string, error) {
 	}
 	a := &Adoption{Classes: pr.classes, Edits: pr.edits, Origin: pr.cand.Origin, Staged: true}
 	return p.what(a) + "." + testedText(s) + " Approve or decline?", nil
+}
+
+// Line gives what the owner is asked to approve for a change intent that
+// Check sends to the owner (C8, CH-12): a verb, a short object of at most
+// 40 characters (the owner channel's field cap), and whether the owner can
+// reverse it later by UNDO or LEARN OFF. The grants gate renders it as a
+// high-tier approval item. Every word is broker text built from
+// broker-known fields, never a candidate's Claim.
+func (p *Pipeline) Line(in journal.Intent) (verb, object string, undoable bool, err error) {
+	l, err := p.line(in)
+	return l.Verb, l.Object, l.Undoable, err
+}
+
+// ownerLine is Line's result.
+type ownerLine struct {
+	Verb, Object string
+	Undoable     bool
+}
+
+func (p *Pipeline) line(in journal.Intent) (ownerLine, error) {
+	parts := parseID(in.ID)
+	if parts == nil {
+		return ownerLine{}, errors.New("change: malformed change intent")
+	}
+	switch in.Action {
+	case ActionPolicy:
+		if len(parts) == 5 && parts[3] == "sharing" {
+			return ownerLine{Verb: "turn on", Object: "sharing learned changes", Undoable: true}, nil
+		}
+		return ownerLine{Verb: "turn on", Object: "learning without asking", Undoable: true}, nil
+	case ActionSuite:
+		return ownerLine{Verb: "remove", Object: "a past task from the tests"}, nil
+	case ActionAdopt:
+	default:
+		return ownerLine{}, errors.New("change: no owner line for this action")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	pr := p.props[parts[1]]
+	if pr == nil || in.ID != adoptID(parts[1]) {
+		return ownerLine{}, fmt.Errorf("change: no open proposal %s", parts[1])
+	}
+	s := pr.report.Score
+	a := &Adoption{Classes: pr.classes, Edits: pr.edits}
+	undoable := true
+	if prev, _, err := undoTree(pr.next, a); err != nil || emptiedSlot(a, prev) != "" {
+		undoable = false // the first image a box installs is replaced, never undone
+	}
+	if images := slices.ContainsFunc(pr.classes, func(c Class) bool { return c == ClassGuestImage || c == ClassHostImage }); images {
+		v := safe(strings.TrimPrefix(pr.cand.Origin, "update:"))
+		if len(v) > 12 {
+			v = v[:12]
+		}
+		obj := "update " + v
+		if pr.security {
+			obj = "security update " + v
+		}
+		if s.Regressions > 0 {
+			obj += fmt.Sprintf(", %d/%d tasks worse", s.Regressions, s.HeldOut)
+		}
+		return ownerLine{Verb: "install", Object: obj, Undoable: undoable}, nil
+	}
+	has := map[Class]bool{}
+	for _, c := range pr.classes {
+		has[c] = true
+	}
+	obj := "a learned procedure"
+	switch {
+	case has[ClassConfig]:
+		obj = "a setting change"
+	case has[ClassRouting]:
+		obj = "an AI routing change"
+	case has[ClassContext]:
+		obj = "a context change"
+	case has[ClassSkill] && pr.cand.Source == Shared:
+		obj = "a shared skill"
+	case pr.cand.Source == Shared:
+		obj = "a shared procedure"
+	case has[ClassSkill]:
+		obj = "a learned skill"
+	}
+	switch {
+	case s.HeldOut == 0 && s.NotEvaluated > 0:
+		obj += ", not testable here"
+	case s.HeldOut == 0:
+		obj += ", not tested yet"
+	default:
+		obj += fmt.Sprintf(", tested on %d tasks", s.HeldOut)
+	}
+	return ownerLine{Verb: "adopt", Object: obj, Undoable: undoable}, nil
 }
 
 func testedText(s Score) string {

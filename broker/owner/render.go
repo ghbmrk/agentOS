@@ -148,7 +148,10 @@ type Item struct {
 	// UndoWindow is the effect's undo window; zero means it cannot be
 	// undone.
 	UndoWindow time.Duration
-	Facts      Facts
+	// Undoable marks an effect with no undo window that the owner can
+	// still reverse later by text, such as a learned change's UNDO.
+	Undoable bool
+	Facts    Facts
 	// Asked, when set, marks an item re-issued after a restart: its line
 	// ends "asked 14:02, re-sent after restart" with the time it was
 	// first asked. It is not part of ItemSum.
@@ -164,10 +167,16 @@ func ItemSum(it Item) string {
 	if !f.RecipientSince.IsZero() {
 		since = f.RecipientSince.UTC().Format(time.RFC3339Nano)
 	}
-	h := sha256.Sum256([]byte(fmt.Sprintf("%q|%q|%t|%q|%d|%d|%q|%t|%t|%t|%t|%q|%t|%t|%d",
+	s := fmt.Sprintf("%q|%q|%t|%q|%d|%d|%q|%t|%t|%t|%t|%q|%t|%t|%d",
 		it.Object, it.Recipient, it.Unverified, it.Amount, it.UndoWindow,
 		f.Kind, f.Verb, f.RecipientChecked, f.NoRecipient, f.RecipientExists, f.RecipientByOwner, since,
-		f.RecipientAutoAdded, f.HasAmount, f.Amount)))
+		f.RecipientAutoAdded, f.HasAmount, f.Amount)
+	if it.Undoable {
+		// Appended only when set, so items without it keep the digests
+		// earlier builds saved for a re-issue.
+		s += "|undoable"
+	}
+	h := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(h[:])
 }
 
@@ -197,6 +206,8 @@ func (it Item) line() string {
 	}
 	if it.UndoWindow > 0 {
 		s += ", undo within " + dur(it.UndoWindow)
+	} else if it.Undoable {
+		s += ", can be undone later"
 	} else {
 		s += ", cannot be undone"
 	}
