@@ -57,6 +57,13 @@ P1-4 follow-ups (from the #23 review), for P1-7 or the loop scheduler:
 | P2-4c | Vault verify operation: `agentos-egress` checks the owner channel's code-generator codes on `verify.sock` so the seed never leaves the vault process; shared last step with the unlock; wrong-verify bound; `agentosd` wires `owner.Channel` to it (CH-4, CRED-8; closes P2-4a's K7) ([assumptions](broker/egress/ASSUMPTIONS.md), K7) | P2-4a | in review |
 | P2-4b | Trusted-host TPM slot (optional boot PIN), N95 Argon2id tuning, TPM NV rollback counter (CRED-8, CRED-9, V6) | **Mark: hardware** | queued |
 
+## Phase 3: compounding
+
+| ID | Package | Needs | State |
+|---|---|---|---|
+| P3-1 | Change pipeline: held-out suites from owner outcomes, frozen evaluation, adoption intents with fallback and rollback points, CHG-6 auto-adoption of authority-neutral changes, sharing and re-qualification, router rule candidates (CHG-1–6, ADP-4) ([assumptions](broker/change/ASSUMPTIONS.md)). Wiring: the grants gate delegates `meta.change.*` to `Pipeline.Check`; the VM layer supplies the replay `Evaluator`; follow-ups for the Loop 1 scheduler in [C14](broker/change/ASSUMPTIONS.md) | P1-1, P2-7 | in review |
+| P3-1a | Replay evaluator: the change pipeline's `Evaluator` as counterfactual replay in a fresh agent machine seeded with the candidate tree; effects answered from the task's journaled intents, unrecorded effects fail closed; model calls through a metered handler built for the tree, or offline (LOOP-5, CHG-1) ([assumptions](broker/replay/ASSUMPTIONS.md)). Mark decided replay may call the model live on a separate capped budget (SPEC LOOP-5, amended here); offline until conditions K1-K3 land (R2) | P3-1, P1-7 | in review |
+
 ## Phase 4: open source
 
 | ID | Package | Needs | State |
