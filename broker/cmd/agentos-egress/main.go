@@ -36,6 +36,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/owner"
+	"github.com/ghbmrk/agentos/broker/route"
 	"github.com/ghbmrk/agentos/broker/vault"
 )
 
@@ -102,6 +103,57 @@ func newProxy(v *vault.Vault, g map[string][]string, tr http.RoundTripper) (*egr
 	})
 }
 
+// newRouter builds the model router (P2-7) over the grants. Its egress
+// handler, label, and auditor are given per call (modelHandler).
+func newRouter(rule route.Rule, g map[string][]string, privateOK map[string]bool) (*route.Router, error) {
+	return route.New(route.Config{
+		Providers: []route.Provider{route.OpenAI(), route.Anthropic()},
+		Rule:      rule,
+		Granted: func(machine, provider string) bool {
+			for _, a := range g[machine] {
+				if a == provider {
+					return true
+				}
+			}
+			return false
+		},
+		PrivateOK: privateOK,
+		Upstream: func(string) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, "model egress unavailable", http.StatusServiceUnavailable)
+			})
+		},
+		// Decisions carry no content; failovers are logged for the
+		// operator. Denials and usage go back to the broker per call.
+		Audit: func(d route.Decision) {
+			if d.Outcome == route.Failover {
+				log.Printf("model route %s: %s failed over (HTTP %d)", d.Machine, d.Route, d.Status)
+			}
+		},
+		// No modem before P2-3: the owner text is a log line for now.
+		CredentialRejected: func(provider string) {
+			log.Printf("provider %s rejected the vault's API key; replace it with put", provider)
+		},
+	})
+}
+
+// readRule reads a routing rule: a JSON object from task class to routes
+// in preference order, e.g. {"default":[{"provider":"anthropic","model":"..."}]}.
+func readRule(path string) (route.Rule, error) {
+	if path == "" {
+		return nil, errors.New("-rule is required: a JSON file mapping task classes to routes")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var rule route.Rule
+	if err := json.Unmarshal(raw, &rule); err != nil {
+		return nil, fmt.Errorf("rule %s: %w", path, err)
+	}
+	return rule, nil
+}
+
 type noAudit struct{}
 
 func (noAudit) Egress(egress.Event) {}
@@ -117,7 +169,23 @@ func serveCmd(args []string) error {
 	ttl := fs.Duration("code-ttl", owner.DefaultCodeTTL, "how long a decrypted vault waits for its approval code")
 	g := grants{}
 	fs.Var(g, "grant", "machine=adapter[,adapter] (repeatable)")
+	rulePath := fs.String("rule", "", "routing rule: JSON task class -> routes (P2-7)")
+	privateOK := fs.String("private-ok", "", "providers the owner allowed for private data, comma-separated (CAP-9)")
 	fs.Parse(args)
+	rule, err := readRule(*rulePath)
+	if err != nil {
+		return err
+	}
+	pok := map[string]bool{}
+	for _, p := range strings.Split(*privateOK, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			pok[p] = true
+		}
+	}
+	rt, err := newRouter(rule, g, pok)
+	if err != nil {
+		return err
+	}
 	self := os.Getuid()
 	if *brokerUID < 0 || *brokerUID == self {
 		return errors.New("-broker-uid must name agentosd's own uid, distinct from this process's")
@@ -144,7 +212,7 @@ func serveCmd(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	srvs, err := serve(*run, c, *brokerUID, *unlockUID)
+	srvs, err := serve(*run, c, rt, *brokerUID, *unlockUID)
 	if err != nil {
 		return err
 	}
@@ -163,7 +231,7 @@ func (emptyVault) Secret(string) (vault.Secret, bool) { return vault.Secret{}, f
 func (emptyVault) Redactor() (*vault.Redactor, error) { return vault.NewRedactor(nil), nil }
 
 // serve opens both sockets in dir and serves them until closed.
-func serve(dir string, c *custody, brokerUID, unlockUID int) ([]*http.Server, error) {
+func serve(dir string, c *custody, rt *route.Router, brokerUID, unlockUID int) ([]*http.Server, error) {
 	if err := runDir(dir); err != nil {
 		return nil, err
 	}
@@ -176,7 +244,7 @@ func serve(dir string, c *custody, brokerUID, unlockUID int) ([]*http.Server, er
 		mln.Close()
 		return nil, err
 	}
-	ms, us := newServer(modelHandler(c)), newServer(unlockHandler(c))
+	ms, us := newServer(modelHandler(c, rt)), newServer(unlockHandler(c))
 	go ms.Serve(mln)
 	go us.Serve(uln)
 	return []*http.Server{ms, us}, nil

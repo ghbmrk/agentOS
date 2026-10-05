@@ -18,18 +18,47 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/modelroute"
+	"github.com/ghbmrk/agentos/broker/route"
 	"github.com/ghbmrk/agentos/broker/vault"
 )
 
 // REQ: CRED-8, CRED-1, CRED-5, CRED-7, ADP-10, REV-5, ARC-6
 
+// REQ: CAP-9, OP-8
+
+// testRouter routes class "default" to OpenAI and "claude" to Anthropic;
+// the machine "agent" is granted OpenAI only, and OpenAI is allowed for
+// private data.
+func testRouter(t *testing.T) *route.Router {
+	t.Helper()
+	rt, err := newRouter(route.Rule{
+		"default": {{Provider: "openai", Model: "gpt-test"}},
+		"claude":  {{Provider: "anthropic", Model: "claude-test"}},
+	}, map[string][]string{"agent": {"openai"}}, map[string]bool{"openai": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rt
+}
+
+// meterStub stands in for the OP-8 meter's writer in front of the
+// forwarder.
+type meterStub struct {
+	http.ResponseWriter
+	usage    string
+	complete bool
+}
+
+func (m *meterStub) ReportUsage(u []byte, complete bool) { m.usage, m.complete = string(u), complete }
+
 // TestUnknownHostUnlockThenModelRoute is the P2-4a chain on one host:
 // `init` seals a vault under a generated passphrase, the vault process
 // starts locked, the model route answers 503, the passphrase plus an
 // approval code unlock it through the unlock socket, and the broker's
-// forwarder (as agentosd wires it) then reaches a provider with the vault
-// key injected, never shown to the guest. Denials come back to the
-// broker's journal. Locking again returns the route to 503.
+// forwarder (as agentosd wires it) then reaches a provider through the
+// model router with the vault key injected, never shown to the guest. The
+// provider's usage comes back to the broker's meter, and denials to its
+// journal. Locking again returns the route to 503.
 func TestUnknownHostUnlockThenModelRoute(t *testing.T) {
 	dir := t.TempDir()
 	vp, kp := filepath.Join(dir, "state", "vault"), filepath.Join(dir, "state", "vault.keys")
@@ -41,14 +70,17 @@ func TestUnknownHostUnlockThenModelRoute(t *testing.T) {
 
 	// A hostile provider that reflects whatever key it receives.
 	var mu sync.Mutex
-	var got []string
+	var got, models []string
 	prov := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		var req struct{ Model string }
+		json.NewDecoder(r.Body).Decode(&req)
 		mu.Lock()
-		got = append(got, key)
+		got, models = append(got, key), append(models, req.Model)
 		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, `{"choices":[{"message":{"content":"key is `+key+`"}}]}`)
+		io.WriteString(w, `{"id":"c1","object":"chat.completion","created":1,"model":"gpt-test","choices":[{"index":0,"message":{"role":"assistant","content":"key is `+key+
+			`"},"finish_reason":"stop"}],"usage":{"prompt_tokens":40,"completion_tokens":3,"total_tokens":43,"prompt_tokens_details":{"cached_tokens":30}}}`)
 	}))
 	defer prov.Close()
 	tr := prov.Client().Transport.(*http.Transport).Clone()
@@ -76,7 +108,7 @@ func TestUnknownHostUnlockThenModelRoute(t *testing.T) {
 	}
 	defer c.lock()
 	run := filepath.Join(dir, "run")
-	srvs, err := serve(run, c, os.Getuid(), os.Getuid())
+	srvs, err := serve(run, c, testRouter(t), os.Getuid(), os.Getuid())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,15 +127,17 @@ func TestUnknownHostUnlockThenModelRoute(t *testing.T) {
 		Label:  func(string) string { return "private" },
 		Denied: func(_ string, d modelroute.Denial) { denied = append(denied, d) },
 	})
-	ask := func(path string) *httptest.ResponseRecorder {
+	var meter *meterStub
+	ask := func(class string) *httptest.ResponseRecorder {
 		w := httptest.NewRecorder()
-		req := httptest.NewRequest("POST", path, strings.NewReader(`{"model":"m","messages":[]}`))
+		req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"`+class+`","messages":[{"role":"user","content":"hi"}]}`))
 		req.Header.Set("Authorization", "Bearer placeholder")
-		fwd("agent").ServeHTTP(w, req)
+		meter = &meterStub{ResponseWriter: w}
+		fwd("agent").ServeHTTP(meter, req)
 		return w
 	}
 
-	if w := ask("/openai/v1/chat/completions"); w.Code != http.StatusServiceUnavailable {
+	if w := ask("default"); w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("locked vault: %d", w.Code)
 	}
 
@@ -120,7 +154,7 @@ func TestUnknownHostUnlockThenModelRoute(t *testing.T) {
 		t.Fatalf("unlock: %v %d %v", res, code, err)
 	}
 	ticket, _ := res["ticket"].(string)
-	if w := ask("/openai/v1/chat/completions"); w.Code != http.StatusServiceUnavailable {
+	if w := ask("default"); w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("passphrase alone opened the route: %d", w.Code)
 	}
 	if res, code, _ := post(ui, "/confirm", map[string]string{"ticket": ticket, "code": "000000"}); code != http.StatusForbidden || res["error"] != "wrong code; 2 tries left" {
@@ -131,34 +165,55 @@ func TestUnknownHostUnlockThenModelRoute(t *testing.T) {
 	}
 
 	// No key yet: the proxy fails closed.
-	if w := ask("/openai/v1/chat/completions"); w.Code != http.StatusServiceUnavailable || len(denied) != 1 || denied[0].Reason != "credential not in vault" {
+	if w := ask("default"); w.Code != http.StatusServiceUnavailable || len(denied) != 1 || denied[0].Reason != "credential not in vault" {
 		t.Fatalf("missing key: %d %+v", w.Code, denied)
 	}
 	key := synthetic(t, "sk-canary-")
 	if err := putCmd([]string{"-run", run, "-name", "openai"}, strings.NewReader(key+"\n")); err != nil {
 		t.Fatal(err)
 	}
-	w := ask("/openai/v1/chat/completions")
+	w := ask("default")
 	if w.Code != 200 || strings.Contains(w.Body.String(), key) || !strings.Contains(w.Body.String(), "key is") {
 		t.Fatalf("model call: %d %s", w.Code, w.Body)
 	}
 	mu.Lock()
-	if len(got) != 1 || got[0] != key {
-		t.Fatalf("provider did not get the vault key")
+	if len(got) != 1 || got[0] != key || models[0] != "gpt-test" {
+		t.Fatalf("provider did not get the routed model with the vault key: %q", models)
 	}
 	mu.Unlock()
-
-	if w := ask("/anthropic/v1/messages"); w.Code != http.StatusForbidden || w.Header().Get(modelroute.HeaderDenial) != "" {
-		t.Fatalf("ungranted adapter: %d", w.Code)
+	// The provider's own usage object reaches the meter; nothing of ours
+	// reaches the guest.
+	var u struct {
+		Prompt  int64 `json:"prompt_tokens"`
+		Out     int64 `json:"completion_tokens"`
+		Details struct {
+			Cached int64 `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
 	}
-	if last := denied[len(denied)-1]; last.Adapter != "anthropic" || last.Machine != "agent" || last.Status != 403 {
-		t.Fatalf("denial: %+v", last)
+	if err := json.Unmarshal([]byte(meter.usage), &u); err != nil || u.Prompt != 40 || u.Details.Cached != 30 || u.Out != 3 || !meter.complete {
+		t.Fatalf("usage to the meter: %q %v", meter.usage, meter.complete)
+	}
+	for k := range w.Result().Trailer {
+		t.Fatalf("guest got trailer %s", k)
+	}
+
+	// A class whose provider is not granted: refused by the router before
+	// any provider, and journaled by the broker.
+	n := len(denied)
+	if w := ask("claude"); w.Code != http.StatusForbidden || w.Header().Get(modelroute.HeaderDenial) != "" {
+		t.Fatalf("ungranted provider: %d", w.Code)
+	}
+	if len(denied) != n+1 || denied[n].Adapter != "router" || denied[n].Machine != "agent" || denied[n].Status != 403 {
+		t.Fatalf("denial: %+v", denied[n:])
+	}
+	if meter.usage != "" {
+		t.Fatalf("usage reported for a refused call: %q", meter.usage)
 	}
 
 	if _, code, _ := post(ui, "/lock", nil); code != 200 {
 		t.Fatalf("lock: %d", code)
 	}
-	if w := ask("/openai/v1/chat/completions"); w.Code != http.StatusServiceUnavailable {
+	if w := ask("default"); w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("after lock: %d", w.Code)
 	}
 }
@@ -188,7 +243,7 @@ func readCard(t *testing.T, card string) (string, []byte) {
 func TestSocketsAdmitOnlyTheirPeer(t *testing.T) {
 	c := &custody{now: time.Now, notify: func(string) {}}
 	run := filepath.Join(t.TempDir(), "run")
-	srvs, err := serve(run, c, os.Getuid()+1, os.Getuid()+1)
+	srvs, err := serve(run, c, testRouter(t), os.Getuid()+1, os.Getuid()+1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +268,7 @@ func TestModelSocketNeedsAMachine(t *testing.T) {
 		w := httptest.NewRecorder()
 		r := httptest.NewRequest("POST", "/openai/v1/chat/completions", nil)
 		r.Header.Set(modelroute.HeaderMachine, m)
-		modelHandler(c).ServeHTTP(w, r)
+		modelHandler(c, testRouter(t)).ServeHTTP(w, r)
 		if w.Code != http.StatusBadRequest {
 			t.Fatalf("machine %q: %d", m, w.Code)
 		}
@@ -229,5 +284,26 @@ func TestStatusShowsPhaseOnly(t *testing.T) {
 	json.Unmarshal(w.Body.Bytes(), &out)
 	if out["state"] != "locked" || len(out) != 1 {
 		t.Fatalf("status %v", out)
+	}
+}
+
+// Usage goes to the meter in the serving provider's own shape, so cached
+// input is weighed at that provider's rates; unreported usage sends none.
+func TestUsageTrailerInProviderShape(t *testing.T) {
+	u := route.Usage{Input: 50, Output: 777, CacheRead: 200, CacheWrite: 10, Reported: true, Complete: true}
+	for _, c := range []struct {
+		route string
+		u     route.Usage
+		want  string
+	}{
+		{"anthropic/claude-test", u, `{"usage":{"cache_creation_input_tokens":10,"cache_read_input_tokens":200,"input_tokens":50,"output_tokens":777},"complete":true}`},
+		{"openai/gpt-test", u, `{"usage":{"completion_tokens":777,"prompt_tokens":260,"prompt_tokens_details":{"cached_tokens":200}},"complete":true}`},
+		{"openai/gpt-test", route.Usage{OutputChars: 40, Complete: true}, ``},
+	} {
+		var a callAudit
+		a.decide(httptest.NewRecorder())(route.Decision{Outcome: route.Served, Route: c.route, Usage: &c.u})
+		if got := a.usage(); got != c.want {
+			t.Fatalf("%s: %s, want %s", c.route, got, c.want)
+		}
 	}
 }

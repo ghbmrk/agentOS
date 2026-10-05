@@ -27,7 +27,7 @@ Covered: 50 / 144 requirement IDs
 | REV-2 | — |
 | REV-3 | — |
 | REV-4 | `broker/vm/gvisor/gvisor_test.go`, `broker/vm/overlay/overlay_test.go`, `broker/vm/vm_test.go` |
-| REV-5 | `broker/cmd/agentos-egress/server_test.go`, `broker/e2e/a14_test.go`, `broker/e2e/openclaw_test.go`, `broker/e2e/owner_test.go`, `broker/egress/handlerfor_test.go`, `broker/guest/plane_test.go`, `broker/modelroute/modelroute_test.go`, `broker/route/route_test.go`, `broker/vm/services_test.go`, `broker/vm/vm_test.go` |
+| REV-5 | `broker/cmd/agentos-egress/server_test.go`, `broker/e2e/a14_test.go`, `broker/e2e/openclaw_test.go`, `broker/e2e/owner_test.go`, `broker/egress/handlerfor_test.go`, `broker/guest/plane_test.go`, `broker/modelroute/modelroute_test.go`, `broker/route/handlerfor_test.go`, `broker/route/route_test.go`, `broker/vm/services_test.go`, `broker/vm/vm_test.go` |
 | CH-1 | `broker/e2e/owner_test.go`, `broker/modem/modem_test.go`, `broker/owner/channel_test.go` |
 | CH-2 | `broker/control/handler_test.go`, `broker/control/parse_test.go`, `broker/control/text_test.go`, `broker/daemon/daemon_test.go`, `broker/e2e/a9_test.go`, `broker/owner/arc2_test.go`, `broker/owner/channel_test.go`, `broker/owner/review_test.go` |
 | CH-3 | `broker/owner/channel_test.go`, `broker/owner/classify_test.go`, `broker/owner/review_test.go` |
@@ -79,7 +79,7 @@ Covered: 50 / 144 requirement IDs
 | OP-5 | `broker/journal/engine_test.go`, `broker/journal/property_test.go` |
 | OP-6 | `broker/journal/engine_test.go`, `broker/journal/property_test.go`, `broker/journal/review_test.go` |
 | OP-7 | `broker/journal/engine_test.go`, `broker/journal/property_test.go` |
-| OP-8 | `broker/e2e/a14_test.go`, `broker/e2e/openclaw_test.go`, `broker/guest/plane_test.go`, `broker/meter/meter_test.go` |
+| OP-8 | `broker/cmd/agentos-egress/server_test.go`, `broker/e2e/a14_test.go`, `broker/e2e/openclaw_test.go`, `broker/guest/plane_test.go`, `broker/meter/meter_test.go`, `broker/meter/report_test.go`, `broker/route/handlerfor_test.go` |
 | CAP-1 | — |
 | CAP-2 | — |
 | CAP-3 | — |
@@ -88,7 +88,7 @@ Covered: 50 / 144 requirement IDs
 | CAP-6 | — |
 | CAP-7 | — |
 | CAP-8 | — |
-| CAP-9 | `broker/route/anthropic_test.go`, `broker/route/route_test.go` |
+| CAP-9 | `broker/cmd/agentos-egress/server_test.go`, `broker/route/anthropic_test.go`, `broker/route/handlerfor_test.go`, `broker/route/route_test.go` |
 | CAP-10 | — |
 | ADP-1 | — |
 | ADP-2 | `broker/egress/verb_test.go` |

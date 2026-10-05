@@ -10,11 +10,14 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/modelroute"
+	"github.com/ghbmrk/agentos/broker/route"
 	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
@@ -28,8 +31,10 @@ var machineRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
 
 // modelHandler serves the model socket. Only the broker connects to it
 // (peerListener), so the machine and label headers are the broker's word.
-// While the vault is not open every request gets 503.
-func modelHandler(c *custody) http.Handler {
+// Every call goes through the model router (P2-7), which sends it through
+// the egress proxy over the open vault (egress K9). While the vault is not
+// open every request gets 503.
+func modelHandler(c *custody, rt *route.Router) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		machine := r.Header.Get(modelroute.HeaderMachine)
 		if !machineRE.MatchString(machine) {
@@ -45,23 +50,91 @@ func modelHandler(c *custody) http.Handler {
 			http.Error(w, "the vault is locked; model egress is unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		p.HandlerFor(machine, label, headerAudit{w}).ServeHTTP(w, r)
+		var ca callAudit
+		w.Header().Set("Trailer", modelroute.HeaderUsage)
+		rt.HandlerFor(machine, label, p.HandlerFor(machine, label, &ca), ca.decide(w)).ServeHTTP(w, r)
+		if u := ca.usage(); u != "" {
+			w.Header().Set(modelroute.HeaderUsage, u)
+		}
 	})
 }
 
-// headerAudit returns a denial to the broker in a response header, for its
-// journal (egress E6). Every denial is audited before the proxy writes its
-// status line, so the header always goes out with it.
-type headerAudit struct{ w http.ResponseWriter }
+// callAudit carries one call's outcome back to the broker: a denial in a
+// response header for its journal (egress E6), and a served call's
+// provider-reported usage in a trailer for its OP-8 meter (K9).
+type callAudit struct {
+	mu     sync.Mutex
+	denial *modelroute.Denial // the proxy's
+	served *route.Decision
+}
 
-func (a headerAudit) Egress(ev egress.Event) {
+// Egress takes the proxy's decision. The proxy runs on its own goroutine
+// inside the router, so this only records it.
+func (a *callAudit) Egress(ev egress.Event) {
 	if ev.Allowed {
 		return
 	}
-	b, err := json.Marshal(modelroute.Denial{Adapter: ev.Adapter, Operation: ev.Operation, Method: ev.Method, Status: ev.Status, Reason: ev.Reason})
-	if err == nil {
-		a.w.Header().Set(modelroute.HeaderDenial, string(b))
+	a.mu.Lock()
+	a.denial = &modelroute.Denial{Adapter: ev.Adapter, Operation: ev.Operation, Method: ev.Method, Status: ev.Status, Reason: ev.Reason}
+	a.mu.Unlock()
+}
+
+// decide takes the router's decisions. The router audits a denial before
+// writing its status line, so the header always goes out with it. A call
+// the proxy refused reports the proxy's denial; the router's own refusal
+// for want of a granted route allowed for the label is reported too, since
+// an ungranted provider never reaches the proxy.
+func (a *callAudit) decide(w http.ResponseWriter) func(route.Decision) {
+	return func(d route.Decision) {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		var den *modelroute.Denial
+		switch {
+		case d.Outcome == route.Served:
+			a.served = &d
+		case d.Outcome == route.Denied && a.denial != nil:
+			den = a.denial
+		case d.Outcome == route.Denied && d.Status == http.StatusForbidden:
+			den = &modelroute.Denial{Adapter: "router", Operation: "chat_completions", Method: http.MethodPost, Status: d.Status, Reason: d.Reason}
+		}
+		if den == nil {
+			return
+		}
+		if b, err := json.Marshal(den); err == nil {
+			w.Header().Set(modelroute.HeaderDenial, string(b))
+		}
 	}
+}
+
+// usage renders a served call's reported usage as the HeaderUsage trailer,
+// in its provider's own shape so the meter weighs cached input by that
+// provider's rates; "" if the provider reported none.
+func (a *callAudit) usage() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.served == nil || a.served.Usage == nil || !a.served.Usage.Reported {
+		return ""
+	}
+	u := a.served.Usage
+	native := map[string]any{
+		"prompt_tokens":         u.Input + u.CacheRead + u.CacheWrite,
+		"prompt_tokens_details": map[string]int64{"cached_tokens": u.CacheRead},
+		"completion_tokens":     u.Output,
+	}
+	if provider, _, _ := strings.Cut(a.served.Route, "/"); provider == "anthropic" {
+		native = map[string]any{
+			"input_tokens":                u.Input,
+			"cache_read_input_tokens":     u.CacheRead,
+			"cache_creation_input_tokens": u.CacheWrite,
+			"output_tokens":               u.Output,
+		}
+	}
+	raw, _ := json.Marshal(native)
+	b, err := json.Marshal(modelroute.Usage{Usage: raw, Complete: u.Complete})
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 // maxUnlockBody bounds a request on the unlock socket.

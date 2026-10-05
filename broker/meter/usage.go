@@ -23,7 +23,8 @@ type usageWriter struct {
 	skip bool         // the current stream line passed max
 	over bool         // the JSON body passed max
 
-	u usage
+	u   usage
+	rep *usage // reported beside the body (ReportUsage), if any
 }
 
 // usage is what the provider reported, plus an estimate from content.
@@ -146,15 +147,27 @@ func (u *usageWriter) used(in int64) int64 {
 		}
 		complete = u.u.done
 	}
-	if u.u.sawIn {
-		in = u.u.in
+	rin, rout, sawIn, sawOut := u.u.in, u.u.out, u.u.sawIn, u.u.sawOut
+	if r := u.rep; r != nil {
+		// The usage the vault process reported in the provider's own
+		// shape outranks what the router rendered into the body.
+		if r.sawIn {
+			rin, sawIn = r.in, true
+		}
+		if r.sawOut {
+			rout, sawOut = r.out, true
+		}
+		complete = complete && r.done
+	}
+	if sawIn {
+		in = rin
 	}
 	counted := Tokens(u.u.chars + u.u.unread)
 	out := counted
-	if u.u.sawOut && complete {
-		out = u.u.out
-	} else if u.u.sawOut {
-		out = max(u.u.out, counted)
+	if sawOut && complete {
+		out = rout
+	} else if sawOut {
+		out = max(rout, counted)
 	}
 	return in + out
 }

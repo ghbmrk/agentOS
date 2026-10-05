@@ -9,7 +9,9 @@
 // machine's REV-5 label. Both are set here from the broker's own state and
 // replace anything the guest sent. The vault process reports a denial in a
 // response header, which is removed here and handed to the broker's
-// journal (egress E6) under the machine this side forwarded for.
+// journal (egress E6) under the machine this side forwarded for. A served
+// call's provider-reported usage comes back in a response trailer, which
+// is removed here and handed to the OP-8 meter (UsageReporter).
 package modelroute
 
 import (
@@ -29,6 +31,7 @@ const (
 	HeaderMachine = "Agentos-Machine"
 	HeaderLabel   = "Agentos-Label"
 	HeaderDenial  = "Agentos-Egress-Denial"
+	HeaderUsage   = "Agentos-Usage"
 	headerPrefix  = "Agentos-"
 )
 
@@ -43,6 +46,27 @@ type Denial struct {
 	Status    int    `json:"status"`
 	Reason    string `json:"reason,omitempty"`
 }
+
+// Usage is the HeaderUsage trailer: the usage object the provider reported
+// for a served call, in that provider's own shape (OpenAI or Anthropic),
+// and whether the provider's answer completed. It carries no content.
+type Usage struct {
+	Usage    json.RawMessage `json:"usage"`
+	Complete bool            `json:"complete"`
+}
+
+// UsageReporter is implemented by a ResponseWriter in front of the model
+// route that charges usage: the OP-8 meter's. The forwarder calls it at
+// most once per call, when the response body has ended with a usage
+// trailer.
+type UsageReporter interface {
+	ReportUsage(usage []byte, complete bool)
+}
+
+// maxUsage bounds the usage trailer.
+const maxUsage = 4 << 10
+
+type reporterKey struct{}
 
 // Config configures Forward.
 type Config struct {
@@ -75,7 +99,7 @@ func Forward(cfg Config) func(machine string) http.Handler {
 		Proxy:              nil,
 	}
 	return func(machine string) http.Handler {
-		return &httputil.ReverseProxy{
+		rp := &httputil.ReverseProxy{
 			Transport:     tr,
 			FlushInterval: -1,
 			Rewrite: func(pr *httputil.ProxyRequest) {
@@ -94,7 +118,8 @@ func Forward(cfg Config) func(machine string) http.Handler {
 				dropOurs(resp.Trailer)
 				// Trailer values arrive with the end of the body; strip
 				// ours again once they have.
-				resp.Body = &scrubTrailers{ReadCloser: resp.Body, resp: resp}
+				rep, _ := resp.Request.Context().Value(reporterKey{}).(UsageReporter)
+				resp.Body = &scrubTrailers{ReadCloser: resp.Body, resp: resp, report: rep}
 				if raw != "" {
 					var d Denial
 					if err := json.Unmarshal([]byte(raw), &d); err != nil {
@@ -111,19 +136,34 @@ func Forward(cfg Config) func(machine string) http.Handler {
 				http.Error(w, "model egress unavailable", http.StatusServiceUnavailable)
 			},
 		}
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if rep, ok := w.(UsageReporter); ok {
+				r = r.WithContext(context.WithValue(r.Context(), reporterKey{}, rep))
+			}
+			rp.ServeHTTP(w, r)
+		})
 	}
 }
 
 // scrubTrailers drops our headers from the response trailers once the body
-// ends, before the reverse proxy copies the trailers to the guest.
+// ends, before the reverse proxy copies the trailers to the guest. A body
+// that ended cleanly hands its usage trailer to the reporter first.
 type scrubTrailers struct {
 	io.ReadCloser
-	resp *http.Response
+	resp   *http.Response
+	report UsageReporter
 }
 
 func (s *scrubTrailers) Read(b []byte) (int, error) {
 	n, err := s.ReadCloser.Read(b)
 	if err != nil {
+		if raw := s.resp.Trailer.Get(HeaderUsage); err == io.EOF && s.report != nil && raw != "" && len(raw) <= maxUsage {
+			var u Usage
+			if json.Unmarshal([]byte(raw), &u) == nil && len(u.Usage) > 0 {
+				s.report.ReportUsage(u.Usage, u.Complete)
+			}
+		}
+		s.report = nil
 		dropOurs(s.resp.Trailer)
 	}
 	return n, err
