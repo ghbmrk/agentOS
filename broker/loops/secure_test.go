@@ -253,8 +253,62 @@ func TestPassiveChecks(t *testing.T) {
 	if _, err := g.Pass(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if d := strings.Join(g.Digest(), " "); !strings.Contains(d, "not run: file hashes, known vulnerabilities, settings, credential expiry") {
+	if d := strings.Join(g.Digest(), " "); !strings.Contains(d, "Loop 2: partial (not run: file hashes; known vulnerabilities; settings; credential expiry).") {
 		t.Errorf("unwired checks: %s", d)
+	}
+}
+
+// Security L5, UX W2 and potency C2 on W5a: STATUS always says what did
+// not run and why; the digest says it once, again when the set changes,
+// and whenever a pass is overdue. Nothing ever reads as clean or passed.
+func TestNotRunIsSaidAndNothingReadsPassed(t *testing.T) {
+	now := t0
+	b := cleanBox()
+	box := b.Box()
+	box.Expiries = nil
+	g, err := NewGuard(GuardConfig{Box: box, Pipeline: newPipe(t), Store: &change.MemStore{}, Now: func() time.Time { return now },
+		NotRun: map[Check]string{CheckExpiry: "needs the vault's expiry list"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var said []string
+	look := func() (status, digest string) {
+		status, digest = g.Status(), strings.Join(g.Digest(), " ")
+		said = append(said, status, digest)
+		return
+	}
+	if st, _ := look(); st != "Loop 2: not run yet." {
+		t.Fatalf("before a pass: %q", st)
+	}
+	g.Pass(context.Background())
+	want := "Loop 2: partial (not run: credential expiry, needs the vault's expiry list)."
+	if st, d := look(); st != want || d != want {
+		t.Fatalf("first pass: STATUS %q, digest %q", st, d)
+	}
+	if st, d := look(); st != want || strings.Contains(d, "Loop 2") {
+		t.Fatalf("second look: STATUS %q, digest %q", st, d)
+	}
+	// Every check wired: STATUS has nothing to say, and says nothing.
+	g.cfg.Box.Expiries = b.Box().Expiries
+	now = now.Add(6 * time.Hour)
+	g.Pass(context.Background())
+	if st, d := look(); st != "" || strings.Contains(d, "Loop 2") {
+		t.Fatalf("all wired: STATUS %q, digest %q", st, d)
+	}
+	// Overdue: said in both, every time.
+	now = now.Add(12 * time.Hour)
+	for range 2 {
+		if st, d := look(); !strings.HasPrefix(st, "Loop 2: checks haven't run since") || !strings.Contains(d, st) {
+			t.Fatalf("overdue: STATUS %q, digest %q", st, d)
+		}
+	}
+	for _, s := range said {
+		l := strings.ToLower(s)
+		for _, w := range []string{"passed", "clean", "all checks", "no problems", "ok"} {
+			if strings.Contains(l, w) {
+				t.Fatalf("%q reads as passed (%q)", s, w)
+			}
+		}
 	}
 }
 

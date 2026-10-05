@@ -63,8 +63,8 @@ func TestLoop2PausesThroughTheGate(t *testing.T) {
 
 // The learning plane runs Loop 2 as a scheduler source. Until the box
 // has a verified input for a check (a signed release, a signed advisory
-// feed, vault metadata), the digest names it as not run, never as passed
-// (loops S2).
+// feed, vault metadata), STATUS and the digest name it as not run, with
+// why, never as passed (loops S2; L5 and C2 on W5a).
 func TestLearningRunsLoop2(t *testing.T) {
 	dir := t.TempDir()
 	cfg := daemon.Config{
@@ -82,8 +82,26 @@ func TestLearningRunsLoop2(t *testing.T) {
 	if _, err := lp.guard.Pass(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	want := "Security checks not run:"
+	want := "Loop 2: partial (not run: file hashes, needs the updater; known vulnerabilities, needs a signed advisory feed; " +
+		"settings, needs a check of what the machines hold; credential expiry, needs the vault's expiry list)."
 	if d := strings.Join(lp.sched.Digest(), "\n"); !strings.Contains(d, want) {
 		t.Fatalf("digest %q lacks %q", d, want)
 	}
+	status := ""
+	for _, n := range cfg.Notes {
+		status += n()
+	}
+	if !strings.Contains(status, want) {
+		t.Fatalf("STATUS %q lacks %q", status, want)
+	}
+}
+
+// attachForTest attaches lp and, at cleanup, cancels ctx and waits for the
+// scheduler, so a Loop 2 pass never writes into a removed test directory.
+func attachForTest(t *testing.T, lp *learning, ctx context.Context, cancel context.CancelFunc, d *daemon.Daemon) {
+	lp.attach(ctx, d)
+	t.Cleanup(func() {
+		cancel()
+		lp.running.Wait()
+	})
 }

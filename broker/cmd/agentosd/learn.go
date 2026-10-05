@@ -54,7 +54,9 @@ type learning struct {
 	learn *loops.Learn
 	// guard is Loop 2's passive checks (W5a, loop2.go); contain and
 	// notify reach the gate and the owner once the daemon attaches.
-	guard   *loops.Guard
+	guard *loops.Guard
+	// running counts the scheduler's run, so a test can wait for it.
+	running sync.WaitGroup
 	contain loop2Contain
 	notify  loop2Notify
 	// values are the guest's task values, for the compiler only
@@ -182,6 +184,7 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		Pipeline:  l.pipe,
 		Store:     change.FileStore{Path: filepath.Join(p.Dir, "loop2.json")},
 		Contain:   &l.contain,
+		NotRun:    loop2NotRun,
 		Notify:    l.notify.send,
 		ResumeFor: p.ResumeFor,
 	}); err != nil {
@@ -221,7 +224,7 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	cfg.BrokerExecutors[change.Executor] = l.pipe
 	cfg.BrokerExecutors[loops.Executor] = l.sched
 	cfg.Settings = l.settings
-	cfg.Notes = append(cfg.Notes, l.note, l.builderNote)
+	cfg.Notes = append(cfg.Notes, l.note, l.builderNote, l.guard.Status)
 	cfg.Narrows = l.sched.Narrows
 	cfg.HelpExtra = loops.HelpLine
 	// The owner's verdicts on the agent's effects become Loop 1's cases
@@ -411,7 +414,11 @@ func (l *learning) attach(ctx context.Context, d *daemon.Daemon) {
 	if l.routing != nil {
 		go l.routing.run(ctx, 30*time.Second)
 	}
-	go l.sched.Run(ctx)
+	l.running.Add(1)
+	go func() {
+		defer l.running.Done()
+		l.sched.Run(ctx)
+	}()
 	go func() {
 		for {
 			select {

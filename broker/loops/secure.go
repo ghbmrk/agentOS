@@ -178,6 +178,9 @@ type GuardConfig struct {
 	// MaxPausesPerDay caps them per UTC day (security L2 on W5a); past
 	// either cap the owner is texted how to pause instead. Default 10.
 	MaxPausesPerDay int
+	// NotRun is why each check the box cannot run yet does not run
+	// ("needs the updater"), for STATUS and the digest.
+	NotRun map[Check]string
 	// ReText is how long a finding must stay clear to be texted again when
 	// it comes back; sooner, it is in the digest as "again". Default 24
 	// hours.
@@ -202,7 +205,6 @@ type Guard struct {
 	mu    sync.Mutex
 	st    secureState
 	force bool
-	notes []string // checks that could not run on the last pass
 	stale string
 	more  []string // lines held back from the last text, for MORE
 	// held are fix candidates whose evaluation was preempted, by finding
@@ -244,6 +246,10 @@ type secureState struct {
 	// Cleared is when each finding last cleared, so a flapping finding is
 	// not texted again unless it stayed clear for ReText.
 	Cleared map[string]time.Time `json:"cleared,omitempty"`
+	// NotRun are the checks the last pass could not run, and NotRunSaid
+	// the set the digest last named (Digest).
+	NotRun     []string `json:"not_run,omitempty"`
+	NotRunSaid string   `json:"not_run_said,omitempty"`
 	// PauseDay and Pauses count the automatic pauses on one UTC day
 	// (MaxPausesPerDay).
 	PauseDay string `json:"pause_day,omitempty"`
@@ -360,7 +366,7 @@ func (s *Guard) Pass(ctx context.Context) (int, error) {
 	found, notes, stale := s.check()
 	now := s.cfg.Now()
 	s.mu.Lock()
-	s.notes, s.stale, s.force = notes, stale, false
+	s.st.NotRun, s.stale, s.force = notes, stale, false
 	s.st.Last = now
 	seen := map[string]bool{}
 	var fresh []Finding
@@ -1133,17 +1139,59 @@ func (s *Guard) Digest() []string {
 			out = append(out, clearedLine(r))
 		}
 	}
-	if len(s.notes) > 0 {
-		var names []string
-		for _, n := range s.notes {
-			names = append(names, plainCheck[Check(n)])
+	// Checks not run: named with their cause once, then again only when
+	// the set changes; a pass overdue is said every time (potency C2,
+	// UX W2 on W5a). Nothing here ever reads as passed (L5).
+	now := s.cfg.Now()
+	if s.overdueLocked(now) {
+		out = append(out, "Loop 2: checks haven't run since "+s.st.Last.Format("Mon 2 Jan")+".")
+	} else if said := strings.Join(s.st.NotRun, ","); said != s.st.NotRunSaid {
+		if len(s.st.NotRun) > 0 {
+			out = append(out, s.partialLocked())
 		}
-		out = append(out, "Security checks not run: "+strings.Join(names, ", ")+".")
+		s.st.NotRunSaid = said
+		_ = s.saveLocked() // a lost save only says it again
 	}
 	if s.stale != "" {
 		out = append(out, s.stale)
 	}
 	return out
+}
+
+// overdueLocked reports no pass for twice the cadence since the last one.
+func (s *Guard) overdueLocked(now time.Time) bool {
+	return !s.st.Last.IsZero() && now.Sub(s.st.Last) >= 2*s.cfg.Every
+}
+
+// partialLocked names the checks the last pass could not run, with the
+// cause the wiring gave for each.
+func (s *Guard) partialLocked() string {
+	var parts []string
+	for _, n := range s.st.NotRun {
+		part := plainCheck[Check(n)]
+		if why := s.cfg.NotRun[Check(n)]; why != "" {
+			part += ", " + why
+		}
+		parts = append(parts, part)
+	}
+	return "Loop 2: partial (not run: " + strings.Join(parts, "; ") + ")."
+}
+
+// Status is Loop 2's STATUS line: never run yet, overdue, or partial with
+// what was not run and why. It is empty only when every check ran on the
+// last pass; it never says the checks passed (security L5 on W5a).
+func (s *Guard) Status() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch now := s.cfg.Now(); {
+	case s.st.Last.IsZero():
+		return "Loop 2: not run yet."
+	case s.overdueLocked(now):
+		return "Loop 2: checks haven't run since " + s.st.Last.Format("Mon 2 Jan") + "."
+	case len(s.st.NotRun) > 0:
+		return s.partialLocked()
+	}
+	return ""
 }
 
 // Evidence returns every recorded finding, oldest first.

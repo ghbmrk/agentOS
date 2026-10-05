@@ -25,6 +25,15 @@ import (
 // FixturesLive stays off until replay answers fixtures (K-S1); the
 // pipeline's PS1 grading is in place (change C24).
 
+// loop2NotRun is why each check does not run on this box yet, for STATUS
+// and the digest (potency C2 on W5a).
+var loop2NotRun = map[loops.Check]string{
+	loops.CheckHash:     "needs the updater",
+	loops.CheckAdvisory: "needs a signed advisory feed",
+	loops.CheckDrift:    "needs a check of what the machines hold",
+	loops.CheckExpiry:   "needs the vault's expiry list",
+}
+
 // errNotPaused: the gate refused Loop 2's pause.
 var errNotPaused = errors.New("loop2: the gate did not pause the grant")
 
@@ -73,7 +82,9 @@ func (c *loop2Contain) Contain(ctx context.Context, t loops.Target, finding stri
 // loop2Notify texts the owner Loop 2's fixed-wording notices once the
 // owner channel is attached. Urgency waits for CH-15's quiet-hours
 // classes in the owner channel: until then every notice goes at once.
-type loop2Notify struct{ ch atomic.Pointer[ownerch.Channel] }
+type loop2Notify struct {
+	ch atomic.Pointer[ownerch.Channel]
+}
 
 func (n *loop2Notify) send(text string, _ bool) {
 	ch := n.ch.Load()
