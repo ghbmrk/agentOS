@@ -148,10 +148,16 @@ type Item struct {
 	// UndoWindow is the effect's undo window; zero means it cannot be
 	// undone.
 	UndoWindow time.Duration
-	// Undoable marks an effect with no undo window that the owner can
-	// still reverse later by text, such as a learned change's UNDO.
-	Undoable bool
-	Facts    Facts
+	// Detail is a broker-verified fact about the object, such as a
+	// change's test result, rendered after it under its own cap so a long
+	// object never cuts it.
+	Detail string
+	// UndoBy, for an effect with no undo window that the owner can still
+	// reverse later by text, is the broker's fixed text saying how ("can
+	// be undone later", "LEARN OFF any time"); it replaces "cannot be
+	// undone".
+	UndoBy string
+	Facts  Facts
 	// Asked, when set, marks an item re-issued after a restart: its line
 	// ends "asked 14:02, re-sent after restart" with the time it was
 	// first asked. It is not part of ItemSum.
@@ -171,10 +177,10 @@ func ItemSum(it Item) string {
 		it.Object, it.Recipient, it.Unverified, it.Amount, it.UndoWindow,
 		f.Kind, f.Verb, f.RecipientChecked, f.NoRecipient, f.RecipientExists, f.RecipientByOwner, since,
 		f.RecipientAutoAdded, f.HasAmount, f.Amount)
-	if it.Undoable {
-		// Appended only when set, so items without it keep the digests
+	if it.Detail != "" || it.UndoBy != "" {
+		// Appended only when set, so items without them keep the digests
 		// earlier builds saved for a re-issue.
-		s += "|undoable"
+		s += fmt.Sprintf("|%q|%q", it.Detail, it.UndoBy)
 	}
 	h := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(h[:])
@@ -191,6 +197,9 @@ func (c *Channel) itemLine(it Item) string {
 
 func (it Item) line() string {
 	s := field(it.Facts.Verb, 12) + " " + field(it.Object, 40)
+	if it.Detail != "" {
+		s += ", " + field(it.Detail, 40)
+	}
 	if it.Unverified {
 		s = "UNVERIFIED, details on the Wi-Fi page: " + s
 	}
@@ -206,8 +215,8 @@ func (it Item) line() string {
 	}
 	if it.UndoWindow > 0 {
 		s += ", undo within " + dur(it.UndoWindow)
-	} else if it.Undoable {
-		s += ", can be undone later"
+	} else if it.UndoBy != "" {
+		s += ", " + field(it.UndoBy, 24)
 	} else {
 		s += ", cannot be undone"
 	}

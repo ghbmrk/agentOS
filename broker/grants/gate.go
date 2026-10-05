@@ -60,9 +60,11 @@ type Changes interface {
 	// Check returns nil to allow, an error with NeedsOwner() true
 	// (change.ErrNeedsOwner) to ask the owner, and any other error to deny.
 	Check(ctx context.Context, phase journal.Phase, in journal.Intent) error
-	// Line is the owner line for an intent Check sends to the owner: a
-	// verb, a short object, and whether the owner can reverse it later.
-	Line(in journal.Intent) (verb, object string, undoable bool, err error)
+	// Line is the approval item for an intent Check sends to the owner:
+	// verb, object, detail, how to reverse it, and its kind. The gate sets
+	// Ref, keeps it free of recipients and amounts, and treats any kind
+	// but Ordinary as GrantChange (high tier).
+	Line(in journal.Intent) (owner.Item, error)
 	// Decided is called once the owner's request for a change intent has
 	// closed, answered or not (change C7).
 	Decided(ctx context.Context, in journal.Intent)
@@ -596,7 +598,7 @@ func (g *Gate) evaluateChange(ctx context.Context, phase journal.Phase, in journ
 	case !errors.As(err, &no) || !no.NeedsOwner():
 		return verdict{kind: deny, why: err.Error()}
 	}
-	v, obj, undoable, err := g.cfg.Changes.Line(in)
+	l, err := g.cfg.Changes.Line(in)
 	if err != nil {
 		return verdict{kind: deny, why: err.Error()}
 	}
@@ -604,8 +606,12 @@ func (g *Gate) evaluateChange(ctx context.Context, phase journal.Phase, in journ
 	if local && !g.cfg.LocalUI {
 		return verdict{kind: deny, why: "turning sharing on needs confirmation on the box's local page, which this build does not have yet (CHG-4)"}
 	}
-	return verdict{kind: ask, local: local, item: owner.Item{Ref: in.ID, Object: obj, Undoable: undoable,
-		Facts: owner.Facts{Kind: owner.GrantChange, Verb: v, NoRecipient: true}}}
+	kind := owner.GrantChange
+	if l.Facts.Kind == owner.Ordinary && !local {
+		kind = owner.Ordinary // a tested, undoable learned change: low tier
+	}
+	return verdict{kind: ask, local: local, item: owner.Item{Ref: in.ID, Object: l.Object, Detail: l.Detail, UndoBy: l.UndoBy,
+		Facts: owner.Facts{Kind: kind, Verb: l.Facts.Verb, NoRecipient: true}}}
 }
 
 // sharingOn reports the intent that turns sharing on: it changes what
@@ -1211,7 +1217,7 @@ func (g *Gate) grantIDLocked(intentID string) string {
 func sameItem(a, b owner.Item) bool {
 	fa, fb := a.Facts, b.Facts
 	return a.Object == b.Object && a.Recipient == b.Recipient && a.Amount == b.Amount &&
-		a.UndoWindow == b.UndoWindow && a.Undoable == b.Undoable && a.Unverified == b.Unverified &&
+		a.UndoWindow == b.UndoWindow && a.Detail == b.Detail && a.UndoBy == b.UndoBy && a.Unverified == b.Unverified &&
 		fa.Kind == fb.Kind && fa.Verb == fb.Verb && fa.RecipientChecked == fb.RecipientChecked &&
 		fa.NoRecipient == fb.NoRecipient && fa.RecipientExists == fb.RecipientExists &&
 		fa.RecipientByOwner == fb.RecipientByOwner && fa.RecipientSince.Equal(fb.RecipientSince) &&

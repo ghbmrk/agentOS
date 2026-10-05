@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/owner"
 )
 
 // #34 nit: a change with no classes is judged strictly, so a declined
@@ -49,36 +50,72 @@ func TestRecheckRevertsDeclinedTree(t *testing.T) {
 	}
 }
 
-// C8: the owner line for each change that needs the owner is broker text
-// that fits CH-12's fields.
+// C8, CH-12 (UX and arbitrator on #48): the owner item for each change
+// that needs the owner is broker text; the test result rides in Detail so
+// the object cap never cuts it; only a tested, undoable, local learned
+// skill or procedure is low tier.
 func TestOwnerLine(t *testing.T) {
 	e := newEnv(t, nil)
 	e.p.Attach(holdJournal{e.eng})
+	item := func(r Report) owner.Item {
+		t.Helper()
+		st, err := e.eng.Get(adoptID(r.ID))
+		if err != nil {
+			t.Fatal(err)
+		}
+		it, err := e.p.Line(st.Intent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return it
+	}
+	high := func(verb, obj, detail, undo string) owner.Item {
+		return owner.Item{Object: obj, Detail: detail, UndoBy: undo, Facts: owner.Facts{Kind: owner.GrantChange, Verb: verb, NoRecipient: true}}
+	}
 	r := e.propose(Candidate{Source: Local, Files: Tree{"skills/n": []byte("x")}, Claim: "trust me"})
-	if r.State != StateAwaitingOwner {
-		t.Fatal(r)
+	if got := item(r); got != high("adopt", "a learned skill", "not tested on past tasks yet", "can be undone later") {
+		t.Fatalf("untested: %+v", got)
 	}
-	st, err := e.eng.Get(adoptID(r.ID))
-	if err != nil {
-		t.Fatal(err)
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	r = e.propose(Candidate{Source: Local, Files: Tree{"skills/greet": []byte("hello")}})
+	low := owner.Item{Object: "a learned skill", Detail: "tested on " + itoa(r.HeldOut) + " past tasks, none worse", UndoBy: "can be undone later",
+		Facts: owner.Facts{Kind: owner.Ordinary, Verb: "adopt", NoRecipient: true}}
+	if got := item(r); r.HeldOut == 0 || got != low {
+		t.Fatalf("tested: %+v", got)
 	}
-	l, err := e.p.line(st.Intent)
-	if err != nil || l != (ownerLine{Verb: "adopt", Object: "a learned skill, not tested yet", Undoable: true}) {
-		t.Fatalf("%+v %v", l, err)
+
+	ev := e.p.cfg.Evaluator
+	e = newEnv(t, nil)
+	e.p.Attach(holdJournal{e.eng})
+	e.cases(12, ClassSkill, "skills/greet", "hi")
+	ev = e.p.cfg.Evaluator
+	e.p.cfg.Evaluator = evalFunc(func(ctx context.Context, tr Tree, pr Probe) ([]byte, error) {
+		if _, ok := tr["host-image/release"]; ok && string(pr.Input) != exfilProbe {
+			return []byte("worse"), nil
+		}
+		return ev.Run(ctx, tr, pr)
+	})
+	long := "2026.10.05-security-hotfix-build-1234567"
+	r = e.release(release(t, long, true, map[string][]byte{"host-image/release": []byte("h")}))
+	got := item(r)
+	if r.Regressions == 0 || got.Detail != "worse on "+itoa(r.Regressions)+" of "+itoa(r.HeldOut)+" past tasks" ||
+		got.Facts.Kind != owner.GrantChange || got.UndoBy != "" || len(got.Object) > 40 {
+		t.Fatalf("release: %+v %+v", r, got)
 	}
+
 	for _, c := range []struct {
 		in   journal.Intent
-		want ownerLine
+		want owner.Item
 	}{
-		{journal.Intent{ID: "chg:policy:n9:auto_adopt:on", Action: ActionPolicy}, ownerLine{Verb: "turn on", Object: "learning without asking", Undoable: true}},
-		{journal.Intent{ID: "chg:policy:n9:sharing:on", Action: ActionPolicy}, ownerLine{Verb: "turn on", Object: "sharing learned changes", Undoable: true}},
-		{journal.Intent{ID: "chg:suite:n9:remove:case-1", Action: ActionSuite}, ownerLine{Verb: "remove", Object: "a past task from the tests"}},
+		{journal.Intent{ID: "chg:policy:n9:auto_adopt:on", Action: ActionPolicy}, high("turn on", "learning without asking", "", "LEARN OFF any time")},
+		{journal.Intent{ID: "chg:policy:n9:sharing:on", Action: ActionPolicy}, high("turn on", "sharing learned changes", "", "can be undone later")},
+		{journal.Intent{ID: "chg:suite:n9:remove:nope", Action: ActionSuite}, high("remove", "a past task from the tests", "", "")},
 	} {
-		if l, err := e.p.line(c.in); err != nil || l != c.want {
+		if l, err := e.p.Line(c.in); err != nil || l != c.want {
 			t.Fatalf("%s: %+v %v", c.in.ID, l, err)
 		}
 	}
-	if _, err := e.p.line(journal.Intent{ID: "chg:c999:adopt", Action: ActionAdopt}); err == nil {
+	if _, err := e.p.Line(journal.Intent{ID: "chg:c999:adopt", Action: ActionAdopt}); err == nil {
 		t.Fatal("a line for no proposal")
 	}
 }

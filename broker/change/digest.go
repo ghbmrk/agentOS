@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/route"
 )
 
@@ -280,65 +281,78 @@ func (p *Pipeline) Ask(id string) (string, error) {
 	return p.what(a) + "." + testedText(s) + " Approve or decline?", nil
 }
 
-// Line gives what the owner is asked to approve for a change intent that
-// Check sends to the owner (C8, CH-12): a verb, a short object of at most
-// 40 characters (the owner channel's field cap), and whether the owner can
-// reverse it later by UNDO or LEARN OFF. The grants gate renders it as a
-// high-tier approval item. Every word is broker text built from
-// broker-known fields, never a candidate's Claim.
-func (p *Pipeline) Line(in journal.Intent) (verb, object string, undoable bool, err error) {
-	l, err := p.line(in)
-	return l.Verb, l.Object, l.Undoable, err
-}
-
-// ownerLine is Line's result.
-type ownerLine struct {
-	Verb, Object string
-	Undoable     bool
-}
-
-func (p *Pipeline) line(in journal.Intent) (ownerLine, error) {
+// Line gives the item the owner is asked to approve for a change intent
+// that Check sends to the owner (C8, CH-12): a verb, a short object (the
+// owner channel caps it at 40 characters), the test result as a separate
+// detail so the cap never cuts it, and how the owner can reverse it later.
+// Every word is broker text built from broker-known fields, never a
+// candidate's Claim. Kind sets the tier (arbitrator ruling on #48): a local
+// learned skill or procedure tested on past tasks that UNDO can reverse is
+// an ordinary low-tier item, answered with the request's texted code;
+// everything else (images, settings, routing, context, shared packages,
+// untested changes, policy and suites) is GrantChange, so always high tier.
+// The grants gate sets Ref and keeps it recipient-free.
+func (p *Pipeline) Line(in journal.Intent) (owner.Item, error) {
 	parts := parseID(in.ID)
 	if parts == nil {
-		return ownerLine{}, errors.New("change: malformed change intent")
+		return owner.Item{}, errors.New("change: malformed change intent")
+	}
+	high := func(verb, obj, detail, undo string) owner.Item {
+		return owner.Item{Object: obj, Detail: detail, UndoBy: undo,
+			Facts: owner.Facts{Kind: owner.GrantChange, Verb: verb, NoRecipient: true}}
 	}
 	switch in.Action {
 	case ActionPolicy:
 		if len(parts) == 5 && parts[3] == "sharing" {
-			return ownerLine{Verb: "turn on", Object: "sharing learned changes", Undoable: true}, nil
+			return high("turn on", "sharing learned changes", "", "can be undone later"), nil
 		}
-		return ownerLine{Verb: "turn on", Object: "learning without asking", Undoable: true}, nil
+		return high("turn on", "learning without asking", "", "LEARN OFF any time"), nil
 	case ActionSuite:
-		return ownerLine{Verb: "remove", Object: "a past task from the tests"}, nil
+		p.mu.Lock()
+		c, ok := p.st.Cases[parts[len(parts)-1]]
+		p.mu.Unlock()
+		obj := "a past task from the tests"
+		if ok && !c.At.IsZero() {
+			obj = "the " + c.At.Format("Jan 2") + " " + string(c.Class) + " task from the tests"
+		}
+		return high("remove", obj, "", ""), nil
 	case ActionAdopt:
 	default:
-		return ownerLine{}, errors.New("change: no owner line for this action")
+		return owner.Item{}, errors.New("change: no owner line for this action")
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	pr := p.props[parts[1]]
 	if pr == nil || in.ID != adoptID(parts[1]) {
-		return ownerLine{}, fmt.Errorf("change: no open proposal %s", parts[1])
+		return owner.Item{}, fmt.Errorf("change: no open proposal %s", parts[1])
 	}
 	s := pr.report.Score
 	a := &Adoption{Classes: pr.classes, Edits: pr.edits}
-	undoable := true
+	undo := "can be undone later"
 	if prev, _, err := undoTree(pr.next, a); err != nil || emptiedSlot(a, prev) != "" {
-		undoable = false // the first image a box installs is replaced, never undone
+		undo = "" // the first image a box installs is replaced, never undone
 	}
-	if images := slices.ContainsFunc(pr.classes, func(c Class) bool { return c == ClassGuestImage || c == ClassHostImage }); images {
+	tested := ""
+	switch {
+	case s.HeldOut == 0 && s.NotEvaluated > 0:
+		tested = "not testable on this box"
+	case s.HeldOut == 0:
+		tested = "not tested on past tasks yet"
+	case s.Regressions > 0:
+		tested = fmt.Sprintf("worse on %d of %d past tasks", s.Regressions, s.HeldOut)
+	default:
+		tested = fmt.Sprintf("tested on %d past tasks, none worse", s.HeldOut)
+	}
+	if slices.ContainsFunc(pr.classes, func(c Class) bool { return c == ClassGuestImage || c == ClassHostImage }) {
 		v := safe(strings.TrimPrefix(pr.cand.Origin, "update:"))
-		if len(v) > 12 {
-			v = v[:12]
+		if len(v) > 20 {
+			v = v[:20]
 		}
 		obj := "update " + v
 		if pr.security {
 			obj = "security update " + v
 		}
-		if s.Regressions > 0 {
-			obj += fmt.Sprintf(", %d/%d tasks worse", s.Regressions, s.HeldOut)
-		}
-		return ownerLine{Verb: "install", Object: obj, Undoable: undoable}, nil
+		return high("install", obj, tested, undo), nil
 	}
 	has := map[Class]bool{}
 	for _, c := range pr.classes {
@@ -350,6 +364,19 @@ func (p *Pipeline) line(in journal.Intent) (ownerLine, error) {
 		obj = "a setting change"
 	case has[ClassRouting]:
 		obj = "an AI routing change"
+		for _, e := range pr.edits {
+			if e.Path != RoutingPath {
+				continue
+			}
+			var names []string
+			for c := range routingClasses(e.After) {
+				names = append(names, safe(c))
+			}
+			sort.Strings(names)
+			if len(names) > 0 && len(strings.Join(names, ", ")) <= 20 {
+				obj = "AI routing for " + strings.Join(names, ", ") + " tasks"
+			}
+		}
 	case has[ClassContext]:
 		obj = "a context change"
 	case has[ClassSkill] && pr.cand.Source == Shared:
@@ -359,15 +386,12 @@ func (p *Pipeline) line(in journal.Intent) (ownerLine, error) {
 	case has[ClassSkill]:
 		obj = "a learned skill"
 	}
-	switch {
-	case s.HeldOut == 0 && s.NotEvaluated > 0:
-		obj += ", not testable here"
-	case s.HeldOut == 0:
-		obj += ", not tested yet"
-	default:
-		obj += fmt.Sprintf(", tested on %d tasks", s.HeldOut)
+	learned := pr.cand.Source == Local && !has[ClassConfig] && !has[ClassRouting] && !has[ClassContext]
+	if learned && s.HeldOut > 0 && undo != "" {
+		return owner.Item{Object: obj, Detail: tested, UndoBy: undo,
+			Facts: owner.Facts{Kind: owner.Ordinary, Verb: "adopt", NoRecipient: true}}, nil
 	}
-	return ownerLine{Verb: "adopt", Object: obj, Undoable: undoable}, nil
+	return high("adopt", obj, tested, undo), nil
 }
 
 func testedText(s Score) string {

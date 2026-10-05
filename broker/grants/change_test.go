@@ -82,7 +82,7 @@ func TestChangeIntentsGoThroughThePipeline(t *testing.T) {
 	}
 	r.g.Flush()
 	_, items := r.own.last(t)
-	want := owner.Item{Ref: "chg:" + rep.ID + ":adopt", Object: "a learned skill, not tested yet", Undoable: true,
+	want := owner.Item{Ref: "chg:" + rep.ID + ":adopt", Object: "a learned skill", Detail: "not tested on past tasks yet", UndoBy: "can be undone later",
 		Facts: owner.Facts{Kind: owner.GrantChange, Verb: "adopt", NoRecipient: true}}
 	if len(items) != 1 || !sameItem(items[0], want) || items[0].Ref != want.Ref {
 		t.Fatalf("owner item: %+v", items)
@@ -156,7 +156,7 @@ func TestUnansweredChangeIsNotADecline(t *testing.T) {
 	}
 	id := "chg:" + rep.ID + ":adopt"
 	r.g.Flush()
-	if _, items := r.own.last(t); items[0].Object != "security update 3.0" || items[0].Facts.Verb != "install" || items[0].Undoable {
+	if _, items := r.own.last(t); items[0].Object != "security update 3.0" || items[0].Facts.Verb != "install" || items[0].UndoBy != "" {
 		t.Fatalf("%+v", items[0])
 	}
 	r.decide(false, "expired")
@@ -226,5 +226,43 @@ func TestSharingOnNeedsTheLocalPage(t *testing.T) {
 	_, items = noUI.own.last(t)
 	if err := noUI.g.ConfirmLocal(items[0].Ref); err == nil {
 		t.Fatal("confirmed a change that needs no local page")
+	}
+}
+
+// Arbitrator ruling on #48: a tested, undoable, local learned skill is a
+// low-tier request (the request's texted code, CH-10); the same change
+// untested stays high tier.
+func TestTestedLearnedChangeIsLowTier(t *testing.T) {
+	r, p := changeRig(t)
+	ctx := context.Background()
+	if err := p.SetAutoAdopt(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 20; i++ {
+		id := "task-" + string(rune('a'+i))
+		if _, err := r.eng.Submit(journal.Intent{ID: id, Origin: "guest:agent", Account: "mail", Action: "draft.save", Executor: "mail"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.eng.RecordQuality(id, journal.Quality{Verdict: journal.VerdictGood, Source: "owner"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.AddTaskCase(change.Case{ID: "case-" + id, Task: id, Class: change.ClassSkill, Input: []byte("skills/greet"),
+			Expect: []byte("refused"), Outcome: change.Accepted}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rep, err := p.Propose(ctx, change.Candidate{Source: change.Local, Files: change.Tree{"skills/new": []byte("x")}})
+	if err != nil || rep.State != change.StateAwaitingOwner || rep.HeldOut == 0 {
+		t.Fatalf("%+v %v", rep, err)
+	}
+	r.g.Flush()
+	_, items := r.own.last(t)
+	if len(items) != 1 || items[0].Facts.Kind != owner.Ordinary || r.own.Tier(items[0].Facts) != owner.Low ||
+		!strings.HasPrefix(items[0].Detail, "tested on ") {
+		t.Fatalf("%+v", items)
+	}
+	r.decide(true, "owner")
+	if got := string(p.Files("skills")["skills/new"]); got != "x" {
+		t.Fatalf("approved change not adopted: %q", got)
 	}
 }
