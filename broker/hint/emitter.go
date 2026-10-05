@@ -36,10 +36,11 @@ const (
 var ErrNoPending = errors.New("hint: no such pending hint")
 
 // Outbox receives each day's batch of canonical hints for the clean-room
-// builder, sorted, with the day the batch belongs to. Send must be
-// idempotent by day and set: after a crash, or an error that came after
-// delivery, the emitter sends the same set for the same day again, and
-// the outbox delivers it at most once.
+// builder, sorted, with the day the batch belongs to. Each day labels at
+// most one batch, so Send must be idempotent by day: after a crash, or an
+// error that came after delivery, the emitter sends the same batch (the
+// bytes recorded when it was formed) for the same day again, and the
+// outbox delivers a day at most once.
 type Outbox interface {
 	Send(day string, batch [][]byte) error
 }
@@ -98,9 +99,10 @@ type queued struct {
 // batch is a Forwarded record whose send has not been committed by a Sent
 // record.
 type batch struct {
-	seq   int // the Forwarded record
-	day   string
-	items []queued
+	seq    int // the Forwarded record
+	day    string
+	items  []queued
+	failed bool // a SendFailed record is already logged for it
 }
 
 // Emitter is the private side's single exit to the bridge.
@@ -241,10 +243,22 @@ func New(cfg Config) (*Emitter, error) {
 		}
 	}
 	if open != nil {
+		// Resend the bytes recorded at Forward time, not a rebuild under
+		// the current schema, so the set cannot change (H12).
 		b := &batch{seq: open.Seq, day: open.Day}
-		for _, ref := range open.Refs {
-			if q, ok := items[ref]; ok {
-				b.items = append(b.items, q)
+		for i, c := range open.Batch {
+			q := queued{canon: c}
+			if i < len(open.Refs) {
+				q.seq = open.Refs[i]
+			}
+			if it, ok := items[q.seq]; ok {
+				q.day, q.embargo = it.day, it.embargo
+			}
+			b.items = append(b.items, q)
+		}
+		for _, r := range rs {
+			if r.Outcome == SendFailed && r.Ref == open.Seq {
+				b.failed = true
 			}
 		}
 		e.inflight = b
@@ -439,10 +453,11 @@ func (e *Emitter) Release() error {
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].canon < items[j].canon })
 	refs := make([]int, len(items))
+	canons := make([]string, len(items))
 	for i, q := range items {
-		refs[i] = q.seq
+		refs[i], canons[i] = q.seq, q.canon
 	}
-	if err := e.record(Record{Outcome: Forwarded, Refs: refs}); err != nil {
+	if err := e.record(Record{Outcome: Forwarded, Refs: refs, Batch: canons}); err != nil {
 		return err
 	}
 	e.inflight = &batch{seq: e.seq, day: e.day, items: items}
@@ -462,7 +477,8 @@ func (e *Emitter) Release() error {
 }
 
 // send offers the uncommitted batch to the outbox and commits it with a
-// Sent record. A failure is logged; the batch stays for the next Release.
+// Sent record. A failure is logged once per batch; the batch stays for the
+// next Release.
 func (e *Emitter) send() error {
 	b := e.inflight
 	out := make([][]byte, len(b.items))
@@ -471,9 +487,13 @@ func (e *Emitter) send() error {
 	}
 	if err := e.cfg.Outbox.Send(b.day, out); err != nil {
 		err = fmt.Errorf("hint: outbox: %w", err)
+		if b.failed {
+			return err
+		}
 		if lerr := e.record(Record{Outcome: SendFailed, Ref: b.seq}); lerr != nil {
 			return errors.Join(err, lerr)
 		}
+		b.failed = true
 		return err
 	}
 	if err := e.record(Record{Outcome: Sent, Ref: b.seq}); err != nil {
@@ -483,13 +503,19 @@ func (e *Emitter) send() error {
 	return nil
 }
 
-// Pending lists the hints waiting for the owner, oldest first.
+// Pending lists the hints waiting for the owner, oldest first, after
+// expiring stale asks. If logging an expiry fails, stale asks are still
+// left out.
 func (e *Emitter) Pending() []Pending {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.roll()
+	_ = e.expire()
 	ps := make([]Pending, 0, len(e.pending))
 	for _, p := range e.pending {
-		ps = append(ps, p)
+		if e.recent(p.Day) {
+			ps = append(ps, p)
+		}
 	}
 	sort.Slice(ps, func(i, j int) bool { return ps[i].ID < ps[j].ID })
 	return ps

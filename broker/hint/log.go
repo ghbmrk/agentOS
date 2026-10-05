@@ -25,7 +25,7 @@ const (
 	Expired    Outcome = "expired"     // asked hint Ref went unanswered; treated as declined
 	Forwarded  Outcome = "forwarded"   // a batch of the queued hints Refs, written before it is sent
 	Sent       Outcome = "sent"        // the outbox accepted batch Ref; it crossed
-	SendFailed Outcome = "send_failed" // the send of batch Ref failed; it will be resent
+	SendFailed Outcome = "send_failed" // the send of batch Ref failed (logged once); it will be resent
 )
 
 // Record is one log line. Day is the UTC date; nothing finer is kept. A
@@ -40,6 +40,7 @@ type Record struct {
 	Fields   map[string]string `json:"fields,omitempty"`
 	Ref      int               `json:"ref,omitempty"`
 	Refs     []int             `json:"refs,omitempty"`
+	Batch    []string          `json:"batch,omitempty"` // a Forwarded batch's canonical hints, as sent
 }
 
 // Log is the owner-visible hint log (OSS-1, OSS-7).
