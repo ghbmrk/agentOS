@@ -74,6 +74,10 @@ const (
 	// only removes automation.
 	ActionChangeRevert    = "meta.change.revert"
 	ActionChangePolicyOff = "meta.change.policy.off"
+	// Spare-capacity loops (broker/loops): turning loops off or lowering
+	// their spare budget only removes background work.
+	ActionLoopsOff         = "meta.loops.off"
+	ActionLoopsBudgetLower = "meta.loops.budget.lower"
 )
 
 // narrowing reports whether an intent only takes authority away.
@@ -82,7 +86,8 @@ func narrowing(in Intent) bool {
 		return false
 	}
 	switch in.Action {
-	case ActionGrantRevoke, ActionGrantPause, ActionBudgetLower, ActionChangeRevert, ActionChangePolicyOff:
+	case ActionGrantRevoke, ActionGrantPause, ActionBudgetLower, ActionChangeRevert, ActionChangePolicyOff,
+		ActionLoopsOff, ActionLoopsBudgetLower:
 		return true
 	}
 	return false
