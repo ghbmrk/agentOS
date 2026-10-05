@@ -49,22 +49,31 @@ func TestLoopSettingsGoThroughTheScheduler(t *testing.T) {
 		t.Fatalf("lowering the budget: %q %v", got, ok)
 	}
 	n := r.own.count()
-	if got, ok := s.Text(ctx, "SPARE BUDGET 400"); !ok || !strings.Contains(got, "needs your approval") {
+	if got, ok := s.Text(ctx, "SPARE BUDGET 80"); !ok || !strings.Contains(got, "needs your approval") {
 		t.Fatalf("%q %v", got, ok)
 	}
 	r.g.Flush()
 	_, items := r.own.last(t)
-	want := owner.Item{Object: "spare-time AI use", Detail: "from 40 to 400 calls a day", UndoBy: "SPARE BUDGET 40 any time",
+	want := owner.Item{Object: "spare-time AI use", Detail: "from 40 to 80 paid AI calls a day", UndoBy: "SPARE BUDGET 40 any time",
 		Facts: owner.Facts{Kind: owner.Ordinary, Verb: "raise", NoRecipient: true}}
 	if r.own.count() != n+1 || len(items) != 1 || !sameItem(items[0], want) {
 		t.Fatalf("owner item: %+v", items)
 	}
 	if r.own.Tier(items[0].Facts) != owner.Low {
-		t.Fatal("a budget raise is not low tier")
+		t.Fatal("a small budget raise is not low tier")
 	}
 	r.decide(true, "owner")
-	if s.Settings().SpareCalls != 400 {
+	if s.Settings().SpareCalls != 80 {
 		t.Fatalf("approved raise not applied: %+v", s.Settings())
+	}
+	// A large raise spends real provider money: it needs the code
+	// generator, not a texted code (security B1 on #57).
+	if _, ok := s.Text(ctx, "SPARE BUDGET 5000"); !ok {
+		t.Fatal("not a setting")
+	}
+	r.g.Flush()
+	if _, items := r.own.last(t); len(items) != 1 || r.own.Tier(items[0].Facts) != owner.High {
+		t.Fatalf("a raise from 80 to 5000 is not high tier: %+v", items)
 	}
 }
 

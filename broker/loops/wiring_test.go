@@ -32,14 +32,26 @@ func TestABudgetRaiseIsALowTierLineFromBrokerState(t *testing.T) {
 	r := newRig(t)
 	it, err := r.s.Line(journal.Intent{ID: "loops:n7:budget:400", Action: ActionBudget})
 	must(t, err)
-	want := owner.Item{Object: "spare-time AI use", Detail: "from 100 to 400 calls a day", UndoBy: "SPARE BUDGET 100 any time",
-		Facts: owner.Facts{Kind: owner.Ordinary, Verb: "raise", NoRecipient: true}}
+	want := owner.Item{Object: "spare-time AI use", Detail: "from 100 to 400 paid AI calls a day", UndoBy: "SPARE BUDGET 100 any time",
+		Facts: owner.Facts{Kind: owner.GrantChange, Verb: "raise", NoRecipient: true}}
 	if it != want {
 		t.Fatalf("%+v", it)
 	}
-	if owner.Classify(it.Facts, owner.Limits{}, time.Now()) != owner.Low {
-		t.Fatal("a budget raise is not low tier")
+	// Only a small step is low tier: at most twice the budget and at most
+	// LowTierRaiseMax; anything else needs the code generator (security B1
+	// on #57).
+	for id, low := range map[string]bool{
+		"loops:n8:budget:200":  true,
+		"loops:n8:budget:201":  false,
+		"loops:n8:budget:5000": false,
+	} {
+		it, err := r.s.Line(journal.Intent{ID: id, Action: ActionBudget})
+		must(t, err)
+		if got := owner.Classify(it.Facts, owner.Limits{}, time.Now()) == owner.Low; got != low {
+			t.Fatalf("%s: low tier %v, want %v", id, got, low)
+		}
 	}
+
 	for _, in := range []journal.Intent{
 		{ID: "loops:n7:budget:40", Action: ActionBudgetLower},
 		{ID: "loops:n7:off:all", Action: ActionOff},

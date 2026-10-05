@@ -225,20 +225,30 @@ func (s *Scheduler) BudgetAsk(in journal.Intent) (string, error) {
 	return fmt.Sprintf("Raise spare-time AI use from %d to %d calls a day?", cur, r.Calls), nil
 }
 
+// LowTierRaiseMax is the most spare calls a day a low-tier raise may set.
+const LowTierRaiseMax = 5 * DefaultSpareCalls
+
 // Line is the owner request for an intent Check sent to the owner (the
 // grants gate's Loops.Line): raising the spare budget, with the old and
-// new calls from broker state (security C2). It is low tier: it moves no
-// money (usage credits are off), reaches no one, is capped at
-// MaxSpareCalls, and the owner can lower it again by text at once.
+// new calls from broker state (security C2). Spare calls are paid AI use
+// on the owner's provider account, so only a small step is low tier (a
+// texted code): to at most twice the current budget and at most
+// LowTierRaiseMax. Anything larger needs the code generator (GrantChange),
+// so a SIM swapper holding the owner's number cannot open-endedly spend
+// the owner's money (security B1 on #57).
 func (s *Scheduler) Line(in journal.Intent) (owner.Item, error) {
 	r, ok := parseSetting(in.ID)
 	if !ok || r.Kind != KindBudget || in.Action != ActionBudget {
 		return owner.Item{}, errors.New("loops: no owner line for this intent")
 	}
 	cur := s.Settings().SpareCalls
-	return owner.Item{Object: "spare-time AI use", Detail: fmt.Sprintf("from %d to %d calls a day", cur, r.Calls),
+	kind := owner.Ordinary
+	if r.Calls > 2*cur || r.Calls > LowTierRaiseMax {
+		kind = owner.GrantChange
+	}
+	return owner.Item{Object: "spare-time AI use", Detail: fmt.Sprintf("from %d to %d paid AI calls a day", cur, r.Calls),
 		UndoBy: fmt.Sprintf("SPARE BUDGET %d any time", cur),
-		Facts:  owner.Facts{Kind: owner.Ordinary, Verb: "raise", NoRecipient: true}}, nil
+		Facts:  owner.Facts{Kind: kind, Verb: "raise", NoRecipient: true}}, nil
 }
 
 // Text answers an owner text that is a loop setting (the owner channel's
