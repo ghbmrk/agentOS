@@ -87,6 +87,9 @@ type learnPaths struct {
 	// Tree, if set, is the live agent's copy of the tree's procedures,
 	// skills and context (W4); nil holds them in the pipeline.
 	Tree *liveTree
+	// ResumeFor is how long a preempted evaluation's pairs and candidates
+	// are kept; zero is change.ResumeFor (sleepResumeFor).
+	ResumeFor time.Duration
 }
 
 // openLearning opens the learning plane and wires it into the daemon's
@@ -122,6 +125,7 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		Store:     change.FileStore{Path: filepath.Join(p.Dir, "change.json")},
 		Evaluator: &l.eval,
 		Targets:   targets,
+		ResumeFor: p.ResumeFor,
 		Logf:      log.Printf,
 	}); err != nil {
 		return nil, err
@@ -166,6 +170,7 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		Builder:    l.builder,
 		Router:     router,
 		ModelWired: modelWired,
+		ResumeFor:  p.ResumeFor,
 	})
 	if err != nil {
 		return nil, err

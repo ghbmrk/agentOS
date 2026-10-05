@@ -144,6 +144,11 @@ type Config struct {
 	// resume only under the same ID (PE1, security R1 on #103). Nil: the
 	// evaluator is fixed for the pipeline's life.
 	EvaluatorID func() string
+	// ResumeFor is how long a preempted evaluation's pairs are kept;
+	// zero means the package's ResumeFor. A box whose agent sleeps for
+	// learning sets 36 h, so a candidate cut at the end of one night
+	// resumes the next (PE7).
+	ResumeFor time.Duration
 	// Logf logs each counted candidate cut by a fixed class only (PE5).
 	// Nil: not logged.
 	Logf func(string, ...any)
@@ -797,6 +802,9 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 	}
 	ck := p.candidateKey(base, next)
 	p.mu.Lock()
+	// The active tree when the evaluation starts: if it moves on before
+	// the evaluation is cut, nothing finished is kept (PE7).
+	active := p.st.Active.Hash()
 	mayRun := p.exempt[ck] < MaxExempt || IsIdle(ctx) // proposeInner took the turn
 	p.mu.Unlock()
 	if !mayRun {
@@ -940,9 +948,11 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 			saveErr = p.saveLocked()
 		}
 		// Every side that finished is kept, so a result once seen is
-		// never run again.
+		// never run again; none when the active tree moved on meanwhile,
+		// since dropOldBasesLocked already ran for that move (PE7).
 		for id, pr := range res {
-			if pr.baseDone || pr.nextDone {
+			if (pr.baseDone || pr.nextDone) && active == p.st.Active.Hash() {
+				pr.base, pr.cand = base.Hash(), ck
 				p.keepLocked(keys[id], pr)
 			}
 		}

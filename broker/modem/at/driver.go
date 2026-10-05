@@ -84,8 +84,13 @@ const (
 	// concatTTL drops a concatenated text whose parts never all arrive.
 	concatTTL = 10 * time.Minute
 	// maxConcat bounds texts being reassembled, so forged parts cannot grow
-	// memory.
-	maxConcat = 32
+	// memory. ownerConcat of the slots are the owner's number's alone, and
+	// no sender keeps more than perSenderConcat pending, so a flood of
+	// first parts from strangers cannot push out the owner's long text
+	// before its last part arrives (security review 2, finding 7).
+	maxConcat       = 32
+	ownerConcat     = 4
+	perSenderConcat = 4
 	// dupTTL is how long a delivered PDU is remembered, so a text the
 	// modem hands over twice (a delete that did not happen) is not
 	// delivered twice: a replayed code would count as a wrong code.
@@ -113,6 +118,7 @@ type Modem struct {
 	calls   map[int]*Call
 	dialing chan *Call
 	parts   map[string]*assembly
+	nextSeq uint64
 	seen    map[string]time.Time // delivered PDUs, for dupTTL
 	garbled time.Time            // last GarbledText sent
 	dropped int
@@ -124,6 +130,8 @@ var _ modem.Modem = (*Modem)(nil)
 type assembly struct {
 	from     string
 	alpha    bool
+	owner    bool   // from the owner's number: held in the owner's slots
+	seq      uint64 // arrival order, for dropping the oldest
 	first    time.Time
 	total    int
 	parts    map[int]string
@@ -429,8 +437,9 @@ func (m *Modem) receive(ctx context.Context, idx int, header, pdu string) {
 	} else {
 		d.Addr = E164(d.Addr, d.TON, m.cfg.CountryCode)
 	}
-	text, ok, conflict := m.assemble(d)
-	if conflict && !alpha && m.cfg.Owner != "" && SameNumber(d.Addr, m.cfg.Owner, m.cfg.CountryCode) {
+	fromOwner := !alpha && m.cfg.Owner != "" && SameNumber(d.Addr, m.cfg.Owner, m.cfg.CountryCode)
+	text, ok, conflict := m.assemble(d, fromOwner)
+	if conflict && fromOwner {
 		m.mu.Lock()
 		due := m.garbled.IsZero() || now.Sub(m.garbled) >= time.Hour
 		if due {
@@ -453,8 +462,9 @@ func (m *Modem) receive(ctx context.Context, idx int, header, pdu string) {
 func segments(text string) int { n, _ := modem.Segments(text); return n }
 
 // assemble returns a whole text once every part is in; conflict reports a
-// text dropped because two parts disagreed.
-func (m *Modem) assemble(d Deliver) (text string, ok, conflict bool) {
+// text dropped because two parts disagreed. owner is whether d is from the
+// owner's number, whose texts use the owner's slots.
+func (m *Modem) assemble(d Deliver, owner bool) (text string, ok, conflict bool) {
 	if d.Concat == nil || d.Concat.Total == 1 {
 		return d.Text, true, false
 	}
@@ -463,10 +473,21 @@ func (m *Modem) assemble(d Deliver) (text string, ok, conflict bool) {
 	key := fmt.Sprintf("%s/%d/%d", d.Addr, d.Concat.Ref, d.Concat.Total)
 	a := m.parts[key]
 	if a == nil {
-		if len(m.parts) >= maxConcat {
-			m.dropOldestLocked()
+		// Make room within the sender's own cap, then within its class's
+		// slots: the owner's, or the strangers' shared rest. Only texts
+		// of the same sender, or of the same class, are ever dropped.
+		if m.countLocked(func(x *assembly) bool { return x.from == d.Addr }) >= perSenderConcat {
+			m.dropOldestLocked(func(x *assembly) bool { return x.from == d.Addr })
 		}
-		a = &assembly{from: d.Addr, first: m.cfg.Now(), total: d.Concat.Total, parts: map[int]string{}}
+		slots := maxConcat - ownerConcat
+		if owner {
+			slots = ownerConcat
+		}
+		if m.countLocked(func(x *assembly) bool { return x.owner == owner }) >= slots {
+			m.dropOldestLocked(func(x *assembly) bool { return x.owner == owner })
+		}
+		m.nextSeq++
+		a = &assembly{from: d.Addr, owner: owner, seq: m.nextSeq, first: m.cfg.Now(), total: d.Concat.Total, parts: map[int]string{}}
 		m.parts[key] = a
 	}
 	if prev, dup := a.parts[d.Concat.Seq]; !dup {
@@ -491,15 +512,28 @@ func (m *Modem) assemble(d Deliver) (text string, ok, conflict bool) {
 	return sb.String(), true, false
 }
 
-func (m *Modem) dropOldestLocked() {
-	var oldest string
+func (m *Modem) countLocked(match func(*assembly) bool) int {
+	n := 0
+	for _, a := range m.parts {
+		if match(a) {
+			n++
+		}
+	}
+	return n
+}
+
+// dropOldestLocked drops the earliest-started text that match accepts.
+func (m *Modem) dropOldestLocked(match func(*assembly) bool) {
+	oldest := ""
 	for k, a := range m.parts {
-		if oldest == "" || a.first.Before(m.parts[oldest].first) {
+		if match(a) && (oldest == "" || a.seq < m.parts[oldest].seq) {
 			oldest = k
 		}
 	}
-	delete(m.parts, oldest)
-	m.dropped++
+	if oldest != "" {
+		delete(m.parts, oldest)
+		m.dropped++
+	}
 }
 
 // expireParts drops texts whose parts have not all arrived within concatTTL.

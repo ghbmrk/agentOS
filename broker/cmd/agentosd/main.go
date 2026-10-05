@@ -271,14 +271,15 @@ func main() {
 	flag.StringVar(&learn.Dir, "learn", "/var/lib/agentos/learn", "change pipeline and loop scheduler state (W3)")
 	flag.StringVar(&learn.Spare, "spare-meter", "/var/lib/agentos/spare-meter.json", "spare-time model budget state (LOOP-2), apart from -meter")
 	flag.StringVar(&learn.Routing, "routing", "/run/agentos-egress/routing.sock", "the vault process's routing socket, through which routing changes are read and adopted (W3); empty holds routing changes")
-	flag.StringVar(&builderImage, "builder-image", "", "the minimal image Loop 1's builder machines run (W3-builder), registered with -image; empty runs no model-backed builder")
-	flag.StringVar(&builderLaunch, "builder-launch", "", "how a builder machine starts: argv and env; empty uses the image's own")
+	flag.StringVar(&builderImage, "builder-image", defaultBuilderImage, "the minimal image Loop 1's builder machines run (W3-builder), registered with -image; empty, or the default not registered, runs no model-backed builder")
+	flag.StringVar(&builderLaunch, "builder-launch", defaultBuilderLaunch, "how a builder machine starts: argv and env (guest/builder/launch.json); empty uses the image's own")
 	flag.Int64Var(&builderMemMB, "builder-mem-mb", loopbuild.DefaultMemMB, "a builder machine's memory budget, MB")
 	flag.StringVar(&sleepHoursFlag, "sleep-hours", "", "on a box where the agent and a replay machine do not fit together, the hours the agent may sleep while the box tests changes, HH:MM-HH:MM box time (PE7); empty is 01:00-06:00")
 	var workerImage, workerArgv string
-	var workerMaxMB int64
+	var workerMaxMB, workerLayerMB int64
 	flag.StringVar(&workerImage, "worker-image", "", "the base image worker machines are built from (CAP-8), registered with -image; empty offers guests no worker tools")
 	flag.StringVar(&workerArgv, "worker-argv", "sleep infinity", "what a worker machine runs while the guest drives it, space-separated")
+	flag.Int64Var(&workerLayerMB, "worker-layer-mb", 4096, "the most one worker's files may hold, MB; over it the worker takes no command or snapshot until it shrinks; 0 is no cap beyond the disk reserve")
 	flag.Int64Var(&workerMaxMB, "worker-max-mb", 2048, "the largest memory budget one worker may ask for, MB; admission still decides (RES-2)")
 	flag.Int64Var(&replayMemMB, "replay-mem-mb", defaultReplayMemMB, "a replay machine's memory budget, MB (LOOP-5); with -agent-mem-mb it must fit in -capacity-mb less -headroom-mb")
 	flag.StringVar(&keptPath, "kept-replies", "/var/lib/agentos/kept-replies.json", "private agent replies that could not be emailed, kept for the local page (CH-20)")
@@ -331,7 +332,7 @@ func main() {
 			log.Printf("agent machines disabled: %v", err)
 			runsc = ""
 			if agentOff == "" {
-				agentOff = agentNoMemControls
+				agentOff = agentNoLimits
 			}
 		} else {
 			cg, psiPath = g, filepath.Join(g.Path, "memory.pressure")
@@ -389,6 +390,8 @@ func main() {
 	// managed_tree, private machines only (W4).
 	tree := newLiveTree(log.Printf)
 	learn.Tree = tree
+	asleep := sleepMode(cfg.Admission.CapacityMB, cfg.Admission.HeadroomMB, agentMemMB, replayMemMB)
+	learn.ResumeFor = sleepResumeFor(asleep)
 	var lp *learning
 	if err := os.MkdirAll(learn.Dir, 0o700); err != nil {
 		log.Printf("learning disabled: %v", err)
@@ -447,6 +450,7 @@ func main() {
 			Services: services,
 
 			DiskReserveBytes: diskReserveMB << 20,
+			WorkerLayerBytes: workerLayerBytes(workerLayerMB),
 			// A lineage holding a record the owner deleted is not forked
 			// or merged until that is settled (recall W10).
 			Contained: recallExec.Contained,
@@ -459,10 +463,10 @@ func main() {
 			go m.RunPruner(vm.PrunePolicy{LowWaterBytes: 1 << 30}, time.Minute, ctx.Done())
 			tree.setMachines(m)
 			tools := toolSet{qs.tools(), tree, recallTools}
-			wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB)
+			wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB, d.Engine().Stopped)
 			if wt != nil {
 				tools = append(tools, wt)
-				go reapWorkers(ctx, wt)
+				go reapWorkers(ctx, wt, m, d.Engine().Stopped, 5*time.Second)
 			}
 			if plane, err := openGuestPlane(m, d, ev, cfg.SocketDir, meterPath, inboxPath, egressSocket, tools); err != nil {
 				// Machines cannot start without their guest sockets.
@@ -482,6 +486,8 @@ func main() {
 					if err == nil {
 						if err = replayFits(cfg.Admission.CapacityMB, cfg.Admission.HeadroomMB, agentMemMB, replayMemMB); err != nil {
 							lp.noRoom.Store(true) // STATUS and LEARNING ON say so
+						}
+						if asleep {
 							// The agent sleeps while the box evaluates (PE7).
 							sl := openSleeper(ctx, sleepDeps{d: d, m: m, plane: plane, qs: qs, agent: agent, id: agentMachine, hours: sleepHours, workers: wt})
 							lp.sleep.Store(sl)
@@ -501,8 +507,9 @@ func main() {
 					if err != nil {
 						log.Printf("replay evaluation disabled: %v", err)
 					}
-					lp.startBuilder(m, imgs, services, buildConfig{Dir: filepath.Join(cfg.SocketDir, "build"), Image: builderImage, AgentImage: namedAgentImage,
-						Launch: builderLaunch, MemMB: builderMemMB, Egress: egressSocket})
+					bc := builderFlags(flag.CommandLine, builderImage, builderLaunch)
+					bc.Dir, bc.AgentImage, bc.MemMB, bc.Egress = filepath.Join(cfg.SocketDir, "build"), namedAgentImage, builderMemMB, egressSocket
+					lp.startBuilder(m, imgs, services, bc)
 				}
 				spec, err := agentSpec(imgs, agentImage, agentLaunch, agentMemMB)
 				if err != nil {
@@ -637,7 +644,7 @@ func replayFits(capacityMB, headroomMB, agentMB, replayMB int64) error {
 // workerTools serves the worker-machine tools (CAP-8) on the live guest
 // plane only: replay and builder machines never get them. Nil, offering
 // none, when no worker image is registered.
-func workerTools(m *vm.Manager, imgs images, image, argv string, maxMB int64) *workers.Tools {
+func workerTools(m *vm.Manager, imgs images, image, argv string, maxMB int64, stopped func() bool) *workers.Tools {
 	if image == "" {
 		return nil
 	}
@@ -645,24 +652,52 @@ func workerTools(m *vm.Manager, imgs images, image, argv string, maxMB int64) *w
 		log.Printf("worker tools off: image %q is not registered with -image", image)
 		return nil
 	}
-	return &workers.Tools{M: m, Image: image, Argv: strings.Fields(argv), MaxMemMB: maxMB}
+	return &workers.Tools{M: m, Image: image, Argv: strings.Fields(argv), MaxMemMB: maxMB, Stopped: stopped}
 }
 
-// reapWorkers parks idle and orphaned workers every minute (UX-146-1).
-func reapWorkers(ctx context.Context, wt *workers.Tools) {
-	t := time.NewTicker(time.Minute)
+// workerLayerBytes is -worker-layer-mb in bytes: 0 or less is no cap
+// beyond the disk reserve, and a value past 1 PiB is clamped there
+// rather than overflow.
+func workerLayerBytes(mb int64) int64 {
+	if mb <= 0 {
+		return 0
+	}
+	return min(mb, 1<<30) << 20
+}
+
+// reapWorkers ends worker commands in flight while STOP holds, checked
+// every 5 s (security R2 on #146), and parks idle and orphaned workers
+// every minute (UX-146-1).
+func reapWorkers(ctx context.Context, wt reaper, m commandEnder, stopped func() bool, tick time.Duration) {
+	t := time.NewTicker(tick)
 	defer t.Stop()
+	last := time.Now()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if parked := wt.Reap(ctx); len(parked) > 0 {
-				log.Printf("workers parked: %v", parked)
+			if stopped() {
+				if n := m.EndCommands(); n > 0 {
+					log.Printf("STOP: ended %d worker commands", n)
+				}
+			}
+			if time.Since(last) >= time.Minute {
+				last = time.Now()
+				if parked := wt.Reap(ctx); len(parked) > 0 {
+					log.Printf("workers parked: %v", parked)
+				}
 			}
 		}
 	}
 }
+
+// reaper and commandEnder are what reapWorkers uses of the worker tools
+// and the machine manager.
+type reaper interface {
+	Reap(context.Context) []string
+}
+type commandEnder interface{ EndCommands() int }
 
 // agentSpec is how the owner's agent machine starts, from the image flags
 // and the guest rig's launch file.
