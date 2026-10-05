@@ -178,13 +178,20 @@ func (l *learning) openEvaluator(m *vm.Manager, services *lateServices, c evalCo
 // model calls. They are the evaluator's (a run over the price ceiling
 // ends as not evaluated) and never the owner's: they stay out of the
 // journal's egress records, which feed owner alerts and the digest (W3a,
-// #62 L3 item 7). They are logged.
+// #62 L3 item 7). They are logged by fixed class only, never the
+// vault process's reason text (security R1 on #90).
 func evalDenied(logf func(string, ...any)) func(machine string, d modelroute.Denial) {
 	return func(machine string, d modelroute.Denial) {
 		if !strings.HasPrefix(machine, vm.EvalPrefix) {
 			return
 		}
-		logf("replay %s: model call refused: %s", machine, d.Reason)
+		// The reason is the vault process's text and may quote a
+		// private replay's request; only its fixed class is logged.
+		class := "refused"
+		if d.Reason == modelroute.ReasonEvalCeiling {
+			class = "over the evaluation price ceiling"
+		}
+		logf("replay %s: model call %s (status %d)", machine, class, d.Status)
 	}
 }
 

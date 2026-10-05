@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -72,13 +73,16 @@ func TestLearningPlaneRunsInAgentosd(t *testing.T) {
 }
 
 // The vault process's refusals of replay machines' model calls are logged,
-// never journaled: egress records feed the owner's alerts and digest.
+// never journaled: egress records feed the owner's alerts and digest. Only
+// a fixed class is logged, never the reason text, which may quote a
+// private replay's request.
 func TestEvalDenialsStayOutOfTheJournal(t *testing.T) {
 	var logged []string
-	deny := evalDenied(func(f string, a ...any) { logged = append(logged, f) })
-	deny("eval-0a1b", modelroute.Denial{Reason: modelroute.ReasonEvalCeiling})
+	deny := evalDenied(func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) })
+	deny("eval-0a1b", modelroute.Denial{Reason: modelroute.ReasonEvalCeiling, Status: 403})
+	deny("eval-0a1b", modelroute.Denial{Reason: "denied: CANARY-7f3e quoted request", Status: 403})
 	deny("agent", modelroute.Denial{Reason: "denied"})
-	if len(logged) != 1 {
+	if len(logged) != 2 || !strings.Contains(logged[0], "price ceiling") || strings.Contains(logged[1], "CANARY") {
 		t.Fatalf("logged %q", logged)
 	}
 }
