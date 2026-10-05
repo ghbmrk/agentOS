@@ -51,8 +51,9 @@ var (
 // the evaluator idle (WithIdle). Parking ends the pass for that candidate,
 // but the idle second pass may pick it again at once, so MaxExempt bounds
 // what one pass spends, not what one candidate spends. The count is per
-// process and resets on restart; a per-(candidate, case) bound that
-// survives restarts is PE5b.
+// process and resets on restart. What bounds one candidate is
+// MaxExemptPerCase, saved across restarts (PE5b), and the idle evaluator
+// takes parked candidates in turns (parkedMayRunLocked).
 const MaxExempt = 6
 
 // ErrParked: the candidate was cut short for the owner MaxExempt times and
@@ -73,6 +74,106 @@ func IsIdle(ctx context.Context) bool { v, _ := ctx.Value(idleKey{}).(bool); ret
 // maxExemptCandidates bounds the exempt counts kept; past it the oldest
 // is dropped.
 const maxExemptCandidates = 1024
+
+// MaxExemptPerCase is how many exempt cuts one candidate-side run of one
+// case may take (PE5b, security B2 on #127). The next cut of that pair
+// counts as an ordinary interruption under MaxInterruptions, so owner
+// cuts can re-roll a case a bounded number of times, however often the
+// candidate is parked and resumed.
+const MaxExemptPerCase = 2
+
+// maxCuts bounds the saved cut counts; past it the oldest is dropped.
+const maxCuts = 1024
+
+// cutCount is one (candidate, case) pair's cuts of its candidate-side
+// run: exempt ones (MaxExemptPerCase) and counted ones
+// (MaxInterruptions). It is saved with the pipeline's state, so a restart
+// cannot reset it, and it lasts as long as the pair could be resumed
+// (ResumeFor). Counts and a time only; the key is resumeKey's hash.
+type cutCount struct {
+	Exempt  int       `json:"exempt,omitempty"`
+	Counted int       `json:"counted,omitempty"`
+	At      time.Time `json:"at"`
+}
+
+// cutsLocked returns key's cut counts, dropping them once expired.
+func (p *Pipeline) cutsLocked(key string) cutCount {
+	c, ok := p.st.Cuts[key]
+	if ok && p.cfg.Now().Sub(c.At) > ResumeFor {
+		delete(p.st.Cuts, key)
+		return cutCount{}
+	}
+	return c
+}
+
+// cutLocked records one cut of key's candidate-side run and reports
+// whether it counts: a cut that is not exempt, or an exempt cut past
+// MaxExemptPerCase. The caller saves the state.
+func (p *Pipeline) cutLocked(key string, exempt bool) (counted bool) {
+	c := p.cutsLocked(key)
+	if exempt && c.Exempt < MaxExemptPerCase {
+		c.Exempt++
+	} else {
+		c.Counted++
+		counted = true
+	}
+	c.At = p.cfg.Now()
+	if p.st.Cuts == nil {
+		p.st.Cuts = map[string]cutCount{}
+	}
+	p.st.Cuts[key] = c
+	for len(p.st.Cuts) > maxCuts {
+		oldest := ""
+		for k, v := range p.st.Cuts {
+			if oldest == "" || v.At.Before(p.st.Cuts[oldest].At) || v.At.Equal(p.st.Cuts[oldest].At) && k < oldest {
+				oldest = k
+			}
+		}
+		delete(p.st.Cuts, oldest)
+	}
+	return counted
+}
+
+// parkMark is a parked candidate's place in the idle evaluator's turns
+// (PE5b): when it was last refused, last ran idle, and last yielded to
+// another, as values of Pipeline.parkSeq.
+type parkMark struct{ refused, ran, yielded uint64 }
+
+// parkedMayRunLocked reports whether candidate ck may be evaluated now.
+// One that is not parked may. A parked one runs only when ctx marks the
+// evaluator idle, and then not straight after its own idle run while
+// another parked candidate has been waiting since; that one goes first.
+// Yielding is recorded, so a candidate that waited once and was not
+// offered again holds the evaluator back at most one idle pass.
+func (p *Pipeline) parkedMayRunLocked(ctx context.Context, ck string) bool {
+	if p.exempt[ck] < MaxExempt {
+		return true
+	}
+	if p.parks == nil {
+		p.parks = map[string]*parkMark{}
+	}
+	m := p.parks[ck]
+	if m == nil {
+		m = &parkMark{}
+		p.parks[ck] = m
+	}
+	p.parkSeq++
+	if !IsIdle(ctx) {
+		m.refused = p.parkSeq
+		return false
+	}
+	if m.ran > 0 {
+		since := max(m.ran, m.yielded)
+		for k, o := range p.parks {
+			if k != ck && o.refused > since && o.ran < m.ran {
+				m.yielded = p.parkSeq
+				return false
+			}
+		}
+	}
+	m.ran = p.parkSeq
+	return true
+}
 
 // exemptClass is an exempt cut's fixed log class.
 func exemptClass(cause error) string {
@@ -122,11 +223,11 @@ func cutClass(cause error, evaluator bool) string {
 
 // pairResult is one case's outcome on the two trees of an evaluation:
 // booleans only, never case content or output. baseDone and nextDone say
-// which sides finished; interrupted counts candidate-side runs cut short.
+// which sides finished. Cut counts are kept apart, in the saved state
+// (cutCount).
 type pairResult struct {
 	BaseOK, BaseEv, NextOK, NextEv bool
 	baseDone, nextDone             bool
-	interrupted                    int
 	at                             time.Time
 	seq                            uint64 // put order (Pipeline.keptOrder)
 }
@@ -271,6 +372,7 @@ func (p *Pipeline) exemptLocked(key string) {
 	p.exempt[key]++
 	for len(p.exemptOrder) > maxExemptCandidates {
 		delete(p.exempt, p.exemptOrder[0])
+		delete(p.parks, p.exemptOrder[0])
 		p.exemptOrder = p.exemptOrder[1:]
 	}
 }
