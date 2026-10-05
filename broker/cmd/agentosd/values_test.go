@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -159,6 +160,23 @@ func TestSecretShapedValuesAreNotKept(t *testing.T) {
 		s.Recipients[0] != redactedValue || s.Recipients[1] != "ann@example.test" ||
 		s.Params["meta"].(map[string]any)["ok"] != "plain" {
 		t.Fatalf("scrubbed values %+v", s)
+	}
+	// Numbers and digit strings (security F1 on #119): a card or account
+	// number is a long digit run whatever its form, and a short code is
+	// read with its key, so "code": 123456 is a code like "code 123456".
+	r.values.observe(journal.Intent{ID: "i2", GoalID: "n", Params: map[string]any{
+		"card": float64(4111111111111111), "code": float64(123456), "acct": "4111 1111 1111 1111",
+		"pin": json.Number("4821"), "otp": "903114", "week": float64(3), "amount": 125.5, "zip": "90210",
+	}})
+	r.values.verdict(grants.OwnerOutcome{Intent: journal.Intent{ID: "i2", GoalID: "n"}, Verdict: grants.OwnerAccepted})
+	n, _ := r.values.values("n", "i2")
+	for _, k := range []string{"card", "code", "acct", "pin", "otp"} {
+		if n.Params[k] != redactedValue {
+			t.Errorf("%s kept as %v", k, n.Params[k])
+		}
+	}
+	if n.Params["week"] != float64(3) || n.Params["amount"] != 125.5 || n.Params["zip"] != "90210" {
+		t.Errorf("plain values changed: %+v", n.Params)
 	}
 	// A redactor wired later (P2-4) marks what it would change too.
 	r.values.redact = func(s string) string { return strings.ReplaceAll(s, "hunter2", "[REDACTED]") }

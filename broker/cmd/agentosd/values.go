@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -180,10 +181,13 @@ func (v *taskValues) scrub(s string) string {
 	return s
 }
 
-func (v *taskValues) scrubValue(x any) any {
+func (v *taskValues) scrubValue(x any) any { return v.scrubIn("", x) }
+
+// scrubIn scrubs x found under key: a leaf is read with its key, so
+// "code": 123456 is a code as "code 123456" is, and a number is read as
+// its decimal text (security F1 on #119).
+func (v *taskValues) scrubIn(key string, x any) any {
 	switch t := x.(type) {
-	case string:
-		return v.scrub(t)
 	case map[string]any:
 		out := make(map[string]any, len(t))
 		for k, c := range t {
@@ -191,17 +195,64 @@ func (v *taskValues) scrubValue(x any) any {
 				out[sk] = redactedValue
 				continue
 			}
-			out[k] = v.scrubValue(c)
+			out[k] = v.scrubIn(k, c)
 		}
 		return out
 	case []any:
 		out := make([]any, len(t))
 		for i, c := range t {
-			out[i] = v.scrubValue(c)
+			out[i] = v.scrubIn(key, c)
 		}
 		return out
 	}
+	text, ok := leafText(x)
+	if !ok {
+		return x
+	}
+	if v.scrub(text) != text || longDigits(text) || key != "" && v.scrub(key+" "+text) != key+" "+text {
+		return redactedValue
+	}
 	return x
+}
+
+// leafText is a string or number leaf as text; numbers without an
+// exponent, so 4111111111111111 reads as its digits.
+func leafText(x any) (string, bool) {
+	switch t := x.(type) {
+	case string:
+		return t, true
+	case json.Number:
+		return t.String(), true
+	case float64:
+		return strconv.FormatFloat(t, 'f', -1, 64), true
+	case int:
+		return strconv.Itoa(t), true
+	case int64:
+		return strconv.FormatInt(t, 10), true
+	}
+	return "", false
+}
+
+// minSecretDigits: a run of this many digits, spaces, dots or dashes
+// between them allowed, reads as a card or account number and is not
+// kept. It fails closed: a long order number is dropped too, so a skill
+// built on one does not compile.
+const minSecretDigits = 12
+
+func longDigits(s string) bool {
+	n := 0
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+			if n++; n >= minSecretDigits {
+				return true
+			}
+		case r == ' ' || r == '-' || r == '.':
+		default:
+			n = 0
+		}
+	}
+	return false
 }
 
 // hashStep keeps a keyed hash of each string value: equal values hash
