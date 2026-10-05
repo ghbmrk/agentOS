@@ -18,6 +18,7 @@ type rig struct {
 	t          *testing.T
 	mu         sync.Mutex
 	clock      time.Time
+	mono       time.Duration // the monotonic clock; advance moves it with clock
 	restricted bool
 	quiet      bool
 	approvals  bool // an approval request is open on the channel
@@ -68,6 +69,11 @@ func newRig(t *testing.T, edit func(*Config)) *rig {
 			defer r.mu.Unlock()
 			return r.approvals
 		},
+		Mono: func() time.Duration {
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			return r.mono
+		},
 		Location: time.UTC,
 	}
 	if edit != nil {
@@ -89,6 +95,7 @@ func (r *rig) open() {
 func (r *rig) advance(d time.Duration) {
 	r.mu.Lock()
 	r.clock = r.clock.Add(d)
+	r.mono += d
 	r.mu.Unlock()
 }
 
@@ -403,16 +410,18 @@ func TestPacingHoldsQuestionsAndTheDeadlineStartsAtSend(t *testing.T) {
 	}
 }
 
-// TestRestrictedClockHoldsTheQuestion: while the clock guard says time
-// cannot be trusted, nothing lapses and nothing new is sent (TIM-1).
-func TestRestrictedClockHoldsTheQuestion(t *testing.T) {
+// TestARestrictedClockKeepsTheWaitAndHoldsNewTexts: while the clock guard
+// says time cannot be trusted, a texted question keeps waiting and lapses
+// only when its wait runs out (PQ4), and with quiet hours configured
+// nothing new is sent (TIM-1).
+func TestARestrictedClockKeepsTheWaitAndHoldsNewTexts(t *testing.T) {
 	r := newRig(t, nil)
 	r.ask("lin1", "q", slot())
 	r.set(func() { r.restricted = true })
-	r.advance(5 * time.Hour)
+	r.advance(20 * time.Minute)
 	r.b.Tick(context.Background())
 	st := r.status("lin1", "q")
-	if st.State != Held || st.Answer != "" {
+	if st.State != Waiting || st.Answer != "" {
 		t.Fatalf("restricted clock: %+v", st)
 	}
 	if !strings.Contains(st.Reason, "clock") {
@@ -432,6 +441,70 @@ func TestRestrictedClockHoldsTheQuestion(t *testing.T) {
 	}
 	if st := r.status("lin1", "new"); st.State != Waiting {
 		t.Fatalf("held question not sent after recovery: %+v", st)
+	}
+}
+
+// REQ: CAP-10, TIM-1
+//
+// W9a PQ4 (#95 gate): a texted question's wait runs on the monotonic
+// clock while the wall clock is restricted, so a restriction never
+// stretches the deadline the owner was given; the lapse is dated at that
+// deadline. A held question still waits, and a restart forgets the
+// monotonic reading, so a question loaded from disk waits for trusted time.
+func TestARestrictedClockDoesNotStretchTheWait(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "questions.json")
+	r := newRig(t, func(c *Config) { c.Path = path })
+	r.ask("lin1", "q", slot())
+	r.set(func() { r.restricted = true })
+	r.ask("lin2", "held", slot()) // asked while restricted: never texted
+	r.advance(29 * time.Minute)
+	r.b.Tick(context.Background())
+	if st := r.status("lin1", "q"); st.State != Waiting {
+		t.Fatalf("lapsed early: %+v", st)
+	}
+	r.advance(time.Minute)
+	r.b.Tick(context.Background())
+	if st := r.status("lin1", "q"); st.State != Defaulted || st.Answer != "9:30" {
+		t.Fatalf("not lapsed on the monotonic clock: %+v", st)
+	}
+	if d := strings.Join(r.b.TakeDigest(), "\n"); !strings.Contains(d, "no reply by 13:30") {
+		t.Fatalf("digest %q", d)
+	}
+	if st := r.status("lin2", "held"); st.State != Held || !strings.Contains(st.Reason, "clock") {
+		t.Fatalf("a held question: %+v", st)
+	}
+	if out, _ := r.answer("Q100 9:00"); !strings.HasPrefix(out, "Too late for Q100") {
+		t.Fatalf("answer after the lapse: %q", out)
+	}
+
+	// An answer that arrives before the tick still finds the wait over.
+	r.set(func() { r.restricted = false })
+	r.ask("lin3", "a", slot())
+	r.set(func() { r.restricted = true })
+	r.advance(31 * time.Minute)
+	if out, _ := r.answer("Q102 9:00"); !strings.HasPrefix(out, "Too late for Q102") {
+		t.Fatalf("answer past the wait: %q", out)
+	}
+
+	// After a restart the reading is gone: wait for trusted time.
+	r.set(func() { r.restricted = false })
+	r.ask("lin3", "b", slot())
+	r.set(func() { r.restricted = true })
+	r.open()
+	r.advance(time.Hour)
+	r.b.Tick(context.Background())
+	if st := r.status("lin3", "b"); st.State != Held {
+		t.Fatalf("loaded question lapsed on a restricted clock: %+v", st)
+	}
+	// One texted after the restart counts again.
+	r.set(func() { r.restricted = false })
+	r.b.Tick(context.Background())
+	r.ask("lin4", "c", slot())
+	r.set(func() { r.restricted = true })
+	r.advance(30 * time.Minute)
+	r.b.Tick(context.Background())
+	if st := r.status("lin4", "c"); st.State != Defaulted {
+		t.Fatalf("texted after the restart: %+v", st)
 	}
 }
 

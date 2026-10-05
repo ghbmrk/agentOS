@@ -41,6 +41,42 @@ func TestQuestionAnswersReachTheHookUnlockedAndStripped(t *testing.T) {
 	}
 }
 
+// W9a (UX R1 on #95): the two-step locked path. A reply to a question
+// sent while locked is held; a code-only unlock offers it; RUN sends it to
+// the answer hook, never to the agent.
+func TestALockedQuestionAnswerRunsOnlyThroughTheTwoSteps(t *testing.T) {
+	var got []string
+	r := newRig(t, nil)
+	r.edit = func(c *Config) {
+		c.Answer = func(_ context.Context, msg string) (string, bool) {
+			got = append(got, msg)
+			return "Thanks. Q104 answered.", strings.HasPrefix(msg, "Q104")
+		}
+	}
+	r.ch = r.open()
+	if out := r.say("Q104 yes"); !strings.HasPrefix(out, "Locked.") {
+		t.Fatalf("locked: %q", out)
+	}
+	if out := r.say("RUN"); len(got) != 0 {
+		t.Fatalf("RUN before the unlock: %q, hook got %q", out, got)
+	}
+	if out := r.say(r.totp()); !strings.Contains(out, `Held: "Q104 yes". Reply RUN to send it.`) || len(got) != 0 {
+		t.Fatalf("unlock: %q, hook got %q", out, got)
+	}
+	if out := r.say("RUN"); out != "Thanks. Q104 answered." {
+		t.Fatalf("RUN: %q", out)
+	}
+	if len(got) != 1 || got[0] != "Q104 yes" {
+		t.Fatalf("hook got %q", got)
+	}
+	if out := r.say("RUN"); out != "Nothing is held." || len(got) != 1 {
+		t.Fatalf("RUN twice: %q, hook got %q", out, got)
+	}
+	if n := len(r.agent.got()); n != 0 {
+		t.Fatalf("an answer reached the agent: %d", n)
+	}
+}
+
 // W9 (question Q5, UX R2 on #71): ApprovalsOpen reports an open approval
 // request, so an untagged reply is never taken as a question's answer
 // while the owner may mean the request.

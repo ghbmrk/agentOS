@@ -86,7 +86,7 @@ func TestQuestionsRunInAgentosd(t *testing.T) {
 	}
 	// Reserve is the gate's: with the hour's CH-15 budget spent on the
 	// gate, a new question is held, not texted.
-	for d.Gate().Reserve(time.Now()) {
+	for d.Gate().Reserve(false) {
 	}
 	text, _, err = qs.Call(ctx, "agent", "agent", question.ToolAsk,
 		json.RawMessage(`{"request_id":"q2","question":"Lunch at noon?","default":"yes","wait_minutes":30}`))
