@@ -282,6 +282,20 @@ func TestTheClipWaitsForTheCallersAckAndAuthenticatedAudio(t *testing.T) {
 		t.Fatalf("audio from another address unlocked the clip: %d bytes", n)
 	}
 
+	wrongKey, err := p.RingLine(ctx, "+15550000555", user, sipsim.Ring{WrongKey: true})
+	if err != nil || wrongKey.Status != 200 {
+		t.Fatalf("%v %v", wrongKey, err)
+	}
+	select {
+	case <-wrongKey.Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("no hangup for audio under another key")
+	}
+	time.Sleep(50 * time.Millisecond)
+	if n := len(wrongKey.Heard()); n != 0 {
+		t.Fatalf("audio under another key unlocked the clip: %d bytes", n)
+	}
+
 	unacked, err := p.RingLine(ctx, ownerNum, user, sipsim.Ring{NoAck: true})
 	if err != nil || unacked.Status != 200 {
 		t.Fatalf("%v %v", unacked, err)

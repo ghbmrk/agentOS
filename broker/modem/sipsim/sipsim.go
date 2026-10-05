@@ -597,6 +597,9 @@ type Ring struct {
 	// Elsewhere sends the caller's audio from another port than the one
 	// offered, as a third party would if an offer named its address.
 	Elsewhere bool
+	// WrongKey sends the caller's audio from the offered address under a
+	// key other than the one offered.
+	WrongKey bool
 }
 
 // LineCall is a call the provider placed to a line.
@@ -696,7 +699,12 @@ func (p *Provider) RingLine(ctx context.Context, from, user string, o Ring) (*Li
 			}
 			go func() { <-c.done; _ = from.Close() }()
 		}
-		go c.speak(key, from)
+		k := key
+		if o.WrongKey {
+			k = make([]byte, len(key))
+			_, _ = rand.Read(k)
+		}
+		go c.speak(k, from)
 	}
 	lineKey, err := sipline.OfferKey(c.Answer)
 	if err != nil {
