@@ -19,7 +19,7 @@ var t0 = time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)
 
 func newOpt(t *testing.T, st Store, mod func(*Config)) *Optimizer {
 	t.Helper()
-	cfg := Config{Store: st}
+	cfg := Config{Store: st, UserContent: func(string) bool { return false }}
 	if mod != nil {
 		mod(&cfg)
 	}
@@ -75,10 +75,10 @@ func TestSuggestsAfterRunOfApprovals(t *testing.T) {
 	}
 	r := s[0].Spec.Rule
 	if s[0].Spec.Account != "books" || r.Action != "invoice.send" || r.Params["template"] != "monthly" || len(r.Params) != 1 ||
-		len(r.Recipients) != 1 || r.Recipients[0] != "ap@client.test" || r.PerRecord != 1 || r.PerDay != 4 || r.AmountCap != 0 || r.Reply {
+		len(r.Recipients) != 1 || r.Recipients[0] != "ap@client.test" || r.PerRecord != 1 || r.PerDay != 3 || r.AmountCap != 0 || r.Reply {
 		t.Fatalf("rule %+v", r)
 	}
-	if s[0].Short != "S1" || s[0].Approved != 10 || s[0].Detail != grants.Describe(s[0].Spec) || !strings.Contains(s[0].Text, "up to 4 a day, no money.") ||
+	if s[0].Short != "S1" || s[0].Approved != 10 || s[0].Detail != grants.Describe(s[0].Spec) || !strings.Contains(s[0].Text, "up to 3 a day, no money.") ||
 		!strings.Contains(s[0].Text, "10 times in a row since Oct 5") || !strings.HasSuffix(s[0].Text, "Reply NO S1 to stop suggesting it.") {
 		t.Fatalf("text %q", s[0].Text)
 	}
@@ -122,7 +122,8 @@ func TestRunResetsAndShapesRule(t *testing.T) {
 // CAP-6, ADP-9: never suggested: CRED-6 (reveal-or-create-secret), a
 // reversible verb (needs no rule), a user-content service, a class whose
 // fixed params changed or were not plain strings (no templated content).
-// An unverified approval neither counts nor resets.
+// An unverified approval does not count; an expired item neither counts
+// nor resets.
 func TestExclusions(t *testing.T) {
 	for name, mut := range map[string]func(i int, d *Decision){
 		"secret":     func(_ int, d *Decision) { d.Verb = verb.RevealSecret },
@@ -149,7 +150,7 @@ func TestExclusions(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		if i == 5 {
 			d := invoice(99)
-			d.Verified, d.Approved = false, false
+			d.Verified = false
 			observe(t, o, d)
 			e := invoice(98)
 			e.Expired, e.Approved = true, false
@@ -158,7 +159,62 @@ func TestExclusions(t *testing.T) {
 		observe(t, o, invoice(i))
 	}
 	if len(suggestions(t, o)) != 1 {
-		t.Fatal("an unverified or expired item must not reset the run")
+		t.Fatal("an unverified approval or an expired item must not reset the run")
+	}
+	if _, err := New(Config{Store: &change.MemStore{}}); err == nil {
+		t.Fatal("New must require UserContent")
+	}
+}
+
+// ADP-9, ADP-11 (L3 B1): a NO, UNDO, edit, or wrong verdict resets the run
+// even when the item was unverified; the owner's rejection of an item the
+// verifier could not read is still evidence.
+func TestUnverifiedRejectionResets(t *testing.T) {
+	for name, mut := range map[string]func(d *Decision){
+		"no":    func(d *Decision) { d.Approved = false },
+		"edit":  func(d *Decision) { d.Edited = true },
+		"wrong": func(d *Decision) { d.Wrong = true },
+	} {
+		o := newOpt(t, &change.MemStore{}, nil)
+		for i := 0; i < 25; i++ {
+			d := reply(i, false)
+			if i == 10 {
+				d.Verified = false
+				mut(&d)
+			}
+			observe(t, o, d)
+		}
+		if s := suggestions(t, o); len(s) != 0 {
+			t.Errorf("%s: suggested %q", name, s[0].Text)
+		}
+		o = newOpt(t, &change.MemStore{}, nil)
+		for i := 0; i < 15; i++ {
+			d := invoice(i)
+			if i == 7 {
+				d.Verified = false
+				mut(&d)
+			}
+			observe(t, o, d)
+		}
+		if s := suggestions(t, o); len(s) != 0 {
+			t.Errorf("ADP-9 %s: suggested %q", name, s[0].Text)
+		}
+	}
+	// The reviewer's probe: an unverified NO at #10 and edit at #11 among
+	// 25 replies leave a run of 13, short of 20.
+	o := newOpt(t, &change.MemStore{}, nil)
+	for i := 0; i < 25; i++ {
+		d := reply(i, i == 10)
+		if i == 9 || i == 10 {
+			d.Verified = false
+		}
+		if i == 9 {
+			d.Approved = false
+		}
+		observe(t, o, d)
+	}
+	if s := suggestions(t, o); len(s) != 0 {
+		t.Fatalf("probe: suggested %q", s[0].Text)
 	}
 }
 
@@ -291,6 +347,54 @@ func TestApprovalSplit(t *testing.T) {
 	if n, a := o.Split(); n != 10 || a != 4 {
 		t.Fatalf("necessary %d avoidable %d", n, a)
 	}
+	// Unverified, ineligible, and edited approvals were all necessary; a
+	// later wrong verdict is not a second approval.
+	o = newOpt(t, &change.MemStore{}, nil)
+	for i := 0; i < 10; i++ {
+		observe(t, o, invoice(i))
+	}
+	u, r, e, w := invoice(10), invoice(11), invoice(12), invoice(3)
+	u.Verified = false
+	r.Verb = verb.Draft
+	e.Edited = true
+	w.Wrong = true
+	observe(t, o, u, r, e, w)
+	if n, a := o.Split(); n != 13 || a != 0 {
+		t.Fatalf("necessary %d avoidable %d", n, a)
+	}
+}
+
+// CAP-6: the drafted daily cap is the median day, so bunching approvals
+// into one day cannot raise it.
+func TestPerDayIsMedian(t *testing.T) {
+	o := newOpt(t, &change.MemStore{}, nil)
+	for i := 0; i < 10; i++ {
+		d := invoice(i)
+		d.At = t0.Add(time.Duration(i) * 24 * time.Hour)
+		if i >= 3 {
+			d.At = t0.Add(3 * 24 * time.Hour) // seven on one day
+		}
+		observe(t, o, d)
+	}
+	if s := suggestions(t, o); len(s) != 1 || s[0].Spec.Rule.PerDay != 1 {
+		t.Fatalf("%+v", s)
+	}
+}
+
+// CH-12: fallback short IDs stay within three characters.
+func TestShortIDsAreBounded(t *testing.T) {
+	o := newOpt(t, &change.MemStore{}, nil)
+	for i := 0; i < MaxShort; i++ {
+		o.st.Classes[strconv.Itoa(i)] = &class{Short: "taken"}
+		s, err := o.shortLocked()
+		if err != nil || len(s) > 3 {
+			t.Fatalf("%q %v", s, err)
+		}
+		o.st.Classes[strconv.Itoa(i)].Short = s
+	}
+	if _, err := o.shortLocked(); err != ErrShortIDs {
+		t.Fatal(err)
+	}
 }
 
 // CAP-6: the optimizer proposes and never enacts. It holds no handle on
@@ -301,12 +405,12 @@ func TestCannotEnact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	allowed := map[string]bool{"encoding/json": true, "errors": true, "fmt": true, "sort": true, "strings": true,
+		"sync": true, "time": true, "github.com/ghbmrk/agentos/broker/grants": true, "github.com/ghbmrk/agentos/broker/verb": true}
 	for _, im := range f.Imports {
 		p, _ := strconv.Unquote(im.Path.Value)
-		for _, banned := range []string{"broker/journal", "broker/owner", "broker/daemon", "net", "os"} {
-			if strings.HasSuffix(p, banned) {
-				t.Errorf("attention imports %s", p)
-			}
+		if !allowed[p] {
+			t.Errorf("attention imports %s", p)
 		}
 	}
 }

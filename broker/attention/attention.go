@@ -46,8 +46,9 @@ type Decision struct {
 	// Wrong: the owner later judged it wrong (OP-7). It resets any run.
 	Wrong bool
 	// Verified: the approval line came from the account's verifier. An
-	// unverified item can never match a pre-allowance (grants GR5), so it
-	// neither counts nor resets.
+	// unverified approval can never match a pre-allowance (grants GR5), so
+	// it does not count; an unverified NO, UNDO, edit, or wrong verdict
+	// still resets the run (ADP-11).
 	Verified bool
 	// Params and Recipients are what was approved; Amount is the verified
 	// amount in minor units (0 when no money moves).
@@ -83,7 +84,8 @@ type Config struct {
 	ReplyEditPercent int
 	// UserContent reports an account whose service publishes user content
 	// (paste sites, file shares, URL shorteners): never suggested, since
-	// an attacker can read what it receives (the SPEC egress-allowlist note, security review).
+	// an attacker can read what it receives (the SPEC egress-allowlist note,
+	// security review). Required, so a missing check cannot fail open.
 	UserContent func(account string) bool
 	// ShortID gives the owner-facing ID of a suggestion (CH-12). Nil: S1,
 	// S2, ...
@@ -139,6 +141,9 @@ func New(cfg Config) (*Optimizer, error) {
 	if cfg.Store == nil {
 		return nil, errors.New("attention: Store is required")
 	}
+	if cfg.UserContent == nil {
+		return nil, errors.New("attention: UserContent is required")
+	}
 	if cfg.Threshold < 1 {
 		cfg.Threshold = 10
 	}
@@ -183,9 +188,11 @@ func eligible(v string) bool {
 	return ok && c == verb.Irreversible
 }
 
-// Observe records one owner decision.
+// Observe records one owner decision. A Wrong verdict is the owner's
+// later judgment of an item already observed, so it never counts as an
+// approval again (A10).
 func (o *Optimizer) Observe(d Decision) error {
-	if !eligible(d.Verb) || !d.Verified || d.Expired {
+	if d.Expired {
 		return nil
 	}
 	_, reply := d.Params[Body]
@@ -194,20 +201,28 @@ func (o *Optimizer) Observe(d Decision) error {
 	defer o.mu.Unlock()
 	k := key(d.Account, d.Action, reply)
 	c := o.st.Classes[k]
-	if c == nil {
-		c = &class{Account: d.Account, Action: d.Action, Verb: d.Verb, Reply: reply}
-		o.st.Classes[k] = c
-	}
-	if d.Approved {
-		if o.earnedLocked(c) {
+	if d.Approved && !d.Wrong {
+		// A10: avoidable only when a pre-allowance would have let this
+		// exact item through: eligible, verified, unedited, earned.
+		if c != nil && eligible(d.Verb) && d.Verified && !d.Edited && o.earnedLocked(c) {
 			o.st.Avoidable++
 		} else {
 			o.st.Necessary++
 		}
 	}
+	if !eligible(d.Verb) {
+		return o.save()
+	}
+	if c == nil {
+		c = &class{Account: d.Account, Action: d.Action, Verb: d.Verb, Reply: reply}
+		o.st.Classes[k] = c
+	}
 	if !d.Approved || d.Wrong || (d.Edited && (!reply || o.cfg.ReplyEditPercent <= 0)) {
 		c.reset()
 		return o.save()
+	}
+	if !d.Verified {
+		return o.save() // an unverified approval neither counts nor resets
 	}
 	if reply {
 		c.Recent = append(c.Recent, d.Edited)
@@ -386,9 +401,7 @@ func (o *Optimizer) Suggestions() ([]Suggestion, error) {
 		if len(c.Fixed) > 0 {
 			r.Params = c.Fixed
 		}
-		for _, n := range c.Days {
-			r.PerDay = max(r.PerDay, n)
-		}
+		r.PerDay = max(r.PerDay, median(c.Days))
 		if c.SameRcpt && len(c.Recipients) > 0 && !c.Reply {
 			r.Recipients = c.Recipients
 		}
@@ -423,12 +436,35 @@ func (o *Optimizer) shortLocked() (string, error) {
 	if o.cfg.ShortID != nil {
 		return o.cfg.ShortID(taken)
 	}
-	for {
-		o.st.Seq++
+	for range MaxShort {
+		o.st.Seq = o.st.Seq%MaxShort + 1
 		if s := fmt.Sprintf("S%d", o.st.Seq); !taken(s) {
 			return s, nil
 		}
 	}
+	return "", ErrShortIDs
+}
+
+// MaxShort bounds the fallback IDs to S1..S99, three characters (CH-12);
+// they cycle, so a declined ID is not reused at once.
+const MaxShort = 99
+
+// ErrShortIDs: every fallback short ID is in use.
+var ErrShortIDs = errors.New("attention: no free short ID")
+
+// median is the median count per day (the lower middle for an even
+// count), so bunching approvals into one day cannot raise the drafted
+// daily cap.
+func median(days map[string]int) int {
+	if len(days) == 0 {
+		return 0
+	}
+	ns := make([]int, 0, len(days))
+	for _, n := range days {
+		ns = append(ns, n)
+	}
+	sort.Ints(ns)
+	return ns[(len(ns)-1)/2]
 }
 
 // Reoffer is the least time between two offers of one suggestion, and

@@ -330,7 +330,8 @@ var ErrNoSkill = errors.New("compile: no repeated trajectory to compile")
 // BuildSkill compiles a skill from the journal statuses Loop 1 hands over
 // with a repeat hypothesis (its brief's evidence, which never holds a
 // held-out task, CHG-1). It reads nothing else. The candidate writes only
-// under skills/; Loop 1 sets its source, origin, and public mark.
+// under skills/, deletes that shape's procedure (a no-op when there is
+// none), and is Public only when every source intent was (REV-5).
 func (c *Compiler) BuildSkill(evidence []journal.Status) (change.Candidate, error) {
 	all := trajectories(evidenceJournal(evidence), c.cfg.Group, c.cfg.OwnerSource, c.cfg.Redacted)
 	groups := map[string][]*Trajectory{}
@@ -356,7 +357,16 @@ func (c *Compiler) BuildSkill(evidence []journal.Status) (change.Candidate, erro
 	if sk == nil || sk.Validate() != nil {
 		return change.Candidate{}, ErrNoSkill
 	}
-	return change.Candidate{Source: change.Local, Origin: Origin, Files: map[string][]byte{sk.Path(): sk.Encode()}}, nil
+	cand := change.Candidate{
+		Source: change.Local, Origin: Origin,
+		Files:  map[string][]byte{sk.Path(): sk.Encode()},
+		Delete: []string{skill.ProceduresNS + "/p" + best + ".json"},
+		Public: true,
+	}
+	for _, t := range ts {
+		cand.Public = cand.Public && t.Public
+	}
+	return cand, nil
 }
 
 // evidenceJournal presents statuses, in the order given, as a journal with

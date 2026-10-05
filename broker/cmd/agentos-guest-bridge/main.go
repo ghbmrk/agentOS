@@ -60,23 +60,11 @@ func main() {
 		},
 	}}
 
-	rp := &httputil.ReverseProxy{
-		Rewrite: func(r *httputil.ProxyRequest) {
-			r.SetURL(&url.URL{Scheme: "http", Host: "broker.localhost"})
-			r.Out.Host = "broker.localhost"
-		},
-		Transport:     broker.Transport,
-		FlushInterval: -1, // model streams flow through as they arrive
-	}
 	l, err := net.Listen("tcp", *listen)
 	if err != nil {
 		log.Fatal(err)
 	}
-	mux := http.NewServeMux()
-	mux.Handle("/", rp)
-	mux.Handle("/skills/mcp", &skill.Server{Dir: *tree,
-		Effects: &skill.MCPEffects{Client: broker, URL: "http://broker.localhost/mcp"}})
-	go http.Serve(l, mux)
+	go http.Serve(l, routes(broker, *tree))
 
 	var child *exec.Cmd
 	if args := flag.Args(); len(args) > 0 {
@@ -98,6 +86,24 @@ func main() {
 		}
 	}()
 	reap(child)
+}
+
+// routes forwards the guest's requests to the broker and serves the
+// tree's skills, whose steps go back to the broker's own effect_request.
+func routes(broker *http.Client, tree string) http.Handler {
+	rp := &httputil.ReverseProxy{
+		Rewrite: func(r *httputil.ProxyRequest) {
+			r.SetURL(&url.URL{Scheme: "http", Host: "broker.localhost"})
+			r.Out.Host = "broker.localhost"
+		},
+		Transport:     broker.Transport,
+		FlushInterval: -1, // model streams flow through as they arrive
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/", rp)
+	mux.Handle("/skills/mcp", &skill.Server{Dir: tree,
+		Effects: &skill.MCPEffects{Client: broker, URL: "http://broker.localhost/mcp"}})
+	return mux
 }
 
 // reap waits for every child, as PID 1 must, and exits with the runtime.

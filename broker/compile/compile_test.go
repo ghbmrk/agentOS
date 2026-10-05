@@ -523,6 +523,21 @@ func TestBuildSkillFromEvidence(t *testing.T) {
 		if !strings.HasPrefix(p, "skills/k") {
 			t.Fatalf("wrote %s", p)
 		}
+		// The skill replaces its shape's procedure (L3 rec 6).
+		if want := "procedures/p" + strings.TrimSuffix(strings.TrimPrefix(p, "skills/k"), ".json") + ".json"; len(cand.Delete) != 1 || cand.Delete[0] != want {
+			t.Fatalf("delete %v, want %s", cand.Delete, want)
+		}
+	}
+	if cand.Public {
+		t.Fatal("a skill built from private tasks must not be Public")
+	}
+	pub := newRig(t)
+	for i := 0; i < 3; i++ {
+		id := pub.task(fmt.Sprintf("p%d", i), "public", time.Second, weekly(fmt.Sprintf("u%d@example.test", i), 40+i)...)
+		pub.judge(id, journal.VerdictGood, "owner")
+	}
+	if cand, err := pub.compiler().BuildSkill(pub.eng.List()); err != nil || !cand.Public {
+		t.Fatalf("public evidence: %v %v", cand.Public, err)
 	}
 	// The same evidence without g3's statuses has too few runs: nothing
 	// outside the evidence is read.
@@ -573,9 +588,29 @@ func TestClippedAndNullValues(t *testing.T) {
 	if string(sk.Steps[0].Params["cc"].Lit) != "null" {
 		t.Fatalf("cc %+v", sk.Steps[0].Params["cc"])
 	}
-	params, _, err := sk.Fill(0, map[string]any{"to": "z@example.test"})
+	dec, err := skill.Decode(sk.Encode())
+	if err != nil || string(dec.Steps[0].Params["cc"].Lit) != "null" {
+		t.Fatalf("null must survive Decode: %v", err)
+	}
+	params, _, err := dec.Fill(0, map[string]any{"to": "z@example.test"})
 	if v, ok := params["cc"]; err != nil || !ok || v != nil {
 		t.Fatalf("null must round-trip: %v %v", params, err)
+	}
+
+	// A recipient input is capped at the guest plane's 320 bytes even when
+	// twice the longest run would allow more.
+	r = newRig(t)
+	for i := 0; i < 3; i++ {
+		to := strings.Repeat("a", 200) + fmt.Sprintf("%d@example.test", i)
+		id := r.task(fmt.Sprintf("l%d", i), "private", time.Second,
+			step{"mail", "message.send", nil, []string{to}},
+			step{"mail", "label.add", map[string]any{"label": "sent"}, nil})
+		r.judge(id, journal.VerdictGood, "owner")
+		r.dev[id] = true
+	}
+	_, sk, _ = only(t, r.compiler().Candidates(change.Tree{}))
+	if len(sk.Slots) != 1 || sk.Slots[0].Max != 320 {
+		t.Fatalf("recipient slot %+v", sk.Slots)
 	}
 
 	r = newRig(t)
