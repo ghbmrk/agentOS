@@ -19,6 +19,7 @@ type recServices struct {
 	mu     sync.Mutex
 	open   map[string]bool
 	closed []string
+	opened []string
 	fail   bool
 }
 
@@ -29,6 +30,7 @@ func (s *recServices) Open(id string) (string, error) {
 		return "", errors.New("no socket")
 	}
 	s.open[id] = true
+	s.opened = append(s.opened, id)
 	return filepath.Join(s.root, id), nil
 }
 

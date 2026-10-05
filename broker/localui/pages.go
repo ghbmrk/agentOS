@@ -27,6 +27,7 @@ button.plain { background: none; color: var(--accent); padding: .4em 0; }
 .qr { width: 220px; height: 220px; display: block; margin: .6em 0; }
 .mono { font-family: ui-monospace, Menlo, Consolas, monospace; word-break: break-all; }
 form { margin: .6em 0 1.2em; }
+.card { border-top: 1px solid var(--line); padding-top: .4em; }
 </style></head><body>{{end}}
 {{define "foot"}}<p class="muted">Box page: <span class="mono">http://{{boxhost}}/</span></p></body></html>{{end}}
 
@@ -108,9 +109,86 @@ form { margin: .6em 0 1.2em; }
 <p class="muted">Next, the box asks for a code from your code generator. The passphrase alone does not unlock it.</p>
 <script>{{shrinkjs}}</script>{{end}}
 
+{{define "secondline"}}{{template "head" .Refresh}}
+<h1>Second line</h1>
+{{if .Down}}<p>The box is still starting. This page reloads by itself.</p>
+{{else if .Locked}}<p>The box is locked, so it can't read or change the second line. <a href="/unlock/vault">Unlock the box</a>, then come back here.</p>
+{{else}}
+{{with .Err}}<p class="err">{{.}}</p>{{end}}
+{{if and .Removing .St.Set}}<p>Remove the second line? Texts and calls from {{.St.Settings.Number}} stop, and you'll need the provider's password to add it again.</p>
+<form method="post" action="/second-line/"><input type="hidden" name="step" value="remove"><input type="hidden" name="confirm" value="1"><button class="stop">Remove</button></form>
+<p><a href="/second-line/">Cancel</a></p>
+{{else if .St.Set}}
+{{if .St.RealmConfirmed}}<p class="ok">The second line is ready: {{.St.Settings.Number}} through {{.St.Settings.Domain}}.</p>
+{{else if .St.RealmRecorded}}<p>The box signed in to your provider, which calls itself <b class="mono">{{.Realm}}</b>.
+{{if .Matches}}This matches the domain you entered.{{else}}This differs from the domain you entered ({{.St.Settings.Domain}}). Some providers use another name here; check it on your provider's setup page.{{end}}</p>
+<p>Texts and calls start once you confirm it is your provider.</p>
+<form method="post" action="/second-line/"><input type="hidden" name="step" value="confirm"><input type="hidden" name="realm" value="{{.RealmExact}}"><button>It is my provider</button></form>
+<p class="muted">If it is not, remove the second line below and check the server name with your provider.</p>
+{{else if .St.WaitingForRegistration}}<p>Waiting for the box to sign in to your provider. This page reloads by itself.</p>
+{{if .Slow}}<p>Still trying. If this doesn't change in a few minutes, check the server name, port and password with your provider.</p>{{end}}
+{{else}}<p class="err">The box didn't reach your provider within 30 minutes of setup. Check the server name and password with your provider, then save the account again.</p>{{end}}
+<p class="muted">{{.St.Settings.User}} at {{.St.Settings.Server}}, number {{.St.Settings.Number}}.</p>
+<details{{if and (not .St.RealmRecorded) (not .St.WaitingForRegistration)}} open{{end}}><summary>Change the account</summary>{{template "lineform" .Form}}</details>
+<form method="post" action="/second-line/"><input type="hidden" name="step" value="remove"><button class="stop">Remove the second line</button></form>
+<p class="muted">The box texts you when the account is changed or removed.</p>
+{{else}}
+<p>A second line lets the box text and call businesses for you from its own number, a calling (SIP) account you hold with a provider. Your own number stays private.</p>
+<p>First, in your provider's settings: turn on encrypted calls (SRTP), and turn off voicemail on this number, so callers hear the box's message asking them to text instead.</p>
+{{template "lineform" .Form}}
+{{end}}
+<h2>Texts over your provider's web API</h2>
+{{if and .SMSRemoving .SMS.Set}}<p>Remove the texting account? Texts from {{.SMS.Settings.Number}} stop until you add it again with the provider's auth token.</p>
+<form method="post" action="/second-line/"><input type="hidden" name="step" value="sms-remove"><input type="hidden" name="confirm" value="1"><button class="stop">Remove</button></form>
+<p><a href="/second-line/">Cancel</a></p>
+{{else if .SMS.Set}}<p class="ok">Texts go through {{.SMS.ProviderName}} from {{.SMS.Settings.Number}}.</p>
+<details><summary>Change the texting account</summary>{{template "smsform" .SMSForm}}</details>
+<form method="post" action="/second-line/"><input type="hidden" name="step" value="sms-remove"><button class="stop">Remove the texting account</button></form>
+{{else}}<p>Some providers' calling accounts can't send texts. If yours is Twilio or SignalWire, the box can text through the provider's web API instead, from the same number.</p>
+<p class="muted">For a US number, register it for A2P 10DLC (business texting) in your provider's console first, or carriers block the texts.</p>
+<details{{if .SMSForm.Provider}} open{{end}}><summary>Set up texting</summary>{{template "smsform" .SMSForm}}</details>
+{{end}}{{end}}
+<p><a href="/home">More</a> · <a href="/status">Status</a></p>
+{{template "foot"}}{{end}}
+
+{{define "lineform"}}<form method="post" action="/second-line/"><input type="hidden" name="step" value="set">
+<label>Server and port<input type="text" name="server" value="{{.Server}}" placeholder="sip.example.net:5061" autocapitalize="none" autocorrect="off" spellcheck="false" required></label>
+<label>SIP domain<input type="text" name="domain" value="{{.Domain}}" placeholder="example.net" autocapitalize="none" autocorrect="off" spellcheck="false" required></label>
+<label>SIP user name<input type="text" name="user" value="{{.User}}" autocapitalize="none" autocorrect="off" spellcheck="false" required></label>
+<label>The account's phone number<input type="tel" name="number" value="{{.Number}}" placeholder="+44 7700 900123" required></label>
+<label><input type="checkbox" name="no_plus" value="1"{{if .NoPlus}} checked{{end}}> My provider dials numbers without the + sign</label><br>
+<label>SIP password your provider generated<input type="password" name="password" autocomplete="off" required></label>
+<button>Save</button></form>{{end}}
+
+{{define "smsform"}}<form method="post" action="/second-line/"><input type="hidden" name="step" value="sms-set">
+<label>Provider<select name="provider"><option value="twilio"{{if eq .Provider "twilio"}} selected{{end}}>Twilio</option><option value="signalwire"{{if eq .Provider "signalwire"}} selected{{end}}>SignalWire</option></select></label>
+<label>SignalWire space (leave empty for Twilio)<input type="text" name="space" value="{{.Space}}" placeholder="your-space" autocapitalize="none" autocorrect="off" spellcheck="false"></label>
+<label>Account SID (Twilio) or Project ID (SignalWire)<input type="text" name="account" value="{{.Account}}" autocapitalize="none" autocorrect="off" spellcheck="false" required></label>
+<label>The number texts come from<input type="tel" name="number" value="{{.Number}}" placeholder="+1 555 010 0000" required></label>
+<label>Auth token from the provider's console<input type="password" name="token" autocomplete="off" required></label>
+<button>Save</button></form>{{end}}
+
+{{define "approvals"}}{{template "head" ""}}
+<h1>Approvals</h1>
+{{with .Msg}}<p class="ok">{{.}}</p>{{end}}{{with .Err}}<p class="err">{{.}}</p>{{end}}
+{{range .Requests}}<section class="card"><h2>{{.ID}}{{with .Expires}} <span class="muted">Answer before {{.}}</span>{{end}}</h2>
+{{if .Local}}<p class="muted">Can't be shown in a text, so it is asked only here.</p>{{end}}
+{{range .Items}}<p>{{if .Unverified}}<b>Unverified:</b> the box could not read these details from the source. {{end}}<b>{{.Verb}}</b> {{.Object}}{{with .Detail}}, {{.}}{{end}}{{with .Amount}}, <b>{{.}}</b>{{end}}</p>
+{{with .Recipients}}<p>To {{len .}} recipient{{if ne (len .) 1}}s{{end}}, exactly as the action uses them:</p><ul>{{range .}}<li class="mono">{{.}}</li>{{end}}</ul>{{end}}
+{{if .Odd}}<p class="err">Has an unusual character, shown as [U+…]. Letters from other alphabets can look like plain ones; deny if you didn't expect it.</p>{{end}}
+<p class="muted">{{.Undo}}</p>{{end}}
+<form method="post" action="/approvals/"><input type="hidden" name="id" value="{{.ID}}"><input type="hidden" name="tok" value="{{.Tok}}"><input type="hidden" name="sum" value="{{.Sum}}">
+<label>Code from your code generator, to approve<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code"></label>
+<button name="answer" value="approve">Approve</button> <button name="answer" value="deny" class="stop">Deny</button></form></section>
+{{else}}<p>Nothing is waiting for you.</p>{{end}}
+<p class="muted">Each answer here is texted to you.</p>
+<p><a href="/home">More</a> · <a href="/status">Status</a></p>
+{{template "foot"}}{{end}}
+
 {{define "home"}}{{template "head" ""}}
 <h1>AgentOS</h1>
-<ul>{{range .}}<li><a href="{{.Path}}">{{.Title}}</a></li>{{else}}<li class="muted">Nothing else to show here yet.</li>{{end}}</ul>
+{{with .Waiting}}<p class="ok"><a href="/approvals/">{{.}} waiting for you</a></p>{{end}}
+<ul>{{range .Mounts}}<li><a href="{{.Path}}">{{.Title}}</a></li>{{else}}<li class="muted">Nothing else to show here yet.</li>{{end}}</ul>
 <p><a href="/status">Status, STOP and RESUME</a></p>
 {{template "foot"}}{{end}}
 

@@ -42,6 +42,10 @@ func (o *ownerFake) RequestEach(items []owner.Item, _ []time.Duration) ([]string
 	return ids, nil
 }
 
+func (o *ownerFake) RequestLocal(it owner.Item, _ time.Duration) (string, error) {
+	return o.Request([]owner.Item{it}, 0)
+}
+
 func (o *ownerFake) Tier(f owner.Facts) owner.Tier {
 	return owner.Classify(f, owner.Limits{AmountLimit: 50000}, o.now())
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -102,4 +103,136 @@ func (v *Verifier) VerifyTOTP(code string, after int64, counted bool) (int64, bo
 		return 0, false, &VerifyError{Kind: VerifyLost}
 	}
 	return res.Step, res.OK, nil
+}
+
+// ErrVaultLocked means the vault process is up but its vault is not open.
+var ErrVaultLocked = errors.New("vault locked")
+
+// RecallKey fetches the recall index's identity key from the vault process
+// (recall K5). It fails with ErrVaultLocked until the owner unlocks the
+// vault; agentosd retries until then.
+func (v *Verifier) RecallKey() ([]byte, error) {
+	u := url.URL{Scheme: "http", Host: "agentos-egress", Path: "/recall-key"} // over the Unix socket
+	resp, err := v.c.Post(u.String(), "application/octet-stream", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusServiceUnavailable:
+		return nil, ErrVaultLocked
+	default:
+		return nil, fmt.Errorf("recall key: vault process answered %s", resp.Status)
+	}
+	key, err := io.ReadAll(io.LimitReader(resp.Body, 1<<10))
+	if err != nil {
+		return nil, err
+	}
+	if len(key) < 16 {
+		return nil, errors.New("recall key: too short")
+	}
+	return key, nil
+}
+
+// SecondLineState is what the vault process tells agentosd about the
+// second line's calling account (egress K13): only whether it waits on
+// the owner, never its settings (potency R1 on #139).
+type SecondLineState string
+
+const (
+	// SecondLineOK: no account, an account waiting for its first
+	// registration, or a confirmed one. Nothing for the owner to do.
+	SecondLineOK SecondLineState = ""
+	// SecondLineConfirm: the first registration recorded a realm the
+	// owner has not confirmed, so texts and calls are not signed.
+	SecondLineConfirm SecondLineState = "confirm"
+	// SecondLineUnreached: no registration reached the vault process
+	// within the window after setup.
+	SecondLineUnreached SecondLineState = "unreached"
+)
+
+// SecondLine asks the vault process for the second line's state. It
+// fails with ErrVaultLocked while the vault is locked.
+func (v *Verifier) SecondLine(ctx context.Context) (SecondLineState, error) {
+	u := url.URL{Scheme: "http", Host: "agentos-egress", Path: "/second-line"} // over the Unix socket
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := v.c.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusServiceUnavailable:
+		return "", ErrVaultLocked
+	default:
+		return "", fmt.Errorf("second line: vault process answered %s", resp.Status)
+	}
+	var out struct {
+		State SecondLineState `json:"state"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<10)).Decode(&out); err != nil {
+		return "", err
+	}
+	switch out.State {
+	case SecondLineOK, SecondLineConfirm, SecondLineUnreached:
+		return out.State, nil
+	}
+	return "", fmt.Errorf("second line: unknown state %q", out.State)
+}
+
+// TextsState is what the vault process tells agentosd about the second
+// line's texting account (egress K16): only whether its polls have been
+// failing, and which way, never its settings (UX-159-1).
+type TextsState string
+
+const (
+	// TextsOK: no texting account, or its polls are getting through.
+	TextsOK TextsState = ""
+	// TextsSignIn: the provider has refused the account's polls for
+	// TextsQuiet or longer.
+	TextsSignIn TextsState = "signin"
+	// TextsUnreached: the provider has not answered the account's polls
+	// for TextsQuiet or longer.
+	TextsUnreached TextsState = "unreached"
+)
+
+// TextsQuiet is how long polls fail before the owner is told.
+const TextsQuiet = 5 * time.Minute
+
+// SecondLineTexts asks the vault process for the texting account's
+// state. It fails with ErrVaultLocked while the vault is locked.
+func (v *Verifier) SecondLineTexts(ctx context.Context) (TextsState, error) {
+	u := url.URL{Scheme: "http", Host: "agentos-egress", Path: "/second-line/texts"} // over the Unix socket
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := v.c.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusServiceUnavailable:
+		return "", ErrVaultLocked
+	default:
+		return "", fmt.Errorf("second line texts: vault process answered %s", resp.Status)
+	}
+	var out struct {
+		Texts TextsState `json:"texts"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<10)).Decode(&out); err != nil {
+		return "", err
+	}
+	switch out.Texts {
+	case TextsOK, TextsSignIn, TextsUnreached:
+		return out.Texts, nil
+	}
+	return "", fmt.Errorf("second line texts: unknown state %q", out.Texts)
 }

@@ -177,7 +177,7 @@ func TestStableReleaseSoaksBeforeProposal(t *testing.T) {
 
 func TestFastChannelTakesFastReleasesWithoutSoak(t *testing.T) {
 	r := newRig(t)
-	r.channel = update.ChannelFast
+	r.settings.Updates.Channel = update.ChannelFast
 	r.release(2, func(m *update.Manifest) { m.Channel = update.ChannelFast })
 	r.tick()
 	got := r.p.proposed()
@@ -197,7 +197,7 @@ func TestStableBoxIgnoresFastRelease(t *testing.T) {
 
 func TestPinnedBoxGetsSecurityNoticeOnly(t *testing.T) {
 	r := newRig(t)
-	r.channel = ChannelPinned
+	r.settings.Updates.Channel = ChannelPinned
 	r.release(2, func(m *update.Manifest) { m.Security = true })
 	r.attest()
 	r.tick()
@@ -215,7 +215,7 @@ func TestPinnedBoxGetsSecurityNoticeOnly(t *testing.T) {
 
 func TestPinnedBoxSaysNothingOfOrdinaryReleases(t *testing.T) {
 	r := newRig(t)
-	r.channel = ChannelPinned
+	r.settings.Updates.Channel = ChannelPinned
 	r.release(2, nil)
 	r.tick()
 	if d := r.digest(); strings.Contains(d, "Update 2") {
@@ -228,7 +228,7 @@ func TestPinnedBoxSaysNothingOfOrdinaryReleases(t *testing.T) {
 
 func TestReleaseProposedOnce(t *testing.T) {
 	r := newRig(t)
-	r.channel = update.ChannelFast
+	r.settings.Updates.Channel = update.ChannelFast
 	r.p.state = change.StateRejected
 	r.release(2, func(m *update.Manifest) { m.Channel = update.ChannelFast })
 	r.tick()
@@ -252,7 +252,7 @@ func TestAwaitingOwnerReproposedAfterRestart(t *testing.T) {
 	// The pipeline keeps proposals waiting for the owner in memory only
 	// (change C9), so after a restart Loop 3 proposes again.
 	r := newRig(t)
-	r.channel = update.ChannelFast
+	r.settings.Updates.Channel = update.ChannelFast
 	r.release(2, func(m *update.Manifest) { m.Channel = update.ChannelFast })
 	r.tick()
 	r.l = r.newLoop()
@@ -287,7 +287,7 @@ func TestOfflineInstallNotCurrentUntilCheckedOnline(t *testing.T) {
 
 func TestPreemptedCheckDoesNothing(t *testing.T) {
 	r := newRig(t)
-	r.channel = update.ChannelFast
+	r.settings.Updates.Channel = update.ChannelFast
 	r.release(2, func(m *update.Manifest) { m.Channel = update.ChannelFast })
 	job, ok := r.l.Next(context.Background(), true)
 	if !ok {
@@ -306,7 +306,7 @@ func TestPreemptedCheckDoesNothing(t *testing.T) {
 
 func TestRunsUnderScheduler(t *testing.T) {
 	r := newRig(t)
-	r.channel = update.ChannelFast
+	r.settings.Updates.Channel = update.ChannelFast
 	r.release(2, func(m *update.Manifest) { m.Channel = update.ChannelFast })
 	spare, err := meter.Open(meter.Config{
 		Path:       filepath.Join(t.TempDir(), "spare.json"),
@@ -389,7 +389,7 @@ func TestDigestQuietWhileCurrent(t *testing.T) {
 
 func TestApprovalLineSaysWhenAsked(t *testing.T) {
 	r := newRig(t)
-	r.channel = update.ChannelFast
+	r.settings.Updates.Channel = update.ChannelFast
 	r.release(2, func(m *update.Manifest) { m.Channel = update.ChannelFast })
 	r.tick()
 	if st := r.l.Status(); !strings.Contains(st.Line, "waiting for your approval since Mon 5 Oct") {
@@ -456,7 +456,7 @@ func TestDriveConfirmedOnlyWhenNothingNewer(t *testing.T) {
 
 func TestPreemptedProposalNotShownAsAwaitingApproval(t *testing.T) {
 	r := newRig(t)
-	r.channel = update.ChannelFast
+	r.settings.Updates.Channel = update.ChannelFast
 	r.release(2, func(m *update.Manifest) { m.Channel = update.ChannelFast })
 	r.p.err = context.Canceled
 	ctx, cancel := context.WithCancel(context.Background())
@@ -603,7 +603,7 @@ func TestFailedChecksNotParkedByScheduler(t *testing.T) {
 	// LOOP-3 parks a loop after 3 runs without value; a failed check
 	// retried hourly must not be parked for a day (arbitrator ruling).
 	r := newRig(t)
-	r.channel = update.ChannelFast
+	r.settings.Updates.Channel = update.ChannelFast
 	r.release(2, func(m *update.Manifest) { m.Channel = update.ChannelFast })
 	r.mirrors = []update.Source{failSource{}}
 	spare, err := meter.Open(meter.Config{

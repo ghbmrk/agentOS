@@ -1,5 +1,7 @@
 // Package cgroup enforces agent-machine memory budgets with cgroup v2 and
-// reads memory pressure (SPEC RES-1, RES-2).
+// reads memory pressure (SPEC RES-1, RES-2). It also sets CPU and I/O
+// weights and a per-machine process cap, so no machine can starve the
+// broker of CPU, disk or tasks.
 //
 // It is file I/O only: no child processes and no system calls beyond the
 // file system, so it can sit on the broker's control path (ARC-2). Each
@@ -32,25 +34,51 @@ type Limits struct {
 	HighBytes int64
 	// MinBytes is protected memory (memory.min), used by Component only.
 	MinBytes int64
+	// CPUWeight and IOWeight are the group's share against its siblings
+	// under contention (cpu.weight, io.weight: 1..10000, kernel default
+	// 100). Child requires both; Component leaves zero at the default.
+	CPUWeight, IOWeight int
+	// Pids caps the group's tasks (pids.max), threads included. Child
+	// requires it; Component writes it only when set.
+	Pids int64
 }
 
-// ErrNotV2 means the path is not a usable cgroup v2 group.
-var ErrNotV2 = errors.New("cgroup: not a cgroup v2 group with the memory controller")
+// Controllers are the controllers Open requires and enables for children.
+var Controllers = []string{"cpu", "io", "memory", "pids"}
 
-// Open checks that path is a cgroup v2 group whose children can use the
-// memory controller, enabling it for them if needed.
+// ErrNotV2 means the path is not a usable cgroup v2 group.
+var ErrNotV2 = errors.New("cgroup: not a cgroup v2 group with the cpu, io, memory and pids controllers")
+
+// Open checks that path is a cgroup v2 group whose children can use every
+// controller in Controllers, enabling the missing ones for them in one
+// write (the kernel applies it all or nothing).
 func Open(path string) (*Group, error) {
 	ctl, err := os.ReadFile(filepath.Join(path, "cgroup.controllers"))
-	if err != nil || !hasWord(string(ctl), "memory") {
+	if err != nil {
 		return nil, fmt.Errorf("%w: %s", ErrNotV2, path)
+	}
+	var missing []string
+	for _, c := range Controllers {
+		if !hasWord(string(ctl), c) {
+			missing = append(missing, c)
+		}
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("%w: %s lacks %s", ErrNotV2, path, strings.Join(missing, ", "))
 	}
 	g := &Group{Path: path}
 	sub, err := os.ReadFile(filepath.Join(path, "cgroup.subtree_control"))
 	if err != nil {
 		return nil, err
 	}
-	if !hasWord(string(sub), "memory") {
-		if err := g.write("cgroup.subtree_control", "+memory"); err != nil {
+	var enable []string
+	for _, c := range Controllers {
+		if !hasWord(string(sub), c) {
+			enable = append(enable, "+"+c)
+		}
+	}
+	if len(enable) > 0 {
+		if err := g.write("cgroup.subtree_control", strings.Join(enable, " ")); err != nil {
 			return nil, err
 		}
 	}
@@ -65,6 +93,13 @@ func (g *Group) Child(name string, l Limits) (*Group, error) {
 	if l.MaxBytes <= 0 {
 		return nil, fmt.Errorf("cgroup: %s: a budget is required (RES-2)", name)
 	}
+	if l.Pids == 0 || l.CPUWeight == 0 || l.IOWeight == 0 {
+		return nil, fmt.Errorf("cgroup: %s: a process cap and CPU and I/O weights are required (RES-2)", name)
+	}
+	shares, err := l.shares()
+	if err != nil {
+		return nil, fmt.Errorf("cgroup: %s: %w", name, err)
+	}
 	high := l.HighBytes
 	if high <= 0 || high > l.MaxBytes {
 		high = l.MaxBytes - l.MaxBytes/16
@@ -74,23 +109,77 @@ func (g *Group) Child(name string, l Limits) (*Group, error) {
 		return nil, err
 	}
 	// memory.max first, so high is never above max while being set.
-	for _, kv := range [][2]string{
+	kvs := append([][2]string{
 		{"memory.max", strconv.FormatInt(l.MaxBytes, 10)},
 		{"memory.high", strconv.FormatInt(high, 10)},
 		{"memory.swap.max", "0"},
 		// An OOM kill takes the whole machine, never one process of it, so
 		// the sandbox is never left half alive.
 		{"memory.oom.group", "1"},
-	} {
-		if err := c.write(kv[0], kv[1]); err != nil {
-			if kv[0] == "memory.swap.max" && errors.Is(err, os.ErrNotExist) {
-				continue // kernel without swap accounting: there is no swap to use
-			}
-			c.Remove()
-			return nil, err
-		}
+	}, shares...)
+	if err := c.writeAll(kvs); err != nil {
+		c.Remove()
+		return nil, err
 	}
 	return c, nil
+}
+
+// shares are l's weight and process-cap files, for the weights and cap
+// that are set. A weight outside the kernel's 1..10000 is an error.
+func (l Limits) shares() ([][2]string, error) {
+	var kvs [][2]string
+	for _, w := range []struct {
+		file, prefix string
+		v            int
+	}{{"cpu.weight", "", l.CPUWeight}, {"io.weight", "default ", l.IOWeight}} {
+		if w.v == 0 {
+			continue
+		}
+		if w.v < 1 || w.v > 10000 {
+			return nil, fmt.Errorf("%s %d outside 1..10000", w.file, w.v)
+		}
+		kvs = append(kvs, [2]string{w.file, w.prefix + strconv.Itoa(w.v)})
+	}
+	if l.Pids < 0 {
+		return nil, fmt.Errorf("pids.max %d is negative", l.Pids)
+	}
+	if l.Pids > 0 {
+		kvs = append(kvs, [2]string{"pids.max", strconv.FormatInt(l.Pids, 10)})
+	}
+	return kvs, nil
+}
+
+// PidsMax is the group's own process cap (pids.max), or 0 for "max".
+func (g *Group) PidsMax() (int64, error) {
+	b, err := os.ReadFile(filepath.Join(g.Path, "pids.max"))
+	if err != nil {
+		return 0, err
+	}
+	v := strings.TrimSpace(string(b))
+	if v == "max" {
+		return 0, nil
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("cgroup: bad pids.max %q in %s", v, g.Path)
+	}
+	return n, nil
+}
+
+// writeAll writes each file in order. Two files a kernel may lack are
+// skipped: memory.swap.max without swap accounting (there is no swap to
+// use), and io.weight without iocost (BFQ's io.bfq.weight is not written);
+// the CPU weight and process cap still hold (budget R12).
+func (g *Group) writeAll(kvs [][2]string) error {
+	for _, kv := range kvs {
+		if err := g.write(kv[0], kv[1]); err != nil {
+			if (kv[0] == "memory.swap.max" || kv[0] == "io.weight") && errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return err
+		}
+	}
+	return nil
 }
 
 // Populated reports whether any process is still in the group.
@@ -122,7 +211,7 @@ func (g *Group) Kill(ctx context.Context) error {
 
 // Remove deletes an empty group. A missing group is not an error.
 func (g *Group) Remove() error {
-	err := os.Remove(g.Path)
+	err := removeDir(g.Path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -182,8 +271,14 @@ func PressureSource(path string) (read func() float64, ok bool) {
 	}, true
 }
 
+// writeFile and removeDir are the file system calls tests replace.
+var (
+	writeFile = os.WriteFile
+	removeDir = os.Remove
+)
+
 func (g *Group) write(file, v string) error {
-	return os.WriteFile(filepath.Join(g.Path, file), []byte(v), 0o644)
+	return writeFile(filepath.Join(g.Path, file), []byte(v), 0o644)
 }
 
 func (g *Group) event(key string) (int, error) {

@@ -50,6 +50,11 @@ type Candidate struct {
 	// required to share it (CHG-5). Loop 1 sets it in broker code from the
 	// REV-5 labels of every input; the builder never asserts it.
 	Public bool
+	// Goals are the goals of the owner tasks its builder read: the
+	// journal intents behind its hypothesis and its dev cases. Loop 1 sets
+	// them in broker code; the builder never asserts them. Forgetting one
+	// undoes the adoption (ForgetGoal, C23).
+	Goals []string
 }
 
 // Probe is what the evaluator sees of a case: its ID and input. The
@@ -144,8 +149,16 @@ type Config struct {
 	// resume only under the same ID (PE1, security R1 on #103). Nil: the
 	// evaluator is fixed for the pipeline's life.
 	EvaluatorID func() string
-	Now         func() time.Time
-	Rand        io.Reader
+	// ResumeFor is how long a preempted evaluation's pairs are kept;
+	// zero means the package's ResumeFor. A box whose agent sleeps for
+	// learning sets 36 h, so a candidate cut at the end of one night
+	// resumes the next (PE7).
+	ResumeFor time.Duration
+	// Logf logs each counted candidate cut by a fixed class only (PE5).
+	// Nil: not logged.
+	Logf func(string, ...any)
+	Now  func() time.Time
+	Rand io.Reader
 }
 
 // Bases: why an adoption may run.
@@ -269,6 +282,8 @@ type Adoption struct {
 	ConcernSeen  bool   `json:"concern_seen,omitempty"`
 	Listed       bool   `json:"listed,omitempty"`
 	RevertSeen   bool   `json:"revert_seen,omitempty"`
+	// Goals are the candidate's Goals, IDs only (C23).
+	Goals []string `json:"goals,omitempty"`
 }
 
 // state is everything the pipeline persists.
@@ -287,11 +302,21 @@ type state struct {
 	Outages    int             `json:"outages,omitempty"`
 	OutageSeen bool            `json:"outage_seen,omitempty"`
 	Cases      map[string]Case `json:"cases"`
+	// Forgotten counts task cases removed because a record they used
+	// was deleted (ForgetTasks, CAP-3).
+	Forgotten int `json:"forgotten,omitempty"`
 	// Applied lists intents whose effect took place, for Reconcile.
 	Applied map[string]bool `json:"applied"`
 	// Notices are broker notices for the digest, kept once per key
 	// (Notice).
 	Notices []notice `json:"notices,omitempty"`
+	// Cuts counts each (candidate, case) pair's cut candidate-side runs
+	// (PE5b), so a restart cannot reset them.
+	Cuts map[string]cutCount `json:"cuts,omitempty"`
+	// Loop2Passed are the Loop 2 fixtures the active tree has passed, by
+	// loop2Key: they must pass from then on (PS1). Losing it fails toward
+	// must-not-regress, never toward pass.
+	Loop2Passed map[string]bool `json:"loop2_passed,omitempty"`
 }
 
 // notice is one broker digest line; Seen once the digest listed it.
@@ -337,6 +362,17 @@ type Pipeline struct {
 	kept      map[string]pairResult
 	keptOrder []keptAt // put order, for dropping the oldest
 	keptSeq   uint64
+	// exempt counts each candidate's exempt interruptions (MaxExempt),
+	// in first-seen order for dropping the oldest.
+	exempt      map[string]int
+	exemptOrder []string
+	// parks and parkSeq order parked candidates' idle turns (PE5b).
+	parks   map[string]*parkMark
+	parkSeq uint64
+	// gone holds the goals forgotten since start, so a candidate built
+	// from one and still in flight is never adopted (C23). In memory: a
+	// restarted Loop 1 builds nothing from a forgotten goal.
+	gone map[string]bool
 }
 
 // New loads the persisted state, or seeds it on first start, and applies
@@ -530,6 +566,10 @@ func (p *Pipeline) proposeInner(ctx context.Context, c Candidate, security bool)
 	}
 
 	p.mu.Lock()
+	if p.goneLocked(c.Goals) {
+		p.mu.Unlock()
+		return Report{}, ErrForgotten
+	}
 	base := p.st.Active.clone()
 	next := base.clone()
 	for _, path := range c.Delete {
@@ -542,6 +582,11 @@ func (p *Pipeline) proposeInner(ctx context.Context, c Candidate, security bool)
 	if len(edits) == 0 {
 		p.mu.Unlock()
 		return Report{}, errors.New("change: candidate changes nothing")
+	}
+	if !p.parkedMayRunLocked(ctx, p.candidateKey(base, next)) {
+		// Parked (PE5): refused before it spends an ID or a save.
+		p.mu.Unlock()
+		return Report{}, ErrParked
 	}
 	p.st.Seq++
 	id := "c" + strconv.Itoa(p.st.Seq)
@@ -557,6 +602,12 @@ func (p *Pipeline) proposeInner(ctx context.Context, c Candidate, security bool)
 	rep := Report{ID: id, Classes: cl.classes, Neutral: cl.neutral}
 	if cl.forbidden != "" {
 		rep.State, rep.Reason = StateRejected, cl.forbidden
+		return rep, nil
+	}
+	if len(c.Goals) > 0 && slices.ContainsFunc(cl.classes, func(k Class) bool { return !learnedClass[k] }) {
+		// The forget cascade undoes only what Loop 1 builds (L3 on #160):
+		// an image, setting or authority is never learned from a task.
+		rep.State, rep.Reason = StateRejected, "learned from owner tasks, so it may change only skills, procedures and context"
 		return rep, nil
 	}
 	score, err := p.evaluate(ctx, base, next, set, strictFor(c.Source, cl.classes))
@@ -607,6 +658,12 @@ func (p *Pipeline) proposeInner(ctx context.Context, c Candidate, security bool)
 	}
 
 	p.mu.Lock()
+	if p.goneLocked(c.Goals) {
+		// Forgotten while it was evaluated.
+		p.mu.Unlock()
+		return Report{}, ErrForgotten
+	}
+	c.Goals = slices.Clone(c.Goals)
 	p.props[id] = &proposal{cand: c, base: base.Hash(), next: next, edits: edits, report: rep, classes: cl.classes,
 		security: security && cl.imagesOnly()}
 	p.mu.Unlock()
@@ -774,6 +831,16 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 		struck bool
 		err    bool // the evaluator errored (a fail, unlike a grader's)
 	}
+	ck := p.candidateKey(base, next)
+	p.mu.Lock()
+	// The active tree when the evaluation starts: if it moves on before
+	// the evaluation is cut, nothing finished is kept (PE7).
+	active := p.st.Active.Hash()
+	mayRun := p.exempt[ck] < MaxExempt || IsIdle(ctx) // proposeInner took the turn
+	p.mu.Unlock()
+	if !mayRun {
+		return Score{}, ErrParked
+	}
 	nonce := make([]byte, 16)
 	_, _ = rand.Read(nonce)
 	keys := map[string]string{}
@@ -791,7 +858,7 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 			}
 			switch {
 			case r.nextDone:
-			case r.interrupted >= MaxInterruptions:
+			case p.cutsLocked(k).Counted >= MaxInterruptions:
 				// Cut short too often on this case: failed without
 				// another run (security F1 on #103).
 				runs = append(runs, &run{c: c, cand: true, ev: true, done: true, struck: true})
@@ -878,20 +945,62 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 		res[r.c.ID] = pr
 	}
 	if interrupted {
-		p.mu.Lock()
-		// Every side that finished is kept, so a result once seen is
-		// never run again. The candidate side cut short is counted, so
-		// a candidate that forces preemptions cannot re-roll a case
-		// without limit.
-		for id, pr := range res {
-			if cut != nil && cut.cand && cut.c.ID == id {
-				pr.interrupted++
+		// Only a cut the candidate could have caused counts (PE5): any
+		// cause the host did not mark as the owner's, unknown included.
+		// Both the evaluator's interruption and the context's cause are
+		// read, and either one unmarked makes the cut count; that one is
+		// the cause logged.
+		var causes []error
+		if stopped != nil {
+			causes = append(causes, stopped)
+		}
+		if ctx.Err() != nil {
+			causes = append(causes, context.Cause(ctx))
+		}
+		cause, exempt := causes[0], true
+		for _, c := range causes {
+			if !errors.Is(c, ErrOwnerPreempt) {
+				cause, exempt = c, false
+				break
 			}
-			if pr.baseDone || pr.nextDone || pr.interrupted > 0 {
+		}
+		p.mu.Lock()
+		if exempt {
+			p.exemptLocked(ck)
+		}
+		// The candidate side cut short is counted, so a candidate that
+		// forces preemptions cannot re-roll a case without limit; an
+		// owner's cut is exempt only MaxExemptPerCase times per pair
+		// (PE5b). The counts are saved, so a restart does not reset them.
+		counted := false
+		var saveErr error
+		if cut != nil && cut.cand {
+			counted = p.cutLocked(keys[cut.c.ID], exempt)
+			saveErr = p.saveLocked()
+		}
+		// Every side that finished is kept, so a result once seen is
+		// never run again; none when the active tree moved on meanwhile,
+		// since dropOldBasesLocked already ran for that move (PE7).
+		for id, pr := range res {
+			if (pr.baseDone || pr.nextDone) && active == p.st.Active.Hash() {
+				pr.base, pr.cand = base.Hash(), ck
 				p.keepLocked(keys[id], pr)
 			}
 		}
 		p.mu.Unlock()
+		if p.cfg.Logf != nil {
+			if saveErr != nil {
+				p.cfg.Logf("change: saving a cut count failed; it holds until restart")
+			}
+			switch {
+			case counted && exempt:
+				p.cfg.Logf("change: a candidate run was cut short (%s, past its exempt limit); counted", exemptClass(cause))
+			case counted:
+				p.cfg.Logf("change: a candidate run was cut short (%s); counted", cutClass(cause, stopped != nil && cause == stopped))
+			case exempt:
+				p.cfg.Logf("change: a candidate run was cut short (%s); not counted", exemptClass(cause))
+			}
+		}
 		if stopped != nil {
 			return Score{}, stopped
 		}
@@ -899,9 +1008,37 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 	}
 	p.mu.Lock()
 	for _, k := range keys {
-		delete(p.kept, k) // kept sides and interruption counts are used up
+		delete(p.kept, k)    // kept sides are used up
+		delete(p.st.Cuts, k) // and so are the cut counts; saved with the verdict
+	}
+	// Loop 2 fixtures the active tree has never passed (PS1).
+	open := map[string]bool{}
+	for _, c := range set.security {
+		if strings.HasPrefix(c.ID, Loop2Fixture) && !p.st.Loop2Passed[loop2Key(c)] {
+			open[c.ID] = true
+		}
 	}
 	p.mu.Unlock()
+	// Which side is the active tree: the baseline at proposal, the
+	// candidate side in Recheck.
+	baseActive, nextActive := base.Hash() == active, next.Hash() == active
+	var passed []string
+	defer func() {
+		if len(passed) == 0 {
+			return
+		}
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		if p.st.Loop2Passed == nil {
+			p.st.Loop2Passed = map[string]bool{}
+		}
+		for _, id := range passed {
+			p.st.Loop2Passed[id] = true
+		}
+		if err := p.saveLocked(); err != nil && p.cfg.Logf != nil {
+			p.cfg.Logf("change: saving a passed Loop 2 fixture failed; it is marked again when next passed")
+		}
+	}()
 	cases := map[string]Case{}
 	var order []string
 	for _, cs := range [][]Case{set.heldOut, set.security} {
@@ -931,6 +1068,16 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 			}
 		}
 		if c.Security {
+			if open[c.ID] && (pr.BaseOK && baseActive || pr.NextOK && nextActive) {
+				// The active tree passes it: must pass from now on.
+				passed = append(passed, loop2Key(c))
+			}
+			switch {
+			case open[c.ID] && !pr.BaseOK && !pr.NextOK:
+				// An open finding the candidate leaves as it is: no
+				// regression, and no pass either (PS1).
+				continue
+			}
 			s.Security++
 			if pr.NextOK {
 				s.SecurityPassed++
@@ -976,6 +1123,24 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 // OutageAlert is how many failed Recheck passes in a row the digest
 // reports.
 const OutageAlert = 3
+
+// Loop2Fixture prefixes Loop 2's regression fixture IDs (loops S5). Such
+// a fixture encodes a finding the active tree has now, so until the active
+// tree first passes it, it only must not regress; then it must pass for
+// good (loops PS1, C5).
+const Loop2Fixture = "loop2/"
+
+// loop2Key keys a Loop 2 fixture's must-pass mark by its ID and contents,
+// so a fixture replaced under the same ID starts again as must not regress
+// (security L4 on W5a).
+func loop2Key(c Case) string {
+	h := sha256.New()
+	for _, b := range [][]byte{[]byte(c.ID), c.Input, c.Expect} {
+		fmt.Fprintf(h, "%d:", len(b))
+		h.Write(b)
+	}
+	return c.ID + "@" + hex.EncodeToString(h.Sum(nil))[:32]
+}
 
 // strictness says which not-evaluated candidate results count as fails.
 type strictness struct{ heldOut, security bool }

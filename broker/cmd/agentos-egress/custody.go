@@ -18,7 +18,9 @@ import (
 	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/egress"
+	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/owner"
+	"github.com/ghbmrk/agentos/broker/smsapi"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 	"github.com/ghbmrk/agentos/broker/vault"
 )
@@ -188,8 +190,28 @@ type custody struct {
 	statePath string
 	// host is this PC's TPM (trusted.go); nil without one.
 	host trustedHost
+	// owner is the owner's number, which the second line never texts or
+	// calls (security C1 on the #142 design read).
+	owner string
+	// smsHTTP is the texting provider's client; nil is
+	// smsapi.NewHTTPClient(). Only tests set it.
+	smsHTTP *http.Client
+	// budget is the second line's sending budget, shared by SIP MESSAGE
+	// and the HTTP account (security Q2).
+	budget smsapi.Budget
 
-	mu          sync.Mutex
+	mu sync.Mutex
+	// smsFailSince is when the texting account's polls started failing
+	// at the provider, zero while they get through; smsFail is how the
+	// latest failed (UX-159-1).
+	smsFailSince time.Time
+	smsFail      modelroute.TextsState
+	// smsMissedAt is when the owner was last told texts may have been
+	// missed.
+	smsMissedAt time.Time
+	// smsGen counts texting account setups and removals; a poll's mark
+	// from an earlier one is not kept.
+	smsGen      uint64
 	st          unlockState
 	ph          phase
 	gen         int // bumped by lock, so an unlock in flight is cancelled
@@ -643,6 +665,40 @@ func (c *custody) verify(code string, after int64, counted bool) (int64, bool, e
 		return 0, false, errInternal
 	}
 	return step, true, nil
+}
+
+// RecallKeyName is the vault entry holding the recall index's identity key
+// (recall K5): source IDs are keyed hashes under it, so a copy of the index
+// without the vault does not reveal low-entropy refs. It is created on first
+// use and travels with the vault's backup, so IDs survive a restore.
+const RecallKeyName = "broker-recall-identity"
+
+// KindBrokerKey marks keys the vault keeps for agentosd.
+const KindBrokerKey = "broker_key"
+
+// recallKey returns the recall identity key while the vault is open,
+// creating it on first use. agentosd holds the index in plaintext memory,
+// so handing it this key adds nothing it could not already read.
+func (c *custody) recallKey() ([]byte, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ph != open {
+		return nil, errLocked
+	}
+	if hasOtherKind(c.v, RecallKeyName, KindBrokerKey) {
+		return nil, errInternal
+	}
+	if sec, ok := c.v.Secret(RecallKeyName); ok {
+		return []byte(sec.Reveal()), nil
+	}
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return nil, errInternal
+	}
+	if err := c.v.Put(RecallKeyName, KindBrokerKey, key); err != nil {
+		return nil, errInternal
+	}
+	return key, nil
 }
 
 // since keeps the times after cut, in place.

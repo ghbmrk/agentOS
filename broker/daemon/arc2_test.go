@@ -58,7 +58,13 @@ var controlPath = map[string][]string{
 	// clock imports golang.org/x/sys/unix (adjtimex), so it has no entry
 	// below, whose rules refuse third-party imports; TestAgentosdLinks-
 	// NoInference holds it instead, through netOK.
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild"},
+	// It opens recall (recalltool) once the vault process hands over the
+	// identity key, and serves the recall tools on the guest plane.
+	// It serves the worker-machine tools (workers, CAP-8) on the live guest
+	// plane. It opens the machines' disk quotas (quota, RES-4); quota
+	// imports golang.org/x/sys/unix, so like clock it is held by
+	// TestAgentosdLinksNoInference through netOK.
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool", "workers", "quota"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies
@@ -74,9 +80,9 @@ var machinePlane = map[string]struct {
 	allowed []string
 	forbid  []string
 }{
-	"vm":         {[]string{"admission", "cgroup", "vm/overlay"}, forbiddenStd},
+	"vm":         {[]string{"admission", "cgroup", "vm/overlay", "quota"}, forbiddenStd},
 	"vm/overlay": {nil, []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}},
-	"vm/gvisor":  {[]string{"vm", "vm/overlay"}, []string{"net", "net/http", "net/rpc", "net/smtp", "plugin", "unsafe", "C"}},
+	"vm/gvisor":  {[]string{"vm", "vm/overlay", "quota"}, []string{"net", "net/http", "net/rpc", "net/smtp", "plugin", "unsafe", "C"}},
 }
 
 // The guest plane serves each machine's ARC-6 socket (P1-7). STOP,
@@ -102,10 +108,20 @@ var guestPlane = map[string]struct {
 	// Replay (LOOP-5) serves replay machines through a guest plane of its
 	// own: no journal writes, no executors, no network clients.
 	"replay": {[]string{"admission", "change", "guest", "journal", "meter", "vm"}, []string{"net", "os/exec", "plugin", "unsafe", "C"}},
+	// Recall (CAP-3) and the event bus (CAP-4) are broker state served to
+	// guests as tools: no network clients, no processes, no inference
+	// beyond the in-process hashing embedder (DEP-1).
+	"recall":     {nil, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
+	"events":     {[]string{"recall"}, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
+	"recalltool": {[]string{"recall", "events", "journal"}, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
 	// Loop 1's model-backed builder (W3-builder) serves each builder
 	// machine its own socket, as replay does: the brief, one candidate,
 	// and the metered model route; no executors, no network clients.
 	"loopbuild": {[]string{"admission", "change", "journal", "loops", "meter", "vm"}, []string{"net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}},
+	// Worker machines (CAP-8): served to guests as tools over the machine
+	// manager; no journal, no executors, no network clients, no processes
+	// (commands run through vm/gvisor's runsc exec).
+	"workers": {[]string{"admission", "vm", "vm/overlay"}, forbiddenStd},
 	// Agents' questions to the owner (P3-8, W9): served to guests and
 	// answered from the owner channel, through hooks the wiring passes.
 	"question": {nil, forbiddenStd},

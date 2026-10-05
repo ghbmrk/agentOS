@@ -38,6 +38,9 @@ type learning struct {
 	harvest *loops.Harvester
 	cases   harvester // where owner verdicts go: harvest, or a test's
 	eval    lateEvaluator
+	// sleep is the agent sleeper on a box where the agent and a replay
+	// machine do not fit together (PE7); nil elsewhere.
+	sleep   atomic.Pointer[sleeper]
 	eng     atomic.Pointer[journal.Engine]
 	adm     atomic.Pointer[admission.Controller]
 	routing *syncedRouting // nil: routing held
@@ -49,6 +52,13 @@ type learning struct {
 	// own private machine (W3-builder), once the machine plane attaches it.
 	build lateBuild
 	learn *loops.Learn
+	// guard is Loop 2's passive checks (W5a, loop2.go); contain and
+	// notify reach the gate and the owner once the daemon attaches.
+	guard *loops.Guard
+	// running counts the scheduler's run, so a test can wait for it.
+	running sync.WaitGroup
+	contain loop2Contain
+	notify  loop2Notify
 	// values are the guest's task values, for the compiler only
 	// (W3-values); mining is the journal everything else in Loop 1 reads,
 	// which keeps none (security V3).
@@ -68,6 +78,9 @@ type learning struct {
 	// builderOff is set when -builder-image was given but the builder
 	// did not start (UX-126-1).
 	builderOff atomic.Bool
+	// builderUnset is set when no -builder-image was given (potency R3 on
+	// #126).
+	builderUnset atomic.Bool
 }
 
 // learnPaths are where the learning plane keeps its state.
@@ -81,6 +94,9 @@ type learnPaths struct {
 	// Tree, if set, is the live agent's copy of the tree's procedures,
 	// skills and context (W4); nil holds them in the pipeline.
 	Tree *liveTree
+	// ResumeFor is how long a preempted evaluation's pairs and candidates
+	// are kept; zero is change.ResumeFor (sleepResumeFor).
+	ResumeFor time.Duration
 }
 
 // openLearning opens the learning plane and wires it into the daemon's
@@ -88,6 +104,7 @@ type learnPaths struct {
 // and the owner's settings texts.
 func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning, error) {
 	l := &learning{}
+	l.eval.sleep = &l.sleep
 	spare, err := meter.Open(meter.Config{
 		Path: p.Spare,
 		// The scheduler sets the overall cap from the owner's setting;
@@ -115,11 +132,10 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		Store:     change.FileStore{Path: filepath.Join(p.Dir, "change.json")},
 		Evaluator: &l.eval,
 		Targets:   targets,
+		ResumeFor: p.ResumeFor,
+		Logf:      log.Printf,
 	}); err != nil {
 		return nil, err
-	}
-	if p.Tree != nil {
-		p.Tree.markReady() // the pipeline applied its state, if it had any
 	}
 	var router change.Router
 	if sync != nil {
@@ -158,24 +174,42 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		Builder:    l.builder,
 		Router:     router,
 		ModelWired: modelWired,
+		ResumeFor:  p.ResumeFor,
 	})
 	if err != nil {
 		return nil, err
 	}
 	l.learn = learn
+	if l.guard, err = loops.NewGuard(loops.GuardConfig{
+		Pipeline:  l.pipe,
+		Store:     change.FileStore{Path: filepath.Join(p.Dir, "loop2.json")},
+		Contain:   &l.contain,
+		NotRun:    loop2NotRun,
+		Notify:    l.notify.send,
+		ResumeFor: p.ResumeFor,
+	}); err != nil {
+		return nil, err
+	}
 	if l.sched, err = loops.New(loops.Config{
-		Store:   change.FileStore{Path: filepath.Join(p.Dir, "loops.json")},
-		Spare:   spare,
-		Sources: []loops.Source{learn},
-		Sharing: l.pipe.SetSharing,
-		Busy:    l.busy,
-		Stopped: l.stopped,
-		Logf:    log.Printf,
+		Store:     change.FileStore{Path: filepath.Join(p.Dir, "loops.json")},
+		Spare:     spare,
+		Sources:   []loops.Source{sleepSource{learn, &l.sleep}, l.guard},
+		Sharing:   l.pipe.SetSharing,
+		Busy:      l.busy,
+		BusyCause: l.busyCause,
+		Stopped:   l.stopped,
+		Logf:      log.Printf,
 	}); err != nil {
 		return nil, err
 	}
 	l.harvest.Wake = l.sched.Wake
 	l.cases = l.harvest
+	if err := l.replayForgotten(); err != nil {
+		return nil, err
+	}
+	if p.Tree != nil {
+		p.Tree.markReady() // the pipeline applied its state, if it had any
+	}
 	// Evaluation keeps its reserve of the spare budget while Loop 1
 	// evaluates (loops L3); builder machines take at most their Max of it
 	// (C-3c-5). The clean room takes its Max here once it exists.
@@ -190,7 +224,7 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	cfg.BrokerExecutors[change.Executor] = l.pipe
 	cfg.BrokerExecutors[loops.Executor] = l.sched
 	cfg.Settings = l.settings
-	cfg.Notes = append(cfg.Notes, l.note, l.builderNote)
+	cfg.Notes = append(cfg.Notes, l.note, l.builderNote, l.guard.Status)
 	cfg.Narrows = l.sched.Narrows
 	cfg.HelpExtra = loops.HelpLine
 	// The owner's verdicts on the agent's effects become Loop 1's cases
@@ -208,6 +242,14 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		case l.observed <- in:
 		default:
 			log.Printf("learning: task values not kept: queue full")
+		}
+	}
+	// Loop 2 lists a grant it paused until the owner resumes or revokes
+	// it (loops S4).
+	guard := l.guard
+	cfg.Grants.Unpaused = func(id string) {
+		if err := guard.Resumed(loops.Target{Kind: "grant", Name: id}); err != nil {
+			log.Printf("loop2: a resumed grant stays listed: %v", err)
 		}
 	}
 	l.verdicts = make(chan grants.OwnerOutcome, maxVerdicts)
@@ -242,6 +284,9 @@ const noRoomOn = "Learning is on, but the box's memory is too small to test chan
 
 func (l *learning) note() string {
 	if l.noRoom.Load() {
+		if l.sleep.Load() != nil {
+			return sleepModeNote
+		}
 		return noRoomNote
 	}
 	return ""
@@ -254,7 +299,7 @@ func (l *learning) note() string {
 func (l *learning) settings(ctx context.Context, msg string, unlocked bool) (string, bool) {
 	reply, ok := l.sched.Text(ctx, msg, unlocked)
 	r, _ := loops.ParseText(msg)
-	if !ok || !l.noRoom.Load() || r.Kind != loops.KindLoops || !r.On || (r.Loop != "" && r.Loop != loops.Improve) ||
+	if !ok || !l.noRoom.Load() || l.sleep.Load() != nil || r.Kind != loops.KindLoops || !r.On || (r.Loop != "" && r.Loop != loops.Improve) ||
 		reply != loops.Confirm(r, l.sched.Settings()) {
 		return reply, ok
 	}
@@ -293,11 +338,11 @@ func learningOff(cfg *daemon.Config) {
 
 // forgetTask deletes what the learning plane keeps of one task: its text,
 // its values, the Loop 1 cases harvested from it and the harvester's
-// records of them (W3-tasks part 1,
-// CAP-3). Only an authenticated owner forget may call it; none exists yet,
-// so nothing does. Adopted skills and procedures whose evidence includes
-// the task, and held candidates (loops L19), are the cascade's (security
-// C1 on #120; BOARD W3-tasks).
+// records of them (W3-tasks part 1, CAP-3), and the cascade (W3-tasks part
+// 2, security C1 on #120): Loop 1's kept candidates built from it, and
+// every adoption learned from it, undone with its files cleared from the
+// pipeline's history (change C23). Only an authenticated owner forget may
+// call it; none exists yet, so nothing does.
 func (l *learning) forgetTask(goal string) error {
 	if goal == "" {
 		return errors.New("learning: forget needs a goal")
@@ -307,11 +352,51 @@ func (l *learning) forgetTask(goal string) error {
 	// The tombstone first: once it holds, nothing keeps the goal again,
 	// even if a deletion below fails.
 	ferr := l.forgotten.add(goal)
+	return errors.Join(ferr, l.forgetStores(goal))
+}
+
+// forgetStores deletes one forgotten goal from every learning store, each
+// even when another's save failed. Each step is idempotent, and one that
+// finds nothing saves nothing.
+func (l *learning) forgetStores(goal string) error {
 	_, terr := l.tasks.forget(goal)
 	_, verr := l.values.forget(goal)
+	l.learn.ForgetGoal(goal)
 	ids, cerr := l.pipe.ForgetGoal(goal)
 	herr := l.harvest.ForgetCases(ids)
-	return errors.Join(ferr, terr, verr, cerr, herr)
+	return errors.Join(terr, verr, cerr, herr)
+}
+
+// replayForgotten runs every tombstoned goal's forget again when the
+// learning plane opens (L3 MUST-2 on #160). A forget writes the live tree
+// before it saves the pipeline, the other stores save one by one, and the
+// in-flight refusals are kept in memory only, so a crash midway would
+// bring forgotten files back and let a candidate from the goal be
+// adopted. It runs before the tree is marked ready, so on a failure the
+// agent never gets the tree and learning stays off until a start
+// succeeds.
+func (l *learning) replayForgotten() error {
+	var errs []error
+	for _, g := range l.forgotten.goals() {
+		errs = append(errs, l.forgetStores(g))
+	}
+	return errors.Join(errs...)
+}
+
+// ForgetTasks is recall's deletion reach into the learning plane
+// (recalltool Cases; CAP-3, change C19): for intents it erases, the
+// harvester's tombstone first, so none is harvested again and none counts
+// as evidence, then the pipeline's task cases and the values kept for
+// them. One method, so the parts cannot be wired apart (security F1 on
+// #59). Idempotent; every part runs even when another fails.
+func (l *learning) ForgetTasks(ids ...string) (int, error) {
+	herr := l.harvest.ForgetIntents(ids)
+	n, cerr := l.pipe.ForgetTasks(ids...)
+	var verr error
+	if l.values != nil {
+		verr = l.values.forgetSteps(ids)
+	}
+	return n, errors.Join(herr, cerr, verr)
 }
 
 // attach binds the running daemon's engine and admission and starts the
@@ -320,12 +405,20 @@ func (l *learning) attach(ctx context.Context, d *daemon.Daemon) {
 	eng := d.Engine()
 	l.pipe.Attach(eng)
 	l.sched.Attach(eng)
+	if g := d.Gate(); g != nil {
+		l.contain.gate.Store(&pauseGateBox{g})
+	}
+	l.notify.ch.Store(d.Owner())
 	l.eng.Store(eng)
 	l.adm.Store(d.Admission())
 	if l.routing != nil {
 		go l.routing.run(ctx, 30*time.Second)
 	}
-	go l.sched.Run(ctx)
+	l.running.Add(1)
+	go func() {
+		defer l.running.Done()
+		l.sched.Run(ctx)
+	}()
 	go func() {
 		for {
 			select {
@@ -379,8 +472,36 @@ func (l *learning) record(o grants.OwnerOutcome) {
 }
 
 func (l *learning) busy() bool {
+	if sl := l.sleep.Load(); sl != nil && sl.keepsAwake() {
+		return true
+	}
 	a := l.adm.Load()
 	return a == nil || a.Busy()
+}
+
+// busyCause is admission's BusyCause for the scheduler (PE5). Before the
+// daemon attaches, the box reads as busy under pressure, so a cut then
+// counts.
+func (l *learning) busyCause() (busy, owner, pressure bool) {
+	a := l.adm.Load()
+	if a == nil {
+		return true, false, true
+	}
+	busy, owner, pressure = a.BusyCause()
+	if sl := l.sleep.Load(); sl != nil && sl.keepsAwake() {
+		// The agent is awake for the owner (PE7 condition 7); pressure
+		// still wins.
+		return true, true, pressure
+	}
+	return busy, owner, pressure
+}
+
+// revokedForOwner is admission's RevokedForOwner for the replay evaluator
+// (PE5): before the daemon attaches there is no record, so a revoke
+// counts.
+func (l *learning) revokedForOwner(id string) bool {
+	a := l.adm.Load()
+	return a != nil && a.RevokedForOwner(id)
 }
 
 func (l *learning) stopped() bool {
@@ -412,7 +533,9 @@ func (l *learning) openEvaluator(m *vm.Manager, services *lateServices, c evalCo
 		Active:     l.pipe.Files,
 		Spec:       c.Spec,
 		Dir:        c.Dir,
-		Logf:       log.Printf,
+		// A revoke is the owner's only as admission recorded it (PE5).
+		RevokedForOwner: l.revokedForOwner,
+		Logf:            log.Printf,
 	}
 	if c.Egress != "" {
 		rc.Meter = l.spare
@@ -477,6 +600,8 @@ func (heldRouting) Apply(t change.Tree) error {
 // evaluated and nothing adopts (change C8: no evaluation, no adoption).
 type lateEvaluator struct {
 	e atomic.Pointer[replay.Evaluator]
+	// sleep, if set, guards each run while the agent sleeps (PE7).
+	sleep *atomic.Pointer[sleeper]
 }
 
 func (l *lateEvaluator) Run(ctx context.Context, t change.Tree, p change.Probe) ([]byte, error) {
@@ -484,7 +609,11 @@ func (l *lateEvaluator) Run(ctx context.Context, t change.Tree, p change.Probe) 
 	if e == nil {
 		return nil, change.ErrNotEvaluated
 	}
-	return e.Run(ctx, t, p)
+	var sl *sleeper
+	if l.sleep != nil {
+		sl = l.sleep.Load()
+	}
+	return sleepGuard(ctx, sl, func(ctx context.Context) ([]byte, error) { return e.Run(ctx, t, p) })
 }
 
 // lateReader is Loop 1's journal reader, empty until the engine runs.

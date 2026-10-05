@@ -40,6 +40,9 @@ type Owner interface {
 	LocalResume() (string, error)
 	// UnlockPeriod is CH-14's N: how long a sign-in is remembered.
 	UnlockPeriod() time.Duration
+	// LocalRequests and LocalAnswer serve the Approvals page (P2-2a).
+	LocalRequests() []owner.LocalRequest
+	LocalAnswer(id, sum string, approve bool, code string) (string, error)
 }
 
 // Config configures a Server.
@@ -64,8 +67,12 @@ type Config struct {
 	// P2-4e) is then served at /unlock/vault, open without sign-in like
 	// /unlock.
 	Vault Vault
-	Now   func() time.Time
-	Rand  io.Reader
+	// SecondLine, when set, is the second line's routes on the same
+	// socket (egress K13); its page is served at /second-line/ behind
+	// sign-in (ADP-12, P2-3c). It needs Vault.
+	SecondLine SecondLine
+	Now        func() time.Time
+	Rand       io.Reader
 }
 
 // Server is the local UI.
@@ -75,6 +82,11 @@ type Server struct {
 	mux  *http.ServeMux
 	// pages carry this box's address in their footer.
 	pages *template.Template
+	// formKey binds Approvals forms to a phone and a request; pageWrong
+	// lists each phone's recent wrong approval codes (PageWrongPerMinute).
+	formKey   []byte
+	pageWrong map[string][]time.Time
+	approveMu sync.Mutex // serializes page approvals
 
 	mu       sync.Mutex
 	owner    Owner
@@ -114,6 +126,9 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Hooks == nil || cfg.Store == nil {
 		return nil, errors.New("localui: hooks and store are required")
 	}
+	if cfg.SecondLine != nil && cfg.Vault == nil {
+		return nil, errors.New("localui: the second line needs the vault socket")
+	}
 	if cfg.Port == 0 {
 		cfg.Port = UIPort
 	}
@@ -128,6 +143,10 @@ func New(cfg Config) (*Server, error) {
 		host = net.JoinHostPort(host, strconv.Itoa(cfg.Port))
 	}
 	s := &Server{cfg: cfg, host: host, mux: http.NewServeMux(), sessions: map[string]session{}, pages: pagesFor(host), scanning: make(chan struct{}, 1)}
+	s.formKey = make([]byte, 32)
+	if _, err := io.ReadFull(cfg.Rand, s.formKey); err != nil {
+		return nil, err
+	}
 	st, err := cfg.Store.Load()
 	if err != nil {
 		return nil, err
@@ -172,6 +191,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/box.vcf", s.contact)
 	if s.cfg.Vault != nil {
 		s.mux.HandleFunc("/unlock/vault", s.vaultUnlock)
+	}
+	s.Mount("/approvals", "Approvals", http.HandlerFunc(s.approvals))
+	if s.cfg.SecondLine != nil {
+		s.Mount("/second-line", "Second line", http.HandlerFunc(s.secondLine))
 	}
 	s.setup.routes(s.mux)
 }
@@ -492,7 +515,14 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	ms := append([]mount(nil), s.mounts...)
 	s.mu.Unlock()
-	s.render(w, "home", ms)
+	v := struct {
+		Mounts  []mount
+		Waiting int
+	}{Mounts: ms}
+	if o := s.getOwner(); o != nil {
+		v.Waiting = len(o.LocalRequests())
+	}
+	s.render(w, "home", v)
 }
 
 // contact serves the box's number as a contact card (§8.1 step 5).

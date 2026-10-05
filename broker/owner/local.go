@@ -2,8 +2,11 @@ package owner
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -33,6 +36,8 @@ type localAlerts struct {
 	// pushed out meanwhile, so the send drops exactly what it listed.
 	sending bool
 	evicted int
+	// evictedAns is evicted for page answers (State.LocalAnswers).
+	evictedAns int
 	// wrong lists wrong local codes for the digest; alerted is the
 	// bound window whose first wrong code was already texted.
 	wrong   []time.Time
@@ -48,26 +53,44 @@ const maxSignIns = 64
 // signInTextLocked returns the text listing untold sign-ins and how many
 // it lists, or "" while the last such text is less than SignInAlertEvery old
 // or another is being sent. The caller passes both to sendSignIns.
-func (c *Channel) signInTextLocked(now time.Time) (string, int) {
+func (c *Channel) signInTextLocked(now time.Time) (string, int, int) {
 	st := c.codes.st
-	if c.local.sending || len(st.LocalSignIns) == 0 ||
+	if c.local.sending || len(st.LocalSignIns)+len(st.LocalAnswers) == 0 ||
 		(!st.LocalAlertAt.IsZero() && now.Sub(st.LocalAlertAt) < SignInAlertEvery) {
-		return "", 0
+		return "", 0, 0
 	}
-	c.local.sending, c.local.evicted = true, 0
-	n := len(st.LocalSignIns)
-	times := c.clockList(st.LocalSignIns, 8)
-	if n > 1 {
-		return "Phones signed in on the box's Wi-Fi at " + times + ". Not you? Text STOP.", n
+	c.local.sending, c.local.evicted, c.local.evictedAns = true, 0, 0
+	n, m := len(st.LocalSignIns), len(st.LocalAnswers)
+	var parts []string
+	switch {
+	case n > 1:
+		parts = append(parts, "Phones signed in on my Wi-Fi at "+c.clockList(st.LocalSignIns, 8)+".")
+	case n == 1:
+		parts = append(parts, "A phone signed in on my Wi-Fi at "+c.clockList(st.LocalSignIns, 8)+".")
 	}
-	return "A phone signed in on the box's Wi-Fi at " + times + ". Not you? Text STOP.", n
+	switch {
+	case m == 1 && n == 0:
+		a := st.LocalAnswers[0]
+		parts = append(parts, a.Text+" on my Wi-Fi page at "+c.clock(a.At)+".")
+	case m > 0:
+		var as []string
+		for i, a := range st.LocalAnswers {
+			if i == 8 {
+				as = append(as, fmt.Sprintf("and %d more", m-8))
+				break
+			}
+			as = append(as, a.Text+" at "+c.clock(a.At))
+		}
+		parts = append(parts, "On my Wi-Fi page: "+strings.Join(as, ", ")+".")
+	}
+	return strings.Join(parts, " ") + " Not you? Text STOP.", n, m
 }
 
 // sendSignIns texts a sign-in alert from signInTextLocked and, only once it
 // is sent, drops the n sign-ins it listed, less any the cap pushed out
 // meanwhile, so one recorded during the send stays for the next text. A failed send keeps them for the
 // next Tick. Called without c.mu.
-func (c *Channel) sendSignIns(text string, n int, now time.Time) {
+func (c *Channel) sendSignIns(text string, n, m int, now time.Time) {
 	err := c.alert(text)
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -83,6 +106,8 @@ func (c *Channel) sendSignIns(text string, n int, now time.Time) {
 			i = 0
 		}
 		s.LocalSignIns = append([]time.Time(nil), s.LocalSignIns[i:]...)
+		j := max(m-c.local.evictedAns, 0)
+		s.LocalAnswers = append([]LocalNote(nil), s.LocalAnswers[j:]...)
 		s.LocalAlertAt = now
 	})
 }
@@ -113,10 +138,10 @@ func (c *Channel) wrongLocalLocked(now time.Time) []string {
 func (c *Channel) FlushLocal() {
 	now := c.cfg.Now()
 	c.mu.Lock()
-	t, n := c.signInTextLocked(now)
+	t, n, m := c.signInTextLocked(now)
 	c.mu.Unlock()
 	if t != "" {
-		c.sendSignIns(t, n, now)
+		c.sendSignIns(t, n, m, now)
 	}
 }
 
@@ -210,18 +235,8 @@ func (c *Channel) LocalSignIn(code string) (until time.Time, err error) {
 	// nor is the owner, who just unlocked, texted about it (#75 L3).
 	proof := strings.HasPrefix(code, UnlockProofPrefix)
 	res, locked, err := c.codes.checkStrong(code, now, strongOpts{unlock: c.cfg.UnlockFor, count: !proof, proof: true})
-	var alerts []string
-	signIn, signIns := "", 0
-	if locked {
-		alerts = append(alerts, fmt.Sprintf("%d wrong codes, the last on the box's Wi-Fi. Texted codes are off and the session is locked until you send a code-generator code.", WrongToLock))
-	}
-	if c.codes.justChallenged {
-		c.codes.justChallenged = false
-		c.held = nil
-		c.alertAt = now
-		alerts = append(alerts, fmt.Sprintf("Too many wrong codes, the last on the box's Wi-Fi. Codes by text now need a challenge: reply UNLOCK %s and a code from your code generator within %s.",
-			c.codes.currentChallenge(now), dur(ChallengeTTL)))
-	}
+	alerts := c.lockAlertsLocked(locked, now)
+	signIn, signIns, answers := "", 0, 0
 	switch {
 	case err == nil && res == strongOK:
 		until = c.codes.st.UnlockedUntil
@@ -238,11 +253,11 @@ func (c *Channel) LocalSignIn(code string) (until time.Time, err error) {
 			}
 		}) != nil {
 			// Not recorded, so not coalesced either: tell now.
-			alerts = append(alerts, "A phone signed in on the box's Wi-Fi at "+c.clock(now)+". Not you? Text STOP.")
+			alerts = append(alerts, "A phone signed in on my Wi-Fi at "+c.clock(now)+". Not you? Text STOP.")
 		} else {
 			c.local.evicted += evicted
 		}
-		signIn, signIns = c.signInTextLocked(now)
+		signIn, signIns, answers = c.signInTextLocked(now)
 	case err == nil && !proof:
 		alerts = append(alerts, c.wrongLocalLocked(now)...)
 	}
@@ -251,7 +266,7 @@ func (c *Channel) LocalSignIn(code string) (until time.Time, err error) {
 		c.alert(a)
 	}
 	if signIn != "" {
-		c.sendSignIns(signIn, signIns, now)
+		c.sendSignIns(signIn, signIns, answers, now)
 	}
 	switch {
 	case err != nil:
@@ -275,6 +290,23 @@ func (c *Channel) takeLocalLocked(now time.Time) (bool, error) {
 		}
 	})
 	return ok && err == nil, err
+}
+
+// lockAlertsLocked returns the texts for a wrong code on the box's Wi-Fi
+// that locked the session or switched on challenge mode.
+func (c *Channel) lockAlertsLocked(locked bool, now time.Time) []string {
+	var alerts []string
+	if locked {
+		alerts = append(alerts, fmt.Sprintf("%d wrong codes, the last on the box's Wi-Fi. Texted codes are off and the session is locked until you send a code-generator code.", WrongToLock))
+	}
+	if c.codes.justChallenged {
+		c.codes.justChallenged = false
+		c.held = nil
+		c.alertAt = now
+		alerts = append(alerts, fmt.Sprintf("Too many wrong codes, the last on the box's Wi-Fi. Codes by text now need a challenge: reply UNLOCK %s and a code from your code generator within %s.",
+			c.codes.currentChallenge(now), dur(ChallengeTTL)))
+	}
+	return alerts
 }
 
 // LocalStop is STOP from the local UI. Like STOP by text it needs no code,
@@ -323,3 +355,190 @@ func TOTP(seed []byte, t time.Time) string { return totpAt(seed, t.Unix()) }
 
 // UnlockPeriod is CH-14's N, for the local UI's remembered sign-in.
 func (c *Channel) UnlockPeriod() time.Duration { return c.cfg.UnlockFor }
+
+// LocalAnswer errors: the request is not open, or not as the page showed
+// it.
+var (
+	ErrNoRequest = errors.New("owner: no such open request")
+	ErrChanged   = errors.New("owner: the request is not as shown")
+)
+
+// LocalNote is a page answer not yet texted to the owner.
+type LocalNote struct {
+	At   time.Time `json:"at"`
+	Text string    `json:"text"` // "Approved K7"
+}
+
+// LocalRequest is an open approval request as the local page shows it
+// (P2-2a): every field in full, recipients included.
+type LocalRequest struct {
+	ID      string
+	Tier    Tier
+	Expires time.Time
+	// By is Expires as the owner's texts show it ("14:05").
+	By string
+	// Local: asked on the page only; it cannot be approved by text.
+	Local bool
+	Items []Item
+	Done  []bool // items already settled
+	// Sum digests everything the page shows: each item, which are
+	// settled, and the expiry. LocalAnswer takes it back and refuses a
+	// request that no longer matches (Security D1).
+	Sum string
+}
+
+// LocalRequests lists the open requests, oldest first.
+func (c *Channel) LocalRequests() []LocalRequest {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	rs := make([]*request, 0, len(c.open))
+	for _, r := range c.open {
+		rs = append(rs, r)
+	}
+	sort.Slice(rs, func(i, j int) bool { return rs[i].n < rs[j].n })
+	out := make([]LocalRequest, len(rs))
+	for i, r := range rs {
+		out[i] = LocalRequest{ID: r.id, Tier: r.tier, Expires: r.expires, By: c.clock(r.expires), Local: r.local,
+			Items: append([]Item(nil), r.items...), Done: append([]bool(nil), r.done...), Sum: requestSum(r)}
+	}
+	return out
+}
+
+func requestSum(r *request) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "%s|%d|%t", r.id, r.expires.UnixNano(), r.local)
+	for i, it := range r.items {
+		fmt.Fprintf(h, "|%s|%t", ItemSum(it), r.done[i])
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// LocalWaiting is STATUS's line for requests only the Wi-Fi page can
+// approve (UX A4), or "".
+func (c *Channel) LocalWaiting() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := 0
+	for _, r := range c.open {
+		if r.local {
+			n++
+		}
+	}
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d waiting for you on my Wi-Fi page.", n)
+}
+
+// LocalAnswer approves or denies all open items of a request from the
+// local page (P2-2a). sum is the LocalRequest.Sum the page showed: any
+// change since refuses with ErrChanged. Approving takes a code-generator
+// code (or the asked grid cell) every time, even on a signed-in phone,
+// through the same checks as a texted YES, so a code is spent across texts
+// and the page alike, and counts against LocalBound; denying needs no
+// code. Each answer is texted to the owner, coalesced with local sign-ins
+// (UX A6), so a phone left signed in cannot act unseen. On a wrong code the
+// reply (tries left, or void) comes back with ErrWrongCode.
+func (c *Channel) LocalAnswer(id, sum string, approve bool, code string) (string, error) {
+	if approve && code == "" {
+		return "", ErrWrongCode
+	}
+	now := c.cfg.Now()
+	c.mu.Lock()
+	decided := c.expireLocked(now)
+	r := c.open[id]
+	if r == nil || requestSum(r) != sum {
+		c.mu.Unlock()
+		c.decide(decided)
+		if r == nil {
+			return "", ErrNoRequest
+		}
+		return "", ErrChanged
+	}
+	if approve {
+		ok, err := c.takeLocalLocked(now)
+		if err != nil || !ok {
+			c.mu.Unlock()
+			c.decide(decided)
+			if err == nil {
+				err = ErrTooMany
+			}
+			return "", err
+		}
+	}
+	rp := reply{word: "NO", id: id}
+	if approve {
+		rp.word, rp.code = "YES", code
+	}
+	n := len(decided)
+	wasLocked := c.codes.st.LowLocked
+	out, _, wrong := c.answerLocked(rp, now, &decided, true)
+	msg := strings.Join(out, " ")
+	var alerts []string
+	var err error
+	note := ""
+	switch {
+	case wrong:
+		err = ErrWrongCode
+		// A lock or challenge mode this code set off is told like one from
+		// a sign-in (L3 S2 on #165).
+		alerts = append(c.wrongLocalLocked(now), c.lockAlertsLocked(!wasLocked && c.codes.st.LowLocked, now)...)
+		until := c.clock(c.codes.st.LocalStart.Add(WrongWindow))
+		switch left := LocalBound - c.codes.st.LocalUsed; {
+		case left <= 0:
+			msg += " Approving here is paused until " + until + "." // Security R3 on #165
+		case left <= 2:
+			// Say so before approving here pauses (UX on #165).
+			msg += fmt.Sprintf(" %d more %s on my Wi-Fi today, then approving here pauses until %s.",
+				left, map[bool]string{true: "try", false: "tries"}[left == 1], until)
+		}
+		if c.open[id] == nil {
+			note = id + " void after wrong codes"
+		}
+	case len(decided) == n:
+		err = errors.New(msg) // nothing settled
+	case approve:
+		note = "Approved " + id
+		// The page's own wording (UX A4); a hold that failed keeps the
+		// channel's reply, which says the item did not run (L3 S4).
+		ran := true
+		for _, d := range decided[n:] {
+			ran = ran && d.Approved
+		}
+		if ran {
+			msg = "Approved. Your agent can go ahead." + strings.TrimPrefix(msg, "Approved "+id+".")
+		}
+	default:
+		note, msg = "Denied "+id, "Denied."
+	}
+	var text string
+	var ns, na int
+	if note != "" {
+		evicted := 0
+		if c.codes.commit(func(s *State) {
+			s.LocalAnswers = append(s.LocalAnswers, LocalNote{At: now, Text: note})
+			if k := len(s.LocalAnswers) - maxSignIns; k > 0 {
+				s.LocalAnswers = append([]LocalNote(nil), s.LocalAnswers[k:]...)
+				evicted = k
+			}
+		}) != nil {
+			// Not recorded, so not coalesced either: tell now.
+			alerts = append(alerts, note+" on my Wi-Fi page at "+c.clock(now)+". Not you? Text STOP.")
+		} else {
+			c.local.evictedAns += evicted
+		}
+		text, ns, na = c.signInTextLocked(now)
+	}
+	c.mu.Unlock()
+	c.decide(decided)
+	for _, a := range alerts {
+		_ = c.alert(a)
+	}
+	if text != "" {
+		c.sendSignIns(text, ns, na, now)
+	}
+	if err != nil {
+		return msg, err
+	}
+	return msg, nil
+}

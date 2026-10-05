@@ -22,6 +22,14 @@ import (
 // attestation from the box's allow-listed attestor, so its Security() holds (UPD-8, D6).
 func Release(t testing.TB, version int64, security bool, images map[string][]byte) *update.Verified {
 	t.Helper()
+	v, _ := Box(t, version, security, images)
+	return v
+}
+
+// Box is Release, also returning the box store that checked it (installed
+// release 0), for tests that stage and commit it.
+func Box(t testing.TB, version int64, security bool, images map[string][]byte) (*update.Verified, *update.Store) {
+	t.Helper()
 	d := t.TempDir()
 	must := func(err error) {
 		t.Helper()
@@ -74,9 +82,9 @@ func Release(t testing.TB, version int64, security bool, images map[string][]byt
 		t.Fatal("updatetest: no release")
 	}
 	if !security {
-		return res.Release
+		return res.Release, st
 	}
 	att, err := update.Attest(ak, res.Release, update.Statement{Result: update.ResultPass, Channel: update.ChannelFast, Hardware: attest.Hardware{Vendor: attest.Unlisted, Model: attest.Unlisted, Firmware: attest.Unlisted}})
 	must(err)
-	return res.Release.WithAttestations([][]byte{att}, nil)
+	return res.Release.WithAttestations([][]byte{att}, nil), st
 }

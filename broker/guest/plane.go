@@ -86,7 +86,7 @@ type Config struct {
 	// OwnerReply receives a guest's reply to an owner message. It is
 	// guest-written text: the owner channel filters it before it goes out
 	// (CH-19). Nil drops replies.
-	OwnerReply func(machine, msgID, text string)
+	OwnerReply func(machine string, rep Reply)
 	// Logf reports broker-side faults (a failed snapshot). Nil is silent.
 	Logf func(format string, args ...any)
 	// MaxConns caps one machine's concurrent requests; default 8.

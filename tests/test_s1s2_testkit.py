@@ -1,6 +1,7 @@
 # Unit tests for the S1/S2 test kit's pure logic. No coverage claims: a spike measures, it does not
 # implement requirements. The image itself is checked end to end by .github/workflows/testkit.yml.
 import importlib.util
+import os
 import pathlib
 import random
 import sys
@@ -119,22 +120,60 @@ class FloorFitTest(unittest.TestCase):
     # PE2: on the N95, the agent machine and one replay machine fit in the pool left after the
     # RES-2 floor budget (host, inference, browser, headroom).
     def test_n95_fits(self):
-        out = tk.floor_fit("MemTotal:        7864320 kB\nMemAvailable:    7340032 kB\n")
+        out = tk.floor_fit("MemTotal:        7864320 kB\nMemAvailable:    7340032 kB\n", 4)
         self.assertTrue(out.startswith("PASS"), out)
         self.assertIn("pool 3496 MiB", out)
         self.assertIn("agent 1536 + one replay 1024 = 2560", out)
         self.assertIn("-capacity-mb 4096", out)
 
     def test_small_pc_fails(self):
-        out = tk.floor_fit("MemTotal:        6291456 kB\n")
+        out = tk.floor_fit("MemTotal:        6291456 kB\n", 4)
         self.assertTrue(out.startswith("FAIL"), out)
         self.assertIn("pool 1960 MiB", out)
 
     def test_large_box_capacity_is_capped(self):
-        self.assertIn("-capacity-mb 4500 here", tk.floor_fit("MemTotal: 16777216 kB\n"))
+        self.assertIn("-capacity-mb 4500 here", tk.floor_fit("MemTotal: 16777216 kB\n", 4))
+
+    # RES-2c: the cap grows by one OpenClaw machine per two cores past four.
+    def test_cap_grows_with_cores(self):
+        out = tk.floor_fit("MemTotal: 33554432 kB\n", 16)
+        self.assertIn("-capacity-mb 13016 here", out)
+        self.assertIn("at most 13016 for 16 cores", out)
+        self.assertIn("-capacity-mb 12800 here", tk.floor_fit("MemTotal: 16777216 kB\n", 16))
 
     def test_unreadable(self):
-        self.assertTrue(tk.floor_fit("").startswith("unknown"))
+        self.assertTrue(tk.floor_fit("", 4).startswith("unknown"))
+
+
+class WakeEstimateTest(unittest.TestCase):
+    # PE7 (UX P2-a on #147): the warm wake's hash and read-back against the 15 s holding line.
+    def test_ssd_passes(self):
+        out = tk.wake_estimate(400, 1000)
+        self.assertTrue(out.startswith("PASS"), out)
+        self.assertIn("about 8.1 s", out)
+        self.assertIn("1536 MiB", out)
+
+    def test_slow_disk_fails(self):
+        out = tk.wake_estimate(100, 1000)
+        self.assertTrue(out.startswith("FAIL"), out)
+        self.assertIn("about 32.2 s", out)
+
+    def test_slow_hash_bounds_the_first_pass(self):
+        self.assertIn("about 12.1 s", tk.wake_estimate(400, 200))
+
+    def test_unmeasured(self):
+        self.assertTrue(tk.wake_estimate(0, 100).startswith("unknown"))
+
+    def test_probe_measures(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            sh, tk.sh = tk.sh, lambda *a, **k: ""
+            try:
+                out = tk.wake_probe(os.path.join(d, "w"))
+            finally:
+                tk.sh = sh
+            self.assertRegex(out, r"^(PASS|FAIL): about ")
+            self.assertEqual(os.listdir(d), [])
 
 
 class S2HelpersTest(unittest.TestCase):

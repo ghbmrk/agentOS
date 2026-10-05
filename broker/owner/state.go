@@ -44,6 +44,9 @@ type State struct {
 	// LocalAlertAt is the last such text (SignInAlertEvery).
 	LocalSignIns []time.Time `json:"local_sign_ins,omitempty"`
 	LocalAlertAt time.Time   `json:"local_alert_at"`
+	// LocalAnswers lists answers given on the Wi-Fi page not yet texted
+	// to the owner, coalesced with the sign-ins (P2-2a, UX A6).
+	LocalAnswers []LocalNote `json:"local_answers,omitempty"`
 	// Pending lists open requests and Queued the auto-replies waiting out
 	// their undo window, by reference only (never codes or reply text), so
 	// a restart can report what it dropped (OP-4, CH-13).
@@ -101,6 +104,7 @@ func copyState(s State) State {
 	s.GridUsed = append([]string(nil), s.GridUsed...)
 	s.Wrong = append([]time.Time(nil), s.Wrong...)
 	s.LocalSignIns = append([]time.Time(nil), s.LocalSignIns...)
+	s.LocalAnswers = append([]LocalNote(nil), s.LocalAnswers...)
 	s.Pending = append([]PendingRef(nil), s.Pending...)
 	s.Queued = append([]QueuedRef(nil), s.Queued...)
 	r := make(map[string]time.Time, len(s.Retired))

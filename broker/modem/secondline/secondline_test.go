@@ -318,3 +318,33 @@ func TestTheOwnersNumberIsRefusedInEveryInternationalForm(t *testing.T) {
 		}
 	}
 }
+
+// A SIM sender ID that spells a number reaches the agent as a named
+// sender, never as that number, and its label keeps printable ASCII only
+// (UX and security on #132).
+func TestASIMNamedSenderIsLabelledAndNeverANumber(t *testing.T) {
+	c := modem.NewCarrier()
+	owner := open(t, c, at.SIMCom, "SIMCOM_SIM7600G-H", boxNum)
+	second := open(t, c, at.SIMCom, "SIMCOM_SIM7600G-H", secondNum)
+	tool, err := secondline.New(secondline.Config{Owner: owner.m, Second: secondline.FromAT(second.m), Roles: roles(owner, second),
+		Disclosure: disclosure(), OwnerPhone: ownerNum, CountryCode: "1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const spelled = "+4670123456"
+	// SMS-DELIVER of "STOP" from alphanumeric sender ID "+4670123456"
+	// (TP-OA type 101), as at.DeliverAlpha encodes it.
+	second.dev.StorePDU("07915155000000F00414D02B9AED068BC966B49A0D0000620140210000000453EA130A")
+	select {
+	case u := <-tool.Inbound():
+		if !u.Named || u.Sender() != "named sender "+spelled {
+			t.Fatalf("%+v as %q", u, u.Sender())
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no inbound")
+	}
+	u := secondline.Untrusted{From: "alpha:Shop\r\nCo\x00" + strings.Repeat("x", 40), Named: true}
+	if got := u.Sender(); got != "named sender ShopCo"+strings.Repeat("x", 26) {
+		t.Fatalf("%q", got)
+	}
+}

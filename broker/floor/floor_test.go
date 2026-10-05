@@ -102,7 +102,7 @@ func newFloor(t *testing.T) *floorRig {
 	must(t, err)
 	root, err := cgroup.Open(box.Path)
 	must(t, err)
-	mem, err := budget.ForHost(floorMiB, budget.Floor())
+	mem, err := budget.ForHost(floorMiB, 4, budget.Floor())
 	must(t, err)
 	gs, err := mem.Apply(root)
 	must(t, err)
@@ -126,6 +126,7 @@ func newFloor(t *testing.T) *floorRig {
 		Images:   map[string]string{"base": img},
 		Runtime:  r.rt,
 		Admit:    r.adm,
+		NoQuota:  true,
 		Cgroups:  gs.Machines,
 	})
 	must(t, err)

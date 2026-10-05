@@ -110,7 +110,7 @@ func TestDaemonWiresTheLearningPlane(t *testing.T) {
 	cancel()
 	d.Wait()
 
-	for _, ex := range []map[string]journal.Executor{{"grants": f}} {
+	for _, ex := range []map[string]journal.Executor{{"grants": f}, {grants.RecallExecutor: f}} {
 		_, err = Run(context.Background(), Config{
 			JournalPath: filepath.Join(dir, "j2"), SocketDir: filepath.Join(dir, "run2"),
 			OwnerNumber: owner, ModemUID: os.Getuid(), Admission: admission.Config{CapacityMB: 4500, HeadroomMB: 600},

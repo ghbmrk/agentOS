@@ -24,7 +24,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/vm"
 )
 
-// REQ: REV-1, REV-4, ARC-4, RES-1, RES-2, ARC-6
+// REQ: REV-1, REV-4, ARC-4, RES-1, RES-2, ARC-6, CAP-1, CAP-8, A15
 
 // TestOnlyRunscIsExecuted: in the whole machine plane, the one process that
 // may be started is the configured runsc binary, from one call site (ARC-2
@@ -94,6 +94,13 @@ func newRig(t *testing.T, capacityMB int64) *rig { return newRigWith(t, capacity
 
 func newRigWith(t *testing.T, capacityMB int64, svc vm.Services) *rig {
 	t.Helper()
+	return newRigOn(t, capacityMB, svc, "", nil)
+}
+
+// newRigOn is newRigWith with its state under state ("": a temporary
+// directory) and the manager's configuration adjusted by adjust.
+func newRigOn(t *testing.T, capacityMB int64, svc vm.Services, state string, adjust func(*vm.Config)) *rig {
+	t.Helper()
 	bin := os.Getenv("AGENTOS_RUNSC")
 	if bin == "" || os.Geteuid() != 0 {
 		t.Skip("set AGENTOS_RUNSC to a runsc binary and run as root (CI integration job)")
@@ -109,7 +116,9 @@ func newRigWith(t *testing.T, capacityMB int64, svc vm.Services) *rig {
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("building guest: %v\n%s", err, out)
 	}
-	state := t.TempDir()
+	if state == "" {
+		state = t.TempDir()
+	}
 	r := &rig{t: t, rt: &Runtime{Bin: bin, StateDir: filepath.Join(state, "runsc")}}
 	adm, err := admission.New(admission.Config{CapacityMB: capacityMB}, late{&r.m})
 	if err != nil {
@@ -122,6 +131,7 @@ func newRigWith(t *testing.T, capacityMB int64, svc vm.Services) *rig {
 		Runtime:  r.rt,
 		Admit:    r.adm,
 		Services: svc,
+		NoQuota:  true, // quota_test.go runs on a file system with quotas
 	}
 	if p := os.Getenv("AGENTOS_CGROUP_PARENT"); p != "" {
 		g, err := cgroup.Open(p)
@@ -132,6 +142,9 @@ func newRigWith(t *testing.T, capacityMB int64, svc vm.Services) *rig {
 	} else {
 		r.cfg.NoCgroups = true
 		t.Log("no AGENTOS_CGROUP_PARENT: running without cgroups")
+	}
+	if adjust != nil {
+		adjust(&r.cfg)
 	}
 	m, err := vm.Open(context.Background(), r.cfg)
 	if err != nil {
@@ -460,5 +473,179 @@ func TestIntegrationHostSocketInImageIsUnreachable(t *testing.T) {
 	out, _ := r.rt.cmd(context.Background(), "exec", cid("m1"), "/guest", "svc", "/planted.sock", "/").Output()
 	if got := strings.TrimSpace(string(out)); !strings.HasPrefix(got, "ERR") {
 		t.Fatalf("guest reached a host socket in its image: %q", got)
+	}
+}
+
+// TestIntegrationWorkerExec: a worker runs a command under runsc exec with
+// stdin, its exit code comes back as a result, and output is capped
+// (CAP-8).
+func TestIntegrationWorkerExec(t *testing.T) {
+	r := newRig(t, 4096)
+	ctx := context.Background()
+	r.create("agent", admission.Experiment)
+	a, err := r.m.Get("agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.m.CreateWorker(ctx, "wk-1", a.Lineage, vm.Spec{Image: "base", Class: admission.Experiment, MemMB: 256, Argv: []string{"/guest", "serve"}}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := r.m.Exec(ctx, "wk-1", vm.Command{Argv: []string{"/guest", "stdin", "3"}, Stdin: []byte("hello worker"), MaxOutput: 5}, 20*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ExitCode != 3 || string(res.Stdout) != "hello" || !res.Truncated {
+		t.Fatalf("exec = code %d, stdout %q, truncated %v; want 3, %q, true", res.ExitCode, res.Stdout, res.Truncated, "hello")
+	}
+}
+
+func TestCappedKeepsTheFirstBytes(t *testing.T) {
+	c := &capped{max: 4}
+	c.Write([]byte("ab"))
+	c.Write([]byte("cdef"))
+	c.Write([]byte("g"))
+	if c.b.String() != "abcd" || !c.over {
+		t.Fatalf("capped = %q, over %v", c.b.String(), c.over)
+	}
+	u := &capped{}
+	u.Write([]byte("all of it"))
+	if u.b.String() != "all of it" || u.over {
+		t.Fatal("uncapped writer dropped output")
+	}
+}
+
+// worker starts an agent machine and a worker in its lineage.
+func (r *rig) worker(id string) vm.Machine {
+	r.t.Helper()
+	r.create("agent", admission.Experiment)
+	a, err := r.m.Get("agent")
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	if _, err := r.m.CreateWorker(context.Background(), id, a.Lineage, vm.Spec{Image: "base", Class: admission.Experiment, MemMB: 256, Argv: []string{"/guest", "serve"}}); err != nil {
+		r.t.Fatal(err)
+	}
+	return a
+}
+
+// lingering reports whether a linger command still runs in machine id: its
+// file still grows.
+func (r *rig) lingering(id string) bool {
+	r.t.Helper()
+	n := len(r.ask(id, "read", "/work/linger"))
+	time.Sleep(300 * time.Millisecond)
+	return len(r.ask(id, "read", "/work/linger")) != n
+}
+
+// A command that ignores signals and holds stdout past its timeout ends:
+// Exec returns in bounded time and the process inside the sandbox is gone
+// (L3 MUST-1 on #146).
+func TestIntegrationWorkerExecOutlivesTimeout(t *testing.T) {
+	r := newRig(t, 4096)
+	r.worker("wk-1")
+	start := time.Now()
+	res, err := r.m.Exec(context.Background(), "wk-1", vm.Command{Argv: []string{"/guest", "linger"}}, time.Second)
+	d := time.Since(start)
+	t.Logf("timed-out exec returned after %v", d.Round(time.Millisecond))
+	if d > time.Second+ExecWaitDelay+3*time.Second {
+		t.Fatalf("exec returned after %v", d)
+	}
+	if err != nil || !res.TimedOut {
+		t.Fatalf("exec = %+v, %v; want a timed-out result", res, err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for r.lingering("wk-1") {
+		if time.Now().After(deadline) {
+			t.Fatal("the timed-out command still runs in the worker")
+		}
+	}
+}
+
+// Erasure during such a command does not wait for it, and the command does
+// not survive it (CAP-3, F1; L3 MUST-1 on #146).
+func TestIntegrationForgetSinceDuringWorkerExec(t *testing.T) {
+	r := newRig(t, 4096)
+	a := r.worker("wk-1")
+	since := time.Now()
+	done := make(chan error, 1)
+	go func() {
+		_, err := r.m.Exec(context.Background(), "wk-1", vm.Command{Argv: []string{"/guest", "linger"}}, 10*time.Minute)
+		done <- err
+	}()
+	deadline := time.Now().Add(20 * time.Second)
+	for !strings.HasPrefix(r.ask("wk-1", "read", "/work/linger"), ".") {
+		if time.Now().After(deadline) {
+			t.Fatal("the command never started")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	start := time.Now()
+	if err := r.m.ForgetSince(context.Background(), a.Lineage, since); err != nil {
+		t.Fatal(err)
+	}
+	d := time.Since(start)
+	t.Logf("ForgetSince during a command took %v", d.Round(time.Millisecond))
+	if d > ExecWaitDelay+10*time.Second {
+		t.Fatalf("ForgetSince took %v", d)
+	}
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("the erased command reported success")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the command's Exec never returned")
+	}
+	if w, err := r.m.Get("wk-1"); err == nil && w.State == vm.Running {
+		if got := r.ask("wk-1", "read", "/work/linger"); !strings.HasPrefix(got, "ERR") && r.lingering("wk-1") {
+			t.Fatal("the command survived erasure")
+		}
+	}
+}
+
+// CAP-1 and A15 under gVisor: on the floor host's pool (3496 MB, budget
+// ForHost(7680, 4)) beside a 1552 MB agent, a 192 MB worker forks into 8 workers that each run a command
+// with their memory intact, and the winner is kept; admission stays
+// within its budget throughout (RES-2).
+func TestIntegrationEightWorkersWithinRES2(t *testing.T) {
+	r := newRig(t, 3496)
+	ctx := context.Background()
+	if _, err := r.m.Create(ctx, "agent", vm.Spec{Image: "base", Class: admission.Foreground, MemMB: 1552, Argv: []string{"/guest", "serve"}}); err != nil {
+		t.Fatal(err)
+	}
+	a, err := r.m.Get("agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.m.CreateWorker(ctx, "wk-src", a.Lineage, vm.Spec{Image: "base", Class: admission.Foreground, MemMB: 192, Argv: []string{"/guest", "serve"}}); err != nil {
+		t.Fatal(err)
+	}
+	token := r.ask("wk-src", "token")
+	var ids []string
+	for i := range 8 {
+		ids = append(ids, fmt.Sprintf("wk-try%d", i))
+	}
+	timed(t, "fork(8)", func() error { _, err := r.m.Fork(ctx, "wk-src", ids); return err })
+	if free := r.adm.Snapshot().FreeMB; free < 0 {
+		t.Fatalf("admission over budget: %d MB free", free)
+	}
+	for i, id := range ids {
+		if got := r.ask(id, "token"); got != token {
+			t.Fatalf("%s lost the source's memory: %q", id, got)
+		}
+		res, err := r.m.Exec(ctx, id, vm.Command{Argv: []string{"/guest", "stdin", fmt.Sprint(i)}, Stdin: []byte(id)}, 20*time.Second)
+		if err != nil || res.ExitCode != i || string(res.Stdout) != id {
+			t.Fatalf("%s exec = %+v, %v", id, res, err)
+		}
+	}
+	for _, id := range ids {
+		if id != "wk-try5" {
+			if err := r.m.Destroy(ctx, id); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if n := len(r.adm.Snapshot().Running); n != 3 {
+		t.Fatalf("%d machines admitted after keeping the winner, want 3", n)
 	}
 }

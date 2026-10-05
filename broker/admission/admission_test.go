@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// REQ: RES-1, RES-2
+// REQ: RES-1, RES-2, CAP-1
 
 type recPreempter struct {
 	frozen []string
@@ -302,5 +302,171 @@ func TestBusyIsAcceptedWorkOrPressure(t *testing.T) {
 		if !c.Busy() {
 			t.Fatalf("pressure %v, not busy", v)
 		}
+	}
+}
+
+// PE5 (security P2): BusyCause reads Busy, whether the busy work is the
+// owner's, and whether pressure is over its limit in one call, so the
+// scheduler's cause for a preemption is consistent. Only accepted work the
+// broker marked as the owner's (Request.Owner) is the owner's: accepted
+// work without the mark (a loop's, a replay's) is busy but not owner work.
+// An unreadable reading is pressure, as for Busy. Experiments cannot carry
+// the mark.
+func TestBusyCauseSaysWhetherPressureHolds(t *testing.T) {
+	p := 0.0
+	c, err := New(Config{CapacityMB: 4000, HeadroomMB: 500}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Pressure, c.MaxPressure = func() float64 { return p }, 10
+	if b, o, pr := c.BusyCause(); b || o || pr {
+		t.Fatalf("idle: %v %v %v", b, o, pr)
+	}
+	if _, err := c.Admit(Request{ID: "eval-x", Class: Experiment, MemMB: 100, Owner: true}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("an experiment marked the owner's: %v", err)
+	}
+	if _, err := c.Admit(Request{ID: "loop-job", Class: Accepted, MemMB: 500}); err != nil {
+		t.Fatal(err)
+	}
+	if b, o, pr := c.BusyCause(); !b || o || pr {
+		t.Fatalf("accepted work not the owner's: %v %v %v", b, o, pr)
+	}
+	if _, err := c.Admit(Request{ID: "job", Class: Accepted, MemMB: 500, Owner: true}); err != nil {
+		t.Fatal(err)
+	}
+	if b, o, pr := c.BusyCause(); !b || !o || pr {
+		t.Fatalf("the owner's accepted work: %v %v %v", b, o, pr)
+	}
+	for _, v := range []float64{11, math.NaN(), -1} {
+		p = v
+		if b, _, pr := c.BusyCause(); !b || !pr {
+			t.Fatalf("pressure %v: %v %v", v, b, pr)
+		}
+	}
+}
+
+// PE5 (security P3): admission records, when it picks a victim, whether it
+// was revoked for the owner's work without pressure: foreground, or
+// accepted work marked the owner's. A revoke for unmarked accepted work,
+// or under pressure, is not the owner's. The record is read once.
+func TestRevokeRecordsWhetherItWasForTheOwner(t *testing.T) {
+	p := 0.0
+	for _, tc := range []struct {
+		name     string
+		req      Request
+		pressure float64
+		want     bool
+	}{
+		{name: "foreground", req: Request{ID: "agent", Class: Foreground, MemMB: 3000}, want: true},
+		{name: "foreground under pressure", req: Request{ID: "agent", Class: Foreground, MemMB: 3000}, pressure: 50, want: true},
+		{name: "the owner's accepted work", req: Request{ID: "job", Class: Accepted, MemMB: 3000, Owner: true}, want: true},
+		{name: "the owner's accepted work under pressure", req: Request{ID: "job", Class: Accepted, MemMB: 3000, Owner: true}, pressure: 50},
+		{name: "accepted work not the owner's", req: Request{ID: "loop-job", Class: Accepted, MemMB: 3000}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := New(Config{CapacityMB: 4000, HeadroomMB: 500}, &recPreempter{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.Pressure, c.MaxPressure = func() float64 { return p }, 10
+			p = 0
+			if _, err := c.Admit(Request{ID: "eval-1", Class: Experiment, MemMB: 3000}); err != nil {
+				t.Fatal(err)
+			}
+			p = tc.pressure
+			d, err := c.Admit(tc.req)
+			if err != nil || len(d.Preempted) != 1 {
+				t.Fatalf("%+v %v", d, err)
+			}
+			if got := c.RevokedForOwner("eval-1"); got != tc.want {
+				t.Fatalf("for the owner: %v, want %v", got, tc.want)
+			}
+			if c.RevokedForOwner("eval-1") {
+				t.Fatal("the record was read twice")
+			}
+		})
+	}
+}
+
+// RoomFor is what Admit would find for a class, without admitting: free
+// budget, plus running experiments for a class that preempts them; under
+// pressure experiments get none and accepted work only what it preempts
+// (CAP-1, RES-1, RES-2).
+func TestRoomForMirrorsAdmit(t *testing.T) {
+	c := newCtl(&recPreempter{})
+	if _, err := c.Admit(Request{ID: "fg", Class: Foreground, MemMB: 1600}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Admit(Request{ID: "x", Class: Experiment, MemMB: 1000}); err != nil {
+		t.Fatal(err)
+	}
+	// 3900 - 2600 = 1300 free; 1000 more is preemptible.
+	for _, w := range []struct {
+		class Class
+		want  int64
+	}{{Experiment, 1300}, {Accepted, 2300}, {Foreground, 2300}} {
+		if got := c.RoomFor(w.class); got != w.want {
+			t.Errorf("RoomFor(%v) = %d, want %d", w.class, got, w.want)
+		}
+	}
+	c.Pressure, c.MaxPressure = func() float64 { return 50 }, 10
+	for _, w := range []struct {
+		class Class
+		want  int64
+	}{{Experiment, 0}, {Accepted, 1000}, {Foreground, 2300}} {
+		if got := c.RoomFor(w.class); got != w.want {
+			t.Errorf("under pressure RoomFor(%v) = %d, want %d", w.class, got, w.want)
+		}
+	}
+	// What RoomFor says fits does fit.
+	c.Pressure = nil
+	if _, err := c.Admit(Request{ID: "e2", Class: Experiment, MemMB: c.RoomFor(Experiment)}); err != nil {
+		t.Fatalf("RoomFor's room refused: %v", err)
+	}
+	if got := c.RoomFor(Experiment); got != 0 {
+		t.Fatalf("room after filling it = %d", got)
+	}
+}
+
+// RoomFor's guards (L3 SHOULD-7 on #158): a NaN or negative reading is
+// pressure, a reading at the limit is not, an experiment already yielding
+// is not offered twice, and an overcommitted budget reads 0, never less.
+func TestRoomForGuards(t *testing.T) {
+	c := newCtl(&recPreempter{})
+	mustAdmit(t, c, Request{ID: "x", Class: Experiment, MemMB: 1000})
+	c.MaxPressure = 10
+	for _, w := range []struct {
+		p          float64
+		exp, accep int64
+	}{{math.NaN(), 0, 1000}, {-1, 0, 1000}, {math.Inf(-1), 0, 1000}, {10, 2900, 3900}, {10.01, 0, 1000}} {
+		c.Pressure = func() float64 { return w.p }
+		if got := c.RoomFor(Experiment); got != w.exp {
+			t.Errorf("pressure %v: RoomFor(Experiment) = %d, want %d", w.p, got, w.exp)
+		}
+		if got := c.RoomFor(Accepted); got != w.accep {
+			t.Errorf("pressure %v: RoomFor(Accepted) = %d, want %d", w.p, got, w.accep)
+		}
+	}
+	c.Pressure = nil
+	// While x yields to a call, it is no longer room for anyone else.
+	p := &recPreempter{}
+	c2 := newCtl(p)
+	mustAdmit(t, c2, Request{ID: "x", Class: Experiment, MemMB: 3000})
+	var during int64 = -1
+	p.during = func() { during = c2.RoomFor(Accepted) }
+	mustAdmit(t, c2, Request{ID: "call", Class: Foreground, MemMB: 1500})
+	if during != 0 { // 3900 - 3000 - 1500 < 0 free, and x is yielding
+		t.Fatalf("RoomFor while x yields = %d, want 0", during)
+	}
+	// Overcommitted (the books can run over while a preemption settles):
+	// free reads 0.
+	c.mu.Lock()
+	c.running["over"] = Request{ID: "over", Class: Foreground, MemMB: 5000}
+	c.mu.Unlock()
+	if got := c.RoomFor(Experiment); got != 0 {
+		t.Fatalf("overcommitted RoomFor(Experiment) = %d", got)
+	}
+	if got := c.RoomFor(Accepted); got != 1000 {
+		t.Fatalf("overcommitted RoomFor(Accepted) = %d, want only the experiment's 1000", got)
 	}
 }

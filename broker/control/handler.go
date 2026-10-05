@@ -59,7 +59,9 @@ type Handler struct {
 	Machines func() string
 	// Notes are STATUS's exception lines, in order: the time check
 	// (clock.Status.Line; clock K7, UX-68-3), spare-time work not running
-	// (W3-off). Each keeps its first line, plain; "" adds nothing.
+	// (W3-off), an agent holding a record the owner deleted or memory not
+	// open (recalltool W10). Each keeps its first line, plain; "" adds
+	// nothing.
 	Notes []func() string
 	Now   func() time.Time
 	// NewCode returns a fresh texted code; nil means 6 random digits.

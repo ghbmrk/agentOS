@@ -27,6 +27,7 @@ type fakeOwner struct {
 	down     bool            // Request fails
 	active   bool            // the owner is texting
 	each     []string        // requests opened by RequestEach
+	local    []string        // requests opened by RequestLocal
 	lateUndo map[string]bool // UndoneAfterRelease
 }
 
@@ -36,9 +37,28 @@ func (f *fakeOwner) Request(items []owner.Item, _ time.Duration) (string, error)
 	if f.down {
 		return "", fmt.Errorf("owner: no modem")
 	}
+	for _, it := range items {
+		if !owner.SMSApprovable(it) {
+			return "", owner.ErrLocalOnly // as the channel refuses it
+		}
+	}
 	id := fmt.Sprintf("R%d", len(f.order)+1)
 	f.reqs[id] = append([]owner.Item(nil), items...)
 	f.order = append(f.order, id)
+	return id, nil
+}
+
+// RequestLocal records a request asked on the local page (P2-2a).
+func (f *fakeOwner) RequestLocal(it owner.Item, _ time.Duration) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.down {
+		return "", fmt.Errorf("owner: no modem")
+	}
+	id := fmt.Sprintf("R%d", len(f.order)+1)
+	f.reqs[id] = []owner.Item{it}
+	f.order = append(f.order, id)
+	f.local = append(f.local, id)
 	return id, nil
 }
 

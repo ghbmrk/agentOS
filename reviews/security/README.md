@@ -15,3 +15,4 @@ It is one of three lenses (security, potency, UX). An arbitrator loop weighs the
 | Run | main at | Review |
 |---|---|---|
 | 1 | e841b78 | [2026-10-04](2026-10-04-security-review.md) |
+| 2 | 76ac0b9 | [2026-10-05](2026-10-05-security-review.md) |

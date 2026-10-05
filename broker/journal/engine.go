@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -39,6 +40,8 @@ type entry struct {
 	attempts   []Attempt
 	quality    Quality
 	authorized time.Time // when RecAuthorized was journaled
+	submitted  time.Time // when RecSubmitted was journaled
+	erased     bool      // RecErased: params and evidence removed
 }
 
 // Option configures Open.
@@ -95,6 +98,12 @@ func Open(store Store, policy Policy, execs map[string]Executor, redact Redactor
 		n := en.attempts[len(en.attempts)-1].N
 		if err := e.commit(Record{Type: RecObserved, ID: id, Attempt: n, Result: ResultUnknown,
 			Source: "restart", Evidence: "in flight when the broker stopped"}); err != nil {
+			return nil, err
+		}
+	}
+	// An erase a crash cut off before its rewrite is finished now.
+	if e.unerased() {
+		if err := e.rewriteErased(); err != nil {
 			return nil, err
 		}
 	}
@@ -511,6 +520,21 @@ func (e *Engine) Resume() error {
 	return e.commit(Record{Type: RecResume})
 }
 
+// GuestActive reports an intent the agent submitted (origin "guest:")
+// that is authorized but not yet dispatched, or in flight: work the agent
+// has in hand, so the sleeper does not stop it (PE7 condition 2).
+func (e *Engine) GuestActive() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, id := range e.order {
+		en := e.intents[id]
+		if strings.HasPrefix(en.intent.Origin, "guest:") && (en.state == Authorized || en.state == InFlight) {
+			return true
+		}
+	}
+	return false
+}
+
 // Stopped reports whether STOP is in force.
 func (e *Engine) Stopped() bool {
 	e.mu.Lock()
@@ -660,6 +684,12 @@ func (e *Engine) validate(r Record) error {
 		}
 		return nil
 	}
+	if r.Type == RecSleep {
+		if r.Sleep == nil || !r.Sleep.valid() || r.ID != "" {
+			return fmt.Errorf("sleep record without a valid note")
+		}
+		return nil
+	}
 	if r.Type == RecResume {
 		if !e.stopped {
 			return fmt.Errorf("resume while not stopped")
@@ -723,6 +753,10 @@ func (e *Engine) validate(r Record) error {
 		if r.Verdict != VerdictGood && r.Verdict != VerdictWrong {
 			return fmt.Errorf("%s: verdict %q", r.ID, r.Verdict)
 		}
+	case RecErased:
+		if en.state != Succeeded && en.state != Denied {
+			return fmt.Errorf("%s: erased from %s", r.ID, en.state)
+		}
 	default:
 		return fmt.Errorf("unknown record type %q", r.Type)
 	}
@@ -740,11 +774,11 @@ func (e *Engine) apply(r Record) {
 	case RecResume:
 		e.stopped = false
 		return
-	case RecEgress:
+	case RecEgress, RecSleep:
 		return
 	case RecSubmitted:
 		in := *r.Intent
-		e.intents[r.ID] = &entry{intent: in, fp: fingerprint(in), efp: effectFingerprint(in), state: Pending}
+		e.intents[r.ID] = &entry{intent: in, fp: fingerprint(in), efp: effectFingerprint(in), state: Pending, submitted: r.At}
 		e.order = append(e.order, r.ID)
 		return
 	}
@@ -779,6 +813,18 @@ func (e *Engine) apply(r Record) {
 		a.Cancels = append(a.Cancels, Cancel{Accepted: r.Accepted, Detail: r.Evidence})
 	case RecQuality:
 		en.quality = Quality{Verdict: r.Verdict, Source: r.Source, Note: r.Evidence}
+	case RecErased:
+		en.erased = true
+		en.intent.Params, en.intent.Preconditions = nil, nil
+		for i := range en.attempts {
+			en.attempts[i].Evidence = ""
+			for j := range en.attempts[i].Cancels {
+				en.attempts[i].Cancels[j].Detail = ""
+			}
+		}
+		if r.FP != "" {
+			en.fp, en.efp = r.FP, r.EFP
+		}
 	}
 }
 

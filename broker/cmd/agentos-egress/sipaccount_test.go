@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/sipsign"
 	"github.com/ghbmrk/agentos/broker/vault"
 )
@@ -378,10 +379,13 @@ func TestTheModemUIDMustBeTheBridgesOwn(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "file"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	run := func(modem int) error {
-		return serveCmd([]string{"-rule", rule, "-broker-uid", fmt.Sprint(broker), "-unlock-uid", fmt.Sprint(ui), "-modem-uid", fmt.Sprint(modem),
+	run := func(modem int, owner ...string) error {
+		if owner == nil {
+			owner = []string{"-owner-number", "+15550000999"}
+		}
+		return serveCmd(append(owner, "-rule", rule, "-broker-uid", fmt.Sprint(broker), "-unlock-uid", fmt.Sprint(ui), "-modem-uid", fmt.Sprint(modem),
 			"-run", filepath.Join(dir, "file", "run"), "-vault", filepath.Join(dir, "vault"), "-keys", filepath.Join(dir, "vault.keys"),
-			"-tpm", filepath.Join(dir, "no-tpm")})
+			"-tpm", filepath.Join(dir, "no-tpm")))
 	}
 	for _, m := range []int{self, broker, ui} {
 		if err := run(m); err == nil || !strings.Contains(err.Error(), "-modem-uid") {
@@ -391,4 +395,65 @@ func TestTheModemUIDMustBeTheBridgesOwn(t *testing.T) {
 	if err := run(self + 3); err == nil || strings.Contains(err.Error(), "-modem-uid") {
 		t.Fatalf("a distinct modem uid: %v", err)
 	}
+	// Security C1 on the #142 design read: the second line needs the
+	// owner's number, which it never texts or calls.
+	for _, o := range [][]string{{}, {"-owner-number", "07700900123"}, {"-owner-number", "+1234"}} {
+		if err := run(self+3, o...); err == nil || !strings.Contains(err.Error(), "-owner-number") {
+			t.Errorf("owner %v: %v", o, err)
+		}
+	}
+}
+
+// Potency R1 on #139: agentosd learns, on the verify socket, when the
+// second line waits on the owner (a realm to confirm) or never reached
+// its provider, so STATUS and the digest can say so. It learns nothing
+// else about the account.
+func TestAgentosdLearnsWhenTheSecondLineWaitsOnTheOwner(t *testing.T) {
+	r := newFastRig(t, true)
+	run := filepath.Join(t.TempDir(), "run")
+	srvs, err := serve(run, r.c, testRouter(t), nil, nil, os.Getuid(), os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		for _, s := range srvs {
+			s.Close()
+		}
+	})
+	v := modelroute.NewVerifier(filepath.Join(run, VerifySocket))
+	ctx := context.Background()
+	if _, err := v.SecondLine(ctx); err != modelroute.ErrVaultLocked {
+		t.Fatalf("while locked: %v", err)
+	}
+	tk := r.unlock(t)
+	if err := r.c.confirm(tk, r.code()); err != nil {
+		t.Fatal(err)
+	}
+	want := func(step string, s modelroute.SecondLineState) {
+		t.Helper()
+		got, err := v.SecondLine(ctx)
+		if err != nil || got != s {
+			t.Fatalf("%s: %q %v, want %q", step, got, err, s)
+		}
+	}
+	want("no account", modelroute.SecondLineOK)
+	if err := r.c.setSIP(sipSettings, synthetic(t, "canary-sip-")); err != nil {
+		t.Fatal(err)
+	}
+	want("waiting for registration", modelroute.SecondLineOK)
+	r.clk.add(RealmWindow)
+	want("window passed", modelroute.SecondLineUnreached)
+	if err := r.c.setSIP(sipSettings, synthetic(t, "canary-sip-")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (signStore{r.c}).LearnRealm(sipRealm); err != nil {
+		t.Fatal(err)
+	}
+	want("realm recorded", modelroute.SecondLineConfirm)
+	r.clk.add(RealmWindow)
+	want("realm still unconfirmed", modelroute.SecondLineConfirm)
+	if err := r.c.confirmRealm(sipRealm); err != nil {
+		t.Fatal(err)
+	}
+	want("confirmed", modelroute.SecondLineOK)
 }

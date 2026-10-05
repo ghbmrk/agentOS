@@ -11,8 +11,10 @@
 // The second line is a second SIM (FromAT) or an owner-held calling
 // account (package sipline); either way its role is bound at setup (Roles).
 //
-// Recipient verification, third-party rate limits and transcript
-// journaling belong to the adapter that calls this tool (the send verb);
+// Recipients are full international numbers or owner contacts, and a
+// second SIM's texts and calls share one budget (ADP-12, SR2-5).
+// Verifying a recipient against owner contacts or a source, and journaling
+// transcripts, belong to the adapter that calls this tool (the send verb);
 // see broker/modem/at/ASSUMPTIONS.md.
 package secondline
 
@@ -24,6 +26,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/modem/at"
+	"github.com/ghbmrk/agentos/broker/sendrules"
 )
 
 // Call is a voice call on the second line.
@@ -97,6 +100,19 @@ type Config struct {
 	Disclosure []byte
 	// AnswerWait bounds how long a call may ring (default 60 s).
 	AnswerWait time.Duration
+	// Contact says the owner created a contact for a number. Recipients
+	// are full international numbers; anything else, a short or
+	// premium-rate code included, is sent to only as an owner contact
+	// (ADP-12, SR2-5). It must say yes only for a contact the owner
+	// created, matched by the exact number, never one the agent or an
+	// import added (security R1 on #164). Nil is no contacts.
+	Contact func(number string) bool
+	// Budget is a second SIM's sending budget, shared by its texts and
+	// calls (ADP-12, SR2-5); nil is a new one. A calling account's budget
+	// is the vault process's (egress K16), so it is not spent here.
+	Budget *sendrules.Budget
+	// Now is the clock for the budget; nil is time.Now.
+	Now func() time.Time
 }
 
 // Untrusted is a text that reached the second line: data for the agent,
@@ -104,6 +120,28 @@ type Config struct {
 type Untrusted struct {
 	From, Text string
 	At         time.Time
+	// Named marks a sender given as a name rather than a number (From is
+	// "alpha:<name>"): an alphanumeric SMS sender, or a SIP sender the
+	// provider did not vouch for. It can never be the owner.
+	Named bool
+}
+
+// Sender is how the sender is shown to the agent and the owner: the number,
+// or "named sender <name>" for a Named one, so a name never reads as a
+// number or as the owner (UX on #102).
+// The name keeps printable ASCII only, at most 32 characters, since a SIM
+// sender ID can carry control characters (security on #132).
+func (u Untrusted) Sender() string {
+	if n, ok := strings.CutPrefix(u.From, "alpha:"); u.Named || ok {
+		var b strings.Builder
+		for _, r := range n {
+			if r >= 0x20 && r < 0x7f && b.Len() < 32 {
+				b.WriteRune(r)
+			}
+		}
+		return "named sender " + b.String()
+	}
+	return u.From
 }
 
 // Roles binds each line to its SIM, or the second line to its account.
@@ -123,6 +161,8 @@ var (
 	ErrRecipient   = errors.New("secondline: not a third-party number")
 	ErrNoAnswer    = errors.New("secondline: call not answered")
 	ErrOwnerPhone  = errors.New("secondline: the owner's number and home country code are required")
+	// ErrLimited: the line's budget is spent (sipline.OwnerText words it).
+	ErrLimited = sendrules.ErrLimited
 )
 
 // Check verifies that owner and second are the SIMs recorded for their
@@ -201,6 +241,12 @@ func New(cfg Config) (*Tool, error) {
 	if cfg.AnswerWait == 0 {
 		cfg.AnswerWait = 60 * time.Second
 	}
+	if cfg.Budget == nil {
+		cfg.Budget = &sendrules.Budget{}
+	}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
+	}
 	t := &Tool{cfg: cfg, inbound: make(chan Untrusted, 64)}
 	if cfg.Second == nil {
 		close(t.inbound)
@@ -256,14 +302,27 @@ func same(s Line, o SIM) bool {
 	return any(s) == any(o)
 }
 
-// recipient refuses the owner's own phone and the box's two numbers.
-func (t *Tool) recipient(to string) error {
+// recipient refuses the owner's own phone and the box's two numbers in
+// any form, then anything but a full international number that is not
+// premium-rate, unless the owner made it a contact (SR2-5). It then
+// spends a second SIM's budget.
+func (t *Tool) recipient(to string, call bool) error {
 	for _, n := range []string{t.cfg.OwnerPhone, t.cfg.Owner.Number(), t.cfg.Second.Number()} {
 		if at.SameNumber(to, n, t.cfg.CountryCode) {
 			return ErrRecipient
 		}
 	}
-	return nil
+	contact := t.cfg.Contact != nil && t.cfg.Contact(to)
+	if !contact && sendrules.CheckRecipient(to, "", "") != nil {
+		return ErrRecipient
+	}
+	if _, ok := t.cfg.Second.(Account); ok {
+		return nil
+	}
+	if call {
+		return t.cfg.Budget.TakeCall(to, t.cfg.Now())
+	}
+	return t.cfg.Budget.Take(to, t.cfg.Now())
 }
 
 // Available reports whether third-party texts and calls can be made.
@@ -277,7 +336,7 @@ func (t *Tool) Text(to, text string) error {
 	if err := t.check(); err != nil {
 		return err
 	}
-	if err := t.recipient(to); err != nil {
+	if err := t.recipient(to, false); err != nil {
 		return err
 	}
 	return t.cfg.Second.Send(to, text)
@@ -293,7 +352,7 @@ func (t *Tool) Call(ctx context.Context, to string) (Call, error) {
 	if err := t.check(); err != nil {
 		return nil, err
 	}
-	if err := t.recipient(to); err != nil {
+	if err := t.recipient(to, true); err != nil {
 		return nil, err
 	}
 	c, err := t.cfg.Second.Dial(ctx, to)
@@ -348,7 +407,7 @@ func (t *Tool) pump() {
 				continue
 			}
 			select {
-			case t.inbound <- Untrusted{From: m.From, Text: m.Text, At: m.At}:
+			case t.inbound <- Untrusted{From: m.From, Text: m.Text, At: m.At, Named: m.Alphanumeric || strings.HasPrefix(m.From, "alpha:")}:
 			default: // unread third-party texts are dropped, never queued unbounded
 			}
 		}

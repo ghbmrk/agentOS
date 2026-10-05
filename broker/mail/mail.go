@@ -107,10 +107,14 @@ type Config struct {
 	Account  string
 	Executor string
 	// Address is the owner's address on this account; Aliases are other
-	// addresses that are the owner's. They are never a reply's recipient.
+	// addresses that are the owner's, read from the provider's verified
+	// send-as list, never typed in. They are never a reply's recipient.
 	Address string
 	Aliases []string
-	Store   Store
+	// Box marks the box's own mailbox (ADP-13), not the owner's: no
+	// address on it is the owner's evidence destination (CH-20).
+	Box   bool
+	Store Store
 
 	// Organize targets (ADP-2). Folders and Labels are the ones the owner
 	// confirmed when granting; the inbox, the archive and the AgentOS/
@@ -158,6 +162,11 @@ type Config struct {
 	// do not (Gmail does; most IMAP servers do not).
 	AppendSent bool
 
+	// Redact, if set, rewrites an OpDeliver body before it is sent: the
+	// vault process passes its redactor, so no vault value leaves in
+	// evidence (CRED-7).
+	Redact func(string) string
+
 	Now func() time.Time
 }
 
@@ -170,8 +179,9 @@ const (
 
 // Adapter is one connected mail account.
 type Adapter struct {
-	cfg  Config
-	self map[string]bool
+	cfg   Config
+	self  map[string]bool
+	alias map[string]bool // the aliases, exactly
 
 	mu       sync.Mutex
 	reserved map[string]time.Time // organize bound places not yet in the journal
@@ -211,10 +221,10 @@ func New(cfg Config) (*Adapter, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	a := &Adapter{cfg: cfg, self: map[string]bool{addr: true, selfKey(addr): true}, reserved: map[string]time.Time{}}
+	a := &Adapter{cfg: cfg, self: map[string]bool{addr: true, selfKey(addr): true}, alias: map[string]bool{}, reserved: map[string]time.Time{}}
 	for _, x := range cfg.Aliases {
 		if c, ok := canon(x); ok {
-			a.self[c], a.self[selfKey(c)] = true, true
+			a.self[c], a.self[selfKey(c)], a.alias[c] = true, true, true
 		}
 	}
 	a.cfg.Address = addr
@@ -236,6 +246,19 @@ func canon(s string) (string, bool) {
 func (a *Adapter) isSelf(addr string) bool {
 	return a.self[addr] || a.self[selfKey(addr)]
 }
+
+// Owns reports whether addr is one of the owner's addresses on this
+// account: the evidence destination must be (CH-20).
+//
+// Unlike isSelf it matches exactly: a +tag or Gmail-dot variant of the
+// owner's address is not the destination (L3 SHOULD 5 on #148).
+func (a *Adapter) Owns(addr string) bool {
+	c, ok := canon(addr)
+	return ok && !a.cfg.Box && (c == a.cfg.Address || a.alias[c])
+}
+
+// Address is the owner's main address on this account.
+func (a *Adapter) Address() string { return a.cfg.Address }
 
 // selfKey is addr with a +tag removed and, for Gmail's domains, the dots
 // in the local part removed: the forms that reach the same mailbox.
