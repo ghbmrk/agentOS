@@ -126,6 +126,11 @@ type Config struct {
 	// owner would see only a pointer and it would still default. Nil:
 	// nothing is.
 	Hidden func(string) bool
+	// ApprovalsOpen reports whether the owner channel has an approval
+	// request open. An untagged reply answers the only open question only
+	// when none is, so a bare reply meant for a request never lands here.
+	// Nil: untagged replies are never answers.
+	ApprovalsOpen func() bool
 	// Logf records store failures. Nil: discarded.
 	Logf func(format string, args ...any)
 
@@ -324,6 +329,9 @@ func (b *Book) normalize(s Spec) (Spec, error) {
 	found := len(s.Choices) == 0
 	for _, c := range s.Choices {
 		c = flatten(c)
+		if controlWords[strings.ToUpper(strings.Trim(c, ".!?"))] {
+			return out, errors.New("question: a choice cannot be an owner-channel word (STOP, YES, NO, RUN...), since the channel takes it when sent alone; use words like \"go ahead\" or \"wait\"")
+		}
 		if c == "" || utf8.RuneCountInString(c) > MaxChoice {
 			return out, fmt.Errorf("question: each choice must be 1 to %d characters", MaxChoice)
 		}
@@ -347,7 +355,7 @@ func (b *Book) normalize(s Spec) (Spec, error) {
 		if replyShape.MatchString(t) {
 			return out, errors.New("question: no owner-channel replies (YES, NO, UNDO, RESUME... and an ID or code)")
 		}
-		if credWords.MatchString(t) {
+		if credWords.MatchString(t) || credWords.MatchString(squeeze(t)) {
 			return out, errors.New("question: no questions about codes, PINs, passwords, keys or the Owner Card; the agent never needs them")
 		}
 	}
@@ -361,42 +369,74 @@ func (b *Book) normalize(s Spec) (Spec, error) {
 	return out, nil
 }
 
+// squeeze drops punctuation inside words ("pass-word", "P.I.N."), so the
+// credential words match through it. The list is a backstop: a question
+// carries no authority whatever it says (Q8), and answers are filtered.
+func squeeze(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsSpace(r) {
+			return r
+		}
+		return -1
+	}, s)
+}
+
 // credWords are words that only a question fishing for a credential needs
 // (security C2 on #71). The agent never needs a code, PIN, password,
 // recovery key or anything on the Owner Card, so no question may name one.
 var credWords = regexp.MustCompile(`(?i)\b(codes?|otps?|pins?|passwords?|passphrases?|recovery|seeds?|grids?|cells?|cards?|2fa|verification|authenticators?)\b`)
 
-// keyShaped reports text shaped like an Owner Card recovery key: 40
-// symbols of the card alphabet in one run, or at least four consecutive
-// groups of five split by spaces or dashes (security C1 on #71).
+// keyShaped reports text shaped like part of an Owner Card recovery key
+// (security C1 on #71): split on anything but letters and digits, two or
+// more five-symbol groups, or one run of ten or more, of card-alphabet
+// symbols mixing letters and digits.
 func keyShaped(s string) bool {
-	in := func(w string) bool {
-		for _, r := range strings.ToUpper(w) {
-			if !strings.ContainsRune(cardAlphabet, r) {
-				return false
-			}
+	groups := 0
+	for _, w := range strings.FieldsFunc(s, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }) {
+		if !cardMixed(w) {
+			continue
 		}
-		return true
-	}
-	run := 0
-	for _, w := range strings.FieldsFunc(s, func(r rune) bool { return unicode.IsSpace(r) || r == '-' }) {
-		w = strings.Trim(w, ".,;:!?\"'()")
-		if len(w) >= 20 && in(w) {
+		if len(w) >= 10 {
 			return true
 		}
-		if len(w) == 5 && in(w) {
-			if run++; run >= 4 {
+		if len(w) == 5 {
+			if groups++; groups >= 2 {
 				return true
 			}
-		} else {
-			run = 0
 		}
 	}
 	return false
 }
 
+// cardMixed reports whether w is all card-alphabet symbols and mixes
+// letters and digits, as most groups of a random key do and words do not.
+func cardMixed(w string) bool {
+	letter, digit := false, false
+	for _, r := range strings.ToUpper(w) {
+		if !strings.ContainsRune(cardAlphabet, r) {
+			return false
+		}
+		if r >= '0' && r <= '9' {
+			digit = true
+		} else {
+			letter = true
+		}
+	}
+	return letter && digit
+}
+
 // cardAlphabet is the Owner Card's symbol set (card.Alphabet).
 const cardAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+// controlWords are the owner channel's whole-message words (CH-11, and
+// the channel's own replies). Sent alone they go to the channel, never to
+// a question, so no choice may be one (#71 L3): a choice is what the owner
+// is invited to send. A default is not; the owner answers with the tag
+// ("Q104 no"), which the channel never takes.
+var controlWords = map[string]bool{
+	"STOP": true, "STATUS": true, "HELP": true, "YES": true, "NO": true, "UNDO": true, "MORE": true,
+	"PUBLIC": true, "RUN": true, "RESUME": true, "UNLOCK": true, "PAUSE": true, "REVOKE": true,
+}
 
 // replyShape is an owner-channel reply word with an ID or code after it:
 // a question must not hand the owner a reply to copy (CH-12).
@@ -407,19 +447,19 @@ var replyShape = regexp.MustCompile(`(?i)\b(yes|no|undo|more|resume|unlock|pause
 // ("482 913", "4-8-2-9-1-3"), as owner.SecretShaped does.
 func codeShaped(s string) bool {
 	var runs []int
-	n, gap := 0, false
+	n, gap := 0, 0
 	for _, r := range s {
 		switch {
 		case unicode.IsDigit(r):
 			n++
-			gap = false
-		case n > 0 && !gap && (r == ' ' || r == '.' || r == '-' || r == '\u00a0'):
-			gap = true // a single separator may join two groups
+			gap = 0
+		case n > 0 && gap < maxJoin && !unicode.IsLetter(r) && r != ':':
+			gap++ // a short run of separators joins two groups
 		default:
 			if n > 0 {
 				runs = append(runs, n)
 			}
-			n, gap = 0, false
+			n, gap = 0, 0
 		}
 	}
 	if n > 0 {
@@ -432,6 +472,11 @@ func codeShaped(s string) bool {
 	}
 	return false
 }
+
+// maxJoin is the longest run of separators (anything but a letter, a
+// digit, or ':', so times like 9:30 stay apart) that joins two digit
+// groups: "482 913", "482/913", "4, 8, 2, 9, 1, 3".
+const maxJoin = 3
 
 func same(e *entry, s Spec) bool {
 	if e.Text != s.Text || e.Default != s.Default || e.Wait != s.Wait || len(e.Choices) != len(s.Choices) {
@@ -738,7 +783,11 @@ func (b *Book) TakeDigest() []string {
 	defer b.mu.Unlock()
 	out := append([]string(nil), b.digest...)
 	if b.refused > 0 {
-		out = append(out, fmt.Sprintf("%d answers to the agent's questions held a code or key and were not passed on. If that was not you, reply STOP.", b.refused))
+		n := fmt.Sprintf("%d answers", b.refused)
+		if b.refused == 1 {
+			n = "1 answer"
+		}
+		out = append(out, n+" to the agent's questions held a code or key and were not passed on. If that was not you, reply STOP.")
 	}
 	if len(out) == 0 {
 		return nil
@@ -769,7 +818,7 @@ func (b *Book) untaggedLocked(text string) *entry {
 			only = e
 		}
 	}
-	if only == nil || only.Sent.IsZero() {
+	if only == nil || only.Sent.IsZero() || b.cfg.ApprovalsOpen == nil || b.cfg.ApprovalsOpen() {
 		return nil
 	}
 	for _, c := range only.Choices {

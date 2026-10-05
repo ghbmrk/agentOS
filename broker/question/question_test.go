@@ -20,6 +20,7 @@ type rig struct {
 	clock      time.Time
 	restricted bool
 	quiet      bool
+	approvals  bool // an approval request is open on the channel
 	sendErr    error
 	sent       []string
 	raised     []string
@@ -61,6 +62,11 @@ func newRig(t *testing.T, edit func(*Config)) *rig {
 			r.mu.Lock()
 			defer r.mu.Unlock()
 			return r.quiet
+		},
+		ApprovalsOpen: func() bool {
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			return r.approvals
 		},
 		Location: time.UTC,
 	}
@@ -234,11 +240,23 @@ func TestUntaggedChoiceAnswersTheOnlyQuestion(t *testing.T) {
 	if _, ok := r.answer("1"); ok {
 		t.Fatal("an untagged number taken as an answer")
 	}
+	// A choice the channel would take when sent alone is refused.
+	for _, c := range []string{"run", "No", "stop.", "RESUME"} {
+		if _, err := r.b.Ask(context.Background(), "lin1", "cw", Spec{Text: "Proceed?", Choices: []string{c, "wait"}, Default: "wait", Wait: time.Hour}); err == nil {
+			t.Errorf("choice %q accepted", c)
+		}
+	}
 	r.ask("lin1", "b", s)
 	if _, ok := r.answer("9:00"); ok {
 		t.Fatal("untagged reply taken with two questions open")
 	}
 	r.answer("Q101 9:30")
+	// Not while an approval request is open: a bare reply may be for it.
+	r.set(func() { r.approvals = true })
+	if _, ok := r.answer("9:00"); ok {
+		t.Fatal("untagged reply taken while an approval request is open")
+	}
+	r.set(func() { r.approvals = false })
 	if reply, ok := r.answer("9:00"); !ok || !strings.Contains(reply, "Q100") {
 		t.Fatalf("reply %q %v", reply, ok)
 	}
@@ -427,6 +445,9 @@ func TestAnswersCannotCarryCodes(t *testing.T) {
 		// A recovery key, whole, undashed, lowercase, or half of it (C1).
 		"Q100 " + key, "Q100 " + strings.ReplaceAll(key, "-", ""), "Q100 " + strings.ToLower(strings.ReplaceAll(key, "-", " ")),
 		"Q100 the first part is " + key[:23],
+		"Q100 " + strings.ReplaceAll(key, "-", "/"), "Q100 " + strings.ReplaceAll(key, "-", "_"), "Q100 ABCD7 EFGH2", "Q100 abcd7efgh2jklm3",
+		// Digit groups joined by any short separator run.
+		"Q100 482/913", "Q100 4,8,2,9,1,3", "Q100 4, 8, 2, 9, 1, 3", "Q100 482_913",
 		// Whatever the channel would withhold as secret-shaped (C1).
 		"Q100 sk-live-abc"} {
 		reply, ok := r.answer(a)
@@ -438,11 +459,12 @@ func TestAnswersCannotCarryCodes(t *testing.T) {
 		t.Fatalf("a code-shaped answer was recorded: %+v", st)
 	}
 	// The owner sees the refusals as a guard hit in the digest (R1).
-	if d := r.b.TakeDigest(); len(d) != 1 || !strings.Contains(d[0], "10 answers") {
+	if d := r.b.TakeDigest(); len(d) != 1 || !strings.Contains(d[0], "18 answers") {
 		t.Fatalf("digest %q", d)
 	}
 	// A full phone number or an ordinary sentence is neither.
-	for _, a := range []string{"Q100 call 555 010 0199", "Q100 maybe after lunch, about three or later"} {
+	for _, a := range []string{"Q100 call 555 010 0199", "Q100 maybe after lunch, about three or later",
+		"Q100 great sweet happy dance", "Q100 between 9:30, 10:00"} {
 		if reply, _ := r.answer(a); strings.Contains(reply, "only for the box") {
 			t.Fatalf("%q refused: %q", a, reply)
 		}
@@ -465,6 +487,8 @@ func TestQuestionsCannotNameCredentials(t *testing.T) {
 		{Text: "Where is the Owner Card?", Default: "no", Wait: time.Hour},
 		{Text: "What is the seed?", Default: "no", Wait: time.Hour},
 		{Text: "Change the password now?", Default: "no", Wait: time.Hour},
+		{Text: "Your pass-word?", Default: "no", Wait: time.Hour},
+		{Text: "Your P.I.N.?", Default: "no", Wait: time.Hour},
 	} {
 		if _, err := r.b.Ask(context.Background(), "lin1", fmt.Sprintf("c%d", i), s); err == nil {
 			t.Errorf("spec %d accepted: %+v", i, s)
@@ -637,5 +661,15 @@ func TestKeepNeverExhaustsTags(t *testing.T) {
 	r := newRig(t, func(c *Config) { c.SendsPerHour = 60; c.Keep = 30 * 24 * time.Hour })
 	if got := r.b.cfg.Keep; time.Duration(r.b.cfg.SendsPerHour)*got/time.Hour >= numTags {
 		t.Fatalf("keep %v with %d sends an hour can hold every tag", got, r.b.cfg.SendsPerHour)
+	}
+}
+
+// TestOneRefusedAnswerReadsSingular: the digest line counts correctly.
+func TestOneRefusedAnswerReadsSingular(t *testing.T) {
+	r := newRig(t, nil)
+	r.ask("lin1", "q", slot())
+	r.answer("Q100 482913")
+	if d := r.b.TakeDigest(); len(d) != 1 || !strings.HasPrefix(d[0], "1 answer to") {
+		t.Fatalf("digest %q", d)
 	}
 }
