@@ -887,7 +887,7 @@ func TestUsageReachesTheCallersContext(t *testing.T) {
 	r := newRig(t, rigOpts{rule: Rule{"default": {{"openai", "gpt-fixture"}}}})
 	r.up.set(hostOpenAI, serveFixture(200, "text/event-stream", fixture(t, "openai_stream.sse")))
 	var got []string
-	ctx := WithUsage(t.Context(), func(provider string, u Usage) { got = append(got, fmt.Sprint(provider, u)) })
+	ctx := WithUsage(context.Background(), func(provider string, u Usage) { got = append(got, fmt.Sprint(provider, u)) })
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"default","stream":true,"messages":[{"role":"user","content":"hi"}]}`)).WithContext(ctx)
 	w := httptest.NewRecorder()
 	r.router.Handler("m1").ServeHTTP(w, req)
