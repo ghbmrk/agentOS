@@ -131,7 +131,9 @@ func (l *learning) startBuilder(m builderMachines, imgs images, services *lateSe
 }
 
 func (l *learning) builderNote() string {
-	if l.builderOff.Load() {
+	// Not after the owner turned learning off: a restart would not
+	// change that (UX R1 on #126).
+	if l.builderOff.Load() && l.learningOn() {
 		return builderOffNote
 	}
 	return ""

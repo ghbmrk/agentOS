@@ -162,7 +162,12 @@ func grantsKey(machine string) string {
 // modelRouting checks the grants, adds the builders' (builderGrants), and
 // builds the router over the result, in that order, so the router sees
 // every grant it serves (L3 MUST 1 on #126).
-func modelRouting(rule route.Rule, g grants, privateOK map[string]bool, builderFrom string) (grants, *route.Router, error) {
+func modelRouting(rule route.Rule, g grants, privateOK map[string]bool, builderFrom, evalFrom string) (grants, *route.Router, error) {
+	// -eval-from names an agent machine: never a builder's grants key or a
+	// replay machine (security R1 on #126).
+	if strings.HasPrefix(evalFrom, modelroute.BuilderPrefix) || strings.HasPrefix(evalFrom, modelroute.EvalPrefix) {
+		return nil, nil, fmt.Errorf("-eval-from %s: name the agent machine whose grants replay uses", evalFrom)
+	}
 	for m := range g {
 		if strings.HasPrefix(m, modelroute.EvalPrefix) {
 			return nil, nil, fmt.Errorf("-grant %s: replay machines take -eval-from's grants, never their own", m)
@@ -297,7 +302,7 @@ func serveCmd(args []string) error {
 	if rule, err = startRule(base, *routingPath); err != nil {
 		log.Printf("routing: starting from -rule: %v", err)
 	}
-	g, rt, err := modelRouting(rule, g, pok, *builderFrom)
+	g, rt, err := modelRouting(rule, g, pok, *builderFrom, *evalFrom)
 	if err != nil {
 		return err
 	}

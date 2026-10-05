@@ -90,7 +90,7 @@ func TestTheBuilderNeverRunsTheAgentImage(t *testing.T) {
 // STATUS says that learning from failed, corrected, slow or costly tasks
 // is not running; with no builder attempted, nothing is said.
 func TestStatusSaysWhenTheBuilderDidNotStart(t *testing.T) {
-	var l learning
+	l := testLearning(t)
 	if n := l.builderNote(); n != "" {
 		t.Fatalf("no builder attempted, note %q", n)
 	}
@@ -99,6 +99,37 @@ func TestStatusSaysWhenTheBuilderDidNotStart(t *testing.T) {
 	if n := l.builderNote(); n != builderOffNote {
 		t.Fatalf("note %q", n)
 	}
+	// UX R1 on #126: after LEARNING OFF, a restart would not help.
+	if reply, ok := l.sched.Text(context.Background(), "LEARNING OFF", true); !ok || l.learningOn() {
+		t.Fatalf("LEARNING OFF: %q", reply)
+	}
+	if n := l.builderNote(); n != "" {
+		t.Fatalf("note with learning off %q", n)
+	}
+}
+
+// testLearning opens agentosd's learning plane in a temporary directory
+// and attaches it to a running daemon.
+func testLearning(t *testing.T) *learning {
+	t.Helper()
+	dir := t.TempDir()
+	cfg := daemon.Config{
+		JournalPath: filepath.Join(dir, "journal.log"), SocketDir: filepath.Join(dir, "run"),
+		OwnerNumber: ownerNum, ModemUID: os.Getuid(), Admission: admission.Config{CapacityMB: 4500, HeadroomMB: 600},
+		OwnerState: filepath.Join(dir, "owner.json"),
+	}
+	lp, err := openLearning(learnPaths{Dir: dir, Spare: filepath.Join(dir, "spare.json")}, false, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	d, err := daemon.Run(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lp.attach(ctx, d)
+	return lp
 }
 
 // fakeBuilderMachines is a vm manager with leftover builder machines and
@@ -125,16 +156,8 @@ func (f *fakeBuilderMachines) DataLabel(string) string { return "private" }
 // and to builder machines' services, destroys builder machines a
 // previous run left, and leaves no STATUS note.
 func TestOpenBuilderAttachesTheBuilder(t *testing.T) {
+	lp := testLearning(t)
 	dir := t.TempDir()
-	cfg := daemon.Config{
-		JournalPath: filepath.Join(dir, "journal.log"), SocketDir: filepath.Join(dir, "run"),
-		OwnerNumber: ownerNum, ModemUID: os.Getuid(), Admission: admission.Config{CapacityMB: 4500, HeadroomMB: 600},
-		OwnerState: filepath.Join(dir, "owner.json"),
-	}
-	lp, err := openLearning(learnPaths{Dir: dir, Spare: filepath.Join(dir, "spare.json")}, false, &cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
 	f := &fakeBuilderMachines{}
 	var s lateServices
 	lp.startBuilder(f, images{"builder": "/img/builder", "openclaw": "/img/openclaw"}, &s,
