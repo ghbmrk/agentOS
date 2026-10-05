@@ -447,6 +447,10 @@ func (s *Scheduler) Execute(_ context.Context, in journal.Intent, _ int) journal
 			next.Paused[r.Loop] = true
 		}
 	case KindBudget:
+		if in.Action == ActionBudgetLower && r.Calls > prev.SpareCalls {
+			// Check allowed it as narrowing; the budget changed since.
+			return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "not a lower budget"}
+		}
 		next.SpareCalls = r.Calls
 	}
 	if r.Kind == KindBudget && s.cfg.Spare != nil {

@@ -60,7 +60,15 @@ type Harvester struct {
 
 	mu     sync.Mutex
 	loaded bool
-	added  map[string]string // case ID -> task key of its intent
+	st     harvested
+}
+
+// harvested is what the harvester persists. Tasks is written before a case
+// goes to the pipeline and Added after, so a crash between the two leaves a
+// task excluded from mining but not counted as evidence (fail safe, CHG-1).
+type harvested struct {
+	Tasks map[string]string `json:"tasks"` // case ID -> task key of its intent
+	Added map[string]bool   `json:"added"` // cases the pipeline holds
 }
 
 var ErrAction = errors.New("loops: unknown owner action")
@@ -103,17 +111,26 @@ func (h *Harvester) Harvest(o Outcome) error {
 	if err := h.loadLocked(); err != nil {
 		return err
 	}
-	if err := h.Pipeline.AddTaskCase(c); err != nil {
-		if errors.Is(err, change.ErrDuplicate) {
-			// A later action on the same item (UNDO after YES) is
-			// recorded in the journal; the suite keeps the first.
-			return nil
+	if h.st.Added[c.ID] {
+		// A later action on the same item (UNDO after YES) is recorded in
+		// the journal; the suite keeps the first.
+		return nil
+	}
+	if _, ok := h.st.Tasks[c.ID]; !ok {
+		h.st.Tasks[c.ID] = taskKey
+		if err := h.saveLocked(); err != nil {
+			delete(h.st.Tasks, c.ID)
+			return err
 		}
+	}
+	// A failure from here on is retryable: calling Harvest again records
+	// the verdict again (the same verdict) and adds the case.
+	if err := h.Pipeline.AddTaskCase(c); err != nil && !errors.Is(err, change.ErrDuplicate) {
 		return err
 	}
-	h.added[c.ID] = taskKey
-	b, _ := json.Marshal(h.added)
-	if err := h.Store.Save(b); err != nil {
+	h.st.Added[c.ID] = true
+	if err := h.saveLocked(); err != nil {
+		delete(h.st.Added, c.ID)
 		return err
 	}
 	if h.Wake != nil {
@@ -137,14 +154,28 @@ func (h *Harvester) loadLocked() error {
 	if err != nil {
 		return err
 	}
-	h.added = map[string]string{}
+	h.st = harvested{}
 	if b != nil {
-		if err := json.Unmarshal(b, &h.added); err != nil {
+		if err := json.Unmarshal(b, &h.st); err != nil {
 			return err
 		}
 	}
+	if h.st.Tasks == nil {
+		h.st.Tasks = map[string]string{}
+	}
+	if h.st.Added == nil {
+		h.st.Added = map[string]bool{}
+	}
 	h.loaded = true
 	return nil
+}
+
+func (h *Harvester) saveLocked() error {
+	b, err := json.Marshal(h.st)
+	if err != nil {
+		return err
+	}
+	return h.Store.Save(b)
 }
 
 // Evidence is what Loop 1 may know about the harvested cases: which tasks
@@ -173,15 +204,20 @@ func (h *Harvester) Evidence() (Evidence, error) {
 		inDev[c.ID] = true
 	}
 	ev := Evidence{heldTasks: map[string]bool{}, Dev: dev}
-	ids := make([]string, 0, len(h.added))
-	for id := range h.added {
+	ids := make([]string, 0, len(h.st.Tasks))
+	for id := range h.st.Tasks {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
 	for _, id := range ids {
-		if !inDev[id] {
+		if inDev[id] {
+			continue
+		}
+		// A task whose case may be held out is never mined, even if the
+		// pipeline may not have it; only cases it holds count.
+		ev.heldTasks[h.st.Tasks[id]] = true
+		if h.st.Added[id] {
 			ev.HeldOut++
-			ev.heldTasks[h.added[id]] = true
 		}
 	}
 	return ev, nil

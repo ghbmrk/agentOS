@@ -467,3 +467,57 @@ func TestHarvestNeverWidensTheJournalLabel(t *testing.T) {
 		t.Fatalf("%d cases", len(cs.got))
 	}
 }
+
+// failSecond saves once, then fails: a crash between the harvester's two
+// writes.
+type failSecond struct {
+	change.MemStore
+	n int
+}
+
+func (f *failSecond) Save(b []byte) error {
+	f.n++
+	if f.n > 1 {
+		return errors.New("disk gone")
+	}
+	return f.MemStore.Save(b)
+}
+
+func TestACrashMidHarvestStillKeepsTheTaskFromTheBuilder(t *testing.T) {
+	r := newRig(t)
+	st := &failSecond{}
+	h := &Harvester{J: r.eng, Pipeline: r.p, Store: st}
+	// Find a task whose case lands held out, so it must never be mined.
+	var id string
+	for i := 0; ; i++ {
+		id = fmt.Sprintf("crash-%d", i)
+		r.task(id, "gc"+id, "mail", "draft", "private")
+		st.n = 0
+		err := h.Harvest(Outcome{Intent: id, Action: Edited, Input: []byte("procedures/mail"), Output: []byte("v1"), Correction: []byte("v2")})
+		if err == nil {
+			t.Fatal("second save did not fail")
+		}
+		dev := false
+		for _, c := range r.p.Dev(change.ClassTask) {
+			dev = dev || c.ID == id
+		}
+		if !dev {
+			break
+		}
+	}
+	// The box restarts: a fresh harvester over what was saved.
+	h2 := &Harvester{J: r.eng, Pipeline: r.p, Store: &st.MemStore}
+	ev, err := h2.Evidence()
+	must(t, err)
+	if !ev.Held("goal:gc" + id) {
+		t.Fatal("a held-out task the pipeline holds is not excluded from mining after a crash")
+	}
+	if ev.HeldOut != 0 {
+		t.Fatalf("an unconfirmed case counted as evidence: %d", ev.HeldOut)
+	}
+	// Retrying the harvest completes it.
+	must(t, h2.Harvest(Outcome{Intent: id, Action: Edited, Input: []byte("procedures/mail"), Output: []byte("v1"), Correction: []byte("v2")}))
+	if ev, _ := h2.Evidence(); ev.HeldOut != 1 {
+		t.Fatalf("after retry: held out %d", ev.HeldOut)
+	}
+}
