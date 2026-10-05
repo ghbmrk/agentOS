@@ -188,32 +188,44 @@ func TestHW8VerifiedIsPerBoot(t *testing.T) {
 	}
 }
 
-// A floor beyond verified time is impossible, so a verified check replaces
-// it (a corrupt or tampered file), and it is logged.
+// A floor beyond authenticated time is impossible, so an NTS-verified
+// check replaces it (a corrupt or tampered file), and it is logged. Plain
+// NTP or carrier time, which an on-path attacker can forge, never rolls
+// the floor back for later boots (security R1 on #177); that is logged
+// once.
 func TestHW8FloorAheadOfVerifiedTimeIsReplaced(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "clock.json")
-	r := newRig()
-	rtc := r.wall
-	g := rtcGuard(t, r, path, &rtc)
-	g.Check(bg)
-	v := readSaved(t, path)
-	v.Floor = r.wall.Add(400 * 24 * time.Hour)
-	if err := writeAtomic(path, v); err != nil {
-		t.Fatal(err)
-	}
-	var logs []string
-	r.reboot(r.wall)
-	g = r.guard(t, func(c *Config) {
-		c.StatePath = path
-		c.BootID = func() string { return r.boot }
-		c.Logf = func(f string, a ...any) { logs = append(logs, f) }
-	})
-	g.Check(bg)
-	if got := readSaved(t, path).Floor; !got.Equal(r.wall) {
-		t.Fatalf("floor %v, want verified now %v", got, r.wall)
-	}
-	if len(logs) == 0 {
-		t.Fatal("not logged")
+	for _, kind := range []SyncKind{SyncedPlain, SyncedNTS} {
+		path := filepath.Join(t.TempDir(), "clock.json")
+		r := newRig()
+		rtc := r.wall
+		g := rtcGuard(t, r, path, &rtc)
+		g.Check(bg)
+		v := readSaved(t, path)
+		ahead := r.wall.Add(400 * 24 * time.Hour)
+		v.Floor = ahead
+		if err := writeAtomic(path, v); err != nil {
+			t.Fatal(err)
+		}
+		var logs []string
+		r.reboot(r.wall)
+		g = r.guard(t, func(c *Config) {
+			c.StatePath = path
+			c.BootID = func() string { return r.boot }
+			c.Logf = func(f string, a ...any) { logs = append(logs, f) }
+			c.Sync = func() (SyncKind, error) { return kind, nil }
+		})
+		g.Check(bg)
+		g.Check(bg)
+		want := ahead
+		if kind == SyncedNTS {
+			want = r.wall
+		}
+		if got := readSaved(t, path).Floor; !got.Equal(want) {
+			t.Errorf("kind %d: floor %v, want %v", kind, got, want)
+		}
+		if len(logs) != 1 {
+			t.Errorf("kind %d: logged %d times", kind, len(logs))
+		}
 	}
 }
 

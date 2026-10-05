@@ -232,11 +232,25 @@ func about(d time.Duration) string {
 	return fmt.Sprintf("about %d %s", n, unit)
 }
 
+// SyncKind is how an NTP sync was verified.
+type SyncKind int
+
+const (
+	NotSynced   SyncKind = iota
+	SyncedPlain          // at least three unauthenticated sources combined
+	SyncedNTS            // the selected source is NTS-authenticated
+)
+
 // Config sets up a Guard.
 type Config struct {
 	// Synced reports a verified NTP sync (Synced: chronyd, through chronyc,
-	// HW-8 and security T4, T5). An error counts as not synced. Required.
+	// HW-8 and security T4, T5). An error counts as not synced. Synced or
+	// Sync is required.
 	Synced func() (bool, error)
+	// Sync, when set, is used instead of Synced and says how the sync was
+	// verified (Sync: chronyd). Only an NTS sync may lower the saved floor
+	// (security R1 on #177); a sync through Synced counts as plain.
+	Sync func() (SyncKind, error)
 	// RTC reads the host's hardware clock as the kernel does, as if UTC
 	// (RTC, from sysfs, on Linux). At a verified sync the guard learns its
 	// offset from UTC for BootEstimate (potency C1, security T7). Nil
@@ -317,10 +331,13 @@ type Guard struct {
 	// verified time ever seen, which true time cannot be before; it bounds
 	// Latest and Earliest while unverified and only advances (security T3).
 	// offset: the hardware clock minus UTC at the last verified sync.
-	verified   bool
-	floor      time.Time
-	offset     time.Duration
-	haveOffset bool
+	verified bool
+	floor    time.Time
+	// floorKeptLogged: a floor ahead of unauthenticated time was logged
+	// this boot.
+	floorKeptLogged bool
+	offset          time.Duration
+	haveOffset      bool
 
 	running atomic.Int32 // Run loops live
 	fmu     sync.Mutex
@@ -349,7 +366,7 @@ type notice struct {
 // New makes a Guard and loads StatePath. Nothing is read from the sources
 // until the first Check or Now.
 func New(cfg Config) (*Guard, error) {
-	if cfg.Synced == nil {
+	if cfg.Sync == nil && cfg.Synced == nil {
 		return nil, errors.New("clock: Synced is required")
 	}
 	if cfg.Tolerance <= 0 {
@@ -473,9 +490,22 @@ func (g *Guard) allowedLocked(time.Duration) time.Duration {
 	return g.cfg.Tolerance + anchorSlack
 }
 
+// syncKind asks Sync, or Synced as plain.
+func (g *Guard) syncKind() (SyncKind, error) {
+	if g.cfg.Sync != nil {
+		return g.cfg.Sync()
+	}
+	ok, err := g.cfg.Synced()
+	if !ok {
+		return NotSynced, err
+	}
+	return SyncedPlain, err
+}
+
 func (g *Guard) check(ctx context.Context) Status {
-	synced, err := g.cfg.Synced()
-	synced = synced && err == nil
+	kind, err := g.syncKind()
+	synced := kind != NotSynced && err == nil
+	nts := synced && kind == SyncedNTS
 	var carrier time.Time
 	have := false
 	if g.cfg.Carrier != nil {
@@ -540,11 +570,16 @@ func (g *Guard) check(ctx context.Context) Status {
 		switch {
 		case now.After(g.floor):
 			g.floor = now
-		case g.floor.Sub(now) > g.cfg.Tolerance:
-			// Verified time is the authority: a floor ahead of it is a
-			// corrupt or tampered file, never true time.
+		case g.floor.Sub(now) > g.cfg.Tolerance && nts:
+			// Authenticated time is the authority: a floor ahead of it is
+			// a corrupt or tampered file, never true time.
 			g.cfg.Logf("clock: saved floor %v is ahead of verified time %v; replaced", g.floor, now)
 			g.floor = now
+		case g.floor.Sub(now) > g.cfg.Tolerance && !g.floorKeptLogged:
+			// Plain NTP or carrier time can be forged on path: it never
+			// rolls the floor back (security R1 on #177).
+			g.cfg.Logf("clock: saved floor %v is ahead of unauthenticated time %v; kept", g.floor, now)
+			g.floorKeptLogged = true
 		}
 		if synced {
 			g.learnOffsetLocked(now)

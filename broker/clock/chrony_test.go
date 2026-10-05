@@ -39,40 +39,45 @@ const (
 	srcThree      = "^,*,192.0.2.1,2,6,377,12,0,0,0\n^,+,192.0.2.2,2,6,377,12,0,0,0\n^,+,192.0.2.3,2,6,377,12,0,0,0\n^,-,192.0.2.4,2,6,377,12,0,0,0\n"
 	srcTwo        = "^,*,192.0.2.1,2,6,377,12,0,0,0\n^,+,192.0.2.2,2,6,377,12,0,0,0\n^,-,192.0.2.3,2,6,377,12,0,0,0\n"
 	authNTS       = "192.0.2.1,NTS,1,15,256,33m,0,0,8,100\n198.51.100.7,NTS,0,0,0,-,0,0,0,0\n"
+	authNTSKey0   = "192.0.2.1,NTS,0,15,256,33m,0,0,8,100\n"
 	authNone      = "192.0.2.1,-,0,0,0,-,0,0,0,0\n"
 )
 
 // Security T4, T5: a sync is verified when chronyd is synchronised at a
 // real stratum and its selected source is NTS-authenticated, or at least
 // three sources are combined; a chronyc error, "Not synchronised", or
-// stratum 0 or 16 is unsynced.
+// stratum 0 or 16 is unsynced. Which kind it is decides whether the floor
+// may be lowered (security R1 on #177); an NTS key ID of 0 is a working
+// source (R2).
 func TestHW8SyncedFromChrony(t *testing.T) {
 	for _, c := range []struct {
 		name                    string
 		tracking, sources, auth string
 		authErr                 error
-		want                    bool
+		want                    SyncKind
 	}{
-		{"NTS selected", trackOK, srcNTS, authNTS, nil, true},
-		{"three plain NTP agree", trackOK, srcThree, authNone, nil, true},
-		{"three plain NTP, authdata refused", trackOK, srcThree, "", errors.New("501 Not authorised"), true},
-		{"two plain NTP", trackOK, srcTwo, authNone, nil, false},
-		{"one plain NTP", trackOK, srcNTS, authNone, nil, false},
-		{"NTS listed but authdata refused", trackOK, srcNTS, "", errors.New("501 Not authorised"), false},
-		{"not synchronised", trackUnsynced, srcThree, authNTS, nil, false},
-		{"stratum 0", trackStratum0, srcThree, authNone, nil, false},
-		{"stratum 16", trackStratum6, srcThree, authNone, nil, false},
-		{"garbage", "x\n", srcThree, authNone, nil, false},
-		{"empty", "", "", "", nil, false},
+		{"NTS selected", trackOK, srcNTS, authNTS, nil, SyncedNTS},
+		{"NTS selected, key ID 0", trackOK, srcNTS, authNTSKey0, nil, SyncedNTS},
+		{"NTS selected among three", trackOK, srcThree, authNTS, nil, SyncedNTS},
+		{"three plain NTP agree", trackOK, srcThree, authNone, nil, SyncedPlain},
+		{"three plain NTP, authdata refused", trackOK, srcThree, "", errors.New("501 Not authorised"), SyncedPlain},
+		{"two plain NTP", trackOK, srcTwo, authNone, nil, NotSynced},
+		{"one plain NTP", trackOK, srcNTS, authNone, nil, NotSynced},
+		{"NTS listed but authdata refused", trackOK, srcNTS, "", errors.New("501 Not authorised"), NotSynced},
+		{"not synchronised", trackUnsynced, srcThree, authNTS, nil, NotSynced},
+		{"stratum 0", trackStratum0, srcThree, authNone, nil, NotSynced},
+		{"stratum 16", trackStratum6, srcThree, authNone, nil, NotSynced},
+		{"garbage", "x\n", srcThree, authNone, nil, NotSynced},
+		{"empty", "", "", "", nil, NotSynced},
 	} {
 		run := chronycOut(c.tracking, c.sources, c.auth, c.authErr)
-		got, err := chronySynced(context.Background(), run)
+		got, err := chronySync(context.Background(), run)
 		if got != c.want {
 			t.Errorf("%s: %v (%v), want %v", c.name, got, err, c.want)
 		}
 	}
 	fail := func(context.Context, ...string) ([]byte, error) { return nil, errors.New("no chronyd") }
-	if got, err := chronySynced(context.Background(), fail); got || err == nil {
+	if got, err := chronySync(context.Background(), fail); got != NotSynced || err == nil {
 		t.Errorf("chronyc failing: %v, %v", got, err)
 	}
 }
@@ -199,7 +204,7 @@ func TestOnlyChronycIsExecuted(t *testing.T) {
 		queries = append(queries, args...)
 		return nil, errors.New("not run")
 	}
-	chronySynced(context.Background(), run)
+	chronySync(context.Background(), run)
 	for _, q := range queries {
 		if q != "tracking" && q != "sources" && q != "authdata" {
 			t.Errorf("chronyc %s", q)

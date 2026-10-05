@@ -22,29 +22,37 @@ func runChronyc(ctx context.Context, args ...string) ([]byte, error) {
 	return exec.CommandContext(ctx, chronyc, append([]string{"-c", "-n"}, args...)...).Output()
 }
 
-// Synced reports a verified NTP sync from chronyd (HW-8; security T4, T5).
+// Sync reports how chronyd's sync is verified (HW-8; security T4, T5, and
+// R1 on #177): SyncedNTS when its selected source is NTS-authenticated,
+// SyncedPlain when at least three unauthenticated sources are combined.
 // It never reads the kernel's sync flag: chronyd keeps that set, so the
 // kernel never writes the host's hardware clock (chrony/chrony.conf).
-func Synced() (bool, error) { return chronySynced(context.Background(), runChronyc) }
+func Sync() (SyncKind, error) { return chronySync(context.Background(), runChronyc) }
 
-// chronySynced: chronyd is synchronised at a real stratum, and its selected
+// Synced reports a verified NTP sync of either kind.
+func Synced() (bool, error) {
+	k, err := Sync()
+	return k != NotSynced, err
+}
+
+// chronySync: chronyd is synchronised at a real stratum, and its selected
 // source is NTS-authenticated or at least three sources are combined.
-func chronySynced(ctx context.Context, run func(context.Context, ...string) ([]byte, error)) (bool, error) {
+func chronySync(ctx context.Context, run func(context.Context, ...string) ([]byte, error)) (SyncKind, error) {
 	out, err := run(ctx, "tracking")
 	if err != nil {
-		return false, err
+		return NotSynced, err
 	}
 	f := strings.Split(strings.TrimSpace(string(out)), ",")
 	if len(f) < 14 {
-		return false, errors.New("clock: chronyc tracking: unexpected output")
+		return NotSynced, errors.New("clock: chronyc tracking: unexpected output")
 	}
 	stratum, err := strconv.Atoi(f[2])
 	if err != nil || stratum <= 0 || stratum >= 16 || f[13] == "Not synchronised" {
-		return false, nil
+		return NotSynced, nil
 	}
 	out, err = run(ctx, "sources")
 	if err != nil {
-		return false, err
+		return NotSynced, err
 	}
 	selected, combined := "", 0
 	for _, l := range strings.Split(string(out), "\n") {
@@ -61,20 +69,23 @@ func chronySynced(ctx context.Context, run func(context.Context, ...string) ([]b
 		}
 	}
 	if selected == "" {
-		return false, nil
+		return NotSynced, nil
 	}
+	plain := NotSynced
 	if combined >= 3 {
-		return true, nil
+		plain = SyncedPlain
 	}
 	out, err = run(ctx, "authdata")
 	if err != nil {
-		return false, nil // NTS cannot be confirmed; fewer than three sources
+		return plain, nil // NTS cannot be confirmed
 	}
+	// chronyd accepts no unauthenticated reply from an nts source, so the
+	// mode is enough; the key ID counts key establishments from 0 (R2).
 	for _, l := range strings.Split(string(out), "\n") {
 		f := strings.Split(l, ",")
-		if len(f) >= 3 && f[0] == selected && f[1] == "NTS" && f[2] != "0" {
-			return true, nil
+		if len(f) >= 2 && f[0] == selected && f[1] == "NTS" {
+			return SyncedNTS, nil
 		}
 	}
-	return false, nil
+	return plain, nil
 }
