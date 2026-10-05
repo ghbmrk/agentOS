@@ -201,6 +201,34 @@ func TestOSS6FailedBatchIsResentUnchanged(t *testing.T) {
 	}
 }
 
+// Turning sharing off stops what is already queued: Clear discards every
+// waiting item and an unconfirmed batch, durably, and nothing of it is
+// published afterwards (UX on #163).
+func TestOSS6ClearStopsWhatIsQueued(t *testing.T) {
+	g := newRig(t, 0)
+	must(t, g.p.Queue("artifact", []byte("a")))
+	g.out.fail = errors.New("offline")
+	g.day(1, 12*time.Hour)
+	if err := g.p.Release(); err == nil {
+		t.Fatal("send error lost")
+	}
+	must(t, g.p.Queue("artifact", []byte("b")))
+	n, err := g.p.Clear()
+	must(t, err)
+	if n != 2 || g.p.Len() != 0 {
+		t.Fatalf("Clear discarded %d, %d left", n, g.p.Len())
+	}
+	g.out.fail = nil
+	g.reopen(t)
+	for d := 2; d <= 5; d++ {
+		g.day(d, 12*time.Hour)
+		must(t, g.p.Release())
+	}
+	if len(g.out.got) != 1 {
+		t.Fatalf("published after Clear: %+v", g.out.got[1:])
+	}
+}
+
 // Only known kinds, bounded payloads and a bounded queue are accepted;
 // a refusal never says what the payload was.
 func TestOSS6QueueIsBounded(t *testing.T) {

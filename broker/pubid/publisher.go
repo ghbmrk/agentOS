@@ -159,6 +159,27 @@ func (p *Publisher) Queue(kind string, payload []byte) error {
 	return nil
 }
 
+// Clear discards every item not yet published, and a formed batch whose
+// delivery was not confirmed, so turning sharing off stops what is already
+// queued (UX on #163). It returns how many items were discarded. A batch
+// the sender accepted before an error may already be out; nothing can
+// recall that.
+func (p *Publisher) Clear() (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	old := p.st
+	n := len(p.st.Items)
+	if p.st.Pending != nil {
+		n += len(p.st.Pending.Batch)
+	}
+	p.st.Items, p.st.Pending = nil, nil
+	if err := p.save(); err != nil {
+		p.st = old
+		return 0, err
+	}
+	return n, nil
+}
+
 // Len is how many items wait.
 func (p *Publisher) Len() int {
 	p.mu.Lock()
