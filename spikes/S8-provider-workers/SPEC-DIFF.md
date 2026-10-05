@@ -22,7 +22,7 @@ Lens notes for the gate are at the end.
   
   Either way the CLI's non-interactive mode takes the brief, and the plan's credential is never used by any other client. A provider without a qualified CLI, or whose terms allow neither mode, uses an API key injected by the broker's egress proxy into declared inference endpoints only (ADP-10).
 
-Rationale: the old text allowed a consumer login only with tools off. S8 shows both CLIs run as full workers, and that the terms, not the mechanics, decide custody (Anthropic: "developers may not collect, store, or intermediate Claude.ai credentials or session tokens").
+Rationale: the old text allowed a consumer login only with tools off. S8 shows both CLIs run as full workers, and that the terms, not the mechanics, decide custody (Anthropic, code.claude.com/docs/en/legal-and-compliance, read live 2026-10-05: "developers may not collect, store, or intermediate Claude.ai credentials or session tokens"). OpenAI's position on a proxy holding ChatGPT-managed tokens is unverified (search summaries only).
 
 ## RES-5 (new, after RES-4)
 

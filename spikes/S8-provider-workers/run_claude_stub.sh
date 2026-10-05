@@ -18,5 +18,5 @@ env -i PATH="$PATH" HOME="$W/home" TERM=dumb \
   timeout 120 claude -p "write the S8 marker" \
     --output-format stream-json --verbose \
     --allowedTools "Bash" --max-turns 4 < /dev/null \
-  > "$D/results/claude_stream.jsonl" 2> "$D/results/claude_stderr.txt" || echo "exit=$?"
+  > "$D/results/claude_stream.jsonl" 2>/dev/null || echo "exit=$?"
 echo "marker: $(cat s8_marker.txt 2>/dev/null || echo MISSING)"
