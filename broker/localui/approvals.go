@@ -74,7 +74,7 @@ func (s *Server) approvals(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/unlock?next=/approvals/", http.StatusSeeOther)
 			return
 		}
-		v.Err = "Could not reach the owner channel. Reload to try again."
+		v.Err = unreachableText
 	}
 	for _, q := range rq.Requests {
 		v.Requests = append(v.Requests, s.requestView(q, sess))
@@ -135,7 +135,7 @@ func (s *Server) answer(ctx context.Context, tok, sess string, f map[string][]st
 	case refused(err, localapi.ErrLimited):
 		return "", "Too many wrong codes from this phone. Wait a minute, then try again."
 	case err != nil:
-		return "", "Could not reach the owner channel. Try again."
+		return "", unreachableText
 	}
 	switch a.Refusal {
 	case "":
@@ -162,6 +162,9 @@ func (s *Server) answer(ctx context.Context, tok, sess string, f map[string][]st
 	}
 	return "", stalePage
 }
+
+// unreachableText: agentosd did not answer, so nothing was decided (UX-2wb-1).
+const unreachableText = "The box isn't answering right now. Nothing was approved or denied. Reload to try again."
 
 const stalePage = "This page is out of date. Check the request below and answer again."
 

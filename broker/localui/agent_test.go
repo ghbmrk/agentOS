@@ -2,6 +2,8 @@ package localui
 
 import (
 	"context"
+	"encoding/json"
+	"html"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -77,7 +79,7 @@ func TestWithoutSetupHooksEverySetupRouteIsRefused(t *testing.T) {
 	for _, path := range []string{"/setup", "/setup/", "/setup/network", "/setup/number", "/setup/number-code", "/setup/claim",
 		"/setup/codes", "/setup/recovery", "/setup/host", "/setup/ai-key", "/setup/ai-device", "/setup/restart", "/setup/anything"} {
 		for _, m := range []string{"GET", "POST"} {
-			if w := get(m, path); w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "isn't ready yet") {
+			if w := get(m, path); w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "isn't ready yet. This page reloads by itself. If it stays like this for more than a few minutes, turn the PC off and on again.") {
 				t.Errorf("%s %s: %d", m, path, w.Code)
 			}
 		}
@@ -99,5 +101,34 @@ func TestWithoutSetupHooksEverySetupRouteIsRefused(t *testing.T) {
 	}
 	if w := get("POST", "/setup/number"); w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("setup with agentosd up: %d", w.Code)
+	}
+}
+
+// UX-2wb-1: when agentosd does not answer, the Approvals page says the box
+// isn't answering and that nothing was decided, naming no internal part.
+func TestApprovalsSayWhenTheBoxIsNotAnswering(t *testing.T) {
+	s, err := New(Config{AP: testAP()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok := strings.Repeat("ab", localapi.TokenBytes)
+	s.SetOwner(InProcess{
+		localapi.OpSession: func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
+			return localapi.Session{Token: tok, Until: time.Now().Add(time.Hour)}, nil
+		},
+		localapi.OpRequests: func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
+			return nil, sockets.ErrFailed
+		},
+	})
+	req := httptest.NewRequest("GET", "http://10.42.0.1/approvals/", nil)
+	req.RemoteAddr = "10.42.0.20:5000"
+	req.AddCookie(&http.Cookie{Name: cookieName, Value: tok})
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, req)
+	if body := w.Body.String(); w.Code != 200 || !strings.Contains(body, html.EscapeString(unreachableText)) || strings.Contains(body, "owner channel") {
+		t.Fatalf("%d %s", w.Code, body)
+	}
+	if limitedText != "Too many wrong codes were tried on this Wi-Fi. Wait a minute, then try again." {
+		t.Fatalf("limited text %q", limitedText) // UX-2wb-4
 	}
 }

@@ -190,12 +190,14 @@ func (s *Server) signOut(_ context.Context, _ sockets.Peer, args json.RawMessage
 // session reports a live token's session; a dead one is unauthorized.
 func (s *Server) session(_ context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
 	var in localapi.Auth
-	if decode(args, &in) != nil || !s.valid(in.Token) {
+	if decode(args, &in) != nil {
 		return nil, errUnauthorized
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return localapi.Session{Token: in.Token, Until: s.sessions[sha256.Sum256([]byte(in.Token))].until}, nil
+	ses, ok := s.live(in.Token)
+	if !ok {
+		return nil, errUnauthorized
+	}
+	return localapi.Session{Token: in.Token, Until: ses.until}, nil
 }
 
 // authed wraps an op that takes only a token.
@@ -326,8 +328,15 @@ func (s *Server) mint(until time.Time, locks uint64) string {
 // valid says tok names a live session: minted here, before its time, and
 // with no session lock since. A dead one is dropped.
 func (s *Server) valid(tok string) bool {
+	_, ok := s.live(tok)
+	return ok
+}
+
+// live is tok's session, read in the same critical section that checks it
+// (Security S2 on step b).
+func (s *Server) live(tok string) (session, bool) {
 	if len(tok) != 2*localapi.TokenBytes {
-		return false
+		return session{}, false
 	}
 	locks := s.cfg.Owner.LocalStatus().Locks
 	k := sha256.Sum256([]byte(tok))
@@ -335,13 +344,13 @@ func (s *Server) valid(tok string) bool {
 	defer s.mu.Unlock()
 	ses, ok := s.sessions[k]
 	if !ok {
-		return false
+		return session{}, false
 	}
 	if !s.cfg.Now().Before(ses.until) || locks != ses.locks {
 		delete(s.sessions, k)
-		return false
+		return session{}, false
 	}
-	return true
+	return ses, true
 }
 
 // fresh says tok's session signed in within FreshFor.

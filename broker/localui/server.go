@@ -454,7 +454,7 @@ func (s *Server) proofSignIn(w http.ResponseWriter, r *http.Request, ticket stri
 
 const (
 	wrongCodeText = "That code did not work. Each code works once; wait for the next one."
-	limitedText   = "Too many wrong codes on the box's Wi-Fi. Wait a minute, then try again."
+	limitedText   = "Too many wrong codes were tried on this Wi-Fi. Wait a minute, then try again."
 )
 
 // checkSignIn returns the new session's token.

@@ -188,7 +188,7 @@ form { margin: .6em 0 1.2em; }
 
 {{define "notready"}}{{template "head" "30"}}
 <h1>AgentOS</h1>
-<p>This box isn't ready yet. This page reloads by itself; if it stays like this, restart the box.</p>
+<p>This box isn't ready yet. This page reloads by itself. If it stays like this for more than a few minutes, turn the PC off and on again.</p>
 {{template "foot"}}{{end}}
 {{define "home"}}{{template "head" ""}}
 <h1>AgentOS</h1>
