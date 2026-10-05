@@ -611,6 +611,32 @@ func TestSeverityOrder(t *testing.T) {
 	if d := r3.g.Digest(); len(d) != 1 || d[0] != want || len(r3.c.got) != 0 {
 		t.Fatalf("digest %q\nwant %q", d, want)
 	}
+	// Like an uncomparable installed version, texted once after 7 days.
+	r3.now = r3.now.Add(8 * 24 * time.Hour)
+	r3.pass(t)
+	r3.now = r3.now.Add(24 * time.Hour)
+	r3.pass(t)
+	if len(r3.texts) != 1 || !strings.Contains(r3.texts[0], "Could not read the fixed version in advisory ADV-1 for openssl.") {
+		t.Fatalf("unreadable texts %q", r3.texts)
+	}
+
+	// A High advisory on a later package still gets a pause ahead of Low
+	// ones on earlier packages, past the cap of 3.
+	b4 := cleanBox()
+	b4.pkgs, b4.snap.Advisories = nil, nil
+	for _, n := range []string{"a", "b", "c", "z"} {
+		sev := "low"
+		if n == "z" {
+			sev = "critical"
+		}
+		b4.pkgs = append(b4.pkgs, Package{Name: n, Version: "1.0", Contain: &Target{Kind: "grant", Name: "g-" + n}})
+		b4.snap.Advisories = append(b4.snap.Advisories, Advisory{ID: "ADV-" + n, Package: n, Fixed: "1.1", Severity: sev})
+	}
+	r4 := newGuardRig(t, b4)
+	r4.pass(t)
+	if len(r4.c.got) != 3 || r4.c.got[0].Name != "g-z" {
+		t.Fatalf("paused %+v: the High advisory must be paused first", r4.c.got)
+	}
 }
 
 // LOOP-10: a fix that disables a check, widens authority, or fails a

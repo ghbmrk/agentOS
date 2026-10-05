@@ -340,11 +340,12 @@ func (s *Guard) Pass(ctx context.Context) (int, error) {
 			later = append(later, clearedLine(rec))
 		}
 	}
-	// A version that stays uncomparable for UncomparedAlert is texted once
+	// A version (installed or fixed) that stays uncomparable for
+	// UncomparedAlert is texted once
 	// (arbitrator ruling 1 on #54).
 	for _, id := range sortedKeys(s.st.Open) {
 		rec := s.st.Open[id]
-		if seen[id] && !rec.Texted && strings.HasPrefix(rec.Finding.Detail, uncompared) && now.Sub(rec.At) >= s.cfg.UncomparedAlert {
+		if seen[id] && !rec.Texted && (strings.HasPrefix(rec.Finding.Detail, uncompared) || strings.HasPrefix(rec.Finding.Detail, unreadable)) && now.Sub(rec.At) >= s.cfg.UncomparedAlert {
 			rec.Texted = true
 			s.st.Open[id] = rec
 			later = append(later, findingText(rec.Finding))
