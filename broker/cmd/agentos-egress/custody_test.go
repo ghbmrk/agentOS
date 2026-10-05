@@ -388,6 +388,21 @@ func TestProxySeesOnlyAPIKeys(t *testing.T) {
 	if err := r.c.put("anthropic", []byte(synthetic(t, "sk-ant-"))); err != nil {
 		t.Fatal(err)
 	}
+	// Recovery's reserved entries and any other non-adapter name are not
+	// writable (REC-1, REC-2): a local-UI write could otherwise reseal
+	// backups to another key or lift restricted mode.
+	for _, name := range []string{"recovery-backup-key", "recovery-state", "owner-card", "owner-card-wifi", "x-key"} {
+		if err := r.c.put(name, []byte(synthetic(t, "sk-"))); err != errBadCredential {
+			t.Fatalf("put %s: %v", name, err)
+		}
+	}
+	// An adapter name already held by another kind is not overwritten.
+	if err := r.c.v.Put("openai", vault.KindTOTPSeed, []byte(synthetic(t, "sk-"))); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.c.put("openai", []byte(synthetic(t, "sk-"))); err != errBadCredential {
+		t.Fatalf("other kind overwritten: %v", err)
+	}
 }
 
 // K7: the broker's high-tier check runs here, against the seed in the

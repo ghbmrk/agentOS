@@ -400,9 +400,10 @@ func OpenSealed(vaultPath, keysPath string, f Factor) (*Vault, error) {
 }
 
 // Rekey proves have against the keys file, then replaces every slot of
-// next's kind with one new slot for next. Slots of other kinds stay. A
-// copy of the keys file taken earlier still opens with what it held
-// (CRED-8: replacement protects only against later copies).
+// next's kind with one new slot for next. Slots of other kinds stay. The
+// data key itself does not change: a copy of the keys file taken earlier
+// still opens with what it held (CRED-8), and the data key it yields also
+// opens later copies of the vault.
 func Rekey(keysPath string, have, next Factor) error {
 	defer wipeFactor(have)
 	defer wipeFactor(next)
