@@ -930,7 +930,7 @@ func TestVaultInterruptedPassphraseChange(t *testing.T) {
 	r, fv := vaultRig(t)
 	fv.interrupted = true
 	res := r.upload(nil, "not the words")
-	if !strings.Contains(res.Body, "A passphrase change was interrupted. Try your new passphrase.") ||
+	if !strings.Contains(res.Body, "A passphrase change was interrupted. Try your new passphrase, or your old one if that fails.") ||
 		strings.Contains(res.Body, "Those words do not open this box") {
 		t.Fatalf("interrupted change:\n%s", res.Body)
 	}

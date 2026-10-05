@@ -582,7 +582,7 @@ func vaultText(err error) string {
 	case "the passphrase does not open this vault":
 		return "Those words do not open this box. Check them against your card, or take the photo again."
 	case "a passphrase change was interrupted; try your new passphrase":
-		return "A passphrase change was interrupted. Try your new passphrase."
+		return "A passphrase change was interrupted. Try your new passphrase, or your old one if that fails."
 	case "wait a moment before trying again":
 		return "Wait a moment, then try again."
 	}
