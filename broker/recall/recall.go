@@ -213,8 +213,9 @@ type Index struct {
 
 	segs     map[uint32]*segInfo
 	active   uint32
-	dirty    map[uint32]bool // segments that lost live lines since the last check
-	unerased map[uint32]bool // segments a failed rewrite left holding deleted data
+	dirty    map[uint32]bool      // segments that lost live lines since the last check
+	unerased map[uint32]bool      // segments a failed rewrite left holding deleted data
+	keepTomb func(id string) bool // tombstones PruneTombstones must keep
 
 	prefs     map[string]Preference
 	tombs     map[string]time.Time // deleted ID -> deletion time
@@ -496,6 +497,15 @@ func (ix *Index) admitLocked(it *Item, unknownReceipt bool) error {
 			it.Label = Private
 		case old.labelBy != "" && it.Label == Public:
 			it.LabelBy = old.labelBy
+		}
+	}
+	// Nothing derived from a deleted item comes in while its tombstone
+	// stands, so a deletion cannot be laundered through a note made from
+	// it (CAP-3). A parent ingested again after its deletion is live and
+	// counts as itself.
+	for _, p := range it.Source.DerivedFrom {
+		if _, gone := ix.tombs[p]; gone && ix.items[p] == nil {
+			return ErrDeleted
 		}
 	}
 	// A derived item is at least as private as its parents, and private if
@@ -905,7 +915,7 @@ func (ix *Index) PruneTombstones(maxAge time.Duration) (int, error) {
 	cut := ix.now().Add(-maxAge)
 	old := map[string]time.Time{}
 	for id, t := range ix.tombs {
-		if t.Before(cut) {
+		if t.Before(cut) && (ix.keepTomb == nil || !ix.keepTomb(id)) {
 			old[id] = t
 			delete(ix.tombs, id)
 		}
@@ -920,6 +930,24 @@ func (ix *Index) PruneTombstones(maxAge time.Duration) (int, error) {
 		return 0, err
 	}
 	return len(old), nil
+}
+
+// KeepTombstones makes PruneTombstones keep any tombstone keep reports
+// as still needed, whatever its age: recall's deletion reach keeps one
+// while an agent lineage still holds the deleted item (recalltool W10).
+func (ix *Index) KeepTombstones(keep func(id string) bool) {
+	ix.mu.Lock()
+	ix.keepTomb = keep
+	ix.mu.Unlock()
+}
+
+// Deleted reports an item ID the owner deleted that is not live again:
+// its tombstone stands and no item holds the ID.
+func (ix *Index) Deleted(id string) bool {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	_, gone := ix.tombs[id]
+	return gone && ix.items[id] == nil
 }
 
 // Preferences returns all preferences, sorted by key (broker side).

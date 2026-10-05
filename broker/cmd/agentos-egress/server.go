@@ -475,10 +475,26 @@ func unlockHandler(c *custody) http.Handler {
 // a high-tier code here (K7). It is a socket of its own, not a path on the
 // model socket, because the model socket forwards whatever path a guest
 // asks for. The answer is a step and a yes or no, never the seed.
+//
+// POST /recall-key hands agentosd the recall index's identity key (recall
+// K5), only while the vault is open.
 func verifyHandler(c *custody) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/recall-key" {
+			key, err := c.recallKey()
+			switch {
+			case err == errLocked:
+				http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			case err != nil:
+				http.Error(w, errInternal.Error(), http.StatusInternalServerError)
+			default:
+				w.Header().Set("Content-Type", "application/octet-stream")
+				w.Write(key)
+			}
+			return
+		}
 		if r.Method != http.MethodPost || r.URL.Path != "/verify" {
-			http.Error(w, "POST /verify only", http.StatusMethodNotAllowed)
+			http.Error(w, "POST /verify or /recall-key only", http.StatusMethodNotAllowed)
 			return
 		}
 		var req modelroute.VerifyRequest

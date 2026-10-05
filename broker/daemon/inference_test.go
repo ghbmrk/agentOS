@@ -83,6 +83,8 @@ var netOK = map[string]allowance{
 	"loopbuild":  {"builder machines' unix listeners, capped (W3-builder)", []string{"net.Listen", "net.Listener", "net.Conn", "net.ErrClosed"}},
 	"journal":    {"flock on the journal file", []string{"syscall.Flock", "syscall.LOCK_EX", "syscall.LOCK_NB"}},
 	"update":     {"flock on the update store", []string{"syscall.Flock", "syscall.LOCK_EX"}},
+	// Recall (CAP-3, #59): one broker per index, as for the journal.
+	"recall": {"flock on the recall store", []string{"syscall.Flock", "syscall.LOCK_EX", "syscall.LOCK_NB"}},
 	"vm/overlay": {"overlay files: xattrs, device nodes, stat, timestamps, and the FICLONE ioctl for copies",
 		[]string{"syscall.EINVAL", "syscall.ENOTDIR", "syscall.ENXIO", "syscall.Getxattr", "syscall.Listxattr",
 			"syscall.Mknod", "syscall.NsecToTimespec", "syscall.O_NOFOLLOW", "syscall.Removexattr", "syscall.SYS_IOCTL",

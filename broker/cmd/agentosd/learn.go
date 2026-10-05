@@ -316,6 +316,22 @@ func (l *learning) forgetTask(goal string) error {
 	return errors.Join(ferr, terr, verr, cerr, herr)
 }
 
+// ForgetTasks is recall's deletion reach into the learning plane
+// (recalltool Cases; CAP-3, change C19): for intents it erases, the
+// harvester's tombstone first, so none is harvested again and none counts
+// as evidence, then the pipeline's task cases and the values kept for
+// them. One method, so the parts cannot be wired apart (security F1 on
+// #59). Idempotent; every part runs even when another fails.
+func (l *learning) ForgetTasks(ids ...string) (int, error) {
+	herr := l.harvest.ForgetIntents(ids)
+	n, cerr := l.pipe.ForgetTasks(ids...)
+	var verr error
+	if l.values != nil {
+		verr = l.values.forgetSteps(ids)
+	}
+	return n, errors.Join(herr, cerr, verr)
+}
+
 // attach binds the running daemon's engine and admission and starts the
 // scheduler. Before it, the box reads as busy and stopped: no loop work.
 func (l *learning) attach(ctx context.Context, d *daemon.Daemon) {

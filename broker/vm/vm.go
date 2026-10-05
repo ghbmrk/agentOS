@@ -107,6 +107,10 @@ type Snapshot struct {
 	Label   Label // the machine's label when taken
 	Image   string
 	Taken   time.Time
+	// Lineage is the machine's lineage when taken, so a snapshot outlives
+	// its machine's destroy still traceable (ForgetSince). Empty on
+	// snapshots taken before it was recorded.
+	Lineage string `json:",omitempty"`
 }
 
 // Launch is what a Runtime needs to run a machine.
@@ -183,6 +187,10 @@ type Config struct {
 	MaxLayerBytes, MaxLayerInodes int64
 	// FreeBytes reports the state disk's free space; nil measures it.
 	FreeBytes func(path string) (int64, error)
+	// Contained reports a lineage that holds a record the owner deleted
+	// and has not been rolled back yet (recall W10): its machines are not
+	// forked or merged, so what it holds spreads no further. Nil: none is.
+	Contained func(lineage string) bool
 }
 
 var (
@@ -201,6 +209,9 @@ var (
 	// are derived from owner data until their files carry a public mark
 	// (REV-5, compile K7).
 	ErrSeedLabel = errors.New("vm: a seeded machine must be labelled private")
+	// ErrContained refuses a fork or merge of a lineage that holds a
+	// record the owner deleted (Config.Contained).
+	ErrContained = errors.New("vm: this agent holds a record the owner deleted; no fork or merge until that is settled")
 )
 
 var idRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
@@ -444,26 +455,14 @@ func (m *Manager) startFrom(ctx context.Context, mc *machine, s *Snapshot) error
 	if keep {
 		s = nil
 	}
-	for _, p := range []string{l.Upper, l.Work} {
-		if keep && p == l.Upper {
-			continue
-		}
-		if err := os.RemoveAll(p); err != nil {
+	if keep {
+		if err := os.RemoveAll(l.Work); err != nil {
 			return err
 		}
-	}
-	if keep {
 		if fi, err := os.Lstat(l.Upper); err != nil || !fi.IsDir() {
 			return fmt.Errorf("vm: %s has no layer to resume on", mc.ID)
 		}
-	} else if s == nil {
-		if err := os.Mkdir(l.Upper, 0o755); err != nil {
-			return err
-		}
-		if err := writeSeed(l.Upper, mc.seed); err != nil {
-			return err
-		}
-	} else if err := overlay.Copy(filepath.Join(m.snapDir(s.ID), "fs"), l.Upper); err != nil {
+	} else if err := m.writeLayer(l, mc, s); err != nil {
 		return err
 	}
 	if err := os.Mkdir(l.Work, 0o700); err != nil {
@@ -502,6 +501,23 @@ func (m *Manager) startFrom(ctx context.Context, mc *machine, s *Snapshot) error
 	}
 	mc.State = Running
 	return m.saveMachine(mc)
+}
+
+// writeLayer replaces mc's layer with snapshot s's file system, or with a
+// fresh one holding mc's seed when s is nil. The work directory goes too.
+func (m *Manager) writeLayer(l Launch, mc *machine, s *Snapshot) error {
+	for _, p := range []string{l.Upper, l.Work} {
+		if err := os.RemoveAll(p); err != nil {
+			return err
+		}
+	}
+	if s != nil {
+		return overlay.Copy(filepath.Join(m.snapDir(s.ID), "fs"), l.Upper)
+	}
+	if err := os.Mkdir(l.Upper, 0o755); err != nil {
+		return err
+	}
+	return writeSeed(l.Upper, mc.seed)
 }
 
 // reserveSeed reserves the disk for writing mc's seed into a fresh layer,
@@ -707,7 +723,7 @@ func (m *Manager) capture(ctx context.Context, mc *machine, t Tier) (Snapshot, e
 		return Snapshot{}, fmt.Errorf("%s: %w", mc.ID, err)
 	}
 	defer h.release()
-	s := Snapshot{ID: m.nextSnapID(), Machine: mc.ID, Tier: t, Label: mc.Label, Image: mc.Spec.Image, Taken: time.Now().UTC()}
+	s := Snapshot{ID: m.nextSnapID(), Machine: mc.ID, Tier: t, Label: mc.Label, Image: mc.Spec.Image, Lineage: mc.Lineage}
 	dir := m.snapDir(s.ID)
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		return Snapshot{}, err
@@ -737,6 +753,10 @@ func (m *Manager) capture(ctx context.Context, mc *machine, t Tier) (Snapshot, e
 	if mc.preempting.Load() {
 		return fail(fmt.Errorf("%w: %s: snapshot discarded", ErrPreempted, mc.ID))
 	}
+	// Stamped once the capture is complete: a record handed to the machine
+	// while it was being copied may be in it, so the snapshot must not
+	// read as taken before that (CAP-3 restore points, V26).
+	s.Taken = time.Now().UTC()
 	if err := writeJSON(filepath.Join(dir, "meta.json"), s); err != nil {
 		return fail(err)
 	}
@@ -965,6 +985,9 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 	if strings.HasPrefix(id, BuilderPrefix) {
 		return Snapshot{}, fmt.Errorf("vm: builder machine %s cannot be forked", id)
 	}
+	if m.contained(src) {
+		return Snapshot{}, fmt.Errorf("%w (%s)", ErrContained, id)
+	}
 	for _, f := range ids {
 		if strings.HasPrefix(f, EvalPrefix) {
 			return Snapshot{}, fmt.Errorf("vm: machine ids starting %q are kept for replay", EvalPrefix)
@@ -1131,6 +1154,9 @@ func (m *Manager) Merge(ctx context.Context, dst, src string) (Snapshot, error) 
 	sm, err := m.get(src)
 	if err != nil {
 		return Snapshot{}, err
+	}
+	if m.contained(sm) {
+		return Snapshot{}, fmt.Errorf("%w (%s)", ErrContained, src)
 	}
 	sm.mu.Lock()
 	baseID := sm.ForkBase

@@ -58,7 +58,9 @@ var controlPath = map[string][]string{
 	// clock imports golang.org/x/sys/unix (adjtimex), so it has no entry
 	// below, whose rules refuse third-party imports; TestAgentosdLinks-
 	// NoInference holds it instead, through netOK.
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild"},
+	// It opens recall (recalltool) once the vault process hands over the
+	// identity key, and serves the recall tools on the guest plane.
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies
@@ -102,6 +104,12 @@ var guestPlane = map[string]struct {
 	// Replay (LOOP-5) serves replay machines through a guest plane of its
 	// own: no journal writes, no executors, no network clients.
 	"replay": {[]string{"admission", "change", "guest", "journal", "meter", "vm"}, []string{"net", "os/exec", "plugin", "unsafe", "C"}},
+	// Recall (CAP-3) and the event bus (CAP-4) are broker state served to
+	// guests as tools: no network clients, no processes, no inference
+	// beyond the in-process hashing embedder (DEP-1).
+	"recall":     {nil, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
+	"events":     {[]string{"recall"}, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
+	"recalltool": {[]string{"recall", "events", "journal"}, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
 	// Loop 1's model-backed builder (W3-builder) serves each builder
 	// machine its own socket, as replay does: the brief, one candidate,
 	// and the metered model route; no executors, no network clients.

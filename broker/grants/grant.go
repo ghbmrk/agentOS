@@ -34,6 +34,13 @@ const ExecutorName = "grants"
 // guest can submit one.
 const OriginOwner = "owner"
 
+// OriginRecall and RecallExecutor mark the broker's recall rollback
+// intents (journal.ActionRecallRollback); recalltool submits and runs them.
+const (
+	OriginRecall   = "broker:recall"
+	RecallExecutor = "recall"
+)
+
 // Params keys a pre-allowed intent may carry besides the rule's fixed
 // params: the source record it acts on, and for a context-scoped reply
 // (ADP-11) the reply's body. Nothing else, so there is no free text

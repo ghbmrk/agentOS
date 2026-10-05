@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -102,4 +103,34 @@ func (v *Verifier) VerifyTOTP(code string, after int64, counted bool) (int64, bo
 		return 0, false, &VerifyError{Kind: VerifyLost}
 	}
 	return res.Step, res.OK, nil
+}
+
+// ErrVaultLocked means the vault process is up but its vault is not open.
+var ErrVaultLocked = errors.New("vault locked")
+
+// RecallKey fetches the recall index's identity key from the vault process
+// (recall K5). It fails with ErrVaultLocked until the owner unlocks the
+// vault; agentosd retries until then.
+func (v *Verifier) RecallKey() ([]byte, error) {
+	u := url.URL{Scheme: "http", Host: "agentos-egress", Path: "/recall-key"} // over the Unix socket
+	resp, err := v.c.Post(u.String(), "application/octet-stream", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusServiceUnavailable:
+		return nil, ErrVaultLocked
+	default:
+		return nil, fmt.Errorf("recall key: vault process answered %s", resp.Status)
+	}
+	key, err := io.ReadAll(io.LimitReader(resp.Body, 1<<10))
+	if err != nil {
+		return nil, err
+	}
+	if len(key) < 16 {
+		return nil, errors.New("recall key: too short")
+	}
+	return key, nil
 }

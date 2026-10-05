@@ -645,6 +645,40 @@ func (c *custody) verify(code string, after int64, counted bool) (int64, bool, e
 	return step, true, nil
 }
 
+// RecallKeyName is the vault entry holding the recall index's identity key
+// (recall K5): source IDs are keyed hashes under it, so a copy of the index
+// without the vault does not reveal low-entropy refs. It is created on first
+// use and travels with the vault's backup, so IDs survive a restore.
+const RecallKeyName = "broker-recall-identity"
+
+// KindBrokerKey marks keys the vault keeps for agentosd.
+const KindBrokerKey = "broker_key"
+
+// recallKey returns the recall identity key while the vault is open,
+// creating it on first use. agentosd holds the index in plaintext memory,
+// so handing it this key adds nothing it could not already read.
+func (c *custody) recallKey() ([]byte, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ph != open {
+		return nil, errLocked
+	}
+	if hasOtherKind(c.v, RecallKeyName, KindBrokerKey) {
+		return nil, errInternal
+	}
+	if sec, ok := c.v.Secret(RecallKeyName); ok {
+		return []byte(sec.Reveal()), nil
+	}
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return nil, errInternal
+	}
+	if err := c.v.Put(RecallKeyName, KindBrokerKey, key); err != nil {
+		return nil, errInternal
+	}
+	return key, nil
+}
+
 // since keeps the times after cut, in place.
 func since(ts []time.Time, cut time.Time) []time.Time {
 	kept := ts[:0]

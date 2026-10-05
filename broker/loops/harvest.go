@@ -105,6 +105,9 @@ type harvested struct {
 	// each lineage's (origin task key's) on its last day.
 	Implicit map[string]bool     `json:"implicit,omitempty"`
 	Daily    map[string]dayCount `json:"daily,omitempty"`
+	// Forgotten are intents recall's deletion reach erased (ForgetIntents):
+	// never harvested again.
+	Forgotten map[string]bool `json:"forgotten,omitempty"`
 }
 
 type dayCount struct {
@@ -113,6 +116,10 @@ type dayCount struct {
 }
 
 var ErrAction = errors.New("loops: unknown owner action")
+
+// ErrForgotten is Harvest's refusal of an intent recall's deletion reach
+// erased (ForgetIntents).
+var ErrForgotten = errors.New("loops: the intent was erased by a deletion")
 
 // Harvest records the owner's verdict on the intent (OP-7) and adds the
 // task case it makes (CHG-1). The case is one ClassTask case per intent:
@@ -141,6 +148,10 @@ func (h *Harvester) Harvest(o Outcome) error {
 	}
 	if o.Intent == "" || len(o.Input) == 0 {
 		return errors.New("loops: an outcome needs its intent and the owner's task message")
+	}
+	// An erased intent is refused before its verdict is recorded.
+	if err := h.refuseForgotten(o.Intent); err != nil {
+		return err
 	}
 	// An implicit case takes its slot under the cap before the verdict is
 	// recorded, under one lock, so concurrent harvests cannot overshoot it
@@ -177,6 +188,9 @@ func (h *Harvester) Harvest(o Outcome) error {
 	if err := h.loadLocked(); err != nil {
 		return err
 	}
+	if h.st.Forgotten[c.ID] {
+		return ErrForgotten
+	}
 	if h.st.Added[c.ID] {
 		// A later action on the same item (UNDO after YES) is recorded in
 		// the journal; the suite keeps the first.
@@ -208,6 +222,18 @@ func (h *Harvester) Harvest(o Outcome) error {
 	}
 	if h.Wake != nil {
 		h.Wake()
+	}
+	return nil
+}
+
+func (h *Harvester) refuseForgotten(id string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if err := h.loadLocked(); err != nil {
+		return err
+	}
+	if h.st.Forgotten[id] {
+		return ErrForgotten
 	}
 	return nil
 }
@@ -291,6 +317,9 @@ func (h *Harvester) loadLocked() error {
 	if h.st.Daily == nil {
 		h.st.Daily = map[string]dayCount{}
 	}
+	if h.st.Forgotten == nil {
+		h.st.Forgotten = map[string]bool{}
+	}
 	h.loaded = true
 	return nil
 }
@@ -323,6 +352,37 @@ func (h *Harvester) ForgetCases(ids []string) error {
 		delete(h.st.Added, id)
 		delete(h.st.Origins, id)
 		delete(h.st.Implicit, id)
+	}
+	return h.saveLocked()
+}
+
+// ForgetIntents marks intents recall's deletion reach erases (CAP-3,
+// change C19), before the journal erases them: Harvest refuses each from
+// then on, so an intent still in flight cannot settle into a case that
+// may hold the deleted record, and a case already harvested stops
+// counting as evidence. Its task stays held (Tasks, Origins), so Loop 1
+// never mines it either. Idempotent. Only the broker's deletion reach
+// calls it (security F1 on #59).
+func (h *Harvester) ForgetIntents(ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if err := h.loadLocked(); err != nil {
+		return err
+	}
+	changed := false
+	for _, id := range ids {
+		if id == "" || (h.st.Forgotten[id] && !h.st.Added[id]) {
+			continue
+		}
+		h.st.Forgotten[id] = true
+		delete(h.st.Added, id)
+		changed = true
+	}
+	if !changed {
+		return nil
 	}
 	return h.saveLocked()
 }

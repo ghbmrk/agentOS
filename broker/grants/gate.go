@@ -173,6 +173,10 @@ type Config struct {
 	// egress). It is keyed by machine, not lineage, so a fork of a
 	// composer is not one. Nil: none is, so reply rules never match.
 	Isolated func(machine string) bool
+	// Contained reports an agent lineage that still holds a record the
+	// owner deleted (recalltool W10); its intents get no pre-allowance.
+	// Nil: none is.
+	Contained func(lineage string) bool
 	// Forms maps an executor's irreversible operations to their
 	// reversible forms (REV-3), from the adapter's own declaration next to
 	// Declared. An effect the owner approves under one is held for its
@@ -654,7 +658,7 @@ func (g *Gate) evaluateEffect(ctx context.Context, phase journal.Phase, in journ
 	if esc.Reason != "" {
 		item.Detail = esc.Reason
 	}
-	if cls == verb.Irreversible && verified {
+	if cls == verb.Irreversible && verified && !g.contained(in.Origin) {
 		sort.Slice(rules, func(i, j int) bool { return rules[i].ID < rules[j].ID })
 		for _, r := range rules {
 			if g.matches(*r.Spec.Rule, in, ver) != nil {
@@ -669,6 +673,14 @@ func (g *Gate) evaluateEffect(ctx context.Context, phase journal.Phase, in journ
 		}
 	}
 	return verdict{kind: ask, item: item}
+}
+
+// contained reports a guest lineage that still holds a record the owner
+// deleted (recalltool W10): no pre-allowance acts for it, so each of its
+// irreversible effects is asked.
+func (g *Gate) contained(origin string) bool {
+	l, ok := strings.CutPrefix(origin, "guest:")
+	return ok && g.cfg.Contained != nil && g.cfg.Contained(l)
 }
 
 // approvalItem is the line the owner approves (CH-12): source fields when
@@ -817,6 +829,17 @@ func (g *Gate) evaluateBroker(ctx context.Context, phase journal.Phase, in journ
 		}
 		return verdict{kind: ask, local: true, item: owner.Item{Ref: in.ID, Object: short(s),
 			Facts: owner.Facts{Kind: owner.GrantChange, Verb: "grant", NoRecipient: true}}}
+	case journal.ActionRecallRollback:
+		// Recall's deletion reach asks before taking back agent work
+		// (recalltool W10). Only the broker submits it; its line is the
+		// broker's own text.
+		obj, _ := in.Params["object"].(string)
+		detail, _ := in.Params["detail"].(string)
+		if in.Origin != OriginRecall || in.Executor != RecallExecutor || obj == "" {
+			return verdict{kind: deny, why: "a recall rollback comes only from the broker's recall"}
+		}
+		return verdict{kind: ask, item: owner.Item{Ref: in.ID, Object: obj, Detail: detail,
+			Facts: owner.Facts{Kind: owner.Ordinary, Verb: "forget", NoRecipient: true}}}
 	case journal.ActionGrantPause, journal.ActionGrantRevoke:
 		if in.Origin != OriginOwner {
 			return verdict{kind: deny, why: "only the owner pauses or revokes a grant"}
@@ -1077,6 +1100,25 @@ func (g *Gate) endHeld(ids ...string) {
 			g.afterHold(st, a.hold, a.n)
 		}()
 	}
+}
+
+// Withdraw closes a recall rollback question still waiting for the owner,
+// as superseded by an earlier one for the same agent (recalltool W10): it
+// is denied with "not approved: superseded" and an answer to it later
+// does nothing. Only the broker's recall rollbacks can be withdrawn.
+func (g *Gate) Withdraw(id string) error {
+	st, err := g.eng.Get(id)
+	if err != nil {
+		return err
+	}
+	if st.Intent.Origin != OriginRecall || st.Intent.Action != journal.ActionRecallRollback {
+		return errors.New("grants: only a recall rollback can be withdrawn")
+	}
+	if st.State != journal.Pending {
+		return nil
+	}
+	g.closeIntent(id, "superseded")
+	return nil
 }
 
 func (g *Gate) Get(id string) (journal.Status, error) {
