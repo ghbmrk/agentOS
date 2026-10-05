@@ -117,7 +117,7 @@ func openTaskValues(store change.Store, keyPath string, now func() time.Time, lo
 // credential, and a long random-looking token (L3 MUST-2 on #119).
 var (
 	authScheme = regexp.MustCompile(`(?i)\b(bearer|basic|token|digest)\s+[A-Za-z0-9._~+/=-]{8,}`)
-	tokenParam = regexp.MustCompile(`(?i)[?&#;][^=&#;\s]*(token|code|key|sig|auth|session|pass|secret|otp)[^=&#;\s]*=[^&#;\s]+`)
+	tokenParam = regexp.MustCompile(`(?i)(?:^|[?&#;\s])[^=&#;\s]*(token|code|key|sig|auth|session|pass|secret|otp)[^=&#;\s]*=[^&#;\s]+`)
 	emailShape = regexp.MustCompile(`^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$`)
 )
 
@@ -403,7 +403,34 @@ func (v *taskValues) values(goal, id string) (valueStep, bool) {
 		return valueStep{}, false
 	}
 	s, ok := g.Steps[id]
-	return s, ok
+	if !ok {
+		return valueStep{}, false
+	}
+	// A copy, so nothing the compiler does reaches the record (security R1
+	// on #119), as observe copies what it records (V1).
+	out := valueStep{Recipients: append([]string(nil), s.Recipients...)}
+	if s.Params != nil {
+		out.Params = copyValue(s.Params).(map[string]any)
+	}
+	return out, true
+}
+
+func copyValue(x any) any {
+	switch t := x.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, c := range t {
+			out[k] = copyValue(c)
+		}
+		return out
+	case []any:
+		out := make([]any, len(t))
+		for i, c := range t {
+			out[i] = copyValue(c)
+		}
+		return out
+	}
+	return x
 }
 
 func (v *taskValues) saveLocked() {

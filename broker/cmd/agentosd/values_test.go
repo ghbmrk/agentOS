@@ -192,6 +192,7 @@ func TestSecretShapedValuesAreNotKept(t *testing.T) {
 		"Bearer " + strings.Repeat("Zq7x", 10),
 		"https://cb.example.test/done?access_token=" + strings.Repeat("a1", 8),
 		strings.Repeat("0123456789abcdef", 4),
+		"access_token=xyz", "then sig=xyz", // a bare param, no URL (security R2)
 	} {
 		if got := r.values.scrubValue(map[string]any{"note": c, "list": []any{c}}); fmt.Sprint(got) != fmt.Sprint(map[string]any{"note": redactedValue, "list": []any{redactedValue}}) {
 			t.Errorf("%q kept: %v", c, got)
@@ -370,6 +371,13 @@ func TestTaskValuesBounds(t *testing.T) {
 	}
 	if _, ok := r.values.values("cap", fmt.Sprint("cap/", maxValueSteps)); ok {
 		t.Fatal("step over the cap kept")
+	}
+	// What is read is a copy: changing it leaves the record as it was
+	// (security R1).
+	got, _ := r.values.values("cap", "cap/0")
+	got.Params["n"] = "changed"
+	if again, _ := r.values.values("cap", "cap/0"); again.Params["n"] != "x" {
+		t.Fatal("values() handed out the record's own map")
 	}
 	r.now = r.now.Add(keepValues + time.Hour)
 	if _, ok := r.values.values("old", "old/1"); ok {
