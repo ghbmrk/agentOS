@@ -39,7 +39,7 @@ Covered: 113 / 144 requirement IDs
 | CH-12 | `broker/cmd/agentosd/routenotice_test.go`, `broker/control/help_loops_test.go`, `broker/grants/change_test.go`, `broker/grants/channel_test.go`, `broker/grants/gate_test.go`, `broker/modem/at/pdu_test.go`, `broker/modem/modem_test.go`, `broker/owner/channel_test.go`, `broker/owner/question_test.go`, `broker/owner/undoable_test.go` |
 | CH-13 | `broker/grants/channel_test.go`, `broker/grants/gate_test.go`, `broker/owner/channel_test.go`, `broker/owner/parse_test.go`, `broker/owner/review_test.go` |
 | CH-14 | `broker/control/answer_test.go`, `broker/e2e/owner_test.go`, `broker/owner/answer_test.go`, `broker/owner/channel_test.go`, `broker/owner/parse_test.go`, `broker/owner/review_test.go`, `broker/owner/settings_test.go` |
-| CH-15 | `broker/change/notice_test.go`, `broker/cmd/agentosd/questions_test.go`, `broker/cmd/agentosd/routenotice_test.go`, `broker/grants/gate_test.go`, `broker/grants/shared_test.go`, `broker/loops/loop1_test.go`, `broker/owner/review_test.go`, `broker/question/pq_test.go`, `broker/question/question_test.go`, `broker/question/wiring_test.go` |
+| CH-15 | `broker/change/notice_test.go`, `broker/cmd/agentosd/questions_test.go`, `broker/cmd/agentosd/routenotice_test.go`, `broker/grants/gate_test.go`, `broker/grants/shared_test.go`, `broker/loops/loop1_test.go`, `broker/owner/review_test.go`, `broker/question/pq_test.go`, `broker/question/question_test.go`, `broker/question/w9a_test.go`, `broker/question/wiring_test.go` |
 | CH-16 | `broker/grants/outcome_test.go`, `broker/grants/reversible_test.go`, `broker/owner/channel_test.go`, `broker/owner/hold_test.go` |
 | CH-17 | `broker/modem/at/driver_test.go`, `broker/modem/at/dtmf_test.go`, `broker/modem/at/engine_test.go` |
 | CH-18 | `broker/cmd/agentosd/verify_test.go`, `broker/localui/localui_test.go`, `broker/modelroute/verify_test.go`, `broker/owner/channel_test.go`, `broker/owner/local_test.go`, `broker/owner/review_test.go`, `broker/owner/verifier_test.go` |
@@ -89,7 +89,7 @@ Covered: 113 / 144 requirement IDs
 | CAP-7 | — |
 | CAP-8 | — |
 | CAP-9 | `broker/cmd/agentos-egress/eval_test.go`, `broker/cmd/agentos-egress/hostile_test.go`, `broker/cmd/agentos-egress/routing_test.go`, `broker/cmd/agentos-egress/server_test.go`, `broker/e2e/routed_test.go`, `broker/route/anthropic_test.go`, `broker/route/handlerfor_test.go`, `broker/route/route_test.go` |
-| CAP-10 | `broker/cmd/agentosd/questions_test.go`, `broker/control/answer_test.go`, `broker/grants/question_test.go`, `broker/grants/shared_test.go`, `broker/owner/answer_test.go`, `broker/owner/question_test.go`, `broker/question/boundary_test.go`, `broker/question/pq_test.go`, `broker/question/question_test.go`, `broker/question/wiring_test.go` |
+| CAP-10 | `broker/cmd/agentosd/questions_test.go`, `broker/control/answer_test.go`, `broker/grants/question_test.go`, `broker/grants/shared_test.go`, `broker/owner/answer_test.go`, `broker/owner/question_test.go`, `broker/question/boundary_test.go`, `broker/question/pq_test.go`, `broker/question/question_test.go`, `broker/question/w9a_test.go`, `broker/question/wiring_test.go` |
 | ADP-1 | `broker/grants/gate_test.go`, `broker/mail/organize_test.go` |
 | ADP-2 | `broker/egress/verb_test.go`, `broker/grants/escalate_test.go`, `broker/grants/gate_test.go`, `broker/grants/grant_test.go`, `broker/mail/gate_test.go`, `broker/mail/organize_test.go` |
 | ADP-3 | `broker/route/anthropic_test.go`, `broker/route/route_test.go` |
@@ -147,4 +147,4 @@ Covered: 113 / 144 requirement IDs
 | UPD-7 | — |
 | UPD-8 | `broker/cmd/agentos-release/main_test.go`, `broker/update/attest_test.go`, `broker/update/hardening_test.go`, `broker/update/update_test.go` |
 | BAK-1 | `broker/recovery/choice_test.go` |
-| TIM-1 | `broker/clock/clock_test.go`, `broker/clock/hold_test.go`, `broker/clock/sync_linux_test.go`, `broker/cmd/agentosd/questions_test.go`, `broker/control/handler_test.go`, `broker/daemon/daemon_test.go`, `broker/modem/at/nettime_internal_test.go`, `broker/modem/at/nettime_test.go`, `broker/owner/answer_test.go` |
+| TIM-1 | `broker/clock/clock_test.go`, `broker/clock/hold_test.go`, `broker/clock/sync_linux_test.go`, `broker/cmd/agentosd/questions_test.go`, `broker/control/handler_test.go`, `broker/daemon/daemon_test.go`, `broker/modem/at/nettime_internal_test.go`, `broker/modem/at/nettime_test.go`, `broker/owner/answer_test.go`, `broker/question/question_test.go`, `broker/question/w9a_test.go` |
