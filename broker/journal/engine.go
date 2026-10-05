@@ -684,6 +684,12 @@ func (e *Engine) validate(r Record) error {
 		}
 		return nil
 	}
+	if r.Type == RecSleep {
+		if r.Sleep == nil || !r.Sleep.valid() || r.ID != "" {
+			return fmt.Errorf("sleep record without a valid note")
+		}
+		return nil
+	}
 	if r.Type == RecResume {
 		if !e.stopped {
 			return fmt.Errorf("resume while not stopped")
@@ -768,7 +774,7 @@ func (e *Engine) apply(r Record) {
 	case RecResume:
 		e.stopped = false
 		return
-	case RecEgress:
+	case RecEgress, RecSleep:
 		return
 	case RecSubmitted:
 		in := *r.Intent
