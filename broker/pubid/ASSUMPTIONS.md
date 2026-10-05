@@ -13,3 +13,10 @@ Built for BOARD OSS-6 against SPEC v0.12 OSS-6, with OSS-4, OSS-8 and OSS-9 in v
 | P7 | **The hint emitter publishes nothing itself.** Its `Outbox` is the box's own clean room (cleanroom C1), so hints cross no network and carry no publication key. BOARD's "used by the hint emitter" is read as: what the clean room builds from hints is published through this outbox. | OSS-1, OSS-2, OSS-6 | — |
 | P8 | **Within one epoch, an installation's publications are linkable to each other.** That is by design, because attestations need a stable signer for OSS-9's weighting. Across epochs they are not linkable. OSS-9 must therefore never treat distinct keys as distinct installations (one box is a new attestor every 28 days), and it already must not count attestations blindly. | OSS-6, OSS-9 | OSS-9 weighting. |
 | P9 | **Network metadata is out of scope here.** The spec's optional anonymity-network routing belongs to the `Sender`, which is not built. Until then a publication shows that some installation at that IP address published. | OSS-6 | The Sender package adds the setting. |
+
+## Conditions for wiring (security on #163)
+
+- **W1 (P6):** every `Signer`'s caller strips installation-unique content (the box's email, owner IDs, host names, serials, timestamps finer than a day) before `Queue`, with a test that plants a canary identifier and shows it never reaches a batch.
+- **W2 (P6(d)):** wiring `update.Attest` (or a statement signer beside it) goes to the strongest review tier with an explicit threat check.
+- **W3 (P9):** the `Sender` adds network-level unlinkability: an anonymity transport, or a fixed cadence padded to a constant batch size.
+- **W4 (P8, OSS-9):** consumers never count distinct keys as distinct boxes, and never join keys across epochs.
