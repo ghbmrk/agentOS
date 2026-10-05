@@ -25,6 +25,7 @@ type fakeRuntime struct {
 	launches []Launch
 	kills    int
 	failNext error
+	failKill error           // Kill's error, after it kills
 	onPause  func(id string) // runs as the guest is paused
 	onCkpt   func(id string) // runs during a memory checkpoint
 }
@@ -110,7 +111,7 @@ func (f *fakeRuntime) Kill(_ context.Context, l Launch) error {
 	delete(f.running, l.ID)
 	delete(f.paused, l.ID)
 	delete(f.mem, l.ID)
-	return nil
+	return f.failKill
 }
 
 // work simulates guest computation: it changes the machine's memory.
