@@ -33,7 +33,9 @@ import (
 // Machines is the part of the machine manager (vm.Manager) the tools use.
 type Machines interface {
 	Get(id string) (vm.Machine, error)
+	TryGet(id string) (vm.Machine, bool)
 	Machines() []string
+	Workers(lineage string) []string
 	CreateWorker(ctx context.Context, id, lineage string, s vm.Spec) (vm.Machine, error)
 	Exec(ctx context.Context, id string, c vm.Command, timeout time.Duration) (vm.ExecResult, error)
 	Checkpoint(ctx context.Context, id string) (vm.Snapshot, error)
@@ -71,10 +73,13 @@ type Tools struct {
 	MaxMemMB int64
 	Now      func() time.Time // nil is time.Now
 
-	// mu serializes creating workers, so the per-lineage count cannot be
-	// raced past (security R1 on #146), and guards used.
-	mu   sync.Mutex
-	used map[string]time.Time // worker ID -> last named by a tool
+	// mu guards used and pending. Creating workers reserves their IDs in
+	// pending under it, so the per-lineage count cannot be raced past
+	// (security R1 on #146), but the machines are made without it, so a
+	// fork waiting on a busy worker holds up no other call (L3 MUST-4).
+	mu      sync.Mutex
+	used    map[string]time.Time // worker ID -> last named by a tool
+	pending map[string]string    // worker ID being made -> its lineage
 }
 
 func (t *Tools) now() time.Time {
@@ -243,17 +248,52 @@ func readable(c caller, l vm.Label) error {
 	return nil
 }
 
-func (t *Tools) count(lineage string) int {
-	n := 0
-	prefix := workerID(lineage, "")
-	for _, id := range t.M.Machines() {
-		if strings.HasPrefix(id, prefix) {
-			if w, err := t.M.Get(id); err == nil && w.Lineage == lineage {
-				n++
-			}
+// reserve claims ids for lineage's new workers, refusing past
+// MaxWorkers; settle hands them back. The count reads the machine table
+// alone, never a worker's lock.
+func (t *Tools) reserve(lineage string, ids []string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	n := map[string]bool{}
+	for _, id := range t.M.Workers(lineage) {
+		n[id] = true
+	}
+	for id, l := range t.pending {
+		if l == lineage {
+			n[id] = true
 		}
 	}
-	return n
+	for _, id := range ids {
+		if n[id] {
+			return false
+		}
+		n[id] = true
+	}
+	if len(n) > MaxWorkers {
+		return false
+	}
+	if t.pending == nil {
+		t.pending = map[string]string{}
+	}
+	for _, id := range ids {
+		t.pending[id] = lineage
+	}
+	return true
+}
+
+// settle ends a reservation; made says the workers now exist.
+func (t *Tools) settle(ids []string, made bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.used == nil {
+		t.used = map[string]time.Time{}
+	}
+	for _, id := range ids {
+		delete(t.pending, id)
+		if made {
+			t.used[id] = t.now()
+		}
+	}
 }
 
 func (t *Tools) create(ctx context.Context, c caller, raw json.RawMessage) (any, error) {
@@ -273,21 +313,16 @@ func (t *Tools) create(ctx context.Context, c caller, raw json.RawMessage) (any,
 	if a.MemMB < MinMemMB || a.MemMB > t.MaxMemMB {
 		return nil, fmt.Errorf("mem_mb must be between %d and %d", MinMemMB, t.MaxMemMB)
 	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.count(c.lineage) >= MaxWorkers {
-		return nil, fmt.Errorf("at most %d workers at once; destroy one first", MaxWorkers)
+	id := workerID(c.lineage, a.Name)
+	if !t.reserve(c.lineage, []string{id}) {
+		return nil, fmt.Errorf("at most %d workers at once, each with its own name; destroy one first", MaxWorkers)
 	}
 	s := vm.Spec{Image: t.Image, Class: c.spec.Class, MemMB: a.MemMB, Argv: t.Argv, Label: c.label}
-	id := workerID(c.lineage, a.Name)
 	w, err := t.M.CreateWorker(ctx, id, c.lineage, s)
+	t.settle([]string{id}, err == nil)
 	if err != nil {
 		return nil, startErr(a.Name, err)
 	}
-	if t.used == nil {
-		t.used = map[string]time.Time{}
-	}
-	t.used[id] = t.now()
 	return map[string]any{"name": a.Name, "label": w.Label.String(), "mem_mb": w.Spec.MemMB}, nil
 }
 
@@ -439,11 +474,6 @@ func (t *Tools) fork(ctx context.Context, c caller, raw json.RawMessage) (any, e
 	if err := readable(c, w.Label); err != nil {
 		return nil, err
 	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if len(a.Into) == 0 || t.count(c.lineage)+len(a.Into) > MaxWorkers {
-		return nil, fmt.Errorf("into needs 1 or more names, with at most %d workers at once", MaxWorkers)
-	}
 	ids := make([]string, len(a.Into))
 	for i, n := range a.Into {
 		if !nameRE.MatchString(n) {
@@ -451,12 +481,13 @@ func (t *Tools) fork(ctx context.Context, c caller, raw json.RawMessage) (any, e
 		}
 		ids[i] = workerID(c.lineage, n)
 	}
+	if len(ids) == 0 || !t.reserve(c.lineage, ids) {
+		return nil, fmt.Errorf("into needs 1 or more new names, with at most %d workers at once", MaxWorkers)
+	}
 	s, err := t.M.Fork(ctx, w.ID, ids)
+	t.settle(ids, err == nil)
 	if err != nil {
 		return nil, startErr(a.Name, err)
-	}
-	for _, id := range ids {
-		t.used[id] = t.now()
 	}
 	return map[string]any{"snapshot": s.ID, "workers": a.Into}, nil
 }
@@ -534,16 +565,15 @@ func (t *Tools) Reap(ctx context.Context) []string {
 	live := map[string]bool{} // lineages with a running non-worker machine
 	var workers []vm.Machine
 	for _, id := range ids {
-		mc, err := t.M.Get(id)
-		if err != nil {
+		if strings.HasPrefix(id, vm.WorkerPrefix) {
+			// A busy worker is in use, not idle: skip it rather than
+			// wait out its command.
+			if w, ok := t.M.TryGet(id); ok && w.State == vm.Running {
+				workers = append(workers, w)
+			}
 			continue
 		}
-		switch {
-		case strings.HasPrefix(id, vm.WorkerPrefix):
-			if mc.State == vm.Running {
-				workers = append(workers, mc)
-			}
-		case mc.State == vm.Running:
+		if mc, err := t.M.Get(id); err == nil && mc.State == vm.Running {
 			live[mc.Lineage] = true
 		}
 	}

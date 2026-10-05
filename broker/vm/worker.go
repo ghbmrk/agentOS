@@ -84,6 +84,32 @@ func (m *Manager) lineageLive(lineage string) bool {
 	return false
 }
 
+// Workers lists the IDs of lineage's workers, ones still being made
+// included. Like lineageLive it reads the table alone, so it never waits
+// behind a worker's command.
+func (m *Manager) Workers(lineage string) []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []string
+	for id, mc := range m.machines {
+		if strings.HasPrefix(id, WorkerPrefix) && mc.Lineage == lineage {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// TryGet returns machine id, or false when it is unknown or busy (its lock
+// is held by a command, snapshot or start), without waiting.
+func (m *Manager) TryGet(id string) (Machine, bool) {
+	mc, err := m.get(id)
+	if err != nil || !mc.mu.TryLock() {
+		return Machine{}, false
+	}
+	defer mc.mu.Unlock()
+	return mc.Machine, true
+}
+
 // Exec runs c in worker id and waits up to timeout. It holds the machine's
 // lock, so no snapshot, rollback or fork of the worker runs meanwhile;
 // preemption does not wait for the lock and ends the command with the

@@ -18,7 +18,8 @@ import (
 )
 
 // runtime stands in for gVisor: a guest's files are its upper layer, its
-// memory a checkpointed marker. Exec understands cat, tee, echo and false.
+// memory a checkpointed marker. Exec understands cat, tee, echo and sleep
+// (until cancelled).
 type runtime struct {
 	mu      sync.Mutex
 	running map[string]vm.Launch
@@ -42,7 +43,7 @@ func (r *runtime) Kill(_ context.Context, l vm.Launch) error {
 	delete(r.running, l.ID)
 	return nil
 }
-func (r *runtime) Exec(_ context.Context, id string, c vm.Command) (vm.ExecResult, error) {
+func (r *runtime) Exec(ctx context.Context, id string, c vm.Command) (vm.ExecResult, error) {
 	r.mu.Lock()
 	l, ok := r.running[id]
 	r.mu.Unlock()
@@ -52,6 +53,9 @@ func (r *runtime) Exec(_ context.Context, id string, c vm.Command) (vm.ExecResul
 	a := c.Argv
 	path := func() string { return filepath.Join(l.Upper, strings.TrimPrefix(a[len(a)-1], "/")) }
 	switch a[0] {
+	case "sleep":
+		<-ctx.Done()
+		return vm.ExecResult{}, ctx.Err()
 	case "echo":
 		return vm.ExecResult{Stdout: []byte(strings.Join(a[1:], " "))}, nil
 	case "cat":
@@ -557,5 +561,65 @@ func TestCAP8LineageComesFromTheMachinesRecord(t *testing.T) {
 	}
 	if err := r.call("a", toolExec, m{"name": "x", "argv": []string{"echo"}}, nil); err == nil || err.Error() != errNoWorker.Error() {
 		t.Fatalf("a reached a worker recorded in b's lineage: %v", err)
+	}
+}
+
+// A fork or create waiting on a busy worker holds up no other call: not
+// another lineage's tools, not the same lineage's other creates, and not
+// Reap (L3 MUST-4 on #146).
+func TestCAP8ABusyWorkerHoldsUpNoOtherCall(t *testing.T) {
+	r := newRig(t, 16000)
+	r.agent("a", vm.Public)
+	r.agent("b", vm.Public)
+	r.must("a", toolCreate, m{"name": "busy"}, nil)
+	ran := make(chan error, 2)
+	go func() {
+		ran <- r.call("a", toolExec, m{"name": "busy", "argv": []string{"sleep"}, "timeout_seconds": 600}, nil)
+	}()
+	time.Sleep(20 * time.Millisecond) // the command holds the worker
+	go func() { ran <- r.call("a", toolFork, m{"name": "busy", "into": []string{"copy"}}, nil) }()
+	time.Sleep(20 * time.Millisecond) // the fork waits on the worker
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.must("b", toolCreate, m{"name": "w"}, nil)
+		r.must("a", toolCreate, m{"name": "other"}, nil)
+		r.tools.Reap(context.Background())
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("other calls waited behind a busy worker")
+	}
+	mc, _ := r.m.Get("a")
+	if err := r.m.Destroy(context.Background(), workerID(mc.Lineage, "busy")); err != nil {
+		t.Fatal(err)
+	}
+	<-ran
+	<-ran
+}
+
+// Concurrent creates and forks cannot race past the cap: the slots are
+// reserved before any machine is made (security R1, L3 MUST-4 on #146).
+func TestCAP8ConcurrentCreatesStayUnderTheCap(t *testing.T) {
+	r := newRig(t, 64000)
+	r.agent("agent", vm.Public)
+	r.must("agent", toolCreate, m{"name": "src", "mem_mb": MinMemMB}, nil)
+	var wg sync.WaitGroup
+	for i := range 2 * MaxWorkers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if i%2 == 0 {
+				r.call("agent", toolCreate, m{"name": fmt.Sprintf("c%d", i), "mem_mb": MinMemMB}, nil)
+			} else {
+				r.call("agent", toolFork, m{"name": "src", "into": []string{fmt.Sprintf("f%d", i)}}, nil)
+			}
+		}()
+	}
+	wg.Wait()
+	mc, _ := r.m.Get("agent")
+	if n := len(r.m.Workers(mc.Lineage)); n != MaxWorkers {
+		t.Fatalf("%d workers after the race, want exactly %d", n, MaxWorkers)
 	}
 }
