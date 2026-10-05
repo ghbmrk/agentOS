@@ -176,7 +176,7 @@ func TestBrokenEvaluatorAdoptsNothing(t *testing.T) {
 	if rep := e.propose(Candidate{Source: Local, Files: Tree{"skills/greet": []byte("hello")}}); rep.State != StateRejected || len(e.owner.asked) != 0 {
 		t.Fatalf("broken evaluator: %+v", rep)
 	}
-	if rep := e.release(release(t, "2.0", false, map[string][]byte{"guest-image/openclaw": []byte("img")})); rep.State != StateRejected || len(e.owner.asked) != 0 {
+	if rep := e.release(release(t, 20, false, map[string][]byte{"guest-image/openclaw": []byte("img")})); rep.State != StateRejected || len(e.owner.asked) != 0 {
 		t.Fatalf("broken evaluator, release: %+v", rep)
 	}
 	// Even with fixtures that the broken evaluator happened to pass, zero
@@ -349,15 +349,15 @@ func TestBehaviorChangesNeedOwner(t *testing.T) {
 	e := newEnv(t, nil)
 	e.cases(12, ClassSkill, "skills/greet", "hi")
 	cfg := e.propose(Candidate{Source: Local, Files: Tree{"config/digest-time": []byte("08:00")}})
-	img := e.release(release(t, "2.0", false, map[string][]byte{"guest-image/openclaw": []byte("img")}))
-	sec := e.release(release(t, "2.1", true, map[string][]byte{"host-image/release": []byte("host")}))
+	img := e.release(release(t, 20, false, map[string][]byte{"guest-image/openclaw": []byte("img")}))
+	sec := e.release(release(t, 21, true, map[string][]byte{"host-image/release": []byte("host")}))
 	for _, r := range []Report{cfg, img, sec} {
 		if r.Basis != BasisOwner || r.State != StateRejected || !e.owner.wasAsked(adoptID(r.ID)) {
 			t.Fatalf("without approval: %+v", r)
 		}
 	}
 	e.owner.approve = true
-	img = e.release(release(t, "2.0", false, map[string][]byte{"guest-image/openclaw": []byte("img")}))
+	img = e.release(release(t, 20, false, map[string][]byte{"guest-image/openclaw": []byte("img")}))
 	if img.State != StateAdopted || img.HeldOut == 0 {
 		t.Fatalf("owner-approved image: %+v", img)
 	}
@@ -366,11 +366,11 @@ func TestBehaviorChangesNeedOwner(t *testing.T) {
 	}
 
 	s := newEnv(t, func(c *Config) { c.SecurityAutoStage = true })
-	r := s.release(release(t, "2.1", true, map[string][]byte{"host-image/release": []byte("host")}))
+	r := s.release(release(t, 21, true, map[string][]byte{"host-image/release": []byte("host")}))
 	if r.State != StateAdopted || r.Basis != BasisSecurity || len(s.owner.asked) != 0 {
 		t.Fatalf("security auto-stage: %+v", r)
 	}
-	r = s.release(release(t, "2.2", false, map[string][]byte{"host-image/release": []byte("host2")}))
+	r = s.release(release(t, 22, false, map[string][]byte{"host-image/release": []byte("host2")}))
 	if r.Basis != BasisOwner {
 		t.Fatalf("non-security release under the security policy: %+v", r)
 	}
@@ -386,8 +386,11 @@ func TestUpstreamOnlyThroughRelease(t *testing.T) {
 			t.Fatalf("Propose took a %s candidate", src)
 		}
 	}
-	if _, err := e.p.ProposeRelease(bg, update.Verified{}); err == nil {
+	if _, err := e.p.ProposeRelease(bg, &update.Verified{}); err == nil {
 		t.Fatal("unverified release")
+	}
+	if _, err := e.p.ProposeRelease(bg, nil); err == nil {
+		t.Fatal("nil release")
 	}
 	if r := e.propose(Candidate{Source: Local, Files: Tree{"guest-image/openclaw": []byte("x")}}); r.State != StateRejected || !strings.Contains(r.Reason, "signed upstream release") {
 		t.Fatalf("local image change: %+v", r)
@@ -419,12 +422,12 @@ func TestRegressingSecurityReleaseAsks(t *testing.T) {
 		return ev.Run(ctx, t, pr)
 	})
 	e.p.Attach(holdJournal{e.eng})
-	r := e.release(release(t, "3.0", true, map[string][]byte{"host-image/release": []byte("h")}))
+	r := e.release(release(t, 30, true, map[string][]byte{"host-image/release": []byte("h")}))
 	if r.Basis != BasisOwner || r.Regressions == 0 || r.State != StateAwaitingOwner {
 		t.Fatalf("regressing security release: %+v", r)
 	}
 	ask, err := e.p.Ask(r.ID)
-	want := "Security update 3.0 fixes a security issue. It did worse on " + itoa(r.Regressions) + " of " + itoa(r.HeldOut) +
+	want := "Security update 30 fixes a security issue. It did worse on " + itoa(r.Regressions) + " of " + itoa(r.HeldOut) +
 		" past tasks, for example a skill task from "
 	if err != nil || !strings.HasPrefix(ask, want) || !strings.HasSuffix(ask, ". Approve or decline?") {
 		t.Fatalf("ask: %q %v", ask, err)
@@ -434,7 +437,7 @@ func TestRegressingSecurityReleaseAsks(t *testing.T) {
 	if r, _ := e.p.Settle(bg, r.ID); r.State != StateRejected {
 		t.Fatal(r)
 	}
-	declined := "You declined security update 3.0; the box is still on the previous version until a newer update is installed."
+	declined := "You declined security update 30; the box is still on the previous version until a newer update is installed."
 	for i := 0; i < 2; i++ {
 		if d := e.p.Digest(); len(d) != 1 || d[0] != declined {
 			t.Fatalf("digest %d: %q", i, d)
@@ -443,7 +446,7 @@ func TestRegressingSecurityReleaseAsks(t *testing.T) {
 	// A later release that is adopted supersedes it.
 	e.p.cfg.Evaluator = ev
 	e.owner.approve = true
-	r2 := e.release(release(t, "3.1", true, map[string][]byte{"host-image/release": []byte("h2")}))
+	r2 := e.release(release(t, 31, true, map[string][]byte{"host-image/release": []byte("h2")}))
 	if r2.State == StateAwaitingOwner {
 		e.eng.Authorize(bg, adoptID(r2.ID))
 		r2, _ = e.p.Settle(bg, r2.ID)

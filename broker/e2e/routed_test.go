@@ -153,8 +153,32 @@ func TestOP8RoutedCallsSettleFromProviderUsage(t *testing.T) {
 			t.Fatalf("%s: meter %+v, want %d calls of 237 tokens", path, u, i+1)
 		}
 	}
+	// An escaped separator or a dot segment is denied, never decoded or
+	// redirected into the served path, even by a guest that follows
+	// redirects (ADP-10).
+	mu.Lock()
+	served := len(limits)
+	mu.Unlock()
+	for _, path := range []string{
+		"/model/v1/chat%2Fcompletions", "/model/openai%2Fv1/chat/completions", "/model/%761/chat/completions",
+		"/model/v1/../v1/chat/completions", "/model/./v1/chat/completions", "/model//v1/chat/completions",
+		"/model/x/../v1/chat/completions", "/x/../model/v1/chat/completions",
+	} {
+		resp, err := c.Post("http://broker"+path, "application/json",
+			strings.NewReader(`{"model":"default","messages":[{"role":"user","content":"hi"}]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode == 200 {
+			t.Errorf("%s was served", path)
+		}
+	}
 	mu.Lock()
 	defer mu.Unlock()
+	if len(limits) != served {
+		t.Errorf("an unclean path reached the provider: %d calls, want %d", len(limits), served)
+	}
 	for _, l := range limits {
 		if l <= 0 || l > int64(router.MaxOutputTokens()) {
 			t.Fatalf("provider was sent max_tokens %d, ceiling %d", l, router.MaxOutputTokens())
