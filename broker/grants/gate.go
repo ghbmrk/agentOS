@@ -1365,9 +1365,24 @@ func (g *Gate) annotate(st *journal.Status) {
 		st.Permission.Reason = "waiting for the owner's approval"
 	} else if r := g.retry[id]; r != "" {
 		st.Permission.Reason = r
-	} else if f := g.failed[id]; f != "" {
+	} else if f := g.failed[id]; f == LineDown {
+		st.Permission.Reason = LineDown
+	} else if f != "" {
 		st.Permission.Reason = "could not ask the owner (" + f + "); retry later"
 	}
+}
+
+// LineDown is the agent's reason for an ask that could not be texted
+// because the owner's phone line was down: the request was dropped, and
+// asking again once the line is back reaches the owner (UX on #170; the
+// recovery text tells the owner the agent can ask again).
+const LineDown = "not sent: the owner's phone line is down; ask again later"
+
+func failReason(err error) string {
+	if owner.LineDown(err) {
+		return LineDown
+	}
+	return err.Error()
 }
 
 func (g *Gate) queueReply(id string, v verdict) {
@@ -1391,7 +1406,7 @@ func (g *Gate) queueReply(id string, v verdict) {
 	case w == nil:
 	case err != nil:
 		delete(g.waiting, id)
-		g.failed[id] = err.Error()
+		g.failed[id] = failReason(err)
 	case res.Queued != nil:
 		w.reply, w.sendAt = res.Queued.ID, res.Queued.SendAt
 	default:
@@ -1592,7 +1607,7 @@ func (g *Gate) flush(paced bool) {
 				if err == nil {
 					err = errors.New("not sent")
 				}
-				g.failed[it.Ref] = err.Error()
+				g.failed[it.Ref] = failReason(err)
 			}
 		}
 		g.mu.Unlock()
@@ -1616,7 +1631,7 @@ func (g *Gate) flush(paced bool) {
 		if w := g.waiting[it.Ref]; w != nil {
 			if err != nil {
 				delete(g.waiting, it.Ref)
-				g.failed[it.Ref] = err.Error()
+				g.failed[it.Ref] = failReason(err)
 			} else {
 				w.request = req
 			}
@@ -1658,7 +1673,7 @@ func (g *Gate) flush(paced bool) {
 				if err != nil {
 					// Retrying the request_id asks again.
 					delete(g.waiting, it.Ref)
-					g.failed[it.Ref] = err.Error()
+					g.failed[it.Ref] = failReason(err)
 				} else {
 					w.request = req
 				}

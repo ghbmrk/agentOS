@@ -199,7 +199,7 @@ func TestAnUnpluggedModemIsDownAndRecovers(t *testing.T) {
 	r.mu.Unlock()
 	r.waitNote(func(n string) bool { return n == "" })
 	got := r.phoneGets()
-	if !strings.HasPrefix(got, "I couldn't text you from ") || !strings.Contains(got, "2 texts weren't sent; see my Wi-Fi page.") {
+	if !strings.HasPrefix(got, "I couldn't text you from ") || !strings.Contains(got, "2 texts didn't reach you.") {
 		t.Fatalf("recovery text %q", got)
 	}
 	select {

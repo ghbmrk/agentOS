@@ -406,6 +406,27 @@ func TestContextScopedReplies(t *testing.T) {
 
 // REQ: CH-10
 
+// UX on #170: an ask dropped because the owner's phone line was down
+// tells the agent so in fixed words, and that it can ask again.
+func TestALineDownAskTellsTheAgentToAskAgain(t *testing.T) {
+	r := newRig(t, nil)
+	r.grant(mailGrant())
+	r.ver.set("inv-1042", sam())
+	r.own.lineDown = true
+	r.effect("agent/s1", "invoice.send", map[string]any{"record": "inv-1042"}, "sam@example.com")
+	r.g.Flush()
+	if st := r.state("agent/s1"); st.State != journal.Pending || st.Permission.Reason != "not sent: the owner's phone line is down; ask again later" {
+		t.Fatalf("%s %q", st.State, st.Permission.Reason)
+	}
+	n := r.own.count()
+	r.own.lineDown = false
+	r.effect("agent/s1", "invoice.send", map[string]any{"record": "inv-1042"}, "sam@example.com")
+	r.g.Flush()
+	if r.own.count() != n+1 {
+		t.Fatalf("asking again did not text the owner: %d %+v", r.own.count(), r.state("agent/s1").Permission)
+	}
+}
+
 // TestOwnerUnreachableLeavesItPending: if the owner cannot be texted, the
 // intent stays pending with the reason and a retry asks again.
 func TestOwnerUnreachableLeavesItPending(t *testing.T) {

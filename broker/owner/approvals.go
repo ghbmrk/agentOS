@@ -62,7 +62,7 @@ func (c *Channel) Request(items []Item, ttl time.Duration) (string, error) {
 	}
 	text := c.renderLocked(r)
 	c.mu.Unlock()
-	if err := c.cfg.Modem.Send(c.cfg.Owner, text); err != nil {
+	if err := c.sendRequest(text); err != nil {
 		c.dropOpen([]string{r.id}, now)
 		return "", err
 	}
@@ -109,7 +109,7 @@ func (c *Channel) RequestEach(items []Item, ttls []time.Duration) (ids []string,
 	}
 	c.mu.Unlock()
 	for _, p := range parts {
-		if e := c.cfg.Modem.Send(c.cfg.Owner, p.text); e != nil {
+		if e := c.sendRequest(p.text); e != nil {
 			var drop []string
 			for _, i := range p.idx {
 				drop = append(drop, ids[i])
@@ -143,7 +143,7 @@ func (c *Channel) RequestLocal(it Item, ttl time.Duration) (string, error) {
 	}
 	text := c.renderLocked(r)
 	c.mu.Unlock()
-	if err := c.cfg.Modem.Send(c.cfg.Owner, text); err != nil {
+	if err := c.sendRequest(text); err != nil {
 		c.dropOpen([]string{r.id}, now)
 		return "", err
 	}

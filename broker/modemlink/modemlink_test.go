@@ -242,7 +242,11 @@ func TestRecoveryTextCountsWhatWasNotSent(t *testing.T) {
 	l, clk := rig(t)
 	call(t, l, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateDown}, nil)
 	for i := 0; i < 3; i++ {
-		if err := l.Send(ownerNum, "approve? code 1234"); !errors.Is(err, modem.ErrDown) {
+		send := l.Send
+		if i > 0 {
+			send = l.SendRequest
+		}
+		if err := send(ownerNum, "approve? code 1234"); !errors.Is(err, modem.ErrDown) {
 			t.Fatalf("send while down: %v", err)
 		}
 		clk.add(30 * time.Minute)
@@ -250,7 +254,7 @@ func TestRecoveryTextCountsWhatWasNotSent(t *testing.T) {
 	clk.add(45 * time.Minute)
 	call(t, l, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateOK}, nil)
 	it := poll(t, l)
-	want := "I couldn't text you from 13:05 to 15:20. 3 texts weren't sent; see my Wi-Fi page."
+	want := "I couldn't text you from 13:05 to 15:20. 2 approval requests and 1 other text didn't reach you; your agent can ask again."
 	if it.Text != want || it.To != ownerNum {
 		t.Fatalf("recovery text %q, want %q", it.Text, want)
 	}
@@ -260,7 +264,7 @@ func TestRecoveryTextCountsWhatWasNotSent(t *testing.T) {
 	if out.Item != nil {
 		t.Fatalf("replayed %+v", out.Item)
 	}
-	if n := l.LastOutage(); n.Missed != 3 {
+	if n := l.LastOutage(); n.Missed != 3 || n.Requests != 2 {
 		t.Fatalf("outage %+v", n)
 	}
 	// An outage that cost nothing sends nothing.
@@ -322,5 +326,25 @@ func TestAPollFromBeforeAnOutageGetsNothing(t *testing.T) {
 	}
 	if it := poll(t, l); !strings.HasPrefix(it.Text, "I couldn't text you") {
 		t.Fatalf("got %+v", it)
+	}
+}
+
+// UX on #170: the recovery text counts approval requests apart and says
+// the agent can ask again only when one was lost.
+func TestRecoveryTextWording(t *testing.T) {
+	at := func(h, m int) time.Time { return time.Date(2026, 10, 5, h, m, 0, 0, time.UTC) }
+	for _, c := range []struct {
+		o    Outage
+		want string
+	}{
+		{Outage{at(13, 5), at(15, 20), 1, 0}, "I couldn't text you from 13:05 to 15:20. 1 text didn't reach you."},
+		{Outage{at(13, 5), at(15, 20), 3, 0}, "I couldn't text you from 13:05 to 15:20. 3 texts didn't reach you."},
+		{Outage{at(13, 5), at(15, 20), 1, 1}, "I couldn't text you from 13:05 to 15:20. 1 approval request didn't reach you; your agent can ask again."},
+		{Outage{at(13, 5), at(15, 20), 2, 2}, "I couldn't text you from 13:05 to 15:20. 2 approval requests didn't reach you; your agent can ask again."},
+		{Outage{at(23, 5), at(9, 0).AddDate(0, 0, 1), 2, 1}, "I couldn't text you from Oct 5 23:05 to Oct 6 09:00. 1 approval request and 1 other text didn't reach you; your agent can ask again."},
+	} {
+		if got := recoveryText(c.o); got != c.want {
+			t.Errorf("%+v: %q", c.o, got)
+		}
 	}
 }

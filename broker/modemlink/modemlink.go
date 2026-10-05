@@ -68,7 +68,9 @@ type Config struct {
 // texts to the owner could not go in it.
 type Outage struct {
 	From, To time.Time
-	Missed   int
+	// Missed counts every text that could not go; Requests, the approval
+	// requests among them.
+	Missed, Requests int
 }
 
 type item struct {
@@ -153,16 +155,32 @@ func (l *Link) heardLocked(now time.Time) {
 	l.wakeLocked()
 }
 
+// recoveryText counts what did not reach the owner. A dropped approval
+// request is never re-sent, but the agent was told it can ask again
+// (grants), so the text says so (UX on #170).
 func recoveryText(o Outage) string {
 	layout := "15:04"
 	if o.To.Sub(o.From) >= 24*time.Hour || o.From.Day() != o.To.Day() {
 		layout = "Jan 2 15:04"
 	}
-	n := fmt.Sprintf("%d texts weren't sent", o.Missed)
-	if o.Missed == 1 {
-		n = "1 text wasn't sent"
+	plural := func(n int, one, many string) string {
+		if n == 1 {
+			return "1 " + one
+		}
+		return fmt.Sprintf("%d %s", n, many)
 	}
-	return fmt.Sprintf("I couldn't text you from %s to %s. %s; see my Wi-Fi page.", o.From.Format(layout), o.To.Format(layout), n)
+	what := plural(o.Missed, "text", "texts")
+	if r := o.Requests; r > 0 {
+		what = plural(r, "approval request", "approval requests")
+		if other := o.Missed - r; other > 0 {
+			what += " and " + plural(other, "other text", "other texts")
+		}
+	}
+	end := "."
+	if o.Requests > 0 {
+		end = "; your agent can ask again."
+	}
+	return fmt.Sprintf("I couldn't text you from %s to %s. %s didn't reach you%s", o.From.Format(layout), o.To.Format(layout), what, end)
 }
 
 func (l *Link) wakeLocked() {
@@ -180,7 +198,13 @@ func newID() string {
 // or modem.ErrDown when the owner line is down, swapped or unbound, the
 // bridge is silent or full, or the text did not go. A text that could not
 // go while the line was unusable is counted for the recovery text.
-func (l *Link) Send(to, text string) error {
+func (l *Link) Send(to, text string) error { return l.send(to, text, false) }
+
+// SendRequest is Send for an approval request (owner.RequestSender), so
+// the recovery text can count requests apart.
+func (l *Link) SendRequest(to, text string) error { return l.send(to, text, true) }
+
+func (l *Link) send(to, text string, request bool) error {
 	if to != l.cfg.Owner {
 		return ErrRecipient
 	}
@@ -189,6 +213,9 @@ func (l *Link) Send(to, text string) error {
 	if !l.usableLocked(now) || len(l.queue)+len(l.out) >= MaxQueued {
 		if l.outage != nil {
 			l.outage.Missed++
+			if request {
+				l.outage.Requests++
+			}
 		}
 		l.mu.Unlock()
 		return modem.ErrDown

@@ -3,6 +3,7 @@ package modemlink_test
 import (
 	"context"
 	"regexp"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -118,5 +119,36 @@ func TestAForgedOwnerTextCannotApproveAHighTierItem(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatal("the owner's code generator did not approve through the bridge")
 		}
+	}
+}
+
+// UX on #170: an approval request the channel could not text is counted
+// as one in the recovery text, which says the agent can ask again.
+func TestTheChannelsDroppedRequestsAreCountedApart(t *testing.T) {
+	const ownerNum = "+15550000999"
+	l := modemlink.New(modemlink.Config{Owner: ownerNum, SendWait: 5 * time.Second, PollWait: 100 * time.Millisecond})
+	ch, err := owner.New(owner.Config{
+		Owner: ownerNum, Modem: l, Engine: engine{}, Store: &owner.MemStore{},
+		Secrets: owner.Secrets{TOTPSeed: []byte("12345678901234567890"), GridSeed: []byte("synthetic-grid-seed")},
+		Limits:  owner.Limits{Hold: 7 * 24 * time.Hour, AmountLimit: 10000}, Location: time.UTC,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sock := ops{l}
+	sock.call(t, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateDown}, nil)
+	low := owner.Item{Ref: "low", Object: "invoice 1042", Recipient: "billing@acme.example",
+		Facts: owner.Facts{Verb: "send", RecipientChecked: true, RecipientExists: true, RecipientByOwner: true}}
+	if _, err := ch.Request([]owner.Item{low}, 0); !owner.LineDown(err) {
+		t.Fatalf("request on a down line: %v", err)
+	}
+	if err := ch.Notify("done"); !owner.LineDown(err) {
+		t.Fatalf("notify on a down line: %v", err)
+	}
+	sock.call(t, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateOK}, nil)
+	var out struct{ Item *bridgeproto.Item }
+	sock.call(t, bridgeproto.OpOutbox, struct{}{}, &out)
+	if out.Item == nil || !strings.Contains(out.Item.Text, "1 approval request and 1 other text didn't reach you; your agent can ask again.") {
+		t.Fatalf("recovery text %+v", out.Item)
 	}
 }
