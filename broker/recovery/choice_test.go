@@ -58,7 +58,7 @@ func TestOwnerChoosesADriveOrTheirOwnStorage(t *testing.T) {
 			}
 			n, err := ChooseBackup(x.b, ch, tier4, t0)
 			must(t, err)
-			want := "No backup has finished yet, so this drive is still the only copy of your box. If it is lost or fails, everything on it is gone. Backups go to Home NAS."
+			want := "No backup has been checked yet, so this drive is still the only copy of your box. If it is lost or fails, everything on it is gone. Backups go to Home NAS."
 			if n != want {
 				t.Fatalf("choice notice: %q", n)
 			}
@@ -121,6 +121,18 @@ func TestBadBackupChoicesAreRefused(t *testing.T) {
 		{Kind: BackupUpload, Destination: "https://owner:CANARY-not-a-password@nas.local/backups"},
 		// The name goes into the digest, so it must not look like a code.
 		{Kind: BackupDrive, Destination: "USB stick PIN 482913"},
+		// No spelling of a URL, share or query carries a sign-in (L3 on #80).
+		{Kind: BackupUpload, Destination: "owner:CANARY@nas/share"},
+		{Kind: BackupUpload, Destination: "//owner:CANARY@nas"},
+		{Kind: BackupUpload, Destination: `\\owner:CANARY@nas\share`},
+		{Kind: BackupUpload, Destination: `smb:\\owner:CANARY@nas`},
+		{Kind: BackupUpload, Destination: "https:/owner:CANARY@nas"},
+		{Kind: BackupUpload, Destination: "ftp:owner:CANARY@nas"},
+		{Kind: BackupUpload, Destination: "owner\uff1aCANARY\uff20nas"},
+		{Kind: BackupUpload, Destination: "nas/backups?token=CANARY"},
+		{Kind: BackupUpload, Destination: "nas/backups#access_token=CANARY"},
+		// Nor a value the vault holds, such as the card's Wi-Fi password.
+		{Kind: BackupDrive, Destination: x.card.WiFiPassword},
 	} {
 		if _, err := ChooseBackup(x.b, c, tier4, t0); !errors.Is(err, ErrBadBackupChoice) {
 			t.Fatalf("%+v: %v", c, err)
@@ -128,6 +140,29 @@ func TestBadBackupChoicesAreRefused(t *testing.T) {
 	}
 	if c, _ := LoadBackupChoice(x.b); c.Kind != BackupUnchosen {
 		t.Fatalf("a refused choice was stored: %+v", c)
+	}
+	// The backup log takes only names that pass the same check.
+	var buf bytes.Buffer
+	rc, err := BackupSum(x.b, x.roots(), &buf, t0)
+	must(t, err)
+	if _, err := RecordBackup(x.b, "owner:CANARY@nas", rc, bytes.NewReader(buf.Bytes())); !errors.Is(err, ErrBadBackupChoice) {
+		t.Fatalf("log took a sign-in: %v", err)
+	}
+	for _, ok := range []string{"Home NAS", "USB stick SANDISK-1", "Clé USB (bureau)", "Home NAS/backups"} {
+		if _, err := ChooseBackup(x.b, BackupChoice{Kind: BackupDrive, Destination: ok}, tier4, t0); err != nil {
+			t.Fatalf("%q refused: %v", ok, err)
+		}
+	}
+}
+
+// While a rotation is owed, backups are refused, so the drive is the only
+// copy the current card restores, whatever the log says (L3 on #80).
+func TestAnOwedRotationIsTheOnlyCopyState(t *testing.T) {
+	x := newBox(t)
+	backedUp(t, x, "USB stick A", t0)
+	must(t, x.b.V.Put(RotationName, KindRotation, []byte("{this is not json")))
+	if n, _ := OnlyCopyNotice(x.b); n != NoticeUnfinished {
+		t.Fatalf("notice with a rotation owed: %q", n)
 	}
 }
 
@@ -215,6 +250,12 @@ func TestTheDigestRepeatsTheOnlyCopyNotice(t *testing.T) {
 	if l := line(t0.Add(38 * day)); l != NoticeNone {
 		t.Fatalf("monthly after choosing none: %q", l)
 	}
+	// A clock set back cannot silence it.
+	_, err = ChooseBackup(x.b, BackupChoice{Kind: BackupNone}, tier4, t0.Add(400*day))
+	must(t, err)
+	if l := line(t0.Add(39 * day)); l != NoticeNone {
+		t.Fatalf("a future last notice silenced the digest: %q", l)
+	}
 	// A backup ends it.
 	backedUp(t, x, "USB stick A", t0.Add(39*day))
 	if l := line(t0.Add(80 * day)); l != "" {
@@ -231,10 +272,26 @@ func TestAWrongKindChoiceFailsClosed(t *testing.T) {
 		t.Fatalf("load: %v", err)
 	}
 	n, err := OnlyCopyNotice(x.b)
-	if err == nil || n != NoticeUnchosen {
+	if err == nil || n != NoticeUnreadable {
 		t.Fatalf("notice: %q %v", n, err)
 	}
 	if _, err := ChooseBackup(x.b, BackupChoice{Kind: BackupNone}, tier4, t0); !errors.Is(err, ErrWrongKind) {
 		t.Fatalf("a choice replaced an entry of another kind: %v", err)
+	}
+}
+
+// A malformed entry of the right kind says so, and the owner's tier-4
+// choice replaces it.
+func TestAMalformedChoiceIsReplacedByTheOwnersChoice(t *testing.T) {
+	x := newBox(t)
+	must(t, x.b.V.Put(BackupChoiceName, KindBackupChoice, []byte(`{"format":"agentos-backup-choice-v1","kind":"cloud"}`)))
+	if n, err := OnlyCopyNotice(x.b); err == nil || n != NoticeUnreadable {
+		t.Fatalf("notice: %q %v", n, err)
+	}
+	if _, err := ChooseBackup(x.b, BackupChoice{Kind: BackupNone}, Auth{}, t0); !errors.Is(err, ErrNotAuthorized) {
+		t.Fatalf("replaced without tier-4: %v", err)
+	}
+	if n, err := ChooseBackup(x.b, BackupChoice{Kind: BackupNone}, tier4, t0); err != nil || n != NoticeNone {
+		t.Fatalf("replace: %q %v", n, err)
 	}
 }

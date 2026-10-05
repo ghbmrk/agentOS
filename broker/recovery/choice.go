@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"net/url"
 	"strings"
 	"time"
 	"unicode"
@@ -63,8 +62,12 @@ type choiceValue struct {
 const (
 	NoticeUnchosen = "This drive is the only copy of your box. If it is lost or fails, everything on it is gone. To keep a copy, choose a backup on the box's Wi-Fi page: a second drive, or storage you already have."
 	NoticeNone     = "You chose no backup, so this drive is the only copy of your box. If it is lost or fails, everything on it is gone. You can choose a backup any time on the box's Wi-Fi page."
-	noticeNoneYet  = "No backup has finished yet, so this drive is still the only copy of your box. If it is lost or fails, everything on it is gone. Backups go to %s."
+	noticeNoneYet  = "No backup has been checked yet, so this drive is still the only copy of your box. If it is lost or fails, everything on it is gone. Backups go to %s."
 	NoticeOldCard  = "Your existing backups open only with your old card. Back up now on the box's Wi-Fi page so your current card can restore the box."
+	// NoticeUnfinished: a rotation is owed, so backups are refused.
+	NoticeUnfinished = "Securing the box after a card change is not finished, so backups are paused and this drive is the only copy your current card restores. Finish it on the box's Wi-Fi page."
+	// NoticeUnreadable: the box cannot read its backup records.
+	NoticeUnreadable = "The box can't read its backup records, so it can't tell whether you have a backup. Treat this drive as the only copy until you back up again on the box's Wi-Fi page."
 )
 
 // How often the digest repeats the notice: weekly while no backup is
@@ -75,8 +78,12 @@ const (
 )
 
 // ErrBadBackupChoice is a choice that is not one of the three, or whose
-// destination is missing, too long, or carries a sign-in.
-var ErrBadBackupChoice = errors.New("recovery: choose no backup, a second drive, or storage you already have, by a name of up to 200 characters")
+// destination is not a plain name (validName, checkDestination).
+var ErrBadBackupChoice = errors.New("recovery: choose no backup, a second drive, or storage you already have, by a plain name of up to 200 characters (letters, digits, spaces, and - _ . , ( ) ' / + &)")
+
+// errMalformedChoice is a backup choice entry of the right kind that does
+// not parse; a tier-4 choice replaces it.
+var errMalformedChoice = errors.New("recovery: malformed backup choice")
 
 func loadChoice(b *Box) (choiceValue, error) {
 	raw, ok, err := reserved(b.V, BackupChoiceName, KindBackupChoice)
@@ -90,7 +97,7 @@ func loadChoice(b *Box) (choiceValue, error) {
 	d := json.NewDecoder(bytes.NewReader(raw))
 	d.DisallowUnknownFields()
 	if err := d.Decode(&c); err != nil || c.Format != backupChoiceFmt || c.valid() != nil {
-		return choiceValue{}, errors.New("recovery: malformed backup choice")
+		return choiceValue{}, errMalformedChoice
 	}
 	return c, nil
 }
@@ -114,23 +121,41 @@ func (c BackupChoice) valid() error {
 	default:
 		return ErrBadBackupChoice
 	}
-	d := c.Destination
+	return validName(c.Destination)
+}
+
+// validName checks a destination's form: 1 to 200 characters of letters,
+// digits, spaces and plain punctuation. No ':', '@', '?', '#', '%' or '\\',
+// so no URL, share path, user info or query can carry a sign-in, in any
+// spelling (L3 on #80).
+func validName(d string) error {
 	if d == "" || len(d) > 200 || strings.TrimSpace(d) != d {
 		return ErrBadBackupChoice
 	}
 	for _, r := range d {
-		if unicode.IsControl(r) {
+		if !(unicode.IsLetter(r) || unicode.IsDigit(r) || r == ' ' || strings.ContainsRune("-_.,()'/+&", r)) {
 			return ErrBadBackupChoice
 		}
 	}
-	// The name goes into the digest, so it must not look like a code or key.
+	return nil
+}
+
+// checkDestination is validName plus what the box knows of secrets: the
+// name goes into the digest, so it must not look like a code or key
+// (owner.SecretShaped) or carry a vault value (the vault's redactor).
+func checkDestination(b *Box, d string) error {
+	if err := validName(d); err != nil {
+		return err
+	}
 	if owner.SecretShaped(d) {
 		return ErrBadBackupChoice
 	}
-	if strings.Contains(d, "://") {
-		if u, err := url.Parse(d); err != nil || u.User != nil {
-			return ErrBadBackupChoice
-		}
+	r, err := b.V.Redactor()
+	if err != nil {
+		return err
+	}
+	if string(r.Redact([]byte(d))) != d {
+		return ErrBadBackupChoice
 	}
 	return nil
 }
@@ -155,10 +180,20 @@ func ChooseBackup(b *Box, c BackupChoice, auth Auth, now time.Time) (string, err
 	if err := c.valid(); err != nil {
 		return "", err
 	}
+	if c.Destination != "" {
+		if err := checkDestination(b, c.Destination); err != nil {
+			return "", err
+		}
+	}
 	if err := auth.check(b); err != nil {
 		return "", err
 	}
 	cur, err := loadChoice(b)
+	if errors.Is(err, errMalformedChoice) {
+		// The owner's tier-4 choice replaces an unreadable one of this
+		// kind; an entry of another kind is never replaced.
+		cur, err = choiceValue{Format: backupChoiceFmt}, nil
+	}
 	if err != nil {
 		return "", err
 	}
@@ -176,7 +211,7 @@ func ChooseBackup(b *Box, c BackupChoice, auth Auth, now time.Time) (string, err
 func OnlyCopyNotice(b *Box) (string, error) {
 	c, err := loadChoice(b)
 	if err != nil {
-		return NoticeUnchosen, err
+		return NoticeUnreadable, err
 	}
 	return notice(b, c.BackupChoice)
 }
@@ -184,10 +219,16 @@ func OnlyCopyNotice(b *Box) (string, error) {
 func notice(b *Box, c BackupChoice) (string, error) {
 	l, err := loadLog(b)
 	if err != nil {
-		return NoticeUnchosen, err
+		return NoticeUnreadable, err
+	}
+	// While a rotation is owed, backups are refused, and the backup key
+	// may not match the card the owner holds.
+	if _, unfinished := RotationUnfinished(b); unfinished {
+		return NoticeUnfinished, nil
 	}
 	// A backup counts when it was sealed to the drive's backup key now,
-	// never by its timestamp, which comes from the box clock.
+	// which backupKey binds to the recovery slot, never by its timestamp,
+	// which comes from the box clock.
 	cur := currentKey(b)
 	older := false
 	for _, e := range l.Entries {
@@ -217,7 +258,7 @@ func OnlyCopyDigestLine(b *Box, now time.Time) (string, error) {
 	defer b.mu.Unlock()
 	c, err := loadChoice(b)
 	if err != nil {
-		return NoticeUnchosen, err
+		return NoticeUnreadable, err
 	}
 	n, err := notice(b, c.BackupChoice)
 	if err != nil || n == "" {
@@ -227,7 +268,10 @@ func OnlyCopyDigestLine(b *Box, now time.Time) (string, error) {
 	if n == NoticeNone {
 		every = noticeEveryNone
 	}
-	if !c.Noticed.IsZero() && now.Sub(c.Noticed) < every {
+	// A Noticed in the future (the clock moved back) counts as due, so a
+	// wrong clock cannot silence the notice. The caller passes the TIM-1
+	// checked time.
+	if since := now.Sub(c.Noticed); !c.Noticed.IsZero() && since >= 0 && since < every {
 		return "", nil
 	}
 	c.Noticed = now.UTC()

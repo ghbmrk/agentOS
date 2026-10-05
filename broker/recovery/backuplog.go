@@ -115,8 +115,8 @@ func RecordBackup(b *Box, destination string, rc Receipt, readBack io.Reader) (B
 	if rc.created.IsZero() {
 		return BackupEntry{}, errors.New("recovery: record a backup with BackupSum's receipt")
 	}
-	if destination == "" || len(destination) > 200 {
-		return BackupEntry{}, errors.New("recovery: name the backup's destination")
+	if err := checkDestination(b, destination); err != nil {
+		return BackupEntry{}, err
 	}
 	e := BackupEntry{Destination: destination, Created: created.UTC(), Key: rc.key}
 	if readBack != nil && len(sum) == sha256.Size {
