@@ -199,7 +199,7 @@ func (p *Proxy) label(machine string) string {
 // listener of its own and serves this handler on it.
 func (p *Proxy) Handler(machine string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		p.serve(machine, func() string { return p.label(machine) }, p.audit, w, r)
+		p.serve(machine, machine, func() string { return p.label(machine) }, p.audit, w, r)
 	})
 }
 
@@ -214,7 +214,21 @@ func (p *Proxy) HandlerFor(machine, label string, audit Auditor) http.Handler {
 			http.Error(w, "egress: no auditor", http.StatusInternalServerError)
 			return
 		}
-		p.serve(machine, func() string { return label }, audit, w, r)
+		p.serve(machine, machine, func() string { return label }, audit, w, r)
+	})
+}
+
+// HandlerWithGrantsOf is HandlerFor for a replay machine (LOOP-5): the
+// request may use only the adapters granted to grantsOf, the agent machine
+// whose calls it replays, but is audited as machine and admitted against
+// machine's own concurrency and caps, never grantsOf's.
+func (p *Proxy) HandlerWithGrantsOf(machine, grantsOf, label string, audit Auditor) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if audit == nil {
+			http.Error(w, "egress: no auditor", http.StatusInternalServerError)
+			return
+		}
+		p.serve(machine, grantsOf, func() string { return label }, audit, w, r)
 	})
 }
 
@@ -254,7 +268,7 @@ func (p *Proxy) release(machine string) {
 	p.mu.Unlock()
 }
 
-func (p *Proxy) serve(machine string, labelOf func() string, audit Auditor, w http.ResponseWriter, r *http.Request) {
+func (p *Proxy) serve(machine, grantsOf string, labelOf func() string, audit Auditor, w http.ResponseWriter, r *http.Request) {
 	ev := Event{At: p.now(), Machine: machine, Method: r.Method}
 	deny := func(status int, reason string) {
 		ev.Reason, ev.Status = reason, status
@@ -282,7 +296,7 @@ func (p *Proxy) serve(machine string, labelOf func() string, audit Auditor, w ht
 		return
 	}
 	ev.Adapter = a.Name
-	if !p.grants[machine][a.Name] {
+	if !p.grants[grantsOf][a.Name] {
 		deny(http.StatusForbidden, "adapter not granted to this machine")
 		return
 	}

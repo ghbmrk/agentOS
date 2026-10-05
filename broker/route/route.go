@@ -427,9 +427,12 @@ func (r *Router) serve(c caller, w http.ResponseWriter, req *http.Request) {
 		fail(http.StatusRequestEntityTooLarge, "invalid_request_error", "", "request body unreadable or too large")
 		return
 	}
+	// A refusal's reason quotes anything the guest sent, so its class (the
+	// text before the first quote) is fixed and the journal's coalescing
+	// key cannot vary with the request (egress E6).
 	chat, err := parseChat(body)
 	if err != nil {
-		fail(http.StatusBadRequest, "invalid_request_error", "", err.Error())
+		fail(http.StatusBadRequest, "invalid_request_error", "", fmt.Sprintf("request not accepted: %q", err.Error()))
 		return
 	}
 	d.Class = chat.Model
@@ -527,7 +530,7 @@ func (r *Router) serve(c caller, w http.ResponseWriter, req *http.Request) {
 	case exhausted > 0:
 		fail(http.StatusTooManyRequests, "rate_limit_error", "routes_exhausted", "every permitted route is exhausted; try again later")
 	default:
-		fail(http.StatusBadRequest, "invalid_request_error", "unsupported", unsupportedWhy)
+		fail(http.StatusBadRequest, "invalid_request_error", "unsupported", fmt.Sprintf("no permitted route can serve this request: %q", unsupportedWhy))
 	}
 }
 

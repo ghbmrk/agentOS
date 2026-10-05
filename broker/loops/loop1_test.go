@@ -251,6 +251,77 @@ func TestCandidatesOutsideTheirClassNeverReachThePipeline(t *testing.T) {
 	}
 }
 
+// notReady is a builder whose evidence cannot yield a candidate yet.
+type notReady struct {
+	builder
+	ready bool
+}
+
+func (b *notReady) Ready(Brief) bool { return b.ready }
+
+// LOOP-3, L10: a builder that is not ready for a hypothesis gets no job, so
+// nothing is measured against Loop 1 (no dry run toward parking); the
+// hypothesis waits for more supporting tasks.
+func TestNotReadyWaitsForMoreTasks(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	b := &notReady{builder: builder{files: map[string][]byte{"procedures/mail": []byte("v2")}}}
+	l, err := NewLearn(LearnConfig{Pipeline: r.p, Journal: r.eng, Harvest: h, Builder: b, MinHeldOut: 1})
+	must(t, err)
+	n := 0
+	for i := 0; i < 8; i++ {
+		n++
+		r.corrected(h, n)
+	}
+	if job, ok := l.Next(context.Background(), true); ok {
+		t.Fatalf("offered %s while the builder was not ready", job.Name)
+	}
+	b.ready = true
+	if _, ok := l.Next(context.Background(), true); ok {
+		t.Fatal("offered again with no new supporting task")
+	}
+	// Held-out tasks never support a hypothesis, so add tasks until one
+	// lands in its evidence.
+	var job Job
+	ok := false
+	for i := 0; i < 20 && !ok; i++ {
+		n++
+		r.corrected(h, n)
+		job, ok = l.Next(context.Background(), true)
+	}
+	if !ok || job.Name != "candidate" {
+		t.Fatalf("no candidate after new supporting tasks: %v %v", job.Name, ok)
+	}
+	if len(b.got()) != 0 {
+		t.Fatal("Build ran before the job")
+	}
+}
+
+// CAP-5: a skill candidate may delete the procedure it replaces, but may
+// not write there, and no other class may delete outside its namespace.
+func TestSkillMaySupersedeItsProcedure(t *testing.T) {
+	ok := change.Candidate{Files: map[string][]byte{"skills/k1.json": nil}, Delete: []string{"procedures/p1.json"}}
+	sk := map[string][]byte{"skills/k1.json": nil}
+	if err := inClass(change.ClassSkill, ok); err != nil {
+		t.Fatal(err)
+	}
+	for name, c := range map[string]struct {
+		class change.Class
+		cand  change.Candidate
+	}{
+		"skill writes procedures": {change.ClassSkill, change.Candidate{Files: map[string][]byte{"procedures/p1.json": nil}}},
+		"skill deletes budget":    {change.ClassSkill, change.Candidate{Delete: []string{"budget/spare.json"}}},
+		"other shape's procedure": {change.ClassSkill, change.Candidate{Files: sk, Delete: []string{"procedures/p2.json"}}},
+		"procedure with no skill": {change.ClassSkill, change.Candidate{Delete: []string{"procedures/p1.json"}}},
+		"two skills":              {change.ClassSkill, change.Candidate{Files: map[string][]byte{"skills/k1.json": nil, "skills/k2.json": nil}, Delete: []string{"procedures/p1.json"}}},
+		"procedure deletes skill": {change.ClassProcedure, change.Candidate{Delete: []string{"skills/k1.json"}}},
+	} {
+		if err := inClass(c.class, c.cand); !errors.Is(err, ErrOutOfClass) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
 // fakePipeline records what Loop 1 asks of the pipeline.
 type fakePipeline struct {
 	mu       sync.Mutex

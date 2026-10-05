@@ -100,7 +100,7 @@ func TestUnknownHostUnlockThenModelRoute(t *testing.T) {
 	}
 	defer c.lock()
 	run := filepath.Join(dir, "run")
-	srvs, err := serve(run, c, testRouter(t), os.Getuid(), os.Getuid())
+	srvs, err := serve(run, c, testRouter(t), nil, os.Getuid(), os.Getuid())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +228,7 @@ func readCard(t *testing.T, card string) (string, []byte) {
 func TestSocketsAdmitOnlyTheirPeer(t *testing.T) {
 	c := &custody{now: time.Now, notify: func(string) {}}
 	run := filepath.Join(t.TempDir(), "run")
-	srvs, err := serve(run, c, testRouter(t), os.Getuid()+1, os.Getuid()+1)
+	srvs, err := serve(run, c, testRouter(t), nil, os.Getuid()+1, os.Getuid()+1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +253,7 @@ func TestModelSocketNeedsAMachine(t *testing.T) {
 		w := httptest.NewRecorder()
 		r := httptest.NewRequest("POST", "/openai/v1/chat/completions", nil)
 		r.Header.Set(modelroute.HeaderMachine, m)
-		modelHandler(c, testRouter(t)).ServeHTTP(w, r)
+		modelHandler(c, testRouter(t), nil).ServeHTTP(w, r)
 		if w.Code != http.StatusBadRequest {
 			t.Fatalf("machine %q: %d", m, w.Code)
 		}
@@ -279,7 +279,7 @@ func TestStatusShowsPhaseOnly(t *testing.T) {
 func TestVerifySocketForTheBroker(t *testing.T) {
 	r := newFastRig(t, true)
 	run := filepath.Join(t.TempDir(), "run")
-	srvs, err := serve(run, r.c, testRouter(t), os.Getuid(), os.Getuid())
+	srvs, err := serve(run, r.c, testRouter(t), nil, os.Getuid(), os.Getuid())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -345,13 +345,13 @@ func TestUsageTrailerNamesProvider(t *testing.T) {
 		{"openai/gpt-test", route.Usage{OutputChars: 40}, `{"provider":"openai","input":0,"output":0,"cache_read":0,"cache_write":0,"reported":false,"complete":false,"output_chars":40}`},
 	} {
 		var a callAudit
-		a.decide(httptest.NewRecorder())(route.Decision{Outcome: route.Served, Route: c.route, Usage: &c.u})
+		a.decide(httptest.NewRecorder(), "POST")(route.Decision{Outcome: route.Served, Route: c.route, Usage: &c.u})
 		if got := a.usage(); got != c.want {
 			t.Fatalf("%s: %s, want %s", c.route, got, c.want)
 		}
 	}
 	var none callAudit
-	none.decide(httptest.NewRecorder())(route.Decision{Outcome: route.Denied, Status: 400})
+	none.decide(httptest.NewRecorder(), "POST")(route.Decision{Outcome: route.Denied, Status: 400})
 	if got := none.usage(); got != "" {
 		t.Fatalf("usage for a refused call: %s", got)
 	}

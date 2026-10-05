@@ -1,12 +1,18 @@
 package update
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
+
+	"github.com/ghbmrk/agentos/broker/attest"
 )
 
 // Attestations (OSS-8): an installation that reproduced a release says
@@ -75,9 +81,11 @@ type Statement struct {
 	ManifestSHA256 string `json:"manifest_sha256"`
 	Result         string `json:"result"`
 	// Channel the attesting installation follows.
-	Channel       string            `json:"channel"`
-	HardwareClass string            `json:"hardware_class"`
-	Versions      map[string]string `json:"versions,omitempty"`
+	Channel string `json:"channel"`
+	// Hardware and Versions are choices from the public attestation
+	// schema (OSS-4): no free text, serial number or timestamp.
+	Hardware attest.Hardware   `json:"hardware"`
+	Versions map[string]string `json:"versions,omitempty"`
 	// Attestor is the signer's Ed25519 public key, standard base64.
 	Attestor string `json:"attestor"`
 	// Operator is OperatorMaintainer for a maintainer-run attestor, else
@@ -86,7 +94,7 @@ type Statement struct {
 }
 
 var (
-	statementFields = fields("release", "manifest_sha256", "result", "channel", "hardware_class", "versions", "attestor", "operator")
+	statementFields = fields("release", "manifest_sha256", "result", "channel", "hardware", "versions", "attestor", "operator")
 	envelopeFields  = fields("payloadType", "payload", "signatures")
 	signatureFields = fields("keyid", "sig")
 )
@@ -113,8 +121,73 @@ func pae(payloadType string, payload []byte) []byte {
 	return []byte(fmt.Sprintf("DSSEv1 %d %s %d %s", len(payloadType), payloadType, len(payload), payload))
 }
 
+var sha256RE = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// isReleasePath reports whether p is ReleasePath of some version >= 1,
+// in that exact spelling.
+func isReleasePath(p string) bool {
+	n, err := strconv.ParseInt(strings.TrimSuffix(strings.TrimPrefix(p, "releases/"), ".json"), 10, 64)
+	return err == nil && n >= 1 && ReleasePath(n) == p
+}
+
+// checkStatement reports the first field outside the closed form OSS-4
+// allows: identifiers of the signed release in their fixed shapes, and
+// every other field a value the public attestation schema lists. The
+// attestor key is checked where it is decoded.
+func checkStatement(st Statement) error {
+	if err := checkFixed(st); err != nil {
+		return err
+	}
+	s := attest.Default()
+	if err := s.CheckHardware(st.Hardware); err != nil {
+		return err
+	}
+	return s.CheckVersions(st.Versions)
+}
+
+// readStatement is checkStatement for a statement signed elsewhere,
+// perhaps under a newer schema than this box's: hardware and versions
+// need only the schema's token shape, and come back mapped onto this
+// box's schema, with what it does not list as attest.Unlisted (potency
+// PB1 on #73). Otherwise a box on release N would refuse every
+// attestation of N+1 that names N+1's new versions, and the security fix
+// would never auto-stage (D6).
+func readStatement(st Statement) (Statement, error) {
+	if err := checkFixed(st); err != nil {
+		return Statement{}, err
+	}
+	s := attest.Default()
+	var err error
+	if st.Hardware, err = s.ReadHardware(st.Hardware); err != nil {
+		return Statement{}, err
+	}
+	if st.Versions, err = s.ReadVersions(st.Versions); err != nil {
+		return Statement{}, err
+	}
+	return st, nil
+}
+
+// checkFixed checks the fields every schema version shares.
+func checkFixed(st Statement) error {
+	s := attest.Default()
+	if !isReleasePath(st.Release) || !sha256RE.MatchString(st.ManifestSHA256) {
+		return errors.New("statement does not name a release manifest")
+	}
+	if (st.Result != ResultPass && st.Result != ResultFail) || !s.Result(st.Result) {
+		return fmt.Errorf("result %q is not pass or fail", st.Result)
+	}
+	if (st.Channel != ChannelStable && st.Channel != ChannelFast) || !s.Channel(st.Channel) {
+		return fmt.Errorf("channel %q is not stable or fast", st.Channel)
+	}
+	if st.Operator != "" && st.Operator != OperatorMaintainer {
+		return fmt.Errorf("operator %q is not %q", st.Operator, OperatorMaintainer)
+	}
+	return nil
+}
+
 // Attest signs a statement for the release v names. Attestor and the
-// release fields are filled in from v and priv.
+// release fields are filled in from v and priv. Every other field must
+// be a choice the public attestation schema lists (OSS-4).
 func Attest(priv ed25519.PrivateKey, v *Verified, st Statement) ([]byte, error) {
 	if !v.ok() {
 		return nil, ErrNotChecked
@@ -122,11 +195,8 @@ func Attest(priv ed25519.PrivateKey, v *Verified, st Statement) ([]byte, error) 
 	st.Release = v.manifest.Path
 	st.ManifestSHA256 = v.manifest.SHA256
 	st.Attestor = base64.StdEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
-	if st.Result != ResultPass && st.Result != ResultFail {
-		return nil, fmt.Errorf("result %q is not pass or fail", st.Result)
-	}
-	if st.Operator != "" && st.Operator != OperatorMaintainer {
-		return nil, fmt.Errorf("operator %q is not %q", st.Operator, OperatorMaintainer)
+	if err := checkStatement(st); err != nil {
+		return nil, err
 	}
 	body, err := json.Marshal(st)
 	if err != nil {
@@ -143,10 +213,25 @@ func Attest(priv ed25519.PrivateKey, v *Verified, st Statement) ([]byte, error) 
 	})
 }
 
+// MaxAttestationSize caps one attestation's bytes (review K-PB1b on #73),
+// as U8 caps manifests. A fetcher reads no more than this per attestation.
+const MaxAttestationSize = 16 << 10
+
 // ParseAttestation checks an envelope's signature and returns its
 // statement and the attestor key. Envelope, signatures and statement are
-// decoded strictly: no unknown, duplicate or case-variant key.
+// decoded strictly: no unknown, duplicate or case-variant key. The input
+// must also be canonical, exactly the bytes Attest would write for that
+// statement: one signature, its keyid the attestor's KeyID, the payload
+// json.Marshal of the statement, and the envelope json.Marshal of the
+// result, so whitespace, key order, escapes, base64 padding or line
+// breaks, and extra signatures cannot carry anything (OSS-4, security C1
+// on #73). Hardware and versions must have the schema's token shape;
+// values this box's schema does not list come back as attest.Unlisted
+// (readStatement).
 func ParseAttestation(b []byte) (Statement, ed25519.PublicKey, error) {
+	if len(b) > MaxAttestationSize {
+		return Statement{}, nil, fmt.Errorf("attestation is %d bytes, over %d", len(b), MaxAttestationSize)
+	}
 	var env struct {
 		PayloadType string            `json:"payloadType"`
 		Payload     string            `json:"payload"`
@@ -158,13 +243,12 @@ func ParseAttestation(b []byte) (Statement, ed25519.PublicKey, error) {
 	if env.PayloadType != AttestationType {
 		return Statement{}, nil, fmt.Errorf("payload type %q", env.PayloadType)
 	}
-	sigs := make([]envSignature, 0, len(env.Signatures))
-	for _, raw := range env.Signatures {
-		var sig envSignature
-		if err := decodeStrict(raw, &sig, signatureFields); err != nil {
-			return Statement{}, nil, fmt.Errorf("attestation signature: %w", err)
-		}
-		sigs = append(sigs, sig)
+	if len(env.Signatures) != 1 {
+		return Statement{}, nil, fmt.Errorf("attestation has %d signatures, not one", len(env.Signatures))
+	}
+	var sig envSignature
+	if err := decodeStrict(env.Signatures[0], &sig, signatureFields); err != nil {
+		return Statement{}, nil, fmt.Errorf("attestation signature: %w", err)
 	}
 	body, err := base64.StdEncoding.DecodeString(env.Payload)
 	if err != nil {
@@ -175,17 +259,33 @@ func ParseAttestation(b []byte) (Statement, ed25519.PublicKey, error) {
 		return Statement{}, nil, fmt.Errorf("attestation statement: %w", err)
 	}
 	raw, err := base64.StdEncoding.DecodeString(st.Attestor)
-	if err != nil || len(raw) != ed25519.PublicKeySize {
-		return Statement{}, nil, errors.New("attestor is not an Ed25519 key")
+	if err != nil || len(raw) != ed25519.PublicKeySize || base64.StdEncoding.EncodeToString(raw) != st.Attestor {
+		return Statement{}, nil, errors.New("attestor is not a canonical Ed25519 key")
 	}
 	pub := ed25519.PublicKey(raw)
-	for _, sig := range sigs {
-		raw, err := base64.StdEncoding.DecodeString(sig.Sig)
-		if err == nil && ed25519.Verify(pub, pae(env.PayloadType, body), raw) {
-			return st, pub, nil
-		}
+	sigRaw, err := base64.StdEncoding.DecodeString(sig.Sig)
+	if err != nil || !ed25519.Verify(pub, pae(env.PayloadType, body), sigRaw) {
+		return Statement{}, nil, errors.New("attestation signature does not verify")
 	}
-	return Statement{}, nil, errors.New("attestation signature does not verify")
+	if id, err := KeyID(pub); err != nil || sig.KeyID != id {
+		return Statement{}, nil, errors.New("attestation keyid is not the attestor's")
+	}
+	canon, err := json.Marshal(st)
+	if err != nil || !bytes.Equal(canon, body) {
+		return Statement{}, nil, errors.New("attestation statement is not canonical")
+	}
+	want, err := json.Marshal(envelope{
+		PayloadType: AttestationType,
+		Payload:     base64.StdEncoding.EncodeToString(body),
+		Signatures:  []envSignature{{KeyID: sig.KeyID, Sig: base64.StdEncoding.EncodeToString(sigRaw)}},
+	})
+	if err != nil || !bytes.Equal(want, b) {
+		return Statement{}, nil, errors.New("attestation envelope is not canonical")
+	}
+	if st, err = readStatement(st); err != nil {
+		return Statement{}, nil, fmt.Errorf("attestation statement: %w", err)
+	}
+	return st, pub, nil
 }
 
 // passes calls f with the fingerprint and statement of each distinct

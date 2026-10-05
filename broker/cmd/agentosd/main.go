@@ -19,7 +19,6 @@ import (
 	"github.com/ghbmrk/agentos/broker/cgroup"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/guest"
-	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/owner"
@@ -66,21 +65,33 @@ func (a machines) Lineage(id string) (string, error) {
 	return mc.Lineage, err
 }
 
-// lateServices forwards to the guest plane, which needs the manager and so
-// is built after it; machines start only once both exist.
-type lateServices struct{ p atomic.Pointer[guest.Plane] }
+// lateServices routes each machine to its guest services, which need the
+// manager and so are built after it; machines start only once they exist.
+// Replay machines (vm.EvalPrefix) go only to the evaluator's plane, never
+// the live one with its journal, executors and owner (replay R7); every
+// other machine goes to the live guest plane.
+type lateServices struct{ live, eval atomic.Pointer[svc] }
+
+type svc struct{ vm.Services }
+
+func (l *lateServices) pick(id string) *svc {
+	if strings.HasPrefix(id, vm.EvalPrefix) {
+		return l.eval.Load()
+	}
+	return l.live.Load()
+}
 
 func (l *lateServices) Open(id string) (string, error) {
-	p := l.p.Load()
-	if p == nil {
-		return "", errors.New("guest plane not open")
+	s := l.pick(id)
+	if s == nil {
+		return "", fmt.Errorf("no guest services for %s yet", id)
 	}
-	return p.Open(id)
+	return s.Open(id)
 }
 
 func (l *lateServices) Close(id string) {
-	if p := l.p.Load(); p != nil {
-		p.Close(id)
+	if s := l.pick(id); s != nil {
+		s.Close(id)
 	}
 }
 
@@ -183,14 +194,14 @@ func main() {
 		log.Fatal(err)
 	}
 	if runsc != "" {
-		svc := &lateServices{}
+		services := &lateServices{}
 		m, err := vm.Open(ctx, vm.Config{
 			StateDir: stateDir,
 			Images:   imgs,
 			Runtime:  &gvisor.Runtime{Bin: runsc, StateDir: filepath.Join(stateDir, "runsc")},
 			Admit:    d.Admission(),
 			Cgroups:  cg,
-			Services: svc,
+			Services: services,
 
 			DiskReserveBytes: diskReserveMB << 20,
 		})
@@ -202,7 +213,7 @@ func main() {
 				// Machines cannot start without their guest sockets.
 				log.Printf("agent machines disabled: %v", err)
 			} else {
-				svc.p.Store(plane)
+				services.live.Store(&svc{plane})
 				agent.a.Store(&guest.OwnerAgent{Plane: plane, Machine: agentMachine})
 				defer plane.Shutdown()
 				spec, err := agentSpec(imgs, agentImage, agentLaunch, agentMemMB)
@@ -300,16 +311,8 @@ func openGuestPlane(m *vm.Manager, d *daemon.Daemon, socketDir, meterPath, inbox
 		gcfg.Model = modelroute.Forward(modelroute.Config{
 			Socket: egressSocket,
 			Label:  m.DataLabel,
-			Denied: func(machine string, x modelroute.Denial) {
-				n := journal.EgressNote{Machine: machine, Adapter: x.Adapter, Operation: x.Operation, Method: x.Method, Status: x.Status, Reason: x.Reason}
-				if n.Reason == "" {
-					n.Reason = "denied"
-				}
-				if err := eng.RecordEgress(n); err != nil {
-					log.Printf("journal egress denial for %s: %v", machine, err)
-				}
-			},
-			Logf: log.Printf,
+			Denied: modelroute.Journal(eng, log.Printf),
+			Logf:   log.Printf,
 		})
 	}
 	return guest.New(gcfg)

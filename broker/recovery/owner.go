@@ -43,6 +43,11 @@ func ReEnroll(b *Box, rk RecoveryKey, local bool, r io.Reader) (Enrollment, erro
 	if err := (Auth{Recovery: rk}).check(b); err != nil {
 		return Enrollment{}, err
 	}
+	return newSeed(b, r)
+}
+
+// newSeed replaces the code-generator seed in the vault.
+func newSeed(b *Box, r io.Reader) (Enrollment, error) {
 	seed, err := random(r, TOTPSeedBytes)
 	if err != nil {
 		return Enrollment{}, err
