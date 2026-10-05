@@ -247,11 +247,20 @@ func (l *Loop3) Loop() loops.Loop { return loops.Maintain }
 
 // Urgent reports work that must not wait out a dry-run park (LOOP-11,
 // security first; arbitrator ruling on #53): a security fix waiting for
-// its attestation or a retry, or a failed check being retried.
+// its attestation or a retry, a failed check being retried, or a box
+// back online since its last offer.
 func (l *Loop3) Urgent() bool {
+	online := l.cfg.Online()
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.st.Failure != "" {
+	// The scheduler asks a parked loop only this, so going offline is
+	// noted here too, and coming back online makes a check due at once
+	// (M3).
+	if !online {
+		l.noteOfflineLocked()
+		return false
+	}
+	if !l.st.OfflineSince.IsZero() || l.st.Failure != "" {
 		return true
 	}
 	p := l.st.Pending
@@ -268,10 +277,7 @@ func (l *Loop3) Next(_ context.Context, _ bool) (loops.Job, bool) {
 	defer l.mu.Unlock()
 	now := l.cfg.Now()
 	if !online {
-		if l.st.OfflineSince.IsZero() {
-			l.st.OfflineSince = now
-			l.saveLocked()
-		}
+		l.noteOfflineLocked()
 		return loops.Job{}, false
 	}
 	if !l.st.OfflineSince.IsZero() {
@@ -284,6 +290,13 @@ func (l *Loop3) Next(_ context.Context, _ bool) (loops.Job, bool) {
 		return loops.Job{}, false
 	}
 	return loops.Job{Name: "update-check", Run: l.check}, true
+}
+
+func (l *Loop3) noteOfflineLocked() {
+	if l.st.OfflineSince.IsZero() {
+		l.st.OfflineSince = l.cfg.Now()
+		l.saveLocked()
+	}
 }
 
 func (l *Loop3) saveLocked() error {
@@ -642,7 +655,7 @@ func (l *Loop3) statusLocked(online bool, set loops.Settings, in update.Installe
 	case set.Off:
 		return Status{Line: fmt.Sprintf("Updates: last checked %s, but update checks are off. Reply LOOPS ON to restart them.", last) + drive}
 	case !set.On(loops.Maintain):
-		return Status{Line: fmt.Sprintf("Updates: last checked %s, but update checks are off. Reply LOOP 3 ON to restart them.", last) + drive}
+		return Status{Line: fmt.Sprintf("Updates: last checked %s, but update checks are off. Reply UPDATE CHECKS ON to restart them.", last) + drive}
 	case st.Failure != "":
 		return Status{Line: fmt.Sprintf("Updates: could not check: %s. Last good check: %s.", failText[st.Failure], last) + drive}
 	case st.LastOnline.IsZero():
@@ -674,6 +687,9 @@ func (l *Loop3) statusLocked(online bool, set loops.Settings, in update.Installe
 				return Status{Line: "Security " + ready + " An independent tester's report passed."}
 			}
 			return Status{Line: "U" + ready[1:]}
+		}
+		if at, ok := st.ProposedAt[st.Newest]; ok && st.NewestSecurity && st.TestedBy != "" {
+			return Status{Line: fmt.Sprintf("Security update %d has been waiting for your approval since %s.", st.Newest, at.Format("Mon 2 Jan"))}
 		}
 		if at, ok := st.ProposedAt[st.Newest]; ok && st.NewestSecurity {
 			return Status{Line: fmt.Sprintf("Security update %d needs your approval: no trusted independent test report yet. Asked %s.", st.Newest, at.Format("Mon 2 Jan"))}

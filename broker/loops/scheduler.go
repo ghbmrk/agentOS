@@ -480,7 +480,7 @@ func (s *Scheduler) safeRun(ctx context.Context, job Job) (res Result) {
 
 // Share reports each loop's current share of spare capacity, for STATUS
 // and tests: its measured return relative to the best loop's, or 1 while
-// unmeasured, and 0 while parked or off.
+// unmeasured, and 0 while off or parked (unless Urgent).
 func (s *Scheduler) Share() map[Loop]float64 {
 	set := s.Settings()
 	s.mu.Lock()
@@ -492,10 +492,14 @@ func (s *Scheduler) Share() map[Loop]float64 {
 			best = r
 		}
 	}
+	urgentNow := map[Loop]bool{}
+	for _, src := range s.cfg.Sources {
+		urgentNow[src.Loop()] = urgentNow[src.Loop()] || urgent(src)
+	}
 	out := map[Loop]float64{}
 	for l, m := range s.loops {
 		switch {
-		case !set.On(l) || now.Before(m.parked):
+		case !set.On(l) || (now.Before(m.parked) && !urgentNow[l]):
 			out[l] = 0
 		case m.runs == 0:
 			out[l] = 1

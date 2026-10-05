@@ -329,7 +329,7 @@ func TestStaleCheckSaysWhy(t *testing.T) {
 		t.Fatalf("busy box: %q", st.Line)
 	}
 	r.settings = loops.Settings{Paused: map[loops.Loop]bool{loops.Maintain: true}}
-	if st := r.l.Status(); st.Current || !strings.Contains(st.Line, "Reply LOOP 3 ON") {
+	if st := r.l.Status(); st.Current || !strings.Contains(st.Line, "Reply UPDATE CHECKS ON") {
 		t.Fatalf("Loop 3 off: %q", st.Line)
 	}
 	r.settings = loops.Settings{Off: true}
@@ -713,5 +713,60 @@ func TestDigestSaysWhoTestedAnAutoStagedSecurityFix(t *testing.T) {
 		if d := r.digest(); !strings.Contains(d, c.want) {
 			t.Fatalf("%s: digest %q, want %q", name, d, c.want)
 		}
+	}
+}
+
+func TestComingBackOnlineChecksEvenWhenParked(t *testing.T) {
+	// M3, UPD-8 (#53 L3 round 2): dry daily checks park Loop 3, its
+	// resting state; coming back online still checks at once, and a
+	// security fix found then keeps it offered (Urgent) and in the share.
+	r := newRig(t)
+	spare, err := meter.Open(meter.Config{
+		Path:       filepath.Join(t.TempDir(), "spare.json"),
+		MachineCap: meter.Limits{Calls: 50, Tokens: 500_000},
+		OverallCap: loops.SpareLimits(loops.DefaultSpareCalls),
+		Now:        r.clk.now,
+	})
+	r.must(err)
+	s, err := loops.New(loops.Config{Store: &change.MemStore{}, Spare: spare, Sources: []loops.Source{r.l}, Now: r.clk.now})
+	r.must(err)
+	for d := 0; d < 3; d++ {
+		if d > 0 {
+			r.clk.add(24 * time.Hour)
+			r.refresh()
+		}
+		s.Tick(context.Background())
+	}
+	if s.Share()[loops.Maintain] != 0 {
+		t.Fatalf("not parked after 3 dry checks: %v", s.Share())
+	}
+	r.online = false
+	for h := 0; h < 6; h++ {
+		r.clk.add(time.Hour)
+		s.Tick(context.Background())
+	}
+	r.release(2, func(m *update.Manifest) { m.Security = true })
+	r.online = true
+	r.clk.add(time.Minute)
+	s.Tick(context.Background())
+	if st := r.l.Status(); !strings.Contains(st.Line, "Security update 2") {
+		t.Fatalf("back online but not checked: %q", st.Line)
+	}
+	if s.Share()[loops.Maintain] == 0 {
+		t.Fatalf("an urgent Loop 3 shows no share: %v", s.Share())
+	}
+}
+
+func TestListedReportHeldForOwnerNotCalledUntested(t *testing.T) {
+	// #53 L3 round 2: a listed report passed, but the pipeline still asks
+	// the owner; the line must not say there is no trusted report.
+	r := newRig(t)
+	r.release(2, func(m *update.Manifest) { m.Security = true })
+	r.attest()
+	r.tick()
+	st := r.l.Status()
+	if strings.Contains(st.Line, "no trusted independent test report") ||
+		!strings.Contains(st.Line, "Security update 2 has been waiting for your approval since") {
+		t.Fatalf("line %q", st.Line)
 	}
 }
