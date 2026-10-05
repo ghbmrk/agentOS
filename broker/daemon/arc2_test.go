@@ -94,8 +94,8 @@ var learningPlane = map[string]struct {
 	allowed []string
 	forbid  []string
 }{
-	"change": {[]string{"journal", "owner", "routerule", "update"}, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
-	"loops":  {[]string{"change", "journal", "meter", "owner", "vm"}, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
+	"change": {[]string{"journal", "owner", "routerule", "update"}, forbiddenStd},
+	"loops":  {[]string{"change", "journal", "meter", "owner", "vm"}, forbiddenStd},
 }
 
 var forbiddenStd = []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "syscall", "unsafe", "C"}
