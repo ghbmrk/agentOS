@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf16"
@@ -14,9 +15,11 @@ import (
 
 const driveESP = "4a1b2c3d-0000-4000-8000-00000000d71e"
 
-// fakeHost is a /sys, /dev and mountinfo tree with an AgentOS Drive on sda
-// (booted from the partition systemd-boot names), a Windows NVMe disk, a
-// data disk, and the virtual devices the list must skip.
+// fakeHost is a /sys, /dev and mountinfo tree laid out like the kernel's:
+// /sys/block and /sys/dev/block are symlinks into /sys/devices. The
+// AgentOS Drive is sda (a USB stick), booted from the ESP systemd-boot
+// names, with root on sda2; the host has a Windows NVMe disk and a SATA
+// data disk.
 type fakeHost struct {
 	t      *testing.T
 	root   string
@@ -26,24 +29,29 @@ type fakeHost struct {
 
 func newFakeHost(t *testing.T) *fakeHost {
 	h := &fakeHost{t: t, root: t.TempDir(), images: map[string][]byte{}}
-	h.disk("sda", "8:0", "SanDisk Extreme", 4096, gptDisk(512, 4096, "dddddddd-0000-4000-8000-000000000001", []tpart{
-		{typ: tESP, start: 64, n: 128, sig: SigFAT, uuid: driveESP},
-		{typ: tLinux, start: 192, n: 3000, sig: SigExt},
-	}), "sda1:8:1", "sda2:8:2")
-	h.disk("nvme0n1", "259:0", "Samsung SSD 970 EVO", 4096, windowsLaptop(512), "nvme0n1p1:259:1", "nvme0n1p3:259:3")
-	h.disk("sdb", "8:16", "WDC WD20EZAZ", 4096, gptDisk(512, 4096, "eeeeeeee-0000-4000-8000-000000000002", []tpart{
-		{typ: tBasic, start: 64, n: 3900, sig: SigNTFS, name: "Data"},
-	}), "sdb1:8:17")
-	for _, v := range []string{"loop0", "ram0", "zram0", "dm-0", "md0", "sr0", "nbd0"} {
-		h.write("sys/block/"+v+"/dev", "1:1\n")
+	h.disk("sda", "pci0000:00/0000:00:14.0/usb2/2-1/2-1:1.0/host0/target0:0:0/0:0:0:0", "8:0", "SanDisk Extreme", true,
+		gptDisk(512, 4096, "dddddddd-0000-4000-8000-000000000001", []tpart{
+			{typ: tESP, start: 64, n: 128, sig: SigFAT, uuid: driveESP},
+			{typ: tLinux, start: 192, n: 3000, sig: SigExt},
+		}), "sda1:8:1", "sda2:8:2")
+	h.disk("nvme0n1", "pci0000:00/0000:00:1d.0/0000:3d:00.0/nvme/nvme0", "259:0", "Samsung SSD 970 EVO", false,
+		windowsLaptop(512), "nvme0n1p1:259:1", "nvme0n1p3:259:3")
+	h.disk("sdb", "pci0000:00/0000:00:17.0/ata1/host1/target1:0:0/1:0:0:0", "8:16", "WDC WD20EZAZ", false,
+		gptDisk(512, 4096, "eeeeeeee-0000-4000-8000-000000000002", []tpart{
+			{typ: tBasic, start: 64, n: 3900, sig: SigNTFS},
+		}), "sdb1:8:17")
+	for _, v := range []string{"loop0", "ram0", "zram0", "nbd0"} {
+		h.disk(v, "virtual/block", "7:0", "", false, nil)
 	}
 	h.efivar(driveESP)
-	h.mounts("8:2")
+	h.mountRoot("8:2")
 	return h
 }
 
+func (h *fakeHost) path(rel string) string { return filepath.Join(h.root, rel) }
+
 func (h *fakeHost) write(rel, s string) {
-	p := filepath.Join(h.root, rel)
+	p := h.path(rel)
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		h.t.Fatal(err)
 	}
@@ -52,33 +60,60 @@ func (h *fakeHost) write(rel, s string) {
 	}
 }
 
-func (h *fakeHost) disk(name, dev, model string, sectors int64, img []byte, parts ...string) {
-	h.write("sys/block/"+name+"/dev", dev+"\n")
-	h.write("sys/block/"+name+"/size", strings.TrimSpace(itoa(sectors))+"\n")
-	h.write("sys/block/"+name+"/device/model", model+"   \n")
-	h.write("sys/block/"+name+"/queue/logical_block_size", "512\n")
-	if err := os.MkdirAll(filepath.Join(h.root, "sys/block", name, "holders"), 0o755); err != nil {
+func (h *fakeHost) link(rel, target string) {
+	p := h.path(rel)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		h.t.Fatal(err)
 	}
-	for _, p := range parts {
-		f := strings.SplitN(p, ":", 2)
-		h.write("sys/block/"+name+"/"+f[0]+"/dev", f[1]+"\n")
-		h.write("sys/block/"+name+"/"+f[0]+"/partition", "1\n")
+	os.Remove(p)
+	if err := os.Symlink(target, p); err != nil {
+		h.t.Fatal(err)
 	}
-	h.images[filepath.Join(h.root, "dev", name)] = img
 }
 
-func itoa(n int64) string {
-	var b [20]byte
-	i := len(b)
-	for {
-		i--
-		b[i] = byte('0' + n%10)
-		n /= 10
-		if n == 0 {
-			return string(b[i:])
-		}
+// disk adds a disk under /sys/devices/<parent>/block/<name> with its
+// partitions ("name:major:minor").
+func (h *fakeHost) disk(name, parent, dev, model string, removable bool, img []byte, parts ...string) {
+	d := "sys/devices/" + parent + "/block/" + name
+	h.write(d+"/dev", dev+"\n")
+	h.write(d+"/size", strconv.Itoa(len(img)/512)+"\n")
+	h.write(d+"/device/model", model+"   \n")
+	h.write(d+"/queue/logical_block_size", "512\n")
+	rm := "0"
+	if removable {
+		rm = "1"
 	}
+	h.write(d+"/removable", rm+"\n")
+	h.link("sys/block/"+name, h.path(d))
+	h.link("sys/dev/block/"+dev, h.path(d))
+	for _, p := range parts {
+		f := strings.SplitN(p, ":", 2)
+		h.write(d+"/"+f[0]+"/dev", f[1]+"\n")
+		h.write(d+"/"+f[0]+"/partition", "1\n")
+		h.link("sys/dev/block/"+f[1], h.path(d+"/"+f[0]))
+	}
+	if img != nil {
+		h.images[h.path("dev/"+name)] = img
+	}
+}
+
+// stacked adds a dm or md device built on the given partition or disk
+// device directories (relative to /sys/block).
+func (h *fakeHost) stacked(name, dev string, slaves ...string) {
+	d := "sys/devices/virtual/block/" + name
+	h.write(d+"/dev", dev+"\n")
+	if err := os.MkdirAll(h.path(d+"/slaves"), 0o755); err != nil {
+		h.t.Fatal(err)
+	}
+	for _, s := range slaves {
+		real, err := filepath.EvalSymlinks(h.path("sys/block/" + s))
+		if err != nil {
+			h.t.Fatal(err)
+		}
+		h.link(d+"/slaves/"+filepath.Base(s), real)
+	}
+	h.link("sys/block/"+name, h.path(d))
+	h.link("sys/dev/block/"+dev, h.path(d))
 }
 
 // efivar writes LoaderDevicePartUUID the way efivarfs shows it: four
@@ -92,21 +127,26 @@ func (h *fakeHost) efivar(uuid string) {
 	h.write("sys/firmware/efi/efivars/"+loaderDevicePartUUID, b.String())
 }
 
-func (h *fakeHost) mounts(devs ...string) {
-	var s strings.Builder
-	for i, d := range devs {
-		s.WriteString(itoa(int64(20+i)) + " 1 " + d + " / /mnt rw,relatime - ext4 /dev/x rw\n")
+func (h *fakeHost) noEfivar() {
+	os.Remove(h.path("sys/firmware/efi/efivars/" + loaderDevicePartUUID))
+}
+
+// mountRoot writes mountinfo with / on dev, plus other mounts.
+func (h *fakeHost) mountRoot(dev string, others ...string) {
+	s := "1 0 " + dev + " / / rw - ext4 /dev/root rw\n"
+	for i, o := range others {
+		s += strconv.Itoa(20+i) + " 1 " + o + " / /mnt/" + strconv.Itoa(i) + " rw - ntfs3 /dev/x rw\n"
 	}
-	s.WriteString("30 1 0:22 / /proc rw - proc proc rw\n")
-	h.write("proc/self/mountinfo", s.String())
+	s += "30 1 0:22 / /proc rw - proc proc rw\n"
+	h.write("proc/self/mountinfo", s)
 }
 
 func (h *fakeHost) system() System {
 	return System{
-		Sys:       filepath.Join(h.root, "sys"),
-		Dev:       filepath.Join(h.root, "dev"),
-		Mountinfo: filepath.Join(h.root, "proc/self/mountinfo"),
-		Open: func(path string) (Device, error) {
+		Sys:       h.path("sys"),
+		Dev:       h.path("dev"),
+		Mountinfo: h.path("proc/self/mountinfo"),
+		open: func(path string) (device, error) {
 			h.opened = append(h.opened, path)
 			img, ok := h.images[path]
 			if !ok {
@@ -121,30 +161,40 @@ type nopCloser struct{ *bytes.Reader }
 
 func (nopCloser) Close() error { return nil }
 
-func names(ds []Disk) []string {
+func names(ds []Disk) string {
 	var out []string
 	for _, d := range ds {
 		out = append(out, d.Name)
 	}
-	return out
+	return strings.Join(out, ",")
 }
 
-// The HW-8a list is every host disk, described, and never the AgentOS
-// Drive or a virtual device.
+func classes(t *testing.T, s System, want map[string]Class) {
+	t.Helper()
+	for name, w := range want {
+		if got := s.Classify(name); got != w {
+			t.Errorf("%s: %s, want %s", name, got, w)
+		}
+	}
+}
+
+// The HW-8a list is every physical host disk, described with bus and
+// removable flags, and never the AgentOS Drive or a virtual device.
 func TestHostDisksListsEveryHostDiskButTheDrive(t *testing.T) {
 	h := newFakeHost(t)
-	ds, err := h.system().HostDisks()
+	l, err := h.system().HostDisks()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(names(ds), ","); got != "nvme0n1,sdb" {
-		t.Fatalf("host disks %s", got)
+	if l.Health != HealthOK || names(l.Disks) != "nvme0n1,sdb" {
+		t.Fatalf("listing %+v", l)
 	}
-	win, data := ds[0], ds[1]
-	if win.Model != "Samsung SSD 970 EVO" || win.Size != 4096*512 || !win.HoldsWindows || !win.HasBitLocker || !win.NeedsSecondConfirm() {
+	win, data := l.Disks[0], l.Disks[1]
+	if win.Model != "Samsung SSD 970 EVO" || win.Size != 4096*512 || win.Bus != BusNVMe || win.Removable ||
+		!win.HoldsWindows || !win.HasBitLocker || !win.NeedsSecondConfirm() {
 		t.Errorf("windows disk %+v", win)
 	}
-	if data.Model != "WDC WD20EZAZ" || data.NeedsSecondConfirm() || len(data.Partitions) != 1 || data.Partitions[0].Name != "Data" {
+	if data.Model != "WDC WD20EZAZ" || data.Bus != BusSATA || data.NeedsSecondConfirm() || len(data.Partitions) != 1 {
 		t.Errorf("data disk %+v", data)
 	}
 	for _, p := range h.opened {
@@ -156,84 +206,114 @@ func TestHostDisksListsEveryHostDiskButTheDrive(t *testing.T) {
 	}
 }
 
-// The drive is the disk holding the partition systemd-boot booted from.
-// Without that variable (another loader, a damaged variable) the drive is
-// the disk the system is running on: a partition mounted or held by
-// device-mapper (dm-verity /usr). A disk is never classed as the drive
-// for any other reason, so every other disk stays hidden.
-func TestIsDrive(t *testing.T) {
+// Security H1 on HOST-1a: the drive is the disk holding the running root,
+// cross-checked against systemd-boot's partition; dm and md devices take
+// the class of the disks they are built on; removable media are host
+// disks; virtual devices are not classified.
+func TestClassify(t *testing.T) {
 	h := newFakeHost(t)
+	h.disk("sdc", "pci0000:00/0000:00:14.0/usb2/2-2/2-2:1.0/host2/target2:0:0/2:0:0:0", "8:32", "USB Flash", true,
+		gptDisk(512, 1024, "cccccccc-0000-4000-8000-000000000003", []tpart{{typ: tBasic, start: 64, n: 900, sig: SigExFAT}}), "sdc1:8:33")
+	h.stacked("dm-0", "253:0", "sda/sda2")
+	h.stacked("dm-1", "253:1", "nvme0n1/nvme0n1p3")
+	h.stacked("md0", "9:0", "sdb/sdb1", "sda/sda1")
+	h.stacked("dm-2", "253:2")
 	s := h.system()
-	for name, want := range map[string]bool{"sda": true, "nvme0n1": false, "sdb": false} {
-		got, err := s.IsDrive(name)
-		if err != nil || got != want {
-			t.Errorf("%s: %v %v, want %v", name, got, err, want)
-		}
+	classes(t, s, map[string]Class{
+		"sda": ClassDrive, "nvme0n1": ClassHost, "sdb": ClassHost, "sdc": ClassHost,
+		"dm-0": ClassDrive, "dm-1": ClassHost, "md0": ClassHost, "dm-2": ClassUnknown,
+		"loop0": ClassUnknown, "zram0": ClassUnknown, "nosuch": ClassUnknown,
+		"": ClassUnknown, "../sda": ClassUnknown, "sda/..": ClassUnknown, "sda\n": ClassUnknown,
+	})
+	if got := s.ClassifyEnv("sda"); got != "AGENTOS_DISK=drive\n" {
+		t.Errorf("env %q", got)
 	}
 
-	// No loader variable: the in-use disk is the drive, by a mount or by
-	// a device-mapper holder on one of its partitions.
-	os.Remove(filepath.Join(h.root, "sys/firmware/efi/efivars", loaderDevicePartUUID))
-	for name, want := range map[string]bool{"sda": true, "nvme0n1": false, "sdb": false} {
-		if got, _ := s.IsDrive(name); got != want {
-			t.Errorf("no efivar, mounted: %s = %v", name, got)
-		}
-	}
-	h.mounts()
-	h.write("sys/block/sda/sda2/holders/dm-0", "")
-	for name, want := range map[string]bool{"sda": true, "nvme0n1": false, "sdb": false} {
-		if got, _ := s.IsDrive(name); got != want {
-			t.Errorf("no efivar, held: %s = %v", name, got)
-		}
-	}
+	// Root on dm-crypt over a drive partition: still the drive.
+	h.mountRoot("253:0")
+	classes(t, s, map[string]Class{"sda": ClassDrive, "nvme0n1": ClassHost})
 
-	// A loader variable naming a partition on no disk falls back the same
-	// way, so a mismatch never hides the drive the box runs on.
-	h.efivar("00000000-1111-2222-3333-444444444444")
-	if got, _ := s.IsDrive("sda"); !got {
-		t.Error("unmatched efivar hid the running drive")
-	}
-	if got, _ := s.IsDrive("sdb"); got {
-		t.Error("unmatched efivar exposed a host disk")
-	}
+	// No loader variable: the root's disk is the drive.
+	h.mountRoot("8:2")
+	h.noEfivar()
+	classes(t, s, map[string]Class{"sda": ClassDrive, "nvme0n1": ClassHost, "sdb": ClassHost})
+}
 
-	// A device name with path tricks is refused.
-	for _, bad := range []string{"", "../sda", "sda/..", "a b", "sda\n"} {
-		if _, err := s.IsDrive(bad); err == nil {
-			t.Errorf("%q accepted", bad)
-		}
+// Mount state never makes a disk the drive: a host partition mounted (by
+// mistake or attack) stays a host disk and stays listed.
+func TestMountedHostPartitionStaysHost(t *testing.T) {
+	h := newFakeHost(t)
+	h.mountRoot("8:2", "259:3", "8:17")
+	classes(t, h.system(), map[string]Class{"sda": ClassDrive, "nvme0n1": ClassHost, "sdb": ClassHost})
+	h.noEfivar()
+	classes(t, h.system(), map[string]Class{"sda": ClassDrive, "nvme0n1": ClassHost, "sdb": ClassHost})
+	l, err := h.system().HostDisks()
+	if err != nil || names(l.Disks) != "nvme0n1,sdb" {
+		t.Fatalf("%v %+v", err, l)
 	}
 }
 
-// An unreadable disk is still listed, as unreadable, needing the second
-// confirmation: a disk the probe cannot describe is not taken lightly.
+// When the root's disk lacks the partition systemd-boot booted from, there
+// is no drive: a health item is raised, every other disk is a host disk,
+// and the disk under the running root is "unknown" (not hidden, which
+// would only stop the box booting) and never offered for HW-8a.
+func TestDriveMismatch(t *testing.T) {
+	h := newFakeHost(t)
+	h.efivar("00000000-1111-2222-3333-444444444444")
+	s := h.system()
+	classes(t, s, map[string]Class{"sda": ClassUnknown, "nvme0n1": ClassHost, "sdb": ClassHost})
+	l, err := s.HostDisks()
+	if err != nil || l.Health != HealthMismatch || names(l.Disks) != "nvme0n1,sdb" {
+		t.Fatalf("%v %+v", err, l)
+	}
+
+	// The loader names a partition on a host disk: still a mismatch, and
+	// that disk does not become the drive.
+	h.efivar("00000000-0000-0000-0000-0000000000a1") // windowsLaptop's ESP
+	classes(t, s, map[string]Class{"sda": ClassUnknown, "nvme0n1": ClassHost})
+}
+
+// With no single root disk (root not on a block device, or on dm over
+// two disks) nothing can be the drive: every device is unknown, and the
+// listing carries the health item.
+func TestNoRootDisk(t *testing.T) {
+	h := newFakeHost(t)
+	h.mountRoot("0:31")
+	s := h.system()
+	classes(t, s, map[string]Class{"sda": ClassUnknown, "nvme0n1": ClassUnknown})
+	l, err := s.HostDisks()
+	if err != nil || l.Health != HealthNoRoot || names(l.Disks) != "nvme0n1,sda,sdb" {
+		t.Fatalf("%v %+v", err, l)
+	}
+	h.stacked("dm-3", "253:3", "sda/sda2", "sdb/sdb1")
+	h.mountRoot("253:3")
+	classes(t, s, map[string]Class{"sda": ClassUnknown, "sdb": ClassUnknown})
+}
+
+// Potency R1 on HOST-1a: a disk that cannot be read is listed, flagged,
+// and needs the second confirmation.
 func TestHostDisksListsUnreadableDisk(t *testing.T) {
 	h := newFakeHost(t)
-	delete(h.images, filepath.Join(h.root, "dev", "sdb"))
-	ds, err := h.system().HostDisks()
+	delete(h.images, h.path("dev/sdb"))
+	l, err := h.system().HostDisks()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ds) != 2 || ds[1].Name != "sdb" || ds[1].Unreadable == "" || !ds[1].NeedsSecondConfirm() {
-		t.Fatalf("%+v", ds)
+	if len(l.Disks) != 2 || l.Disks[1].Name != "sdb" || l.Disks[1].Problem != ProblemOpen || !l.Disks[1].NeedsSecondConfirm() {
+		t.Fatalf("%+v", l)
 	}
 }
 
-// ClassifyEnv is what the udev helper prints: AGENTOS_DRIVE=1 for the
-// drive, 0 for anything else, and 0 on any error, so a disk that cannot
-// be classified is hidden.
-func TestClassifyEnv(t *testing.T) {
+// Security H4: the listing carries no label, partition name or GUID.
+func TestHostDisksKeepNoLabels(t *testing.T) {
 	h := newFakeHost(t)
-	s := h.system()
-	for name, want := range map[string]string{
-		"sda":     "AGENTOS_DRIVE=1\n",
-		"nvme0n1": "AGENTOS_DRIVE=0\n",
-		"sdb":     "AGENTOS_DRIVE=0\n",
-		"../etc":  "AGENTOS_DRIVE=0\n",
-		"nosuch":  "AGENTOS_DRIVE=0\n",
-	} {
-		if got := s.ClassifyEnv(name); got != want {
-			t.Errorf("%s: %q, want %q", name, got, want)
-		}
+	h.images[h.path("dev/sdb")] = canaryDisk()
+	l, err := h.system().HostDisks()
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaksCanary(t, "listing", l)
+	if got := cleanModel("WD\x1b[31m Blue\x00 " + strings.Repeat("x", 100)); strings.ContainsAny(got, "\x1b\x00") || len(got) > 64 {
+		t.Errorf("model %q", got)
 	}
 }

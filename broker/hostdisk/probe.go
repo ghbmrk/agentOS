@@ -3,19 +3,21 @@
 // partition, at most its first WindowSize bytes to recognize the volume
 // signature, so the local page can say what a disk holds (Windows,
 // BitLocker, a boot loader, a data volume) before the owner gives it to
-// the box. It opens no file system, never mounts, and never writes: the
-// only way in is a read-only io.ReaderAt (see OpenReadOnly), and a source
-// test keeps the package free of write, mount and exec calls.
+// the box. It opens no file system, never mounts, and never writes.
+//
+// The partition table is hostile input: every count, size and LBA is
+// bounded and checked before use, and a disk's total reads are capped.
+// What comes out is booleans, enums and sizes only: no volume label,
+// partition name, GUID or serial is decoded, kept or logged (security H4
+// on HOST-1a).
 package hostdisk
 
 import (
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"hash/crc32"
 	"io"
-	"strings"
-	"unicode/utf16"
+	"math/bits"
 )
 
 // WindowSize is how much of a partition (or of a disk with no partition
@@ -23,8 +25,19 @@ import (
 // lies inside it; no file system structure past it is read.
 const WindowSize = 4096
 
+// Bounds on a partition table (security H3 on HOST-1a). A table outside
+// them is unreadable, never partly trusted.
+const (
+	maxGPTEntries   = 128
+	minGPTEntrySize = 128
+	maxGPTEntrySize = 512
+	maxGPTArray     = 32 << 10
+	maxLogical      = 64
+)
+
 // ErrUnreadableTable means the disk has a partition table the probe could
-// not read (both GPT copies damaged, or the disk shorter than its table).
+// not read (both GPT copies damaged or out of bounds, a looping or too long
+// extended-partition chain, or a disk shorter than its table).
 var ErrUnreadableTable = errors.New("hostdisk: partition table unreadable")
 
 // Table is the kind of partition table.
@@ -67,14 +80,26 @@ const (
 	KindOther     Kind = "other"
 )
 
-var gptKinds = map[string]Kind{
-	"c12a7328-f81f-11d2-ba4b-00a0c93ec93b": KindESP,
-	"21686148-6449-6e6f-744e-656564454649": KindBIOSBoot,
-	"e3c9e316-0b5c-4db8-817d-f92df00215ae": KindMSR,
-	"ebd0a0a2-b9e5-4433-87c0-68b6b72699c7": KindBasicData,
-	"de94bba4-06d1-4d40-a16a-bfd50179d6ac": KindWinRE,
-	"0fc63daf-8483-4772-8e79-3d69d8477de4": KindLinux,
-	"0657fd6d-a4ab-43c4-84e5-0933c84b4f4f": KindLinuxSwap,
+// Problem says why a disk could not be described (potency R1 on HOST-1a:
+// such a disk is listed, never dropped).
+type Problem string
+
+const (
+	ProblemNone        Problem = ""
+	ProblemTable       Problem = "unreadable-table"
+	ProblemOpen        Problem = "cannot-open"
+	ProblemSizeUnknown Problem = "size-unknown"
+)
+
+// gptKinds maps GPT type GUIDs, as on disk (mixed-endian), to kinds.
+var gptKinds = map[[16]byte]Kind{
+	onDisk("c12a7328-f81f-11d2-ba4b-00a0c93ec93b"): KindESP,
+	onDisk("21686148-6449-6e6f-744e-656564454649"): KindBIOSBoot,
+	onDisk("e3c9e316-0b5c-4db8-817d-f92df00215ae"): KindMSR,
+	onDisk("ebd0a0a2-b9e5-4433-87c0-68b6b72699c7"): KindBasicData,
+	onDisk("de94bba4-06d1-4d40-a16a-bfd50179d6ac"): KindWinRE,
+	onDisk("0fc63daf-8483-4772-8e79-3d69d8477de4"): KindLinux,
+	onDisk("0657fd6d-a4ab-43c4-84e5-0933c84b4f4f"): KindLinuxSwap,
 }
 
 var mbrKinds = map[byte]Kind{
@@ -90,68 +115,121 @@ var mbrKinds = map[byte]Kind{
 // Partition is one entry of a disk's partition table.
 type Partition struct {
 	Number    int       `json:"number"` // 1-based, as the kernel numbers it
-	Start     int64     `json:"start"`  // bytes
+	Start     int64     `json:"-"`      // bytes; used only to read the window
 	Size      int64     `json:"size"`   // bytes
 	Kind      Kind      `json:"kind"`
-	TypeGUID  string    `json:"type_guid,omitempty"` // GPT only, lower case
-	UUID      string    `json:"uuid,omitempty"`      // GPT only, lower case
-	MBRType   byte      `json:"mbr_type,omitempty"`  // MBR only
-	Active    bool      `json:"active,omitempty"`    // MBR boot flag
-	Name      string    `json:"name,omitempty"`      // GPT label
+	Active    bool      `json:"active,omitempty"` // MBR boot flag
 	Signature Signature `json:"signature,omitempty"`
 }
 
+// Bus is how a disk is attached (potency R2 on HOST-1a).
+type Bus string
+
+const (
+	BusNVMe   Bus = "nvme"
+	BusSATA   Bus = "sata"
+	BusUSB    Bus = "usb"
+	BusMMC    Bus = "mmc"
+	BusVirtIO Bus = "virtio"
+	BusSCSI   Bus = "scsi"
+	BusOther  Bus = "other"
+)
+
 // Disk describes one host disk for the HW-8a list.
 type Disk struct {
-	Name          string      `json:"name"` // kernel name, e.g. "nvme0n1"
-	Model         string      `json:"model"`
-	Size          int64       `json:"size"` // bytes
+	Name          string      `json:"name"`  // kernel name, e.g. "nvme0n1"
+	Model         string      `json:"model"` // the drive's own model string (HW-8a), printable ASCII
+	Size          int64       `json:"size"`  // bytes
+	Bus           Bus         `json:"bus"`
+	Removable     bool        `json:"removable"`
 	Table         Table       `json:"table"`
-	TableUUID     string      `json:"table_uuid,omitempty"`
 	Signature     Signature   `json:"signature,omitempty"` // a volume on the whole disk
 	Partitions    []Partition `json:"partitions"`
 	HoldsWindows  bool        `json:"holds_windows"`
 	HasBitLocker  bool        `json:"has_bitlocker"`
 	HasBootLoader bool        `json:"has_boot_loader"`
-	// Unreadable is why the disk could not be described, or empty.
-	Unreadable string `json:"unreadable,omitempty"`
+	Problem       Problem     `json:"problem,omitempty"`
 }
 
 // NeedsSecondConfirm reports whether taking the disk needs HW-8a's second,
 // separate confirmation: it holds BitLocker, Windows, or a boot loader the
 // host may start from, or it could not be read, so what it holds is unknown.
 func (d Disk) NeedsSecondConfirm() bool {
-	return d.HasBitLocker || d.HoldsWindows || d.HasBootLoader || d.Unreadable != ""
+	return d.HasBitLocker || d.HoldsWindows || d.HasBootLoader || d.Problem != ProblemNone
 }
 
-// HasPartition reports whether the disk's table lists a partition with the
-// given GPT unique GUID (any case).
-func (d Disk) HasPartition(uuid string) bool {
-	uuid = strings.ToLower(uuid)
-	for _, p := range d.Partitions {
-		if p.UUID != "" && p.UUID == uuid {
-			return true
-		}
+// readBudget caps the bytes one probe reads: the MBR, both GPT copies at
+// their largest, every EBR, and a window per partition.
+func readBudget(ss int64) int64 {
+	return 512 + 2*(ss+maxGPTArray) + maxLogical*ss + (maxGPTEntries+1)*WindowSize
+}
+
+// budget is a ReaderAt that refuses reads outside the disk and past the
+// probe's read budget.
+type budget struct {
+	r    io.ReaderAt
+	size int64
+	left int64
+}
+
+var errBudget = errors.New("hostdisk: read budget spent")
+
+func (b *budget) read(p []byte, off int64) error {
+	n := int64(len(p))
+	if off < 0 || n > b.size || off > b.size-n {
+		return io.ErrUnexpectedEOF
 	}
-	return false
+	if n > b.left {
+		return errBudget
+	}
+	b.left -= n
+	got, err := b.r.ReadAt(p, off)
+	if int64(got) == n {
+		return nil
+	}
+	if err == nil {
+		err = io.ErrUnexpectedEOF
+	}
+	return err
+}
+
+// mul multiplies two non-negative values, reporting overflow past int64.
+func mul(a, b uint64) (int64, bool) {
+	hi, lo := bits.Mul64(a, b)
+	if hi != 0 || lo > 1<<63-1 {
+		return 0, false
+	}
+	return int64(lo), true
 }
 
 // Probe describes the disk behind r, size bytes long with the given
 // logical sector size. It reads only the partition table and each
 // partition's first WindowSize bytes. A table it cannot read is returned
-// as ErrUnreadableTable with Disk.Unreadable set.
+// as ErrUnreadableTable with Disk.Problem set.
 func Probe(r io.ReaderAt, size int64, sector int) (Disk, error) {
+	d, _, err := probe(r, size, sector, [16]byte{})
+	return d, err
+}
+
+// probe is Probe that also reports whether the GPT lists a partition with
+// unique GUID want (on-disk form), without keeping any GUID.
+func probe(r io.ReaderAt, size int64, sector int, want [16]byte) (Disk, bool, error) {
 	if sector < 512 || sector > 65536 || sector&(sector-1) != 0 {
-		return Disk{}, fmt.Errorf("hostdisk: bad sector size %d", sector)
+		return Disk{}, false, errors.New("hostdisk: bad sector size")
 	}
+	if size < 0 {
+		return Disk{}, false, errors.New("hostdisk: bad size")
+	}
+	ss := int64(sector)
+	b := &budget{r: r, size: size, left: readBudget(ss)}
 	d := Disk{Size: size, Table: TableNone, Partitions: []Partition{}}
-	fail := func(err error) (Disk, error) {
-		d.Unreadable = err.Error()
-		return d, err
+	fail := func(err error) (Disk, bool, error) {
+		d.Problem = ProblemTable
+		return d, false, err
 	}
 	mbr := make([]byte, 512)
-	if err := readFull(r, size, mbr, 0); err != nil {
-		return fail(fmt.Errorf("%w: %v", ErrUnreadableTable, err))
+	if err := b.read(mbr, 0); err != nil {
+		return fail(ErrUnreadableTable)
 	}
 	bootSig := mbr[510] == 0x55 && mbr[511] == 0xAA
 	protective := false
@@ -162,24 +240,31 @@ func Probe(r io.ReaderAt, size int64, sector int) (Disk, error) {
 			}
 		}
 	}
+	found := false
 	if protective {
+		// A hybrid MBR (0xEE beside other entries) is read as the GPT it
+		// fronts; if no GPT copy is valid the disk is unreadable, never
+		// described from the hybrid entries.
 		d.Table = TableGPT
-		if err := probeGPT(r, size, int64(sector), &d); err != nil {
+		parts, ok, err := probeGPT(b, size, ss, want)
+		if err != nil {
 			return fail(err)
 		}
+		d.Partitions, found = parts, ok
 	} else {
 		w := make([]byte, min(int64(WindowSize), size))
-		if err := readFull(r, size, w, 0); err != nil {
-			return fail(fmt.Errorf("%w: %v", ErrUnreadableTable, err))
+		if err := b.read(w, 0); err != nil {
+			return fail(ErrUnreadableTable)
 		}
 		if sig := detect(w); sig != SigNone {
 			d.Signature = sig
 		} else if bootSig && validMBR(mbr) {
 			d.Table = TableMBR
-			d.TableUUID = fmt.Sprintf("%08x", binary.LittleEndian.Uint32(mbr[440:]))
-			if err := probeMBR(r, size, int64(sector), mbr, &d); err != nil {
+			parts, err := probeMBR(b, size, ss, mbr)
+			if err != nil {
 				return fail(err)
 			}
+			d.Partitions = parts
 		}
 	}
 	for i := range d.Partitions {
@@ -188,12 +273,12 @@ func Probe(r io.ReaderAt, size int64, sector int) (Disk, error) {
 			continue
 		}
 		w := make([]byte, min(int64(WindowSize), p.Size, size-p.Start))
-		if err := readFull(r, size, w, p.Start); err == nil {
+		if err := b.read(w, p.Start); err == nil {
 			p.Signature = detect(w)
 		}
 	}
 	summarize(&d)
-	return d, nil
+	return d, found, nil
 }
 
 func summarize(d *Disk) {
@@ -222,20 +307,6 @@ func summarize(d *Disk) {
 	if d.HasBootLoader && hasNTFS {
 		d.HoldsWindows = true
 	}
-}
-
-func readFull(r io.ReaderAt, size int64, b []byte, off int64) error {
-	if off < 0 || off+int64(len(b)) > size {
-		return io.ErrUnexpectedEOF
-	}
-	n, err := r.ReadAt(b, off)
-	if n == len(b) {
-		return nil
-	}
-	if err == nil {
-		err = io.ErrUnexpectedEOF
-	}
-	return err
 }
 
 // detect recognizes a volume from its first bytes.
@@ -272,120 +343,123 @@ func detect(b []byte) Signature {
 	return SigNone
 }
 
-// guid formats a GPT on-disk GUID (mixed-endian) in lower-case text.
-func guid(b []byte) string {
-	return fmt.Sprintf("%08x-%04x-%04x-%x-%x",
-		binary.LittleEndian.Uint32(b[0:]), binary.LittleEndian.Uint16(b[4:]),
-		binary.LittleEndian.Uint16(b[6:]), b[8:10], b[10:16])
+// onDisk turns a textual GUID into GPT's on-disk mixed-endian bytes.
+func onDisk(s string) [16]byte {
+	var raw [16]byte
+	j := 0
+	for i := 0; i < len(s) && j < 32; i++ {
+		c := s[i]
+		var v byte
+		switch {
+		case c >= '0' && c <= '9':
+			v = c - '0'
+		case c >= 'a' && c <= 'f':
+			v = c - 'a' + 10
+		case c >= 'A' && c <= 'F':
+			v = c - 'A' + 10
+		default:
+			continue
+		}
+		raw[j/2] = raw[j/2]<<4 | v
+		j++
+	}
+	var out [16]byte
+	out[0], out[1], out[2], out[3] = raw[3], raw[2], raw[1], raw[0]
+	out[4], out[5] = raw[5], raw[4]
+	out[6], out[7] = raw[7], raw[6]
+	copy(out[8:], raw[8:])
+	return out
 }
 
-func probeGPT(r io.ReaderAt, size, ss int64, d *Disk) error {
-	last := size/ss - 1
-	var firstErr error
-	for _, lba := range []int64{1, last} {
+func probeGPT(b *budget, size, ss int64, want [16]byte) ([]Partition, bool, error) {
+	for _, lba := range []int64{1, size/ss - 1} {
 		if lba < 1 {
 			continue
 		}
-		parts, diskGUID, err := readGPT(r, size, ss, lba)
-		if err == nil {
-			d.TableUUID = diskGUID
-			d.Partitions = parts
-			return nil
-		}
-		if firstErr == nil {
-			firstErr = err
+		if parts, found, err := readGPT(b, size, ss, lba, want); err == nil {
+			return parts, found, nil
 		}
 	}
-	if firstErr == nil {
-		firstErr = errors.New("disk too small")
-	}
-	return fmt.Errorf("%w: %v", ErrUnreadableTable, firstErr)
+	return nil, false, ErrUnreadableTable
 }
 
-const (
-	maxGPTEntries   = 1024
-	maxGPTEntrySize = 4096
-	maxGPTArray     = 1 << 20
-)
+var errGPT = errors.New("hostdisk: GPT copy invalid")
 
-func readGPT(r io.ReaderAt, size, ss, lba int64) ([]Partition, string, error) {
+func readGPT(b *budget, size, ss, lba int64, want [16]byte) ([]Partition, bool, error) {
+	sectors := uint64(size / ss)
 	h := make([]byte, ss)
-	if err := readFull(r, size, h, lba*ss); err != nil {
-		return nil, "", err
+	off, ok := mul(uint64(lba), uint64(ss))
+	if !ok {
+		return nil, false, errGPT
+	}
+	if err := b.read(h, off); err != nil {
+		return nil, false, err
 	}
 	if string(h[:8]) != "EFI PART" {
-		return nil, "", errors.New("no GPT signature")
+		return nil, false, errGPT
 	}
 	hsize := int64(binary.LittleEndian.Uint32(h[12:]))
 	if hsize < 92 || hsize > ss {
-		return nil, "", errors.New("bad GPT header size")
+		return nil, false, errGPT
 	}
-	want := binary.LittleEndian.Uint32(h[16:])
+	crc := binary.LittleEndian.Uint32(h[16:])
 	hc := append([]byte(nil), h[:hsize]...)
 	binary.LittleEndian.PutUint32(hc[16:], 0)
-	if crc32.ChecksumIEEE(hc) != want {
-		return nil, "", errors.New("GPT header CRC mismatch")
+	if crc32.ChecksumIEEE(hc) != crc {
+		return nil, false, errGPT
 	}
-	if int64(binary.LittleEndian.Uint64(h[24:])) != lba {
-		return nil, "", errors.New("GPT header in the wrong place")
+	if binary.LittleEndian.Uint64(h[24:]) != uint64(lba) {
+		return nil, false, errGPT
 	}
 	entLBA := binary.LittleEndian.Uint64(h[72:])
-	num := int64(binary.LittleEndian.Uint32(h[80:]))
-	esize := int64(binary.LittleEndian.Uint32(h[84:]))
-	if esize < 128 || esize > maxGPTEntrySize || esize%8 != 0 || num > maxGPTEntries || num*esize > maxGPTArray {
-		return nil, "", errors.New("bad GPT entry array")
+	num := uint64(binary.LittleEndian.Uint32(h[80:]))
+	esize := uint64(binary.LittleEndian.Uint32(h[84:]))
+	if esize < minGPTEntrySize || esize > maxGPTEntrySize || esize%8 != 0 || num > maxGPTEntries || num*esize > maxGPTArray {
+		return nil, false, errGPT
 	}
-	if entLBA > uint64(size/ss) {
-		return nil, "", errors.New("GPT entry array outside the disk")
+	if entLBA < 1 || entLBA >= sectors {
+		return nil, false, errGPT
+	}
+	entOff, ok := mul(entLBA, uint64(ss))
+	if !ok {
+		return nil, false, errGPT
 	}
 	ent := make([]byte, num*esize)
-	if err := readFull(r, size, ent, int64(entLBA)*ss); err != nil {
-		return nil, "", err
+	if err := b.read(ent, entOff); err != nil {
+		return nil, false, err
 	}
 	if crc32.ChecksumIEEE(ent) != binary.LittleEndian.Uint32(h[88:]) {
-		return nil, "", errors.New("GPT entry CRC mismatch")
+		return nil, false, errGPT
 	}
-	var parts []Partition
-	for i := int64(0); i < num; i++ {
+	parts := []Partition{}
+	found := false
+	for i := uint64(0); i < num; i++ {
 		e := ent[i*esize : (i+1)*esize]
-		typ := guid(e[0:16])
-		if typ == "00000000-0000-0000-0000-000000000000" {
+		var typ, uniq [16]byte
+		copy(typ[:], e[0:16])
+		copy(uniq[:], e[16:32])
+		if typ == ([16]byte{}) {
 			continue
 		}
-		first, lastLBA := binary.LittleEndian.Uint64(e[32:]), binary.LittleEndian.Uint64(e[40:])
-		if lastLBA < first || first > uint64(1<<62)/uint64(ss) || lastLBA > uint64(1<<62)/uint64(ss) {
+		first, last := binary.LittleEndian.Uint64(e[32:]), binary.LittleEndian.Uint64(e[40:])
+		if last < first || last >= sectors {
+			continue // outside the disk: not a partition the probe describes
+		}
+		start, ok1 := mul(first, uint64(ss))
+		n, ok2 := mul(last-first+1, uint64(ss))
+		if !ok1 || !ok2 {
 			continue
 		}
 		kind, ok := gptKinds[typ]
 		if !ok {
 			kind = KindOther
 		}
-		parts = append(parts, Partition{
-			Number:   int(i + 1),
-			Start:    int64(first) * ss,
-			Size:     int64(lastLBA-first+1) * ss,
-			Kind:     kind,
-			TypeGUID: typ,
-			UUID:     guid(e[16:32]),
-			Name:     utf16Name(e[56:128]),
-		})
-	}
-	if parts == nil {
-		parts = []Partition{}
-	}
-	return parts, guid(h[56:72]), nil
-}
-
-func utf16Name(b []byte) string {
-	var u []uint16
-	for i := 0; i+1 < len(b); i += 2 {
-		c := binary.LittleEndian.Uint16(b[i:])
-		if c == 0 {
-			break
+		if want != ([16]byte{}) && uniq == want {
+			found = true
 		}
-		u = append(u, c)
+		parts = append(parts, Partition{Number: int(i + 1), Start: start, Size: n, Kind: kind})
 	}
-	return string(utf16.Decode(u))
+	return parts, found, nil
 }
 
 func validMBR(mbr []byte) bool {
@@ -404,59 +478,65 @@ func validMBR(mbr []byte) bool {
 
 func isExtended(t byte) bool { return t == 0x05 || t == 0x0F || t == 0x85 }
 
-const maxLogical = 128
-
-func probeMBR(r io.ReaderAt, size, ss int64, mbr []byte, d *Disk) error {
-	add := func(e []byte, base int64, number int) {
+func probeMBR(b *budget, size, ss int64, mbr []byte) ([]Partition, error) {
+	sectors := uint64(size / ss)
+	parts := []Partition{}
+	add := func(e []byte, base uint64, number int) {
 		t := e[4]
-		start := (base + int64(binary.LittleEndian.Uint32(e[8:]))) * ss
-		n := int64(binary.LittleEndian.Uint32(e[12:])) * ss
+		first := base + uint64(binary.LittleEndian.Uint32(e[8:]))
+		count := uint64(binary.LittleEndian.Uint32(e[12:]))
 		kind, ok := mbrKinds[t]
 		if !ok {
 			kind = KindOther
 		}
-		d.Partitions = append(d.Partitions, Partition{
-			Number: number, Start: start, Size: n, Kind: kind, MBRType: t, Active: e[0] == 0x80,
-		})
+		p := Partition{Number: number, Kind: kind, Active: e[0] == 0x80, Start: -1}
+		if first < sectors {
+			p.Start, _ = mul(first, uint64(ss))
+			p.Size, _ = mul(min(count, sectors-first), uint64(ss))
+		}
+		parts = append(parts, p)
 	}
-	var extStart int64 = -1
+	extStart := uint64(0)
+	hasExt := false
 	for i := 0; i < 4; i++ {
 		e := mbr[446+16*i : 446+16*i+16]
 		switch {
 		case e[4] == 0:
 		case isExtended(e[4]):
-			if extStart < 0 {
-				extStart = int64(binary.LittleEndian.Uint32(e[8:]))
+			if !hasExt {
+				extStart, hasExt = uint64(binary.LittleEndian.Uint32(e[8:])), true
 			}
 		default:
 			add(e, 0, i+1)
 		}
 	}
-	if extStart < 0 {
-		return nil
+	if !hasExt {
+		return parts, nil
 	}
 	ebr := make([]byte, 512)
-	next := int64(0)
+	seen := map[uint64]bool{}
+	next := uint64(0)
 	for n := 0; n < maxLogical; n++ {
 		at := extStart + next
-		if err := readFull(r, size, ebr, at*ss); err != nil {
-			return fmt.Errorf("%w: extended partition: %v", ErrUnreadableTable, err)
+		if seen[at] || at >= sectors {
+			return nil, ErrUnreadableTable
+		}
+		seen[at] = true
+		off, _ := mul(at, uint64(ss))
+		if err := b.read(ebr, off); err != nil {
+			return nil, ErrUnreadableTable
 		}
 		if ebr[510] != 0x55 || ebr[511] != 0xAA {
-			return fmt.Errorf("%w: extended partition: no boot signature", ErrUnreadableTable)
+			return nil, ErrUnreadableTable
 		}
 		if e := ebr[446:462]; e[4] != 0 {
 			add(e, at, 5+n)
 		}
 		link := ebr[462:478]
 		if !isExtended(link[4]) {
-			return nil
+			return parts, nil
 		}
-		nx := int64(binary.LittleEndian.Uint32(link[8:]))
-		if nx <= next {
-			return fmt.Errorf("%w: extended partition loops", ErrUnreadableTable)
-		}
-		next = nx
+		next = uint64(binary.LittleEndian.Uint32(link[8:]))
 	}
-	return fmt.Errorf("%w: too many logical partitions", ErrUnreadableTable)
+	return nil, ErrUnreadableTable
 }

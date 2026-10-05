@@ -1,21 +1,22 @@
 # AgentOS: the host PC's disks are left as they were (HW-8, HOST-1a).
 # Installed by the image (P2-1) to /usr/lib/udev/rules.d/, with the helper
-# at /usr/lib/agentos/agentos-hostdisk. Not installed in the initrd.
+# at /usr/lib/agentos/agentos-hostdisk (root only). Not in the initrd.
 #
-# Every block disk and partition that is not on the AgentOS Drive is a host
-# disk. For a host disk:
+# The helper classifies each block disk, including dm and md devices by
+# what they are built on, and partitions take their disk's answer:
+#   drive    the disk holding the running root, cross-checked against the
+#            partition systemd-boot booted from: left alone;
+#   host     every other disk, removable media included: hidden, below;
+#   unknown  no answer (no single root disk, the helper failed or printed
+#            anything else): kept from udisks only, so the box still boots.
+# A hidden disk or partition:
 #   SYSTEMD_READY=0     no .device unit becomes active, so no .mount or .swap
 #                       unit (fstab, a generator, a dependency) can use it;
 #   UDISKS_*            udisks never offers, automounts or shows it;
 #   ID_FS_TYPE/USAGE="" LVM, MD-RAID and anything else keyed on blkid's result
 #                       never assembles or activates what it holds;
-#   root:root 0600      the disk group, services, agent machines and executors
-#                       cannot open the node (":=" so no later rule widens it).
-# The helper reads only the partition table of the disk it is given; it
-# prints AGENTOS_DRIVE=1 for the disk holding the partition systemd-boot
-# booted from (or, without that variable, the disk the system runs on) and
-# AGENTOS_DRIVE=0 otherwise. A failed or missing helper sets nothing, and
-# the disk is treated as a host disk.
+#   root:root 0600      no other uid (services, agent machines, executors)
+#                       can open the node (":=" so no later rule widens it).
 #
 # Numbered 61: after 60-persistent-storage (blkid, by-* links) and before
 # 64-md-raid, 69-dm-lvm, 80-udisks2 and 99-systemd, which act on what is
@@ -23,12 +24,17 @@
 
 ACTION=="remove", GOTO="agentos_host_disks_end"
 SUBSYSTEM!="block", GOTO="agentos_host_disks_end"
-KERNEL=="loop*|ram*|zram*|dm-*|md*|sr*|nbd*|fd*|zd*", GOTO="agentos_host_disks_end"
+KERNEL=="loop*|ram*|zram*|nbd*", GOTO="agentos_host_disks_end"
 
 ENV{DEVTYPE}=="disk", IMPORT{program}="/usr/lib/agentos/agentos-hostdisk classify %k"
-ENV{DEVTYPE}=="partition", IMPORT{parent}="AGENTOS_DRIVE"
-ENV{AGENTOS_DRIVE}=="1", GOTO="agentos_host_disks_end"
+ENV{DEVTYPE}=="partition", IMPORT{parent}="AGENTOS_DISK"
+ENV{AGENTOS_DISK}=="drive", GOTO="agentos_host_disks_end"
+ENV{AGENTOS_DISK}=="host", GOTO="agentos_host_disk"
 
-ENV{AGENTOS_HOST_DISK}="1", ENV{SYSTEMD_READY}="0", ENV{UDISKS_IGNORE}="1", ENV{UDISKS_AUTO}="0", ENV{UDISKS_SYSTEM}="1", ENV{ID_FS_TYPE}="", ENV{ID_FS_USAGE}="", OWNER:="root", GROUP:="root", MODE:="0600", TAG-="uaccess"
+ENV{UDISKS_IGNORE}="1", ENV{UDISKS_AUTO}="0"
+GOTO="agentos_host_disks_end"
+
+LABEL="agentos_host_disk"
+ENV{SYSTEMD_READY}="0", ENV{UDISKS_IGNORE}="1", ENV{UDISKS_AUTO}="0", ENV{UDISKS_SYSTEM}="1", ENV{ID_FS_TYPE}="", ENV{ID_FS_USAGE}="", OWNER:="root", GROUP:="root", MODE:="0600", TAG-="uaccess"
 
 LABEL="agentos_host_disks_end"

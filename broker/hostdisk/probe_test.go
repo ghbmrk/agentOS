@@ -192,9 +192,6 @@ func TestProbeDescribesAWindowsDisk(t *testing.T) {
 		if d.Table != TableGPT {
 			t.Fatalf("sector %d: table %q", sector, d.Table)
 		}
-		if d.TableUUID != "6c1e57a0-3b1f-4c4e-9a52-1f0c7d6e2b11" {
-			t.Errorf("sector %d: table uuid %q", sector, d.TableUUID)
-		}
 		want := []struct {
 			kind Kind
 			sig  Signature
@@ -214,9 +211,6 @@ func TestProbeDescribesAWindowsDisk(t *testing.T) {
 				t.Errorf("sector %d: partition %d = %+v, want %+v", sector, i, p, w)
 			}
 		}
-		if d.Partitions[0].Name != "EFI system partition" {
-			t.Errorf("name %q", d.Partitions[0].Name)
-		}
 		if !d.HoldsWindows || !d.HasBitLocker || !d.HasBootLoader || !d.NeedsSecondConfirm() {
 			t.Errorf("sector %d: flags %+v", sector, d)
 		}
@@ -233,7 +227,7 @@ func TestProbeDataDiskNeedsOneConfirmation(t *testing.T) {
 	if d.HoldsWindows || d.HasBitLocker || d.HasBootLoader || d.NeedsSecondConfirm() {
 		t.Fatalf("flags %+v", d)
 	}
-	if len(d.Partitions) != 1 || d.Partitions[0].Signature != SigNTFS || d.Partitions[0].Name != "Data" {
+	if len(d.Partitions) != 1 || d.Partitions[0].Signature != SigNTFS {
 		t.Fatalf("partitions %+v", d.Partitions)
 	}
 }
@@ -405,22 +399,24 @@ func TestProbeReadsOnlyTablesAndSignatureWindows(t *testing.T) {
 	}
 }
 
-// Probe's partitions come back in table order, with GPT GUIDs in the
-// lower-case textual form systemd uses for LoaderDevicePartUUID.
-func TestProbePartitionUUIDs(t *testing.T) {
+// probe finds the partition systemd-boot booted from by its unique GUID
+// without keeping any GUID, and the partitions come back in table order.
+func TestProbeFindsPartitionWithoutKeepingGUIDs(t *testing.T) {
 	b := gptDisk(512, 2048, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", []tpart{
 		{typ: tLinux, start: 64, n: 64, uuid: "0E5B0A6F-1C2D-4E3F-8A9B-0C1D2E3F4A5B"},
 		{typ: tLinux, start: 128, n: 64, uuid: "9F8E7D6C-5B4A-3928-1706-F5E4D3C2B1A0"},
 	})
-	d := probeBytes(t, b, 512)
-	got := []string{d.Partitions[0].UUID, d.Partitions[1].UUID}
+	d, found, err := probe(bytes.NewReader(b), int64(len(b)), 512, onDisk("9f8e7d6c-5b4a-3928-1706-f5e4d3c2b1a0"))
+	if err != nil || !found {
+		t.Fatalf("found %v, %v", found, err)
+	}
 	if !sort.SliceIsSorted(d.Partitions, func(i, j int) bool { return d.Partitions[i].Start < d.Partitions[j].Start }) {
 		t.Fatal("order")
 	}
-	if got[0] != "0e5b0a6f-1c2d-4e3f-8a9b-0c1d2e3f4a5b" || got[1] != "9f8e7d6c-5b4a-3928-1706-f5e4d3c2b1a0" {
-		t.Fatalf("uuids %v", got)
+	if _, found, _ := probe(bytes.NewReader(b), int64(len(b)), 512, onDisk("00000000-0000-0000-0000-000000000001")); found {
+		t.Fatal("found a partition that is not there")
 	}
-	if !d.HasPartition("0E5B0A6F-1C2D-4E3F-8A9B-0C1D2E3F4A5B") || d.HasPartition("00000000-0000-0000-0000-000000000000") {
-		t.Fatal("HasPartition")
+	if _, found, _ := probe(bytes.NewReader(b), int64(len(b)), 512, [16]byte{}); found {
+		t.Fatal("zero GUID matched")
 	}
 }

@@ -151,10 +151,35 @@ func blockDev(kernel, devtype string) *udevDev {
 		env: map[string]string{"DEVTYPE": devtype, "ID_FS_TYPE": "ntfs", "ID_FS_USAGE": "filesystem"}}
 }
 
-// Host disks and their partitions are hidden from systemd units, udisks,
-// LVM/MD assembly and every unprivileged process; the AgentOS Drive and
-// virtual devices are left alone; a disk the helper cannot classify is
-// hidden.
+// outcome is what the rule did to a device.
+type outcome int
+
+const (
+	untouched outcome = iota
+	keptFromUdisks
+	hiddenFully
+)
+
+func (o outcome) String() string { return [...]string{"untouched", "kept from udisks", "hidden"}[o] }
+
+func outcomeOf(d *udevDev) outcome {
+	switch {
+	case hidden(d):
+		return hiddenFully
+	case d.env["UDISKS_IGNORE"] == "1" && d.env["UDISKS_AUTO"] == "0" && d.env["SYSTEMD_READY"] == "" &&
+		d.group == "disk" && d.env["ID_FS_TYPE"] == "ntfs":
+		return keptFromUdisks
+	case d.env["UDISKS_IGNORE"] == "" && d.env["SYSTEMD_READY"] == "" && d.group == "disk" && d.env["ID_FS_TYPE"] == "ntfs":
+		return untouched
+	}
+	return -1
+}
+
+// Security H2 on HOST-1a: host disks and their partitions are hidden from
+// systemd units, udisks, LVM/MD assembly and every other uid; the drive
+// and the box's virtual devices are left alone; a device the helper calls
+// unknown, or for which it fails or prints anything else, is only kept
+// from udisks, so the box still boots.
 func TestUdevRuleHidesHostDisks(t *testing.T) {
 	rules := parseRules(t)
 	const helper = "/usr/lib/agentos/agentos-hostdisk classify "
@@ -163,30 +188,41 @@ func TestUdevRuleHidesHostDisks(t *testing.T) {
 			t.Fatalf("helper %q", cmd)
 		}
 		switch strings.TrimPrefix(cmd, helper) {
-		case "sda":
-			return "AGENTOS_DRIVE=1\n"
+		case "sda", "dm-0":
+			return "AGENTOS_DISK=drive\n"
 		case "sdc":
 			return "" // the helper failed
+		case "sdd":
+			return "AGENTOS_DISK=Host\n"
+		case "sde":
+			return "AGENTOS_DISK=unknown\n"
 		}
-		return "AGENTOS_DRIVE=0\n"
+		return "AGENTOS_DISK=host\n"
 	}
 	cases := []struct {
 		dev    *udevDev
 		parent string
-		hide   bool
+		want   outcome
 	}{
-		{blockDev("sda", "disk"), "", false},
-		{blockDev("sda2", "partition"), "sda", false},
-		{blockDev("nvme0n1", "disk"), "", true},
-		{blockDev("nvme0n1p3", "partition"), "nvme0n1", true},
-		{blockDev("sdb", "disk"), "", true},
-		{blockDev("sdb1", "partition"), "sdb", true},
-		{blockDev("sdc", "disk"), "", true},
-		{blockDev("sdc1", "partition"), "sdc", true},
-		{blockDev("mmcblk0", "disk"), "", true},
-		{blockDev("loop0", "disk"), "", false},
-		{blockDev("dm-0", "disk"), "", false},
-		{blockDev("sr0", "disk"), "", false},
+		{blockDev("sda", "disk"), "", untouched},
+		{blockDev("sda2", "partition"), "sda", untouched},
+		{blockDev("dm-0", "disk"), "", untouched},
+		{blockDev("nvme0n1", "disk"), "", hiddenFully},
+		{blockDev("nvme0n1p3", "partition"), "nvme0n1", hiddenFully},
+		{blockDev("sdb", "disk"), "", hiddenFully},
+		{blockDev("sdb1", "partition"), "sdb", hiddenFully},
+		{blockDev("mmcblk0", "disk"), "", hiddenFully},
+		{blockDev("sr0", "disk"), "", hiddenFully},
+		{blockDev("dm-1", "disk"), "", hiddenFully},
+		{blockDev("md0", "disk"), "", hiddenFully},
+		{blockDev("sdc", "disk"), "", keptFromUdisks},
+		{blockDev("sdc1", "partition"), "sdc", keptFromUdisks},
+		{blockDev("sdd", "disk"), "", keptFromUdisks},
+		{blockDev("sde", "disk"), "", keptFromUdisks},
+		{blockDev("sde1", "partition"), "sde", keptFromUdisks},
+		{blockDev("loop0", "disk"), "", untouched},
+		{blockDev("zram0", "disk"), "", untouched},
+		{blockDev("nbd0", "disk"), "", untouched},
 	}
 	parents := map[string]map[string]string{}
 	for _, c := range cases {
@@ -194,11 +230,8 @@ func TestUdevRuleHidesHostDisks(t *testing.T) {
 		if c.dev.env["DEVTYPE"] == "disk" {
 			parents[c.dev.kernel] = c.dev.env
 		}
-		if got := hidden(c.dev); got != c.hide {
-			t.Errorf("%s: hidden %v, want %v (%+v)", c.dev.kernel, got, c.hide, c.dev)
-		}
-		if !c.hide && (c.dev.group != "disk" || c.dev.env["ID_FS_TYPE"] != "ntfs") {
-			t.Errorf("%s: drive or virtual device changed: %+v", c.dev.kernel, c.dev)
+		if got := outcomeOf(c.dev); got != c.want {
+			t.Errorf("%s: %v, want %v (%+v)", c.dev.kernel, got, c.want, c.dev)
 		}
 	}
 
@@ -206,13 +239,13 @@ func TestUdevRuleHidesHostDisks(t *testing.T) {
 	rm := blockDev("sdb", "disk")
 	rm.action = "remove"
 	runRules(t, rules, rm, classify, nil)
-	if hidden(rm) {
+	if outcomeOf(rm) != untouched {
 		t.Error("remove event processed")
 	}
 	tty := blockDev("ttyS0", "")
 	tty.subsystem = "tty"
 	runRules(t, rules, tty, classify, nil)
-	if hidden(tty) {
+	if outcomeOf(tty) != untouched {
 		t.Error("tty processed")
 	}
 }
