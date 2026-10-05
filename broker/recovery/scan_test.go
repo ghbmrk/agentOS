@@ -62,7 +62,7 @@ func TestNoKeySeedOrGridMaterialInAnyPlaintextOnTheDriveOrInBackups(t *testing.T
 	after, err := x.rotate([]Part{PartWiFi, PartGrid, PartPassphrase}, Auth{Code: true, Local: true}, Proof{Recovery: x.rk})
 	must(t, err)
 
-	needles := append(x.needles(before), x.needles(after)...)
+	needles := append(x.needles(before), x.needles(after.Card)...)
 	needles = append(needles, Needle{Name: "old code-generator seed", Value: oldSeed})
 	s, err := NewScanner(needles)
 	must(t, err)
