@@ -102,7 +102,7 @@ Covered: 105 / 144 requirement IDs
 | ADP-10 | `broker/cmd/agentos-egress/server_test.go`, `broker/e2e/a14_test.go`, `broker/e2e/openclaw_config_test.go`, `broker/egress/denied_test.go`, `broker/egress/egress_test.go`, `broker/egress/handlerfor_test.go`, `broker/egress/journal_test.go`, `broker/egress/verb_test.go`, `broker/guest/plane_test.go`, `broker/journal/egress_test.go`, `broker/modelroute/modelroute_test.go` |
 | ADP-11 | `broker/attention/attention_test.go`, `broker/grants/channel_test.go`, `broker/grants/gate_test.go`, `broker/owner/channel_test.go`, `broker/owner/commit_test.go`, `broker/owner/review_test.go` |
 | ADP-12 | `broker/modem/secondline/secondline_test.go`, `broker/owner/channel_test.go` |
-| CHG-1 | `broker/change/pipeline_test.go`, `broker/change/review_test.go`, `broker/change/task_test.go`, `broker/change/wiring_test.go`, `broker/loops/loop1_test.go`, `broker/loops/wiring_test.go`, `broker/replay/replay_test.go` |
+| CHG-1 | `broker/change/pipeline_test.go`, `broker/change/review_test.go`, `broker/change/split_test.go`, `broker/change/task_test.go`, `broker/change/wiring_test.go`, `broker/loops/loop1_test.go`, `broker/loops/wiring_test.go`, `broker/replay/replay_test.go` |
 | CHG-2 | `broker/change/pipeline_test.go`, `broker/change/wiring_test.go`, `broker/grants/change_test.go`, `broker/grants/loops_test.go` |
 | CHG-3 | `broker/change/pipeline_test.go`, `broker/change/review_test.go`, `broker/change/wiring_test.go`, `broker/grants/change_test.go`, `broker/replay/replay_test.go`, `broker/update/attest_test.go`, `broker/update/hardening_test.go` |
 | CHG-4 | `broker/change/share_test.go` |
@@ -113,7 +113,7 @@ Covered: 105 / 144 requirement IDs
 | LOOP-2 | `broker/loops/model_test.go`, `broker/loops/scheduler_test.go`, `broker/loops/settings_test.go`, `broker/meter/share_test.go`, `broker/meter/spare_test.go` |
 | LOOP-3 | `broker/loops/scheduler_test.go` |
 | LOOP-4 | `broker/loops/loop1_test.go` |
-| LOOP-5 | `broker/loops/model_test.go`, `broker/loops/scheduler_test.go`, `broker/meter/share_test.go`, `broker/replay/replay_test.go`, `broker/vm/vm_test.go` |
+| LOOP-5 | `broker/change/split_test.go`, `broker/loops/model_test.go`, `broker/loops/scheduler_test.go`, `broker/meter/share_test.go`, `broker/replay/replay_test.go`, `broker/vm/vm_test.go` |
 | LOOP-6 | `broker/grants/loops_test.go`, `broker/loops/loop1_test.go`, `broker/loops/settings_test.go` |
 | LOOP-7 | — |
 | LOOP-8 | `broker/loops/secure_test.go` |
