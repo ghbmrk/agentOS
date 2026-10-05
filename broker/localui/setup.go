@@ -203,6 +203,8 @@ type setup struct {
 	numExpires time.Time
 	numTries   int
 	texts      []time.Time
+	// resets are wrong reset-secret attempts in the last hour.
+	resets []time.Time
 	// claim is the page code texted after a pairing by the card's setup
 	// code; the phone that types it continues setup.
 	claimCode    string
@@ -295,6 +297,7 @@ func (u *setup) routes(mux *http.ServeMux) {
 		"/setup/host":        u.host,
 		"/setup/ai-key":      u.aiKey,
 		"/setup/ai-device":   u.aiDevice,
+		"/setup/restart":     u.restart,
 	} {
 		path, f := path, f
 		mux.HandleFunc(path, u.s.post(func(w http.ResponseWriter, r *http.Request) {
@@ -304,7 +307,7 @@ func (u *setup) routes(mux *http.ServeMux) {
 			}
 			key := u.phone(w, r, false)
 			u.mu.Lock()
-			ok := key != "" && (u.mayLocked(key) || path == "/setup/claim")
+			ok := key != "" && (u.mayLocked(key) || path == "/setup/claim" || path == "/setup/restart")
 			u.mu.Unlock()
 			err := errElsewhere
 			if key == "" {
@@ -676,6 +679,44 @@ func (u *setup) claim(r *http.Request, key string) error {
 		return errors.New("The box could not send a text. Check the SIM.")
 	}
 	return errors.New("That code did not match. The box texted you a new page code.")
+}
+
+// ResetTriesPerHour caps wrong reset secrets typed on the setup page.
+const ResetTriesPerHour = 5
+
+// restart starts setup over from pairing: the lost-device escape
+// (arbitrator ruling on #32). The phone that paired may do it; any other
+// phone needs the card's setup secret (the reset secret on the recovery
+// sheet). Enrollment, the recovery acknowledgment and the trusted-PC
+// choice are asked again; the vault's seed is replaced at re-enrollment.
+func (u *setup) restart(r *http.Request, key string) error {
+	now := u.s.cfg.Now()
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.st.Owner == "" {
+		return nil
+	}
+	if key != u.st.Device {
+		u.resets = recentTimes(u.resets, now, time.Hour)
+		if len(u.resets) >= ResetTriesPerHour {
+			return errors.New("Too many tries. Try again in an hour.")
+		}
+		want := card.Normalize(u.s.cfg.SetupSecret)
+		if want == "" || subtle.ConstantTimeCompare([]byte(card.Normalize(r.PostFormValue("secret"))), []byte(want)) != 1 {
+			u.resets = append(u.resets, now)
+			return errors.New("That reset secret did not match. It is on your card's recovery sheet.")
+		}
+	}
+	for i := range u.seed {
+		u.seed[i] = 0
+	}
+	u.seed = nil
+	u.pair = map[string]string{}
+	u.claimCode, u.numCode, u.numTo, u.numDevice = "", "", "", ""
+	u.device = map[string][2]string{}
+	return u.save(func(s *SetupState) {
+		s.Owner, s.Device, s.Codes, s.Recovery, s.Host, s.HostTrusted = "", "", false, false, false, false
+	})
 }
 
 // codes confirms code-generator enrollment with one entered code (ONB-3),

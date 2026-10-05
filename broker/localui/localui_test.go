@@ -860,3 +860,42 @@ func TestAllSetTextWithoutPrivateData(t *testing.T) {
 		t.Fatalf("breaks CH-12: %q", s)
 	}
 }
+
+// The lost-device escape: another phone can start setup over only with the
+// card's reset secret (the setup secret); the paired phone can without it.
+func TestRestartSetupNeedsTheResetSecretElsewhere(t *testing.T) {
+	r := newRig(t)
+	r.hooks.progress.Online = true
+	page := html.UnescapeString(r.get("/setup"))
+	r.srv.OfferText(ownerNum, "PAIR "+regexp.MustCompile(`PAIR%20([A-Z2-9]{8})`).FindStringSubmatch(page)[1])
+	r.asOther(func() {
+		if !strings.Contains(r.get("/setup"), "Lost that phone?") {
+			t.Fatal("no lost-device escape offered")
+		}
+		r.post("/setup/restart", url.Values{"secret": {"AAAA-BBBB"}})
+		if r.srv.setup.st.Owner != ownerNum {
+			t.Fatal("restart without the reset secret")
+		}
+		r.post("/setup/restart", url.Values{"secret": {strings.ToLower(r.card.SetupSecret)}})
+		if r.srv.setup.st.Owner != "" {
+			t.Fatal("reset secret did not restart setup")
+		}
+		p := html.UnescapeString(r.get("/setup"))
+		code := regexp.MustCompile(`PAIR%20([A-Z2-9]{8})`).FindStringSubmatch(p)[1]
+		r.srv.OfferText("+15550000002", "PAIR "+code)
+		if !strings.Contains(r.get("/setup"), "otpauth://") {
+			t.Fatal("new phone does not continue after restart")
+		}
+	})
+	if strings.Contains(r.get("/setup"), "otpauth://") {
+		t.Fatal("old phone still continues after restart")
+	}
+	// Wrong reset secrets are bounded.
+	for i := 0; i < ResetTriesPerHour+1; i++ {
+		r.post("/setup/restart", url.Values{"secret": {"WRONG"}})
+	}
+	r.post("/setup/restart", url.Values{"secret": {r.card.SetupSecret}})
+	if r.srv.setup.st.Owner == "" {
+		t.Fatal("reset secret accepted past the bound")
+	}
+}

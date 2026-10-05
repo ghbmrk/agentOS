@@ -107,6 +107,8 @@ type Channel struct {
 	expired        []Decision
 	expiredMore    int
 	boot           *bootReport
+	// local coalesces texts about local UI sign-ins (local.go).
+	local localAlerts
 }
 
 var _ control.Auth = (*Channel)(nil)
@@ -493,7 +495,7 @@ func (c *Channel) TakeDigestNotes() []string {
 		out = append(out, fmt.Sprintf("%d code messages without the current challenge were ignored.", c.dropped))
 		c.dropped = 0
 	}
-	return out
+	return append(out, c.takeLocalNotesLocked()...)
 }
 
 const stateErr = "Could not save the code check, so it did not count. Try again."

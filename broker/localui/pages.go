@@ -69,6 +69,10 @@ form { margin: .6em 0 1.2em; }
 <p><a href="/status">Status, STOP and RESUME</a></p>
 {{template "foot"}}{{end}}
 
+{{define "restart"}}{{if .}}<details><summary>Lost that phone? Start setup over</summary>
+<form method="post" action="/setup/restart"><label>Reset secret, from your card's recovery sheet<input type="text" name="secret" autocomplete="off" autocapitalize="characters" spellcheck="false" required></label><button>Start over</button></form></details>
+{{else}}<form method="post" action="/setup/restart"><button class="plain">Start setup over</button></form>{{end}}{{end}}
+
 {{define "private"}}<label><input type="checkbox" name="private" value="1" checked> {{.Name}} may see your private data (mail, files) to do tasks. Recommended.</label><br>{{end}}
 
 {{define "setup"}}{{template "head" .Refresh}}
@@ -101,13 +105,15 @@ form { margin: .6em 0 1.2em; }
 <h2>2. Text your box</h2>
 <p>Your number ({{.Paired}}) is paired. The box texted you a page code; type it here to continue on this phone.</p>
 <form method="post" action="/setup/claim"><label>Page code<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required></label><button>Continue</button></form>
+{{template "restart" true}}
 
 {{else if eq .Step "elsewhere"}}
 <h2>Setup in progress</h2>
 <p>Setup is continuing on the phone that texted the box ({{.Paired}}). Finish it there.</p>
+{{template "restart" true}}
 
 {{else if eq .Step "codes"}}
-<p class="muted">Paired with your number {{.Paired}}.</p>
+<p class="muted">Paired with your number {{.Paired}}.</p>{{template "restart" false}}
 <h2>3. Add approval codes</h2>
 <p><a class="button" href="{{.OTPLink}}">Add approval codes</a></p>
 <p class="muted">Your phone's code generator opens (on iPhone, the Passwords app). If it does not, scan this with another device, or type the key.</p>

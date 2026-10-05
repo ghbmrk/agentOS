@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -17,7 +18,95 @@ import (
 // at its first attempt, not sliding), so the Wi-Fi is never an unmetered
 // guessing path, including in challenge mode where wrong codes no longer
 // escalate anything.
-const LocalBound = 10
+const LocalBound = 24
+
+// SignInAlertEvery is the least time between two local sign-in texts;
+// sign-ins in between are listed in the next one (CH-15).
+const SignInAlertEvery = time.Hour
+
+// localAlerts coalesces the owner's texts about local sign-ins.
+type localAlerts struct {
+	signIns  []time.Time // not yet texted
+	lastText time.Time
+	// wrong lists wrong local codes for the digest; alerted is the
+	// bound window whose first wrong code was already texted.
+	wrong   []time.Time
+	alerted time.Time
+}
+
+const maxLocalNotes = 200
+
+// signInTextLocked returns the text listing untold sign-ins, or "" while
+// the last one is less than SignInAlertEvery old.
+func (c *Channel) signInTextLocked(now time.Time) string {
+	l := &c.local
+	if len(l.signIns) == 0 || (!l.lastText.IsZero() && now.Sub(l.lastText) < SignInAlertEvery) {
+		return ""
+	}
+	times := c.clockList(l.signIns, 8)
+	l.signIns, l.lastText = nil, now
+	if strings.Contains(times, ",") {
+		return "Phones signed in on the box's Wi-Fi at " + times + ". Not you? Text STOP."
+	}
+	return "A phone signed in on the box's Wi-Fi at " + times + ". Not you? Text STOP."
+}
+
+// wrongLocalLocked records a wrong local code for the digest and returns
+// the texts it calls for: one on the first wrong code of a bound window, and
+// one when the bound is used up (arbitrator ruling on #32).
+func (c *Channel) wrongLocalLocked(now time.Time) []string {
+	l := &c.local
+	if len(l.wrong) < maxLocalNotes {
+		l.wrong = append(l.wrong, now)
+	}
+	var out []string
+	st := c.codes.st
+	if !st.LocalStart.Equal(l.alerted) {
+		l.alerted = st.LocalStart
+		out = append(out, "A wrong code was entered on the box's Wi-Fi at "+c.clock(now)+". Not you? Text STOP. More wrong tries today go in the digest.")
+	}
+	if st.LocalUsed >= LocalBound {
+		out = append(out, fmt.Sprintf("Sign-in on the box's Wi-Fi is paused until %s after %d tries. Not you? Text STOP.",
+			c.clock(st.LocalStart.Add(WrongWindow)), LocalBound))
+	}
+	return out
+}
+
+// FlushLocal texts sign-ins held back by SignInAlertEvery once it has
+// passed. Tick calls it.
+func (c *Channel) FlushLocal() {
+	c.mu.Lock()
+	t := c.signInTextLocked(c.cfg.Now())
+	c.mu.Unlock()
+	if t != "" {
+		c.alert(t)
+	}
+}
+
+func (c *Channel) clock(t time.Time) string { return t.In(c.cfg.Location).Format("15:04") }
+
+// clockList renders times as "09:01, 09:30", at most max of them.
+func (c *Channel) clockList(ts []time.Time, max int) string {
+	var parts []string
+	for i, t := range ts {
+		if i == max {
+			parts = append(parts, fmt.Sprintf("and %d more", len(ts)-max))
+			break
+		}
+		parts = append(parts, c.clock(t))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// takeLocalNotesLocked returns the digest line for wrong local codes.
+func (c *Channel) takeLocalNotesLocked() []string {
+	if len(c.local.wrong) == 0 {
+		return nil
+	}
+	s := fmt.Sprintf("%d wrong codes entered on the box's Wi-Fi: %s.", len(c.local.wrong), c.clockList(c.local.wrong, 20))
+	c.local.wrong = nil
+	return []string{s}
+}
 
 // Local sign-in errors.
 var (
@@ -60,8 +149,9 @@ func (c *Channel) LocalGridCell() string {
 // the local UI. On success the session is unlocked for UnlockFor, the
 // low-tier lock and challenge mode end, and until is returned: the local UI
 // remembers the device for the same period (CH-7). A wrong code counts as
-// one (CH-18). The owner is texted on every attempt, right or wrong, so a
-// sign-in by someone else holding the card is never silent.
+// one (CH-18). Sign-ins are always texted to the owner, at most one text
+// an hour listing each; wrong codes are texted on the first of a bound
+// window and when the bound is used up, and listed in the digest.
 func (c *Channel) LocalSignIn(code string) (until time.Time, err error) {
 	now := c.cfg.Now()
 	c.mu.Lock()
@@ -85,16 +175,19 @@ func (c *Channel) LocalSignIn(code string) (until time.Time, err error) {
 		alerts = append(alerts, fmt.Sprintf("Too many wrong codes, the last on the box's Wi-Fi. Codes by text now need a challenge: reply UNLOCK %s and a code from your code generator within %s.",
 			c.codes.currentChallenge(now), dur(ChallengeTTL)))
 	}
-	at := now.In(c.cfg.Location).Format("15:04")
 	switch {
 	case err == nil && res == strongOK:
 		until = c.codes.st.UnlockedUntil
 		c.codes.unlockCh = ""
 		// Every local sign-in is told to the owner, since it lifts locks
-		// and challenge mode without the owner's phone (L1).
-		alerts = append(alerts, "A phone signed in on the box's Wi-Fi at "+at+". Not you? Text STOP.")
-	case err == nil && len(alerts) == 0:
-		alerts = append(alerts, "A wrong code was entered on the box's Wi-Fi at "+at+". Not you? Text STOP.")
+		// and challenge mode without the owner's phone (L1), coalesced to
+		// one text an hour under CH-15 (arbitrator).
+		c.local.signIns = append(c.local.signIns, now)
+		if t := c.signInTextLocked(now); t != "" {
+			alerts = append(alerts, t)
+		}
+	case err == nil:
+		alerts = append(alerts, c.wrongLocalLocked(now)...)
 	}
 	c.mu.Unlock()
 	for _, a := range alerts {

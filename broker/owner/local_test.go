@@ -135,23 +135,75 @@ func TestTOTPMatchesTheChannelsCheck(t *testing.T) {
 	}
 }
 
-// Every local sign-in, right or wrong, is texted to the owner: a sign-in
-// lifts locks without the owner's phone, so it must never be silent.
-func TestLocalSignInIsAlwaysTextedToTheOwner(t *testing.T) {
+// Every local sign-in is texted to the owner, coalesced to one text an
+// hour that lists each (CH-15). Wrong local codes are texted on the first
+// of a bound window and when the bound runs out, and listed in the digest.
+func TestLocalSignInAlertsAreCoalesced(t *testing.T) {
 	r := newRig(t, nil)
 	if _, err := r.ch.LocalSignIn(r.totp()); err != nil {
 		t.Fatal(err)
 	}
-	want := "A phone signed in on the box's Wi-Fi at " + r.clock().Format("15:04") + ". Not you? Text STOP."
-	if got := r.inbox(); got != want {
+	first := r.clock().Format("15:04")
+	if got := r.inbox(); got != "A phone signed in on the box's Wi-Fi at "+first+". Not you? Text STOP." {
 		t.Fatalf("sign-in alert: %q", got)
 	}
-	r.advance(time.Second)
+	r.advance(10 * time.Minute)
+	r.ch.LocalSignIn(r.totp())
+	second := r.clock().Format("15:04")
+	r.advance(10 * time.Minute)
+	r.ch.LocalSignIn(r.totp())
+	third := r.clock().Format("15:04")
+	r.ch.Tick()
+	select {
+	case m := <-r.phone.Inbox():
+		t.Fatalf("second sign-in text inside the hour: %q", m.Text)
+	default:
+	}
+	r.advance(SignInAlertEvery)
+	r.ch.Tick()
+	if got := r.inbox(); got != "Phones signed in on the box's Wi-Fi at "+second+", "+third+". Not you? Text STOP." {
+		t.Fatalf("coalesced alert: %q", got)
+	}
+
+	r = newRig(t, nil)
 	r.ch.LocalSignIn(wrongCode(1))
 	if got := r.inbox(); !strings.HasPrefix(got, "A wrong code was entered on the box's Wi-Fi") {
-		t.Fatalf("wrong-code alert: %q", got)
+		t.Fatalf("first wrong-code alert: %q", got)
+	}
+	r.advance(time.Minute)
+	r.ch.LocalSignIn(wrongCode(2))
+	select {
+	case m := <-r.phone.Inbox():
+		t.Fatalf("second wrong code texted: %q", m.Text)
+	default:
+	}
+	notes := strings.Join(r.ch.TakeDigestNotes(), " ")
+	if !strings.Contains(notes, "2 wrong codes entered on the box's Wi-Fi") {
+		t.Fatalf("digest: %q", notes)
 	}
 	if r.ch.UnlockPeriod() != DefaultUnlockFor {
 		t.Fatal("unlock period")
+	}
+}
+
+// When the local bound runs out the owner is told until when.
+func TestLocalBoundExhaustionIsTexted(t *testing.T) {
+	r := newRig(t, nil)
+	enterChallenge(t, r)
+	for i := 0; i < LocalBound; i++ {
+		r.ch.LocalSignIn(wrongCode(i))
+	}
+	var last string
+	for {
+		select {
+		case m := <-r.phone.Inbox():
+			last = m.Text
+			continue
+		default:
+		}
+		break
+	}
+	if !strings.HasPrefix(last, "Sign-in on the box's Wi-Fi is paused until") {
+		t.Fatalf("bound alert: %q", last)
 	}
 }
