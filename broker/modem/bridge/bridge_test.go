@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -48,19 +49,25 @@ type rig struct {
 	refusal string
 	// refuseFrom, if set, refuses every offer from that sender.
 	refuseFrom string
-	cancel     context.CancelFunc
-	done       chan error
-	dir        string
-	srv        *sockets.Server
-	srvStop    context.CancelFunc
-	last       *atsim.Device
+	// refuseText refuses each text so many more times, as limited and
+	// paused in turn.
+	refuseText map[string]int
+	// skew moves agentosd's clock ahead, past its rate limit's minute.
+	skew    atomic.Int64
+	cancel  context.CancelFunc
+	done    chan error
+	dir     string
+	srv     *sockets.Server
+	srvStop context.CancelFunc
+	last    *atsim.Device
 }
 
 // startAgentosd serves owner.sock with a fresh Link, as agentosd does when
 // it starts: the line reads as down until the bridge reports it.
 func (r *rig) startAgentosd() {
 	r.t.Helper()
-	r.link = modemlink.New(modemlink.Config{Owner: ownerNum, SendWait: 5 * time.Second, PollWait: 200 * time.Millisecond})
+	r.link = modemlink.New(modemlink.Config{Owner: ownerNum, SendWait: 5 * time.Second, PollWait: 200 * time.Millisecond,
+		Now: func() time.Time { return time.Now().Add(time.Duration(r.skew.Load())) }})
 	ctx, cancel := context.WithCancel(context.Background())
 	r.srv, r.srvStop = &sockets.Server{Dir: r.dir}, cancel
 	if err := r.srv.Start(ctx, sockets.Endpoint{Name: "owner.sock", Peer: sockets.Peer{Kind: "owner"}, Ops: r.link.Ops(), MaxConns: 8, HangupOps: map[string]bool{bridgeproto.OpOutbox: true}}); err != nil {
@@ -143,6 +150,13 @@ func (f *flaky) Call(ctx context.Context, op string, args, out any) error {
 	}
 	if in, ok := args.(bridgeproto.Inbound); ok && f.r.refuseFrom != "" && in.From == f.r.refuseFrom {
 		refused = bridgeproto.RefusedPaused
+	}
+	if in, ok := args.(bridgeproto.Inbound); ok && f.r.refuseText[in.Text] > 0 {
+		f.r.refuseText[in.Text]--
+		refused = bridgeproto.RefusedLimited
+		if f.r.refuseText[in.Text]%2 == 0 {
+			refused = bridgeproto.RefusedPaused
+		}
 	}
 	f.r.mu.Unlock()
 	if fail {
@@ -547,4 +561,56 @@ func TestAStrangersTextIsOfferedOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.gets("STOP")
+}
+
+// Security on #170 (round 4): a text from the owner's number past the
+// modem's held limit is not kept, yet it is still offered until agentosd
+// takes it, once, whatever agentosd refuses meanwhile.
+func TestAnOwnersTextPastTheHeldLimitIsStillDelivered(t *testing.T) {
+	r := newRig(t, recorded)
+	r.waitNote(func(n string) bool { return n == "" })
+	r.mu.Lock()
+	r.refuseText = map[string]int{"t01": 1 << 30, "t33": 6}
+	dev := r.last
+	r.mu.Unlock()
+	for i := 1; i <= 33; i++ {
+		pdus, err := at.EncodeDeliver(ownerNum, fmt.Sprintf("t%02d", i), byte(i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		dev.StorePDU(pdus[0])
+	}
+	// t01 is refused, so t02 to t32 wait behind it, kept; t33 is not.
+	for deadline := time.Now().Add(5 * time.Second); dev.Stored() != 32; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d stored, want 32 kept", dev.Stored())
+		}
+	}
+	r.mu.Lock()
+	r.refuseText["t01"] = 0
+	r.mu.Unlock()
+	got := map[string]int{}
+	for deadline := time.Now().Add(10 * time.Second); len(got) < 33; {
+		select {
+		case m := <-r.link.Inbox():
+			got[m.Text]++
+		case <-time.After(500 * time.Millisecond):
+			// agentosd takes 20 a minute: move its clock on a minute.
+			r.skew.Add(int64(time.Minute))
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("delivered %d of 33: %v", len(got), got)
+		}
+	}
+	select {
+	case m := <-r.link.Inbox():
+		t.Fatalf("delivered twice: %+v", m)
+	case <-time.After(200 * time.Millisecond):
+	}
+	r.mu.Lock()
+	left := r.refuseText["t33"]
+	r.mu.Unlock()
+	if left != 0 {
+		t.Fatalf("t33 was refused only %d times", 6-left)
+	}
 }

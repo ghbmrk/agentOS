@@ -249,14 +249,14 @@ func (b *runner) reportOK(ctx context.Context) bool {
 	}
 }
 
-// inbound offers one text to agentosd. A text the modem keeps (the
-// owner's: it has a Ref) is offered while the modem answers, again while
-// the refusal can pass, and deleted once agentosd has it or can never take
-// it; before each new offer agentosd is told again that the line is ok,
-// since a paused refusal or a lost connection may mean agentosd restarted
-// and reads the line as down. Anyone else's text was deleted as it was
-// read and is offered once, so it can never hold up the owner's (L3 on
-// #170). A text agentosd would refuse as malformed (too long, a bad
+// inbound offers one text to agentosd. A text from the owner's number is
+// offered while the modem answers, again while the refusal can pass, with
+// one ID for every try; a kept one (it has a Ref) is deleted once agentosd
+// has it or can never take it. Before each new offer agentosd is told
+// again that the line is ok, since a paused refusal or a lost connection
+// may mean agentosd restarted and reads the line as down. Anyone else's
+// text was deleted as it was read and is offered once, so it can never
+// hold up the owner's (L3 and security on #170). A text agentosd would refuse as malformed (too long, a bad
 // sender) is never offered: its request could exceed what agentosd reads.
 func (b *runner) inbound(ctx context.Context, m Owner, sms modem.SMS) {
 	id := sms.Ref
@@ -278,7 +278,7 @@ func (b *runner) inbound(ctx context.Context, m Owner, sms modem.SMS) {
 		if ctx.Err() != nil {
 			return // still stored: read again at the next open
 		}
-		if err == nil || !bridgeproto.Retryable(err) || sms.Ref == "" {
+		if err == nil || !bridgeproto.Retryable(err) || !sms.Owner {
 			if err != nil {
 				b.cfg.Logf("bridge: an inbound text was refused")
 			}

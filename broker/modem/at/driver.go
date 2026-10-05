@@ -121,7 +121,7 @@ type Modem struct {
 	inbox      chan modem.SMS
 	incoming   chan *Call
 	smsKick    chan int
-	ackKick    chan string
+	ackKick    chan string // at most maxHeld refs are outstanding, so Ack never blocks on it
 	callKick   chan struct{}
 	statusKick chan struct{}
 	stop       chan struct{}
@@ -182,7 +182,7 @@ func Open(ctx context.Context, cfg Config) (*Modem, error) {
 	m := &Modem{
 		cfg: cfg, e: NewEngine(cfg.Port, urcs), number: cfg.Number,
 		inbox: make(chan modem.SMS, 64), incoming: make(chan *Call, 4),
-		smsKick: make(chan int, 64), ackKick: make(chan string, 64), callKick: make(chan struct{}, 1), statusKick: make(chan struct{}, 1),
+		smsKick: make(chan int, 64), ackKick: make(chan string, 2*maxHeld), callKick: make(chan struct{}, 1), statusKick: make(chan struct{}, 1),
 		stop: make(chan struct{}), calls: map[int]*Call{}, parts: map[string]*assembly{}, seen: map[string]time.Time{},
 		held: map[int]bool{}, pending: map[string][]int{},
 	}
@@ -510,7 +510,7 @@ func (m *Modem) receive(ctx context.Context, idx int, header, pdu string) {
 	if !ok {
 		return
 	}
-	sms := modem.SMS{From: d.Addr, To: m.number, Text: text, At: now, Segments: segments(text), Alphanumeric: alpha}
+	sms := modem.SMS{From: d.Addr, To: m.number, Text: text, At: now, Segments: segments(text), Alphanumeric: alpha, Owner: fromOwner}
 	if kept := heldOf(idxs); len(kept) > 0 {
 		// Kept until Ack; parts already deleted as read (past maxHeld)
 		// need no ack.

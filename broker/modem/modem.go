@@ -32,6 +32,9 @@ type SMS struct {
 	// it (at.Config.KeepUntilAck); a re-read of the same text has the same
 	// Ref.
 	Ref string
+	// Owner marks a text from the owner's number (at.Config.Owner), never
+	// a named sender: its reader retries it whether or not it was kept.
+	Owner bool
 }
 
 // Modem is one SIM: it sends texts from its own number and delivers what
