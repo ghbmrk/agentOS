@@ -305,6 +305,14 @@ func TestAnthropicStreamTruncatedOrError(t *testing.T) {
 		t.Fatal("a truncated stream must not claim completion")
 	}
 
+	// A normal end whose message_delta reports no output count leaves
+	// only message_start's placeholder: not authoritative for the meter.
+	noFinal := bytes.Replace(full, []byte(`,"usage":{"output_tokens":32}`), nil, 1)
+	out.Reset()
+	if u, err := Anthropic().Stream(&out, func() {}, bytes.NewReader(noFinal), "default", false); err != nil || u.Complete || u.OutputChars != 29 {
+		t.Fatalf("placeholder usage: %+v %v", u, err)
+	}
+
 	// An error before the message starts writes nothing: the router can
 	// still fail over.
 	out.Reset()

@@ -1,0 +1,13 @@
+{
+  "note": "How an OpenClaw agent machine starts (vm.Spec Argv and Env). The bridge is PID 1; it starts the gateway with a fresh guest-local token. The env switches are S4's defense-in-depth settings (ARC-7); OPENCLAW_CLAWHUB_URL points ClawHub at a closed port (S4 finding 7).",
+  "argv": ["/usr/local/bin/agentos-guest-bridge", "--", "/usr/local/bin/openclaw", "gateway", "run", "--port", "18789"],
+  "env": [
+    "HOME=/root",
+    "OPENCLAW_CONFIG_PATH=/etc/openclaw/openclaw.json5",
+    "OPENCLAW_CONFIG_READONLY=1",
+    "OPENCLAW_NO_AUTO_UPDATE=1",
+    "OPENCLAW_DISABLE_BONJOUR=1",
+    "OPENCLAW_CLAWHUB_URL=http://127.0.0.1:9",
+    "DO_NOT_TRACK=1"
+  ]
+}

@@ -127,6 +127,7 @@ const (
 	RecQuality       RecordType = "quality"
 	RecStop          RecordType = "stop"
 	RecResume        RecordType = "resume"
+	RecEgress        RecordType = "egress" // an egress decision, not an intent
 )
 
 // recordVersion is the journal schema version. Replay refuses newer records
@@ -136,19 +137,20 @@ const recordVersion = 1
 // Record is one journal entry. The journal is the single audit trail for
 // effects and for broker-state changes alike (OP-5).
 type Record struct {
-	V        int        `json:"v"`
-	Seq      uint64     `json:"seq"`
-	At       time.Time  `json:"at"`
-	Type     RecordType `json:"type"`
-	ID       string     `json:"id,omitempty"`
-	Intent   *Intent    `json:"intent,omitempty"`
-	Attempt  int        `json:"attempt,omitempty"`
-	Result   Result     `json:"result,omitempty"`
-	Source   string     `json:"source,omitempty"`
-	Evidence string     `json:"evidence,omitempty"`
-	Reason   string     `json:"reason,omitempty"`
-	Accepted bool       `json:"accepted,omitempty"`
-	Verdict  Verdict    `json:"verdict,omitempty"`
+	V        int         `json:"v"`
+	Seq      uint64      `json:"seq"`
+	At       time.Time   `json:"at"`
+	Type     RecordType  `json:"type"`
+	ID       string      `json:"id,omitempty"`
+	Intent   *Intent     `json:"intent,omitempty"`
+	Attempt  int         `json:"attempt,omitempty"`
+	Result   Result      `json:"result,omitempty"`
+	Source   string      `json:"source,omitempty"`
+	Evidence string      `json:"evidence,omitempty"`
+	Reason   string      `json:"reason,omitempty"`
+	Accepted bool        `json:"accepted,omitempty"`
+	Verdict  Verdict     `json:"verdict,omitempty"`
+	Egress   *EgressNote `json:"egress,omitempty"`
 }
 
 // encodeRecord renders a record as one line: 8 hex digits of CRC-32 over the
