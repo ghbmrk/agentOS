@@ -104,6 +104,20 @@ type Config struct {
 type Untrusted struct {
 	From, Text string
 	At         time.Time
+	// Named marks a sender given as a name rather than a number (From is
+	// "alpha:<name>"): an alphanumeric SMS sender, or a SIP sender the
+	// provider did not vouch for. It can never be the owner.
+	Named bool
+}
+
+// Sender is how the sender is shown to the agent and the owner: the number,
+// or "named sender <name>" for a Named one, so a name never reads as a
+// number or as the owner (UX on #102).
+func (u Untrusted) Sender() string {
+	if n, ok := strings.CutPrefix(u.From, "alpha:"); u.Named || ok {
+		return "named sender " + n
+	}
+	return u.From
 }
 
 // Roles binds each line to its SIM, or the second line to its account.
@@ -348,7 +362,7 @@ func (t *Tool) pump() {
 				continue
 			}
 			select {
-			case t.inbound <- Untrusted{From: m.From, Text: m.Text, At: m.At}:
+			case t.inbound <- Untrusted{From: m.From, Text: m.Text, At: m.At, Named: m.Alphanumeric || strings.HasPrefix(m.From, "alpha:")}:
 			default: // unread third-party texts are dropped, never queued unbounded
 			}
 		}

@@ -33,6 +33,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/modem/secondline"
+	"github.com/ghbmrk/agentos/broker/sipsign"
 )
 
 // Config configures the line.
@@ -61,7 +62,15 @@ type Config struct {
 	Expiry time.Duration
 	// Log receives registration failures; nil discards them.
 	Log *slog.Logger
+	// NoCallsClip is the broker-rendered NoCallsText (8 kHz S16_LE mono),
+	// played over SRTP to anyone who calls the line, which then hangs up.
+	// Empty declines calls (603) instead.
+	NoCallsClip []byte
 }
+
+// NoCallsText is what a caller to the second line hears (NoCallsClip):
+// the line answers only texts until a call handler exists (at M13).
+const NoCallsText = "This number can't take calls. Please text it."
 
 // Errors.
 var (
@@ -70,7 +79,41 @@ var (
 	ErrNumber   = errors.New("sipline: not a phone number")
 	ErrBusy     = errors.New("sipline: a call is already in progress")
 	ErrClosed   = errors.New("sipline: line closed")
+	// ErrTextRefused wraps the provider's refusal of a text.
+	ErrTextRefused = errors.New("sipline: text refused")
+	// ErrUnreachable wraps a failure to reach or register with the
+	// provider.
+	ErrUnreachable = errors.New("sipline: provider unreachable")
 )
+
+// OwnerText words err for the owner: what happened and what to do, never
+// a status code or the provider's reason text. Unknown errors read as the
+// provider being unreachable, which the line keeps retrying.
+func OwnerText(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, ErrNumber):
+		return "That isn't a phone number the second line can call or text."
+	case errors.Is(err, ErrBusy):
+		return "The second line is already on a call. Try again when it ends."
+	case errors.Is(err, ErrClosed), errors.Is(err, ErrConfig), errors.Is(err, ErrInsecure):
+		return "The second line isn't connected right now."
+	case errors.Is(err, ErrNoSRTP):
+		return "The call was ended before anything was said: the provider didn't offer an encrypted call."
+	case errors.Is(err, ErrMediaAddress):
+		return "The call was ended before anything was said: the provider sent its audio somewhere the box won't send to."
+	case errors.Is(err, ErrTextRefused):
+		return "The second line's provider didn't accept that text. Check the number, or try again later."
+	case errors.Is(err, sipsign.ErrLocked):
+		return "The second line can't sign in while the box is locked. Unlock it on the local page."
+	case errors.Is(err, sipsign.ErrNoAccount):
+		return "The second line's calling account isn't set up. Set it up on the box's local page."
+	case errors.Is(err, sipsign.ErrRefused):
+		return "The second line's sign-in needs confirming. Check the provider name on the box's local page."
+	}
+	return "The second line couldn't reach its provider. It will keep trying."
+}
 
 // quiet discards everything the SIP stack would log. sipgo logs a whole
 // message it cannot parse, which can carry a third party's text or the far
@@ -156,6 +199,7 @@ func Open(ctx context.Context, cfg Config) (*Line, error) {
 	l.srv.OnMessage(l.onMessage)
 	l.srv.OnInvite(l.onInvite)
 	l.srv.OnBye(l.onBye)
+	l.srv.OnAck(l.onAck)
 	l.srv.OnOptions(func(req *sip.Request, tx sip.ServerTransaction) {
 		_ = tx.Respond(sip.NewResponseFromRequest(req, sip.StatusOK, "OK", nil))
 	})
@@ -222,7 +266,7 @@ func (l *Line) Send(to, text string) error {
 		return err
 	}
 	if !res.IsSuccess() {
-		return fmt.Errorf("sipline: text refused: %d", res.StatusCode)
+		return fmt.Errorf("%w: %d", ErrTextRefused, res.StatusCode)
 	}
 	return nil
 }
@@ -308,7 +352,7 @@ func (l *Line) register(ctx context.Context, expiry time.Duration) (time.Duratio
 		probe := l.request(sip.OPTIONS, domain, domain)
 		res, err := l.cli.Do(ctx, probe)
 		if err != nil {
-			return 0, fmt.Errorf("sipline: provider unreachable: %w", err)
+			return 0, fmt.Errorf("%w: %w", ErrUnreachable, err)
 		}
 		host, _, _ := net.SplitHostPort(res.Source())
 		via := probe.Via()
@@ -333,7 +377,7 @@ func (l *Line) register(ctx context.Context, expiry time.Duration) (time.Duratio
 		return 0, err
 	}
 	if !res.IsSuccess() {
-		return 0, fmt.Errorf("sipline: registration refused: %d", res.StatusCode)
+		return 0, fmt.Errorf("%w: registration refused: %d", ErrUnreachable, res.StatusCode)
 	}
 	granted := expiry
 	if h := res.GetHeader("Expires"); h != nil {
@@ -462,10 +506,113 @@ func phone(s string) bool {
 	return true
 }
 
-// onInvite declines calls to the line: answering third-party calls is a
-// later package (at M13), and until then they are never picked up.
+// onInvite answers a call to the line with NoCallsClip over SRTP and hangs
+// up: answering third-party calls is a later package (at M13). It declines
+// (603) whenever the clip cannot be played safely: no clip, a call already
+// in progress, or an offer without SRTP, a G.711 codec or a public unicast
+// audio address (the rules of an answer, SL7). It never answers in the
+// clear.
 func (l *Line) onInvite(req *sip.Request, tx sip.ServerTransaction) {
-	_ = tx.Respond(sip.NewResponseFromRequest(req, sip.StatusGlobalDecline, "Decline", nil))
+	decline := func() { _ = tx.Respond(sip.NewResponseFromRequest(req, sip.StatusGlobalDecline, "Decline", nil)) }
+	if len(l.cfg.NoCallsClip) == 0 {
+		decline()
+		return
+	}
+	l.mu.Lock()
+	p, contact := l.provider, l.contact
+	l.mu.Unlock()
+	theirs, err := parseOffer(req.Body(), p != nil && (p.IsLoopback() || p.IsPrivate()))
+	if err != nil {
+		decline()
+		return
+	}
+	c, ours, err := l.claim(req, tx, contact)
+	if err != nil {
+		decline()
+		return
+	}
+	defer c.end(nil)
+	srtpTx, err := Context(ours.key)
+	if err != nil {
+		_ = c.sdlg.Respond(sip.StatusGlobalDecline, "Decline", nil)
+		return
+	}
+	c.mu.Lock()
+	c.ans, c.tx = theirs, srtpTx
+	c.mu.Unlock()
+	if err := c.sdlg.RespondSDP([]byte(ours.answerSDP(theirs.pt, theirs.tag))); err != nil {
+		return
+	}
+	close(c.active)
+	go c.drain()
+	go func() {
+		select {
+		case <-c.sdlg.Context().Done():
+			c.end(nil)
+		case <-c.ended:
+		}
+	}()
+	if err := c.Say(c.ctx, l.cfg.NoCallsClip); err != nil {
+		return // the caller hung up
+	}
+	// The line is free once the clip is out, before the BYE is answered.
+	c.end(nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = c.sdlg.Bye(ctx)
+}
+
+// claim makes the incoming call the line's one call, with its audio socket
+// and the line's key, or fails if a call is in progress.
+func (l *Line) claim(req *sip.Request, tx sip.ServerTransaction, contact sip.ContactHeader) (*call, offer, error) {
+	ip := l.cfg.MediaIP
+	if ip == nil {
+		ip = net.ParseIP(contact.Address.Host)
+	}
+	if ip == nil {
+		return nil, offer{}, errors.New("sipline: no address for call audio")
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.call != nil {
+		select {
+		case <-l.call.ended:
+		default:
+			return nil, offer{}, ErrBusy
+		}
+	}
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: ip})
+	if err != nil {
+		return nil, offer{}, err
+	}
+	ours, err := newOffer(ip, conn.LocalAddr().(*net.UDPAddr).Port)
+	if err != nil {
+		_ = conn.Close()
+		return nil, offer{}, err
+	}
+	ua := &sipgo.DialogUA{Client: l.cli, ContactHDR: contact, RewriteContact: true}
+	d, err := ua.ReadInvite(req, tx)
+	if err != nil {
+		_ = conn.Close()
+		return nil, offer{}, err
+	}
+	c := newCall(l, conn)
+	c.sdlg, c.id = d, d.ID
+	l.call = c
+	return c, ours, nil
+}
+
+// onAck confirms an answered incoming call.
+func (l *Line) onAck(req *sip.Request, tx sip.ServerTransaction) {
+	l.mu.Lock()
+	c := l.call
+	l.mu.Unlock()
+	if c == nil || c.sdlg == nil {
+		return
+	}
+	if id, err := sip.DialogIDFromRequestUAS(req); err == nil && id == c.sdlg.ID {
+		_ = c.sdlg.ReadAck(req, tx)
+	}
 }
 
 func (l *Line) onBye(req *sip.Request, tx sip.ServerTransaction) {
@@ -476,10 +623,21 @@ func (l *Line) onBye(req *sip.Request, tx sip.ServerTransaction) {
 	if c != nil {
 		id = c.ID()
 	}
-	if got, err := sip.DialogIDFromRequestUAC(req); id == "" || err != nil || got != id {
+	dialogID := sip.DialogIDFromRequestUAC
+	if c != nil && c.sdlg != nil {
+		dialogID = sip.DialogIDFromRequestUAS // the caller's BYE for a call to the line
+	}
+	if got, err := dialogID(req); id == "" || err != nil || got != id {
 		_ = tx.Respond(sip.NewResponseFromRequest(req, sip.StatusCallTransactionDoesNotExists, "Call/Transaction Does Not Exist", nil))
 		return
 	}
-	_ = c.dlg.ReadBye(req, tx)
+	if c.sdlg != nil {
+		// Answered here, not through ReadBye: over TLS the BYE's
+		// transaction can terminate as the 200 goes out, and ReadBye
+		// then reports an error (see sipsim's onBye).
+		_ = tx.Respond(sip.NewResponseFromRequest(req, sip.StatusOK, "OK", nil))
+	} else {
+		_ = c.dlg.ReadBye(req, tx)
+	}
 	c.end(nil)
 }

@@ -24,7 +24,8 @@ const frameSamples = 160
 // call is one outbound call. Only one runs at a time.
 type call struct {
 	l      *Line
-	dlg    *sipgo.DialogClientSession
+	dlg    *sipgo.DialogClientSession // an outbound call
+	sdlg   *sipgo.DialogServerSession // or a call to the line (NoCallsClip)
 	conn   *net.UDPConn
 	ctx    context.Context // ends the INVITE; cancelling it before an answer sends CANCEL
 	cancel context.CancelFunc
@@ -90,13 +91,8 @@ func (l *Line) Dial(ctx context.Context, number string) (secondline.Call, error)
 	req.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
 	req.SetBody([]byte(off.String()))
 
-	cctx, cancel := context.WithCancel(context.Background())
-	c := &call{l: l, conn: conn, ctx: cctx, cancel: cancel, active: make(chan struct{}), ended: make(chan struct{})}
-	var b [10]byte
-	_, _ = rand.Read(b[:])
-	c.ss = binary.BigEndian.Uint32(b[:])
-	c.seq = binary.BigEndian.Uint16(b[4:]) // RFC 3550: random first sequence number and timestamp
-	c.ts = binary.BigEndian.Uint32(b[6:])
+	c := newCall(l, conn)
+	cancel := c.cancel
 	ua := &sipgo.DialogUA{Client: l.cli, ContactHDR: contact, RewriteContact: true}
 	if c.dlg, err = ua.WriteInvite(ctx, req); err != nil {
 		cancel()
@@ -106,6 +102,18 @@ func (l *Line) Dial(ctx context.Context, number string) (secondline.Call, error)
 	l.call = c
 	go c.run(off)
 	return c, nil
+}
+
+// newCall starts a call's state on its audio socket.
+func newCall(l *Line, conn *net.UDPConn) *call {
+	cctx, cancel := context.WithCancel(context.Background())
+	c := &call{l: l, conn: conn, ctx: cctx, cancel: cancel, active: make(chan struct{}), ended: make(chan struct{})}
+	var b [10]byte
+	_, _ = rand.Read(b[:])
+	c.ss = binary.BigEndian.Uint32(b[:])
+	c.seq = binary.BigEndian.Uint16(b[4:]) // RFC 3550: random first sequence number and timestamp
+	c.ts = binary.BigEndian.Uint32(b[6:])
+	return c
 }
 
 func (c *call) run(off offer) {
@@ -265,7 +273,12 @@ func (c *call) Hangup(ctx context.Context) error {
 	}
 	select {
 	case <-c.active:
-		err := c.dlg.Bye(ctx)
+		var err error
+		if c.sdlg != nil {
+			err = c.sdlg.Bye(ctx)
+		} else {
+			err = c.dlg.Bye(ctx)
+		}
 		c.end(nil)
 		return err
 	default:
