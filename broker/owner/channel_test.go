@@ -869,6 +869,8 @@ func TestOnlyCanonicalRecipientsAreShown(t *testing.T) {
 		"sam@example.com,",
 		", sam@example.com",
 		"sam@example.com,, dad@example.com",
+		".boss@corp.com",   // L3 on #144: leading dot
+		"boss..x@corp.com", // and two in a row
 	} {
 		it := lowItem("x")
 		it.Recipient = rcpt
@@ -884,6 +886,7 @@ func TestOnlyCanonicalRecipientsAreShown(t *testing.T) {
 		"o'brien+bills@mail.acme-corp.example",
 		"+15551234821",
 		"+4930123456",
+		"+4829131", // security R1 on #144: 7 digits is a number, 6 is a code
 		"acct ...4821",
 		"sam@example.com, +15551234821, acct ...0042",
 		"sam@example.com,dad@example.com",
@@ -896,6 +899,15 @@ func TestOnlyCanonicalRecipientsAreShown(t *testing.T) {
 		if l := it.line(); !strings.Contains(l, " to "+rcpt) {
 			t.Errorf("%q: line %q", rcpt, l)
 		}
+	}
+}
+
+// UX-144 R2: one recipient reads in the singular.
+func TestOneUnshownRecipientReadsSingular(t *testing.T) {
+	it := lowItem("x")
+	it.Recipient = "Sam Lee"
+	if l := it.line(); !strings.Contains(l, " to 1 recipient, see the Wi-Fi page") {
+		t.Fatalf("line %q", l)
 	}
 }
 

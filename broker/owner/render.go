@@ -207,7 +207,8 @@ func (it Item) line() string {
 		if r, ok := recipientText(it.Recipient); ok {
 			s += " to " + r
 		} else {
-			s += fmt.Sprintf(" to %d recipients, see the Wi-Fi page", len(strings.Split(it.Recipient, ",")))
+			n := len(strings.Split(it.Recipient, ","))
+			s += fmt.Sprintf(" to %d recipient%s, see the Wi-Fi page", n, map[bool]string{true: "s"}[n != 1])
 		}
 	}
 	if it.Amount != "" {
