@@ -1,6 +1,6 @@
 package tpmseal_test
 
-// REQ: CRED-8, REC-2
+// REQ: CRED-8
 
 import (
 	"crypto/rand"

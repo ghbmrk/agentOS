@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// REQ: REC-4, CRED-8, CRED-9
+// REQ: CRED-8, CRED-9
 
 const newPass = "violet harbor kettle summit ribbon falcon meadow"
 

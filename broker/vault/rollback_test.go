@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-// REQ: CRED-8, REC-2
+// REQ: CRED-8, REC-1
 
 // fakePC is one PC's counters, standing in for its TPM (tpmseal has the
 // swtpm tests). Like a TPM, a new counter starts at the highest value any
@@ -347,18 +347,20 @@ func TestCounterMovedUnderOpenVault(t *testing.T) {
 	}
 }
 
-// Anchoring stopped after the pending anchor was written: with no counter
-// made, the vault opens unbound and Anchor finishes; with the counter
-// made, the next bind adopts it.
+// Anchoring stopped after the pending anchor was written (a crash): with
+// no counter made, the vault opens unbound and Anchor finishes; with the
+// counter made, the next bind adopts it.
 func TestInterruptedAnchoring(t *testing.T) {
 	d, pc := newDrive(t), newPC("alpha")
 	v := d.open()
-	pc.broken = true // Define fails after the pending anchor is written
-	if err := v.Anchor(pc); err == nil {
-		t.Fatal("Anchor succeeded with a silent TPM")
+	if err := v.ensureID(); err != nil {
+		t.Fatal(err)
+	}
+	v.anchors = []Anchor{{Host: "alpha", Pending: true}}
+	if err := v.write(v.anchors); err != nil {
+		t.Fatal(err)
 	}
 	v.Close()
-	pc.broken = false
 
 	v = d.open()
 	if a := v.Anchors(); len(a) != 1 || !a[0].Pending {
@@ -393,6 +395,69 @@ func TestInterruptedAnchoring(t *testing.T) {
 	}
 	if a := v.Anchors(); len(a) != 1 || a[0].Pending {
 		t.Fatalf("anchor not adopted: %+v", a)
+	}
+}
+
+// B2: when the counter cannot be made, Anchor takes its pending anchor
+// back out. A copy taken while it failed is then refused once the PC does
+// get a counter, instead of adopting it.
+func TestFailedAnchorLeavesNoPendingAnchor(t *testing.T) {
+	d, pc := newDrive(t), newPC("alpha")
+	v := d.open()
+	pc.broken = true
+	if err := v.Anchor(pc); err == nil {
+		t.Fatal("Anchor succeeded with a silent TPM")
+	}
+	pc.broken = false
+	if a := v.Anchors(); len(a) != 0 {
+		t.Fatalf("pending anchor kept after a failed Define: %+v", a)
+	}
+	mustPut(t, v, "openai", "sk-canary-before-copy")
+	old := d.copy()
+	v.Delete("openai")
+	if err := v.Anchor(pc); err != nil {
+		t.Fatal(err)
+	}
+	v.Close()
+
+	d.putBack(old)
+	v = d.open()
+	defer v.Close()
+	if err := v.Bind(pc); !errors.Is(err, ErrRolledBack) {
+		t.Fatalf("copy from the failed-anchor window: %v", err)
+	}
+}
+
+// B3: the owner hierarchy can undefine an anchored PC's counter (or the
+// TPM is cleared). The PC then reports the counter missing rather than
+// binding nothing, so the vault process can refuse the unattended slot
+// and alert; trusting the PC again makes a new counter, and an old copy
+// is refused against it.
+func TestMissingCounterIsReported(t *testing.T) {
+	d, pc := newDrive(t), newPC("alpha")
+	v := d.open()
+	if err := v.Anchor(pc); err != nil {
+		t.Fatal(err)
+	}
+	old := d.copy()
+	mustPut(t, v, "openai", "sk-canary-after-copy")
+	v.Close()
+	pc.counters = map[string]uint64{} // NV_UndefineSpace
+
+	v = d.open()
+	if err := v.Bind(pc); !errors.Is(err, ErrCounterMissing) {
+		t.Fatalf("anchored PC without its counter: %v", err)
+	}
+	if err := v.Anchor(pc); err != nil {
+		t.Fatalf("re-trust: %v", err)
+	}
+	v.Close()
+
+	d.putBack(old)
+	v = d.open()
+	defer v.Close()
+	if err := v.Bind(pc); !errors.Is(err, ErrRolledBack) {
+		t.Fatalf("old copy after re-trust: %v", err)
 	}
 }
 
@@ -479,34 +544,16 @@ func TestAnchorsAreSealed(t *testing.T) {
 	}
 }
 
-// A version 1 file (P1-3 to P2-4b) still opens, has nothing to check, and
-// is written as version 2 with an ID on its next write.
-func TestVersion1FileUpgrades(t *testing.T) {
+// A version 1 file (P1-3 to P2-4b) carries no vault ID, so a copy from
+// before the upgrade would skip the rollback check on an anchored PC. The
+// project is pre-release, so version 1 is not read at all (review of #45,
+// B4).
+func TestVersion1FileIsRefused(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "vault")
 	key := testKey(t)
 	writeV1(t, path, key, map[string]record{"openai": {Kind: KindAPIKey, Value: []byte("sk-canary-version-one")}})
-	v, err := Open(path, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := v.Bind(newPC("alpha")); err != nil {
-		t.Fatal(err)
-	}
-	if s, ok := v.Secret("openai"); !ok || s.Reveal() != "sk-canary-version-one" {
-		t.Fatal("version 1 entry lost")
-	}
-	mustPut(t, v, "anthropic", "sk-canary-version-two")
-	v.Close()
-	v, err = Open(path, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer v.Close()
-	if len(v.id) != idSize || len(v.counterAuth) != authSize || len(v.List()) != 2 {
-		t.Fatalf("not upgraded: id %d auth %d entries %d", len(v.id), len(v.counterAuth), len(v.List()))
-	}
-	if bytes.IndexByte(v.counterAuth, 0) >= 0 {
-		t.Fatal("counter auth holds a zero byte")
+	if _, err := Open(path, key); err == nil {
+		t.Fatal("version 1 file opened")
 	}
 }
 

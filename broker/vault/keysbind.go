@@ -95,13 +95,13 @@ func (v *Vault) replaceKeys(kf *keyFile) error {
 }
 
 // checkKeys is OpenSealed's check of the keys file raw (parsed as kf)
-// against the vault opened under key ID want. A vault from before the
-// binding records none and adopts the file it was opened with. Caller
-// does not hold mu.
+// against the vault opened under key ID want. A vault that records no
+// keys file (made by Create, not CreateSealed) accepts none. Caller does
+// not hold mu.
 func (v *Vault) checkKeys(raw []byte, kf *keyFile, want []byte) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if len(v.keysOK) > 0 && !v.acceptsKeys(raw) {
+	if !v.acceptsKeys(raw) {
 		return ErrRolledBack
 	}
 	if _, err := kf.keyID(); err != nil {

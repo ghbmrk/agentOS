@@ -73,6 +73,14 @@ type Counter interface {
 // recovery key (REC-1), which rebases the vault (Rebase).
 var ErrRolledBack = errors.New("vault: this vault file is older than this PC's rollback counter, so it may be an old copy of the drive")
 
+// ErrCounterMissing means the file is anchored to this PC but the PC's
+// counter for it is gone: undefined with the owner hierarchy, or the TPM
+// cleared (review of #45, B3). Nothing then shows whether the file is
+// current, so the vault is unbound: the vault process refuses this PC's
+// unattended slot, lets the owner unlock in person (CRED-8), alerts, and
+// makes a new counter when the owner trusts the PC again (Anchor).
+var ErrCounterMissing = errors.New("vault: this PC's rollback counter for the vault is gone")
+
 // ensureID gives the vault its ID and counter authorization the first time
 // it is written as version 2. Caller holds mu.
 func (v *Vault) ensureID() error {
@@ -120,8 +128,7 @@ func (v *Vault) Bind(c Counter) error {
 func (v *Vault) bind(c Counter) error {
 	v.counter, v.bound = nil, -1
 	if v.id == nil {
-		// A version 1 file: never anchored anywhere.
-		return nil
+		return errors.New("vault: no vault ID to bind")
 	}
 	i := v.find(c.Host())
 	if i < 0 {
@@ -156,6 +163,9 @@ func (v *Vault) bind(c Counter) error {
 	}
 	n, err := c.Read(a.Ref, v.counterAuth)
 	if err != nil {
+		if _, ok, ferr := c.Find(v.id); ferr == nil && !ok {
+			return ErrCounterMissing
+		}
 		// Anchored here, so the check is owed: fail closed.
 		return fmt.Errorf("vault: rollback counter: %w", err)
 	}
@@ -186,7 +196,19 @@ func (v *Vault) Anchor(c Counter) error {
 	if err := v.ensureID(); err != nil {
 		return err
 	}
-	if err := v.bind(c); err != nil {
+	err := v.bind(c)
+	if errors.Is(err, ErrCounterMissing) {
+		// Trusting the PC again after its counter went: make a new one.
+		// It starts at the highest count the TPM has had, so the copy
+		// check holds from here.
+		i := v.find(c.Host())
+		prev := v.anchors[i]
+		v.anchors[i] = Anchor{Host: prev.Host, Pending: true}
+		if werr := v.write(v.anchors); werr != nil {
+			v.anchors[i] = prev
+			return werr
+		}
+	} else if err != nil {
 		return err
 	}
 	if v.counter != nil {
@@ -203,6 +225,15 @@ func (v *Vault) Anchor(c Counter) error {
 	}
 	ref, err := c.Define(v.id, v.counterAuth)
 	if err != nil {
+		// No counter was made (NV full, TPM refusing): take the pending
+		// anchor back out, so a pending anchor survives only a crash
+		// between the two writes (review of #45, B2). Left in, every
+		// later write would carry it, and a copy taken meanwhile would
+		// adopt the counter once one is made.
+		next := append(append([]Anchor(nil), v.anchors[:i]...), v.anchors[i+1:]...)
+		if werr := v.write(next); werr == nil {
+			v.anchors = next
+		}
 		return fmt.Errorf("vault: rollback counter: %w", err)
 	}
 	return v.adopt(c, i, ref)

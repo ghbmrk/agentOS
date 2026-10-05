@@ -39,7 +39,8 @@ const KindAPIKey = "api_key"
 // fileMagic and the version are bound into every seal as associated data,
 // so a file from another format or version fails to open rather than being
 // misread. Version 2 adds the vault ID and the rollback anchors (V6,
-// rollback.go); a version 1 file still opens and is written as version 2.
+// rollback.go). Version 1 is no longer read: it has no ID, so a copy from
+// before the upgrade would skip the rollback check.
 const fileMagic = "agentos-vault"
 const fileVersion = 2
 
@@ -54,7 +55,7 @@ type record struct {
 	Value []byte `json:"value"`
 }
 
-// payload is what a version 2 file seals. Version 1 sealed Entries alone.
+// payload is what a version 2 file seals.
 type payload struct {
 	Entries map[string]record `json:"entries"`
 	// ID names this vault to a rollback counter; CounterAuth is the
@@ -141,10 +142,7 @@ func Open(path string, key []byte) (*Vault, error) {
 		return nil, err
 	}
 	var env envelope
-	if err := json.Unmarshal(raw, &env); err != nil || env.Magic != fileMagic || (env.Version != 1 && env.Version != fileVersion) || len(env.Nonce) != aead.NonceSize() {
-		return nil, errors.New("vault: not a vault file this version can read")
-	}
-	if env.Version == 1 && len(env.KeyID) != 0 {
+	if err := json.Unmarshal(raw, &env); err != nil || env.Magic != fileMagic || env.Version != fileVersion || len(env.Nonce) != aead.NonceSize() {
 		return nil, errors.New("vault: not a vault file this version can read")
 	}
 	plain, err := aead.Open(nil, env.Nonce, env.Sealed, aad(env.Version, env.KeyID))
@@ -153,12 +151,7 @@ func Open(path string, key []byte) (*Vault, error) {
 	}
 	defer wipe(plain)
 	var p payload
-	if env.Version == 1 {
-		err = json.Unmarshal(plain, &p.Entries)
-	} else {
-		err = json.Unmarshal(plain, &p)
-	}
-	if err != nil || (env.Version == fileVersion && (len(p.ID) != idSize || len(p.CounterAuth) != authSize)) {
+	if err := json.Unmarshal(plain, &p); err != nil || len(p.ID) != idSize || len(p.CounterAuth) != authSize {
 		return nil, errors.New("vault: corrupt contents")
 	}
 	if p.Entries == nil {
