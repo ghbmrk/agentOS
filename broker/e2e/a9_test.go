@@ -19,8 +19,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/meter"
 )
 
-// REQ: CH-2, DEP-1
-// SPEC v0.12 IDs (PR #15; move into REQ when it merges): ARC-6
+// REQ: CH-2, DEP-1, ARC-6
 //
 // TestA9OfflineScenario is the broker scenario registered in
 // assurance/dep-targets.json: boot the daemon with its guest plane, take

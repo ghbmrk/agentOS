@@ -17,8 +17,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/meter"
 )
 
-// REQ: REV-1, REV-5, OP-1, ADP-10, CRED-1, ARC-3
-// SPEC v0.12 IDs (PR #15; move into REQ when it merges): ARC-6, ARC-7, OP-8
+// REQ: REV-1, REV-5, OP-1, ADP-10, CRED-1, ARC-3, ARC-6, ARC-7, OP-8
 
 // fakeMachines records steps and label changes.
 type fakeMachines struct {

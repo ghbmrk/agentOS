@@ -11,8 +11,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/admission"
 )
 
-// REQ: ARC-5, OP-1, REV-5
-// SPEC v0.12 IDs (PR #15; move into REQ when it merges): ARC-6
+// REQ: ARC-5, OP-1, REV-5, ARC-6
 
 // recServices records Open and Close calls.
 type recServices struct {

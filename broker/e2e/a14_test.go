@@ -26,8 +26,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/vm"
 )
 
-// REQ: CRED-1, CRED-5, CRED-7, ADP-10, REV-5
-// SPEC v0.12 IDs (PR #15; move into REQ when it merges): ARC-6, ARC-7, OP-8
+// REQ: CRED-1, CRED-5, CRED-7, ADP-10, REV-5, ARC-6, ARC-7, OP-8
 //
 // TestA14CanaryThroughTheGuestSocket is the canary target registered in
 // assurance/canary-targets.json (A5) and the A14 end-to-end proof that P1-3

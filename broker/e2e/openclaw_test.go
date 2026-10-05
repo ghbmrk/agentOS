@@ -24,8 +24,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/vm/gvisor"
 )
 
-// REQ: ARC-3, REV-1, REV-5, OP-1, CRED-1
-// SPEC v0.12 IDs (PR #15; move into REQ when it merges): ARC-6, ARC-7, OP-8
+// REQ: ARC-3, REV-1, REV-5, OP-1, CRED-1, ARC-6, ARC-7, OP-8
 //
 // TestIntegrationOpenClawGuest runs OpenClaw 2026.9.8, unmodified (ARC-3),
 // as an agent machine under gVisor, with the guest bridge as PID 1 and the

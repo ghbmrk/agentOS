@@ -14,8 +14,7 @@ import (
 	"time"
 )
 
-// REQ: CRED-1
-// SPEC v0.12 IDs (PR #15; move into REQ when it merges): OP-8, ARC-7
+// REQ: CRED-1, OP-8, ARC-7
 
 type clock struct {
 	mu sync.Mutex
