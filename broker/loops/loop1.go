@@ -501,18 +501,25 @@ func (l *Learn) mine(ev Evidence) []Hypothesis {
 	return out
 }
 
-// heldWithNext is the task keys mining skips: every held one, and for a
-// held goal, the next goal its origin started after it. A guest that is
-// handed the next owner message while still finishing the held task
-// stamps that trailing work with the next goal (guest G14), so it may be
-// the held task's own work. Goals are ordered by their first intent in
-// the journal (submission order). Unstamped work is the origin key, which
-// Evidence already holds for a held guest case.
+// heldWithNext is the task keys mining skips (arbitrator on #55): every
+// held one; for a held goal of a guest lineage, every other goal of that
+// lineage with an intent inside the held goal's span (its first to its
+// last intent), which ran while it was active; and the first goal the
+// lineage started after that span, since a guest still finishing the held
+// task when handed the next owner message stamps that trailing work with
+// the next goal (guest G14). Order is the journal's submission order.
+// Unstamped work is the origin key, which Evidence already holds for a
+// held guest case.
 func heldWithNext(sts []journal.Status, ev Evidence) map[string]bool {
 	held := map[string]bool{}
-	goals := map[string][]string{} // origin -> goal keys in order of first intent
-	seen := map[string]bool{}
-	for _, s := range sts {
+	type span struct{ first, last int }
+	spans := map[string]*span{} // goal key -> span of its intents
+	type at struct {
+		i int
+		k string
+	}
+	byOrigin := map[string][]at{} // origin -> stamped intents in order
+	for i, s := range sts {
 		in := s.Intent
 		if in.Account == journal.BrokerAccount {
 			continue
@@ -521,15 +528,30 @@ func heldWithNext(sts []journal.Status, ev Evidence) map[string]bool {
 		if ev.Held(k) {
 			held[k] = true
 		}
-		if in.GoalID != "" && !seen[k] {
-			seen[k] = true
-			goals[in.Origin] = append(goals[in.Origin], k)
+		if in.GoalID == "" {
+			continue
 		}
+		if sp := spans[k]; sp == nil {
+			spans[k] = &span{i, i}
+		} else {
+			sp.last = i
+		}
+		byOrigin[in.Origin] = append(byOrigin[in.Origin], at{i, k})
 	}
-	for _, ks := range goals {
-		for i := 0; i+1 < len(ks); i++ {
-			if ev.Held(ks[i]) {
-				held[ks[i+1]] = true
+	for _, ats := range byOrigin {
+		for _, a := range ats {
+			if !ev.Held(a.k) {
+				continue
+			}
+			sp := spans[a.k]
+			for _, b := range ats {
+				if b.i >= sp.first && b.i <= sp.last {
+					held[b.k] = true // ran while the held goal was active
+				}
+				if b.i > sp.last && spans[b.k].first > sp.last {
+					held[b.k] = true // the first goal started after it
+					break
+				}
 			}
 		}
 	}

@@ -525,9 +525,10 @@ func TestACrashMidHarvestStillKeepsTheTaskFromTheBuilder(t *testing.T) {
 }
 
 // TestAHeldOutGoalsWorkIsNotMinedWhereverItLanded: a held-out task's work
-// can land unstamped (the origin bucket) or under the lineage's next goal
-// (guest G14). Neither is mined; a later goal of the same lineage still is,
-// so one held-out case does not stop Loop 1 on a one-guest box (#55 B2).
+// can land unstamped (the origin bucket), under a goal that ran while it
+// was active, or under the goal that came after it (guest G14). None is
+// mined; a goal that starts later is, so one held-out case does not stop
+// Loop 1 on a one-guest box (#55 B2, arbitrator).
 func TestAHeldOutGoalsWorkIsNotMinedWhereverItLanded(t *testing.T) {
 	r := newRig(t)
 	h := r.harvester()
@@ -545,9 +546,11 @@ func TestAHeldOutGoalsWorkIsNotMinedWhereverItLanded(t *testing.T) {
 		}
 	}
 	for _, x := range []struct{ id, goal, action string }{
-		{"loose", "", "refund"},       // unstamped: the origin bucket
-		{"trail", "owner:mB", "pay"},  // the next goal: may be the held task's trailing work
-		{"later", "owner:mC", "move"}, // a later task of the same lineage
+		{"loose", "", "refund"},             // unstamped: the origin bucket
+		{"during", "owner:mC", "send"},      // C runs inside A's span
+		{"a-again", "owner:m" + id, "file"}, // A is still active
+		{"trail", "owner:mB", "pay"},        // the goal after A: may be A's trailing work
+		{"later", "owner:mD", "move"},       // starts after A's span and the goal after it
 	} {
 		r.tasks.out[x.id] = journal.ResultNotApplied
 		r.task(x.id, x.goal, "bank", x.action, "private")
@@ -560,7 +563,7 @@ func TestAHeldOutGoalsWorkIsNotMinedWhereverItLanded(t *testing.T) {
 	for _, hy := range l.mine(ev) {
 		got[hy.Key] = true
 	}
-	if got["failure:bank/refund"] || got["failure:bank/pay"] {
+	if got["failure:bank/refund"] || got["failure:bank/pay"] || got["failure:bank/send"] || got["failure:bank/file"] {
 		t.Fatalf("held-out work was mined: %v", got)
 	}
 	if !got["failure:bank/move"] {
