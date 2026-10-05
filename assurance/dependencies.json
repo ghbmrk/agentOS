@@ -29,6 +29,31 @@
       "file": "broker/vendor/golang.org/x/sys/unix/syscall_solaris.go",
       "host": "go.dev",
       "why": "bug link inside a Solaris-only panic message; not compiled for Linux and never contacted (P2-4b, go-tpm dependency)."
+    },
+    {
+      "file": "broker/vendor/github.com/emersion/go-imap/.build.yml",
+      "host": "github.com",
+      "why": "upstream CI config shipped in the vendored module root; not Go code, not compiled or contacted (P2-6m, IMAP client)."
+    },
+    {
+      "file": "broker/vendor/github.com/emersion/go-message/.build.yml",
+      "host": "github.com",
+      "why": "upstream CI config shipped in the vendored module root; not Go code, not compiled or contacted (P2-6m, go-imap dependency)."
+    },
+    {
+      "file": "broker/vendor/github.com/emersion/go-sasl/.build.yml",
+      "host": "github.com",
+      "why": "upstream CI config shipped in the vendored module root; not Go code, not compiled or contacted (P2-6m, go-imap dependency)."
+    },
+    {
+      "file": "broker/vendor/github.com/emersion/go-sasl/.build.yml",
+      "host": "codecov.io",
+      "why": "upstream CI config shipped in the vendored module root; not Go code, not compiled or contacted (P2-6m, go-imap dependency)."
+    },
+    {
+      "file": "broker/vendor/golang.org/x/text/internal/language/parse.go",
+      "host": "www.ietf.org",
+      "why": "RFC link in a code comment of the BCP 47 parser (charset lookup for mail bodies); never contacted (P2-6m)."
     }
   ]
 }
