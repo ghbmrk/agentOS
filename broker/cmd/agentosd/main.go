@@ -271,8 +271,8 @@ func main() {
 	flag.StringVar(&learn.Dir, "learn", "/var/lib/agentos/learn", "change pipeline and loop scheduler state (W3)")
 	flag.StringVar(&learn.Spare, "spare-meter", "/var/lib/agentos/spare-meter.json", "spare-time model budget state (LOOP-2), apart from -meter")
 	flag.StringVar(&learn.Routing, "routing", "/run/agentos-egress/routing.sock", "the vault process's routing socket, through which routing changes are read and adopted (W3); empty holds routing changes")
-	flag.StringVar(&builderImage, "builder-image", "", "the minimal image Loop 1's builder machines run (W3-builder), registered with -image; empty runs no model-backed builder")
-	flag.StringVar(&builderLaunch, "builder-launch", "", "how a builder machine starts: argv and env; empty uses the image's own")
+	flag.StringVar(&builderImage, "builder-image", defaultBuilderImage, "the minimal image Loop 1's builder machines run (W3-builder), registered with -image; empty, or the default not registered, runs no model-backed builder")
+	flag.StringVar(&builderLaunch, "builder-launch", defaultBuilderLaunch, "how a builder machine starts: argv and env (guest/builder/launch.json); empty uses the image's own")
 	flag.Int64Var(&builderMemMB, "builder-mem-mb", loopbuild.DefaultMemMB, "a builder machine's memory budget, MB")
 	flag.StringVar(&sleepHoursFlag, "sleep-hours", "", "on a box where the agent and a replay machine do not fit together, the hours the agent may sleep while the box tests changes, HH:MM-HH:MM box time (PE7); empty is 01:00-06:00")
 	var workerImage, workerArgv string
@@ -507,8 +507,9 @@ func main() {
 					if err != nil {
 						log.Printf("replay evaluation disabled: %v", err)
 					}
-					lp.startBuilder(m, imgs, services, buildConfig{Dir: filepath.Join(cfg.SocketDir, "build"), Image: builderImage, AgentImage: namedAgentImage,
-						Launch: builderLaunch, MemMB: builderMemMB, Egress: egressSocket})
+					bc := builderFlags(flag.CommandLine, builderImage, builderLaunch)
+					bc.Dir, bc.AgentImage, bc.MemMB, bc.Egress = filepath.Join(cfg.SocketDir, "build"), namedAgentImage, builderMemMB, egressSocket
+					lp.startBuilder(m, imgs, services, bc)
 				}
 				spec, err := agentSpec(imgs, agentImage, agentLaunch, agentMemMB)
 				if err != nil {

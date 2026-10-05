@@ -5,8 +5,10 @@
 # agent tools, nothing downloaded: it is built from this repository alone.
 #
 # Usage: build-rootfs.sh OUT_DIR
-# Needs: go. Register OUT_DIR with agentosd's -image builder=OUT_DIR and
-# name it with -builder-image builder (-builder-launch guest/builder/launch.json).
+# Needs: go. Register OUT_DIR with agentosd's -image builder=OUT_DIR, and
+# install guest/builder/launch.json at /usr/lib/agentos/builder/launch.json
+# (root-owned, 0644): agentosd's -builder-image and -builder-launch default
+# to those.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../.." && pwd)

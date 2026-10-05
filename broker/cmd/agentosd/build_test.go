@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"os"
 	"path/filepath"
 	"testing"
@@ -191,5 +192,57 @@ func TestStatusSaysWhenNoBuilderIsSetUp(t *testing.T) {
 	}
 	if n := l.builderNote(); n != "" {
 		t.Fatalf("note with learning off %q", n)
+	}
+}
+
+// W3-builder-ship: the builder's image name and launch file have defaults
+// the box image installs, so its unit need not pass them. Fail-closed: a
+// box whose image does not carry the builder (the default name is not
+// registered with -image) runs no builder, and STATUS says it learns from
+// repeated routines only; a builder image registered without its launch
+// file does not start, and STATUS says so.
+func TestTheBuilderDefaultsFailClosed(t *testing.T) {
+	if defaultBuilderImage != "builder" || defaultBuilderLaunch != "/usr/lib/agentos/builder/launch.json" {
+		t.Fatalf("defaults %q %q", defaultBuilderImage, defaultBuilderLaunch)
+	}
+	l := testLearning(t)
+	var s lateServices
+	l.startBuilder(nil, images{"openclaw": "/img/openclaw"}, &s, buildConfig{Image: defaultBuilderImage, ImageDefault: true, Launch: defaultBuilderLaunch})
+	if n := l.builderNote(); n != builderUnsetNote {
+		t.Fatalf("no builder image on the box: note %q", n)
+	}
+	if s.build.Load() != nil || l.build.Ready(loops.Brief{}) {
+		t.Fatal("a builder was attached with no image")
+	}
+
+	l = testLearning(t)
+	dir := t.TempDir()
+	l.startBuilder(&fakeBuilderMachines{}, images{"builder": "/img/builder"}, &s,
+		buildConfig{Dir: filepath.Join(dir, "build"), Image: defaultBuilderImage, ImageDefault: true, Launch: filepath.Join(dir, "missing.json")})
+	if n := l.builderNote(); n != builderOffNote {
+		t.Fatalf("builder image without its launch file: note %q", n)
+	}
+	if l.build.Ready(loops.Brief{}) {
+		t.Fatal("a builder was attached without its launch file")
+	}
+}
+
+// L3 SHOULD on #154: only an image the operator did not name is the
+// default one; a named image that is missing is a fault STATUS reports.
+func TestOnlyAnUnnamedBuilderImageIsTheDefault(t *testing.T) {
+	fs := flag.NewFlagSet("agentosd", flag.ContinueOnError)
+	image := fs.String("builder-image", defaultBuilderImage, "")
+	launch := fs.String("builder-launch", defaultBuilderLaunch, "")
+	if err := fs.Parse(nil); err != nil {
+		t.Fatal(err)
+	}
+	if c := builderFlags(fs, *image, *launch); !c.ImageDefault || c.Image != defaultBuilderImage || c.Launch != defaultBuilderLaunch {
+		t.Fatalf("unset: %+v", c)
+	}
+	if err := fs.Parse([]string{"-builder-image", "mine"}); err != nil {
+		t.Fatal(err)
+	}
+	if c := builderFlags(fs, *image, *launch); c.ImageDefault || c.Image != "mine" {
+		t.Fatalf("named: %+v", c)
 	}
 }
