@@ -184,6 +184,10 @@ type Config struct {
 	MaxLayerBytes, MaxLayerInodes int64
 	// FreeBytes reports the state disk's free space; nil measures it.
 	FreeBytes func(path string) (int64, error)
+	// Contained reports a lineage that holds a record the owner deleted
+	// and has not been rolled back yet (recall W10): its machines are not
+	// forked or merged, so what it holds spreads no further. Nil: none is.
+	Contained func(lineage string) bool
 }
 
 var (
@@ -199,6 +203,9 @@ var (
 	// are derived from owner data until their files carry a public mark
 	// (REV-5, compile K7).
 	ErrSeedLabel = errors.New("vm: a seeded machine must be labelled private")
+	// ErrContained refuses a fork or merge of a lineage that holds a
+	// record the owner deleted (Config.Contained).
+	ErrContained = errors.New("vm: this agent holds a record the owner deleted; no fork or merge until that is settled")
 )
 
 var idRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
@@ -693,7 +700,7 @@ func (m *Manager) capture(ctx context.Context, mc *machine, t Tier) (Snapshot, e
 		return Snapshot{}, fmt.Errorf("%s: %w", mc.ID, err)
 	}
 	defer h.release()
-	s := Snapshot{ID: m.nextSnapID(), Machine: mc.ID, Tier: t, Label: mc.Label, Image: mc.Spec.Image, Taken: time.Now().UTC(), Lineage: mc.Lineage}
+	s := Snapshot{ID: m.nextSnapID(), Machine: mc.ID, Tier: t, Label: mc.Label, Image: mc.Spec.Image, Lineage: mc.Lineage}
 	dir := m.snapDir(s.ID)
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		return Snapshot{}, err
@@ -714,6 +721,10 @@ func (m *Manager) capture(ctx context.Context, mc *machine, t Tier) (Snapshot, e
 			return fail(err)
 		}
 	}
+	// Stamped once the capture is complete: a record handed to the machine
+	// while it was being copied may be in it, so the snapshot must not
+	// read as taken before that (CAP-3 restore points, V25).
+	s.Taken = time.Now().UTC()
 	if err := writeJSON(filepath.Join(dir, "meta.json"), s); err != nil {
 		return fail(err)
 	}
@@ -939,6 +950,9 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 	if strings.HasPrefix(id, EvalPrefix) {
 		return Snapshot{}, fmt.Errorf("vm: replay machine %s cannot be forked", id)
 	}
+	if m.contained(src) {
+		return Snapshot{}, fmt.Errorf("%w (%s)", ErrContained, id)
+	}
 	for _, f := range ids {
 		if strings.HasPrefix(f, EvalPrefix) {
 			return Snapshot{}, fmt.Errorf("vm: machine ids starting %q are kept for replay", EvalPrefix)
@@ -1099,6 +1113,9 @@ func (m *Manager) Merge(ctx context.Context, dst, src string) (Snapshot, error) 
 	sm, err := m.get(src)
 	if err != nil {
 		return Snapshot{}, err
+	}
+	if m.contained(sm) {
+		return Snapshot{}, fmt.Errorf("%w (%s)", ErrContained, src)
 	}
 	sm.mu.Lock()
 	baseID := sm.ForkBase

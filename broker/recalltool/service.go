@@ -39,7 +39,10 @@ type ServiceConfig struct {
 	// (W10; the grants gate). Location is the owner's time zone.
 	Ask      Asker
 	Location *time.Location
-	Logf     func(format string, args ...any)
+	// Notify tells the owner an approved rollback is done (the owner
+	// channel's Notify).
+	Notify func(text string) error
+	Logf   func(format string, args ...any)
 }
 
 // Service is recall wired for the broker: the index, the event bus that
@@ -107,7 +110,7 @@ func OpenService(cfg ServiceConfig) (*Service, error) {
 		return fail(err)
 	}
 	s.Reach = &Reach{Prov: s.Prov, Journal: cfg.Journal, Machines: cfg.Machines, Cases: cfg.Cases,
-		Ask: cfg.Ask, Location: cfg.Location, Logf: cfg.Logf}
+		Deleted: s.Index.Deleted, Ask: cfg.Ask, Notify: cfg.Notify, Location: cfg.Location, Logf: cfg.Logf}
 	s.Index.KeepTombstones(s.Reach.Needed)
 	// Registering replays every tombstone, so a reach a crash cut short
 	// runs again (CAP-3).
@@ -208,6 +211,14 @@ func (l *LateExecutor) Contained(lineage string) bool {
 		return r.Contained(lineage)
 	}
 	return false
+}
+
+// Status is Reach.Status once recall is open, "" before.
+func (l *LateExecutor) Status() string {
+	if r := l.r.Load(); r != nil {
+		return r.Status()
+	}
+	return ""
 }
 
 // Reconcile reports an interrupted rollback as approved, to be finished.

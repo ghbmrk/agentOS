@@ -124,6 +124,14 @@ func (r recallLabels) Label(id string) recall.Label {
 
 func (r recallLabels) Raise(id string) error { return r.m.RaiseLabel(id, vm.Private) }
 
+// recallMachines is where a recall deletion reaches the machines.
+type recallMachines struct{ *vm.Manager }
+
+func (r recallMachines) Plan(lineage string, since time.Time) (recalltool.Plan, error) {
+	p, err := r.ResetPlan(lineage, since)
+	return recalltool.Plan{To: p.To, Changes: p.Changes}, err
+}
+
 // openRecall waits for the owner to unlock the vault, takes the recall
 // identity key from the vault process (recall K5), and opens recall, its
 // event bus and provenance record, then serves the recall tools. Until then
@@ -234,6 +242,7 @@ func main() {
 	recallExec := &recalltool.LateExecutor{}
 	cfg.Recall = recallExec
 	cfg.Grants.Contained = recallExec.Contained
+	cfg.RecallStatus = recallExec.Status
 	// No modem driver exists before P2-3, so texts arrive only through the
 	// owner socket and the channel's own outbound texts are not sent.
 
@@ -245,7 +254,13 @@ func main() {
 	}
 	// Deletions reach the journal's guest intents (CAP-3). The change
 	// pipeline is not run by the broker yet; whoever wires it sets Cases.
-	recallCfg := recalltool.ServiceConfig{Dir: recallDir, Journal: d.Engine(), Ask: d.Gate(), Location: time.Local}
+	recallCfg := recalltool.ServiceConfig{Dir: recallDir, Journal: d.Engine(), Ask: d.Gate(), Location: time.Local,
+		Notify: func(text string) error {
+			if ch := d.Owner(); ch != nil {
+				return ch.Notify(text)
+			}
+			return errors.New("no owner channel")
+		}}
 	if runsc != "" {
 		svc := &lateServices{}
 		m, err := vm.Open(ctx, vm.Config{
@@ -257,12 +272,15 @@ func main() {
 			Services: svc,
 
 			DiskReserveBytes: diskReserveMB << 20,
+			// A lineage holding a record the owner deleted is not forked
+			// or merged until that is settled (recall W10).
+			Contained: recallExec.Contained,
 		})
 		if err != nil {
 			log.Printf("agent machines disabled: %v", err)
 		} else {
 			pre.m.Store(m)
-			recallCfg.Labeler, recallCfg.Machines = recallLabels{m}, m
+			recallCfg.Labeler, recallCfg.Machines = recallLabels{m}, recallMachines{m}
 			if plane, err := openGuestPlane(m, d, cfg.SocketDir, meterPath, inboxPath, egressSocket, recallTools); err != nil {
 				// Machines cannot start without their guest sockets.
 				log.Printf("agent machines disabled: %v", err)

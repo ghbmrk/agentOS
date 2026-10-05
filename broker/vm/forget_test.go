@@ -3,6 +3,7 @@ package vm
 // REQ: CAP-3, REV-4, REV-5
 
 import (
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -115,5 +116,126 @@ func TestCAP3ForgetSinceFailsWhenItCannotReset(t *testing.T) {
 	must(t, e.m.ForgetSince(bg, mc.Lineage, since))
 	if e.guestRead("m", "big") != "before" {
 		t.Fatal("retry did not reset")
+	}
+}
+
+// A snapshot is dated when its capture completes (#59 L3 3): a record
+// handed to the machine while it was being copied must not land in a
+// snapshot that reads as taken before it, or ForgetSince would restore
+// it.
+func TestCAP3SnapshotTakenDuringAReadIsNotARestorePoint(t *testing.T) {
+	e := newEnv(t, 8192)
+	e.create("m", admission.Accepted, 500)
+	e.rt.work("m", 3)
+	pre, err := e.m.Checkpoint(bg, "m")
+	must(t, err)
+	time.Sleep(2 * time.Millisecond)
+	var read time.Time
+	e.rt.onCkpt = func(string) {
+		// recall_search answered while the capture runs.
+		read = time.Now().UTC()
+		time.Sleep(2 * time.Millisecond)
+	}
+	e.rt.work("m", 50)
+	during, err := e.m.Checkpoint(bg, "m")
+	must(t, err)
+	e.rt.onCkpt = nil
+	if !during.Taken.After(read) {
+		t.Fatalf("snapshot dated %v, before the read at %v it may hold", during.Taken, read)
+	}
+	mc, _ := e.m.Get("m")
+	must(t, e.m.ForgetSince(bg, mc.Lineage, read))
+	if mem, _ := e.rt.memOf("m"); mem != 3 {
+		t.Fatalf("memory %d after the reset; want the checkpoint before the read", mem)
+	}
+	if _, err := e.m.Snapshot(during.ID); err == nil {
+		t.Fatal("the snapshot taken during the read survived")
+	}
+	if got := e.m.Snapshots("m"); len(got) != 1 || got[0].ID != pre.ID {
+		t.Fatalf("snapshots after: %+v", got)
+	}
+}
+
+// ResetPlan measures what a reset would lose without changing anything:
+// the restore point and the files changed since it (recall W10).
+func TestCAP3ResetPlanMeasuresInMachineWork(t *testing.T) {
+	e := newEnv(t, 8192)
+	e.create("m", admission.Accepted, 500)
+	mc, _ := e.m.Get("m")
+	since := time.Now().UTC()
+	e.guestWrite("m", "a", "1")
+	// No snapshot before since: a fresh start, everything in the layer.
+	p, err := e.m.ResetPlan(mc.Lineage, since)
+	must(t, err)
+	if !p.To.IsZero() || p.Changes != 1 {
+		t.Fatalf("plan with no restore point: %+v", p)
+	}
+	pre, err := e.m.Checkpoint(bg, "m")
+	must(t, err)
+	time.Sleep(2 * time.Millisecond)
+	since = time.Now().UTC()
+	p, err = e.m.ResetPlan(mc.Lineage, since)
+	must(t, err)
+	if !p.To.Equal(pre.Taken) || p.Changes != 0 {
+		t.Fatalf("plan with nothing done since: %+v (restore point %v)", p, pre.Taken)
+	}
+	e.guestWrite("m", "a", "2")
+	e.guestWrite("m", "b/c", "3")
+	p, err = e.m.ResetPlan(mc.Lineage, since)
+	must(t, err)
+	if !p.To.Equal(pre.Taken) || p.Changes < 2 {
+		t.Fatalf("plan after work: %+v", p)
+	}
+	if e.guestRead("m", "a") != "2" {
+		t.Fatal("ResetPlan changed the machine")
+	}
+	if _, err := e.m.ResetPlan("", since); err == nil {
+		t.Fatal("ResetPlan without a lineage")
+	}
+}
+
+// While a lineage holds a record the owner deleted and is not rolled back,
+// it is not forked or merged (recall W10 containment).
+func TestCAP3ContainedLineageIsNotForkedOrMerged(t *testing.T) {
+	e := newEnv(t, 8192)
+	held := map[string]bool{}
+	e.cfg.Contained = func(l string) bool { return held[l] }
+	e.open()
+	e.create("m", admission.Accepted, 500)
+	_, err := e.m.Fork(bg, "m", []string{"f"})
+	must(t, err)
+	mc, _ := e.m.Get("m")
+	held[mc.Lineage] = true
+	if _, err := e.m.Fork(bg, "m", []string{"g"}); !errors.Is(err, ErrContained) {
+		t.Fatalf("fork of a contained lineage: %v", err)
+	}
+	if _, err := e.m.Merge(bg, "m", "f"); !errors.Is(err, ErrContained) {
+		t.Fatalf("merge of a contained lineage: %v", err)
+	}
+	held[mc.Lineage] = false
+	if _, err := e.m.Merge(bg, "m", "f"); err != nil {
+		t.Fatalf("merge once released: %v", err)
+	}
+}
+
+// A reset restarts a running machine, which opens its services again, so
+// the guest plane hands its unanswered owner messages out again (guest
+// G5): a silent rollback does not drop an owner task (#59 UX-59-3).
+func TestCAP3ForgetSinceReopensServices(t *testing.T) {
+	e := newEnv(t, 8192)
+	svc := &recServices{root: t.TempDir(), open: map[string]bool{}}
+	e.cfg.Services = svc
+	e.open()
+	e.create("m", admission.Accepted, 500)
+	_, err := e.m.Checkpoint(bg, "m")
+	must(t, err)
+	time.Sleep(2 * time.Millisecond)
+	since := time.Now().UTC()
+	e.guestWrite("m", "read", "deleted mail")
+	before := len(svc.opened)
+	mc, _ := e.m.Get("m")
+	must(t, e.m.ForgetSince(bg, mc.Lineage, since))
+	if len(svc.opened) != before+1 || svc.opened[len(svc.opened)-1] != "m" || !svc.open["m"] {
+		t.Fatalf("services opened %v (before the reset: %d)", svc.opened, before)
 	}
 }

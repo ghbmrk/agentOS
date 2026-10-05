@@ -20,7 +20,10 @@ type Provenance struct {
 	mu    sync.Mutex
 	store recall.Store
 	sets  map[string]map[string]time.Time // lineage -> item ID -> first given
-	lines int
+	// resets: lineages whose machines went back to before since at reset,
+	// whose reach is not finished (Reach). since and reset in UnixNano.
+	resets map[string]map[int64]int64
+	lines  int
 }
 
 type provRecord struct {
@@ -28,12 +31,16 @@ type provRecord struct {
 	IDs     []string  `json:"ids,omitempty"`
 	At      time.Time `json:"at,omitempty"`
 	Forget  bool      `json:"forget,omitempty"` // drop IDs (or, with none, the lineage)
+	// Reset, with At: the lineage's machines went back to before At at
+	// Reset. With Forget, the reach from At is done: IDs are dropped and
+	// the mark goes.
+	Reset time.Time `json:"reset,omitempty"`
 }
 
 // OpenProvenance loads the record from store (a recall.FileStore in the
 // broker's state directory; unreadable lines are skipped).
 func OpenProvenance(store recall.Store) (*Provenance, error) {
-	p := &Provenance{store: store, sets: map[string]map[string]time.Time{}}
+	p := &Provenance{store: store, sets: map[string]map[string]time.Time{}, resets: map[string]map[int64]int64{}}
 	data, err := store.ReadAll()
 	if err != nil {
 		return nil, err
@@ -56,6 +63,24 @@ func OpenProvenance(store recall.Store) (*Provenance, error) {
 
 func (p *Provenance) apply(r provRecord) {
 	if r.Lineage == "" {
+		return
+	}
+	if !r.Reset.IsZero() {
+		since := r.At.UnixNano()
+		if r.Forget {
+			for _, id := range r.IDs {
+				delete(p.sets[r.Lineage], id)
+			}
+			delete(p.resets[r.Lineage], since)
+			if len(p.resets[r.Lineage]) == 0 {
+				delete(p.resets, r.Lineage)
+			}
+			return
+		}
+		if p.resets[r.Lineage] == nil {
+			p.resets[r.Lineage] = map[int64]int64{}
+		}
+		p.resets[r.Lineage][since] = r.Reset.UnixNano()
 		return
 	}
 	if r.Forget {
@@ -175,6 +200,16 @@ func (p *Provenance) compact() error {
 			n++
 		}
 	}
+	for _, l := range sortedKeys(p.resets) {
+		for since, at := range p.resets[l] {
+			b, err := json.Marshal(provRecord{Lineage: l, At: time.Unix(0, since).UTC(), Reset: time.Unix(0, at).UTC()})
+			if err != nil {
+				return err
+			}
+			buf = append(append(buf, b...), '\n')
+			n++
+		}
+	}
 	if err := p.store.Rewrite(buf); err != nil {
 		return err
 	}
@@ -182,20 +217,63 @@ func (p *Provenance) compact() error {
 	return nil
 }
 
-// ForgetSince drops what lineage was given at or after since: its machines
-// went back to before then, so it no longer holds those items.
-func (p *Provenance) ForgetSince(lineage string, since time.Time) error {
+// Items returns what lineage was given and when each first was.
+func (p *Provenance) Items(lineage string) map[string]time.Time {
 	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make(map[string]time.Time, len(p.sets[lineage]))
+	for id, t := range p.sets[lineage] {
+		out[id] = t
+	}
+	return out
+}
+
+// Reset is a lineage whose machines went back to before Since at At, its
+// reach not yet finished.
+type Reset struct{ Since, At time.Time }
+
+// MarkReset records, durably, that lineage's machines went back to before
+// since at at: a reach finished later (or after a restart) forgets only
+// what was given between the two, and does not reset the machines again.
+func (p *Provenance) MarkReset(lineage string, since, at time.Time) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.write(provRecord{Lineage: lineage, At: since.UTC(), Reset: at.UTC()})
+}
+
+// Resets lists lineage's unfinished resets, oldest first.
+func (p *Provenance) Resets(lineage string) []Reset {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var out []Reset
+	for since, at := range p.resets[lineage] {
+		out = append(out, Reset{Since: time.Unix(0, since).UTC(), At: time.Unix(0, at).UTC()})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Since.Before(out[j].Since) })
+	return out
+}
+
+// Finish ends the reach of a reset: what lineage was given from r.Since
+// until r.At is dropped (its machines went back to before then); what it
+// was given after the reset stays (#59 L3 2). The mark goes with it.
+func (p *Provenance) Finish(lineage string, r Reset) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	var ids []string
 	for id, t := range p.sets[lineage] {
-		if !t.Before(since) {
+		if !t.Before(r.Since) && t.Before(r.At) {
 			ids = append(ids, id)
 		}
 	}
-	p.mu.Unlock()
-	if len(ids) == 0 {
-		return nil
-	}
 	sort.Strings(ids)
-	return p.Forget(lineage, ids...)
+	return p.write(provRecord{Lineage: lineage, IDs: ids, At: r.Since.UTC(), Reset: r.At.UTC(), Forget: true})
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

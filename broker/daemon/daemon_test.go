@@ -156,6 +156,23 @@ func TestCH2StatusSaysWhyTheAgentIsDown(t *testing.T) {
 	}
 }
 
+// STATUS says when an agent still holds a record the owner deleted
+// (recall W10, #59 arbitrator).
+func TestCAP3StatusSaysAnAgentHoldsADeletedRecord(t *testing.T) {
+	dir, err := os.MkdirTemp("", "bk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	cancel, d := startWith(t, dir, func(c *Config) {
+		c.RecallStatus = func() string { return "Agent still holds a record you deleted." }
+	})
+	defer func() { cancel(); d.Wait() }()
+	if r := text(t, dir, owner, "STATUS"); !strings.Contains(r[0], "Machines:") || !strings.HasSuffix(r[0], " Agent still holds a record you deleted.") {
+		t.Fatalf("STATUS: %q", r)
+	}
+}
+
 func TestGuestSocketCannotSendOwnerMessages(t *testing.T) {
 	dir, err := os.MkdirTemp("", "bk")
 	if err != nil {

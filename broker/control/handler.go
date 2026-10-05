@@ -57,7 +57,10 @@ type Handler struct {
 	Agent  Agent // nil: no agent running
 	// Machines, if set, returns STATUS's line about agent machines.
 	Machines func() string
-	Now      func() time.Time
+	// Notice, if set and not empty, is a further STATUS sentence: an agent
+	// that still holds a record the owner deleted (recall W10).
+	Notice func() string
+	Now    func() time.Time
 	// NewCode returns a fresh texted code; nil means 6 random digits.
 	NewCode func() string
 	// Settings, if set, answers an owner text that is a whole-message
@@ -294,6 +297,11 @@ func (h *Handler) status() string {
 	fmt.Fprintf(&b, ", %d waiting to run, %d awaiting a decision.", len(held), len(open))
 	if h.Machines != nil {
 		b.WriteString(" " + plainLine(h.Machines(), 80))
+	}
+	if h.Notice != nil {
+		if n := h.Notice(); n != "" {
+			b.WriteString(" " + plainLine(n, 60))
+		}
 	}
 	return b.String()
 }

@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/vm/overlay"
 )
 
 // ForgetSince takes back from a lineage everything it may hold since a
@@ -78,15 +80,7 @@ func (m *Manager) forgetMachine(ctx context.Context, mc *machine, since time.Tim
 	}()
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
-	var target *Snapshot
-	m.mu.Lock()
-	for _, s := range m.snaps {
-		if inLineage(mc, s) && s.Taken.Before(since) && (target == nil || s.ID > target.ID) {
-			s := s
-			target = &s
-		}
-	}
-	m.mu.Unlock()
+	target := m.restoreTarget(mc, since)
 	if mc.State == Running {
 		// Running is admitted already; restart on that admission.
 		if err := m.restartLocked(ctx, mc, target); err != nil {
@@ -176,4 +170,91 @@ func (m *Manager) removeSnapshot(id string) error {
 	delete(m.snaps, id)
 	m.mu.Unlock()
 	return os.RemoveAll(dir)
+}
+
+// restoreTarget is the snapshot ForgetSince takes mc back to: its newest
+// usable one taken before since, or nil for its image.
+func (m *Manager) restoreTarget(mc *machine, since time.Time) *Snapshot {
+	var target *Snapshot
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, s := range m.snaps {
+		if inLineage(mc, s) && s.Taken.Before(since) && (target == nil || s.ID > target.ID) {
+			s := s
+			target = &s
+		}
+	}
+	return target
+}
+
+func (m *Manager) contained(mc *machine) bool {
+	if m.cfg.Contained == nil {
+		return false
+	}
+	mc.mu.Lock()
+	l := mc.Lineage
+	mc.mu.Unlock()
+	return m.cfg.Contained(l)
+}
+
+// ResetPlan says what ForgetSince(lineage, since) would take back now.
+type ResetPlan struct {
+	// To is the oldest restore point among the lineage's machines; zero
+	// when some machine would go back to its image (a fresh start).
+	To time.Time
+	// Changes counts the files and directories that differ between each
+	// machine's restore point and its layer now: in-machine work a reset
+	// loses. Memory is not measured. A layer that cannot be read counts
+	// as changed.
+	Changes int
+}
+
+// ResetPlan measures what a ForgetSince from since would lose, without
+// changing anything (recall W10: in-machine work counts as work, and the
+// owner's question names the real restore point).
+func (m *Manager) ResetPlan(lineage string, since time.Time) (ResetPlan, error) {
+	if lineage == "" {
+		return ResetPlan{}, errors.New("vm: ResetPlan needs a lineage")
+	}
+	var ms []*machine
+	m.mu.Lock()
+	for id, mc := range m.machines {
+		if mc.Lineage == lineage && !strings.HasPrefix(id, EvalPrefix) {
+			ms = append(ms, mc)
+		}
+	}
+	m.mu.Unlock()
+	var p ResetPlan
+	fresh := false
+	for _, mc := range ms {
+		target := m.restoreTarget(mc, since)
+		mc.mu.Lock()
+		now := overlay.View{Lower: m.cfg.Images[mc.Spec.Image], Upper: m.launch(mc).Upper}
+		mc.mu.Unlock()
+		if target == nil {
+			fresh = true
+			ents, err := overlay.Scan(now.Upper)
+			switch {
+			case errors.Is(err, os.ErrNotExist):
+			case err != nil:
+				p.Changes++
+			default:
+				p.Changes += len(ents)
+			}
+			continue
+		}
+		if p.To.IsZero() || target.Taken.Before(p.To) {
+			p.To = target.Taken
+		}
+		ch, err := overlay.Diff(m.view(*target), now)
+		if err != nil {
+			p.Changes++
+			continue
+		}
+		p.Changes += len(ch)
+	}
+	if fresh {
+		p.To = time.Time{}
+	}
+	return p, nil
 }

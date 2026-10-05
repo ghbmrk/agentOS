@@ -7,6 +7,7 @@ import (
 	"errors"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,10 +36,10 @@ func (j *fakeJournal) Get(id string) (journal.Status, error) {
 	return journal.Status{State: journal.Succeeded}, nil
 }
 
-func (j *fakeJournal) Since(origin string, since time.Time) []string {
+func (j *fakeJournal) Between(origin string, from, until time.Time) []string {
 	var out []string
 	for id, at := range j.submitted {
-		if origin == "guest:root" && !at.Before(since) {
+		if origin == "guest:root" && !at.Before(from) && (until.IsZero() || at.Before(until)) {
 			out = append(out, id)
 		}
 	}
@@ -61,6 +62,8 @@ func (j *fakeJournal) Erase(ids []string) (erased, held []string, err error) {
 
 type fakeMachines struct {
 	calls []string
+	since []time.Time
+	plan  Plan
 	fail  error
 }
 
@@ -69,8 +72,11 @@ func (m *fakeMachines) ForgetSince(_ context.Context, lineage string, since time
 		return m.fail
 	}
 	m.calls = append(m.calls, lineage)
+	m.since = append(m.since, since)
 	return nil
 }
+
+func (m *fakeMachines) Plan(string, time.Time) (Plan, error) { return m.plan, nil }
 
 type fakeCases struct{ forgot map[string]bool }
 
@@ -111,48 +117,62 @@ func (a *fakeAsk) Get(id string) (journal.Status, error) {
 	return st, nil
 }
 
-// answer settles every asked intent: YES runs it as the journal would.
-func (a *fakeAsk) answer(yes bool) {
+// answer settles every open question as the gate would: YES runs it,
+// NO denies it as the owner's, and no answer denies it as expired.
+func (a *fakeAsk) answer(how string) {
 	for id, st := range a.st {
-		if st.State != journal.Pending {
-			continue
+		if st.State == journal.Pending {
+			a.settle(id, how)
 		}
-		if !yes {
-			st.State = journal.Denied
-		} else {
-			out := a.reach.Execute(context.Background(), st.Intent, 1)
-			st.State = journal.Succeeded
-			if out.Result != journal.ResultSucceeded {
-				st.State = journal.NotApplied
-			}
-			st.Attempts = []journal.Attempt{{N: 1, Result: out.Result, Evidence: out.Evidence}}
-		}
-		a.st[id] = st
 	}
 }
 
+func (a *fakeAsk) settle(id, how string) {
+	st := a.st[id]
+	switch how {
+	case "yes":
+		out := a.reach.Execute(context.Background(), st.Intent, 1)
+		st.State = journal.Succeeded
+		if out.Result != journal.ResultSucceeded {
+			st.State = journal.NotApplied
+		}
+		st.Attempts = []journal.Attempt{{N: 1, Result: out.Result, Evidence: out.Evidence}}
+	case "no":
+		st.State, st.Permission = journal.Denied, journal.Permission{Decision: "denied", Reason: "not approved: owner"}
+	default:
+		st.State, st.Permission = journal.Denied, journal.Permission{Decision: "denied", Reason: "not approved: expired"}
+	}
+	a.st[id] = st
+}
+
 type reachRig struct {
-	r     *rig
-	j     *fakeJournal
-	vm    *fakeMachines
-	cs    *fakeCases
-	ask   *fakeAsk
-	reach *Reach
-	clock time.Time
-	mail  string
+	r      *rig
+	j      *fakeJournal
+	vm     *fakeMachines
+	cs     *fakeCases
+	ask    *fakeAsk
+	reach  *Reach
+	told   []string
+	clock  time.Time
+	mail   string
+	before time.Time // a restore point before the read
 }
 
 // newReachRig: lineage "root" reads public items, then the owner's mail at
-// read; "bystander" reads only public items.
+// read; "bystander" reads only public items. The machines' restore point
+// is 08:12 the same day.
 func newReachRig(t *testing.T) (*reachRig, time.Time) {
 	r := newRig(t)
 	x := &reachRig{r: r, clock: time.Now().UTC().Truncate(time.Minute).Add(-time.Hour)} // notes refuse future receipt
 	r.tl.cfg.Now = func() time.Time { return x.clock }
 	x.j = &fakeJournal{submitted: map[string]time.Time{}, erased: map[string]bool{}, inFlight: map[string]bool{}, denied: map[string]bool{}}
-	x.vm = &fakeMachines{}
+	x.before = x.clock.Add(-10 * time.Minute)
+	x.vm = &fakeMachines{plan: Plan{To: x.before}}
 	x.cs = &fakeCases{forgot: map[string]bool{}}
 	x.ask = &fakeAsk{st: map[string]journal.Status{}}
-	x.reach = &Reach{Prov: r.prov, Journal: x.j, Machines: x.vm, Cases: x.cs, Ask: x.ask}
+	x.reach = &Reach{Prov: r.prov, Journal: x.j, Machines: x.vm, Cases: x.cs, Ask: x.ask, Deleted: r.ix.Deleted,
+		Now: func() time.Time { return x.clock }, Location: time.UTC,
+		Notify: func(s string) error { x.told = append(x.told, s); return nil }}
 	x.ask.reach = x.reach
 	r.ix.KeepTombstones(x.reach.Needed)
 	if err := r.ix.OnDelete(x.reach.OnDelete); err != nil {
@@ -169,19 +189,24 @@ func newReachRig(t *testing.T) (*reachRig, time.Time) {
 	return x, read
 }
 
+func (x *reachRig) del(t *testing.T, id string) {
+	t.Helper()
+	if _, err := x.r.ix.Delete(id); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+}
+
 // W10 (Mark, 2026-10-05): a lineage that has done nothing since it read a
 // deleted record is taken back at once, with no question: machines back
 // to before the read, what it was given since forgotten. Other lineages
 // and earlier intents are untouched.
 func TestCAP3NoWorkSinceTheReadRollsBackWithoutAsking(t *testing.T) {
 	x, read := newReachRig(t)
-	if _, err := x.r.ix.Delete(x.mail); err != nil {
-		t.Fatal(err)
+	x.del(t, x.mail)
+	if len(x.ask.asked) != 0 || len(x.vm.calls) != 1 || x.vm.calls[0] != "root" || !x.vm.since[0].Equal(read) {
+		t.Fatalf("asked %v, reset %v %v", x.ask.asked, x.vm.calls, x.vm.since)
 	}
-	if len(x.ask.asked) != 0 || len(x.vm.calls) != 1 || x.vm.calls[0] != "root" {
-		t.Fatalf("asked %v, reset %v", x.ask.asked, x.vm.calls)
-	}
-	if x.j.erased["early"] || x.reach.Pending() != 0 || len(x.r.prov.Holders(x.mail)) != 0 {
+	if x.j.erased["early"] || x.reach.Pending() != 0 || len(x.r.prov.Holders(x.mail)) != 0 || len(x.told) != 0 {
 		t.Fatal("wrong reach")
 	}
 	for _, id := range x.r.prov.Of("root") {
@@ -189,44 +214,65 @@ func TestCAP3NoWorkSinceTheReadRollsBackWithoutAsking(t *testing.T) {
 			t.Fatalf("item given at %v kept", g)
 		}
 	}
-	if len(x.r.prov.Of("root")) == 0 || len(x.r.prov.Of("bystander")) == 0 {
-		t.Fatal("reading from before, or another lineage's, was forgotten")
+	if len(x.r.prov.Of("root")) == 0 || len(x.r.prov.Of("bystander")) == 0 || len(x.r.prov.Resets("root")) != 0 {
+		t.Fatal("reading from before, or another lineage's, was forgotten; or the reset left open")
 	}
 }
 
-// W10: a lineage that has worked since the read is asked about first, with
-// what would be undone. The item is gone from recall at once; nothing of
-// the lineage is undone until the owner says YES. Then its machines go
-// back, its intents since are erased with their cases, and an intent in
-// flight keeps the deletion pending until it settles.
+// #59 arbitrator (Potency 3): files changed in the machine since its
+// restore point are work too, so the owner is asked even when no action
+// was taken.
+func TestCAP3InMachineWorkIsAskedAbout(t *testing.T) {
+	x, _ := newReachRig(t)
+	x.vm.plan.Changes = 4
+	x.del(t, x.mail)
+	if len(x.ask.asked) != 1 || len(x.vm.calls) != 0 {
+		t.Fatalf("asked %v, reset %v", x.ask.asked, x.vm.calls)
+	}
+	in := x.ask.st[x.ask.asked[0]].Intent
+	if in.Params["detail"] != "back to "+x.before.Format("15:04 Jan 2")+"; no actions yet" {
+		t.Fatalf("detail %q", in.Params["detail"])
+	}
+}
+
+// W10: a lineage that has worked since the read is asked about first,
+// naming the item by kind, the real restore point and the actions so far.
+// The item is gone from recall at once; nothing of the lineage is undone
+// until the owner says YES. Then its machines go back, its intents since
+// are erased with their cases, the owner is told the real count, and an
+// intent in flight keeps the deletion pending until it settles.
 func TestCAP3WorkSinceTheReadWaitsForTheOwnersYes(t *testing.T) {
 	x, read := newReachRig(t)
 	x.j.submitted["late"] = read.Add(time.Second)
 	x.j.submitted["running"] = read.Add(2 * time.Second)
 	x.j.inFlight["running"] = true
-	x.reach.Location = time.FixedZone("owner", -4*3600)
-	if _, err := x.r.ix.Delete(x.mail); err != nil {
-		t.Fatalf("a deletion waiting for the owner is an error: %v", err)
-	}
+	x.del(t, x.mail)
 	if _, ok := x.r.ix.Get(x.mail); ok {
 		t.Fatal("the item waited for the owner too")
 	}
-	if len(x.ask.asked) != 1 || len(x.vm.calls) != 0 || len(x.j.erased) != 0 || x.reach.Pending() != 1 {
+	if len(x.ask.asked) != 1 || len(x.vm.calls) != 0 || len(x.j.erased) != 0 || x.reach.Pending() != 1 || !x.reach.Contained("root") {
 		t.Fatalf("before the answer: asked %v, reset %v, erased %v", x.ask.asked, x.vm.calls, x.j.erased)
 	}
 	in := x.ask.st[x.ask.asked[0]].Intent
 	if in.Origin != Origin || in.Executor != ExecutorName || in.Action != journal.ActionRecallRollback ||
-		in.Params["object"] != "root to "+read.In(x.reach.Location).Format("15:04 Jan 2") || in.Params["detail"] != "its 2 actions since stay done; their details are erased" {
-		t.Fatalf("rollback intent: %+v", in)
+		in.Params["object"] != "a mail you deleted from root" ||
+		in.Params["detail"] != "back to "+x.before.Format("15:04 Jan 2")+"; 2 actions stay done" {
+		t.Fatalf("rollback intent: %+v", in.Params)
 	}
-	// Asking again (Retry) does not ask twice.
+	// Asking again (Retry) does not ask twice; more work meanwhile.
+	x.j.submitted["later"] = read.Add(3 * time.Second)
+	x.clock = x.clock.Add(time.Minute)
 	x.reach.Retry(context.Background())
 	if len(x.ask.asked) != 2 || len(x.ask.st) != 1 {
 		t.Fatalf("re-asked: %v", x.ask.st)
 	}
-	x.ask.answer(true)
+	x.ask.answer("yes")
 	if len(x.vm.calls) != 1 || !x.j.erased["late"] || x.j.erased["early"] || !x.cs.forgot["late"] {
 		t.Fatalf("after YES: reset %v, erased %v, cases %v", x.vm.calls, x.j.erased, x.cs.forgot)
+	}
+	want := "Done: root forgot a mail you deleted and is back to " + x.before.Format("15:04 Jan 2") + ". Its 3 actions since stay done; their details are erased."
+	if len(x.told) != 1 || x.told[0] != want {
+		t.Fatalf("told %q", x.told)
 	}
 	if x.reach.Pending() != 1 || len(x.r.prov.Holders(x.mail)) != 1 {
 		t.Fatal("an intent in flight, but the deletion is done")
@@ -235,26 +281,137 @@ func TestCAP3WorkSinceTheReadWaitsForTheOwnersYes(t *testing.T) {
 	if err := x.reach.Retry(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if !x.j.erased["running"] || x.reach.Pending() != 0 || len(x.vm.calls) != 1 || len(x.r.prov.Holders(x.mail)) != 0 {
+	if !x.j.erased["running"] || x.reach.Pending() != 0 || len(x.vm.calls) != 1 || len(x.r.prov.Holders(x.mail)) != 0 || x.reach.Contained("root") {
 		t.Fatalf("retry: erased %v pending %d resets %v", x.j.erased, x.reach.Pending(), x.vm.calls)
+	}
+	if len(x.told) != 1 {
+		t.Fatal("told twice")
 	}
 }
 
-// W10: on NO (or no answer) the lineage keeps its work and what it read,
-// and is not asked again; the item stays deleted.
-func TestCAP3OwnersNoKeepsTheWork(t *testing.T) {
+// #59 L3 2: what the lineage reads and does after its reset is new, not
+// built on the deleted record: a reach finished later (here, after an
+// intent in flight settles) keeps it.
+func TestCAP3ReadAfterTheResetIsKept(t *testing.T) {
 	x, read := newReachRig(t)
-	x.j.submitted["late"] = read.Add(time.Second)
-	x.r.ix.Delete(x.mail)
-	x.ask.answer(false)
+	x.j.submitted["running"] = read.Add(time.Second)
+	x.j.inFlight["running"] = true
+	x.del(t, x.mail)
+	x.ask.answer("yes")
+	if len(x.vm.calls) != 1 || x.reach.Pending() != 1 || len(x.r.prov.Resets("root")) != 1 {
+		t.Fatalf("reset %v pending %d", x.vm.calls, x.reach.Pending())
+	}
+	// After the reset: a new search and a new action.
+	x.clock = x.clock.Add(time.Minute)
+	x.r.call("root", "root", "recall_search", map[string]any{"query": "shed", "scope": "public"})
+	x.j.submitted["after"] = x.clock
+	pub := x.r.ix.SourceID("web", "", "https://shed.example.test/")
+	delete(x.j.inFlight, "running")
 	if err := x.reach.Retry(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(x.vm.calls) != 0 || len(x.j.erased) != 0 || x.reach.Pending() != 0 || len(x.ask.asked) != 1 {
+	if !x.j.erased["running"] || x.j.erased["after"] || len(x.vm.calls) != 1 || x.reach.Pending() != 0 {
+		t.Fatalf("erased %v resets %v", x.j.erased, x.vm.calls)
+	}
+	if g, ok := x.r.prov.Holders(pub)["root"]; !ok || !g.Before(read) {
+		t.Fatalf("the earlier read of the public page: %v %v", g, ok)
+	}
+	if len(x.r.prov.Resets("root")) != 0 {
+		t.Fatal("reset mark left")
+	}
+}
+
+// #59 L3 4: one question per lineage, at its earliest deleted item; an
+// approval that is stale by the time it runs undoes nothing.
+func TestCAP3StaleApprovalUndoesNothing(t *testing.T) {
+	x, read := newReachRig(t)
+	x.j.submitted["late"] = read.Add(time.Second)
+	// The lineage was given the public page before the mail: deleting the
+	// mail asks from its read; deleting the page then asks from earlier.
+	pub := x.r.ix.SourceID("web", "", "https://shed.example.test/")
+	x.del(t, x.mail)
+	first := x.ask.asked[0]
+	x.del(t, pub)
+	var second string
+	for _, id := range x.ask.asked {
+		if id != first {
+			second = id
+		}
+	}
+	if second == "" {
+		t.Fatalf("no question from the earlier read: %v", x.ask.asked)
+	}
+	x.ask.settle(second, "yes")
+	resets := func() (n int) {
+		for _, l := range x.vm.calls {
+			if l == "root" {
+				n++
+			}
+		}
+		return n
+	}
+	if resets() != 1 || len(x.r.prov.Of("root")) != 0 {
+		t.Fatalf("earlier rollback: %v %v", x.vm.calls, x.r.prov.Of("root"))
+	}
+	// The lineage works on; then the stale question is answered YES.
+	x.clock = x.clock.Add(time.Minute)
+	x.j.submitted["new"] = x.clock
+	x.ask.settle(first, "yes")
+	if st := x.ask.st[first]; st.Attempts[0].Evidence != staleEvidence || resets() != 1 || x.j.erased["new"] || len(x.told) != 1 {
+		t.Fatalf("stale approval: %s, resets %v, erased %v", st.State, x.vm.calls, x.j.erased)
+	}
+}
+
+// W10 (arbitrator): the owner's NO keeps the lineage's work and what it
+// read, lifts the containment, and is not asked again; the item stays
+// deleted, and the lineage still makes no note derived from it.
+func TestCAP3OwnersNoKeepsTheWork(t *testing.T) {
+	x, read := newReachRig(t)
+	x.j.submitted["late"] = read.Add(time.Second)
+	x.del(t, x.mail)
+	x.ask.answer("no")
+	if err := x.reach.Retry(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(x.vm.calls) != 0 || len(x.j.erased) != 0 || x.reach.Pending() != 0 || len(x.ask.asked) != 1 || x.reach.Contained("root") {
 		t.Fatalf("after NO: reset %v erased %v pending %d asked %v", x.vm.calls, x.j.erased, x.reach.Pending(), x.ask.asked)
 	}
 	if _, ok := x.r.ix.Get(x.mail); ok {
 		t.Fatal("item back after NO")
+	}
+	if got := x.reach.Status(); got != "root still holds a record you deleted" {
+		t.Fatalf("status %q", got)
+	}
+	_, err := x.r.call("root", "root", "recall_note", map[string]any{"key": "n", "text": "a summary"})
+	if err == nil || !strings.Contains(err.Error(), "notes are off") {
+		t.Fatalf("note after NO: %v", err)
+	}
+	if !x.reach.Needed(x.mail) {
+		t.Fatal("tombstone of a kept record not kept")
+	}
+	// A record deleted after the NO is a new question, asked once.
+	x.r.call("root", "root", "recall_search", map[string]any{"query": "shed", "scope": "public"})
+	pub := x.r.ix.SourceID("web", "", "https://shed.example.test/")
+	x.del(t, pub)
+	x.reach.Retry(context.Background())
+	if n := len(x.ask.st); n != 2 || !x.reach.Contained("root") {
+		t.Fatalf("questions after a new deletion: %d", n)
+	}
+}
+
+// W10 (arbitrator): no answer is not a decline. The deletion stays
+// pending and the lineage contained until the owner answers.
+func TestCAP3NoAnswerStaysContained(t *testing.T) {
+	x, read := newReachRig(t)
+	x.j.submitted["late"] = read.Add(time.Second)
+	x.del(t, x.mail)
+	x.ask.answer("lapse")
+	x.reach.Retry(context.Background())
+	if x.reach.Pending() != 1 || !x.reach.Contained("root") || len(x.vm.calls) != 0 || len(x.ask.st) != 1 {
+		t.Fatalf("after no answer: pending %d contained %v", x.reach.Pending(), x.reach.Contained("root"))
+	}
+	if x.reach.Status() == "" {
+		t.Fatal("no status line while held")
 	}
 }
 
@@ -263,18 +420,18 @@ func TestCAP3OwnersNoKeepsTheWork(t *testing.T) {
 func TestCAP3ApprovedRollbackFinishesAfterAFailedReset(t *testing.T) {
 	x, read := newReachRig(t)
 	x.j.submitted["late"] = read.Add(time.Second)
-	x.r.ix.Delete(x.mail)
+	x.del(t, x.mail)
 	x.vm.fail = errors.New("disk budget")
-	x.ask.answer(true)
-	if len(x.j.erased) != 0 || x.reach.Pending() != 1 {
+	x.ask.answer("yes")
+	if len(x.j.erased) != 0 || x.reach.Pending() != 1 || len(x.told) != 0 {
 		t.Fatal("went past a failed reset")
 	}
 	x.vm.fail = nil
 	if err := x.reach.Retry(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(x.vm.calls) != 1 || !x.j.erased["late"] || x.reach.Pending() != 0 {
-		t.Fatalf("retry after approval: %v %v", x.vm.calls, x.j.erased)
+	if len(x.vm.calls) != 1 || !x.j.erased["late"] || x.reach.Pending() != 0 || len(x.told) != 1 {
+		t.Fatalf("retry after approval: %v %v %v", x.vm.calls, x.j.erased, x.told)
 	}
 }
 
@@ -283,7 +440,7 @@ func TestCAP3ApprovedRollbackFinishesAfterAFailedReset(t *testing.T) {
 func TestCAP3DeletionReachRetriesAfterFailure(t *testing.T) {
 	r := newRig(t)
 	vm := &fakeMachines{fail: errors.New("disk budget")}
-	reach := &Reach{Prov: r.prov, Machines: vm}
+	reach := &Reach{Prov: r.prov, Machines: vm, Deleted: r.ix.Deleted}
 	r.ix.OnDelete(reach.OnDelete)
 	r.call("root", "root", "recall_search", map[string]any{"query": "invoice", "scope": "owner"})
 	mail := r.ix.SourceID("mail", "owner@example.test", "<m1@x>")
@@ -300,23 +457,36 @@ func TestCAP3DeletionReachRetriesAfterFailure(t *testing.T) {
 }
 
 // The service replays tombstones through the reach at start, so a reach a
-// crash cut short (provenance not yet forgotten) runs again.
+// crash cut short (provenance not yet forgotten) runs again; a recorded
+// reset is finished without resetting the machines again.
 func TestCAP3ServiceReplaysReachAtStart(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "recall")
 	s, err := OpenService(ServiceConfig{Dir: dir, Key: key(), Labeler: newLabels()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := s.Index.Ingest(recall.Item{Source: recall.Source{Kind: "mail", Account: "a", Ref: "<c@x>"}, Text: "synthetic canary", Received: time.Now()})
-	if err != nil {
-		t.Fatal(err)
+	var ids []string
+	for _, ref := range []string{"<c@x>", "<d@x>"} {
+		id, err := s.Index.Ingest(recall.Item{Source: recall.Source{Kind: "mail", Account: "a", Ref: ref}, Text: "synthetic canary", Received: time.Now()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
 	}
-	if err := s.Prov.Given("root", []string{id}, time.Now()); err != nil {
-		t.Fatal(err)
+	t0 := time.Now().UTC()
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
-	// Not wired to machines: the index deletes, the lineage keeps its
-	// record of what it was given.
-	if _, err := s.Index.Delete(id); err != nil {
+	must(s.Prov.Given("root", ids[:1], t0))
+	must(s.Prov.Given("other", ids[1:], t0))
+	// "other" was reset before a crash; its reach was not finished.
+	must(s.Prov.MarkReset("other", t0, t0.Add(time.Second)))
+	// Not wired to machines: the index deletes, the lineages keep their
+	// record of what they were given.
+	if _, err := s.Index.Delete(ids...); err != nil {
 		t.Fatal(err)
 	}
 	s.Close()
@@ -326,7 +496,7 @@ func TestCAP3ServiceReplaysReachAtStart(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s2.Close()
-	if len(vm.calls) != 1 || len(s2.Prov.Holders(id)) != 0 {
+	if len(vm.calls) != 1 || vm.calls[0] != "root" || len(s2.Prov.Holders(ids[0])) != 0 || len(s2.Prov.Holders(ids[1])) != 0 {
 		t.Fatalf("not replayed at start: %v", vm.calls)
 	}
 }
@@ -344,33 +514,26 @@ func TestCAP3DeniedIntentIsNotWork(t *testing.T) {
 	x, read := newReachRig(t)
 	x.j.submitted["junk"] = read.Add(time.Second)
 	x.j.denied["junk"] = true
-	x.r.ix.Delete(x.mail)
+	x.del(t, x.mail)
 	if len(x.ask.asked) != 0 || len(x.vm.calls) != 1 || x.reach.Pending() != 0 {
 		t.Fatalf("asked %v, reset %v", x.ask.asked, x.vm.calls)
 	}
 }
 
-// #59 security B1, C2: a lineage that keeps a deleted record (asked, then
-// NO) is contained: it can make no note derived from it, its tombstone is
-// kept past the prune policy, and the gate gives it no pre-allowance.
-func TestCAP3DeclinedLineageIsContained(t *testing.T) {
+// #59 security B1, C2: a lineage being asked about is contained: it can
+// make no note derived from the record, and its tombstone is kept past
+// the prune policy. Other lineages are not.
+func TestCAP3AskedLineageIsContained(t *testing.T) {
 	x, read := newReachRig(t)
 	x.j.submitted["late"] = read.Add(time.Second)
-	x.r.ix.Delete(x.mail)
+	x.del(t, x.mail)
 	if !x.reach.Contained("root") || x.reach.Contained("bystander") {
 		t.Fatal("not contained while asked")
-	}
-	x.ask.answer(false)
-	x.reach.Retry(context.Background())
-	if !x.reach.Contained("root") {
-		t.Fatal("not contained after NO")
 	}
 	note := map[string]any{"key": "n", "text": "a summary"}
 	if _, err := x.r.call("root", "root", "recall_note", note); err == nil {
 		t.Fatal("note derived from a deleted record stored")
 	}
-	// Its tombstone outlives the prune policy (recall's
-	// TestDerivedFromDeletedIsRefused covers the prune itself).
 	if !x.reach.Needed(x.mail) {
 		t.Fatal("tombstone of a held record not kept")
 	}
@@ -383,13 +546,91 @@ func TestCAP3DeclinedLineageIsContained(t *testing.T) {
 func TestCAP3ApprovedLineageIsReleased(t *testing.T) {
 	x, read := newReachRig(t)
 	x.j.submitted["late"] = read.Add(time.Second)
-	x.r.ix.Delete(x.mail)
-	x.ask.answer(true)
+	x.del(t, x.mail)
+	x.ask.answer("yes")
 	x.reach.Retry(context.Background())
-	if x.reach.Contained("root") {
+	if x.reach.Contained("root") || x.reach.Status() != "" {
 		t.Fatal("still contained after the rollback")
 	}
 	if _, err := x.r.call("root", "root", "recall_note", map[string]any{"key": "n", "text": "fresh"}); err != nil {
 		t.Fatalf("note after the rollback: %v", err)
+	}
+}
+
+// #59 L3: Execute runs only the broker's own rollback intents.
+func TestRollbackExecuteChecksTheIntent(t *testing.T) {
+	x, read := newReachRig(t)
+	in := journal.Intent{ID: "x", Origin: "guest:root", Account: journal.BrokerAccount, Action: journal.ActionRecallRollback,
+		Params: map[string]any{"lineage": "root", "since": read.Format(time.RFC3339Nano)}}
+	for _, mod := range []func(*journal.Intent){
+		func(in *journal.Intent) {},
+		func(in *journal.Intent) { in.Origin, in.Account = Origin, "mail" },
+	} {
+		c := in
+		mod(&c)
+		if out := x.reach.Execute(context.Background(), c, 1); out.Result != journal.ResultNotApplied {
+			t.Fatalf("ran %+v", c)
+		}
+	}
+	if len(x.vm.calls) != 0 {
+		t.Fatal("reset")
+	}
+}
+
+// #59 UX-59-1: the question fits the owner text's caps (no field is cut),
+// names the item by kind only, and never uses UNDO's words.
+func TestRollbackLineFitsTheCaps(t *testing.T) {
+	r := &Reach{Location: time.UTC, Now: func() time.Time { return time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC) },
+		kinds: map[string]string{"a": "mail", "b": "mail", "c": "calendar"}}
+	restore := []time.Time{{}, time.Date(2026, 10, 5, 8, 12, 0, 0, time.UTC), time.Date(2026, 10, 4, 23, 59, 0, 0, time.UTC)}
+	for _, lineage := range []string{"agent.0123456789ab", "a-very-long-machine-name-for-a-test.0123"} {
+		for _, ids := range [][]string{{"a"}, {"a", "b"}, {"a", "c"}, {"c"}, {"zz"}} {
+			for _, to := range restore {
+				for _, n := range []int{0, 1, 9, 12, 1234} {
+					obj, det := r.line(lineage, ids, to, n)
+					for _, f := range []string{obj, det} {
+						if len(f) > fieldCap || f == "" || strings.Contains(strings.ToLower(f), "undo") {
+							t.Fatalf("field %q (%d chars)", f, len(f))
+						}
+					}
+					if !strings.HasPrefix(det, "back to ") || !strings.Contains(obj, "you deleted") {
+						t.Fatalf("line %q / %q", obj, det)
+					}
+				}
+			}
+		}
+	}
+	if obj, det := r.line("agent.x", []string{"a"}, restore[1], 2); obj != "a mail you deleted from agent" || det != "back to 08:12 Oct 5; 2 actions stay done" {
+		t.Fatalf("%q / %q", obj, det)
+	}
+}
+
+// The reset mark is durable and survives a compaction; finishing it
+// forgets only what was given between the read and the reset.
+func TestProvenanceResetMarks(t *testing.T) {
+	st := &recall.MemStore{}
+	p, err := OpenProvenance(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t0 := time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)
+	p.Given("l", []string{"before"}, t0.Add(-time.Minute))
+	p.Given("l", []string{"between"}, t0.Add(time.Minute))
+	p.Given("l", []string{"after"}, t0.Add(3*time.Minute))
+	if err := p.MarkReset("l", t0, t0.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	p.compact()
+	p2, _ := OpenProvenance(st)
+	rs := p2.Resets("l")
+	if len(rs) != 1 || !rs[0].Since.Equal(t0) || !rs[0].At.Equal(t0.Add(2*time.Minute)) {
+		t.Fatalf("resets after reopen: %+v", rs)
+	}
+	if err := p2.Finish("l", rs[0]); err != nil {
+		t.Fatal(err)
+	}
+	p3, _ := OpenProvenance(st)
+	if got := strings.Join(p3.Of("l"), ","); got != "after,before" || len(p3.Resets("l")) != 0 {
+		t.Fatalf("after finish: %s %v", got, p3.Resets("l"))
 	}
 }

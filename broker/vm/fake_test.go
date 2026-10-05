@@ -26,6 +26,7 @@ type fakeRuntime struct {
 	kills    int
 	failNext error
 	onPause  func(id string) // runs as the guest is paused
+	onCkpt   func(id string) // runs during a memory checkpoint
 }
 
 func newFake() *fakeRuntime {
@@ -93,6 +94,9 @@ func (f *fakeRuntime) Checkpoint(_ context.Context, id, image string) error {
 	defer f.mu.Unlock()
 	if !f.paused[id] {
 		return errors.New("fake: checkpoint of a machine that is not paused")
+	}
+	if f.onCkpt != nil {
+		f.onCkpt(id)
 	}
 	return os.WriteFile(filepath.Join(image, "mem"), []byte(strconv.Itoa(f.mem[id])), 0o600)
 }

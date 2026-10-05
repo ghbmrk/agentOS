@@ -362,6 +362,9 @@ func TestDerivedFromDeletedIsRefused(t *testing.T) {
 	if _, err := ix.Ingest(note); !errors.Is(err, ErrDeleted) {
 		t.Fatalf("note from a deleted item: %v", err)
 	}
+	if !ix.Deleted(parent) || ix.Deleted("nope") {
+		t.Fatal("Deleted does not report the tombstone")
+	}
 	ix.KeepTombstones(func(id string) bool { return id == parent })
 	now = now.Add(40 * 24 * time.Hour)
 	note.Received = now

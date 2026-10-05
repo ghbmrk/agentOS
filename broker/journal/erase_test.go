@@ -147,3 +147,23 @@ func (f *failingRewrite) Rewrite(data []byte) error {
 	}
 	return f.MemStore.Rewrite(data)
 }
+
+// Between bounds the intents a deletion reaches by when the lineage was
+// reset (#59 L3 2): those submitted after the reset are new work, not
+// built on the deleted record.
+func TestBetweenBoundsByTime(t *testing.T) {
+	e := mustOpen(t, &MemStore{}, newPolicy(), newService())
+	t0 := time.Now().UTC()
+	must(e.Submit(canaryIntent("a", "guest:L")))
+	time.Sleep(2 * time.Millisecond)
+	r := time.Now().UTC()
+	time.Sleep(2 * time.Millisecond)
+	must(e.Submit(canaryIntent("b", "guest:L")))
+	must(e.Submit(canaryIntent("x", "guest:other")))
+	if got := strings.Join(e.Between("guest:L", t0, r), ","); got != "a" {
+		t.Fatalf("between: %s", got)
+	}
+	if got := strings.Join(e.Between("guest:L", r, time.Time{}), ","); got != "b" {
+		t.Fatalf("open-ended: %s", got)
+	}
+}

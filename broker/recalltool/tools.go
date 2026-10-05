@@ -247,6 +247,11 @@ func (t *Tools) Call(ctx context.Context, machine, lineage, name string, raw jso
 				DerivedFrom: t.cfg.Prov.Of(lineage)},
 			Label: label, Text: a.Text, Facts: facts, Received: now,
 		})
+		if errors.Is(err, recall.ErrDeleted) {
+			// #59 security B1: a lineage that read a deleted record
+			// derives no note from it, even after the owner keeps it.
+			return "", true, errors.New("this agent read a record the owner deleted; notes are off until that is settled")
+		}
 		if err != nil {
 			t.cfg.Logf("recall %s: note: %v", machine, err)
 			return "", true, errors.New("broker could not store the note")

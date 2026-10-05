@@ -55,7 +55,9 @@ type Config struct {
 	// Agent receives task chat; nil when no agent is running.
 	Agent    control.Agent
 	Machines func() string
-	Secrets  Secrets
+	// Notice is STATUS's further sentence (control.Handler.Notice).
+	Notice  func() string
+	Secrets Secrets
 	// Verifier, when set, checks code-generator codes in place of
 	// Secrets.TOTPSeed, which is then ignored (egress K7).
 	Verifier Verifier
@@ -205,7 +207,7 @@ func New(cfg Config) (*Channel, error) {
 		queued: map[string]*Queued{},
 		boot:   &bootReport{pending: st.Pending, queued: st.Queued},
 	}
-	c.ctrl = &control.Handler{Engine: cfg.Engine, Auth: c, Agent: cfg.Agent, Machines: cfg.Machines, Now: cfg.Now}
+	c.ctrl = &control.Handler{Engine: cfg.Engine, Auth: c, Agent: cfg.Agent, Machines: cfg.Machines, Notice: cfg.Notice, Now: cfg.Now}
 	return c, nil
 }
 

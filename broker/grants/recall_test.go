@@ -29,7 +29,7 @@ func TestRecallRollbackRunsOnlyOnTheOwnersYes(t *testing.T) {
 		return journal.Intent{ID: id, Origin: origin, Account: journal.BrokerAccount,
 			Action: journal.ActionRecallRollback, Executor: RecallExecutor,
 			Params: map[string]any{"lineage": "agent.x", "since": "2026-10-05T09:00:00Z",
-				"object": "agent to 09:00 Oct 5", "detail": "its 2 actions since stay done; their details are erased"}}
+				"object": "a mail you deleted from agent", "detail": "back to 08:12 Oct 5; 2 actions stay done"}}
 	}
 	for _, origin := range []string{"guest:agent.x", OriginOwner, "local"} {
 		if st := r.submit(rollback("rb-"+origin, origin)); st.State != journal.Denied {
@@ -41,7 +41,7 @@ func TestRecallRollbackRunsOnlyOnTheOwnersYes(t *testing.T) {
 	}
 	r.g.Flush()
 	_, items := r.own.last(t)
-	if len(items) != 1 || items[0].Facts.Verb != "reset" || items[0].Object != "agent to 09:00 Oct 5" ||
+	if len(items) != 1 || items[0].Facts.Verb != "forget" || items[0].Object != "a mail you deleted from agent" ||
 		items[0].Detail == "" || items[0].Recipient != "" {
 		t.Fatalf("approval line: %+v", items)
 	}
@@ -59,6 +59,10 @@ func TestRecallRollbackRunsOnlyOnTheOwnersYes(t *testing.T) {
 	r.decide(false, "owner")
 	if len(ex.ran) != 1 || r.state("rb-2").State != journal.Denied {
 		t.Fatalf("after NO: ran %v, %s", ex.ran, r.state("rb-2").State)
+	}
+	// recalltool tells the owner's NO from no answer by this reason.
+	if why := r.state("rb-2").Permission.Reason; why != "not approved: owner" {
+		t.Fatalf("NO recorded as %q", why)
 	}
 }
 

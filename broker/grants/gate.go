@@ -613,7 +613,7 @@ func (g *Gate) evaluateBroker(ctx context.Context, phase journal.Phase, in journ
 			return verdict{kind: deny, why: "a recall rollback comes only from the broker's recall"}
 		}
 		return verdict{kind: ask, item: owner.Item{Ref: in.ID, Object: obj, Detail: detail,
-			Facts: owner.Facts{Kind: owner.Ordinary, Verb: "reset", NoRecipient: true}}}
+			Facts: owner.Facts{Kind: owner.Ordinary, Verb: "forget", NoRecipient: true}}}
 	case journal.ActionGrantPause, journal.ActionGrantRevoke:
 		if in.Origin != OriginOwner {
 			return verdict{kind: deny, why: "only the owner pauses or revokes a grant"}

@@ -23,12 +23,18 @@ const ErasedReason = "a source it was built from was deleted"
 // Since lists the intents submitted with origin at or after since, oldest
 // first.
 func (e *Engine) Since(origin string, since time.Time) []string {
+	return e.Between(origin, since, time.Time{})
+}
+
+// Between lists the intents submitted with origin at or after from and,
+// unless until is zero, before until, oldest first.
+func (e *Engine) Between(origin string, from, until time.Time) []string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	var out []string
 	for _, id := range e.order {
 		en := e.intents[id]
-		if en.intent.Origin == origin && !en.submitted.Before(since) {
+		if en.intent.Origin == origin && !en.submitted.Before(from) && (until.IsZero() || en.submitted.Before(until)) {
 			out = append(out, id)
 		}
 	}

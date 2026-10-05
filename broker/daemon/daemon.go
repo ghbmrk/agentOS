@@ -91,6 +91,9 @@ type Config struct {
 	// RecallExecutor, recalltool W10) once the owner approves them. Nil:
 	// none can run.
 	Recall journal.Executor
+	// RecallStatus, when it returns a line, is a further STATUS sentence:
+	// an agent that still holds a record the owner deleted (recall W10).
+	RecallStatus func() string
 	// Redactor scrubs journaled free text. Nil journals none at all until
 	// the vault's redactor (CRED-7 values plus CH-19 patterns) is wired
 	// with the vault unlock (P2-4).
@@ -198,13 +201,13 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 			return adm.Summary()
 		}
 	}
-	h := &control.Handler{Engine: eng, Auth: cfg.Auth, Agent: cfg.Agent, Machines: machines}
+	h := &control.Handler{Engine: eng, Auth: cfg.Auth, Agent: cfg.Agent, Machines: machines, Notice: cfg.RecallStatus}
 	handle := h.Handle
 	var ch *ownerch.Channel
 	if cfg.OwnerState != "" {
 		if ch, err = ownerch.New(ownerch.Config{
 			Owner: cfg.OwnerNumber, Modem: cfg.Modem, Engine: eng, Agent: cfg.Agent,
-			Machines: machines, Secrets: cfg.OwnerSecrets, Verifier: cfg.OwnerVerifier, Store: ownerch.FileStore{Path: cfg.OwnerState},
+			Machines: machines, Notice: cfg.RecallStatus, Secrets: cfg.OwnerSecrets, Verifier: cfg.OwnerVerifier, Store: ownerch.FileStore{Path: cfg.OwnerState},
 			Decide: gate.Decide, Narrow: gate.Narrow, Reissue: gate.Reissue,
 		}); err != nil {
 			store.Close()

@@ -941,6 +941,15 @@ func (ix *Index) KeepTombstones(keep func(id string) bool) {
 	ix.mu.Unlock()
 }
 
+// Deleted reports an item ID the owner deleted that is not live again:
+// its tombstone stands and no item holds the ID.
+func (ix *Index) Deleted(id string) bool {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	_, gone := ix.tombs[id]
+	return gone && ix.items[id] == nil
+}
+
 // Preferences returns all preferences, sorted by key (broker side).
 func (ix *Index) Preferences() []Preference {
 	ix.mu.RLock()
