@@ -40,7 +40,9 @@ var controlPath = map[string][]string{
 	// (modelroute, P2-4) and journals the denials that come back, and
 	// gives the owner channel the vault process's verify operation
 	// (owner.Verifier, egress K7).
-	"cmd/agentosd": {"daemon", "cgroup", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner"},
+	// It opens recall (recalltool) once the vault process hands over the
+	// identity key, and serves the recall tools on the guest plane.
+	"cmd/agentosd": {"daemon", "cgroup", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "recall", "recalltool"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies
@@ -79,6 +81,12 @@ var guestPlane = map[string]struct {
 	// Replay (LOOP-5) serves replay machines through a guest plane of its
 	// own: no journal writes, no executors, no network clients.
 	"replay": {[]string{"admission", "change", "guest", "journal", "meter", "vm"}, []string{"net", "os/exec", "plugin", "unsafe", "C"}},
+	// Recall (CAP-3) and the event bus (CAP-4) are broker state served to
+	// guests as tools: no network clients, no processes, no inference
+	// beyond the in-process hashing embedder (DEP-1).
+	"recall":     {nil, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
+	"events":     {[]string{"recall"}, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
+	"recalltool": {[]string{"recall", "events"}, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
 }
 
 var forbiddenStd = []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "syscall", "unsafe", "C"}

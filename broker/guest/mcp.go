@@ -117,7 +117,11 @@ func (p *Plane) mcp(m *machine, w http.ResponseWriter, r *http.Request) {
 	case "ping":
 		writeRPC(w, req.ID, map[string]any{}, nil)
 	case "tools/list":
-		writeRPC(w, req.ID, map[string]any{"tools": tools}, nil)
+		list := tools
+		if p.cfg.Tools != nil {
+			list = append(append([]map[string]any(nil), tools...), p.cfg.Tools.List()...)
+		}
+		writeRPC(w, req.ID, map[string]any{"tools": list}, nil)
 	case "tools/call":
 		var call struct {
 			Name      string          `json:"name"`
@@ -126,6 +130,22 @@ func (p *Plane) mcp(m *machine, w http.ResponseWriter, r *http.Request) {
 		if err := json.Unmarshal(req.Params, &call); err != nil {
 			writeRPC(w, req.ID, nil, &rpcError{-32602, "bad params"})
 			return
+		}
+		if call.Name != "effect_request" && call.Name != "effect_status" && p.cfg.Tools != nil {
+			lineage, err := p.cfg.Machines.Lineage(m.id)
+			if err != nil {
+				writeRPC(w, req.ID, toolResult("broker: unknown machine", true), nil)
+				return
+			}
+			text, handled, err := p.cfg.Tools.Call(r.Context(), m.id, lineage, call.Name, call.Arguments)
+			if handled {
+				if err != nil {
+					writeRPC(w, req.ID, toolResult(err.Error(), true), nil)
+				} else {
+					writeRPC(w, req.ID, toolResult(text, false), nil)
+				}
+				return
+			}
 		}
 		res, submitted, err := p.callTool(r.Context(), m, call.Name, call.Arguments)
 		if submitted {

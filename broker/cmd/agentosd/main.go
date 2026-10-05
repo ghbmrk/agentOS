@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/cgroup"
 	"github.com/ghbmrk/agentos/broker/daemon"
@@ -20,6 +21,8 @@ import (
 	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/owner"
+	"github.com/ghbmrk/agentos/broker/recall"
+	"github.com/ghbmrk/agentos/broker/recalltool"
 	"github.com/ghbmrk/agentos/broker/vm"
 	"github.com/ghbmrk/agentos/broker/vm/gvisor"
 )
@@ -94,10 +97,58 @@ func (l *lateAgent) Deliver(ctx context.Context, text string, public bool) error
 	return a.Deliver(ctx, text, public)
 }
 
+// recallLabels gives the recall index the machine manager's REV-5 labels.
+// Raise returns once the label is private, which model egress and the
+// guest plane read per request.
+type recallLabels struct{ m *vm.Manager }
+
+func (r recallLabels) Label(id string) recall.Label {
+	if r.m.DataLabel(id) == vm.Public.String() {
+		return recall.Public
+	}
+	return recall.Private
+}
+
+func (r recallLabels) Raise(id string) error { return r.m.RaiseLabel(id, vm.Private) }
+
+// openRecall waits for the owner to unlock the vault, takes the recall
+// identity key from the vault process (recall K5), and opens recall, its
+// event bus and provenance record, then serves the recall tools. Until then
+// the tools answer that recall opens after the unlock. STOP and STATUS
+// never wait on any of it.
+func openRecall(ctx context.Context, v *modelroute.Verifier, dir string, labels recall.Labeler, late *recalltool.Late) {
+	var key []byte
+	for {
+		k, err := v.RecallKey()
+		if err == nil {
+			key = k
+			break
+		}
+		if !errors.Is(err, modelroute.ErrVaultLocked) {
+			log.Printf("recall: waiting for the vault process: %v", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(10 * time.Second):
+		}
+	}
+	svc, err := recalltool.OpenService(recalltool.ServiceConfig{Dir: dir, Key: key, Labeler: labels, Logf: log.Printf})
+	clear(key)
+	if err != nil {
+		log.Printf("recall disabled: %v", err)
+		return
+	}
+	late.Set(svc.Tools)
+	log.Printf("recall open: %d items", svc.Index.Len())
+	svc.Run(ctx, log.Printf)
+	svc.Close()
+}
+
 func main() {
 	var cfg daemon.Config
 	imgs := images{}
-	var stateDir, runsc, cgroupParent, meterPath, agentMachine, inboxPath, egressSocket, verifySocket string
+	var stateDir, runsc, cgroupParent, meterPath, agentMachine, inboxPath, egressSocket, verifySocket, recallDir string
 	var diskReserveMB int64
 	flag.StringVar(&cfg.JournalPath, "journal", "/var/lib/agentos/journal.log", "journal file")
 	flag.StringVar(&cfg.SocketDir, "sockets", "/run/agentos", "socket directory (created 0700)")
@@ -116,6 +167,7 @@ func main() {
 	flag.StringVar(&agentMachine, "agent-machine", "agent", "machine whose guest receives the owner's task chat")
 	flag.StringVar(&inboxPath, "guest-inbox", "/var/lib/agentos/guest-inbox.json", "unanswered owner messages to guests, kept across restarts")
 	flag.StringVar(&egressSocket, "egress", "/run/agentos-egress/model.sock", "the vault process's model socket (agentos-egress); empty serves no model route")
+	flag.StringVar(&recallDir, "recall", "/var/lib/agentos/recall", "recall index, event bus and provenance (created 0700); empty runs no recall")
 	flag.StringVar(&verifySocket, "owner-verify", "/run/agentos-egress/verify.sock", "the vault process's verify socket, which checks the owner's code-generator codes; empty refuses high-tier codes")
 	flag.Parse()
 	if cfg.ModemUID < 0 || cfg.ModemUID == os.Getuid() {
@@ -148,9 +200,12 @@ func main() {
 	// process holds (P2-4a); the channel asks it to check high-tier codes
 	// (egress K7). While the vault is locked those checks fail and count
 	// nothing.
+	var verifier *modelroute.Verifier
 	if verifySocket != "" {
-		cfg.OwnerVerifier = ownerVerifier{modelroute.NewVerifier(verifySocket)}
+		verifier = modelroute.NewVerifier(verifySocket)
+		cfg.OwnerVerifier = ownerVerifier{verifier}
 	}
+	recallTools := &recalltool.Late{}
 	// No modem driver exists before P2-3, so texts arrive only through the
 	// owner socket and the channel's own outbound texts are not sent.
 
@@ -160,6 +215,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	var recallLabeler recall.Labeler
 	if runsc != "" {
 		svc := &lateServices{}
 		m, err := vm.Open(ctx, vm.Config{
@@ -176,7 +232,8 @@ func main() {
 			log.Printf("agent machines disabled: %v", err)
 		} else {
 			pre.m.Store(m)
-			if plane, err := openGuestPlane(m, d, cfg.SocketDir, meterPath, inboxPath, egressSocket); err != nil {
+			recallLabeler = recallLabels{m}
+			if plane, err := openGuestPlane(m, d, cfg.SocketDir, meterPath, inboxPath, egressSocket, recallTools); err != nil {
 				// Machines cannot start without their guest sockets.
 				log.Printf("agent machines disabled: %v", err)
 			} else {
@@ -185,6 +242,11 @@ func main() {
 				defer plane.Shutdown()
 			}
 		}
+	}
+	// The recall identity key is vault-held (recall K5): recall opens once
+	// the vault process can hand it over.
+	if recallDir != "" && verifier != nil {
+		go openRecall(ctx, verifier, recallDir, recallLabeler, recallTools)
 	}
 	log.Printf("broker up; owner socket %s/%s", cfg.SocketDir, daemon.OwnerSocket)
 	d.Wait()
@@ -199,7 +261,7 @@ func openCgroup(path string) (*cgroup.Group, error) {
 
 // openGuestPlane opens the OP-8 meter and the guest plane (ARC-6) over the
 // machine manager. Without them no agent machine can start.
-func openGuestPlane(m *vm.Manager, d *daemon.Daemon, socketDir, meterPath, inboxPath, egressSocket string) (*guest.Plane, error) {
+func openGuestPlane(m *vm.Manager, d *daemon.Daemon, socketDir, meterPath, inboxPath, egressSocket string, tools guest.Tools) (*guest.Plane, error) {
 	eng := d.Engine()
 	mtr, err := meter.Open(meter.Config{
 		Path:           meterPath,
@@ -249,6 +311,8 @@ func openGuestPlane(m *vm.Manager, d *daemon.Daemon, socketDir, meterPath, inbox
 			}
 		},
 		Logf: log.Printf,
+		// The recall tools (CAP-3), live once the vault is unlocked.
+		Tools: tools,
 	}
 	if egressSocket != "" {
 		gcfg.Model = modelroute.Forward(modelroute.Config{

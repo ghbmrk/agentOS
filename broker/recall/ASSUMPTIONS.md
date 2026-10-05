@@ -30,6 +30,8 @@ Batched ingest runs about 1000 items/s (scrubbing and embedding bound), so a 100
 
 ## Conditions for wiring (from the #38 lens gate)
 
+Status: see [recalltool W8](../recalltool/ASSUMPTIONS.md).
+
 - **K1.** Whatever turns the owner's words into a preference key and value is broker code, or its result is echoed back to the owner in fixed wording before it counts; it is never an agent machine that has read untrusted content.
 - **K2b.** Deletion also reaches journal params, agent-machine memory and snapshots, the change pipeline's held-out cases (#34) and replay recordings (#37), each through an `OnDelete` hook. Agent summaries set `DerivedFrom` from the recall results and events they consumed, so deleting a source deletes what was made from it.
 - **K3.** Credentialed reads are ingested as kind `credentialed`, set by the executor, never by the caller.
