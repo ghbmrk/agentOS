@@ -418,7 +418,7 @@ func (r *Router) serve(c caller, w http.ResponseWriter, req *http.Request) {
 		w.WriteHeader(status)
 		w.Write(apiError(reason, typ, code))
 	}
-	if req.Method != http.MethodPost || !paths[req.URL.Path] || req.URL.RawQuery != "" {
+	if req.Method != http.MethodPost || !paths[req.URL.Path] || req.URL.RawPath != "" || req.URL.RawQuery != "" {
 		fail(http.StatusNotFound, "invalid_request_error", "not_found", "only POST /v1/chat/completions is served")
 		return
 	}
