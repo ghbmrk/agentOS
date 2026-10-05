@@ -91,7 +91,7 @@ form { margin: .6em 0 1.2em; }
 <label>Photo of the vault passphrase QR code on your card
 <input type="file" name="photo" accept="image/*"></label>
 <p class="muted">Or type the passphrase words.</p>
-<input type="text" name="passphrase" autocomplete="off" autocapitalize="none" spellcheck="false" aria-label="Passphrase words">
+<input type="text" name="passphrase" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" aria-label="Passphrase words">
 <button>Next</button></form>
 <p class="muted">Next, the box asks for a code from your code generator. The passphrase alone does not unlock it.</p>
 {{end}}

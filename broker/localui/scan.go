@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"image"
+	"image/color"
 	_ "image/jpeg" // phone photos
 	_ "image/png"  // screenshots
 	"io"
@@ -30,6 +31,8 @@ var (
 const (
 	MaxPhotoBytes  = 20 << 20
 	MaxPhotoPixels = 50_000_000
+	// MaxOtherPixels bounds a photo that does not decode to YCbCr.
+	MaxOtherPixels = 25_000_000
 	// scanEdge is the longest side a photo is reduced to before the QR
 	// search: a card-sized code is still several pixels per module.
 	scanEdge = 2048
@@ -46,8 +49,21 @@ func ScanPassphrase(photo []byte) (string, error) {
 	if err != nil {
 		return "", ErrNotPhoto
 	}
-	if cfg.Width <= 0 || cfg.Height <= 0 || int64(cfg.Width)*int64(cfg.Height) > MaxPhotoPixels {
+	px := int64(cfg.Width) * int64(cfg.Height)
+	if cfg.Width <= 0 || cfg.Height <= 0 || px > MaxPhotoPixels {
 		return "", ErrPhotoSize
+	}
+	// A camera JPEG decodes to YCbCr at 1.5 bytes a pixel; anything else
+	// (PNG) to as much as 4, so it gets a lower bound, and 16-bit
+	// channels (8 bytes a pixel) are refused (#50 security B2).
+	switch cfg.ColorModel {
+	case color.YCbCrModel:
+	case color.RGBA64Model, color.NRGBA64Model, color.Gray16Model, color.Alpha16Model:
+		return "", ErrNotPhoto
+	default:
+		if px > MaxOtherPixels {
+			return "", ErrPhotoSize
+		}
 	}
 	img, _, err := image.Decode(bytes.NewReader(photo))
 	if err != nil {

@@ -20,6 +20,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -149,9 +150,11 @@ func vaultRig(t *testing.T) (*rig, *fakeVault) {
 }
 
 // upload posts the passphrase form as a phone does: multipart, with a
-// photo and/or typed words.
+// photo and/or typed words. It waits out the attempt gap first, as a
+// person would.
 func (r *rig) upload(photo []byte, typed string) *httpResult {
 	r.t.Helper()
+	r.advance(VaultTryGap)
 	var b bytes.Buffer
 	mw := multipart.NewWriter(&b)
 	mw.WriteField("step", "passphrase")
@@ -471,6 +474,7 @@ func TestVaultBootPIN(t *testing.T) {
 	if !strings.Contains(w.Body.String(), "Wrong PIN.") || strings.Contains(w.Body.String(), "0000") {
 		t.Fatalf("wrong PIN:\n%s", w.Body)
 	}
+	r.advance(VaultTryGap)
 	w = r.post("/unlock/vault", url.Values{"step": {"pin"}, "pin": {"4711"}})
 	if w.Code != http.StatusSeeOther || !strings.Contains(r.get("/unlock/vault"), "The box is unlocked.") {
 		t.Fatalf("PIN: %d %v", w.Code, fv.pins)
@@ -545,4 +549,101 @@ func TestVaultChangedBootPath(t *testing.T) {
 	if strings.Contains(r.get("/unlock/vault"), `name="keep"`) {
 		t.Fatal("keep-trusted offered on an unknown host")
 	}
+}
+
+// The vault process does not count wrong passphrases, and its attempts
+// share one slot, so the page bounds attempts per phone and on the Wi-Fi
+// as a whole; refused attempts never reach the vault (#50 security B1).
+func TestVaultAttemptBudget(t *testing.T) {
+	r, fv := vaultRig(t)
+	post := func(ip string) string {
+		r.ip = ip
+		var b bytes.Buffer
+		mw := multipart.NewWriter(&b)
+		mw.WriteField("step", "passphrase")
+		mw.WriteField("passphrase", "wrong words entirely here now please")
+		mw.Close()
+		return r.doBody("POST", "/unlock/vault", &b, mw.FormDataContentType()).Body.String()
+	}
+	post("10.42.0.30:1000")
+	if body := post("10.42.0.30:1001"); !strings.Contains(body, "Wait a few seconds") || len(fv.unlocks) != 1 {
+		t.Fatalf("inside the gap: %d\n%s", len(fv.unlocks), body)
+	}
+	for i := 1; i < VaultTriesPerHour; i++ {
+		r.advance(VaultTryGap)
+		post("10.42.0.30:1000")
+	}
+	r.advance(VaultTryGap)
+	if body := post("10.42.0.30:1000"); !strings.Contains(body, "Too many tries from this phone. Try again after 10:00.") {
+		t.Fatalf("per phone:\n%s", body)
+	}
+	if len(fv.unlocks) != VaultTriesPerHour {
+		t.Fatalf("vault saw %d", len(fv.unlocks))
+	}
+	// Rotating addresses meets the Wi-Fi-wide bound.
+	for i := 0; len(fv.unlocks) < VaultTriesAllPerHour; i++ {
+		post("10.42.0." + strconv.Itoa(40+i) + ":1000")
+	}
+	if body := post("10.42.0.200:1000"); !strings.Contains(body, "Too many tries on the box&#39;s Wi-Fi.") || len(fv.unlocks) != VaultTriesAllPerHour {
+		t.Fatalf("Wi-Fi bound: %d\n%s", len(fv.unlocks), body)
+	}
+	// An hour on, the owner's phone is admitted again.
+	r.advance(time.Hour)
+	post("10.42.0.23:1000")
+	if len(fv.unlocks) != VaultTriesAllPerHour+1 {
+		t.Fatal("budget did not recover")
+	}
+}
+
+// Parallel uploads cannot each hold a photo: while one is read, another is
+// refused before its body is read (#50 security B2).
+func TestVaultOneUploadAtATime(t *testing.T) {
+	r, fv := vaultRig(t)
+	r.srv.scanning <- struct{}{} // an upload in progress
+	res := r.upload(cardPhoto(t, r.card.VaultPassphrase), "")
+	<-r.srv.scanning
+	if !strings.Contains(res.Body, "reading another photo") || len(fv.unlocks) != 0 {
+		t.Fatalf("second upload: %v\n%s", fv.unlocks, res.Body)
+	}
+}
+
+// A 16-bit PNG decodes to 8 bytes a pixel, so it is refused, and a non-JPEG
+// photo has a lower pixel bound (#50 security B2).
+func TestScanRefusesCostlyPNGs(t *testing.T) {
+	var b bytes.Buffer
+	png.Encode(&b, image.NewRGBA64(image.Rect(0, 0, 64, 64)))
+	if _, err := ScanPassphrase(b.Bytes()); !errors.Is(err, ErrNotPhoto) {
+		t.Fatalf("16-bit PNG: %v", err)
+	}
+	b.Reset()
+	png.Encode(&b, image.NewRGBA(image.Rect(0, 0, 1, 1)))
+	hdr := append([]byte(nil), b.Bytes()...)
+	binary.BigEndian.PutUint32(hdr[16:], 6000) // 6000 x 5000 = 30 MP
+	binary.BigEndian.PutUint32(hdr[20:], 5000)
+	binary.BigEndian.PutUint32(hdr[29:], crc32.ChecksumIEEE(hdr[12:29]))
+	if _, err := ScanPassphrase(hdr); !errors.Is(err, ErrPhotoSize) {
+		t.Fatalf("30 MP PNG: %v", err)
+	}
+}
+
+// A decoder panic on a hostile file is an unreadable photo, not a crash.
+func TestScanSafeRecovers(t *testing.T) {
+	// A JPEG header with absurd tables exercises the decoders; whatever
+	// they do, scanSafe returns.
+	for _, b := range [][]byte{nil, {0xff, 0xd8, 0xff}, []byte("\x89PNG\r\n\x1a\n")} {
+		if _, err := scanSafe(b); err == nil {
+			t.Fatalf("%q decoded", b)
+		}
+	}
+}
+
+// FuzzScanPassphrase: no input makes the scan panic or hang.
+func FuzzScanPassphrase(f *testing.F) {
+	var b bytes.Buffer
+	png.Encode(&b, image.NewGray(image.Rect(0, 0, 8, 8)))
+	f.Add(b.Bytes())
+	f.Add([]byte{0xff, 0xd8, 0xff, 0xe0})
+	f.Fuzz(func(t *testing.T, photo []byte) {
+		ScanPassphrase(photo)
+	})
 }

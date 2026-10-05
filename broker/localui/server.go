@@ -86,8 +86,12 @@ type Server struct {
 	vaultPend *vaultPending
 	// vaultKept: the last unlock kept this PC trusted.
 	vaultKept bool
-	// scanning admits one photo scan at a time.
+	// scanning admits one photo upload at a time.
 	scanning chan struct{}
+	// vaultTries and vaultAll are the unlock attempts in the last hour,
+	// per phone address and in all (vaultTry).
+	vaultTries map[string][]time.Time
+	vaultAll   []time.Time
 }
 
 type mount struct{ Path, Title string }

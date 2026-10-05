@@ -11,6 +11,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -165,6 +166,66 @@ func (u *UnlockClient) UnlockPIN(ctx context.Context, pin string) (VaultStatus, 
 	return w.status(), err
 }
 
+// Unlock attempt budget (#50 security B1). Wrong passphrases are not
+// counted by the vault process (nobody without the card can lock the owner
+// out), but its attempts share one slot spaced 2 s apart, so a phone on the
+// Wi-Fi posting garbage could starve the owner's attempt. Each phone (by
+// address) gets one attempt per VaultTryGap and VaultTriesPerHour an hour,
+// and the Wi-Fi as a whole VaultTriesAllPerHour, which bounds an attacker
+// rotating addresses; the vault process tells the owner of wrong
+// passphrases. Passphrase and PIN attempts share the budget.
+const (
+	VaultTryGap          = 10 * time.Second
+	VaultTriesPerHour    = 20
+	VaultTriesAllPerHour = 120
+)
+
+// vaultTry spends one attempt for the phone at addr, or returns the
+// owner-facing refusal.
+func (s *Server) vaultTry(addr string) string {
+	now := s.cfg.Now()
+	ip := addr
+	if ap, err := netip.ParseAddrPort(addr); err == nil {
+		ip = ap.Addr().Unmap().String()
+	}
+	hour := now.Add(-time.Hour)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.vaultTries == nil {
+		s.vaultTries = map[string][]time.Time{}
+	}
+	all := s.vaultAll[:0]
+	for _, t := range s.vaultAll {
+		if t.After(hour) {
+			all = append(all, t)
+		}
+	}
+	s.vaultAll = all
+	for k, ts := range s.vaultTries {
+		if len(ts) == 0 || !ts[len(ts)-1].After(hour) {
+			delete(s.vaultTries, k)
+		}
+	}
+	var mine []time.Time
+	for _, t := range s.vaultTries[ip] {
+		if t.After(hour) {
+			mine = append(mine, t)
+		}
+	}
+	at := func(t time.Time) string { return t.In(now.Location()).Format("15:04") }
+	switch {
+	case len(mine) > 0 && now.Sub(mine[len(mine)-1]) < VaultTryGap:
+		return "Wait a few seconds, then try again."
+	case len(mine) >= VaultTriesPerHour:
+		return "Too many tries from this phone. Try again after " + at(mine[0].Add(time.Hour)) + "."
+	case len(all) >= VaultTriesAllPerHour:
+		return "Too many tries on the box's Wi-Fi. Try again after " + at(all[0].Add(time.Hour)) + "."
+	}
+	s.vaultTries[ip] = append(mine, now)
+	s.vaultAll = append(s.vaultAll, now)
+	return ""
+}
+
 // vaultCookie binds a pending unlock's ticket to the phone that sent the
 // passphrase, so another phone on the Wi-Fi can neither answer nor spoil
 // it (egress K5).
@@ -272,6 +333,15 @@ func (s *Server) vaultPost(w http.ResponseWriter, r *http.Request) {
 // read part by part into memory, never spooled to a temporary file, so
 // the passphrase never reaches the drive.
 func (s *Server) vaultPassphrase(w http.ResponseWriter, r *http.Request) {
+	// One upload at a time, taken before the body is read, so parallel
+	// uploads cannot each hold a photo in memory (#50 security B2).
+	select {
+	case s.scanning <- struct{}{}:
+		defer func() { <-s.scanning }()
+	default:
+		s.vaultPage(w, r, scanText(ErrScanBusy))
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, MaxPhotoBytes+64<<10)
 	mr, err := r.MultipartReader()
 	if err != nil {
@@ -298,12 +368,13 @@ func (s *Server) vaultPassphrase(w http.ResponseWriter, r *http.Request) {
 		case "passphrase":
 			b, _ := io.ReadAll(io.LimitReader(p, 1<<10))
 			typed = strings.TrimSpace(string(b))
+			clear(b)
 		}
 		p.Close()
 	}
 	pass := typed
 	if pass == "" && len(photo) > 0 {
-		if pass, err = s.scan(photo); err != nil {
+		if pass, err = scanSafe(photo); err != nil {
 			s.vaultPage(w, r, scanText(err))
 			return
 		}
@@ -311,6 +382,10 @@ func (s *Server) vaultPassphrase(w http.ResponseWriter, r *http.Request) {
 	clear(photo)
 	if pass == "" {
 		s.vaultPage(w, r, "Take a photo of the passphrase code, or type the words.")
+		return
+	}
+	if msg := s.vaultTry(r.RemoteAddr); msg != "" {
+		s.vaultPage(w, r, msg)
 		return
 	}
 	st, ticket, err := s.cfg.Vault.Unlock(r.Context(), pass)
@@ -360,6 +435,10 @@ func (s *Server) vaultCode(w http.ResponseWriter, r *http.Request, code string, 
 }
 
 func (s *Server) vaultPIN(w http.ResponseWriter, r *http.Request, pin string) {
+	if msg := s.vaultTry(r.RemoteAddr); msg != "" {
+		s.vaultPage(w, r, msg)
+		return
+	}
 	if _, err := s.cfg.Vault.UnlockPIN(r.Context(), pin); err != nil {
 		s.vaultPage(w, r, vaultText(err))
 		return
@@ -367,15 +446,15 @@ func (s *Server) vaultPIN(w http.ResponseWriter, r *http.Request, pin string) {
 	http.Redirect(w, r, "/unlock/vault", http.StatusSeeOther)
 }
 
-// scan reads one photo at a time; a second upload meanwhile is refused
-// rather than queued, so uploads cannot pile up in memory.
-func (s *Server) scan(photo []byte) (string, error) {
-	select {
-	case s.scanning <- struct{}{}:
-		defer func() { <-s.scanning }()
-	default:
-		return "", ErrScanBusy
-	}
+// scanSafe is ScanPassphrase with a panic in the decoders (a bug reached
+// by a hostile file) reported as an unreadable photo, not a crash of the
+// local UI.
+func scanSafe(photo []byte) (pass string, err error) {
+	defer func() {
+		if recover() != nil {
+			pass, err = "", ErrNotPhoto
+		}
+	}()
 	return ScanPassphrase(photo)
 }
 
