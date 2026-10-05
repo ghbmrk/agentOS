@@ -95,6 +95,12 @@ type Config struct {
 	// Excluded reports hours the owner excluded from updates (UPD-6).
 	// Nil: none.
 	Excluded func(time.Time) bool
+	// LastTalk is when the owner was last delivered a message or the
+	// agent last replied. Within Quiet of it the box is not free, so a
+	// restart never cuts a conversation off (UX-133-4). Nil: never.
+	LastTalk func() time.Time
+	// Quiet is how long after LastTalk the box waits. Default 10 minutes.
+	Quiet time.Duration
 	// Jitter is the most an ordinary release waits, at random, before its
 	// quiet moment (UPD-5). Security fixes do not wait. Default 6 hours.
 	Jitter time.Duration
@@ -136,6 +142,8 @@ const (
 type last struct {
 	Version int64  `json:"version"`
 	Kind    string `json:"kind"`
+	// Told: the digest carried it (UX-133-1).
+	Told bool `json:"told,omitempty"`
 }
 
 type state struct {
@@ -167,6 +175,12 @@ func New(cfg Config) (*Applier, error) {
 	}
 	if cfg.Excluded == nil {
 		cfg.Excluded = func(time.Time) bool { return false }
+	}
+	if cfg.LastTalk == nil {
+		cfg.LastTalk = func() time.Time { return time.Time{} }
+	}
+	if cfg.Quiet <= 0 {
+		cfg.Quiet = 10 * time.Minute
 	}
 	if cfg.Jitter <= 0 {
 		cfg.Jitter = 6 * time.Hour
@@ -238,13 +252,32 @@ func (a *Applier) Schedule(v *update.Verified, adoption string) error {
 func (a *Applier) busy(now time.Time) string {
 	switch {
 	case a.cfg.InCall():
-		return "a call is in progress"
+		return busyCall
 	case a.cfg.Working():
-		return "accepted work is in progress"
+		return busyWork
 	case a.cfg.Excluded(now):
-		return "the owner excluded these hours from updates"
+		return busyExcluded
+	case now.Sub(a.cfg.LastTalk()) < a.cfg.Quiet:
+		return busyTalk
 	}
 	return ""
+}
+
+// Why the box is not free (UPD-6; UX-133-4).
+const (
+	busyCall     = "a call is in progress"
+	busyWork     = "accepted work is in progress"
+	busyExcluded = "the owner excluded these hours from updates"
+	busyTalk     = "the owner and the agent are talking"
+)
+
+// waitLines say why an update waits (UX-133-3).
+var waitLines = map[string]string{
+	busyCall:     "Update %d will install after the current call.",
+	busyWork:     "Update %d will install once the agent's current task is done.",
+	busyExcluded: "Update %d will install after your update-free hours.",
+	busyTalk:     "Update %d will install once your conversation pauses.",
+	"":           "Update %d will install soon. Nothing is needed from you.",
 }
 
 // Tick applies the pending release when it is due and the box is free,
@@ -519,7 +552,9 @@ func (a *Applier) Resume(ctx context.Context) error {
 	return a.saveLocked()
 }
 
-// Status is the applier's one line for STATUS and the digest, or "".
+// Status is the applier's STATUS line, or "": an update installing or
+// waiting, with why, and a fallback until the next update installs
+// (UX-133-1 to 3). A successful install is said once, in the digest.
 func (a *Applier) Status() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -527,18 +562,41 @@ func (a *Applier) Status() string {
 	case a.st.Applying != nil && a.st.Applying.Installed:
 		return fmt.Sprintf("Update %d is installing; the box will restart and check it.", a.st.Applying.To)
 	case a.st.Pending != nil && a.rel != nil:
-		if a.busy(a.cfg.Now()) != "" || a.cfg.Now().Before(a.st.Pending.NotBefore) {
-			return fmt.Sprintf("Update %d is ready and will install when the box is free.", a.st.Pending.Version)
+		why := ""
+		if now := a.cfg.Now(); !now.Before(a.st.Pending.NotBefore) {
+			why = a.busy(now)
 		}
-		return fmt.Sprintf("Update %d is ready to install.", a.st.Pending.Version)
-	case a.st.Last == nil:
+		return fmt.Sprintf(waitLines[why], a.st.Pending.Version)
+	case a.st.Last == nil || a.st.Last.Kind == doneInstalled:
 		return ""
-	case a.st.Last.Kind == doneInstalled:
-		return fmt.Sprintf("Update %d is installed.", a.st.Last.Version)
 	case a.st.Last.Kind == doneFellBack:
-		return fmt.Sprintf("Update %d did not start cleanly, so the box went back to the version it had.", a.st.Last.Version)
+		return fellBackLine(a.st.Last.Version)
 	}
 	return fmt.Sprintf("Update %d was not installed; the box will try again.", a.st.Last.Version)
+}
+
+// Digest returns the lines the next digest carries once: an update that
+// installed, or one that fell back (UX-133-1, 133-2).
+func (a *Applier) Digest() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	l := a.st.Last
+	if l == nil || l.Told || (l.Kind != doneInstalled && l.Kind != doneFellBack) {
+		return nil
+	}
+	l.Told = true
+	_ = a.saveLocked()
+	if l.Kind == doneInstalled {
+		return []string{fmt.Sprintf("Update %d is installed.", l.Version)}
+	}
+	return []string{fellBackLine(l.Version)}
+}
+
+// fellBackLine: Loop 3 never proposes a release again once it was adopted
+// (security C3 on #133), so it is not tried again.
+func fellBackLine(v int64) string {
+	return fmt.Sprintf("Update %d did not start cleanly, so the box went back to the version it had. "+
+		"Nothing is needed from you. It won't be tried again.", v)
 }
 
 func (a *Applier) saveLocked() error {

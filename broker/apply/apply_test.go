@@ -61,8 +61,15 @@ func TestSecurityFixAppliesAtTheNextQuietMomentAndCommitsAfterHealthCheck(t *tes
 	if len(r.pipe.confirmed) != 1 || r.pipe.confirmed[0] != "a1" || len(r.pipe.failed) != 0 {
 		t.Fatalf("pipeline: %+v", r.pipe)
 	}
-	if got := r.a.Status(); got != "Update 1 is installed." {
+	// UX-133-1: an install is said once, in the digest, not in STATUS.
+	if got := r.a.Status(); got != "" {
 		t.Fatalf("status: %q", got)
+	}
+	if d := r.a.Digest(); len(d) != 1 || d[0] != "Update 1 is installed." {
+		t.Fatalf("digest: %q", d)
+	}
+	if d := r.a.Digest(); len(d) != 0 {
+		t.Fatalf("digest again: %q", d)
 	}
 	// Done: nothing more happens.
 	if ok, _ := r.a.Tick(ctx); ok || r.act.restarts != 1 {
@@ -76,19 +83,30 @@ func TestNeverAppliesDuringACallWorkOrExcludedHours(t *testing.T) {
 	r := newRig(t)
 	ctx := context.Background()
 	r.must(r.a.Schedule(r.release(1, true), "a1"))
-	for name, set := range map[string]func(bool){
-		"call":     func(b bool) { r.inCall = b },
-		"work":     func(b bool) { r.working = b },
-		"excluded": func(b bool) { r.excluded = func(time.Time) bool { return b } },
+	// UX-133-3: STATUS says why it waits.
+	for _, c := range []struct {
+		set  func(bool)
+		line string
+	}{
+		{func(b bool) { r.inCall = b }, "Update 1 will install after the current call."},
+		{func(b bool) { r.working = b }, "Update 1 will install once the agent's current task is done."},
+		{func(b bool) { r.excluded = func(time.Time) bool { return b } }, "Update 1 will install after your update-free hours."},
+		{func(b bool) {
+			if b {
+				r.talk = r.clk.now().Add(-5 * time.Minute)
+			} else {
+				r.talk = time.Time{}
+			}
+		}, "Update 1 will install once your conversation pauses."},
 	} {
-		set(true)
+		c.set(true)
 		if ok, err := r.a.Tick(ctx); ok || err != nil {
-			t.Fatalf("%s: applied (%v)", name, err)
+			t.Fatalf("%s: applied (%v)", c.line, err)
 		}
-		if !strings.Contains(r.a.Status(), "when the box is free") {
-			t.Fatalf("%s: status %q", name, r.a.Status())
+		if got := r.a.Status(); got != c.line {
+			t.Fatalf("status %q, want %q", got, c.line)
 		}
-		set(false)
+		c.set(false)
 	}
 	if len(r.act.installed) != 0 || len(r.intents()) != 0 {
 		t.Fatal("handed over while busy")
@@ -131,6 +149,32 @@ func TestStableReleaseWaitsForItsJitter(t *testing.T) {
 	}
 }
 
+// UX-133-4: a conversation in the last 10 minutes holds the apply, also
+// for a security fix; one 11 minutes ago does not.
+func TestRecentConversationHoldsTheApply(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	r.must(r.a.Schedule(r.release(1, true), "a1"))
+	r.talk = r.clk.now().Add(-5 * time.Minute)
+	if ok, _ := r.a.Tick(ctx); ok {
+		t.Fatal("applied 5 minutes after a message")
+	}
+	r.talk = r.clk.now().Add(-11 * time.Minute)
+	if ok, err := r.a.Tick(ctx); !ok || err != nil {
+		t.Fatalf("held 11 minutes after a message: %v", err)
+	}
+}
+
+// UX-133-3: before its moment, an update says it will install soon.
+func TestWaitingForItsMomentSaysSoon(t *testing.T) {
+	r := newRig(t)
+	r.must(r.a.Schedule(r.release(1, false), "a1"))
+	r.inCall = true // not yet its moment: the call is not the reason
+	if got := r.a.Status(); got != "Update 1 will install soon. Nothing is needed from you." {
+		t.Fatalf("status: %q", got)
+	}
+}
+
 // UPD-1: a release that fails its health check falls back by boot
 // counting with no owner action; the box drops the staged release and
 // reverts the adoption, and rewinds nothing that lives outside the image:
@@ -163,8 +207,17 @@ func TestFallbackRevertsTheAdoptionAndRewindsNothing(t *testing.T) {
 	if its := r.intents(); len(its) != 1 || its[0].State != journal.Succeeded || len(r.eng.List()) != before {
 		t.Fatalf("journal changed: %+v", its)
 	}
-	if got := r.a.Status(); got != "Update 1 did not start cleanly, so the box went back to the version it had." {
+	// UX-133-2: in STATUS until the next update installs, and once in
+	// the digest.
+	want := "Update 1 did not start cleanly, so the box went back to the version it had. Nothing is needed from you. It won't be tried again."
+	if got := r.a.Status(); got != want {
 		t.Fatalf("status: %q", got)
+	}
+	if d := r.a.Digest(); len(d) != 1 || d[0] != want {
+		t.Fatalf("digest: %q", d)
+	}
+	if got := r.a.Status(); got != want {
+		t.Fatalf("status after the digest: %q", got)
 	}
 }
 
