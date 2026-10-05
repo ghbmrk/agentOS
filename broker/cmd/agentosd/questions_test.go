@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
+	"github.com/ghbmrk/agentos/broker/clock"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/question"
 )
@@ -141,5 +142,18 @@ func TestStatusShowsAnUnreadableClockRestriction(t *testing.T) {
 	defer guard.Flush()
 	if l := cfg.Clock(); !strings.HasPrefix(l, "Time check: restricted since") || !strings.Contains(l, "saved check unreadable") {
 		t.Fatalf("STATUS clock line: %q", l)
+	}
+}
+
+// UX-98-1: STATUS shows the time check only for exceptions. Agreement adds
+// nothing; a restriction, a hold and every degraded check stay visible.
+func TestClockLineOnlyForExceptions(t *testing.T) {
+	if l := clockLine(clock.Status{State: clock.Agreed}, time.UTC); l != "" {
+		t.Fatalf("agreed: %q", l)
+	}
+	for _, st := range []clock.State{clock.Disagree, clock.Held, clock.NetworkOnly, clock.CarrierOnly, clock.Unchecked} {
+		if l := clockLine(clock.Status{State: st}, time.UTC); !strings.HasPrefix(l, "Time check: ") {
+			t.Fatalf("state %v: %q", st, l)
+		}
 	}
 }

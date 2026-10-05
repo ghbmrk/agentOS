@@ -50,7 +50,16 @@ func (q *questions) Clock() string {
 	if g == nil {
 		return ""
 	}
-	return g.Status().Line(time.Local)
+	return clockLine(g.Status(), time.Local)
+}
+
+// clockLine is the line for s, or "" when the sources agree: STATUS shows
+// only exceptions, degraded checks included (UX-98-1).
+func clockLine(s clock.Status, loc *time.Location) string {
+	if s.State == clock.Agreed {
+		return ""
+	}
+	return s.Line(loc)
 }
 
 // List and Call serve the question tools on each guest socket.
