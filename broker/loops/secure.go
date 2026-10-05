@@ -518,7 +518,7 @@ func (s *Guard) handle(ctx context.Context, f Finding, pause bool) (Record, erro
 	if f.Rule != nil && !s.cfg.FixturesLive {
 		rec.Fixture = "deferred"
 	} else if f.Rule != nil {
-		c := change.Case{ID: "loop2/" + f.ID, Class: change.ClassConfig, Input: f.Rule, Expect: []byte(FixtureOK)}
+		c := change.Case{ID: change.Loop2Fixture + f.ID, Class: change.ClassConfig, Input: f.Rule, Expect: []byte(FixtureOK)}
 		switch err := s.cfg.Pipeline.AddSecurityCase(c); {
 		case err == nil, errors.Is(err, change.ErrDuplicate):
 			rec.Fixture = c.ID

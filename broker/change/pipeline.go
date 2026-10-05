@@ -313,6 +313,9 @@ type state struct {
 	// Cuts counts each (candidate, case) pair's cut candidate-side runs
 	// (PE5b), so a restart cannot reset them.
 	Cuts map[string]cutCount `json:"cuts,omitempty"`
+	// Loop2Passed are the Loop 2 fixtures the active tree has passed:
+	// they must pass from then on (PS1).
+	Loop2Passed map[string]bool `json:"loop2_passed,omitempty"`
 }
 
 // notice is one broker digest line; Seen once the digest listed it.
@@ -1007,7 +1010,34 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 		delete(p.kept, k)    // kept sides are used up
 		delete(p.st.Cuts, k) // and so are the cut counts; saved with the verdict
 	}
+	// Loop 2 fixtures the active tree has never passed (PS1).
+	open := map[string]bool{}
+	for _, c := range set.security {
+		if strings.HasPrefix(c.ID, Loop2Fixture) && !p.st.Loop2Passed[c.ID] {
+			open[c.ID] = true
+		}
+	}
 	p.mu.Unlock()
+	// Which side is the active tree: the baseline at proposal, the
+	// candidate side in Recheck.
+	baseActive, nextActive := base.Hash() == active, next.Hash() == active
+	var passed []string
+	defer func() {
+		if len(passed) == 0 {
+			return
+		}
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		if p.st.Loop2Passed == nil {
+			p.st.Loop2Passed = map[string]bool{}
+		}
+		for _, id := range passed {
+			p.st.Loop2Passed[id] = true
+		}
+		if err := p.saveLocked(); err != nil && p.cfg.Logf != nil {
+			p.cfg.Logf("change: saving a passed Loop 2 fixture failed; it is marked again when next passed")
+		}
+	}()
 	cases := map[string]Case{}
 	var order []string
 	for _, cs := range [][]Case{set.heldOut, set.security} {
@@ -1037,6 +1067,16 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 			}
 		}
 		if c.Security {
+			if open[c.ID] && (pr.BaseOK && baseActive || pr.NextOK && nextActive) {
+				// The active tree passes it: must pass from now on.
+				passed = append(passed, c.ID)
+			}
+			switch {
+			case open[c.ID] && !pr.BaseOK && !pr.NextOK:
+				// An open finding the candidate leaves as it is: no
+				// regression, and no pass either (PS1).
+				continue
+			}
 			s.Security++
 			if pr.NextOK {
 				s.SecurityPassed++
@@ -1082,6 +1122,12 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 // OutageAlert is how many failed Recheck passes in a row the digest
 // reports.
 const OutageAlert = 3
+
+// Loop2Fixture prefixes Loop 2's regression fixture IDs (loops S5). Such
+// a fixture encodes a finding the active tree has now, so until the active
+// tree first passes it, it only must not regress; then it must pass for
+// good (loops PS1, C5).
+const Loop2Fixture = "loop2/"
 
 // strictness says which not-evaluated candidate results count as fails.
 type strictness struct{ heldOut, security bool }

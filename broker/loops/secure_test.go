@@ -652,7 +652,6 @@ func TestFixesCannotWeaken(t *testing.T) {
 		{"disables a check", change.Tree{"checks/advisory.json": []byte(`{"off":true}`)}, "LOOP-10"},
 		{"widens authority", change.Tree{"grants/mail.json": []byte(`{"send":"any"}`)}, "LOOP-10"},
 		{"edits the suite", change.Tree{"security/loop2.json": []byte(`[]`)}, "CHG-2"},
-		{"fails the new fixture", change.Tree{"config/facts.json": facts("3.0.12")}, "security suite"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			r := newGuardRig(t, b)
@@ -674,12 +673,22 @@ func TestFixesCannotWeaken(t *testing.T) {
 		})
 	}
 
-	// The fixture outlives the fix: a later candidate that brings the
-	// vulnerable version back is rejected by the pipeline itself.
+	// While the finding is open, the fixture only must not regress (PS1):
+	// the box already fails it, so a candidate that leaves it failing is
+	// not failed by it. The fixture outlives the fix: once the fix is
+	// adopted, a later candidate that brings the vulnerable version back
+	// is rejected by the pipeline itself.
 	r := newGuardRig(t, b)
 	r.pass(t)
-	rep, err := r.p.Propose(context.Background(), change.Candidate{Source: change.Local, Files: change.Tree{"config/facts.json": facts("3.0.1")}})
-	if err != nil || rep.State != change.StateRejected || rep.SecurityPassed == rep.Security {
+	rep, err := r.p.Propose(context.Background(), change.Candidate{Source: change.Local, Files: change.Tree{"config/facts.json": facts("3.0.12")}})
+	if err != nil || rep.Reason == "fails the security suite" {
+		t.Fatalf("a candidate leaving the open finding: %+v %v", rep, err)
+	}
+	if rep, err := r.p.Propose(context.Background(), change.Candidate{Source: change.Local, Files: change.Tree{"config/facts.json": facts("3.0.14")}}); err != nil || rep.State != change.StateAdopted {
+		t.Fatalf("the fix: %+v %v", rep, err)
+	}
+	rep, err = r.p.Propose(context.Background(), change.Candidate{Source: change.Local, Files: change.Tree{"config/facts.json": facts("3.0.1")}})
+	if err != nil || rep.State != change.StateRejected || rep.Reason != "fails the security suite" {
 		t.Fatalf("regressing candidate: %+v %v", rep, err)
 	}
 	// A duplicate fixture (the same finding after restart with a lost
