@@ -748,3 +748,107 @@ func TestOnlyTheNextPageIsAskedFor(t *testing.T) {
 		}
 	}
 }
+
+// SR2-5 (ADP-12: "a short or premium-rate code needs an owner-created
+// contact"): premium-rate numbers are refused like short codes.
+func TestPremiumRateNumbersAreRefused(t *testing.T) {
+	for _, n := range []string{"+19005550123", "+19765550123", "+449098790123", "+448712345678", "+499001234567", "+491371234567", "+33899123456", "+61190012345"} {
+		if !Premium(n) {
+			t.Errorf("%s is premium-rate", n)
+		}
+		if err := CheckRecipient(n, ownerNum, lineNum); err != ErrRecipient {
+			t.Errorf("%s: %v", n, err)
+		}
+	}
+	for _, n := range []string{shopNum, "+447700900123", "+4930123456", "+33612345678", "+61212345678", "+18005550123"} {
+		if Premium(n) {
+			t.Errorf("%s is not premium-rate", n)
+		}
+	}
+}
+
+// SR2-5 (security F1 and F2 on #164): on an account that dials without
+// the +, digits the provider may read as national or after an
+// international prefix are checked against the premium-rate list in
+// those forms, and ITU's shared-cost and satellite codes are refused.
+func TestPremiumRateNumbersDialedWithoutThePlusAreRefused(t *testing.T) {
+	for _, c := range []struct {
+		own    string
+		dialed []string
+		pass   []string
+	}{
+		{"+15550000300", []string{"9005551234", "19005551234", "9765551234", "01144909879012", "011881612345678"}, []string{"5550200001", "15550200001", "8005550123", "0114477009001"}},
+		{"+390212345678", []string{"899123456", "39899123456", "0039899123456", "892123456"}, []string{"3123456789", "0212345678"}},
+		{"+34912345678", []string{"806123456", "34806123456", "0034806123456", "905123456"}, []string{"612345678", "912345678"}},
+		{"+447700900300", []string{"09098790123", "9098790123", "00449098790123", "0870123456"}, []string{"07700900123", "02079460123", "00919876543210", "00971501234567"}},
+		{"+61212345678", []string{"0011449098790123", "1900123456"}, []string{"0412345678"}},
+		// A whole-country-code entry has no national reading (L3 nit).
+		{"+870773100000", []string{"870773112345"}, []string{"447700900123", "5550200001"}},
+	} {
+		for _, d := range c.dialed {
+			if !PremiumDialed(d, c.own) {
+				t.Errorf("%s from %s is premium-rate", d, c.own)
+			}
+		}
+		for _, d := range c.pass {
+			if PremiumDialed(d, c.own) {
+				t.Errorf("%s from %s is not premium-rate", d, c.own)
+			}
+		}
+	}
+	for _, n := range []string{"+979123456789", "+881612345678", "+882161234567", "+883510001234", "+870773112345"} {
+		if err := CheckRecipient(n, ownerNum, lineNum); err != ErrRecipient {
+			t.Errorf("%s: %v", n, err)
+		}
+	}
+}
+
+// SR2-5 (L3 SHOULD-1 on #159): a call spends the line's one budget like a
+// text, and calls have a lower cap of their own.
+func TestCallsSpendTheBudgetAndHaveTheirOwnCap(t *testing.T) {
+	var b Budget
+	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < CallsPerHour; i++ {
+		if err := b.TakeCall(fmt.Sprintf("+1555070%04d", i), now); err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+	}
+	if err := b.TakeCall("+15550799999", now); err != ErrLimited {
+		t.Fatalf("call past the cap: %v", err)
+	}
+	for i := CallsPerHour; i < PerHour; i++ {
+		if err := b.Take(fmt.Sprintf("+1555070%04d", i), now); err != nil {
+			t.Fatalf("text %d: %v", i, err)
+		}
+	}
+	if err := b.Take("+15550799999", now); err != ErrLimited {
+		t.Fatalf("calls and texts share the hour: %v", err)
+	}
+	// Calls to one number share its hourly cap with texts.
+	var c Budget
+	for i := 0; i < PerRecipientHour; i++ {
+		if err := c.TakeCall(shopNum, now.Add(time.Duration(i)*7*time.Hour)); err != nil {
+			t.Fatalf("spread call %d: %v", i, err)
+		}
+	}
+	var d Budget
+	for i := 0; i < PerRecipientHour-1; i++ {
+		d.Take(shopNum, now)
+	}
+	if err := d.TakeCall(shopNum, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.TakeCall(shopNum, now); err != ErrLimited {
+		t.Fatalf("per recipient: %v", err)
+	}
+	// The daily call cap.
+	var e Budget
+	for i := 0; i < CallsPerDay; i++ {
+		if err := e.TakeCall(fmt.Sprintf("+1555080%04d", i), now.Add(time.Duration(i)*20*time.Minute)); err != nil {
+			t.Fatalf("day call %d: %v", i, err)
+		}
+	}
+	if err := e.TakeCall("+15550899999", now.Add(CallsPerDay*20*time.Minute)); err != ErrLimited {
+		t.Fatalf("call past the day: %v", err)
+	}
+}
