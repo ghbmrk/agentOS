@@ -483,10 +483,10 @@ func TestReconcileDropsPausesTheGateNoLongerHolds(t *testing.T) {
 	if err := r.g.Reconcile(func(t Target) bool { return t.Name == "G3" }); err != nil {
 		t.Fatal(err)
 	}
+	r.reopen(t) // Reconcile saved
 	if d := strings.Join(r.g.Digest(), " "); strings.Contains(d, "Cleared: a.") || !strings.Contains(d, "Cleared: b.") {
 		t.Fatalf("digest after Reconcile: %q", d)
 	}
-	r.reopen(t) // Reconcile saved
 	b.snap.Advisories = []Advisory{{ID: "ADV-a", Package: "a", Fixed: "1.1", Severity: "low"},
 		{ID: "ADV-b", Package: "b", Fixed: "1.1", Severity: "low"}}
 	r.now = r.now.Add(7 * 24 * time.Hour)

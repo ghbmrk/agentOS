@@ -963,7 +963,7 @@ func TestAGuestCannotClaimTheLoop2Origin(t *testing.T) {
 		t.Fatalf("intent origin %q: %v", s.Intent.Origin, err)
 	}
 	p := map[string]any{"request_id": "o2", "account": "owner-mail", "action": "meta.grant.pause", "origin": "broker:loop2"}
-	if st, e := r.tool("m1", "effect_request", p); st.State == "succeeded" || st.State == "authorized" {
+	if st, e := r.tool("m1", "effect_request", p); st.State != "refused" || e != "" || !strings.Contains(st.Reason, "a guest cannot request them") {
 		t.Fatalf("pause: %+v %s", st, e)
 	}
 	if _, err := r.eng.Get("m1/o2"); err == nil {

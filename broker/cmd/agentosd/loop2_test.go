@@ -141,3 +141,23 @@ func TestAttachReconcilesLoop2Pauses(t *testing.T) {
 		t.Fatalf("a pause the gate does not hold is still listed: %q", dg)
 	}
 }
+
+// L3 on #173 (mutant R3): only a grant the gate holds paused stays
+// listed. A grant whose resume was journaled but not heard by Loop 2 (the
+// crash window) exists unpaused, and is dropped.
+func TestLoop2HeldIsOnlyAPausedGrant(t *testing.T) {
+	held := loop2Held([]grants.Grant{{ID: "G1", Paused: true}, {ID: "G2"}})
+	for _, c := range []struct {
+		t    loops.Target
+		want bool
+	}{
+		{loops.Target{Kind: "grant", Name: "G1"}, true},
+		{loops.Target{Kind: "grant", Name: "G2"}, false}, // resumed
+		{loops.Target{Kind: "grant", Name: "G3"}, false}, // revoked
+		{loops.Target{Kind: "executor", Name: "G1"}, false},
+	} {
+		if got := held(c.t); got != c.want {
+			t.Errorf("%+v: held %v, want %v", c.t, got, c.want)
+		}
+	}
+}

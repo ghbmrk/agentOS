@@ -98,3 +98,13 @@ func (n *loop2Notify) send(text string, _ bool) {
 		log.Printf("loop2: owner notice not sent: %v", err)
 	}
 }
+
+// loop2Held reports the targets the gate still holds paused: a grant that
+// exists and is paused. A resumed or revoked grant is not held.
+func loop2Held(gs []grants.Grant) func(loops.Target) bool {
+	held := map[string]bool{}
+	for _, gr := range gs {
+		held[gr.ID] = gr.Paused
+	}
+	return func(t loops.Target) bool { return t.Kind == "grant" && held[t.Name] }
+}

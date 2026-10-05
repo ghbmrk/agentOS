@@ -408,12 +408,9 @@ func (l *learning) attach(ctx context.Context, d *daemon.Daemon) {
 	if g := d.Gate(); g != nil {
 		l.contain.gate.Store(&pauseGateBox{g})
 		// The gate has replayed its journal: Loop 2 drops any pause that
-		// ended while it could not hear it (L3 S1 on #169).
-		held := map[string]bool{}
-		for _, gr := range g.Grants() {
-			held[gr.ID] = gr.Paused
-		}
-		if err := l.guard.Reconcile(func(t loops.Target) bool { return t.Kind == "grant" && held[t.Name] }); err != nil {
+		// ended while it could not hear it (L3 S1 on #169). This runs
+		// before sched.Run below, so no pass sees the stale list.
+		if err := l.guard.Reconcile(loop2Held(g.Grants())); err != nil {
 			log.Printf("loop2: an ended pause stays listed: %v", err)
 		}
 	}
