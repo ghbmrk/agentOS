@@ -260,10 +260,11 @@ func build(kind skill.Kind, id string, ts, implicit []*Trajectory, allSlots bool
 		var varies [][]byte
 		for _, ls := range others {
 			if l := ls[li]; l.key() == l0.key() && l.kind == l0.kind {
-				// An effect target or authority field stays literal
-				// unless explicit runs vary it: an input there widens
-				// what the skill can do (arbitrator on #109).
-				if !authority(l0) {
+				// Only a content field may widen: a target or authority
+				// field stays literal unless explicit runs vary it, since
+				// an input there widens what the skill can do
+				// (arbitrator on #109).
+				if content(l0) {
 					constant = constant && bytes.Equal(l.val, l0.val)
 				}
 				varies = append(varies, l.val)
@@ -294,28 +295,24 @@ func build(kind skill.Kind, id string, ts, implicit []*Trajectory, allSlots bool
 
 var nonName = regexp.MustCompile(`[^a-z0-9_]+`)
 
-// authorityKeys name parameters that pick an effect's target or authority:
-// a recipient, destination, account, path or amount.
-var authorityKeys = map[string]bool{
-	"to": true, "cc": true, "bcc": true, "recipient": true, "recipients": true, "address": true, "email": true,
-	"destination": true, "dest": true, "target": true, "url": true, "folder": true, "calendar": true,
-	"account": true, "path": true, "file": true, "amount": true, "currency": true, "price": true, "total": true,
+// contentKeys name parameters that hold an item's content rather than its
+// target or authority. Only these may an implicit run widen into an input
+// (arbitrator on #109): an allowlist, so a target field no list names
+// (a phone number, a host, a channel) stays literal.
+var contentKeys = map[string]bool{
+	"subject": true, "body": true, "title": true, "note": true, "notes": true, "text": true,
+	"query": true, "message": true, "summary": true, "description": true, "comment": true,
 }
 
-// authority reports whether a leaf is an effect target or authority field:
-// a recipient, a parameter named like one (anywhere on its path), or an
-// email-shaped value.
-func authority(l leaf) bool {
-	if l.path == nil {
-		return true
-	}
-	for _, k := range l.path {
-		if authorityKeys[strings.ToLower(k)] {
-			return true
-		}
+// content reports whether a leaf is a content field: a parameter whose own
+// key is a content key, holding a value that is not email-shaped.
+// Recipients are never content.
+func content(l leaf) bool {
+	if l.path == nil || !contentKeys[strings.ToLower(l.path[len(l.path)-1])] {
+		return false
 	}
 	s, ok := l.raw.(string)
-	return ok && emailRE.MatchString(s)
+	return !ok || !emailRE.MatchString(s)
 }
 
 // slotFor names and types an input from its leaf's values in every run.
