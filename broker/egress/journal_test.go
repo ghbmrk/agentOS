@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -65,5 +66,39 @@ func TestADP10DenialFloodsAreCoalesced(t *testing.T) {
 	j.Egress(Event{Machine: "m1", Status: 403, Reason: "no such adapter"})
 	if n := rec.notes[len(rec.notes)-1]; len(rec.notes) != 5 || n.Suppressed != 999 {
 		t.Fatalf("after the window: %+v", rec.notes)
+	}
+}
+
+// TestADP10DenialReasonsQuoteGuestContent pins the convention coalescing
+// relies on: a body-rule denial reason carries request content only in a
+// quoted part, so its class (the part before any quote) never varies with
+// what the guest sends.
+func TestADP10DenialReasonsQuoteGuestContent(t *testing.T) {
+	const mark = "zq9mark"
+	bodies := []string{
+		`{"` + mark + `":1} x`,
+		`{"background":"` + mark + `"}`,
+		`{"web_search_options":{"` + mark + `":1}}`,
+		`{"tools":"` + mark + `"}`,
+		`{"tools":["` + mark + `"]}`,
+		`{"tools":[{"type":"` + mark + `"}]}`,
+		`{"messages":[{"content":[{"image_url":{"url":"https://` + mark + `.example/"}}]}]}`,
+		`["` + mark + `"]`,
+	}
+	for _, a := range []Adapter{OpenAI("k"), Anthropic("k")} {
+		for _, op := range a.Operations {
+			if op.Body == nil {
+				continue
+			}
+			for _, b := range bodies {
+				_, err := op.Body.apply([]byte(b), false)
+				if err == nil {
+					continue
+				}
+				if strings.Contains(reasonClass(err.Error()), mark) {
+					t.Errorf("%s %s: reason %q carries request content outside quotes", a.Name, op.Name, err)
+				}
+			}
+		}
 	}
 }

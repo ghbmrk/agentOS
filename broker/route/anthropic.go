@@ -428,10 +428,13 @@ func (anthropic) Stream(dst io.Writer, flush func(), src io.Reader, class string
 		chars   int64           // content and tool-argument characters seen
 		tools   = map[int]int{} // Messages block index -> chat tool call index
 	)
-	complete := false
+	// complete: the stream ended normally and message_delta reported the
+	// final output count (message_start's is a placeholder), so the
+	// usage is authoritative for the meter.
+	complete, final := false, false
 	result := func() Usage {
 		u := usage.usage()
-		u.OutputChars, u.Complete = chars, complete
+		u.OutputChars, u.Complete = chars, complete && final
 		return u
 	}
 	send := func(v any) error {
@@ -502,6 +505,7 @@ func (anthropic) Stream(dst io.Writer, flush func(), src io.Reader, class string
 		case "message_delta":
 			if ev.Usage != nil {
 				usage.merge(*ev.Usage)
+				final = final || ev.Usage.OutputTokens > 0
 			}
 			if ev.Delta != nil && ev.Delta.StopReason != "" {
 				err = chunk(map[string]any{}, finishReason(ev.Delta.StopReason))

@@ -89,6 +89,7 @@ type usage struct {
 	chars         int64 // content and argument characters seen
 	unread        int64 // bytes that could not be examined
 	done          bool  // the stream reached its end marker
+	final         bool  // output was reported after the start of the message
 }
 
 func (u *usageWriter) Header() http.Header { return u.w.Header() }
@@ -208,7 +209,9 @@ func (u *usageWriter) used(in int64, rep *Usage) int64 {
 		complete = u.u.done
 	}
 	counted := Tokens(u.u.chars + u.u.unread)
-	reported, sawIn, sawOut, outRep := u.u.in, u.u.sawIn, u.u.sawOut, u.u.out
+	// Usage is authoritative only when its output count came after the
+	// message started (not message_start's placeholder).
+	reported, sawIn, sawOut, outRep, final := u.u.in, u.u.sawIn, u.u.sawOut, u.u.out, u.u.final
 	if rep != nil {
 		complete = rep.Complete
 		counted = max(counted, Tokens(max(rep.OutputChars, 0)))
@@ -218,12 +221,13 @@ func (u *usageWriter) used(in int64, rep *Usage) int64 {
 			reported = max(rep.Input, 0) + int64(math.Ceil(float64(max(rep.CacheRead, 0))*r+float64(max(rep.CacheWrite, 0))*w))
 			outRep = max(rep.Output, 0)
 		}
+		final = true
 	}
 	if sawIn {
 		in = reported
 	}
 	out := counted
-	if sawOut && complete {
+	if sawOut && complete && final {
 		out = outRep
 	} else if sawOut {
 		out = max(outRep, counted)
@@ -238,9 +242,13 @@ func (u *usage) doc(b []byte) bool {
 	if len(b) == 0 || b[0] != '{' || json.Unmarshal(b, &d) != nil {
 		return false
 	}
-	u.report(d["usage"])
+	if u.report(d["usage"]) {
+		u.final = true
+	}
 	if msg, ok := d["message"].(map[string]any); ok {
-		u.report(msg["usage"]) // Anthropic message_start
+		// Anthropic message_start: its output count is a placeholder
+		// until message_delta reports the real one.
+		u.report(msg["usage"])
 	}
 	if d["type"] == "message_stop" {
 		u.done = true // Anthropic's end of stream
@@ -264,10 +272,10 @@ const (
 // report reads a usage object. OpenAI: prompt_tokens (cached_tokens among
 // them), completion_tokens (reasoning included). Anthropic: input_tokens
 // plus cache reads and writes, output_tokens (cumulative in a stream).
-func (u *usage) report(v any) {
+func (u *usage) report(v any) (sawOut bool) {
 	m, ok := v.(map[string]any)
 	if !ok {
-		return
+		return false
 	}
 	num := func(m map[string]any, k string) (float64, bool) {
 		f, ok := m[k].(float64)
@@ -302,6 +310,7 @@ func (u *usage) report(v any) {
 	if okOut {
 		u.out, u.sawOut = max(u.out, int64(out)), true
 	}
+	return okOut
 }
 
 // contentKeys hold model output: text, tool arguments, and reasoning.
