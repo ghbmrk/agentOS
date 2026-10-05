@@ -83,6 +83,21 @@ func New(p *at.Profile, model string, line *modem.Line, tick time.Duration) *Dev
 	return d
 }
 
+// Reopen is the same modem after its port was closed and opened again:
+// a new port, with the SIM and the stored texts kept.
+func (d *Device) Reopen() *Device {
+	n := New(d.prof, d.model, d.line, d.tick)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for i, p := range d.store {
+		n.store[i] = p
+	}
+	n.nextIdx, n.iccid, n.sim, n.uac = d.nextIdx, d.iccid, d.sim, d.uac
+	return n
+}
+
 // Port is the driver's end of the AT port.
 func (d *Device) Port() io.ReadWriteCloser { return d.host }
 

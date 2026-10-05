@@ -344,3 +344,34 @@ func TestTheOwnerSocketIsTheBridgeGroups(t *testing.T) {
 		t.Fatalf("the bridge's uid was refused: %+v", r)
 	}
 }
+
+// L3 on #170 (A15): the bridge's ops end when the bridge hangs up, so the
+// outbox's long poll hands no text to a dead bridge.
+func TestTheBridgeOpsEndWhenTheBridgeHangsUp(t *testing.T) {
+	dir := t.TempDir()
+	ended := make(chan error, 1)
+	cancel, _ := startWith(t, dir, func(c *Config) {
+		c.OwnerOps = map[string]sockets.Handler{
+			"outbox": func(ctx context.Context, _ sockets.Peer, _ json.RawMessage) (any, error) {
+				select {
+				case <-ctx.Done():
+					ended <- ctx.Err()
+				case <-time.After(3 * time.Second):
+					ended <- nil
+				}
+				return nil, nil
+			},
+		}
+	})
+	defer cancel()
+	c, err := net.Dial("unix", filepath.Join(dir, "run", OwnerSocket))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Write([]byte(`{"op":"outbox","args":{}}` + "\n"))
+	time.Sleep(50 * time.Millisecond)
+	c.Close()
+	if err := <-ended; err == nil {
+		t.Fatal("the poll ran on after the bridge hung up")
+	}
+}

@@ -407,7 +407,11 @@ func TestATextOfferedAgainIsTakenOnce(t *testing.T) {
 			t.Fatalf("try %d: %v", i+1, err)
 		}
 	}
-	<-l.Inbox()
+	select {
+	case <-l.Inbox():
+	case <-time.After(5 * time.Second):
+		t.Fatal("not delivered")
+	}
 	select {
 	case m := <-l.Inbox():
 		t.Fatalf("delivered twice: %+v", m)
@@ -417,13 +421,18 @@ func TestATextOfferedAgainIsTakenOnce(t *testing.T) {
 	if err := call(t, l, bridgeproto.OpInbound, in, nil); err == nil {
 		t.Fatal("an oversized ID was taken")
 	}
-	clk.add(3 * time.Minute)
+	clk.add(IDTTL + time.Minute)
 	in.ID = "t1"
 	if err := call(t, l, bridgeproto.OpInbound, in, nil); err != nil {
 		t.Fatal(err)
 	}
-	if m := <-l.Inbox(); m.Text != "123456" {
-		t.Fatalf("delivered %+v", m)
+	select {
+	case m := <-l.Inbox():
+		if m.Text != "123456" {
+			t.Fatalf("delivered %+v", m)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("an ID past IDTTL was not taken")
 	}
 }
 
@@ -501,5 +510,22 @@ func TestRecoveryTextUsesTheBoxsZone(t *testing.T) {
 	o := Outage{time.Date(2026, 10, 5, 20, 5, 0, 0, time.UTC), time.Date(2026, 10, 5, 22, 20, 0, 0, time.UTC), 1, 0}
 	if got, want := recoveryText(o, zone), "I couldn't text you from 13:05 to 15:20. 1 text didn't reach you."; got != want {
 		t.Fatalf("%q", got)
+	}
+}
+
+// L3 on #170: SendWait runs from when the bridge takes a text, not from
+// when it was queued: a text behind a slow one is not reported down while
+// it can still go.
+func TestSendWaitRunsFromHandOff(t *testing.T) {
+	l, _ := rig(t) // SendWait 2 s
+	sendAsync(l, ownerNum, "slow")
+	poll(t, l)
+	done := sendAsync(l, ownerNum, "next")
+	time.Sleep(1500 * time.Millisecond)
+	it := poll(t, l)
+	time.Sleep(1000 * time.Millisecond) // 2.5 s after it was queued
+	call(t, l, bridgeproto.OpSent, bridgeproto.Sent{ID: it.ID, Code: bridgeproto.CodeOK}, nil)
+	if err := <-done; err != nil {
+		t.Fatalf("a text sent within SendWait of hand-off: %v", err)
 	}
 }

@@ -41,7 +41,7 @@ func TestTheUnitIsHardened(t *testing.T) {
 		"PrivateIPC":              {"yes"},
 		"RemoveIPC":               {"yes"},
 		"TemporaryFileSystem":     {"/var/lib/agentos:ro"},
-		"BindReadOnlyPaths":       {"/var/lib/agentos/modem-roles.json"},
+		"BindReadOnlyPaths":       {"-/var/lib/agentos/modem"},
 	} {
 		if strings.Join(set[k], "|") != strings.Join(want, "|") {
 			t.Errorf("%s = %q, want %q", k, set[k], want)

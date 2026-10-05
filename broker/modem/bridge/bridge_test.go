@@ -42,8 +42,32 @@ type rig struct {
 	// failFirst names ops whose first call fails, as a dropped
 	// connection does.
 	failFirst map[string]bool
-	cancel    context.CancelFunc
-	done      chan error
+	// refuse is how many more inbound offers fail with refusal.
+	refuse  int
+	refusal string
+	cancel  context.CancelFunc
+	done    chan error
+	dir     string
+	srv     *sockets.Server
+	srvStop context.CancelFunc
+	last    *atsim.Device
+}
+
+// startAgentosd serves owner.sock with a fresh Link, as agentosd does when
+// it starts: the line reads as down until the bridge reports it.
+func (r *rig) startAgentosd() {
+	r.t.Helper()
+	r.link = modemlink.New(modemlink.Config{Owner: ownerNum, SendWait: 5 * time.Second, PollWait: 200 * time.Millisecond})
+	ctx, cancel := context.WithCancel(context.Background())
+	r.srv, r.srvStop = &sockets.Server{Dir: r.dir}, cancel
+	if err := r.srv.Start(ctx, sockets.Endpoint{Name: "owner.sock", Peer: sockets.Peer{Kind: "owner"}, Ops: r.link.Ops(), MaxConns: 8, HangupOps: map[string]bool{bridgeproto.OpOutbox: true}}); err != nil {
+		r.t.Fatal(err)
+	}
+}
+
+func (r *rig) stopAgentosd() {
+	r.srvStop()
+	r.srv.Wait()
 }
 
 func newRig(t *testing.T, iccid func(*atsim.Device) string) *rig {
@@ -58,14 +82,11 @@ func newRigWith(t *testing.T, iccid func(*atsim.Device) string, preload func(*at
 		r.failFirst[op] = true
 	}
 	r.phone = r.carrier.Line(ownerNum)
-	r.link = modemlink.New(modemlink.Config{Owner: ownerNum, SendWait: 5 * time.Second, PollWait: 200 * time.Millisecond})
 	dir := t.TempDir()
+	r.dir = dir
+	r.startAgentosd()
 	ctx, cancel := context.WithCancel(context.Background())
 	r.cancel = cancel
-	srv := &sockets.Server{Dir: dir}
-	if err := srv.Start(ctx, sockets.Endpoint{Name: "owner.sock", Peer: sockets.Peer{Kind: "owner"}, Ops: r.link.Ops(), MaxConns: 8, HangupOps: map[string]bool{bridgeproto.OpOutbox: true}}); err != nil {
-		t.Fatal(err)
-	}
 	r.iccid = iccid(atsim.New(at.SIMCom, "SIMCOM_SIM7600G-H", modem.NewCarrier().Line(boxNum), time.Millisecond))
 	cfg := bridge.Config{
 		Agentosd: &flaky{r: r, c: bridgeclient.Client{Path: filepath.Join(dir, "owner.sock")}},
@@ -78,7 +99,7 @@ func newRigWith(t *testing.T, iccid func(*atsim.Device) string, preload func(*at
 			}
 			// Each open is a fresh port, as a reopened serial device is.
 			dev := r.newDevice()
-			return at.Open(ctx, at.Config{Profile: at.SIMCom, Port: dev.Port(), Number: boxNum, CountryCode: "1", Owner: ownerNum, CheckSIM: check,
+			return at.Open(ctx, at.Config{Profile: at.SIMCom, Port: dev.Port(), Number: boxNum, CountryCode: "1", Owner: ownerNum, CheckSIM: check, KeepUntilAck: true,
 				Poll: 5 * time.Millisecond, Sweep: 20 * time.Millisecond})
 		},
 		OwnerICCID:   func() string { r.mu.Lock(); defer r.mu.Unlock(); return r.iccid },
@@ -93,7 +114,7 @@ func newRigWith(t *testing.T, iccid func(*atsim.Device) string, preload func(*at
 		if err := <-r.done; err != nil && !errors.Is(err, context.Canceled) {
 			t.Errorf("bridge: %v", err)
 		}
-		srv.Wait()
+		r.stopAgentosd()
 	})
 	return r
 }
@@ -112,19 +133,36 @@ func (f *flaky) Call(ctx context.Context, op string, args, out any) error {
 	f.r.mu.Lock()
 	fail := f.r.failFirst[op]
 	delete(f.r.failFirst, op)
+	refused := ""
+	if op == bridgeproto.OpInbound && f.r.refuse > 0 {
+		f.r.refuse--
+		refused = f.r.refusal
+	}
 	f.r.mu.Unlock()
 	if fail {
 		return errors.New("connection reset")
+	}
+	if refused != "" {
+		return errors.New("bridgeclient: " + refused)
 	}
 	return f.c.Call(ctx, op, args, out)
 }
 
 func (r *rig) newDevice() *atsim.Device {
-	dev := atsim.New(at.SIMCom, "SIMCOM_SIM7600G-H", r.carrier.Line(boxNum), time.Millisecond)
-	if r.preload != nil {
-		r.preload(dev)
+	r.mu.Lock()
+	last := r.last
+	r.mu.Unlock()
+	var dev *atsim.Device
+	if last != nil {
+		dev = last.Reopen() // the same modem: its stored texts kept
+	} else {
+		dev = atsim.New(at.SIMCom, "SIMCOM_SIM7600G-H", r.carrier.Line(boxNum), time.Millisecond)
+		if r.preload != nil {
+			r.preload(dev)
+		}
 	}
 	r.mu.Lock()
+	r.last = dev
 	r.devs = append(r.devs, dev)
 	r.mu.Unlock()
 	return dev
@@ -297,5 +335,100 @@ func TestAWrongSIMKeepsItsStoredTexts(t *testing.T) {
 		if n := d.Stored(); n != 1 {
 			t.Fatalf("device %d keeps %d stored texts, want 1", i, n)
 		}
+	}
+}
+
+// gets waits for agentosd's owner channel to receive want.
+func (r *rig) gets(want string) {
+	r.t.Helper()
+	select {
+	case m := <-r.link.Inbox():
+		if m.From != ownerNum || m.Text != want {
+			r.t.Fatalf("delivered %+v, want %q", m, want)
+		}
+	case <-time.After(5 * time.Second):
+		r.t.Fatalf("%q did not reach agentosd", want)
+	}
+}
+
+func (r *rig) stored() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.last.Stored()
+}
+
+// L3 on #170 (MUST-A): a text agentosd keeps refusing as paused is
+// offered again for as long as the line is ok, the line being reported
+// again before each offer, and stays on the modem until agentosd takes
+// it.
+func TestATextRefusedManyTimesIsStillDelivered(t *testing.T) {
+	r := newRig(t, recorded)
+	r.waitNote(func(n string) bool { return n == "" })
+	r.mu.Lock()
+	r.refuse, r.refusal = 20, bridgeproto.RefusedPaused
+	r.mu.Unlock()
+	if err := r.phone.Send(boxNum, "STOP"); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		r.mu.Lock()
+		left := r.refuse
+		r.mu.Unlock()
+		if left == 10 {
+			if n := r.stored(); n != 1 {
+				t.Fatalf("%d stored while agentosd refuses, want 1", n)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the text was not offered again")
+		}
+	}
+	r.gets("STOP")
+	for deadline := time.Now().Add(5 * time.Second); r.stored() != 0; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("a taken text was left on the modem")
+		}
+	}
+}
+
+// L3 on #170 (MUST-A): a STOP sent while agentosd restarts reaches the
+// restarted agentosd, which reads the line as down until the bridge says
+// otherwise.
+func TestAStopSentWhileAgentosdRestartsReachesIt(t *testing.T) {
+	r := newRig(t, recorded)
+	r.waitNote(func(n string) bool { return n == "" })
+	r.stopAgentosd()
+	if err := r.phone.Send(boxNum, "STOP"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond) // offers fail meanwhile
+	r.startAgentosd()
+	r.gets("STOP")
+}
+
+// L3 on #170 (MUST-A): a text the bridge had not handed over when it
+// stopped (here, the modem dropped while agentosd was unreachable) stays
+// on the modem and is delivered after the next open, once.
+func TestATextInHandWhenTheModemDropsIsDeliveredAfterReopen(t *testing.T) {
+	r := newRig(t, recorded)
+	r.waitNote(func(n string) bool { return n == "" })
+	r.mu.Lock()
+	r.refuse, r.refusal = 1<<30, "connection reset"
+	r.mu.Unlock()
+	if err := r.phone.Send(boxNum, "STOP"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	r.mu.Lock()
+	dev := r.last
+	r.refuse = 0
+	r.mu.Unlock()
+	dev.Unplug()
+	r.gets("STOP")
+	select {
+	case m := <-r.link.Inbox():
+		t.Fatalf("delivered twice: %+v", m)
+	case <-time.After(200 * time.Millisecond):
 	}
 }

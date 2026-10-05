@@ -30,7 +30,7 @@ import (
 func main() {
 	var ownerSock, roles, boxNumber, ownerNumber, countryCode, sysRoot string
 	flag.StringVar(&ownerSock, "owner-sock", "/run/agentos/owner.sock", "agentosd's owner socket (agentosd -sockets)")
-	flag.StringVar(&roles, "roles", "/var/lib/agentos/modem-roles.json", "the lines' SIM serials recorded at setup")
+	flag.StringVar(&roles, "roles", "/var/lib/agentos/modem/roles.json", "the lines' SIM serials recorded at setup")
 	// The numbers default from the environment (the unit's EnvironmentFile),
 	// so they are not on the command line for any process to read.
 	flag.StringVar(&boxNumber, "box-number", os.Getenv("BOX_NUMBER"), "the owner line's own number, E.164 (AT+CNUM is tried when empty); default $BOX_NUMBER")
@@ -56,7 +56,7 @@ func main() {
 			if err != nil {
 				return nil, err
 			}
-			m, err := at.Open(ctx, at.Config{Profile: f.Profile, Port: port, Number: boxNumber, CountryCode: countryCode, Owner: ownerNumber, CheckSIM: check})
+			m, err := at.Open(ctx, at.Config{Profile: f.Profile, Port: port, Number: boxNumber, CountryCode: countryCode, Owner: ownerNumber, CheckSIM: check, KeepUntilAck: true})
 			if err != nil {
 				port.Close()
 				return nil, err

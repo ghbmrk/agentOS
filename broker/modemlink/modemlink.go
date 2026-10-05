@@ -37,6 +37,9 @@ const (
 	// Silent is how long the bridge may say nothing before the owner line
 	// reads as down: two missed state reports and a margin.
 	Silent = 2*bridgeproto.StateEvery + 30*time.Second
+	// IDTTL is how long a taken inbound ID is remembered: past a bridge
+	// restart, after which the modem gives up an untaken text again.
+	IDTTL = 10 * time.Minute
 	// MaxQueued caps the texts waiting for the bridge.
 	MaxQueued = 64
 	// InboundPerMinute caps texts handed in per minute (security S-B4).
@@ -81,7 +84,8 @@ type Outage struct {
 
 type item struct {
 	bridgeproto.Item
-	result chan string // nil: nobody waits (the recovery text)
+	result chan string   // nil: nobody waits (the recovery text)
+	handed chan struct{} // closed when a poll takes it; nil with result
 }
 
 // Link is agentosd's end of the modem bridge.
@@ -101,7 +105,7 @@ type Link struct {
 	dropped     bool
 	others      int
 	timedOut    int
-	inboundIDs  map[string]time.Time // taken inbound IDs, for a minute past their last try
+	inboundIDs  map[string]time.Time // taken inbound IDs, kept for IDTTL
 	inboundTime []time.Time
 	// okSince is when the owner line last became usable. A poll that
 	// began before it may be a dead bridge's connection, so it is handed
@@ -233,12 +237,27 @@ func (l *Link) send(to, text string, request bool) error {
 		l.mu.Unlock()
 		return modem.ErrDown
 	}
-	it := &item{Item: bridgeproto.Item{ID: newID(), Line: bridgeproto.LineOwner, To: l.cfg.Owner, Text: text}, result: make(chan string, 1)}
+	it := &item{Item: bridgeproto.Item{ID: newID(), Line: bridgeproto.LineOwner, To: l.cfg.Owner, Text: text},
+		result: make(chan string, 1), handed: make(chan struct{})}
+	ahead := len(l.queue) + len(l.out)
 	l.queue = append(l.queue, it)
 	l.wakeLocked()
 	l.mu.Unlock()
-	t := time.NewTimer(l.cfg.SendWait)
+	// SendWait runs from when the bridge takes the text: the bridge sends
+	// one at a time, so the texts ahead may each take up to SendWait (L3
+	// on #170).
+	t := time.NewTimer(time.Duration(ahead+1) * l.cfg.SendWait)
 	defer t.Stop()
+	select {
+	case <-it.handed:
+		t.Reset(l.cfg.SendWait)
+	case <-t.C:
+		l.mu.Lock()
+		l.dropLocked(it)
+		l.timedOut++
+		l.mu.Unlock()
+		return modem.ErrDown
+	}
 	select {
 	case code := <-it.result:
 		if code == bridgeproto.CodeOK {
@@ -353,7 +372,7 @@ func (l *Link) inbound(_ context.Context, _ sockets.Peer, args json.RawMessage) 
 		return nil, errPaused // swapped or unbound: not the owner's SIM
 	}
 	for id, t := range l.inboundIDs {
-		if now.Sub(t) > 2*time.Minute {
+		if now.Sub(t) > IDTTL {
 			delete(l.inboundIDs, id)
 		}
 	}
@@ -409,6 +428,9 @@ func (l *Link) outbox(ctx context.Context, _ sockets.Peer, _ json.RawMessage) (a
 			it := l.queue[0]
 			l.queue = l.queue[1:]
 			l.out[it.ID] = it
+			if it.handed != nil {
+				close(it.handed)
+			}
 			l.mu.Unlock()
 			return map[string]any{"item": it.Item}, nil
 		}

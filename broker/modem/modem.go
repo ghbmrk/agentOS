@@ -28,6 +28,10 @@ type SMS struct {
 	// 101) rather than a phone number. Such an ID can spell anything,
 	// including the owner's number, so it is never the owner (CH-1).
 	Alphanumeric bool
+	// Ref, when set, names a text the driver keeps until the taker acks
+	// it (at.Config.KeepUntilAck); a re-read of the same text has the same
+	// Ref.
+	Ref string
 }
 
 // Modem is one SIM: it sends texts from its own number and delivers what
