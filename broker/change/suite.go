@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/journal"
@@ -88,6 +89,11 @@ var (
 func (p *Pipeline) AddTaskCase(c Case) error {
 	if c.ID == "" || c.Task == "" || c.Security {
 		return fmt.Errorf("%w: a task case needs an id and a task", ErrProvenance)
+	}
+	if strings.HasPrefix(c.ID, "goal:") {
+		// splitKey would hash it like that goal's cases, letting whoever
+		// names the case put it beside a goal it does not belong to.
+		return fmt.Errorf("%w: a case id may not start with goal:", ErrProvenance)
 	}
 	st, err := p.j.Get(c.Task)
 	if err != nil {
