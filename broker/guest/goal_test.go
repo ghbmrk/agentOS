@@ -203,3 +203,22 @@ func TestOP1LastGoalEndsOnDeliveryOrQuiet(t *testing.T) {
 		t.Fatalf("a new delivery did not end the last goal: %q", g)
 	}
 }
+
+// TestOP1GuestCannotNameAGoal: a goal the guest supplies, at the top level
+// or in params, is ignored; the broker's stamp stands.
+func TestOP1GuestCannotNameAGoal(t *testing.T) {
+	r := newRig(t, nil)
+	r.client("m1")
+	a := r.deliver("m1", "book the dentist")
+	r.fetch("m1")
+	args := send("r1")
+	args["goal_id"] = "owner:forged"
+	args["GoalID"] = "owner:forged"
+	args["params"] = map[string]any{"text": "hello", "goal_id": "owner:forged", "GoalID": "owner:forged"}
+	if st, e := r.tool("m1", "effect_request", args); st.State != "succeeded" {
+		t.Fatalf("%+v %s", st, e)
+	}
+	if g := r.goalOf("m1/r1"); g != GoalID(a) {
+		t.Fatalf("goal %q, want the broker's %q", g, GoalID(a))
+	}
+}
