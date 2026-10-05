@@ -802,6 +802,9 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 	}
 	ck := p.candidateKey(base, next)
 	p.mu.Lock()
+	// The active tree when the evaluation starts: if it moves on before
+	// the evaluation is cut, nothing finished is kept (PE7).
+	active := p.st.Active.Hash()
 	mayRun := p.exempt[ck] < MaxExempt || IsIdle(ctx) // proposeInner took the turn
 	p.mu.Unlock()
 	if !mayRun {
@@ -945,9 +948,10 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 			saveErr = p.saveLocked()
 		}
 		// Every side that finished is kept, so a result once seen is
-		// never run again.
+		// never run again; none when the active tree moved on meanwhile,
+		// since dropOldBasesLocked already ran for that move (PE7).
 		for id, pr := range res {
-			if pr.baseDone || pr.nextDone {
+			if (pr.baseDone || pr.nextDone) && active == p.st.Active.Hash() {
 				pr.base, pr.cand = base.Hash(), ck
 				p.keepLocked(keys[id], pr)
 			}

@@ -257,14 +257,25 @@ func TestOwnerChatToASleepingAgent(t *testing.T) {
 // preempted evaluations are kept 36 h, past the next night's window;
 // elsewhere the 12 h default holds.
 func TestSleepModeKeepsEvaluationsAcrossNights(t *testing.T) {
-	if got := sleepResumeFor(3000, 600, 1536, 1024); got != 36*time.Hour {
-		t.Fatalf("no room: %v", got)
-	}
-	if got := sleepResumeFor(4096, 0, 1536, 1024); got != 0 {
-		t.Fatalf("room for both: %v", got)
-	}
-	if got := sleepResumeFor(3000, 600, 1536, 0); got != 0 {
-		t.Fatalf("no replay machine: %v", got)
+	for _, tc := range []struct {
+		capacity, headroom, agent, replay int64
+		asleep                            bool
+	}{
+		{3000, 600, 1536, 1024, true}, // no room for both
+		{4096, 0, 1536, 1024, false},  // room for both
+		{3000, 600, 1536, 0, false},   // no replay machine: nothing to sleep for (L3 on #153)
+	} {
+		asleep := sleepMode(tc.capacity, tc.headroom, tc.agent, tc.replay)
+		if asleep != tc.asleep {
+			t.Fatalf("%+v: sleep mode %v", tc, asleep)
+		}
+		want := time.Duration(0)
+		if tc.asleep {
+			want = 36 * time.Hour
+		}
+		if got := sleepResumeFor(asleep); got != want {
+			t.Fatalf("%+v: resume %v, want %v", tc, got, want)
+		}
 	}
 }
 

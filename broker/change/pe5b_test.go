@@ -195,10 +195,12 @@ func TestCutCountsExpireAndAreCapped(t *testing.T) {
 		after     time.Duration
 		kept      bool
 	}{
-		{0, ResumeFor - time.Minute, true},
-		{0, ResumeFor + time.Minute, false},
-		{36 * time.Hour, 30 * time.Hour, true},
-		{36 * time.Hour, 37 * time.Hour, false},
+		// The default window is 12 h, pinned as a literal (L3 on #153):
+		// kept at exactly the window, gone a nanosecond past it.
+		{0, 12 * time.Hour, true},
+		{0, 12*time.Hour + time.Nanosecond, false},
+		{36 * time.Hour, 36 * time.Hour, true},
+		{36 * time.Hour, 36*time.Hour + time.Nanosecond, false},
 	} {
 		at := now
 		p := &Pipeline{cfg: Config{Now: func() time.Time { return at }, ResumeFor: tc.resumeFor}}
@@ -209,6 +211,9 @@ func TestCutCountsExpireAndAreCapped(t *testing.T) {
 		}
 	}
 
+	if maxCuts != 1024 {
+		t.Fatalf("maxCuts %d, want 1024", maxCuts)
+	}
 	at := now
 	p := &Pipeline{cfg: Config{Now: func() time.Time { return at }}}
 	for i := 0; i <= maxCuts; i++ {

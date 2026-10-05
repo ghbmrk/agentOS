@@ -490,6 +490,8 @@ type keptCounter interface {
 	KeptPairs(change.Candidate) int
 }
 
+var _ keptCounter = (*change.Pipeline)(nil)
+
 // finishFirst puts the hypotheses whose kept candidate has kept pairs
 // first, most pairs first, so the candidate closest to a verdict is
 // finished before another starts (PE7); the rest keep their order.

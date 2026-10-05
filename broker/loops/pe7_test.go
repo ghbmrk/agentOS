@@ -118,3 +118,43 @@ func TestAKeptFixLastsTheConfiguredResumeFor(t *testing.T) {
 		t.Fatalf("%d fixer calls a day later, want 1: the kept fix was not reused", fx.calls)
 	}
 }
+
+// pairsPipeline is a real pipeline whose kept pairs are counted by the
+// candidate's "k" file.
+type pairsPipeline struct {
+	*change.Pipeline
+	counts
+}
+
+func (p pairsPipeline) KeptPairs(c change.Candidate) int { return p.counts.KeptPairs(c) }
+
+// PE7 (condition 19, L3 MUST-1 on #153): Next offers first the hypothesis
+// whose kept candidate has the most pairs, not the first one mined.
+func TestNextFinishesTheClosestCandidateFirst(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	for i := range 8 {
+		r.corrected(h, i)
+	}
+	r.failing("x", "owner:mX", "refund")
+	r.failing("y", "owner:mY", "pay")
+	b := &builder{files: map[string][]byte{"procedures/mail": []byte("v2")}}
+	l, err := NewLearn(LearnConfig{Pipeline: pairsPipeline{r.p, counts{"kept": 4}}, Journal: r.eng, Harvest: h, Builder: b, MinHeldOut: 1})
+	must(t, err)
+	ev, err := h.Evidence()
+	must(t, err)
+	mined := l.mine(ev)
+	if len(mined) < 2 {
+		t.Fatalf("mined %d hypotheses, want 2 or more", len(mined))
+	}
+	last := mined[len(mined)-1].Key
+	l.built[last] = keptCandidate{cand: change.Candidate{Files: change.Tree{"k": []byte("kept")}}}
+	job, ok := l.Next(context.Background(), true)
+	if !ok || job.Name != "candidate" {
+		t.Fatalf("no candidate job: %v %v", job.Name, ok)
+	}
+	job.Run(context.Background())
+	if got := b.got(); len(got) != 1 || got[0].Hypothesis.Key != last {
+		t.Fatalf("offered %v first, want %s", got, last)
+	}
+}

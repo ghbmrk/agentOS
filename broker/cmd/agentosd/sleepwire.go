@@ -241,11 +241,18 @@ func agentKeeper(ctx context.Context, m *vm.Manager, record func(journal.SleepNo
 // when one window ends resumes in the next (PE7 condition 17).
 const sleepResume = 36 * time.Hour
 
-// sleepResumeFor is sleepResume where the agent and a replay machine do
-// not fit together, so the agent sleeps while the box learns; zero
-// (change.ResumeFor) otherwise.
-func sleepResumeFor(capacityMB, headroomMB, agentMB, replayMB int64) time.Duration {
-	if replayMB > 0 && replayFits(capacityMB, headroomMB, agentMB, replayMB) != nil {
+// sleepMode reports whether the agent sleeps while the box learns: a
+// replay machine is configured but does not fit beside the agent (PE7).
+// main decides both the sleeper and sleepResumeFor from it, so they never
+// disagree (L3 on #153).
+func sleepMode(capacityMB, headroomMB, agentMB, replayMB int64) bool {
+	return replayMB > 0 && replayFits(capacityMB, headroomMB, agentMB, replayMB) != nil
+}
+
+// sleepResumeFor is sleepResume in sleep mode; zero (change.ResumeFor)
+// otherwise.
+func sleepResumeFor(asleep bool) time.Duration {
+	if asleep {
 		return sleepResume
 	}
 	return 0

@@ -405,7 +405,8 @@ func (p *Pipeline) dropOldBasesLocked(base string) {
 
 // KeptPairs counts candidate c's pairs kept from preempted evaluations
 // on the current active tree, both sides finished, so the candidate
-// closest to a verdict can be finished first (PE7).
+// closest to a verdict can be finished first (PE7). A parked candidate
+// counts none.
 func (p *Pipeline) KeptPairs(c Candidate) int {
 	p.mu.Lock()
 	base := p.st.Active.clone()
@@ -420,6 +421,11 @@ func (p *Pipeline) KeptPairs(c Candidate) int {
 	ck := p.candidateKey(base, next)
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.exempt[ck] >= MaxExempt {
+		// Parked (PE5): refused outside idle passes, so it never leads
+		// the order (L3 MUST-2 on #153).
+		return 0
+	}
 	n := 0
 	for k, r := range p.kept {
 		if r.cand != ck {
