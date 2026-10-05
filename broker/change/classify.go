@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"regexp"
 	"sort"
 	"strings"
@@ -108,7 +109,7 @@ func decodeStrict(b []byte, v any) error {
 	if err := d.Decode(v); err != nil {
 		return err
 	}
-	if d.More() {
+	if _, err := d.Token(); err != io.EOF {
 		return fmt.Errorf("trailing data")
 	}
 	return nil

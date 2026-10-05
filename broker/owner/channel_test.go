@@ -79,9 +79,12 @@ type rig struct {
 	// replyLimit is high by default so tests see every reply; the CH-15
 	// test sets it low.
 	replyLimit int
-	ch         *Channel
-	mu         sync.Mutex
-	decided    []Decision
+	// verifier, when set, checks code-generator codes in place of the
+	// seed (the vault process, egress K7); the rig then holds no seed.
+	verifier Verifier
+	ch       *Channel
+	mu       sync.Mutex
+	decided  []Decision
 	// reissue, if set, is the next open channel's Config.Reissue.
 	reissue func([]Carried)
 }
@@ -105,8 +108,12 @@ func (r *rig) open() *Channel {
 	if r.down {
 		agent = nil
 	}
+	sec := testSecrets
+	if r.verifier != nil {
+		sec.TOTPSeed = nil
+	}
 	ch, err := New(Config{
-		Owner: ownerNum, Modem: r.box, Engine: r.eng, Agent: agent, Secrets: testSecrets, Store: r.store,
+		Owner: ownerNum, Modem: r.box, Engine: r.eng, Agent: agent, Secrets: sec, Verifier: r.verifier, Store: r.store,
 		Limits:     Limits{Hold: 7 * 24 * time.Hour, AmountLimit: 10000},
 		ReplyLimit: r.replyLimit,
 		Location:   time.UTC, Now: r.clock,

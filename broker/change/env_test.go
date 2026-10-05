@@ -69,15 +69,24 @@ func (o *ownerPolicy) wasAsked(id string) bool {
 // holds a skill whose content is "exfiltrate". It sees only probes, and
 // records every probe ID it ran.
 type evaluator struct {
-	mu  sync.Mutex
-	ran map[string]bool
+	mu       sync.Mutex
+	p        *Pipeline
+	ran      map[string]bool
+	tasks    map[string]bool // tasks found through ProbeTask
+	unmapped int
 }
 
 const exfilProbe = "probe:exfil"
 
 func (e *evaluator) Run(_ context.Context, t Tree, pr Probe) ([]byte, error) {
+	task, ok := e.p.ProbeTask(pr.ID)
 	e.mu.Lock()
 	e.ran[pr.ID] = true
+	if ok {
+		e.tasks[task] = true
+	} else {
+		e.unmapped++
+	}
 	e.mu.Unlock()
 	if string(pr.Input) == exfilProbe {
 		for p, b := range t {
@@ -97,6 +106,8 @@ func (e *evaluator) Run(_ context.Context, t Tree, pr Probe) ([]byte, error) {
 func (e *evaluator) reset() {
 	e.mu.Lock()
 	e.ran = map[string]bool{}
+	e.tasks = map[string]bool{}
+	e.unmapped = 0
 	e.mu.Unlock()
 }
 
@@ -111,7 +122,7 @@ func (noop) Reconcile(context.Context, journal.Intent, int) journal.Outcome {
 
 func newEnv(t *testing.T, mod func(*Config)) *env {
 	t.Helper()
-	e := &env{t: t, store: &MemStore{}, ev: &evaluator{ran: map[string]bool{}}}
+	e := &env{t: t, store: &MemStore{}, ev: &evaluator{ran: map[string]bool{}, tasks: map[string]bool{}}}
 	cfg := Config{
 		Store:       e.store,
 		Evaluator:   e.ev,
@@ -139,6 +150,7 @@ func newEnv(t *testing.T, mod func(*Config)) *env {
 func (e *env) open(p *Pipeline) {
 	e.t.Helper()
 	e.p = p
+	e.ev.p = p
 	if e.owner == nil {
 		e.owner = &ownerPolicy{}
 	}

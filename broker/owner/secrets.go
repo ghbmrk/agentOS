@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"time"
 )
 
 // Secrets are the verifiers for the high tier (CH-4). They live only in the
@@ -19,6 +20,44 @@ type Secrets struct {
 	// GridSeed derives the paper grid printed on the Owner Card's
 	// detachable sheet.
 	GridSeed []byte
+}
+
+// Verifier checks code-generator codes where the seed is held: the vault
+// process (egress K7), so the seed never reaches the broker. It accepts the
+// current 30-second step or the one before, never at or before after (the
+// channel's last accepted step) nor its own last accepted step, and spends
+// a step that matches. counted is false for the silent checks of O5, which
+// the vault process bounds apart from the rest, so a flood of them never
+// refuses a counted check. An error means no check ran, and the channel
+// counts nothing; a *VerifyError says why.
+type Verifier interface {
+	VerifyTOTP(code string, after int64, counted bool) (step int64, ok bool, err error)
+}
+
+// VerifyFailure says why a Verifier could not check a code.
+type VerifyFailure int
+
+const (
+	// VaultDown: the vault process was not reached; nothing was checked.
+	VaultDown VerifyFailure = iota
+	// VaultLocked: the vault is not open, so the seed is not readable.
+	VaultLocked
+	// VerifyPaused: too many wrong codes reached the vault process;
+	// checks resume at Until.
+	VerifyPaused
+	// VerifyLost: the code was sent but no answer came, so it may have
+	// been spent.
+	VerifyLost
+)
+
+// VerifyError is a Verifier's reason for not checking a code.
+type VerifyError struct {
+	Kind  VerifyFailure
+	Until time.Time // VerifyPaused only
+}
+
+func (e *VerifyError) Error() string {
+	return [...]string{"vault process down", "vault locked", "verify paused", "verify answer lost"}[e.Kind]
 }
 
 const (

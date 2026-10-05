@@ -71,3 +71,32 @@ func TestOnlyImages(t *testing.T) {
 		}
 	}
 }
+
+func TestRootKeysCountOnce(t *testing.T) {
+	root, pk := keys(t, 2)
+	root.Keys["c"] = root.Keys["a"] // one key under two IDs
+	sigs := []Signature{{"a", ed25519.Sign(pk[0], meta)}, {"c", ed25519.Sign(pk[0], meta)}}
+	if _, err := Verify(root, meta, sigs, 1); err == nil {
+		t.Fatal("one signer met a 2-of-n threshold")
+	}
+}
+
+func TestStrictMetadata(t *testing.T) {
+	root, pk := keys(t, 2)
+	d := Digest(nil)
+	for _, m := range []string{
+		`{"version":"1","images":{"host-image/a":"` + d + `"}}}`,
+		`{"version":"1","images":{"host-image/a":"` + d + `"}}]`,
+		`{"version":"1","version":"2","images":{"host-image/a":"` + d + `"}}`,
+		`{"version":"1","images":{"host-image/a":"` + d + `","host-image/a":"` + d + `"}}`,
+		`{"version":"1","Version":"2","images":{"host-image/a":"` + d + `"}}`,
+		`{"VERSION":"1","images":{"host-image/a":"` + d + `"}}`,
+		`{"version":"1","Images":{"host-image/a":"` + d + `"}}`,
+	} {
+		b := []byte(m)
+		sigs := []Signature{{"a", ed25519.Sign(pk[0], b)}, {"b", ed25519.Sign(pk[1], b)}}
+		if _, err := Verify(root, b, sigs, 1); err == nil {
+			t.Fatalf("accepted %s", m)
+		}
+	}
+}

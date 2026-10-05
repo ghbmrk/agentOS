@@ -44,7 +44,7 @@ func (p *Pipeline) shortLocked() (string, error) {
 }
 
 func shortOK(id string) bool {
-	if len(id) < 2 || len(id) > 3 || id[0] < 'A' || id[0] > 'Z' {
+	if len(id) < 2 || len(id) > 3 || !strings.ContainsRune(idLetters, rune(id[0])) {
 		return false
 	}
 	for _, c := range id[1:] {
@@ -191,8 +191,12 @@ func (p *Pipeline) Digest() []string {
 			case BasisSecurity:
 				line += " Security update, under your standing policy."
 			}
-			if a.Reverted == "" {
+			switch {
+			case a.Reverted != "":
+			case p.undoableLocked(a):
 				line += fmt.Sprintf(" UNDO %s / MORE %s", a.Short, a.Short)
+			default:
+				line += fmt.Sprintf(" MORE %s", a.Short)
 			}
 			out = append(out, line)
 			a.Listed = true
@@ -208,8 +212,34 @@ func (p *Pipeline) Digest() []string {
 			a.RevertSeen = true
 		}
 	}
-	for _, v := range p.st.Declined {
-		out = append(out, "You declined security update "+safe(v)+"; the box is still on the previous version until a newer update is installed.")
+	seen := map[string]bool{}
+	for _, d := range p.st.Declined {
+		if !seen[d.Version] {
+			seen[d.Version] = true
+			out = append(out, "You declined security update "+safe(d.Version)+"; the box is still on the previous version until a newer update is installed.")
+		}
+	}
+	for _, a := range p.st.Adoptions {
+		if a.Concern != "" && !a.ConcernSeen && a.Reverted == "" {
+			s := a.ConcernScore
+			line := p.what(&Adoption{Classes: a.Classes, Origin: a.Origin}) + " now"
+			if a.Concern == WhySecurity {
+				line += " fails a newer security check"
+			} else {
+				line += fmt.Sprintf(" does worse on %d of %d newer tasks", max(s.Regressions, s.BaselinePassed-s.Passed), s.HeldOut)
+			}
+			if p.undoableLocked(a) {
+				line += ". Reply UNDO " + a.Short + " to go back to the previous version, or nothing to keep it."
+			} else {
+				line += ". It is the only version on the box, so it stays until a newer update is installed."
+			}
+			out = append(out, line)
+			a.ConcernSeen = true
+		}
+	}
+	if p.st.Outages >= OutageAlert && !p.st.OutageSeen {
+		out = append(out, fmt.Sprintf("The box could not re-test its learned changes the last %d times it tried; they stay as they are until it can.", p.st.Outages))
+		p.st.OutageSeen = true
 	}
 	if len(out) > 0 {
 		_ = p.saveLocked()

@@ -11,6 +11,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	mrand "math/rand/v2"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -161,6 +164,9 @@ const (
 	// ActionPolicyOff turns a setting off; authority-narrowing, so it
 	// works during STOP (journal A9).
 	ActionPolicyOff = journal.ActionChangePolicyOff
+	// ActionRevertAuto is the pipeline's own revert (regression, security,
+	// fallback). It is not narrowing, so STOP holds it.
+	ActionRevertAuto = "meta.change.revert.auto"
 )
 
 // ErrNeedsOwner is returned by Check for a change only the owner may
@@ -198,8 +204,12 @@ type Score struct {
 	SecurityPassed int `json:"security_passed"`
 	// NotEvaluated counts cases the evaluator could not run on this box
 	// (ErrNotEvaluated); they are in no other count.
-	NotEvaluated int   `json:"not_evaluated,omitempty"`
-	example      *Case // first regressed case, for the owner's line
+	NotEvaluated int `json:"not_evaluated,omitempty"`
+	// Security fixtures on the baseline, so Recheck blames an adoption
+	// only for a fixture the state without it passes.
+	BaselineSecurityPassed int   `json:"baseline_security_passed"`
+	SecurityRegressions    int   `json:"security_regressions"`
+	example                *Case // first regressed case, for the owner's line
 }
 
 // Adoption is a change that took effect and its rollback point.
@@ -219,9 +229,14 @@ type Adoption struct {
 	Staged bool `json:"staged,omitempty"`
 	// Reverted names why the adoption was undone ("owner", "regression",
 	// "security", "fallback"), empty while it is active.
-	Reverted   string `json:"reverted,omitempty"`
-	Listed     bool   `json:"listed,omitempty"`
-	RevertSeen bool   `json:"revert_seen,omitempty"`
+	Reverted string `json:"reverted,omitempty"`
+	// Concern is a regression Recheck found on a protected adoption, which
+	// the owner decides (arbitrator R2); ConcernScore its counts.
+	Concern      string `json:"concern,omitempty"`
+	ConcernScore Score  `json:"concern_score,omitempty"`
+	ConcernSeen  bool   `json:"concern_seen,omitempty"`
+	Listed       bool   `json:"listed,omitempty"`
+	RevertSeen   bool   `json:"revert_seen,omitempty"`
 }
 
 // state is everything the pipeline persists.
@@ -234,8 +249,12 @@ type state struct {
 	Sharing   bool        `json:"sharing"`
 	// Declined lists security releases the owner declined; the digest
 	// repeats them until a later release is adopted (arbitrator R2).
-	Declined []string        `json:"declined,omitempty"`
-	Cases    map[string]Case `json:"cases"`
+	Declined []declined `json:"declined,omitempty"`
+	// Outages counts consecutive Recheck passes the evaluator could not
+	// run; the digest says so once it reaches OutageAlert.
+	Outages    int             `json:"outages,omitempty"`
+	OutageSeen bool            `json:"outage_seen,omitempty"`
+	Cases      map[string]Case `json:"cases"`
 	// Applied lists intents whose effect took place, for Reconcile.
 	Applied map[string]bool `json:"applied"`
 }
@@ -269,6 +288,9 @@ type Pipeline struct {
 	st     state
 	props  map[string]*proposal
 	broken error // set when state could neither be saved nor reloaded
+	// probes of running evaluations: use count and task intent.
+	probes    map[string]int
+	probeTask map[string]string
 }
 
 // New loads the persisted state, or seeds it on first start, and applies
@@ -295,7 +317,7 @@ func New(cfg Config) (*Pipeline, error) {
 	if cfg.Rand == nil {
 		cfg.Rand = rand.Reader
 	}
-	p := &Pipeline{cfg: cfg, props: map[string]*proposal{}}
+	p := &Pipeline{cfg: cfg, props: map[string]*proposal{}, probes: map[string]int{}, probeTask: map[string]string{}}
 	raw, err := cfg.Store.Load()
 	if err != nil {
 		return nil, err
@@ -433,7 +455,15 @@ func (p *Pipeline) ProposeRelease(ctx context.Context, v update.Verified) (Repor
 	return p.propose(ctx, Candidate{Source: Upstream, Origin: "update:" + v.Version(), Files: files}, v.Security())
 }
 
+// propose runs a candidate and returns its report without held-out
+// content: Loop 1 sees counts, never a case.
 func (p *Pipeline) propose(ctx context.Context, c Candidate, security bool) (Report, error) {
+	rep, err := p.proposeInner(ctx, c, security)
+	rep.example = nil
+	return rep, err
+}
+
+func (p *Pipeline) proposeInner(ctx context.Context, c Candidate, security bool) (Report, error) {
 	if p.j == nil {
 		return Report{}, errors.New("change: no journal attached")
 	}
@@ -481,7 +511,7 @@ func (p *Pipeline) propose(ctx context.Context, c Candidate, security bool) (Rep
 		rep.State, rep.Reason = StateRejected, cl.forbidden
 		return rep, nil
 	}
-	rep.Score = p.evaluate(ctx, base, next, set)
+	rep.Score = p.evaluate(ctx, base, next, set, strictFor(c.Source, cl.classes))
 	images := cl.imagesOnly()
 	regressed := rep.Regressions > 0 || rep.Passed < rep.BaselinePassed
 	switch {
@@ -491,7 +521,7 @@ func (p *Pipeline) propose(ctx context.Context, c Candidate, security bool) (Rep
 	case rep.SecurityPassed < rep.Security:
 		rep.State, rep.Reason = StateRejected, "fails the security suite"
 		return rep, nil
-	case rep.Security < p.cfg.MinSecurity && rep.NotEvaluated == 0:
+	case rep.Security < p.cfg.MinSecurity && (rep.NotEvaluated == 0 || c.Source != Upstream):
 		// Without fixtures nothing shows the evaluator ran at all.
 		rep.State, rep.Reason = StateRejected, "too few security fixtures to qualify anything"
 		return rep, nil
@@ -546,7 +576,9 @@ func (p *Pipeline) Settle(ctx context.Context, id string) (Report, error) {
 	if pr == nil {
 		return Report{}, fmt.Errorf("change: no open proposal %s", id)
 	}
-	return p.drive(ctx, id, pr.report, false)
+	rep, err := p.drive(ctx, id, pr.report, false)
+	rep.example = nil
+	return rep, err
 }
 
 func (p *Pipeline) drive(ctx context.Context, id string, rep Report, authorize bool) (Report, error) {
@@ -565,12 +597,20 @@ func (p *Pipeline) drive(ctx context.Context, id string, rep Report, authorize b
 		return rep, nil
 	case journal.Denied:
 		rep.State, rep.Reason = StateRejected, st.Permission.Reason
-		p.mu.Lock()
-		if pr := p.props[id]; pr != nil && pr.security {
-			p.st.Declined = append(p.st.Declined, strings.TrimPrefix(pr.cand.Origin, "update:"))
+		// Record a decline only when the owner was all that was missing:
+		// a stale base or a gate refusal is not the owner's no.
+		if pr := p.prop(id); pr != nil && pr.security &&
+			errors.Is(p.Check(ctx, journal.PhaseAuthorize, st.Intent), ErrNeedsOwner) {
+			p.mu.Lock()
+			for _, ns := range nsOf(pr.edits) {
+				d := declined{Version: strings.TrimPrefix(pr.cand.Origin, "update:"), NS: ns}
+				if !slices.Contains(p.st.Declined, d) {
+					p.st.Declined = append(p.st.Declined, d)
+				}
+			}
 			_ = p.saveLocked()
+			p.mu.Unlock()
 		}
-		p.mu.Unlock()
 		p.drop(id)
 		return rep, nil
 	case journal.Authorized:
@@ -598,6 +638,28 @@ func (p *Pipeline) drive(ctx context.Context, id string, rep Report, authorize b
 	return rep, nil
 }
 
+// declined is a security release the owner declined, per namespace.
+type declined struct {
+	Version string `json:"version"`
+	NS      string `json:"ns"`
+}
+
+func nsOf(edits []Edit) []string {
+	var out []string
+	for _, e := range edits {
+		if ns := namespace(e.Path); !slices.Contains(out, ns) {
+			out = append(out, ns)
+		}
+	}
+	return out
+}
+
+func (p *Pipeline) prop(id string) *proposal {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.props[id]
+}
+
 func (p *Pipeline) drop(id string) {
 	p.mu.Lock()
 	delete(p.props, id)
@@ -605,43 +667,143 @@ func (p *Pipeline) drop(id string) {
 }
 
 // evaluate runs the frozen suites against the baseline and the candidate.
-// An evaluator error fails the case on that side.
-func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen) Score {
+// Every case, security fixtures included, runs on both sides in a shuffled
+// order under probe IDs keyed with a fresh nonce, so the evaluator cannot
+// tell sides, kinds, or the same case across evaluations (CHG-1). An
+// evaluator error fails the case on that side.
+func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st strictness) Score {
+	type run struct {
+		c     Case
+		cand  bool
+		probe string
+		ok    bool
+		ev    bool
+	}
+	nonce := make([]byte, 16)
+	_, _ = rand.Read(nonce)
+	var runs []*run
+	for _, cs := range [][]Case{set.heldOut, set.security} {
+		for _, c := range cs {
+			runs = append(runs, &run{c: c, probe: p.probeID(nonce, c.ID)}, &run{c: c, cand: true, probe: p.probeID(nonce, c.ID)})
+		}
+	}
+	mrand.Shuffle(len(runs), func(i, j int) { runs[i], runs[j] = runs[j], runs[i] })
+	p.mu.Lock()
+	for _, r := range runs {
+		p.probes[r.probe]++
+		if !r.c.Security {
+			p.probeTask[r.probe] = r.c.Task
+		}
+	}
+	p.mu.Unlock()
+	defer func() {
+		p.mu.Lock()
+		for _, r := range runs {
+			if p.probes[r.probe]--; p.probes[r.probe] <= 0 {
+				delete(p.probes, r.probe)
+				delete(p.probeTask, r.probe)
+			}
+		}
+		p.mu.Unlock()
+	}()
+	for _, r := range runs {
+		t := base
+		if r.cand {
+			t = next
+		}
+		r.ok, r.ev = p.pass(ctx, t, r.c, r.probe)
+	}
+	res := map[string][2]*run{}
+	var order []string
+	for _, r := range runs {
+		pair, seen := res[r.c.ID]
+		if !seen {
+			order = append(order, r.c.ID)
+		}
+		if r.cand {
+			pair[1] = r
+		} else {
+			pair[0] = r
+		}
+		res[r.c.ID] = pair
+	}
+	sort.Strings(order)
 	var s Score
-	for _, c := range set.heldOut {
-		b, be := p.pass(ctx, base, c)
-		n, ne := p.pass(ctx, next, c)
-		if !be || !ne {
+	for _, id := range order {
+		b, n := res[id][0], res[id][1]
+		if !b.ev {
 			s.NotEvaluated++
 			continue
 		}
+		if !n.ev {
+			// The baseline ran but the candidate's tree declined: honoured
+			// only where the evaluator legitimately cannot test (C5).
+			if n.c.Security && st.security || !n.c.Security && st.heldOut {
+				n.ev, n.ok = true, false
+			} else {
+				s.NotEvaluated++
+				continue
+			}
+		}
+		if n.c.Security {
+			s.Security++
+			if n.ok {
+				s.SecurityPassed++
+			}
+			if b.ok {
+				s.BaselineSecurityPassed++
+			}
+			if b.ok && !n.ok {
+				s.SecurityRegressions++
+			}
+			continue
+		}
 		s.HeldOut++
-		if b {
+		if b.ok {
 			s.BaselinePassed++
 		}
-		if n {
+		if n.ok {
 			s.Passed++
 		}
-		if b && !n {
+		if b.ok && !n.ok {
 			s.Regressions++
 			if s.example == nil {
-				cc := c
+				cc := n.c
 				s.example = &cc
 			}
 		}
 	}
-	for _, c := range set.security {
-		ok, ev := p.pass(ctx, next, c)
-		if !ev {
-			s.NotEvaluated++
-			continue
-		}
-		s.Security++
-		if ok {
-			s.SecurityPassed++
+	return s
+}
+
+// OutageAlert is how many failed Recheck passes in a row the digest
+// reports.
+const OutageAlert = 3
+
+// strictness says which not-evaluated candidate results count as fails.
+type strictness struct{ heldOut, security bool }
+
+// strictFor: only an upstream release may rest on its signatures when the
+// box cannot run security fixtures on it, and only images, config, and
+// routing (while replay has no model) may go untested on held-out cases. A
+// shared package is always tested in full (C5, LOOP-10).
+func strictFor(src Source, classes []Class) strictness {
+	st := strictness{heldOut: src == Shared, security: src != Upstream}
+	for _, c := range classes {
+		switch c {
+		case ClassGuestImage, ClassHostImage, ClassConfig, ClassRouting:
+		default:
+			st.heldOut = true
 		}
 	}
-	return s
+	return st
+}
+
+// outage reports a score where nothing passed on either side: the
+// evaluator is down, so no adoption can be blamed.
+func (s Score) outage() bool {
+	return s.HeldOut+s.Security > 0 && s.Passed == 0 && s.BaselinePassed == 0 &&
+		s.SecurityPassed == 0 && s.BaselineSecurityPassed == 0
 }
 
 // ErrNotEvaluated is what an Evaluator returns (wrapped is fine) when it
@@ -652,8 +814,8 @@ var ErrNotEvaluated = errors.New("change: not evaluated on this box")
 
 // pass reports whether the case passed on t, and whether it was evaluated
 // at all. Any other evaluator error is a fail.
-func (p *Pipeline) pass(ctx context.Context, t Tree, c Case) (ok, evaluated bool) {
-	out, err := p.cfg.Evaluator.Run(ctx, t.clone(), Probe{ID: p.probeID(c.ID), Input: append([]byte(nil), c.Input...)})
+func (p *Pipeline) pass(ctx context.Context, t Tree, c Case, probe string) (ok, evaluated bool) {
+	out, err := p.cfg.Evaluator.Run(ctx, t.clone(), Probe{ID: probe, Input: append([]byte(nil), c.Input...)})
 	if errors.Is(err, ErrNotEvaluated) {
 		return false, false
 	}
@@ -667,24 +829,25 @@ func (p *Pipeline) pass(ctx context.Context, t Tree, c Case) (ok, evaluated bool
 	return g(c, out), true
 }
 
-// ProbeTask maps a probe ID back to the journal intent of the task case it
-// names, so the replay evaluator can find that task's recordings. Security
-// fixtures and unknown probes give ok=false.
+// ProbeTask maps a probe ID of a running evaluation back to the journal
+// intent of the task case it names, so the replay evaluator can find that
+// task's recordings. Security fixtures, finished evaluations, and unknown
+// probes give ok=false. That ok=false tells its caller which probes are
+// fixtures, so only the trusted replay layer may call it, and nothing it
+// returns may reach the tree under test.
 func (p *Pipeline) ProbeTask(probeID string) (string, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	for _, c := range p.st.Cases {
-		if !c.Security && c.Task != "" && p.probeID(c.ID) == probeID {
-			return c.Task, true
-		}
-	}
-	return "", false
+	task, ok := p.probeTask[probeID]
+	return task, ok && task != ""
 }
 
-// probeID is an opaque per-installation name for a case, so the evaluator
-// cannot tell a security fixture or a task case by its name.
-func (p *Pipeline) probeID(caseID string) string {
+// probeID is an opaque name for a case within one evaluation, so the
+// evaluator cannot tell a security fixture or a task case by its name, nor
+// link a case across evaluations.
+func (p *Pipeline) probeID(nonce []byte, caseID string) string {
 	m := hmac.New(sha256.New, p.key)
+	m.Write(nonce)
 	m.Write([]byte("probe:" + caseID))
 	return hex.EncodeToString(m.Sum(nil)[:8])
 }
