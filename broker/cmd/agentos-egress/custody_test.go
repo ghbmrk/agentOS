@@ -6,6 +6,7 @@ import (
 	"crypto/sha1"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -401,6 +402,114 @@ func TestProxySeesOnlyAPIKeys(t *testing.T) {
 	}
 	if err := r.c.put("openai", []byte(synthetic(t, "sk-"))); err != errBadCredential {
 		t.Fatalf("other kind overwritten: %v", err)
+	}
+}
+
+// K7: the broker's high-tier check runs here, against the seed in the
+// vault, and only while the vault is open. A pending vault holds the seed
+// but serves nothing, verify included.
+func TestVerifyNeedsAnOpenVault(t *testing.T) {
+	r := newFastRig(t, true)
+	if _, _, err := r.c.verify(r.code(), 0, true); err != errLocked {
+		t.Fatalf("locked: %v", err)
+	}
+	r.unlock(t)
+	if _, _, err := r.c.verify(r.code(), 0, true); err != errLocked {
+		t.Fatalf("pending: %v", err)
+	}
+	if r.phase() != pending {
+		t.Fatalf("verify changed the unlock: %v", r.phase())
+	}
+}
+
+// K7, O6: the unlock and the broker share one last step, so the code that
+// unlocked the vault is not accepted again for the channel, and each code
+// the channel uses works once whatever after the broker sends.
+func TestVerifySharesTheLastStepWithUnlock(t *testing.T) {
+	r := newFastRig(t, true)
+	tk := r.unlock(t)
+	used := r.code()
+	if err := r.c.confirm(tk, used); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := r.c.verify(used, 0, true); ok || err != nil {
+		t.Fatalf("unlock code accepted for the channel: %v %v", ok, err)
+	}
+	r.clk.add(30 * time.Second)
+	code := r.code()
+	step, ok, err := r.c.verify(code, 0, true)
+	if !ok || err != nil || step != r.clk.now().Unix()/30 {
+		t.Fatalf("fresh code: %d %v %v", step, ok, err)
+	}
+	if _, ok, _ := r.c.verify(code, 0, true); ok {
+		t.Fatal("code accepted twice")
+	}
+	r.clk.add(30 * time.Second)
+	if _, ok, _ := r.c.verify(r.code(), r.clk.now().Unix()/30, true); ok {
+		t.Fatal("code at or before the broker's last step accepted")
+	}
+
+	// The step a verify spent is durable: after a restart the same code
+	// does not confirm an unlock.
+	r.clk.add(30 * time.Second)
+	spent := r.code()
+	if _, ok, err := r.c.verify(spent, 0, true); !ok || err != nil {
+		t.Fatalf("verify: %v %v", ok, err)
+	}
+	r.c.lock()
+	r.build(t)
+	tk = r.unlock(t)
+	if err := r.c.confirm(tk, spent); err == nil {
+		t.Fatal("code spent by verify confirmed an unlock after a restart")
+	}
+}
+
+// A broker that has been taken over cannot grind codes: wrong verifies are
+// bounded here, independently of the channel's own counting, per bucket,
+// and the bound ages out.
+func TestWrongVerifiesAreBounded(t *testing.T) {
+	r := newFastRig(t, true)
+	r.c.confirm(r.unlock(t), r.code())
+	r.clk.add(30 * time.Second)
+	start := r.clk.now()
+	for i := 0; i < MaxWrongCounted; i++ {
+		if _, ok, err := r.c.verify("000000", 0, true); ok || err != nil {
+			t.Fatalf("wrong verify %d: %v %v", i, ok, err)
+		}
+	}
+	_, _, err := r.c.verify(r.code(), 0, true)
+	var p *pausedError
+	if !errors.As(err, &p) || !p.until.Equal(start.Add(VerifyWindow)) {
+		t.Fatalf("after %d wrong: %v", MaxWrongCounted, err)
+	}
+	r.clk.add(VerifyWindow)
+	if _, ok, err := r.c.verify(r.code(), 0, true); !ok || err != nil {
+		t.Fatalf("after the window: %v %v", ok, err)
+	}
+	if r.phase() != open {
+		t.Fatal("wrong verifies changed the vault")
+	}
+}
+
+// O5, CH-14: a flood of silent checks (a spoofer texting coded chat) fills
+// only the silent bucket; the owner's counted code is still checked and
+// accepted.
+func TestSilentFloodNeverRefusesACountedCode(t *testing.T) {
+	r := newFastRig(t, true)
+	r.c.confirm(r.unlock(t), r.code())
+	r.clk.add(30 * time.Second)
+	for i := 0; i < 3*MaxWrongSilent; i++ {
+		r.c.verify("000000", 0, false)
+	}
+	var p *pausedError
+	if _, _, err := r.c.verify(r.code(), 0, false); !errors.As(err, &p) {
+		t.Fatalf("silent bucket not full: %v", err)
+	}
+	if step, ok, err := r.c.verify(r.code(), 0, true); !ok || err != nil || step == 0 {
+		t.Fatalf("counted code after a silent flood: %v %v", ok, err)
+	}
+	if len(r.c.wrongCounted) != 0 {
+		t.Fatalf("silent checks charged to the counted bucket: %d", len(r.c.wrongCounted))
 	}
 }
 

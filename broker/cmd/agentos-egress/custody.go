@@ -31,6 +31,26 @@ const (
 	MinAttemptGap = 2 * time.Second
 )
 
+// Wrong verifies from the broker are bounded here on their own (K7), so a
+// taken-over agentosd cannot grind codes. There are two buckets, each over
+// a sliding VerifyWindow. Counted checks (the owner's deliberate codes)
+// may be wrong MaxWrongCounted times, above the channel's own
+// WrongToChallenge (10), after which each attempt needs a texted
+// challenge. Silent checks of codes in chat (O5) may be wrong
+// MaxWrongSilent times; a full silent bucket refuses silent checks only,
+// so a spoofer's flood never refuses the owner's counted code.
+const (
+	MaxWrongCounted = 20
+	MaxWrongSilent  = 10
+	VerifyWindow    = 10 * time.Minute
+)
+
+// pausedError refuses a verify until the oldest wrong one in its bucket
+// ages out.
+type pausedError struct{ until time.Time }
+
+func (e *pausedError) Error() string { return "too many wrong codes; checks are paused" }
+
 // unlockErr is an error safe to show on the unlock socket, with its HTTP
 // status.
 type unlockErr struct {
@@ -137,6 +157,9 @@ type custody struct {
 	expires     time.Time
 	timer       *time.Timer
 	lastAttempt time.Time
+	// wrongCounted and wrongSilent are the wrong verifies per bucket.
+	wrongCounted []time.Time
+	wrongSilent  []time.Time
 }
 
 // newCustody loads the durable unlock state into c.
@@ -310,6 +333,55 @@ func (c *custody) persist(next unlockState) error {
 	}
 	c.st = next
 	return nil
+}
+
+// verify checks a code-generator code for the broker's owner channel (CH-4,
+// K7), so the seed never leaves this process. It accepts the current step
+// or the one before, after both the broker's last step and the durable
+// last step the unlock also uses, and spends a step that matches: the step
+// is on disk before the answer, so a restart cannot reset it. Only an open
+// vault verifies. counted picks the bucket a wrong code is charged to.
+func (c *custody) verify(code string, after int64, counted bool) (int64, bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ph != open {
+		return 0, false, errLocked
+	}
+	now := c.now()
+	bucket, limit := &c.wrongSilent, MaxWrongSilent
+	if counted {
+		bucket, limit = &c.wrongCounted, MaxWrongCounted
+	}
+	*bucket = since(*bucket, now.Add(-VerifyWindow))
+	if len(*bucket) >= limit {
+		return 0, false, &pausedError{until: (*bucket)[0].Add(VerifyWindow)}
+	}
+	seed, ok := c.v.Secret(SeedName)
+	if !ok {
+		return 0, false, errInternal
+	}
+	step, ok := owner.MatchTOTP([]byte(seed.Reveal()), code, now, max(after, c.st.LastStep))
+	if !ok {
+		*bucket = append(*bucket, now)
+		return 0, false, nil
+	}
+	next := c.st
+	next.LastStep = step
+	if err := c.persist(next); err != nil {
+		return 0, false, errInternal
+	}
+	return step, true, nil
+}
+
+// since keeps the times after cut, in place.
+func since(ts []time.Time, cut time.Time) []time.Time {
+	kept := ts[:0]
+	for _, t := range ts {
+		if t.After(cut) {
+			kept = append(kept, t)
+		}
+	}
+	return kept
 }
 
 // recent returns the wrong codes inside WrongWindow. Caller holds mu.
