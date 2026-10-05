@@ -27,7 +27,7 @@ Covered: 93 / 144 requirement IDs
 | REV-2 | `broker/daemon/grants_wiring_test.go`, `broker/grants/gate_test.go` |
 | REV-3 | — |
 | REV-4 | `broker/vm/gvisor/gvisor_test.go`, `broker/vm/overlay/overlay_test.go`, `broker/vm/vm_test.go` |
-| REV-5 | `broker/cmd/agentos-egress/hostile_test.go`, `broker/cmd/agentos-egress/server_test.go`, `broker/e2e/a14_test.go`, `broker/e2e/openclaw_test.go`, `broker/e2e/owner_test.go`, `broker/egress/handlerfor_test.go`, `broker/events/bus_test.go`, `broker/guest/plane_test.go`, `broker/journal/provenance_test.go`, `broker/modelroute/modelroute_test.go`, `broker/recall/recall_test.go`, `broker/recall/review_test.go`, `broker/route/handlerfor_test.go`, `broker/route/route_test.go`, `broker/vm/services_test.go`, `broker/vm/vm_test.go` |
+| REV-5 | `broker/cmd/agentos-egress/hostile_test.go`, `broker/cmd/agentos-egress/server_test.go`, `broker/cmd/agentosd/agent_test.go`, `broker/e2e/a14_test.go`, `broker/e2e/openclaw_test.go`, `broker/e2e/owner_test.go`, `broker/egress/handlerfor_test.go`, `broker/events/bus_test.go`, `broker/guest/plane_test.go`, `broker/journal/provenance_test.go`, `broker/modelroute/modelroute_test.go`, `broker/recall/recall_test.go`, `broker/recall/review_test.go`, `broker/route/handlerfor_test.go`, `broker/route/route_test.go`, `broker/vm/services_test.go`, `broker/vm/vm_test.go` |
 | CH-1 | `broker/e2e/owner_test.go`, `broker/modem/at/driver_test.go`, `broker/modem/at/engine_test.go`, `broker/modem/at/pdu_test.go`, `broker/modem/modem_test.go`, `broker/modem/secondline/secondline_test.go`, `broker/owner/channel_test.go` |
 | CH-2 | `broker/control/handler_test.go`, `broker/control/parse_test.go`, `broker/control/text_test.go`, `broker/daemon/daemon_test.go`, `broker/e2e/a9_test.go`, `broker/modelroute/verify_test.go`, `broker/owner/arc2_test.go`, `broker/owner/channel_test.go`, `broker/owner/review_test.go`, `broker/owner/verifier_test.go` |
 | CH-3 | `broker/grants/channel_test.go`, `broker/grants/grant_test.go`, `broker/owner/channel_test.go`, `broker/owner/classify_test.go`, `broker/owner/review_test.go` |
@@ -133,7 +133,7 @@ Covered: 93 / 144 requirement IDs
 | OSS-13 | — |
 | OSS-11 | — |
 | OSS-12 | — |
-| RES-1 | `broker/admission/admission_test.go`, `broker/cgroup/cgroup_test.go`, `broker/daemon/admission_wiring_test.go`, `broker/loops/scheduler_test.go`, `broker/vm/gvisor/gvisor_test.go`, `broker/vm/vm_test.go` |
+| RES-1 | `broker/admission/admission_test.go`, `broker/cgroup/cgroup_test.go`, `broker/cmd/agentosd/agent_test.go`, `broker/daemon/admission_wiring_test.go`, `broker/loops/scheduler_test.go`, `broker/vm/gvisor/gvisor_test.go`, `broker/vm/vm_test.go` |
 | RES-2 | `broker/admission/admission_test.go`, `broker/cgroup/cgroup_test.go`, `broker/daemon/admission_wiring_test.go`, `broker/vm/gvisor/gvisor_test.go`, `broker/vm/vm_test.go` |
 | RES-3 | — |
 | RES-4 | `broker/vm/vm_test.go` |
