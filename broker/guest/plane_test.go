@@ -916,3 +916,21 @@ func TestShutdownWaitsForCallsInFlight(t *testing.T) {
 		t.Fatal("Shutdown returned with a call still in flight")
 	}
 }
+
+// TestOwnerAgentReportsDeliveredTasks: W3 (potency PW3 on #90) keeps the
+// owner's task text by goal ID for harvesting, so the agent adapter says
+// which goal each delivered message starts; an undelivered one is not
+// reported.
+func TestOwnerAgentReportsDeliveredTasks(t *testing.T) {
+	r := newRig(t, nil)
+	r.client("m1")
+	var got []string
+	note := func(goal, text string, public bool) { got = append(got, fmt.Sprint(goal, "|", text, "|", public)) }
+	if err := (OwnerAgent{Plane: r.p, Machine: "m1", Delivered: note}).Deliver(context.Background(), "find bus times", true); err != nil {
+		t.Fatal(err)
+	}
+	_ = (OwnerAgent{Plane: r.p, Machine: "absent", Delivered: note}).Deliver(context.Background(), "x", false)
+	if len(got) != 1 || !strings.HasPrefix(got[0], "owner:") || !strings.HasSuffix(got[0], "|find bus times|true") {
+		t.Fatalf("reported %q", got)
+	}
+}

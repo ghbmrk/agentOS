@@ -273,10 +273,16 @@ func (p *Plane) ownerReply(m *machine, w http.ResponseWriter, r *http.Request) {
 type OwnerAgent struct {
 	Plane   *Plane
 	Machine string
+	// Delivered, if set, is told each delivered message's goal ID (GoalID)
+	// and text, for Loop 1's harvesting (W3).
+	Delivered func(goal, text string, public bool)
 }
 
 // Deliver implements control.Agent.
 func (a OwnerAgent) Deliver(_ context.Context, text string, public bool) error {
-	_, err := a.Plane.DeliverOwner(a.Machine, text, public)
+	id, err := a.Plane.DeliverOwner(a.Machine, text, public)
+	if err == nil && a.Delivered != nil {
+		a.Delivered(GoalID(id), text, public)
+	}
 	return err
 }
