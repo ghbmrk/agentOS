@@ -236,7 +236,9 @@ func TestLOOP5EachRecordingAnswersOnce(t *testing.T) {
 		return "sent twice"
 	}, nil)
 	_, err := r.e.Run(bg, tree, change.Case{ID: "c1", Input: []byte("go")})
-	if s := <-second; !errors.Is(err, ErrUnrecorded) || !strings.HasPrefix(s, "error:") {
+	// The run ends at the miss and its machine goes with it, so the guest
+	// may see the refusal or a closed socket; never a second success.
+	if s := <-second; !errors.Is(err, ErrUnrecorded) || s == "succeeded" {
 		t.Fatalf("second send: %q, run %v", s, err)
 	}
 }
