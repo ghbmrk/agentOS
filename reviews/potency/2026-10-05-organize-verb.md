@@ -16,6 +16,18 @@ Mark decided (project chat, 2026-10-05): "Yes - reversible".
 | At most 200 organize effects per account per day (owner-set) | Bounds a mass hide. |
 | Every effect is journaled and counted in the digest, with one `UNDO` for the day | The owner sees what was tidied and can reverse it in one reply. |
 
+## Revisions after L3 review
+
+- **Day-wide `UNDO`.** It restores only items whose current state still matches what the agent set, and reports the ones it skipped.
+- **Allowed targets.** Moves and labels go only to system states, folders the owner confirmed when granting, or `AgentOS/`. Trash, spam and folders with a retention policy are never targets. A shared or watched target counts as share, and reporting spam counts as delete-remote or share.
+- **Alert guard.** Alerts are recognised first by sender, not by wording: the provider's security senders and senders the owner holds an account with or marked as financial or identity, each after a DMARC pass. Phrase patterns are a second net, in the owner's languages.
+- **Recommended items, adopted.**
+  - Per-item undo through `MORE` and `UNDO <id> 3 7`.
+  - The digest names the senders most affected and lists guard hits.
+  - Every organized item gets an `AgentOS` label.
+  - `UNDO` ids last 7 days.
+  - Anything over the daily bound is asked once, as a batch.
+
 ## Tradeoffs
 
 | Potency | Security | UX |
