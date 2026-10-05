@@ -83,7 +83,10 @@ type Server struct {
 	// pages carry this box's address in their footer.
 	pages *template.Template
 	// formKey binds Approvals forms to a phone and a request; pageWrong
-	// lists each phone's recent wrong approval codes (PageWrongPerMinute).
+	// lists each phone's recent wrong approval codes (PageWrongPerMinute),
+	// and its tries in flight: each holds a slot until known not to be
+	// wrong, so a right code sent while the phone has 4 wrong ones and
+	// another try in flight is refused too (L3 nit on #171).
 	formKey   []byte
 	pageWrong map[string][]time.Time
 

@@ -476,3 +476,82 @@ func TestManyWrongPageCodesTellTheLockAndChallengeOnce(t *testing.T) {
 		t.Fatalf("digest %q", notes)
 	}
 }
+
+// L3 MUST on #171: with the day's page bound spent, the texted code gets
+// the same answer as any other code, so the hint is no oracle for it.
+func TestTheTextedCodeHintNeedsACountedTry(t *testing.T) {
+	r := newRig(t, nil)
+	id, _ := r.ch.Request([]Item{lowItem("t1")}, 0)
+	texted := lowCodeRe.FindStringSubmatch(r.inbox())[2]
+	r.ch.mu.Lock()
+	r.ch.codes.st.LocalStart, r.ch.codes.st.LocalUsed = r.clock(), LocalBound
+	r.ch.mu.Unlock()
+	wrong := "000000"
+	if wrong == texted {
+		wrong = "000001"
+	}
+	for _, code := range []string{texted, wrong} {
+		if _, err := r.ch.LocalAnswer(id, r.sum(id), true, code); err != ErrTooMany {
+			t.Fatalf("%s with the bound spent: %v", code, err)
+		}
+	}
+}
+
+// L3 SHOULDs on #171: only this request's texted code gets the hint;
+// another request's counts as wrong. A deny with the texted code typed in
+// still denies.
+func TestOnlyThisRequestsTextedCodeGetsTheHint(t *testing.T) {
+	r := newRig(t, nil)
+	a, _ := r.ch.Request([]Item{lowItem("a1")}, 0)
+	r.inbox()
+	b, _ := r.ch.Request([]Item{lowItem("b1")}, 0)
+	textedB := lowCodeRe.FindStringSubmatch(r.inbox())[2]
+	if _, err := r.ch.LocalAnswer(a, r.sum(a), true, textedB); err != ErrWrongCode || len(r.ch.codes.st.Wrong) != 1 {
+		t.Fatalf("B's code on A: %v, %d wrong", err, len(r.ch.codes.st.Wrong))
+	}
+	if msg, err := r.ch.LocalAnswer(b, r.sum(b), false, textedB); err != nil || msg != "Denied." {
+		t.Fatalf("deny with the code typed in: %q %v", msg, err)
+	}
+	if d := r.decisions(); len(d) != 1 || d[0].Approved || d[0].Ref != "b1" {
+		t.Fatalf("decisions %+v", d)
+	}
+}
+
+// L3 SHOULD on #171: a page-only request's code is never texted, so it
+// never gets the hint.
+func TestAPageOnlyRequestNeverGetsTheTextedHint(t *testing.T) {
+	r := newRig(t, nil)
+	id, _ := r.ch.RequestLocal(localItem("i1"), 0)
+	r.inbox()
+	r.ch.mu.Lock()
+	r.ch.open[id].code = "123456" // as if one were set
+	r.ch.mu.Unlock()
+	if _, err := r.ch.LocalAnswer(id, r.sum(id), true, "123456"); err == ErrTextedCode {
+		t.Fatal("hint on a page-only request")
+	}
+}
+
+// L3 nit on #171: when only some items of a request ran, the owner's
+// text says not all of it ran.
+func TestThePageSaysWhenNotAllOfARequestRan(t *testing.T) {
+	r := newRig(t, nil)
+	held := lowItem("h1")
+	held.UndoWindow = 10 * time.Minute
+	id, _ := r.ch.Request([]Item{lowItem("n1"), held}, 0)
+	r.inbox()
+	sum, code := r.sum(id), r.totp()
+	r.ch.mu.Lock()
+	for _, l := range idLetters {
+		for d := 0; d < 100; d++ {
+			r.ch.codes.st.Retired[fmt.Sprintf("%c%d", l, d)] = r.clock()
+			r.ch.codes.st.Retired[fmt.Sprintf("%c%02d", l, d)] = r.clock()
+		}
+	}
+	r.ch.mu.Unlock()
+	if _, err := r.ch.LocalAnswer(id, sum, true, code); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.inbox(); !strings.Contains(got, "Approved "+id+" (not all of it ran) on my Wi-Fi page") {
+		t.Fatalf("told %q", got)
+	}
+}

@@ -281,6 +281,13 @@ func (c *Channel) LocalSignIn(code string) (until time.Time, err error) {
 	return until, nil
 }
 
+// localAllowedLocked reports whether takeLocalLocked would allow one
+// more local attempt now, without spending it.
+func (c *Channel) localAllowedLocked(now time.Time) bool {
+	s := c.codes.st
+	return s.LocalStart.IsZero() || !now.Before(s.LocalStart.Add(WrongWindow)) || s.LocalUsed < LocalBound
+}
+
 // takeLocalLocked spends one local attempt of the fixed 24-hour bound.
 func (c *Channel) takeLocalLocked(now time.Time) (bool, error) {
 	ok := false
@@ -460,10 +467,13 @@ func (c *Channel) LocalAnswer(id, sum string, approve bool, code string) (string
 		}
 		return "", ErrChanged
 	}
-	if approve && r.code != "" && eq(code, r.code) {
+	if approve && !r.local && r.code != "" && c.localAllowedLocked(now) && eq(code, r.code) {
 		// The page takes a code-generator code; the texted one is refused
 		// here without counting, since a phone offers it from the text
-		// (L3 S-a on #165). Any other guess still counts.
+		// (L3 S-a on #165). Any other guess still counts. Only while a
+		// counted try is still allowed: with the day's bound spent, it
+		// gets ErrTooMany like any code, so the hint is no oracle (L3 on
+		// #171). A page-only request's code is never texted.
 		c.mu.Unlock()
 		c.decide(decided)
 		return "", ErrTextedCode
@@ -514,14 +524,18 @@ func (c *Channel) LocalAnswer(id, sum string, approve bool, code string) (string
 		note = "Approved " + id
 		// The page's own wording (UX A4); a hold that failed keeps the
 		// channel's reply, which says the item did not run (L3 S4).
-		ran := true
+		ran, some := true, false
 		for _, d := range decided[n:] {
 			ran = ran && d.Approved
+			some = some || d.Approved
 		}
 		if ran {
 			msg = "Approved. Your agent can go ahead." + strings.TrimPrefix(msg, "Approved "+id+".")
 		} else {
 			note += " (it did not run)" // L3 N3 on #165
+			if some {
+				note = "Approved " + id + " (not all of it ran)" // L3 nit on #171
+			}
 		}
 	default:
 		note, msg = "Denied "+id, "Denied."
