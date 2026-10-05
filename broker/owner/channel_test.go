@@ -686,7 +686,8 @@ func TestAgentTextsCarryNoCodesOrKeys(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 	r.ch.Notify("Invoice 482913 was paid on 2026-10-04.")
-	if got := r.inbox(); got != "Invoice 482913 was paid on 2026-10-04." {
+	// Agent text is always marked, so it cannot pass for a broker template.
+	if got := r.inbox(); got != "Agent: Invoice 482913 was paid on 2026-10-04." {
 		t.Fatalf("got %q", got)
 	}
 }

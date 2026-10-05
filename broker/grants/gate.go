@@ -49,7 +49,7 @@ type Owner interface {
 	Active(within time.Duration) bool
 	QueueAutoReply(owner.AutoReply) (owner.QueueResult, error)
 	DueAutoReplies() []owner.Queued
-	Notify(text string) error
+	Inform(text string) error
 }
 
 // Verifier reads, from the source system, the fields of one intent that
@@ -658,7 +658,7 @@ func (g *Gate) Authorize(ctx context.Context, id string) (journal.Status, error)
 			// Recipients that cannot be shown in full are never approved
 			// by text (CH-10, CH-12).
 			n := len(strings.Split(v.item.Recipient, ","))
-			_ = own.Notify(fmt.Sprintf("An action for %d recipients needs your approval on the box's Wi-Fi page.", n))
+			_ = own.Inform(fmt.Sprintf("An action for %d recipients needs your approval on the box's Wi-Fi page.", n))
 		}
 	case autoReply:
 		g.queueReply(id, v)
@@ -950,7 +950,7 @@ func (g *Gate) settle(id string) {
 		g.mu.Unlock()
 		if st.State == journal.Succeeded && st.Intent.Executor == ExecutorName && own != nil && len(st.Attempts) > 0 {
 			if gid := st.Attempts[len(st.Attempts)-1].Evidence; gid != "" {
-				_ = own.Notify(fmt.Sprintf("Added %s. Text PAUSE %s or REVOKE %s to stop it.", gid, gid, gid))
+				_ = own.Inform(fmt.Sprintf("Added %s. Text PAUSE %s or REVOKE %s to stop it.", gid, gid, gid))
 			}
 		}
 	}()

@@ -18,5 +18,16 @@
 | 2026-10-04 | Package branches use a `pkg/<id>-<slug>` stem set by the coordinator, plus the server's session suffix; older `claude/…` branches are accepted when the PR title starts with the package ID | Mark, PR reviews thread |
 | 2026-10-04 | Boot integrity (S7, proposed HW-5a): accept for MVP that Secure Boot covers only distribution-signed parts; AgentOS boot files are protected by a TPM policy seal on trusted hosts; unknown-host tampering is a documented risk (owner's guide: after losing custody of the drive, use only a trusted PC). Per-PC key enrollment rejected; own shim deferred past MVP | Mark, S7 thread |
 | 2026-10-04 | Unlock on an unknown PC needs the Owner Card's vault passphrase (entered on the box's Wi-Fi page) plus an approval code; the code alone never decrypts (CRED-8) | Mark, PR reviews thread |
+| 2026-10-04 | Task text is private by default; the owner marks a task public with `PUBLIC` (D1) | Mark, PR reviews thread |
+| 2026-10-04 | Context-scoped replies: yes, with alert; earned per account, verified thread starter, commitment filter (D2, ADP-11) | Mark, PR reviews thread |
+| 2026-10-04 | Third-party calls and texts only on a second line, never the owner-channel number; spec now, build after S2 (F2, ADP-12) | Mark, arbitration |
+| 2026-10-04 | Session unlock weekly by code-generator code, never a texted code (CH-19) | Mark, security review 1 |
+| 2026-10-04 | Security fixes auto-stage only after one independent fast-channel attestation (D6, UPD-8) | Mark, security review 1 |
+| 2026-10-04 | Optional boot PIN on trusted hosts, off by default (D7, CRED-8) | Mark, security review 1 |
+| 2026-10-04 | Agent machines use gVisor at the floor; re-test Firecracker on the N95 and switch if it measures better (S3; ARC-5 already excludes namespaces alone) | Claude, auto-decided: no lens worse |
+| 2026-10-04 | Host reference stack: Debian 13 systemd image stack (mkosi, systemd-sysupdate, dm-verity `/usr`, signed systemd-boot); fallback bootc on CentOS Stream 10 (S7) | Claude, auto-decided: measured pick per PLAN S7 rule |
+| 2026-10-04 | Spec v0.12 folds S3, S4, S7 and HW-5a | Claude; P0 exit approval is Mark's |
+| 2026-10-04 | CH-11 adds `RUN` (confirms a message held before a code-only unlock) and `UNLOCK <challenge> <code>` (after 10 wrong codes in 24 h, only attempts carrying a one-time challenge texted to the owner count; arbitrator's O4 ruling, PR #22) | Claude, auto-decided: security better, UX and potency not worse |
+| 2026-10-04 | Pace: ~100% of the weekly limit used by each reset, spread evenly (~14%/day), with more parallel threads; replaces the 70% envelope ("faster and sooner, should be 100% at reset") | Mark, project chat |
 | Proposed | External-drive-only (no internal install) | Not yet confirmed |
 | Pending | License | Before first public release (OSS-12) |

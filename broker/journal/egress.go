@@ -13,12 +13,15 @@ type EgressNote struct {
 	Method    string `json:"method,omitempty"`
 	Status    int    `json:"status,omitempty"`
 	Reason    string `json:"reason"`
+	// Suppressed counts notes like this one (same machine and reason) that
+	// were folded into it rather than journaled one by one.
+	Suppressed int `json:"suppressed,omitempty"`
 }
 
 // RecordEgress journals an egress decision. It is audit only: it changes no
 // intent, and STOP does not hold it.
 func (e *Engine) RecordEgress(n EgressNote) error {
-	if n.Machine == "" || n.Reason == "" {
+	if n.Machine == "" || n.Reason == "" || n.Suppressed < 0 {
 		return fmt.Errorf("%w: egress note needs a machine and a reason", ErrInvalid)
 	}
 	e.mu.Lock()

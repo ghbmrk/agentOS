@@ -1,0 +1,10 @@
+{
+  "id": "chatcmpl-SyntheticFixture0001",
+  "object": "chat.completion",
+  "created": 1790000000,
+  "model": "gpt-fixture",
+  "choices": [
+    {"index": 0, "message": {"role": "assistant", "content": "Hello from the fixture.", "refusal": null}, "logprobs": null, "finish_reason": "stop"}
+  ],
+  "usage": {"prompt_tokens": 19, "completion_tokens": 6, "total_tokens": 25}
+}

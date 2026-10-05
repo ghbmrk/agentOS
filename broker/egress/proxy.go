@@ -242,6 +242,7 @@ func (p *Proxy) serve(machine string, w http.ResponseWriter, r *http.Request) {
 	deny := func(status int, reason string) {
 		ev.Reason, ev.Status = reason, status
 		p.audit.Egress(ev)
+		w.Header().Set(DeniedHeader, "1")
 		http.Error(w, "egress denied: "+reason, status)
 	}
 	red, err := p.vault.Redactor()
@@ -428,6 +429,14 @@ func (b *BodyRule) apply(body []byte, public bool) ([]byte, error) {
 	}
 	for k, v := range b.Set {
 		obj[k] = v
+	}
+	if b.StreamUsage && obj["stream"] == true {
+		so, _ := obj["stream_options"].(map[string]any)
+		if so == nil {
+			so = map[string]any{}
+		}
+		so["include_usage"] = true
+		obj["stream_options"] = so
 	}
 	var out bytes.Buffer
 	enc := json.NewEncoder(&out)

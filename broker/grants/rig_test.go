@@ -93,7 +93,7 @@ func (f *fakeOwner) DueAutoReplies() []owner.Queued {
 	return out
 }
 
-func (f *fakeOwner) Notify(text string) error {
+func (f *fakeOwner) Inform(text string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.notes = append(f.notes, text)

@@ -94,7 +94,7 @@ func (l *lateAgent) Deliver(ctx context.Context, text string, public bool) error
 func main() {
 	var cfg daemon.Config
 	imgs := images{}
-	var stateDir, runsc, cgroupParent, meterPath, agentMachine string
+	var stateDir, runsc, cgroupParent, meterPath, agentMachine, inboxPath string
 	var diskReserveMB int64
 	flag.StringVar(&cfg.JournalPath, "journal", "/var/lib/agentos/journal.log", "journal file")
 	flag.StringVar(&cfg.SocketDir, "sockets", "/run/agentos", "socket directory (created 0700)")
@@ -111,6 +111,7 @@ func main() {
 	flag.StringVar(&meterPath, "meter", "/var/lib/agentos/meter.json", "model-spend meter state (OP-8)")
 	flag.StringVar(&cfg.OwnerState, "owner-state", "/var/lib/agentos/owner.json", "owner channel state (P1-5)")
 	flag.StringVar(&agentMachine, "agent-machine", "agent", "machine whose guest receives the owner's task chat")
+	flag.StringVar(&inboxPath, "guest-inbox", "/var/lib/agentos/guest-inbox.json", "unanswered owner messages to guests, kept across restarts")
 	flag.Parse()
 	if cfg.ModemUID < 0 || cfg.ModemUID == os.Getuid() {
 		log.Fatal("-modem-uid must name the modem bridge's own uid, distinct from the broker's")
@@ -165,7 +166,7 @@ func main() {
 			log.Printf("agent machines disabled: %v", err)
 		} else {
 			pre.m.Store(m)
-			if plane, err := openGuestPlane(m, d, cfg.SocketDir, meterPath); err != nil {
+			if plane, err := openGuestPlane(m, d, cfg.SocketDir, meterPath, inboxPath); err != nil {
 				// Machines cannot start without their guest sockets.
 				log.Printf("agent machines disabled: %v", err)
 			} else {
@@ -188,7 +189,7 @@ func openCgroup(path string) (*cgroup.Group, error) {
 
 // openGuestPlane opens the OP-8 meter and the guest plane (ARC-6) over the
 // machine manager. Without them no agent machine can start.
-func openGuestPlane(m *vm.Manager, d *daemon.Daemon, socketDir, meterPath string) (*guest.Plane, error) {
+func openGuestPlane(m *vm.Manager, d *daemon.Daemon, socketDir, meterPath, inboxPath string) (*guest.Plane, error) {
 	eng := d.Engine()
 	mtr, err := meter.Open(meter.Config{
 		Path:           meterPath,
@@ -209,10 +210,13 @@ func openGuestPlane(m *vm.Manager, d *daemon.Daemon, socketDir, meterPath string
 	// ARC-6: each machine gets its own guest socket. Model egress
 	// needs the vault, which no process may unlock before P2-4, so
 	// model calls answer 503 until then; broker tools, per-step
-	// snapshots, and the owner inbox work now.
+	// snapshots, and the owner inbox work now. When P2-4 serves model
+	// egress, its proxy takes labels from m.DataLabel, which reads
+	// private for any machine it cannot vouch for (REV-5, E10).
 	plane, err := guest.New(guest.Config{
-		Dir:      filepath.Join(socketDir, "guests"),
-		Machines: machines{m},
+		Dir:       filepath.Join(socketDir, "guests"),
+		InboxPath: inboxPath,
+		Machines:  machines{m},
 		// The grants gate decides every effect (OP-5, REV-2) and routes
 		// only accounts a grant connects.
 		Effects: d.Gate(),
