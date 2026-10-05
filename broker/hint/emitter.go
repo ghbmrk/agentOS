@@ -246,6 +246,15 @@ func New(cfg Config) (*Emitter, error) {
 		// Resend the bytes recorded at Forward time, not a rebuild under
 		// the current schema, so the set cannot change (H12).
 		b := &batch{seq: open.Seq, day: open.Day}
+		if len(open.Batch) == 0 {
+			// A record from before Batch existed: rebuild from Refs, so
+			// its hints are not committed Sent as an empty set.
+			for _, ref := range open.Refs {
+				if q, ok := items[ref]; ok {
+					b.items = append(b.items, q)
+				}
+			}
+		}
 		for i, c := range open.Batch {
 			q := queued{canon: c}
 			if i < len(open.Refs) {

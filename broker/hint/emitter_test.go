@@ -692,3 +692,20 @@ func TestOSS1SendFailureLoggedOnce(t *testing.T) {
 		}
 	}
 }
+
+// TestOSS5LegacyForwardedWithoutBatch: a Forwarded record written before
+// records carried the batch bytes is rebuilt from its Refs, never resent as
+// an empty set and committed.
+func TestOSS5LegacyForwardedWithoutBatch(t *testing.T) {
+	log := &MemLog{}
+	log.Append(Record{Seq: 1, Day: "2026-10-05", Outcome: Queued, Category: "security", Kind: vuln.Kind, Fields: vuln.Fields})
+	log.Append(Record{Seq: 2, Day: "2026-10-06", Outcome: Forwarded, Refs: []int{1}})
+	r := newRig(t, Config{Log: log})
+	r.now = time.Date(2026, 10, 6, 0, 0, 0, 0, time.UTC).Add(DefaultReleaseAt)
+	if err := r.e.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.out.all(); len(got) != 1 || got[0] != canon(t, vuln) || r.out.days[0] != "2026-10-06" {
+		t.Fatalf("sent %v for %v", got, r.out.days)
+	}
+}
