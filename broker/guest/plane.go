@@ -116,15 +116,18 @@ type Plane struct {
 }
 
 type machine struct {
-	id    string
-	dir   string
-	srv   *http.Server
-	ln    *limitListener
-	slot  chan struct{}
-	box   *inbox
-	steps stepper
-	rate  bucket
-	conns atomic.Int64 // connections the server holds open
+	id  string
+	dir string
+	// lineage is the machine's fork lineage, read when it opens: the
+	// machine manager forgets a destroyed machine before Close.
+	lineage string
+	srv     *http.Server
+	ln      *limitListener
+	slot    chan struct{}
+	box     *inbox
+	steps   stepper
+	rate    bucket
+	conns   atomic.Int64 // connections the server holds open
 }
 
 var idRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
@@ -198,6 +201,7 @@ func (p *Plane) Open(id string) (string, error) {
 		return "", err
 	}
 	m := &machine{id: id, dir: dir, slot: make(chan struct{}, p.cfg.MaxConns), box: newInbox(id, p.store)}
+	m.lineage, _ = p.cfg.Machines.Lineage(id)
 	m.rate = bucket{tokens: float64(p.cfg.SubmitBurst), last: time.Now()}
 	m.ln = newLimitListener(l, p.cfg.MaxOpenConns)
 	m.srv = &http.Server{
@@ -236,6 +240,9 @@ func (p *Plane) close(id string, forget bool) {
 	m.box.close(forget)
 	m.srv.Close()
 	os.RemoveAll(m.dir)
+	if forget && m.lineage != "" && !p.lineageOpen(m.lineage) {
+		p.store.setGoal(m.lineage, "") // the lineage is gone; so is its goal
+	}
 }
 
 // Shutdown closes every machine's socket. Unanswered owner messages stay
@@ -261,7 +268,7 @@ func (p *Plane) get(id string) *machine {
 // handler is machine m's whole surface. Anything else is 404.
 func (p *Plane) handler(m *machine) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("/model/", http.StripPrefix("/model", p.model(m.id)))
+	mux.Handle("/model/", http.StripPrefix("/model", p.model(m)))
 	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) { p.mcp(m, w, r) })
 	mux.HandleFunc("/owner/next", func(w http.ResponseWriter, r *http.Request) { p.ownerNext(m, w, r) })
 	mux.HandleFunc("/owner/reply", func(w http.ResponseWriter, r *http.Request) { p.ownerReply(m, w, r) })
@@ -277,13 +284,18 @@ func (p *Plane) handler(m *machine) http.Handler {
 	})
 }
 
-func (p *Plane) model(id string) http.Handler {
+func (p *Plane) model(m *machine) http.Handler {
 	if p.cfg.Model == nil {
 		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			http.Error(w, "no model egress is configured", http.StatusServiceUnavailable)
 		})
 	}
-	return p.cfg.Meter.Wrap(id, p.cfg.Model(id))
+	metered := p.cfg.Meter.Wrap(m.id, p.cfg.Model(m.id))
+	// Each call also counts against the goal the lineage serves when it
+	// arrives (G14); the meter limits by machine, task, and box only.
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		metered.ServeHTTP(w, r.WithContext(meter.WithGoal(r.Context(), p.goal(p.lineageOf(m)))))
+	})
 }
 
 // stepper coalesces one machine's per-step snapshots (REV-1, vm V3).

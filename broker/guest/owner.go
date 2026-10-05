@@ -101,6 +101,20 @@ func (b *inbox) next() (*ownerMsg, <-chan struct{}) {
 	return nil, b.wake
 }
 
+// handed returns the IDs of messages handed to this incarnation and not
+// yet answered.
+func (b *inbox) handed() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var ids []string
+	for _, m := range b.msgs {
+		if m.out {
+			ids = append(ids, m.ID)
+		}
+	}
+	return ids
+}
+
 func (b *inbox) answer(id string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -181,6 +195,7 @@ func (p *Plane) ownerNext(m *machine, w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if msg != nil {
+			p.handedOut(m, msg.ID)
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(msg)
 			return
