@@ -95,6 +95,16 @@ jobs:
           sudo mkdir -p /usr/local/bin/gvisor-bin
           sudo install -m 0755 /tmp/gv/gvisor-bin/* /usr/local/bin/gvisor-bin/
           runsc --version
+      - name: Project quotas (SR2-3)
+        # ext4 project quotas need the quota_v2 format module, which the
+        # runner's kernel keeps in linux-modules-extra; XFS has its own.
+        # The quota tests run on each that mounts and fail if neither does.
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq xfsprogs
+          sudo modprobe quota_v2 2>/dev/null || {
+            sudo apt-get install -yq "linux-modules-extra-$(uname -r)" && sudo modprobe quota_v2
+          } || echo "::warning::no quota_v2 module: ext4 quota tests skip; XFS covers them"
       - name: Machine tests as root
         working-directory: broker
         run: |

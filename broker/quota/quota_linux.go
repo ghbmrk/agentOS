@@ -69,13 +69,30 @@ func getInfo(f *os.File) error {
 	return quotactl(f, qGetInfo, 0, unsafe.Pointer(&i))
 }
 
-func setProject(f *os.File, id uint32) error {
+func getXattr(f *os.File) (fsxattr, error) {
 	var a fsxattr
 	if _, _, e := unix.Syscall(unix.SYS_IOCTL, f.Fd(), fsIocFsGetXattr, uintptr(unsafe.Pointer(&a))); e != 0 {
-		return e
+		return a, e
+	}
+	return a, nil
+}
+
+func getProject(f *os.File) (uint32, error) {
+	a, err := getXattr(f)
+	return a.Projid, err
+}
+
+// setProject tags f with project id; a directory also passes it on to
+// what is made beneath it.
+func setProject(f *os.File, id uint32, dir bool) error {
+	a, err := getXattr(f)
+	if err != nil {
+		return err
 	}
 	a.Projid = id
-	a.Xflags |= fsXflagProjInherit
+	if dir {
+		a.Xflags |= fsXflagProjInherit
+	}
 	if _, _, e := unix.Syscall(unix.SYS_IOCTL, f.Fd(), fsIocFsSetXattr, uintptr(unsafe.Pointer(&a))); e != 0 {
 		return e
 	}

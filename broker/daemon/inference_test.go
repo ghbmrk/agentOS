@@ -95,10 +95,11 @@ var netOK = map[string]allowance{
 			"syscall.MS_NOSUID", "syscall.MS_PRIVATE", "syscall.Mount", "syscall.O_CLOEXEC", "syscall.O_DIRECTORY",
 			"syscall.O_RDONLY", "syscall.Open", "syscall.SysProcAttr", "syscall.Unmount"}},
 	// Per-machine disk quotas (RES-4, SR2-3).
-	"quota": {"quotactl_fd and FS_IOC_FS[GS]ETXATTR on the machines' directories; capget/capset to drop CAP_SYS_RESOURCE on one thread; no network client",
+	"quota": {"quotactl_fd and FS_IOC_FS[GS]ETXATTR on the machines' directories; capget/capset to drop CAP_SYS_RESOURCE on one thread; O_NOFOLLOW to tag a tree without following links; no network client",
 		[]string{"golang.org/x/sys/unix.CAP_SYS_RESOURCE", "golang.org/x/sys/unix.CapUserData", "golang.org/x/sys/unix.CapUserHeader",
 			"golang.org/x/sys/unix.Capget", "golang.org/x/sys/unix.Capset", "golang.org/x/sys/unix.LINUX_CAPABILITY_VERSION_3",
-			"golang.org/x/sys/unix.SYS_IOCTL", "golang.org/x/sys/unix.SYS_QUOTACTL_FD", "golang.org/x/sys/unix.Syscall", "golang.org/x/sys/unix.Syscall6"}},
+			"golang.org/x/sys/unix.SYS_IOCTL", "golang.org/x/sys/unix.SYS_QUOTACTL_FD", "golang.org/x/sys/unix.Syscall", "golang.org/x/sys/unix.Syscall6",
+			"syscall.O_NOFOLLOW"}},
 	// The box clock check (P2-9, W9 links it for question deadlines).
 	"clock": {"read-only adjtimex (is NTP synced) and CLOCK_BOOTTIME; no network client",
 		[]string{"golang.org/x/sys/unix.Adjtimex", "golang.org/x/sys/unix.CLOCK_BOOTTIME", "golang.org/x/sys/unix.ClockGettime", "golang.org/x/sys/unix.STA_UNSYNC", "golang.org/x/sys/unix.TIME_ERROR", "golang.org/x/sys/unix.Timespec", "golang.org/x/sys/unix.Timex"}},

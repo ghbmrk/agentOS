@@ -2,6 +2,7 @@ package vm
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,6 +27,7 @@ type fakeQuota struct {
 	dirs    map[uint32]string
 	limits  map[uint32][2]int64
 	cleared map[uint32]bool
+	tagged  []string // "dir=project", every Tag
 }
 
 func newFakeQuota() *fakeQuota {
@@ -52,6 +54,16 @@ func (q *fakeQuota) Usage(p uint32) (quota.Usage, error) {
 		err = nil
 	}
 	return quota.Usage{Bytes: u.Bytes, Inodes: u.Inodes, LimitBytes: l[0], LimitInodes: l[1]}, err
+}
+
+func (q *fakeQuota) Tag(root string, p uint32) error {
+	if p == 0 {
+		return errors.New("fake: project 0")
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.tagged = append(q.tagged, fmt.Sprintf("%s=%d", root, p))
+	return nil
 }
 
 func (q *fakeQuota) Clear(p uint32) error {
@@ -202,21 +214,53 @@ func TestOpenRequiresAQuotaUnlessDeclaredOff(t *testing.T) {
 	}
 }
 
-func TestALayerWrittenWithoutAQuotaIsNotResumedUnderOne(t *testing.T) {
+// A layer resumed as it is may hold files the quota does not cover: one
+// written while quotas were off, or copied or restored with its tags
+// lost. Every such resume tags the whole layer first (L3 on #152).
+func TestEveryResumeOnALayerTagsItAgain(t *testing.T) {
 	e := newEnv(t, 1024)
 	e.create("m", admission.Accepted, 100)
 	e.guestWrite("m", "f", "untracked")
 	must(t, e.m.Preempt("m"))
 	e.adm.Release("m")
-	e.cfg.NoQuota, e.cfg.Quota = false, newFakeQuota()
+	q := newFakeQuota()
+	e.cfg.NoQuota, e.cfg.Quota = false, q
 	e.open()
-	if err := e.m.Resume(bg, "m"); err == nil || !strings.Contains(err.Error(), "quota") {
-		t.Fatalf("resumed a layer whose files escape the quota: %v", err)
+	must(t, e.m.Resume(bg, "m"))
+	mc, _ := e.m.Get("m")
+	dir := filepath.Join(e.cfg.StateDir, "machines", "m", "disk")
+	if mc.Project == 0 || len(q.tagged) != 1 || q.tagged[0] != fmt.Sprintf("%s=%d", dir, mc.Project) {
+		t.Fatalf("project %d, tagged %v", mc.Project, q.tagged)
 	}
-	// A rebuild writes a fresh layer under the quota.
-	must(t, e.m.Rebuild(bg, "m"))
-	if mc, _ := e.m.Get("m"); mc.Project == 0 || mc.State != Running {
-		t.Fatalf("after rebuild: %+v", mc)
+	if e.guestRead("m", "f") != "untracked" {
+		t.Fatal("layer lost")
+	}
+	// Again on every resume on the layer, quotas on all along.
+	must(t, e.m.Preempt("m"))
+	e.adm.Release("m")
+	must(t, e.m.Resume(bg, "m"))
+	if len(q.tagged) != 2 {
+		t.Fatalf("second resume tagged %v", q.tagged)
+	}
+}
+
+// A creation whose kill failed leaves its guest counted, even when its ID
+// is taken again (L3 on #152).
+func TestAFailedCreationWhoseKillFailedStaysCounted(t *testing.T) {
+	const budget, reserve = int64(1 << 30), int64(2 << 30)
+	e := newEnv(t, 8192)
+	e.cfg.Quota, e.cfg.MachineDiskBytes, e.cfg.DiskReserveBytes = newFakeQuota(), budget, reserve
+	e.cfg.FreeBytes = func(string) (int64, error) { return reserve + 2*(budget+ConsoleMaxBytes) + 1<<20, nil }
+	e.open()
+	e.rt.failNext = errors.New("fake: start failed")
+	e.rt.failKill = errors.New("fake: kill failed")
+	if _, err := e.m.Create(bg, "m", Spec{Image: "base", Class: admission.Accepted, MemMB: 100}); err == nil {
+		t.Fatal("creation succeeded")
+	}
+	e.rt.failKill = nil
+	e.create("m", admission.Accepted, 100)
+	if _, err := e.m.Create(bg, "m2", Spec{Image: "base", Class: admission.Accepted, MemMB: 100}); !errors.Is(err, ErrDiskFull) {
+		t.Fatalf("the unkilled guest's room was handed out: %v", err)
 	}
 }
 
@@ -241,5 +285,22 @@ func TestAGuestWhoseKillFailedStaysCounted(t *testing.T) {
 	must(t, e.m.Destroy(bg, "m1"))
 	if _, err := e.m.Create(bg, "m2", Spec{Image: "base", Class: admission.Accepted, MemMB: 100}); err != nil {
 		t.Fatalf("after a successful kill: %v", err)
+	}
+}
+
+// A guest a restarted broker could not kill stays counted (L3 on #152).
+func TestAGuestARestartCouldNotKillStaysCounted(t *testing.T) {
+	const budget, reserve = int64(1 << 30), int64(2 << 30)
+	e := newEnv(t, 8192)
+	e.cfg.Quota, e.cfg.MachineDiskBytes, e.cfg.DiskReserveBytes = newFakeQuota(), budget, reserve
+	e.cfg.FreeBytes = func(string) (int64, error) { return reserve + 2*(budget+ConsoleMaxBytes) + 1<<20, nil }
+	e.open()
+	e.create("m1", admission.Accepted, 100)
+	e.rt.failKill = errors.New("fake: kill failed")
+	e.open()
+	e.rt.failKill = nil
+	e.create("m2", admission.Accepted, 100)
+	if _, err := e.m.Create(bg, "m3", Spec{Image: "base", Class: admission.Accepted, MemMB: 100}); !errors.Is(err, ErrDiskFull) {
+		t.Fatalf("the unkilled guest's room was handed out: %v", err)
 	}
 }

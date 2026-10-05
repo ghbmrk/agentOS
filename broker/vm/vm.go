@@ -155,9 +155,11 @@ const ConsoleMaxBytes = 8 << 20
 
 // Quota sets per-machine hard disk quotas (quota.FS). Limit tags the
 // directory dir with project, so all later created beneath it counts
-// against the project, and sets the project's hard limits.
+// against the project, and sets the project's hard limits. Tag tags every
+// directory and file already in the tree at root with project.
 type Quota interface {
 	Limit(dir string, project uint32, bytes, inodes int64) error
+	Tag(root string, project uint32) error
 	Usage(project uint32) (quota.Usage, error)
 	Clear(project uint32) error
 }
@@ -302,9 +304,11 @@ type Manager struct {
 
 	diskMu   sync.Mutex // serializes disk reservations
 	diskHeld int64      // bytes reserved for copies in progress
-	// live holds each machine whose guest may write (started, not yet
-	// stopped) and its quota project, under diskMu.
-	live    map[string]uint32
+	// live holds the quota project of each guest that may write (started,
+	// and not known dead), under diskMu. It is keyed by project, unique to
+	// one machine's life, so a guest whose kill failed stays counted even
+	// after its ID is taken again.
+	live    map[uint32]bool
 	project uint32 // highest quota project given out, under mu
 
 	now func() time.Time // nil: time.Now (tests age snapshots for Prune)
@@ -349,7 +353,7 @@ func Open(ctx context.Context, cfg Config) (*Manager, error) {
 			return nil, err
 		}
 	}
-	m := &Manager{cfg: cfg, machines: map[string]*machine{}, snaps: map[string]Snapshot{}, live: map[string]uint32{}}
+	m := &Manager{cfg: cfg, machines: map[string]*machine{}, snaps: map[string]Snapshot{}, live: map[uint32]bool{}}
 	if err := m.load(ctx); err != nil {
 		return nil, err
 	}
@@ -616,9 +620,11 @@ func (m *Manager) startFrom(ctx context.Context, mc *machine, s *Snapshot) error
 
 // limitDisk makes mc's quota directory and sets its quota there, before
 // any layer is written into it: files made beneath it count against mc's
-// project. A machine recorded without a project (from a run with quotas
-// off) gets one, but its layer was written untagged, so it is not resumed
-// on that layer (keep): a rollback or rebuild writes a fresh one.
+// project. When mc resumes on the layer it has (keep), every file of it is
+// tagged again first: a layer copied, restored, or written with quotas off
+// is untagged, and its directories would pass project 0, which no limit
+// covers, to what the guest writes in them. A machine recorded without a
+// project gets one.
 func (m *Manager) limitDisk(mc *machine, keep bool) error {
 	dir := m.diskDir(mc.ID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -628,14 +634,17 @@ func (m *Manager) limitDisk(mc *machine, keep bool) error {
 		return nil
 	}
 	if mc.Project == 0 {
-		if keep {
-			return fmt.Errorf("%w: %s's layer was written without a disk quota; roll it back or rebuild it", ErrState, mc.ID)
-		}
 		m.mu.Lock()
 		mc.Project = m.nextProjectLocked()
 		m.mu.Unlock()
 	}
-	return m.cfg.Quota.Limit(dir, mc.Project, m.cfg.MachineDiskBytes, m.cfg.MaxLayerInodes)
+	if err := m.cfg.Quota.Limit(dir, mc.Project, m.cfg.MachineDiskBytes, m.cfg.MaxLayerInodes); err != nil {
+		return err
+	}
+	if keep {
+		return m.cfg.Quota.Tag(dir, mc.Project)
+	}
+	return nil
 }
 
 // commitDisk admits mc's guest to write: the disk above the reserve and
@@ -648,7 +657,6 @@ func (m *Manager) commitDisk(mc *machine) error {
 	}
 	m.diskMu.Lock()
 	defer m.diskMu.Unlock()
-	delete(m.live, mc.ID)
 	room, err := m.roomLocked()
 	if err != nil {
 		return err
@@ -660,14 +668,14 @@ func (m *Manager) commitDisk(mc *machine) error {
 	if need > room {
 		return fmt.Errorf("%w (%s may write %d bytes; %d free above the reserve and running machines)", ErrDiskFull, mc.ID, need, room)
 	}
-	m.live[mc.ID] = mc.Project
+	m.live[mc.Project] = true
 	return nil
 }
 
 // uncommitDisk: mc's guest no longer runs, so it writes nothing more.
 func (m *Manager) uncommitDisk(mc *machine) {
 	m.diskMu.Lock()
-	delete(m.live, mc.ID)
+	delete(m.live, mc.Project)
 	m.diskMu.Unlock()
 }
 
@@ -689,7 +697,7 @@ func (m *Manager) roomLocked() (int64, error) {
 		return 0, err
 	}
 	room := free - m.cfg.DiskReserveBytes - m.diskHeld
-	for _, p := range m.live {
+	for p := range m.live {
 		n, err := m.unusedLocked(p)
 		if err != nil {
 			return 0, err
@@ -1731,6 +1739,13 @@ func (m *Manager) load(ctx context.Context) error {
 		return err
 	}
 	for _, e := range ms {
+		if m.cfg.Quota != nil {
+			// A directory left by a creation cut short still holds files
+			// of its project: no new machine is given that project.
+			if p, err := quota.Project(m.diskDir(e.Name())); err == nil {
+				m.project = max(m.project, p)
+			}
+		}
 		mc := &machine{}
 		if err := readJSON(filepath.Join(m.machineDir(e.Name()), "meta.json"), &mc.Machine); err != nil || mc.ID != e.Name() {
 			continue
@@ -1742,7 +1757,10 @@ func (m *Manager) load(ctx context.Context) error {
 			mc.Lineage = mc.ID
 		}
 		m.project = max(m.project, mc.Project)
-		m.stopRuntime(ctx, mc)
+		if err := m.stopRuntime(ctx, mc); err != nil && m.cfg.Quota != nil && mc.Project != 0 {
+			// Its guest may outlive the broker: it stays counted.
+			m.live[mc.Project] = true
+		}
 		m.machines[mc.ID] = mc
 		if err := m.saveMachine(mc); err != nil {
 			return err

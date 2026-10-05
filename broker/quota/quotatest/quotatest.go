@@ -1,49 +1,87 @@
-// Package quotatest gives tests a directory on a small ext4 file system
-// mounted with project quotas. It needs root and mkfs.ext4; without them,
-// or on a kernel without quota support, the test is skipped, unless
-// AGENTOS_REQUIRE_QUOTA is set (CI's root job), when it fails.
+// Package quotatest gives tests a directory on a small file system mounted
+// with project quotas: ext4, or XFS where the kernel lacks ext4's quota
+// format (quota_v2). It needs root and mkfs; without them, or on a kernel
+// without quota support, the test is skipped, unless AGENTOS_REQUIRE_QUOTA
+// is set (CI's root job), when it fails.
 package quotatest
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 )
 
-// Dir returns the root of a fresh mb-MiB ext4 file system with project
-// quotas on, unmounted when the test ends.
+// Kinds are the file systems with project quotas Dir tries, in order.
+var Kinds = []string{"ext4", "xfs"}
+
+// Dir returns the root of a fresh file system of at least mb MiB with
+// project quotas on, unmounted when the test ends: the first of Kinds
+// that this host can mount.
 func Dir(t testing.TB, mb int64) string {
 	t.Helper()
-	skip := func(why string, args ...any) {
-		t.Helper()
-		if os.Getenv("AGENTOS_REQUIRE_QUOTA") != "" {
-			t.Fatalf("project quotas required: "+why, args...)
+	var why []error
+	for _, k := range Kinds {
+		d, err := On(t, k, mb)
+		if err == nil {
+			t.Logf("project quotas on %s", k)
+			return d
 		}
-		t.Skipf("no project quotas here: "+why, args...)
+		why = append(why, err)
 	}
+	Unavailable(t, fmt.Sprint(why))
+	return ""
+}
+
+// Unavailable skips the test, or fails it when AGENTOS_REQUIRE_QUOTA is set.
+func Unavailable(t testing.TB, why string) {
+	t.Helper()
+	if os.Getenv("AGENTOS_REQUIRE_QUOTA") != "" {
+		t.Fatalf("project quotas required: %s", why)
+	}
+	t.Skipf("no project quotas here: %s", why)
+}
+
+// On returns the root of a fresh kind ("ext4" or "xfs") file system of at
+// least mb MiB with project quotas on, unmounted when the test ends, or why
+// this host cannot make one.
+func On(t testing.TB, kind string, mb int64) (string, error) {
+	t.Helper()
 	if os.Getuid() != 0 {
-		skip("not root")
+		return "", fmt.Errorf("%s: not root", kind)
+	}
+	var mkfs []string
+	opts := "loop"
+	switch kind {
+	case "ext4":
+		mkfs, opts = []string{"mkfs.ext4", "-q", "-F", "-O", "quota,project"}, opts+",prjquota"
+	case "xfs":
+		mb = max(mb, 320) // mkfs.xfs's smallest file system
+		mkfs, opts = []string{"mkfs.xfs", "-q", "-f"}, opts+",prjquota"
+	default:
+		return "", fmt.Errorf("unknown file system %q", kind)
 	}
 	base := t.TempDir()
 	img, dir := filepath.Join(base, "fs.img"), filepath.Join(base, "mnt")
 	f, err := os.Create(img)
 	if err != nil {
-		t.Fatal(err)
+		return "", err
 	}
-	if err := f.Truncate(mb << 20); err != nil {
-		t.Fatal(err)
-	}
+	err = f.Truncate(mb << 20)
 	f.Close()
-	if out, err := exec.Command("mkfs.ext4", "-q", "-F", "-O", "quota,project", img).CombinedOutput(); err != nil {
-		skip("mkfs.ext4: %v: %s", err, out)
+	if err != nil {
+		return "", err
+	}
+	if out, err := exec.Command(mkfs[0], append(mkfs[1:], img)...).CombinedOutput(); err != nil {
+		return "", fmt.Errorf("%s: %v: %s", mkfs[0], err, out)
 	}
 	if err := os.Mkdir(dir, 0o700); err != nil {
-		t.Fatal(err)
+		return "", err
 	}
-	if out, err := exec.Command("mount", "-o", "loop,prjquota", img, dir).CombinedOutput(); err != nil {
-		skip("mount: %v: %s", err, out)
+	if out, err := exec.Command("mount", "-o", opts, img, dir).CombinedOutput(); err != nil {
+		return "", fmt.Errorf("mount %s: %v: %s", kind, err, out)
 	}
 	t.Cleanup(func() { exec.Command("umount", "-l", dir).Run() })
-	return dir
+	return dir, nil
 }

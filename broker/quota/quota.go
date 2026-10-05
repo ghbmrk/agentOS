@@ -17,7 +17,10 @@ package quota
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
+	"syscall"
 )
 
 // ErrUnsupported: the file system holding the directory has no project
@@ -61,13 +64,55 @@ func (q *FS) Limit(dir string, id uint32, bytes, inodes int64) error {
 		return err
 	}
 	defer f.Close()
-	if err := setProject(f, id); err != nil {
+	if err := setProject(f, id, true); err != nil {
 		return fmt.Errorf("quota: tag %s with project %d: %w", dir, id, err)
 	}
 	if err := setLimits(f, id, bytes, inodes); err != nil {
 		return fmt.Errorf("quota: limits for project %d: %w", id, err)
 	}
 	return nil
+}
+
+// Tag tags every directory and regular file in the tree at root with
+// project id, so all of it counts against id and nothing beneath it
+// escapes: a tree copied, restored or written before it was tagged keeps
+// project 0, which no hard limit covers, and retagging a directory does not
+// retag what it already holds. Symlinks are not followed (they cannot be
+// tagged, and cannot grow); V17 keeps other kinds out of layers. root must
+// be on this file system. With quotas on, the kernel moves each file's use
+// to id as it is tagged.
+func (q *FS) Tag(root string, id uint32) error {
+	if id == 0 {
+		return errors.New("quota: project 0 is every untagged file")
+	}
+	return filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && !d.Type().IsRegular() {
+			return nil
+		}
+		f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		if err := setProject(f, id, d.IsDir()); err != nil {
+			return fmt.Errorf("quota: tag %s with project %d: %w", p, id, err)
+		}
+		return nil
+	})
+}
+
+// Project reports the project path is tagged with, without following a
+// final symlink.
+func Project(path string) (uint32, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	return getProject(f)
 }
 
 // Usage reports project id's use and limits.
