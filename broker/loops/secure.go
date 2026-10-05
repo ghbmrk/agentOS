@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -135,11 +137,12 @@ type Fixer interface {
 }
 
 // SuitePipeline is the part of the change pipeline Loop 2 uses: it adds
-// fixtures and proposes fixes. It has no way to remove a fixture
-// (LOOP-10): that is an owner-approved intent.
+// fixtures, proposes fixes and reads the active tree they change. It has
+// no way to remove a fixture (LOOP-10): that is an owner-approved intent.
 type SuitePipeline interface {
 	AddSecurityCase(c change.Case) error
 	Propose(ctx context.Context, c change.Candidate) (change.Report, error)
+	Files(ns string) change.Tree
 }
 
 // GuardConfig configures NewSecure.
@@ -200,15 +203,23 @@ type Guard struct {
 	held map[string]heldFix
 }
 
-// heldFix is a checked fix candidate kept after a preempted evaluation.
+// heldFix is a checked fix candidate kept after a preempted evaluation,
+// with the hash of each namespace it touches as the fixer saw it.
 type heldFix struct {
 	cand change.Candidate
+	base map[string]string
 	at   time.Time
 }
 
-// FixPreempted is a Record's Fix while its fix waits to be proposed again:
-// the fixer or the evaluation was preempted (PE4).
-const FixPreempted = "preempted"
+// A Record's Fix before the pipeline settles it (PE4): FixPending until
+// Pass first proposes it, FixPreempted while it waits to be proposed again
+// after the fixer or the evaluation was preempted, and FixFailed, final,
+// when the fixer failed.
+const (
+	FixPending   = "pending"
+	FixPreempted = "preempted"
+	FixFailed    = "failed"
+)
 
 // maxHeldFixes bounds the kept candidates, oldest dropped first.
 const maxHeldFixes = 16
@@ -378,10 +389,11 @@ func (s *Guard) Pass(ctx context.Context) (int, error) {
 		}
 		return checkRank[a.Check] < checkRank[b.Check]
 	})
+	// Every new finding is contained, its evidence saved and the owner
+	// texted before any fix is built or proposed, so a slow or preempted
+	// fix never holds containment back (PE4, L3 on #112).
 	var errs []error
-	if err := s.retryFixes(ctx); err != nil {
-		errs = append(errs, err)
-	}
+	var ids []string
 	pauses := 0
 	for _, f := range fresh {
 		if ctx.Err() != nil {
@@ -395,6 +407,7 @@ func (s *Guard) Pass(ctx context.Context) (int, error) {
 		if err != nil {
 			errs = append(errs, err)
 		}
+		ids = append(ids, f.ID)
 		if rec.Texted {
 			lines = append(lines, ownerLine(rec))
 			urgent = urgent || rec.Finding.Check != CheckExpiry
@@ -407,7 +420,13 @@ func (s *Guard) Pass(ctx context.Context) (int, error) {
 	if text != "" {
 		s.cfg.Notify(text, urgent)
 	}
-	return len(fresh), errors.Join(append(errs, err)...)
+	if err := s.fixPending(ctx, ids); err != nil {
+		errs = append(errs, err)
+	}
+	s.mu.Lock()
+	err2 := s.saveLocked()
+	s.mu.Unlock()
+	return len(fresh), errors.Join(append(errs, err, err2)...)
 }
 
 // textBudget is three SMS segments (CH-15).
@@ -460,8 +479,8 @@ func sortedKeys[V any](m map[string]V) []string {
 }
 
 // handle is LOOP-9: contain, preserve evidence, add the regression
-// fixture, propose a fix. It decides whether the owner is texted; Pass
-// sends the text.
+// fixture, and mark a fix pending. It decides whether the owner is texted;
+// Pass sends the text, then proposes the fix.
 func (s *Guard) handle(ctx context.Context, f Finding, pause bool) (Record, error) {
 	rec := Record{Finding: f, At: s.cfg.Now(), Contained: "none", Digest: digestOf(f)}
 	var errs []error
@@ -505,9 +524,7 @@ func (s *Guard) handle(ctx context.Context, f Finding, pause bool) (Record, erro
 		}
 	}
 	if s.cfg.Fixer != nil && f.Rule != nil {
-		if err := s.fix(ctx, &rec); err != nil {
-			errs = append(errs, err)
-		}
+		rec.Fix = FixPending // Pass proposes it once every finding is contained
 	}
 	s.mu.Lock()
 	s.st.Open[f.ID] = rec
@@ -519,32 +536,37 @@ func (s *Guard) handle(ctx context.Context, f Finding, pause bool) (Record, erro
 
 // fix proposes a fix for rec's finding through the pipeline. A candidate
 // kept from a preempted evaluation of the same finding is offered again
-// without calling the fixer, within change.ResumeFor; otherwise the fixer
-// builds one. If the fixer or the evaluation is preempted, the fix stays
-// FixPreempted and the next pass offers it again (PE4, L3 on #103), so a
-// preemption never leaves a finding without a fix for good.
+// without calling the fixer, within change.ResumeFor and only while every
+// namespace it touches is as it was when the fixer built it; otherwise the
+// fixer builds one, so a kept candidate never reverts a newer adoption
+// (CHG-2, Security on #112). If the fixer or the evaluation is preempted,
+// the fix stays FixPreempted and a later pass offers it again (PE4, L3 on
+// #103). A fixer that fails otherwise leaves FixFailed, which is final, so
+// a broken fixer is not called on every pass (OP-8).
 func (s *Guard) fix(ctx context.Context, rec *Record) error {
 	f := rec.Finding
 	s.mu.Lock()
 	h, ok := s.held[f.ID]
 	delete(s.held, f.ID)
 	s.mu.Unlock()
-	cand := h.cand
-	if !ok || s.cfg.Now().Sub(h.at) > change.ResumeFor {
+	cand, base := h.cand, h.base
+	if !ok || s.cfg.Now().Sub(h.at) > change.ResumeFor || !maps.Equal(base, s.bases(cand)) {
 		var err error
 		if cand, err = s.cfg.Fixer.Fix(ctx, f); err != nil {
 			if ctx.Err() != nil {
 				rec.Fix, rec.FixReason = FixPreempted, ""
 				return nil
 			}
+			rec.Fix, rec.FixReason = FixFailed, ""
 			return fmt.Errorf("fix %s: %w", f.ID, err)
 		}
 		// Loop 2 sets these, never the fixer.
 		cand.Source, cand.Origin, cand.Public = change.Local, "loop2", false
+		base = s.bases(cand)
 	}
 	rep, err := s.cfg.Pipeline.Propose(ctx, cand)
 	if errors.Is(err, change.ErrInterrupted) {
-		s.keep(f.ID, cand)
+		s.keep(f.ID, heldFix{cand: cand, base: base, at: s.cfg.Now()})
 		rec.Fix, rec.FixReason = FixPreempted, ""
 		return nil
 	}
@@ -555,15 +577,27 @@ func (s *Guard) fix(ctx context.Context, rec *Record) error {
 	return nil
 }
 
+// bases hashes the active tree of each namespace a candidate touches.
+func (s *Guard) bases(c change.Candidate) map[string]string {
+	out := map[string]string{}
+	for _, p := range append(slices.Collect(maps.Keys(c.Files)), c.Delete...) {
+		ns, _, _ := strings.Cut(p, "/")
+		if _, done := out[ns]; !done {
+			out[ns] = s.cfg.Pipeline.Files(ns).Hash()
+		}
+	}
+	return out
+}
+
 // keep holds a preempted fix candidate, dropping the oldest past
 // maxHeldFixes.
-func (s *Guard) keep(id string, cand change.Candidate) {
+func (s *Guard) keep(id string, h heldFix) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.held == nil {
 		s.held = map[string]heldFix{}
 	}
-	s.held[id] = heldFix{cand: cand, at: s.cfg.Now()}
+	s.held[id] = h
 	for len(s.held) > maxHeldFixes {
 		oldest := ""
 		for k, v := range s.held {
@@ -575,28 +609,30 @@ func (s *Guard) keep(id string, cand change.Candidate) {
 	}
 }
 
-// retryFixes offers again every open finding's fix left FixPreempted.
-func (s *Guard) retryFixes(ctx context.Context) error {
+// fixPending proposes every open finding's pending or preempted fix:
+// those left from earlier passes first, oldest finding ID order, then this
+// pass's new findings in the order given.
+func (s *Guard) fixPending(ctx context.Context, fresh []string) error {
 	if s.cfg.Fixer == nil {
 		return nil
 	}
 	s.mu.Lock()
 	var ids []string
 	for _, id := range sortedKeys(s.st.Open) {
-		if s.st.Open[id].Fix == FixPreempted {
+		if fx := s.st.Open[id].Fix; (fx == FixPending || fx == FixPreempted) && !slices.Contains(fresh, id) {
 			ids = append(ids, id)
 		}
 	}
 	s.mu.Unlock()
 	var errs []error
-	for _, id := range ids {
+	for _, id := range append(ids, fresh...) {
 		if ctx.Err() != nil {
 			break
 		}
 		s.mu.Lock()
 		rec, ok := s.st.Open[id]
 		s.mu.Unlock()
-		if !ok {
+		if !ok || (rec.Fix != FixPending && rec.Fix != FixPreempted) {
 			continue
 		}
 		if err := s.fix(ctx, &rec); err != nil {
