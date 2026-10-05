@@ -242,8 +242,8 @@ type vaultView struct {
 	PIN   bool
 	// Boot is the changed-boot-path notice (P2-4b), "" for none.
 	Boot string
-	// Keep offers "Keep this PC trusted"; KeepOn ticks it.
-	Keep, KeepOn bool
+	// Keep offers "Keep this PC trusted", unticked.
+	Keep bool
 	// Kept: the unlock kept this PC trusted.
 	Kept    bool
 	Mine    bool
@@ -280,11 +280,11 @@ func (s *Server) vaultPage(w http.ResponseWriter, r *http.Request, errText strin
 	}
 	v.State, v.PIN = st.State, st.PIN
 	if st.BootChanged {
-		// Wording and default as ruled in the #42 review: tick "Keep
-		// this PC trusted" only for a box update. The Secure Boot hint is
-		// forgeable from the drive (a modified initrd can make only PCR 7
-		// look changed), so it is never ticked by default.
-		v.Keep, v.KeepOn = true, st.Updated && !st.SecureBoot
+		// "Keep this PC trusted" is never ticked by default: Updated and
+		// SecureBoot come from the drive, so they only pick the wording
+		// (#42 T6). A release the updater verified unlocks unattended and
+		// never reaches this page.
+		v.Keep = true
 		switch {
 		case st.Updated:
 			v.Boot = "Box updated. Unlock once with your passphrase and a code; this PC stays trusted after that."

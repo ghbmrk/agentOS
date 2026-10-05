@@ -73,7 +73,7 @@ form { margin: .6em 0 1.2em; }
 <form method="post" action="/unlock/vault"><input type="hidden" name="step" value="code">
 <label>Code from your code generator, by {{.Expires}}
 <input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required autofocus></label>
-{{if .Keep}}<label><input type="checkbox" name="keep" value="1"{{if .KeepOn}} checked{{end}}> Keep this PC trusted</label><br>{{end}}
+{{if .Keep}}<label><input type="checkbox" name="keep" value="1"> Keep this PC trusted</label><br>{{end}}
 {{with .Err}}<p class="err">{{.}}</p>{{end}}
 <button>Unlock</button></form>
 {{else}}{{with .Err}}<p class="err">{{.}}</p>{{end}}
