@@ -91,7 +91,7 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		sync.doneRestoring()
 		pipe := l.pipe
 		sync.active = func() routerule.Rule { return routerOf{pipe: pipe}.active() }
-		sync.note = pipe.Notice
+		sync.wire(pipe, filepath.Join(p.Dir, "routing-learned.json"))
 		l.routing = sync
 		router = routerOf{sync, l.pipe}
 	}
@@ -407,6 +407,16 @@ type syncedRouting struct {
 	// not queued yet (W3-route).
 	note func(key, line string) error
 	owe  routerule.Rule
+
+	// supersede records the owner's rule as the pipeline's routing state
+	// when it still holds was, and reports whether the pipeline now holds
+	// the owner's rule (change.Pipeline.Superseded); nil until the
+	// pipeline exists. learned is the refused order Loop 1 proposes
+	// projected onto the owner's rule, kept in learnedStore so a restart
+	// still proposes it, until the pipeline adopts anything (W3-route-a).
+	supersede    func(was routerule.Rule) (bool, error)
+	learned      routerule.Rule
+	learnedStore change.Store
 }
 
 // routingStandsInText is the digest line telling the owner that their own
@@ -455,14 +465,14 @@ func project(learned, owner routerule.Rule) routerule.Rule {
 	return out
 }
 
-// projected is the projection Loop 1 proposes: only while the pipeline's
-// rule is the refused one (the owner's rule stands in for it), and only
-// when it differs from the owner's rule.
-func projected(active, refused, owner routerule.Rule) (routerule.Rule, bool) {
-	if refused == nil || len(owner) == 0 || !sameRule(active, refused) {
+// projected is the projection Loop 1 proposes: only while the pipeline
+// records the owner's rule (an empty active rule) after a learned order
+// was refused, and only when it differs from the owner's rule.
+func projected(active, learned, owner routerule.Rule) (routerule.Rule, bool) {
+	if learned == nil || len(owner) == 0 || len(active) != 0 {
 		return nil, false
 	}
-	p := project(refused, owner)
+	p := project(learned, owner)
 	if sameRule(p, owner) {
 		return nil, false
 	}
@@ -596,9 +606,16 @@ func (s *syncedRouting) check(ctx context.Context) bool {
 // not be queued is tried again at the next check.
 func (s *syncedRouting) tell() {
 	s.mu.Lock()
-	owe, note := s.owe, s.note
+	owe, note, supersede, learned := s.owe, s.note, s.supersede, s.learned
 	s.mu.Unlock()
-	if owe == nil || note == nil {
+	if owe == nil {
+		// Once the pipeline adopts anything, the learned order is done.
+		if learned != nil && s.active != nil && len(s.active()) != 0 {
+			s.setLearned(nil)
+		}
+		return
+	}
+	if note == nil || supersede == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -607,9 +624,19 @@ func (s *syncedRouting) tell() {
 	if err != nil {
 		return // the vault process is down: tried at the next check
 	}
+	// The pipeline records the owner's rule from now on, so the next
+	// evaluation's base is what the router runs (L3 MUST-1 on #110).
+	owners, err := supersede(owe)
+	if err != nil {
+		s.logf("routing: the owner's rule was not recorded: %v", err)
+		return
+	}
 	text := routingStandsInText
-	if _, ok := projected(owe, owe, st.Owner); ok {
-		text = routingProjectedText
+	if owners {
+		s.setLearned(owe)
+		if _, ok := projected(nil, owe, st.Owner); ok {
+			text = routingProjectedText
+		}
 	}
 	if err := note("routing-refused:"+ruleText(owe), text); err != nil {
 		s.logf("routing: the owner's digest line was not queued: %v", err)
@@ -698,14 +725,53 @@ func (r routerOf) Candidate() routerule.Rule {
 	// Until the router measures the owner's new rule, a refused learned
 	// order is proposed as projected onto it (W3-route-a).
 	active := r.active()
-	if p, ok := projected(active, r.s.refusedRule(), st.Owner); ok {
+	if p, ok := projected(active, r.s.learnedRule(), st.Owner); ok {
 		return p
 	}
 	return active
 }
 
-func (s *syncedRouting) refusedRule() routerule.Rule {
+// wire binds the routing target to its pipeline: the owner's digest
+// line, the owner's rule recorded on a refusal, and the learned order kept
+// at learnedPath.
+func (s *syncedRouting) wire(pipe *change.Pipeline, learnedPath string) {
+	s.note = pipe.Notice
+	s.supersede = func(was routerule.Rule) (bool, error) {
+		files := pipe.Files("routing")
+		if len(files) != 0 && sameRule(routerOf{pipe: pipe}.active(), was) {
+			if _, err := pipe.Superseded("routing", files); err != nil {
+				return false, err
+			}
+		}
+		return len(pipe.Files("routing")) == 0, nil
+	}
+	s.learnedStore = change.FileStore{Path: learnedPath}
+	if b, err := s.learnedStore.Load(); err == nil && len(b) > 0 {
+		_ = json.Unmarshal(b, &s.learned)
+	}
+}
+
+func (s *syncedRouting) learnedRule() routerule.Rule {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.refused
+	return s.learned
+}
+
+// setLearned keeps the order to project, or nil once the pipeline has
+// adopted anything since; a failed save keeps it in memory only.
+func (s *syncedRouting) setLearned(r routerule.Rule) {
+	s.mu.Lock()
+	s.learned = r
+	store := s.learnedStore
+	s.mu.Unlock()
+	if store == nil {
+		return
+	}
+	var b []byte
+	if r != nil {
+		b, _ = json.Marshal(r)
+	}
+	if err := store.Save(b); err != nil {
+		s.logf("routing: could not keep the learned order: %v", err)
+	}
 }

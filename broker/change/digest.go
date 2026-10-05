@@ -294,6 +294,54 @@ func (p *Pipeline) Notice(key, line string) error {
 	return nil
 }
 
+// Superseded records that the owner's own configuration now stands in for
+// namespace ns's adopted state, which its target could no longer take (the
+// owner changed the configuration it reorders; W3-route-a, L3 MUST-1 on
+// #110). If ns's active files still equal was, they are dropped, since the
+// empty tree stands for the owner's configuration, and every active
+// adoption that edited ns is marked undone with WhySettings, with no line
+// of its own: the caller's Notice tells the owner. The target is not
+// called; it already runs the owner's configuration. A stale was changes
+// nothing. It reports whether the active tree changed. This records what
+// runs rather than changing it, so it is no intent (CHG-2): later
+// evaluations then compare against what the owner actually has.
+func (p *Pipeline) Superseded(ns string, was Tree) (bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	cur := p.st.Active.under(ns)
+	if len(cur) == 0 || cur.Hash() != was.Hash() {
+		return false, nil
+	}
+	prevActive, prevAdoptions := p.st.Active, p.st.Adoptions
+	next := Tree{}
+	for path, b := range p.st.Active {
+		if namespace(path) != ns {
+			next[path] = b
+		}
+	}
+	adoptions := make([]*Adoption, len(p.st.Adoptions))
+	for i, a := range p.st.Adoptions {
+		adoptions[i] = a
+		if a.Reverted != "" {
+			continue
+		}
+		for _, e := range a.Edits {
+			if namespace(e.Path) == ns {
+				c := *a
+				c.Reverted, c.RevertSeen = WhySettings, true
+				adoptions[i] = &c
+				break
+			}
+		}
+	}
+	p.st.Active, p.st.Adoptions = next, adoptions
+	if err := p.saveLocked(); err != nil {
+		p.st.Active, p.st.Adoptions = prevActive, prevAdoptions
+		return false, err
+	}
+	return true, nil
+}
+
 // Ask is the one plain line the owner gets for a proposal that waits on
 // them, sent through CH-15 coalescing by the wiring. For a security
 // release it says what it fixes, how many past tasks did worse with one

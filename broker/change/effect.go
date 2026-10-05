@@ -18,6 +18,9 @@ const (
 	WhyRegression = "regression"
 	WhySecurity   = "security"
 	WhyFallback   = "fallback" // a staged image did not boot cleanly
+	// WhySettings: the owner's own configuration replaced the adopted
+	// state outside the pipeline (Superseded); never an intent ID.
+	WhySettings = "settings"
 )
 
 // Check is the policy for meta.change intents (OP-3), run at authorize and

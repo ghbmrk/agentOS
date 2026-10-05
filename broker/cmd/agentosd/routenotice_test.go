@@ -18,7 +18,8 @@ import (
 func openNoted(t *testing.T, store change.Store, f *fakeRouting) (*syncedRouting, *change.Pipeline) {
 	t.Helper()
 	s, p := openRouting(t, store, f)
-	s.note = p.Notice
+	fs, _ := store.(change.FileStore)
+	s.wire(p, fs.Path+".learned")
 	return s, p
 }
 
@@ -164,6 +165,21 @@ func TestARefusedOrderIsProposedProjected(t *testing.T) {
 	if got := p.Digest(); len(got) != 1 || got[0] != routingProjectedText {
 		t.Fatalf("digest: %q", got)
 	}
+	// L3 MUST-1 on #110: the pipeline records the owner's rule (the empty
+	// tree), so evaluating the projection compares it with what runs.
+	if f := p.Files("routing"); len(f) != 0 {
+		t.Fatalf("the evaluation's base is still the refused order: %v", f)
+	}
+	// A restart still proposes it, and adds no second line.
+	s, p = openNoted(t, store, vault)
+	settleChecks(s, 2)
+	r = routerOf{s, p}
+	if got := r.Candidate(); !sameRule(got, want) {
+		t.Fatalf("candidate after a restart %v", got)
+	}
+	if got := p.Digest(); len(got) != 0 {
+		t.Fatalf("digest after a restart: %q", got)
+	}
 	if n, gsm := modem.Segments(routingProjectedText); !gsm || n != 1 {
 		t.Fatalf("the line is %d segments: %q", n, routingProjectedText)
 	}
@@ -181,7 +197,16 @@ func TestARefusedOrderIsProposedProjected(t *testing.T) {
 	if _, ok := projected(want, learned, changed); ok {
 		t.Fatal("projection offered after an adoption")
 	}
-	if got, ok := projected(learned, learned, changed); !ok || !sameRule(got, want) {
+	if got, ok := projected(nil, learned, changed); !ok || !sameRule(got, want) {
 		t.Fatalf("projection while standing in: %v %v", got, ok)
+	}
+	// The pipeline adopting anything ends the kept order, across restarts.
+	s.active = func() routerule.Rule { return want }
+	s.check(context.Background())
+	if l := s.learnedRule(); l != nil {
+		t.Fatalf("learned order kept after an adoption: %v", l)
+	}
+	if b, _ := s.learnedStore.Load(); len(b) != 0 {
+		t.Fatalf("learned order still saved: %s", b)
 	}
 }
