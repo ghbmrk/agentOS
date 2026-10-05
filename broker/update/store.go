@@ -858,3 +858,96 @@ func (s *Store) Commit(v *Verified) error {
 	return s.writeInstalled(Installed{Version: v.release.Version, UnconfirmedFreshness: !v.fresh,
 		ManifestPath: v.manifest.Path, ManifestSHA256: v.manifest.SHA256})
 }
+
+// Staged is a release handed to the A/B activator and not yet committed:
+// what the box needs after the restart to commit it once the new slot
+// passed its health check, or to drop it when the boot fell back (UPD-1).
+type Staged struct {
+	Version        int64  `json:"version"`
+	UsrRootHash    string `json:"usr_root_hash"`
+	ManifestPath   string `json:"manifest_path"`
+	ManifestSHA256 string `json:"manifest_sha256"`
+	Fresh          bool   `json:"fresh"`
+}
+
+// Stage records v as the release being activated. Only a release newer
+// than the installed one is staged; a later Stage replaces an earlier
+// one.
+func (s *Store) Stage(v *Verified) error {
+	if !v.ok() {
+		return ErrNotChecked
+	}
+	unlock, err := s.lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	in, err := s.Installed()
+	if err != nil {
+		return err
+	}
+	if v.release.Version <= in.Version {
+		return fmt.Errorf("%w: release %d is not newer than installed %d", ErrRollback, v.release.Version, in.Version)
+	}
+	b, _ := json.Marshal(Staged{Version: v.release.Version, UsrRootHash: v.release.UsrRootHash,
+		ManifestPath: v.manifest.Path, ManifestSHA256: v.manifest.SHA256, Fresh: v.fresh})
+	return writeAtomic(s.p("staged.json"), b, 0o600)
+}
+
+// Staged reads the staged release; ok is false when none is staged.
+func (s *Store) Staged() (Staged, bool, error) {
+	var st Staged
+	b, err := os.ReadFile(s.p("staged.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return st, false, nil
+	}
+	if err != nil {
+		return st, false, err
+	}
+	return st, true, json.Unmarshal(b, &st)
+}
+
+// CommitStaged records the staged release as installed once the box booted
+// it and its health check passed (UPD-1), as Commit does for a *Verified.
+// version must be the staged one and newer than the installed one.
+func (s *Store) CommitStaged(version int64) error {
+	unlock, err := s.lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	st, ok, err := s.Staged()
+	if err != nil {
+		return err
+	}
+	if !ok || st.Version != version {
+		return fmt.Errorf("update: release %d is not staged", version)
+	}
+	in, err := s.Installed()
+	if err != nil {
+		return err
+	}
+	if st.Version <= in.Version {
+		return fmt.Errorf("%w: release %d is not newer than installed %d", ErrRollback, st.Version, in.Version)
+	}
+	if err := s.writeInstalled(Installed{Version: st.Version, UnconfirmedFreshness: !st.Fresh,
+		ManifestPath: st.ManifestPath, ManifestSHA256: st.ManifestSHA256}); err != nil {
+		return err
+	}
+	return os.Remove(s.p("staged.json"))
+}
+
+// DropStaged forgets the staged release after a fallback. Nothing else in
+// the store changes: the installed release, root metadata and seen keys
+// live outside the image, so a fallback never rewinds them (UPD-1).
+func (s *Store) DropStaged() error {
+	unlock, err := s.lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := os.Remove(s.p("staged.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
