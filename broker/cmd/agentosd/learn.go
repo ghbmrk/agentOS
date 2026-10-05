@@ -453,7 +453,7 @@ func project(learned, owner routerule.Rule) routerule.Rule {
 		next := make([]routerule.Route, len(rs))
 		k := 0
 		for i, r := range rs {
-			if inLearned[r] {
+			if inLearned[r] && k < len(kept) {
 				next[i] = kept[k]
 				k++
 			} else {
@@ -471,6 +471,15 @@ func project(learned, owner routerule.Rule) routerule.Rule {
 func projected(active, learned, owner routerule.Rule) (routerule.Rule, bool) {
 	if learned == nil || len(owner) == 0 || len(active) != 0 {
 		return nil, false
+	}
+	for _, rs := range owner {
+		seen := map[routerule.Route]bool{}
+		for _, r := range rs {
+			if seen[r] {
+				return nil, false // not a rule the vault process takes (security R1 on #110)
+			}
+			seen[r] = true
+		}
 	}
 	p := project(learned, owner)
 	if sameRule(p, owner) {

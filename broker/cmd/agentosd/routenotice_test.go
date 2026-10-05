@@ -200,6 +200,12 @@ func TestARefusedOrderIsProposedProjected(t *testing.T) {
 	if got, ok := projected(nil, learned, changed); !ok || !sameRule(got, want) {
 		t.Fatalf("projection while standing in: %v %v", got, ok)
 	}
+	// Security R1 on #110: an owner rule that repeats a route (which the
+	// vault process never takes) gives no projection and no panic.
+	if _, ok := projected(nil, learned, routerule.Rule{"chat": {ra, ra, rb}}); ok {
+		t.Fatal("projection from a rule that repeats a route")
+	}
+	_ = project(learned, routerule.Rule{"chat": {rb, rb, ra}})
 	// The pipeline adopting anything ends the kept order, across restarts.
 	s.active = func() routerule.Rule { return want }
 	s.check(context.Background())
