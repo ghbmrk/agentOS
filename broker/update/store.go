@@ -9,8 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -115,11 +117,18 @@ type Options struct {
 	// Attestors is the box's attestor allow-list: the keys pinned in its
 	// image plus those the owner added (D6, arbitrator's correction). Only
 	// these count as independent; empty means none do yet, and a security
-	// fix takes the owner's CH-3 install path. While every listed key is
-	// maintainer-operated (the project's test box, Mark 2026-10-05), those
-	// keys count as the interim check; once any outside key is listed,
-	// maintainer-operated keys stop counting.
+	// fix takes the owner's CH-3 install path. Maintainer-operated keys
+	// never count, except the interim keys below.
 	Attestors []ed25519.PublicKey
+	// InterimAttestors are the keys of the project's own test box, pinned
+	// in the image (Mark 2026-10-05, "Project test box"). One that is also
+	// allow-listed counts as the interim check while every allow-listed key
+	// is an interim key and no outside attestor has ever been listed on this
+	// box: the Store remembers the first outside listing for good, so
+	// removing that attestor later does not bring the interim back. Only
+	// box-held data decides this; the signed maintainer list can never make
+	// a key count.
+	InterimAttestors []ed25519.PublicKey
 	// AllowOldDrive: the owner approved, with a tier-4 code, an offline
 	// install from a drive whose root expired over MaxOfflineRootAge ago.
 	AllowOldDrive bool
@@ -208,12 +217,15 @@ type Verified struct {
 	fresh       bool
 	maintainers map[string]bool // keys any accepted root listed (no attestor)
 	allowed     map[string]bool // Options.Attestors
-	// interim: every allow-listed key is maintainer-operated, so the
-	// project's test box counts until an outside attestor is listed
-	// (Mark, 2026-10-05).
+	pinned      map[string]bool // Options.InterimAttestors
+	// interim: every allow-listed key is pinned and no outside attestor
+	// was ever listed, so the project's test box counts (Mark, 2026-10-05).
 	interim  bool
 	operated map[string]bool // maintainer-operated attestor keys
-	security bool            // set only by WithAttestations
+	// coversFix: the newest release above the installed one when a
+	// security fix is among those it supersedes (Result.SecurityFix).
+	coversFix bool
+	security  bool // set only by WithAttestations
 }
 
 // ErrNotChecked: a Verified that Store.Check did not make.
@@ -407,6 +419,7 @@ func (s *Store) Check(src Source, o Options) (res Result, err error) {
 	// not crash the process.
 	defer func() {
 		if r := recover(); r != nil {
+			log.Printf("update: check panicked: %v\n%s", r, debug.Stack())
 			res, err = Result{}, fmt.Errorf("%w: %v", ErrBadRepository, r)
 		}
 	}()
@@ -565,13 +578,9 @@ func (s *Store) check(src Source, o Options) (Result, error) {
 		return Result{}, err
 	}
 
-	allowed := map[string]bool{}
-	for _, k := range o.Attestors {
-		der, err := x509.MarshalPKIXPublicKey(k)
-		if err != nil || len(k) != ed25519.PublicKeySize {
-			return Result{}, fmt.Errorf("attestor allow-list holds a key that is not Ed25519")
-		}
-		allowed[fingerprint(der)] = true
+	proto := Verified{maintainers: seen, operated: attestors}
+	if proto.interim, err = s.noteAttestors(o.Attestors, o.InterimAttestors, &proto); err != nil {
+		return Result{}, err
 	}
 
 	var versions []int64
@@ -582,7 +591,7 @@ func (s *Store) check(src Source, o Options) (Result, error) {
 	}
 	sort.Slice(versions, func(i, j int) bool { return versions[i] > versions[j] })
 	for _, n := range versions {
-		v, err := s.load(src, seen, attestors, allowed, targets, n)
+		v, err := s.load(src, proto, targets, n)
 		if err != nil {
 			return Result{}, err
 		}
@@ -599,6 +608,9 @@ func (s *Store) check(src Source, o Options) (Result, error) {
 		if res.SecurityFix != 0 {
 			break
 		}
+	}
+	if res.Release != nil && res.SecurityFix != 0 {
+		res.Release.coversFix = true
 	}
 
 	// The whole check passed: only now settle an offline install's
@@ -647,6 +659,68 @@ func (s *Store) seenKeys() (map[string]bool, error) {
 		seen[k] = true
 	}
 	return seen, nil
+}
+
+// outsideFile records that an outside attestor was once allow-listed on
+// this box. It is never removed: the interim rule ends for good.
+const outsideFile = "outside_attestor_listed"
+
+// NoteAttestors records the allow-list as the owner changes it, so an
+// outside attestor added and removed between checks still ends the interim
+// rule. Check records it too.
+func (s *Store) NoteAttestors(allow, interim []ed25519.PublicKey) error {
+	unlock, err := s.lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	_, err = s.noteAttestors(allow, interim, &Verified{})
+	return err
+}
+
+// noteAttestors fills v's allowed and pinned sets, records any outside
+// listing, and reports whether the interim rule holds. The caller holds
+// the lock.
+func (s *Store) noteAttestors(allow, interim []ed25519.PublicKey, v *Verified) (bool, error) {
+	var err error
+	if v.allowed, err = keySet(allow); err != nil {
+		return false, err
+	}
+	if v.pinned, err = keySet(interim); err != nil {
+		return false, err
+	}
+	outside := false
+	for fp := range v.allowed {
+		if !v.pinned[fp] {
+			outside = true
+		}
+	}
+	if outside {
+		if err := writeAtomic(s.p(outsideFile), []byte("1\n"), 0o600); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	_, err = os.Stat(s.p(outsideFile))
+	if err == nil {
+		return false, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	return len(v.allowed) > 0, nil
+}
+
+func keySet(keys []ed25519.PublicKey) (map[string]bool, error) {
+	set := map[string]bool{}
+	for _, k := range keys {
+		der, err := x509.MarshalPKIXPublicKey(k)
+		if err != nil || len(k) != ed25519.PublicKeySize {
+			return nil, fmt.Errorf("attestor allow-list holds a key that is not Ed25519")
+		}
+		set[fingerprint(der)] = true
+	}
+	return set, nil
 }
 
 func (s *Store) writeSeenKeys(seen map[string]bool) error {
@@ -717,7 +791,7 @@ func fileOf(p string, tf *metadata.TargetFiles) (File, error) {
 	return File{Path: p, Length: tf.Length, SHA256: hex.EncodeToString(sum)}, nil
 }
 
-func (s *Store) load(src Source, seen, attestors, allowed map[string]bool, targets *metadata.Metadata[metadata.TargetsType], n int64) (*Verified, error) {
+func (s *Store) load(src Source, proto Verified, targets *metadata.Metadata[metadata.TargetsType], n int64) (*Verified, error) {
 	p := ReleasePath(n)
 	man, err := fileOf(p, targets.Signed.Targets[p])
 	if err != nil {
@@ -740,13 +814,8 @@ func (s *Store) load(src Source, seen, attestors, allowed map[string]bool, targe
 	if rel.Version != n {
 		return nil, fmt.Errorf("%w: %s holds version %d", ErrBadRepository, p, rel.Version)
 	}
-	interim := len(allowed) > 0
-	for fp := range allowed {
-		if !attestors[fp] {
-			interim = false
-		}
-	}
-	v := &Verified{sealed: true, release: rel, manifest: man, files: map[string]File{}, maintainers: seen, operated: attestors, allowed: allowed, interim: interim}
+	v := &proto
+	v.sealed, v.release, v.manifest, v.files = true, rel, man, map[string]File{}
 	for _, f := range rel.Files {
 		tf, ok := targets.Signed.Targets[f]
 		if !ok {

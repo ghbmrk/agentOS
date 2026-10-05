@@ -298,11 +298,13 @@ func TestOnlyAllowListedAttestorsCount(t *testing.T) {
 func TestProjectTestBoxIsInterimAttestor(t *testing.T) {
 	f := newFixture(t)
 	box := newKey(t)
-	f.must(f.repo.SetMaintainerAttestors([]ed25519.PublicKey{box.Public().(ed25519.PublicKey)}))
+	boxPub := box.Public().(ed25519.PublicKey)
+	only := []ed25519.PublicKey{boxPub}
 	f.release(2, func(r *Manifest) { r.Security = true })
 	f.publish(0, 1)
-	only := []ed25519.PublicKey{box.Public().(ed25519.PublicKey)}
-	res, err := f.check(Options{Attestors: only})
+	// The image pins the test box; the signed maintainer list need not name
+	// it, and it may carry the maintainer label.
+	res, err := f.check(Options{Attestors: only, InterimAttestors: only})
 	if err != nil || res.Release == nil {
 		t.Fatal(res.Release, err)
 	}
@@ -311,23 +313,108 @@ func TestProjectTestBoxIsInterimAttestor(t *testing.T) {
 	if !v.InterimAttestation() || v.IndependentPasses([][]byte{labelled}, nil) != 1 || !v.WithAttestations([][]byte{labelled}, nil).Security() {
 		t.Fatal("the project's test box did not count as the interim check")
 	}
-	// A key that only claims the label, or is listed but not signed as
-	// maintainer-operated, does not ride the interim rule.
+	if v.MaintainerPasses([][]byte{labelled}, nil) != 1 {
+		t.Fatal("the test box's pass is not evidence for the digest")
+	}
+	// Pinned but not allow-listed, or allow-listed but not pinned: no.
+	res, _ = f.check(Options{Attestors: []ed25519.PublicKey{}, InterimAttestors: only})
+	if res.Release.InterimAttestation() || res.Release.IndependentPasses([][]byte{labelled}, nil) != 0 {
+		t.Fatal("an empty allow-list counted the test box")
+	}
+	// A key that only claims the label does not ride the interim rule.
 	stranger := newKey(t)
 	claim, _ := Attest(stranger, v, Statement{Result: ResultPass, Channel: ChannelFast, Operator: OperatorMaintainer})
 	if v.IndependentPasses([][]byte{claim}, nil) != 0 {
 		t.Fatal("a self-labelled key counted")
 	}
-	res, _ = f.check(Options{Attestors: append(only, stranger.Public().(ed25519.PublicKey))})
-	if res.Release.InterimAttestation() || res.Release.IndependentPasses([][]byte{pass(t, box, res.Release)}, nil) != 0 {
-		t.Fatal("the test box still counted after an outside attestor was listed")
+}
+
+// The signed maintainer list never makes a key count: a compromised quorum
+// that lists the outside attestor as maintainer-operated must not turn the
+// interim rule back on (L3 round 3, B1).
+func TestSignedListCannotReviveInterim(t *testing.T) {
+	f := newFixture(t)
+	box, outside := newKey(t), newKey(t)
+	pinned := []ed25519.PublicKey{box.Public().(ed25519.PublicKey)}
+	allow := append(append([]ed25519.PublicKey{}, pinned...), outside.Public().(ed25519.PublicKey))
+	f.must(f.repo.SetMaintainerAttestors(allow))
+	f.release(3, func(r *Manifest) { r.Security = true })
+	f.publish(0, 1)
+	res, err := f.check(Options{Attestors: allow, InterimAttestors: pinned})
+	if err != nil || res.Release == nil {
+		t.Fatal(res.Release, err)
 	}
-	if res.Release.IndependentPasses([][]byte{pass(t, stranger, res.Release)}, nil) != 1 {
-		t.Fatal("the outside attestor did not count")
+	v := res.Release
+	atts := [][]byte{pass(t, box, v), pass(t, outside, v)}
+	if v.InterimAttestation() || v.IndependentPasses(atts, nil) != 0 || v.WithAttestations(atts, nil).Security() {
+		t.Fatal("the signed list revived the interim rule")
 	}
-	// Not on the allow-list at all: nothing counts.
-	res, _ = f.check(Options{Attestors: []ed25519.PublicKey{}})
-	if res.Release.InterimAttestation() || res.Release.IndependentPasses([][]byte{labelled}, nil) != 0 {
-		t.Fatal("an empty allow-list counted the test box")
+	// Nor does it make an allow-listed, unpinned maintainer key count alone.
+	solo := newFixture(t)
+	mk := newKey(t)
+	mkList := []ed25519.PublicKey{mk.Public().(ed25519.PublicKey)}
+	solo.must(solo.repo.SetMaintainerAttestors(mkList))
+	solo.release(2, func(r *Manifest) { r.Security = true })
+	solo.publish(0, 1)
+	res, _ = solo.check(Options{Attestors: mkList})
+	if res.Release.InterimAttestation() || res.Release.IndependentPasses([][]byte{pass(t, mk, res.Release)}, nil) != 0 {
+		t.Fatal("a signed maintainer key counted without the image pin")
+	}
+}
+
+// Once an outside attestor is listed, the interim rule ends for good, even
+// if that attestor is removed later or never seen by a check (B2).
+func TestInterimEndsForGood(t *testing.T) {
+	f := newFixture(t)
+	box, outside := newKey(t), newKey(t)
+	pinned := []ed25519.PublicKey{box.Public().(ed25519.PublicKey)}
+	allow := append(append([]ed25519.PublicKey{}, pinned...), outside.Public().(ed25519.PublicKey))
+	f.release(2, func(r *Manifest) { r.Security = true })
+	f.publish(0, 1)
+	res, _ := f.check(Options{Attestors: allow, InterimAttestors: pinned})
+	if v := res.Release; v.InterimAttestation() || v.IndependentPasses([][]byte{pass(t, box, v)}, nil) != 0 ||
+		v.IndependentPasses([][]byte{pass(t, outside, v)}, nil) != 1 {
+		t.Fatal("with an outside attestor listed, the test box counted or the outside one did not")
+	}
+	res, _ = f.check(Options{Attestors: pinned, InterimAttestors: pinned})
+	if v := res.Release; v.InterimAttestation() || v.IndependentPasses([][]byte{pass(t, box, v)}, nil) != 0 {
+		t.Fatal("removing the outside attestor brought the interim rule back")
+	}
+	// Added and removed between checks: the owner's change is noted.
+	g := newFixture(t)
+	g.release(2, func(r *Manifest) { r.Security = true })
+	g.publish(0, 1)
+	g.must(g.store.NoteAttestors(allow, pinned))
+	res, _ = g.check(Options{Attestors: pinned, InterimAttestors: pinned})
+	if res.Release.InterimAttestation() {
+		t.Fatal("an outside attestor noted between checks did not end the interim rule")
+	}
+}
+
+// The newest release supersedes a security fix: it auto-stages on an
+// independent attestation of its own manifest, and only then (C2).
+func TestNewestReleaseCarriesTheSecurityFix(t *testing.T) {
+	f := newFixture(t)
+	f.release(2, func(r *Manifest) { r.Security = true })
+	f.release(3, nil)
+	f.publish(0, 1)
+	res, err := f.check(Options{Channel: ChannelFast})
+	if err != nil || res.Release == nil || res.SecurityFix != 2 {
+		t.Fatal(res, err)
+	}
+	v := res.Release
+	if v.SecurityAutoStage(nil, nil) != ErrNeedsAttestation {
+		t.Fatal("the newest release staged without an attestation")
+	}
+	if !v.WithAttestations([][]byte{pass(t, f.att[0], v)}, nil).Security() {
+		t.Fatal("the newest release did not carry the security fix")
+	}
+	// An attestation of the superseded fix is not one of the newest.
+	old := newFixture(t)
+	old.release(2, func(r *Manifest) { r.Security = true })
+	old.publish(0, 1)
+	r2, _ := old.check(Options{Channel: ChannelFast})
+	if v.SecurityAutoStage([][]byte{pass(t, old.att[0], r2.Release)}, nil) == nil {
+		t.Fatal("an attestation of another manifest counted")
 	}
 }
