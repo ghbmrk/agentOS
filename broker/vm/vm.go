@@ -193,7 +193,10 @@ var (
 	ErrConflict = errors.New("vm: merge conflict")
 	ErrImage    = errors.New("vm: snapshots are of different images")
 	ErrRevoked  = errors.New("vm: admission was withdrawn before the machine started")
-	ErrQuota    = errors.New("vm: disk budget exceeded: snapshot refused; free space in the machine (delete files) or roll back, then retry")
+	// ErrPreempted: the machine was preempted while an operation held it,
+	// and what it was writing is discarded.
+	ErrPreempted = errors.New("vm: machine was preempted during the operation")
+	ErrQuota     = errors.New("vm: disk budget exceeded: snapshot refused; free space in the machine (delete files) or roll back, then retry")
 	// ErrSeedLabel refuses a seed for a machine not labelled private: seeds
 	// are derived from owner data until their files carry a public mark
 	// (REV-5, compile K7).
@@ -297,6 +300,11 @@ func (m *Manager) Create(ctx context.Context, id string, s Spec) (Machine, error
 // services are replay's, never the live plane's. Only CreateSeeded makes
 // them, and they cannot be forked or forked into.
 const EvalPrefix = "eval-"
+
+// BuilderPrefix starts the IDs of Loop 1's builder machines (W3-builder),
+// to which the vault process gives the builder's grants. Only Create makes
+// them: no fork or merge makes or touches one (security R1 on #126).
+const BuilderPrefix = "lb-"
 
 // CreateSeeded is Create with files written into the machine's fresh layer
 // before its guest first runs, at paths relative to the guest's root: how
@@ -720,6 +728,15 @@ func (m *Manager) capture(ctx context.Context, mc *machine, t Tier) (Snapshot, e
 			return fail(err)
 		}
 	}
+	// A preemption that began before the copy or checkpoint returned may
+	// have killed the sandbox under it, and a runtime need not report that
+	// as an error: the image may be cut short. Such a snapshot is never
+	// published (Security R2 on #124). Preempt marks the machine before it
+	// kills, so a mark not seen here means the kill came after the image
+	// was whole.
+	if mc.preempting.Load() {
+		return fail(fmt.Errorf("%w: %s: snapshot discarded", ErrPreempted, mc.ID))
+	}
 	if err := writeJSON(filepath.Join(dir, "meta.json"), s); err != nil {
 		return fail(err)
 	}
@@ -945,9 +962,15 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 	if strings.HasPrefix(id, EvalPrefix) {
 		return Snapshot{}, fmt.Errorf("vm: replay machine %s cannot be forked", id)
 	}
+	if strings.HasPrefix(id, BuilderPrefix) {
+		return Snapshot{}, fmt.Errorf("vm: builder machine %s cannot be forked", id)
+	}
 	for _, f := range ids {
 		if strings.HasPrefix(f, EvalPrefix) {
 			return Snapshot{}, fmt.Errorf("vm: machine ids starting %q are kept for replay", EvalPrefix)
+		}
+		if strings.HasPrefix(f, BuilderPrefix) {
+			return Snapshot{}, fmt.Errorf("vm: machine ids starting %q are kept for Loop 1's builder", BuilderPrefix)
 		}
 		if !idRE.MatchString(f) {
 			return Snapshot{}, fmt.Errorf("vm: bad machine id %q", f)
@@ -1101,6 +1124,9 @@ func (m *Manager) view(s Snapshot) overlay.View {
 func (m *Manager) Merge(ctx context.Context, dst, src string) (Snapshot, error) {
 	if strings.HasPrefix(dst, EvalPrefix) || strings.HasPrefix(src, EvalPrefix) {
 		return Snapshot{}, errors.New("vm: replay machines are not merged")
+	}
+	if strings.HasPrefix(dst, BuilderPrefix) || strings.HasPrefix(src, BuilderPrefix) {
+		return Snapshot{}, errors.New("vm: builder machines are not merged")
 	}
 	sm, err := m.get(src)
 	if err != nil {

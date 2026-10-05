@@ -395,6 +395,13 @@ func (m *Meter) admit(machine, tid, goal string, now, in int64) (*Exhausted, err
 func (m *Meter) add(machine, tid, goal string, now int64, use Limits) {
 	m.st.Overall = m.charge(m.st.Overall, now, use)
 	m.st.Machines[machine] = m.charge(m.st.Machines[machine], now, use)
+	// A machine whose use has all left the window is forgotten, so
+	// one-job machines (builders, replay) do not pile up (L3 S4 on #126).
+	for id, bs := range m.st.Machines {
+		if id != machine && (len(bs) == 0 || bs[len(bs)-1].Start <= now-int64(m.cfg.Window/time.Second)) {
+			delete(m.st.Machines, id)
+		}
+	}
 	if p, ok := m.shareOf(machine); ok {
 		m.st.Shares[p] = m.charge(m.st.Shares[p], now, use)
 	}
