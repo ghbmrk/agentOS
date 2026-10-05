@@ -160,18 +160,26 @@ func TestUnansweredChangeIsNotADecline(t *testing.T) {
 		t.Fatalf("%+v", items[0])
 	}
 	r.decide(false, "expired")
-	if st := r.state(id); st.State != journal.Pending {
-		t.Fatalf("an expired request was closed: %s %q", st.State, st.Permission.Reason)
+	if st := r.state(id); st.State != journal.Denied || !strings.Contains(st.Permission.Reason, "lapsed, not declined") {
+		t.Fatalf("an expired request: %s %q", st.State, st.Permission.Reason)
 	}
 	if d := p.Digest(); len(d) != 0 {
 		t.Fatalf("an expired request reads as a decline: %q", d)
 	}
 	// A restart's drop of an intent this run never asked about is not a
 	// decline either.
-	r.g.Decide(owner.Decision{Request: "old", Item: 1, Ref: id, Why: "restart"})
+	rep2, err := p.ProposeRelease(ctx, signed(t, "3.0.1", map[string][]byte{"host-image/release": []byte("g")}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id2 := "chg:" + rep2.ID + ":adopt"
+	r.g.Decide(owner.Decision{Request: "old", Item: 1, Ref: id2, Why: "restart"})
 	r.g.Wait()
-	if st := r.state(id); st.State != journal.Pending {
-		t.Fatal(st.State)
+	if st := r.state(id2); st.State != journal.Denied || !strings.Contains(st.Permission.Reason, "lapsed, not declined") {
+		t.Fatalf("%s %q", st.State, st.Permission.Reason)
+	}
+	if d := p.Digest(); len(d) != 0 {
+		t.Fatalf("a restart drop reads as a decline: %q", d)
 	}
 
 	rep, err = p.ProposeRelease(ctx, signed(t, "3.1", map[string][]byte{"host-image/release": []byte("i")}))
@@ -301,6 +309,9 @@ func TestReleaseNeedsTheLocalPage(t *testing.T) {
 	noUI.g.Flush()
 	if noUI.own.count() != n {
 		t.Fatal("texted a code that cannot complete without the local page")
+	}
+	if notes := noUI.own.notes; len(notes) != 1 || notes[0] != "Waiting for your confirmation on the box's local page, or your recovery key." {
+		t.Fatalf("%q", notes)
 	}
 	if st := noUI.state("chg:" + rep.ID + ":adopt"); st.State != journal.Pending || !strings.Contains(st.Permission.Reason, "local page") {
 		t.Fatalf("%s %q", st.State, st.Permission.Reason)

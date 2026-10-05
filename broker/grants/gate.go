@@ -735,6 +735,10 @@ func (g *Gate) Authorize(ctx context.Context, id string) (journal.Status, error)
 		delete(g.failed, id)
 		own := g.own
 		g.mu.Unlock()
+		if fresh && v.hold && own != nil {
+			// Arbitrator Q1 on #48: one fixed line, no code.
+			_ = own.Inform("Waiting for your confirmation on the box's local page, or your recovery key.")
+		}
 		if fresh && onlyUI && !v.hold && own != nil {
 			// Recipients that cannot be shown in full are never approved
 			// by text (CH-10, CH-12).
@@ -1001,10 +1005,12 @@ func (g *Gate) isChange(id string) bool {
 
 // lapse closes the owner's request for a change intent that ended without
 // the owner's answer: expired, voided by wrong codes, left out of a partial
-// YES, or dropped by a restart (change C7). The intent is left pending,
-// never denied, so silence is never recorded as a decline; the pipeline
-// drops its proposal and proposes again later. Only the owner's NO (Why
-// "owner") denies.
+// YES, or dropped by a restart (change C7). The pipeline drops its
+// proposal without recording a decline, then the intent closes as "lapsed,
+// not declined" (arbitrator Q3 on #48): it never runs, the owner channel
+// lists the expired item in the digest (CH-13), and neither learning nor
+// Loop 1's backoff reads silence as a rejection. Only the owner's NO is a
+// decline.
 func (g *Gate) lapse(d owner.Decision) {
 	g.mu.Lock()
 	w := g.waiting[d.Ref]
@@ -1018,7 +1024,11 @@ func (g *Gate) lapse(d owner.Decision) {
 	if st, err := eng.Get(d.Ref); err == nil && g.cfg.Changes != nil {
 		g.cfg.Changes.Decided(context.Background(), st.Intent, false)
 	}
+	g.closeIntent(d.Ref, lapsed)
 }
+
+// lapsed is the reason a change request closed without the owner's answer.
+const lapsed = "lapsed, not declined: the owner did not answer"
 
 // ConfirmLocal records the owner's confirmation on the local page for a
 // grant intent (CH-3), or for a change that needs it: turning sharing on
