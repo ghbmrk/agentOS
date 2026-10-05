@@ -19,6 +19,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # The canary and audit self-tests build the broker, so install the
+      # toolchain go.mod names (GOTOOLCHAIN=local never downloads one).
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0 (reads the toolchain line)
+        with:
+          go-version-file: broker/go.mod
+          cache: false
       - name: Unit tests
         run: python -m unittest discover -s tests -v
       - name: Traceability (markers cite known IDs; checked on a regenerated TRACE.md)
