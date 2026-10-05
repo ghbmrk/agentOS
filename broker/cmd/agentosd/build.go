@@ -69,6 +69,9 @@ func builderDenied(logf func(string, ...any)) func(machine string, d modelroute.
 type buildConfig struct {
 	Dir   string // builder machines' socket directories
 	Image string // the minimal builder image (C-3c-3), registered with -image
+	// ImageDefault: Image is defaultBuilderImage, not named by the
+	// operator, so a box without it registered simply has no builder.
+	ImageDefault bool
 	// AgentImage is the agent's image, which the builder never runs
 	// (security R2 on #126).
 	AgentImage string
@@ -127,10 +130,19 @@ const builderOffNote = "Learning from failed, corrected, slow or costly tasks: n
 // (UX-134-1).
 const builderUnsetNote = "Learning: this box learns from repeated routines only, not yet from mistakes or slow tasks."
 
+// Defaults for -builder-image and -builder-launch (W3-builder-ship): the
+// box image registers its builder image under this name and installs
+// guest/builder/launch.json here, root-owned, mode 0644.
+const (
+	defaultBuilderImage  = "builder"
+	defaultBuilderLaunch = "/usr/lib/agentos/builder/launch.json"
+)
+
 // startBuilder opens the builder, and on failure logs it and keeps the
-// STATUS note on. With no image it opens nothing and says so.
+// STATUS note on. With no image it opens nothing and says so; so it does
+// when the default image is not registered, since the box carries none.
 func (l *learning) startBuilder(m builderMachines, imgs images, services *lateServices, c buildConfig) {
-	if c.Image == "" {
+	if _, ok := imgs[c.Image]; c.Image == "" || c.ImageDefault && !ok {
 		l.builderUnset.Store(true)
 		return
 	}
