@@ -156,6 +156,10 @@ type Pending struct {
 // owner keeps those parts of the old card.
 func (p *Pending) Card() Card { return p.next }
 
+// ErrLostCardParts is a lost-card rotation that keeps a factor the lost
+// card carries.
+var ErrLostCardParts = errors.New("recovery: without the current card, the passphrase and recovery key are both replaced")
+
 // ErrPendingLapsed is a rotation that expired, was used, or was answered
 // wrong three times. Nothing changed; start again.
 var ErrPendingLapsed = errors.New("recovery: this new card has lapsed; nothing changed, start again")
@@ -172,8 +176,9 @@ var ErrCardNotStored = errors.New("recovery: part of the new card is in effect b
 // It is a tier-4 action (CH-3). Rewriting the passphrase or recovery slot
 // needs a factor that opens the drive now: the current recovery key or
 // passphrase typed from the old card, or the vault process's own TPM
-// factor when the card is lost. When have is nil the recovery key in auth
-// serves.
+// factor when the card is lost, in which case both the passphrase and the
+// recovery key must be among the parts. When have is nil the recovery key
+// in auth serves.
 func BeginRotate(b *Box, parts []Part, auth Auth, have vault.Factor, gen Generator, r io.Reader, now time.Time) (*Pending, error) {
 	if err := auth.check(b); err != nil {
 		return nil, err
@@ -195,6 +200,11 @@ func BeginRotate(b *Box, parts []Part, auth Auth, have vault.Factor, gen Generat
 	}
 	if (set[PartPassphrase] || set[PartRecovery]) && !b.opensWith(have) {
 		return nil, errors.New("recovery: replacing the passphrase or recovery key needs the current one from the card")
+	}
+	// No current card (proved by the box's own TPM slot): the lost card
+	// may be in other hands, so both factors it carries are replaced.
+	if have != nil && have.Kind() == vault.SlotTPM && !(set[PartPassphrase] && set[PartRecovery]) {
+		return nil, ErrLostCardParts
 	}
 	cur, err := b.LoadCard()
 	if err != nil {

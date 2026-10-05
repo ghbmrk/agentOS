@@ -86,8 +86,13 @@ func TestReplacingAFactorNeedsAFactorThatOpensTheDrive(t *testing.T) {
 			t.Fatalf("rotated with %v", have)
 		}
 	}
-	// Card lost: the box's own TPM slot proves the drive.
-	nc, err := x.rotate([]Part{PartRecovery}, Auth{Code: true, Local: true}, fakeTPM{[]byte("sealed-to-host-a-tpm")})
+	// Card lost: the box's own TPM slot proves the drive, and both
+	// factors the lost card carries are replaced.
+	tpm := fakeTPM{[]byte("sealed-to-host-a-tpm")}
+	if _, err := x.rotate([]Part{PartRecovery}, Auth{Code: true, Local: true}, tpm); !errors.Is(err, ErrLostCardParts) {
+		t.Fatalf("lost card kept the passphrase: %v", err)
+	}
+	nc, err := x.rotate([]Part{PartRecovery, PartPassphrase}, Auth{Code: true, Local: true}, tpm)
 	must(t, err)
 	nk, _ := ParseRecoveryKey(nc.RecoveryKey)
 	if _, err := vault.OpenSealed(x.b.VaultPath, x.b.KeysPath, Factor(nk)); err != nil {
