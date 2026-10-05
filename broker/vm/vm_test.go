@@ -957,7 +957,7 @@ func lineageOf(t *testing.T, e *env, id string) string {
 // outweighs experiments, and every machine has the same process cap.
 // The whole pool weighs less than the broker (RES-2).
 func TestRES2MachineLimitsByClass(t *testing.T) {
-	l := func(c admission.Class) cgroup.Limits { return MachineLimits(Spec{Class: c, MemMB: 1600}) }
+	l := func(c admission.Class) cgroup.Limits { return MachineLimits("m1", Spec{Class: c, MemMB: 1600}) }
 	fg, acc, exp := l(admission.Foreground), l(admission.Accepted), l(admission.Experiment)
 	if fg.MaxBytes != 1600<<20 || acc.MaxBytes != 1600<<20 || exp.MaxBytes != 1600<<20 {
 		t.Fatalf("memory budget = %d, %d, %d", fg.MaxBytes, acc.MaxBytes, exp.MaxBytes)
@@ -976,5 +976,23 @@ func TestRES2MachineLimitsByClass(t *testing.T) {
 	// An unknown class gets the least weight, never the most.
 	if u := l(admission.Class(9)); u.CPUWeight != ExperimentWeight {
 		t.Errorf("unknown class weighed %d", u.CPUWeight)
+	}
+	// A worker takes its creator's class but never outweighs accepted
+	// work, so a foreground agent's builds cannot crowd out the agent
+	// itself or the owner's other foreground work (L3 S2 on #155).
+	w := MachineLimits(WorkerPrefix+"b1", Spec{Class: admission.Foreground, MemMB: 200})
+	if w.CPUWeight != AcceptedWeight || w.IOWeight != AcceptedWeight {
+		t.Errorf("foreground worker weighed %d/%d, want %d", w.CPUWeight, w.IOWeight, AcceptedWeight)
+	}
+	if w := MachineLimits(WorkerPrefix+"b2", Spec{Class: admission.Experiment, MemMB: 200}); w.CPUWeight != ExperimentWeight {
+		t.Errorf("experiment worker weighed %d", w.CPUWeight)
+	}
+	// The cap is bounded both ways: room for a parallel build, and far
+	// below the pool's cap so one machine cannot take it all (L3 S3).
+	if MachinePids != 4096 {
+		t.Errorf("MachinePids = %d, want 4096 (vm V29)", MachinePids)
+	}
+	if MachinePids >= budget.MaxPoolPids {
+		t.Errorf("one machine's cap %d reaches the pool's %d", MachinePids, budget.MaxPoolPids)
 	}
 }

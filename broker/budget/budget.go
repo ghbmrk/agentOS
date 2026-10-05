@@ -90,6 +90,28 @@ const (
 	PoolWeight      = 100
 )
 
+// HostPidsReserve is the share of the root's process cap (the unit's
+// TasksMax) kept out of the pool for the broker, inference and the
+// browser, so machines at their caps never take the last task the broker
+// needs for a thread (budget R14).
+const HostPidsReserve = 1024
+
+// MaxPoolPids caps the whole pool's tasks when the root's cap allows more
+// or is unlimited: four machines at vm.MachinePids.
+const MaxPoolPids = 16384
+
+// PoolPids is the pool's process cap under a root capped at rootMax (0 for
+// no cap): what the reserve leaves, at most MaxPoolPids.
+func PoolPids(rootMax int64) (int64, error) {
+	if rootMax == 0 {
+		return MaxPoolPids, nil
+	}
+	if rootMax <= HostPidsReserve {
+		return 0, fmt.Errorf("budget: the cgroup root's pids.max %d leaves no room past the host's reserve of %d", rootMax, HostPidsReserve)
+	}
+	return min(rootMax-HostPidsReserve, MaxPoolPids), nil
+}
+
 // Groups are the component groups Apply made.
 type Groups struct {
 	Broker, Inference, Browser *cgroup.Group
@@ -98,13 +120,20 @@ type Groups struct {
 }
 
 // Apply creates one group per component under root, each with its CPU and
-// I/O weight. Inference, the browser and the pool get hard limits; the broker gets its budget as protected
+// I/O weight, and caps the pool's tasks below the root's (PoolPids). Inference, the browser and the pool get hard limits; the broker gets its budget as protected
 // memory and no hard limit, so it is never OOM-killed by its own group and
 // its pages are not reclaimed for others. With every other component capped
 // and the headroom left over, the host's own OOM killer has nothing to do.
 func (m Memory) Apply(root *cgroup.Group) (Groups, error) {
 	var g Groups
-	var err error
+	rootPids, err := root.PidsMax()
+	if err != nil {
+		return Groups{}, err
+	}
+	poolPids, err := PoolPids(rootPids)
+	if err != nil {
+		return Groups{}, err
+	}
 	mib := func(n int64) int64 { return n << 20 }
 	if g.Broker, err = root.Component("broker", cgroup.Limits{MinBytes: mib(m.HostMB), CPUWeight: BrokerWeight, IOWeight: BrokerWeight}); err != nil {
 		return Groups{}, err
@@ -122,7 +151,7 @@ func (m Memory) Apply(root *cgroup.Group) (Groups, error) {
 	// The pool's own memory.high would throttle every machine together
 	// before any one reached its limit, so it is set at the hard limit:
 	// per-machine groups carry the throttle.
-	pool, err := root.Component("machines", cgroup.Limits{MaxBytes: mib(m.PoolMB), HighBytes: mib(m.PoolMB), CPUWeight: PoolWeight, IOWeight: PoolWeight})
+	pool, err := root.Component("machines", cgroup.Limits{MaxBytes: mib(m.PoolMB), HighBytes: mib(m.PoolMB), CPUWeight: PoolWeight, IOWeight: PoolWeight, Pids: poolPids})
 	if err != nil {
 		return Groups{}, err
 	}

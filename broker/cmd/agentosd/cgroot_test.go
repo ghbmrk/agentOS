@@ -27,6 +27,9 @@ func fakeCgroupfs(t *testing.T, marked bool) (cgroupHost, string) {
 			t.Fatal(err)
 		}
 	}
+	if err := os.WriteFile(filepath.Join(own, "pids.max"), []byte("9830"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	self := filepath.Join(dir, "self-cgroup")
 	if err := os.WriteFile(self, []byte("0::/system.slice/agentos.service\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -145,5 +148,29 @@ func TestRES2DelegatedRootWithoutPidsOpensNoPool(t *testing.T) {
 func TestRES2NoMemoryControlsSaysSoInStatus(t *testing.T) {
 	if s := (&lateStatus{off: agentNoMemControls}).Status(); s != "Agent: off, the box's memory controls are not set up; it needs an update." {
 		t.Fatalf("status = %q", s)
+	}
+}
+
+// I/O weights are inert without iocost: the broker says so once at start
+// (L3 S1 on #155, budget R12).
+func TestRES2IOWeightNote(t *testing.T) {
+	fsRoot := t.TempDir()
+	root := filepath.Join(fsRoot, "agentos.service")
+	os.MkdirAll(filepath.Join(root, "broker"), 0o755)
+	if n := ioWeightNote(fsRoot, root); !strings.Contains(n, "no iocost") {
+		t.Errorf("no io.weight: note %q", n)
+	}
+	os.WriteFile(filepath.Join(root, "broker", "io.weight"), []byte("default 1000\n"), 0o644)
+	if n := ioWeightNote(fsRoot, root); !strings.Contains(n, "io.cost.qos") {
+		t.Errorf("no io.cost.qos: note %q", n)
+	}
+	qos := filepath.Join(fsRoot, "io.cost.qos")
+	os.WriteFile(qos, []byte("8:0 enable=0 ctrl=auto rpct=0.00 rlat=250000 wpct=0.00 wlat=250000 min=1.00 max=10000.00\n"), 0o644)
+	if n := ioWeightNote(fsRoot, root); !strings.Contains(n, "io.cost.qos") {
+		t.Errorf("iocost disabled: note %q", n)
+	}
+	os.WriteFile(qos, []byte("8:0 enable=0 ctrl=auto\n259:0 enable=1 ctrl=auto rpct=0.00\n"), 0o644)
+	if n := ioWeightNote(fsRoot, root); n != "" {
+		t.Errorf("iocost on: note %q, want none", n)
 	}
 }

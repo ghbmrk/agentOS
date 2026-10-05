@@ -151,3 +151,60 @@ func TestRES2ComponentWeights(t *testing.T) {
 		t.Errorf("component pids.max = %q", got)
 	}
 }
+
+// PidsMax reads a group's process cap; "max" is no cap (0).
+func TestRES2PidsMaxReadsTheCap(t *testing.T) {
+	g := fakeV2(t)
+	must(t, os.WriteFile(filepath.Join(g.Path, "pids.max"), []byte("9830\n"), 0o644))
+	if n, err := g.PidsMax(); err != nil || n != 9830 {
+		t.Fatalf("PidsMax = %d, %v", n, err)
+	}
+	must(t, os.WriteFile(filepath.Join(g.Path, "pids.max"), []byte("max\n"), 0o644))
+	if n, err := g.PidsMax(); err != nil || n != 0 {
+		t.Fatalf("PidsMax(max) = %d, %v", n, err)
+	}
+	for _, bad := range []string{"", "-1", "0", "lots"} {
+		must(t, os.WriteFile(filepath.Join(g.Path, "pids.max"), []byte(bad), 0o644))
+		if _, err := g.PidsMax(); err == nil {
+			t.Errorf("PidsMax(%q) accepted", bad)
+		}
+	}
+	must(t, os.Remove(filepath.Join(g.Path, "pids.max")))
+	if _, err := g.PidsMax(); err == nil {
+		t.Error("PidsMax without the file accepted")
+	}
+}
+
+// A negative process cap is an error, never silently no cap (L3 S6).
+func TestRES2NegativePidsRefused(t *testing.T) {
+	g := fakeV2(t)
+	if _, err := g.Component("pool", Limits{MaxBytes: 1 << 20, Pids: -1}); err == nil {
+		t.Error("Component accepted pids -1")
+	}
+	if _, err := g.Child("m1", Limits{MaxBytes: 1 << 20, CPUWeight: 1, IOWeight: 1, Pids: -1}); err == nil {
+		t.Error("Child accepted pids -1")
+	}
+}
+
+// A machine whose limits fail half way leaves no group behind (L3 S4).
+func TestRES2ChildRemovesItsGroupWhenALimitFails(t *testing.T) {
+	g := fakeV2(t)
+	writeFile = func(name string, b []byte, perm os.FileMode) error {
+		if filepath.Base(name) == "pids.max" {
+			return errors.New("injected")
+		}
+		return os.WriteFile(name, b, perm)
+	}
+	defer func() { writeFile = os.WriteFile }()
+	// The fake's files are regular files, so rmdir would fail here where
+	// the kernel's interface files would not; the test records the call.
+	removed := ""
+	removeDir = func(p string) error { removed = p; return nil }
+	defer func() { removeDir = os.Remove }()
+	if _, err := g.Child("m1", Limits{MaxBytes: 1 << 20, CPUWeight: 1, IOWeight: 1, Pids: 8}); err == nil {
+		t.Fatal("Child succeeded with pids.max failing")
+	}
+	if removed != filepath.Join(g.Path, "m1") {
+		t.Fatalf("removed %q, want the machine's group", removed)
+	}
+}

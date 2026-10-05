@@ -127,6 +127,7 @@ func fakeV2(t *testing.T) *cgroup.Group {
 	d := t.TempDir()
 	must(t, os.WriteFile(filepath.Join(d, "cgroup.controllers"), []byte("cpu io memory pids\n"), 0o644))
 	must(t, os.WriteFile(filepath.Join(d, "cgroup.subtree_control"), nil, 0o644))
+	must(t, os.WriteFile(filepath.Join(d, "pids.max"), []byte("max\n"), 0o644))
 	g, err := cgroup.Open(d)
 	must(t, err)
 	return g

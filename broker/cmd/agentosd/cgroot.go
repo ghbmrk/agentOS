@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -72,5 +73,38 @@ func openMachines(h cgroupHost, flagRoot string, vouched bool, mem budget.Memory
 	if err != nil {
 		return nil, err
 	}
-	return openPool(root, mem)
+	g, err := openPool(root, mem)
+	if err != nil {
+		return nil, err
+	}
+	if n := ioWeightNote(h.FS, root); n != "" {
+		log.Print(n)
+	}
+	return g, nil
+}
+
+// ioWeightNote says why I/O weights are inert, or "" when iocost weighs
+// them on at least one disk (budget R12). The host image enables iocost
+// on the state disk (SR2-4i); io.cost.qos lives in the cgroup root, which
+// the broker only reads.
+func ioWeightNote(fsRoot, root string) string {
+	if _, err := os.Stat(filepath.Join(root, "broker", "io.weight")); err != nil {
+		return "cgroup: io.weight absent (kernel has no iocost): machines' disk use is not weighed against the broker"
+	}
+	b, _ := os.ReadFile(filepath.Join(fsRoot, "io.cost.qos"))
+	for _, line := range strings.Split(string(b), "\n") {
+		if hasField(line, "enable=1") {
+			return ""
+		}
+	}
+	return "cgroup: iocost is off on every disk (io.cost.qos): io.weight is written but machines' disk use is not weighed against the broker"
+}
+
+func hasField(line, f string) bool {
+	for _, x := range strings.Fields(line) {
+		if x == f {
+			return true
+		}
+	}
+	return false
 }

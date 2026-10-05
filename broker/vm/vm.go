@@ -102,16 +102,21 @@ const (
 // (vm V29, unmeasured).
 const MachinePids = 4096
 
-// MachineLimits is a machine's cgroup limits: its declared memory budget,
+// MachineLimits is machine id's cgroup limits: its declared memory budget,
 // its class's weights and the process cap. Every machine kind gets them,
-// workers included. An unknown class weighs least.
-func MachineLimits(s Spec) cgroup.Limits {
+// workers included; a worker never weighs more than accepted work, so a
+// foreground agent's builds cannot crowd out the agent itself. An unknown
+// class weighs least.
+func MachineLimits(id string, s Spec) cgroup.Limits {
 	w := ExperimentWeight
 	switch s.Class {
 	case admission.Foreground:
 		w = ForegroundWeight
 	case admission.Accepted:
 		w = AcceptedWeight
+	}
+	if strings.HasPrefix(id, WorkerPrefix) {
+		w = min(w, AcceptedWeight)
 	}
 	return cgroup.Limits{MaxBytes: s.MemMB << 20, CPUWeight: w, IOWeight: w, Pids: MachinePids}
 }
@@ -537,7 +542,7 @@ func (m *Manager) startFrom(ctx context.Context, mc *machine, s *Snapshot) error
 		return err
 	}
 	if m.cfg.Cgroups != nil {
-		if _, err := m.cfg.Cgroups.Child(mc.ID, MachineLimits(mc.Spec)); err != nil {
+		if _, err := m.cfg.Cgroups.Child(mc.ID, MachineLimits(mc.ID, mc.Spec)); err != nil {
 			return err
 		}
 	}

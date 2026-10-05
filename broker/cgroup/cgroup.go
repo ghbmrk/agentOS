@@ -89,7 +89,7 @@ func (g *Group) Child(name string, l Limits) (*Group, error) {
 	if l.MaxBytes <= 0 {
 		return nil, fmt.Errorf("cgroup: %s: a budget is required (RES-2)", name)
 	}
-	if l.Pids <= 0 || l.CPUWeight == 0 || l.IOWeight == 0 {
+	if l.Pids == 0 || l.CPUWeight == 0 || l.IOWeight == 0 {
 		return nil, fmt.Errorf("cgroup: %s: a process cap and CPU and I/O weights are required (RES-2)", name)
 	}
 	shares, err := l.shares()
@@ -136,10 +136,30 @@ func (l Limits) shares() ([][2]string, error) {
 		}
 		kvs = append(kvs, [2]string{w.file, w.prefix + strconv.Itoa(w.v)})
 	}
+	if l.Pids < 0 {
+		return nil, fmt.Errorf("pids.max %d is negative", l.Pids)
+	}
 	if l.Pids > 0 {
 		kvs = append(kvs, [2]string{"pids.max", strconv.FormatInt(l.Pids, 10)})
 	}
 	return kvs, nil
+}
+
+// PidsMax is the group's own process cap (pids.max), or 0 for "max".
+func (g *Group) PidsMax() (int64, error) {
+	b, err := os.ReadFile(filepath.Join(g.Path, "pids.max"))
+	if err != nil {
+		return 0, err
+	}
+	v := strings.TrimSpace(string(b))
+	if v == "max" {
+		return 0, nil
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("cgroup: bad pids.max %q in %s", v, g.Path)
+	}
+	return n, nil
 }
 
 // writeAll writes each file in order. Two files a kernel may lack are
@@ -187,7 +207,7 @@ func (g *Group) Kill(ctx context.Context) error {
 
 // Remove deletes an empty group. A missing group is not an error.
 func (g *Group) Remove() error {
-	err := os.Remove(g.Path)
+	err := removeDir(g.Path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -247,8 +267,14 @@ func PressureSource(path string) (read func() float64, ok bool) {
 	}, true
 }
 
+// writeFile and removeDir are the file system calls tests replace.
+var (
+	writeFile = os.WriteFile
+	removeDir = os.Remove
+)
+
 func (g *Group) write(file, v string) error {
-	return os.WriteFile(filepath.Join(g.Path, file), []byte(v), 0o644)
+	return writeFile(filepath.Join(g.Path, file), []byte(v), 0o644)
 }
 
 func (g *Group) event(key string) (int, error) {
