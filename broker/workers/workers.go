@@ -138,7 +138,7 @@ func (t *Tools) List() []map[string]any {
 				"stdin_base64":    map[string]any{"type": "string", "description": "Binary stdin, base64; instead of stdin."},
 				"output_base64":   map[string]any{"type": "boolean", "description": "Return stdout and stderr base64-encoded, for binary output."},
 				"timeout_seconds": map[string]any{"type": "number", "description": fmt.Sprintf("Default %d, at most %d.", int(DefaultTimeout.Seconds()), int(MaxTimeout.Seconds()))}}, "name", "argv")},
-		{"name": toolRead, "description": fmt.Sprintf("Read a file from a worker, or length bytes of it from offset (at most %d at once; its image needs tail).", MaxOutput),
+		{"name": toolRead, "description": fmt.Sprintf("Read a file from a worker, or length bytes of it from offset (at most %d at once; its image needs tail). truncated: true means more follows: read again from offset+length.", MaxOutput),
 			"inputSchema": obj(map[string]any{"name": pName, "path": pPath,
 				"offset": map[string]any{"type": "number", "description": "Byte offset to start at; default 0."},
 				"length": map[string]any{"type": "number", "description": fmt.Sprintf("Bytes to read; default and at most %d.", MaxOutput)},
@@ -365,7 +365,7 @@ func (t *Tools) run(ctx context.Context, c caller, name string, cmd vm.Command, 
 	}
 	r, err := t.M.Exec(ctx, w.ID, cmd, timeout)
 	if err != nil {
-		return vm.ExecResult{}, fmt.Errorf("worker %s: %w", name, err)
+		return vm.ExecResult{}, workerErr(name, err)
 	}
 	return r, nil
 }
@@ -526,7 +526,7 @@ func (t *Tools) checkpoint(ctx context.Context, c caller, raw json.RawMessage) (
 	}
 	s, err := t.M.Checkpoint(ctx, w.ID)
 	if err != nil {
-		return nil, fmt.Errorf("worker %s: %w", a.Name, err)
+		return nil, workerErr(a.Name, err)
 	}
 	return map[string]any{"snapshot": s.ID}, nil
 }
@@ -625,6 +625,17 @@ func startErr(name string, err error) error {
 	if errors.Is(err, admission.ErrNoRoom) || errors.Is(err, admission.ErrPressure) {
 		return fmt.Errorf("no room for worker %s now: destroy a worker, or ask for less memory with mem_mb", name)
 	}
+	return workerErr(name, err)
+}
+
+// workerErr names the worker in err. Over its layer cap every command is
+// refused, deletions included, so the way out it names is a rollback or
+// destroy (UX-150-1).
+func workerErr(name string, err error) error {
+	var full *vm.WorkerFull
+	if errors.As(err, &full) {
+		return fmt.Errorf("worker %s holds more files than its %d MB cap; roll it back to a snapshot or destroy it", name, (full.Cap+1<<20-1)>>20)
+	}
 	return fmt.Errorf("worker %s: %w", name, err)
 }
 
@@ -683,7 +694,7 @@ func (t *Tools) destroy(ctx context.Context, c caller, raw json.RawMessage) (any
 		return nil, err
 	}
 	if err := t.M.Destroy(ctx, w.ID); err != nil {
-		return nil, fmt.Errorf("worker %s: %w", a.Name, err)
+		return nil, workerErr(a.Name, err)
 	}
 	t.mu.Lock()
 	delete(t.used, w.ID)

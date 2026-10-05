@@ -37,6 +37,19 @@ type Command struct {
 	As Label
 }
 
+// WorkerFull refuses a command or snapshot of a worker whose files are
+// over its layer cap (Config.WorkerLayerBytes). It is an ErrQuota.
+type WorkerFull struct {
+	ID         string
+	Bytes, Cap int64
+}
+
+func (e *WorkerFull) Error() string {
+	return fmt.Sprintf("vm: worker %s holds %d bytes of files, over its cap of %d", e.ID, e.Bytes, e.Cap)
+}
+
+func (e *WorkerFull) Unwrap() error { return ErrQuota }
+
 // ErrBusy refuses to park a worker that is in use.
 var ErrBusy = errors.New("vm: worker is busy")
 

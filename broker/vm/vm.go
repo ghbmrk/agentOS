@@ -858,7 +858,7 @@ func (m *Manager) checkCaps(id, upper string) (overlay.Usage, error) {
 	}
 	switch {
 	case strings.HasPrefix(id, WorkerPrefix) && m.cfg.WorkerLayerBytes > 0 && u.Bytes > m.cfg.WorkerLayerBytes:
-		return u, fmt.Errorf("%w (worker layer %d bytes, cap %d)", ErrQuota, u.Bytes, m.cfg.WorkerLayerBytes)
+		return u, &WorkerFull{ID: id, Bytes: u.Bytes, Cap: m.cfg.WorkerLayerBytes}
 	case m.cfg.MaxLayerBytes > 0 && u.Bytes > m.cfg.MaxLayerBytes:
 		return u, fmt.Errorf("%w (layer %d bytes, cap %d)", ErrQuota, u.Bytes, m.cfg.MaxLayerBytes)
 	case u.Inodes > m.cfg.MaxLayerInodes:

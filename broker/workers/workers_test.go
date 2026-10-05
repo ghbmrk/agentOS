@@ -93,7 +93,10 @@ type late struct{ m **vm.Manager }
 
 func (l late) Preempt(id string) error { return (*l.m).Preempt(id) }
 
-func newRig(t *testing.T, capacityMB int64) *rig {
+func newRig(t *testing.T, capacityMB int64) *rig { return newRigLayer(t, capacityMB, 0) }
+
+// newRigLayer caps each worker's files at layerBytes (zero: no cap).
+func newRigLayer(t *testing.T, capacityMB, layerBytes int64) *rig {
 	r := &rig{t: t}
 	adm, err := admission.New(admission.Config{CapacityMB: capacityMB}, late{&r.m})
 	if err != nil {
@@ -103,7 +106,8 @@ func newRig(t *testing.T, capacityMB int64) *rig {
 	r.m, err = vm.Open(context.Background(), vm.Config{
 		StateDir: filepath.Join(t.TempDir(), "state"), Images: map[string]string{"base": img},
 		Runtime: &runtime{running: map[string]vm.Launch{}}, Admit: adm, NoCgroups: true,
-		FreeBytes: func(string) (int64, error) { return 1 << 50, nil },
+		FreeBytes:        func(string) (int64, error) { return 1 << 50, nil },
+		WorkerLayerBytes: layerBytes,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -741,4 +745,33 @@ func TestCAP8PendingForkHoldsItsSlots(t *testing.T) {
 	if err := r.call("agent", toolCreate, m{"name": "late", "mem_mb": MinMemMB}, nil); err == nil {
 		t.Fatal("create past the cap after the fork")
 	}
+}
+
+// Over its layer cap a worker takes no command, deletions included, so the
+// refusal names the ways out that work: roll back or destroy (UX-150-1).
+func TestCAP8OverTheCapSaysRollBackOrDestroy(t *testing.T) {
+	r := newRigLayer(t, 8000, 1<<20)
+	r.agent("agent", vm.Public)
+	r.must("agent", toolCreate, m{"name": "w"}, nil)
+	var snap struct{ Snapshot string }
+	r.must("agent", toolCkpt, m{"name": "w"}, &snap)
+	big := strings.Repeat("x", MaxStdin)
+	for i := range 2 { // the second starts under the cap and ends over it
+		r.must("agent", toolWrite, m{"name": "w", "path": fmt.Sprintf("/big%d", i), "content": big}, nil)
+	}
+	want := "worker w holds more files than its 1 MB cap; roll it back to a snapshot or destroy it"
+	for _, c := range []struct {
+		tool string
+		args m
+	}{
+		{toolExec, m{"name": "w", "argv": []string{"echo"}}},
+		{toolCkpt, m{"name": "w"}},
+		{toolFork, m{"name": "w", "into": []string{"f"}}},
+	} {
+		if err := r.call("agent", c.tool, c.args, nil); err == nil || err.Error() != want {
+			t.Errorf("%s over the cap: %v, want %q", c.tool, err, want)
+		}
+	}
+	r.must("agent", toolRollback, m{"name": "w", "snapshot": snap.Snapshot}, nil)
+	r.must("agent", toolExec, m{"name": "w", "argv": []string{"echo"}}, nil)
 }
