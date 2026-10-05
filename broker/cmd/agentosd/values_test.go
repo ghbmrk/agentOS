@@ -542,6 +542,56 @@ func TestLearningForgetsATask(t *testing.T) {
 	if !holds("f2") || !bytes.Contains(all, []byte(`"agent/f2"`)) {
 		t.Fatal("the other task's case went too")
 	}
+	// Security F1 on #123: the journal still holds the goal's intents, so
+	// the goal is tombstoned and nothing in learning reads them again: no
+	// hypothesis or brief step (Loop 1 and the compiler read l.mining), no
+	// case, no new text or values.
+	for _, st := range lp.mining.List() {
+		if st.Intent.GoalID == "owner:f1" {
+			t.Fatal("mining still lists the forgotten goal's intent")
+		}
+	}
+	saw := false
+	for _, r := range lp.mining.Trail() {
+		if r.ID == "agent/f1" || r.Intent != nil && r.Intent.GoalID == "owner:f1" {
+			t.Fatal("mining's trail still holds the forgotten goal's intent")
+		}
+		saw = saw || r.ID == "agent/f2"
+	}
+	if !saw {
+		t.Fatal("mining's trail lost the other goal")
+	}
+	lp.delivered("owner:f1", "pay the CANARY-forget invoice", false)
+	lp.observeIntent(journal.Intent{ID: "agent/f1", GoalID: "owner:f1", Origin: "guest:agent", Params: map[string]any{"to": "ann@example.test"}})
+	lp.values.mu.Lock()
+	_, revalued := lp.values.st["owner:f1"]
+	lp.values.mu.Unlock()
+	if _, ok := lp.tasks.get("owner:f1"); ok || revalued {
+		t.Fatal("a forgotten goal's text or values were kept again")
+	}
+	in, err := eng.Get("agent/f1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lp.record(grants.OwnerOutcome{Intent: in.Intent, Verdict: grants.OwnerAccepted})
+	ev, err := lp.harvest.Evidence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.HeldOut+len(ev.Dev) != 1 {
+		t.Fatalf("a forgotten goal made a case again: %d held, %d dev", ev.HeldOut, len(ev.Dev))
+	}
+	// The tombstone keeps goal IDs only, and survives a restart.
+	again, err := openLearning(learnPaths{Dir: dir, Spare: filepath.Join(dir, "spare.json")}, false, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !again.forgotten.has("owner:f1") || again.forgotten.has("owner:f2") {
+		t.Fatal("the tombstone did not survive a restart")
+	}
+	if raw, err := os.ReadFile(filepath.Join(dir, "forgotten.json")); err != nil || bytes.Contains(raw, []byte("CANARY")) {
+		t.Fatalf("tombstone: %s %v", raw, err)
+	}
 	if err := lp.forgetTask(""); err == nil {
 		t.Fatal("forgot with no goal")
 	}

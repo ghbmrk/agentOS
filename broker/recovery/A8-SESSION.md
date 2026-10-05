@@ -18,7 +18,8 @@ recovery key appears in any plaintext on either drive or in the backup
 **What the learning plane keeps at rest (W3-tasks):** the learn directory
 (`/var/lib/agentos/learn`, broker only, files 0600) holds owner task texts
 (`tasks.json`), the guest's task values and their hash key (`values.json`,
-`values.key`), and the change pipeline's state with its cases, all
+`values.key`), the change pipeline's state with its cases, and the IDs of
+forgotten goals (`forgotten.json`, no content), all
 plaintext on the box's encrypted volume. Step 10's scan covers it with the
 rest of the drive. Forgetting a task removes its text, values and cases
 from the learn directory only. The journal, skills adopted from it (until
