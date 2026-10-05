@@ -42,10 +42,16 @@ type State struct {
 	Retired map[string]time.Time `json:"retired,omitempty"`
 }
 
-// PendingRef is an open request as a restart sees it.
+// PendingRef is an open request as a restart sees it. Asked, Expires,
+// and Sums (ItemSum of each item, in Refs order) let the caller re-issue
+// an item that has not expired and has not changed (Config.Reissue). A
+// record without them, from an older build, is cancelled.
 type PendingRef struct {
-	ID   string   `json:"id"`
-	Refs []string `json:"refs"`
+	ID      string    `json:"id"`
+	Refs    []string  `json:"refs"`
+	Asked   time.Time `json:"asked,omitempty"`
+	Expires time.Time `json:"expires,omitempty"`
+	Sums    []string  `json:"sums,omitempty"`
 }
 
 // QueuedRef is a queued auto-reply as a restart sees it.

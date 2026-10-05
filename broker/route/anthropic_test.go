@@ -305,6 +305,14 @@ func TestAnthropicStreamTruncatedOrError(t *testing.T) {
 		t.Fatal("a truncated stream must not claim completion")
 	}
 
+	// A normal end whose message_delta reports no output count leaves
+	// only message_start's placeholder: not authoritative for the meter.
+	noFinal := bytes.Replace(full, []byte(`,"usage":{"output_tokens":32}`), nil, 1)
+	out.Reset()
+	if u, err := Anthropic().Stream(&out, func() {}, bytes.NewReader(noFinal), "default", false); err != nil || u.Complete || u.OutputChars != 29 {
+		t.Fatalf("placeholder usage: %+v %v", u, err)
+	}
+
 	// An error before the message starts writes nothing: the router can
 	// still fail over.
 	out.Reset()
@@ -358,5 +366,22 @@ func TestTypedAllowLists(t *testing.T) {
 	json.Unmarshal(b, &sent)
 	if sent["tool_choice"] != "auto" || sent["stop"].([]any)[0] != "END" || sent["response_format"].(map[string]any)["type"] != "json_object" {
 		t.Fatalf("re-encoded %s", b)
+	}
+}
+
+// A response whose usage has no output count is not reported usage: the
+// meter then charges the content it can count instead of zero output.
+func TestUsageWithoutOutputCountIsNotReported(t *testing.T) {
+	_, u, err := Anthropic().Response([]byte(`{"type":"message","content":[{"type":"text","text":"hello"}],"usage":{"input_tokens":12}}`), "default")
+	if err != nil || u.Reported || u.OutputChars != 5 {
+		t.Fatalf("anthropic: %+v %v", u, err)
+	}
+	_, u, err = OpenAI().Response([]byte(`{"choices":[{"message":{"content":"hello"}}],"usage":{"prompt_tokens":12}}`), "default")
+	if err != nil || u.Reported || u.OutputChars != 5 {
+		t.Fatalf("openai: %+v %v", u, err)
+	}
+	_, u, _ = OpenAI().Response([]byte(`{"choices":[{"message":{"content":"hello"}}],"usage":{"prompt_tokens":12,"completion_tokens":0}}`), "default")
+	if !u.Reported {
+		t.Fatalf("an explicit zero output count is a report: %+v", u)
 	}
 }

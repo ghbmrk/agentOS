@@ -38,6 +38,7 @@ type entry struct {
 	permission Permission
 	attempts   []Attempt
 	quality    Quality
+	authorized time.Time // when RecAuthorized was journaled
 }
 
 // Option configures Open.
@@ -560,6 +561,26 @@ func (e *Engine) List() []Status {
 	return out
 }
 
+// AuthorizedSince returns the intents on account with action that were
+// authorized at or after since and not later denied by the recheck, oldest
+// first. Pre-allowance scope bounds count them (ADP-9): an authorized intent
+// holds its place in the bound until the recheck before dispatch refuses it.
+func (e *Engine) AuthorizedSince(account, action string, since time.Time) []Intent {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var out []Intent
+	for _, id := range e.order {
+		en := e.intents[id]
+		if en.intent.Account != account || en.intent.Action != action || en.state == Denied || en.authorized.IsZero() {
+			continue
+		}
+		if !en.authorized.Before(since) {
+			out = append(out, en.intent)
+		}
+	}
+	return out
+}
+
 // Trail returns the journal records, oldest first: one audit trail for
 // effects and broker-state changes (OP-5).
 func (e *Engine) Trail() []Record {
@@ -631,6 +652,12 @@ func (e *Engine) commit(r Record) error {
 // validate checks that a record is a legal transition from the current state.
 func (e *Engine) validate(r Record) error {
 	if r.Type == RecStop {
+		return nil
+	}
+	if r.Type == RecEgress {
+		if r.Egress == nil || r.Egress.Machine == "" || r.ID != "" {
+			return fmt.Errorf("egress record without a machine")
+		}
 		return nil
 	}
 	if r.Type == RecResume {
@@ -713,6 +740,8 @@ func (e *Engine) apply(r Record) {
 	case RecResume:
 		e.stopped = false
 		return
+	case RecEgress:
+		return
 	case RecSubmitted:
 		in := *r.Intent
 		e.intents[r.ID] = &entry{intent: in, fp: fingerprint(in), efp: effectFingerprint(in), state: Pending}
@@ -723,6 +752,7 @@ func (e *Engine) apply(r Record) {
 	switch r.Type {
 	case RecAuthorized:
 		en.state = Authorized
+		en.authorized = r.At
 		en.permission = Permission{Decision: "allowed", Phase: PhaseAuthorize}
 	case RecDenied:
 		en.state = Denied

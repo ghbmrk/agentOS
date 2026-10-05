@@ -13,11 +13,16 @@ type bootReport struct {
 	queued  []QueuedRef
 }
 
-// Boot reports what a restart dropped (OP-4, CH-13): each item of a
-// request open at shutdown is decided as denied with Why "restart" and
-// listed for the digest, and the owner is texted which requests were
-// cancelled and which auto-replies were not sent. Run calls it; it does
-// nothing the second time.
+// Boot reports what a restart dropped (OP-4, CH-13). Every old code dies:
+// each request open at shutdown is retired. With Config.Reissue set, the
+// items of a request not yet expired are handed to it to be re-sent with
+// new codes, and those that expired meanwhile are decided as denied with
+// Why "expired". Without it, or for a request recorded without its expiry,
+// they are decided as denied with Why "restart". Each auto-reply still
+// queued is decided as denied with Why "restart". The decided items are
+// listed for the digest, and the owner is texted what was re-sent,
+// cancelled, expired, and not sent. Run calls it; it does nothing the
+// second time.
 func (c *Channel) Boot() {
 	now := c.cfg.Now()
 	c.mu.Lock()
@@ -25,38 +30,77 @@ func (c *Channel) Boot() {
 	c.boot = nil
 	if b == nil || (len(b.pending) == 0 && len(b.queued) == 0) {
 		c.mu.Unlock()
+		if b != nil && c.cfg.Reissue != nil {
+			c.cfg.Reissue(nil)
+		}
 		return
 	}
 	var decided []Decision
-	var reqs, replies []string
+	var carried []Carried
+	var resent, reqs, expired, replies []string
 	for _, p := range b.pending {
-		reqs = append(reqs, p.ID)
-		for i, ref := range p.Refs {
-			decided = append(decided, Decision{Request: p.ID, Item: i + 1, Ref: ref, Why: "restart"})
+		// A record is carried only if it is whole and sane: asked in the
+		// past, and its expiry no later than MaxTTL after that.
+		keep := c.cfg.Reissue != nil && !p.Expires.IsZero() && len(p.Sums) == len(p.Refs) &&
+			!p.Asked.IsZero() && !p.Asked.After(now)
+		if keep && p.Expires.After(p.Asked.Add(MaxTTL)) {
+			p.Expires = p.Asked.Add(MaxTTL)
+		}
+		switch {
+		case keep && now.Before(p.Expires):
+			resent = append(resent, p.ID)
+			for i, ref := range p.Refs {
+				carried = append(carried, Carried{Ref: ref, Request: p.ID, Asked: p.Asked, Expires: p.Expires, Sum: p.Sums[i]})
+			}
+		case keep:
+			expired = append(expired, p.ID)
+			for i, ref := range p.Refs {
+				decided = append(decided, Decision{Request: p.ID, Item: i + 1, Ref: ref, Why: "expired"})
+			}
+		default:
+			reqs = append(reqs, p.ID)
+			for i, ref := range p.Refs {
+				decided = append(decided, Decision{Request: p.ID, Item: i + 1, Ref: ref, Why: "restart"})
+			}
 		}
 	}
 	for _, q := range b.queued {
 		replies = append(replies, q.ID)
+		decided = append(decided, Decision{Request: q.ID, Item: 1, Ref: q.Ref, Why: "restart"})
 	}
 	c.addExpiredLocked(decided)
-	for _, id := range append(append([]string(nil), reqs...), replies...) {
+	for _, p := range b.pending {
+		c.retireLocked(p.ID, now)
+	}
+	for _, id := range replies {
 		c.retireLocked(id, now)
 	}
 	text := "Box restarted."
+	if len(resent) > 0 {
+		text += " Old codes no longer work. " + strings.Join(resent, ", ") + " will be re-sent with new codes unless the details changed."
+	}
 	if len(reqs) > 0 {
 		text += " Cancelled requests: " + strings.Join(reqs, ", ") + "."
+	}
+	if len(expired) > 0 {
+		text += " Expired: " + strings.Join(expired, ", ") + "."
 	}
 	if len(replies) > 0 {
 		text += " Auto-replies not sent: " + strings.Join(replies, ", ") + "."
 	}
-	text += " Ask your agent again if still needed."
+	if len(reqs)+len(expired)+len(replies) > 0 {
+		text += " Ask your agent again if still needed."
+	}
 	if !fits(text) {
-		text = fmt.Sprintf("Box restarted. %d requests cancelled and %d auto-replies not sent. Ask your agent again if still needed.",
-			len(reqs), len(replies))
+		text = fmt.Sprintf("Box restarted. %d requests re-sent with new codes, %d cancelled, %d expired, and %d auto-replies not sent.",
+			len(resent), len(reqs), len(expired), len(replies))
 	}
 	c.mu.Unlock()
-	c.decide(decided)
 	if c.cfg.Modem != nil {
 		_ = c.cfg.Modem.Send(c.cfg.Owner, text)
+	}
+	c.decide(decided)
+	if c.cfg.Reissue != nil {
+		c.cfg.Reissue(carried)
 	}
 }
