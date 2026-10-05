@@ -332,7 +332,7 @@ func main() {
 			log.Printf("agent machines disabled: %v", err)
 			runsc = ""
 			if agentOff == "" {
-				agentOff = agentNoMemControls
+				agentOff = agentNoLimits
 			}
 		} else {
 			cg, psiPath = g, filepath.Join(g.Path, "memory.pressure")
@@ -390,6 +390,8 @@ func main() {
 	// managed_tree, private machines only (W4).
 	tree := newLiveTree(log.Printf)
 	learn.Tree = tree
+	asleep := sleepMode(cfg.Admission.CapacityMB, cfg.Admission.HeadroomMB, agentMemMB, replayMemMB)
+	learn.ResumeFor = sleepResumeFor(asleep)
 	var lp *learning
 	if err := os.MkdirAll(learn.Dir, 0o700); err != nil {
 		log.Printf("learning disabled: %v", err)
@@ -484,6 +486,8 @@ func main() {
 					if err == nil {
 						if err = replayFits(cfg.Admission.CapacityMB, cfg.Admission.HeadroomMB, agentMemMB, replayMemMB); err != nil {
 							lp.noRoom.Store(true) // STATUS and LEARNING ON say so
+						}
+						if asleep {
 							// The agent sleeps while the box evaluates (PE7).
 							sl := openSleeper(ctx, sleepDeps{d: d, m: m, plane: plane, qs: qs, agent: agent, id: agentMachine, hours: sleepHours, workers: wt})
 							lp.sleep.Store(sl)
