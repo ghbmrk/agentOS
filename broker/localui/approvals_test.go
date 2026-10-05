@@ -390,3 +390,18 @@ func TestARightCodeGivesItsSlotBack(t *testing.T) {
 		t.Fatalf("5th wrong: %s", w.Body.String())
 	}
 }
+
+// L3 nit on #171: an unlock proof offered as an approval code counts
+// against the phone's bound like any wrong code.
+func TestAnUnlockProofCountsForThePhone(t *testing.T) {
+	a := newApprovalRig(t)
+	id, _ := a.ch.RequestLocal(pageItem("u1"), 0)
+	for i := 0; i < PageWrongPerMinute; i++ {
+		if w := a.post("/approvals/", answer(a.form(id), "approve", owner.UnlockProofPrefix+"CANARY")); !strings.Contains(w.Body.String(), "That code did not work.") {
+			t.Fatalf("try %d: %s", i, w.Body.String())
+		}
+	}
+	if w := a.post("/approvals/", answer(a.form(id), "approve", a.code())); !strings.Contains(w.Body.String(), "Too many wrong codes from this phone.") {
+		t.Fatalf("sixth: %s", w.Body.String())
+	}
+}

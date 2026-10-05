@@ -281,13 +281,6 @@ func (c *Channel) LocalSignIn(code string) (until time.Time, err error) {
 	return until, nil
 }
 
-// localAllowedLocked reports whether takeLocalLocked would allow one
-// more local attempt now, without spending it.
-func (c *Channel) localAllowedLocked(now time.Time) bool {
-	s := c.codes.st
-	return s.LocalStart.IsZero() || !now.Before(s.LocalStart.Add(WrongWindow)) || s.LocalUsed < LocalBound
-}
-
 // takeLocalLocked spends one local attempt of the fixed 24-hour bound.
 func (c *Channel) takeLocalLocked(now time.Time) (bool, error) {
 	ok := false
@@ -467,17 +460,6 @@ func (c *Channel) LocalAnswer(id, sum string, approve bool, code string) (string
 		}
 		return "", ErrChanged
 	}
-	if approve && !r.local && r.code != "" && c.localAllowedLocked(now) && eq(code, r.code) {
-		// The page takes a code-generator code; the texted one is refused
-		// here without counting, since a phone offers it from the text
-		// (L3 S-a on #165). Any other guess still counts. Only while a
-		// counted try is still allowed: with the day's bound spent, it
-		// gets ErrTooMany like any code, so the hint is no oracle (L3 on
-		// #171). A page-only request's code is never texted.
-		c.mu.Unlock()
-		c.decide(decided)
-		return "", ErrTextedCode
-	}
 	if approve {
 		ok, err := c.takeLocalLocked(now)
 		if err != nil || !ok {
@@ -488,6 +470,17 @@ func (c *Channel) LocalAnswer(id, sum string, approve bool, code string) (string
 			}
 			return "", err
 		}
+	}
+	if approve && !r.local && r.code != "" && eq(code, r.code) {
+		// The page takes a code-generator code; the texted one is refused
+		// here, not counted as wrong, since a phone offers it from the
+		// text (L3 S-a on #165). It still spends a saved try of the day's
+		// bound first, like any code, so the hint is no oracle once the
+		// bound is spent or while the state cannot be saved (L3 on #171).
+		// A page-only request's code is never texted.
+		c.mu.Unlock()
+		c.decide(decided)
+		return "", ErrTextedCode
 	}
 	rp := reply{word: "NO", id: id}
 	if approve {

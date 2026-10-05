@@ -342,15 +342,17 @@ func TestThePageApprovesTextedRequestsWithAStrongCode(t *testing.T) {
 	r := newRig(t, nil)
 	id, _ := r.ch.Request([]Item{lowItem("t1")}, 0)
 	texted := lowCodeRe.FindStringSubmatch(r.inbox())[2]
-	// L3 S-a: the texted code is refused there with a hint, not counted.
+	// L3 S-a: the texted code is refused there with a hint, not counted
+	// as wrong; it spends a try of the day's bound like any code (L3 on
+	// #171).
 	used := r.ch.codes.st.LocalUsed
 	for i := 0; i < WrongPerRequest; i++ {
 		if _, err := r.ch.LocalAnswer(id, r.sum(id), true, texted); err == nil || err.Error() != "That's the code I texted. Here, use a code from your code generator." {
 			t.Fatalf("texted code on the page: %v", err)
 		}
 	}
-	if len(r.ch.codes.st.Wrong) != 0 || r.ch.codes.st.LocalUsed != used || len(r.ch.LocalRequests()) != 1 {
-		t.Fatal("the texted code counted")
+	if len(r.ch.codes.st.Wrong) != 0 || r.ch.codes.st.LocalUsed != used+WrongPerRequest || len(r.ch.LocalRequests()) != 1 {
+		t.Fatal("the texted code counted as wrong, or spent no try")
 	}
 	msg, err := r.ch.LocalAnswer(id, r.sum(id), true, r.totp())
 	if err != nil || !strings.HasPrefix(msg, "Approved. Your agent can go ahead.") {
@@ -553,5 +555,39 @@ func TestThePageSaysWhenNotAllOfARequestRan(t *testing.T) {
 	}
 	if got := r.inbox(); !strings.Contains(got, "Approved "+id+" (not all of it ran) on my Wi-Fi page") {
 		t.Fatalf("told %q", got)
+	}
+}
+
+// L3 F1 on #171 at 654aa24: while the state cannot be saved, the texted
+// code and a wrong code get the same answer, so a failing store does not
+// make the hint an unlimited oracle.
+func TestTheTextedCodeHintNeedsASavedTry(t *testing.T) {
+	fs := &flakyStore{}
+	r := newRig(t, fs)
+	id, _ := r.ch.Request([]Item{lowItem("t1")}, 0)
+	texted := lowCodeRe.FindStringSubmatch(r.inbox())[2]
+	wrong := "000000"
+	if wrong == texted {
+		wrong = "000001"
+	}
+	fs.setFail(true)
+	var got []string
+	for _, code := range []string{texted, wrong} {
+		_, err := r.ch.LocalAnswer(id, r.sum(id), true, code)
+		if err == nil || err == ErrTextedCode {
+			t.Fatalf("%s with the store failing: %v", code, err)
+		}
+		got = append(got, err.Error())
+	}
+	if got[0] != got[1] {
+		t.Fatalf("answers differ: %q", got)
+	}
+	// Once a day's window has passed, the hint is back (L3 nit: M7).
+	fs.setFail(false)
+	r.ch.mu.Lock()
+	r.ch.codes.st.LocalStart, r.ch.codes.st.LocalUsed = r.clock().Add(-WrongWindow), LocalBound
+	r.ch.mu.Unlock()
+	if _, err := r.ch.LocalAnswer(id, r.sum(id), true, texted); err != ErrTextedCode {
+		t.Fatalf("after the window: %v", err)
 	}
 }
