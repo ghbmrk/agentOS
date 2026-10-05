@@ -22,6 +22,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/owner"
+	"github.com/ghbmrk/agentos/broker/replay"
 	"github.com/ghbmrk/agentos/broker/vm"
 	"github.com/ghbmrk/agentos/broker/vm/gvisor"
 )
@@ -124,7 +125,8 @@ func main() {
 	imgs := images{}
 	var stateDir, runsc, cgroupParent, meterPath, agentMachine, inboxPath, egressSocket, verifySocket string
 	var agentImage, agentLaunch string
-	var diskReserveMB, agentMemMB int64
+	var diskReserveMB, agentMemMB, replayMemMB int64
+	var learn learnPaths
 	flag.StringVar(&cfg.JournalPath, "journal", "/var/lib/agentos/journal.log", "journal file")
 	flag.StringVar(&cfg.SocketDir, "sockets", "/run/agentos", "socket directory (created 0700)")
 	flag.StringVar(&cfg.OwnerNumber, "owner", "", "owner's phone number, E.164")
@@ -146,6 +148,9 @@ func main() {
 	flag.StringVar(&inboxPath, "guest-inbox", "/var/lib/agentos/guest-inbox.json", "unanswered owner messages to guests, kept across restarts")
 	flag.StringVar(&egressSocket, "egress", "/run/agentos-egress/model.sock", "the vault process's model socket (agentos-egress); empty serves no model route")
 	flag.StringVar(&verifySocket, "owner-verify", "/run/agentos-egress/verify.sock", "the vault process's verify socket, which checks the owner's code-generator codes; empty refuses high-tier codes")
+	flag.StringVar(&learn.Dir, "learn", "/var/lib/agentos/learn", "change pipeline and loop scheduler state (W3)")
+	flag.StringVar(&learn.Spare, "spare-meter", "/var/lib/agentos/spare-meter.json", "spare-time model budget state (LOOP-2), apart from -meter")
+	flag.Int64Var(&replayMemMB, "replay-mem-mb", 1024, "a replay machine's memory budget, MB (LOOP-5)")
 	flag.Parse()
 	if cfg.ModemUID < 0 || cfg.ModemUID == os.Getuid() {
 		log.Fatal("-modem-uid must name the modem bridge's own uid, distinct from the broker's")
@@ -187,11 +192,23 @@ func main() {
 	// No modem driver exists before P2-3, so texts arrive only through the
 	// owner socket and the channel's own outbound texts are not sent.
 
+	// The learning plane failing must not take the owner channel down
+	// either: without it loop settings are refused and nothing adopts.
+	var lp *learning
+	if err := os.MkdirAll(learn.Dir, 0o700); err != nil {
+		log.Printf("learning disabled: %v", err)
+	} else if lp, err = openLearning(learn, runsc != "" && egressSocket != "", &cfg); err != nil {
+		log.Printf("learning disabled: %v", err)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	d, err := daemon.Run(ctx, cfg)
 	if err != nil {
 		log.Fatal(err)
+	}
+	if lp != nil {
+		lp.attach(ctx, d)
 	}
 	if runsc != "" {
 		services := &lateServices{}
@@ -216,6 +233,19 @@ func main() {
 				services.live.Store(&svc{plane})
 				agent.a.Store(&guest.OwnerAgent{Plane: plane, Machine: agentMachine})
 				defer plane.Shutdown()
+				if lp != nil {
+					// Replay machines run the agent's image and launch.
+					spec, err := agentSpec(imgs, agentImage, agentLaunch, replayMemMB)
+					if err == nil {
+						var ev *replay.Evaluator
+						if ev, err = lp.openEvaluator(m, services, evalConfig{Dir: filepath.Join(cfg.SocketDir, "replay"), Spec: spec, Egress: egressSocket}); err == nil {
+							defer ev.Shutdown()
+						}
+					}
+					if err != nil {
+						log.Printf("replay evaluation disabled: %v", err)
+					}
+				}
 				spec, err := agentSpec(imgs, agentImage, agentLaunch, agentMemMB)
 				if err != nil {
 					log.Printf("no agent machine kept running: %v", err)

@@ -89,6 +89,16 @@ type Config struct {
 	// calls it once, with nil when there are none, after the restart text.
 	// Nil: they are cancelled.
 	Reissue func([]Carried)
+	// Settings answers a whole message that is a box setting (the loop
+	// scheduler's Text), before it would go to the agent; HelpExtra is
+	// appended to HELP (control.Handler). Nil: no settings.
+	Settings  func(ctx context.Context, msg string, unlocked bool) (reply string, ok bool)
+	HelpExtra string
+	// Narrows reports a setting whose worst case is a pause (LOOPS OFF,
+	// a lower budget). In a locked session it runs at once, like a pause
+	// word (CH-11), rather than being held for the unlock. It must not
+	// call back into the channel.
+	Narrows func(msg string) bool
 }
 
 // Carried is an item of a request open at the last shutdown, handed to
@@ -212,7 +222,8 @@ func New(cfg Config) (*Channel, error) {
 		queued: map[string]*Queued{}, released: map[string]time.Time{},
 		boot: &bootReport{pending: st.Pending, queued: st.Queued},
 	}
-	c.ctrl = &control.Handler{Engine: cfg.Engine, Auth: c, Agent: cfg.Agent, Machines: cfg.Machines, Now: cfg.Now}
+	c.ctrl = &control.Handler{Engine: cfg.Engine, Auth: c, Agent: cfg.Agent, Machines: cfg.Machines, Now: cfg.Now,
+		Settings: cfg.Settings, HelpExtra: cfg.HelpExtra}
 	return c, nil
 }
 
@@ -424,6 +435,9 @@ func (c *Channel) routeLocked(text string, now time.Time, decided *[]Decision) r
 	case control.WordHelp, control.WordYes, control.WordNo, control.WordUndo,
 		control.WordMore, control.WordResume, control.WordUnclear:
 		return route{delegate: text, run: true, limited: !unlocked}
+	}
+	if !unlocked && c.cfg.Narrows != nil && c.cfg.Narrows(text) {
+		return route{delegate: text, run: true, limited: true}
 	}
 	rest, code := splitCode(text)
 	if unlocked {

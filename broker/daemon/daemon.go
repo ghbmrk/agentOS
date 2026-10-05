@@ -87,6 +87,17 @@ type Config struct {
 	// Executors are the adapters' executors, by name; each needs its
 	// declaration in Grants.Declared. None exist before P2-6/P2-7.
 	Executors map[string]journal.Executor
+	// BrokerExecutors are the broker's own setting executors (the change
+	// pipeline and the loop scheduler, W3). They declare no operations: no
+	// grant can name them, and only the intents the gate's Changes and
+	// Loops policies allow reach them.
+	BrokerExecutors map[string]journal.Executor
+	// Settings answers an owner text that is a box setting (the loop
+	// scheduler's Text) and HelpExtra is appended to HELP; Narrows marks
+	// the settings that run in a locked session (owner.Config).
+	Settings  func(ctx context.Context, msg string, unlocked bool) (reply string, ok bool)
+	HelpExtra string
+	Narrows   func(msg string) bool
 	// Redactor scrubs journaled free text. Nil journals none at all until
 	// the vault's redactor (CRED-7 values plus CH-19 patterns) is wired
 	// with the vault unlock (P2-4).
@@ -171,6 +182,17 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 		}
 		execs[name] = ex
 	}
+	for name, ex := range cfg.BrokerExecutors {
+		switch {
+		case name == grants.ExecutorName:
+			store.Close()
+			return nil, fmt.Errorf("daemon: executor name %q is reserved", name)
+		case execs[name] != nil:
+			store.Close()
+			return nil, fmt.Errorf("daemon: executor %q is both an adapter and the broker's", name)
+		}
+		execs[name] = ex
+	}
 	gate := grants.New(gcfg)
 	execs[grants.ExecutorName] = gate
 	red := cfg.Redactor
@@ -191,7 +213,8 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 			return adm.Summary()
 		}
 	}
-	h := &control.Handler{Engine: eng, Auth: cfg.Auth, Agent: cfg.Agent, Machines: machines}
+	h := &control.Handler{Engine: eng, Auth: cfg.Auth, Agent: cfg.Agent, Machines: machines,
+		Settings: cfg.Settings, HelpExtra: cfg.HelpExtra}
 	handle := h.Handle
 	var ch *ownerch.Channel
 	if cfg.OwnerState != "" {
@@ -199,6 +222,7 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 			Owner: cfg.OwnerNumber, Modem: cfg.Modem, Engine: eng, Agent: cfg.Agent,
 			Machines: machines, Secrets: cfg.OwnerSecrets, Verifier: cfg.OwnerVerifier, Store: ownerch.FileStore{Path: cfg.OwnerState},
 			Decide: gate.Decide, Narrow: gate.Narrow, Reissue: gate.Reissue,
+			Settings: cfg.Settings, HelpExtra: cfg.HelpExtra, Narrows: cfg.Narrows,
 		}); err != nil {
 			store.Close()
 			return nil, err
