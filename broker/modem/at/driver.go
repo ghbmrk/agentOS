@@ -191,7 +191,7 @@ func (m *Modem) init(ctx context.Context) error {
 	if len(lines) == 0 || !m.cfg.Profile.accepts(strings.TrimPrefix(lines[0], "+CGMM: ")) {
 		return fmt.Errorf("%w: %q", ErrModel, strings.Join(lines, " "))
 	}
-	if st := m.readStatus(ctx); st.SIM != SIMReady {
+	if st := m.readStatus(ctx, simSettle); st.SIM != SIMReady {
 		return &SIMError{Status: st}
 	}
 	m.iccid = m.readICCID(ctx)
@@ -217,7 +217,7 @@ func (m *Modem) init(ctx context.Context) error {
 	// Registration notices, so a lost network shows at once. Best effort.
 	_ = do("AT+CEREG=1")
 	_ = do("AT+CREG=1")
-	m.readStatus(ctx)
+	m.readStatus(ctx, 0)
 	if m.number == "" {
 		if lines, err := m.e.Do(ctx, "AT+CNUM", cmdTimeout); err == nil {
 			for _, l := range lines {
@@ -355,10 +355,10 @@ func (m *Modem) smsLoop() {
 				}
 			}
 		case <-m.statusKick:
-			m.readStatus(ctx)
+			m.readStatus(ctx, 0)
 		case <-t.C:
 			m.sweep(ctx)
-			m.readStatus(ctx)
+			m.readStatus(ctx, 0)
 		}
 	}
 }

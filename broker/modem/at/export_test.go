@@ -1,5 +1,9 @@
 package at
 
+import "time"
+
+func init() { simRetry = time.Millisecond }
+
 // DeliverAlpha encodes an SMS-DELIVER from an alphanumeric sender ID
 // (type 101), which can spell any text, a phone number included.
 func DeliverAlpha(name, text string) string {

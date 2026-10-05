@@ -57,6 +57,7 @@ type Device struct {
 	closed   bool
 	upW      net.Conn // device end carrying the uplink (SIMCom port or Quectel capture)
 	sim      string   // AT+CPIN? answer; "" means no SIM
+	simBusy  int      // AT+CPIN? queries still answered "busy"
 	iccid    string
 	reg      int // +CEREG stat
 	csq      int
@@ -246,6 +247,10 @@ func (d *Device) handle(cmd string) []string {
 	case cmd == "AT+CGMM":
 		return []string{d.model, "OK"}
 	case cmd == "AT+CPIN?":
+		if d.simBusy > 0 {
+			d.simBusy--
+			return []string{"+CME ERROR: 14"}
+		}
 		if d.sim == "" {
 			return []string{"+CME ERROR: 10"}
 		}
@@ -410,6 +415,14 @@ func (d *Device) SetSIM(state string) {
 		v = "NOT READY"
 	}
 	go d.urc("+CPIN: " + v) // no driver may be reading yet
+}
+
+// SetSIMBusy makes the next n AT+CPIN? queries answer +CME ERROR: 14, as
+// a SIM still starting after a modem restart does.
+func (d *Device) SetSIMBusy(n int) {
+	d.mu.Lock()
+	d.simBusy = n
+	d.mu.Unlock()
 }
 
 // SetNetwork sets registration (+CEREG stat: 1 home, 2 searching, 3

@@ -479,10 +479,27 @@ func TestNationalFormatSendersAreWrittenAsE164(t *testing.T) {
 		{"00447700900123", "44", "+447700900123"},
 		{"447700900123", "44", "+447700900123"},
 		{"5555123456", "", "5555123456"},
+		// Exit prefixes, a stray 0 after +, and the trunk 0 after the
+		// country code.
+		{"0015555123456", "1", "+15555123456"},
+		{"+015555123456", "1", "+15555123456"},
+		{"+01115555123456", "1", "+15555123456"},
+		{"+1 (555) 512-3456", "1", "+15555123456"},
+		{"+4407700900123", "44", "+447700900123"},
+		{"+00447700900123", "44", "+447700900123"},
+		{"+330612345678", "33", "+33612345678"},
+		{"0612345678", "33", "+33612345678"},
+		// Italy keeps its leading 0 after the country code.
+		{"+390612345678", "39", "+390612345678"},
+		{"0612345678", "39", "+390612345678"},
 	} {
 		if got := at.E164(c.in, 0, c.cc); got != c.want {
 			t.Errorf("E164(%q, %q) = %q, want %q", c.in, c.cc, got, c.want)
 		}
+	}
+	// An alphanumeric sender is never any number, whatever it spells.
+	if at.SameNumber("alpha:"+ownerNum, ownerNum, "1") || at.SameNumber(ownerNum, "alpha:"+ownerNum, "1") {
+		t.Fatal("an alpha sender matched a number")
 	}
 }
 
@@ -550,6 +567,18 @@ func TestSIMNetworkAndSignalAreReportedInPlainWords(t *testing.T) {
 			t.Fatalf("SIM %q: %v", c.sim, err)
 		}
 	}
+	// A SIM still starting after a restart is waited for, not reported
+	// missing.
+	dev := atsim.New(at.SIMCom, "SIMCOM_SIM7600G-H", modem.NewCarrier().Line(boxNum), time.Millisecond)
+	dev.SetSIMBusy(3)
+	if m, err := at.Open(context.Background(), at.Config{Profile: at.SIMCom, Port: dev.Port()}); err != nil {
+		t.Fatalf("busy SIM: %v", err)
+	} else {
+		_ = m.Close()
+	}
+	if l := (at.Status{}).Line(); strings.Contains(l, "signal") || strings.Contains(l, "Looking") {
+		t.Fatalf("unknown SIM reads %q", l)
+	}
 	for _, v := range vendors {
 		r := newRig(t, v, at.KeysInBand, nil)
 		if s := r.m.Status(); !s.Registered() || s.Bars != 4 || !strings.HasPrefix(s.Line(), "Connected") {
@@ -566,6 +595,10 @@ func TestSIMNetworkAndSignalAreReportedInPlainWords(t *testing.T) {
 			{2, 99, "No mobile signal here. Move the box nearer a window."},
 			{2, 12, "Looking for the mobile network."},
 			{5, 12, "Connected to a partner network (roaming), signal 2 of 4."},
+			// LTE registered for texts only, or for emergency calls only.
+			{6, 12, "Connected to the mobile network, signal 2 of 4."},
+			{10, 12, "Connected to a partner network (roaming), signal 2 of 4."},
+			{8, 12, "The carrier refused the SIM. Check it is activated."},
 		} {
 			r.dev.SetNetwork(n.stat, n.rssi)
 			eventually(t, n.want, func() bool { return r.m.Status().Line() == n.want })

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // SIMState is what AT+CPIN? says about the SIM.
@@ -52,6 +53,8 @@ func (s Status) Line() string {
 		return "No SIM found. Check it is in the modem."
 	case s.SIM == SIMLocked:
 		return "The SIM is PIN-locked. Remove the PIN in a phone, then put it back."
+	case s.SIM == SIMUnknown:
+		return "Can't read the SIM yet. If this stays, restart the box."
 	case s.Reg == RegDenied:
 		return "The carrier refused the SIM. Check it is activated."
 	case s.Registered() && s.Reg == RegRoaming:
@@ -71,33 +74,59 @@ type SIMError struct{ Status Status }
 
 func (e *SIMError) Error() string { return "at: " + e.Status.Line() }
 
-// readSIM parses AT+CPIN?.
-func (m *Modem) readSIM(ctx context.Context) SIMState {
+// simSettle is how long Open waits for a SIM that is still starting up
+// (after power-on or the AT+CFUN=1,1 restart); simRetry is the poll step.
+var (
+	simSettle = 10 * time.Second
+	simRetry  = 250 * time.Millisecond
+)
+
+// readSIM parses AT+CPIN?. A SIM still starting up (+CME ERROR: 14, or
+// NOT READY) is asked again until settle has passed, so a fresh restart
+// is not reported as no SIM.
+func (m *Modem) readSIM(ctx context.Context, settle time.Duration) SIMState {
+	end := time.Now().Add(settle)
+	for {
+		st, busy := m.readSIMOnce(ctx)
+		if !busy || time.Now().After(end) {
+			return st
+		}
+		select {
+		case <-ctx.Done():
+			return st
+		case <-time.After(simRetry):
+		}
+	}
+}
+
+func (m *Modem) readSIMOnce(ctx context.Context) (st SIMState, busy bool) {
 	lines, err := m.e.Do(ctx, "AT+CPIN?", cmdTimeout)
 	if err != nil {
 		if ae, ok := err.(*Error); ok && strings.HasPrefix(ae.Result, "+CME ERROR") {
-			// 10 not inserted, 13 failure, 14 busy: none is a usable SIM.
-			return SIMMissing
+			// 10 not inserted, 13 failure, 14 busy: none is a usable SIM
+			// now, but 14 may become one.
+			return SIMMissing, strings.TrimSpace(strings.TrimPrefix(ae.Result, "+CME ERROR:")) == "14"
 		}
-		return SIMUnknown
+		return SIMUnknown, false
 	}
 	for _, l := range lines {
 		v := strings.TrimSpace(strings.TrimPrefix(l, "+CPIN:"))
 		switch {
 		case v == "READY":
-			return SIMReady
+			return SIMReady, false
 		case strings.HasPrefix(v, "SIM PIN"), strings.HasPrefix(v, "SIM PUK"), strings.HasPrefix(v, "PH-"):
-			return SIMLocked
+			return SIMLocked, false
 		case v != "":
-			return SIMMissing
+			return SIMMissing, v == "NOT READY"
 		}
 	}
-	return SIMUnknown
+	return SIMUnknown, false
 }
 
-// readStatus refreshes SIM, registration and signal.
-func (m *Modem) readStatus(ctx context.Context) Status {
-	s := Status{SIM: m.readSIM(ctx)}
+// readStatus refreshes SIM, registration and signal, waiting up to settle
+// for a SIM that is still starting.
+func (m *Modem) readStatus(ctx context.Context, settle time.Duration) Status {
+	s := Status{SIM: m.readSIM(ctx, settle)}
 	if s.SIM == SIMReady {
 		s.Reg = max(m.readReg(ctx, "AT+CEREG?"), m.readReg(ctx, "AT+CREG?"))
 		s.Bars = m.readBars(ctx)
@@ -121,13 +150,13 @@ func (m *Modem) readReg(ctx context.Context, cmd string) RegState {
 		switch f[1] {
 		case "0":
 			return RegNone
-		case "1":
+		case "1", "6", "9": // home; 6 SMS only, 9 CSFB not preferred
 			return RegHome
 		case "2":
 			return RegSearching
-		case "3":
+		case "3", "8": // denied; 8 emergency calls only
 			return RegDenied
-		case "5":
+		case "5", "7", "10": // roaming; 7 SMS only, 10 CSFB not preferred
 			return RegRoaming
 		}
 	}

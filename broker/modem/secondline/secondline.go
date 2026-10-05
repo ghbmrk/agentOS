@@ -105,6 +105,7 @@ var (
 	ErrUnbound     = errors.New("secondline: a line's SIM is unknown or not the one set up for it")
 	ErrRecipient   = errors.New("secondline: not a third-party number")
 	ErrNoAnswer    = errors.New("secondline: call not answered")
+	ErrOwnerPhone  = errors.New("secondline: the owner's number and home country code are required")
 )
 
 // Check verifies that owner and second are the SIMs recorded for their
@@ -139,9 +140,11 @@ type Tool struct {
 }
 
 // New checks the configuration. Without a second line the tool is
-// unavailable and nothing more is checked. With one, the owner line is
-// required, both lines must be the SIMs recorded for their roles, their
-// numbers must differ, and calls need disclosure audio.
+// unavailable and nothing more is checked. With one, the owner line, the
+// owner's own number and the home country code are required (without them
+// the owner-number guards would pass everything), both lines must be the
+// SIMs recorded for their roles, their numbers must differ, and calls need
+// disclosure audio.
 func New(cfg Config) (*Tool, error) {
 	if cfg.AnswerWait == 0 {
 		cfg.AnswerWait = 60 * time.Second
@@ -150,6 +153,9 @@ func New(cfg Config) (*Tool, error) {
 	if cfg.Second == nil {
 		close(t.inbound)
 		return t, nil
+	}
+	if cfg.CountryCode == "" || cfg.OwnerPhone == "" || strings.HasPrefix(cfg.OwnerPhone, "alpha:") {
+		return nil, ErrOwnerPhone
 	}
 	if err := t.check(); err != nil {
 		return nil, err
@@ -192,7 +198,7 @@ func same(s Line, o SIM) bool {
 // recipient refuses the owner's own phone and the box's two numbers.
 func (t *Tool) recipient(to string) error {
 	for _, n := range []string{t.cfg.OwnerPhone, t.cfg.Owner.Number(), t.cfg.Second.Number()} {
-		if n != "" && at.SameNumber(to, n, t.cfg.CountryCode) {
+		if at.SameNumber(to, n, t.cfg.CountryCode) {
 			return ErrRecipient
 		}
 	}

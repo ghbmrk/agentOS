@@ -219,18 +219,19 @@ func TestASecondLineThatIsTheOwnerLineIsRefused(t *testing.T) {
 	c := modem.NewCarrier()
 	owner := open(t, c, at.SIMCom, "SIMCOM_SIM7600G-H", boxNum)
 	if _, err := secondline.New(secondline.Config{Owner: owner.m, Second: secondline.FromAT(owner.m),
-		Roles: roles(owner, owner), Disclosure: disclosure()}); !errors.Is(err, secondline.ErrOwnerLine) {
+		Roles: roles(owner, owner), Disclosure: disclosure(), OwnerPhone: ownerNum, CountryCode: "1"}); !errors.Is(err, secondline.ErrOwnerLine) {
 		t.Fatalf("same modem: %v", err)
 	}
 	// A different modem holding a SIM with the same number (a misconfigured
 	// or cloned SIM) is refused too.
 	twin := open(t, c, at.Quectel, "EC25", "+1 555 000 0100")
 	if _, err := secondline.New(secondline.Config{Owner: owner.m, Second: secondline.FromAT(twin.m),
-		Roles: secondline.Roles{OwnerICCID: owner.dev.ICCID(), SecondICCID: "89010000000000000099"}, Disclosure: disclosure()}); err == nil {
+		Roles: secondline.Roles{OwnerICCID: owner.dev.ICCID(), SecondICCID: "89010000000000000099"}, Disclosure: disclosure(), OwnerPhone: ownerNum, CountryCode: "1"}); err == nil {
 		t.Fatal("accepted a twin")
 	}
 	other := open(t, c, at.Quectel, "EC25", secondNum)
-	if _, err := secondline.New(secondline.Config{Owner: owner.m, Second: secondline.FromAT(other.m), Roles: roles(owner, other)}); err == nil {
+	if _, err := secondline.New(secondline.Config{Owner: owner.m, Second: secondline.FromAT(other.m), Roles: roles(owner, other),
+		OwnerPhone: ownerNum, CountryCode: "1"}); err == nil {
 		t.Fatal("accepted a second line with no disclosure audio")
 	}
 }
@@ -243,7 +244,7 @@ func TestRolesAreBoundToTheSIMAndFailClosed(t *testing.T) {
 	second := open(t, c, at.Quectel, "EG25", secondNum)
 	set := roles(owner, second)
 	cfg := func(o secondline.SIM, s *at.Modem, r secondline.Roles) secondline.Config {
-		return secondline.Config{Owner: o, Second: secondline.FromAT(s), Roles: r, Disclosure: disclosure()}
+		return secondline.Config{Owner: o, Second: secondline.FromAT(s), Roles: r, Disclosure: disclosure(), OwnerPhone: ownerNum, CountryCode: "1"}
 	}
 	if _, err := secondline.New(cfg(owner.m, second.m, set)); err != nil {
 		t.Fatal(err)
@@ -267,5 +268,52 @@ func TestRolesAreBoundToTheSIMAndFailClosed(t *testing.T) {
 	}
 	if err := set.Check(owner.m, second.m); err != nil {
 		t.Fatalf("Check: %v", err)
+	}
+}
+
+// The owner-number guards cannot be configured away: a second line without
+// the owner's number and home country code is refused, so owner texts can
+// never reach an agent and the agent can never text the owner (ADP-12).
+func TestASecondLineNeedsTheOwnersNumberAndCountry(t *testing.T) {
+	c := modem.NewCarrier()
+	owner := open(t, c, at.SIMCom, "SIMCOM_SIM7600G-H", boxNum)
+	second := open(t, c, at.Quectel, "EG25", secondNum)
+	for name, cfg := range map[string]secondline.Config{
+		"no owner number": {CountryCode: "1"},
+		"no country code": {OwnerPhone: ownerNum},
+		"alpha owner":     {OwnerPhone: "alpha:" + ownerNum, CountryCode: "1"},
+	} {
+		cfg.Owner, cfg.Second, cfg.Roles, cfg.Disclosure = owner.m, secondline.FromAT(second.m), roles(owner, second), disclosure()
+		if _, err := secondline.New(cfg); !errors.Is(err, secondline.ErrOwnerPhone) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+// The owner's number is refused however the network or the agent writes
+// it: exit prefixes, a stray 0 after +, or the trunk 0 after the country
+// code (ADP-12, CH-19).
+func TestTheOwnersNumberIsRefusedInEveryInternationalForm(t *testing.T) {
+	for _, c := range []struct {
+		cc, owner string
+		forms     []string
+	}{
+		{"1", ownerNum, []string{"0015550000001", "+015550000001", "01115550000001", "+01115550000001", "+1 555 000 0001"}},
+		{"44", "+447700900123", []string{"+4407700900123", "07700900123", "00447700900123", "+00447700900123"}},
+		{"33", "+33612345678", []string{"+330612345678", "0612345678", "0033612345678"}},
+	} {
+		carrier := modem.NewCarrier()
+		owner := open(t, carrier, at.SIMCom, "SIMCOM_SIM7600G-H", boxNum)
+		second := open(t, carrier, at.Quectel, "EG25", secondNum)
+		tool, err := secondline.New(secondline.Config{Owner: owner.m, Second: secondline.FromAT(second.m), Roles: roles(owner, second),
+			Disclosure: disclosure(), OwnerPhone: c.owner, CountryCode: c.cc})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, to := range c.forms {
+			if err := tool.Text(to, "Reply with your code"); !errors.Is(err, secondline.ErrRecipient) {
+				t.Errorf("cc %s: Text to %s: %v", c.cc, to, err)
+			}
+		}
 	}
 }
