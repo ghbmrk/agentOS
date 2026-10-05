@@ -533,8 +533,8 @@ Before any qualification run, freeze revisions, hardware profile, accounts, work
 | 2026-10-04 | Calendar acceptance in context-scoped replies (ADP-11, Mark's decision): an earned reply may accept a slot the counterpart proposed, when it is free on the owner's calendar and the counterpart is a known contact; it never proposes a time. |
 | 2026-10-05 | Organize verb (ADP-2, Mark's decision): archive, label, move, and mark read run as reversible actions inside the owner's account, journaled and in the digest; security alerts and anything that cannot be undone still ask. |
 | 2026-10-05 | Unknown-host unlock (CRED-8, arbitrator for P2-4a): the unlocked key is discarded when code attempts are exhausted or no valid code arrives in time, rather than on the first failed code. |
-| 2026-10-05 | Security review 2 (`reviews/security/`, auto-decided, no lens worse): CPU, I/O, and process limits per component (RES-2); the storage reserve is enforced by the file system and each machine has a disk quota (RES-4); second-line recipients are full numbers unless an owner contact, with one shared cap per line (ADP-12). |
 | 2026-10-05 | Live model calls in replay (LOOP-5, Mark's decision): effects stay recorded and fail closed; model calls may run live under the candidate's routing, metered against a separate capped evaluation budget, so Loop 1 can evaluate prompt, context, procedure, and routing candidates. |
+| 2026-10-05 | Security review 2 (`reviews/security/`, auto-decided, no lens worse): CPU, I/O, and process limits per component (RES-2); the storage reserve is enforced by the file system and each machine has a disk quota (RES-4); second-line recipients are full numbers unless an owner contact, with one shared cap per line (ADP-12). |
 | Proposed | External-drive-only (no internal install). This spec assumes it; the owner has not formally confirmed. |
 
 ## 17. Open risks
