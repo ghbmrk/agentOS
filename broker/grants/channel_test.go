@@ -68,8 +68,7 @@ func TestOwnerChannelEndToEnd(t *testing.T) {
 	r.advance(30 * time.Second)
 	pageApprove(t, ch, id, totp(seed, r.now()))
 	r.g.Wait()
-	for note := text(); !strings.Contains(note, "Added G1"); note = text() {
-	}
+	pageTexts(text, "Added G1", true)
 
 	// 2. A low-risk send: the texted code from the request.
 	r.ver.set("inv-1042", sam())
@@ -89,7 +88,7 @@ func TestOwnerChannelEndToEnd(t *testing.T) {
 	}
 
 	// 3. An auto-reply the owner undoes.
-	r.grant2(ch, text, say, seed, Spec{Account: "mail", Rule: &Rule{Action: "message.send", PerRecord: 3, PerDay: 10, Reply: true}})
+	r.grant2(ch, text, say, seed, Spec{Account: "mail", Rule: &Rule{Action: "message.send", PerRecord: 3, PerDay: 10, Reply: true}}, false)
 	r.ver.set("thr-1", Verified{Item: owner.Item{Object: "reply", Recipient: "sam@example.com",
 		Facts: owner.Facts{RecipientChecked: true, RecipientExists: true, RecipientByOwner: true}},
 		Recipients: []string{"sam@example.com"}, Record: "thr-1", ThreadVerified: true})
@@ -164,7 +163,7 @@ func TestRestartReissuesThroughTheChannel(t *testing.T) {
 		return ""
 	}
 	say := func(msg string) string { return strings.Join(ch.Handle(ctx, ownerNum, msg), " | ") }
-	r.grant2(ch, text, say, seed, mailGrant())
+	r.grant2(ch, text, say, seed, mailGrant(), true)
 
 	for _, rec := range []string{"inv-1", "inv-2"} {
 		x := sam()
@@ -210,7 +209,9 @@ func TestRestartReissuesThroughTheChannel(t *testing.T) {
 }
 
 // grant2 creates a grant through the real channel.
-func (r *rig) grant2(ch *owner.Channel, text func() string, say func(string) string, seed []byte, s Spec) {
+// note: the page's own note on it is texted now, not coalesced into a
+// later one.
+func (r *rig) grant2(ch *owner.Channel, text func() string, say func(string) string, seed []byte, s Spec, note bool) {
 	r.t.Helper()
 	id := fmt.Sprintf("local/grant/%d", len(r.eng.List()))
 	r.submit(journal.Intent{ID: id, Origin: "local", Account: journal.BrokerAccount,
@@ -222,7 +223,17 @@ func (r *rig) grant2(ch *owner.Channel, text func() string, say func(string) str
 	r.advance(30 * time.Second)
 	pageApprove(r.t, ch, rid, totp(seed, r.now()))
 	r.g.Wait()
-	for note := text(); !strings.Contains(note, "Added G"); note = text() {
+	pageTexts(text, "Added G", note)
+}
+
+// pageTexts reads the texts a page approval of a grant sends, in either
+// order: the grant's notice and, when note, the page's own note.
+func pageTexts(text func() string, notice string, note bool) {
+	gotNotice, gotNote := false, !note
+	for !gotNotice || !gotNote {
+		m := text()
+		gotNotice = gotNotice || strings.Contains(m, notice)
+		gotNote = gotNote || strings.Contains(m, "on my Wi-Fi page at")
 	}
 }
 
