@@ -78,7 +78,7 @@ func TestSuggestsAfterRunOfApprovals(t *testing.T) {
 		len(r.Recipients) != 1 || r.Recipients[0] != "ap@client.test" || r.PerRecord != 1 || r.PerDay != 4 || r.AmountCap != 0 || r.Reply {
 		t.Fatalf("rule %+v", r)
 	}
-	if s[0].Short != "S1" || s[0].Approved != 10 || !strings.Contains(s[0].Text, grants.Describe(s[0].Spec)) ||
+	if s[0].Short != "S1" || s[0].Approved != 10 || s[0].Detail != grants.Describe(s[0].Spec) || !strings.Contains(s[0].Text, "up to 4 a day, no money.") ||
 		!strings.Contains(s[0].Text, "10 times in a row since Oct 5") || !strings.HasSuffix(s[0].Text, "Reply NO S1 to stop suggesting it.") {
 		t.Fatalf("text %q", s[0].Text)
 	}
@@ -249,5 +249,50 @@ func TestCannotEnact(t *testing.T) {
 				t.Errorf("attention imports %s", p)
 			}
 		}
+	}
+}
+
+// CAP-6, CH-12 (UX-52-2): the owner's text fits three GSM-7 segments even
+// for the longest names and an amount cap; the full rule is on the Wi-Fi
+// page (Detail).
+func TestTextFitsThreeSegments(t *testing.T) {
+	o := newOpt(t, &change.MemStore{}, nil)
+	long := strings.Repeat("a", 64)
+	for i := 0; i < 10; i++ {
+		d := invoice(i)
+		d.Account, d.Action, d.Amount = long, strings.Repeat("b", 64), 99999999999
+		d.Params["template"] = strings.Repeat("t", 200)
+		observe(t, o, d)
+	}
+	s := suggestions(t, o)
+	if len(s) != 1 || len(s[0].Text) > MaxText || !strings.Contains(s[0].Text, "amounts up to") {
+		t.Fatalf("%d chars: %q", len(s[0].Text), s[0].Text)
+	}
+}
+
+// CAP-6 (UX-52-3): a suggestion goes to the owner at most weekly, and two
+// unanswered offers count as a NO.
+func TestOffersAreWeeklyAndLapse(t *testing.T) {
+	o := newOpt(t, &change.MemStore{}, nil)
+	for i := 0; i < 10; i++ {
+		observe(t, o, invoice(i))
+	}
+	due := func(at time.Time) int {
+		t.Helper()
+		s, err := o.Due(at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(s)
+	}
+	day := t0.Add(10 * 24 * time.Hour)
+	if due(day) != 1 || due(day.Add(time.Hour)) != 0 || due(day.Add(6*24*time.Hour)) != 0 {
+		t.Fatal("offered more than weekly")
+	}
+	if due(day.Add(7*24*time.Hour)) != 1 {
+		t.Fatal("not re-offered after a week")
+	}
+	if due(day.Add(14*24*time.Hour)) != 0 || len(suggestions(t, o)) != 0 {
+		t.Fatal("two unanswered offers must count as a NO")
 	}
 }

@@ -97,6 +97,10 @@ type class struct {
 	// twice the threshold (Snooze), counted from the NO.
 	Snooze int    `json:"snooze,omitempty"`
 	Short  string `json:"short,omitempty"`
+	// Offered is when the suggestion last went to the owner; Offers how
+	// many times it went unanswered.
+	Offered time.Time `json:"offered,omitempty"`
+	Offers  int       `json:"offers,omitempty"`
 }
 
 type state struct {
@@ -213,7 +217,7 @@ func (o *Optimizer) earnedLocked(c *class) bool {
 
 func (c *class) reset() {
 	c.Run, c.Fixed, c.Templated, c.Recipients, c.SameRcpt, c.MaxAmount, c.Days = 0, nil, false, nil, false, 0, nil
-	c.Short = ""
+	c.Short, c.Offered, c.Offers = "", time.Time{}, 0
 }
 
 func (o *Optimizer) threshold(c *class) int {
@@ -275,7 +279,27 @@ type Suggestion struct {
 	Spec     grants.Spec
 	Approved int
 	Since    time.Time
-	Text     string
+	// Text is the owner's text (at most 3 SMS segments, CH-12); Detail
+	// is the full fixed wording (grants.Describe) for the Wi-Fi page,
+	// where the owner confirms the rule.
+	Text   string
+	Detail string
+}
+
+// MaxText is CH-12's three GSM-7 segments.
+const MaxText = 3 * 153
+
+// summary is the rule in one clause for the owner's text.
+func summary(spec grants.Spec) string {
+	r := spec.Rule
+	if r.Reply {
+		return fmt.Sprintf("let the agent reply in existing threads on %s without asking, up to %d a day.", spec.Account, r.PerDay)
+	}
+	money := "no money"
+	if r.AmountCap > 0 {
+		money = "amounts up to " + fmt.Sprintf("%d.%02d", r.AmountCap/100, r.AmountCap%100)
+	}
+	return fmt.Sprintf("let it run without asking, up to %d a day, %s.", r.PerDay, money)
 }
 
 // Suggestions returns the classes that have earned a suggestion, in a
@@ -298,6 +322,7 @@ func (o *Optimizer) Suggestions() ([]Suggestion, error) {
 		if !o.earnedLocked(c) {
 			continue
 		}
+		out = append(out, Suggestion{})
 		if c.Short == "" {
 			s, err := o.shortLocked()
 			if err != nil {
@@ -319,12 +344,13 @@ func (o *Optimizer) Suggestions() ([]Suggestion, error) {
 			r.AmountCap, r.HoldDays = c.MaxAmount, 3
 		}
 		spec := grants.Spec{Account: c.Account, Rule: r}
-		out = append(out, Suggestion{
+		out[len(out)-1] = Suggestion{
 			Short: c.Short, Spec: spec, Approved: c.Run, Since: c.Since,
 			Text: fmt.Sprintf("You approved %s on %s %d times in a row since %s, never changed. Suggestion: %s "+
 				"To set it up, open the box's Wi-Fi page. Reply NO %s to stop suggesting it.",
-				c.Action, c.Account, c.Run, c.Since.UTC().Format("Jan 2"), grants.Describe(spec), c.Short),
-		})
+				c.Action, c.Account, c.Run, c.Since.UTC().Format("Jan 2"), summary(spec), c.Short),
+			Detail: grants.Describe(spec),
+		}
 	}
 	if dirty {
 		if err := o.save(); err != nil {
@@ -354,6 +380,45 @@ func (o *Optimizer) shortLocked() (string, error) {
 	}
 }
 
+// Reoffer is the least time between two offers of one suggestion, and
+// MaxOffers how many unanswered offers count as a NO.
+const (
+	Reoffer   = 7 * 24 * time.Hour
+	MaxOffers = 2
+)
+
+// Due returns the suggestions to send the owner now (in the digest), and
+// records them as offered: one never offered, or last offered at least
+// Reoffer ago. After MaxOffers unanswered offers the next due one counts
+// as a NO (Decline) instead, so an ignored suggestion stops repeating.
+func (o *Optimizer) Due(now time.Time) ([]Suggestion, error) {
+	all, err := o.Suggestions()
+	if err != nil {
+		return nil, err
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	var out []Suggestion
+	for _, sg := range all {
+		var c *class
+		for _, x := range o.st.Classes {
+			if x.Short == sg.Short {
+				c = x
+			}
+		}
+		if c == nil || (!c.Offered.IsZero() && now.Sub(c.Offered) < Reoffer) {
+			continue
+		}
+		if c.Offers >= MaxOffers {
+			c.Snooze, c.Short, c.Offered, c.Offers = 2*o.threshold(c), "", time.Time{}, 0
+			continue
+		}
+		c.Offered, c.Offers = now, c.Offers+1
+		out = append(out, sg)
+	}
+	return out, o.save()
+}
+
 // ErrUnknown: no open suggestion has that ID.
 var ErrUnknown = errors.New("attention: no such suggestion")
 
@@ -364,7 +429,7 @@ func (o *Optimizer) Decline(short string) error {
 	defer o.mu.Unlock()
 	for _, c := range o.st.Classes {
 		if c.Short != "" && strings.EqualFold(c.Short, short) {
-			c.Snooze, c.Short = 2*o.threshold(c), ""
+			c.Snooze, c.Short, c.Offered, c.Offers = 2*o.threshold(c), "", time.Time{}, 0
 			return o.save()
 		}
 	}
