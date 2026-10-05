@@ -41,6 +41,47 @@ const (
 	RecallExecutor = "recall"
 )
 
+// OriginEvidence marks the broker's delivery of an agent reply to the
+// owner's evidence destination (CH-20): the only origin the gate allows
+// a Config.Delivery operation from, and only for that.
+const OriginEvidence = "broker:evidence"
+
+// A delivery's params: the body and who wrote it, the agent or the box
+// itself (a notice), so the adapter can label it (security C4 on #148).
+const (
+	ParamFrom        = "from"
+	DeliverFromAgent = "agent"
+	DeliverFromBox   = "box"
+)
+
+// DeliveryCap bounds deliveries to the evidence destination in any 24
+// hours (security C5 on #148); past it a delivery is denied with
+// DeliveryCapReason and the broker keeps the reply instead.
+const (
+	DeliveryCap       = 30
+	DeliveryCapReason = "today's emailed replies are used up"
+)
+
+// originLocal is the local page's origin.
+const originLocal = "local"
+
+// Params of a journal.ActionEvidence intent: the destination address
+// (empty clears it) and the account whose own address it is.
+const (
+	ParamEvidenceAddress = "address"
+	ParamEvidenceAccount = "account"
+)
+
+// EvidenceIntent is the intent that sets the evidence destination to
+// address on account, or clears it when address is empty (CH-20).
+func EvidenceIntent(id, origin, address, account string) journal.Intent {
+	if address == "" {
+		account = ""
+	}
+	return journal.Intent{ID: id, Origin: origin, Account: journal.BrokerAccount, Action: journal.ActionEvidence,
+		Params: map[string]any{ParamEvidenceAddress: address, ParamEvidenceAccount: account}, Executor: ExecutorName}
+}
+
 // Params keys a pre-allowed intent may carry besides the rule's fixed
 // params: the source record it acts on, and for a context-scoped reply
 // (ADP-11) the reply's body. Nothing else, so there is no free text

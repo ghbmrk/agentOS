@@ -36,6 +36,11 @@ func (f *fakeOwner) Request(items []owner.Item, _ time.Duration) (string, error)
 	if f.down {
 		return "", fmt.Errorf("owner: no modem")
 	}
+	for _, it := range items {
+		if !owner.SMSApprovable(it) {
+			return "", owner.ErrLocalOnly // as the channel refuses it
+		}
+	}
 	id := fmt.Sprintf("R%d", len(f.order)+1)
 	f.reqs[id] = append([]owner.Item(nil), items...)
 	f.order = append(f.order, id)

@@ -12,8 +12,10 @@ import (
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/guest"
+	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/loops"
 	"github.com/ghbmrk/agentos/broker/vm"
+	"github.com/ghbmrk/agentos/broker/workers"
 )
 
 // sleepSource runs a loop's evaluating work with the agent asleep, on a
@@ -96,6 +98,29 @@ type sleepDeps struct {
 	agent *lateAgent
 	id    string
 	hours func(time.Time) bool
+	// workers, if set, serves the guest's worker tools (CAP-8).
+	workers *workers.Tools
+}
+
+// sleepWork is where the agent's work in hand is read (condition 2). Any
+// check that holds keeps the agent awake; clock does too, since the
+// sleeper's hours read the box clock (TIM-1, security R1 on #149).
+type sleepWork struct {
+	intent, undo, gate, handed func() bool
+	// worker, if set, reports a worker tool call in flight (L3 on #149).
+	worker func() bool
+	qs     *questions
+}
+
+func (w sleepWork) checks() map[string]func() bool {
+	m := map[string]func() bool{
+		"intent": w.intent, "undo": w.undo, "gate": w.gate, "handed": w.handed,
+		"question": w.qs.pending, "clock": w.qs.restricted,
+	}
+	if w.worker != nil {
+		m["worker"] = w.worker
+	}
+	return m
 }
 
 // openSleeper makes the agent sleeper for a box where the agent and a
@@ -115,17 +140,17 @@ func openSleeper(ctx context.Context, deps sleepDeps) *sleeper {
 			}
 			return t
 		},
-		Pending: map[string]func() bool{
-			"intent": d.Engine().GuestActive,
-			"undo": func() bool {
+		Pending: sleepWork{
+			intent: d.Engine().GuestActive,
+			undo: func() bool {
 				ch := d.Owner()
 				return ch != nil && ch.UndoOpen()
 			},
-			"gate":     d.Gate().Holding,
-			"question": deps.qs.pending,
-			"handed":   func() bool { return deps.plane.OwnerPending(deps.id) },
-			"clock":    deps.qs.restricted,
-		},
+			gate:   d.Gate().Holding,
+			handed: func() bool { return deps.plane.OwnerPending(deps.id) },
+			worker: workerBusy(deps.workers, deps.id),
+			qs:     deps.qs,
+		}.checks(),
 		Stopped: d.Engine().Stopped,
 		Journal: d.Engine().RecordSleep,
 		Hold: func() {
@@ -191,17 +216,22 @@ func (s *sleeper) whileAwake(f func() error) error {
 	return f()
 }
 
-// recoverSleep wakes an agent left on a sleep checkpoint on a box that no
-// longer sleeps it, or deletes the checkpoint (security R2 on #149).
-func recoverSleep(ctx context.Context, m sleepMachines, d *daemon.Daemon, id string) {
-	newSleeper(sleepConfig{Machines: m, ID: id, Journal: d.Engine().RecordSleep}).recover(ctx)
+// workerBusy reports whether id has a worker tool call in flight; nil
+// without worker tools.
+func workerBusy(wt *workers.Tools, id string) func() bool {
+	if wt == nil {
+		return nil
+	}
+	return func() bool { return wt.Busy(id) }
 }
 
-// ownerOr is the owner's quiet hours where set, else hours (UX nit on
-// #149): the agent sleeps when the owner asked not to be reached.
-func ownerOr(owner, hours func(time.Time) bool) func(time.Time) bool {
-	if owner != nil {
-		return owner
+// agentKeeper is the keeper of the agent machine id. With no sleeper (a
+// box whose agent and a replay machine fit together), a sleep checkpoint
+// left from when the box did sleep its agent is restored or deleted
+// first, so none outlives the mode (security R2 on #149).
+func agentKeeper(ctx context.Context, m *vm.Manager, record func(journal.SleepNote) error, id string, spec vm.Spec, sl *sleeper) *keeper {
+	if sl == nil {
+		newSleeper(sleepConfig{Machines: m, ID: id, Journal: record}).recover(ctx)
 	}
-	return hours
+	return &keeper{m: m, id: id, spec: spec, every: 30 * time.Second, logf: log.Printf, status: agentWaiting, sleep: sl}
 }

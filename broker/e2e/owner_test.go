@@ -110,7 +110,7 @@ func TestARC6OwnerChatReachesTheGuestAndBack(t *testing.T) {
 	ms := &machines{private: map[string]bool{}}
 	plane, err := guest.New(guest.Config{
 		Dir: filepath.Join(dir, "run", "guests"), Machines: ms, Effects: d.Engine(), Meter: mtr,
-		OwnerReply: func(_, _, text string) { d.Owner().Notify(text) },
+		OwnerReply: func(_ string, rep guest.Reply) { d.Owner().Notify(rep.Text) },
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -29,6 +29,7 @@ const (
 	wakeMax     = "max_sleep"
 	wakeUnit    = "unit_done"
 	wakeRestart = "restart"
+	wakeWork    = "work_pending"
 )
 
 // coldCodes are vm's cold-wake reasons as journal codes (potency R1 on
@@ -53,6 +54,9 @@ const (
 	defaultPreWake   = 10 * time.Minute
 	defaultMaxSleep  = 5 * time.Hour
 	defaultHoldAfter = 15 * time.Second
+	// defaultRestoreFor bounds one wake's restore, so a hung restore
+	// cannot hold the keeper and every later wake (L3 on #149).
+	defaultRestoreFor = 2 * time.Minute
 )
 
 // errNoSleep: the agent may not sleep now.
@@ -71,6 +75,10 @@ type sleepConfig struct {
 	// HoldAfter how long a wake for an owner message runs before the
 	// holding line (condition 14).
 	IdleAfter, PreWake, MaxSleep, HoldAfter time.Duration
+	// RestoreFor bounds one wake's restore (defaultRestoreFor). After a
+	// wake at MaxSleep the agent stays awake for IdleAfter before it may
+	// sleep again (condition 6, L3 on #149).
+	RestoreFor time.Duration
 	// LastOwner is when the owner last sent the agent a message.
 	LastOwner func() time.Time
 	// Pending names the checks for work in hand (condition 2): any true
@@ -98,6 +106,7 @@ type sleeper struct {
 	asleep bool
 	snap   string
 	since  time.Time
+	rested time.Time // no sleep before this, after a wake at MaxSleep
 	cuts   map[int]context.CancelCauseFunc
 	nextID int
 }
@@ -121,6 +130,9 @@ func newSleeper(cfg sleepConfig) *sleeper {
 	if cfg.HoldAfter <= 0 {
 		cfg.HoldAfter = defaultHoldAfter
 	}
+	if cfg.RestoreFor <= 0 {
+		cfg.RestoreFor = defaultRestoreFor
+	}
 	if cfg.Logf == nil {
 		cfg.Logf = log.Printf
 	}
@@ -140,22 +152,12 @@ func (s *sleeper) why(now time.Time) string {
 	switch {
 	case !s.inHours(now):
 		return "outside its hours"
-	case s.cfg.Stopped != nil && s.cfg.Stopped():
-		return "STOP"
+	case now.Before(s.rested):
+		return "just woke from its longest sleep"
 	case s.cfg.LastOwner != nil && now.Sub(s.cfg.LastOwner()) < s.cfg.IdleAfter:
 		return "owner recent"
 	}
-	names := make([]string, 0, len(s.cfg.Pending))
-	for n := range s.cfg.Pending {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	for _, n := range names {
-		if s.cfg.Pending[n]() {
-			return n
-		}
-	}
-	return ""
+	return s.pending()
 }
 
 // Asleep reports whether the agent is asleep or going to sleep; the keeper
@@ -206,7 +208,31 @@ func (s *sleeper) Sleep(ctx context.Context) error {
 	s.snap = snap.ID
 	s.mu.Unlock()
 	s.journal(journal.SleepNote{Event: journal.SleepAsleep})
+	// Work that arrived while the checkpoint was taken wakes the agent
+	// again at once (condition 2, L3 on #149).
+	if s.pending() != "" {
+		s.wakeLocked(wakeWork, nil)
+		return errNoSleep
+	}
 	return nil
+}
+
+// pending names the work in hand or STOP, or "".
+func (s *sleeper) pending() string {
+	if s.cfg.Stopped != nil && s.cfg.Stopped() {
+		return "STOP"
+	}
+	names := make([]string, 0, len(s.cfg.Pending))
+	for n := range s.cfg.Pending {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		if s.cfg.Pending[n]() {
+			return n
+		}
+	}
+	return ""
 }
 
 // guard returns ctx for one evaluator run while the agent sleeps: a wake
@@ -230,21 +256,53 @@ func (s *sleeper) guard(ctx context.Context) (context.Context, func()) {
 // Wake restores the agent, if asleep, for cause (a wake code). Any
 // evaluation running is cut first, as the owner's: STOP's cut is
 // change.ErrOwnerStop, any other change.ErrOwnerWork, so neither counts
-// against the candidate (PE5). A wake for an owner message that has not
-// finished within HoldAfter sends the holding line once.
+// against the candidate (PE5).
 func (s *sleeper) Wake(cause string) {
-	cut := change.ErrOwnerWork
-	if cause == wakeStop {
-		cut = change.ErrOwnerStop
-	}
-	s.mu.Lock()
-	for _, c := range s.cuts {
-		c(cut)
-	}
-	s.mu.Unlock()
-
+	s.cut(cause)
 	s.op.Lock()
 	defer s.op.Unlock()
+	s.wakeLocked(cause, nil)
+}
+
+// OwnerMessage wakes the agent for an owner message delivered to its
+// inbox at at. If the agent is asleep or going to sleep and is still not
+// awake HoldAfter after at, the holding line goes out once (condition
+// 14): the clock runs from the delivery, not from when the wake gets its
+// turn behind a checkpoint in progress (L3 on #149).
+func (s *sleeper) OwnerMessage(at time.Time) {
+	if !s.Asleep() {
+		return
+	}
+	s.cut(wakeOwner)
+	var hold *time.Timer
+	if s.cfg.Hold != nil {
+		hold = time.AfterFunc(s.cfg.HoldAfter-time.Since(at), s.cfg.Hold)
+	}
+	s.op.Lock()
+	defer s.op.Unlock()
+	s.wakeLocked(wakeOwner, hold)
+}
+
+// cut ends every guarded evaluation with the owner's cause for a wake.
+func (s *sleeper) cut(cause string) {
+	c := change.ErrOwnerWork
+	if cause == wakeStop {
+		c = change.ErrOwnerStop
+	}
+	s.mu.Lock()
+	for _, f := range s.cuts {
+		f(c)
+	}
+	s.mu.Unlock()
+}
+
+// wakeLocked restores the agent with s.op held; hold, if set, is stopped
+// once the agent is awake. The agent is marked awake even if the restore
+// and its cold fallback both fail, so the keeper starts it again.
+func (s *sleeper) wakeLocked(cause string, hold *time.Timer) {
+	if hold != nil {
+		defer hold.Stop()
+	}
 	s.mu.Lock()
 	if !s.asleep {
 		s.mu.Unlock()
@@ -252,20 +310,19 @@ func (s *sleeper) Wake(cause string) {
 	}
 	snap := s.snap
 	s.mu.Unlock()
-	var hold *time.Timer
-	if cause == wakeOwner && s.cfg.Hold != nil {
-		hold = time.AfterFunc(s.cfg.HoldAfter, s.cfg.Hold)
-	}
-	w, err := s.cfg.Machines.ResumeFromCheckpoint(context.Background(), s.cfg.ID, snap)
-	if hold != nil {
-		hold.Stop()
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.RestoreFor)
+	w, err := s.cfg.Machines.ResumeFromCheckpoint(ctx, s.cfg.ID, snap)
+	cancel()
 	if err != nil {
 		// The cold resume failed too: the keeper retries it.
 		s.cfg.Logf("agent machine %s: waking: %v", s.cfg.ID, err)
+		w = vm.Wake{Cold: vm.ColdFailed}
 	}
 	s.mu.Lock()
 	s.asleep, s.snap = false, ""
+	if cause == wakeMax {
+		s.rested = s.cfg.Now().Add(s.cfg.IdleAfter)
+	}
 	s.mu.Unlock()
 	s.journal(journal.SleepNote{Event: journal.SleepAwake, Cause: cause, Cold: coldCode(w)})
 }

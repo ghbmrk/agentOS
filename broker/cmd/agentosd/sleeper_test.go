@@ -27,6 +27,10 @@ type sleepFake struct {
 	sleepErr error
 	slow     chan struct{} // if set, ResumeFromCheckpoint waits on it
 	resumed  []string
+	// during, if set, runs inside CheckpointAndStop, unlocked; resumeErr
+	// fails ResumeFromCheckpoint, cold fallback included.
+	during    func()
+	resumeErr error
 }
 
 func newSleepFake() *sleepFake {
@@ -51,6 +55,12 @@ func (f *sleepFake) Snapshot(id string) (vm.Snapshot, error) {
 
 func (f *sleepFake) CheckpointAndStop(_ context.Context, id string) (vm.Snapshot, error) {
 	f.mu.Lock()
+	during := f.during
+	f.mu.Unlock()
+	if during != nil {
+		during()
+	}
+	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.sleepErr != nil {
 		return vm.Snapshot{}, f.sleepErr
@@ -70,6 +80,10 @@ func (f *sleepFake) ResumeFromCheckpoint(_ context.Context, id, snap string) (vm
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.resumeErr != nil {
+		delete(f.snaps, snap)
+		return vm.Wake{}, f.resumeErr
+	}
 	f.resumed = append(f.resumed, snap)
 	delete(f.snaps, snap)
 	f.state = vm.Running
@@ -262,7 +276,7 @@ func TestWatchWakesAtTheWindowEndAndMaxSleep(t *testing.T) {
 func TestHoldingLineOnASlowWake(t *testing.T) {
 	r := newSleepRig(t)
 	must(t, r.s.Sleep(context.Background()))
-	r.s.Wake(wakeOwner)
+	r.s.OwnerMessage(time.Now())
 	if r.holds != 0 {
 		t.Fatal("a quick wake sent the holding line")
 	}
@@ -272,7 +286,7 @@ func TestHoldingLineOnASlowWake(t *testing.T) {
 	r.f.slow = slow
 	r.f.mu.Unlock()
 	go func() { time.Sleep(80 * time.Millisecond); close(slow) }()
-	r.s.Wake(wakeOwner)
+	r.s.OwnerMessage(time.Now())
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.holds != 1 {
@@ -309,5 +323,168 @@ func TestRecoverWakesAnAgentLeftAsleep(t *testing.T) {
 	r2.s.recover(context.Background())
 	if len(r.f.resumed) != 1 {
 		t.Fatal("a running agent was resumed again")
+	}
+}
+
+func (r *sleepRig) holdCount() int { r.mu.Lock(); defer r.mu.Unlock(); return r.holds }
+
+// PE7 (condition 14, L3 on #149): the holding line's clock runs from the
+// owner message's delivery. A message that arrives while the checkpoint is
+// still being taken gets the line HoldAfter later, not after the
+// checkpoint and then HoldAfter.
+func TestHoldingLineClockStartsAtDelivery(t *testing.T) {
+	r := newSleepRig(t)
+	release := make(chan struct{})
+	in := make(chan struct{})
+	r.f.during = func() { close(in); <-release }
+	slept := make(chan error, 1)
+	go func() { slept <- r.s.Sleep(context.Background()) }()
+	<-in
+	woke := make(chan struct{})
+	go func() { r.s.OwnerMessage(time.Now()); close(woke) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for r.holdCount() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("no holding line while the checkpoint held the wake")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(release)
+	must(t, <-slept)
+	<-woke
+	if r.s.Asleep() || r.holdCount() != 1 {
+		t.Fatalf("asleep %v, holding lines %d", r.s.Asleep(), r.holdCount())
+	}
+
+	// A message delivered a while before its wake begins counts from the
+	// delivery too.
+	r = newSleepRig(t)
+	r.s.cfg.HoldAfter = 300 * time.Millisecond
+	must(t, r.s.Sleep(context.Background()))
+	slow := make(chan struct{})
+	r.f.mu.Lock()
+	r.f.slow = slow
+	r.f.mu.Unlock()
+	go func() { time.Sleep(150 * time.Millisecond); close(slow) }()
+	r.s.OwnerMessage(time.Now().Add(-250 * time.Millisecond))
+	if r.holdCount() != 1 {
+		t.Fatalf("holding lines %d for a wake ending 400 ms after delivery, want 1", r.holdCount())
+	}
+}
+
+// PE7 (condition 14, L3 on #149): the holding line is for owner messages
+// only, never before HoldAfter, and HoldAfter is 15 s unless set.
+func TestHoldingLineThreshold(t *testing.T) {
+	if got := newSleeper(sleepConfig{}).cfg.HoldAfter; got != 15*time.Second {
+		t.Fatalf("default HoldAfter %v", got)
+	}
+	slowWake := func(r *sleepRig, d time.Duration, wake func()) {
+		must(t, r.s.Sleep(context.Background()))
+		slow := make(chan struct{})
+		r.f.mu.Lock()
+		r.f.slow = slow
+		r.f.mu.Unlock()
+		go func() { time.Sleep(d); close(slow) }()
+		wake()
+	}
+	r := newSleepRig(t)
+	slowWake(r, 80*time.Millisecond, func() { r.s.Wake(wakeWindow) })
+	if r.holdCount() != 0 {
+		t.Fatal("a wake at the window's end sent the holding line")
+	}
+	r = newSleepRig(t)
+	r.s.cfg.HoldAfter = 400 * time.Millisecond
+	slowWake(r, 40*time.Millisecond, func() { r.s.OwnerMessage(time.Now()) })
+	time.Sleep(450 * time.Millisecond)
+	if r.holdCount() != 0 {
+		t.Fatal("the holding line went out before HoldAfter")
+	}
+}
+
+// PE7 (L3 on #149): a wake whose restore and cold fallback both fail
+// still marks the agent awake and journals it, so the keeper starts it
+// again.
+func TestFailedRestoreLeavesTheAgentToTheKeeper(t *testing.T) {
+	r := newSleepRig(t)
+	must(t, r.s.Sleep(context.Background()))
+	r.f.mu.Lock()
+	r.f.resumeErr = errors.New("restore failed")
+	r.f.mu.Unlock()
+	r.s.Wake(wakeOwner)
+	if r.s.Asleep() {
+		t.Fatal("the agent stayed asleep after a failed restore")
+	}
+	if n := r.last(); n.Event != journal.SleepAwake || n.Cold != "restore_failed" {
+		t.Fatalf("journal %+v", n)
+	}
+	f := &fakeMachines{m: map[string]vm.Machine{"agent": {ID: "agent", Spec: testSpec, State: vm.Stopped}}}
+	k := &keeper{m: f, id: "agent", spec: testSpec, sleep: r.s}
+	must(t, k.ensure(context.Background()))
+	if f.resumed != 1 {
+		t.Fatalf("keeper resumed %d times, want 1", f.resumed)
+	}
+}
+
+// PE7 (condition 2, L3 on #149): work that arrives while the checkpoint
+// is taken wakes the agent at once, and the unit does not run.
+func TestWorkDuringTheCheckpointWakesTheAgent(t *testing.T) {
+	r := newSleepRig(t)
+	r.f.during = func() { r.set(func() { r.pending["handed"] = true }) }
+	if err := r.s.Sleep(context.Background()); !errors.Is(err, errNoSleep) {
+		t.Fatalf("sleep with work arrived: %v", err)
+	}
+	if r.s.Asleep() || len(r.f.resumed) != 1 || r.last().Cause != wakeWork {
+		t.Fatalf("asleep %v, resumed %v, journal %+v", r.s.Asleep(), r.f.resumed, r.last())
+	}
+}
+
+// PE7 (condition 6, L3 on #149): MaxSleep runs from the latest sleep, and
+// after a wake at MaxSleep the agent stays awake for IdleAfter.
+func TestMaxSleepRunsFromEachSleep(t *testing.T) {
+	r := newSleepRig(t)
+	r.s.cfg.Hours = func(time.Time) bool { return true }
+	must(t, r.s.Sleep(context.Background()))
+	r.set(func() { r.now = r.now.Add(4 * time.Hour) })
+	r.s.Wake(wakeUnit)
+	must(t, r.s.Sleep(context.Background()))
+	r.set(func() { r.now = r.now.Add(2 * time.Hour) })
+	r.s.check()
+	if !r.s.Asleep() {
+		t.Fatalf("woken %+v: MaxSleep counted from the first sleep", r.last())
+	}
+	r.set(func() { r.now = r.now.Add(3*time.Hour + time.Minute) })
+	r.s.check()
+	if r.s.Asleep() || r.last().Cause != wakeMax {
+		t.Fatalf("not woken at MaxSleep: %+v", r.last())
+	}
+	if err := r.s.Sleep(context.Background()); !errors.Is(err, errNoSleep) {
+		t.Fatalf("slept again straight after its longest sleep: %v", err)
+	}
+	r.set(func() { r.now = r.now.Add(defaultIdleAfter) })
+	must(t, r.s.Sleep(context.Background()))
+}
+
+// PE7 (security R1 on #147, L3 on #149): recover restores only this
+// machine's sleep checkpoint, and only while the machine is stopped on it.
+func TestRecoverLeavesOtherStatesAlone(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(f *sleepFake)
+	}{
+		{"running", func(f *sleepFake) { f.state = vm.Running }},
+		{"not a sleep checkpoint", func(f *sleepFake) { s := f.snaps[f.last]; s.Sleep = false; f.snaps[f.last] = s }},
+		{"another machine's", func(f *sleepFake) { s := f.snaps[f.last]; s.Machine = "other"; f.snaps[f.last] = s }},
+	} {
+		r := newSleepRig(t)
+		must(t, r.s.Sleep(context.Background()))
+		r.f.mu.Lock()
+		tc.set(r.f)
+		r.f.mu.Unlock()
+		r2 := newSleepRig(t)
+		r2.s.cfg.Machines = r.f
+		r2.s.recover(context.Background())
+		if len(r.f.resumed) != 0 || len(r2.notes) != 0 {
+			t.Fatalf("%s: resumed %v, journal %+v", tc.name, r.f.resumed, r2.notes)
+		}
 	}
 }

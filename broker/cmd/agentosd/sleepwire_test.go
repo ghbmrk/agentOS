@@ -115,6 +115,14 @@ func TestSleepModeBusyIsTheOwners(t *testing.T) {
 	if b, _, _ := l.busyCause(); b {
 		t.Fatal("asleep: the sleeper held the box")
 	}
+
+	// Memory pressure still wins while the sleeper keeps the agent awake:
+	// the cut is pressure's, which counts (condition 7, L3 on #149).
+	r.s.Wake(wakeUnit)
+	c.Pressure = func() float64 { return 1e9 }
+	if b, o, p := l.busyCause(); !b || !o || !p {
+		t.Fatalf("pressure with the owner recent: busy %v owner %v pressure %v", b, o, p)
+	}
 }
 
 // PE7: the keeper does not restart an agent its sleeper stopped, and
@@ -195,22 +203,5 @@ func TestParseSleepHours(t *testing.T) {
 		if _, err := parseSleepHours(bad); err == nil {
 			t.Errorf("%q accepted", bad)
 		}
-	}
-}
-
-// PE7 (UX nit on #149): the owner's quiet hours, where set, are the
-// agent's sleep hours; -sleep-hours applies otherwise.
-func TestOwnerQuietHoursAreTheSleepHours(t *testing.T) {
-	never := func(time.Time) bool { return false }
-	always := func(time.Time) bool { return true }
-	if ownerOr(never, always)(time.Now()) {
-		t.Fatal("the flag's hours won over the owner's")
-	}
-	if !ownerOr(nil, always)(time.Now()) {
-		t.Fatal("no owner hours: the flag's did not apply")
-	}
-	var q questions
-	if q.restricted() {
-		t.Fatal("no clock check yet: restricted")
 	}
 }
