@@ -493,7 +493,7 @@ func TestATextingAccountIsSetUpOnTheSecondLinePage(t *testing.T) {
 	if b := html.UnescapeString(w.Body.String()); !strings.Contains(b, "Copy the account ID exactly") || strings.Contains(b, smsCanary) || !strings.Contains(b, `value="+1 555 010 4477"`) {
 		t.Fatalf("refusal:\n%s", b)
 	}
-	form.Set("account", "AC" + "0123456789abcdef" + "0123456789abcdef")
+	form.Set("account", "AC"+"0123456789abcdef"+"0123456789abcdef")
 	if w := r.post("/second-line/", form); w.Code != http.StatusSeeOther || fl.smsToken != smsCanary || fl.sms.Number != "+15550104477" {
 		t.Fatalf("set: %d %+v", w.Code, fl.sms)
 	}
