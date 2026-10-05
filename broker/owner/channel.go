@@ -55,8 +55,8 @@ type Config struct {
 	// Agent receives task chat; nil when no agent is running.
 	Agent    control.Agent
 	Machines func() string
-	// Clock is STATUS's time check line (control.Handler.Clock).
-	Clock   func() string
+	// Notes are STATUS's exception lines (control.Handler.Notes).
+	Notes   []func() string
 	Secrets Secrets
 	// Verifier, when set, checks code-generator codes in place of
 	// Secrets.TOTPSeed, which is then ignored (egress K7).
@@ -228,7 +228,7 @@ func New(cfg Config) (*Channel, error) {
 		queued: map[string]*Queued{}, released: map[string]time.Time{},
 		boot: &bootReport{pending: st.Pending, queued: st.Queued},
 	}
-	c.ctrl = &control.Handler{Engine: cfg.Engine, Auth: c, Agent: cfg.Agent, Machines: cfg.Machines, Clock: cfg.Clock, Now: cfg.Now,
+	c.ctrl = &control.Handler{Engine: cfg.Engine, Auth: c, Agent: cfg.Agent, Machines: cfg.Machines, Notes: cfg.Notes, Now: cfg.Now,
 		Settings: cfg.Settings, HelpExtra: cfg.HelpExtra, Answer: cfg.Answer}
 	return c, nil
 }

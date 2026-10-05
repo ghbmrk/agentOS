@@ -42,7 +42,7 @@ func (q *questions) Answer(ctx context.Context, msg string) (string, bool) {
 	return b.Answer(ctx, msg)
 }
 
-// Clock is STATUS's time check line (control.Handler.Clock): the guard's
+// Clock is STATUS's time check line (a control.Handler note): the guard's
 // last check in the box's zone, so a restriction holding every question
 // is visible while the guard texts nothing (UX R3, L3 S1 on #95).
 func (q *questions) Clock() string {
@@ -133,7 +133,10 @@ func (q *questions) open(ctx context.Context, d *daemon.Daemon, pre *preempter, 
 
 // wire gives the daemon the answer hook and the STATUS clock line; call
 // it before daemon.Run.
-func (q *questions) wire(cfg *daemon.Config) { cfg.Answer, cfg.Clock = q.Answer, q.Clock }
+func (q *questions) wire(cfg *daemon.Config) {
+	cfg.Answer = q.Answer
+	cfg.Notes = append(cfg.Notes, q.Clock)
+}
 
 // tools is what the guest plane serves beside the effect tools: the
 // question tools once the book is open, else none.
