@@ -30,6 +30,7 @@ func TestQuestionsRunInAgentosd(t *testing.T) {
 	}
 	qs.wire(&cfg) // as main does
 	ctx, cancel := context.WithCancel(context.Background())
+	defer qs.wait() // the loops write into dir until they stop
 	defer cancel()
 	if _, ok := qs.Answer(ctx, "Q100 yes"); ok {
 		t.Fatal("answered before the book opened")
@@ -123,6 +124,7 @@ func TestStatusShowsAnUnreadableClockRestriction(t *testing.T) {
 	}
 	qs.wire(&cfg)
 	ctx, cancel := context.WithCancel(context.Background())
+	defer qs.wait() // the loops write into dir until they stop
 	defer cancel()
 	d, err := daemon.Run(ctx, cfg)
 	if err != nil {

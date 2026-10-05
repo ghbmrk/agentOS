@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -24,7 +25,13 @@ import (
 type questions struct {
 	b atomic.Pointer[question.Book]
 	g atomic.Pointer[clock.Guard]
+	// run is the guard's and the book's loops, which write state files
+	// until ctx is done; wait waits for them.
+	run sync.WaitGroup
 }
+
+// wait returns once the loops open started have stopped.
+func (q *questions) wait() { q.run.Wait() }
 
 // Answer is the owner channel's answer hook (control.Handler.Answer).
 func (q *questions) Answer(ctx context.Context, msg string) (string, bool) {
@@ -109,8 +116,9 @@ func (q *questions) open(ctx context.Context, d *daemon.Daemon, pre *preempter, 
 	}
 	q.b.Store(b)
 	q.g.Store(guard)
-	go guard.Run(ctx)
-	go b.Run(ctx, 30*time.Second)
+	q.run.Add(2)
+	go func() { defer q.run.Done(); guard.Run(ctx) }()
+	go func() { defer q.run.Done(); b.Run(ctx, 30*time.Second) }()
 	return guard, nil
 }
 
