@@ -101,6 +101,7 @@ type rig struct {
 	now       time.Time
 	grants    map[string][]string
 	labels    map[string]string
+	px        *egress.Proxy
 }
 
 func (r *rig) Egress(e egress.Event) {
@@ -189,6 +190,7 @@ func newRig(t *testing.T, o rigOpts) *rig {
 	if err != nil {
 		t.Fatal(err)
 	}
+	r.px = px
 	r.router, err = New(Config{
 		Providers: []Provider{OpenAI(), Anthropic()},
 		Rule:      o.rule,
