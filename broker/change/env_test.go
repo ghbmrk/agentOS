@@ -2,9 +2,6 @@ package change
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -13,6 +10,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/update"
+	"github.com/ghbmrk/agentos/broker/update/updatetest"
 )
 
 // env is a pipeline wired to a real journal engine, with the owner played
@@ -200,7 +198,7 @@ func (e *env) cases(n int, class Class, input, expect string) {
 	}
 }
 
-func (e *env) release(v update.Verified) Report {
+func (e *env) release(v *update.Verified) Report {
 	e.t.Helper()
 	rep, err := e.p.ProposeRelease(context.Background(), v)
 	if err != nil {
@@ -220,28 +218,7 @@ func (e *env) propose(c Candidate) Report {
 
 func containsCanary(b []byte) bool { return strings.Contains(string(b), "CANARY-") }
 
-// release signs and verifies an upstream release with two test root keys.
-func release(t *testing.T, version string, security bool, images map[string][]byte) update.Verified {
-	t.Helper()
-	root := update.Root{Keys: map[string]ed25519.PublicKey{}, Threshold: 2}
-	var pks []ed25519.PrivateKey
-	for _, id := range []string{"k1", "k2"} {
-		pub, pk, err := ed25519.GenerateKey(rand.Reader)
-		if err != nil {
-			t.Fatal(err)
-		}
-		root.Keys[id] = pub
-		pks = append(pks, pk)
-	}
-	dg := map[string]string{}
-	for p, b := range images {
-		dg[p] = update.Digest(b)
-	}
-	meta, _ := json.Marshal(update.Release{Version: version, Security: security, Images: dg})
-	v, err := update.Verify(root, meta, []update.Signature{{KeyID: "k1", Sig: ed25519.Sign(pks[0], meta)},
-		{KeyID: "k2", Sig: ed25519.Sign(pks[1], meta)}}, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return v
+// release is a verified upstream release, as update.Store.Check makes one.
+func release(t *testing.T, version int64, security bool, images map[string][]byte) *update.Verified {
+	return updatetest.Release(t, version, security, images)
 }

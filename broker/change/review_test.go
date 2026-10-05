@@ -70,21 +70,21 @@ func TestStagedImages(t *testing.T) {
 	e := newEnv(t, nil)
 	e.cases(12, ClassSkill, "skills/greet", "hi")
 	e.owner.approve = true
-	r := e.release(release(t, "4.0", false, map[string][]byte{"host-image/release": []byte("a")}))
+	r := e.release(release(t, 40, false, map[string][]byte{"host-image/release": []byte("a")}))
 	if r.State != StateAdopted {
 		t.Fatal(r)
 	}
 	d := e.p.Digest()
-	if len(d) != 1 || !strings.HasPrefix(d[0], "Staged update 4.0; it starts at the next restart.") {
+	if len(d) != 1 || !strings.HasPrefix(d[0], "Staged update 40; it starts at the next restart.") {
 		t.Fatalf("staged digest: %q", d)
 	}
 	if err := e.p.ConfirmStaged(r.Short); err != nil {
 		t.Fatal(err)
 	}
-	if d := e.p.Digest(); len(d) != 1 || !strings.HasPrefix(d[0], "Installed update 4.0.") {
+	if d := e.p.Digest(); len(d) != 1 || !strings.HasPrefix(d[0], "Installed update 40.") {
 		t.Fatalf("installed digest: %q", d)
 	}
-	r2 := e.release(release(t, "4.1", false, map[string][]byte{"host-image/release": []byte("b")}))
+	r2 := e.release(release(t, 41, false, map[string][]byte{"host-image/release": []byte("b")}))
 	e.p.Digest()
 	if err := e.p.StageFailed(bg, r2.Short); err != nil {
 		t.Fatal(err)
@@ -273,7 +273,7 @@ func TestNotEvaluatedImage(t *testing.T) {
 		return ev.Run(ctx, tr, pr)
 	})
 	e.p.Attach(holdJournal{e.eng})
-	r := e.release(release(t, "2.0", false, map[string][]byte{"host-image/release": []byte("a")}))
+	r := e.release(release(t, 20, false, map[string][]byte{"host-image/release": []byte("a")}))
 	if r.State != StateAwaitingOwner || r.NotEvaluated == 0 || r.HeldOut != 0 {
 		t.Fatalf("image: %+v", r)
 	}
@@ -323,7 +323,7 @@ func TestRecheckKeepsProtectedImages(t *testing.T) {
 		}
 		return ev.Run(ctx, tr, pr)
 	})
-	sec := e.release(release(t, "5.0", true, map[string][]byte{"host-image/release": []byte("a")}))
+	sec := e.release(release(t, 50, true, map[string][]byte{"host-image/release": []byte("a")}))
 	if sec.State != StateAdopted || sec.Basis != BasisSecurity {
 		t.Fatal(sec)
 	}
@@ -368,7 +368,7 @@ func TestRevertNeverEmptiesTarget(t *testing.T) {
 	e := newEnv(t, func(c *Config) { c.Targets = map[string]Target{"host-image": tg} })
 	e.cases(12, ClassSkill, "skills/greet", "hi")
 	e.owner.approve = true
-	r := e.release(release(t, "1.0", false, map[string][]byte{"host-image/release": []byte("a")}))
+	r := e.release(release(t, 10, false, map[string][]byte{"host-image/release": []byte("a")}))
 	if r.State != StateAdopted {
 		t.Fatal(r)
 	}

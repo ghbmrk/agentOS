@@ -69,6 +69,11 @@ type Harvester struct {
 type harvested struct {
 	Tasks map[string]string `json:"tasks"` // case ID -> task key of its intent
 	Added map[string]bool   `json:"added"` // cases the pipeline holds
+	// Origins is the origin task key of each case's intent (TaskKey with
+	// no goal). A held-out case holds it too: the same guest's intents
+	// with no goal land there and may be the held-out task's own work
+	// (guest G14, #55 review B2).
+	Origins map[string]string `json:"origins,omitempty"`
 }
 
 var ErrAction = errors.New("loops: unknown owner action")
@@ -118,8 +123,10 @@ func (h *Harvester) Harvest(o Outcome) error {
 	}
 	if _, ok := h.st.Tasks[c.ID]; !ok {
 		h.st.Tasks[c.ID] = taskKey
+		h.st.Origins[c.ID] = originKey(st.Intent)
 		if err := h.saveLocked(); err != nil {
 			delete(h.st.Tasks, c.ID)
+			delete(h.st.Origins, c.ID)
 			return err
 		}
 	}
@@ -166,6 +173,9 @@ func (h *Harvester) loadLocked() error {
 	if h.st.Added == nil {
 		h.st.Added = map[string]bool{}
 	}
+	if h.st.Origins == nil {
+		h.st.Origins = map[string]string{}
+	}
 	h.loaded = true
 	return nil
 }
@@ -184,6 +194,9 @@ type Evidence struct {
 	HeldOut int
 	// heldTasks are the task keys whose case is held out.
 	heldTasks map[string]bool
+	// heldIntents are the intents held-out cases were recorded on (a
+	// case's ID is its intent's).
+	heldIntents map[string]bool
 	// Dev are the dev-split task cases, the only ones a builder may see.
 	Dev []change.Case
 }
@@ -203,7 +216,7 @@ func (h *Harvester) Evidence() (Evidence, error) {
 	for _, c := range dev {
 		inDev[c.ID] = true
 	}
-	ev := Evidence{heldTasks: map[string]bool{}, Dev: dev}
+	ev := Evidence{heldTasks: map[string]bool{}, heldIntents: map[string]bool{}, Dev: dev}
 	ids := make([]string, 0, len(h.st.Tasks))
 	for id := range h.st.Tasks {
 		ids = append(ids, id)
@@ -216,6 +229,10 @@ func (h *Harvester) Evidence() (Evidence, error) {
 		// A task whose case may be held out is never mined, even if the
 		// pipeline may not have it; only cases it holds count.
 		ev.heldTasks[h.st.Tasks[id]] = true
+		ev.heldIntents[id] = true
+		if o := h.st.Origins[id]; o != "" {
+			ev.heldTasks[o] = true
+		}
 		if h.st.Added[id] {
 			ev.HeldOut++
 		}
