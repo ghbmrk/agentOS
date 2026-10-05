@@ -69,7 +69,8 @@ class TreeCheckTest(unittest.TestCase):
         for rel in ("usr/sbin/hwclock", "usr/lib/udev/rules.d/85-hwclock.rules", "usr/lib/systemd/systemd-timesyncd",
                     "usr/lib/systemd/systemd-timedated", "usr/sbin/lvm", "usr/sbin/mdadm",
                     "usr/lib/udev/rules.d/69-lvm.rules", "usr/lib/udev/rules.d/63-md-raid-arrays.rules",
-                    "usr/lib/udev/rules.d/80-udisks2.rules"):
+                    "usr/lib/udev/rules.d/80-udisks2.rules", "usr/lib/udev/rules.d/69-bcache.rules",
+                    "usr/lib/udev/rules.d/60-zfs.rules", "usr/lib/udev/rules.d/64-md-raid-assembly.rules"):
             with self.subTest(rel):
                 f = write(self.root, rel, "x")
                 v = check.violations(self.root)

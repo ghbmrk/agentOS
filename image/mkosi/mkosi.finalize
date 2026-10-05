@@ -25,12 +25,14 @@ KEY_MARKERS = (b"PRIVATE KEY-----", b"PGP PRIVATE KEY BLOCK", b"AGE-SECRET-KEY-"
 # package content from pinned sources and is covered only by the socket check.
 SCAN_MAX = 1 << 20
 # HW-8 (HOST-1a H11, HOST-1b K14): nothing that writes the host's hardware clock (hwclock, its udev
-# rule, timesyncd, timedated) or assembles or automounts its disks (LVM, MD-RAID, udisks).
+# rule, timesyncd, timedated) or assembles or automounts its disks (LVM, MD-RAID, bcache, ZFS,
+# dmraid, udisks): a future dependency that adds such a udev rule fails the build (security on #172).
 HOST_TOUCHING = ("usr/sbin/hwclock", "usr/lib/udev/rules.d/*hwclock*", "usr/lib/systemd/systemd-timesyncd",
                  "usr/lib/systemd/systemd-timedated", "usr/lib/systemd/system/systemd-timesyncd.service",
                  "usr/lib/systemd/system/systemd-timedated.service", "usr/sbin/lvm", "usr/sbin/mdadm",
                  "usr/lib/udev/rules.d/*lvm*", "usr/lib/udev/rules.d/*md-raid*", "usr/libexec/udisks2",
-                 "usr/lib/udev/rules.d/*udisks*")
+                 "usr/lib/udev/rules.d/*udisks*", "usr/lib/udev/rules.d/*bcache*", "usr/lib/udev/rules.d/*zfs*",
+                 "usr/lib/udev/rules.d/*dmraid*", "usr/lib/udev/rules.d/*mdadm*")
 RTC_DIRECTIVES = ("rtcsync", "rtcfile", "hwclockfile", "rtconutc", "rtcautotrim", "rtcdevice")
 
 
