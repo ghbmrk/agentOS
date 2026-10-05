@@ -100,6 +100,33 @@ type Verifier interface {
 	Verify(ctx context.Context, in journal.Intent) (Verified, error)
 }
 
+// Escalator is implemented by verifiers whose adapter guards a
+// reversible verb (ADP-2's organize guards): it reads the source and says
+// whether this one effect must be treated more strictly. It runs at
+// authorization and again at the recheck before dispatch (OP-3).
+type Escalator interface {
+	Escalate(ctx context.Context, in journal.Intent) (Escalation, error)
+}
+
+// Escalation is what an Escalator decided. The zero value changes
+// nothing. An error denies the effect: a target the adapter never allows.
+type Escalation struct {
+	// Verb, if set, applies when stricter than the granted verb (an
+	// archive that hides a security alert is change-account).
+	Verb string
+	// Ask sends the effect to the owner at its verb, reversible or not
+	// (past a daily bound).
+	Ask bool
+	// Reason is why the effect is asked, in the adapter's fixed wording
+	// built only from broker-held fields (never a message's subject or
+	// body). It becomes the approval line's Detail.
+	Reason string
+	// Held refuses the effect for now, with a reason that says it may be
+	// tried again (past a daily bound while the owner has not allowed
+	// more).
+	Held bool
+}
+
 // Verified is what a Verifier read.
 type Verified struct {
 	// Item is the approval line as the source shows it: object, canonical
@@ -453,7 +480,33 @@ func (g *Gate) evaluate(ctx context.Context, phase journal.Phase, in journal.Int
 	if !ok {
 		return verdict{kind: deny, why: "this operation's verb is not on the broker's list (ADP-2)"}
 	}
-	if cls == verb.Reversible {
+	var esc Escalation
+	if e, ok := g.cfg.Verifiers[in.Account].(Escalator); ok {
+		var err error
+		if esc, err = e.Escalate(ctx, in); err != nil {
+			g.cfg.Logf("grants: guarding %s: %v", in.ID, err)
+			return verdict{kind: deny, why: "the adapter's guard refuses this effect (ADP-2)"}
+		}
+		if esc.Held {
+			return verdict{kind: deny, why: "held: past the account's daily bound until the owner allows more; try again later (ADP-2)"}
+		}
+		if esc.Verb != "" {
+			// Only a strictly higher class replaces the granted verb, so
+			// an escalation can never relabel an effect sideways.
+			ec, ok := verb.ClassOf(esc.Verb)
+			if !ok {
+				return verdict{kind: deny, why: "this operation's verb is not on the broker's list (ADP-2)"}
+			}
+			if ec > cls {
+				v, cls = esc.Verb, ec
+			}
+		}
+	} else if v == verb.Organize {
+		// Organize is reversible only behind its adapter's guards
+		// (ADP-2): without them, every effect is asked.
+		esc = Escalation{Ask: true, Reason: "no guard for this account"}
+	}
+	if cls == verb.Reversible && !esc.Ask {
 		return verdict{kind: allow}
 	}
 	var ver Verified
@@ -467,6 +520,9 @@ func (g *Gate) evaluate(ctx context.Context, phase journal.Phase, in journal.Int
 		}
 	}
 	item := approvalItem(in, v, cls, ver, verified)
+	if esc.Reason != "" {
+		item.Detail = esc.Reason
+	}
 	if cls == verb.Irreversible && verified {
 		sort.Slice(rules, func(i, j int) bool { return rules[i].ID < rules[j].ID })
 		for _, r := range rules {

@@ -139,6 +139,14 @@ func Backup(b *Box, roots []Root, w io.Writer, now time.Time) error {
 	if err != nil {
 		return err
 	}
+	return backupSealed(b, pub, roots, w, now)
+}
+
+// backupSealed is Backup to the backup key pub, read once by the caller.
+func backupSealed(b *Box, pub []byte, roots []Root, w io.Writer, now time.Time) error {
+	if _, unfinished := RotationUnfinished(b); unfinished {
+		return ErrRotationUnfinished
+	}
 	mk, err := macKey(b.V)
 	if err != nil {
 		return err

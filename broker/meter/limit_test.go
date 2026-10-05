@@ -175,3 +175,36 @@ func TestOP8ServerReportedUsageSettlesTheCall(t *testing.T) {
 		}
 	}
 }
+
+// TestOP8NoResponseChargesNoPageOutput: when the egress gives no
+// response, the serving handler writes its own error page and says why.
+// A call that never reached the egress is charged its input estimate; one
+// that reached it and got no answer, its full output reservation too. The
+// page is never charged as output.
+func TestOP8NoResponseChargesNoPageOutput(t *testing.T) {
+	body := `{"max_tokens":100}`
+	est := Tokens(int64(len(body)))
+	page := "model egress unavailable\n"
+	for _, tc := range []struct {
+		name string
+		rep  *Usage
+		want int64
+	}{
+		{"never reached", &Usage{NoResponse: true}, est},
+		{"unanswered", &Usage{Unanswered: true}, est + 100},
+		// Without a report the page is an unreadable body, charged by size.
+		{"unreported", nil, est + Tokens(int64(len(page)))},
+	} {
+		m, _, _ := open(t, Config{MachineCap: Limits{Calls: 10, Tokens: 1 << 30}, OverallCap: big})
+		h := m.Wrap("m1", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if tc.rep != nil {
+				Report(r.Context(), *tc.rep)
+			}
+			http.Error(w, strings.TrimSuffix(page, "\n"), http.StatusServiceUnavailable)
+		}))
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/", strings.NewReader(body)))
+		if u := m.Usage("m1"); u.Tokens != tc.want || u.Calls != 1 {
+			t.Errorf("%s: charged %d tokens and %d calls, want %d and 1", tc.name, u.Tokens, u.Calls, tc.want)
+		}
+	}
+}

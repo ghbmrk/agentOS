@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -884,5 +885,34 @@ func TestLabelsPartitionRequests(t *testing.T) {
 	}
 	if s, _ := r.eng.Get("m1/q1"); s.Intent.Label != "public" {
 		t.Fatalf("label %q", s.Intent.Label)
+	}
+}
+
+// REQ: OP-8
+//
+// TestShutdownWaitsForCallsInFlight: a model call whose response the guest
+// already has may still be settling the meter; Shutdown returns only once
+// it has ended, so nothing writes the broker's files after shutdown.
+func TestShutdownWaitsForCallsInFlight(t *testing.T) {
+	var ended atomic.Bool
+	r := newRig(t, func(c *Config) {
+		c.Model = func(string) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				io.WriteString(w, `{}`)
+				w.(http.Flusher).Flush()
+				time.Sleep(200 * time.Millisecond)
+				ended.Store(true)
+			})
+		}
+	})
+	resp, err := r.client("m1").Post("http://broker/model/openai/v1/chat/completions", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.ReadAll(io.LimitReader(resp.Body, 2))
+	resp.Body.Close()
+	r.p.Shutdown()
+	if !ended.Load() {
+		t.Fatal("Shutdown returned with a call still in flight")
 	}
 }
