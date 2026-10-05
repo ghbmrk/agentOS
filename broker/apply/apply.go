@@ -247,10 +247,16 @@ func (a *Applier) busy(now time.Time) string {
 	return ""
 }
 
-// Tick applies the pending release when it is due and the box is free:
-// it journals the activation and, once the activator took the release,
-// restarts. ok reports the restart.
+// Tick applies the pending release when it is due and the box is free,
+// by journaling its activation, then restarts into it. The restart is
+// its own step: it waits for the box to be free again after the slot
+// write, which can take minutes (UPD-6), and it is retried on later ticks
+// when the broker stopped before it (security F1 on #133). ok reports the
+// restart.
 func (a *Applier) Tick(ctx context.Context) (ok bool, err error) {
+	if ok, err := a.restartIfHandedOver(ctx); ok || err != nil {
+		return ok, err
+	}
 	now := a.cfg.Now()
 	a.mu.Lock()
 	p := a.st.Pending
@@ -279,6 +285,26 @@ func (a *Applier) Tick(ctx context.Context) (ok bool, err error) {
 	}
 	if st.State != journal.Succeeded {
 		return false, nil // denied (busy at dispatch) or not applied: try again later
+	}
+	return a.restartIfHandedOver(ctx)
+}
+
+// restartIfHandedOver restarts into a release the activator took, in the
+// boot it was handed over in, once the box is free.
+func (a *Applier) restartIfHandedOver(ctx context.Context) (bool, error) {
+	a.mu.Lock()
+	pt := a.st.Applying
+	if pt == nil || !pt.Installed || a.executing {
+		a.mu.Unlock()
+		return false, nil
+	}
+	a.mu.Unlock()
+	b, err := a.cfg.Activator.Booted(ctx)
+	if err != nil || b.ID != pt.BootID {
+		return false, err // a new boot is Resume's to judge
+	}
+	if a.busy(a.cfg.Now()) != "" {
+		return false, nil
 	}
 	return true, a.cfg.Activator.Restart(ctx)
 }

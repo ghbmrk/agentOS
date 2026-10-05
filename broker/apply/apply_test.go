@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/update"
 )
 
 // REQ: UPD-1, UPD-1a, UPD-5, UPD-6
@@ -285,5 +286,70 @@ func TestStoppedMidHandover(t *testing.T) {
 			t.Fatalf("%s: still staged", name)
 		}
 		r.must(r.a.Schedule(r.release(2, true), "a2"))
+	}
+}
+
+// Security F1 on #133: a call that starts during the slot write delays
+// the restart until it ends, and a broker that stopped before the restart
+// restarts on its next free tick.
+type slowActivator struct {
+	*activator
+	during func()
+}
+
+func (s slowActivator) Install(ctx context.Context, v *update.Verified) error {
+	err := s.activator.Install(ctx, v)
+	s.during()
+	return err
+}
+
+func TestRestartWaitsForTheBoxToBeFreeAfterTheSlotWrite(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	rel := r.release(1, true)
+	r.act0 = slowActivator{r.act, func() { r.inCall = true }}
+	r.restart()
+	r.must(r.a.Schedule(rel, "a1"))
+	if ok, err := r.a.Tick(ctx); ok || err != nil || len(r.act.installed) != 1 || r.act.restarts != 0 {
+		t.Fatalf("restarted during a call: %v %v", ok, err)
+	}
+	if !strings.Contains(r.a.Status(), "installing") {
+		t.Fatalf("status: %q", r.a.Status())
+	}
+	r.inCall = false
+	if ok, err := r.a.Tick(ctx); !ok || err != nil || r.act.restarts != 1 {
+		t.Fatalf("not restarted once free: %v %v", ok, err)
+	}
+}
+
+func TestBrokerStoppedBeforeTheRestartRestartsLater(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	r.must(r.a.Schedule(r.release(1, true), "a1"))
+	id := r.a.nextID(1)
+	in := r.a.intent(id)
+	if _, err := r.eng.Submit(in); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.eng.Authorize(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := r.eng.Dispatch(ctx, id); err != nil || st.State != journal.Succeeded {
+		t.Fatalf("%s %v", st.State, err)
+	}
+	r.restart() // the broker stopped before restarting the box
+	r.must(r.a.Resume(ctx))
+	r.working = true
+	if ok, _ := r.a.Tick(ctx); ok {
+		t.Fatal("restarted during accepted work")
+	}
+	r.working = false
+	if ok, err := r.a.Tick(ctx); !ok || err != nil || r.act.restarts != 1 {
+		t.Fatalf("not restarted: %v %v", ok, err)
+	}
+	r.restart()
+	r.must(r.a.Resume(ctx))
+	if in, _ := r.store.Installed(); in.Version != 1 {
+		t.Fatalf("installed %+v", in)
 	}
 }

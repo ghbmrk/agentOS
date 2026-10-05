@@ -118,6 +118,7 @@ type rig struct {
 	t        *testing.T
 	clk      *clock
 	act      *activator
+	act0     Activator // the activator the applier uses; nil: act
 	pipe     *pipeline
 	store    *update.Store
 	state    *change.MemStore
@@ -160,7 +161,11 @@ func (r *rig) release(v int64, security bool) *update.Verified {
 // restart starts a new applier over the same state, as after a reboot.
 func (r *rig) restart() {
 	r.t.Helper()
-	a, err := New(Config{Journal: r.eng, Activator: r.act, Store: r.store, Pipeline: r.pipe, State: r.state,
+	var act Activator = r.act
+	if r.act0 != nil {
+		act = r.act0
+	}
+	a, err := New(Config{Journal: r.eng, Activator: act, Store: r.store, Pipeline: r.pipe, State: r.state,
 		InCall: func() bool { return r.inCall }, Working: func() bool { return r.working },
 		Excluded: func(t time.Time) bool { return r.excluded != nil && r.excluded(t) },
 		Jitter:   6 * time.Hour, Rand: func(n int64) int64 { return n / 2 }, Now: r.clk.now})
