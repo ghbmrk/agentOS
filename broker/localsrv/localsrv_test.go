@@ -15,7 +15,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
-// REQ: CH-7, CH-10, CH-18, ARC-2
+// REQ: CH-7, CH-10, CH-11, CH-18, ARC-2
 
 const good = "123456"
 
@@ -573,3 +573,21 @@ func TestASessionReportsItsTime(t *testing.T) {
 		t.Fatalf("unlock days %d", st.UnlockDays)
 	}
 }
+
+// L3 SHOULD on #184: without randomness no token is minted; the sign-in
+// fails closed rather than handing out a guessable one.
+func TestNoRandomnessMintsNoToken(t *testing.T) {
+	r := newRig(t)
+	r.srv = New(Config{Owner: r.own, Now: func() time.Time { return r.now }, Rand: failingRand{}})
+	r.ops = r.srv.Ops()
+	if _, err := r.call(localapi.OpSignIn, localapi.SignIn{Code: good}); code(err) != localapi.ErrFailed {
+		t.Fatalf("sign-in without randomness: %v", err)
+	}
+	if len(r.srv.sessions) != 0 {
+		t.Fatal("a session was kept")
+	}
+}
+
+type failingRand struct{}
+
+func (failingRand) Read([]byte) (int, error) { return 0, errors.New("no entropy") }

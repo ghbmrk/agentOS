@@ -1,10 +1,13 @@
 package daemon
 
 import (
+	"bufio"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/localapi"
 )
@@ -36,7 +39,8 @@ func TestTheLocalUISocketServesThePageOps(t *testing.T) {
 	if fi.Mode().Perm() != 0o660 {
 		t.Fatalf("mode %v", fi.Mode().Perm())
 	}
-	if r := send(t, sock, localapi.OpStatus, struct{}{}); !r.OK {
+	// The owner line's note reaches the page before sign-in (L3 on #184).
+	if r := send(t, sock, localapi.OpStatus, struct{}{}); !r.OK || !strings.Contains(string(r.Result), `"line_note":"note"`) {
 		t.Fatalf("status: %+v", r)
 	}
 	for _, op := range []string{localapi.OpLines, localapi.OpRequests, localapi.OpResume, localapi.OpWaiting, localapi.OpAnswer, localapi.OpSignOut} {
@@ -83,5 +87,38 @@ func TestTheLocalUISocketIsOptIn(t *testing.T) {
 		ModemUID: os.Getuid(), PageSocket: &PageSocket{UID: os.Getuid()}}
 	if _, err := Run(t.Context(), cfg); err == nil {
 		t.Fatal("PageSocket without the owner channel ran")
+	}
+}
+
+// L3 SHOULD on #184: the socket caps its connections, so a compromised
+// page cannot exhaust agentosd's file descriptors.
+func TestTheLocalUISocketCapsConnections(t *testing.T) {
+	dir := t.TempDir()
+	startLocalUI(t, dir, &PageSocket{UID: os.Getuid()})
+	sock := filepath.Join(dir, "run", localapi.Socket)
+	var held []net.Conn
+	defer func() {
+		for _, c := range held {
+			c.Close()
+		}
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c, err := net.Dial("unix", sock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		held = append(held, c)
+		if len(held) <= 8 {
+			continue
+		}
+		c.SetReadDeadline(time.Now().Add(time.Second))
+		line, _ := bufio.NewReader(c).ReadString('\n')
+		if strings.Contains(line, "too many connections") {
+			return
+		}
+		if time.Now().After(deadline) || len(held) > 64 {
+			t.Fatalf("%d connections held, last answered %q", len(held), line)
+		}
 	}
 }
