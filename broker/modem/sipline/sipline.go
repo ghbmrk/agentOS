@@ -136,9 +136,9 @@ func OwnerText(err error) string {
 	case errors.Is(err, sipsign.ErrRefused):
 		return "The second line's sign-in needs confirming. Check the provider name on the box's local page."
 	case errors.Is(err, smsapi.ErrLocked):
-		return "The second line can't text while the box is locked. Unlock it on the box's local page."
+		return "The second line can't text while the box is locked. Unlock it on the box's Wi-Fi page."
 	case errors.Is(err, smsapi.ErrNoAccount):
-		return "The second line's texting account isn't set up. Set it up on the box's local page."
+		return "The second line's texting account isn't set up. Set it up on the box's Wi-Fi page."
 	case errors.Is(err, smsapi.ErrTooLong):
 		return "That text is too long for the second line. Shorten it and send it again."
 	case errors.Is(err, smsapi.ErrRefused):
@@ -359,6 +359,7 @@ func (l *Line) poll() {
 		if err != nil {
 			continue
 		}
+		dropped := 0
 		for _, i := range in {
 			m := modem.SMS{From: i.From, To: l.cfg.Number, Text: i.Text, At: i.At}
 			if i.Named {
@@ -367,7 +368,11 @@ func (l *Line) poll() {
 			select {
 			case l.inbox <- m:
 			default: // a full inbox drops texts rather than queueing without bound
+				dropped++
 			}
+		}
+		if dropped > 0 {
+			l.cfg.Log.Warn("sipline: inbox full, polled texts dropped", "count", dropped)
 		}
 	}
 }

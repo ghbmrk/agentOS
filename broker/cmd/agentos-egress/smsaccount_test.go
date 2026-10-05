@@ -13,9 +13,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/sipsign"
 	"github.com/ghbmrk/agentos/broker/smsapi"
 	"github.com/ghbmrk/agentos/broker/vault"
@@ -298,5 +300,88 @@ func TestTheTextingTokenNeverLeaves(t *testing.T) {
 	}
 	if _, ok := (apiKeysOnly{r.c.v}).Secret(smsapi.TokenName); ok || hasKind(r.c.v, smsapi.TokenName, vault.KindAPIKey) {
 		t.Fatal("the token is an API key")
+	}
+}
+
+// stubProvider answers every provider call with status, or as
+// unreachable while it is zero.
+type stubProvider struct{ status *atomic.Int32 }
+
+func (p stubProvider) RoundTrip(r *http.Request) (*http.Response, error) {
+	st := int(p.status.Load())
+	if st == 0 {
+		return nil, errors.New("no network in tests")
+	}
+	return &http.Response{StatusCode: st, Body: io.NopCloser(strings.NewReader(`{"messages":[]}`)), Header: http.Header{}, Request: r}, nil
+}
+
+// UX-159-1: when the texting account's polls have failed at the provider
+// for five minutes, agentosd learns on the verify socket whether the
+// provider refused the account or did not answer; the next good poll,
+// a new setup or removal clears it, and it says nothing while locked.
+func TestAgentosdLearnsWhenTextsStopArriving(t *testing.T) {
+	r := openRig(t)
+	r.c.owner = ownerNumber
+	var status atomic.Int32
+	r.c.smsHTTP = &http.Client{Transport: stubProvider{&status}}
+	run := filepath.Join(t.TempDir(), "run")
+	srvs, err := serve(run, r.c, testRouter(t), nil, nil, os.Getuid(), os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sms, err := serveSMS(run, r.c, os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		sms.Close()
+		for _, s := range srvs {
+			s.Close()
+		}
+	})
+	bridge := smsapi.NewClient(filepath.Join(run, SMSSocket))
+	v := modelroute.NewVerifier(filepath.Join(run, VerifySocket))
+	ctx := context.Background()
+	want := func(step string, s modelroute.TextsState) {
+		t.Helper()
+		got, err := v.SecondLineTexts(ctx)
+		if err != nil || got != s {
+			t.Fatalf("%s: %q %v, want %q", step, got, err, s)
+		}
+	}
+	poll := func() {
+		r.clk.add(smsapi.MinPollGap)
+		bridge.Poll(ctx)
+	}
+	want("no account", modelroute.TextsOK)
+	if err := r.c.setSMS(smsSettings, synthetic(t, "canary-sms-")); err != nil {
+		t.Fatal(err)
+	}
+	poll()
+	want("first failure", modelroute.TextsOK)
+	r.clk.add(modelroute.TextsQuiet)
+	poll()
+	want("unreached for five minutes", modelroute.TextsUnreached)
+	status.Store(http.StatusUnauthorized)
+	poll()
+	want("refused", modelroute.TextsSignIn)
+	status.Store(http.StatusOK)
+	poll()
+	want("a good poll", modelroute.TextsOK)
+	status.Store(http.StatusUnauthorized)
+	poll()
+	r.clk.add(modelroute.TextsQuiet)
+	poll()
+	want("refused again", modelroute.TextsSignIn)
+	if err := r.c.setSMS(smsSettings, synthetic(t, "canary-sms-")); err != nil {
+		t.Fatal(err)
+	}
+	want("set up again", modelroute.TextsOK)
+	poll()
+	r.clk.add(modelroute.TextsQuiet)
+	poll()
+	r.c.lock()
+	if _, err := v.SecondLineTexts(ctx); err != modelroute.ErrVaultLocked {
+		t.Fatalf("while locked: %v", err)
 	}
 }

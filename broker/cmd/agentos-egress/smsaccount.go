@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/sipsign"
 	"github.com/ghbmrk/agentos/broker/smsapi"
 	"github.com/ghbmrk/agentos/broker/vault"
@@ -35,8 +36,8 @@ var (
 
 // Owner notices when the account changes, as for the SIP account.
 const (
-	noteSMSReplaced = "The second line's texting account was replaced on the local page."
-	noteSMSRemoved  = "The second line's texting account was removed on the local page."
+	noteSMSReplaced = "The second line's texting account was replaced on the box's Wi-Fi page."
+	noteSMSRemoved  = "The second line's texting account was removed on the box's Wi-Fi page."
 )
 
 func smsFieldErr(err error) error {
@@ -117,6 +118,7 @@ func (c *custody) setSMS(s smsapi.Settings, token string) error {
 	if err := c.v.Put(smsapi.SettingsName, smsapi.KindSettings, rec); err != nil {
 		return c.putErr(err)
 	}
+	c.smsFailSince, c.smsFail = time.Time{}, modelroute.TextsOK
 	if replacing {
 		c.notify(noteSMSReplaced)
 	}
@@ -139,6 +141,7 @@ func (c *custody) removeSMS() error {
 		}
 		removed = true
 	}
+	c.smsFailSince, c.smsFail = time.Time{}, modelroute.TextsOK
 	if removed {
 		c.notify(noteSMSRemoved)
 	}
@@ -173,6 +176,42 @@ func (c *custody) smsStatus() (smsStatus, error) {
 		return smsStatus{}, nil
 	}
 	return smsStatus{Set: true, Settings: rec.Settings}, nil
+}
+
+// smsPolled hears each poll's outcome at the provider (smsapi
+// Service.Polled): a refusal reads as a sign-in failure, anything else
+// as the provider not answering; a good poll clears it.
+func (c *custody) smsPolled(err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	switch {
+	case err == nil:
+		c.smsFailSince, c.smsFail = time.Time{}, modelroute.TextsOK
+		return
+	case c.smsFailSince.IsZero():
+		c.smsFailSince = c.now()
+	}
+	c.smsFail = modelroute.TextsUnreached
+	if errors.Is(err, smsapi.ErrRefused) {
+		c.smsFail = modelroute.TextsSignIn
+	}
+}
+
+// textsState is what agentosd learns about the texting account on the
+// verify socket: how its polls fail once they have failed for
+// modelroute.TextsQuiet, else nothing (UX-159-1).
+func (c *custody) textsState() (modelroute.TextsState, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, _, err := c.smsAccount(); errors.Is(err, smsapi.ErrLocked) {
+		return modelroute.TextsOK, errLocked
+	} else if err != nil {
+		return modelroute.TextsOK, nil
+	}
+	if c.smsFailSince.IsZero() || c.now().Sub(c.smsFailSince) < modelroute.TextsQuiet {
+		return modelroute.TextsOK, nil
+	}
+	return c.smsFail, nil
 }
 
 // lineNumbers are the second line's own numbers, which it never texts.
@@ -280,7 +319,7 @@ func serveSMS(dir string, c *custody, modemUID int) (*http.Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	srv := newServer(smsapi.Handler(&smsapi.Service{Store: smsStore{c}, HTTP: c.smsHTTP, Now: c.now}))
+	srv := newServer(smsapi.Handler(&smsapi.Service{Store: smsStore{c}, HTTP: c.smsHTTP, Now: c.now, Polled: c.smsPolled}))
 	srv.ReadTimeout = 10 * time.Second
 	go srv.Serve(ln)
 	return srv, nil

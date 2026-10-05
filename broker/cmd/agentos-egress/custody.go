@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/egress"
+	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/smsapi"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
@@ -199,16 +200,21 @@ type custody struct {
 	// and the HTTP account (security Q2).
 	budget smsapi.Budget
 
-	mu          sync.Mutex
-	st          unlockState
-	ph          phase
-	gen         int // bumped by lock, so an unlock in flight is cancelled
-	v           *vault.Vault
-	proxy       *egress.Proxy
-	ticket      string // binds a confirm to its unlock
-	expires     time.Time
-	timer       *time.Timer
-	lastAttempt time.Time
+	mu sync.Mutex
+	// smsFailSince is when the texting account's polls started failing
+	// at the provider, zero while they get through; smsFail is how the
+	// latest failed (UX-159-1).
+	smsFailSince time.Time
+	smsFail      modelroute.TextsState
+	st           unlockState
+	ph           phase
+	gen          int // bumped by lock, so an unlock in flight is cancelled
+	v            *vault.Vault
+	proxy        *egress.Proxy
+	ticket       string // binds a confirm to its unlock
+	expires      time.Time
+	timer        *time.Timer
+	lastAttempt  time.Time
 	// needPIN: this PC is trusted with a boot PIN and waits for it.
 	needPIN bool
 	// counterReset: the owner was told this PC's rollback counter is

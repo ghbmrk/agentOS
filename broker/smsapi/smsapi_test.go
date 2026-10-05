@@ -429,3 +429,33 @@ func TestSettingsAreTheClosedProviderList(t *testing.T) {
 }
 
 func ptr(s Settings) *Settings { return &s }
+
+// UX-159-1: the vault process hears each poll's outcome at the provider,
+// so failing polls can reach STATUS; polls that never reach the provider
+// are not reported.
+func TestPollOutcomesAreReported(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	var mu sync.Mutex
+	var heard []error
+	r.svc.Polled = func(err error) { mu.Lock(); heard = append(heard, err); mu.Unlock() }
+	r.cl.Poll(ctx)
+	r.cl.Poll(ctx) // too soon: not reported
+	for _, st := range []int{401, 503} {
+		r.p.mu.Lock()
+		r.p.status = st
+		r.p.mu.Unlock()
+		r.advance(MinPollGap)
+		r.cl.Poll(ctx)
+	}
+	r.st.mu.Lock()
+	r.st.locked = true
+	r.st.mu.Unlock()
+	r.advance(MinPollGap)
+	r.cl.Poll(ctx) // locked: not reported
+	mu.Lock()
+	defer mu.Unlock()
+	if len(heard) != 3 || heard[0] != nil || heard[1] != ErrRefused || heard[2] != ErrUnreachable {
+		t.Fatalf("heard %v", heard)
+	}
+}

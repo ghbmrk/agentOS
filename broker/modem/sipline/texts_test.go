@@ -1,8 +1,10 @@
 package sipline_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -120,8 +122,8 @@ func TestPolledTextsReachTheInbox(t *testing.T) {
 // Each texting refusal has its owner wording, without internals.
 func TestTextingErrorsHaveOwnerWording(t *testing.T) {
 	for err, want := range map[error]string{
-		smsapi.ErrLocked:      "while the box is locked",
-		smsapi.ErrNoAccount:   "texting account isn't set up",
+		smsapi.ErrLocked:      "while the box is locked. Unlock it on the box's Wi-Fi page",
+		smsapi.ErrNoAccount:   "texting account isn't set up. Set it up on the box's Wi-Fi page",
 		smsapi.ErrRecipient:   "doesn't text or call that number",
 		smsapi.ErrLimited:     "sent as many texts as it may",
 		smsapi.ErrTooLong:     "too long",
@@ -132,5 +134,40 @@ func TestTextingErrorsHaveOwnerWording(t *testing.T) {
 		if !strings.Contains(got, want) || strings.ContainsAny(got, "0123456789") || strings.Contains(got, "smsapi") {
 			t.Errorf("%v: %q", err, got)
 		}
+	}
+}
+
+// UX nit on #159: a full inbox drops polled texts rather than queueing
+// without bound, and says how many in the log, never their text.
+func TestAFullInboxLogsHowManyTextsItDropped(t *testing.T) {
+	defer sipline.SetPollEvery(10 * time.Millisecond)()
+	p := provider(t)
+	h := &httpTexts{}
+	cfg := config(p, vault(p))
+	cfg.Texts = h
+	var mu sync.Mutex
+	var logs bytes.Buffer
+	cfg.Log = slog.New(slog.NewTextHandler(lockedWriter{&mu, &logs}, nil))
+	open(t, p, cfg)
+	var in []smsapi.Inbound
+	for i := 0; i < 70; i++ {
+		in = append(in, smsapi.Inbound{ID: "SM", From: shopNum, Text: "secret-text", At: time.Now()})
+	}
+	h.receive(in...)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		mu.Lock()
+		l := logs.String()
+		mu.Unlock()
+		if strings.Contains(l, "count=6") {
+			if strings.Contains(l, "secret-text") {
+				t.Fatalf("log carries the text: %s", l)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no drop count in the log: %q", l)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

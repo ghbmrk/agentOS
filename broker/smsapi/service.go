@@ -37,6 +37,10 @@ type Service struct {
 	// HTTP is the provider client; nil is NewHTTPClient().
 	HTTP *http.Client
 	Now  func() time.Time
+	// Polled, if set, hears each poll's outcome at the provider: nil, or
+	// ErrRefused, ErrLimited or ErrUnreachable. Polls that never reach
+	// the provider (locked, no account, too soon) are not reported.
+	Polled func(error)
 
 	mu       sync.Mutex
 	lastPoll time.Time
@@ -103,6 +107,9 @@ func (s *Service) Poll(ctx context.Context) ([]Inbound, error) {
 		return nil, ErrUnreachable
 	}
 	msgs, err := u.list(ctx, m.Since)
+	if s.Polled != nil {
+		s.Polled(err)
+	}
 	if err != nil {
 		return nil, err
 	}
