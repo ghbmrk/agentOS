@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/meter"
 )
@@ -150,6 +151,79 @@ func TestStreamsAreFlushed(t *testing.T) {
 	rest, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(rest), "two") {
 		t.Fatalf("rest %q", rest)
+	}
+}
+
+// gateBody hands over the guest's request body, then holds the
+// transport's trailing EOF read until gate closes.
+type gateBody struct {
+	orig io.ReadCloser
+	gate chan struct{}
+	eof  bool
+}
+
+func (g *gateBody) Read(b []byte) (int, error) {
+	if g.eof {
+		<-g.gate
+		return g.orig.Read(b)
+	}
+	n, err := g.orig.Read(b)
+	if err == io.EOF {
+		g.eof = true
+		if n == 0 {
+			<-g.gate
+			return g.orig.Read(b)
+		}
+		return n, nil
+	}
+	return n, err
+}
+
+func (g *gateBody) Close() error { return g.orig.Close() }
+
+// The guest's request body stays readable by the transport after the
+// response has started. Its trailing EOF read is held until the guest has
+// the first chunk; had the server drained and closed the body when the
+// response began, that read would fail, the transport would drop the
+// vault connection, and the rest of the stream would be lost.
+func TestStreamSurvivesTrailingBodyRead(t *testing.T) {
+	next := make(chan struct{})
+	fe := &fakeEgress{h: func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "data: one\n\n")
+		w.(http.Flusher).Flush()
+		<-next
+		// A dropped connection shows here as a cancelled request; the
+		// second chunk must not race it.
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(50 * time.Millisecond):
+		}
+		io.WriteString(w, "data: two\n\n")
+	}}
+	sock := serveUnix(t, fe)
+	fwd := Forward(Config{Socket: sock, Label: func(string) string { return "public" }, Denied: func(string, Denial) {}})
+	gate := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = &gateBody{orig: r.Body, gate: gate}
+		fwd("m1").ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+	resp, err := http.Post(srv.URL+"/openai/v1/chat/completions", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	buf := make([]byte, 64)
+	n, _ := resp.Body.Read(buf)
+	if !strings.Contains(string(buf[:n]), "one") {
+		t.Fatalf("first chunk %q", buf[:n])
+	}
+	close(gate)
+	close(next)
+	rest, err := io.ReadAll(resp.Body)
+	if !strings.Contains(string(rest), "two") {
+		t.Fatalf("rest %q err %v", rest, err)
 	}
 }
 
