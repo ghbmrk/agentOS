@@ -16,7 +16,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/sipsign"
 )
 
-// REQ: ADP-12, CH-1
+// REQ: ADP-12, CH-1, CH-12
 
 // clip stands in for the broker-rendered "can't take calls" audio.
 func clip(frames int) []byte {
@@ -206,16 +206,16 @@ func TestLineErrorsHaveOwnerWording(t *testing.T) {
 		sipline.ErrNumber:                            "isn't a phone number",
 		sipline.ErrBusy:                              "already on a call",
 		sipline.ErrClosed:                            "isn't connected right now",
-		sipline.ErrConfig:                            "isn't set up. Set it up on the box's local page",
-		sipline.ErrInsecure:                          "couldn't connect securely",
+		sipline.ErrConfig:                            "isn't set up. Set it up on the box's Wi-Fi page",
+		sipline.ErrInsecure:                          "Check the server name on the box's Wi-Fi page",
 		sipline.ErrNoSRTP:                            "Turn on encrypted calls (SRTP)",
 		sipline.ErrMediaAddress:                      "isn't on a safe address",
 		sipline.ErrTextRefused:                       "provider didn't accept",
 		fmt.Errorf("%w: 486", sipline.ErrCallFailed): "doesn't call again on its own",
 		fmt.Errorf("x: %w", sipline.ErrUnreachable):  "It will keep trying to reconnect",
-		sipsign.ErrLocked:                            "while the box is locked",
-		sipsign.ErrNoAccount:                         "isn't set up",
-		sipsign.ErrRefused:                           "local page",
+		sipsign.ErrLocked:                            "Unlock it on the box's Wi-Fi page",
+		sipsign.ErrNoAccount:                         "account isn't set up. Set it up on the box's Wi-Fi page",
+		sipsign.ErrRefused:                           "on the box's Wi-Fi page",
 		sipsign.ErrLimited:                           "sent as many texts as it may for now",
 		sipsign.ErrRecipient:                         "doesn't text or call that number",
 		errors.New("anything else 486 Busy"):         "couldn't reach its provider, so that didn't go through",
@@ -226,6 +226,10 @@ func TestLineErrorsHaveOwnerWording(t *testing.T) {
 		}
 		if strings.ContainsAny(got, "0123456789") || strings.Contains(got, "sipline") {
 			t.Errorf("%v: %q carries internals", err, got)
+		}
+		// CH-12: the page is "the box's Wi-Fi page" in owner texts.
+		if strings.Contains(got, "local page") {
+			t.Errorf("%v: %q names the local page", err, got)
 		}
 	}
 	if sipline.OwnerText(nil) != "" {

@@ -1341,7 +1341,7 @@ func (g *Gate) Authorize(ctx context.Context, id string) (journal.Status, error)
 		g.mu.Unlock()
 		if fresh && v.hold && own != nil {
 			// Arbitrator Q1 on #48: one fixed line, no code.
-			_ = own.Inform("Waiting for your confirmation on the box's local page, or your recovery key.")
+			_ = own.Inform("Waiting for your confirmation on the box's Wi-Fi page, or your recovery key.")
 		}
 	case autoReply:
 		g.queueReply(id, v)
