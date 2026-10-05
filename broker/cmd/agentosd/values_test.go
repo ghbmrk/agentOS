@@ -3,10 +3,13 @@ package main
 // REQ: LOOP-4, CAP-5, CAP-3, CRED-7
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -462,6 +465,21 @@ func TestLearningForgetsATask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	eng, err := journal.Open(&journal.MemStore{}, allowAll{}, map[string]journal.Executor{"task": succeeds{}}, func(string) string { return daemon.Redacted })
+	if err != nil {
+		t.Fatal(err)
+	}
+	lp.pipe.Attach(eng)
+	lp.eng.Store(eng)
+	for _, g := range []string{"f1", "f2"} {
+		id := "agent/" + g
+		if _, err := eng.Submit(journal.Intent{ID: id, GoalID: "owner:" + g, Origin: "guest:agent", Account: "mail", Action: "draft", Executor: "task"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := lp.harvest.Harvest(loops.Outcome{Intent: id, Action: loops.Approved, Input: []byte("pay the CANARY-" + g + " invoice"), Output: []byte("paid")}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	lp.tasks.put("owner:f1", "pay the CANARY-forget invoice", false)
 	lp.values.observe(journal.Intent{ID: "agent/1", GoalID: "owner:f1", Origin: "guest:agent", Params: map[string]any{"to": "ann@example.test"}})
 	lp.values.mu.Lock()
@@ -481,6 +499,31 @@ func TestLearningForgetsATask(t *testing.T) {
 	lp.values.mu.Unlock()
 	if kept {
 		t.Fatal("task values kept")
+	}
+	// Its cases, and the harvester's records of them, are gone from
+	// every file in the learn directory; the other task's stay.
+	var all []byte
+	err = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		b, err := os.ReadFile(path)
+		all = append(all, b...)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A case's input is saved as base64 ([]byte in JSON).
+	holds := func(g string) bool {
+		in := "pay the CANARY-" + g + " invoice"
+		return bytes.Contains(all, []byte(in)) || bytes.Contains(all, []byte(base64.StdEncoding.EncodeToString([]byte(in))))
+	}
+	if bytes.Contains(all, []byte("CANARY-forget")) || holds("f1") || bytes.Contains(all, []byte(`"agent/f1"`)) {
+		t.Fatal("the learn directory still holds the forgotten task")
+	}
+	if !holds("f2") || !bytes.Contains(all, []byte(`"agent/f2"`)) {
+		t.Fatal("the other task's case went too")
 	}
 	if err := lp.forgetTask(""); err == nil {
 		t.Fatal("forgot with no goal")
@@ -523,6 +566,16 @@ func TestForgetReportsAFailedSave(t *testing.T) {
 			t.Fatalf("%s: forget reported success with its save failing", broken)
 		}
 		lp.tasks.store, lp.values.store = tasks, values
+		// Security R1: the entry is gone from memory, so a retried
+		// forget must still save, or the file keeps the text.
+		if err := lp.forgetTask(goal); err != nil {
+			t.Fatalf("%s: retried forget: %v", broken, err)
+		}
+		for _, st := range []change.Store{tasks, values} {
+			if raw, _ := st.Load(); bytes.Contains(raw, []byte("CANARY-forget")) || bytes.Contains(raw, []byte(goal)) {
+				t.Fatalf("%s: a retried forget left the task on disk", broken)
+			}
+		}
 		if _, ok := lp.tasks.get(goal); ok {
 			t.Fatalf("%s: task text kept in memory", broken)
 		}

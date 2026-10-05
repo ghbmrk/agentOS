@@ -4,6 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/journal"
@@ -34,9 +40,9 @@ func TestForgetGoalRemovesItsCases(t *testing.T) {
 	}
 	add("owner:g1", 2)
 	add("owner:g2", 1)
-	n, err := e.p.ForgetGoal("owner:g1")
-	if err != nil || n != 2 {
-		t.Fatalf("forgot %d cases: %v", n, err)
+	ids, err := e.p.ForgetGoal("owner:g1")
+	if err != nil || strings.Join(ids, ",") != "case-owner:g1-t0,case-owner:g1-t1" {
+		t.Fatalf("forgot %q: %v", ids, err)
 	}
 	e.p.mu.Lock()
 	_, kept := e.p.st.Cases["case-owner:g2-t0"]
@@ -62,10 +68,51 @@ func TestForgetGoalRemovesItsCases(t *testing.T) {
 	if len(saved.Cases) != 2 {
 		t.Fatalf("saved %d cases, want 2", len(saved.Cases))
 	}
-	if n, err := e.p.ForgetGoal("owner:g1"); err != nil || n != 0 {
-		t.Fatalf("second forget: %d %v", n, err)
+	if ids, err := e.p.ForgetGoal("owner:g1"); err != nil || len(ids) != 0 {
+		t.Fatalf("second forget: %q %v", ids, err)
 	}
 	if _, err := e.p.ForgetGoal(""); err == nil {
 		t.Fatal("an empty goal forgot cases without a goal")
+	}
+}
+
+// W3-tasks part 1 (L3 on #123): forgetting skips CHG-2's second approval
+// because only the owner's authenticated forget may call it, and dropping
+// harvest records un-holds tasks Loop 1 must never mine. So only the
+// composition root (cmd/agentosd) may call ForgetGoal or ForgetCases:
+// a loop, a builder or the evaluator calling either fails this test.
+func TestOnlyTheDaemonForgets(t *testing.T) {
+	root := ".."
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if name := d.Name(); name == "vendor" || name == "testdata" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		rel, _ := filepath.Rel(root, path)
+		if dir := filepath.ToSlash(filepath.Dir(rel)); dir == "cmd/agentosd" {
+			return nil
+		}
+		f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if err != nil {
+			return err
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			if sel, ok := n.(*ast.SelectorExpr); ok && (sel.Sel.Name == "ForgetGoal" || sel.Sel.Name == "ForgetCases") {
+				t.Errorf("%s calls %s; only cmd/agentosd may", rel, sel.Sel.Name)
+			}
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }

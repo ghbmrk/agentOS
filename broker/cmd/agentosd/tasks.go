@@ -37,7 +37,10 @@ type taskTexts struct {
 	logf  func(string, ...any)
 
 	mu sync.Mutex
-	st map[string]taskText
+	// dirty: the last save failed, so memory may hold less than the
+	// file (security R1 on #123).
+	dirty bool
+	st    map[string]taskText
 }
 
 func openTaskTexts(store change.Store, now func() time.Time, logf func(string, ...any)) (*taskTexts, error) {
@@ -85,6 +88,7 @@ func (t *taskTexts) saveLocked() error {
 	if err != nil {
 		t.logf("learning: task texts not saved: %v", err)
 	}
+	t.dirty = err != nil
 	return err
 }
 
@@ -112,6 +116,11 @@ func (t *taskTexts) forget(goal string) (bool, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if _, ok := t.st[goal]; !ok {
+		if t.dirty {
+			// An earlier save failed: the entry left memory but may
+			// still be on disk (security R1 on #123).
+			return false, t.saveLocked()
+		}
 		return false, nil
 	}
 	delete(t.st, goal)
