@@ -8,6 +8,9 @@
 // Inbound as Untrusted, a type the owner channel does not accept, so it can
 // never become a control word, task chat, or part of an approval.
 //
+// The second line is a second SIM (FromAT) or an owner-held calling
+// account (package sipline); either way its role is bound at setup (Roles).
+//
 // Recipient verification, third-party rate limits and transcript
 // journaling belong to the adapter that calls this tool (the send verb);
 // see broker/modem/at/ASSUMPTIONS.md.
@@ -39,10 +42,21 @@ type SIM interface {
 	Done() <-chan struct{}
 }
 
-// Line is a SIM that can text and call.
+// Line is a second line that can text and call: a second SIM (FromAT), or
+// an owner-held calling account (an Account, package sipline).
 type Line interface {
-	SIM
+	modem.Modem
+	// Done is closed when the line has gone away.
+	Done() <-chan struct{}
 	Dial(ctx context.Context, number string) (Call, error)
+}
+
+// Account is a second line that is a calling account rather than a SIM. Its
+// role is bound to its address of record (user@domain), which the owner
+// gives at setup, the way a SIM's role is bound to its serial.
+type Account interface {
+	Line
+	AOR() string
 }
 
 var _ SIM = (*at.Modem)(nil)
@@ -92,9 +106,12 @@ type Untrusted struct {
 	At         time.Time
 }
 
-// Roles binds each line to its SIM.
+// Roles binds each line to its SIM, or the second line to its account.
 type Roles struct {
 	OwnerICCID, SecondICCID string
+	// SecondAccount is the second line's address of record when it is a
+	// calling account. At most one of SecondICCID and SecondAccount is set.
+	SecondAccount string
 }
 
 // Errors.
@@ -132,6 +149,41 @@ func (r Roles) Check(owner, second SIM) error {
 }
 
 func norm(iccid string) string { return strings.ToUpper(strings.TrimSpace(iccid)) }
+
+// CheckAccount verifies that owner is the SIM recorded for the owner role
+// and second is the account recorded for the second role. It fails closed
+// like Check: an unread or unrecorded serial or address, or roles recorded
+// for both a second SIM and an account, are refused.
+func (r Roles) CheckAccount(owner SIM, second Account) error {
+	if owner == nil || second == nil {
+		return ErrUnbound
+	}
+	o, ro := norm(owner.ICCID()), norm(r.OwnerICCID)
+	a, ra := normAOR(second.AOR()), normAOR(r.SecondAccount)
+	switch {
+	case o == "" || ro == "" || a == "" || ra == "" || norm(r.SecondICCID) != "":
+		return ErrUnbound
+	case o != ro || a != ra:
+		return ErrUnbound
+	}
+	return nil
+}
+
+// normAOR compares addresses of record without their scheme and with the
+// domain's case folded; the user part is case-sensitive (RFC 3261 19.1.4).
+func normAOR(aor string) string {
+	aor = strings.TrimSpace(aor)
+	for _, p := range []string{"sip:", "sips:"} {
+		if len(aor) >= len(p) && strings.EqualFold(aor[:len(p)], p) {
+			aor = aor[len(p):]
+		}
+	}
+	user, host, ok := strings.Cut(aor, "@")
+	if !ok || user == "" || host == "" {
+		return ""
+	}
+	return user + "@" + strings.ToLower(host)
+}
 
 // Tool is the second-line tool.
 type Tool struct {
@@ -177,8 +229,17 @@ func (t *Tool) check() error {
 	if same(s, o) {
 		return ErrOwnerLine
 	}
-	if err := t.cfg.Roles.Check(o, s); err != nil {
-		return err
+	switch s := s.(type) {
+	case Account:
+		if err := t.cfg.Roles.CheckAccount(o, s); err != nil {
+			return err
+		}
+	case SIM:
+		if err := t.cfg.Roles.Check(o, s); err != nil {
+			return err
+		}
+	default:
+		return ErrUnbound
 	}
 	if at.SameNumber(s.Number(), o.Number(), t.cfg.CountryCode) {
 		return ErrOwnerLine

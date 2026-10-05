@@ -19,6 +19,23 @@ github.com/emersion/go-sasl
 # github.com/emersion/go-textwrapper v0.0.0-20200911093747-65d896831594
 ## explicit
 github.com/emersion/go-textwrapper
+# github.com/emiago/sipgo v1.5.0
+## explicit; go 1.23.0
+github.com/emiago/sipgo
+github.com/emiago/sipgo/sip
+# github.com/gobwas/httphead v0.1.0
+## explicit; go 1.15
+github.com/gobwas/httphead
+# github.com/gobwas/pool v0.2.1
+## explicit
+github.com/gobwas/pool
+github.com/gobwas/pool/internal/pmath
+github.com/gobwas/pool/pbufio
+github.com/gobwas/pool/pbytes
+# github.com/gobwas/ws v1.3.2
+## explicit; go 1.15
+github.com/gobwas/ws
+github.com/gobwas/ws/wsutil
 # github.com/google/go-containerregistry v0.20.7
 ## explicit; go 1.24.0
 github.com/google/go-containerregistry/pkg/name
@@ -31,6 +48,13 @@ github.com/google/go-tpm/tpm2/transport/linuxtpm
 github.com/google/go-tpm/tpm2/transport/linuxudstpm
 github.com/google/go-tpm/tpmutil
 github.com/google/go-tpm/tpmutil/tbs
+# github.com/google/uuid v1.6.0
+## explicit
+github.com/google/uuid
+# github.com/icholy/digest v1.1.0
+## explicit; go 1.20
+github.com/icholy/digest
+github.com/icholy/digest/internal/param
 # github.com/makiuchi-d/gozxing v0.1.1
 ## explicit; go 1.17
 github.com/makiuchi-d/gozxing
@@ -47,6 +71,31 @@ github.com/makiuchi-d/gozxing/qrcode/encoder
 # github.com/opencontainers/go-digest v1.0.0
 ## explicit; go 1.13
 github.com/opencontainers/go-digest
+# github.com/pion/logging v0.2.4
+## explicit; go 1.20
+github.com/pion/logging
+# github.com/pion/randutil v0.1.0
+## explicit; go 1.14
+github.com/pion/randutil
+# github.com/pion/rtcp v1.2.19
+## explicit; go 1.24.0
+github.com/pion/rtcp
+# github.com/pion/rtp v1.10.5
+## explicit; go 1.24.0
+github.com/pion/rtp
+github.com/pion/rtp/codecs/av1/obu
+# github.com/pion/sdp/v3 v3.0.20
+## explicit; go 1.24.0
+github.com/pion/sdp/v3
+# github.com/pion/srtp/v3 v3.1.3
+## explicit; go 1.24.0
+github.com/pion/srtp/v3
+# github.com/pion/transport/v5 v5.1.1
+## explicit; go 1.24.0
+github.com/pion/transport/v5/deadline
+github.com/pion/transport/v5/packetio
+github.com/pion/transport/v5/replaydetector
+github.com/pion/transport/v5/utils/xor
 # github.com/secure-systems-lab/go-securesystemslib v0.11.0
 ## explicit; go 1.25.0
 github.com/secure-systems-lab/go-securesystemslib/cjson
@@ -74,6 +123,9 @@ golang.org/x/crypto/nacl/secretbox
 golang.org/x/crypto/pbkdf2
 golang.org/x/crypto/salsa20/salsa
 golang.org/x/crypto/scrypt
+# golang.org/x/sync v0.20.0
+## explicit; go 1.25.0
+golang.org/x/sync/singleflight
 # golang.org/x/sys v0.43.0
 ## explicit; go 1.25.0
 golang.org/x/sys/cpu
