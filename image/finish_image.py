@@ -81,7 +81,8 @@ def main(out, version):
     roothash = usrhash(text)
     data, tree = out / ("agentos_%s.usr.raw" % version), out / ("agentos_%s.usr-verity.raw" % version)
     subprocess.run(["veritysetup", "verify", str(data), str(tree), roothash], check=True)
-    files = {p.name: sha256(p) for p in sorted(out.glob("agentos_%s.usr*.raw" % version))}
+    # Only the two files just verified: mkosi also leaves arch-named split copies beside them.
+    files = {p.name: sha256(p) for p in (data, tree)}
     m = manifest(version, roothash, name, text, files)
     (out / ("agentos_%s.release.json" % version)).write_text(json.dumps(m, indent=2, sort_keys=True) + "\n")
     print(json.dumps(m, indent=2, sort_keys=True))
