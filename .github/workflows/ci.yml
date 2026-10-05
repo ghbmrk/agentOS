@@ -5,6 +5,10 @@ on:
   pull_request:
 permissions:
   contents: read
+# Builds never download a Go toolchain: setup-go installs the one go.mod
+# names, and an offline build fails rather than fetch one.
+env:
+  GOTOOLCHAIN: local
 jobs:
   checks:
     runs-on: ubuntu-latest
@@ -34,12 +38,15 @@ jobs:
         working-directory: broker
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0 (reads the toolchain line)
         with:
           go-version-file: broker/go.mod
           cache: false
       - name: Format
-        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+        # Vendored code keeps its upstream formatting.
+        run: |
+          bad=$(find . -path ./vendor -prune -o -name '*.go' -print | xargs gofmt -l)
+          test -z "$bad" || { echo "$bad"; exit 1; }
       - name: Vet
         run: go vet ./...
       - name: Tests (race detector)
@@ -50,7 +57,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0 (reads the toolchain line)
         with:
           go-version-file: broker/go.mod
           cache: false
@@ -68,7 +75,7 @@ jobs:
         working-directory: broker
         run: |
           sudo mkdir /sys/fs/cgroup/agentos-ci
-          sudo env "PATH=$PATH" HOME=/root GOCACHE=/tmp/gocache \
+          sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
             AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \
             go test -count=1 -v ./cgroup ./vm/... ./recovery
       - name: OpenClaw guest under gVisor (P1-7)
@@ -76,6 +83,6 @@ jobs:
         # only its broker socket; a scripted model stands in for a provider.
         run: |
           sh guest/openclaw/build-rootfs.sh /tmp/ocroot
-          cd broker && sudo env "PATH=$PATH" HOME=/root GOCACHE=/tmp/gocache \
+          cd broker && sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
             AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_OPENCLAW_ROOTFS=/tmp/ocroot \
             go test -count=1 -v -run '^TestIntegrationOpenClawGuest$' ./e2e

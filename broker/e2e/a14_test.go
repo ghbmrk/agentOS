@@ -262,7 +262,7 @@ func TestA14CanaryThroughTheGuestSocket(t *testing.T) {
 			sock := filepath.Join(dir, guest.Socket)
 			clients[a.machine] = &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				return (&net.Dialer{}).DialContext(ctx, "unix", sock)
-			}}}
+			}}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 		}
 		if a.path == "/owner/next" {
 			plane.DeliverOwner(a.machine, "hello from the owner", false) // raises m1 to private
@@ -280,7 +280,14 @@ func TestA14CanaryThroughTheGuestSocket(t *testing.T) {
 			b, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			rec["status"], rec["headers"], rec["body"] = resp.StatusCode, resp.Header, string(b)
-			statuses = append(statuses, resp.StatusCode)
+			// The socket's mux answers an unclean path with a redirect to
+			// the clean one (301 before Go 1.25, method-keeping 307 after)
+			// and never serves it; record any redirect as 300.
+			st := resp.StatusCode
+			if st/100 == 3 {
+				st = 300
+			}
+			statuses = append(statuses, st)
 		}
 		line, _ := json.Marshal(rec)
 		tx.Write(append(line, '\n'))
@@ -305,7 +312,7 @@ func TestA14CanaryThroughTheGuestSocket(t *testing.T) {
 	}
 
 	// A14 assertions that hold whoever minted the canaries.
-	want := []int{200, 200, 200, 200, 403, 403, 403, 403, 403, 403, 200, 200, 403, 403, 200, 200, 200, 200, 403, 403, 404, 404}
+	want := []int{200, 200, 200, 200, 403, 403, 403, 403, 300, 403, 200, 200, 403, 403, 200, 200, 200, 200, 403, 403, 404, 404}
 	if fmt.Sprint(statuses) != fmt.Sprint(want) {
 		t.Errorf("statuses\n got %v\nwant %v", statuses, want)
 	}

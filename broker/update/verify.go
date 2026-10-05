@@ -1,12 +1,20 @@
-// Package update checks release metadata before anything from upstream
-// reaches the change pipeline (SPEC UPD-8, CHG-3).
+// Package update signs and verifies AgentOS releases (UPD-2, UPD-8,
+// UPD-1a) and hands verified ones to the change pipeline (CHG-3).
 //
-// This is the narrow seam the pipeline needs: a Verified value can only be
-// built by Verify, after a threshold of distinct root keys has signed the
-// exact metadata bytes. Full TUF (timestamp freshness, key rotation,
-// rollback protection across versions) is the update package's own work
-// (P4) and will build on a maintained implementation; it will construct
-// Verified the same way, so the pipeline does not change.
+// Metadata follows The Update Framework through go-tuf, the reference Go
+// implementation: root, targets, snapshot and timestamp roles, threshold
+// signatures, key rotation by chained root versions, and content-addressed
+// target files. Maintainers use Repo (and cmd/agentos-release) on offline
+// machines; the box uses Store.Check to accept a release only when the
+// metadata checks out, online from any mirror or offline from a drive. A
+// release is one TUF target, releases/<version>.json, naming the /usr
+// verity root hash and the image files that boot it (UPD-1a).
+//
+// The pipeline consumes a Verified value, which only this package can
+// make: Checked.Verified builds one from a TUF-checked release. Verify
+// below is #34's stand-in seam (a threshold of distinct root keys over the
+// exact metadata bytes, decoded strictly); it stays until the updater
+// feeds the pipeline from Store.Check.
 package update
 
 import (

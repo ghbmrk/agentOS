@@ -7,6 +7,8 @@
 # than passing with nothing run.
 set -eu
 cd "$(dirname "$0")/.."
+# Offline means no toolchain download either.
+export GOTOOLCHAIN=local
 out=$(go test -count=1 -v -run '^TestA9OfflineScenario$' ./e2e) || { printf '%s\n' "$out"; exit 1; }
 printf '%s\n' "$out"
 printf '%s\n' "$out" | grep -q '^--- PASS: TestA9OfflineScenario ' || { echo "TestA9OfflineScenario did not run" >&2; exit 1; }
