@@ -205,11 +205,21 @@ func TestHugeRequestIsRefusedWithoutOverflow(t *testing.T) {
 }
 
 func TestNaNPressureCountsAsOverTheLimit(t *testing.T) {
+	for _, v := range []float64{math.NaN(), math.Inf(-1), -1, math.Inf(1)} {
+		c := newCtl(&recPreempter{})
+		c.Pressure = func() float64 { return v }
+		c.MaxPressure = 10
+		if _, err := c.Admit(Request{ID: "w", Class: Accepted, MemMB: 10}); !errors.Is(err, ErrPressure) {
+			t.Fatalf("pressure %v: got %v", v, err)
+		}
+	}
+}
+
+func TestSummaryNeverShowsNegativeFreeMemory(t *testing.T) {
 	c := newCtl(&recPreempter{})
-	c.Pressure = func() float64 { return math.NaN() }
-	c.MaxPressure = 10
-	if _, err := c.Admit(Request{ID: "w", Class: Accepted, MemMB: 10}); !errors.Is(err, ErrPressure) {
-		t.Fatalf("got %v", err)
+	c.running["big"] = Request{ID: "big", Class: Accepted, MemMB: 5000}
+	if got, want := c.Summary(), "Machines: 0 foreground, 1 work, 0 experiments; 0 MB free."; got != want {
+		t.Fatalf("got %q want %q", got, want)
 	}
 }
 
