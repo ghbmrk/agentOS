@@ -16,7 +16,7 @@ Covered: 127 / 150 requirement IDs
 | HW-5a | `broker/cmd/agentos-egress/trusted_test.go`, `broker/localui/vault_test.go`, `broker/tpmseal/tpmseal_test.go` |
 | HW-6 | — |
 | HW-7 | — |
-| HW-8 | `broker/clock/chrony_test.go`, `broker/clock/sync_linux_test.go`, `broker/clock/unverified_test.go`, `broker/cmd/agentos-clock-boot/main_test.go`, `broker/cmd/agentos-hostdisk/main_test.go`, `broker/hostdisk/ASSUMPTIONS.md`, `broker/hostdisk/fence_test.go`, `broker/hostdisk/hostile_test.go`, `broker/hostdisk/list_test.go`, `broker/hostdisk/probe_test.go`, `broker/hostdisk/udev_test.go`, `broker/vm/gvisor/nodevices_test.go` |
+| HW-8 | `broker/card/card_test.go`, `broker/clock/chrony_test.go`, `broker/clock/sync_linux_test.go`, `broker/clock/unverified_test.go`, `broker/cmd/agentos-clock-boot/main_test.go`, `broker/cmd/agentos-hostdisk/main_test.go`, `broker/hostchange/hostchange_test.go`, `broker/hostdisk/ASSUMPTIONS.md`, `broker/hostdisk/fence_test.go`, `broker/hostdisk/hostile_test.go`, `broker/hostdisk/list_test.go`, `broker/hostdisk/probe_test.go`, `broker/hostdisk/udev_test.go`, `broker/vm/gvisor/nodevices_test.go` |
 | HW-8a | `broker/hostdisk/hostile_test.go`, `broker/hostdisk/list_test.go`, `broker/hostdisk/probe_test.go` |
 | ARC-1 | `broker/modelroute/modelroute_test.go`, `broker/recovery/imports_test.go`, `broker/tpmseal/imports_test.go`, `broker/vault/imports_test.go`, `broker/vault/vault_test.go` |
 | ARC-2 | `broker/control/handler_test.go`, `broker/daemon/arc2_test.go`, `broker/daemon/daemon_test.go`, `broker/daemon/inference_test.go`, `broker/localui/imports_test.go`, `broker/owner/arc2_test.go`, `broker/smsapi/imports_test.go`, `broker/tpmseal/imports_test.go` |
@@ -73,7 +73,7 @@ Covered: 127 / 150 requirement IDs
 | ONB-4 | `broker/localui/localui_test.go` |
 | ONB-5 | `broker/localui/ap_test.go` |
 | ONB-6 | `broker/localui/localui_test.go` |
-| ONB-7 | `broker/card/card_test.go` |
+| ONB-7 | `broker/card/card_test.go`, `broker/hostchange/hostchange_test.go` |
 | ONB-8 | `broker/localui/localui_test.go` |
 | OP-1 | `broker/e2e/openclaw_test.go`, `broker/guest/goal_test.go`, `broker/guest/plane_test.go`, `broker/journal/engine_test.go`, `broker/journal/erase_test.go`, `broker/journal/property_test.go`, `broker/journal/provenance_test.go`, `broker/mail/reply_test.go`, `broker/vm/services_test.go` |
 | OP-2 | `broker/journal/engine_test.go`, `broker/journal/property_test.go`, `broker/journal/review_test.go`, `broker/mail/organize_test.go`, `broker/mail/reply_test.go` |
