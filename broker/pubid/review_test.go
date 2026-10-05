@@ -32,6 +32,8 @@ func TestOSS6ForwardClockStepDoesNotFreezePublication(t *testing.T) {
 	must(t, g.p.Release())
 	must(t, g.p.Queue("artifact", []byte("b")))
 	g.day(1, 12*time.Hour)
+	must(t, g.p.Release()) // after a jump, the first one-day step only rebuilds the chain
+	g.day(2, 12*time.Hour)
 	must(t, g.p.Release())
 	if len(g.out.got) != 1 || len(g.out.got[0].batch) != 2 || g.out.got[0].day != g.c.t.Format("2006-01-02") {
 		t.Fatalf("after the clock was corrected: %+v", g.out.got)
@@ -128,9 +130,9 @@ func TestOSS6UnsignableItemDoesNotBlockTheOutbox(t *testing.T) {
 		return signer(priv, payload)
 	}
 	p, err := NewPublisher(Config{Path: filepath.Join(g.dir, "o2.json"), Identity: g.id, Sender: g.out, Now: g.c.now,
-		Signers: map[string]Signer{"artifact": bad}, Rand: g.rand})
+		Signers: map[string]Signer{"artifact": bad}, Rand: g.rand, Mono: g.mono})
 	must(t, err)
-	must(t, p.Release())
+	g.warm(t, p)
 	must(t, p.Queue("artifact", canary))
 	must(t, p.Queue("artifact", []byte("ok")))
 	g.day(1, 12*time.Hour)
@@ -173,7 +175,8 @@ func TestOSS6Defaults(t *testing.T) {
 	p, err := NewPublisher(Config{Path: filepath.Join(g.dir, "d.json"), Identity: g.id, Sender: g.out, Signers: map[string]Signer{"a": signer}})
 	must(t, err)
 	if DefaultReleaseAt != 5*time.Hour || p.cfg.ReleaseAt != DefaultReleaseAt || p.cfg.Rand != rand.Reader ||
-		p.cfg.MaxDelayDays != DefaultMaxDelayDays || DefaultMaxDelayDays != 3 {
+		p.cfg.MaxDelayDays != DefaultMaxDelayDays || DefaultMaxDelayDays != 3 || minCountGap != 20*time.Hour ||
+		p.cfg.Mono == nil || p.cfg.Mono() < 0 || p.cfg.Mono() > time.Minute {
 		t.Fatalf("defaults %+v", p.cfg)
 	}
 	// The caller's signer map is copied: changing it later changes nothing.
@@ -203,8 +206,9 @@ func TestOSS6FarAheadQueueDrains(t *testing.T) {
 	g.c.t = right
 	g.reopen(t)
 	must(t, g.p.Release()) // a jump back counts nothing
-	// Queued under a clock no release counted, each waits a day more.
-	for d := 1; d <= 2; d++ {
+	// Queued under a clock no release counted, each waits a day more, and
+	// the first day after the jump only rebuilds the chain.
+	for d := 1; d <= 3; d++ {
 		g.day(d, 12*time.Hour)
 		must(t, g.p.Release())
 	}
@@ -216,7 +220,7 @@ func TestOSS6FarAheadQueueDrains(t *testing.T) {
 // L3 round 4 MUST 1, as probed: queued at 02:00 with a 3-day delay; a
 // reboot after the release time with the clock 1 to 60 days behind, and a
 // release; the clock is corrected. The item never leaves before its third
-// day, with no reopen in between.
+// day, with no reopen in between; after a jump it leaves by its fifth.
 func TestOSS6ClockBehindKeepsTheDelay(t *testing.T) {
 	for _, back := range []int{1, 2, 10, 25, 26, 27, 28, 29, 40, 60} {
 		g := newRig(t, 2) // every delay is 3 days
@@ -237,7 +241,7 @@ func TestOSS6ClockBehindKeepsTheDelay(t *testing.T) {
 		if len(g.out.got) != 0 {
 			t.Fatalf("back %d days: left on %s", back, g.out.got[0].day)
 		}
-		for d := 13; d <= 14; d++ {
+		for d := 13; d <= 15; d++ {
 			g.day(d, 6*time.Hour)
 			must(t, g.p.Release())
 		}
@@ -252,10 +256,10 @@ func TestOSS6ClockBehindKeepsTheDelay(t *testing.T) {
 func TestOSS6LongDelayIsKept(t *testing.T) {
 	g := newRig(t, 0)
 	p, err := NewPublisher(Config{Path: filepath.Join(g.dir, "long.json"), Identity: g.id, Sender: g.out, Now: g.c.now,
-		Signers: map[string]Signer{"a": signer}, MaxDelayDays: 60, Rand: fixedRand(59)})
+		Signers: map[string]Signer{"a": signer}, MaxDelayDays: 60, Rand: fixedRand(59), Mono: g.mono})
 	must(t, err)
 	g.day(0, 6*time.Hour)
-	must(t, p.Release())
+	g.warm(t, p)
 	must(t, p.Queue("a", []byte("x")))
 	for d := 1; d < 60; d++ {
 		g.day(d, 6*time.Hour)

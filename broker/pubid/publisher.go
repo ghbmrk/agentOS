@@ -35,6 +35,13 @@ const (
 	// date, so no day counts twice (or gets two batches) unless the clock
 	// falls behind further than that.
 	maxDays = 400
+	// minCountGap is the least monotonic time between two counted days in
+	// one process, so a clock moved on cannot count days faster than they
+	// pass while the broker runs.
+	minCountGap = 20 * time.Hour
+	// maxStep is the most days a step may move on, so a box off for up to
+	// maxStep-1 days in a row keeps counting. A larger move is a jump.
+	maxStep = 3
 )
 
 // ErrFull means MaxQueue items are already waiting.
@@ -68,6 +75,9 @@ type Config struct {
 	// MaxDelayDays (0 means DefaultMaxDelayDays).
 	MaxDelayDays int
 	Rand         io.Reader // delay draws; nil means crypto/rand
+	// Mono is monotonic time since some fixed point in this process; nil
+	// means time since NewPublisher, by Go's monotonic clock.
+	Mono func() time.Duration
 }
 
 type item struct {
@@ -83,31 +93,39 @@ type formed struct {
 	Batch [][]byte `json:"batch"`
 }
 
-// The clock model (L3 round 4 on #163). The wall clock is the only time
-// the box has across restarts, and it can be wrong by any amount in
-// either direction and change at any moment (a reboot, NTP). So no item
-// carries a date. A day counts when a release sees it follow the last day
-// a release saw, by exactly one, and it was never counted before; a batch
-// forms only on a counted day. Hence:
+// The clock model (DECISIONS.md, OSS-6 clock; L3 rounds 4 and 5 on #163).
+// The wall clock is the only time the box keeps across restarts, and it
+// can be wrong by any amount either way and change at any moment (a
+// reboot, NTP), so no item carries a date; each stores how many counted
+// days it still waits. A release with a plausible clock, after the release
+// time, counts its day once it steps: it moves on from the day the last
+// release saw by one to maxStep days. It counts only if that last release
+// had itself stepped, the day was never counted, and, within this process,
+// at least minCountGap of monotonic time has passed since the last count.
+// A step back or a larger move is a jump, and the release after a jump
+// never counts. A batch forms only on a counted day. Hence:
 //
-//   - An item with delay k leaves on the k'th counted day after it was
-//     queued, so no sooner than k-1 days and the release time after it,
-//     as with a right clock. A clock that jumps, behind or ahead or back
-//     again, counts nothing. Only a change that moves the clock on by
-//     hours, or the date on by exactly one, shortens a wait, by that much:
-//     the same as a clock simply that wrong (TestOSS6ClockModel).
-//   - No remembered day gets two batches.
-//   - No date can freeze the outbox: any clock that then runs day by day
-//     counts again.
+//   - G1: within one process an item with delay k leaves no sooner than
+//     (k-1)*20h after it was queued, whatever the clock does; with a right
+//     clock, no sooner than k-1 days and the release time.
+//   - G2: each restart can let one day count without real time passing,
+//     if someone controls the clock, so (k-1-r)*20h for r restarts.
+//   - G3: off days only lengthen waits. A box off for up to maxStep-1 days
+//     in a row keeps counting; after longer, the first two days it sees
+//     do not count.
+//   - G4: no remembered day gets two batches, and no date can freeze the
+//     outbox.
 //
-// Days the box was off, or saw no release, do not count: they only make
-// the wait longer.
+// TestOSS6ClockModel checks G1, G2 and G4 over random clocks.
 type outbox struct {
 	Items []item `json:"items"`
 	// Days are the counted days, newest maxDays by date.
-	Days    []string `json:"days"`
-	Seen    string   `json:"seen,omitempty"`    // the day the last release saw
-	Pending *formed  `json:"pending,omitempty"` // formed, not confirmed sent
+	Days []string `json:"days"`
+	Seen string   `json:"seen,omitempty"` // the day the last release saw
+	// Stepped: the release that saw Seen saw it follow the day before it
+	// saw, by one to maxStep days.
+	Stepped bool    `json:"stepped,omitempty"`
+	Pending *formed `json:"pending,omitempty"` // formed, not confirmed sent
 }
 
 // Publisher holds public output until its day and publishes each day's
@@ -116,6 +134,10 @@ type Publisher struct {
 	cfg Config
 	mu  sync.Mutex
 	st  outbox
+	// counted is the monotonic time of the last day counted in this
+	// process, if any.
+	counted    time.Duration
+	hasCounted bool
 }
 
 // NewPublisher opens the outbox at cfg.Path.
@@ -148,6 +170,10 @@ func NewPublisher(cfg Config) (*Publisher, error) {
 	}
 	if cfg.Rand == nil {
 		cfg.Rand = rand.Reader
+	}
+	if cfg.Mono == nil {
+		start := time.Now()
+		cfg.Mono = func() time.Duration { return time.Since(start) }
 	}
 	p := &Publisher{cfg: cfg}
 	// Others who can write the directory could swap in items for the box
@@ -241,17 +267,16 @@ func (p *Publisher) draw() (int, error) {
 	return 1 + int(r[0])%p.cfg.MaxDelayDays, nil
 }
 
-// counts reports whether a release on today counts: today follows the
-// day the last release saw by exactly one, and was never counted.
-func (p *Publisher) counts(today string) bool {
-	if slices.Contains(p.st.Days, today) {
-		return false
-	}
-	if p.st.Seen == "" {
-		return true
-	}
+// step reports whether today follows the day the last release saw by one
+// to maxStep days.
+func (p *Publisher) step(today string) bool {
 	t, _ := time.Parse("2006-01-02", p.st.Seen)
-	return day(t.AddDate(0, 0, 1)) == today
+	for n := 1; n <= maxStep; n++ {
+		if day(t.AddDate(0, 0, n)) == today {
+			return true
+		}
+	}
+	return false
 }
 
 // checkDir refuses a directory that is a symlink, belongs to another
@@ -361,7 +386,7 @@ func (p *Publisher) Len() int {
 // dropped, so it cannot hold the others back; the error says how many. A
 // batch formed earlier and not confirmed is resent unchanged, for its own
 // day, and no new batch is formed in that call. Only a fixed broker timer
-// may call it, more than once a day so no day is missed: when it runs is
+// may call it, hourly or so, so no day is missed (G3): when it runs is
 // when the batch leaves.
 func (p *Publisher) Release() error {
 	p.mu.Lock()
@@ -378,8 +403,15 @@ func (p *Publisher) Release() error {
 		return nil // nothing new, and no write on every tick of the timer
 	}
 	old := p.st
-	if !p.counts(today) {
-		p.st.Seen = today
+	step := p.step(today)
+	if step && p.st.Stepped && !slices.Contains(p.st.Days, today) {
+		// Today counts, once enough monotonic time has passed in this
+		// process; until then it is not seen, so a later tick can count it.
+		if p.hasCounted && p.cfg.Mono()-p.counted < minCountGap {
+			return nil
+		}
+	} else {
+		p.st.Seen, p.st.Stepped = today, step
 		if err := p.save(); err != nil {
 			p.st = old
 			return err
@@ -417,7 +449,7 @@ func (p *Publisher) Release() error {
 		ferr = fmt.Errorf("pubid: %d items could not be signed and were dropped", failed)
 	}
 	sort.Slice(batch, func(i, j int) bool { return bytes.Compare(batch[i], batch[j]) < 0 })
-	p.st.Items, p.st.Seen = rest, today
+	p.st.Items, p.st.Seen, p.st.Stepped = rest, today, true
 	p.st.Days = trim(append(slices.Clone(p.st.Days), today))
 	if len(batch) > 0 {
 		p.st.Pending = &formed{Day: today, Batch: batch}
@@ -426,6 +458,7 @@ func (p *Publisher) Release() error {
 		p.st = old
 		return err
 	}
+	p.counted, p.hasCounted = p.cfg.Mono(), true
 	if len(batch) == 0 {
 		return ferr
 	}

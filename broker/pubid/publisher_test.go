@@ -48,18 +48,33 @@ type rig struct {
 	out  *fakeSender
 	p    *Publisher
 	rand fixedRand
+	// mono is the publisher's monotonic clock. By default each reading is
+	// a day after the last, so only the tests of the floor meet it.
+	mono func() time.Duration
 }
 
 func newRig(t *testing.T, r fixedRand) *rig {
 	t.Helper()
 	g := &rig{c: &clock{Reference.Add(2*24*time.Hour + 10*time.Hour)}, dir: t.TempDir(), out: &fakeSender{}, rand: r}
+	var m time.Duration
+	g.mono = func() time.Duration { m += 24 * time.Hour; return m }
 	var err error
 	g.id, err = Open(filepath.Join(g.dir, "pubid.json"), g.c.now)
 	must(t, err)
 	g.reopen(t)
-	// The broker's timer has run today, as it does on a running box.
-	must(t, g.p.Release())
+	g.warm(t, g.p)
 	return g
+}
+
+// warm runs p's release on the two days before the clock's day and on it,
+// as the broker's timer has on a running box, so today is counted.
+func (g *rig) warm(t *testing.T, p *Publisher) {
+	t.Helper()
+	now := g.c.t
+	for d := 2; d >= 0; d-- {
+		g.c.t = now.Add(-time.Duration(d) * 24 * time.Hour)
+		must(t, p.Release())
+	}
 }
 
 func (g *rig) reopen(t *testing.T) {
@@ -67,7 +82,7 @@ func (g *rig) reopen(t *testing.T) {
 	var err error
 	g.p, err = NewPublisher(Config{
 		Path: filepath.Join(g.dir, "outbox.json"), Identity: g.id, Sender: g.out, Now: g.c.now,
-		Signers: map[string]Signer{"artifact": signer, "attestation": signer}, Rand: g.rand,
+		Signers: map[string]Signer{"artifact": signer, "attestation": signer}, Rand: g.rand, Mono: g.mono,
 	})
 	must(t, err)
 }
@@ -203,9 +218,12 @@ func TestOSS6FailedBatchIsResentUnchanged(t *testing.T) {
 		t.Fatalf("resend %+v, want %+v", g.out.got[1], first)
 	}
 	must(t, g.p.Release()) // sees the new day after a jump: it does not count
-	// The next release forms the next batch, with b, under the new key.
-	g.c.t = g.c.t.Add(24 * time.Hour)
-	must(t, g.p.Release())
+	// After a day rebuilding the chain of one-day steps, the next release
+	// forms the next batch, with b, under the new key.
+	for d := 0; d < 2; d++ {
+		g.c.t = g.c.t.Add(24 * time.Hour)
+		must(t, g.p.Release())
+	}
 	k, e, err := g.id.Key()
 	must(t, err)
 	if e != 1 || len(g.out.got) != 3 || !bytes.HasPrefix(g.out.got[2].batch[0], k.Public().(ed25519.PublicKey)) {

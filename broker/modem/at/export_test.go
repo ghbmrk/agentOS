@@ -54,10 +54,3 @@ func (m *Modem) PendingFrom(addr string) int {
 	}
 	return n
 }
-
-// PendingTotal counts every text being reassembled.
-func (m *Modem) PendingTotal() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return len(m.parts)
-}
