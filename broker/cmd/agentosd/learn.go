@@ -418,15 +418,16 @@ func (s *syncedRouting) push(ctx context.Context) bool {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// One budget for the whole check, so mu is never held long (L3 N1).
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
 	if s.pending != nil {
 		want = *s.pending
 	} else {
 		if s.applied != gen || s.active == nil {
 			return true // an Apply since: the next check reads its rule
 		}
-		ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		st, err := s.r.State(ctx)
-		cancel()
 		if err != nil {
 			return false
 		}
@@ -444,7 +445,7 @@ func (s *syncedRouting) push(ctx context.Context) bool {
 		s.pending = nil
 		return true
 	case errors.Is(err, modelroute.ErrRoutingRefused) && len(want) != 0:
-		s.logf("routing: the adopted rule no longer reorders the owner's rule; using the owner's rule")
+		s.logf("routing: the adopted rule %s no longer reorders the owner's rule; using the owner's rule", ruleText(want))
 		s.refused = want
 		s.pending = &routerule.Rule{}
 	default:
@@ -467,6 +468,12 @@ func (s *syncedRouting) run(ctx context.Context, every time.Duration) {
 		case <-time.After(every):
 		}
 	}
+}
+
+// ruleText is a rule as logged: provider and model names only.
+func ruleText(r routerule.Rule) string {
+	b, _ := json.Marshal(r)
+	return string(b)
 }
 
 func sameRule(a, b routerule.Rule) bool {

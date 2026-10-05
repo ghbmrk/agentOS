@@ -159,3 +159,27 @@ func TestRoutingErrorsAreNotRefusals(t *testing.T) {
 		t.Fatalf("a %d-byte rule: %d", len(req), resp.StatusCode)
 	}
 }
+
+// L3 MUST-1 on #96: an owner's -rule with a repeated route is refused
+// even when a saved adoption exists, so no reordering check is fooled
+// into taking a route the owner never configured, and the router refuses
+// to start on it.
+func TestARepeatInTheOwnersRuleIsNeverABase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routing.json")
+	if err := writeFileAtomic(path, []byte(`{"chat":[{"provider":"anthropic","model":"claude-test"},{"provider":"openai","model":"gpt-test"}]}`)); err != nil {
+		t.Fatal(err)
+	}
+	bad := route.Rule{"chat": {ra, ra}}
+	if r, err := startRule(bad, path); err == nil || r["chat"][1] != ra {
+		t.Fatalf("a repeated -rule with a saved adoption: %v %v", r, err)
+	}
+	if _, err := newRouter(bad, map[string][]string{"agent": {"openai", "anthropic"}}, nil); err == nil {
+		t.Fatal("the router started on a repeated -rule")
+	}
+	if err := reorders(bad, route.Rule{"chat": {ra, rc}}); err == nil {
+		t.Fatal("a route the owner never configured passed as a reordering")
+	}
+	if err := reorders(route.Rule{"chat": {}}, route.Rule{"chat": {}}); err == nil {
+		t.Fatal("an empty class passed as a base")
+	}
+}

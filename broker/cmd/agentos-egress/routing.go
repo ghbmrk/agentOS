@@ -36,6 +36,11 @@ type routing struct {
 // it is a reordering of base, else base. A missing file is no adoption; an
 // unreadable or non-reordering one is logged by the caller and ignored.
 func startRule(base route.Rule, path string) (route.Rule, error) {
+	if err := checkBase(base); err != nil {
+		// Not a base any reordering can be checked against: -rule
+		// applies, and the router refuses it (L3 MUST-1 on #96).
+		return base, err
+	}
 	if path == "" {
 		return base, nil
 	}
@@ -64,9 +69,32 @@ func startRule(base route.Rule, path string) (route.Rule, error) {
 	return r, nil
 }
 
+// checkBase refuses an owner's rule with no classes, an empty class, or a
+// repeated route in a class: with a repeat, a rule of the same length
+// could hold a route the owner never configured.
+func checkBase(base route.Rule) error {
+	if len(base) == 0 {
+		return errors.New("-rule has no classes")
+	}
+	for class, routes := range base {
+		if len(routes) == 0 {
+			return fmt.Errorf("-rule: class %q has no routes", class)
+		}
+		for i, r := range routes {
+			if slices.Contains(routes[i+1:], r) {
+				return fmt.Errorf("-rule: class %q repeats %s", class, r)
+			}
+		}
+	}
+	return nil
+}
+
 // reorders reports nil when next has exactly base's classes, each with
 // exactly base's routes in some order. Its errors are refusals.
 func reorders(base, next route.Rule) error {
+	if err := checkBase(base); err != nil {
+		return err
+	}
 	if len(next) != len(base) {
 		return errors.New("a routing change may only reorder the configured routes: classes differ")
 	}
@@ -76,7 +104,7 @@ func reorders(base, next route.Rule) error {
 			return fmt.Errorf("a routing change may only reorder the configured routes: class %q differs", class)
 		}
 		// Same length and every base route present: with no repeats in
-		// base (route.New refuses them), got repeats none either.
+		// base (checkBase), got repeats none either.
 		for _, r := range routes {
 			if !slices.Contains(got, r) {
 				return fmt.Errorf("a routing change may only reorder the configured routes: class %q lacks %s", class, r)
