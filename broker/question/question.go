@@ -211,6 +211,9 @@ type entry struct {
 	// its wait and its age never run short.
 	sentMono, askedMono time.Duration
 	monoSet, askMono    bool
+	// askLoaded: askedMono is the time of loading, which understates the
+	// age, so a restricted clock cannot tell the ask-by (PQ2).
+	askLoaded bool
 }
 
 // texted reports whether e's text went out (Sent, from files written
@@ -219,10 +222,27 @@ func (e *entry) texted() bool { return e.Texted || !e.Sent.IsZero() }
 
 func (e *entry) open() bool { return e.State == Held || e.State == Waiting }
 
-// due reports whether e may be texted at now: held, never sent, and not
-// past its ask-by.
-func (e *entry) due(now time.Time) bool {
-	return e.State == Held && !e.texted() && !e.pastAskBy(now)
+// dueLocked reports whether e may be texted: held, never sent, and not
+// past its ask-by. While the clock is restricted the ask-by is read on the
+// monotonic clock, and a question whose ask-by cannot be read that way
+// (asked before a restart) waits for trusted time (L3 MUST on #125).
+func (b *Book) dueLocked(e *entry, now time.Time, trusted bool, m time.Duration) bool {
+	if e.State != Held || e.texted() || b.askByPassed(e, now, trusted, m) {
+		return false
+	}
+	return trusted || e.AskWithin == 0 || e.askMono && !e.askLoaded
+}
+
+// askByPassed reports whether e, unsent, is past its ask-by: on the
+// monotonic clock from the ask, or on trusted time from Asked.
+func (b *Book) askByPassed(e *entry, now time.Time, trusted bool, m time.Duration) bool {
+	if e.AskWithin == 0 {
+		return false
+	}
+	if e.askMono && !e.askLoaded && m-e.askedMono >= e.AskWithin {
+		return true
+	}
+	return trusted && e.pastAskBy(now)
 }
 
 func (e *entry) pastAskBy(now time.Time) bool {
@@ -252,7 +272,7 @@ type send struct {
 	At     time.Time `json:"at"` // zero for a text sent while restricted
 	Asker  string    `json:"asker"`
 	Others []string  `json:"others,omitempty"`
-	// mono is Mono at the text (monoSet), or at loading, so pacing holds
+	// mono is Mono at the text, or at loading (monoSet), so pacing holds
 	// while the clock is restricted (PQ4).
 	mono    time.Duration
 	monoSet bool
@@ -350,16 +370,14 @@ func New(cfg Config) (*Book, error) {
 		m := cfg.Mono()
 		for _, e := range b.qs {
 			if e.State == Held && !e.texted() {
-				e.askedMono, e.askMono = m, true
+				e.askedMono, e.askMono, e.askLoaded = m, true, true
 			}
 			if e.State == Waiting && e.Deadline.IsZero() {
 				e.sentMono, e.monoSet = m, true // texted while restricted
 			}
 		}
 		for i := range b.sends {
-			if b.sends[i].At.IsZero() {
-				b.sends[i].mono, b.sends[i].monoSet = m, true
-			}
+			b.sends[i].mono, b.sends[i].monoSet = m, true
 		}
 	}
 	return b, nil
@@ -888,7 +906,7 @@ func (b *Book) sendDue(ctx context.Context) {
 		if len(b.sends) < b.cfg.SendsPerHour {
 			for tier := range 3 {
 				for _, q := range b.qs {
-					if !q.due(now) {
+					if !b.dueLocked(q, now, trusted, m) {
 						continue
 					}
 					t := 2
@@ -969,17 +987,15 @@ func (b *Book) sendDue(ctx context.Context) {
 	}
 }
 
-// withinHour reports whether t counts against this hour's texts: on the
-// monotonic clock when it has a reading, else on trusted time, else
-// (restricted, no reading) it does.
+// withinHour reports whether t counts against this hour's texts: on
+// trusted time when both have one, else on the monotonic clock. A loaded
+// send reads as sent at loading, so while restricted it counts for the
+// hour after a restart.
 func (b *Book) withinHour(t send, now time.Time, trusted bool, m time.Duration) bool {
-	switch {
-	case t.monoSet:
-		return m-t.mono < time.Hour
-	case trusted:
+	if trusted && !t.At.IsZero() {
 		return now.Sub(t.At) < time.Hour
 	}
-	return true
+	return !t.monoSet || m-t.mono < time.Hour
 }
 
 // heldFor is how long q has waited since it was asked: the longer of the
@@ -1087,8 +1103,12 @@ func (b *Book) notAskedLocked(e *entry, now time.Time) {
 		return
 	}
 	b.notAskedLines++
+	by := "its ask-by time" // closed while restricted, or asked then
+	if !now.IsZero() && !e.Asked.IsZero() {
+		by = b.clock(now, e.Asked.Add(e.AskWithin))
+	}
 	b.digest = append(b.digest, fmt.Sprintf(`Not asked: the agent's question "%s" was held past %s (texts paced or quiet hours), so the agent went ahead without asking.`,
-		clip(e.Text, 60), b.clock(now, e.Asked.Add(e.AskWithin))))
+		clip(e.Text, 60), by))
 }
 
 // startGraceLocked starts the restart grace at the first trusted time
@@ -1101,8 +1121,10 @@ func (b *Book) startGraceLocked(now time.Time) {
 
 // monoLapsedLocked reports whether e's wait has run out on the monotonic
 // clock (PQ4). Only a restricted clock relies on it. It needs no restart
-// grace: e was texted by this process, so no reply to it was queued while
-// the box was down.
+// grace: either e was texted by this process, so no reply to it was
+// queued while the box was down, or it was texted while restricted before
+// a restart and its reading is the time of loading, so its whole wait,
+// at least MinWait and longer than the grace, runs again from there.
 func (b *Book) monoLapsedLocked(e *entry, m time.Duration) bool {
 	return e.State == Waiting && e.monoSet && m-e.sentMono >= e.Wait
 }
@@ -1119,6 +1141,10 @@ func (b *Book) tickRestricted() {
 	for _, e := range b.qs {
 		if b.monoLapsedLocked(e, m) {
 			b.lapseLocked(e, e.Deadline)
+			changed = true
+		}
+		if e.State == Held && !e.texted() && b.askByPassed(e, time.Time{}, false, m) {
+			b.notAskedLocked(e, time.Time{}) // the next trusted tick dates its close
 			changed = true
 		}
 	}
@@ -1155,10 +1181,13 @@ func (b *Book) Tick(ctx context.Context) {
 			changed = true
 		}
 		if e.State == Held && !e.texted() {
-			switch {
-			case e.Asked.IsZero():
-				e.Asked, changed = now, true // asked while the clock was restricted
-			case e.pastAskBy(now):
+			if e.Asked.IsZero() { // asked while the clock was restricted
+				e.Asked, changed = now, true
+				if e.askMono && !e.askLoaded {
+					e.Asked = now.Add(-(m - e.askedMono))
+				}
+			}
+			if b.askByPassed(e, now, true, m) {
 				b.notAskedLocked(e, now)
 				changed = true
 			}

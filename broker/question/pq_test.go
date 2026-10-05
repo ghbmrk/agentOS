@@ -3,6 +3,7 @@ package question
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -129,28 +130,88 @@ func TestAQuestionNotTextedByItsAskByIsNotAsked(t *testing.T) {
 	}
 }
 
-// An ask-by counts from the first trusted time, and never closes a
-// question once it is texted.
-func TestAskByWaitsForTrustedTimeAndEndsAtTheText(t *testing.T) {
-	r := newRig(t, nil)
+// An ask-by counts from the ask on the monotonic clock, so a restricted
+// clock neither stretches it nor lets a question past it be texted (L3
+// MUST on #125); it never closes a question once it is texted.
+func TestAskByRunsOnTheMonotonicClockAndEndsAtTheText(t *testing.T) {
+	r := newRig(t, func(c *Config) { c.Quiet, c.SendsPerHour = nil, 1 })
+	r.ask("lin0", "x", short("Taxi home?")) // spends the hour's text
 	r.set(func() { r.restricted = true })
 	s := short("Lunch at noon?")
 	s.AskWithin = 10 * time.Minute
 	r.ask("lin1", "a", s)
-	r.advance(time.Hour) // unknown while restricted
-	r.set(func() { r.restricted = false; r.quiet = true })
-	r.b.Tick(context.Background())
 	r.advance(9 * time.Minute)
 	r.b.Tick(context.Background())
 	if st := r.status("lin1", "a"); st.State != Held {
-		t.Fatalf("ask-by counted from before the clock was trusted: %+v", st)
+		t.Fatalf("before its ask-by: %+v", st)
 	}
+	r.advance(52 * time.Minute)               // the hour's text is free again
+	r.ask("lin3", "z", short("Bus or tram?")) // sends before any tick
+	if got := r.texts(); len(got) != 2 || strings.Contains(got[1], "Lunch") {
+		t.Fatalf("texts %q", got)
+	}
+	r.b.Tick(context.Background())
+	if st := r.status("lin1", "a"); st.State != NotAsked || len(r.texts()) != 2 {
+		t.Fatalf("past its ask-by while restricted: %+v, texts %q", st, r.texts())
+	}
+	if d := strings.Join(r.b.TakeDigest(), "\n"); !strings.Contains(d, `"Lunch at noon?" was held past its ask-by time`) {
+		t.Fatalf("digest %q", d)
+	}
+
+	// Asked while restricted, trusted later: Asked is dated from the
+	// monotonic clock, not from the first trusted tick.
+	r.advance(time.Hour)
+	r.ask("lin2", "y", short("Wine or beer?")) // spends the hour's text
+	r.ask("lin1", "b", s)
+	r.advance(6 * time.Minute)
+	r.set(func() { r.restricted = false; r.quiet = true })
+	r.b.Tick(context.Background())
+	r.advance(4 * time.Minute)
+	r.b.Tick(context.Background())
+	if st := r.status("lin1", "b"); st.State != NotAsked {
+		t.Fatalf("ask-by counted from the first trusted tick: %+v", st)
+	}
+	if d := strings.Join(r.b.TakeDigest(), "\n"); !strings.Contains(d, `"Lunch at noon?" was held past 15:11`) {
+		t.Fatalf("digest %q", d)
+	}
+
+	// Texted in time, the ask-by no longer applies.
+	r.advance(time.Hour)
 	r.set(func() { r.quiet = false })
+	r.ask("lin1", "c", s)
+	r.advance(15 * time.Minute)
 	r.b.Tick(context.Background())
-	r.advance(5 * time.Minute) // past the ask-by, but texted in time
-	r.b.Tick(context.Background())
-	if st := r.status("lin1", "a"); st.State != Waiting {
+	if st := r.status("lin1", "c"); st.State != Waiting {
 		t.Fatalf("texted question: %+v", st)
+	}
+}
+
+// After a restart while restricted, the ask's monotonic reading is gone,
+// so a question with an ask-by waits for trusted time.
+func TestAskByAfterARestartWaitsForTrustedTime(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "questions.json")
+	r := newRig(t, func(c *Config) { c.Quiet, c.SendsPerHour, c.Path = nil, 2, path })
+	r.ask("lin0", "x", short("Taxi home?"))
+	r.ask("lin0", "y", short("Wine or beer?")) // both texts this hour
+	s := short("Lunch at noon?")
+	s.AskWithin = 30 * time.Minute
+	r.ask("lin1", "a", s)
+	r.set(func() { r.restricted = true })
+	r.open()
+	r.advance(time.Hour)
+	r.b.Tick(context.Background())
+	if st := r.status("lin1", "a"); st.State != Held || len(r.texts()) != 2 {
+		t.Fatalf("restricted after a restart: %+v, texts %q", st, r.texts())
+	}
+	// The texts loaded from before the restart count for its first hour
+	// only, so one without an ask-by goes out.
+	if st := r.ask("lin2", "b", short("Bus or tram?")); st.State != Waiting {
+		t.Fatalf("an hour after the restart: %+v, texts %q", st, r.texts())
+	}
+	r.set(func() { r.restricted = false })
+	r.b.Tick(context.Background())
+	if st := r.status("lin1", "a"); st.State != NotAsked {
+		t.Fatalf("trusted again, an hour past its ask-by: %+v", st)
 	}
 }
 

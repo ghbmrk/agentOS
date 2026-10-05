@@ -410,10 +410,11 @@ func TestPacingHoldsQuestionsAndTheDeadlineStartsAtSend(t *testing.T) {
 	}
 }
 
-// TestRestrictedClockHoldsTheQuestion: while the clock guard says time
-// cannot be trusted, nothing is sent and nothing lapses before its wait
-// runs out (TIM-1; PQ4 for the wait).
-func TestRestrictedClockHoldsTheQuestion(t *testing.T) {
+// TestARestrictedClockKeepsTheWaitAndHoldsNewTexts: while the clock guard
+// says time cannot be trusted, a texted question keeps waiting and lapses
+// only when its wait runs out (PQ4), and with quiet hours configured
+// nothing new is sent (TIM-1).
+func TestARestrictedClockKeepsTheWaitAndHoldsNewTexts(t *testing.T) {
 	r := newRig(t, nil)
 	r.ask("lin1", "q", slot())
 	r.set(func() { r.restricted = true })
