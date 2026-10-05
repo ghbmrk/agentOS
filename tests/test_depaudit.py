@@ -169,29 +169,6 @@ class StaticScanTest(unittest.TestCase):
         self.assertEqual([(x["kind"], x["target"]) for x in v], [("undeclared", "collector.vendor.io")])
         self.assertEqual(v[0]["location"], "broker/net.go:1")
 
-    def test_not_endpoints_excuse_only_their_path_and_host(self):
-        files = {
-            "broker/vendor/x/mk.sh": 'curl https://cgit.example-bsd.org/x\n',
-            "broker/other.go": 'u := "https://cgit.example-bsd.org/y"\n',
-            "broker/vendor/x/mk2.sh": 'curl https://ping.agentos.dev/x\n',
-        }
-        data = json.loads(json.dumps(MANIFEST))
-        data["not_endpoints"] = [
-            {"path": "broker/vendor/x/mk.sh", "host": "cgit.example-bsd.org", "why": "build script"},
-            {"path": "broker/vendor/x/mk2.sh", "host": "ping.agentos.dev", "why": "never excused"},
-        ]
-        with tempfile.TemporaryDirectory() as d:
-            for rel, text in files.items():
-                p = pathlib.Path(d, rel)
-                p.parent.mkdir(parents=True, exist_ok=True)
-                p.write_text(text)
-            v = depaudit.static_scan(pathlib.Path(d), depaudit.load_manifest(data))
-        self.assertEqual(sorted((x["kind"], x["location"]) for x in v),
-                         [("forbidden", "broker/vendor/x/mk2.sh:1"), ("undeclared", "broker/other.go:1")])
-        data["not_endpoints"] = [{"path": "a", "host": "b"}]
-        with self.assertRaises(ValueError):
-            depaudit.load_manifest(data)
-
     def test_forbidden_url_is_flagged_even_if_declared(self):
         m = self.scan({"src/a.py": 'U = "https://ping.agentos.example/x"\n'})
         self.assertEqual(m[0]["kind"], "forbidden")
@@ -205,6 +182,26 @@ class StaticScanTest(unittest.TestCase):
             "spikes/x.py": 'U = "https://anything.io"\n',
         })
         self.assertEqual(v, [])
+
+    def test_inert_literal_exempts_only_its_file_and_host(self):
+        m = depaudit.load_manifest({"inert_literals": [
+            {"file": "broker/vendor/x/png.go", "host": "meta.example.io", "why": "metadata"}]})
+        with tempfile.TemporaryDirectory() as d:
+            for rel in ("broker/vendor/x/png.go", "broker/vendor/x/net.go"):
+                p = pathlib.Path(d, rel)
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text('var c = "http://meta.example.io/" + "https://other.vendor.io/"\n')
+            v = sorted((x["location"], x["target"]) for x in depaudit.static_scan(pathlib.Path(d), m))
+        self.assertEqual(v, [("broker/vendor/x/net.go:1", "meta.example.io"), ("broker/vendor/x/net.go:1", "other.vendor.io"),
+                             ("broker/vendor/x/png.go:1", "other.vendor.io")])
+        for bad in ({"file": "broker/net.go", "host": "h.io", "why": "x"},
+                    {"file": "broker/x/vendor/y.go", "host": "h.io", "why": "x"},
+                    {"file": "x/broker/vendor/y.go", "host": "h.io", "why": "x"},
+                    {"file": "broker/vendor/../net.go", "host": "h.io", "why": "x"},
+                    {"file": "broker/vendor/x.go", "host": "h.io"},
+                    {"file": "broker/vendor/x.go", "host": "ping.agentos.io", "why": "x"}):
+            with self.assertRaises(ValueError):
+                depaudit.load_manifest({"forbidden_host_patterns": ["*agentos*"], "inert_literals": [bad]})
 
 
 @unittest.skipUnless(depaudit.sandbox_available(), "needs user+net namespaces and strace")

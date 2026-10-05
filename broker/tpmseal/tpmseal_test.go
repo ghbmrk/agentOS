@@ -6,8 +6,12 @@ import (
 	"bytes"
 	"crypto/ecdsa"
 	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"testing"
+
+	"github.com/google/go-tpm/tpm2"
+	"github.com/google/go-tpm/tpm2/transport"
 
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 	"github.com/ghbmrk/agentos/broker/tpmseal/swtpm"
@@ -297,5 +301,148 @@ func TestPolicyKeyRoundTrip(t *testing.T) {
 	back, err := tpmseal.ParsePolicyKey(der)
 	if err != nil || !back.Equal(k) {
 		t.Fatalf("round trip: %v", err)
+	}
+}
+
+// interposer sits on the TPM's bus and answers CreatePrimary with its own
+// public key under the real SRK's name, hoping the box salts its sessions
+// to a key the interposer holds.
+type interposer struct {
+	t   transport.TPM
+	pub *ecdsa.PublicKey
+	// sessions counts sessions started after a forged answer: each would
+	// carry a salt encrypted to the interposer's key.
+	sessions int
+	forged   bool
+}
+
+func (i *interposer) Send(cmd []byte) ([]byte, error) {
+	if i.forged && len(cmd) >= 10 && binary.BigEndian.Uint32(cmd[6:10]) == uint32(tpm2.TPMCCStartAuthSession) {
+		i.sessions++
+	}
+	rsp, err := i.t.Send(cmd)
+	if err != nil || len(cmd) < 10 || binary.BigEndian.Uint32(cmd[6:10]) != uint32(tpm2.TPMCCCreatePrimary) ||
+		len(rsp) < 18 || binary.BigEndian.Uint32(rsp[6:10]) != 0 {
+		return rsp, err
+	}
+	// header (10), object handle (4), parameter size (4), TPM2B_PUBLIC.
+	out, err := tpm2.Unmarshal[tpm2.TPM2BPublic](rsp[18:])
+	if err != nil {
+		return rsp, nil
+	}
+	pub, err := out.Contents()
+	if err != nil {
+		return rsp, nil
+	}
+	ecc, err := pub.Unique.ECC()
+	if err != nil {
+		return rsp, nil
+	}
+	x, y := make([]byte, 32), make([]byte, 32)
+	i.pub.X.FillBytes(x)
+	i.pub.Y.FillBytes(y)
+	i.forged = true
+	forged := bytes.Replace(rsp, ecc.X.Buffer, x, 1)
+	return bytes.Replace(forged, ecc.Y.Buffer, y, 1), nil
+}
+
+// An interposer that substitutes the storage root key's public area while
+// keeping its name is caught before any session is salted to its key: at
+// seal time (no recorded name yet) and at unseal time. (This interposer
+// is passive, so the TPM would reject the session anyway; an active one
+// holding its key could re-salt to the real SRK, which is why no salt may
+// ever be sent to its key.)
+func TestSubstitutedSRKPublicRefused(t *testing.T) {
+	s := swtpm.Start(t)
+	boot(s, releaseA)
+	key := newKey(t)
+	_, sealed, pols := enroll(t, s, key, "")
+	evil := newKey(t)
+	bus := &interposer{t: s.TPM(), pub: &evil.PublicKey}
+
+	if _, err := tpmseal.Seal(bus, secret(t), &key.PublicKey, "", "Test PC"); err == nil {
+		t.Fatal("sealed through the interposer")
+	}
+	if _, err := tpmseal.Unseal(bus, sealed, pols, ""); err == nil {
+		t.Fatal("unsealed through the interposer")
+	}
+	if bus.sessions != 0 {
+		t.Fatalf("%d sessions salted to the interposer's key", bus.sessions)
+	}
+	if _, err := tpmseal.Identity(bus); err == nil {
+		t.Fatal("identity from a substituted storage root key")
+	}
+	// The bus without the interposer still works.
+	if _, err := tpmseal.Unseal(s.TPM(), sealed, pols, ""); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A PIN slot takes the TPM's lockout hierarchy, so the guess counter can't
+// be reset with the factory-empty lockout password; a lockout password
+// someone else set is refused rather than guessed.
+func TestPINSlotTakesTheLockoutHierarchy(t *testing.T) {
+	s := swtpm.Start(t)
+	if err := s.ThiefLockReset(); err != nil {
+		t.Fatalf("factory TPM: empty-password reset should work: %v", err)
+	}
+	auth, err := tpmseal.NewLockoutAuth()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tpmseal.TakeLockout(s.TPM(), auth, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ThiefLockReset(); err == nil {
+		t.Fatal("empty-password reset still works after the box took the lockout hierarchy")
+	}
+	if err := tpmseal.TakeLockout(s.TPM(), auth, true); err != nil {
+		t.Fatalf("box's own lockout authorization: %v", err)
+	}
+	other, _ := tpmseal.NewLockoutAuth()
+	if err := tpmseal.TakeLockout(s.TPM(), other, false); !errors.Is(err, tpmseal.ErrLockoutOwned) {
+		t.Fatalf("lockout set by someone else: got %v, want ErrLockoutOwned", err)
+	}
+}
+
+// After PINMaxTries wrong PINs the TPM refuses even the right one.
+func TestPINLockout(t *testing.T) {
+	s := swtpm.Start(t)
+	boot(s, releaseA)
+	auth, _ := tpmseal.NewLockoutAuth()
+	if err := tpmseal.TakeLockout(s.TPM(), auth, false); err != nil {
+		t.Fatal(err)
+	}
+	_, sealed, pols := enroll(t, s, newKey(t), "4711-correct")
+	for i := 0; i < tpmseal.PINMaxTries; i++ {
+		if _, err := tpmseal.Unseal(s.TPM(), sealed, pols, "0000"); !errors.Is(err, tpmseal.ErrPIN) {
+			t.Fatalf("wrong PIN %d: got %v, want ErrPIN", i+1, err)
+		}
+	}
+	if _, err := tpmseal.Unseal(s.TPM(), sealed, pols, "4711-correct"); !errors.Is(err, tpmseal.ErrLockout) {
+		t.Fatalf("right PIN in lockout: got %v, want ErrLockout", err)
+	}
+	if err := s.ThiefLockReset(); err == nil {
+		t.Fatal("thief reset the lockout")
+	}
+}
+
+// Only the exact PIN opens the slot: no prefix, extension, case or
+// spacing variant does.
+func TestPINVariantsDoNotOpen(t *testing.T) {
+	s := swtpm.Start(t)
+	boot(s, releaseA)
+	auth, _ := tpmseal.NewLockoutAuth()
+	if err := tpmseal.TakeLockout(s.TPM(), auth, false); err != nil {
+		t.Fatal(err)
+	}
+	_, sealed, pols := enroll(t, s, newKey(t), "Zebra-4711")
+	for _, pin := range []string{"Zebra-471", "Zebra-47110", "zebra-4711", "Zebra-4711 ", " Zebra-4711", "Zebra-4711\x00"} {
+		if _, err := tpmseal.Unseal(s.TPM(), sealed, pols, pin); !errors.Is(err, tpmseal.ErrPIN) {
+			t.Fatalf("PIN %q: got %v, want ErrPIN", pin, err)
+		}
+	}
+	if _, err := tpmseal.Unseal(s.TPM(), sealed, pols, "Zebra-4711"); err != nil {
+		t.Fatalf("exact PIN: %v", err)
 	}
 }

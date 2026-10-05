@@ -76,6 +76,9 @@ var guestPlane = map[string]struct {
 	// reports usage to the meter; never the vault or the proxy.
 	"modelroute": {[]string{"meter"}, []string{"os/exec", "plugin", "unsafe", "C"}},
 	"route":      {nil, []string{"net", "os/exec", "plugin", "unsafe", "C"}},
+	// Replay (LOOP-5) serves replay machines through a guest plane of its
+	// own: no journal writes, no executors, no network clients.
+	"replay": {[]string{"admission", "change", "guest", "journal", "meter", "vm"}, []string{"net", "os/exec", "plugin", "unsafe", "C"}},
 }
 
 var forbiddenStd = []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "syscall", "unsafe", "C"}

@@ -27,6 +27,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -83,6 +84,8 @@ type Sealed struct {
 	PINSalt []byte `json:"pin_salt,omitempty"`
 	// Host names the PC for the owner (its DMI product name), if known.
 	Host string `json:"host,omitempty"`
+	// Trusted is when the owner trusted the PC (Unix seconds), if known.
+	Trusted int64 `json:"trusted,omitempty"`
 }
 
 // HasPIN reports whether unsealing needs the boot PIN.
@@ -305,8 +308,15 @@ type srk struct {
 	pub    tpm2.TPMTPublic
 }
 
+// ErrSRK: the storage root key's public area does not match its name or
+// the template, as when something on the bus substitutes its own key.
+var ErrSRK = errors.New("tpmseal: the storage root key's public area does not match its name")
+
 // loadSRK recreates the storage root key from the owner seed (TCG ECC
 // P-256 template), so the same TPM always yields the same key and name.
+// The public area is the salt key for every later session, so it must
+// hash to the name the TPM returned and keep the template's attributes;
+// callers then compare that name with the one a slot recorded.
 func loadSRK(t transport.TPM) (*srk, error) {
 	rsp, err := tpm2.CreatePrimary{
 		PrimaryHandle: tpm2.TPMRHOwner,
@@ -320,7 +330,27 @@ func loadSRK(t transport.TPM) (*srk, error) {
 		flush(t, rsp.ObjectHandle)
 		return nil, err
 	}
+	name, err := tpm2.ObjectName(pub)
+	if err != nil || !bytes.Equal(name.Buffer, rsp.Name.Buffer) || !srkShape(pub) {
+		flush(t, rsp.ObjectHandle)
+		return nil, ErrSRK
+	}
 	return &srk{handle: rsp.ObjectHandle, name: rsp.Name, pub: *pub}, nil
+}
+
+// srkShape reports whether pub is the template's kind of key: a restricted
+// P-256 decryption key, fixed to this TPM, with no policy.
+func srkShape(pub *tpm2.TPMTPublic) bool {
+	want := tpm2.ECCSRKTemplate
+	if pub.Type != want.Type || pub.NameAlg != want.NameAlg ||
+		pub.ObjectAttributes != want.ObjectAttributes || len(pub.AuthPolicy.Buffer) != 0 {
+		return false
+	}
+	p, err := pub.Parameters.ECCDetail()
+	if err != nil {
+		return false
+	}
+	return p.CurveID == tpm2.TPMECCNistP256
 }
 
 func flush(t transport.TPM, h tpm2.TPMHandle) {
@@ -594,4 +624,132 @@ func unsealErr(err error) error {
 		return ErrPIN
 	}
 	return ErrPolicy
+}
+
+// Dictionary-attack parameters a PIN slot sets when it takes the lockout
+// hierarchy. Ten wrong PINs lock the PIN out; the TPM then forgives one
+// failure every two hours, so a thief gets about twelve guesses a day. A
+// wrong lockout authorization locks the lockout hierarchy for a day.
+const (
+	PINMaxTries        = 10
+	PINRecoverySeconds = 2 * 60 * 60
+	LockoutRecoverySec = 24 * 60 * 60
+)
+
+// ErrLockoutOwned: something other than this box set the TPM's lockout
+// authorization, so the box cannot vouch for the PIN's guess limit.
+var ErrLockoutOwned = errors.New("tpmseal: the TPM's lockout authorization is held by someone else")
+
+// NewLockoutAuth makes a lockout authorization: 128 random bits as 32 hex
+// characters (no zero byte; see pinAuth).
+func NewLockoutAuth() ([]byte, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return nil, err
+	}
+	return []byte(hex.EncodeToString(b)), nil
+}
+
+// lockoutAuthSet reads TPMA_PERMANENT.lockoutAuthSet.
+func lockoutAuthSet(t transport.TPM) (bool, error) {
+	rsp, err := tpm2.GetCapability{
+		Capability:    tpm2.TPMCapTPMProperties,
+		Property:      uint32(tpm2.TPMPTPermanent),
+		PropertyCount: 1,
+	}.Execute(t)
+	if err != nil {
+		return false, err
+	}
+	props, err := rsp.CapabilityData.Data.TPMProperties()
+	if err != nil || len(props.TPMProperty) == 0 || props.TPMProperty[0].Property != tpm2.TPMPTPermanent {
+		return false, errors.New("tpmseal: cannot read the TPM's permanent attributes")
+	}
+	return props.TPMProperty[0].Value&(1<<2) != 0, nil
+}
+
+// TakeLockout makes the TPM's lockout hierarchy the box's, so that only
+// the vault can reset the dictionary-attack counter that limits PIN
+// guesses. With the lockout authorization empty, as a TPM leaves the
+// factory, anyone holding the PC could reset the counter and guess on.
+//
+// auth is the authorization the vault keeps for this TPM; held says the
+// vault already had it from an earlier PIN slot. When the TPM's lockout
+// authorization is empty, TakeLockout sets the dictionary-attack
+// parameters (while there is still no authorization to expose) and then
+// changes the authorization to auth in a session salted to the SRK and
+// encrypted on the bus. When it is already set, TakeLockout accepts it
+// only if held, and never guesses: ErrLockoutOwned.
+func TakeLockout(t transport.TPM, auth []byte, held bool) error {
+	set, err := lockoutAuthSet(t)
+	if err != nil {
+		return err
+	}
+	if set {
+		if held {
+			return nil
+		}
+		return ErrLockoutOwned
+	}
+	if err := daParameters(t); err != nil {
+		return fmt.Errorf("tpmseal: dictionary-attack parameters: %w", err)
+	}
+	s, err := loadSRK(t)
+	if err != nil {
+		return err
+	}
+	defer flush(t, s.handle)
+	change := func(from []byte) error {
+		_, err := tpm2.HierarchyChangeAuth{
+			AuthHandle: tpm2.AuthHandle{
+				Handle: tpm2.TPMRHLockout,
+				Auth: tpm2.HMAC(tpm2.TPMAlgSHA256, 16,
+					tpm2.Auth(from),
+					tpm2.AESEncryption(128, tpm2.EncryptIn),
+					tpm2.Salted(s.handle, s.pub)),
+			},
+			NewAuth: tpm2.TPM2BAuth{Buffer: auth},
+		}.Execute(t)
+		return err
+	}
+	// The TPM answers a change of the lockout authorization with an HMAC
+	// keyed by the new value, which go-tpm v0.9.8 checks against the old
+	// one, so the first change reports a bad response HMAC even when it
+	// took effect. Changing auth to auth then proves the TPM holds it.
+	first := change(nil)
+	if set, err := lockoutAuthSet(t); err != nil || !set {
+		return fmt.Errorf("tpmseal: lockout authorization: %w", errors.Join(first, err))
+	}
+	if err := change(auth); err != nil {
+		return fmt.Errorf("tpmseal: lockout authorization: %w", err)
+	}
+	return nil
+}
+
+// daParameters runs TPM2_DictionaryAttackParameters with the empty
+// lockout authorization. go-tpm v0.9.8 has no type for this command, so
+// it is marshalled here: header, TPM_RH_LOCKOUT, a password session with
+// an empty password, and the three parameters.
+func daParameters(t transport.TPM) error {
+	cmd := binary.BigEndian.AppendUint16(nil, uint16(tpm2.TPMSTSessions))
+	cmd = binary.BigEndian.AppendUint32(cmd, 0) // size, set below
+	cmd = binary.BigEndian.AppendUint32(cmd, uint32(tpm2.TPMCCDictionaryAttackParameters))
+	cmd = binary.BigEndian.AppendUint32(cmd, uint32(tpm2.TPMRHLockout))
+	cmd = binary.BigEndian.AppendUint32(cmd, 9) // authorization area size
+	cmd = binary.BigEndian.AppendUint32(cmd, uint32(tpm2.TPMRSPW))
+	cmd = append(cmd, 0, 0, 0, 0, 0) // nonce, attributes, password: empty
+	cmd = binary.BigEndian.AppendUint32(cmd, PINMaxTries)
+	cmd = binary.BigEndian.AppendUint32(cmd, PINRecoverySeconds)
+	cmd = binary.BigEndian.AppendUint32(cmd, LockoutRecoverySec)
+	binary.BigEndian.PutUint32(cmd[2:6], uint32(len(cmd)))
+	rsp, err := t.Send(cmd)
+	if err != nil {
+		return err
+	}
+	if len(rsp) < 10 {
+		return errors.New("short response")
+	}
+	if rc := binary.BigEndian.Uint32(rsp[6:10]); rc != 0 {
+		return tpm2.TPMRC(rc)
+	}
+	return nil
 }

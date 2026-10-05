@@ -51,7 +51,7 @@ DOC_NAMES = ("example.com", "example.net", "example.org", "*.example.com", "*.ex
              "*.example.org", "*.example", "*.test", "*.invalid")
 
 Event = collections.namedtuple("Event", "pid syscall family addr port")
-Manifest = collections.namedtuple("Manifest", "forbidden endpoints not_endpoints")
+Manifest = collections.namedtuple("Manifest", "forbidden endpoints inert", defaults=((),))
 
 _LINE = re.compile(r"^(?:(\d+)\s+)?(\w+)\(")
 _SOCKADDR = re.compile(r"\{sa_family=AF_(\w+)([^{}]*)\}")
@@ -138,17 +138,23 @@ def load_manifest(data):
         if _match(e["host"], forbidden):
             raise ValueError("endpoint %s matches a forbidden pattern (DEP-2)" % e["host"])
         endpoints.append(e)
-    # Exact (path, host) pairs where a URL is text, not an endpoint the code
-    # contacts (a vendored build script, a link in an error message). Each
-    # names its reason; the same host anywhere else is still checked, and a
-    # forbidden host is never excused.
-    not_endpoints = set()
-    for x in data.get("not_endpoints", ()):
-        for k in ("path", "host", "why"):
-            if not x.get(k):
-                raise ValueError("not_endpoints entry missing %r: %r" % (k, x))
-        not_endpoints.add((x["path"], x["host"].lower()))
-    return Manifest(forbidden, tuple(endpoints), frozenset(not_endpoints))
+    # Inert literals: a URL in third-party vendored code that names a host but
+    # is never contacted (e.g. a metadata string). Each is one exact file and
+    # host with a reason; it exempts nothing else, and the runtime scan still
+    # catches any real contact.
+    inert = []
+    for e in data.get("inert_literals", ()):
+        for k in ("file", "host", "why"):
+            if not e.get(k):
+                raise ValueError("inert literal missing %r: %r" % (k, e))
+        # Only a shipping directory's own Go vendor tree: a "vendor" folder
+        # deeper in our code (broker/x/vendor/) is not third-party.
+        if not any(e["file"].startswith(d + "/vendor/") for d in SHIPPING_DIRS) or ".." in e["file"].split("/"):
+            raise ValueError("inert literal %s: only vendored third-party files may be exempted" % e["file"])
+        if _match(e["host"], forbidden):
+            raise ValueError("inert literal %s matches a forbidden pattern (DEP-2)" % e["host"])
+        inert.append((e["file"], e["host"].lower()))
+    return Manifest(forbidden, tuple(endpoints), tuple(inert))
 
 
 def _allowed(host, manifest, profile):
@@ -261,7 +267,7 @@ def static_scan(root, manifest, dirs=SHIPPING_DIRS):
                     loc = "%s:%d" % (rel.as_posix(), n)
                     if _match(host, manifest.forbidden):
                         out.append({"kind": "forbidden", "target": host, "location": loc})
-                    elif _match(host, DOC_NAMES) or (rel.as_posix(), host.lower()) in manifest.not_endpoints:
+                    elif _match(host, DOC_NAMES) or (rel.as_posix(), host.lower()) in manifest.inert:
                         continue
                     elif not _allowed(host, manifest, "full"):
                         out.append({"kind": "undeclared", "target": host, "location": loc})

@@ -202,6 +202,7 @@ func (c *codes) wrong(now time.Time) (locked bool, err error) {
 		if since >= WrongToLock && !s.LowLocked {
 			s.LowLocked = true
 			s.UnlockedUntil = time.Time{}
+			s.Locks++
 			locked = true
 		}
 		if since >= WrongToChallenge && !s.Challenged {
@@ -213,6 +214,7 @@ func (c *codes) wrong(now time.Time) (locked bool, err error) {
 		c.st.Wrong = append(recent(c.st.Wrong, now), now)
 		if locked {
 			c.st.LowLocked, c.st.UnlockedUntil = true, time.Time{}
+			c.st.Locks++
 		}
 		if c.justChallenged {
 			c.st.Challenged = true
@@ -309,8 +311,11 @@ func (c *codes) unlocked(now time.Time) bool { return now.Before(c.st.UnlockedUn
 // lock ends the session unlock (boot on an unknown host, CH-14). Memory is
 // locked even if the save fails.
 func (c *codes) lock() error {
-	err := c.commit(func(s *State) { s.UnlockedUntil = time.Time{} })
-	c.st.UnlockedUntil = time.Time{}
+	err := c.commit(func(s *State) { s.UnlockedUntil = time.Time{}; s.Locks++ })
+	if err != nil {
+		c.st.UnlockedUntil = time.Time{}
+		c.st.Locks++
+	}
 	return err
 }
 

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/owner"
@@ -80,14 +81,15 @@ var (
 	errNoTPM        = uerr(http.StatusConflict, "this PC has no TPM, so it cannot be a trusted host")
 	errBadPIN       = uerr(http.StatusBadRequest, "a boot PIN has 4 to 64 characters")
 	errWrongPIN     = uerr(http.StatusForbidden, "wrong PIN; this PC's TPM limits how many tries it allows")
-	errPINLockout   = uerr(http.StatusTooManyRequests, "this PC's TPM is locked after wrong PINs; unlock with the vault passphrase and a code instead")
+	errPINLockout   = uerr(http.StatusTooManyRequests, "Too many wrong PINs. Unlock with your passphrase and a code instead.")
 	errNotTrusted   = uerr(http.StatusConflict, "this PC is not a trusted host; unlock with the vault passphrase and a code")
-	errBootChanged  = uerr(http.StatusConflict, "this PC's boot path changed since it was trusted; unlock with the vault passphrase and a code")
+	errBootChanged  = uerr(http.StatusConflict, "This PC started the box in a way it hasn't before. Unlock with your passphrase and a code.")
 	errNoSuchHost   = uerr(http.StatusNotFound, "no trusted host with that id")
 	errHostNotSaved = uerr(http.StatusInternalServerError, "could not make this PC trusted; nothing was changed")
 
 	// Rollback (V6): the drive's vault is older than this PC's counter.
-	errRolledBack = uerr(http.StatusConflict, "this drive's vault is older than this PC has seen, so it may be an old copy put back; nothing was unlocked. If you did not restore it, keep the drive and restore from your backup with the recovery key")
+	errRolledBack   = uerr(http.StatusConflict, "this drive's vault is older than this PC has seen, so it may be an old copy put back; nothing was unlocked. If you did not restore it, keep the drive and restore from your backup with the recovery key")
+	errLockoutOwned = uerr(http.StatusConflict, "other software already manages this PC's TPM, so the box can't limit guesses at a boot PIN here. Trust this PC without a PIN instead.")
 )
 
 // noteRolledBack is the owner's notice for an old copy of the drive (V6).
@@ -179,6 +181,10 @@ type custody struct {
 	lastAttempt time.Time
 	// needPIN: this PC is trusted with a boot PIN and waits for it.
 	needPIN bool
+	// bootChanged: this PC is trusted but booted a path the box never
+	// approved; bootUpdated: and it runs another release than last time.
+	// The fallback unlock may then keep the PC trusted (confirmKeep).
+	bootChanged, bootUpdated bool
 	// wrongCounted and wrongSilent are the wrong verifies per bucket.
 	wrongCounted []time.Time
 	wrongSilent  []time.Time
@@ -285,37 +291,55 @@ func (c *custody) unlock(passphrase string) (string, error) {
 // A wrong code counts toward the durable cap and leaves the unlock pending
 // until its expiry, unless the cap is reached; then the key is discarded.
 func (c *custody) confirm(ticket, code string) error {
+	_, err := c.confirmKeep(ticket, code, false)
+	return err
+}
+
+// confirmKeep is confirm with "Keep this PC trusted": when this trusted PC
+// booted a path the box never approved, keep approves the running path
+// with the same proof (passphrase, code, local page; CRED-9 tier 4), so
+// the next restart is unattended again. It reports whether it did.
+func (c *custody) confirmKeep(ticket, code string, keep bool) (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.ph != pending || subtle.ConstantTimeCompare([]byte(ticket), []byte(c.ticket)) != 1 {
-		return errNotPending
+		return false, errNotPending
 	}
 	now := c.now()
 	if !now.Before(c.expires) {
 		c.discard()
 		c.notify("vault unlock expired without a code; key discarded")
-		return errExpired
+		return false, errExpired
 	}
 	if err := c.checkCode(code, now); err != nil {
 		var ue *unlockErr
 		switch {
 		case !errors.As(err, &ue) || ue == errInternal:
 			c.discard()
-			return errInternal
+			return false, errInternal
 		case ue.status == http.StatusTooManyRequests:
 			c.discard()
 			c.notify("too many wrong codes for a vault unlock; key discarded")
 		case strings.HasPrefix(ue.msg, "wrong code"):
 			c.notify("wrong code for a vault unlock")
 		}
-		return err
+		return false, err
 	}
+	keep = keep && c.bootChanged && c.host != nil
 	if err := c.serve(c.v); err != nil {
 		c.discard()
-		return err
+		return false, err
 	}
 	c.notify("vault unlocked")
-	return nil
+	if !keep {
+		return false, nil
+	}
+	if err := c.host.approve(c.v); err != nil {
+		c.notify("could not keep this PC trusted (" + err.Error() + "); trust it again from the local page")
+		return false, nil
+	}
+	c.notify("this PC stays trusted on the boot path it started with now")
+	return true, nil
 }
 
 // checkCode checks a code-generator code against the seed in the open or
@@ -370,6 +394,7 @@ func (c *custody) serve(v *vault.Vault) error {
 		c.timer = nil
 	}
 	c.ph, c.v, c.proxy, c.expires, c.ticket, c.needPIN = open, v, p, time.Time{}, "", false
+	c.bootChanged, c.bootUpdated = false, false
 	return nil
 }
 
@@ -524,7 +549,7 @@ func (c *custody) put(name string, value []byte) error {
 	if c.ph != open {
 		return errLocked
 	}
-	if name == "" || name == SeedName || name == PolicyKeyName || len(name) > 64 {
+	if name == "" || name == SeedName || name == PolicyKeyName || strings.HasPrefix(name, lockoutAuthPrefix) || len(name) > 64 {
 		return errBadCredential
 	}
 	for _, e := range c.v.List() {
@@ -649,10 +674,34 @@ func (c *custody) bootTrusted() {
 	case errors.Is(err, tpmseal.ErrNoPolicy), errors.Is(err, tpmseal.ErrPolicy):
 		// HW-5a: on a trusted PC this is either an update the box did
 		// not approve or a tampered drive; the owner decides.
-		c.notify("this trusted PC's boot path changed, so the vault stayed locked. If you did not just update the box, the drive may have been tampered with. Unlock with the vault passphrase and a code.")
+		c.markBootChanged()
 	default:
 		c.notify("trusted-host unlock failed (" + err.Error() + "); unlock with the vault passphrase and a code")
 	}
+}
+
+// markBootChanged notes that this trusted PC booted a path the box never
+// approved, and tells the owner which case it most likely is. The release
+// comparison reads the drive, which an attacker could edit, so it only
+// picks the wording; both cases need the same full unlock. Caller holds mu.
+func (c *custody) markBootChanged() {
+	c.bootChanged, c.bootUpdated = true, c.host.updated()
+	if c.bootUpdated {
+		c.notify("Box updated. Unlock once with your passphrase and a code; this PC stays trusted after that.")
+		return
+	}
+	c.notify("This PC started the box in a way it hasn't before. If you didn't change anything, the drive may have been tampered with. Unlock only if you're sure.")
+}
+
+// bootChange reports, while the vault is not open, whether this trusted
+// PC booted an unapproved path and whether that looks like an update.
+func (c *custody) bootChange() (changed, updated bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ph == open {
+		return false, false
+	}
+	return c.bootChanged, c.bootUpdated
 }
 
 // pinWanted reports whether this trusted PC waits for its boot PIN.
@@ -707,6 +756,7 @@ func (c *custody) unlockPIN(pin string) error {
 	case errors.Is(err, vault.ErrNoSlotOpens):
 		return errNotTrusted
 	case errors.Is(err, tpmseal.ErrNoPolicy), errors.Is(err, tpmseal.ErrPolicy):
+		c.markBootChanged()
 		return errBootChanged
 	case errors.Is(err, vault.ErrRolledBack):
 		c.notify(noteRolledBack)
@@ -746,7 +796,7 @@ func (c *custody) tier4(code string) (*vault.Vault, error) {
 // trust makes this PC a trusted host (CRED-9): its TPM slot opens the
 // vault on this boot path from now on, with the boot PIN if pin is set.
 func (c *custody) trust(code, pin string) (string, error) {
-	if pin != "" && (len(pin) < 4 || len(pin) > 64) {
+	if n := utf8.RuneCountInString(pin); pin != "" && (n < 4 || n > 64) {
 		return "", errBadPIN
 	}
 	v, err := c.tier4(code)
@@ -761,6 +811,9 @@ func (c *custody) trust(code, pin string) (string, error) {
 		return "", errHostNotSaved
 	}
 	name, err := c.host.enroll(v, pin)
+	if errors.Is(err, tpmseal.ErrLockoutOwned) {
+		return "", errLockoutOwned
+	}
 	if err != nil {
 		return "", errHostNotSaved
 	}

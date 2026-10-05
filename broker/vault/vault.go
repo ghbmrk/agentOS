@@ -71,9 +71,9 @@ type envelope struct {
 	// KeyID names the data key this file is sealed under once the vault
 	// has been re-encrypted (reencrypt.go), so the key slots for it can be
 	// told from the ones for the key before. Empty until then.
-	KeyID []byte `json:"key_id,omitempty"`
-	Nonce   []byte `json:"nonce"`
-	Sealed  []byte `json:"sealed"`
+	KeyID  []byte `json:"key_id,omitempty"`
+	Nonce  []byte `json:"nonce"`
+	Sealed []byte `json:"sealed"`
 }
 
 // Vault is an open vault. It is safe for concurrent use.

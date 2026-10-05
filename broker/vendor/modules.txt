@@ -15,3 +15,8 @@ golang.org/x/crypto/blake2b
 ## explicit; go 1.18
 golang.org/x/sys/cpu
 golang.org/x/sys/unix
+# rsc.io/qr v0.2.0
+## explicit
+rsc.io/qr
+rsc.io/qr/coding
+rsc.io/qr/gf256
