@@ -45,3 +45,18 @@ a later package, that a reviewer may want to change.
 - P2-2's page: reprinting the card without rotating takes a QR scan of the current card (CRED-8 flow).
 - Wiring: the backup command calls `BackupSum` and `RecordBackup`; the digest includes `DigestLine`; the done page shows `OldBackupsNote` and `OfferDelete`, and the caller deletes what `ApproveDelete` returns.
 - New package (for BOARD): scheduled daily sealed backups to an owner destination, the backup's age in the digest, and a stale backup as an alert class.
+
+## Backup choice (BAK-1)
+
+Built for BAK-1 on this package's sealed backups (#45, #64) and backup log. Code: `choice.go`.
+
+| # | Assumption | Spec basis | If it changes |
+|---|---|---|---|
+| B1 | **Three choices, none by default.** A new box has no backup (`BackupUnchosen`). The owner picks **No backup**, **A second drive**, or **Storage you already have**, each destination by a name the owner recognizes, the same name the backup log records. The choice is a reserved vault entry (`backup-choice`), read only under its own kind; a wrong-kind or malformed entry fails closed (the notice still shows, with the error). | BAK-1, R12 | — |
+| B2 | **Choosing is tier-4** (approval code plus local confirmation, or the recovery key). An upload destination is a new grant (CH-3), and turning backups off must not be reachable from a spoofed text. The choice page is the box's Wi-Fi page, where the owner is already signed in with a code. | BAK-1, CH-3 | Auto-decided: security better; UX near-equal (a rare choice, made on the page that already asks for a code). |
+| B3 | **Upload is encrypted by construction.** Both destinations receive only the sealed stream `Backup` writes (REC-1, R2), which only the recovery key opens; the box cannot open it either. A destination name carrying a sign-in (a URL with user info) is refused: the storage's sign-in is a vault credential held by its adapter, never in the name. The upload itself runs outside this package, which reaches no network (R13). | BAK-1, REC-1, CRED-1 | — |
+| B4 | **"Only copy" means no backup verified under the current recovery key.** A backup counts once `RecordBackup` read it back intact; an unverified one does not. After a recovery-key change, older backups open only with the old card, so the notice says so (`NoticeOldCard`) until a new backup is verified. Any verified backup counts, including one made after choosing **No backup**. | BAK-1, REC-4, R10 | — |
+| B5 | **Where the owner is told.** The choice page returns the notice with the choice; the status page shows `OnlyCopyNotice`; the digest carries `OnlyCopyDigestLine` weekly while no backup is chosen or none has finished, and monthly once the owner chose none. Setup does not ask (ONB-3 minimum path): its one-line defaults statement carries "No backup yet: this drive is the only copy." | BAK-1, ONB-3, CH-15 | Auto-decided: cadence is UX only; no lens worse. |
+| B6 | **Staleness is not this package's.** A verified backup ends the notice, however old. The backup's age in the digest, scheduled backups, and a stale backup as an alert class stay the follow-up package above. | BAK-1 | — |
+
+Follow-ups (wiring): the local page offers the three choices and shows the returned notice; the status page shows `OnlyCopyNotice`; the digest includes `OnlyCopyDigestLine`; setup's defaults line carries the no-backup statement; the backup command uploads the sealed stream to an upload destination through its storage adapter and logs it with `RecordBackup` under the chosen name.
