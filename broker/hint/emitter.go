@@ -19,8 +19,14 @@ const (
 
 const (
 	// DefaultDailyLimit is the most hints one daily batch may carry when
-	// Config.DailyLimit is zero.
-	DefaultDailyLimit = 20
+	// Config.DailyLimit is zero (arbitrator's ruling on #40).
+	DefaultDailyLimit = 5
+	// DefaultEmbargoReserve is the batch slots kept for embargo kinds when
+	// Config.EmbargoReserve is zero, capped to leave one routine slot.
+	DefaultEmbargoReserve = 2
+	// DefaultDedupeDays is how many days a hint counts as a duplicate of
+	// an identical one queued or asked, when Config.DedupeDays is zero.
+	DefaultDedupeDays = 7
 	// DefaultReleaseAt is the UTC time of day a batch is released when
 	// Config.ReleaseAt is zero.
 	DefaultReleaseAt = 4 * time.Hour
@@ -41,11 +47,14 @@ type Config struct {
 	Policy map[string]Mode // by category; absent means Automatic
 
 	// DailyLimit caps one batch (0 means DefaultDailyLimit). EmbargoReserve
-	// of its slots are kept for embargo kinds such as vuln (0 means a
-	// quarter of the limit, at least 1); slots one class leaves unused go
-	// to the other. Hints over the cap wait for the next batch.
+	// of its slots are kept for embargo kinds such as vuln (0 means
+	// DefaultEmbargoReserve, at most DailyLimit-1); slots one class leaves
+	// unused go to the other. Hints over the cap wait for the next batch.
 	DailyLimit     int
 	EmbargoReserve int
+	// DedupeDays: a hint identical to one queued or asked within this many
+	// days (today included) is a Duplicate (0 means DefaultDedupeDays).
+	DedupeDays int
 	// MaxBacklog bounds the hints of each class waiting to cross (0 means
 	// 7 × DailyLimit). Over it, a hint is logged OverLimit and dropped.
 	MaxBacklog int
@@ -87,21 +96,21 @@ type queued struct {
 // day as one batch once the day's release time has passed, in sorted
 // canonical order. Only the set of hints crosses: not their order, not
 // when they were emitted. The day only moves forward: a clock stepped
-// back keeps the latest day seen, so it cannot reopen an earlier day's
-// dedupe or release.
+// back keeps the latest day seen, so it cannot shorten the dedupe window
+// or reopen an earlier day's release.
 type Emitter struct {
 	cfg Config
 
 	mu          sync.Mutex
 	seq         int
-	day         string          // latest UTC day seen; never moves back
-	seen        map[string]bool // canonical forms queued or asked today
-	backlog     []queued        // waiting to cross, oldest first
-	pending     map[int]Pending // asks waiting for the owner
-	lastRelease string          // day of the last successful batch
+	day         string            // latest UTC day seen; never moves back
+	seen        map[string]string // canonical form -> latest day queued or asked
+	backlog     []queued          // waiting to cross, oldest first
+	pending     map[int]Pending   // asks waiting for the owner
+	lastRelease string            // day of the last successful batch
 }
 
-// New builds an Emitter and rebuilds the latest day, today's dedupe, the
+// New builds an Emitter and rebuilds the latest day, the dedupe window, the
 // waiting batch, and the open asks from the log, so a restart neither
 // reopens a day nor loses a hint or a question to the owner.
 func New(cfg Config) (*Emitter, error) {
@@ -123,7 +132,10 @@ func New(cfg Config) (*Emitter, error) {
 		cfg.DailyLimit = DefaultDailyLimit
 	}
 	if cfg.EmbargoReserve <= 0 {
-		cfg.EmbargoReserve = (cfg.DailyLimit + 3) / 4
+		cfg.EmbargoReserve = min(DefaultEmbargoReserve, cfg.DailyLimit-1)
+	}
+	if cfg.DedupeDays <= 0 {
+		cfg.DedupeDays = DefaultDedupeDays
 	}
 	if cfg.EmbargoReserve >= cfg.DailyLimit {
 		return nil, errors.New("hint: EmbargoReserve must leave room under DailyLimit")
@@ -183,8 +195,8 @@ func New(cfg Config) (*Emitter, error) {
 			continue // the schema changed; it can no longer cross
 		}
 		c, _ := cfg.Schema.Canonical(h)
-		if r.Day == e.day {
-			e.seen[string(c)] = true
+		if r.Day > e.seen[string(c)] {
+			e.seen[string(c)] = r.Day
 		}
 		if r.Outcome != Asked && !crossed[r.Seq] {
 			e.backlog = append(e.backlog, queued{seq: r.Seq, day: r.Day, embargo: k.Embargo, canon: string(c)})
@@ -193,17 +205,25 @@ func New(cfg Config) (*Emitter, error) {
 	return e, nil
 }
 
-// roll moves the day forward to the clock's UTC day if that is later, and
-// resets the day's dedupe when it moves. Callers hold mu (or own e).
+// roll moves the day forward to the clock's UTC day if that is later.
+// Callers hold mu (or own e).
 func (e *Emitter) roll() {
-	d := e.cfg.Now().UTC().Format("2006-01-02")
-	if d > e.day {
+	if d := e.cfg.Now().UTC().Format("2006-01-02"); d > e.day {
 		e.day = d
-		e.seen = nil
 	}
 	if e.seen == nil {
-		e.seen = map[string]bool{}
+		e.seen = map[string]string{}
 	}
+}
+
+// recent reports whether day is within the dedupe window ending today.
+func (e *Emitter) recent(day string) bool {
+	d, err1 := time.Parse("2006-01-02", day)
+	t, err2 := time.Parse("2006-01-02", e.day)
+	if err1 != nil || err2 != nil {
+		return true // unreadable: fail toward duplicate
+	}
+	return t.Sub(d) < time.Duration(e.cfg.DedupeDays)*24*time.Hour
 }
 
 func (e *Emitter) record(r Record) error {
@@ -212,9 +232,10 @@ func (e *Emitter) record(r Record) error {
 	return e.cfg.Log.Append(r)
 }
 
-// waiting reports whether an identical hint is already queued or asked.
+// waiting reports whether an identical hint is waiting, or was queued or
+// asked within the dedupe window.
 func (e *Emitter) waiting(canon string) bool {
-	if e.seen[canon] {
+	if d, ok := e.seen[canon]; ok && e.recent(d) {
 		return true
 	}
 	for _, q := range e.backlog {
@@ -243,8 +264,8 @@ func (e *Emitter) backlogFull(embargo bool) bool {
 // Emit validates h, logs it, and queues, asks, or withholds it by the
 // owner's policy for its category. A hint that fails the schema is logged
 // as Refused with no content and returns ErrInvalid. A repeat of a hint
-// queued or asked today, or still waiting, is a Duplicate. A log failure
-// stops the hint.
+// queued or asked within DedupeDays, or still waiting, is a Duplicate. A
+// log failure stops the hint.
 func (e *Emitter) Emit(h Hint) (Result, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -273,7 +294,7 @@ func (e *Emitter) Emit(h Hint) (Result, error) {
 		if err != nil {
 			return res, err
 		}
-		e.seen[string(canon)] = true
+		e.seen[string(canon)] = e.day
 		res.ID = e.seq
 		e.pending[e.seq] = Pending{ID: e.seq, Day: e.day, Kind: rec.Kind, Fields: copyFields(rec.Fields)}
 		return res, nil
@@ -284,7 +305,7 @@ func (e *Emitter) Emit(h Hint) (Result, error) {
 	if err != nil {
 		return res, err
 	}
-	e.seen[string(canon)] = true
+	e.seen[string(canon)] = e.day
 	e.backlog = append(e.backlog, queued{seq: e.seq, day: e.day, embargo: k.Embargo, canon: string(canon)})
 	return res, nil
 }
@@ -414,7 +435,7 @@ func (e *Emitter) settle(id int, approve bool) error {
 	delete(e.pending, id)
 	if rec.Outcome == Approved {
 		canon, _ := e.cfg.Schema.Canonical(h)
-		e.seen[string(canon)] = true
+		e.seen[string(canon)] = e.day
 		e.backlog = append(e.backlog, queued{seq: e.seq, day: e.day, embargo: k.Embargo, canon: string(canon)})
 	}
 	return nil

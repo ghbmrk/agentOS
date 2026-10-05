@@ -99,7 +99,7 @@ func records(t *testing.T, l Log) []Record {
 }
 
 func skill(domain string) Hint {
-	return Hint{Kind: "skill_gap", Fields: map[string]string{"domain": domain, "format": "ics", "failure": "timezone"}}
+	return Hint{Kind: "skill_gap", Fields: map[string]string{"domain": domain, "format": "ics", "failure": "timezone", "frequency": "once"}}
 }
 
 var vuln = Hint{Kind: "vuln", Fields: map[string]string{"class": "prompt_injection", "vector": "email_html"}}
@@ -138,7 +138,7 @@ func TestOSS7DefaultIsAutomatic(t *testing.T) {
 	if err := r.nextRelease(); err != nil {
 		t.Fatal(err)
 	}
-	if got := r.out.all(); len(got) != 1 || got[0] != `{"schema":1,"kind":"skill_gap","embargo":false,"fields":{"domain":"calendar","failure":"timezone","format":"ics"}}` {
+	if got := r.out.all(); len(got) != 1 || got[0] != `{"schema":1,"kind":"skill_gap","embargo":false,"fields":{"domain":"calendar","failure":"timezone","format":"ics","frequency":"once"}}` {
 		t.Fatalf("sent %q", got)
 	}
 }
@@ -191,7 +191,7 @@ func TestOSS1EveryHintLogged(t *testing.T) {
 	r.e.Emit(good())
 	r.e.Emit(good())
 	r.e.Emit(vuln)
-	r.e.Emit(Hint{Kind: "adapter_gap", Fields: map[string]string{"service_class": "banking", "surface": "web", "failure": "changed_layout"}})
+	r.e.Emit(Hint{Kind: "adapter_gap", Fields: map[string]string{"service_class": "banking", "surface": "web", "failure": "changed_layout", "frequency": "sometimes"}})
 	if _, err := r.e.Emit(Hint{Kind: "skill_gap", Fields: map[string]string{"domain": "Ann's flight UA123"}}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("invalid: %v", err)
 	}
@@ -494,4 +494,28 @@ func contains(xs []string, x string) bool {
 		}
 	}
 	return false
+}
+
+// TestOSS1DedupeSevenDays: a hint identical to one queued in the last
+// seven days is a duplicate, also after a restart; on the eighth day it
+// may be queued again. The defaults are the arbitrator's: five hints a
+// batch, two of them reserved for embargo kinds.
+func TestOSS1DedupeSevenDays(t *testing.T) {
+	r := newRig(t, Config{})
+	if r.e.cfg.DailyLimit != 5 || r.e.cfg.EmbargoReserve != 2 || r.e.cfg.DedupeDays != 7 {
+		t.Fatalf("defaults %d/%d/%d", r.e.cfg.DailyLimit, r.e.cfg.EmbargoReserve, r.e.cfg.DedupeDays)
+	}
+	emit(t, r.e, good())
+	if err := r.nextRelease(); err != nil || len(r.out.all()) != 1 {
+		t.Fatalf("release: %v %v", err, r.out.all())
+	}
+	r.now = day0.Add(6 * 24 * time.Hour)
+	r.restart()
+	if res := emit(t, r.e, good()); res.Outcome != Duplicate {
+		t.Fatalf("day 6: %s", res.Outcome)
+	}
+	r.now = day0.Add(7 * 24 * time.Hour)
+	if res := emit(t, r.e, good()); res.Outcome != Queued {
+		t.Fatalf("day 7: %s", res.Outcome)
+	}
 }

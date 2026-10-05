@@ -81,6 +81,21 @@ type Schema struct {
 	version    int
 	categories []string
 	kinds      map[string]*kindDef
+	edges      *frequencyEdges
+}
+
+// FrequencyField is the field whose value the broker computes from
+// journaled counts (Frequency), with edges the schema declares.
+const FrequencyField = "frequency"
+
+var frequencyValues = []string{"once", "sometimes", "most_tasks"}
+
+// frequencyEdges are the public bucket edges for FrequencyField: "once" at
+// or under OnceMaxCount occurrences, "most_tasks" at or over
+// MostTasksMinPercent of tasks, "sometimes" between.
+type frequencyEdges struct {
+	OnceMaxCount        int `json:"once_max_count"`
+	MostTasksMinPercent int `json:"most_tasks_min_percent"`
 }
 
 type kindDef struct {
@@ -95,6 +110,7 @@ type kindDef struct {
 
 type schemaFile struct {
 	Version    int                 `json:"version"`
+	Edges      *frequencyEdges     `json:"frequency_edges"`
 	Categories []string            `json:"categories"`
 	Kinds      map[string]*kindDef `json:"kinds"`
 }
@@ -123,6 +139,9 @@ func Parse(data []byte) (*Schema, error) {
 	if f.Version < 1 {
 		return nil, fmt.Errorf("%w: schema version", ErrInvalid)
 	}
+	if e := f.Edges; e != nil && (e.OnceMaxCount < 1 || e.MostTasksMinPercent < 1 || e.MostTasksMinPercent > 100) {
+		return nil, fmt.Errorf("%w: frequency edges", ErrInvalid)
+	}
 	if len(f.Kinds) == 0 {
 		return nil, fmt.Errorf("%w: no kinds", ErrInvalid)
 	}
@@ -150,6 +169,9 @@ func Parse(data []byte) (*Schema, error) {
 			if !allowedWord(field) {
 				return nil, fmt.Errorf("%w: kind %s: field %q", ErrInvalid, name, field)
 			}
+			if field == FrequencyField && (f.Edges == nil || strings.Join(values, ",") != strings.Join(frequencyValues, ",")) {
+				return nil, fmt.Errorf("%w: kind %s: %s needs frequency_edges and the values %v", ErrInvalid, name, field, frequencyValues)
+			}
 			if len(values) < 2 {
 				return nil, fmt.Errorf("%w: kind %s: field %s needs at least two values", ErrInvalid, name, field)
 			}
@@ -174,7 +196,24 @@ func Parse(data []byte) (*Schema, error) {
 			return nil, fmt.Errorf("%w: category %s has no kinds", ErrInvalid, c)
 		}
 	}
-	return &Schema{version: f.Version, categories: f.Categories, kinds: f.Kinds}, nil
+	return &Schema{version: f.Version, categories: f.Categories, kinds: f.Kinds, edges: f.Edges}, nil
+}
+
+// Frequency is the only way a FrequencyField value is made: the broker
+// passes how many of the window's journaled tasks showed the gap (n) and
+// how many tasks there were, and the schema's edges pick the bucket. No
+// machine chooses it (ASSUMPTIONS K1).
+func (s *Schema) Frequency(n, tasks int) (string, error) {
+	if s.edges == nil || n < 1 || n > tasks {
+		return "", fmt.Errorf("%w: frequency of %d in %d tasks", ErrInvalid, n, tasks)
+	}
+	switch {
+	case n <= s.edges.OnceMaxCount:
+		return "once", nil
+	case n*100 >= s.edges.MostTasksMinPercent*tasks:
+		return "most_tasks", nil
+	}
+	return "sometimes", nil
 }
 
 // Version is the schema version stamped on every canonical hint.

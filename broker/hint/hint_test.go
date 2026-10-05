@@ -8,7 +8,7 @@ import (
 // REQ: OSS-1, OSS-5
 
 func good() Hint {
-	return Hint{Kind: "skill_gap", Fields: map[string]string{"domain": "calendar", "format": "ics", "failure": "timezone"}}
+	return Hint{Kind: "skill_gap", Fields: map[string]string{"domain": "calendar", "format": "ics", "failure": "timezone", "frequency": "once"}}
 }
 
 // TestOSS1OnlyEnumeratedValues: a hint is valid only when its kind is in
@@ -25,9 +25,9 @@ func TestOSS1OnlyEnumeratedValues(t *testing.T) {
 		"extra field":        {Kind: "skill_gap", Fields: map[string]string{"domain": "calendar", "format": "ics", "failure": "timezone", "detail": "timezone"}},
 		"free text":          {Kind: "skill_gap", Fields: map[string]string{"domain": "calendar", "format": "ics", "failure": "the 9am meeting with Ann"}},
 		"number":             {Kind: "skill_gap", Fields: map[string]string{"domain": "calendar", "format": "ics", "failure": "42"}},
-		"other field's list": {Kind: "skill_gap", Fields: map[string]string{"domain": "ics", "format": "ics", "failure": "timezone"}},
-		"case variant":       {Kind: "skill_gap", Fields: map[string]string{"domain": "Calendar", "format": "ics", "failure": "timezone"}},
-		"padded":             {Kind: "skill_gap", Fields: map[string]string{"domain": "calendar ", "format": "ics", "failure": "timezone"}},
+		"other field's list": {Kind: "skill_gap", Fields: map[string]string{"domain": "ics", "format": "ics", "failure": "timezone", "frequency": "once"}},
+		"case variant":       {Kind: "skill_gap", Fields: map[string]string{"domain": "Calendar", "format": "ics", "failure": "timezone", "frequency": "once"}},
+		"padded":             {Kind: "skill_gap", Fields: map[string]string{"domain": "calendar ", "format": "ics", "failure": "timezone", "frequency": "once"}},
 		"nil fields":         {Kind: "skill_gap"},
 	}
 	for name, h := range bad {
@@ -42,7 +42,7 @@ func TestOSS1OnlyEnumeratedValues(t *testing.T) {
 // keys, trailing data) is refused before validation.
 func TestOSS1StrictWireForm(t *testing.T) {
 	s := Default()
-	h, err := s.ParseJSON([]byte(` {"fields":{"failure":"timezone","format":"ics","domain":"calendar"},"kind":"skill_gap"} `))
+	h, err := s.ParseJSON([]byte(` {"fields":{"failure":"timezone","format":"ics","domain":"calendar","frequency":"once"},"kind":"skill_gap"} `))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -55,13 +55,13 @@ func TestOSS1StrictWireForm(t *testing.T) {
 		`{"kind":"skill_gap","fields":{"domain":"calendar","format":"ics","failure":{"a":"b"}}}`,
 		`{"kind":"skill_gap","fields":{"domain":"calendar","format":"ics","failure":null}}`,
 		`{"kind":"skill_gap","fields":{"domain":"calendar","format":"ics","failure":"timezone"},"note":"hi"}`,
-		`{"kind":"skill_gap","kind":"vuln","fields":{"domain":"calendar","format":"ics","failure":"timezone"}}`,
-		`{"kind":"skill_gap","fields":{"domain":"calendar","domain":"email","format":"ics","failure":"timezone"}}`,
+		`{"kind":"skill_gap","kind":"vuln","fields":{"domain":"calendar","format":"ics","failure":"timezone","frequency":"once"}}`,
+		`{"kind":"skill_gap","fields":{"domain":"calendar","domain":"email","format":"ics","failure":"timezone","frequency":"once"}}`,
 		`{"kind":"skill_gap","fields":{"domain":"calendar","format":"ics","failure":"timezone"}} {}`,
 		`{"kind":"skill_gap","fields":{"domain":"calendar","format":"ics","failure":"timezone"}`,
 		`["skill_gap"]`,
 		`{"kind":1,"fields":{}}`,
-		`{"fields":{"domain":"calendar","format":"ics","failure":"timezone"}}`,
+		`{"fields":{"domain":"calendar","format":"ics","failure":"timezone","frequency":"once"}}`,
 		`{"kind":"skill_gap","fields":{"domain":"calendar","format":"ics","failure":"other"}}`,
 	} {
 		if _, err := s.ParseJSON([]byte(src)); !errors.Is(err, ErrInvalid) {
@@ -76,11 +76,11 @@ func TestOSS1StrictWireForm(t *testing.T) {
 // mark (OSS-5).
 func TestOSS1CanonicalForm(t *testing.T) {
 	s := Default()
-	a, err := s.ParseJSON([]byte(`{"kind":"skill_gap","fields":{"domain":"calendar","format":"ics","failure":"timezone"}}`))
+	a, err := s.ParseJSON([]byte(`{"kind":"skill_gap","fields":{"domain":"calendar","format":"ics","failure":"timezone","frequency":"once"}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := s.ParseJSON([]byte("{\"fields\" : {\"failure\":\"time\\u007aone\",\n\"format\":\"ics\",\"domain\":\"calendar\"}, \"kind\":\"skill_gap\"}"))
+	b, err := s.ParseJSON([]byte("{\"fields\" : {\"failure\":\"time\\u007aone\",\n\"format\":\"ics\",\"domain\":\"calendar\",\"frequency\":\"once\"}, \"kind\":\"skill_gap\"}"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func TestOSS1CanonicalForm(t *testing.T) {
 		t.Fatal(err)
 	}
 	cb, _ := s.Canonical(b)
-	want := `{"schema":1,"kind":"skill_gap","embargo":false,"fields":{"domain":"calendar","failure":"timezone","format":"ics"}}`
+	want := `{"schema":1,"kind":"skill_gap","embargo":false,"fields":{"domain":"calendar","failure":"timezone","format":"ics","frequency":"once"}}`
 	if string(ca) != want || string(cb) != want {
 		t.Fatalf("canonical\n%s\n%s", ca, cb)
 	}

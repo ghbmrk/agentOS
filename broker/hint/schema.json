@@ -1,5 +1,6 @@
 {
   "version": 1,
+  "frequency_edges": {"once_max_count": 1, "most_tasks_min_percent": 50},
   "categories": ["skills", "security", "adapters"],
   "kinds": {
     "skill_gap": {
@@ -7,7 +8,8 @@
       "fields": {
         "domain": ["calendar", "email", "contacts", "documents", "spreadsheets", "files", "web_forms", "shopping", "travel", "finance", "messaging", "notes", "tasks", "media"],
         "format": ["ics", "vcard", "html", "plain_text", "markdown", "pdf", "csv", "json", "xml", "office_doc", "image", "audio", "archive"],
-        "failure": ["timezone", "recurrence", "encoding", "parsing", "layout", "authentication_flow", "pagination", "rate_limit", "locale", "attachment", "large_input", "ambiguous_intent"]
+        "failure": ["timezone", "recurrence", "encoding", "parsing", "layout", "authentication_flow", "pagination", "rate_limit", "locale", "attachment", "large_input", "ambiguous_intent"],
+        "frequency": ["once", "sometimes", "most_tasks"]
       }
     },
     "vuln": {
@@ -23,7 +25,8 @@
       "fields": {
         "service_class": ["calendar", "email", "storage", "banking", "shopping", "travel", "social", "messaging", "office_suite", "utilities"],
         "surface": ["api", "cli", "web", "desktop_gui"],
-        "failure": ["missing_operation", "changed_layout", "changed_api", "authentication_flow", "rate_limit", "unmapped_verb", "verification"]
+        "failure": ["missing_operation", "changed_layout", "changed_api", "authentication_flow", "rate_limit", "unmapped_verb", "verification"],
+        "frequency": ["once", "sometimes", "most_tasks"]
       }
     }
   }
