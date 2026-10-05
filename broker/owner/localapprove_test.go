@@ -640,7 +640,8 @@ func TestAConfirmationTakesOneCodeOnThePage(t *testing.T) {
 	if strings.Contains(text, "YES") || strings.Contains(text, "recipient") {
 		t.Fatalf("notice %q", text)
 	}
-	if got := r.say("YES " + ids[0] + " " + r.totp()); got != "Approve "+ids[0]+" on my Wi-Fi page. Or reply NO "+ids[0]+"." {
+	// UX U-2A-4: the reply says nothing was approved, with the ID only.
+	if got := r.say("YES " + ids[0] + " " + r.totp()); got != "Not approved: "+ids[0]+" can only be approved on my Wi-Fi page. Use a new code there." {
 		t.Fatalf("YES by text: %q", got)
 	}
 	code := r.totp()
@@ -663,5 +664,28 @@ func TestAConfirmationTakesOneCodeOnThePage(t *testing.T) {
 	r.say("YES " + id + " " + m[2])
 	if d := r.decisions(); len(d) != 1 || d[0].Ref != "t1" || !d[0].Approved || d[0].Page {
 		t.Fatalf("decisions %+v", d)
+	}
+}
+
+// UX U-2A-5: the owner's text for a page decision names the page, since
+// it is the alert for a decision the owner may not have made.
+func TestPageDecisionsAreToldNamingThePage(t *testing.T) {
+	r := newRig(t, nil)
+	ids, _ := r.ch.RequestLocalEach([]Item{confirmItem("g4"), confirmItem("g5")}, []time.Duration{0, 0})
+	r.inbox()
+	at := r.clock().Format("15:04")
+	if _, err := r.ch.LocalAnswer(ids[0], r.sum(ids[0]), true, r.totp()); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.inbox(); got != "Approved "+ids[0]+" on my Wi-Fi page at "+at+". Not you? Text STOP." {
+		t.Fatalf("approved: %q", got)
+	}
+	r.advance(SignInAlertEvery)
+	at = r.clock().Format("15:04")
+	if _, err := r.ch.LocalAnswer(ids[1], r.sum(ids[1]), false, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.inbox(); got != "Denied "+ids[1]+" on my Wi-Fi page at "+at+". Not you? Text STOP." {
+		t.Fatalf("denied: %q", got)
 	}
 }

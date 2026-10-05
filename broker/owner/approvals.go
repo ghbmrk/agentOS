@@ -337,8 +337,10 @@ func (c *Channel) answerLocked(rp reply, now time.Time, decided *[]Decision, pag
 			_, _, _ = c.codes.checkStrong(rp.code, now, strongOpts{silent: true})
 		}
 		if SMSApprovable(r.items[0]) {
-			// A change that needs the page's confirmation (CH-3).
-			return []string{fmt.Sprintf("Approve %s on my Wi-Fi page. Or reply NO %s.", r.id, r.id)}, false, false
+			// A change that needs the page's confirmation (CH-3): its
+			// code, if any, was spent, so it says nothing was approved
+			// (UX U-2A-4).
+			return []string{fmt.Sprintf("Not approved: %s can only be approved on my Wi-Fi page. Use a new code there.", r.id)}, false, false
 		}
 		return []string{fmt.Sprintf("Approve %s on my Wi-Fi page: it shows where this goes. Or reply NO %s.", r.id, r.id)}, false, false
 	}
