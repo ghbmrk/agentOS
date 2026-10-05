@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/theupdateframework/go-tuf/v2/metadata"
@@ -321,6 +322,25 @@ type Result struct {
 	// RootRotatedTo is the new root version when this check accepted a
 	// key rotation, else 0; the digest reports it (Security R3).
 	RootRotatedTo int64
+	// SecurityFix is the highest release above the installed one, on the
+	// box's channel, whose manifest marks it a security fix, else 0. A
+	// newer ordinary release does not hide it: the updater treats the
+	// newest as carrying the fix (maintain M5, security lens C2).
+	SecurityFix int64
+}
+
+// lock serializes checks and commits across processes sharing Dir, so two
+// writers cannot interleave saved metadata and lower the rollback floor.
+func (s *Store) lock() (func(), error) {
+	f, err := os.OpenFile(s.p(".lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return func() { f.Close() }, nil
 }
 
 func readAll(src Source, name string, max int64) ([]byte, error) {
@@ -355,6 +375,11 @@ func readMeta(src Source, name string) ([]byte, error) {
 // box may install (UPD-2, UPD-8). Root rotations are followed and saved;
 // the timestamp and snapshot it accepts are saved for rollback checks.
 func (s *Store) Check(src Source, o Options) (Result, error) {
+	unlock, err := s.lock()
+	if err != nil {
+		return Result{}, err
+	}
+	defer unlock()
 	if o.Channel == "" {
 		o.Channel = ChannelStable
 	}
@@ -501,9 +526,17 @@ func (s *Store) Check(src Source, o Options) (Result, error) {
 		if err != nil {
 			return Result{}, err
 		}
-		if v.release.Channel == ChannelStable || o.Channel == ChannelFast {
+		if v.release.Channel != ChannelStable && o.Channel != ChannelFast {
+			continue
+		}
+		if res.Release == nil {
 			v.fresh = !o.Offline
 			res.Release = v
+		}
+		if v.release.Security && res.SecurityFix == 0 {
+			res.SecurityFix = n
+		}
+		if res.SecurityFix != 0 {
 			break
 		}
 	}
@@ -672,6 +705,11 @@ func (s *Store) Commit(v *Verified) error {
 	if !v.ok() {
 		return ErrNotChecked
 	}
+	unlock, err := s.lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	in, err := s.Installed()
 	if err != nil {
 		return err
