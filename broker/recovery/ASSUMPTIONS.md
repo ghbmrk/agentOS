@@ -34,6 +34,7 @@ a later package, that a reviewer may want to change.
 
 ## Follow-ups (not in this package)
 
+- At wiring time, the lost-card done note ("Back up now, then delete them") is reworded to match what Reencrypt then guarantees (R10a).
 - **Blocking the wiring:** `vault.Reencrypt` (P2-4d) re-encrypts under a fresh data key with every slot rewrapped; the recovery-key and lost-card commits then call it and rotate the MAC key (R10a). Nothing below wires recovery into the vault process before that. P2-4d's `Vault.Rebase()` is called right after the restored vault opens.
 
 - Wire into the vault process (`cmd/agentos-egress`, P2-4a/c): `Provision` at `init`, the backup, restore and scan buttons, and local-UI operations for re-enroll, number change, re-confirm (with re-adding a trusted host), and two-phase rotate (P2-2's page).

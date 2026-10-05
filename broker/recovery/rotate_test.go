@@ -81,7 +81,7 @@ func TestEveryCardSecretRotatesAloneAsATier4Action(t *testing.T) {
 // value, or the vault process's TPM factor when the card is lost.
 func TestReplacingAFactorNeedsAFactorThatOpensTheDrive(t *testing.T) {
 	x := newBox(t)
-	for _, proof := range []Proof{{}, {Recovery: mustKey(t)}, {Passphrase: "not the passphrase at all"}} {
+	for _, proof := range []Proof{{}, {Recovery: mustKey(t)}, {Passphrase: []byte("not the passphrase at all")}} {
 		if _, err := BeginRotate(x.b, []Part{PartRecovery}, Auth{Code: true, Local: true}, proof, testGen, nil, t0); err == nil {
 			t.Fatalf("rotated with %+v", proof)
 		}
@@ -208,12 +208,59 @@ func TestAPartialRotationReturnsWhatIsInEffect(t *testing.T) {
 	}
 }
 
+// The marker exists before the first slot write: a crash at that write
+// cannot leave a rotation unrecorded.
+type markerCheck struct {
+	vault.Factor
+	b     *Box
+	armed *bool
+	seen  *bool
+}
+
+func (m markerCheck) KEK(s vault.Slot) ([]byte, error) {
+	if *m.armed {
+		_, ok := RotationUnfinished(m.b)
+		*m.seen = *m.seen || !ok
+	}
+	return m.Factor.KEK(s)
+}
+
+func TestTheRotationMarkerPrecedesTheFirstSlotWrite(t *testing.T) {
+	x := newBox(t)
+	var armed, missing bool
+	proof := Proof{Host: func() vault.Factor { return markerCheck{Factor(x.rk), x.b, &armed, &missing} }}
+	p, err := BeginRotate(x.b, []Part{PartPassphrase, PartRecovery}, Auth{Code: true, Local: true}, proof, testGen, nil, t0)
+	must(t, err)
+	armed = true
+	_, err = p.Commit(x.b, p.answer, t0)
+	must(t, err)
+	if missing {
+		t.Fatal("a slot write ran before the rotation marker existed")
+	}
+}
+
+// A typed passphrase is wiped once the rotation commits or lapses.
+func TestPendingWipesTheTypedPassphrase(t *testing.T) {
+	x := newBox(t)
+	x.withPassphrase()
+	typed := []byte(x.card.VaultPassphrase)
+	p, err := BeginRotate(x.b, []Part{PartWiFi}, Auth{Code: true, Local: true}, Proof{Passphrase: typed}, testGen, nil, t0)
+	must(t, err)
+	held := p.proof.Passphrase
+	for i := 0; i < 3; i++ {
+		p.Commit(x.b, "WRONG", t0)
+	}
+	if p.proof.Passphrase != nil || bytes.Count(held, []byte{0}) != len(held) {
+		t.Fatal("lapsed rotation kept the passphrase")
+	}
+}
+
 // The vault wipes a factor after each use: a rotation proved by the old
 // passphrase still completes.
 func TestRotationProvedByThePassphrase(t *testing.T) {
 	x := newBox(t)
 	x.withPassphrase()
-	nc, err := x.rotate([]Part{PartPassphrase, PartRecovery}, Auth{Code: true, Local: true}, Proof{Passphrase: x.card.VaultPassphrase})
+	nc, err := x.rotate([]Part{PartPassphrase, PartRecovery}, Auth{Code: true, Local: true}, Proof{Passphrase: []byte(x.card.VaultPassphrase)})
 	must(t, err)
 	if _, err := vault.OpenSealed(x.b.VaultPath, x.b.KeysPath, vault.Passphrase(nc.VaultPassphrase)); err != nil {
 		t.Fatal(err)

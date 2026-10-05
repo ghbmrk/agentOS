@@ -177,8 +177,10 @@ var ErrCardNotStored = errors.New("recovery: part of the new card is in effect b
 // lost, the vault process's own TPM factor. The vault wipes a factor's
 // secret bytes after each call, so a fresh factor is built for each use.
 type Proof struct {
-	Recovery   RecoveryKey
-	Passphrase string
+	Recovery RecoveryKey
+	// Passphrase is the typed passphrase; Pending wipes its copy when the
+	// rotation commits or lapses.
+	Passphrase []byte
 	// Host builds the vault process's TPM factor afresh on each call.
 	Host func() vault.Factor
 }
@@ -187,8 +189,8 @@ func (p Proof) factor() vault.Factor {
 	switch {
 	case p.Recovery.Valid():
 		return Factor(p.Recovery)
-	case p.Passphrase != "":
-		return vault.Passphrase(p.Passphrase)
+	case len(p.Passphrase) > 0:
+		return vault.Passphrase(string(p.Passphrase))
 	case p.Host != nil:
 		return p.Host()
 	}
@@ -196,7 +198,7 @@ func (p Proof) factor() vault.Factor {
 }
 
 // lost reports a proof without the current card.
-func (p Proof) lost() bool { return !p.Recovery.Valid() && p.Passphrase == "" && p.Host != nil }
+func (p Proof) lost() bool { return !p.Recovery.Valid() && len(p.Passphrase) == 0 && p.Host != nil }
 
 // BeginRotate generates replacements for the chosen card secrets (REC-4).
 // It is a tier-4 action (CH-3). Rewriting the passphrase or recovery slot
@@ -257,6 +259,8 @@ func BeginRotate(b *Box, parts []Part, auth Auth, proof Proof, gen Generator, r 
 		}
 		next.RecoveryKey = fresh.RecoveryKey
 	}
+	// Pending keeps its own copy of a typed passphrase, wiped when done.
+	proof.Passphrase = append([]byte(nil), proof.Passphrase...)
 	p := &Pending{parts: set, next: next, proof: proof, expires: now.Add(PendingTTL)}
 	switch {
 	case set[PartRecovery]:
@@ -313,13 +317,18 @@ func (p *Pending) Commit(b *Box, typed string, now time.Time) (Card, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.done || p.wrong >= 3 || now.After(p.expires) {
+		p.lapse()
 		return Card{}, ErrPendingLapsed
 	}
 	if !hmac.Equal([]byte(normalizeTyped(typed)), []byte(normalizeTyped(p.answer))) {
 		p.wrong++
+		if p.wrong >= 3 {
+			p.lapse()
+		}
 		return Card{}, ErrConfirm
 	}
 	p.done = true
+	defer p.lapse()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	cur, err := b.LoadCard()
@@ -356,8 +365,9 @@ func (p *Pending) Commit(b *Box, typed string, now time.Time) (Card, error) {
 		}
 		wrote = true
 		in.VaultPassphrase = p.next.VaultPassphrase
-		if proof.Passphrase != "" {
-			proof.Passphrase = p.next.VaultPassphrase
+		if len(proof.Passphrase) > 0 {
+			proof.Passphrase = []byte(p.next.VaultPassphrase)
+			defer wipe(proof.Passphrase)
 		}
 	}
 	if p.parts[PartRecovery] {
@@ -397,6 +407,12 @@ func (p *Pending) Commit(b *Box, typed string, now time.Time) (Card, error) {
 	}
 	in.WiFiPassword, in.SetupSecret, in.SetupCode, in.GridSeed = p.next.WiFiPassword, p.next.SetupSecret, p.next.SetupCode, p.next.GridSeed
 	return in, nil
+}
+
+// lapse wipes the typed passphrase this rotation held.
+func (p *Pending) lapse() {
+	wipe(p.proof.Passphrase)
+	p.proof.Passphrase = nil
 }
 
 // Lost reports a rotation made without the current card.

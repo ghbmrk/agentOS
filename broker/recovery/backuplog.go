@@ -73,11 +73,16 @@ func saveLog(b *Box, l backupLog) error {
 }
 
 // Receipt is what BackupSum wrote: the backup's time and the SHA-256 of
-// its bytes, for RecordBackup.
+// its bytes, for RecordBackup. Only BackupSum makes one, so a backup is
+// logged as verified, and opens ApproveDelete, only after this box wrote
+// it.
 type Receipt struct {
-	Created time.Time
-	Sum     []byte
+	created time.Time
+	sum     []byte
 }
+
+// Created is when the backup was made.
+func (r Receipt) Created() time.Time { return r.created }
 
 // BackupSum writes a backup like Backup and returns its receipt.
 func BackupSum(b *Box, roots []Root, w io.Writer, now time.Time) (Receipt, error) {
@@ -85,7 +90,7 @@ func BackupSum(b *Box, roots []Root, w io.Writer, now time.Time) (Receipt, error
 	if err := Backup(b, roots, io.MultiWriter(w, h), now); err != nil {
 		return Receipt{}, err
 	}
-	return Receipt{Created: now.UTC(), Sum: h.Sum(nil)}, nil
+	return Receipt{created: now.UTC(), sum: h.Sum(nil)}, nil
 }
 
 // RecordBackup logs a backup written to destination (a name the owner
@@ -93,10 +98,13 @@ func BackupSum(b *Box, roots []Root, w io.Writer, now time.Time) (Receipt, error
 // readBack is the backup as read again from the destination; it is
 // verified when it matches the receipt.
 func RecordBackup(b *Box, destination string, rc Receipt, readBack io.Reader) (BackupEntry, error) {
-	created, sum := rc.Created, rc.Sum
+	created, sum := rc.created, rc.sum
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	destination = strings.TrimSpace(destination)
+	if rc.created.IsZero() {
+		return BackupEntry{}, errors.New("recovery: record a backup with BackupSum's receipt")
+	}
 	if destination == "" || len(destination) > 200 {
 		return BackupEntry{}, errors.New("recovery: name the backup's destination")
 	}

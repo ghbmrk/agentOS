@@ -29,7 +29,7 @@ func TestOlderBackupsAreNamedAndDeletedOnlyWithApproval(t *testing.T) {
 	logged("USB stick A", t0.Add(-48*time.Hour))
 	logged("Home NAS", t0.Add(-24*time.Hour))
 	// A read-back that differs is not verified.
-	if e, _ := RecordBackup(x.b, "USB stick A", Receipt{t0.Add(-time.Hour), make([]byte, 32)}, strings.NewReader("x")); e.Verified {
+	if e, _ := RecordBackup(x.b, "USB stick A", Receipt{created: t0.Add(-time.Hour), sum: make([]byte, 32)}, strings.NewReader("x")); e.Verified {
 		t.Fatal("a damaged read-back is verified")
 	}
 	if n, _ := OldBackupsNote(x.b); n != "" {
