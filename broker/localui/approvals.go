@@ -32,6 +32,9 @@ type requestView struct {
 	// Local: the request can be answered here only.
 	Local bool
 	Items []itemView
+	// Lets is what approving lets the agent do, from the broker's own
+	// fields, shown next to the buttons (UX U-2A-1).
+	Lets string
 }
 
 type itemView struct {
@@ -240,6 +243,9 @@ func (s *Server) requestView(rq owner.LocalRequest, sess string) requestView {
 			iv.Undo = "Cannot be undone."
 		}
 		v.Items = append(v.Items, iv)
+	}
+	if len(v.Items) == 1 {
+		v.Lets = v.Items[0].Verb + " " + v.Items[0].Object // UX U-2A-1
 	}
 	return v
 }

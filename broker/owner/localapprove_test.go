@@ -38,7 +38,7 @@ func TestALocalOnlyItemIsAskedOnThePage(t *testing.T) {
 	// with the fixed wording and not counted.
 	for _, yes := range []string{"YES " + id + " %s", "YES %s", "YES " + id + " 1 %s", "yes " + id + " %s"} {
 		got := r.say(fmt.Sprintf(yes, r.totp()))
-		if !strings.Contains(got, "on my Wi-Fi page: it shows where this goes") || strings.Contains(got, "Wrong") || strings.Contains(got, "Approved") {
+		if got != "Not approved. Approve "+id+" on my Wi-Fi page; it shows where this goes. Or reply NO "+id+"." { // UX on P2-2a 2A
 			t.Fatalf("%q by text: %q", yes, got)
 		}
 	}
@@ -71,7 +71,7 @@ func TestThePageApprovesWithACode(t *testing.T) {
 		t.Fatalf("no code: %v", err)
 	}
 	msg, err := r.ch.LocalAnswer(id, r.sum(id), true, r.totp())
-	if err != nil || !strings.HasPrefix(msg, "Approved. Your agent can go ahead. It runs at") || !strings.Contains(msg, "UNDO") {
+	if err != nil || !strings.HasPrefix(msg, "Approved "+id+". Your agent can go ahead. It runs at") || !strings.Contains(msg, "UNDO") {
 		t.Fatalf("approve: %q %v", msg, err)
 	}
 	if d := r.decisions(); len(d) != 1 || !d[0].Approved || d[0].Hold == "" {
@@ -355,7 +355,7 @@ func TestThePageApprovesTextedRequestsWithAStrongCode(t *testing.T) {
 		t.Fatal("the texted code counted as wrong, or spent no try")
 	}
 	msg, err := r.ch.LocalAnswer(id, r.sum(id), true, r.totp())
-	if err != nil || !strings.HasPrefix(msg, "Approved. Your agent can go ahead.") {
+	if err != nil || !strings.HasPrefix(msg, "Approved "+id+". Your agent can go ahead.") {
 		t.Fatalf("strong code: %q %v", msg, err)
 	}
 	if d := r.decisions(); len(d) != 1 || !d[0].Approved {
@@ -511,7 +511,7 @@ func TestOnlyThisRequestsTextedCodeGetsTheHint(t *testing.T) {
 	if _, err := r.ch.LocalAnswer(a, r.sum(a), true, textedB); err != ErrWrongCode || len(r.ch.codes.st.Wrong) != 1 {
 		t.Fatalf("B's code on A: %v, %d wrong", err, len(r.ch.codes.st.Wrong))
 	}
-	if msg, err := r.ch.LocalAnswer(b, r.sum(b), false, textedB); err != nil || msg != "Denied." {
+	if msg, err := r.ch.LocalAnswer(b, r.sum(b), false, textedB); err != nil || msg != "Denied "+b+"." {
 		t.Fatalf("deny with the code typed in: %q %v", msg, err)
 	}
 	if d := r.decisions(); len(d) != 1 || d[0].Approved || d[0].Ref != "b1" {
@@ -589,5 +589,116 @@ func TestTheTextedCodeHintNeedsASavedTry(t *testing.T) {
 	r.ch.mu.Unlock()
 	if _, err := r.ch.LocalAnswer(id, r.sum(id), true, texted); err != ErrTextedCode {
 		t.Fatalf("after the window: %v", err)
+	}
+}
+
+// Potency R2 on P2-2a: page requests opened together share their notice
+// texts, as many to a text as fit, each still its own request.
+func TestPageRequestsOpenedTogetherShareAText(t *testing.T) {
+	r := newRig(t, nil)
+	before := len(r.carrier.Log())
+	ids, err := r.ch.RequestLocalEach([]Item{localItem("i1"), localItem("i2")}, []time.Duration{0, time.Hour})
+	if err != nil || len(ids) != 2 || ids[0] == "" || ids[1] == "" || ids[0] == ids[1] {
+		t.Fatalf("ids %v err %v", ids, err)
+	}
+	sent := r.carrier.Log()[before:]
+	if len(sent) != 1 || !strings.HasPrefix(sent[0].Text, ids[0]+": ") || !strings.Contains(sent[0].Text, " "+ids[1]+": ") || strings.Contains(sent[0].Text, "acme") {
+		t.Fatalf("sent %+v", sent)
+	}
+	got := r.ch.LocalRequests()
+	if len(got) != 2 || !got[0].Local || !got[1].Local || !got[1].Expires.Equal(r.now.Add(time.Hour)) {
+		t.Fatalf("requests %+v", got)
+	}
+	if _, err := r.ch.RequestLocalEach([]Item{localItem("i3")}, nil); err == nil {
+		t.Fatal("ttls not checked")
+	}
+}
+
+// confirmItem is a change that needs the owner's confirmation on the
+// page (a grant, evidence, sharing or release change; CH-3).
+func confirmItem(ref string) Item {
+	return Item{Ref: ref, Object: "mail.read for CANARY-agent", Facts: Facts{Kind: GrantChange, Verb: "grant", NoRecipient: true}}
+}
+
+// Security Q1 (amended) on P2-2a part 2: a change that needs the page is
+// never offered YES by text; its notice offers only NO, and the page
+// approves and confirms it with one fresh strong code bound to it (P2):
+// the decision says it came from the page, with the shown item's sum,
+// and a G4 code does not then pass for G5.
+func TestAConfirmationTakesOneCodeOnThePage(t *testing.T) {
+	r := newRig(t, nil)
+	ids, err := r.ch.RequestLocalEach([]Item{confirmItem("g4"), confirmItem("g5")}, []time.Duration{0, 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := r.inbox()
+	for _, id := range ids {
+		if !strings.Contains(text, id+": your agent wants to grant \"mail.read for CANARY-agent\". Approve or deny on my Wi-Fi page before ") || !strings.Contains(text, "or reply NO "+id+".") {
+			t.Fatalf("notice %q", text)
+		}
+	}
+	if strings.Contains(text, "YES") || strings.Contains(text, "recipient") {
+		t.Fatalf("notice %q", text)
+	}
+	// UX U-2A-4: the reply says nothing was approved, with the ID only.
+	if got := r.say("YES " + ids[0] + " " + r.totp()); got != "Not approved: "+ids[0]+" can only be approved on my Wi-Fi page. Use a new code there." {
+		t.Fatalf("YES by text: %q", got)
+	}
+	code := r.totp()
+	if _, err := r.ch.LocalAnswer(ids[0], r.sum(ids[0]), true, code); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.ch.LocalAnswer(ids[1], r.sum(ids[1]), true, code); err != ErrWrongCode {
+		t.Fatalf("G4's code for G5: %v", err)
+	}
+	d := r.decisions()
+	if len(d) != 1 || !d[0].Approved || !d[0].Page || d[0].Ref != "g4" || d[0].Sum != ItemSum(confirmItem("g4")) {
+		t.Fatalf("decisions %+v", d)
+	}
+	// A texted request's approval is not from the page.
+	id, _ := r.ch.Request([]Item{lowItem("t1")}, 0)
+	m := lowCodeRe.FindStringSubmatch(r.inbox())
+	for m == nil {
+		m = lowCodeRe.FindStringSubmatch(r.inbox())
+	}
+	r.say("YES " + id + " " + m[2])
+	if d := r.decisions(); len(d) != 1 || d[0].Ref != "t1" || !d[0].Approved || d[0].Page {
+		t.Fatalf("decisions %+v", d)
+	}
+}
+
+// UX U-2A-5: the owner's text for a page decision names the page, since
+// it is the alert for a decision the owner may not have made.
+func TestPageDecisionsAreToldNamingThePage(t *testing.T) {
+	r := newRig(t, nil)
+	ids, _ := r.ch.RequestLocalEach([]Item{confirmItem("g4"), confirmItem("g5")}, []time.Duration{0, 0})
+	r.inbox()
+	at := r.clock().Format("15:04")
+	if _, err := r.ch.LocalAnswer(ids[0], r.sum(ids[0]), true, r.totp()); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.inbox(); got != "Approved "+ids[0]+" on my Wi-Fi page at "+at+". Not you? Text STOP." {
+		t.Fatalf("approved: %q", got)
+	}
+	r.advance(SignInAlertEvery)
+	at = r.clock().Format("15:04")
+	if _, err := r.ch.LocalAnswer(ids[1], r.sum(ids[1]), false, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.inbox(); got != "Denied "+ids[1]+" on my Wi-Fi page at "+at+". Not you? Text STOP." {
+		t.Fatalf("denied: %q", got)
+	}
+	// Coalesced, with the same alert tail.
+	more, _ := r.ch.RequestLocalEach([]Item{confirmItem("g6"), confirmItem("g7")}, []time.Duration{0, 0})
+	r.inbox()
+	at1 := r.clock().Format("15:04")
+	r.ch.LocalAnswer(more[0], r.sum(more[0]), false, "") // within the hour: held
+	r.advance(time.Minute)
+	at2 := r.clock().Format("15:04")
+	r.ch.LocalAnswer(more[1], r.sum(more[1]), false, "")
+	r.advance(SignInAlertEvery)
+	r.ch.FlushLocal()
+	if got := r.inbox(); got != "On my Wi-Fi page: Denied "+more[0]+" at "+at1+", Denied "+more[1]+" at "+at2+". Not you? Text STOP." {
+		t.Fatalf("coalesced: %q", got)
 	}
 }

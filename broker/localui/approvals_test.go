@@ -154,7 +154,7 @@ func TestThePageApprovesOnlyWithACode(t *testing.T) {
 	// The wrong code voids nothing yet (WrongPerRequest is 3); a good one approves.
 	f = a.form(id)
 	w := a.post("/approvals/", answer(f, "approve", a.code()))
-	if w.Code != 200 || !strings.Contains(w.Body.String(), "Approved. Your agent can go ahead.") {
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "Approved "+id+". Your agent can go ahead.") {
 		t.Fatalf("approve: %d %s", w.Code, w.Body.String())
 	}
 	if d := a.decided(); len(d) != 1 || !d[0].Approved || d[0].Ref != "i1" {
@@ -165,7 +165,7 @@ func TestThePageApprovesOnlyWithACode(t *testing.T) {
 	}
 
 	id2, _ := a.ch.RequestLocal(pageItem("i2"), 0)
-	if w := a.post("/approvals/", answer(a.form(id2), "deny", "")); !strings.Contains(w.Body.String(), `<p class="ok">Denied.</p>`) {
+	if w := a.post("/approvals/", answer(a.form(id2), "deny", "")); !strings.Contains(w.Body.String(), `<p class="ok">Denied `+id2+`.</p>`) {
 		t.Fatalf("deny: %s", w.Body.String())
 	}
 	if d := a.decided(); len(d) != 2 || d[1].Approved || d[1].Ref != "i2" {
@@ -264,7 +264,7 @@ func TestWrongCodesFromOnePhoneAreBounded(t *testing.T) {
 	if w := a.post("/approvals/", answer(a.form(ids[2]), "approve", a.code())); !strings.Contains(w.Body.String(), "Wait a minute") {
 		t.Fatalf("over the bound: %s", w.Body.String())
 	}
-	if w := a.post("/approvals/", answer(a.form(ids[2]), "deny", "")); !strings.Contains(w.Body.String(), "Denied.") {
+	if w := a.post("/approvals/", answer(a.form(ids[2]), "deny", "")); !strings.Contains(w.Body.String(), "Denied "+ids[2]+".") {
 		t.Fatalf("deny: %s", w.Body.String())
 	}
 	a.advance(time.Minute)
@@ -283,7 +283,7 @@ func TestWrongCodesFromOnePhoneAreBounded(t *testing.T) {
 	a.srv.pageWrong = nil
 	a.srv.mu.Unlock()
 	id, _ := a.ch.RequestLocal(pageItem("j"), 0)
-	if w := a.post("/approvals/", answer(a.form(id), "approve", a.code())); !strings.Contains(w.Body.String(), "Approved.") {
+	if w := a.post("/approvals/", answer(a.form(id), "approve", a.code())); !strings.Contains(w.Body.String(), "Approved "+id+".") {
 		t.Fatalf("after a minute: %s", w.Body.String())
 	}
 }
@@ -383,7 +383,7 @@ func TestARightCodeGivesItsSlotBack(t *testing.T) {
 			t.Fatalf("wrong %d: %s", n, w.Body.String())
 		}
 	}
-	if w := a.post("/approvals/", answer(a.form(ids[2]), "approve", a.code())); !strings.Contains(w.Body.String(), "Approved.") {
+	if w := a.post("/approvals/", answer(a.form(ids[2]), "approve", a.code())); !strings.Contains(w.Body.String(), "Approved "+ids[2]+".") {
 		t.Fatalf("right: %s", w.Body.String())
 	}
 	if w := a.post("/approvals/", answer(a.form(ids[3]), "approve", "000000")); !strings.Contains(w.Body.String(), "Wrong code") {
@@ -403,5 +403,17 @@ func TestAnUnlockProofCountsForThePhone(t *testing.T) {
 	}
 	if w := a.post("/approvals/", answer(a.form(id), "approve", a.code())); !strings.Contains(w.Body.String(), "Too many wrong codes from this phone.") {
 		t.Fatalf("sixth: %s", w.Body.String())
+	}
+}
+
+// UX U-2A-1 on P2-2a part 2: next to the buttons, the card says what
+// approving lets the agent do, in the broker's own fields.
+func TestTheCardSaysWhatApprovingLetsTheAgentDo(t *testing.T) {
+	a := newApprovalRig(t)
+	id, _ := a.ch.RequestLocal(owner.Item{Ref: "g4", Object: "mail.read for <i>CANARY</i>", Facts: owner.Facts{Kind: owner.GrantChange, Verb: "grant", NoRecipient: true}}, 0)
+	p := a.get("/approvals/")
+	want := `<p>Approving lets your agent grant mail.read for &lt;i&gt;CANARY&lt;/i&gt;.</p>`
+	if i, j := strings.Index(p, "<h2>"+id), strings.Index(p, want); i < 0 || j < i || j > strings.Index(p, `value="approve"`) {
+		t.Fatalf("card:\n%s", p)
 	}
 }
