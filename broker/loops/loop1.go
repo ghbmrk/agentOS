@@ -51,17 +51,15 @@ var supersedes = map[change.Class]string{
 	change.ClassSkill: "procedures",
 }
 
-// supersededBy reports whether path is procedures/p<shape>.json for the
-// candidate's single skill, skills/k<shape>.json.
+// supersededBy reports whether path is procedures/p<shape>.json and the
+// candidate writes exactly one file, that shape's skills/k<shape>.json.
 func supersededBy(path string, files map[string][]byte) bool {
-	if len(files) != 1 {
+	shape, ok := strings.CutPrefix(path, "procedures/p")
+	if !ok || !strings.HasSuffix(shape, ".json") || len(shape) == len(".json") || len(files) != 1 {
 		return false
 	}
-	for f := range files {
-		shape, ok := strings.CutPrefix(f, "skills/k")
-		return ok && strings.HasSuffix(shape, ".json") && len(shape) > len(".json") && path == "procedures/p"+shape
-	}
-	return false
+	_, ok = files["skills/k"+shape]
+	return ok
 }
 
 // Hypothesis is one thing Loop 1 might improve (LOOP-4). It names journal
