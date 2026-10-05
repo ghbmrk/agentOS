@@ -156,6 +156,11 @@ type Config struct {
 	// and counts the text in the same step. Nil: questions are paced
 	// alone, by SendsPerHour.
 	Reserve func(now time.Time) bool
+	// Mono reads a monotonic clock (any origin). While Now is restricted,
+	// a texted question's wait is counted on it, so a restriction never
+	// stretches a deadline the owner was given (PQ4). Nil: the process's
+	// monotonic clock.
+	Mono func() time.Duration
 	// Logf records store failures. Nil: discarded.
 	Logf func(format string, args ...any)
 
@@ -187,6 +192,11 @@ type entry struct {
 	Answer    string    `json:"answer,omitempty"`
 	FromOwner bool      `json:"from_owner,omitempty"`
 	Late      string    `json:"late,omitempty"`
+
+	// sentMono is Mono when the question was texted, set only for a text
+	// sent by this process (monotonic time does not survive a restart).
+	sentMono time.Duration
+	monoSet  bool
 }
 
 func (e *entry) open() bool { return e.State == Held || e.State == Waiting }
@@ -281,6 +291,10 @@ func New(cfg Config) (*Book, error) {
 	}
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
+	}
+	if cfg.Mono == nil {
+		origin := time.Now()
+		cfg.Mono = func() time.Duration { return time.Since(origin) }
 	}
 	// Tags are held while their question is kept and was texted (a
 	// question closed unsent frees its tag at once). At most SendsPerHour
@@ -754,6 +768,7 @@ func (b *Book) Status(ctx context.Context, asker, req, machine string) (Status, 
 		return Status{}, ErrNotFound
 	}
 	st := Status{ID: e.ID, State: e.State, Default: e.Default, Late: e.Late}
+	counting := e.State == Waiting && e.monoSet // the wait runs on while restricted (PQ4)
 	switch e.State {
 	case Held:
 		st.Reason = "not texted yet (pacing or quiet hours); the deadline starts when the owner is texted"
@@ -767,7 +782,10 @@ func (b *Book) Status(ctx context.Context, asker, req, machine string) (Status, 
 		st.Reason = "not texted by its ask-by time (pacing, quiet hours or the clock check), so the owner never saw it"
 	}
 	b.mu.Unlock()
-	if clockErr != nil && (st.State == Held || st.State == Waiting) {
+	switch {
+	case clockErr != nil && counting:
+		st.Reason = "the box clock is being checked; the wait still runs out at the deadline the owner was given"
+	case clockErr != nil && (st.State == Held || st.State == Waiting):
 		st.State, st.Deadline = Held, time.Time{}
 		st.Reason = "the box clock is being checked; the default waits until it is"
 	}
@@ -854,6 +872,7 @@ func (b *Book) sendDue(ctx context.Context) {
 		if err := b.cfg.Send(text); err != nil {
 			return
 		}
+		m := b.cfg.Mono()
 		b.mu.Lock()
 		s := send{At: now, Asker: batch[0].Asker}
 		for _, e := range batch {
@@ -865,6 +884,7 @@ func (b *Book) sendDue(ctx context.Context) {
 			} else {
 				e.Sent = now
 			}
+			e.sentMono, e.monoSet = m, true
 		}
 		b.sends = append(b.sends, s)
 		b.wakeLocked()
@@ -954,11 +974,41 @@ func (b *Book) startGraceLocked(now time.Time) {
 	}
 }
 
+// monoLapsedLocked reports whether e's wait has run out on the monotonic
+// clock (PQ4). Only a restricted clock relies on it. It needs no restart
+// grace: e was texted by this process, so no reply to it was queued while
+// the box was down.
+func (b *Book) monoLapsedLocked(e *entry, m time.Duration) bool {
+	return e.State == Waiting && e.monoSet && m-e.sentMono >= e.Wait
+}
+
+// tickRestricted lapses, on the monotonic clock, the questions whose wait
+// ran out while Now is restricted (PQ4). The deadline was set from a
+// trusted time when the owner was texted, so the lapse is dated at it.
+func (b *Book) tickRestricted() {
+	m := b.cfg.Mono()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	changed := false
+	for _, e := range b.qs {
+		if b.monoLapsedLocked(e, m) {
+			b.lapseLocked(e, e.Deadline)
+			changed = true
+		}
+	}
+	if changed {
+		b.wakeLocked()
+		b.save("tick")
+	}
+}
+
 // Tick lapses questions past their deadline, drops old closed ones, and
-// texts held ones. With the clock restricted it does nothing.
+// texts held ones. With the clock restricted it only lapses texted
+// questions whose wait ran out on the monotonic clock (PQ4).
 func (b *Book) Tick(ctx context.Context) {
 	now, err := b.cfg.Now(ctx)
 	if err != nil {
+		b.tickRestricted()
 		return
 	}
 	b.mu.Lock()
@@ -1127,6 +1177,8 @@ func (b *Book) Answer(ctx context.Context, text string) (reply string, ok bool) 
 	}
 	if e.State == Waiting && clockErr == nil && !now.Before(e.Deadline) && !now.Before(b.grace) {
 		b.lapseLocked(e, now) // the deadline passed before the timer ran
+	} else if clockErr != nil && b.monoLapsedLocked(e, b.cfg.Mono()) {
+		b.lapseLocked(e, e.Deadline) // likewise, counted on the monotonic clock
 	}
 	switch e.State {
 	case Answered:
