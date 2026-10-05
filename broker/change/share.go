@@ -88,7 +88,7 @@ func (p *Pipeline) Export(ctx context.Context, id string) ([]byte, error) {
 		}
 	}
 	pub.security = set.security
-	s := p.evaluate(ctx, prev, cur, pub)
+	s := p.evaluate(ctx, prev, cur, pub, strictFor(Shared, a.Classes))
 	pkg.Evidence = Evidence{PublicCases: s.HeldOut, PublicPassed: s.Passed, PublicBaseline: s.BaselinePassed,
 		Fixtures: s.Security, FixturesPassed: s.SecurityPassed}
 	sort.Slice(pkg.Classes, func(i, j int) bool { return pkg.Classes[i] < pkg.Classes[j] })

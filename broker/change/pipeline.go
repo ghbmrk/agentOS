@@ -249,8 +249,12 @@ type state struct {
 	Sharing   bool        `json:"sharing"`
 	// Declined lists security releases the owner declined; the digest
 	// repeats them until a later release is adopted (arbitrator R2).
-	Declined []declined      `json:"declined,omitempty"`
-	Cases    map[string]Case `json:"cases"`
+	Declined []declined `json:"declined,omitempty"`
+	// Outages counts consecutive Recheck passes the evaluator could not
+	// run; the digest says so once it reaches OutageAlert.
+	Outages    int             `json:"outages,omitempty"`
+	OutageSeen bool            `json:"outage_seen,omitempty"`
+	Cases      map[string]Case `json:"cases"`
 	// Applied lists intents whose effect took place, for Reconcile.
 	Applied map[string]bool `json:"applied"`
 }
@@ -507,7 +511,7 @@ func (p *Pipeline) proposeInner(ctx context.Context, c Candidate, security bool)
 		rep.State, rep.Reason = StateRejected, cl.forbidden
 		return rep, nil
 	}
-	rep.Score = p.evaluate(ctx, base, next, set)
+	rep.Score = p.evaluate(ctx, base, next, set, strictFor(c.Source, cl.classes))
 	images := cl.imagesOnly()
 	regressed := rep.Regressions > 0 || rep.Passed < rep.BaselinePassed
 	switch {
@@ -517,7 +521,7 @@ func (p *Pipeline) proposeInner(ctx context.Context, c Candidate, security bool)
 	case rep.SecurityPassed < rep.Security:
 		rep.State, rep.Reason = StateRejected, "fails the security suite"
 		return rep, nil
-	case rep.Security < p.cfg.MinSecurity && rep.NotEvaluated == 0:
+	case rep.Security < p.cfg.MinSecurity && (rep.NotEvaluated == 0 || c.Source != Upstream):
 		// Without fixtures nothing shows the evaluator ran at all.
 		rep.State, rep.Reason = StateRejected, "too few security fixtures to qualify anything"
 		return rep, nil
@@ -667,7 +671,7 @@ func (p *Pipeline) drop(id string) {
 // order under probe IDs keyed with a fresh nonce, so the evaluator cannot
 // tell sides, kinds, or the same case across evaluations (CHG-1). An
 // evaluator error fails the case on that side.
-func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen) Score {
+func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st strictness) Score {
 	type run struct {
 		c     Case
 		cand  bool
@@ -727,9 +731,19 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen) Sc
 	var s Score
 	for _, id := range order {
 		b, n := res[id][0], res[id][1]
-		if !b.ev || !n.ev {
+		if !b.ev {
 			s.NotEvaluated++
 			continue
+		}
+		if !n.ev {
+			// The baseline ran but the candidate's tree declined: honoured
+			// only where the evaluator legitimately cannot test (C5).
+			if n.c.Security && st.security || !n.c.Security && st.heldOut {
+				n.ev, n.ok = true, false
+			} else {
+				s.NotEvaluated++
+				continue
+			}
 		}
 		if n.c.Security {
 			s.Security++
@@ -760,6 +774,29 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen) Sc
 		}
 	}
 	return s
+}
+
+// OutageAlert is how many failed Recheck passes in a row the digest
+// reports.
+const OutageAlert = 3
+
+// strictness says which not-evaluated candidate results count as fails.
+type strictness struct{ heldOut, security bool }
+
+// strictFor: only an upstream release may rest on its signatures when the
+// box cannot run security fixtures on it, and only images, config, and
+// routing (while replay has no model) may go untested on held-out cases. A
+// shared package is always tested in full (C5, LOOP-10).
+func strictFor(src Source, classes []Class) strictness {
+	st := strictness{heldOut: src == Shared, security: src != Upstream}
+	for _, c := range classes {
+		switch c {
+		case ClassGuestImage, ClassHostImage, ClassConfig, ClassRouting:
+		default:
+			st.heldOut = true
+		}
+	}
+	return st
 }
 
 // outage reports a score where nothing passed on either side: the
@@ -795,7 +832,9 @@ func (p *Pipeline) pass(ctx context.Context, t Tree, c Case, probe string) (ok, 
 // ProbeTask maps a probe ID of a running evaluation back to the journal
 // intent of the task case it names, so the replay evaluator can find that
 // task's recordings. Security fixtures, finished evaluations, and unknown
-// probes give ok=false.
+// probes give ok=false. That ok=false tells its caller which probes are
+// fixtures, so only the trusted replay layer may call it, and nothing it
+// returns may reach the tree under test.
 func (p *Pipeline) ProbeTask(probeID string) (string, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

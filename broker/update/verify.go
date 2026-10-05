@@ -103,7 +103,7 @@ func Verify(root Root, meta []byte, sigs []Signature, attestations int) (Verifie
 	if len(good) < root.Threshold {
 		return Verified{}, fmt.Errorf("update: %d of %d required signatures", len(good), root.Threshold)
 	}
-	if err := noDuplicateKeys(meta); err != nil {
+	if err := noDuplicateKeys(meta, releaseFields); err != nil {
 		return Verified{}, fmt.Errorf("update: metadata does not parse: %v", err)
 	}
 	var r Release
@@ -130,10 +130,16 @@ func Verify(root Root, meta []byte, sigs []Signature, attestations int) (Verifie
 	return Verified{r: r, security: r.Security && attestations >= 1}, nil
 }
 
+// releaseFields are the exact top-level keys a release may carry.
+var releaseFields = map[string]bool{"version": true, "security": true, "images": true}
+
 // noDuplicateKeys rejects JSON with a repeated key in any object, which
-// encoding/json would otherwise resolve silently (last one wins).
-func noDuplicateKeys(b []byte) error {
+// encoding/json would otherwise resolve silently (last one wins), and a
+// top-level key not exactly in top: encoding/json matches struct fields
+// case-insensitively, so "Version" would otherwise override "version".
+func noDuplicateKeys(b []byte, top map[string]bool) error {
 	d := json.NewDecoder(bytes.NewReader(b))
+	depth := 0
 	var walk func() error
 	walk = func() error {
 		t, err := d.Token()
@@ -142,6 +148,8 @@ func noDuplicateKeys(b []byte) error {
 		}
 		switch t {
 		case json.Delim('{'):
+			depth++
+			defer func() { depth-- }()
 			keys := map[string]bool{}
 			for d.More() {
 				k, err := d.Token()
@@ -151,6 +159,9 @@ func noDuplicateKeys(b []byte) error {
 				ks, _ := k.(string)
 				if keys[ks] {
 					return fmt.Errorf("duplicate key %q", ks)
+				}
+				if depth == 1 && !top[ks] {
+					return fmt.Errorf("unknown key %q", ks)
 				}
 				keys[ks] = true
 				if err := walk(); err != nil {

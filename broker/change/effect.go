@@ -326,11 +326,8 @@ func (p *Pipeline) revertLocked(id, why string) error {
 	if err != nil {
 		return err
 	}
-	for _, e := range a.Edits {
-		ns := namespace(e.Path)
-		if p.cfg.Targets[ns] != nil && len(next.under(ns)) == 0 {
-			return fmt.Errorf("undoing %s would leave %s with nothing to run; install another version instead", a.Short, ns)
-		}
+	if ns := emptiedSlot(a, next); ns != "" {
+		return fmt.Errorf("undoing %s would leave %s with nothing to boot; install another version instead", a.Short, ns)
 	}
 	if err := p.activateLocked(p.st.Active, next, a.Edits); err != nil {
 		return err
@@ -501,6 +498,18 @@ func (p *Pipeline) Recheck(ctx context.Context) ([]string, error) {
 	}
 	p.mu.Unlock()
 	var out []string
+	var errs []error
+	outage := false
+	defer func() {
+		p.mu.Lock()
+		if outage {
+			p.st.Outages++
+		} else {
+			p.st.Outages, p.st.OutageSeen = 0, false
+		}
+		_ = p.saveLocked()
+		p.mu.Unlock()
+	}()
 	for _, id := range ids {
 		// Read the tree per adoption, so earlier reverts in this pass
 		// are seen.
@@ -518,10 +527,11 @@ func (p *Pipeline) Recheck(ctx context.Context) ([]string, error) {
 		cur, set := p.st.Active.clone(), p.freezeLocked(a.Classes)
 		p.mu.Unlock()
 
-		s := p.evaluate(ctx, prev, cur, set)
+		s := p.evaluate(ctx, prev, cur, set, strictFor(a.Source, a.Classes))
 		why := ""
 		switch {
 		case s.outage():
+			outage = true
 			continue
 		case s.SecurityRegressions > 0:
 			why = WhySecurity
@@ -540,12 +550,18 @@ func (p *Pipeline) Recheck(ctx context.Context) ([]string, error) {
 		if protected {
 			continue
 		}
+		// A failed revert is reported and the pass goes on to older
+		// adoptions; only STOP ends it.
 		if err := p.revert(ctx, id, OriginPipeline, why); err != nil {
-			return out, err
+			if errors.Is(err, journal.ErrStopped) {
+				return out, err
+			}
+			errs = append(errs, fmt.Errorf("%s: %w", id, err))
+			continue
 		}
 		out = append(out, id)
 	}
-	return out, nil
+	return out, errors.Join(errs...)
 }
 
 // protected reports an image adoption the owner approved or that rests on
@@ -556,6 +572,25 @@ func (a *Adoption) protected() bool {
 		image = image || c == ClassGuestImage || c == ClassHostImage
 	}
 	return image && (a.Basis == BasisOwner || a.Basis == BasisSecurity)
+}
+
+// emptiedSlot names an image slot the tree after undoing a would leave
+// empty: the first image a box installed cannot be undone, only replaced.
+// Other namespaces may go empty; their targets run with nothing adopted.
+func emptiedSlot(a *Adoption, next Tree) string {
+	for _, e := range a.Edits {
+		ns := namespace(e.Path)
+		if c := classOf(e.Path); (c == ClassGuestImage || c == ClassHostImage) && len(next.under(ns)) == 0 {
+			return ns
+		}
+	}
+	return ""
+}
+
+// undoableLocked reports whether the owner can be offered UNDO for a.
+func (p *Pipeline) undoableLocked(a *Adoption) bool {
+	next, _, err := undoTree(p.st.Active, a)
+	return err != nil || emptiedSlot(a, next) == ""
 }
 
 func touchesNS(edits []Edit, ns string) bool {

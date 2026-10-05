@@ -191,8 +191,12 @@ func (p *Pipeline) Digest() []string {
 			case BasisSecurity:
 				line += " Security update, under your standing policy."
 			}
-			if a.Reverted == "" {
+			switch {
+			case a.Reverted != "":
+			case p.undoableLocked(a):
 				line += fmt.Sprintf(" UNDO %s / MORE %s", a.Short, a.Short)
+			default:
+				line += fmt.Sprintf(" MORE %s", a.Short)
 			}
 			out = append(out, line)
 			a.Listed = true
@@ -222,11 +226,20 @@ func (p *Pipeline) Digest() []string {
 			if a.Concern == WhySecurity {
 				line += " fails a newer security check"
 			} else {
-				line += fmt.Sprintf(" does worse on %d of %d newer tasks", s.Regressions, s.HeldOut)
+				line += fmt.Sprintf(" does worse on %d of %d newer tasks", max(s.Regressions, s.BaselinePassed-s.Passed), s.HeldOut)
 			}
-			out = append(out, line+". Reply UNDO "+a.Short+" to go back to the previous version, or nothing to keep it.")
+			if p.undoableLocked(a) {
+				line += ". Reply UNDO " + a.Short + " to go back to the previous version, or nothing to keep it."
+			} else {
+				line += ". It is the only version on the box, so it stays until a newer update is installed."
+			}
+			out = append(out, line)
 			a.ConcernSeen = true
 		}
+	}
+	if p.st.Outages >= OutageAlert && !p.st.OutageSeen {
+		out = append(out, fmt.Sprintf("The box could not re-test its learned changes the last %d times it tried; they stay as they are until it can.", p.st.Outages))
+		p.st.OutageSeen = true
 	}
 	if len(out) > 0 {
 		_ = p.saveLocked()

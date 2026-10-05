@@ -89,6 +89,9 @@ func TestStrictMetadata(t *testing.T) {
 		`{"version":"1","images":{"host-image/a":"` + d + `"}}]`,
 		`{"version":"1","version":"2","images":{"host-image/a":"` + d + `"}}`,
 		`{"version":"1","images":{"host-image/a":"` + d + `","host-image/a":"` + d + `"}}`,
+		`{"version":"1","Version":"2","images":{"host-image/a":"` + d + `"}}`,
+		`{"VERSION":"1","images":{"host-image/a":"` + d + `"}}`,
+		`{"version":"1","Images":{"host-image/a":"` + d + `"}}`,
 	} {
 		b := []byte(m)
 		sigs := []Signature{{"a", ed25519.Sign(pk[0], b)}, {"b", ed25519.Sign(pk[1], b)}}
