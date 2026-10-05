@@ -1,0 +1,67 @@
+# AgentOS modem bridge (P2-3w). Installed by the image (P2-1) to
+# /usr/lib/systemd/system/. It drives the modems and parses any sender's
+# texts, so it runs as its own user with nothing else (security S-B7 on
+# the P2-3w design read).
+[Unit]
+Description=AgentOS modem bridge
+After=agentosd.service
+Requires=agentosd.service
+
+[Service]
+User=agentos-modem
+Group=agentos-modem
+ExecStart=/usr/lib/agentos/agentos-modem -owner-sock /run/agentos/owner.sock -roles /var/lib/agentos/modem/roles.json
+# OWNER_NUMBER, COUNTRY_CODE and BOX_NUMBER, read from the environment so
+# no number is on the command line.
+EnvironmentFile=/etc/agentos/modem.env
+Restart=always
+RestartSec=5
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+UMask=0077
+# No other process's /proc entries and no System V IPC (security R1 on
+# #170). ProcSubset=pid is left off: discovery pairs each modem with its
+# sound card through /proc/asound, which that would hide.
+ProtectProc=invisible
+PrivateIPC=yes
+RemoveIPC=yes
+
+# Devices: the modems' serial nodes and sound card only. The udev rule
+# makes only qualified modems' nodes this user's; every other serial or
+# sound node stays root's, so the class allows no more than that.
+DevicePolicy=closed
+DeviceAllow=char-ttyUSB rw
+DeviceAllow=char-alsa rw
+
+# Network: none in part 1, Unix sockets only. The second line's SIP
+# account (part 2) reaches only its provider through the egress allow-list.
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+# Of AgentOS's state, only the roles directory is visible, read-only (L3
+# on #170). The directory, not the file, is bound, so a roles file
+# replaced by rename is seen at the next open; "-" lets the unit start
+# before setup has written it (the line then reads as unbound).
+TemporaryFileSystem=/var/lib/agentos:ro
+BindReadOnlyPaths=-/var/lib/agentos/modem
+
+[Install]
+WantedBy=multi-user.target

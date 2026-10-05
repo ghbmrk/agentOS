@@ -10,6 +10,8 @@ package at
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -58,6 +60,18 @@ type Config struct {
 	// CountryCode is the home country code from setup ("1", "44"), used to
 	// write national-format numbers as E.164 so they match the owner's.
 	CountryCode string
+	// CheckSIM, if set, is given the SIM's serial (ICCID) before any stored
+	// text is read; an error ends Open with that error, leaving every text
+	// stored, so a text is never taken off a SIM that is not the one
+	// expected.
+	CheckSIM func(iccid string) error
+	// KeepUntilAck leaves each delivered text stored on the modem until
+	// Ack is called with its SMS.Ref, so a text the reader never took
+	// (the reader exited, the modem dropped) is read again at the next
+	// open. Ref is derived from the text's PDUs, so a re-read carries the
+	// same Ref and the taker can tell it from a new text. Off, a text is
+	// deleted as it is read, before delivery.
+	KeepUntilAck bool
 	// Owner is the owner's number when this SIM is the owner line. A long
 	// text from it that arrives garbled (conflicting parts) gets the fixed
 	// GarbledText reply, at most once an hour.
@@ -107,6 +121,7 @@ type Modem struct {
 	inbox      chan modem.SMS
 	incoming   chan *Call
 	smsKick    chan int
+	ackKick    chan string // at most maxHeld refs are outstanding, so Ack never blocks on it
 	callKick   chan struct{}
 	statusKick chan struct{}
 	stop       chan struct{}
@@ -120,7 +135,13 @@ type Modem struct {
 	parts   map[string]*assembly
 	nextSeq uint64
 	seen    map[string]time.Time // delivered PDUs, for dupTTL
-	garbled time.Time            // last GarbledText sent
+	// With KeepUntilAck: held are stored indices taken but not yet
+	// deleted (in an assembly or delivered); pending maps a delivered
+	// text's Ref to its indices; trash are indices to delete.
+	held    map[int]bool
+	pending map[string][]int
+	trash   []int
+	garbled time.Time // last GarbledText sent
 	dropped int
 	status  Status
 }
@@ -135,6 +156,8 @@ type assembly struct {
 	first    time.Time
 	total    int
 	parts    map[int]string
+	idx      map[int]int    // part → stored index (KeepUntilAck)
+	pdus     map[int]string // part → PDU, for the Ref
 	conflict bool
 }
 
@@ -159,8 +182,9 @@ func Open(ctx context.Context, cfg Config) (*Modem, error) {
 	m := &Modem{
 		cfg: cfg, e: NewEngine(cfg.Port, urcs), number: cfg.Number,
 		inbox: make(chan modem.SMS, 64), incoming: make(chan *Call, 4),
-		smsKick: make(chan int, 64), callKick: make(chan struct{}, 1), statusKick: make(chan struct{}, 1),
+		smsKick: make(chan int, 64), ackKick: make(chan string, 2*maxHeld), callKick: make(chan struct{}, 1), statusKick: make(chan struct{}, 1),
 		stop: make(chan struct{}), calls: map[int]*Call{}, parts: map[string]*assembly{}, seen: map[string]time.Time{},
+		held: map[int]bool{}, pending: map[string][]int{},
 	}
 	if err := m.init(ctx); err != nil {
 		_ = m.e.Close()
@@ -203,6 +227,11 @@ func (m *Modem) init(ctx context.Context) error {
 		return &SIMError{Status: st}
 	}
 	m.iccid = m.readICCID(ctx)
+	if m.cfg.CheckSIM != nil {
+		if err := m.cfg.CheckSIM(m.iccid); err != nil {
+			return err
+		}
+	}
 	if err := do("AT+CMGF=0"); err != nil {
 		return err
 	}
@@ -350,11 +379,15 @@ func (m *Modem) smsLoop() {
 	t := time.NewTicker(m.cfg.Sweep)
 	defer t.Stop()
 	m.sweep(ctx)
+	m.flushTrash(ctx)
 	for {
 		select {
 		case <-m.stop:
 			return
 		case i := <-m.smsKick:
+			if m.isHeld(i) {
+				continue
+			}
 			lines, err := m.e.Do(ctx, "AT+CMGR="+strconv.Itoa(i), cmdTimeout)
 			if err != nil {
 				continue
@@ -365,10 +398,14 @@ func (m *Modem) smsLoop() {
 					break
 				}
 			}
+			m.flushTrash(ctx)
+		case ref := <-m.ackKick:
+			m.ack(ctx, ref)
 		case <-m.statusKick:
 			m.readStatus(ctx, 0)
 		case <-t.C:
 			m.sweep(ctx)
+			m.flushTrash(ctx)
 			m.readStatus(ctx, 0)
 		}
 	}
@@ -387,7 +424,7 @@ func (m *Modem) sweep(ctx context.Context) {
 			continue
 		}
 		i, err := strconv.Atoi(mt[1])
-		if err != nil {
+		if err != nil || m.isHeld(i) {
 			continue
 		}
 		m.receive(ctx, i, lines[j], lines[j+1])
@@ -398,7 +435,9 @@ func (m *Modem) sweep(ctx context.Context) {
 
 // receive decodes one stored text, deletes it from the modem, and delivers
 // it once whole. Deleting first means a crash loses a text rather than
-// replaying it: a replayed approval code would count as a wrong code. A
+// replaying it: a replayed approval code would count as a wrong code. With
+// KeepUntilAck a text that will be delivered stays stored until Ack
+// instead, and its Ref lets the taker tell a replay from a new text. A
 // line that is not the PDU its header announced (a stray boot line, a
 // URC) is left stored for the next sweep.
 func (m *Modem) receive(ctx context.Context, idx int, header, pdu string) {
@@ -408,9 +447,27 @@ func (m *Modem) receive(ctx context.Context, idx int, header, pdu string) {
 		return
 	}
 	d, err := DecodeDeliver(pdu)
-	if _, derr := m.e.Do(ctx, "AT+CMGD="+strconv.Itoa(idx), cmdTimeout); derr != nil && !errors.Is(derr, modem.ErrDown) {
-		// Left stored; the next sweep tries again.
-		return
+	alpha, fromOwner := false, false
+	if err == nil {
+		alpha = d.TON == 5
+		if alpha {
+			// A sender ID can spell any number; it never reads as one.
+			d.Addr = "alpha:" + d.Addr
+		} else {
+			d.Addr = E164(d.Addr, d.TON, m.cfg.CountryCode)
+		}
+		fromOwner = !alpha && m.cfg.Owner != "" && SameNumber(d.Addr, m.cfg.Owner, m.cfg.CountryCode)
+	}
+	// Only the owner's texts are kept until acked, and at most maxHeld
+	// stored indices at once: anyone else's are deleted as they are read,
+	// so no one else can fill the modem's memory and keep the owner's
+	// STOP out (L3 on #170).
+	keep := m.cfg.KeepUntilAck && err == nil && !d.Silent() && fromOwner && m.heldCount() < maxHeld
+	if !keep {
+		if _, derr := m.e.Do(ctx, "AT+CMGD="+strconv.Itoa(idx), cmdTimeout); derr != nil && !errors.Is(derr, modem.ErrDown) {
+			// Left stored; the next sweep tries again.
+			return
+		}
 	}
 	now := m.cfg.Now()
 	m.mu.Lock()
@@ -426,19 +483,19 @@ func (m *Modem) receive(ctx context.Context, idx int, header, pdu string) {
 		if !dup {
 			m.dropped++
 		}
+		if keep {
+			m.trash = append(m.trash, idx) // never delivered: delete now
+		}
 		m.mu.Unlock()
 		return
 	}
-	m.mu.Unlock()
-	alpha := d.TON == 5
-	if alpha {
-		// A sender ID can spell any number; it never reads as one.
-		d.Addr = "alpha:" + d.Addr
-	} else {
-		d.Addr = E164(d.Addr, d.TON, m.cfg.CountryCode)
+	keptIdx := -1 // the index to delete later; -1: deleted as read
+	if keep {
+		m.held[idx] = true
+		keptIdx = idx
 	}
-	fromOwner := !alpha && m.cfg.Owner != "" && SameNumber(d.Addr, m.cfg.Owner, m.cfg.CountryCode)
-	text, ok, conflict := m.assemble(d, fromOwner)
+	m.mu.Unlock()
+	text, ok, conflict, idxs, ref := m.assemble(d, fromOwner, keptIdx, key)
 	if conflict && fromOwner {
 		m.mu.Lock()
 		due := m.garbled.IsZero() || now.Sub(m.garbled) >= time.Hour
@@ -453,20 +510,107 @@ func (m *Modem) receive(ctx context.Context, idx int, header, pdu string) {
 	if !ok {
 		return
 	}
+	sms := modem.SMS{From: d.Addr, To: m.number, Text: text, At: now, Segments: segments(text), Alphanumeric: alpha, Owner: fromOwner}
+	if kept := heldOf(idxs); len(kept) > 0 {
+		// Kept until Ack; parts already deleted as read (past maxHeld)
+		// need no ack.
+		sms.Ref = ref
+		m.mu.Lock()
+		m.pending[ref] = append(m.pending[ref], kept...)
+		m.mu.Unlock()
+	}
 	select {
-	case m.inbox <- modem.SMS{From: d.Addr, To: m.number, Text: text, At: now, Segments: segments(text), Alphanumeric: alpha}:
+	case m.inbox <- sms:
 	case <-m.stop:
 	}
 }
 
+// maxHeld bounds the stored indices kept until acked.
+const maxHeld = 32
+
+func heldOf(idxs []int) []int {
+	var out []int
+	for _, i := range idxs {
+		if i >= 0 {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+func (m *Modem) heldCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.held)
+}
+
+func (m *Modem) isHeld(idx int) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.held[idx]
+}
+
+// Ack deletes a delivered text kept with KeepUntilAck: its taker has it.
+// The delete runs on the text loop, between reads, so an index it frees
+// is never mistaken by a read in flight (L3 on #170). A delete that fails
+// leaves the text stored; it is not delivered again while this Modem
+// remembers it (dupTTL), and is deleted when read again.
+func (m *Modem) Ack(ref string) error {
+	select {
+	case m.ackKick <- ref:
+		return nil
+	case <-m.stop:
+		return modem.ErrDown
+	}
+}
+
+// ack deletes ref's indices, then forgets them. smsLoop only.
+func (m *Modem) ack(ctx context.Context, ref string) {
+	m.mu.Lock()
+	idxs := m.pending[ref]
+	delete(m.pending, ref)
+	m.mu.Unlock()
+	for _, i := range idxs {
+		m.e.Do(ctx, "AT+CMGD="+strconv.Itoa(i), cmdTimeout)
+	}
+	m.mu.Lock()
+	for _, i := range idxs {
+		delete(m.held, i)
+	}
+	m.mu.Unlock()
+}
+
+// flushTrash deletes kept texts that will never be delivered.
+func (m *Modem) flushTrash(ctx context.Context) {
+	m.mu.Lock()
+	trash := m.trash
+	m.trash = nil
+	m.mu.Unlock()
+	for _, i := range trash {
+		m.e.Do(ctx, "AT+CMGD="+strconv.Itoa(i), cmdTimeout)
+	}
+	m.mu.Lock()
+	for _, i := range trash {
+		delete(m.held, i)
+	}
+	m.mu.Unlock()
+}
+
+// textRef names a text by its PDUs, in part order: the same on every read.
+func textRef(pdus ...string) string {
+	h := sha256.Sum256([]byte(strings.Join(pdus, "\n")))
+	return hex.EncodeToString(h[:16])
+}
+
 func segments(text string) int { n, _ := modem.Segments(text); return n }
 
-// assemble returns a whole text once every part is in; conflict reports a
-// text dropped because two parts disagreed. owner is whether d is from the
-// owner's number, whose texts use the owner's slots.
-func (m *Modem) assemble(d Deliver, owner bool) (text string, ok, conflict bool) {
+// assemble returns a whole text once every part is in, with its parts'
+// stored indices and its Ref; conflict reports a text dropped because two
+// parts disagreed. owner is whether d is from the owner's number, whose
+// texts use the owner's slots. idx and pdu are this part's.
+func (m *Modem) assemble(d Deliver, owner bool, idx int, pdu string) (text string, ok, conflict bool, idxs []int, ref string) {
 	if d.Concat == nil || d.Concat.Total == 1 {
-		return d.Text, true, false
+		return d.Text, true, false, []int{idx}, textRef(pdu)
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -487,29 +631,53 @@ func (m *Modem) assemble(d Deliver, owner bool) (text string, ok, conflict bool)
 			m.dropOldestLocked(func(x *assembly) bool { return x.owner == owner })
 		}
 		m.nextSeq++
-		a = &assembly{from: d.Addr, owner: owner, seq: m.nextSeq, first: m.cfg.Now(), total: d.Concat.Total, parts: map[int]string{}}
+		a = &assembly{from: d.Addr, owner: owner, seq: m.nextSeq, first: m.cfg.Now(), total: d.Concat.Total,
+			parts: map[int]string{}, idx: map[int]int{}, pdus: map[int]string{}}
 		m.parts[key] = a
 	}
 	if prev, dup := a.parts[d.Concat.Seq]; !dup {
 		a.parts[d.Concat.Seq] = d.Text
-	} else if prev != d.Text {
-		// Two different bodies for one part: someone guessed the reference
-		// and is trying to replace a segment. Drop the whole text.
-		a.conflict = true
+		a.idx[d.Concat.Seq], a.pdus[d.Concat.Seq] = idx, pdu
+	} else {
+		m.discardLocked(idx) // a second copy of a part
+		if prev != d.Text {
+			// Two different bodies for one part: someone guessed the
+			// reference and is trying to replace a segment. Drop the
+			// whole text.
+			a.conflict = true
+		}
 	}
 	if len(a.parts) < a.total {
-		return "", false, false
+		return "", false, false, nil, ""
 	}
 	delete(m.parts, key)
 	if a.conflict {
 		m.dropped++
-		return "", false, true
+		m.discardAssemblyLocked(a)
+		return "", false, true, nil, ""
 	}
 	var sb strings.Builder
+	pdus := make([]string, 0, a.total)
 	for i := 1; i <= a.total; i++ {
 		sb.WriteString(a.parts[i])
+		idxs = append(idxs, a.idx[i])
+		pdus = append(pdus, a.pdus[i])
 	}
-	return sb.String(), true, false
+	return sb.String(), true, false, idxs, textRef(pdus...)
+}
+
+// discardLocked marks a kept index for deletion; -1 (or without
+// KeepUntilAck) it was deleted as it was read. Caller holds mu.
+func (m *Modem) discardLocked(idx int) {
+	if m.cfg.KeepUntilAck && idx >= 0 {
+		m.trash = append(m.trash, idx)
+	}
+}
+
+func (m *Modem) discardAssemblyLocked(a *assembly) {
+	for _, i := range a.idx {
+		m.discardLocked(i)
+	}
 }
 
 func (m *Modem) countLocked(match func(*assembly) bool) int {
@@ -531,6 +699,7 @@ func (m *Modem) dropOldestLocked(match func(*assembly) bool) {
 		}
 	}
 	if oldest != "" {
+		m.discardAssemblyLocked(m.parts[oldest])
 		delete(m.parts, oldest)
 		m.dropped++
 	}
@@ -544,6 +713,7 @@ func (m *Modem) expireParts() {
 	now := m.cfg.Now()
 	for k, a := range m.parts {
 		if now.Sub(a.first) > concatTTL {
+			m.discardAssemblyLocked(a)
 			delete(m.parts, k)
 			m.dropped++
 		}

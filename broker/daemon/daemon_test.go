@@ -276,3 +276,102 @@ func TestCH2IdleOwnerConnectionsAreClosed(t *testing.T) {
 		t.Fatalf("STOP after idle connections: %+v", r)
 	}
 }
+
+// P2-3w: the modem bridge's ops are served on the owner socket beside
+// "message", which they cannot replace.
+func TestOwnerSocketServesTheBridgeOps(t *testing.T) {
+	dir := t.TempDir()
+	var got []string
+	cancel, _ := startWith(t, dir, func(c *Config) {
+		c.OwnerOps = map[string]sockets.Handler{
+			"state": func(_ context.Context, p sockets.Peer, _ json.RawMessage) (any, error) {
+				got = append(got, p.Kind)
+				return "noted", nil
+			},
+			"message": func(context.Context, sockets.Peer, json.RawMessage) (any, error) { return "hijacked", nil },
+		}
+	})
+	defer cancel()
+	sock := filepath.Join(dir, "run", OwnerSocket)
+	if r := send(t, sock, "state", map[string]string{}); !r.OK || string(r.Result) != `"noted"` || len(got) != 1 || got[0] != "owner" {
+		t.Fatalf("state: %+v %v", r, got)
+	}
+	if r := send(t, sock, "message", map[string]string{"from": "+15550000999", "text": "STATUS"}); string(r.Result) == `"hijacked"` {
+		t.Fatal("an extra op replaced message")
+	}
+}
+
+// With the bridge on, an owner text must pass the bridge's checks (line,
+// sender, size, rate): the raw "message" op, which takes any sender, is
+// not served, and no extra op can put it back (security F1 on #170).
+func TestABridgeOnlyOwnerSocketRefusesRawMessages(t *testing.T) {
+	dir := t.TempDir()
+	cancel, _ := startWith(t, dir, func(c *Config) {
+		c.BridgeOnly = true
+		c.OwnerOps = map[string]sockets.Handler{
+			"state":   func(context.Context, sockets.Peer, json.RawMessage) (any, error) { return "noted", nil },
+			"message": func(context.Context, sockets.Peer, json.RawMessage) (any, error) { return "hijacked", nil },
+		}
+	})
+	defer cancel()
+	sock := filepath.Join(dir, "run", OwnerSocket)
+	if r := send(t, sock, "message", map[string]string{"from": "+15550000999", "text": "STATUS"}); r.OK || !strings.Contains(r.Error, "unknown op") {
+		t.Fatalf("message served with the bridge on: %+v", r)
+	}
+	if r := send(t, sock, "state", map[string]string{}); !r.OK {
+		t.Fatalf("state: %+v", r)
+	}
+}
+
+// agentosd gives the owner socket to the bridge user's group (security R3
+// on #170); the bridge's uid still connects.
+func TestTheOwnerSocketIsTheBridgeGroups(t *testing.T) {
+	dir := t.TempDir()
+	gid := os.Getgid()
+	cancel, _ := startWith(t, dir, func(c *Config) { c.ModemGID = &gid })
+	defer cancel()
+	sock := filepath.Join(dir, "run", OwnerSocket)
+	for p, want := range map[string]os.FileMode{sock: 0o660, filepath.Dir(sock): 0o711} {
+		fi, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode().Perm() != want {
+			t.Fatalf("%s mode %v, want %v", p, fi.Mode().Perm(), want)
+		}
+	}
+	if r := send(t, sock, "message", map[string]string{"from": "+15550000999", "text": "STATUS"}); !r.OK {
+		t.Fatalf("the bridge's uid was refused: %+v", r)
+	}
+}
+
+// L3 on #170 (A15): the bridge's ops end when the bridge hangs up, so the
+// outbox's long poll hands no text to a dead bridge.
+func TestTheBridgeOpsEndWhenTheBridgeHangsUp(t *testing.T) {
+	dir := t.TempDir()
+	ended := make(chan error, 1)
+	cancel, _ := startWith(t, dir, func(c *Config) {
+		c.OwnerOps = map[string]sockets.Handler{
+			"outbox": func(ctx context.Context, _ sockets.Peer, _ json.RawMessage) (any, error) {
+				select {
+				case <-ctx.Done():
+					ended <- ctx.Err()
+				case <-time.After(3 * time.Second):
+					ended <- nil
+				}
+				return nil, nil
+			},
+		}
+	})
+	defer cancel()
+	c, err := net.Dial("unix", filepath.Join(dir, "run", OwnerSocket))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Write([]byte(`{"op":"outbox","args":{}}` + "\n"))
+	time.Sleep(50 * time.Millisecond)
+	c.Close()
+	if err := <-ended; err == nil {
+		t.Fatal("the poll ran on after the bridge hung up")
+	}
+}

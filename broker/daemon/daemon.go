@@ -44,6 +44,10 @@ type Config struct {
 	// ModemUID is the only uid allowed on the owner socket: the modem
 	// bridge, which runs as its own user (SO_PEERCRED, B8).
 	ModemUID int
+	// ModemGID, if set, is the bridge's group: the owner socket is given
+	// it, mode 0660, so the bridge can connect as its own user (security
+	// R3 on #170). Unset, the socket is 0600 (same-uid tests only).
+	ModemGID *int
 	// Machines gets one guest socket each. IDs are [a-z0-9-], unique.
 	Machines []string
 	// Auth overrides the default, which knows the owner's number and keeps
@@ -73,6 +77,16 @@ type Config struct {
 	// Modem, when set, is served by the owner channel as well as the owner
 	// socket, and carries its outbound texts.
 	Modem modem.Modem
+	// OwnerOps are more ops on the owner socket: the modem bridge's
+	// (modemlink.Link.Ops, P2-3w). They cannot replace "message". Each
+	// runs with a context that ends if the bridge hangs up first, so the
+	// outbox's long poll hands no text to a dead bridge.
+	OwnerOps map[string]sockets.Handler
+	// BridgeOnly drops "message" from the owner socket, leaving OwnerOps:
+	// with the modem bridge on, owner texts arrive only through its
+	// checked "inbound" op (security F1 on #170). "message" stays for
+	// simulator and test builds.
+	BridgeOnly bool
 	// Agent receives the owner's task chat: the guest plane's owner inbox
 	// for the agent's machine (ARC-6 (c)). Nil: no agent running.
 	Agent control.Agent
@@ -256,11 +270,15 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 		gate.Attach(eng, nil)
 	}
 
-	modem := cfg.ModemUID
+	var modemUID *int
+	if cfg.ModemUID >= 0 {
+		modemUID = &cfg.ModemUID
+	}
 	eps := []sockets.Endpoint{{
 		Name:        OwnerSocket,
 		Peer:        sockets.Peer{Kind: "owner"},
-		PeerUID:     &modem,
+		PeerUID:     modemUID,
+		PeerGID:     cfg.ModemGID,
 		MaxConns:    8,
 		IdleTimeout: ownerIdle,
 		Ops: map[string]sockets.Handler{
@@ -273,6 +291,18 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 			},
 		},
 	}}
+	if cfg.BridgeOnly {
+		delete(eps[0].Ops, "message")
+	}
+	for op, h := range cfg.OwnerOps {
+		if _, taken := eps[0].Ops[op]; !taken && op != "message" {
+			eps[0].Ops[op] = h
+			if eps[0].HangupOps == nil {
+				eps[0].HangupOps = map[string]bool{}
+			}
+			eps[0].HangupOps[op] = true
+		}
+	}
 	for _, id := range cfg.Machines {
 		eps = append(eps, sockets.Endpoint{
 			Name:        GuestSocket(id),
