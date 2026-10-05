@@ -139,8 +139,13 @@ type Config struct {
 	// never clash with open requests; taken reports IDs the pipeline still
 	// uses. Nil: the pipeline's own letter-and-digits sequence.
 	ShortID func(taken func(string) bool) (string, error)
-	Now     func() time.Time
-	Rand    io.Reader
+	// EvaluatorID names the evaluator's current configuration (image,
+	// model route, price ceiling). A preempted evaluation's kept pairs
+	// resume only under the same ID (PE1, security R1 on #103). Nil: the
+	// evaluator is fixed for the pipeline's life.
+	EvaluatorID func() string
+	Now         func() time.Time
+	Rand        io.Reader
 }
 
 // Bases: why an adoption may run.
@@ -323,6 +328,10 @@ type Pipeline struct {
 	// probes of running evaluations: use count and task intent.
 	probes    map[string]int
 	probeTask map[string]string
+	// kept holds preempted evaluations' completed pairs (PE1).
+	kept      map[string]pairResult
+	keptOrder []keptAt // put order, for dropping the oldest
+	keptSeq   uint64
 }
 
 // New loads the persisted state, or seeds it on first start, and applies
@@ -349,7 +358,7 @@ func New(cfg Config) (*Pipeline, error) {
 	if cfg.Rand == nil {
 		cfg.Rand = rand.Reader
 	}
-	p := &Pipeline{cfg: cfg, props: map[string]*proposal{}, probes: map[string]int{}, probeTask: map[string]string{}}
+	p := &Pipeline{cfg: cfg, props: map[string]*proposal{}, probes: map[string]int{}, probeTask: map[string]string{}, kept: map[string]pairResult{}}
 	raw, err := cfg.Store.Load()
 	if err != nil {
 		return nil, err
@@ -545,7 +554,13 @@ func (p *Pipeline) proposeInner(ctx context.Context, c Candidate, security bool)
 		rep.State, rep.Reason = StateRejected, cl.forbidden
 		return rep, nil
 	}
-	rep.Score = p.evaluate(ctx, base, next, set, strictFor(c.Source, cl.classes))
+	score, err := p.evaluate(ctx, base, next, set, strictFor(c.Source, cl.classes))
+	if err != nil {
+		// Preempted: not a verdict. The ID is spent; the next proposal
+		// of the same candidate resumes from the kept pairs.
+		return Report{}, err
+	}
+	rep.Score = score
 	images := cl.imagesOnly()
 	regressed := rep.Regressions > 0 || rep.Passed < rep.BaselinePassed
 	switch {
@@ -735,25 +750,58 @@ func (p *Pipeline) drop(id string) {
 // order under probe IDs keyed with a fresh nonce, so the evaluator cannot
 // tell sides, kinds, or the same case across evaluations (CHG-1). An
 // evaluator error fails the case on that side.
-func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st strictness) Score {
+//
+// If ctx ends part way (preemption), evaluate stops at once and returns
+// ErrInterrupted instead of a score; the run in flight is discarded, and
+// every side that finished is kept, so the next evaluation of the same
+// trees runs only the rest (PE1). A candidate side cut short
+// MaxInterruptions times fails. A finished evaluation uses up what was
+// kept.
+func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st strictness) (Score, error) {
 	type run struct {
 		c     Case
 		cand  bool
 		probe string
 		ok    bool
 		ev    bool
+		done  bool
+		// struck: failed without running (MaxInterruptions).
+		struck bool
+		err    bool // the evaluator errored (a fail, unlike a grader's)
 	}
 	nonce := make([]byte, 16)
 	_, _ = rand.Read(nonce)
+	keys := map[string]string{}
+	res := map[string]pairResult{} // kept sides, then this evaluation's
 	var runs []*run
+	p.mu.Lock()
 	for _, cs := range [][]Case{set.heldOut, set.security} {
 		for _, c := range cs {
-			runs = append(runs, &run{c: c, probe: p.probeID(nonce, c.ID)}, &run{c: c, cand: true, probe: p.probeID(nonce, c.ID)})
+			k := p.resumeKey(base, next, c)
+			keys[c.ID] = k
+			r, _ := p.keptLocked(k)
+			res[c.ID] = r
+			if !r.baseDone {
+				runs = append(runs, &run{c: c, probe: p.probeID(nonce, c.ID)})
+			}
+			switch {
+			case r.nextDone:
+			case r.interrupted >= MaxInterruptions:
+				// Cut short too often on this case: failed without
+				// another run (security F1 on #103).
+				runs = append(runs, &run{c: c, cand: true, ev: true, done: true, struck: true})
+			default:
+				runs = append(runs, &run{c: c, cand: true, probe: p.probeID(nonce, c.ID)})
+			}
 		}
 	}
+	p.mu.Unlock()
 	mrand.Shuffle(len(runs), func(i, j int) { runs[i], runs[j] = runs[j], runs[i] })
 	p.mu.Lock()
 	for _, r := range runs {
+		if r.struck {
+			continue
+		}
 		p.probes[r.probe]++
 		if !r.c.Security {
 			p.probeTask[r.probe] = r.c.Task
@@ -763,6 +811,9 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 	defer func() {
 		p.mu.Lock()
 		for _, r := range runs {
+			if r.struck {
+				continue
+			}
 			if p.probes[r.probe]--; p.probes[r.probe] <= 0 {
 				delete(p.probes, r.probe)
 				delete(p.probeTask, r.probe)
@@ -770,83 +821,135 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 		}
 		p.mu.Unlock()
 	}()
+	var cut *run // the run in flight when ctx ended
 	for _, r := range runs {
+		if r.struck {
+			continue
+		}
+		if ctx.Err() != nil {
+			break
+		}
 		t := base
 		if r.cand {
 			t = next
 		}
-		r.ok, r.ev = p.pass(ctx, t, r.c, r.probe)
+		r.ok, r.ev, r.err = p.pass(ctx, t, r.c, r.probe)
+		// A run that returns after the preemption may have failed
+		// because of it: it is discarded, never counted or kept.
+		r.done = ctx.Err() == nil
+		if !r.done {
+			cut = r
+		}
 	}
-	res := map[string][2]*run{}
-	var order []string
+	interrupted := ctx.Err() != nil
 	for _, r := range runs {
-		pair, seen := res[r.c.ID]
-		if !seen {
-			order = append(order, r.c.ID)
+		if !r.done {
+			continue
 		}
+		if interrupted && r.err && !r.cand {
+			// An erroring baseline (a model outage, a rate limit) is
+			// not kept: kept as a fail it could hide a regression for
+			// as long as it is kept. It runs again on resume. A
+			// candidate's error stays a fail: the candidate may cause
+			// it, and must not re-roll by it (security F1 on #103).
+			continue
+		}
+		pr := res[r.c.ID]
 		if r.cand {
-			pair[1] = r
+			pr.NextOK, pr.NextEv, pr.nextDone = r.ok, r.ev, true
 		} else {
-			pair[0] = r
+			pr.BaseOK, pr.BaseEv, pr.baseDone = r.ok, r.ev, true
 		}
-		res[r.c.ID] = pair
+		res[r.c.ID] = pr
+	}
+	if interrupted {
+		p.mu.Lock()
+		// Every side that finished is kept, so a result once seen is
+		// never run again. The candidate side cut short is counted, so
+		// a candidate that forces preemptions cannot re-roll a case
+		// without limit.
+		for id, pr := range res {
+			if cut != nil && cut.cand && cut.c.ID == id {
+				pr.interrupted++
+			}
+			if pr.baseDone || pr.nextDone || pr.interrupted > 0 {
+				p.keepLocked(keys[id], pr)
+			}
+		}
+		p.mu.Unlock()
+		return Score{}, fmt.Errorf("%w: %w", ErrInterrupted, ctx.Err())
+	}
+	p.mu.Lock()
+	for _, k := range keys {
+		delete(p.kept, k) // kept sides and interruption counts are used up
+	}
+	p.mu.Unlock()
+	cases := map[string]Case{}
+	var order []string
+	for _, cs := range [][]Case{set.heldOut, set.security} {
+		for _, c := range cs {
+			if _, seen := cases[c.ID]; !seen {
+				order = append(order, c.ID)
+			}
+			cases[c.ID] = c
+		}
 	}
 	sort.Strings(order)
 	var s Score
 	for _, id := range order {
-		b, n := res[id][0], res[id][1]
-		if !b.ev {
+		c, pr := cases[id], res[id]
+		if !pr.BaseEv {
 			s.NotEvaluated++
 			continue
 		}
-		if !n.ev {
+		if !pr.NextEv {
 			// The baseline ran but the candidate's tree declined: honoured
 			// only where the evaluator legitimately cannot test (C5).
-			if n.c.Security && st.security || !n.c.Security && st.heldOut {
-				n.ev, n.ok = true, false
+			if c.Security && st.security || !c.Security && st.heldOut {
+				pr.NextEv, pr.NextOK = true, false
 			} else {
 				s.NotEvaluated++
 				continue
 			}
 		}
-		if n.c.Security {
+		if c.Security {
 			s.Security++
-			if n.ok {
+			if pr.NextOK {
 				s.SecurityPassed++
 			}
-			if b.ok {
+			if pr.BaseOK {
 				s.BaselineSecurityPassed++
 			}
-			if b.ok && !n.ok {
+			if pr.BaseOK && !pr.NextOK {
 				s.SecurityRegressions++
 			}
 			continue
 		}
 		s.HeldOut++
-		if b.ok {
+		if pr.BaseOK {
 			s.BaselinePassed++
 		}
-		if n.ok {
+		if pr.NextOK {
 			s.Passed++
 		}
-		if n.c.Implicit {
+		if c.Implicit {
 			s.Implicit++
-			if b.ok {
+			if pr.BaseOK {
 				s.ImplicitBaselinePassed++
 			}
-			if n.ok {
+			if pr.NextOK {
 				s.ImplicitPassed++
 			}
 		}
-		if b.ok && !n.ok {
+		if pr.BaseOK && !pr.NextOK {
 			s.Regressions++
-			if s.example == nil && !n.c.Implicit {
-				cc := n.c
+			if s.example == nil && !c.Implicit {
+				cc := c
 				s.example = &cc
 			}
 		}
 	}
-	return s
+	return s, nil
 }
 
 // OutageAlert is how many failed Recheck passes in a row the digest
@@ -889,19 +992,19 @@ var ErrNotEvaluated = errors.New("change: not evaluated on this box")
 
 // pass reports whether the case passed on t, and whether it was evaluated
 // at all. Any other evaluator error is a fail.
-func (p *Pipeline) pass(ctx context.Context, t Tree, c Case, probe string) (ok, evaluated bool) {
+func (p *Pipeline) pass(ctx context.Context, t Tree, c Case, probe string) (ok, evaluated, errored bool) {
 	out, err := p.cfg.Evaluator.Run(ctx, t.clone(), Probe{ID: probe, Input: append([]byte(nil), c.Input...)})
 	if errors.Is(err, ErrNotEvaluated) {
-		return false, false
+		return false, false, false
 	}
 	if err != nil {
-		return false, true
+		return false, true, true
 	}
 	g := p.cfg.Graders[c.Class]
 	if g == nil {
 		g = DefaultGrader
 	}
-	return g(c, out), true
+	return g(c, out), true, false
 }
 
 // ProbeTask maps a probe ID of a running evaluation back to the journal
