@@ -20,6 +20,9 @@ type fakeHarvest struct{ got []loops.Outcome }
 
 func (f *fakeHarvest) Harvest(o loops.Outcome) error {
 	f.got = append(f.got, o)
+	if strings.Contains(string(o.Input), "capped") {
+		return loops.ErrImplicitCap
+	}
 	if strings.Contains(string(o.Input), "refuse") {
 		return fmt.Errorf("case %s refused", o.Input)
 	}
@@ -50,9 +53,20 @@ func TestOwnerVerdictsBecomeCases(t *testing.T) {
 	harvestOutcome(h, tasks, grants.OwnerOutcome{Intent: effect("agent/2", "owner:a1"), Verdict: grants.OwnerAcceptedImplicitly}, logf)
 	harvestOutcome(h, tasks, grants.OwnerOutcome{Intent: effect("agent/3", "owner:gone"), Verdict: grants.OwnerDeclined}, logf)
 	harvestOutcome(h, tasks, grants.OwnerOutcome{Intent: effect("agent/4", "owner:a2"), Verdict: grants.OwnerUndone}, logf)
-	if len(h.got) != 2 {
+	if len(h.got) != 3 {
 		t.Fatalf("harvested %+v", h.got)
 	}
+	// An auto-reply let go on time is an implicit acceptance (PW3 part B).
+	if o := h.got[1]; o.Intent != "agent/2" || o.Action != loops.Implicit {
+		t.Fatalf("implicit: %+v", o)
+	}
+	h.got = append(h.got[:1], h.got[2:]...)
+	tasks.put("owner:a3", "capped CANARY-task", false)
+	harvestOutcome(&fakeHarvest{}, tasks, grants.OwnerOutcome{Intent: effect("agent/5", "owner:a3"), Verdict: grants.OwnerAcceptedImplicitly}, logf)
+	if l := logged[len(logged)-1]; l != "learning: owner verdict not harvested: daily cap on implicit acceptances" {
+		t.Fatalf("cap logged %q", l)
+	}
+	logged = logged[:len(logged)-1]
 	if o := h.got[0]; o.Intent != "agent/1" || o.Action != loops.Approved || string(o.Input) != "send Sam the invoice CANARY-task" ||
 		string(o.Output) != `{"record":"inv-1042"}` || !o.Public {
 		t.Fatalf("accepted: %+v", o)

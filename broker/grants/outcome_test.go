@@ -101,8 +101,31 @@ func TestOwnerOutcomesAreReportedOnceFinal(t *testing.T) {
 	r.advance(11 * time.Minute)
 	r.g.Tick()
 	r.g.Wait()
+	if got := o.take(); got != "" {
+		t.Fatalf("auto-reply reported before a late UNDO could come: %q", got)
+	}
+	r.advance(owner.LateRelease)
+	r.g.Tick()
+	r.g.Wait()
 	if got := o.take(); got != "reply-1/r1 accepted-implicitly" {
 		t.Fatalf("auto-reply let go: %q", got)
+	}
+
+	// L3 MUST-4 on #109: an UNDO just after the release was too late to
+	// stop the reply, but the owner did not let it go: no verdict.
+	reply("reply-1/r3")
+	q3 := r.own.due[len(r.own.due)-1]
+	r.advance(11 * time.Minute)
+	r.g.Tick()
+	r.g.Wait()
+	r.own.mu.Lock()
+	r.own.lateUndo = map[string]bool{q3.ID: true}
+	r.own.mu.Unlock()
+	r.advance(owner.LateRelease)
+	r.g.Tick()
+	r.g.Wait()
+	if got := o.take(); got != "" {
+		t.Fatalf("an UNDO after the release left a verdict: %q", got)
 	}
 	reply("reply-1/r2")
 	q := r.own.due[len(r.own.due)-1]
@@ -226,9 +249,100 @@ func TestOnlyTheOwnersAnswersAreVerdicts(t *testing.T) {
 		{"not a guest's", yes, at(local, journal.Succeeded), ""},
 		{"the broker's", no, at(broker, journal.Denied), ""},
 		{"never asked this run", decision{why: "owner"}, at(guest, journal.Denied), ""},
+		{"released late", decision{approved: true, why: whyReleasedLate, asked: true, late: true}, at(guest, journal.Succeeded), ""},
 	} {
 		if got := ownerVerdict(c.d, c.st); got != c.want {
 			t.Errorf("%s: %q, want %q", c.name, got, c.want)
 		}
+	}
+}
+
+// Security B1(a) on PW3: an auto-reply released late, or after its alert's
+// line failed, is still sent, but its silence is not reported as the
+// owner's acceptance, nor as an explicit one.
+func TestALateReleaseIsNoVerdict(t *testing.T) {
+	var o outcomes
+	quiet := new(func(time.Time) bool)
+	*quiet = func(time.Time) bool { return false }
+	r := newRig(t, func(c *Config) {
+		c.Isolated = func(m string) bool { return m == "reply-1" }
+		c.Outcome = o.add
+		c.Quiet = func(t time.Time) bool { return (*quiet)(t) }
+	})
+	r.grant(mailGrant())
+	r.grant(Spec{Account: "mail", Rule: &Rule{Action: "message.send", PerRecord: 5, PerDay: 20, Reply: true}})
+	r.ver.set("thr-1", Verified{Item: owner.Item{Object: "reply in thread", Recipient: "sam@example.com",
+		Facts: owner.Facts{RecipientChecked: true, RecipientExists: true, RecipientByOwner: true}},
+		Recipients: []string{"sam@example.com"}, Record: "thr-1", ThreadVerified: true})
+	r.submit(journal.Intent{ID: "reply-1/late", Origin: "guest:reply-1", Machine: "reply-1", Account: "mail", Action: "message.send",
+		Params: map[string]any{"record": "thr-1", "body": "Thanks, got it."}, Recipients: []string{"sam@example.com"}, Executor: "mail"})
+	r.own.mu.Lock()
+	r.own.due[len(r.own.due)-1].Late = true
+	r.own.mu.Unlock()
+	r.advance(11 * time.Minute)
+	r.g.Tick()
+	r.g.Wait()
+	if st := r.state("reply-1/late"); st.State != journal.Succeeded {
+		t.Fatalf("a late release was not sent: %s", st.State)
+	}
+	if got := o.take(); got != "" {
+		t.Fatalf("a late release was reported: %q", got)
+	}
+
+	// Security F1 on #109: quiet hours at the alert or the release make
+	// the silence not the owner's either.
+	for _, at := range []string{"alert", "release"} {
+		id := "reply-1/quiet-" + at
+		r.submit(journal.Intent{ID: id, Origin: "guest:reply-1", Machine: "reply-1", Account: "mail", Action: "message.send",
+			Params: map[string]any{"record": "thr-1", "body": "Thanks, got it."}, Recipients: []string{"sam@example.com"}, Executor: "mail"})
+		r.own.mu.Lock()
+		alerted := r.now()
+		r.own.due[len(r.own.due)-1].Alerted = alerted
+		r.own.mu.Unlock()
+		quietAt := alerted
+		if at == "release" {
+			quietAt = alerted.Add(11 * time.Minute)
+		}
+		*quiet = func(t time.Time) bool { return t.Equal(quietAt) }
+		r.advance(11 * time.Minute)
+		r.g.Tick()
+		r.g.Wait()
+		if got := o.take(); got != "" {
+			t.Fatalf("silence in quiet hours at the %s was reported: %q", at, got)
+		}
+	}
+	*quiet = func(time.Time) bool { return false }
+	r.submit(journal.Intent{ID: "reply-1/awake", Origin: "guest:reply-1", Machine: "reply-1", Account: "mail", Action: "message.send",
+		Params: map[string]any{"record": "thr-1", "body": "Thanks, got it."}, Recipients: []string{"sam@example.com"}, Executor: "mail"})
+	r.own.mu.Lock()
+	r.own.due[len(r.own.due)-1].Alerted = r.now()
+	r.own.mu.Unlock()
+	r.advance(11 * time.Minute)
+	r.g.Tick()
+	r.g.Wait()
+	r.advance(owner.LateRelease)
+	r.g.Tick()
+	r.g.Wait()
+	if got := o.take(); got != "reply-1/awake accepted-implicitly" {
+		t.Fatalf("on time, outside quiet hours: %q", got)
+	}
+}
+
+// Security on #101 (BOARD follow-up on #109): an unsent acceptance whose
+// intent the journal no longer has is dropped, never reported, so the
+// held set cannot fill with verdicts nothing will end.
+func TestAnUnsentVerdictForAMissingIntentIsDropped(t *testing.T) {
+	var got []OwnerOutcome
+	r := newRig(t, func(c *Config) { c.Outcome = func(o OwnerOutcome) { got = append(got, o) } })
+	r.g.mu.Lock()
+	r.g.sending["gone/1"] = pending{v: OwnerAccepted}
+	r.g.mu.Unlock()
+	r.g.Tick()
+	r.g.Wait()
+	r.g.mu.Lock()
+	_, kept := r.g.sending["gone/1"]
+	r.g.mu.Unlock()
+	if kept || len(got) != 0 {
+		t.Fatalf("missing intent: kept %v, reported %+v", kept, got)
 	}
 }

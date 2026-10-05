@@ -121,8 +121,8 @@ type harvester interface {
 }
 
 // harvestOutcome records the owner's final verdict on an agent's effect
-// (grants.Config.Outcome) as a Loop 1 case. Implicit acceptance waits for
-// a verdict strength the pipeline does not have yet (potency PK2). With no
+// (grants.Config.Outcome) as a Loop 1 case. An implicit acceptance is a
+// weaker, capped good verdict under its own source (loops L6). With no
 // task text kept for its goal, there is no case input, so nothing is
 // recorded. Only a fixed class is logged, never the item or the task.
 func harvestOutcome(h harvester, tasks *taskTexts, o grants.OwnerOutcome, logf func(string, ...any)) {
@@ -134,6 +134,8 @@ func harvestOutcome(h harvester, tasks *taskTexts, o grants.OwnerOutcome, logf f
 		a = loops.Denied
 	case grants.OwnerUndone:
 		a = loops.Undone
+	case grants.OwnerAcceptedImplicitly:
+		a = loops.Implicit
 	default:
 		return
 	}
@@ -146,7 +148,10 @@ func harvestOutcome(h harvester, tasks *taskTexts, o grants.OwnerOutcome, logf f
 	if err != nil {
 		return
 	}
-	if err := h.Harvest(loops.Outcome{Intent: o.Intent.ID, Action: a, Input: []byte(task.Text), Output: out, Public: task.Public}); err != nil {
+	switch err := h.Harvest(loops.Outcome{Intent: o.Intent.ID, Action: a, Input: []byte(task.Text), Output: out, Public: task.Public}); {
+	case errors.Is(err, loops.ErrImplicitCap):
+		logf("learning: owner verdict not harvested: daily cap on implicit acceptances")
+	case err != nil:
 		logf("learning: owner verdict not harvested: refused") // the error may quote the case
 	}
 }

@@ -15,18 +15,19 @@ import (
 // fakeOwner stands in for owner.Channel: it records requests and replies
 // and leaves deciding to the test.
 type fakeOwner struct {
-	mu     sync.Mutex
-	limits owner.Limits
-	now    func() time.Time
-	reqs   map[string][]owner.Item
-	order  []string
-	queued []owner.AutoReply
-	due    []owner.Queued
-	notes  []string
-	commit bool     // QueueAutoReply turns replies into requests
-	down   bool     // Request fails
-	active bool     // the owner is texting
-	each   []string // requests opened by RequestEach
+	mu       sync.Mutex
+	limits   owner.Limits
+	now      func() time.Time
+	reqs     map[string][]owner.Item
+	order    []string
+	queued   []owner.AutoReply
+	due      []owner.Queued
+	notes    []string
+	commit   bool            // QueueAutoReply turns replies into requests
+	down     bool            // Request fails
+	active   bool            // the owner is texting
+	each     []string        // requests opened by RequestEach
+	lateUndo map[string]bool // UndoneAfterRelease
 }
 
 func (f *fakeOwner) Request(items []owner.Item, _ time.Duration) (string, error) {
@@ -91,6 +92,12 @@ func (f *fakeOwner) DueAutoReplies() []owner.Queued {
 	}
 	f.due = keep
 	return out
+}
+
+func (f *fakeOwner) UndoneAfterRelease(id string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lateUndo[id]
 }
 
 func (f *fakeOwner) Inform(text string) error {
