@@ -141,15 +141,16 @@ func (f *fixer) Fix(context.Context, Finding) (change.Candidate, error) {
 }
 
 type guardRig struct {
-	b      *box
-	p      *change.Pipeline
-	c      *contain
-	fx     *fixer
-	store  *change.MemStore
-	now    time.Time
-	texts  []string
-	urgent []bool
-	g      *Guard
+	b             *box
+	p             *change.Pipeline
+	c             *contain
+	fx            *fixer
+	store         *change.MemStore
+	now           time.Time
+	texts         []string
+	urgent        []bool
+	deferFixtures bool
+	g             *Guard
 }
 
 func newGuardRig(t *testing.T, b *box) *guardRig {
@@ -161,7 +162,7 @@ func newGuardRig(t *testing.T, b *box) *guardRig {
 
 func (r *guardRig) reopen(t *testing.T) {
 	t.Helper()
-	cfg := GuardConfig{Box: r.b.Box(), Pipeline: r.p, Store: r.store, Contain: r.c,
+	cfg := GuardConfig{Box: r.b.Box(), Pipeline: r.p, Store: r.store, Contain: r.c, FixturesLive: !r.deferFixtures,
 		Notify: func(s string, u bool) { r.texts, r.urgent = append(r.texts, s), append(r.urgent, u) }, Now: func() time.Time { return r.now }}
 	if r.fx != nil {
 		cfg.Fixer = r.fx
@@ -237,7 +238,7 @@ func TestPassiveChecks(t *testing.T) {
 		{"", "1.2.3", "1.2.4", true}, {"", "1.10", "1.9", false}, {"", "1.2", "1.2.1", true},
 		{"", "3.0.15-1~deb12u1", "3.0.15-1", true}, {"", "3.0.15-1+deb12u1", "3.0.15-1", false},
 		{"", "1:1.0", "2.0", false}, {"", "1.0~rc1", "1.0", true}, {"", "1.0a", "1.0", false},
-		{"", "2.36-9+deb12u7", "2.36-9+deb12u8", true}, {"", "garbage", "1.0", true},
+		{"", "2.36-9+deb12u7", "2.36-9+deb12u8", true},
 		{SchemeSemver, "1.2.0-rc.1", "1.2.0", true}, {SchemeSemver, "v1.2.0", "1.2.0", false},
 		{SchemeSemver, "1.2.0-alpha", "1.2.0-alpha.1", true}, {SchemeSemver, "1.2.0-2", "1.2.0-10", true},
 		{SchemeSemver, "1.10.0", "1.9.9", false}, {SchemeSemver, "1.x", "1.0", true},
@@ -496,6 +497,58 @@ func TestOwnerText(t *testing.T) {
 	r3.pass(t)
 	if d := strings.Join(r3.g.Digest(), "\n"); !strings.Contains(d, "Known vulnerabilities in openssl (ADV-1, ADV-2), all fixed in 3.0.14.") {
 		t.Fatalf("grouped digest %s", d)
+	}
+}
+
+// LOOP-8: a version that cannot be compared is reported plainly in the
+// digest, with nothing paused, texted, or pinned as a fixture; and the
+// owner wording is exact.
+func TestUncomparedAndWording(t *testing.T) {
+	b := cleanBox()
+	b.pkgs[0].Version = "build-42" // not a dpkg version
+	r := newGuardRig(t, b)
+	r.pass(t)
+	ev := r.g.Evidence()
+	if len(ev) != 1 || ev[0].Contained != "none" || ev[0].Fixture != "" || ev[0].Finding.Severity != Low || len(r.c.got) != 0 || len(r.texts) != 0 {
+		t.Fatalf("uncompared: %+v paused %d texts %q", ev, len(r.c.got), r.texts)
+	}
+	want := "Security check: Could not compare the installed version of openssl with advisory ADV-1 (fixed in 3.0.14). Check it on the box page."
+	if d := r.g.Digest(); len(d) != 1 || d[0] != want {
+		t.Fatalf("digest %q\nwant %q", d, want)
+	}
+
+	for _, c := range []struct {
+		f    Finding
+		want string
+	}{
+		{Finding{Check: CheckHash, Subject: "guest-image/openclaw", Detail: "differs from the signed release"}, "File guest-image/openclaw does not match the signed release."},
+		{Finding{Check: CheckHash, Subject: "dep/libfoo", Detail: "could not be measured"}, "File dep/libfoo could not be checked."},
+		{Finding{Check: CheckDrift, Subject: "config/quiet.json", Detail: "changed outside the change pipeline"}, "Setting file config/quiet.json changed outside the box's change process."},
+		{Finding{Check: CheckExpiry, Subject: "cal-cert", Detail: "expires 2026-10-08"}, "Credential cal-cert expires 2026-10-08. Replace it on the box page."},
+		{Finding{Check: CheckAdvisory, Subject: "openssl", Detail: "ADV-1", Fixed: "3.0.14"}, "Known vulnerability in openssl (ADV-1), fixed in 3.0.14. The box takes the fix when an update has it."},
+	} {
+		if got := findingText(c.f); got != c.want {
+			t.Errorf("got  %q\nwant %q", got, c.want)
+		}
+	}
+}
+
+// K-S1: with fixtures not live, a finding records its fixture as deferred
+// and the suite does not grow, so Loop 1 and updates keep adopting.
+func TestFixturesDeferred(t *testing.T) {
+	b := cleanBox()
+	b.pkgs[0].Version = "3.0.13"
+	r := newGuardRig(t, b)
+	r.deferFixtures = true
+	r.reopen(t)
+	r.pass(t)
+	ev := r.g.Evidence()
+	if len(ev) != 1 || ev[0].Fixture != "deferred" || len(r.c.got) != 1 || len(r.texts) != 1 {
+		t.Fatalf("deferred: %+v", ev)
+	}
+	rep, err := r.p.Propose(context.Background(), change.Candidate{Source: change.Local, Files: change.Tree{"config/facts.json": facts("3.0.1")}})
+	if err != nil || strings.Contains(rep.Reason, "security suite") || rep.Security != 0 {
+		t.Fatalf("suite grew while deferred: %+v %v", rep, err)
 	}
 }
 

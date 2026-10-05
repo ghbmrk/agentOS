@@ -157,6 +157,13 @@ type GuardConfig struct {
 	// (CH-15): a tampered file or a vulnerability, not an expiring
 	// credential.
 	Notify func(text string, urgent bool)
+	// FixturesLive turns on adding regression fixtures to the security
+	// suite. Leave it off until replay answers them (K-S1) and the pipeline
+	// grades open findings as no-regression (PS1): every fixture must pass
+	// for every adoption and update, so an unanswerable fixture would stop
+	// both. Off, each fixture is recorded as "deferred"; detection,
+	// containment, evidence, and notice still run.
+	FixturesLive bool
 	// MaxPauses caps automatic containment per pass, so a bad advisory
 	// feed cannot pause everything; the owner is texted about the rest.
 	// Default 3.
@@ -294,7 +301,8 @@ func (s *Guard) Next(_ context.Context, _ bool) (Job, bool) {
 }
 
 // Pass runs every passive check and handles each new finding. It returns
-// how many findings were new: Loop 2's measured value (LOOP-3).
+// how many findings were new: Loop 2's measured value (LOOP-3). Passes
+// must not run concurrently; the scheduler runs one job at a time.
 func (s *Guard) Pass(ctx context.Context) (int, error) {
 	found, notes, stale := s.check()
 	now := s.cfg.Now()
@@ -437,7 +445,9 @@ func (s *Guard) handle(ctx context.Context, f Finding, pause bool) (Record, erro
 	if err != nil {
 		errs = append(errs, err)
 	}
-	if f.Rule != nil {
+	if f.Rule != nil && !s.cfg.FixturesLive {
+		rec.Fixture = "deferred"
+	} else if f.Rule != nil {
 		c := change.Case{ID: "loop2/" + f.ID, Class: change.ClassConfig, Input: f.Rule, Expect: []byte(FixtureOK)}
 		switch err := s.cfg.Pipeline.AddSecurityCase(c); {
 		case err == nil, errors.Is(err, change.ErrDuplicate):
@@ -564,7 +574,19 @@ func (s *Guard) check() (found []Finding, notes []string, stale string) {
 			}
 			for _, p := range pkgs {
 				for _, a := range snap.Advisories {
-					if a.Package != p.Name || !versionBelow(p.Scheme, p.Version, a.Fixed) {
+					if a.Package != p.Name {
+						continue
+					}
+					c, ok := compareVersions(p.Scheme, p.Version, a.Fixed)
+					if !ok {
+						// Neither assumed fixed nor assumed vulnerable: the
+						// owner hears it in the digest, and nothing is paused
+						// or pinned on a guess.
+						add(CheckAdvisory, p.Name, uncompared+a.ID, Low, nil, nil)
+						found[len(found)-1].Fixed = a.Fixed
+						continue
+					}
+					if c >= 0 {
 						continue
 					}
 					sev := Low
@@ -689,6 +711,10 @@ func AnswerFixture(input []byte, f Facts) []byte {
 	return []byte("fails")
 }
 
+// uncompared marks an advisory finding whose versions could not be
+// compared.
+const uncompared = "uncompared:"
+
 // plainCheck names a check for the owner.
 var plainCheck = map[Check]string{
 	CheckHash:     "file hashes",
@@ -738,6 +764,10 @@ func findingText(f Finding) string {
 		}
 		return "File " + sub + " does not match the signed release."
 	case CheckAdvisory:
+		if id, ok := strings.CutPrefix(f.Detail, uncompared); ok {
+			return fmt.Sprintf("Could not compare the installed version of %s with advisory %s (fixed in %s). Check it on the box page.",
+				sub, safeName(id), safeName(f.Fixed))
+		}
 		return fmt.Sprintf("Known vulnerability in %s (%s), fixed in %s. The box takes the fix when an update has it.",
 			sub, safeName(f.Detail), safeName(f.Fixed))
 	case CheckDrift:
@@ -800,7 +830,7 @@ func (s *Guard) Digest() []string {
 	pkgs := map[string][]Record{}
 	for _, id := range sortedKeys(s.st.Open) {
 		r := s.st.Open[id]
-		if r.Finding.Check == CheckAdvisory {
+		if r.Finding.Check == CheckAdvisory && !strings.HasPrefix(r.Finding.Detail, uncompared) {
 			pkgs[r.Finding.Subject] = append(pkgs[r.Finding.Subject], r)
 			continue
 		}

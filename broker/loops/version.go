@@ -17,14 +17,17 @@ const (
 // that does not parse counts as below: fail closed, so an unreadable
 // version is reported, never assumed fixed.
 func versionBelow(scheme, v, fixed string) bool {
-	var c int
-	var ok bool
-	if scheme == SchemeSemver {
-		c, ok = semverCompare(v, fixed)
-	} else {
-		c, ok = debCompare(v, fixed)
-	}
+	c, ok := compareVersions(scheme, v, fixed)
 	return !ok || c < 0
+}
+
+// compareVersions orders two versions under the scheme; ok is false when
+// either does not parse.
+func compareVersions(scheme, a, b string) (int, bool) {
+	if scheme == SchemeSemver {
+		return semverCompare(a, b)
+	}
+	return debCompare(a, b)
 }
 
 // debCompare orders two Debian versions as dpkg does:
