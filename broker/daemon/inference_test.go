@@ -114,6 +114,7 @@ var netOK = map[string]allowance{
 // import (escapes), and why.
 var escapeOK = map[string]map[string]string{
 	"vm/gvisor": {"os/exec": "starts runsc, the only executable (vm/gvisor TestOnlyRunscIsExecuted)"},
+	"clock":     {"os/exec": "runs /usr/bin/chronyc for read-only sync queries, the only executable (clock TestOnlyChronycIsExecuted; HOST-1b)"},
 	"quota":     {"unsafe": "hands the quotactl and fsxattr structs to the kernel"},
 }
 
