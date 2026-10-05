@@ -30,8 +30,9 @@ type fakeMachines struct {
 	events  []string
 	// locked mimics the manager holding its lock while it calls Open;
 	// a Lineage call then would deadlock on the box.
-	locked bool
-	misuse int
+	locked  bool
+	misuse  int
+	stepErr error // what Step answers; nil succeeds
 }
 
 func newMachines() *fakeMachines {
@@ -43,8 +44,10 @@ func (f *fakeMachines) Step(_ context.Context, id string) error {
 	defer f.mu.Unlock()
 	f.steps[id]++
 	f.events = append(f.events, "step "+id)
-	return nil
+	return f.stepErr
 }
+
+func (f *fakeMachines) failSteps(err error) { f.mu.Lock(); f.stepErr = err; f.mu.Unlock() }
 
 func (f *fakeMachines) RaisePrivate(id string) error {
 	f.mu.Lock()

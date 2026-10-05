@@ -66,7 +66,103 @@ type machines struct{ m *vm.Manager }
 
 func (a machines) Step(ctx context.Context, id string) error {
 	_, err := a.m.Step(ctx, id)
+	return stepErr(err)
+}
+
+// stepErr marks a failed step snapshot's reason for the guest plane,
+// which tells the agent and STATUS a fixed text for it (SR2-3s). A layer
+// too deep to measure is checked first: the manager reports it as a
+// disk budget too.
+func stepErr(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, vm.ErrTooDeep):
+		return fmt.Errorf("%w: %w", guest.ErrStepTooDeep, err)
+	case errors.Is(err, vm.ErrQuota):
+		return fmt.Errorf("%w: %w", guest.ErrStepNoRoom, err)
+	}
 	return err
+}
+
+// stepSource is the guest plane's view of failing step snapshots.
+type stepSource interface {
+	StepNote() string
+	StepLine() (string, time.Time)
+}
+
+type stepSrc struct{ stepSource }
+
+// stepNotes is STATUS's line while the agent's step snapshots keep
+// failing, once the guest plane is open (SR2-3s).
+type stepNotes struct{ p atomic.Pointer[stepSrc] }
+
+// newStepNotes adds the line to STATUS's notes; it stays empty until open.
+func newStepNotes(notes *[]func() string) *stepNotes {
+	n := &stepNotes{}
+	*notes = append(*notes, n.Note)
+	return n
+}
+
+// open points the line at src and, with a digest to tell, starts telling
+// it there.
+func (n *stepNotes) open(ctx context.Context, src stepSource, notice func(key, line string) error) {
+	n.p.Store(&stepSrc{src})
+	if notice != nil {
+		go n.digest(ctx, notice)
+	}
+}
+
+func (n *stepNotes) Note() string {
+	if p := n.p.Load(); p != nil {
+		return p.StepNote()
+	}
+	return ""
+}
+
+// digestPeriod is how long the Rollback line stands before the digest
+// carries it too (security R1, UX on SR2-3s).
+const digestPeriod = 24 * time.Hour
+
+// stepDigestKey is the digest notice key for the Rollback line STATUS has
+// carried since shown, at now: none in the first digest period, then one
+// a day for 7 days, then one a week (W5's cadence). The key holds the
+// line, so a new reason or since-time is told at once; a success clears
+// the line, and with it any further key.
+func stepDigestKey(line string, shown, now time.Time) (string, bool) {
+	if line == "" || now.Sub(shown) < digestPeriod {
+		return "", false
+	}
+	d := int(now.Sub(shown) / digestPeriod)
+	if d > 7 {
+		d = 8 + (d-8)/7
+	}
+	return fmt.Sprintf("sr2-3s:%d:%s", d, line), true
+}
+
+// digest queues the Rollback line for the owner's digest on stepDigestKey's
+// cadence, each minute until ctx ends. The line is the STATUS line,
+// verbatim: the digest adds no wording of its own.
+func (n *stepNotes) digest(ctx context.Context, notice func(key, line string) error) {
+	t := time.NewTicker(time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		p := n.p.Load()
+		if p == nil {
+			continue
+		}
+		line, shown := p.StepLine()
+		if key, ok := stepDigestKey(line, shown, time.Now()); ok {
+			if err := notice(key, line); err != nil {
+				log.Printf("rollback digest line: %v", err)
+			}
+		}
+	}
 }
 
 func (a machines) RaisePrivate(id string) error { return a.m.RaiseLabel(id, vm.Private) }
@@ -442,6 +538,7 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	steps := newStepNotes(&cfg.Notes)
 	d, err := daemon.Run(ctx, cfg)
 	if err != nil {
 		log.Fatal(err)
@@ -511,6 +608,11 @@ func main() {
 				log.Printf("agent machines disabled: %v", err)
 			} else {
 				services.live.Store(&svc{plane})
+				var notice func(key, line string) error
+				if lp != nil {
+					notice = lp.pipe.Notice
+				}
+				steps.open(ctx, plane, notice)
 				oa := &guest.OwnerAgent{Plane: plane, Machine: agentMachine}
 				if lp != nil {
 					oa.Delivered = lp.delivered

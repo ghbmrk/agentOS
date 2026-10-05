@@ -290,6 +290,9 @@ var (
 	// and what it was writing is discarded.
 	ErrPreempted = errors.New("vm: machine was preempted during the operation")
 	ErrQuota     = errors.New("vm: disk budget exceeded: snapshot refused; free space in the machine (delete files) or roll back, then retry")
+	// ErrTooDeep is a layer nested too deep to measure or copy
+	// (overlay.ErrTooDeep), for callers outside the machine plane.
+	ErrTooDeep = overlay.ErrTooDeep
 	// ErrDiskFull refuses to start a machine when the state disk above
 	// the reserve cannot hold what it and the running machines may write
 	// under their quotas (RES-4).
