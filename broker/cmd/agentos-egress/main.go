@@ -123,12 +123,45 @@ func newProxy(v *vault.Vault, g map[string][]string, tr http.RoundTripper) (*egr
 
 // newRouter builds the model router (P2-7) over the grants. Its egress
 // handler, label, and auditor are given per call (modelHandler).
+// builderGrants gives Loop 1's builder machines the grants of from, under
+// the key modelroute.BuilderPrefix (grantsKey), when from is set. No
+// -grant may name a builder machine, and from may not be one: builders
+// have no grants of their own (W3-builder, C-3c-6).
+func builderGrants(g grants, from string) (grants, error) {
+	for m := range g {
+		if strings.HasPrefix(m, modelroute.BuilderPrefix) {
+			return nil, fmt.Errorf("-grant %s: builder machines take -builder-from's grants, never their own", m)
+		}
+	}
+	out := grants{}
+	for m, a := range g {
+		out[m] = a
+	}
+	if from == "" {
+		return out, nil
+	}
+	if strings.HasPrefix(from, modelroute.BuilderPrefix) || strings.HasPrefix(from, modelroute.EvalPrefix) {
+		return nil, fmt.Errorf("-builder-from %s: name the agent machine whose grants builders use", from)
+	}
+	out[modelroute.BuilderPrefix] = append([]string(nil), g[from]...)
+	return out, nil
+}
+
+// grantsKey is the grants entry a machine uses: its own, or the builders'
+// for a builder machine.
+func grantsKey(machine string) string {
+	if strings.HasPrefix(machine, modelroute.BuilderPrefix) {
+		return modelroute.BuilderPrefix
+	}
+	return machine
+}
+
 func newRouter(rule route.Rule, g map[string][]string, privateOK map[string]bool) (*route.Router, error) {
 	return route.New(route.Config{
 		Providers: []route.Provider{route.OpenAI(), route.Anthropic()},
 		Rule:      rule,
 		Granted: func(machine, provider string) bool {
-			for _, a := range g[machine] {
+			for _, a := range g[grantsKey(machine)] {
 				if a == provider {
 					return true
 				}
@@ -213,6 +246,7 @@ func serveCmd(args []string) error {
 	rulePath := fs.String("rule", "", "routing rule: JSON task class -> routes (P2-7); adoptions may only reorder its routes")
 	routingPath := fs.String("routing-state", "", "the adopted routing rule, kept across restarts (W3); default routing.json beside the keys")
 	pricesPath := fs.String("prices", "", "model price table for evaluation routes: JSON \"provider/model\" -> {input, output} per million tokens; empty refuses every evaluation route")
+	builderFrom := fs.String("builder-from", "", "the agent machine whose model grants Loop 1's builder machines (lb-) use, always as private data (W3-builder); empty (the default) gives builders no model access")
 	evalFrom := fs.String("eval-from", "", "the agent machine whose model grants replay machines use (LOOP-5); empty (the default) gives replay no model access")
 	privateOK := fs.String("private-ok", "", "providers the owner allowed for private data, comma-separated (CAP-9)")
 	tpmPath := fs.String("tpm", defaultTPM, "this PC's TPM (trusted host, CRED-8); absent means every boot is an unknown host")
@@ -256,6 +290,9 @@ func serveCmd(args []string) error {
 		if strings.HasPrefix(m, modelroute.EvalPrefix) {
 			return fmt.Errorf("-grant %s: replay machines take -eval-from's grants, never their own", m)
 		}
+	}
+	if g, err = builderGrants(g, *builderFrom); err != nil {
+		return err
 	}
 	self := os.Getuid()
 	if *brokerUID < 0 || *brokerUID == self {

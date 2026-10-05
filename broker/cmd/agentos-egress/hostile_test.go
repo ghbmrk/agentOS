@@ -51,6 +51,12 @@ func openModelSocket(t *testing.T, rt *route.Router, provider http.HandlerFunc) 
 // The machine "agent" is granted OpenAI.
 func serveModel(t *testing.T, rt *route.Router, ev *evalRoute, provider http.HandlerFunc) string {
 	t.Helper()
+	return serveModelGrants(t, rt, ev, map[string][]string{"agent": {"openai"}}, provider)
+}
+
+// serveModelGrants is serveModel with the proxy's grants g.
+func serveModelGrants(t *testing.T, rt *route.Router, ev *evalRoute, g map[string][]string, provider http.HandlerFunc) string {
+	t.Helper()
 	prov := httptest.NewTLSServer(provider)
 	t.Cleanup(prov.Close)
 	tr := prov.Client().Transport.(*http.Transport).Clone()
@@ -63,7 +69,7 @@ func serveModel(t *testing.T, rt *route.Router, ev *evalRoute, provider http.Han
 	}
 	r := newFastRig(t, true)
 	r.c.build = func(v *vault.Vault) (*egress.Proxy, error) {
-		return newProxy(v, map[string][]string{"agent": {"openai"}}, tr)
+		return newProxy(v, g, tr)
 	}
 	if err := r.c.confirm(r.unlock(t), r.code()); err != nil {
 		t.Fatal(err)

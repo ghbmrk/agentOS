@@ -114,6 +114,13 @@ type Readier interface {
 	Ready(b Brief) bool
 }
 
+// Private is a builder whose candidates are never public, whatever the
+// REV-5 labels of their inputs: it builds in a private machine with
+// private model egress (loopbuild; security C-3c-4, C-3c-6).
+type Private interface {
+	Private(b Brief) bool
+}
+
 // BySignal routes each hypothesis to the builder for its signal, such as
 // the skill compiler for repeated trajectories (CAP-5) and a model-backed
 // agent for the rest.
@@ -127,6 +134,12 @@ func (b BySignal) Ready(br Brief) bool {
 		return r.Ready(br)
 	}
 	return true
+}
+
+// Private defers to the signal's builder when it is Private.
+func (b BySignal) Private(br Brief) bool {
+	p, ok := b[br.Hypothesis.Signal].(Private)
+	return ok && p.Private(br)
 }
 
 func (b BySignal) Build(ctx context.Context, br Brief) (change.Candidate, error) {
@@ -454,7 +467,8 @@ func (l *Learn) propose(ctx context.Context, h Hypothesis, ev Evidence) (change.
 	if !reuse {
 		// No kept candidate, or its brief changed, it expired, or one of
 		// its tasks is now held out: build afresh.
-		built, err := l.cfg.Builder.Build(ctx, Brief{Hypothesis: h, Dev: ev.Dev})
+		br := Brief{Hypothesis: h, Dev: ev.Dev}
+		built, err := l.cfg.Builder.Build(ctx, br)
 		if err != nil {
 			return change.Report{}, err
 		}
@@ -467,6 +481,9 @@ func (l *Learn) propose(ctx context.Context, h Hypothesis, ev Evidence) (change.
 		// Source, origin, and the public mark are the broker's, from the
 		// REV-5 labels of every input; the builder asserts none of them.
 		cand.Source, cand.Origin, cand.Public = change.Local, "loop1", public(h, ev.Dev)
+		if p, ok := l.cfg.Builder.(Private); ok && p.Private(br) {
+			cand.Public = false
+		}
 	}
 	l.mu.Lock()
 	if l.Holds(cand) {

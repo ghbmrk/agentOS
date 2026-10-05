@@ -50,11 +50,13 @@ var controlPath = map[string][]string{
 	// grants gate's types to harvest the owner's verdicts (PW3 on #90).
 	// Loop 1's skill compiler (compile) is its one in-process builder: it
 	// calls no model and imports only the skill file format (W3 step 3a).
+	// Every other builder runs in its own machine behind loopbuild's
+	// socket (W3-builder).
 	// It runs the owner-question book (W9) on the box clock (P2-9).
 	// clock imports golang.org/x/sys/unix (adjtimex), so it has no entry
 	// below, whose rules refuse third-party imports; TestAgentosdLinks-
 	// NoInference holds it instead, through netOK.
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile"},
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies
@@ -98,6 +100,10 @@ var guestPlane = map[string]struct {
 	// Replay (LOOP-5) serves replay machines through a guest plane of its
 	// own: no journal writes, no executors, no network clients.
 	"replay": {[]string{"admission", "change", "guest", "journal", "meter", "vm"}, []string{"net", "os/exec", "plugin", "unsafe", "C"}},
+	// Loop 1's model-backed builder (W3-builder) serves each builder
+	// machine its own socket, as replay does: the brief, one candidate,
+	// and the metered model route; no executors, no network clients.
+	"loopbuild": {[]string{"admission", "change", "journal", "loops", "meter", "vm"}, []string{"net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}},
 	// Agents' questions to the owner (P3-8, W9): served to guests and
 	// answered from the owner channel, through hooks the wiring passes.
 	"question": {nil, forbiddenStd},

@@ -435,9 +435,11 @@ func TestLoop1BuildsCompiledSkillsOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Every other signal's builder runs in its own machine (W3-builder),
+	// never in agentosd.
 	for _, s := range []loops.Signal{loops.SignalFailure, loops.SignalCorrection, loops.SignalSlow, loops.SignalExpensive} {
-		if lp.builder.Handles(s) {
-			t.Fatalf("a builder for %s runs in agentosd", s)
+		if lp.builder[s] != loops.Builder(&lp.build) {
+			t.Fatalf("the builder for %s is not the builder machines'", s)
 		}
 	}
 	if !lp.builder.Handles(loops.SignalRepeat) {

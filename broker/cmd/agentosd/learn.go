@@ -45,7 +45,10 @@ type learning struct {
 	// builder is Loop 1's: the skill compiler for repeated trajectories,
 	// in-process since it calls no model (W3 step 3a).
 	builder loops.BySignal
-	learn   *loops.Learn
+	// build is the model-backed builder for every other signal, in its
+	// own private machine (W3-builder), once the machine plane attaches it.
+	build lateBuild
+	learn *loops.Learn
 	// values are the guest's task values, for the compiler only
 	// (W3-values); mining is the journal everything else in Loop 1 reads,
 	// which keeps none (security V3).
@@ -135,6 +138,9 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	if l.builder, err = skillBuilder(l.mining, l.values, l.pipe); err != nil {
 		return nil, err
 	}
+	for _, sig := range []loops.Signal{loops.SignalFailure, loops.SignalCorrection, loops.SignalSlow, loops.SignalExpensive} {
+		l.builder[sig] = &l.build
+	}
 	learn, err := loops.NewLearn(loops.LearnConfig{
 		Pipeline:   l.pipe,
 		Journal:    l.mining,
@@ -161,9 +167,9 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	l.harvest.Wake = l.sched.Wake
 	l.cases = l.harvest
 	// Evaluation keeps its reserve of the spare budget while Loop 1
-	// evaluates (loops L3). The clean room takes its Max here once it
-	// exists.
-	if err := spare.SetShares([]meter.Share{l.sched.EvalShare()}); err != nil {
+	// evaluates (loops L3); builder machines take at most their Max of it
+	// (C-3c-5). The clean room takes its Max here once it exists.
+	if err := spare.SetShares([]meter.Share{l.sched.EvalShare(), builderShare()}); err != nil {
 		return nil, err
 	}
 	cfg.Grants.Changes = l.pipe
