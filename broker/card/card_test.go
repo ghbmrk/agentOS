@@ -55,7 +55,7 @@ func TestGenerateStrengthAndUniqueness(t *testing.T) {
 		}
 	}
 	bits := func(s string) float64 { return float64(len(strings.ReplaceAll(s, "-", ""))) * 5 }
-	if bits(a.WiFiPassword) < 80 || bits(a.SetupSecret) < 128 || bits(a.RecoveryKey) < 128 || len(a.GridSeed) < 32 {
+	if bits(a.WiFiPassword) < 80 || bits(a.SetupSecret) < 128 || bits(a.RecoveryKey)*32/40 < 160 || len(a.GridSeed) < 32 {
 		t.Fatalf("weak secret: %+v", a)
 	}
 	if len(a.WiFiPassword) < 8 || len(a.WiFiPassword) > 63 {
@@ -89,6 +89,46 @@ func TestSetupCodeIsDerivedFromTheSecretOnly(t *testing.T) {
 	}
 	if CheckSetupCode(a.SetupSecret, "AAAA-AAAA") {
 		t.Fatal("wrong setup code accepted")
+	}
+}
+
+// The recovery key prints in broker/recovery's format (P2-8): 40 symbols,
+// eight groups of four plus a GF(32) check symbol. The vectors were made
+// with recovery.RecoveryKey.Text and recovery.GridCheck, so the card and
+// the vault agree.
+func TestRecoveryKeyAndGridCheckMatchRecovery(t *testing.T) {
+	var b [recoveryKeyBytes]byte
+	for i := range b {
+		b[i] = byte(i*37 + 11)
+	}
+	if got := RecoveryKeyText(b); got != "BN2FV-L8W9W-2VWSR-6N429-RYTNQ-R5ATA-G3P23-BKQLP" {
+		t.Fatalf("recovery key text %s", got)
+	}
+	seed := make([]byte, 32)
+	for i := range seed {
+		seed[i] = byte(i)
+	}
+	if got := GridCheck(seed); got != "THJA" {
+		t.Fatalf("grid check %s", got)
+	}
+	c := mustGen(t, 5)
+	if !regexp.MustCompile(`^([A-Z2-9]{5}-){7}[A-Z2-9]{5}$`).MatchString(c.RecoveryKey) {
+		t.Fatalf("recovery key shape %q", c.RecoveryKey)
+	}
+	// One mistyped symbol fails its group's check.
+	bad := []byte(c.RecoveryKey)
+	if bad[0] == 'A' {
+		bad[0] = 'B'
+	} else {
+		bad[0] = 'A'
+	}
+	c.RecoveryKey = string(bad)
+	if c.Validate() == nil {
+		t.Fatal("mistyped recovery key accepted")
+	}
+	page, err := HTML(mustGen(t, 6))
+	if err != nil || !strings.Contains(string(page), "Grid check code: <span class=\"mono\">"+GridCheck(mustGen(t, 6).GridSeed)) {
+		t.Fatalf("grid check not printed under the grid: %v", err)
 	}
 }
 

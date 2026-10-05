@@ -39,10 +39,10 @@ const (
 	// setupCodeSymbols: 40 bits, guessable only online through the box's
 	// rate-limited pairing (localui).
 	setupCodeSymbols = 8
-	// recoverySymbols: 160 bits.
-	recoverySymbols = 32
-	gridSeedBytes   = 32
-	nameSymbols     = 4
+	// The recovery key is 160 bits, printed as 40 symbols with checks
+	// (recoverykey.go).
+	gridSeedBytes = 32
+	nameSymbols   = 4
 )
 
 // Card holds one Owner Card's values. Everything but GridSeed is printed;
@@ -74,8 +74,8 @@ func Generate(r io.Reader) (*Card, error) {
 	if err != nil {
 		return nil, err
 	}
-	rec, err := sym(recoverySymbols)
-	if err != nil {
+	var rec [recoveryKeyBytes]byte
+	if _, err := io.ReadFull(r, rec[:]); err != nil {
 		return nil, err
 	}
 	pass, err := passphrase(r)
@@ -92,7 +92,7 @@ func Generate(r io.Reader) (*Card, error) {
 		SetupSecret:     group(setup, 4),
 		VaultPassphrase: pass,
 		GridSeed:        seed,
-		RecoveryKey:     group(rec, 4),
+		RecoveryKey:     RecoveryKeyText(rec),
 	}
 	c.SetupCode = SetupCodeFor(c.SetupSecret)
 	return c, c.Validate()
@@ -118,11 +118,13 @@ func (c *Card) Validate() error {
 	for _, e := range []error{
 		check("Wi-Fi password", c.WiFiPassword, wifiSymbols),
 		check("setup secret", c.SetupSecret, setupSymbols),
-		check("recovery key", c.RecoveryKey, recoverySymbols),
 	} {
 		if e != nil {
 			return e
 		}
+	}
+	if !recoveryKeyOK(c.RecoveryKey) {
+		return errors.New("card: recovery key format or check symbols")
 	}
 	if c.SetupCode != SetupCodeFor(c.SetupSecret) {
 		return errors.New("card: setup code does not match the setup secret")

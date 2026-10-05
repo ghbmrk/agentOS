@@ -64,6 +64,7 @@ type view struct {
 	BoxPage        string
 	GridCols       []string
 	Grid           []gridRow
+	GridCheck      string
 }
 
 // HTML renders the card as a printable page: the card itself (front and
@@ -82,7 +83,7 @@ func HTML(c *Card) ([]byte, error) {
 		return nil, err
 	}
 	v := view{Card: c, WiFiQR: wq, PassQR: pq, QuickStart: QuickStart, BootKeys: BootKeys, WaitMinutes: WaitMinutes, BoxPage: BoxPage,
-		GridCols: []string{"A", "B", "C", "D", "E", "F", "G", "H", "I", "J"}}
+		GridCols: []string{"A", "B", "C", "D", "E", "F", "G", "H", "I", "J"}, GridCheck: GridCheck(c.GridSeed)}
 	labels := owner.GridLabels()
 	for r := 0; r < 10; r++ {
 		row := gridRow{Row: r + 1}
@@ -162,6 +163,7 @@ If this drive was out of your hands, unlock it only on your trusted PC.</p></div
 <table class="grid"><tr><th></th>{{range .GridCols}}<th>{{.}}</th>{{end}}</tr>
 {{range .Grid}}<tr><th>{{.Row}}</th>{{range .Cells}}<td>{{.}}</td>{{end}}</tr>
 {{end}}</table>
+<p class="note">Grid check code: <span class="mono">{{.GridCheck}}</span> (the box may ask for it after a new grid).</p>
 </section>
 
 <section class="sheet">
