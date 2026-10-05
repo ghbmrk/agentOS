@@ -310,11 +310,11 @@ func learningOff(cfg *daemon.Config) {
 
 // forgetTask deletes what the learning plane keeps of one task: its text,
 // its values, the Loop 1 cases harvested from it and the harvester's
-// records of them (W3-tasks part 1,
-// CAP-3). Only an authenticated owner forget may call it; none exists yet,
-// so nothing does. Adopted skills and procedures whose evidence includes
-// the task, and held candidates (loops L19), are the cascade's (security
-// C1 on #120; BOARD W3-tasks).
+// records of them (W3-tasks part 1, CAP-3), and the cascade (W3-tasks part
+// 2, security C1 on #120): Loop 1's kept candidates built from it, and
+// every adoption learned from it, undone with its files cleared from the
+// pipeline's history (change C23). Only an authenticated owner forget may
+// call it; none exists yet, so nothing does.
 func (l *learning) forgetTask(goal string) error {
 	if goal == "" {
 		return errors.New("learning: forget needs a goal")
@@ -326,6 +326,7 @@ func (l *learning) forgetTask(goal string) error {
 	ferr := l.forgotten.add(goal)
 	_, terr := l.tasks.forget(goal)
 	_, verr := l.values.forget(goal)
+	l.learn.ForgetGoal(goal)
 	ids, cerr := l.pipe.ForgetGoal(goal)
 	herr := l.harvest.ForgetCases(ids)
 	return errors.Join(ferr, terr, verr, cerr, herr)

@@ -144,15 +144,24 @@ func (p *Pipeline) AddSecurityCase(c Case) error {
 // (TestOnlyTheDaemonForgets holds every other package to that), so unlike
 // RemoveCase it takes no second approval (CHG-2 guards the suite against
 // changes the owner did not make). Security fixtures carry no goal and
-// never go. Adoptions whose evidence included these cases stay until the
-// forget cascade removes or rebuilds them (BOARD W3-tasks, security C1 on
-// #120).
+// never go. In the same save it undoes every adoption learned from goal
+// and clears its files from history, and drops proposals built from it;
+// a candidate from goal still being evaluated is never adopted (security
+// C1 on #120, C23). On a failed save the saved state is reloaded and
+// re-applied, so a retry does it all again.
 func (p *Pipeline) ForgetGoal(goal string) ([]string, error) {
 	if goal == "" {
 		return nil, errors.New("change: forget needs a goal")
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.broken != nil {
+		return nil, p.broken
+	}
+	if p.gone == nil {
+		p.gone = map[string]bool{}
+	}
+	p.gone[goal] = true
 	next := p.st.copyCases()
 	var ids []string
 	for id, c := range next {
@@ -161,14 +170,20 @@ func (p *Pipeline) ForgetGoal(goal string) ([]string, error) {
 			ids = append(ids, id)
 		}
 	}
-	if len(ids) == 0 {
+	sort.Strings(ids)
+	tree, ads, touched, changed := p.forgetAdoptionsLocked(goal)
+	if len(ids) == 0 && !changed {
 		return nil, nil
 	}
-	sort.Strings(ids)
-	old := p.st.Cases
-	p.st.Cases = next
+	if err := p.activateLocked(p.st.Active, tree, touched); err != nil {
+		return nil, err
+	}
+	p.st.Cases, p.st.Adoptions, p.st.Active = next, ads, tree
+	p.dropOldBasesLocked(tree.Hash())
 	if err := p.saveLocked(); err != nil {
-		p.st.Cases = old
+		if rerr := p.reloadLocked(); rerr != nil {
+			p.broken = fmt.Errorf("change: state cannot be saved (%v) or reloaded (%v); restart needed", err, rerr)
+		}
 		return nil, err
 	}
 	return ids, nil

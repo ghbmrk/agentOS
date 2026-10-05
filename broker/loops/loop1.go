@@ -243,6 +243,55 @@ type Learn struct {
 	// the next digest says once that drafted skills are being tested
 	// (potency C1, UX-120-1 on #120).
 	nowTested bool
+	// gone are the goals forgotten since start (ForgetGoal).
+	gone map[string]bool
+}
+
+// ForgetGoal drops every candidate Loop 1 keeps that was built from goal,
+// and keeps none built from it from now on (W3-tasks part 2, security C1
+// on #120). Only the broker's handling of an authenticated owner forget
+// calls it, with the pipeline's ForgetGoal (change C23); new hypotheses
+// never mine a forgotten goal, since the daemon's tombstone hides its
+// intents.
+func (l *Learn) ForgetGoal(goal string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.gone == nil {
+		l.gone = map[string]bool{}
+	}
+	l.gone[goal] = true
+	for k, kc := range l.built {
+		if l.goneLocked(kc.cand.Goals) {
+			delete(l.built, k)
+		}
+	}
+}
+
+func (l *Learn) goneLocked(goals []string) bool {
+	for _, g := range goals {
+		if l.gone[g] {
+			return true
+		}
+	}
+	return false
+}
+
+// goalsRead are the goals of the owner tasks a builder's brief carries:
+// the hypothesis's evidence intents and the dev cases, sorted.
+func goalsRead(h Hypothesis, dev []change.Case) []string {
+	var out []string
+	for _, s := range h.Evidence {
+		if s.Intent.GoalID != "" {
+			out = append(out, s.Intent.GoalID)
+		}
+	}
+	for _, c := range dev {
+		if c.Goal != "" {
+			out = append(out, c.Goal)
+		}
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
 // Holds reports whether Loop 1 would build c but hold it unproposed,
@@ -571,6 +620,7 @@ func (l *Learn) propose(ctx context.Context, h Hypothesis, ev Evidence) (change.
 		// Source, origin, and the public mark are the broker's, from the
 		// REV-5 labels of every input; the builder asserts none of them.
 		cand.Source, cand.Origin, cand.Public = change.Local, "loop1", public(h, ev.Dev)
+		cand.Goals = goalsRead(h, ev.Dev)
 		if p, ok := l.cfg.Builder.(Private); ok && p.Private(br) {
 			cand.Public = false
 		}
@@ -598,11 +648,12 @@ func (l *Learn) propose(ctx context.Context, h Hypothesis, ev Evidence) (change.
 	rep, err := l.cfg.Pipeline.Propose(ctx, cand)
 	if errors.Is(err, change.ErrInterrupted) {
 		// Preempted mid-evaluation: keep the checked candidate for the
-		// next offer, so the pipeline can resume its pairs.
+		// next offer, so the pipeline can resume its pairs, unless its
+		// goal was forgotten or an intent erased meanwhile.
 		intents := briefIntents(h, ev.Dev)
 		l.mu.Lock()
-		if l.cfg.Harvest.erasedAny(intents) {
-			// Erased while it was evaluated (security F1 on #153).
+		if l.goneLocked(cand.Goals) || l.cfg.Harvest.erasedAny(intents) {
+			// Security F1 on #153; change C23.
 			l.mu.Unlock()
 			return rep, err
 		}
