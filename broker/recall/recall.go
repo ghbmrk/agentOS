@@ -405,12 +405,15 @@ func (ix *Index) ingest(keys []string, items []Item) ([]string, []error) {
 		if len(batch) == 0 {
 			return
 		}
-		err := ix.putLocked(batch)
+		// Items before a failed append are durable and indexed: report
+		// them as ingested, and the error only for the rest. A compaction
+		// failure after all are applied is retried by later writes.
+		n, err := ix.putLockedN(batch)
 		for k, i := range idx {
-			if err != nil {
-				errs[i] = err
-			} else {
+			if k < n {
 				ids[i] = batch[k].ID
+			} else {
+				errs[i] = err
 			}
 		}
 		batch, idx, inBatch = nil, nil, map[string]bool{}

@@ -294,3 +294,43 @@ func TestUnreadableItemIsStillDeleted(t *testing.T) {
 		t.Fatalf("other items: %d", ix.Len())
 	}
 }
+
+// A batch that spans segments and fails part-way reports the items written
+// before the failure as ingested and only the rest as failed (review of
+// #51, round 2).
+func TestIngestBatchReportsPartialFailure(t *testing.T) {
+	smallSegments(t, 4)
+	st := &appendFailAfter{MemDir: NewMemDir(), okAppends: 1}
+	ix := open(t, st, WithKeyer(testKeyer(t)))
+	var items []Item
+	for i := 0; i < 8; i++ {
+		items = append(items, Item{Source: Source{Kind: "file", Ref: fmt.Sprint("/b", i)}, Text: fmt.Sprint("batch item ", i)})
+	}
+	ids, errs := ix.IngestBatch(items)
+	for i := range items {
+		_, present := ix.Get(ix.SourceID("file", "", fmt.Sprint("/b", i)))
+		ok := errs[i] == nil && ids[i] != ""
+		if ok != present {
+			t.Errorf("item %d: reported ok=%v (id %q, err %v) but present=%v", i, ok, ids[i], errs[i], present)
+		}
+	}
+	if errs[0] != nil || errs[7] == nil {
+		t.Fatalf("want the first segment written and the second failed: %v", errs)
+	}
+}
+
+// appendFailAfter lets okAppends appends through, then fails every one
+// after writing it (a failed fsync).
+type appendFailAfter struct {
+	*MemDir
+	okAppends int
+}
+
+func (f *appendFailAfter) Append(n uint32, data []byte) (int64, error) {
+	if f.okAppends > 0 {
+		f.okAppends--
+		return f.MemDir.Append(n, data)
+	}
+	f.MemDir.Append(n, data)
+	return 0, errors.New("fsync failed")
+}

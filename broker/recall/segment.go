@@ -153,6 +153,14 @@ func (ix *Index) readItem(e *entry) (Item, error) {
 // putLocked writes items (each already admitted) to the active segment,
 // one durable append per segment, and indexes them. Caller holds mu.
 func (ix *Index) putLocked(items []*Item) error {
+	_, err := ix.putLockedN(items)
+	return err
+}
+
+// putLockedN is putLocked reporting how many items, from the first, are
+// durable and indexed: a batch spanning segments can fail part-way. An
+// error with every item applied is a compaction failure (retried later).
+func (ix *Index) putLockedN(items []*Item) (applied int, err error) {
 	type pend struct {
 		it   *Item
 		line []byte
@@ -186,6 +194,7 @@ func (ix *Index) putLocked(items []*Item) error {
 		si := ix.seg(ix.active)
 		for _, p := range batch {
 			ix.applyPut(p.it, ix.active, off, uint32(len(p.line)-1))
+			applied++
 			off += int64(len(p.line))
 			si.lines++
 			si.size += int64(len(p.line))
@@ -196,13 +205,13 @@ func (ix *Index) putLocked(items []*Item) error {
 	for _, it := range items {
 		line, err := encodeItem(it)
 		if err != nil {
-			return err
+			return applied, err
 		}
 		si := ix.seg(ix.active)
 		pending := si.lines + len(batch)
 		if pending > 0 && (pending >= segMaxLines || si.size+int64(size+len(line)) > segMaxBytes) {
 			if err := flush(); err != nil {
-				return err
+				return applied, err
 			}
 			ix.active++
 		}
@@ -210,9 +219,9 @@ func (ix *Index) putLocked(items []*Item) error {
 		size += len(line)
 	}
 	if err := flush(); err != nil {
-		return err
+		return applied, err
 	}
-	return ix.maybeCompactSegs()
+	return applied, ix.maybeCompactSegs()
 }
 
 // applyPut makes it the current version of its ID, stored at (seg, off).
