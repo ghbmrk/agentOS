@@ -4,13 +4,14 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/admission"
 )
 
-// REQ: ARC-5
+// REQ: ARC-5, OP-1, REV-5
 // SPEC v0.12 IDs (PR #15; move into REQ when it merges): ARC-6
 
 // recServices records Open and Close calls.
@@ -56,9 +57,13 @@ func TestARC6EachLaunchGetsItsOwnServicesDirectory(t *testing.T) {
 	must(t, e.m.Rebuild(ctx, "m1"))
 	_, err = e.m.Fork(ctx, "f2", []string{"g1"})
 	must(t, err)
-	for id, want := range map[string]string{"m1": "m1", "f1": "m1", "f2": "m1", "g1": "m1"} {
-		if mc, _ := e.m.Get(id); mc.Lineage != want {
-			t.Errorf("%s lineage %q, want %q", id, mc.Lineage, want)
+	root, _ := e.m.Get("m1")
+	if !strings.HasPrefix(root.Lineage, "m1.") || len(root.Lineage) != len("m1.")+12 {
+		t.Fatalf("m1 lineage %q, want m1.<nonce>", root.Lineage)
+	}
+	for _, id := range []string{"f1", "f2", "g1"} {
+		if mc, _ := e.m.Get(id); mc.Lineage != root.Lineage {
+			t.Errorf("%s lineage %q, want %q", id, mc.Lineage, root.Lineage)
 		}
 	}
 	for _, l := range e.rt.launches {
@@ -93,4 +98,35 @@ func TestARC6NoServicesNoStart(t *testing.T) {
 	}
 	svc.fail = false
 	e.create("m1", admission.Accepted, 4096) // the whole capacity: the failed attempt released it
+}
+
+// TestOP1ReusedIDGetsANewLineage: a machine created under an ID that an
+// earlier, destroyed machine used does not share its intent namespace.
+func TestOP1ReusedIDGetsANewLineage(t *testing.T) {
+	e := newEnv(t, 4096)
+	e.open()
+	first := e.create("m1", admission.Accepted, 256)
+	must(t, e.m.Destroy(context.Background(), "m1"))
+	second := e.create("m1", admission.Accepted, 256)
+	if first.Lineage == second.Lineage {
+		t.Fatalf("re-created m1 reused lineage %q", first.Lineage)
+	}
+}
+
+// TestREV5DataLabelFailsClosed: model egress reads "public" only for a
+// known public machine; unknown machines and private ones read "private".
+func TestREV5DataLabelFailsClosed(t *testing.T) {
+	e := newEnv(t, 4096)
+	e.open()
+	e.create("pub", admission.Accepted, 256)
+	if got := e.m.DataLabel("pub"); got != "public" {
+		t.Fatalf("public machine reads %q", got)
+	}
+	if got := e.m.DataLabel("nobody"); got != "private" {
+		t.Fatalf("unknown machine reads %q, want private", got)
+	}
+	must(t, e.m.RaiseLabel("pub", Private))
+	if got := e.m.DataLabel("pub"); got != "private" {
+		t.Fatalf("raised machine reads %q", got)
+	}
 }

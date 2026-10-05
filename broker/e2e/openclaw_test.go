@@ -346,8 +346,9 @@ func TestIntegrationOpenClawGuest(t *testing.T) {
 	ex.mu.Lock()
 	runs := ex.runs
 	ex.mu.Unlock()
-	if len(runs) != 1 || runs[0].ID != "agent/oc-1" || runs[0].Origin != "guest:agent" || runs[0].Action != "message.send" {
-		t.Fatalf("effects run: %+v, want agent/oc-1 once", runs)
+	mc, _ := m.Get("agent")
+	if len(runs) != 1 || runs[0].ID != mc.Lineage+"/oc-1" || runs[0].Origin != "guest:"+mc.Lineage || runs[0].Action != "message.send" {
+		t.Fatalf("effects run: %+v, want %s/oc-1 once", runs, mc.Lineage)
 	}
 	if after := len(m.Snapshots("agent")); after <= before {
 		t.Fatalf("snapshots %d -> %d: want a Step after the tool call (REV-1)", before, after)
@@ -363,7 +364,7 @@ func TestIntegrationOpenClawGuest(t *testing.T) {
 	if u := mtr.Usage("agent"); u.Calls < 2 || int(u.Calls) != calls {
 		t.Fatalf("meter counted %+v, model saw %d calls (OP-8)", u, calls)
 	}
-	if st, err := eng.Get("agent/oc-1"); err != nil || st.State != journal.Succeeded {
+	if st, err := eng.Get(mc.Lineage + "/oc-1"); err != nil || st.State != journal.Succeeded {
 		t.Fatalf("journal: %+v %v", st, err)
 	}
 }

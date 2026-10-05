@@ -163,3 +163,47 @@ func TestA9OfflineScenario(t *testing.T) {
 		t.Fatalf("guest plane after restart: %d", code)
 	}
 }
+
+// TestCH2GuestFloodLeavesStopWorking: a guest that opens thousands of
+// connections to its socket cannot starve the broker process that serves
+// the owner's STOP (CH-2): its open connections are capped per machine.
+func TestCH2GuestFloodLeavesStopWorking(t *testing.T) {
+	dir, err := os.MkdirTemp("", "flood")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	b := boot(t, dir)
+	defer b.stop()
+	gdir, err := b.plane.Open("m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fds := func() int { e, _ := os.ReadDir("/proc/self/fd"); return len(e) }
+	before := fds()
+	var held []net.Conn
+	defer func() {
+		for _, c := range held {
+			c.Close()
+		}
+	}()
+	for i := 0; i < 3000; i++ {
+		c, err := net.DialTimeout("unix", filepath.Join(gdir, guest.Socket), 20*time.Millisecond)
+		if err == nil {
+			held = append(held, c)
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
+	// This process holds both ends: the guest's dials and what the broker
+	// accepted. The broker's share is what exceeds the guest's own.
+	if broker := fds() - before - len(held); broker > 32 {
+		t.Fatalf("the broker holds %d descriptors for one guest's flood", broker)
+	}
+	t0 := time.Now()
+	if r := ownerText(t, filepath.Join(dir, "run", daemon.OwnerSocket), "STOP"); !strings.HasPrefix(r, "Stopped.") {
+		t.Fatalf("STOP under flood: %q", r)
+	}
+	if d := time.Since(t0); d > 2*time.Second {
+		t.Fatalf("STOP took %v under flood", d)
+	}
+}

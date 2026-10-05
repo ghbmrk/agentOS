@@ -5,9 +5,17 @@
 // the caller knows from the listener the request came in on (never from
 // anything the guest sends, CRED-1): to the machine's task reservation when
 // a task is bound, otherwise to the machine's rolling cap; and always to the
-// box-wide overall cap. Counts are the broker's own observation: one call
-// per request, and tokens estimated from the bytes the broker saw going in
-// and coming out (Tokens). Provider- or guest-reported usage is never read.
+// box-wide overall cap.
+//
+// A call is charged in two steps. Start charges one call, the request's
+// input estimated from its size, and a reservation for its output sized
+// from the request's own output limit (clamped), so parallel calls cannot
+// pass a limit together. Done settles the charge to what the provider
+// reported it used (Wrap reads the usage the provider returns, hidden
+// reasoning tokens included); when a response carries no usage, output is
+// estimated from its content strings. Wrap runs the call to the end even
+// if the guest hangs up, so hanging up does not stop the charge.
+//
 // On exhaustion further calls are refused and the owner is told once
 // (Notify); the owner may extend one task within a daily ceiling that the
 // extension itself cannot raise. Usage is written to disk on every change,
@@ -18,6 +26,7 @@ package meter
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,8 +46,8 @@ type Limits struct {
 
 func (l Limits) add(o Limits) Limits { return Limits{l.Calls + o.Calls, l.Tokens + o.Tokens} }
 
-// over reports whether charging one more call carrying in tokens to used
-// would pass cap.
+// over reports whether charging one more call carrying in tokens (input
+// and reserved output) to used would pass cap.
 func over(used, cap Limits, in int64) bool {
 	return used.Calls+1 > cap.Calls || used.Tokens+in > cap.Tokens
 }
@@ -84,8 +93,15 @@ type Config struct {
 	DailyExtension Limits        // most the owner may extend tasks by per day
 	Window         time.Duration // rolling window; default 24 h
 	MaxBody        int64         // Wrap's request body cap; default 8 MiB
-	Notify         func(Exhausted)
-	Now            func() time.Time
+	// DefaultReserve is the output reserved for a request that sets no
+	// output limit; MaxReserve clamps any reservation. Defaults 8192 and
+	// 32768 tokens. Done settles the reservation to actual use.
+	DefaultReserve, MaxReserve int64
+	// CallTimeout bounds one call, which Wrap runs to the end even if the
+	// guest hangs up; default 10 minutes.
+	CallTimeout time.Duration
+	Notify      func(Exhausted)
+	Now         func() time.Time
 }
 
 // slots is how many buckets a window is split into.
@@ -134,6 +150,15 @@ func Open(cfg Config) (*Meter, error) {
 	}
 	if cfg.MaxBody <= 0 {
 		cfg.MaxBody = 8 << 20
+	}
+	if cfg.DefaultReserve <= 0 {
+		cfg.DefaultReserve = 8192
+	}
+	if cfg.MaxReserve <= 0 {
+		cfg.MaxReserve = 32768
+	}
+	if cfg.CallTimeout <= 0 {
+		cfg.CallTimeout = 10 * time.Minute
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
@@ -235,21 +260,28 @@ func (m *Meter) charge(bs []bucket, now int64, use Limits) []bucket {
 
 func (t *task) limit() Limits { return t.Reserved.add(t.Extended) }
 
-// Call is one admitted model call. Done records the tokens it returned.
+// Call is one admitted model call. Done settles what it used.
 type Call struct {
 	m       *Meter
 	machine string
 	task    string
+	charged int64 // tokens charged at Start
+	at      int64 // start of the bucket they were charged to
+	once    sync.Once
 }
 
-// Start admits one model call from machine carrying in tokens, or refuses
-// it with ErrExhausted. The call and its input tokens are charged at once,
-// so parallel calls cannot pass a limit together.
-func (m *Meter) Start(machine string, in int64) (*Call, error) {
+// Start admits one model call from machine carrying in input tokens and
+// reserving reserve output tokens, or refuses it with ErrExhausted. The
+// call and both amounts are charged at once, so parallel calls cannot pass
+// a limit together.
+func (m *Meter) Start(machine string, in, reserve int64) (*Call, error) {
+	if in < 0 || reserve < 0 {
+		return nil, errors.New("meter: negative charge")
+	}
 	m.mu.Lock()
 	now := m.cfg.Now().Unix()
 	tid := m.st.Bound[machine]
-	ex, err := m.admit(machine, tid, now, in)
+	ex, err := m.admit(machine, tid, now, in+reserve)
 	if ex != nil {
 		if m.st.Notified[ex.key()] {
 			ex = nil // told once per exhaustion
@@ -267,7 +299,7 @@ func (m *Meter) Start(machine string, in int64) (*Call, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Call{m: m, machine: machine, task: tid}, nil
+	return &Call{m: m, machine: machine, task: tid, charged: in + reserve, at: now - now%m.slot}, nil
 }
 
 func (e Exhausted) key() string {
@@ -293,9 +325,11 @@ func (m *Meter) admit(machine, tid string, now, in int64) (*Exhausted, error) {
 		return &Exhausted{Scope: ScopeMachine, Machine: machine, Used: used, Limit: m.cfg.MachineCap}, ErrExhausted
 	}
 	m.add(machine, tid, now, Limits{Calls: 1, Tokens: in})
+	// A task's notice stays sent until the owner extends it (Extend), so
+	// the owner is asked at most once per task. Rolling caps re-arm once
+	// a call gets through again.
 	delete(m.st.Notified, ScopeOverall)
 	delete(m.st.Notified, ScopeMachine+":"+machine)
-	delete(m.st.Notified, ScopeTask+":"+tid)
 	return nil, m.save()
 }
 
@@ -307,16 +341,45 @@ func (m *Meter) add(machine, tid string, now int64, use Limits) {
 	}
 }
 
-// Done charges the tokens the call returned. A call may pass its limit by
-// its own output; the next call is then refused. If the state cannot be
-// written, the charge still holds in memory and goes to disk with the next
-// successful save.
-func (c *Call) Done(out int64) {
-	m := c.m
+// Done settles the call to used, the tokens it actually used (input and
+// output). More than was charged at Start is added now; less is refunded
+// from the bucket Start charged, if it is still in the window. A call may
+// pass its limit by its own output; the next call is then refused. If the
+// state cannot be written, the charge still holds in memory and goes to
+// disk with the next successful save. Only the first Done counts.
+func (c *Call) Done(used int64) {
+	c.once.Do(func() { c.m.settle(c, used) })
+}
+
+func (m *Meter) settle(c *Call, used int64) {
+	if used < 0 {
+		used = 0
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.add(c.machine, c.task, m.cfg.Now().Unix(), Limits{Tokens: out})
+	switch d := used - c.charged; {
+	case d > 0:
+		m.add(c.machine, c.task, m.cfg.Now().Unix(), Limits{Tokens: d})
+	case d < 0:
+		refund(m.st.Overall, c.at, -d)
+		refund(m.st.Machines[c.machine], c.at, -d)
+		if t := m.st.Tasks[c.task]; t != nil {
+			t.Used.Tokens = max(0, t.Used.Tokens+d)
+		}
+	default:
+		return
+	}
 	_ = m.save()
+}
+
+// refund takes up to n tokens back from the bucket starting at at.
+func refund(bs []bucket, at, n int64) {
+	for i := range bs {
+		if bs[i].Start == at {
+			bs[i].Use.Tokens = max(0, bs[i].Use.Tokens-n)
+			return
+		}
+	}
 }
 
 // Bind charges machine's calls to task's reservation from now on. Several
@@ -361,7 +424,9 @@ func (m *Meter) Extend(taskID string, by Limits) error {
 		return fmt.Errorf("meter: no task %q", taskID)
 	}
 	day := m.cfg.Now().UTC().Format(time.DateOnly)
-	if g := m.st.Ext[day].add(by); g.Calls > m.cfg.DailyExtension.Calls || g.Tokens > m.cfg.DailyExtension.Tokens {
+	// Compared by subtraction: granted never exceeds the ceiling, so this
+	// cannot overflow the way granted+by can.
+	if g, c := m.st.Ext[day], m.cfg.DailyExtension; by.Calls > c.Calls-g.Calls || by.Tokens > c.Tokens-g.Tokens {
 		return ErrCeiling
 	}
 	m.st.Ext[day] = m.st.Ext[day].add(by)
@@ -382,15 +447,16 @@ func (m *Meter) Usage(machine string) Limits {
 	return m.sum(m.st.Machines[machine], m.cfg.Now().Unix())
 }
 
-// Tokens estimates tokens from bytes the broker observed: one token per 4
-// bytes, rounded up. It counts everything on the wire (JSON and stream
-// framing included), so it errs high for English text.
+// Tokens estimates tokens from bytes: one token per 4 bytes, rounded up.
 func Tokens(n int64) int64 { return (n + 3) / 4 }
 
 // Wrap meters every request to next as one model call from machine. The
-// request body is read in full (up to MaxBody) and counted before next
-// sees it; the response is counted as it streams. A refused call gets 429
-// and never reaches next.
+// request body is read in full (up to MaxBody); its size is the input
+// estimate and its output limit sizes the reservation. next runs on a
+// context the guest cannot cancel (bounded by CallTimeout), and keeps
+// writing after the guest hangs up, so the provider's whole answer, and
+// the usage it reports, is seen and charged. A refused call gets 429 and
+// never reaches next.
 func (m *Meter) Wrap(machine string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(io.LimitReader(r.Body, m.cfg.MaxBody+1))
@@ -402,7 +468,8 @@ func (m *Meter) Wrap(machine string, next http.Handler) http.Handler {
 			http.Error(w, "body too large", http.StatusRequestEntityTooLarge)
 			return
 		}
-		c, err := m.Start(machine, Tokens(int64(len(body))))
+		in := Tokens(int64(len(body)))
+		c, err := m.Start(machine, in, m.reserve(body))
 		if err != nil {
 			code, msg := http.StatusTooManyRequests, "model spend limit reached for this task; the owner has been told and may extend it"
 			if !errors.Is(err, ErrExhausted) {
@@ -415,27 +482,36 @@ func (m *Meter) Wrap(machine string, next http.Handler) http.Handler {
 			}})
 			return
 		}
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), m.cfg.CallTimeout)
+		defer cancel()
+		r = r.WithContext(ctx)
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		r.ContentLength = int64(len(body))
-		cw := &countingWriter{ResponseWriter: w}
-		defer func() { c.Done(Tokens(cw.n)) }()
-		next.ServeHTTP(cw, r)
+		uw := &usageWriter{w: w, max: m.cfg.MaxBody}
+		defer func() { c.Done(uw.used(in)) }()
+		next.ServeHTTP(uw, r)
 	})
 }
 
-type countingWriter struct {
-	http.ResponseWriter
-	n int64
-}
-
-func (c *countingWriter) Write(b []byte) (int, error) {
-	n, err := c.ResponseWriter.Write(b)
-	c.n += int64(n)
-	return n, err
-}
-
-func (c *countingWriter) Flush() {
-	if f, ok := c.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
+// reserve sizes a call's output reservation from the request's own output
+// limit (max_tokens, max_completion_tokens, or max_output_tokens; any
+// reasoning budget is inside it), clamped to MaxReserve.
+func (m *Meter) reserve(body []byte) int64 {
+	var req struct {
+		MaxTokens           json.Number `json:"max_tokens"`
+		MaxCompletionTokens json.Number `json:"max_completion_tokens"`
+		MaxOutputTokens     json.Number `json:"max_output_tokens"`
 	}
+	n := int64(0)
+	if json.Unmarshal(body, &req) == nil {
+		for _, v := range []json.Number{req.MaxTokens, req.MaxCompletionTokens, req.MaxOutputTokens} {
+			if f, err := v.Float64(); err == nil && f > float64(n) {
+				n = int64(min(f, float64(m.cfg.MaxReserve)))
+			}
+		}
+	}
+	if n <= 0 {
+		n = m.cfg.DefaultReserve
+	}
+	return min(n, m.cfg.MaxReserve)
 }

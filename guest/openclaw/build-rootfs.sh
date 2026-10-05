@@ -28,9 +28,12 @@ echo "$NODE_SHA256  $work/node.tar.xz" | sha256sum -c -
 n=node-$NODE_VERSION-linux-x64
 tar -xJf "$work/node.tar.xz" --strip-components=1 -C usr/local "$n/bin/node" "$n/bin/npm" "$n/bin/npx" "$n/lib/node_modules/npm"
 
-# OpenClaw, unmodified (ARC-3). Install scripts stay off, as in S4 (finding 8).
-PATH="$out/usr/local/bin:$PATH" npm install --prefix opt/openclaw --ignore-scripts --no-audit --no-fund \
-	--omit=dev "openclaw@$OPENCLAW_VERSION" >"$work/npm.log" 2>&1 || { cat "$work/npm.log"; exit 1; }
+# OpenClaw, unmodified (ARC-3), with every transitive dependency pinned by
+# the committed lockfile (npm ci checks each package's integrity). Install
+# scripts stay off, as in S4 (finding 8).
+cp "$here/package.json" "$here/package-lock.json" opt/openclaw/
+(cd opt/openclaw && PATH="$out/usr/local/bin:$PATH" npm ci --ignore-scripts --no-audit --no-fund --omit=dev \
+	>"$work/npm.log" 2>&1) || { cat "$work/npm.log"; exit 1; }
 got=$(PATH="$out/usr/local/bin:$PATH" node -e \
 	'console.log(require(process.argv[1]).packages["node_modules/openclaw"].integrity)' \
 	"$out/opt/openclaw/node_modules/.package-lock.json")
