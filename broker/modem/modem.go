@@ -24,6 +24,10 @@ type SMS struct {
 	// Spoofed marks a text whose sender was forged with Carrier.Inject. Only
 	// tests read it: a real network gives the broker no such signal.
 	Spoofed bool
+	// Alphanumeric marks a sender given as a text sender ID (TP-OA type
+	// 101) rather than a phone number. Such an ID can spell anything,
+	// including the owner's number, so it is never the owner (CH-1).
+	Alphanumeric bool
 }
 
 // Modem is one SIM: it sends texts from its own number and delivers what

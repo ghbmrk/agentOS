@@ -4,7 +4,7 @@
 // neither the vault nor the proxy (vault V2).
 //
 //	agentos-egress init     create a sealed vault: passphrase slot and code-generator seed
-//	agentos-egress serve    hold the vault; serve the model and unlock sockets
+//	agentos-egress serve    hold the vault; serve the model, verify and unlock sockets
 //	agentos-egress unlock   unknown-host unlock from a terminal: passphrase, then code
 //	                        (or the boot PIN, on a trusted host that has one)
 //	agentos-egress put      store a provider API key in the open vault
@@ -13,8 +13,8 @@
 //	agentos-egress hosts    list the trusted hosts
 //
 // It runs as its own uid. The vault and keys files are readable by it only;
-// the model socket admits the broker's uid only, and the unlock socket the
-// local UI's uid only.
+// the model and verify sockets admit the broker's uid only, and the unlock
+// socket the local UI's uid only.
 package main
 
 import (
@@ -259,24 +259,39 @@ type emptyVault struct{}
 func (emptyVault) Secret(string) (vault.Secret, bool) { return vault.Secret{}, false }
 func (emptyVault) Redactor() (*vault.Redactor, error) { return vault.NewRedactor(nil), nil }
 
-// serve opens both sockets in dir and serves them until closed.
+// serve opens the model, verify and unlock sockets in dir and serves them
+// until closed. The model and verify sockets admit the broker's uid only.
 func serve(dir string, c *custody, rt *route.Router, brokerUID, unlockUID int) ([]*http.Server, error) {
 	if err := runDir(dir); err != nil {
 		return nil, err
 	}
-	mln, err := listen(dir, ModelSocket, brokerUID)
-	if err != nil {
-		return nil, err
+	socks := []struct {
+		name string
+		uid  int
+		h    http.Handler
+	}{
+		{ModelSocket, brokerUID, modelHandler(c, rt)},
+		{VerifySocket, brokerUID, verifyHandler(c)},
+		{UnlockSocket, unlockUID, unlockHandler(c)},
 	}
-	uln, err := listen(dir, UnlockSocket, unlockUID)
-	if err != nil {
-		mln.Close()
-		return nil, err
+	var lns []net.Listener
+	for _, s := range socks {
+		ln, err := listen(dir, s.name, s.uid)
+		if err != nil {
+			for _, l := range lns {
+				l.Close()
+			}
+			return nil, err
+		}
+		lns = append(lns, ln)
 	}
-	ms, us := newServer(modelHandler(c, rt)), newServer(unlockHandler(c))
-	go ms.Serve(mln)
-	go us.Serve(uln)
-	return []*http.Server{ms, us}, nil
+	var srvs []*http.Server
+	for i, s := range socks {
+		srv := newServer(s.h)
+		go srv.Serve(lns[i])
+		srvs = append(srvs, srv)
+	}
+	return srvs, nil
 }
 
 // initCmd creates a sealed vault: a generated passphrase (100 bits) in the
