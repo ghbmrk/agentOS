@@ -5,7 +5,7 @@
 **Labels:** [Fact] verifiable · [Measured] from a spike or CI · [Inference] reasoned, untested · [Risk] needs a spike · **[Decision]** Mark's call.
 **For the arbitrator:** every finding carries a potency / security / UX line. "Conflict" marks the ones where the lenses pull apart.
 
-Findings marked **→ spec** have a proposed SPEC.md edit in the last section. This session could not commit SPEC.md itself (spec edits need Mark's own "yes" in the thread, per the project's permission rule), so the edit is given here as text for an L1 spec-diff commit once Mark says yes.
+Findings marked **→ spec** have a SPEC.md edit in this PR (listed in the last section), committed after Mark's yes in the potency thread.
 
 ---
 
@@ -83,7 +83,7 @@ Net effect [Inference]: 1–5 raise potency with no security cost (3 raises secu
 
 ---
 
-## Proposed SPEC.md edits (for an L1 spec-diff commit after Mark's yes)
+## SPEC.md edits (L1 spec-diff, approved by Mark)
 
 1. **New OP-9**, after OP-8:
    > **OP-9** **No silent loss of capability.** When a capability is off or cannot run because of the host (memory, hardware), configuration (a missing image or grant), or a held decision (a security fix not yet installed, a provider refusing the line's sign-in), STATUS MUST name it in one owner-worded line with what would fix it, and the digest MUST repeat it while it lasts. A log line alone is not enough. Owner choices (LOOPS OFF, PINNED) are named once when made and then listed in the digest, never repeated as alerts.
