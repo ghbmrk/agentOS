@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/journal"
 )
 
@@ -45,6 +46,12 @@ type Trajectory struct {
 	Succeeded bool
 	Good      bool
 	Public    bool
+	// Implicit: the owner let the task go unanswered (verdict source
+	// owner-implicit, loops L6), no owner verdict says good, and nobody
+	// said wrong. Such a run counts toward MinRuns beside an explicit-good
+	// run of its shape, but never supplies a skill's content (arbitrator
+	// on W3 PW3 part B).
+	Implicit bool
 	// Redacted: some value is the journal's redaction of a secret, which
 	// a skill must never replay as a literal.
 	Redacted bool
@@ -60,6 +67,7 @@ func trajectories(j Journal, group func(journal.Intent) string, ownerSource stri
 	for _, s := range j.List() {
 		sts[s.Intent.ID] = s
 	}
+	implicitSource := ownerSource + change.ImplicitSuffix
 	byGoal := map[string]*Trajectory{}
 	goalOf := map[string]string{}
 	for _, r := range j.Trail() {
@@ -86,7 +94,7 @@ func trajectories(j Journal, group func(journal.Intent) string, ownerSource stri
 		}
 	}
 	for _, t := range byGoal {
-		owner, wrong := false, false
+		owner, implicit, wrong := false, false, false
 		for _, id := range t.Intents {
 			s, ok := sts[id]
 			if !ok {
@@ -101,7 +109,7 @@ func trajectories(j Journal, group func(journal.Intent) string, ownerSource stri
 			if in.Label != "public" {
 				t.Public = false
 			}
-			if t.Canonical == "" && s.Quality.Source == ownerSource && s.Quality.Verdict != "" {
+			if t.Canonical == "" && (s.Quality.Source == ownerSource || s.Quality.Source == implicitSource) && s.Quality.Verdict != "" {
 				t.Canonical = id
 			}
 			switch s.Quality.Verdict {
@@ -109,6 +117,7 @@ func trajectories(j Journal, group func(journal.Intent) string, ownerSource stri
 				wrong = true
 			case journal.VerdictGood:
 				owner = owner || s.Quality.Source == ownerSource
+				implicit = implicit || s.Quality.Source == implicitSource
 			}
 			if anyString(in.Params, in.Recipients, func(v string) bool {
 				return clipped(v) || (redacted != nil && redacted(v))
@@ -117,6 +126,7 @@ func trajectories(j Journal, group func(journal.Intent) string, ownerSource stri
 			}
 		}
 		t.Good = owner && !wrong
+		t.Implicit = implicit && !owner && !wrong
 	}
 	return byGoal
 }
