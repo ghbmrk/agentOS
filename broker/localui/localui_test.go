@@ -21,6 +21,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/owner"
 )
@@ -157,9 +158,11 @@ type rig struct {
 	card  *card.Card
 	eng   *fakeEngine
 	ch    *owner.Channel
-	jar   http.CookieJar
-	ip    string   // the phone's address on the box's Wi-Fi
-	seen  []string // every page body served, for the ONB-1 scan
+	// served is the channel behind the in-process socket (page).
+	served *swapOwner
+	jar    http.CookieJar
+	ip     string   // the phone's address on the box's Wi-Fi
+	seen   []string // every page body served, for the ONB-1 scan
 }
 
 func newRig(t *testing.T) *rig {
@@ -248,7 +251,7 @@ func (r *rig) startChannel(m modem.Modem) {
 		r.t.Fatal(err)
 	}
 	r.ch = ch
-	r.srv.SetOwner(ch)
+	r.srv.SetOwner(r.page(ch))
 }
 
 // code is the owner's code generator; each call moves to the next step.
@@ -558,6 +561,22 @@ func TestLocalUnlockClearsChallengeModeAndResume(t *testing.T) {
 	r.post("/resume", url.Values{})
 	if r.eng.Stopped() {
 		t.Fatal("signed-in RESUME")
+	}
+	// Once the sign-in is old, agentosd asks for a code (Security S2 on
+	// P2-2w a), and the page asks for it on the same page (UX).
+	r.post("/stop", url.Values{})
+	r.advance(localapi.FreshFor)
+	w = r.post("/resume", url.Values{})
+	if body := w.Body.String(); !r.eng.Stopped() || !strings.Contains(body, html.EscapeString(resumeCodeText)) || !strings.Contains(body, `name="code"`) {
+		t.Fatalf("old sign-in resumed without a code, or no code field: %v %s", r.eng.Stopped(), body)
+	}
+	r.post("/resume", url.Values{"code": {"000000"}})
+	if !r.eng.Stopped() {
+		t.Fatal("resumed with a wrong code on an old sign-in")
+	}
+	r.post("/resume", url.Values{"code": {r.code()}})
+	if r.eng.Stopped() {
+		t.Fatal("a right code on an old sign-in did not resume")
 	}
 	_ = phone
 }

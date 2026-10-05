@@ -39,7 +39,7 @@ func newApprovalRig(t *testing.T) *approvalRig {
 		t.Fatal(err)
 	}
 	a.ch = ch
-	a.srv.SetOwner(ch)
+	a.srv.SetOwner(a.page(ch))
 	a.signIn()
 	return a
 }
@@ -127,9 +127,7 @@ func TestTheApprovalsPageShowsEveryRecipientAsItIs(t *testing.T) {
 	}
 
 	// Without sign-in the page and its answers are closed (CH-7).
-	a.srv.mu.Lock()
-	a.srv.sessions = map[string]session{}
-	a.srv.mu.Unlock()
+	a.post("/signout", url.Values{})
 	if w := a.do("GET", "/approvals/", nil); w.Code != http.StatusSeeOther {
 		t.Fatalf("signed out: %d", w.Code)
 	}
@@ -305,7 +303,7 @@ func TestParallelPostsKeepThePerPhoneBound(t *testing.T) {
 	f := a.form(id)
 	// Each answer takes a while, so the posts overlap in the channel if
 	// the bound lets them through together.
-	a.srv.SetOwner(slowOwner{a.ch})
+	a.served.Owner = slowOwner{a.ch}
 	var mu sync.Mutex
 	var wrong, held int
 	var wg sync.WaitGroup

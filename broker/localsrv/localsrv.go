@@ -36,6 +36,8 @@ type Owner interface {
 	LocalWaiting() string
 	// LocalStatusLines is STATUS's text, as the owner's phone gets it.
 	LocalStatusLines() string
+	// UnlockPeriod is CH-14's N: how long a sign-in lasts.
+	UnlockPeriod() time.Duration
 }
 
 // Config configures a Server.
@@ -93,6 +95,7 @@ func (s *Server) Ops() map[string]sockets.Handler {
 		localapi.OpGridCell: s.gridCell,
 		localapi.OpSignIn:   s.signIn,
 		localapi.OpSignOut:  s.signOut,
+		localapi.OpSession:  s.session,
 		localapi.OpLines:    s.authed(s.lines),
 		localapi.OpResume:   s.resume,
 		localapi.OpRequests: s.authed(s.requests),
@@ -124,7 +127,7 @@ func decode(args json.RawMessage, v any) error {
 func (s *Server) status(context.Context, sockets.Peer, json.RawMessage) (any, error) {
 	st := s.cfg.Owner.LocalStatus()
 	out := localapi.Status{Stopped: st.Stopped, Unlocked: st.Unlocked, UnlockedUntil: st.UnlockedUntil,
-		LowLocked: st.LowLocked, Challenged: st.Challenged}
+		LowLocked: st.LowLocked, Challenged: st.Challenged, UnlockDays: int(s.cfg.Owner.UnlockPeriod() / (24 * time.Hour))}
 	if s.cfg.LineNote != nil {
 		out.LineNote = s.cfg.LineNote()
 	}
@@ -182,6 +185,17 @@ func (s *Server) signOut(_ context.Context, _ sockets.Peer, args json.RawMessage
 	delete(s.sessions, sha256.Sum256([]byte(in.Token)))
 	s.mu.Unlock()
 	return localapi.Text{}, nil
+}
+
+// session reports a live token's session; a dead one is unauthorized.
+func (s *Server) session(_ context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
+	var in localapi.Auth
+	if decode(args, &in) != nil || !s.valid(in.Token) {
+		return nil, errUnauthorized
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return localapi.Session{Token: in.Token, Until: s.sessions[sha256.Sum256([]byte(in.Token))].until}, nil
 }
 
 // authed wraps an op that takes only a token.

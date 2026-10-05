@@ -60,8 +60,9 @@ func (f *fakeOwner) LocalResume() (string, error) {
 func (f *fakeOwner) LocalRequests() []owner.LocalRequest {
 	return []owner.LocalRequest{{ID: "K7", Sum: "s1"}}
 }
-func (f *fakeOwner) LocalWaiting() string     { return "1 waiting for you on my Wi-Fi page." }
-func (f *fakeOwner) LocalStatusLines() string { return "Running. 0 may have happened." }
+func (f *fakeOwner) LocalWaiting() string        { return "1 waiting for you on my Wi-Fi page." }
+func (f *fakeOwner) LocalStatusLines() string    { return "Running. 0 may have happened." }
+func (f *fakeOwner) UnlockPeriod() time.Duration { return 7 * 24 * time.Hour }
 func (f *fakeOwner) LocalAnswer(id, sum string, approve bool, code string) (string, error) {
 	f.mu.Lock()
 	f.answers = append(f.answers, id)
@@ -136,6 +137,7 @@ func code(err error) string {
 func tokenOps(tok string) map[string]any {
 	return map[string]any{
 		localapi.OpSignOut:  localapi.Auth{Token: tok},
+		localapi.OpSession:  localapi.Auth{Token: tok},
 		localapi.OpLines:    localapi.Auth{Token: tok},
 		localapi.OpResume:   localapi.Resume{Token: tok},
 		localapi.OpRequests: localapi.Auth{Token: tok},
@@ -552,5 +554,22 @@ func TestAStaleSessionNeedsACodeToResume(t *testing.T) {
 	}
 	if _, err := r.call(localapi.OpResume, localapi.Resume{Token: tok, Code: strings.Repeat("1", localapi.MaxCode+1)}); code(err) != localapi.ErrBadArgs {
 		t.Fatalf("long code: %v", err)
+	}
+}
+
+// The page asks whether its cookie's token is live, and until when.
+func TestASessionReportsItsTime(t *testing.T) {
+	r := newRig(t)
+	tok := r.signIn()
+	out, err := r.call(localapi.OpSession, localapi.Auth{Token: tok})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ses := out.(localapi.Session); ses.Token != tok || !ses.Until.Equal(r.now.Add(time.Hour)) {
+		t.Fatalf("session %+v", ses)
+	}
+	out, _ = r.call(localapi.OpStatus, struct{}{})
+	if st := out.(localapi.Status); st.UnlockDays != 7 {
+		t.Fatalf("unlock days %d", st.UnlockDays)
 	}
 }

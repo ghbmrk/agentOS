@@ -1,15 +1,16 @@
 package localui
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/owner"
 )
 
@@ -52,15 +53,12 @@ func (s *Server) approvals(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	o := s.getOwner()
-	if o == nil {
+	if s.getOwner() == nil {
 		http.Redirect(w, r, "/status", http.StatusSeeOther)
 		return
 	}
-	sess := ""
-	if c, err := r.Cookie(cookieName); err == nil {
-		sess = tokenKey(c.Value)
-	}
+	tok := cookieToken(r)
+	sess := tokenKey(tok)
 	v := approvalsView{}
 	if r.Method == http.MethodPost {
 		r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
@@ -68,17 +66,25 @@ func (s *Server) approvals(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Bad request", http.StatusBadRequest)
 			return
 		}
-		v.Msg, v.Err = s.answer(o, sess, r.PostForm)
+		v.Msg, v.Err = s.answer(r.Context(), tok, sess, r.PostForm)
 	}
-	for _, rq := range o.LocalRequests() {
-		v.Requests = append(v.Requests, s.requestView(rq, sess))
+	var rq localapi.Requests
+	if err := s.call(r.Context(), localapi.OpRequests, localapi.Auth{Token: tok}, &rq); err != nil {
+		if refused(err, localapi.ErrUnauthorized) {
+			http.Redirect(w, r, "/unlock?next=/approvals/", http.StatusSeeOther)
+			return
+		}
+		v.Err = "Could not reach the owner channel. Reload to try again."
+	}
+	for _, q := range rq.Requests {
+		v.Requests = append(v.Requests, s.requestView(q, sess))
 	}
 	s.render(w, "approvals", v)
 }
 
 // answer settles one request from the page's form and returns the
 // channel's reply, or the owner-facing refusal.
-func (s *Server) answer(o Owner, sess string, f map[string][]string) (msg, refusal string) {
+func (s *Server) answer(ctx context.Context, tok, sess string, f map[string][]string) (msg, refusal string) {
 	get := func(k string) string {
 		if v := f[k]; len(v) == 1 {
 			return v[0]
@@ -120,28 +126,41 @@ func (s *Server) answer(o Owner, sess string, f map[string][]string) (msg, refus
 		wrong = true
 		return "", "That code did not work. Each code works once; wait for the next one."
 	}
-	out, err := o.LocalAnswer(id, sum, approve, code)
+	if len(id) > localapi.MaxID || len(sum) > localapi.MaxSum || len(code) > localapi.MaxCode {
+		return "", stalePage
+	}
+	var a localapi.Answered
+	err := s.call(ctx, localapi.OpAnswer, localapi.Answer{Token: tok, ID: id, Sum: sum, Approve: approve, Code: code}, &a)
 	switch {
-	case err == nil:
-		return out, ""
-	case errors.Is(err, owner.ErrTooMany):
+	case refused(err, localapi.ErrLimited):
+		return "", "Too many wrong codes from this phone. Wait a minute, then try again."
+	case err != nil:
+		return "", "Could not reach the owner channel. Try again."
+	}
+	switch a.Refusal {
+	case "":
+		return a.Text, ""
+	case localapi.RefusedTooMany:
 		return "", "Too many tries on the box's Wi-Fi in the last day, so approving here is paused for up to 24 hours. Deny still works here, and NO by text."
-	case errors.Is(err, owner.ErrWrongCode):
+	case localapi.RefusedWrongCode:
 		wrong = true
-		if out != "" {
-			return "", out // tries left, or void (UX A4)
+		if a.Text != "" {
+			return "", a.Text // tries left, or void (UX A4)
 		}
-		return "", "That code did not work. Each code works once; wait for the next one."
-	case errors.Is(err, owner.ErrTextedCode):
+		return "", wrongCodeText
+	case localapi.RefusedTextedCode:
 		// Uncounted by the channel, but counted for this phone, or the
 		// page would test texted codes without limit (Security F1 on #171).
 		wrong = true
-		return "", err.Error()
-	case errors.Is(err, owner.ErrNoRequest), errors.Is(err, owner.ErrChanged):
+		return "", owner.ErrTextedCode.Error()
+	case localapi.RefusedNoRequest, localapi.RefusedChanged:
 		return "", stalePage
 	}
 	// The channel's own reply when nothing was settled.
-	return "", err.Error()
+	if a.Text != "" {
+		return "", a.Text
+	}
+	return "", stalePage
 }
 
 const stalePage = "This page is out of date. Check the request below and answer again."

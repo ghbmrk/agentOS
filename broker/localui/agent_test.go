@@ -1,0 +1,103 @@
+package localui
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/ghbmrk/agentos/broker/localapi"
+	"github.com/ghbmrk/agentos/broker/localsrv"
+	"github.com/ghbmrk/agentos/broker/owner"
+	"github.com/ghbmrk/agentos/broker/sockets"
+)
+
+// REQ: ARC-2, CH-7
+
+type stillOwner struct{}
+
+func (stillOwner) LocalStatus() owner.LocalStatus                           { return owner.LocalStatus{Stopped: true} }
+func (stillOwner) LocalGridCell() string                                    { return "C3" }
+func (stillOwner) LocalSignIn(string) (time.Time, error)                    { return time.Time{}, owner.ErrWrongCode }
+func (stillOwner) LocalStop(context.Context) error                          { return nil }
+func (stillOwner) LocalResume() (string, error)                             { return "", nil }
+func (stillOwner) LocalRequests() []owner.LocalRequest                      { return nil }
+func (stillOwner) LocalWaiting() string                                     { return "" }
+func (stillOwner) LocalStatusLines() string                                 { return "" }
+func (stillOwner) UnlockPeriod() time.Duration                              { return 7 * 24 * time.Hour }
+func (stillOwner) LocalAnswer(string, string, bool, string) (string, error) { return "", nil }
+
+// The page reaches agentosd over localui.sock (P2-2w b): results decode,
+// and a refusal comes back as agentosd's fixed code.
+func TestThePageCallsAgentosdOverItsSocket(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "run")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	uid := os.Getuid()
+	srv := &sockets.Server{Dir: dir}
+	if err := srv.Start(ctx, sockets.Endpoint{Name: localapi.Socket, Peer: sockets.Peer{Kind: "localui"}, PeerUID: &uid,
+		Ops: localsrv.New(localsrv.Config{Owner: stillOwner{}}).Ops()}); err != nil {
+		t.Fatal(err)
+	}
+	c := Socket{Path: filepath.Join(dir, localapi.Socket)}
+	var st localapi.Status
+	if err := c.Call(ctx, localapi.OpStatus, struct{}{}, &st); err != nil || !st.Stopped || st.UnlockDays != 7 {
+		t.Fatalf("status: %+v %v", st, err)
+	}
+	if err := c.Call(ctx, localapi.OpSignIn, localapi.SignIn{Code: "000000"}, nil); !refused(err, localapi.RefusedWrongCode) {
+		t.Fatalf("wrong sign-in: %v", err)
+	}
+	if err := c.Call(ctx, localapi.OpRequests, localapi.Auth{}, nil); !refused(err, localapi.ErrUnauthorized) {
+		t.Fatalf("no token: %v", err)
+	}
+	cancel()
+	srv.Wait()
+}
+
+// Security L6 on the P2-2w plan: without setup hooks (agentos-localui
+// until setup moves into agentosd), every setup route is refused with the
+// fixed not-ready page, and nothing pairs in this process.
+func TestWithoutSetupHooksEverySetupRouteIsRefused(t *testing.T) {
+	s, err := New(Config{AP: testAP()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	get := func(method, path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, "http://10.42.0.1"+path, strings.NewReader("number=%2B15550000001&code=123456"))
+		req.RemoteAddr = "10.42.0.20:5000"
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, req)
+		return w
+	}
+	for _, path := range []string{"/setup", "/setup/", "/setup/network", "/setup/number", "/setup/number-code", "/setup/claim",
+		"/setup/codes", "/setup/recovery", "/setup/host", "/setup/ai-key", "/setup/ai-device", "/setup/restart", "/setup/anything"} {
+		for _, m := range []string{"GET", "POST"} {
+			if w := get(m, path); w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "isn't ready yet") {
+				t.Errorf("%s %s: %d", m, path, w.Code)
+			}
+		}
+	}
+	// Before agentosd answers, the box is not ready; once it does, the
+	// page serves its status.
+	if w := get("GET", "/"); w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("root without agentosd: %d", w.Code)
+	}
+	if w := get("GET", "/box.vcf"); w.Code != http.StatusNotFound {
+		t.Fatalf("contact without hooks: %d", w.Code)
+	}
+	s.SetOwner(InProcess(localsrv.New(localsrv.Config{Owner: stillOwner{}}).Ops()))
+	if w := get("GET", "/"); w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/status" {
+		t.Fatalf("root with agentosd: %d %s", w.Code, w.Header().Get("Location"))
+	}
+	if w := get("GET", "/status"); w.Code != 200 || !strings.Contains(w.Body.String(), "RESUME") {
+		t.Fatalf("status: %d %s", w.Code, w.Body.String())
+	}
+	if w := get("POST", "/setup/number"); w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("setup with agentosd up: %d", w.Code)
+	}
+}

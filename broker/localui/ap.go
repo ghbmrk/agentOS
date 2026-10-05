@@ -56,6 +56,9 @@ var (
 // Validate refuses any configuration that could expose the local UI beyond
 // the access point (CH-9) or inject into a generated configuration.
 func (c *APConfig) Validate() error {
+	if err := c.ValidateServe(); err != nil {
+		return err
+	}
 	if c.Channel == 0 {
 		c.Channel = 6
 	}
@@ -63,16 +66,6 @@ func (c *APConfig) Validate() error {
 		c.Country = "US"
 	}
 	switch {
-	case !ifaceRe.MatchString(c.Iface):
-		return errors.New("localui: access point interface name")
-	case c.Uplink != "" && (!ifaceRe.MatchString(c.Uplink) || c.Uplink == c.Iface):
-		return errors.New("localui: uplink interface name")
-	case !c.Addr.IsValid() || !c.Addr.Addr().Is4() || !c.Addr.Addr().IsPrivate():
-		return errors.New("localui: access point address must be a private IPv4 address")
-	case c.Addr.Bits() < 16 || c.Addr.Bits() > 30:
-		return errors.New("localui: access point subnet must be /16 to /30")
-	case c.Addr.Addr() == c.Addr.Masked().Addr():
-		return errors.New("localui: access point address is the network address")
 	case c.Channel < 1 || c.Channel > 13:
 		return errors.New("localui: channel")
 	case !countryRe.MatchString(c.Country):
@@ -88,6 +81,26 @@ func (c *APConfig) Validate() error {
 	}
 	if c.Passthrough && c.Uplink == "" {
 		return errors.New("localui: passthrough needs an uplink")
+	}
+	return nil
+}
+
+// ValidateServe checks what serving the page needs (CH-9): the access
+// point's interface and its private address. The page's own process
+// (agentos-localui) gets no Wi-Fi password; only the access point's driver
+// needs Validate.
+func (c *APConfig) ValidateServe() error {
+	switch {
+	case !ifaceRe.MatchString(c.Iface):
+		return errors.New("localui: access point interface name")
+	case c.Uplink != "" && (!ifaceRe.MatchString(c.Uplink) || c.Uplink == c.Iface):
+		return errors.New("localui: uplink interface name")
+	case !c.Addr.IsValid() || !c.Addr.Addr().Is4() || !c.Addr.Addr().IsPrivate():
+		return errors.New("localui: access point address must be a private IPv4 address")
+	case c.Addr.Bits() < 16 || c.Addr.Bits() > 30:
+		return errors.New("localui: access point subnet must be /16 to /30")
+	case c.Addr.Addr() == c.Addr.Masked().Addr():
+		return errors.New("localui: access point address is the network address")
 	}
 	return nil
 }
