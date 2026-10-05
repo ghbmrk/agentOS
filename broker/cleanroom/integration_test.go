@@ -187,7 +187,7 @@ func TestIntegrationCleanRoomCannotReachPrivateData(t *testing.T) {
 	}
 	waitFile(t, probes[4])
 
-	if err := b.Send([][]byte{skillHint(t)}); err != nil {
+	if err := b.Send(nextDay(), [][]byte{skillHint(t)}); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())

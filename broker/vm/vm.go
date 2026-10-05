@@ -201,6 +201,9 @@ type machine struct {
 	// revoked: admission preempted the machine after admitting it but
 	// before it started, so it must not start on that admission.
 	revoked bool
+	// seed is written into a fresh layer before the machine starts from its
+	// image (CreateSeeded). Kept in memory only.
+	seed map[string][]byte
 }
 
 // Manager is safe for concurrent use.
@@ -272,6 +275,41 @@ func (m *Manager) launch(mc *machine) Launch {
 
 // Create admits and starts a new machine from an image.
 func (m *Manager) Create(ctx context.Context, id string, s Spec) (Machine, error) {
+	if strings.HasPrefix(id, EvalPrefix) {
+		return Machine{}, fmt.Errorf("vm: machine ids starting %q are kept for replay", EvalPrefix)
+	}
+	return m.create(ctx, id, s, nil)
+}
+
+// EvalPrefix starts the IDs of replay machines (LOOP-5), whose guest
+// services are replay's, never the live plane's. Only CreateSeeded makes
+// them, and they cannot be forked or forked into.
+const EvalPrefix = "eval-"
+
+// CreateSeeded is Create with files written into the machine's fresh layer
+// before its guest first runs, at paths relative to the guest's root: how
+// the broker hands a machine read-only inputs, such as the managed tree a
+// replay evaluates (LOOP-5). Paths must be local and clean; files are
+// root-owned 0644 in 0755 directories. A rebuild from the image writes the
+// seed again; the seed is not persisted, so after a broker restart the
+// machine has only its layer.
+func (m *Manager) CreateSeeded(ctx context.Context, id string, s Spec, seed map[string][]byte) (Machine, error) {
+	var size int64
+	for p, b := range seed {
+		if !filepath.IsLocal(p) || filepath.Clean(p) != p {
+			return Machine{}, fmt.Errorf("vm: bad seed path %q", p)
+		}
+		size += int64(len(b))
+	}
+	// The seed lands on the state disk like a layer copy (RES-4); every
+	// write of it (create, rebuild) reserves the disk first.
+	if m.cfg.MaxLayerBytes > 0 && size > m.cfg.MaxLayerBytes {
+		return Machine{}, fmt.Errorf("%w (seed %d bytes, cap %d)", ErrQuota, size, m.cfg.MaxLayerBytes)
+	}
+	return m.create(ctx, id, s, seed)
+}
+
+func (m *Manager) create(ctx context.Context, id string, s Spec, seed map[string][]byte) (Machine, error) {
 	if !idRE.MatchString(id) {
 		return Machine{}, fmt.Errorf("vm: bad machine id %q", id)
 	}
@@ -282,6 +320,7 @@ func (m *Manager) Create(ctx context.Context, id string, s Spec) (Machine, error
 	if err != nil {
 		return Machine{}, err
 	}
+	mc.seed = seed
 	if err := m.admit(mc); err != nil {
 		m.unreserve(id)
 		return Machine{}, err
@@ -391,6 +430,21 @@ func (m *Manager) startFrom(ctx context.Context, mc *machine, s *Snapshot) error
 		if err := os.Mkdir(l.Upper, 0o755); err != nil {
 			return err
 		}
+		if len(mc.seed) > 0 {
+			var size int64
+			for _, b := range mc.seed {
+				size += int64(len(b))
+			}
+			h, err := m.reserveDisk(size)
+			if err != nil {
+				return fmt.Errorf("%s: seed: %w", mc.ID, err)
+			}
+			err = writeSeed(l.Upper, mc.seed)
+			h.release()
+			if err != nil {
+				return err
+			}
+		}
 	} else if err := overlay.Copy(filepath.Join(m.snapDir(s.ID), "fs"), l.Upper); err != nil {
 		return err
 	}
@@ -423,6 +477,30 @@ func (m *Manager) startFrom(ctx context.Context, mc *machine, s *Snapshot) error
 	}
 	mc.State = Running
 	return m.saveMachine(mc)
+}
+
+// writeSeed writes seed files into a fresh, broker-only layer. Nothing else
+// has written to upper yet, so no path in it can be a symlink; O_EXCL
+// refuses one at the final component anyway.
+func writeSeed(upper string, seed map[string][]byte) error {
+	for p, b := range seed {
+		dst := filepath.Join(upper, p)
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return err
+		}
+		f, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if err != nil {
+			return err
+		}
+		_, err = f.Write(b)
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // stopRuntime kills the machine and waits until its memory is released.
@@ -716,6 +794,9 @@ func inLineage(mc *machine, s Snapshot) bool {
 // file system. The machine's label does not fall (REV-5). A preempted or
 // stopped machine is re-admitted first.
 func (m *Manager) Rollback(ctx context.Context, id, snapID string) error {
+	if strings.HasPrefix(id, EvalPrefix) {
+		return fmt.Errorf("vm: replay machine %s cannot be rolled back", id)
+	}
 	mc, err := m.get(id)
 	if err != nil {
 		return err
@@ -823,7 +904,13 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 	if len(ids) == 0 {
 		return Snapshot{}, errors.New("vm: fork needs at least one new machine")
 	}
+	if strings.HasPrefix(id, EvalPrefix) {
+		return Snapshot{}, fmt.Errorf("vm: replay machine %s cannot be forked", id)
+	}
 	for _, f := range ids {
+		if strings.HasPrefix(f, EvalPrefix) {
+			return Snapshot{}, fmt.Errorf("vm: machine ids starting %q are kept for replay", EvalPrefix)
+		}
 		if !idRE.MatchString(f) {
 			return Snapshot{}, fmt.Errorf("vm: bad machine id %q", f)
 		}
@@ -974,6 +1061,9 @@ func (m *Manager) view(s Snapshot) overlay.View {
 // dst restarts on the merged file system (a file-system rollback), and its
 // label rises to the fork's (REV-5). Returns the merged snapshot.
 func (m *Manager) Merge(ctx context.Context, dst, src string) (Snapshot, error) {
+	if strings.HasPrefix(dst, EvalPrefix) || strings.HasPrefix(src, EvalPrefix) {
+		return Snapshot{}, errors.New("vm: replay machines are not merged")
+	}
 	sm, err := m.get(src)
 	if err != nil {
 		return Snapshot{}, err

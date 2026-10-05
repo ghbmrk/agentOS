@@ -25,6 +25,7 @@ import (
 const (
 	ModelSocket  = "model.sock"
 	UnlockSocket = "unlock.sock"
+	VerifySocket = "verify.sock"
 )
 
 var machineRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
@@ -217,6 +218,41 @@ func unlockHandler(c *custody) http.Handler {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	return mux
+}
+
+// verifyHandler serves the verify socket: agentosd's owner channel checks
+// a high-tier code here (K7). It is a socket of its own, not a path on the
+// model socket, because the model socket forwards whatever path a guest
+// asks for. The answer is a step and a yes or no, never the seed.
+func verifyHandler(c *custody) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/verify" {
+			http.Error(w, "POST /verify only", http.StatusMethodNotAllowed)
+			return
+		}
+		var req modelroute.VerifyRequest
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<10)).Decode(&req); err != nil {
+			http.Error(w, "malformed request", http.StatusBadRequest)
+			return
+		}
+		step, ok, err := c.verify(req.Code, req.After, req.Counted)
+		var paused *pausedError
+		switch {
+		case err == nil:
+		case err == errLocked:
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		case errors.As(err, &paused):
+			w.Header().Set(modelroute.HeaderPausedUntil, paused.until.UTC().Format(time.RFC3339))
+			http.Error(w, err.Error(), http.StatusTooManyRequests)
+			return
+		default:
+			http.Error(w, errInternal.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(modelroute.VerifyResult{OK: ok, Step: step})
+	})
 }
 
 // peerListener accepts only connections from one uid (SO_PEERCRED); every

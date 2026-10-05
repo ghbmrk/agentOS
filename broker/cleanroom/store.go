@@ -93,17 +93,19 @@ var Output = map[string]string{
 
 // Manifest is an artifact's provenance record (OSS-2).
 type Manifest struct {
-	ID       string          `json:"id"`
-	Job      string          `json:"job"`
-	Hint     json.RawMessage `json:"hint"` // the canonical hint it was built from
-	Output   string          `json:"output"`
-	Embargo  bool            `json:"embargo"` // from the schema's mark on the hint's kind (OSS-5)
-	Cleared  bool            `json:"cleared"` // the embargo path has cleared it
-	Image    string          `json:"image"`
-	Machine  string          `json:"machine"`
-	Day      string          `json:"day"`
-	Fixtures Fixtures        `json:"fixtures"`
-	Files    []File          `json:"files"`
+	ID      string          `json:"id"`
+	Job     string          `json:"job"`
+	Hint    json.RawMessage `json:"hint"` // the canonical hint it was built from
+	Output  string          `json:"output"`
+	Embargo bool            `json:"embargo"` // from the schema's mark on the hint's kind (OSS-5)
+	Cleared bool            `json:"cleared"` // the embargo path has cleared it
+	Image   string          `json:"image"`
+	Machine string          `json:"machine"`
+	Day     string          `json:"day"`
+	// ClaimedFixtures is the clean room's own report of its fixture run.
+	// Nothing re-ran it: never show it as an attestation (C7, K2).
+	ClaimedFixtures Fixtures `json:"claimed_fixtures"`
+	Files           []File   `json:"files"`
 }
 
 // File is one output file's record.
@@ -199,6 +201,18 @@ func (s *Store) put(m Manifest, files map[string]string) (Artifact, error) {
 		return Artifact{}, err
 	}
 	return Artifact{m: m, dir: dir}, nil
+}
+
+func (s *Store) remove(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.get(id); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(filepath.Join(s.dir, id)); err != nil {
+		return err
+	}
+	return syncDir(s.dir)
 }
 
 // Get returns one artifact.

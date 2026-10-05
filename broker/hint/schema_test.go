@@ -1,6 +1,7 @@
 package hint
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -76,6 +77,42 @@ func TestOSS1SchemaRules(t *testing.T) {
 		bad["sensitive "+w] = `{"version":1,"categories":["c"],"kinds":{"k":{"category":"c","fields":{"f":["aa","` + w + `"]}}}}`
 	}
 	for name, src := range bad {
+		if _, err := Parse([]byte(src)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+// TestOSS1FrequencyIsComputed: the frequency value is computed by the
+// broker from journaled counts with the bucket edges the public schema
+// declares, never chosen by a machine (K1).
+func TestOSS1FrequencyIsComputed(t *testing.T) {
+	s := Default()
+	for _, tc := range []struct {
+		n, tasks int
+		want     string
+	}{
+		{1, 1, "once"}, {1, 40, "once"}, {2, 40, "sometimes"}, {19, 40, "sometimes"},
+		{20, 40, "most_tasks"}, {40, 40, "most_tasks"}, {2, 3, "most_tasks"},
+	} {
+		got, err := s.Frequency(tc.n, tc.tasks)
+		if err != nil || got != tc.want {
+			t.Errorf("Frequency(%d, %d) = %q, %v; want %q", tc.n, tc.tasks, got, err, tc.want)
+		}
+	}
+	for _, tc := range [][2]int{{0, 5}, {6, 5}, {-1, 5}, {1, 0}} {
+		if _, err := s.Frequency(tc[0], tc[1]); !errors.Is(err, ErrInvalid) {
+			t.Errorf("Frequency(%d, %d): %v", tc[0], tc[1], err)
+		}
+	}
+	// A frequency field needs the declared edges and exactly the three
+	// bucket values; edges must be sane.
+	for name, src := range map[string]string{
+		"no edges":     `{"version":1,"categories":["c"],"kinds":{"k":{"category":"c","fields":{"frequency":["once","sometimes","most_tasks"]}}}}`,
+		"other values": `{"version":1,"frequency_edges":{"once_max_count":1,"most_tasks_min_percent":50},"categories":["c"],"kinds":{"k":{"category":"c","fields":{"frequency":["rare","often"]}}}}`,
+		"bad percent":  `{"version":1,"frequency_edges":{"once_max_count":1,"most_tasks_min_percent":101},"categories":["c"],"kinds":{"k":{"category":"c","fields":{"frequency":["once","sometimes","most_tasks"]}}}}`,
+		"bad count":    `{"version":1,"frequency_edges":{"once_max_count":0,"most_tasks_min_percent":50},"categories":["c"],"kinds":{"k":{"category":"c","fields":{"frequency":["once","sometimes","most_tasks"]}}}}`,
+	} {
 		if _, err := Parse([]byte(src)); err == nil {
 			t.Errorf("%s: accepted", name)
 		}

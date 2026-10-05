@@ -1,25 +1,28 @@
 package hint
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
 
-// REQ: OSS-1, OSS-5, OSS-6, OSS-7
+// REQ: OSS-1, OSS-5, OSS-7
 
 type outbox struct {
 	mu      sync.Mutex
 	batches [][]string
+	days    []string
 	fail    error
 	onSend  func()
 }
 
-func (o *outbox) Send(batch [][]byte) error {
+func (o *outbox) Send(day string, batch [][]byte) error {
 	if o.onSend != nil {
 		o.onSend()
 	}
@@ -33,6 +36,7 @@ func (o *outbox) Send(batch [][]byte) error {
 		b = append(b, string(h))
 	}
 	o.batches = append(o.batches, b)
+	o.days = append(o.days, day)
 	return nil
 }
 
@@ -99,7 +103,7 @@ func records(t *testing.T, l Log) []Record {
 }
 
 func skill(domain string) Hint {
-	return Hint{Kind: "skill_gap", Fields: map[string]string{"domain": domain, "format": "ics", "failure": "timezone"}}
+	return Hint{Kind: "skill_gap", Fields: map[string]string{"domain": domain, "format": "ics", "failure": "timezone", "frequency": "once"}}
 }
 
 var vuln = Hint{Kind: "vuln", Fields: map[string]string{"class": "prompt_injection", "vector": "email_html"}}
@@ -138,15 +142,17 @@ func TestOSS7DefaultIsAutomatic(t *testing.T) {
 	if err := r.nextRelease(); err != nil {
 		t.Fatal(err)
 	}
-	if got := r.out.all(); len(got) != 1 || got[0] != `{"schema":1,"kind":"skill_gap","embargo":false,"fields":{"domain":"calendar","failure":"timezone","format":"ics"}}` {
+	if got := r.out.all(); len(got) != 1 || got[0] != `{"schema":1,"kind":"skill_gap","embargo":false,"fields":{"domain":"calendar","failure":"timezone","format":"ics","frequency":"once"}}` {
 		t.Fatalf("sent %q", got)
 	}
 }
 
-// TestOSS6OnlyTheSetCrosses: hints cross only as one batch per day, at the
+// TestOSS1OnlyTheSetCrosses: hints cross only as one batch per day, at the
 // fixed release time on a later day, sorted by canonical form, so neither
-// the order nor the time they were emitted reaches the outbox.
-func TestOSS6OnlyTheSetCrosses(t *testing.T) {
+// the order nor the time they were emitted reaches the outbox. (This is
+// OSS-6's batching and delay; its pseudonymous key and rotation are the
+// publication package's.)
+func TestOSS1OnlyTheSetCrosses(t *testing.T) {
 	r := newRig(t, Config{})
 	order := []string{"travel", "calendar", "notes", "email"}
 	for i, d := range order {
@@ -191,7 +197,7 @@ func TestOSS1EveryHintLogged(t *testing.T) {
 	r.e.Emit(good())
 	r.e.Emit(good())
 	r.e.Emit(vuln)
-	r.e.Emit(Hint{Kind: "adapter_gap", Fields: map[string]string{"service_class": "banking", "surface": "web", "failure": "changed_layout"}})
+	r.e.Emit(Hint{Kind: "adapter_gap", Fields: map[string]string{"service_class": "banking", "surface": "web", "failure": "changed_layout", "frequency": "sometimes"}})
 	if _, err := r.e.Emit(Hint{Kind: "skill_gap", Fields: map[string]string{"domain": "Ann's flight UA123"}}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("invalid: %v", err)
 	}
@@ -420,19 +426,20 @@ func TestOSS1RestartKeepsState(t *testing.T) {
 	}
 }
 
-// TestOSS1LoggedBeforeSent: the batch's records exist before the outbox is
-// called, so nothing crosses unlogged; a failed send is logged, the hints
-// stay queued, and they cross at the next release, also after a restart.
+// TestOSS1LoggedBeforeSent: the batch's Forwarded record exists before
+// the outbox is called, so nothing crosses unlogged. A failed send is
+// logged and the same set is resent for the same day at the next release,
+// also after a restart, ahead of hints queued since.
 func TestOSS1LoggedBeforeSent(t *testing.T) {
 	r := newRig(t, Config{})
 	emit(t, r.e, good())
 	emit(t, r.e, vuln)
-	var forwarded int
+	var refs int
 	r.out.onSend = func() {
-		forwarded = 0
+		refs = 0
 		for _, rec := range records(t, r.log) {
 			if rec.Outcome == Forwarded {
-				forwarded++
+				refs += len(rec.Refs)
 			}
 		}
 	}
@@ -440,17 +447,99 @@ func TestOSS1LoggedBeforeSent(t *testing.T) {
 	if err := r.nextRelease(); err == nil {
 		t.Fatal("release with failing outbox succeeded")
 	}
-	if forwarded != 2 {
-		t.Fatalf("log had %d forwarded records when the outbox was called", forwarded)
+	if refs != 2 {
+		t.Fatalf("log had %d forwarded hints when the outbox was called", refs)
 	}
+	emit(t, r.e, skill("email")) // queued after the failed batch
 	r.out.fail = nil
 	r.restart()
+	r.now = r.now.Add(24 * time.Hour)
+	if err := r.e.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.out.batches) != 1 || len(r.out.batches[0]) != 2 || contains(r.out.batches[0], canon(t, skill("email"))) || r.out.days[0] != "2026-10-06" {
+		t.Fatalf("retry sent %v for %v", r.out.batches, r.out.days)
+	}
+}
+
+// failSent is a Log that fails to write Sent records: the box crashed
+// after the outbox took the batch but before the commit.
+type failSent struct{ MemLog }
+
+func (l *failSent) Append(r Record) error {
+	if r.Outcome == Sent {
+		return errors.New("crash")
+	}
+	return l.MemLog.Append(r)
+}
+
+// TestOSS5CrashBetweenSendAndCommit: a batch the outbox took but whose Sent
+// record was never written is resent after a restart, the same set for the
+// same day, so the outbox's idempotent Send can drop the repeat; a vuln
+// hint in it is never lost. Then normal batches resume.
+func TestOSS5CrashBetweenSendAndCommit(t *testing.T) {
+	log := &failSent{}
+	r := newRig(t, Config{Log: log})
+	emit(t, r.e, vuln)
+	emit(t, r.e, good())
+	if err := r.nextRelease(); err == nil {
+		t.Fatal("commit failure not reported")
+	}
+	r.cfg.Log = &log.MemLog // the restarted box writes normally
+	r.restart()
+	emit(t, r.e, skill("email"))
 	r.now = r.now.Add(time.Hour)
 	if err := r.e.Release(); err != nil {
 		t.Fatal(err)
 	}
-	if len(r.out.all()) != 2 {
-		t.Fatalf("retry sent %v", r.out.all())
+	if len(r.out.batches) != 2 || r.out.days[0] != r.out.days[1] || strings.Join(r.out.batches[0], "|") != strings.Join(r.out.batches[1], "|") {
+		t.Fatalf("resend %v for %v", r.out.batches, r.out.days)
+	}
+	if err := r.nextRelease(); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.out.batches) != 3 || r.out.batches[2][0] != canon(t, skill("email")) {
+		t.Fatalf("next batch %v", r.out.batches)
+	}
+	var sent int
+	for _, rec := range records(t, r.log) {
+		if rec.Outcome == Sent {
+			sent++
+		}
+	}
+	if sent != 2 {
+		t.Fatalf("%d Sent records", sent)
+	}
+}
+
+// TestOSS7AsksBoundedAndExpire: open asks are bounded, and an ask the
+// owner has not answered within DedupeDays expires as declined.
+func TestOSS7AsksBoundedAndExpire(t *testing.T) {
+	r := newRig(t, Config{Policy: map[string]Mode{"skills": Ask}, MaxPending: 2})
+	emit(t, r.e, skill("calendar"))
+	emit(t, r.e, skill("email"))
+	if res := emit(t, r.e, skill("notes")); res.Outcome != OverLimit {
+		t.Fatalf("third ask: %s", res.Outcome)
+	}
+	r.now = day0.Add(7 * 24 * time.Hour)
+	if res := emit(t, r.e, skill("notes")); res.Outcome != Asked {
+		t.Fatalf("after expiry: %s", res.Outcome)
+	}
+	if p := r.e.Pending(); len(p) != 1 {
+		t.Fatalf("pending %+v", p)
+	}
+	var expired int
+	for _, rec := range records(t, r.log) {
+		if rec.Outcome == Expired {
+			expired++
+		}
+	}
+	if expired != 2 {
+		t.Fatalf("%d expired", expired)
+	}
+	r.restart()
+	if p := r.e.Pending(); len(p) != 1 {
+		t.Fatalf("pending after restart %+v", p)
 	}
 }
 
@@ -494,4 +583,129 @@ func contains(xs []string, x string) bool {
 		}
 	}
 	return false
+}
+
+// TestOSS1DedupeSevenDays: a hint identical to one queued in the last
+// seven days is a duplicate, also after a restart; on the eighth day it
+// may be queued again. The defaults are the arbitrator's: five hints a
+// batch, two of them reserved for embargo kinds.
+func TestOSS1DedupeSevenDays(t *testing.T) {
+	r := newRig(t, Config{})
+	if r.e.cfg.DailyLimit != 5 || r.e.cfg.EmbargoReserve != 2 || r.e.cfg.DedupeDays != 7 {
+		t.Fatalf("defaults %d/%d/%d", r.e.cfg.DailyLimit, r.e.cfg.EmbargoReserve, r.e.cfg.DedupeDays)
+	}
+	emit(t, r.e, good())
+	if err := r.nextRelease(); err != nil || len(r.out.all()) != 1 {
+		t.Fatalf("release: %v %v", err, r.out.all())
+	}
+	r.now = day0.Add(6 * 24 * time.Hour)
+	r.restart()
+	if res := emit(t, r.e, good()); res.Outcome != Duplicate {
+		t.Fatalf("day 6: %s", res.Outcome)
+	}
+	r.now = day0.Add(7 * 24 * time.Hour)
+	if res := emit(t, r.e, good()); res.Outcome != Queued {
+		t.Fatalf("day 7: %s", res.Outcome)
+	}
+}
+
+// TestOSS5ResendIsTheRecordedSet: the resend after a restart is the
+// canonical bytes recorded when the batch was formed, so a schema change
+// in between (here a new version) cannot alter or empty the set.
+func TestOSS5ResendIsTheRecordedSet(t *testing.T) {
+	log := &failSent{}
+	r := newRig(t, Config{Log: log})
+	emit(t, r.e, vuln)
+	emit(t, r.e, good())
+	r.nextRelease()
+	v2, err := Parse(bytes.Replace(publicSchema, []byte(`"version": 1`), []byte(`"version": 2`), 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.cfg.Log, r.cfg.Schema = &log.MemLog, v2
+	r.restart()
+	r.now = r.now.Add(time.Hour)
+	if err := r.e.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.out.batches) != 2 || strings.Join(r.out.batches[0], "|") != strings.Join(r.out.batches[1], "|") || r.out.days[0] != r.out.days[1] {
+		t.Fatalf("resend %v for %v", r.out.batches, r.out.days)
+	}
+}
+
+// TestOSS5CrashBeforeSend: a crash after the Forwarded record but before
+// the outbox is called leaves no SendFailed record; the restart still
+// resends the batch.
+func TestOSS5CrashBeforeSend(t *testing.T) {
+	r := newRig(t, Config{})
+	emit(t, r.e, vuln)
+	r.out.onSend = func() { panic("crash") }
+	func() {
+		defer func() { recover() }()
+		r.nextRelease()
+	}()
+	r.out.onSend = nil
+	for _, rec := range records(t, r.log) {
+		if rec.Outcome == SendFailed || rec.Outcome == Sent {
+			t.Fatalf("unexpected %s record", rec.Outcome)
+		}
+	}
+	r.restart()
+	r.now = r.now.Add(time.Minute)
+	if err := r.e.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.out.all(); len(got) != 1 || got[0] != canon(t, vuln) {
+		t.Fatalf("sent %v", got)
+	}
+}
+
+// TestOSS1SendFailureLoggedOnce: repeated failed retries of one batch log
+// one SendFailed record, also across a restart; Pending never lists an
+// expired ask.
+func TestOSS1SendFailureLoggedOnce(t *testing.T) {
+	r := newRig(t, Config{Policy: map[string]Mode{"security": Ask}})
+	emit(t, r.e, good())
+	ask := emit(t, r.e, vuln)
+	r.out.fail = errors.New("down")
+	r.nextRelease()
+	for i := 0; i < 3; i++ {
+		r.now = r.now.Add(time.Hour)
+		r.e.Release()
+	}
+	r.restart()
+	r.now = r.now.Add(time.Hour)
+	r.e.Release()
+	n := 0
+	for _, rec := range records(t, r.log) {
+		if rec.Outcome == SendFailed {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("%d SendFailed records", n)
+	}
+	r.now = day0.Add(8 * 24 * time.Hour)
+	for _, p := range r.e.Pending() {
+		if p.ID == ask.ID {
+			t.Fatal("Pending lists an expired ask")
+		}
+	}
+}
+
+// TestOSS5LegacyForwardedWithoutBatch: a Forwarded record written before
+// records carried the batch bytes is rebuilt from its Refs, never resent as
+// an empty set and committed.
+func TestOSS5LegacyForwardedWithoutBatch(t *testing.T) {
+	log := &MemLog{}
+	log.Append(Record{Seq: 1, Day: "2026-10-05", Outcome: Queued, Category: "security", Kind: vuln.Kind, Fields: vuln.Fields})
+	log.Append(Record{Seq: 2, Day: "2026-10-06", Outcome: Forwarded, Refs: []int{1}})
+	r := newRig(t, Config{Log: log})
+	r.now = time.Date(2026, 10, 6, 0, 0, 0, 0, time.UTC).Add(DefaultReleaseAt)
+	if err := r.e.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.out.all(); len(got) != 1 || got[0] != canon(t, vuln) || r.out.days[0] != "2026-10-06" {
+		t.Fatalf("sent %v for %v", got, r.out.days)
+	}
 }

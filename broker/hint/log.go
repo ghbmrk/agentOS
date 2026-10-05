@@ -22,8 +22,10 @@ const (
 	Duplicate  Outcome = "duplicate"   // the same hint is waiting, or was queued or asked today
 	OverLimit  Outcome = "over_limit"  // that class's waiting queue was full; dropped
 	Refused    Outcome = "refused"     // failed the schema; no content recorded
-	Forwarded  Outcome = "forwarded"   // queued hint Ref is in the batch being sent
-	SendFailed Outcome = "send_failed" // the send for Forwarded record Ref failed; it did not cross
+	Expired    Outcome = "expired"     // asked hint Ref went unanswered; treated as declined
+	Forwarded  Outcome = "forwarded"   // a batch of the queued hints Refs, written before it is sent
+	Sent       Outcome = "sent"        // the outbox accepted batch Ref; it crossed
+	SendFailed Outcome = "send_failed" // the send of batch Ref failed (logged once); it will be resent
 )
 
 // Record is one log line. Day is the UTC date; nothing finer is kept. A
@@ -37,6 +39,8 @@ type Record struct {
 	Kind     string            `json:"kind,omitempty"`
 	Fields   map[string]string `json:"fields,omitempty"`
 	Ref      int               `json:"ref,omitempty"`
+	Refs     []int             `json:"refs,omitempty"`
+	Batch    []string          `json:"batch,omitempty"` // a Forwarded batch's canonical hints, as sent
 }
 
 // Log is the owner-visible hint log (OSS-1, OSS-7).

@@ -40,6 +40,7 @@ type session struct {
 	storing  bool
 	artifact string
 	failure  string
+	parked   bool // the clean room needs public material it cannot reach yet
 }
 
 func (s *session) fail(reason string) {
@@ -158,6 +159,7 @@ func (s *session) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/cleanroom/hint", s.hint)
 	mux.HandleFunc("/cleanroom/result", s.result)
+	mux.HandleFunc("/cleanroom/unable", s.unable)
 	mux.Handle("/model/", http.StripPrefix("/model", s.model()))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
@@ -241,7 +243,7 @@ func (s *session) result(w http.ResponseWriter, r *http.Request) {
 		ID: artifactID(s.job), Job: s.job.ID, Hint: json.RawMessage(s.job.Hint),
 		Output: Output[s.kind], Embargo: s.embargo,
 		Image: m.Spec.Image, Machine: s.id, Day: s.b.cfg.Now().UTC().Format("2006-01-02"),
-		Fixtures: res.Fixtures,
+		ClaimedFixtures: res.Fixtures,
 	}, res.Files)
 	s.mu.Lock()
 	s.storing = false
@@ -250,6 +252,15 @@ func (s *session) result(w http.ResponseWriter, r *http.Request) {
 		s.finished, s.artifact = true, a.m.ID
 	}
 	s.mu.Unlock()
+	if err == nil && !stored {
+		// The job failed (e.g. the machine stopped being clean) while
+		// the result was stored: it publishes nothing.
+		if rerr := s.b.store.remove(a.m.ID); rerr != nil {
+			s.b.cfg.Logf("cleanroom: removing %s: %v", a.m.ID, rerr)
+		}
+		http.Error(w, "this clean room's job is finished", http.StatusConflict)
+		return
+	}
 	if err != nil {
 		s.b.cfg.Logf("cleanroom: storing %s: %v", s.id, err)
 		http.Error(w, "could not store the result", http.StatusInternalServerError)
@@ -268,3 +279,40 @@ func (s *session) result(w http.ResponseWriter, r *http.Request) {
 
 // artifactID is the one artifact a job can produce.
 func artifactID(j *job) string { return "a-" + j.ID }
+
+// Unable is what a clean room may say instead of a result. The reason is
+// one of a fixed set, so nothing else crosses back.
+type Unable struct {
+	Reason string `json:"reason"`
+}
+
+// NeedsPublicMaterial: the clean room needs public material it cannot
+// reach (no read-only internet yet, C5). Such jobs are parked for Requeue.
+const NeedsPublicMaterial = "needs_public_material"
+
+func (s *session) unable(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	var u Unable
+	dec := json.NewDecoder(io.LimitReader(r.Body, 1024))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&u); err != nil || u.Reason != NeedsPublicMaterial {
+		http.Error(w, `body must be {"reason": "needs_public_material"}`, http.StatusBadRequest)
+		return
+	}
+	s.mu.Lock()
+	if s.finished || s.storing {
+		s.mu.Unlock()
+		http.Error(w, "this clean room's job is finished", http.StatusConflict)
+		return
+	}
+	s.finished, s.parked, s.failure = true, true, "needs public material; parked until it can be reached"
+	s.mu.Unlock()
+	w.WriteHeader(http.StatusOK)
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+	close(s.done)
+}

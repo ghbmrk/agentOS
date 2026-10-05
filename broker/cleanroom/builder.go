@@ -83,8 +83,7 @@ type Builder struct {
 	store *Store
 	wake  chan struct{}
 
-	qmu       sync.Mutex
-	lastBatch uint64
+	qmu sync.Mutex
 
 	mu       sync.Mutex
 	sessions map[string]*session
@@ -128,7 +127,7 @@ func New(cfg Config) (*Builder, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	for _, d := range []string{cfg.Dir, filepath.Join(cfg.Dir, "queue"), filepath.Join(cfg.Dir, "sockets")} {
+	for _, d := range []string{cfg.Dir, filepath.Join(cfg.Dir, "queue"), filepath.Join(cfg.Dir, "sockets"), filepath.Join(cfg.Dir, "days")} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return nil, err
 		}
@@ -269,6 +268,14 @@ func (b *Builder) runJob(ctx context.Context, j *job) error {
 		Argv: b.cfg.Argv, Env: b.cfg.Env, Label: vm.Public,
 	})
 	if err != nil {
+		if !capacity(err) {
+			// Not a matter of waiting for room: spend an attempt, so a
+			// job that can never start leaves the queue.
+			j.Attempts++
+			if werr := writeJSON(j.path, j); werr != nil {
+				return werr
+			}
+		}
 		return fmt.Errorf("creating clean room: %w", err)
 	}
 	defer b.destroy(id)
@@ -292,8 +299,12 @@ func (b *Builder) runJob(ctx context.Context, j *job) error {
 		select {
 		case <-s.done:
 			s.mu.Lock()
-			a, failure := s.artifact, s.failure
+			a, failure, parked := s.artifact, s.failure, s.parked
 			s.mu.Unlock()
+			if parked {
+				b.destroy(id)
+				return b.park(j, h.Kind, failure)
+			}
 			if failure != "" {
 				return done(Outcome{Result: "failed", Reason: failure})
 			}
@@ -360,4 +371,69 @@ func (b *Builder) finish(j *job, kind string, o Outcome) error {
 	}
 	syncDir(filepath.Dir(j.path))
 	return nil
+}
+
+// capacity reports whether a Create error means only that there is no
+// spare capacity now.
+func capacity(err error) bool {
+	return errors.Is(err, admission.ErrNoRoom) || errors.Is(err, admission.ErrPressure) || errors.Is(err, vm.ErrRevoked)
+}
+
+func (b *Builder) parkDir() string { return filepath.Join(b.cfg.Dir, "parked") }
+
+// park logs a job that needs public material as failed and keeps it aside
+// for Requeue (potency PR2).
+func (b *Builder) park(j *job, kind, reason string) error {
+	if err := b.logOutcome(Outcome{Job: j.ID, Day: j.Day, Kind: kind, Result: "parked", Reason: reason}); err != nil {
+		return err
+	}
+	b.qmu.Lock()
+	defer b.qmu.Unlock()
+	if err := os.MkdirAll(b.parkDir(), 0o700); err != nil {
+		return err
+	}
+	if err := os.Rename(j.path, filepath.Join(b.parkDir(), filepath.Base(j.path))); err != nil {
+		return err
+	}
+	syncDir(filepath.Dir(j.path))
+	return syncDir(b.parkDir())
+}
+
+// Requeue puts parked jobs back in the queue with fresh attempts, for when
+// clean rooms can reach the public material they lacked (ARC-6 (d)).
+func (b *Builder) Requeue() (int, error) {
+	b.qmu.Lock()
+	defer b.qmu.Unlock()
+	ents, err := os.ReadDir(b.parkDir())
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil || len(ents) == 0 {
+		return 0, err
+	}
+	dir := filepath.Join(b.queueDir(), "requeue-"+newID())
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, e := range ents {
+		p := filepath.Join(b.parkDir(), e.Name())
+		var j job
+		if err := readJSON(p, &j); err != nil {
+			return n, err
+		}
+		j.Attempts = 0
+		if err := writeJSON(filepath.Join(dir, e.Name()), j); err != nil {
+			return n, err
+		}
+		if err := os.Remove(p); err != nil {
+			return n, err
+		}
+		n++
+	}
+	select {
+	case b.wake <- struct{}{}:
+	default:
+	}
+	return n, nil
 }

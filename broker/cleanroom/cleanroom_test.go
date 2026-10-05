@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,6 +36,7 @@ type fakeVMs struct {
 	createErr error
 	guest     func(id, dir string)
 	wg        sync.WaitGroup // guests running
+	onGet     func(id string)
 }
 
 func newFake() *fakeVMs { return &fakeVMs{ms: map[string]*vm.Machine{}} }
@@ -71,6 +73,9 @@ func (f *fakeVMs) Create(_ context.Context, id string, s vm.Spec) (vm.Machine, e
 }
 
 func (f *fakeVMs) Get(id string) (vm.Machine, error) {
+	if f.onGet != nil {
+		f.onGet(id)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if m := f.ms[id]; m != nil {
@@ -174,7 +179,30 @@ func canon(t *testing.T, kind string, fields map[string]string) []byte {
 }
 
 func skillHint(t *testing.T) []byte {
-	return canon(t, "skill_gap", map[string]string{"domain": "calendar", "format": "ics", "failure": "timezone"})
+	return canon(t, "skill_gap", map[string]string{"domain": "calendar", "format": "ics", "failure": "timezone", "frequency": "sometimes"})
+}
+
+// skillHintN is a skill hint that differs from skillHint and from every
+// other n.
+func skillHintN(t *testing.T, n int) []byte {
+	domains := []string{"email", "contacts", "documents", "spreadsheets", "files"}
+	return canon(t, "skill_gap", map[string]string{"domain": domains[n], "format": "ics", "failure": "timezone", "frequency": "once"})
+}
+
+var dayN struct {
+	sync.Mutex
+	t time.Time
+}
+
+// nextDay is a fresh day for each batch, since the outbox takes a day once.
+func nextDay() string {
+	dayN.Lock()
+	defer dayN.Unlock()
+	if dayN.t.IsZero() {
+		dayN.t = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	}
+	dayN.t = dayN.t.AddDate(0, 0, 1)
+	return dayN.t.Format("2006-01-02")
 }
 
 func vulnHint(t *testing.T) []byte {
@@ -242,7 +270,7 @@ func TestCleanRoomBuildsArtifactFromHint(t *testing.T) {
 			t.Errorf("result: %d %s", code, body)
 		}
 	}
-	if err := r.b.Send([][]byte{h}); err != nil {
+	if err := r.b.Send(nextDay(), [][]byte{h}); err != nil {
 		t.Fatal(err)
 	}
 	r.run()
@@ -269,7 +297,7 @@ func TestCleanRoomBuildsArtifactFromHint(t *testing.T) {
 		t.Fatalf("publishable %v %v", pub, err)
 	}
 	man := pub[0].Manifest()
-	if man.Output != "skill" || man.Embargo || string(man.Hint) != string(h) || man.Machine != m.ID || man.Image != "cleanroom" || man.Fixtures.Passed != 3 || len(man.Files) != 2 {
+	if man.Output != "skill" || man.Embargo || string(man.Hint) != string(h) || man.Machine != m.ID || man.Image != "cleanroom" || man.ClaimedFixtures.Passed != 3 || len(man.Files) != 2 {
 		t.Fatalf("manifest %+v", man)
 	}
 	if data, err := pub[0].ReadFile("skill/SKILL.md"); err != nil || string(data) != "# ics timezones\n" {
@@ -297,7 +325,7 @@ func TestCleanRoomHasNoPrivateServices(t *testing.T) {
 		codes["hint-post"], _ = call(c, "POST", "/cleanroom/hint", nil)
 		call(c, "POST", "/cleanroom/result", goodResult())
 	}
-	r.b.Send([][]byte{skillHint(t)})
+	r.b.Send(nextDay(), [][]byte{skillHint(t)})
 	r.run()
 	waitFor(t, "outcome", func() bool { return len(r.outcomes()) == 1 })
 	r.f.wg.Wait()
@@ -349,7 +377,7 @@ func TestCleanRoomModelCallsAreMetered(t *testing.T) {
 		}
 		call(c, "POST", "/cleanroom/result", goodResult())
 	}
-	r.b.Send([][]byte{skillHint(t)})
+	r.b.Send(nextDay(), [][]byte{skillHint(t)})
 	r.run()
 	waitFor(t, "outcome", func() bool { return len(r.outcomes()) == 1 })
 	r.f.wg.Wait()
@@ -381,7 +409,7 @@ func TestSendTakesOnlyCanonicalHints(t *testing.T) {
 		"not json":        "hello",
 	}
 	for name, h := range bad {
-		if err := r.b.Send([][]byte{good, []byte(h)}); !errors.Is(err, ErrHint) {
+		if err := r.b.Send(nextDay(), [][]byte{good, []byte(h)}); !errors.Is(err, ErrHint) {
 			t.Errorf("%s: %v, want ErrHint", name, err)
 		}
 	}
@@ -389,7 +417,7 @@ func TestSendTakesOnlyCanonicalHints(t *testing.T) {
 	if len(jobs) != 0 {
 		t.Fatalf("%d jobs queued from refused batches", len(jobs))
 	}
-	if err := r.b.Send([][]byte{good, vulnHint(t)}); err != nil {
+	if err := r.b.Send(nextDay(), [][]byte{good, vulnHint(t)}); err != nil {
 		t.Fatal(err)
 	}
 	jobs, _ = r.b.queued()
@@ -400,13 +428,13 @@ func TestSendTakesOnlyCanonicalHints(t *testing.T) {
 
 func TestSendBoundsTheQueue(t *testing.T) {
 	r := newRig(t, func(c *Config) { c.MaxQueue = 2 })
-	if err := r.b.Send([][]byte{skillHint(t), vulnHint(t), skillHint(t)}); !errors.Is(err, ErrFull) {
+	if err := r.b.Send(nextDay(), [][]byte{skillHint(t), vulnHint(t), skillHintN(t, 0)}); !errors.Is(err, ErrFull) {
 		t.Fatalf("over the bound: %v", err)
 	}
-	if err := r.b.Send([][]byte{skillHint(t), vulnHint(t)}); err != nil {
+	if err := r.b.Send(nextDay(), [][]byte{skillHint(t), vulnHint(t)}); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.b.Send([][]byte{skillHint(t)}); !errors.Is(err, ErrFull) {
+	if err := r.b.Send(nextDay(), [][]byte{skillHintN(t, 1)}); !errors.Is(err, ErrFull) {
 		t.Fatalf("full queue: %v", err)
 	}
 }
@@ -416,7 +444,7 @@ func TestSendBoundsTheQueue(t *testing.T) {
 func TestVulnRegressionIsEmbargoed(t *testing.T) {
 	r := newRig(t, nil)
 	r.f.guest = func(id, dir string) { call(client(dir), "POST", "/cleanroom/result", goodResult()) }
-	r.b.Send([][]byte{vulnHint(t)})
+	r.b.Send(nextDay(), [][]byte{vulnHint(t)})
 	r.run()
 	waitFor(t, "outcome", func() bool { return len(r.outcomes()) == 1 })
 	r.f.wg.Wait()
@@ -449,7 +477,7 @@ func TestCleanRoomWithPrivateLabelPublishesNothing(t *testing.T) {
 		r.f.set(id, func(m *vm.Machine) { m.Label = vm.Private })
 		code, _ = call(client(dir), "POST", "/cleanroom/result", goodResult())
 	}
-	r.b.Send([][]byte{skillHint(t)})
+	r.b.Send(nextDay(), [][]byte{skillHint(t)})
 	r.run()
 	waitFor(t, "outcome", func() bool { return len(r.outcomes()) == 1 })
 	r.f.wg.Wait()
@@ -479,7 +507,7 @@ func TestNotACleanMachineFails(t *testing.T) {
 				r.f.set(id, mod)
 				call(client(dir), "POST", "/cleanroom/result", goodResult())
 			}
-			r.b.Send([][]byte{skillHint(t)})
+			r.b.Send(nextDay(), [][]byte{skillHint(t)})
 			r.run()
 			waitFor(t, "outcome", func() bool { return len(r.outcomes()) == 1 })
 			r.f.wg.Wait()
@@ -526,7 +554,7 @@ func TestResultRules(t *testing.T) {
 			got[k], _ = call(c, "POST", "/cleanroom/result", cases[k].body)
 		}
 	}
-	r.b.Send([][]byte{skillHint(t)})
+	r.b.Send(nextDay(), [][]byte{skillHint(t)})
 	r.run()
 	waitFor(t, "outcome", func() bool { return len(r.outcomes()) == 1 })
 	r.f.wg.Wait()
@@ -545,7 +573,7 @@ func TestResultRules(t *testing.T) {
 // tried once more on a fresh machine, then the job fails.
 func TestSilentCleanRoomTimesOut(t *testing.T) {
 	r := newRig(t, func(c *Config) { c.Timeout = 50 * time.Millisecond })
-	r.b.Send([][]byte{skillHint(t)})
+	r.b.Send(nextDay(), [][]byte{skillHint(t)})
 	r.run()
 	waitFor(t, "outcome", func() bool { return len(r.outcomes()) == 1 })
 	r.f.wg.Wait()
@@ -567,7 +595,7 @@ func TestPreemptedCleanRoomResumes(t *testing.T) {
 		<-release
 		call(client(dir), "POST", "/cleanroom/result", goodResult())
 	}
-	r.b.Send([][]byte{skillHint(t)})
+	r.b.Send(nextDay(), [][]byte{skillHint(t)})
 	r.run()
 	waitFor(t, "resume", func() bool { r.f.mu.Lock(); defer r.f.mu.Unlock(); return len(r.f.resumed) > 0 })
 	close(release)
@@ -582,8 +610,8 @@ func TestPreemptedCleanRoomResumes(t *testing.T) {
 // queued without spending an attempt.
 func TestNoCapacityKeepsJobQueued(t *testing.T) {
 	r := newRig(t, nil)
-	r.f.createErr = errors.New("admission: no capacity")
-	r.b.Send([][]byte{skillHint(t)})
+	r.f.createErr = fmt.Errorf("vm: %w", admission.ErrNoRoom)
+	r.b.Send(nextDay(), [][]byte{skillHint(t)})
 	r.run()
 	time.Sleep(100 * time.Millisecond)
 	jobs, _ := r.b.queued()
@@ -602,7 +630,7 @@ func TestNoCapacityKeepsJobQueued(t *testing.T) {
 // behind; other machines are untouched.
 func TestRestartKeepsQueueAndDestroysLeftovers(t *testing.T) {
 	r := newRig(t, nil)
-	r.b.Send([][]byte{skillHint(t)})
+	r.b.Send(nextDay(), [][]byte{skillHint(t)})
 	f := r.f
 	f.ms["cr-old"] = &vm.Machine{ID: "cr-old", State: vm.Stopped}
 	f.ms["owner-task"] = &vm.Machine{ID: "owner-task", State: vm.Running, Label: vm.Private}
@@ -675,7 +703,7 @@ func TestArtifactTamperIsDetected(t *testing.T) {
 
 func TestStateIsBrokerOnly(t *testing.T) {
 	r := newRig(t, nil)
-	r.b.Send([][]byte{skillHint(t)})
+	r.b.Send(nextDay(), [][]byte{skillHint(t)})
 	for _, d := range []string{"", "queue", "sockets", "artifacts"} {
 		fi, err := os.Stat(filepath.Join(r.cfg.Dir, d))
 		if err != nil || fi.Mode().Perm() != 0o700 {
@@ -686,5 +714,147 @@ func TestStateIsBrokerOnly(t *testing.T) {
 	fi, _ := os.Stat(jobs[0].path)
 	if fi.Mode().Perm() != 0o600 {
 		t.Fatal(fmt.Sprint("job file mode ", fi.Mode()))
+	}
+}
+
+// R4: a Create error that is not about capacity spends an attempt, so a
+// job that can never start leaves the queue.
+func TestPermanentCreateErrorSpendsAttempts(t *testing.T) {
+	r := newRig(t, nil)
+	r.f.createErr = fmt.Errorf("vm: %w: image", vm.ErrUnknown)
+	r.b.Send(nextDay(), [][]byte{skillHint(t)})
+	r.run()
+	waitFor(t, "outcome", func() bool { return len(r.outcomes()) == 1 })
+	if o := r.outcomes()[0]; o.Result != "failed" {
+		t.Fatalf("outcome %+v", o)
+	}
+}
+
+// hint.Outbox: Send is idempotent by day; a resend of a day already taken
+// queues nothing, even after the first batch was built and left the queue.
+func TestSendIsIdempotentByDay(t *testing.T) {
+	r := newRig(t, nil)
+	batch := [][]byte{skillHint(t), vulnHint(t)}
+	if err := r.b.Send("2026-10-04", batch); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.b.Send("2026-10-04", batch); err != nil {
+		t.Fatal(err)
+	}
+	jobs, _ := r.b.queued()
+	if len(jobs) != 2 || jobs[0].Day != "2026-10-04" {
+		t.Fatalf("queued %+v", jobs)
+	}
+	for _, j := range jobs {
+		os.Remove(j.path) // as if built
+	}
+	if err := r.b.Send("2026-10-04", batch); err != nil {
+		t.Fatal(err)
+	}
+	// A restart keeps the record of days taken.
+	b2, err := New(r.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b2.Send("2026-10-04", batch); err != nil {
+		t.Fatal(err)
+	}
+	if jobs, _ := b2.queued(); len(jobs) != 0 {
+		t.Fatalf("resent day queued again: %d jobs", len(jobs))
+	}
+	for _, d := range []string{"", "2026-1-4", "2026-13-01", "../x", "2026-10-04T00:00"} {
+		if err := r.b.Send(d, batch); !errors.Is(err, ErrHint) {
+			t.Errorf("day %q: %v", d, err)
+		}
+	}
+}
+
+// Potency PR1: a hint identical to one queued or already built is not
+// built again; the outcome log records it as coalesced.
+func TestIdenticalHintsCoalesce(t *testing.T) {
+	r := newRig(t, nil)
+	r.b.Send(nextDay(), [][]byte{skillHint(t)})
+	r.b.Send(nextDay(), [][]byte{skillHint(t), vulnHint(t)})
+	jobs, _ := r.b.queued()
+	if len(jobs) != 2 {
+		t.Fatalf("%d jobs, want the repeat coalesced", len(jobs))
+	}
+	r.f.guest = func(id, dir string) { call(client(dir), "POST", "/cleanroom/result", goodResult()) }
+	r.run()
+	waitFor(t, "built", func() bool { return len(r.outcomes()) == 3 })
+	r.f.wg.Wait()
+	r.b.Send(nextDay(), [][]byte{vulnHint(t)})
+	waitFor(t, "coalesced", func() bool { return len(r.outcomes()) == 4 })
+	var coalesced, built int
+	for _, o := range r.outcomes() {
+		switch o.Result {
+		case "coalesced":
+			coalesced++
+		case "built":
+			built++
+		}
+	}
+	if coalesced != 2 || built != 2 || len(r.f.creates()) != 2 {
+		t.Fatalf("outcomes %+v, %d machines", r.outcomes(), len(r.f.creates()))
+	}
+}
+
+// Potency PR2: a clean room that needs public material it cannot reach
+// says so with a fixed reason; the job is parked, and Requeue runs it
+// again on a fresh machine.
+func TestNeedsPublicMaterialParksAndRequeues(t *testing.T) {
+	r := newRig(t, nil)
+	var codes []int
+	var mu sync.Mutex
+	first := true
+	r.f.guest = func(id, dir string) {
+		c := client(dir)
+		mu.Lock()
+		f := first
+		first = false
+		mu.Unlock()
+		if !f {
+			call(c, "POST", "/cleanroom/result", goodResult())
+			return
+		}
+		bad, _ := call(c, "POST", "/cleanroom/unable", []byte(`{"reason":"my bank changed its login page"}`))
+		good, _ := call(c, "POST", "/cleanroom/unable", []byte(`{"reason":"needs_public_material"}`))
+		mu.Lock()
+		codes = append(codes, bad, good)
+		mu.Unlock()
+	}
+	r.b.Send(nextDay(), [][]byte{skillHint(t)})
+	r.run()
+	waitFor(t, "parked", func() bool { return len(r.outcomes()) == 1 })
+	r.f.wg.Wait()
+	if o := r.outcomes()[0]; o.Result != "parked" || len(codes) != 2 || codes[0] != 400 || codes[1] != 200 {
+		t.Fatalf("outcome %+v codes %v", o, codes)
+	}
+	if jobs, _ := r.b.queued(); len(jobs) != 0 {
+		t.Fatal("parked job still queued")
+	}
+	if n, err := r.b.Requeue(); n != 1 || err != nil {
+		t.Fatalf("requeue %d %v", n, err)
+	}
+	waitFor(t, "built", func() bool { return len(r.outcomes()) == 2 })
+	r.f.wg.Wait()
+	if o := r.outcomes()[1]; o.Result != "built" {
+		t.Fatalf("outcome %+v", o)
+	}
+}
+
+// R1, OSS-3: a result stored while the job failed is removed, so the
+// store never holds a publishable artifact from a failed job.
+func TestResultStoredAfterFailureIsRemoved(t *testing.T) {
+	r := newRig(t, nil)
+	s := &session{b: r.b, id: "cr-x", job: &job{ID: "x", Hint: string(skillHint(t))}, kind: "skill_gap", done: make(chan struct{})}
+	r.f.ms["cr-x"] = &vm.Machine{ID: "cr-x", Spec: vm.Spec{Image: "cleanroom"}}
+	// The job fails between the clean check and storing the result.
+	r.f.onGet = func(string) { s.fail("machine stopped being clean") }
+	w := httptest.NewRecorder()
+	s.result(w, httptest.NewRequest("POST", "/cleanroom/result", bytes.NewReader(goodResult())))
+	pub, _ := r.b.Store().Publishable()
+	if w.Code == 200 || len(pub) != 0 {
+		t.Fatalf("code %d, %d publishable", w.Code, len(pub))
 	}
 }

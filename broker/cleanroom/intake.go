@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/hint"
 )
@@ -62,44 +63,89 @@ func parseCanonical(s *hint.Schema, b []byte) (hint.Hint, bool, error) {
 // Send takes one day's batch of canonical hints from the emitter
 // (hint.Outbox). Every hint is checked before any is queued, and the batch
 // is queued by one rename, so it is taken whole or not at all and the
-// emitter can resend a refused batch.
-func (b *Builder) Send(batch [][]byte) error {
+// emitter can resend a refused batch. Send is idempotent by day, as the
+// emitter requires: a day already taken is acknowledged and not queued
+// again. A hint identical to one queued or already built is coalesced into
+// it rather than built twice.
+func (b *Builder) Send(day string, batch [][]byte) error {
+	if t, err := time.Parse("2006-01-02", day); err != nil || t.Format("2006-01-02") != day {
+		return fmt.Errorf("%w: day %q", ErrHint, clip(day, 16))
+	}
 	for _, c := range batch {
 		if _, _, err := parseCanonical(b.cfg.Schema, c); err != nil {
 			return err
 		}
 	}
-	if len(batch) == 0 {
-		return nil
-	}
 	b.qmu.Lock()
 	defer b.qmu.Unlock()
+	marker := filepath.Join(b.cfg.Dir, "days", day)
+	if _, err := os.Stat(marker); err == nil {
+		return nil
+	}
+	if _, err := os.Stat(filepath.Join(b.queueDir(), day)); err == nil {
+		return writeFile(marker, nil) // queued before a crash took the marker
+	}
 	jobs, err := b.queued()
 	if err != nil {
 		return err
 	}
-	if len(jobs)+len(batch) > b.cfg.MaxQueue {
-		return ErrFull
+	have := map[string]string{} // canonical hint -> what it coalesces into
+	for _, j := range jobs {
+		have[j.Hint] = "job " + j.ID
 	}
-	day := b.cfg.Now().UTC().Format("2006-01-02")
-	tmp, err := os.MkdirTemp(b.cfg.Dir, "incoming-")
+	built, err := b.store.list(func(Manifest) bool { return true })
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(tmp)
-	for i, c := range batch {
-		j := job{ID: newID(), Hint: string(c), Day: day}
-		if err := writeJSON(filepath.Join(tmp, fmt.Sprintf("%04d-%s.json", i, j.ID)), j); err != nil {
+	for _, a := range built {
+		have[string(a.m.Hint)] = a.m.ID
+	}
+	var fresh [][]byte
+	var merged []Outcome
+	for _, c := range batch {
+		if into, ok := have[string(c)]; ok {
+			h, _, _ := parseCanonical(b.cfg.Schema, c)
+			o := Outcome{Day: day, Kind: h.Kind, Result: "coalesced", Reason: "same hint as " + into}
+			if !strings.HasPrefix(into, "job ") {
+				o.Artifact = into
+			}
+			merged = append(merged, o)
+			continue
+		}
+		have[string(c)] = "this batch"
+		fresh = append(fresh, c)
+	}
+	if len(jobs)+len(fresh) > b.cfg.MaxQueue {
+		return ErrFull
+	}
+	if len(fresh) > 0 {
+		tmp, err := os.MkdirTemp(b.cfg.Dir, "incoming-")
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(tmp)
+		for i, c := range fresh {
+			j := job{ID: newID(), Hint: string(c), Day: day}
+			if err := writeJSON(filepath.Join(tmp, fmt.Sprintf("%04d-%s.json", i, j.ID)), j); err != nil {
+				return err
+			}
+		}
+		// Batch directories are named by day, so they sort by day.
+		if err := os.Rename(tmp, filepath.Join(b.queueDir(), day)); err != nil {
+			return err
+		}
+		if err := syncDir(b.queueDir()); err != nil {
 			return err
 		}
 	}
-	// Batch directories sort by arrival: a sequence above every one queued.
-	name := fmt.Sprintf("%016x", b.nextBatch())
-	if err := os.Rename(tmp, filepath.Join(b.queueDir(), name)); err != nil {
+	if err := writeFile(marker, nil); err != nil {
 		return err
 	}
-	if err := syncDir(b.queueDir()); err != nil {
-		return err
+	for _, o := range merged {
+		o.Job = "-"
+		if err := b.logOutcome(o); err != nil {
+			return err
+		}
 	}
 	select {
 	case b.wake <- struct{}{}:
@@ -109,22 +155,6 @@ func (b *Builder) Send(batch [][]byte) error {
 }
 
 func (b *Builder) queueDir() string { return filepath.Join(b.cfg.Dir, "queue") }
-
-func (b *Builder) nextBatch() uint64 {
-	var n uint64
-	ents, _ := os.ReadDir(b.queueDir())
-	for _, e := range ents {
-		var v uint64
-		if _, err := fmt.Sscanf(e.Name(), "%016x", &v); err == nil && v >= n {
-			n = v + 1
-		}
-	}
-	if n <= b.lastBatch {
-		n = b.lastBatch + 1
-	}
-	b.lastBatch = n
-	return n
-}
 
 // queued lists waiting jobs, oldest batch first, in batch order.
 func (b *Builder) queued() ([]*job, error) {
