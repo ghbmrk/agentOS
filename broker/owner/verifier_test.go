@@ -371,3 +371,19 @@ func TestUnlockProofOnlySignsIn(t *testing.T) {
 		t.Fatalf("sign-in with the proof: %v", err)
 	}
 }
+
+// A refused unlock proof is not a wrong code: the vault process refuses
+// one it has no match for (a late redirect) and counts a wrong one itself
+// (#65 L3 follow-up 1).
+func TestRefusedUnlockProofIsNotCounted(t *testing.T) {
+	r, _ := newVerifierRig(t)
+	if _, err := r.ch.LocalSignIn(UnlockProofPrefix + "0123456789abcdef0123456789abcdef"); err != ErrWrongCode {
+		t.Fatalf("refused proof: %v", err)
+	}
+	r.ch.mu.Lock()
+	wrong := len(r.ch.codes.st.Wrong)
+	r.ch.mu.Unlock()
+	if wrong != 0 {
+		t.Fatalf("refused proof counted: %d", wrong)
+	}
+}

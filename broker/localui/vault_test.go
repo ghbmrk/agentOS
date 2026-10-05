@@ -898,3 +898,18 @@ func TestVaultBudgetExemptsThePendingPhone(t *testing.T) {
 		t.Fatalf("pending phone starved:\n%s", b)
 	}
 }
+
+// A typed code is never the vault unlock's sign-in proof; only the vault
+// page presents one, right after the confirm (#65 L3 follow-up 1).
+func TestTypedCodeIsNeverAnUnlockProof(t *testing.T) {
+	r, fv := vaultRig(t)
+	pv := &proofVerifier{fv: fv}
+	r.channelWith(pv)
+	w := r.post("/unlock", url.Values{"code": {owner.UnlockProofPrefix + "tkt-0000000000000001"}})
+	if len(pv.proofs) != 0 {
+		t.Fatalf("typed proof reached the owner channel: %q", pv.proofs)
+	}
+	if !strings.Contains(w.Body.String(), "That code did not work.") {
+		t.Fatalf("typed proof:\n%s", w.Body)
+	}
+}
