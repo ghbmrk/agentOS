@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -243,7 +244,7 @@ func main() {
 	var cgroupVouched, modemBridge, ownerMessage bool
 	floor := budget.Floor()
 	flag.StringVar(&cfg.JournalPath, "journal", "/var/lib/agentos/journal.log", "journal file")
-	flag.StringVar(&cfg.SocketDir, "sockets", "/run/agentos", "socket directory (created 0700; 0711 so the modem bridge can reach owner.sock)")
+	flag.StringVar(&cfg.SocketDir, "sockets", "/run/agentos", "socket directory (created 0700; 0711 once owner.sock, 0660 to the modem bridge's group, is up)")
 	flag.StringVar(&cfg.OwnerNumber, "owner", "", "owner's phone number, E.164")
 	flag.IntVar(&cfg.ModemUID, "modem-uid", -1, "uid of the modem bridge, the only peer allowed on the owner socket")
 	flag.BoolVar(&modemBridge, "modem-bridge", true, "serve the modem bridge's ops on the owner socket and send the owner channel's texts through it")
@@ -308,6 +309,14 @@ func main() {
 	}
 	if cfg.ModemUID < 0 || cfg.ModemUID == os.Getuid() {
 		log.Fatal("-modem-uid must name the modem bridge's own uid, distinct from the broker's")
+	}
+	// The owner socket is the bridge user's primary group's, 0660 (R3).
+	if u, err := user.LookupId(strconv.Itoa(cfg.ModemUID)); err != nil {
+		log.Fatalf("-modem-uid %d: %v", cfg.ModemUID, err)
+	} else if gid, err := strconv.Atoi(u.Gid); err != nil {
+		log.Fatalf("-modem-uid %d: group %q: %v", cfg.ModemUID, u.Gid, err)
+	} else {
+		cfg.ModemGID = &gid
 	}
 
 	// RES-3: nothing below depends on what is found here. No local

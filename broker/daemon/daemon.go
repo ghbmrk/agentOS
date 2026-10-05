@@ -44,6 +44,10 @@ type Config struct {
 	// ModemUID is the only uid allowed on the owner socket: the modem
 	// bridge, which runs as its own user (SO_PEERCRED, B8).
 	ModemUID int
+	// ModemGID, if set, is the bridge's group: the owner socket is given
+	// it, mode 0660, so the bridge can connect as its own user (security
+	// R3 on #170). Unset, the socket is 0600 (same-uid tests only).
+	ModemGID *int
 	// Machines gets one guest socket each. IDs are [a-z0-9-], unique.
 	Machines []string
 	// Auth overrides the default, which knows the owner's number and keeps
@@ -264,11 +268,15 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 		gate.Attach(eng, nil)
 	}
 
-	modem := cfg.ModemUID
+	var modemUID *int
+	if cfg.ModemUID >= 0 {
+		modemUID = &cfg.ModemUID
+	}
 	eps := []sockets.Endpoint{{
 		Name:        OwnerSocket,
 		Peer:        sockets.Peer{Kind: "owner"},
-		PeerUID:     &modem,
+		PeerUID:     modemUID,
+		PeerGID:     cfg.ModemGID,
 		MaxConns:    8,
 		IdleTimeout: ownerIdle,
 		Ops: map[string]sockets.Handler{

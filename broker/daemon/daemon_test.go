@@ -322,3 +322,25 @@ func TestABridgeOnlyOwnerSocketRefusesRawMessages(t *testing.T) {
 		t.Fatalf("state: %+v", r)
 	}
 }
+
+// agentosd gives the owner socket to the bridge user's group (security R3
+// on #170); the bridge's uid still connects.
+func TestTheOwnerSocketIsTheBridgeGroups(t *testing.T) {
+	dir := t.TempDir()
+	gid := os.Getgid()
+	cancel, _ := startWith(t, dir, func(c *Config) { c.ModemGID = &gid })
+	defer cancel()
+	sock := filepath.Join(dir, "run", OwnerSocket)
+	for p, want := range map[string]os.FileMode{sock: 0o660, filepath.Dir(sock): 0o711} {
+		fi, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode().Perm() != want {
+			t.Fatalf("%s mode %v, want %v", p, fi.Mode().Perm(), want)
+		}
+	}
+	if r := send(t, sock, "message", map[string]string{"from": "+15550000999", "text": "STATUS"}); !r.OK {
+		t.Fatalf("the bridge's uid was refused: %+v", r)
+	}
+}
