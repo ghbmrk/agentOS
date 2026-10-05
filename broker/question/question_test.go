@@ -241,7 +241,7 @@ func TestUntaggedChoiceAnswersTheOnlyQuestion(t *testing.T) {
 		t.Fatal("an untagged number taken as an answer")
 	}
 	// A choice the channel would take when sent alone is refused.
-	for _, c := range []string{"run", "No", "stop.", "RESUME"} {
+	for _, c := range []string{"run", "No", "stop.", "RESUME", "yes,", "(run)", "*run*", "yes, please"} {
 		if _, err := r.b.Ask(context.Background(), "lin1", "cw", Spec{Text: "Proceed?", Choices: []string{c, "wait"}, Default: "wait", Wait: time.Hour}); err == nil {
 			t.Errorf("choice %q accepted", c)
 		}
@@ -447,7 +447,7 @@ func TestAnswersCannotCarryCodes(t *testing.T) {
 		"Q100 the first part is " + key[:23],
 		"Q100 " + strings.ReplaceAll(key, "-", "/"), "Q100 " + strings.ReplaceAll(key, "-", "_"), "Q100 ABCD7 EFGH2", "Q100 abcd7efgh2jklm3",
 		// Digit groups joined by any short separator run.
-		"Q100 482/913", "Q100 4,8,2,9,1,3", "Q100 4, 8, 2, 9, 1, 3", "Q100 482_913",
+		"Q100 482/913", "Q100 482:913", "Q100 482,913", "Q100 4,8,2,9,1,3", "Q100 4, 8, 2, 9, 1, 3", "Q100 482_913",
 		// Whatever the channel would withhold as secret-shaped (C1).
 		"Q100 sk-live-abc"} {
 		reply, ok := r.answer(a)
@@ -459,12 +459,13 @@ func TestAnswersCannotCarryCodes(t *testing.T) {
 		t.Fatalf("a code-shaped answer was recorded: %+v", st)
 	}
 	// The owner sees the refusals as a guard hit in the digest (R1).
-	if d := r.b.TakeDigest(); len(d) != 1 || !strings.Contains(d[0], "18 answers") {
+	if d := r.b.TakeDigest(); len(d) != 1 || !strings.Contains(d[0], "20 answers") {
 		t.Fatalf("digest %q", d)
 	}
 	// A full phone number or an ordinary sentence is neither.
 	for _, a := range []string{"Q100 call 555 010 0199", "Q100 maybe after lunch, about three or later",
-		"Q100 great sweet happy dance", "Q100 between 9:30, 10:00"} {
+		"Q100 great sweet happy dance", "Q100 between 9:30, 10:00",
+		"Q100 £1,250.00", "Q100 1,234,567", "Q100 05/10/2026", "Q100 the 2026/27 season", "Q100 2026-10-05 at 14:30"} {
 		if reply, _ := r.answer(a); strings.Contains(reply, "only for the box") {
 			t.Fatalf("%q refused: %q", a, reply)
 		}

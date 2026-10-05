@@ -329,7 +329,7 @@ func (b *Book) normalize(s Spec) (Spec, error) {
 	found := len(s.Choices) == 0
 	for _, c := range s.Choices {
 		c = flatten(c)
-		if controlWords[strings.ToUpper(strings.Trim(c, ".!?"))] {
+		if w := strings.Fields(squeezeAll(c)); len(w) > 0 && controlWords[strings.ToUpper(w[0])] {
 			return out, errors.New("question: a choice cannot be an owner-channel word (STOP, YES, NO, RUN...), since the channel takes it when sent alone; use words like \"go ahead\" or \"wait\"")
 		}
 		if c == "" || utf8.RuneCountInString(c) > MaxChoice {
@@ -367,6 +367,18 @@ func (b *Book) normalize(s Spec) (Spec, error) {
 		return out, errors.New("question: it reads as carrying a secret, so the owner would not see it")
 	}
 	return out, nil
+}
+
+// squeezeAll turns everything but letters and digits into spaces, as the
+// owner channel splits a message into words (owner fields): "(run)" and
+// "yes, please" start with a channel word.
+func squeezeAll(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return r
+		}
+		return ' '
+	}, s)
 }
 
 // squeeze drops punctuation inside words ("pass-word", "P.I.N."), so the
@@ -446,6 +458,7 @@ var replyShape = regexp.MustCompile(`(?i)\b(yes|no|undo|more|resume|unlock|pause
 // to ASCII and joining digit groups split by spaces, dots or dashes
 // ("482 913", "4-8-2-9-1-3"), as owner.SecretShaped does.
 func codeShaped(s string) bool {
+	s = benign.ReplaceAllString(s, "x")
 	var runs []int
 	n, gap := 0, 0
 	for _, r := range s {
@@ -453,7 +466,7 @@ func codeShaped(s string) bool {
 		case unicode.IsDigit(r):
 			n++
 			gap = 0
-		case n > 0 && gap < maxJoin && !unicode.IsLetter(r) && r != ':':
+		case n > 0 && gap < maxJoin && !unicode.IsLetter(r):
 			gap++ // a short run of separators joins two groups
 		default:
 			if n > 0 {
@@ -473,9 +486,19 @@ func codeShaped(s string) bool {
 	return false
 }
 
-// maxJoin is the longest run of separators (anything but a letter, a
-// digit, or ':', so times like 9:30 stay apart) that joins two digit
-// groups: "482 913", "482/913", "4, 8, 2, 9, 1, 3".
+// maxJoin is the longest run of separators (anything but a letter or a
+// digit) that joins two digit groups: "482 913", "482/913", "482:913",
+// "4, 8, 2, 9, 1, 3".
+
+// benign matches number shapes that are not codes, blanked before digit
+// groups are joined (#71 L3): clock times (9:30, 23:59), dates
+// (05/10/2026, 2026-10-05, 2026/27), and amounts written with thousands
+// separators and a currency sign, a decimal part, or two or more groups
+// (£1,250.00, 1,234,567). "482,913" alone stays code-shaped.
+var benign = regexp.MustCompile(`\b([01]?[0-9]|2[0-3]):[0-5][0-9]\b` +
+	`|\b[0-9]{1,2}[/.-][0-9]{1,2}[/.-][0-9]{2,4}\b|\b[0-9]{4}-[0-9]{2}-[0-9]{2}\b|\b(19|20)[0-9]{2}/[0-9]{2}\b` +
+	`|[$£€¥][0-9]{1,3}(,[0-9]{3})*(\.[0-9]+)?|\b[0-9]{1,3}(,[0-9]{3})+\.[0-9]+|\b[0-9]{1,3}(,[0-9]{3}){2,}\b`)
+
 const maxJoin = 3
 
 func same(e *entry, s Spec) bool {
