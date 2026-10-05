@@ -60,6 +60,37 @@ func (w watchedLine) Send(to, text string) error {
 	return err
 }
 
+// LineDown says err is the owner's line being down (modem.ErrDown): the
+// text did not go, and asking again later may reach the owner.
+func LineDown(err error) bool { return errors.Is(err, modem.ErrDown) }
+
+// RequestSender is a modem that tells an approval request apart from the
+// channel's other texts: the modem bridge's link, whose recovery text
+// counts the requests that did not go (UX on #170).
+type RequestSender interface {
+	SendRequest(to, text string) error
+}
+
+func (w watchedLine) SendRequest(to, text string) error {
+	rs, ok := w.Modem.(RequestSender)
+	if !ok {
+		return w.Send(to, text)
+	}
+	err := rs.SendRequest(to, text)
+	if err != nil {
+		w.c.lineFailed.Store(w.c.cfg.Now().UnixNano())
+	}
+	return err
+}
+
+// sendRequest texts the owner an approval request.
+func (c *Channel) sendRequest(text string) error {
+	if rs, ok := c.cfg.Modem.(RequestSender); ok {
+		return rs.SendRequest(c.cfg.Owner, text)
+	}
+	return c.cfg.Modem.Send(c.cfg.Owner, text)
+}
+
 // QueueResult says what happened to a reply.
 type QueueResult struct {
 	// Queued is set when the reply waits out the undo window.

@@ -17,8 +17,7 @@ import (
 // TestOnlyTheDaemonUsesTheLoop2Origin); the guest plane is covered by guest
 // TestAGuestCannotClaimTheLoop2Origin.
 func TestTheOwnerSocketCannotClaimTheLoop2Origin(t *testing.T) {
-	dir, _ := os.MkdirTemp("", "bk")
-	defer os.RemoveAll(dir)
+	dir := t.TempDir()
 	cancel, d := start(t, dir)
 	sock := filepath.Join(dir, "run", OwnerSocket)
 	for _, from := range []string{owner, "+15550000002", grants.OriginLoop2} {

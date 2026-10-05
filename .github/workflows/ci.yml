@@ -120,7 +120,7 @@ jobs:
             go test -count=1 -v ./cgroup ./quota/... ./vm/... ./recovery ./cleanroom
           # Per-machine disk quotas on a prjquota file system (RES-4, SR2-3).
           sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache AGENTOS_REQUIRE_QUOTA=1 \
-            go test -count=1 -v -run '^TestMachinesGetTheStateFileSystemsQuota$' ./cmd/agentosd
+            go test -count=1 -v -run '^(TestMachinesGetTheStateFileSystemsQuota|TestMachineDiskWithQuotasAddsNoLine)$' ./cmd/agentosd
       - name: OpenClaw guest under gVisor (P1-7)
         # Real OpenClaw, pinned by version and hash, as an agent machine with
         # only its broker socket; a scripted model stands in for a provider.

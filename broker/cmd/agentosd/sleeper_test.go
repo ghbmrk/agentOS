@@ -26,6 +26,7 @@ type sleepFake struct {
 	wake     vm.Wake // what the next ResumeFromCheckpoint reports
 	sleepErr error
 	slow     chan struct{} // if set, ResumeFromCheckpoint waits on it
+	waits    int           // restores that have waited on slow
 	resumed  []string
 	// during, if set, runs inside CheckpointAndStop, unlocked; resumeErr
 	// fails ResumeFromCheckpoint, cold fallback included.
@@ -76,6 +77,9 @@ func (f *sleepFake) ResumeFromCheckpoint(ctx context.Context, id, snap string) (
 	f.mu.Lock()
 	f.deadline, _ = ctx.Deadline()
 	slow := f.slow
+	if slow != nil {
+		f.waits++
+	}
 	f.mu.Unlock()
 	if slow != nil {
 		<-slow
@@ -111,6 +115,14 @@ type sleepRig struct {
 	stopped bool
 	notes   []journal.SleepNote
 	holds   int
+	timers  []*rigTimer
+}
+
+// rigTimer is an AfterFunc on the rig's clock: advance fires it.
+type rigTimer struct {
+	due           time.Time
+	f             func()
+	fired, halted bool
 }
 
 func newSleepRig(t *testing.T) *sleepRig {
@@ -130,8 +142,69 @@ func newSleepRig(t *testing.T) *sleepRig {
 		Journal:   func(n journal.SleepNote) error { r.mu.Lock(); r.notes = append(r.notes, n); r.mu.Unlock(); return nil },
 		Hold:      func() { r.mu.Lock(); r.holds++; r.mu.Unlock() },
 		HoldAfter: 20 * time.Millisecond,
+		AfterFunc: r.afterFunc,
 	})
 	return r
+}
+
+func (r *sleepRig) afterFunc(d time.Duration, f func()) func() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	t := &rigTimer{due: r.now.Add(d), f: f}
+	r.timers = append(r.timers, t)
+	return func() bool {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		was := !t.fired && !t.halted
+		t.halted = true
+		return was
+	}
+}
+
+// advance moves the rig's clock on by d and fires the timers then due,
+// outside the rig's lock (the holding line takes it).
+func (r *sleepRig) advance(d time.Duration) {
+	r.mu.Lock()
+	r.now = r.now.Add(d)
+	var due []func()
+	for _, t := range r.timers {
+		if !t.fired && !t.halted && !t.due.After(r.now) {
+			t.fired = true
+			due = append(due, t.f)
+		}
+	}
+	r.mu.Unlock()
+	for _, f := range due {
+		f()
+	}
+}
+
+// armed counts the timers set so far.
+func (r *sleepRig) armed() int { r.mu.Lock(); defer r.mu.Unlock(); return len(r.timers) }
+
+// slowly makes the next restore wait until d has passed on the rig's
+// clock: a wake that long, whatever the machine's load.
+func (r *sleepRig) slowly(d time.Duration) {
+	slow := make(chan struct{})
+	r.f.mu.Lock()
+	r.f.slow = slow
+	base := r.f.waits
+	r.f.mu.Unlock()
+	go func() {
+		// Time moves on once the restore is under way: an owner message
+		// arms its timer before that.
+		for {
+			r.f.mu.Lock()
+			started := r.f.waits > base
+			r.f.mu.Unlock()
+			if started {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+		r.advance(d)
+		close(slow)
+	}()
 }
 
 func (r *sleepRig) clock() time.Time { r.mu.Lock(); defer r.mu.Unlock(); return r.now }
@@ -278,17 +351,14 @@ func TestWatchWakesAtTheWindowEndAndMaxSleep(t *testing.T) {
 func TestHoldingLineOnASlowWake(t *testing.T) {
 	r := newSleepRig(t)
 	must(t, r.s.Sleep(context.Background()))
-	r.s.OwnerMessage(time.Now())
-	if r.holds != 0 {
+	r.s.OwnerMessage(r.clock())
+	r.advance(time.Hour)
+	if r.holdCount() != 0 {
 		t.Fatal("a quick wake sent the holding line")
 	}
 	must(t, r.s.Sleep(context.Background()))
-	slow := make(chan struct{})
-	r.f.mu.Lock()
-	r.f.slow = slow
-	r.f.mu.Unlock()
-	go func() { time.Sleep(80 * time.Millisecond); close(slow) }()
-	r.s.OwnerMessage(time.Now())
+	r.slowly(80 * time.Millisecond)
+	r.s.OwnerMessage(r.clock())
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.holds != 1 {
@@ -343,13 +413,13 @@ func TestHoldingLineClockStartsAtDelivery(t *testing.T) {
 	go func() { slept <- r.s.Sleep(context.Background()) }()
 	<-in
 	woke := make(chan struct{})
-	go func() { r.s.OwnerMessage(time.Now()); close(woke) }()
-	deadline := time.Now().Add(5 * time.Second)
-	for r.holdCount() == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("no holding line while the checkpoint held the wake")
-		}
+	go func() { r.s.OwnerMessage(r.clock()); close(woke) }()
+	for r.armed() == 0 { // the message's timer, armed before it waits
 		time.Sleep(time.Millisecond)
+	}
+	r.advance(r.s.cfg.HoldAfter)
+	if r.holdCount() != 1 {
+		t.Fatal("no holding line while the checkpoint held the wake")
 	}
 	close(release)
 	must(t, <-slept)
@@ -363,14 +433,10 @@ func TestHoldingLineClockStartsAtDelivery(t *testing.T) {
 	r = newSleepRig(t)
 	r.s.cfg.HoldAfter = 300 * time.Millisecond
 	must(t, r.s.Sleep(context.Background()))
-	slow := make(chan struct{})
-	r.f.mu.Lock()
-	r.f.slow = slow
-	r.f.mu.Unlock()
-	go func() { time.Sleep(150 * time.Millisecond); close(slow) }()
-	r.s.OwnerMessage(time.Now().Add(-250 * time.Millisecond))
+	r.slowly(60 * time.Millisecond)
+	r.s.OwnerMessage(r.clock().Add(-250 * time.Millisecond))
 	if r.holdCount() != 1 {
-		t.Fatalf("holding lines %d for a wake ending 400 ms after delivery, want 1", r.holdCount())
+		t.Fatalf("holding lines %d for a wake ending 310 ms after delivery, want 1", r.holdCount())
 	}
 }
 
@@ -382,11 +448,7 @@ func TestHoldingLineThreshold(t *testing.T) {
 	}
 	slowWake := func(r *sleepRig, d time.Duration, wake func()) {
 		must(t, r.s.Sleep(context.Background()))
-		slow := make(chan struct{})
-		r.f.mu.Lock()
-		r.f.slow = slow
-		r.f.mu.Unlock()
-		go func() { time.Sleep(d); close(slow) }()
+		r.slowly(d)
 		wake()
 	}
 	r := newSleepRig(t)
@@ -396,8 +458,8 @@ func TestHoldingLineThreshold(t *testing.T) {
 	}
 	r = newSleepRig(t)
 	r.s.cfg.HoldAfter = 400 * time.Millisecond
-	slowWake(r, 40*time.Millisecond, func() { r.s.OwnerMessage(time.Now()) })
-	time.Sleep(450 * time.Millisecond)
+	slowWake(r, 399*time.Millisecond, func() { r.s.OwnerMessage(r.clock()) })
+	r.advance(time.Hour)
 	if r.holdCount() != 0 {
 		t.Fatal("the holding line went out before HoldAfter")
 	}
@@ -504,23 +566,28 @@ func TestHoldingLineOncePerWake(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < 3; i++ {
 		wg.Add(1)
-		go func() { defer wg.Done(); r.s.OwnerMessage(time.Now()) }()
+		go func() { defer wg.Done(); r.s.OwnerMessage(r.clock()) }()
 	}
-	time.Sleep(100 * time.Millisecond) // past HoldAfter for every message
+	for { // every message is in: one restore waits, two messages queue
+		r.f.mu.Lock()
+		w := r.f.waits
+		r.f.mu.Unlock()
+		if w > 0 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	r.advance(100 * time.Millisecond) // past HoldAfter for every message
 	close(slow)
 	wg.Wait()
-	time.Sleep(50 * time.Millisecond)
+	r.advance(time.Hour)
 	if n := r.holdCount(); n != 1 {
 		t.Fatalf("%d holding lines for one wake, want 1", n)
 	}
 	// The next sleep may send its own.
 	must(t, r.s.Sleep(context.Background()))
-	slow = make(chan struct{})
-	r.f.mu.Lock()
-	r.f.slow = slow
-	r.f.mu.Unlock()
-	go func() { time.Sleep(80 * time.Millisecond); close(slow) }()
-	r.s.OwnerMessage(time.Now())
+	r.slowly(80 * time.Millisecond)
+	r.s.OwnerMessage(r.clock())
 	if n := r.holdCount(); n != 2 {
 		t.Fatalf("%d holding lines after a second slow wake, want 2", n)
 	}
@@ -530,8 +597,8 @@ func TestHoldingLineOncePerWake(t *testing.T) {
 	r = newSleepRig(t)
 	r.s.cfg.HoldAfter = 60 * time.Millisecond
 	must(t, r.s.Sleep(context.Background()))
-	r.s.OwnerMessage(time.Now())
-	time.Sleep(120 * time.Millisecond)
+	r.s.OwnerMessage(r.clock())
+	r.advance(120 * time.Millisecond)
 	if n := r.holdCount(); n != 0 {
 		t.Fatalf("a holding line after the agent woke (%d)", n)
 	}

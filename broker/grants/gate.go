@@ -1373,9 +1373,24 @@ func (g *Gate) annotate(st *journal.Status) {
 		st.Permission.Reason = "waiting for the owner's approval"
 	} else if r := g.retry[id]; r != "" {
 		st.Permission.Reason = r
-	} else if f := g.failed[id]; f != "" {
+	} else if f := g.failed[id]; f == LineDown {
+		st.Permission.Reason = LineDown
+	} else if f != "" {
 		st.Permission.Reason = "could not ask the owner (" + f + "); retry later"
 	}
+}
+
+// LineDown is the agent's reason for an ask that could not be texted
+// because the owner's phone line was down: the request was dropped, and
+// asking again once the line is back reaches the owner (UX on #170; the
+// recovery text tells the owner the agent can ask again).
+const LineDown = "not sent: the owner's phone line is down; ask again later"
+
+func failReason(err error) string {
+	if owner.LineDown(err) {
+		return LineDown
+	}
+	return err.Error()
 }
 
 func (g *Gate) queueReply(id string, v verdict) {
@@ -1399,7 +1414,7 @@ func (g *Gate) queueReply(id string, v verdict) {
 	case w == nil:
 	case err != nil:
 		delete(g.waiting, id)
-		g.failed[id] = err.Error()
+		g.failed[id] = failReason(err)
 	case res.Queued != nil:
 		w.reply, w.sendAt = res.Queued.ID, res.Queued.SendAt
 	default:
@@ -1600,7 +1615,7 @@ func (g *Gate) flush(paced bool) {
 				if err == nil {
 					err = errors.New("not sent")
 				}
-				g.failed[it.Ref] = err.Error()
+				g.failed[it.Ref] = failReason(err)
 			}
 		}
 		g.mu.Unlock()
@@ -1624,7 +1639,7 @@ func (g *Gate) flush(paced bool) {
 		if w := g.waiting[it.Ref]; w != nil {
 			if err != nil {
 				delete(g.waiting, it.Ref)
-				g.failed[it.Ref] = err.Error()
+				g.failed[it.Ref] = failReason(err)
 			} else {
 				w.request = req
 			}
@@ -1666,7 +1681,7 @@ func (g *Gate) flush(paced bool) {
 				if err != nil {
 					// Retrying the request_id asks again.
 					delete(g.waiting, it.Ref)
-					g.failed[it.Ref] = err.Error()
+					g.failed[it.Ref] = failReason(err)
 				} else {
 					w.request = req
 				}
@@ -2391,13 +2406,29 @@ func (g *Gate) Narrow(word, id string) string {
 // Execute runs a grant intent: it is the engine executor for ExecutorName.
 func (g *Gate) Execute(_ context.Context, in journal.Intent, _ int) journal.Outcome {
 	g.mu.Lock()
+	before := make([]string, 0, len(g.grants))
+	for k := range g.grants {
+		before = append(before, k)
+	}
 	id, err := g.applyLocked(in)
+	// Every grant the intent ended: the one named, and the pre-allowances
+	// a revoked connection takes with it (L3 S1 on #169).
+	var ended []string
+	if err == nil && unpauses(in) {
+		ended = append(ended, id)
+		for _, k := range before {
+			if _, live := g.grants[k]; !live && k != id {
+				ended = append(ended, k)
+			}
+		}
+		sort.Strings(ended[1:])
+	}
 	g.mu.Unlock()
 	if err != nil {
 		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: err.Error()}
 	}
-	if unpauses(in) {
-		g.unpaused(id)
+	for _, k := range ended {
+		g.unpaused(k)
 	}
 	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: id}
 }

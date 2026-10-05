@@ -85,7 +85,7 @@ var netOK = map[string]allowance{
 	"update":     {"flock on the update store", []string{"syscall.Flock", "syscall.LOCK_EX"}},
 	// Recall (CAP-3, #59): one broker per index, as for the journal.
 	"recall": {"flock on the recall store", []string{"syscall.Flock", "syscall.LOCK_EX", "syscall.LOCK_NB"}},
-	"vm/overlay": {"overlay files: xattrs, device nodes, stat, timestamps, the FICLONE ioctl for copies, and handle-relative deletion in a stopped worker's layer (CAP-8c)",
+	"vm/overlay": {"overlay files: xattrs, device nodes, stat, timestamps, the FICLONE ioctl for copies, and handle-relative deletion in a stopped worker's layer (CAP-8c), and directory handles to measure a layer past the path limit",
 		[]string{"syscall.Close", "syscall.Dup", "syscall.EEXIST", "syscall.EINVAL", "syscall.ELOOP", "syscall.ENAMETOOLONG", "syscall.ENOENT",
 			"syscall.ENOTDIR", "syscall.ENOTEMPTY", "syscall.ENXIO", "syscall.Fstat", "syscall.Getxattr", "syscall.Listxattr",
 			"syscall.Mknod", "syscall.NsecToTimespec", "syscall.O_CLOEXEC", "syscall.O_DIRECTORY", "syscall.O_NOFOLLOW",

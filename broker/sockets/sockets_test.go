@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -148,5 +149,68 @@ func TestEndpointNameCannotEscapeTheDirectory(t *testing.T) {
 	err := s.Start(context.Background(), Endpoint{Name: "../x.sock", Peer: Peer{Kind: "guest"}})
 	if err == nil {
 		t.Fatal("accepted a path outside the socket directory")
+	}
+}
+
+// The owner socket's client (agentos-modem) runs as its own user: the
+// directory is traversable but not listable, that socket is its group's
+// (0660; the SO_PEERCRED check still refuses every other uid), and the
+// others stay owner-only. The directory is widened only after every socket
+// has its mode, and a restart narrows it first (security F3, R3 on #170).
+func TestAPeerSocketIsReachableByItsGroupOnly(t *testing.T) {
+	var during []os.FileMode
+	listened = func(dir string) {
+		if fi, err := os.Stat(dir); err == nil {
+			during = append(during, fi.Mode().Perm())
+		}
+	}
+	defer func() { listened = func(string) {} }()
+	modem, gid := os.Getuid()+1, os.Getgid()
+	eps := []Endpoint{
+		{Name: "owner.sock", Peer: Peer{Kind: "owner"}, PeerUID: &modem, PeerGID: &gid, Ops: map[string]Handler{"ping": echoPeer}},
+		{Name: "guest-m1.sock", Peer: Peer{Kind: "guest", ID: "m1"}, Ops: map[string]Handler{"ping": echoPeer}},
+	}
+	dir := filepath.Join(t.TempDir(), "run")
+	start := func() func() {
+		t.Helper()
+		s := &Server{Dir: dir}
+		ctx, cancel := context.WithCancel(context.Background())
+		if err := s.Start(ctx, eps...); err != nil {
+			t.Fatal(err)
+		}
+		return func() { cancel(); s.Wait() }
+	}
+	check := func() {
+		t.Helper()
+		for name, want := range map[string]os.FileMode{"": 0o711, "owner.sock": 0o660, "guest-m1.sock": 0o600} {
+			fi, err := os.Stat(filepath.Join(dir, name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fi.Mode().Perm() != want {
+				t.Fatalf("%q mode %v, want %v", name, fi.Mode().Perm(), want)
+			}
+			if st, ok := fi.Sys().(*syscall.Stat_t); name == "owner.sock" && (!ok || int(st.Gid) != gid) {
+				t.Fatalf("owner.sock group %v, want %d", fi.Sys(), gid)
+			}
+		}
+	}
+	stop := start()
+	check()
+	if r := call(t, filepath.Join(dir, "owner.sock"), `{"op":"ping"}`); r.OK {
+		t.Fatalf("a uid other than PeerUID was served: %+v", r)
+	}
+	// A restart over the widened directory narrows it before listening.
+	stop()
+	stop = start()
+	defer stop()
+	check()
+	if len(during) != 4 {
+		t.Fatalf("listen hook saw %d sockets, want 4", len(during))
+	}
+	for _, m := range during {
+		if m != 0o700 {
+			t.Fatalf("directory was %v while a socket was being created, want 0700", m)
+		}
 	}
 }

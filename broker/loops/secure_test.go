@@ -396,7 +396,7 @@ func TestFindingHandling(t *testing.T) {
 	// and that the pause stays.
 	b.pkgs[0].Version = "3.0.14"
 	r.pass(t)
-	if len(r.texts) != 2 || !strings.Contains(r.texts[1], "Cleared: openssl. The network gateway is still paused; ask your agent to turn it back on.") {
+	if len(r.texts) != 2 || !strings.Contains(r.texts[1], "Cleared: openssl. The network gateway stays paused until you resume it; the box page will offer that in an update.") {
 		t.Fatalf("cleared text %q", r.texts)
 	}
 	// Back within a day: handled again (contained, evidence), but not
@@ -457,6 +457,44 @@ func TestPauseCap(t *testing.T) {
 	all := strings.Join(append(r.texts, r.g.More()...), " ")
 	if len(r.texts) != 1 || strings.Count(all, "Not paused (too many findings at once)") != 2 || strings.Count(all, "Paused the affected tool") != 3 {
 		t.Fatalf("texts %q, all %q", r.texts, all)
+	}
+}
+
+// L3 S1 on #169: a pause that ended while the guard could not hear it (a
+// cascade revoke before the hook covered it, or a crash between the
+// journal's resume and the guard's save) is dropped by Reconcile, so the
+// digest does not list it and a new pause of the target is texted (L2).
+func TestReconcileDropsPausesTheGateNoLongerHolds(t *testing.T) {
+	b := cleanBox()
+	b.pkgs = []Package{{Name: "a", Version: "1.0", Contain: &Target{Kind: "grant", Name: "G2"}},
+		{Name: "b", Version: "1.0", Contain: &Target{Kind: "grant", Name: "G3"}}}
+	b.snap.Advisories = []Advisory{{ID: "ADV-a", Package: "a", Fixed: "1.1", Severity: "low"},
+		{ID: "ADV-b", Package: "b", Fixed: "1.1", Severity: "low"}}
+	r := newGuardRig(t, b)
+	r.pass(t)
+	if len(r.c.got) != 2 || len(r.texts) != 1 {
+		t.Fatalf("paused %v, texts %q", r.c.got, r.texts)
+	}
+	// Both clear; the owner ends G2's pause, but the guard never hears it.
+	b.snap.Advisories = nil
+	r.now = r.now.Add(6 * time.Hour)
+	r.pass(t)
+	r.reopen(t)
+	if err := r.g.Reconcile(func(t Target) bool { return t.Name == "G3" }); err != nil {
+		t.Fatal(err)
+	}
+	r.reopen(t) // Reconcile saved
+	if d := strings.Join(r.g.Digest(), " "); strings.Contains(d, "Cleared: a.") || !strings.Contains(d, "Cleared: b.") {
+		t.Fatalf("digest after Reconcile: %q", d)
+	}
+	b.snap.Advisories = []Advisory{{ID: "ADV-a", Package: "a", Fixed: "1.1", Severity: "low"},
+		{ID: "ADV-b", Package: "b", Fixed: "1.1", Severity: "low"}}
+	r.now = r.now.Add(7 * 24 * time.Hour)
+	r.texts = nil
+	r.pass(t)
+	all := strings.Join(append(r.texts, r.g.More()...), " ")
+	if strings.Count(all, "Paused the affected tool") != 1 {
+		t.Fatalf("only G2's new pause is texted; G3 is still paused: %q", all)
 	}
 }
 
@@ -542,7 +580,7 @@ func TestPausedAndFlapping(t *testing.T) {
 	b.pkgs[0].Version = "3.0.14"
 	r.pass(t)
 	d := strings.Join(r.g.Digest(), "\n")
-	if !strings.Contains(d, "Cleared: openssl. The network gateway is still paused; ask your agent to turn it back on.") {
+	if !strings.Contains(d, "Cleared: openssl. The network gateway stays paused until you resume it; the box page will offer that in an update.") {
 		t.Fatalf("digest: %s", d)
 	}
 	must(t, r.g.Resumed(Target{Kind: "executor", Name: "egress", Label: "the network gateway"}))

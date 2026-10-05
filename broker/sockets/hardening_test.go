@@ -1,6 +1,7 @@
 package sockets
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -177,4 +178,59 @@ func TestDuplicateEndpointNamesAreRefused(t *testing.T) {
 	if err := s.Start(context.Background(), ep, ep); err == nil {
 		t.Fatal("accepted two sockets with one name")
 	}
+}
+
+// L3 on #170: a long poll's context ends when its peer hangs up, so an
+// answer is not handed to a closed connection; other ops run to the end.
+func TestAHangupEndsALongPoll(t *testing.T) {
+	ended := make(chan error, 1)
+	_, dir := serve(t, Endpoint{Name: "p.sock", Peer: Peer{Kind: "owner"}, HangupOps: map[string]bool{"poll": true},
+		Ops: map[string]Handler{
+			"poll": func(ctx context.Context, _ Peer, _ json.RawMessage) (any, error) {
+				select {
+				case <-ctx.Done():
+					ended <- ctx.Err()
+				case <-time.After(time.Second):
+					ended <- nil
+				}
+				return nil, nil
+			},
+			"ping": echoPeer,
+		}})
+	path := filepath.Join(dir, "p.sock")
+	c, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Write([]byte(`{"op":"poll"}` + "\n"))
+	time.Sleep(50 * time.Millisecond)
+	c.Close()
+	select {
+	case err := <-ended:
+		if err == nil {
+			t.Fatal("the poll ran on after its peer hung up")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the poll ran on after its peer hung up")
+	}
+	// A pipelined request after a watched one is kept and answered.
+	c, err = net.Dial("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(10 * time.Second))
+	c.Write([]byte(`{"op":"poll"}` + "\n" + `{"op":"ping"}` + "\n"))
+	rd := bufio.NewReader(c)
+	for i := 0; i < 2; i++ {
+		line, err := rd.ReadBytes('\n')
+		if err != nil {
+			t.Fatalf("answer %d: %v", i+1, err)
+		}
+		var r Response
+		if json.Unmarshal(line, &r) != nil || !r.OK {
+			t.Fatalf("answer %d: %s", i+1, line)
+		}
+	}
+	<-ended
 }
