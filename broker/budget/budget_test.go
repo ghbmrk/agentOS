@@ -125,8 +125,9 @@ func TestRES2MemTotalReadsMeminfo(t *testing.T) {
 func fakeV2(t *testing.T) *cgroup.Group {
 	t.Helper()
 	d := t.TempDir()
-	must(t, os.WriteFile(filepath.Join(d, "cgroup.controllers"), []byte("cpu memory pids\n"), 0o644))
+	must(t, os.WriteFile(filepath.Join(d, "cgroup.controllers"), []byte("cpu io memory pids\n"), 0o644))
 	must(t, os.WriteFile(filepath.Join(d, "cgroup.subtree_control"), nil, 0o644))
+	must(t, os.WriteFile(filepath.Join(d, "pids.max"), []byte("max\n"), 0o644))
 	g, err := cgroup.Open(d)
 	must(t, err)
 	return g
@@ -150,7 +151,7 @@ func TestRES2ApplyGivesEachComponentItsOwnGroup(t *testing.T) {
 	// subtree_control enables it, which the fake plays here.
 	pool := filepath.Join(root.Path, "machines")
 	must(t, os.MkdirAll(pool, 0o755))
-	must(t, os.WriteFile(filepath.Join(pool, "cgroup.controllers"), []byte("memory\n"), 0o644))
+	must(t, os.WriteFile(filepath.Join(pool, "cgroup.controllers"), []byte("cpu io memory pids\n"), 0o644))
 	must(t, os.WriteFile(filepath.Join(pool, "cgroup.subtree_control"), nil, 0o644))
 
 	gs, err := m.Apply(root)
@@ -170,7 +171,7 @@ func TestRES2ApplyGivesEachComponentItsOwnGroup(t *testing.T) {
 	if gs.Machines == nil || gs.Machines.Path != pool {
 		t.Fatalf("machines group = %+v", gs.Machines)
 	}
-	if got := read(t, filepath.Join(pool, "cgroup.subtree_control")); got != "+memory" {
+	if got := read(t, filepath.Join(pool, "cgroup.subtree_control")); got != "+cpu +io +memory +pids" {
 		t.Fatalf("pool children cannot use the memory controller: %q", got)
 	}
 }

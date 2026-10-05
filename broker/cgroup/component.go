@@ -24,6 +24,10 @@ func (g *Group) Component(name string, l Limits) (*Group, error) {
 	if l.MaxBytes <= 0 && l.MinBytes <= 0 {
 		return nil, fmt.Errorf("cgroup: %s: a budget or a protection is required (RES-2)", name)
 	}
+	shares, err := l.shares()
+	if err != nil {
+		return nil, fmt.Errorf("cgroup: %s: %w", name, err)
+	}
 	c := &Group{Path: filepath.Join(g.Path, name)}
 	if err := os.Mkdir(c.Path, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
 		return nil, err
@@ -44,13 +48,8 @@ func (g *Group) Component(name string, l Limits) (*Group, error) {
 		kvs = append(kvs, [2]string{"memory.min", strconv.FormatInt(l.MinBytes, 10)})
 	}
 	kvs = append(kvs, [2]string{"memory.swap.max", "0"})
-	for _, kv := range kvs {
-		if err := c.write(kv[0], kv[1]); err != nil {
-			if kv[0] == "memory.swap.max" && errors.Is(err, os.ErrNotExist) {
-				continue // no swap accounting: there is no swap to use
-			}
-			return nil, err
-		}
+	if err := c.writeAll(append(kvs, shares...)); err != nil {
+		return nil, err
 	}
 	return c, nil
 }
