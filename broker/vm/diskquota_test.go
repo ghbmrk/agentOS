@@ -304,3 +304,19 @@ func TestAGuestARestartCouldNotKillStaysCounted(t *testing.T) {
 		t.Fatalf("the unkilled guest's room was handed out: %v", err)
 	}
 }
+
+// A worker's quota is its layer cap when that is smaller (CAP-8b).
+func TestAWorkersQuotaIsItsLayerCap(t *testing.T) {
+	e := newEnv(t, 8192)
+	q := newFakeQuota()
+	e.cfg.Quota, e.cfg.MachineDiskBytes, e.cfg.WorkerLayerBytes = q, 64<<20, 16<<20
+	e.open()
+	a := e.create("agent", admission.Accepted, 100)
+	if _, err := e.m.CreateWorker(bg, WorkerPrefix+"1", a.Lineage, Spec{Image: "base", Class: admission.Accepted, MemMB: 100}); err != nil {
+		t.Fatal(err)
+	}
+	w, _ := e.m.Get(WorkerPrefix + "1")
+	if q.limits[w.Project][0] != 16<<20 || q.limits[a.Project][0] != 64<<20 {
+		t.Fatalf("worker limit %v, agent limit %v", q.limits[w.Project], q.limits[a.Project])
+	}
+}

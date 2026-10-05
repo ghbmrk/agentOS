@@ -210,6 +210,10 @@ type LearnConfig struct {
 	Backoff time.Duration
 	MaxAsks int
 	Now     func() time.Time
+	// ResumeFor is how long a preempted candidate is kept for reuse:
+	// change.ResumeFor unless set (36 h when the agent sleeps for
+	// learning, PE7). It matches the pipeline's.
+	ResumeFor time.Duration
 }
 
 // Learn is Loop 1's Source.
@@ -239,6 +243,77 @@ type Learn struct {
 	// the next digest says once that drafted skills are being tested
 	// (potency C1, UX-120-1 on #120).
 	nowTested bool
+	// gone are the goals forgotten since start (ForgetGoal).
+	gone map[string]bool
+	// triedGoals are the goals each tried hypothesis's evidence held, so
+	// forgetting one lets it be tried again on what remains (CAP-3). In
+	// memory only, like tried: a restart tries every hypothesis afresh.
+	triedGoals map[string][]string
+}
+
+// ForgetGoal drops every candidate Loop 1 keeps that was built from goal,
+// and keeps none built from it from now on (W3-tasks part 2, security C1
+// on #120). Only the broker's handling of an authenticated owner forget
+// calls it, with the pipeline's ForgetGoal (change C23); new hypotheses
+// never mine a forgotten goal, since the daemon's tombstone hides its
+// intents.
+func (l *Learn) ForgetGoal(goal string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.gone == nil {
+		l.gone = map[string]bool{}
+	}
+	l.gone[goal] = true
+	for k, kc := range l.built {
+		if l.goneLocked(kc.cand.Goals) {
+			delete(l.built, k)
+		}
+	}
+	// SPEC CAP-3: what was learned from a forgotten task is rebuilt from
+	// the remaining evidence, so a hypothesis tried with it is tried again
+	// at once, with one task fewer, rather than waiting for more (potency
+	// on #160).
+	for k, goals := range l.triedGoals {
+		if slices.Contains(goals, goal) {
+			delete(l.tried, k)
+			delete(l.notBefore, k)
+			delete(l.triedGoals, k)
+		}
+	}
+}
+
+// Forgot reports whether ForgetGoal was called for goal since start.
+func (l *Learn) Forgot(goal string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.gone[goal]
+}
+
+func (l *Learn) goneLocked(goals []string) bool {
+	for _, g := range goals {
+		if l.gone[g] {
+			return true
+		}
+	}
+	return false
+}
+
+// goalsRead are the goals of the owner tasks a builder's brief carries:
+// the hypothesis's evidence intents and the dev cases, sorted.
+func goalsRead(h Hypothesis, dev []change.Case) []string {
+	var out []string
+	for _, s := range h.Evidence {
+		if s.Intent.GoalID != "" {
+			out = append(out, s.Intent.GoalID)
+		}
+	}
+	for _, c := range dev {
+		if c.Goal != "" {
+			out = append(out, c.Goal)
+		}
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
 // Holds reports whether Loop 1 would build c but hold it unproposed,
@@ -260,7 +335,47 @@ type keptCandidate struct {
 	cand  change.Candidate
 	brief string // briefDigest of the builder's brief
 	tasks []string
-	at    time.Time
+	// intents are the journal intents the brief carried: its evidence
+	// and its dev cases' tasks (ForgetIntents).
+	intents []string
+	at      time.Time
+}
+
+// ForgetIntents drops every kept candidate whose brief carried one of ids,
+// as an evidence intent or a dev case's task: recall's deletion reach
+// erases them (CAP-3, change C19; security F1 on #153), so a candidate
+// built from them is not kept. The harvester's ForgetIntents calls it
+// (NewLearn wires it), which the reach runs before the journal erases the
+// intents and after.
+func (l *Learn) ForgetIntents(ids []string) {
+	gone := map[string]bool{}
+	for _, id := range ids {
+		gone[id] = true
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for k, kc := range l.built {
+		for _, in := range kc.intents {
+			if gone[in] {
+				delete(l.built, k)
+				break
+			}
+		}
+	}
+}
+
+// briefIntents are the journal intents a brief carries.
+func briefIntents(h Hypothesis, dev []change.Case) []string {
+	var out []string
+	for _, s := range h.Evidence {
+		out = append(out, s.Intent.ID)
+	}
+	for _, c := range dev {
+		if c.Task != "" {
+			out = append(out, c.Task)
+		}
+	}
+	return out
 }
 
 // briefDigest names everything a builder saw: the hypothesis's tasks, its
@@ -317,8 +432,11 @@ func NewLearn(cfg LearnConfig) (*Learn, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Learn{cfg: cfg, tried: map[string]int{}, asks: map[string]int{}, notBefore: map[string]time.Time{},
-		needsExplicit: map[string]string{}, lastRecheck: cfg.Now(), built: map[string]keptCandidate{}, unseeded: map[string]time.Time{}}, nil
+	l := &Learn{cfg: cfg, tried: map[string]int{}, asks: map[string]int{}, notBefore: map[string]time.Time{},
+		needsExplicit: map[string]string{}, lastRecheck: cfg.Now(), built: map[string]keptCandidate{}, unseeded: map[string]time.Time{}}
+	forget := l.ForgetIntents
+	cfg.Harvest.erased.Store(&forget)
+	return l, nil
 }
 
 func (l *Learn) Loop() Loop { return Improve }
@@ -376,7 +494,7 @@ func (l *Learn) Next(ctx context.Context, modelOK bool) (Job, bool) {
 		if l.tried[key] < ev.HeldOut && l.mayAskLocked(key) {
 			return Job{Name: "routing", UsesModel: true, Evaluates: true, Run: func(ctx context.Context) Result {
 				rep, ok, err := l.cfg.Pipeline.ProposeRouting(ctx, l.cfg.Router)
-				l.done(ctx, err, key, ev.HeldOut)
+				l.done(ctx, err, key, ev.HeldOut, nil)
 				l.asked(key, rep)
 				if !ok {
 					return Result{Err: err}
@@ -390,6 +508,7 @@ func (l *Learn) Next(ctx context.Context, modelOK bool) (Job, bool) {
 	}
 	sel, _ := l.cfg.Builder.(Handler)
 	ready, _ := l.cfg.Builder.(Readier)
+	hyps = l.finishFirstLocked(hyps)
 	for _, h := range hyps {
 		if l.tried[h.Key] >= len(h.Tasks) || !l.mayAskLocked(h.Key) {
 			continue // tried with this much evidence already, or the owner was asked lately
@@ -399,12 +518,13 @@ func (l *Learn) Next(ctx context.Context, modelOK bool) (Job, bool) {
 		}
 		if ready != nil && !ready.Ready(Brief{Hypothesis: h, Dev: ev.Dev}) {
 			l.tried[h.Key] = len(h.Tasks) // wait for more supporting tasks
+			l.triedGoalsLocked(h.Key, goalsRead(h, ev.Dev))
 			continue
 		}
 		h := h
 		return Job{Name: "candidate", UsesModel: true, Evaluates: true, Run: func(ctx context.Context) Result {
 			rep, err := l.propose(ctx, h, ev)
-			l.done(ctx, err, h.Key, len(h.Tasks))
+			l.done(ctx, err, h.Key, len(h.Tasks), goalsRead(h, ev.Dev))
 			if errors.Is(err, ErrUnseeded) {
 				return Result{}
 			}
@@ -413,6 +533,48 @@ func (l *Learn) Next(ctx context.Context, modelOK bool) (Job, bool) {
 		}}, true
 	}
 	return Job{}, false
+}
+
+// ResumeWindow is how long Loop 1 keeps a preempted candidate for
+// reuse: LearnConfig.ResumeFor, or change.ResumeFor (PE7).
+func (l *Learn) ResumeWindow() time.Duration { return l.resumeFor() }
+
+func (l *Learn) resumeFor() time.Duration {
+	if l.cfg.ResumeFor > 0 {
+		return l.cfg.ResumeFor
+	}
+	return change.ResumeFor
+}
+
+// finishFirstLocked orders hyps so the kept candidate closest to a
+// verdict is finished first (PE7 condition 19), where the pipeline counts
+// kept pairs.
+func (l *Learn) finishFirstLocked(hyps []Hypothesis) []Hypothesis {
+	if kc, ok := l.cfg.Pipeline.(keptCounter); ok && len(l.built) > 0 {
+		return finishFirst(hyps, l.built, kc)
+	}
+	return hyps
+}
+
+// keptCounter is the pipeline's count of a candidate's kept pairs
+// (change.Pipeline.KeptPairs).
+type keptCounter interface {
+	KeptPairs(change.Candidate) int
+}
+
+var _ keptCounter = (*change.Pipeline)(nil)
+
+// finishFirst puts the hypotheses whose kept candidate has kept pairs
+// first, most pairs first, so the candidate closest to a verdict is
+// finished before another starts (PE7); the rest keep their order.
+func finishFirst(hyps []Hypothesis, built map[string]keptCandidate, kc keptCounter) []Hypothesis {
+	n := make(map[string]int, len(built))
+	for k, b := range built {
+		n[k] = kc.KeptPairs(b.cand)
+	}
+	out := slices.Clone(hyps)
+	slices.SortStableFunc(out, func(a, b Hypothesis) int { return n[b.Key] - n[a.Key] })
+	return out
 }
 
 // mayAskLocked reports whether key may be proposed now: not while its
@@ -440,13 +602,26 @@ func (l *Learn) asked(key string, rep change.Report) {
 
 // done marks a key tried, unless the work was preempted (ctx ended, or
 // the evaluator was interrupted, PE3): then it is offered again.
-func (l *Learn) done(ctx context.Context, err error, key string, n int) {
+func (l *Learn) done(ctx context.Context, err error, key string, n int, goals []string) {
 	if ctx.Err() != nil || errors.Is(err, change.ErrInterrupted) {
 		return
 	}
 	l.mu.Lock()
 	l.tried[key] = n
+	l.triedGoalsLocked(key, goals)
 	l.mu.Unlock()
+}
+
+// triedGoalsLocked records the goals key was tried with (ForgetGoal).
+func (l *Learn) triedGoalsLocked(key string, goals []string) {
+	if len(goals) == 0 {
+		delete(l.triedGoals, key)
+		return
+	}
+	if l.triedGoals == nil {
+		l.triedGoals = map[string][]string{}
+	}
+	l.triedGoals[key] = goals
 }
 
 // ErrOutOfClass: the builder wrote outside the namespace its hypothesis
@@ -460,7 +635,7 @@ func (l *Learn) propose(ctx context.Context, h Hypothesis, ev Evidence) (change.
 	delete(l.built, h.Key)
 	l.mu.Unlock()
 	cand := k.cand
-	reuse := ok && k.brief == brief && l.cfg.Now().Sub(k.at) <= change.ResumeFor
+	reuse := ok && k.brief == brief && l.cfg.Now().Sub(k.at) <= l.resumeFor()
 	for _, t := range k.tasks {
 		reuse = reuse && !ev.Held(t)
 	}
@@ -481,6 +656,7 @@ func (l *Learn) propose(ctx context.Context, h Hypothesis, ev Evidence) (change.
 		// Source, origin, and the public mark are the broker's, from the
 		// REV-5 labels of every input; the builder asserts none of them.
 		cand.Source, cand.Origin, cand.Public = change.Local, "loop1", public(h, ev.Dev)
+		cand.Goals = goalsRead(h, ev.Dev)
 		if p, ok := l.cfg.Builder.(Private); ok && p.Private(br) {
 			cand.Public = false
 		}
@@ -508,9 +684,17 @@ func (l *Learn) propose(ctx context.Context, h Hypothesis, ev Evidence) (change.
 	rep, err := l.cfg.Pipeline.Propose(ctx, cand)
 	if errors.Is(err, change.ErrInterrupted) {
 		// Preempted mid-evaluation: keep the checked candidate for the
-		// next offer, so the pipeline can resume its pairs.
+		// next offer, so the pipeline can resume its pairs, unless its
+		// goal was forgotten or an intent erased meanwhile.
+		intents := briefIntents(h, ev.Dev)
 		l.mu.Lock()
-		l.built[h.Key] = keptCandidate{cand: cand, brief: brief, tasks: slices.Clone(h.Tasks), at: l.cfg.Now()}
+		if l.goneLocked(cand.Goals) || l.cfg.Harvest.erasedAny(intents) {
+			// Security F1 on #153; change C23.
+			l.mu.Unlock()
+			return rep, err
+		}
+		l.built[h.Key] = keptCandidate{cand: cand, brief: brief, tasks: slices.Clone(h.Tasks),
+			intents: intents, at: l.cfg.Now()}
 		for len(l.built) > maxKeptCandidates {
 			oldest := ""
 			for k, v := range l.built {

@@ -15,6 +15,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/sipsign"
+	"github.com/ghbmrk/agentos/broker/smsapi"
 )
 
 // REQ: ADP-12, CRED-1, CH-7
@@ -26,17 +27,20 @@ const sipCanary = "canary-sip-pw-7f3a9c21"
 // K13): field checks with fixed reasons, a realm recorded by the first
 // registration, and confirmation only of that realm.
 type fakeLine struct {
-	mu        sync.Mutex
-	set       bool
-	settings  sipsign.Settings
-	password  string
-	realm     string
-	confirmed bool
-	waiting   bool
-	removed   int
-	calls     int
-	setAt     time.Time
-	now       func() time.Time
+	mu         sync.Mutex
+	set        bool
+	settings   sipsign.Settings
+	password   string
+	realm      string
+	confirmed  bool
+	waiting    bool
+	removed    int
+	calls      int
+	setAt      time.Time
+	now        func() time.Time
+	sms        smsapi.Settings
+	smsToken   string
+	smsRemoved int
 	// failSet and failStatus, when set, are what SetSecondLine and
 	// SecondLineStatus return instead.
 	failSet, failStatus error
@@ -93,6 +97,33 @@ func (f *fakeLine) RemoveSecondLine(ctx context.Context) error {
 	f.calls++
 	f.set, f.settings, f.password, f.realm, f.confirmed = false, sipsign.Settings{}, "", "", false
 	f.removed++
+	return nil
+}
+
+func (f *fakeLine) SMSStatus(ctx context.Context) (SMSStatus, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return SMSStatus{Set: f.sms != (smsapi.Settings{}), Settings: f.sms}, nil
+}
+
+func (f *fakeLine) SetSMS(ctx context.Context, s smsapi.Settings, token string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	s = s.Normalize()
+	if s.Check() == smsapi.ErrAccount {
+		return &VaultError{400, "Copy the account ID exactly from your provider: for Twilio the Account SID (AC and 32 characters), for SignalWire the Project ID."}
+	}
+	f.sms, f.smsToken = s, token
+	return nil
+}
+
+func (f *fakeLine) RemoveSMS(ctx context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	f.sms, f.smsToken = smsapi.Settings{}, ""
+	f.smsRemoved++
 	return nil
 }
 
@@ -438,5 +469,48 @@ func TestASlowRegistrationSaysWhatToCheck(t *testing.T) {
 	r.advance(time.Second)
 	if p := html.UnescapeString(r.get("/second-line/")); !strings.Contains(p, still) || !strings.Contains(p, "Waiting for the box to sign in") {
 		t.Fatalf("no slow line at 2 minutes:\n%s", p)
+	}
+}
+
+// smsCanary is a synthetic texting token.
+const smsCanary = "canary-sms-token-3c8e1f02"
+
+// Potency PL1 on #102 (P2-3c part 5b): a provider whose SIP account
+// carries no texts gets a texting account on the same page. The page
+// says what US numbers need first, never shows the token, and asks
+// before removing it.
+func TestATextingAccountIsSetUpOnTheSecondLinePage(t *testing.T) {
+	r, _, fl := lineRig(t)
+	r.signIn()
+	p := html.UnescapeString(r.get("/second-line/"))
+	for _, want := range []string{"Texts over your provider's web API", "A2P 10DLC", `name="token"`, `value="twilio"`, `value="signalwire"`} {
+		if !strings.Contains(p, want) {
+			t.Fatalf("page lacks %q:\n%s", want, p)
+		}
+	}
+	form := url.Values{"step": {"sms-set"}, "provider": {"twilio"}, "account": {"AC1"}, "number": {"+1 555 010 4477"}, "token": {smsCanary}}
+	w := r.post("/second-line/", form)
+	if b := html.UnescapeString(w.Body.String()); !strings.Contains(b, "Copy the account ID exactly") || strings.Contains(b, smsCanary) || !strings.Contains(b, `value="+1 555 010 4477"`) {
+		t.Fatalf("refusal:\n%s", b)
+	}
+	form.Set("account", "AC"+"0123456789abcdef"+"0123456789abcdef")
+	if w := r.post("/second-line/", form); w.Code != http.StatusSeeOther || fl.smsToken != smsCanary || fl.sms.Number != "+15550104477" {
+		t.Fatalf("set: %d %+v", w.Code, fl.sms)
+	}
+	p = html.UnescapeString(r.get("/second-line/"))
+	if !strings.Contains(p, "Texts go through Twilio from +15550104477.") || strings.Contains(p, smsCanary) {
+		t.Fatalf("set page:\n%s", p)
+	}
+	w = r.post("/second-line/", url.Values{"step": {"sms-remove"}})
+	if b := html.UnescapeString(w.Body.String()); fl.smsRemoved != 0 || !strings.Contains(b, "Remove the texting account? Texts from +15550104477 stop until you add it again with the provider's auth token.") {
+		t.Fatalf("removed without asking: %s", b)
+	}
+	if w := r.post("/second-line/", url.Values{"step": {"sms-remove"}, "confirm": {"1"}}); w.Code != http.StatusSeeOther || fl.smsRemoved != 1 {
+		t.Fatalf("confirmed removal: %d", w.Code)
+	}
+	for _, p := range r.seen {
+		if strings.Contains(p, smsCanary) {
+			t.Fatal("a page carried the token")
+		}
 	}
 }

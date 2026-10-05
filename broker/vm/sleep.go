@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // CheckpointAndStop puts a machine to sleep (PE7): it pauses it, takes a
@@ -69,6 +70,23 @@ func (m *Manager) CheckpointAndStop(ctx context.Context, id string) (Snapshot, e
 	return s, nil
 }
 
+// Why a wake was cold: fixed classes for the sleeper's journal line
+// (PE7 condition 12), never a path or an error's text.
+const (
+	ColdNotSleep = "not this machine's sleep checkpoint"
+	ColdNewer    = "a newer snapshot exists"
+	ColdStarted  = "the machine started since"
+	ColdChanged  = "the checkpoint changed"
+	ColdFailed   = "the restore failed"
+)
+
+// Wake is how ResumeFromCheckpoint woke a machine: Restored with its
+// memory, or cold on its layer for the reason Cold names.
+type Wake struct {
+	Restored bool
+	Cold     string
+}
+
 // ResumeFromCheckpoint wakes a machine CheckpointAndStop put to sleep
 // (PE7). It restores memory and files from snapID only when every check
 // holds:
@@ -81,38 +99,57 @@ func (m *Manager) CheckpointAndStop(ctx context.Context, id string) (Snapshot, e
 // layer (Resume). Either way the sleep checkpoint is deleted: it is
 // restored at most once. A checkpoint the owner took, or another
 // machine's, is never deleted. The label never falls (REV-5). It reports
-// whether memory was restored; err is the cold resume's.
-func (m *Manager) ResumeFromCheckpoint(ctx context.Context, id, snapID string) (bool, error) {
+// how the machine woke; err is the cold resume's.
+func (m *Manager) ResumeFromCheckpoint(ctx context.Context, id, snapID string) (Wake, error) {
 	mc, err := m.get(id)
 	if err != nil {
-		return false, err
+		return Wake{}, err
 	}
 	mc.mu.Lock()
 	st, last, starts := mc.State, mc.Last, mc.Starts
 	mc.mu.Unlock()
 	if st == Running {
-		return false, fmt.Errorf("%w: %s is running", ErrState, id)
+		return Wake{}, fmt.Errorf("%w: %s is running", ErrState, id)
 	}
 	s, serr := m.Snapshot(snapID)
 	own := serr == nil && s.Sleep && s.Machine == id
 	if own {
 		defer m.dropSnapshot(mc, s.ID, "")
 	}
-	ok := own && s.Tier == Full && s.ID == last && s.Starts == starts && m.hashMatches(s)
-	if ok {
+	var cold string
+	switch {
+	case !own || s.Tier != Full:
+		cold = ColdNotSleep
+	case s.ID != last:
+		cold = ColdNewer
+	case s.Starts != starts:
+		cold = ColdStarted
+	case !m.hashMatches(s):
+		cold = ColdChanged
+	default:
 		if err := m.Rollback(ctx, id, s.ID); err == nil {
-			return true, nil
+			return Wake{Restored: true}, nil
 		}
 		// The restore failed: whatever it left, the machine starts cold.
+		cold = ColdFailed
 		mc.mu.Lock()
 		running := mc.State == Running
 		mc.mu.Unlock()
 		if running {
-			return false, nil
+			return Wake{Cold: cold}, nil
 		}
 	}
-	return false, m.Resume(ctx, id)
+	// The cold start gets a context of its own, bounded by ColdResumeFor:
+	// a restore that ran out the caller's must still leave the machine
+	// started, not wait for the keeper's next try (L3 on #149).
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ColdResumeFor)
+	defer cancel()
+	return Wake{Cold: cold}, m.Resume(cctx, id)
 }
+
+// ColdResumeFor bounds the cold start that follows a refused or failed
+// restore in ResumeFromCheckpoint.
+const ColdResumeFor = time.Minute
 
 func (m *Manager) hashMatches(s Snapshot) bool {
 	if s.Hash == "" {

@@ -42,7 +42,11 @@ func (f *fakeRuntime) take() error {
 	return err
 }
 
-func (f *fakeRuntime) Start(_ context.Context, l Launch) error {
+func (f *fakeRuntime) Start(ctx context.Context, l Launch) error {
+	// As runsc would, a start on a spent context fails.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.take(); err != nil {

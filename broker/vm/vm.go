@@ -86,13 +86,49 @@ type Spec struct {
 	Label Label
 }
 
+// Machines are siblings in the pool's cgroup, weighed by admission class
+// for CPU and I/O (cpu.weight, io.weight; RES-1, RES-2): foreground first,
+// accepted work next, experiments least. The pool as a whole weighs less
+// than the broker (budget.BrokerWeight).
+const (
+	ForegroundWeight = 1000
+	AcceptedWeight   = 100
+	ExperimentWeight = 1
+)
+
+// MachinePids caps one machine's tasks, threads included (pids.max). A
+// gVisor sandbox's host tasks are the sentry's threads and, under
+// systrap, stub threads for the guest's, so this bounds a fork bomb well
+// below memory.max while leaving room for a parallel build in a worker
+// (vm V29, unmeasured).
+const MachinePids = 4096
+
+// MachineLimits is machine id's cgroup limits: its declared memory budget,
+// its class's weights and the process cap. Every machine kind gets them,
+// workers included; a worker never weighs more than accepted work, so a
+// foreground agent's builds cannot crowd out the agent itself. An unknown
+// class weighs least.
+func MachineLimits(id string, s Spec) cgroup.Limits {
+	w := ExperimentWeight
+	switch s.Class {
+	case admission.Foreground:
+		w = ForegroundWeight
+	case admission.Accepted:
+		w = AcceptedWeight
+	}
+	if strings.HasPrefix(id, WorkerPrefix) {
+		w = min(w, AcceptedWeight)
+	}
+	return cgroup.Limits{MaxBytes: s.MemMB << 20, CPUWeight: w, IOWeight: w, Pids: MachinePids}
+}
+
 // Machine is a copy of a machine's record.
 type Machine struct {
 	ID       string
 	Spec     Spec
 	Label    Label
 	State    State
-	ForkBase string // snapshot this machine was forked from, if any
+	ForkBase string // snapshot this machine was forked from, if any; written under m.mu too (ForkSiblings)
 	// Lineage names the creation this machine descends from by fork: the
 	// root machine's ID plus a nonce drawn when it was created. Forks share their source's memory, so the broker treats a
 	// lineage as one requester for idempotency (OP-1).
@@ -230,6 +266,10 @@ type Config struct {
 	// MaxLayerBytes caps one machine's layer at a snapshot (zero:
 	// MachineDiskBytes). MaxLayerInodes caps its inodes (zero: 200,000).
 	MaxLayerBytes, MaxLayerInodes int64
+	// WorkerLayerBytes caps one worker's layer (zero: MaxLayerBytes
+	// alone). A worker over it takes no snapshot and no command until
+	// files are deleted or it is rolled back (security R3 on #146).
+	WorkerLayerBytes int64
 	// FreeBytes reports the state disk's free space; nil measures it.
 	FreeBytes func(path string) (int64, error)
 	// Contained reports a lineage that holds a record the owner deleted
@@ -308,8 +348,8 @@ type Manager struct {
 	// and not known dead), under diskMu. It is keyed by project, unique to
 	// one machine's life, so a guest whose kill failed stays counted even
 	// after its ID is taken again.
-	live    map[uint32]bool
-	project uint32 // highest quota project given out, under mu
+	live    map[uint32]int64 // project -> its disk budget
+	project uint32           // highest quota project given out, under mu
 
 	now func() time.Time // nil: time.Now (tests age snapshots for Prune)
 }
@@ -353,7 +393,7 @@ func Open(ctx context.Context, cfg Config) (*Manager, error) {
 			return nil, err
 		}
 	}
-	m := &Manager{cfg: cfg, machines: map[string]*machine{}, snaps: map[string]Snapshot{}, live: map[uint32]bool{}}
+	m := &Manager{cfg: cfg, machines: map[string]*machine{}, snaps: map[string]Snapshot{}, live: map[uint32]int64{}}
 	if err := m.load(ctx); err != nil {
 		return nil, err
 	}
@@ -581,7 +621,7 @@ func (m *Manager) startFrom(ctx context.Context, mc *machine, s *Snapshot) error
 		return err
 	}
 	if m.cfg.Cgroups != nil {
-		if _, err := m.cfg.Cgroups.Child(mc.ID, cgroup.Limits{MaxBytes: mc.Spec.MemMB << 20}); err != nil {
+		if _, err := m.cfg.Cgroups.Child(mc.ID, MachineLimits(mc.ID, mc.Spec)); err != nil {
 			return err
 		}
 	}
@@ -638,13 +678,22 @@ func (m *Manager) limitDisk(mc *machine, keep bool) error {
 		mc.Project = m.nextProjectLocked()
 		m.mu.Unlock()
 	}
-	if err := m.cfg.Quota.Limit(dir, mc.Project, m.cfg.MachineDiskBytes, m.cfg.MaxLayerInodes); err != nil {
+	if err := m.cfg.Quota.Limit(dir, mc.Project, m.diskBudget(mc.ID), m.cfg.MaxLayerInodes); err != nil {
 		return err
 	}
 	if keep {
 		return m.cfg.Quota.Tag(dir, mc.Project)
 	}
 	return nil
+}
+
+// diskBudget is machine id's disk quota: MachineDiskBytes, or a worker's
+// smaller layer cap.
+func (m *Manager) diskBudget(id string) int64 {
+	if strings.HasPrefix(id, WorkerPrefix) && m.cfg.WorkerLayerBytes > 0 {
+		return min(m.cfg.MachineDiskBytes, m.cfg.WorkerLayerBytes)
+	}
+	return m.cfg.MachineDiskBytes
 }
 
 // commitDisk admits mc's guest to write: the disk above the reserve and
@@ -661,14 +710,14 @@ func (m *Manager) commitDisk(mc *machine) error {
 	if err != nil {
 		return err
 	}
-	need, err := m.unusedLocked(mc.Project)
+	need, err := m.unusedLocked(mc.Project, m.diskBudget(mc.ID))
 	if err != nil {
 		return err
 	}
 	if need > room {
 		return fmt.Errorf("%w (%s may write %d bytes; %d free above the reserve and running machines)", ErrDiskFull, mc.ID, need, room)
 	}
-	m.live[mc.Project] = true
+	m.live[mc.Project] = m.diskBudget(mc.ID)
 	return nil
 }
 
@@ -681,12 +730,12 @@ func (m *Manager) uncommitDisk(mc *machine) {
 
 // unusedLocked is what a running guest of project p may still write: its
 // budget less its use, plus its console. Called with diskMu held.
-func (m *Manager) unusedLocked(p uint32) (int64, error) {
+func (m *Manager) unusedLocked(p uint32, budget int64) (int64, error) {
 	u, err := m.cfg.Quota.Usage(p)
 	if err != nil {
 		return 0, fmt.Errorf("vm: disk use of project %d: %w", p, err)
 	}
-	return max(0, m.cfg.MachineDiskBytes-u.Bytes) + ConsoleMaxBytes, nil
+	return max(0, budget-u.Bytes) + ConsoleMaxBytes, nil
 }
 
 // roomLocked is the state disk's free space less the reserve, every hold,
@@ -697,8 +746,8 @@ func (m *Manager) roomLocked() (int64, error) {
 		return 0, err
 	}
 	room := free - m.cfg.DiskReserveBytes - m.diskHeld
-	for p := range m.live {
-		n, err := m.unusedLocked(p)
+	for p, budget := range m.live {
+		n, err := m.unusedLocked(p, budget)
 		if err != nil {
 			return 0, err
 		}
@@ -954,7 +1003,7 @@ func (m *Manager) capture(ctx context.Context, mc *machine, t Tier) (Snapshot, e
 // captureAs is capture; sleep marks a sleep checkpoint, with the
 // machine's start count and the hash of what was written.
 func (m *Manager) captureAs(ctx context.Context, mc *machine, t Tier, sleep bool) (Snapshot, error) {
-	u, err := m.checkCaps(m.launch(mc).Upper)
+	u, err := m.checkCaps(mc.ID, m.launch(mc).Upper)
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("%s: %w", mc.ID, err)
 	}
@@ -1022,12 +1071,14 @@ func (m *Manager) captureAs(ctx context.Context, mc *machine, t Tier, sleep bool
 // checkCaps measures a layer about to be snapshotted and refuses it if it
 // is over the per-layer caps. Copies keep holes and hardlinks, so a copy
 // costs no more than this measure.
-func (m *Manager) checkCaps(upper string) (overlay.Usage, error) {
+func (m *Manager) checkCaps(id, upper string) (overlay.Usage, error) {
 	u, err := overlay.Measure(upper)
 	if err != nil {
 		return u, err
 	}
 	switch {
+	case strings.HasPrefix(id, WorkerPrefix) && m.cfg.WorkerLayerBytes > 0 && u.Bytes > m.cfg.WorkerLayerBytes:
+		return u, &WorkerFull{ID: id, Bytes: u.Bytes, Cap: m.cfg.WorkerLayerBytes}
 	case m.cfg.MaxLayerBytes > 0 && u.Bytes > m.cfg.MaxLayerBytes:
 		return u, fmt.Errorf("%w (layer %d bytes, cap %d)", ErrQuota, u.Bytes, m.cfg.MaxLayerBytes)
 	case u.Inodes > m.cfg.MaxLayerInodes:
@@ -1324,7 +1375,7 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 	}
 	for i, mc := range reserved {
 		mc.mu.Lock()
-		mc.ForkBase = s.ID
+		m.setForkBase(mc, s.ID)
 		mc.Label = maxLabel(mc.Label, s.Label)
 		err := claimLocked(mc)
 		if err == nil {
@@ -1651,7 +1702,11 @@ func (m *Manager) Preempt(id string) error {
 	}
 	// The completion is scheduled even if the kill fails: once the holding
 	// operation lets go, the machine is stopped under its lock and
-	// recorded preempted, and preempting is cleared (L3 on #124).
+	// recorded preempted, and preempting is cleared (L3 on #124). A
+	// worker's command in flight is ended with it.
+	if c := mc.execCancel.Load(); c != nil {
+		(*c)()
+	}
 	kerr := m.kill(mc)
 	go func() {
 		mc.mu.Lock()
@@ -1759,7 +1814,7 @@ func (m *Manager) load(ctx context.Context) error {
 		m.project = max(m.project, mc.Project)
 		if err := m.stopRuntime(ctx, mc); err != nil && m.cfg.Quota != nil && mc.Project != 0 {
 			// Its guest may outlive the broker: it stays counted.
-			m.live[mc.Project] = true
+			m.live[mc.Project] = m.diskBudget(mc.ID)
 		}
 		m.machines[mc.ID] = mc
 		if err := m.saveMachine(mc); err != nil {

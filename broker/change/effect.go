@@ -21,6 +21,9 @@ const (
 	// WhySettings: the owner's own configuration replaced the adopted
 	// state outside the pipeline (Superseded); never an intent ID.
 	WhySettings = "settings"
+	// WhyForgotten: the owner forgot a task it was learned from
+	// (ForgetGoal, C23); never an intent ID.
+	WhyForgotten = "forgotten"
 )
 
 // Check is the policy for meta.change intents (OP-3), run at authorize and
@@ -201,6 +204,7 @@ func (p *Pipeline) reloadLocked() error {
 		st.Applied = map[string]bool{}
 	}
 	p.st = st
+	p.dropOldBasesLocked(p.st.Active.Hash())
 	for ns, tg := range p.cfg.Targets {
 		if err := tg.Apply(p.st.Active.under(ns)); err != nil {
 			return err
@@ -229,6 +233,7 @@ func (p *Pipeline) adoptLocked(id, basis string) error {
 		staged = staged || c == ClassGuestImage || c == ClassHostImage
 	}
 	p.st.Active = pr.next
+	p.dropOldBasesLocked(pr.next.Hash())
 	if pr.cand.Source == Upstream {
 		// A later release supersedes declined ones in the namespaces it
 		// installs.
@@ -242,7 +247,7 @@ func (p *Pipeline) adoptLocked(id, basis string) error {
 	}
 	p.st.Adoptions = append(p.st.Adoptions, &Adoption{ID: id, Short: short, Source: pr.cand.Source,
 		Classes: pr.classes, Basis: basis, Edits: pr.edits, Score: pr.report.Score, Public: pr.cand.Public,
-		Staged: staged, Origin: pr.cand.Origin, At: p.cfg.Now()})
+		Staged: staged, Origin: pr.cand.Origin, Goals: pr.cand.Goals, At: p.cfg.Now()})
 	return nil
 }
 
@@ -336,6 +341,7 @@ func (p *Pipeline) revertLocked(id, why string) error {
 		return err
 	}
 	p.st.Active = next
+	p.dropOldBasesLocked(next.Hash())
 	a.Reverted = why
 	return nil
 }
@@ -554,6 +560,12 @@ func (p *Pipeline) Recheck(ctx context.Context) ([]string, error) {
 			continue
 		}
 		p.mu.Lock()
+		// a was read before the evaluation; a forget meanwhile replaces
+		// the history with copies (C23), so read it again.
+		if a = p.adoptionLocked(id); a == nil || a.Reverted != "" {
+			p.mu.Unlock()
+			continue
+		}
 		protected := a.protected()
 		if protected && a.Concern == "" {
 			a.Concern, a.ConcernScore = why, s

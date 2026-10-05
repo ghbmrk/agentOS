@@ -22,9 +22,12 @@ recovery key appears in any plaintext on either drive or in the backup
 forgotten goals (`forgotten.json`, no content), all
 plaintext on the box's encrypted volume. Step 10's scan covers it with the
 rest of the drive. Forgetting a task removes its text, values and cases
-from the learn directory only. The journal, skills adopted from it (until
-the forget cascade lands) and backups made before the forget still hold
-them, so the scan may still find a forgotten task's canary there.
+from the learn directory, and undoes the skills and procedures learned
+from it, clearing their files from the pipeline's history (change C23).
+The journal, machine snapshots and backups made before the forget still
+hold them, and the old blocks of a rewritten `change.json` stay on the
+drive until overwritten, so the scan may still find a forgotten task's
+canary there.
 
 **You need:** the box drive (set up on PC-T, your trusted PC), a second PC
 (PC-U) never used with it, a spare drive of at least the same size, a USB

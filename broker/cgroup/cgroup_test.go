@@ -14,6 +14,11 @@ import (
 
 // REQ: RES-1, RES-2
 
+// ok is a machine's non-memory limits, for tests about memory.
+var ok = Limits{CPUWeight: 100, IOWeight: 100, Pids: 64}
+
+func mem(maxBytes int64) Limits { l := ok; l.MaxBytes = maxBytes; return l }
+
 // fakeV2 builds a directory that looks like a cgroup v2 parent. The kernel's
 // side (cgroup.events) is played by the test.
 func fakeV2(t *testing.T) *Group {
@@ -61,10 +66,10 @@ func TestRES2OpenRejectsGroupWithoutMemoryController(t *testing.T) {
 
 func TestRES2ChildEnforcesBudgetWithThrottleBelowHardLimitAndNoSwap(t *testing.T) {
 	g := fakeV2(t)
-	if got := read(t, filepath.Join(g.Path, "cgroup.subtree_control")); got != "+memory" {
+	if got := read(t, filepath.Join(g.Path, "cgroup.subtree_control")); got != "+cpu +io +memory +pids" {
 		t.Fatalf("subtree_control = %q, want memory enabled for children", got)
 	}
-	c, err := g.Child("m1", Limits{MaxBytes: 1600 << 20})
+	c, err := g.Child("m1", mem(1600<<20))
 	must(t, err)
 	if got := read(t, filepath.Join(c.Path, "memory.max")); got != "1677721600" {
 		t.Errorf("memory.max = %s", got)
@@ -78,11 +83,11 @@ func TestRES2ChildEnforcesBudgetWithThrottleBelowHardLimitAndNoSwap(t *testing.T
 	if got := read(t, filepath.Join(c.Path, "memory.oom.group")); got != "1" {
 		t.Errorf("memory.oom.group = %s, want 1", got)
 	}
-	if _, err := g.Child("m2", Limits{}); err == nil {
+	if _, err := g.Child("m2", ok); err == nil {
 		t.Error("a machine without a budget was given a group")
 	}
 	for _, bad := range []string{"", "..", "a/b", "x.y"} {
-		if _, err := g.Child(bad, Limits{MaxBytes: 1}); err == nil {
+		if _, err := g.Child(bad, mem(1)); err == nil {
 			t.Errorf("Child(%q) accepted", bad)
 		}
 	}
@@ -90,7 +95,7 @@ func TestRES2ChildEnforcesBudgetWithThrottleBelowHardLimitAndNoSwap(t *testing.T
 
 func TestRES1FreezeAndKillWaitForTheKernel(t *testing.T) {
 	g := fakeV2(t)
-	c, err := g.Child("exp", Limits{MaxBytes: 1 << 30})
+	c, err := g.Child("exp", mem(1<<30))
 	must(t, err)
 	ev := filepath.Join(c.Path, "cgroup.events")
 	must(t, os.WriteFile(ev, []byte("populated 1\nfrozen 0\n"), 0o644))
@@ -163,9 +168,28 @@ func TestRES1RES2RealCgroupV2(t *testing.T) {
 	}
 	g, err := Open(root)
 	must(t, err)
-	c, err := g.Child("agentos-test", Limits{MaxBytes: 64 << 20})
+	c, err := g.Child("agentos-test", Limits{MaxBytes: 64 << 20, CPUWeight: 1, IOWeight: 1, Pids: 4})
 	must(t, err)
 	defer c.Remove()
+	for f, want := range map[string]string{"cpu.weight": "1", "pids.max": "4"} {
+		if got := read(t, filepath.Join(c.Path, f)); got != want {
+			t.Errorf("kernel %s = %q, want %q", f, got, want)
+		}
+	}
+	if w, err := os.ReadFile(filepath.Join(c.Path, "io.weight")); err == nil {
+		t.Logf("io.weight: %q", strings.TrimSpace(string(w)))
+	} else {
+		t.Logf("kernel has no io.weight (no iocost): %v", err)
+	}
+
+	// The process cap holds: a shell in the group cannot fork past it
+	// (RES-2, security review 2 finding 4).
+	bomb := exec.Command("/bin/sh", "-c", "echo $$ > "+filepath.Join(c.Path, "cgroup.procs")+"; for i in 1 2 3 4 5 6 7 8; do sleep 1 & done; wait")
+	out, _ := bomb.CombinedOutput()
+	if got := read(t, filepath.Join(c.Path, "pids.events")); strings.HasPrefix(got+"\n", "max 0\n") {
+		t.Fatalf("pids.max never refused a fork: pids.events %q, output %q", got, out)
+	}
+	t.Logf("fork past pids.max: %q", strings.TrimSpace(string(out)))
 
 	// A shell in the group that allocates past the budget is throttled and
 	// then killed by the kernel or by us; it never takes host memory.

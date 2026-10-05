@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -23,9 +24,12 @@ func fakeCgroupfs(t *testing.T, marked bool) (cgroupHost, string) {
 		t.Fatal(err)
 	}
 	for _, f := range []string{"cgroup.controllers", "cgroup.subtree_control"} {
-		if err := os.WriteFile(filepath.Join(own, f), []byte("cpu memory"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(own, f), []byte("cpu io memory pids"), 0o644); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := os.WriteFile(filepath.Join(own, "pids.max"), []byte("9830"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 	self := filepath.Join(dir, "self-cgroup")
 	if err := os.WriteFile(self, []byte("0::/system.slice/agentos.service\n"), 0o644); err != nil {
@@ -107,8 +111,8 @@ func TestRES2DelegatedRootGetsTheBrokerAndPool(t *testing.T) {
 	for _, c := range []string{"broker", "machines"} {
 		os.MkdirAll(filepath.Join(own, c), 0o755)
 	}
-	os.WriteFile(filepath.Join(own, "machines", "cgroup.controllers"), []byte("memory"), 0o644)
-	os.WriteFile(filepath.Join(own, "machines", "cgroup.subtree_control"), []byte("memory"), 0o644)
+	os.WriteFile(filepath.Join(own, "machines", "cgroup.controllers"), []byte("cpu io memory pids"), 0o644)
+	os.WriteFile(filepath.Join(own, "machines", "cgroup.subtree_control"), []byte("cpu io memory pids"), 0o644)
 	mem, err := budget.ForHost(7680, 4, budget.Floor())
 	if err != nil {
 		t.Fatal(err)
@@ -125,8 +129,73 @@ func TestRES2DelegatedRootGetsTheBrokerAndPool(t *testing.T) {
 	}
 }
 
-func TestRES2NoMemoryControlsSaysSoInStatus(t *testing.T) {
-	if s := (&lateStatus{off: agentNoMemControls}).Status(); s != "Agent: off, the box's memory controls are not set up; it needs an update." {
-		t.Fatalf("status = %q", s)
+// A delegated group without the pids controller cannot cap a machine's
+// processes, so no pool opens and the agent stays off (RES-2, SR2-4).
+func TestRES2DelegatedRootWithoutPidsOpensNoPool(t *testing.T) {
+	h, own := fakeCgroupfs(t, true)
+	os.WriteFile(filepath.Join(own, "cgroup.controllers"), []byte("cpu io memory"), 0o644)
+	mem, err := budget.ForHost(7680, 4, budget.Floor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g, err := openMachines(h, "", false, mem); err == nil {
+		t.Fatalf("pool opened without a process cap: %+v", g)
+	}
+	if _, err := os.Stat(filepath.Join(own, "machines")); err == nil {
+		t.Fatal("machines group made without a process cap")
+	}
+}
+
+// Whichever controller is missing, the owner reads one line that names
+// none of them, and the log lists every missing one (UX ruling on #155).
+func TestRES2MissingControllerSaysSoInStatus(t *testing.T) {
+	const want = "Agent: off, the box can't yet keep the agent within its limits; it needs an update."
+	mem, err := budget.ForHost(7680, 4, budget.Floor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, missing := range [][]string{{"cpu"}, {"io"}, {"memory"}, {"pids"}, {"cpu", "pids"}} {
+		h, own := fakeCgroupfs(t, true)
+		var have []string
+		for _, c := range []string{"cpu", "io", "memory", "pids"} {
+			if !slices.Contains(missing, c) {
+				have = append(have, c)
+			}
+		}
+		os.WriteFile(filepath.Join(own, "cgroup.controllers"), []byte(strings.Join(have, " ")), 0o644)
+		_, err := openMachines(h, "", false, mem)
+		if err == nil || !strings.Contains(err.Error(), "lacks "+strings.Join(missing, ", ")) {
+			t.Errorf("missing %v: log error %v, want it to list them", missing, err)
+		}
+		if s := (&lateStatus{off: agentNoLimits}).Status(); s != want {
+			t.Errorf("missing %v: status %q", missing, s)
+		}
+	}
+	if strings.Contains(agentNoLimits, "memory") || strings.Contains(agentNoLimits, "cgroup") {
+		t.Errorf("owner text names a mechanism: %q", agentNoLimits)
+	}
+}
+
+// I/O weights are inert without iocost: the broker says so once at start
+// (L3 S1 on #155, budget R12).
+func TestRES2IOWeightNote(t *testing.T) {
+	fsRoot := t.TempDir()
+	root := filepath.Join(fsRoot, "agentos.service")
+	os.MkdirAll(filepath.Join(root, "broker"), 0o755)
+	if n := ioWeightNote(fsRoot, root); !strings.Contains(n, "no iocost") {
+		t.Errorf("no io.weight: note %q", n)
+	}
+	os.WriteFile(filepath.Join(root, "broker", "io.weight"), []byte("default 1000\n"), 0o644)
+	if n := ioWeightNote(fsRoot, root); !strings.Contains(n, "io.cost.qos") {
+		t.Errorf("no io.cost.qos: note %q", n)
+	}
+	qos := filepath.Join(fsRoot, "io.cost.qos")
+	os.WriteFile(qos, []byte("8:0 enable=0 ctrl=auto rpct=0.00 rlat=250000 wpct=0.00 wlat=250000 min=1.00 max=10000.00\n"), 0o644)
+	if n := ioWeightNote(fsRoot, root); !strings.Contains(n, "io.cost.qos") {
+		t.Errorf("iocost disabled: note %q", n)
+	}
+	os.WriteFile(qos, []byte("8:0 enable=0 ctrl=auto\n259:0 enable=1 ctrl=auto rpct=0.00\n"), 0o644)
+	if n := ioWeightNote(fsRoot, root); n != "" {
+		t.Errorf("iocost on: note %q, want none", n)
 	}
 }

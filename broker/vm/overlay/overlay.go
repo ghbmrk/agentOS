@@ -299,16 +299,26 @@ func FreeBytes(path string) (int64, error) {
 	return int64(st.Bavail) * int64(st.Bsize), nil
 }
 
-// Measure returns a layer's usage without following symlinks.
+// Measure returns a layer's usage without following symlinks. It may run
+// on a live layer: files that vanish mid-walk are skipped.
 func Measure(root string) (Usage, error) {
 	var u Usage
 	seen := map[[2]uint64]bool{}
+	// A file removed between its directory's read and its stat is not
+	// there to count: a running machine's layer changes under the walk.
+	gone := func(p string, err error) bool { return p != root && errors.Is(err, fs.ErrNotExist) }
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
+			if gone(p, err) {
+				return nil
+			}
 			return err
 		}
 		fi, err := d.Info()
 		if err != nil {
+			if gone(p, err) {
+				return nil
+			}
 			return err
 		}
 		st, ok := fi.Sys().(*syscall.Stat_t)

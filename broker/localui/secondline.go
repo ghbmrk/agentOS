@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/sipsign"
+	"github.com/ghbmrk/agentos/broker/smsapi"
 )
 
 // SecondLine is the vault process's second-line routes on the unlock
@@ -26,6 +27,25 @@ type SecondLine interface {
 	SetSecondLine(ctx context.Context, s sipsign.Settings, password string) error
 	ConfirmRealm(ctx context.Context, realm string) error
 	RemoveSecondLine(ctx context.Context) error
+	// The texting account over the provider's web API (egress K16); its
+	// token is never read back either.
+	SMSStatus(ctx context.Context) (SMSStatus, error)
+	SetSMS(ctx context.Context, s smsapi.Settings, token string) error
+	RemoveSMS(ctx context.Context) error
+}
+
+// SMSStatus is the texting account as the vault process reports it.
+type SMSStatus struct {
+	Set      bool            `json:"set"`
+	Settings smsapi.Settings `json:"settings"`
+}
+
+// ProviderName is the provider as the page names it.
+func (s SMSStatus) ProviderName() string {
+	if s.Settings.Provider == smsapi.SignalWire {
+		return "SignalWire"
+	}
+	return "Twilio"
 }
 
 // SecondLineStatus is the calling account as the vault process reports
@@ -71,6 +91,26 @@ func (u *UnlockClient) ConfirmRealm(ctx context.Context, realm string) error {
 // RemoveSecondLine implements SecondLine.
 func (u *UnlockClient) RemoveSecondLine(ctx context.Context) error {
 	return u.do(ctx, http.MethodPost, "/second-line/remove", struct{}{}, nil)
+}
+
+// SMSStatus implements SecondLine.
+func (u *UnlockClient) SMSStatus(ctx context.Context) (SMSStatus, error) {
+	var st SMSStatus
+	err := u.do(ctx, http.MethodGet, "/second-line/sms/status", nil, &st)
+	return st, err
+}
+
+// SetSMS implements SecondLine.
+func (u *UnlockClient) SetSMS(ctx context.Context, s smsapi.Settings, token string) error {
+	return u.do(ctx, http.MethodPost, "/second-line/sms", struct {
+		smsapi.Settings
+		Token string `json:"token"`
+	}{s, token}, nil)
+}
+
+// RemoveSMS implements SecondLine.
+func (u *UnlockClient) RemoveSMS(ctx context.Context) error {
+	return u.do(ctx, http.MethodPost, "/second-line/sms/remove", struct{}{}, nil)
 }
 
 // do sends one request to the unlock socket and decodes a 200 reply into
@@ -138,8 +178,13 @@ type secondLineView struct {
 	// Removing asks first (UX-139-1); Slow: the first registration has
 	// taken SlowRegistration or longer.
 	Removing, Slow bool
-	Err            string
-	Refresh        string
+	// SMS is the texting account; SMSForm what the owner typed for it,
+	// never the token; SMSRemoving asks first.
+	SMS         SMSStatus
+	SMSForm     smsapi.Settings
+	SMSRemoving bool
+	Err         string
+	Refresh     string
 }
 
 // secondLine serves the second line's page behind sign-in (CH-7): set up
@@ -184,11 +229,21 @@ func (s *Server) secondLine(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 			err = s.cfg.SecondLine.RemoveSecondLine(ctx)
+		case "sms-set":
+			v.SMSForm = smsapi.Settings{Provider: r.PostForm.Get("provider"), Space: r.PostForm.Get("space"),
+				Account: r.PostForm.Get("account"), Number: r.PostForm.Get("number")}
+			err = s.cfg.SecondLine.SetSMS(ctx, v.SMSForm, r.PostForm.Get("token"))
+		case "sms-remove":
+			if r.PostForm.Get("confirm") != "1" {
+				v.SMSRemoving = true
+				break
+			}
+			err = s.cfg.SecondLine.RemoveSMS(ctx)
 		default:
 			http.Error(w, "Bad request", http.StatusBadRequest)
 			return
 		}
-		if err == nil && !v.Removing {
+		if err == nil && !v.Removing && !v.SMSRemoving {
 			http.Redirect(w, r, "/second-line/", http.StatusSeeOther)
 			return
 		}
@@ -210,6 +265,16 @@ func (s *Server) secondLine(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	v.St = st
+	if v.SMS, err = s.cfg.SecondLine.SMSStatus(ctx); err != nil {
+		if v.Locked = isVaultError(err); !v.Locked {
+			v.Down, v.Refresh = true, "5"
+		}
+		s.render(w, "secondline", v)
+		return
+	}
+	if v.SMSForm == (smsapi.Settings{}) && v.SMS.Set {
+		v.SMSForm = v.SMS.Settings
+	}
 	if st.RealmRecorded {
 		v.RealmExact = st.Realm
 		v.Realm = showRealm(st.Realm)
@@ -223,7 +288,7 @@ func (s *Server) secondLine(w http.ResponseWriter, r *http.Request) {
 		v.Refresh = "5"
 		v.Slow = !s.cfg.Now().Before(time.Unix(st.SetAt, 0).Add(SlowRegistration))
 	}
-	if v.Removing {
+	if v.Removing || v.SMSRemoving {
 		v.Refresh = ""
 	}
 	if v.Form == (sipsign.Settings{}) && st.Set {

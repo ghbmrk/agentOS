@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // REQ: RES-1, CHG-1, LOOP-1
@@ -108,7 +109,7 @@ func TestCutCountsSurviveARestart(t *testing.T) {
 // candidate waits; with none waiting it runs again; and one that waited
 // once but is not offered again holds it back for one idle pass only.
 func TestParkedCandidatesTakeIdleTurns(t *testing.T) {
-	e, pe := newPreemptEnv(t, func(c *Config) { c.MinHeldOut = 100 })
+	e, pe := newPreemptEnv(t, func(c *Config) { c.MinHeldOut = 100; c.DevPercent = parkDev })
 	e.cases(12, ClassSkill, "skills/greet", "hello")
 	a := greet
 	b := Candidate{Source: Local, Files: Tree{"skills/greet": []byte("hello there")}}
@@ -180,5 +181,52 @@ func TestParkedCandidatesTakeIdleTurns(t *testing.T) {
 	refused(a)
 	if !ran(cutAny(), a) {
 		t.Fatal("a did not run with nothing else waiting")
+	}
+}
+
+// PE5b (L3 SHOULD-2 on #145), with PE7: a pair's cut counts lapse with
+// its kept sides, after the pipeline's ResumeFor (12 h by default, 36 h
+// on a box whose agent sleeps), and at most maxCuts pairs are kept, the
+// oldest dropped first.
+func TestCutCountsExpireAndAreCapped(t *testing.T) {
+	now := time.Date(2026, 10, 5, 6, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		resumeFor time.Duration
+		after     time.Duration
+		kept      bool
+	}{
+		// The default window is 12 h, pinned as a literal (L3 on #153):
+		// kept at exactly the window, gone a nanosecond past it.
+		{0, 12 * time.Hour, true},
+		{0, 12*time.Hour + time.Nanosecond, false},
+		{36 * time.Hour, 36 * time.Hour, true},
+		{36 * time.Hour, 36*time.Hour + time.Nanosecond, false},
+	} {
+		at := now
+		p := &Pipeline{cfg: Config{Now: func() time.Time { return at }, ResumeFor: tc.resumeFor}}
+		p.cutLocked("pair", true)
+		at = now.Add(tc.after)
+		if got := p.cutsLocked("pair").Exempt == 1; got != tc.kept {
+			t.Errorf("ResumeFor %v, %v later: kept %v", tc.resumeFor, tc.after, got)
+		}
+	}
+
+	if maxCuts != 1024 {
+		t.Fatalf("maxCuts %d, want 1024", maxCuts)
+	}
+	at := now
+	p := &Pipeline{cfg: Config{Now: func() time.Time { return at }}}
+	for i := 0; i <= maxCuts; i++ {
+		at = now.Add(time.Duration(i) * time.Second)
+		p.cutLocked(fmt.Sprintf("pair%04d", i), true)
+	}
+	if len(p.st.Cuts) != maxCuts {
+		t.Fatalf("%d pairs kept, want %d", len(p.st.Cuts), maxCuts)
+	}
+	if _, ok := p.st.Cuts["pair0000"]; ok {
+		t.Fatal("the oldest pair was kept past the cap")
+	}
+	if _, ok := p.st.Cuts[fmt.Sprintf("pair%04d", maxCuts)]; !ok {
+		t.Fatal("the newest pair was dropped")
 	}
 }

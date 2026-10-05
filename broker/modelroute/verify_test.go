@@ -71,4 +71,13 @@ func TestSecondLineRefusesAnUnknownState(t *testing.T) {
 	if st, err := v.SecondLine(context.Background()); err != nil || st != SecondLineConfirm {
 		t.Fatalf("known state: %q %v", st, err)
 	}
+	// The texting account's state is closed the same way (UX-159-1).
+	body.Store(`{"texts":"other"}`)
+	if st, err := v.SecondLineTexts(context.Background()); err == nil || st != "" {
+		t.Fatalf("unknown texts state: %q %v", st, err)
+	}
+	body.Store(`{"texts":"signin"}`)
+	if st, err := v.SecondLineTexts(context.Background()); err != nil || st != TextsSignIn {
+		t.Fatalf("known texts state: %q %v", st, err)
+	}
 }

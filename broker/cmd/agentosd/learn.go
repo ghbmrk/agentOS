@@ -38,6 +38,9 @@ type learning struct {
 	harvest *loops.Harvester
 	cases   harvester // where owner verdicts go: harvest, or a test's
 	eval    lateEvaluator
+	// sleep is the agent sleeper on a box where the agent and a replay
+	// machine do not fit together (PE7); nil elsewhere.
+	sleep   atomic.Pointer[sleeper]
 	eng     atomic.Pointer[journal.Engine]
 	adm     atomic.Pointer[admission.Controller]
 	routing *syncedRouting // nil: routing held
@@ -84,6 +87,9 @@ type learnPaths struct {
 	// Tree, if set, is the live agent's copy of the tree's procedures,
 	// skills and context (W4); nil holds them in the pipeline.
 	Tree *liveTree
+	// ResumeFor is how long a preempted evaluation's pairs and candidates
+	// are kept; zero is change.ResumeFor (sleepResumeFor).
+	ResumeFor time.Duration
 }
 
 // openLearning opens the learning plane and wires it into the daemon's
@@ -91,6 +97,7 @@ type learnPaths struct {
 // and the owner's settings texts.
 func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning, error) {
 	l := &learning{}
+	l.eval.sleep = &l.sleep
 	spare, err := meter.Open(meter.Config{
 		Path: p.Spare,
 		// The scheduler sets the overall cap from the owner's setting;
@@ -118,12 +125,10 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		Store:     change.FileStore{Path: filepath.Join(p.Dir, "change.json")},
 		Evaluator: &l.eval,
 		Targets:   targets,
+		ResumeFor: p.ResumeFor,
 		Logf:      log.Printf,
 	}); err != nil {
 		return nil, err
-	}
-	if p.Tree != nil {
-		p.Tree.markReady() // the pipeline applied its state, if it had any
 	}
 	var router change.Router
 	if sync != nil {
@@ -162,6 +167,7 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		Builder:    l.builder,
 		Router:     router,
 		ModelWired: modelWired,
+		ResumeFor:  p.ResumeFor,
 	})
 	if err != nil {
 		return nil, err
@@ -170,7 +176,7 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	if l.sched, err = loops.New(loops.Config{
 		Store:     change.FileStore{Path: filepath.Join(p.Dir, "loops.json")},
 		Spare:     spare,
-		Sources:   []loops.Source{learn},
+		Sources:   []loops.Source{sleepSource{learn, &l.sleep}},
 		Sharing:   l.pipe.SetSharing,
 		Busy:      l.busy,
 		BusyCause: l.busyCause,
@@ -181,6 +187,12 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	}
 	l.harvest.Wake = l.sched.Wake
 	l.cases = l.harvest
+	if err := l.replayForgotten(); err != nil {
+		return nil, err
+	}
+	if p.Tree != nil {
+		p.Tree.markReady() // the pipeline applied its state, if it had any
+	}
 	// Evaluation keeps its reserve of the spare budget while Loop 1
 	// evaluates (loops L3); builder machines take at most their Max of it
 	// (C-3c-5). The clean room takes its Max here once it exists.
@@ -247,6 +259,9 @@ const noRoomOn = "Learning is on, but the box's memory is too small to test chan
 
 func (l *learning) note() string {
 	if l.noRoom.Load() {
+		if l.sleep.Load() != nil {
+			return sleepModeNote
+		}
 		return noRoomNote
 	}
 	return ""
@@ -259,7 +274,7 @@ func (l *learning) note() string {
 func (l *learning) settings(ctx context.Context, msg string, unlocked bool) (string, bool) {
 	reply, ok := l.sched.Text(ctx, msg, unlocked)
 	r, _ := loops.ParseText(msg)
-	if !ok || !l.noRoom.Load() || r.Kind != loops.KindLoops || !r.On || (r.Loop != "" && r.Loop != loops.Improve) ||
+	if !ok || !l.noRoom.Load() || l.sleep.Load() != nil || r.Kind != loops.KindLoops || !r.On || (r.Loop != "" && r.Loop != loops.Improve) ||
 		reply != loops.Confirm(r, l.sched.Settings()) {
 		return reply, ok
 	}
@@ -298,11 +313,11 @@ func learningOff(cfg *daemon.Config) {
 
 // forgetTask deletes what the learning plane keeps of one task: its text,
 // its values, the Loop 1 cases harvested from it and the harvester's
-// records of them (W3-tasks part 1,
-// CAP-3). Only an authenticated owner forget may call it; none exists yet,
-// so nothing does. Adopted skills and procedures whose evidence includes
-// the task, and held candidates (loops L19), are the cascade's (security
-// C1 on #120; BOARD W3-tasks).
+// records of them (W3-tasks part 1, CAP-3), and the cascade (W3-tasks part
+// 2, security C1 on #120): Loop 1's kept candidates built from it, and
+// every adoption learned from it, undone with its files cleared from the
+// pipeline's history (change C23). Only an authenticated owner forget may
+// call it; none exists yet, so nothing does.
 func (l *learning) forgetTask(goal string) error {
 	if goal == "" {
 		return errors.New("learning: forget needs a goal")
@@ -312,11 +327,35 @@ func (l *learning) forgetTask(goal string) error {
 	// The tombstone first: once it holds, nothing keeps the goal again,
 	// even if a deletion below fails.
 	ferr := l.forgotten.add(goal)
+	return errors.Join(ferr, l.forgetStores(goal))
+}
+
+// forgetStores deletes one forgotten goal from every learning store, each
+// even when another's save failed. Each step is idempotent, and one that
+// finds nothing saves nothing.
+func (l *learning) forgetStores(goal string) error {
 	_, terr := l.tasks.forget(goal)
 	_, verr := l.values.forget(goal)
+	l.learn.ForgetGoal(goal)
 	ids, cerr := l.pipe.ForgetGoal(goal)
 	herr := l.harvest.ForgetCases(ids)
-	return errors.Join(ferr, terr, verr, cerr, herr)
+	return errors.Join(terr, verr, cerr, herr)
+}
+
+// replayForgotten runs every tombstoned goal's forget again when the
+// learning plane opens (L3 MUST-2 on #160). A forget writes the live tree
+// before it saves the pipeline, the other stores save one by one, and the
+// in-flight refusals are kept in memory only, so a crash midway would
+// bring forgotten files back and let a candidate from the goal be
+// adopted. It runs before the tree is marked ready, so on a failure the
+// agent never gets the tree and learning stays off until a start
+// succeeds.
+func (l *learning) replayForgotten() error {
+	var errs []error
+	for _, g := range l.forgotten.goals() {
+		errs = append(errs, l.forgetStores(g))
+	}
+	return errors.Join(errs...)
 }
 
 // ForgetTasks is recall's deletion reach into the learning plane
@@ -400,6 +439,9 @@ func (l *learning) record(o grants.OwnerOutcome) {
 }
 
 func (l *learning) busy() bool {
+	if sl := l.sleep.Load(); sl != nil && sl.keepsAwake() {
+		return true
+	}
 	a := l.adm.Load()
 	return a == nil || a.Busy()
 }
@@ -412,7 +454,13 @@ func (l *learning) busyCause() (busy, owner, pressure bool) {
 	if a == nil {
 		return true, false, true
 	}
-	return a.BusyCause()
+	busy, owner, pressure = a.BusyCause()
+	if sl := l.sleep.Load(); sl != nil && sl.keepsAwake() {
+		// The agent is awake for the owner (PE7 condition 7); pressure
+		// still wins.
+		return true, true, pressure
+	}
+	return busy, owner, pressure
 }
 
 // revokedForOwner is admission's RevokedForOwner for the replay evaluator
@@ -519,6 +567,8 @@ func (heldRouting) Apply(t change.Tree) error {
 // evaluated and nothing adopts (change C8: no evaluation, no adoption).
 type lateEvaluator struct {
 	e atomic.Pointer[replay.Evaluator]
+	// sleep, if set, guards each run while the agent sleeps (PE7).
+	sleep *atomic.Pointer[sleeper]
 }
 
 func (l *lateEvaluator) Run(ctx context.Context, t change.Tree, p change.Probe) ([]byte, error) {
@@ -526,7 +576,11 @@ func (l *lateEvaluator) Run(ctx context.Context, t change.Tree, p change.Probe) 
 	if e == nil {
 		return nil, change.ErrNotEvaluated
 	}
-	return e.Run(ctx, t, p)
+	var sl *sleeper
+	if l.sleep != nil {
+		sl = l.sleep.Load()
+	}
+	return sleepGuard(ctx, sl, func(ctx context.Context) ([]byte, error) { return e.Run(ctx, t, p) })
 }
 
 // lateReader is Loop 1's journal reader, empty until the engine runs.

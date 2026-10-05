@@ -186,6 +186,9 @@ type GuardConfig struct {
 	// checks are not current. Default 7 days.
 	Stale time.Duration
 	Now   func() time.Time
+	// ResumeFor is how long a preempted fix is kept: change.ResumeFor
+	// unless set (PE7).
+	ResumeFor time.Duration
 }
 
 // Guard is Loop 2's Source.
@@ -550,7 +553,7 @@ func (s *Guard) fix(ctx context.Context, rec *Record) error {
 	delete(s.held, f.ID)
 	s.mu.Unlock()
 	cand, base := h.cand, h.base
-	if !ok || s.cfg.Now().Sub(h.at) > change.ResumeFor || !maps.Equal(base, s.bases(cand)) {
+	if !ok || s.cfg.Now().Sub(h.at) > s.resumeFor() || !maps.Equal(base, s.bases(cand)) {
 		var err error
 		if cand, err = s.cfg.Fixer.Fix(ctx, f); err != nil {
 			if ctx.Err() != nil {
@@ -575,6 +578,13 @@ func (s *Guard) fix(ctx context.Context, rec *Record) error {
 		return fmt.Errorf("fix %s: %w", f.ID, err)
 	}
 	return nil
+}
+
+func (s *Guard) resumeFor() time.Duration {
+	if s.cfg.ResumeFor > 0 {
+		return s.cfg.ResumeFor
+	}
+	return change.ResumeFor
 }
 
 // bases hashes the active tree of each namespace a candidate touches.

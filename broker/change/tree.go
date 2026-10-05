@@ -56,9 +56,14 @@ func (t Tree) under(ns string) Tree {
 // Edit is one changed path: its content before and after. A nil side means
 // the file is absent.
 type Edit struct {
-	Path   string `json:"path"`
-	Before []byte `json:"before,omitempty"`
-	After  []byte `json:"after,omitempty"`
+	Path string `json:"path"`
+	// Before and After are nil for an absent file and empty for an empty
+	// one; without omitempty the saved state keeps the difference.
+	Before []byte `json:"before"`
+	After  []byte `json:"after"`
+	// Forgotten marks an edit whose contents a forget cleared (C23): it
+	// is not a delete, though it now holds nothing either side.
+	Forgotten bool `json:"forgotten,omitempty"`
 }
 
 // diff computes the edits that turn base into next, sorted by path. Files
