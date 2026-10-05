@@ -1,22 +1,28 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"math"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/compile"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/loops"
 	"github.com/ghbmrk/agentos/broker/owner"
 )
 
@@ -74,18 +80,9 @@ type taskValues struct {
 
 // openTaskValues loads the record and its hash key, made on first use.
 func openTaskValues(store change.Store, keyPath string, now func() time.Time, logf func(string, ...any)) (*taskValues, error) {
-	key, err := os.ReadFile(keyPath)
-	if errors.Is(err, os.ErrNotExist) {
-		key = make([]byte, 32)
-		if _, err = rand.Read(key); err == nil {
-			err = os.WriteFile(keyPath, key, 0o600)
-		}
-	}
+	key, err := readValuesKey(keyPath)
 	if err != nil {
 		return nil, err
-	}
-	if len(key) != 32 {
-		return nil, errors.New("task values: bad key")
 	}
 	v := &taskValues{store: store, key: key, now: now, logf: logf, st: map[string]*valueGoal{}}
 	raw, err := store.Load()
@@ -99,6 +96,12 @@ func openTaskValues(store change.Store, keyPath string, now func() time.Time, lo
 		if v.st == nil {
 			v.st = map[string]*valueGoal{}
 		}
+		for id, g := range v.st {
+			if g == nil || g.Steps == nil || len(g.Steps) > maxValueSteps {
+				delete(v.st, id)
+				logf("task values: a malformed goal was dropped")
+			}
+		}
 	}
 	v.mu.Lock()
 	if v.pruneLocked(now()) {
@@ -106,6 +109,89 @@ func openTaskValues(store change.Store, keyPath string, now func() time.Time, lo
 	}
 	v.mu.Unlock()
 	return v, nil
+}
+
+// The credential shapes recall's scrubber removes (CRED-1), restated here
+// since agentosd's control path may not import recall (ARC-2): an auth
+// scheme with its token, a URL query or fragment param REV-5 names as a
+// credential, and a long random-looking token (L3 MUST-2 on #119).
+var (
+	authScheme = regexp.MustCompile(`(?i)\b(bearer|basic|token|digest)\s+[A-Za-z0-9._~+/=-]{8,}`)
+	tokenParam = regexp.MustCompile(`(?i)[?&#;][^=&#;\s]*(token|code|key|sig|auth|session|pass|secret|otp)[^=&#;\s]*=[^&#;\s]+`)
+	emailShape = regexp.MustCompile(`^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$`)
+)
+
+func credentialShaped(s string) bool {
+	if authScheme.MatchString(s) || tokenParam.MatchString(s) {
+		return true
+	}
+	for _, tok := range strings.Fields(s) {
+		if t := strings.Trim(tok, "\"'()[]{}<>.,;:!?"); !strings.Contains(t, "://") && randomLooking(t) {
+			return true
+		}
+	}
+	return false
+}
+
+// randomLooking is recall's test: at least 16 characters mixing letters
+// and digits with high per-character entropy, or at least 20 of very high
+// entropy; addresses are kept.
+func randomLooking(t string) bool {
+	if len(t) < 16 || emailShape.MatchString(t) {
+		return false
+	}
+	h := entropy(t)
+	if strings.ContainsAny(t, "0123456789") && strings.IndexFunc(t, unicode.IsLetter) >= 0 && h >= 3.0 {
+		return true
+	}
+	return len(t) >= 20 && h >= 3.5
+}
+
+func entropy(t string) float64 {
+	n := map[rune]float64{}
+	for _, r := range t {
+		n[r]++
+	}
+	total := float64(len([]rune(t)))
+	h := 0.0
+	for _, c := range n {
+		p := c / total
+		h -= p * math.Log2(p)
+	}
+	return h
+}
+
+// readValuesKey reads the hash key, made on first use: written to a
+// temporary file and renamed, so a crash never leaves a short key, and
+// refused when others can read it.
+func readValuesKey(path string) ([]byte, error) {
+	key, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		key = make([]byte, 32)
+		if _, err = rand.Read(key); err != nil {
+			return nil, err
+		}
+		tmp := path + ".tmp"
+		if err = os.WriteFile(tmp, key, 0o600); err == nil {
+			err = os.Rename(tmp, path)
+		}
+		if err != nil {
+			return nil, err
+		}
+	} else if err != nil {
+		return nil, err
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if fi.Mode().Perm()&0o077 != 0 {
+		return nil, errors.New("task values: key file is readable by others")
+	}
+	if len(key) != 32 {
+		return nil, errors.New("task values: bad key")
+	}
+	return key, nil
 }
 
 // observe records the values of an intent the gate authorized.
@@ -172,10 +258,11 @@ func (v *taskValues) verdict(o grants.OwnerOutcome) {
 	v.saveLocked()
 }
 
-// scrub is one leaf: secret-shaped, or changed by the journal's
-// redactor, is the placeholder as a whole (security V2).
+// scrub is one leaf: secret-shaped, holding credential material, or
+// changed by the journal's redactor, is the placeholder as a whole
+// (security V2).
 func (v *taskValues) scrub(s string) string {
-	if owner.SecretShaped(s) || (v.redact != nil && v.redact(s) != s) {
+	if owner.SecretShaped(s) || credentialShaped(s) || (v.redact != nil && v.redact(s) != s) {
 		return redactedValue
 	}
 	return s
@@ -269,11 +356,18 @@ func (v *taskValues) hashStep(s valueStep) valueStep {
 	return out
 }
 
+// schemaKey is a map key shaped like a field name; any other key is data
+// and is hashed in an implicit run (L3 on #119).
+var schemaKey = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]{0,63}$`)
+
 func (v *taskValues) hashValue(x any) any {
 	switch t := x.(type) {
 	case map[string]any:
 		out := make(map[string]any, len(t))
 		for k, c := range t {
+			if !schemaKey.MatchString(k) { // a key that is data, such as an address
+				k = v.hash(k)
+			}
 			out[k] = v.hashValue(c)
 		}
 		return out
@@ -382,3 +476,50 @@ func (vj valuedJournal) Trail() []journal.Record {
 	}
 	return out
 }
+
+// skillBuilder is Loop 1's builder for repeated trajectories: the
+// compiler, reading kept values in place of the journal's marks. Loop 1
+// mines its evidence from the plain journal, so the builder maps each
+// brief's evidence through the values itself, on a copy: the values never
+// enter Loop 1's brief (security V3; L3 MUST-1 on #119).
+func skillBuilder(j compile.Journal, values *taskValues, cases compile.Cases) (loops.BySignal, error) {
+	var b loops.Builder
+	if values == nil {
+		comp, err := compile.New(compile.Config{Journal: j, Cases: cases, Redacted: journalRedacted})
+		if err != nil {
+			return nil, err
+		}
+		b = compile.LoopBuilder{C: comp}
+	} else {
+		vj := valuedJournal{j, values}
+		comp, err := compile.New(compile.Config{Journal: vj, Cases: cases, Redacted: journalRedacted})
+		if err != nil {
+			return nil, err
+		}
+		b = valuedBuilder{compile.LoopBuilder{C: comp}, vj}
+	}
+	return loops.BySignal{loops.SignalRepeat: b}, nil
+}
+
+type valuedBuilder struct {
+	b  compile.LoopBuilder
+	vj valuedJournal
+}
+
+func (vb valuedBuilder) valued(br loops.Brief) loops.Brief {
+	ev := make([]journal.Status, len(br.Hypothesis.Evidence))
+	for i, s := range br.Hypothesis.Evidence {
+		s.Intent = vb.vj.with(s.Intent)
+		ev[i] = s
+	}
+	br.Hypothesis.Evidence = ev
+	return br
+}
+
+func (vb valuedBuilder) Build(ctx context.Context, br loops.Brief) (change.Candidate, error) {
+	return vb.b.Build(ctx, vb.valued(br))
+}
+
+func (vb valuedBuilder) Ready(br loops.Brief) bool { return vb.b.Ready(vb.valued(br)) }
+
+var _ loops.Readier = valuedBuilder{}

@@ -14,7 +14,6 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/change"
-	"github.com/ghbmrk/agentos/broker/compile"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
@@ -129,15 +128,24 @@ func TestCompiledSkillsReadKeptValues(t *testing.T) {
 		g := fmt.Sprint("g", i)
 		r.judge(g, r.weekly(g, to, 40+i), grants.OwnerAccepted)
 	}
-	vj := valuedJournal{r.eng, r.values}
-	for name, j := range map[string]compile.Journal{"plain journal": r.eng, "with values": vj} {
-		c, err := compile.New(compile.Config{Journal: j, Cases: devAll{}, Redacted: journalRedacted})
+	// Through Loop 1's builder (L3 MUST-1 on #119): Loop 1 mines evidence
+	// from the plain journal, so the builder must read kept values itself.
+	for name, v := range map[string]*taskValues{"no values kept": nil, "with values": r.values} {
+		b, err := skillBuilder(r.eng, v, devAll{})
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, err = c.BuildSkill(j.List())
-		if (err == nil) != (name == "with values") {
-			t.Fatalf("%s: %v", name, err)
+		br := loops.Brief{Hypothesis: loops.Hypothesis{Signal: loops.SignalRepeat, Key: "repeat:k", Evidence: r.eng.List()}}
+		plain := fmt.Sprint(br.Hypothesis.Evidence)
+		cand, err := b.Build(context.Background(), br)
+		if b.Ready(br) != (name == "with values") || (err == nil) != (name == "with values") {
+			t.Fatalf("%s: ready %v, build %v", name, b.Ready(br), err)
+		}
+		if fmt.Sprint(br.Hypothesis.Evidence) != plain || strings.Contains(plain, "@example.test") {
+			t.Fatalf("%s: values reached Loop 1's brief", name)
+		}
+		if name == "with values" && len(cand.Files) == 0 {
+			t.Fatal("no skill built")
 		}
 	}
 }
@@ -177,6 +185,22 @@ func TestSecretShapedValuesAreNotKept(t *testing.T) {
 	}
 	if n.Params["week"] != float64(3) || n.Params["amount"] != 125.5 || n.Params["zip"] != "90210" {
 		t.Errorf("plain values changed: %+v", n.Params)
+	}
+	// Credentials recall's scrubber removes (L3 MUST-2 on #119): auth
+	// schemes, REV-5 token-URL params, long random-looking strings.
+	for _, c := range []string{
+		"Bearer " + strings.Repeat("Zq7x", 10),
+		"https://cb.example.test/done?access_token=" + strings.Repeat("a1", 8),
+		strings.Repeat("0123456789abcdef", 4),
+	} {
+		if got := r.values.scrubValue(map[string]any{"note": c, "list": []any{c}}); fmt.Sprint(got) != fmt.Sprint(map[string]any{"note": redactedValue, "list": []any{redactedValue}}) {
+			t.Errorf("%q kept: %v", c, got)
+		}
+	}
+	for _, c := range []string{"https://shop.example.test/orders?page=2", "Weekly report for the team", "ann@example.test"} {
+		if r.values.scrub(c) != c {
+			t.Errorf("plain %q scrubbed", c)
+		}
 	}
 	// A redactor wired later (P2-4) marks what it would change too.
 	r.values.redact = func(s string) string { return strings.ReplaceAll(s, "hunter2", "[REDACTED]") }
@@ -301,24 +325,94 @@ func TestTaskValuesReachOnlyTheCompiler(t *testing.T) {
 	off := in
 	off.ID, off.GoalID = "agent/2", "owner:off"
 	cfg.Grants.Observe(off)
-	// A sentinel queued after it: once it is recorded, anything queued
-	// before it was too.
-	lp.observed <- journal.Intent{ID: "agent/3", GoalID: "owner:sentinel", Origin: "guest:agent"}
-	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
-		lp.values.mu.Lock()
-		_, done := lp.values.st["owner:sentinel"]
-		_, kept := lp.values.st["owner:off"]
-		lp.values.mu.Unlock()
-		if kept {
-			t.Fatal("values observed while learning is off")
+	if len(lp.observed) != 0 {
+		t.Fatal("queued while learning is off")
+	}
+	// Queued before LEARNING OFF, recorded after: checked again at dequeue.
+	// The loop handles one intent at a time, so once a second one has left
+	// the queue the first is done.
+	lp.observed <- off
+	waitEmpty := func() {
+		for deadline := time.Now().Add(5 * time.Second); len(lp.observed) > 0; time.Sleep(10 * time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatal("the record never drained its queue")
+			}
 		}
-		if done {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the record never took the sentinel")
-		}
+	}
+	waitEmpty()
+	lp.observed <- journal.Intent{ID: "agent/3", GoalID: "owner:next", Origin: "guest:agent"}
+	waitEmpty()
+	lp.values.mu.Lock()
+	_, kept := lp.values.st["owner:off"]
+	lp.values.mu.Unlock()
+	if kept {
+		t.Fatal("values observed while learning is off")
 	}
 	cancel()
 	d.Wait()
+}
+
+// Bounds and load checks (L3 SHOULDs on #119): at most maxValueSteps steps
+// a goal, nothing read after keepValues, a malformed record or a key file
+// others can read is refused, and an implicit run's data-shaped map keys
+// are hashed like its values.
+func TestTaskValuesBounds(t *testing.T) {
+	r := newValuesRig(t)
+	for i := 0; i <= maxValueSteps; i++ {
+		r.values.observe(journal.Intent{ID: fmt.Sprint("cap/", i), GoalID: "cap", Params: map[string]any{"n": "x"}})
+	}
+	r.values.observe(journal.Intent{ID: "old/1", GoalID: "old", Params: map[string]any{"n": "x"}})
+	for _, g := range []string{"cap", "old"} {
+		r.values.verdict(grants.OwnerOutcome{Intent: journal.Intent{GoalID: g}, Verdict: grants.OwnerAccepted})
+	}
+	if _, ok := r.values.values("cap", fmt.Sprint("cap/", maxValueSteps-1)); !ok {
+		t.Fatal("step within the cap not kept")
+	}
+	if _, ok := r.values.values("cap", fmt.Sprint("cap/", maxValueSteps)); ok {
+		t.Fatal("step over the cap kept")
+	}
+	r.now = r.now.Add(keepValues + time.Hour)
+	if _, ok := r.values.values("old", "old/1"); ok {
+		t.Fatal("values read after keepValues")
+	}
+
+	r.values.observe(journal.Intent{ID: "imp/1", GoalID: "imp", Params: map[string]any{
+		"to": "x", "by_sender": map[string]any{"ann@example.test": "y", "folder_id": "z"}}})
+	r.values.verdict(grants.OwnerOutcome{Intent: journal.Intent{GoalID: "imp"}, Verdict: grants.OwnerAcceptedImplicitly})
+	h, _ := r.values.values("imp", "imp/1")
+	by, _ := h.Params["by_sender"].(map[string]any)
+	if strings.Contains(fmt.Sprint(h), "ann@") || by == nil || by["folder_id"] == nil || len(by) != 2 {
+		t.Fatalf("implicit keys: %+v", h)
+	}
+
+	dir := t.TempDir()
+	store := change.FileStore{Path: filepath.Join(dir, "values.json")}
+	at, _ := json.Marshal(r.now)
+	big := map[string]valueStep{}
+	for i := 0; i <= maxValueSteps; i++ {
+		big[fmt.Sprint(i)] = valueStep{}
+	}
+	bigJSON, _ := json.Marshal(big)
+	if err := store.Save([]byte(`{"null":null,"nosteps":{"at":` + string(at) + `,"good":true},` +
+		`"big":{"at":` + string(at) + `,"good":true,"steps":` + string(bigJSON) + `},` +
+		`"ok":{"at":` + string(at) + `,"good":true,"steps":{"ok/1":{"params":{"n":"x"}}}}}`)); err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(dir, "values.key")
+	v, err := openTaskValues(store, keyPath, func() time.Time { return r.now }, t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(v.st) != 1 || v.st["ok"] == nil {
+		t.Fatalf("malformed goals loaded: %v", v.st)
+	}
+	if fi, err := os.Stat(keyPath); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("key file: %v %v", fi, err)
+	}
+	if err := os.Chmod(keyPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openTaskValues(store, keyPath, func() time.Time { return r.now }, t.Logf); err == nil {
+		t.Fatal("a key file others can read was used")
+	}
 }

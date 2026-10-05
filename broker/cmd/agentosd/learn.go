@@ -13,7 +13,6 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/change"
-	"github.com/ghbmrk/agentos/broker/compile"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
@@ -120,11 +119,9 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		return nil, err
 	}
 	l.mining = lateReader{&l.eng}
-	comp, err := compile.New(compile.Config{Journal: valuedJournal{l.mining, l.values}, Cases: l.pipe, Redacted: journalRedacted})
-	if err != nil {
+	if l.builder, err = skillBuilder(l.mining, l.values, l.pipe); err != nil {
 		return nil, err
 	}
-	l.builder = loops.BySignal{loops.SignalRepeat: compile.LoopBuilder{C: comp}}
 	learn, err := loops.NewLearn(loops.LearnConfig{
 		Pipeline:   l.pipe,
 		Journal:    l.mining,
@@ -308,7 +305,9 @@ func (l *learning) attach(ctx context.Context, d *daemon.Daemon) {
 					l.record(o)
 				}()
 			case in := <-l.observed:
-				l.values.observe(in)
+				if l.learningOn() { // again: it may have been turned off while queued (UX-S3-2)
+					l.values.observe(in)
+				}
 			}
 		}
 	}()
