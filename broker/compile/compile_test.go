@@ -14,6 +14,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/loops"
 	"github.com/ghbmrk/agentos/broker/skill"
 )
 
@@ -624,5 +625,41 @@ func TestClippedAndNullValues(t *testing.T) {
 	}
 	if cs := r.compiler().Candidates(change.Tree{}); len(cs) != 0 {
 		t.Fatalf("clipped values compiled: %+v", cs)
+	}
+}
+
+// CAP-5, LOOP-4: Loop 1 routes repeat hypotheses to the compiler; the
+// candidate writes one skill and deletes only that shape's procedure, the
+// namespace a skill supersedes.
+func TestLoopBuilder(t *testing.T) {
+	r := newRig(t)
+	for i, to := range []string{"ann@example.test", "bo@example.test", "cy@example.test"} {
+		r.accepted(fmt.Sprintf("g%d", i), to, 40+i)
+	}
+	b := loops.BySignal{loops.SignalRepeat: LoopBuilder{C: r.compiler()}}
+	if !b.Handles(loops.SignalRepeat) || b.Handles(loops.SignalFailure) {
+		t.Fatal("routing")
+	}
+	cand, err := b.Build(context.Background(), loops.Brief{Hypothesis: loops.Hypothesis{
+		Signal: loops.SignalRepeat, Class: change.ClassSkill, Evidence: r.eng.List()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cand.Files) != 1 || len(cand.Delete) != 1 || !strings.HasPrefix(cand.Delete[0], "procedures/p") {
+		t.Fatalf("%+v", cand)
+	}
+	for p := range cand.Files {
+		if !strings.HasPrefix(p, "skills/k") {
+			t.Fatalf("wrote %s", p)
+		}
+	}
+	if _, err := b.Build(context.Background(), loops.Brief{Hypothesis: loops.Hypothesis{Signal: loops.SignalRepeat}}); !errors.Is(err, ErrNoSkill) {
+		t.Fatalf("no evidence: %v", err)
+	}
+	if b.Ready(loops.Brief{Hypothesis: loops.Hypothesis{Signal: loops.SignalRepeat}}) {
+		t.Fatal("ready with no evidence")
+	}
+	if !b.Ready(loops.Brief{Hypothesis: loops.Hypothesis{Signal: loops.SignalRepeat, Evidence: r.eng.List()}}) {
+		t.Fatal("not ready with three accepted runs")
 	}
 }

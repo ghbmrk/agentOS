@@ -3,6 +3,7 @@ package recovery
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,6 +33,10 @@ type BackupEntry struct {
 	// Verified: read back from the destination and matching what was
 	// written.
 	Verified bool `json:"verified,omitempty"`
+	// Key identifies the backup key the backup was sealed to (keyID). A
+	// backup is current only when it matches the drive's backup key now,
+	// whatever the clock said (Created is for display).
+	Key string `json:"key,omitempty"`
 }
 
 type backupLog struct {
@@ -79,6 +84,7 @@ func saveLog(b *Box, l backupLog) error {
 type Receipt struct {
 	created time.Time
 	sum     []byte
+	key     string
 }
 
 // Created is when the backup was made.
@@ -86,11 +92,15 @@ func (r Receipt) Created() time.Time { return r.created }
 
 // BackupSum writes a backup like Backup and returns its receipt.
 func BackupSum(b *Box, roots []Root, w io.Writer, now time.Time) (Receipt, error) {
-	h := sha256.New()
-	if err := Backup(b, roots, io.MultiWriter(w, h), now); err != nil {
+	pub, err := backupKey(b)
+	if err != nil {
 		return Receipt{}, err
 	}
-	return Receipt{created: now.UTC(), sum: h.Sum(nil)}, nil
+	h := sha256.New()
+	if err := backupSealed(b, pub, roots, io.MultiWriter(w, h), now); err != nil {
+		return Receipt{}, err
+	}
+	return Receipt{created: now.UTC(), sum: h.Sum(nil), key: keyID(pub)}, nil
 }
 
 // RecordBackup logs a backup written to destination (a name the owner
@@ -105,10 +115,10 @@ func RecordBackup(b *Box, destination string, rc Receipt, readBack io.Reader) (B
 	if rc.created.IsZero() {
 		return BackupEntry{}, errors.New("recovery: record a backup with BackupSum's receipt")
 	}
-	if destination == "" || len(destination) > 200 {
-		return BackupEntry{}, errors.New("recovery: name the backup's destination")
+	if err := checkDestination(b, destination); err != nil {
+		return BackupEntry{}, err
 	}
-	e := BackupEntry{Destination: destination, Created: created.UTC()}
+	e := BackupEntry{Destination: destination, Created: created.UTC(), Key: rc.key}
 	if readBack != nil && len(sum) == sha256.Size {
 		h := sha256.New()
 		if _, err := io.Copy(h, readBack); err == nil {
@@ -134,20 +144,41 @@ func keyChanged(b *Box, now time.Time) error {
 	return saveLog(b, l)
 }
 
-func (l backupLog) older() []BackupEntry {
+// keyID names a backup public key: the first 16 bytes of its SHA-256
+// under a label, in hex.
+func keyID(pub []byte) string {
+	h := sha256.New()
+	h.Write([]byte("agentos-backup-key-id-v1"))
+	h.Write(pub)
+	return hex.EncodeToString(h.Sum(nil)[:16])
+}
+
+// currentKey is the keyID of the key backups are sealed to now; empty
+// when there is none, so no backup counts as current.
+func currentKey(b *Box) string {
+	pub, err := backupKey(b)
+	if err != nil {
+		return ""
+	}
+	return keyID(pub)
+}
+
+// older lists backups sealed to another key than cur, once the key changed.
+func (l backupLog) older(cur string) []BackupEntry {
 	var out []BackupEntry
 	for _, e := range l.Entries {
-		if !l.KeyChangedAt.IsZero() && e.Created.Before(l.KeyChangedAt) {
+		if !l.KeyChangedAt.IsZero() && (cur == "" || e.Key != cur) {
 			out = append(out, e)
 		}
 	}
 	return out
 }
 
-// freshVerified reports a verified backup made since the key changed.
-func (l backupLog) freshVerified() bool {
+// freshVerified reports a verified backup sealed to the current key cur
+// since the key changed.
+func (l backupLog) freshVerified(cur string) bool {
 	for _, e := range l.Entries {
-		if e.Verified && !l.KeyChangedAt.IsZero() && !e.Created.Before(l.KeyChangedAt) {
+		if e.Verified && !l.KeyChangedAt.IsZero() && cur != "" && e.Key == cur {
 			return true
 		}
 	}
@@ -185,7 +216,7 @@ func OldBackupsNote(b *Box) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	old := l.older()
+	old := l.older(currentKey(b))
 	if len(old) == 0 {
 		return "", nil
 	}
@@ -230,8 +261,9 @@ func OfferDelete(b *Box, reachable func(string) bool) (DeleteOffer, bool, error)
 	}
 	var off DeleteOffer
 	var far []BackupEntry
-	fresh := l.freshVerified()
-	for _, e := range l.older() {
+	cur := currentKey(b)
+	fresh := l.freshVerified(cur)
+	for _, e := range l.older(cur) {
 		if reachable != nil && reachable(e.Destination) {
 			off.Reachable = append(off.Reachable, e)
 		} else {
@@ -264,7 +296,8 @@ func ApproveDelete(b *Box, off DeleteOffer, auth Auth) ([]BackupEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !l.freshVerified() {
+	cur := currentKey(b)
+	if !l.freshVerified(cur) {
 		return nil, ErrNoFreshBackup
 	}
 	offered := map[BackupEntry]bool{}
@@ -272,7 +305,7 @@ func ApproveDelete(b *Box, off DeleteOffer, auth Auth) ([]BackupEntry, error) {
 		offered[e] = true
 	}
 	var out []BackupEntry
-	for _, e := range l.older() {
+	for _, e := range l.older(cur) {
 		if offered[e] {
 			out = append(out, e)
 		}
@@ -281,7 +314,8 @@ func ApproveDelete(b *Box, off DeleteOffer, auth Auth) ([]BackupEntry, error) {
 }
 
 // ForgetBackups drops older backups from the log once the caller has
-// confirmed their deletion. Backups since the key change are never dropped.
+// confirmed their deletion. Backups sealed to the current key are never
+// dropped.
 func ForgetBackups(b *Box, deleted []BackupEntry) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -290,12 +324,17 @@ func ForgetBackups(b *Box, deleted []BackupEntry) error {
 		return err
 	}
 	gone := map[BackupEntry]bool{}
+	for _, e := range l.older(currentKey(b)) {
+		gone[e] = false
+	}
 	for _, e := range deleted {
-		gone[e] = true
+		if _, old := gone[e]; old {
+			gone[e] = true
+		}
 	}
 	var keep []BackupEntry
 	for _, e := range l.Entries {
-		if !(gone[e] && !l.KeyChangedAt.IsZero() && e.Created.Before(l.KeyChangedAt)) {
+		if !gone[e] {
 			keep = append(keep, e)
 		}
 	}

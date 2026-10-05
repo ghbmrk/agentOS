@@ -4,8 +4,10 @@ package journal
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestADP10EgressDenialsAreJournaledAndReplayed: a denied egress request is
@@ -67,5 +69,37 @@ func TestADP10EgressRecordsDoNotDisturbIntents(t *testing.T) {
 	}
 	if s := must(e.Get("a")); s.State != Pending {
 		t.Fatalf("intent state %s", s.State)
+	}
+}
+
+// TestADP10GateNeverAdmitsUntracked: once every key in the coalescing
+// table is live, a new reason class is folded into the machine's overflow
+// entry, so a guest minting reasons gets at most one record per window.
+func TestADP10GateNeverAdmitsUntracked(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	g := &EgressGate{Now: func() time.Time { return now }}
+	for i := 0; i < maxEgressKeys; i++ {
+		if !g.Admit(&EgressNote{Machine: "m1", Reason: fmt.Sprint("reason ", i)}) {
+			t.Fatalf("reason %d not admitted while the table had room", i)
+		}
+	}
+	admitted := 0
+	for i := 0; i < 500; i++ {
+		if g.Admit(&EgressNote{Machine: "m1", Reason: fmt.Sprint("overflow ", i)}) {
+			admitted++
+		}
+	}
+	if admitted != 1 {
+		t.Fatalf("admitted %d notes past a full table in one window, want 1", admitted)
+	}
+	if !g.Admit(&EgressNote{Machine: "m2", Reason: "another machine"}) {
+		t.Fatal("another machine's first overflow note was not admitted")
+	}
+	now = now.Add(61 * time.Second)
+	n := &EgressNote{Machine: "m1", Reason: "overflow again"}
+	// The window ended: expired keys are pruned, so this one is tracked
+	// on its own again.
+	if !g.Admit(n) {
+		t.Fatalf("after the window: %+v not admitted", n)
 	}
 }

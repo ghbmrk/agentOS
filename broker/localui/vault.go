@@ -304,12 +304,14 @@ type vaultView struct {
 	// Keep offers "Keep this PC trusted", unticked.
 	Keep bool
 	// Kept: the unlock kept this PC trusted.
-	Kept    bool
-	Mine    bool
-	Expires string
-	Err     string
-	Down    bool
-	Refresh string
+	Kept bool
+	// SignedIn: this phone is signed in (after its unlock, P2-4f).
+	SignedIn bool
+	Mine     bool
+	Expires  string
+	Err      string
+	Down     bool
+	Refresh  string
 }
 
 // vaultUnlock serves /unlock/vault: the unknown-host unlock (CRED-8) on
@@ -357,6 +359,7 @@ func (s *Server) vaultPage(w http.ResponseWriter, r *http.Request, errText strin
 	s.mu.Lock()
 	v.Kept = s.vaultKept && st.State == "open"
 	s.mu.Unlock()
+	v.SignedIn = st.State == "open" && s.isSignedIn(r)
 	s.mu.Lock()
 	if st.State == "pending" {
 		v.Mine = s.vaultPend != nil && s.vaultPend.key == vaultKey(r)
@@ -498,6 +501,13 @@ func (s *Server) vaultCode(w http.ResponseWriter, r *http.Request, code string, 
 	s.mu.Lock()
 	s.vaultPend, s.vaultKept = nil, st.KeptTrusted
 	s.mu.Unlock()
+	// The confirmed ticket also signs this phone in and unlocks chat by
+	// text, once, through the owner channel, which checks it with the
+	// vault process (P2-4f): no second code, and no codeless sign-in here.
+	// If it fails, the open page offers sign-in with the next code.
+	if o := s.getOwner(); o != nil {
+		s.proofSignIn(w, o, ticket)
+	}
 	http.Redirect(w, r, "/unlock/vault", http.StatusSeeOther)
 }
 

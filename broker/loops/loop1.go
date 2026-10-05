@@ -45,6 +45,23 @@ var classNS = map[change.Class]string{
 	change.ClassContext:   "context",
 }
 
+// supersedes is a namespace a class may also delete from: a compiled skill
+// replaces the procedure of its shape (CAP-5), and only that one.
+var supersedes = map[change.Class]string{
+	change.ClassSkill: "procedures",
+}
+
+// supersededBy reports whether path is procedures/p<shape>.json and the
+// candidate writes exactly one file, that shape's skills/k<shape>.json.
+func supersededBy(path string, files map[string][]byte) bool {
+	shape, ok := strings.CutPrefix(path, "procedures/p")
+	if !ok || !strings.HasSuffix(shape, ".json") || len(shape) == len(".json") || len(files) != 1 {
+		return false
+	}
+	_, ok = files["skills/k"+shape]
+	return ok
+}
+
 // Hypothesis is one thing Loop 1 might improve (LOOP-4). It names journal
 // identifiers (accounts and actions) and the tasks behind it, never a
 // held-out task.
@@ -80,12 +97,29 @@ type Handler interface {
 	Handles(Signal) bool
 }
 
+// Readier is a builder that can tell, without model calls, that a
+// hypothesis's evidence cannot yet yield a candidate (the skill compiler
+// needs enough owner-accepted runs). Loop 1 then offers no job for it, so
+// nothing is measured against the loop, and waits for more supporting
+// tasks (L10).
+type Readier interface {
+	Ready(b Brief) bool
+}
+
 // BySignal routes each hypothesis to the builder for its signal, such as
 // the skill compiler for repeated trajectories (CAP-5) and a model-backed
 // agent for the rest.
 type BySignal map[Signal]Builder
 
 func (b BySignal) Handles(s Signal) bool { return b[s] != nil }
+
+// Ready defers to the signal's builder when it is a Readier.
+func (b BySignal) Ready(br Brief) bool {
+	if r, ok := b[br.Hypothesis.Signal].(Readier); ok {
+		return r.Ready(br)
+	}
+	return true
+}
 
 func (b BySignal) Build(ctx context.Context, br Brief) (change.Candidate, error) {
 	x := b[br.Hypothesis.Signal]
@@ -269,11 +303,16 @@ func (l *Learn) Next(ctx context.Context, modelOK bool) (Job, bool) {
 		return Job{}, false
 	}
 	sel, _ := l.cfg.Builder.(Handler)
+	ready, _ := l.cfg.Builder.(Readier)
 	for _, h := range hyps {
 		if l.tried[h.Key] >= len(h.Tasks) || !l.mayAskLocked(h.Key) {
 			continue // tried with this much evidence already, or the owner was asked lately
 		}
 		if sel != nil && !sel.Handles(h.Signal) {
+			continue
+		}
+		if ready != nil && !ready.Ready(Brief{Hypothesis: h, Dev: ev.Dev}) {
+			l.tried[h.Key] = len(h.Tasks) // wait for more supporting tasks
 			continue
 		}
 		h := h
@@ -325,21 +364,34 @@ func (l *Learn) propose(ctx context.Context, h Hypothesis, ev Evidence) (change.
 	if err != nil {
 		return change.Report{}, err
 	}
-	ns := classNS[h.Class]
-	for p := range cand.Files {
-		if first, _, _ := strings.Cut(p, "/"); first != ns {
-			return change.Report{}, fmt.Errorf("%w: %s", ErrOutOfClass, h.Class)
-		}
-	}
-	for _, p := range cand.Delete {
-		if first, _, _ := strings.Cut(p, "/"); first != ns {
-			return change.Report{}, fmt.Errorf("%w: %s", ErrOutOfClass, h.Class)
-		}
+	if err := inClass(h.Class, cand); err != nil {
+		return change.Report{}, err
 	}
 	// Source, origin, and the public mark are the broker's, from the
 	// REV-5 labels of every input; the builder asserts none of them.
 	cand.Source, cand.Origin, cand.Public = change.Local, "loop1", public(h, ev.Dev)
 	return l.cfg.Pipeline.Propose(ctx, cand)
+}
+
+// inClass checks that a candidate writes only its class's namespace, and
+// deletes only there or in the namespace the class supersedes.
+func inClass(class change.Class, cand change.Candidate) error {
+	ns := classNS[class]
+	for p := range cand.Files {
+		if first, _, _ := strings.Cut(p, "/"); first != ns {
+			return fmt.Errorf("%w: %s", ErrOutOfClass, class)
+		}
+	}
+	for _, p := range cand.Delete {
+		first, _, _ := strings.Cut(p, "/")
+		if first == ns {
+			continue
+		}
+		if first != supersedes[class] || !supersededBy(p, cand.Files) {
+			return fmt.Errorf("%w: %s", ErrOutOfClass, class)
+		}
+	}
+	return nil
 }
 
 // value is a proposal's measured return: its held-out gain over the

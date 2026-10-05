@@ -50,6 +50,7 @@ type Operation struct {
 const (
 	VerbRead          = verb.Read
 	VerbDraft         = verb.Draft
+	VerbOrganize      = verb.Organize
 	VerbSend          = verb.Send
 	VerbPost          = verb.Post
 	VerbBuy           = verb.Buy

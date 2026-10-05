@@ -402,6 +402,21 @@ func (s *Server) unlock(w http.ResponseWriter, r *http.Request) {
 // remembered. The returned error is owner-facing text.
 func (s *Server) signIn(w http.ResponseWriter, o Owner, code string) error {
 	code = strings.TrimSpace(code)
+	if strings.HasPrefix(code, owner.UnlockProofPrefix) {
+		// Typed codes are never the vault unlock's sign-in proof, which
+		// only vaultCode presents (proofSignIn).
+		return errors.New("That code did not work. Each code works once; wait for the next one.")
+	}
+	return s.checkSignIn(w, o, code)
+}
+
+// proofSignIn signs in the phone that just unlocked the box, with the
+// vault process's one-time proof for that unlock (P2-4f).
+func (s *Server) proofSignIn(w http.ResponseWriter, o Owner, ticket string) error {
+	return s.checkSignIn(w, o, owner.UnlockProofPrefix+ticket)
+}
+
+func (s *Server) checkSignIn(w http.ResponseWriter, o Owner, code string) error {
 	// The lock count is read first, so a lock racing the sign-in can only
 	// sign the device out, never leave it signed in.
 	locks := o.LocalStatus().Locks

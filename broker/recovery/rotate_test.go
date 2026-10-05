@@ -43,7 +43,7 @@ func TestEveryCardSecretRotatesAloneAsATier4Action(t *testing.T) {
 		// The new card carries the rotated part; the rest are blank (the
 		// owner keeps those parts of the old card).
 		for _, q := range AllParts {
-			got := cardPart(nc, q)
+			got := cardPart(nc.Card, q)
 			if q == p && (got == "" || got == cardPart(x.card, q)) {
 				t.Errorf("rotating %s: not replaced", p)
 			}
@@ -58,7 +58,7 @@ func TestEveryCardSecretRotatesAloneAsATier4Action(t *testing.T) {
 		must(t, err)
 		switch p {
 		case PartWiFi, PartSetup, PartGrid:
-			if cardPart(stored, p) != cardPart(nc, p) {
+			if cardPart(stored, p) != cardPart(nc.Card, p) {
 				t.Errorf("rotating %s: vault card not updated", p)
 			}
 		case PartPassphrase:
@@ -92,7 +92,7 @@ func TestReplacingAFactorNeedsAFactorThatOpensTheDrive(t *testing.T) {
 	if _, err := x.rotate([]Part{PartRecovery}, Auth{Code: true, Local: true}, tpm); !errors.Is(err, ErrLostCardParts) {
 		t.Fatalf("lost card kept the passphrase: %v", err)
 	}
-	nc, err := x.rotate([]Part{PartRecovery, PartPassphrase}, Auth{Code: true, Local: true}, tpm)
+	nc, err := x.rotate([]Part{PartRecovery, PartPassphrase, PartSetup, PartGrid}, Auth{Code: true, Local: true}, tpm)
 	must(t, err)
 	nk, _ := ParseRecoveryKey(nc.RecoveryKey)
 	if _, err := vault.OpenSealed(x.b.VaultPath, x.b.KeysPath, Factor(nk)); err != nil {
@@ -168,7 +168,7 @@ func (f failing) KEK(s vault.Slot) ([]byte, error) {
 func TestAPartialRotationReturnsWhatIsInEffect(t *testing.T) {
 	x := newBox(t)
 	orig, _ := os.ReadFile(x.b.KeysPath)
-	p, err := BeginRotate(x.b, []Part{PartPassphrase, PartRecovery, PartWiFi}, Auth{Code: true, Local: true},
+	p, err := BeginRotate(x.b, []Part{PartPassphrase, PartRecovery, PartSetup, PartGrid, PartWiFi}, Auth{Code: true, Local: true},
 		Proof{Host: func() vault.Factor { return failing{Factor(x.rk), x.b.KeysPath, orig} }}, testGen, nil, t0)
 	must(t, err)
 	nc, err := p.Commit(x.b, p.answer, t0)
@@ -183,21 +183,37 @@ func TestAPartialRotationReturnsWhatIsInEffect(t *testing.T) {
 	}
 	// The unfinished rotation is recorded: no backup is sealed to the
 	// key it was replacing until a rotation covering it completes.
-	if parts, ok := RotationUnfinished(x.b); !ok || len(parts) != 2 {
+	// What the lost-card rotation owes: both slots, the setup secret and
+	// grid the lost card carries, and the re-encryption.
+	if parts, ok := RotationUnfinished(x.b); !ok || fmt.Sprint(parts) != "[passphrase recovery setup grid refresh]" {
 		t.Fatalf("unfinished rotation not recorded: %v %v", parts, ok)
 	}
 	var buf bytes.Buffer
 	if err := Backup(x.b, x.roots(), &buf, t0); !errors.Is(err, ErrRotationUnfinished) {
 		t.Fatalf("backup during an unfinished rotation: %v", err)
 	}
-	// A rotation that does not cover what is owed leaves the marker.
-	_, err = x.rotate([]Part{PartWiFi}, Auth{Code: true, Local: true}, Proof{})
+	// A rotation that leaves out an owed part is refused, so the lost
+	// card's grid and setup secret cannot stay valid (L3 F3 on #64).
+	for _, parts := range [][]Part{{PartWiFi}, {PartPassphrase, PartRecovery}} {
+		if _, err := x.rotate(parts, Auth{Code: true, Local: true}, Proof{Recovery: x.rk}); !errors.Is(err, ErrRotationOwed) {
+			t.Fatalf("rotating %v while parts are owed: %v", parts, err)
+		}
+	}
+	// Nor does Refresh pay what the slots owe.
+	_, err = Refresh(x.b, Auth{Code: true, Local: true}, x.rk, []byte(nc.VaultPassphrase), nil, t0)
 	must(t, err)
-	if _, ok := RotationUnfinished(x.b); !ok {
-		t.Fatal("a Wi-Fi rotation cleared the unfinished one")
+	if parts, _ := RotationUnfinished(x.b); fmt.Sprint(parts) != "[passphrase recovery setup grid]" {
+		t.Fatalf("after Refresh: %v", parts)
 	}
 	// Finishing it clears the marker, and backups resume under the new key.
-	nc, err = x.rotate([]Part{PartPassphrase, PartRecovery}, Auth{Code: true, Local: true}, Proof{Recovery: x.rk})
+	// The finishing rotation has the card, but shows the lost-card notes.
+	fin, err := BeginRotate(x.b, []Part{PartPassphrase, PartRecovery, PartSetup, PartGrid}, Auth{Code: true, Local: true}, Proof{Recovery: x.rk}, testGen, nil, t0)
+	must(t, err)
+	if !fin.Lost() {
+		t.Fatal("a rotation finishing a lost-card one is not shown as lost")
+	}
+	nc2, err := fin.Commit(x.b, fin.answer, t0)
+	nc = nc2
 	must(t, err)
 	if _, ok := RotationUnfinished(x.b); ok {
 		t.Fatal("marker left after the rotation finished")
@@ -240,7 +256,7 @@ func TestTheRotationMarkerPrecedesTheFirstSlotWrite(t *testing.T) {
 	x := newBox(t)
 	var armed, missing bool
 	proof := Proof{Host: func() vault.Factor { return markerCheck{Factor(x.rk), x.b, x.rk, &armed, &missing} }}
-	p, err := BeginRotate(x.b, []Part{PartPassphrase, PartRecovery}, Auth{Code: true, Local: true}, proof, testGen, nil, t0)
+	p, err := BeginRotate(x.b, []Part{PartPassphrase, PartRecovery, PartSetup, PartGrid}, Auth{Code: true, Local: true}, proof, testGen, nil, t0)
 	must(t, err)
 	armed = true
 	_, err = p.Commit(x.b, p.answer, t0)
@@ -312,7 +328,7 @@ func TestRotateEverythingWithTheRecoveryKey(t *testing.T) {
 			t.Fatalf("card formats a secret: %q", s)
 		}
 	}
-	if len(DoneNotes(AllParts, false)) != 4 || !strings.HasPrefix(DoneNotes(AllParts, true)[0], "Your lost card opens every backup") {
+	if len(DoneNotes(AllParts, false)) != 5 || !strings.HasPrefix(DoneNotes(AllParts, true)[0], "Your lost card still opens backups") {
 		t.Fatal("done page notes")
 	}
 }

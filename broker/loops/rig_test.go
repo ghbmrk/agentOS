@@ -183,12 +183,14 @@ func (r *rig) task(id, goal, account, action string, label string) {
 	}
 }
 
-// fixed is a deterministic "random" source for the pipeline.
+// fixed is a deterministic "random" source for the pipeline. These tests
+// rely on the dev/held-out layout its split key gives; the key was changed
+// when cases began splitting by goal (P3-1c), which re-laid the split.
 type fixed struct{}
 
 func (fixed) Read(b []byte) (int, error) {
 	for i := range b {
-		b[i] = byte(i*7 + 3)
+		b[i] = byte(i*7 + 5)
 	}
 	return len(b), nil
 }

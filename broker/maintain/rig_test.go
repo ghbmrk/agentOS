@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/attest"
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/loops"
 	"github.com/ghbmrk/agentos/broker/update"
@@ -236,7 +237,7 @@ func (r *rig) attestWith(k ed25519.PrivateKey) {
 	if res.Release == nil {
 		r.t.Fatal("no release to attest")
 	}
-	b, err := update.Attest(k, res.Release, update.Statement{Result: update.ResultPass, Channel: update.ChannelFast, HardwareClass: "n95-8g"})
+	b, err := update.Attest(k, res.Release, update.Statement{Result: update.ResultPass, Channel: update.ChannelFast, Hardware: attest.Hardware{Vendor: "geekom", Model: "air12_lite", Firmware: attest.Unlisted}})
 	r.must(err)
 	r.atts = append(r.atts, b)
 }
