@@ -383,3 +383,179 @@ func TestCAP8NoRoomSaysWhatToDo(t *testing.T) {
 		t.Fatalf("refusal = %v", err)
 	}
 }
+
+// interleave runs before between the tools' checks and the manager's
+// Exec, as another machine's call would.
+type interleave struct {
+	*vm.Manager
+	before func()
+}
+
+func (i interleave) Exec(ctx context.Context, id string, c vm.Command, timeout time.Duration) (vm.ExecResult, error) {
+	i.before()
+	return i.Manager.Exec(ctx, id, c, timeout)
+}
+
+// A private machine's write that lands between a public machine's checks
+// and its command does not reach the public machine: the label is checked
+// again under the worker's lock (L3 MUST-2 on #146).
+func TestREV5PrivateWriteBetweenCheckAndCommandIsNotRead(t *testing.T) {
+	r := newRig(t, 8000)
+	pub := r.agent("agent", vm.Public)
+	if _, err := r.m.Fork(context.Background(), "agent", []string{"agent-priv"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.m.RaiseLabel("agent-priv", vm.Private); err != nil {
+		t.Fatal(err)
+	}
+	r.must("agent", toolCreate, m{"name": "shared"}, nil)
+	raced := false
+	r.tools.M = interleave{r.m, func() {
+		if raced {
+			return
+		}
+		raced = true
+		r.tools.M = r.m // the private machine's own call goes straight through
+		r.must("agent-priv", toolWrite, m{"name": "shared", "path": "/out", "content": "owner data"}, nil)
+	}}
+	var out struct{ Stdout string }
+	err := r.call("agent", toolExec, m{"name": "shared", "argv": []string{"cat", "/out"}}, &out)
+	if !raced {
+		t.Fatal("the interleaving hook did not run")
+	}
+	if err == nil || !strings.Contains(err.Error(), "private") || strings.Contains(out.Stdout, "owner data") {
+		t.Fatalf("public machine's command after a private write: %v, stdout %q", err, out.Stdout)
+	}
+	if w, _ := r.m.Get(workerID(pub.Lineage, "shared")); w.Label != vm.Private {
+		t.Fatalf("worker is %v", w.Label)
+	}
+}
+
+// record keeps the last command the tools handed the manager.
+type record struct {
+	*vm.Manager
+	cmd     vm.Command
+	timeout time.Duration
+}
+
+func (r *record) Exec(ctx context.Context, id string, c vm.Command, timeout time.Duration) (vm.ExecResult, error) {
+	r.cmd, r.timeout = c, timeout
+	return r.Manager.Exec(ctx, id, c, timeout)
+}
+
+// The bounds hold exactly where they say: timeouts clamp (overflow
+// included), output is capped by default, paths follow "--", and argv
+// limits sit at their values (M15, M16, M18, M20, M21, M23 on #146).
+func TestCAP8CommandsAreBoundedExactly(t *testing.T) {
+	r := newRig(t, 8000)
+	r.agent("agent", vm.Public)
+	rec := &record{Manager: r.m}
+	r.tools.M = rec
+	r.must("agent", toolCreate, m{"name": "w"}, nil)
+	for _, c := range []struct {
+		args m
+		want time.Duration
+	}{
+		{m{}, DefaultTimeout},
+		{m{"timeout_seconds": 2}, 2 * time.Second},
+		{m{"timeout_seconds": 3600}, MaxTimeout},
+		{m{"timeout_seconds": 1e12}, MaxTimeout},
+	} {
+		c.args["name"], c.args["argv"] = "w", []string{"echo"}
+		r.must("agent", toolExec, c.args, nil)
+		if rec.timeout != c.want {
+			t.Errorf("timeout %v ran with %v, want %v", c.args["timeout_seconds"], rec.timeout, c.want)
+		}
+		if rec.cmd.MaxOutput != MaxOutput {
+			t.Errorf("exec output cap %d, want %d", rec.cmd.MaxOutput, MaxOutput)
+		}
+	}
+	r.call("agent", toolRead, m{"name": "w", "path": "/-n"}, nil)
+	if a := rec.cmd.Argv; len(a) != 3 || a[0] != "cat" || a[1] != "--" || a[2] != "/-n" {
+		t.Errorf("read ran %q", a)
+	}
+	r.must("agent", toolWrite, m{"name": "w", "path": "/-a", "content": "x"}, nil)
+	if a := rec.cmd.Argv; len(a) != 3 || a[0] != "tee" || a[1] != "--" || a[2] != "/-a" {
+		t.Errorf("write ran %q", a)
+	}
+
+	argv := func(n, size int) []string {
+		a := make([]string, n)
+		for i := range a {
+			a[i] = "x"
+		}
+		a[0] = strings.Repeat("x", size-(n-1))
+		return a
+	}
+	r.must("agent", toolExec, m{"name": "w", "argv": argv(MaxArgs, MaxArgs)}, nil)
+	r.must("agent", toolExec, m{"name": "w", "argv": argv(1, MaxArgBytes)}, nil)
+	for _, c := range []struct {
+		argv []string
+		want string
+	}{
+		{argv(MaxArgs+1, MaxArgs+1), fmt.Sprintf("argv needs 1 to %d entries", MaxArgs)},
+		{argv(1, MaxArgBytes+1), fmt.Sprintf("at most %d bytes", MaxArgBytes)},
+	} {
+		if err := r.call("agent", toolExec, m{"name": "w", "argv": c.argv}, nil); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("argv of %d entries: %v, want %q", len(c.argv), err, c.want)
+		}
+	}
+}
+
+// A fork stops at the per-lineage cap, counting the forks it would make
+// (M12 on #146).
+func TestCAP8ForkStopsAtTheWorkerCap(t *testing.T) {
+	r := newRig(t, 16000)
+	r.agent("agent", vm.Public)
+	for i := range MaxWorkers - 1 {
+		r.must("agent", toolCreate, m{"name": fmt.Sprintf("w%d", i), "mem_mb": MinMemMB}, nil)
+	}
+	err := r.call("agent", toolFork, m{"name": "w0", "into": []string{"f1", "f2"}}, nil)
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("at most %d workers", MaxWorkers)) {
+		t.Fatalf("fork past the cap: %v", err)
+	}
+	r.must("agent", toolFork, m{"name": "w0", "into": []string{"f1"}}, nil)
+}
+
+// A diff returns at most MaxChanges entries and says how many there were
+// (M28 on #146).
+func TestCAP8DiffIsCapped(t *testing.T) {
+	r := newRig(t, 8000)
+	r.agent("agent", vm.Public)
+	r.must("agent", toolCreate, m{"name": "w"}, nil)
+	var a, b struct{ Snapshot string }
+	r.must("agent", toolCkpt, m{"name": "w"}, &a)
+	for i := range MaxChanges + 1 {
+		r.must("agent", toolWrite, m{"name": "w", "path": fmt.Sprintf("/f%d", i), "content": "x"}, nil)
+	}
+	r.must("agent", toolCkpt, m{"name": "w"}, &b)
+	var d struct {
+		Changes []struct{ Path string }
+		Total   int
+	}
+	r.must("agent", toolDiff, m{"a": a.Snapshot, "b": b.Snapshot}, &d)
+	if len(d.Changes) != MaxChanges || d.Total != MaxChanges+1 {
+		t.Fatalf("diff = %d changes, total %d; want %d, %d", len(d.Changes), d.Total, MaxChanges, MaxChanges+1)
+	}
+}
+
+// The tools trust a machine's own record, not the lineage they are told:
+// a caller naming another lineage is refused (M4), and a worker whose short
+// ID matches but whose record holds another lineage is not the caller's
+// (M5 on #146).
+func TestCAP8LineageComesFromTheMachinesRecord(t *testing.T) {
+	r := newRig(t, 8000)
+	a := r.agent("a", vm.Public)
+	b := r.agent("b", vm.Public)
+	r.must("b", toolCreate, m{"name": "w"}, nil)
+	if _, _, err := r.tools.Call(context.Background(), "a", b.Lineage, toolList, nil); err == nil || err.Error() != "broker: unknown machine" {
+		t.Fatalf("a caller naming another lineage: %v", err)
+	}
+	// As if b's lineage hashed like a's: a worker under a's ID, in b's lineage.
+	if _, err := r.m.CreateWorker(context.Background(), workerID(a.Lineage, "x"), b.Lineage, vm.Spec{Image: "base", Class: admission.Experiment, MemMB: MinMemMB}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.call("a", toolExec, m{"name": "x", "argv": []string{"echo"}}, nil); err == nil || err.Error() != errNoWorker.Error() {
+		t.Fatalf("a reached a worker recorded in b's lineage: %v", err)
+	}
+}

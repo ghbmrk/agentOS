@@ -500,3 +500,92 @@ func TestCappedKeepsTheFirstBytes(t *testing.T) {
 		t.Fatal("uncapped writer dropped output")
 	}
 }
+
+// worker starts an agent machine and a worker in its lineage.
+func (r *rig) worker(id string) vm.Machine {
+	r.t.Helper()
+	r.create("agent", admission.Experiment)
+	a, err := r.m.Get("agent")
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	if _, err := r.m.CreateWorker(context.Background(), id, a.Lineage, vm.Spec{Image: "base", Class: admission.Experiment, MemMB: 256, Argv: []string{"/guest", "serve"}}); err != nil {
+		r.t.Fatal(err)
+	}
+	return a
+}
+
+// lingering reports whether a linger command still runs in machine id: its
+// file still grows.
+func (r *rig) lingering(id string) bool {
+	r.t.Helper()
+	n := len(r.ask(id, "read", "/work/linger"))
+	time.Sleep(300 * time.Millisecond)
+	return len(r.ask(id, "read", "/work/linger")) != n
+}
+
+// A command that ignores signals and holds stdout past its timeout ends:
+// Exec returns in bounded time and the process inside the sandbox is gone
+// (L3 MUST-1 on #146).
+func TestIntegrationWorkerExecOutlivesTimeout(t *testing.T) {
+	r := newRig(t, 4096)
+	r.worker("wk-1")
+	start := time.Now()
+	res, err := r.m.Exec(context.Background(), "wk-1", vm.Command{Argv: []string{"/guest", "linger"}}, time.Second)
+	d := time.Since(start)
+	t.Logf("timed-out exec returned after %v", d.Round(time.Millisecond))
+	if d > time.Second+ExecWaitDelay+3*time.Second {
+		t.Fatalf("exec returned after %v", d)
+	}
+	if err != nil || !res.TimedOut {
+		t.Fatalf("exec = %+v, %v; want a timed-out result", res, err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for r.lingering("wk-1") {
+		if time.Now().After(deadline) {
+			t.Fatal("the timed-out command still runs in the worker")
+		}
+	}
+}
+
+// Erasure during such a command does not wait for it, and the command does
+// not survive it (CAP-3, F1; L3 MUST-1 on #146).
+func TestIntegrationForgetSinceDuringWorkerExec(t *testing.T) {
+	r := newRig(t, 4096)
+	a := r.worker("wk-1")
+	since := time.Now()
+	done := make(chan error, 1)
+	go func() {
+		_, err := r.m.Exec(context.Background(), "wk-1", vm.Command{Argv: []string{"/guest", "linger"}}, 10*time.Minute)
+		done <- err
+	}()
+	deadline := time.Now().Add(20 * time.Second)
+	for !strings.HasPrefix(r.ask("wk-1", "read", "/work/linger"), ".") {
+		if time.Now().After(deadline) {
+			t.Fatal("the command never started")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	start := time.Now()
+	if err := r.m.ForgetSince(context.Background(), a.Lineage, since); err != nil {
+		t.Fatal(err)
+	}
+	d := time.Since(start)
+	t.Logf("ForgetSince during a command took %v", d.Round(time.Millisecond))
+	if d > ExecWaitDelay+10*time.Second {
+		t.Fatalf("ForgetSince took %v", d)
+	}
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("the erased command reported success")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the command's Exec never returned")
+	}
+	if w, err := r.m.Get("wk-1"); err == nil && w.State == vm.Running {
+		if got := r.ask("wk-1", "read", "/work/linger"); !strings.HasPrefix(got, "ERR") && r.lingering("wk-1") {
+			t.Fatal("the command survived erasure")
+		}
+	}
+}

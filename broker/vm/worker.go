@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 )
@@ -29,7 +30,20 @@ type Command struct {
 	// MaxOutput caps each of stdout and stderr; output past it is dropped
 	// and Truncated set.
 	MaxOutput int
+	// As is the data label of the machine the command runs for. Under the
+	// worker's lock, Exec raises the worker to it before the command
+	// writes anything (A14), and refuses a worker labelled above it, whose
+	// output the caller may not read (REV-5).
+	As Label
 }
+
+// ErrLabel refuses a command whose caller may not read the worker.
+var ErrLabel = errors.New("vm: that worker holds private data; a public machine cannot read it")
+
+// ExecGrace is how long past its timeout Exec waits for a runtime that
+// does not end a command, before it gives up on the command and lets the
+// worker's lock go. A var so tests can shorten it.
+var ExecGrace = 15 * time.Second
 
 // ExecResult is a finished command. A command that ran and exited
 // non-zero is a result, not an error.
@@ -96,11 +110,20 @@ func (m *Manager) Exec(ctx context.Context, id string, c Command, timeout time.D
 	if mc.State != Running {
 		return ExecResult{}, fmt.Errorf("%w: %s is %s", ErrState, id, mc.State)
 	}
+	if c.As > mc.Label {
+		mc.Label = c.As
+		if err := m.saveMachine(mc); err != nil {
+			return ExecResult{}, err
+		}
+	}
+	if mc.Label > c.As {
+		return ExecResult{}, ErrLabel
+	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	mc.execCancel.Store(&cancel)
 	defer mc.execCancel.Store(nil)
-	r, err := ex.Exec(ctx, id, c)
+	r, err := m.awaitExec(ctx, ex, id, c)
 	if err != nil && ctx.Err() == context.Canceled {
 		return ExecResult{}, fmt.Errorf("vm: %s: command ended before it finished", id)
 	}
@@ -108,6 +131,36 @@ func (m *Manager) Exec(ctx context.Context, id string, c Command, timeout time.D
 		return ExecResult{TimedOut: true, Stdout: r.Stdout, Stderr: r.Stderr, Truncated: r.Truncated, ExitCode: -1}, nil
 	}
 	return r, err
+}
+
+// awaitExec runs the command and returns when the runtime does, or
+// ExecGrace after ctx ends if the runtime has not: a runtime that ignores
+// cancellation must not hold the worker's lock, and with it erasure
+// (F1), past that bound. The abandoned call finishes on its own.
+func (m *Manager) awaitExec(ctx context.Context, ex Execer, id string, c Command) (ExecResult, error) {
+	type done struct {
+		r   ExecResult
+		err error
+	}
+	ch := make(chan done, 1)
+	go func() {
+		r, err := ex.Exec(ctx, id, c)
+		ch <- done{r, err}
+	}()
+	select {
+	case d := <-ch:
+		return d.r, d.err
+	case <-ctx.Done():
+	}
+	t := time.NewTimer(ExecGrace)
+	defer t.Stop()
+	select {
+	case d := <-ch:
+		return d.r, d.err
+	case <-t.C:
+		log.Printf("vm: %s: the runtime did not end a cancelled command; abandoning it", id)
+		return ExecResult{}, ctx.Err()
+	}
 }
 
 // Park checkpoints a running worker, memory included, and stops it,

@@ -17,11 +17,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/vm"
 	"github.com/ghbmrk/agentos/broker/vm/overlay"
@@ -149,17 +152,45 @@ func (r *Runtime) Checkpoint(ctx context.Context, id, image string) error {
 	return r.run(ctx, "checkpoint", "--leave-running", "--image-path="+image, cid(id))
 }
 
+// ExecWaitDelay bounds how long Exec waits, once its context ends, for the
+// command's output to close: a command inside the sandbox can outlive the
+// host's runsc exec and hold its stdio open (L3 MUST-1 on #146).
+const ExecWaitDelay = 3 * time.Second
+
 // Exec runs a command in a running sandbox, as root in the guest from its
 // root directory, with c.Stdin as input (CAP-8). The command's arguments
 // follow the container ID, past runsc's own flags, so none is read as a
 // flag. A non-zero exit is a result; each output stream is capped.
+//
+// When ctx ends, the host runsc exec is killed and so is the command inside
+// the sandbox (runsc kill by the pid runsc wrote); a failed kill is only
+// logged. Exec returns within ExecWaitDelay of ctx ending whatever the
+// command does: what it started may run on inside the worker until the
+// worker is rolled back, parked or destroyed.
 func (r *Runtime) Exec(ctx context.Context, id string, c vm.Command) (vm.ExecResult, error) {
-	cmd := r.cmd(ctx, append([]string{"exec", "--cwd", "/", "--user", "0:0", cid(id)}, c.Argv...)...)
+	if err := os.MkdirAll(r.StateDir, 0o700); err != nil {
+		return vm.ExecResult{}, err
+	}
+	pf, err := os.CreateTemp(r.StateDir, "exec-*.pid")
+	if err != nil {
+		return vm.ExecResult{}, err
+	}
+	pidFile := pf.Name()
+	pf.Close()
+	defer os.Remove(pidFile)
+	cmd := r.cmd(ctx, append([]string{"exec", "--cwd", "/", "--user", "0:0", "--internal-pid-file", pidFile, cid(id)}, c.Argv...)...)
 	cmd.Stdin = bytes.NewReader(c.Stdin)
 	stdout, stderr := &capped{max: c.MaxOutput}, &capped{max: c.MaxOutput}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
-	err := cmd.Run()
-	res := vm.ExecResult{Stdout: stdout.b.Bytes(), Stderr: stderr.b.Bytes(), Truncated: stdout.over || stderr.over}
+	cmd.WaitDelay = ExecWaitDelay
+	cmd.Cancel = func() error {
+		// Read the pid now: the deferred Remove may run before the kill.
+		b, _ := os.ReadFile(pidFile)
+		go r.killExec(id, strings.TrimSpace(string(b)))
+		return cmd.Process.Kill()
+	}
+	err = cmd.Run()
+	res := vm.ExecResult{Stdout: stdout.bytes(), Stderr: stderr.bytes(), Truncated: stdout.truncated() || stderr.truncated()}
 	var exit *exec.ExitError
 	if errors.As(err, &exit) && ctx.Err() == nil {
 		res.ExitCode = exit.ExitCode()
@@ -168,14 +199,46 @@ func (r *Runtime) Exec(ctx context.Context, id string, c vm.Command) (vm.ExecRes
 	return res, err
 }
 
+// killExec kills the command an Exec started inside the sandbox, by the
+// in-sandbox pid runsc wrote. Best effort and bounded: it runs off the
+// caller's path, and a failure is logged.
+func (r *Runtime) killExec(id, pid string) {
+	if pid == "" {
+		log.Printf("gvisor: %s: no pid to kill for a cancelled command", id)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := r.run(ctx, "kill", "--pid", pid, cid(id), "KILL"); err != nil {
+		log.Printf("gvisor: %s: killing cancelled command %s: %v", id, pid, err)
+	}
+}
+
 // capped keeps the first max bytes written (all of them when max is 0).
+// It is safe for concurrent use: after ExecWaitDelay, Exec reads it while
+// the copy may still be finishing.
 type capped struct {
+	mu   sync.Mutex
 	b    bytes.Buffer
 	max  int
 	over bool
 }
 
+func (c *capped) bytes() []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return bytes.Clone(c.b.Bytes())
+}
+
+func (c *capped) truncated() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.over
+}
+
 func (c *capped) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.max > 0 {
 		if room := c.max - c.b.Len(); len(p) > room {
 			c.b.Write(p[:max(room, 0)])

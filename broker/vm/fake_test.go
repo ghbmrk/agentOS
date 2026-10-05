@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
 )
@@ -224,7 +225,8 @@ func (e *env) upper(id, rel string) string {
 
 // Exec runs a few commands against the machine's upper layer: "echo"
 // prints its arguments, "write PATH" stores stdin, "cat PATH" prints the
-// file, "sleep" waits for the context, and "exit N" exits N.
+// file, "sleep" waits for the context, "hang" ignores it for a second, and
+// "exit N" exits N.
 func (f *fakeRuntime) Exec(ctx context.Context, id string, c Command) (ExecResult, error) {
 	f.mu.Lock()
 	l, ok := f.running[id]
@@ -258,6 +260,9 @@ func (f *fakeRuntime) Exec(ctx context.Context, id string, c Command) (ExecResul
 	case "sleep":
 		<-ctx.Done()
 		return ExecResult{ExitCode: -1}, ctx.Err()
+	case "hang": // a runtime that ignores cancellation
+		time.Sleep(time.Second)
+		return ExecResult{}, ctx.Err()
 	case "exit":
 		n, _ := strconv.Atoi(a[1])
 		return ExecResult{ExitCode: n}, nil

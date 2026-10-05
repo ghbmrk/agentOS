@@ -243,18 +243,6 @@ func readable(c caller, l vm.Label) error {
 	return nil
 }
 
-// writing raises a public worker to private before a private machine puts
-// anything into it (A14), then checks the caller may read the result.
-func (t *Tools) writing(c caller, w vm.Machine) error {
-	if c.label > w.Label {
-		if err := t.M.RaiseLabel(w.ID, c.label); err != nil {
-			return err
-		}
-		w.Label = c.label
-	}
-	return readable(c, w.Label)
-}
-
 func (t *Tools) count(lineage string) int {
 	n := 0
 	prefix := workerID(lineage, "")
@@ -316,10 +304,11 @@ func (t *Tools) run(ctx context.Context, c caller, name string, cmd vm.Command, 
 	if err != nil {
 		return execOut{}, err
 	}
-	// A command both writes into the worker and returns what it sees.
-	if err := t.writing(c, w); err != nil {
-		return execOut{}, err
-	}
+	// A command both writes into the worker and returns what it sees:
+	// Exec raises the worker to the caller's label and checks the caller
+	// may read it under the worker's lock, so no other machine's raise
+	// lands between the check and the command (A14, REV-5).
+	cmd.As = c.label
 	if cmd.MaxOutput == 0 {
 		cmd.MaxOutput = MaxOutput
 	}
@@ -362,7 +351,11 @@ func (t *Tools) exec(ctx context.Context, c caller, raw json.RawMessage) (any, e
 	}
 	timeout := DefaultTimeout
 	if a.Timeout > 0 {
-		timeout = min(time.Duration(a.Timeout*float64(time.Second)), MaxTimeout)
+		// Clamped as a float: a huge value would overflow the conversion.
+		timeout = MaxTimeout
+		if a.Timeout < MaxTimeout.Seconds() {
+			timeout = time.Duration(a.Timeout * float64(time.Second))
+		}
 	}
 	return t.run(ctx, c, a.Name, vm.Command{Argv: a.Argv, Stdin: []byte(a.Stdin)}, timeout)
 }

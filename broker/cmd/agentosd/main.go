@@ -577,8 +577,6 @@ func replayFits(capacityMB, headroomMB, agentMB, replayMB int64) error {
 	return nil
 }
 
-// agentSpec is how the owner's agent machine starts, from the image flags
-// and the guest rig's launch file.
 // workerTools serves the worker-machine tools (CAP-8) on the live guest
 // plane only: replay and builder machines never get them. Nil, offering
 // none, when no worker image is registered.
@@ -609,6 +607,8 @@ func reapWorkers(ctx context.Context, wt *workers.Tools) {
 	}
 }
 
+// agentSpec is how the owner's agent machine starts, from the image flags
+// and the guest rig's launch file.
 func agentSpec(imgs images, image, launch string, memMB int64) (vm.Spec, error) {
 	if image == "" {
 		return vm.Spec{}, errors.New("-agent-image is empty")

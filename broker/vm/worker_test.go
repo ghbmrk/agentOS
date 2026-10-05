@@ -39,22 +39,22 @@ func TestCAP8WorkerJoinsTheLineageAndRunsCommandsWithoutServices(t *testing.T) {
 		}
 	}
 
-	_, err = e.m.Exec(bg, "wk-a1", Command{Argv: []string{"write", "out/result"}, Stdin: []byte("42")}, time.Second)
+	_, err = e.m.Exec(bg, "wk-a1", Command{As: Private, Argv: []string{"write", "out/result"}, Stdin: []byte("42")}, time.Second)
 	must(t, err)
-	r, err := e.m.Exec(bg, "wk-a1", Command{Argv: []string{"cat", "out/result"}}, time.Second)
+	r, err := e.m.Exec(bg, "wk-a1", Command{As: Private, Argv: []string{"cat", "out/result"}}, time.Second)
 	must(t, err)
 	if string(r.Stdout) != "42" || r.ExitCode != 0 {
 		t.Fatalf("cat = %+v", r)
 	}
-	r, err = e.m.Exec(bg, "wk-a1", Command{Argv: []string{"exit", "3"}}, time.Second)
+	r, err = e.m.Exec(bg, "wk-a1", Command{As: Private, Argv: []string{"exit", "3"}}, time.Second)
 	if err != nil || r.ExitCode != 3 {
 		t.Fatalf("exit 3 = %+v, %v; want a result with code 3", r, err)
 	}
-	r, err = e.m.Exec(bg, "wk-a1", Command{Argv: []string{"echo", strings.Repeat("x", 100)}, MaxOutput: 10}, time.Second)
+	r, err = e.m.Exec(bg, "wk-a1", Command{As: Private, Argv: []string{"echo", strings.Repeat("x", 100)}, MaxOutput: 10}, time.Second)
 	if err != nil || len(r.Stdout) != 10 || !r.Truncated {
 		t.Fatalf("capped output = %d bytes, truncated %v, %v", len(r.Stdout), r.Truncated, err)
 	}
-	r, err = e.m.Exec(bg, "wk-a1", Command{Argv: []string{"sleep"}}, 20*time.Millisecond)
+	r, err = e.m.Exec(bg, "wk-a1", Command{As: Private, Argv: []string{"sleep"}}, 20*time.Millisecond)
 	if err != nil || !r.TimedOut {
 		t.Fatalf("sleep past timeout = %+v, %v; want timed out", r, err)
 	}
@@ -123,7 +123,7 @@ func TestCAP3ForgetSinceReachesTheLineagesWorkers(t *testing.T) {
 	must(t, err)
 	since := time.Now()
 	time.Sleep(5 * time.Millisecond)
-	_, err = e.m.Exec(bg, "wk-a", Command{Argv: []string{"write", "secret"}, Stdin: []byte("deleted record")}, time.Second)
+	_, err = e.m.Exec(bg, "wk-a", Command{As: Private, Argv: []string{"write", "secret"}, Stdin: []byte("deleted record")}, time.Second)
 	must(t, err)
 	_, err = e.m.Step(bg, "wk-a")
 	must(t, err)
@@ -143,7 +143,7 @@ func TestCAP3ForgetSinceDoesNotWaitForAWorkersCommand(t *testing.T) {
 	must(t, err)
 	since := time.Now()
 	time.Sleep(5 * time.Millisecond)
-	_, err = e.m.Exec(bg, "wk-a", Command{Argv: []string{"write", "secret"}, Stdin: []byte("deleted record")}, time.Second)
+	_, err = e.m.Exec(bg, "wk-a", Command{As: Private, Argv: []string{"write", "secret"}, Stdin: []byte("deleted record")}, time.Second)
 	must(t, err)
 	for _, op := range []struct {
 		name string
@@ -154,7 +154,7 @@ func TestCAP3ForgetSinceDoesNotWaitForAWorkersCommand(t *testing.T) {
 	} {
 		done := make(chan error, 1)
 		go func() {
-			_, err := e.m.Exec(bg, "wk-a", Command{Argv: []string{"sleep"}}, 10*time.Minute)
+			_, err := e.m.Exec(bg, "wk-a", Command{As: Private, Argv: []string{"sleep"}}, 10*time.Minute)
 			done <- err
 		}()
 		time.Sleep(20 * time.Millisecond) // the command holds the worker
@@ -183,7 +183,7 @@ func TestCAP3WorkerMadeAfterSinceComesBackEmpty(t *testing.T) {
 	time.Sleep(5 * time.Millisecond)
 	_, err := e.m.CreateWorker(bg, "wk-new", agent.Lineage, workerSpec(Private))
 	must(t, err)
-	_, err = e.m.Exec(bg, "wk-new", Command{Argv: []string{"write", "secret"}, Stdin: []byte("deleted record")}, time.Second)
+	_, err = e.m.Exec(bg, "wk-new", Command{Argv: []string{"write", "secret"}, Stdin: []byte("deleted record"), As: Private}, time.Second)
 	must(t, err)
 	must(t, e.m.ForgetSince(bg, agent.Lineage, since))
 	if got := e.guestRead("wk-new", "secret"); got != "" {
@@ -225,5 +225,79 @@ func TestCAP8ParkedWorkerFreesMemoryAndRevivesByRollback(t *testing.T) {
 	}
 	if got := e.guestRead("wk-a", "f"); got != "kept" {
 		t.Fatalf("revived worker file = %q", got)
+	}
+}
+
+// REV-5 and A14 under the worker's lock: a command raises the worker to its
+// caller's label before it runs, and a caller labelled below the worker is
+// refused before the runtime runs anything (L3 MUST-2 on #146).
+func TestREV5ExecRaisesAndChecksUnderTheWorkersLock(t *testing.T) {
+	e := newEnv(t, 4096)
+	agent := e.create("agent", admission.Experiment, 500)
+	_, err := e.m.CreateWorker(bg, "wk-a", agent.Lineage, workerSpec(Public))
+	must(t, err)
+	_, err = e.m.Exec(bg, "wk-a", Command{As: Private, Argv: []string{"write", "secret"}, Stdin: []byte("owner data")}, time.Second)
+	must(t, err)
+	if l, _ := e.m.Label("wk-a"); l != Private {
+		t.Fatalf("worker written for a private machine is %v", l)
+	}
+	if _, err := e.m.Exec(bg, "wk-a", Command{As: Public, Argv: []string{"write", "probe"}}, time.Second); !errors.Is(err, ErrLabel) {
+		t.Fatalf("public caller on a private worker: %v, want ErrLabel", err)
+	}
+	if got := e.guestRead("wk-a", "probe"); got != "" {
+		t.Fatal("the refused command ran")
+	}
+	// The raise is recorded: it survives a reopen.
+	e.open()
+	if l, _ := e.m.Label("wk-a"); l != Private {
+		t.Fatalf("after reopen the worker is %v", l)
+	}
+}
+
+// A runtime that ignores cancellation holds the worker for at most
+// ExecGrace past the timeout, and erasure gets the worker after it (L3
+// MUST-1 on #146; F1).
+func TestCAP8ExecReturnsWhenTheRuntimeIgnoresCancellation(t *testing.T) {
+	old := ExecGrace
+	ExecGrace = 50 * time.Millisecond
+	t.Cleanup(func() { ExecGrace = old })
+	e := newEnv(t, 4096)
+	agent := e.create("agent", admission.Experiment, 500)
+	_, err := e.m.CreateWorker(bg, "wk-a", agent.Lineage, workerSpec(Public))
+	must(t, err)
+	start := time.Now()
+	r, err := e.m.Exec(bg, "wk-a", Command{Argv: []string{"hang"}}, 20*time.Millisecond)
+	if d := time.Since(start); d > 500*time.Millisecond {
+		t.Fatalf("exec returned after %v", d)
+	}
+	if err != nil || !r.TimedOut {
+		t.Fatalf("exec = %+v, %v; want a timed-out result", r, err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := e.m.Exec(bg, "wk-a", Command{Argv: []string{"hang"}}, time.Minute)
+		done <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+	start = time.Now()
+	must(t, e.m.ForgetSince(bg, agent.Lineage, start.Add(-time.Hour)))
+	if d := time.Since(start); d > 500*time.Millisecond {
+		t.Fatalf("ForgetSince waited %v behind a hung runtime", d)
+	}
+	if err := <-done; err == nil {
+		t.Fatal("the abandoned command reported success")
+	}
+}
+
+// A worker that is not running takes no command (M33).
+func TestCAP8ExecNeedsARunningWorker(t *testing.T) {
+	e := newEnv(t, 4096)
+	agent := e.create("agent", admission.Experiment, 500)
+	_, err := e.m.CreateWorker(bg, "wk-a", agent.Lineage, workerSpec(Public))
+	must(t, err)
+	_, err = e.m.Park(bg, "wk-a")
+	must(t, err)
+	if _, err := e.m.Exec(bg, "wk-a", Command{Argv: []string{"echo"}}, time.Second); !errors.Is(err, ErrState) {
+		t.Fatalf("exec on a parked worker: %v, want ErrState", err)
 	}
 }
