@@ -53,7 +53,7 @@ func projectStopsAtItsHardLimit(t *testing.T, root string) {
 	// CAP_SYS_RESOURCE, which ext4 lets past a hard limit.
 	must(t, os.MkdirAll(filepath.Join(d, "upper", "deep"), 0o755))
 	werr := Enforced(func() error { return fill(filepath.Join(d, "upper", "deep", "big"), 4<<20) })
-	if !errors.Is(werr, syscall.EDQUOT) {
+	if !overLimit(werr) {
 		t.Fatalf("wrote 4 MiB under a 1 MiB quota: %v", werr)
 	}
 	u, err := q.Usage(4242)
@@ -73,7 +73,7 @@ func projectStopsAtItsHardLimit(t *testing.T, root string) {
 		}
 		return err
 	})
-	if !errors.Is(ierr, syscall.EDQUOT) {
+	if !overLimit(ierr) {
 		t.Fatalf("made 20 files under a 10-inode quota: %v", ierr)
 	}
 	// Cleared, the project writes freely.
@@ -110,13 +110,24 @@ func TestTagTakesInATreeWrittenUntagged(t *testing.T) {
 			t.Fatalf("tagged tree's use not counted: %+v", u)
 		}
 		werr := Enforced(func() error { return fill(filepath.Join(d, "upper", "deep", "new"), 2<<20) })
-		if !errors.Is(werr, syscall.EDQUOT) {
+		if !overLimit(werr) {
 			t.Fatalf("wrote 2 MiB more under a 1 MiB quota holding 512 KiB: %v", werr)
+		}
+		if u, err := q.Usage(4250); err != nil || u.Bytes > 1<<20 {
+			t.Fatalf("usage %+v (%v) past the limit", u, err)
 		}
 		if err := q.Tag(d, 0); err == nil {
 			t.Fatal("tagged a tree with project 0")
 		}
 	})
+}
+
+// overLimit reports whether err is a write refused at a project's limit:
+// EDQUOT on ext4, ENOSPC on XFS, which reports a project (directory tree)
+// quota as a full file system. Each file system here is far larger than
+// the limits, so ENOSPC is the limit, and the usage checks pin it.
+func overLimit(err error) bool {
+	return errors.Is(err, syscall.EDQUOT) || errors.Is(err, syscall.ENOSPC)
 }
 
 // fill writes n bytes to path, synced as it goes so blocks are allocated.

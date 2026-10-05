@@ -1,8 +1,8 @@
 // Package quota sets hard disk quotas on directory trees with Linux project
 // quotas (SPEC RES-4): every file created under a directory tagged with a
 // project ID counts against that project's limits, and a write past them
-// fails with EDQUOT. The file system must be ext4 or XFS mounted with
-// project quotas on (prjquota).
+// fails (EDQUOT on ext4, ENOSPC on XFS). The file system must be ext4 or
+// XFS mounted with project quotas on (prjquota).
 //
 // ext4 lets a writer holding CAP_SYS_RESOURCE past a hard limit, and
 // agentosd runs as root with it. So whatever writes into a limited tree on
