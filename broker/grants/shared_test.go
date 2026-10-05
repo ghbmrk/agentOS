@@ -1,11 +1,15 @@
 package grants
 
-// REQ: CH-15, CAP-10
+// REQ: CH-15, CAP-10, OP-4
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/owner"
 )
 
 // TestQuestionsReserveOnTheRequestBudget (W9, question Q3, UX-71-1):
@@ -66,5 +70,51 @@ func TestQuestionsReserveOnTheRequestBudget(t *testing.T) {
 	}
 	if _, items := r.own.last(t); len(items) != 1 {
 		t.Fatalf("next hour's request carries %d items, want 1", len(items))
+	}
+}
+
+// TestReissuedIntentsGoOutsideTheBudget (W9a, security R3 on #95): an
+// intent re-issued after a restart (GR10) runs on its original expiry, so
+// a spent budget must not hold it until it lapses unseen. Its texts go
+// unpaced, but still count on RequestsPerHour, so questions see them.
+func TestReissuedIntentsGoOutsideTheBudget(t *testing.T) {
+	r := newRig(t, func(c *Config) { c.RequestsPerHour = 2 })
+	r.grant(mailGrant())
+	var refs []string
+	for _, rec := range []string{"inv-1", "inv-2"} {
+		x := sam()
+		x.Record = rec
+		r.ver.set(rec, x)
+		r.effect("agent/"+rec, "invoice.send", map[string]any{"record": rec}, "sam@example.com")
+		refs = append(refs, "agent/"+rec)
+	}
+	r.g.Flush()
+	req, items := r.own.last(t)
+	for _, it := range items {
+		r.boot = append(r.boot, owner.Carried{Ref: it.Ref, Request: req, Asked: r.now(), Expires: r.now().Add(10 * time.Minute), Sum: owner.ItemSum(it)})
+	}
+	if _, err := r.eng.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	r.open() // restart under STOP: nothing is re-issued yet
+	if !r.g.Reserve(r.now()) || !r.g.Reserve(r.now()) {
+		t.Fatal("questions refused on a fresh budget")
+	}
+	base := r.own.count()
+	r.eng.Resume()
+	r.g.Tick()
+	r.advance(2 * time.Minute)
+	r.g.Tick()
+	if got := r.own.count() - base; got != 2 || len(r.own.each) != 2 {
+		t.Fatalf("re-issued %d texts with the budget spent, want 2", got)
+	}
+	for _, ref := range refs {
+		if st := r.state(ref); st.State != journal.Pending {
+			t.Fatalf("%s: %s %q", ref, st.State, st.Permission.Reason)
+		}
+	}
+	r.advance(30 * time.Minute)
+	if r.g.Reserve(r.now()) {
+		t.Fatal("re-issued texts were not counted: a question went out over the budget")
 	}
 }

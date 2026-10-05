@@ -62,3 +62,19 @@ func TestApprovalsOpen(t *testing.T) {
 		t.Fatal("open after the request expired")
 	}
 }
+
+// REQ: TIM-1, CH-11
+
+// W9a (clock K7, UX-68-3): the owner channel's STATUS carries the box
+// clock's time check line.
+func TestStatusCarriesTheClockLine(t *testing.T) {
+	r := newRig(t, nil)
+	r.edit = func(c *Config) {
+		c.Clock = func() string { return "Time check: box and phone network agree." }
+	}
+	r.ch = r.open()
+	r.unlock()
+	if out := r.say("STATUS"); !strings.HasSuffix(out, " Time check: box and phone network agree.") {
+		t.Fatalf("STATUS: %q", out)
+	}
+}

@@ -1127,7 +1127,8 @@ func (g *Gate) queueReply(id string, v verdict) {
 // flushDue sends the batch when it is due (CH-10, CH-15): at once for an
 // urgent item or an owner active in chat; otherwise once the batch has
 // been quiet for CoalesceIdle or open for Coalesce, outside quiet hours,
-// and within RequestsPerHour.
+// and within RequestsPerHour, or past it for intents re-issued after a
+// restart.
 func (g *Gate) flushDue() {
 	now := g.cfg.Now()
 	g.mu.Lock()
@@ -1135,12 +1136,17 @@ func (g *Gate) flushDue() {
 		g.mu.Unlock()
 		return
 	}
-	urgent := false
-	if g.cfg.Urgent != nil {
-		for _, id := range g.batch {
-			if w := g.waiting[id]; w != nil && g.cfg.Urgent(w.item) {
-				urgent = true
-			}
+	urgent, reissued := false, false
+	for _, id := range g.batch {
+		w := g.waiting[id]
+		if w == nil {
+			continue
+		}
+		if g.cfg.Urgent != nil && g.cfg.Urgent(w.item) {
+			urgent = true
+		}
+		if !w.expires.IsZero() {
+			reissued = true
 		}
 	}
 	own := g.own
@@ -1152,7 +1158,9 @@ func (g *Gate) flushDue() {
 	switch {
 	case urgent || (!quiet && active):
 		g.Flush()
-	case !quiet && ripe && budget:
+	case !quiet && ripe && (budget || reissued):
+		// A re-issued intent runs on its original expiry, so it goes
+		// even past the budget (security R3 on #95); the rest stay paced.
 		g.flush(true)
 	}
 }
@@ -1226,7 +1234,8 @@ func (g *Gate) requeue(items []owner.Item) {
 func (g *Gate) Flush() { g.flush(false) }
 
 // flush sends batched items, each request text counted on the CH-15
-// budget before it goes; paced, texts past the budget stay batched.
+// budget before it goes; paced, texts past the budget stay batched,
+// except re-issued intents, which always go.
 func (g *Gate) flush(paced bool) {
 	now := g.cfg.Now()
 	g.mu.Lock()
@@ -1265,11 +1274,9 @@ func (g *Gate) flush(paced bool) {
 	for _, id := range lapsed {
 		g.closeIntent(id, "the approval request expired; ask again with a new request_id")
 	}
-	if n := g.take(paced, len(again)); n < len(again) {
-		// Each re-issued intent is its own request text.
-		g.requeue(again[n:])
-		again, ttls = again[:n], ttls[:n]
-	}
+	// Each re-issued intent is its own request text: counted, but never
+	// paced, so none lapses unseen behind a spent budget (security R3).
+	g.take(false, len(again))
 	if len(again) > 0 {
 		reqs := make([]string, len(again))
 		err := errors.New("no owner channel")

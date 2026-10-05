@@ -57,7 +57,10 @@ type Handler struct {
 	Agent  Agent // nil: no agent running
 	// Machines, if set, returns STATUS's line about agent machines.
 	Machines func() string
-	Now      func() time.Time
+	// Clock, if set, returns STATUS's time check line (clock.Status.Line;
+	// clock K7, UX-68-3); "" adds nothing.
+	Clock func() string
+	Now   func() time.Time
 	// NewCode returns a fresh texted code; nil means 6 random digits.
 	NewCode func() string
 	// Settings, if set, answers an owner text that is a whole-message
@@ -312,6 +315,12 @@ func (h *Handler) status() string {
 	fmt.Fprintf(&b, ", %d waiting to run, %d awaiting a decision.", len(held), len(open))
 	if h.Machines != nil {
 		b.WriteString(" " + plainLine(h.Machines(), 80))
+	}
+	if h.Clock != nil {
+		l, _, _ := strings.Cut(h.Clock(), "\n")
+		if l = plainLine(l, 100); l != "" {
+			b.WriteString(" " + l)
+		}
 	}
 	return b.String()
 }

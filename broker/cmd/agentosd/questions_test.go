@@ -41,11 +41,18 @@ func TestQuestionsRunInAgentosd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if l := cfg.Clock(); l != "" {
+		t.Fatalf("clock line before the guard opened: %q", l)
+	}
 	guard, err := qs.open(ctx, d, &preempter{}, defaultQuestionConfig(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer guard.Flush()
+	// STATUS carries the guard's time check (W9a, UX R3 on #95).
+	if l := cfg.Clock(); !strings.HasPrefix(l, "Time check: ") {
+		t.Fatalf("STATUS clock line: %q", l)
+	}
 	if qs.tools() == nil {
 		t.Fatal("no tools for the guest plane once the book is open")
 	}
@@ -98,5 +105,39 @@ func TestQuestionsRunInAgentosd(t *testing.T) {
 	}
 	if _, err := (&questions{}).open(ctx, d2, &preempter{}, defaultQuestionConfig(t.TempDir())); err == nil {
 		t.Fatal("opened with no owner channel")
+	}
+}
+
+// REQ: TIM-1, CH-11
+
+// W9a (L3 S1 on #95): an unreadable clock.json restricts the guard until
+// phone-network time agrees, which with no carrier is never; STATUS says
+// so, since the guard texts nothing yet.
+func TestStatusShowsAnUnreadableClockRestriction(t *testing.T) {
+	dir := t.TempDir()
+	qs := &questions{}
+	cfg := daemon.Config{
+		JournalPath: filepath.Join(dir, "journal.log"), SocketDir: filepath.Join(dir, "run"),
+		OwnerNumber: ownerNum, ModemUID: os.Getuid(), Admission: admission.Config{CapacityMB: 4500, HeadroomMB: 600},
+		OwnerState: filepath.Join(dir, "owner.json"),
+	}
+	qs.wire(&cfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d, err := daemon.Run(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	qc := defaultQuestionConfig(dir)
+	if err := os.WriteFile(qc.ClockPath, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	guard, err := qs.open(ctx, d, &preempter{}, qc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guard.Flush()
+	if l := cfg.Clock(); !strings.HasPrefix(l, "Time check: restricted since") || !strings.Contains(l, "saved check unreadable") {
+		t.Fatalf("STATUS clock line: %q", l)
 	}
 }

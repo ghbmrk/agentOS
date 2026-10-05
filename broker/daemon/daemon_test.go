@@ -156,6 +156,27 @@ func TestCH2StatusSaysWhyTheAgentIsDown(t *testing.T) {
 	}
 }
 
+// REQ: TIM-1, CH-11
+
+// STATUS carries the box clock's time check on the owner socket (W9a,
+// clock K7, UX-68-3).
+func TestCH2StatusCarriesTheClockLine(t *testing.T) {
+	dir, err := os.MkdirTemp("", "bk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	cancel, d := startWith(t, dir, func(c *Config) {
+		c.Clock = func() string {
+			return "Time check: box clock held since 09:05 (it jumped by about 3 hours, unconfirmed)."
+		}
+	})
+	defer func() { cancel(); d.Wait() }()
+	if r := text(t, dir, owner, "STATUS"); !strings.HasSuffix(r[0], " Time check: box clock held since 09:05 (it jumped by about 3 hours, unconfirmed).") {
+		t.Fatalf("STATUS: %q", r)
+	}
+}
+
 func TestGuestSocketCannotSendOwnerMessages(t *testing.T) {
 	dir, err := os.MkdirTemp("", "bk")
 	if err != nil {
