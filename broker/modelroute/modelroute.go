@@ -133,7 +133,18 @@ func Forward(cfg Config) func(machine string) http.Handler {
 				http.Error(w, "model egress unavailable", http.StatusServiceUnavailable)
 			},
 		}
-		return rp
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// The guest's request body belongs to the outbound request
+			// until the transport is done with it. In the default
+			// half-duplex mode the server drains and closes that body as
+			// soon as the response starts, which can land between the
+			// transport sending the body and its final EOF read: the
+			// read fails, the transport drops the connection, and the
+			// stream is cut. A writer without full duplex support (one
+			// that wraps it) is left as it is.
+			_ = http.NewResponseController(w).EnableFullDuplex()
+			rp.ServeHTTP(w, r)
+		})
 	}
 }
 
