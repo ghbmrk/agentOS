@@ -17,8 +17,9 @@ package daemon
 // (only their socket-capable imports are checked); reflection; values
 // built from the allowed types and handed across packages (modelroute's
 // transport, once built, is only as good as the code that builds it, which
-// this test reads); the address of a unix dial (only its network is
-// checked); _test.go files, which are not linked; and code generated or
+// this test reads); where a unix dial's address comes from (it must be a
+// field or variable, so from configuration, but the configuration itself
+// is the operator's); _test.go files, which are not linked; and code generated or
 // loaded at run time (plugin, os/exec, and os.StartProcess are refused
 // outside their allow-lists, so none is expected).
 
@@ -353,6 +354,16 @@ func sourceUse(t *testing.T, path, name, rel string) []string {
 			if lit, ok := n.Args[i].(*ast.BasicLit); !ok || lit.Value != `"unix"` {
 				at(n, se.Sel.Name+" on a network other than \"unix\"")
 			}
+			// A unix socket can front a network proxy, so a dial's
+			// address must come from configuration (a field or a
+			// variable), never a literal or an expression built here.
+			if se.Sel.Name != "Listen" && len(n.Args) > i+1 {
+				switch n.Args[i+1].(type) {
+				case *ast.Ident, *ast.SelectorExpr:
+				default:
+					at(n, se.Sel.Name+" to an address not taken from configuration")
+				}
+			}
 		case *ast.SelectorExpr:
 			if _, isDial := dials[n.Sel.Name]; isDial && !callee[n] {
 				at(n, n.Sel.Name+" used as a value, not called")
@@ -452,6 +463,8 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 		{"modelroute", src(`"net/http"`, `var none func(); var tr = &http.Transport{DialContext: none}`)},
 		{"vm/overlay", src(`"syscall"`, `var a, b, e = syscall.Syscall(41, 2, 1, 0)`)},
 		{"loops", src(`"os"`, `var p, _ = os.StartProcess("/bin/sh", nil, nil)`)},
+		{"modelroute", src(`"net"`, `var c, _ = (&net.Dialer{}).Dial("unix", "/run/proxy.sock")`)},
+		{"modelroute", src(`"net"; "path/filepath"`, `var c, _ = (&net.Dialer{}).Dial("unix", filepath.Join("/run", "p.sock"))`)},
 	} {
 		path := filepath.Join(t.TempDir(), "p.go")
 		if err := os.WriteFile(path, []byte(c.src), 0o600); err != nil {
@@ -461,8 +474,9 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 			t.Errorf("missed in %s:\n%s", c.rel, c.src)
 		}
 	}
-	ok := src(`"net"; "net/http"; "net/http/httputil"`, `func g() {
-	tr := &http.Transport{DialContext: func() { (&net.Dialer{}).DialContext(nil, "unix", "s") }}
+	ok := src(`"net"; "net/http"; "net/http/httputil"`, `var sock string
+func g() {
+	tr := &http.Transport{DialContext: func() { (&net.Dialer{}).DialContext(nil, "unix", sock) }}
 	_ = &httputil.ReverseProxy{Transport: tr}
 	_ = &http.Client{Transport: &http.Transport{DialContext: func() {}}}
 }`)
