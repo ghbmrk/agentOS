@@ -45,6 +45,9 @@ type learning struct {
 	// verdicts queues the gate's owner verdicts for harvesting, so a slow
 	// learning plane never holds the gate (security A2 on PW3).
 	verdicts chan grants.OwnerOutcome
+	// noRoom is set when replay evaluation was not opened because the
+	// agent machine and one replay machine do not fit in memory (PE2).
+	noRoom atomic.Bool
 }
 
 // learnPaths are where the learning plane keeps its state.
@@ -135,7 +138,8 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	}
 	cfg.BrokerExecutors[change.Executor] = l.pipe
 	cfg.BrokerExecutors[loops.Executor] = l.sched
-	cfg.Settings = l.sched.Text
+	cfg.Settings = l.settings
+	cfg.Notes = append(cfg.Notes, l.note)
 	cfg.Narrows = l.sched.Narrows
 	cfg.HelpExtra = loops.HelpLine
 	// The owner's verdicts on the agent's effects become Loop 1's cases
@@ -150,6 +154,38 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		}
 	}
 	return l, nil
+}
+
+// noRoomNote is STATUS's line when replay evaluation was not opened for
+// lack of memory (PE2; UX-114-1, potency C1 on #114). It follows the time
+// check's note.
+const noRoomNote = "Learning: paused, the box's memory is too small to test changes."
+
+// noRoomOn is what turning learning back on adds then.
+const noRoomOn = "Learning is on, but the box's memory is too small to test changes, so nothing new will be adopted."
+
+func (l *learning) note() string {
+	if l.noRoom.Load() {
+		return noRoomNote
+	}
+	return ""
+}
+
+// settings answers the owner's loop settings (loops Scheduler.Text). While
+// there is no room for replay, a LEARNING ON or LOOPS ON that took effect
+// says nothing new will be adopted, keeping the "if this wasn't you" line
+// (security C1 on #49).
+func (l *learning) settings(ctx context.Context, msg string, unlocked bool) (string, bool) {
+	reply, ok := l.sched.Text(ctx, msg, unlocked)
+	r, _ := loops.ParseText(msg)
+	if !ok || !l.noRoom.Load() || r.Kind != loops.KindLoops || !r.On || (r.Loop != "" && r.Loop != loops.Improve) ||
+		reply != loops.Confirm(r, l.sched.Settings()) {
+		return reply, ok
+	}
+	if r.Loop == "" {
+		return "Spare-time work is back on. " + noRoomOn + " Reply LOOPS OFF if this wasn't you.", true
+	}
+	return noRoomOn + " Reply LEARNING OFF if this wasn't you.", true
 }
 
 // learningOffText answers loop settings and ends HELP when the learning
