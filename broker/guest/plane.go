@@ -276,12 +276,18 @@ func (p *Plane) get(id string) *machine {
 }
 
 // handler is machine m's whole surface. Anything else is 404.
+//
+// It routes on the path exactly as the guest sent it, not through
+// http.ServeMux, which cleans dot segments and empty segments with a
+// redirect (a 307 that keeps the method and body since Go 1.26), so a
+// guest that follows it reaches a declared shape from an undeclared one.
+// Model paths go to the model chain as sent, escapes and dot segments
+// included, so its shape check sees and denies them: on the box the model
+// router in the vault process, or the egress proxy (E1) where it is served
+// directly. Every other service needs its exact path with nothing escaped
+// (ADP-10).
 func (p *Plane) handler(m *machine) http.Handler {
-	mux := http.NewServeMux()
-	mux.Handle("/model/", http.StripPrefix("/model", p.model(m)))
-	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) { p.mcp(m, w, r) })
-	mux.HandleFunc("/owner/next", func(w http.ResponseWriter, r *http.Request) { p.ownerNext(m, w, r) })
-	mux.HandleFunc("/owner/reply", func(w http.ResponseWriter, r *http.Request) { p.ownerReply(m, w, r) })
+	model := p.model(m)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
 		case m.slot <- struct{}{}:
@@ -290,7 +296,27 @@ func (p *Plane) handler(m *machine) http.Handler {
 			http.Error(w, "too many requests in flight", http.StatusTooManyRequests)
 			return
 		}
-		mux.ServeHTTP(w, r)
+		if strings.HasPrefix(r.URL.EscapedPath(), "/model/") {
+			r2 := r.Clone(r.Context())
+			r2.URL.Path = strings.TrimPrefix(r.URL.Path, "/model")
+			r2.URL.RawPath = strings.TrimPrefix(r.URL.RawPath, "/model")
+			model.ServeHTTP(w, r2)
+			return
+		}
+		if r.URL.RawPath != "" {
+			http.NotFound(w, r)
+			return
+		}
+		switch r.URL.Path {
+		case "/mcp":
+			p.mcp(m, w, r)
+		case "/owner/next":
+			p.ownerNext(m, w, r)
+		case "/owner/reply":
+			p.ownerReply(m, w, r)
+		default:
+			http.NotFound(w, r)
+		}
 	})
 }
 
