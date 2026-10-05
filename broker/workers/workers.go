@@ -16,6 +16,7 @@ package workers
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -72,6 +73,9 @@ type Tools struct {
 	Argv     []string
 	MaxMemMB int64
 	Now      func() time.Time // nil is time.Now
+	// Stopped reports the owner's STOP: while it holds, no worker command
+	// starts (security R2 on #146). Nil is never stopped.
+	Stopped func() bool
 
 	// mu guards used and pending. Creating workers reserves their IDs in
 	// pending under it, so the per-lineage count cannot be raced past
@@ -127,12 +131,21 @@ func (t *Tools) List() []map[string]any {
 	return []map[string]any{
 		{"name": toolCreate, "description": "Start a worker machine: a sandboxed machine with no agent, no network and no broker tools, built from the base image, that you drive with the other worker_ tools. It runs on your admission class and the memory you ask for; the box refuses it when there is no room. It holds your data label: a worker made by a private machine is private.",
 			"inputSchema": obj(map[string]any{"name": pName, "mem_mb": map[string]any{"type": "number", "description": fmt.Sprintf("Memory budget in MiB; default %d, at most %d.", DefaultMemMB, t.MaxMemMB)}}, "name")},
-		{"name": toolExec, "description": "Run a command in a worker, as root from /, and wait for it. Returns exit_code, stdout, stderr (each capped), truncated and timed_out. A non-zero exit is a result, not an error.",
-			"inputSchema": obj(map[string]any{"name": pName, "argv": strList, "stdin": map[string]any{"type": "string"}, "timeout_seconds": map[string]any{"type": "number", "description": fmt.Sprintf("Default %d, at most %d.", int(DefaultTimeout.Seconds()), int(MaxTimeout.Seconds()))}}, "name", "argv")},
-		{"name": toolRead, "description": "Read a file from a worker (its image needs cat).",
-			"inputSchema": obj(map[string]any{"name": pName, "path": pPath}, "name", "path")},
+		{"name": toolExec, "description": "Run a command in a worker, as root from /, and wait for it. Returns exit_code, stdout, stderr (each capped), truncated and timed_out. A non-zero exit is a result, not an error. " +
+			"To move a directory tree, send a tar archive as stdin_base64 to [\"tar\", \"-x\", \"-C\", \"/dir\"], or read one back with [\"tar\", \"-c\", \"-C\", \"/dir\", \".\"] and output_base64.",
+			"inputSchema": obj(map[string]any{"name": pName, "argv": strList,
+				"stdin":           map[string]any{"type": "string"},
+				"stdin_base64":    map[string]any{"type": "string", "description": "Binary stdin, base64; instead of stdin."},
+				"output_base64":   map[string]any{"type": "boolean", "description": "Return stdout and stderr base64-encoded, for binary output."},
+				"timeout_seconds": map[string]any{"type": "number", "description": fmt.Sprintf("Default %d, at most %d.", int(DefaultTimeout.Seconds()), int(MaxTimeout.Seconds()))}}, "name", "argv")},
+		{"name": toolRead, "description": fmt.Sprintf("Read a file from a worker, or length bytes of it from offset (at most %d at once; its image needs tail).", MaxOutput),
+			"inputSchema": obj(map[string]any{"name": pName, "path": pPath,
+				"offset": map[string]any{"type": "number", "description": "Byte offset to start at; default 0."},
+				"length": map[string]any{"type": "number", "description": fmt.Sprintf("Bytes to read; default and at most %d.", MaxOutput)},
+				"base64": map[string]any{"type": "boolean", "description": "Return the content base64-encoded, for binary files."}}, "name", "path")},
 		{"name": toolWrite, "description": "Write a file in a worker, replacing it (its image needs tee).",
-			"inputSchema": obj(map[string]any{"name": pName, "path": pPath, "content": map[string]any{"type": "string"}}, "name", "path", "content")},
+			"inputSchema": obj(map[string]any{"name": pName, "path": pPath, "content": map[string]any{"type": "string"},
+				"content_base64": map[string]any{"type": "string", "description": "Binary content, base64; instead of content."}}, "name", "path")},
 		{"name": toolCkpt, "description": "Checkpoint a worker, memory included; returns the snapshot id to roll back to or diff.",
 			"inputSchema": obj(map[string]any{"name": pName}, "name")},
 		{"name": toolFork, "description": "Checkpoint a worker and start one new worker per name from it, memory included; each is admitted on its own budget, and either all start or none do.",
@@ -334,10 +347,13 @@ type execOut struct {
 	TimedOut  bool   `json:"timed_out"`
 }
 
-func (t *Tools) run(ctx context.Context, c caller, name string, cmd vm.Command, timeout time.Duration) (execOut, error) {
+func (t *Tools) run(ctx context.Context, c caller, name string, cmd vm.Command, timeout time.Duration) (vm.ExecResult, error) {
+	if t.Stopped != nil && t.Stopped() {
+		return vm.ExecResult{}, errors.New("the owner sent STOP: worker commands wait until RESUME")
+	}
 	w, err := t.worker(c, name)
 	if err != nil {
-		return execOut{}, err
+		return vm.ExecResult{}, err
 	}
 	// A command both writes into the worker and returns what it sees:
 	// Exec raises the worker to the caller's label and checks the caller
@@ -349,9 +365,32 @@ func (t *Tools) run(ctx context.Context, c caller, name string, cmd vm.Command, 
 	}
 	r, err := t.M.Exec(ctx, w.ID, cmd, timeout)
 	if err != nil {
-		return execOut{}, fmt.Errorf("worker %s: %w", name, err)
+		return vm.ExecResult{}, fmt.Errorf("worker %s: %w", name, err)
 	}
-	return execOut{r.ExitCode, string(r.Stdout), string(r.Stderr), r.Truncated, r.TimedOut}, nil
+	return r, nil
+}
+
+// text renders output as a string, or base64 for binary.
+func text(b []byte, b64 bool) string {
+	if b64 {
+		return base64.StdEncoding.EncodeToString(b)
+	}
+	return string(b)
+}
+
+// input picks the plain or base64 form of an input.
+func input(plain, b64 string) ([]byte, error) {
+	if b64 == "" {
+		return []byte(plain), nil
+	}
+	if plain != "" {
+		return nil, errors.New("give the text or the base64 form, not both")
+	}
+	b, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		return nil, errors.New("base64 input does not decode")
+	}
+	return b, nil
 }
 
 func checkArgv(argv []string) error {
@@ -373,6 +412,8 @@ func (t *Tools) exec(ctx context.Context, c caller, raw json.RawMessage) (any, e
 		Name    string   `json:"name"`
 		Argv    []string `json:"argv"`
 		Stdin   string   `json:"stdin"`
+		Stdin64 string   `json:"stdin_base64"`
+		Out64   bool     `json:"output_base64"`
 		Timeout float64  `json:"timeout_seconds"`
 	}
 	if err := decode(raw, &a); err != nil {
@@ -381,7 +422,11 @@ func (t *Tools) exec(ctx context.Context, c caller, raw json.RawMessage) (any, e
 	if err := checkArgv(a.Argv); err != nil {
 		return nil, err
 	}
-	if len(a.Stdin) > MaxStdin {
+	stdin, err := input(a.Stdin, a.Stdin64)
+	if err != nil {
+		return nil, err
+	}
+	if len(stdin) > MaxStdin {
 		return nil, fmt.Errorf("stdin is larger than %d bytes", MaxStdin)
 	}
 	timeout := DefaultTimeout
@@ -392,7 +437,11 @@ func (t *Tools) exec(ctx context.Context, c caller, raw json.RawMessage) (any, e
 			timeout = time.Duration(a.Timeout * float64(time.Second))
 		}
 	}
-	return t.run(ctx, c, a.Name, vm.Command{Argv: a.Argv, Stdin: []byte(a.Stdin)}, timeout)
+	r, err := t.run(ctx, c, a.Name, vm.Command{Argv: a.Argv, Stdin: stdin}, timeout)
+	if err != nil {
+		return nil, err
+	}
+	return execOut{r.ExitCode, text(r.Stdout, a.Out64), text(r.Stderr, a.Out64), r.Truncated, r.TimedOut}, nil
 }
 
 func checkPath(p string) error {
@@ -403,43 +452,67 @@ func checkPath(p string) error {
 }
 
 func (t *Tools) read(ctx context.Context, c caller, raw json.RawMessage) (any, error) {
-	var a struct{ Name, Path string }
+	var a struct {
+		Name   string `json:"name"`
+		Path   string `json:"path"`
+		Offset int64  `json:"offset"`
+		Length int    `json:"length"`
+		B64    bool   `json:"base64"`
+	}
 	if err := decode(raw, &a); err != nil {
 		return nil, err
 	}
 	if err := checkPath(a.Path); err != nil {
 		return nil, err
 	}
-	r, err := t.run(ctx, c, a.Name, vm.Command{Argv: []string{"cat", "--", a.Path}}, DefaultTimeout)
+	if a.Offset < 0 || a.Length < 0 || a.Length > MaxOutput {
+		return nil, fmt.Errorf("offset must be 0 or more and length at most %d", MaxOutput)
+	}
+	if a.Length == 0 {
+		a.Length = MaxOutput
+	}
+	// tail -c +N prints from byte N (1-based); the output cap is the length.
+	argv := []string{"tail", "-c", fmt.Sprintf("+%d", a.Offset+1), "--", a.Path}
+	r, err := t.run(ctx, c, a.Name, vm.Command{Argv: argv, MaxOutput: a.Length}, DefaultTimeout)
 	if err != nil {
 		return nil, err
 	}
 	if r.ExitCode != 0 {
-		return nil, fmt.Errorf("cannot read %s: %s", a.Path, strings.TrimSpace(r.Stderr))
+		return nil, fmt.Errorf("cannot read %s: %s", a.Path, strings.TrimSpace(string(r.Stderr)))
 	}
-	return map[string]any{"content": r.Stdout, "truncated": r.Truncated}, nil
+	// truncated: the file goes on past offset+length; read on from there.
+	return map[string]any{"content": text(r.Stdout, a.B64), "truncated": r.Truncated}, nil
 }
 
 func (t *Tools) write(ctx context.Context, c caller, raw json.RawMessage) (any, error) {
-	var a struct{ Name, Path, Content string }
+	var a struct {
+		Name      string `json:"name"`
+		Path      string `json:"path"`
+		Content   string `json:"content"`
+		Content64 string `json:"content_base64"`
+	}
 	if err := decode(raw, &a); err != nil {
 		return nil, err
 	}
 	if err := checkPath(a.Path); err != nil {
 		return nil, err
 	}
-	if len(a.Content) > MaxStdin {
+	content, err := input(a.Content, a.Content64)
+	if err != nil {
+		return nil, err
+	}
+	if len(content) > MaxStdin {
 		return nil, fmt.Errorf("content is larger than %d bytes", MaxStdin)
 	}
 	// tee echoes what it writes; keep one byte of it.
-	r, err := t.run(ctx, c, a.Name, vm.Command{Argv: []string{"tee", "--", a.Path}, Stdin: []byte(a.Content), MaxOutput: 1}, DefaultTimeout)
+	r, err := t.run(ctx, c, a.Name, vm.Command{Argv: []string{"tee", "--", a.Path}, Stdin: content, MaxOutput: 1}, DefaultTimeout)
 	if err != nil {
 		return nil, err
 	}
 	if r.ExitCode != 0 {
-		return nil, fmt.Errorf("cannot write %s: %s", a.Path, strings.TrimSpace(r.Stderr))
+		return nil, fmt.Errorf("cannot write %s: %s", a.Path, strings.TrimSpace(string(r.Stderr)))
 	}
-	return map[string]any{"written": len(a.Content)}, nil
+	return map[string]any{"written": len(content)}, nil
 }
 
 func (t *Tools) checkpoint(ctx context.Context, c caller, raw json.RawMessage) (any, error) {

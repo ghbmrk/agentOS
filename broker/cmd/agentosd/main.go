@@ -243,9 +243,10 @@ func main() {
 	flag.StringVar(&builderLaunch, "builder-launch", "", "how a builder machine starts: argv and env; empty uses the image's own")
 	flag.Int64Var(&builderMemMB, "builder-mem-mb", loopbuild.DefaultMemMB, "a builder machine's memory budget, MB")
 	var workerImage, workerArgv string
-	var workerMaxMB int64
+	var workerMaxMB, workerLayerMB int64
 	flag.StringVar(&workerImage, "worker-image", "", "the base image worker machines are built from (CAP-8), registered with -image; empty offers guests no worker tools")
 	flag.StringVar(&workerArgv, "worker-argv", "sleep infinity", "what a worker machine runs while the guest drives it, space-separated")
+	flag.Int64Var(&workerLayerMB, "worker-layer-mb", 4096, "the most one worker's files may hold, MB; over it the worker takes no command or snapshot until it shrinks; 0 is no cap beyond the disk reserve")
 	flag.Int64Var(&workerMaxMB, "worker-max-mb", 2048, "the largest memory budget one worker may ask for, MB; admission still decides (RES-2)")
 	flag.Int64Var(&replayMemMB, "replay-mem-mb", defaultReplayMemMB, "a replay machine's memory budget, MB (LOOP-5); with -agent-mem-mb it must fit in -capacity-mb less -headroom-mb")
 	qcfg := defaultQuestionConfig("/var/lib/agentos")
@@ -400,6 +401,7 @@ func main() {
 			Services: services,
 
 			DiskReserveBytes: diskReserveMB << 20,
+			WorkerLayerBytes: workerLayerMB << 20,
 			// A lineage holding a record the owner deleted is not forked
 			// or merged until that is settled (recall W10).
 			Contained: recallExec.Contained,
@@ -413,8 +415,9 @@ func main() {
 			tree.setMachines(m)
 			tools := toolSet{qs.tools(), tree, recallTools}
 			if wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB); wt != nil {
+				wt.Stopped = d.Engine().Stopped
 				tools = append(tools, wt)
-				go reapWorkers(ctx, wt)
+				go reapWorkers(ctx, wt, m, d.Engine().Stopped)
 			}
 			if plane, err := openGuestPlane(m, d, cfg.SocketDir, meterPath, inboxPath, egressSocket, tools); err != nil {
 				// Machines cannot start without their guest sockets.
@@ -591,17 +594,28 @@ func workerTools(m *vm.Manager, imgs images, image, argv string, maxMB int64) *w
 	return &workers.Tools{M: m, Image: image, Argv: strings.Fields(argv), MaxMemMB: maxMB}
 }
 
-// reapWorkers parks idle and orphaned workers every minute (UX-146-1).
-func reapWorkers(ctx context.Context, wt *workers.Tools) {
-	t := time.NewTicker(time.Minute)
+// reapWorkers ends worker commands in flight while STOP holds, checked
+// every 5 s (security R2 on #146), and parks idle and orphaned workers
+// every minute (UX-146-1).
+func reapWorkers(ctx context.Context, wt *workers.Tools, m *vm.Manager, stopped func() bool) {
+	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
+	last := time.Now()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if parked := wt.Reap(ctx); len(parked) > 0 {
-				log.Printf("workers parked: %v", parked)
+			if stopped() {
+				if n := m.EndCommands(); n > 0 {
+					log.Printf("STOP: ended %d worker commands", n)
+				}
+			}
+			if time.Since(last) >= time.Minute {
+				last = time.Now()
+				if parked := wt.Reap(ctx); len(parked) > 0 {
+					log.Printf("workers parked: %v", parked)
+				}
 			}
 		}
 	}

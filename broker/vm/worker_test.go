@@ -301,3 +301,82 @@ func TestCAP8ExecNeedsARunningWorker(t *testing.T) {
 		t.Fatalf("exec on a parked worker: %v, want ErrState", err)
 	}
 }
+
+// A worker over its layer cap takes no command and no snapshot until it
+// shrinks (security R3 on #146); other machines keep the general cap.
+func TestCAP8WorkerLayerCap(t *testing.T) {
+	e := newEnv(t, 4096)
+	e.cfg.WorkerLayerBytes = 16 << 10
+	e.open()
+	agent := e.create("agent", admission.Experiment, 500)
+	_, err := e.m.CreateWorker(bg, "wk-a", agent.Lineage, workerSpec(Public))
+	must(t, err)
+	_, err = e.m.Exec(bg, "wk-a", Command{Argv: []string{"write", "big"}, Stdin: make([]byte, 64<<10)}, time.Second)
+	must(t, err) // under the cap when it started
+	if _, err := e.m.Exec(bg, "wk-a", Command{Argv: []string{"echo"}}, time.Second); !errors.Is(err, ErrQuota) {
+		t.Fatalf("command in a worker over its cap: %v", err)
+	}
+	if _, err := e.m.Step(bg, "wk-a"); !errors.Is(err, ErrQuota) {
+		t.Fatalf("snapshot of a worker over its cap: %v", err)
+	}
+	e.guestWrite("agent", "big", string(make([]byte, 64<<10)))
+	if _, err := e.m.Step(bg, "agent"); err != nil {
+		t.Fatalf("the worker cap applied to an agent: %v", err)
+	}
+}
+
+func TestCAP8EndCommandsEndsWhatIsInFlight(t *testing.T) {
+	e := newEnv(t, 4096)
+	agent := e.create("agent", admission.Experiment, 500)
+	_, err := e.m.CreateWorker(bg, "wk-a", agent.Lineage, workerSpec(Public))
+	must(t, err)
+	done := make(chan error, 1)
+	go func() {
+		_, err := e.m.Exec(bg, "wk-a", Command{Argv: []string{"sleep"}}, 10*time.Minute)
+		done <- err
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for e.m.EndCommands() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("no command in flight to end")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("an ended command reported success")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("EndCommands did not end the command")
+	}
+	w, err := e.m.Get("wk-a")
+	must(t, err)
+	if w.State != Running {
+		t.Fatalf("worker is %s after its command ended", w.State)
+	}
+}
+
+// Parking does not wait out a command: a busy worker is refused at once
+// (L3 SHOULD on #146).
+func TestCAP8ParkRefusesABusyWorker(t *testing.T) {
+	e := newEnv(t, 4096)
+	agent := e.create("agent", admission.Experiment, 500)
+	_, err := e.m.CreateWorker(bg, "wk-a", agent.Lineage, workerSpec(Public))
+	must(t, err)
+	done := make(chan error, 1)
+	go func() {
+		_, err := e.m.Exec(bg, "wk-a", Command{Argv: []string{"sleep"}}, 10*time.Minute)
+		done <- err
+	}()
+	time.Sleep(20 * time.Millisecond) // the command holds the worker
+	start := time.Now()
+	if _, err := e.m.Park(bg, "wk-a"); !errors.Is(err, ErrBusy) {
+		t.Fatalf("park of a busy worker: %v, want ErrBusy", err)
+	}
+	if d := time.Since(start); d > 100*time.Millisecond {
+		t.Fatalf("park waited %v", d)
+	}
+	must(t, e.m.Destroy(bg, "wk-a"))
+	<-done
+}

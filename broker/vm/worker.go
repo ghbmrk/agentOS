@@ -37,6 +37,9 @@ type Command struct {
 	As Label
 }
 
+// ErrBusy refuses to park a worker that is in use.
+var ErrBusy = errors.New("vm: worker is busy")
+
 // ErrLabel refuses a command whose caller may not read the worker.
 var ErrLabel = errors.New("vm: that worker holds private data; a public machine cannot read it")
 
@@ -145,6 +148,11 @@ func (m *Manager) Exec(ctx context.Context, id string, c Command, timeout time.D
 	if mc.Label > c.As {
 		return ExecResult{}, ErrLabel
 	}
+	if m.cfg.WorkerLayerBytes > 0 {
+		if _, err := m.checkCaps(id, m.launch(mc).Upper); err != nil {
+			return ExecResult{}, fmt.Errorf("%s: %w", id, err)
+		}
+	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	mc.execCancel.Store(&cancel)
@@ -192,7 +200,8 @@ func (m *Manager) awaitExec(ctx context.Context, ex Execer, id string, c Command
 // Park checkpoints a running worker, memory included, and stops it,
 // handing its memory back to admission (UX-146-1). The checkpoint becomes
 // the worker's newest snapshot; rolling back to it revives the worker as
-// it was.
+// it was. A busy worker (a command holds its lock) is refused with
+// ErrBusy at once, so Reap never waits out a command.
 func (m *Manager) Park(ctx context.Context, id string) (Snapshot, error) {
 	if !strings.HasPrefix(id, WorkerPrefix) {
 		return Snapshot{}, fmt.Errorf("vm: %s is not a worker", id)
@@ -201,7 +210,11 @@ func (m *Manager) Park(ctx context.Context, id string) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
-	mc.mu.Lock()
+	// A worker whose lock is held is in use (a command runs): parking
+	// would wait out the command, so it is refused instead.
+	if !mc.mu.TryLock() {
+		return Snapshot{}, fmt.Errorf("%w: %s", ErrBusy, id)
+	}
 	if mc.State != Running {
 		mc.mu.Unlock()
 		return Snapshot{}, fmt.Errorf("%w: %s is %s", ErrState, id, mc.State)
@@ -219,4 +232,22 @@ func (m *Manager) Park(ctx context.Context, id string) (Snapshot, error) {
 		m.cfg.Admit.Release(id)
 	}
 	return s, err
+}
+
+// EndCommands ends every worker command in flight (STOP, security R2 on
+// #146). The workers keep running; their commands report an error.
+func (m *Manager) EndCommands() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for id, mc := range m.machines {
+		if !strings.HasPrefix(id, WorkerPrefix) {
+			continue
+		}
+		if c := mc.execCancel.Load(); c != nil {
+			(*c)()
+			n++
+		}
+	}
+	return n
 }

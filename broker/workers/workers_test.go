@@ -4,6 +4,7 @@ package workers
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -58,12 +59,23 @@ func (r *runtime) Exec(ctx context.Context, id string, c vm.Command) (vm.ExecRes
 		return vm.ExecResult{}, ctx.Err()
 	case "echo":
 		return vm.ExecResult{Stdout: []byte(strings.Join(a[1:], " "))}, nil
-	case "cat":
+	case "stdin":
+		return vm.ExecResult{Stdout: c.Stdin}, nil
+	case "cat", "tail":
 		b, err := os.ReadFile(path())
 		if err != nil {
-			return vm.ExecResult{ExitCode: 1, Stderr: []byte("cat: no such file")}, nil
+			return vm.ExecResult{ExitCode: 1, Stderr: []byte("no such file")}, nil
 		}
-		return vm.ExecResult{Stdout: b}, nil
+		if a[0] == "tail" { // tail -c +N -- PATH
+			var n int
+			fmt.Sscanf(a[2], "+%d", &n)
+			b = b[min(n-1, len(b)):]
+		}
+		r := vm.ExecResult{Stdout: b}
+		if c.MaxOutput > 0 && len(b) > c.MaxOutput {
+			r.Stdout, r.Truncated = b[:c.MaxOutput], true
+		}
+		return r, nil
 	case "tee":
 		os.MkdirAll(filepath.Dir(path()), 0o755)
 		return vm.ExecResult{}, os.WriteFile(path(), c.Stdin, 0o644)
@@ -475,7 +487,7 @@ func TestCAP8CommandsAreBoundedExactly(t *testing.T) {
 		}
 	}
 	r.call("agent", toolRead, m{"name": "w", "path": "/-n"}, nil)
-	if a := rec.cmd.Argv; len(a) != 3 || a[0] != "cat" || a[1] != "--" || a[2] != "/-n" {
+	if a := rec.cmd.Argv; len(a) != 5 || a[0] != "tail" || a[3] != "--" || a[4] != "/-n" {
 		t.Errorf("read ran %q", a)
 	}
 	r.must("agent", toolWrite, m{"name": "w", "path": "/-a", "content": "x"}, nil)
@@ -621,5 +633,112 @@ func TestCAP8ConcurrentCreatesStayUnderTheCap(t *testing.T) {
 	mc, _ := r.m.Get("agent")
 	if n := len(r.m.Workers(mc.Lineage)); n != MaxWorkers {
 		t.Fatalf("%d workers after the race, want exactly %d", n, MaxWorkers)
+	}
+}
+
+// Potency R3 on #146: a file reads in pieces, and binary goes both ways
+// as base64.
+func TestCAP8FilesReadInPiecesAndBinaryRoundTrips(t *testing.T) {
+	r := newRig(t, 8000)
+	r.agent("agent", vm.Public)
+	r.must("agent", toolCreate, m{"name": "w"}, nil)
+	r.must("agent", toolWrite, m{"name": "w", "path": "/f", "content": "0123456789"}, nil)
+	var part struct {
+		Content   string
+		Truncated bool
+	}
+	r.must("agent", toolRead, m{"name": "w", "path": "/f", "offset": 3, "length": 4}, &part)
+	if part.Content != "3456" || !part.Truncated {
+		t.Fatalf("read 4 at 3 = %+v", part)
+	}
+	r.must("agent", toolRead, m{"name": "w", "path": "/f", "offset": 8}, &part)
+	if part.Content != "89" || part.Truncated {
+		t.Fatalf("read the tail = %+v", part)
+	}
+	bin := []byte{0, 0xff, 0xfe, '\n', 7}
+	enc := base64.StdEncoding.EncodeToString(bin)
+	r.must("agent", toolWrite, m{"name": "w", "path": "/b", "content_base64": enc}, nil)
+	r.must("agent", toolRead, m{"name": "w", "path": "/b", "base64": true}, &part)
+	if part.Content != enc {
+		t.Fatalf("binary read back = %q, want %q", part.Content, enc)
+	}
+	var ex execOut
+	r.must("agent", toolExec, m{"name": "w", "argv": []string{"stdin"}, "stdin_base64": enc, "output_base64": true}, &ex)
+	if ex.Stdout != enc {
+		t.Fatalf("binary through exec = %q", ex.Stdout)
+	}
+	for _, bad := range []m{
+		{"name": "w", "path": "/b", "content": "x", "content_base64": enc},
+		{"name": "w", "path": "/b", "content_base64": "%%%"},
+	} {
+		if err := r.call("agent", toolWrite, bad, nil); err == nil {
+			t.Errorf("write %v accepted", bad)
+		}
+	}
+	if err := r.call("agent", toolRead, m{"name": "w", "path": "/f", "length": MaxOutput + 1}, nil); err == nil {
+		t.Error("read longer than the cap accepted")
+	}
+}
+
+// Security R2 on #146: while STOP holds, no worker command starts.
+func TestCAP8StopHoldsWorkerCommands(t *testing.T) {
+	r := newRig(t, 8000)
+	stopped := false
+	r.tools.Stopped = func() bool { return stopped }
+	r.agent("agent", vm.Public)
+	r.must("agent", toolCreate, m{"name": "w"}, nil)
+	stopped = true
+	for _, c := range []struct {
+		tool string
+		args m
+	}{
+		{toolExec, m{"name": "w", "argv": []string{"echo"}}},
+		{toolRead, m{"name": "w", "path": "/f"}},
+		{toolWrite, m{"name": "w", "path": "/f", "content": "x"}},
+	} {
+		if err := r.call("agent", c.tool, c.args, nil); err == nil || !strings.Contains(err.Error(), "STOP") {
+			t.Errorf("%s under STOP: %v", c.tool, err)
+		}
+	}
+	stopped = false
+	r.must("agent", toolExec, m{"name": "w", "argv": []string{"echo"}}, nil)
+}
+
+// hold blocks Fork until release is closed, so a reservation stays pending.
+type hold struct {
+	*vm.Manager
+	forking chan struct{}
+	release chan struct{}
+}
+
+func (h hold) Fork(ctx context.Context, id string, ids []string) (vm.Snapshot, error) {
+	close(h.forking)
+	<-h.release
+	return h.Manager.Fork(ctx, id, ids)
+}
+
+// A fork's reserved slots count before its workers exist: a create that
+// would pass the cap meanwhile is refused (L3 SHOULD on #146).
+func TestCAP8PendingForkHoldsItsSlots(t *testing.T) {
+	r := newRig(t, 16000)
+	r.agent("agent", vm.Public)
+	for i := range MaxWorkers - 1 {
+		r.must("agent", toolCreate, m{"name": fmt.Sprintf("w%d", i), "mem_mb": MinMemMB}, nil)
+	}
+	h := hold{r.m, make(chan struct{}), make(chan struct{})}
+	r.tools.M = h
+	forked := make(chan error, 1)
+	go func() { forked <- r.call("agent", toolFork, m{"name": "w0", "into": []string{"f"}}, nil) }()
+	<-h.forking
+	err := r.call("agent", toolCreate, m{"name": "late", "mem_mb": MinMemMB}, nil)
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("at most %d workers", MaxWorkers)) {
+		t.Fatalf("create beside a pending fork at the cap: %v", err)
+	}
+	close(h.release)
+	if err := <-forked; err != nil {
+		t.Fatal(err)
+	}
+	if err := r.call("agent", toolCreate, m{"name": "late", "mem_mb": MinMemMB}, nil); err == nil {
+		t.Fatal("create past the cap after the fork")
 	}
 }
