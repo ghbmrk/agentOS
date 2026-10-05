@@ -4,6 +4,7 @@ package clock
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -770,6 +771,56 @@ func TestTIM1HonestRebootsAgeAlertsOutWithoutCarrier(t *testing.T) {
 	alarm()
 	if len(r.sent()) == n {
 		t.Fatal("honest reboots without carrier kept the cap full past a day")
+	}
+}
+
+func TestTIM1ImplausibleSavedBootClockKeepsTheCap(t *testing.T) {
+	// A state file whose saved boot clock puts an alert more than a day
+	// before the save is corrupt (alerts that old are pruned before every
+	// save): its alerts count as just sent, so the cap is not freed
+	// (security R1 on #68).
+	path := filepath.Join(t.TempDir(), "clock.json")
+	r := newRig()
+	boot := "boot-a"
+	mod := func(c *Config) { c.StatePath = path; c.BootID = func() string { return boot } }
+	g := r.guard(t, mod)
+	g.Check(bg)
+	alarm := func() {
+		r.step(time.Hour)
+		g.Check(bg)
+		r.step(-time.Hour)
+		g.Check(bg)
+		r.advance(AgreeAfter)
+		g.Check(bg)
+	}
+	alarm()
+	alarm()
+	g.Flush()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v map[string]any
+	if err := json.Unmarshal(b, &v); err != nil {
+		t.Fatal(err)
+	}
+	v["saved_mono"] = int64(1000 * time.Hour)
+	if b, err = json.Marshal(v); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	boot = "boot-b"
+	r.mu.Lock()
+	r.mono = 0
+	r.mu.Unlock()
+	g = r.guard(t, mod)
+	g.Check(bg)
+	n := len(r.sent())
+	alarm()
+	if len(r.sent()) != n {
+		t.Fatalf("corrupt saved boot clock freed the cap: %q", r.sent()[n:])
 	}
 }
 

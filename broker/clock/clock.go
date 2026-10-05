@@ -126,6 +126,8 @@ const (
 	// texts will come today (AgreeLastText). Suppressed alerts are not
 	// queued; STATUS and the digest show the live state.
 	MaxAlertsPerDay = 2
+	// alertWindow is how long a sent alert counts toward MaxAlertsPerDay.
+	alertWindow = 24 * time.Hour
 	// anchorSlack is the honest wall-vs-boot-clock movement a hold allows on
 	// top of the tolerance. NTP slewing moves the wall and boot clocks
 	// together, so only steps open a gap (L3 F6 on #68).
@@ -527,7 +529,7 @@ func (g *Guard) check(ctx context.Context) Status {
 func (g *Guard) noticeLocked(s Status, mono time.Duration) string {
 	recent := g.alerts[:0]
 	for _, a := range g.alerts {
-		if mono-a.Mono < 24*time.Hour {
+		if mono-a.Mono < alertWindow {
 			recent = append(recent, a)
 		}
 	}
@@ -745,12 +747,19 @@ func (g *Guard) load() {
 	// age: the part within that boot comes from its boot clock and is
 	// trusted; only the downtime since, which the box clock gives at both
 	// ends, is clamped to between zero and this boot's uptime, so no clock
-	// setting frees the cap early (L3 F1 on #68).
+	// setting frees the cap early (L3 F1 on #68). Alerts a day old are
+	// pruned before every save, so an in-boot age outside zero to a day
+	// means a corrupt file: that alert counts as just sent (security R1).
 	mono, wall := g.cfg.Elapsed(), g.cfg.Now()
 	down := min(max(wall.Sub(v.SavedWall), 0), mono)
 	for _, a := range v.Alerts {
 		if !sameBoot {
-			a.Mono = mono - (max(v.SavedMono-a.Mono, 0) + down)
+			age, d := v.SavedMono-a.Mono, down
+			if age < 0 || age > alertWindow+time.Minute { // a minute for the save's own delay
+				g.cfg.Logf("clock: saved alert age %v implausible, counting it as new", age)
+				age, d = 0, 0
+			}
+			a.Mono = mono - (age + d)
 		}
 		g.alerts = append(g.alerts, a)
 	}
