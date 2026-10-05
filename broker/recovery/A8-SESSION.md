@@ -18,7 +18,8 @@ recovery key appears in any plaintext on either drive or in the backup
 **You need:** the box drive (set up on PC-T, your trusted PC), a second PC
 (PC-U) never used with it, a spare drive of at least the same size, a USB
 stick for the backup, the Owner Card with both sheets, your phone with the code
-generator, a second SIM or phone number, a Linux computer for the scan.
+generator, a second SIM or phone number. The scan runs on the box itself, so the
+recovery key is never typed into another computer.
 
 | # | Do | Expect | Observed | Pass |
 |---|---|---|---|---|
@@ -30,16 +31,17 @@ generator, a second SIM or phone number, a Linux computer for the scan.
 | 6 | Add PC-U as a trusted host: code plus confirm on the Wi-Fi page. Restart. | Comes up with no input (unattended restart). | | |
 | 7 | Remove PC-U as a trusted host. Restart. | Asks for the passphrase and code again. | | |
 | 8 | Move the drive back to PC-T and restart. | Comes up with no input. | | |
-| 9 | Create two pre-allowances on the Wi-Fi page (G1, G2). Back up to the USB stick. Then text `REVOKE G1`. | Backup reports done; G1 revoked. | | |
-| 10 | Power off. Attach the drive to the Linux computer. For every partition run `agentos-a8scan -vault <data>/vault -keys <data>/vault.keys /dev/sdXN` (and the mounted data directory, read-only), typing the recovery key when asked. Also scan the USB stick. | Each target: "nothing found"; the control line and key-slot line say ok. | | |
-| 11 | Restore from the USB stick onto the spare drive with the recovery key. Boot the spare drive on PC-T. | Not trusted: asks for passphrase and code. After unlock, a text says the box was restored and grants need re-confirming. | | |
+| 9 | Create two pre-allowances on the Wi-Fi page (G1, G2). Press **Back up now** and pick the USB stick. Then text `REVOKE G1`. | Backup reports done with its date; G1 revoked. | | |
+| 10 | With the USB stick still attached, press **Scan drive (A8)** on the Wi-Fi page and type the recovery key and the passphrase from the card. It runs `agentos-a8scan` over every partition of the box drive, read-only, and over the USB stick. | Each target: "nothing found"; the control line and key-slot line say ok. | | |
+| 11 | Press **Restore** on the Wi-Fi page, pick the USB stick and the spare drive, and type the recovery key. Boot the spare drive on PC-T. | Not trusted: asks for passphrase and code. After unlock, a text: "Box restored from a backup made DATE. Pre-allowances and today's budget are paused until you review them on the box page (one step)." | | |
 | 12 | Before re-confirming, ask the agent for something G2 covers. | It asks for approval instead of running. | | |
-| 13 | On the Wi-Fi page, re-confirm G2 only (code plus confirm). Ask again for G1's and G2's actions. | G2 runs; G1 asks (it stays revoked). | | |
-| 14 | Restore again, this time from the original drive (both plugged in), onto the spare drive. | Same as 11. | | |
+| 13 | On the Wi-Fi page, re-confirm G2 only (code plus confirm). Ask again for G1's and G2's actions. | G2 runs; G1 asks (it stays revoked). The page also offered Keep all and Start budgets fresh. | | |
+| 14 | Press **Restore** again, this time picking the original drive (both plugged in) as the source. | Same as 11, but the text says "restored from its old drive". | | |
 | 15 | Lost phone: on the Wi-Fi page, re-enroll with the recovery key; add the new entry to the code generator. Text a code from the old entry. | Old code refused; a code from the new entry unlocks. | | |
-| 16 | Lost number: on the Wi-Fi page, start a number change with the recovery key; text the shown code from the second number. | Old number gets "owner number moved to ...NNNN"; the new number gets the welcome text. | | |
+| 16 | Lost number: on the Wi-Fi page, start a number change with the recovery key; text `HELP` and then the shown code from the second number. | HELP does not use up a try. Old number gets "owner number moved to ...NNNN" with how to move it back; the new number gets the welcome text. | | |
 | 17 | From the old number, text STOP, STATUS, and a valid code. | No reply, no effect. | | |
-| 18 | Rotate everything on the Wi-Fi page (recovery key as authority). Print the new card. Try the old passphrase on PC-U. | Old passphrase refused; new card's works. The old USB backup still restores with the old recovery key (expected: rotation protects only against later copies). | | |
+| 18 | Rotate everything on the Wi-Fi page (recovery key as authority). Press **Save card**, print it, and type back the value the page asks for. Rejoin the box's new Wi-Fi. Try the old passphrase on PC-U. | Nothing changes until the typed-back value matches. Then the old passphrase is refused and the new card's works. The done page offers **Back up now**. The old USB backup still restores with the old recovery key (expected: rotation protects only against later copies). | | |
+| 19 | Type the recovery key with one character changed into the Restore page. | The page names the group that looks mistyped. | | |
 
 Send the filled table (a photo is fine). Any failed row comes back to the
 builder with the row number.

@@ -1,8 +1,11 @@
 package recovery
 
 import (
+	"bytes"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
+	"sync"
 
 	"github.com/ghbmrk/agentos/broker/vault"
 )
@@ -43,19 +46,30 @@ func (f factor) KEK(s vault.Slot) ([]byte, error) {
 type Box struct {
 	VaultPath, KeysPath string
 	V                   *vault.Vault
+
+	// mu serializes this package's read-modify-write operations on the
+	// vault (re-confirmation, rotation, re-enrollment).
+	mu sync.Mutex
 }
 
-// Vault entries this package keeps. Only the vault process reads them.
+// Vault entries this package keeps. Only the vault process reads them,
+// and each is read only under its own kind: an entry of another kind (a
+// credential written under a reserved name) fails closed.
 const (
-	// CardName holds the full Owner Card (EncodeCard).
+	// CardName holds the Owner Card's operating values (storedCard):
+	// never the vault passphrase or the recovery key.
 	CardName = "owner-card"
 	KindCard = "owner_card"
-	// KindCardPart marks each printed card secret's own entry
-	// ("owner-card-passphrase" and so on), there for the redactor.
+	// KindCardPart marks each stored card secret's own entry
+	// ("owner-card-wifi", "owner-card-setup"), there for the redactor.
 	KindCardPart = "owner_card_part"
-	// BackupKeyName holds the X25519 public key backups are sealed to.
+	// BackupKeyName holds the X25519 public key backups are sealed to,
+	// bound to the recovery slot it belongs to.
 	BackupKeyName = "recovery-backup-key"
 	KindBackupKey = "backup_public_key"
+	// MACKeyName holds the key of the MAC that ends every backup.
+	MACKeyName = "recovery-backup-mac"
+	KindMACKey = "backup_mac_key"
 	// StateName holds the restore state (REC-2).
 	StateName = "recovery-state"
 	KindState = "recovery_state"
@@ -65,13 +79,37 @@ const (
 	SeedName = "owner-totp-seed"
 )
 
-// opens reports whether rk opens the drive's recovery slot. It opens a
-// second, short-lived view of the vault to prove it.
+// ErrWrongKind is a reserved entry stored under another kind.
+var ErrWrongKind = errors.New("recovery: a reserved vault entry has the wrong kind")
+
+// reserved reads a reserved entry, requiring its kind.
+func reserved(v *vault.Vault, name, kind string) ([]byte, bool, error) {
+	k, ok := entryKind(v, name)
+	if !ok {
+		return nil, false, nil
+	}
+	s, ok := v.Secret(name)
+	if !ok {
+		return nil, false, nil
+	}
+	if k != kind {
+		return nil, true, ErrWrongKind
+	}
+	return []byte(s.Reveal()), true, nil
+}
+
+// opens reports whether rk opens the drive's recovery slot.
 func (b *Box) opens(rk RecoveryKey) bool {
-	if !rk.Valid() {
+	return rk.Valid() && b.opensWith(Factor(rk))
+}
+
+// opensWith reports whether f opens the drive's key slots. It opens a
+// second, short-lived view of the vault to prove it.
+func (b *Box) opensWith(f vault.Factor) bool {
+	if f == nil {
 		return false
 	}
-	v, err := vault.OpenSealed(b.VaultPath, b.KeysPath, Factor(rk))
+	v, err := vault.OpenSealed(b.VaultPath, b.KeysPath, f)
 	if err != nil {
 		return false
 	}
@@ -79,11 +117,97 @@ func (b *Box) opens(rk RecoveryKey) bool {
 	return true
 }
 
-// LoadCard reads the Owner Card from the vault.
+// backupValue is the backup key entry: the public key and the recovery
+// slot it was derived for, so a backup is never sealed to a key that no
+// longer matches the drive's recovery slot.
+type backupValue struct {
+	Format string `json:"format"`
+	Public []byte `json:"public"`
+	Slot   []byte `json:"slot"`
+}
+
+const backupKeyFormat = "agentos-backup-key-v1"
+
+func storeBackupKey(b *Box, rk RecoveryKey) error {
+	pub, err := backupPublic(rk)
+	if err != nil {
+		return err
+	}
+	id, err := recoverySlotID(b.KeysPath)
+	if err != nil {
+		return err
+	}
+	if _, _, err := reserved(b.V, BackupKeyName, KindBackupKey); err != nil {
+		return err
+	}
+	enc, err := json.Marshal(backupValue{backupKeyFormat, pub, id})
+	if err != nil {
+		return err
+	}
+	return b.V.Put(BackupKeyName, KindBackupKey, enc)
+}
+
+// backupKey returns the public key to seal backups to. It fails closed
+// on a missing or wrong-kind entry, or one bound to another recovery slot.
+func backupKey(b *Box) ([]byte, error) {
+	raw, ok, err := reserved(b.V, BackupKeyName, KindBackupKey)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, errors.New("recovery: no backup key in the vault; provision the recovery slot first")
+	}
+	var bv backupValue
+	d := json.NewDecoder(bytes.NewReader(raw))
+	d.DisallowUnknownFields()
+	if err := d.Decode(&bv); err != nil || bv.Format != backupKeyFormat || len(bv.Public) != 32 {
+		return nil, errors.New("recovery: malformed backup key")
+	}
+	id, err := recoverySlotID(b.KeysPath)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(id, bv.Slot) {
+		return nil, errors.New("recovery: the backup key does not match the drive's recovery slot; no backup made")
+	}
+	return bv.Public, nil
+}
+
+// ensureMACKey creates the backup MAC key if the vault has none.
+func ensureMACKey(v *vault.Vault) error {
+	_, ok, err := reserved(v, MACKeyName, KindMACKey)
+	if err != nil || ok {
+		return err
+	}
+	k, err := random(nil, 32)
+	if err != nil {
+		return err
+	}
+	defer wipe(k)
+	return v.Put(MACKeyName, KindMACKey, k)
+}
+
+func macKey(v *vault.Vault) ([]byte, error) {
+	k, ok, err := reserved(v, MACKeyName, KindMACKey)
+	if err != nil {
+		return nil, err
+	}
+	if !ok || len(k) != 32 {
+		return nil, errors.New("recovery: no backup MAC key in the vault")
+	}
+	return k, nil
+}
+
+// LoadCard reads the Owner Card's stored values from the vault: every
+// field but the vault passphrase and the recovery key, which the vault
+// never holds.
 func (b *Box) LoadCard() (Card, error) {
-	s, ok := b.V.Secret(CardName)
+	raw, ok, err := reserved(b.V, CardName, KindCard)
+	if err != nil {
+		return Card{}, err
+	}
 	if !ok {
 		return Card{}, errors.New("recovery: no Owner Card in the vault")
 	}
-	return DecodeCard([]byte(s.Reveal()))
+	return DecodeCard(raw)
 }

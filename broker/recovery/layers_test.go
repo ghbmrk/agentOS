@@ -27,6 +27,12 @@ func TestRestoreKeepsMachineLayerWhiteoutsOpaqueMarkersAndOwners(t *testing.T) {
 	must(t, os.WriteFile(suid, []byte("bin"), 0o755))
 	must(t, os.Chown(suid, 1000, 1000))
 	must(t, os.Chmod(suid, 0o755|os.ModeSetuid))
+	rootSuid := filepath.Join(up, "rootsu")
+	must(t, os.WriteFile(rootSuid, []byte("bin"), 0o755))
+	must(t, os.Chmod(rootSuid, 0o755|os.ModeSetuid))
+	// Outside the layers, owners are not restored.
+	other := filepath.Join(x.dir, "broker", "journal", "000001.log")
+	must(t, os.Chown(other, 1000, 1000))
 
 	var buf bytes.Buffer
 	must(t, Backup(x.b, x.roots(), &buf, t0))
@@ -49,5 +55,14 @@ func TestRestoreKeepsMachineLayerWhiteoutsOpaqueMarkersAndOwners(t *testing.T) {
 	if s.Uid != 1000 || s.Gid != 1000 || fi.Mode()&os.ModeSetuid == 0 {
 		t.Fatalf("owner %d:%d mode %v", s.Uid, s.Gid, fi.Mode())
 	}
-	sameTree(t, filepath.Join(x.dir, "broker"), filepath.Join(dst, "broker"))
+	if fi, err := os.Lstat(filepath.Join(nu, "rootsu")); err != nil || fi.Mode()&os.ModeSetuid != 0 {
+		t.Fatalf("setuid root file restored: %v %v", fi.Mode(), err)
+	}
+	must(t, os.Chmod(rootSuid, 0o755)) // as restored, for the comparison
+	fi, err = os.Lstat(filepath.Join(dst, "broker", "journal", "000001.log"))
+	must(t, err)
+	if s := fi.Sys().(*syscall.Stat_t); s.Uid != 0 {
+		t.Fatalf("owner outside a layer restored: %d", s.Uid)
+	}
+	sameTree(t, filepath.Join(x.dir, "broker"), filepath.Join(dst, "broker"), true)
 }

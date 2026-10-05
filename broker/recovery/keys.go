@@ -2,6 +2,7 @@ package recovery
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -117,12 +118,37 @@ func dropHostSlots(path string) (int, error) {
 	return dropped, writeAtomic(path, out)
 }
 
+// recoverySlotID identifies the drive's recovery slot: a hash of its salt
+// and wrapped key, which change whenever the slot is rewritten.
+func recoverySlotID(path string) ([]byte, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	kf, err := parseKeys(raw)
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range kf.Slots {
+		if s.Kind == vault.SlotRecovery {
+			h := sha256.New()
+			for _, f := range [][]byte{s.Sealed, s.Nonce, s.Wrapped} {
+				h.Write(f)
+			}
+			return h.Sum(nil), nil
+		}
+	}
+	return nil, errors.New("recovery: no recovery slot")
+}
+
 // AuditNeedles lists every secret A8's scan must not find in plaintext:
 // the vault data key (unwrapped from the recovery slot by this package's
 // own reading of the file format, so the scan does not trust the vault
-// code it audits), and every value in the vault, the Owner Card's fields
-// among them. It is for the A8 scan tool and tests only.
-func AuditNeedles(b *Box, rk RecoveryKey) ([]Needle, error) {
+// code it audits), every value in the vault (the card's stored values
+// among them), and the factors the vault never holds, as typed from the
+// card: the recovery key and, when given, the vault passphrase. It is for
+// the A8 scan tool and tests only.
+func AuditNeedles(b *Box, rk RecoveryKey, passphrase string) ([]Needle, error) {
 	raw, err := os.ReadFile(b.KeysPath)
 	if err != nil {
 		return nil, err
@@ -137,13 +163,16 @@ func AuditNeedles(b *Box, rk RecoveryKey) ([]Needle, error) {
 		out = append(out, Needle{Name: "vault entry " + e.Name, Value: []byte(s.Reveal()), Text: true})
 	}
 	if c, err := b.LoadCard(); err == nil {
-		for name, v := range map[string]string{"Wi-Fi password": c.WiFiPassword, "setup secret": c.SetupSecret,
-			"vault passphrase": c.VaultPassphrase, "recovery key text": c.RecoveryKey} {
+		for name, v := range map[string]string{"Wi-Fi password": c.WiFiPassword, "setup secret": c.SetupSecret} {
 			if len(v) >= minPattern {
 				out = append(out, Needle{Name: name, Value: []byte(v), Text: true})
 			}
 		}
 		out = append(out, Needle{Name: "grid seed", Value: c.GridSeed})
+	}
+	out = append(out, Needle{Name: "recovery key text", Value: []byte(rk.Text()), Text: true})
+	if len(passphrase) >= minPattern {
+		out = append(out, Needle{Name: "vault passphrase", Value: []byte(passphrase), Text: true})
 	}
 	out = append(out, Needle{Name: "recovery key", Value: append([]byte(nil), rk.b[:]...)})
 	return out, nil

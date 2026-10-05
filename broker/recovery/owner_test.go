@@ -174,8 +174,24 @@ func TestPairingCodeExpiresAndAllowsThreeTries(t *testing.T) {
 		t.Fatal("expired code accepted")
 	}
 	nc, _ = BeginNumberChange(x.b, x.rk, true, t0, nil)
+	wrong := "00000000"
+	if nc.Code == wrong {
+		wrong = "00000001"
+	}
+	// Texts that are not eight digits do not use up the tries.
+	for _, spam := range []string{"T", "HELP", "1234", "0000000x", "123456789"} {
+		nc.Complete(ownerNum, "+15550000777", spam, t0)
+	}
+	nc2, _ := BeginNumberChange(x.b, x.rk, true, t0, nil)
+	for _, spam := range []string{"T", "STOP", "HELP"} {
+		nc2.Complete(ownerNum, "+15550000777", spam, t0)
+		nc2.Complete(ownerNum, "+15550000777", spam, t0)
+	}
+	if got, _, err := nc2.Complete(ownerNum, "+15550000777", nc2.Code, t0); err != nil || got != "+15550000777" {
+		t.Fatalf("spam used up the tries: %v", err)
+	}
 	for i := 0; i < 3; i++ {
-		nc.Complete(ownerNum, "+15550000777", "00000000x", t0)
+		nc.Complete(ownerNum, "+15550000777", wrong, t0)
 	}
 	if _, _, err := nc.Complete(ownerNum, "+15550000777", nc.Code, t0); err == nil {
 		t.Fatal("right code after three wrong ones")

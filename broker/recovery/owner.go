@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/owner"
@@ -34,6 +35,8 @@ func (Enrollment) String() string { return "[code-generator enrollment]" }
 // channel's session (EndSession), and the owner confirms enrollment with
 // one code from the new seed, as at setup (ONB-3).
 func ReEnroll(b *Box, rk RecoveryKey, local bool, r io.Reader) (Enrollment, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if !local {
 		return Enrollment{}, errors.New("recovery: re-enrollment happens on the box's Wi-Fi page")
 	}
@@ -45,6 +48,9 @@ func ReEnroll(b *Box, rk RecoveryKey, local bool, r io.Reader) (Enrollment, erro
 		return Enrollment{}, err
 	}
 	defer wipe(seed)
+	if k, ok := entryKind(b.V, SeedName); ok && k != vault.KindTOTPSeed {
+		return Enrollment{}, ErrWrongKind
+	}
 	if err := b.V.Put(SeedName, vault.KindTOTPSeed, seed); err != nil {
 		return Enrollment{}, err
 	}
@@ -71,7 +77,9 @@ const PairingTTL = 15 * time.Minute
 type NumberChange struct {
 	Code    string
 	Expires time.Time
-	wrong   int
+
+	mu    sync.Mutex
+	wrong int
 }
 
 // BeginNumberChange checks the recovery key (entered on the local page)
@@ -104,24 +112,55 @@ var ErrPairing = errors.New("recovery: not the pairing code, or it expired")
 
 // Complete finishes the change when a text whose whole body is the pairing
 // code arrives from a number other than the current owner's, and returns
-// the new owner number. Three wrong codes end the attempt (CH-18). The
-// new number is announced to the old one, so an owner who did not ask
-// learns of it (REC-3). The caller restarts the owner channel on the new
-// number with the session ended (EndSession), so the new number must
-// unlock with a code before chat runs.
+// the new owner number. Three wrong codes end the attempt (CH-18); only a
+// body of eight digits counts as a try, so other texts cannot use them up.
+// The new number is announced to the old one, with how to undo it, so an
+// owner who did not ask learns of it (REC-3). The caller restarts the
+// owner channel on the new number with the session ended (EndSession), so
+// the new number must unlock with a code before chat runs.
 func (nc *NumberChange) Complete(current, from, text string, now time.Time) (string, Texts, error) {
-	if nc == nil || now.After(nc.Expires) || nc.wrong >= 3 || from == "" || from == current {
+	if nc == nil {
 		return "", Texts{}, ErrPairing
 	}
-	if !hmac.Equal([]byte(trimSpace(text)), []byte(nc.Code)) {
+	nc.mu.Lock()
+	defer nc.mu.Unlock()
+	if now.After(nc.Expires) || nc.wrong >= 3 || from == "" || from == current {
+		return "", Texts{}, ErrPairing
+	}
+	body := trimSpace(text)
+	if !eightDigits(body) {
+		return "", Texts{}, ErrPairing
+	}
+	if !hmac.Equal([]byte(body), []byte(nc.Code)) {
 		nc.wrong++
 		return "", Texts{}, ErrPairing
 	}
 	nc.Expires = time.Time{}
 	return from, Texts{
-		ToOld: fmt.Sprintf("AgentOS: the owner number moved to %s with the recovery key. This number can no longer control the box.", tail(from)),
+		ToOld: fmt.Sprintf("AgentOS: the owner number moved to %s with the recovery key. This number can no longer control the box. If you did not do this, enter the recovery key on the box's Wi-Fi page to move it back.", tail(from)),
 		ToNew: "AgentOS: this is now the owner number. Text a code from your code generator to unlock. HELP for commands.",
 	}, nil
+}
+
+func eightDigits(s string) bool {
+	if len(s) != 8 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// RestoreNotice is the owner text after a restore (REC-2).
+func RestoreNotice(rep Report) string {
+	if rep.Source == "drive" {
+		return "AgentOS: Box restored from its old drive. Pre-allowances and today's budget are paused until you review them on the box page (one step). Grants you revoked recently may appear there; leave them off."
+	}
+	d := rep.Created.UTC().Format("2006-01-02")
+	return fmt.Sprintf("AgentOS: Box restored from a backup made %s. Pre-allowances and today's budget are paused until you review them on the box page (one step). Grants you revoked after %s appear there; leave them off.", d, d)
 }
 
 // EndSession ends the owner channel's session unlock and, after a new

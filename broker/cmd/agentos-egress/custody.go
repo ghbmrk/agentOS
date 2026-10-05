@@ -356,21 +356,42 @@ func (c *custody) model() *egress.Proxy {
 	return c.proxy
 }
 
-// put stores a provider API key while the vault is open. The seed and other
-// kinds are not writable here.
+// put stores a provider API key while the vault is open. Only a built-in
+// adapter's credential name is writable, and never over an entry of
+// another kind, so the seed and the recovery entries (backup key, restore
+// state, Owner Card) cannot be replaced from the local UI.
 func (c *custody) put(name string, value []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.ph != open {
 		return errLocked
 	}
-	if name == "" || name == SeedName || len(name) > 64 {
+	if !adapterCredential(name) || hasOtherKind(c.v, name, vault.KindAPIKey) {
 		return errBadCredential
 	}
 	if err := c.v.Put(name, vault.KindAPIKey, value); err != nil {
 		return errBadCredential
 	}
 	return nil
+}
+
+func adapterCredential(name string) bool {
+	for _, a := range adapters() {
+		if name != "" && a.Credential == name {
+			return true
+		}
+	}
+	return false
+}
+
+// hasOtherKind reports whether name exists with a kind other than kind.
+func hasOtherKind(v *vault.Vault, name, kind string) bool {
+	for _, e := range v.List() {
+		if e.Name == name {
+			return e.Kind != kind
+		}
+	}
+	return false
 }
 
 func hasKind(v *vault.Vault, name, kind string) bool {

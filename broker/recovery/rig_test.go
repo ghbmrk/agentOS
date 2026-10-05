@@ -83,7 +83,8 @@ type box struct {
 
 const ownerNum = "+15550000001"
 
-var lay = Layout{Vault: "egress/vault", Keys: "egress/vault.keys"}
+var lay = Layout{Vault: "egress/vault", Keys: "egress/vault.keys", Owner: "broker/owner.json",
+	Layers: []string{"broker/machines/m1/upper"}}
 
 func newBox(t *testing.T) *box {
 	t.Helper()
@@ -118,6 +119,11 @@ func newBox(t *testing.T) *box {
 	must(t, os.WriteFile(filepath.Join(layer, "etc", "hostname"), []byte("m1\n"), 0o644))
 	must(t, os.Symlink("etc/hostname", filepath.Join(layer, "hostname-link")))
 	must(t, os.WriteFile(filepath.Join(layer, "tool"), []byte("#!/bin/sh\n"), 0o755))
+	if os.Geteuid() == 0 {
+		// A guest user's file: setgid is kept only for a group other than
+		// root's.
+		must(t, os.Chown(filepath.Join(layer, "tool"), 1000, 1000))
+	}
 	must(t, os.Chmod(filepath.Join(layer, "tool"), 0o755|os.ModeSetgid))
 	big := make([]byte, 3*chunkSize+123) // spans several sealed chunks
 	rand.Read(big)
@@ -159,6 +165,15 @@ func openAt(t *testing.T, dst string, rk RecoveryKey) *Box {
 	must(t, err)
 	t.Cleanup(func() { b.V.Close() })
 	return b
+}
+
+// rotate generates and commits a rotation, typing back the prompted value.
+func (x *box) rotate(parts []Part, auth Auth, have vault.Factor) (Card, error) {
+	p, err := BeginRotate(x.b, parts, auth, have, testGen, nil, t0)
+	if err != nil {
+		return Card{}, err
+	}
+	return p.Commit(x.b, p.answer, t0)
 }
 
 // dataKey unwraps the recovery slot from the file format alone, for the

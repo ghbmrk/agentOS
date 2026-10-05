@@ -6,27 +6,31 @@ import (
 	"bytes"
 	"crypto/cipher"
 	"crypto/ecdh"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/vault"
 )
 
 const bundleMagic = "agentos-backup"
-const bundleVersion = 1
+const bundleVersion = 2
 
 // chunkSize is the plaintext size of each sealed chunk of a backup.
 const chunkSize = 64 << 10
@@ -54,10 +58,43 @@ type Root struct {
 	Name, Path string
 }
 
-// Layout says where the vault and its key slots sit in a restored tree,
-// relative to the restore target: "<root name>/<file>".
+// Layout says where things sit in a restored tree, relative to the
+// restore target ("<root name>/<path>").
 type Layout struct {
-	Vault, Keys string
+	// Vault and Keys are the sealed vault and its key-slot file. Both sit
+	// in one root, the vault process's, which is restored with every file
+	// 0600 and every directory 0700, owned by VaultUID and VaultGID when
+	// owners are kept.
+	Vault, Keys        string
+	VaultUID, VaultGID int
+	// Owner is the owner channel's state file, whose session unlock the
+	// restore ends. Empty when the backup carries none.
+	Owner string
+	// Layers are the machine-layer directories (overlay uppers, V17).
+	// Only beneath them are file owners, setuid and setgid bits, absolute
+	// symlinks, and whiteouts restored; elsewhere a symlink must stay
+	// inside its own root.
+	Layers []string
+}
+
+func (l Layout) vaultRoot() (string, error) {
+	vr, _, _ := strings.Cut(l.Vault, "/")
+	kr, _, _ := strings.Cut(l.Keys, "/")
+	if vr == "" || vr != kr || vr == l.Vault || kr == l.Keys {
+		return "", errors.New("recovery: the vault and its key slots must sit in one root")
+	}
+	return vr, nil
+}
+
+// inLayer reports whether clean is a machine layer or beneath one.
+func (l Layout) inLayer(clean string) bool {
+	for _, d := range l.Layers {
+		d = path.Clean(d)
+		if d != "." && d != "" && (clean == d || strings.HasPrefix(clean, d+"/")) {
+			return true
+		}
+	}
+	return false
 }
 
 // backupPrivate is the X25519 key backups are sealed to, derived from the
@@ -89,16 +126,31 @@ func backupPublic(rk RecoveryKey) ([]byte, error) {
 // Contents are sealed in 64 KiB chunks (AES-256-GCM, each chunk numbered
 // and the last one marked), so a reordered, truncated, or modified backup
 // fails to restore.
+//
+// The archive ends with a MAC over every entry, keyed by a vault entry
+// (MACKeyName), so a restore accepts only contents this box wrote: the
+// backup public key alone, which anyone holding it can seal to, does not
+// make a backup restorable.
 func Backup(b *Box, roots []Root, w io.Writer, now time.Time) error {
-	s, ok := b.V.Secret(BackupKeyName)
-	if !ok {
-		return errors.New("recovery: no backup key in the vault; provision the recovery slot first")
+	pub, err := backupKey(b)
+	if err != nil {
+		return err
 	}
-	return backupTo([]byte(s.Reveal()), roots, w, now)
+	mk, err := macKey(b.V)
+	if err != nil {
+		return err
+	}
+	defer wipe(mk)
+	return backupTo(pub, mk, roots, w, now)
 }
 
-func backupTo(pub []byte, roots []Root, w io.Writer, now time.Time) error {
-	return sealTo(pub, w, now, func(tw *tar.Writer) error {
+// macEntry is the archive's last entry: the MAC. Root names cannot start
+// with a dot, so it cannot collide with one.
+const macEntry = ".agentos-backup-mac"
+
+func backupTo(pub, mk []byte, roots []Root, w io.Writer, now time.Time) error {
+	return sealTo(pub, w, now, func(raw *tar.Writer) error {
+		tw := &digestTar{tw: raw, h: sha256.New()}
 		names := map[string]bool{}
 		for _, r := range roots {
 			if r.Name == "" || strings.ContainsAny(r.Name, "/.") || names[r.Name] {
@@ -112,8 +164,67 @@ func backupTo(pub []byte, roots []Root, w io.Writer, now time.Time) error {
 				return err
 			}
 		}
-		return nil
+		if mk == nil {
+			return nil
+		}
+		sum := backupMAC(mk, tw.h.Sum(nil))
+		if err := raw.WriteHeader(&tar.Header{Name: macEntry, Typeflag: tar.TypeReg, Mode: 0o600, Size: int64(len(sum)), ModTime: now, Format: tar.FormatPAX}); err != nil {
+			return err
+		}
+		_, err := raw.Write(sum)
+		return err
 	})
+}
+
+func backupMAC(mk, digest []byte) []byte {
+	m := hmac.New(sha256.New, mk)
+	m.Write([]byte("agentos-backup-mac-v1"))
+	m.Write(digest)
+	return m.Sum(nil)
+}
+
+// tarWriter is what writeTree writes to.
+type tarWriter interface {
+	WriteHeader(*tar.Header) error
+	io.Writer
+}
+
+// digestTar hashes each entry's restored fields and contents as written.
+type digestTar struct {
+	tw *tar.Writer
+	h  hash.Hash
+}
+
+func (d *digestTar) WriteHeader(hd *tar.Header) error {
+	d.h.Write(canonHeader(hd))
+	return d.tw.WriteHeader(hd)
+}
+
+func (d *digestTar) Write(p []byte) (int, error) {
+	d.h.Write(p)
+	return d.tw.Write(p)
+}
+
+// canonHeader is every header field a restore acts on, length-prefixed.
+func canonHeader(hd *tar.Header) []byte {
+	var b bytes.Buffer
+	field := func(v string) {
+		var n [4]byte
+		binary.BigEndian.PutUint32(n[:], uint32(len(v)))
+		b.Write(n[:])
+		b.WriteString(v)
+	}
+	field("entry")
+	field(hd.Name)
+	field(string([]byte{hd.Typeflag}))
+	field(strconv.FormatInt(hd.Mode, 8))
+	field(strconv.Itoa(hd.Uid))
+	field(strconv.Itoa(hd.Gid))
+	field(hd.Linkname)
+	field(strconv.FormatInt(hd.Size, 10))
+	field(hd.PAXRecords["SCHILY.xattr."+opaqueXattr])
+	field(strconv.FormatInt(hd.Devmajor, 10) + ":" + strconv.FormatInt(hd.Devminor, 10))
+	return b.Bytes()
 }
 
 // sealTo writes the preamble and the archive body writes, sealed to pub.
@@ -170,25 +281,40 @@ type Report struct {
 	// DroppedHostSlots counts the TPM slots removed: new hardware is
 	// never trusted until the owner adds it (CRED-9).
 	DroppedHostSlots int
+	// Created is when the backup was made (for the owner's notice).
+	Created time.Time
+	// Source is "backup" or "drive".
+	Source string
 }
 
 // Options tune a restore.
 type Options struct {
-	// KeepOwners restores file owners (the broker runs as root on the
-	// box; machine layers need guest owners, V17). Off, files belong to
-	// the restoring user.
+	// KeepOwners restores file owners beneath the machine layers (the
+	// broker runs as root on the box; layers need guest owners, V17) and
+	// gives the vault root to the vault's user. Off, files belong to the
+	// restoring user and no setuid or setgid bit is restored.
 	KeepOwners bool
-	// Source is recorded in the restore state: "backup" or "drive".
-	Source string
 }
 
 // Restore reads a backup with the recovery key into dst, a path that must
 // not exist yet (REC-1). The recovery key must also open the restored
-// vault. The restored box loses every TPM slot and is restricted until the
-// owner re-confirms its standing grants (REC-2). A restore that fails
-// part way leaves nothing at dst.
+// vault, and the archive's MAC must verify under the restored vault's MAC
+// key. The restored box loses every TPM slot, its owner session ends, and
+// it is restricted until the owner re-confirms its standing grants
+// (REC-2). A restore that fails part way leaves nothing at dst.
 func Restore(r io.Reader, rk RecoveryKey, dst string, lay Layout, opt Options, now time.Time) (Report, error) {
-	var rep Report
+	return restore(r, rk, dst, lay, opt, now, false)
+}
+
+func restore(r io.Reader, rk RecoveryKey, dst string, lay Layout, opt Options, now time.Time, drive bool) (Report, error) {
+	rep := Report{Source: "backup"}
+	if drive {
+		rep.Source = "drive"
+	}
+	vroot, err := lay.vaultRoot()
+	if err != nil {
+		return rep, err
+	}
 	if _, err := os.Lstat(dst); err == nil {
 		return rep, errors.New("recovery: restore target already exists")
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -217,6 +343,7 @@ func Restore(r io.Reader, rk RecoveryKey, dst string, lay Layout, opt Options, n
 	if err := d.Decode(&p); err != nil || p.Magic != bundleMagic || p.Version != bundleVersion || len(p.NoncePrefix) != 7 {
 		return rep, errors.New("recovery: not a backup this version can read")
 	}
+	rep.Created = p.Created
 	eph, err := ecdh.X25519().NewPublicKey(p.Ephemeral)
 	if err != nil {
 		return rep, errors.New("recovery: not a backup this version can read")
@@ -240,16 +367,22 @@ func Restore(r io.Reader, rk RecoveryKey, dst string, lay Layout, opt Options, n
 			os.RemoveAll(tmp)
 		}
 	}()
-	if err := extract(tar.NewReader(sr), tmp, opt, &rep); err != nil {
+	x := &extractor{dst: tmp, opt: opt, lay: lay, vroot: vroot, rep: &rep, h: sha256.New()}
+	if err := x.run(tar.NewReader(sr)); err != nil {
 		return rep, err
 	}
 	if err := sr.end(); err != nil {
 		return rep, err
 	}
 	b := &Box{VaultPath: filepath.Join(tmp, filepath.FromSlash(lay.Vault)), KeysPath: filepath.Join(tmp, filepath.FromSlash(lay.Keys))}
+	for _, f := range []string{b.VaultPath, b.KeysPath} {
+		if fi, err := os.Lstat(f); err != nil || !fi.Mode().IsRegular() {
+			return rep, fmt.Errorf("recovery: the backup holds no regular file at %s", strings.TrimPrefix(f, tmp+string(filepath.Separator)))
+		}
+	}
 	raw, err := os.ReadFile(b.KeysPath)
 	if err != nil {
-		return rep, fmt.Errorf("recovery: the backup holds no key slots at %s", lay.Keys)
+		return rep, err
 	}
 	if err := CheckKeys(raw); err != nil {
 		return rep, err
@@ -260,14 +393,20 @@ func Restore(r io.Reader, rk RecoveryKey, dst string, lay Layout, opt Options, n
 	if b.V, err = vault.OpenSealed(b.VaultPath, b.KeysPath, Factor(rk)); err != nil {
 		return rep, fmt.Errorf("recovery: the restored vault does not open with this recovery key: %w", err)
 	}
-	src := opt.Source
-	if src == "" {
-		src = "backup"
+	err = x.verify(b.V, drive)
+	if err == nil {
+		// Declines are for good, across restores too.
+		prev := LoadState(b.V)
+		err = saveState(b.V, State{Restricted: true, RestoredAt: now.UTC(), Source: rep.Source, Unverified: drive, Declined: prev.Declined})
 	}
-	err = saveState(b.V, State{Restricted: true, RestoredAt: now.UTC(), Source: src})
 	b.V.Close()
 	if err != nil {
 		return rep, err
+	}
+	if lay.Owner != "" {
+		if err := endRestoredSession(filepath.Join(tmp, filepath.FromSlash(lay.Owner))); err != nil {
+			return rep, err
+		}
 	}
 	if err := os.Rename(tmp, dst); err != nil {
 		return rep, err
@@ -280,15 +419,18 @@ func Restore(r io.Reader, rk RecoveryKey, dst string, lay Layout, opt Options, n
 // itself") onto dst with the recovery key. It is a backup piped into a
 // restore, so both paths share one format and one set of checks. The old
 // drive is only read.
+//
+// Nothing authenticates the old drive's plaintext broker state, so the
+// restore is marked unverified (State.Unverified): its owner number and
+// grants are the owner's only once re-confirmed.
 func RestoreDrive(roots []Root, rk RecoveryKey, dst string, lay Layout, opt Options, now time.Time) (Report, error) {
 	pub, err := backupPublic(rk)
 	if err != nil {
 		return Report{}, err
 	}
 	pr, pw := io.Pipe()
-	go func() { pw.CloseWithError(backupTo(pub, roots, pw, now)) }()
-	opt.Source = "drive"
-	rep, err := Restore(pr, rk, dst, lay, opt, now)
+	go func() { pw.CloseWithError(backupTo(pub, nil, roots, pw, now)) }()
+	rep, err := restore(pr, rk, dst, lay, opt, now, true)
 	pr.CloseWithError(errors.New("restore ended"))
 	return rep, err
 }
@@ -337,7 +479,7 @@ func syncDir(dir string) error {
 // files, directories, symlinks, and overlayfs whiteouts (0/0 character
 // devices) with their modes and owners, and the opaque marker on
 // directories; anything else fails with its path named (as vm/overlay V17).
-func writeTree(tw *tar.Writer, root, under string) error {
+func writeTree(tw tarWriter, root, under string) error {
 	return filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -416,12 +558,26 @@ func opaque(p string) (string, bool) {
 	return "y", true
 }
 
-// extract writes a backup's entries under dst. Every entry's parent must
+// extractor writes a backup's entries under dst. Every entry's parent must
 // be a directory this restore created, and files are created exclusively
 // without following links, so no entry (a symlink first, a path beneath
-// it next) can write outside dst.
-func extract(tr *tar.Reader, dst string, opt Options, rep *Report) error {
-	if err := os.Mkdir(dst, 0o700); err != nil {
+// it next) can write outside dst. Outside the machine layers no owner,
+// setuid or setgid bit, whiteout, or symlink leaving its root is restored;
+// the vault root is forced to the vault's user, 0600 files and 0700
+// directories; top-level directories are 0700. It digests what it
+// restores for the MAC check.
+type extractor struct {
+	dst   string
+	opt   Options
+	lay   Layout
+	vroot string
+	rep   *Report
+	h     hash.Hash
+	mac   []byte
+}
+
+func (x *extractor) run(tr *tar.Reader) error {
+	if err := os.Mkdir(x.dst, 0o700); err != nil {
 		return err
 	}
 	dirs := map[string]bool{".": true}
@@ -438,6 +594,20 @@ func extract(tr *tar.Reader, dst string, opt Options, rep *Report) error {
 		if err != nil {
 			return fmt.Errorf("recovery: backup is damaged: %v", err)
 		}
+		if x.mac != nil {
+			return errors.New("recovery: entries after the backup's MAC")
+		}
+		if hd.Name == macEntry {
+			if hd.Typeflag != tar.TypeReg || hd.Size != sha256.Size {
+				return errors.New("recovery: malformed backup MAC")
+			}
+			x.mac = make([]byte, sha256.Size)
+			if _, err := io.ReadFull(tr, x.mac); err != nil {
+				return errDamaged
+			}
+			continue
+		}
+		x.h.Write(canonHeader(hd))
 		name := strings.TrimSuffix(hd.Name, "/")
 		clean := path.Clean(name)
 		if name == "" || clean != name || path.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, "../") || clean == "." {
@@ -446,9 +616,22 @@ func extract(tr *tar.Reader, dst string, opt Options, rep *Report) error {
 		if !dirs[path.Dir(clean)] {
 			return fmt.Errorf("recovery: %q is not under a restored directory", clean)
 		}
-		p := filepath.Join(dst, filepath.FromSlash(clean))
+		top, _, _ := strings.Cut(clean, "/")
+		layer := x.lay.inLayer(clean)
+		inVault := top == x.vroot
+		p := filepath.Join(x.dst, filepath.FromSlash(clean))
 		mode := os.FileMode(hd.Mode & 0o777)
-		special := fileModeBits(hd.Mode)
+		var special os.FileMode
+		if layer && x.opt.KeepOwners {
+			special = fileModeBits(hd.Mode)
+			// Never a setuid file of root's, or setgid to root's group.
+			if hd.Uid == 0 {
+				special &^= os.ModeSetuid
+			}
+			if hd.Gid == 0 {
+				special &^= os.ModeSetgid
+			}
+		}
 		switch hd.Typeflag {
 		case tar.TypeDir:
 			if err := os.Mkdir(p, 0o700); err != nil {
@@ -456,9 +639,15 @@ func extract(tr *tar.Reader, dst string, opt Options, rep *Report) error {
 			}
 			dirs[clean] = true
 			if v, ok := hd.PAXRecords["SCHILY.xattr."+opaqueXattr]; ok {
+				if !layer {
+					return fmt.Errorf("recovery: opaque marker outside a machine layer: %q", clean)
+				}
 				if err := syscall.Setxattr(p, opaqueXattr, []byte(v), 0); err != nil {
 					return fmt.Errorf("recovery: %s: opaque marker: %v", clean, err)
 				}
+			}
+			if inVault || !strings.Contains(clean, "/") {
+				mode, special = 0o700, 0
 			}
 			later = append(later, dirMode{p, mode | special})
 		case tar.TypeReg:
@@ -466,7 +655,7 @@ func extract(tr *tar.Reader, dst string, opt Options, rep *Report) error {
 			if err != nil {
 				return err
 			}
-			n, err := io.Copy(f, tr)
+			n, err := io.Copy(f, io.TeeReader(tr, x.h))
 			if err == nil {
 				err = f.Sync()
 			}
@@ -476,16 +665,25 @@ func extract(tr *tar.Reader, dst string, opt Options, rep *Report) error {
 			if err != nil {
 				return err
 			}
-			rep.Files++
-			rep.Bytes += n
+			x.rep.Files++
+			x.rep.Bytes += n
+			if inVault {
+				mode, special = 0o600, 0
+			}
 			if err := os.Chmod(p, mode|special); err != nil {
 				return err
 			}
 		case tar.TypeSymlink:
+			if !layer && !staysIn(top, clean, hd.Linkname) {
+				return fmt.Errorf("recovery: symlink %q leaves its root", clean)
+			}
 			if err := os.Symlink(hd.Linkname, p); err != nil {
 				return err
 			}
 		case tar.TypeChar:
+			if !layer {
+				return fmt.Errorf("recovery: whiteout outside a machine layer: %q", clean)
+			}
 			if hd.Devmajor != 0 || hd.Devminor != 0 {
 				return fmt.Errorf("recovery: device node %q in backup", clean)
 			}
@@ -495,14 +693,23 @@ func extract(tr *tar.Reader, dst string, opt Options, rep *Report) error {
 		default:
 			return fmt.Errorf("recovery: entry type %q not allowed: %q", hd.Typeflag, clean)
 		}
-		if opt.KeepOwners {
-			if err := os.Lchown(p, hd.Uid, hd.Gid); err != nil {
-				return err
+		if x.opt.KeepOwners {
+			uid, gid := -1, -1
+			switch {
+			case layer:
+				uid, gid = hd.Uid, hd.Gid
+			case inVault:
+				uid, gid = x.lay.VaultUID, x.lay.VaultGID
 			}
-			if hd.Typeflag == tar.TypeReg && special != 0 {
-				// chown clears setuid and setgid; put them back.
-				if err := os.Chmod(p, mode|special); err != nil {
+			if uid >= 0 {
+				if err := os.Lchown(p, uid, gid); err != nil {
 					return err
+				}
+				if hd.Typeflag == tar.TypeReg && special != 0 {
+					// chown clears setuid and setgid; put them back.
+					if err := os.Chmod(p, mode|special); err != nil {
+						return err
+					}
 				}
 			}
 		}
@@ -513,7 +720,56 @@ func extract(tr *tar.Reader, dst string, opt Options, rep *Report) error {
 			return err
 		}
 	}
-	return syncDir(dst)
+	return syncDir(x.dst)
+}
+
+// staysIn reports whether a symlink at clean pointing to link resolves,
+// lexically, inside the root top.
+func staysIn(top, clean, link string) bool {
+	if link == "" || path.IsAbs(link) {
+		return false
+	}
+	t := path.Join(path.Dir(clean), link)
+	return t == top || strings.HasPrefix(t, top+"/")
+}
+
+// verify checks the archive's MAC under the restored vault's MAC key. A
+// drive restore carries none: nothing on the old drive authenticates it.
+func (x *extractor) verify(v *vault.Vault, drive bool) error {
+	if drive {
+		if x.mac != nil {
+			return errors.New("recovery: unexpected MAC in a drive restore")
+		}
+		return nil
+	}
+	if x.mac == nil {
+		return errors.New("recovery: the backup is not authenticated (no MAC)")
+	}
+	mk, err := macKey(v)
+	if err != nil {
+		return err
+	}
+	defer wipe(mk)
+	if !hmac.Equal(x.mac, backupMAC(mk, x.h.Sum(nil))) {
+		return errors.New("recovery: the backup's contents were not written by this box")
+	}
+	return nil
+}
+
+// endRestoredSession ends the restored owner session (UnlockedUntil), so
+// chat waits for a fresh code on the new hardware.
+func endRestoredSession(p string) error {
+	fi, err := os.Lstat(p)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !fi.Mode().IsRegular() {
+		return errors.New("recovery: the owner state is not a regular file")
+	}
+	return EndSession(owner.FileStore{Path: p}, false)
 }
 
 func fileModeBits(m int64) os.FileMode {

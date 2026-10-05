@@ -15,17 +15,29 @@ import (
 )
 
 // needles are every secret A8 requires to be absent from plaintext.
+// A rotated card leaves secrets it did not replace blank.
 func (x *box) needles(c Card) []Needle {
-	rk, _ := ParseRecoveryKey(c.RecoveryKey)
-	return []Needle{
+	out := []Needle{
 		{Name: "vault data key", Value: dataKey(x.t, x.b.KeysPath, x.rk)},
 		{Name: "code-generator seed", Value: x.vaultSeed()},
-		{Name: "grid seed", Value: c.GridSeed},
-		{Name: "recovery key", Value: rk.b[:]},
-		{Name: "recovery key text", Value: []byte(c.RecoveryKey), Text: true},
-		{Name: "vault passphrase", Value: []byte(c.VaultPassphrase), Text: true},
 		{Name: "api key", Value: x.apiKey, Text: true},
 	}
+	if len(c.GridSeed) > 0 {
+		out = append(out, Needle{Name: "grid seed", Value: c.GridSeed})
+	}
+	if rk, err := ParseRecoveryKey(c.RecoveryKey); err == nil {
+		out = append(out, Needle{Name: "recovery key", Value: rk.b[:]},
+			Needle{Name: "recovery key text", Value: []byte(c.RecoveryKey), Text: true})
+	}
+	if c.VaultPassphrase != "" {
+		out = append(out, Needle{Name: "vault passphrase", Value: []byte(c.VaultPassphrase), Text: true})
+	}
+	for _, v := range []string{c.WiFiPassword, c.SetupSecret} {
+		if v != "" {
+			out = append(out, Needle{Name: "card secret", Value: []byte(v), Text: true})
+		}
+	}
+	return out
 }
 
 // REQ: CRED-8, CRED-1
@@ -42,12 +54,12 @@ func TestNoKeySeedOrGridMaterialInAnyPlaintextOnTheDriveOrInBackups(t *testing.T
 	must(t, os.WriteFile(filepath.Join(x.dir, "broker", "backup.agentos"), bk, 0o600))
 	nb, dst, err := x.restore(bk, x.rk, t0)
 	must(t, err)
-	_, err = Reconfirm(nb, []Standing{{"G1", "x"}}, []string{"G1"}, Auth{Code: true, Local: true})
+	_, err = Reconfirm(nb, Answer{Standing: []Standing{{"G1", "x"}}, Keep: []string{"G1"}}, Auth{Code: true, Local: true}, t0)
 	must(t, err)
 	oldSeed := x.vaultSeed()
 	_, err = ReEnroll(x.b, x.rk, true, nil)
 	must(t, err)
-	after, err := Rotate(x.b, []Part{PartWiFi, PartGrid, PartPassphrase}, Auth{Code: true, Local: true}, testGen, nil)
+	after, err := x.rotate([]Part{PartWiFi, PartGrid, PartPassphrase}, Auth{Code: true, Local: true}, Factor(x.rk))
 	must(t, err)
 
 	needles := append(x.needles(before), x.needles(after)...)

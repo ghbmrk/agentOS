@@ -50,7 +50,7 @@ Covered: 52 / 144 requirement IDs
 | CH-20 | — |
 | ID-1 | — |
 | ID-2 | — |
-| CRED-1 | `broker/cmd/agentos-egress/custody_test.go`, `broker/cmd/agentos-egress/server_test.go`, `broker/e2e/a14_test.go`, `broker/e2e/openclaw_test.go`, `broker/egress/egress_test.go`, `broker/guest/plane_test.go`, `broker/meter/meter_test.go`, `broker/modelroute/modelroute_test.go`, `broker/recovery/a8_test.go`, `broker/recovery/imports_test.go`, `broker/recovery/scan_test.go`, `broker/vault/imports_test.go`, `broker/vault/keyslot_test.go`, `broker/vault/redact_test.go`, `broker/vault/vault_test.go` |
+| CRED-1 | `broker/cmd/agentos-egress/custody_test.go`, `broker/cmd/agentos-egress/server_test.go`, `broker/e2e/a14_test.go`, `broker/e2e/openclaw_test.go`, `broker/egress/egress_test.go`, `broker/guest/plane_test.go`, `broker/meter/meter_test.go`, `broker/modelroute/modelroute_test.go`, `broker/recovery/a8_test.go`, `broker/recovery/imports_test.go`, `broker/recovery/rotate_test.go`, `broker/recovery/scan_test.go`, `broker/vault/imports_test.go`, `broker/vault/keyslot_test.go`, `broker/vault/redact_test.go`, `broker/vault/vault_test.go` |
 | CRED-2 | — |
 | CRED-3 | `broker/owner/disclose_test.go` |
 | CRED-4 | `tests/test_s5_executor.py`, `tests/test_s5_protocol.py` |
@@ -60,8 +60,8 @@ Covered: 52 / 144 requirement IDs
 | CRED-8 | `broker/cmd/agentos-a8scan/main_test.go`, `broker/cmd/agentos-egress/custody_test.go`, `broker/cmd/agentos-egress/server_test.go`, `broker/owner/totp_test.go`, `broker/recovery/a8_test.go`, `broker/recovery/recovery_test.go`, `broker/recovery/scan_test.go`, `broker/vault/keyslot_test.go` |
 | CRED-9 | — |
 | CRED-10 | `tests/test_s5_executor.py`, `tests/test_s5_protocol.py` |
-| REC-1 | `broker/recovery/a8_test.go`, `broker/recovery/layers_test.go`, `broker/recovery/recovery_test.go` |
-| REC-2 | `broker/recovery/restrict_test.go` |
+| REC-1 | `broker/recovery/a8_test.go`, `broker/recovery/layers_test.go`, `broker/recovery/recovery_test.go`, `broker/recovery/rotate_test.go` |
+| REC-2 | `broker/recovery/restrict_test.go`, `broker/recovery/rotate_test.go` |
 | REC-3 | `broker/recovery/owner_test.go` |
 | REC-4 | `broker/recovery/rotate_test.go` |
 | ONB-1 | — |

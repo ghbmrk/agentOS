@@ -7,8 +7,9 @@
 //
 //	agentos-a8scan -vault DIR/vault -keys DIR/vault.keys TARGET...
 //
-// The recovery key is read from standard input, never from the command
-// line. Each TARGET is a block device or file (scanned raw, start to end)
+// The recovery key, and optionally the vault passphrase, are read from
+// standard input with echo off, never from the command line; the vault
+// holds neither, so the scan learns them only from the card. Each TARGET is a block device or file (scanned raw, start to end)
 // or a directory (every regular file, no symlinks followed). Before
 // scanning, it plants every needle in a scratch blob and stops unless the
 // scan finds all of them, so a clean result means something. It prints
@@ -27,6 +28,9 @@ import (
 	"io"
 	"log"
 	"os"
+	"strings"
+	"syscall"
+	"unsafe"
 
 	"github.com/ghbmrk/agentos/broker/recovery"
 	"github.com/ghbmrk/agentos/broker/vault"
@@ -40,13 +44,14 @@ func main() {
 	if *vp == "" || *kp == "" || flag.NArg() == 0 {
 		log.Fatal("usage: agentos-a8scan -vault FILE -keys FILE TARGET... (recovery key on stdin)")
 	}
-	fmt.Fprint(os.Stderr, "Recovery key: ")
-	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	in := bufio.NewReader(os.Stdin)
+	line := readSecret(in, "Recovery key: ")
 	rk, err := recovery.ParseRecoveryKey(line)
 	if err != nil {
 		log.Fatal(err)
 	}
-	n, err := run(*vp, *kp, rk, flag.Args(), os.Stdout)
+	pass := strings.TrimRight(readSecret(in, "Vault passphrase (Enter to skip): "), "\r\n")
+	n, err := run(*vp, *kp, rk, pass, flag.Args(), os.Stdout)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -55,7 +60,26 @@ func main() {
 	}
 }
 
-func run(vp, kp string, rk recovery.RecoveryKey, targets []string, out io.Writer) (int, error) {
+// readSecret prompts on standard error and reads one line with terminal
+// echo off (when standard input is a terminal).
+func readSecret(in *bufio.Reader, prompt string) string {
+	fmt.Fprint(os.Stderr, prompt)
+	fd := os.Stdin.Fd()
+	var old syscall.Termios
+	if _, _, e := syscall.Syscall(syscall.SYS_IOCTL, fd, syscall.TCGETS, uintptr(unsafe.Pointer(&old))); e == 0 {
+		quiet := old
+		quiet.Lflag &^= syscall.ECHO
+		syscall.Syscall(syscall.SYS_IOCTL, fd, syscall.TCSETS, uintptr(unsafe.Pointer(&quiet)))
+		defer func() {
+			syscall.Syscall(syscall.SYS_IOCTL, fd, syscall.TCSETS, uintptr(unsafe.Pointer(&old)))
+			fmt.Fprintln(os.Stderr)
+		}()
+	}
+	line, _ := in.ReadString('\n')
+	return line
+}
+
+func run(vp, kp string, rk recovery.RecoveryKey, passphrase string, targets []string, out io.Writer) (int, error) {
 	raw, err := os.ReadFile(kp)
 	if err != nil {
 		return 0, err
@@ -70,7 +94,7 @@ func run(vp, kp string, rk recovery.RecoveryKey, targets []string, out io.Writer
 		return 0, fmt.Errorf("the recovery key does not open this vault: %w", err)
 	}
 	b := &recovery.Box{VaultPath: vp, KeysPath: kp, V: v}
-	needles, err := recovery.AuditNeedles(b, rk)
+	needles, err := recovery.AuditNeedles(b, rk, passphrase)
 	v.Close()
 	if err != nil {
 		return 0, err

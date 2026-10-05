@@ -13,6 +13,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 )
@@ -23,9 +24,17 @@ import (
 const RecoveryKeyBytes = 20
 
 // Alphabet is the Owner Card's alphabet for typed values (card.Alphabet,
-// P2-2): 32 symbols, no I, O, 0 or 1. The recovery key prints as 32 of
-// them, 160 bits, in groups of four.
+// P2-2): 32 symbols, no I, O, 0 or 1.
 const Alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+// The recovery key prints as 32 key symbols (160 bits) in eight groups of
+// four, each group followed by one check symbol: 40 symbols in all.
+const (
+	keyGroups   = 8
+	groupKeyLen = 4
+	groupLen    = groupKeyLen + 1
+	textSymbols = keyGroups * groupLen
+)
 
 // RecoveryKey is the secret printed on the Owner Card's recovery sheet
 // (ID-1). It formats as a placeholder; only Text returns the printable form.
@@ -46,13 +55,13 @@ func NewRecoveryKey(r io.Reader) (RecoveryKey, error) {
 // Valid reports whether k holds a key.
 func (k RecoveryKey) Valid() bool { return k.b != nil }
 
-// Text is the printed form: 32 symbols in eight groups of four, the format
-// of card.Card.RecoveryKey.
+// Text is the printed form: eight dash-separated groups of five symbols,
+// four of the key and one check symbol (checkSymbol).
 func (k RecoveryKey) Text() string {
 	if k.b == nil {
 		return ""
 	}
-	var s strings.Builder
+	var syms []byte
 	var acc uint64
 	bits := 0
 	for _, x := range k.b {
@@ -60,13 +69,48 @@ func (k RecoveryKey) Text() string {
 		bits += 8
 		for bits >= 5 {
 			bits -= 5
-			if s.Len()%5 == 4 {
-				s.WriteByte('-')
-			}
-			s.WriteByte(Alphabet[(acc>>bits)&31])
+			syms = append(syms, byte((acc>>bits)&31))
 		}
 	}
+	var s strings.Builder
+	for g := 0; g < keyGroups; g++ {
+		if g > 0 {
+			s.WriteByte('-')
+		}
+		grp := syms[g*groupKeyLen : (g+1)*groupKeyLen]
+		for _, v := range grp {
+			s.WriteByte(Alphabet[v])
+		}
+		s.WriteByte(Alphabet[checkSymbol(grp)])
+	}
 	return s.String()
+}
+
+// checkSymbol is sum(a^(i+1) * s_i) over GF(32) (x^5 + x^2 + 1, a = x).
+// Each position has a distinct nonzero weight, so any one wrong symbol and
+// any swap of two different neighbours change it.
+func checkSymbol(grp []byte) byte {
+	var c, w byte = 0, 1
+	for _, v := range grp {
+		w = gfMul(w, 2)
+		c ^= gfMul(w, v)
+	}
+	return c
+}
+
+func gfMul(a, b byte) byte {
+	var p byte
+	for b > 0 {
+		if b&1 != 0 {
+			p ^= a
+		}
+		b >>= 1
+		a <<= 1
+		if a&32 != 0 {
+			a ^= 0x25 // x^5 + x^2 + 1
+		}
+	}
+	return p
 }
 
 // String prints a placeholder, so a key logged by mistake shows nothing.
@@ -75,34 +119,53 @@ func (k RecoveryKey) String() string { return "[recovery key]" }
 // GoString prints a placeholder.
 func (k RecoveryKey) GoString() string { return "[recovery key]" }
 
-// ErrRecoveryKeyFormat is text that is not 32 card symbols.
-var ErrRecoveryKeyFormat = errors.New("recovery: that is not a recovery key; it has 32 letters and digits in groups of four")
+// ErrRecoveryKeyFormat is text that is not 40 card symbols.
+var ErrRecoveryKeyFormat = errors.New("recovery: that is not a recovery key; it has 40 letters and digits in groups of five")
+
+// MistypedError is a key whose group fails its check symbol.
+type MistypedError struct{ Group int }
+
+func (e *MistypedError) Error() string {
+	return fmt.Sprintf("recovery: group %d of the recovery key looks mistyped; check it against the card", e.Group)
+}
 
 // ParseRecoveryKey reads a typed or scanned key, ignoring case, spaces and
-// dashes (card.Normalize). A key with a typo parses but opens no slot.
+// dashes (card.Normalize). A group whose check symbol does not match is
+// reported by number (MistypedError).
 func ParseRecoveryKey(s string) (RecoveryKey, error) {
-	var b [RecoveryKeyBytes]byte
-	var acc uint64
-	bits, n, syms := 0, 0, 0
+	var syms []byte
 	for _, c := range strings.ToUpper(s) {
 		if c == ' ' || c == '-' || c == '\t' || c == '\n' || c == '\r' {
 			continue
 		}
 		i := strings.IndexRune(Alphabet, c)
-		if i < 0 || syms == 32 {
+		if i < 0 || len(syms) == textSymbols {
 			return RecoveryKey{}, ErrRecoveryKeyFormat
 		}
-		syms++
-		acc = acc<<5 | uint64(i)
+		syms = append(syms, byte(i))
+	}
+	if len(syms) != textSymbols {
+		return RecoveryKey{}, ErrRecoveryKeyFormat
+	}
+	var key []byte
+	for g := 0; g < keyGroups; g++ {
+		grp := syms[g*groupLen : g*groupLen+groupKeyLen]
+		if checkSymbol(grp) != syms[g*groupLen+groupKeyLen] {
+			return RecoveryKey{}, &MistypedError{Group: g + 1}
+		}
+		key = append(key, grp...)
+	}
+	var b [RecoveryKeyBytes]byte
+	var acc uint64
+	bits, n := 0, 0
+	for _, v := range key {
+		acc = acc<<5 | uint64(v)
 		bits += 5
 		if bits >= 8 {
 			bits -= 8
 			b[n] = byte(acc >> bits)
 			n++
 		}
-	}
-	if syms != 32 {
-		return RecoveryKey{}, ErrRecoveryKeyFormat
 	}
 	return RecoveryKey{b: &b}, nil
 }
