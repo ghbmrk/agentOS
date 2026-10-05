@@ -47,6 +47,11 @@ const (
 // only for them.
 const EvalPrefix = "eval-"
 
+// BuilderPrefix starts every Loop 1 builder machine's ID (loopbuild,
+// W3-builder). The vault process gives such machines the grants of
+// -builder-from, always as private (C-3c-6), never grants of their own.
+const BuilderPrefix = "lb-"
+
 // ReasonEvalCeiling is the vault process's denial reason when a tree under
 // evaluation routes to a model priced above the active rule's dearest
 // route, or to one with no known price. The broker reports such a tree as

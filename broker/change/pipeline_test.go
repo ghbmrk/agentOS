@@ -635,3 +635,19 @@ func TestForgetTasksErasesCasesOfDeletedTasks(t *testing.T) {
 		t.Fatal("not idempotent")
 	}
 }
+
+// C-3c-4 on W3 step 3c: the new-identifier check covers every text file a
+// Loop 1 builder may write, context rules too: a rule selecting a source
+// named by an address the active tree never used asks the owner.
+func TestANewIdentifierInAContextRuleAsks(t *testing.T) {
+	feed := "https://feeds.example.test/a"
+	e := newEnv(t, func(c *Config) {
+		c.Receives = func(m string) []string { return map[string][]string{"mail-agent": {"mail", "calendar", feed}}[m] }
+	})
+	rule := `{"select":["mail","` + feed + `"]}`
+	e.cases(12, ClassContext, "context/mail-agent.json", rule)
+	rep := e.propose(Candidate{Source: Local, Files: Tree{"context/mail-agent.json": []byte(rule)}})
+	if rep.Neutral || rep.Basis == BasisStanding || len(e.owner.asked) != 1 {
+		t.Fatalf("a new address in a context rule adopted without asking: %+v asked=%v", rep, e.owner.asked)
+	}
+}

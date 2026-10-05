@@ -123,12 +123,73 @@ func newProxy(v *vault.Vault, g map[string][]string, tr http.RoundTripper) (*egr
 
 // newRouter builds the model router (P2-7) over the grants. Its egress
 // handler, label, and auditor are given per call (modelHandler).
+// builderGrants gives Loop 1's builder machines the grants of from, under
+// the key modelroute.BuilderPrefix (grantsKey), when from is set. No
+// -grant may name a builder machine, and from may not be one: builders
+// have no grants of their own (W3-builder, C-3c-6).
+func builderGrants(g grants, from string) (grants, error) {
+	for m := range g {
+		if strings.HasPrefix(m, modelroute.BuilderPrefix) {
+			return nil, fmt.Errorf("-grant %s: builder machines take -builder-from's grants, never their own", m)
+		}
+	}
+	out := grants{}
+	for m, a := range g {
+		out[m] = a
+	}
+	if from == "" {
+		return out, nil
+	}
+	if strings.HasPrefix(from, modelroute.BuilderPrefix) || strings.HasPrefix(from, modelroute.EvalPrefix) {
+		return nil, fmt.Errorf("-builder-from %s: name the agent machine whose grants builders use", from)
+	}
+	if len(g[from]) == 0 {
+		return nil, fmt.Errorf("-builder-from %s: that machine has no -grant", from)
+	}
+	out[modelroute.BuilderPrefix] = append([]string(nil), g[from]...)
+	return out, nil
+}
+
+// grantsKey is the grants entry a machine uses: its own, or the builders'
+// for a builder machine.
+func grantsKey(machine string) string {
+	if strings.HasPrefix(machine, modelroute.BuilderPrefix) {
+		return modelroute.BuilderPrefix
+	}
+	return machine
+}
+
+// modelRouting checks the grants, adds the builders' (builderGrants), and
+// builds the router over the result, in that order, so the router sees
+// every grant it serves (L3 MUST 1 on #126).
+func modelRouting(rule route.Rule, g grants, privateOK map[string]bool, builderFrom, evalFrom string) (grants, *route.Router, error) {
+	// -eval-from names an agent machine: never a builder's grants key or a
+	// replay machine (security R1 on #126).
+	if strings.HasPrefix(evalFrom, modelroute.BuilderPrefix) || strings.HasPrefix(evalFrom, modelroute.EvalPrefix) {
+		return nil, nil, fmt.Errorf("-eval-from %s: name the agent machine whose grants replay uses", evalFrom)
+	}
+	for m := range g {
+		if strings.HasPrefix(m, modelroute.EvalPrefix) {
+			return nil, nil, fmt.Errorf("-grant %s: replay machines take -eval-from's grants, never their own", m)
+		}
+	}
+	g, err := builderGrants(g, builderFrom)
+	if err != nil {
+		return nil, nil, err
+	}
+	rt, err := newRouter(rule, g, privateOK)
+	if err != nil {
+		return nil, nil, err
+	}
+	return g, rt, nil
+}
+
 func newRouter(rule route.Rule, g map[string][]string, privateOK map[string]bool) (*route.Router, error) {
 	return route.New(route.Config{
 		Providers: []route.Provider{route.OpenAI(), route.Anthropic()},
 		Rule:      rule,
 		Granted: func(machine, provider string) bool {
-			for _, a := range g[machine] {
+			for _, a := range g[grantsKey(machine)] {
 				if a == provider {
 					return true
 				}
@@ -213,6 +274,7 @@ func serveCmd(args []string) error {
 	rulePath := fs.String("rule", "", "routing rule: JSON task class -> routes (P2-7); adoptions may only reorder its routes")
 	routingPath := fs.String("routing-state", "", "the adopted routing rule, kept across restarts (W3); default routing.json beside the keys")
 	pricesPath := fs.String("prices", "", "model price table for evaluation routes: JSON \"provider/model\" -> {input, output} per million tokens; empty refuses every evaluation route")
+	builderFrom := fs.String("builder-from", "", "the agent machine whose model grants Loop 1's builder machines (lb-) use, always as private data (W3-builder); empty (the default) gives builders no model access")
 	evalFrom := fs.String("eval-from", "", "the agent machine whose model grants replay machines use (LOOP-5); empty (the default) gives replay no model access")
 	privateOK := fs.String("private-ok", "", "providers the owner allowed for private data, comma-separated (CAP-9)")
 	tpmPath := fs.String("tpm", defaultTPM, "this PC's TPM (trusted host, CRED-8); absent means every boot is an unknown host")
@@ -240,7 +302,7 @@ func serveCmd(args []string) error {
 	if rule, err = startRule(base, *routingPath); err != nil {
 		log.Printf("routing: starting from -rule: %v", err)
 	}
-	rt, err := newRouter(rule, g, pok)
+	g, rt, err := modelRouting(rule, g, pok, *builderFrom, *evalFrom)
 	if err != nil {
 		return err
 	}
@@ -251,11 +313,6 @@ func serveCmd(args []string) error {
 			return err
 		}
 		ev = &evalRoute{From: *evalFrom, Grants: g[*evalFrom], PrivateOK: pok, Active: rule, Prices: ps}
-	}
-	for m := range g {
-		if strings.HasPrefix(m, modelroute.EvalPrefix) {
-			return fmt.Errorf("-grant %s: replay machines take -eval-from's grants, never their own", m)
-		}
 	}
 	self := os.Getuid()
 	if *brokerUID < 0 || *brokerUID == self {

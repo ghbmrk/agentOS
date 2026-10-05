@@ -47,6 +47,11 @@ func (p *Pipeline) classify(edits []Edit, base Tree, src Source) classification 
 			p.checkRouting(&cl, e)
 		case ClassContext:
 			p.checkContext(&cl, e)
+			// Every text file a Loop 1 builder may write gets the same
+			// check (C-3c-4 on W3 step 3c).
+			if id := newIdentifier(e.After, base); id != "" {
+				cl.neutral = false
+			}
 		default:
 			cl.neutral = false // config and images are behavior changes (CHG-3)
 		}

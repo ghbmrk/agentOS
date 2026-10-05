@@ -57,7 +57,8 @@ func modelHandler(c *custody, rt *route.Router, ev *evalRoute) http.Handler {
 			return
 		}
 		label := "private"
-		if r.Header.Get(modelroute.HeaderLabel) == egress.LabelPublic {
+		builder := strings.HasPrefix(machine, modelroute.BuilderPrefix)
+		if r.Header.Get(modelroute.HeaderLabel) == egress.LabelPublic && !builder {
 			label = egress.LabelPublic
 		}
 		p := c.model()
@@ -67,7 +68,13 @@ func modelHandler(c *custody, rt *route.Router, ev *evalRoute) http.Handler {
 		}
 		var ca callAudit
 		w.Header().Set("Trailer", modelroute.HeaderUsage)
-		rt.HandlerFor(machine, label, p.HandlerFor(machine, label, &ca), ca.decide(w, r.Method)).ServeHTTP(w, r)
+		// A Loop 1 builder machine is always private and uses the
+		// builders' grants (-builder-from), never its own (C-3c-6).
+		up := p.HandlerFor(machine, label, &ca)
+		if builder {
+			up = p.HandlerWithGrantsOf(machine, modelroute.BuilderPrefix, label, &ca)
+		}
+		rt.HandlerFor(machine, label, up, ca.decide(w, r.Method)).ServeHTTP(w, r)
 		if u := ca.usage(); u != "" {
 			w.Header().Set(modelroute.HeaderUsage, u)
 		}

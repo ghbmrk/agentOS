@@ -4,6 +4,7 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // REQ: OP-8, LOOP-2, LOOP-5
@@ -104,5 +105,25 @@ func TestSharesAreValidated(t *testing.T) {
 		if err := m.SetShares(s); err == nil {
 			t.Fatalf("shares %+v accepted", s)
 		}
+	}
+}
+
+// L3 S4 on #126: a machine's usage is forgotten once its use has left
+// the window, so one-job machines (Loop 1's builders, replay) do not pile
+// up in the meter's state.
+func TestIdleMachinesAreForgotten(t *testing.T) {
+	m, c, _ := open(t, Config{MachineCap: big, OverallCap: big})
+	if err := call(m, "lb-1", 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	c.add(25 * time.Hour)
+	if err := call(m, "lb-2", 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	_, kept := m.st.Machines["lb-1"]
+	m.mu.Unlock()
+	if kept {
+		t.Fatal("a machine idle past the window is still kept")
 	}
 }
