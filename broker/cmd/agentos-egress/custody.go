@@ -101,7 +101,7 @@ var (
 // noteChangeUnfinished is the owner's notice when the vault opens beside
 // a passphrase change that never took effect (vault ChangeUnfinished,
 // P2-4h), once per unlock: the old passphrase still opens it.
-const noteChangeUnfinished = "Your passphrase change did not finish, so your old passphrase still unlocks the box. Change it again."
+const noteChangeUnfinished = "Your passphrase change did not finish, so your old passphrase still works. Change it again the same way you started it."
 
 // noteCounterReset is the owner's notice, once, when this PC's rollback
 // counter for the vault is gone (vault.ErrCounterMissing; arbitrator
@@ -488,6 +488,7 @@ func (c *custody) confirmKeep(ticket, code string, keep bool) (bool, error) {
 		c.supersedeQuiet = 0
 	}
 	c.notify("vault unlocked")
+	c.noteChangeUnfinishedLocked()
 	if !keep {
 		return false, nil
 	}
@@ -551,13 +552,19 @@ func (c *custody) serve(v *vault.Vault) error {
 		c.timer = nil
 	}
 	v.OnWarn(c.notify)
-	if v.ChangeUnfinished() {
-		// A trusted PC's unlock never reaches the local page (P2-4h).
-		c.notify(noteChangeUnfinished)
-	}
 	c.ph, c.v, c.proxy, c.expires, c.ticket, c.needPIN = open, v, p, time.Time{}, "", false
 	c.bootChanged, c.bootUpdated, c.bootSecure = false, false, false
 	return nil
+}
+
+// noteChangeUnfinishedLocked sends noteChangeUnfinished after the unlock
+// notice when the open vault reports a passphrase change that never took
+// effect: a trusted PC's unlock never reaches the local page (P2-4h,
+// UX-104-1). Caller holds mu.
+func (c *custody) noteChangeUnfinishedLocked() {
+	if c.v != nil && c.v.ChangeUnfinished() {
+		c.notify(noteChangeUnfinished)
+	}
 }
 
 // nearMatch finds a code for a step just outside the accepted window, which
@@ -853,6 +860,7 @@ func (c *custody) bootTrusted() {
 			return
 		}
 		c.notify("vault unlocked on this trusted host")
+		c.noteChangeUnfinishedLocked()
 	case errors.Is(err, tpmseal.ErrNeedPIN):
 		c.needPIN = true
 		c.notify("trusted host with a boot PIN: enter the PIN on the local page")
@@ -992,6 +1000,7 @@ func (c *custody) unlockPIN(pin string) error {
 		return err
 	}
 	c.notify("vault unlocked on this trusted host with its boot PIN")
+	c.noteChangeUnfinishedLocked()
 	return nil
 }
 

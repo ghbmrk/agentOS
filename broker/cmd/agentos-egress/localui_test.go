@@ -185,13 +185,15 @@ func TestUnfinishedPassphraseChangeReported(t *testing.T) {
 	}
 	// One owner text when the vault opens, since a trusted PC's unlock
 	// never reaches the page (P2-4h).
-	n := 0
-	for _, s := range notes {
+	// It follows the unlock notice (UX-104-1).
+	n, follows := 0, false
+	for i, s := range notes {
 		if s == noteChangeUnfinished {
 			n++
+			follows = i > 0 && notes[i-1] == "vault unlocked"
 		}
 	}
-	if n != 1 {
+	if n != 1 || !follows {
 		t.Fatalf("owner notes %q", notes)
 	}
 	c.lock()
