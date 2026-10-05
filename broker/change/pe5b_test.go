@@ -108,7 +108,7 @@ func TestCutCountsSurviveARestart(t *testing.T) {
 // candidate waits; with none waiting it runs again; and one that waited
 // once but is not offered again holds it back for one idle pass only.
 func TestParkedCandidatesTakeIdleTurns(t *testing.T) {
-	e, pe := newPreemptEnv(t, func(c *Config) { c.MinHeldOut = 100 })
+	e, pe := newPreemptEnv(t, func(c *Config) { c.MinHeldOut = 100; c.DevPercent = parkDev })
 	e.cases(12, ClassSkill, "skills/greet", "hello")
 	a := greet
 	b := Candidate{Source: Local, Files: Tree{"skills/greet": []byte("hello there")}}

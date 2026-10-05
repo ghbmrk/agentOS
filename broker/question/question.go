@@ -222,6 +222,19 @@ func (e *entry) texted() bool { return e.Texted || !e.Sent.IsZero() }
 
 func (e *entry) open() bool { return e.State == Held || e.State == Waiting }
 
+// Open reports a question held or waiting for the owner: the sleeper does
+// not stop the agent then (PE7 condition 2).
+func (b *Book) Open() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, e := range b.qs {
+		if e.open() {
+			return true
+		}
+	}
+	return false
+}
+
 // dueLocked reports whether e may be texted: held, never sent, and not
 // past its ask-by. While the clock is restricted the ask-by is read on the
 // monotonic clock, and a question whose ask-by cannot be read that way

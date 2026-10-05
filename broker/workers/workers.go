@@ -85,6 +85,27 @@ type Tools struct {
 	mu      sync.Mutex
 	used    map[string]time.Time // worker ID -> last named by a tool
 	pending map[string]string    // worker ID being made -> its lineage
+	calls   map[string]int       // calling machine -> its worker tool calls in flight
+}
+
+// Busy reports whether machine has a worker tool call in flight, such as
+// a running worker_exec: it has work in hand, so the agent sleeper does
+// not stop it (PE7 condition 2, L3 on #149).
+func (t *Tools) Busy(machine string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.calls[machine] > 0
+}
+
+func (t *Tools) called(machine string, d int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.calls == nil {
+		t.calls = map[string]int{}
+	}
+	if t.calls[machine] += d; t.calls[machine] <= 0 {
+		delete(t.calls, machine)
+	}
 }
 
 func (t *Tools) now() time.Time {
@@ -198,6 +219,8 @@ func (t *Tools) Call(ctx context.Context, machine, lineage, name string, raw jso
 		return "", true, errors.New("broker: unknown machine")
 	}
 	c := caller{machine: machine, lineage: lineage, label: me.Label, spec: me.Spec}
+	t.called(machine, 1)
+	defer t.called(machine, -1)
 	var out any
 	switch name {
 	case toolCreate:

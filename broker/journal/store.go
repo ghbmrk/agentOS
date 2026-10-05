@@ -197,6 +197,7 @@ type Record struct {
 	Accepted bool        `json:"accepted,omitempty"`
 	Verdict  Verdict     `json:"verdict,omitempty"`
 	Egress   *EgressNote `json:"egress,omitempty"`
+	Sleep    *SleepNote  `json:"sleep,omitempty"`
 	// FP and EFP carry an erased intent's fingerprints, so OP-1 still
 	// recognises a resubmission once its parameters are gone.
 	FP  string `json:"fp,omitempty"`

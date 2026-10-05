@@ -41,6 +41,8 @@ Pass for S1: at least 3 of 3 vendors switch off by themselves with no keys, eith
 
 On the N95, also read the results file's `agent_and_replay_fit` line: **PASS** means the agent machine and one replay machine fit in memory beside the rest of the floor budget. Note it here: ________
 
+Also read the `agent_warm_wake` line: **PASS** means waking the agent from its overnight sleep spends under 15 s on disk and hashing, before "One moment" would be sent (PE7). Note it here: ________
+
 ## 2. S2: modem test (about 20 minutes per modem)
 
 Use one PC that passed S1, ideally the N95 floor machine.
