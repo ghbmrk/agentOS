@@ -328,6 +328,10 @@ func TestAMistypedPassphraseChangesNothing(t *testing.T) {
 	if _, err := Refresh(x.b, Auth{Code: true, Local: true}, x.rk, []byte("tulip orbit mosaic typo"), nil, t0); !errors.Is(err, ErrWrongPassphrase) {
 		t.Fatalf("refresh with a mistyped passphrase: %v", err)
 	}
+	// Without the passphrase, Refresh refuses before marking anything.
+	if _, err := Refresh(x.b, Auth{Code: true, Local: true}, x.rk, nil, nil, t0); !errors.Is(err, ErrNeedPassphrase) {
+		t.Fatalf("refresh without the passphrase: %v", err)
+	}
 	if now, _ := os.ReadFile(x.b.KeysPath); !bytes.Equal(now, keys) {
 		t.Fatal("keys file changed")
 	}
@@ -372,5 +376,21 @@ func TestDonePageLines(t *testing.T) {
 		if got := RetrustNote(c.n, c.names); got != c.want {
 			t.Fatalf("retrust %d: %q", c.n, got)
 		}
+	}
+}
+
+// A commit that fails after re-encrypting still reports the PCs to trust
+// again and any new enrollment with what is in effect (L3 nit on #64).
+func TestAFailedCommitKeepsWhatTheRefreshChanged(t *testing.T) {
+	x := newBox(t)
+	crashed := errors.New("crash")
+	crashPoint = func(string) error { return crashed }
+	t.Cleanup(func() { crashPoint = func(string) error { return nil } })
+	done, err := x.rotate([]Part{PartRecovery}, Auth{Code: true, Local: true}, Proof{Recovery: x.rk})
+	if !errors.Is(err, ErrCardNotStored) || !errors.Is(err, crashed) {
+		t.Fatalf("crash after re-encryption: %v", err)
+	}
+	if done.RecoveryKey == "" || done.Retrust != 1 {
+		t.Fatalf("what is in effect: %q %d", done.RecoveryKey, done.Retrust)
 	}
 }

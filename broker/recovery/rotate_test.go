@@ -206,7 +206,13 @@ func TestAPartialRotationReturnsWhatIsInEffect(t *testing.T) {
 		t.Fatalf("after Refresh: %v", parts)
 	}
 	// Finishing it clears the marker, and backups resume under the new key.
-	nc2, err := x.rotate([]Part{PartPassphrase, PartRecovery, PartSetup, PartGrid}, Auth{Code: true, Local: true}, Proof{Recovery: x.rk})
+	// The finishing rotation has the card, but shows the lost-card notes.
+	fin, err := BeginRotate(x.b, []Part{PartPassphrase, PartRecovery, PartSetup, PartGrid}, Auth{Code: true, Local: true}, Proof{Recovery: x.rk}, testGen, nil, t0)
+	must(t, err)
+	if !fin.Lost() {
+		t.Fatal("a rotation finishing a lost-card one is not shown as lost")
+	}
+	nc2, err := fin.Commit(x.b, fin.answer, t0)
 	nc = nc2
 	must(t, err)
 	if _, ok := RotationUnfinished(x.b); ok {

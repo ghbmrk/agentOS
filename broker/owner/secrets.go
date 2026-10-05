@@ -34,6 +34,15 @@ type Verifier interface {
 	VerifyTOTP(code string, after int64, counted bool) (step int64, ok bool, err error)
 }
 
+// UnlockProofPrefix marks a "code" that is the proof of an unknown-host
+// vault unlock (P2-4f): UnlockProofPrefix followed by the unlock's ticket,
+// which only the local UI that sent the passphrase holds. The vault
+// process accepts it once, within a minute of the code that opened the
+// vault, as that code's step, so the phone that unlocked the box signs in
+// (LocalSignIn) without spending a second code. The channel passes it to
+// the Verifier like any code; without a Verifier it never matches.
+const UnlockProofPrefix = "unlock:"
+
 // VerifyFailure says why a Verifier could not check a code.
 type VerifyFailure int
 

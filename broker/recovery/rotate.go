@@ -150,6 +150,8 @@ type Pending struct {
 	expires time.Time
 	wrong   int
 	done    bool
+	// lostMark: an unfinished lost-card rotation this one finishes.
+	lostMark bool
 }
 
 // Card is the new card to save and print. Secrets not being rotated are
@@ -243,6 +245,10 @@ func BeginRotate(b *Box, parts []Part, auth Auth, proof Proof, gen Generator, r 
 	// An unfinished rotation's parts are owed: the next rotation replaces
 	// them all, so a lost card's grid and setup secret cannot be left
 	// valid by a narrower one (L3 F3 on #64).
+	lostMark := false
+	if m, ok, err := readMark(b); ok && (err != nil || m.Lost) {
+		lostMark = true
+	}
 	if owed, ok := RotationUnfinished(b); ok {
 		var missing []string
 		for _, q := range owed {
@@ -307,7 +313,7 @@ func BeginRotate(b *Box, parts []Part, auth Auth, proof Proof, gen Generator, r 
 	}
 	// Pending keeps its own copy of a typed passphrase, wiped when done.
 	proof.Passphrase = append([]byte(nil), proof.Passphrase...)
-	p := &Pending{parts: set, next: next, proof: proof, expires: now.Add(PendingTTL)}
+	p := &Pending{parts: set, next: next, proof: proof, expires: now.Add(PendingTTL), lostMark: lostMark}
 	switch {
 	case set[PartRecovery]:
 		p.Prompt = "Type the last group of the new recovery key."
@@ -407,9 +413,13 @@ func (p *Pending) Commit(b *Box, typed string, now time.Time) (Done, error) {
 	}
 	in := Card{WiFiName: cur.WiFiName}
 	wrote := false
+	var done Done
 	fail := func(err error) (Done, error) {
 		if wrote {
-			return Done{Card: in}, errors.Join(ErrCardNotStored, err)
+			// What is in effect, including a new seed's enrollment and the
+			// PCs to trust again if the re-encryption got that far.
+			done.Card = in
+			return done, errors.Join(ErrCardNotStored, err)
 		}
 		return Done{}, err
 	}
@@ -450,7 +460,6 @@ func (p *Pending) Commit(b *Box, typed string, now time.Time) (Done, error) {
 			defer wipe(proof.Passphrase)
 		}
 	}
-	var done Done
 	if p.parts[PartRecovery] {
 		nk, err := ParseRecoveryKey(p.next.RecoveryKey)
 		if err != nil {
@@ -590,6 +599,11 @@ func Refresh(b *Box, auth Auth, rk RecoveryKey, passphrase []byte, r io.Reader, 
 	}
 	if len(passphrase) > 0 && !b.opensWith(vault.Passphrase(string(passphrase))) {
 		return Refreshed{}, ErrWrongPassphrase
+	}
+	// Re-encryption rewraps every passphrase slot: refuse now rather than
+	// mark a refresh that cannot run.
+	if len(passphrase) == 0 && hasSlot(b, vault.SlotPassphrase) {
+		return Refreshed{}, ErrNeedPassphrase
 	}
 	owner := []vault.Factor{Factor(rk)}
 	if len(passphrase) > 0 {
@@ -733,8 +747,10 @@ func (p *Pending) lapse() {
 	p.proof.Passphrase = nil
 }
 
-// Lost reports a rotation made without the current card.
-func (p *Pending) Lost() bool { return p.proof.lost() }
+// Lost reports a rotation made without the current card, or one that
+// finishes an unfinished lost-card rotation: the done page shows the
+// lost-card notes (DoneNotes) for both.
+func (p *Pending) Lost() bool { return p.proof.lost() || p.lostMark }
 
 // DoneNotes are the actions the local page offers after a rotation; lost
 // is a rotation made without the current card.
