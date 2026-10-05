@@ -76,7 +76,8 @@ func Premium(number string) bool {
 // for an account whose own number (E.164) is own. The provider may read
 // the digits as international, after an international prefix (00, 011 or
 // 0011), or as national in the account's own country, after a trunk 0 or
-// none (security F1 on #164: "9005551234" is a US 900 number, not +90).
+// none (security F1 on #164: "9005551234" is a US 900 number, not +90),
+// the national reading only when at most one zero leads (F3).
 func PremiumDialed(dialed, own string) bool {
 	d := strings.TrimLeft(dialed, "0")
 	forms := []string{d}
@@ -89,7 +90,9 @@ func PremiumDialed(dialed, own string) bool {
 				return true
 			}
 		}
-		if p.nat != "" && strings.HasPrefix(own, "+"+p.cc) && strings.HasPrefix(d, p.nat) {
+		// Two or more leading zeros are an international prefix, never a
+		// trunk 0 (security F3 on #164: 0091 is India, not UK 09).
+		if p.nat != "" && len(dialed)-len(d) <= 1 && strings.HasPrefix(own, "+"+p.cc) && strings.HasPrefix(d, p.nat) {
 			return true
 		}
 	}
