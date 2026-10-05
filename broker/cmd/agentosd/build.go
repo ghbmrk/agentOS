@@ -122,8 +122,10 @@ func (l *learning) openBuilder(m builderMachines, imgs images, services *lateSer
 const builderOffNote = "Learning from failed, corrected, slow or costly tasks: not running. Restarting the box may fix it."
 
 // builderUnsetNote is STATUS's line when no -builder-image is given, so an
-// inert builder is never silent (potency R3 on #126).
-const builderUnsetNote = "Learning: only repeated routines are learned; the builder isn't set up."
+// inert builder is never silent (potency R3 on #126). It states a fact and
+// implies no setting: the owner never sets the flag; the box image does
+// (UX-134-1).
+const builderUnsetNote = "Learning: this box learns from repeated routines only, not yet from mistakes or slow tasks."
 
 // startBuilder opens the builder, and on failure logs it and keeps the
 // STATUS note on. With no image it opens nothing and says so.
