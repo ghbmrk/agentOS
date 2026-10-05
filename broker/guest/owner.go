@@ -46,6 +46,13 @@ type inbox struct {
 	msgs    []*ownerMsg
 	wake    chan struct{}
 	closed  bool
+	// stored is set while messages loaded from the store have not yet been
+	// handed out under a private label. The store can outlive the machine
+	// record (a restored state directory, a destroy while the plane was
+	// closed), so the machine now serving this ID may be a fresh public one;
+	// stored messages are owner data, so the label rises before the guest
+	// reads one (REV-5).
+	stored bool
 }
 
 func newInbox(machine string, st *store) *inbox {
@@ -53,7 +60,20 @@ func newInbox(machine string, st *store) *inbox {
 	for _, m := range st.load(machine) {
 		b.msgs = append(b.msgs, &ownerMsg{ID: m.ID, Text: m.Text})
 	}
+	b.stored = len(b.msgs) > 0
 	return b
+}
+
+func (b *inbox) needsRaise() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.stored
+}
+
+func (b *inbox) raised() {
+	b.mu.Lock()
+	b.stored = false
+	b.mu.Unlock()
 }
 
 // persist writes the inbox through to the store. Called with mu held.
@@ -171,6 +191,15 @@ func (p *Plane) ownerNext(m *machine, w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "GET only", http.StatusMethodNotAllowed)
 		return
+	}
+	// Not in Open: the machine manager opens services while holding the
+	// machine's lock, which RaisePrivate takes.
+	if m.box.needsRaise() {
+		if err := p.cfg.Machines.RaisePrivate(m.id); err != nil {
+			http.Error(w, "machine label", http.StatusServiceUnavailable)
+			return
+		}
+		m.box.raised()
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), pollWait)
 	defer cancel()
