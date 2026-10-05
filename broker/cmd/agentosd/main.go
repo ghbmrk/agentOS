@@ -104,6 +104,17 @@ func (l *lateServices) Close(id string) {
 	}
 }
 
+// lateStatus is STATUS's agent line: the keeper's once it runs, and "not
+// set up" before that or when no keeper could start.
+type lateStatus struct{ k atomic.Pointer[keeper] }
+
+func (l *lateStatus) Status() string {
+	if k := l.k.Load(); k != nil {
+		return k.Status()
+	}
+	return agentNotSet
+}
+
 // lateAgent hands owner chat to the guest plane once it exists.
 type lateAgent struct {
 	a atomic.Pointer[guest.OwnerAgent]
@@ -174,6 +185,10 @@ func main() {
 	cfg.Preempter = pre
 	agent := &lateAgent{}
 	cfg.Agent = agent
+	// Until the keeper runs, STATUS says the agent is not set up; it says
+	// so for good if the machine plane or the agent's setup fails.
+	agentStatus := &lateStatus{}
+	cfg.AgentStatus = agentStatus.Status
 	// The code-generator seed lives in the vault, which only the vault
 	// process holds (P2-4a); the channel asks it to check high-tier codes
 	// (egress K7). While the vault is locked those checks fail and count
@@ -217,7 +232,8 @@ func main() {
 				if err != nil {
 					log.Printf("no agent machine kept running: %v", err)
 				} else {
-					k := &keeper{m: m, id: agentMachine, spec: spec, every: 30 * time.Second, logf: log.Printf}
+					k := &keeper{m: m, id: agentMachine, spec: spec, every: 30 * time.Second, logf: log.Printf, status: agentWaiting}
+					agentStatus.k.Store(k)
 					go k.run(ctx)
 				}
 				if learnUID < 0 || learnUID == os.Getuid() {

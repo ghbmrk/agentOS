@@ -6,9 +6,19 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/vm"
+)
+
+// The agent machine's STATUS lines (UX-56-1): fixed words only; raw errors
+// go to the log.
+const (
+	agentWaiting = "Agent: starting, waiting for memory."
+	agentFailed  = "Agent: starting, last try failed."
+	agentNotSet  = "Agent: not set up; the box needs an update or a restart."
 )
 
 // liveMachines is the part of the machine manager that keeps the owner's
@@ -34,6 +44,30 @@ type keeper struct {
 	spec  vm.Spec
 	every time.Duration
 	logf  func(format string, args ...any)
+
+	mu     sync.Mutex
+	status string // STATUS line while not running; empty once it runs
+}
+
+// Status is the keeper's STATUS line: empty while the machine runs.
+func (k *keeper) Status() string {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.status
+}
+
+func (k *keeper) setStatus(err error) {
+	line := ""
+	switch {
+	case err == nil:
+	case errors.Is(err, admission.ErrNoRoom), errors.Is(err, admission.ErrPressure):
+		line = agentWaiting
+	default:
+		line = agentFailed
+	}
+	k.mu.Lock()
+	k.status = line
+	k.mu.Unlock()
 }
 
 // ensure brings the machine to running, or says why it is not.
@@ -61,6 +95,7 @@ func (k *keeper) run(ctx context.Context) {
 	last := ""
 	for {
 		err := k.ensure(ctx)
+		k.setStatus(err)
 		switch {
 		case err != nil && err.Error() != last:
 			last = err.Error()

@@ -162,3 +162,29 @@ func TestLOOP5ReplayMachinesNeverGetTheLivePlane(t *testing.T) {
 	l.Close(vm.EvalPrefix + "r") // nothing open: no panic
 	l.Close("agent")
 }
+
+// STATUS names why the agent is not running in fixed words, never the raw
+// error, and says nothing once it runs (UX-56-1).
+func TestRES1AgentStatusLine(t *testing.T) {
+	var l lateStatus
+	if l.Status() != agentNotSet {
+		t.Fatalf("before the keeper: %q", l.Status())
+	}
+	f := &fakeMachines{m: map[string]vm.Machine{}}
+	k := &keeper{m: f, id: "agent", spec: testSpec, status: agentWaiting}
+	l.k.Store(k)
+	for _, c := range []struct {
+		err  error
+		want string
+	}{
+		{fmt.Errorf("x: %w", admission.ErrNoRoom), agentWaiting},
+		{admission.ErrPressure, agentWaiting},
+		{errors.New("runsc: exit status 1 /var/lib/secret-path"), agentFailed},
+		{nil, ""},
+	} {
+		k.setStatus(c.err)
+		if got := l.Status(); got != c.want {
+			t.Errorf("%v: %q, want %q", c.err, got, c.want)
+		}
+	}
+}

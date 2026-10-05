@@ -23,6 +23,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -278,7 +279,8 @@ func (c *Client) Run(ctx context.Context, t change.Tree, p change.Probe) ([]byte
 	if err != nil {
 		return nil, err
 	}
-	hr, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://agentosd/run", bytes.NewReader(body))
+	u := url.URL{Scheme: "http", Host: "agentosd", Path: "/run"} // over the Unix socket
+	hr, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
