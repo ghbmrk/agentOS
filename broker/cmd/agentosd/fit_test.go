@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/admission"
+	"github.com/ghbmrk/agentos/broker/budget"
 	"github.com/ghbmrk/agentos/broker/daemon"
 )
 
@@ -135,13 +136,13 @@ func TestPE6CapacityFollowsTheBoxMemory(t *testing.T) {
 		if err := fs.Parse(c.args); err != nil {
 			t.Fatal(err)
 		}
-		p := planMemory(c.meminfo, flagSet(fs, "capacity-mb"), *capMB, defaultHeadroomMB, defaultAgentMemMB)
+		p := planMemory(c.meminfo, flagSet(fs, "capacity-mb"), *capMB, budget.Floor(), defaultAgentMemMB)
 		if p.CapacityMB != c.want || !strings.Contains(p.Why, c.says) || p.AgentOff != "" {
 			t.Errorf("%s: %+v, want %d MB naming %q, agent on", c.name, p, c.want, c.says)
 		}
 	}
 	// On the N95 the defaults still hold the agent and one replay machine.
-	p := planMemory(n95, false, defaultCapacityMB, defaultHeadroomMB, defaultAgentMemMB)
+	p := planMemory(n95, false, defaultCapacityMB, budget.Floor(), defaultAgentMemMB)
 	if err := replayFits(p.CapacityMB, defaultHeadroomMB, defaultAgentMemMB, defaultReplayMemMB); err != nil {
 		t.Fatalf("N95: %v", err)
 	}
@@ -159,7 +160,7 @@ func TestPE6ABoxTooSmallForTheAgentSaysSo(t *testing.T) {
 		{"4 GB", "MemTotal: 4096000 kB\n", "Agent: off, this box has 3.9 GB of memory and running the agent needs about 5.6 GB."},
 		{"5 GB", "MemTotal: 5120000 kB\n", "Agent: off, this box has 4.9 GB of memory and running the agent needs about 5.6 GB."},
 	} {
-		p := planMemory(c.meminfo, false, defaultCapacityMB, defaultHeadroomMB, defaultAgentMemMB)
+		p := planMemory(c.meminfo, false, defaultCapacityMB, budget.Floor(), defaultAgentMemMB)
 		if p.AgentOff != c.says {
 			t.Errorf("%s: agent line %q, want %q", c.name, p.AgentOff, c.says)
 		}
@@ -173,10 +174,10 @@ func TestPE6ABoxTooSmallForTheAgentSaysSo(t *testing.T) {
 	}
 	// An explicit capacity too small for the agent says so without a
 	// MemTotal figure, and fits once the agent does.
-	if p := planMemory("MemTotal: 16777216 kB\n", true, 1500, defaultHeadroomMB, defaultAgentMemMB); p.AgentOff == "" || p.CapacityMB != 1500 {
+	if p := planMemory("MemTotal: 16777216 kB\n", true, 1500, budget.Floor(), defaultAgentMemMB); p.AgentOff == "" || p.CapacityMB != 1500 {
 		t.Errorf("explicit 1500: %+v", p)
 	}
-	if p := planMemory("MemTotal: 5939200 kB\n", false, defaultCapacityMB, defaultHeadroomMB, defaultAgentMemMB); p.AgentOff != "" {
+	if p := planMemory("MemTotal: 5939200 kB\n", false, defaultCapacityMB, budget.Floor(), defaultAgentMemMB); p.AgentOff != "" {
 		t.Errorf("5.7 GB box: agent off %q", p.AgentOff)
 	}
 	if (&lateStatus{}).Status() != agentNotSet {
