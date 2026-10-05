@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
 
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/meter"
+	"github.com/ghbmrk/agentos/broker/owner"
 )
 
 // Loop names one of the three loops (§11A).
@@ -130,9 +133,14 @@ func ParseText(msg string) (Request, bool) {
 			return Request{Kind: KindLoops, Loop: All[n-1], On: on}, true
 		}
 	case len(f) == 3 && f[0] == "SPARE" && f[1] == "BUDGET":
+		// Any whole number is a budget request; one over MaxSpareCalls is
+		// answered with the limit rather than passed to the agent (UX-57-2).
 		n, err := strconv.ParseInt(f[2], 10, 64)
-		if err == nil && n >= 0 && n <= MaxSpareCalls && f[2] == strconv.FormatInt(n, 10) {
-			return Request{Kind: KindBudget, Calls: n}, true
+		if errors.Is(err, strconv.ErrRange) && strings.Trim(f[2], "0123456789") == "" {
+			n, err = MaxSpareCalls+1, nil
+		}
+		if err == nil && n >= 0 && (n > MaxSpareCalls || f[2] == strconv.FormatInt(n, 10)) {
+			return Request{Kind: KindBudget, Calls: min(n, MaxSpareCalls+1)}, true
 		}
 	case len(f) == 2 && f[1] == "SHARING" && (f[0] == "STOP" || f[0] == "START"):
 		return Request{Kind: KindSharing, On: f[0] == "START"}, true
@@ -189,9 +197,18 @@ func Confirm(r Request, set Settings) string {
 	}
 	w := strings.ToLower(loopAliases[r.Loop])
 	if r.On {
-		return fmt.Sprintf("%s is back on. Reply %s OFF if this wasn't you.", capitalize(w), loopAliases[r.Loop])
+		return fmt.Sprintf("%s %s back on. Reply %s OFF if this wasn't you.", capitalize(w), be(r.Loop), loopAliases[r.Loop])
 	}
-	return fmt.Sprintf("%s is off until you reply %s ON.", capitalize(w), loopAliases[r.Loop])
+	return fmt.Sprintf("%s %s off until you reply %s ON.", capitalize(w), be(r.Loop), loopAliases[r.Loop])
+}
+
+// be is the verb for a loop's word name: "Learning is", "Security tests
+// are".
+func be(l Loop) string {
+	if strings.HasSuffix(loopAliases[l], "S") {
+		return "are"
+	}
+	return "is"
 }
 
 func capitalize(s string) string {
@@ -212,6 +229,88 @@ func (s *Scheduler) BudgetAsk(in journal.Intent) (string, error) {
 	cur := s.Settings().SpareCalls
 	return fmt.Sprintf("Raise spare-time AI use from %d to %d calls a day?", cur, r.Calls), nil
 }
+
+// LowTierRaiseMax is the most spare calls a day a low-tier raise may set.
+const LowTierRaiseMax = 5 * DefaultSpareCalls
+
+// Line is the owner request for an intent Check sent to the owner (the
+// grants gate's Loops.Line): raising the spare budget, with the old and
+// new calls from broker state (security C2). Spare calls are paid AI use
+// on the owner's provider account, so only a small step is low tier (a
+// texted code): to at most twice the current budget and at most
+// LowTierRaiseMax. Anything larger needs the code generator (GrantChange),
+// so a SIM swapper holding the owner's number cannot open-endedly spend
+// the owner's money (security B1 on #57).
+func (s *Scheduler) Line(in journal.Intent) (owner.Item, error) {
+	r, ok := parseSetting(in.ID)
+	if !ok || r.Kind != KindBudget || in.Action != ActionBudget {
+		return owner.Item{}, errors.New("loops: no owner line for this intent")
+	}
+	cur := s.Settings().SpareCalls
+	kind := owner.Ordinary
+	if r.Calls > 2*cur || r.Calls > LowTierRaiseMax {
+		kind = owner.GrantChange
+	}
+	return owner.Item{Object: "spare-time AI use", Detail: fmt.Sprintf("from %d to %d paid AI calls a day", cur, r.Calls),
+		UndoBy: fmt.Sprintf("SPARE BUDGET %d any time", cur),
+		Facts:  owner.Facts{Kind: kind, Verb: "raise", NoRecipient: true}}, nil
+}
+
+// Text answers an owner text that is a loop setting (the owner channel's
+// settings hook): ok is false for any other message, which goes on to the
+// agent. The owner channel calls it only for messages from the owner's
+// number, after its own control words. In a locked session (unlocked
+// false) only narrowing settings are taken: anything OFF, STOP SHARING, a
+// budget no higher than the current one, and HELP LOOPS, whose worst case
+// is a pause, as for CH-11's pause words (UX-57-1). Turning work on and
+// raising the budget return ok false there, so the owner channel asks for
+// the unlock.
+func (s *Scheduler) Text(ctx context.Context, msg string, unlocked bool) (reply string, ok bool) {
+	r, ok := ParseText(msg)
+	if !ok {
+		return "", false
+	}
+	if !unlocked && !s.narrowing(r) {
+		return "", false
+	}
+	if r.Kind == KindBudget && r.Calls > MaxSpareCalls {
+		return fmt.Sprintf("The most is %d calls a day.", MaxSpareCalls), true
+	}
+	err := s.Set(ctx, r)
+	var no refused
+	switch {
+	case err == nil:
+		return Confirm(r, s.Settings()), true
+	case errors.Is(err, ErrPending):
+		return "Raising spare-time AI use needs your approval; a request follows.", true
+	case errors.Is(err, errNoSharing):
+		return "Sharing is not available yet.", true
+	case errors.As(err, &no):
+		return "Not allowed: " + no.reason + ".", true
+	default:
+		return "The box could not save that setting. Try again later.", true
+	}
+}
+
+// narrowing reports a request whose worst case is a pause.
+func (s *Scheduler) narrowing(r Request) bool {
+	switch r.Kind {
+	case KindHelp:
+		return true
+	case KindLoops, KindSharing:
+		return !r.On
+	case KindBudget:
+		return r.Calls <= s.Settings().SpareCalls
+	}
+	return false
+}
+
+// refused is a setting the broker's policy denied, with its reason.
+type refused struct{ reason string }
+
+func (r refused) Error() string { return "loops: refused: " + r.reason }
+
+var errNoSharing = errors.New("loops: sharing is not wired")
 
 // DefaultsLine is onboarding's one line on the loop defaults (LOOP-0).
 func DefaultsLine(calls int64) string {
@@ -236,13 +335,23 @@ const (
 // request may make: raising the spare budget spends the owner's quota, so
 // a spoofed text must not be enough (CH-10). The broker's policy turns it
 // into an approval request, as for change.ErrNeedsOwner.
-var ErrNeedsOwner = errors.New("loops: needs the owner's approval")
+// It reports NeedsOwner, which is how the grants gate tells it apart
+// without importing this package (ARC-2), as for change.ErrNeedsOwner.
+var ErrNeedsOwner error = needsOwner{}
+
+type needsOwner struct{}
+
+func (needsOwner) Error() string    { return "loops: needs the owner's approval" }
+func (needsOwner) NeedsOwner() bool { return true }
 
 // state is what the scheduler persists.
 type state struct {
 	Seq      int             `json:"seq"`
 	Settings Settings        `json:"settings"`
 	Applied  map[string]bool `json:"applied"`
+	// Order is Applied's IDs in the order they were applied, oldest
+	// first; pruning drops the oldest (L3 R2 on #49).
+	Order []string `json:"order,omitempty"`
 }
 
 // settingID is the intent ID for a request: loops:<n>:<verb>:<arg>.
@@ -310,7 +419,7 @@ func (s *Scheduler) Set(ctx context.Context, r Request) error {
 	}
 	if r.Kind == KindSharing {
 		if s.cfg.Sharing == nil {
-			return errors.New("loops: sharing is not wired")
+			return errNoSharing
 		}
 		return s.cfg.Sharing(ctx, r.On)
 	}
@@ -361,7 +470,7 @@ func runIntent(ctx context.Context, j Journal, in journal.Intent) error {
 	case journal.Pending:
 		return ErrPending
 	case journal.Denied:
-		return errors.New("loops: refused: " + st.Permission.Reason)
+		return refused{strings.TrimPrefix(st.Permission.Reason, "loops: ")}
 	case journal.Authorized:
 		if st, err = j.Dispatch(ctx, in.ID); err != nil {
 			return err
@@ -459,11 +568,13 @@ func (s *Scheduler) Execute(_ context.Context, in journal.Intent, _ int) journal
 		}
 	}
 	s.st.Settings = next
+	prevOrder, prevApplied := s.st.Order, maps.Clone(s.st.Applied)
 	s.st.Applied[in.ID] = true
+	s.st.Order = append(slices.Clip(s.st.Order), in.ID)
 	s.pruneLocked()
 	if err := s.saveLocked(); err != nil {
 		s.st.Settings = prev
-		delete(s.st.Applied, in.ID)
+		s.st.Order, s.st.Applied = prevOrder, prevApplied
 		if r.Kind == KindBudget && s.cfg.Spare != nil {
 			_ = s.cfg.Spare.SetOverallCap(SpareLimits(prev.SpareCalls))
 		}
@@ -512,15 +623,38 @@ func (s *Scheduler) saveLocked() error {
 // ones settled long ago (security R2).
 const keepApplied = 256
 
+// pruneLocked keeps the last keepApplied settings by apply order, so a
+// setting applied now is kept however old its submission is (an approval
+// that waited while many others were made).
 func (s *Scheduler) pruneLocked() {
+	if n := len(s.st.Order) - keepApplied; n > 0 {
+		for _, id := range s.st.Order[:n] {
+			delete(s.st.Applied, id)
+		}
+		s.st.Order = slices.Clone(s.st.Order[n:])
+	}
+}
+
+// orderLocked rebuilds Order for state saved before it existed: by
+// submission number, which is the order those builds applied them in
+// unless an approval waited.
+func (s *Scheduler) orderLocked() {
+	if len(s.st.Order) > 0 || len(s.st.Applied) == 0 {
+		return
+	}
 	for id := range s.st.Applied {
+		s.st.Order = append(s.st.Order, id)
+	}
+	seq := func(id string) int {
 		p := strings.Split(id, ":")
 		if len(p) < 2 {
-			delete(s.st.Applied, id)
-			continue
+			return -1
 		}
-		if n, err := strconv.Atoi(strings.TrimPrefix(p[1], "n")); err != nil || n < s.st.Seq-keepApplied {
-			delete(s.st.Applied, id)
+		n, err := strconv.Atoi(strings.TrimPrefix(p[1], "n"))
+		if err != nil {
+			return -1
 		}
+		return n
 	}
+	slices.SortFunc(s.st.Order, func(a, b string) int { return seq(a) - seq(b) })
 }

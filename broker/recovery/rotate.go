@@ -92,7 +92,7 @@ func Provision(b *Box, c Card, have vault.Factor) error {
 	if err != nil {
 		return err
 	}
-	if err := vault.Rekey(b.KeysPath, have, Factor(rk)); err != nil {
+	if err := b.V.Rekey(have, Factor(rk)); err != nil {
 		return err
 	}
 	if err := storeBackupKey(b, rk); err != nil {
@@ -360,7 +360,7 @@ func (p *Pending) Commit(b *Box, typed string, now time.Time) (Card, error) {
 		}
 	}
 	if p.parts[PartPassphrase] {
-		if err := vault.Rekey(b.KeysPath, proof.factor(), vault.Passphrase(p.next.VaultPassphrase)); err != nil {
+		if err := b.V.Rekey(proof.factor(), vault.Passphrase(p.next.VaultPassphrase)); err != nil {
 			return fail(err)
 		}
 		wrote = true
@@ -375,7 +375,7 @@ func (p *Pending) Commit(b *Box, typed string, now time.Time) (Card, error) {
 		if err != nil {
 			return fail(err)
 		}
-		if err := vault.Rekey(b.KeysPath, proof.factor(), Factor(nk)); err != nil {
+		if err := b.V.Rekey(proof.factor(), Factor(nk)); err != nil {
 			return fail(err)
 		}
 		wrote = true

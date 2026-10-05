@@ -133,29 +133,37 @@ func TestKeySlotsHoldOnlyTPMPassphraseAndRecoverySlots(t *testing.T) {
 	}
 }
 
-// The mirror of the vault's key-slot format must stay exact: a slot
-// rewritten by this package still opens in the vault, and the format alone
-// unwraps the same key the vault uses.
+// The mirror of the vault's key-slot format must stay exact: it reads the
+// vault's keys file back byte for byte, before and after re-encryption,
+// and the format alone unwraps the same key the vault uses.
 func TestKeysMirrorMatchesTheVault(t *testing.T) {
 	x := newBox(t)
-	k := dataKey(t, x.b.KeysPath, x.rk)
-	n, err := dropHostSlots(x.b.KeysPath)
-	if err != nil || n != 1 {
-		t.Fatalf("dropped %d: %v", n, err)
+	check := func(when string) {
+		raw, err := os.ReadFile(x.b.KeysPath)
+		must(t, err)
+		kf, err := parseKeys(raw)
+		must(t, err)
+		out, err := json.Marshal(kf)
+		must(t, err)
+		if !bytes.Equal(out, raw) {
+			t.Fatalf("%s: the mirror does not round-trip the vault's keys file", when)
+		}
+		// The independent unwrap really is the vault's key.
+		if _, err := vault.Open(x.b.VaultPath, dataKey(t, x.b.KeysPath, x.rk)); err != nil {
+			t.Fatalf("%s: mirror unwrap: %v", when, err)
+		}
 	}
-	if k2 := dataKey(t, x.b.KeysPath, x.rk); !bytes.Equal(k, k2) {
-		t.Fatal("rewrite changed the wrapped key")
+	check("before re-encryption")
+	// After vault.Reencrypt every slot carries a key ID (V7).
+	if _, err := x.b.V.Reencrypt(Factor(x.rk)); err != nil {
+		t.Fatal(err)
 	}
-	v, err := vault.OpenSealed(x.b.VaultPath, x.b.KeysPath, Factor(x.rk))
+	raw, err := os.ReadFile(x.b.KeysPath)
 	must(t, err)
-	if s, ok := v.Secret("openai"); !ok || s.Reveal() != string(x.apiKey) {
-		t.Fatal("vault does not open after the rewrite")
+	if !bytes.Contains(raw, []byte(`"key_id"`)) {
+		t.Fatal("no key ID after re-encryption")
 	}
-	v.Close()
-	// The independent unwrap really is the vault's key.
-	if _, err := vault.Open(x.b.VaultPath, k); err != nil {
-		t.Fatalf("mirror unwrap: %v", err)
-	}
+	check("after re-encryption")
 }
 
 // REQ: REC-1

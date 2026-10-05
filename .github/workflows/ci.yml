@@ -41,7 +41,8 @@ jobs:
       - name: Software TPM for the trusted-host slot (P2-4b)
         run: sudo apt-get update -q && sudo apt-get install -yq swtpm
       - name: Format
-        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+        # Vendored third-party code keeps its upstream formatting.
+        run: f=$(find . -name '*.go' -not -path './vendor/*' -print0 | xargs -0 gofmt -l); test -z "$f" || { echo "$f"; exit 1; }
       - name: Vet
         run: go vet ./...
       - name: Tests (race detector)
@@ -75,7 +76,7 @@ jobs:
           sudo mkdir /sys/fs/cgroup/agentos-ci
           sudo env "PATH=$PATH" HOME=/root GOCACHE=/tmp/gocache \
             AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \
-            go test -count=1 -v ./cgroup ./vm/... ./recovery
+            go test -count=1 -v ./cgroup ./vm/... ./recovery ./cleanroom
       - name: OpenClaw guest under gVisor (P1-7)
         # Real OpenClaw, pinned by version and hash, as an agent machine with
         # only its broker socket; a scripted model stands in for a provider.

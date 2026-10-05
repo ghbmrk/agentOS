@@ -6,9 +6,10 @@ import (
 	"net/http"
 )
 
-// Pages carry no script and load nothing from outside the box (ONB-1).
+// Pages load nothing from outside the box and carry no script, except the
+// vault page's one hash-allowed photo shrink (ONB-1, L17).
 // Live progress refreshes with a meta refresh (ONB-4).
-var tmpl = template.Must(template.New("layout").Funcs(template.FuncMap{"phase": phaseText, "boxhost": func() string { return "" }}).Parse(`{{define "head"}}<!doctype html>
+var tmpl = template.Must(template.New("layout").Funcs(template.FuncMap{"phase": phaseText, "boxhost": func() string { return "" }, "shrinkjs": func() template.JS { return template.JS(shrinkJS) }}).Parse(`{{define "head"}}<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 {{if .}}<meta http-equiv="refresh" content="{{.}}">{{end}}
@@ -60,6 +61,42 @@ form { margin: .6em 0 1.2em; }
 <p class="muted">This phone stays signed in for {{.Days}} days, or until the box restarts. Signing in also unlocks chat by text, and the box texts you that a phone signed in.</p>
 {{else}}<p>Setup is not finished yet. <a href="/setup">Continue setup</a></p>{{end}}
 {{if .Vault}}<p><a href="/unlock/vault">Unlock the box on a new PC</a></p>{{end}}
+<p><a href="/status">Status</a></p>
+{{template "foot"}}{{end}}
+
+{{define "vault"}}{{template "head" .Refresh}}
+<h1>Unlock the box</h1>
+{{if .Down}}<p>The box is still starting. This page reloads by itself.</p>
+{{else if eq .State "open"}}<p class="ok">The box is unlocked.{{if .Kept}} This PC stays trusted.{{end}}</p>
+<p>To approve by text again, <a href="/unlock">sign in</a> with your next code.</p>
+{{else if eq .State "opening"}}<p>Checking the passphrase. This page reloads by itself.</p>
+{{else if eq .State "pending"}}{{if .Mine}}<p class="ok">Passphrase accepted.</p>
+<form method="post" action="/unlock/vault"><input type="hidden" name="step" value="code">
+<label>Code from your code generator, by {{.Expires}}
+<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required autofocus></label>
+{{if .Keep}}<label><input type="checkbox" name="keep" value="1"> Keep this PC trusted</label><br>{{end}}
+{{with .Err}}<p class="err">{{.}}</p>{{end}}
+<button>Unlock</button></form>
+{{else}}{{with .Err}}<p class="err">{{.}}</p>{{end}}
+<p>An unlock is waiting for a code on another phone or a closed page. It ends by itself at {{.Expires}}.</p>{{end}}
+{{else}}
+<p><b>If this drive was out of your hands, unlock it only on your trusted PC.</b></p>
+{{with .Boot}}<p class="err">{{.}}</p>{{end}}
+{{with .Err}}<p class="err">{{.}}</p>{{end}}
+{{if .PIN}}<form method="post" action="/unlock/vault"><input type="hidden" name="step" value="pin">
+<label>This PC is trusted and has a boot PIN. Enter it
+<input type="password" name="pin" inputmode="numeric" autocomplete="off" required></label>
+<button>Unlock</button></form>
+<h2>Or use your Owner Card</h2>{{end}}
+<form method="post" action="/unlock/vault" enctype="multipart/form-data"><input type="hidden" name="step" value="passphrase">
+<label>Photo of the vault passphrase QR code on your card
+<input type="file" name="photo" id="photo" accept="image/*"></label>
+<p class="muted">Or type the passphrase words.</p>
+<input type="text" name="passphrase" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" aria-label="Passphrase words">
+<button>Next</button></form>
+<p class="muted">Next, the box asks for a code from your code generator. The passphrase alone does not unlock it.</p>
+<script>{{shrinkjs}}</script>
+{{end}}
 <p><a href="/status">Status</a></p>
 {{template "foot"}}{{end}}
 
