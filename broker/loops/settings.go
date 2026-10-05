@@ -50,7 +50,64 @@ type Settings struct {
 	// Spare is the spare AI budget per meter window (LOOP-2), counted in
 	// model calls; tokens scale with it (TokensPerCall).
 	SpareCalls int64 `json:"spare_calls"`
+	// Updates are the owner's update channel and cadence (UPD-4, UPD-5),
+	// which Loop 3 reads.
+	Updates UpdateSettings `json:"updates,omitzero"`
 }
+
+// Update channels (UPD-4), as update and maintain name them.
+const (
+	ChannelStable = "stable" // the default
+	ChannelFast   = "fast"
+	ChannelPinned = "pinned" // no automatic updates, security notices only
+)
+
+// Soak bounds for stable releases, in days (UPD-5: at least 7).
+const (
+	DefaultSoakDays = 7
+	MinSoakDays     = 7
+	MaxSoakDays     = 60 // well inside maintain's 90-day memory of first sightings
+)
+
+// UpdateSettings are UPD-5's cadence defaults as owner settings. The zero
+// value is the spec default: stable, a 7-day soak, tested security fixes
+// staged on their own.
+type UpdateSettings struct {
+	// Channel is ChannelStable, ChannelFast or ChannelPinned; empty is
+	// stable.
+	Channel string `json:"channel,omitempty"`
+	// SoakDays is how long a stable release waits before it is offered;
+	// zero is DefaultSoakDays.
+	SoakDays int `json:"soak_days,omitempty"`
+	// SecurityAsk sends every security fix to the owner instead of staging
+	// a tested one on its own.
+	SecurityAsk bool `json:"security_ask,omitempty"`
+}
+
+// ChannelName is the channel, with the default filled in. A saved value
+// that is not a channel reads as stable, so a damaged state file never
+// stops checks or security notices (L3 MUST on #130).
+func (u UpdateSettings) ChannelName() string {
+	if _, ok := channelRank[u.Channel]; !ok {
+		return ChannelStable
+	}
+	return u.Channel
+}
+
+// Soak is the soak in days, with the default filled in and clamped to
+// MinSoakDays..MaxSoakDays whatever the saved state says (L3 MUST on #130).
+func (u UpdateSettings) Soak() int {
+	if u.SoakDays <= 0 {
+		return DefaultSoakDays
+	}
+	return min(max(u.SoakDays, MinSoakDays), MaxSoakDays)
+}
+
+// channelRank orders channels from fastest to most cautious.
+var channelRank = map[string]int{ChannelFast: 0, ChannelStable: 1, ChannelPinned: 2}
+
+// channelWords are the channels in owner texts.
+var channelWords = map[string]string{"STABLE": ChannelStable, "FAST": ChannelFast, "PINNED": ChannelPinned}
 
 // On reports whether loop l may run.
 func (s Settings) On(l Loop) bool { return !s.Off && !s.Paused[l] }
@@ -84,6 +141,11 @@ const (
 	KindBudget  Kind = "budget"  // set the spare budget
 	KindSharing Kind = "sharing" // the change pipeline's sharing setting
 	KindHelp    Kind = "help"    // HELP LOOPS: the full list, changes nothing
+
+	KindChannel     Kind = "channel"      // UPDATES STABLE | FAST | PINNED (UPD-4)
+	KindSoak        Kind = "soak"         // UPDATE SOAK n: days a stable release waits (UPD-5)
+	KindSecurity    Kind = "security"     // SECURITY UPDATES AUTO (On) | ASK
+	KindHelpUpdates Kind = "help-updates" // HELP UPDATES, changes nothing
 )
 
 // Request is one parsed owner setting.
@@ -92,6 +154,10 @@ type Request struct {
 	Loop  Loop // KindLoops: empty means every loop (the global switch)
 	On    bool
 	Calls int64 // KindBudget
+	// Channel is KindChannel's channel.
+	Channel string
+	// Days is KindSoak's soak; out of range is answered with the bound.
+	Days int
 }
 
 // ParseText reads an owner text as a loop setting (LOOP-0, CH-11). Like a
@@ -104,6 +170,10 @@ type Request struct {
 //	LEARNING, SECURITY TESTS, UPDATE CHECKS + OFF | ON (one loop by name)
 //	STOP SHARING | START SHARING
 //	HELP LOOPS
+//	UPDATES STABLE | UPDATES FAST | UPDATES PINNED
+//	UPDATE SOAK 14 [DAYS]
+//	SECURITY UPDATES AUTO | SECURITY UPDATES ASK
+//	HELP UPDATES
 //
 // Anything else is not a loop setting and goes on to the agent.
 func ParseText(msg string) (Request, bool) {
@@ -147,6 +217,21 @@ func ParseText(msg string) (Request, bool) {
 		return Request{Kind: KindSharing, On: f[0] == "START"}, true
 	case len(f) == 2 && f[0] == "HELP" && f[1] == "LOOPS":
 		return Request{Kind: KindHelp}, true
+	case len(f) == 2 && f[0] == "HELP" && f[1] == "UPDATES":
+		return Request{Kind: KindHelpUpdates}, true
+	// UPDATE and UPDATES are both taken (UX-130-1).
+	case len(f) == 2 && (f[0] == "UPDATES" || f[0] == "UPDATE") && channelWords[f[1]] != "":
+		return Request{Kind: KindChannel, Channel: channelWords[f[1]]}, true
+	case (len(f) == 3 || len(f) == 4 && (f[3] == "DAYS" || f[3] == "DAY")) && (f[0] == "UPDATE" || f[0] == "UPDATES") && f[1] == "SOAK":
+		n, err := strconv.Atoi(f[2])
+		if errors.Is(err, strconv.ErrRange) && strings.Trim(f[2], "0123456789") == "" {
+			n, err = MaxSoakDays+1, nil
+		}
+		if err == nil && n >= 0 && (n > MaxSoakDays || f[2] == strconv.Itoa(n)) {
+			return Request{Kind: KindSoak, Days: min(n, MaxSoakDays+1)}, true
+		}
+	case len(f) == 3 && f[0] == "SECURITY" && (f[1] == "UPDATES" || f[1] == "UPDATE") && (f[2] == "AUTO" || f[2] == "ASK"):
+		return Request{Kind: KindSecurity, On: f[2] == "AUTO"}, true
 	case len(f) >= 2:
 		// Word names for each loop (UX-49-2): LEARNING OFF, SECURITY
 		// TESTS OFF, UPDATE CHECKS ON.
@@ -173,8 +258,12 @@ var loopAliases = map[Loop]string{
 const HelpLine = "LOOPS OFF/ON: spare-time learning and self-tests. HELP LOOPS for more."
 
 // HelpText is the reply to HELP LOOPS.
-const HelpText = "LOOPS OFF/ON: all spare-time work. LEARNING, SECURITY TESTS or UPDATE CHECKS OFF/ON: one part. " +
-	"SPARE BUDGET 100: AI calls a day. STOP SHARING."
+const HelpText = "LOOPS OFF/ON: all spare-time work. LEARNING, SECURITY TESTS, UPDATE CHECKS OFF/ON: one part. " +
+	"SPARE BUDGET 100: AI calls/day. STOP SHARING. HELP UPDATES."
+
+// HelpUpdates is the reply to HELP UPDATES.
+const HelpUpdates = "UPDATES STABLE, FAST or PINNED: which releases the box offers. UPDATE SOAK 7: days other boxes test a release first. " +
+	"SECURITY UPDATES AUTO or ASK."
 
 // Confirm is the owner's one-line reply once a request took effect
 // (UX-49-3; security C1 for turning work back on).
@@ -182,6 +271,27 @@ func Confirm(r Request, set Settings) string {
 	switch r.Kind {
 	case KindHelp:
 		return HelpText
+	case KindHelpUpdates:
+		return HelpUpdates
+	case KindChannel:
+		switch r.Channel {
+		case ChannelFast:
+			return "Updates: fast channel. New releases are offered as they come out."
+		case ChannelPinned:
+			return "Updates: pinned. Nothing installs on its own; the box still tells you about security fixes."
+		}
+		return fmt.Sprintf("Updates: stable channel. Releases are offered after other boxes have tested them for %d days.", set.Updates.Soak())
+	case KindSoak:
+		reply := fmt.Sprintf("Stable releases now wait %d days before the box offers them.", set.Updates.Soak())
+		if set.Updates.ChannelName() != ChannelStable {
+			reply += " It applies once you're on UPDATES STABLE." // UX-130-3
+		}
+		return reply
+	case KindSecurity:
+		if r.On {
+			return "Tested security fixes install on their own again. Reply SECURITY UPDATES ASK if this wasn't you."
+		}
+		return "The box will ask you before it installs each security fix. Reply SECURITY UPDATES AUTO to undo."
 	case KindBudget:
 		return fmt.Sprintf("Spare-time work may now use up to %d AI calls a day.", set.SpareCalls)
 	case KindSharing:
@@ -277,11 +387,37 @@ func (s *Scheduler) Text(ctx context.Context, msg string, unlocked bool) (reply 
 	if r.Kind == KindBudget && r.Calls > MaxSpareCalls {
 		return fmt.Sprintf("The most is %d calls a day.", MaxSpareCalls), true
 	}
+	if r.Kind == KindSoak && r.Days < MinSoakDays {
+		return fmt.Sprintf("The shortest soak is %d days; UPDATES FAST takes releases as they come out.", MinSoakDays), true
+	}
+	if r.Kind == KindSoak && r.Days > MaxSoakDays {
+		return fmt.Sprintf("The longest soak is %d days.", MaxSoakDays), true
+	}
+	prev := s.Settings().Updates
 	err := s.Set(ctx, r)
 	var no refused
 	switch {
 	case err == nil:
-		return Confirm(r, s.Settings()), true
+		reply := Confirm(r, s.Settings())
+		// Making updates faster again says how to undo it (security C1).
+		switch {
+		case r.Kind == KindSoak && r.Days < prev.Soak():
+			reply += fmt.Sprintf(" Reply UPDATE SOAK %d if this wasn't you.", prev.Soak())
+		case r.Kind == KindChannel && r.Channel == ChannelStable && prev.ChannelName() == ChannelPinned:
+			reply += " Reply UPDATES PINNED if this wasn't you."
+		case r.Kind == KindChannel && r.Channel != ChannelStable:
+			// The undo names the channel the box was on (L3 on #130).
+			back := prev.ChannelName()
+			if back == r.Channel {
+				back = ChannelStable
+			}
+			if r.Channel == ChannelFast {
+				reply += fmt.Sprintf(" Reply UPDATES %s if this wasn't you.", strings.ToUpper(back))
+			} else {
+				reply += fmt.Sprintf(" Reply UPDATES %s to undo.", strings.ToUpper(back))
+			}
+		}
+		return reply, true
 	case errors.Is(err, ErrPending):
 		return "Raising spare-time AI use needs your approval; a request follows.", true
 	case errors.Is(err, errNoSharing):
@@ -303,12 +439,21 @@ func (s *Scheduler) Narrows(msg string) bool {
 // narrowing reports a request whose worst case is a pause.
 func (s *Scheduler) narrowing(r Request) bool {
 	switch r.Kind {
-	case KindHelp:
+	case KindHelp, KindHelpUpdates:
 		return true
 	case KindLoops, KindSharing:
 		return !r.On
 	case KindBudget:
 		return r.Calls <= s.Settings().SpareCalls
+	// Update settings narrow when they make updates slower or more
+	// cautious, as UPDATE CHECKS OFF does: a later channel, a longer soak,
+	// asking before security fixes.
+	case KindChannel:
+		return channelRank[r.Channel] >= channelRank[s.Settings().Updates.ChannelName()]
+	case KindSoak:
+		return r.Days >= s.Settings().Updates.Soak()
+	case KindSecurity:
+		return !r.On
 	}
 	return false
 }
@@ -337,6 +482,9 @@ const (
 	ActionOn          = "meta.loops.on"
 	ActionBudget      = "meta.loops.budget" // raising the spare budget
 	ActionBudgetLower = journal.ActionLoopsBudgetLower
+	// ActionUpdates changes the update channel or cadence. It is not in
+	// the journal's narrowing set, so it waits out a STOP.
+	ActionUpdates = "meta.loops.updates"
 )
 
 // ErrNeedsOwner is returned by Check for a setting only an approved owner
@@ -383,6 +531,22 @@ func settingID(n int, r Request) (id, action string, err error) {
 			return "", "", fmt.Errorf("loops: spare budget %d out of range", r.Calls)
 		}
 		return fmt.Sprintf("loops:n%d:budget:%d", n, r.Calls), "", nil
+	case KindChannel:
+		if _, ok := channelRank[r.Channel]; !ok {
+			return "", "", fmt.Errorf("loops: unknown channel %q", r.Channel)
+		}
+		return fmt.Sprintf("loops:n%d:channel:%s", n, r.Channel), ActionUpdates, nil
+	case KindSoak:
+		if r.Days < MinSoakDays || r.Days > MaxSoakDays {
+			return "", "", fmt.Errorf("loops: soak %d days out of range", r.Days)
+		}
+		return fmt.Sprintf("loops:n%d:soak:%d", n, r.Days), ActionUpdates, nil
+	case KindSecurity:
+		arg := "ask"
+		if r.On {
+			arg = "auto"
+		}
+		return fmt.Sprintf("loops:n%d:security:%s", n, arg), ActionUpdates, nil
 	}
 	return "", "", fmt.Errorf("loops: %q is not a loop setting", r.Kind)
 }
@@ -412,6 +576,22 @@ func parseSetting(id string) (Request, bool) {
 			return Request{}, false
 		}
 		return Request{Kind: KindBudget, Calls: n}, true
+	case "channel":
+		if _, ok := channelRank[p[3]]; !ok {
+			return Request{}, false
+		}
+		return Request{Kind: KindChannel, Channel: p[3]}, true
+	case "soak":
+		n, err := strconv.Atoi(p[3])
+		if err != nil || n < MinSoakDays || n > MaxSoakDays || p[3] != strconv.Itoa(n) {
+			return Request{}, false
+		}
+		return Request{Kind: KindSoak, Days: n}, true
+	case "security":
+		if p[3] != "auto" && p[3] != "ask" {
+			return Request{}, false
+		}
+		return Request{Kind: KindSecurity, On: p[3] == "auto"}, true
 	}
 	return Request{}, false
 }
@@ -422,7 +602,7 @@ func parseSetting(id string) (Request, bool) {
 // whose origin the broker authenticated. It returns ErrPending when the
 // setting waits for the owner's approval (raising the budget).
 func (s *Scheduler) Set(ctx context.Context, r Request) error {
-	if r.Kind == KindHelp {
+	if r.Kind == KindHelp || r.Kind == KindHelpUpdates {
 		return nil
 	}
 	if r.Kind == KindSharing {
@@ -450,6 +630,12 @@ func (s *Scheduler) Set(ctx context.Context, r Request) error {
 	switch r.Kind {
 	case KindLoops:
 		params["loop"], params["on"] = string(r.Loop), r.On
+	case KindChannel:
+		params["channel"] = r.Channel
+	case KindSoak:
+		params["days"] = r.Days
+	case KindSecurity:
+		params["auto"] = r.On
 	case KindBudget:
 		params["calls"] = r.Calls
 		action = ActionBudget
@@ -523,6 +709,10 @@ func (s *Scheduler) Check(_ context.Context, _ journal.Phase, in journal.Intent)
 		return nil
 	case r.Kind == KindBudget && in.Action == ActionBudget:
 		return ErrNeedsOwner
+	case (r.Kind == KindChannel || r.Kind == KindSoak || r.Kind == KindSecurity) && in.Action == ActionUpdates:
+		// The owner's text, like turning loops on: no loop or pipeline
+		// origin reaches here (LOOP-6).
+		return nil
 	}
 	return errors.New("loops: action does not match the setting")
 }
@@ -563,6 +753,12 @@ func (s *Scheduler) Execute(_ context.Context, in journal.Intent, _ int) journal
 		} else {
 			next.Paused[r.Loop] = true
 		}
+	case KindChannel:
+		next.Updates.Channel = r.Channel
+	case KindSoak:
+		next.Updates.SoakDays = r.Days
+	case KindSecurity:
+		next.Updates.SecurityAsk = !r.On
 	case KindBudget:
 		if in.Action == ActionBudgetLower && r.Calls > prev.SpareCalls {
 			// Check allowed it as narrowing; the budget changed since.

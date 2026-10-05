@@ -1,0 +1,5 @@
+{
+  "note": "How a Loop 1 builder machine starts (vm.Spec Argv and Env; agentosd -builder-launch). The brief client is PID 1: it reads /brief, calls the model route, and posts /candidate or /done on its one socket (W3-builder-image).",
+  "argv": ["/usr/local/bin/agentos-builder"],
+  "env": ["HOME=/"]
+}
