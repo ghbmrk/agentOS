@@ -646,13 +646,44 @@ func TestAHeldOutUnstampedCaseHoldsTheGoalsAroundIt(t *testing.T) {
 	}
 }
 
+// TestAHeldGoalHoldsItsNeighboursInEveryLineageItReached: a goal's work
+// can land in another lineage (a CAP-8 worker stamped with its creator's
+// goal); the goal after it there is held too (#55 L3 round 3).
+func TestAHeldGoalHoldsItsNeighboursInEveryLineageItReached(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	g := heldCase(t, r, h, "g", func(i int) string { return fmt.Sprintf("owner:mG%d", i) })
+	goal := "owner:mG" + g[len("g-"):]
+	for _, x := range []struct{ id, goal, action string }{
+		{"w-g", goal, "label"},          // the held goal's work in the worker
+		{"w-n", "owner:mN", "pay"},      // the worker's next goal: held
+		{"w-later", "owner:mL", "move"}, // clear of it: mined
+	} {
+		r.tasks.out[x.id] = journal.ResultNotApplied
+		in := journal.Intent{ID: x.id, GoalID: x.goal, Origin: "guest:worker", Account: "bank", Action: x.action,
+			Executor: "task", Machine: "worker", Label: "private"}
+		if _, err := r.eng.Submit(in); err != nil {
+			t.Fatal(err)
+		}
+		r.eng.Authorize(context.Background(), x.id)
+		r.eng.Dispatch(context.Background(), x.id)
+	}
+	got := minedKeys(t, r, h)
+	if got["failure:bank/pay"] || got["failure:bank/label"] {
+		t.Fatalf("the held goal's neighbour in the worker was mined: %v", got)
+	}
+	if !got["failure:bank/move"] {
+		t.Fatalf("a later worker goal was not mined: %v", got)
+	}
+}
+
 // TestSeveralHeldGoalsEachHoldTheirNeighbours: with two held goals and
 // interleaved work, each holds the goals in its span and the first after
 // it; goals clear of both are mined.
 func TestSeveralHeldGoalsEachHoldTheirNeighbours(t *testing.T) {
 	r := newRig(t)
 	h := r.harvester()
-	a := heldCase(t, r, h, "a", func(i int) string { return fmt.Sprintf("owner:mA%d", i) })
+	heldCase(t, r, h, "a", func(i int) string { return fmt.Sprintf("owner:mA%d", i) })
 	r.failing("p", "owner:mP", "send") // first goal after A: held
 	r.failing("q", "owner:mQ", "file") // clear of A: mined
 	b := heldCase(t, r, h, "b", func(i int) string { return fmt.Sprintf("owner:mB%d", i) })
@@ -660,7 +691,6 @@ func TestSeveralHeldGoalsEachHoldTheirNeighbours(t *testing.T) {
 	r.task(b+"-again", "owner:mB"+b[len("b-"):], "mail", "label", "private")
 	r.failing("u", "owner:mU", "pay")  // first goal after B: held
 	r.failing("v", "owner:mV", "move") // clear of B: mined
-	_ = a
 	got := minedKeys(t, r, h)
 	for _, k := range []string{"failure:bank/send", "failure:bank/post", "failure:bank/pay"} {
 		if got[k] {

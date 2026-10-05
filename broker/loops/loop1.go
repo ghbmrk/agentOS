@@ -525,8 +525,11 @@ func heldWithNext(sts []journal.Status, ev Evidence) map[string]bool {
 		k string // goal key; "" for an unstamped intent
 	}
 	type span struct{ first, last int }
+	type ok struct{ origin, k string }
 	byOrigin := map[string][]at{} // origin -> intents in order
-	goalSpan := map[string]*span{}
+	// goalSpan is per origin: a goal's work can reach more than one
+	// lineage (a CAP-8 worker stamped with its creator's goal, G14 (b)).
+	goalSpan := map[ok]*span{}
 	var points []struct {
 		origin string
 		i      int
@@ -550,8 +553,8 @@ func heldWithNext(sts []journal.Status, ev Evidence) map[string]bool {
 			}
 			continue
 		}
-		if sp := goalSpan[k]; sp == nil {
-			goalSpan[k] = &span{i, i}
+		if sp := goalSpan[ok{in.Origin, k}]; sp == nil {
+			goalSpan[ok{in.Origin, k}] = &span{i, i}
 		} else {
 			sp.last = i
 		}
@@ -569,7 +572,7 @@ func heldWithNext(sts []journal.Status, ev Evidence) map[string]bool {
 			if a.i >= first && a.i <= last {
 				held[a.k] = true
 			}
-			if a.i > last && goalSpan[a.k].first > last {
+			if a.i > last && goalSpan[ok{origin, a.k}].first > last {
 				held[a.k] = true
 				break
 			}
@@ -583,10 +586,9 @@ func heldWithNext(sts []journal.Status, ev Evidence) map[string]bool {
 			}
 		}
 	}
-	for k, sp := range goalSpan {
-		if ev.Held(k) {
-			// Every intent of a goal shares one origin (its lineage).
-			around(sts[sp.first].Intent.Origin, sp.first, sp.last, false)
+	for g, sp := range goalSpan {
+		if ev.Held(g.k) {
+			around(g.origin, sp.first, sp.last, false)
 		}
 	}
 	for _, p := range points {
