@@ -3,17 +3,19 @@ package recovery
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/ghbmrk/agentos/broker/vault"
 )
 
 // keysFile mirrors the vault's key-slot file (vault/keyslot.go) field for
-// field, so this package can check it strictly (A8) and drop host slots
-// on restore. TestKeysMirrorMatchesTheVault fails if the two drift.
+// field, so this package can check it strictly (A8) and unwrap the data
+// key independently of the vault code it audits. TestKeysMirrorMatchesTheVault fails if the two drift.
 type keysFile struct {
 	Magic   string     `json:"magic"`
 	Version int        `json:"version"`
@@ -24,6 +26,7 @@ type keysSlot struct {
 	Kind    string   `json:"kind"`
 	KDF     *keysKDF `json:"kdf,omitempty"`
 	Sealed  []byte   `json:"sealed,omitempty"`
+	KeyID   []byte   `json:"key_id,omitempty"`
 	Nonce   []byte   `json:"nonce"`
 	Wrapped []byte   `json:"wrapped"`
 }
@@ -59,9 +62,12 @@ func parseKeys(raw []byte) (*keysFile, error) {
 	if kf.Magic != "agentos-vault-keys" || kf.Version != 1 {
 		return nil, errors.New("recovery: not a key-slot file this version can read")
 	}
+	// One passphrase and one recovery slot per data key: an interrupted
+	// re-encryption (vault.Reencrypt) leaves the old key's and the new
+	// key's side by side until the vault next opens.
 	n := map[string]int{}
 	for _, s := range kf.Slots {
-		n[s.Kind]++
+		n[s.Kind+"/"+hex.EncodeToString(s.KeyID)]++
 		switch s.Kind {
 		case vault.SlotPassphrase:
 			if s.KDF == nil || len(s.KDF.Salt) < 16 || len(s.Sealed) != 0 {
@@ -83,39 +89,12 @@ func parseKeys(raw []byte) (*keysFile, error) {
 			return nil, fmt.Errorf("recovery: malformed %s slot", s.Kind)
 		}
 	}
-	if n[vault.SlotPassphrase] > 1 || n[vault.SlotRecovery] > 1 {
-		return nil, errors.New("recovery: at most one passphrase slot and one recovery slot")
-	}
-	return &kf, nil
-}
-
-// dropHostSlots removes every TPM slot (CRED-9: new hardware is trusted
-// only when the owner adds it) and returns how many it removed.
-func dropHostSlots(path string) (int, error) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return 0, err
-	}
-	kf, err := parseKeys(raw)
-	if err != nil {
-		return 0, err
-	}
-	var keep []keysSlot
-	for _, s := range kf.Slots {
-		if s.Kind != vault.SlotTPM {
-			keep = append(keep, s)
+	for k, c := range n {
+		if c > 1 && !strings.HasPrefix(k, vault.SlotTPM+"/") {
+			return nil, errors.New("recovery: at most one passphrase slot and one recovery slot")
 		}
 	}
-	dropped := len(kf.Slots) - len(keep)
-	if dropped == 0 {
-		return 0, nil
-	}
-	kf.Slots = keep
-	out, err := json.Marshal(kf)
-	if err != nil {
-		return 0, err
-	}
-	return dropped, writeAtomic(path, out)
+	return &kf, nil
 }
 
 // recoverySlotID identifies the drive's recovery slot: a hash of its salt
@@ -184,27 +163,32 @@ func unwrapRecovery(raw []byte, rk RecoveryKey) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	err = errors.New("recovery: no recovery slot")
 	for _, s := range kf.Slots {
 		if s.Kind != vault.SlotRecovery {
 			continue
 		}
-		aad, err := json.Marshal(struct {
+		aad, merr := json.Marshal(struct {
 			Magic   string   `json:"magic"`
 			Version int      `json:"version"`
 			Kind    string   `json:"kind"`
 			KDF     *keysKDF `json:"kdf,omitempty"`
 			Sealed  []byte   `json:"sealed,omitempty"`
-		}{kf.Magic, kf.Version, s.Kind, s.KDF, s.Sealed})
-		if err != nil {
-			return nil, err
+			KeyID   []byte   `json:"key_id,omitempty"`
+		}{kf.Magic, kf.Version, s.Kind, s.KDF, s.Sealed, s.KeyID})
+		if merr != nil {
+			return nil, merr
 		}
 		kek := hkdf(rk.b[:], s.Sealed, "agentos-slot-recovery-v1", vault.KeySize)
-		aead, err := newGCM(kek)
+		aead, gerr := newGCM(kek)
 		wipe(kek)
-		if err != nil {
-			return nil, err
+		if gerr != nil {
+			return nil, gerr
 		}
-		return aead.Open(nil, s.Nonce, s.Wrapped, aad)
+		var key []byte
+		if key, err = aead.Open(nil, s.Nonce, s.Wrapped, aad); err == nil {
+			return key, nil
+		}
 	}
-	return nil, errors.New("recovery: no recovery slot")
+	return nil, err
 }

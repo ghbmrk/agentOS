@@ -86,6 +86,13 @@ type Sealed struct {
 	Host string `json:"host,omitempty"`
 	// Trusted is when the owner trusted the PC (Unix seconds), if known.
 	Trusted int64 `json:"trusted,omitempty"`
+	// SRKPublic is the storage root key's TPM2B public area, which hashes
+	// to SRKName. With it the vault process can seal a new secret to this
+	// PC while the PC is elsewhere (SealTo).
+	SRKPublic []byte `json:"srk_public,omitempty"`
+	// Seed is set for an object SealTo made away from the PC: Private is
+	// then a duplication blob that Unseal imports under the SRK first.
+	Seed []byte `json:"seed,omitempty"`
 }
 
 // HasPIN reports whether unsealing needs the boot PIN.
@@ -442,6 +449,7 @@ func Seal(t transport.TPM, secret []byte, pub *ecdsa.PublicKey, pin, host string
 		PolicyKey: pkix,
 		PINSalt:   salt,
 		Host:      host,
+		SRKPublic: tpm2.Marshal(tpm2.New2B(s.pub)),
 	}, nil
 }
 
@@ -458,8 +466,12 @@ func (s *Sealed) PolicyPublicKey() (*ecdsa.PublicKey, error) {
 	return ek, nil
 }
 
-// match picks the first policy whose PCRs read their digest now.
-func match(t transport.TPM, policies []Policy) (*Policy, error) {
+// match picks a policy whose PCRs read their digest now, preferring one
+// key signed: the file can hold policies under two keys while Reencrypt
+// moves the box to a new policy key. The TPM, not this choice, checks the
+// signature.
+func match(t transport.TPM, policies []Policy, key *ecdsa.PublicKey) (*Policy, error) {
+	var other *Policy
 	for i := range policies {
 		p := &policies[i]
 		pcrs, err := normPCRs(p.PCRs)
@@ -471,8 +483,16 @@ func match(t transport.TPM, policies []Policy) (*Policy, error) {
 			return nil, err
 		}
 		if bytes.Equal(composite(vals), p.Digest) {
-			return p, nil
+			if signedBy(p, key) {
+				return p, nil
+			}
+			if other == nil {
+				other = p
+			}
 		}
+	}
+	if other != nil {
+		return other, nil
 	}
 	return nil, ErrNoPolicy
 }
@@ -500,7 +520,7 @@ func Unseal(t transport.TPM, sealed *Sealed, policies []Policy, pin string) ([]b
 	if !bytes.Equal(s.name.Buffer, sealed.SRKName) {
 		return nil, ErrOtherTPM
 	}
-	p, err := match(t, policies)
+	p, err := match(t, policies, pub)
 	if err != nil {
 		return nil, err
 	}
@@ -531,6 +551,20 @@ func Unseal(t transport.TPM, sealed *Sealed, policies []Policy, pin string) ([]b
 		return nil, ErrPolicy
 	}
 
+	if len(sealed.Seed) > 0 {
+		// Sealed away from this PC (SealTo): import it under the SRK.
+		imp, err := tpm2.Import{
+			ParentHandle: tpm2.AuthHandle{Handle: s.handle, Name: s.name, Auth: tpm2.PasswordAuth(nil)},
+			ObjectPublic: *objPub,
+			Duplicate:    *objPriv,
+			InSymSeed:    tpm2.TPM2BEncryptedSecret{Buffer: sealed.Seed},
+			Symmetric:    tpm2.TPMTSymDef{Algorithm: tpm2.TPMAlgNull},
+		}.Execute(t)
+		if err != nil {
+			return nil, fmt.Errorf("%w (import: %v)", ErrOtherTPM, err)
+		}
+		objPriv = &imp.OutPrivate
+	}
 	obj, err := tpm2.Load{
 		ParentHandle: tpm2.AuthHandle{Handle: s.handle, Name: s.name, Auth: tpm2.PasswordAuth(nil)},
 		InPrivate:    *objPriv,
