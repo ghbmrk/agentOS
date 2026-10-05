@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -433,7 +434,10 @@ func TestForgetDeletesTheTaskValues(t *testing.T) {
 	r := newValuesRig(t)
 	r.weekly("owner:w1", "sam@example.com", 1)
 	r.weekly("owner:w2", "ana@example.com", 1)
-	if !r.values.forget("owner:w1") || r.values.forget("owner:w1") {
+	if ok, err := r.values.forget("owner:w1"); !ok || err != nil {
+		t.Fatal("forget reported the wrong result", err)
+	}
+	if ok, _ := r.values.forget("owner:w1"); ok {
 		t.Fatal("forget reported the wrong result")
 	}
 	raw, err := r.values.store.Load()
@@ -480,5 +484,53 @@ func TestLearningForgetsATask(t *testing.T) {
 	}
 	if err := lp.forgetTask(""); err == nil {
 		t.Fatal("forgot with no goal")
+	}
+}
+
+// failSave is a store whose saves fail, as on a full or read-only disk.
+type failSave struct{ change.Store }
+
+func (failSave) Save([]byte) error { return errors.New("disk full") }
+
+// W3-tasks part 1 (security F1 on #123): a forget whose deletion did not
+// reach the disk says so, so the owner is never told a task is gone while
+// its text or values are still at rest. The other stores still forget.
+func TestForgetReportsAFailedSave(t *testing.T) {
+	dir := t.TempDir()
+	cfg := daemon.Config{
+		JournalPath: filepath.Join(dir, "journal.log"), SocketDir: filepath.Join(dir, "run"),
+		OwnerNumber: ownerNum, ModemUID: os.Getuid(), Admission: admission.Config{CapacityMB: 4500, HeadroomMB: 600},
+		OwnerState: filepath.Join(dir, "owner.json"),
+	}
+	lp, err := openLearning(learnPaths{Dir: dir, Spare: filepath.Join(dir, "spare.json")}, false, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, broken := range []string{"tasks", "values"} {
+		goal := "owner:" + broken
+		lp.tasks.put(goal, "pay the CANARY-forget invoice", false)
+		lp.values.observe(journal.Intent{ID: "agent/1", GoalID: goal, Origin: "guest:agent", Params: map[string]any{"to": "ann@example.test"}})
+		tasks, values := lp.tasks.store, lp.values.store
+		if broken == "tasks" {
+			lp.tasks.store = failSave{tasks}
+		} else {
+			lp.values.store = failSave{values}
+		}
+		if _, err := lp.tasks.forget("none"); err != nil {
+			t.Fatalf("%s: nothing to forget still failed: %v", broken, err)
+		}
+		if err := lp.forgetTask(goal); err == nil {
+			t.Fatalf("%s: forget reported success with its save failing", broken)
+		}
+		lp.tasks.store, lp.values.store = tasks, values
+		if _, ok := lp.tasks.get(goal); ok {
+			t.Fatalf("%s: task text kept in memory", broken)
+		}
+		lp.values.mu.Lock()
+		_, kept := lp.values.st[goal]
+		lp.values.mu.Unlock()
+		if kept {
+			t.Fatalf("%s: task values kept in memory", broken)
+		}
 	}
 }

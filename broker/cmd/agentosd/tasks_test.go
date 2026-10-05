@@ -141,7 +141,10 @@ func TestForgetDeletesTheTaskText(t *testing.T) {
 	}
 	tasks.put("owner:a1", "send Sam the invoice CANARY-forget", false)
 	tasks.put("owner:a2", "book the dentist", false)
-	if !tasks.forget("owner:a1") || tasks.forget("owner:a1") {
+	if ok, err := tasks.forget("owner:a1"); !ok || err != nil {
+		t.Fatal("forget reported the wrong result", err)
+	}
+	if ok, _ := tasks.forget("owner:a1"); ok {
 		t.Fatal("forget reported the wrong result")
 	}
 	raw, err := os.ReadFile(store.Path)

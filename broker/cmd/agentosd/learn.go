@@ -285,10 +285,12 @@ func (l *learning) forgetTask(goal string) error {
 	if goal == "" {
 		return errors.New("learning: forget needs a goal")
 	}
-	l.tasks.forget(goal)
-	l.values.forget(goal)
-	_, err := l.pipe.ForgetGoal(goal)
-	return err
+	// Each store forgets even when another's save failed; any failure is
+	// returned, so a forget is never reported done while data is at rest.
+	_, terr := l.tasks.forget(goal)
+	_, verr := l.values.forget(goal)
+	_, cerr := l.pipe.ForgetGoal(goal)
+	return errors.Join(terr, verr, cerr)
 }
 
 // attach binds the running daemon's engine and admission and starts the

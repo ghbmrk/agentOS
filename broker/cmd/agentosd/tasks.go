@@ -77,7 +77,7 @@ func (t *taskTexts) put(goal, text string, public bool) {
 	t.saveLocked()
 }
 
-func (t *taskTexts) saveLocked() {
+func (t *taskTexts) saveLocked() error {
 	b, err := json.Marshal(t.st)
 	if err == nil {
 		err = t.store.Save(b)
@@ -85,6 +85,7 @@ func (t *taskTexts) saveLocked() {
 	if err != nil {
 		t.logf("learning: task texts not saved: %v", err)
 	}
+	return err
 }
 
 func (t *taskTexts) pruneLocked(now time.Time) {
@@ -106,16 +107,15 @@ func (t *taskTexts) pruneLocked(now time.Time) {
 }
 
 // forget deletes goal's task text (W3-tasks, CAP-3) and reports whether
-// one was kept. A failed save is logged, as for put.
-func (t *taskTexts) forget(goal string) bool {
+// one was kept. A failed save is logged and returned (security F1 on #123).
+func (t *taskTexts) forget(goal string) (bool, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if _, ok := t.st[goal]; !ok {
-		return false
+		return false, nil
 	}
 	delete(t.st, goal)
-	t.saveLocked()
-	return true
+	return true, t.saveLocked()
 }
 
 func (t *taskTexts) get(goal string) (taskText, bool) {

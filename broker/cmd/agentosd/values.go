@@ -226,16 +226,15 @@ func (v *taskValues) observe(in journal.Intent) {
 }
 
 // forget deletes goal's values with its task text (W3-values (d), CAP-3)
-// and reports whether any were kept.
-func (v *taskValues) forget(goal string) bool {
+// and reports whether any were kept, and any failed save.
+func (v *taskValues) forget(goal string) (bool, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if v.st[goal] == nil {
-		return false
+		return false, nil
 	}
 	delete(v.st, goal)
-	v.saveLocked()
-	return true
+	return true, v.saveLocked()
 }
 
 // verdict applies the owner's verdict on an effect to its goal's values.
@@ -446,7 +445,7 @@ func copyValue(x any) any {
 	return x
 }
 
-func (v *taskValues) saveLocked() {
+func (v *taskValues) saveLocked() error {
 	b, err := json.Marshal(v.st)
 	if err == nil {
 		err = v.store.Save(b)
@@ -454,6 +453,7 @@ func (v *taskValues) saveLocked() {
 	if err != nil {
 		v.logf("learning: task values not saved: %v", err)
 	}
+	return err
 }
 
 // pruneLocked drops goals past keepValues and the oldest past
