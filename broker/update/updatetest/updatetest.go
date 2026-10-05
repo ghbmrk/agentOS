@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ghbmrk/agentos/broker/attest"
 	"github.com/ghbmrk/agentos/broker/update"
 )
 
@@ -75,7 +76,7 @@ func Release(t testing.TB, version int64, security bool, images map[string][]byt
 	if !security {
 		return res.Release
 	}
-	att, err := update.Attest(ak, res.Release, update.Statement{Result: update.ResultPass, Channel: update.ChannelFast, HardwareClass: "test"})
+	att, err := update.Attest(ak, res.Release, update.Statement{Result: update.ResultPass, Channel: update.ChannelFast, Hardware: attest.Hardware{Vendor: attest.Unlisted, Model: attest.Unlisted, Firmware: attest.Unlisted}})
 	must(err)
 	return res.Release.WithAttestations([][]byte{att}, nil)
 }

@@ -1,6 +1,6 @@
 package update
 
-// REQ: OSS-8, UPD-8, CHG-3
+// REQ: OSS-8, UPD-8, CHG-3, OSS-4
 
 import (
 	"crypto/ed25519"
@@ -10,6 +10,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/ghbmrk/agentos/broker/attest"
 )
 
 func securityFix(t *testing.T) (*fixture, *Verified) {
@@ -31,8 +33,11 @@ func newKey(t *testing.T) ed25519.PrivateKey {
 	return k
 }
 
+// floorPC is the HW-4 reference PC as the public attestation schema lists it.
+var floorPC = attest.Hardware{Vendor: "geekom", Model: "air12_lite", Firmware: attest.Unlisted}
+
 func pass(t *testing.T, k ed25519.PrivateKey, v *Verified) []byte {
-	b, err := Attest(k, v, Statement{Result: ResultPass, Channel: ChannelFast, HardwareClass: "n95-8g", Versions: map[string]string{"openclaw": "1.2.3"}})
+	b, err := Attest(k, v, Statement{Result: ResultPass, Channel: ChannelFast, Hardware: floorPC, Versions: map[string]string{"openclaw": "2026.9.8"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +52,7 @@ func TestAttestationRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !pub.Equal(k.Public()) || st.Release != "releases/2.json" || st.ManifestSHA256 != mustV(v.ManifestFile()).SHA256 ||
-		st.HardwareClass != "n95-8g" || st.Versions["openclaw"] != "1.2.3" {
+		st.Hardware != floorPC || st.Versions["openclaw"] != "2026.9.8" {
 		t.Fatalf("%+v", st)
 	}
 }
@@ -67,8 +72,8 @@ func TestSecurityFixWaitsForOneIndependentAttestation(t *testing.T) {
 	if mustV(other.ManifestFile()).SHA256 == mustV(v.ManifestFile()).SHA256 {
 		t.Fatal("fixture: the two releases have the same bytes")
 	}
-	stable, _ := Attest(newKey(t), v, Statement{Result: ResultPass, Channel: ChannelStable})
-	failed, _ := Attest(newKey(t), v, Statement{Result: ResultFail, Channel: ChannelFast})
+	stable, _ := Attest(newKey(t), v, Statement{Result: ResultPass, Channel: ChannelStable, Hardware: floorPC})
+	failed, _ := Attest(newKey(t), v, Statement{Result: ResultFail, Channel: ChannelFast, Hardware: floorPC})
 	tampered := pass(t, newKey(t), v)
 	var env map[string]any
 	json.Unmarshal(tampered, &env)
@@ -157,7 +162,7 @@ func TestMaintainerOperatedAttestorNeverIndependent(t *testing.T) {
 	}
 	v := res.Release
 	listed := pass(t, ci, v)
-	marked, err := Attest(f.att[1], v, Statement{Result: ResultPass, Channel: ChannelFast, Operator: OperatorMaintainer})
+	marked, err := Attest(f.att[1], v, Statement{Result: ResultPass, Channel: ChannelFast, Hardware: floorPC, Operator: OperatorMaintainer})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +176,7 @@ func TestMaintainerOperatedAttestorNeverIndependent(t *testing.T) {
 	if v.WithAttestations(atts, nil).Security() || !errors.Is(v.SecurityAutoStage(atts, nil), ErrNeedsAttestation) {
 		t.Fatal("maintainer-operated attestations auto-staged a security fix")
 	}
-	if _, err := Attest(newKey(t), v, Statement{Result: ResultPass, Channel: ChannelFast, Operator: "ci"}); err == nil {
+	if _, err := Attest(newKey(t), v, Statement{Result: ResultPass, Channel: ChannelFast, Hardware: floorPC, Operator: "ci"}); err == nil {
 		t.Fatal("unknown operator label")
 	}
 	ind := pass(t, f.att[0], v)
@@ -221,7 +226,7 @@ func TestStrictAttestations(t *testing.T) {
 	k := f.att[0]
 	m := mustV(v.ManifestFile())
 	pub := base64.StdEncoding.EncodeToString(k.Public().(ed25519.PublicKey))
-	head := `{"release":"` + m.Path + `","manifest_sha256":"` + m.SHA256 + `","channel":"fast","hardware_class":"x","attestor":"` + pub + `"`
+	head := `{"release":"` + m.Path + `","manifest_sha256":"` + m.SHA256 + `","channel":"fast","hardware":{"vendor":"unlisted","model":"unlisted","firmware":"unlisted"},"attestor":"` + pub + `"`
 	good := envelopeOf(k, head+`,"result":"pass"}`)
 	if v.IndependentPasses([][]byte{good}, nil) != 1 {
 		t.Fatal("fixture: the well-formed statement does not count")
@@ -233,6 +238,7 @@ func TestStrictAttestations(t *testing.T) {
 		head + `,"result":"pass","operator":"maintainer","Operator":""}`,
 		head + `,"result":"pass","extra":1}`,
 		head + `,"result":"pass","versions":{"a":"1","a":"2"}}`,
+		head + `,"result":"pass","hardware":{"vendor":"unlisted","model":"unlisted","firmware":"unlisted"}}`,
 		head + `,"result":"pass"}{}`,
 	} {
 		b := envelopeOf(k, body)
@@ -309,7 +315,7 @@ func TestProjectTestBoxIsInterimAttestor(t *testing.T) {
 		t.Fatal(res.Release, err)
 	}
 	v := res.Release
-	labelled, _ := Attest(box, v, Statement{Result: ResultPass, Channel: ChannelFast, Operator: OperatorMaintainer})
+	labelled, _ := Attest(box, v, Statement{Result: ResultPass, Channel: ChannelFast, Hardware: floorPC, Operator: OperatorMaintainer})
 	if !v.InterimAttestation() || v.IndependentPasses([][]byte{labelled}, nil) != 1 || !v.WithAttestations([][]byte{labelled}, nil).Security() {
 		t.Fatal("the project's test box did not count as the interim check")
 	}
@@ -323,7 +329,7 @@ func TestProjectTestBoxIsInterimAttestor(t *testing.T) {
 	}
 	// A key that only claims the label does not ride the interim rule.
 	stranger := newKey(t)
-	claim, _ := Attest(stranger, v, Statement{Result: ResultPass, Channel: ChannelFast, Operator: OperatorMaintainer})
+	claim, _ := Attest(stranger, v, Statement{Result: ResultPass, Channel: ChannelFast, Hardware: floorPC, Operator: OperatorMaintainer})
 	if v.IndependentPasses([][]byte{claim}, nil) != 0 {
 		t.Fatal("a self-labelled key counted")
 	}
@@ -427,5 +433,96 @@ func TestNewestReleaseCarriesTheSecurityFix(t *testing.T) {
 	r2, _ := old.check(Options{Channel: ChannelFast})
 	if v.SecurityAutoStage([][]byte{pass(t, old.att[0], r2.Release)}, nil) == nil {
 		t.Fatal("an attestation of another manifest counted")
+	}
+}
+
+// TestOSS4AttestRefusesWhatTheSchemaDoesNotList: a box cannot sign a
+// statement carrying hardware, versions, or a channel the public schema
+// does not list, so free text, serial numbers and the like never leave it.
+func TestOSS4AttestRefusesWhatTheSchemaDoesNotList(t *testing.T) {
+	_, v := securityFix(t)
+	k := newKey(t)
+	ok := Statement{Result: ResultPass, Channel: ChannelFast, Hardware: floorPC}
+	if _, err := Attest(k, v, ok); err != nil {
+		t.Fatal(err)
+	}
+	unknown := attest.Hardware{Vendor: attest.Unlisted, Model: attest.Unlisted, Firmware: attest.Unlisted}
+	if _, err := Attest(k, v, Statement{Result: ResultFail, Channel: ChannelStable, Hardware: unknown}); err != nil {
+		t.Fatal("hardware the schema does not know yet:", err)
+	}
+	bad := map[string]func(*Statement){
+		"no hardware":      func(s *Statement) { s.Hardware = attest.Hardware{} },
+		"serial number":    func(s *Statement) { s.Hardware.Firmware = "SN-4C1A92F07" },
+		"free-text model":  func(s *Statement) { s.Hardware.Model = "Mark's kitchen PC" },
+		"unlisted version": func(s *Statement) { s.Versions = map[string]string{"openclaw": "2026.9.9"} },
+		"free-text key":    func(s *Statement) { s.Versions = map[string]string{"my notes": "x"} },
+		"channel":          func(s *Statement) { s.Channel = "nightly" },
+		"result":           func(s *Statement) { s.Result = "pass with warnings" },
+	}
+	for name, f := range bad {
+		st := ok
+		f(&st)
+		if _, err := Attest(k, v, st); err == nil {
+			t.Errorf("%s: signed", name)
+		}
+	}
+}
+
+// TestOSS4ParseRefusesStatementsOutsideTheSchema: a statement signed
+// elsewhere with fields outside the schema does not parse, so it never
+// counts (D6) or reaches the owner's digest as evidence (OSS-9).
+func TestOSS4ParseRefusesStatementsOutsideTheSchema(t *testing.T) {
+	_, v := securityFix(t)
+	k := newKey(t)
+	pub := base64.StdEncoding.EncodeToString(k.Public().(ed25519.PublicKey))
+	sha := mustV(v.ManifestFile()).SHA256
+	stmt := func(edit func(m map[string]any)) []byte {
+		m := map[string]any{
+			"release": "releases/2.json", "manifest_sha256": sha, "result": "pass", "channel": "fast",
+			"hardware": map[string]any{"vendor": "geekom", "model": "air12_lite", "firmware": "unlisted"},
+			"attestor": pub,
+		}
+		if edit != nil {
+			edit(m)
+		}
+		b, _ := json.Marshal(m)
+		return envelopeOf(k, string(b))
+	}
+	if _, _, err := ParseAttestation(stmt(nil)); err != nil {
+		t.Fatal(err)
+	}
+	if n := v.MaintainerPasses([][]byte{stmt(func(m map[string]any) { m["operator"] = "maintainer" })}, nil); n != 1 {
+		t.Fatalf("fixture: a valid maintainer-labelled statement counts %d", n)
+	}
+	bad := map[string]func(m map[string]any){
+		"timestamp":          func(m map[string]any) { m["time"] = "2026-10-05T04:00:00Z" },
+		"notes":              func(m map[string]any) { m["notes"] = "ran on Mark's PC" },
+		"serial":             func(m map[string]any) { m["serial"] = "SN-4C1A92F07" },
+		"old hardware_class": func(m map[string]any) { m["hardware_class"] = "n95-8g" },
+		"no hardware":        func(m map[string]any) { delete(m, "hardware") },
+		"hardware as text":   func(m map[string]any) { m["hardware"] = "geekom air12_lite" },
+		"hardware extra key": func(m map[string]any) {
+			m["hardware"] = map[string]any{"vendor": "geekom", "model": "air12_lite", "firmware": "unlisted", "serial": "x"}
+		},
+		"hardware unlisted": func(m map[string]any) {
+			m["hardware"] = map[string]any{"vendor": "geekom", "model": "kitchen", "firmware": "unlisted"}
+		},
+		"version unlisted": func(m map[string]any) { m["versions"] = map[string]any{"openclaw": "hello world"} },
+		"channel":          func(m map[string]any) { m["channel"] = "nightly" },
+		"result":           func(m map[string]any) { m["result"] = "maybe" },
+		"operator":         func(m map[string]any) { m["operator"] = "Mark" },
+		"release path":     func(m map[string]any) { m["release"] = "releases/2.json?note=hi" },
+		"padded release":   func(m map[string]any) { m["release"] = "releases/02.json" },
+		"release zero":     func(m map[string]any) { m["release"] = "releases/0.json" },
+		"manifest hash":    func(m map[string]any) { m["manifest_sha256"] = "not a hash" },
+	}
+	for name, edit := range bad {
+		b := stmt(edit)
+		if _, _, err := ParseAttestation(b); err == nil {
+			t.Errorf("%s: parsed", name)
+		}
+		if n := v.MaintainerPasses([][]byte{stmt(func(m map[string]any) { m["operator"] = "maintainer"; edit(m) })}, nil); n != 0 {
+			t.Errorf("%s: counted as evidence", name)
+		}
 	}
 }

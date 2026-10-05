@@ -7,6 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
+
+	"github.com/ghbmrk/agentos/broker/attest"
 )
 
 // Attestations (OSS-8): an installation that reproduced a release says
@@ -75,9 +80,11 @@ type Statement struct {
 	ManifestSHA256 string `json:"manifest_sha256"`
 	Result         string `json:"result"`
 	// Channel the attesting installation follows.
-	Channel       string            `json:"channel"`
-	HardwareClass string            `json:"hardware_class"`
-	Versions      map[string]string `json:"versions,omitempty"`
+	Channel string `json:"channel"`
+	// Hardware and Versions are choices from the public attestation
+	// schema (OSS-4): no free text, serial number or timestamp.
+	Hardware attest.Hardware   `json:"hardware"`
+	Versions map[string]string `json:"versions,omitempty"`
 	// Attestor is the signer's Ed25519 public key, standard base64.
 	Attestor string `json:"attestor"`
 	// Operator is OperatorMaintainer for a maintainer-run attestor, else
@@ -86,7 +93,7 @@ type Statement struct {
 }
 
 var (
-	statementFields = fields("release", "manifest_sha256", "result", "channel", "hardware_class", "versions", "attestor", "operator")
+	statementFields = fields("release", "manifest_sha256", "result", "channel", "hardware", "versions", "attestor", "operator")
 	envelopeFields  = fields("payloadType", "payload", "signatures")
 	signatureFields = fields("keyid", "sig")
 )
@@ -113,8 +120,42 @@ func pae(payloadType string, payload []byte) []byte {
 	return []byte(fmt.Sprintf("DSSEv1 %d %s %d %s", len(payloadType), payloadType, len(payload), payload))
 }
 
+var sha256RE = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// isReleasePath reports whether p is ReleasePath of some version >= 1,
+// in that exact spelling.
+func isReleasePath(p string) bool {
+	n, err := strconv.ParseInt(strings.TrimSuffix(strings.TrimPrefix(p, "releases/"), ".json"), 10, 64)
+	return err == nil && n >= 1 && ReleasePath(n) == p
+}
+
+// checkStatement reports the first field outside the closed form OSS-4
+// allows: identifiers of the signed release in their fixed shapes, and
+// every other field a value the public attestation schema lists. The
+// attestor key is checked where it is decoded.
+func checkStatement(st Statement) error {
+	s := attest.Default()
+	if !isReleasePath(st.Release) || !sha256RE.MatchString(st.ManifestSHA256) {
+		return errors.New("statement does not name a release manifest")
+	}
+	if (st.Result != ResultPass && st.Result != ResultFail) || !s.Result(st.Result) {
+		return fmt.Errorf("result %q is not pass or fail", st.Result)
+	}
+	if (st.Channel != ChannelStable && st.Channel != ChannelFast) || !s.Channel(st.Channel) {
+		return fmt.Errorf("channel %q is not stable or fast", st.Channel)
+	}
+	if st.Operator != "" && st.Operator != OperatorMaintainer {
+		return fmt.Errorf("operator %q is not %q", st.Operator, OperatorMaintainer)
+	}
+	if err := s.CheckHardware(st.Hardware); err != nil {
+		return err
+	}
+	return s.CheckVersions(st.Versions)
+}
+
 // Attest signs a statement for the release v names. Attestor and the
-// release fields are filled in from v and priv.
+// release fields are filled in from v and priv. Every other field must
+// be a choice the public attestation schema lists (OSS-4).
 func Attest(priv ed25519.PrivateKey, v *Verified, st Statement) ([]byte, error) {
 	if !v.ok() {
 		return nil, ErrNotChecked
@@ -122,11 +163,8 @@ func Attest(priv ed25519.PrivateKey, v *Verified, st Statement) ([]byte, error) 
 	st.Release = v.manifest.Path
 	st.ManifestSHA256 = v.manifest.SHA256
 	st.Attestor = base64.StdEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
-	if st.Result != ResultPass && st.Result != ResultFail {
-		return nil, fmt.Errorf("result %q is not pass or fail", st.Result)
-	}
-	if st.Operator != "" && st.Operator != OperatorMaintainer {
-		return nil, fmt.Errorf("operator %q is not %q", st.Operator, OperatorMaintainer)
+	if err := checkStatement(st); err != nil {
+		return nil, err
 	}
 	body, err := json.Marshal(st)
 	if err != nil {
@@ -145,7 +183,8 @@ func Attest(priv ed25519.PrivateKey, v *Verified, st Statement) ([]byte, error) 
 
 // ParseAttestation checks an envelope's signature and returns its
 // statement and the attestor key. Envelope, signatures and statement are
-// decoded strictly: no unknown, duplicate or case-variant key.
+// decoded strictly: no unknown, duplicate or case-variant key, and a
+// statement outside the public attestation schema is refused (OSS-4).
 func ParseAttestation(b []byte) (Statement, ed25519.PublicKey, error) {
 	var env struct {
 		PayloadType string            `json:"payloadType"`
@@ -172,6 +211,9 @@ func ParseAttestation(b []byte) (Statement, ed25519.PublicKey, error) {
 	}
 	var st Statement
 	if err := decodeStrict(body, &st, statementFields); err != nil {
+		return Statement{}, nil, fmt.Errorf("attestation statement: %w", err)
+	}
+	if err := checkStatement(st); err != nil {
 		return Statement{}, nil, fmt.Errorf("attestation statement: %w", err)
 	}
 	raw, err := base64.StdEncoding.DecodeString(st.Attestor)
