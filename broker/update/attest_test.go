@@ -389,6 +389,17 @@ func TestInterimEndsForGood(t *testing.T) {
 	if res.Release.InterimAttestation() {
 		t.Fatal("an outside attestor noted between checks did not end the interim rule")
 	}
+	// A check that fails still records the outside attestor.
+	h := newFixture(t)
+	h.release(2, func(r *Manifest) { r.Security = true })
+	h.publish(0, 1)
+	if _, err := h.store.Check(DirSource(t.TempDir()), Options{Attestors: allow, InterimAttestors: pinned}); err == nil {
+		t.Fatal("an empty repository passed")
+	}
+	res, _ = h.check(Options{Attestors: pinned, InterimAttestors: pinned})
+	if res.Release.InterimAttestation() {
+		t.Fatal("a failed check did not record the outside attestor")
+	}
 }
 
 // The newest release supersedes a security fix: it auto-stages on an
