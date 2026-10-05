@@ -66,6 +66,7 @@ type Device struct {
 	zone     int       // the network's zone, quarter hours east of UTC
 	ctzu     bool      // AT+CTZU=1: SIMCom clock follows network time
 	born     time.Time // power-up
+	noCTZU   bool
 }
 
 // New attaches a simulated modem of profile p to a carrier line. model is
@@ -380,6 +381,9 @@ func (d *Device) handle(cmd string) []string {
 		return []string{fmt.Sprintf(`+QLTS: "%s%s,0"`, t.UTC().Format("2006/01/02,15:04:05"), zoneQ(d.zone)), "OK"}
 	// SIMCom
 	case simcom && cmd == "AT+CTZU=1":
+		if d.noCTZU {
+			return []string{"ERROR"}
+		}
 		d.ctzu = true
 		return []string{"OK"}
 	case simcom && cmd == "AT+CCLK?":
@@ -410,6 +414,9 @@ func (d *Device) handle(cmd string) []string {
 }
 
 func (d *Device) setCNMI() bool { d.cnmi = true; return true }
+
+// RefuseCTZU makes AT+CTZU=1 answer ERROR, as a firmware without it would.
+func (d *Device) RefuseCTZU() { d.mu.Lock(); d.noCTZU = true; d.mu.Unlock() }
 
 // SetNetworkTime simulates a network time update (NITZ) carrying t, in a
 // zone given in quarter hours east of UTC. The module's clock runs on from

@@ -65,3 +65,17 @@ func TestTIM1ModemIsTheGuardsCarrier(t *testing.T) {
 		}
 	}
 }
+
+func TestTIM1RefusedCTZUStillOpens(t *testing.T) {
+	// CTZU is best effort: a SIMCom module that refuses it still texts and
+	// calls (security C3 on #68).
+	for _, c := range at.SIMCom.Init {
+		if c == at.SIMCom.NetTimeOn {
+			t.Fatalf("%s is in Init, where a refusal aborts Open", c)
+		}
+	}
+	r := newRig(t, vendor{at.SIMCom, "SIMCOM_SIM7600G-H"}, at.KeysInBand, func(d *atsim.Device) { d.RefuseCTZU() })
+	if _, err := r.m.NetworkTime(context.Background()); !errors.Is(err, at.ErrNoNetworkTime) {
+		t.Fatalf("err = %v", err)
+	}
+}

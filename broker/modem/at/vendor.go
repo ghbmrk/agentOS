@@ -94,12 +94,11 @@ var SIMCom = &Profile{
 	ATInterface:    "02",
 	AudioInterface: "04",
 	Audio:          AudioSerial,
-	// 8 kHz PCM; the module's clock follows network time updates.
-	Init:     []string{"AT+CPCMFRM=0", "AT+CTZU=1"},
-	AudioOn:  []string{"AT+CPCMREG=1"},
-	AudioOff: []string{"AT+CPCMREG=0"},
-	KeysOn:   "AT+DDET=1",
-	ICCIDCmd: "AT+CICCID",
+	Init:           []string{"AT+CPCMFRM=0"}, // 8 kHz PCM
+	AudioOn:        []string{"AT+CPCMREG=1"},
+	AudioOff:       []string{"AT+CPCMREG=0"},
+	KeysOn:         "AT+DDET=1",
+	ICCIDCmd:       "AT+CICCID",
 	// AT+CCLK? is the module's clock, set from network time by AT+CTZU=1.
 	// It has no "never set" answer: after power-up it starts from a fixed
 	// date years in the past, which netTimeFloor rejects (S2-CONFIRM C14).

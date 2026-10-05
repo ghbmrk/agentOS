@@ -460,7 +460,10 @@ func TestTIM1RunLiveAnswersStaleFromLastCheck(t *testing.T) {
 	defer cancel()
 	go g.Run(ctx)
 	tick <- time.Time{}
-	tick <- time.Time{} // returns only after the first tick's check ran
+	for r.readCount() < 2 { // Run's first check and the tick's
+		time.Sleep(time.Millisecond)
+	}
+	g.Check(bg) // joins the tick's check if still in flight
 	reads := r.readCount()
 	r.advance(DefaultInterval + time.Minute)
 	if _, err := g.Now(bg); err != nil {
