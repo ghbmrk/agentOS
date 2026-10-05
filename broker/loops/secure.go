@@ -164,6 +164,9 @@ type GuardConfig struct {
 	// both. Off, each fixture is recorded as "deferred"; detection,
 	// containment, evidence, and notice still run.
 	FixturesLive bool
+	// UncomparedAlert is how long a version may stay uncomparable before
+	// the owner is texted once. Default 7 days.
+	UncomparedAlert time.Duration
 	// MaxPauses caps automatic containment per pass, so a bad advisory
 	// feed cannot pause everything; the owner is texted about the rest.
 	// Default 3.
@@ -231,6 +234,9 @@ type Record struct {
 func NewGuard(cfg GuardConfig) (*Guard, error) {
 	if cfg.Pipeline == nil || cfg.Store == nil {
 		return nil, errors.New("loops: Pipeline and Store are required")
+	}
+	if cfg.UncomparedAlert <= 0 {
+		cfg.UncomparedAlert = 7 * 24 * time.Hour
 	}
 	if cfg.MaxPauses <= 0 {
 		cfg.MaxPauses = 3
@@ -330,6 +336,16 @@ func (s *Guard) Pass(ctx context.Context) (int, error) {
 		s.st.Cleared[id] = now
 		if rec.Contained == "paused" && rec.Texted {
 			lines = append(lines, clearedLine(rec))
+		}
+	}
+	// A version that stays uncomparable for UncomparedAlert is texted once
+	// (arbitrator ruling 1 on #54).
+	for _, id := range sortedKeys(s.st.Open) {
+		rec := s.st.Open[id]
+		if seen[id] && !rec.Texted && strings.HasPrefix(rec.Finding.Detail, uncompared) && now.Sub(rec.At) >= s.cfg.UncomparedAlert {
+			rec.Texted = true
+			s.st.Open[id] = rec
+			lines = append(lines, findingText(rec.Finding))
 		}
 	}
 	s.mu.Unlock()
@@ -573,17 +589,20 @@ func (s *Guard) check() (found []Finding, notes []string, stale string) {
 				stale = staleLine(snap.Fetched, now)
 			}
 			for _, p := range pkgs {
+				uncomp := false
 				for _, a := range snap.Advisories {
 					if a.Package != p.Name {
 						continue
 					}
 					c, ok := compareVersions(p.Scheme, p.Version, a.Fixed)
 					if !ok {
-						// Neither assumed fixed nor assumed vulnerable: the
-						// owner hears it in the digest, and nothing is paused
-						// or pinned on a guess.
-						add(CheckAdvisory, p.Name, uncompared+a.ID, Low, nil, nil)
-						found[len(found)-1].Fixed = a.Fixed
+						// Neither assumed fixed nor assumed vulnerable: one
+						// Low finding per package and version, in the
+						// digest, with nothing paused or pinned on a guess.
+						if !uncomp {
+							uncomp = true
+							add(CheckAdvisory, p.Name, uncompared+p.Version, Low, nil, nil)
+						}
 						continue
 					}
 					if c >= 0 {
@@ -764,9 +783,9 @@ func findingText(f Finding) string {
 		}
 		return "File " + sub + " does not match the signed release."
 	case CheckAdvisory:
-		if id, ok := strings.CutPrefix(f.Detail, uncompared); ok {
-			return fmt.Sprintf("Could not compare the installed version of %s with advisory %s (fixed in %s). Check it on the box page.",
-				sub, safeName(id), safeName(f.Fixed))
+		if v, ok := strings.CutPrefix(f.Detail, uncompared); ok {
+			return fmt.Sprintf("Could not check %s version %s against known vulnerabilities. Check it on the box page.",
+				sub, safeName(v))
 		}
 		return fmt.Sprintf("Known vulnerability in %s (%s), fixed in %s. The box takes the fix when an update has it.",
 			sub, safeName(f.Detail), safeName(f.Fixed))

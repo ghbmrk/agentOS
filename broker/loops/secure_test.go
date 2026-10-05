@@ -512,9 +512,22 @@ func TestUncomparedAndWording(t *testing.T) {
 	if len(ev) != 1 || ev[0].Contained != "none" || ev[0].Fixture != "" || ev[0].Finding.Severity != Low || len(r.c.got) != 0 || len(r.texts) != 0 {
 		t.Fatalf("uncompared: %+v paused %d texts %q", ev, len(r.c.got), r.texts)
 	}
-	want := "Security check: Could not compare the installed version of openssl with advisory ADV-1 (fixed in 3.0.14). Check it on the box page."
+	want := "Security check: Could not check openssl version build-42 against known vulnerabilities. Check it on the box page."
 	if d := r.g.Digest(); len(d) != 1 || d[0] != want {
 		t.Fatalf("digest %q\nwant %q", d, want)
+	}
+	// One finding per package and version, however many advisories.
+	b.snap.Advisories = append(b.snap.Advisories, Advisory{ID: "ADV-9", Package: "openssl", Fixed: "3.1", Severity: "high"})
+	if n := r.pass(t); n != 0 {
+		t.Fatalf("second advisory made %d findings", n)
+	}
+	// Still uncomparable after 7 days: texted once, then not again.
+	r.now = r.now.Add(8 * 24 * time.Hour)
+	r.pass(t)
+	r.now = r.now.Add(24 * time.Hour)
+	r.pass(t)
+	if len(r.texts) != 1 || !strings.Contains(r.texts[0], "Could not check openssl version build-42") || len(r.c.got) != 0 {
+		t.Fatalf("texts %q", r.texts)
 	}
 
 	for _, c := range []struct {
