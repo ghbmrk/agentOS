@@ -64,9 +64,9 @@ func (c *Channel) signInTextLocked(now time.Time) (string, int, int) {
 	var parts []string
 	switch {
 	case n > 1:
-		parts = append(parts, "Phones signed in on the box's Wi-Fi at "+c.clockList(st.LocalSignIns, 8)+".")
+		parts = append(parts, "Phones signed in on my Wi-Fi at "+c.clockList(st.LocalSignIns, 8)+".")
 	case n == 1:
-		parts = append(parts, "A phone signed in on the box's Wi-Fi at "+c.clockList(st.LocalSignIns, 8)+".")
+		parts = append(parts, "A phone signed in on my Wi-Fi at "+c.clockList(st.LocalSignIns, 8)+".")
 	}
 	switch {
 	case m == 1 && n == 0:
@@ -263,7 +263,7 @@ func (c *Channel) LocalSignIn(code string) (until time.Time, err error) {
 			}
 		}) != nil {
 			// Not recorded, so not coalesced either: tell now.
-			alerts = append(alerts, "A phone signed in on the box's Wi-Fi at "+c.clock(now)+". Not you? Text STOP.")
+			alerts = append(alerts, "A phone signed in on my Wi-Fi at "+c.clock(now)+". Not you? Text STOP.")
 		} else {
 			c.local.evicted += evicted
 		}
@@ -473,6 +473,11 @@ func (c *Channel) LocalAnswer(id, sum string, approve bool, code string) (string
 	case wrong:
 		err = ErrWrongCode
 		alerts = c.wrongLocalLocked(now)
+		if left := LocalBound - c.codes.st.LocalUsed; left <= 2 {
+			// Say so before approving here pauses (UX on #165).
+			msg += fmt.Sprintf(" %d more %s on my Wi-Fi today, then approving here pauses until %s.",
+				left, map[bool]string{true: "try", false: "tries"}[left == 1], c.clock(c.codes.st.LocalStart.Add(WrongWindow)))
+		}
 		if c.open[id] == nil {
 			note = id + " void after wrong codes"
 		}

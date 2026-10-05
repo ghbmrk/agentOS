@@ -265,3 +265,44 @@ func TestPageAnswersAreCoalesced(t *testing.T) {
 		t.Fatal("answers kept after the text")
 	}
 }
+
+// Potency R3: a page-only request lapses after LocalTTL, not CodeTTL, and
+// is reported in the digest like any expired request (CH-13).
+func TestALocalRequestLapsesAfterLocalTTL(t *testing.T) {
+	r := newRig(t, nil)
+	id, _ := r.ch.RequestLocal(localItem("i1"), 0)
+	r.inbox()
+	r.advance(LocalTTL - time.Minute)
+	r.ch.Tick()
+	if len(r.decisions()) != 0 || len(r.ch.LocalRequests()) != 1 {
+		t.Fatal("lapsed before LocalTTL")
+	}
+	r.advance(time.Minute)
+	r.ch.Tick()
+	if d := r.decisions(); len(d) != 1 || d[0].Approved || d[0].Why != "expired" || d[0].Ref != "i1" {
+		t.Fatalf("decisions %+v", d)
+	}
+	if ds, _ := r.ch.TakeExpired(); len(ds) != 1 || ds[0].Request != id {
+		t.Fatalf("digest %+v", ds)
+	}
+	if len(r.ch.LocalRequests()) != 0 {
+		t.Fatal("still listed")
+	}
+}
+
+// UX on #165: near the local bound, a wrong code on the page says how
+// many tries remain before approving there pauses.
+func TestThePageWarnsBeforeTheLocalBound(t *testing.T) {
+	r := newRig(t, nil)
+	id, _ := r.ch.RequestLocal(localItem("i1"), 0)
+	r.inbox()
+	r.ch.mu.Lock()
+	r.ch.codes.commit(func(s *State) { s.LocalStart, s.LocalUsed = r.clock(), LocalBound-4 })
+	r.ch.mu.Unlock()
+	if msg, _ := r.ch.LocalAnswer(id, r.sum(id), true, "000000"); strings.Contains(msg, "more tr") {
+		t.Fatalf("3 left: %q", msg)
+	}
+	if msg, _ := r.ch.LocalAnswer(id, r.sum(id), true, "000001"); !strings.Contains(msg, "2 more tries on my Wi-Fi today, then approving here pauses until") {
+		t.Fatalf("2 left: %q", msg)
+	}
+}

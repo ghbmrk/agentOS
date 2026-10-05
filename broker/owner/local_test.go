@@ -144,7 +144,7 @@ func TestLocalSignInAlertsAreCoalesced(t *testing.T) {
 		t.Fatal(err)
 	}
 	first := r.clock().Format("15:04")
-	if got := r.inbox(); got != "A phone signed in on the box's Wi-Fi at "+first+". Not you? Text STOP." {
+	if got := r.inbox(); got != "A phone signed in on my Wi-Fi at "+first+". Not you? Text STOP." {
 		t.Fatalf("sign-in alert: %q", got)
 	}
 	r.advance(10 * time.Minute)
@@ -161,7 +161,7 @@ func TestLocalSignInAlertsAreCoalesced(t *testing.T) {
 	}
 	r.advance(SignInAlertEvery)
 	r.ch.Tick()
-	if got := r.inbox(); got != "Phones signed in on the box's Wi-Fi at "+second+", "+third+". Not you? Text STOP." {
+	if got := r.inbox(); got != "Phones signed in on my Wi-Fi at "+second+", "+third+". Not you? Text STOP." {
 		t.Fatalf("coalesced alert: %q", got)
 	}
 
@@ -207,7 +207,7 @@ func TestLocalSignInAlertsSurviveRestartAndFailedSend(t *testing.T) {
 	}
 	r.ch = r.open()
 	r.ch.Tick()
-	if got := r.inbox(); got != "A phone signed in on the box's Wi-Fi at "+held+". Not you? Text STOP." {
+	if got := r.inbox(); got != "A phone signed in on my Wi-Fi at "+held+". Not you? Text STOP." {
 		t.Fatalf("held sign-in after restart and failed send: %q", got)
 	}
 	// Sent once only.
