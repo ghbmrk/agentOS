@@ -775,9 +775,9 @@ func TestStaleLockoutEntryIsDropped(t *testing.T) {
 	}
 }
 
-// The CLI's "Keep this PC trusted" prompt: an empty answer keeps the PC
-// trusted only after the box's own update; after a Secure Boot or an
-// unexplained change the owner must type y.
+// The CLI's "Keep this PC trusted" prompt is never ticked by default: the
+// update and Secure Boot hints come from files on the drive (Security
+// lens, #50), so an empty answer keeps nothing.
 func TestUnlockCLIKeepTrustedDefault(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -786,7 +786,7 @@ func TestUnlockCLIKeepTrustedDefault(t *testing.T) {
 		kept    bool
 		release string
 	}{
-		{"update", func(r *pcRig) { bootPC(r.tpm, "initrd-B", "usrhash=bbbb quiet") }, "[Y/n]", true, "2026.11.1"},
+		{"update", func(r *pcRig) { bootPC(r.tpm, "initrd-B", "usrhash=bbbb quiet") }, "[y/N]", false, "2026.11.1"},
 		{"secure boot", func(r *pcRig) { bootSB(r.tpm, "sb-db-2027", "initrd-A", "usrhash=aaaa quiet") }, "[y/N]", false, ""},
 		{"unexplained", func(r *pcRig) { bootPC(r.tpm, "initrd-A", "usrhash=aaaa init=/bin/sh") }, "[y/N]", false, ""},
 	} {
