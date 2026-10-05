@@ -578,7 +578,8 @@ func opaque(p string) (string, bool) {
 // be a directory this restore created, and files are created exclusively
 // without following links, so no entry (a symlink first, a path beneath
 // it next) can write outside dst. Outside the machine layers no owner,
-// setuid or setgid bit, whiteout, or symlink leaving its root is restored;
+// setuid or setgid bit, whiteout, or symlink leaving its root (one that is
+// absolute, has a ".." element, or passes through a restored link) is restored;
 // the vault root is forced to the vault's user, 0600 files and 0700
 // directories; top-level directories are 0700. It digests what it
 // restores for the MAC check.
@@ -597,6 +598,7 @@ func (x *extractor) run(tr *tar.Reader) error {
 		return err
 	}
 	dirs := map[string]bool{".": true}
+	links := map[string]bool{} // symlinks restored so far
 	type dirMode struct {
 		p    string
 		mode os.FileMode
@@ -690,12 +692,13 @@ func (x *extractor) run(tr *tar.Reader) error {
 				return err
 			}
 		case tar.TypeSymlink:
-			if !layer && !staysIn(top, clean, hd.Linkname) {
+			if !layer && !staysIn(top, clean, hd.Linkname, links) {
 				return fmt.Errorf("recovery: symlink %q leaves its root", clean)
 			}
 			if err := os.Symlink(hd.Linkname, p); err != nil {
 				return err
 			}
+			links[clean] = true
 		case tar.TypeChar:
 			if !layer {
 				return fmt.Errorf("recovery: whiteout outside a machine layer: %q", clean)
@@ -739,14 +742,31 @@ func (x *extractor) run(tr *tar.Reader) error {
 	return syncDir(x.dst)
 }
 
-// staysIn reports whether a symlink at clean pointing to link resolves,
-// lexically, inside the root top.
-func staysIn(top, clean, link string) bool {
+// staysIn reports whether a symlink at clean pointing to link stays inside
+// the root top. Checked one link at a time, a lexical test is not enough:
+// a chain such as a -> ., b -> a/.., c -> b/.. resolves outside on disk
+// (security review 2, finding 2). So the link must be relative with no
+// ".." element, and its target must not pass through a link already
+// restored (links); a link may still point at another link itself.
+func staysIn(top, clean, link string, links map[string]bool) bool {
 	if link == "" || path.IsAbs(link) {
 		return false
 	}
+	for _, e := range strings.Split(link, "/") {
+		if e == ".." {
+			return false
+		}
+	}
 	t := path.Join(path.Dir(clean), link)
-	return t == top || strings.HasPrefix(t, top+"/")
+	if t != top && !strings.HasPrefix(t, top+"/") {
+		return false
+	}
+	for p := path.Dir(t); p != "." && p != "/"; p = path.Dir(p) {
+		if links[p] {
+			return false
+		}
+	}
+	return true
 }
 
 // verify checks the archive's MAC under the restored vault's MAC key. A
