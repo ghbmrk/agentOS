@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -374,7 +375,7 @@ func TestTruncatedBodyReportsNoUsage(t *testing.T) {
 func TestLOOP5EvaluationCallsCarryTheTreesRule(t *testing.T) {
 	fe := &fakeEgress{h: func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, `{"ok":true}`) }}
 	sock := serveUnix(t, fe)
-	ev := Evaluation(Config{Socket: sock, Label: func(string) string { return "public" }, Denied: (&denials{}).add})
+	ev := Evaluation(Config{Socket: sock, Label: func(string) string { return "public" }, Denied: (&denials{}).add, OverCeiling: func(string) {}})
 
 	rule := []byte(`{"chat":[{"provider":"anthropic","model":"m"}]}`)
 	for _, c := range []struct {
@@ -411,5 +412,40 @@ func TestLOOP5EvaluationCallsCarryTheTreesRule(t *testing.T) {
 	defer fe.mu.Unlock()
 	if r := fe.seen[len(fe.seen)-1]; r.Header.Get(HeaderRule) != "" {
 		t.Fatalf("live route forwarded a rule: %q", r.Header.Get(HeaderRule))
+	}
+}
+
+// Evaluation needs somewhere to report a ceiling refusal: without
+// OverCeiling it forwards nothing. With it, a refusal the vault process
+// gives with ReasonEvalCeiling names the replay machine to OverCeiling,
+// and other denials do not.
+func TestLOOP5CeilingRefusalsReachTheEvaluator(t *testing.T) {
+	var reason atomic.Value
+	reason.Store(ReasonEvalCeiling)
+	fe := &fakeEgress{h: func(w http.ResponseWriter, r *http.Request) {
+		b, _ := json.Marshal(Denial{Adapter: "router", Method: r.Method, Status: 403, Reason: reason.Load().(string)})
+		w.Header().Set(HeaderDenial, string(b))
+		http.Error(w, "refused", 403)
+	}}
+	sock := serveUnix(t, fe)
+	call := func(cfg Config) {
+		w := httptest.NewRecorder()
+		Evaluation(cfg)("eval-0a1b", nil).ServeHTTP(w, httptest.NewRequest("POST", "/openai/v1/chat/completions", strings.NewReader(`{}`)))
+	}
+	cfg := Config{Socket: sock, Label: func(string) string { return "private" }, Denied: (&denials{}).add}
+	call(cfg)
+	fe.mu.Lock()
+	n := len(fe.seen)
+	fe.mu.Unlock()
+	if n != 0 {
+		t.Fatal("forwarded without OverCeiling")
+	}
+	var over []string
+	cfg.OverCeiling = func(m string) { over = append(over, m) }
+	call(cfg)
+	reason.Store("no declared operation matches")
+	call(cfg)
+	if len(over) != 1 || over[0] != "eval-0a1b" {
+		t.Fatalf("OverCeiling got %q", over)
 	}
 }

@@ -95,6 +95,11 @@ type Config struct {
 	Denied func(machine string, d Denial)
 	// Logf reports forwarding faults. Nil is silent.
 	Logf func(format string, args ...any)
+	// OverCeiling is told, for Evaluation only, which replay machine the
+	// vault process refused with ReasonEvalCeiling, so the evaluator ends
+	// that run as not evaluated (replay.Evaluator.OverPriceCeiling).
+	// Evaluation requires it: without it every call answers 503.
+	OverCeiling func(machine string)
 }
 
 // Forward returns the guest plane's Model function: one handler per
@@ -110,12 +115,13 @@ func Forward(cfg Config) func(machine string) http.Handler {
 // private (owner task data, REV-5), carrying rule, the routing rule of the
 // tree under evaluation, or none to use the active one. The vault process
 // applies it within the owner's grants, which are its own configuration
-// (replay K1). A machine outside EvalPrefix, or a rule over MaxRule, gets
-// 503 and nothing is forwarded.
+// (replay K1). A machine outside EvalPrefix, a rule over MaxRule, or a
+// Config without OverCeiling gets 503 and nothing is forwarded. A refusal
+// with ReasonEvalCeiling is reported to OverCeiling before Denied.
 func Evaluation(cfg Config) func(machine string, rule []byte) http.Handler {
 	fwd := forward(cfg)
 	return func(machine string, rule []byte) http.Handler {
-		if !strings.HasPrefix(machine, EvalPrefix) || len(rule) > MaxRule {
+		if cfg.OverCeiling == nil || !strings.HasPrefix(machine, EvalPrefix) || len(rule) > MaxRule {
 			return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				http.Error(w, "no evaluation model route", http.StatusServiceUnavailable)
 			})
@@ -169,6 +175,9 @@ func forward(cfg Config) func(machine string, eval bool, rule []byte) http.Handl
 						d = Denial{Status: resp.StatusCode, Reason: "unreadable denial"}
 					}
 					d.Machine = machine
+					if eval && d.Reason == ReasonEvalCeiling {
+						cfg.OverCeiling(machine)
+					}
 					cfg.Denied(machine, d)
 				}
 				return nil

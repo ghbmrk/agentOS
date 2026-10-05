@@ -22,6 +22,11 @@ var testPrices = prices{
 	"openai/gpt-eval":       {Input: 1, Output: 8},
 	"anthropic/claude-eval": {Input: 1, Output: 4},
 	"openai/gpt-big":        {Input: 2, Output: 30},
+	"openai/gpt-in":         {Input: 3, Output: 8},
+	"openai/a":              {Input: 10, Output: 1},
+	"openai/b":              {Input: 1, Output: 10},
+	"openai/c":              {Input: 10, Output: 10},
+	"anthropic/claude-a":    {Input: 50, Output: 50},
 }
 
 // A replay machine's model calls (LOOP-5) are routed by the rule of the
@@ -44,7 +49,7 @@ func TestLOOP5EvaluationRuleOnlyReordersGrantedRoutes(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		io.WriteString(w, `{"id":"c1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
 	})
-	evaluation := modelroute.Evaluation(modelroute.Config{Socket: sock, Label: func(string) string { return "public" },
+	evaluation := modelroute.Evaluation(modelroute.Config{OverCeiling: func(string) {}, Socket: sock, Label: func(string) string { return "public" },
 		Denied: func(string, modelroute.Denial) {}})
 	ask := func(rule string) *http.Response {
 		var b []byte
@@ -119,9 +124,9 @@ func TestLOOP5EvaluationRoutesStayUnderTheActivePriceCeiling(t *testing.T) {
 		io.WriteString(w, `{}`)
 	})
 	var denied []modelroute.Denial
-	evaluation := modelroute.Evaluation(modelroute.Config{Socket: sock, Label: func(string) string { return "private" },
+	evaluation := modelroute.Evaluation(modelroute.Config{OverCeiling: func(string) {}, Socket: sock, Label: func(string) string { return "private" },
 		Denied: func(_ string, d modelroute.Denial) { denied = append(denied, d) }})
-	for _, model := range []string{"gpt-big", "gpt-unknown"} {
+	for _, model := range []string{"gpt-big", "gpt-in", "gpt-unknown"} {
 		rule := `{"default":[{"provider":"openai","model":"gpt-eval"},{"provider":"openai","model":"` + model + `"}]}`
 		resp := chat(evaluation("eval-0a1b", []byte(rule)))
 		if resp.StatusCode != http.StatusForbidden {
@@ -133,7 +138,7 @@ func TestLOOP5EvaluationRoutesStayUnderTheActivePriceCeiling(t *testing.T) {
 		t.Fatalf("a provider saw %d refused calls", calls)
 	}
 	mu.Unlock()
-	if len(denied) != 2 || denied[0].Reason != modelroute.ReasonEvalCeiling || denied[1].Reason != modelroute.ReasonEvalCeiling {
+	if len(denied) != 3 || denied[0].Reason != modelroute.ReasonEvalCeiling || denied[2].Reason != modelroute.ReasonEvalCeiling {
 		t.Fatalf("denials %+v", denied)
 	}
 
@@ -141,7 +146,7 @@ func TestLOOP5EvaluationRoutesStayUnderTheActivePriceCeiling(t *testing.T) {
 	// refused.
 	unpriced := &evalRoute{From: "agent", Grants: []string{"openai"}, PrivateOK: map[string]bool{"openai": true},
 		Active: route.Rule{"default": {{Provider: "openai", Model: "gpt-unknown"}}}, Prices: testPrices}
-	evaluation = modelroute.Evaluation(modelroute.Config{Socket: serveModel(t, testRouter(t), unpriced, func(w http.ResponseWriter, r *http.Request) {
+	evaluation = modelroute.Evaluation(modelroute.Config{OverCeiling: func(string) {}, Socket: serveModel(t, testRouter(t), unpriced, func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		calls++
 		mu.Unlock()
@@ -154,5 +159,43 @@ func TestLOOP5EvaluationRoutesStayUnderTheActivePriceCeiling(t *testing.T) {
 	defer mu.Unlock()
 	if calls != 0 {
 		t.Fatalf("a provider saw %d refused calls", calls)
+	}
+}
+
+// Each route a tree names must be no dearer, in input and in output price,
+// than one route of the active rule on a provider the agent machine is
+// granted: two cheap-on-one-axis active routes do not admit a route dear
+// on both, and an ungranted dear active route raises no ceiling (L3 F2).
+func TestLOOP5CeilingIsOneDominatingGrantedRoute(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
+	ev := &evalRoute{From: "agent", Grants: []string{"openai"}, PrivateOK: map[string]bool{"openai": true},
+		Active: route.Rule{"default": {{Provider: "openai", Model: "a"}, {Provider: "openai", Model: "b"}, {Provider: "anthropic", Model: "claude-a"}}},
+		Prices: testPrices}
+	sock := serveModel(t, testRouter(t), ev, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"id":"c1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+	})
+	evaluation := modelroute.Evaluation(modelroute.Config{OverCeiling: func(string) {}, Socket: sock, Label: func(string) string { return "private" },
+		Denied: func(string, modelroute.Denial) {}})
+	ask := func(model string) int {
+		return chat(evaluation("eval-0a1b", []byte(`{"default":[{"provider":"openai","model":"`+model+`"}]}`))).StatusCode
+	}
+	if c := ask("c"); c != http.StatusForbidden {
+		t.Fatalf("route dear on both axes: %d", c)
+	}
+	if c := ask("b"); c != 200 {
+		t.Fatalf("an active route itself: %d", c)
+	}
+	if c := chat(evaluation("eval-0a1b", nil)).StatusCode; c != 200 {
+		t.Fatalf("the active rule, with an ungranted dear route: %d", c)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 2 {
+		t.Fatalf("provider saw %d calls, want 2", calls)
 	}
 }

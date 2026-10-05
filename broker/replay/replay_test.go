@@ -21,6 +21,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/guest"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/meter"
+	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/vm"
 )
 
@@ -581,9 +582,74 @@ func TestCHG1RouteOverThePriceCeilingIsNotEvaluated(t *testing.T) {
 		}
 	})
 	ev = r.e
-	_, err = r.e.Run(bg, tree, change.Probe{ID: "p1", Input: []byte("go")})
-	if !errors.Is(err, change.ErrNotEvaluated) || !errors.Is(err, ErrOverPriceCeiling) {
-		t.Fatalf("over the ceiling: %v", err)
+	// Run reads the reply and the refusal from two channels; repeat so a
+	// Run that let the reply win would fail here, not once in a while.
+	for i := 0; i < 12; i++ {
+		_, err = r.e.Run(bg, tree, change.Probe{ID: "p1", Input: []byte("go")})
+		if !errors.Is(err, change.ErrNotEvaluated) || !errors.Is(err, ErrOverPriceCeiling) {
+			t.Fatalf("run %d over the ceiling: %v", i, err)
+		}
 	}
 	r.e.OverPriceCeiling("eval-none") // no run: ignored
+}
+
+// The same when the guest never replies: the run ends at once as not
+// evaluated, never as a timeout (a failure on one side).
+func TestCHG1RouteOverThePriceCeilingEndsASilentRun(t *testing.T) {
+	mtr, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "meter.json"), MachineCap: meter.DefaultMachineCap, OverallCap: meter.DefaultOverallCap})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hold := make(chan struct{})
+	t.Cleanup(func() { close(hold) })
+	var ev *Evaluator
+	r := newRig(t, recs{}, func(g *client, _ string) string { modelCall(g); <-hold; return "" }, func(c *Config) {
+		c.Meter = mtr
+		c.Timeout = 20 * time.Second
+		c.Model = func(id string, _ change.Tree) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				ev.OverPriceCeiling(id)
+				http.Error(w, "refused", http.StatusForbidden)
+			})
+		}
+	})
+	ev = r.e
+	start := time.Now()
+	_, err = r.e.Run(bg, tree, change.Probe{ID: "p1", Input: []byte("go")})
+	if !errors.Is(err, ErrOverPriceCeiling) || errors.Is(err, ErrNoReply) || time.Since(start) > 10*time.Second {
+		t.Fatalf("silent guest over the ceiling: %v after %v", err, time.Since(start))
+	}
+}
+
+// The link from the vault process's ceiling refusal to the evaluator is
+// structural: the evaluation route calls OverCeiling for the refused
+// machine, so a 403 with modelroute.ReasonEvalCeiling ends the run as
+// ErrOverPriceCeiling.
+func TestCHG1CeilingDenialFromTheVaultProcessEndsTheRun(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "model.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := json.Marshal(modelroute.Denial{Adapter: "router", Method: r.Method, Status: 403, Reason: modelroute.ReasonEvalCeiling})
+		w.Header().Set(modelroute.HeaderDenial, string(b))
+		http.Error(w, modelroute.ReasonEvalCeiling, http.StatusForbidden)
+	})}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+	mtr, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "meter.json"), MachineCap: meter.DefaultMachineCap, OverallCap: meter.DefaultOverallCap})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ev *Evaluator
+	r := newRig(t, recs{}, func(g *client, _ string) string { modelCall(g); return "replied anyway" }, func(c *Config) {
+		c.Meter = mtr
+		c.Model = RuleModel(modelroute.Evaluation(modelroute.Config{Socket: sock, Label: func(string) string { return "private" },
+			Denied: func(string, modelroute.Denial) {}, OverCeiling: func(id string) { ev.OverPriceCeiling(id) }}))
+	})
+	ev = r.e
+	if _, err := r.e.Run(bg, tree, change.Probe{ID: "p1", Input: []byte("go")}); !errors.Is(err, ErrOverPriceCeiling) {
+		t.Fatalf("ceiling denial: %v", err)
+	}
 }

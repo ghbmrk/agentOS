@@ -34,7 +34,6 @@ import (
 	"path"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
@@ -210,9 +209,6 @@ type run struct {
 	out   chan []byte
 	fail  chan error
 	once  sync.Once
-	// ceiling is set when the vault process refused a model call over the
-	// price ceiling; the run is then not evaluated whatever the guest says.
-	ceiling atomic.Bool
 }
 
 func (r *run) failed(err error) {
@@ -269,8 +265,13 @@ func (e *Evaluator) Run(ctx context.Context, t change.Tree, c change.Probe) ([]b
 	}
 	select {
 	case out := <-r.out:
-		if r.ceiling.Load() {
-			return nil, fmt.Errorf("replay %s: %w", c.ID, ErrOverPriceCeiling)
+		// A failure recorded before the reply arrived wins: a run that
+		// asked for an unrecorded effect or a route over the price ceiling
+		// is never a pass because the guest replied anyway.
+		select {
+		case err := <-r.fail:
+			return nil, fmt.Errorf("replay %s: %w", c.ID, err)
+		default:
 		}
 		return out, nil
 	case err := <-r.fail:
@@ -323,7 +324,6 @@ func seed(t change.Tree) map[string][]byte {
 // broker calls it from the evaluation route's denial callback.
 func (e *Evaluator) OverPriceCeiling(id string) {
 	if r := e.get(id); r != nil {
-		r.ceiling.Store(true)
 		r.failed(ErrOverPriceCeiling)
 	}
 }

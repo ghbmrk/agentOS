@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -80,10 +81,10 @@ func modelHandler(c *custody, rt *route.Router, ev *evalRoute) http.Handler {
 // grants, and are always private data. Nil: replay machines get no model
 // access, and the broker does not evaluate routing changes.
 //
-// A rule may name only models priced, per token, at most like the dearest
-// route in Active, from Prices; a dearer or unpriced model, or an Active
-// rule with an unpriced route, refuses the call before any provider with
-// modelroute.ReasonEvalCeiling (security C1 on #62). Each replay machine
+// A rule may name only models priced, from Prices, and no dearer in input
+// or in output than one priced route of Active on a granted provider; any
+// other refuses the call before any provider with
+// modelroute.ReasonEvalCeiling (security C1, L3 F2 on #62). Each replay machine
 // is admitted against its own limits, never From's (L3 R1).
 type evalRoute struct {
 	From      string
@@ -102,28 +103,30 @@ type price struct {
 // prices is this process's price table, keyed "provider/model" (-prices).
 type prices map[string]price
 
-// ceiling is the dearest input and output price among rule's routes; ok is
-// false if any route has no price.
-func (ps prices) ceiling(rule route.Rule) (price, bool) {
-	var c price
-	for _, routes := range rule {
+// within reports whether every route in rule on a provider in granted is
+// priced, and no dearer in input or in output than one priced route of
+// active on a granted provider (security C1; L3 F2 on #62). Routes on other
+// providers are never called, since the router refuses them.
+func (ps prices) within(rule, active route.Rule, granted []string) bool {
+	ok := map[string]bool{}
+	for _, g := range granted {
+		ok[g] = true
+	}
+	var ceil []price
+	for _, routes := range active {
 		for _, r := range routes {
-			p, ok := ps[r.String()]
-			if !ok {
-				return price{}, false
+			if p, priced := ps[r.String()]; priced && ok[r.Provider] {
+				ceil = append(ceil, p)
 			}
-			c.Input, c.Output = max(c.Input, p.Input), max(c.Output, p.Output)
 		}
 	}
-	return c, true
-}
-
-// within reports whether every route in rule is priced at most c.
-func (ps prices) within(rule route.Rule, c price) bool {
 	for _, routes := range rule {
 		for _, r := range routes {
-			p, ok := ps[r.String()]
-			if !ok || p.Input > c.Input || p.Output > c.Output {
+			if !ok[r.Provider] {
+				continue // never routed: the router refuses an ungranted provider
+			}
+			p, priced := ps[r.String()]
+			if !priced || !slices.ContainsFunc(ceil, func(c price) bool { return p.Input <= c.Input && p.Output <= c.Output }) {
 				return false
 			}
 		}
@@ -148,7 +151,7 @@ func (ev *evalRoute) serve(c *custody, machine string, w http.ResponseWriter, r 
 			"message": "the routing rule under evaluation is not usable", "type": "invalid_request_error"}})
 		return
 	}
-	if ceil, ok := ev.Prices.ceiling(ev.Active); !ok || !ev.Prices.within(rule, ceil) {
+	if !ev.Prices.within(rule, ev.Active, ev.Grants) {
 		b, _ := json.Marshal(modelroute.Denial{Adapter: "router", Method: r.Method, Status: http.StatusForbidden, Reason: modelroute.ReasonEvalCeiling})
 		w.Header().Set(modelroute.HeaderDenial, string(b))
 		http.Error(w, modelroute.ReasonEvalCeiling, http.StatusForbidden)
