@@ -140,7 +140,7 @@ func (b *builder) giveUp(ctx context.Context) {
 }
 
 func (b *builder) get(ctx context.Context, p string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://broker"+p, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://broker.localhost"+p, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -157,7 +157,7 @@ func (b *builder) get(ctx context.Context, p string) ([]byte, error) {
 }
 
 func (b *builder) post(ctx context.Context, p string, body []byte) (int, []byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://broker"+p, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://broker.localhost"+p, bytes.NewReader(body))
 	if err != nil {
 		return 0, nil, err
 	}
