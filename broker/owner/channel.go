@@ -774,7 +774,11 @@ func (c *Channel) resumeLocked(r reply, now time.Time) (out []string, accepted b
 			n++
 		}
 	}
-	return []string{fmt.Sprintf("Resumed. %d held actions may now run.", n) + c.rewindowLocked(now)}, true
+	text := "Resumed."
+	if n > 0 {
+		text = fmt.Sprintf("Resumed. %d stopped actions may now run.", n)
+	}
+	return []string{text + c.rewindowLocked(now)}, true
 }
 
 // checkLocked checks a reply code against a texted code, or against the

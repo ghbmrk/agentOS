@@ -133,7 +133,7 @@ func (c *Channel) undoLocked(id string, now time.Time, decided *[]Decision) stri
 	q := c.queued[id]
 	if q == nil {
 		if _, ok := c.released[id]; ok {
-			return fmt.Sprintf("%s is past its undo window; it ran.", id)
+			return fmt.Sprintf("%s is past its undo window; it was released.", id)
 		}
 		return fmt.Sprintf("Nothing to undo for %s.", id)
 	}
@@ -170,7 +170,7 @@ func (c *Channel) rewindowLocked(now time.Time) string {
 		return fmt.Sprintf(" %s runs at %s unless you reply UNDO %s.", ids[0], c.clock(at), ids[0])
 	}
 	s := fmt.Sprintf(" %s run at %s unless you reply UNDO and an ID.", strings.Join(ids, ", "), c.clock(at))
-	if !fits("Resumed. 999 held actions may now run." + s) {
+	if !fits("Resumed. 999 stopped actions may now run." + s) {
 		s = fmt.Sprintf(" %d queued items run at %s unless you reply UNDO and an ID.", len(ids), c.clock(at))
 	}
 	return s

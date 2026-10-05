@@ -309,15 +309,14 @@ func (c *Channel) answerLocked(rp reply, now time.Time, decided *[]Decision) (ou
 	}
 	n := len(*decided)
 	c.closeLocked(r, func(i int) (bool, bool) { return true, all || chosen[i] }, "", now, decided)
-	held := c.holdLocked(r, (*decided)[n:], now)
-	if all {
-		return []string{"Approved " + r.id + "." + held}, true, false
+	s := "Approved " + r.id + "."
+	if !all {
+		s = fmt.Sprintf("Approved %s item %s.", r.id, list(rp.items))
+		if len(denied) > 0 {
+			s += fmt.Sprintf(" Denied %s.", list(denied))
+		}
 	}
-	s := fmt.Sprintf("Approved %s item %s.", r.id, list(rp.items))
-	if len(denied) > 0 {
-		s += fmt.Sprintf(" Denied %s.", list(denied))
-	}
-	return []string{s + held}, true, false
+	return []string{s + c.holdLocked(r, (*decided)[n:], now, s)}, true, false
 }
 
 // holdLocked holds each approved item of r that has an undo window (REV-3):
@@ -327,10 +326,11 @@ func (c *Channel) answerLocked(rp reply, now time.Time, decided *[]Decision) (ou
 // the IDs that stop them. An item that cannot be held (no free ID, the
 // restart record cannot be saved) is denied rather than run without the
 // undo its request promised.
-func (c *Channel) holdLocked(r *request, ds []Decision, now time.Time) string {
+func (c *Channel) holdLocked(r *request, ds []Decision, now time.Time, prefix string) string {
 	var items []int
 	var ids []string
 	var untils []time.Time
+	fail := ""
 	var first time.Time
 	var failed []int
 	for k := range ds {
@@ -357,6 +357,9 @@ func (c *Channel) holdLocked(r *request, ds []Decision, now time.Time) string {
 			first = until
 		}
 	}
+	if len(failed) > 0 {
+		fail = fmt.Sprintf(" Could not hold %s for undo, so it did not run. Ask your agent again.", list(failed))
+	}
 	s := ""
 	switch {
 	case len(ids) == 1 && len(r.items) == 1:
@@ -377,15 +380,12 @@ func (c *Channel) holdLocked(r *request, ds []Decision, now time.Time) string {
 			}
 			// Each item's own time when they differ, if it fits; else the
 			// earliest, which is never later than any.
-			if t := fmt.Sprintf(" Held items run unless you reply UNDO and an ID: %s.", strings.Join(pairs, ", ")); fits("Approved A99 item 1, 2." + t) {
+			if t := fmt.Sprintf(" Held items run unless you reply UNDO and an ID: %s.", strings.Join(pairs, ", ")); fits(prefix + t + fail) {
 				s = t
 			}
 		}
 	}
-	if len(failed) > 0 {
-		s += fmt.Sprintf(" Could not hold %s for undo, so it did not run. Ask your agent again.", list(failed))
-	}
-	return s
+	return s + fail
 }
 
 // findLocked resolves which request a reply answers.

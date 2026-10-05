@@ -97,11 +97,13 @@ func (c *Channel) Boot() {
 	if len(replies) > 0 {
 		text += " Auto-replies not sent: " + strings.Join(replies, ", ") + "."
 	}
-	if len(holds) > 0 {
-		text += " Approved actions cancelled, not sent: " + strings.Join(holds, ", ") + "."
-	}
-	if len(reqs)+len(expired)+len(replies)+len(holds) > 0 {
+	if len(reqs)+len(expired)+len(replies) > 0 {
 		text += " Ask your agent again if still needed."
+	}
+	if len(holds) > 0 {
+		// The gate asks these again itself (grants RV11), so the owner is
+		// not invited to a duplicate request that could send twice.
+		text += " Approved actions cancelled, not sent: " + strings.Join(holds, ", ") + ". They will be asked again."
 	}
 	if !fits(text) {
 		text = fmt.Sprintf("Box restarted. %d requests re-sent with new codes, %d cancelled, %d expired, %d auto-replies not sent, and %d approved actions cancelled.",

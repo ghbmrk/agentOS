@@ -1,7 +1,7 @@
 // Package reversible declares how an irreversible operation is converted
 // into a reversible one (SPEC REV-3): held for an undo window after the
-// owner approves it, and optionally staged first as a draft, a scheduled
-// send, or a staging copy that an UNDO removes. An adapter declares a Form
+// owner approves it, and optionally staged first as an inert draft or
+// staging copy that an UNDO removes. An adapter declares a Form
 // next to the operation; the grants gate applies it. The package holds no
 // state and makes no calls: it validates forms and builds the derived
 // intents the gate journals.

@@ -676,7 +676,7 @@ func TestResumeNeedsATextedCodeAndStopVoidsIt(t *testing.T) {
 		t.Fatalf("code survived STOP: %q", got)
 	}
 	code = regexp.MustCompile(`RESUME ([0-9]{6})`).FindStringSubmatch(r.say("resume"))[1]
-	if got := r.say("Resume " + code + "."); got != "Resumed. 0 held actions may now run." || r.eng.Stopped() {
+	if got := r.say("Resume " + code + "."); got != "Resumed." || r.eng.Stopped() {
 		t.Fatalf("resume: %q", got)
 	}
 	if got := r.say("RESUME " + code); got != "Not stopped. Nothing to resume." {
@@ -728,7 +728,7 @@ func TestAutoReplyAlertUndoAndCommitmentFilter(t *testing.T) {
 	if due := r.ch.DueAutoReplies(); len(due) != 1 || due[0].Reply.Ref != "r2" {
 		t.Fatalf("due %+v", due)
 	}
-	if got := r.say("UNDO " + res.Queued.ID); got != res.Queued.ID+" is past its undo window; it ran." {
+	if got := r.say("UNDO " + res.Queued.ID); got != res.Queued.ID+" is past its undo window; it was released." {
 		t.Fatalf("undo after send: %q", got)
 	}
 

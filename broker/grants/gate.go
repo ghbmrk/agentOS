@@ -200,6 +200,9 @@ type Gate struct {
 	// retry explains a pending intent whose hold ended without the
 	// owner's answer (PV1): the agent's retry asks again.
 	retry map[string]string
+	// after holds released effects that STOP kept from running, whose
+	// staged copy is settled once they end.
+	after map[string]afterRef
 	wg    sync.WaitGroup
 }
 
@@ -214,6 +217,12 @@ type wait struct {
 	held    bool      // approved, and held under reply until sendAt (REV-3)
 	attempt int       // which hold of the intent this is, from 1
 	expires time.Time // a re-issued item's original expiry; zero otherwise
+}
+
+// afterRef names the hold of a released effect still to end.
+type afterRef struct {
+	hold string
+	n    int
 }
 
 // decision is the owner's answer on one intent.
@@ -252,7 +261,7 @@ func New(cfg Config) *Gate {
 	return &Gate{cfg: cfg, grants: map[string]*Grant{},
 		waiting: map[string]*wait{}, decided: map[string]decision{}, confirmed: map[string]bool{}, failed: map[string]string{},
 		carried: map[string]bool{}, forms: checkForms(cfg), derived: map[string]bool{}, staging: map[string]chan struct{}{},
-		retry: map[string]string{}}
+		retry: map[string]string{}, after: map[string]afterRef{}}
 }
 
 // checkForms keeps the forms reversible.Check accepts against each
@@ -836,7 +845,40 @@ func (g *Gate) Submit(in journal.Intent) (journal.Status, error) {
 }
 
 func (g *Gate) Dispatch(ctx context.Context, id string) (journal.Status, error) {
-	return g.eng.Dispatch(ctx, id)
+	st, err := g.eng.Dispatch(ctx, id)
+	g.endHeld(id)
+	return st, err
+}
+
+// endHeld settles the staged copy of released effects that STOP kept from
+// running, once each has ended (afterHold). With no id it checks them all.
+func (g *Gate) endHeld(ids ...string) {
+	g.mu.Lock()
+	if len(ids) == 0 {
+		for id := range g.after {
+			ids = append(ids, id)
+		}
+	}
+	g.mu.Unlock()
+	for _, id := range ids {
+		// The engine is read without g.mu: its policy calls take g.mu.
+		st, err := g.eng.Get(id)
+		if err != nil || st.State == journal.Authorized || st.State == journal.InFlight {
+			continue
+		}
+		g.mu.Lock()
+		a, ok := g.after[id]
+		delete(g.after, id)
+		g.mu.Unlock()
+		if !ok {
+			continue
+		}
+		g.wg.Add(1)
+		go func() {
+			defer g.wg.Done()
+			g.afterHold(st, a.hold, a.n)
+		}()
+	}
 }
 
 func (g *Gate) Get(id string) (journal.Status, error) {
@@ -1287,8 +1329,12 @@ func (g *Gate) hold(d owner.Decision) {
 	if w.request != "" && d.Request != w.request {
 		// A hold this intent's request did not make: never left pending
 		// on a release that would not match it.
+		own := g.own
 		g.mu.Unlock()
 		g.closeIntent(d.Ref, "the approval did not match its request; ask again with a new request_id")
+		if own != nil {
+			_ = own.Inform(fmt.Sprintf("%s did not run: its approval did not match its request. Ask your agent again if still needed.", clip(d.Hold)))
+		}
 		return
 	}
 	w.held, w.reply, w.sendAt = true, d.Hold, d.Until
@@ -1502,7 +1548,15 @@ func (g *Gate) settle(id string) {
 		own := g.own
 		g.mu.Unlock()
 		if d.hold != "" {
-			g.afterHold(st, d.hold, d.attempt)
+			if st.State == journal.Authorized || st.State == journal.InFlight {
+				// STOP held it after the release: settle its staged copy
+				// when it ends, whoever dispatches it (L3 on #76).
+				g.mu.Lock()
+				g.after[id] = afterRef{hold: d.hold, n: d.attempt}
+				g.mu.Unlock()
+			} else {
+				g.afterHold(st, d.hold, d.attempt)
+			}
 		}
 		if st.Intent.Origin == reversible.Origin && st.State != journal.Pending && st.State != journal.Authorized {
 			g.mu.Lock()
@@ -1528,6 +1582,7 @@ func (g *Gate) settle(id string) {
 func (g *Gate) Tick() {
 	g.reissueDue()
 	g.flushDue()
+	g.endHeld()
 	g.mu.Lock()
 	own := g.own
 	g.mu.Unlock()

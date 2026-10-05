@@ -46,7 +46,7 @@ func TestApprovedEffectIsHeldWithUndoInItsConfirmation(t *testing.T) {
 	if len(due) != 1 || due[0].ID != u[1] || due[0].Reply.Ref != "e1" || !due[0].Held {
 		t.Fatalf("due %+v", due)
 	}
-	if got := r.say("UNDO " + u[1]); got != u[1]+" is past its undo window; it ran." {
+	if got := r.say("UNDO " + u[1]); got != u[1]+" is past its undo window; it was released." {
 		t.Fatalf("undo after release: %q", got)
 	}
 
@@ -133,7 +133,7 @@ func TestHeldEffectsAreNotReleasedDuringStopAndDieAtRestart(t *testing.T) {
 
 	r.ch = r.open() // reboot
 	r.ch.Boot()
-	if got := r.inbox(); got != "Box restarted. Approved actions cancelled, not sent: "+u[1]+". Ask your agent again if still needed." {
+	if got := r.inbox(); got != "Box restarted. Approved actions cancelled, not sent: "+u[1]+". They will be asked again." {
 		t.Fatalf("boot text: %q", got)
 	}
 	if ds := r.decisions(); len(ds) != 1 || ds[0].Ref != "e1" || ds[0].Approved || ds[0].Why != "restart" {
@@ -169,7 +169,7 @@ func TestUndoWorksUntilReleaseAndResumeGivesAFreshWindow(t *testing.T) {
 	r.decisions()
 	code := regexp.MustCompile(`RESUME ([0-9]{6})`).FindStringSubmatch(r.say("resume"))[1]
 	got := r.say("RESUME " + code)
-	if got != "Resumed. 0 held actions may now run. "+k2+" runs at 13:02 unless you reply UNDO "+k2+"." {
+	if got != "Resumed. "+k2+" runs at 13:02 unless you reply UNDO "+k2+"." {
 		t.Fatalf("resume: %q", got)
 	}
 	if due := r.ch.DueAutoReplies(); len(due) != 0 {
@@ -179,7 +179,7 @@ func TestUndoWorksUntilReleaseAndResumeGivesAFreshWindow(t *testing.T) {
 	if due := r.ch.DueAutoReplies(); len(due) != 1 || due[0].ID != k2 {
 		t.Fatalf("due %+v", due)
 	}
-	if got := r.say("UNDO " + k2); got != k2+" is past its undo window; it ran." {
+	if got := r.say("UNDO " + k2); got != k2+" is past its undo window; it was released." {
 		t.Fatalf("undo after release: %q", got)
 	}
 }

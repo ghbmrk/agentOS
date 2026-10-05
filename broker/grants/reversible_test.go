@@ -447,3 +447,54 @@ func TestHoldsThatEndWithoutTheOwnerAreAskedAgain(t *testing.T) {
 		t.Fatal("unstaged the copy that was sent")
 	}
 }
+
+// TestStopBetweenReleaseAndDispatchStillSettlesTheCopy (L3 on #76): a
+// released effect that STOP keeps from running ends later, through the
+// guest's dispatch after RESUME; its staged copy is still settled then.
+func TestStopBetweenReleaseAndDispatchStillSettlesTheCopy(t *testing.T) {
+	form := reversible.Form{Stage: "draft.save", Inverse: "draft.discard"}
+	r := newRig(t, withForms(map[string]reversible.Form{"invoice.send": form}))
+	r.grant(mailGrant())
+	r.ver.set("inv-1042", sam())
+	r.effect("agent/s1", "invoice.send", map[string]any{"record": "inv-1042"}, "sam@example.com")
+	r.g.Flush()
+	h := r.approveHeld()
+	r.exec.fail = map[string]bool{"agent/s1": true}
+	r.exec.evidence = map[string]string{"agent/s1": reversible.EvidenceEdited}
+	if _, err := r.eng.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	r.advance(reversible.DefaultWindow)
+	r.g.Tick()
+	r.g.Wait()
+	if st := r.state("agent/s1"); st.State != journal.Authorized || r.exec.runs("agent/s1") != 0 {
+		t.Fatalf("during STOP: %s", st.State)
+	}
+	if err := r.eng.Resume(); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := r.g.Dispatch(context.Background(), "agent/s1"); st.State != journal.NotApplied {
+		t.Fatalf("after RESUME: %s", st.State)
+	}
+	r.g.Wait()
+	if n := r.own.notes; n[len(n)-1] != h[0]+" not sent: its draft changed after you approved it. Send it from your mail app if you still want it." {
+		t.Fatalf("notes %q", n)
+	}
+
+	// And a plain failure there unstages, found by Tick whoever ran it.
+	r.effect("agent/s2", "invoice.send", map[string]any{"record": "inv-1042"}, "sam@example.com")
+	r.g.Flush()
+	r.approveHeld()
+	r.exec.fail["agent/s2"] = true
+	r.eng.Stop(context.Background())
+	r.advance(reversible.DefaultWindow)
+	r.g.Tick()
+	r.g.Wait()
+	r.eng.Resume()
+	r.eng.Dispatch(context.Background(), "agent/s2")
+	r.g.Tick()
+	r.g.Wait()
+	if st := r.state(reversible.InverseID("agent/s2", 1)); st.State != journal.Succeeded {
+		t.Fatalf("not unstaged after a STOP-held failure: %s", st.State)
+	}
+}
