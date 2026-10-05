@@ -200,11 +200,30 @@ func (l *learning) attach(ctx context.Context, d *daemon.Daemon) {
 							log.Printf("learning: owner verdict not harvested: harvester failed")
 						}
 					}()
-					harvestOutcome(l.harvest, l.tasks, o, log.Printf)
+					l.record(o)
 				}()
 			}
 		}
 	}()
+}
+
+// learningOn reports whether the owner has learning on: the Improve loop
+// on and loops not all off. While it is off, nothing new is recorded from
+// the owner (UX-101-1 on #101); texts already kept stay until their sweep.
+func (l *learning) learningOn() bool { return l.sched.Settings().On(loops.Improve) }
+
+// delivered keeps the owner's task text for harvesting (guest G16).
+func (l *learning) delivered(goal, text string, public bool) {
+	if l.learningOn() {
+		l.tasks.put(goal, text, public)
+	}
+}
+
+// record harvests an owner verdict as a Loop 1 case (loops L6).
+func (l *learning) record(o grants.OwnerOutcome) {
+	if l.learningOn() {
+		harvestOutcome(l.harvest, l.tasks, o, log.Printf)
+	}
 }
 
 func (l *learning) busy() bool {

@@ -70,6 +70,23 @@ func TestLearningPlaneRunsInAgentosd(t *testing.T) {
 	if lp.busy() || lp.stopped() {
 		t.Fatal("an idle box reads busy or stopped")
 	}
+	// With learning off, nothing new is recorded from the owner: no task
+	// text, no case (UX-101-1 on #101).
+	lp.delivered("owner:on", "a task while learning is on", false)
+	if _, ok := lp.tasks.get("owner:on"); !ok {
+		t.Fatal("a task text was not kept while learning is on")
+	}
+	if got := d.Owner().Handle(ctx, ownerNum, "LEARNING OFF"); len(got) != 1 || lp.sched.Settings().On(loops.Improve) {
+		t.Fatalf("locked LEARNING OFF: %q", got)
+	}
+	lp.delivered("owner:off", "CANARY-task while learning is off", false)
+	if _, ok := lp.tasks.get("owner:off"); ok {
+		t.Fatal("a task text was kept while learning is off")
+	}
+	lp.record(grants.OwnerOutcome{Intent: journal.Intent{ID: "agent/on", GoalID: "owner:on", Origin: "guest:agent"}, Verdict: grants.OwnerAccepted})
+	if _, err := os.Stat(filepath.Join(dir, "harvest.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a verdict was harvested while learning is off: %v", err)
+	}
 	if got := d.Owner().Handle(ctx, ownerNum, "LOOPS OFF"); len(got) != 1 || !strings.Contains(got[0], "LOOPS ON") {
 		t.Fatalf("locked LOOPS OFF: %q", got)
 	}

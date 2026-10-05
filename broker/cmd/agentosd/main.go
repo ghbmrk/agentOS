@@ -253,7 +253,7 @@ func main() {
 				services.live.Store(&svc{plane})
 				oa := &guest.OwnerAgent{Plane: plane, Machine: agentMachine}
 				if lp != nil {
-					oa.Delivered = lp.tasks.put
+					oa.Delivered = lp.delivered
 				}
 				agent.a.Store(oa)
 				defer plane.Shutdown()
