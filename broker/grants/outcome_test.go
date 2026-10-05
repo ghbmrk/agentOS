@@ -1,6 +1,7 @@
 package grants
 
 import (
+	"context"
 	"strings"
 	"sync"
 	"testing"
@@ -130,5 +131,104 @@ func TestOwnerOutcomeHookCannotFailTheAnswer(t *testing.T) {
 	}
 	if r.g.reportOnce("agent/1") {
 		t.Fatal("an intent could be reported twice")
+	}
+}
+
+// L3 MUST-1 on #101: an acceptance is reported only once the effect is
+// sent. A YES that STOP holds is reported after RESUME, when the send
+// ends: not if it fails or its draft changed after the YES.
+func TestAcceptanceWaitsForTheSend(t *testing.T) {
+	var o outcomes
+	r := newRig(t, func(c *Config) { c.Outcome = o.add })
+	r.grant(mailGrant())
+	ctx := context.Background()
+
+	r.approveStopped("agent/f1", "inv-f1")
+	if got := o.take(); got != "" {
+		t.Fatalf("reported before the send: %q", got)
+	}
+	r.exec.fail = map[string]bool{"agent/f1": true}
+	if st, _ := r.g.Dispatch(ctx, "agent/f1"); st.State != journal.NotApplied {
+		t.Fatalf("failed send: %s", st.State)
+	}
+	r.g.Wait()
+	r.g.Tick()
+	r.g.Wait()
+	if got := o.take(); got != "" {
+		t.Fatalf("a failed send was reported: %q", got)
+	}
+
+	r.approveStopped("agent/s1", "inv-s1")
+	if st, _ := r.g.Dispatch(ctx, "agent/s1"); st.State != journal.Succeeded {
+		t.Fatalf("send: %s", st.State)
+	}
+	r.g.Wait()
+	if got := o.take(); got != "agent/s1 accepted" {
+		t.Fatalf("sent after RESUME: %q", got)
+	}
+}
+
+// The same for a held effect released under STOP whose draft changed.
+func TestAnEditedDraftIsNotAnAcceptance(t *testing.T) {
+	var o outcomes
+	form := reversible.Form{Stage: "draft.save", Inverse: "draft.discard"}
+	r := newRig(t, func(c *Config) {
+		withForms(map[string]reversible.Form{"invoice.send": form})(c)
+		c.Outcome = o.add
+	})
+	r.grant(mailGrant())
+	r.ver.set("inv-1042", sam())
+	r.effect("agent/e1", "invoice.send", map[string]any{"record": "inv-1042"}, "sam@example.com")
+	r.g.Flush()
+	r.approveHeld()
+	r.exec.fail = map[string]bool{"agent/e1": true}
+	r.exec.evidence = map[string]string{"agent/e1": reversible.EvidenceEdited}
+	if _, err := r.eng.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	r.advance(reversible.DefaultWindow)
+	r.g.Tick()
+	r.g.Wait()
+	if err := r.eng.Resume(); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := r.g.Dispatch(context.Background(), "agent/e1"); st.State != journal.NotApplied {
+		t.Fatalf("after RESUME: %s", st.State)
+	}
+	r.g.Wait()
+	if got := o.take(); got != "" {
+		t.Fatalf("an edited draft was reported: %q", got)
+	}
+}
+
+// L3 MUST-2 on #101: each guard on what counts as the owner's verdict.
+func TestOnlyTheOwnersAnswersAreVerdicts(t *testing.T) {
+	guest := journal.Intent{ID: "agent/1", Origin: "guest:agent", Account: "mail"}
+	yes := decision{approved: true, why: "owner", asked: true}
+	no := decision{why: "owner", asked: true}
+	at := func(in journal.Intent, s journal.State) journal.Status { return journal.Status{Intent: in, State: s} }
+	broker := guest
+	broker.Account = journal.BrokerAccount
+	local := guest
+	local.Origin = "owner"
+	for _, c := range []struct {
+		name string
+		d    decision
+		st   journal.Status
+		want OwnerVerdict
+	}{
+		{"YES sent", yes, at(guest, journal.Succeeded), OwnerAccepted},
+		{"YES unknown", yes, at(guest, journal.OutcomeUnknown), OwnerAccepted},
+		{"NO", no, at(guest, journal.Denied), OwnerDeclined},
+		{"UNDO", decision{why: "undo", asked: true}, at(guest, journal.Denied), OwnerUndone},
+		{"YES not applied", yes, at(guest, journal.NotApplied), ""},
+		{"YES refused at the recheck", yes, at(guest, journal.Denied), ""},
+		{"not a guest's", yes, at(local, journal.Succeeded), ""},
+		{"the broker's", no, at(broker, journal.Denied), ""},
+		{"never asked this run", decision{why: "owner"}, at(guest, journal.Denied), ""},
+	} {
+		if got := ownerVerdict(c.d, c.st); got != c.want {
+			t.Errorf("%s: %q, want %q", c.name, got, c.want)
+		}
 	}
 }

@@ -241,7 +241,11 @@ type Gate struct {
 	// after holds released effects that STOP kept from running, whose
 	// staged copy is settled once they end.
 	after map[string]afterRef
-	wg    sync.WaitGroup
+	// sending holds owner acceptances of effects that were authorized
+	// but not yet sent; each is reported once its send ends (L3 MUST-1
+	// on #101), never for a failed send or a changed draft.
+	sending map[string]OwnerVerdict
+	wg      sync.WaitGroup
 }
 
 // wait is an intent waiting on the owner.
@@ -306,7 +310,7 @@ func New(cfg Config) *Gate {
 	return &Gate{cfg: cfg, grants: map[string]*Grant{},
 		waiting: map[string]*wait{}, decided: map[string]decision{}, confirmed: map[string]bool{}, failed: map[string]string{},
 		carried: map[string]bool{}, forms: checkForms(cfg), derived: map[string]bool{}, staging: map[string]chan struct{}{},
-		retry: map[string]string{}, after: map[string]afterRef{}, reported: map[string]bool{}}
+		retry: map[string]string{}, after: map[string]afterRef{}, sending: map[string]OwnerVerdict{}, reported: map[string]bool{}}
 }
 
 // checkForms keeps the forms reversible.Check accepts against each
@@ -974,6 +978,11 @@ func (g *Gate) endHeld(ids ...string) {
 		for id := range g.after {
 			ids = append(ids, id)
 		}
+		for id := range g.sending {
+			if _, ok := g.after[id]; !ok {
+				ids = append(ids, id)
+			}
+		}
 	}
 	g.mu.Unlock()
 	for _, id := range ids {
@@ -985,7 +994,10 @@ func (g *Gate) endHeld(ids ...string) {
 		g.mu.Lock()
 		a, ok := g.after[id]
 		delete(g.after, id)
+		v := g.sending[id]
+		delete(g.sending, id)
 		g.mu.Unlock()
+		g.reportSent(v, st)
 		if !ok {
 			continue
 		}
@@ -1765,8 +1777,20 @@ func (g *Gate) settle(id string) {
 			// (stale approval, changed state) is not (change C7).
 			g.cfg.Changes.Decided(ctx, st.Intent, !d.approved && d.why == "owner")
 		}
-		if v := ownerVerdict(d, st); v != "" && g.cfg.Outcome != nil && g.reportOnce(id) {
-			g.report(OwnerOutcome{Intent: st.Intent, Verdict: v})
+		switch v := ownerVerdict(d, st); {
+		case v == "" || g.cfg.Outcome == nil:
+		case st.State == journal.Authorized || st.State == journal.InFlight:
+			// STOP, a fence, or a slow send: the acceptance waits for
+			// the send to end (endHeld, from Dispatch or Tick).
+			g.mu.Lock()
+			if len(g.sending) < maxReported {
+				g.sending[id] = v
+			} else {
+				g.cfg.Logf("grants: owner verdict not reported: too many effects unsent")
+			}
+			g.mu.Unlock()
+		default:
+			g.reportSent(v, st)
 		}
 		if st.State == journal.Succeeded && st.Intent.Executor == ExecutorName && own != nil && len(st.Attempts) > 0 {
 			if gid := st.Attempts[len(st.Attempts)-1].Evidence; gid != "" {
@@ -1822,6 +1846,21 @@ func (g *Gate) reportOnce(id string) bool {
 // report calls Outcome outside the gate's lock, after the journal has the
 // final state; a panic in it is logged, never the owner's answer's
 // failure (security A2 on PW3).
+// reportSent reports verdict v on st once it is final. An acceptance
+// counts only once the effect was sent (or may have been); a failed send
+// or a changed draft (not_applied) is not the owner's verdict.
+func (g *Gate) reportSent(v OwnerVerdict, st journal.Status) {
+	if v == "" || g.cfg.Outcome == nil {
+		return
+	}
+	if (v == OwnerAccepted || v == OwnerAcceptedImplicitly) && st.State != journal.Succeeded && st.State != journal.OutcomeUnknown {
+		return
+	}
+	if g.reportOnce(st.Intent.ID) {
+		g.report(OwnerOutcome{Intent: st.Intent, Verdict: v})
+	}
+}
+
 func (g *Gate) report(o OwnerOutcome) {
 	defer func() {
 		if recover() != nil {
@@ -1835,7 +1874,8 @@ func (g *Gate) report(o OwnerOutcome) {
 // not one: an expiry, a restart, a recheck's refusal, a draft changed
 // after the YES or a failed send (not_applied: no correction text is
 // known, and the content was never seen sent), or an intent that is not
-// a guest's effect. An approval STOP holds is still the owner's verdict.
+// a guest's effect. An approval STOP holds is still the owner's verdict,
+// reported only once its send ends (reportSent).
 func ownerVerdict(d decision, st journal.Status) OwnerVerdict {
 	if !d.asked || !strings.HasPrefix(st.Intent.Origin, "guest:") || st.Intent.Account == journal.BrokerAccount {
 		return ""

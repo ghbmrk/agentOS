@@ -36,6 +36,7 @@ type learning struct {
 	pipe    *change.Pipeline
 	sched   *loops.Scheduler
 	harvest *loops.Harvester
+	cases   harvester // where owner verdicts go: harvest, or a test's
 	eval    lateEvaluator
 	eng     atomic.Pointer[journal.Engine]
 	adm     atomic.Pointer[admission.Controller]
@@ -119,6 +120,7 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		return nil, err
 	}
 	l.harvest.Wake = l.sched.Wake
+	l.cases = l.harvest
 	// Evaluation keeps its reserve of the spare budget while Loop 1
 	// evaluates (loops L3). The clean room takes its Max here once it
 	// exists.
@@ -222,7 +224,7 @@ func (l *learning) delivered(goal, text string, public bool) {
 // record harvests an owner verdict as a Loop 1 case (loops L6).
 func (l *learning) record(o grants.OwnerOutcome) {
 	if l.learningOn() {
-		harvestOutcome(l.harvest, l.tasks, o, log.Printf)
+		harvestOutcome(l.cases, l.tasks, o, log.Printf)
 	}
 }
 

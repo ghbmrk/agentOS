@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -106,5 +107,9 @@ func TestTaskTextsAreBounded(t *testing.T) {
 	}
 	if tasks, err = openTaskTexts(store, clock, t.Logf); err != nil || len(tasks.st) != 0 {
 		t.Fatalf("the sweep was not saved: %d kept, %v", len(tasks.st), err)
+	}
+	// Only the broker reads them (L3 N4 on #101).
+	if fi, err := os.Stat(store.Path); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("tasks.json: %v, %v", fi.Mode(), err)
 	}
 }
