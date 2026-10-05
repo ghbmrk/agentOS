@@ -54,14 +54,16 @@ var supersedes = map[change.Class]string{
 	change.ClassSkill: "procedures",
 }
 
-// supersededBy reports whether path is procedures/p<shape>.json and the
-// candidate writes exactly one file, that shape's skills/k<shape>.json.
+// supersededBy reports whether path is a procedure file's name,
+// procedures/p<shape>.json (format.IsFileName, so a free-form file is
+// never "superseded", L3 and security R1 on #89), and the candidate writes
+// exactly one file, that shape's skills/k<shape>.json.
 // inClass has already checked that every skill or procedure file a
 // candidate writes is for the task its name says (format.DecodeFile), so
 // the name pairs the skill with its own shape's procedure (P3-6e).
 func supersededBy(path string, files map[string][]byte) bool {
 	shape, ok := strings.CutPrefix(path, "procedures/p")
-	if !ok || !strings.HasSuffix(shape, ".json") || len(shape) == len(".json") || len(files) != 1 {
+	if !ok || !format.IsFileName(path) || len(files) != 1 {
 		return false
 	}
 	_, ok = files["skills/k"+shape]

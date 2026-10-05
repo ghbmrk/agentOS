@@ -1,12 +1,12 @@
 package skill
 
 import (
-	"github.com/ghbmrk/agentos/broker/skill/format"
-
 	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/ghbmrk/agentos/broker/skill/format"
 )
 
 // Effects asks the broker for one effect and reports its state. In the

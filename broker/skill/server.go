@@ -1,8 +1,6 @@
 package skill
 
 import (
-	"github.com/ghbmrk/agentos/broker/skill/format"
-
 	"bytes"
 	"context"
 	"encoding/json"
@@ -16,6 +14,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/skill/format"
 )
 
 // Server is an MCP tool server (streamable HTTP, one JSON response per
