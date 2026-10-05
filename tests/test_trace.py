@@ -42,6 +42,13 @@ class TraceTest(unittest.TestCase):
         d = make_repo(self.SPEC, {"tests/t.py": M + "XX-9\n"})
         self.assertEqual(tr.main(["--root", str(d)]), 1)
 
+    def test_lettered_sub_ids(self):
+        spec = "- **HW-5** a\n- **HW-5a** b\n"
+        self.assertEqual(tr.spec_ids(spec), ["HW-5", "HW-5a"])
+        d = make_repo(spec, {"tests/t.py": M + "HW-5a, HW-5\n"})
+        self.assertEqual(tr.main(["--root", str(d)]), 0)
+        self.assertIn("Covered: 2 / 2", (d / "TRACE.md").read_text())
+
     def test_gate(self):
         d = make_repo(self.SPEC, {"tests/t.py": M + "OP-1\n"})
         self.assertEqual(tr.main(["--root", str(d), "--gate", "OP-1"]), 0)
