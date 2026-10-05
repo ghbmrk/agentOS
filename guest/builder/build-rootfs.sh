@@ -14,7 +14,7 @@ out=$(mkdir -p "$1" && cd "$1" && pwd)
 
 cd "$out"
 mkdir -p usr/local/bin etc tmp proc dev sys run/agentos
-(cd "$repo/broker" && CGO_ENABLED=0 go build -trimpath -o "$out/usr/local/bin/agentos-builder" ./cmd/agentos-builder)
+(cd "$repo/broker" && CGO_ENABLED=0 go build -trimpath -ldflags=-buildid= -o "$out/usr/local/bin/agentos-builder" ./cmd/agentos-builder)
 printf 'root:x:0:0:root:/:/usr/local/bin/agentos-builder\n' >etc/passwd
 printf 'root:x:0:\n' >etc/group
 printf '127.0.0.1 localhost\n::1 localhost\n' >etc/hosts
