@@ -144,10 +144,11 @@ var errLaunchWritable = errors.New("launch file is writable by others")
 // launchSpec reads how the agent machine starts (vm.Spec Argv and Env),
 // as guest/openclaw/launch.json records it. It sets what a foreground
 // guest runs, so it must come from the signed host image's read-only root
-// filesystem: a file owned by anyone but root or agentosd, or writable by
-// group or others, is refused (L3 R2 on #56).
+// filesystem: a symlink, a file that is not regular, one owned by anyone
+// but root or agentosd, or one writable by group or others is refused
+// (L3 R2 on #56).
 func launchSpec(path string) (argv, env []string, err error) {
-	f, err := os.Open(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -157,7 +158,7 @@ func launchSpec(path string) (argv, env []string, err error) {
 		return nil, nil, err
 	}
 	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok || fi.Mode().Perm()&0o022 != 0 || st.Uid != 0 && int(st.Uid) != os.Geteuid() {
+	if !ok || !fi.Mode().IsRegular() || fi.Mode().Perm()&0o022 != 0 || st.Uid != 0 && int(st.Uid) != os.Geteuid() {
 		return nil, nil, fmt.Errorf("%s: %w (mode %v)", path, errLaunchWritable, fi.Mode().Perm())
 	}
 	b, err := io.ReadAll(io.LimitReader(f, 1<<20))

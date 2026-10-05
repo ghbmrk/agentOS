@@ -186,7 +186,7 @@ func serveCmd(args []string) error {
 	g := grants{}
 	fs.Var(g, "grant", "machine=adapter[,adapter] (repeatable)")
 	rulePath := fs.String("rule", "", "routing rule: JSON task class -> routes (P2-7)")
-	evalFrom := fs.String("eval-from", "agent", "the agent machine whose model grants replay machines use (LOOP-5); empty gives replay no model access")
+	evalFrom := fs.String("eval-from", "", "the agent machine whose model grants replay machines use (LOOP-5); empty (the default) gives replay no model access")
 	privateOK := fs.String("private-ok", "", "providers the owner allowed for private data, comma-separated (CAP-9)")
 	tpmPath := fs.String("tpm", defaultTPM, "this PC's TPM (trusted host, CRED-8); absent means every boot is an unknown host")
 	polPath := fs.String("pcr-policy", "", "approved boot paths: signed PCR policies (HW-5a); default vault.pcrpolicy beside the keys")

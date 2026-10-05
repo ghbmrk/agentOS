@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -192,6 +193,22 @@ func TestRES1AgentLaunchSpecRefusesAWritableFile(t *testing.T) {
 		}
 		if _, _, err := launchSpec(p); !errors.Is(err, errLaunchWritable) {
 			t.Errorf("%o: err = %v, want errLaunchWritable", mode, err)
+		}
+	}
+	if err := os.Chmod(p, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(filepath.Dir(p), "link.json")
+	fifo := filepath.Join(filepath.Dir(p), "fifo.json")
+	if err := os.Symlink(p, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(fifo, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{link, fifo} {
+		if _, _, err := launchSpec(q); err == nil {
+			t.Errorf("%s accepted", filepath.Base(q))
 		}
 	}
 	if os.Geteuid() != 0 {
