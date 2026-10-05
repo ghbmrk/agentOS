@@ -11,6 +11,8 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/journal"
@@ -112,29 +114,37 @@ func Check(declared map[string]string, op string, f Form) (Form, error) {
 	return f, nil
 }
 
-// StageID, InverseID, and EditedID name the derived intents, so a retry is
-// the same intent (OP-1). They start with '~', which no guest intent ID
-// does (guest IDs start with their lineage, [a-z0-9]), so a guest cannot
-// take one first (arbitrator C1 on #76).
-func StageID(parent string) string   { return "~reversible/stage/" + parent }
-func InverseID(parent string) string { return "~reversible/unstage/" + parent }
-func EditedID(parent string) string  { return "~reversible/edited/" + parent }
+// Prefix starts every derived intent ID. No guest intent ID starts with
+// '~' (guest IDs start with their lineage, [a-z0-9]), so a guest cannot
+// take a derived ID first and block it (arbitrator C1 on #76).
+const Prefix = "~reversible/"
 
-// Stage is the intent that stages p's effect.
-func Stage(p journal.Intent, f Form) journal.Intent {
-	return derive(p, StageID(p.ID), f.Stage, nil)
+// StageID, InverseID, and EditedID name the derived intents of the n-th
+// hold of parent (from 1), so a retry is the same intent (OP-1) and a
+// parent held again after a restart is staged afresh.
+func StageID(parent string, n int) string   { return derivedID("stage", parent, n) }
+func InverseID(parent string, n int) string { return derivedID("unstage", parent, n) }
+func EditedID(parent string, n int) string  { return derivedID("edited", parent, n) }
+
+func derivedID(kind, parent string, n int) string {
+	return Prefix + kind + "/" + strconv.Itoa(n) + "/" + parent
 }
 
-// Inverse is the intent that removes what p's stage made; staged is the
-// stage's evidence.
-func Inverse(p journal.Intent, f Form, staged string) journal.Intent {
-	return derive(p, InverseID(p.ID), f.Inverse, map[string]any{ParamStaged: staged})
+// Stage is the intent that stages p's n-th hold.
+func Stage(p journal.Intent, f Form, n int) journal.Intent {
+	return derive(p, StageID(p.ID, n), f.Stage, nil)
+}
+
+// Inverse is the intent that removes what p's n-th stage made; staged is
+// the stage's evidence.
+func Inverse(p journal.Intent, f Form, n int, staged string) journal.Intent {
+	return derive(p, InverseID(p.ID, n), f.Inverse, map[string]any{ParamStaged: staged})
 }
 
 // Edited is the intent that sends the owner's edited copy of p's stage,
 // asked of the owner at the normal tier; staged is the stage's evidence.
-func Edited(p journal.Intent, staged string) journal.Intent {
-	return derive(p, EditedID(p.ID), p.Action, map[string]any{ParamStaged: staged, ParamEdited: true})
+func Edited(p journal.Intent, n int, staged string) journal.Intent {
+	return derive(p, EditedID(p.ID, n), p.Action, map[string]any{ParamStaged: staged, ParamEdited: true})
 }
 
 func derive(p journal.Intent, id, op string, extra map[string]any) journal.Intent {
@@ -149,15 +159,18 @@ func derive(p journal.Intent, id, op string, extra map[string]any) journal.Inten
 		Machine: p.Machine, Label: p.Label}
 }
 
-// Parent returns the parent ID of an intent the gate derived; false for
-// any other intent, whatever its params claim.
-func Parent(in journal.Intent) (string, bool) {
-	if in.Origin != Origin {
-		return "", false
-	}
+// Parent returns the parent ID and hold number of an intent the gate
+// derived; false for any other intent, whatever its params claim.
+func Parent(in journal.Intent) (string, int, bool) {
 	p, _ := in.Params[ParamParent].(string)
-	if p == "" || (in.ID != StageID(p) && in.ID != InverseID(p) && in.ID != EditedID(p)) {
-		return "", false
+	if in.Origin != Origin || p == "" || !strings.HasPrefix(in.ID, Prefix) || !strings.HasSuffix(in.ID, "/"+p) {
+		return "", 0, false
 	}
-	return p, true
+	mid := strings.TrimSuffix(strings.TrimPrefix(in.ID, Prefix), "/"+p) // kind/n
+	kind, num, ok := strings.Cut(mid, "/")
+	n, err := strconv.Atoi(num)
+	if !ok || err != nil || n < 1 || derivedID(kind, p, n) != in.ID || (kind != "stage" && kind != "unstage" && kind != "edited") {
+		return "", 0, false
+	}
+	return p, n, true
 }

@@ -728,7 +728,7 @@ func TestAutoReplyAlertUndoAndCommitmentFilter(t *testing.T) {
 	if due := r.ch.DueAutoReplies(); len(due) != 1 || due[0].Reply.Ref != "r2" {
 		t.Fatalf("due %+v", due)
 	}
-	if got := r.say("UNDO " + res.Queued.ID); !strings.HasPrefix(got, "Nothing to undo") {
+	if got := r.say("UNDO " + res.Queued.ID); got != res.Queued.ID+" is past its undo window; it ran." {
 		t.Fatalf("undo after send: %q", got)
 	}
 

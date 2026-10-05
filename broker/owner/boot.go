@@ -71,7 +71,11 @@ func (c *Channel) Boot() {
 		} else {
 			replies = append(replies, q.ID)
 		}
-		decided = append(decided, Decision{Request: q.ID, Item: 1, Ref: q.Ref, Why: "restart"})
+		d := Decision{Request: q.ID, Item: 1, Ref: q.Ref, Why: "restart"}
+		if q.Held {
+			d.Hold = q.ID
+		}
+		decided = append(decided, d)
 	}
 	c.addExpiredLocked(decided)
 	for _, p := range b.pending {

@@ -299,7 +299,10 @@ func (c *Channel) LocalResume() (string, error) {
 	if err := c.cfg.Engine.Resume(); err != nil {
 		return "", fmt.Errorf("owner: resume failed to record, still stopped: %w", err)
 	}
-	return "Resumed. Held actions may now run.", nil
+	c.mu.Lock()
+	more := c.rewindowLocked(c.cfg.Now())
+	c.mu.Unlock()
+	return "Resumed. Held actions may now run." + more, nil
 }
 
 // alert texts the owner a broker template, if a modem is attached.

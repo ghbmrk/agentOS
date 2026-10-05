@@ -330,6 +330,7 @@ func (c *Channel) answerLocked(rp reply, now time.Time, decided *[]Decision) (ou
 func (c *Channel) holdLocked(r *request, ds []Decision, now time.Time) string {
 	var items []int
 	var ids []string
+	var untils []time.Time
 	var first time.Time
 	var failed []int
 	for k := range ds {
@@ -351,6 +352,7 @@ func (c *Channel) holdLocked(r *request, ds []Decision, now time.Time) string {
 		d.Hold, d.Until = id, until
 		items = append(items, d.Item)
 		ids = append(ids, id)
+		untils = append(untils, until)
 		if first.IsZero() || until.Before(first) {
 			first = until
 		}
@@ -363,13 +365,25 @@ func (c *Channel) holdLocked(r *request, ds []Decision, now time.Time) string {
 		s = fmt.Sprintf(" Item %d runs at %s unless you reply UNDO %s.", items[0], c.clock(first), ids[0])
 	case len(ids) > 1:
 		pairs := make([]string, len(ids))
+		same := true
 		for i := range ids {
 			pairs[i] = fmt.Sprintf("%s for %d", ids[i], items[i])
+			same = same && untils[i].Equal(first)
 		}
 		s = fmt.Sprintf(" Held items run from %s unless you reply UNDO and an ID: %s.", c.clock(first), strings.Join(pairs, ", "))
+		if !same {
+			for i := range ids {
+				pairs[i] += " at " + c.clock(untils[i])
+			}
+			// Each item's own time when they differ, if it fits; else the
+			// earliest, which is never later than any.
+			if t := fmt.Sprintf(" Held items run unless you reply UNDO and an ID: %s.", strings.Join(pairs, ", ")); fits("Approved A99 item 1, 2." + t) {
+				s = t
+			}
+		}
 	}
 	if len(failed) > 0 {
-		s += fmt.Sprintf(" Could not hold %s for undo, so it did not run.", list(failed))
+		s += fmt.Sprintf(" Could not hold %s for undo, so it did not run. Ask your agent again.", list(failed))
 	}
 	return s
 }

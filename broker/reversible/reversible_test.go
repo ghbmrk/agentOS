@@ -74,38 +74,38 @@ func TestDeriveCarriesTheParentAndNothingTheGuestChose(t *testing.T) {
 		Params: map[string]any{"record": "thr-1"}, Recipients: []string{"sam@example.com"}, Executor: "mail",
 		Machine: "agent", Label: "private", GrantRef: "G1"}
 	f := Form{Window: DefaultWindow, Stage: "draft.save", Inverse: "draft.discard"}
-	s := Stage(p, f)
-	if s.ID != "~reversible/stage/agent/s1" || s.Origin != Origin || s.Action != "draft.save" || s.Account != "mail" || s.Executor != "mail" ||
+	s := Stage(p, f, 1)
+	if s.ID != "~reversible/stage/1/agent/s1" || s.Origin != Origin || s.Action != "draft.save" || s.Account != "mail" || s.Executor != "mail" ||
 		s.Params["record"] != "thr-1" || s.Params[ParamParent] != "agent/s1" || len(s.Recipients) != 1 || s.GoalID != "g1" ||
 		s.Machine != "agent" || s.Label != "private" {
 		t.Fatalf("stage %+v", s)
 	}
-	u := Inverse(p, f, "draft-77")
-	if u.ID != "~reversible/unstage/agent/s1" || u.Action != "draft.discard" || u.Params[ParamStaged] != "draft-77" || u.Params[ParamParent] != "agent/s1" {
+	u := Inverse(p, f, 1, "draft-77")
+	if u.ID != "~reversible/unstage/1/agent/s1" || u.Action != "draft.discard" || u.Params[ParamStaged] != "draft-77" || u.Params[ParamParent] != "agent/s1" {
 		t.Fatalf("inverse %+v", u)
 	}
-	e := Edited(p, "draft-77")
-	if e.ID != "~reversible/edited/agent/s1" || e.Action != "message.send" || e.Params[ParamStaged] != "draft-77" || e.Params[ParamEdited] != true {
+	e := Edited(p, 1, "draft-77")
+	if e.ID != "~reversible/edited/1/agent/s1" || e.Action != "message.send" || e.Params[ParamStaged] != "draft-77" || e.Params[ParamEdited] != true {
 		t.Fatalf("edited %+v", e)
 	}
-	if par, ok := Parent(e); !ok || par != "agent/s1" {
-		t.Fatalf("parent of edited: %q %v", par, ok)
+	if par, n, ok := Parent(e); !ok || par != "agent/s1" || n != 1 {
+		t.Fatalf("parent of edited: %q %d %v", par, n, ok)
 	}
 	if _, ok := p.Params[ParamParent]; ok {
 		t.Fatal("derive changed the parent's params")
 	}
-	if par, ok := Parent(s); !ok || par != "agent/s1" {
-		t.Fatalf("parent of stage: %q %v", par, ok)
+	if par, n, ok := Parent(s); !ok || par != "agent/s1" || n != 1 {
+		t.Fatalf("parent of stage: %q %d %v", par, n, ok)
 	}
-	if par, ok := Parent(u); !ok || par != "agent/s1" {
-		t.Fatalf("parent of inverse: %q %v", par, ok)
+	if par, n, ok := Parent(u); !ok || par != "agent/s1" || n != 1 {
+		t.Fatalf("parent of inverse: %q %d %v", par, n, ok)
 	}
-	if _, ok := Parent(p); ok {
+	if _, _, ok := Parent(p); ok {
 		t.Fatal("a guest intent has no parent")
 	}
 	forged := s
 	forged.Origin = "guest:agent"
-	if _, ok := Parent(forged); ok {
+	if _, _, ok := Parent(forged); ok {
 		t.Fatal("a guest-origin intent named a parent")
 	}
 }
@@ -118,13 +118,19 @@ func TestDeriveCarriesTheParentAndNothingTheGuestChose(t *testing.T) {
 // (OP-1), whatever its parent's ID.
 func TestDerivedIDsAreOutsideEveryGuestID(t *testing.T) {
 	for _, parent := range []string{"agent/s1", "agent/private/s1", "a/b/c"} {
-		for _, id := range []string{StageID(parent), InverseID(parent), EditedID(parent)} {
+		for _, id := range []string{StageID(parent, 1), InverseID(parent, 2), EditedID(parent, 3)} {
 			if !strings.HasPrefix(id, "~") || strings.Count(id, parent) != 1 || !strings.HasSuffix(id, "/"+parent) {
 				t.Errorf("derived ID %q of %q", id, parent)
 			}
 		}
 	}
-	if StageID("x") == InverseID("x") || InverseID("x") == EditedID("x") || StageID("x") == EditedID("x") {
+	if StageID("x", 1) == InverseID("x", 1) || InverseID("x", 1) == EditedID("x", 1) || StageID("x", 1) == StageID("x", 2) {
 		t.Fatal("derived IDs collide")
+	}
+	// A hold number or kind that does not round-trip names no parent.
+	for _, id := range []string{"~reversible/stage/0/x", "~reversible/stage/01/x", "~reversible/other/1/x", "~reversible/stage//x"} {
+		if _, _, ok := Parent(journal.Intent{ID: id, Origin: Origin, Params: map[string]any{ParamParent: "x"}}); ok {
+			t.Errorf("%s named a parent", id)
+		}
 	}
 }

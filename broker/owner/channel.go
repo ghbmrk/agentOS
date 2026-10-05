@@ -128,6 +128,7 @@ type Channel struct {
 	codes       codes
 	open        map[string]*request
 	queued      map[string]*Queued
+	released    map[string]time.Time // queued IDs released, for UNDO's reply
 	resume      *resumeCode
 	resumeTexts []time.Time
 	held        *heldMsg
@@ -208,8 +209,8 @@ func New(cfg Config) (*Channel, error) {
 		cfg:    cfg,
 		codes:  codes{sec: cfg.Secrets, verify: cfg.Verifier, st: st, store: cfg.Store, rand: cfg.Rand},
 		open:   map[string]*request{},
-		queued: map[string]*Queued{},
-		boot:   &bootReport{pending: st.Pending, queued: st.Queued},
+		queued: map[string]*Queued{}, released: map[string]time.Time{},
+		boot: &bootReport{pending: st.Pending, queued: st.Queued},
 	}
 	c.ctrl = &control.Handler{Engine: cfg.Engine, Auth: c, Agent: cfg.Agent, Machines: cfg.Machines, Now: cfg.Now}
 	return c, nil
@@ -565,7 +566,7 @@ func (c *Channel) challengeLocked(text string, now time.Time) (route, bool) {
 			case err != nil:
 				return route{replies: []string{msg + " RESUME failed to record. Still stopped."}}, true
 			}
-			msg += " Resumed."
+			msg += " Resumed." + c.rewindowLocked(now)
 		}
 		return route{replies: []string{msg}}, true
 	}
@@ -773,7 +774,7 @@ func (c *Channel) resumeLocked(r reply, now time.Time) (out []string, accepted b
 			n++
 		}
 	}
-	return []string{fmt.Sprintf("Resumed. %d held actions may now run.", n)}, true
+	return []string{fmt.Sprintf("Resumed. %d held actions may now run.", n) + c.rewindowLocked(now)}, true
 }
 
 // checkLocked checks a reply code against a texted code, or against the

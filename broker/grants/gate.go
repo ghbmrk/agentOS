@@ -197,7 +197,10 @@ type Gate struct {
 	forms   map[string]map[string]reversible.Form
 	derived map[string]bool
 	staging map[string]chan struct{}
-	wg      sync.WaitGroup
+	// retry explains a pending intent whose hold ended without the
+	// owner's answer (PV1): the agent's retry asks again.
+	retry map[string]string
+	wg    sync.WaitGroup
 }
 
 // wait is an intent waiting on the owner.
@@ -209,6 +212,7 @@ type wait struct {
 	reply   string // queued auto-reply ID
 	sendAt  time.Time
 	held    bool      // approved, and held under reply until sendAt (REV-3)
+	attempt int       // which hold of the intent this is, from 1
 	expires time.Time // a re-issued item's original expiry; zero otherwise
 }
 
@@ -245,7 +249,8 @@ func New(cfg Config) *Gate {
 	}
 	return &Gate{cfg: cfg, grants: map[string]*Grant{},
 		waiting: map[string]*wait{}, decided: map[string]decision{}, confirmed: map[string]bool{}, failed: map[string]string{},
-		carried: map[string]bool{}, forms: checkForms(cfg), derived: map[string]bool{}, staging: map[string]chan struct{}{}}
+		carried: map[string]bool{}, forms: checkForms(cfg), derived: map[string]bool{}, staging: map[string]chan struct{}{},
+		retry: map[string]string{}}
 }
 
 // checkForms keeps the forms reversible.Check accepts against each
@@ -459,6 +464,14 @@ func (g *Gate) evaluate(ctx context.Context, phase journal.Phase, in journal.Int
 	if in.Origin == reversible.Origin {
 		return g.evaluateDerived(ctx, phase, in)
 	}
+	if strings.HasPrefix(in.ID, reversible.Prefix) {
+		return verdict{kind: deny, why: "only the broker submits this intent"}
+	}
+	return g.evaluateEffect(ctx, phase, in)
+}
+
+// evaluateEffect is evaluate for an intent that is not derived.
+func (g *Gate) evaluateEffect(ctx context.Context, phase journal.Phase, in journal.Intent) verdict {
 	if in.Account == journal.BrokerAccount {
 		return g.evaluateBroker(ctx, phase, in)
 	}
@@ -621,11 +634,11 @@ func (g *Gate) matches(r Rule, in journal.Intent, v Verified) error {
 // after the owner edited the staged copy, is asked of the owner like the
 // effect itself, with no undo window.
 func (g *Gate) evaluateDerived(ctx context.Context, phase journal.Phase, in journal.Intent) verdict {
-	parent, ok := reversible.Parent(in)
+	parent, n, ok := reversible.Parent(in)
 	g.mu.Lock()
 	ours := g.derived[in.ID]
 	w := g.waiting[parent]
-	held := w != nil && w.held
+	live := w != nil && w.held && w.attempt == n // this stage's hold is on
 	ag := g.adapterLocked(in.Account)
 	g.mu.Unlock()
 	if !ok || !ours {
@@ -643,13 +656,14 @@ func (g *Gate) evaluateDerived(ctx context.Context, phase journal.Phase, in jour
 		return verdict{kind: deny, why: "no grant connects this account"}
 	}
 	switch {
-	case in.ID == reversible.StageID(parent) && in.Action == f.Stage && held:
-	case in.ID == reversible.InverseID(parent) && in.Action == f.Inverse && (p.State == journal.Denied || p.State == journal.NotApplied):
-	case in.ID == reversible.EditedID(parent) && in.Action == p.Intent.Action && p.State == journal.NotApplied &&
+	case in.ID == reversible.StageID(parent, n) && in.Action == f.Stage && live:
+	case in.ID == reversible.InverseID(parent, n) && in.Action == f.Inverse &&
+		(p.State == journal.Denied || p.State == journal.NotApplied || (p.State == journal.Pending && !live)):
+	case in.ID == reversible.EditedID(parent, n) && in.Action == p.Intent.Action && p.State == journal.NotApplied &&
 		lastEvidence(p) == reversible.EvidenceEdited:
 		x := in
 		x.Origin = p.Intent.Origin
-		v := g.evaluate(ctx, phase, x)
+		v := g.evaluateEffect(ctx, phase, x)
 		if v.kind != ask {
 			// Its extra params match no pre-allowance; anything but an
 			// ask here is a fault, so it fails closed.
@@ -825,7 +839,14 @@ func (g *Gate) isConfirmed(id string) bool {
 
 // Submit, Dispatch, and Get pass through to the engine; with Authorize
 // they are the guest plane's Effects.
-func (g *Gate) Submit(in journal.Intent) (journal.Status, error) { return g.eng.Submit(in) }
+// Submit refuses a derived intent's ID from anyone but the gate, so no
+// one can take it first and block a stage or an UNDO's inverse (C1).
+func (g *Gate) Submit(in journal.Intent) (journal.Status, error) {
+	if strings.HasPrefix(in.ID, reversible.Prefix) {
+		return journal.Status{}, errors.New("grants: intent IDs starting " + reversible.Prefix + " are the broker's")
+	}
+	return g.eng.Submit(in)
+}
 
 func (g *Gate) Dispatch(ctx context.Context, id string) (journal.Status, error) {
 	return g.eng.Dispatch(ctx, id)
@@ -880,6 +901,7 @@ func (g *Gate) Authorize(ctx context.Context, id string) (journal.Status, error)
 			}
 		}
 		delete(g.failed, id)
+		delete(g.retry, id)
 		own := g.own
 		g.mu.Unlock()
 		if fresh && v.hold && own != nil {
@@ -930,6 +952,8 @@ func (g *Gate) annotate(st *journal.Status) {
 		st.Permission.Reason = "auto-reply queued; it sends at " + w.sendAt.UTC().Format("15:04") + " UTC unless the owner cancels it"
 	} else if w != nil {
 		st.Permission.Reason = "waiting for the owner's approval"
+	} else if r := g.retry[id]; r != "" {
+		st.Permission.Reason = r
 	} else if f := g.failed[id]; f != "" {
 		st.Permission.Reason = "could not ask the owner (" + f + "); retry later"
 	}
@@ -1113,6 +1137,10 @@ func (g *Gate) Decide(d owner.Decision) {
 		g.hold(d)
 		return
 	}
+	if !d.Approved && (d.Why == "not held" || (d.Why == "restart" && d.Hold != "")) {
+		g.unhold(d)
+		return
+	}
 	unstaged := d.Approved && g.unstaged(d.Ref)
 	g.mu.Lock()
 	w := g.waiting[d.Ref]
@@ -1161,6 +1189,53 @@ func (g *Gate) Decide(d owner.Decision) {
 	}
 }
 
+// unhold ends a hold that closed without the owner's answer (PV1 on #76):
+// the owner channel could not hold it, or a restart cancelled it. It is no
+// refusal, so the intent is not denied and nothing counts it as one
+// (CAP-6, ADP-11, Loop 1). After a restart it is asked again as new with
+// the rest of what the restart left open (GR10, PV2); otherwise the
+// agent's retry asks again. Any staged copy is removed first (C2).
+func (g *Gate) unhold(d owner.Decision) {
+	g.mu.Lock()
+	w := g.waiting[d.Ref]
+	if w != nil && w.request != "" && d.Request != w.request && d.Request != w.reply {
+		g.mu.Unlock()
+		return
+	}
+	delete(g.waiting, d.Ref)
+	delete(g.decided, d.Ref)
+	if d.Why == "not held" {
+		delete(g.carried, d.Ref)
+		g.retry[d.Ref] = "approved, but it could not be held for its undo window, so it did not run; retry to ask the owner again"
+	}
+	eng := g.eng
+	g.mu.Unlock()
+	if eng == nil {
+		return
+	}
+	if st, err := eng.Get(d.Ref); err == nil {
+		g.wg.Add(1)
+		go func() {
+			defer g.wg.Done()
+			g.unstage(st.Intent, d.Request)
+		}()
+	}
+}
+
+// lastStage returns the number of p's latest hold that has a stage
+// intent in the journal, and that intent; 0 if none.
+func (g *Gate) lastStage(p string) (int, journal.Status) {
+	var last journal.Status
+	n := 0
+	for {
+		st, err := g.eng.Get(reversible.StageID(p, n+1))
+		if err != nil {
+			return n, last
+		}
+		n, last = n+1, st
+	}
+}
+
 // unstaged reports a held effect whose form stages it but whose stage did
 // not succeed, once any stage attempt in flight has ended.
 func (g *Gate) unstaged(id string) bool {
@@ -1170,6 +1245,7 @@ func (g *Gate) unstaged(id string) bool {
 	if w == nil || !w.held {
 		return false
 	}
+	n := w.attempt
 	st, err := g.eng.Get(id)
 	if err != nil {
 		return false
@@ -1180,7 +1256,7 @@ func (g *Gate) unstaged(id string) bool {
 	if done != nil {
 		<-done
 	}
-	s, err := g.eng.Get(reversible.StageID(id))
+	s, err := g.eng.Get(reversible.StageID(id, n))
 	return err != nil || s.State != journal.Succeeded
 }
 
@@ -1199,8 +1275,15 @@ func lastEvidence(st journal.Status) string {
 func (g *Gate) hold(d owner.Decision) {
 	g.mu.Lock()
 	w := g.waiting[d.Ref]
-	if w == nil || w.held || (w.request != "" && d.Request != w.request) {
+	if w == nil || w.held {
 		g.mu.Unlock()
+		return
+	}
+	if w.request != "" && d.Request != w.request {
+		// A hold this intent's request did not make: never left pending
+		// on a release that would not match it.
+		g.mu.Unlock()
+		g.closeIntent(d.Ref, "the approval did not match its request; ask again with a new request_id")
 		return
 	}
 	w.held, w.reply, w.sendAt = true, d.Hold, d.Until
@@ -1209,11 +1292,18 @@ func (g *Gate) hold(d owner.Decision) {
 	if err != nil {
 		return
 	}
+	n, _ := g.lastStage(d.Ref)
+	n++
+	g.mu.Lock()
+	if w := g.waiting[d.Ref]; w != nil && w.held {
+		w.attempt = n
+	}
+	g.mu.Unlock()
 	f, ok := g.forms[st.Intent.Executor][st.Intent.Action]
 	if !ok || f.Stage == "" {
 		return
 	}
-	in := reversible.Stage(st.Intent, f)
+	in := reversible.Stage(st.Intent, f, n)
 	done := make(chan struct{})
 	g.mu.Lock()
 	g.derived[in.ID] = true
@@ -1224,8 +1314,7 @@ func (g *Gate) hold(d owner.Decision) {
 		defer g.wg.Done()
 		defer close(done)
 		if st := g.runDerived(in); st.State != journal.Succeeded {
-			// The effect still runs after the window, as approved; the
-			// adapter's operation works without its staged copy.
+			// The effect is then not sent at release (RV7).
 			g.cfg.Logf("grants: staging %s: %s", d.Ref, st.State)
 		}
 	}()
@@ -1250,17 +1339,18 @@ func (g *Gate) afterHold(st journal.Status, hold string) {
 // askEdited asks the owner whether to send their edited copy of p's
 // stage, at the normal tier (Authorize batches it like any ask).
 func (g *Gate) askEdited(p journal.Intent) {
-	s, err := g.eng.Get(reversible.StageID(p.ID))
-	if err != nil || s.State != journal.Succeeded {
+	n, s := g.lastStage(p.ID)
+	if n == 0 || s.State != journal.Succeeded {
 		return
 	}
-	in := reversible.Edited(p, lastEvidence(s))
+	in := reversible.Edited(p, n, lastEvidence(s))
 	g.mu.Lock()
 	g.derived[in.ID] = true
 	g.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	if _, err := g.eng.Submit(in); err == nil {
+	_, err := g.eng.Submit(in)
+	if err == nil {
 		_, err = g.Authorize(ctx, in.ID)
 	}
 	if err != nil {
@@ -1286,11 +1376,14 @@ func (g *Gate) unstage(p journal.Intent, hold string) {
 	g.mu.Lock()
 	delete(g.staging, p.ID)
 	g.mu.Unlock()
-	st, err := g.eng.Get(reversible.StageID(p.ID))
-	if err != nil || st.State != journal.Succeeded || len(st.Attempts) == 0 {
+	n, st := g.lastStage(p.ID)
+	if n == 0 || st.State != journal.Succeeded || len(st.Attempts) == 0 {
 		return
 	}
-	in := reversible.Inverse(p, f, st.Attempts[len(st.Attempts)-1].Evidence)
+	if _, err := g.eng.Get(reversible.InverseID(p.ID, n)); err == nil {
+		return // already unstaged
+	}
+	in := reversible.Inverse(p, f, n, lastEvidence(st))
 	g.mu.Lock()
 	g.derived[in.ID] = true
 	own := g.own
