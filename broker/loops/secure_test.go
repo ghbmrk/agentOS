@@ -728,3 +728,31 @@ func TestGuardInScheduler(t *testing.T) {
 		t.Fatalf("share %v", sh)
 	}
 }
+
+// W5a, potency follow-up on #54 (S3): the passive pass makes no model
+// calls, so three clean passes do not hold it past its 6 h cadence: while
+// a pass is due the guard is Urgent, and the scheduler offers it even
+// though L5 parked Loop 2.
+func TestThePassiveCadenceOutlivesParking(t *testing.T) {
+	r := newRig(t)
+	g, err := NewGuard(GuardConfig{Box: cleanBox().Box(), Pipeline: newPipe(t), Store: &change.MemStore{}, Now: r.clk.now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.restart(g)
+	for i := 0; i < 3; i++ {
+		if !g.Urgent() {
+			t.Fatalf("pass %d not due", i)
+		}
+		if ran, _ := r.s.Tick(context.Background()); !ran {
+			t.Fatalf("pass %d did not run", i)
+		}
+		if g.Urgent() {
+			t.Fatal("still urgent right after a pass")
+		}
+		r.clk.add(6 * time.Hour)
+	}
+	if ran, _ := r.s.Tick(context.Background()); !ran {
+		t.Fatal("the passive pass waited out the park")
+	}
+}

@@ -324,16 +324,22 @@ func (s *Guard) Trigger() {
 // Next offers one pass of the passive checks when one is due. It makes no
 // model calls.
 func (s *Guard) Next(_ context.Context, _ bool) (Job, bool) {
-	s.mu.Lock()
-	due := s.force || s.cfg.Now().Sub(s.st.Last) >= s.cfg.Every
-	s.mu.Unlock()
-	if !due {
+	if !s.Urgent() {
 		return Job{}, false
 	}
 	return Job{Name: "passive", Run: func(ctx context.Context) Result {
 		n, err := s.Pass(ctx)
 		return Result{Value: float64(n), Err: err}
 	}}, true
+}
+
+// Urgent reports a pass due: the scheduler then offers Loop 2 work even
+// while L5 parks it for dry runs, since a pass makes no model calls and
+// costs little, so the 6 h cadence holds (S3; potency on #54).
+func (s *Guard) Urgent() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.force || s.cfg.Now().Sub(s.st.Last) >= s.cfg.Every
 }
 
 // Pass runs every passive check and handles each new finding. It returns
