@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 	"testing"
 
@@ -53,34 +54,56 @@ func TestApprovalUsedUpByTheDispatchCommit(t *testing.T) {
 	}
 }
 
-// TestConcurrentDispatchStartsOneAttempt (GR8): N rounds of many
-// concurrent Dispatch calls on one approved intent whose attempts are not
-// applied start exactly one attempt each round. Run under -race.
+// TestConcurrentDispatchStartsOneAttempt (GR8): N rounds, each with an
+// attempt dispatched below the gate (so no gate bookkeeping spends the
+// approval) and held in flight while many callers Dispatch through the
+// gate, then released, then raced by the callers again. Every round
+// starts exactly one attempt; before the fix every round started two.
+// Run under -race.
 func TestConcurrentDispatchStartsOneAttempt(t *testing.T) {
-	const rounds, callers, calls = 50, 8, 20
+	const rounds, callers = 20, 8
 	r := newRig(t, nil)
 	r.grant(mailGrant())
+	ctx := context.Background()
 	r.exec.mu.Lock()
-	r.exec.fail = map[string]bool{}
+	r.exec.fail, r.exec.block = map[string]bool{}, map[string]chan struct{}{}
 	r.exec.mu.Unlock()
-	double := 0
-	for i := 0; i < rounds; i++ {
-		id := fmt.Sprintf("agent/c%d", i)
-		r.approveStopped(id, "inv-"+id)
-		r.exec.mu.Lock()
-		r.exec.fail[id] = true
-		r.exec.mu.Unlock()
+	race := func(id string) {
 		var wg sync.WaitGroup
 		for c := 0; c < callers; c++ {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				for k := 0; k < calls; k++ {
-					r.g.Dispatch(context.Background(), id)
-				}
+				r.g.Dispatch(ctx, id)
 			}()
 		}
 		wg.Wait()
+	}
+	double := 0
+	for i := 0; i < rounds; i++ {
+		id := fmt.Sprintf("agent/c%d", i)
+		r.approveStopped(id, "inv-"+id)
+		release := make(chan struct{})
+		r.exec.mu.Lock()
+		r.exec.fail[id], r.exec.block[id] = true, release
+		r.exec.mu.Unlock()
+		first := make(chan error, 1)
+		go func() {
+			_, err := r.eng.Dispatch(ctx, id)
+			first <- err
+		}()
+		for {
+			if st, _ := r.eng.Get(id); st.State == journal.InFlight {
+				break
+			}
+			runtime.Gosched()
+		}
+		race(id) // refused: in flight
+		close(release)
+		if err := <-first; err != nil {
+			t.Fatalf("%s: first attempt: %v", id, err)
+		}
+		race(id) // the approval is spent: refused at the recheck
 		r.g.Wait()
 		if n := r.exec.runs(id); n != 1 {
 			double++
@@ -89,5 +112,17 @@ func TestConcurrentDispatchStartsOneAttempt(t *testing.T) {
 	}
 	if double != 0 {
 		t.Fatalf("%d of %d rounds started a second attempt", double, rounds)
+	}
+}
+
+// TestTriesFailsClosed: an attempt count the gate cannot read is an
+// error, never a count that might match an approval.
+func TestTriesFailsClosed(t *testing.T) {
+	r := newRig(t, nil)
+	if n, err := r.g.tries("agent/none"); err == nil {
+		t.Fatalf("unknown intent: %d attempts, no error", n)
+	}
+	if _, err := New(Config{}).tries("agent/none"); err == nil {
+		t.Fatal("no engine: no error")
 	}
 }
