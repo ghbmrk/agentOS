@@ -127,7 +127,7 @@ func (p *Pipeline) Dev(class Class) []Case {
 	defer p.mu.Unlock()
 	var out []Case
 	for _, c := range p.st.Cases {
-		if !c.Security && c.Class == class && splitOf(p.key, c.ID, p.cfg.DevPercent) == dev {
+		if !c.Security && (c.Class == class || c.Class == ClassTask && taskClasses[class]) && splitOf(p.key, c.ID, p.cfg.DevPercent) == dev {
 			out = append(out, c)
 		}
 	}
@@ -145,9 +145,11 @@ type frozen struct {
 func (p *Pipeline) freezeLocked(classes []Class) frozen {
 	rel := map[Class]bool{}
 	images := false
+	taskRel := false
 	for _, c := range classes {
 		rel[c] = true
 		images = images || c == ClassGuestImage || c == ClassHostImage
+		taskRel = taskRel || taskClasses[c]
 	}
 	var f frozen
 	for _, c := range p.st.Cases {
@@ -155,7 +157,7 @@ func (p *Pipeline) freezeLocked(classes []Class) frozen {
 		case c.Security:
 			f.security = append(f.security, c)
 		case splitOf(p.key, c.ID, p.cfg.DevPercent) == dev:
-		case rel[c.Class] || images:
+		case rel[c.Class] || images || c.Class == ClassTask && taskRel:
 			// A new image runs every task, so every held-out case is
 			// relevant to it.
 			f.heldOut = append(f.heldOut, c)
