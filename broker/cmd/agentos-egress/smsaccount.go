@@ -200,6 +200,24 @@ func (c *custody) smsPolled(err error) {
 	}
 }
 
+// smsMissedEvery paces noteSMSMissed: a flood that lasts sends it at
+// most this often, not on every poll (security R3 on #159).
+const smsMissedEvery = time.Hour
+
+// smsMissed tells the owner texts may have been missed, at most once per
+// smsMissedEvery.
+func (c *custody) smsMissed() {
+	c.mu.Lock()
+	now := c.now()
+	if !c.smsMissedAt.IsZero() && now.Sub(c.smsMissedAt) < smsMissedEvery {
+		c.mu.Unlock()
+		return
+	}
+	c.smsMissedAt = now
+	c.mu.Unlock()
+	c.notify(noteSMSMissed)
+}
+
 // textsState is what agentosd learns about the texting account on the
 // verify socket: how its polls fail once they have failed for
 // modelroute.TextsQuiet, else nothing (UX-159-1).
@@ -323,7 +341,7 @@ func serveSMS(dir string, c *custody, modemUID int) (*http.Server, error) {
 		return nil, err
 	}
 	srv := newServer(smsapi.Handler(&smsapi.Service{Store: smsStore{c}, HTTP: c.smsHTTP, Now: c.now, Polled: c.smsPolled,
-		Missed: func() { c.notify(noteSMSMissed) }}))
+		Missed: c.smsMissed}))
 	srv.ReadTimeout = 10 * time.Second
 	go srv.Serve(ln)
 	return srv, nil

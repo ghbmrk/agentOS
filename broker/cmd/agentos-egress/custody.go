@@ -206,15 +206,18 @@ type custody struct {
 	// latest failed (UX-159-1).
 	smsFailSince time.Time
 	smsFail      modelroute.TextsState
-	st           unlockState
-	ph           phase
-	gen          int // bumped by lock, so an unlock in flight is cancelled
-	v            *vault.Vault
-	proxy        *egress.Proxy
-	ticket       string // binds a confirm to its unlock
-	expires      time.Time
-	timer        *time.Timer
-	lastAttempt  time.Time
+	// smsMissedAt is when the owner was last told texts may have been
+	// missed.
+	smsMissedAt time.Time
+	st          unlockState
+	ph          phase
+	gen         int // bumped by lock, so an unlock in flight is cancelled
+	v           *vault.Vault
+	proxy       *egress.Proxy
+	ticket      string // binds a confirm to its unlock
+	expires     time.Time
+	timer       *time.Timer
+	lastAttempt time.Time
 	// needPIN: this PC is trusted with a boot PIN and waits for it.
 	needPIN bool
 	// counterReset: the owner was told this PC's rollback counter is

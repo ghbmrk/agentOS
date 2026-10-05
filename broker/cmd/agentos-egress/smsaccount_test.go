@@ -421,13 +421,36 @@ func TestTheOwnerIsToldWhenTextsMayBeMissed(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { sms.Close() })
-	got, err := smsapi.NewClient(filepath.Join(run, SMSSocket)).Poll(context.Background())
+	bridge := smsapi.NewClient(filepath.Join(run, SMSSocket))
+	got, err := bridge.Poll(context.Background())
 	if err != nil || len(got) != smsapi.MaxPages*smsapi.PageSize {
 		t.Fatalf("poll: %d %v", len(got), err)
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(notes) != 1 || notes[0] != noteSMSMissed {
-		t.Fatalf("owner told %q", notes)
+	told := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, n := range notes {
+			if n != noteSMSMissed {
+				t.Fatalf("owner told %q", notes)
+			}
+		}
+		return len(notes)
+	}
+	if n := told(); n != 1 {
+		t.Fatalf("told %d times", n)
+	}
+	// Security R3 on #159: a flood that lasts tells the owner once an
+	// hour, not on every poll.
+	for i := 0; i < 5; i++ {
+		r.clk.add(smsapi.MinPollGap)
+		bridge.Poll(context.Background())
+	}
+	if n := told(); n != 1 {
+		t.Fatalf("told %d times in a minute", n)
+	}
+	r.clk.add(smsMissedEvery)
+	bridge.Poll(context.Background())
+	if n := told(); n != 2 {
+		t.Fatalf("told %d times after an hour", n)
 	}
 }
