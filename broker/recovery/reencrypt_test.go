@@ -3,6 +3,8 @@ package recovery
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -183,11 +185,11 @@ func TestRefreshAfterAHostIsRemoved(t *testing.T) {
 	x := newBox(t)
 	old := x.snapshot()
 	for _, a := range []Auth{{}, {Code: true}, {Local: true}} {
-		if _, err := Refresh(x.b, a, x.rk, nil, nil); !errors.Is(err, ErrNotAuthorized) {
+		if _, err := Refresh(x.b, a, x.rk, nil, nil, t0); !errors.Is(err, ErrNotAuthorized) {
 			t.Fatalf("auth %+v: %v", a, err)
 		}
 	}
-	r, err := Refresh(x.b, Auth{Code: true, Local: true}, x.rk, nil, nil)
+	r, err := Refresh(x.b, Auth{Code: true, Local: true}, x.rk, nil, nil, t0)
 	must(t, err)
 	if old.opensLater(x) || bytes.Equal(x.secretNow(MACKeyName), old.mac) || bytes.Equal(x.secretNow(SeedName), old.seed) {
 		t.Fatal("refresh kept an old secret")
@@ -226,36 +228,128 @@ func mustRK(t *testing.T, s string) RecoveryKey {
 }
 
 // The rotation is final only once a code from the new seed is confirmed:
-// until then the page can show the seed again (UX-64-1 on #64).
+// until then the page can show the seed again, on the box's Wi-Fi page to
+// the holder of the new recovery key only, and wrong codes are bounded
+// (UX-64-1, L3 F2 on #64).
 func TestTheNewCodeGeneratorIsConfirmedWithACode(t *testing.T) {
 	x := newBox(t)
-	if _, err := ShowEnrollment(x.b); !errors.Is(err, ErrNoEnrollment) {
+	if _, err := ShowEnrollment(x.b, x.rk, true); !errors.Is(err, ErrNoEnrollment) {
 		t.Fatalf("enrollment shown before any reset: %v", err)
 	}
 	done, err := x.rotate([]Part{PartRecovery}, Auth{Code: true, Local: true}, Proof{Recovery: x.rk})
 	must(t, err)
+	nk := mustRK(t, done.RecoveryKey)
 	if !EnrollmentPending(x.b) {
 		t.Fatal("no pending enrollment after a reset")
 	}
-	again, err := ShowEnrollment(x.b)
+	// Refused: off the Wi-Fi page, with the old card's key, with any other.
+	for _, c := range []struct {
+		rk    RecoveryKey
+		local bool
+	}{{nk, false}, {x.rk, true}, {mustKey(t), true}, {RecoveryKey{}, true}} {
+		if _, err := ShowEnrollment(x.b, c.rk, c.local); err == nil {
+			t.Fatalf("seed shown with %+v", c.local)
+		}
+	}
+	again, err := ShowEnrollment(x.b, nk, true)
 	must(t, err)
 	if again.URI != done.Enrollment.URI {
 		t.Fatal("shown again with another seed")
 	}
 	seed := x.secretNow(SeedName)
-	for _, code := range []string{totp(x.seed, t0), totp(seed, t0.Add(5*time.Minute)), "000000x"} {
-		if ok, err := ConfirmEnrollment(x.b, code, t0); ok || err != nil {
+	if _, err := ConfirmEnrollment(x.b, totp(seed, t0), false, t0); err == nil {
+		t.Fatal("confirmed off the Wi-Fi page")
+	}
+	wrong := []string{totp(x.seed, t0), totp(seed, t0.Add(5*time.Minute)), "000000x", "000000", "111111"}
+	for _, code := range wrong {
+		if ok, err := ConfirmEnrollment(x.b, code, true, t0); ok || err != nil {
 			t.Fatalf("confirmed with %q: %v", code, err)
 		}
 	}
-	if ok, err := ConfirmEnrollment(x.b, totp(seed, t0.Add(-30*time.Second)), t0); !ok || err != nil {
+	// The bound holds even for the right code, until the seed is shown
+	// again with the recovery key.
+	if ok, err := ConfirmEnrollment(x.b, totp(seed, t0), true, t0); ok || !errors.Is(err, ErrEnrollTries) {
+		t.Fatalf("past the bound: %v %v", ok, err)
+	}
+	_, err = ShowEnrollment(x.b, nk, true)
+	must(t, err)
+	if ok, err := ConfirmEnrollment(x.b, totp(seed, t0.Add(-30*time.Second)), true, t0); !ok || err != nil {
 		t.Fatalf("a current code was refused: %v", err)
 	}
 	if EnrollmentPending(x.b) {
 		t.Fatal("still pending after the code matched")
 	}
-	if _, err := ShowEnrollment(x.b); !errors.Is(err, ErrNoEnrollment) {
+	if _, err := ShowEnrollment(x.b, nk, true); !errors.Is(err, ErrNoEnrollment) {
 		t.Fatalf("seed shown after confirmation: %v", err)
+	}
+}
+
+// The enrollment marker is written before the seed: a crash between them
+// leaves the old seed marked, never a new seed unmarked (L3 F1).
+func TestTheEnrollmentMarkerPrecedesTheNewSeed(t *testing.T) {
+	x := newBox(t)
+	crashed := errors.New("crash")
+	var marked bool
+	crashPoint = func(step string) error {
+		marked = EnrollmentPending(x.b) && bytes.Equal(x.secretNow(SeedName), x.seed)
+		return crashed
+	}
+	t.Cleanup(func() { crashPoint = func(string) error { return nil } })
+	_, err := Refresh(x.b, Auth{Code: true, Local: true}, x.rk, nil, nil, t0)
+	if !errors.Is(err, crashed) || !marked {
+		t.Fatalf("marker before seed: %v %v", err, marked)
+	}
+	// The interrupted Refresh is owed: backups wait for it, and the page
+	// offers Finish securing the box (security R2), which completes it.
+	if parts, ok := RotationUnfinished(x.b); !ok || fmt.Sprint(parts) != "[refresh]" {
+		t.Fatalf("owed after a crash: %v", parts)
+	}
+	var buf bytes.Buffer
+	if err := Backup(x.b, x.roots(), &buf, t0); !errors.Is(err, ErrRotationUnfinished) {
+		t.Fatalf("backup during an unfinished refresh: %v", err)
+	}
+	crashPoint = func(string) error { return nil }
+	_, err = Refresh(x.b, Auth{Code: true, Local: true}, x.rk, nil, nil, t0)
+	must(t, err)
+	if _, ok := RotationUnfinished(x.b); ok {
+		t.Fatal("marker left after Refresh finished")
+	}
+}
+
+// A typed passphrase that is not the proof is checked before anything
+// changes (L3 F5).
+func TestAMistypedPassphraseChangesNothing(t *testing.T) {
+	x := newBox(t)
+	x.withPassphrase()
+	keys, _ := os.ReadFile(x.b.KeysPath)
+	if _, err := BeginRotate(x.b, []Part{PartRecovery}, Auth{Code: true, Local: true}, Proof{Recovery: x.rk, Passphrase: []byte("tulip orbit mosaic typo")}, testGen, nil, t0); !errors.Is(err, ErrWrongPassphrase) {
+		t.Fatalf("mistyped passphrase: %v", err)
+	}
+	if _, err := Refresh(x.b, Auth{Code: true, Local: true}, x.rk, []byte("tulip orbit mosaic typo"), nil, t0); !errors.Is(err, ErrWrongPassphrase) {
+		t.Fatalf("refresh with a mistyped passphrase: %v", err)
+	}
+	if now, _ := os.ReadFile(x.b.KeysPath); !bytes.Equal(now, keys) {
+		t.Fatal("keys file changed")
+	}
+	if _, ok := RotationUnfinished(x.b); ok {
+		t.Fatal("marked")
+	}
+}
+
+// A marker that cannot be read owes everything (L3 minor).
+func TestAnUnreadableRotationMarkerFailsClosed(t *testing.T) {
+	x := newBox(t)
+	must(t, x.b.V.Put(RotationName, KindRotation, []byte("{this is not json")))
+	if parts, ok := RotationUnfinished(x.b); !ok || len(parts) != len(AllParts)+1 {
+		t.Fatalf("unreadable marker: %v %v", parts, ok)
+	}
+	if _, err := x.rotate([]Part{PartPassphrase, PartRecovery}, Auth{Code: true, Local: true}, Proof{Recovery: x.rk}); !errors.Is(err, ErrRotationOwed) {
+		t.Fatalf("narrow rotation: %v", err)
+	}
+	_, err := x.rotate(AllParts, Auth{Code: true, Local: true}, Proof{Recovery: x.rk})
+	must(t, err)
+	if _, ok := RotationUnfinished(x.b); ok {
+		t.Fatal("marker left after rotating everything")
 	}
 }
 

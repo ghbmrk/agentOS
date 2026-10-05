@@ -162,6 +162,14 @@ func (p *Pending) Card() Card { return p.next }
 // copy of the drive holds.
 var ErrLostCardParts = errors.New("recovery: without the current card, the passphrase, recovery key, setup secret and grid are all replaced")
 
+// ErrRotationOwed is a rotation that leaves out a part an unfinished one
+// still owes (RotationUnfinished).
+var ErrRotationOwed = errors.New("recovery: an earlier rotation did not finish")
+
+// ErrWrongPassphrase is a typed vault passphrase that does not open the
+// drive.
+var ErrWrongPassphrase = errors.New("recovery: that vault passphrase does not open the drive; check it against the card")
+
 // LostCardWiFiNote goes beside the Wi-Fi part on a lost-card rotation,
 // which the page ticks in advance but the owner may untick.
 const LostCardWiFiNote = "Whoever finds your card could join the box's Wi-Fi. Your devices will need the new password."
@@ -232,11 +240,31 @@ func BeginRotate(b *Box, parts []Part, auth Auth, proof Proof, gen Generator, r 
 			return nil, fmt.Errorf("recovery: unknown card part %q", p)
 		}
 	}
+	// An unfinished rotation's parts are owed: the next rotation replaces
+	// them all, so a lost card's grid and setup secret cannot be left
+	// valid by a narrower one (L3 F3 on #64).
+	if owed, ok := RotationUnfinished(b); ok {
+		var missing []string
+		for _, q := range owed {
+			if q != PartRefresh && !set[q] {
+				missing = append(missing, string(q))
+			}
+		}
+		if len(missing) > 0 {
+			return nil, fmt.Errorf("%w: also replace %s", ErrRotationOwed, strings.Join(missing, ", "))
+		}
+	}
 	if proof.factor() == nil && auth.Recovery.Valid() {
 		proof.Recovery = auth.Recovery
 	}
 	if (set[PartPassphrase] || set[PartRecovery]) && !b.opensWith(proof.factor()) {
 		return nil, errors.New("recovery: replacing the passphrase or recovery key needs the current one from the card")
+	}
+	// A typed passphrase that is not the proof is still used to rewrap its
+	// slot, so a typo is caught now, before anything changes (L3 F5).
+	if set[PartRecovery] && !set[PartPassphrase] && len(proof.Passphrase) > 0 && proof.Recovery.Valid() &&
+		!b.opensWith(vault.Passphrase(string(proof.Passphrase))) {
+		return nil, ErrWrongPassphrase
 	}
 	// No current card: the lost card may be in other hands, so both
 	// factors it carries are replaced, and its setup secret (ID-1), and
@@ -392,12 +420,22 @@ func (p *Pending) Commit(b *Box, typed string, now time.Time) (Done, error) {
 			slots = append(slots, q)
 		}
 	}
+	// Everything this commit owes once its first slot is written: the
+	// slots, a lost card's setup secret and grid, and the re-encryption.
+	lost := proof.lost()
+	owes := append([]Part(nil), slots...)
+	if lost {
+		owes = append(owes, PartSetup, PartGrid)
+	}
+	if p.parts[PartRecovery] {
+		owes = append(owes, PartRefresh)
+	}
 	if len(slots) > 0 {
-		// Recorded before the first slot write and cleared only when a
-		// rotation covering these parts completes, so a crash or failure
-		// between the writes is not silent: Backup refuses meanwhile and
-		// the page asks to rotate again.
-		if err := markRotation(b, slots, now); err != nil {
+		// Recorded before the first slot write and cleared only as a
+		// rotation completes the parts, so a crash or failure between the
+		// writes is not silent: Backup refuses meanwhile, and the next
+		// rotation must replace what is owed.
+		if err := markRotation(b, owes, lost, now); err != nil {
 			return Done{}, err
 		}
 	}
@@ -460,7 +498,14 @@ func (p *Pending) Commit(b *Box, typed string, now time.Time) (Done, error) {
 	if err := storeCard(b, stored); err != nil {
 		return fail(err)
 	}
-	if err := clearRotation(b, slots); err != nil {
+	finished := []Part{PartRefresh}
+	if !p.parts[PartRecovery] {
+		finished = nil
+	}
+	for q := range p.parts {
+		finished = append(finished, q)
+	}
+	if err := clearRotation(b, finished); err != nil {
 		return fail(err)
 	}
 	in.WiFiPassword, in.SetupSecret, in.SetupCode, in.GridSeed = p.next.WiFiPassword, p.next.SetupSecret, p.next.SetupCode, p.next.GridSeed
@@ -500,16 +545,25 @@ func refresh(b *Box, owner []vault.Factor, r io.Reader) (Refreshed, error) {
 	if err := rotateMACKey(b.V); err != nil {
 		return out, err
 	}
-	e, err := newSeed(b, r)
-	if err != nil {
+	// The enrollment marker goes first: a crash between the two writes
+	// leaves the old seed marked, never a new seed unmarked (L3 F1).
+	if err := putEnroll(b, enrollMark{Format: enrollFormat}); err != nil {
 		return out, err
 	}
-	if err := b.V.Put(EnrollName, KindEnroll, []byte("agentos-enrollment-v1")); err != nil {
+	if err := crashPoint("enroll-marked"); err != nil {
+		return out, err
+	}
+	e, err := newSeed(b, r)
+	if err != nil {
 		return out, err
 	}
 	out.Enrollment = &e
 	return out, nil
 }
+
+// crashPoint lets tests stop between writes, as a crash would. Tests set
+// it; nothing else may.
+var crashPoint = func(step string) error { return nil }
 
 // Refresh re-encrypts after a trusted PC is removed (CRED-9; egress V7):
 // whoever holds that PC may hold its slot's key-encryption key, and so,
@@ -521,7 +575,11 @@ func refresh(b *Box, owner []vault.Factor, r io.Reader) (Refreshed, error) {
 // code-generator seed; the page shows the enrollment, and the caller ends
 // the owner channel's session. The grid's seed is not replaced here: the
 // page offers a grid rotation (REC-4) alongside.
-func Refresh(b *Box, auth Auth, rk RecoveryKey, passphrase []byte, r io.Reader) (Refreshed, error) {
+//
+// It is marked in the rotation marker until the seed is replaced, so a
+// failure part way leaves backups refused and the page offering Finish
+// securing the box (security R2), which calls Refresh again.
+func Refresh(b *Box, auth Auth, rk RecoveryKey, passphrase []byte, r io.Reader, now time.Time) (Refreshed, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if err := auth.check(b); err != nil {
@@ -530,11 +588,21 @@ func Refresh(b *Box, auth Auth, rk RecoveryKey, passphrase []byte, r io.Reader) 
 	if !rk.Valid() {
 		return Refreshed{}, errors.New("recovery: re-encryption needs the recovery key from the card")
 	}
+	if len(passphrase) > 0 && !b.opensWith(vault.Passphrase(string(passphrase))) {
+		return Refreshed{}, ErrWrongPassphrase
+	}
 	owner := []vault.Factor{Factor(rk)}
 	if len(passphrase) > 0 {
 		owner = append(owner, vault.Passphrase(string(passphrase)))
 	}
-	return refresh(b, owner, r)
+	if err := markRotation(b, []Part{PartRefresh}, false, now); err != nil {
+		return Refreshed{}, err
+	}
+	out, err := refresh(b, owner, r)
+	if err != nil {
+		return out, err
+	}
+	return out, clearRotation(b, []Part{PartRefresh})
 }
 
 // The enrollment marker: a vault entry that exists while a code-generator
@@ -547,16 +615,63 @@ const (
 // ErrNoEnrollment is ShowEnrollment with no unconfirmed seed.
 var ErrNoEnrollment = errors.New("recovery: the code generator is already confirmed")
 
+// MaxEnrollTries bounds wrong ConfirmEnrollment codes; ShowEnrollment
+// with the recovery key allows that many again.
+const MaxEnrollTries = 5
+
+// ErrEnrollTries is ConfirmEnrollment after MaxEnrollTries wrong codes.
+var ErrEnrollTries = errors.New("recovery: too many wrong codes; show the code again with the recovery key")
+
+type enrollMark struct {
+	Format string `json:"format"`
+	Wrong  int    `json:"wrong"`
+}
+
+const enrollFormat = "agentos-enrollment-v2"
+
+func putEnroll(b *Box, m enrollMark) error {
+	if _, _, err := reserved(b.V, EnrollName, KindEnroll); err != nil {
+		return err
+	}
+	enc, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	return b.V.Put(EnrollName, KindEnroll, enc)
+}
+
+// readEnroll reads the enrollment marker. One that does not parse counts
+// as spent, so it fails closed.
+func readEnroll(b *Box) (enrollMark, error) {
+	raw, ok, err := reserved(b.V, EnrollName, KindEnroll)
+	if err != nil {
+		return enrollMark{}, err
+	}
+	if !ok {
+		return enrollMark{}, ErrNoEnrollment
+	}
+	var m enrollMark
+	if json.Unmarshal(raw, &m) != nil || m.Format != enrollFormat {
+		m = enrollMark{Format: enrollFormat, Wrong: MaxEnrollTries}
+	}
+	return m, nil
+}
+
 // ShowEnrollment shows the replaced seed again ("Show the code again")
-// until ConfirmEnrollment accepts a code from it (UX-64-1 on #64). Like
-// the first showing, it is for the box's own Wi-Fi page only.
-func ShowEnrollment(b *Box) (Enrollment, error) {
+// until ConfirmEnrollment accepts a code from it (UX-64-1 on #64). The
+// live seed is shown only on the box's own Wi-Fi page to the holder of
+// the recovery key (the new card's, after a rotation), as ReEnroll
+// requires (L3 F2); it also allows MaxEnrollTries more codes.
+func ShowEnrollment(b *Box, rk RecoveryKey, local bool) (Enrollment, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if _, ok, err := reserved(b.V, EnrollName, KindEnroll); err != nil || !ok {
-		if err == nil {
-			err = ErrNoEnrollment
-		}
+	if !local {
+		return Enrollment{}, errors.New("recovery: the code generator is shown on the box's Wi-Fi page only")
+	}
+	if _, err := readEnroll(b); err != nil {
+		return Enrollment{}, err
+	}
+	if err := (Auth{Recovery: rk}).check(b); err != nil {
 		return Enrollment{}, err
 	}
 	seed, ok, err := reserved(b.V, SeedName, vault.KindTOTPSeed)
@@ -564,20 +679,28 @@ func ShowEnrollment(b *Box) (Enrollment, error) {
 		return Enrollment{}, errors.New("recovery: no code-generator seed in the vault")
 	}
 	defer wipe(seed)
+	if err := putEnroll(b, enrollMark{Format: enrollFormat}); err != nil {
+		return Enrollment{}, err
+	}
 	return Enrollment{URI: otpauth(seed)}, nil
 }
 
 // ConfirmEnrollment reports whether code is the new seed's code now (or
 // one 30-second step either side) and, when it is, ends the enrollment:
-// a rotation is final only then. It is not a sign-in and spends no code.
-func ConfirmEnrollment(b *Box, code string, now time.Time) (bool, error) {
+// a rotation is final only then. It is for the box's Wi-Fi page, counts
+// wrong codes against MaxEnrollTries, and is not a sign-in.
+func ConfirmEnrollment(b *Box, code string, local bool, now time.Time) (bool, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if _, ok, err := reserved(b.V, EnrollName, KindEnroll); err != nil || !ok {
-		if err == nil {
-			err = ErrNoEnrollment
-		}
+	if !local {
+		return false, errors.New("recovery: the code generator is confirmed on the box's Wi-Fi page only")
+	}
+	m, err := readEnroll(b)
+	if err != nil {
 		return false, err
+	}
+	if m.Wrong >= MaxEnrollTries {
+		return false, ErrEnrollTries
 	}
 	seed, ok, err := reserved(b.V, SeedName, vault.KindTOTPSeed)
 	if err != nil || !ok {
@@ -591,7 +714,8 @@ func ConfirmEnrollment(b *Box, code string, now time.Time) (bool, error) {
 		}
 	}
 	if !match {
-		return false, nil
+		m.Wrong++
+		return false, putEnroll(b, m)
 	}
 	return true, b.V.Delete(EnrollName)
 }
@@ -677,40 +801,46 @@ func RetrustNote(n int, names []string) string {
 	return pcs + " must be trusted again: on each, open the box page, unlock, and tick Keep this PC trusted."
 }
 
-// The rotation marker: a vault entry that exists while a rotation that
-// rewrites the passphrase or recovery slot has not completed.
+// The rotation marker: a vault entry that exists while a rotation or
+// re-encryption has parts it still owes.
 const (
 	RotationName = "recovery-rotation-pending"
 	KindRotation = "rotation_pending"
 )
 
+// PartRefresh is owed in the rotation marker while a re-encryption with
+// its MAC-key and seed replacement has not completed. It is not a card
+// part: a recovery-key rotation or Refresh pays it.
+const PartRefresh Part = "refresh"
+
 type rotationMark struct {
 	Format  string    `json:"format"`
 	Started time.Time `json:"started"`
 	Parts   []Part    `json:"parts"`
+	// Lost records a rotation started without the current card.
+	Lost bool `json:"lost,omitempty"`
 }
 
-// ErrRotationUnfinished is a backup refused while a rotation is unfinished.
-var ErrRotationUnfinished = errors.New("recovery: a card rotation did not finish; rotate the passphrase and recovery key again before backing up")
+const rotationFormat = "agentos-rotation-v2"
 
-func markRotation(b *Box, parts []Part, now time.Time) error {
+// ErrRotationUnfinished is a backup refused while a rotation is unfinished.
+var ErrRotationUnfinished = errors.New("recovery: a card rotation did not finish; finish it before backing up")
+
+// readMark reads the marker. One that does not parse owes everything, as
+// after a lost card, so it fails closed.
+func readMark(b *Box) (rotationMark, bool, error) {
 	raw, ok, err := reserved(b.V, RotationName, KindRotation)
-	if err != nil {
-		return err
+	if err != nil || !ok {
+		return rotationMark{}, ok, err
 	}
-	m := rotationMark{Format: "agentos-rotation-v1", Started: now.UTC()}
-	if ok {
-		// Keep what an earlier unfinished rotation still owes.
-		var old rotationMark
-		if json.Unmarshal(raw, &old) == nil {
-			m.Parts = old.Parts
-		}
+	var m rotationMark
+	if json.Unmarshal(raw, &m) != nil || m.Format != rotationFormat || len(m.Parts) == 0 {
+		m = rotationMark{Format: rotationFormat, Parts: append(append([]Part(nil), AllParts...), PartRefresh), Lost: true}
 	}
-	for _, p := range parts {
-		if !containsPart(m.Parts, p) {
-			m.Parts = append(m.Parts, p)
-		}
-	}
+	return m, true, nil
+}
+
+func putMark(b *Box, m rotationMark) error {
 	enc, err := json.Marshal(m)
 	if err != nil {
 		return err
@@ -718,20 +848,44 @@ func markRotation(b *Box, parts []Part, now time.Time) error {
 	return b.V.Put(RotationName, KindRotation, enc)
 }
 
-// clearRotation removes the marker when this rotation covered every part
-// it owes.
+// markRotation adds parts to what is owed, keeping what an earlier
+// unfinished rotation still owes.
+func markRotation(b *Box, parts []Part, lost bool, now time.Time) error {
+	m, ok, err := readMark(b)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		m = rotationMark{Format: rotationFormat, Started: now.UTC()}
+	}
+	m.Lost = m.Lost || lost
+	for _, p := range parts {
+		if !containsPart(m.Parts, p) {
+			m.Parts = append(m.Parts, p)
+		}
+	}
+	return putMark(b, m)
+}
+
+// clearRotation drops the parts done from what is owed, and the marker
+// once nothing is.
 func clearRotation(b *Box, done []Part) error {
-	raw, ok, err := reserved(b.V, RotationName, KindRotation)
+	m, ok, err := readMark(b)
 	if err != nil || !ok {
 		return err
 	}
-	var m rotationMark
-	if err := json.Unmarshal(raw, &m); err == nil {
-		for _, p := range m.Parts {
-			if !containsPart(done, p) {
-				return nil
-			}
+	var left []Part
+	for _, p := range m.Parts {
+		if !containsPart(done, p) {
+			left = append(left, p)
 		}
+	}
+	if len(left) == len(m.Parts) {
+		return nil
+	}
+	if len(left) > 0 {
+		m.Parts = left
+		return putMark(b, m)
 	}
 	return b.V.Delete(RotationName)
 }
@@ -746,15 +900,12 @@ func containsPart(ps []Part, p Part) bool {
 }
 
 // RotationUnfinished reports the parts an unfinished rotation still owes,
-// for the local page to resume it.
+// for the local page to resume it; PartRefresh asks for Finish securing
+// the box (Refresh). An unreadable marker owes everything.
 func RotationUnfinished(b *Box) ([]Part, bool) {
-	k, ok := entryKind(b.V, RotationName)
-	if !ok {
-		return nil, false
+	m, ok, err := readMark(b)
+	if err != nil {
+		return append(append([]Part(nil), AllParts...), PartRefresh), true
 	}
-	var m rotationMark
-	if s, ok := b.V.Secret(RotationName); ok && k == KindRotation && json.Unmarshal([]byte(s.Reveal()), &m) == nil && len(m.Parts) > 0 {
-		return m.Parts, true
-	}
-	return AllParts, true
+	return m.Parts, ok
 }

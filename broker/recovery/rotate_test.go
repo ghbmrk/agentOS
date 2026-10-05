@@ -183,21 +183,31 @@ func TestAPartialRotationReturnsWhatIsInEffect(t *testing.T) {
 	}
 	// The unfinished rotation is recorded: no backup is sealed to the
 	// key it was replacing until a rotation covering it completes.
-	if parts, ok := RotationUnfinished(x.b); !ok || len(parts) != 2 {
+	// What the lost-card rotation owes: both slots, the setup secret and
+	// grid the lost card carries, and the re-encryption.
+	if parts, ok := RotationUnfinished(x.b); !ok || fmt.Sprint(parts) != "[passphrase recovery setup grid refresh]" {
 		t.Fatalf("unfinished rotation not recorded: %v %v", parts, ok)
 	}
 	var buf bytes.Buffer
 	if err := Backup(x.b, x.roots(), &buf, t0); !errors.Is(err, ErrRotationUnfinished) {
 		t.Fatalf("backup during an unfinished rotation: %v", err)
 	}
-	// A rotation that does not cover what is owed leaves the marker.
-	_, err = x.rotate([]Part{PartWiFi}, Auth{Code: true, Local: true}, Proof{})
+	// A rotation that leaves out an owed part is refused, so the lost
+	// card's grid and setup secret cannot stay valid (L3 F3 on #64).
+	for _, parts := range [][]Part{{PartWiFi}, {PartPassphrase, PartRecovery}} {
+		if _, err := x.rotate(parts, Auth{Code: true, Local: true}, Proof{Recovery: x.rk}); !errors.Is(err, ErrRotationOwed) {
+			t.Fatalf("rotating %v while parts are owed: %v", parts, err)
+		}
+	}
+	// Nor does Refresh pay what the slots owe.
+	_, err = Refresh(x.b, Auth{Code: true, Local: true}, x.rk, []byte(nc.VaultPassphrase), nil, t0)
 	must(t, err)
-	if _, ok := RotationUnfinished(x.b); !ok {
-		t.Fatal("a Wi-Fi rotation cleared the unfinished one")
+	if parts, _ := RotationUnfinished(x.b); fmt.Sprint(parts) != "[passphrase recovery setup grid]" {
+		t.Fatalf("after Refresh: %v", parts)
 	}
 	// Finishing it clears the marker, and backups resume under the new key.
-	nc, err = x.rotate([]Part{PartPassphrase, PartRecovery}, Auth{Code: true, Local: true}, Proof{Recovery: x.rk})
+	nc2, err := x.rotate([]Part{PartPassphrase, PartRecovery, PartSetup, PartGrid}, Auth{Code: true, Local: true}, Proof{Recovery: x.rk})
+	nc = nc2
 	must(t, err)
 	if _, ok := RotationUnfinished(x.b); ok {
 		t.Fatal("marker left after the rotation finished")
