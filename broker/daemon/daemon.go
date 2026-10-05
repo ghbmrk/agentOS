@@ -73,6 +73,9 @@ type Config struct {
 	// Modem, when set, is served by the owner channel as well as the owner
 	// socket, and carries its outbound texts.
 	Modem modem.Modem
+	// OwnerOps are more ops on the owner socket: the modem bridge's
+	// (modemlink.Link.Ops, P2-3w). They cannot replace "message".
+	OwnerOps map[string]sockets.Handler
 	// Agent receives the owner's task chat: the guest plane's owner inbox
 	// for the agent's machine (ARC-6 (c)). Nil: no agent running.
 	Agent control.Agent
@@ -273,6 +276,11 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 			},
 		},
 	}}
+	for op, h := range cfg.OwnerOps {
+		if _, taken := eps[0].Ops[op]; !taken {
+			eps[0].Ops[op] = h
+		}
+	}
 	for _, id := range cfg.Machines {
 		eps = append(eps, sockets.Endpoint{
 			Name:        GuestSocket(id),

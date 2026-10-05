@@ -26,6 +26,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/loopbuild"
 	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/modelroute"
+	"github.com/ghbmrk/agentos/broker/modemlink"
 	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/recall"
 	"github.com/ghbmrk/agentos/broker/recalltool"
@@ -239,12 +240,13 @@ func main() {
 	var sleepHoursFlag string
 	var builderImage, builderLaunch, keptPath string
 	var learn learnPaths
-	var cgroupVouched bool
+	var cgroupVouched, modemBridge bool
 	floor := budget.Floor()
 	flag.StringVar(&cfg.JournalPath, "journal", "/var/lib/agentos/journal.log", "journal file")
 	flag.StringVar(&cfg.SocketDir, "sockets", "/run/agentos", "socket directory (created 0700)")
 	flag.StringVar(&cfg.OwnerNumber, "owner", "", "owner's phone number, E.164")
 	flag.IntVar(&cfg.ModemUID, "modem-uid", -1, "uid of the modem bridge, the only peer allowed on the owner socket")
+	flag.BoolVar(&modemBridge, "modem-bridge", true, "serve the modem bridge's ops on the owner socket and send the owner channel's texts through it")
 	flag.Int64Var(&cfg.Admission.CapacityMB, "capacity-mb", defaultCapacityMB, "memory for agent machines, MB; unset, MemTotal less the floor budget outside the pool, at most 4500 or one OpenClaw machine per two cores, whichever is more (PE6, RES-2c)")
 	flag.Int64Var(&floor.HeadroomMB, "headroom-mb", floor.HeadroomMB, "memory never admitted into, MB")
 	flag.Int64Var(&floor.HostMB, "host-mb", floor.HostMB, "budget: host image, broker and journal (protected), MB (RES-2)")
@@ -381,8 +383,15 @@ func main() {
 	if line != nil {
 		cfg.Notes = append(cfg.Notes, line.Note, line.TextsNote)
 	}
-	// No modem driver exists before P2-3, so texts arrive only through the
-	// owner socket and the channel's own outbound texts are not sent.
+	// The modem bridge (agentos-modem, P2-3w) hands owner texts in and
+	// pulls the channel's own texts from the owner socket; until it
+	// reports the owner line, sends fail as down and are counted for the
+	// recovery text. Its line note is for the box's local page (U-B1);
+	// the local UI's wiring shows it.
+	if modemBridge {
+		link := modemlink.New(modemlink.Config{Owner: cfg.OwnerNumber})
+		cfg.Modem, cfg.OwnerOps = link, link.Ops()
+	}
 
 	// The learning plane failing must not take the owner channel down
 	// either: without it loop settings are refused and nothing adopts.

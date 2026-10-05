@@ -276,3 +276,27 @@ func TestCH2IdleOwnerConnectionsAreClosed(t *testing.T) {
 		t.Fatalf("STOP after idle connections: %+v", r)
 	}
 }
+
+// P2-3w: the modem bridge's ops are served on the owner socket beside
+// "message", which they cannot replace.
+func TestOwnerSocketServesTheBridgeOps(t *testing.T) {
+	dir := t.TempDir()
+	var got []string
+	cancel, _ := startWith(t, dir, func(c *Config) {
+		c.OwnerOps = map[string]sockets.Handler{
+			"state": func(_ context.Context, p sockets.Peer, _ json.RawMessage) (any, error) {
+				got = append(got, p.Kind)
+				return "noted", nil
+			},
+			"message": func(context.Context, sockets.Peer, json.RawMessage) (any, error) { return "hijacked", nil },
+		}
+	})
+	defer cancel()
+	sock := filepath.Join(dir, "run", OwnerSocket)
+	if r := send(t, sock, "state", map[string]string{}); !r.OK || string(r.Result) != `"noted"` || len(got) != 1 || got[0] != "owner" {
+		t.Fatalf("state: %+v %v", r, got)
+	}
+	if r := send(t, sock, "message", map[string]string{"from": "+15550000999", "text": "STATUS"}); string(r.Result) == `"hijacked"` {
+		t.Fatal("an extra op replaced message")
+	}
+}
