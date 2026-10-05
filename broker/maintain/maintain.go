@@ -56,7 +56,7 @@ type Config struct {
 	// passes every check. Nil or empty: no mirror, which reads as offline.
 	Mirrors func() []update.Source
 	// Online reports network access. No mirror is contacted while it is
-	// false, and the box is never reported current. Nil: always online.
+	// false, and the box is never reported current. Required.
 	Online func() bool
 	// Channel is the owner's update channel: update.ChannelStable (the
 	// default), update.ChannelFast, or ChannelPinned (UPD-4).
@@ -169,14 +169,11 @@ var (
 // owner are forgotten across a restart (change C9), so Loop 3 proposes
 // them again at its next check.
 func New(cfg Config) (*Loop3, error) {
-	if cfg.Store == nil || cfg.Pipeline == nil || cfg.State == nil {
-		return nil, errors.New("maintain: Store, Pipeline and State are required")
+	if cfg.Store == nil || cfg.Pipeline == nil || cfg.State == nil || cfg.Online == nil {
+		return nil, errors.New("maintain: Store, Pipeline, State and Online are required")
 	}
 	if cfg.Mirrors == nil {
 		cfg.Mirrors = func() []update.Source { return nil }
-	}
-	if cfg.Online == nil {
-		cfg.Online = func() bool { return true }
 	}
 	if cfg.Channel == nil {
 		cfg.Channel = func() string { return update.ChannelStable }
@@ -242,7 +239,9 @@ func (l *Loop3) Next(_ context.Context, _ bool) (loops.Job, bool) {
 		l.st.OfflineSince, l.st.Next = time.Time{}, time.Time{}
 		l.saveLocked()
 	}
-	if !l.st.LastAttempt.IsZero() && now.Before(l.st.Next) {
+	// A clock that went back behind the last attempt is not trusted to
+	// say a check is not due.
+	if !l.st.LastAttempt.IsZero() && now.Before(l.st.Next) && !now.Before(l.st.LastAttempt) {
 		return loops.Job{}, false
 	}
 	return loops.Job{Name: "update-check", Run: l.check}, true
@@ -573,6 +572,8 @@ func (l *Loop3) statusLocked(online bool, set loops.Settings, in update.Installe
 		return Status{Line: fmt.Sprintf("Updates: could not check: %s. Last good check: %s.", failText[st.Failure], last) + drive}
 	case st.LastOnline.IsZero():
 		return Status{Line: "Updates: not checked yet." + drive}
+	case now.Before(st.LastOnline):
+		return Status{Line: fmt.Sprintf("Updates: this box's clock is behind its last check (%s), so it will check again.", last)}
 	case in.UnconfirmedFreshness:
 		return Status{Line: "Updates: the last update was installed from a drive and has not been checked online yet."}
 	case now.Sub(st.LastOnline) > 2*l.cfg.Interval:
@@ -632,7 +633,7 @@ func (l *Loop3) Digest() []string {
 		l.saveLocked()
 	}
 	if l.st.Confirmed {
-		out = append(out, "The update installed from a drive is now confirmed as the latest by the update source.")
+		out = append(out, "The update installed from a drive has now been checked online.")
 		l.st.Confirmed = false
 		l.saveLocked()
 	}

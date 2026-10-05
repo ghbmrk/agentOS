@@ -334,7 +334,7 @@ func TestOfflineInstallNotCurrentUntilCheckedOnline(t *testing.T) {
 	if st := r.l.Status(); !st.Current {
 		t.Fatalf("after the online check: %+v", st)
 	}
-	if d := r.digest(); !strings.Contains(d, "confirmed") {
+	if d := r.digest(); !strings.Contains(d, "has now been checked online") {
 		t.Fatalf("digest: %q", d)
 	}
 }
@@ -473,5 +473,24 @@ func TestSoakCountsFromFirstSightOnFast(t *testing.T) {
 	got := r.p.proposed()
 	if len(got) != 1 || got[0].Version() != "3" {
 		t.Fatalf("after 7 days on fast: %+v", got)
+	}
+}
+
+func TestClockBackwardsNotCurrent(t *testing.T) {
+	r := newRig(t)
+	r.tick()
+	r.clk.add(-2 * time.Hour)
+	if st := r.l.Status(); st.Current || !strings.Contains(st.Line, "clock") {
+		t.Fatalf("clock went back: %+v", st)
+	}
+	if ok, _ := r.tick(); !ok {
+		t.Fatal("no fresh check after the clock went back")
+	}
+}
+
+func TestOnlineRequired(t *testing.T) {
+	r := newRig(t)
+	if _, err := New(Config{Store: r.store, Pipeline: r.p, State: r.state}); err == nil {
+		t.Fatal("New without Online: the wiring must say how the box knows it is online")
 	}
 }
