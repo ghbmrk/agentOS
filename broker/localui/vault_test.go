@@ -33,6 +33,8 @@ import (
 	"rsc.io/qr"
 
 	"github.com/ghbmrk/agentos/broker/card"
+	"github.com/ghbmrk/agentos/broker/modem"
+	"github.com/ghbmrk/agentos/broker/owner"
 )
 
 // REQ: CRED-8, HW-5a, CH-6, CH-7, ONB-1
@@ -56,6 +58,9 @@ type fakeVault struct {
 	// "secure_boot" or "other".
 	boot  string
 	keeps []bool
+	// n numbers tickets; confirmed is the ticket of the confirmed unlock.
+	n         int
+	confirmed string
 	// calls records what reached the socket.
 	unlocks  []string
 	confirms []string
@@ -90,13 +95,15 @@ func (f *fakeVault) Unlock(ctx context.Context, pass string) (VaultStatus, strin
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.unlocks = append(f.unlocks, pass)
-	if f.state != "locked" {
+	if f.state == "open" {
 		return VaultStatus{}, "", &VaultError{409, "an unlock is already in progress or the vault is open"}
 	}
 	if card.NormalizePassphrase(pass) != f.pass {
 		return VaultStatus{}, "", &VaultError{403, "the passphrase does not open this vault"}
 	}
-	f.state, f.ticket, f.expires = "pending", "tkt-"+strings.Repeat("a", 16), time.Date(2026, 10, 5, 9, 15, 0, 0, time.UTC)
+	// A new correct passphrase supersedes a pending unlock (P2-4f).
+	f.n++
+	f.state, f.ticket, f.expires = "pending", fmt.Sprintf("tkt-%016d", f.n), time.Date(2026, 10, 5, 9, 15, 0, 0, time.UTC)
 	return f.status(), f.ticket, nil
 }
 
@@ -119,7 +126,7 @@ func (f *fakeVault) Confirm(ctx context.Context, ticket, code string, keep bool)
 		}
 		return VaultStatus{}, &VaultError{403, "wrong code; 2 tries left"}
 	}
-	f.state, f.ticket = "open", ""
+	f.state, f.confirmed, f.ticket = "open", f.ticket, ""
 	st := f.status()
 	st.KeptTrusted = keep && f.boot != ""
 	return st, nil
@@ -721,6 +728,115 @@ func TestVaultPhotoSpendsAnAttempt(t *testing.T) {
 	}
 	if body := send(); !strings.Contains(body, "Wait a few seconds") {
 		t.Fatalf("second photo inside the gap was scanned:\n%s", body)
+	}
+}
+
+// proofVerifier is the vault process's verify socket for the owner
+// channel: it redeems the confirmed unlock's ticket once (P2-4f).
+type proofVerifier struct {
+	fv     *fakeVault
+	mu     sync.Mutex
+	proofs []string
+	refuse bool
+}
+
+func (p *proofVerifier) VerifyTOTP(code string, after int64, counted bool) (int64, bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.proofs = append(p.proofs, code)
+	p.fv.mu.Lock()
+	defer p.fv.mu.Unlock()
+	if p.refuse || p.fv.confirmed == "" || code != owner.UnlockProofPrefix+p.fv.confirmed {
+		return 0, false, nil
+	}
+	p.fv.confirmed = ""
+	return after + 1, true, nil
+}
+
+func (r *rig) channelWith(v owner.Verifier) {
+	r.t.Helper()
+	ch, err := owner.New(owner.Config{Owner: ownerNum, Modem: modem.NewCarrier().Line(boxNum), Engine: r.eng, Store: &owner.MemStore{},
+		Verifier: v, Now: r.clock, Location: time.UTC})
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	r.ch = ch
+	r.srv.SetOwner(ch)
+}
+
+// UX-50-1, P2-4f: the code that unlocks the box also signs the phone in
+// and unlocks chat by text. The local UI presents the confirmed ticket to
+// the owner channel, which has the vault process check it; the local UI
+// never signs a phone in without that check.
+func TestVaultUnlockSignsThePhoneIn(t *testing.T) {
+	r, fv := vaultRig(t)
+	pv := &proofVerifier{fv: fv}
+	r.channelWith(pv)
+	r.upload(nil, r.card.VaultPassphrase)
+	ticket := fv.ticket
+	r.post("/unlock/vault", url.Values{"step": {"code"}, "code": {"123456"}})
+	page := r.get("/unlock/vault")
+	if !strings.Contains(page, "This phone is signed in, and chat by text is unlocked.") {
+		t.Fatalf("open page:\n%s", page)
+	}
+	if len(pv.proofs) != 1 || pv.proofs[0] != owner.UnlockProofPrefix+ticket {
+		t.Fatalf("proofs: %q", pv.proofs)
+	}
+	if w := r.do("GET", "/home", nil); w.Code != http.StatusOK {
+		t.Fatal("phone not signed in")
+	}
+	if st := r.ch.LocalStatus(); st.Challenged || st.LowLocked {
+		t.Fatalf("chat not unlocked: %+v", st)
+	}
+	// Another phone is not signed in by it.
+	other := &rig{t: t, srv: r.srv, ip: "10.42.0.77:40000"}
+	other.jar, _ = cookiejar.New(nil)
+	if strings.Contains(other.get("/unlock/vault"), "This phone is signed in") {
+		t.Fatal("other phone shown as signed in")
+	}
+}
+
+// When the owner channel refuses the proof, the phone is not signed in and
+// the page offers sign-in with the next code.
+func TestVaultUnlockSignInRefused(t *testing.T) {
+	r, fv := vaultRig(t)
+	r.channelWith(&proofVerifier{fv: fv, refuse: true})
+	r.upload(nil, r.card.VaultPassphrase)
+	r.post("/unlock/vault", url.Values{"step": {"code"}, "code": {"123456"}})
+	page := r.get("/unlock/vault")
+	if strings.Contains(page, "This phone is signed in") || !strings.Contains(page, `<a href="/unlock">sign in</a>`) {
+		t.Fatalf("open page:\n%s", page)
+	}
+}
+
+// PU1, P2-4f: a phone that finds an unlock waiting elsewhere can start
+// over with the card; the new unlock is then this phone's.
+func TestVaultStartOverOnAnotherPhone(t *testing.T) {
+	r, fv := vaultRig(t)
+	r.upload(nil, r.card.VaultPassphrase)
+	other := &rig{t: t, srv: r.srv, ip: "10.42.0.77:40000", now: r.clock()}
+	other.jar, _ = cookiejar.New(nil)
+	page := other.get("/unlock/vault")
+	if !strings.Contains(page, "Start over on this phone") || !strings.Contains(page, `name="photo"`) {
+		t.Fatalf("other phone:\n%s", page)
+	}
+	var b bytes.Buffer
+	mw := multipart.NewWriter(&b)
+	mw.WriteField("step", "passphrase")
+	mw.WriteField("passphrase", r.card.VaultPassphrase)
+	mw.Close()
+	if w := other.doBody("POST", "/unlock/vault", &b, mw.FormDataContentType()); w.Code != http.StatusSeeOther {
+		t.Fatalf("start over: %d\n%s", w.Code, w.Body)
+	}
+	if !strings.Contains(other.get("/unlock/vault"), `name="code"`) {
+		t.Fatal("new unlock is not the other phone's")
+	}
+	if strings.Contains(r.get("/unlock/vault"), `name="code"`) {
+		t.Fatal("first phone still holds the unlock")
+	}
+	other.post("/unlock/vault", url.Values{"step": {"code"}, "code": {"123456"}})
+	if fv.state != "open" {
+		t.Fatalf("state %s", fv.state)
 	}
 }
 

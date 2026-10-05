@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
@@ -200,6 +201,16 @@ type custody struct {
 	bootChanged, bootUpdated bool
 	// bootSecure: only the Secure Boot state (PCR 7) changed.
 	bootSecure bool
+	// deriving: an Argon2id derivation is running. With phase opening it
+	// is a first unlock; with phase pending, a new passphrase that will
+	// supersede the pending unlock if it opens the vault.
+	deriving bool
+	// proof is the hash of the ticket of the last confirmed unlock and the
+	// step its code spent, redeemable once on the verify socket until
+	// proofUntil, so the phone that unlocked signs in (P2-4f).
+	proof      [32]byte
+	proofStep  int64
+	proofUntil time.Time
 	// wrongPassAt is when the owner was last told of a wrong passphrase;
 	// wrongPassQuiet counts those since, untold (WrongPassNoteEvery).
 	wrongPassAt    time.Time
@@ -247,6 +258,10 @@ const WrongPassNoteEvery = 10 * time.Minute
 
 // noteWrongPassLocked tells the owner of a wrong passphrase, at most once
 // per WrongPassNoteEvery, with the count of those not told.
+// ProofTTL is how long the proof of a confirmed unlock can sign the
+// unlocking phone in (P2-4f).
+const ProofTTL = time.Minute
+
 func (c *custody) noteWrongPassLocked(now time.Time) {
 	if !c.wrongPassAt.IsZero() && now.Sub(c.wrongPassAt) < WrongPassNoteEvery {
 		c.wrongPassQuiet++
@@ -262,7 +277,12 @@ func (c *custody) noteWrongPassLocked(now time.Time) {
 
 func (c *custody) unlock(passphrase string) (string, error) {
 	c.mu.Lock()
-	if c.ph != locked {
+	// A pending unlock can be superseded by a new correct passphrase, so a
+	// phone that lost its ticket (a closed page, a local UI restart) does
+	// not wait out the expiry. The pending unlock stays answerable while
+	// the new passphrase is checked; this is atomic here, so it cannot
+	// race a confirm (#50 potency PU1).
+	if c.ph == open || c.ph == opening || c.deriving {
 		c.mu.Unlock()
 		return "", errBusy
 	}
@@ -276,7 +296,10 @@ func (c *custody) unlock(passphrase string) (string, error) {
 		return "", errTooSoon
 	}
 	c.lastAttempt = now
-	c.ph = opening
+	c.deriving = true
+	if c.ph == locked {
+		c.ph = opening
+	}
 	gen := c.gen
 	c.mu.Unlock()
 
@@ -303,12 +326,19 @@ func (c *custody) unlock(passphrase string) (string, error) {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.ph = locked
-	if c.gen != gen {
+	c.deriving = false
+	if c.ph == opening {
+		c.ph = locked
+	}
+	if c.gen != gen || c.ph == open {
+		// Locked meanwhile, or the pending unlock was confirmed.
 		if v != nil {
 			v.Close()
 		}
-		return "", errUnlockCancelled
+		if c.gen != gen {
+			return "", errUnlockCancelled
+		}
+		return "", errBusy
 	}
 	if err != nil {
 		if errors.Is(err, vault.ErrNoSlotOpens) {
@@ -329,6 +359,11 @@ func (c *custody) unlock(passphrase string) (string, error) {
 	if _, err := rand.Read(b); err != nil {
 		v.Close()
 		return "", errInternal
+	}
+	if c.ph == pending {
+		c.timer.Stop()
+		c.v.Close()
+		c.notify("vault unlock started again with the passphrase; the earlier one is discarded")
 	}
 	c.ph, c.v, c.ticket = pending, v, hex.EncodeToString(b)
 	c.expires = now.Add(c.ttl)
@@ -381,7 +416,9 @@ func (c *custody) confirmKeep(ticket, code string, keep bool) (bool, error) {
 		return false, err
 	}
 	keep = keep && c.bootChanged && c.host != nil
+	c.proof, c.proofStep, c.proofUntil = sha256.Sum256([]byte(ticket)), c.st.LastStep, now.Add(ProofTTL)
 	if err := c.serve(c.v); err != nil {
+		c.proofUntil = time.Time{}
 		c.discard()
 		return false, err
 	}
@@ -505,6 +542,15 @@ func (c *custody) verify(code string, after int64, counted bool) (int64, bool, e
 	*bucket = since(*bucket, now.Add(-VerifyWindow))
 	if len(*bucket) >= limit {
 		return 0, false, &pausedError{until: (*bucket)[0].Add(VerifyWindow)}
+	}
+	if t, isProof := strings.CutPrefix(code, owner.UnlockProofPrefix); isProof {
+		sum := sha256.Sum256([]byte(t))
+		if now.Before(c.proofUntil) && c.proofStep > after && subtle.ConstantTimeCompare(sum[:], c.proof[:]) == 1 {
+			c.proof, c.proofUntil = [32]byte{}, time.Time{} // once
+			return c.proofStep, true, nil
+		}
+		*bucket = append(*bucket, now)
+		return 0, false, nil
 	}
 	seed, ok := c.v.Secret(SeedName)
 	if !ok {
