@@ -271,8 +271,6 @@ func (v *taskValues) hashStep(s valueStep) valueStep {
 
 func (v *taskValues) hashValue(x any) any {
 	switch t := x.(type) {
-	case string:
-		return v.hash(t)
 	case map[string]any:
 		out := make(map[string]any, len(t))
 		for k, c := range t {
@@ -285,6 +283,9 @@ func (v *taskValues) hashValue(x any) any {
 			out[i] = v.hashValue(c)
 		}
 		return out
+	}
+	if text, ok := leafText(x); ok { // numbers too: count, not content (security R1 on #119)
+		return v.hash(text)
 	}
 	return x
 }

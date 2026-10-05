@@ -191,7 +191,7 @@ func TestSecretShapedValuesAreNotKept(t *testing.T) {
 func TestTaskValuesFollowTheOwnersVerdict(t *testing.T) {
 	r := newValuesRig(t)
 	obs := func(goal, to string) {
-		r.values.observe(journal.Intent{ID: goal + "/1", GoalID: goal, Params: map[string]any{"to": to}, Recipients: []string{to}})
+		r.values.observe(journal.Intent{ID: goal + "/1", GoalID: goal, Params: map[string]any{"to": to, "count": float64(7)}, Recipients: []string{to}})
 	}
 	obs("yes", "ann@example.test")
 	if _, ok := r.values.values("yes", "yes/1"); ok {
@@ -214,6 +214,9 @@ func TestTaskValuesFollowTheOwnersVerdict(t *testing.T) {
 	if strings.Contains(fmt.Sprint(h1, h2), "@") || h1.Params["to"] == h2.Params["to"] || h1.Params["to"] != h3.Params["to"] ||
 		h1.Recipients[0] != h1.Params["to"] {
 		t.Fatalf("implicit values are not keyed hashes: %+v %+v %+v", h1, h2, h3)
+	}
+	if c, ok := h1.Params["count"].(string); !ok || c != h2.Params["count"] { // numbers too (security R1 on #119)
+		t.Fatalf("implicit number kept as %v", h1.Params["count"])
 	}
 	r.values.verdict(grants.OwnerOutcome{Intent: journal.Intent{GoalID: "imp1"}, Verdict: grants.OwnerAccepted})
 	if h, _ := r.values.values("imp1", "imp1/1"); h.Params["to"] != h1.Params["to"] {
