@@ -38,6 +38,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/routerule"
 )
 
 // deniedHeader is egress.DeniedHeader: the proxy's mark on a response it
@@ -77,17 +79,13 @@ func unsupported(what string) error { return errUnsupported{what} }
 var errNotStarted = errors.New("provider stream failed before it started")
 
 // Route is one way to serve a class: a provider and its model.
-type Route struct {
-	Provider string `json:"provider"`
-	Model    string `json:"model"`
-}
-
-func (r Route) String() string { return r.Provider + "/" + r.Model }
+type Route = routerule.Route
 
 // Rule maps each task class to its routes in preference order. ADP-3's
 // default order puts API routes first; the order within a class is what
-// Loop 1 improves (ADP-4).
-type Rule map[string][]Route
+// Loop 1 improves (ADP-4). The types live in routerule so code that only
+// reads or changes a rule need not link the router.
+type Rule = routerule.Rule
 
 // Decision is one routing outcome. It carries no request or response
 // content. Usage is what the provider reported for a served call; the

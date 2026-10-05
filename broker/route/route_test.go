@@ -171,7 +171,7 @@ func newRig(t *testing.T, o rigOpts) *rig {
 		o.grants = map[string][]string{"m1": {"openai", "anthropic"}}
 	}
 	if o.rule == nil {
-		o.rule = Rule{"default": {{"anthropic", "claude-fixture"}, {"openai", "gpt-fixture"}}}
+		o.rule = Rule{"default": {{Provider: "anthropic", Model: "claude-fixture"}, {Provider: "openai", Model: "gpt-fixture"}}}
 	}
 	if o.labels == nil {
 		o.labels = map[string]string{"m1": LabelPublic}
@@ -355,7 +355,7 @@ func TestFailoverStatuses(t *testing.T) {
 // is exhausted.
 func TestNeverRoutesToUngrantedProvider(t *testing.T) {
 	r := newRig(t, rigOpts{
-		rule:   Rule{"default": {{"openai", "gpt-fixture"}, {"anthropic", "claude-fixture"}}},
+		rule:   Rule{"default": {{Provider: "openai", Model: "gpt-fixture"}, {Provider: "anthropic", Model: "claude-fixture"}}},
 		grants: map[string][]string{"m1": {"anthropic"}},
 	})
 	r.up.set(hostAnthropic, serveFixture(429, "application/json", fixture(t, "anthropic_rate_limit.json")))
@@ -387,7 +387,7 @@ func TestNeverRoutesToUngrantedProvider(t *testing.T) {
 // overrides it.
 func TestPrivateCallsOnlyToPrivateAllowedProviders(t *testing.T) {
 	r := newRig(t, rigOpts{
-		rule:      Rule{"default": {{"openai", "gpt-fixture"}, {"anthropic", "claude-fixture"}}},
+		rule:      Rule{"default": {{Provider: "openai", Model: "gpt-fixture"}, {Provider: "anthropic", Model: "claude-fixture"}}},
 		grants:    map[string][]string{"pub": {"openai", "anthropic"}, "priv": {"openai", "anthropic"}, "unlabelled": {"openai", "anthropic"}},
 		labels:    map[string]string{"pub": LabelPublic, "priv": "private"},
 		privateOK: map[string]bool{"anthropic": true},
@@ -407,7 +407,7 @@ func TestPrivateCallsOnlyToPrivateAllowedProviders(t *testing.T) {
 		t.Fatal("a private machine's call reached a provider not allowed for private data")
 	}
 	// An adopted rule that puts openai alone cannot change that.
-	if err := r.router.SetRule(Rule{"default": {{"openai", "gpt-fixture"}}}); err != nil {
+	if err := r.router.SetRule(Rule{"default": {{Provider: "openai", Model: "gpt-fixture"}}}); err != nil {
 		t.Fatal(err)
 	}
 	if w := r.do(t, "priv", simpleChat); w.Code != 403 || r.up.count(hostOpenAI) != 1 {
@@ -434,7 +434,7 @@ func TestSkipsRouteThatCannotExpressTheCall(t *testing.T) {
 		t.Fatalf("%d anthropic=%d openai=%d", w.Code, r.up.count(hostAnthropic), r.up.count(hostOpenAI))
 	}
 	// With only the route that cannot express it, the guest is told why.
-	r2 := newRig(t, rigOpts{rule: Rule{"default": {{"anthropic", "claude-fixture"}}}})
+	r2 := newRig(t, rigOpts{rule: Rule{"default": {{Provider: "anthropic", Model: "claude-fixture"}}}})
 	w = r2.do(t, "m1", `{"model":"default","n":2,"messages":[{"role":"user","content":"hi"}]}`)
 	if w.Code != 400 || !strings.Contains(w.Body.String(), "n other than 1") {
 		t.Fatalf("%d %s", w.Code, w.Body)
@@ -507,7 +507,7 @@ func TestStreamsTranslatedThroughEgress(t *testing.T) {
 	}
 
 	// OpenAI streams pass through as sent.
-	r2 := newRig(t, rigOpts{rule: Rule{"default": {{"openai", "gpt-fixture"}}}})
+	r2 := newRig(t, rigOpts{rule: Rule{"default": {{Provider: "openai", Model: "gpt-fixture"}}}})
 	r2.up.set(hostOpenAI, serveFixture(200, "text/event-stream", fixture(t, "openai_stream.sse")))
 	w = r2.do(t, "m1", `{"model":"default","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
 	if a := reassemble(t, w.Body.Bytes()); !a.done || a.text != "Hi" || a.finish != "stop" {
@@ -554,10 +554,10 @@ func TestCandidateProposesButDoesNotAdopt(t *testing.T) {
 
 	for _, bad := range []Rule{
 		{},
-		{"default": {{"mistral", "m"}}},
+		{"default": {{Provider: "mistral", Model: "m"}}},
 		{"default": {}},
-		{"default": {{"openai", ""}}},
-		{"default": {{"openai", "x"}, {"openai", "x"}}},
+		{"default": {{Provider: "openai", Model: ""}}},
+		{"default": {{Provider: "openai", Model: "x"}, {Provider: "openai", Model: "x"}}},
 	} {
 		if err := r.router.SetRule(bad); err == nil {
 			t.Fatalf("rule %v accepted", bad)
@@ -616,11 +616,11 @@ func TestRouterHoldsNoCredentialAndDialsNothing(t *testing.T) {
 }
 
 func TestNewRequiresWiring(t *testing.T) {
-	if _, err := New(Config{Providers: []Provider{OpenAI()}, Rule: Rule{"d": {{"openai", "m"}}}}); err == nil {
+	if _, err := New(Config{Providers: []Provider{OpenAI()}, Rule: Rule{"d": {{Provider: "openai", Model: "m"}}}}); err == nil {
 		t.Fatal("router without Granted, Upstream, Audit accepted")
 	}
 	h := func(string) http.Handler { return http.NotFoundHandler() }
-	_, err := New(Config{Providers: []Provider{OpenAI(), OpenAI()}, Rule: Rule{"d": {{"openai", "m"}}},
+	_, err := New(Config{Providers: []Provider{OpenAI(), OpenAI()}, Rule: Rule{"d": {{Provider: "openai", Model: "m"}}},
 		Granted: func(string, string) bool { return true }, Upstream: h, Audit: func(Decision) {}})
 	if err == nil {
 		t.Fatal("duplicate provider accepted")
@@ -702,7 +702,7 @@ func TestDecisionsReportProviderUsage(t *testing.T) {
 
 	// OpenAI: usage is always requested upstream, and its usage-only chunk
 	// is dropped when the guest did not ask for it.
-	r2 := newRig(t, rigOpts{rule: Rule{"default": {{"openai", "gpt-fixture"}}}})
+	r2 := newRig(t, rigOpts{rule: Rule{"default": {{Provider: "openai", Model: "gpt-fixture"}}}})
 	r2.up.set(hostOpenAI, serveFixture(200, "text/event-stream", fixture(t, "openai_stream.sse")))
 	w = r2.do(t, "m1", `{"model":"default","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
 	if a := reassemble(t, w.Body.Bytes()); a.usage != nil || !a.done || a.text != "Hi" {
@@ -727,7 +727,7 @@ func TestDecisionsReportProviderUsage(t *testing.T) {
 // Every call goes upstream with an output limit at or below the owner's
 // ceiling, so the meter can reserve it.
 func TestOutputTokensClampedToCeiling(t *testing.T) {
-	r := newRig(t, rigOpts{rule: Rule{"default": {{"openai", "gpt-fixture"}}}, maxOut: 1000})
+	r := newRig(t, rigOpts{rule: Rule{"default": {{Provider: "openai", Model: "gpt-fixture"}}}, maxOut: 1000})
 	r.up.set(hostOpenAI, serveFixture(200, "application/json", fixture(t, "openai_completion.json")))
 	for _, c := range []struct{ body, key string }{
 		{simpleChat, "max_completion_tokens"},
@@ -792,7 +792,7 @@ func TestStreamErrorBeforeFirstByteFailsOver(t *testing.T) {
 // order, and the first that answers serves.
 func TestMixedOutcomesAcrossThreeRoutes(t *testing.T) {
 	r := newRig(t, rigOpts{rule: Rule{"default": {
-		{"anthropic", "claude-a"}, {"anthropic", "claude-b"}, {"openai", "gpt-fixture"},
+		{Provider: "anthropic", Model: "claude-a"}, {Provider: "anthropic", Model: "claude-b"}, {Provider: "openai", Model: "gpt-fixture"},
 	}}})
 	r.up.set(hostAnthropic, func(w http.ResponseWriter, req *http.Request) {
 		r.up.mu.Lock()
@@ -821,7 +821,7 @@ func TestMixedOutcomesAcrossThreeRoutes(t *testing.T) {
 // When every permitted route is cooling down, the guest is told when to
 // retry; an HTTP-date Retry-After counts like seconds.
 func TestRetryAfterReachesGuest(t *testing.T) {
-	r := newRig(t, rigOpts{rule: Rule{"default": {{"anthropic", "claude-fixture"}}}})
+	r := newRig(t, rigOpts{rule: Rule{"default": {{Provider: "anthropic", Model: "claude-fixture"}}}})
 	date := r.clock().Add(90 * time.Second).UTC().Format(http.TimeFormat)
 	r.up.set(hostAnthropic, serveFixture(429, "application/json", fixture(t, "anthropic_rate_limit.json"), "Retry-After", date))
 	w := r.do(t, "m1", simpleChat)
@@ -856,7 +856,7 @@ func TestCandidateIgnoresGuestErrors(t *testing.T) {
 // With no usage in the response, the decision says so and carries the
 // generated characters for the meter's fallback.
 func TestUnreportedUsageFallsBackToCharacters(t *testing.T) {
-	r := newRig(t, rigOpts{rule: Rule{"default": {{"openai", "gpt-fixture"}}}})
+	r := newRig(t, rigOpts{rule: Rule{"default": {{Provider: "openai", Model: "gpt-fixture"}}}})
 	r.up.set(hostOpenAI, serveFixture(200, "application/json", []byte(`{"choices":[{"message":{"content":"twelve chars","tool_calls":[{"id":"c","type":"function","function":{"name":"f","arguments":"{}"}}]}}]}`)))
 	r.do(t, "m1", simpleChat)
 	if d := r.lastDecision(); d.Usage == nil || *d.Usage != (Usage{Complete: true, OutputChars: 14}) {
@@ -893,7 +893,7 @@ func TestCredentialRejectedToldOncePerDay(t *testing.T) {
 // usage through the request context, also when the guest did not ask for
 // usage and so its stream carries none.
 func TestUsageReachesTheCallersContext(t *testing.T) {
-	r := newRig(t, rigOpts{rule: Rule{"default": {{"openai", "gpt-fixture"}}}})
+	r := newRig(t, rigOpts{rule: Rule{"default": {{Provider: "openai", Model: "gpt-fixture"}}}})
 	r.up.set(hostOpenAI, serveFixture(200, "text/event-stream", fixture(t, "openai_stream.sse")))
 	var got []string
 	ctx := WithUsage(context.Background(), func(provider string, u Usage) { got = append(got, fmt.Sprint(provider, u)) })

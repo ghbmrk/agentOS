@@ -5,14 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 
-	"github.com/ghbmrk/agentos/broker/route"
+	"github.com/ghbmrk/agentos/broker/routerule"
 )
 
 // Router is the part of *route.Router the pipeline drives (ADP-4).
 type Router interface {
-	Rule() route.Rule
-	SetRule(route.Rule) error
-	Candidate() route.Rule
+	Rule() routerule.Rule
+	SetRule(routerule.Rule) error
+	Candidate() routerule.Rule
 }
 
 // RoutingTarget applies routing/rule.json to the model router. The router
@@ -29,7 +29,7 @@ func (t RoutingTarget) Apply(files Tree) error {
 	if !ok || len(files) != 1 {
 		return errors.New("change: routing needs exactly " + RoutingPath)
 	}
-	var r route.Rule
+	var r routerule.Rule
 	if err := json.Unmarshal(b, &r); err != nil {
 		return err
 	}

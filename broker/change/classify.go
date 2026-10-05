@@ -9,7 +9,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/ghbmrk/agentos/broker/route"
+	"github.com/ghbmrk/agentos/broker/routerule"
 )
 
 // classification is decided from paths and content alone (ARC-2: no
@@ -128,7 +128,7 @@ func (p *Pipeline) checkRouting(cl *classification, e Edit) {
 		cl.forbid("the routing rule cannot be deleted")
 		return
 	}
-	var next route.Rule
+	var next routerule.Rule
 	if err := decodeStrict(e.After, &next); err != nil {
 		cl.forbid("routing rule does not parse: " + err.Error())
 		return
@@ -149,13 +149,13 @@ func (p *Pipeline) checkRouting(cl *classification, e Edit) {
 			}
 		}
 	}
-	var cur route.Rule
+	var cur routerule.Rule
 	if e.Before == nil || json.Unmarshal(e.Before, &cur) != nil || len(cur) != len(next) {
 		cl.neutral = false
 		return
 	}
 	for class, routes := range next {
-		have := map[route.Route]bool{}
+		have := map[routerule.Route]bool{}
 		for _, rt := range cur[class] {
 			have[rt] = true
 		}

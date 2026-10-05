@@ -10,7 +10,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/owner"
-	"github.com/ghbmrk/agentos/broker/route"
+	"github.com/ghbmrk/agentos/broker/routerule"
 )
 
 // idLetters avoids I and O, as the owner channel's IDs do.
@@ -126,11 +126,11 @@ func (p *Pipeline) what(a *Adoption) string {
 // primaryChange names, per task class, a change of first route provider or
 // a dropped local fallback (arbitrator R1); "" when there is none.
 func (p *Pipeline) primaryChange(before, after []byte) string {
-	var b, n route.Rule
+	var b, n routerule.Rule
 	if json.Unmarshal(before, &b) != nil || json.Unmarshal(after, &n) != nil {
 		return ""
 	}
-	local := func(rs []route.Route) bool {
+	local := func(rs []routerule.Route) bool {
 		for _, r := range rs {
 			if p.cfg.LocalProvider != nil && p.cfg.LocalProvider(r.Provider) {
 				return true
