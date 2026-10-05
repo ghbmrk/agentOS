@@ -88,6 +88,15 @@ func newBrief(br loops.Brief, ns string) Brief {
 	out := Brief{Signal: string(h.Signal), Class: string(h.Class), Key: h.Key, Writes: ns,
 		Steps: []BriefStep{}, Cases: []BriefCase{},
 		Limits: BriefLimits{Files: MaxFiles, FileBytes: MaxFileBytes, Bytes: MaxCandidateBytes}}
+	// A task the owner accepted only implicitly is counted, never read
+	// (C17; security F1 on #126): its steps keep their account, action and
+	// state, but no values.
+	implicit := map[string]bool{}
+	for _, s := range h.Evidence {
+		if strings.HasSuffix(s.Quality.Source, change.ImplicitSuffix) {
+			implicit[loops.TaskKey(s.Intent)] = true
+		}
+	}
 	for _, s := range h.Evidence {
 		if len(out.Steps) == maxBriefSteps {
 			break
@@ -95,8 +104,12 @@ func newBrief(br loops.Brief, ns string) Brief {
 		if s.Intent.Account == journal.BrokerAccount {
 			continue
 		}
-		out.Steps = append(out.Steps, BriefStep{Task: loops.TaskKey(s.Intent), Account: s.Intent.Account,
-			Action: s.Intent.Action, State: string(s.State), Params: s.Intent.Params})
+		task := loops.TaskKey(s.Intent)
+		st := BriefStep{Task: task, Account: s.Intent.Account, Action: s.Intent.Action, State: string(s.State)}
+		if !implicit[task] {
+			st.Params = s.Intent.Params
+		}
+		out.Steps = append(out.Steps, st)
 	}
 	for _, c := range br.Dev {
 		if c.Implicit {
@@ -288,7 +301,13 @@ func (s *session) model() http.Handler {
 		})
 	}
 	next := b.cfg.Meter.Wrap(s.id, b.cfg.Model(s.id))
+	// One call at a time, so the cap is checked against every earlier
+	// call's metered use and concurrent calls cannot overshoot it
+	// (security R3 on #126).
+	var one sync.Mutex
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		one.Lock()
+		defer one.Unlock()
 		if b.cfg.Meter.Usage(s.id).Tokens >= b.cfg.JobTokens {
 			http.Error(w, "this job's model budget is spent", http.StatusTooManyRequests)
 			return

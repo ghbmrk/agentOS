@@ -68,11 +68,14 @@ func builderDenied(logf func(string, ...any)) func(machine string, d modelroute.
 
 // buildConfig is Loop 1's builder machine and its model route.
 type buildConfig struct {
-	Dir    string // builder machines' socket directories
-	Image  string // the minimal builder image (C-3c-3), registered with -image
-	Launch string // its argv and env; empty: the image's own
-	MemMB  int64
-	Egress string // the vault process's model socket; empty: no model access
+	Dir   string // builder machines' socket directories
+	Image string // the minimal builder image (C-3c-3), registered with -image
+	// AgentImage is the agent's image, which the builder never runs
+	// (security R2 on #126).
+	AgentImage string
+	Launch     string // its argv and env; empty: the image's own
+	MemMB      int64
+	Egress     string // the vault process's model socket; empty: no model access
 }
 
 // openBuilder attaches Loop 1's model-backed builder (W3-builder): builder
@@ -82,6 +85,9 @@ type buildConfig struct {
 func (l *learning) openBuilder(m *vm.Manager, imgs images, services *lateServices, c buildConfig) error {
 	if _, ok := imgs[c.Image]; !ok {
 		return fmt.Errorf("image %q is not registered with -image", c.Image)
+	}
+	if c.AgentImage != "" && (c.Image == c.AgentImage || imgs[c.Image] == imgs[c.AgentImage]) {
+		return fmt.Errorf("builder image %q is the agent's image; the builder runs a minimal image of its own", c.Image)
 	}
 	cfg := loopbuild.Config{Dir: c.Dir, Machines: m, Image: c.Image, MemMB: c.MemMB, Logf: log.Printf}
 	if c.Launch != "" {

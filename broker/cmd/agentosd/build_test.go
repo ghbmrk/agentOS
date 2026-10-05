@@ -65,3 +65,19 @@ func TestLoop1sModelBuilderWaitsForTheBox(t *testing.T) {
 		t.Fatalf("builder share %+v", sh)
 	}
 }
+
+// Security R2 on #126 (C-3c-3): the builder never runs the agent's image,
+// by name or by the same directory under another name.
+func TestTheBuilderNeverRunsTheAgentImage(t *testing.T) {
+	imgs := images{"openclaw": "/img/openclaw", "alias": "/img/openclaw"}
+	var l learning
+	var s lateServices
+	for _, name := range []string{"openclaw", "alias"} {
+		if err := l.openBuilder(nil, imgs, &s, buildConfig{Image: name, AgentImage: "openclaw"}); err == nil {
+			t.Fatalf("builder image %q, the agent's, was accepted", name)
+		}
+	}
+	if s.build.Load() != nil {
+		t.Fatal("a builder was attached")
+	}
+}

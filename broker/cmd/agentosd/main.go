@@ -177,6 +177,7 @@ func main() {
 	mem := planMemory(string(meminfo), flagSet(flag.CommandLine, "capacity-mb"), cfg.Admission.CapacityMB, cfg.Admission.HeadroomMB, agentMemMB)
 	cfg.Admission.CapacityMB = mem.CapacityMB
 	log.Printf("admission capacity: %d MB (%s)", mem.CapacityMB, mem.Why)
+	namedAgentImage := agentImage // the builder never runs it, agent or not
 	if mem.AgentOff != "" {
 		// The broker stays up, STOP and STATUS included; no agent machine
 		// is kept and no replay machine opened, and STATUS says why.
@@ -307,7 +308,7 @@ func main() {
 						log.Printf("replay evaluation disabled: %v", err)
 					}
 					if builderImage != "" {
-						if err := lp.openBuilder(m, imgs, services, buildConfig{Dir: filepath.Join(cfg.SocketDir, "build"), Image: builderImage,
+						if err := lp.openBuilder(m, imgs, services, buildConfig{Dir: filepath.Join(cfg.SocketDir, "build"), Image: builderImage, AgentImage: namedAgentImage,
 							Launch: builderLaunch, MemMB: builderMemMB, Egress: egressSocket}); err != nil {
 							log.Printf("loop 1 builder machines disabled: %v", err)
 						}

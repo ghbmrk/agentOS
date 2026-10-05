@@ -367,3 +367,81 @@ func TestTheModelRouteHasAJobCap(t *testing.T) {
 		t.Fatalf("codes %v, served %d", codes, served)
 	}
 }
+
+// Security F1 on #126 ("count, not content"; arbitrator on #109, change
+// C17): a task the owner accepted only implicitly is counted in the brief,
+// its steps' account, action and state, but none of its values reaches
+// the model-backed builder.
+func TestAnImplicitTasksValuesNeverReachTheBrief(t *testing.T) {
+	f := &machines{}
+	var got Brief
+	f.guest = func(id, dir string) {
+		c := guestClient(dir)
+		if _, body := call(c, "GET", "/brief", nil); json.Unmarshal([]byte(body), &got) != nil {
+			t.Errorf("brief %s", body)
+		}
+		call(c, "POST", "/candidate", Submission{Files: map[string]string{"procedures/mail": "v"}})
+	}
+	br := brief(change.ClassProcedure)
+	implicit := journal.Quality{Verdict: journal.VerdictGood, Source: "owner" + change.ImplicitSuffix}
+	br.Hypothesis.Evidence = append(br.Hypothesis.Evidence,
+		journal.Status{Intent: journal.Intent{ID: "i1", GoalID: "g2", Account: "mail", Action: "draft", Params: map[string]any{"subject": "CANARY-implicit"}}, State: journal.NotApplied},
+		journal.Status{Intent: journal.Intent{ID: "i2", GoalID: "g2", Account: "mail", Action: "send", Params: map[string]any{"to": "CANARY-implicit"}}, State: journal.Succeeded, Quality: implicit},
+	)
+	b := newBuilder(t, f, nil)
+	if _, err := b.Build(context.Background(), br); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Steps) != 3 || got.Steps[0].Params == nil {
+		t.Fatalf("steps %+v", got.Steps)
+	}
+	for _, s := range got.Steps[1:] {
+		if s.Account != "mail" || s.Action == "" || s.State == "" || s.Params != nil {
+			t.Fatalf("implicit step %+v", s)
+		}
+	}
+}
+
+// Security R3 on #126: one model call in flight per job, so concurrent
+// calls cannot overshoot the job's token cap.
+func TestConcurrentModelCallsKeepTheJobCap(t *testing.T) {
+	mtr, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "meter.json"), MachineCap: meter.DefaultMachineCap, OverallCap: meter.DefaultOverallCap})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &machines{}
+	f.guest = func(id, dir string) {
+		c := guestClient(dir)
+		var wg sync.WaitGroup
+		for i := 0; i < 3; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				call(c, "POST", "/model/v1/chat/completions", map[string]any{"max_tokens": 10})
+			}()
+		}
+		wg.Wait()
+		call(c, "POST", "/candidate", Submission{Files: map[string]string{"procedures/mail": "v"}})
+	}
+	var mu sync.Mutex
+	served := 0
+	b := newBuilder(t, f, func(c *Config) {
+		c.Meter, c.JobTokens = mtr, 50
+		c.Model = func(string) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				mu.Lock()
+				served++
+				mu.Unlock()
+				time.Sleep(50 * time.Millisecond)
+				w.Header().Set("Content-Type", "application/json")
+				io.WriteString(w, `{"usage":{"prompt_tokens":100,"completion_tokens":10}}`)
+			})
+		}
+	})
+	if _, err := b.Build(context.Background(), brief(change.ClassProcedure)); err != nil {
+		t.Fatal(err)
+	}
+	if served != 1 {
+		t.Fatalf("served %d model calls past a 50-token cap", served)
+	}
+}

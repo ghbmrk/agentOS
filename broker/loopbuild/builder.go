@@ -37,7 +37,7 @@ import (
 // services are this package's socket, never the guest plane's. It is
 // modelroute.BuilderPrefix, by which the vault process knows them
 // (agentosd TestBuilderMachinesReachOnlyTheBuilder).
-const Prefix = "lb-"
+const Prefix = vm.BuilderPrefix
 
 // Machines is the part of vm.Manager the builder uses.
 type Machines interface {
