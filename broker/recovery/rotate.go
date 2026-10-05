@@ -337,6 +337,9 @@ func (p *Pending) Commit(b *Box, typed string, now time.Time) (Card, error) {
 			// Backup refuses until it is rewritten (backupKey).
 			return fail(err)
 		}
+		if err := keyChanged(b, now); err != nil {
+			return fail(err)
+		}
 	}
 	stored := cur
 	if p.parts[PartWiFi] {
@@ -361,7 +364,7 @@ func DoneNotes(parts []Part) []string {
 	for _, p := range parts {
 		switch p {
 		case PartRecovery:
-			out = append(out, "Old backups still open with the old recovery key. Back up now, then destroy old backups and the old card's recovery sheet.")
+			out = append(out, "Back up now. Backups made before today still open with your old card.")
 		case PartPassphrase:
 			out = append(out, "Copies of the drive made before now still open with the old passphrase. Destroy the old card's passphrase sheet.")
 		case PartWiFi:
