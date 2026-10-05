@@ -270,9 +270,10 @@ func (o *Optimizer) earnedLocked(c *class) bool {
 	return o.cfg.UserContent == nil || !o.cfg.UserContent(c.Account)
 }
 
+// reset ends the run; the edit-rate window (Recent) is kept, since it
+// covers the last answered replies whatever happened between (ADP-11).
 func (c *class) reset() {
 	c.Run, c.Fixed, c.Templated, c.Recipients, c.SameRcpt, c.MaxAmount, c.Days = 0, nil, false, nil, false, 0, nil
-	c.Recent = nil
 	c.Short, c.Offered, c.Offers = "", time.Time{}, 0
 }
 

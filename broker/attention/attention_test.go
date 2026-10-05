@@ -212,7 +212,7 @@ func TestUnverifiedRejectionResets(t *testing.T) {
 		t.Fatalf("unverified edits left out of the rate: %q", s[0].Text)
 	}
 	// The reviewer's probe: an unverified NO at #10 and edit at #11 among
-	// 25 replies leave a run of 13, short of 20.
+	// 25 replies leave a run of 14, short of 20.
 	o = newOpt(t, &change.MemStore{}, nil)
 	for i := 0; i < 25; i++ {
 		d := reply(i, i == 10)
@@ -260,6 +260,25 @@ func TestReplyRuleIsEarned(t *testing.T) {
 	}
 	if !strings.Contains(s[0].Text, "20 of the agent's replies on mail unedited") || !strings.Contains(s[0].Text, "reply in existing threads") {
 		t.Fatalf("text %q", s[0].Text)
+	}
+}
+
+// ADP-11 (L3 F1): a reset keeps the edit-rate window. Five edits, a NO,
+// then 20 unedited approvals: 5 of the last 25 answered were edited (20%),
+// so nothing is offered.
+func TestResetKeepsEditRate(t *testing.T) {
+	o := newOpt(t, &change.MemStore{}, nil)
+	for i := 0; i < 5; i++ {
+		observe(t, o, reply(i, true))
+	}
+	no := reply(5, false)
+	no.Approved = false
+	observe(t, o, no)
+	for i := 6; i < 26; i++ {
+		observe(t, o, reply(i, false))
+	}
+	if s := suggestions(t, o); len(s) != 0 {
+		t.Fatalf("a reset forgot earlier edits: %q", s[0].Text)
 	}
 }
 
