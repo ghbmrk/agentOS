@@ -87,7 +87,11 @@ type Machine struct {
 	Label    Label
 	State    State
 	ForkBase string // snapshot this machine was forked from, if any
-	Last     string // newest snapshot of this machine
+	// Lineage is the machine this one descends from by fork, or its own
+	// ID. Forks share their source's memory, so the broker treats a
+	// lineage as one requester for idempotency (OP-1).
+	Lineage string
+	Last    string // newest snapshot of this machine
 }
 
 // Snapshot is a broker-held snapshot's record.
@@ -109,8 +113,26 @@ type Launch struct {
 	Work   string // overlayfs work directory
 	Root   string // where the merged root is mounted
 	Cgroup string // cgroup v2 directory to start the machine in; "" if none
-	Argv   []string
-	Env    []string
+	// Services is a broker-held host directory holding only this machine's
+	// guest service socket (ARC-6), mounted read-only at ServicesMount; ""
+	// if none. The runtime lets the guest connect to host sockets there and
+	// nowhere else.
+	Services string
+	Argv     []string
+	Env      []string
+}
+
+// ServicesMount is where a machine sees its Launch.Services directory.
+const ServicesMount = "/run/agentos"
+
+// Services hands each machine its own guest service directory (ARC-6). Open
+// is called before every start or restore of machine id and must return the
+// same directory each time. Close is called when the machine is removed
+// (destroyed, or its creation failed) and must be idempotent.
+// Identity comes from the directory: only machine id's sandbox has it.
+type Services interface {
+	Open(id string) (dir string, err error)
+	Close(id string)
 }
 
 // Runtime runs machines. Checkpoint is called on a paused machine and leaves
@@ -143,6 +165,9 @@ type Config struct {
 	NoCgroups bool
 	// KillTimeout bounds waiting for a machine's memory to be released.
 	KillTimeout time.Duration
+	// Services gives each machine its guest service socket (P1-7). Nil
+	// runs machines with no broker services at all.
+	Services Services
 	// DiskReserveBytes is the state disk's RES-4 reserve (a healthy
 	// release, the journal, the recall index). A snapshot is admitted only
 	// if copying the layer leaves the reserve free, as memory admission
@@ -251,7 +276,7 @@ func (m *Manager) Create(ctx context.Context, id string, s Spec) (Machine, error
 	if _, ok := m.cfg.Images[s.Image]; !ok {
 		return Machine{}, fmt.Errorf("%w: image %q", ErrUnknown, s.Image)
 	}
-	mc, err := m.reserve(id, s, s.Label, "")
+	mc, err := m.reserve(id, s, s.Label, "", "")
 	if err != nil {
 		return Machine{}, err
 	}
@@ -301,7 +326,7 @@ func claimLocked(mc *machine) error {
 
 // reserve records a new machine in the table so no one else takes its ID.
 // The returned machine is not yet persisted or started.
-func (m *Manager) reserve(id string, s Spec, l Label, forkBase string) (*machine, error) {
+func (m *Manager) reserve(id string, s Spec, l Label, forkBase, lineage string) (*machine, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.machines[id]; ok {
@@ -310,7 +335,10 @@ func (m *Manager) reserve(id string, s Spec, l Label, forkBase string) (*machine
 	if _, err := os.Lstat(m.machineDir(id)); err == nil {
 		return nil, fmt.Errorf("%w: %s (left on disk)", ErrExists, id)
 	}
-	mc := &machine{Machine: Machine{ID: id, Spec: s, Label: l, State: Stopped, ForkBase: forkBase}}
+	if lineage == "" {
+		lineage = id
+	}
+	mc := &machine{Machine: Machine{ID: id, Spec: s, Label: l, State: Stopped, ForkBase: forkBase, Lineage: lineage}}
 	m.machines[id] = mc
 	return mc, nil
 }
@@ -319,6 +347,9 @@ func (m *Manager) unreserve(id string) {
 	m.mu.Lock()
 	delete(m.machines, id)
 	m.mu.Unlock()
+	if m.cfg.Services != nil {
+		m.cfg.Services.Close(id)
+	}
 }
 
 // keepLayer, passed to startFrom, restarts a machine on the layer it has.
@@ -365,6 +396,13 @@ func (m *Manager) startFrom(ctx context.Context, mc *machine, s *Snapshot) error
 		if _, err := m.cfg.Cgroups.Child(mc.ID, cgroup.Limits{MaxBytes: mc.Spec.MemMB << 20}); err != nil {
 			return err
 		}
+	}
+	if m.cfg.Services != nil {
+		dir, err := m.cfg.Services.Open(mc.ID)
+		if err != nil {
+			return err
+		}
+		l.Services = dir
 	}
 	var err error
 	if s != nil && s.Tier == Full {
@@ -464,6 +502,17 @@ func (m *Manager) RaiseLabel(id string, l Label) error {
 	}
 	mc.Label = l
 	return m.saveMachine(mc)
+}
+
+// Label returns a machine's data label (REV-5).
+func (m *Manager) Label(id string) (Label, error) {
+	mc, err := m.get(id)
+	if err != nil {
+		return 0, err
+	}
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+	return mc.Label, nil
 }
 
 // Step takes the per-step file-system snapshot (REV-1).
@@ -761,8 +810,11 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 		}
 	}
 	src.mu.Lock()
-	spec, label := src.Spec, src.Label
+	spec, label, lineage := src.Spec, src.Label, src.Lineage
 	src.mu.Unlock()
+	if lineage == "" {
+		lineage = id
+	}
 	spec.Label = label
 
 	var reserved []*machine
@@ -773,7 +825,7 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 		}
 	}
 	for _, f := range ids {
-		mc, err := m.reserve(f, spec, label, "")
+		mc, err := m.reserve(f, spec, label, "", lineage)
 		if err != nil {
 			undo()
 			return Snapshot{}, err
@@ -1162,6 +1214,9 @@ func (m *Manager) load(ctx context.Context) error {
 		}
 		if mc.State == Running {
 			mc.State = Stopped
+		}
+		if mc.Lineage == "" {
+			mc.Lineage = mc.ID
 		}
 		m.stopRuntime(ctx, mc)
 		m.machines[mc.ID] = mc

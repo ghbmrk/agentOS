@@ -25,14 +25,24 @@ Started before spec v0.12 on parts unlikely to change; each package lists its sp
 |---|---|---|---|
 | P1-1 | Journal and intent engine (OP-1–7), Go library with property tests ([assumptions](broker/journal/ASSUMPTIONS.md)) | Cloud only | in review |
 | P1-2 | Broker skeleton: sockets, admission classes, STOP/STATUS without inference (ARC-2, CH-2) ([assumptions](broker/daemon/ASSUMPTIONS.md)) | P1-1 | in review |
-| P1-3 | Vault and credentialed egress proxy: encrypted vault, key injection into declared inference endpoints only, relay body rules, redaction (CRED-1, CRED-5, CRED-7; ADP-10 partial) ([assumptions](broker/egress/ASSUMPTIONS.md)). **Conditions for P1-7:** do not serve `Proxy.Handler` to a machine until OP-8 metering exists, or at least `Config.Cap` is set; OP-8 lands before or with P1-7; each machine's listener is reachable only from that VM (per-VM vsock CID or tap); A14 re-proves CRED-1 and CRED-5 end to end through the wired listener; no build loads the vault data key from a plaintext file or env var outside tests until P2-4; wire `Config.Label` to each machine's REV-5 label (until then provider-side tools are denied to every machine). | P1-2 | in review |
-| P1-6 | Canary harness (A5) and dependency audit harness (A9) as permanent CI jobs ([assurance/README.md](assurance/README.md)) | Cloud only | in review |
-| P1-5 | Owner channel on a modem simulator: SMS, two-tier approval codes, tiers, inline unlock, code hygiene, disclosure and commitment filters (CH-1–4, CH-10–14, CH-16, CH-18, CH-19, ADP-11) ([assumptions](broker/owner/ASSUMPTIONS.md)). Carry-forward: P2-2's local UI must offer RESUME and a local unlock that clears challenge mode (O4) as defense in depth; P1-7 tells the owner what a restart dropped (`Boot`) and closes approval-pending intents with no live request | P1-2 | in review |
+| P1-3 | Vault and credentialed egress proxy: encrypted vault, key injection into declared inference endpoints only, relay body rules, redaction (CRED-1, CRED-5, CRED-7; ADP-10 partial) ([assumptions](broker/egress/ASSUMPTIONS.md)). **Conditions for P1-7:** do not serve `Proxy.Handler` to a machine until OP-8 metering exists, or at least `Config.Cap` is set; OP-8 lands before or with P1-7; each machine's listener is reachable only from that VM (per-VM vsock CID or tap); A14 re-proves CRED-1 and CRED-5 end to end through the wired listener; no build loads the vault data key from a plaintext file or env var outside tests until P2-4; wire `Config.Label` to each machine's REV-5 label (until then provider-side tools are denied to every machine). | P1-2 | merged |
 | P1-4 | Agent-machine lifecycle: create, snapshot, fork, diff, merge, rollback, rebuild, destroy under gVisor with cgroup budgets and preemption (REV-1, REV-4, ARC-4, RES-1, RES-2) ([assumptions](broker/vm/ASSUMPTIONS.md)) | P1-2 | in review |
+| P1-6 | Canary harness (A5) and dependency audit harness (A9) as permanent CI jobs ([assurance/README.md](assurance/README.md)) | Cloud only | merged |
+| P1-5 | Owner channel on a modem simulator: SMS, two-tier approval codes, tiers, inline unlock, code hygiene, disclosure and commitment filters (CH-1–4, CH-10–14, CH-16, CH-18, CH-19, ADP-11) ([assumptions](broker/owner/ASSUMPTIONS.md)). Carry-forward: P2-2's local UI must offer RESUME and a local unlock that clears challenge mode (O4) as defense in depth; P1-7 tells the owner what a restart dropped (`Boot`) and closes approval-pending intents with no live request | P1-2 | merged |
+| P1-7 | OpenClaw as first guest: per-machine guest socket mounted into gVisor, broker tools over MCP with Step after each call, owner chat to the guest and back, OP-8 spend meter, egress denials journaled, verb-class gate, REV-5 labels to the proxy, A14 through the guest socket, A9 offline scenario, real OpenClaw run in CI (ARC-6, ARC-7, OP-8, REV-1, REV-5, OP-1, ADP-10) ([assumptions](broker/guest/ASSUMPTIONS.md)). Carry-forward: P2-4 serves the model route from a process holding the unlocked vault (G8); the grants/approval-policy package takes P1-5's approval-pending close-out (G12) | P1-3, P1-4, P1-5, P1-6 | in review |
 
 P1-4 follow-ups (from the #23 review), for P1-7 or the loop scheduler:
 - Re-admit preempted experiments: nothing calls `Manager.Resume` with retries yet (Potency).
 - Long experiments take an idle-time full checkpoint, so repeated preemption still makes progress (Potency).
 - After a broker restart, accepted work resumes once the journal reconciles, and the boot text names the resumed tasks (UX).
-- Guest sockets follow the B8 per-machine identity rule when P1-7 mounts them (V15, Security).
+- Guest sockets follow the B8 per-machine identity rule when P1-7 mounts them (V15, Security). Done in P1-7: identity is the socket (G1).
 - On the N95, measure zram together with the 1/16 `memory.high` margin (Potency).
+
+## Phase 2: real hardware
+
+Cloud parts first; the rest waits on Mark's hardware.
+
+| ID | Package | Needs | State |
+|---|---|---|---|
+| P2-4a | Vault passphrase key slot and vault process: Argon2id passphrase slot with a TPM seam, `agentos-egress` holding the unlocked vault and serving the model route `agentosd` forwards, unknown-host unlock by passphrase plus code-generator code (CRED-8; carries P1-7's G8) ([assumptions](broker/egress/ASSUMPTIONS.md), K1–K8). Carry-forward: P2-2 scans the passphrase on the local page, offers the grid challenge, and texts the owner about a pending unlock with P2-3 (K6); a verify operation on the vault process gives the owner channel its high-tier codes (K7) | P1-3, P1-7 | in review |
+| P2-4b | Trusted-host TPM slot (optional boot PIN), N95 Argon2id tuning, TPM NV rollback counter (CRED-8, CRED-9, V6) | **Mark: hardware** | queued |

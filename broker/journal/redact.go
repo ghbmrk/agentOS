@@ -13,6 +13,10 @@ func (e *Engine) scrub(r Record) Record {
 		in := e.scrubIntent(*r.Intent)
 		r.Intent = &in
 	}
+	if r.Egress != nil {
+		n := e.scrubEgress(*r.Egress)
+		r.Egress = &n
+	}
 	return r
 }
 
