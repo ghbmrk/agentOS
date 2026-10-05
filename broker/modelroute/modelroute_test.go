@@ -140,6 +140,80 @@ func TestVaultProcessDownIs503(t *testing.T) {
 	}
 }
 
+// A metered call the vault process gives no response is never charged
+// the broker's 503 page as output (OP-8). One that never reached it (a
+// dial failure) is charged its input estimate; one that reached it and
+// got no answer, its output reservation too, since a provider may have
+// billed output the broker never saw.
+func TestUnansweredCallCharges(t *testing.T) {
+	const small = `{"model":"default","max_tokens":100}`
+	const large = `{"model":"default","max_tokens":32000}`
+	stalled := make(chan struct{})
+	defer close(stalled)
+	for _, c := range []struct {
+		name  string
+		body  string
+		sock  func(t *testing.T) string // a socket nothing serves
+		h     http.HandlerFunc
+		extra int64 // output charged beyond the input estimate
+	}{
+		{"absent socket", small, func(t *testing.T) string { return filepath.Join(t.TempDir(), "absent.sock") }, nil, 0},
+		{"stale socket", small, staleUnix, nil, 0},
+		{"stalls past the call bound", large, nil, func(w http.ResponseWriter, r *http.Request) {
+			io.Copy(io.Discard, r.Body)
+			<-stalled
+		}, 32000},
+		{"hangs up after the request", small, nil, func(w http.ResponseWriter, r *http.Request) {
+			io.Copy(io.Discard, r.Body)
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err == nil {
+				conn.Close()
+			}
+		}, 100},
+		{"aborts after the request", small, nil, func(w http.ResponseWriter, r *http.Request) {
+			io.Copy(io.Discard, r.Body)
+			panic(http.ErrAbortHandler)
+		}, 100},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var sock string
+			if c.h != nil {
+				sock = serveUnix(t, &fakeEgress{h: c.h})
+			} else {
+				sock = c.sock(t)
+			}
+			fwd := Forward(Config{Socket: sock, Label: func(string) string { return "public" }, Denied: func(string, Denial) {}})
+			m, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "meter.json"), CallTimeout: 100 * time.Millisecond,
+				MachineCap: meter.Limits{Calls: 10, Tokens: 1 << 30}, OverallCap: meter.Limits{Calls: 10, Tokens: 1 << 30}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			w := httptest.NewRecorder()
+			m.Wrap("m1", fwd("m1")).ServeHTTP(w, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(c.body)))
+			if w.Code != http.StatusServiceUnavailable {
+				t.Fatalf("got %d", w.Code)
+			}
+			want := meter.Tokens(int64(len(c.body))) + c.extra
+			if u := m.Usage("m1"); u.Tokens != want || u.Calls != 1 {
+				t.Fatalf("charged %d tokens and %d calls, want %d and 1", u.Tokens, u.Calls, want)
+			}
+		})
+	}
+}
+
+// staleUnix leaves a socket file behind with nothing listening on it, as
+// a vault process that died does.
+func staleUnix(t *testing.T) string {
+	sock := filepath.Join(t.TempDir(), "stale.sock")
+	l, err := net.ListenUnix("unix", &net.UnixAddr{Name: sock, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.SetUnlinkOnClose(false)
+	l.Close()
+	return sock
+}
+
 // Token streams keep flowing: each chunk the vault process flushes reaches
 // the guest before the response ends.
 func TestStreamsAreFlushed(t *testing.T) {
