@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"math/big"
+	"strings"
 	"time"
 )
 
@@ -97,6 +98,11 @@ type strongOpts struct {
 	// silent is an O5 check of a code in chat: the vault process bounds
 	// these apart from counted checks.
 	silent bool
+	// proof allows the vault unlock's sign-in proof (UnlockProofPrefix).
+	// Only the local sign-in sets it: the proof signs in the phone that
+	// unlocked the box and is never an approval, RESUME or chat code
+	// (#65 security C1).
+	proof bool
 }
 
 // VerifyBreaker is how long the channel stops asking the vault process
@@ -152,6 +158,10 @@ func (c *codes) matchStrong(got string, now time.Time, silent bool) (ok bool, st
 // neither is counted. locked reports that this wrong code crossed
 // WrongToLock.
 func (c *codes) checkStrong(got string, now time.Time, o strongOpts) (res strongResult, locked bool, err error) {
+	if !o.proof && strings.HasPrefix(got, UnlockProofPrefix) {
+		// Refused before the vault process sees it, and not counted.
+		return strongWrong, false, nil
+	}
 	ok, step, cell, err := c.matchStrong(got, now, o.silent)
 	if err != nil {
 		return strongWrong, false, err
