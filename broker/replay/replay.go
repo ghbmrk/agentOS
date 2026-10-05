@@ -53,8 +53,18 @@ const TreeDir = "etc/agentos/tree"
 
 // untested are the namespaces a replay cannot exercise: it boots the
 // configured image and guest configuration, not the tree's. A tree that
-// changes them is not evaluated (ErrNotEvaluated).
+// changes them is not evaluated (ErrNotEvaluated). Without model access,
+// routing is not exercised either (untestedNamespaces).
 var untested = []string{"config", "guest-image", "host-image"}
+
+func (e *Evaluator) untestedNamespaces() []string {
+	if e.cfg.Model == nil {
+		// Routing acts only through Model: with none, both sides of a
+		// routing change give the same output, which is no evidence.
+		return append(untested, "routing")
+	}
+	return untested
+}
 
 // guestNamespaces are the tree namespaces a guest reads. Routing is applied
 // on the broker side (Config.Model); the authority and governance
@@ -89,8 +99,11 @@ type Config struct {
 	Spec vm.Spec
 	// Dir holds the replay machines' socket directories (0700).
 	Dir string
-	// Model returns model access for a run on tree t. Nil serves no model
-	// access. Meter is required with it: model calls are never unmetered.
+	// Model returns model access for a run on tree t. Only t's routing
+	// rule (the order among routes the owner granted) comes from the tree:
+	// grants, labels, and which providers may see private data are broker
+	// configuration (ASSUMPTIONS R2, K1). Nil serves no model access, and
+	// then routing changes are not evaluated. Meter is required with it: model calls are never unmetered.
 	Model func(t change.Tree) http.Handler
 	Meter *meter.Meter
 	// Timeout bounds one run, from creating the machine to its reply.
@@ -117,7 +130,9 @@ var (
 const destroyTimeout = 2 * time.Minute
 
 // Evaluator implements change.Evaluator. It is also the vm.Services for
-// replay machines (see Services).
+// replay machines (see Services). There is one per machine manager: New
+// destroys every replay machine it finds, which would include another
+// evaluator's runs.
 type Evaluator struct {
 	cfg   Config
 	plane *guest.Plane
@@ -194,7 +209,7 @@ func (r *run) failed(err error) {
 
 // Run replays probe c on tree t and returns the guest's reply.
 func (e *Evaluator) Run(ctx context.Context, t change.Tree, c change.Probe) ([]byte, error) {
-	for _, ns := range untested {
+	for _, ns := range e.untestedNamespaces() {
 		if !sameFiles(inNamespace(t, ns), e.cfg.Active(ns)) {
 			return nil, fmt.Errorf("%w: %s", ErrNotEvaluated, ns)
 		}

@@ -301,15 +301,11 @@ func (m *Manager) CreateSeeded(ctx context.Context, id string, s Spec, seed map[
 		}
 		size += int64(len(b))
 	}
-	// The seed lands on the state disk like a layer copy (RES-4).
+	// The seed lands on the state disk like a layer copy (RES-4); every
+	// write of it (create, rebuild) reserves the disk first.
 	if m.cfg.MaxLayerBytes > 0 && size > m.cfg.MaxLayerBytes {
 		return Machine{}, fmt.Errorf("%w (seed %d bytes, cap %d)", ErrQuota, size, m.cfg.MaxLayerBytes)
 	}
-	h, err := m.reserveDisk(size)
-	if err != nil {
-		return Machine{}, fmt.Errorf("%s: seed: %w", id, err)
-	}
-	defer h.release()
 	return m.create(ctx, id, s, seed)
 }
 
@@ -434,8 +430,20 @@ func (m *Manager) startFrom(ctx context.Context, mc *machine, s *Snapshot) error
 		if err := os.Mkdir(l.Upper, 0o755); err != nil {
 			return err
 		}
-		if err := writeSeed(l.Upper, mc.seed); err != nil {
-			return err
+		if len(mc.seed) > 0 {
+			var size int64
+			for _, b := range mc.seed {
+				size += int64(len(b))
+			}
+			h, err := m.reserveDisk(size)
+			if err != nil {
+				return fmt.Errorf("%s: seed: %w", mc.ID, err)
+			}
+			err = writeSeed(l.Upper, mc.seed)
+			h.release()
+			if err != nil {
+				return err
+			}
 		}
 	} else if err := overlay.Copy(filepath.Join(m.snapDir(s.ID), "fs"), l.Upper); err != nil {
 		return err
@@ -786,6 +794,9 @@ func inLineage(mc *machine, s Snapshot) bool {
 // file system. The machine's label does not fall (REV-5). A preempted or
 // stopped machine is re-admitted first.
 func (m *Manager) Rollback(ctx context.Context, id, snapID string) error {
+	if strings.HasPrefix(id, EvalPrefix) {
+		return fmt.Errorf("vm: replay machine %s cannot be rolled back", id)
+	}
 	mc, err := m.get(id)
 	if err != nil {
 		return err
@@ -1050,6 +1061,9 @@ func (m *Manager) view(s Snapshot) overlay.View {
 // dst restarts on the merged file system (a file-system rollback), and its
 // label rises to the fork's (REV-5). Returns the merged snapshot.
 func (m *Manager) Merge(ctx context.Context, dst, src string) (Snapshot, error) {
+	if strings.HasPrefix(dst, EvalPrefix) || strings.HasPrefix(src, EvalPrefix) {
+		return Snapshot{}, errors.New("vm: replay machines are not merged")
+	}
 	sm, err := m.get(src)
 	if err != nil {
 		return Snapshot{}, err

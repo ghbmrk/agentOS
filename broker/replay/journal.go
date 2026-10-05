@@ -22,6 +22,9 @@ type JournalRecordings struct {
 }
 
 func (r JournalRecordings) Effects(probeID string) ([]journal.Status, error) {
+	if r.Task == nil {
+		return nil, nil // no lookup: nothing recorded, every effect fails closed
+	}
 	task, ok := r.Task(probeID)
 	if !ok || task == "" {
 		return nil, nil // no task (a security fixture): nothing recorded

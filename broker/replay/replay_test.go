@@ -454,3 +454,42 @@ func TestLOOP5LeftoverReplayMachinesAreDestroyed(t *testing.T) {
 		t.Fatalf("after start: %v", got)
 	}
 }
+
+// CHG-1, LOOP-5: routing acts only through model access. Without it, a
+// routing change gives both sides the same output, so it is not evaluated;
+// with it, the candidate's rule is what the model handler gets.
+func TestCHG1RoutingWithoutModelAccessIsNotEvaluated(t *testing.T) {
+	cand := change.Tree{}
+	for k, v := range tree {
+		cand[k] = v
+	}
+	cand["routing/rule.json"] = []byte(`{"order":["a"]}`)
+	r := newRig(t, recs{}, func(*client, string) string { return "ran" }, nil)
+	if _, err := r.e.Run(bg, cand, change.Probe{ID: "p1", Input: []byte("go")}); !errors.Is(err, change.ErrNotEvaluated) {
+		t.Fatalf("routing change, no model: %v", err)
+	}
+	if len(r.ms.created) != 0 {
+		t.Fatal("an unevaluable routing change started a machine")
+	}
+	mtr, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "meter.json"), MachineCap: meter.DefaultMachineCap, OverallCap: meter.DefaultOverallCap})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r = newRig(t, recs{}, func(g *client, _ string) string { return modelCall(g) }, func(c *Config) {
+		c.Meter = mtr
+		c.Model = func(t change.Tree) http.Handler {
+			rule := t["routing/rule.json"]
+			return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.Write(rule) })
+		}
+	})
+	if out, err := r.e.Run(bg, cand, change.Probe{ID: "p1", Input: []byte("go")}); err != nil || string(out) != `{"order":["a"]}` {
+		t.Fatalf("routing change with model access: %q %v", out, err)
+	}
+}
+
+func TestLOOP5NoTaskLookupRecordsNothing(t *testing.T) {
+	got, err := JournalRecordings{J: fakeJournal{st("g/1", "", "guest:g", "mail")}}.Effects("p")
+	if err != nil || len(got) != 0 {
+		t.Fatalf("nil Task: %v %v", got, err)
+	}
+}
