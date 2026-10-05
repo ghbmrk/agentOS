@@ -655,6 +655,7 @@ func TestCAP8cDeleteDuringSTOPLeavesTheWorkerStopped(t *testing.T) {
 		t.Fatalf("restart without STOP = %+v", rep)
 	}
 	must(t, e.m.Preempt("wk-a"))
+	e.m.cfg.Admit.Release("wk-a") // as admission does once Preempt returns
 	rep, err = e.m.DeleteFiles(bg, "wk-a", Deletion{Paths: []string{"/g"}})
 	must(t, err)
 	if w, _ := e.m.Get("wk-a"); rep.Restarted || w.State != Preempted {
