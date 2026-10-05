@@ -47,7 +47,6 @@ import (
 const (
 	defaultVault = "/var/lib/agentos-egress/vault"
 	defaultKeys  = "/var/lib/agentos-egress/vault.keys"
-	defaultState = "/var/lib/agentos-egress/unlock.json"
 	defaultPol   = "/var/lib/agentos-egress/vault.pcrpolicy"
 	defaultTPM   = "/dev/tpmrm0"
 	// defaultPCRs measure the Type #1 boot path of S7's host stack: PCR 4
@@ -178,7 +177,7 @@ func serveCmd(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	vaultPath := fs.String("vault", defaultVault, "sealed vault file")
 	keysPath := fs.String("keys", defaultKeys, "key slots file")
-	statePath := fs.String("state", defaultState, "unlock state: wrong codes and last code step (CH-18)")
+	statePath := fs.String("state", "", "unlock state: wrong codes and last code step (CH-18); default unlock.json beside the keys")
 	run := fs.String("run", defaultRun, "socket directory (created 0711)")
 	brokerUID := fs.Int("broker-uid", -1, "uid of agentosd, the only peer on the model socket")
 	unlockUID := fs.Int("unlock-uid", -1, "uid of the local UI, the only peer on the unlock socket")
@@ -216,7 +215,11 @@ func serveCmd(args []string) error {
 	if *unlockUID < 0 || *unlockUID == *brokerUID {
 		return errors.New("-unlock-uid must name the local UI's uid, distinct from agentosd's")
 	}
+	if *statePath == "" {
+		*statePath = statePathFor(*keysPath)
+	}
 	c, err := newCustody(&custody{
+		keysPath: *keysPath,
 		open: func(p string) (*vault.Vault, error) {
 			return vault.OpenSealed(*vaultPath, *keysPath, vault.Passphrase(p))
 		},
@@ -283,7 +286,11 @@ func initCmd(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
 	vaultPath := fs.String("vault", defaultVault, "sealed vault file to create")
 	keysPath := fs.String("keys", defaultKeys, "key slots file to create")
+	statePath := fs.String("state", "", "unlock state to create; default unlock.json beside the keys")
 	fs.Parse(args)
+	if *statePath == "" {
+		*statePath = statePathFor(*keysPath)
+	}
 	pass, err := newPassphrase()
 	if err != nil {
 		return err
@@ -295,6 +302,14 @@ func initCmd(args []string, out io.Writer) error {
 	if err := os.MkdirAll(filepath.Dir(*vaultPath), 0o700); err != nil {
 		return err
 	}
+	// The unlock state goes in place before the keys make the vault
+	// openable, so serve can require it (newCustody).
+	if _, err := os.Lstat(*keysPath); err == nil {
+		return fmt.Errorf("%s already exists; this box already has a vault", *keysPath)
+	}
+	if err := writeFileAtomic(*statePath, []byte("{}")); err != nil {
+		return err
+	}
 	if err := sealNew(*vaultPath, *keysPath, pass, seed); err != nil {
 		return err
 	}
@@ -303,6 +318,11 @@ func initCmd(args []string, out io.Writer) error {
 	fmt.Fprintf(out, "Code generator:   otpauth://totp/AgentOS?secret=%s&issuer=AgentOS\n", secret)
 	fmt.Fprintln(out, "Keep both offline. They are shown once.")
 	return nil
+}
+
+// statePathFor is the default unlock state file, beside the keys file.
+func statePathFor(keysPath string) string {
+	return filepath.Join(filepath.Dir(keysPath), "unlock.json")
 }
 
 // sealNew builds the vault and keys under temporary names, stores the seed,

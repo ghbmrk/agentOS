@@ -276,6 +276,12 @@ func TestIntegrationOpenClawGuest(t *testing.T) {
 		Machines: ref,
 		Effects:  eng,
 		Route:    func(account string) (string, bool) { return "mail", account == "owner-mail" },
+		Label: func(id string) string {
+			if l, err := ref.m.Load().Label(id); err == nil && l == vm.Public {
+				return "public"
+			}
+			return "private"
+		},
 		// The guest names provider "openai"; the plane strips /model.
 		Model:      func(string) http.Handler { return http.StripPrefix("/openai", model) },
 		Meter:      mtr,
@@ -345,9 +351,11 @@ func TestIntegrationOpenClawGuest(t *testing.T) {
 	ex.mu.Lock()
 	runs := ex.runs
 	ex.mu.Unlock()
+	// Owner chat raised the machine to private before the guest read it
+	// (REV-5), so its requests live in the lineage's private namespace.
 	mc, _ := m.Get("agent")
-	if len(runs) != 1 || runs[0].ID != mc.Lineage+"/oc-1" || runs[0].Origin != "guest:"+mc.Lineage || runs[0].Action != "message.send" {
-		t.Fatalf("effects run: %+v, want %s/oc-1 once", runs, mc.Lineage)
+	if len(runs) != 1 || runs[0].ID != mc.Lineage+"/private/oc-1" || runs[0].Origin != "guest:"+mc.Lineage || runs[0].Action != "message.send" {
+		t.Fatalf("effects run: %+v, want %s/private/oc-1 once", runs, mc.Lineage)
 	}
 	if after := len(m.Snapshots("agent")); after <= before {
 		t.Fatalf("snapshots %d -> %d: want a Step after the tool call (REV-1)", before, after)
@@ -363,7 +371,7 @@ func TestIntegrationOpenClawGuest(t *testing.T) {
 	if u := mtr.Usage("agent"); u.Calls < 2 || int(u.Calls) != calls {
 		t.Fatalf("meter counted %+v, model saw %d calls (OP-8)", u, calls)
 	}
-	if st, err := eng.Get(mc.Lineage + "/oc-1"); err != nil || st.State != journal.Succeeded {
+	if st, err := eng.Get(mc.Lineage + "/private/oc-1"); err != nil || st.State != journal.Succeeded {
 		t.Fatalf("journal: %+v %v", st, err)
 	}
 }

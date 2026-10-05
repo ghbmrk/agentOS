@@ -27,7 +27,12 @@ var controlPath = map[string][]string{
 	"cgroup":    {},
 	"owner":     {"control", "journal", "modem"},
 	"modem":     {},
-	"daemon":    {"journal", "control", "admission", "sockets", "owner", "modem"},
+	// The approval policy (grants) runs inside the engine's checks, so it
+	// is on the control path too; adapters reach it only through its
+	// Verifier interface.
+	"grants": {"journal", "owner", "verb"},
+	"verb":   {},
+	"daemon": {"journal", "control", "admission", "sockets", "owner", "modem", "grants"},
 	// The composition root also opens the machine plane (below) and hands
 	// it to admission as a Preempter, and serves the guest plane (below)
 	// on each machine's socket.
@@ -63,11 +68,12 @@ var guestPlane = map[string]struct {
 	allowed []string
 	forbid  []string
 }{
-	"guest": {[]string{"journal", "meter"}, []string{"os/exec", "plugin", "unsafe", "C"}},
+	"guest": {[]string{"journal", "meter", "route"}, []string{"os/exec", "plugin", "unsafe", "C"}},
 	"meter": {nil, []string{"net", "os/exec", "plugin", "unsafe", "C"}},
-	// modelroute forwards to the vault process over its Unix socket; it
-	// imports no broker package, so never the vault or the proxy.
-	"modelroute": {nil, []string{"os/exec", "plugin", "unsafe", "C"}},
+	// modelroute forwards to the vault process over its Unix socket and
+	// reports usage to the meter; never the vault or the proxy.
+	"modelroute": {[]string{"meter"}, []string{"os/exec", "plugin", "unsafe", "C"}},
+	"route":      {nil, []string{"net", "os/exec", "plugin", "unsafe", "C"}},
 }
 
 var forbiddenStd = []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "syscall", "unsafe", "C"}

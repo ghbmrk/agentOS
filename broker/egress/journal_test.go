@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -54,12 +55,50 @@ func TestADP10DenialFloodsAreCoalesced(t *testing.T) {
 	}
 	j.Egress(Event{Machine: "m2", Status: 403, Reason: "no such adapter"})
 	j.Egress(Event{Machine: "m1", Status: 403, Reason: "body too large"})
-	if len(rec.notes) != 3 {
-		t.Fatalf("journaled %d notes, want 3", len(rec.notes))
+	// A guest-chosen key name in the reason does not open a new entry.
+	for i := 0; i < 100; i++ {
+		j.Egress(Event{Machine: "m1", Status: 403, Reason: fmt.Sprintf("body key %q needs a public machine", fmt.Sprint("k", i))})
+	}
+	if len(rec.notes) != 4 {
+		t.Fatalf("journaled %d notes, want 4", len(rec.notes))
 	}
 	now = now.Add(61 * time.Second)
 	j.Egress(Event{Machine: "m1", Status: 403, Reason: "no such adapter"})
-	if n := rec.notes[len(rec.notes)-1]; len(rec.notes) != 4 || n.Suppressed != 999 {
+	if n := rec.notes[len(rec.notes)-1]; len(rec.notes) != 5 || n.Suppressed != 999 {
 		t.Fatalf("after the window: %+v", rec.notes)
+	}
+}
+
+// TestADP10DenialReasonsQuoteGuestContent pins the convention coalescing
+// relies on: a body-rule denial reason carries request content only in a
+// quoted part, so its class (the part before any quote) never varies with
+// what the guest sends.
+func TestADP10DenialReasonsQuoteGuestContent(t *testing.T) {
+	const mark = "zq9mark"
+	bodies := []string{
+		`{"` + mark + `":1} x`,
+		`{"background":"` + mark + `"}`,
+		`{"web_search_options":{"` + mark + `":1}}`,
+		`{"tools":"` + mark + `"}`,
+		`{"tools":["` + mark + `"]}`,
+		`{"tools":[{"type":"` + mark + `"}]}`,
+		`{"messages":[{"content":[{"image_url":{"url":"https://` + mark + `.example/"}}]}]}`,
+		`["` + mark + `"]`,
+	}
+	for _, a := range []Adapter{OpenAI("k"), Anthropic("k")} {
+		for _, op := range a.Operations {
+			if op.Body == nil {
+				continue
+			}
+			for _, b := range bodies {
+				_, err := op.Body.apply([]byte(b), false)
+				if err == nil {
+					continue
+				}
+				if strings.Contains(reasonClass(err.Error()), mark) {
+					t.Errorf("%s %s: reason %q carries request content outside quotes", a.Name, op.Name, err)
+				}
+			}
+		}
 	}
 }

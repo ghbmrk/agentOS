@@ -215,8 +215,8 @@ func TestOP8WrapMetersByListenerIdentity(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstream++
 		b, _ := io.ReadAll(r.Body)
-		if string(b) != `{"messages":["hi"]}` {
-			t.Errorf("body changed on the way: %q", b)
+		if string(b) != `{"max_completion_tokens":32000,"messages":["hi"]}` {
+			t.Errorf("forwarded %q, want the guest's body with its output limit", b)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		io.WriteString(w, `{"choices":[{"message":{"content":"hello"}}],"usage":{"prompt_tokens":7,"completion_tokens":40}}`)
@@ -367,8 +367,15 @@ func TestOP8NoUsageIsEstimatedFromContent(t *testing.T) {
 // actual use afterwards.
 func TestOP8OutputIsReservedAtStart(t *testing.T) {
 	m, _, _ := open(t, Config{MachineCap: Limits{Calls: 100, Tokens: 10_000}, OverallCap: big, MaxReserve: 6000})
-	if m.reserve([]byte(`{"max_tokens":1e9}`)) != 6000 || m.reserve([]byte(`{"max_completion_tokens":300}`)) != 300 ||
-		m.reserve([]byte(`{}`)) != 6000 || m.reserve([]byte(`not json`)) != 6000 {
+	reserve := func(body string) int64 {
+		_, n, err := m.limit("/v1/chat/completions", []byte(body))
+		if err != nil {
+			return -1
+		}
+		return n
+	}
+	if reserve(`{"max_tokens":1e9}`) != 6000 || reserve(`{"max_completion_tokens":300}`) != 300 ||
+		reserve(`{}`) != 6000 || reserve(`not json`) != -1 {
 		t.Fatal("reservation sizing")
 	}
 	c1, err := m.Start("m1", 100, 6000)

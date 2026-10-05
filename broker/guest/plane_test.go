@@ -116,6 +116,7 @@ func newRig(t *testing.T, mod func(*Config)) *rig {
 		Route: func(account string) (string, bool) {
 			return "mail", account == "owner-mail"
 		},
+		Label: func(string) string { return "public" },
 		Model: func(machine string) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 				r.mu.Lock()
@@ -371,14 +372,26 @@ func TestOP5GuestCannotRequestBrokerState(t *testing.T) {
 	r := newRig(t, func(c *Config) {
 		c.Route = func(string) (string, bool) { return "mail", true } // every account routes
 	})
-	for _, a := range []map[string]any{
-		{"request_id": "b1", "account": "broker", "action": "meta.budget.lower"},
-		{"request_id": "b2", "account": "Broker", "action": "anything"},
-		{"request_id": "b3", "account": "owner-mail", "action": "META.grant.add"},
+	for i, a := range []map[string]string{
+		{"account": "broker", "action": "meta.budget.lower"},
+		{"account": "Broker", "action": "anything"},
+		{"account": "owner-mail", "action": "META.grant.add"},
+		// Look-alikes: names are strict lowercase ASCII, so none of these
+		// reaches routing or the journal as a different name.
+		{"account": " broker", "action": "send"},
+		{"account": "broker ", "action": "send"},
+		{"account": "bro\u200bker", "action": "send"},
+		{"account": "br\u043e\u043aer", "action": "send"},          // Cyrillic o, k
+		{"account": "owner-mail", "action": "meta\u2024grant.add"}, // one dot leader
+		{"account": "owner-mail", "action": "\u200bmeta.grant.add"},
+		{"account": "owner-mail", "action": "m\u0435ta.grant.add"}, // Cyrillic e
+		{"account": "owner-mail", "action": "meta.grant.add\n"},
+		{"account": "owner\uff0dmail", "action": "send"}, // fullwidth hyphen
 	} {
-		st, e := r.tool("m1", "effect_request", a)
-		if st.State != "refused" || e != "" {
-			t.Fatalf("%v: %+v %s", a, st, e)
+		args := map[string]any{"request_id": fmt.Sprint("b", i), "account": a["account"], "action": a["action"]}
+		st, e := r.tool("m1", "effect_request", args)
+		if st.State != "refused" && e == "" {
+			t.Fatalf("%q: %+v %s", args, st, e)
 		}
 	}
 	if n := len(r.eng.List()); n != 0 || r.ms.stepsOf("m1") != 0 {
@@ -656,5 +669,80 @@ func TestREV5PublicTaskKeepsTheLabel(t *testing.T) {
 	}
 	if err := (OwnerAgent{Plane: r.p, Machine: "absent"}).Deliver(context.Background(), "x", false); err == nil {
 		t.Fatal("delivered to a machine with no socket")
+	}
+}
+
+// REQ: REV-5, OP-1
+
+// TestIntentsRecordTheSubmittingMachineAndLabel: each intent records the
+// machine and its data label, failing closed to private when the label is
+// unknown, and a fork's repeat keeps the first submission's record.
+func TestIntentsRecordTheSubmittingMachineAndLabel(t *testing.T) {
+	r := newRig(t, func(c *Config) { c.Label = nil })
+	if st, e := r.tool("m1", "effect_request", send("r1")); st.State != "succeeded" {
+		t.Fatalf("%+v %s", st, e)
+	}
+	if s, _ := r.eng.Get("m1/private/r1"); s.Intent.Machine != "m1" || s.Intent.Label != "private" {
+		t.Fatalf("no label source: %q %q", s.Intent.Machine, s.Intent.Label)
+	}
+	pub := newRig(t, func(c *Config) {
+		c.Label = func(id string) string {
+			if id == "m1" {
+				return "public"
+			}
+			return "bogus"
+		}
+	})
+	pub.ms.lineage["f1"] = "m1"
+	pub.tool("m1", "effect_request", send("r1"))
+	pub.tool("f1", "effect_request", send("r2"))
+	if s, _ := pub.eng.Get("m1/r1"); s.Intent.Label != "public" {
+		t.Fatalf("public machine recorded %q", s.Intent.Label)
+	}
+	if s, _ := pub.eng.Get("m1/private/r2"); s.Intent.Machine != "f1" || s.Intent.Label != "private" {
+		t.Fatalf("unknown label recorded %q %q", s.Intent.Machine, s.Intent.Label)
+	}
+}
+
+// REQ: REV-5, OP-1, OP-5
+
+// TestLabelsPartitionRequests: a private fork cannot pass anything to its
+// public parent through request IDs, states, or reasons. Its own requests
+// live apart; a repeat of a request the lineage made while public reads
+// that intent without driving it; broker actions are refused unjournaled.
+func TestLabelsPartitionRequests(t *testing.T) {
+	labels := map[string]string{"m1": "public", "f1": "private"}
+	r := newRig(t, func(c *Config) { c.Label = func(id string) string { return labels[id] } })
+	r.ms.lineage["f1"] = "m1"
+
+	st, _ := r.tool("f1", "effect_request", map[string]any{"request_id": "x1", "account": "broker", "action": "meta.canary-7f3a"})
+	if st.State != "refused" || strings.Contains(st.Reason, "canary") {
+		t.Fatalf("broker action: %+v", st)
+	}
+	if len(r.eng.List()) != 0 {
+		t.Fatal("a refused broker action was journaled")
+	}
+
+	// The private fork's own request is invisible to the public parent.
+	if st, _ := r.tool("f1", "effect_request", send("p1")); st.State != "succeeded" {
+		t.Fatalf("fork request: %+v", st)
+	}
+	if _, e := r.tool("m1", "effect_status", map[string]any{"request_id": "p1"}); e == "" {
+		t.Fatal("the public parent read the private fork's request")
+	}
+	if st, _ := r.tool("m1", "effect_request", send("p1")); st.State != "succeeded" || r.ex.runs["m1/p1"] != 1 {
+		t.Fatalf("the parent's p1 is its own: %+v %v", st, r.ex.runs)
+	}
+
+	// A repeat of a public-era request reads it and runs nothing again.
+	if st, e := r.tool("f1", "effect_status", map[string]any{"request_id": "p1"}); e != "" || st.State != "succeeded" {
+		t.Fatalf("fork status of its own p1: %+v %s", st, e)
+	}
+	r.tool("m1", "effect_request", send("q1"))
+	if st, _ := r.tool("f1", "effect_request", send("q1")); st.State != "succeeded" || r.ex.runs["m1/q1"] != 1 {
+		t.Fatalf("fork repeat of a public request: %+v %v", st, r.ex.runs)
+	}
+	if s, _ := r.eng.Get("m1/q1"); s.Intent.Label != "public" {
+		t.Fatalf("label %q", s.Intent.Label)
 	}
 }

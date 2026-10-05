@@ -11,7 +11,7 @@
 // response header, which is removed here and handed to the broker's
 // journal (egress E6) under the machine this side forwarded for. A served
 // call's provider-reported usage comes back in a response trailer, which
-// is removed here and handed to the OP-8 meter (UsageReporter).
+// is removed here and reported to the OP-8 meter (meter.Report).
 package modelroute
 
 import (
@@ -23,6 +23,8 @@ import (
 	"net/http/httputil"
 	"strings"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/meter"
 )
 
 // Headers between the broker and the vault process. Every header with the
@@ -47,26 +49,22 @@ type Denial struct {
 	Reason    string `json:"reason,omitempty"`
 }
 
-// Usage is the HeaderUsage trailer: the usage object the provider reported
-// for a served call, in that provider's own shape (OpenAI or Anthropic),
-// and whether the provider's answer completed. It carries no content.
+// Usage is the HeaderUsage trailer: a served call's usage as the router
+// measured it (route.Usage) and the provider that served it, whose cache
+// weights the meter applies. It carries no content.
 type Usage struct {
-	Usage    json.RawMessage `json:"usage"`
-	Complete bool            `json:"complete"`
-}
-
-// UsageReporter is implemented by a ResponseWriter in front of the model
-// route that charges usage: the OP-8 meter's. The forwarder calls it at
-// most once per call, when the response body has ended with a usage
-// trailer.
-type UsageReporter interface {
-	ReportUsage(usage []byte, complete bool)
+	Provider    string `json:"provider"`
+	Input       int64  `json:"input"`
+	Output      int64  `json:"output"`
+	CacheRead   int64  `json:"cache_read"`
+	CacheWrite  int64  `json:"cache_write"`
+	Reported    bool   `json:"reported"`
+	Complete    bool   `json:"complete"`
+	OutputChars int64  `json:"output_chars"`
 }
 
 // maxUsage bounds the usage trailer.
 const maxUsage = 4 << 10
-
-type reporterKey struct{}
 
 // Config configures Forward.
 type Config struct {
@@ -118,8 +116,7 @@ func Forward(cfg Config) func(machine string) http.Handler {
 				dropOurs(resp.Trailer)
 				// Trailer values arrive with the end of the body; strip
 				// ours again once they have.
-				rep, _ := resp.Request.Context().Value(reporterKey{}).(UsageReporter)
-				resp.Body = &scrubTrailers{ReadCloser: resp.Body, resp: resp, report: rep}
+				resp.Body = &scrubTrailers{ReadCloser: resp.Body, resp: resp, ctx: resp.Request.Context()}
 				if raw != "" {
 					var d Denial
 					if err := json.Unmarshal([]byte(raw), &d); err != nil {
@@ -136,42 +133,53 @@ func Forward(cfg Config) func(machine string) http.Handler {
 				http.Error(w, "model egress unavailable", http.StatusServiceUnavailable)
 			},
 		}
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if rep, ok := w.(UsageReporter); ok {
-				r = r.WithContext(context.WithValue(r.Context(), reporterKey{}, rep))
-			}
-			rp.ServeHTTP(w, r)
-		})
+		return rp
 	}
 }
 
 // scrubTrailers drops our headers from the response trailers once the body
 // ends, before the reverse proxy copies the trailers to the guest. A body
-// that ended cleanly hands its usage trailer to the reporter first.
+// that ended cleanly reports its usage trailer to the meter first, on the
+// metered call's context (the request's).
 type scrubTrailers struct {
 	io.ReadCloser
-	resp   *http.Response
-	report UsageReporter
+	resp *http.Response
+	ctx  context.Context
+	done bool
 }
 
 func (s *scrubTrailers) Read(b []byte) (int, error) {
 	n, err := s.ReadCloser.Read(b)
 	if err != nil {
-		if raw := s.resp.Trailer.Get(HeaderUsage); err == io.EOF && s.report != nil && raw != "" && len(raw) <= maxUsage {
+		if raw := s.resp.Trailer.Get(HeaderUsage); err == io.EOF && !s.done && raw != "" && len(raw) <= maxUsage {
 			var u Usage
-			if json.Unmarshal([]byte(raw), &u) == nil && len(u.Usage) > 0 {
-				s.report.ReportUsage(u.Usage, u.Complete)
+			if json.Unmarshal([]byte(raw), &u) == nil && u.valid() {
+				meter.Report(s.ctx, meter.Usage{Provider: u.Provider, Input: u.Input, Output: u.Output, CacheRead: u.CacheRead,
+					CacheWrite: u.CacheWrite, Reported: u.Reported, Complete: u.Complete, OutputChars: u.OutputChars})
 			}
 		}
-		s.report = nil
+		s.done = true
 		dropOurs(s.resp.Trailer)
 	}
 	return n, err
 }
 
+// valid refuses negative or absurd counts; the meter would otherwise charge
+// them.
+func (u Usage) valid() bool {
+	for _, n := range []int64{u.Input, u.Output, u.CacheRead, u.CacheWrite, u.OutputChars} {
+		if n < 0 || n > 1e12 {
+			return false
+		}
+	}
+	return true
+}
+
+// dropOurs removes every Agentos- header, and the proxy's own denial mark
+// (egress.DeniedHeader, X-Agentos-Egress-Denied).
 func dropOurs(h http.Header) {
 	for k := range h {
-		if strings.HasPrefix(http.CanonicalHeaderKey(k), headerPrefix) {
+		if k := http.CanonicalHeaderKey(k); strings.HasPrefix(k, headerPrefix) || strings.HasPrefix(k, "X-"+headerPrefix) {
 			delete(h, k)
 		}
 	}
