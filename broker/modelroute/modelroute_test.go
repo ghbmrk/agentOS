@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -257,5 +258,33 @@ func TestEgressDeniedMarkIsScrubbed(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != 403 || resp.Header.Get("X-Agentos-Egress-Denied") != "" {
 		t.Fatalf("%d %v", resp.StatusCode, resp.Header)
+	}
+}
+
+// A body cut off before its end reports no usage, even with a trailer
+// declared: the meter keeps its own count of what the guest got.
+func TestTruncatedBodyReportsNoUsage(t *testing.T) {
+	fe := &fakeEgress{h: func(w http.ResponseWriter, r *http.Request) {
+		conn, buf, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			return
+		}
+		chunk := `data: {"choices":[{"delta":{"content":"hi"}}]}` + "\n\n"
+		buf.WriteString("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTrailer: Agentos-Usage\r\nTransfer-Encoding: chunked\r\n\r\n")
+		buf.WriteString(strconv.FormatInt(int64(len(chunk)), 16) + "\r\n" + chunk + "\r\n")
+		buf.Flush()
+		conn.Close() // no last chunk, so no trailer
+	}}
+	sock := serveUnix(t, fe)
+	fwd := Forward(Config{Socket: sock, Label: func(string) string { return "public" }, Denied: func(string, Denial) {}})
+	m, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "meter.json"), MachineCap: meter.Limits{Calls: 10, Tokens: 1 << 30}, OverallCap: meter.Limits{Calls: 10, Tokens: 1 << 30}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const body = `{"model":"default","max_tokens":100}`
+	w := httptest.NewRecorder()
+	m.Wrap("m1", fwd("m1")).ServeHTTP(w, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
+	if want := meter.Tokens(int64(len(body))) + meter.Tokens(2); m.Usage("m1").Tokens != want {
+		t.Fatalf("charged %d tokens, want the counted floor %d", m.Usage("m1").Tokens, want)
 	}
 }
