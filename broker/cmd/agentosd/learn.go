@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"path/filepath"
 	"strings"
@@ -367,9 +368,19 @@ func (l *learning) forgetTask(goal string) error {
 	// returned, so a forget is never reported done while data is at rest.
 	// The tombstone first: once it holds, nothing keeps the goal again,
 	// even if a deletion below fails.
-	ferr := l.forgotten.add(goal)
-	return errors.Join(ferr, l.forgetStores(goal))
+	// If the tombstone did not save, nothing else is deleted: the owner is
+	// told the task was not forgotten, and it stays listed for another
+	// FORGET, also after a restart (security R1 on #182). The goal stays
+	// tombstoned in memory until then, so nothing is learned from it.
+	if err := l.forgotten.add(goal); err != nil {
+		return fmt.Errorf("%w: %v", errNotTombstoned, err)
+	}
+	return l.forgetStores(goal)
 }
+
+// errNotTombstoned: a forget's tombstone did not save, so nothing of the
+// task was deleted.
+var errNotTombstoned = errors.New("learning: the forget was not saved")
 
 // forgetStores deletes one forgotten goal from every learning store, each
 // even when another's save failed. Each step is idempotent, and one that

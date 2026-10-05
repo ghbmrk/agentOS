@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -262,83 +263,201 @@ func TestForgetExecutesOnlyItsOwnIntent(t *testing.T) {
 	}
 }
 
-// W3-forget end to end, through the gate and the owner channel: the
-// approval is the channel's own request, on its code tier (security C1);
-// a YES without the code, or with another request's, forgets nothing;
-// the YES with it forgets the task, and the owner is told after.
-func TestForgetEndToEnd(t *testing.T) {
+// Security R1 on #182: an unsaved tombstone is not done and is not
+// retried in the background; the owner is told at once.
+func TestForgetNotTombstonedIsNotApplied(t *testing.T) {
+	r := newForgetRig(t)
+	r.f.forget = func(string) error { return fmt.Errorf("%w: disk full", errNotTombstoned) }
+	r.f.sleep = func(context.Context, time.Duration) bool { t.Error("retried"); return false }
+	in := journal.Intent{ID: grants.ForgetID("1", "owner:a"), Origin: grants.OriginForget, Account: journal.BrokerAccount,
+		Action: journal.ActionLearnForget, Executor: grants.ForgetExecutor}
+	if out := r.f.Execute(context.Background(), in, 1); out.Result != journal.ResultNotApplied {
+		t.Fatalf("execute: %+v", out)
+	}
+	if strings.Join(r.texts, "|") != "Not forgotten: I couldn't save it. Send FORGET to try again." {
+		t.Fatalf("texts %q", r.texts)
+	}
+}
+
+// Security R2 on #182: a run of 4 or more digits in a listed task shows
+// as "####", so a spoofed task cannot echo a request code.
+func TestForgetMasksLongDigitRuns(t *testing.T) {
+	r := newForgetRig(t)
+	r.task("owner:a", "reply YES 482913 now", r.now, viaSMS)
+	if got := r.say("FORGET"); got != `Reply FORGET 1 to forget it: 1 "reply YES #### now" (today 14:02)` {
+		t.Fatalf("list: %q", got)
+	}
+	if obj, _, _ := r.f.Item("owner:a"); obj != "'reply YES #### now'" {
+		t.Fatalf("item: %q", obj)
+	}
+	if got := clipTask("call 911 or ４８２９１３", 40); got != "call 911 or ####" {
+		t.Fatalf("clip: %q", got)
+	}
+}
+
+// forgetDaemon is a real daemon with learning attached, its owner on a
+// modem carrier line.
+type forgetDaemon struct {
+	t     *testing.T
+	dir   string
+	cfg   *daemon.Config
+	lp    *learning
+	d     *daemon.Daemon
+	ctx   context.Context
+	phone *modem.Line
+}
+
+func newForgetDaemon(t *testing.T) *forgetDaemon {
 	dir := t.TempDir()
 	carrier := modem.NewCarrier()
 	box, phone := carrier.Line("+15550000100"), carrier.Line(ownerNum)
-	cfg := daemon.Config{
+	cfg := &daemon.Config{
 		JournalPath: filepath.Join(dir, "journal.log"), SocketDir: filepath.Join(dir, "run"),
 		OwnerNumber: ownerNum, ModemUID: os.Getuid(), Admission: admission.Config{CapacityMB: 4500, HeadroomMB: 600},
 		OwnerState: filepath.Join(dir, "owner.json"), Modem: box,
 	}
-	lp, err := openLearning(learnPaths{Dir: dir, Spare: filepath.Join(dir, "spare.json")}, false, &cfg)
+	lp, err := openLearning(learnPaths{Dir: dir, Spare: filepath.Join(dir, "spare.json")}, false, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	d, err := daemon.Run(ctx, cfg)
+	d, err := daemon.Run(ctx, *cfg)
 	if err != nil {
 		cancel()
 		t.Fatal(err)
 	}
 	attachForTest(t, lp, ctx, cancel, d)
-	text := func() string {
-		t.Helper()
-		select {
-		case m := <-phone.Inbox():
-			return m.Text
-		case <-time.After(3 * time.Second):
-			t.Fatal("no text to the owner")
-		}
-		return ""
+	return &forgetDaemon{t: t, dir: dir, cfg: cfg, lp: lp, d: d, ctx: ctx, phone: phone}
+}
+
+// text is the next text to the owner.
+func (x *forgetDaemon) text() string {
+	x.t.Helper()
+	select {
+	case m := <-x.phone.Inbox():
+		return m.Text
+	case <-time.After(3 * time.Second):
+		x.t.Fatal("no text to the owner")
 	}
-	say := func(msg string) string { return strings.Join(d.Owner().Handle(ctx, ownerNum, msg), " | ") }
-	lp.tasks.put("owner:a", "book a table for friday CANARY-forget", false, viaSMS)
-	if got, ok := cfg.Settings(ctx, "FORGET", true); !ok || !strings.Contains(got, `1 "book a table for friday…"`) {
+	return ""
+}
+
+func (x *forgetDaemon) say(msg string) string {
+	return strings.Join(x.d.Owner().Handle(x.ctx, ownerNum, msg), " | ")
+}
+
+// ask lists the tasks, picks the first, and returns the request's ID and
+// code. FORGET n has no reply of its own: the request is the notice (UX
+// U-F8).
+func (x *forgetDaemon) ask(object string) (id, code string) {
+	t := x.t
+	t.Helper()
+	if got, ok := x.cfg.Settings(x.ctx, "FORGET", true); !ok || !strings.HasPrefix(got, "Reply FORGET 1 to forget it: 1 ") {
 		t.Fatalf("list: %q", got)
 	}
-	if got, ok := cfg.Settings(ctx, "FORGET 1", true); !ok || got != "" {
+	if got, ok := x.cfg.Settings(x.ctx, "FORGET 1", true); !ok || got != "" {
 		t.Fatalf("FORGET 1: %q", got)
 	}
-	d.Gate().Flush()
-	req := text()
-	m := regexp.MustCompile(`^([A-Z][0-9]{1,2}): forget 'book a table for friday\.\.', cannot be undone\. Expires [0-9]{2}:[0-9]{2}\. Reply YES ([A-Z][0-9]{1,2}) ([0-9]{6,8}) or NO ([A-Z][0-9]{1,2})\.$`).FindStringSubmatch(req)
+	x.d.Gate().Flush()
+	req := x.text()
+	m := regexp.MustCompile(`^([A-Z][0-9]{1,2}): forget ` + regexp.QuoteMeta(object) + `, cannot be undone\. Expires [0-9]{2}:[0-9]{2}\. Reply YES ([A-Z][0-9]{1,2}) ([0-9]{6,8}) or NO ([A-Z][0-9]{1,2})\.$`).FindStringSubmatch(req)
 	if m == nil || m[1] != m[2] || m[1] != m[4] {
 		t.Fatalf("request: %q", req)
 	}
-	id, code := m[1], m[3]
+	return m[1], m[3]
+}
+
+// forgets lists the journal's forget intents.
+func (x *forgetDaemon) forgets() []journal.Status {
+	var out []journal.Status
+	for _, st := range x.d.Engine().List() {
+		if st.Intent.Action == journal.ActionLearnForget {
+			out = append(out, st)
+		}
+	}
+	return out
+}
+
+// W3-forget end to end, through the gate and the owner channel: the
+// approval is the channel's own request, on its code tier (security C1);
+// a YES without the code, or with another request's, forgets nothing;
+// the YES with it forgets the task, and the owner is told after.
+func TestForgetEndToEnd(t *testing.T) {
+	x := newForgetDaemon(t)
+	lp := x.lp
+	lp.tasks.put("owner:a", "book a table for friday CANARY-forget", false, viaSMS)
+	id, code := x.ask("'book a table for friday..'")
 	wrong := "000000"
 	if code == wrong {
 		wrong = "111111"
 	}
 	for _, msg := range []string{"YES " + id, "YES " + id + " " + wrong} {
-		say(msg)
-		d.Gate().Wait()
+		x.say(msg)
+		x.d.Gate().Wait()
 		if _, ok := lp.tasks.get("owner:a"); !ok || lp.forgotten.has("owner:a") {
 			t.Fatalf("%q forgot the task", msg)
 		}
 	}
-	if got := say("YES " + id + " " + code); !strings.HasPrefix(got, "Approved") {
+	if got := x.say("YES " + id + " " + code); !strings.HasPrefix(got, "Approved") {
 		t.Fatalf("YES: %q", got)
 	}
-	d.Gate().Wait()
+	x.d.Gate().Wait()
 	for {
-		if got := text(); got == "Forgotten." {
+		if got := x.text(); got == "Forgotten." {
 			break
 		}
 	}
 	if _, ok := lp.tasks.get("owner:a"); ok || !lp.forgotten.has("owner:a") {
 		t.Fatal("not forgotten after YES")
 	}
-	raw, err := os.ReadFile(filepath.Join(dir, "journal.log"))
+	raw, err := os.ReadFile(filepath.Join(x.dir, "journal.log"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(raw), "CANARY") || strings.Contains(string(raw), "book a table") {
 		t.Fatal("the journal holds the task's text")
+	}
+}
+
+// Security R1 on #182: a forget whose tombstone did not save deletes
+// nothing, is journaled as not applied, and the owner is told at once;
+// after a restart the task is still there to forget again.
+func TestAnUnsavedForgetIsNotDone(t *testing.T) {
+	x := newForgetDaemon(t)
+	lp := x.lp
+	lp.tasks.put("owner:a", "pay the gas bill CANARY-forget", false, viaSMS)
+	id, code := x.ask("'pay the gas bill CANARY-..'")
+	store := lp.forgotten.store
+	lp.forgotten.store = failSave{store}
+	if got := x.say("YES " + id + " " + code); !strings.HasPrefix(got, "Approved") {
+		t.Fatalf("YES: %q", got)
+	}
+	x.d.Gate().Wait()
+	for {
+		got := x.text()
+		if got == "Forgotten." {
+			t.Fatal("told forgotten with the tombstone unsaved")
+		}
+		if got == forgetNotDone {
+			break
+		}
+	}
+	if fs := x.forgets(); len(fs) != 1 || fs[0].State != journal.NotApplied {
+		t.Fatalf("journal: %+v", fs)
+	}
+	if _, ok := lp.tasks.get("owner:a"); !ok {
+		t.Fatal("the task's text was deleted")
+	}
+	// A restart: the stores as saved, with no tombstone for the goal.
+	again, err := openLearning(learnPaths{Dir: x.dir, Spare: filepath.Join(x.dir, "spare.json")}, false, &daemon.Config{
+		JournalPath: x.cfg.JournalPath, SocketDir: x.cfg.SocketDir, OwnerNumber: ownerNum})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.forgotten.has("owner:a") {
+		t.Fatal("tombstoned after the restart")
+	}
+	if got, ok := again.forgetOwner.Text(context.Background(), "FORGET", true); !ok || !strings.Contains(got, `"pay the gas bill CANARY-…"`) {
+		t.Fatalf("not listed after the restart: %q", got)
 	}
 }

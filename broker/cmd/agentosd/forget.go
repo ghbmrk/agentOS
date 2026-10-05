@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -44,6 +46,7 @@ const (
 	forgetStale    = "Send FORGET to see your recent tasks."
 	forgetRefused  = "I couldn't ask to forget that task. Try again."
 	forgetNotSaved = "Not forgotten yet: I couldn't save it. I keep trying and will text you when it's done."
+	forgetNotDone  = "Not forgotten: I couldn't save it. Send FORGET to try again."
 )
 
 type ownerForget struct {
@@ -232,6 +235,9 @@ func (f *ownerForget) when(at time.Time) string {
 // clipTask keeps the first n characters of s on one line, marking a cut.
 func clipTask(s string, n int) string {
 	s = strings.Join(strings.Fields(s), " ")
+	// A run of 4 or more digits shows as "####", so a task cannot echo a
+	// request code in the box's voice (security R2 on #182).
+	s = longRun.ReplaceAllString(s, "####")
 	s = strings.Map(func(r rune) rune {
 		if r == '"' {
 			return '\''
@@ -244,6 +250,8 @@ func clipTask(s string, n int) string {
 	r := []rune(s)
 	return strings.TrimRight(string(r[:n]), " ") + "…"
 }
+
+var longRun = regexp.MustCompile(`\p{Nd}{4,}`)
 
 func things(n int) string {
 	if n == 1 {
@@ -262,10 +270,20 @@ func (f *ownerForget) Execute(ctx context.Context, in journal.Intent, _ int) jou
 		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "malformed forget"}
 	}
 	undone := f.learned(goal)
-	if err := f.forget(goal); err == nil {
+	err := f.forget(goal)
+	switch {
+	case err == nil:
 		f.inform(forgetDone(undone))
 		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "forgotten"}
+	case errors.Is(err, errNotTombstoned):
+		// Nothing was deleted and a restart would not finish it, so it
+		// is not done and the owner is told now (security R1 on #182).
+		log.Printf("forget: %v", err)
+		f.inform(forgetNotDone)
+		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "not saved"}
 	}
+	// The tombstone holds: the replay at start finishes it if this
+	// process does not.
 	go f.retry(context.WithoutCancel(ctx), goal, undone)
 	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "forgetting; retrying"}
 }
