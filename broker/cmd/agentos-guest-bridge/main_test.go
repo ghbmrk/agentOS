@@ -59,12 +59,13 @@ func TestBridgeRunsSkillThroughBroker(t *testing.T) {
 	defer srv.Close()
 
 	tree := t.TempDir()
-	sk := &skill.Skill{Version: skill.Version, Kind: skill.KindSkill, ID: "k0123456789ab", Runs: 3,
+	sk := &skill.Skill{Version: skill.Version, Kind: skill.KindSkill, Runs: 3,
 		Slots: []skill.Slot{{Name: "to", Type: skill.Email, Max: 64}},
 		Steps: []skill.Step{
 			{Account: "mail", Action: "draft.create", Params: map[string]skill.Node{"subject": {Lit: json.RawMessage(`"Weekly report"`)}, "to": {Slot: "to"}}},
 			{Account: "mail", Action: "message.send", Recipients: []skill.Node{{Slot: "to"}}},
 		}}
+	sk.ID = "k" + sk.Shape() // the bridge offers a file only under its own shape
 	os.MkdirAll(filepath.Join(tree, skill.SkillsNS), 0o755)
 	os.WriteFile(filepath.Join(tree, sk.Path()), sk.Encode(), 0o644)
 

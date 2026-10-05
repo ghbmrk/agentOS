@@ -1,12 +1,14 @@
 package loops
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/skill/format"
 )
 
 // Signal is what in the journal a hypothesis comes from (LOOP-4).
@@ -53,6 +56,9 @@ var supersedes = map[change.Class]string{
 
 // supersededBy reports whether path is procedures/p<shape>.json and the
 // candidate writes exactly one file, that shape's skills/k<shape>.json.
+// inClass has already checked that every skill or procedure file a
+// candidate writes is for the task its name says (format.DecodeFile), so
+// the name pairs the skill with its own shape's procedure (P3-6e).
 func supersededBy(path string, files map[string][]byte) bool {
 	shape, ok := strings.CutPrefix(path, "procedures/p")
 	if !ok || !strings.HasSuffix(shape, ".json") || len(shape) == len(".json") || len(files) != 1 {
@@ -360,10 +366,13 @@ func (l *Learn) done(ctx context.Context, key string, n int) {
 var ErrOutOfClass = errors.New("loops: candidate writes outside its hypothesis's namespace")
 
 func (l *Learn) propose(ctx context.Context, h Hypothesis, ev Evidence) (change.Report, error) {
-	cand, err := l.cfg.Builder.Build(ctx, Brief{Hypothesis: h, Dev: ev.Dev})
+	built, err := l.cfg.Builder.Build(ctx, Brief{Hypothesis: h, Dev: ev.Dev})
 	if err != nil {
 		return change.Report{}, err
 	}
+	// Checked and proposed bytes are the same: a builder keeps no handle
+	// on what is checked (L3 on #89).
+	cand := owned(built)
 	if err := inClass(h.Class, cand); err != nil {
 		return change.Report{}, err
 	}
@@ -373,13 +382,32 @@ func (l *Learn) propose(ctx context.Context, h Hypothesis, ev Evidence) (change.
 	return l.cfg.Pipeline.Propose(ctx, cand)
 }
 
+// owned copies a candidate's files and deletions.
+func owned(c change.Candidate) change.Candidate {
+	files := make(map[string][]byte, len(c.Files))
+	for p, b := range c.Files {
+		files[p] = bytes.Clone(b)
+	}
+	c.Files, c.Delete = files, slices.Clone(c.Delete)
+	return c
+}
+
 // inClass checks that a candidate writes only its class's namespace, and
-// deletes only there or in the namespace the class supersedes.
+// deletes only there or in the namespace the class supersedes. Every file
+// it writes with a skill or procedure file's name (the only ones the skill
+// bridge offers or a skill supersedes) must decode canonically as one whose
+// name is its own: its ID, and the shape its steps give (security R1 on
+// #74, C1 on #89).
 func inClass(class change.Class, cand change.Candidate) error {
 	ns := classNS[class]
-	for p := range cand.Files {
+	for p, b := range cand.Files {
 		if first, _, _ := strings.Cut(p, "/"); first != ns {
 			return fmt.Errorf("%w: %s", ErrOutOfClass, class)
+		}
+		if format.IsFileName(p) {
+			if _, err := format.DecodeFile(p, b); err != nil {
+				return fmt.Errorf("%w: %s: %v", ErrOutOfClass, class, err)
+			}
 		}
 	}
 	for _, p := range cand.Delete {

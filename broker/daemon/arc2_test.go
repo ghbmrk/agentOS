@@ -101,7 +101,10 @@ var learningPlane = map[string]struct {
 	forbid  []string
 }{
 	"change": {[]string{"journal", "owner", "routerule", "update"}, forbiddenStd},
-	"loops":  {[]string{"change", "journal", "meter", "owner", "vm"}, forbiddenStd},
+	"loops":  {[]string{"change", "journal", "meter", "owner", "skill/format", "vm"}, forbiddenStd},
+	// The skill file format without the bridge (P3-6e): Loop 1 decodes
+	// the skills and procedures a builder writes.
+	"skill/format": {nil, forbiddenStd},
 }
 
 var forbiddenStd = []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "syscall", "unsafe", "C"}
