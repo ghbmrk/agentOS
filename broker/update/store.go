@@ -432,6 +432,12 @@ func (s *Store) check(src Source, o Options) (Result, error) {
 		return Result{}, err
 	}
 	defer unlock()
+	// Record an outside attestor first, so a check that fails later still
+	// ends the interim rule.
+	var proto Verified
+	if proto.interim, err = s.noteAttestors(o.Attestors, o.InterimAttestors, &proto); err != nil {
+		return Result{}, err
+	}
 	if o.Channel == "" {
 		o.Channel = ChannelStable
 	}
@@ -578,10 +584,7 @@ func (s *Store) check(src Source, o Options) (Result, error) {
 		return Result{}, err
 	}
 
-	proto := Verified{maintainers: seen, operated: attestors}
-	if proto.interim, err = s.noteAttestors(o.Attestors, o.InterimAttestors, &proto); err != nil {
-		return Result{}, err
-	}
+	proto.maintainers, proto.operated = seen, attestors
 
 	var versions []int64
 	for p := range targets.Signed.Targets {
