@@ -15,6 +15,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 	"time"
@@ -36,6 +37,8 @@ type Owner interface {
 	LocalWaiting() string
 	// LocalStatusLines is STATUS's text, as the owner's phone gets it.
 	LocalStatusLines() string
+	// UnlockPeriod is CH-14's N: how long a sign-in lasts.
+	UnlockPeriod() time.Duration
 }
 
 // Config configures a Server.
@@ -93,6 +96,7 @@ func (s *Server) Ops() map[string]sockets.Handler {
 		localapi.OpGridCell: s.gridCell,
 		localapi.OpSignIn:   s.signIn,
 		localapi.OpSignOut:  s.signOut,
+		localapi.OpSession:  s.session,
 		localapi.OpLines:    s.authed(s.lines),
 		localapi.OpResume:   s.resume,
 		localapi.OpRequests: s.authed(s.requests),
@@ -124,7 +128,7 @@ func decode(args json.RawMessage, v any) error {
 func (s *Server) status(context.Context, sockets.Peer, json.RawMessage) (any, error) {
 	st := s.cfg.Owner.LocalStatus()
 	out := localapi.Status{Stopped: st.Stopped, Unlocked: st.Unlocked, UnlockedUntil: st.UnlockedUntil,
-		LowLocked: st.LowLocked, Challenged: st.Challenged}
+		LowLocked: st.LowLocked, Challenged: st.Challenged, UnlockDays: int(s.cfg.Owner.UnlockPeriod() / (24 * time.Hour))}
 	if s.cfg.LineNote != nil {
 		out.LineNote = s.cfg.LineNote()
 	}
@@ -156,10 +160,11 @@ func (s *Server) signIn(_ context.Context, _ sockets.Peer, args json.RawMessage)
 	// only the day's spent bound does not, since nothing was tried.
 	s.endTry(err != nil && !errors.Is(err, owner.ErrTooMany))
 	switch {
-	case errors.Is(err, owner.ErrWrongCode):
-		return nil, sockets.Code(localapi.RefusedWrongCode)
-	case errors.Is(err, owner.ErrTooMany):
-		return nil, sockets.Code(localapi.RefusedTooMany)
+	case errors.Is(err, owner.ErrWrongCode), errors.Is(err, owner.ErrTooMany):
+		// Fixed refusal only: page_sign_in is untokened, so what is left
+		// of the day's tries is told only on a signed-in RESUME (D1).
+		r, _ := s.triesLeft(err)
+		return localapi.Session{Refusal: r}, nil
 	case err != nil:
 		return nil, errFailed
 	}
@@ -182,6 +187,19 @@ func (s *Server) signOut(_ context.Context, _ sockets.Peer, args json.RawMessage
 	delete(s.sessions, sha256.Sum256([]byte(in.Token)))
 	s.mu.Unlock()
 	return localapi.Text{}, nil
+}
+
+// session reports a live token's session; a dead one is unauthorized.
+func (s *Server) session(_ context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
+	var in localapi.Auth
+	if decode(args, &in) != nil {
+		return nil, errUnauthorized
+	}
+	ses, ok := s.live(in.Token)
+	if !ok {
+		return nil, errUnauthorized
+	}
+	return localapi.Session{Token: in.Token, Until: ses.until}, nil
 }
 
 // authed wraps an op that takes only a token.
@@ -218,10 +236,9 @@ func (s *Server) resume(_ context.Context, _ sockets.Peer, args json.RawMessage)
 		_, err := s.cfg.Owner.LocalSignIn(in.Code)
 		s.endTry(err != nil && !errors.Is(err, owner.ErrTooMany))
 		switch {
-		case errors.Is(err, owner.ErrWrongCode):
-			return localapi.Answered{Refusal: localapi.RefusedWrongCode}, nil
-		case errors.Is(err, owner.ErrTooMany):
-			return localapi.Answered{Refusal: localapi.RefusedTooMany}, nil
+		case errors.Is(err, owner.ErrWrongCode), errors.Is(err, owner.ErrTooMany):
+			r, t := s.triesLeft(err)
+			return localapi.Answered{Refusal: r, Text: t}, nil
 		case err != nil:
 			return nil, errFailed
 		}
@@ -284,6 +301,21 @@ func (s *Server) answer(_ context.Context, _ sockets.Peer, args json.RawMessage)
 	return nil, errFailed
 }
 
+// triesLeft is the refusal of a wrong or unchecked code and what the day's
+// local tries have left, told only in a signed-in response to the code
+// just tried (Security D1, UX-2wb-2): a count once 2 or fewer remain, and once none
+// remain, the bound's fixed reset.
+func (s *Server) triesLeft(err error) (refusal, text string) {
+	st := s.cfg.Owner.LocalStatus()
+	switch {
+	case errors.Is(err, owner.ErrTooMany), st.LocalLeft <= 0:
+		return localapi.RefusedTooMany, "No more codes can be tried today. Try again after " + st.LocalReset + ", or use your recovery key."
+	case st.LocalLeft <= 2:
+		return localapi.RefusedWrongCode, fmt.Sprintf("%d %s left today.", st.LocalLeft, map[bool]string{true: "try", false: "tries"}[st.LocalLeft == 1])
+	}
+	return localapi.RefusedWrongCode, ""
+}
+
 // mint records a session until until, signed in under locks, and returns
 // its token ("" if no randomness).
 func (s *Server) mint(until time.Time, locks uint64) string {
@@ -312,8 +344,15 @@ func (s *Server) mint(until time.Time, locks uint64) string {
 // valid says tok names a live session: minted here, before its time, and
 // with no session lock since. A dead one is dropped.
 func (s *Server) valid(tok string) bool {
+	_, ok := s.live(tok)
+	return ok
+}
+
+// live is tok's session, read in the same critical section that checks it
+// (Security S2 on step b).
+func (s *Server) live(tok string) (session, bool) {
 	if len(tok) != 2*localapi.TokenBytes {
-		return false
+		return session{}, false
 	}
 	locks := s.cfg.Owner.LocalStatus().Locks
 	k := sha256.Sum256([]byte(tok))
@@ -321,13 +360,13 @@ func (s *Server) valid(tok string) bool {
 	defer s.mu.Unlock()
 	ses, ok := s.sessions[k]
 	if !ok {
-		return false
+		return session{}, false
 	}
 	if !s.cfg.Now().Before(ses.until) || locks != ses.locks {
 		delete(s.sessions, k)
-		return false
+		return session{}, false
 	}
-	return true
+	return ses, true
 }
 
 // fresh says tok's session signed in within FreshFor.

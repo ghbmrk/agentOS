@@ -39,7 +39,7 @@ form { margin: .6em 0 1.2em; }
 <p>Actions: <b>{{if .Owner.Stopped}}stopped{{else}}running{{end}}</b></p>
 {{if or .Owner.Challenged .Owner.LowLocked}}<p>Approvals by text are paused after wrong codes. Sign in here to turn them back on.</p>{{end}}
 {{if .Owner.Stopped}}
-<form method="post" action="/resume">{{if not .SignedIn}}<label>Code from your code generator<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required></label>{{end}}<button>RESUME</button></form>
+<form method="post" action="/resume">{{if or (not .SignedIn) .AskCode}}<label>Code from your code generator<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required></label>{{end}}<button>RESUME</button></form>
 {{else}}
 <form method="post" action="/stop"><button class="stop">STOP all actions</button></form>
 {{end}}
@@ -186,6 +186,10 @@ form { margin: .6em 0 1.2em; }
 <p><a href="/home">More</a> · <a href="/status">Status</a></p>
 {{template "foot"}}{{end}}
 
+{{define "notready"}}{{template "head" "30"}}
+<h1>AgentOS</h1>
+<p>This box isn't ready yet. This page reloads by itself. If it stays like this for more than a few minutes, turn the PC off and on again.</p>
+{{template "foot"}}{{end}}
 {{define "home"}}{{template "head" ""}}
 <h1>AgentOS</h1>
 {{with .Waiting}}<p class="ok"><a href="/approvals/">{{.}} waiting for you</a></p>{{end}}

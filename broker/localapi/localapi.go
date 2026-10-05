@@ -30,7 +30,8 @@ const (
 	OpGridCell = "page_grid_cell" // no token: the sign-in challenge
 	OpSignIn   = "page_sign_in"   // a code or grid cell: a token
 	OpSignOut  = "page_sign_out"
-	OpLines    = "page_lines" // STATUS's full lines
+	OpSession  = "page_session" // a token's session: is it live, until when
+	OpLines    = "page_lines"   // STATUS's full lines
 	OpResume   = "page_resume"
 	OpRequests = "page_requests"
 	OpAnswer   = "page_answer"
@@ -38,7 +39,7 @@ const (
 )
 
 // Ops lists every op, for the disjointness test.
-var Ops = []string{OpStatus, OpStop, OpGridCell, OpSignIn, OpSignOut, OpLines, OpResume, OpRequests, OpAnswer, OpWaiting}
+var Ops = []string{OpStatus, OpStop, OpGridCell, OpSignIn, OpSignOut, OpSession, OpLines, OpResume, OpRequests, OpAnswer, OpWaiting}
 
 // Fixed refusals, sent as sockets codes.
 const (
@@ -66,6 +67,8 @@ type Status struct {
 	UnlockedUntil time.Time `json:"unlocked_until"`
 	LowLocked     bool      `json:"low_locked"`
 	Challenged    bool      `json:"challenged"`
+	// UnlockDays is how long a sign-in lasts, in days (CH-14's N).
+	UnlockDays int `json:"unlock_days"`
 	// LineNote is the owner line's note, empty while the line is fine
 	// (Potency R2): fixed text, shown on the home page.
 	LineNote string `json:"line_note,omitempty"`
@@ -79,8 +82,12 @@ type SignIn struct {
 // Session is a sign-in's result: the token, valid until Until unless
 // revoked first (sign-out, a session lock).
 type Session struct {
-	Token string    `json:"token"`
+	Token string    `json:"token,omitempty"`
 	Until time.Time `json:"until"`
+	// Refusal, on a refused sign-in: RefusedWrongCode or RefusedTooMany,
+	// fixed only. The op is untokened, so what is left of the day's tries
+	// is told only on a signed-in page_resume (Security D1, UX-2wb-2).
+	Refusal string `json:"refusal,omitempty"`
 }
 
 // Auth carries a token.

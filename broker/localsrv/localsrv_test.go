@@ -15,7 +15,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
-// REQ: CH-7, CH-10, CH-18, ARC-2
+// REQ: CH-7, CH-10, CH-11, CH-18, ARC-2
 
 const good = "123456"
 
@@ -26,6 +26,7 @@ type fakeOwner struct {
 	stopped  bool
 	signIns  int
 	resumes  int
+	left     int
 	answers  []string
 	answerFn func(id, sum string, approve bool, code string) (string, error)
 }
@@ -33,7 +34,11 @@ type fakeOwner struct {
 func (f *fakeOwner) LocalStatus() owner.LocalStatus {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return owner.LocalStatus{Stopped: f.stopped, Locks: f.locks}
+	st := owner.LocalStatus{Stopped: f.stopped, Locks: f.locks, LocalLeft: f.left}
+	if f.left <= 0 {
+		st.LocalReset = "14:05"
+	}
+	return st
 }
 func (f *fakeOwner) LocalGridCell() string { return "B4" }
 func (f *fakeOwner) LocalSignIn(code string) (time.Time, error) {
@@ -60,8 +65,9 @@ func (f *fakeOwner) LocalResume() (string, error) {
 func (f *fakeOwner) LocalRequests() []owner.LocalRequest {
 	return []owner.LocalRequest{{ID: "K7", Sum: "s1"}}
 }
-func (f *fakeOwner) LocalWaiting() string     { return "1 waiting for you on my Wi-Fi page." }
-func (f *fakeOwner) LocalStatusLines() string { return "Running. 0 may have happened." }
+func (f *fakeOwner) LocalWaiting() string        { return "1 waiting for you on my Wi-Fi page." }
+func (f *fakeOwner) LocalStatusLines() string    { return "Running. 0 may have happened." }
+func (f *fakeOwner) UnlockPeriod() time.Duration { return 7 * 24 * time.Hour }
 func (f *fakeOwner) LocalAnswer(id, sum string, approve bool, code string) (string, error) {
 	f.mu.Lock()
 	f.answers = append(f.answers, id)
@@ -89,7 +95,7 @@ type rig struct {
 
 func newRig(t *testing.T) *rig {
 	r := &rig{t: t, now: time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)}
-	r.own = &fakeOwner{now: &r.now}
+	r.own = &fakeOwner{now: &r.now, left: 24}
 	r.srv = New(Config{Owner: r.own, LineNote: func() string { return "I can't reach my phone modem." }, Now: func() time.Time { return r.now }})
 	r.ops = r.srv.Ops()
 	return r
@@ -121,6 +127,14 @@ func (r *rig) signIn() string {
 	return out.(localapi.Session).Token
 }
 
+// refusal is a sign-in's refusal, as a code or in the Session.
+func refusal(out any, err error) string {
+	if ses, ok := out.(localapi.Session); ok && err == nil {
+		return ses.Refusal
+	}
+	return code(err)
+}
+
 func code(err error) string {
 	var c sockets.Code
 	if errors.As(err, &c) {
@@ -136,6 +150,7 @@ func code(err error) string {
 func tokenOps(tok string) map[string]any {
 	return map[string]any{
 		localapi.OpSignOut:  localapi.Auth{Token: tok},
+		localapi.OpSession:  localapi.Auth{Token: tok},
 		localapi.OpLines:    localapi.Auth{Token: tok},
 		localapi.OpResume:   localapi.Resume{Token: tok},
 		localapi.OpRequests: localapi.Auth{Token: tok},
@@ -264,13 +279,13 @@ func TestSessionsAreBounded(t *testing.T) {
 
 func TestAWrongSignInIsRefusedWithAFixedCode(t *testing.T) {
 	r := newRig(t)
-	if _, err := r.call(localapi.OpSignIn, localapi.SignIn{Code: "000000"}); code(err) != localapi.RefusedWrongCode {
+	if out, err := r.call(localapi.OpSignIn, localapi.SignIn{Code: "000000"}); refusal(out, err) != localapi.RefusedWrongCode {
 		t.Fatalf("wrong sign-in: %v", err)
 	}
 	r.own.answerFn = nil
 	tooMany := &fakeTooMany{fakeOwner: r.own}
 	r.srv.cfg.Owner = tooMany
-	if _, err := r.call(localapi.OpSignIn, localapi.SignIn{Code: good}); code(err) != localapi.RefusedTooMany {
+	if out, err := r.call(localapi.OpSignIn, localapi.SignIn{Code: good}); refusal(out, err) != localapi.RefusedTooMany {
 		t.Fatalf("bound spent: %v", err)
 	}
 }
@@ -285,7 +300,7 @@ func TestWrongCodesOnTheSocketAreLimited(t *testing.T) {
 	r := newRig(t)
 	tok := r.signIn()
 	for i := 0; i < WrongPerMinute; i++ {
-		if _, err := r.call(localapi.OpSignIn, localapi.SignIn{Code: "000000"}); code(err) != localapi.RefusedWrongCode {
+		if out, err := r.call(localapi.OpSignIn, localapi.SignIn{Code: "000000"}); refusal(out, err) != localapi.RefusedWrongCode {
 			t.Fatalf("try %d: %v", i, err)
 		}
 	}
@@ -507,7 +522,7 @@ func TestEveryRefusedSignInCountsTowardTheLimit(t *testing.T) {
 	r.now = r.now.Add(time.Minute)
 	r.srv.cfg.Owner = &fakeTooMany{fakeOwner: r.own}
 	for i := 0; i < 2*WrongPerMinute; i++ {
-		if _, err := r.call(localapi.OpSignIn, localapi.SignIn{Code: good}); code(err) != localapi.RefusedTooMany {
+		if out, err := r.call(localapi.OpSignIn, localapi.SignIn{Code: good}); refusal(out, err) != localapi.RefusedTooMany {
 			t.Fatalf("spent bound %d: %v", i, err)
 		}
 	}
@@ -552,5 +567,97 @@ func TestAStaleSessionNeedsACodeToResume(t *testing.T) {
 	}
 	if _, err := r.call(localapi.OpResume, localapi.Resume{Token: tok, Code: strings.Repeat("1", localapi.MaxCode+1)}); code(err) != localapi.ErrBadArgs {
 		t.Fatalf("long code: %v", err)
+	}
+}
+
+// The page asks whether its cookie's token is live, and until when.
+func TestASessionReportsItsTime(t *testing.T) {
+	r := newRig(t)
+	tok := r.signIn()
+	out, err := r.call(localapi.OpSession, localapi.Auth{Token: tok})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ses := out.(localapi.Session); ses.Token != tok || !ses.Until.Equal(r.now.Add(time.Hour)) {
+		t.Fatalf("session %+v", ses)
+	}
+	out, _ = r.call(localapi.OpStatus, struct{}{})
+	if st := out.(localapi.Status); st.UnlockDays != 7 {
+		t.Fatalf("unlock days %d", st.UnlockDays)
+	}
+}
+
+// L3 SHOULD on #184: without randomness no token is minted; the sign-in
+// fails closed rather than handing out a guessable one.
+func TestNoRandomnessMintsNoToken(t *testing.T) {
+	r := newRig(t)
+	r.srv = New(Config{Owner: r.own, Now: func() time.Time { return r.now }, Rand: failingRand{}})
+	r.ops = r.srv.Ops()
+	if _, err := r.call(localapi.OpSignIn, localapi.SignIn{Code: good}); code(err) != localapi.ErrFailed {
+		t.Fatalf("sign-in without randomness: %v", err)
+	}
+	if len(r.srv.sessions) != 0 {
+		t.Fatal("a session was kept")
+	}
+}
+
+type failingRand struct{}
+
+func (failingRand) Read([]byte) (int, error) { return 0, errors.New("no entropy") }
+
+// UX-2wb-2: a wrong code on a signed-in RESUME tells the day's tries once
+// 2 or fewer remain; before sign-in no count is told (Security D1).
+func TestAWrongResumeCodeTellsTheTriesLeft(t *testing.T) {
+	r := newRig(t)
+	tok := r.signIn()
+	r.now = r.now.Add(localapi.FreshFor)
+	for _, c := range []struct {
+		left int
+		want string
+	}{{5, ""}, {2, "2 tries left today."}, {1, "1 try left today."}, {0, "No more codes can be tried today. Try again after 14:05, or use your recovery key."}} {
+		r.own.mu.Lock()
+		r.own.left = c.left
+		r.own.mu.Unlock()
+		out, err := r.call(localapi.OpResume, localapi.Resume{Token: tok, Code: "000000"})
+		want := localapi.RefusedWrongCode
+		if c.left == 0 {
+			want = localapi.RefusedTooMany
+		}
+		if a := out.(localapi.Answered); err != nil || a.Refusal != want || a.Text != c.want {
+			t.Fatalf("left %d: %+v %v", c.left, out, err)
+		}
+		r.now = r.now.Add(time.Minute) // past the socket's limit
+	}
+	if out, err := r.call(localapi.OpSignIn, localapi.SignIn{Code: "000000"}); refusal(out, err) != localapi.RefusedTooMany {
+		t.Fatalf("sign-in once none are left: %v", err)
+	}
+}
+
+// Security D1: page_sign_in is untokened, so a wrong code there gets only
+// its fixed refusal, and status before sign-in never tells the tries.
+func TestAWrongSignInTellsNoTriesLeft(t *testing.T) {
+	r := newRig(t)
+	for _, c := range []struct {
+		left    int
+		refusal string
+		text    string
+	}{
+		{5, localapi.RefusedWrongCode, ""},
+		{2, localapi.RefusedWrongCode, ""},
+		{0, localapi.RefusedTooMany, ""},
+	} {
+		r.own.mu.Lock()
+		r.own.left = c.left
+		r.own.mu.Unlock()
+		out, err := r.call(localapi.OpSignIn, localapi.SignIn{Code: "000000"})
+		if ses := out.(localapi.Session); err != nil || ses.Refusal != c.refusal || ses.Token != "" {
+			t.Fatalf("left %d: %+v %v", c.left, out, err)
+		}
+		st, _ := r.call(localapi.OpStatus, struct{}{})
+		b, _ := json.Marshal(st)
+		if strings.Contains(string(b), "tries") || strings.Contains(string(b), "14:05") || strings.Contains(string(b), "No more") {
+			t.Fatalf("status before sign-in tells the tries: %s", b)
+		}
+		r.now = r.now.Add(time.Minute)
 	}
 }

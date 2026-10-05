@@ -190,6 +190,12 @@ type LocalStatus struct {
 	// Locks counts session locks; a local device signed in under an
 	// earlier count is signed out.
 	Locks uint64
+	// LocalLeft is how many local tries the day's bound has left. Only a
+	// signed-in page may show it (Security D1 on P2-2w).
+	LocalLeft int
+	// LocalReset is when the spent bound resets, as the owner's texts show
+	// times ("14:05"); "" while tries are left.
+	LocalReset string
 }
 
 // LocalStatus reports the channel's state for the local UI.
@@ -204,7 +210,27 @@ func (c *Channel) LocalStatus() LocalStatus {
 		LowLocked:     c.codes.st.LowLocked,
 		Challenged:    c.codes.st.Challenged,
 		Locks:         c.codes.st.Locks,
+		LocalLeft:     c.localLeftLocked(now),
+		LocalReset:    c.localResetLocked(now),
 	}
+}
+
+// localResetLocked is the spent bound's fixed reset time, or "". Tries
+// past the bound are refused unchecked and never move it (takeLocalLocked).
+func (c *Channel) localResetLocked(now time.Time) string {
+	if c.localLeftLocked(now) > 0 {
+		return ""
+	}
+	return c.clock(c.codes.st.LocalStart.Add(WrongWindow))
+}
+
+// localLeftLocked is what the local bound has left at now.
+func (c *Channel) localLeftLocked(now time.Time) int {
+	st := c.codes.st
+	if st.LocalStart.IsZero() || !now.Before(st.LocalStart.Add(WrongWindow)) {
+		return LocalBound
+	}
+	return max(LocalBound-st.LocalUsed, 0)
 }
 
 // LocalGridCell returns the grid cell a local sign-in may use instead of a
