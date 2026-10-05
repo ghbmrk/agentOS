@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -35,11 +36,22 @@ var machineRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
 // Every call goes through the model router (P2-7), which sends it through
 // the egress proxy over the open vault (egress K9). While the vault is not
 // open every request gets 503.
-func modelHandler(c *custody, rt *route.Router) http.Handler {
+//
+// A replay machine's calls (modelroute.EvalPrefix) take the evaluation
+// route, ev; see evalRoute.
+func modelHandler(c *custody, rt *route.Router, ev *evalRoute) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		machine := r.Header.Get(modelroute.HeaderMachine)
 		if !machineRE.MatchString(machine) {
 			http.Error(w, "no machine named", http.StatusBadRequest)
+			return
+		}
+		if strings.HasPrefix(machine, modelroute.EvalPrefix) {
+			ev.serve(c, machine, w, r)
+			return
+		}
+		if r.Header.Get(modelroute.HeaderRule) != "" {
+			http.Error(w, "a routing rule is only for replay machines", http.StatusBadRequest)
 			return
 		}
 		label := "private"
@@ -58,6 +70,65 @@ func modelHandler(c *custody, rt *route.Router) http.Handler {
 			w.Header().Set(modelroute.HeaderUsage, u)
 		}
 	})
+}
+
+// evalRoute is the model access of replay machines (LOOP-5, replay K1).
+// Only the order among routes comes from the tree under evaluation, in the
+// broker's HeaderRule (absent: Active). Everything else is this process's
+// configuration: the calls get the grants and private-data allowance of
+// the agent machine From, go out through the proxy under From's adapter
+// grants, and are always private data. Nil: replay machines get no model
+// access, and the broker does not evaluate routing changes.
+type evalRoute struct {
+	From      string
+	Grants    []string
+	PrivateOK map[string]bool
+	Active    route.Rule
+}
+
+func (ev *evalRoute) serve(c *custody, machine string, w http.ResponseWriter, r *http.Request) {
+	if ev == nil {
+		http.Error(w, "evaluation has no model access", http.StatusServiceUnavailable)
+		return
+	}
+	rule, err := ev.rule(r.Header.Get(modelroute.HeaderRule))
+	var rt *route.Router
+	if err == nil {
+		rt, err = newRouter(rule, map[string][]string{machine: ev.Grants}, ev.PrivateOK)
+	}
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{
+			"message": "the routing rule under evaluation is not usable", "type": "invalid_request_error"}})
+		return
+	}
+	p := c.model()
+	if p == nil {
+		http.Error(w, "the vault is locked; model egress is unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	var ca callAudit
+	w.Header().Set("Trailer", modelroute.HeaderUsage)
+	rt.HandlerFor(machine, "private", p.HandlerFor(ev.From, "private", &ca), ca.decide(w)).ServeHTTP(w, r)
+	if u := ca.usage(); u != "" {
+		w.Header().Set(modelroute.HeaderUsage, u)
+	}
+}
+
+func (ev *evalRoute) rule(raw string) (route.Rule, error) {
+	if raw == "" {
+		return ev.Active, nil
+	}
+	b, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil || len(b) > modelroute.MaxRule {
+		return nil, errors.New("unreadable rule")
+	}
+	var rule route.Rule
+	if err := json.Unmarshal(b, &rule); err != nil {
+		return nil, err
+	}
+	return rule, nil
 }
 
 // callAudit carries one call's outcome back to the broker: a denial in a

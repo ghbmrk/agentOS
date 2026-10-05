@@ -26,6 +26,26 @@ import (
 // journaled.
 func openModel(t *testing.T, rt *route.Router, provider http.HandlerFunc) (http.Handler, *meter.Meter, *[]modelroute.Denial) {
 	t.Helper()
+	sock := serveModel(t, rt, nil, provider)
+	var denied []modelroute.Denial
+	fwd := modelroute.Forward(modelroute.Config{
+		Socket: sock,
+		Label:  func(string) string { return "private" },
+		Denied: func(_ string, d modelroute.Denial) { denied = append(denied, d) },
+	})
+	m, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "meter.json"),
+		MachineCap: meter.Limits{Calls: 100, Tokens: 1 << 30}, OverallCap: meter.Limits{Calls: 100, Tokens: 1 << 30}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m.Wrap("agent", fwd("agent")), m, &denied
+}
+
+// serveModel opens a fastRig's vault through the code and serves its model
+// socket with rt and ev, reaching provider for every provider host. The
+// machine "agent" is granted OpenAI.
+func serveModel(t *testing.T, rt *route.Router, ev *evalRoute, provider http.HandlerFunc) string {
+	t.Helper()
 	prov := httptest.NewTLSServer(provider)
 	t.Cleanup(prov.Close)
 	tr := prov.Client().Transport.(*http.Transport).Clone()
@@ -48,21 +68,10 @@ func openModel(t *testing.T, rt *route.Router, provider http.HandlerFunc) (http.
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := newServer(modelHandler(r.c, rt))
+	srv := newServer(modelHandler(r.c, rt, ev))
 	go srv.Serve(ln)
 	t.Cleanup(func() { srv.Close() })
-	var denied []modelroute.Denial
-	fwd := modelroute.Forward(modelroute.Config{
-		Socket: sock,
-		Label:  func(string) string { return "private" },
-		Denied: func(_ string, d modelroute.Denial) { denied = append(denied, d) },
-	})
-	m, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "meter.json"),
-		MachineCap: meter.Limits{Calls: 100, Tokens: 1 << 30}, OverallCap: meter.Limits{Calls: 100, Tokens: 1 << 30}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return m.Wrap("agent", fwd("agent")), m, &denied
+	return sock
 }
 
 func chat(h http.Handler) *http.Response {
@@ -130,7 +139,7 @@ func TestDefaultPrivateOKRefusesNonPublicLabels(t *testing.T) {
 		req.Header.Set(modelroute.HeaderMachine, "agent")
 		req.Header.Set(modelroute.HeaderLabel, label)
 		// Labels as the broker would send them on the socket.
-		modelHandler(r.c, rt).ServeHTTP(w, req)
+		modelHandler(r.c, rt, nil).ServeHTTP(w, req)
 		if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "no_route") {
 			t.Fatalf("label %q: %d %s", label, w.Code, w.Body)
 		}

@@ -99,12 +99,15 @@ type Config struct {
 	Spec vm.Spec
 	// Dir holds the replay machines' socket directories (0700).
 	Dir string
-	// Model returns model access for a run on tree t. Only t's routing
-	// rule (the order among routes the owner granted) comes from the tree:
-	// grants, labels, and which providers may see private data are broker
-	// configuration (ASSUMPTIONS R2, K1). Nil serves no model access, and
-	// then routing changes are not evaluated. Meter is required with it: model calls are never unmetered.
-	Model func(t change.Tree) http.Handler
+	// Model returns model access for replay machine id's run on tree t.
+	// Only t's routing rule (the order among routes the owner granted)
+	// comes from the tree: grants, labels, and which providers may see
+	// private data are broker configuration (ASSUMPTIONS R2, K1). Replay
+	// serves it only to that machine's guest and never calls it itself
+	// (R10). Nil serves no model access, and then routing changes are not
+	// evaluated. Meter is required with it: model calls are never
+	// unmetered.
+	Model func(id string, t change.Tree) http.Handler
 	Meter *meter.Meter
 	// Timeout bounds one run, from creating the machine to its reply.
 	// Default 10 minutes.
@@ -225,7 +228,7 @@ func (e *Evaluator) Run(ctx context.Context, t change.Tree, c change.Probe) ([]b
 	r := &run{id: Prefix + hex.EncodeToString(b[:]), fx: newRecorded(recs), out: make(chan []byte, 1), fail: make(chan error, 1)}
 	r.fx.onMiss = r.failed
 	if e.cfg.Model != nil {
-		r.model = e.cfg.Model(t)
+		r.model = e.cfg.Model(r.id, t)
 	}
 	e.mu.Lock()
 	e.runs[r.id] = r
@@ -332,6 +335,16 @@ func (e *Evaluator) Close(id string)                { e.plane.Close(id) }
 
 // Shutdown stops the replay plane.
 func (e *Evaluator) Shutdown() { e.plane.Shutdown() }
+
+// RuleModel builds Config.Model from a forwarder that carries a routing
+// rule to the model router for a replay machine (modelroute.Evaluation):
+// a run on tree t forwards t's routing rule and nothing else of the tree,
+// and a tree with none forwards no rule, so the active one applies.
+func RuleModel(fwd func(id string, rule []byte) http.Handler) func(id string, t change.Tree) http.Handler {
+	return func(id string, t change.Tree) http.Handler {
+		return fwd(id, t[change.RoutingPath])
+	}
+}
 
 // Services routes each machine to its guest services: replay machines (ID
 // starting with Prefix) to the evaluator, every other machine to Live. A

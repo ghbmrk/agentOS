@@ -16,6 +16,7 @@ package modelroute
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net"
@@ -34,8 +35,19 @@ const (
 	HeaderLabel   = "Agentos-Label"
 	HeaderDenial  = "Agentos-Egress-Denial"
 	HeaderUsage   = "Agentos-Usage"
-	headerPrefix  = "Agentos-"
+	// HeaderRule carries, for a replay machine only, the routing rule of
+	// the tree under evaluation (base64 of its JSON); see Evaluation.
+	HeaderRule   = "Agentos-Rule"
+	headerPrefix = "Agentos-"
 )
+
+// EvalPrefix starts every replay machine's ID (vm.EvalPrefix). Only such
+// machines get the evaluation route, and the vault process applies a rule
+// only for them.
+const EvalPrefix = "eval-"
+
+// MaxRule bounds a forwarded routing rule.
+const MaxRule = 16 << 10
 
 // Denial is one refused request, as the vault process reports it. It
 // carries no header or body content. Machine is ignored on receipt: the
@@ -83,6 +95,30 @@ type Config struct {
 // machine, forwarding to the vault process. If that process is down the
 // guest gets 503, as when the vault is locked.
 func Forward(cfg Config) func(machine string) http.Handler {
+	fwd := forward(cfg)
+	return func(machine string) http.Handler { return fwd(machine, false, nil) }
+}
+
+// Evaluation returns the replay plane's model access (LOOP-5): machine's
+// calls go to the vault process like a live machine's, always labelled
+// private (owner task data, REV-5), carrying rule, the routing rule of the
+// tree under evaluation, or none to use the active one. The vault process
+// applies it within the owner's grants, which are its own configuration
+// (replay K1). A machine outside EvalPrefix, or a rule over MaxRule, gets
+// 503 and nothing is forwarded.
+func Evaluation(cfg Config) func(machine string, rule []byte) http.Handler {
+	fwd := forward(cfg)
+	return func(machine string, rule []byte) http.Handler {
+		if !strings.HasPrefix(machine, EvalPrefix) || len(rule) > MaxRule {
+			return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, "no evaluation model route", http.StatusServiceUnavailable)
+			})
+		}
+		return fwd(machine, true, rule)
+	}
+}
+
+func forward(cfg Config) func(machine string, eval bool, rule []byte) http.Handler {
 	logf := cfg.Logf
 	if logf == nil {
 		logf = func(string, ...any) {}
@@ -96,7 +132,7 @@ func Forward(cfg Config) func(machine string) http.Handler {
 		IdleConnTimeout:    90 * time.Second,
 		Proxy:              nil,
 	}
-	return func(machine string) http.Handler {
+	return func(machine string, eval bool, rule []byte) http.Handler {
 		rp := &httputil.ReverseProxy{
 			Transport:     tr,
 			FlushInterval: -1,
@@ -104,11 +140,14 @@ func Forward(cfg Config) func(machine string) http.Handler {
 				pr.Out.URL.Scheme, pr.Out.URL.Host, pr.Out.Host = "http", "agentos-egress", "agentos-egress"
 				dropOurs(pr.Out.Header)
 				label := "private"
-				if cfg.Label(machine) == "public" {
+				if !eval && cfg.Label(machine) == "public" {
 					label = "public"
 				}
 				pr.Out.Header.Set(HeaderMachine, machine)
 				pr.Out.Header.Set(HeaderLabel, label)
+				if eval && rule != nil {
+					pr.Out.Header.Set(HeaderRule, base64.StdEncoding.EncodeToString(rule))
+				}
 			},
 			ModifyResponse: func(resp *http.Response) error {
 				raw := resp.Header.Get(HeaderDenial)

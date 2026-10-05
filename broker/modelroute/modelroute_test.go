@@ -1,6 +1,7 @@
 package modelroute
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net"
@@ -286,5 +287,55 @@ func TestTruncatedBodyReportsNoUsage(t *testing.T) {
 	m.Wrap("m1", fwd("m1")).ServeHTTP(w, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
 	if want := meter.Tokens(int64(len(body))) + meter.Tokens(2); m.Usage("m1").Tokens != want {
 		t.Fatalf("charged %d tokens, want the counted floor %d", m.Usage("m1").Tokens, want)
+	}
+}
+
+// REQ: LOOP-5, CHG-1
+
+// A replay machine's calls go to the vault process like a live machine's,
+// always labelled private, carrying the routing rule of the tree under
+// evaluation; the vault process applies it within the owner's grants. A
+// guest cannot send a rule of its own, and a machine outside the replay
+// prefix never gets the evaluation route.
+func TestLOOP5EvaluationCallsCarryTheTreesRule(t *testing.T) {
+	fe := &fakeEgress{h: func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, `{"ok":true}`) }}
+	sock := serveUnix(t, fe)
+	ev := Evaluation(Config{Socket: sock, Label: func(string) string { return "public" }, Denied: (&denials{}).add})
+
+	rule := []byte(`{"chat":[{"provider":"anthropic","model":"m"}]}`)
+	for _, c := range []struct {
+		rule []byte
+		want string
+	}{{rule, base64.StdEncoding.EncodeToString(rule)}, {nil, ""}} {
+		req := httptest.NewRequest("POST", "/openai/v1/chat/completions", strings.NewReader(`{}`))
+		req.Header.Set(HeaderRule, "eyJndWVzdCI6MX0=")
+		w := httptest.NewRecorder()
+		ev("eval-0a1b", c.rule).ServeHTTP(w, req)
+		if w.Code != 200 {
+			t.Fatalf("status %d", w.Code)
+		}
+		fe.mu.Lock()
+		got := fe.seen[len(fe.seen)-1]
+		fe.mu.Unlock()
+		if got.Header.Get(HeaderRule) != c.want || got.Header.Get(HeaderLabel) != "private" || got.Header.Get(HeaderMachine) != "eval-0a1b" {
+			t.Errorf("rule %q label %q machine %q", got.Header.Get(HeaderRule), got.Header.Get(HeaderLabel), got.Header.Get(HeaderMachine))
+		}
+	}
+
+	n := len(fe.seen)
+	w := httptest.NewRecorder()
+	ev("agent", rule).ServeHTTP(w, httptest.NewRequest("POST", "/openai/v1/chat/completions", strings.NewReader(`{}`)))
+	if w.Code != http.StatusServiceUnavailable || len(fe.seen) != n {
+		t.Fatalf("non-replay machine: status %d, forwarded %d", w.Code, len(fe.seen)-n)
+	}
+
+	// The live route never forwards a rule, whatever the guest sends.
+	req := httptest.NewRequest("POST", "/openai/v1/chat/completions", strings.NewReader(`{}`))
+	req.Header.Set(HeaderRule, base64.StdEncoding.EncodeToString(rule))
+	Forward(Config{Socket: sock, Label: func(string) string { return "private" }, Denied: (&denials{}).add})("agent").ServeHTTP(httptest.NewRecorder(), req)
+	fe.mu.Lock()
+	defer fe.mu.Unlock()
+	if r := fe.seen[len(fe.seen)-1]; r.Header.Get(HeaderRule) != "" {
+		t.Fatalf("live route forwarded a rule: %q", r.Header.Get(HeaderRule))
 	}
 }

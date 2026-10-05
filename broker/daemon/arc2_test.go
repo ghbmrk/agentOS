@@ -40,8 +40,11 @@ var controlPath = map[string][]string{
 	// (modelroute, P2-4) and journals the denials that come back, and
 	// gives the owner channel the vault process's verify operation
 	// (owner.Verifier, egress K7). It keeps the owner's agent machine
-	// running as foreground work (admission.Foreground, RES-1).
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner"},
+	// running as foreground work (admission.Foreground, RES-1). It hosts
+	// the change pipeline's replay evaluator (change, replay; arbitrator
+	// on W3a): replay calls no model itself, and replay machines' calls
+	// go to the vault process through modelroute like a live guest's.
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "replay"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies

@@ -301,7 +301,7 @@ func TestLOOP5ModelAccessIsTheTreesAndMetered(t *testing.T) {
 	}
 	r = newRig(t, recs{}, func(g *client, _ string) string { return modelCall(g) }, func(c *Config) {
 		c.Meter = mtr
-		c.Model = func(t change.Tree) http.Handler {
+		c.Model = func(_ string, t change.Tree) http.Handler {
 			rule := t["routing/rule.json"]
 			return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.Write(rule) })
 		}
@@ -317,7 +317,7 @@ func TestLOOP5ModelAccessIsTheTreesAndMetered(t *testing.T) {
 
 func TestLOOP5ModelNeedsAMeter(t *testing.T) {
 	_, err := New(Config{Machines: &machines{}, Recordings: recs{}, Active: active, Spec: vm.Spec{Image: "i"}, Dir: t.TempDir(),
-		Model: func(change.Tree) http.Handler { return http.NotFoundHandler() }})
+		Model: func(string, change.Tree) http.Handler { return http.NotFoundHandler() }})
 	if err == nil {
 		t.Fatal("unmetered model access accepted")
 	}
@@ -477,7 +477,7 @@ func TestCHG1RoutingWithoutModelAccessIsNotEvaluated(t *testing.T) {
 	}
 	r = newRig(t, recs{}, func(g *client, _ string) string { return modelCall(g) }, func(c *Config) {
 		c.Meter = mtr
-		c.Model = func(t change.Tree) http.Handler {
+		c.Model = func(_ string, t change.Tree) http.Handler {
 			rule := t["routing/rule.json"]
 			return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.Write(rule) })
 		}
@@ -491,5 +491,72 @@ func TestLOOP5NoTaskLookupRecordsNothing(t *testing.T) {
 	got, err := JournalRecordings{J: fakeJournal{st("g/1", "", "guest:g", "mail")}}.Effects("p")
 	if err != nil || len(got) != 0 {
 		t.Fatalf("nil Task: %v %v", got, err)
+	}
+}
+
+// Arbitrator on W3a: the verdict is a deterministic function of the replay
+// machines' outputs; replay itself never calls a model. Its Model handle is
+// built only for the run's own replay machine and is served only when that
+// machine's guest makes a call. A guest that makes none causes no model
+// call at all.
+func TestCHG1ReplayNeverCallsAModelItself(t *testing.T) {
+	mtr, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "meter.json"), MachineCap: meter.DefaultMachineCap, OverallCap: meter.DefaultOverallCap})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var built []string
+	var served int
+	r := newRig(t, recs{}, func(*client, string) string { return "no model call" }, func(c *Config) {
+		c.Meter = mtr
+		c.Model = func(id string, _ change.Tree) http.Handler {
+			built = append(built, id)
+			return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { served++ })
+		}
+	})
+	out, err := r.e.Run(bg, tree, change.Probe{ID: "p1", Input: []byte("go")})
+	if err != nil || string(out) != "no model call" {
+		t.Fatalf("run: %q %v", out, err)
+	}
+	if served != 0 || len(built) != 1 || built[0] != r.ms.created[0] || !strings.HasPrefix(built[0], Prefix) {
+		t.Fatalf("model handle built for %q, served %d times; machine %q", built, served, r.ms.created)
+	}
+}
+
+// The same, by source: replay's own code opens no outbound connection, so
+// a model can only be reached through the guest plane's model route.
+func TestCHG1ReplayOpensNoClient(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, bad := range []string{"http.Client", "http.Get", "http.Post", "DefaultClient", "DefaultTransport", "RoundTrip", "net.Dial", ".ServeHTTP("} {
+			if strings.Contains(string(b), bad) {
+				t.Errorf("%s uses %s", f, bad)
+			}
+		}
+	}
+}
+
+// Replay's model access forwards the routing rule of the tree under
+// evaluation, and only that file; a tree with none forwards no rule.
+func TestLOOP5RuleModelCarriesOnlyTheTreesRule(t *testing.T) {
+	type call struct{ id, rule string }
+	var got []call
+	model := RuleModel(func(id string, rule []byte) http.Handler {
+		got = append(got, call{id, string(rule)})
+		return http.NotFoundHandler()
+	})
+	model("eval-1", change.Tree{change.RoutingPath: []byte(`{"chat":[]}`), "skills/a.md": []byte("skill")})
+	model("eval-2", change.Tree{"skills/a.md": []byte("x")})
+	if len(got) != 2 || got[0] != (call{"eval-1", `{"chat":[]}`}) || got[1] != (call{"eval-2", ""}) {
+		t.Fatalf("forwarded %+v", got)
 	}
 }
