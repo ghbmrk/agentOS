@@ -6,7 +6,8 @@ Documentation=file:/usr/lib/agentos/drive-ids
 DefaultDependencies=no
 ConditionPathExists=/etc/initrd-release
 After=initrd-root-device.target systemd-udev-trigger.service
-Before=sysroot.mount
+# Before anything mounts or repartitions the drive in the initrd.
+Before=sysroot.mount systemd-repart.service
 # Two drives with this drive's IDs: power off rather than guess which one to trust.
 FailureAction=poweroff
 
@@ -15,4 +16,6 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/lib/agentos/drive-ids
 StandardOutput=journal+console
+# The refusal's reason goes to the journal only; the console gets one fixed line (security I2).
+StandardError=journal
 TimeoutStartSec=180

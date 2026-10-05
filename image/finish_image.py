@@ -9,12 +9,15 @@ entry and the /usr partitions are one release: the build verifies the split /usr
 its hash tree against that hash with veritysetup, and the manifest records both.
 Uses mtools on the raw image, so no loop devices or mounts are needed.
 Usage: finish_image.py OUTDIR VERSION"""
+import configparser
 import hashlib
+import hmac
 import json
 import pathlib
 import re
 import subprocess
 import sys
+import uuid
 
 ESP = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
 TRIES = 3
@@ -35,6 +38,32 @@ INITRD_REQUIRED = ("usr/lib/agentos/drive-ids", "usr/lib/systemd/system/agentos-
 INITRD_FORBIDDEN = r"(^|/)(lvm|pvscan|vgchange|lvchange|mdadm|mdmon)$|lvm[^/]*\.rules$|md-raid[^/]*\.rules$|mdadm[^/]*\.rules$"
 # /usr is chosen by usrhash= alone: an ID on the command line could pick another drive's partition.
 BY_ID = r"(?:^|\s)(root|mount\.usr|usr|systemd\.verity_usr_data|systemd\.verity_usr_hash|mount\.usrfstype)="
+
+
+HERE = pathlib.Path(__file__).resolve().parent
+DRIVE_IDS = HERE / "mkosi/mkosi.initrd/mkosi.extra/usr/lib/agentos/drive-ids"
+
+
+def seed_disk():
+    """The disk GUID systemd-repart gives every drive from mkosi.conf's Seed= (HMAC-SHA256 keyed by
+    the seed over "disk-uuid", first half as a v4 UUID). The initrd's drive-ids treats a drive
+    with this GUID as fresh and gives it IDs of its own (I10)."""
+    c = configparser.ConfigParser(strict=False, interpolation=None, delimiters=("=",))
+    c.read(HERE / "mkosi/mkosi.conf")
+    b = bytearray(hmac.new(uuid.UUID(c["Output"]["Seed"]).bytes, b"disk-uuid", hashlib.sha256).digest()[:16])
+    b[6], b[8] = (b[6] & 0x0F) | 0x40, (b[8] & 0x3F) | 0x80
+    return str(uuid.UUID(bytes=bytes(b)))
+
+
+def check_seed_disk(img_guid):
+    """The built drive's GUID, drive-ids' SEED_DISK and the seed's derivation must agree, or a fresh
+    drive would never get IDs of its own."""
+    want = seed_disk()
+    m = re.search(r"^SEED_DISK=([0-9a-f-]{36})$", DRIVE_IDS.read_text(), re.M)
+    script = m.group(1) if m else None
+    if not (img_guid.lower() == want == script):
+        raise ValueError("disk GUID %s, seed derivation %s, drive-ids SEED_DISK %s must be equal"
+                         % (img_guid, want, script))
 
 
 def usrhash(entry):
@@ -130,6 +159,7 @@ def verify_usr(data, tree, roothash):
 
 def esp_offset(img):
     t = json.loads(subprocess.check_output(["sfdisk", "-J", img]))["partitiontable"]
+    check_seed_disk(t["id"])
     p = next(p for p in t["partitions"] if p["type"].lower() == ESP)
     return p["start"] * t.get("sectorsize", 512)
 

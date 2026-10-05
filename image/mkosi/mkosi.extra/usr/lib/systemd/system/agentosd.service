@@ -4,7 +4,10 @@
 [Unit]
 Description=AgentOS broker
 ConditionPathExists=/etc/agentos/agentosd.env
-After=local-fs.target network.target
+After=local-fs.target network.target agentos-machines.service
+# Machine layers and snapshots live on their own XFS volume with project quotas (SR2-3i).
+Requires=agentos-machines.service
+ConditionPathIsMountPoint=/var/lib/agentos/machines
 
 [Service]
 EnvironmentFile=/etc/agentos/agentosd.env
@@ -13,7 +16,8 @@ EnvironmentFile=/etc/agentos/agentosd.env
 Slice=agentos.slice
 Delegate=yes
 ExecStart=/usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER} -modem-uid ${AGENTOS_MODEM_UID} \
-        -runsc /usr/lib/agentos/runsc -image openclaw=/usr/lib/agentos/images/openclaw
+        -runsc /usr/lib/agentos/runsc \
+        -machines /var/lib/agentos/machines -disk-quota on -image openclaw=/usr/lib/agentos/images/openclaw
 Restart=on-failure
 # No device but the NPU or GPU render nodes it may hand to a model (broker/accel); the modem is
 # the modem bridge's, gVisor runs on systrap. Host disks stay closed even to root (HW-8).

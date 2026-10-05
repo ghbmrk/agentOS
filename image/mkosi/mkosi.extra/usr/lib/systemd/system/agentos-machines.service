@@ -1,0 +1,16 @@
+# Mounts the agent machines' volume (SR2-3i) after first-boot repart has created it.
+[Unit]
+Description=AgentOS machines volume
+Documentation=file:/usr/lib/agentos/machines-mount
+After=systemd-repart.service local-fs.target systemd-udevd.service
+Before=agentosd.service agentos-health.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/agentos/machines-mount
+StandardOutput=journal+console
+DevicePolicy=closed
+
+[Install]
+WantedBy=multi-user.target

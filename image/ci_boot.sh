@@ -1,12 +1,12 @@
 #!/bin/sh
 # Boot COPIES of the image in QEMU the way a PC would: OVMF with Microsoft keys and Secure Boot on,
-# swtpm TPM 2.0, no network, the boot drive larger than the image (root grows into it). virtio
-# disks, not emulated USB: S7 saw QEMU's usb-storage corrupt reads. Three boots of one drive A,
-# beside a second fresh copy B of the same image (Security MUST on #41: every drive starts with
-# the same IDs):
-#   1. A and B both fresh: the initrd finds two drives with A's IDs and powers off; A unchanged.
-#   2. A alone: the initrd gives A its own IDs and restarts once; health passes under Secure Boot,
-#      the entry is blessed, root grew.
+# swtpm TPM 2.0, no network, the boot drive larger than the image. virtio disks, not emulated USB:
+# S7 saw QEMU's usb-storage corrupt reads. Three boots of one drive A, beside a second fresh copy B
+# of the same image (Security MUST on #41 and I1-I2 on the plan: every drive starts with the same IDs):
+#   1. A and B both fresh: the initrd prints one fixed line and powers off; neither drive written.
+#   2. A as an interrupted first run leaves it (ESP and root rewritten, disk GUID still the seed's),
+#      alone: the initrd finishes giving A its own IDs and restarts once; then health passes under
+#      Secure Boot, the entry is blessed, root grew, and the machines volume exists (SR2-3i).
 #   3. A beside fresh B again: A boots; every mounted partition is on A; A's disk and writable
 #      partition IDs are not B's; B is byte for byte unchanged. Every service unit's device policy
 #      is listed, and a root service with open device access must be in device-policy.txt (HW-8).
@@ -14,9 +14,7 @@
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 IMG=$1; W=$(realpath -m "${2:-/var/tmp/agentos-boot}"); mkdir -p "$W/tpm"
-cp --sparse=always "$IMG" "$W/a.raw"
-before=$(stat -c %s "$W/a.raw")
-truncate -s +2G "$W/a.raw"
+before=$(stat -c %s "$IMG")
 cp /usr/share/OVMF/OVMF_VARS_4M.ms.fd "$W/vars.fd"
 swtpm socket --tpm2 --tpmstate dir="$W/tpm" --ctrl type=unixio,path="$W/tpm/sock" --daemon
 ACCEL=tcg; [ -w /dev/kvm ] && ACCEL=kvm
@@ -48,42 +46,60 @@ boot() {
 	grep -a "agentos-\|Secure Boot\|verity\|Failed" "$log" | grep -v "agentos-unit:" | tail -40 || true
 }
 has() { grep -aqF "$2" "$W/$1.log"; }
+# Every boot: no unit ordering cycle (systemd would drop a job, perhaps the drive ID check).
+nocycle() { grep -aqi "ordering cycle" "$W/$1.log" && miss "ordering cycle in boot $1" || ok "no ordering cycle in boot $1"; }
 
-# 1. Two fresh copies: refused before anything changes.
-cp --sparse=always "$IMG" "$W/b.raw"
-a0=$(ids "$W/a.raw"); b0=$(sha256sum <"$W/b.raw")
+# 1. Two fresh copies: refused, one fixed line, power off, neither drive written.
+cp --sparse=always "$IMG" "$W/a.raw"; cp --sparse=always "$IMG" "$W/b.raw"
+a0=$(sha256sum <"$W/a.raw"); b0=$(sha256sum <"$W/b.raw")
 boot 1-two-fresh "$W/a.raw" "$W/b.raw" 900
-has 1-two-fresh "agentos-drive: FAIL 2 drives carry this drive's IDs" && ok "two drives with one ID refused" || miss "two drives with one ID refused"
+nocycle 1-two-fresh
+has 1-two-fresh "agentos-drive: FAIL another drive carries this drive's IDs; unplug it and start again" &&
+	ok "two drives with one ID refused" || miss "two drives with one ID refused"
 has 1-two-fresh "agentos-boot:" && miss "boot 1 went on to boot" || ok "boot 1 stopped before root"
-[ "$(ids "$W/a.raw")" = "$a0" ] && ok "A unchanged by the refused boot" || miss "A unchanged by the refused boot"
+[ "$(sha256sum <"$W/a.raw")" = "$a0" ] && ok "A unchanged by the refused boot" || miss "A unchanged by the refused boot"
+[ "$(sha256sum <"$W/b.raw")" = "$b0" ] && ok "B unchanged by the refused boot" || miss "B unchanged by the refused boot"
 
-# 2. A alone: its own IDs, one restart, then a healthy, blessed boot with root grown.
-boot 2-first "$W/a.raw"
+# 2. A as an interrupted first run leaves it (security I1): the ESP and root already have new
+#    IDs, the disk GUID is still the seed's. Booted alone it finishes the job, restarts once, and
+#    then boots healthy and blessed, with root grown and the machines volume made and mounted.
+seed=$(ids "$W/a.raw" | sed -n 's/^disk //p')
+esp=$(sfdisk -J "$W/a.raw" | jq -r '.partitiontable.partitions | to_entries[] | select(.value.type == "C12A7328-F81F-11D2-BA4B-00A0C93EC93B") | .key + 1')
+rootn=$(sfdisk -J "$W/a.raw" | jq -r '.partitiontable.partitions | length')
+sfdisk -q --part-uuid "$W/a.raw" "$esp" "$(cat /proc/sys/kernel/random/uuid)"
+sfdisk -q --part-uuid "$W/a.raw" "$rootn" "$(cat /proc/sys/kernel/random/uuid)"
+truncate -s +10G "$W/a.raw"
+boot 2-interrupted "$W/a.raw"
+nocycle 2-interrupted
 for want in "agentos-drive: fresh drive" "agentos-drive: done; restarting once" "agentos-drive: ok" \
-	"agentos-health: PASS secure_boot=on usr=verity" "agentos-boot: bless=good"; do
-	has 2-first "$want" && ok "$want" || miss "$want"
+	"agentos-machines: ok" "agentos-health: PASS secure_boot=on usr=verity" "agentos-boot: bless=good"; do
+	has 2-interrupted "$want" && ok "$want" || miss "$want"
 done
-# Root started at its 1G minimum inside an image of $before bytes; the drive gained 2G.
-root=$(grep -ao "agentos-boot: .*root_bytes=[0-9]*" "$W/2-first.log" | sed 's/.*root_bytes=//' | tail -1)
-if [ -n "$root" ] && [ "$root" -gt $((2 * 1024 * 1024 * 1024)) ]; then
-	ok "root grew to $root bytes"
-else
+[ "$(ids "$W/a.raw" | sed -n 's/^disk //p')" != "$seed" ] && ok "A's disk GUID is its own" || miss "A's disk GUID is its own"
+# Root started at its 1G minimum inside an image of $before bytes; the drive gained 10G, a fifth
+# of it for root and the rest for the machines volume (repart.d 50-root, 60-machines).
+size() { grep -ao "agentos-boot: .*$1=[0-9]*" "$W/2-interrupted.log" | sed -n "s/.*$1=\([0-9]*\).*/\1/p" | tail -1; }
+root=$(size root_bytes); machines=$(size machines_bytes)
+[ -n "$root" ] && [ "$root" -gt $((2 * 1024 * 1024 * 1024)) ] && ok "root grew to $root bytes" ||
 	miss "root grew past 2 GiB (root_bytes=${root:-none}, image $before bytes)"
-fi
+[ -n "$machines" ] && [ "$machines" -gt $((6 * 1024 * 1024 * 1024)) ] && ok "machines volume is $machines bytes" ||
+	miss "machines volume past 6 GiB (machines_bytes=${machines:-none})"
 
 # 3. A beside a fresh copy: A boots from its own partitions only, and B is untouched.
 cp --sparse=always "$IMG" "$W/b.raw"
 boot 3-beside-copy "$W/a.raw" "$W/b.raw"
-for want in "agentos-drive: ok" "agentos-health: PASS secure_boot=on usr=verity" "agentos-boot: bless=good"; do
+nocycle 3-beside-copy
+for want in "agentos-drive: ok" "agentos-machines: ok" "agentos-health: PASS secure_boot=on usr=verity" \
+	"agentos-boot: bless=good"; do
 	has 3-beside-copy "$want" && ok "$want" || miss "$want"
 done
 mounts=$(grep -a "agentos-mount:" "$W/3-beside-copy.log" | tr -d '\r' || true)
 echo "$mounts"
-[ "$(printf '%s\n' "$mounts" | grep -c "serial=AGENTOS-A")" -ge 2 ] && ok "root and /usr mounted from A" || miss "root and /usr mounted from A"
+[ "$(printf '%s\n' "$mounts" | grep -c "serial=AGENTOS-A")" -ge 3 ] && ok "root, /usr and machines mounted from A" ||
+	miss "root, /usr and machines mounted from A"
 printf '%s\n' "$mounts" | grep -v "serial=AGENTOS-A" | grep -q . && miss "a partition mounted from B" || ok "nothing mounted from B"
 A=$(ids "$W/a.raw"); B=$(ids "$W/b.raw")
 echo "A:"; echo "$A"; echo "B:"; echo "$B"
-printf '%s\n' "$A" | grep -qx "agentos-root [0-9A-Fa-f-]*" && ok "A's root relabelled" || miss "A's root relabelled"
 printf '%s\n' "$B" | awk '{ print $2 }' >"$W/b.ids"
 shared=$(printf '%s\n' "$A" | grep -v "^agentos_" | awk '{ print $2 }' | grep -ixF -f "$W/b.ids" || true)
 [ -z "$shared" ] && ok "A's disk and writable partition IDs differ from B's" || miss "A shares IDs with B: $shared"

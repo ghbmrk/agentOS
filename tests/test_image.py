@@ -242,6 +242,7 @@ class HealthTest(unittest.TestCase):
         stub(self.bin, "veritysetup", 'echo "/dev/mapper/usr is active and is in use."; echo "  type:        VERITY";'
                                       ' echo "  status:      verified"; echo "  root hash:   %s"' % H)
         self.findmnt("/dev/mapper/usr", "ro,relatime")
+        self.lsblk({"/dev/vda6": "/dev/vda", "/dev/vda7": "/dev/vda"})
         stub(self.lib, "agentosd", "exit 0")
         stub(self.lib, "runsc", 'echo "runsc version release-20260928.0"')
         (self.lib / "images/openclaw/opt/openclaw").mkdir(parents=True)
@@ -251,8 +252,16 @@ class HealthTest(unittest.TestCase):
         ev.mkdir(parents=True)
         (ev / "SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c").write_bytes(b"\x06\x00\x00\x00\x01")
 
-    def findmnt(self, source, options):
-        stub(self.bin, "findmnt", 'case "$2" in SOURCE) echo "%s" ;; *) echo "%s" ;; esac' % (source, options))
+    def findmnt(self, source, options, machines=("/dev/vda7", "xfs", "rw,nosuid,nodev,relatime,prjquota")):
+        msrc, mfs, mopts = machines
+        stub(self.bin, "findmnt", 'case "$2 $3" in "SOURCE /usr") echo "%s" ;; "OPTIONS /usr") echo "%s" ;;'
+             ' "SOURCE /") echo /dev/vda6 ;; "SOURCE /var/lib/agentos/machines") [ -n "%s" ] || exit 1; echo "%s" ;;'
+             ' "FSTYPE /var/lib/agentos/machines") echo "%s" ;; "OPTIONS /var/lib/agentos/machines") echo "%s" ;;'
+             ' *) exit 1 ;; esac' % (source, options, msrc, msrc, mfs, mopts))
+        self.usr = (source, options)
+
+    def lsblk(self, parents):
+        stub(self.bin, "lsblk", 'case "$3" in %s esac' % " ".join('%s) echo %s ;;' % kv for kv in parents.items()))
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -288,6 +297,14 @@ class HealthTest(unittest.TestCase):
             "broker broken": lambda: stub(self.lib, "agentosd", "exit 2"),
             "runsc broken": lambda: stub(self.lib, "runsc", "exit 1"),
             "guest image missing": lambda: (self.lib / "images/openclaw/opt/openclaw").rmdir(),
+            "machines not mounted": lambda: self.findmnt(*self.usr, machines=("", "", "")),
+            "machines not xfs": lambda: self.findmnt(*self.usr, machines=("/dev/vda7", "ext4", "rw,nosuid,nodev,prjquota")),
+            "machines without quotas": lambda: self.findmnt(*self.usr, machines=("/dev/vda7", "xfs", "rw,nosuid,nodev,noquota")),
+            "machines without nodev": lambda: self.findmnt(*self.usr, machines=("/dev/vda7", "xfs", "rw,nosuid,prjquota")),
+            "machines without nosuid": lambda: self.findmnt(*self.usr, machines=("/dev/vda7", "xfs", "rw,nodev,prjquota")),
+            "machines on no disk": lambda: self.lsblk({}),
+            "machines on another disk": lambda: self.lsblk({"/dev/vda6": "/dev/vda", "/dev/vdb1": "/dev/vdb"}) or
+                self.findmnt(*self.usr, machines=("/dev/vdb1", "xfs", "rw,nosuid,nodev,prjquota")),
         }
         for name, breakit in cases.items():
             with self.subTest(name):
@@ -379,8 +396,9 @@ RELEASE = "a1a1a1a1-0000-4000-8000-000000000001"
 
 
 class DriveIDsTest(unittest.TestCase):
-    """Security MUST on #41: every drive starts with the same IDs (Seed=), so the initrd refuses a
-    boot that another drive's IDs could steer, and gives a fresh drive IDs of its own."""
+    """Security MUST on #41 (and I1, I2 on the plan): every drive starts with the same IDs
+    (Seed=), so the initrd refuses a boot that another drive's IDs could steer, and gives a
+    fresh drive IDs of its own, on the boot drive only."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -389,10 +407,11 @@ class DriveIDsTest(unittest.TestCase):
         self.log.write_text("")
         self.loader(ESP_A)
         # vda: the boot drive (ESP, /usr release, empty slot, root); vdb: another disk.
+        self.disks = {"/dev/vda": "a0a0a0a0-0000-4000-8000-00000000000a", "/dev/vdb": "b0b0b0b0-0000-4000-8000-00000000000b"}
         self.parts = [("/dev/vda1", "/dev/vda", ESP_A, "esp"),
                       ("/dev/vda2", "/dev/vda", RELEASE, "agentos_7"),
                       ("/dev/vda4", "/dev/vda", "22222222-0000-4000-8000-000000000004", "_empty"),
-                      ("/dev/vda6", "/dev/vda", ROOT_A, "agentos-root"),
+                      ("/dev/vda6", "/dev/vda", ROOT_A, "root-x86-64"),
                       ("/dev/vdb1", "/dev/vdb", ESP_B, "esp"),
                       ("/dev/vdb2", "/dev/vdb", RELEASE, "agentos_7")]
         for n in range(1, 7):
@@ -411,8 +430,10 @@ class DriveIDsTest(unittest.TestCase):
         f.write_bytes(b"\x06\x00\x00\x00" + uuid.upper().encode("utf-16-le") + b"\x00\x00")
 
     def run_ids(self):
-        table = "\n".join("%s part %s %s %s" % p for p in self.parts)
-        stub(self.bin, "lsblk", "cat <<'T'\n/dev/vda disk  \n%s\nT" % table)
+        # lsblk -rnpo NAME,TYPE,PKNAME,PTUUID,PARTUUID,PARTLABEL: empty fields collapse in raw mode.
+        rows = ["%s disk %s" % (d, g.upper()) for d, g in self.disks.items()]
+        rows += ["%s part %s %s %s %s" % (n, d, self.disks[d], u.upper(), l) for n, d, u, l in self.parts]
+        stub(self.bin, "lsblk", "cat <<'T'\n%s\nT" % "\n".join(rows))
         stub(self.bin, "systemctl", 'case "$1" in show) echo "%s" ;; *) echo "systemctl $*" >> %s ;; esac'
              % (self.rootdev, self.log))
         env = dict(os.environ, PATH="%s:%s" % (self.bin, os.environ["PATH"]),
@@ -420,6 +441,27 @@ class DriveIDsTest(unittest.TestCase):
         r = subprocess.run(["bash", str(INITRD / "mkosi.extra/usr/lib/agentos/drive-ids")], env=env,
                            capture_output=True, text=True)
         return r, self.log.read_text()
+
+    def assertRefused(self, r, log):
+        self.assertEqual(r.returncode, 1)
+        # I2: one fixed console line, the reason only in the journal (stderr), nothing written.
+        self.assertEqual(r.stdout, "agentos-drive: FAIL another drive carries this drive's IDs; unplug it and start again\n")
+        self.assertTrue(r.stderr.strip())
+        self.assertEqual(log, "")
+
+    def test_seed_disk_guid_is_the_one_repart_derives(self):
+        # systemd-repart: HMAC-SHA256 keyed by the seed over "disk-uuid", first half as a v4 UUID.
+        # finish_image.py checks the built image's GUID against the same constant.
+        import hmac, hashlib, uuid
+        seed = uuid.UUID(ini(MK / "mkosi.conf")["Output"]["Seed"])
+        b = bytearray(hmac.new(seed.bytes, b"disk-uuid", hashlib.sha256).digest()[:16])
+        b[6], b[8] = (b[6] & 0x0F) | 0x40, (b[8] & 0x3F) | 0x80
+        script = (INITRD / "mkosi.extra/usr/lib/agentos/drive-ids").read_text()
+        self.assertIn("SEED_DISK=%s\n" % uuid.UUID(bytes=bytes(b)), script)
+        self.assertEqual(finish.seed_disk(), str(uuid.UUID(bytes=bytes(b))))
+        finish.check_seed_disk(finish.seed_disk().upper())
+        with self.assertRaises(ValueError):
+            finish.check_seed_disk("00000000-0000-4000-8000-000000000000")
 
     def test_unique_drive_boots_unchanged(self):
         r, log = self.run_ids()
@@ -429,16 +471,15 @@ class DriveIDsTest(unittest.TestCase):
 
     def test_two_drives_with_the_boot_esp_id_are_refused(self):
         self.parts[4] = ("/dev/vdb1", "/dev/vdb", ESP_A, "esp")
-        r, log = self.run_ids()
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("agentos-drive: FAIL 2 drives carry this drive's IDs", r.stdout)
-        self.assertEqual(log, "")
+        self.assertRefused(*self.run_ids())
 
     def test_another_drive_with_this_drives_root_id_is_refused(self):
-        self.parts.append(("/dev/vdb6", "/dev/vdb", ROOT_A, "agentos-root"))
-        r, _ = self.run_ids()
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("another drive carries partition ID %s" % ROOT_A, r.stdout)
+        self.parts.append(("/dev/vdb6", "/dev/vdb", ROOT_A, "root-x86-64"))
+        self.assertRefused(*self.run_ids())
+
+    def test_another_drive_with_this_disk_guid_is_refused(self):
+        self.disks["/dev/vdb"] = self.disks["/dev/vda"]
+        self.assertRefused(*self.run_ids())
 
     def test_the_same_release_on_another_drive_is_fine(self):
         # /usr is chosen by usrhash= and checked by dm-verity, not by ID: equal IDs are expected.
@@ -446,59 +487,49 @@ class DriveIDsTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout)
 
     def test_root_on_another_drive_is_refused(self):
-        self.parts.append(("/dev/vdb6", "/dev/vdb", "33333333-0000-4000-8000-000000000006", "agentos-root"))
+        self.parts.append(("/dev/vdb6", "/dev/vdb", "33333333-0000-4000-8000-000000000006", "root-x86-64"))
         self.rootdev = "/dev/vdb6"
-        r, _ = self.run_ids()
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("is not on the drive the loader booted from", r.stdout)
+        self.assertRefused(*self.run_ids())
 
     def test_no_loader_variable_or_no_matching_partition_is_refused(self):
         self.loader("99999999-0000-4000-8000-000000000009")
-        r, _ = self.run_ids()
-        self.assertEqual(r.returncode, 1)
+        self.assertRefused(*self.run_ids())
         (self.root / LOADER_VAR).unlink()
-        r, _ = self.run_ids()
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("agentos-drive: FAIL", r.stdout)
+        self.assertRefused(*self.run_ids())
 
     def test_fresh_drive_gets_its_own_ids_then_restarts(self):
-        self.parts[3] = ("/dev/vda6", "/dev/vda", ROOT_A, "agentos-root-new")
+        self.disks["/dev/vda"] = finish.seed_disk()
         r, log = self.run_ids()
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         lines = log.splitlines()
-        self.assertRegex(lines[0], r"^sfdisk .*--disk-id /dev/vda [0-9a-f-]{36}$")
+        self.assertEqual(lines[0], "sfdisk -q --no-reread --no-tell-kernel --relocate gpt-bak-std /dev/vda")
         changed = sorted(re.findall(r"--part-uuid /dev/vda (\d) ", log))
         self.assertEqual(changed, ["1", "4", "6"])  # not the release's own partition (2)
         self.assertIn("e2fsck -fp /dev/vda6", log)
         self.assertIn("tune2fs -U random /dev/vda6", log)
         self.assertRegex(log, r"fatlabel -i /dev/vda1 [0-9a-f]{8}\n")
-        # Relabelled last, so an interrupted run starts over; then one restart.
-        self.assertRegex(lines[-2], r"--part-label /dev/vda 6 agentos-root$")
+        # The disk GUID last: a run cut short still has the seed's GUID and starts over.
+        self.assertRegex(lines[-2], r"^sfdisk .*--disk-id /dev/vda [0-9a-f-]{36}$")
         self.assertEqual(lines[-1], "systemctl --no-block reboot")
-        for l in lines:
-            if l.startswith("sfdisk"):
-                self.assertIn("--no-reread", l)
+        self.assertNotIn("vdb", log)
 
     def test_fresh_drive_beside_a_copy_is_refused_before_any_change(self):
-        self.parts[3] = ("/dev/vda6", "/dev/vda", ROOT_A, "agentos-root-new")
+        self.disks["/dev/vda"] = self.disks["/dev/vdb"] = finish.seed_disk()
         self.parts[4] = ("/dev/vdb1", "/dev/vdb", ESP_A, "esp")
-        r, log = self.run_ids()
-        self.assertEqual(r.returncode, 1)
-        self.assertEqual(log, "")
+        self.assertRefused(*self.run_ids())
 
     def test_root_never_mounts_without_the_check(self):
         u = ini(INITRD / "mkosi.extra/usr/lib/systemd/system/agentos-drive-ids.service")
         self.assertEqual(u["Unit"]["FailureAction"], "poweroff")
         self.assertIn("sysroot.mount", u["Unit"]["Before"])
         self.assertIn("initrd-root-device.target", u["Unit"]["After"])
+        self.assertEqual(u["Service"]["StandardError"], "journal")
         d = ini(INITRD / "mkosi.extra/usr/lib/systemd/system/sysroot.mount.d/agentos-drive-ids.conf")
         self.assertEqual(d["Unit"]["Requires"], "agentos-drive-ids.service")
         self.assertEqual(d["Unit"]["After"], "agentos-drive-ids.service")
         self.assertTrue(os.access(INITRD / "mkosi.extra/usr/lib/agentos/drive-ids", os.X_OK))
 
-    def test_fresh_label_and_initrd_tools(self):
-        root = ini(MK / "mkosi.repart/30-root.conf")["Partition"]
-        self.assertEqual(root["Label"], "agentos-root-new")
+    def test_initrd_tools(self):
         c = ini(INITRD / "mkosi.conf")["Content"]
         for p in ("fdisk", "dosfstools"):
             self.assertIn(p, c["Packages"].split())
@@ -607,6 +638,78 @@ class HostUntouchedImageTest(unittest.TestCase):
         except (OSError, subprocess.CalledProcessError):
             self.skipTest("zstd not installed")
         self.assertEqual(finish.initrd_names(newc(["early/a"]) + z), ["early/a", "usr/bin/sfdisk"])
+
+
+MACHINES_TYPE = "dbd1b055-3c71-434c-a687-eeefd49cc21b"
+
+
+class MachinesVolumeTest(unittest.TestCase):
+    """SR2-3i (RES-4) with security M1-M3: the agent machines' own XFS volume with project quotas,
+    found by type on the boot drive only, mounted nodev,nosuid."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        t = pathlib.Path(self.tmp.name)
+        self.bin, self.mp, self.log = t / "bin", t / "machines", t / "log"
+        self.log.write_text("")
+        self.parts = [("/dev/vda6", "/dev/vda", "4f68bce3-e8cd-4db1-96e7-fbcaf984b709"),
+                      ("/dev/vda7", "/dev/vda", MACHINES_TYPE.upper()),
+                      ("/dev/vdb7", "/dev/vdb", MACHINES_TYPE)]
+        self.mounted = ""
+        stub(self.bin, "udevadm", "exit 0")
+        stub(self.bin, "systemd-mount", 'echo "systemd-mount $*" >> %s' % self.log)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_mount(self):
+        rows = "\n".join("%s part %s %s" % p for p in self.parts)
+        stub(self.bin, "lsblk", 'case "$1" in -dnpo) echo /dev/vda ;; *) cat <<\'T\'\n%s\nT\n;; esac' % rows)
+        stub(self.bin, "findmnt", 'case "$3" in /) echo /dev/vda6 ;; *) grep -q mount %s || exit 1; echo /dev/vda7 ;; esac'
+             % self.log)
+        env = dict(os.environ, PATH="%s:%s" % (self.bin, os.environ["PATH"]),
+                   AGENTOS_MACHINES_MP=str(self.mp), AGENTOS_MACHINES_HOLD="0")
+        r = subprocess.run(["sh", str(MK / "mkosi.extra/usr/lib/agentos/machines-mount")], env=env,
+                           capture_output=True, text=True)
+        return r, self.log.read_text()
+
+    def test_mounts_the_boot_drives_volume_with_quotas(self):
+        r, log = self.run_mount()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("-t xfs -o nodev,nosuid,prjquota /dev/vda7 %s" % self.mp, log)
+        self.assertNotIn("vdb", log)
+        self.assertEqual(stat.S_IMODE(self.mp.stat().st_mode), 0o700)
+
+    def test_another_drives_volume_is_never_used(self):
+        del self.parts[1]
+        r, log = self.run_mount()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("agentos-machines: FAIL no machines volume on /dev/vda", r.stdout)
+        self.assertEqual(log, "")
+
+    def test_two_volumes_on_the_drive_fail(self):
+        self.parts.append(("/dev/vda8", "/dev/vda", MACHINES_TYPE))
+        r, log = self.run_mount()
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(log, "")
+
+    def test_config(self):
+        p = ini(MK / "mkosi.extra/usr/lib/repart.d/60-machines.conf")["Partition"]
+        self.assertEqual(p["Type"], MACHINES_TYPE)
+        self.assertEqual(p["Format"], "xfs")
+        self.assertIn("TYPE=%s\n" % MACHINES_TYPE, (MK / "mkosi.extra/usr/lib/agentos/machines-mount").read_text())
+        root = ini(MK / "mkosi.extra/usr/lib/repart.d/50-root.conf")["Partition"]
+        self.assertGreater(int(p["Weight"]), int(root["Weight"]))
+        self.assertIn("xfsprogs", ini(MK / "mkosi.conf")["Content"]["Packages"].split())
+        u = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")
+        self.assertEqual(u["Unit"]["Requires"], "agentos-machines.service")
+        self.assertIn("agentos-machines.service", u["Unit"]["After"])
+        self.assertEqual(u["Unit"]["ConditionPathIsMountPoint"], "/var/lib/agentos/machines")
+        self.assertIn("-machines /var/lib/agentos/machines -disk-quota on", u["Service"]["ExecStart"])
+        h = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentos-health.service")
+        self.assertIn("agentos-machines.service", h["Unit"]["After"])
+        preset = (MK / "mkosi.extra/usr/lib/systemd/system-preset/50-agentos.preset").read_text()
+        self.assertIn("enable agentos-machines.service", preset)
 
 
 if __name__ == "__main__":

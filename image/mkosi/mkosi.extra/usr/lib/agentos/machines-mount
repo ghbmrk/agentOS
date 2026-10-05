@@ -1,0 +1,33 @@
+#!/bin/sh
+# Mount the agent machines' volume (SR2-3i, RES-4) at /var/lib/agentos/machines for agentosd.
+# The volume is the one partition of AgentOS's machines type on the disk root is on (security M1:
+# chosen by disk and type, never by label, file-system type or an ID another drive could carry).
+# Mounted nodev,nosuid with project quotas (security M2); the mount itself runs in its own mount
+# unit (systemd-mount), so this service needs no device access. agentos-health fails the boot
+# if the volume is missing, on another disk, or mounted without quotas.
+# AGENTOS_MACHINES_MP and AGENTOS_MACHINES_HOLD exist for tests/test_image.py.
+set -u
+TYPE=dbd1b055-3c71-434c-a687-eeefd49cc21b
+MP=${AGENTOS_MACHINES_MP:-/var/lib/agentos/machines}
+OPTS=nodev,nosuid,prjquota
+fail() { echo "agentos-machines: FAIL $*"; exit 1; }
+
+rootdev=$(findmnt -no SOURCE /)
+disk=$(lsblk -dnpo PKNAME "$rootdev")
+[ -n "$disk" ] || fail "no disk under root ($rootdev)"
+dev=
+for _ in $(seq 30); do
+	udevadm settle --timeout=10 >/dev/null 2>&1 || true
+	dev=$(lsblk -rnpo NAME,TYPE,PKNAME,PARTTYPE | awk -v d="$disk" -v t="$TYPE" '$2 == "part" && $3 == d && tolower($4) == t { print $1 }')
+	[ -n "$dev" ] && break
+	sleep "${AGENTOS_MACHINES_HOLD:-1}"
+done
+[ -n "$dev" ] || fail "no machines volume on $disk"
+[ "$(printf '%s\n' "$dev" | wc -l)" -eq 1 ] || fail "more than one machines volume on $disk"
+if ! findmnt -rno SOURCE "$MP" >/dev/null 2>&1; then
+	mkdir -p "$MP"
+	systemd-mount --no-ask-password --fsck=no -t xfs -o "$OPTS" "$dev" "$MP" || fail "could not mount $dev"
+fi
+[ "$(findmnt -rno SOURCE "$MP")" = "$dev" ] || fail "$MP is not mounted from $dev"
+chmod 0700 "$MP"
+echo "agentos-machines: ok $dev"

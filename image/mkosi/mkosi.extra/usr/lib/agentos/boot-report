@@ -4,7 +4,7 @@
 #     slaves): partition, its disk's serial, PARTUUID. CI checks they are all on the boot drive.
 #   agentos-unit: one per service unit file: who it runs as and its device policy. CI fails on a
 #     root service with open device access that image/device-policy.txt does not list (HW-8).
-#   agentos-boot: the bless state and root's size; printed last.
+#   agentos-boot: the bless state, root's and the machines volume's sizes; printed last.
 for src in $(findmnt -rnvo SOURCE | grep '^/dev/' | sort -u); do
 	lsblk -snrpo NAME,TYPE "$src" 2>/dev/null | awk '$2 == "part" { print $1 }'
 done | sort -u | while read -r p; do
@@ -19,4 +19,5 @@ while read -r u; do
 done
 st=$(/usr/lib/systemd/systemd-bless-boot status 2>&1)
 root=$(findmnt -bno SIZE /)
-echo "agentos-boot: bless=$st root_bytes=$root"
+machines=$(findmnt -bno SIZE /var/lib/agentos/machines)
+echo "agentos-boot: bless=$st root_bytes=$root machines_bytes=${machines:-none}"

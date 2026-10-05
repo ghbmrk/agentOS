@@ -3,3 +3,4 @@ enable agentos-boot-report.service
 enable agentosd.service
 enable agentosd.path
 enable chrony.service
+enable agentos-machines.service

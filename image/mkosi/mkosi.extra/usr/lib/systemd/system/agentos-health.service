@@ -2,6 +2,7 @@
 Description=AgentOS boot health check
 Documentation=file:/usr/lib/agentos/health
 Before=boot-complete.target
+After=agentos-machines.service
 
 [Service]
 Type=oneshot
