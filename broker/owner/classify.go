@@ -101,3 +101,17 @@ func Classify(f Facts, l Limits, now time.Time) Tier {
 	}
 	return Low
 }
+
+// Tier is the tier Request would give one item with facts f now: the
+// owner's limits applied to f, and high while texted codes are locked
+// (CH-18). Callers batching items use it to keep low-risk items out of a
+// high-tier batch, so one high-risk item does not raise the code needed
+// for the rest.
+func (c *Channel) Tier(f Facts) Tier {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.codes.st.LowLocked {
+		return High
+	}
+	return Classify(f, c.cfg.Limits, c.cfg.Now())
+}
