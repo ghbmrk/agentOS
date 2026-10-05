@@ -302,9 +302,12 @@ func TestClassifyImageLayout(t *testing.T) {
 	}
 
 	// A volatile root (tmpfs) on the same image: the drive is the disk
-	// under /usr.
+	// under /usr, with or without the loader variable.
 	h.mountinfo("0:30 / tmpfs rw", "253:0 /usr ext4 ro")
 	classes(t, s, map[string]Class{"sdd": ClassDrive, "sda": ClassHost})
+	h.noEfivar()
+	classes(t, s, map[string]Class{"sdd": ClassDrive, "sda": ClassHost})
+	h.efivar("11111111-0000-4000-8000-0000000000e5")
 
 	// An overlay root: the drive is the disk under its upper and lower
 	// directories.
