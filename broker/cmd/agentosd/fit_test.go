@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"os"
 	"path/filepath"
 	"strings"
@@ -111,30 +112,74 @@ func TestPE2NoRoomForReplayIsSaid(t *testing.T) {
 // this box's memory less the rest of the RES-2 floor budget (host,
 // inference, browser), at most the 4500 MB default, so the N95 (pool
 // about 3496 MB) is not over-committed. The figure and its source are
-// logged; an unreadable MemTotal keeps the default and says so.
+// logged; an unreadable MemTotal takes the N95 floor's 4096 and says so;
+// an explicit flag, 4500 included, wins.
 func TestPE6CapacityFollowsTheBoxMemory(t *testing.T) {
 	const n95 = "MemTotal:        7864320 kB\nMemAvailable:    7340032 kB\n"
 	for _, c := range []struct {
-		name     string
-		meminfo  string
-		explicit bool
-		flag     int64
-		want     int64
-		says     string
+		name    string
+		meminfo string
+		args    []string
+		want    int64
+		says    string
 	}{
-		{"n95", n95, false, defaultCapacityMB, 4096, "MemTotal 7680 MB"},
-		{"large box", "MemTotal: 16777216 kB\n", false, defaultCapacityMB, 4500, "at most 4500"},
-		{"unreadable", "", false, defaultCapacityMB, 4500, "MemTotal unreadable"},
-		{"explicit", n95, true, 5000, 5000, "-capacity-mb"},
+		{"n95", n95, nil, 4096, "MemTotal 7680 MB"},
+		{"large box", "MemTotal: 16777216 kB\n", nil, 4500, "at most 4500"},
+		{"unreadable", "", nil, 4096, "MemTotal unreadable"},
+		{"explicit", n95, []string{"-capacity-mb", "5000"}, 5000, "-capacity-mb"},
+		{"explicit default", n95, []string{"-capacity-mb", "4500"}, 4500, "-capacity-mb"},
 	} {
-		got, why := capacityFor(c.meminfo, c.explicit, c.flag)
-		if got != c.want || !strings.Contains(why, c.says) {
-			t.Errorf("%s: %d MB (%q), want %d MB naming %q", c.name, got, why, c.want, c.says)
+		fs := flag.NewFlagSet("agentosd", flag.ContinueOnError)
+		capMB := fs.Int64("capacity-mb", defaultCapacityMB, "")
+		fs.Int64("headroom-mb", defaultHeadroomMB, "")
+		if err := fs.Parse(c.args); err != nil {
+			t.Fatal(err)
+		}
+		p := planMemory(c.meminfo, flagSet(fs, "capacity-mb"), *capMB, defaultHeadroomMB, defaultAgentMemMB)
+		if p.CapacityMB != c.want || !strings.Contains(p.Why, c.says) || p.AgentOff != "" {
+			t.Errorf("%s: %+v, want %d MB naming %q, agent on", c.name, p, c.want, c.says)
 		}
 	}
 	// On the N95 the defaults still hold the agent and one replay machine.
-	n, _ := capacityFor(n95, false, defaultCapacityMB)
-	if err := replayFits(n, defaultHeadroomMB, defaultAgentMemMB, defaultReplayMemMB); err != nil {
+	p := planMemory(n95, false, defaultCapacityMB, defaultHeadroomMB, defaultAgentMemMB)
+	if err := replayFits(p.CapacityMB, defaultHeadroomMB, defaultAgentMemMB, defaultReplayMemMB); err != nil {
 		t.Fatalf("N95: %v", err)
+	}
+}
+
+// PE6, potency C1 on #118: a box too small for the agent machine keeps
+// agentosd up with the agent off and says why on STATUS's agent line. Two
+// bands: about 4 GB, where the computed capacity would be at or below
+// headroom and admission would not open (agentosd would fail at start),
+// and about 5 GB, where admission opens but would refuse every launch.
+func TestPE6ABoxTooSmallForTheAgentSaysSo(t *testing.T) {
+	for _, c := range []struct {
+		name, meminfo, says string
+	}{
+		{"4 GB", "MemTotal: 4096000 kB\n", "Agent: off, this box has 3.9 GB of memory and running the agent needs about 5.6 GB."},
+		{"5 GB", "MemTotal: 5120000 kB\n", "Agent: off, this box has 4.9 GB of memory and running the agent needs about 5.6 GB."},
+	} {
+		p := planMemory(c.meminfo, false, defaultCapacityMB, defaultHeadroomMB, defaultAgentMemMB)
+		if p.AgentOff != c.says {
+			t.Errorf("%s: agent line %q, want %q", c.name, p.AgentOff, c.says)
+		}
+		if _, err := admission.New(admission.Config{CapacityMB: p.CapacityMB, HeadroomMB: defaultHeadroomMB}, nil); err != nil {
+			t.Errorf("%s: admission does not open: %v", c.name, err)
+		}
+		s := &lateStatus{off: p.AgentOff}
+		if s.Status() != c.says {
+			t.Errorf("%s: STATUS agent line %q", c.name, s.Status())
+		}
+	}
+	// An explicit capacity too small for the agent says so without a
+	// MemTotal figure, and fits once the agent does.
+	if p := planMemory("MemTotal: 16777216 kB\n", true, 1500, defaultHeadroomMB, defaultAgentMemMB); p.AgentOff == "" || p.CapacityMB != 1500 {
+		t.Errorf("explicit 1500: %+v", p)
+	}
+	if p := planMemory("MemTotal: 5939200 kB\n", false, defaultCapacityMB, defaultHeadroomMB, defaultAgentMemMB); p.AgentOff != "" {
+		t.Errorf("5.7 GB box: agent off %q", p.AgentOff)
+	}
+	if (&lateStatus{}).Status() != agentNotSet {
+		t.Error("with no plan, STATUS lost its not-set-up line")
 	}
 }

@@ -99,11 +99,17 @@ func (l *lateServices) Close(id string) {
 
 // lateStatus is STATUS's agent line: the keeper's once it runs, and "not
 // set up" before that or when no keeper could start.
-type lateStatus struct{ k atomic.Pointer[keeper] }
+type lateStatus struct {
+	k   atomic.Pointer[keeper]
+	off string // set before the daemon runs: why the agent is off (PE6)
+}
 
 func (l *lateStatus) Status() string {
 	if k := l.k.Load(); k != nil {
 		return k.Status()
+	}
+	if l.off != "" {
+		return l.off
 	}
 	return agentNotSet
 }
@@ -157,12 +163,16 @@ func main() {
 	flag.StringVar(&qcfg.Path, "questions", qcfg.Path, "agents' questions to the owner, kept across restarts (P3-8)")
 	flag.StringVar(&qcfg.ClockPath, "clock-state", qcfg.ClockPath, "the box clock check's state (P2-9)")
 	flag.Parse()
-	capacitySet := false
-	flag.Visit(func(f *flag.Flag) { capacitySet = capacitySet || f.Name == "capacity-mb" })
 	meminfo, _ := os.ReadFile("/proc/meminfo")
-	var why string
-	cfg.Admission.CapacityMB, why = capacityFor(string(meminfo), capacitySet, cfg.Admission.CapacityMB)
-	log.Printf("admission capacity: %d MB (%s)", cfg.Admission.CapacityMB, why)
+	mem := planMemory(string(meminfo), flagSet(flag.CommandLine, "capacity-mb"), cfg.Admission.CapacityMB, cfg.Admission.HeadroomMB, agentMemMB)
+	cfg.Admission.CapacityMB = mem.CapacityMB
+	log.Printf("admission capacity: %d MB (%s)", mem.CapacityMB, mem.Why)
+	if mem.AgentOff != "" {
+		// The broker stays up, STOP and STATUS included; no agent machine
+		// is kept and no replay machine opened, and STATUS says why.
+		log.Printf("agent machine disabled: %s", mem.AgentOff)
+		agentImage = ""
+	}
 	if cfg.ModemUID < 0 || cfg.ModemUID == os.Getuid() {
 		log.Fatal("-modem-uid must name the modem bridge's own uid, distinct from the broker's")
 	}
@@ -197,7 +207,7 @@ func main() {
 	cfg.Agent = agent
 	// Until the keeper runs, STATUS says the agent is not set up; it says
 	// so for good if the machine plane or the agent's setup fails.
-	agentStatus := &lateStatus{}
+	agentStatus := &lateStatus{off: mem.AgentOff}
 	cfg.AgentStatus = agentStatus.Status
 	// The code-generator seed lives in the vault, which only the vault
 	// process holds (P2-4a); the channel asks it to check high-tier codes
@@ -318,25 +328,72 @@ const (
 // capacityFor is PE6: unless -capacity-mb was given, admission's capacity
 // is MemTotal less the floor budget outside the pool, at most
 // defaultCapacityMB, so a box smaller than the budget assumed (the N95 has
-// about 7.5 GB usable, not 8) is not over-committed. It returns the
-// capacity and why, for the log.
-func capacityFor(meminfo string, explicit bool, flagMB int64) (int64, string) {
-	if explicit {
-		return flagMB, "set by -capacity-mb"
-	}
+// about 7.5 GB usable, not 8) is not over-committed. An unreadable
+// MemTotal gives the N95's figure, the floor (HW-4). It returns the
+// capacity, MemTotal in MB (0 if unreadable), and why, for the log.
+func capacityFor(meminfo string, explicit bool, flagMB int64) (capacity, totalMB int64, why string) {
 	var kb int64
 	for _, line := range strings.Split(meminfo, "\n") {
 		if v, ok := strings.CutPrefix(line, "MemTotal:"); ok {
 			kb, _ = strconv.ParseInt(strings.TrimSuffix(strings.TrimSpace(v), " kB"), 10, 64)
 		}
 	}
-	if kb <= 0 {
-		return flagMB, "MemTotal unreadable; the default"
+	totalMB = max(kb>>10, 0)
+	switch {
+	case explicit:
+		return flagMB, totalMB, "set by -capacity-mb"
+	case totalMB == 0:
+		return n95CapacityMB, 0, fmt.Sprintf("MemTotal unreadable; the N95 floor's %d", n95CapacityMB)
 	}
-	total := kb >> 10
-	n := min(total-floorHostMB-floorInferenceMB-floorBrowserMB, defaultCapacityMB)
-	return n, fmt.Sprintf("MemTotal %d MB less host %d, inference %d and browser %d, at most %d",
-		total, floorHostMB, floorInferenceMB, floorBrowserMB, defaultCapacityMB)
+	n := min(totalMB-floorHostMB-floorInferenceMB-floorBrowserMB, defaultCapacityMB)
+	return n, totalMB, fmt.Sprintf("MemTotal %d MB less host %d, inference %d and browser %d, at most %d",
+		totalMB, floorHostMB, floorInferenceMB, floorBrowserMB, defaultCapacityMB)
+}
+
+// n95CapacityMB is capacityFor's figure on the N95 (about 7680 MB).
+const n95CapacityMB = 4096
+
+// memPlan is agentosd's start-time memory plan (PE6).
+type memPlan struct {
+	CapacityMB int64
+	Why        string
+	// AgentOff, when set, is STATUS's agent line: the agent machine does
+	// not fit in the pool, so it is not started (potency C1 on #118).
+	AgentOff string
+}
+
+// planMemory sets admission's capacity (capacityFor) and checks the agent
+// machine fits in the pool it leaves. If not, the agent is off and the
+// capacity is kept above headroom, so admission still opens and agentosd
+// stays up (STOP, STATUS) instead of failing at start or refusing every
+// launch without a word.
+func planMemory(meminfo string, explicit bool, flagMB, headroomMB, agentMB int64) memPlan {
+	c, total, why := capacityFor(meminfo, explicit, flagMB)
+	p := memPlan{CapacityMB: c, Why: why}
+	if c-headroomMB >= agentMB {
+		return p
+	}
+	need := agentMB + headroomMB
+	if !explicit {
+		need += floorHostMB + floorInferenceMB + floorBrowserMB
+	}
+	if total > 0 && !explicit {
+		p.AgentOff = fmt.Sprintf("Agent: off, this box has %s of memory and running the agent needs about %s.", gb(total), gb(need))
+	} else {
+		p.AgentOff = "Agent: off, the memory set aside for it is too small to run it."
+	}
+	p.CapacityMB = max(c, headroomMB+1)
+	return p
+}
+
+// gb renders MB as GB with one decimal.
+func gb(mb int64) string { return fmt.Sprintf("%.1f GB", float64(mb)/1024) }
+
+// flagSet reports whether flag name was given on fs's command line.
+func flagSet(fs *flag.FlagSet, name string) bool {
+	set := false
+	fs.Visit(func(f *flag.Flag) { set = set || f.Name == name })
+	return set
 }
 
 // replayFits is PE2: the agent machine and one replay machine must fit in
