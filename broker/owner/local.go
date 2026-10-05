@@ -361,6 +361,10 @@ func TOTP(seed []byte, t time.Time) string { return totpAt(seed, t.Unix()) }
 // UnlockPeriod is CH-14's N, for the local UI's remembered sign-in.
 func (c *Channel) UnlockPeriod() time.Duration { return c.cfg.UnlockFor }
 
+// LocalStatusLines is STATUS's text as the owner's phone gets it, with
+// the page-only requests' line, for a signed-in local page (Potency R3).
+func (c *Channel) LocalStatusLines() string { return c.ctrl.Status() }
+
 // LocalAnswer errors: the request is not open, or not as the page showed
 // it.
 var (

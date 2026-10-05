@@ -295,6 +295,9 @@ func since(ts []time.Time, cutoff time.Time) []time.Time {
 	return ts[i:]
 }
 
+// Status is STATUS's text, for the box's local page (P2-2w, Potency R3).
+func (h *Handler) Status() string { return h.status() }
+
 func (h *Handler) status() string {
 	var b strings.Builder
 	if h.Engine.Stopped() {

@@ -497,7 +497,7 @@ func TestLearningForgetsATask(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	lp.tasks.put("owner:f1", "pay the CANARY-forget invoice", false)
+	lp.tasks.put("owner:f1", "pay the CANARY-forget invoice", false, viaSMS)
 	lp.values.observe(journal.Intent{ID: "agent/1", GoalID: "owner:f1", Origin: "guest:agent", Params: map[string]any{"to": "ann@example.test"}})
 	lp.values.mu.Lock()
 	_, had := lp.values.st["owner:f1"]
@@ -618,7 +618,7 @@ func TestForgetReportsAFailedSave(t *testing.T) {
 	}
 	for _, broken := range []string{"tasks", "values"} {
 		goal := "owner:" + broken
-		lp.tasks.put(goal, "pay the CANARY-forget invoice", false)
+		lp.tasks.put(goal, "pay the CANARY-forget invoice", false, viaSMS)
 		lp.values.observe(journal.Intent{ID: "agent/1", GoalID: goal, Origin: "guest:agent", Params: map[string]any{"to": "ann@example.test"}})
 		tasks, values := lp.tasks.store, lp.values.store
 		if broken == "tasks" {
@@ -705,7 +705,7 @@ func TestRecallReachForgetsWhatLearningKept(t *testing.T) {
 		if _, err := eng.Submit(journal.Intent{ID: id, GoalID: "owner:" + id[6:], Origin: "guest:agent", Account: "mail", Action: "draft", Executor: "task"}); err != nil {
 			t.Fatal(err)
 		}
-		lp.tasks.put("owner:"+id[6:], "answer the hall mail", false)
+		lp.tasks.put("owner:"+id[6:], "answer the hall mail", false, viaSMS)
 		lp.values.observe(journal.Intent{ID: id, GoalID: "owner:" + id[6:], Origin: "guest:agent", Params: map[string]any{"body": "meet at the oak table " + id[6:]}})
 	}
 	if raw, err := os.ReadFile(filepath.Join(dir, "values.json")); err != nil || !bytes.Contains(raw, []byte("oak table r2")) {

@@ -171,6 +171,16 @@ type state struct {
 	// stage on its own: testedProject (D6 interim, the project's own test
 	// box) or testedIndependent; absent when the owner approves it.
 	TestedBy map[int64]string `json:"tested_by,omitempty"`
+	// Evidence is, per proposed version, how many listed independent
+	// attestors and maintainer-operated ones passed it when it was asked
+	// (OSS-9: evidence for the owner's text, never authority).
+	Evidence map[int64][2]int `json:"evidence,omitempty"`
+	// Source is the root digest of the fork the last check ran on, empty
+	// for the project's own chain; a change forgets the old chain's
+	// releases.
+	Source string `json:"source,omitempty"`
+	// SaidSource is the source the digest last announced (OSS-10).
+	SaidSource string `json:"said_source,omitempty"`
 }
 
 // Loop3 is the maintenance loop's scheduler source.
@@ -332,6 +342,10 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 	if failure == "" && ierr != nil {
 		failure, err = failState, ierr
 	}
+	src, ferr := l.cfg.Store.Following()
+	if failure == "" && ferr != nil {
+		failure, err = failState, ferr
+	}
 	var (
 		rel *update.Verified
 		m   update.Manifest
@@ -360,6 +374,14 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 		return loops.Result{Err: errors.Join(err, serr)}
 	}
 	l.st.LastOnline, l.st.Failure = now, ""
+	if src.RootSHA256 != l.st.Source {
+		// Another chain (OSS-10): its version numbers say nothing of the
+		// old chain's, so what was proposed or seen there is forgotten.
+		// A request the old chain left with the owner cannot stage: the
+		// store refuses a release checked under another root.
+		l.st.Source = src.RootSHA256
+		l.st.Proposed, l.st.ProposedAt, l.st.TestedBy, l.st.Evidence = nil, nil, nil, nil
+	}
 	l.st.FreshFailed = res.FreshnessFailed
 	if res.RootRotatedTo > 0 {
 		l.st.RootRotatedTo = res.RootRotatedTo
@@ -385,6 +407,7 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 			delete(l.st.Proposed, v)
 			delete(l.st.ProposedAt, v)
 			delete(l.st.TestedBy, v)
+			delete(l.st.Evidence, v)
 		}
 	}
 	l.st.Newest, l.st.NewestSecurity, l.st.Pending = 0, false, nil
@@ -432,6 +455,10 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 			l.st.ProposedAt = map[int64]time.Time{}
 		}
 		l.st.ProposedAt[v] = now
+		if l.st.Evidence == nil {
+			l.st.Evidence = map[int64][2]int{}
+		}
+		l.st.Evidence[v] = o.evidence
 		if o.tested != "" {
 			if l.st.TestedBy == nil {
 				l.st.TestedBy = map[int64]string{}
@@ -532,6 +559,7 @@ const (
 type outcome struct {
 	proposed change.State
 	tested   string
+	evidence [2]int // listed independent and maintainer-operated passes
 	wait     *pending
 	value    float64
 	err      error
@@ -581,7 +609,8 @@ func (l *Loop3) decide(ctx context.Context, rel *update.Verified, m update.Manif
 		}
 		return outcome{wait: &pending{Version: m.Version, Security: security, Why: waitPropose}, err: err}
 	}
-	o := outcome{proposed: rep.State}
+	ev := rel.Evidence(atts, l.cfg.OwnKey)
+	o := outcome{proposed: rep.State, evidence: [2]int{ev.Independent, ev.Maintainer}}
 	if security && rel.SecurityAutoStage(atts, l.cfg.OwnKey) == nil {
 		o.tested = testedIndependent
 		if rel.InterimAttestation() {
@@ -632,12 +661,31 @@ var failText = map[string]string{
 func (l *Loop3) Status() Status {
 	online, set := l.cfg.Online(), l.cfg.Settings()
 	installed, ierr := l.cfg.Store.Installed()
+	src, serr := l.cfg.Store.Following()
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.statusLocked(online, set, installed, ierr)
+	return l.statusLocked(online, set, installed, src, errors.Join(ierr, serr))
 }
 
-func (l *Loop3) statusLocked(online bool, set loops.Settings, in update.Installed, ierr error) Status {
+// statusLocked is the status line; on a fork it also names the fork
+// (Security C7) and, with no attestor listed, says each security fix is
+// the owner's to approve (potency C1).
+func (l *Loop3) statusLocked(online bool, set loops.Settings, in update.Installed, src update.Followed, ierr error) Status {
+	st := l.baseStatusLocked(online, set, in, src, ierr)
+	if src.Name == "" {
+		return st
+	}
+	st.Line += fmt.Sprintf(" Following: %s (%s).", src.Name, src.Fingerprint[:min(8, len(src.Fingerprint))])
+	if len(l.cfg.Attestors) == 0 {
+		st.Line += " " + forkAsks
+	}
+	return st
+}
+
+// forkAsks is potency C1's STATUS line on a fork with no attestor listed.
+const forkAsks = "Security fixes: you approve each one, since no attestor is listed for the fork you follow."
+
+func (l *Loop3) baseStatusLocked(online bool, set loops.Settings, in update.Installed, src update.Followed, ierr error) Status {
 	now := l.cfg.Now()
 	st := l.st
 	last := "never"
@@ -694,13 +742,24 @@ func (l *Loop3) statusLocked(online bool, set loops.Settings, in update.Installe
 		if at, ok := st.ProposedAt[st.Newest]; ok && st.NewestSecurity && st.TestedBy[st.Newest] != "" {
 			return Status{Line: fmt.Sprintf("Security update %d has been waiting for your approval since %s.", st.Newest, at.Format("Mon 2 Jan"))}
 		}
+		// On a fork, a request waiting for the owner also says who checked
+		// the release (OSS-9, UX Q-C).
+		evidence := ""
+		if ev := st.Evidence[st.Newest]; src.Name != "" {
+			evidence = " " + EvidenceLine(src.Name, ev[0], ev[1], false)
+		}
 		if at, ok := st.ProposedAt[st.Newest]; ok && st.NewestSecurity {
-			return Status{Line: fmt.Sprintf("Security update %d needs your approval: no trusted independent test report yet. Asked %s.", st.Newest, at.Format("Mon 2 Jan"))}
+			return Status{Line: fmt.Sprintf("Security update %d needs your approval: no trusted independent test report yet. Asked %s.", st.Newest, at.Format("Mon 2 Jan")) + evidence}
 		}
 		if at, ok := st.ProposedAt[st.Newest]; ok {
-			return Status{Line: fmt.Sprintf("Update %d has been waiting for your approval since %s.", st.Newest, at.Format("Mon 2 Jan"))}
+			return Status{Line: fmt.Sprintf("Update %d has been waiting for your approval since %s.", st.Newest, at.Format("Mon 2 Jan")) + evidence}
 		}
 		return Status{Line: fmt.Sprintf("Update %d is waiting for your approval.", st.Newest)}
+	}
+	if src.Name != "" {
+		// UPD-8 holds on a fork: nothing older than the installed release
+		// is taken, so a fork behind it has nothing to offer (Security C5).
+		return Status{Current: true, Line: fmt.Sprintf("Updates: %s has no release newer than yours yet (checked %s).", src.Name, last)}
 	}
 	return Status{Current: true, Line: fmt.Sprintf("Updates: up to date (checked %s).", last)}
 }
@@ -729,10 +788,21 @@ func pendingLine(p *pending) string {
 func (l *Loop3) Digest() []string {
 	online, set := l.cfg.Online(), l.cfg.Settings()
 	installed, ierr := l.cfg.Store.Installed()
+	src, serr := l.cfg.Store.Following()
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	st := l.statusLocked(online, set, installed, ierr)
+	st := l.statusLocked(online, set, installed, src, errors.Join(ierr, serr))
 	var out []string
+	if serr == nil && src.RootSHA256 != l.st.SaidSource {
+		// Once per switch (Security C7, UX Q-C).
+		if src.Name != "" {
+			out = append(out, fmt.Sprintf("Updates now come from %s, chosen by you on %s. You can switch back on my Wi-Fi page.", src.Name, src.Since.Format("Mon 2 Jan")))
+		} else {
+			out = append(out, "Updates now come from the AgentOS project again, chosen by you.")
+		}
+		l.st.SaidSource = src.RootSHA256
+		l.saveLocked()
+	}
 	if !st.Current || !l.st.DigestCurrent {
 		out = append(out, st.Line)
 	}

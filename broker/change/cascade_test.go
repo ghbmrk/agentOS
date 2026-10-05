@@ -579,3 +579,34 @@ func TestALaterForgetLeavesAClearedEdit(t *testing.T) {
 		t.Fatalf("x after both forgets: %q, want v's v5", got)
 	}
 }
+
+// W3-forget: the owner's notice says how many active adoptions a forget
+// of the goal would undo, before anything is deleted. A reverted one and
+// another goal's do not count, and the count changes nothing.
+func TestLearnedFromCountsWhatAForgetWouldUndo(t *testing.T) {
+	e := newEnv(t, nil)
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	a := e.propose(Candidate{Source: Local, Goals: []string{"owner:g1"}, Files: Tree{"skills/greet": []byte("hello"), "skills/a": []byte("1")}})
+	b := e.propose(Candidate{Source: Local, Goals: []string{"owner:g1", "owner:g2"}, Files: Tree{"skills/b": []byte("1")}})
+	c := e.propose(Candidate{Source: Local, Goals: []string{"owner:g2"}, Files: Tree{"skills/c": []byte("1")}})
+	for _, r := range []Report{a, b, c} {
+		if r.State != StateAdopted {
+			t.Fatalf("setup: %+v", r)
+		}
+	}
+	if n := e.p.LearnedFrom("owner:g1"); n != 2 {
+		t.Fatalf("learned from g1: %d, want 2", n)
+	}
+	if err := e.p.Revert(bg, a.ID, OriginOwner); err != nil {
+		t.Fatal(err)
+	}
+	if n := e.p.LearnedFrom("owner:g1"); n != 1 {
+		t.Fatalf("after an UNDO: %d, want 1", n)
+	}
+	if n := e.p.LearnedFrom("owner:g9"); n != 0 {
+		t.Fatalf("an unknown goal: %d", n)
+	}
+	if files := e.p.Files("skills"); string(files["skills/b"]) != "1" {
+		t.Fatal("counting changed the tree")
+	}
+}

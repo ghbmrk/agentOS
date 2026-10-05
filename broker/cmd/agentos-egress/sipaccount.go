@@ -39,8 +39,8 @@ var (
 
 // Owner notices when the account changes (S2 on #116).
 const (
-	noteSIPReplaced = "The second line's calling account was replaced on the local page."
-	noteSIPRemoved  = "The second line's calling account was removed on the local page."
+	noteSIPReplaced = "The second line's calling account was replaced on the box's Wi-Fi page."
+	noteSIPRemoved  = "The second line's calling account was removed on the box's Wi-Fi page."
 )
 
 // sipFieldErr maps a sipsign refusal to its owner wording.

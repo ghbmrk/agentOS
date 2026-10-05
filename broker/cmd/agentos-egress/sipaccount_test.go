@@ -19,7 +19,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/vault"
 )
 
-// REQ: CRED-1, ADP-12, CRED-7
+// REQ: CRED-1, ADP-12, CRED-7, CH-12
 
 var sipSettings = sipsign.Settings{Server: "sip.voip.test:5061", Domain: "voip.test", User: "acct1001", Number: "+15550000300"}
 
@@ -309,6 +309,12 @@ func TestTheOwnerIsToldWhenTheAccountChanges(t *testing.T) {
 	}
 	if got := r.notes[n:]; len(got) != 2 || got[0] != noteSIPReplaced || got[1] != noteSIPRemoved {
 		t.Fatalf("notes %q", got)
+	}
+	// CH-12: owner texts name "the box's Wi-Fi page".
+	for _, s := range []string{noteSIPReplaced, noteSIPRemoved} {
+		if !strings.HasSuffix(s, " on the box's Wi-Fi page.") {
+			t.Errorf("note %q", s)
+		}
 	}
 }
 

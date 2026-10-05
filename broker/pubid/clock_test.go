@@ -237,3 +237,26 @@ func TestOSS6OffDaysKeepCounting(t *testing.T) {
 		t.Fatal("did not count again once the chain was rebuilt")
 	}
 }
+
+// The floor is exactly minCountGap, 20 hours, and a day it defers stays
+// unseen, so a later release that day counts it (OSS-6c, L3 on #163).
+func TestOSS6FloorDefersTheDayUnseen(t *testing.T) {
+	g := newRig(t, 0)
+	var m time.Duration
+	g.mono = func() time.Duration { return m }
+	g.reopen(t)
+	g.day(1, 5*time.Hour)
+	must(t, g.p.Release()) // the first count in this process, at monotonic 0
+	g.day(2, 5*time.Hour)
+	m = 20*time.Hour - time.Second
+	must(t, g.p.Release())
+	if g.p.st.Seen != day(g.c.t.AddDate(0, 0, -1)) || len(g.p.st.Days) != 2 {
+		t.Fatalf("counted, or saw, a day the floor deferred: seen %s, %d days", g.p.st.Seen, len(g.p.st.Days))
+	}
+	g.day(2, 23*time.Hour)
+	m = 20 * time.Hour
+	must(t, g.p.Release())
+	if g.p.st.Seen != day(g.c.t) || len(g.p.st.Days) != 3 {
+		t.Fatalf("the deferred day did not count at the floor: seen %s, %d days", g.p.st.Seen, len(g.p.st.Days))
+	}
+}
