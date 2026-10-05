@@ -590,21 +590,21 @@ func TestIntegrationForgetSinceDuringWorkerExec(t *testing.T) {
 	}
 }
 
-// CAP-1 and A15 under gVisor: on the floor's pool (4500 MB) beside a
-// 1600 MB agent, a worker forks into 8 workers that each run a command
+// CAP-1 and A15 under gVisor: on the floor host's pool (3496 MB, budget
+// ForHost(7680, 4)) beside a 1552 MB agent, a 192 MB worker forks into 8 workers that each run a command
 // with their memory intact, and the winner is kept; admission stays
 // within its budget throughout (RES-2).
 func TestIntegrationEightWorkersWithinRES2(t *testing.T) {
-	r := newRig(t, 4500)
+	r := newRig(t, 3496)
 	ctx := context.Background()
-	if _, err := r.m.Create(ctx, "agent", vm.Spec{Image: "base", Class: admission.Foreground, MemMB: 1600, Argv: []string{"/guest", "serve"}}); err != nil {
+	if _, err := r.m.Create(ctx, "agent", vm.Spec{Image: "base", Class: admission.Foreground, MemMB: 1552, Argv: []string{"/guest", "serve"}}); err != nil {
 		t.Fatal(err)
 	}
 	a, err := r.m.Get("agent")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.m.CreateWorker(ctx, "wk-src", a.Lineage, vm.Spec{Image: "base", Class: admission.Foreground, MemMB: 256, Argv: []string{"/guest", "serve"}}); err != nil {
+	if _, err := r.m.CreateWorker(ctx, "wk-src", a.Lineage, vm.Spec{Image: "base", Class: admission.Foreground, MemMB: 192, Argv: []string{"/guest", "serve"}}); err != nil {
 		t.Fatal(err)
 	}
 	token := r.ask("wk-src", "token")

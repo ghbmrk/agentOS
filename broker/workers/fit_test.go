@@ -8,38 +8,50 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
+	"github.com/ghbmrk/agentos/broker/budget"
 	"github.com/ghbmrk/agentos/broker/vm"
 )
 
 type fitOut struct {
 	Fit         int    `json:"fit"`
 	MemMB       int64  `json:"mem_mb"`
-	FreeMB      int64  `json:"free_mb"`
 	WorkersLeft int    `json:"workers_left"`
 	Why         string `json:"why"`
 }
 
+// clock lets a test step past the fit cache.
+type clock struct{ t time.Time }
+
+func (c *clock) now() time.Time { return c.t }
+func (c *clock) next()          { c.t = c.t.Add(FitFor) }
+func newClock(r *rig) *clock    { c := &clock{time.Now()}; r.tools.Now = c.now; return c }
+
 // N is the smaller of what admission's declared budget and measured free
-// memory hold, and what the lineage's worker cap leaves (CAP-1).
+// memory hold, rounded down to FitStepMB, and what the lineage's worker
+// cap leaves (CAP-1).
 func TestCAP1FitIsTheSmallerOfDeclaredAndMeasured(t *testing.T) {
 	r := newRig(t, 8000)
+	clk := newClock(r)
 	r.agent("agent", vm.Public)
-	declared, measured := int64(3000), int64(1000)
+	declared, measured := int64(3000), int64(1100)
 	var measureErr error
 	r.tools.Free = func(admission.Class) int64 { return declared }
 	r.tools.Avail = func() (int64, error) { return measured, measureErr }
 	var f fitOut
 	r.must("agent", toolFit, m{}, &f)
-	if f.Fit != 3 || f.MemMB != DefaultMemMB || f.FreeMB != 1000 || f.WorkersLeft != MaxWorkers {
-		t.Fatalf("fit = %+v, want 3 of %d MiB from 1000 measured", f, DefaultMemMB)
+	if f.Fit != 1024/DefaultMemMB || f.MemMB != DefaultMemMB || f.WorkersLeft != MaxWorkers {
+		t.Fatalf("fit = %+v, want %d from 1100 measured rounded to 1024", f, 1024/DefaultMemMB)
 	}
+	clk.next()
 	measured = 1 << 20
 	r.must("agent", toolFit, m{"mem_mb": 500}, &f)
-	if f.Fit != 6 || f.FreeMB != 3000 {
-		t.Fatalf("fit at 500 MiB = %+v, want 6 from 3000 declared", f)
+	if f.Fit != 5 { // 3000 declared rounds to 2560
+		t.Fatalf("fit at 500 MiB = %+v, want 5", f)
 	}
+	clk.next()
 	declared = 1 << 20
 	r.must("agent", toolCreate, m{"name": "w"}, nil)
 	r.must("agent", toolFit, m{"mem_mb": MinMemMB}, &f)
@@ -47,19 +59,64 @@ func TestCAP1FitIsTheSmallerOfDeclaredAndMeasured(t *testing.T) {
 		t.Fatalf("fit beside one worker = %+v, want the cap's %d", f, MaxWorkers-1)
 	}
 	// Unreadable measurement: admission's budget alone, and it says so.
+	clk.next()
 	declared, measureErr = 600, errors.New("no meminfo")
 	r.must("agent", toolFit, m{}, &f)
 	if f.Fit != 2 || !strings.Contains(f.Why, "declared") {
 		t.Fatalf("fit without a measurement = %+v", f)
 	}
 	// At the floor N may be 0, and the answer says what to do.
-	declared, measureErr = 100, nil
+	clk.next()
+	declared, measureErr = 500, nil
 	r.must("agent", toolFit, m{}, &f)
-	if f.Fit != 0 || !strings.Contains(f.Why, "sequential") {
+	if f.Fit != 0 || !strings.Contains(f.Why, "sequentially") {
 		t.Fatalf("fit with no room = %+v", f)
 	}
 	if err := r.call("agent", toolFit, m{"mem_mb": 1}, nil); err == nil {
 		t.Fatal("fit below the minimum worker size accepted")
+	}
+}
+
+// worker_fit tells a guest no more than one rounded figure per lineage per
+// FitFor: no memory field, the same rounded room for every mem_mb asked
+// inside the window, and nothing finer than FitStepMB (security F1 on
+// #158, REV-5).
+func TestCAP1FitRevealsOnlyACoarseCachedFigure(t *testing.T) {
+	r := newRig(t, 8000)
+	clk := newClock(r)
+	r.agent("agent", vm.Public)
+	measured, calls := int64(2047), 0
+	r.tools.Avail = func() (int64, error) { calls++; return measured, nil }
+	var raw map[string]any
+	r.must("agent", toolFit, m{"mem_mb": MinMemMB}, &raw)
+	for k := range raw {
+		if k != "fit" && k != "mem_mb" && k != "workers_left" && k != "why" {
+			t.Errorf("worker_fit answers %q", k)
+		}
+	}
+	var f fitOut
+	for mem := int64(MinMemMB); mem <= 1024; mem += 37 {
+		measured += 300 // the box changes inside the window
+		r.must("agent", toolFit, m{"mem_mb": mem}, &f)
+		if want := min(MaxWorkers, int(1536/mem)); f.Fit != want {
+			t.Fatalf("fit at %d MiB = %d, want %d from 2047 rounded to 1536", mem, f.Fit, want)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("measured %d times inside one window", calls)
+	}
+	clk.next()
+	measured = 2600
+	r.must("agent", toolFit, m{"mem_mb": 512}, &f)
+	if f.Fit != 5 || calls != 2 {
+		t.Fatalf("after the window fit = %d (%d measurements), want 5 from 2560", f.Fit, calls)
+	}
+	// Another lineage gets its own window, not this one's figure.
+	r.agent("b", vm.Public)
+	measured = 700
+	r.must("b", toolFit, m{"mem_mb": 512}, &f)
+	if f.Fit != 1 {
+		t.Fatalf("lineage b fit = %d, want 1 from 700 rounded to 512", f.Fit)
 	}
 }
 
@@ -80,8 +137,9 @@ func TestCAP1FitAsksForTheCallersClass(t *testing.T) {
 func TestCAP1ForkUpToFit(t *testing.T) {
 	r := newRig(t, 8000)
 	r.agent("agent", vm.Public)
-	r.must("agent", toolCreate, m{"name": "src"}, nil)
-	r.tools.Avail = func() (int64, error) { return 3 * DefaultMemMB, nil }
+	clk := newClock(r)
+	r.must("agent", toolCreate, m{"name": "src", "mem_mb": FitStepMB}, nil)
+	r.tools.Avail = func() (int64, error) { return 3*FitStepMB + 100, nil }
 	var out struct {
 		Workers []string
 		Skipped []string
@@ -90,6 +148,7 @@ func TestCAP1ForkUpToFit(t *testing.T) {
 	if fmt.Sprint(out.Workers) != "[a b c]" || fmt.Sprint(out.Skipped) != "[d e]" {
 		t.Fatalf("fork up to fit = %+v", out)
 	}
+	clk.next()
 	r.tools.Avail = func() (int64, error) { return 0, nil }
 	err := r.call("agent", toolFork, m{"name": "src", "into": []string{"f"}, "up_to_fit": true}, nil)
 	if err == nil || !strings.Contains(err.Error(), "no fork fits") {
@@ -140,21 +199,33 @@ func TestCAP1KeepTheWinnerDiscardsTheRest(t *testing.T) {
 	}
 }
 
-// A15's shape within RES-2: on the floor's pool beside the agent, one
+// A15WorkerMB is a worker size at which A15's 8 forks fit beside the
+// agent on the floor host: (3496 - 1552 - 192) rounds to 1536 = 8 x 192.
+const A15WorkerMB = 192
+
+// A15's shape within RES-2: on the floor host's pool beside the agent, one
 // guest asks how many fit, forks 8, tests each, and keeps the winner;
 // admission never goes over its budget.
 func TestA15EightWorkersWithinRES2(t *testing.T) {
-	r := newRig(t, 4500) // budget.BaseCapMB, the floor's pool
-	if _, err := r.m.Create(context.Background(), "agent", vm.Spec{Image: "base", Class: admission.Foreground, MemMB: 1600}); err != nil {
+	// The floor host's pool (8 GB, 4 cores; potency R1 on #158).
+	floor, err := budget.ForHost(7680, 4, budget.Floor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := newRig(t, floor.PoolMB)
+	if _, err := r.m.Create(context.Background(), "agent", vm.Spec{Image: "base", Class: admission.Foreground, MemMB: budget.OpenClawMB}); err != nil {
 		t.Fatal(err)
 	}
 	r.tools.Free = func(admission.Class) int64 { return r.adm.Snapshot().FreeMB }
-	r.must("agent", toolCreate, m{"name": "src"}, nil)
+	// At the default 256 MiB only 6 forks fit here (3496 - 1552 - 256 =
+	// 1688, rounded to 1536): the guest sizes its workers to the count
+	// it wants, which K16 records.
+	r.must("agent", toolCreate, m{"name": "src", "mem_mb": A15WorkerMB}, nil)
 	r.must("agent", toolWrite, m{"name": "src", "path": "/task", "content": "solve"}, nil)
 	var f fitOut
-	r.must("agent", toolFit, m{}, &f)
+	r.must("agent", toolFit, m{"mem_mb": A15WorkerMB}, &f)
 	if f.Fit < 8 {
-		t.Fatalf("only %d workers fit on the floor's pool, A15 needs 8", f.Fit)
+		t.Fatalf("only %d workers of %d MiB fit on the floor's pool, A15 needs 8", f.Fit, A15WorkerMB)
 	}
 	var into []string
 	for i := range 8 {

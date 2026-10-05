@@ -53,7 +53,7 @@ type Machines interface {
 // Limits bound what one lineage may ask for.
 const (
 	MaxWorkers     = 16        // live workers per lineage; A15 needs 8
-	DefaultMemMB   = 256       // a worker's budget when none is asked; 8 fit beside the N95's agent (potency R1 on #146)
+	DefaultMemMB   = 256       // a worker's budget when none is asked; on the floor host 7 fit beside the agent, 8 at 192 MiB (K16)
 	MinMemMB       = 64        // below this a base image does not start
 	MaxArgs        = 64        // arguments in one command
 	MaxArgBytes    = 16 << 10  // all arguments together
@@ -93,6 +93,7 @@ type Tools struct {
 	used    map[string]time.Time // worker ID -> last named by a tool
 	pending map[string]string    // worker ID being made -> its lineage
 	calls   map[string]int       // calling machine -> its worker tool calls in flight
+	rooms   map[string]fitRoom   // lineage -> its rounded room (CAP-1)
 }
 
 // Busy reports whether machine has a worker tool call in flight, such as
@@ -182,7 +183,7 @@ func (t *Tools) List() []map[string]any {
 		{"name": toolFork, "description": "Checkpoint a worker and start one new worker per name from it, memory included; each is admitted on its own budget, and either all start or none do. With up_to_fit, only as many as fit now start (in the order named) and the rest come back as skipped.",
 			"inputSchema": obj(map[string]any{"name": pName, "into": strList,
 				"up_to_fit": map[string]any{"type": "boolean", "description": "Start only as many forks as fit (see worker_fit)."}}, "name", "into")},
-		{"name": toolFit, "description": "How many more workers of mem_mb fit now: the smaller of the box's free memory as measured and as budgeted for your class, and your worker cap. Use it to pick how many approaches to try in parallel; 0 means try them one at a time.",
+		{"name": toolFit, "description": "How many more workers of mem_mb fit now, from the box's free memory (measured and as budgeted for your class, rounded down, refreshed every few seconds) and your worker cap. Use it to pick how many approaches to try in parallel; 0 means try them one at a time.",
 			"inputSchema": obj(map[string]any{"mem_mb": map[string]any{"type": "integer", "description": fmt.Sprintf("Memory per worker in MiB; default %d.", DefaultMemMB)}})},
 		{"name": toolKeep, "description": "Keep the winner of a fork: destroy every other worker forked from the same snapshot as this one. The worker it was forked from, and your other workers, stay.",
 			"inputSchema": obj(map[string]any{"name": pName}, "name")},
@@ -792,22 +793,74 @@ func (t *Tools) list(c caller) (any, error) {
 	return map[string]any{"workers": out}, nil
 }
 
-// fitAnswer is how many more workers of MemMB fit now (CAP-1).
+// fitAnswer is how many more workers of MemMB fit now (CAP-1). It
+// carries no memory figure: free memory tracks the owner's activity and
+// other labels' machines, so a guest learns only the count (security F1
+// on #158).
 type fitAnswer struct {
 	Fit         int    `json:"fit"`
 	MemMB       int64  `json:"mem_mb"`
-	FreeMB      int64  `json:"free_mb"`
 	WorkersLeft int    `json:"workers_left"`
 	Why         string `json:"why,omitempty"`
 }
 
-// fit counts the workers of memMB the caller could start now: the smaller
-// of admission's declared room for its class and measured free memory,
-// and what its worker cap leaves. Unreadable measurement falls back to the
-// declared budget, which admission enforces anyway. It is advice: each
-// start is still admitted on its own.
+const (
+	// FitStepMB is the step free memory is rounded down to before it
+	// sizes forks, and FitFor how long one lineage's rounded figure is
+	// reused: together they bound what worker_fit says about the box's
+	// memory to one step per 10 s, whatever mem_mb is asked (security F1
+	// on #158).
+	FitStepMB = 512
+	FitFor    = 10 * time.Second
+)
+
+// fitRoom is a lineage's rounded room, computed at most once per FitFor.
+type fitRoom struct {
+	mb  int64 // -1: unbounded (neither source set)
+	at  time.Time
+	why string
+}
+
+// room is the smaller of admission's declared room for the caller's class
+// and measured free memory, rounded down to FitStepMB and reused for
+// FitFor per lineage. Unreadable measurement falls back to the declared
+// budget, which admission enforces anyway.
+func (t *Tools) room(c caller) (int64, string) {
+	now := t.now()
+	t.mu.Lock()
+	if r, ok := t.rooms[c.lineage]; ok && now.Sub(r.at) < FitFor && !now.Before(r.at) {
+		t.mu.Unlock()
+		return r.mb, r.why
+	}
+	t.mu.Unlock()
+	mb, why := int64(-1), ""
+	if t.Free != nil {
+		mb = max(t.Free(c.spec.Class), 0)
+	}
+	if t.Avail != nil {
+		if m, err := t.Avail(); err != nil {
+			why = "free memory could not be measured, so this uses the declared budget"
+		} else if mb < 0 || m < mb {
+			mb = max(m, 0)
+		}
+	}
+	if mb >= 0 {
+		mb = mb / FitStepMB * FitStepMB
+	}
+	t.mu.Lock()
+	if t.rooms == nil || len(t.rooms) > 4*MaxWorkers {
+		t.rooms = map[string]fitRoom{}
+	}
+	t.rooms[c.lineage] = fitRoom{mb, now, why}
+	t.mu.Unlock()
+	return mb, why
+}
+
+// fit counts the workers of memMB the caller could start now, from its
+// lineage's rounded room and what its worker cap leaves. It is advice:
+// each start is still admitted on its own.
 func (t *Tools) fit(c caller, memMB int64) fitAnswer {
-	a := fitAnswer{MemMB: memMB, FreeMB: -1}
+	a := fitAnswer{MemMB: memMB}
 	t.mu.Lock()
 	n := len(t.M.Workers(c.lineage))
 	for _, l := range t.pending {
@@ -817,27 +870,21 @@ func (t *Tools) fit(c caller, memMB int64) fitAnswer {
 	}
 	t.mu.Unlock()
 	a.WorkersLeft = max(MaxWorkers-n, 0)
-	var whys []string
-	if t.Free != nil {
-		a.FreeMB = t.Free(c.spec.Class)
-	}
-	if t.Avail != nil {
-		if m, err := t.Avail(); err != nil {
-			whys = append(whys, "free memory could not be measured, so this uses the declared budget")
-		} else if a.FreeMB < 0 || m < a.FreeMB {
-			a.FreeMB = max(m, 0)
-		}
+	room, why := t.room(c)
+	whys := []string{}
+	if why != "" {
+		whys = append(whys, why)
 	}
 	a.Fit = a.WorkersLeft
-	if a.FreeMB >= 0 {
-		a.Fit = min(a.Fit, int(a.FreeMB/memMB))
+	if room >= 0 {
+		a.Fit = min(a.Fit, int(room/memMB))
 	}
 	switch {
 	case a.Fit > 0:
 	case a.WorkersLeft == 0:
 		whys = append(whys, fmt.Sprintf("you hold %d workers, the most at once; destroy one first", MaxWorkers))
 	default:
-		whys = append(whys, fmt.Sprintf("%d MB free is less than one %d MB worker; work sequentially in one worker, ask for less memory, or destroy a worker", a.FreeMB, memMB))
+		whys = append(whys, fmt.Sprintf("not enough free memory for one %d MB worker now; work sequentially in one worker, ask for less memory, or destroy a worker", memMB))
 	}
 	a.Why = strings.Join(whys, "; ")
 	return a
