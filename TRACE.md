@@ -36,10 +36,10 @@ Covered: 113 / 144 requirement IDs
 | CH-10 | `broker/grants/change_test.go`, `broker/grants/channel_test.go`, `broker/grants/gate_test.go`, `broker/grants/loops_test.go`, `broker/loops/wiring_test.go`, `broker/mail/reply_test.go`, `broker/owner/channel_test.go`, `broker/owner/classify_test.go` |
 | CH-6 | `broker/localui/vault_test.go` |
 | CH-11 | `broker/cmd/agentosd/questions_test.go`, `broker/control/handler_test.go`, `broker/control/help_loops_test.go`, `broker/control/settings_test.go`, `broker/daemon/daemon_test.go`, `broker/localui/localui_test.go`, `broker/loops/wiring_test.go`, `broker/owner/answer_test.go`, `broker/owner/channel_test.go`, `broker/owner/local_test.go`, `broker/owner/parse_test.go`, `broker/owner/settings_test.go` |
-| CH-12 | `broker/control/help_loops_test.go`, `broker/grants/change_test.go`, `broker/grants/channel_test.go`, `broker/grants/gate_test.go`, `broker/modem/at/pdu_test.go`, `broker/modem/modem_test.go`, `broker/owner/channel_test.go`, `broker/owner/question_test.go`, `broker/owner/undoable_test.go` |
+| CH-12 | `broker/cmd/agentosd/routenotice_test.go`, `broker/control/help_loops_test.go`, `broker/grants/change_test.go`, `broker/grants/channel_test.go`, `broker/grants/gate_test.go`, `broker/modem/at/pdu_test.go`, `broker/modem/modem_test.go`, `broker/owner/channel_test.go`, `broker/owner/question_test.go`, `broker/owner/undoable_test.go` |
 | CH-13 | `broker/grants/channel_test.go`, `broker/grants/gate_test.go`, `broker/owner/channel_test.go`, `broker/owner/parse_test.go`, `broker/owner/review_test.go` |
 | CH-14 | `broker/control/answer_test.go`, `broker/e2e/owner_test.go`, `broker/owner/answer_test.go`, `broker/owner/channel_test.go`, `broker/owner/parse_test.go`, `broker/owner/review_test.go`, `broker/owner/settings_test.go` |
-| CH-15 | `broker/cmd/agentosd/questions_test.go`, `broker/grants/gate_test.go`, `broker/grants/shared_test.go`, `broker/owner/review_test.go`, `broker/question/question_test.go`, `broker/question/wiring_test.go` |
+| CH-15 | `broker/change/notice_test.go`, `broker/cmd/agentosd/questions_test.go`, `broker/cmd/agentosd/routenotice_test.go`, `broker/grants/gate_test.go`, `broker/grants/shared_test.go`, `broker/owner/review_test.go`, `broker/question/question_test.go`, `broker/question/wiring_test.go` |
 | CH-16 | `broker/grants/outcome_test.go`, `broker/grants/reversible_test.go`, `broker/owner/channel_test.go`, `broker/owner/hold_test.go` |
 | CH-17 | `broker/modem/at/driver_test.go`, `broker/modem/at/dtmf_test.go`, `broker/modem/at/engine_test.go` |
 | CH-18 | `broker/cmd/agentosd/verify_test.go`, `broker/localui/localui_test.go`, `broker/modelroute/verify_test.go`, `broker/owner/channel_test.go`, `broker/owner/local_test.go`, `broker/owner/review_test.go`, `broker/owner/verifier_test.go` |
@@ -93,7 +93,7 @@ Covered: 113 / 144 requirement IDs
 | ADP-1 | `broker/grants/gate_test.go`, `broker/mail/organize_test.go` |
 | ADP-2 | `broker/egress/verb_test.go`, `broker/grants/escalate_test.go`, `broker/grants/gate_test.go`, `broker/grants/grant_test.go`, `broker/mail/gate_test.go`, `broker/mail/organize_test.go` |
 | ADP-3 | `broker/route/anthropic_test.go`, `broker/route/route_test.go` |
-| ADP-4 | `broker/change/review_test.go`, `broker/change/routing_test.go`, `broker/cmd/agentos-egress/eval_test.go`, `broker/cmd/agentos-egress/routing_test.go`, `broker/cmd/agentosd/learn_test.go`, `broker/modelroute/routing_test.go`, `broker/route/route_test.go` |
+| ADP-4 | `broker/change/review_test.go`, `broker/change/routing_test.go`, `broker/cmd/agentos-egress/eval_test.go`, `broker/cmd/agentos-egress/routing_test.go`, `broker/cmd/agentosd/learn_test.go`, `broker/cmd/agentosd/routenotice_test.go`, `broker/modelroute/routing_test.go`, `broker/route/route_test.go` |
 | ADP-5 | — |
 | ADP-6 | — |
 | ADP-7 | `broker/route/route_test.go` |
@@ -107,7 +107,7 @@ Covered: 113 / 144 requirement IDs
 | CHG-3 | `broker/change/pipeline_test.go`, `broker/change/review_test.go`, `broker/change/wiring_test.go`, `broker/grants/change_test.go`, `broker/replay/replay_test.go`, `broker/update/attest_test.go`, `broker/update/hardening_test.go` |
 | CHG-4 | `broker/change/share_test.go` |
 | CHG-5 | `broker/change/share_test.go` |
-| CHG-6 | `broker/change/pipeline_test.go`, `broker/change/review_test.go`, `broker/change/routing_test.go`, `broker/change/wiring_test.go`, `broker/grants/change_test.go` |
+| CHG-6 | `broker/change/notice_test.go`, `broker/change/pipeline_test.go`, `broker/change/review_test.go`, `broker/change/routing_test.go`, `broker/change/wiring_test.go`, `broker/grants/change_test.go` |
 | LOOP-0 | `broker/cmd/agentosd/learn_test.go`, `broker/control/settings_test.go`, `broker/daemon/learning_wiring_test.go`, `broker/grants/loops_test.go`, `broker/loops/settings_test.go`, `broker/loops/wiring_test.go`, `broker/owner/settings_test.go` |
 | LOOP-1 | `broker/admission/admission_test.go`, `broker/cmd/agentosd/learn_test.go`, `broker/loops/scheduler_test.go` |
 | LOOP-2 | `broker/cmd/agentosd/learn_test.go`, `broker/loops/scheduler_test.go`, `broker/loops/settings_test.go`, `broker/meter/share_test.go`, `broker/meter/spare_test.go` |
