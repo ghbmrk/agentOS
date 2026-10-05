@@ -1,0 +1,45 @@
+{"method": "GET", "path": "/backend-api/wham/accounts/check", "authorization": "placeholder", "chatgpt-account-id": "acct-S8", "user-agent": "codex_exec/0.160.1 (Ubuntu 24.4.0; x86_64) dumb", "upgrade": null}
+{"method": "GET", "path": "/backend-api/ps/plugins/list?scope=GLOBAL&limit=200", "authorization": "placeholder", "chatgpt-account-id": "acct-S8", "user-agent": "codex_exec/0.160.1 (Ubuntu 24.4.0; x86_64) dumb", "upgrade": null}
+{"method": "GET", "path": "/backend-api/ps/plugins/installed?limit=200", "authorization": "placeholder", "chatgpt-account-id": "acct-S8", "user-agent": "codex_exec/0.160.1 (Ubuntu 24.4.0; x86_64) dumb", "upgrade": null}
+{"method": "GET", "path": "/backend-api/ps/plugins/installed?limit=200&includeDownloadUrls=true", "authorization": "placeholder", "chatgpt-account-id": "acct-S8", "user-agent": "codex_exec/0.160.1 (Ubuntu 24.4.0; x86_64) dumb", "upgrade": null}
+{"method": "GET", "path": "/backend-api/ps/plugins/suggested/codex?scope=GLOBAL", "authorization": "placeholder", "chatgpt-account-id": "acct-S8", "user-agent": "codex_exec/0.160.1 (Ubuntu 24.4.0; x86_64) dumb", "upgrade": null}
+{"method": "GET", "path": "/backend-api/plugins/featured?platform=codex", "authorization": "placeholder", "chatgpt-account-id": "acct-S8", "user-agent": "codex_exec/0.160.1 (Ubuntu 24.4.0; x86_64) dumb", "upgrade": null}
+{"method": "GET", "path": "/backend-api/ps/plugins/installed?limit=200", "authorization": "placeholder", "chatgpt-account-id": "acct-S8", "user-agent": "codex_exec/0.160.1 (Ubuntu 24.4.0; x86_64) dumb (codex_exec;", "upgrade": null}
+{"method": "CONNECT", "path": "chatgpt.com:443", "authorization": null, "chatgpt-account-id": null, "user-agent": "", "upgrade": null}
+{"method": "CONNECT", "path": "chatgpt.com:443", "authorization": null, "chatgpt-account-id": null, "user-agent": "", "upgrade": null}
+{"method": "GET", "path": "/backend-api/wham/accounts/check", "authorization": "placeholder", "chatgpt-account-id": "acct-S8", "user-agent": "codex_exec/0.160.1 (Ubuntu 24.4.0; x86_64) dumb (codex_exec;", "upgrade": null}
+{"method": "CONNECT", "path": "chatgpt.com:443", "authorization": null, "chatgpt-account-id": null, "user-agent": "", "upgrade": null}
+{"method": "CONNECT", "path": "chatgpt.com:443", "authorization": null, "chatgpt-account-id": null, "user-agent": "", "upgrade": null}
+{"method": "CONNECT", "path": "chatgpt.com:443", "authorization": null, "chatgpt-account-id": null, "user-agent": "", "upgrade": null}
+{"method": "CONNECT", "path": "chatgpt.com:443", "authorization": null, "chatgpt-account-id": null, "user-agent": "", "upgrade": null}
+{"method": "CONNECT", "path": "chatgpt.com:443", "authorization": null, "chatgpt-account-id": null, "user-agent": "", "upgrade": null}
+{"method": "CONNECT", "path": "chatgpt.com:443", "authorization": null, "chatgpt-account-id": null, "user-agent": "", "upgrade": null}
+{"method": "CONNECT", "path": "chatgpt.com:443", "authorization": null, "chatgpt-account-id": null, "user-agent": "", "upgrade": null}
+{"method": "CONNECT", "path": "chatgpt.com:443", "authorization": null, "chatgpt-account-id": null, "user-agent": "", "upgrade": null}
+{"method": "CONNECT", "path": "chatgpt.com:443", "authorization": null, "chatgpt-account-id": null, "user-agent": "", "upgrade": null}
+{"method": "CONNECT", "path": "chatgpt.com:443", "authorization": null, "chatgpt-account-id": null, "user-agent": "", "upgrade": null}
+{"method": "CONNECT", "path": "chatgpt.com:443", "authorization": null, "chatgpt-account-id": null, "user-agent": "", "upgrade": null}
+{"method": "CONNECT", "path": "chatgpt.com:443", "authorization": null, "chatgpt-account-id": null, "user-agent": "", "upgrade": null}
+{"method": "CONNECT", "path": "chatgpt.com:443", "authorization": null, "chatgpt-account-id": null, "user-agent": "", "upgrade": null}
+{"method": "GET", "path": "/backend-api/ps/plugins/suggested/codex?scope=GLOBAL", "authorization": "placeholder", "chatgpt-account-id": "acct-S8", "user-agent": "codex_exec/0.160.1 (Ubuntu 24.4.0; x86_64) dumb (codex_exec;", "upgrade": null}
+{"method": "POST", "path": "/backend-api/codex/analytics-events/events", "authorization": "placeholder", "chatgpt-account-id": "acct-S8", "user-agent": "codex_exec/0.160.1 (Ubuntu 24.4.0; x86_64) dumb (codex_exec;", "upgrade": null, "model": null, "tools": [], "tool_output": null}
+{"method": "GET", "path": "/backend-api/ps/plugins/suggested/codex?scope=GLOBAL", "authorization": "placeholder", "chatgpt-account-id": "acct-S8", "user-agent": "codex_exec/0.160.1 (Ubuntu 24.4.0; x86_64) dumb (codex_exec;", "upgrade": null}
+{"method": "GET", "path": "/backend-api/wham/accounts/check", "authorization": "placeholder", "chatgpt-account-id": "acct-S8", "user-agent": "codex_exec/0.160.1 (Ubuntu 24.4.0; x86_64) dumb (codex_exec;", "upgrade": null}
+{"method": "POST", "path": "/backend-api/ps/mcp", "authorization": null, "chatgpt-account-id": null, "user-agent": "codex-mcp-client/0.160.1", "upgrade": null, "model": null, "tools": [], "tool_output": null}
+{"method": "POST", "path": "/backend-api/ps/mcp", "authorization": null, "chatgpt-account-id": null, "user-agent": "codex-mcp-client/0.160.1", "upgrade": null, "model": null, "tools": [], "tool_output": null}
+{"method": "GET", "path": "/backend-api/ps/plugins/suggested/codex?scope=GLOBAL", "authorization": "placeholder", "chatgpt-account-id": "acct-S8", "user-agent": "codex_exec/0.160.1 (Ubuntu 24.4.0; x86_64) dumb (codex_exec;", "upgrade": null}
+{"method": "GET", "path": "/backend-api/wham/settings/user", "authorization": "placeholder", "chatgpt-account-id": "acct-S8", "user-agent": "codex_exec/0.160.1 (Ubuntu 24.4.0; x86_64) dumb (codex_exec;", "upgrade": null}
+{"method": "GET", "path": "/backend-api/ps/plugins/suggested/codex?scope=GLOBAL", "authorization": "placeholder", "chatgpt-account-id": "acct-S8", "user-agent": "codex_exec/0.160.1 (Ubuntu 24.4.0; x86_64) dumb (codex_exec;", "upgrade": null}
+{"method": "GET", "path": "/backend-api/wham/accounts/check", "authorization": "placeholder", "chatgpt-account-id": "acct-S8", "user-agent": "codex_exec/0.160.1 (Ubuntu 24.4.0; x86_64) dumb (codex_exec;", "upgrade": null}
+{"method": "GET", "path": "/backend-api/wham/accounts/check", "authorization": "placeholder", "chatgpt-account-id": "acct-S8", "user-agent": "codex_exec/0.160.1 (Ubuntu 24.4.0; x86_64) dumb (codex_exec;", "upgrade": null}
+{"method": "GET", "path": "/backend-api/wham/accounts/check", "authorization": "placeholder", "chatgpt-account-id": "acct-S8", "user-agent": "codex_exec/0.160.1 (Ubuntu 24.4.0; x86_64) dumb (codex_exec;", "upgrade": null}
+{"method": "GET", "path": "/backend-api/wham/accounts/check", "authorization": "placeholder", "chatgpt-account-id": "acct-S8", "user-agent": "codex_exec/0.160.1 (Ubuntu 24.4.0; x86_64) dumb (codex_exec;", "upgrade": null}
+{"method": "GET", "path": "/backend-api/wham/accounts/check", "authorization": "placeholder", "chatgpt-account-id": "acct-S8", "user-agent": "codex_exec/0.160.1 (Ubuntu 24.4.0; x86_64) dumb (codex_exec;", "upgrade": null}
+{"method": "GET", "path": "/backend-api/wham/accounts/check", "authorization": "placeholder", "chatgpt-account-id": "acct-S8", "user-agent": "codex_exec/0.160.1 (Ubuntu 24.4.0; x86_64) dumb (codex_exec;", "upgrade": null}
+{"method": "GET", "path": "/backend-api/wham/accounts/check", "authorization": "placeholder", "chatgpt-account-id": "acct-S8", "user-agent": "codex_exec/0.160.1 (Ubuntu 24.4.0; x86_64) dumb (codex_exec;", "upgrade": null}
+{"method": "GET", "path": "/backend-api/wham/accounts/check", "authorization": "placeholder", "chatgpt-account-id": "acct-S8", "user-agent": "codex_exec/0.160.1 (Ubuntu 24.4.0; x86_64) dumb (codex_exec;", "upgrade": null}
+{"method": "GET", "path": "/backend-api/wham/accounts/check", "authorization": "placeholder", "chatgpt-account-id": "acct-S8", "user-agent": "codex_exec/0.160.1 (Ubuntu 24.4.0; x86_64) dumb (codex_exec;", "upgrade": null}
+{"method": "GET", "path": "/backend-api/wham/accounts/check", "authorization": "placeholder", "chatgpt-account-id": "acct-S8", "user-agent": "codex_exec/0.160.1 (Ubuntu 24.4.0; x86_64) dumb (codex_exec;", "upgrade": null}
+{"method": "GET", "path": "/backend-api/wham/accounts/check", "authorization": "placeholder", "chatgpt-account-id": "acct-S8", "user-agent": "codex_exec/0.160.1 (Ubuntu 24.4.0; x86_64) dumb (codex_exec;", "upgrade": null}
+{"method": "GET", "path": "/backend-api/wham/accounts/check", "authorization": "placeholder", "chatgpt-account-id": "acct-S8", "user-agent": "codex_exec/0.160.1 (Ubuntu 24.4.0; x86_64) dumb (codex_exec;", "upgrade": null}
+{"method": "POST", "path": "/backend-api/codex/analytics-events/events", "authorization": "placeholder", "chatgpt-account-id": "acct-S8", "user-agent": "codex_exec/0.160.1 (Ubuntu 24.4.0; x86_64) dumb (codex_exec;", "upgrade": null, "model": null, "tools": [], "tool_output": null}
