@@ -25,19 +25,20 @@ func TestOSS6ForwardClockStepDoesNotFreezePublication(t *testing.T) {
 	must(t, g.p.Queue("artifact", []byte("a")))
 	g.c.t = g.c.t.Add(100 * 365 * 24 * time.Hour)
 	must(t, g.p.Release())
-	if len(g.out.got) != 1 {
-		t.Fatalf("the far-future batch: %+v", g.out.got)
+	if len(g.out.got) != 0 {
+		t.Fatalf("a jump counted as days passing: %+v", g.out.got)
 	}
 	g.day(0, 12*time.Hour)
+	must(t, g.p.Release())
 	must(t, g.p.Queue("artifact", []byte("b")))
 	g.day(1, 12*time.Hour)
 	must(t, g.p.Release())
-	if len(g.out.got) != 2 || g.out.got[1].day != g.c.t.Format("2006-01-02") {
+	if len(g.out.got) != 1 || len(g.out.got[0].batch) != 2 || g.out.got[0].day != g.c.t.Format("2006-01-02") {
 		t.Fatalf("after the clock was corrected: %+v", g.out.got)
 	}
 	k, e, err := g.id.Key()
 	must(t, err)
-	if e != EpochOf(g.c.t) || !bytes.HasPrefix(g.out.got[1].batch[0], k.Public().(ed25519.PublicKey)) {
+	if e != EpochOf(g.c.t) || !bytes.HasPrefix(g.out.got[0].batch[0], k.Public().(ed25519.PublicKey)) {
 		t.Fatalf("signed with a key from the wrong clock: epoch %d", e)
 	}
 }
@@ -50,7 +51,8 @@ func TestOSS6NoSecondBatchForADay(t *testing.T) {
 	g.day(1, 12*time.Hour)
 	must(t, g.p.Release())
 	g.day(0, 12*time.Hour)
-	must(t, g.p.Queue("artifact", []byte("b"))) // due day 1
+	must(t, g.p.Release())
+	must(t, g.p.Queue("artifact", []byte("b")))
 	g.day(1, 13*time.Hour)
 	must(t, g.p.Release())
 	if len(g.out.got) != 1 {
@@ -86,10 +88,12 @@ func TestOSS6LoadedOutboxIsValidated(t *testing.T) {
 	if len(g.out.got) != 1 || len(g.out.got[0].batch) != 1 {
 		t.Fatalf("%+v", g.out.got)
 	}
-	good := `"kind":"artifact","payload":"eA==","due":"2026-01-08"`
+	good := `"kind":"artifact","payload":"eA==","wait":2`
 	for name, body := range map[string]string{
 		"unknown field": `{"items":[],"extra":1}`,
-		"bad due":       `{"items":[{` + strings.Replace(good, "2026-01-08", "tomorrow", 1) + `}]}`,
+		"no wait":       `{"items":[{` + strings.Replace(good, `"wait":2`, `"wait":0`, 1) + `}]}`,
+		"long wait":     `{"items":[{` + strings.Replace(good, `"wait":2`, `"wait":257`, 1) + `}]}`,
+		"bad seen":      `{"items":[],"seen":"today"}`,
 		"empty payload": `{"items":[{` + strings.Replace(good, "eA==", "", 1) + `}]}`,
 		"bad day":       `{"items":[],"days":["2026-1-8"]}`,
 		"bad pending":   `{"items":[],"pending":{"day":"8 Jan","batch":["eA=="]}}`,
@@ -102,7 +106,7 @@ func TestOSS6LoadedOutboxIsValidated(t *testing.T) {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	big := `{"items":[{"kind":"artifact","payload":"` + strings.Repeat("A", (MaxPayload/3+1)*4) + `","due":"2026-01-08"}]}`
+	big := `{"items":[{"kind":"artifact","payload":"` + strings.Repeat("A", (MaxPayload/3+1)*4) + `","wait":1}]}`
 	must(t, os.WriteFile(path, []byte(big), 0o600))
 	if _, err := NewPublisher(Config{Path: path, Identity: g.id, Sender: g.out, Signers: map[string]Signer{"artifact": signer}}); err == nil {
 		t.Error("an oversized payload was accepted")
@@ -126,6 +130,7 @@ func TestOSS6UnsignableItemDoesNotBlockTheOutbox(t *testing.T) {
 	p, err := NewPublisher(Config{Path: filepath.Join(g.dir, "o2.json"), Identity: g.id, Sender: g.out, Now: g.c.now,
 		Signers: map[string]Signer{"artifact": bad}, Rand: g.rand})
 	must(t, err)
+	must(t, p.Release())
 	must(t, p.Queue("artifact", canary))
 	must(t, p.Queue("artifact", []byte("ok")))
 	g.day(1, 12*time.Hour)
@@ -138,11 +143,11 @@ func TestOSS6UnsignableItemDoesNotBlockTheOutbox(t *testing.T) {
 	}
 	// Only the unsignable item, alone: nothing leaves, and it is gone.
 	must(t, p.Queue("artifact", canary))
-	g.day(3, 12*time.Hour)
+	g.day(2, 12*time.Hour)
 	if err := p.Release(); err == nil || p.Len() != 0 || len(g.out.got) != 1 {
 		t.Fatalf("alone: %v, left %d, batches %d", err, p.Len(), len(g.out.got))
 	}
-	g.day(4, 12*time.Hour)
+	g.day(3, 12*time.Hour)
 	must(t, p.Release())
 	if len(g.out.got) != 1 {
 		t.Fatalf("an empty batch went out: %+v", g.out.got)
@@ -181,13 +186,14 @@ func TestOSS6Defaults(t *testing.T) {
 	}
 }
 
-// Items queued under a clock far ahead are redrawn once the clock is
-// right, at release and on load, so they leave and the queue is not
-// frozen (L3 round 2 MUST on #163).
-func TestOSS6FarFutureDueIsRedrawn(t *testing.T) {
+// Items queued under a clock far ahead carry no date, so once the clock
+// is right they leave after their delay and a full queue drains (L3
+// round 2 MUST on #163).
+func TestOSS6FarAheadQueueDrains(t *testing.T) {
 	g := newRig(t, 0)
 	right := g.c.t
 	g.c.t = right.Add(100 * 365 * 24 * time.Hour)
+	must(t, g.p.Release())
 	for i := 0; i < MaxQueue; i++ {
 		must(t, g.p.Queue("artifact", []byte{byte(i), 1}))
 	}
@@ -195,83 +201,82 @@ func TestOSS6FarFutureDueIsRedrawn(t *testing.T) {
 		t.Fatalf("queue: %v", err)
 	}
 	g.c.t = right
-	g.day(1, 12*time.Hour)
-	must(t, g.p.Release()) // redrawn: each waits 1 to MaxDelayDays from now
-	if len(g.out.got) != 0 {
-		t.Fatal("redrawn items left at once")
+	g.reopen(t)
+	must(t, g.p.Release()) // a jump back counts nothing
+	// Queued under a clock no release counted, each waits a day more.
+	for d := 1; d <= 2; d++ {
+		g.day(d, 12*time.Hour)
+		must(t, g.p.Release())
 	}
-	g.day(2, 12*time.Hour)
-	must(t, g.p.Release())
 	if len(g.out.got) != 1 || len(g.out.got[0].batch) != MaxQueue || g.p.Len() != 0 {
 		t.Fatalf("after the clock was corrected: %d batches, %d left", len(g.out.got), g.p.Len())
 	}
-	must(t, g.p.Queue("artifact", []byte("y")))
+}
 
-	// Not on load, which may run before the clock is right; at the next
-	// release.
-	h := newRig(t, 0)
-	h.c.t = right.Add(100 * 365 * 24 * time.Hour)
-	must(t, h.p.Queue("artifact", []byte("z")))
-	far := h.p.st.Items[0].Due
-	h.c.t = right
-	h.reopen(t)
-	if d := h.p.st.Items[0].Due; d != far {
-		t.Fatalf("redrawn on load: %s", d)
-	}
-	must(t, h.p.Release())
-	if d := h.p.st.Items[0].Due; d > day(right.AddDate(0, 0, DefaultMaxDelayDays)) {
-		t.Fatalf("due %s not redrawn at release", d)
-	}
-
-	// The threshold: due redrawAfterDays after today stays, one day more
-	// is redrawn.
-	k := newRig(t, 0)
-	k.day(1, 12*time.Hour)
-	now := k.c.t
-	must(t, k.p.Queue("artifact", []byte("p")))
-	must(t, k.p.Queue("artifact", []byte("q")))
-	edge := day(now.AddDate(0, 0, redrawAfterDays))
-	k.p.st.Items[0].Due, k.p.st.Items[1].Due = edge, day(now.AddDate(0, 0, redrawAfterDays+1))
-	must(t, k.p.Release())
-	if k.p.st.Items[0].Due != edge || k.p.st.Items[1].Due > day(now.AddDate(0, 0, DefaultMaxDelayDays)) {
-		t.Fatalf("threshold: %s, %s", k.p.st.Items[0].Due, k.p.st.Items[1].Due)
+// L3 round 4 MUST 1, as probed: queued at 02:00 with a 3-day delay; a
+// reboot after the release time with the clock 1 to 60 days behind, and a
+// release; the clock is corrected. The item never leaves before its third
+// day, with no reopen in between.
+func TestOSS6ClockBehindKeepsTheDelay(t *testing.T) {
+	for _, back := range []int{1, 2, 10, 25, 26, 27, 28, 29, 40, 60} {
+		g := newRig(t, 2) // every delay is 3 days
+		for d := 1; d < 10; d++ {
+			g.day(d, 12*time.Hour)
+			must(t, g.p.Release())
+		}
+		g.day(10, 2*time.Hour)
+		must(t, g.p.Queue("artifact", []byte("a")))
+		g.day(10-back, 6*time.Hour)
+		must(t, g.p.Release())
+		for d := 10; d < 13; d++ {
+			for h := 6; h < 24; h++ {
+				g.day(d, time.Duration(h)*time.Hour)
+				must(t, g.p.Release())
+			}
+		}
+		if len(g.out.got) != 0 {
+			t.Fatalf("back %d days: left on %s", back, g.out.got[0].day)
+		}
+		for d := 13; d <= 14; d++ {
+			g.day(d, 6*time.Hour)
+			must(t, g.p.Release())
+		}
+		if len(g.out.got) != 1 {
+			t.Fatalf("back %d days: %+v", back, g.out.got)
+		}
 	}
 }
 
-// A clock that steps back (a hardware clock in local time, or by days)
-// never pulls a correct due day in: the item still waits its drawn delay
-// once the clock is right (L3 round 3 MUST on #163).
-func TestOSS6ClockBehindKeepsTheDelay(t *testing.T) {
-	for _, back := range []time.Duration{5 * time.Hour, 10 * 24 * time.Hour, 27 * 24 * time.Hour} {
-		g := newRig(t, 2) // every delay is 3 days
-		g.day(0, 2*time.Hour)
-		queued := g.c.t
-		must(t, g.p.Queue("artifact", []byte("a")))
-		due := g.p.st.Items[0].Due
-		g.c.t = queued.Add(-back)
-		g.reopen(t)
-		must(t, g.p.Release())
-		g.c.t = queued.Add(10 * time.Hour)
-		g.reopen(t)
-		must(t, g.p.Release())
-		if len(g.out.got) != 0 || g.p.st.Items[0].Due != due {
-			t.Fatalf("back %v: published %d, due %s (was %s)", back, len(g.out.got), g.p.st.Items[0].Due, due)
-		}
-		g.day(3, 12*time.Hour)
-		must(t, g.p.Release())
-		if len(g.out.got) != 1 || g.out.got[0].day != due {
-			t.Fatalf("back %v: %+v", back, g.out.got)
-		}
+// A delay longer than any clock threshold is kept whole (L3 round 4 MUST
+// 2): there is no threshold.
+func TestOSS6LongDelayIsKept(t *testing.T) {
+	g := newRig(t, 0)
+	p, err := NewPublisher(Config{Path: filepath.Join(g.dir, "long.json"), Identity: g.id, Sender: g.out, Now: g.c.now,
+		Signers: map[string]Signer{"a": signer}, MaxDelayDays: 60, Rand: fixedRand(59)})
+	must(t, err)
+	g.day(0, 6*time.Hour)
+	must(t, p.Release())
+	must(t, p.Queue("a", []byte("x")))
+	for d := 1; d < 60; d++ {
+		g.day(d, 6*time.Hour)
+		must(t, p.Release())
+	}
+	if len(g.out.got) != 0 {
+		t.Fatalf("a 60-day delay left on %s", g.out.got[0].day)
+	}
+	g.day(60, 6*time.Hour)
+	must(t, p.Release())
+	if len(g.out.got) != 1 {
+		t.Fatal("did not leave on day 60")
 	}
 }
 
 // A clock before the public reference, or too far ahead for a four-digit
-// year, neither queues nor publishes; a clock behind the last batch does
-// not shorten the delay (L3 round 2 SHOULD 1 and 3).
+// year, neither queues nor counts (L3 round 2 SHOULD 3).
 func TestOSS6ImplausibleClock(t *testing.T) {
 	g := newRig(t, 0)
 	right := g.c.t
-	for _, at := range []time.Time{time.Unix(0, 0), Reference.Add(-time.Hour), time.Date(9999, 12, 30, 12, 0, 0, 0, time.UTC)} {
+	for _, at := range []time.Time{time.Unix(0, 0), Reference.Add(-time.Hour), time.Date(10000, 1, 1, 12, 0, 0, 0, time.UTC)} {
 		g.c.t = at
 		if err := g.p.Queue("artifact", []byte("a")); !errors.Is(err, ErrClock) {
 			t.Fatalf("%v: %v", at, err)
@@ -279,57 +284,59 @@ func TestOSS6ImplausibleClock(t *testing.T) {
 	}
 	g.c.t = right
 	must(t, g.p.Queue("artifact", []byte("a")))
-	g.c.t = time.Date(9999, 12, 31, 12, 0, 0, 0, time.UTC)
+	g.c.t = time.Date(10000, 1, 1, 12, 0, 0, 0, time.UTC)
 	must(t, g.p.Release())
-	if len(g.out.got) != 0 {
-		t.Fatal("published in year 9999")
+	if len(g.out.got) != 0 || g.p.st.Seen != day(right) {
+		t.Fatal("counted in year 10000")
 	}
 	g.reopen(t)
-	// Published on day 1; the clock steps back to day -1: what is queued
-	// then still waits at least a day past day 1.
 	g.day(1, 12*time.Hour)
 	must(t, g.p.Release())
-	g.day(-1, 12*time.Hour)
-	must(t, g.p.Queue("artifact", []byte("b")))
-	if d := g.p.st.Items[0].Due; d <= g.out.got[0].day {
-		t.Fatalf("due %s, last batch %s", d, g.out.got[0].day)
+	if len(g.out.got) != 1 {
+		t.Fatal("did not leave once the clock was plausible")
 	}
 }
 
-// A day is never published twice, even after a far-future batch and a
-// corrected clock (L3 round 2 SHOULD 2).
+// A day is never published twice, after a far-future batch and a corrected
+// clock, or after days counted under a clock 5 to 28 days ahead (L3 round
+// 2 SHOULD 2; round 4 SHOULD 1).
 func TestOSS6NoDayTwiceAfterAWrongClock(t *testing.T) {
-	g := newRig(t, 0)
-	must(t, g.p.Queue("artifact", []byte("a")))
-	g.day(1, 12*time.Hour)
-	must(t, g.p.Release())
-	right := g.c.t
-	must(t, g.p.Queue("artifact", []byte("b")))
-	g.c.t = right.Add(100 * 365 * 24 * time.Hour)
-	must(t, g.p.Release())
-	g.c.t = right
-	must(t, g.p.Queue("artifact", []byte("c")))
-	g.day(1, 20*time.Hour)
-	must(t, g.p.Release())
-	if len(g.out.got) != 2 {
-		t.Fatalf("day 1 published again: %+v", g.out.got)
-	}
-	g.day(5, 12*time.Hour)
-	must(t, g.p.Release())
-	if len(g.out.got) != 3 {
-		t.Fatalf("publication did not resume: %d", len(g.out.got))
-	}
-	for i, a := range g.out.got {
-		for _, b := range g.out.got[i+1:] {
-			if a.day == b.day {
-				t.Fatalf("day %s twice", a.day)
+	for _, ahead := range []int{36500, 5, 10, 28} {
+		g := newRig(t, 0)
+		for d := 0; d < 3; d++ {
+			g.day(d, 12*time.Hour)
+			must(t, g.p.Queue("artifact", []byte{byte(d), 1}))
+			must(t, g.p.Release())
+		}
+		// The clock runs ahead for a week, publishing every day.
+		for d := 3; d < 10; d++ {
+			g.day(d+ahead, 12*time.Hour)
+			must(t, g.p.Release())
+			must(t, g.p.Queue("artifact", []byte{byte(d), 2}))
+		}
+		// Corrected, it runs right for two months.
+		for d := 10; d < 70; d++ {
+			g.day(d, 12*time.Hour)
+			must(t, g.p.Release())
+			must(t, g.p.Queue("artifact", []byte{byte(d), 3}))
+		}
+		days := map[string]bool{}
+		for _, b := range g.out.got {
+			if days[b.day] {
+				t.Fatalf("ahead %d: day %s twice", ahead, b.day)
 			}
+			days[b.day] = true
+		}
+		if len(g.out.got) < 60-ahead%60 || g.p.Len() > 1 {
+			t.Fatalf("ahead %d: publication did not resume: %d batches, %d left", ahead, len(g.out.got), g.p.Len())
 		}
 	}
 }
 
-// Temporary files a crash left are swept at start, and an identity
-// directory others can write is refused (L3 round 2 SHOULD 4, nit).
+// Temporary files a crash left are swept at start, and a directory that
+// is a symlink, belongs to another user, or is writable by its group or by
+// anyone is refused, for the identity and the outbox alike (L3 round 2
+// SHOULD 4; round 3 SHOULD 3; round 4 SHOULD 2).
 func TestOSS6StartSweepsAndChecksTheDirectory(t *testing.T) {
 	dir := t.TempDir()
 	stale := filepath.Join(dir, ".pubid-123")
@@ -346,105 +353,68 @@ func TestOSS6StartSweepsAndChecksTheDirectory(t *testing.T) {
 	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("NewPublisher left a stale temporary file")
 	}
-	must(t, os.Chmod(dir, 0o777))
-	defer os.Chmod(dir, 0o700)
-	if _, err := Open(filepath.Join(dir, "pubid.json"), c.now); err == nil {
-		t.Fatal("a directory others can write was accepted")
+	open := func(d string) []error {
+		_, e1 := Open(filepath.Join(d, "pubid.json"), c.now)
+		_, e2 := NewPublisher(Config{Path: filepath.Join(d, "o.json"), Identity: id, Sender: &fakeSender{}, Signers: map[string]Signer{"a": signer}})
+		return []error{e1, e2}
+	}
+	for _, mode := range []os.FileMode{0o720, 0o702, 0o777} {
+		d := filepath.Join(t.TempDir(), "d")
+		must(t, os.Mkdir(d, 0o700))
+		must(t, os.Chmod(d, mode))
+		for _, err := range open(d) {
+			if err == nil {
+				t.Fatalf("mode %o accepted", mode)
+			}
+		}
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	must(t, os.Symlink(dir, link))
+	for _, err := range open(link) {
+		if err == nil {
+			t.Fatal("a symlinked directory was accepted")
+		}
+	}
+	if os.Geteuid() == 0 {
+		d := filepath.Join(t.TempDir(), "theirs")
+		must(t, os.Mkdir(d, 0o700))
+		must(t, os.Chown(d, 4242, 4242))
+		for _, err := range open(d) {
+			if err == nil {
+				t.Fatal("another user's directory was accepted")
+			}
+		}
 	}
 }
 
-// Loading under an implausible clock redraws nothing, so the delay is not
-// lost; the outbox remembers at most maxDays published days.
-func TestOSS6LoadUnderAWrongClockAndDayHistory(t *testing.T) {
+// The outbox remembers the newest maxDays counted days, and a step back of
+// a day publishes nothing; loading under a wrong clock changes nothing.
+func TestOSS6DayHistory(t *testing.T) {
 	g := newRig(t, 0)
 	right := g.c.t
 	must(t, g.p.Queue("artifact", []byte("a")))
-	due := g.p.st.Items[0].Due
 	g.c.t = time.Unix(0, 0)
 	g.reopen(t)
 	g.c.t = right
 	g.reopen(t)
-	if d := g.p.st.Items[0].Due; d != due {
-		t.Fatalf("due moved from %s to %s under a wrong clock", due, d)
+	if it := g.p.st.Items[0]; it.Wait != 1 {
+		t.Fatalf("item changed under a wrong clock: %+v", it)
 	}
 	for n := 1; n <= maxDays+6; n++ {
-		g.day(n-1, 13*time.Hour)
-		must(t, g.p.Queue("artifact", []byte{byte(n), 2}))
 		g.day(n, 12*time.Hour)
 		must(t, g.p.Release())
+		must(t, g.p.Queue("artifact", []byte{byte(n), byte(n >> 8), 2}))
 	}
 	if len(g.p.st.Days) != maxDays || g.p.st.Days[maxDays-1] != g.out.got[len(g.out.got)-1].day {
 		t.Fatalf("%d days remembered, newest %s", len(g.p.st.Days), g.p.st.Days[len(g.p.st.Days)-1])
 	}
-	// A one-day step back publishes nothing.
 	n := len(g.out.got)
 	g.day(maxDays+5, 13*time.Hour)
-	must(t, g.p.Queue("artifact", []byte("late")))
-	g.p.st.Items[len(g.p.st.Items)-1].Due = day(g.c.t)
+	must(t, g.p.Release())
+	g.day(maxDays+6, 13*time.Hour)
 	must(t, g.p.Release())
 	if len(g.out.got) != n {
-		t.Fatal("published again after a one-day step back")
-	}
-	g.reopen(t)
-	path := filepath.Join(g.dir, "outbox.json")
-	days := `"` + strings.TrimSuffix(strings.Repeat(`2026-01-08","`, maxDays+1), `","`) + `"`
-	must(t, os.WriteFile(path, []byte(`{"items":[],"days":[`+days+`]}`), 0o600))
-	if _, err := NewPublisher(Config{Path: path, Identity: g.id, Sender: g.out, Signers: map[string]Signer{"a": signer}}); err == nil {
-		t.Fatal("an outbox with too many days was accepted")
-	}
-}
-
-// Days from a clock far ahead never push real days out of the history, so
-// no real day is published twice (L3 round 3 SHOULD 1 on #163).
-func TestOSS6FarDaysNeverEvictRealOnes(t *testing.T) {
-	g := newRig(t, 0)
-	must(t, g.p.Queue("artifact", []byte("a")))
-	g.day(1, 12*time.Hour)
-	must(t, g.p.Release())
-	real := g.out.got[0].day
-	right := g.c.t
-	ahead := right.Add(100 * 365 * 24 * time.Hour)
-	for i := 0; i < maxDays+1; i++ {
-		g.c.t = ahead.AddDate(0, 0, i-1)
-		must(t, g.p.Queue("artifact", []byte{byte(i), 3}))
-		g.c.t = ahead.AddDate(0, 0, i)
-		must(t, g.p.Release())
-	}
-	if len(g.out.got) != maxDays+2 {
-		t.Fatalf("far batches %d", len(g.out.got)-1)
-	}
-	g.c.t = right.Add(-3 * 24 * time.Hour)
-	must(t, g.p.Queue("artifact", []byte("b")))
-	g.p.st.Items[0].Due = real
-	g.c.t = right.Add(8 * time.Hour)
-	must(t, g.p.Release())
-	if len(g.out.got) != maxDays+2 {
-		t.Fatalf("day %s published twice", real)
-	}
-}
-
-// Trim keeps the newest maxEnds days that end a run before a far jump,
-// then the newest of the rest, and nothing more.
-func TestOSS6TrimKeepsTheNewestEnds(t *testing.T) {
-	base := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
-	var days, ends []string
-	for i := 0; i < maxEnds+2; i++ {
-		d := day(base.AddDate(0, 0, 30*i))
-		days, ends = append(days, d), append(ends, d)
-	}
-	start := base.AddDate(0, 0, 30*(maxEnds+2))
-	for i := 0; i < maxDays; i++ {
-		days = append(days, day(start.AddDate(0, 0, i)))
-	}
-	got := (&Publisher{}).trim(append([]string(nil), days...))
-	// The newest day is itself an end, so maxEnds-1 isolated days stay.
-	want := append(append([]string(nil), ends[3:]...), days[len(days)-(maxDays-maxEnds+1):]...)
-	if fmt.Sprint(got) != fmt.Sprint(want) {
-		t.Fatalf("trim:\n got %v\nwant %v", got, want)
-	}
-	short := days[:5]
-	if got := (&Publisher{}).trim(append([]string(nil), short...)); fmt.Sprint(got) != fmt.Sprint(short) {
-		t.Fatalf("short history trimmed: %v", got)
+		t.Fatal("a day was published twice after a one-day step back")
 	}
 }
 

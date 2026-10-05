@@ -57,6 +57,8 @@ func newRig(t *testing.T, r fixedRand) *rig {
 	g.id, err = Open(filepath.Join(g.dir, "pubid.json"), g.c.now)
 	must(t, err)
 	g.reopen(t)
+	// The broker's timer has run today, as it does on a running box.
+	must(t, g.p.Release())
 	return g
 }
 
@@ -146,27 +148,36 @@ func TestOSS6BatchIsSortedSignedAndOncePerDay(t *testing.T) {
 }
 
 // A clock stepped back behind the last published day publishes nothing
-// until it is past that day again.
+// until it is past that day again, and what is queued meanwhile still
+// waits its delay.
 func TestOSS6ClockSteppedBackPublishesNothing(t *testing.T) {
 	g := newRig(t, 0)
 	must(t, g.p.Queue("artifact", []byte("a")))
 	g.day(1, 12*time.Hour)
 	must(t, g.p.Release())
 	must(t, g.p.Queue("artifact", []byte("b")))
-	g.day(5, 12*time.Hour)
-	must(t, g.p.Release()) // b leaves on day 5
+	g.day(2, 12*time.Hour)
+	must(t, g.p.Release()) // b leaves on day 2
 	must(t, g.p.Queue("artifact", []byte("c")))
 	g.day(-1, 12*time.Hour)
-	must(t, g.p.Queue("artifact", []byte("d"))) // due day 0, before the last batch
-	g.day(3, 12*time.Hour)
 	must(t, g.p.Release())
+	must(t, g.p.Queue("artifact", []byte("d")))
+	for d := 0; d <= 2; d++ {
+		g.day(d, 12*time.Hour)
+		must(t, g.p.Release())
+	}
 	if len(g.out.got) != 2 {
 		t.Fatalf("published with the clock behind the last batch: %+v", g.out.got)
 	}
-	g.day(6, 12*time.Hour)
+	g.day(3, 12*time.Hour)
 	must(t, g.p.Release())
-	if len(g.out.got) != 3 || len(g.out.got[2].batch) != 2 {
+	if len(g.out.got) != 3 || len(g.out.got[2].batch) != 1 {
 		t.Fatalf("after the clock caught up: %+v", g.out.got)
+	}
+	g.day(4, 12*time.Hour)
+	must(t, g.p.Release())
+	if len(g.out.got) != 4 || g.p.Len() != 0 {
+		t.Fatalf("d: %+v", g.out.got)
 	}
 }
 
@@ -191,6 +202,7 @@ func TestOSS6FailedBatchIsResentUnchanged(t *testing.T) {
 	if len(g.out.got) != 2 || g.out.got[1].day != first.day || !bytes.Equal(g.out.got[1].batch[0], first.batch[0]) || len(g.out.got[1].batch) != 1 {
 		t.Fatalf("resend %+v, want %+v", g.out.got[1], first)
 	}
+	must(t, g.p.Release()) // sees the new day after a jump: it does not count
 	// The next release forms the next batch, with b, under the new key.
 	g.c.t = g.c.t.Add(24 * time.Hour)
 	must(t, g.p.Release())

@@ -10,8 +10,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -29,17 +31,10 @@ const (
 	MaxQueue = 256
 	// MaxPayload bounds one item's bytes before signing.
 	MaxPayload = 1 << 20
-	// maxDays is how many published days the outbox remembers, so no day
-	// is published twice even after a wrong clock is corrected.
-	maxDays = 64
-	// maxEnds bounds the days trim keeps from before clock jumps.
-	maxEnds = 8
-	// redrawAfterDays: an item due more than this many days after today
-	// was queued under a clock that was wrong, far beyond any plausible
-	// clock error (a clock kept in local time, a step back of days), so it
-	// gets a new draw. Smaller would let a clock behind pull a correct due
-	// day in and lose the delay (L3 round 3 on #163).
-	redrawAfterDays = 28
+	// maxDays is how many counted days the outbox remembers, newest by
+	// date, so no day counts twice (or gets two batches) unless the clock
+	// falls behind further than that.
+	maxDays = 400
 )
 
 // ErrFull means MaxQueue items are already waiting.
@@ -78,7 +73,9 @@ type Config struct {
 type item struct {
 	Kind    string `json:"kind"`
 	Payload []byte `json:"payload"`
-	Due     string `json:"due"` // UTC day it may leave
+	// Wait is how many more counted days the item waits; it leaves on the
+	// day that brings it to zero.
+	Wait int `json:"wait"`
 }
 
 type formed struct {
@@ -86,10 +83,30 @@ type formed struct {
 	Batch [][]byte `json:"batch"`
 }
 
+// The clock model (L3 round 4 on #163). The wall clock is the only time
+// the box has across restarts, and it can be wrong by any amount in
+// either direction and change at any moment (a reboot, NTP). So no item
+// carries a date. A day counts when a release sees it follow the last day
+// a release saw, by exactly one, and it was never counted before; a batch
+// forms only on a counted day. Hence:
+//
+//   - An item with delay k leaves on the k'th counted day after it was
+//     queued, so no sooner than k-1 days and the release time after it,
+//     as with a right clock. A clock that jumps, behind or ahead or back
+//     again, counts nothing. Only a change that moves the clock on by
+//     hours, or the date on by exactly one, shortens a wait, by that much:
+//     the same as a clock simply that wrong (TestOSS6ClockModel).
+//   - No remembered day gets two batches.
+//   - No date can freeze the outbox: any clock that then runs day by day
+//     counts again.
+//
+// Days the box was off, or saw no release, do not count: they only make
+// the wait longer.
 type outbox struct {
 	Items []item `json:"items"`
-	// Days are the days batches were published for, newest maxDays.
+	// Days are the counted days, newest maxDays by date.
 	Days    []string `json:"days"`
+	Seen    string   `json:"seen,omitempty"`    // the day the last release saw
 	Pending *formed  `json:"pending,omitempty"` // formed, not confirmed sent
 }
 
@@ -156,8 +173,6 @@ func NewPublisher(cfg Config) (*Publisher, error) {
 		if err != nil {
 			return nil, fmt.Errorf("pubid: outbox %s: %w", cfg.Path, err)
 		}
-		// No redraw here: a load runs just after boot, maybe before the
-		// clock is right (L3 round 3 on #163).
 		if dropped {
 			if err := p.save(); err != nil {
 				return nil, err
@@ -179,15 +194,18 @@ func (p *Publisher) validate() (bool, error) {
 	}
 	for _, d := range p.st.Days {
 		if !isDay(d) {
-			return false, errors.New("bad published day")
+			return false, errors.New("bad counted day")
 		}
+	}
+	if p.st.Seen != "" && !isDay(p.st.Seen) {
+		return false, errors.New("bad seen day")
 	}
 	if f := p.st.Pending; f != nil && (!isDay(f.Day) || len(f.Batch) == 0) {
 		return false, errors.New("bad pending batch")
 	}
 	var keep []item
 	for _, it := range p.st.Items {
-		if !isDay(it.Due) || len(it.Payload) == 0 || len(it.Payload) > MaxPayload {
+		if it.Wait < 1 || it.Wait > maxWait || len(it.Payload) == 0 || len(it.Payload) > MaxPayload {
 			return false, errors.New("bad item")
 		}
 		if p.cfg.Signers[it.Kind] != nil {
@@ -204,70 +222,51 @@ func isDay(s string) bool {
 	return err == nil && day(t) == s
 }
 
-// plausible: the clock is on or after the public reference, and a full
-// delay from now still has a four-digit year. A clock outside that (unset
-// before NTP, or set absurdly far ahead) neither queues nor publishes
-// (L3 round 2 on #163).
-func (p *Publisher) plausible(now time.Time) bool {
-	return !now.Before(Reference) && now.AddDate(0, 0, p.cfg.MaxDelayDays+1).Year() <= 9999
+// plausible: the clock is on or after the public reference and its date
+// has a four-digit year. A clock outside that (unset before NTP, or set
+// absurdly far ahead) neither queues nor counts (L3 round 2 on #163).
+func plausible(now time.Time) bool {
+	return !now.Before(Reference) && now.Year() <= 9999
 }
 
-// last is the newest published day no further ahead of today than an item
-// can wait: a later one came from a clock that was wrong, and holding
-// publication back for it would freeze the outbox (L3 MUST 1 on #163).
-func (p *Publisher) last(today time.Time) string {
-	limit := day(today.AddDate(0, 0, p.cfg.MaxDelayDays+1))
-	l := ""
-	for _, d := range p.st.Days {
-		if d > l && d <= limit {
-			l = d
-		}
-	}
-	return l
-}
+// maxWait bounds an item's wait: the largest delay, plus the day it came.
+const maxWait = 256
 
-// draw picks an item's leaving day: 1 to MaxDelayDays days after the
-// later of today and the last published day, so a clock behind the last
-// batch cannot shorten the delay.
-func (p *Publisher) draw(now time.Time) (string, error) {
+// draw picks an item's delay, 1 to MaxDelayDays counted days.
+func (p *Publisher) draw() (int, error) {
 	var r [1]byte
 	if _, err := io.ReadFull(p.cfg.Rand, r[:]); err != nil {
-		return "", err
+		return 0, err
 	}
-	base := now.UTC()
-	if l := p.last(base); l > day(base) {
-		base, _ = time.Parse("2006-01-02", l)
-	}
-	return day(base.AddDate(0, 0, 1+int(r[0])%p.cfg.MaxDelayDays)), nil
+	return 1 + int(r[0])%p.cfg.MaxDelayDays, nil
 }
 
-// redraw gives a new leaving day to every item due more than
-// redrawAfterDays after today, as one queued under a clock far ahead
-// would be; otherwise it would never leave, or fill the queue for good
-// (L3 round 2 on #163). Only Release calls it, with a plausible clock past
-// the last published day.
-func (p *Publisher) redraw(now time.Time) error {
-	limit := day(now.AddDate(0, 0, redrawAfterDays))
-	for i := range p.st.Items {
-		if p.st.Items[i].Due <= limit {
-			continue
-		}
-		d, err := p.draw(now)
-		if err != nil {
-			return err
-		}
-		p.st.Items[i].Due = d
+// counts reports whether a release on today counts: today follows the
+// day the last release saw by exactly one, and was never counted.
+func (p *Publisher) counts(today string) bool {
+	if slices.Contains(p.st.Days, today) {
+		return false
 	}
-	return nil
+	if p.st.Seen == "" {
+		return true
+	}
+	t, _ := time.Parse("2006-01-02", p.st.Seen)
+	return day(t.AddDate(0, 0, 1)) == today
 }
 
-// checkDir refuses a directory others can write.
+// checkDir refuses a directory that is a symlink, belongs to another
+// user, or others can write: any of these lets someone else swap the
+// files in it (L3 round 4 on #163).
 func checkDir(dir string) error {
-	fi, err := os.Stat(dir)
+	fi, err := os.Lstat(dir)
 	if err != nil {
 		return err
 	}
-	if fi.Mode().Perm()&0o022 != 0 {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	switch {
+	case !ok || int(st.Uid) != os.Geteuid():
+		return fmt.Errorf("pubid: %s belongs to another user", dir)
+	case fi.Mode().Perm()&0o022 != 0:
 		return fmt.Errorf("pubid: %s is writable by others", dir)
 	}
 	return nil
@@ -292,7 +291,7 @@ func sweepTemp(dir string) error {
 func day(t time.Time) string { return t.UTC().Format("2006-01-02") }
 
 // Queue holds payload for publication as kind. It leaves in the batch of
-// a day 1 to MaxDelayDays after today, drawn now. A refusal never echoes
+// the 1st to MaxDelayDays'th counted day after today, drawn now. A refusal never echoes
 // the payload.
 func (p *Publisher) Queue(kind string, payload []byte) error {
 	if p.cfg.Signers[kind] == nil {
@@ -304,17 +303,22 @@ func (p *Publisher) Queue(kind string, payload []byte) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := p.cfg.Now().UTC()
-	if !p.plausible(now) {
+	if !plausible(now) {
 		return ErrClock
 	}
 	if len(p.st.Items) >= MaxQueue {
 		return ErrFull
 	}
-	due, err := p.draw(now)
+	wait, err := p.draw()
 	if err != nil {
 		return err
 	}
-	p.st.Items = append(p.st.Items, item{Kind: kind, Payload: append([]byte(nil), payload...), Due: due})
+	// Unless a release already counted today, the next counted day may be
+	// today itself, which must not count for the item.
+	if t := day(now); t != p.st.Seen || !slices.Contains(p.st.Days, t) {
+		wait++
+	}
+	p.st.Items = append(p.st.Items, item{Kind: kind, Payload: append([]byte(nil), payload...), Wait: wait})
 	if err := p.save(); err != nil {
 		p.st.Items = p.st.Items[:len(p.st.Items)-1]
 		return err
@@ -350,68 +354,71 @@ func (p *Publisher) Len() int {
 	return len(p.st.Items)
 }
 
-// Release publishes today's batch once the release time has passed: every
-// due item, signed now with the epoch's key, sorted by its signed bytes.
-// At most one batch a day: none on or behind the last plausible published
-// day, so no day is published twice. Items due
-// further ahead than an item can wait are redrawn first. A clock that is
-// not plausible publishes nothing. An item that fails to sign is dropped, so it cannot hold the
-// others back; the error says how many. A batch formed earlier and not
-// confirmed is resent unchanged, for its own day, and no new batch is
-// formed in that call. Only a fixed broker timer may call it: when it runs
-// is when the batch leaves.
+// Release publishes today's batch once the release time has passed, if
+// today counts (the clock model above): every item whose wait it ends,
+// signed now with the epoch's key, sorted by its signed bytes. A clock
+// that is not plausible publishes nothing. An item that fails to sign is
+// dropped, so it cannot hold the others back; the error says how many. A
+// batch formed earlier and not confirmed is resent unchanged, for its own
+// day, and no new batch is formed in that call. Only a fixed broker timer
+// may call it, more than once a day so no day is missed: when it runs is
+// when the batch leaves.
 func (p *Publisher) Release() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := p.cfg.Now().UTC()
 	today := day(now)
-	if now.Sub(now.Truncate(24*time.Hour)) < p.cfg.ReleaseAt || !p.plausible(now) {
+	if now.Sub(now.Truncate(24*time.Hour)) < p.cfg.ReleaseAt || !plausible(now) {
 		return nil
 	}
 	if p.st.Pending != nil {
 		return p.send()
 	}
-	if today <= p.last(now) {
-		return nil
+	if today == p.st.Seen {
+		return nil // nothing new, and no write on every tick of the timer
 	}
-	// Saved with the batch below; if none forms, the next release redraws again.
-	if err := p.redraw(now); err != nil {
-		return err
+	old := p.st
+	if !p.counts(today) {
+		p.st.Seen = today
+		if err := p.save(); err != nil {
+			p.st = old
+			return err
+		}
+		return nil
 	}
 	var due, rest []item
 	for _, it := range p.st.Items {
-		if it.Due <= today {
+		if it.Wait--; it.Wait == 0 {
 			due = append(due, it)
 		} else {
 			rest = append(rest, it)
 		}
 	}
-	if len(due) == 0 {
-		return nil
-	}
-	priv, _, err := p.cfg.Identity.Key()
-	if err != nil {
-		return err
-	}
-	batch := make([][]byte, 0, len(due))
+	var batch [][]byte
 	failed := 0
-	for _, it := range due {
-		b, err := p.cfg.Signers[it.Kind](priv, it.Payload)
+	if len(due) > 0 {
+		priv, _, err := p.cfg.Identity.Key()
 		if err != nil {
-			failed++
-			continue
+			return err
 		}
-		batch = append(batch, b)
+		for _, it := range due {
+			b, err := p.cfg.Signers[it.Kind](priv, it.Payload)
+			if err != nil {
+				failed++
+				continue
+			}
+			batch = append(batch, b)
+		}
+		clear(priv)
 	}
-	clear(priv)
 	var ferr error
 	if failed > 0 {
 		// The signer's error may quote the payload, so it is not passed on.
 		ferr = fmt.Errorf("pubid: %d items could not be signed and were dropped", failed)
 	}
 	sort.Slice(batch, func(i, j int) bool { return bytes.Compare(batch[i], batch[j]) < 0 })
-	old := p.st
-	p.st.Items = rest
+	p.st.Items, p.st.Seen = rest, today
+	p.st.Days = trim(append(slices.Clone(p.st.Days), today))
 	if len(batch) > 0 {
 		p.st.Pending = &formed{Day: today, Batch: batch}
 	}
@@ -425,54 +432,24 @@ func (p *Publisher) Release() error {
 	return errors.Join(p.send(), ferr)
 }
 
-// send publishes the pending batch and, once the sender accepts it,
-// records its day as published.
+// send publishes the pending batch; once the sender accepts it, the batch
+// is done.
 func (p *Publisher) send() error {
 	f := p.st.Pending
 	if err := p.cfg.Sender.Publish(f.Day, f.Batch); err != nil {
 		return fmt.Errorf("pubid: publishing %s: %w", f.Day, err)
 	}
-	p.st.Pending, p.st.Days = nil, p.trim(append(p.st.Days, f.Day))
+	p.st.Pending = nil
 	return p.save()
 }
 
-// trim keeps at most maxDays published days: the newest day before each
-// jump of more than redrawAfterDays (the true newest day when a clock was
-// far ahead, so it is never pushed out and never published again; the
-// newest maxEnds such days), then the newest of the rest (L3 round 3 on
-// #163).
-func (p *Publisher) trim(days []string) []string {
+// trim keeps the newest maxDays days by date. A clock that ran ahead
+// leaves the days it counted at the top, which the true clock reaches
+// later; what drops out is the oldest, which only a clock behind by more
+// than the remembered span reaches again.
+func trim(days []string) []string {
 	sort.Strings(days)
-	var ends []string
-	for i, d := range days {
-		if i == len(days)-1 || gap(d, days[i+1]) > redrawAfterDays {
-			ends = append(ends, d)
-		}
-	}
-	if len(ends) > maxEnds {
-		ends = ends[len(ends)-maxEnds:]
-	}
-	keep := map[string]bool{}
-	for _, d := range ends {
-		keep[d] = true
-	}
-	for i := len(days) - 1; i >= 0 && len(keep) < maxDays; i-- {
-		keep[days[i]] = true
-	}
-	out := days[:0]
-	for _, d := range days {
-		if keep[d] {
-			out = append(out, d)
-		}
-	}
-	return out
-}
-
-// gap is how many days b is after a (both valid days).
-func gap(a, b string) int {
-	ta, _ := time.Parse("2006-01-02", a)
-	tb, _ := time.Parse("2006-01-02", b)
-	return int(tb.Sub(ta) / (24 * time.Hour))
+	return days[max(0, len(days)-maxDays):]
 }
 
 func (p *Publisher) save() error {
