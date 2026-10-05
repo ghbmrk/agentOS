@@ -33,6 +33,15 @@ const PolicyKeyName = "pcr-policy-key"
 // lockout authorization, one per TPM, followed by part of its SRK name.
 const lockoutAuthPrefix = "tpm-lockout-"
 
+// daOriginalPrefix names the vault entries keeping a trusted PC's own TPM
+// dictionary-attack settings while a boot PIN slot has replaced them
+// (HOST-1f); daValuePrefix versions their value and gives it the vault's
+// minimum length.
+const (
+	daOriginalPrefix = "tpm-da-"
+	daValuePrefix    = "tpm-da-v1 "
+)
+
 // maxPolicies bounds the approved boot paths kept; the oldest go first.
 const maxPolicies = 16
 
@@ -785,6 +794,11 @@ func takeLockout(v *vault.Vault, t transport.TPM, id []byte) error {
 		s, _ := v.Secret(name)
 		auth, held = []byte(s.Reveal()), true
 	}
+	// The PC's own settings go into the vault, durably, before the TPM
+	// is changed (Security H3 on HOST-1f).
+	if err := keepDAOriginal(v, t, id); err != nil {
+		return err
+	}
 	if !held {
 		var err error
 		if auth, err = tpmseal.NewLockoutAuth(); err != nil {
@@ -807,7 +821,14 @@ func takeLockout(v *vault.Vault, t transport.TPM, id []byte) error {
 
 // lockoutAuthName is the vault entry for the TPM whose SRK name is id: the
 // first 16 bytes of the name's digest, in hex.
-func lockoutAuthName(id []byte) string {
+func lockoutAuthName(id []byte) string { return lockoutAuthPrefix + tpmTag(id) }
+
+// daOriginalName is the entry keeping that TPM's own dictionary-attack
+// settings. It is bound to the TPM as the lockout entry is, so one PC's
+// settings are never written into another's (Security H2 on HOST-1f).
+func daOriginalName(id []byte) string { return daOriginalPrefix + tpmTag(id) }
+
+func tpmTag(id []byte) string {
 	d := id
 	if len(d) > 2 {
 		d = d[2:] // drop the name's hash algorithm
@@ -815,7 +836,35 @@ func lockoutAuthName(id []byte) string {
 	if len(d) > 16 {
 		d = d[:16]
 	}
-	return lockoutAuthPrefix + hex.EncodeToString(d)
+	return hex.EncodeToString(d)
+}
+
+// keepDAOriginal keeps the TPM's dictionary-attack settings in the vault
+// while they are still the PC's own: only while the lockout authorization
+// is empty, since the box sets its own settings only then, and never over
+// an entry already kept, which holds the first, true originals (a take cut
+// off midway, or a TPM cleared under a held PIN, would otherwise replace
+// them with the box's).
+func keepDAOriginal(v *vault.Vault, t transport.TPM, id []byte) error {
+	name := daOriginalName(id)
+	for _, e := range v.List() {
+		if e.Name != name {
+			continue
+		}
+		if e.Kind != vault.KindTPMDAOriginal {
+			return errors.New("dictionary-attack settings entry has the wrong kind")
+		}
+		return nil
+	}
+	set, err := tpmseal.LockoutAuthSet(t)
+	if err != nil || set {
+		return err
+	}
+	p, err := tpmseal.ReadDA(t)
+	if err != nil {
+		return err
+	}
+	return v.Put(name, vault.KindTPMDAOriginal, []byte(daValuePrefix+p.String()))
 }
 
 func (h *tpmHost) clock() time.Time {
@@ -881,24 +930,56 @@ func (h *tpmHost) remove(v *vault.Vault, id string) (int, error) {
 // retried at each unattended start. Caller holds mu.
 func (h *tpmHost) giveBack(v *vault.Vault, t transport.TPM, id []byte) {
 	name := lockoutAuthName(id)
-	if !hasKind(v, name, vault.KindTPMLockoutAuth) {
+	if hasKind(v, name, vault.KindTPMLockoutAuth) {
+		s, _ := v.Secret(name)
+		auth := []byte(s.Reveal())
+		err := tpmseal.ReleaseLockout(t, auth)
+		clear(auth)
+		switch {
+		case errors.Is(err, tpmseal.ErrLockoutOwned):
+			// Proved stale: retrying would only re-arm the TPM's lockout.
+			// The settings it guards are the other system's now.
+			h.say("Another system on this PC now controls the TPM's lockout, so the box has forgotten its own copy.")
+			if hasKind(v, daOriginalName(id), vault.KindTPMDAOriginal) {
+				v.Delete(daOriginalName(id))
+			}
+		case err != nil:
+			h.say("couldn't give the TPM's lockout back to this PC yet; the box will try again at each restart")
+			return
+		}
+		if err := v.Delete(name); err != nil {
+			h.say("couldn't remove the box's copy of the TPM lockout from the vault: " + err.Error())
+			return
+		}
+	}
+	h.restoreDA(v, t, id)
+}
+
+// restoreDA puts this TPM's own dictionary-attack settings back once the
+// lockout authorization is given back (HOST-1f). tpmseal.RestoreDA reads
+// whether the authorization is empty before sending anything, so a lockout
+// another system set since is never tried (Security H1); the entry is then
+// dropped and the owner told once. A malformed entry is never written and
+// stays (H4); any other failure stays for the next unattended start (D4).
+// Caller holds mu.
+func (h *tpmHost) restoreDA(v *vault.Vault, t transport.TPM, id []byte) {
+	name := daOriginalName(id)
+	if !hasKind(v, name, vault.KindTPMDAOriginal) {
 		return
 	}
 	s, _ := v.Secret(name)
-	auth := []byte(s.Reveal())
-	err := tpmseal.ReleaseLockout(t, auth)
-	clear(auth)
-	switch {
-	case errors.Is(err, tpmseal.ErrLockoutOwned):
-		// Proved stale: retrying would only re-arm the TPM's lockout.
-		h.say("Another system on this PC now controls the TPM's lockout, so the box has forgotten its own copy.")
-	case err != nil:
-		h.say("couldn't give the TPM's lockout back to this PC yet; the box will try again at each restart")
+	raw, ok := strings.CutPrefix(s.Reveal(), daValuePrefix)
+	p, err := tpmseal.ParseDA(raw)
+	if !ok || err != nil {
 		return
 	}
-	if err := v.Delete(name); err != nil {
-		h.say("couldn't remove the box's copy of the TPM lockout from the vault: " + err.Error())
+	switch err := tpmseal.RestoreDA(t, p); {
+	case errors.Is(err, tpmseal.ErrLockoutSet):
+		h.say("Another system on this PC now controls its security chip's lockout, so I couldn't put back the chip's limit on wrong guesses.")
+	case err != nil:
+		return
 	}
+	v.Delete(name)
 }
 
 func (h *tpmHost) say(s string) {

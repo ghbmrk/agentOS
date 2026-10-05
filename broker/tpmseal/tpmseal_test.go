@@ -1,6 +1,6 @@
 package tpmseal_test
 
-// REQ: CRED-8, HW-5a, A8
+// REQ: CRED-8, HW-5a, A8, HW-8
 
 import (
 	"bytes"
@@ -489,5 +489,80 @@ func TestReleaseWithStaleValue(t *testing.T) {
 	// refused for the moment, and that is not ErrLockoutOwned.
 	if err := tpmseal.ReleaseLockout(s.TPM(), auth); err == nil || errors.Is(err, tpmseal.ErrLockoutOwned) {
 		t.Fatalf("right value during lockout: got %v", err)
+	}
+}
+
+// HOST-1f (HW-8, D7): the dictionary-attack settings a PIN slot changes
+// are read first and can be put back exactly as they were, only while the
+// lockout authorization is empty: with it set, RestoreDA sends nothing
+// that needs it (Security H1), so the hierarchy is not locked by a probe.
+func TestDASettingsAreGivenBackAsTheyWere(t *testing.T) {
+	s := swtpm.Start(t)
+	orig := tpmseal.DAParams{MaxTries: 7, Interval: 600, Recovery: 3600}
+	if err := tpmseal.RestoreDA(s.TPM(), orig); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := tpmseal.ReadDA(s.TPM()); err != nil || got != orig {
+		t.Fatalf("read %+v, %v; want %+v", got, err, orig)
+	}
+	auth, _ := tpmseal.NewLockoutAuth()
+	if err := tpmseal.TakeLockout(s.TPM(), auth, false); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := tpmseal.ReadDA(s.TPM()); got != tpmseal.PINDA {
+		t.Fatalf("PIN slot's settings %+v, want %+v", got, tpmseal.PINDA)
+	}
+	if set, err := tpmseal.LockoutAuthSet(s.TPM()); err != nil || !set {
+		t.Fatalf("lockout authorization set: %v, %v", set, err)
+	}
+	if err := tpmseal.RestoreDA(s.TPM(), orig); !errors.Is(err, tpmseal.ErrLockoutSet) {
+		t.Fatalf("restore while the box holds the lockout: %v", err)
+	}
+	// Nothing was tried against the lockout authorization: the box's own
+	// value still works at once (a wrong one would lock it for a day).
+	if err := tpmseal.TakeLockout(s.TPM(), auth, true); err != nil {
+		t.Fatalf("lockout hierarchy disturbed by the refused restore: %v", err)
+	}
+	if err := tpmseal.ReleaseLockout(s.TPM(), auth); err != nil {
+		t.Fatal(err)
+	}
+	if err := tpmseal.RestoreDA(s.TPM(), orig); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := tpmseal.ReadDA(s.TPM()); got != orig {
+		t.Fatalf("after release and restore %+v, want %+v", got, orig)
+	}
+	// MaxTries 0 (no protection) is what some PCs have; it is put back too.
+	none := tpmseal.DAParams{MaxTries: 0, Interval: 0, Recovery: 0}
+	if err := tpmseal.RestoreDA(s.TPM(), none); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := tpmseal.ReadDA(s.TPM()); got != none {
+		t.Fatalf("zero settings %+v", got)
+	}
+}
+
+// Security H4: a stored triple is exactly three decimal uint32 values in
+// the form String writes; anything else is refused, never written.
+func TestParseDAIsStrict(t *testing.T) {
+	p := tpmseal.DAParams{MaxTries: 32, Interval: 7200, Recovery: 86400}
+	got, err := tpmseal.ParseDA(p.String())
+	if err != nil || got != p {
+		t.Fatalf("round trip %+v, %v", got, err)
+	}
+	if p.String() != "32,7200,86400" {
+		t.Fatalf("format %q", p.String())
+	}
+	if got, err := tpmseal.ParseDA("0,0,0"); err != nil || got != (tpmseal.DAParams{}) {
+		t.Fatalf("zeros: %+v, %v", got, err)
+	}
+	if got, err := tpmseal.ParseDA("4294967295,1,2"); err != nil || got.MaxTries != 4294967295 {
+		t.Fatalf("max uint32: %+v, %v", got, err)
+	}
+	for _, bad := range []string{"", "32", "32,7200", "32,7200,86400,1", " 32,7200,86400", "32,7200,86400\n",
+		"+32,7200,86400", "-1,7200,86400", "032,7200,86400", "4294967296,1,2", "32,,86400", "0x20,7200,86400", "32, 7200,86400"} {
+		if _, err := tpmseal.ParseDA(bad); err == nil {
+			t.Errorf("ParseDA(%q) accepted", bad)
+		}
 	}
 }

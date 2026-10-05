@@ -20,7 +20,7 @@ This is the whole list. A few small things are stored in the PC's own firmware a
 - <!-- host-change: loader-system-token --> **One random number in the PC's firmware.** AgentOS's start-up program stores it the first time, so that each start begins with fresh randomness. It holds nothing about you.
 - <!-- host-change: tpm-srk --> **A standard key in the PC's security chip (TPM), if the chip has none yet.** Most Windows PCs already have it.
 - <!-- host-change: tpm-vault-counter --> **On a PC you trust: one counter in the security chip for each AgentOS drive you trust it with.** It only counts up, so an old copy of your drive cannot pretend to be the current one. It stays in the chip after the drive is gone; it holds nothing about you.
-- <!-- host-change: tpm-lockout --> **If you turn on a start-up PIN: the security chip's lockout setting.** The box holds it while the PIN is on, so wrong PINs stay limited. When you turn the PIN off it gives the setting back; the limit on wrong guesses it set stays. Wrong PINs count toward the chip's limit, which Windows shares.
+- <!-- host-change: tpm-lockout --> **If you turn on a start-up PIN: the security chip's lockout setting.** The box holds it while the PIN is on, so wrong PINs stay limited. When you turn the PIN off it gives back the setting and the chip's limit on wrong guesses, as they were. Wrong PINs count toward the chip's limit, which Windows shares.
 - <!-- host-change: sbat-level --> **Possibly, an update to the PC's list of blocked old start-up programs,** if AgentOS's start-up program carries a newer list than the PC has. Windows Update installs the same list too.
 - <!-- host-change: windows-recovery-prompt --> **Rarely, a question from Windows at its next start.** If it happens, see below.
 

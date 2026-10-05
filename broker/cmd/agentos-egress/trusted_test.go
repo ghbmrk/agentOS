@@ -20,7 +20,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/vault"
 )
 
-// REQ: CRED-8, CRED-9, HW-5a, A8
+// REQ: CRED-8, CRED-9, HW-5a, A8, HW-8
 
 // cardFactor stands in for the Owner Card's passphrase slot, so the
 // trusted-host rules run without paying Argon2id on every test; the real
@@ -578,6 +578,10 @@ func TestBootPINRefusedWhenLockoutIsOwned(t *testing.T) {
 	if r.lockoutEntry() != "" {
 		t.Fatal("unused lockout authorization left in the vault")
 	}
+	// The settings are another system's: nothing is kept to put back.
+	if n, _ := r.daEntry(); n != "" {
+		t.Fatal("another system's settings kept as this PC's originals")
+	}
 	if _, err := r.c.trust(r.code(), ""); err != nil {
 		t.Fatalf("trust without a PIN: %v", err)
 	}
@@ -773,6 +777,11 @@ func TestStaleLockoutEntryIsDropped(t *testing.T) {
 	if !r.noted("Another system on this PC now controls the TPM") {
 		t.Fatalf("owner not told: %q", r.notes)
 	}
+	// The settings the stale lockout guarded are the other system's now:
+	// their kept originals go too, without a second message (HOST-1f).
+	if n, _ := r.daEntry(); n != "" || r.noted("security chip") {
+		t.Fatalf("originals entry %q, notes %q", n, r.notes)
+	}
 }
 
 // The CLI's "Keep this PC trusted" prompt is never ticked by default: the
@@ -827,5 +836,253 @@ func TestUnlockCLIKeepTrustedDefault(t *testing.T) {
 				t.Fatalf("kept %v, want %v", got, tc.kept)
 			}
 		})
+	}
+}
+
+// daEntry is the vault's kept dictionary-attack originals entry, if any.
+func (r *pcRig) daEntry() (name, value string) {
+	for _, e := range r.c.v.List() {
+		if e.Kind == vault.KindTPMDAOriginal {
+			s, _ := r.c.v.Secret(e.Name)
+			return e.Name, s.Reveal()
+		}
+	}
+	return "", ""
+}
+
+func (r *pcRig) readDA(t *testing.T) tpmseal.DAParams {
+	t.Helper()
+	p, err := tpmseal.ReadDA(r.tpm.TPM())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// pcDA is a PC's own dictionary-attack settings, unlike the PIN slot's.
+var pcDA = tpmseal.DAParams{MaxTries: 7, Interval: 600, Recovery: 3600}
+
+func (r *pcRig) setPCDA(t *testing.T) {
+	t.Helper()
+	if err := tpmseal.RestoreDA(r.tpm.TPM(), pcDA); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// HOST-1f (HW-8, D7): turning a boot PIN on keeps the PC's own
+// dictionary-attack settings in the vault before the TPM is changed, and
+// turning it off puts them back exactly; the entry then goes, so a later
+// PIN reads the PC's settings afresh (Security H3).
+func TestPINOffGivesTheDASettingsBack(t *testing.T) {
+	r := newPCRig(t)
+	r.setPCDA(t)
+	r.unknownHostUnlock(t)
+	if _, err := r.c.trust(r.code(), "246810"); err != nil {
+		t.Fatal(err)
+	}
+	name, val := r.daEntry()
+	if name != daOriginalPrefix+strings.TrimPrefix(r.lockoutEntry(), lockoutAuthPrefix) || val != daValuePrefix+pcDA.String() {
+		t.Fatalf("kept originals %q = %q (lockout entry %q)", name, val, r.lockoutEntry())
+	}
+	if got := r.readDA(t); got != tpmseal.PINDA {
+		t.Fatalf("PIN settings %+v", got)
+	}
+	if _, ok := (apiKeysOnly{r.c.v}).Secret(name); ok {
+		t.Fatal("proxy can read the kept settings")
+	}
+	// Changing the PIN keeps the first originals, not the PIN's own.
+	if _, err := r.c.trust(r.code(), "135799"); err != nil {
+		t.Fatal(err)
+	}
+	if _, v := r.daEntry(); v != daValuePrefix+pcDA.String() {
+		t.Fatalf("originals replaced: %q", v)
+	}
+	r.notes = nil
+	if _, err := r.c.trust(r.code(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.readDA(t); got != pcDA {
+		t.Fatalf("after PIN off %+v, want %+v", got, pcDA)
+	}
+	if n, _ := r.daEntry(); n != "" || r.lockoutEntry() != "" {
+		t.Fatalf("entries left: %q, %q", n, r.lockoutEntry())
+	}
+	if r.noted("security chip") || r.noted("lockout") {
+		t.Fatalf("owner told about a clean give-back: %q", r.notes)
+	}
+}
+
+// Security H3: a take cut off after the PIN's settings were written but
+// before the lockout authorization was set leaves the originals entry;
+// the next take keeps it, and PIN off restores the true settings.
+func TestDAOriginalsSurviveAPartialTake(t *testing.T) {
+	r := newPCRig(t)
+	r.setPCDA(t)
+	r.unknownHostUnlock(t)
+	id, err := tpmseal.Identity(r.tpm.TPM())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := keepDAOriginal(r.c.v, r.tpm.TPM(), id); err != nil {
+		t.Fatal(err)
+	}
+	if err := tpmseal.RestoreDA(r.tpm.TPM(), tpmseal.PINDA); err != nil { // the cut-off midpoint
+		t.Fatal(err)
+	}
+	if _, err := r.c.trust(r.code(), "246810"); err != nil {
+		t.Fatal(err)
+	}
+	if _, v := r.daEntry(); v != daValuePrefix+pcDA.String() {
+		t.Fatalf("originals after the retried take: %q", v)
+	}
+	if _, err := r.c.trust(r.code(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.readDA(t); got != pcDA {
+		t.Fatalf("after PIN off %+v, want %+v", got, pcDA)
+	}
+}
+
+// Security H5, D4: originals left with no lockout entry (a restore that
+// failed after the release, or a crash before the take) are restored at
+// the next unattended start and then forgotten.
+func TestPendingDARestoreIsRetriedAtStart(t *testing.T) {
+	r := newPCRig(t)
+	r.setPCDA(t)
+	r.unknownHostUnlock(t)
+	if _, err := r.c.trust(r.code(), ""); err != nil {
+		t.Fatal(err)
+	}
+	id, _ := tpmseal.Identity(r.tpm.TPM())
+	if err := keepDAOriginal(r.c.v, r.tpm.TPM(), id); err != nil {
+		t.Fatal(err)
+	}
+	if err := tpmseal.RestoreDA(r.tpm.TPM(), tpmseal.PINDA); err != nil {
+		t.Fatal(err)
+	}
+	r.notes = nil
+	bootGood(r.tpm)
+	r.start(t, r.tpm)
+	if r.phase() != open {
+		t.Fatalf("phase %v, notes %q", r.phase(), r.notes)
+	}
+	if got := r.readDA(t); got != pcDA {
+		t.Fatalf("after start %+v, want %+v", got, pcDA)
+	}
+	if n, _ := r.daEntry(); n != "" {
+		t.Fatal("restored entry kept")
+	}
+}
+
+// Security H1, H6: when another system has set the lockout authorization
+// since, nothing is tried against it (a wrong one would lock its lockout
+// hierarchy for a day at every start), the entry is dropped, and the
+// owner is told once, in the guide's words.
+func TestDARestoreNeverProbesAForeignLockout(t *testing.T) {
+	r := newPCRig(t)
+	r.unknownHostUnlock(t)
+	if _, err := r.c.trust(r.code(), ""); err != nil {
+		t.Fatal(err)
+	}
+	id, _ := tpmseal.Identity(r.tpm.TPM())
+	if err := keepDAOriginal(r.c.v, r.tpm.TPM(), id); err != nil {
+		t.Fatal(err)
+	}
+	other, _ := tpmseal.NewLockoutAuth()
+	if err := tpmseal.TakeLockout(r.tpm.TPM(), other, false); err != nil {
+		t.Fatal(err)
+	}
+	before := r.readDA(t)
+	r.notes = nil
+	bootGood(r.tpm)
+	r.start(t, r.tpm)
+	if err := tpmseal.TakeLockout(r.tpm.TPM(), other, true); err != nil {
+		t.Fatalf("the other system's lockout authorization was disturbed: %v", err)
+	}
+	if got := r.readDA(t); got != before {
+		t.Fatalf("settings changed under a foreign lockout: %+v", got)
+	}
+	if n, _ := r.daEntry(); n != "" {
+		t.Fatal("unrestorable entry kept for retries")
+	}
+	const msg = "Another system on this PC now controls its security chip's lockout, so I couldn't put back the chip's limit on wrong guesses."
+	told := 0
+	for _, n := range r.notes {
+		if strings.Contains(n, "security chip") {
+			if n != msg {
+				t.Fatalf("note %q", n)
+			}
+			told++
+		}
+	}
+	if told != 1 {
+		t.Fatalf("notes %q", r.notes)
+	}
+	r.notes = nil
+	bootGood(r.tpm)
+	r.start(t, r.tpm)
+	if r.noted("security chip") {
+		t.Fatal("told twice")
+	}
+}
+
+// Security H2, H4: originals kept for another PC's TPM are never written
+// into this one, and a malformed entry is never written at all; both stay.
+func TestDAOriginalsOnlyForTheirOwnTPM(t *testing.T) {
+	r := newPCRig(t)
+	r.unknownHostUnlock(t)
+	if _, err := r.c.trust(r.code(), ""); err != nil {
+		t.Fatal(err)
+	}
+	before := r.readDA(t)
+	otherPC := daOriginalName([]byte("\x00\x0bsome-other-pcs-srk-name"))
+	if err := r.c.v.Put(otherPC, vault.KindTPMDAOriginal, []byte(daValuePrefix+"1,1,1")); err != nil {
+		t.Fatal(err)
+	}
+	bootGood(r.tpm)
+	r.start(t, r.tpm)
+	if got := r.readDA(t); got != before {
+		t.Fatalf("another PC's settings written here: %+v", got)
+	}
+	if n, _ := r.daEntry(); n != otherPC {
+		t.Fatal("another PC's entry dropped")
+	}
+	r.c.v.Delete(otherPC)
+	id, _ := tpmseal.Identity(r.tpm.TPM())
+	for _, bad := range []string{daValuePrefix + "1,1", daValuePrefix + "1, 1,1", "tpm-da-v2 1,1,1", daValuePrefix + "01,1,1"} {
+		if err := r.c.v.Put(daOriginalName(id), vault.KindTPMDAOriginal, []byte(bad)); err != nil {
+			t.Fatal(err)
+		}
+		bootGood(r.tpm)
+		r.start(t, r.tpm)
+		if got := r.readDA(t); got != before {
+			t.Fatalf("malformed %q written: %+v", bad, got)
+		}
+		if _, v := r.daEntry(); v != bad {
+			t.Fatalf("malformed %q dropped or changed: %q", bad, v)
+		}
+	}
+}
+
+// D5: a vault whose PIN was turned on before HOST-1f has no originals;
+// PIN off gives the lockout back and leaves the settings, saying nothing.
+func TestLegacyPINOffLeavesTheDASettings(t *testing.T) {
+	r := newPCRig(t)
+	r.setPCDA(t)
+	r.unknownHostUnlock(t)
+	if _, err := r.c.trust(r.code(), "246810"); err != nil {
+		t.Fatal(err)
+	}
+	n, _ := r.daEntry()
+	r.c.v.Delete(n)
+	r.notes = nil
+	if _, err := r.c.trust(r.code(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.readDA(t); got != tpmseal.PINDA {
+		t.Fatalf("legacy settings %+v", got)
+	}
+	if r.lockoutEntry() != "" || r.noted("security chip") || r.noted("lockout") {
+		t.Fatalf("lockout %q, notes %q", r.lockoutEntry(), r.notes)
 	}
 }
