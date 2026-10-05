@@ -135,9 +135,9 @@ func newRig(t *testing.T, mod func(*Config)) *rig {
 			})
 		},
 		Meter: m,
-		OwnerReply: func(machine, id, text string) {
+		OwnerReply: func(machine string, rep Reply) {
 			r.mu.Lock()
-			r.reps = append(r.reps, machine+" "+id+" "+text)
+			r.reps = append(r.reps, machine+" "+rep.ID+" "+rep.Text+"|"+rep.Summary)
 			r.mu.Unlock()
 		},
 	}
@@ -700,11 +700,23 @@ func TestREV5OwnerMessageRaisesLabelFirst(t *testing.T) {
 	if code, _ := r.do("m1", "POST", "/owner/reply", fmt.Sprintf(`{"id":%q,"text":"dentist at 3"}`, id)); code != 204 {
 		t.Fatalf("reply: %d", code)
 	}
-	if len(r.reps) != 1 || r.reps[0] != "m1 "+id+" dentist at 3" {
+	if len(r.reps) != 1 || r.reps[0] != "m1 "+id+" dentist at 3|" {
 		t.Fatalf("replies %v", r.reps)
 	}
 	if code, _ := r.do("m1", "POST", "/owner/reply", fmt.Sprintf(`{"id":%q,"text":"again"}`, id)); code != 404 {
 		t.Fatal("answered twice")
+	}
+
+	// The reply may carry the agent's own one-line summary (CH-20): kept
+	// as one line, cut to MaxSummary.
+	idS, _ := r.p.DeliverOwner("m1", "and tomorrow?", false)
+	r.do("m1", "GET", "/owner/next", "")
+	long := strings.Repeat("s", MaxSummary+50)
+	if code, _ := r.do("m1", "POST", "/owner/reply", fmt.Sprintf(`{"id":%q,"text":"full","summary":"Line one\nline two %s"}`, idS, long)); code != 204 {
+		t.Fatalf("reply with summary: %d", code)
+	}
+	if got := r.reps[1]; !strings.HasPrefix(got, "m1 "+idS+" full|Line one line two sss") || len(got) != len("m1 "+idS+" full|")+MaxSummary {
+		t.Fatalf("summary %q", got)
 	}
 
 	// A slow guest is not handed the message twice; a restart of the

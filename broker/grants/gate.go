@@ -201,6 +201,15 @@ type Config struct {
 	// must not block, and a panic in it is logged and changes nothing
 	// (security V1 on W3-values). Nil: none.
 	Observe func(journal.Intent)
+	// Delivery names, per adapter executor, the one declared share
+	// operation that delivers to the owner's evidence destination (CH-20;
+	// mail.OpDeliver). Only OriginEvidence submits it, and it runs
+	// without asking only to that destination; from any other origin it
+	// is denied. Destination reports whether addr may be the destination,
+	// as one of a connected account's own addresses, and names that
+	// account. Nil: no destination can be set.
+	Delivery    map[string]string
+	Destination func(addr string) (account string, ok bool)
 	// Coalesce, CoalesceIdle, and RequestsPerHour pace approval requests
 	// (CH-15); zero takes the defaults. Urgent marks owner-defined urgent
 	// items, sent at once and in quiet hours. Quiet reports the owner's
@@ -221,15 +230,17 @@ type Config struct {
 type Gate struct {
 	cfg Config
 
-	mu      sync.Mutex
-	eng     *journal.Engine
-	own     Owner
-	grants  map[string]*Grant
-	waiting map[string]*wait
-	batch   []string
-	first   time.Time // when the batch's first item arrived
-	last    time.Time // when its latest item arrived
-	sent    []time.Time
+	mu     sync.Mutex
+	eng    *journal.Engine
+	own    Owner
+	grants map[string]*Grant
+	// evidence is the owner's evidence destination, if set (CH-20).
+	evidence destination
+	waiting  map[string]*wait
+	batch    []string
+	first    time.Time // when the batch's first item arrived
+	last     time.Time // when its latest item arrived
+	sent     []time.Time
 	// asked are owner-question texts reserved on the same budget
 	// (Reserve, W9).
 	asked []time.Time
@@ -580,6 +591,9 @@ func (g *Gate) evaluateEffect(ctx context.Context, phase journal.Phase, in journ
 	if in.Account == journal.BrokerAccount {
 		return g.evaluateBroker(ctx, phase, in)
 	}
+	if op, ok := g.cfg.Delivery[in.Executor]; (ok && in.Action == op) || in.Origin == OriginEvidence {
+		return g.evaluateDelivery(in)
+	}
 	// Reasons are fixed wording: a guest reads them back through
 	// effect_status, so they never echo what a guest wrote (REV-5).
 	g.mu.Lock()
@@ -844,6 +858,8 @@ func (g *Gate) evaluateBroker(ctx context.Context, phase journal.Phase, in journ
 		}
 		return verdict{kind: ask, item: owner.Item{Ref: in.ID, Object: obj, Detail: detail,
 			Facts: owner.Facts{Kind: owner.Ordinary, Verb: "forget", NoRecipient: true}}}
+	case journal.ActionEvidence:
+		return g.evaluateEvidence(in)
 	case journal.ActionGrantPause, journal.ActionGrantRevoke:
 		if in.Origin != OriginOwner {
 			return verdict{kind: deny, why: "only the owner pauses or revokes a grant"}
@@ -857,6 +873,119 @@ func (g *Gate) evaluateBroker(ctx context.Context, phase journal.Phase, in journ
 		return verdict{kind: allow}
 	}
 	return verdict{kind: deny, why: "this broker action is not handled here"}
+}
+
+// evaluateEvidence decides a change to the evidence destination (CH-20).
+// It is the owner's alone. Setting it chooses where private content goes,
+// so it is high risk (CH-10) and, like a grant, needs the code and the
+// local page: a SIM swapper holding the phone cannot move it. Clearing it
+// needs neither.
+func (g *Gate) evaluateEvidence(in journal.Intent) verdict {
+	if in.Origin != OriginOwner && in.Origin != originLocal {
+		return verdict{kind: deny, why: "only the owner sets where private replies go"}
+	}
+	d, err := parseDestination(in)
+	if err != nil {
+		return verdict{kind: deny, why: err.Error()}
+	}
+	if d.Address == "" {
+		// Clearing needs no code (security C3 on #148): the broker tells
+		// the old destination, so the owner sees it if it wasn't them.
+		return verdict{kind: allow}
+	}
+	if !g.cfg.LocalUI {
+		return verdict{kind: deny, why: "changing where private replies go needs confirmation on the box's local page, which this build does not have yet (CH-20)"}
+	}
+	if g.cfg.Destination == nil {
+		return verdict{kind: deny, why: "no connected account can deliver private replies"}
+	}
+	if acct, ok := g.cfg.Destination(d.Address); !ok || acct != d.Account {
+		return verdict{kind: deny, why: "the destination must be the connected mail account's own address (CH-20)"}
+	}
+	return verdict{kind: ask, local: true, item: owner.Item{Ref: in.ID, Object: "send private replies to " + d.Address,
+		Facts: owner.Facts{Kind: owner.GrantChange, Verb: "share", NoRecipient: true}}}
+}
+
+// evaluateDelivery decides a delivery to the evidence destination: a
+// pre-allowed share to the owner only (CH-20). Every part of it is fixed
+// by the broker, so anything else is denied, never asked.
+func (g *Gate) evaluateDelivery(in journal.Intent) verdict {
+	if in.Origin != OriginEvidence {
+		return verdict{kind: deny, why: "only the broker delivers to the owner's destination (CH-20)"}
+	}
+	g.mu.Lock()
+	d, ag := g.evidence, g.adapterLocked(in.Account)
+	g.mu.Unlock()
+	op, ok := g.cfg.Delivery[in.Executor]
+	switch {
+	case !ok || in.Action != op:
+		return verdict{kind: deny, why: "the broker's evidence route only delivers"}
+	case ag == nil || ag.Spec.Executor != in.Executor || in.Account != d.Account:
+		return verdict{kind: deny, why: "no grant connects the destination's account"}
+	case ag.Spec.Ops[in.Action] != verb.Share || g.cfg.Declared[in.Executor][in.Action] != verb.Share:
+		return verdict{kind: deny, why: "delivery is not granted for the account"}
+	case len(in.Recipients) != 1 || in.Recipients[0] != d.Address:
+		return verdict{kind: deny, why: "delivery goes only to the owner's destination"}
+	}
+	b, _ := in.Params[ParamBody].(string)
+	from, _ := in.Params[ParamFrom].(string)
+	if b == "" || (from != DeliverFromAgent && from != DeliverFromBox) || len(in.Params) != 2 {
+		return verdict{kind: deny, why: "a delivery carries only its body and author"}
+	}
+	n := 0
+	for _, x := range g.eng.AuthorizedSince(in.Account, in.Action, g.cfg.Now().Add(-24*time.Hour)) {
+		if x.Origin == OriginEvidence && x.ID != in.ID {
+			n++
+		}
+	}
+	if n >= DeliveryCap {
+		return verdict{kind: deny, why: DeliveryCapReason}
+	}
+	if g.cfg.Destination == nil {
+		return verdict{kind: deny, why: "the destination is no longer the account's own address"}
+	}
+	if acct, ok := g.cfg.Destination(d.Address); !ok || acct != d.Account {
+		return verdict{kind: deny, why: "the destination is no longer the account's own address"}
+	}
+	return verdict{kind: allow}
+}
+
+// destination is the evidence destination: an address and the account
+// whose own address it is.
+type destination struct{ Address, Account string }
+
+func parseDestination(in journal.Intent) (destination, error) {
+	a, ok1 := in.Params[ParamEvidenceAddress].(string)
+	c, ok2 := in.Params[ParamEvidenceAccount].(string)
+	if !ok1 || !ok2 || len(in.Params) != 2 {
+		return destination{}, errors.New("malformed evidence destination")
+	}
+	if a == "" {
+		if c != "" {
+			return destination{}, errors.New("malformed evidence destination")
+		}
+		return destination{}, nil
+	}
+	if !bareAddress(a) || c == "" {
+		return destination{}, errors.New("the destination must be one bare, lower-case address")
+	}
+	return destination{Address: a, Account: c}, nil
+}
+
+// bareAddress is a lower-case local@domain with nothing around it. Whether
+// it is the owner's is Config.Destination's to say.
+func bareAddress(a string) bool {
+	local, domain, ok := strings.Cut(a, "@")
+	return ok && local != "" && domain != "" && !strings.ContainsAny(a, " \t\r\n<>,;\"()[]:") &&
+		!strings.Contains(domain, "@") && strings.ToLower(a) == a
+}
+
+// Evidence returns the evidence destination and its account; empty when
+// none is set (CH-20).
+func (g *Gate) Evidence() (address, account string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.evidence.Address, g.evidence.Account
 }
 
 // evaluateChange delegates a meta.change.* intent to the change pipeline
@@ -1855,7 +1984,7 @@ func (g *Gate) ConfirmLocal(id string) error {
 		return err
 	}
 	if st.State != journal.Pending || st.Intent.Account != journal.BrokerAccount ||
-		(st.Intent.Action != journal.ActionGrantChange && !(changeAction(st.Intent.Action) &&
+		(st.Intent.Action != journal.ActionGrantChange && st.Intent.Action != journal.ActionEvidence && !(changeAction(st.Intent.Action) &&
 			g.evaluate(context.Background(), journal.PhaseAuthorize, st.Intent).local)) {
 		return errors.New("grants: nothing to confirm for " + clip(id))
 	}
@@ -2221,6 +2350,13 @@ func (g *Gate) applyLocked(in journal.Intent) (string, error) {
 			}
 		}
 		return gr.ID, nil
+	case journal.ActionEvidence:
+		d, err := parseDestination(in)
+		if err != nil {
+			return "", err
+		}
+		g.evidence = d
+		return "evidence", nil
 	}
 	return "", errors.New("not a grant action")
 }

@@ -117,6 +117,19 @@ func TestMinerFindsTheLoop4Signals(t *testing.T) {
 		r.task(g+"-a", g, "mail", "search", "private")
 		r.task(g+"-b", g, "mail", "label", "private")
 	}
+	// The broker's own deliveries (CH-20's evidence email, origin
+	// broker:evidence) carry private reply bodies and are not tasks: even
+	// failing, they are never mined (L3 SHOULD 7 on #148).
+	for i := 0; i < 3; i++ {
+		id := fmt.Sprintf("evidence/%d", i)
+		r.tasks.out[id] = journal.ResultNotApplied
+		in := journal.Intent{ID: id, Origin: "broker:evidence", Account: "mail", Action: "deliver", Executor: "task"}
+		_, err := r.eng.Submit(in)
+		must(t, err)
+		_, err = r.eng.Authorize(context.Background(), id)
+		must(t, err)
+		r.eng.Dispatch(context.Background(), id)
+	}
 	// An owner correction.
 	r.corrected(h, 1)
 	cost := map[string]int64{"goal:f1": 100, "goal:s1": 100, "goal:s2": 100, "goal:rep0": 2000}
