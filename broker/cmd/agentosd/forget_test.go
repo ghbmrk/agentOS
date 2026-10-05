@@ -285,6 +285,30 @@ func TestForgetNotTombstonedIsNotApplied(t *testing.T) {
 	}
 }
 
+// A forget cut off by a restart (L3 on #182): done once its tombstone
+// holds, since the start-up replay finishes it; otherwise not applied.
+func TestForgetReconcile(t *testing.T) {
+	r := newForgetRig(t)
+	held := map[string]bool{"owner:a": true}
+	r.f.forgotten = func(g string) bool { return held[g] }
+	in := func(id string) journal.Intent {
+		return journal.Intent{ID: id, Origin: grants.OriginForget, Account: journal.BrokerAccount,
+			Action: journal.ActionLearnForget, Executor: grants.ForgetExecutor}
+	}
+	for id, want := range map[string]journal.Result{
+		grants.ForgetID("1", "owner:a"): journal.ResultSucceeded,
+		grants.ForgetID("2", "owner:b"): journal.ResultNotApplied,
+		"forget/3":                      journal.ResultNotApplied,
+	} {
+		if out := r.f.Reconcile(context.Background(), in(id), 1); out.Result != want {
+			t.Fatalf("%s: %+v, want %s", id, out, want)
+		}
+	}
+	if len(r.texts) != 0 || len(r.forgot) != 0 {
+		t.Fatalf("reconcile acted: %q %q", r.texts, r.forgot)
+	}
+}
+
 // Security R2 on #182: a run of 4 or more digits in a listed task shows
 // as "####", so a spoofed task cannot echo a request code.
 func TestForgetMasksLongDigitRuns(t *testing.T) {
@@ -352,17 +376,17 @@ func (x *forgetDaemon) say(msg string) string {
 	return strings.Join(x.d.Owner().Handle(x.ctx, ownerNum, msg), " | ")
 }
 
-// ask lists the tasks, picks the first, and returns the request's ID and
+// ask lists the tasks, picks the nth, and returns its request's ID and
 // code. FORGET n has no reply of its own: the request is the notice (UX
 // U-F8).
-func (x *forgetDaemon) ask(object string) (id, code string) {
+func (x *forgetDaemon) ask(n int, object string) (id, code string) {
 	t := x.t
 	t.Helper()
-	if got, ok := x.cfg.Settings(x.ctx, "FORGET", true); !ok || !strings.HasPrefix(got, "Reply FORGET 1 to forget it: 1 ") {
+	if got, ok := x.cfg.Settings(x.ctx, "FORGET", true); !ok || !strings.HasPrefix(got, "Reply FORGET 1") {
 		t.Fatalf("list: %q", got)
 	}
-	if got, ok := x.cfg.Settings(x.ctx, "FORGET 1", true); !ok || got != "" {
-		t.Fatalf("FORGET 1: %q", got)
+	if got, ok := x.cfg.Settings(x.ctx, fmt.Sprintf("FORGET %d", n), true); !ok || got != "" {
+		t.Fatalf("FORGET %d: %q", n, got)
 	}
 	x.d.Gate().Flush()
 	req := x.text()
@@ -371,6 +395,15 @@ func (x *forgetDaemon) ask(object string) (id, code string) {
 		t.Fatalf("request: %q", req)
 	}
 	return m[1], m[3]
+}
+
+// kept reports whether goal's task text and values are still kept.
+func (x *forgetDaemon) kept(goal string) bool {
+	_, text := x.lp.tasks.get(goal)
+	x.lp.values.mu.Lock()
+	_, values := x.lp.values.st[goal]
+	x.lp.values.mu.Unlock()
+	return text && values && !x.lp.forgotten.has(goal)
 }
 
 // forgets lists the journal's forget intents.
@@ -386,22 +419,32 @@ func (x *forgetDaemon) forgets() []journal.Status {
 
 // W3-forget end to end, through the gate and the owner channel: the
 // approval is the channel's own request, on its code tier (security C1);
-// a YES without the code, or with another request's, forgets nothing;
-// the YES with it forgets the task, and the owner is told after.
+// a YES without the code, with a wrong one, or with another pending
+// request's, forgets nothing; the YES with it forgets that task and no
+// other (L3 on #182), and the owner is told after.
 func TestForgetEndToEnd(t *testing.T) {
 	x := newForgetDaemon(t)
 	lp := x.lp
-	lp.tasks.put("owner:a", "book a table for friday CANARY-forget", false, viaSMS)
-	id, code := x.ask("'book a table for friday..'")
+	for _, g := range []string{"owner:b", "owner:a"} {
+		text := map[string]string{"owner:a": "book a table for friday CANARY-forget", "owner:b": "pay the gas bill"}[g]
+		lp.tasks.put(g, text, false, viaSMS)
+		lp.values.observe(journal.Intent{ID: "agent/" + g, GoalID: g, Origin: "guest:agent", Params: map[string]any{"to": "ann@example.test"}})
+		time.Sleep(time.Millisecond) // a is the newer
+	}
+	id, code := x.ask(1, "'book a table for friday..'")
+	idB, codeB := x.ask(2, "'pay the gas bill'")
+	if id == idB || code == codeB {
+		t.Fatalf("two requests share an ID or code: %s %s", id, idB)
+	}
 	wrong := "000000"
 	if code == wrong {
 		wrong = "111111"
 	}
-	for _, msg := range []string{"YES " + id, "YES " + id + " " + wrong} {
+	for _, msg := range []string{"YES " + id, "YES " + id + " " + wrong, "YES " + id + " " + codeB} {
 		x.say(msg)
 		x.d.Gate().Wait()
-		if _, ok := lp.tasks.get("owner:a"); !ok || lp.forgotten.has("owner:a") {
-			t.Fatalf("%q forgot the task", msg)
+		if !x.kept("owner:a") || !x.kept("owner:b") {
+			t.Fatalf("%q forgot a task", msg)
 		}
 	}
 	if got := x.say("YES " + id + " " + code); !strings.HasPrefix(got, "Approved") {
@@ -416,6 +459,9 @@ func TestForgetEndToEnd(t *testing.T) {
 	if _, ok := lp.tasks.get("owner:a"); ok || !lp.forgotten.has("owner:a") {
 		t.Fatal("not forgotten after YES")
 	}
+	if !x.kept("owner:b") {
+		t.Fatal("the YES forgot another task")
+	}
 	raw, err := os.ReadFile(filepath.Join(x.dir, "journal.log"))
 	if err != nil {
 		t.Fatal(err)
@@ -423,6 +469,8 @@ func TestForgetEndToEnd(t *testing.T) {
 	if strings.Contains(string(raw), "CANARY") || strings.Contains(string(raw), "book a table") {
 		t.Fatal("the journal holds the task's text")
 	}
+	// That FORGET n's empty reply sends no text over the owner's line is
+	// owner.TestASettingWithNoTextSendsNothing.
 }
 
 // Security R1 on #182: a forget whose tombstone did not save deletes
@@ -432,7 +480,7 @@ func TestAnUnsavedForgetIsNotDone(t *testing.T) {
 	x := newForgetDaemon(t)
 	lp := x.lp
 	lp.tasks.put("owner:a", "pay the gas bill CANARY-forget", false, viaSMS)
-	id, code := x.ask("'pay the gas bill CANARY-..'")
+	id, code := x.ask(1, "'pay the gas bill CANARY-..'")
 	store := lp.forgotten.store
 	lp.forgotten.store = failSave{store}
 	if got := x.say("YES " + id + " " + code); !strings.HasPrefix(got, "Approved") {
