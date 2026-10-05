@@ -616,7 +616,7 @@ func TestNewPassphraseSupersedesPendingUnlock(t *testing.T) {
 	if second == first || r.phase() != pending {
 		t.Fatalf("supersede: %q %v", second, r.phase())
 	}
-	if !slices.Contains(r.notes, "vault unlock started again with the passphrase; the earlier one is discarded") {
+	if !slices.Contains(r.notes, "The box unlock was started over with your card; the earlier one was cancelled.") {
 		t.Fatalf("owner not told: %q", r.notes)
 	}
 	if err := r.c.confirm(first, r.code()); err != errNotPending {

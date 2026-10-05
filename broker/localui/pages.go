@@ -81,6 +81,7 @@ form { margin: .6em 0 1.2em; }
 {{else}}{{with .Err}}<p class="err">{{.}}</p>{{end}}
 <p>An unlock is waiting for a code on another phone or a closed page. It ends by itself at {{.Expires}}.</p>
 <h2>Start over on this phone</h2>
+<p class="muted">This cancels the unlock waiting on the other phone.</p>
 {{template "vaultcard"}}{{end}}
 {{else}}
 <p><b>If this drive was out of your hands, unlock it only on your trusted PC.</b></p>

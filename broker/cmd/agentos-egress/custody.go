@@ -363,7 +363,7 @@ func (c *custody) unlock(passphrase string) (string, error) {
 	if c.ph == pending {
 		c.timer.Stop()
 		c.v.Close()
-		c.notify("vault unlock started again with the passphrase; the earlier one is discarded")
+		c.notify("The box unlock was started over with your card; the earlier one was cancelled.")
 	}
 	c.ph, c.v, c.ticket = pending, v, hex.EncodeToString(b)
 	c.expires = now.Add(c.ttl)

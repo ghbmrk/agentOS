@@ -817,7 +817,7 @@ func TestVaultStartOverOnAnotherPhone(t *testing.T) {
 	other := &rig{t: t, srv: r.srv, ip: "10.42.0.77:40000", now: r.clock()}
 	other.jar, _ = cookiejar.New(nil)
 	page := other.get("/unlock/vault")
-	if !strings.Contains(page, "Start over on this phone") || !strings.Contains(page, `name="photo"`) {
+	if !strings.Contains(page, "Start over on this phone") || !strings.Contains(page, "This cancels the unlock waiting on the other phone.") || !strings.Contains(page, `name="photo"`) {
 		t.Fatalf("other phone:\n%s", page)
 	}
 	var b bytes.Buffer
