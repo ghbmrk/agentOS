@@ -304,7 +304,10 @@ func (m *Manager) Create(ctx context.Context, id string, s Spec) (Machine, error
 	if strings.HasPrefix(id, EvalPrefix) {
 		return Machine{}, fmt.Errorf("vm: machine ids starting %q are kept for replay", EvalPrefix)
 	}
-	return m.create(ctx, id, s, nil)
+	if strings.HasPrefix(id, WorkerPrefix) {
+		return Machine{}, fmt.Errorf("vm: machine ids starting %q are kept for workers", WorkerPrefix)
+	}
+	return m.create(ctx, id, s, nil, "")
 }
 
 // EvalPrefix starts the IDs of replay machines (LOOP-5), whose guest
@@ -343,17 +346,20 @@ func (m *Manager) CreateSeeded(ctx context.Context, id string, s Spec, seed map[
 	if m.cfg.MaxLayerBytes > 0 && size > m.cfg.MaxLayerBytes {
 		return Machine{}, fmt.Errorf("%w (seed %d bytes, cap %d)", ErrQuota, size, m.cfg.MaxLayerBytes)
 	}
-	return m.create(ctx, id, s, seed)
+	if strings.HasPrefix(id, WorkerPrefix) {
+		return Machine{}, fmt.Errorf("vm: machine ids starting %q are kept for workers", WorkerPrefix)
+	}
+	return m.create(ctx, id, s, seed, "")
 }
 
-func (m *Manager) create(ctx context.Context, id string, s Spec, seed map[string][]byte) (Machine, error) {
+func (m *Manager) create(ctx context.Context, id string, s Spec, seed map[string][]byte, lineage string) (Machine, error) {
 	if !idRE.MatchString(id) {
 		return Machine{}, fmt.Errorf("vm: bad machine id %q", id)
 	}
 	if _, ok := m.cfg.Images[s.Image]; !ok {
 		return Machine{}, fmt.Errorf("%w: image %q", ErrUnknown, s.Image)
 	}
-	mc, err := m.reserve(id, s, s.Label, "", "")
+	mc, err := m.reserve(id, s, s.Label, "", lineage)
 	if err != nil {
 		return Machine{}, err
 	}
@@ -479,7 +485,9 @@ func (m *Manager) startFrom(ctx context.Context, mc *machine, s *Snapshot) error
 	if mc.preempting.Load() {
 		return fmt.Errorf("%w: %s", ErrRevoked, mc.ID)
 	}
-	if m.cfg.Services != nil {
+	// Workers run no agent: no broker socket, so no tools, owner channel
+	// or model egress (CAP-8).
+	if m.cfg.Services != nil && !strings.HasPrefix(mc.ID, WorkerPrefix) {
 		dir, err := m.cfg.Services.Open(mc.ID)
 		if err != nil {
 			return err
@@ -1019,7 +1027,14 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 	if m.contained(src) {
 		return Snapshot{}, fmt.Errorf("%w (%s)", ErrContained, id)
 	}
+	worker := strings.HasPrefix(id, WorkerPrefix)
 	for _, f := range ids {
+		// A worker forks into workers only, and nothing else forks into
+		// one: a worker's memory never runs with an agent's services, and
+		// an agent's never runs without them (CAP-8).
+		if strings.HasPrefix(f, WorkerPrefix) != worker {
+			return Snapshot{}, fmt.Errorf("vm: a worker forks into workers only, and only a worker into ids starting %q", WorkerPrefix)
+		}
 		if strings.HasPrefix(f, EvalPrefix) {
 			return Snapshot{}, fmt.Errorf("vm: machine ids starting %q are kept for replay", EvalPrefix)
 		}
@@ -1181,6 +1196,9 @@ func (m *Manager) Merge(ctx context.Context, dst, src string) (Snapshot, error) 
 	}
 	if strings.HasPrefix(dst, BuilderPrefix) || strings.HasPrefix(src, BuilderPrefix) {
 		return Snapshot{}, errors.New("vm: builder machines are not merged")
+	}
+	if strings.HasPrefix(dst, WorkerPrefix) || strings.HasPrefix(src, WorkerPrefix) {
+		return Snapshot{}, errors.New("vm: worker machines are not merged")
 	}
 	sm, err := m.get(src)
 	if err != nil {

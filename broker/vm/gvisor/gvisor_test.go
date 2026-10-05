@@ -462,3 +462,41 @@ func TestIntegrationHostSocketInImageIsUnreachable(t *testing.T) {
 		t.Fatalf("guest reached a host socket in its image: %q", got)
 	}
 }
+
+// TestIntegrationWorkerExec: a worker runs a command under runsc exec with
+// stdin, its exit code comes back as a result, and output is capped
+// (CAP-8).
+func TestIntegrationWorkerExec(t *testing.T) {
+	r := newRig(t, 4096)
+	ctx := context.Background()
+	r.create("agent", admission.Experiment)
+	a, err := r.m.Get("agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.m.CreateWorker(ctx, "wk-1", a.Lineage, vm.Spec{Image: "base", Class: admission.Experiment, MemMB: 256, Argv: []string{"/guest", "serve"}}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := r.m.Exec(ctx, "wk-1", vm.Command{Argv: []string{"/guest", "stdin", "3"}, Stdin: []byte("hello worker"), MaxOutput: 5}, 20*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ExitCode != 3 || string(res.Stdout) != "hello" || !res.Truncated {
+		t.Fatalf("exec = code %d, stdout %q, truncated %v; want 3, %q, true", res.ExitCode, res.Stdout, res.Truncated, "hello")
+	}
+}
+
+func TestCappedKeepsTheFirstBytes(t *testing.T) {
+	c := &capped{max: 4}
+	c.Write([]byte("ab"))
+	c.Write([]byte("cdef"))
+	c.Write([]byte("g"))
+	if c.b.String() != "abcd" || !c.over {
+		t.Fatalf("capped = %q, over %v", c.b.String(), c.over)
+	}
+	u := &capped{}
+	u.Write([]byte("all of it"))
+	if u.b.String() != "all of it" || u.over {
+		t.Fatal("uncapped writer dropped output")
+	}
+}

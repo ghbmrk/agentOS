@@ -3,6 +3,7 @@
 //	guest serve      hold a random token in memory and serve requests
 //	guest svc SOCK PATH  GET PATH from the broker service socket SOCK and
 //	                 print the status and body
+//	guest stdin N    copy stdin to stdout, then exit N (worker exec)
 //	guest <cmd> ...  send one request to the server and print the answer
 //
 // Requests: token; write PATH TEXT; read PATH; remove PATH; stat PATH;
@@ -28,6 +29,12 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "serve" {
 		serve()
 		return
+	}
+	if len(os.Args) == 3 && os.Args[1] == "stdin" {
+		io.Copy(os.Stdout, os.Stdin)
+		var n int
+		fmt.Sscan(os.Args[2], &n)
+		os.Exit(n)
 	}
 	if len(os.Args) == 4 && os.Args[1] == "svc" {
 		fmt.Println(get(os.Args[2], os.Args[3]))

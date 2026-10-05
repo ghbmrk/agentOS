@@ -149,6 +149,45 @@ func (r *Runtime) Checkpoint(ctx context.Context, id, image string) error {
 	return r.run(ctx, "checkpoint", "--leave-running", "--image-path="+image, cid(id))
 }
 
+// Exec runs a command in a running sandbox, as root in the guest from its
+// root directory, with c.Stdin as input (CAP-8). The command's arguments
+// follow the container ID, past runsc's own flags, so none is read as a
+// flag. A non-zero exit is a result; each output stream is capped.
+func (r *Runtime) Exec(ctx context.Context, id string, c vm.Command) (vm.ExecResult, error) {
+	cmd := r.cmd(ctx, append([]string{"exec", "--cwd", "/", "--user", "0:0", cid(id)}, c.Argv...)...)
+	cmd.Stdin = bytes.NewReader(c.Stdin)
+	stdout, stderr := &capped{max: c.MaxOutput}, &capped{max: c.MaxOutput}
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	err := cmd.Run()
+	res := vm.ExecResult{Stdout: stdout.b.Bytes(), Stderr: stderr.b.Bytes(), Truncated: stdout.over || stderr.over}
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && ctx.Err() == nil {
+		res.ExitCode = exit.ExitCode()
+		return res, nil
+	}
+	return res, err
+}
+
+// capped keeps the first max bytes written (all of them when max is 0).
+type capped struct {
+	b    bytes.Buffer
+	max  int
+	over bool
+}
+
+func (c *capped) Write(p []byte) (int, error) {
+	if c.max > 0 {
+		if room := c.max - c.b.Len(); len(p) > room {
+			c.b.Write(p[:max(room, 0)])
+			c.over = true
+			return len(p), nil
+		}
+	}
+	return c.b.Write(p)
+}
+
+var _ vm.Execer = (*Runtime)(nil)
+
 // Kill stops the sandbox, deletes runsc's record of it, and unmounts the
 // machine's root. It is idempotent.
 func (r *Runtime) Kill(ctx context.Context, l vm.Launch) error {
