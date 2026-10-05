@@ -85,6 +85,37 @@ type Spec struct {
 	Label Label
 }
 
+// Machines are siblings in the pool's cgroup, weighed by admission class
+// for CPU and I/O (cpu.weight, io.weight; RES-1, RES-2): foreground first,
+// accepted work next, experiments least. The pool as a whole weighs less
+// than the broker (budget.BrokerWeight).
+const (
+	ForegroundWeight = 1000
+	AcceptedWeight   = 100
+	ExperimentWeight = 1
+)
+
+// MachinePids caps one machine's tasks, threads included (pids.max). A
+// gVisor sandbox's host tasks are the sentry's threads and, under
+// systrap, stub threads for the guest's, so this bounds a fork bomb well
+// below memory.max while leaving room for a parallel build in a worker
+// (vm V29, unmeasured).
+const MachinePids = 4096
+
+// MachineLimits is a machine's cgroup limits: its declared memory budget,
+// its class's weights and the process cap. Every machine kind gets them,
+// workers included. An unknown class weighs least.
+func MachineLimits(s Spec) cgroup.Limits {
+	w := ExperimentWeight
+	switch s.Class {
+	case admission.Foreground:
+		w = ForegroundWeight
+	case admission.Accepted:
+		w = AcceptedWeight
+	}
+	return cgroup.Limits{MaxBytes: s.MemMB << 20, CPUWeight: w, IOWeight: w, Pids: MachinePids}
+}
+
 // Machine is a copy of a machine's record.
 type Machine struct {
 	ID       string
@@ -502,7 +533,7 @@ func (m *Manager) startFrom(ctx context.Context, mc *machine, s *Snapshot) error
 		return err
 	}
 	if m.cfg.Cgroups != nil {
-		if _, err := m.cfg.Cgroups.Child(mc.ID, cgroup.Limits{MaxBytes: mc.Spec.MemMB << 20}); err != nil {
+		if _, err := m.cfg.Cgroups.Child(mc.ID, MachineLimits(mc.Spec)); err != nil {
 			return err
 		}
 	}

@@ -77,6 +77,19 @@ func (m Memory) Admission() admission.Config {
 	return admission.Config{CapacityMB: m.PoolMB + m.HeadroomMB, HeadroomMB: m.HeadroomMB}
 }
 
+// CPU and I/O weights (cpu.weight, io.weight; kernel default 100) set who
+// comes first under contention (RES-1, RES-2, budget R12). Components are
+// siblings under the root: the broker (owner channel, STOP, journal fsync)
+// first, local inference (speech for calls) next, then the browser and the
+// agent-machine pool. Machines inside the pool are weighed by class
+// (vm.MachineLimits).
+const (
+	BrokerWeight    = 1000
+	InferenceWeight = 500
+	BrowserWeight   = 100
+	PoolWeight      = 100
+)
+
 // Groups are the component groups Apply made.
 type Groups struct {
 	Broker, Inference, Browser *cgroup.Group
@@ -84,8 +97,8 @@ type Groups struct {
 	Machines *cgroup.Group
 }
 
-// Apply creates one group per component under root. Inference, the browser
-// and the pool get hard limits; the broker gets its budget as protected
+// Apply creates one group per component under root, each with its CPU and
+// I/O weight. Inference, the browser and the pool get hard limits; the broker gets its budget as protected
 // memory and no hard limit, so it is never OOM-killed by its own group and
 // its pages are not reclaimed for others. With every other component capped
 // and the headroom left over, the host's own OOM killer has nothing to do.
@@ -93,23 +106,23 @@ func (m Memory) Apply(root *cgroup.Group) (Groups, error) {
 	var g Groups
 	var err error
 	mib := func(n int64) int64 { return n << 20 }
-	if g.Broker, err = root.Component("broker", cgroup.Limits{MinBytes: mib(m.HostMB)}); err != nil {
+	if g.Broker, err = root.Component("broker", cgroup.Limits{MinBytes: mib(m.HostMB), CPUWeight: BrokerWeight, IOWeight: BrokerWeight}); err != nil {
 		return Groups{}, err
 	}
 	if m.InferenceMB > 0 {
-		if g.Inference, err = root.Component("inference", cgroup.Limits{MaxBytes: mib(m.InferenceMB)}); err != nil {
+		if g.Inference, err = root.Component("inference", cgroup.Limits{MaxBytes: mib(m.InferenceMB), CPUWeight: InferenceWeight, IOWeight: InferenceWeight}); err != nil {
 			return Groups{}, err
 		}
 	}
 	if m.BrowserMB > 0 {
-		if g.Browser, err = root.Component("browser", cgroup.Limits{MaxBytes: mib(m.BrowserMB)}); err != nil {
+		if g.Browser, err = root.Component("browser", cgroup.Limits{MaxBytes: mib(m.BrowserMB), CPUWeight: BrowserWeight, IOWeight: BrowserWeight}); err != nil {
 			return Groups{}, err
 		}
 	}
 	// The pool's own memory.high would throttle every machine together
 	// before any one reached its limit, so it is set at the hard limit:
 	// per-machine groups carry the throttle.
-	pool, err := root.Component("machines", cgroup.Limits{MaxBytes: mib(m.PoolMB), HighBytes: mib(m.PoolMB)})
+	pool, err := root.Component("machines", cgroup.Limits{MaxBytes: mib(m.PoolMB), HighBytes: mib(m.PoolMB), CPUWeight: PoolWeight, IOWeight: PoolWeight})
 	if err != nil {
 		return Groups{}, err
 	}

@@ -5,12 +5,14 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
+	"github.com/ghbmrk/agentos/broker/budget"
 	"github.com/ghbmrk/agentos/broker/cgroup"
 )
 
@@ -429,11 +431,11 @@ func TestRES1AcceptedWorkIsNeverPreempted(t *testing.T) {
 
 func TestRES2EveryMachineRunsInItsOwnBudgetedCgroup(t *testing.T) {
 	parent := t.TempDir()
-	write(t, parent, "cgroup.controllers", "memory pids")
+	write(t, parent, "cgroup.controllers", "cpu io memory pids")
 	write(t, parent, "cgroup.subtree_control", "")
 	g, err := cgroup.Open(parent)
 	must(t, err)
-	e := newEnv(t, 4096)
+	e := newEnv(t, 8192)
 	e.cfg.Cgroups, e.cfg.NoCgroups = g, false
 	e.open()
 	e.create("m1", admission.Accepted, 1600)
@@ -445,6 +447,26 @@ func TestRES2EveryMachineRunsInItsOwnBudgetedCgroup(t *testing.T) {
 	must(t, err)
 	if string(b) != "1677721600" {
 		t.Fatalf("memory.max = %s, want the declared 1600 MB", b)
+	}
+	// Every machine kind, workers included, gets its class's CPU and I/O
+	// weight and the process cap (RES-2, CAP-8b).
+	e.create("fg", admission.Foreground, 100)
+	_, err = e.m.CreateWorker(bg, WorkerPrefix+"w1", lineageOf(t, e, "m1"), workerSpec(Private))
+	must(t, err)
+	for _, c := range []struct {
+		id     string
+		weight int
+	}{{"m1", AcceptedWeight}, {"fg", ForegroundWeight}, {WorkerPrefix + "w1", ExperimentWeight}} {
+		for f, want := range map[string]string{
+			"cpu.weight": strconv.Itoa(c.weight),
+			"io.weight":  "default " + strconv.Itoa(c.weight),
+			"pids.max":   strconv.Itoa(MachinePids),
+		} {
+			b, err := os.ReadFile(filepath.Join(parent, c.id, f))
+			if err != nil || string(b) != want {
+				t.Errorf("%s/%s = %q, %v; want %q", c.id, f, b, err, want)
+			}
+		}
 	}
 	// Without cgroups, the manager refuses to start unless told it is a test.
 	cfg := e.cfg
@@ -921,5 +943,38 @@ func TestRES4SeedAdmittedOnTheDisk(t *testing.T) {
 	// Refusal changes nothing: the machine runs on its layer as before.
 	if m, _ := e.m.Get("m"); m.State != Running || len(e.guestRead("m", "etc/big")) != 128<<10 {
 		t.Fatalf("refused rebuild changed the machine: %s", m.State)
+	}
+}
+
+func lineageOf(t *testing.T, e *env, id string) string {
+	t.Helper()
+	mc, err := e.m.Get(id)
+	must(t, err)
+	return mc.Lineage
+}
+
+// Within the pool, a foreground machine outweighs accepted work, which
+// outweighs experiments, and every machine has the same process cap.
+// The whole pool weighs less than the broker (RES-2).
+func TestRES2MachineLimitsByClass(t *testing.T) {
+	l := func(c admission.Class) cgroup.Limits { return MachineLimits(Spec{Class: c, MemMB: 1600}) }
+	fg, acc, exp := l(admission.Foreground), l(admission.Accepted), l(admission.Experiment)
+	if fg.MaxBytes != 1600<<20 || acc.MaxBytes != 1600<<20 || exp.MaxBytes != 1600<<20 {
+		t.Fatalf("memory budget = %d, %d, %d", fg.MaxBytes, acc.MaxBytes, exp.MaxBytes)
+	}
+	if fg.CPUWeight != 1000 || acc.CPUWeight != 100 || exp.CPUWeight != 1 {
+		t.Errorf("cpu weights %d/%d/%d, want 1000/100/1", fg.CPUWeight, acc.CPUWeight, exp.CPUWeight)
+	}
+	for _, x := range []cgroup.Limits{fg, acc, exp} {
+		if x.IOWeight != x.CPUWeight || x.Pids != MachinePids {
+			t.Errorf("limits %+v: io weight must follow cpu, pids must be %d", x, MachinePids)
+		}
+	}
+	if budget.PoolWeight >= budget.BrokerWeight {
+		t.Errorf("pool weight %d not below the broker's %d", budget.PoolWeight, budget.BrokerWeight)
+	}
+	// An unknown class gets the least weight, never the most.
+	if u := l(admission.Class(9)); u.CPUWeight != ExperimentWeight {
+		t.Errorf("unknown class weighed %d", u.CPUWeight)
 	}
 }

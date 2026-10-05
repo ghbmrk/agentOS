@@ -23,7 +23,7 @@ func fakeCgroupfs(t *testing.T, marked bool) (cgroupHost, string) {
 		t.Fatal(err)
 	}
 	for _, f := range []string{"cgroup.controllers", "cgroup.subtree_control"} {
-		if err := os.WriteFile(filepath.Join(own, f), []byte("cpu memory"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(own, f), []byte("cpu io memory pids"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -107,8 +107,8 @@ func TestRES2DelegatedRootGetsTheBrokerAndPool(t *testing.T) {
 	for _, c := range []string{"broker", "machines"} {
 		os.MkdirAll(filepath.Join(own, c), 0o755)
 	}
-	os.WriteFile(filepath.Join(own, "machines", "cgroup.controllers"), []byte("memory"), 0o644)
-	os.WriteFile(filepath.Join(own, "machines", "cgroup.subtree_control"), []byte("memory"), 0o644)
+	os.WriteFile(filepath.Join(own, "machines", "cgroup.controllers"), []byte("cpu io memory pids"), 0o644)
+	os.WriteFile(filepath.Join(own, "machines", "cgroup.subtree_control"), []byte("cpu io memory pids"), 0o644)
 	mem, err := budget.ForHost(7680, 4, budget.Floor())
 	if err != nil {
 		t.Fatal(err)
@@ -122,6 +122,23 @@ func TestRES2DelegatedRootGetsTheBrokerAndPool(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(filepath.Join(own, "broker", "cgroup.procs")); strings.TrimSpace(string(b)) == "" {
 		t.Fatal("broker did not join its group")
+	}
+}
+
+// A delegated group without the pids controller cannot cap a machine's
+// processes, so no pool opens and the agent stays off (RES-2, SR2-4).
+func TestRES2DelegatedRootWithoutPidsOpensNoPool(t *testing.T) {
+	h, own := fakeCgroupfs(t, true)
+	os.WriteFile(filepath.Join(own, "cgroup.controllers"), []byte("cpu io memory"), 0o644)
+	mem, err := budget.ForHost(7680, 4, budget.Floor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g, err := openMachines(h, "", false, mem); err == nil {
+		t.Fatalf("pool opened without a process cap: %+v", g)
+	}
+	if _, err := os.Stat(filepath.Join(own, "machines")); err == nil {
+		t.Fatal("machines group made without a process cap")
 	}
 }
 
