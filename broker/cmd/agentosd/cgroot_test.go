@@ -109,7 +109,7 @@ func TestRES2DelegatedRootGetsTheBrokerAndPool(t *testing.T) {
 	}
 	os.WriteFile(filepath.Join(own, "machines", "cgroup.controllers"), []byte("memory"), 0o644)
 	os.WriteFile(filepath.Join(own, "machines", "cgroup.subtree_control"), []byte("memory"), 0o644)
-	mem, err := budget.ForHost(7680, budget.Floor())
+	mem, err := budget.ForHost(7680, 4, budget.Floor())
 	if err != nil {
 		t.Fatal(err)
 	}
