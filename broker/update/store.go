@@ -56,6 +56,9 @@ var (
 	ErrRollback = errors.New("update metadata is older than what this box trusts")
 	// ErrWeakThreshold: the root or targets role needs fewer keys than the box's floor.
 	ErrWeakThreshold = errors.New("update metadata threshold is below this box's floor")
+	// ErrDriveTooOld: offline, the drive's root expired more than
+	// MaxOfflineRootAge ago; the owner sees DriveTooOldNotice.
+	ErrDriveTooOld = errors.New("drive's update is too old to trust offline")
 	// ErrBadRepository: anything else wrong with what the source served.
 	ErrBadRepository = errors.New("update repository is malformed")
 )
@@ -85,6 +88,14 @@ func classify(err error) error {
 // drive (UPD-8). P2-2 and the owner channel show it.
 const OfflineNotice = "Update installed from a drive without a freshness check. The box will check it the next time it is online."
 
+// DriveTooOldNotice is what the owner sees when a drive's update is refused
+// for age (Mark, 2026-10-05). The same text accompanies the tier-4 override.
+const DriveTooOldNotice = "This drive's update is too old to trust offline. Use a newer drive, or connect once."
+
+// MaxOfflineRootAge: an offline install is refused when the drive's newest
+// root expired longer ago than this, unless the owner overrides.
+const MaxOfflineRootAge = 180 * 24 * time.Hour
+
 // NotConfirmedNotice is what the owner sees when an online check finds the
 // release installed from a drive missing from the fresh metadata.
 const NotConfirmedNotice = "The update installed from a drive is not in the latest signed release list. It may have been withdrawn; the box will offer the current release."
@@ -104,9 +115,15 @@ type Options struct {
 	// Attestors is the box's attestor allow-list: the keys pinned in its
 	// image plus those the owner added (D6, arbitrator's correction). Only
 	// these count as independent; empty means none do yet, and a security
-	// fix takes the owner's CH-3 install path.
+	// fix takes the owner's CH-3 install path. While every listed key is
+	// maintainer-operated (the project's test box, Mark 2026-10-05), those
+	// keys count as the interim check; once any outside key is listed,
+	// maintainer-operated keys stop counting.
 	Attestors []ed25519.PublicKey
-	// Now is the clock for online expiry; nil means time.Now.
+	// AllowOldDrive: the owner approved, with a tier-4 code, an offline
+	// install from a drive whose root expired over MaxOfflineRootAge ago.
+	AllowOldDrive bool
+	// Now is the clock for expiry and drive age; nil means time.Now.
 	Now func() time.Time
 }
 
@@ -191,8 +208,12 @@ type Verified struct {
 	fresh       bool
 	maintainers map[string]bool // keys any accepted root listed (no attestor)
 	allowed     map[string]bool // Options.Attestors
-	operated    map[string]bool // maintainer-operated attestor keys
-	security    bool            // set only by WithAttestations
+	// interim: every allow-listed key is maintainer-operated, so the
+	// project's test box counts until an outside attestor is listed
+	// (Mark, 2026-10-05).
+	interim  bool
+	operated map[string]bool // maintainer-operated attestor keys
+	security bool            // set only by WithAttestations
 }
 
 // ErrNotChecked: a Verified that Store.Check did not make.
@@ -457,6 +478,18 @@ func (s *Store) check(src Source, o Options) (Result, error) {
 		addKeys(seen, tm.Root)
 		rootBytes, rotated = b, true
 	}
+	// A drive's root may be expired (UPD-8), but not by more than
+	// MaxOfflineRootAge without the owner's override: such a drive cannot
+	// carry a revocation newer than half a year past its root's life.
+	if o.Offline && !o.AllowOldDrive {
+		now := time.Now()
+		if o.Now != nil {
+			now = o.Now()
+		}
+		if exp := tm.Root.Signed.Expires; now.Sub(exp) > MaxOfflineRootAge {
+			return Result{}, fmt.Errorf("%w: root v%d expired %s", ErrDriveTooOld, tm.Root.Signed.Version, exp.UTC().Format(time.DateOnly))
+		}
+	}
 	var res Result
 	if rotated {
 		if err := s.writeSeenKeys(seen); err != nil {
@@ -707,7 +740,13 @@ func (s *Store) load(src Source, seen, attestors, allowed map[string]bool, targe
 	if rel.Version != n {
 		return nil, fmt.Errorf("%w: %s holds version %d", ErrBadRepository, p, rel.Version)
 	}
-	v := &Verified{sealed: true, release: rel, manifest: man, files: map[string]File{}, maintainers: seen, operated: attestors, allowed: allowed}
+	interim := len(allowed) > 0
+	for fp := range allowed {
+		if !attestors[fp] {
+			interim = false
+		}
+	}
+	v := &Verified{sealed: true, release: rel, manifest: man, files: map[string]File{}, maintainers: seen, operated: attestors, allowed: allowed, interim: interim}
 	for _, f := range rel.Files {
 		tf, ok := targets.Signed.Targets[f]
 		if !ok {

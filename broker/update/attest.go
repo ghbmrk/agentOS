@@ -24,10 +24,13 @@ import (
 // maintainer-operated, and not the box's own. The list starts empty, so
 // until it has entries every security fix goes to the owner.
 //
-// A maintainer-run CI attestor runs from day one: its key is in the
-// signed target AttestorsPath and its statements carry Operator
-// "maintainer". Its passes are shown as evidence (MaintainerPasses) and
-// never count as independent.
+// A maintainer-run attestor (the project's test box) runs from day one:
+// its key is in the signed target AttestorsPath and its statements carry
+// Operator "maintainer". Its passes are shown as evidence
+// (MaintainerPasses). As an interim (Mark, 2026-10-05) it also counts as
+// the check while every allow-listed key is maintainer-operated, so it
+// must be both allow-listed and in the signed list; once an outside
+// attestor is listed it stops counting.
 
 // AttestationType is the DSSE payload type.
 const AttestationType = "application/vnd.agentos.attestation.v1+json"
@@ -222,7 +225,8 @@ func (v *Verified) IndependentPasses(atts [][]byte, own ed25519.PublicKey) int {
 	}
 	n := 0
 	v.passes(atts, own, func(fp string, st Statement) {
-		if v.allowed[fp] && !v.maintainers[fp] && !v.operated[fp] && st.Operator == "" {
+		maintainerRun := v.operated[fp] || st.Operator != ""
+		if v.allowed[fp] && !v.maintainers[fp] && (!maintainerRun || v.interim && v.operated[fp]) {
 			n++
 		}
 	})
@@ -261,3 +265,8 @@ func (v *Verified) SecurityAutoStage(atts [][]byte, own ed25519.PublicKey) error
 	}
 	return nil
 }
+
+// InterimAttestation reports whether the box's allow-list holds only the
+// project's own test box, so the digest can say the fix was checked by the
+// project rather than an outside attestor.
+func (v *Verified) InterimAttestation() bool { return v.ok() && v.interim }

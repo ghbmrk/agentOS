@@ -448,3 +448,34 @@ func TestPanicDuringCheckFailsClosed(t *testing.T) {
 		t.Fatal(res.Release, err)
 	}
 }
+
+// Mark, 2026-10-05: offline, a drive whose root expired more than 180 days
+// ago is refused unless the owner overrides with a tier-4 code.
+func TestOldDriveRefusedOfflineUnlessOverridden(t *testing.T) {
+	f := newFixture(t)
+	// Root v2 is dated by the fixture clock (Init dates v1 by the real one).
+	f.must(f.repo.Rotate("root", nil, nil, 0))
+	f.must(f.repo.Sign("root", f.root[0]))
+	f.must(f.repo.Sign("root", f.root[1]))
+	f.release(2, nil)
+	f.publish(0, 1)
+	rootExp := t0.Add(RootExpiry)
+	f.now = rootExp.Add(MaxOfflineRootAge - time.Hour)
+	if res, err := f.check(Options{Offline: true}); err != nil || res.Release == nil {
+		t.Fatalf("root expired 179 days ago: %v %v", res.Release, err)
+	}
+	f.now = rootExp.Add(MaxOfflineRootAge + time.Hour)
+	res, err := f.check(Options{Offline: true})
+	if !errors.Is(err, ErrDriveTooOld) || res.Release != nil {
+		t.Fatalf("root expired 181 days ago: %v %v", res.Release, err)
+	}
+	if in, _ := f.store.Installed(); in.Version != 1 {
+		t.Fatal("installed moved")
+	}
+	if res, err := f.check(Options{Offline: true, AllowOldDrive: true}); err != nil || res.Release == nil {
+		t.Fatalf("owner override: %v %v", res.Release, err)
+	}
+	if DriveTooOldNotice != "This drive's update is too old to trust offline. Use a newer drive, or connect once." {
+		t.Fatal("notice text")
+	}
+}
