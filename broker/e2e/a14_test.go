@@ -280,14 +280,7 @@ func TestA14CanaryThroughTheGuestSocket(t *testing.T) {
 			b, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			rec["status"], rec["headers"], rec["body"] = resp.StatusCode, resp.Header, string(b)
-			// The socket's mux answers an unclean path with a redirect to
-			// the clean one (301 before Go 1.25, method-keeping 307 after)
-			// and never serves it; record any redirect as 300.
-			st := resp.StatusCode
-			if st/100 == 3 {
-				st = 300
-			}
-			statuses = append(statuses, st)
+			statuses = append(statuses, resp.StatusCode)
 		}
 		line, _ := json.Marshal(rec)
 		tx.Write(append(line, '\n'))
@@ -311,8 +304,10 @@ func TestA14CanaryThroughTheGuestSocket(t *testing.T) {
 		}
 	}
 
-	// A14 assertions that hold whoever minted the canaries.
-	want := []int{200, 200, 200, 200, 403, 403, 403, 403, 300, 403, 200, 200, 403, 403, 200, 200, 200, 200, 403, 403, 404, 404}
+	// A14 assertions that hold whoever minted the canaries. The client
+	// does not follow redirects, and the socket must not send one: an
+	// unclean path is denied where it lands, never redirected (ADP-10).
+	want := []int{200, 200, 200, 200, 403, 403, 403, 403, 403, 403, 200, 200, 403, 403, 200, 200, 200, 200, 403, 403, 404, 404}
 	if fmt.Sprint(statuses) != fmt.Sprint(want) {
 		t.Errorf("statuses\n got %v\nwant %v", statuses, want)
 	}
