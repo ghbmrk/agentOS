@@ -140,8 +140,11 @@ func Forward(cfg Config) func(machine string) http.Handler {
 			// soon as the response starts, which can land between the
 			// transport sending the body and its final EOF read: the
 			// read fails, the transport drops the connection, and the
-			// stream is cut. A writer without full duplex support (one
-			// that wraps it) is left as it is.
+			// stream is cut. A writer that wraps the server's without
+			// Unwrap is left as it is: in agentosd, Forward is reached
+			// through meter.Wrap, whose writer has none, so this is a
+			// no-op there; that path is safe already because Wrap reads
+			// the body in full and hands the proxy an in-memory copy.
 			_ = http.NewResponseController(w).EnableFullDuplex()
 			rp.ServeHTTP(w, r)
 		})

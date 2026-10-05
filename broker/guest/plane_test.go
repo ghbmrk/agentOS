@@ -369,11 +369,13 @@ func TestREV1StepAfterEveryEffectRequest(t *testing.T) {
 // stepsSettle waits until machine id's stepper owes nothing and a full
 // StepInterval has passed since its last snapshot, so the next effect
 // request snapshots at once. It reads the stepper's state rather than
-// sleeping a fixed time, which a late timer under load can outlast.
+// sleeping a fixed time, which a late timer under load can outlast. A
+// trailing snapshot is due within one interval; one not taken within
+// three fails the test.
 func (r *rig) stepsSettle(id string) {
 	r.t.Helper()
 	m := r.p.get(id)
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(3 * r.p.cfg.StepInterval)
 	for {
 		s := &m.steps
 		s.mu.Lock()
@@ -383,10 +385,10 @@ func (r *rig) stepsSettle(id string) {
 		switch {
 		case idle && wait <= 0:
 			return
-		case time.Now().After(deadline):
-			r.t.Fatalf("stepper of %s never settled", id)
 		case idle:
 			time.Sleep(wait)
+		case time.Now().After(deadline):
+			r.t.Fatalf("stepper of %s still owes a snapshot after %v", id, 3*r.p.cfg.StepInterval)
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
