@@ -499,6 +499,14 @@ func TestNationalFormsOfTheOwnersNumberAreRefused(t *testing.T) {
 			}
 		}
 	}
+	// Security F1 on #164: a US 900 number dialed without the + is not +90.
+	for _, user := range []string{"9005551234", "19005551234", "01144909879012"} {
+		for _, m := range []string{"MESSAGE", "INVITE"} {
+			if _, err := sign.Sign(ctx, ch(m, user)); !errors.Is(err, sipsign.ErrRecipient) {
+				t.Errorf("%s to %s: %v", m, user, err)
+			}
+		}
+	}
 	for _, user := range []string{"15550200001", "5550200001", "+15550200001"} {
 		if _, err := sign.Sign(ctx, ch("MESSAGE", user)); err != nil {
 			t.Errorf("MESSAGE to %s: %v", user, err)

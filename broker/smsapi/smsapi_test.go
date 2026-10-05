@@ -767,6 +767,40 @@ func TestPremiumRateNumbersAreRefused(t *testing.T) {
 	}
 }
 
+// SR2-5 (security F1 and F2 on #164): on an account that dials without
+// the +, digits the provider may read as national or after an
+// international prefix are checked against the premium-rate list in
+// those forms, and ITU's shared-cost and satellite codes are refused.
+func TestPremiumRateNumbersDialedWithoutThePlusAreRefused(t *testing.T) {
+	for _, c := range []struct {
+		own    string
+		dialed []string
+		pass   []string
+	}{
+		{"+15550000300", []string{"9005551234", "19005551234", "9765551234", "01144909879012", "011881612345678"}, []string{"5550200001", "15550200001", "8005550123", "0114477009001"}},
+		{"+390212345678", []string{"899123456", "39899123456", "0039899123456", "892123456"}, []string{"3123456789", "0212345678"}},
+		{"+34912345678", []string{"806123456", "34806123456", "0034806123456", "905123456"}, []string{"612345678", "912345678"}},
+		{"+447700900300", []string{"09098790123", "9098790123", "00449098790123", "0870123456"}, []string{"07700900123", "02079460123"}},
+		{"+61212345678", []string{"0011449098790123", "1900123456"}, []string{"0412345678"}},
+	} {
+		for _, d := range c.dialed {
+			if !PremiumDialed(d, c.own) {
+				t.Errorf("%s from %s is premium-rate", d, c.own)
+			}
+		}
+		for _, d := range c.pass {
+			if PremiumDialed(d, c.own) {
+				t.Errorf("%s from %s is not premium-rate", d, c.own)
+			}
+		}
+	}
+	for _, n := range []string{"+979123456789", "+881612345678", "+882161234567", "+883510001234", "+870773112345"} {
+		if err := CheckRecipient(n, ownerNum, lineNum); err != ErrRecipient {
+			t.Errorf("%s: %v", n, err)
+		}
+	}
+}
+
 // SR2-5 (L3 SHOULD-1 on #159): a call spends the line's one budget like a
 // text, and calls have a lower cap of their own.
 func TestCallsSpendTheBudgetAndHaveTheirOwnCap(t *testing.T) {

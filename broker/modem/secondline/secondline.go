@@ -103,7 +103,9 @@ type Config struct {
 	// Contact says the owner created a contact for a number. Recipients
 	// are full international numbers; anything else, a short or
 	// premium-rate code included, is sent to only as an owner contact
-	// (ADP-12, SR2-5). Nil is no contacts.
+	// (ADP-12, SR2-5). It must say yes only for a contact the owner
+	// created, matched by the exact number, never one the agent or an
+	// import added (security R1 on #164). Nil is no contacts.
 	Contact func(number string) bool
 	// Budget is a second SIM's sending budget, shared by its texts and
 	// calls (ADP-12, SR2-5); nil is a new one. A calling account's budget

@@ -339,11 +339,16 @@ func (s signStore) Allow(ch sipsign.Challenge) error {
 	to := sipsign.Recipient(ch.URI, rec.NoPlus)
 	if rec.NoPlus && sipsign.Recipient(ch.URI, false) == "" && to != "" {
 		// Dialed without the +: the provider may read it as a national
-		// or international-prefix number.
+		// or international-prefix number, so the owner's and the line's
+		// numbers, and premium-rate ranges, are checked in those forms
+		// too (security F1 on #164).
 		for _, n := range append(c.lineNumbers(), c.owner) {
 			if smsapi.SameNumber(to[1:], n) {
 				return sipsign.ErrRecipient
 			}
+		}
+		if smsapi.PremiumDialed(to[1:], rec.Number) {
+			return sipsign.ErrRecipient
 		}
 	}
 	switch c.allowSend(to, ch.Method == "INVITE") {

@@ -181,30 +181,64 @@ func CheckRecipient(to, owner, own string) error {
 	return nil
 }
 
-// premium are E.164 prefixes of premium-rate and revenue-share ranges
-// (SR2-5; ADP-12: a premium-rate code needs an owner-created contact).
-// The list is not exhaustive: it covers the ranges most open to abuse in
-// the box's first markets, and the shared budget bounds the rest.
-var premium = []string{
-	"+1900", "+1976", // NANP
-	"+449", "+4487", // UK 09 and 087
-	"+49900", "+49137", "+49118", // DE
-	"+3389",                      // FR 089
-	"+39899", "+39892", "+39895", // IT
-	"+34803", "+34806", "+34807", "+34905", // ES
-	"+31900", "+31906", "+31909", // NL
-	"+3290",                      // BE 090x
-	"+41900", "+41901", "+41906", // CH
-	"+43900", "+43930", // AT
-	"+61190", // AU
-	"+64900", // NZ
-	"+35315", // IE 15xx
+// premium are premium-rate and revenue-share ranges as country code and
+// national prefix (SR2-5; ADP-12: a premium-rate code needs an
+// owner-created contact). The national prefix is written without any
+// trunk 0, the way it follows the country code. An empty one means the
+// whole country code is premium-rate: ITU's shared-cost (IPRS) and
+// global satellite and network codes (security F2 on #164). The list is
+// not exhaustive: it covers the ranges most open to abuse in the box's
+// first markets, and the shared budget bounds the rest (egress K16).
+var premium = []struct{ cc, nat string }{
+	{"1", "900"}, {"1", "976"}, // NANP
+	{"44", "9"}, {"44", "87"}, // UK 09 and 087
+	{"49", "900"}, {"49", "137"}, {"49", "118"}, // DE
+	{"33", "89"},                                // FR 089
+	{"39", "899"}, {"39", "892"}, {"39", "895"}, // IT
+	{"34", "803"}, {"34", "806"}, {"34", "807"}, {"34", "905"}, // ES
+	{"31", "900"}, {"31", "906"}, {"31", "909"}, // NL
+	{"32", "90"},                                // BE 090x
+	{"41", "900"}, {"41", "901"}, {"41", "906"}, // CH
+	{"43", "900"}, {"43", "930"}, // AT
+	{"61", "190"},                                                   // AU
+	{"64", "900"},                                                   // NZ
+	{"353", "15"},                                                   // IE 15xx
+	{"979", ""}, {"881", ""}, {"882", ""}, {"883", ""}, {"870", ""}, // ITU
 }
 
-// Premium says number is in a premium-rate range on the list.
+// Premium says number (E.164) is in a premium-rate range on the list.
 func Premium(number string) bool {
+	d, ok := strings.CutPrefix(number, "+")
+	if !ok {
+		return false
+	}
 	for _, p := range premium {
-		if strings.HasPrefix(number, p) {
+		if strings.HasPrefix(d, p.cc+p.nat) {
+			return true
+		}
+	}
+	return false
+}
+
+// PremiumDialed says dialed, the digits of a Request-URI on an account
+// that dials without the +, may reach a premium-rate range on the list,
+// for an account whose own number (E.164) is own. The provider may read
+// the digits as international, after an international prefix (00, 011 or
+// 0011), or as national in the account's own country, after a trunk 0 or
+// none (security F1 on #164: "9005551234" is a US 900 number, not +90).
+func PremiumDialed(dialed, own string) bool {
+	d := strings.TrimLeft(dialed, "0")
+	forms := []string{d}
+	if rest, ok := strings.CutPrefix(d, "11"); ok { // 011, 0011
+		forms = append(forms, rest)
+	}
+	for _, p := range premium {
+		for _, f := range forms {
+			if strings.HasPrefix(f, p.cc+p.nat) {
+				return true
+			}
+		}
+		if p.nat != "" && strings.HasPrefix(own, "+"+p.cc) && strings.HasPrefix(d, p.nat) {
 			return true
 		}
 	}
