@@ -719,6 +719,9 @@ func TestRecallReachForgetsWhatLearningKept(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// agent/r2 was still queued for observe when the forget ran (security
+	// F2 on #59): drained now, it is not kept.
+	lp.observeIntent(journal.Intent{ID: "agent/r2", GoalID: "owner:r2", Origin: "guest:agent", Params: map[string]any{"body": "meet at the oak table r2"}})
 	// agent/r2 settles after the reset and the owner says YES.
 	in, err := eng.Get("agent/r2")
 	if err != nil {

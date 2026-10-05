@@ -79,6 +79,11 @@ type taskValues struct {
 	// file (security R1 on #123).
 	dirty bool
 	st    map[string]*valueGoal // goal ID -> its values
+	// gone: intents recall's deletion reach erased, and when, so one still
+	// queued for observe is not kept after the forget (security F2 on
+	// #59). In memory only: the queue does not survive a restart. An entry
+	// goes after keepValues, past which no step it names is kept anyway.
+	gone map[string]time.Time
 }
 
 // openTaskValues loads the record and its hash key, made on first use.
@@ -204,6 +209,9 @@ func (v *taskValues) observe(in journal.Intent) {
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if _, erased := v.gone[in.ID]; erased {
+		return
+	}
 	g := v.st[in.GoalID]
 	switch {
 	case g == nil:
@@ -259,6 +267,18 @@ func (v *taskValues) forgetSteps(ids []string) error {
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	now := v.now()
+	if v.gone == nil {
+		v.gone = map[string]time.Time{}
+	}
+	for id, at := range v.gone {
+		if now.Sub(at) > keepValues {
+			delete(v.gone, id)
+		}
+	}
+	for id := range drop {
+		v.gone[id] = now
+	}
 	changed := v.dirty
 	for _, g := range v.st {
 		for id := range g.Steps {
