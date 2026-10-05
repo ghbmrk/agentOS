@@ -1,0 +1,270 @@
+package update
+
+import (
+	"bytes"
+	"crypto/x509"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"sort"
+	"time"
+
+	"github.com/theupdateframework/go-tuf/v2/metadata"
+)
+
+// Following a fork (OSS-10, OSS-9): the box trusts whichever root of trust
+// the owner chose, and only FollowRoot changes it. Check never does: a root
+// that does not chain from the trusted one is refused (B4). The tier-4 page
+// shows DescribeRoot's summary, and the owner's code binds to its Digest
+// (Security C6), so the switch follows exactly the root the owner saw.
+
+// RootSummary is what the owner is shown before following a root.
+type RootSummary struct {
+	Version int64
+	// Keys maps each role to its keys' fingerprints (SHA-256 of the PKIX
+	// public key, hex), sorted.
+	Keys       map[string][]string
+	Thresholds map[string]int
+	Expires    time.Time
+	// RootSHA256 is the digest of the root's bytes.
+	RootSHA256 string
+	// Digest binds the root's bytes and every shown field; the owner's
+	// tier-4 code approves this value and nothing else.
+	Digest string
+}
+
+func (r RootSummary) digest() string {
+	b, _ := json.Marshal(struct {
+		Root       string              `json:"root_sha256"`
+		Version    int64               `json:"version"`
+		Keys       map[string][]string `json:"keys"`
+		Thresholds map[string]int      `json:"thresholds"`
+		Expires    string              `json:"expires"`
+	}{r.RootSHA256, r.Version, r.Keys, r.Thresholds, r.Expires.UTC().Format(time.RFC3339Nano)})
+	return Digest(b)
+}
+
+// ErrFollowNotApproved: the root is not the one whose summary the owner
+// approved.
+var ErrFollowNotApproved = errors.New("update: this root is not the one the owner approved")
+
+var roles = []string{metadata.ROOT, metadata.TARGETS, metadata.SNAPSHOT, metadata.TIMESTAMP}
+
+// verifyRoot checks a root to follow (Security C3): its own root-role
+// threshold, the box's floor (the same floor as Check, never below 2), a
+// nonzero threshold for every role, and unexpired by o.Now.
+func verifyRoot(b []byte, o Options) (*metadata.Metadata[metadata.RootType], error) {
+	if err := noNull(b); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrBadRepository, err)
+	}
+	m, err := metadata.Root().FromBytes(b)
+	if err != nil {
+		return nil, classify(err)
+	}
+	for _, r := range roles {
+		role := m.Signed.Roles[r]
+		if role == nil {
+			return nil, fmt.Errorf("%w: root has no %s role", ErrBadRepository, r)
+		}
+		if role.Threshold < 1 || role.Threshold > len(role.KeyIDs) {
+			return nil, fmt.Errorf("%w: %s threshold (%d) does not fit its %d keys", ErrSignatures, r, role.Threshold, len(role.KeyIDs))
+		}
+	}
+	if err := m.VerifyDelegate(metadata.ROOT, m); err != nil {
+		return nil, classify(err)
+	}
+	if o.MinThreshold < 2 {
+		o.MinThreshold = 2
+	}
+	if err := floor(m, o.MinThreshold); err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	if o.Now != nil {
+		now = o.Now()
+	}
+	if m.Signed.IsExpired(now) {
+		return nil, fmt.Errorf("%w: root v%d expired %s", ErrExpired, m.Signed.Version, m.Signed.Expires.UTC().Format(time.DateOnly))
+	}
+	return m, nil
+}
+
+// DescribeRoot verifies a root as FollowRoot will and returns what the
+// owner is shown.
+func DescribeRoot(b []byte, o Options) (RootSummary, error) {
+	m, err := verifyRoot(b, o)
+	if err != nil {
+		return RootSummary{}, err
+	}
+	return describe(b, m)
+}
+
+func describe(b []byte, m *metadata.Metadata[metadata.RootType]) (RootSummary, error) {
+	s := RootSummary{Version: m.Signed.Version, Keys: map[string][]string{}, Thresholds: map[string]int{},
+		Expires: m.Signed.Expires.UTC(), RootSHA256: Digest(b)}
+	for _, r := range roles {
+		role := m.Signed.Roles[r]
+		s.Thresholds[r] = role.Threshold
+		fps := []string{}
+		for _, id := range role.KeyIDs {
+			k, ok := m.Signed.Keys[id]
+			if !ok {
+				return RootSummary{}, fmt.Errorf("%w: %s names an unknown key", ErrBadRepository, r)
+			}
+			pub, err := k.ToPublicKey()
+			if err != nil {
+				return RootSummary{}, fmt.Errorf("%w: %v", ErrBadRepository, err)
+			}
+			der, err := x509.MarshalPKIXPublicKey(pub)
+			if err != nil {
+				return RootSummary{}, fmt.Errorf("%w: %v", ErrBadRepository, err)
+			}
+			fps = append(fps, fingerprint(der))
+		}
+		sort.Strings(fps)
+		s.Keys[r] = fps
+	}
+	s.Digest = s.digest()
+	return s, nil
+}
+
+// followFile marks a switch in progress: it holds the new root's digest,
+// written before the root. The next store operation finishes the switch if
+// the root was written, or forgets it if not (settle).
+const followFile = "following"
+
+// followSteps are the switch's writes, in order, under the store lock.
+var followSteps = []string{"seen_keys", "interim_flag", "marker", "root", "timestamp", "snapshot", "staged", "done"}
+
+// followFault, set only by tests, fails the switch before a step, as a
+// crash there would.
+var followFault func(step string) error
+
+func step(name string) error {
+	if followFault != nil {
+		return followFault(name)
+	}
+	return nil
+}
+
+// FollowRoot makes root the box's trusted root, replacing whatever chain it
+// followed (OSS-10). Only the owner's tier-4 intent calls it, with the
+// Digest of the summary the owner approved. The root must pass verifyRoot.
+// The installed version is kept, so a fork must release above it (UPD-8,
+// Security C5); every key the new root and the current one list, in any
+// role, joins seen_keys and never leaves (C2, C8); and the project's interim test box stops counting for
+// good (C1, B2). The allow-list itself is the caller's and is unchanged.
+func (s *Store) FollowRoot(root []byte, approved string, o Options) error {
+	m, err := verifyRoot(root, o)
+	if err != nil {
+		return err
+	}
+	sum, err := describe(root, m)
+	if err != nil {
+		return err
+	}
+	if sum.Digest != approved {
+		return ErrFollowNotApproved
+	}
+	unlock, err := s.lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := s.settle(); err != nil {
+		return err
+	}
+	// Narrowing writes first: a crash after them leaves the old chain
+	// with fewer keys able to attest and no interim rule.
+	if err := step("seen_keys"); err != nil {
+		return err
+	}
+	seen, err := s.seenKeys()
+	if err != nil {
+		return err
+	}
+	// The chain being left: Check keeps its keys in seen_keys only once
+	// it rotates, and they must never count once the box stops trusting
+	// them as signers (C8).
+	cur, err := os.ReadFile(s.p("root.json"))
+	if err != nil {
+		return err
+	}
+	old, err := metadata.Root().FromBytes(cur)
+	if err != nil {
+		return classify(err)
+	}
+	addKeys(seen, old)
+	addKeys(seen, m)
+	if err := s.writeSeenKeys(seen); err != nil {
+		return err
+	}
+	if err := step("interim_flag"); err != nil {
+		return err
+	}
+	if err := writeAtomic(s.p(outsideFile), []byte("1\n"), 0o600); err != nil {
+		return err
+	}
+	if err := step("marker"); err != nil {
+		return err
+	}
+	if err := writeAtomic(s.p(followFile), []byte(sum.RootSHA256+"\n"), 0o600); err != nil {
+		return err
+	}
+	if err := step("root"); err != nil {
+		return err
+	}
+	if err := writeAtomic(s.p("root.json"), root, 0o600); err != nil {
+		return err
+	}
+	return s.finishFollow()
+}
+
+// finishFollow clears what the old chain left once the new root is written:
+// the saved timestamp and snapshot (their versions belong to the old chain)
+// and any staged release, then the marker. The caller holds the lock.
+func (s *Store) finishFollow() error {
+	for _, n := range []string{"timestamp", "snapshot", "staged"} {
+		if err := step(n); err != nil {
+			return err
+		}
+		if err := os.Remove(s.p(n + ".json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	if err := step("done"); err != nil {
+		return err
+	}
+	if err := os.Remove(s.p(followFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return syncDir(s.Dir)
+}
+
+// settle completes or forgets a switch a crash interrupted. The caller
+// holds the lock. Check, CommitStaged and FollowRoot settle first; Stage
+// needs no settling, since a release checked under the old root fails
+// trustUnchanged once the root is written.
+func (s *Store) settle() error {
+	want, err := os.ReadFile(s.p(followFile))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	root, err := os.ReadFile(s.p("root.json"))
+	if err != nil {
+		return err
+	}
+	if bytes.Equal(bytes.TrimSpace(want), []byte(Digest(root))) {
+		return s.finishFollow()
+	}
+	// The root was never written: the old chain stands. What was written
+	// (seen keys, the interim flag) only narrows.
+	if err := os.Remove(s.p(followFile)); err != nil {
+		return err
+	}
+	return syncDir(s.Dir)
+}
