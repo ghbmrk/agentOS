@@ -166,6 +166,11 @@ func TestOSS9FollowRootRefusesWeakRoots(t *testing.T) {
 		{"timestamp threshold 0", resign(t, good, threshold(metadata.TIMESTAMP, 0), k[0], k[1]), Options{}, ErrSignatures},
 		{"expired", good, Options{Now: func() time.Time { return time.Now().Add(RootExpiry + time.Hour) }}, ErrExpired},
 		{"not a root", []byte(`{"signed":{}}`), Options{}, ErrBadRepository},
+		// L3 on #180: go-tuf dereferences a null entry while parsing, and
+		// an oversized root is refused before it is parsed at all.
+		{"a null role", edit(t, good, `"roles": {`, `"roles": {"x": null, `), Options{}, ErrBadRepository},
+		{"a null key", edit(t, good, `"keys": {`, `"keys": {"x": null, `), Options{}, ErrBadRepository},
+		{"over 4 MiB", append(append([]byte{}, good...), bytes.Repeat([]byte(" "), maxMetadata)...), Options{}, ErrBadRepository},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := newFixture(t)
@@ -480,4 +485,13 @@ func init() {
 		}
 		return nil
 	}
+}
+
+// edit replaces the one occurrence of old in b.
+func edit(t *testing.T, b []byte, old, new string) []byte {
+	t.Helper()
+	if n := bytes.Count(b, []byte(old)); n != 1 {
+		t.Fatalf("%q occurs %d times", old, n)
+	}
+	return bytes.Replace(b, []byte(old), []byte(new), 1)
 }

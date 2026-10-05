@@ -55,6 +55,9 @@ var roles = []string{metadata.ROOT, metadata.TARGETS, metadata.SNAPSHOT, metadat
 // threshold, the box's floor (the same floor as Check, never below 2), a
 // nonzero threshold for every role, and unexpired by o.Now.
 func verifyRoot(b []byte, o Options) (*metadata.Metadata[metadata.RootType], error) {
+	if len(b) > maxMetadata {
+		return nil, fmt.Errorf("%w: root is larger than %d bytes", ErrBadRepository, maxMetadata)
+	}
 	if err := noNull(b); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrBadRepository, err)
 	}
