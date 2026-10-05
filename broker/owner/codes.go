@@ -60,6 +60,12 @@ type codes struct {
 	// justChallenged is set when a wrong code switched on challenge mode;
 	// the channel reads and clears it to tell the owner.
 	justChallenged bool
+	// pausedSilent and pausedCounted are set when the vault process
+	// refused a check because that bucket of wrong codes is full; the
+	// channel reads and clears them for the flood alert. pausedUntil is
+	// when the silent bucket reopens.
+	pausedSilent, pausedCounted bool
+	pausedUntil                 time.Time
 }
 
 // commit applies f to a copy of the state, saves it, and keeps it only if
@@ -114,8 +120,14 @@ func (c *codes) matchStrong(got string, now time.Time, silent bool) (ok bool, st
 		}
 		step, ok, err := c.verify.VerifyTOTP(got, c.st.LastStep, !silent)
 		var ve *VerifyError
-		if errors.As(err, &ve) && ve.Kind == VerifyLost {
+		switch {
+		case !errors.As(err, &ve):
+		case ve.Kind == VerifyLost:
 			c.verifyOffUntil = now.Add(VerifyBreaker)
+		case ve.Kind == VerifyPaused && silent:
+			c.pausedSilent, c.pausedUntil = true, ve.Until
+		case ve.Kind == VerifyPaused:
+			c.pausedCounted = true
 		}
 		if err != nil || !ok || step <= c.st.LastStep {
 			return false, 0, "", err

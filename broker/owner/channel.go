@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -105,8 +106,10 @@ type Channel struct {
 	held        *heldMsg
 	limited     []time.Time
 	alertAt     time.Time
-	// floodAlertAt is the last alert that the vault's silent bound filled.
+	// floodAlertAt is the last flood alert; floods counts the events for
+	// the digest by kind.
 	floodAlertAt time.Time
+	floods       floodCounts
 	// stops counts STOPs; a RESUME code issued before the latest STOP is
 	// void (taken on the fast path, outside mu).
 	stops atomic.Int64
@@ -248,12 +251,15 @@ func (c *Channel) route(from, text string) (route, bool) {
 	c.mu.Lock()
 	decided := c.expireLocked(now)
 	rt := c.routeLocked(text, now, &decided)
+	flood := c.floodLocked(now)
 	if c.codes.justChallenged {
 		c.codes.justChallenged = false
 		c.held = nil
 		c.alertAt = now
 		rt.alerts = append(rt.alerts, fmt.Sprintf("Too many wrong codes. Codes by text now need a challenge: reply UNLOCK %s and a code from your code generator within %s.",
-			c.codes.currentChallenge(now), dur(ChallengeTTL)))
+			c.codes.currentChallenge(now), dur(ChallengeTTL))+flood)
+	} else if flood != "" {
+		rt.alerts = append(rt.alerts, strings.TrimSpace(flood))
 	}
 	c.mu.Unlock()
 	c.decide(decided)
@@ -382,17 +388,9 @@ func (c *Channel) unlockedChatLocked(text, rest, code string, now time.Time) rou
 			}
 			return route{delegate: rest, run: true}
 		}
-		var ve *VerifyError
-		if errors.As(err, &ve) && ve.Kind == VerifyPaused &&
-			(c.floodAlertAt.IsZero() || now.Sub(c.floodAlertAt) >= AlertEvery) {
-			// The vault's bound on silent checks is full: someone may
-			// be texting codes from the owner's number. The chat passes
-			// on unchecked; counted codes still work.
-			c.floodAlertAt = now
-			return route{delegate: text, run: true, alerts: []string{"Many texts ending in a code have come from your number. " +
-				"Codes in chat pass on unchecked until " + ve.Until.In(c.cfg.Location).Format("15:04") +
-				". If these were not yours, reply STOP."}}
-		}
+		// Otherwise the chat passes on as sent. If the vault's bound on
+		// silent checks is full, that includes the code (route raises
+		// the flood alert); counted codes still work.
 	}
 	return route{delegate: text, run: true}
 }
@@ -532,6 +530,45 @@ func (c *Channel) dropLocked(now time.Time) route {
 	return route{alerts: []string{"Codes without the current challenge are being ignored. Reply UNLOCK for a one-time challenge."}}
 }
 
+// FloodAlertEvery is the least time between two flood alerts by text; every
+// flood event also goes in the digest (arbitrator, P2-4c).
+const FloodAlertEvery = 24 * time.Hour
+
+// floodCounts are the flood events since the last digest.
+type floodCounts struct{ silent, counted, challenge int }
+
+// floodLocked records what the last code check showed: the vault's bound
+// on silent checks full, its bound on counted checks full, or challenge
+// mode switched on. Each is a sign someone may be texting as the owner. It
+// returns the flood alert, with a leading space, at most once per
+// FloodAlertEvery, and "" otherwise.
+func (c *Channel) floodLocked(now time.Time) string {
+	k := &c.codes
+	if !k.pausedSilent && !k.pausedCounted && !k.justChallenged {
+		return ""
+	}
+	if k.pausedSilent {
+		c.floods.silent++
+	}
+	if k.pausedCounted {
+		c.floods.counted++
+	}
+	if k.justChallenged {
+		c.floods.challenge++
+	}
+	silent, until := k.pausedSilent, k.pausedUntil
+	k.pausedSilent, k.pausedCounted = false, false
+	if !c.floodAlertAt.IsZero() && now.Sub(c.floodAlertAt) < FloodAlertEvery {
+		return ""
+	}
+	c.floodAlertAt = now
+	msg := " Many wrong codes have come from your number. If they were not yours, someone may be texting as you: reply STOP."
+	if silent {
+		msg += " Codes in chat pass on unchecked until " + until.In(c.cfg.Location).Format("15:04") + "."
+	}
+	return msg
+}
+
 // TakeDigestNotes returns and clears owner-channel lines for the next
 // digest (O4).
 func (c *Channel) TakeDigestNotes() []string {
@@ -541,6 +578,20 @@ func (c *Channel) TakeDigestNotes() []string {
 	if c.dropped > 0 {
 		out = append(out, fmt.Sprintf("%d code messages without the current challenge were ignored.", c.dropped))
 		c.dropped = 0
+	}
+	if f := c.floods; f != (floodCounts{}) {
+		var parts []string
+		if f.silent > 0 {
+			parts = append(parts, fmt.Sprintf("%d texts with a code passed on unchecked", f.silent))
+		}
+		if f.counted > 0 {
+			parts = append(parts, fmt.Sprintf("%d codes refused at the vault's limit", f.counted))
+		}
+		if f.challenge > 0 {
+			parts = append(parts, fmt.Sprintf("challenge mode switched on %d times", f.challenge))
+		}
+		out = append(out, "Possible code flood: "+strings.Join(parts, ", ")+".")
+		c.floods = floodCounts{}
 	}
 	return out
 }

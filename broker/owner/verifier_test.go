@@ -137,8 +137,9 @@ func TestVerifierFailureCountsNothingAndSaysWhy(t *testing.T) {
 }
 
 // O5 checks are marked silent for the vault's separate bound. When that
-// bound is full the chat passes on unstripped, the owner is alerted once,
-// and a counted code still works.
+// bound is full the chat passes on unstripped and a counted code still
+// works. The owner gets one flood alert per FloodAlertEvery, whether a
+// bucket fills or challenge mode trips, and every event is in the digest.
 func TestFullSilentBoundPassesChatOnAndCountedCodesStillWork(t *testing.T) {
 	r, f := newVerifierRig(t)
 	r.unlock()
@@ -154,17 +155,52 @@ func TestFullSilentBoundPassesChatOnAndCountedCodesStillWork(t *testing.T) {
 		return &VerifyError{Kind: VerifyPaused, Until: until}
 	}
 	first := r.say("plan my week 123456")
-	if !strings.Contains(first, "Many texts ending in a code") {
+	if !strings.Contains(first, "Many wrong codes have come from your number") ||
+		!strings.Contains(first, "unchecked until "+until.Format("15:04")) {
 		t.Fatalf("no flood alert: %q", first)
 	}
 	if got := r.agent.got(); got[len(got)-1] != "plan my week 123456" {
 		t.Fatalf("chat not passed on unstripped: %q", got)
 	}
-	if again := r.say("plan my week 654321"); strings.Contains(again, "Many texts") {
-		t.Fatalf("alerted twice within AlertEvery: %q", again)
+	r.advance(12 * time.Hour)
+	if again := r.say("plan my week 654321"); strings.Contains(again, "Many wrong codes") {
+		t.Fatalf("alerted twice within FloodAlertEvery: %q", again)
 	}
 	r.ch.RequireUnlock()
 	r.unlock()
+
+	// The counted bucket full is a flood sign too; after a day it alerts
+	// again.
+	r.ch.RequireUnlock()
+	f.fail = failWith(VerifyPaused, r.clock().Add(5*time.Minute))
+	r.advance(12 * time.Hour)
+	if got := r.say(r.totp()); !strings.Contains(got, "paused until") || !strings.Contains(got, "Many wrong codes") {
+		t.Fatalf("counted bucket full: %q", got)
+	}
+	notes := r.ch.TakeDigestNotes()
+	if len(notes) != 1 || notes[0] != "Possible code flood: 2 texts with a code passed on unchecked, 1 codes refused at the vault's limit." {
+		t.Fatalf("digest %q", notes)
+	}
+}
+
+// Arbitrator condition (P2-4c): codes are checked only for texts from the
+// owner's number. Agent or guest text (Notify, the guest's owner reply)
+// and texts from any other number never reach the verifier, so a code
+// passed on unchecked in chat gives the agent nothing to test.
+func TestOnlyOwnerTextsReachTheVerifier(t *testing.T) {
+	r, f := newVerifierRig(t)
+	code := totpAt(testSecrets.TOTPSeed, r.clock().Unix())
+	r.ch.Notify("Your code is " + code)
+	r.ch.Notify(code)
+	r.sayFrom("+15559999999", code)
+	r.sayFrom("+15559999999", "plan my week "+code)
+	if n := f.calls(); n != 0 {
+		t.Fatalf("%d checks from text that was not the owner's", n)
+	}
+	r.unlock()
+	if f.calls() != 1 {
+		t.Fatal("owner code not checked")
+	}
 }
 
 var tokenRe = regexp.MustCompile(`UNLOCK ([A-Z2-9]{4})`)

@@ -163,7 +163,8 @@ func TestChallengeModeDropsSpoofedCodesAndOwnerRecovers(t *testing.T) {
 	if len(r.ch.codes.st.Wrong) != wrongBefore || r.ch.codes.st.BoundUsed != 0 {
 		t.Fatal("dropped messages were counted")
 	}
-	if notes := r.ch.TakeDigestNotes(); len(notes) != 1 || notes[0] != "82 code messages without the current challenge were ignored." {
+	if notes := r.ch.TakeDigestNotes(); len(notes) != 2 || notes[0] != "82 code messages without the current challenge were ignored." ||
+		notes[1] != "Possible code flood: challenge mode switched on 1 times." {
 		t.Fatalf("digest %v", notes)
 	}
 	// A real generator code without the challenge does nothing either.
