@@ -44,3 +44,29 @@ func TestLoop2PausesAGrantAndNothingElse(t *testing.T) {
 		t.Fatalf("paused rule still ran: %s", st.State)
 	}
 }
+
+// Loop 2 lists a paused grant until the owner ends the pause: resuming or
+// revoking it tells Config.Unpaused (W5a, loops S4).
+func TestEndingAPauseIsReported(t *testing.T) {
+	var got []string
+	r := newRig(t, func(c *Config) { c.Unpaused = func(id string) { got = append(got, id) } })
+	r.grant(mailGrant())
+	rule := r.grant(Spec{Account: "mail", Rule: &Rule{Action: "invoice.send", AmountCap: 15000, PerRecord: 5, PerDay: 50}})
+	if st := r.submit(journal.Intent{ID: "loop2/p", Origin: OriginLoop2, Account: journal.BrokerAccount,
+		Action: journal.ActionGrantPause, GrantRef: rule, Executor: ExecutorName}); st.State != journal.Succeeded {
+		t.Fatalf("pause: %s", st.State)
+	}
+	if len(got) != 0 {
+		t.Fatalf("a pause reported as ended: %v", got)
+	}
+	r.grant(Spec{Resume: rule})
+	if len(got) != 1 || got[0] != rule {
+		t.Fatalf("after RESUME: %v", got)
+	}
+	if out := r.g.Narrow("REVOKE", rule); out == "" {
+		t.Fatal("no reply to REVOKE")
+	}
+	if len(got) != 2 || got[1] != rule {
+		t.Fatalf("after REVOKE: %v", got)
+	}
+}

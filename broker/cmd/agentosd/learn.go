@@ -52,6 +52,11 @@ type learning struct {
 	// own private machine (W3-builder), once the machine plane attaches it.
 	build lateBuild
 	learn *loops.Learn
+	// guard is Loop 2's passive checks (W5a, loop2.go); contain and
+	// notify reach the gate and the owner once the daemon attaches.
+	guard   *loops.Guard
+	contain loop2Contain
+	notify  loop2Notify
 	// values are the guest's task values, for the compiler only
 	// (W3-values); mining is the journal everything else in Loop 1 reads,
 	// which keeps none (security V3).
@@ -173,10 +178,19 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		return nil, err
 	}
 	l.learn = learn
+	if l.guard, err = loops.NewGuard(loops.GuardConfig{
+		Pipeline:  l.pipe,
+		Store:     change.FileStore{Path: filepath.Join(p.Dir, "loop2.json")},
+		Contain:   &l.contain,
+		Notify:    l.notify.send,
+		ResumeFor: p.ResumeFor,
+	}); err != nil {
+		return nil, err
+	}
 	if l.sched, err = loops.New(loops.Config{
 		Store:     change.FileStore{Path: filepath.Join(p.Dir, "loops.json")},
 		Spare:     spare,
-		Sources:   []loops.Source{sleepSource{learn, &l.sleep}},
+		Sources:   []loops.Source{sleepSource{learn, &l.sleep}, l.guard},
 		Sharing:   l.pipe.SetSharing,
 		Busy:      l.busy,
 		BusyCause: l.busyCause,
@@ -225,6 +239,14 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		case l.observed <- in:
 		default:
 			log.Printf("learning: task values not kept: queue full")
+		}
+	}
+	// Loop 2 lists a grant it paused until the owner resumes or revokes
+	// it (loops S4).
+	guard := l.guard
+	cfg.Grants.Unpaused = func(id string) {
+		if err := guard.Resumed(loops.Target{Kind: "grant", Name: id}); err != nil {
+			log.Printf("loop2: a resumed grant stays listed: %v", err)
 		}
 	}
 	l.verdicts = make(chan grants.OwnerOutcome, maxVerdicts)
@@ -380,6 +402,10 @@ func (l *learning) attach(ctx context.Context, d *daemon.Daemon) {
 	eng := d.Engine()
 	l.pipe.Attach(eng)
 	l.sched.Attach(eng)
+	if g := d.Gate(); g != nil {
+		l.contain.gate.Store(&pauseGateBox{g})
+	}
+	l.notify.ch.Store(d.Owner())
 	l.eng.Store(eng)
 	l.adm.Store(d.Admission())
 	if l.routing != nil {
