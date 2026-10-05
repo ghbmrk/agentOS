@@ -135,9 +135,9 @@ func TestStagedEffectIsStagedAtApprovalAndUnstagedOnUndo(t *testing.T) {
 	r.effect("agent/s1", "invoice.send", map[string]any{"record": "inv-1042"}, "sam@example.com")
 	r.g.Flush()
 	r.approveHeld()
-	st := r.state("agent/s1/stage")
+	st := r.state(reversible.StageID("agent/s1"))
 	if st.State != journal.Succeeded || st.Intent.Action != "draft.save" || st.Intent.Origin != reversible.Origin ||
-		r.exec.params["agent/s1/stage"][reversible.ParamParent] != "agent/s1" || r.exec.runs("agent/s1") != 0 {
+		r.exec.params[reversible.StageID("agent/s1")][reversible.ParamParent] != "agent/s1" || r.exec.runs("agent/s1") != 0 {
 		t.Fatalf("stage: %s %+v", st.State, st.Intent)
 	}
 	r.advance(reversible.DefaultWindow)
@@ -146,7 +146,7 @@ func TestStagedEffectIsStagedAtApprovalAndUnstagedOnUndo(t *testing.T) {
 	if st := r.state("agent/s1"); st.State != journal.Succeeded {
 		t.Fatalf("released: %s", st.State)
 	}
-	if _, err := r.g.Get("agent/s1/unstage"); err == nil {
+	if _, err := r.g.Get(reversible.InverseID("agent/s1")); err == nil {
 		t.Fatal("unstaged a released effect")
 	}
 
@@ -155,9 +155,9 @@ func TestStagedEffectIsStagedAtApprovalAndUnstagedOnUndo(t *testing.T) {
 	h := r.approveHeld()
 	r.g.Decide(owner.Decision{Request: h[0], Item: 1, Ref: "agent/s2", Why: "undo"})
 	r.g.Wait()
-	st = r.state("agent/s2/unstage")
+	st = r.state(reversible.InverseID("agent/s2"))
 	if st.State != journal.Succeeded || st.Intent.Action != "draft.discard" ||
-		r.exec.params["agent/s2/unstage"][reversible.ParamStaged] != "done:agent/s2/stage" || r.exec.runs("agent/s2") != 0 {
+		r.exec.params[reversible.InverseID("agent/s2")][reversible.ParamStaged] != "done:"+reversible.StageID("agent/s2") || r.exec.runs("agent/s2") != 0 {
 		t.Fatalf("unstage: %s %+v", st.State, st.Intent)
 	}
 	if st := r.state("agent/s2"); st.State != journal.Denied {
@@ -171,37 +171,128 @@ func TestStagedEffectIsStagedAtApprovalAndUnstagedOnUndo(t *testing.T) {
 // TestUnstageThatFindsChangesLeavesThemAndSaysSo: an inverse the adapter
 // does not apply (the draft changed since, say) leaves the staged copy and the
 // owner is told in fixed wording; a stage that failed is never unstaged,
-// and its effect still runs after the window as the owner approved.
+// and its effect is not sent, since the owner approved it as staged.
 func TestUnstageThatFindsChangesLeavesThemAndSaysSo(t *testing.T) {
 	form := reversible.Form{Stage: "draft.save", Inverse: "draft.discard"}
 	r := newRig(t, withForms(map[string]reversible.Form{"invoice.send": form}))
 	r.grant(mailGrant())
 	r.ver.set("inv-1042", sam())
-	r.exec.fail = map[string]bool{"agent/s1/unstage": true, "agent/s2/stage": true}
+	r.exec.fail = map[string]bool{reversible.InverseID("agent/s1"): true, reversible.StageID("agent/s2"): true}
 
 	r.effect("agent/s1", "invoice.send", map[string]any{"record": "inv-1042"}, "sam@example.com")
 	r.g.Flush()
 	h := r.approveHeld()
 	r.g.Decide(owner.Decision{Request: h[0], Item: 1, Ref: "agent/s1", Why: "undo"})
 	r.g.Wait()
-	if st := r.state("agent/s1/unstage"); st.State != journal.NotApplied {
+	if st := r.state(reversible.InverseID("agent/s1")); st.State != journal.NotApplied {
 		t.Fatalf("unstage: %s", st.State)
 	}
-	if n := r.own.notes; len(n) != 2 || n[1] != "UNDO "+h[0]+": it did not run, but its draft or staged copy could not be removed, so it was left as is." {
+	if n := r.own.notes; len(n) != 2 || n[1] != h[0]+" did not run, but its draft or staged copy could not be removed, so it was left as is." {
 		t.Fatalf("notes %q", r.own.notes)
 	}
 
 	r.effect("agent/s2", "invoice.send", map[string]any{"record": "inv-1042"}, "sam@example.com")
 	r.g.Flush()
-	r.approveHeld()
-	if st := r.state("agent/s2/stage"); st.State != journal.NotApplied {
+	h = r.approveHeld()
+	if st := r.state(reversible.StageID("agent/s2")); st.State != journal.NotApplied {
 		t.Fatalf("failed stage: %s", st.State)
 	}
+	// Without its staged copy the effect is not sent (arbitrator on #76).
 	r.advance(reversible.DefaultWindow)
 	r.g.Tick()
 	r.g.Wait()
-	if st := r.state("agent/s2"); st.State != journal.Succeeded {
+	if st := r.state("agent/s2"); st.State != journal.Denied || r.exec.runs("agent/s2") != 0 {
 		t.Fatalf("effect after a failed stage: %s", st.State)
+	}
+	if n := r.own.notes; len(n) != 3 || n[2] != h[0]+" was not sent: its draft or staged copy could not be made. Ask your agent again if still needed." {
+		t.Fatalf("notes %q", n)
+	}
+}
+
+// TestReleaseChecksTheStagedCopy (arbitrator on #76): at the window's end
+// the recheck runs first, and anything but a clean send unstages (C2),
+// except a copy the owner deleted (a cancel) or edited. An edited copy is
+// not sent as approved: the owner is asked about the edited version at
+// the normal tier, and the staged copy is left for them.
+func TestReleaseChecksTheStagedCopy(t *testing.T) {
+	form := reversible.Form{Stage: "draft.save", Inverse: "draft.discard"}
+	r := newRig(t, withForms(map[string]reversible.Form{"invoice.send": form}))
+	r.grant(mailGrant())
+	r.ver.set("inv-1042", sam())
+	held := func(id string) {
+		r.effect(id, "invoice.send", map[string]any{"record": "inv-1042"}, "sam@example.com")
+		r.g.Flush()
+		r.approveHeld()
+		if st := r.state(reversible.StageID(id)); st.State != journal.Succeeded {
+			t.Fatalf("stage %s: %s", id, st.State)
+		}
+	}
+	release := func() {
+		r.advance(reversible.DefaultWindow)
+		r.g.Tick()
+		r.g.Wait()
+	}
+
+	// The recheck refuses: the details changed while held. Unstaged.
+	held("agent/s1")
+	v := sam()
+	v.Item.Amount = "$999.00"
+	r.ver.set("inv-1042", v)
+	release()
+	if st := r.state("agent/s1"); st.State != journal.Denied || r.exec.runs("agent/s1") != 0 {
+		t.Fatalf("recheck: %s", st.State)
+	}
+	if st := r.state(reversible.InverseID("agent/s1")); st.State != journal.Succeeded {
+		t.Fatalf("not unstaged after a recheck denial: %s", st.State)
+	}
+	r.ver.set("inv-1042", sam())
+
+	// The adapter finds the draft gone: a cancel, nothing to unstage.
+	held("agent/s2")
+	r.exec.mu.Lock()
+	r.exec.fail = map[string]bool{"agent/s2": true}
+	r.exec.mu.Unlock()
+	r.exec.evidence = map[string]string{"agent/s2": reversible.EvidenceGone}
+	release()
+	if st := r.state("agent/s2"); st.State != journal.NotApplied {
+		t.Fatalf("gone: %s", st.State)
+	}
+	if _, err := r.g.Get(reversible.InverseID("agent/s2")); err == nil {
+		t.Fatal("unstaged a deleted draft")
+	}
+
+	// Any other not-applied result unstages (C2).
+	held("agent/s3")
+	r.exec.fail["agent/s3"] = true
+	release()
+	if st := r.state(reversible.InverseID("agent/s3")); st.State != journal.Succeeded {
+		t.Fatalf("not unstaged after a failed send: %s", st.State)
+	}
+
+	// The owner edited the draft: not sent, not unstaged, and asked anew.
+	held("agent/s4")
+	r.exec.fail["agent/s4"] = true
+	r.exec.evidence["agent/s4"] = reversible.EvidenceEdited
+	n := r.own.count()
+	release()
+	if _, err := r.g.Get(reversible.InverseID("agent/s4")); err == nil {
+		t.Fatal("unstaged an edited draft")
+	}
+	eid := reversible.EditedID("agent/s4")
+	if st := r.state(eid); st.State != journal.Pending || st.Intent.Params[reversible.ParamEdited] != true {
+		t.Fatalf("edited send: %s %+v", st.State, st.Intent)
+	}
+	r.g.Flush()
+	if r.own.count() != n+1 {
+		t.Fatal("the edited send was not asked")
+	}
+	_, items := r.own.last(t)
+	if len(items) != 1 || items[0].Ref != eid || items[0].UndoWindow != 0 || items[0].Detail != "your edit stopped the send" || items[0].Facts.Verb != "send" {
+		t.Fatalf("edited item %+v", items)
+	}
+	r.decide(true, "owner")
+	if st := r.state(eid); st.State != journal.Succeeded || r.exec.params[eid][reversible.ParamStaged] != "done:"+reversible.StageID("agent/s4") {
+		t.Fatalf("approved edited send: %s", st.State)
 	}
 }
 
@@ -231,7 +322,7 @@ func TestDerivedIntentsComeOnlyFromTheGate(t *testing.T) {
 	r.effect("agent/s3", "invoice.send", map[string]any{"record": "inv-1042"}, "sam@example.com")
 	r.g.Flush()
 	r.approveHeld()
-	if st := r.state("agent/s3/stage"); st.State != journal.Succeeded {
+	if st := r.state(reversible.StageID("agent/s3")); st.State != journal.Succeeded {
 		t.Fatalf("stage without a draft grant: %s %q", st.State, st.Permission.Reason)
 	}
 	// A guest naming the held parent gets nothing new: draft.save is not

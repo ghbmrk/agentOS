@@ -133,7 +133,7 @@ func TestHeldEffectsAreNotReleasedDuringStopAndDieAtRestart(t *testing.T) {
 
 	r.ch = r.open() // reboot
 	r.ch.Boot()
-	if got := r.inbox(); got != "Box restarted. Approved actions not run: "+u[1]+". Ask your agent again if still needed." {
+	if got := r.inbox(); got != "Box restarted. Approved actions cancelled, not sent: "+u[1]+". Ask your agent again if still needed." {
 		t.Fatalf("boot text: %q", got)
 	}
 	if ds := r.decisions(); len(ds) != 1 || ds[0].Ref != "e1" || ds[0].Approved || ds[0].Why != "restart" {

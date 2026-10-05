@@ -94,13 +94,13 @@ func (c *Channel) Boot() {
 		text += " Auto-replies not sent: " + strings.Join(replies, ", ") + "."
 	}
 	if len(holds) > 0 {
-		text += " Approved actions not run: " + strings.Join(holds, ", ") + "."
+		text += " Approved actions cancelled, not sent: " + strings.Join(holds, ", ") + "."
 	}
 	if len(reqs)+len(expired)+len(replies)+len(holds) > 0 {
 		text += " Ask your agent again if still needed."
 	}
 	if !fits(text) {
-		text = fmt.Sprintf("Box restarted. %d requests re-sent with new codes, %d cancelled, %d expired, %d auto-replies not sent, and %d approved actions not run.",
+		text = fmt.Sprintf("Box restarted. %d requests re-sent with new codes, %d cancelled, %d expired, %d auto-replies not sent, and %d approved actions cancelled.",
 			len(resent), len(reqs), len(expired), len(replies), len(holds))
 	}
 	c.mu.Unlock()

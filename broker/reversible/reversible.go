@@ -30,10 +30,22 @@ const (
 const Origin = "broker:reversible"
 
 // Params the derived intents carry, for the adapter to find the staged
-// copy: the parent intent's ID, and for an inverse the stage's evidence.
+// copy: the parent intent's ID, for an inverse or an edited send the
+// stage's evidence, and for an edited send ParamEdited (true).
 const (
 	ParamParent = "reversible_parent"
 	ParamStaged = "reversible_staged"
+	ParamEdited = "reversible_edited"
+)
+
+// Evidence an adapter returns, with a not-applied result, when the
+// effect is released but its staged copy is not what the stage made
+// (arbitrator on #76). Gone: the owner deleted it in their own app, which
+// is a cancel. Edited: the owner changed it, so it is not sent as
+// approved; the owner is asked about the edited copy instead.
+const (
+	EvidenceGone   = "reversible: the staged copy is gone"
+	EvidenceEdited = "reversible: the staged copy was edited"
 )
 
 // Form is an irreversible operation's reversible form.
@@ -42,10 +54,14 @@ type Form struct {
 	// during which UNDO cancels it (CH-16). Zero takes DefaultWindow.
 	Window time.Duration `json:"window,omitempty"`
 	// Stage, if set, is a reversible operation the gate runs as soon as the
-	// owner approves, on the same params: a draft in the owner's account,
-	// a scheduled send, a staging copy. When the window passes the
-	// original operation runs; the adapter makes it complete the staged
-	// copy, found by the stage intent's ID.
+	// owner approves, on the same params: an inert copy in the owner's
+	// account, such as a draft. It must never complete on its own (a
+	// provider-side scheduled send would go out while the box is down and
+	// skip the recheck; arbitrator on #76). When the window passes and the
+	// recheck passes, the original operation runs, and the adapter makes
+	// it complete the staged copy, found by the stage intent's ID, only if
+	// that copy is still exactly what the stage made; otherwise it returns
+	// not applied with EvidenceGone or EvidenceEdited.
 	Stage string `json:"stage,omitempty"`
 	// Inverse is the reversible operation that removes what Stage made,
 	// run on UNDO. Required with Stage.
@@ -96,10 +112,13 @@ func Check(declared map[string]string, op string, f Form) (Form, error) {
 	return f, nil
 }
 
-// StageID and InverseID name the derived intents, so a retry is the same
-// intent (OP-1).
-func StageID(parent string) string   { return parent + "/stage" }
-func InverseID(parent string) string { return parent + "/unstage" }
+// StageID, InverseID, and EditedID name the derived intents, so a retry is
+// the same intent (OP-1). They start with '~', which no guest intent ID
+// does (guest IDs start with their lineage, [a-z0-9]), so a guest cannot
+// take one first (arbitrator C1 on #76).
+func StageID(parent string) string   { return "~reversible/stage/" + parent }
+func InverseID(parent string) string { return "~reversible/unstage/" + parent }
+func EditedID(parent string) string  { return "~reversible/edited/" + parent }
 
 // Stage is the intent that stages p's effect.
 func Stage(p journal.Intent, f Form) journal.Intent {
@@ -110,6 +129,12 @@ func Stage(p journal.Intent, f Form) journal.Intent {
 // stage's evidence.
 func Inverse(p journal.Intent, f Form, staged string) journal.Intent {
 	return derive(p, InverseID(p.ID), f.Inverse, map[string]any{ParamStaged: staged})
+}
+
+// Edited is the intent that sends the owner's edited copy of p's stage,
+// asked of the owner at the normal tier; staged is the stage's evidence.
+func Edited(p journal.Intent, staged string) journal.Intent {
+	return derive(p, EditedID(p.ID), p.Action, map[string]any{ParamStaged: staged, ParamEdited: true})
 }
 
 func derive(p journal.Intent, id, op string, extra map[string]any) journal.Intent {
@@ -131,7 +156,7 @@ func Parent(in journal.Intent) (string, bool) {
 		return "", false
 	}
 	p, _ := in.Params[ParamParent].(string)
-	if p == "" || (in.ID != StageID(p) && in.ID != InverseID(p)) {
+	if p == "" || (in.ID != StageID(p) && in.ID != InverseID(p) && in.ID != EditedID(p)) {
 		return "", false
 	}
 	return p, true

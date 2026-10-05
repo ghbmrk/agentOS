@@ -125,6 +125,8 @@ type fakeExec struct {
 	ran    map[string]int
 	params map[string]map[string]any
 	fail   map[string]bool
+	// evidence overrides a failed intent's evidence.
+	evidence map[string]string
 }
 
 func (e *fakeExec) Execute(_ context.Context, in journal.Intent, _ int) journal.Outcome {
@@ -136,7 +138,11 @@ func (e *fakeExec) Execute(_ context.Context, in journal.Intent, _ int) journal.
 	}
 	e.params[in.ID] = in.Params
 	if e.fail[in.ID] {
-		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "changed since"}
+		ev := "changed since"
+		if x := e.evidence[in.ID]; x != "" {
+			ev = x
+		}
+		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: ev}
 	}
 	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "done:" + in.ID}
 }

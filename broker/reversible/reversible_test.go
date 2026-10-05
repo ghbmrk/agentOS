@@ -75,14 +75,21 @@ func TestDeriveCarriesTheParentAndNothingTheGuestChose(t *testing.T) {
 		Machine: "agent", Label: "private", GrantRef: "G1"}
 	f := Form{Window: DefaultWindow, Stage: "draft.save", Inverse: "draft.discard"}
 	s := Stage(p, f)
-	if s.ID != "agent/s1/stage" || s.Origin != Origin || s.Action != "draft.save" || s.Account != "mail" || s.Executor != "mail" ||
+	if s.ID != "~reversible/stage/agent/s1" || s.Origin != Origin || s.Action != "draft.save" || s.Account != "mail" || s.Executor != "mail" ||
 		s.Params["record"] != "thr-1" || s.Params[ParamParent] != "agent/s1" || len(s.Recipients) != 1 || s.GoalID != "g1" ||
 		s.Machine != "agent" || s.Label != "private" {
 		t.Fatalf("stage %+v", s)
 	}
 	u := Inverse(p, f, "draft-77")
-	if u.ID != "agent/s1/unstage" || u.Action != "draft.discard" || u.Params[ParamStaged] != "draft-77" || u.Params[ParamParent] != "agent/s1" {
+	if u.ID != "~reversible/unstage/agent/s1" || u.Action != "draft.discard" || u.Params[ParamStaged] != "draft-77" || u.Params[ParamParent] != "agent/s1" {
 		t.Fatalf("inverse %+v", u)
+	}
+	e := Edited(p, "draft-77")
+	if e.ID != "~reversible/edited/agent/s1" || e.Action != "message.send" || e.Params[ParamStaged] != "draft-77" || e.Params[ParamEdited] != true {
+		t.Fatalf("edited %+v", e)
+	}
+	if par, ok := Parent(e); !ok || par != "agent/s1" {
+		t.Fatalf("parent of edited: %q %v", par, ok)
 	}
 	if _, ok := p.Params[ParamParent]; ok {
 		t.Fatal("derive changed the parent's params")
@@ -100,5 +107,24 @@ func TestDeriveCarriesTheParentAndNothingTheGuestChose(t *testing.T) {
 	forged.Origin = "guest:agent"
 	if _, ok := Parent(forged); ok {
 		t.Fatal("a guest-origin intent named a parent")
+	}
+}
+
+// TestDerivedIDsAreOutsideEveryGuestID (arbitrator C1 on #76): a guest's
+// intent IDs are <lineage>/<request_id> or <lineage>/private/<request_id>,
+// with lineages from [a-z0-9-] and request IDs from [A-Za-z0-9._-], so they
+// start with a lowercase letter or digit. Derived IDs start with '~', so
+// no guest request can take a derived intent's ID first and block it
+// (OP-1), whatever its parent's ID.
+func TestDerivedIDsAreOutsideEveryGuestID(t *testing.T) {
+	for _, parent := range []string{"agent/s1", "agent/private/s1", "a/b/c"} {
+		for _, id := range []string{StageID(parent), InverseID(parent), EditedID(parent)} {
+			if !strings.HasPrefix(id, "~") || strings.Count(id, parent) != 1 || !strings.HasSuffix(id, "/"+parent) {
+				t.Errorf("derived ID %q of %q", id, parent)
+			}
+		}
+	}
+	if StageID("x") == InverseID("x") || InverseID("x") == EditedID("x") || StageID("x") == EditedID("x") {
+		t.Fatal("derived IDs collide")
 	}
 }
