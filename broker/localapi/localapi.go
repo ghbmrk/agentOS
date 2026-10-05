@@ -83,12 +83,11 @@ type SignIn struct {
 // revoked first (sign-out, a session lock).
 type Session struct {
 	Token string    `json:"token,omitempty"`
-	Until time.Time `json:"until,omitempty"`
-	// Refusal, on a refused sign-in: RefusedWrongCode or RefusedTooMany.
-	// Text then says what is left of the day's tries, in the response to
-	// the code just tried only, never on a status op (Security D1, UX-2wb-2).
+	Until time.Time `json:"until"`
+	// Refusal, on a refused sign-in: RefusedWrongCode or RefusedTooMany,
+	// fixed only. The op is untokened, so what is left of the day's tries
+	// is told only on a signed-in page_resume (Security D1, UX-2wb-2).
 	Refusal string `json:"refusal,omitempty"`
-	Text    string `json:"text,omitempty"`
 }
 
 // Auth carries a token.

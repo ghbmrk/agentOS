@@ -455,13 +455,18 @@ func (s *Server) proofSignIn(w http.ResponseWriter, r *http.Request, ticket stri
 const (
 	wrongCodeText = "That code didn't work. Try the next code from your code generator." // UX-2wb-2
 	limitedText   = "Too many wrong codes were tried on this Wi-Fi. Wait a minute, then try again."
+	lockedText    = "No more codes can be tried today. Use your recovery key, or try again later."
 )
 
 // refusalText is the page's line for a refused code: what is left of the
-// day's tries comes from agentosd, in the response to this code only.
+// day's tries comes from agentosd, in a signed-in response to this code
+// only; before sign-in the lockout line is fixed (Security D1).
 func refusalText(refusal, left string) string {
-	if refusal == localapi.RefusedTooMany && left != "" {
+	switch {
+	case refusal == localapi.RefusedTooMany && left != "":
 		return left
+	case refusal == localapi.RefusedTooMany:
+		return lockedText
 	}
 	return strings.TrimSpace(wrongCodeText + " " + left)
 }
@@ -475,7 +480,7 @@ func (s *Server) checkSignIn(w http.ResponseWriter, r *http.Request, code string
 	err := s.call(r.Context(), localapi.OpSignIn, localapi.SignIn{Code: code}, &ses)
 	switch {
 	case err == nil && ses.Refusal != "":
-		return "", errors.New(refusalText(ses.Refusal, ses.Text))
+		return "", errors.New(refusalText(ses.Refusal, ""))
 	case refused(err, localapi.ErrLimited):
 		return "", errors.New(limitedText)
 	case err != nil:

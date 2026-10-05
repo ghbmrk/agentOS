@@ -633,9 +633,9 @@ func TestAWrongResumeCodeTellsTheTriesLeft(t *testing.T) {
 	}
 }
 
-// UX-2wb-2 under Security D1: a wrong sign-in code's response says what is
-// left of the day's tries; status before sign-in never does.
-func TestAWrongSignInTellsTheTriesLeftOnlyInItsResponse(t *testing.T) {
+// Security D1: page_sign_in is untokened, so a wrong code there gets only
+// its fixed refusal, and status before sign-in never tells the tries.
+func TestAWrongSignInTellsNoTriesLeft(t *testing.T) {
 	r := newRig(t)
 	for _, c := range []struct {
 		left    int
@@ -643,14 +643,14 @@ func TestAWrongSignInTellsTheTriesLeftOnlyInItsResponse(t *testing.T) {
 		text    string
 	}{
 		{5, localapi.RefusedWrongCode, ""},
-		{2, localapi.RefusedWrongCode, "2 tries left today."},
-		{0, localapi.RefusedTooMany, "No more codes can be tried today. Try again after 14:05, or use your recovery key."},
+		{2, localapi.RefusedWrongCode, ""},
+		{0, localapi.RefusedTooMany, ""},
 	} {
 		r.own.mu.Lock()
 		r.own.left = c.left
 		r.own.mu.Unlock()
 		out, err := r.call(localapi.OpSignIn, localapi.SignIn{Code: "000000"})
-		if ses := out.(localapi.Session); err != nil || ses.Refusal != c.refusal || ses.Text != c.text || ses.Token != "" {
+		if ses := out.(localapi.Session); err != nil || ses.Refusal != c.refusal || ses.Token != "" {
 			t.Fatalf("left %d: %+v %v", c.left, out, err)
 		}
 		st, _ := r.call(localapi.OpStatus, struct{}{})

@@ -69,6 +69,12 @@ func TestTheUnitIsHardened(t *testing.T) {
 	}
 	for k, want := range map[string][]string{
 		"User":                    {"agentos-localui"},
+		"Group":                   {"agentos-localui"},
+		"AmbientCapabilities":     {"CAP_NET_BIND_SERVICE CAP_NET_RAW"},
+		"ProtectHome":             {"yes"},
+		"PrivateDevices":          {"yes"},
+		"RestrictNamespaces":      {"yes"},
+		"IPAddressAllow":          {"10.42.0.0/24"},
 		"NoNewPrivileges":         {"yes"},
 		"CapabilityBoundingSet":   {"CAP_NET_BIND_SERVICE CAP_NET_RAW"},
 		"ProtectSystem":           {"strict"},

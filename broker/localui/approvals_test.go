@@ -191,10 +191,11 @@ func TestOnlyTheFormShownAnswersItsRequest(t *testing.T) {
 	a := newApprovalRig(t)
 	id, _ := a.ch.RequestLocal(pageItem("i1"), 0)
 	f := a.form(id)
+	// "Q1" is never issued (IDs run from 2), so it is never this form's.
 	for name, g := range map[string]url.Values{
 		"forged":    {"id": {id}, "tok": {strings.Repeat("0", 64)}},
 		"no token":  {"id": {id}},
-		"other id":  {"id": {"Q9"}, "tok": f["tok"], "sum": f["sum"]},
+		"other id":  {"id": {"Q1"}, "tok": f["tok"], "sum": f["sum"]},
 		"other sum": {"id": {id}, "tok": f["tok"], "sum": {strings.Repeat("1", 64)}},
 	} {
 		if w := a.post("/approvals/", answer(g, "deny", "")); !strings.Contains(w.Body.String(), "This page is out of date") {

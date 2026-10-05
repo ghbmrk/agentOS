@@ -149,16 +149,17 @@ func (o leftOwner) LocalStatus() owner.LocalStatus {
 	return st
 }
 
-// UX-2wb-2 under Security D1: the response to a wrong code says what is
-// left of the day's tries; the sign-in and status pages, fetched, never do.
-func TestTheTriesLeftShowOnlyInTheWrongCodeResponse(t *testing.T) {
+// Security D1: before sign-in, a wrong code's response carries only fixed
+// text, and the sign-in and status pages, fetched, never tell the tries
+// (the count is told on a signed-in RESUME; see localsrv).
+func TestNoTriesLeftShowBeforeSignIn(t *testing.T) {
 	for _, c := range []struct {
 		left int
 		want string
 	}{
 		{5, wrongCodeText},
-		{2, wrongCodeText + " 2 tries left today."},
-		{0, "No more codes can be tried today. Try again after 14:05, or use your recovery key."},
+		{2, wrongCodeText},
+		{0, lockedText},
 	} {
 		s, err := New(Config{AP: testAP()})
 		if err != nil {
@@ -173,8 +174,9 @@ func TestTheTriesLeftShowOnlyInTheWrongCodeResponse(t *testing.T) {
 			s.ServeHTTP(w, req)
 			return w.Body.String()
 		}
-		if body := do("POST", "/unlock", "code=000000"); !strings.Contains(body, html.EscapeString(c.want)) {
-			t.Fatalf("left %d: wrong-code response lacks %q:\n%s", c.left, c.want, body)
+		body := do("POST", "/unlock", "code=000000")
+		if !strings.Contains(body, html.EscapeString(c.want)) || strings.Contains(body, "left today") || strings.Contains(body, "14:05") {
+			t.Fatalf("left %d: wrong-code response is not %q:\n%s", c.left, c.want, body)
 		}
 		for _, p := range []string{"/unlock", "/status"} {
 			if body := do("GET", p, ""); strings.Contains(body, "tries left") || strings.Contains(body, "No more codes") || strings.Contains(body, "14:05") {

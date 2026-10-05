@@ -161,8 +161,10 @@ func (s *Server) signIn(_ context.Context, _ sockets.Peer, args json.RawMessage)
 	s.endTry(err != nil && !errors.Is(err, owner.ErrTooMany))
 	switch {
 	case errors.Is(err, owner.ErrWrongCode), errors.Is(err, owner.ErrTooMany):
-		r, t := s.triesLeft(err)
-		return localapi.Session{Refusal: r, Text: t}, nil
+		// Fixed refusal only: page_sign_in is untokened, so what is left
+		// of the day's tries is told only on a signed-in RESUME (D1).
+		r, _ := s.triesLeft(err)
+		return localapi.Session{Refusal: r}, nil
 	case err != nil:
 		return nil, errFailed
 	}
@@ -300,8 +302,8 @@ func (s *Server) answer(_ context.Context, _ sockets.Peer, args json.RawMessage)
 }
 
 // triesLeft is the refusal of a wrong or unchecked code and what the day's
-// local tries have left, told only in the response to the code just tried
-// (Security D1, UX-2wb-2): a count once 2 or fewer remain, and once none
+// local tries have left, told only in a signed-in response to the code
+// just tried (Security D1, UX-2wb-2): a count once 2 or fewer remain, and once none
 // remain, the bound's fixed reset.
 func (s *Server) triesLeft(err error) (refusal, text string) {
 	st := s.cfg.Owner.LocalStatus()
