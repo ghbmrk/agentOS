@@ -11,6 +11,10 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+# Builds never download a Go toolchain: setup-go installs the one go.mod
+# names, and an offline build fails rather than fetch one.
+env:
+  GOTOOLCHAIN: local
 # Both harnesses are stdlib-only, so they use the runner's system python3: no
 # setup action to pin or trust.
 jobs:

@@ -1,6 +1,6 @@
 package update
 
-// REQ: OSS-8, UPD-8
+// REQ: OSS-8, UPD-8, CHG-3
 
 import (
 	"crypto/ed25519"
@@ -10,9 +10,9 @@ import (
 	"testing"
 )
 
-func securityFix(t *testing.T) (*fixture, *Verified) {
+func securityFix(t *testing.T) (*fixture, *Checked) {
 	f := newFixture(t)
-	f.release(2, func(r *Release) { r.Security = true })
+	f.release(2, func(r *Manifest) { r.Security = true })
 	f.publish(0, 1)
 	res, err := f.check(Options{})
 	if err != nil || res.Release == nil {
@@ -29,7 +29,7 @@ func newKey(t *testing.T) ed25519.PrivateKey {
 	return k
 }
 
-func pass(t *testing.T, k ed25519.PrivateKey, v *Verified) []byte {
+func pass(t *testing.T, k ed25519.PrivateKey, v *Checked) []byte {
 	b, err := Attest(k, v, Statement{Result: ResultPass, Channel: ChannelFast, HardwareClass: "n95-8g", Versions: map[string]string{"openclaw": "1.2.3"}})
 	if err != nil {
 		t.Fatal(err)
@@ -44,7 +44,7 @@ func TestAttestationRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !pub.Equal(k.Public()) || st.Release != "releases/2.json" || st.ManifestSHA256 != v.Manifest().SHA256 ||
+	if !pub.Equal(k.Public()) || st.Release != "releases/2.json" || st.ManifestSHA256 != v.ManifestFile().SHA256 ||
 		st.HardwareClass != "n95-8g" || st.Versions["openclaw"] != "1.2.3" {
 		t.Fatalf("%+v", st)
 	}
@@ -58,11 +58,11 @@ func TestSecurityFixWaitsForOneIndependentAttestation(t *testing.T) {
 	}
 	g := newFixture(t) // a different release with the same version
 	g.rootHash = "cd" + g.rootHash[2:]
-	g.release(2, func(r *Release) { r.Security = true })
+	g.release(2, func(r *Manifest) { r.Security = true })
 	g.publish(0, 1)
 	gres, _ := g.check(Options{})
 	other := gres.Release
-	if other.Manifest().SHA256 == v.Manifest().SHA256 {
+	if other.ManifestFile().SHA256 == v.ManifestFile().SHA256 {
 		t.Fatal("fixture: the two releases have the same bytes")
 	}
 	stable, _ := Attest(newKey(t), v, Statement{Result: ResultPass, Channel: ChannelStable})
@@ -103,5 +103,28 @@ func TestOnlySecurityFixesUseTheAttestationRule(t *testing.T) {
 	res, _ := f.check(Options{})
 	if err := res.Release.SecurityAutoStage([][]byte{pass(t, newKey(t), res.Release)}, nil); err == nil {
 		t.Fatal("a non-security release auto-staged under the security rule")
+	}
+}
+
+// A TUF-checked release reaches the change pipeline as the same Verified
+// value #34's seam makes: version, signed image digests, and Security only
+// with an independent attestation.
+func TestCheckedReleaseBecomesPipelineVerified(t *testing.T) {
+	_, c := securityFix(t)
+	plain := c.Verified(nil, nil)
+	if !plain.OK() || plain.Version() != "2" || plain.Security() {
+		t.Fatalf("unattested: ok=%v version=%q security=%v", plain.OK(), plain.Version(), plain.Security())
+	}
+	imgs := plain.Images()
+	if len(imgs) != 3 {
+		t.Fatalf("images %v", imgs)
+	}
+	for _, f := range c.Files() {
+		if imgs[f.Path] != f.SHA256 {
+			t.Fatalf("%s: %q, signed %q", f.Path, imgs[f.Path], f.SHA256)
+		}
+	}
+	if !c.Verified([][]byte{pass(t, newKey(t), c)}, nil).Security() {
+		t.Fatal("attested security fix not marked security")
 	}
 }

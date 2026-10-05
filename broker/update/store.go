@@ -160,33 +160,33 @@ type File struct {
 	SHA256 string
 }
 
-// Verified is a release whose metadata passed every check. Only Check
+// Checked is a release whose metadata passed every check. Only Check
 // makes one, so code that must act only on a verified release (A/B
 // activation, UPD-1; signing a PCR policy for the new boot path, HW-5a)
-// takes a *Verified.
-type Verified struct {
-	release     Release
+// takes a *Checked.
+type Checked struct {
+	release     Manifest
 	manifest    File
 	files       map[string]File
 	fresh       bool
 	maintainers map[string]bool
 }
 
-// Release is the verified manifest.
-func (v *Verified) Release() Release {
+// Manifest is the verified manifest.
+func (v *Checked) Manifest() Manifest {
 	r := v.release
 	r.Files = append([]string(nil), r.Files...)
 	return r
 }
 
 // Fresh is false when the check ran offline (UPD-8).
-func (v *Verified) Fresh() bool { return v.fresh }
+func (v *Checked) Fresh() bool { return v.fresh }
 
-// Manifest is the release manifest target itself.
-func (v *Verified) Manifest() File { return v.manifest }
+// ManifestFile is the release manifest target itself.
+func (v *Checked) ManifestFile() File { return v.manifest }
 
 // Files lists the release's files with their signed lengths and hashes.
-func (v *Verified) Files() []File {
+func (v *Checked) Files() []File {
 	out := make([]File, 0, len(v.files))
 	for _, p := range v.release.Files {
 		out = append(out, v.files[p])
@@ -196,7 +196,7 @@ func (v *Verified) Files() []File {
 
 // Fetch copies one of the release's files from src to dst, which appears
 // only if the bytes match the signed length and hash.
-func (v *Verified) Fetch(src Source, targetPath, dst string) error {
+func (v *Checked) Fetch(src Source, targetPath, dst string) error {
 	f, ok := v.files[targetPath]
 	if !ok {
 		return fmt.Errorf("%q is not a file of release %d", targetPath, v.release.Version)
@@ -229,7 +229,7 @@ func (v *Verified) Fetch(src Source, targetPath, dst string) error {
 type Result struct {
 	// Release is the newest verified release above the installed one on
 	// the box's channel, or nil if there is none.
-	Release *Verified
+	Release *Checked
 	// FreshnessConfirmed: an online check cleared an offline install's
 	// pending freshness check.
 	FreshnessConfirmed bool
@@ -408,7 +408,7 @@ func fileOf(p string, tf *metadata.TargetFiles) (File, error) {
 	return File{Path: p, Length: tf.Length, SHA256: hex.EncodeToString(sum)}, nil
 }
 
-func (s *Store) load(src Source, root *metadata.Metadata[metadata.RootType], targets *metadata.Metadata[metadata.TargetsType], n int64) (*Verified, error) {
+func (s *Store) load(src Source, root *metadata.Metadata[metadata.RootType], targets *metadata.Metadata[metadata.TargetsType], n int64) (*Checked, error) {
 	p := ReleasePath(n)
 	man, err := fileOf(p, targets.Signed.Targets[p])
 	if err != nil {
@@ -424,14 +424,14 @@ func (s *Store) load(src Source, root *metadata.Metadata[metadata.RootType], tar
 	if err := targets.Signed.Targets[p].VerifyLengthHashes(b); err != nil {
 		return nil, classify(err)
 	}
-	rel, err := parseRelease(b)
+	rel, err := parseManifest(b)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrBadRepository, err)
 	}
 	if rel.Version != n {
 		return nil, fmt.Errorf("%w: %s holds version %d", ErrBadRepository, p, rel.Version)
 	}
-	v := &Verified{release: rel, manifest: man, files: map[string]File{}, maintainers: map[string]bool{}}
+	v := &Checked{release: rel, manifest: man, files: map[string]File{}, maintainers: map[string]bool{}}
 	for _, f := range rel.Files {
 		tf, ok := targets.Signed.Targets[f]
 		if !ok {
@@ -463,7 +463,7 @@ func fingerprint(der []byte) string {
 // Commit records a release as installed once A/B activation passed its
 // health check (UPD-1). An offline release leaves the freshness check
 // pending, and the owner sees OfflineNotice.
-func (s *Store) Commit(v *Verified) error {
+func (s *Store) Commit(v *Checked) error {
 	in, err := s.Installed()
 	if err != nil {
 		return err

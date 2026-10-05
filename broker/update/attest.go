@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -32,7 +33,7 @@ const (
 
 // Statement is what an attestation says.
 type Statement struct {
-	// Release is the manifest target path, e.g. releases/12.json, and
+	// Manifest is the manifest target path, e.g. releases/12.json, and
 	// ManifestSHA256 its hash, so the statement names exact bytes.
 	Release        string `json:"release"`
 	ManifestSHA256 string `json:"manifest_sha256"`
@@ -69,7 +70,7 @@ func pae(payloadType string, payload []byte) []byte {
 
 // Attest signs a statement for the release v names. Attestor and the
 // release fields are filled in from v and priv.
-func Attest(priv ed25519.PrivateKey, v *Verified, st Statement) ([]byte, error) {
+func Attest(priv ed25519.PrivateKey, v *Checked, st Statement) ([]byte, error) {
 	st.Release = v.manifest.Path
 	st.ManifestSHA256 = v.manifest.SHA256
 	st.Attestor = base64.StdEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
@@ -129,7 +130,7 @@ func ParseAttestation(b []byte) (Statement, ed25519.PublicKey, error) {
 // fast-channel attestation for exactly this release, excluding
 // root-listed keys and own (this box's key; may be nil). Malformed or
 // unrelated attestations are skipped, not fatal: they arrive from anyone.
-func (v *Verified) IndependentPasses(atts [][]byte, own ed25519.PublicKey) int {
+func (v *Checked) IndependentPasses(atts [][]byte, own ed25519.PublicKey) int {
 	seen := map[string]bool{}
 	for _, b := range atts {
 		st, pub, err := ParseAttestation(b)
@@ -157,7 +158,7 @@ func (v *Verified) IndependentPasses(atts [][]byte, own ed25519.PublicKey) int {
 // owner: threshold signatures (already checked to make v) plus at least
 // one independent fast-channel attestation (UPD-8, D6). Other releases
 // follow UPD-5's soak, which is not decided here.
-func (v *Verified) SecurityAutoStage(atts [][]byte, own ed25519.PublicKey) error {
+func (v *Checked) SecurityAutoStage(atts [][]byte, own ed25519.PublicKey) error {
 	if !v.release.Security {
 		return errors.New("not a security fix")
 	}
@@ -165,4 +166,17 @@ func (v *Verified) SecurityAutoStage(atts [][]byte, own ed25519.PublicKey) error
 		return ErrNeedsAttestation
 	}
 	return nil
+}
+
+// Verified hands a checked release to the change pipeline as the Verified
+// value it consumes (CHG-3, #34): the signed version and image digests,
+// with Security set only for a security fix that also has an independent
+// fast-channel attestation (UPD-8, D6).
+func (v *Checked) Verified(atts [][]byte, own ed25519.PublicKey) Verified {
+	images := make(map[string]string, len(v.files))
+	for p, f := range v.files {
+		images[p] = f.SHA256
+	}
+	r := Release{Version: strconv.FormatInt(v.release.Version, 10), Security: v.release.Security, Images: images}
+	return Verified{r: r, security: r.Security && v.IndependentPasses(atts, own) >= 1}
 }

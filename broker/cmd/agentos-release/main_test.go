@@ -49,7 +49,7 @@ func TestReleaseFlowThroughTheCommand(t *testing.T) {
 	entry := k("entry.conf")
 	os.WriteFile(entry, []byte("title AgentOS 7\n"), 0o644)
 	must("add-release", "-repo", repo, "-version", "7", "-usr-root-hash", strings.Repeat("0f", 32),
-		"-file", "boot/7/entry.conf="+entry, "-security")
+		"-file", "host-image/7/entry.conf="+entry, "-security")
 	must("sign", "-repo", repo, "-role", "targets", "-key", k("t0.key"))
 	if err := do("publish", "-repo", repo, "-snapshot-key", k("snap.key"), "-timestamp-key", k("ts.key")); err == nil {
 		t.Fatal("published a release with 1 of 2 targets signatures")
@@ -59,7 +59,7 @@ func TestReleaseFlowThroughTheCommand(t *testing.T) {
 	must("refresh", "-repo", repo, "-snapshot-key", k("snap.key"), "-timestamp-key", k("ts.key"))
 
 	must("verify", "-repo", repo, "-root", filepath.Join(repo, "metadata", "1.root.json"), "-installed", "6")
-	if !strings.Contains(out.String(), "verified release 7 (stable, security=true)") || !strings.Contains(out.String(), "boot/7/entry.conf") {
+	if !strings.Contains(out.String(), "verified release 7 (stable, security=true)") || !strings.Contains(out.String(), "host-image/7/entry.conf") {
 		t.Fatalf("verify said %q", out.String())
 	}
 	must("verify", "-repo", repo, "-root", filepath.Join(repo, "metadata", "1.root.json"), "-installed", "7", "-offline")

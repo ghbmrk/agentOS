@@ -1,15 +1,3 @@
-// Package update signs and verifies AgentOS releases (UPD-2, UPD-8, UPD-1a).
-//
-// Metadata follows The Update Framework through go-tuf, the reference Go
-// implementation: root, targets, snapshot and timestamp roles, threshold
-// signatures, key rotation by chained root versions, and content-addressed
-// target files. Maintainers use Repo (and cmd/agentos-release) on offline
-// machines; the box uses Store to accept a release only when the
-// metadata checks out, online from any mirror or offline from a drive.
-//
-// A release is one TUF target, releases/<version>.json, naming the /usr
-// verity root hash and the files that boot it (UPD-1a). Every file it names
-// is itself a target, so the hash of each is signed by the targets role.
 package update
 
 import (
@@ -28,8 +16,8 @@ const (
 	ChannelFast   = "fast"
 )
 
-// Release is the manifest a releases/<version>.json target holds.
-type Release struct {
+// Manifest is the manifest a releases/<version>.json target holds.
+type Manifest struct {
 	// Version orders releases; a box never accepts one at or below the
 	// installed version (UPD-8).
 	Version int64 `json:"version"`
@@ -41,7 +29,8 @@ type Release struct {
 	// UsrRootHash is the dm-verity root hash of /usr, hex (UPD-1a).
 	UsrRootHash string `json:"usr_root_hash"`
 	// Files are the target paths that make up the release: the boot
-	// entry, kernel, initrd, and the /usr image and its verity data.
+	// entry, kernel, initrd, and the /usr image and its verity data, each
+	// under host-image/ or guest-image/ as the change pipeline expects.
 	Files []string `json:"files"`
 }
 
@@ -69,7 +58,7 @@ func validTargetPath(p string) bool {
 }
 
 // Check reports the first thing wrong with a manifest.
-func (r Release) Check() error {
+func (r Manifest) Check() error {
 	if r.Version < 1 {
 		return errors.New("release version must be at least 1")
 	}
@@ -84,8 +73,9 @@ func (r Release) Check() error {
 	}
 	seen := map[string]bool{}
 	for _, f := range r.Files {
-		if !validTargetPath(f) || strings.HasPrefix(f, "releases/") {
-			return fmt.Errorf("release file %q is not a plain target path", f)
+		ns, _, _ := strings.Cut(f, "/")
+		if !validTargetPath(f) || (ns != "host-image" && ns != "guest-image") {
+			return fmt.Errorf("release file %q is not a plain path under host-image/ or guest-image/", f)
 		}
 		if seen[f] {
 			return fmt.Errorf("release file %q listed twice", f)
@@ -95,21 +85,21 @@ func (r Release) Check() error {
 	return nil
 }
 
-func parseRelease(b []byte) (Release, error) {
-	var r Release
+func parseManifest(b []byte) (Manifest, error) {
+	var r Manifest
 	dec := json.NewDecoder(strings.NewReader(string(b)))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&r); err != nil {
-		return Release{}, fmt.Errorf("release manifest: %w", err)
+		return Manifest{}, fmt.Errorf("release manifest: %w", err)
 	}
 	if dec.More() {
-		return Release{}, errors.New("release manifest: trailing data")
+		return Manifest{}, errors.New("release manifest: trailing data")
 	}
 	return r, r.Check()
 }
 
 // RootHashBytes returns the verity root hash as bytes.
-func (r Release) RootHashBytes() []byte {
+func (r Manifest) RootHashBytes() []byte {
 	b, _ := hex.DecodeString(r.UsrRootHash)
 	return b
 }

@@ -8,6 +8,7 @@ require (
 	github.com/sigstore/sigstore v1.10.6
 	github.com/theupdateframework/go-tuf/v2 v2.4.2
 	golang.org/x/crypto v0.50.0
+	rsc.io/qr v0.2.0
 )
 
 require (

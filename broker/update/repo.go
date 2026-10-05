@@ -303,7 +303,7 @@ func targetFile(targetPath string, sha string) string {
 // file) is copied in content-addressed, and the manifest becomes
 // releases/<version>.json. A file already a target may be named in
 // rel.Files without being in files. Versions only go up.
-func (r Repo) AddRelease(rel Release, files map[string]string) error {
+func (r Repo) AddRelease(rel Manifest, files map[string]string) error {
 	if err := rel.Check(); err != nil {
 		return err
 	}

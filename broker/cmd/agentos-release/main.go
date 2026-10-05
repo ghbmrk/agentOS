@@ -122,7 +122,7 @@ func run(args []string, out io.Writer) error {
 		return nil
 
 	case "add-release":
-		var rel update.Release
+		var rel update.Manifest
 		var files multi
 		fs.Int64Var(&rel.Version, "version", 0, "release version")
 		fs.StringVar(&rel.Channel, "channel", update.ChannelStable, "stable or fast")
@@ -260,7 +260,7 @@ func run(args []string, out io.Writer) error {
 			fmt.Fprintln(out, "verified; no release newer than", installed)
 			return nil
 		}
-		rel := res.Release.Release()
+		rel := res.Release.Manifest()
 		fmt.Fprintf(out, "verified release %d (%s, security=%v) usr root hash %s\n", rel.Version, rel.Channel, rel.Security, rel.UsrRootHash)
 		for _, f := range res.Release.Files() {
 			fmt.Fprintf(out, "  %s %d sha256:%s\n", f.Path, f.Length, f.SHA256)

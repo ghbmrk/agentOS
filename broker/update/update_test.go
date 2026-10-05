@@ -33,7 +33,7 @@ type fixture struct {
 	rootHash  string
 }
 
-func keys(t *testing.T, dir, prefix string, n int) ([]ed25519.PrivateKey, []ed25519.PublicKey) {
+func genKeys(t *testing.T, dir, prefix string, n int) ([]ed25519.PrivateKey, []ed25519.PublicKey) {
 	var privs []ed25519.PrivateKey
 	var pubs []ed25519.PublicKey
 	for i := 0; i < n; i++ {
@@ -58,10 +58,10 @@ func newFixture(t *testing.T) *fixture {
 	os.Mkdir(kdir, 0o700)
 	f := &fixture{t: t, dir: dir, now: t0, rootHash: strings.Repeat("ab", 32)}
 	var rp, tp, sp, tsp []ed25519.PublicKey
-	f.root, rp = keys(t, kdir, "root", 3)
-	f.tgt, tp = keys(t, kdir, "targets", 3)
-	s, sp := keys(t, kdir, "snapshot", 1)
-	ts, tsp := keys(t, kdir, "timestamp", 1)
+	f.root, rp = genKeys(t, kdir, "root", 3)
+	f.tgt, tp = genKeys(t, kdir, "targets", 3)
+	s, sp := genKeys(t, kdir, "snapshot", 1)
+	ts, tsp := genKeys(t, kdir, "timestamp", 1)
 	f.snap, f.ts = s[0], ts[0]
 	r, err := Init(filepath.Join(dir, "repo"), RootConfig{
 		Root: rp, Targets: tp, Snapshot: sp, Timestamp: tsp, RootThreshold: 2, TargetsThreshold: 2,
@@ -95,12 +95,12 @@ func (f *fixture) must(err error) {
 }
 
 // release stages release v with a boot entry, kernel and /usr image.
-func (f *fixture) release(v int64, mod func(*Release)) Release {
+func (f *fixture) release(v int64, mod func(*Manifest)) Manifest {
 	f.t.Helper()
 	files := map[string]string{}
-	rel := Release{Version: v, Channel: ChannelStable, UsrRootHash: f.rootHash}
+	rel := Manifest{Version: v, Channel: ChannelStable, UsrRootHash: f.rootHash}
 	for _, name := range []string{"entry.conf", "vmlinuz", "usr.img"} {
-		p := fmt.Sprintf("boot/%d/%s", v, name)
+		p := fmt.Sprintf("host-image/%d/%s", v, name)
 		local := filepath.Join(f.dir, fmt.Sprintf("%d-%s", v, name))
 		f.must(os.WriteFile(local, []byte(fmt.Sprintf("%s of release %d", name, v)), 0o644))
 		files[p] = local
@@ -140,7 +140,7 @@ func TestThresholdSignedReleaseVerifies(t *testing.T) {
 	if res.Release == nil {
 		t.Fatal("no release offered")
 	}
-	got := res.Release.Release()
+	got := res.Release.Manifest()
 	if got.Version != 2 || got.UsrRootHash != rel.UsrRootHash || !res.Release.Fresh() {
 		t.Fatalf("got %+v fresh=%v", got, res.Release.Fresh())
 	}
@@ -149,7 +149,7 @@ func TestThresholdSignedReleaseVerifies(t *testing.T) {
 		t.Fatalf("files %v", res.Release.Files())
 	}
 	dst := filepath.Join(t.TempDir(), "entry.conf")
-	if err := res.Release.Fetch(DirSource(f.repo.Dir), "boot/2/entry.conf", dst); err != nil {
+	if err := res.Release.Fetch(DirSource(f.repo.Dir), "host-image/2/entry.conf", dst); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := os.ReadFile(dst); string(b) != "entry.conf of release 2" {
@@ -176,20 +176,20 @@ func TestTamperedTargetFileIsNotFetched(t *testing.T) {
 	}
 	var kernel File
 	for _, fl := range res.Release.Files() {
-		if fl.Path == "boot/2/vmlinuz" {
+		if fl.Path == "host-image/2/vmlinuz" {
 			kernel = fl
 		}
 	}
 	stored := filepath.Join(f.repo.Dir, filepath.FromSlash(targetFile(kernel.Path, kernel.SHA256)))
 	f.must(os.WriteFile(stored, []byte("vmlinuz of release 9"), 0o644))
 	dst := filepath.Join(t.TempDir(), "vmlinuz")
-	if err := res.Release.Fetch(DirSource(f.repo.Dir), "boot/2/vmlinuz", dst); !errors.Is(err, ErrBadRepository) {
+	if err := res.Release.Fetch(DirSource(f.repo.Dir), "host-image/2/vmlinuz", dst); !errors.Is(err, ErrBadRepository) {
 		t.Fatalf("tampered kernel: %v", err)
 	}
 	if _, err := os.Stat(dst); !os.IsNotExist(err) {
 		t.Fatal("tampered bytes reached the destination")
 	}
-	if err := res.Release.Fetch(DirSource(f.repo.Dir), "boot/3/vmlinuz", dst); err == nil {
+	if err := res.Release.Fetch(DirSource(f.repo.Dir), "host-image/3/vmlinuz", dst); err == nil {
 		t.Fatal("fetched a file the release does not name")
 	}
 }
@@ -269,7 +269,7 @@ func TestOlderReleaseRefusedOfflineToo(t *testing.T) {
 			t.Fatalf("offline=%v: offered %v, %v", off, res.Release, err)
 		}
 	}
-	if err := f.repo.AddRelease(Release{Version: 3, Channel: ChannelStable, UsrRootHash: f.rootHash, Files: []string{"boot/3/entry.conf"}}, nil); err == nil {
+	if err := f.repo.AddRelease(Manifest{Version: 3, Channel: ChannelStable, UsrRootHash: f.rootHash, Files: []string{"host-image/3/entry.conf"}}, nil); err == nil {
 		t.Fatal("re-added release 3")
 	}
 }
@@ -355,8 +355,8 @@ func TestKeyRotationAndRevocationWithoutReinstall(t *testing.T) {
 		t.Fatal(err)
 	}
 	kdir := t.TempDir()
-	newTgt, newPub := keys(t, kdir, "targets-new", 1)
-	newRoot, newRootPub := keys(t, kdir, "root-new", 1)
+	newTgt, newPub := genKeys(t, kdir, "targets-new", 1)
+	newRoot, newRootPub := genKeys(t, kdir, "root-new", 1)
 	// Revoke targets key 0 (say it was lost) and add a new one; replace
 	// root key 0 too. Root v2 needs 2 of the old root keys and 2 of the new.
 	f.must(f.repo.Rotate("targets", newPub, []ed25519.PublicKey{f.tgt[0].Public().(ed25519.PublicKey)}, 0))
@@ -384,7 +384,7 @@ func TestKeyRotationAndRevocationWithoutReinstall(t *testing.T) {
 	f.tgt = append(f.tgt, newTgt[0])
 	f.publish(1, 3)
 	res, err := f.check(Options{})
-	if err != nil || res.Release == nil || res.Release.Release().Version != 4 {
+	if err != nil || res.Release == nil || res.Release.Manifest().Version != 4 {
 		t.Fatalf("after rotation: %v %v", res.Release, err)
 	}
 	b, _ := os.ReadFile(filepath.Join(f.store.Dir, "root.json"))
@@ -398,7 +398,7 @@ func TestRotationWithoutOldThresholdRefused(t *testing.T) {
 	f.release(2, nil)
 	f.publish(0, 1)
 	kdir := t.TempDir()
-	evil, evilPub := keys(t, kdir, "evil", 2)
+	evil, evilPub := genKeys(t, kdir, "evil", 2)
 	// A thief with one root key tries to install their own root keys.
 	f.must(f.repo.Rotate("root", evilPub, []ed25519.PublicKey{f.root[1].Public().(ed25519.PublicKey), f.root[2].Public().(ed25519.PublicKey)}, 0))
 	m, _ := metadata.Root().FromFile(filepath.Join(f.repo.Dir, "staged", "root.json"))
@@ -432,14 +432,15 @@ func TestWeakThresholdRefused(t *testing.T) {
 func TestManifestMustBindSignedFiles(t *testing.T) {
 	f := newFixture(t)
 	// The tool refuses a release that names a file it was not given.
-	err := f.repo.AddRelease(Release{Version: 2, Channel: ChannelStable, UsrRootHash: f.rootHash, Files: []string{"boot/2/entry.conf"}}, nil)
+	err := f.repo.AddRelease(Manifest{Version: 2, Channel: ChannelStable, UsrRootHash: f.rootHash, Files: []string{"host-image/2/entry.conf"}}, nil)
 	if err == nil {
 		t.Fatal("added a release naming an unsigned file")
 	}
-	for _, bad := range []Release{
-		{Version: 2, Channel: ChannelStable, UsrRootHash: "ABC", Files: []string{"boot/x"}},
-		{Version: 2, Channel: "nightly", UsrRootHash: f.rootHash, Files: []string{"boot/x"}},
+	for _, bad := range []Manifest{
+		{Version: 2, Channel: ChannelStable, UsrRootHash: "ABC", Files: []string{"host-image/x"}},
+		{Version: 2, Channel: "nightly", UsrRootHash: f.rootHash, Files: []string{"host-image/x"}},
 		{Version: 2, Channel: ChannelStable, UsrRootHash: f.rootHash, Files: []string{"../etc/passwd"}},
+		{Version: 2, Channel: ChannelStable, UsrRootHash: f.rootHash, Files: []string{"boot/2/entry.conf"}},
 		{Version: 2, Channel: ChannelStable, UsrRootHash: f.rootHash},
 	} {
 		if bad.Check() == nil {
@@ -450,7 +451,7 @@ func TestManifestMustBindSignedFiles(t *testing.T) {
 	// the box even if signed: the release would not activate as one unit.
 	f.release(2, nil)
 	m, _ := metadata.Targets().FromFile(filepath.Join(f.repo.Dir, "staged", "targets.json"))
-	delete(m.Signed.Targets, "boot/2/vmlinuz")
+	delete(m.Signed.Targets, "host-image/2/vmlinuz")
 	f.must(writeMeta(filepath.Join(f.repo.Dir, "staged", "targets.json"), m))
 	f.publish(0, 1)
 	if _, err := f.check(Options{}); !errors.Is(err, ErrBadRepository) {
@@ -461,14 +462,14 @@ func TestManifestMustBindSignedFiles(t *testing.T) {
 func TestFastReleasesOnlyOnFastChannel(t *testing.T) {
 	f := newFixture(t)
 	f.release(2, nil)
-	f.release(3, func(r *Release) { r.Channel = ChannelFast })
+	f.release(3, func(r *Manifest) { r.Channel = ChannelFast })
 	f.publish(0, 1)
 	res, err := f.check(Options{})
-	if err != nil || res.Release.Release().Version != 2 {
+	if err != nil || res.Release.Manifest().Version != 2 {
 		t.Fatalf("stable box: %v %v", res.Release, err)
 	}
 	res, err = f.check(Options{Channel: ChannelFast})
-	if err != nil || res.Release.Release().Version != 3 {
+	if err != nil || res.Release.Manifest().Version != 3 {
 		t.Fatalf("fast box: %v %v", res.Release, err)
 	}
 	if _, err := f.check(Options{Channel: "pinned"}); err == nil {
