@@ -349,9 +349,6 @@ func (s *Server) vaultPage(w http.ResponseWriter, r *http.Request, errText strin
 		return
 	}
 	v.State, v.PIN = st.State, st.PIN
-	if st.ChangeUnfinished && (st.State == "pending" || st.State == "open") {
-		v.Change = "Your passphrase change did not finish; change it again."
-	}
 	if st.BootChanged {
 		// "Keep this PC trusted" is never ticked by default: Updated and
 		// SecureBoot come from the drive, so they only pick the wording
@@ -378,6 +375,16 @@ func (s *Server) vaultPage(w http.ResponseWriter, r *http.Request, errText strin
 		s.vaultPend = nil
 	}
 	s.mu.Unlock()
+	// The line tells whoever reads it that the old passphrase still opens
+	// the box, so only the phone that gave the passphrase (pending), the
+	// one that confirmed, or a signed-in phone sees it (M1, security R1 on
+	// #93).
+	s.mu.Lock()
+	opener := s.vaultOpener != "" && s.vaultOpener != "-" && s.vaultOpener == vaultKey(r)
+	s.mu.Unlock()
+	if st.ChangeUnfinished && ((st.State == "pending" && v.Mine) || (st.State == "open" && (v.SignedIn || opener))) {
+		v.Change = "Your passphrase change did not finish; change it again."
+	}
 	if !st.Expires.IsZero() {
 		v.Expires = st.Expires.In(s.cfg.Now().Location()).Format("15:04")
 	}
@@ -510,7 +517,7 @@ func (s *Server) vaultCode(w http.ResponseWriter, r *http.Request, code string, 
 		return
 	}
 	s.mu.Lock()
-	s.vaultPend, s.vaultKept = nil, st.KeptTrusted
+	s.vaultPend, s.vaultKept, s.vaultOpener = nil, st.KeptTrusted, vaultKey(r)
 	s.mu.Unlock()
 	// The confirmed ticket also signs this phone in and unlocks chat by
 	// text, once, through the owner channel, which checks it with the

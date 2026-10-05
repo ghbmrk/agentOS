@@ -952,4 +952,11 @@ func TestVaultInterruptedPassphraseChange(t *testing.T) {
 	if page := r.get("/unlock/vault"); !strings.Contains(page, line) || !strings.Contains(page, "The box is unlocked.") {
 		t.Fatalf("open page:\n%s", page)
 	}
+	// Another phone on the Wi-Fi learns nothing: the line would tell it
+	// the old passphrase still opens the box (M1, security R1 on #93).
+	other := &rig{t: t, srv: r.srv, ip: "10.42.0.77:40000"}
+	other.jar, _ = cookiejar.New(nil)
+	if page := other.get("/unlock/vault"); strings.Contains(page, line) || !strings.Contains(page, "The box is unlocked.") {
+		t.Fatalf("other phone:\n%s", page)
+	}
 }

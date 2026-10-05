@@ -86,6 +86,10 @@ type Server struct {
 	vaultPend *vaultPending
 	// vaultKept: the last unlock kept this PC trusted.
 	vaultKept bool
+	// vaultOpener is the cookie key of the phone that confirmed the last
+	// unlock: only it, or a signed-in phone, is told the passphrase change
+	// did not finish (M1 on #93).
+	vaultOpener string
 	// scanning admits one photo upload at a time.
 	scanning chan struct{}
 	// vaultTries and vaultAll are the unlock attempts in the last hour,
