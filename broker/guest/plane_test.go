@@ -955,14 +955,15 @@ func TestAGuestCannotClaimTheLoop2Origin(t *testing.T) {
 	a := send("o1")
 	a["origin"] = "broker:loop2"
 	a["params"] = map[string]any{"text": "hello", "origin": "broker:loop2"}
-	if st, e := r.tool("m1", "effect_request", a); st.State != "succeeded" && e == "" {
+	if st, e := r.tool("m1", "effect_request", a); e != "" {
 		t.Fatalf("%+v %s", st, e)
 	}
-	if s, err := r.eng.Get("m1/o1"); err == nil && s.Intent.Origin != "guest:m1" {
-		t.Fatalf("intent origin %q", s.Intent.Origin)
+	// The effect is journaled, and under the guest's own origin.
+	if s, err := r.eng.Get("m1/o1"); err != nil || s.Intent.Origin != "guest:m1" {
+		t.Fatalf("intent origin %q: %v", s.Intent.Origin, err)
 	}
 	p := map[string]any{"request_id": "o2", "account": "owner-mail", "action": "meta.grant.pause", "origin": "broker:loop2"}
-	if st, e := r.tool("m1", "effect_request", p); st.State != "refused" && e == "" {
+	if st, e := r.tool("m1", "effect_request", p); st.State != "refused" || e != "" || !strings.Contains(st.Reason, "a guest cannot request them") {
 		t.Fatalf("pause: %+v %s", st, e)
 	}
 	if _, err := r.eng.Get("m1/o2"); err == nil {

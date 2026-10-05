@@ -7,6 +7,8 @@ import (
 	"go/token"
 	"io/fs"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 
@@ -76,6 +78,27 @@ func TestEndingAPauseIsReported(t *testing.T) {
 	}
 	if len(got) != 2 || got[1] != rule {
 		t.Fatalf("after REVOKE: %v", got)
+	}
+}
+
+// L3 S1 on #169: revoking a connection deletes its pre-allowances too, and
+// each one deleted is reported as no longer paused, so Loop 2 does not
+// list a grant that is gone.
+func TestARevokeCascadeReportsEveryGrantItEnds(t *testing.T) {
+	var got []string
+	r := newRig(t, func(c *Config) { c.Unpaused = func(id string) { got = append(got, id) } })
+	conn := r.grant(mailGrant())
+	rule := r.grant(Spec{Account: "mail", Rule: &Rule{Action: "invoice.send", AmountCap: 15000, PerRecord: 5, PerDay: 50}})
+	if st := r.submit(journal.Intent{ID: "loop2/p", Origin: OriginLoop2, Account: journal.BrokerAccount,
+		Action: journal.ActionGrantPause, GrantRef: rule, Executor: ExecutorName}); st.State != journal.Succeeded {
+		t.Fatalf("pause: %s", st.State)
+	}
+	if out := r.g.Narrow("REVOKE", conn); out == "" {
+		t.Fatal("no reply to REVOKE")
+	}
+	sort.Strings(got)
+	if want := []string{conn, rule}; !slices.Equal(got, want) {
+		t.Fatalf("after REVOKE %s: %v, want %v", conn, got, want)
 	}
 }
 
