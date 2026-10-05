@@ -291,3 +291,43 @@ func TestOnlyAllowListedAttestorsCount(t *testing.T) {
 		t.Fatal("malformed allow-list key accepted")
 	}
 }
+
+// Mark, 2026-10-05 ("Project test box"): while the allow-list holds only
+// maintainer-operated keys, the project's test box counts as the check;
+// once an outside attestor is listed, it stops counting.
+func TestProjectTestBoxIsInterimAttestor(t *testing.T) {
+	f := newFixture(t)
+	box := newKey(t)
+	f.must(f.repo.SetMaintainerAttestors([]ed25519.PublicKey{box.Public().(ed25519.PublicKey)}))
+	f.release(2, func(r *Manifest) { r.Security = true })
+	f.publish(0, 1)
+	only := []ed25519.PublicKey{box.Public().(ed25519.PublicKey)}
+	res, err := f.check(Options{Attestors: only})
+	if err != nil || res.Release == nil {
+		t.Fatal(res.Release, err)
+	}
+	v := res.Release
+	labelled, _ := Attest(box, v, Statement{Result: ResultPass, Channel: ChannelFast, Operator: OperatorMaintainer})
+	if !v.InterimAttestation() || v.IndependentPasses([][]byte{labelled}, nil) != 1 || !v.WithAttestations([][]byte{labelled}, nil).Security() {
+		t.Fatal("the project's test box did not count as the interim check")
+	}
+	// A key that only claims the label, or is listed but not signed as
+	// maintainer-operated, does not ride the interim rule.
+	stranger := newKey(t)
+	claim, _ := Attest(stranger, v, Statement{Result: ResultPass, Channel: ChannelFast, Operator: OperatorMaintainer})
+	if v.IndependentPasses([][]byte{claim}, nil) != 0 {
+		t.Fatal("a self-labelled key counted")
+	}
+	res, _ = f.check(Options{Attestors: append(only, stranger.Public().(ed25519.PublicKey))})
+	if res.Release.InterimAttestation() || res.Release.IndependentPasses([][]byte{pass(t, box, res.Release)}, nil) != 0 {
+		t.Fatal("the test box still counted after an outside attestor was listed")
+	}
+	if res.Release.IndependentPasses([][]byte{pass(t, stranger, res.Release)}, nil) != 1 {
+		t.Fatal("the outside attestor did not count")
+	}
+	// Not on the allow-list at all: nothing counts.
+	res, _ = f.check(Options{Attestors: []ed25519.PublicKey{}})
+	if res.Release.InterimAttestation() || res.Release.IndependentPasses([][]byte{labelled}, nil) != 0 {
+		t.Fatal("an empty allow-list counted the test box")
+	}
+}

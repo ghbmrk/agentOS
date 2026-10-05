@@ -115,7 +115,10 @@ type Options struct {
 	// Attestors is the box's attestor allow-list: the keys pinned in its
 	// image plus those the owner added (D6, arbitrator's correction). Only
 	// these count as independent; empty means none do yet, and a security
-	// fix takes the owner's CH-3 install path.
+	// fix takes the owner's CH-3 install path. While every listed key is
+	// maintainer-operated (the project's test box, Mark 2026-10-05), those
+	// keys count as the interim check; once any outside key is listed,
+	// maintainer-operated keys stop counting.
 	Attestors []ed25519.PublicKey
 	// AllowOldDrive: the owner approved, with a tier-4 code, an offline
 	// install from a drive whose root expired over MaxOfflineRootAge ago.
@@ -205,8 +208,12 @@ type Verified struct {
 	fresh       bool
 	maintainers map[string]bool // keys any accepted root listed (no attestor)
 	allowed     map[string]bool // Options.Attestors
-	operated    map[string]bool // maintainer-operated attestor keys
-	security    bool            // set only by WithAttestations
+	// interim: every allow-listed key is maintainer-operated, so the
+	// project's test box counts until an outside attestor is listed
+	// (Mark, 2026-10-05).
+	interim  bool
+	operated map[string]bool // maintainer-operated attestor keys
+	security bool            // set only by WithAttestations
 }
 
 // ErrNotChecked: a Verified that Store.Check did not make.
@@ -733,7 +740,13 @@ func (s *Store) load(src Source, seen, attestors, allowed map[string]bool, targe
 	if rel.Version != n {
 		return nil, fmt.Errorf("%w: %s holds version %d", ErrBadRepository, p, rel.Version)
 	}
-	v := &Verified{sealed: true, release: rel, manifest: man, files: map[string]File{}, maintainers: seen, operated: attestors, allowed: allowed}
+	interim := len(allowed) > 0
+	for fp := range allowed {
+		if !attestors[fp] {
+			interim = false
+		}
+	}
+	v := &Verified{sealed: true, release: rel, manifest: man, files: map[string]File{}, maintainers: seen, operated: attestors, allowed: allowed, interim: interim}
 	for _, f := range rel.Files {
 		tf, ok := targets.Signed.Targets[f]
 		if !ok {
