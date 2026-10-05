@@ -118,7 +118,7 @@ func TestRecoveryKeyAndGridCheckMatchRecovery(t *testing.T) {
 	// One mistyped symbol fails its group's check, wherever it is: a key
 	// symbol of the first or last group, or a check symbol.
 	key := c.RecoveryKey
-	for _, i := range []int{0, 37, 4, 22} {
+	for _, i := range []int{0, 43, 4, 23} {
 		bad := []byte(key)
 		if bad[i] == 'A' {
 			bad[i] = 'B'
