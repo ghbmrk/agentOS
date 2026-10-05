@@ -299,12 +299,12 @@ func FreeBytes(path string) (int64, error) {
 	return int64(st.Bavail) * int64(st.Bsize), nil
 }
 
-// MaxDepth is how deeply Measure follows nested directories: as deep as
+// MaxTreeDepth is how deeply Measure follows nested directories: as deep as
 // a worker's deletes go (CAP-8c's too_deep), with one open directory
 // handle per level.
-const MaxDepth = 256
+const MaxTreeDepth = 256
 
-// ErrTooDeep is a layer nested deeper than MaxDepth. Callers treat it as
+// ErrTooDeep is a layer nested deeper than MaxTreeDepth. Callers treat it as
 // over the layer's cap: never as no use.
 var ErrTooDeep = errors.New("directories nest more than 256 deep; flatten them")
 
@@ -312,7 +312,7 @@ var ErrTooDeep = errors.New("directories nest more than 256 deep; flatten them")
 // on a live layer: files that vanish mid-walk are skipped. It walks by
 // directory handles, never by host path, so a layer nested past the host's
 // path limit is still counted (security R4 on #166); one nested deeper
-// than MaxDepth is ErrTooDeep.
+// than MaxTreeDepth is ErrTooDeep.
 func Measure(root string) (Usage, error) {
 	w := measurer{seen: map[[2]uint64]bool{}}
 	fd, err := syscall.Open(root, oPath|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
@@ -347,7 +347,7 @@ func (w *measurer) handle(fd, depth int) error {
 		w.u.Inodes++
 		w.u.Bytes += st.Blocks * 512
 	}
-	if dir && depth > MaxDepth {
+	if dir && depth > MaxTreeDepth {
 		err = ErrTooDeep
 	}
 	if !dir || err != nil {

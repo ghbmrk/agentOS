@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/vm/overlay"
 )
 
 // WorkerPrefix starts the IDs of worker machines (CAP-8): machines with no
@@ -286,10 +288,11 @@ func (m *Manager) Park(ctx context.Context, id string) (Snapshot, error) {
 	}
 	s, err := m.takeLocked(ctx, mc, Full)
 	var full *WorkerFull
-	if errors.As(err, &full) {
-		// Over its layer cap no snapshot can be taken, but its memory
-		// must still go back: stop it as it is. It revives by rollback
-		// to an earlier snapshot, which also brings it under the cap.
+	if errors.As(err, &full) || errors.Is(err, overlay.ErrTooDeep) {
+		// Over its layer cap, or nested too deep to measure (security M4
+		// on SR2-3i), no snapshot can be taken, but its memory must still
+		// go back: stop it as it is. It revives by rollback to an earlier
+		// snapshot, which also brings it under the cap.
 		s, err = Snapshot{}, nil
 	}
 	if err == nil {

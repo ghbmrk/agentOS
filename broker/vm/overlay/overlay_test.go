@@ -514,16 +514,16 @@ func TestMeasureCountsALayerPastThePathLimit(t *testing.T) {
 	}
 }
 
-// A layer nested deeper than MaxDepth is reported as too deep, a refusal
+// A layer nested deeper than MaxTreeDepth is reported as too deep, a refusal
 // callers treat as over the cap, never as no use; fds stay bounded.
 func TestMeasureRefusesALayerDeeperThanTheCap(t *testing.T) {
 	root := t.TempDir()
-	chain(t, root, "a", MaxDepth)
+	chain(t, root, "a", MaxTreeDepth)
 	if _, err := Measure(root); err != nil {
 		t.Fatalf("measure at the cap: %v", err)
 	}
 	root = t.TempDir()
-	chain(t, root, "a", MaxDepth+1)
+	chain(t, root, "a", MaxTreeDepth+1)
 	if _, err := Measure(root); !errors.Is(err, ErrTooDeep) {
 		t.Fatalf("measure past the cap: %v", err)
 	}
