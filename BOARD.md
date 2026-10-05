@@ -8,6 +8,7 @@ States: `queued` → `building` → `in review` → `merged` | `escalated` | `dr
 |---|---|---|---|
 | H0 | Repo scaffold: docs, trace tool, CI, PR template | — | merged |
 | H1 | Metrics harness: `tools/metrics.py` writes METRICS.md weekly from git, LEDGER.md and GitHub (L4 inputs, PLAN.md §2) | H0 | in review |
+| TR1 | Trace gaps the code already meets: tests for DEP-2 (no component needs a host the project runs), ID-2 (no developer key, no first-caller enrollment), DEP-4 (updates verified by hashes and signatures alone, installable offline from a drive), so TRACE.md counts them honestly | H0 | in review |
 | S7 | Host foundation: compare 2–3 immutable-image options (A/B updates, Secure Boot shim, USB boot, build time) | Cloud only | merged: [result](spikes/S7-host-image/RESULT.md), systemd image stack on Debian 13; HW-5a decided |
 | S3 | Agent machines at 8 GB: microVM vs container+sandbox; snapshot/fork/rollback timings; max concurrency | Cloud first, then N95 | merged (cloud part); Firecracker + N95 timings wait on hardware |
 | S4 | OpenClaw unmodified as a guest via broker tools; record any missing seam. Result: **yes**, config only, no patch ([result](spikes/S4-openclaw-guest/RESULT.md)) | Cloud only | merged |
