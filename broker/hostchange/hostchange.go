@@ -38,10 +38,11 @@ var All = []Change{
 	// tpmseal/counter.go). Nothing undefines them, so they stay after the
 	// drive is gone and accumulate with each vault trusted on the PC.
 	{"tpm-vault-counter", TPM},
-	// When a boot PIN is turned on: the lockout authorization, held
-	// while the PIN is on and given back (empty) when it is turned off,
-	// and the dictionary-attack settings, set once and left as set (D7,
-	// tpmseal TakeLockout/ReleaseLockout).
+	// When a boot PIN is turned on: the lockout authorization and the
+	// dictionary-attack settings, held while the PIN is on; turning it
+	// off gives the authorization back (empty) and restores the PC's own
+	// settings, kept in the vault (D7, HOST-1f; tpmseal TakeLockout,
+	// ReleaseLockout, RestoreDA).
 	{"tpm-lockout", TPM},
 	// shim's SBAT revocation level (SbatLevel), written when the shim on
 	// the drive carries a newer revocation policy than the PC (shim 15.7
