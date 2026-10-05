@@ -340,8 +340,8 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	// Deletions reach the journal's guest intents (CAP-3) and the change
-	// pipeline's task cases built on them (change C19), when learning runs.
+	// Deletions reach the journal's guest intents (CAP-3) and, when
+	// learning runs, what it keeps of them (change C19, learning.ForgetTasks).
 	recallCfg := recalltool.ServiceConfig{Dir: recallDir, Journal: d.Engine(), Ask: d.Gate(), Location: time.Local,
 		Notify: func(text string) error {
 			if ch := d.Owner(); ch != nil {
@@ -349,8 +349,8 @@ func main() {
 			}
 			return errors.New("no owner channel")
 		}}
-	if lp != nil && lp.pipe != nil {
-		recallCfg.Cases = lp.pipe
+	if lp != nil {
+		recallCfg.Cases = lp
 	}
 	if lp != nil {
 		lp.attach(ctx, d)

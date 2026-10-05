@@ -88,11 +88,19 @@ func (m *fakeMachines) ForgetSince(_ context.Context, lineage string, since time
 
 func (m *fakeMachines) Plan(string, time.Time) (Plan, error) { return m.plan, m.planErr }
 
-type fakeCases struct{ forgot map[string]bool }
+type fakeCases struct {
+	forgot map[string]bool
+	// early: tasks forgotten while their intent was not yet erased.
+	early map[string]bool
+	j     *fakeJournal
+}
 
 func (c *fakeCases) ForgetTasks(tasks ...string) (int, error) {
 	for _, t := range tasks {
 		c.forgot[t] = true
+		if c.j != nil && !c.j.erased[t] {
+			c.early[t] = true
+		}
 	}
 	return len(tasks), nil
 }
@@ -191,7 +199,7 @@ func newReachRig(t *testing.T) (*reachRig, time.Time) {
 	x.j = &fakeJournal{submitted: map[string]time.Time{}, origin: map[string]string{}, erased: map[string]bool{}, inFlight: map[string]bool{}, denied: map[string]bool{}}
 	x.before = x.clock.Add(-10 * time.Minute)
 	x.vm = &fakeMachines{plan: Plan{To: x.before}}
-	x.cs = &fakeCases{forgot: map[string]bool{}}
+	x.cs = &fakeCases{forgot: map[string]bool{}, early: map[string]bool{}, j: x.j}
 	x.ask = &fakeAsk{st: map[string]journal.Status{}}
 	x.reach = &Reach{Prov: r.prov, Journal: x.j, Machines: x.vm, Cases: x.cs, Ask: x.ask, Deleted: r.ix.Deleted,
 		Now: func() time.Time { return x.clock }, Location: time.UTC,
@@ -290,7 +298,9 @@ func TestCAP3WorkSinceTheReadWaitsForTheOwnersYes(t *testing.T) {
 		t.Fatalf("re-asked: %v", x.ask.st)
 	}
 	x.ask.answer("yes")
-	if len(x.vm.calls) != 1 || !x.j.erased["late"] || x.j.erased["early"] || !x.cs.forgot["late"] {
+	// The learning plane forgets an intent before the journal erases it,
+	// so one in flight cannot settle into a new case (security F1 on #59).
+	if len(x.vm.calls) != 1 || !x.j.erased["late"] || x.j.erased["early"] || !x.cs.forgot["late"] || !x.cs.early["late"] {
 		t.Fatalf("after YES: reset %v, erased %v, cases %v", x.vm.calls, x.j.erased, x.cs.forgot)
 	}
 	want := "Done: root forgot a mail you deleted and is back to " + x.before.Format("15:04 Jan 2") + ". Its 3 actions since stay done; their details are erased."

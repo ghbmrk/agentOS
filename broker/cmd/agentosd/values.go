@@ -250,6 +250,30 @@ func (v *taskValues) forget(goal string) (bool, error) {
 	return true, v.saveLocked()
 }
 
+// forgetSteps deletes the values kept for intents recall's deletion reach
+// erases (CAP-3, change C19): their params may hold the deleted record.
+func (v *taskValues) forgetSteps(ids []string) error {
+	drop := map[string]bool{}
+	for _, id := range ids {
+		drop[id] = true
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	changed := v.dirty
+	for _, g := range v.st {
+		for id := range g.Steps {
+			if drop[id] {
+				delete(g.Steps, id)
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return v.saveLocked()
+}
+
 // verdict applies the owner's verdict on an effect to its goal's values.
 func (v *taskValues) verdict(o grants.OwnerOutcome) {
 	goal := o.Intent.GoalID

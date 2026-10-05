@@ -612,13 +612,21 @@ func (r *Reach) finish(lineage string, rs Reset) error {
 			until = rs.At
 		}
 		ids := r.Journal.Between("guest:"+lineage, rs.Since, until)
+		// Every intent in the window, not only those erased now, so a
+		// retry after a failed removal still removes their cases. First,
+		// so one still in flight cannot settle into a new case (security
+		// F1 on #59), and again after the erase, for anything kept from
+		// an intent that settled in between.
+		if r.Cases != nil {
+			if _, err := r.Cases.ForgetTasks(ids...); err != nil {
+				return err
+			}
+		}
 		_, held, err := r.Journal.Erase(ids)
 		if err != nil {
 			return err
 		}
 		if r.Cases != nil {
-			// Every intent in the window, not only those erased now, so a
-			// retry after a failed removal still removes their cases.
 			if _, err := r.Cases.ForgetTasks(ids...); err != nil {
 				return err
 			}
