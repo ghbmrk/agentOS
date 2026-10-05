@@ -381,6 +381,10 @@ func (p *Pipeline) exemptLocked(key string) {
 	}
 }
 
+// ResumeWindow is how long this pipeline keeps a preempted evaluation's
+// pairs: Config.ResumeFor, or ResumeFor (PE7).
+func (p *Pipeline) ResumeWindow() time.Duration { return p.resumeFor() }
+
 func (p *Pipeline) resumeFor() time.Duration {
 	if p.cfg.ResumeFor > 0 {
 		return p.cfg.ResumeFor

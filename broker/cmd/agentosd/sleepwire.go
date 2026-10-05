@@ -235,3 +235,18 @@ func agentKeeper(ctx context.Context, m *vm.Manager, record func(journal.SleepNo
 	}
 	return &keeper{m: m, id: id, spec: spec, every: 30 * time.Second, logf: log.Printf, status: agentWaiting, sleep: sl}
 }
+
+// sleepResume is how long a preempted evaluation is kept on a box whose
+// agent sleeps for learning: past the next night's window, so work cut
+// when one window ends resumes in the next (PE7 condition 17).
+const sleepResume = 36 * time.Hour
+
+// sleepResumeFor is sleepResume where the agent and a replay machine do
+// not fit together, so the agent sleeps while the box learns; zero
+// (change.ResumeFor) otherwise.
+func sleepResumeFor(capacityMB, headroomMB, agentMB, replayMB int64) time.Duration {
+	if replayMB > 0 && replayFits(capacityMB, headroomMB, agentMB, replayMB) != nil {
+		return sleepResume
+	}
+	return 0
+}

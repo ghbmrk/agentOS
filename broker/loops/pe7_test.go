@@ -1,11 +1,13 @@
 package loops
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/change"
+	"github.com/ghbmrk/agentos/broker/journal"
 )
 
 // REQ: LOOP-1
@@ -45,5 +47,74 @@ func TestLearnResumeForFollowsConfig(t *testing.T) {
 	}
 	if (&Guard{}).resumeFor() != change.ResumeFor || (&Guard{cfg: GuardConfig{ResumeFor: time.Hour}}).resumeFor() != time.Hour {
 		t.Fatal("guard")
+	}
+}
+
+// countingPipeline counts kept pairs by the candidate's "k" file.
+type countingPipeline struct {
+	interruptingPipeline
+	counts
+}
+
+// PE7 (condition 19): Loop 1 orders its hypotheses by its kept
+// candidates' pairs where the pipeline counts them, and leaves the mined
+// order alone where it does not.
+func TestLearnFinishesTheClosestCandidateFirst(t *testing.T) {
+	hyps := []Hypothesis{{Key: "a"}, {Key: "b"}}
+	built := map[string]keptCandidate{"b": {cand: change.Candidate{Files: change.Tree{"k": []byte("b")}}}}
+	l := &Learn{cfg: LearnConfig{Pipeline: &countingPipeline{counts: counts{"b": 2}}}, built: built}
+	if got := l.finishFirstLocked(hyps); got[0].Key != "b" {
+		t.Fatalf("order %v", got)
+	}
+	l = &Learn{cfg: LearnConfig{Pipeline: &interruptingPipeline{}}, built: built}
+	if got := l.finishFirstLocked(hyps); got[0].Key != "a" {
+		t.Fatalf("no counts: order %v", got)
+	}
+}
+
+// PE7 (condition 17): with ResumeFor 36 h, Loop 1 reuses a kept
+// candidate a day later rather than building again, and builds afresh
+// past 36 h.
+func TestAKeptCandidateLastsTheConfiguredResumeFor(t *testing.T) {
+	pl := &interruptingPipeline{}
+	b := &builder{files: map[string][]byte{"procedures/mail": []byte("v2")}}
+	clk := &clock{t: time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)}
+	l, err := NewLearn(LearnConfig{Pipeline: pl, Journal: &journal.Engine{}, Harvest: &Harvester{}, Builder: b, Now: clk.now, ResumeFor: 36 * time.Hour})
+	must(t, err)
+	h := hyp("k", "task-a")
+	l.propose(context.Background(), h, Evidence{})
+	clk.mu.Lock()
+	clk.t = clk.t.Add(24 * time.Hour)
+	clk.mu.Unlock()
+	l.propose(context.Background(), h, Evidence{})
+	if n := len(b.got()); n != 1 {
+		t.Fatalf("%d builds a day later, want 1", n)
+	}
+	clk.mu.Lock()
+	clk.t = clk.t.Add(37 * time.Hour)
+	clk.mu.Unlock()
+	l.propose(context.Background(), h, Evidence{})
+	if n := len(b.got()); n != 2 {
+		t.Fatalf("%d builds past 36 h, want 2", n)
+	}
+}
+
+// PE7 (condition 17): Loop 2 keeps a preempted fix for its ResumeFor too.
+func TestAKeptFixLastsTheConfiguredResumeFor(t *testing.T) {
+	b := cleanBox()
+	b.pkgs[0].Version = "3.0.13"
+	now := t0
+	pl := &interruptOnce{Pipeline: newPipe(t), n: 1}
+	fx := &fixer{cand: change.Candidate{Files: change.Tree{"config/facts.json": facts("3.0.14")}}}
+	g, err := NewGuard(GuardConfig{Box: b.Box(), Pipeline: pl, Store: &change.MemStore{}, Contain: &contain{},
+		FixturesLive: true, Fixer: fx, Notify: func(string, bool) {}, Now: func() time.Time { return now }, ResumeFor: 36 * time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.Pass(context.Background()) // built, preempted, kept
+	now = now.Add(24 * time.Hour)
+	g.Pass(context.Background())
+	if fx.calls != 1 {
+		t.Fatalf("%d fixer calls a day later, want 1: the kept fix was not reused", fx.calls)
 	}
 }

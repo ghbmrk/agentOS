@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/change"
+	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/loops"
 	"github.com/ghbmrk/agentos/broker/vm"
@@ -248,5 +250,38 @@ func TestOwnerChatToASleepingAgent(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 	if r.holdCount() != 1 || r.last().Cause != wakeOwner {
 		t.Fatalf("holding lines %d, journal %+v", r.holdCount(), r.last())
+	}
+}
+
+// PE7 (condition 17): on a box where the agent sleeps for learning,
+// preempted evaluations are kept 36 h, past the next night's window;
+// elsewhere the 12 h default holds.
+func TestSleepModeKeepsEvaluationsAcrossNights(t *testing.T) {
+	if got := sleepResumeFor(3000, 600, 1536, 1024); got != 36*time.Hour {
+		t.Fatalf("no room: %v", got)
+	}
+	if got := sleepResumeFor(4096, 0, 1536, 1024); got != 0 {
+		t.Fatalf("room for both: %v", got)
+	}
+	if got := sleepResumeFor(3000, 600, 1536, 0); got != 0 {
+		t.Fatalf("no replay machine: %v", got)
+	}
+}
+
+// PE7 (condition 17): the learning plane keeps preempted evaluations for
+// learnPaths.ResumeFor, in the pipeline and in Loop 1 alike.
+func TestLearningKeepsEvaluationsForResumeFor(t *testing.T) {
+	for _, d := range []time.Duration{0, 36 * time.Hour} {
+		dir := t.TempDir()
+		cfg := daemon.Config{}
+		l, err := openLearning(learnPaths{Dir: dir, Spare: filepath.Join(dir, "spare.json"), ResumeFor: d}, false, &cfg)
+		must(t, err)
+		want := d
+		if want == 0 {
+			want = change.ResumeFor
+		}
+		if l.pipe.ResumeWindow() != want || l.learn.ResumeWindow() != want {
+			t.Fatalf("ResumeFor %v: pipeline %v, Loop 1 %v", d, l.pipe.ResumeWindow(), l.learn.ResumeWindow())
+		}
 	}
 }

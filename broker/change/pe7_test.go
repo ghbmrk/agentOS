@@ -77,3 +77,72 @@ func TestKeptPairsPerCandidate(t *testing.T) {
 		t.Fatalf("another candidate: %d", n)
 	}
 }
+
+// PE7 (condition 18): an UNDO that changes the active tree discards the
+// pairs kept against the tree it replaced too.
+func TestKeptPairsGoOnUndo(t *testing.T) {
+	e, pe := newPreemptEnv(t, nil)
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	pe.arm(0)
+	e.owner.approve = true
+	a, err := e.p.Propose(context.Background(), Candidate{Source: Local, Files: Tree{"config/a": []byte("1")}})
+	if err != nil || a.State != StateAdopted {
+		t.Fatalf("setup: %+v %v", a, err)
+	}
+	e.owner.approve = false
+	if _, err := e.p.Propose(lateArm(e, pe), greet); !errors.Is(err, ErrInterrupted) {
+		t.Fatal(err)
+	}
+	if e.p.keptSides() == 0 {
+		t.Fatal("nothing kept")
+	}
+	if err := e.p.Revert(context.Background(), a.ID, OriginOwner); err != nil {
+		t.Fatal(err)
+	}
+	if n := e.p.keptSides(); n != 0 {
+		t.Fatalf("%d sides kept against the undone tree", n)
+	}
+}
+
+// PE7 (condition 18): reloading the saved state (after a failed save)
+// keeps only pairs on the reloaded active tree.
+func TestKeptPairsGoOnReload(t *testing.T) {
+	e, pe := newPreemptEnv(t, nil)
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	if _, err := e.p.Propose(lateArm(e, pe), greet); !errors.Is(err, ErrInterrupted) {
+		t.Fatal(err)
+	}
+	e.p.mu.Lock()
+	for k, r := range e.p.kept {
+		r.base = "another tree"
+		e.p.kept[k] = r
+	}
+	err := e.p.reloadLocked()
+	e.p.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := e.p.keptSides(); n != 0 {
+		t.Fatalf("%d sides kept against a tree that is not the reloaded one", n)
+	}
+}
+
+// PE7 (condition 18): a reload that leaves the active tree as it was
+// keeps the pairs evaluated against it.
+func TestKeptPairsStayOnTheirOwnBase(t *testing.T) {
+	e, pe := newPreemptEnv(t, nil)
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	if _, err := e.p.Propose(lateArm(e, pe), greet); !errors.Is(err, ErrInterrupted) {
+		t.Fatal(err)
+	}
+	n := e.p.keptSides()
+	e.p.mu.Lock()
+	err := e.p.reloadLocked()
+	e.p.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := e.p.keptSides(); got != n || n == 0 {
+		t.Fatalf("%d sides kept after a reload of the same tree, had %d", got, n)
+	}
+}

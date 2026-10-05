@@ -394,9 +394,7 @@ func (l *Learn) Next(ctx context.Context, modelOK bool) (Job, bool) {
 	}
 	sel, _ := l.cfg.Builder.(Handler)
 	ready, _ := l.cfg.Builder.(Readier)
-	if kc, ok := l.cfg.Pipeline.(keptCounter); ok && len(l.built) > 0 {
-		hyps = finishFirst(hyps, l.built, kc)
-	}
+	hyps = l.finishFirstLocked(hyps)
 	for _, h := range hyps {
 		if l.tried[h.Key] >= len(h.Tasks) || !l.mayAskLocked(h.Key) {
 			continue // tried with this much evidence already, or the owner was asked lately
@@ -422,11 +420,25 @@ func (l *Learn) Next(ctx context.Context, modelOK bool) (Job, bool) {
 	return Job{}, false
 }
 
+// ResumeWindow is how long Loop 1 keeps a preempted candidate for
+// reuse: LearnConfig.ResumeFor, or change.ResumeFor (PE7).
+func (l *Learn) ResumeWindow() time.Duration { return l.resumeFor() }
+
 func (l *Learn) resumeFor() time.Duration {
 	if l.cfg.ResumeFor > 0 {
 		return l.cfg.ResumeFor
 	}
 	return change.ResumeFor
+}
+
+// finishFirstLocked orders hyps so the kept candidate closest to a
+// verdict is finished first (PE7 condition 19), where the pipeline counts
+// kept pairs.
+func (l *Learn) finishFirstLocked(hyps []Hypothesis) []Hypothesis {
+	if kc, ok := l.cfg.Pipeline.(keptCounter); ok && len(l.built) > 0 {
+		return finishFirst(hyps, l.built, kc)
+	}
+	return hyps
 }
 
 // keptCounter is the pipeline's count of a candidate's kept pairs

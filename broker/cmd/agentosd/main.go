@@ -389,6 +389,7 @@ func main() {
 	// managed_tree, private machines only (W4).
 	tree := newLiveTree(log.Printf)
 	learn.Tree = tree
+	learn.ResumeFor = sleepResumeFor(cfg.Admission.CapacityMB, cfg.Admission.HeadroomMB, agentMemMB, replayMemMB)
 	var lp *learning
 	if err := os.MkdirAll(learn.Dir, 0o700); err != nil {
 		log.Printf("learning disabled: %v", err)
