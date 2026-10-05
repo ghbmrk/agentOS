@@ -59,6 +59,15 @@ The broker can cap a provider-agent run at four points, outermost first:
 
 A run is metered as runs and quota, not tokens: the broker cannot route model calls inside a provider's run (CAP-9 applies per run, not per call).
 
+## Can the agent read its own login? (Security W1)
+
+Security accepted worker-held custody only if the agent's tools cannot read the login (W1). Measured with Claude Code and `CLAUDE_CODE_OAUTH_TOKEN` holding a placeholder, tools allowed (`IS_SANDBOX=1`, `--permission-mode bypassPermissions`, as inside a worker):
+- The Bash tool's own environment does **not** carry the token: Claude Code strips it from tool subprocesses.
+- But a tool can read it from the parent CLI's `/proc/<pid>/environ` (same user): found in 2 of the CLI's processes (`results/claude_stub_env_probe.jsonl`).
+- Claude Code's built-in sandbox (bubblewrap) might hide `/proc`, but bubblewrap is not installed in this session, and enabling the setting changed nothing here (`results/claude_stub_env_probe_sandboxed.jsonl`).
+
+So **W1 is not met by default**. Candidate fixes for the image: tools under a separate user or PID namespace (the CLI's sandbox with bubblewrap, or `hidepid=2` on `/proc` with tools as another user), plus managed-policy deny rules on the credential path. *Live/qualification:* prove one of these with the canary-encoding brief. Under the default auto permission mode the CLI's classifier declined the probe command, but that is not a boundary.
+
 ## Usage pools (Mark's addition)
 
 Mark asked for separate pools per product (Codex vs ChatGPT) and for the route type to stay open to other frontier tools (Grok, Gemini). What the CLIs show:

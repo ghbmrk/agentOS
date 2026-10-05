@@ -120,7 +120,7 @@ class H(BaseHTTPRequestHandler):
             stop = "end_turn"
         else:
             content = [{"type": "tool_use", "id": "toolu_" + uuid.uuid4().hex[:20], "name": "Bash",
-                        "input": {"command": "echo S8-tool-ran > s8_marker.txt && cat s8_marker.txt",
+                        "input": {"command": os.environ.get("STUB_CMD") or "echo S8-tool-ran > s8_marker.txt && cat s8_marker.txt",
                                   "description": "Write the S8 marker"}}]
             stop = "tool_use"
         msg = {"id": "msg_" + uuid.uuid4().hex[:20], "type": "message", "role": "assistant",

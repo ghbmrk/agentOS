@@ -6,7 +6,7 @@ set -eu
 D=$(cd "$(dirname "$0")" && pwd)
 W=$(mktemp -d); LOG=${LOG:-$D/results/claude_stub.jsonl}; PORT=${PORT:-18431}
 mkdir -p "$D/results"; : > "$LOG"
-STUB_MODE=${STUB_MODE:-} python3 "$D/stub_anthropic.py" "$PORT" "$LOG" 2>/dev/null & SP=$!
+STUB_CMD=${STUB_CMD:-} STUB_MODE=${STUB_MODE:-} python3 "$D/stub_anthropic.py" "$PORT" "$LOG" 2>/dev/null & SP=$!
 trap 'kill $SP 2>/dev/null; rm -rf "$W"' EXIT
 sleep 0.5
 mkdir -p "$W/home" "$W/work"
@@ -17,6 +17,6 @@ env -i PATH="$PATH" HOME="$W/home" TERM=dumb \
   HTTPS_PROXY="http://127.0.0.1:$PORT" HTTP_PROXY="http://127.0.0.1:$PORT" NO_PROXY=127.0.0.1 \
   timeout 120 claude -p "write the S8 marker" \
     --output-format stream-json --verbose \
-    --allowedTools "Bash" --max-turns 4 < /dev/null \
+    --allowedTools "Bash" --max-turns 4 ${CLAUDE_FLAGS:-} < /dev/null \
   > "$D/results/claude_stream.jsonl" 2>/dev/null || echo "exit=$?"
 echo "marker: $(cat s8_marker.txt 2>/dev/null || echo MISSING)"
