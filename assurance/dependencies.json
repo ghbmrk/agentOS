@@ -84,6 +84,76 @@
       "file": "broker/vendor/golang.org/x/text/internal/language/parse.go",
       "host": "www.ietf.org",
       "why": "RFC link in a code comment of the BCP 47 parser (charset lookup for mail bodies); never contacted (P2-6m)."
+    },
+    {
+      "file": "broker/vendor/github.com/emiago/sipgo/sip/transport_udp.go",
+      "host": "datatracker.ietf.org",
+      "why": "A comment URL citing a spec; never contacted (P2-3b)."
+    },
+    {
+      "file": "broker/vendor/github.com/pion/logging/renovate.json",
+      "host": "docs.renovatebot.com",
+      "why": "A non-Go metadata file (CI or bot config) in the vendored module; not compiled into any binary (P2-3b)."
+    },
+    {
+      "file": "broker/vendor/github.com/pion/randutil/.travis.yml",
+      "host": "raw.githubusercontent.com",
+      "why": "A non-Go metadata file (CI or bot config) in the vendored module; not compiled into any binary (P2-3b)."
+    },
+    {
+      "file": "broker/vendor/github.com/pion/randutil/.travis.yml",
+      "host": "codecov.io",
+      "why": "A non-Go metadata file (CI or bot config) in the vendored module; not compiled into any binary (P2-3b)."
+    },
+    {
+      "file": "broker/vendor/github.com/pion/randutil/.travis.yml",
+      "host": "dl.google.com",
+      "why": "A non-Go metadata file (CI or bot config) in the vendored module; not compiled into any binary (P2-3b)."
+    },
+    {
+      "file": "broker/vendor/github.com/pion/rtcp/renovate.json",
+      "host": "docs.renovatebot.com",
+      "why": "A non-Go metadata file (CI or bot config) in the vendored module; not compiled into any binary (P2-3b)."
+    },
+    {
+      "file": "broker/vendor/github.com/pion/rtp/packetizer.go",
+      "host": "www.webrtc.org",
+      "why": "A comment URL citing a spec; never contacted (P2-3b)."
+    },
+    {
+      "file": "broker/vendor/github.com/pion/rtp/renovate.json",
+      "host": "docs.renovatebot.com",
+      "why": "A non-Go metadata file (CI or bot config) in the vendored module; not compiled into any binary (P2-3b)."
+    },
+    {
+      "file": "broker/vendor/github.com/pion/sdp/v3/extmap.go",
+      "host": "www.webrtc.org",
+      "why": "An RTP header-extension identifier URI (a name in SDP, compared as a string); never contacted (P2-3b)."
+    },
+    {
+      "file": "broker/vendor/github.com/pion/sdp/v3/extmap.go",
+      "host": "www.ietf.org",
+      "why": "An RTP header-extension identifier URI (a name in SDP, compared as a string); never contacted (P2-3b)."
+    },
+    {
+      "file": "broker/vendor/github.com/pion/sdp/v3/jsep.go",
+      "host": "www.ietf.org",
+      "why": "An RTP header-extension identifier URI (a name in SDP, compared as a string); never contacted (P2-3b)."
+    },
+    {
+      "file": "broker/vendor/github.com/pion/sdp/v3/renovate.json",
+      "host": "docs.renovatebot.com",
+      "why": "A non-Go metadata file (CI or bot config) in the vendored module; not compiled into any binary (P2-3b)."
+    },
+    {
+      "file": "broker/vendor/github.com/pion/srtp/v3/renovate.json",
+      "host": "docs.renovatebot.com",
+      "why": "A non-Go metadata file (CI or bot config) in the vendored module; not compiled into any binary (P2-3b)."
+    },
+    {
+      "file": "broker/vendor/github.com/pion/srtp/v3/srtp_cipher.go",
+      "host": "tools.ietf.org",
+      "why": "A comment URL citing a spec; never contacted (P2-3b)."
     }
   ]
 }
