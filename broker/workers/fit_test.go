@@ -510,9 +510,16 @@ func TestCAP1PreemptedCommandSaysRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := <-done
-	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+	// The preemption found the worker busy: it records it, writing the
+	// machine's files, once the command lets go. Get takes the same lock,
+	// so Preempted is seen only after that write; the test must not
+	// return (and remove its directory) before.
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(5 * time.Millisecond) {
 		if w, _ := r.m.Get(workerID(ag.Lineage, "w")); w.State == vm.Preempted {
-			break // the preemption has finished writing its record
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the preemption never finished")
 		}
 	}
 	if err == nil || !strings.HasPrefix(err.Error(), "preempted, retry: worker w ") || !strings.Contains(err.Error(), "did not fail") || !strings.Contains(err.Error(), "destroy and recreate it") {

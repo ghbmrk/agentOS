@@ -458,15 +458,7 @@ func TestCAP1PreemptedCommandIsNotAFailure(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("preemption did not end the command")
 	}
-	for deadline := time.Now().Add(2 * time.Second); ; {
-		if w, _ := e.m.Get("wk-1"); w.State == Preempted {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("worker never recorded preempted")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	waitPreempted(t, e, "wk-1")
 	if _, err := e.m.Exec(bg, "wk-1", Command{Argv: []string{"echo"}, As: Public}, time.Second); !errors.Is(err, ErrPreempted) {
 		t.Fatalf("command on a preempted worker = %v", err)
 	}
@@ -491,6 +483,23 @@ func TestCAP1PreemptedExit137IsNotAFailure(t *testing.T) {
 	must(t, e.m.Preempt("wk-1"))
 	if err := <-done; !errors.Is(err, ErrPreempted) {
 		t.Fatalf("killed command = %v, want ErrPreempted", err)
+	}
+	waitPreempted(t, e, "wk-1")
+}
+
+// waitPreempted waits for a preemption that found the worker busy to
+// finish: it records the machine under its lock once the command lets go,
+// writing the machine's files, so a test must not return before then.
+// Get takes the same lock, so Preempted is seen only after the write.
+func waitPreempted(t *testing.T, e *env, id string) {
+	t.Helper()
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		if w, _ := e.m.Get(id); w.State == Preempted {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s never recorded preempted", id)
+		}
 	}
 }
 
