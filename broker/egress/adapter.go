@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/ghbmrk/agentos/broker/verb"
 )
 
 // Adapter declares one credentialed upstream: where it lives, which vault
@@ -43,24 +45,19 @@ type Operation struct {
 	Body   *BodyRule
 }
 
-// The broker's closed verb list (ADP-2). An adapter maps each operation to
-// one of these; it cannot define its own.
+// The broker's closed verb list (ADP-2), from package verb. An adapter maps
+// each operation to one of these; it cannot define its own.
 const (
-	VerbRead          = "read"
-	VerbDraft         = "draft"
-	VerbSend          = "send"
-	VerbPost          = "post"
-	VerbBuy           = "buy"
-	VerbShare         = "share"
-	VerbDeleteRemote  = "delete-remote"
-	VerbChangeAccount = "change-account"
-	VerbRevealSecret  = "reveal-or-create-secret"
+	VerbRead          = verb.Read
+	VerbDraft         = verb.Draft
+	VerbSend          = verb.Send
+	VerbPost          = verb.Post
+	VerbBuy           = verb.Buy
+	VerbShare         = verb.Share
+	VerbDeleteRemote  = verb.DeleteRemote
+	VerbChangeAccount = verb.ChangeAccount
+	VerbRevealSecret  = verb.RevealSecret
 )
-
-var verbs = map[string]bool{
-	VerbRead: true, VerbDraft: true, VerbSend: true, VerbPost: true, VerbBuy: true,
-	VerbShare: true, VerbDeleteRemote: true, VerbChangeAccount: true, VerbRevealSecret: true,
-}
 
 // BodyRule constrains a JSON request body (ADP-10). The proxy decodes the
 // body, checks it, applies Set, and forwards its own re-encoding, so the
@@ -179,7 +176,7 @@ func (a Adapter) validate() error {
 		if op.Name == "" || op.Method == "" || op.Method != strings.ToUpper(op.Method) {
 			return fmt.Errorf("adapter %s: bad operation %+v", a.Name, op)
 		}
-		if !verbs[op.Verb] {
+		if !verb.Valid(op.Verb) {
 			return fmt.Errorf("adapter %s: operation %s: verb %q is not on the broker's list (ADP-2)", a.Name, op.Name, op.Verb)
 		}
 		if _, err := splitPath(op.Path); err != nil {
