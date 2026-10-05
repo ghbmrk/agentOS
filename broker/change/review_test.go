@@ -6,6 +6,7 @@ package change
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -220,5 +221,51 @@ func TestGuestCannotDriveRealProposal(t *testing.T) {
 	in := journal.Intent{ID: adoptID(r.ID), Origin: "guest:a", Account: journal.BrokerAccount, Action: ActionAdopt, Executor: Executor}
 	if err := e.p.Check(context.Background(), journal.PhaseAuthorize, in); err == nil || errors.Is(err, ErrNeedsOwner) {
 		t.Fatalf("guest origin: %v", err)
+	}
+}
+
+// CHG-1, CHG-6: a case the evaluator cannot run on this box is neither a
+// pass nor a fail; such a change never auto-adopts, and the owner is told
+// it was not tested.
+func TestNotEvaluated(t *testing.T) {
+	e := newEnv(t, nil)
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	ev := e.p.cfg.Evaluator
+	e.p.cfg.Evaluator = evalFunc(func(ctx context.Context, tr Tree, pr Probe) ([]byte, error) {
+		if _, ok := tr["config/a"]; ok {
+			return nil, fmt.Errorf("replay: %w", ErrNotEvaluated)
+		}
+		if _, ok := tr["skills/odd"]; ok && string(pr.Input) == "skills/greet" {
+			return nil, ErrNotEvaluated
+		}
+		return ev.Run(ctx, tr, pr)
+	})
+	e.p.Attach(holdJournal{e.eng})
+	r := e.propose(Candidate{Source: Local, Files: Tree{"config/a": []byte("1")}})
+	if r.State != StateAwaitingOwner || r.HeldOut != 0 || r.NotEvaluated == 0 {
+		t.Fatalf("config: %+v", r)
+	}
+	if ask, _ := e.p.Ask(r.ID); ask != "Changed a setting. Not tested on this box. Approve or decline?" {
+		t.Fatalf("ask: %q", ask)
+	}
+	s := e.propose(Candidate{Source: Local, Files: Tree{"skills/greet": []byte("hello"), "skills/odd": []byte("x")}})
+	if s.Basis != BasisOwner || s.NotEvaluated == 0 {
+		t.Fatalf("partly evaluated skill auto-adopted: %+v", s)
+	}
+}
+
+// The replay evaluator maps probes back to task intents; security
+// fixtures and unknown probes map to nothing.
+func TestProbeTask(t *testing.T) {
+	e := newEnv(t, nil)
+	c := e.taskCase(ClassSkill, "skills/greet", "hello", Accepted)
+	if task, ok := e.p.ProbeTask(e.p.probeID(c.ID)); !ok || task != c.Task {
+		t.Fatal(task, ok)
+	}
+	if _, ok := e.p.ProbeTask(e.p.probeID("sec-1")); ok {
+		t.Fatal("security fixture mapped to a task")
+	}
+	if _, ok := e.p.ProbeTask("nope"); ok {
+		t.Fatal("unknown probe")
 	}
 }
