@@ -259,6 +259,7 @@ func (p *Proxy) serve(machine string, labelOf func() string, audit Auditor, w ht
 	deny := func(status int, reason string) {
 		ev.Reason, ev.Status = reason, status
 		audit.Egress(ev)
+		w.Header().Set(DeniedHeader, "1")
 		http.Error(w, "egress denied: "+reason, status)
 	}
 	red, err := p.vault.Redactor()

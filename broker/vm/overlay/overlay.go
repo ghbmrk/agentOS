@@ -484,9 +484,15 @@ func Put(dst, src View, rel string) error {
 		if err := os.Mkdir(p, 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
 			return err
 		}
+		// The directory's own metadata is part of the change: owner, then
+		// mode (chown clears setgid), then guest xattrs.
+		if err := os.Lchown(p, int(e.Uid), int(e.Gid)); err != nil {
+			return err
+		}
 		if err := os.Chmod(p, e.Mode); err != nil {
 			return err
 		}
+		syncGuestXattrs(filepath.Join(from, rel), p)
 		if seen.Kind != Dir && lower.Kind != Absent {
 			// The guest saw no directory here, so what the image has below
 			// must stay hidden.
@@ -648,6 +654,29 @@ func copyXattrs(src, dst string) error {
 		syscall.Setxattr(dst, name, v, 0) // best effort, as cp -a does
 	}
 	return nil
+}
+
+// syncGuestXattrs makes dst's guest xattrs those of src, best effort as
+// copyXattrs is. Overlay xattrs on either side are left alone: whether dst
+// is opaque is decided by Put, not taken from another layer.
+func syncGuestXattrs(src, dst string) {
+	want := map[string][]byte{}
+	for _, n := range listXattrs(src) {
+		if strings.HasPrefix(n, overlayXattrs) {
+			continue
+		}
+		if v, ok := getXattr(src, n); ok {
+			want[n] = v
+		}
+	}
+	for _, n := range listXattrs(dst) {
+		if _, ok := want[n]; !ok && !strings.HasPrefix(n, overlayXattrs) {
+			syscall.Removexattr(dst, n)
+		}
+	}
+	for n, v := range want {
+		syscall.Setxattr(dst, n, v, 0)
+	}
 }
 
 // MountOptions are the overlayfs options for a machine's root: features

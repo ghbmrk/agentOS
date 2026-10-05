@@ -209,6 +209,9 @@ type Manager struct {
 	machines map[string]*machine
 	snaps    map[string]Snapshot
 	seq      int
+
+	diskMu   sync.Mutex // serializes disk reservations
+	diskHeld int64      // bytes reserved for copies in progress
 }
 
 // Open opens (or creates) the state directory. Machines recorded by an
@@ -554,9 +557,20 @@ func (m *Manager) takeLocked(ctx context.Context, mc *machine, t Tier) (s Snapsh
 
 // capture writes a snapshot of a paused (or stopped) machine.
 func (m *Manager) capture(ctx context.Context, mc *machine, t Tier) (Snapshot, error) {
-	if err := m.checkQuota(m.launch(mc).Upper); err != nil {
+	u, err := m.checkCaps(m.launch(mc).Upper)
+	if err != nil {
 		return Snapshot{}, fmt.Errorf("%s: %w", mc.ID, err)
 	}
+	need := u.Bytes
+	if t == Full {
+		// The memory image is at most the machine's memory budget.
+		need += mc.Spec.MemMB << 20
+	}
+	h, err := m.reserveDisk(need)
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("%s: %w", mc.ID, err)
+	}
+	defer h.release()
 	s := Snapshot{ID: m.nextSnapID(), Machine: mc.ID, Tier: t, Label: mc.Label, Image: mc.Spec.Image, Taken: time.Now().UTC()}
 	dir := m.snapDir(s.ID)
 	if err := os.Mkdir(dir, 0o700); err != nil {
@@ -588,28 +602,80 @@ func (m *Manager) capture(ctx context.Context, mc *machine, t Tier) (Snapshot, e
 	return s, m.saveMachine(mc)
 }
 
-// checkQuota admits a snapshot of a layer only if copying it leaves the
-// state disk's RES-4 reserve free and the layer is within its caps. Copies
-// keep holes and hardlinks, so a copy costs no more than this measure.
-// Refusal changes nothing: the machine and its existing snapshots stay.
-func (m *Manager) checkQuota(upper string) error {
+// checkCaps measures a layer about to be snapshotted and refuses it if it
+// is over the per-layer caps. Copies keep holes and hardlinks, so a copy
+// costs no more than this measure.
+func (m *Manager) checkCaps(upper string) (overlay.Usage, error) {
 	u, err := overlay.Measure(upper)
 	if err != nil {
-		return err
+		return u, err
 	}
+	switch {
+	case m.cfg.MaxLayerBytes > 0 && u.Bytes > m.cfg.MaxLayerBytes:
+		return u, fmt.Errorf("%w (layer %d bytes, cap %d)", ErrQuota, u.Bytes, m.cfg.MaxLayerBytes)
+	case u.Inodes > m.cfg.MaxLayerInodes:
+		return u, fmt.Errorf("%w (layer %d inodes, cap %d)", ErrQuota, u.Inodes, m.cfg.MaxLayerInodes)
+	}
+	return u, nil
+}
+
+// diskHold is a reservation of state-disk bytes for copies in progress.
+type diskHold struct {
+	m *Manager
+	n int64
+}
+
+// reserveDisk reserves need bytes for copies about to be made (RES-4). It
+// is granted only if the measured free space, less the reserve and every
+// other reservation still held, covers it. Reservations are serialized, so
+// concurrent snapshots, forks, merges and rollbacks cannot each pass the
+// check and together eat the reserve. While a copy runs its bytes count
+// both as used and as held: an overestimate, never an under-one. Refusal
+// changes nothing: no machine or snapshot is touched.
+func (m *Manager) reserveDisk(need int64) (*diskHold, error) {
+	h := &diskHold{m: m}
+	if err := h.grow(need); err != nil {
+		return nil, err
+	}
+	return h, nil
+}
+
+// reserveRestore reserves the disk for n copies of snapshot id's layer.
+func (m *Manager) reserveRestore(n int64, id string) (*diskHold, error) {
+	u, err := overlay.Measure(filepath.Join(m.snapDir(id), "fs"))
+	if err != nil {
+		return nil, err
+	}
+	return m.reserveDisk(n * u.Bytes)
+}
+
+// grow adds need bytes to the reservation.
+func (h *diskHold) grow(need int64) error {
+	if need <= 0 {
+		return nil
+	}
+	m := h.m
+	m.diskMu.Lock()
+	defer m.diskMu.Unlock()
 	free, err := m.cfg.FreeBytes(m.cfg.StateDir)
 	if err != nil {
 		return err
 	}
-	switch {
-	case u.Bytes > free-m.cfg.DiskReserveBytes:
-		return fmt.Errorf("%w (layer %d bytes; %d free, %d reserved)", ErrQuota, u.Bytes, free, m.cfg.DiskReserveBytes)
-	case m.cfg.MaxLayerBytes > 0 && u.Bytes > m.cfg.MaxLayerBytes:
-		return fmt.Errorf("%w (layer %d bytes, cap %d)", ErrQuota, u.Bytes, m.cfg.MaxLayerBytes)
-	case u.Inodes > m.cfg.MaxLayerInodes:
-		return fmt.Errorf("%w (layer %d inodes, cap %d)", ErrQuota, u.Inodes, m.cfg.MaxLayerInodes)
+	if need > free-m.cfg.DiskReserveBytes-m.diskHeld {
+		return fmt.Errorf("%w (need %d bytes; %d free, %d reserved, %d held)", ErrQuota, need, free, m.cfg.DiskReserveBytes, m.diskHeld)
 	}
+	m.diskHeld += need
+	h.n += need
 	return nil
+}
+
+// release returns the reservation; the copies made under it now show in
+// the measured free space instead.
+func (h *diskHold) release() {
+	h.m.diskMu.Lock()
+	h.m.diskHeld -= h.n
+	h.n = 0
+	h.m.diskMu.Unlock()
 }
 
 func (m *Manager) nextSnapID() string {
@@ -664,9 +730,23 @@ func (m *Manager) Rollback(ctx context.Context, id, snapID string) error {
 	return err
 }
 
-// restartLocked stops a machine and starts it from s (nil: its image). On
-// failure the machine is left Stopped and the caller releases admission.
+// restartLocked stops a machine and starts it from s (nil: its image). The
+// disk for restoring s is reserved before the machine is stopped, so a full
+// disk refuses the restart and leaves the machine as it was. On other
+// failures the machine is left Stopped and the caller releases admission.
 func (m *Manager) restartLocked(ctx context.Context, mc *machine, s *Snapshot) error {
+	if s != nil && s != keepLayer {
+		h, err := m.reserveRestore(1, s.ID)
+		if err != nil {
+			return fmt.Errorf("%s: %w", mc.ID, err)
+		}
+		defer h.release()
+	}
+	return m.restartHeld(ctx, mc, s)
+}
+
+// restartHeld is restartLocked for a caller that already reserved the disk.
+func (m *Manager) restartHeld(ctx context.Context, mc *machine, s *Snapshot) error {
 	err := m.stopRuntime(ctx, mc)
 	if err == nil {
 		err = m.startFrom(ctx, mc, s)
@@ -758,10 +838,40 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 		reserved = append(reserved, mc)
 	}
 
+	// Reserve the disk for every fork's copy before checkpointing anything,
+	// held until all have started, so a disk too small for n forks refuses
+	// the fork outright instead of failing part-way.
+	u, err := overlay.Measure(m.launch(src).Upper)
+	if err != nil {
+		undo()
+		return Snapshot{}, err
+	}
+	n := int64(len(ids))
+	h, err := m.reserveDisk(n * u.Bytes)
+	if err != nil {
+		undo()
+		return Snapshot{}, fmt.Errorf("%s: fork(%d): %w", id, n, err)
+	}
+	defer h.release()
+	src.mu.Lock()
+	prevLast := src.Last
+	src.mu.Unlock()
 	s, err := m.take(ctx, id, Full)
 	if err != nil {
 		undo()
 		return Snapshot{}, err
+	}
+	// The guest ran until it was paused; cover any growth since.
+	v, err := overlay.Measure(filepath.Join(m.snapDir(s.ID), "fs"))
+	if err == nil {
+		err = h.grow(n*v.Bytes - h.n)
+	}
+	if err != nil {
+		// No fork will use the checkpoint, so it goes too: a refused fork
+		// leaves nothing behind.
+		m.dropSnapshot(src, s.ID, prevLast)
+		undo()
+		return Snapshot{}, fmt.Errorf("%s: fork(%d): %w", id, n, err)
 	}
 	for i, mc := range reserved {
 		mc.mu.Lock()
@@ -785,6 +895,21 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 		}
 	}
 	return s, nil
+}
+
+// dropSnapshot deletes snapshot id, just taken of mc, that nothing uses;
+// mc's newest snapshot goes back to prev.
+func (m *Manager) dropSnapshot(mc *machine, id, prev string) {
+	m.mu.Lock()
+	delete(m.snaps, id)
+	m.mu.Unlock()
+	os.RemoveAll(m.snapDir(id))
+	mc.mu.Lock()
+	if mc.Last == id {
+		mc.Last = prev
+		m.saveMachine(mc)
+	}
+	mc.mu.Unlock()
 }
 
 // Diff lists file-system changes from snapshot a to snapshot b (REV-4).
@@ -865,11 +990,37 @@ func (m *Manager) mergeLocked(ctx context.Context, dm *machine, base, ss Snapsho
 	if dm.State != Running {
 		return Snapshot{}, false, fmt.Errorf("%w: %s is %s", ErrState, dst, dm.State)
 	}
+	// Reserve the disk for the merged layer (at most dst's layer plus the
+	// fork's) and for restarting dst on it, before touching dst.
+	cost := func(dstUpper string) (int64, error) {
+		d, err := overlay.Measure(dstUpper)
+		if err != nil {
+			return 0, err
+		}
+		f, err := overlay.Measure(m.view(ss).Upper)
+		return 2 * (d.Bytes + f.Bytes), err
+	}
+	need, err := cost(m.launch(dm).Upper)
+	if err != nil {
+		return Snapshot{}, false, err
+	}
+	h, err := m.reserveDisk(need)
+	if err != nil {
+		return Snapshot{}, false, fmt.Errorf("merge into %s: %w", dst, err)
+	}
+	defer h.release()
 	// A full checkpoint, so the owner can roll dst back to its pre-merge
 	// memory as well as its files.
 	ds, err := m.takeLocked(ctx, dm, Full)
 	if err != nil {
 		return Snapshot{}, false, err
+	}
+	// dst ran until it was paused; cover any growth since.
+	if need, err = cost(m.view(ds).Upper); err == nil {
+		err = h.grow(need - h.n)
+	}
+	if err != nil {
+		return Snapshot{}, false, fmt.Errorf("merge into %s: %w", dst, err)
 	}
 	changes, err := overlay.Diff(m.view(base), m.view(ss))
 	if err != nil {
@@ -926,7 +1077,7 @@ func (m *Manager) mergeLocked(ctx context.Context, dm *machine, base, ss Snapsho
 	m.mu.Unlock()
 	dm.Label = out.Label
 	dm.Last = out.ID
-	if err := m.restartLocked(ctx, dm, &out); err != nil {
+	if err := m.restartHeld(ctx, dm, &out); err != nil {
 		return Snapshot{}, true, err
 	}
 	return out, false, nil

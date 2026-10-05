@@ -20,7 +20,7 @@ Read SPEC.md for what to build and PLAN.md for how. This file is the working con
 - Security-critical paths (broker, vault, executors, clean room, update signing) need the strongest reviewer tier and an explicit threat check.
 
 ## Budget (PLAN.md §4A)
-- The only hard limit is the subscription (usage credits off). Weekly share (~70% default, adaptive) and daily pace (~10%) are targets: spend where the next unit of work has clear value, don't idle to stay on pace, and don't spend just because budget remains.
+- The only hard limit is the subscription (usage credits off). Target: ~100% of the weekly limit used by each reset, paced evenly at ~14% a day so it never runs out early (Mark, 2026-10-04); these are targets: spend where the next unit of work has clear value, don't idle to stay on pace, and don't spend just because budget remains.
 - Near a session-window limit, finish the current step cleanly; start heavy new work after the reset.
 - Keep contexts small: brief + touched files. Summarize CI logs instead of pasting them.
 

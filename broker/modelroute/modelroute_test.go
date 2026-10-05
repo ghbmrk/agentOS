@@ -12,8 +12,7 @@ import (
 	"testing"
 )
 
-// REQ: ARC-1, CRED-1, REV-5, ADP-10
-// SPEC v0.12 IDs (PR #15; move into REQ when it merges): ARC-6
+// REQ: ARC-1, CRED-1, REV-5, ADP-10, ARC-6
 
 // fakeEgress stands in for the vault process on its model socket.
 type fakeEgress struct {
@@ -148,5 +147,28 @@ func TestStreamsAreFlushed(t *testing.T) {
 	rest, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(rest), "two") {
 		t.Fatalf("rest %q", rest)
+	}
+}
+
+// Our headers never reach the guest as trailers either.
+func TestTrailersAreScrubbed(t *testing.T) {
+	fe := &fakeEgress{h: func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Trailer", HeaderDenial+", X-Other")
+		io.WriteString(w, "body")
+		w.Header().Set(HeaderDenial, `{"reason":"x"}`)
+		w.Header().Set("X-Other", "kept")
+	}}
+	sock := serveUnix(t, fe)
+	fwd := Forward(Config{Socket: sock, Label: func(string) string { return "public" }, Denied: func(string, Denial) {}})
+	srv := httptest.NewServer(fwd("m1"))
+	defer srv.Close()
+	resp, err := http.Post(srv.URL+"/openai/v1/chat/completions", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.Trailer.Get(HeaderDenial) != "" || resp.Trailer.Get("X-Other") != "kept" {
+		t.Fatalf("trailers %v", resp.Trailer)
 	}
 }
