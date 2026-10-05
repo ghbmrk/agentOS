@@ -302,7 +302,9 @@ func (p *Pipeline) Notice(key, line string) error {
 // adoption that edited ns is marked undone with WhySettings, with no line
 // of its own: the caller's Notice tells the owner. The target is not
 // called; it already runs the owner's configuration. A stale was changes
-// nothing. It reports whether the active tree changed. This records what
+// nothing. It reports whether the active tree changed. It is only for a
+// namespace whose empty tree means the owner's own configuration, today
+// routing alone (security R3 on #110). This records what
 // runs rather than changing it, so it is no intent (CHG-2): later
 // evaluations then compare against what the owner actually has.
 func (p *Pipeline) Superseded(ns string, was Tree) (bool, error) {
