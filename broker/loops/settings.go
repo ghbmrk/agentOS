@@ -227,7 +227,7 @@ func ParseText(msg string) (Request, bool) {
 		if err == nil && n >= 0 && (n > MaxSoakDays || f[2] == strconv.Itoa(n)) {
 			return Request{Kind: KindSoak, Days: min(n, MaxSoakDays+1)}, true
 		}
-	case len(f) == 3 && f[0] == "SECURITY" && f[1] == "UPDATES" && (f[2] == "AUTO" || f[2] == "ASK"):
+	case len(f) == 3 && f[0] == "SECURITY" && (f[1] == "UPDATES" || f[1] == "UPDATE") && (f[2] == "AUTO" || f[2] == "ASK"):
 		return Request{Kind: KindSecurity, On: f[2] == "AUTO"}, true
 	case len(f) >= 2:
 		// Word names for each loop (UX-49-2): LEARNING OFF, SECURITY

@@ -26,8 +26,9 @@ func TestUpdateTextsParse(t *testing.T) {
 		"security updates auto":   {Kind: KindSecurity, On: true},
 		"HELP UPDATES":            {Kind: KindHelpUpdates},
 		// UX-130-1: UPDATE and UPDATES alike.
-		"UPDATE PINNED":   {Kind: KindChannel, Channel: ChannelPinned},
-		"updates soak 14": {Kind: KindSoak, Days: 14},
+		"UPDATE PINNED":       {Kind: KindChannel, Channel: ChannelPinned},
+		"updates soak 14":     {Kind: KindSoak, Days: 14},
+		"SECURITY UPDATE ASK": {Kind: KindSecurity},
 	} {
 		got, ok := ParseText(msg)
 		if !ok || got != want {
