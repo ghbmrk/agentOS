@@ -16,7 +16,8 @@
 #    GPT headers in place at the end of the drive, every partition except the active /usr release
 #    (labelled agentos_*, IDs from its root hash), the root ext4 UUID and the ESP's volume ID, and
 #    the disk GUID last. A run cut short leaves the seed's disk GUID, so the next boot does it all
-#    again. The loader still reports the old ESP ID for this boot, so the box restarts once.
+#    again. The loader still reports the old ESP ID for this boot, so the box restarts once, at
+#    once (--force: no unit is stopped, so nothing queued around this unit can hold it up).
 #
 # AGENTOS_DRIVE_ROOT and AGENTOS_DRIVE_HOLD exist for tests/test_image.py.
 set -u
@@ -25,8 +26,10 @@ SEED_DISK=8d64dfb8-8434-4cb8-b3f4-306fe9a935dd
 REFUSED="agentos-drive: FAIL another drive carries this drive's IDs; unplug it and start again"
 
 say() { echo "agentos-drive: $*"; }
-# Refusal: the fixed line on the console, the reason in the journal (stderr), exit for FailureAction.
-refuse() { echo "$1" >&2; echo "$REFUSED"; exit 1; }
+# Refusal: the fixed line on the console, the reason in the journal (stderr), then power off at
+# once. Not by FailureAction= alone: when this unit fails, sysroot.mount's dependency fails first
+# and the initrd queues emergency.target irreversibly, so a poweroff job would be refused (CI boot 1).
+refuse() { echo "$1" >&2; echo "$REFUSED"; systemctl --force poweroff; exit 1; }
 fail() { say "FAIL $*"; exit 1; }
 lower() { tr 'A-F' 'a-f'; }
 newuuid() { cat /proc/sys/kernel/random/uuid; }
@@ -83,5 +86,5 @@ fatlabel -i "$espdev" "$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')" >/dev/null
 sf --disk-id "$disk" "$(newuuid)" || fail "could not set the disk ID"
 sync
 say "done; restarting once"
-systemctl --no-block reboot
+systemctl --force reboot
 exec sleep "${AGENTOS_DRIVE_HOLD:-infinity}"

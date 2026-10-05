@@ -3,7 +3,8 @@
 # swtpm TPM 2.0, no network, the boot drive larger than the image. virtio disks, not emulated USB:
 # S7 saw QEMU's usb-storage corrupt reads. Three boots of one drive A, beside a second fresh copy B
 # of the same image (Security MUST on #41 and I1-I2 on the plan: every drive starts with the same IDs):
-#   1. A and B both fresh: the initrd prints one fixed line and powers off; neither drive written.
+#   1. A and B both fresh: the initrd prints one fixed line and powers off; B not written, A not
+#      written but for the loader's boot counter in its entry's name.
 #   2. A as an interrupted first run leaves it (ESP and root rewritten, disk GUID still the seed's),
 #      alone: the initrd finishes giving A its own IDs and restarts once; then health passes under
 #      Secure Boot, the entry is blessed, root grew, and the machines volume exists (SR2-3i).
@@ -16,16 +17,29 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 IMG=$1; W=$(realpath -m "${2:-/var/tmp/agentos-boot}"); mkdir -p "$W/tpm"
 before=$(stat -c %s "$IMG")
 cp /usr/share/OVMF/OVMF_VARS_4M.ms.fd "$W/vars.fd"
-swtpm socket --tpm2 --tpmstate dir="$W/tpm" --ctrl type=unixio,path="$W/tpm/sock" --daemon
 ACCEL=tcg; [ -w /dev/kvm ] && ACCEL=kvm
 fail=0
 ok() { echo "ok   $*"; }
 miss() { echo "MISS $*"; fail=1; }
 ids() { sfdisk -J "$1" | jq -r '.partitiontable | "disk \(.id)", (.partitions[] | "\(.name // "-") \(.uuid)")'; }
+# The ESP's byte range (512-byte sectors) and a drive's hash and ESP file list around it: the
+# loader's boot counting renames the entry on the ESP of the drive it boots (+3 to +2-1) before
+# the initrd runs, so a refused drive is unchanged outside its ESP and in its ESP's files but that name.
+ESP_TYPE=C12A7328-F81F-11D2-BA4B-00A0C93EC93B
+esprange() { sfdisk -J "$1" | jq -r --arg t "$ESP_TYPE" '.partitiontable.partitions[] | select(.type == $t) | "\(.start) \(.size)"'; }
+outside_esp() {
+	set -- "$1" $(esprange "$1")
+	{ head -c $(($2 * 512)) "$1"; tail -c +$((($2 + $3) * 512 + 1)) "$1"; } | sha256sum
+}
+espfiles() { set -- "$1" $(esprange "$1"); mdir -i "$1@@$(($2 * 512))" -/ -b ::/ | sed 's/+[0-9-]*\.conf$/.conf/' | sort; }
 
 # boot NAME DISK [SECOND [TIMEOUT]]: run until the boot report, a power-off, or the timeout. Console: $W/NAME.log
 boot() {
 	log=$W/$1.log; second=
+	# swtpm exits when QEMU does, so each boot starts its own on the same TPM state.
+	rm -f "$W/tpm/sock"
+	swtpm socket --tpm2 --tpmstate dir="$W/tpm" --ctrl type=unixio,path="$W/tpm/sock" --daemon
+	for _ in 1 2 3 4 5 6 7 8 9 10; do [ -S "$W/tpm/sock" ] && break; sleep 1; done
 	[ -n "${3:-}" ] && second="-drive if=none,id=b,format=raw,file=$3 -device virtio-blk-pci,drive=b,serial=AGENTOS-B"
 	# shellcheck disable=SC2086
 	qemu-system-x86_64 -machine q35,smm=on -accel $ACCEL -cpu max -smp 4 -m 4096 \
@@ -51,13 +65,14 @@ nocycle() { grep -aqi "ordering cycle" "$W/$1.log" && miss "ordering cycle in bo
 
 # 1. Two fresh copies: refused, one fixed line, power off, neither drive written.
 cp --sparse=always "$IMG" "$W/a.raw"; cp --sparse=always "$IMG" "$W/b.raw"
-a0=$(sha256sum <"$W/a.raw"); b0=$(sha256sum <"$W/b.raw")
+a0=$(outside_esp "$W/a.raw"); a0esp=$(espfiles "$W/a.raw"); b0=$(sha256sum <"$W/b.raw")
 boot 1-two-fresh "$W/a.raw" "$W/b.raw" 900
 nocycle 1-two-fresh
 has 1-two-fresh "agentos-drive: FAIL another drive carries this drive's IDs; unplug it and start again" &&
 	ok "two drives with one ID refused" || miss "two drives with one ID refused"
 has 1-two-fresh "agentos-boot:" && miss "boot 1 went on to boot" || ok "boot 1 stopped before root"
-[ "$(sha256sum <"$W/a.raw")" = "$a0" ] && ok "A unchanged by the refused boot" || miss "A unchanged by the refused boot"
+[ "$(outside_esp "$W/a.raw")" = "$a0" ] && [ "$(espfiles "$W/a.raw")" = "$a0esp" ] &&
+	ok "A unchanged by the refused boot (but the loader's boot counter)" || miss "A unchanged by the refused boot (but the loader's boot counter)"
 [ "$(sha256sum <"$W/b.raw")" = "$b0" ] && ok "B unchanged by the refused boot" || miss "B unchanged by the refused boot"
 
 # 2. A as an interrupted first run leaves it (security I1): the ESP and root already have new

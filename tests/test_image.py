@@ -454,6 +454,7 @@ class DriveIDsTest(unittest.TestCase):
         rows = ["%s disk %s" % (d, g.upper()) for d, g in self.disks.items()]
         rows += ["%s part %s %s %s %s" % (n, d, self.disks[d], u.upper(), l) for n, d, u, l in self.parts]
         stub(self.bin, "lsblk", "cat <<'T'\n%s\nT" % "\n".join(rows))
+        self.log.write_text("")
         stub(self.bin, "systemctl", 'case "$1" in show) echo "%s" ;; *) echo "systemctl $*" >> %s ;; esac'
              % (self.rootdev, self.log))
         env = dict(os.environ, PATH="%s:%s" % (self.bin, os.environ["PATH"]),
@@ -467,7 +468,9 @@ class DriveIDsTest(unittest.TestCase):
         # I2: one fixed console line, the reason only in the journal (stderr), nothing written.
         self.assertEqual(r.stdout, "agentos-drive: FAIL another drive carries this drive's IDs; unplug it and start again\n")
         self.assertTrue(r.stderr.strip())
-        self.assertEqual(log, "")
+        # Powered off by the script itself, at once: a FailureAction= poweroff job conflicts
+        # with the initrd's emergency.target, queued first when sysroot.mount's dependency fails.
+        self.assertEqual(log, "systemctl --force poweroff\n")
 
     def test_seed_disk_guid_is_the_one_repart_derives(self):
         # systemd-repart: HMAC-SHA256 keyed by the seed over "disk-uuid", first half as a v4 UUID.
@@ -530,7 +533,7 @@ class DriveIDsTest(unittest.TestCase):
         self.assertRegex(log, r"fatlabel -i /dev/vda1 [0-9a-f]{8}\n")
         # The disk GUID last: a run cut short still has the seed's GUID and starts over.
         self.assertRegex(lines[-2], r"^sfdisk .*--disk-id /dev/vda [0-9a-f-]{36}$")
-        self.assertEqual(lines[-1], "systemctl --no-block reboot")
+        self.assertEqual(lines[-1], "systemctl --force reboot")
         self.assertNotIn("vdb", log)
 
     def test_fresh_drive_beside_a_copy_is_refused_before_any_change(self):
