@@ -16,7 +16,10 @@ import (
 	"github.com/ghbmrk/agentos/broker/cgroup"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/guest"
+	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/meter"
+	"github.com/ghbmrk/agentos/broker/modelroute"
+	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/vm"
 	"github.com/ghbmrk/agentos/broker/vm/gvisor"
 )
@@ -94,7 +97,7 @@ func (l *lateAgent) Deliver(ctx context.Context, text string, public bool) error
 func main() {
 	var cfg daemon.Config
 	imgs := images{}
-	var stateDir, runsc, cgroupParent, meterPath, agentMachine, inboxPath string
+	var stateDir, runsc, cgroupParent, meterPath, agentMachine, inboxPath, egressSocket, verifySocket string
 	var diskReserveMB int64
 	flag.StringVar(&cfg.JournalPath, "journal", "/var/lib/agentos/journal.log", "journal file")
 	flag.StringVar(&cfg.SocketDir, "sockets", "/run/agentos", "socket directory (created 0700)")
@@ -112,6 +115,8 @@ func main() {
 	flag.StringVar(&cfg.OwnerState, "owner-state", "/var/lib/agentos/owner.json", "owner channel state (P1-5)")
 	flag.StringVar(&agentMachine, "agent-machine", "agent", "machine whose guest receives the owner's task chat")
 	flag.StringVar(&inboxPath, "guest-inbox", "/var/lib/agentos/guest-inbox.json", "unanswered owner messages to guests, kept across restarts")
+	flag.StringVar(&egressSocket, "egress", "/run/agentos-egress/model.sock", "the vault process's model socket (agentos-egress); empty serves no model route")
+	flag.StringVar(&verifySocket, "owner-verify", "/run/agentos-egress/verify.sock", "the vault process's verify socket, which checks the owner's code-generator codes; empty refuses high-tier codes")
 	flag.Parse()
 	if cfg.ModemUID < 0 || cfg.ModemUID == os.Getuid() {
 		log.Fatal("-modem-uid must name the modem bridge's own uid, distinct from the broker's")
@@ -139,8 +144,13 @@ func main() {
 	cfg.Preempter = pre
 	agent := &lateAgent{}
 	cfg.Agent = agent
-	// The high-tier code seeds come from the vault, which no process may
-	// unlock before P2-4; until then the channel refuses high-tier codes.
+	// The code-generator seed lives in the vault, which only the vault
+	// process holds (P2-4a); the channel asks it to check high-tier codes
+	// (egress K7). While the vault is locked those checks fail and count
+	// nothing.
+	if verifySocket != "" {
+		cfg.OwnerVerifier = ownerVerifier{modelroute.NewVerifier(verifySocket)}
+	}
 	// No modem driver exists before P2-3, so texts arrive only through the
 	// owner socket and the channel's own outbound texts are not sent.
 
@@ -166,7 +176,7 @@ func main() {
 			log.Printf("agent machines disabled: %v", err)
 		} else {
 			pre.m.Store(m)
-			if plane, err := openGuestPlane(m, d, cfg.SocketDir, meterPath, inboxPath); err != nil {
+			if plane, err := openGuestPlane(m, d, cfg.SocketDir, meterPath, inboxPath, egressSocket); err != nil {
 				// Machines cannot start without their guest sockets.
 				log.Printf("agent machines disabled: %v", err)
 			} else {
@@ -189,7 +199,7 @@ func openCgroup(path string) (*cgroup.Group, error) {
 
 // openGuestPlane opens the OP-8 meter and the guest plane (ARC-6) over the
 // machine manager. Without them no agent machine can start.
-func openGuestPlane(m *vm.Manager, d *daemon.Daemon, socketDir, meterPath, inboxPath string) (*guest.Plane, error) {
+func openGuestPlane(m *vm.Manager, d *daemon.Daemon, socketDir, meterPath, inboxPath, egressSocket string) (*guest.Plane, error) {
 	eng := d.Engine()
 	mtr, err := meter.Open(meter.Config{
 		Path:           meterPath,
@@ -207,13 +217,13 @@ func openGuestPlane(m *vm.Manager, d *daemon.Daemon, socketDir, meterPath, inbox
 	if err != nil {
 		return nil, err
 	}
-	// ARC-6: each machine gets its own guest socket. Model egress
-	// needs the vault, which no process may unlock before P2-4, so
-	// model calls answer 503 until then; broker tools, per-step
-	// snapshots, and the owner inbox work now. When P2-4 serves model
-	// egress, its proxy takes labels from m.DataLabel, which reads
-	// private for any machine it cannot vouch for (REV-5, E10).
-	plane, err := guest.New(guest.Config{
+	// ARC-6: each machine gets its own guest socket. Its model route is
+	// metered here, then forwarded to the vault process (P2-4a), which
+	// holds the vault and runs the router and egress proxy; this process
+	// links neither. Labels come from m.DataLabel, which reads private
+	// for any machine it cannot vouch for (REV-5, E10). Until the owner
+	// unlocks the vault, model calls answer 503.
+	gcfg := guest.Config{
 		Dir:       filepath.Join(socketDir, "guests"),
 		InboxPath: inboxPath,
 		Machines:  machines{m},
@@ -239,6 +249,45 @@ func openGuestPlane(m *vm.Manager, d *daemon.Daemon, socketDir, meterPath, inbox
 			}
 		},
 		Logf: log.Printf,
-	})
-	return plane, err
+	}
+	if egressSocket != "" {
+		gcfg.Model = modelroute.Forward(modelroute.Config{
+			Socket: egressSocket,
+			Label:  m.DataLabel,
+			Denied: func(machine string, x modelroute.Denial) {
+				n := journal.EgressNote{Machine: machine, Adapter: x.Adapter, Operation: x.Operation, Method: x.Method, Status: x.Status, Reason: x.Reason}
+				if n.Reason == "" {
+					n.Reason = "denied"
+				}
+				if err := eng.RecordEgress(n); err != nil {
+					log.Printf("journal egress denial for %s: %v", machine, err)
+				}
+			},
+			Logf: log.Printf,
+		})
+	}
+	return guest.New(gcfg)
+}
+
+// ownerVerifier gives the owner channel the vault process's verify
+// operation, translating why a check did not run into the channel's terms.
+type ownerVerifier struct{ v *modelroute.Verifier }
+
+func (o ownerVerifier) VerifyTOTP(code string, after int64, counted bool) (int64, bool, error) {
+	step, ok, err := o.v.VerifyTOTP(code, after, counted)
+	return step, ok, ownerVerifyErr(err)
+}
+
+func ownerVerifyErr(err error) error {
+	var ve *modelroute.VerifyError
+	if err == nil || !errors.As(err, &ve) {
+		return err
+	}
+	kind := map[modelroute.VerifyFailure]owner.VerifyFailure{
+		modelroute.VerifyDown:   owner.VaultDown,
+		modelroute.VerifyLocked: owner.VaultLocked,
+		modelroute.VerifyPaused: owner.VerifyPaused,
+		modelroute.VerifyLost:   owner.VerifyLost,
+	}[ve.Kind]
+	return &owner.VerifyError{Kind: kind, Until: ve.Until}
 }
