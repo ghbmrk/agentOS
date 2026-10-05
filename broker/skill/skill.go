@@ -2,6 +2,8 @@ package skill
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -394,4 +396,77 @@ func fillNode(n Node, vals map[string]any) (any, error) {
 		}
 		return m, nil
 	}
+}
+
+// Shape is the shape of the task this file was compiled from, recomputed
+// from its own steps: the accounts and actions in order, and every value's
+// position and JSON kind (a slot's kind from its type, a literal's from
+// its value). It equals compile.Shape of the source trajectories, so a
+// file's content, not its name, says which task it is for (P3-6e).
+func (s *Skill) Shape() string {
+	types := map[string]SlotType{}
+	for _, sl := range s.Slots {
+		types[sl.Name] = sl.Type
+	}
+	kind := func(n Node) byte {
+		if n.Slot != "" {
+			switch types[n.Slot] {
+			case Text, Email:
+				return 's'
+			case Number:
+				return 'n'
+			case Bool:
+				return 'b'
+			}
+			return 'j'
+		}
+		dec := json.NewDecoder(bytes.NewReader(n.Lit))
+		dec.UseNumber()
+		var v any
+		dec.Decode(&v)
+		switch v.(type) {
+		case string:
+			return 's'
+		case bool:
+			return 'b'
+		case nil:
+			return 'z'
+		case json.Number:
+			return 'n'
+		}
+		return 'j'
+	}
+	h := sha256.New()
+	for i, st := range s.Steps {
+		fmt.Fprintf(h, "step %d %q %q %d\n", i, st.Account, st.Action, len(st.Recipients))
+	}
+	esc := strings.NewReplacer("~", "~0", "/", "~1")
+	for i, st := range s.Steps {
+		var walk func(path string, n Node)
+		walk = func(path string, n Node) {
+			if n.Obj == nil {
+				fmt.Fprintf(h, "%d/p/%s %c\n", i, path, kind(n))
+				return
+			}
+			for _, k := range sortedKeys(n.Obj) {
+				walk(path+"/"+esc.Replace(k), n.Obj[k])
+			}
+		}
+		for _, k := range sortedKeys(st.Params) {
+			walk(esc.Replace(k), st.Params[k])
+		}
+		for r, n := range st.Recipients {
+			fmt.Fprintf(h, "%d/r/%d %c\n", i, r, kind(n))
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil))[:12]
+}
+
+func sortedKeys(m map[string]Node) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }

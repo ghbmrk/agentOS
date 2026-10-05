@@ -14,6 +14,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/skill"
 )
 
 // Signal is what in the journal a hypothesis comes from (LOOP-4).
@@ -52,14 +53,22 @@ var supersedes = map[change.Class]string{
 }
 
 // supersededBy reports whether path is procedures/p<shape>.json and the
-// candidate writes exactly one file, that shape's skills/k<shape>.json.
+// candidate writes exactly one file, skills/k<shape>.json, holding a valid
+// compiled skill whose own steps have that shape. The shape is recomputed
+// from the decoded file, never taken from its name, so a builder cannot
+// pair a skill with another shape's procedure (P3-6e, security R1 on #74).
 func supersededBy(path string, files map[string][]byte) bool {
 	shape, ok := strings.CutPrefix(path, "procedures/p")
 	if !ok || !strings.HasSuffix(shape, ".json") || len(shape) == len(".json") || len(files) != 1 {
 		return false
 	}
-	_, ok = files["skills/k"+shape]
-	return ok
+	shape = strings.TrimSuffix(shape, ".json")
+	b, ok := files["skills/k"+shape+".json"]
+	if !ok {
+		return false
+	}
+	sk, err := skill.Decode(b)
+	return err == nil && sk.Kind == skill.KindSkill && sk.ID == "k"+shape && sk.Shape() == shape
 }
 
 // Hypothesis is one thing Loop 1 might improve (LOOP-4). It names journal

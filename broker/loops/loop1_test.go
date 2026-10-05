@@ -12,6 +12,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/route"
+	"github.com/ghbmrk/agentos/broker/skill"
 )
 
 // REQ: LOOP-4, LOOP-6, CHG-1, OP-7
@@ -297,24 +298,53 @@ func TestNotReadyWaitsForMoreTasks(t *testing.T) {
 	}
 }
 
+// skillFile is a valid one-step skill or procedure file for account,
+// with the shape its content gives.
+func skillFile(t *testing.T, kind skill.Kind, account string) (shape string, b []byte) {
+	t.Helper()
+	sk := &skill.Skill{Version: skill.Version, Kind: kind, ID: "k000000000000", Runs: 1,
+		Slots: []skill.Slot{{Name: "to", Type: skill.Email, Max: 64}},
+		Steps: []skill.Step{{Account: account, Action: "send", Recipients: []skill.Node{{Slot: "to"}}}}}
+	shape = sk.Shape()
+	sk.ID = "k" + shape
+	if kind == skill.KindProcedure {
+		sk.ID = "p" + shape
+	}
+	if err := sk.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	return shape, sk.Encode()
+}
+
 // CAP-5: a skill candidate may delete the procedure it replaces, but may
 // not write there, and no other class may delete outside its namespace.
+// "Replaces" is the shape the skill file's own steps give, not its name
+// (P3-6e, security R1 on #74).
 func TestSkillMaySupersedeItsProcedure(t *testing.T) {
-	ok := change.Candidate{Files: map[string][]byte{"skills/k1.json": nil}, Delete: []string{"procedures/p1.json"}}
-	sk := map[string][]byte{"skills/k1.json": nil}
+	s1, b1 := skillFile(t, skill.KindSkill, "mail")
+	s2, b2 := skillFile(t, skill.KindSkill, "chat")
+	_, pb := skillFile(t, skill.KindProcedure, "mail")
+	k := func(s string) string { return "skills/k" + s + ".json" }
+	p := func(s string) string { return "procedures/p" + s + ".json" }
+	ok := change.Candidate{Files: map[string][]byte{k(s1): b1}, Delete: []string{p(s1)}}
 	if err := inClass(change.ClassSkill, ok); err != nil {
 		t.Fatal(err)
 	}
+	sk := map[string][]byte{k(s1): b1}
 	for name, c := range map[string]struct {
 		class change.Class
 		cand  change.Candidate
 	}{
-		"skill writes procedures": {change.ClassSkill, change.Candidate{Files: map[string][]byte{"procedures/p1.json": nil}}},
+		"skill writes procedures": {change.ClassSkill, change.Candidate{Files: map[string][]byte{p(s1): pb}}},
 		"skill deletes budget":    {change.ClassSkill, change.Candidate{Delete: []string{"budget/spare.json"}}},
-		"other shape's procedure": {change.ClassSkill, change.Candidate{Files: sk, Delete: []string{"procedures/p2.json"}}},
-		"procedure with no skill": {change.ClassSkill, change.Candidate{Delete: []string{"procedures/p1.json"}}},
-		"two skills":              {change.ClassSkill, change.Candidate{Files: map[string][]byte{"skills/k1.json": nil, "skills/k2.json": nil}, Delete: []string{"procedures/p1.json"}}},
-		"procedure deletes skill": {change.ClassProcedure, change.Candidate{Delete: []string{"skills/k1.json"}}},
+		"other shape's procedure": {change.ClassSkill, change.Candidate{Files: sk, Delete: []string{p(s2)}}},
+		"procedure with no skill": {change.ClassSkill, change.Candidate{Delete: []string{p(s1)}}},
+		"two skills":              {change.ClassSkill, change.Candidate{Files: map[string][]byte{k(s1): b1, k(s2): b2}, Delete: []string{p(s1)}}},
+		"procedure deletes skill": {change.ClassProcedure, change.Candidate{Delete: []string{k(s1)}}},
+		// The builder names the file after s1's shape, but its steps are s2's.
+		"skill renamed to another shape": {change.ClassSkill, change.Candidate{Files: map[string][]byte{k(s1): b2}, Delete: []string{p(s1)}}},
+		"skill file not a skill":         {change.ClassSkill, change.Candidate{Files: map[string][]byte{k(s1): []byte("{}")}, Delete: []string{p(s1)}}},
+		"procedure file under skills":    {change.ClassSkill, change.Candidate{Files: map[string][]byte{k(s1): pb}, Delete: []string{p(s1)}}},
 	} {
 		if err := inClass(c.class, c.cand); !errors.Is(err, ErrOutOfClass) {
 			t.Errorf("%s: %v", name, err)
