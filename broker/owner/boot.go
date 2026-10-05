@@ -18,8 +18,9 @@ type bootReport struct {
 // items of a request not yet expired are handed to it to be re-sent with
 // new codes, and those that expired meanwhile are decided as denied with
 // Why "expired". Without it, or for a request recorded without its expiry,
-// they are decided as denied with Why "restart". Each auto-reply still
-// queued is decided as denied with Why "restart". The decided items are
+// they are decided as denied with Why "restart". Each auto-reply or
+// approved effect still queued (REV-3) is decided as denied with Why
+// "restart". The decided items are
 // listed for the digest, and the owner is texted what was re-sent,
 // cancelled, expired, and not sent. Run calls it; it does nothing the
 // second time.
@@ -37,7 +38,7 @@ func (c *Channel) Boot() {
 	}
 	var decided []Decision
 	var carried []Carried
-	var resent, reqs, expired, replies []string
+	var resent, reqs, expired, replies, holds []string
 	for _, p := range b.pending {
 		// A record is carried only if it is whole and sane: asked in the
 		// past, and its expiry no later than MaxTTL after that.
@@ -65,15 +66,23 @@ func (c *Channel) Boot() {
 		}
 	}
 	for _, q := range b.queued {
-		replies = append(replies, q.ID)
-		decided = append(decided, Decision{Request: q.ID, Item: 1, Ref: q.Ref, Why: "restart"})
+		if q.Held {
+			holds = append(holds, q.ID)
+		} else {
+			replies = append(replies, q.ID)
+		}
+		d := Decision{Request: q.ID, Item: 1, Ref: q.Ref, Why: "restart"}
+		if q.Held {
+			d.Hold = q.ID
+		}
+		decided = append(decided, d)
 	}
 	c.addExpiredLocked(decided)
 	for _, p := range b.pending {
 		c.retireLocked(p.ID, now)
 	}
-	for _, id := range replies {
-		c.retireLocked(id, now)
+	for _, q := range b.queued {
+		c.retireLocked(q.ID, now)
 	}
 	text := "Box restarted."
 	if len(resent) > 0 {
@@ -91,9 +100,14 @@ func (c *Channel) Boot() {
 	if len(reqs)+len(expired)+len(replies) > 0 {
 		text += " Ask your agent again if still needed."
 	}
+	if len(holds) > 0 {
+		// The gate asks these again itself (grants RV11), so the owner is
+		// not invited to a duplicate request that could send twice.
+		text += " Approved actions cancelled, not sent: " + strings.Join(holds, ", ") + ". They will be asked again."
+	}
 	if !fits(text) {
-		text = fmt.Sprintf("Box restarted. %d requests re-sent with new codes, %d cancelled, %d expired, and %d auto-replies not sent.",
-			len(resent), len(reqs), len(expired), len(replies))
+		text = fmt.Sprintf("Box restarted. %d requests re-sent with new codes, %d cancelled, %d expired, %d auto-replies not sent, and %d approved actions cancelled.",
+			len(resent), len(reqs), len(expired), len(replies), len(holds))
 	}
 	c.mu.Unlock()
 	if c.cfg.Modem != nil {

@@ -71,13 +71,17 @@ var (
 	errBusy            = uerr(http.StatusConflict, "an unlock is already in progress or the vault is open")
 	errTooSoon         = uerr(http.StatusTooManyRequests, "wait a moment before trying again")
 	errWrongPassphrase = uerr(http.StatusForbidden, "the passphrase does not open this vault")
-	errNoCodeGenerator = uerr(http.StatusForbidden, "no code generator is enrolled in this vault")
-	errNotPending      = uerr(http.StatusConflict, "no unlock is waiting for a code")
-	errExpired         = uerr(http.StatusForbidden, "the code did not arrive in time; unlock again")
-	errLocked          = uerr(http.StatusConflict, "the vault is locked")
-	errUnlockCancelled = uerr(http.StatusConflict, "the unlock was cancelled")
-	errBadCredential   = uerr(http.StatusBadRequest, "credential name or value refused")
-	errInternal        = uerr(http.StatusInternalServerError, "internal error")
+	// errChangeInterrupted: a passphrase change is staged beside the keys
+	// file and may have taken effect (vault.ErrChangeInterrupted, P2-4g).
+	// It reveals only that an interrupted change exists.
+	errChangeInterrupted = uerr(http.StatusForbidden, "a passphrase change was interrupted; try your new passphrase")
+	errNoCodeGenerator   = uerr(http.StatusForbidden, "no code generator is enrolled in this vault")
+	errNotPending        = uerr(http.StatusConflict, "no unlock is waiting for a code")
+	errExpired           = uerr(http.StatusForbidden, "the code did not arrive in time; unlock again")
+	errLocked            = uerr(http.StatusConflict, "the vault is locked")
+	errUnlockCancelled   = uerr(http.StatusConflict, "the unlock was cancelled")
+	errBadCredential     = uerr(http.StatusBadRequest, "credential name or value refused")
+	errInternal          = uerr(http.StatusInternalServerError, "internal error")
 
 	// Trusted hosts (CRED-8, CRED-9).
 	errNoTPM        = uerr(http.StatusConflict, "this PC has no TPM, so it cannot be a trusted host")
@@ -93,6 +97,11 @@ var (
 	// Rollback (V6): the drive's vault is older than this PC's counter.
 	errRolledBack = uerr(http.StatusConflict, "this drive's vault is older than this PC has seen, so it may be an old copy put back; nothing was unlocked. If you did not restore it, keep the drive and restore from your backup with the recovery key")
 )
+
+// noteChangeUnfinished is the owner's notice when the vault opens beside
+// a passphrase change that never took effect (vault ChangeUnfinished,
+// P2-4h), once per unlock: the old passphrase still opens it.
+const noteChangeUnfinished = "Your passphrase change did not finish, so your old passphrase still works. Change it again the same way you started it."
 
 // noteCounterReset is the owner's notice, once, when this PC's rollback
 // counter for the vault is gone (vault.ErrCounterMissing; arbitrator
@@ -249,6 +258,15 @@ func (c *custody) status() (phase, time.Time) {
 	return c.ph, c.expires
 }
 
+// changeUnfinished reports that the held vault opened beside a passphrase
+// change that never took effect, so the page asks the owner to change it
+// again (vault ChangeUnfinished, P2-4g).
+func (c *custody) changeUnfinished() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return (c.ph == pending || c.ph == open) && c.v != nil && c.v.ChangeUnfinished()
+}
+
 // WrongPassNoteEvery bounds how often the owner is told of wrong vault
 // passphrases. They are not counted toward any lockout (nobody without the
 // card can lock the owner out), but repeated ones may be someone on the
@@ -374,6 +392,9 @@ func (c *custody) unlock(passphrase string) (string, error) {
 	if err != nil {
 		if errors.Is(err, vault.ErrNoSlotOpens) {
 			c.noteWrongPassLocked(now)
+			if errors.Is(err, vault.ErrChangeInterrupted) {
+				return "", errChangeInterrupted
+			}
 			return "", errWrongPassphrase
 		}
 		if errors.Is(err, vault.ErrRolledBack) {
@@ -467,6 +488,7 @@ func (c *custody) confirmKeep(ticket, code string, keep bool) (bool, error) {
 		c.supersedeQuiet = 0
 	}
 	c.notify("vault unlocked")
+	c.noteChangeUnfinishedLocked()
 	if !keep {
 		return false, nil
 	}
@@ -533,6 +555,16 @@ func (c *custody) serve(v *vault.Vault) error {
 	c.ph, c.v, c.proxy, c.expires, c.ticket, c.needPIN = open, v, p, time.Time{}, "", false
 	c.bootChanged, c.bootUpdated, c.bootSecure = false, false, false
 	return nil
+}
+
+// noteChangeUnfinishedLocked sends noteChangeUnfinished after the unlock
+// notice when the open vault reports a passphrase change that never took
+// effect: a trusted PC's unlock never reaches the local page (P2-4h,
+// UX-104-1). Caller holds mu.
+func (c *custody) noteChangeUnfinishedLocked() {
+	if c.v != nil && c.v.ChangeUnfinished() {
+		c.notify(noteChangeUnfinished)
+	}
 }
 
 // nearMatch finds a code for a step just outside the accepted window, which
@@ -862,6 +894,7 @@ func (c *custody) bootTrusted() {
 			return
 		}
 		c.notify("vault unlocked on this trusted host")
+		c.noteChangeUnfinishedLocked()
 	case errors.Is(err, tpmseal.ErrNeedPIN):
 		c.needPIN = true
 		c.notify("trusted host with a boot PIN: enter the PIN on the local page")
@@ -1001,6 +1034,7 @@ func (c *custody) unlockPIN(pin string) error {
 		return err
 	}
 	c.notify("vault unlocked on this trusted host with its boot PIN")
+	c.noteChangeUnfinishedLocked()
 	return nil
 }
 

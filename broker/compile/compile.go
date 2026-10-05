@@ -11,7 +11,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/journal"
-	"github.com/ghbmrk/agentos/broker/skill"
+	skill "github.com/ghbmrk/agentos/broker/skill/format"
 )
 
 // Cases is the part of the change pipeline the compiler uses: the dev
@@ -40,6 +40,13 @@ type Config struct {
 	// replaced by a marker). A trajectory holding one is never compiled.
 	// Nil: none detected.
 	Redacted func(string) bool
+	// Hash maps a value to the form implicit runs keep it in, when they
+	// keep keyed hashes rather than values (agentosd, W3-values V4): the
+	// compiler then hashes the explicit runs' values to match implicit
+	// runs by shape and compare them, so a value equal across runs stays
+	// the explicit run's literal (potency on #119). Nil: implicit values
+	// are compared as they are.
+	Hash func(any) any
 }
 
 // Compiler builds procedure and skill candidates from the journal.
@@ -92,7 +99,7 @@ func (c *Compiler) CaseClass(intentID string) change.Class {
 // does not make it dev, so a task split across dev and held-out by two
 // cases is compiled only when its canonical case is on the dev side (CHG-1;
 // the harvester's contract is one case per task, K4).
-func (c *Compiler) usable() map[string][]*Trajectory {
+func (c *Compiler) usable() (groups, implicit map[string][]*Trajectory) {
 	all := trajectories(c.cfg.Journal, c.cfg.Group, c.cfg.OwnerSource, c.cfg.Redacted)
 	goalOf := map[string]string{}
 	for g, t := range all {
@@ -108,18 +115,48 @@ func (c *Compiler) usable() map[string][]*Trajectory {
 			}
 		}
 	}
-	out := map[string][]*Trajectory{}
-	for g, t := range all {
-		if !dev[g] || !t.Succeeded || !t.Good || t.Redacted || !structured(t) || len(t.Steps) < c.cfg.MinSteps || len(t.Steps) > skill.MaxSteps {
+	for g := range all {
+		if !dev[g] {
+			delete(all, g)
+		}
+	}
+	return c.group(all)
+}
+
+// group sorts usable trajectories by shape into explicit-good and implicit
+// runs. Callers walk only shapes with an explicit-good run (the anchor), so
+// implicit runs alone never make a skill or procedure.
+func (c *Compiler) group(all map[string]*Trajectory) (groups, implicit map[string][]*Trajectory) {
+	groups, implicit = map[string][]*Trajectory{}, map[string][]*Trajectory{}
+	for _, t := range all {
+		if !t.Succeeded || !(t.Good || t.Implicit) || t.Redacted || !structured(t) || len(t.Steps) < c.cfg.MinSteps || len(t.Steps) > skill.MaxSteps {
 			continue
 		}
 		sh := Shape(t)
-		out[sh] = append(out[sh], t)
+		if t.Good {
+			groups[sh] = append(groups[sh], t)
+		} else {
+			implicit[sh] = append(implicit[sh], t)
+		}
 	}
-	for _, ts := range out {
+	if c.cfg.Hash != nil {
+		// Hashed implicit runs have the shape of a hashed explicit run.
+		byHashed := implicit
+		implicit = map[string][]*Trajectory{}
+		for sh, ts := range groups {
+			implicit[sh] = byHashed[sh]
+			if hs := Shape(hashTraj(ts[0], c.cfg.Hash)); hs != sh {
+				implicit[sh] = append(append([]*Trajectory(nil), implicit[sh]...), byHashed[hs]...)
+			}
+		}
+	}
+	for _, ts := range implicit {
 		sort.Slice(ts, func(i, j int) bool { return ts[i].Goal < ts[j].Goal })
 	}
-	return out
+	for _, ts := range groups {
+		sort.Slice(ts, func(i, j int) bool { return ts[i].Goal < ts[j].Goal })
+	}
+	return groups, implicit
 }
 
 // Candidates returns one change-pipeline candidate per shape whose skill
@@ -130,7 +167,7 @@ func (c *Compiler) usable() map[string][]*Trajectory {
 // every source intent came from a public machine (CHG-5, REV-5).
 func (c *Compiler) Candidates(active change.Tree) []change.Candidate {
 	var out []change.Candidate
-	groups := c.usable()
+	groups, implicit := c.usable()
 	shapes := make([]string, 0, len(groups))
 	for sh := range groups {
 		shapes = append(shapes, sh)
@@ -139,8 +176,8 @@ func (c *Compiler) Candidates(active change.Tree) []change.Candidate {
 	for _, sh := range shapes {
 		ts := groups[sh]
 		var sk *skill.Skill
-		if len(ts) >= c.cfg.MinRuns {
-			sk = Compile(sh, ts)
+		if len(ts)+len(implicit[sh]) >= c.cfg.MinRuns {
+			sk = compileWith(sh, ts, implicit[sh], c.cfg.Hash)
 		} else {
 			if _, has := active[skill.SkillsNS+"/k"+sh+".json"]; has {
 				continue // a skill already covers it
@@ -186,17 +223,44 @@ func same(b []byte, sk *skill.Skill) bool {
 // every run is a literal; any other is an input. Inputs whose values are
 // equal run for run share one slot. Nil if they are not the same shape.
 func Compile(shape string, ts []*Trajectory) *skill.Skill {
-	return build(skill.KindSkill, "k"+shape, ts, false)
+	return build(skill.KindSkill, "k"+shape, ts, nil, false, nil)
+}
+
+// compileWith compiles from explicit runs ts, with implicit runs only
+// counted and only widening: a value one of them varies is an input, never
+// a literal, and no implicit value or length shapes the skill (arbitrator
+// on W3 PW3 part B, "count, not content").
+func compileWith(shape string, ts, implicit []*Trajectory, hash func(any) any) *skill.Skill {
+	return build(skill.KindSkill, "k"+shape, ts, implicit, false, hash)
+}
+
+// hashTraj is t with its values in the form hash gives (Config.Hash).
+func hashTraj(t *Trajectory, hash func(any) any) *Trajectory {
+	h := *t
+	h.Steps = make([]Step, len(t.Steps))
+	for i, st := range t.Steps {
+		st.Recipients = append([]string(nil), st.Recipients...)
+		for r, v := range st.Recipients {
+			if hv, ok := hash(v).(string); ok {
+				st.Recipients[r] = hv
+			}
+		}
+		if hp, ok := hash(st.Params).(map[string]any); ok && st.Params != nil {
+			st.Params = hp
+		}
+		h.Steps[i] = st
+	}
+	return &h
 }
 
 // Procedure records same-shape trajectories, too few to compile, with
 // every value an input (no literal carries a recorded value), so it
 // replays the steps on new inputs.
 func Procedure(shape string, ts []*Trajectory) *skill.Skill {
-	return build(skill.KindProcedure, "p"+shape, ts, true)
+	return build(skill.KindProcedure, "p"+shape, ts, nil, true, nil)
 }
 
-func build(kind skill.Kind, id string, ts []*Trajectory, allSlots bool) *skill.Skill {
+func build(kind skill.Kind, id string, ts, implicit []*Trajectory, allSlots bool, hash func(any) any) *skill.Skill {
 	per := make([][]leaf, len(ts))
 	for i, t := range ts {
 		per[i] = leaves(t)
@@ -204,7 +268,21 @@ func build(kind skill.Kind, id string, ts []*Trajectory, allSlots bool) *skill.S
 			return nil
 		}
 	}
-	sk := &skill.Skill{Version: skill.Version, Kind: kind, ID: id, Runs: len(ts)}
+	// ref is what implicit runs are compared with: the first explicit
+	// run's leaves, hashed when implicit runs keep hashes (Config.Hash).
+	ref := per[0]
+	if hash != nil && len(implicit) > 0 {
+		if hl := leaves(hashTraj(ts[0], hash)); len(hl) == len(ref) {
+			ref = hl
+		}
+	}
+	var others [][]leaf
+	for _, t := range implicit {
+		if ls := leaves(t); len(ls) == len(per[0]) {
+			others = append(others, ls)
+		}
+	}
+	sk := &skill.Skill{Version: skill.Version, Kind: kind, ID: id, Runs: len(ts) + len(others)}
 	for _, st := range ts[0].Steps {
 		sk.Steps = append(sk.Steps, skill.Step{Account: st.Account, Action: st.Action})
 	}
@@ -221,11 +299,27 @@ func build(kind skill.Kind, id string, ts []*Trajectory, allSlots bool) *skill.S
 			vals[ti] = l.val
 			constant = constant && bytes.Equal(l.val, l0.val)
 		}
+		// Implicit runs only decide that a value varies, and keep inputs
+		// they show apart from sharing one slot; their values are never
+		// placed or measured.
+		var varies [][]byte
+		for _, ls := range others {
+			if l, r0 := ls[li], ref[li]; l.key() == r0.key() && l.kind == r0.kind {
+				// Only a content field may widen: a target or authority
+				// field stays literal unless explicit runs vary it, since
+				// an input there widens what the skill can do
+				// (arbitrator on #109).
+				if content(l0) {
+					constant = constant && bytes.Equal(l.val, r0.val)
+				}
+				varies = append(varies, l.val)
+			}
+		}
 		var node skill.Node
 		if constant && !allSlots {
 			node = skill.Node{Lit: json.RawMessage(l0.val)}
 		} else {
-			vec := string(bytes.Join(vals, []byte{0}))
+			vec := string(bytes.Join(append(vals, varies...), []byte{0}))
 			name, ok := slotOf[vec]
 			if !ok {
 				sl := slotFor(l0, per, li, names)
@@ -245,6 +339,26 @@ func build(kind skill.Kind, id string, ts []*Trajectory, allSlots bool) *skill.S
 }
 
 var nonName = regexp.MustCompile(`[^a-z0-9_]+`)
+
+// contentKeys name parameters that hold an item's content rather than its
+// target or authority. Only these may an implicit run widen into an input
+// (arbitrator on #109): an allowlist, so a target field no list names
+// (a phone number, a host, a channel) stays literal.
+var contentKeys = map[string]bool{
+	"subject": true, "body": true, "title": true, "note": true, "notes": true, "text": true,
+	"query": true, "message": true, "summary": true, "description": true, "comment": true,
+}
+
+// content reports whether a leaf is a content field: a parameter whose own
+// key is a content key, holding a value that is not email-shaped.
+// Recipients are never content.
+func content(l leaf) bool {
+	if l.path == nil || !contentKeys[strings.ToLower(l.path[len(l.path)-1])] {
+		return false
+	}
+	s, ok := l.raw.(string)
+	return !ok || !emailRE.MatchString(s)
+}
 
 // slotFor names and types an input from its leaf's values in every run.
 // A kind that cannot be an input (null) makes no skill.
@@ -333,18 +447,11 @@ var ErrNoSkill = errors.New("compile: no repeated trajectory to compile")
 // under skills/, deletes that shape's procedure (a no-op when there is
 // none), and is Public only when every source intent was (REV-5).
 func (c *Compiler) BuildSkill(evidence []journal.Status) (change.Candidate, error) {
-	all := trajectories(evidenceJournal(evidence), c.cfg.Group, c.cfg.OwnerSource, c.cfg.Redacted)
-	groups := map[string][]*Trajectory{}
-	for _, t := range all {
-		if !t.Succeeded || !t.Good || t.Redacted || !structured(t) || len(t.Steps) < c.cfg.MinSteps || len(t.Steps) > skill.MaxSteps {
-			continue
-		}
-		sh := Shape(t)
-		groups[sh] = append(groups[sh], t)
-	}
+	groups, implicit := c.group(trajectories(evidenceJournal(evidence), c.cfg.Group, c.cfg.OwnerSource, c.cfg.Redacted))
+	runs := func(sh string) int { return len(groups[sh]) + len(implicit[sh]) }
 	best := ""
-	for sh, ts := range groups {
-		if len(ts) >= c.cfg.MinRuns && (best == "" || len(ts) > len(groups[best]) || (len(ts) == len(groups[best]) && sh < best)) {
+	for sh := range groups {
+		if runs(sh) >= c.cfg.MinRuns && (best == "" || runs(sh) > runs(best) || (runs(sh) == runs(best) && sh < best)) {
 			best = sh
 		}
 	}
@@ -352,8 +459,7 @@ func (c *Compiler) BuildSkill(evidence []journal.Status) (change.Candidate, erro
 		return change.Candidate{}, ErrNoSkill
 	}
 	ts := groups[best]
-	sort.Slice(ts, func(i, j int) bool { return ts[i].Goal < ts[j].Goal })
-	sk := Compile(best, ts)
+	sk := compileWith(best, ts, implicit[best], c.cfg.Hash)
 	if sk == nil || sk.Validate() != nil {
 		return change.Candidate{}, ErrNoSkill
 	}

@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/skill/format"
 )
 
 // Server is an MCP tool server (streamable HTTP, one JSON response per
@@ -55,9 +57,9 @@ func (s *Server) List() []*Skill {
 }
 
 // load reads and validates one file; nil when absent or invalid, or when
-// its ID is not its file name.
+// its name is not its own (its ID, or the shape its steps give).
 func (s *Server) load(ns, id string) *Skill {
-	if !idRE.MatchString(id) {
+	if !format.ValidID(id) {
 		return nil
 	}
 	f, err := os.Open(filepath.Join(s.Dir, ns, id+".json"))
@@ -69,8 +71,8 @@ func (s *Server) load(ns, id string) *Skill {
 	if err != nil {
 		return nil
 	}
-	sk, err := Decode(b)
-	if err != nil || sk.ID != id || sk.Path() != ns+"/"+id+".json" {
+	sk, err := DecodeFile(ns+"/"+id+".json", b)
+	if err != nil {
 		return nil
 	}
 	return sk

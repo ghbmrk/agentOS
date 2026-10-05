@@ -204,6 +204,26 @@ def read_verify():
         "PASS" if ok else "FAIL", size >> 20, dt, size / dt / 1e6 if dt else 0, errs)
 
 
+# PE2: the RES-2 floor budget, MiB, and agentosd's default machine budgets (-agent-mem-mb,
+# -replay-mem-mb, -headroom-mb; broker/cmd/agentosd/main.go). What remains after host, inference,
+# browser and headroom is the agent-machine pool; it must hold the agent and one replay machine.
+FLOOR = {"host": 1024, "inference": 2048, "browser": 512, "headroom": 600}
+AGENT_MB, REPLAY_MB = 1536, 1024
+
+
+def floor_fit(meminfo):
+    """Whether the agent machine and one replay machine fit in this PC's pool (PE2), from /proc/meminfo."""
+    m = re.search(r"MemTotal:\s+(\d+)", meminfo)
+    if not m:
+        return "unknown: MemTotal unreadable"
+    total = int(m.group(1)) >> 10
+    pool = total - sum(FLOOR.values())
+    need = AGENT_MB + REPLAY_MB
+    return "%s: pool %d MiB (MemTotal %d - host %d - inference %d - browser %d - headroom %d) for agent %d + one replay %d = %d; agentosd -capacity-mb %d here (its default: this, at most 4500)" % (
+        "PASS" if pool >= need else "FAIL", pool, total, FLOOR["host"], FLOOR["inference"], FLOOR["browser"],
+        FLOOR["headroom"], AGENT_MB, REPLAY_MB, need, min(pool + FLOOR["headroom"], 4500))
+
+
 def probe(disk):
     dmi = "/sys/class/dmi/id/"
     tpm = read("/sys/class/tpm/tpm0/tpm_version_major")
@@ -215,6 +235,7 @@ def probe(disk):
         ("firmware", "%s %s %s" % (read(dmi + "bios_vendor"), read(dmi + "bios_version"), read(dmi + "bios_date"))),
         ("cpu", "%s, %d threads" % (cpu.group(1) if cpu else "?", os.cpu_count() or 0)),
         ("ram_gb", "%.1f" % (int(mem.group(1)) / 1048576) if mem else "?"),
+        ("agent_and_replay_fit", floor_fit(read("/proc/meminfo"))),
         ("secure_boot", sh("mokutil --sb-state").splitlines()[0] if sh("mokutil --sb-state") else "?"),
         ("loader", efivar("LoaderInfo") or "not systemd-boot"),
         ("found_root_via_gpt_auto", "yes" if efivar("LoaderDevicePartUUID") else "no"),

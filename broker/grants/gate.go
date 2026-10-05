@@ -2,8 +2,10 @@ package grants
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/owner"
+	"github.com/ghbmrk/agentos/broker/reversible"
 	"github.com/ghbmrk/agentos/broker/verb"
 )
 
@@ -49,6 +52,9 @@ type Owner interface {
 	Active(within time.Duration) bool
 	QueueAutoReply(owner.AutoReply) (owner.QueueResult, error)
 	DueAutoReplies() []owner.Queued
+	// UndoneAfterRelease reports whether the owner texted UNDO for a
+	// released auto-reply after its release (owner O18).
+	UndoneAfterRelease(id string) bool
 	Inform(text string) error
 }
 
@@ -100,6 +106,33 @@ type Verifier interface {
 	Verify(ctx context.Context, in journal.Intent) (Verified, error)
 }
 
+// Escalator is implemented by verifiers whose adapter guards a
+// reversible verb (ADP-2's organize guards): it reads the source and says
+// whether this one effect must be treated more strictly. It runs at
+// authorization and again at the recheck before dispatch (OP-3).
+type Escalator interface {
+	Escalate(ctx context.Context, in journal.Intent) (Escalation, error)
+}
+
+// Escalation is what an Escalator decided. The zero value changes
+// nothing. An error denies the effect: a target the adapter never allows.
+type Escalation struct {
+	// Verb, if set, applies when stricter than the granted verb (an
+	// archive that hides a security alert is change-account).
+	Verb string
+	// Ask sends the effect to the owner at its verb, reversible or not
+	// (past a daily bound).
+	Ask bool
+	// Reason is why the effect is asked, in the adapter's fixed wording
+	// built only from broker-held fields (never a message's subject or
+	// body). It becomes the approval line's Detail.
+	Reason string
+	// Held refuses the effect for now, with a reason that says it may be
+	// tried again (past a daily bound while the owner has not allowed
+	// more).
+	Held bool
+}
+
 // Verified is what a Verifier read.
 type Verified struct {
 	// Item is the approval line as the source shows it: object, canonical
@@ -144,10 +177,30 @@ type Config struct {
 	// owner deleted (recalltool W10); its intents get no pre-allowance.
 	// Nil: none is.
 	Contained func(lineage string) bool
+	// Forms maps an executor's irreversible operations to their
+	// reversible forms (REV-3), from the adapter's own declaration next to
+	// Declared. An effect the owner approves under one is held for its
+	// undo window, staged first if the form says so, and cancelled (and
+	// unstaged) by UNDO. A form reversible.Check refuses is dropped and
+	// logged, so its operation is asked with no undo window.
+	Forms map[string]map[string]reversible.Form
 	// Changes decides meta.change.* intents. Nil: they are denied.
 	Changes Changes
 	// Loops decides meta.loops.* intents. Nil: they are denied.
 	Loops Loops
+	// Outcome receives the owner's verdict on an agent's effect once it is
+	// final, for Loop 1's harvesting (W3, potency PW3 on #90). It is
+	// called once per asked intent, outside the gate's lock, on the
+	// settling goroutine, so it must not block; a panic in it is logged
+	// and changes nothing. Nil: none.
+	Outcome func(OwnerOutcome)
+	// Observe is shown each guest intent the policy authorized, as the
+	// guest wrote it, before the journal redacts it: the learning plane
+	// keeps the values compiled skills need (W3-values). It gets a deep
+	// copy, after the check passed, never for broker-state intents; it
+	// must not block, and a panic in it is logged and changes nothing
+	// (security V1 on W3-values). Nil: none.
+	Observe func(journal.Intent)
 	// Coalesce, CoalesceIdle, and RequestsPerHour pace approval requests
 	// (CH-15); zero takes the defaults. Urgent marks owner-defined urgent
 	// items, sent at once and in quiet hours. Quiet reports the owner's
@@ -168,16 +221,24 @@ type Config struct {
 type Gate struct {
 	cfg Config
 
-	mu        sync.Mutex
-	eng       *journal.Engine
-	own       Owner
-	grants    map[string]*Grant
-	waiting   map[string]*wait
-	batch     []string
-	first     time.Time // when the batch's first item arrived
-	last      time.Time // when its latest item arrived
-	sent      []time.Time
+	mu      sync.Mutex
+	eng     *journal.Engine
+	own     Owner
+	grants  map[string]*Grant
+	waiting map[string]*wait
+	batch   []string
+	first   time.Time // when the batch's first item arrived
+	last    time.Time // when its latest item arrived
+	sent    []time.Time
+	// asked are owner-question texts reserved on the same budget
+	// (Reserve, W9).
+	asked []time.Time
+	// agedAt is when a question last went ahead of a waiting batch
+	// (Reserve, question PQ5).
+	agedAt    time.Time
 	decided   map[string]decision
+	reported  map[string]bool // intents whose owner verdict went to Outcome
+	reportedQ []string        // their order, to bound reported
 	confirmed map[string]bool
 	failed    map[string]string
 	// carried holds the intents a restart left pending until the owner
@@ -185,7 +246,42 @@ type Gate struct {
 	// is what waits for STOP to end before it is asked again.
 	carried map[string]bool
 	reissue []owner.Carried
-	wg      sync.WaitGroup
+	// forms are Config.Forms that passed reversible.Check. derived holds
+	// the stage and inverse intents this gate submitted, the only ones
+	// with reversible.Origin it allows; staging closes when a held
+	// effect's stage attempt has ended.
+	forms   map[string]map[string]reversible.Form
+	derived map[string]bool
+	staging map[string]chan struct{}
+	// retry explains a pending intent whose hold ended without the
+	// owner's answer (PV1): the agent's retry asks again.
+	retry map[string]string
+	// after holds released effects that STOP kept from running, whose
+	// staged copy is settled once they end.
+	after map[string]afterRef
+	// sending holds owner acceptances of effects that were authorized
+	// but not yet sent; each is reported once its send ends (L3 MUST-1
+	// on #101), never for a failed send or a changed draft.
+	sending map[string]pending
+	// implicit holds implicit acceptances of sent auto-replies until
+	// LateRelease after the send, reported only if the owner did not
+	// text UNDO meanwhile (L3 MUST-4 on #109).
+	implicit []heldImplicit
+	wg       sync.WaitGroup
+}
+
+// pending is an owner verdict not yet reported, and the request it
+// answered (an auto-reply's UNDO ID).
+type pending struct {
+	v   OwnerVerdict
+	req string
+}
+
+// heldImplicit is an implicit acceptance waiting out the late-UNDO grace.
+type heldImplicit struct {
+	in  journal.Intent
+	req string
+	due time.Time
 }
 
 // wait is an intent waiting on the owner.
@@ -196,16 +292,40 @@ type wait struct {
 	request string // owner request ID, "" while batched
 	reply   string // queued auto-reply ID
 	sendAt  time.Time
+	held    bool      // approved, and held under reply until sendAt (REV-3)
+	attempt int       // which hold of the intent this is, from 1
 	expires time.Time // a re-issued item's original expiry; zero otherwise
+}
+
+// afterRef names the hold of a released effect still to end.
+type afterRef struct {
+	hold string
+	n    int
 }
 
 // decision is the owner's answer on one intent.
 type decision struct {
 	approved bool
 	why      string
-	at       time.Time
-	item     owner.Item
-	local    bool
+	// asked is set when the decision answered a waiting request, and
+	// implicit when it released an auto-reply the owner never answered.
+	asked, implicit bool
+	// late is set when it released an auto-reply whose silence is not the
+	// owner's (owner Queued.Late): no verdict (security B1(a) on PW3).
+	late bool
+	// req is the request the decision answered (an auto-reply's ID).
+	req   string
+	at    time.Time
+	item  owner.Item
+	local bool
+	// hold is the UNDO ID a held effect was under, and attempt which hold
+	// of the intent it was (REV-3).
+	hold    string
+	attempt int
+	// tries is how many attempts the intent had when the owner answered.
+	// The approval covers the next one only: the journal's dispatch
+	// record uses it up (GR8, Security on #76).
+	tries int
 }
 
 // New returns a gate that denies everything until Attach.
@@ -230,7 +350,28 @@ func New(cfg Config) *Gate {
 	}
 	return &Gate{cfg: cfg, grants: map[string]*Grant{},
 		waiting: map[string]*wait{}, decided: map[string]decision{}, confirmed: map[string]bool{}, failed: map[string]string{},
-		carried: map[string]bool{}}
+		carried: map[string]bool{}, forms: checkForms(cfg), derived: map[string]bool{}, staging: map[string]chan struct{}{},
+		retry: map[string]string{}, after: map[string]afterRef{}, sending: map[string]pending{}, reported: map[string]bool{}}
+}
+
+// checkForms keeps the forms reversible.Check accepts against each
+// executor's declaration.
+func checkForms(cfg Config) map[string]map[string]reversible.Form {
+	out := map[string]map[string]reversible.Form{}
+	for _, ex := range slices.Sorted(maps.Keys(cfg.Forms)) {
+		for _, op := range slices.Sorted(maps.Keys(cfg.Forms[ex])) {
+			f, err := reversible.Check(cfg.Declared[ex], op, cfg.Forms[ex][op])
+			if err != nil {
+				cfg.Logf("grants: dropping the reversible form of %s %s: %v", ex, op, err)
+				continue
+			}
+			if out[ex] == nil {
+				out[ex] = map[string]reversible.Form{}
+			}
+			out[ex][op] = f
+		}
+	}
+	return out
 }
 
 // Attach connects the engine and the owner channel (nil if there is
@@ -421,6 +562,17 @@ type verdict struct {
 // but the owner. Every irreversible effect that no pre-allowance covers
 // is asked of the owner (REV-2).
 func (g *Gate) evaluate(ctx context.Context, phase journal.Phase, in journal.Intent) verdict {
+	if in.Origin == reversible.Origin {
+		return g.evaluateDerived(in)
+	}
+	if strings.HasPrefix(in.ID, reversible.Prefix) {
+		return verdict{kind: deny, why: "only the broker submits this intent"}
+	}
+	return g.evaluateEffect(ctx, phase, in)
+}
+
+// evaluateEffect is evaluate for an intent that is not derived.
+func (g *Gate) evaluateEffect(ctx context.Context, phase journal.Phase, in journal.Intent) verdict {
 	if in.Account == journal.BrokerAccount {
 		return g.evaluateBroker(ctx, phase, in)
 	}
@@ -457,7 +609,33 @@ func (g *Gate) evaluate(ctx context.Context, phase journal.Phase, in journal.Int
 	if !ok {
 		return verdict{kind: deny, why: "this operation's verb is not on the broker's list (ADP-2)"}
 	}
-	if cls == verb.Reversible {
+	var esc Escalation
+	if e, ok := g.cfg.Verifiers[in.Account].(Escalator); ok {
+		var err error
+		if esc, err = e.Escalate(ctx, in); err != nil {
+			g.cfg.Logf("grants: guarding %s: %v", in.ID, err)
+			return verdict{kind: deny, why: "the adapter's guard refuses this effect (ADP-2)"}
+		}
+		if esc.Held {
+			return verdict{kind: deny, why: "held: past the account's daily bound until the owner allows more; try again later (ADP-2)"}
+		}
+		if esc.Verb != "" {
+			// Only a strictly higher class replaces the granted verb, so
+			// an escalation can never relabel an effect sideways.
+			ec, ok := verb.ClassOf(esc.Verb)
+			if !ok {
+				return verdict{kind: deny, why: "this operation's verb is not on the broker's list (ADP-2)"}
+			}
+			if ec > cls {
+				v, cls = esc.Verb, ec
+			}
+		}
+	} else if v == verb.Organize {
+		// Organize is reversible only behind its adapter's guards
+		// (ADP-2): without them, every effect is asked.
+		esc = Escalation{Ask: true, Reason: "no guard for this account"}
+	}
+	if cls == verb.Reversible && !esc.Ask {
 		return verdict{kind: allow}
 	}
 	var ver Verified
@@ -471,6 +649,15 @@ func (g *Gate) evaluate(ctx context.Context, phase journal.Phase, in journal.Int
 		}
 	}
 	item := approvalItem(in, v, cls, ver, verified)
+	// The undo window is the broker's to promise, from the declared form,
+	// never the verifier's (REV-3).
+	item.UndoWindow = 0
+	if f, ok := g.forms[in.Executor][in.Action]; ok && cls == verb.Irreversible {
+		item.UndoWindow = f.Window
+	}
+	if esc.Reason != "" {
+		item.Detail = esc.Reason
+	}
 	if cls == verb.Irreversible && verified && !g.contained(in.Origin) {
 		sort.Slice(rules, func(i, j int) bool { return rules[i].ID < rules[j].ID })
 		for _, r := range rules {
@@ -573,6 +760,45 @@ func (g *Gate) matches(r Rule, in journal.Intent, v Verified) error {
 		return errors.New("scope bound reached")
 	}
 	return nil
+}
+
+// evaluateDerived decides a stage or inverse intent (REV-3). It is
+// allowed only if this gate submitted it for an effect whose form names
+// its operation, and only while the grant that connects the account is
+// live: a stage while its hold is on, an inverse once the effect was
+// cancelled, not sent, or is no longer under that stage's hold. Neither
+// needs a grant of its own: the owner approved the effect they belong to,
+// and the form's operations are reversible (reversible.Check).
+func (g *Gate) evaluateDerived(in journal.Intent) verdict {
+	parent, n, ok := reversible.Parent(in)
+	g.mu.Lock()
+	ours := g.derived[in.ID]
+	w := g.waiting[parent]
+	live := w != nil && w.held && w.attempt == n // this stage's hold is on
+	ag := g.adapterLocked(in.Account)
+	g.mu.Unlock()
+	if !ok || !ours {
+		return verdict{kind: deny, why: "only the broker submits this intent"}
+	}
+	p, err := g.eng.Get(parent)
+	if err != nil {
+		return verdict{kind: deny, why: "the effect it belongs to is not in the journal"}
+	}
+	f, ok := g.forms[p.Intent.Executor][p.Intent.Action]
+	if !ok || in.Account != p.Intent.Account || in.Executor != p.Intent.Executor {
+		return verdict{kind: deny, why: "the effect it belongs to has no reversible form"}
+	}
+	if ag == nil || ag.Spec.Executor != in.Executor {
+		return verdict{kind: deny, why: "no grant connects this account"}
+	}
+	switch {
+	case in.ID == reversible.StageID(parent, n) && in.Action == f.Stage && live:
+	case in.ID == reversible.InverseID(parent, n) && in.Action == f.Inverse &&
+		(p.State == journal.Denied || p.State == journal.NotApplied || (p.State == journal.Pending && !live)):
+	default:
+		return verdict{kind: deny, why: "the effect it belongs to is not in a state that allows it"}
+	}
+	return verdict{kind: allow}
 }
 
 // evaluateBroker decides broker-state intents (OP-5).
@@ -707,6 +933,32 @@ func sharingOn(in journal.Intent) bool {
 // Check is the journal policy (OP-3): it runs at authorize and again
 // immediately before dispatch.
 func (g *Gate) Check(ctx context.Context, phase journal.Phase, in journal.Intent) error {
+	err := g.check(ctx, phase, in)
+	if err == nil && phase == journal.PhaseAuthorize && g.cfg.Observe != nil && in.Account != journal.BrokerAccount {
+		g.observe(in)
+	}
+	return err
+}
+
+// observe hands Observe a deep copy of in; a panic in it is logged.
+func (g *Gate) observe(in journal.Intent) {
+	defer func() {
+		if recover() != nil {
+			g.cfg.Logf("grants: intent observer failed")
+		}
+	}()
+	b, err := json.Marshal(in)
+	if err != nil {
+		return
+	}
+	var cp journal.Intent
+	if json.Unmarshal(b, &cp) != nil {
+		return
+	}
+	g.cfg.Observe(cp)
+}
+
+func (g *Gate) check(ctx context.Context, phase journal.Phase, in journal.Intent) error {
 	g.mu.Lock()
 	d, decided := g.decided[in.ID]
 	ready := g.eng != nil
@@ -736,7 +988,36 @@ func (g *Gate) Check(ctx context.Context, phase journal.Phase, in journal.Intent
 	if phase == journal.PhaseDispatch && g.cfg.Now().Sub(d.at) > g.cfg.Fresh {
 		return fmt.Errorf("the approval is older than %s; ask again", g.cfg.Fresh)
 	}
+	// The engine commits the dispatch only if nothing was journaled since
+	// this check, so an attempt started by a concurrent Dispatch, before
+	// spend runs, is seen here or forces the check again (GR8).
+	if phase == journal.PhaseDispatch {
+		n, err := g.tries(in.ID)
+		if err != nil {
+			return fmt.Errorf("cannot read the intent's attempts: %w", err)
+		}
+		if n != d.tries {
+			return errors.New("the owner's approval was used by an earlier attempt; ask again")
+		}
+	}
 	return nil
+}
+
+// tries is how many attempts the intent has started. The engine is read
+// without g.mu: its policy calls take g.mu. An error is a refusal at the
+// recheck, never a count that might match an approval.
+func (g *Gate) tries(id string) (int, error) {
+	g.mu.Lock()
+	eng := g.eng
+	g.mu.Unlock()
+	if eng == nil {
+		return 0, errors.New("grants are not loaded")
+	}
+	st, err := eng.Get(id)
+	if err != nil {
+		return 0, err
+	}
+	return len(st.Attempts), nil
 }
 
 func (g *Gate) isConfirmed(id string) bool {
@@ -747,10 +1028,78 @@ func (g *Gate) isConfirmed(id string) bool {
 
 // Submit, Dispatch, and Get pass through to the engine; with Authorize
 // they are the guest plane's Effects.
-func (g *Gate) Submit(in journal.Intent) (journal.Status, error) { return g.eng.Submit(in) }
+// Submit refuses a derived intent's ID from anyone but the gate, so no
+// one can take it first and block a stage or an UNDO's inverse (C1).
+func (g *Gate) Submit(in journal.Intent) (journal.Status, error) {
+	if strings.HasPrefix(in.ID, reversible.Prefix) {
+		return journal.Status{}, errors.New("grants: intent IDs starting " + reversible.Prefix + " are the broker's")
+	}
+	return g.eng.Submit(in)
+}
 
 func (g *Gate) Dispatch(ctx context.Context, id string) (journal.Status, error) {
-	return g.eng.Dispatch(ctx, id)
+	st, err := g.eng.Dispatch(ctx, id)
+	if err == nil && st.State != journal.Pending && st.State != journal.Authorized {
+		g.spend(id)
+	}
+	g.endHeld(id)
+	return st, err
+}
+
+// spend drops the owner's approval of an intent once its dispatch has
+// ended, whatever the result: a retry of an effect that did not apply is
+// asked again, never sent on the old YES (L3, Security on #76).
+func (g *Gate) spend(id string) {
+	g.mu.Lock()
+	delete(g.decided, id)
+	delete(g.confirmed, id)
+	g.mu.Unlock()
+}
+
+// endHeld settles the staged copy of released effects that STOP kept from
+// running, once each has ended (afterHold). With no id it checks them all.
+func (g *Gate) endHeld(ids ...string) {
+	g.mu.Lock()
+	if len(ids) == 0 {
+		for id := range g.after {
+			ids = append(ids, id)
+		}
+		for id := range g.sending {
+			if _, ok := g.after[id]; !ok {
+				ids = append(ids, id)
+			}
+		}
+	}
+	g.mu.Unlock()
+	for _, id := range ids {
+		// The engine is read without g.mu: its policy calls take g.mu.
+		st, err := g.eng.Get(id)
+		if errors.Is(err, journal.ErrNotFound) {
+			// Nothing will end it: drop its unsent verdict (security on #101).
+			g.mu.Lock()
+			delete(g.sending, id)
+			g.mu.Unlock()
+		}
+		if err != nil || st.State == journal.Authorized || st.State == journal.InFlight {
+			continue
+		}
+		g.mu.Lock()
+		a, ok := g.after[id]
+		delete(g.after, id)
+		v := g.sending[id]
+		delete(g.sending, id)
+		g.mu.Unlock()
+		g.reportSent(v, st)
+		if !ok {
+			continue
+		}
+		g.spend(id)
+		g.wg.Add(1)
+		go func() {
+			defer g.wg.Done()
+			g.afterHold(st, a.hold, a.n)
+		}()
+	}
 }
 
 // Withdraw closes a recall rollback question still waiting for the owner,
@@ -821,6 +1170,7 @@ func (g *Gate) Authorize(ctx context.Context, id string) (journal.Status, error)
 			}
 		}
 		delete(g.failed, id)
+		delete(g.retry, id)
 		own := g.own
 		g.mu.Unlock()
 		if fresh && v.hold && own != nil {
@@ -865,10 +1215,14 @@ func (g *Gate) annotate(st *journal.Status) {
 		st.Permission.Reason = "approved by code; waiting for the owner to confirm on the box's local page"
 	} else if w := g.waiting[id]; w != nil && w.onlyUI {
 		st.Permission.Reason = "waiting for the owner's approval on the box's local page"
+	} else if w != nil && w.held {
+		st.Permission.Reason = "approved; held for the owner's undo window until " + w.sendAt.UTC().Format("15:04") + " UTC"
 	} else if w != nil && w.reply != "" {
 		st.Permission.Reason = "auto-reply queued; it sends at " + w.sendAt.UTC().Format("15:04") + " UTC unless the owner cancels it"
 	} else if w != nil {
 		st.Permission.Reason = "waiting for the owner's approval"
+	} else if r := g.retry[id]; r != "" {
+		st.Permission.Reason = r
 	} else if f := g.failed[id]; f != "" {
 		st.Permission.Reason = "could not ask the owner (" + f + "); retry later"
 	}
@@ -907,7 +1261,8 @@ func (g *Gate) queueReply(id string, v verdict) {
 // flushDue sends the batch when it is due (CH-10, CH-15): at once for an
 // urgent item or an owner active in chat; otherwise once the batch has
 // been quiet for CoalesceIdle or open for Coalesce, outside quiet hours,
-// and within RequestsPerHour.
+// and within RequestsPerHour, or past it for intents re-issued after a
+// restart.
 func (g *Gate) flushDue() {
 	now := g.cfg.Now()
 	g.mu.Lock()
@@ -915,36 +1270,118 @@ func (g *Gate) flushDue() {
 		g.mu.Unlock()
 		return
 	}
-	urgent := false
-	if g.cfg.Urgent != nil {
-		for _, id := range g.batch {
-			if w := g.waiting[id]; w != nil && g.cfg.Urgent(w.item) {
-				urgent = true
-			}
+	urgent, reissued := false, false
+	for _, id := range g.batch {
+		w := g.waiting[id]
+		if w == nil {
+			continue
+		}
+		if g.cfg.Urgent != nil && g.cfg.Urgent(w.item) {
+			urgent = true
+		}
+		if !w.expires.IsZero() {
+			reissued = true
 		}
 	}
 	own := g.own
-	keep := g.sent[:0]
-	for _, t := range g.sent {
-		if now.Sub(t) < time.Hour {
-			keep = append(keep, t)
-		}
-	}
-	g.sent = keep
-	budget := len(g.sent) < g.cfg.RequestsPerHour
+	budget := g.textsLocked(now) < g.cfg.RequestsPerHour
 	ripe := now.Sub(g.first) >= g.cfg.Coalesce || now.Sub(g.last) >= g.cfg.CoalesceIdle
 	g.mu.Unlock()
 	active := own != nil && own.Active(activeFor)
 	quiet := g.cfg.Quiet != nil && g.cfg.Quiet(now)
-	if urgent || (!quiet && (active || (ripe && budget))) {
+	switch {
+	case urgent || (!quiet && active):
 		g.Flush()
+	case !quiet && ripe && (budget || reissued):
+		// A re-issued intent runs on its original expiry, so it goes
+		// even past the budget (security R3 on #95); the rest stay paced.
+		g.flush(true)
 	}
+}
+
+// textsLocked is the unsolicited texts on the CH-15 budget in the hour
+// before now: approval requests and reserved owner questions.
+func (g *Gate) textsLocked(now time.Time) int {
+	prune := func(ts []time.Time) []time.Time {
+		keep := ts[:0]
+		for _, t := range ts {
+			if now.Sub(t) < time.Hour {
+				keep = append(keep, t)
+			}
+		}
+		return keep
+	}
+	g.sent, g.asked = prune(g.sent), prune(g.asked)
+	return len(g.sent) + len(g.asked)
+}
+
+// Reserve takes one text of the CH-15 budget for an owner question (W9,
+// question Q3). Approval requests go first: it refuses while items wait
+// in a batch, and when approval requests and questions together have
+// used RequestsPerHour in the hour before now. A question that has waited
+// unsent for its AgedAfter (aged, question Config.AgedAfter) may go ahead of a waiting batch,
+// once an hour, so steady approval traffic never holds it indefinitely
+// and approvals keep the rest of the budget (question PQ5). A granted
+// reservation counts at once, sent or not, so the check and the count are
+// one step. Time is the gate's own clock, as for request texts.
+func (g *Gate) Reserve(aged bool) bool {
+	now := g.cfg.Now()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.textsLocked(now) >= g.cfg.RequestsPerHour {
+		return false
+	}
+	if len(g.batch) > 0 {
+		if !aged || !g.agedAt.IsZero() && now.Sub(g.agedAt) < time.Hour {
+			return false
+		}
+		g.agedAt = now
+	}
+	g.asked = append(g.asked, now)
+	return true
+}
+
+// take counts n request texts about to be sent and returns how many may
+// go. Paced, it grants only what the budget has left; unpaced (an urgent
+// item, an owner active in chat) it grants all. Counted before sending,
+// so no question is reserved in between.
+func (g *Gate) take(paced bool, n int) int {
+	now := g.cfg.Now()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if paced {
+		n = max(0, min(n, g.cfg.RequestsPerHour-g.textsLocked(now)))
+	}
+	for range n {
+		g.sent = append(g.sent, now)
+	}
+	return n
+}
+
+// requeue puts items the budget did not cover back in the batch.
+func (g *Gate) requeue(items []owner.Item) {
+	if len(items) == 0 {
+		return
+	}
+	g.mu.Lock()
+	for _, it := range items {
+		if g.waiting[it.Ref] != nil {
+			g.batch = append(g.batch, it.Ref)
+		}
+	}
+	g.mu.Unlock()
 }
 
 // Flush sends batched items now: one request per tier, at most MaxBatch
 // items each, so a high-risk item does not raise the code needed for
-// low-risk ones (CH-10). Each request text counts toward RequestsPerHour.
-func (g *Gate) Flush() {
+// low-risk ones (CH-10). Each request text counts toward RequestsPerHour,
+// but Flush itself is unpaced: it sends everything batched.
+func (g *Gate) Flush() { g.flush(false) }
+
+// flush sends batched items, each request text counted on the CH-15
+// budget before it goes; paced, texts past the budget stay batched,
+// except re-issued intents, which always go.
+func (g *Gate) flush(paced bool) {
 	now := g.cfg.Now()
 	g.mu.Lock()
 	ids, own := g.batch, g.own
@@ -982,6 +1419,9 @@ func (g *Gate) Flush() {
 	for _, id := range lapsed {
 		g.closeIntent(id, "the approval request expired; ask again with a new request_id")
 	}
+	// Each re-issued intent is its own request text: counted, but never
+	// paced, so none lapses unseen behind a spent budget (security R3).
+	g.take(false, len(again))
 	if len(again) > 0 {
 		reqs := make([]string, len(again))
 		err := errors.New("no owner channel")
@@ -989,9 +1429,6 @@ func (g *Gate) Flush() {
 			reqs, err = own.RequestEach(again, ttls)
 		}
 		g.mu.Lock()
-		if slices.ContainsFunc(reqs, func(r string) bool { return r != "" }) {
-			g.sent = append(g.sent, g.cfg.Now())
-		}
 		for i, it := range again {
 			w := g.waiting[it.Ref]
 			switch {
@@ -1010,6 +1447,10 @@ func (g *Gate) Flush() {
 	}
 	for _, items := range [][]owner.Item{low, high} {
 		for len(items) > 0 {
+			if g.take(paced, 1) == 0 {
+				g.requeue(items)
+				break
+			}
 			n := min(len(items), MaxBatch)
 			chunk := items[:n]
 			items = items[n:]
@@ -1019,9 +1460,6 @@ func (g *Gate) Flush() {
 				req, err = own.Request(chunk, 0)
 			}
 			g.mu.Lock()
-			if err == nil {
-				g.sent = append(g.sent, g.cfg.Now())
-			}
 			for _, it := range chunk {
 				w := g.waiting[it.Ref]
 				if w == nil {
@@ -1048,6 +1486,19 @@ func (g *Gate) Decide(d owner.Decision) {
 		g.lapse(d)
 		return
 	}
+	if d.Approved && d.Hold != "" {
+		g.hold(d)
+		return
+	}
+	if !d.Approved && (d.Why == "not held" || (d.Why == "restart" && d.Hold != "")) {
+		g.unhold(d)
+		return
+	}
+	unstaged := d.Approved && g.unstaged(d.Ref)
+	tries, err := g.tries(d.Ref)
+	if err != nil {
+		tries = -1 // matches no count, so the recheck refuses it
+	}
 	g.mu.Lock()
 	w := g.waiting[d.Ref]
 	if w == nil && (d.Approved || g.eng == nil) {
@@ -1071,12 +1522,267 @@ func (g *Gate) Decide(d owner.Decision) {
 	if why == "" {
 		why = "owner"
 	}
-	g.decided[d.Ref] = decision{approved: d.Approved, why: why, at: g.cfg.Now(), item: item, local: local}
+	hold, attempt := "", 0
+	if w != nil {
+		attempt = w.attempt
+	}
+	switch {
+	case !d.Approved && (d.Why == "undo" || d.Why == "restart"):
+		hold = d.Request
+	case d.Approved && w != nil && w.held:
+		hold = w.reply
+		if unstaged {
+			// Released without its staged copy: the owner approved it as
+			// staged, so it is not sent (arbitrator on #76).
+			d.Approved, why = false, "its staged copy could not be made"
+		}
+	}
+	unheld := d.Approved && (w == nil || !w.held)
+	implicit := unheld && d.Why == whyReleased
+	late := unheld && d.Why == whyReleasedLate
+	g.decided[d.Ref] = decision{approved: d.Approved, why: why, asked: w != nil, implicit: implicit, late: late,
+		req: d.Request, at: g.cfg.Now(), item: item, local: local, hold: hold, attempt: attempt, tries: tries}
 	wait := d.Approved && local && !g.confirmed[d.Ref]
+	own := g.own
 	g.mu.Unlock()
+	if unstaged && hold != "" && own != nil {
+		_ = own.Inform(fmt.Sprintf("%s was not sent: its draft or staged copy could not be made. Ask your agent again if still needed.", clip(hold)))
+	}
 	if !wait {
 		g.settle(d.Ref)
 	}
+}
+
+// unhold ends a hold that closed without the owner's answer (PV1 on #76):
+// the owner channel could not hold it, or a restart cancelled it. It is no
+// refusal, so the intent is not denied and nothing counts it as one
+// (CAP-6, ADP-11, Loop 1). After a restart it is asked again as new with
+// the rest of what the restart left open (GR10, PV2); otherwise the
+// agent's retry asks again. Any staged copy is removed first (C2).
+func (g *Gate) unhold(d owner.Decision) {
+	g.mu.Lock()
+	w := g.waiting[d.Ref]
+	if w != nil && w.request != "" && d.Request != w.request && d.Request != w.reply {
+		g.mu.Unlock()
+		return
+	}
+	n := 0
+	if w != nil {
+		n = w.attempt
+	}
+	delete(g.waiting, d.Ref)
+	delete(g.decided, d.Ref)
+	if d.Why == "not held" {
+		delete(g.carried, d.Ref)
+		g.retry[d.Ref] = "approved, but it could not be held for its undo window, so it did not run; retry to ask the owner again"
+	}
+	eng := g.eng
+	g.mu.Unlock()
+	if eng == nil {
+		return
+	}
+	if n == 0 {
+		// After a restart the gate kept no hold: the cancel is for the
+		// latest one, resolved now, before Reissue can start the next
+		// (security R1 on #76).
+		n, _ = g.lastStage(d.Ref)
+	}
+	if st, err := eng.Get(d.Ref); err == nil && n > 0 {
+		g.wg.Add(1)
+		go func() {
+			defer g.wg.Done()
+			g.unstage(st.Intent, d.Request, n)
+		}()
+	}
+}
+
+// lastStage returns the number of p's latest hold that has a stage
+// intent in the journal, and that intent; 0 if none.
+func (g *Gate) lastStage(p string) (int, journal.Status) {
+	var last journal.Status
+	n := 0
+	for {
+		st, err := g.eng.Get(reversible.StageID(p, n+1))
+		if err != nil {
+			return n, last
+		}
+		n, last = n+1, st
+	}
+}
+
+// unstaged reports a held effect whose form stages it but whose stage did
+// not succeed, once any stage attempt in flight has ended.
+func (g *Gate) unstaged(id string) bool {
+	g.mu.Lock()
+	w := g.waiting[id]
+	var done chan struct{}
+	n := 0
+	if w != nil {
+		n = w.attempt
+		done = g.staging[reversible.StageID(id, n)]
+	}
+	g.mu.Unlock()
+	if w == nil || !w.held {
+		return false
+	}
+	st, err := g.eng.Get(id)
+	if err != nil {
+		return false
+	}
+	if f, ok := g.forms[st.Intent.Executor][st.Intent.Action]; !ok || f.Stage == "" {
+		return false
+	}
+	if done != nil {
+		<-done
+	}
+	s, err := g.eng.Get(reversible.StageID(id, n))
+	return err != nil || s.State != journal.Succeeded
+}
+
+// lastEvidence is the evidence of an intent's last attempt.
+func lastEvidence(st journal.Status) string {
+	if len(st.Attempts) == 0 {
+		return ""
+	}
+	return st.Attempts[len(st.Attempts)-1].Evidence
+}
+
+// hold keeps an effect the owner approved from running until the owner
+// channel releases it after its undo window (REV-3, CH-16), and stages it
+// if its form says so. The approval is recorded at the release, so the
+// recheck's freshness counts from then.
+func (g *Gate) hold(d owner.Decision) {
+	g.mu.Lock()
+	w := g.waiting[d.Ref]
+	if w == nil || w.held {
+		g.mu.Unlock()
+		return
+	}
+	if w.request != "" && d.Request != w.request {
+		// A hold this intent's request did not make: never left pending
+		// on a release that would not match it.
+		own := g.own
+		g.mu.Unlock()
+		g.closeIntent(d.Ref, "the approval did not match its request; ask again with a new request_id")
+		if own != nil {
+			_ = own.Inform(fmt.Sprintf("%s did not run: its approval did not match its request. Ask your agent again if still needed.", clip(d.Hold)))
+		}
+		return
+	}
+	w.held, w.reply, w.sendAt = true, d.Hold, d.Until
+	g.mu.Unlock()
+	st, err := g.eng.Get(d.Ref)
+	if err != nil {
+		return
+	}
+	n, _ := g.lastStage(d.Ref)
+	n++
+	g.mu.Lock()
+	if w := g.waiting[d.Ref]; w != nil && w.held {
+		w.attempt = n
+	}
+	g.mu.Unlock()
+	f, ok := g.forms[st.Intent.Executor][st.Intent.Action]
+	if !ok || f.Stage == "" {
+		return
+	}
+	in := reversible.Stage(st.Intent, f, n)
+	done := make(chan struct{})
+	g.mu.Lock()
+	g.derived[in.ID] = true
+	g.staging[in.ID] = done
+	g.mu.Unlock()
+	g.wg.Add(1)
+	go func() {
+		defer g.wg.Done()
+		defer close(done)
+		if st := g.runDerived(in); st.State != journal.Succeeded {
+			// The effect is then not sent at release (RV7).
+			g.cfg.Logf("grants: staging %s: %s", d.Ref, st.State)
+		}
+	}()
+}
+
+// afterHold settles a held effect's staged copy once the effect is
+// settled (arbitrator on #76). Sent: the copy is the sent message. Gone:
+// it is gone (deleted), a cancel. Edited: it is not sent and stays for the
+// owner, who is told in a fixed line offering no YES, because an approval
+// could not be bound to the edited version (arbitrator re-ruling).
+// Anything else that did not happen (UNDO, a restart, a
+// recheck denial, a failed send) unstages (C2). An unknown outcome, or an
+// effect STOP still holds, leaves it alone.
+func (g *Gate) afterHold(st journal.Status, hold string, n int) {
+	switch {
+	case st.State == journal.NotApplied && lastEvidence(st) == reversible.EvidenceGone:
+	case st.State == journal.NotApplied && lastEvidence(st) == reversible.EvidenceEdited:
+		g.mu.Lock()
+		own := g.own
+		g.mu.Unlock()
+		if own != nil {
+			_ = own.Inform(fmt.Sprintf("%s not sent: its draft changed after you approved it. Send it from your mail app if you still want it.", clip(hold)))
+		}
+	case st.State == journal.Denied || st.State == journal.NotApplied:
+		g.unstage(st.Intent, hold, n)
+	}
+}
+
+// unstage removes what a cancelled effect's stage made (REV-3), once the
+// stage attempt has ended. A stage that did not succeed left nothing. If
+// the inverse is not applied (the copy changed since, or the grant is
+// gone), the copy is left as is and the owner is told.
+func (g *Gate) unstage(p journal.Intent, hold string, n int) {
+	f, ok := g.forms[p.Executor][p.Action]
+	if !ok || f.Stage == "" || n < 1 {
+		return
+	}
+	sid := reversible.StageID(p.ID, n)
+	g.mu.Lock()
+	done := g.staging[sid]
+	g.mu.Unlock()
+	if done != nil {
+		<-done
+	}
+	g.mu.Lock()
+	delete(g.staging, sid)
+	g.mu.Unlock()
+	st, err := g.eng.Get(sid)
+	if err != nil || st.State != journal.Succeeded || len(st.Attempts) == 0 {
+		return
+	}
+	if _, err := g.eng.Get(reversible.InverseID(p.ID, n)); err == nil {
+		return // already unstaged
+	}
+	in := reversible.Inverse(p, f, n, lastEvidence(st))
+	g.mu.Lock()
+	g.derived[in.ID] = true
+	own := g.own
+	g.mu.Unlock()
+	if st := g.runDerived(in); st.State != journal.Succeeded && own != nil {
+		_ = own.Inform(fmt.Sprintf("%s did not run, but its draft or staged copy could not be removed, so it was left as is.", clip(hold)))
+	}
+}
+
+// runDerived journals and runs a stage or inverse intent, which stays
+// allowed only while it runs.
+func (g *Gate) runDerived(in journal.Intent) journal.Status {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	defer func() {
+		g.mu.Lock()
+		delete(g.derived, in.ID)
+		g.mu.Unlock()
+	}()
+	st, err := g.eng.Submit(in)
+	if err == nil && st.State == journal.Pending {
+		st, err = g.eng.Authorize(ctx, in.ID)
+	}
+	if err == nil && st.State == journal.Authorized {
+		st, err = g.eng.Dispatch(ctx, in.ID)
+	}
+	if err != nil {
+		g.cfg.Logf("grants: %s: %v", in.ID, err)
+	}
+	return st
 }
 
 // isSetting reports a pending change pipeline or loop setting intent: one
@@ -1173,11 +1879,42 @@ func (g *Gate) settle(id string) {
 		delete(g.failed, id)
 		own := g.own
 		g.mu.Unlock()
+		if d.hold != "" {
+			if st.State == journal.Authorized || st.State == journal.InFlight {
+				// STOP held it after the release: settle its staged copy
+				// when it ends, whoever dispatches it (L3 on #76).
+				g.mu.Lock()
+				g.after[id] = afterRef{hold: d.hold, n: d.attempt}
+				g.mu.Unlock()
+			} else {
+				g.afterHold(st, d.hold, d.attempt)
+			}
+		}
+		if st.Intent.Origin == reversible.Origin && st.State != journal.Pending && st.State != journal.Authorized {
+			g.mu.Lock()
+			delete(g.derived, id)
+			g.mu.Unlock()
+		}
 		if g.cfg.Changes != nil && changeAction(st.Intent.Action) && st.Intent.Account == journal.BrokerAccount &&
 			(st.State == journal.Denied || st.State == journal.Succeeded || st.State == journal.NotApplied) {
 			// Only the owner's NO is a decline; a refusal at the recheck
 			// (stale approval, changed state) is not (change C7).
 			g.cfg.Changes.Decided(ctx, st.Intent, !d.approved && d.why == "owner")
+		}
+		switch v := (pending{ownerVerdict(d, st), d.req}); {
+		case v.v == "" || g.cfg.Outcome == nil:
+		case st.State == journal.Authorized || st.State == journal.InFlight:
+			// STOP, a fence, or a slow send: the acceptance waits for
+			// the send to end (endHeld, from Dispatch or Tick).
+			g.mu.Lock()
+			if len(g.sending) < maxReported {
+				g.sending[id] = v
+			} else {
+				g.cfg.Logf("grants: owner verdict not reported: too many effects unsent")
+			}
+			g.mu.Unlock()
+		default:
+			g.reportSent(v, st)
 		}
 		if st.State == journal.Succeeded && st.Intent.Executor == ExecutorName && own != nil && len(st.Attempts) > 0 {
 			if gid := st.Attempts[len(st.Attempts)-1].Evidence; gid != "" {
@@ -1187,19 +1924,170 @@ func (g *Gate) settle(id string) {
 	}()
 }
 
+// The reasons Tick releases an auto-reply with: its undo window passed, on
+// time or not (owner Queued.Late).
+const (
+	whyReleased     = "undo window passed"
+	whyReleasedLate = "undo window passed late"
+)
+
+// OwnerVerdict is the owner's final verdict on an agent's effect.
+type OwnerVerdict string
+
+const (
+	// OwnerAccepted: the owner said YES, and for a held effect let its
+	// undo window pass.
+	OwnerAccepted OwnerVerdict = "accepted"
+	// OwnerAcceptedImplicitly: a pre-allowed auto-reply (ADP-11) the
+	// owner was shown and let go without answering (potency PK2).
+	OwnerAcceptedImplicitly OwnerVerdict = "accepted-implicitly"
+	// OwnerDeclined: the owner said NO.
+	OwnerDeclined OwnerVerdict = "declined"
+	// OwnerUndone: the owner said UNDO inside the undo window.
+	OwnerUndone OwnerVerdict = "undone"
+)
+
+// OwnerOutcome is an agent effect and the owner's verdict on it.
+type OwnerOutcome struct {
+	Intent  journal.Intent
+	Verdict OwnerVerdict
+}
+
+// maxReported bounds the intents reportOnce remembers; the harvester
+// itself keeps only the first verdict on an intent (loops L6).
+const maxReported = 4096
+
+// reportOnce reports whether intent id's verdict is not yet reported, and
+// marks it reported (security A1 on PW3).
+func (g *Gate) reportOnce(id string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.reported[id] {
+		return false
+	}
+	g.reported[id] = true
+	g.reportedQ = append(g.reportedQ, id)
+	if len(g.reportedQ) > maxReported {
+		delete(g.reported, g.reportedQ[0])
+		g.reportedQ = g.reportedQ[1:]
+	}
+	return true
+}
+
+// reportSent reports verdict p on st once it is final. An acceptance
+// counts only once the effect was sent (or may have been); a failed send
+// or a changed draft (not_applied) is not the owner's verdict. An implicit
+// acceptance waits a further LateRelease for a late UNDO (reportImplicit).
+func (g *Gate) reportSent(p pending, st journal.Status) {
+	v := p.v
+	if v == "" || g.cfg.Outcome == nil {
+		return
+	}
+	if (v == OwnerAccepted || v == OwnerAcceptedImplicitly) && st.State != journal.Succeeded && st.State != journal.OutcomeUnknown {
+		return
+	}
+	if v == OwnerAcceptedImplicitly {
+		g.mu.Lock()
+		if len(g.implicit) < maxReported {
+			g.implicit = append(g.implicit, heldImplicit{in: st.Intent, req: p.req, due: g.cfg.Now().Add(owner.LateRelease)})
+		} else {
+			g.cfg.Logf("grants: owner verdict not reported: too many implicit acceptances waiting")
+		}
+		g.mu.Unlock()
+		return
+	}
+	if g.reportOnce(st.Intent.ID) {
+		g.report(OwnerOutcome{Intent: st.Intent, Verdict: v})
+	}
+}
+
+// reportImplicit reports the implicit acceptances whose grace has passed,
+// except one the owner texted UNDO for after its release: that reply was
+// not let go, it was too late to stop (L3 MUST-4 on #109).
+func (g *Gate) reportImplicit(own Owner) {
+	now := g.cfg.Now()
+	g.mu.Lock()
+	var due []heldImplicit
+	keep := g.implicit[:0]
+	for _, h := range g.implicit {
+		if now.Before(h.due) {
+			keep = append(keep, h)
+		} else {
+			due = append(due, h)
+		}
+	}
+	g.implicit = keep
+	g.mu.Unlock()
+	for _, h := range due {
+		if own.UndoneAfterRelease(h.req) {
+			continue
+		}
+		if g.reportOnce(h.in.ID) {
+			g.report(OwnerOutcome{Intent: h.in, Verdict: OwnerAcceptedImplicitly})
+		}
+	}
+}
+
+// report calls Outcome outside the gate's lock, after the journal has the
+// final state; a panic in it is logged, never the owner's answer's
+// failure (security A2 on PW3).
+func (g *Gate) report(o OwnerOutcome) {
+	defer func() {
+		if recover() != nil {
+			g.cfg.Logf("grants: owner verdict hook failed")
+		}
+	}()
+	g.cfg.Outcome(o)
+}
+
+// ownerVerdict is the owner's verdict d settled st with, or "" when it is
+// not one: an expiry, a restart, a recheck's refusal, a draft changed
+// after the YES or a failed send (not_applied: no correction text is
+// known, and the content was never seen sent), or an intent that is not
+// a guest's effect. An approval STOP holds is still the owner's verdict,
+// reported only once its send ends (reportSent).
+func ownerVerdict(d decision, st journal.Status) OwnerVerdict {
+	if !d.asked || d.late || !strings.HasPrefix(st.Intent.Origin, "guest:") || st.Intent.Account == journal.BrokerAccount {
+		return ""
+	}
+	switch {
+	case d.approved && (st.State == journal.Authorized || st.State == journal.InFlight ||
+		st.State == journal.Succeeded || st.State == journal.OutcomeUnknown):
+		if d.implicit {
+			return OwnerAcceptedImplicitly
+		}
+		return OwnerAccepted
+	case !d.approved && st.State == journal.Denied && d.why == "owner":
+		return OwnerDeclined
+	case !d.approved && st.State == journal.Denied && d.why == "undo":
+		return OwnerUndone
+	}
+	return ""
+}
+
 // Tick sends batched requests and releases auto-replies whose undo window
 // has passed (ADP-11). The owner channel holds them while STOPped.
 func (g *Gate) Tick() {
 	g.reissueDue()
 	g.flushDue()
+	g.endHeld()
 	g.mu.Lock()
 	own := g.own
 	g.mu.Unlock()
 	if own == nil {
 		return
 	}
+	g.reportImplicit(own)
+	now := g.cfg.Now()
 	for _, q := range own.DueAutoReplies() {
-		g.Decide(owner.Decision{Request: q.ID, Item: 1, Ref: q.Reply.Ref, Approved: true, Why: "undo window passed"})
+		why := whyReleased
+		// Silence in quiet hours, when the owner asked not to be reached,
+		// is not acceptance either (security F1 on #109).
+		quiet := g.cfg.Quiet != nil && (g.cfg.Quiet(q.Alerted) || g.cfg.Quiet(now))
+		if q.Late || quiet {
+			why = whyReleasedLate
+		}
+		g.Decide(owner.Decision{Request: q.ID, Item: 1, Ref: q.Reply.Ref, Approved: true, Why: why})
 	}
 }
 

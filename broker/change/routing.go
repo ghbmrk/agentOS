@@ -5,14 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 
-	"github.com/ghbmrk/agentos/broker/route"
+	"github.com/ghbmrk/agentos/broker/routerule"
 )
 
 // Router is the part of *route.Router the pipeline drives (ADP-4).
 type Router interface {
-	Rule() route.Rule
-	SetRule(route.Rule) error
-	Candidate() route.Rule
+	Rule() routerule.Rule
+	SetRule(routerule.Rule) error
+	Candidate() routerule.Rule
 }
 
 // RoutingTarget applies routing/rule.json to the model router. The router
@@ -29,7 +29,7 @@ func (t RoutingTarget) Apply(files Tree) error {
 	if !ok || len(files) != 1 {
 		return errors.New("change: routing needs exactly " + RoutingPath)
 	}
-	var r route.Rule
+	var r routerule.Rule
 	if err := json.Unmarshal(b, &r); err != nil {
 		return err
 	}
@@ -38,9 +38,14 @@ func (t RoutingTarget) Apply(files Tree) error {
 
 // ProposeRouting turns the router's measured proposal into a candidate and
 // runs it through the pipeline (ADP-4, CAP-9). It returns ok=false when the
-// proposal equals the active rule.
+// proposal equals the active rule, or is empty: a router with no rule
+// proposes nothing.
 func (p *Pipeline) ProposeRouting(ctx context.Context, r Router) (Report, bool, error) {
-	next := canonicalJSON(r.Candidate())
+	cand := r.Candidate()
+	if len(cand) == 0 {
+		return Report{}, false, nil
+	}
+	next := canonicalJSON(cand)
 	p.mu.Lock()
 	same := string(p.st.Active[RoutingPath]) == string(next)
 	p.mu.Unlock()

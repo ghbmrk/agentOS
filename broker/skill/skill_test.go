@@ -22,8 +22,8 @@ func slot(n string) Node { return Node{Slot: n} }
 
 // report is a two-step skill: draft a report to one address, then send it.
 func report() *Skill {
-	return &Skill{
-		Version: Version, Kind: KindSkill, ID: "k0123456789ab", Runs: 3,
+	sk := &Skill{
+		Version: Version, Kind: KindSkill, Runs: 3,
 		Slots: []Slot{{Name: "to", Type: Email, Max: 64}, {Name: "week", Type: Number, Max: 1}},
 		Steps: []Step{
 			{Account: "mail", Action: "draft.create", Params: map[string]Node{
@@ -34,6 +34,8 @@ func report() *Skill {
 			{Account: "mail", Action: "message.send", Recipients: []Node{slot("to")}},
 		},
 	}
+	sk.ID = "k" + sk.Shape()
+	return sk
 }
 
 type fakeFX struct {
@@ -82,7 +84,7 @@ func TestRunAllSteps(t *testing.T) {
 		t.Fatalf("%d requests", len(fx.got))
 	}
 	e := fx.got[0]
-	if e.RequestID != "skill-k0123456789ab-r1-1" || e.Account != "mail" || e.Action != "draft.create" {
+	if e.RequestID != "skill-"+sk.ID+"-r1-1" || e.Account != "mail" || e.Action != "draft.create" {
 		t.Fatalf("step 1 %+v", e)
 	}
 	if e.Params["subject"] != "Weekly report" || e.Params["to"] != "ann@example.test" {
@@ -234,6 +236,12 @@ func TestServerOffersAndRunsSkills(t *testing.T) {
 	bad.Steps[0].Account = "broker"
 	os.WriteFile(filepath.Join(dir, SkillsNS, "k111111111111.json"), bad.Encode(), 0o644)
 	os.WriteFile(filepath.Join(dir, SkillsNS, "k222222222222.json"), sk.Encode(), 0o644) // name is not its ID
+	// Another task's steps under their own ID (P3-6e): the name says one
+	// task, the steps another, so it is not offered.
+	other := report()
+	other.Steps[1].Action = "message.archive"
+	other.ID = "k" + strings.Repeat("3", 12)
+	os.WriteFile(filepath.Join(dir, other.Path()), other.Encode(), 0o644)
 
 	b := &broker{}
 	bs := httptest.NewServer(b)

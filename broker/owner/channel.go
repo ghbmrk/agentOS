@@ -55,8 +55,8 @@ type Config struct {
 	// Agent receives task chat; nil when no agent is running.
 	Agent    control.Agent
 	Machines func() string
-	// Notice is STATUS's further sentence (control.Handler.Notice).
-	Notice  func() string
+	// Notes are STATUS's exception lines (control.Handler.Notes).
+	Notes   []func() string
 	Secrets Secrets
 	// Verifier, when set, checks code-generator codes in place of
 	// Secrets.TOTPSeed, which is then ignored (egress K7).
@@ -91,6 +91,20 @@ type Config struct {
 	// calls it once, with nil when there are none, after the restart text.
 	// Nil: they are cancelled.
 	Reissue func([]Carried)
+	// Settings answers a whole message that is a box setting (the loop
+	// scheduler's Text), before it would go to the agent; HelpExtra is
+	// appended to HELP (control.Handler). Nil: no settings.
+	Settings  func(ctx context.Context, msg string, unlocked bool) (reply string, ok bool)
+	HelpExtra string
+	// Narrows reports a setting whose worst case is a pause (LOOPS OFF,
+	// a lower budget). In a locked session it runs at once, like a pause
+	// word (CH-11), rather than being held for the unlock. It must not
+	// call back into the channel.
+	Narrows func(msg string) bool
+	// Answer takes an owner reply to an agent's question (question.Book
+	// .Answer) in an unlocked session, with any code stripped, before it
+	// would reach the agent (control.Handler.Answer, W9). Nil: none.
+	Answer func(ctx context.Context, msg string) (reply string, ok bool)
 }
 
 // Carried is an item of a request open at the last shutdown, handed to
@@ -111,8 +125,14 @@ type Decision struct {
 	Approved bool
 	// Why: "owner", "expired", "void" (wrong codes), "not chosen" (left
 	// out of a partial YES), "restart" (dropped by a reboot), or "undo"
-	// (an auto-reply the owner cancelled).
+	// (an auto-reply or held effect the owner cancelled).
 	Why string
+	// Hold, on an approval, is the UNDO ID the effect is held under until
+	// Until (REV-3, CH-16): the caller keeps it from running until
+	// DueAutoReplies releases it, and a later decision on Hold (Why "undo"
+	// or "restart") cancels it.
+	Hold  string
+	Until time.Time
 }
 
 // Channel is the owner channel. It implements control.Auth.
@@ -120,11 +140,17 @@ type Channel struct {
 	cfg  Config
 	ctrl *control.Handler
 
-	mu          sync.Mutex
-	codes       codes
-	open        map[string]*request
-	queued      map[string]*Queued
-	resume      *resumeCode
+	mu       sync.Mutex
+	codes    codes
+	open     map[string]*request
+	queued   map[string]*Queued
+	released map[string]time.Time // queued IDs released, for UNDO's reply
+	lateUndo map[string]bool      // released IDs the owner texted UNDO for
+	resume   *resumeCode
+	// lineFailed is when the box's line last failed to send (unix nanos
+	// of cfg.Now), so a queued reply's silence is not read as the
+	// owner's over a line that was down (security B1(a) on PW3).
+	lineFailed  atomic.Int64
 	resumeTexts []time.Time
 	held        *heldMsg
 	limited     []time.Time
@@ -204,11 +230,24 @@ func New(cfg Config) (*Channel, error) {
 		cfg:    cfg,
 		codes:  codes{sec: cfg.Secrets, verify: cfg.Verifier, st: st, store: cfg.Store, rand: cfg.Rand},
 		open:   map[string]*request{},
-		queued: map[string]*Queued{},
-		boot:   &bootReport{pending: st.Pending, queued: st.Queued},
+		queued: map[string]*Queued{}, released: map[string]time.Time{}, lateUndo: map[string]bool{},
+		boot: &bootReport{pending: st.Pending, queued: st.Queued},
 	}
-	c.ctrl = &control.Handler{Engine: cfg.Engine, Auth: c, Agent: cfg.Agent, Machines: cfg.Machines, Notice: cfg.Notice, Now: cfg.Now}
+	if cfg.Modem != nil {
+		c.cfg.Modem = watchedLine{Modem: cfg.Modem, c: c}
+	}
+	c.ctrl = &control.Handler{Engine: cfg.Engine, Auth: c, Agent: cfg.Agent, Machines: cfg.Machines, Notes: cfg.Notes, Now: cfg.Now,
+		Settings: cfg.Settings, HelpExtra: cfg.HelpExtra, Answer: cfg.Answer}
 	return c, nil
+}
+
+// ApprovalsOpen reports whether an approval request is open, so an
+// untagged reply is never taken as a question's answer while the owner
+// may mean the request (question Config.ApprovalsOpen, W9).
+func (c *Channel) ApprovalsOpen() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.open) > 0
 }
 
 // IsOwner implements control.Auth (CH-3).
@@ -420,6 +459,9 @@ func (c *Channel) routeLocked(text string, now time.Time, decided *[]Decision) r
 		control.WordMore, control.WordResume, control.WordUnclear:
 		return route{delegate: text, run: true, limited: !unlocked}
 	}
+	if !unlocked && c.cfg.Narrows != nil && c.cfg.Narrows(text) {
+		return route{delegate: text, run: true, limited: true}
+	}
 	rest, code := splitCode(text)
 	if unlocked {
 		return c.unlockedChatLocked(text, rest, code, now)
@@ -561,7 +603,7 @@ func (c *Channel) challengeLocked(text string, now time.Time) (route, bool) {
 			case err != nil:
 				return route{replies: []string{msg + " RESUME failed to record. Still stopped."}}, true
 			}
-			msg += " Resumed."
+			msg += " Resumed." + c.rewindowLocked(now)
 		}
 		return route{replies: []string{msg}}, true
 	}
@@ -769,7 +811,14 @@ func (c *Channel) resumeLocked(r reply, now time.Time) (out []string, accepted b
 			n++
 		}
 	}
-	return []string{fmt.Sprintf("Resumed. %d held actions may now run.", n)}, true
+	text := "Resumed."
+	switch {
+	case n == 1:
+		text = "Resumed. 1 stopped action may now run."
+	case n > 1:
+		text = fmt.Sprintf("Resumed. %d stopped actions may now run.", n)
+	}
+	return []string{text + c.rewindowLocked(now)}, true
 }
 
 // checkLocked checks a reply code against a texted code, or against the

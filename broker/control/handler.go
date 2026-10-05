@@ -57,10 +57,11 @@ type Handler struct {
 	Agent  Agent // nil: no agent running
 	// Machines, if set, returns STATUS's line about agent machines.
 	Machines func() string
-	// Notice, if set and not empty, is a further STATUS sentence: an agent
-	// that still holds a record the owner deleted (recall W10).
-	Notice func() string
-	Now    func() time.Time
+	// Notes are STATUS's exception lines, in order: the time check
+	// (clock.Status.Line; clock K7, UX-68-3), spare-time work not running
+	// (W3-off). Each keeps its first line, plain; "" adds nothing.
+	Notes []func() string
+	Now   func() time.Time
 	// NewCode returns a fresh texted code; nil means 6 random digits.
 	NewCode func() string
 	// Settings, if set, answers an owner text that is a whole-message
@@ -75,6 +76,11 @@ type Handler struct {
 	Settings func(ctx context.Context, msg string, unlocked bool) (reply string, ok bool)
 	// HelpExtra, if set, is appended to HELP's reply (loops.HelpLine).
 	HelpExtra string
+	// Answer, if set, takes an owner reply to an agent's question ("Q104
+	// yes", question.Book.Answer) in an unlocked session, after Settings
+	// and before the agent: ok true answers it with reply and the agent
+	// never sees it. A PUBLIC task never reaches it (W9).
+	Answer func(ctx context.Context, msg string) (reply string, ok bool)
 
 	mu     sync.Mutex
 	resume *pendingCode
@@ -124,14 +130,19 @@ func (h *Handler) Handle(ctx context.Context, from, msg string) []string {
 		r = "Not understood, and not sent to your agent. Reply HELP for commands."
 	default:
 		var out []string
-		if StopNearMiss(cmd.Text) && h.takeHint() {
+		unlocked := h.Auth.SessionUnlocked(h.now())
+		reply, isSetting := h.setting(ctx, cmd, unlocked)
+		// A setting is not a near-miss (STOP SHARING, UX-90-1): it gets
+		// only its own reply and leaves the hourly hint unspent.
+		if !isSetting && StopNearMiss(cmd.Text) && h.takeHint() {
 			out = append(out, stopHint)
 		}
-		unlocked := h.Auth.SessionUnlocked(h.now())
-		if reply, ok := h.setting(ctx, cmd, unlocked); ok {
+		if isSetting {
 			out = append(out, reply)
 		} else if !unlocked {
 			out = append(out, unlockText)
+		} else if reply, ok := h.answer(ctx, cmd); ok {
+			out = append(out, reply)
 		} else if !h.deliver(ctx, cmd) {
 			out = append(out, "Your agent is not running. STOP, RESUME, STATUS and HELP still work.")
 		}
@@ -171,6 +182,14 @@ func (h *Handler) setting(ctx context.Context, cmd Command, unlocked bool) (stri
 		return "", false
 	}
 	return h.Settings(ctx, cmd.Text, unlocked)
+}
+
+// answer tries the Answer hook on task chat that is not PUBLIC.
+func (h *Handler) answer(ctx context.Context, cmd Command) (string, bool) {
+	if h.Answer == nil || cmd.Public {
+		return "", false
+	}
+	return h.Answer(ctx, cmd.Text)
 }
 
 func (h *Handler) deliver(ctx context.Context, cmd Command) bool {
@@ -298,9 +317,10 @@ func (h *Handler) status() string {
 	if h.Machines != nil {
 		b.WriteString(" " + plainLine(h.Machines(), 80))
 	}
-	if h.Notice != nil {
-		if n := h.Notice(); n != "" {
-			b.WriteString(" " + plainLine(n, 60))
+	for _, note := range h.Notes {
+		l, _, _ := strings.Cut(note(), "\n")
+		if l = plainLine(l, 100); l != "" {
+			b.WriteString(" " + l)
 		}
 	}
 	return b.String()

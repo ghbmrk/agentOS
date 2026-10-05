@@ -3,6 +3,7 @@ package update
 // REQ: OSS-8, UPD-8, CHG-3, OSS-4
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -650,5 +651,19 @@ func TestOSS4OnlyCanonicalAttestationsParse(t *testing.T) {
 		if v.IndependentPasses([][]byte{b}, nil) != 0 {
 			t.Errorf("%s: counted", name)
 		}
+	}
+}
+
+// TestOSS4ParseCapsAttestationSize (review K-PB1b on #73): an attestation
+// larger than MaxAttestationSize is refused before it is decoded.
+func TestOSS4ParseCapsAttestationSize(t *testing.T) {
+	_, v := securityFix(t)
+	good := pass(t, newKey(t), v)
+	if len(good) > MaxAttestationSize {
+		t.Fatalf("a plain attestation is %d bytes", len(good))
+	}
+	big := append(append([]byte{}, good...), bytes.Repeat([]byte(" "), MaxAttestationSize)...)
+	if _, _, err := ParseAttestation(big); err == nil || !strings.Contains(err.Error(), "bytes") {
+		t.Fatalf("oversize attestation: %v", err)
 	}
 }

@@ -86,6 +86,10 @@ type Server struct {
 	vaultPend *vaultPending
 	// vaultKept: the last unlock kept this PC trusted.
 	vaultKept bool
+	// vaultOpener is the cookie key of the phone that confirmed the last
+	// unlock: only it, or a signed-in phone, is told the passphrase change
+	// did not finish (M1 on #93).
+	vaultOpener string
 	// scanning admits one photo upload at a time.
 	scanning chan struct{}
 	// vaultTries and vaultAll are the unlock attempts in the last hour,
@@ -347,8 +351,10 @@ type statusView struct {
 	Refresh string
 }
 
-func (s *Server) status(w http.ResponseWriter, r *http.Request) {
-	v := statusView{Progress: s.cfg.Hooks.Progress(), SignedIn: s.isSignedIn(r), Done: s.setup.done(), Msg: msgText(r)}
+func (s *Server) status(w http.ResponseWriter, r *http.Request) { s.statusPage(w, r, msgText(r)) }
+
+func (s *Server) statusPage(w http.ResponseWriter, r *http.Request, msg string) {
+	v := statusView{Progress: s.cfg.Hooks.Progress(), SignedIn: s.isSignedIn(r), Done: s.setup.done(), Msg: msg}
 	if v.Progress.Phase != "ready" {
 		v.Refresh = "10"
 	}
@@ -462,11 +468,14 @@ func (s *Server) resume(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	msg := "resumed"
-	if _, err := o.LocalResume(); err != nil {
-		msg = "resumefailed"
+	text, err := o.LocalResume()
+	if err != nil {
+		http.Redirect(w, r, "/status?m=resumefailed", http.StatusSeeOther)
+		return
 	}
-	http.Redirect(w, r, "/status?m="+msg, http.StatusSeeOther)
+	// The owner channel's text names each held action's new time and UNDO
+	// ID (CH-16), so the page shows it rather than a fixed line (L3 on #76).
+	s.statusPage(w, r, text)
 }
 
 func (s *Server) signout(w http.ResponseWriter, r *http.Request) {
@@ -501,7 +510,6 @@ func (s *Server) contact(w http.ResponseWriter, r *http.Request) {
 var msgs = map[string]string{
 	"stopped":      "Stopped. Nothing new starts until you resume.",
 	"stopfailed":   "STOP failed to record. Nothing new starts now; press STOP again.",
-	"resumed":      "Resumed. Held actions may now run.",
 	"resumefailed": "RESUME failed to record. Still stopped.",
 }
 

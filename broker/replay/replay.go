@@ -76,6 +76,9 @@ type Machines interface {
 	CreateSeeded(ctx context.Context, id string, s vm.Spec, seed map[string][]byte) (vm.Machine, error)
 	Destroy(ctx context.Context, id string) error
 	Machines() []string
+	// Get reports a machine's state, so a run sees admission preempt its
+	// machine (PE3).
+	Get(id string) (vm.Machine, error)
 }
 
 // Recordings supplies the effects recorded for a probe: the journaled
@@ -99,16 +102,22 @@ type Config struct {
 	Spec vm.Spec
 	// Dir holds the replay machines' socket directories (0700).
 	Dir string
-	// Model returns model access for a run on tree t. Only t's routing
-	// rule (the order among routes the owner granted) comes from the tree:
-	// grants, labels, and which providers may see private data are broker
-	// configuration (ASSUMPTIONS R2, K1). Nil serves no model access, and
-	// then routing changes are not evaluated. Meter is required with it: model calls are never unmetered.
-	Model func(t change.Tree) http.Handler
+	// Model returns model access for replay machine id's run on tree t.
+	// Only t's routing rule (the order among routes the owner granted)
+	// comes from the tree: grants, labels, and which providers may see
+	// private data are broker configuration (ASSUMPTIONS R2, K1). Replay
+	// serves it only to that machine's guest and never calls it itself
+	// (R10). Nil serves no model access, and then routing changes are not
+	// evaluated. Meter is required with it: model calls are never
+	// unmetered.
+	Model func(id string, t change.Tree) http.Handler
 	Meter *meter.Meter
 	// Timeout bounds one run, from creating the machine to its reply.
 	// Default 10 minutes.
 	Timeout time.Duration
+	// PreemptPoll is how often a run checks whether admission preempted
+	// its machine. Default 500 ms.
+	PreemptPoll time.Duration
 	// Logf reports broker-side faults. Nil is silent.
 	Logf func(format string, args ...any)
 }
@@ -124,6 +133,17 @@ var (
 	// It wraps change.ErrNotEvaluated, which the pipeline counts as not
 	// evaluated (never a pass or a fail).
 	ErrNotEvaluated = fmt.Errorf("replay: changes the image or configuration: %w", change.ErrNotEvaluated)
+	// ErrOverPriceCeiling: the tree routes to a model priced above the
+	// active rule's dearest route, or to one with no known price, so the
+	// vault process refused its model calls (security C1 on #62). It wraps
+	// change.ErrNotEvaluated: never a pass or a fail.
+	ErrOverPriceCeiling = fmt.Errorf("replay: routes above the active price ceiling: %w", change.ErrNotEvaluated)
+	// ErrPreempted: admission refused the replay machine (memory pressure,
+	// no room, or admission withdrawn before it started) or preempted it
+	// mid-run for higher-class work (RES-1). It wraps
+	// change.ErrInterrupted, so the pipeline gives no verdict and keeps
+	// what finished (change C15, PE3); it is never a fail.
+	ErrPreempted = fmt.Errorf("replay: machine refused or preempted by admission: %w", change.ErrInterrupted)
 )
 
 // destroyTimeout bounds destroying a replay machine after its run.
@@ -147,6 +167,9 @@ func New(cfg Config) (*Evaluator, error) {
 	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 10 * time.Minute
+	}
+	if cfg.PreemptPoll <= 0 {
+		cfg.PreemptPoll = 500 * time.Millisecond
 	}
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
@@ -225,7 +248,7 @@ func (e *Evaluator) Run(ctx context.Context, t change.Tree, c change.Probe) ([]b
 	r := &run{id: Prefix + hex.EncodeToString(b[:]), fx: newRecorded(recs), out: make(chan []byte, 1), fail: make(chan error, 1)}
 	r.fx.onMiss = r.failed
 	if e.cfg.Model != nil {
-		r.model = e.cfg.Model(t)
+		r.model = e.cfg.Model(r.id, t)
 	}
 	e.mu.Lock()
 	e.runs[r.id] = r
@@ -239,6 +262,9 @@ func (e *Evaluator) Run(ctx context.Context, t change.Tree, c change.Probe) ([]b
 	ctx, cancel := context.WithTimeout(ctx, e.cfg.Timeout)
 	defer cancel()
 	if _, err := e.cfg.Machines.CreateSeeded(ctx, r.id, e.cfg.Spec, seed(t)); err != nil {
+		if refused(err) {
+			return nil, fmt.Errorf("replay: start %s: %w: %v", c.ID, ErrPreempted, err)
+		}
 		return nil, fmt.Errorf("replay: start %s: %w", c.ID, err)
 	}
 	defer func() {
@@ -255,14 +281,37 @@ func (e *Evaluator) Run(ctx context.Context, t change.Tree, c change.Probe) ([]b
 	if err != nil {
 		return nil, fmt.Errorf("replay: deliver %s: %w", c.ID, err)
 	}
-	select {
-	case out := <-r.out:
-		return out, nil
-	case err := <-r.fail:
-		return nil, fmt.Errorf("replay %s: %w", c.ID, err)
-	case <-ctx.Done():
-		return nil, fmt.Errorf("replay %s: %w: %v", c.ID, ErrNoReply, ctx.Err())
+	poll := time.NewTicker(e.cfg.PreemptPoll)
+	defer poll.Stop()
+	for {
+		select {
+		case <-poll.C:
+			if m, err := e.cfg.Machines.Get(r.id); err == nil && m.State == vm.Preempted {
+				return nil, fmt.Errorf("replay %s: %w", c.ID, ErrPreempted)
+			}
+			continue
+		case out := <-r.out:
+			// A failure recorded before the reply arrived wins: a run that
+			// asked for an unrecorded effect or a route over the price ceiling
+			// is never a pass because the guest replied anyway.
+			select {
+			case err := <-r.fail:
+				return nil, fmt.Errorf("replay %s: %w", c.ID, err)
+			default:
+			}
+			return out, nil
+		case err := <-r.fail:
+			return nil, fmt.Errorf("replay %s: %w", c.ID, err)
+		case <-ctx.Done():
+			return nil, fmt.Errorf("replay %s: %w: %v", c.ID, ErrNoReply, ctx.Err())
+		}
 	}
+}
+
+// refused reports a start error that is admission's, not the machine's:
+// the box is busy now, which says nothing about the tree under test.
+func refused(err error) bool {
+	return errors.Is(err, admission.ErrPressure) || errors.Is(err, admission.ErrNoRoom) || errors.Is(err, vm.ErrRevoked)
 }
 
 func inNamespace(t change.Tree, ns string) change.Tree {
@@ -302,6 +351,16 @@ func seed(t change.Tree) map[string][]byte {
 	return out
 }
 
+// OverPriceCeiling records that the vault process refused a model call of
+// replay machine id's run as over the evaluation price ceiling
+// (modelroute.ReasonEvalCeiling): the run ends as ErrOverPriceCeiling. The
+// broker calls it from the evaluation route's denial callback.
+func (e *Evaluator) OverPriceCeiling(id string) {
+	if r := e.get(id); r != nil {
+		r.failed(ErrOverPriceCeiling)
+	}
+}
+
 func (e *Evaluator) get(id string) *run {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -332,6 +391,16 @@ func (e *Evaluator) Close(id string)                { e.plane.Close(id) }
 
 // Shutdown stops the replay plane.
 func (e *Evaluator) Shutdown() { e.plane.Shutdown() }
+
+// RuleModel builds Config.Model from a forwarder that carries a routing
+// rule to the model router for a replay machine (modelroute.Evaluation):
+// a run on tree t forwards t's routing rule and nothing else of the tree,
+// and a tree with none forwards no rule, so the active one applies.
+func RuleModel(fwd func(id string, rule []byte) http.Handler) func(id string, t change.Tree) http.Handler {
+	return func(id string, t change.Tree) http.Handler {
+		return fwd(id, t[change.RoutingPath])
+	}
+}
 
 // Services routes each machine to its guest services: replay machines (ID
 // starting with Prefix) to the evaluator, every other machine to Live. A

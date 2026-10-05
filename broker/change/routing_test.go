@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/route"
+	"github.com/ghbmrk/agentos/broker/routerule"
 )
 
 // newRouter builds a real router whose openai route always fails over
@@ -188,5 +189,65 @@ func TestDroppedLocalFallbackSaysSo(t *testing.T) {
 	}
 	if d := e.p.Digest(); len(d) != 1 || !strings.HasPrefix(d[0], "Changed AI routing: mail tasks no longer fall back to the local model.") {
 		t.Fatalf("%q", d)
+	}
+}
+
+// refusingRouting is agentosd's routing target until agentos-egress
+// follows adoptions (cmd/agentosd heldRouting): empty, and refusing any
+// non-empty tree.
+type refusingRouting struct{}
+
+func (refusingRouting) Current() (Tree, error) { return Tree{}, nil }
+func (refusingRouting) Apply(t Tree) error {
+	if len(t) != 0 {
+		return errRefused
+	}
+	return nil
+}
+
+var errRefused = errorString("routing changes wait until agentos-egress follows them")
+
+type errorString string
+
+func (e errorString) Error() string { return string(e) }
+
+// L3 S2 on #90: a routing candidate that qualifies is not adopted when the
+// routing target refuses it, and the active tree is unchanged.
+func TestRoutingAdoptionRefusedByTheTargetLeavesActiveUnchanged(t *testing.T) {
+	r := newRouter(t)
+	e := newEnv(t, func(c *Config) {
+		c.Targets = map[string]Target{"routing": refusingRouting{}}
+		c.RouteGranted = func(p string) bool { return p == "openai" || p == "anthropic" }
+	})
+	ruleCase(e, reordered, 12)
+	callRouter(t, r, 3)
+	before := e.p.Files("routing")
+	rep, changed, _ := e.p.ProposeRouting(bg, r)
+	if !changed {
+		t.Fatal("no routing candidate: the test proves nothing")
+	}
+	if rep.State == StateAdopted {
+		t.Fatalf("adopted through a refusing target: %+v", rep)
+	}
+	if after := e.p.Files("routing"); len(after) != len(before) || len(after) != 0 {
+		t.Fatalf("active routing changed: %v -> %v", before, after)
+	}
+	if len(e.p.Adoptions()) != 0 {
+		t.Fatalf("adoptions %+v", e.p.Adoptions())
+	}
+}
+
+type emptyRouter struct{}
+
+func (emptyRouter) Rule() routerule.Rule         { return nil }
+func (emptyRouter) SetRule(routerule.Rule) error { return nil }
+func (emptyRouter) Candidate() routerule.Rule    { return nil }
+
+// ADP-4: a router with no proposal (the vault process unreachable, or no
+// rule yet) proposes nothing, even while the active routing tree is empty.
+func TestAnEmptyRoutingProposalIsNoCandidate(t *testing.T) {
+	e := newEnv(t, func(c *Config) { c.Targets = map[string]Target{"routing": refusingRouting{}} })
+	if _, changed, err := e.p.ProposeRouting(bg, emptyRouter{}); changed || err != nil {
+		t.Fatalf("an empty proposal: %v %v", changed, err)
 	}
 }

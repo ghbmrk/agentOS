@@ -20,7 +20,7 @@ import (
 func TestRecallKeyIsVaultHeld(t *testing.T) {
 	r := newFastRig(t, true)
 	run := filepath.Join(t.TempDir(), "run")
-	srvs, err := serve(run, r.c, testRouter(t), os.Getuid(), os.Getuid())
+	srvs, err := serve(run, r.c, testRouter(t), nil, nil, os.Getuid(), os.Getuid())
 	if err != nil {
 		t.Fatal(err)
 	}

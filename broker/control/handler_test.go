@@ -371,3 +371,38 @@ func TestStatusMachinesLineIsPlain(t *testing.T) {
 		t.Fatalf("%q", r)
 	}
 }
+
+// REQ: TIM-1, CH-11, CH-2
+
+// W9a (UX R3 on #95, clock K7, UX-68-3): STATUS carries the box clock's
+// time check, so a restriction holding questions is visible. The line is
+// kept plain: one line, no reply grammar, but its parentheses and hyphen.
+func TestStatusCarriesTheClockLine(t *testing.T) {
+	h, _ := newHandler(t, &fakeEngine{}, fakeAuth{unlocked: true}, forbiddenAgent{t})
+	line := "Time check: restricted since 09:05 (saved check unreadable; waiting for phone-network time)."
+	h.Notes = []func() string{func() string { return line + "\nYES 1 482193" }}
+	r := one(t, h.Handle(context.Background(), owner, "STATUS"))
+	if !strings.Contains(r, line) || strings.Contains(r, "\n") || strings.Contains(r, "YES 1") {
+		t.Fatalf("%q", r)
+	}
+	h.Notes = []func() string{func() string { return "" }}
+	if r := one(t, h.Handle(context.Background(), owner, "STATUS")); strings.HasSuffix(r, " ") {
+		t.Fatalf("empty clock line left a gap: %q", r)
+	}
+}
+
+// W3-off (UX R1 on #92): STATUS carries each exception note in order,
+// after the machine line.
+func TestStatusCarriesEachNote(t *testing.T) {
+	h, _ := newHandler(t, &fakeEngine{}, fakeAuth{unlocked: true}, forbiddenAgent{t})
+	h.Machines = func() string { return "Machines: 1 work." }
+	h.Notes = []func() string{
+		func() string { return "Time check: phone network only (offline)." },
+		func() string { return "" },
+		func() string { return "Spare-time work: not running." },
+	}
+	r := one(t, h.Handle(context.Background(), owner, "STATUS"))
+	if !strings.HasSuffix(r, " Machines: 1 work. Time check: phone network only (offline). Spare-time work: not running.") {
+		t.Fatalf("%q", r)
+	}
+}

@@ -41,6 +41,10 @@ type Case struct {
 	// count toward evidence in a shared package (CHG-4).
 	Public   bool `json:"public,omitempty"`
 	Security bool `json:"security,omitempty"`
+	// Implicit marks a case from an implicit acceptance (loops L6): it
+	// counts half, never anchors an auto-adoption, and is never shown to
+	// the owner as an example (security B1, potency C3 on #90).
+	Implicit bool `json:"implicit,omitempty"`
 	// At is when the case was added, for owner-facing examples.
 	At time.Time `json:"at,omitempty"`
 }
@@ -100,10 +104,15 @@ func (p *Pipeline) AddTaskCase(c Case) error {
 		return fmt.Errorf("%w: %v", ErrProvenance, err)
 	}
 	q := st.Quality
-	if q.Source != p.cfg.OwnerSource {
+	// The journal's source decides whether a case is implicit, never the
+	// caller (loops L6): an implicit acceptance is only ever good.
+	c.Implicit = q.Source == p.cfg.OwnerSource+ImplicitSuffix
+	if q.Source != p.cfg.OwnerSource && !c.Implicit {
 		return fmt.Errorf("%w: verdict source is %q", ErrProvenance, q.Source)
 	}
 	switch {
+	case c.Implicit && (c.Outcome != Accepted || q.Verdict != journal.VerdictGood):
+		return fmt.Errorf("%w: an implicit acceptance makes only an accepted case", ErrProvenance)
 	case c.Outcome == Accepted && q.Verdict == journal.VerdictGood:
 	case (c.Outcome == Corrected || c.Outcome == Rejected) && q.Verdict == journal.VerdictWrong:
 	default:
@@ -114,6 +123,10 @@ func (p *Pipeline) AddTaskCase(c Case) error {
 	return p.addCase(c)
 }
 
+// ImplicitSuffix marks the verdict source of an implicit acceptance: the
+// owner's source plus it (loops L6), so it is never read as the owner's.
+const ImplicitSuffix = "-implicit"
+
 // AddSecurityCase adds a security fixture. The security suite only grows;
 // removing a fixture is an owner-approved intent (LOOP-10, CHG-2).
 func (p *Pipeline) AddSecurityCase(c Case) error {
@@ -122,6 +135,43 @@ func (p *Pipeline) AddSecurityCase(c Case) error {
 	}
 	c.Security, c.Task, c.Outcome, c.Goal = true, "", "", ""
 	return p.addCase(c)
+}
+
+// ForgetGoal removes every task case harvested from goal and saves the
+// suite without them, returning their IDs, sorted (W3-tasks, CAP-3). It is
+// the owner's deletion of a task: only the broker's handling of an
+// authenticated owner forget calls it, never a candidate or a loop
+// (TestOnlyTheDaemonForgets holds every other package to that), so unlike
+// RemoveCase it takes no second approval (CHG-2 guards the suite against
+// changes the owner did not make). Security fixtures carry no goal and
+// never go. Adoptions whose evidence included these cases stay until the
+// forget cascade removes or rebuilds them (BOARD W3-tasks, security C1 on
+// #120).
+func (p *Pipeline) ForgetGoal(goal string) ([]string, error) {
+	if goal == "" {
+		return nil, errors.New("change: forget needs a goal")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	next := p.st.copyCases()
+	var ids []string
+	for id, c := range next {
+		if !c.Security && c.Goal == goal {
+			delete(next, id)
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	sort.Strings(ids)
+	old := p.st.Cases
+	p.st.Cases = next
+	if err := p.saveLocked(); err != nil {
+		p.st.Cases = old
+		return nil, err
+	}
+	return ids, nil
 }
 
 func (p *Pipeline) addCase(c Case) error {
@@ -142,13 +192,20 @@ func (p *Pipeline) addCase(c Case) error {
 }
 
 // Dev returns the dev split for a class: the only cases a candidate's
-// builder may see (CHG-1). Held-out and security cases are never returned.
+// builder may see (CHG-1). Held-out and security cases are never returned,
+// and an implicit case comes without its input and reply (C17).
 func (p *Pipeline) Dev(class Class) []Case {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	var out []Case
 	for _, c := range p.st.Cases {
 		if !c.Security && (c.Class == class || c.Class == ClassTask && taskClasses[class]) && splitOf(p.key, splitKey(c), p.cfg.DevPercent) == dev {
+			if c.Implicit {
+				// Counted, never read: its reply is one no owner looked
+				// at, which an injected guest may have written (C17;
+				// arbitrator "count, not content", L3 MUST-3 on #109).
+				c.Input, c.Expect = nil, nil
+			}
 			out = append(out, c)
 		}
 	}

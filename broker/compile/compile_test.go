@@ -14,6 +14,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/loops"
 	"github.com/ghbmrk/agentos/broker/skill"
 )
 
@@ -624,5 +625,114 @@ func TestClippedAndNullValues(t *testing.T) {
 	}
 	if cs := r.compiler().Candidates(change.Tree{}); len(cs) != 0 {
 		t.Fatalf("clipped values compiled: %+v", cs)
+	}
+}
+
+// CAP-5, LOOP-4: Loop 1 routes repeat hypotheses to the compiler; the
+// candidate writes one skill and deletes only that shape's procedure, the
+// namespace a skill supersedes.
+func TestLoopBuilder(t *testing.T) {
+	r := newRig(t)
+	for i, to := range []string{"ann@example.test", "bo@example.test", "cy@example.test"} {
+		r.accepted(fmt.Sprintf("g%d", i), to, 40+i)
+	}
+	b := loops.BySignal{loops.SignalRepeat: LoopBuilder{C: r.compiler()}}
+	if !b.Handles(loops.SignalRepeat) || b.Handles(loops.SignalFailure) {
+		t.Fatal("routing")
+	}
+	cand, err := b.Build(context.Background(), loops.Brief{Hypothesis: loops.Hypothesis{
+		Signal: loops.SignalRepeat, Class: change.ClassSkill, Evidence: r.eng.List()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cand.Files) != 1 || len(cand.Delete) != 1 || !strings.HasPrefix(cand.Delete[0], "procedures/p") {
+		t.Fatalf("%+v", cand)
+	}
+	for p := range cand.Files {
+		if !strings.HasPrefix(p, "skills/k") {
+			t.Fatalf("wrote %s", p)
+		}
+	}
+	if _, err := b.Build(context.Background(), loops.Brief{Hypothesis: loops.Hypothesis{Signal: loops.SignalRepeat}}); !errors.Is(err, ErrNoSkill) {
+		t.Fatalf("no evidence: %v", err)
+	}
+	if b.Ready(loops.Brief{Hypothesis: loops.Hypothesis{Signal: loops.SignalRepeat}}) {
+		t.Fatal("ready with no evidence")
+	}
+	if !b.Ready(loops.Brief{Hypothesis: loops.Hypothesis{Signal: loops.SignalRepeat, Evidence: r.eng.List()}}) {
+		t.Fatal("not ready with three accepted runs")
+	}
+}
+
+// W3 step 3a (security C-3a-1, C-3a-2): in the box the journal may keep
+// no values: the daemon's redactor stores a mark for every free text, the
+// vault's redactor its placeholder for a secret, and the journal clips
+// long text. Runs holding any of them compile into no skill or procedure,
+// and the loop builder offers no job for them, so nothing is proposed.
+func TestARedactedJournalCompilesNothing(t *testing.T) {
+	redacted := func(s string) bool { return strings.Contains(s, "[redacted]") || strings.Contains(s, "[REDACTED]") }
+	for name, red := range map[string]func(string) string{
+		"daemon mark":       func(string) string { return "[redacted]" },
+		"vault placeholder": func(s string) string { return strings.ReplaceAll(s, "@", "[REDACTED]@") },
+		"clip mark":         func(s string) string { return s + "…[cut 9 bytes, sha256 00]" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := &rig{t: t, now: time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC), dev: map[string]bool{}}
+			eng, err := journal.Open(&journal.MemStore{}, r, map[string]journal.Executor{"task": ok{}},
+				func(s string) string {
+					if s == "" {
+						return ""
+					}
+					return red(s)
+				}, journal.WithClock(func() time.Time { return r.now }))
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.eng = eng
+			for i, to := range []string{"ann@example.test", "bo@example.test", "cy@example.test", "dee@example.test"} {
+				r.accepted(fmt.Sprint("g", i), to, 40+i)
+			}
+			c, err := New(Config{Journal: r.eng, Cases: r, Redacted: redacted})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cs := c.Candidates(change.Tree{}); len(cs) != 0 {
+				t.Fatalf("compiled from redacted runs: %+v", cs)
+			}
+			br := loops.Brief{Hypothesis: loops.Hypothesis{Signal: loops.SignalRepeat, Evidence: r.eng.List()}}
+			if (LoopBuilder{c}).Ready(br) {
+				t.Fatal("a job would run on redacted runs")
+			}
+		})
+	}
+}
+
+// The in-process builder reads bounded evidence only, and stops on a
+// done context (arbitrator on W3 step 3a).
+func TestTheLoopBuilderIsBounded(t *testing.T) {
+	r := newRig(t)
+	for i, to := range []string{"ann@example.test", "bo@example.test", "cy@example.test"} {
+		r.accepted(fmt.Sprint("g", i), to, 40+i)
+	}
+	b := LoopBuilder{r.compiler()}
+	br := loops.Brief{Hypothesis: loops.Hypothesis{Signal: loops.SignalRepeat, Evidence: r.eng.List()}}
+	if !b.Ready(br) {
+		t.Fatal("bounded evidence is not ready")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := b.Build(ctx, br); !errors.Is(err, context.Canceled) {
+		t.Fatalf("build on a done context: %v", err)
+	}
+	big := br
+	big.Hypothesis.Evidence = make([]journal.Status, 0, MaxEvidence+1)
+	for len(big.Hypothesis.Evidence) <= MaxEvidence {
+		big.Hypothesis.Evidence = append(big.Hypothesis.Evidence, br.Hypothesis.Evidence...)
+	}
+	if b.Ready(big) {
+		t.Fatal("evidence over MaxEvidence is ready")
+	}
+	if _, err := b.Build(context.Background(), big); !errors.Is(err, ErrNoSkill) {
+		t.Fatalf("build over MaxEvidence: %v", err)
 	}
 }

@@ -61,7 +61,7 @@ func safeToken(s string, max int) string {
 	return b.String()
 }
 
-// plainLine keeps letters, digits, spaces, and . , ; : only, cut to max
+// plainLine keeps letters, digits, spaces, and . , ; : ( ) - only, cut to max
 // characters: no line breaks and nothing that could start a reply grammar
 // on a new line. It is for broker template lines that carry counts.
 func plainLine(s string, max int) string {
@@ -72,7 +72,7 @@ func plainLine(s string, max int) string {
 		}
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
-			r == ' ', r == '.', r == ',', r == ';', r == ':':
+			r == ' ', r == '.', r == ',', r == ';', r == ':', r == '(', r == ')', r == '-':
 			b.WriteRune(r)
 		}
 	}

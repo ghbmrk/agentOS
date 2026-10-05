@@ -13,8 +13,10 @@
 //	agentos-egress hosts    list the trusted hosts
 //
 // It runs as its own uid. The vault and keys files are readable by it only;
-// the model and verify sockets admit the broker's uid only, and the unlock
-// socket the local UI's uid only.
+// the model and verify sockets admit the broker's uid only, the unlock
+// socket the local UI's uid only, and the sign socket (the second line's
+// calling account, served only with -modem-uid) the modem bridge's uid
+// only.
 package main
 
 import (
@@ -39,6 +41,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/egress"
+	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/route"
 	"github.com/ghbmrk/agentos/broker/vault"
@@ -152,6 +155,28 @@ func newRouter(rule route.Rule, g map[string][]string, privateOK map[string]bool
 	})
 }
 
+// readPrices reads the evaluation price table; an empty path is an empty
+// table, which refuses every evaluation route.
+func readPrices(path string) (prices, error) {
+	ps := prices{}
+	if path == "" {
+		return ps, nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(b, &ps); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	for k, p := range ps {
+		if p.Input < 0 || p.Output < 0 {
+			return nil, fmt.Errorf("%s: %s has a negative price", path, k)
+		}
+	}
+	return ps, nil
+}
+
 // readRule reads a routing rule: a JSON object from task class to routes
 // in preference order, e.g. {"default":[{"provider":"anthropic","model":"..."}]}.
 func readRule(path string) (route.Rule, error) {
@@ -181,10 +206,14 @@ func serveCmd(args []string) error {
 	run := fs.String("run", defaultRun, "socket directory (created 0711)")
 	brokerUID := fs.Int("broker-uid", -1, "uid of agentosd, the only peer on the model socket")
 	unlockUID := fs.Int("unlock-uid", -1, "uid of the local UI, the only peer on the unlock socket")
+	modemUID := fs.Int("modem-uid", -1, "uid of the modem bridge, the only peer on the sign socket (a SIP second line); -1 serves no sign socket")
 	ttl := fs.Duration("code-ttl", owner.DefaultCodeTTL, "how long a decrypted vault waits for its approval code")
 	g := grants{}
 	fs.Var(g, "grant", "machine=adapter[,adapter] (repeatable)")
-	rulePath := fs.String("rule", "", "routing rule: JSON task class -> routes (P2-7)")
+	rulePath := fs.String("rule", "", "routing rule: JSON task class -> routes (P2-7); adoptions may only reorder its routes")
+	routingPath := fs.String("routing-state", "", "the adopted routing rule, kept across restarts (W3); default routing.json beside the keys")
+	pricesPath := fs.String("prices", "", "model price table for evaluation routes: JSON \"provider/model\" -> {input, output} per million tokens; empty refuses every evaluation route")
+	evalFrom := fs.String("eval-from", "", "the agent machine whose model grants replay machines use (LOOP-5); empty (the default) gives replay no model access")
 	privateOK := fs.String("private-ok", "", "providers the owner allowed for private data, comma-separated (CAP-9)")
 	tpmPath := fs.String("tpm", defaultTPM, "this PC's TPM (trusted host, CRED-8); absent means every boot is an unknown host")
 	polPath := fs.String("pcr-policy", "", "approved boot paths: signed PCR policies (HW-5a); default vault.pcrpolicy beside the keys")
@@ -204,9 +233,29 @@ func serveCmd(args []string) error {
 			pok[p] = true
 		}
 	}
+	if *routingPath == "" {
+		*routingPath = filepath.Join(filepath.Dir(*keysPath), "routing.json")
+	}
+	base := rule
+	if rule, err = startRule(base, *routingPath); err != nil {
+		log.Printf("routing: starting from -rule: %v", err)
+	}
 	rt, err := newRouter(rule, g, pok)
 	if err != nil {
 		return err
+	}
+	var ev *evalRoute
+	if *evalFrom != "" {
+		ps, err := readPrices(*pricesPath)
+		if err != nil {
+			return err
+		}
+		ev = &evalRoute{From: *evalFrom, Grants: g[*evalFrom], PrivateOK: pok, Active: rule, Prices: ps}
+	}
+	for m := range g {
+		if strings.HasPrefix(m, modelroute.EvalPrefix) {
+			return fmt.Errorf("-grant %s: replay machines take -eval-from's grants, never their own", m)
+		}
 	}
 	self := os.Getuid()
 	if *brokerUID < 0 || *brokerUID == self {
@@ -214,6 +263,9 @@ func serveCmd(args []string) error {
 	}
 	if *unlockUID < 0 || *unlockUID == *brokerUID {
 		return errors.New("-unlock-uid must name the local UI's uid, distinct from agentosd's")
+	}
+	if *modemUID >= 0 && (*modemUID == self || *modemUID == *brokerUID || *modemUID == *unlockUID) {
+		return errors.New("-modem-uid must name the modem bridge's own uid, distinct from this process's, agentosd's and the local UI's")
 	}
 	if *statePath == "" {
 		*statePath = statePathFor(*keysPath)
@@ -242,9 +294,20 @@ func serveCmd(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	srvs, err := serve(*run, c, rt, *brokerUID, *unlockUID)
+	ro := &routing{base: base, rt: rt, ev: ev, path: *routingPath}
+	srvs, err := serve(*run, c, rt, ev, ro, *brokerUID, *unlockUID)
 	if err != nil {
 		return err
+	}
+	if *modemUID >= 0 {
+		sign, err := serveSign(*run, c, *modemUID)
+		if err != nil {
+			for _, s := range srvs {
+				s.Close()
+			}
+			return err
+		}
+		srvs = append(srvs, sign)
 	}
 	c.bootTrusted()
 	ph, _ := c.status()
@@ -264,7 +327,10 @@ func (emptyVault) Redactor() (*vault.Redactor, error) { return vault.NewRedactor
 
 // serve opens the model, verify and unlock sockets in dir and serves them
 // until closed. The model and verify sockets admit the broker's uid only.
-func serve(dir string, c *custody, rt *route.Router, brokerUID, unlockUID int) ([]*http.Server, error) {
+func serve(dir string, c *custody, rt *route.Router, ev *evalRoute, ro *routing, brokerUID, unlockUID int) ([]*http.Server, error) {
+	if ro == nil {
+		ro = &routing{base: rt.Rule(), rt: rt, ev: ev}
+	}
 	if err := runDir(dir); err != nil {
 		return nil, err
 	}
@@ -273,7 +339,8 @@ func serve(dir string, c *custody, rt *route.Router, brokerUID, unlockUID int) (
 		uid  int
 		h    http.Handler
 	}{
-		{ModelSocket, brokerUID, modelHandler(c, rt)},
+		{ModelSocket, brokerUID, modelHandler(c, rt, ev)},
+		{RoutingSocket, brokerUID, ro.handler()},
 		{VerifySocket, brokerUID, verifyHandler(c)},
 		{UnlockSocket, unlockUID, unlockHandler(c)},
 	}

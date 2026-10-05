@@ -15,18 +15,19 @@ import (
 // fakeOwner stands in for owner.Channel: it records requests and replies
 // and leaves deciding to the test.
 type fakeOwner struct {
-	mu     sync.Mutex
-	limits owner.Limits
-	now    func() time.Time
-	reqs   map[string][]owner.Item
-	order  []string
-	queued []owner.AutoReply
-	due    []owner.Queued
-	notes  []string
-	commit bool     // QueueAutoReply turns replies into requests
-	down   bool     // Request fails
-	active bool     // the owner is texting
-	each   []string // requests opened by RequestEach
+	mu       sync.Mutex
+	limits   owner.Limits
+	now      func() time.Time
+	reqs     map[string][]owner.Item
+	order    []string
+	queued   []owner.AutoReply
+	due      []owner.Queued
+	notes    []string
+	commit   bool            // QueueAutoReply turns replies into requests
+	down     bool            // Request fails
+	active   bool            // the owner is texting
+	each     []string        // requests opened by RequestEach
+	lateUndo map[string]bool // UndoneAfterRelease
 }
 
 func (f *fakeOwner) Request(items []owner.Item, _ time.Duration) (string, error) {
@@ -93,6 +94,12 @@ func (f *fakeOwner) DueAutoReplies() []owner.Queued {
 	return out
 }
 
+func (f *fakeOwner) UndoneAfterRelease(id string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lateUndo[id]
+}
+
 func (f *fakeOwner) Inform(text string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -118,17 +125,41 @@ func (f *fakeOwner) count() int {
 	return len(f.order)
 }
 
-// fakeExec counts executions per intent.
+// fakeExec counts executions per intent and records the last params each
+// ran with. An intent in fail is not applied.
 type fakeExec struct {
-	mu  sync.Mutex
-	ran map[string]int
+	mu     sync.Mutex
+	ran    map[string]int
+	params map[string]map[string]any
+	fail   map[string]bool
+	// evidence overrides a failed intent's evidence.
+	evidence map[string]string
+	// block holds an intent's attempts until its channel is closed.
+	block map[string]chan struct{}
 }
 
 func (e *fakeExec) Execute(_ context.Context, in journal.Intent, _ int) journal.Outcome {
 	e.mu.Lock()
+	b := e.block[in.ID]
+	e.mu.Unlock()
+	if b != nil {
+		<-b
+	}
+	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.ran[in.ID]++
-	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "sent"}
+	if e.params == nil {
+		e.params = map[string]map[string]any{}
+	}
+	e.params[in.ID] = in.Params
+	if e.fail[in.ID] {
+		ev := "changed since"
+		if x := e.evidence[in.ID]; x != "" {
+			ev = x
+		}
+		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: ev}
+	}
+	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "done:" + in.ID}
 }
 
 func (e *fakeExec) Reconcile(context.Context, journal.Intent, int) journal.Outcome {

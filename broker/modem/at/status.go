@@ -2,6 +2,7 @@ package at
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -234,3 +235,25 @@ func isICCID(v string) bool {
 // ICCID is the SIM's serial number ("" when unreadable). It identifies the
 // SIM and is kept in the broker's configuration only; never log it.
 func (m *Modem) ICCID() string { return m.iccid }
+
+// ErrNoNetworkTime is NetworkTime's answer when the network has sent no
+// time, or the module's clock was never set from it.
+var ErrNoNetworkTime = errors.New("at: no carrier network time")
+
+// NetworkTime is carrier network time in UTC, the box's cross-check on its
+// own clock (TIM-1, broker/clock). It is never used to set the box clock.
+func (m *Modem) NetworkTime(ctx context.Context) (time.Time, error) {
+	p := m.cfg.Profile
+	if p.NetTimeCmd == "" || p.NetTime == nil {
+		return time.Time{}, ErrNoNetworkTime
+	}
+	lines, err := m.e.Do(ctx, p.NetTimeCmd, cmdTimeout)
+	if err != nil {
+		return time.Time{}, err
+	}
+	t, ok := p.NetTime(lines)
+	if !ok {
+		return time.Time{}, ErrNoNetworkTime
+	}
+	return t, nil
+}

@@ -213,6 +213,10 @@ func Attest(priv ed25519.PrivateKey, v *Verified, st Statement) ([]byte, error) 
 	})
 }
 
+// MaxAttestationSize caps one attestation's bytes (review K-PB1b on #73),
+// as U8 caps manifests. A fetcher reads no more than this per attestation.
+const MaxAttestationSize = 16 << 10
+
 // ParseAttestation checks an envelope's signature and returns its
 // statement and the attestor key. Envelope, signatures and statement are
 // decoded strictly: no unknown, duplicate or case-variant key. The input
@@ -225,6 +229,9 @@ func Attest(priv ed25519.PrivateKey, v *Verified, st Statement) ([]byte, error) 
 // values this box's schema does not list come back as attest.Unlisted
 // (readStatement).
 func ParseAttestation(b []byte) (Statement, ed25519.PublicKey, error) {
+	if len(b) > MaxAttestationSize {
+		return Statement{}, nil, fmt.Errorf("attestation is %d bytes, over %d", len(b), MaxAttestationSize)
+	}
 	var env struct {
 		PayloadType string            `json:"payloadType"`
 		Payload     string            `json:"payload"`

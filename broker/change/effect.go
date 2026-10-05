@@ -18,6 +18,9 @@ const (
 	WhyRegression = "regression"
 	WhySecurity   = "security"
 	WhyFallback   = "fallback" // a staged image did not boot cleanly
+	// WhySettings: the owner's own configuration replaced the adopted
+	// state outside the pipeline (Superseded); never an intent ID.
+	WhySettings = "settings"
 )
 
 // Check is the policy for meta.change intents (OP-3), run at authorize and
@@ -499,9 +502,13 @@ func (p *Pipeline) Recheck(ctx context.Context) ([]string, error) {
 	p.mu.Unlock()
 	var out []string
 	var errs []error
-	outage := false
+	outage, interrupted := false, false
 	defer func() {
 		p.mu.Lock()
+		if interrupted {
+			p.mu.Unlock()
+			return
+		}
 		if outage {
 			p.st.Outages++
 		} else {
@@ -527,7 +534,13 @@ func (p *Pipeline) Recheck(ctx context.Context) ([]string, error) {
 		cur, set := p.st.Active.clone(), p.freezeLocked(a.Classes)
 		p.mu.Unlock()
 
-		s := p.evaluate(ctx, prev, cur, set, strictFor(a.Source, a.Classes))
+		s, err := p.evaluate(ctx, prev, cur, set, strictFor(a.Source, a.Classes))
+		if err != nil {
+			// Preempted: blame nothing, and leave the outage count as it
+			// was. The next pass resumes from the kept pairs.
+			interrupted = true
+			return out, errors.Join(append(errs, err)...)
+		}
 		why := ""
 		switch {
 		case s.outage():

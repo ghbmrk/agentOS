@@ -91,9 +91,23 @@ type Config struct {
 	// RecallExecutor, recalltool W10) once the owner approves them. Nil:
 	// none can run.
 	Recall journal.Executor
-	// RecallStatus, when it returns a line, is a further STATUS sentence:
-	// an agent that still holds a record the owner deleted (recall W10).
-	RecallStatus func() string
+	// BrokerExecutors are the broker's own setting executors (the change
+	// pipeline and the loop scheduler, W3). They declare no operations: no
+	// grant can name them, and only the intents the gate's Changes and
+	// Loops policies allow reach them.
+	BrokerExecutors map[string]journal.Executor
+	// Settings answers an owner text that is a box setting (the loop
+	// scheduler's Text) and HelpExtra is appended to HELP; Narrows marks
+	// the settings that run in a locked session (owner.Config).
+	Settings  func(ctx context.Context, msg string, unlocked bool) (reply string, ok bool)
+	HelpExtra string
+	Narrows   func(msg string) bool
+	// Answer takes the owner's replies to agents' questions before they
+	// reach the agent (question.Book.Answer, W9). Nil: none.
+	Answer func(ctx context.Context, msg string) (reply string, ok bool)
+	// Notes are STATUS's exception lines (control.Handler.Notes); recall
+	// adds one while an agent holds a record the owner deleted (W10).
+	Notes []func() string
 	// Redactor scrubs journaled free text. Nil journals none at all until
 	// the vault's redactor (CRED-7 values plus CH-19 patterns) is wired
 	// with the vault unlock (P2-4).
@@ -117,8 +131,13 @@ func redactAll(s string) string {
 	if s == "" {
 		return ""
 	}
-	return "[redacted]"
+	return Redacted
 }
+
+// Redacted is what the default redactor stores for any free text, so a
+// reader of the journal (the skill compiler) can tell a value it never
+// kept from a real one.
+const Redacted = "[redacted]"
 
 // ownerOnly is the default Auth.
 type ownerOnly struct{ number string }
@@ -178,6 +197,17 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 		}
 		execs[name] = ex
 	}
+	for name, ex := range cfg.BrokerExecutors {
+		switch {
+		case name == grants.ExecutorName:
+			store.Close()
+			return nil, fmt.Errorf("daemon: executor name %q is reserved", name)
+		case execs[name] != nil:
+			store.Close()
+			return nil, fmt.Errorf("daemon: executor %q is both an adapter and the broker's", name)
+		}
+		execs[name] = ex
+	}
 	gate := grants.New(gcfg)
 	execs[grants.ExecutorName] = gate
 	if cfg.Recall != nil {
@@ -201,14 +231,16 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 			return adm.Summary()
 		}
 	}
-	h := &control.Handler{Engine: eng, Auth: cfg.Auth, Agent: cfg.Agent, Machines: machines, Notice: cfg.RecallStatus}
+	h := &control.Handler{Engine: eng, Auth: cfg.Auth, Agent: cfg.Agent, Machines: machines, Notes: cfg.Notes,
+		Settings: cfg.Settings, HelpExtra: cfg.HelpExtra, Answer: cfg.Answer}
 	handle := h.Handle
 	var ch *ownerch.Channel
 	if cfg.OwnerState != "" {
 		if ch, err = ownerch.New(ownerch.Config{
 			Owner: cfg.OwnerNumber, Modem: cfg.Modem, Engine: eng, Agent: cfg.Agent,
-			Machines: machines, Notice: cfg.RecallStatus, Secrets: cfg.OwnerSecrets, Verifier: cfg.OwnerVerifier, Store: ownerch.FileStore{Path: cfg.OwnerState},
+			Machines: machines, Notes: cfg.Notes, Secrets: cfg.OwnerSecrets, Verifier: cfg.OwnerVerifier, Store: ownerch.FileStore{Path: cfg.OwnerState},
 			Decide: gate.Decide, Narrow: gate.Narrow, Reissue: gate.Reissue,
+			Settings: cfg.Settings, HelpExtra: cfg.HelpExtra, Narrows: cfg.Narrows, Answer: cfg.Answer,
 		}); err != nil {
 			store.Close()
 			return nil, err

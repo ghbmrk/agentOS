@@ -1,12 +1,14 @@
 package loops
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/skill/format"
 )
 
 // Signal is what in the journal a hypothesis comes from (LOOP-4).
@@ -43,6 +46,28 @@ var classNS = map[change.Class]string{
 	change.ClassProcedure: "procedures",
 	change.ClassSkill:     "skills",
 	change.ClassContext:   "context",
+}
+
+// supersedes is a namespace a class may also delete from: a compiled skill
+// replaces the procedure of its shape (CAP-5), and only that one.
+var supersedes = map[change.Class]string{
+	change.ClassSkill: "procedures",
+}
+
+// supersededBy reports whether path is a procedure file's name,
+// procedures/p<shape>.json (format.IsFileName, so a free-form file is
+// never "superseded", L3 and security R1 on #89), and the candidate writes
+// exactly one file, that shape's skills/k<shape>.json.
+// inClass has already checked that every skill or procedure file a
+// candidate writes is for the task its name says (format.DecodeFile), so
+// the name pairs the skill with its own shape's procedure (P3-6e).
+func supersededBy(path string, files map[string][]byte) bool {
+	shape, ok := strings.CutPrefix(path, "procedures/p")
+	if !ok || !format.IsFileName(path) || len(files) != 1 {
+		return false
+	}
+	_, ok = files["skills/k"+shape]
+	return ok
 }
 
 // Hypothesis is one thing Loop 1 might improve (LOOP-4). It names journal
@@ -80,12 +105,29 @@ type Handler interface {
 	Handles(Signal) bool
 }
 
+// Readier is a builder that can tell, without model calls, that a
+// hypothesis's evidence cannot yet yield a candidate (the skill compiler
+// needs enough owner-accepted runs). Loop 1 then offers no job for it, so
+// nothing is measured against the loop, and waits for more supporting
+// tasks (L10).
+type Readier interface {
+	Ready(b Brief) bool
+}
+
 // BySignal routes each hypothesis to the builder for its signal, such as
 // the skill compiler for repeated trajectories (CAP-5) and a model-backed
 // agent for the rest.
 type BySignal map[Signal]Builder
 
 func (b BySignal) Handles(s Signal) bool { return b[s] != nil }
+
+// Ready defers to the signal's builder when it is a Readier.
+func (b BySignal) Ready(br Brief) bool {
+	if r, ok := b[br.Hypothesis.Signal].(Readier); ok {
+		return r.Ready(br)
+	}
+	return true
+}
 
 func (b BySignal) Build(ctx context.Context, br Brief) (change.Candidate, error) {
 	x := b[br.Hypothesis.Signal]
@@ -118,9 +160,15 @@ type LearnConfig struct {
 	// Builder may be nil: Loop 1 then proposes only routing rules and
 	// rechecks adoptions.
 	Builder Builder
+	// Unseeded reports a candidate nothing could use yet: it writes only
+	// namespaces no machine is seeded from (skills and procedures before
+	// W4). Loop 1 does not propose it, so the owner is never asked about
+	// a change with no effect (UX-S3-1), and the digest counts it. Nil:
+	// none.
+	Unseeded func(change.Candidate) bool
 	// Router may be nil: no routing candidates.
 	Router change.Router
-	// ModelWired reports that replay has model access (EvalModel). Without
+	// ModelWired reports that replay has model access (replay.RuleModel). Without
 	// it evaluation is offline, so routing candidates are not proposed
 	// (both sides would answer alike) and no evaluation counts as model
 	// work.
@@ -155,15 +203,74 @@ type LearnConfig struct {
 type Learn struct {
 	cfg LearnConfig
 
-	mu          sync.Mutex
-	tried       map[string]int // hypothesis or routing key -> evidence when tried
-	asks        map[string]int // key -> proposals that waited on the owner
-	notBefore   map[string]time.Time
-	waiting     int // hypotheses held for evidence
-	heldOut     int
-	lastRecheck time.Time
-	recheckedAt int // held-out count at the last recheck
+	mu        sync.Mutex
+	tried     map[string]int // hypothesis or routing key -> evidence when tried
+	asks      map[string]int // key -> proposals that waited on the owner
+	notBefore map[string]time.Time
+	// needsExplicit maps the keys whose last proposal the explicit-case
+	// anchor sent to the owner instead of adopting (change NeedsExplicit)
+	// to that proposal's ID.
+	needsExplicit map[string]string
+	waiting       int // hypotheses held for evidence
+	heldOut       int
+	lastRecheck   time.Time
+	recheckedAt   int // held-out count at the last recheck
+	// built keeps a candidate whose evaluation was preempted, by
+	// hypothesis key, so it is proposed again without another build and
+	// the pipeline resumes its evaluation (PE1). In memory only.
+	built map[string]keptCandidate
+	// unseeded are the hypotheses whose candidate was not proposed
+	// because nothing could use it yet (UX-S3-1), at most maxUnseeded.
+	unseeded map[string]time.Time
+	// nowTested is set when a held hypothesis is proposed after all, so
+	// the next digest says once that drafted skills are being tested
+	// (potency C1, UX-120-1 on #120).
+	nowTested bool
 }
+
+// Holds reports whether Loop 1 would build c but hold it unproposed,
+// because nothing could use it yet (LearnConfig.Unseeded, L21).
+func (l *Learn) Holds(c change.Candidate) bool {
+	return l.cfg.Unseeded != nil && l.cfg.Unseeded(c)
+}
+
+// maxUnseeded bounds the hypotheses the digest counts as kept until the
+// agent can use them.
+const maxUnseeded = 256
+
+// ErrUnseeded: the candidate was built but not proposed, since nothing
+// could use it yet (LearnConfig.Unseeded).
+var ErrUnseeded = errors.New("loops: candidate kept until a machine can use it")
+
+// keptCandidate is a built candidate and the brief it was built from.
+type keptCandidate struct {
+	cand  change.Candidate
+	brief string // briefDigest of the builder's brief
+	tasks []string
+	at    time.Time
+}
+
+// briefDigest names everything a builder saw: the hypothesis's tasks, its
+// evidence intents and their labels, and the dev cases. A kept candidate
+// is reused only for the same brief (L3 MUST-1 on #103), so a candidate
+// built from a task that is now held out is never scored on that task.
+func briefDigest(h Hypothesis, dev []change.Case) string {
+	var parts []string
+	for _, t := range h.Tasks {
+		parts = append(parts, "t\x00"+t)
+	}
+	for _, s := range h.Evidence {
+		parts = append(parts, "e\x00"+s.Intent.ID+"\x00"+s.Intent.Label)
+	}
+	for _, c := range dev {
+		parts = append(parts, "d\x00"+c.ID)
+	}
+	sort.Strings(parts)
+	return digest(h.Key + "\x01" + strings.Join(parts, "\x01"))
+}
+
+// maxKeptCandidates bounds Learn.built.
+const maxKeptCandidates = 16
 
 // NewLearn checks cfg and returns Loop 1's source.
 func NewLearn(cfg LearnConfig) (*Learn, error) {
@@ -198,7 +305,7 @@ func NewLearn(cfg LearnConfig) (*Learn, error) {
 		cfg.Now = time.Now
 	}
 	return &Learn{cfg: cfg, tried: map[string]int{}, asks: map[string]int{}, notBefore: map[string]time.Time{},
-		lastRecheck: cfg.Now()}, nil
+		needsExplicit: map[string]string{}, lastRecheck: cfg.Now(), built: map[string]keptCandidate{}, unseeded: map[string]time.Time{}}, nil
 }
 
 func (l *Learn) Loop() Loop { return Improve }
@@ -233,7 +340,7 @@ func (l *Learn) Next(ctx context.Context, modelOK bool) (Job, bool) {
 	if due {
 		return Job{Name: "recheck", UsesModel: evalModel, Evaluates: true, Run: func(ctx context.Context) Result {
 			reverted, err := l.cfg.Pipeline.Recheck(ctx)
-			if ctx.Err() == nil {
+			if ctx.Err() == nil && !errors.Is(err, change.ErrInterrupted) {
 				l.mu.Lock()
 				l.recheckedAt, l.lastRecheck = ev.HeldOut, l.cfg.Now()
 				l.mu.Unlock()
@@ -256,7 +363,7 @@ func (l *Learn) Next(ctx context.Context, modelOK bool) (Job, bool) {
 		if l.tried[key] < ev.HeldOut && l.mayAskLocked(key) {
 			return Job{Name: "routing", UsesModel: true, Evaluates: true, Run: func(ctx context.Context) Result {
 				rep, ok, err := l.cfg.Pipeline.ProposeRouting(ctx, l.cfg.Router)
-				l.done(ctx, key, ev.HeldOut)
+				l.done(ctx, err, key, ev.HeldOut)
 				l.asked(key, rep)
 				if !ok {
 					return Result{Err: err}
@@ -269,6 +376,7 @@ func (l *Learn) Next(ctx context.Context, modelOK bool) (Job, bool) {
 		return Job{}, false
 	}
 	sel, _ := l.cfg.Builder.(Handler)
+	ready, _ := l.cfg.Builder.(Readier)
 	for _, h := range hyps {
 		if l.tried[h.Key] >= len(h.Tasks) || !l.mayAskLocked(h.Key) {
 			continue // tried with this much evidence already, or the owner was asked lately
@@ -276,10 +384,17 @@ func (l *Learn) Next(ctx context.Context, modelOK bool) (Job, bool) {
 		if sel != nil && !sel.Handles(h.Signal) {
 			continue
 		}
+		if ready != nil && !ready.Ready(Brief{Hypothesis: h, Dev: ev.Dev}) {
+			l.tried[h.Key] = len(h.Tasks) // wait for more supporting tasks
+			continue
+		}
 		h := h
 		return Job{Name: "candidate", UsesModel: true, Evaluates: true, Run: func(ctx context.Context) Result {
 			rep, err := l.propose(ctx, h, ev)
-			l.done(ctx, h.Key, len(h.Tasks))
+			l.done(ctx, err, h.Key, len(h.Tasks))
+			if errors.Is(err, ErrUnseeded) {
+				return Result{}
+			}
 			l.asked(h.Key, rep)
 			return Result{Value: value(rep), Err: err}
 		}}, true
@@ -296,19 +411,24 @@ func (l *Learn) mayAskLocked(key string) bool {
 // asked starts key's backoff when its proposal waited on the owner, so an
 // owner who lets a request lapse is not asked again every cycle.
 func (l *Learn) asked(key string, rep change.Report) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if rep.NeedsExplicit && rep.State == change.StateAwaitingOwner {
+		l.needsExplicit[key] = rep.ID
+	} else {
+		delete(l.needsExplicit, key)
+	}
 	if rep.State != change.StateAwaitingOwner {
 		return
 	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
 	l.asks[key]++
 	l.notBefore[key] = l.cfg.Now().Add(l.cfg.Backoff << (l.asks[key] - 1))
 }
 
-// done marks a key tried, unless the work was preempted: then it is
-// offered again.
-func (l *Learn) done(ctx context.Context, key string, n int) {
-	if ctx.Err() != nil {
+// done marks a key tried, unless the work was preempted (ctx ended, or
+// the evaluator was interrupted, PE3): then it is offered again.
+func (l *Learn) done(ctx context.Context, err error, key string, n int) {
+	if ctx.Err() != nil || errors.Is(err, change.ErrInterrupted) {
 		return
 	}
 	l.mu.Lock()
@@ -321,32 +441,120 @@ func (l *Learn) done(ctx context.Context, key string, n int) {
 var ErrOutOfClass = errors.New("loops: candidate writes outside its hypothesis's namespace")
 
 func (l *Learn) propose(ctx context.Context, h Hypothesis, ev Evidence) (change.Report, error) {
-	cand, err := l.cfg.Builder.Build(ctx, Brief{Hypothesis: h, Dev: ev.Dev})
-	if err != nil {
-		return change.Report{}, err
+	brief := briefDigest(h, ev.Dev)
+	l.mu.Lock()
+	k, ok := l.built[h.Key]
+	delete(l.built, h.Key)
+	l.mu.Unlock()
+	cand := k.cand
+	reuse := ok && k.brief == brief && l.cfg.Now().Sub(k.at) <= change.ResumeFor
+	for _, t := range k.tasks {
+		reuse = reuse && !ev.Held(t)
 	}
-	ns := classNS[h.Class]
-	for p := range cand.Files {
+	if !reuse {
+		// No kept candidate, or its brief changed, it expired, or one of
+		// its tasks is now held out: build afresh.
+		built, err := l.cfg.Builder.Build(ctx, Brief{Hypothesis: h, Dev: ev.Dev})
+		if err != nil {
+			return change.Report{}, err
+		}
+		// Checked and proposed bytes are the same: a builder keeps no
+		// handle on what is checked (L3 on #89).
+		cand = owned(built)
+		if err := inClass(h.Class, cand); err != nil {
+			return change.Report{}, err
+		}
+		// Source, origin, and the public mark are the broker's, from the
+		// REV-5 labels of every input; the builder asserts none of them.
+		cand.Source, cand.Origin, cand.Public = change.Local, "loop1", public(h, ev.Dev)
+	}
+	l.mu.Lock()
+	if l.Holds(cand) {
+		l.unseeded[h.Key] = l.cfg.Now()
+		for len(l.unseeded) > maxUnseeded {
+			oldest := ""
+			for k, at := range l.unseeded {
+				if oldest == "" || at.Before(l.unseeded[oldest]) || at.Equal(l.unseeded[oldest]) && k < oldest {
+					oldest = k
+				}
+			}
+			delete(l.unseeded, oldest)
+		}
+		l.mu.Unlock()
+		return change.Report{}, ErrUnseeded
+	}
+	if _, held := l.unseeded[h.Key]; held {
+		delete(l.unseeded, h.Key)
+		l.nowTested = true
+	}
+	l.mu.Unlock()
+	rep, err := l.cfg.Pipeline.Propose(ctx, cand)
+	if errors.Is(err, change.ErrInterrupted) {
+		// Preempted mid-evaluation: keep the checked candidate for the
+		// next offer, so the pipeline can resume its pairs.
+		l.mu.Lock()
+		l.built[h.Key] = keptCandidate{cand: cand, brief: brief, tasks: slices.Clone(h.Tasks), at: l.cfg.Now()}
+		for len(l.built) > maxKeptCandidates {
+			oldest := ""
+			for k, v := range l.built {
+				if oldest == "" || v.at.Before(l.built[oldest].at) || v.at.Equal(l.built[oldest].at) && k < oldest {
+					oldest = k
+				}
+			}
+			delete(l.built, oldest)
+		}
+		l.mu.Unlock()
+	}
+	return rep, err
+}
+
+// owned copies a candidate's files and deletions.
+func owned(c change.Candidate) change.Candidate {
+	files := make(map[string][]byte, len(c.Files))
+	for p, b := range c.Files {
+		files[p] = bytes.Clone(b)
+	}
+	c.Files, c.Delete = files, slices.Clone(c.Delete)
+	return c
+}
+
+// inClass checks that a candidate writes only its class's namespace, and
+// deletes only there or in the namespace the class supersedes. Every file
+// it writes with a skill or procedure file's name (the only ones the skill
+// bridge offers or a skill supersedes) must decode canonically as one whose
+// name is its own: its ID, and the shape its steps give (security R1 on
+// #74, C1 on #89).
+func inClass(class change.Class, cand change.Candidate) error {
+	ns := classNS[class]
+	for p, b := range cand.Files {
 		if first, _, _ := strings.Cut(p, "/"); first != ns {
-			return change.Report{}, fmt.Errorf("%w: %s", ErrOutOfClass, h.Class)
+			return fmt.Errorf("%w: %s", ErrOutOfClass, class)
+		}
+		if format.IsFileName(p) {
+			if _, err := format.DecodeFile(p, b); err != nil {
+				return fmt.Errorf("%w: %s: %v", ErrOutOfClass, class, err)
+			}
 		}
 	}
 	for _, p := range cand.Delete {
-		if first, _, _ := strings.Cut(p, "/"); first != ns {
-			return change.Report{}, fmt.Errorf("%w: %s", ErrOutOfClass, h.Class)
+		first, _, _ := strings.Cut(p, "/")
+		if first == ns {
+			continue
+		}
+		if first != supersedes[class] || !supersededBy(p, cand.Files) {
+			return fmt.Errorf("%w: %s", ErrOutOfClass, class)
 		}
 	}
-	// Source, origin, and the public mark are the broker's, from the
-	// REV-5 labels of every input; the builder asserts none of them.
-	cand.Source, cand.Origin, cand.Public = change.Local, "loop1", public(h, ev.Dev)
-	return l.cfg.Pipeline.Propose(ctx, cand)
+	return nil
 }
 
 // value is a proposal's measured return: its held-out gain over the
-// baseline, plus a little for an adoption with no gain (it qualified with
-// no regression), half for one waiting on the owner, none if rejected.
+// baseline, implicit cases' gain counted half (potency C3(c) on #90), plus
+// a little for an adoption with no gain (it qualified with no regression),
+// half for one waiting on the owner, none if rejected.
 func value(rep change.Report) float64 {
-	gain := math.Max(float64(rep.Passed-rep.BaselinePassed), 0)
+	explicit := (rep.Passed - rep.ImplicitPassed) - (rep.BaselinePassed - rep.ImplicitBaselinePassed)
+	gain := math.Max(float64(explicit)+float64(rep.ImplicitPassed-rep.ImplicitBaselinePassed)/2, 0)
 	switch rep.State {
 	case change.StateAdopted:
 		return gain + 0.25
@@ -370,15 +578,45 @@ func public(h Hypothesis, dev []change.Case) bool {
 	return true
 }
 
-// Digest is Loop 1's line while it waits for evidence (C14 (b)).
+// Digest is Loop 1's lines: while it waits for evidence (C14 (b)), and
+// for ideas the explicit-case anchor sent to the owner (change
+// NeedsExplicit; potency on the PW3 design).
 func (l *Learn) Digest() []string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.waiting == 0 || l.heldOut >= l.cfg.MinHeldOut {
-		return nil
+	var out []string
+	if l.waiting > 0 && l.heldOut < l.cfg.MinHeldOut {
+		out = append(out, fmt.Sprintf("Learning: %d ideas are waiting until there are %d past tasks to test them on (%d so far).",
+			l.waiting, l.cfg.MinHeldOut, l.heldOut))
 	}
-	return []string{fmt.Sprintf("Learning: %d ideas are waiting until there are %d past tasks to test them on (%d so far).",
-		l.waiting, l.cfg.MinHeldOut, l.heldOut)}
+	// Only requests still waiting count: one that lapsed is listed by the
+	// owner channel instead (L18), never twice (UX on #109).
+	w, _ := l.cfg.Pipeline.(interface{ Waiting(id string) bool })
+	n := 0
+	for _, id := range l.needsExplicit {
+		if w == nil || w.Waiting(id) {
+			n++
+		}
+	}
+	switch {
+	case n == 1:
+		out = append(out, "Learning: 1 idea is waiting for your approval instead of taking effect on its own, because it wasn't tested on a task you said YES to.")
+	case n > 1:
+		out = append(out, fmt.Sprintf("Learning: %d ideas are waiting for your approval instead of taking effect on their own, because none was tested on a task you said YES to.", n))
+	}
+	// Built but not proposed, since the agent cannot use them yet
+	// (UX-S3-1).
+	switch n := len(l.unseeded); {
+	case n == 1:
+		out = append(out, "Learning: 1 new skill drafted. It'll be tested once your agent can use it.")
+	case n > 1:
+		out = append(out, fmt.Sprintf("Learning: %d new skills drafted. They'll be tested once your agent can use them.", n))
+	case l.nowTested:
+		// Once, when the agent can use them after all.
+		out = append(out, "Learning: drafted skills are now being tested.")
+		l.nowTested = false
+	}
+	return out
 }
 
 // TaskKey is the task an intent belongs to: its goal, or, for intents

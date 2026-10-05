@@ -124,6 +124,12 @@ var ErrSkipSlot = errors.New("vault: key slot belongs to another factor instance
 // kind, and an edited slot.
 var ErrNoSlotOpens = errors.New("vault: no key slot opens with this factor")
 
+// ErrChangeInterrupted is ErrNoSlotOpens for a passphrase while a
+// passphrase change is staged beside the keys file (keysbind.go): the
+// vault may already be under the new passphrase (P2-4g). It says only
+// that an interrupted change exists.
+var ErrChangeInterrupted = fmt.Errorf("%w; a passphrase change was interrupted", ErrNoSlotOpens)
+
 // Passphrase is the Owner Card's vault passphrase as a factor. It is
 // normalized first (see normalize), so a scan and a typed copy agree.
 func Passphrase(p string) Factor { return passphrase(normalize(p)) }
@@ -480,6 +486,9 @@ func OpenSealed(vaultPath, keysPath string, f Factor) (*Vault, error) {
 		}
 		nkey, nslot, nerr := nkf.unwrapSlot(f, want)
 		if nerr != nil {
+			if errors.Is(nerr, ErrNoSlotOpens) && f.Kind() == SlotPassphrase && passphraseChanged(kf, nkf) {
+				return nil, ErrChangeInterrupted
+			}
 			return nil, err
 		}
 		raw, kf, key, slot, staged = nraw, nkf, nkey, nslot, true
@@ -498,6 +507,15 @@ func OpenSealed(vaultPath, keysPath string, f Factor) (*Vault, error) {
 		v.Close()
 		return nil, err
 	}
-	v.dropStaleStaged()
+	v.unfinished = v.dropStaleStaged()
 	return v, nil
+}
+
+// ChangeUnfinished reports that OpenSealed found a passphrase change that
+// was staged but never sealed, so it did not happen and the owner should
+// change the passphrase again (P2-4g).
+func (v *Vault) ChangeUnfinished() bool {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return v.unfinished
 }

@@ -198,6 +198,27 @@ func (c *Controller) Snapshot() Snapshot {
 	return s
 }
 
+// Busy reports that the box has no spare compute for loop work (LOOP-1):
+// accepted work is running, or memory pressure is over MaxPressure (or not
+// a real reading). Foreground machines alone do not count: the owner's
+// agent machine runs all the time, and when foreground needs memory,
+// Admit preempts experiments for it.
+func (c *Controller) Busy() bool {
+	if c.Pressure != nil {
+		if p := c.Pressure(); math.IsNaN(p) || p < 0 || p > c.MaxPressure {
+			return true
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, r := range c.running {
+		if r.Class == Accepted {
+			return true
+		}
+	}
+	return false
+}
+
 // Summary is STATUS's one line about machines, in fixed wording.
 func (c *Controller) Summary() string {
 	s := c.Snapshot()

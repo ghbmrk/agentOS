@@ -228,6 +228,14 @@ func TestALockedSessionTakesOnlyPauses(t *testing.T) {
 	if got, ok := r.s.Text(ctx, "HELP LOOPS", false); !ok || got != HelpText {
 		t.Fatalf("%q %v", got, ok)
 	}
+	// Narrows is the owner channel's test for the same line, run before
+	// it holds a locked session's message for the unlock (W3).
+	for msg, want := range map[string]bool{"LOOPS OFF": true, "spare budget 40": true, "HELP LOOPS": true,
+		"LOOPS ON": false, "SPARE BUDGET 60": false, "START SHARING": false, "book a table": false} {
+		if r.s.Narrows(msg) != want {
+			t.Fatalf("Narrows(%q) != %v", msg, want)
+		}
+	}
 }
 
 // UX-57-2: a failed setting says why when the box knows.

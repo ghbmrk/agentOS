@@ -100,7 +100,7 @@ func TestUnknownHostUnlockThenModelRoute(t *testing.T) {
 	}
 	defer c.lock()
 	run := filepath.Join(dir, "run")
-	srvs, err := serve(run, c, testRouter(t), os.Getuid(), os.Getuid())
+	srvs, err := serve(run, c, testRouter(t), nil, nil, os.Getuid(), os.Getuid())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +228,7 @@ func readCard(t *testing.T, card string) (string, []byte) {
 func TestSocketsAdmitOnlyTheirPeer(t *testing.T) {
 	c := &custody{now: time.Now, notify: func(string) {}}
 	run := filepath.Join(t.TempDir(), "run")
-	srvs, err := serve(run, c, testRouter(t), os.Getuid()+1, os.Getuid()+1)
+	srvs, err := serve(run, c, testRouter(t), nil, nil, os.Getuid()+1, os.Getuid()+1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +237,7 @@ func TestSocketsAdmitOnlyTheirPeer(t *testing.T) {
 			s.Close()
 		}
 	}()
-	for _, name := range []string{ModelSocket, UnlockSocket, VerifySocket} {
+	for _, name := range []string{ModelSocket, RoutingSocket, UnlockSocket, VerifySocket} {
 		resp, err := unixClient(filepath.Join(run, name)).Get("http://x/status")
 		if err == nil {
 			resp.Body.Close()
@@ -253,7 +253,7 @@ func TestModelSocketNeedsAMachine(t *testing.T) {
 		w := httptest.NewRecorder()
 		r := httptest.NewRequest("POST", "/openai/v1/chat/completions", nil)
 		r.Header.Set(modelroute.HeaderMachine, m)
-		modelHandler(c, testRouter(t)).ServeHTTP(w, r)
+		modelHandler(c, testRouter(t), nil).ServeHTTP(w, r)
 		if w.Code != http.StatusBadRequest {
 			t.Fatalf("machine %q: %d", m, w.Code)
 		}
@@ -279,7 +279,7 @@ func TestStatusShowsPhaseOnly(t *testing.T) {
 func TestVerifySocketForTheBroker(t *testing.T) {
 	r := newFastRig(t, true)
 	run := filepath.Join(t.TempDir(), "run")
-	srvs, err := serve(run, r.c, testRouter(t), os.Getuid(), os.Getuid())
+	srvs, err := serve(run, r.c, testRouter(t), nil, nil, os.Getuid(), os.Getuid())
 	if err != nil {
 		t.Fatal(err)
 	}

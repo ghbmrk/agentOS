@@ -28,6 +28,7 @@ type fakeEngine struct {
 	mu      sync.Mutex
 	stopped bool
 	resumes int
+	list    []journal.Status
 }
 
 func (f *fakeEngine) Stop(context.Context) (journal.StopReport, error) {
@@ -46,7 +47,7 @@ func (f *fakeEngine) Resume() error {
 }
 
 func (f *fakeEngine) Stopped() bool          { f.mu.Lock(); defer f.mu.Unlock(); return f.stopped }
-func (f *fakeEngine) List() []journal.Status { return nil }
+func (f *fakeEngine) List() []journal.Status { f.mu.Lock(); defer f.mu.Unlock(); return f.list }
 
 type recAgent struct {
 	mu   sync.Mutex
@@ -87,6 +88,8 @@ type rig struct {
 	decided  []Decision
 	// reissue, if set, is the next open channel's Config.Reissue.
 	reissue func([]Carried)
+	// edit, if set, changes the next open channel's Config.
+	edit func(*Config)
 }
 
 func newRig(t *testing.T, store Store) *rig {
@@ -112,14 +115,18 @@ func (r *rig) open() *Channel {
 	if r.verifier != nil {
 		sec.TOTPSeed = nil
 	}
-	ch, err := New(Config{
+	cfg := Config{
 		Owner: ownerNum, Modem: r.box, Engine: r.eng, Agent: agent, Secrets: sec, Verifier: r.verifier, Store: r.store,
 		Limits:     Limits{Hold: 7 * 24 * time.Hour, AmountLimit: 10000},
 		ReplyLimit: r.replyLimit,
 		Location:   time.UTC, Now: r.clock,
 		Decide:  func(d Decision) { r.mu.Lock(); r.decided = append(r.decided, d); r.mu.Unlock() },
 		Reissue: r.reissue,
-	})
+	}
+	if r.edit != nil {
+		r.edit(&cfg)
+	}
+	ch, err := New(cfg)
 	if err != nil {
 		r.t.Fatal(err)
 	}
@@ -676,11 +683,27 @@ func TestResumeNeedsATextedCodeAndStopVoidsIt(t *testing.T) {
 		t.Fatalf("code survived STOP: %q", got)
 	}
 	code = regexp.MustCompile(`RESUME ([0-9]{6})`).FindStringSubmatch(r.say("resume"))[1]
-	if got := r.say("Resume " + code + "."); got != "Resumed. 0 held actions may now run." || r.eng.Stopped() {
+	if got := r.say("Resume " + code + "."); got != "Resumed." || r.eng.Stopped() {
 		t.Fatalf("resume: %q", got)
 	}
 	if got := r.say("RESUME " + code); got != "Not stopped. Nothing to resume." {
 		t.Fatalf("reuse: %q", got)
+	}
+}
+
+// TestResumeCountsWhatStopKept: the reply counts the actions STOP kept
+// from running, in plain English (L3 on #76).
+func TestResumeCountsWhatStopKept(t *testing.T) {
+	for n, want := range map[int]string{1: "Resumed. 1 stopped action may now run.", 2: "Resumed. 2 stopped actions may now run."} {
+		r := newRig(t, nil)
+		for range n {
+			r.eng.list = append(r.eng.list, journal.Status{State: journal.Authorized})
+		}
+		r.say("STOP")
+		code := regexp.MustCompile(`RESUME ([0-9]{6})`).FindStringSubmatch(r.say("resume"))[1]
+		if got := r.say("RESUME " + code); got != want {
+			t.Fatalf("%d stopped: %q", n, got)
+		}
 	}
 }
 
@@ -728,8 +751,16 @@ func TestAutoReplyAlertUndoAndCommitmentFilter(t *testing.T) {
 	if due := r.ch.DueAutoReplies(); len(due) != 1 || due[0].Reply.Ref != "r2" {
 		t.Fatalf("due %+v", due)
 	}
-	if got := r.say("UNDO " + res.Queued.ID); !strings.HasPrefix(got, "Nothing to undo") {
+	if r.ch.UndoneAfterRelease(res.Queued.ID) {
+		t.Fatal("released reply marked undone before any UNDO")
+	}
+	if got := r.say("UNDO " + res.Queued.ID); got != res.Queued.ID+" is past its undo window; it was released." {
 		t.Fatalf("undo after send: %q", got)
+	}
+	// L3 MUST-4 on #109: the late UNDO is kept, so the reply's silence is
+	// never read as the owner's acceptance.
+	if !r.ch.UndoneAfterRelease(res.Queued.ID) || r.ch.UndoneAfterRelease(id) {
+		t.Fatal("late UNDO not recorded, or recorded for a reply cancelled in time")
 	}
 
 	// A commitment makes it a normal approval request.
@@ -740,5 +771,64 @@ func TestAutoReplyAlertUndoAndCommitmentFilter(t *testing.T) {
 	}
 	if text := r.inbox(); !strings.HasPrefix(text, res.Request+": send reply (commitment) to sam@example.com") {
 		t.Fatalf("approval: %q", text)
+	}
+}
+
+// Security B1(a) on PW3: an auto-reply released unanswered is the owner's
+// silence only if the alert went out and the window ran out on time. One
+// released late, or whose window saw the box's line fail to send, is
+// marked Late: silence over a channel that was down is not acceptance.
+func TestAutoReplySilenceCountsOnlyOnTime(t *testing.T) {
+	r := newRig(t, nil)
+	queue := func(ref string) {
+		t.Helper()
+		if res, err := r.ch.QueueAutoReply(AutoReply{Ref: ref, Recipients: []string{"sam@example.com"}, Body: "Thanks."}); err != nil || res.Queued == nil {
+			t.Fatalf("%+v %v", res, err)
+		}
+		r.inbox()
+	}
+	due := func() Queued {
+		t.Helper()
+		d := r.ch.DueAutoReplies()
+		if len(d) != 1 {
+			t.Fatalf("due %+v", d)
+		}
+		return d[0]
+	}
+	queue("r1")
+	r.advance(DefaultUndoWindow)
+	if q := due(); q.Late {
+		t.Fatal("an on-time release was marked late")
+	}
+
+	queue("r2")
+	r.advance(time.Minute)
+	r.box.SetDown(true)
+	if r.ch.Inform("A notice.") == nil {
+		t.Fatal("a down line sent")
+	}
+	r.box.SetDown(false)
+	r.advance(DefaultUndoWindow)
+	if q := due(); !q.Late {
+		t.Fatal("a window with a failed send was not marked late")
+	}
+
+	queue("r3")
+	r.advance(DefaultUndoWindow + LateRelease + time.Second)
+	if q := due(); !q.Late {
+		t.Fatal("a late release was not marked late")
+	}
+
+	// An alert whose send never returned before the release (Alerted
+	// zero) was never confirmed shown: no silence either.
+	queue("r4")
+	r.ch.mu.Lock()
+	for _, q := range r.ch.queued {
+		q.Alerted = time.Time{}
+	}
+	r.ch.mu.Unlock()
+	r.advance(DefaultUndoWindow)
+	if q := due(); !q.Late {
+		t.Fatal("a release with an unconfirmed alert was not marked late")
 	}
 }

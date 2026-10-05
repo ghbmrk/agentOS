@@ -16,7 +16,9 @@ package modelroute
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -34,8 +36,25 @@ const (
 	HeaderLabel   = "Agentos-Label"
 	HeaderDenial  = "Agentos-Egress-Denial"
 	HeaderUsage   = "Agentos-Usage"
-	headerPrefix  = "Agentos-"
+	// HeaderRule carries, for a replay machine only, the routing rule of
+	// the tree under evaluation (base64 of its JSON); see Evaluation.
+	HeaderRule   = "Agentos-Rule"
+	headerPrefix = "Agentos-"
 )
+
+// EvalPrefix starts every replay machine's ID (vm.EvalPrefix). Only such
+// machines get the evaluation route, and the vault process applies a rule
+// only for them.
+const EvalPrefix = "eval-"
+
+// ReasonEvalCeiling is the vault process's denial reason when a tree under
+// evaluation routes to a model priced above the active rule's dearest
+// route, or to one with no known price. The broker reports such a tree as
+// not evaluated, never as passing or failing (security C1 on #62).
+const ReasonEvalCeiling = "evaluation route over the active price ceiling"
+
+// MaxRule bounds a forwarded routing rule.
+const MaxRule = 16 << 10
 
 // Denial is one refused request, as the vault process reports it. It
 // carries no header or body content. Machine is ignored on receipt: the
@@ -77,12 +96,42 @@ type Config struct {
 	Denied func(machine string, d Denial)
 	// Logf reports forwarding faults. Nil is silent.
 	Logf func(format string, args ...any)
+	// OverCeiling is told, for Evaluation only, which replay machine the
+	// vault process refused with ReasonEvalCeiling, so the evaluator ends
+	// that run as not evaluated (replay.Evaluator.OverPriceCeiling).
+	// Evaluation requires it: without it every call answers 503.
+	OverCeiling func(machine string)
 }
 
 // Forward returns the guest plane's Model function: one handler per
 // machine, forwarding to the vault process. If that process is down the
 // guest gets 503, as when the vault is locked.
 func Forward(cfg Config) func(machine string) http.Handler {
+	fwd := forward(cfg)
+	return func(machine string) http.Handler { return fwd(machine, false, nil) }
+}
+
+// Evaluation returns the replay plane's model access (LOOP-5): machine's
+// calls go to the vault process like a live machine's, always labelled
+// private (owner task data, REV-5), carrying rule, the routing rule of the
+// tree under evaluation, or none to use the active one. The vault process
+// applies it within the owner's grants, which are its own configuration
+// (replay K1). A machine outside EvalPrefix, a rule over MaxRule, or a
+// Config without OverCeiling gets 503 and nothing is forwarded. A refusal
+// with ReasonEvalCeiling is reported to OverCeiling before Denied.
+func Evaluation(cfg Config) func(machine string, rule []byte) http.Handler {
+	fwd := forward(cfg)
+	return func(machine string, rule []byte) http.Handler {
+		if cfg.OverCeiling == nil || !strings.HasPrefix(machine, EvalPrefix) || len(rule) > MaxRule {
+			return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, "no evaluation model route", http.StatusServiceUnavailable)
+			})
+		}
+		return fwd(machine, true, rule)
+	}
+}
+
+func forward(cfg Config) func(machine string, eval bool, rule []byte) http.Handler {
 	logf := cfg.Logf
 	if logf == nil {
 		logf = func(string, ...any) {}
@@ -99,7 +148,7 @@ func Forward(cfg Config) func(machine string) http.Handler {
 		// to 1 KiB); a larger header block is not its.
 		MaxResponseHeaderBytes: 64 << 10,
 	}
-	return func(machine string) http.Handler {
+	return func(machine string, eval bool, rule []byte) http.Handler {
 		rp := &httputil.ReverseProxy{
 			Transport:     tr,
 			FlushInterval: -1,
@@ -107,11 +156,14 @@ func Forward(cfg Config) func(machine string) http.Handler {
 				pr.Out.URL.Scheme, pr.Out.URL.Host, pr.Out.Host = "http", "agentos-egress", "agentos-egress"
 				dropOurs(pr.Out.Header)
 				label := "private"
-				if cfg.Label(machine) == "public" {
+				if !eval && cfg.Label(machine) == "public" {
 					label = "public"
 				}
 				pr.Out.Header.Set(HeaderMachine, machine)
 				pr.Out.Header.Set(HeaderLabel, label)
+				if eval && rule != nil {
+					pr.Out.Header.Set(HeaderRule, base64.StdEncoding.EncodeToString(rule))
+				}
 			},
 			ModifyResponse: func(resp *http.Response) error {
 				raw := resp.Header.Get(HeaderDenial)
@@ -127,12 +179,29 @@ func Forward(cfg Config) func(machine string) http.Handler {
 						d = Denial{Status: resp.StatusCode, Reason: "unreadable denial"}
 					}
 					d.Machine = machine
+					if eval && d.Reason == ReasonEvalCeiling {
+						cfg.OverCeiling(machine)
+					}
 					cfg.Denied(machine, d)
 				}
 				return nil
 			},
 			ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 				logf("model route %s: vault process: %v", machine, err)
+				// No response came back, and this page is not model output
+				// (OP-8 counts content, not the broker's text). A call that
+				// could not connect never reached a provider; any other
+				// failure (a timeout, a hang-up, a vault process that
+				// died) may come after a provider billed output. The cap
+				// counts what the provider may have billed, not what
+				// reached the guest, so the meter charges the call's full
+				// output reservation.
+				var op *net.OpError
+				if errors.As(err, &op) && op.Op == "dial" {
+					meter.Report(r.Context(), meter.Usage{NoResponse: true})
+				} else {
+					meter.Report(r.Context(), meter.Usage{Unanswered: true})
+				}
 				http.Error(w, "model egress unavailable", http.StatusServiceUnavailable)
 			},
 		}

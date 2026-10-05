@@ -115,6 +115,28 @@ class FinishImageTest(unittest.TestCase):
             self.assertIn("initrd /agentos-tk/initrd", t)
 
 
+class FloorFitTest(unittest.TestCase):
+    # PE2: on the N95, the agent machine and one replay machine fit in the pool left after the
+    # RES-2 floor budget (host, inference, browser, headroom).
+    def test_n95_fits(self):
+        out = tk.floor_fit("MemTotal:        7864320 kB\nMemAvailable:    7340032 kB\n")
+        self.assertTrue(out.startswith("PASS"), out)
+        self.assertIn("pool 3496 MiB", out)
+        self.assertIn("agent 1536 + one replay 1024 = 2560", out)
+        self.assertIn("-capacity-mb 4096", out)
+
+    def test_small_pc_fails(self):
+        out = tk.floor_fit("MemTotal:        6291456 kB\n")
+        self.assertTrue(out.startswith("FAIL"), out)
+        self.assertIn("pool 1960 MiB", out)
+
+    def test_large_box_capacity_is_capped(self):
+        self.assertIn("-capacity-mb 4500 here", tk.floor_fit("MemTotal: 16777216 kB\n"))
+
+    def test_unreadable(self):
+        self.assertTrue(tk.floor_fit("").startswith("unknown"))
+
+
 class S2HelpersTest(unittest.TestCase):
     def test_same_number(self):
         self.assertTrue(s2.same_number("+1 (555) 010-0199", "5550100199"))

@@ -92,6 +92,7 @@ func (v *Vault) replaceKeys(kf *keyFile) error {
 	if err != nil {
 		return err
 	}
+	cur, cerr := readKeys(v.keysPath)
 	if err := writeAtomic(v.keysPath+nextSuffix, raw); err != nil {
 		return err
 	}
@@ -102,6 +103,11 @@ func (v *Vault) replaceKeys(kf *keyFile) error {
 		// A leftover copy is inert (stagedKeys, dropStaleStaged).
 		v.nextKeys = nil
 		return err
+	}
+	// Sealed, so decided: a change of the passphrase replaces any that
+	// never took effect (P2-4g).
+	if cerr == nil && passphraseChanged(cur, kf) {
+		v.unfinished = false
 	}
 	if err := crashPoint(crashKeysSealed); err != nil {
 		return err
@@ -134,17 +140,27 @@ func (v *Vault) finishKeys() error {
 }
 
 // dropStaleStaged removes a staged next keys file left beside the keys
-// file once no slot change is under way. It opens nothing (stagedKeys),
-// so this is housekeeping and a failure is ignored. It assumes one open
+// file once no slot change is under way, and reports whether it changed
+// the passphrase: a passphrase change that never took effect (P2-4g). It
+// opens nothing (stagedKeys), so this is housekeeping and a failure is
+// ignored. It assumes one open
 // Vault per keys path, as the vault process keeps: a second Vault mid
 // change on the same path would lose its staged file. Caller does not
 // hold mu.
-func (v *Vault) dropStaleStaged() {
+func (v *Vault) dropStaleStaged() bool {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if v.nextKeys == nil {
+	if v.nextKeys != nil {
+		return false
+	}
+	changed := false
+	if nraw, err := os.ReadFile(v.keysPath + nextSuffix); err == nil {
+		cur, cerr := readKeys(v.keysPath)
+		nkf, nerr := parseKeys(nraw)
+		changed = cerr == nil && nerr == nil && passphraseChanged(cur, nkf)
 		os.Remove(v.keysPath + nextSuffix)
 	}
+	return changed
 }
 
 // stagedKeys reports whether raw, read from the staged next keys file,
@@ -174,6 +190,10 @@ func (v *Vault) checkKeys(raw []byte, kf *keyFile, want []byte, opened Slot) err
 			return err
 		}
 		if !nkf.has(opened) {
+			if opened.Kind == SlotPassphrase && passphraseChanged(kf, nkf) {
+				// The change replaced this passphrase (P2-4g).
+				return ErrChangeInterrupted
+			}
 			return ErrNoSlotOpens
 		}
 		if err := v.finishKeys(); err != nil {
@@ -189,6 +209,33 @@ func (v *Vault) checkKeys(raw []byte, kf *keyFile, want []byte, opened Slot) err
 		return v.replaceKeys(&keyFile{Magic: kf.Magic, Version: kf.Version, Slots: slotsFor(kf, want)})
 	}
 	return nil
+}
+
+// passphraseChanged reports whether the slot change from cur to next is a
+// passphrase change: both files wrap the same data key, and next drops a
+// passphrase slot of cur and adds one of its own. A re-encryption re-wraps
+// every slot under a new key ID, and an added passphrase slot keeps the
+// old one, so neither counts (security R2 on #93).
+func passphraseChanged(cur, next *keyFile) bool {
+	a, err := cur.keyID()
+	if err != nil {
+		return false
+	}
+	b, err := next.keyID()
+	if err != nil || !bytes.Equal(a, b) {
+		return false
+	}
+	return dropsPassphrase(cur, next) && dropsPassphrase(next, cur)
+}
+
+// dropsPassphrase reports whether from holds a passphrase slot to lacks.
+func dropsPassphrase(from, to *keyFile) bool {
+	for _, s := range from.Slots {
+		if s.Kind == SlotPassphrase && !to.has(s) {
+			return true
+		}
+	}
+	return false
 }
 
 // has reports whether the file holds slot s unchanged.

@@ -1,9 +1,12 @@
 package loops
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -12,6 +15,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/route"
+	"github.com/ghbmrk/agentos/broker/skill/format"
 )
 
 // REQ: LOOP-4, LOOP-6, CHG-1, OP-7
@@ -248,6 +252,134 @@ func TestCandidatesOutsideTheirClassNeverReachThePipeline(t *testing.T) {
 	}
 	if r.ev.runs() != 0 || len(r.p.Adoptions()) != 0 {
 		t.Fatalf("an out-of-class candidate was evaluated (%d runs)", r.ev.runs())
+	}
+}
+
+// notReady is a builder whose evidence cannot yield a candidate yet.
+type notReady struct {
+	builder
+	ready bool
+}
+
+func (b *notReady) Ready(Brief) bool { return b.ready }
+
+// LOOP-3, L10: a builder that is not ready for a hypothesis gets no job, so
+// nothing is measured against Loop 1 (no dry run toward parking); the
+// hypothesis waits for more supporting tasks.
+func TestNotReadyWaitsForMoreTasks(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	b := &notReady{builder: builder{files: map[string][]byte{"procedures/mail": []byte("v2")}}}
+	l, err := NewLearn(LearnConfig{Pipeline: r.p, Journal: r.eng, Harvest: h, Builder: b, MinHeldOut: 1})
+	must(t, err)
+	n := 0
+	for i := 0; i < 8; i++ {
+		n++
+		r.corrected(h, n)
+	}
+	if job, ok := l.Next(context.Background(), true); ok {
+		t.Fatalf("offered %s while the builder was not ready", job.Name)
+	}
+	b.ready = true
+	if _, ok := l.Next(context.Background(), true); ok {
+		t.Fatal("offered again with no new supporting task")
+	}
+	// Held-out tasks never support a hypothesis, so add tasks until one
+	// lands in its evidence.
+	var job Job
+	ok := false
+	for i := 0; i < 20 && !ok; i++ {
+		n++
+		r.corrected(h, n)
+		job, ok = l.Next(context.Background(), true)
+	}
+	if !ok || job.Name != "candidate" {
+		t.Fatalf("no candidate after new supporting tasks: %v %v", job.Name, ok)
+	}
+	if len(b.got()) != 0 {
+		t.Fatal("Build ran before the job")
+	}
+}
+
+// skillFile is a valid one-step skill or procedure file for account,
+// with the shape its content gives.
+func skillFile(t *testing.T, kind format.Kind, account string) (shape string, b []byte) {
+	t.Helper()
+	return skillWith(t, kind, account, nil)
+}
+
+// skillWith is skillFile with extra params on its step, named after the
+// shape without them.
+func skillWith(t *testing.T, kind format.Kind, account string, params map[string]format.Node) (shape string, b []byte) {
+	t.Helper()
+	sk := &format.Skill{Version: format.Version, Kind: kind, ID: "k000000000000", Runs: 1,
+		Slots: []format.Slot{{Name: "to", Type: format.Email, Max: 64}},
+		Steps: []format.Step{{Account: account, Action: "send", Recipients: []format.Node{{Slot: "to"}}}}}
+	shape = sk.Shape()
+	sk.ID = "k" + shape
+	if kind == format.KindProcedure {
+		sk.ID = "p" + shape
+	}
+	sk.Steps[0].Params = params
+	if params == nil {
+		if err := sk.Validate(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return shape, sk.Encode()
+}
+
+// CAP-5: a skill candidate may delete the procedure it replaces, but may
+// not write there, and no other class may delete outside its namespace.
+// "Replaces" is the shape the skill file's own steps give, not its name
+// (P3-6e, security R1 on #74).
+func TestSkillMaySupersedeItsProcedure(t *testing.T) {
+	s1, b1 := skillFile(t, format.KindSkill, "mail")
+	s2, b2 := skillFile(t, format.KindSkill, "chat")
+	_, pb := skillFile(t, format.KindProcedure, "mail")
+	ps2, pb2 := skillFile(t, format.KindProcedure, "chat")
+	if err := inClass(change.ClassProcedure, change.Candidate{Files: map[string][]byte{"procedures/p" + ps2 + ".json": pb2}}); err != nil {
+		t.Fatal(err)
+	}
+	_, emptyObj := skillWith(t, format.KindSkill, "mail", map[string]format.Node{"zzz": {Obj: map[string]format.Node{}}})
+	dup := bytes.Replace(b1, []byte(`{"version":1,`), []byte(`{"version":1,"kind":"procedure",`), 1)
+	k := func(s string) string { return "skills/k" + s + ".json" }
+	p := func(s string) string { return "procedures/p" + s + ".json" }
+	ok := change.Candidate{Files: map[string][]byte{k(s1): b1}, Delete: []string{p(s1)}}
+	if err := inClass(change.ClassSkill, ok); err != nil {
+		t.Fatal(err)
+	}
+	sk := map[string][]byte{k(s1): b1}
+	for name, c := range map[string]struct {
+		class change.Class
+		cand  change.Candidate
+	}{
+		"skill writes procedures": {change.ClassSkill, change.Candidate{Files: map[string][]byte{p(s1): pb}}},
+		"skill deletes budget":    {change.ClassSkill, change.Candidate{Delete: []string{"budget/spare.json"}}},
+		"other shape's procedure": {change.ClassSkill, change.Candidate{Files: sk, Delete: []string{p(s2)}}},
+		"procedure with no skill": {change.ClassSkill, change.Candidate{Delete: []string{p(s1)}}},
+		"two skills":              {change.ClassSkill, change.Candidate{Files: map[string][]byte{k(s1): b1, k(s2): b2}, Delete: []string{p(s1)}}},
+		"procedure deletes skill": {change.ClassProcedure, change.Candidate{Delete: []string{k(s1)}}},
+		// The builder names the file after s1's shape, but its steps are s2's.
+		"skill renamed to another shape": {change.ClassSkill, change.Candidate{Files: map[string][]byte{k(s1): b2}, Delete: []string{p(s1)}}},
+		"skill file not a skill":         {change.ClassSkill, change.Candidate{Files: map[string][]byte{k(s1): []byte("{}")}, Delete: []string{p(s1)}}},
+		"procedure file under skills":    {change.ClassSkill, change.Candidate{Files: map[string][]byte{k(s1): pb}, Delete: []string{p(s1)}}},
+		// A task-B procedure named as task A's (security C1 on #89).
+		"procedure mislabelled": {change.ClassProcedure, change.Candidate{Files: map[string][]byte{p(s1): pb2}}},
+		// An empty object adds a {} param but no shape leaf (L3 on #89).
+		"skill with an empty obj":  {change.ClassSkill, change.Candidate{Files: map[string][]byte{k(s1): emptyObj}, Delete: []string{p(s1)}}},
+		"skill with duplicate key": {change.ClassSkill, change.Candidate{Files: map[string][]byte{k(s1): dup}, Delete: []string{p(s1)}}},
+		"skill with trailing }":    {change.ClassSkill, change.Candidate{Files: map[string][]byte{k(s1): append(bytes.Clone(b1), '}')}, Delete: []string{p(s1)}}},
+		// Not skill-file names: a free-form file is never superseded, and
+		// on a case-insensitive disk pABC… could alias the real pabc…
+		// (L3 and security R1 on #89).
+		"free-form names":     {change.ClassSkill, change.Candidate{Files: map[string][]byte{"skills/kABCDEF012345.json": []byte("x")}, Delete: []string{"procedures/pABCDEF012345.json"}}},
+		"free-form shape":     {change.ClassSkill, change.Candidate{Files: map[string][]byte{"skills/kx.json": []byte("x")}, Delete: []string{"procedures/px.json"}}},
+		"skill not canonical": {change.ClassSkill, change.Candidate{Files: map[string][]byte{k(s1): append([]byte(" "), b1...)}, Delete: []string{p(s1)}}},
+	} {
+		if err := inClass(c.class, c.cand); !errors.Is(err, ErrOutOfClass) {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }
 
@@ -732,5 +864,468 @@ func TestAHeldOutGoalAlsoHoldsItsOriginsUnstampedWork(t *testing.T) {
 	}
 	if ev.Held("origin:guest:other") {
 		t.Fatal("another origin was held")
+	}
+}
+
+// REQ: LOOP-5
+// K3 and C14 (d): nothing about evaluations reaches a builder. If a field
+// is added here, it must be one a builder may see.
+func TestBuildersSeeOnlyTheHypothesisAndTheDevSplit(t *testing.T) {
+	var names []string
+	for _, f := range reflect.VisibleFields(reflect.TypeOf(Brief{})) {
+		names = append(names, f.Name)
+	}
+	sort.Strings(names)
+	if strings.Join(names, ",") != "Dev,Hypothesis" {
+		t.Fatalf("Brief fields %v", names)
+	}
+	var hf []string
+	for _, f := range reflect.VisibleFields(reflect.TypeOf(Hypothesis{})) {
+		hf = append(hf, f.Name)
+	}
+	sort.Strings(hf)
+	if strings.Join(hf, ",") != "Class,Evidence,Key,Signal,Tasks" {
+		t.Fatalf("Hypothesis fields %v", hf)
+	}
+}
+
+// PW3 part B (potency PK2; security B1, potency C3 on #90): an auto-reply
+// the owner let go is a weaker good verdict. It is recorded under its own
+// source, never the owner's; at most MaxImplicitPerDay a day per guest
+// lineage become cases, so one burst cannot flood the suite; and each
+// counts half towards the evidence hold.
+func TestImplicitAcceptancesAreCappedAndWeighHalf(t *testing.T) {
+	r := newRig(t)
+	cs := &cases{}
+	now := time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)
+	h := &Harvester{J: r.eng, Pipeline: cs, Store: &change.MemStore{}, Now: func() time.Time { return now }}
+	implicit := func(id string) error {
+		r.task(id, "g"+id, "mail", "send", "private")
+		return h.Harvest(Outcome{Intent: id, Action: Implicit, Input: []byte("task"), Output: []byte("reply")})
+	}
+	for i := 0; i < MaxImplicitPerDay; i++ {
+		must(t, implicit(fmt.Sprint("i", i)))
+	}
+	if err := implicit("over"); !errors.Is(err, ErrImplicitCap) {
+		t.Fatalf("over the cap: %v", err)
+	}
+	if st, _ := r.eng.Get("over"); st.Quality.Verdict != "" {
+		t.Fatalf("a capped acceptance was recorded: %+v", st.Quality)
+	}
+	if st, _ := r.eng.Get("i0"); st.Quality.Verdict != journal.VerdictGood || st.Quality.Source != "owner-implicit" {
+		t.Fatalf("implicit verdict: %+v", st.Quality)
+	}
+	for _, c := range cs.got {
+		if !c.Implicit || c.Outcome != change.Accepted || string(c.Expect) != "reply" {
+			t.Fatalf("implicit case %+v", c)
+		}
+	}
+	ev, err := h.Evidence()
+	must(t, err)
+	if ev.HeldOut != MaxImplicitPerDay/2 || ev.Explicit != 0 {
+		t.Fatalf("evidence from %d implicit cases: %+v", MaxImplicitPerDay, ev)
+	}
+	r.task("yes", "gyes", "mail", "send", "private")
+	must(t, h.Harvest(Outcome{Intent: "yes", Action: Approved, Input: []byte("task"), Output: []byte("reply")}))
+	if ev, _ := h.Evidence(); ev.HeldOut != 1+MaxImplicitPerDay/2 || ev.Explicit != 1 {
+		t.Fatalf("with one explicit case: %+v", ev)
+	}
+	now = now.Add(24 * time.Hour)
+	must(t, implicit("next-day"))
+}
+
+// L3 MUST-1 and MUST-2 on #109: concurrent harvests never overshoot the
+// lineage's cap, and guests that renew their lineage (recreated machines)
+// share a box-wide daily ceiling.
+func TestImplicitCapsHoldUnderConcurrencyAndRenewedLineages(t *testing.T) {
+	r := newRig(t)
+	cs := &cases{}
+	now := time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)
+	h := &Harvester{J: r.eng, Pipeline: cs, Store: &change.MemStore{}, Now: func() time.Time { return now }}
+	task := func(id, machine string) {
+		in := journal.Intent{ID: id, GoalID: "g" + id, Origin: "guest:" + machine, Account: "mail", Action: "send",
+			Executor: "task", Machine: machine, Label: "private"}
+		if _, err := r.eng.Submit(in); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.eng.Authorize(context.Background(), id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.eng.Dispatch(context.Background(), id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	harvest := func(id string) error {
+		return h.Harvest(Outcome{Intent: id, Action: Implicit, Input: []byte("task"), Output: []byte("reply")})
+	}
+	const n = 40
+	for i := 0; i < n; i++ {
+		task(fmt.Sprint("c", i), "burst")
+	}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	ok, capped := 0, 0
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			err := harvest(id)
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err == nil:
+				ok++
+			case errors.Is(err, ErrImplicitCap):
+				capped++
+			default:
+				t.Errorf("%s: %v", id, err)
+			}
+		}(fmt.Sprint("c", i))
+	}
+	wg.Wait()
+	if ok != MaxImplicitPerDay || capped != n-MaxImplicitPerDay || len(cs.got) != MaxImplicitPerDay {
+		t.Fatalf("%d concurrent harvests: %d kept, %d capped, %d cases", n, ok, capped, len(cs.got))
+	}
+	// Renewed lineages: each is under its own cap, but the box's is shared.
+	kept := ok
+	for m := 0; kept < MaxImplicitBoxPerDay; m++ {
+		id := fmt.Sprint("r", m)
+		task(id, fmt.Sprint("renewed-", m))
+		must(t, harvest(id))
+		kept++
+	}
+	task("one-more", "renewed-new")
+	if err := harvest("one-more"); !errors.Is(err, ErrImplicitCap) {
+		t.Fatalf("over the box's daily cap: %v", err)
+	}
+	// L3 SHOULD-B on #109: the counts survive a restart.
+	h2 := &Harvester{J: r.eng, Pipeline: cs, Store: h.Store, Now: h.Now}
+	task("after-restart", "renewed-after")
+	if err := h2.Harvest(Outcome{Intent: "after-restart", Action: Implicit, Input: []byte("task"), Output: []byte("reply")}); !errors.Is(err, ErrImplicitCap) {
+		t.Fatalf("over the box's daily cap after a restart: %v", err)
+	}
+	now = now.Add(24 * time.Hour)
+	task("tomorrow", "renewed-new")
+	must(t, harvest("tomorrow"))
+	h.mu.Lock()
+	days := len(h.st.Daily)
+	h.mu.Unlock()
+	if days != 2 { // the lineage and the box, today's only
+		t.Fatalf("old daily counts kept: %d entries", days)
+	}
+}
+
+// Potency C3(c), L14: implicit gain counts half toward a proposal's value;
+// and the digest counts the ideas the explicit-case anchor sent to the
+// owner instead of adopting (potency on the PW3 design).
+func TestImplicitGainWeighsHalfAndAnchorHoldsAreCounted(t *testing.T) {
+	adopted := change.Report{State: change.StateAdopted, Score: change.Score{HeldOut: 6, Passed: 6, BaselinePassed: 2,
+		Implicit: 4, ImplicitPassed: 4, ImplicitBaselinePassed: 2}}
+	// Explicit gain 2, implicit gain 2 at half: 3, plus 0.25 for adopting.
+	if v := value(adopted); v != 3.25 {
+		t.Fatalf("value %v", v)
+	}
+	r := newRig(t)
+	p := &waitingPipeline{Pipeline: r.p, open: map[string]bool{"c1": true, "c2": true, "c4": true}}
+	l, err := NewLearn(LearnConfig{Pipeline: p, Journal: r.eng, Harvest: r.harvester()})
+	must(t, err)
+	held := func(id string) change.Report {
+		return change.Report{ID: id, State: change.StateAwaitingOwner, NeedsExplicit: true}
+	}
+	l.asked("a", held("c1"))
+	l.asked("b", held("c2"))
+	l.asked("lapsed", held("c3")) // no longer waiting: the owner channel lists it (L18)
+	l.asked("c", change.Report{State: change.StateAwaitingOwner})
+	if d := strings.Join(l.Digest(), "\n"); !strings.Contains(d, "Learning: 2 ideas are waiting for your approval instead of taking effect on their own, because none was tested on a task you said YES to.") {
+		t.Fatalf("digest %q", d)
+	}
+	l.asked("c", change.Report{State: change.StateRejected})
+	l.asked("b", change.Report{State: change.StateRejected})
+	if d := strings.Join(l.Digest(), "\n"); d != "Learning: 1 idea is waiting for your approval instead of taking effect on its own, because it wasn't tested on a task you said YES to." {
+		t.Fatalf("digest for one %q", d)
+	}
+	l.asked("a", change.Report{State: change.StateAdopted})
+	l.asked("b", change.Report{State: change.StateRejected})
+	if d := l.Digest(); len(d) != 0 {
+		t.Fatalf("digest after they settled %q", d)
+	}
+}
+
+// waitingPipeline reports which proposals still wait on the owner.
+type waitingPipeline struct {
+	Pipeline
+	open map[string]bool
+}
+
+func (w *waitingPipeline) Waiting(id string) bool { return w.open[id] }
+
+// REQ: LOOP-1, RES-1
+// PE1: a candidate whose evaluation is preempted is kept, so when Loop 1
+// is offered spare time again it re-proposes the same candidate without
+// another build (no second model spend), and the pipeline resumes its
+// evaluation from the completed pairs.
+func TestAPreemptedCandidateIsResumedNotRebuilt(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	b := &builder{files: map[string][]byte{"procedures/mail": []byte("v2")}}
+	l, err := NewLearn(LearnConfig{Pipeline: r.p, Journal: r.eng, Harvest: h, Builder: b, Now: r.clk.now})
+	must(t, err)
+	r.restart(l)
+	for n := 1; ; n++ {
+		ev, err := h.Evidence()
+		must(t, err)
+		if ev.HeldOut >= 6 && len(ev.Dev) > 0 {
+			break
+		}
+		r.corrected(h, n)
+	}
+	ev, _ := h.Evidence()
+	total := 2 * (ev.HeldOut + 1) // held-out cases plus the security fixture, both sides
+	var once sync.Once
+	r.ev.mu.Lock()
+	r.ev.hook = func(ctx context.Context, n int) {
+		if n == total-1 {
+			once.Do(func() { go r.s.Preempt() })
+			<-ctx.Done()
+		}
+	}
+	r.ev.mu.Unlock()
+	if ran, _ := r.s.Tick(context.Background()); !ran {
+		t.Fatal("Loop 1 did nothing")
+	}
+	if len(r.p.Adoptions()) != 0 {
+		t.Fatal("a preempted evaluation adopted")
+	}
+	first := r.ev.runs()
+	r.ev.mu.Lock()
+	r.ev.hook = nil
+	r.ev.mu.Unlock()
+	if ran, _ := r.s.Tick(context.Background()); !ran {
+		t.Fatal("the preempted candidate was not offered again")
+	}
+	if got := r.p.Files("procedures")["procedures/mail"]; string(got) != "v2" {
+		t.Fatalf("procedure is %q after the resumed candidate", got)
+	}
+	if n := len(b.got()); n != 1 {
+		t.Fatalf("%d builds, want 1: a preempted candidate was rebuilt", n)
+	}
+	if resumed := r.ev.runs() - first; resumed >= total {
+		t.Fatalf("resumed evaluation ran %d probes of %d: it started over", resumed, total)
+	}
+}
+
+// interruptingPipeline answers every proposal as preempted, and records
+// what it was given.
+type interruptingPipeline struct {
+	Pipeline
+	got []change.Candidate
+}
+
+func (p *interruptingPipeline) Propose(_ context.Context, c change.Candidate) (change.Report, error) {
+	p.got = append(p.got, c)
+	return change.Report{}, change.ErrInterrupted
+}
+
+func newKeepRig(t *testing.T) (*Learn, *interruptingPipeline, *builder, *clock) {
+	t.Helper()
+	pl := &interruptingPipeline{}
+	b := &builder{files: map[string][]byte{"procedures/mail": []byte("v2")}}
+	clk := &clock{t: time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)}
+	l, err := NewLearn(LearnConfig{Pipeline: pl, Journal: &journal.Engine{}, Harvest: &Harvester{}, Builder: b, Now: clk.now})
+	must(t, err)
+	return l, pl, b, clk
+}
+
+func hyp(key string, tasks ...string) Hypothesis {
+	h := Hypothesis{Signal: SignalCorrection, Class: change.ClassProcedure, Key: key, Tasks: tasks}
+	for _, task := range tasks {
+		h.Evidence = append(h.Evidence, journal.Status{Intent: journal.Intent{ID: task, Label: "private"}})
+	}
+	return h
+}
+
+// REQ: CHG-1, LOOP-1
+// L3 MUST-1 on #103: a kept candidate is reused only for the very brief it
+// was built from. The same number of tasks with one swapped, a task now
+// held out, or an expired candidate builds afresh.
+func TestAKeptCandidateNeedsTheSameBrief(t *testing.T) {
+	l, _, b, clk := newKeepRig(t)
+	ev := Evidence{}
+	h := hyp("k", "task-a", "task-b")
+	l.propose(context.Background(), h, ev)
+	l.propose(context.Background(), h, ev)
+	if n := len(b.got()); n != 1 {
+		t.Fatalf("%d builds for the same brief, want 1", n)
+	}
+
+	swapped := hyp("k", "task-a", "task-c") // same count, another task
+	l.propose(context.Background(), swapped, ev)
+	if n := len(b.got()); n != 2 {
+		t.Fatalf("%d builds after a task was swapped, want 2", n)
+	}
+
+	held := Evidence{heldTasks: map[string]bool{"task-a": true}}
+	l.propose(context.Background(), swapped, held)
+	if n := len(b.got()); n != 3 {
+		t.Fatalf("%d builds after a task was held out, want 3", n)
+	}
+
+	l.propose(context.Background(), swapped, ev) // kept, then reused once the hold lifts
+	if n := len(b.got()); n != 3 {
+		t.Fatalf("%d builds for an unchanged brief, want 3", n)
+	}
+	clk.mu.Lock()
+	clk.t = clk.t.Add(change.ResumeFor + time.Minute)
+	clk.mu.Unlock()
+	l.propose(context.Background(), swapped, ev)
+	if n := len(b.got()); n != 4 {
+		t.Fatalf("%d builds after the kept candidate expired, want 4", n)
+	}
+
+	dev := Evidence{Dev: []change.Case{{ID: "dev-1"}}}
+	l.propose(context.Background(), swapped, dev)
+	if n := len(b.got()); n != 5 {
+		t.Fatalf("%d builds after the dev split changed, want 5", n)
+	}
+}
+
+// REQ: LOOP-1
+// At most maxKeptCandidates candidates are kept, oldest dropped first.
+func TestKeptCandidatesAreBounded(t *testing.T) {
+	l, _, b, clk := newKeepRig(t)
+	for i := 0; i <= maxKeptCandidates; i++ {
+		clk.mu.Lock()
+		clk.t = clk.t.Add(time.Second)
+		clk.mu.Unlock()
+		l.propose(context.Background(), hyp(fmt.Sprintf("k%d", i), "t"), Evidence{})
+	}
+	l.mu.Lock()
+	n := len(l.built)
+	_, oldest := l.built["k0"]
+	l.mu.Unlock()
+	if n != maxKeptCandidates || oldest {
+		t.Fatalf("%d kept (oldest kept: %v), want %d without the oldest", n, oldest, maxKeptCandidates)
+	}
+	before := len(b.got())
+	l.propose(context.Background(), hyp(fmt.Sprintf("k%d", maxKeptCandidates), "t"), Evidence{})
+	if len(b.got()) != before {
+		t.Fatal("the newest kept candidate was rebuilt")
+	}
+}
+
+// devOnly is a pipeline whose dev split is fixed.
+type devOnly struct {
+	cases
+	dev []change.Case
+}
+
+func (d *devOnly) Dev(change.Class) []change.Case { return d.dev }
+
+// L3 MUST-3 on #109: a builder's brief never carries an implicit case,
+// even on the dev side (change C17).
+func TestABriefNeverCarriesAnImplicitCase(t *testing.T) {
+	p := &devOnly{dev: []change.Case{{ID: "e", Input: []byte("x")}, {ID: "i", Implicit: true}}}
+	h := &Harvester{J: newRig(t).eng, Pipeline: p, Store: &change.MemStore{}}
+	ev, err := h.Evidence()
+	must(t, err)
+	if len(ev.Dev) != 1 || ev.Dev[0].ID != "e" {
+		t.Fatalf("brief's dev cases: %+v", ev.Dev)
+	}
+}
+
+// REQ: RES-1, LOOP-1, LOOP-3
+// PE3: when admission refuses or preempts an evaluation machine with the
+// unit's context still live, the scheduler treats the unit as preempted:
+// it is not measured, the scheduler waits Retry before looking again
+// (no spin while the box has no room), and Loop 1 offers the same
+// candidate again without another build.
+func TestAnEvaluatorInterruptionIsAPreemption(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	b := &builder{files: map[string][]byte{"procedures/mail": []byte("v2")}}
+	l, err := NewLearn(LearnConfig{Pipeline: r.p, Journal: r.eng, Harvest: h, Builder: b, Now: r.clk.now})
+	must(t, err)
+	r.restart(l)
+	for n := 1; ; n++ {
+		ev, err := h.Evidence()
+		must(t, err)
+		if ev.HeldOut >= 6 && len(ev.Dev) > 0 {
+			break
+		}
+		r.corrected(h, n)
+	}
+	refused := fmt.Errorf("admission: no room: %w", change.ErrInterrupted)
+	r.ev.mu.Lock()
+	r.ev.refuse = func(n int) error {
+		if n == 3 {
+			return refused
+		}
+		return nil
+	}
+	r.ev.mu.Unlock()
+	ran, wait := r.s.Tick(context.Background())
+	if !ran || wait != time.Minute {
+		t.Fatalf("interrupted unit: ran %v, wait %v; want a Retry wait", ran, wait)
+	}
+	if len(r.p.Adoptions()) != 0 {
+		t.Fatal("an interrupted evaluation adopted")
+	}
+	r.s.mu.Lock()
+	runs := r.s.loops[Improve].runs
+	r.s.mu.Unlock()
+	if runs != 0 {
+		t.Fatalf("an interrupted unit was measured (%d runs)", runs)
+	}
+	r.ev.mu.Lock()
+	r.ev.refuse = nil
+	r.ev.mu.Unlock()
+	if ran, _ := r.s.Tick(context.Background()); !ran {
+		t.Fatal("the interrupted candidate was not offered again")
+	}
+	if got := r.p.Files("procedures")["procedures/mail"]; string(got) != "v2" {
+		t.Fatalf("procedure is %q after the resumed candidate", got)
+	}
+	if n := len(b.got()); n != 1 {
+		t.Fatalf("%d builds, want 1", n)
+	}
+}
+
+// REQ: LOOP-4, CH-15
+// UX-S3-1 on W3 step 3: a candidate nothing could use yet is built but not
+// proposed, so the owner is never asked about it, and the digest counts it.
+func TestAnUnseededCandidateIsNeverProposed(t *testing.T) {
+	l, pl, b, _ := newKeepRig(t)
+	l.cfg.Unseeded = func(c change.Candidate) bool { _, ok := c.Files["procedures/mail"]; return ok }
+	for _, k := range []string{"k1", "k2", "k1"} { // k1 rebuilt as its evidence grows (UX-119-1)
+		if _, err := l.propose(context.Background(), hyp(k, "task-"+k), Evidence{}); !errors.Is(err, ErrUnseeded) {
+			t.Fatalf("propose %s: %v", k, err)
+		}
+	}
+	if len(pl.got) != 0 || len(b.got()) != 3 {
+		t.Fatalf("%d proposed, %d built", len(pl.got), len(b.got()))
+	}
+	if d := strings.Join(l.Digest(), "\n"); d != "Learning: 2 new skills drafted. They'll be tested once your agent can use them." {
+		t.Fatalf("digest %q", d)
+	}
+	l.cfg.Unseeded = func(change.Candidate) bool { return false } // W4 seeds them
+	l.propose(context.Background(), hyp("k1", "task-k1"), Evidence{})
+	if len(pl.got) != 1 {
+		t.Fatal("not proposed once it can be used")
+	}
+	if d := strings.Join(l.Digest(), "\n"); d != "Learning: 1 new skill drafted. It'll be tested once your agent can use it." {
+		t.Fatalf("digest for one %q", d)
+	}
+	// Once none is held, the next digest says once that they are being
+	// tested (potency C1, UX-120-1 on #120).
+	l.propose(context.Background(), hyp("k2", "task-k2"), Evidence{})
+	if d := strings.Join(l.Digest(), "\n"); d != "Learning: drafted skills are now being tested." {
+		t.Fatalf("digest once proposed %q", d)
+	}
+	if d := l.Digest(); len(d) != 0 {
+		t.Fatalf("said twice: %q", d)
+	}
+	l.propose(context.Background(), hyp("k3", "task-k3"), Evidence{})
+	if d := l.Digest(); len(d) != 0 {
+		t.Fatalf("a candidate never held is announced: %q", d)
 	}
 }

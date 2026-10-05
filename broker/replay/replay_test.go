@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -17,10 +18,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/guest"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/meter"
+	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/vm"
 )
 
@@ -42,9 +45,41 @@ type machines struct {
 	seeds   map[string]map[string][]byte
 	live    map[string]bool
 	created []string
+	// createErr, if set, refuses every machine; states overrides a
+	// machine's state (Running otherwise).
+	createErr error
+	states    map[string]vm.State
+}
+
+func (m *machines) Get(id string) (vm.Machine, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.live[id] {
+		return vm.Machine{}, vm.ErrUnknown
+	}
+	st := vm.Running
+	if s, ok := m.states[id]; ok {
+		st = s
+	}
+	return vm.Machine{ID: id, State: st}, nil
+}
+
+func (m *machines) setState(id string, st vm.State) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.states == nil {
+		m.states = map[string]vm.State{}
+	}
+	m.states[id] = st
 }
 
 func (m *machines) CreateSeeded(_ context.Context, id string, s vm.Spec, seed map[string][]byte) (vm.Machine, error) {
+	m.mu.Lock()
+	cerr := m.createErr
+	m.mu.Unlock()
+	if cerr != nil {
+		return vm.Machine{}, cerr
+	}
 	dir, err := m.svc.Open(id)
 	if err != nil {
 		return vm.Machine{}, err
@@ -301,7 +336,7 @@ func TestLOOP5ModelAccessIsTheTreesAndMetered(t *testing.T) {
 	}
 	r = newRig(t, recs{}, func(g *client, _ string) string { return modelCall(g) }, func(c *Config) {
 		c.Meter = mtr
-		c.Model = func(t change.Tree) http.Handler {
+		c.Model = func(_ string, t change.Tree) http.Handler {
 			rule := t["routing/rule.json"]
 			return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.Write(rule) })
 		}
@@ -317,7 +352,7 @@ func TestLOOP5ModelAccessIsTheTreesAndMetered(t *testing.T) {
 
 func TestLOOP5ModelNeedsAMeter(t *testing.T) {
 	_, err := New(Config{Machines: &machines{}, Recordings: recs{}, Active: active, Spec: vm.Spec{Image: "i"}, Dir: t.TempDir(),
-		Model: func(change.Tree) http.Handler { return http.NotFoundHandler() }})
+		Model: func(string, change.Tree) http.Handler { return http.NotFoundHandler() }})
 	if err == nil {
 		t.Fatal("unmetered model access accepted")
 	}
@@ -477,7 +512,7 @@ func TestCHG1RoutingWithoutModelAccessIsNotEvaluated(t *testing.T) {
 	}
 	r = newRig(t, recs{}, func(g *client, _ string) string { return modelCall(g) }, func(c *Config) {
 		c.Meter = mtr
-		c.Model = func(t change.Tree) http.Handler {
+		c.Model = func(_ string, t change.Tree) http.Handler {
 			rule := t["routing/rule.json"]
 			return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.Write(rule) })
 		}
@@ -491,5 +526,237 @@ func TestLOOP5NoTaskLookupRecordsNothing(t *testing.T) {
 	got, err := JournalRecordings{J: fakeJournal{st("g/1", "", "guest:g", "mail")}}.Effects("p")
 	if err != nil || len(got) != 0 {
 		t.Fatalf("nil Task: %v %v", got, err)
+	}
+}
+
+// Arbitrator on W3a: the verdict is a deterministic function of the replay
+// machines' outputs; replay itself never calls a model. Its Model handle is
+// built only for the run's own replay machine and is served only when that
+// machine's guest makes a call. A guest that makes none causes no model
+// call at all.
+func TestCHG1ReplayNeverCallsAModelItself(t *testing.T) {
+	mtr, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "meter.json"), MachineCap: meter.DefaultMachineCap, OverallCap: meter.DefaultOverallCap})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var built []string
+	var served int
+	r := newRig(t, recs{}, func(*client, string) string { return "no model call" }, func(c *Config) {
+		c.Meter = mtr
+		c.Model = func(id string, _ change.Tree) http.Handler {
+			built = append(built, id)
+			return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { served++ })
+		}
+	})
+	out, err := r.e.Run(bg, tree, change.Probe{ID: "p1", Input: []byte("go")})
+	if err != nil || string(out) != "no model call" {
+		t.Fatalf("run: %q %v", out, err)
+	}
+	if served != 0 || len(built) != 1 || built[0] != r.ms.created[0] || !strings.HasPrefix(built[0], Prefix) {
+		t.Fatalf("model handle built for %q, served %d times; machine %q", built, served, r.ms.created)
+	}
+}
+
+// The same, by source: replay's own code opens no outbound connection, so
+// a model can only be reached through the guest plane's model route.
+func TestCHG1ReplayOpensNoClient(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, bad := range []string{"http.Client", "http.Get", "http.Post", "DefaultClient", "DefaultTransport", "RoundTrip", "net.Dial", ".ServeHTTP("} {
+			if strings.Contains(string(b), bad) {
+				t.Errorf("%s uses %s", f, bad)
+			}
+		}
+	}
+}
+
+// Replay's model access forwards the routing rule of the tree under
+// evaluation, and only that file; a tree with none forwards no rule.
+func TestLOOP5RuleModelCarriesOnlyTheTreesRule(t *testing.T) {
+	type call struct{ id, rule string }
+	var got []call
+	model := RuleModel(func(id string, rule []byte) http.Handler {
+		got = append(got, call{id, string(rule)})
+		return http.NotFoundHandler()
+	})
+	model("eval-1", change.Tree{change.RoutingPath: []byte(`{"chat":[]}`), "skills/a.md": []byte("skill")})
+	model("eval-2", change.Tree{"skills/a.md": []byte("x")})
+	if len(got) != 2 || got[0] != (call{"eval-1", `{"chat":[]}`}) || got[1] != (call{"eval-2", ""}) {
+		t.Fatalf("forwarded %+v", got)
+	}
+}
+
+// Security C1 on #62: when the vault process refuses a replay's model call
+// because the tree routes above the active price ceiling, the broker tells
+// the evaluator, and the run is not evaluated, never a pass or a fail,
+// even if the guest still replies.
+func TestCHG1RouteOverThePriceCeilingIsNotEvaluated(t *testing.T) {
+	mtr, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "meter.json"), MachineCap: meter.DefaultMachineCap, OverallCap: meter.DefaultOverallCap})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ev *Evaluator
+	r := newRig(t, recs{}, func(g *client, _ string) string { modelCall(g); return "replied anyway" }, func(c *Config) {
+		c.Meter = mtr
+		c.Model = func(id string, _ change.Tree) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				ev.OverPriceCeiling(id)
+				http.Error(w, "refused", http.StatusForbidden)
+			})
+		}
+	})
+	ev = r.e
+	// Run reads the reply and the refusal from two channels; repeat so a
+	// Run that let the reply win would fail here, not once in a while.
+	for i := 0; i < 12; i++ {
+		_, err = r.e.Run(bg, tree, change.Probe{ID: "p1", Input: []byte("go")})
+		if !errors.Is(err, change.ErrNotEvaluated) || !errors.Is(err, ErrOverPriceCeiling) {
+			t.Fatalf("run %d over the ceiling: %v", i, err)
+		}
+	}
+	settled(t, mtr, r.ms.created)
+	r.e.OverPriceCeiling("eval-none") // no run: ignored
+}
+
+// The same when the guest never replies: the run ends at once as not
+// evaluated, never as a timeout (a failure on one side).
+func TestCHG1RouteOverThePriceCeilingEndsASilentRun(t *testing.T) {
+	mtr, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "meter.json"), MachineCap: meter.DefaultMachineCap, OverallCap: meter.DefaultOverallCap})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hold := make(chan struct{})
+	t.Cleanup(func() { close(hold) })
+	var ev *Evaluator
+	r := newRig(t, recs{}, func(g *client, _ string) string { modelCall(g); <-hold; return "" }, func(c *Config) {
+		c.Meter = mtr
+		c.Timeout = 20 * time.Second
+		c.Model = func(id string, _ change.Tree) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				ev.OverPriceCeiling(id)
+				http.Error(w, "refused", http.StatusForbidden)
+			})
+		}
+	})
+	ev = r.e
+	start := time.Now()
+	_, err = r.e.Run(bg, tree, change.Probe{ID: "p1", Input: []byte("go")})
+	if !errors.Is(err, ErrOverPriceCeiling) || errors.Is(err, ErrNoReply) || time.Since(start) > 10*time.Second {
+		t.Fatalf("silent guest over the ceiling: %v after %v", err, time.Since(start))
+	}
+	settled(t, mtr, r.ms.created)
+}
+
+// The link from the vault process's ceiling refusal to the evaluator is
+// structural: the evaluation route calls OverCeiling for the refused
+// machine, so a 403 with modelroute.ReasonEvalCeiling ends the run as
+// ErrOverPriceCeiling.
+func TestCHG1CeilingDenialFromTheVaultProcessEndsTheRun(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "model.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := json.Marshal(modelroute.Denial{Adapter: "router", Method: r.Method, Status: 403, Reason: modelroute.ReasonEvalCeiling})
+		w.Header().Set(modelroute.HeaderDenial, string(b))
+		http.Error(w, modelroute.ReasonEvalCeiling, http.StatusForbidden)
+	})}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+	mtr, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "meter.json"), MachineCap: meter.DefaultMachineCap, OverallCap: meter.DefaultOverallCap})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ev *Evaluator
+	r := newRig(t, recs{}, func(g *client, _ string) string { modelCall(g); return "replied anyway" }, func(c *Config) {
+		c.Meter = mtr
+		c.Model = RuleModel(modelroute.Evaluation(modelroute.Config{Socket: sock, Label: func(string) string { return "private" },
+			Denied: func(string, modelroute.Denial) {}, OverCeiling: func(id string) { ev.OverPriceCeiling(id) }}))
+	})
+	ev = r.e
+	if _, err := r.e.Run(bg, tree, change.Probe{ID: "p1", Input: []byte("go")}); !errors.Is(err, ErrOverPriceCeiling) {
+		t.Fatalf("ceiling denial: %v", err)
+	}
+	settled(t, mtr, r.ms.created)
+}
+
+// settled waits until the meter has settled each machine's model call. A
+// run over the price ceiling ends as soon as the refusal is recorded,
+// while the metered call is still settling and saving the meter's state
+// in the test's directory. Settling refunds the call's output reservation
+// (route.DefaultMaxOutputTokens), so a settled machine shows less.
+func settled(t *testing.T, mtr *meter.Meter, ids []string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for _, id := range ids {
+		for mtr.Usage(id).Tokens >= 32000 {
+			if time.Now().After(deadline) {
+				t.Fatalf("model call of %s never settled: %+v", id, mtr.Usage(id))
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+}
+
+// REQ: RES-1, CHG-1
+// PE3: admission refusing a replay machine (memory pressure, no room, or
+// admission withdrawn before it started) interrupts the run rather than
+// failing it: the pipeline then gives no verdict (change C15). Any other
+// start error is still a failure.
+func TestRES1RefusedReplayMachineInterrupts(t *testing.T) {
+	for _, cause := range []error{admission.ErrPressure, admission.ErrNoRoom, fmt.Errorf("%w: eval-x", vm.ErrRevoked)} {
+		r := newRig(t, recs{}, func(*client, string) string { return "ok" }, nil)
+		r.ms.createErr = cause
+		_, err := r.e.Run(bg, tree, change.Probe{ID: "p1", Input: []byte("go")})
+		if !errors.Is(err, ErrPreempted) || !errors.Is(err, change.ErrInterrupted) {
+			t.Fatalf("%v: %v", cause, err)
+		}
+	}
+	r := newRig(t, recs{}, func(*client, string) string { return "ok" }, nil)
+	r.ms.createErr = errors.New("disk on fire")
+	if _, err := r.e.Run(bg, tree, change.Probe{ID: "p1", Input: []byte("go")}); err == nil || errors.Is(err, change.ErrInterrupted) {
+		t.Fatalf("another start error: %v", err)
+	}
+}
+
+// REQ: RES-1, CHG-1
+// PE3: a replay machine admission preempts mid-run ends the run at once as
+// interrupted, not at the timeout and not as a failure, and the machine is
+// destroyed.
+func TestRES1PreemptedReplayMachineInterrupts(t *testing.T) {
+	started := make(chan string, 1)
+	r := newRig(t, recs{}, func(*client, string) string { return "" }, func(c *Config) {
+		c.Timeout = 10 * time.Second
+		c.PreemptPoll = 10 * time.Millisecond
+	})
+	r.ms.guest = func(*client, string) string {
+		r.ms.mu.Lock()
+		id := r.ms.created[len(r.ms.created)-1]
+		r.ms.mu.Unlock()
+		started <- id
+		return ""
+	}
+	go func() { r.ms.setState(<-started, vm.Preempted) }()
+	begin := time.Now()
+	_, err := r.e.Run(bg, tree, change.Probe{ID: "p1", Input: []byte("go")})
+	if !errors.Is(err, ErrPreempted) || !errors.Is(err, change.ErrInterrupted) {
+		t.Fatalf("preempted run: %v", err)
+	}
+	if time.Since(begin) > 5*time.Second {
+		t.Fatal("a preempted run waited for the timeout")
+	}
+	if r.ms.running() != 0 {
+		t.Fatal("preempted replay machine not destroyed")
 	}
 }
