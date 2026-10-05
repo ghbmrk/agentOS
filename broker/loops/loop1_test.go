@@ -888,3 +888,58 @@ func TestBuildersSeeOnlyTheHypothesisAndTheDevSplit(t *testing.T) {
 		t.Fatalf("Hypothesis fields %v", hf)
 	}
 }
+
+// REQ: LOOP-1, RES-1
+// PE1: a candidate whose evaluation is preempted is kept, so when Loop 1
+// is offered spare time again it re-proposes the same candidate without
+// another build (no second model spend), and the pipeline resumes its
+// evaluation from the completed pairs.
+func TestAPreemptedCandidateIsResumedNotRebuilt(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	b := &builder{files: map[string][]byte{"procedures/mail": []byte("v2")}}
+	l, err := NewLearn(LearnConfig{Pipeline: r.p, Journal: r.eng, Harvest: h, Builder: b, Now: r.clk.now})
+	must(t, err)
+	r.restart(l)
+	for n := 1; ; n++ {
+		ev, err := h.Evidence()
+		must(t, err)
+		if ev.HeldOut >= 6 && len(ev.Dev) > 0 {
+			break
+		}
+		r.corrected(h, n)
+	}
+	ev, _ := h.Evidence()
+	total := 2 * (ev.HeldOut + 1) // held-out cases plus the security fixture, both sides
+	var once sync.Once
+	r.ev.mu.Lock()
+	r.ev.hook = func(ctx context.Context, n int) {
+		if n == total-1 {
+			once.Do(func() { go r.s.Preempt() })
+			<-ctx.Done()
+		}
+	}
+	r.ev.mu.Unlock()
+	if ran, _ := r.s.Tick(context.Background()); !ran {
+		t.Fatal("Loop 1 did nothing")
+	}
+	if len(r.p.Adoptions()) != 0 {
+		t.Fatal("a preempted evaluation adopted")
+	}
+	first := r.ev.runs()
+	r.ev.mu.Lock()
+	r.ev.hook = nil
+	r.ev.mu.Unlock()
+	if ran, _ := r.s.Tick(context.Background()); !ran {
+		t.Fatal("the preempted candidate was not offered again")
+	}
+	if got := r.p.Files("procedures")["procedures/mail"]; string(got) != "v2" {
+		t.Fatalf("procedure is %q after the resumed candidate", got)
+	}
+	if n := len(b.got()); n != 1 {
+		t.Fatalf("%d builds, want 1: a preempted candidate was rebuilt", n)
+	}
+	if resumed := r.ev.runs() - first; resumed >= total {
+		t.Fatalf("resumed evaluation ran %d probes of %d: it started over", resumed, total)
+	}
+}

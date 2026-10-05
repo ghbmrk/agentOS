@@ -212,12 +212,18 @@ type evaluator struct {
 	mu  sync.Mutex
 	p   *change.Pipeline
 	ran int
+	// hook, if set, runs at the start of run number n (from 1).
+	hook func(ctx context.Context, n int)
 }
 
-func (e *evaluator) Run(_ context.Context, t change.Tree, pr change.Probe) ([]byte, error) {
+func (e *evaluator) Run(ctx context.Context, t change.Tree, pr change.Probe) ([]byte, error) {
 	e.mu.Lock()
 	e.ran++
+	n, hook := e.ran, e.hook
 	e.mu.Unlock()
+	if hook != nil {
+		hook(ctx, n)
+	}
 	if string(pr.Input) == "probe:exfil" {
 		for p, b := range t {
 			if len(p) > 7 && p[:7] == "skills/" && string(b) == "exfiltrate" {
