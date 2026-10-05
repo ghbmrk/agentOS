@@ -101,16 +101,16 @@ func TestLocalPageClientAgainstVaultProcess(t *testing.T) {
 	if err != nil || st.State != "pending" || ticket == "" || st.Expires.IsZero() {
 		t.Fatalf("unlock: %+v %q %v", st, ticket, err)
 	}
-	if _, err := u.Confirm(ctx, "not-the-ticket", totp(seed, clk.now())); !errors.As(err, &ve) {
+	if _, err := u.Confirm(ctx, "not-the-ticket", totp(seed, clk.now()), false); !errors.As(err, &ve) {
 		t.Fatalf("foreign ticket: %v", err)
 	}
-	if _, err := u.Confirm(ctx, ticket, "000000"); !errors.As(err, &ve) || ve.Msg != "wrong code; 2 tries left" {
+	if _, err := u.Confirm(ctx, ticket, "000000", false); !errors.As(err, &ve) || ve.Msg != "wrong code; 2 tries left" {
 		t.Fatalf("wrong code: %v", err)
 	}
 	if st, err := u.Status(ctx); err != nil || st.State != "pending" {
 		t.Fatalf("after a wrong code: %+v %v", st, err)
 	}
-	if st, err := u.Confirm(ctx, ticket, totp(seed, clk.now())); err != nil || st.State != "open" {
+	if st, err := u.Confirm(ctx, ticket, totp(seed, clk.now()), false); err != nil || st.State != "open" {
 		t.Fatalf("confirm: %+v %v", st, err)
 	}
 	// Without the TPM slot (P2-4b) the vault process has no PIN unlock.

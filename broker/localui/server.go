@@ -84,6 +84,8 @@ type Server struct {
 	// vaultPend is the pending vault unlock this UI started, bound to the
 	// phone that sent the passphrase.
 	vaultPend *vaultPending
+	// vaultKept: the last unlock kept this PC trusted.
+	vaultKept bool
 	// scanning admits one photo scan at a time.
 	scanning chan struct{}
 }

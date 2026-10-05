@@ -47,6 +47,10 @@ type fakeVault struct {
 	wantPIN string
 	left    int
 	down    bool
+	// boot is a changed boot path on a trusted PC (P2-4b): "", "updated",
+	// "secure_boot" or "other".
+	boot  string
+	keeps []bool
 	// calls records what reached the socket.
 	unlocks  []string
 	confirms []string
@@ -68,6 +72,9 @@ func (f *fakeVault) Status(ctx context.Context) (VaultStatus, error) {
 
 func (f *fakeVault) status() VaultStatus {
 	st := VaultStatus{State: f.state, PIN: f.pin && f.state == "locked"}
+	if f.boot != "" && f.state != "open" {
+		st.BootChanged, st.Updated, st.SecureBoot = true, f.boot == "updated", f.boot == "secure_boot"
+	}
 	if f.state == "pending" {
 		st.Expires = f.expires
 	}
@@ -88,9 +95,10 @@ func (f *fakeVault) Unlock(ctx context.Context, pass string) (VaultStatus, strin
 	return f.status(), f.ticket, nil
 }
 
-func (f *fakeVault) Confirm(ctx context.Context, ticket, code string) (VaultStatus, error) {
+func (f *fakeVault) Confirm(ctx context.Context, ticket, code string, keep bool) (VaultStatus, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.keeps = append(f.keeps, keep)
 	f.confirms = append(f.confirms, ticket+"/"+code)
 	if f.state != "pending" || ticket != f.ticket {
 		return VaultStatus{}, &VaultError{409, "no unlock is waiting for a code"}
@@ -107,7 +115,9 @@ func (f *fakeVault) Confirm(ctx context.Context, ticket, code string) (VaultStat
 		return VaultStatus{}, &VaultError{403, "wrong code; 2 tries left"}
 	}
 	f.state, f.ticket = "open", ""
-	return f.status(), nil
+	st := f.status()
+	st.KeptTrusted = keep && f.boot != ""
+	return st, nil
 }
 
 func (f *fakeVault) UnlockPIN(ctx context.Context, pin string) (VaultStatus, error) {
@@ -490,5 +500,49 @@ func TestVaultUnlockRefusesCrossSitePosts(t *testing.T) {
 	})
 	if w.Code != http.StatusForbidden || len(fv.unlocks) != 0 {
 		t.Fatalf("cross-site: %d %v", w.Code, fv.unlocks)
+	}
+}
+
+// A trusted PC that started a boot path the box never approved (P2-4b)
+// falls back to the card. The page says why, and offers "Keep this PC
+// trusted", ticked only when the cause is a box update or changed Secure
+// Boot settings (#42 review).
+func TestVaultChangedBootPath(t *testing.T) {
+	cases := []struct {
+		boot, notice string
+		ticked       bool
+	}{
+		{"updated", "Box updated. Unlock once with your passphrase and a code; this PC stays trusted after that.", true},
+		{"secure_boot", "Secure Boot settings on this PC changed. If you updated firmware, unlock with your card to keep this PC trusted.", true},
+		{"other", "This PC started the box in a way it hasn&#39;t before. If you didn&#39;t change anything, the drive may have been tampered with. Unlock only if you&#39;re sure.", false},
+	}
+	for _, c := range cases {
+		r, fv := vaultRig(t)
+		fv.boot = c.boot
+		if page := r.get("/unlock/vault"); !strings.Contains(page, c.notice) {
+			t.Fatalf("%s notice:\n%s", c.boot, page)
+		}
+		r.upload(nil, r.card.VaultPassphrase)
+		page := r.get("/unlock/vault")
+		if !strings.Contains(page, `name="keep"`) || strings.Contains(page, `value="1" checked`) != c.ticked {
+			t.Fatalf("%s checkbox (ticked %v):\n%s", c.boot, c.ticked, page)
+		}
+		form := url.Values{"step": {"code"}, "code": {"123456"}}
+		if c.ticked {
+			form.Set("keep", "1")
+		}
+		r.post("/unlock/vault", form)
+		if len(fv.keeps) != 1 || fv.keeps[0] != c.ticked {
+			t.Fatalf("%s keep sent: %v", c.boot, fv.keeps)
+		}
+		if strings.Contains(r.get("/unlock/vault"), "This PC stays trusted.") != c.ticked {
+			t.Fatalf("%s kept notice", c.boot)
+		}
+	}
+	// An unknown host has no checkbox.
+	r, _ := vaultRig(t)
+	r.upload(nil, r.card.VaultPassphrase)
+	if strings.Contains(r.get("/unlock/vault"), `name="keep"`) {
+		t.Fatal("keep-trusted offered on an unknown host")
 	}
 }

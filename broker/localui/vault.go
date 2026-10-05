@@ -26,7 +26,9 @@ type Vault interface {
 	// and the ticket is what Confirm must carry.
 	Unlock(ctx context.Context, passphrase string) (VaultStatus, string, error)
 	// Confirm sends the code-generator code for a pending unlock.
-	Confirm(ctx context.Context, ticket, code string) (VaultStatus, error)
+	// keepTrusted is "Keep this PC trusted" after a changed boot path
+	// (VaultStatus.BootChanged, P2-4b).
+	Confirm(ctx context.Context, ticket, code string, keepTrusted bool) (VaultStatus, error)
 	// UnlockPIN sends the boot PIN of a trusted PC (CRED-8, P2-4b).
 	UnlockPIN(ctx context.Context, pin string) (VaultStatus, error)
 }
@@ -40,6 +42,13 @@ type VaultStatus struct {
 	// PIN reports that this PC is trusted with a boot PIN and waits for
 	// it (P2-4b; never set by a vault process without the TPM slot).
 	PIN bool
+	// BootChanged reports that a trusted PC started a boot path the box
+	// never approved, so the TPM slot did not open (P2-4b). Updated and
+	// SecureBoot name the likely cause: a box update, or changed Secure
+	// Boot settings on the PC.
+	BootChanged, Updated, SecureBoot bool
+	// KeptTrusted, after Confirm, reports that this PC stays trusted.
+	KeptTrusted bool
 }
 
 // VaultError is a refusal from the vault process: its HTTP status and its
@@ -75,10 +84,16 @@ type wireStatus struct {
 	Ticket  string `json:"ticket"`
 	PIN     bool   `json:"pin"`
 	Error   string `json:"error"`
+
+	BootChanged bool `json:"boot_changed"`
+	Updated     bool `json:"updated"`
+	SecureBoot  bool `json:"secure_boot"`
+	KeptTrusted bool `json:"kept_trusted"`
 }
 
 func (w wireStatus) status() VaultStatus {
-	st := VaultStatus{State: w.State, PIN: w.PIN}
+	st := VaultStatus{State: w.State, PIN: w.PIN, BootChanged: w.BootChanged, Updated: w.Updated,
+		SecureBoot: w.SecureBoot, KeptTrusted: w.KeptTrusted}
 	if t, err := time.Parse(time.RFC3339, w.Expires); err == nil {
 		st.Expires = t
 	}
@@ -139,8 +154,8 @@ func (u *UnlockClient) Unlock(ctx context.Context, passphrase string) (VaultStat
 }
 
 // Confirm implements Vault.
-func (u *UnlockClient) Confirm(ctx context.Context, ticket, code string) (VaultStatus, error) {
-	w, err := u.call(ctx, http.MethodPost, "/confirm", map[string]string{"ticket": ticket, "code": code})
+func (u *UnlockClient) Confirm(ctx context.Context, ticket, code string, keepTrusted bool) (VaultStatus, error) {
+	w, err := u.call(ctx, http.MethodPost, "/confirm", map[string]any{"ticket": ticket, "code": code, "keep_trusted": keepTrusted})
 	return w.status(), err
 }
 
@@ -162,8 +177,14 @@ type vaultPending struct {
 }
 
 type vaultView struct {
-	State   string
-	PIN     bool
+	State string
+	PIN   bool
+	// Boot is the changed-boot-path notice (P2-4b), "" for none.
+	Boot string
+	// Keep offers "Keep this PC trusted"; KeepOn ticks it.
+	Keep, KeepOn bool
+	// Kept: the unlock kept this PC trusted.
+	Kept    bool
 	Mine    bool
 	Expires string
 	Err     string
@@ -197,6 +218,22 @@ func (s *Server) vaultPage(w http.ResponseWriter, r *http.Request, errText strin
 		return
 	}
 	v.State, v.PIN = st.State, st.PIN
+	if st.BootChanged {
+		// Wording and default as ruled in the #42 review: tick "Keep
+		// this PC trusted" only when the cause is known to be benign.
+		v.Keep, v.KeepOn = true, st.Updated || st.SecureBoot
+		switch {
+		case st.Updated:
+			v.Boot = "Box updated. Unlock once with your passphrase and a code; this PC stays trusted after that."
+		case st.SecureBoot:
+			v.Boot = "Secure Boot settings on this PC changed. If you updated firmware, unlock with your card to keep this PC trusted."
+		default:
+			v.Boot = "This PC started the box in a way it hasn't before. If you didn't change anything, the drive may have been tampered with. Unlock only if you're sure."
+		}
+	}
+	s.mu.Lock()
+	v.Kept = s.vaultKept && st.State == "open"
+	s.mu.Unlock()
 	s.mu.Lock()
 	if st.State == "pending" {
 		v.Mine = s.vaultPend != nil && s.vaultPend.key == vaultKey(r)
@@ -222,7 +259,7 @@ func (s *Server) vaultPost(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 	switch r.PostFormValue("step") {
 	case "code":
-		s.vaultCode(w, r, strings.TrimSpace(r.PostFormValue("code")))
+		s.vaultCode(w, r, strings.TrimSpace(r.PostFormValue("code")), r.PostFormValue("keep") == "1")
 	case "pin":
 		s.vaultPIN(w, r, strings.TrimSpace(r.PostFormValue("pin")))
 	default:
@@ -298,7 +335,7 @@ func (s *Server) vaultPassphrase(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/unlock/vault", http.StatusSeeOther)
 }
 
-func (s *Server) vaultCode(w http.ResponseWriter, r *http.Request, code string) {
+func (s *Server) vaultCode(w http.ResponseWriter, r *http.Request, code string, keep bool) {
 	s.mu.Lock()
 	var ticket string
 	if p := s.vaultPend; p != nil && p.key == vaultKey(r) {
@@ -309,14 +346,15 @@ func (s *Server) vaultCode(w http.ResponseWriter, r *http.Request, code string) 
 		s.vaultPage(w, r, "This unlock was started on another phone. Enter the code there.")
 		return
 	}
-	if _, err := s.cfg.Vault.Confirm(r.Context(), ticket, code); err != nil {
+	st, err := s.cfg.Vault.Confirm(r.Context(), ticket, code, keep)
+	if err != nil {
 		// A wrong code keeps the unlock pending (egress K5); any other
 		// refusal ended it, and vaultPage forgets the ticket.
 		s.vaultPage(w, r, vaultText(err))
 		return
 	}
 	s.mu.Lock()
-	s.vaultPend = nil
+	s.vaultPend, s.vaultKept = nil, st.KeptTrusted
 	s.mu.Unlock()
 	http.Redirect(w, r, "/unlock/vault", http.StatusSeeOther)
 }

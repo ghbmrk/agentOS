@@ -66,19 +66,21 @@ form { margin: .6em 0 1.2em; }
 {{define "vault"}}{{template "head" .Refresh}}
 <h1>Unlock the box</h1>
 {{if .Down}}<p>The vault is not answering yet. This page reloads by itself.</p>
-{{else if eq .State "open"}}<p class="ok">The box is unlocked.</p>
+{{else if eq .State "open"}}<p class="ok">The box is unlocked.{{if .Kept}} This PC stays trusted.{{end}}</p>
 <p>To approve by text again, <a href="/unlock">sign in</a> with your next code.</p>
 {{else if eq .State "opening"}}<p>Checking the passphrase. This page reloads by itself.</p>
 {{else if eq .State "pending"}}{{if .Mine}}<p class="ok">Passphrase accepted.</p>
 <form method="post" action="/unlock/vault"><input type="hidden" name="step" value="code">
 <label>Code from your code generator, by {{.Expires}}
 <input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required autofocus></label>
+{{if .Keep}}<label><input type="checkbox" name="keep" value="1"{{if .KeepOn}} checked{{end}}> Keep this PC trusted</label><br>{{end}}
 {{with .Err}}<p class="err">{{.}}</p>{{end}}
 <button>Unlock</button></form>
 {{else}}{{with .Err}}<p class="err">{{.}}</p>{{end}}
 <p>An unlock is waiting for a code on another phone. If that was not you, it ends by itself at {{.Expires}} without the code.</p>{{end}}
 {{else}}
 <p><b>If this drive was out of your hands, unlock it only on your trusted PC.</b></p>
+{{with .Boot}}<p class="err">{{.}}</p>{{end}}
 {{with .Err}}<p class="err">{{.}}</p>{{end}}
 {{if .PIN}}<form method="post" action="/unlock/vault"><input type="hidden" name="step" value="pin">
 <label>This PC is trusted and has a boot PIN. Enter it
