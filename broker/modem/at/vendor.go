@@ -3,6 +3,7 @@ package at
 import (
 	"strconv"
 	"strings"
+	"time"
 )
 
 // AudioKind is how a modem carries call audio to the host.
@@ -42,6 +43,13 @@ type Profile struct {
 	Key func(string) (byte, bool)
 	// ICCIDCmd reads the SIM serial number (AT+CCID is the fallback).
 	ICCIDCmd string
+	// NetTimeCmd reads carrier network time (TIM-1), which NetTime parses
+	// to UTC; ok is false when the network has sent none.
+	// NetTimeOn, if set, runs at Open, best effort: a modem that refuses
+	// it still texts and calls.
+	NetTimeCmd string
+	NetTime    func(lines []string) (t time.Time, ok bool)
+	NetTimeOn  string
 }
 
 // Quectel covers the EC25 and EG25-G (S2 modem 1). Voice audio is USB Audio
@@ -59,7 +67,11 @@ var Quectel = &Profile{
 	AudioOff: []string{"AT+QPCMV=0"},
 	KeysOn:   "AT+QTONEDET=1",
 	ICCIDCmd: "AT+QCCID",
-	URCs:     []string{"+QTONEDET:", "+QIND:"},
+	// AT+QLTS=1: UTC as of the latest network time update, carried on by
+	// the module's clock; "" until the network has sent one.
+	NetTimeCmd: "AT+QLTS=1",
+	NetTime:    parseQLTS,
+	URCs:       []string{"+QTONEDET:", "+QIND:"},
 	Key: func(l string) (byte, bool) {
 		v, ok := urcValue(l, "+QTONEDET:")
 		if !ok {
@@ -82,13 +94,20 @@ var SIMCom = &Profile{
 	ATInterface:    "02",
 	AudioInterface: "04",
 	Audio:          AudioSerial,
-	Init:           []string{"AT+CPCMFRM=0"}, // 8 kHz PCM
-	AudioOn:        []string{"AT+CPCMREG=1"},
-	AudioOff:       []string{"AT+CPCMREG=0"},
-	KeysOn:         "AT+DDET=1",
-	ICCIDCmd:       "AT+CICCID",
-	URCs:           []string{"+RXDTMF:", "VOICE CALL:", "MISSED_CALL:", "+SIMCARD:"},
-	CallURCs:       []string{"VOICE CALL:", "MISSED_CALL:"},
+	// 8 kHz PCM; the module's clock follows network time updates.
+	Init:     []string{"AT+CPCMFRM=0", "AT+CTZU=1"},
+	AudioOn:  []string{"AT+CPCMREG=1"},
+	AudioOff: []string{"AT+CPCMREG=0"},
+	KeysOn:   "AT+DDET=1",
+	ICCIDCmd: "AT+CICCID",
+	// AT+CCLK? is the module's clock, set from network time by AT+CTZU=1.
+	// It has no "never set" answer: after power-up it starts from a fixed
+	// date years in the past, which netTimeFloor rejects (S2-CONFIRM C14).
+	NetTimeCmd: "AT+CCLK?",
+	NetTime:    parseCCLK,
+	NetTimeOn:  "AT+CTZU=1",
+	URCs:       []string{"+RXDTMF:", "VOICE CALL:", "MISSED_CALL:", "+SIMCARD:"},
+	CallURCs:   []string{"VOICE CALL:", "MISSED_CALL:"},
 	Key: func(l string) (byte, bool) {
 		v, ok := urcValue(l, "+RXDTMF:")
 		if !ok || len(v) != 1 {
@@ -133,4 +152,56 @@ func keyByte(b byte) (byte, bool) {
 		return 0, false
 	}
 	return b, true
+}
+
+// netTimeFloor rejects a module clock that was never set from the network:
+// both start from a fixed date long before this driver was written.
+var netTimeFloor = time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+
+// parseQLTS reads +QLTS: "yyyy/MM/dd,hh:mm:ss±zz,dst" in mode 1 (UTC; the
+// zone is the network's and is not needed).
+func parseQLTS(lines []string) (time.Time, bool) {
+	for _, l := range lines {
+		v, ok := urcValue(l, "+QLTS:")
+		if !ok {
+			continue
+		}
+		if len(v) < 19 {
+			return time.Time{}, false
+		}
+		t, err := time.Parse("2006/01/02,15:04:05", v[:19])
+		if err != nil || t.Before(netTimeFloor) {
+			return time.Time{}, false
+		}
+		return t, true
+	}
+	return time.Time{}, false
+}
+
+// parseCCLK reads +CCLK: "yy/MM/dd,hh:mm:ss±zz": local time with the zone
+// in quarter hours east of UTC (TS 27.007).
+func parseCCLK(lines []string) (time.Time, bool) {
+	for _, l := range lines {
+		v, ok := urcValue(l, "+CCLK:")
+		if !ok {
+			continue
+		}
+		if len(v) < 20 || (v[17] != '+' && v[17] != '-') {
+			return time.Time{}, false
+		}
+		local, err := time.Parse("06/01/02,15:04:05", v[:17])
+		q, qerr := strconv.Atoi(v[18:])
+		if err != nil || qerr != nil || q > 56 {
+			return time.Time{}, false
+		}
+		if v[17] == '-' {
+			q = -q
+		}
+		t := local.Add(-time.Duration(q) * 15 * time.Minute)
+		if t.Before(netTimeFloor) {
+			return time.Time{}, false
+		}
+		return t, true
+	}
+	return time.Time{}, false
 }
