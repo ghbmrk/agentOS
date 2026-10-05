@@ -19,6 +19,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/modelroute"
+	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/vm"
 	"github.com/ghbmrk/agentos/broker/vm/gvisor"
 )
@@ -96,7 +97,7 @@ func (l *lateAgent) Deliver(ctx context.Context, text string, public bool) error
 func main() {
 	var cfg daemon.Config
 	imgs := images{}
-	var stateDir, runsc, cgroupParent, meterPath, agentMachine, inboxPath, egressSocket string
+	var stateDir, runsc, cgroupParent, meterPath, agentMachine, inboxPath, egressSocket, verifySocket string
 	var diskReserveMB int64
 	flag.StringVar(&cfg.JournalPath, "journal", "/var/lib/agentos/journal.log", "journal file")
 	flag.StringVar(&cfg.SocketDir, "sockets", "/run/agentos", "socket directory (created 0700)")
@@ -115,6 +116,7 @@ func main() {
 	flag.StringVar(&agentMachine, "agent-machine", "agent", "machine whose guest receives the owner's task chat")
 	flag.StringVar(&inboxPath, "guest-inbox", "/var/lib/agentos/guest-inbox.json", "unanswered owner messages to guests, kept across restarts")
 	flag.StringVar(&egressSocket, "egress", "/run/agentos-egress/model.sock", "the vault process's model socket (agentos-egress); empty serves no model route")
+	flag.StringVar(&verifySocket, "owner-verify", "/run/agentos-egress/verify.sock", "the vault process's verify socket, which checks the owner's code-generator codes; empty refuses high-tier codes")
 	flag.Parse()
 	if cfg.ModemUID < 0 || cfg.ModemUID == os.Getuid() {
 		log.Fatal("-modem-uid must name the modem bridge's own uid, distinct from the broker's")
@@ -142,9 +144,13 @@ func main() {
 	cfg.Preempter = pre
 	agent := &lateAgent{}
 	cfg.Agent = agent
-	// The high-tier code seeds live in the vault, which only the vault
-	// process holds (P2-4a); until it offers a verify operation the
-	// channel refuses high-tier codes (egress K7).
+	// The code-generator seed lives in the vault, which only the vault
+	// process holds (P2-4a); the channel asks it to check high-tier codes
+	// (egress K7). While the vault is locked those checks fail and count
+	// nothing.
+	if verifySocket != "" {
+		cfg.OwnerVerifier = ownerVerifier{modelroute.NewVerifier(verifySocket)}
+	}
 	// No modem driver exists before P2-3, so texts arrive only through the
 	// owner socket and the channel's own outbound texts are not sent.
 
@@ -261,4 +267,27 @@ func openGuestPlane(m *vm.Manager, d *daemon.Daemon, socketDir, meterPath, inbox
 		})
 	}
 	return guest.New(gcfg)
+}
+
+// ownerVerifier gives the owner channel the vault process's verify
+// operation, translating why a check did not run into the channel's terms.
+type ownerVerifier struct{ v *modelroute.Verifier }
+
+func (o ownerVerifier) VerifyTOTP(code string, after int64, counted bool) (int64, bool, error) {
+	step, ok, err := o.v.VerifyTOTP(code, after, counted)
+	return step, ok, ownerVerifyErr(err)
+}
+
+func ownerVerifyErr(err error) error {
+	var ve *modelroute.VerifyError
+	if err == nil || !errors.As(err, &ve) {
+		return err
+	}
+	kind := map[modelroute.VerifyFailure]owner.VerifyFailure{
+		modelroute.VerifyDown:   owner.VaultDown,
+		modelroute.VerifyLocked: owner.VaultLocked,
+		modelroute.VerifyPaused: owner.VerifyPaused,
+		modelroute.VerifyLost:   owner.VerifyLost,
+	}[ve.Kind]
+	return &owner.VerifyError{Kind: kind, Until: ve.Until}
 }
