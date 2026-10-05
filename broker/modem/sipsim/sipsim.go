@@ -55,8 +55,9 @@ type Provider struct {
 	grant    uint32
 	texts    chan Text
 	calls    chan *Call
-	live     map[string]*Call // by Call-ID
-	refuse   map[string]int   // method -> status to answer once authenticated
+	live     map[string]*Call     // by Call-ID
+	ringing  map[string]*LineCall // calls to a line, by Call-ID
+	refuse   map[string]int       // method -> status to answer once authenticated
 }
 
 type reg struct {
@@ -87,7 +88,7 @@ func StartTLS(domain, user, password string, maxTLS uint16) (*Provider, error) {
 	}
 	p := &Provider{Roots: roots, Realm: domain + " realm", Domain: domain, ua: ua,
 		users: map[string]string{user: password}, contacts: map[string]reg{}, nonces: map[string]bool{},
-		authOK: map[string]int{}, grant: 3600, texts: make(chan Text, 64), calls: make(chan *Call, 8), live: map[string]*Call{}, refuse: map[string]int{}}
+		authOK: map[string]int{}, grant: 3600, texts: make(chan Text, 64), calls: make(chan *Call, 8), live: map[string]*Call{}, ringing: map[string]*LineCall{}, refuse: map[string]int{}}
 	if p.srv, err = sipgo.NewServer(ua); err != nil {
 		return nil, err
 	}
@@ -395,8 +396,13 @@ func (p *Provider) onBye(req *sip.Request, tx sip.ServerTransaction) {
 		id = h.Value()
 	}
 	p.mu.Lock()
-	c := p.live[id]
+	c, lc := p.live[id], p.ringing[id]
 	p.mu.Unlock()
+	if lc != nil {
+		_ = tx.Respond(sip.NewResponseFromRequest(req, sip.StatusOK, "OK", nil))
+		lc.end()
+		return
+	}
 	if c == nil {
 		_ = tx.Respond(sip.NewResponseFromRequest(req, sip.StatusCallTransactionDoesNotExists, "Call/Transaction Does Not Exist", nil))
 		return
@@ -570,4 +576,248 @@ func selfSigned() (tls.Certificate, *x509.CertPool, error) {
 	roots := x509.NewCertPool()
 	roots.AddCert(leaf)
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}, roots, nil
+}
+
+// Ring describes a call to a line: what the caller's SDP offer holds.
+type Ring struct {
+	// Plain offers RTP/AVP with no key, as a caller without SRTP would.
+	Plain bool
+	// PTs are the payload types offered; default PCMU and PCMA.
+	PTs []int
+	// Tag is the offer's crypto tag; default "7", so a line that
+	// answers under its own tag 1 is caught.
+	Tag string
+	// Addr is the offered audio address; default the loopback listener.
+	Addr string
+	// Silent sends no audio, as a forged offer naming someone else's
+	// address would never produce from that address.
+	Silent bool
+	// NoAck never acknowledges the line's answer.
+	NoAck bool
+	// Elsewhere sends the caller's audio from another port than the one
+	// offered, as a third party would if an offer named its address.
+	Elsewhere bool
+	// WrongKey sends the caller's audio from the offered address under a
+	// key other than the one offered.
+	WrongKey bool
+}
+
+// LineCall is a call the provider placed to a line.
+type LineCall struct {
+	// Status is the line's final answer to the INVITE.
+	Status int
+	// Answer is the line's SDP answer, if it answered.
+	Answer []byte
+
+	p     *Provider
+	id    string
+	d     *sipgo.DialogClientSession
+	media *net.UDPConn
+	done  chan struct{}
+	once  sync.Once
+
+	mu    sync.Mutex
+	heard []byte
+	pts   map[uint8]bool
+}
+
+// RingLine calls a registered line from a third party's number, as the
+// provider relays a call to it. It returns once the line answers or
+// refuses; an answered call is acknowledged and its SRTP audio decrypted
+// into Heard.
+func (p *Provider) RingLine(ctx context.Context, from, user string, o Ring) (*LineCall, error) {
+	req, err := p.toLine(sip.INVITE, from, user)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		return nil, err
+	}
+	if o.PTs == nil {
+		o.PTs = []int{sipline.PCMU, sipline.PCMA}
+	}
+	if o.Tag == "" {
+		o.Tag = "7"
+	}
+	if o.Addr == "" {
+		o.Addr = "127.0.0.1"
+	}
+	var key []byte
+	var pts []string
+	for _, pt := range o.PTs {
+		pts = append(pts, fmt.Sprint(pt))
+	}
+	proto, crypto := "RTP/SAVP", ""
+	if o.Plain {
+		proto = "RTP/AVP"
+	} else {
+		key = make([]byte, 30)
+		_, _ = rand.Read(key)
+		crypto = fmt.Sprintf("a=crypto:%s %s inline:%s\r\n", o.Tag, sipline.Suite, base64.StdEncoding.EncodeToString(key))
+	}
+	body := fmt.Sprintf("v=0\r\no=- 0 0 IN IP4 %s\r\ns=-\r\nc=IN IP4 %s\r\nt=0 0\r\nm=audio %d %s %s\r\n%s",
+		o.Addr, o.Addr, conn.LocalAddr().(*net.UDPAddr).Port, proto, strings.Join(pts, " "), crypto)
+	contact := sip.ContactHeader{Address: sip.Uri{Scheme: "sip", User: from, Host: p.Domain}}
+	req.AppendHeader(&contact)
+	req.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
+	req.SetBody([]byte(body))
+	callID := sip.CallIDHeader(sip.GenerateTagN(16) + "@sipsim")
+	req.AppendHeader(&callID)
+	ua := &sipgo.DialogUA{Client: p.cli, ContactHDR: contact}
+	c := &LineCall{p: p, id: req.CallID().Value(), media: conn, done: make(chan struct{})}
+	p.mu.Lock()
+	p.ringing[c.id] = c
+	p.mu.Unlock()
+	if c.d, err = ua.WriteInvite(ctx, req); err != nil {
+		c.end()
+		return nil, err
+	}
+	err = c.d.WaitAnswer(ctx, sipgo.AnswerOptions{})
+	var de *sipgo.ErrDialogResponse
+	if errors.As(err, &de) {
+		c.Status = de.Res.StatusCode
+		c.end()
+		return c, nil
+	}
+	if err != nil {
+		c.end()
+		return nil, err
+	}
+	c.Status, c.Answer = c.d.InviteResponse.StatusCode, append([]byte(nil), c.d.InviteResponse.Body()...)
+	if !o.NoAck {
+		if err := c.d.Ack(ctx); err != nil {
+			c.end()
+			return nil, err
+		}
+	}
+	if !o.Silent && key != nil {
+		from := conn
+		if o.Elsewhere {
+			if from, err = net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)}); err != nil {
+				return c, nil
+			}
+			go func() { <-c.done; _ = from.Close() }()
+		}
+		k := key
+		if o.WrongKey {
+			k = make([]byte, len(key))
+			_, _ = rand.Read(k)
+		}
+		go c.speak(k, from)
+	}
+	lineKey, err := sipline.OfferKey(c.Answer)
+	if err != nil {
+		return c, nil // no key: nothing can be heard
+	}
+	rx, err := sipline.Context(lineKey)
+	if err != nil {
+		return c, nil
+	}
+	go func() {
+		buf := make([]byte, 1500)
+		for {
+			n, _, err := conn.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			var h rtp.Header
+			plain, err := rx.DecryptRTP(nil, buf[:n], &h)
+			if err != nil {
+				continue
+			}
+			var pkt rtp.Packet
+			if pkt.Unmarshal(plain) != nil {
+				continue
+			}
+			c.mu.Lock()
+			c.heard = append(c.heard, pkt.Payload...)
+			if c.pts == nil {
+				c.pts = map[uint8]bool{}
+			}
+			c.pts[pkt.PayloadType] = true
+			c.mu.Unlock()
+		}
+	}()
+	return c, nil
+}
+
+// speak sends the caller's own SRTP audio (silence) to the line's answer
+// address from the offered address, every 20 ms until the call ends.
+func (c *LineCall) speak(key []byte, from *net.UDPConn) {
+	to := answerAddr(c.Answer)
+	tx, err := sipline.Context(key)
+	if to == nil || err != nil {
+		return
+	}
+	tick := time.NewTicker(20 * time.Millisecond)
+	defer tick.Stop()
+	for seq := uint16(1); ; seq++ {
+		p := rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: sipline.PCMU, SequenceNumber: seq, Timestamp: uint32(seq) * 160, SSRC: 0x5157}, Payload: make([]byte, 160)}
+		raw, _ := p.Marshal()
+		if sealed, err := tx.EncryptRTP(nil, raw, nil); err == nil {
+			_, _ = from.WriteToUDP(sealed, to)
+		}
+		select {
+		case <-c.done:
+			return
+		case <-tick.C:
+		}
+	}
+}
+
+// answerAddr reads the audio address from an SDP answer.
+func answerAddr(sdp []byte) *net.UDPAddr {
+	var ip net.IP
+	port := 0
+	for _, line := range strings.Split(string(sdp), "\r\n") {
+		if a, ok := strings.CutPrefix(line, "c=IN IP4 "); ok {
+			ip = net.ParseIP(strings.TrimSpace(a))
+		}
+		if m, ok := strings.CutPrefix(line, "m=audio "); ok {
+			fmt.Sscanf(m, "%d", &port)
+		}
+	}
+	if ip == nil || port == 0 {
+		return nil
+	}
+	return &net.UDPAddr{IP: ip, Port: port}
+}
+
+func (c *LineCall) end() {
+	c.once.Do(func() {
+		c.p.mu.Lock()
+		delete(c.p.ringing, c.id)
+		c.p.mu.Unlock()
+		// Audio sent just before the BYE may still be in flight.
+		time.AfterFunc(time.Second, func() { _ = c.media.Close() })
+		close(c.done)
+	})
+}
+
+// Done is closed when the call ends: refused, or hung up by either side.
+func (c *LineCall) Done() <-chan struct{} { return c.done }
+
+// Hangup hangs up from the caller's side.
+func (c *LineCall) Hangup(ctx context.Context) error {
+	defer c.end()
+	return c.d.Bye(ctx)
+}
+
+// Heard is the G.711 audio decrypted so far.
+func (c *LineCall) Heard() []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]byte(nil), c.heard...)
+}
+
+// PayloadTypes are the RTP payload types heard.
+func (c *LineCall) PayloadTypes() []uint8 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []uint8
+	for pt := range c.pts {
+		out = append(out, pt)
+	}
+	return out
 }

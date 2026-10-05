@@ -653,3 +653,42 @@ func TestEveryJobLogsItsNumbers(t *testing.T) {
 		}
 	}
 }
+
+// L3 on #134: a job that ends without a candidate after reaching its
+// token cap says so in its count line.
+func TestAJobAtItsTokenCapSaysSo(t *testing.T) {
+	mtr, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "meter.json"), MachineCap: meter.DefaultMachineCap, OverallCap: meter.DefaultOverallCap})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var lines []string
+	f := &machines{}
+	f.guest = func(id, dir string) {
+		c := guestClient(dir)
+		call(c, "POST", "/model/v1/chat/completions", map[string]any{"max_tokens": 10})
+		call(c, "POST", "/done", nil)
+	}
+	b := newBuilder(t, f, func(c *Config) {
+		c.Meter, c.JobTokens = mtr, 50
+		c.Logf = func(f string, a ...any) { mu.Lock(); lines = append(lines, fmt.Sprintf(f, a...)); mu.Unlock() }
+		c.Model = func(string) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				io.WriteString(w, `{"usage":{"prompt_tokens":100,"completion_tokens":10}}`)
+			})
+		}
+	})
+	b.Build(context.Background(), brief(change.ClassProcedure))
+	mu.Lock()
+	defer mu.Unlock()
+	for _, l := range lines {
+		if strings.Contains(l, " job ") {
+			if !strings.Contains(l, "outcome no candidate (token cap), tokens 110") {
+				t.Fatalf("job line %q", l)
+			}
+			return
+		}
+	}
+	t.Fatalf("no job line in %q", lines)
+}
