@@ -33,6 +33,10 @@ type State struct {
 	Challenged bool      `json:"challenged"`
 	BoundStart time.Time `json:"bound_start"`
 	BoundUsed  int       `json:"bound_used"`
+	// LocalStart and LocalUsed are the fixed 24-hour window of local UI
+	// sign-in attempts (LocalBound).
+	LocalStart time.Time `json:"local_start"`
+	LocalUsed  int       `json:"local_used"`
 	// Pending lists open requests and Queued the auto-replies waiting out
 	// their undo window, by reference only (never codes or reply text), so
 	// a restart can report what it dropped (OP-4, CH-13).

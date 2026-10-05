@@ -1,0 +1,136 @@
+package owner
+
+import (
+	"context"
+	"strings"
+	"testing"
+	"time"
+)
+
+// REQ: CH-7, CH-11, CH-18
+
+// The local UI (P2-2) signs in with a code-generator code. Per O4's
+// carry-forward, that sign-in is also a local unlock: it clears challenge
+// mode and the low-tier lock, as a texted UNLOCK with the challenge would,
+// without needing the texted challenge, because joining the box's Wi-Fi
+// already proves the card.
+func TestLocalSignInClearsChallengeModeAndUnlocks(t *testing.T) {
+	r := newRig(t, nil)
+	enterChallenge(t, r)
+	if !r.ch.codes.st.LowLocked || r.ch.SessionUnlocked(r.clock()) {
+		t.Fatal("setup: expected low tier locked and session locked")
+	}
+	until, err := r.ch.LocalSignIn(r.totp())
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := r.ch.LocalStatus()
+	if st.Challenged || st.LowLocked || !st.Unlocked || !until.Equal(r.clock().Add(DefaultUnlockFor)) {
+		t.Fatalf("after local sign-in: %+v until %v", st, until)
+	}
+	// Text codes work normally again: a bare code no longer drops.
+	if got := r.say("hello " + r.totp()); strings.Contains(got, "ignored") {
+		t.Fatalf("still challenged by text: %q", got)
+	}
+}
+
+func TestLocalSignInAcceptsTheAskedGridCellOnly(t *testing.T) {
+	r := newRig(t, nil)
+	cell := r.ch.LocalGridCell()
+	if cell == "" {
+		t.Fatal("no grid cell asked")
+	}
+	other := "A1"
+	if cell == other {
+		other = "B1"
+	}
+	if _, err := r.ch.LocalSignIn(GridCell(testSecrets.GridSeed, other)); err != ErrWrongCode {
+		t.Fatalf("unasked cell: %v", err)
+	}
+	cell = r.ch.LocalGridCell()
+	if _, err := r.ch.LocalSignIn(GridCell(testSecrets.GridSeed, cell)); err != nil {
+		t.Fatalf("asked cell: %v", err)
+	}
+	// Single use (CH-18).
+	r.ch.codes.challenge = cell
+	if _, err := r.ch.LocalSignIn(GridCell(testSecrets.GridSeed, cell)); err != ErrWrongCode {
+		t.Fatalf("spent cell reused: %v", err)
+	}
+}
+
+// Wrong local codes count like any wrong code (CH-18): five lock the low
+// tier and the owner is texted, so guessing on the Wi-Fi is visible.
+func TestLocalWrongCodesCountAndAlertTheOwner(t *testing.T) {
+	r := newRig(t, nil)
+	r.unlock()
+	r.advance(time.Second)
+	for i := 0; i < WrongToLock; i++ {
+		if _, err := r.ch.LocalSignIn(wrongCode(i)); err != ErrWrongCode {
+			t.Fatalf("wrong %d: %v", i, err)
+		}
+	}
+	if !r.ch.codes.st.LowLocked || r.ch.SessionUnlocked(r.clock()) {
+		t.Fatal("five wrong local codes did not lock")
+	}
+	if got := r.inbox(); !strings.Contains(got, "box's Wi-Fi") {
+		t.Fatalf("owner alert: %q", got)
+	}
+}
+
+// Local attempts have their own fixed 24-hour bound, so the Wi-Fi is not
+// an unmetered guessing path even in challenge mode, where wrong codes no
+// longer escalate anything.
+func TestLocalAttemptsAreBounded(t *testing.T) {
+	r := newRig(t, nil)
+	enterChallenge(t, r)
+	for i := 0; i < LocalBound; i++ {
+		if _, err := r.ch.LocalSignIn(wrongCode(i)); err != ErrWrongCode {
+			t.Fatalf("attempt %d: %v", i, err)
+		}
+		r.advance(time.Minute)
+	}
+	if _, err := r.ch.LocalSignIn(r.totp()); err != ErrTooMany {
+		t.Fatalf("over the bound, even a right code: %v", err)
+	}
+	// The bound survives a restart.
+	r.ch = r.open()
+	if _, err := r.ch.LocalSignIn(r.totp()); err != ErrTooMany {
+		t.Fatalf("bound forgotten on restart: %v", err)
+	}
+	r.advance(WrongWindow)
+	if _, err := r.ch.LocalSignIn(r.totp()); err != nil {
+		t.Fatalf("next window: %v", err)
+	}
+}
+
+// RESUME on the local UI: the caller has a signed-in device, which is a
+// stronger proof than CH-11's texted code, so no further code is asked.
+func TestLocalStopAndResume(t *testing.T) {
+	r := newRig(t, nil)
+	if msg, err := r.ch.LocalResume(); err != nil || msg != "Not stopped. Nothing to resume." {
+		t.Fatalf("resume while running: %q %v", msg, err)
+	}
+	if err := r.ch.LocalStop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !r.ch.LocalStatus().Stopped {
+		t.Fatal("not stopped")
+	}
+	// A texted RESUME code issued before is void after a local resume.
+	r.say("RESUME")
+	msg, err := r.ch.LocalResume()
+	if err != nil || !strings.HasPrefix(msg, "Resumed.") || r.eng.Stopped() {
+		t.Fatalf("local resume: %q %v", msg, err)
+	}
+	if r.ch.resume != nil {
+		t.Fatal("texted RESUME code still live")
+	}
+}
+
+func TestTOTPMatchesTheChannelsCheck(t *testing.T) {
+	r := newRig(t, nil)
+	r.advance(30 * time.Second)
+	if _, err := r.ch.LocalSignIn(TOTP(testSecrets.TOTPSeed, r.clock())); err != nil {
+		t.Fatal(err)
+	}
+}
