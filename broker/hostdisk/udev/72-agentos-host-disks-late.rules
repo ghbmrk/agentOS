@@ -1,0 +1,13 @@
+# AgentOS: host disks stay closed to every uid but root (HW-8, L3 on #172).
+# Runs after 70-uaccess, which re-adds the uaccess tag to optical drives, and
+# before 73-seat-late, which would grant the seat user an ACL for it.
+# The SCSI generic (sg) and NVMe generic (ng) character nodes reach the same
+# disks with commands that write (SG_IO, NVMe passthrough); the box needs
+# none of them, so every one is root:root 0600, the drive's included.
+
+ACTION=="remove", GOTO="agentos_late_end"
+
+SUBSYSTEM=="block", ENV{AGENTOS_DISK}=="host", TAG-="uaccess"
+SUBSYSTEM=="scsi_generic|nvme-generic", OWNER:="root", GROUP:="root", MODE:="0600", TAG-="uaccess"
+
+LABEL="agentos_late_end"

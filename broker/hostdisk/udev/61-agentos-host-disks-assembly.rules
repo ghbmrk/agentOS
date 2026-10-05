@@ -1,0 +1,16 @@
+# AgentOS: no RAID or LVM member on a disk that is not the drive is assembled
+# (HW-8, security F1 on #172): a degraded array's resync would write it.
+# Runs after 60-persistent-storage (blkid's ID_FS_TYPE) and before 64-md-raid
+# and 69-dm-lvm. Only member types are cleared: an unknown device's own file
+# system result stays, since 99-systemd marks a dm-crypt or dm-verity device
+# (DM_UUID CRYPT-*) not ready when ID_FS_USAGE is empty (L3 on #172).
+# Host disks never reach here with a blkid result (59 skips the probe).
+
+ACTION=="remove", GOTO="agentos_assembly_end"
+SUBSYSTEM!="block", GOTO="agentos_assembly_end"
+KERNEL=="loop*|ram*|zram*|nbd*", GOTO="agentos_assembly_end"
+ENV{AGENTOS_DISK}=="drive", GOTO="agentos_assembly_end"
+
+ENV{ID_FS_TYPE}=="*_raid_member|LVM2_member|bcache|zfs_member", ENV{ID_FS_TYPE}="", ENV{ID_FS_USAGE}=""
+
+LABEL="agentos_assembly_end"

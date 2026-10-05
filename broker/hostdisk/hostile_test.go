@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"io"
 	"strings"
 	"testing"
 )
@@ -54,25 +55,152 @@ func TestProbeBoundsHostileGPT(t *testing.T) {
 		"header size 600":     put32(12, 600),
 		"header in wrong LBA": put64(24, 7),
 	} {
-		d, err := Probe(bytes.NewReader(regpt(base, sector, edit)), int64(len(base)), sector)
+		img := regpt(base, sector, edit)
+		rec := &recorder{r: bytes.NewReader(img)}
+		d, err := Probe(rec, int64(len(img)), sector)
 		if !errors.Is(err, ErrUnreadableTable) || d.Problem != ProblemTable || !d.NeedsSecondConfirm() {
 			t.Errorf("%s: %v %+v", name, err, d)
 		}
+		checkReads(t, rec, int64(len(img)), sector)
 	}
 	// The edit helper itself keeps a valid table valid.
 	if _, err := Probe(bytes.NewReader(regpt(base, sector, func([]byte) {})), int64(len(base)), sector); err != nil {
 		t.Fatalf("control: %v", err)
 	}
 
-	// A partition entry reaching past the disk is dropped, not read.
+	// A partition reaching past the disk is described as far as the disk
+	// goes, one starting past it or ending before it starts is left out,
+	// and either way the disk is flagged partly unreadable, which needs
+	// the second confirmation (L3 on #172).
 	b := gptDisk(sector, 2048, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", []tpart{
 		{typ: tBasic, start: 64, n: 64, sig: SigNTFS},
 		{typ: tBasic, start: 1000, n: 1 << 40},
 		{typ: tBasic, start: 1 << 62, n: 4},
 	})
 	d := probeBytes(t, b, sector)
-	if len(d.Partitions) != 1 {
-		t.Fatalf("%+v", d.Partitions)
+	if len(d.Partitions) != 2 || d.Partitions[1].Size != (2048-1000)*sector || d.Problem != ProblemPartial || !d.NeedsSecondConfirm() {
+		t.Fatalf("%+v", d)
+	}
+	// The last sector is on the disk; one past it is not.
+	for n, want := range map[int64]Problem{1048: ProblemNone, 1049: ProblemPartial} {
+		b := gptDisk(sector, 2048, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", []tpart{{typ: tBasic, start: 1000, n: n}})
+		if d := probeBytes(t, b, sector); len(d.Partitions) != 1 || d.Partitions[0].Size != 1048*sector || d.Problem != want {
+			t.Errorf("n=%d: %+v", n, d)
+		}
+	}
+	b = regpt(gptDisk(sector, 2048, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", []tpart{{typ: tBasic, start: 64, n: 64}}), sector, func([]byte) {})
+	binary.LittleEndian.PutUint64(b[2*sector+40:], 63) // last before first
+	b = regpt(b, sector, func([]byte) {})
+	if d := probeBytes(t, b, sector); len(d.Partitions) != 0 || d.Problem != ProblemPartial {
+		t.Errorf("inverted: %+v", d)
+	}
+}
+
+// The checked multiply and the budgeted reader hold at their edges.
+func TestProbeArithmeticAndBudget(t *testing.T) {
+	for _, c := range []struct {
+		a, b uint64
+		ok   bool
+	}{
+		{1 << 31, 1 << 31, true},
+		{1<<63 - 1, 1, true},
+		{1 << 32, 1 << 31, false},
+		{3, 1 << 62, false},
+		{1 << 33, 1 << 33, false},
+	} {
+		if v, ok := mul(c.a, c.b); ok != c.ok || ok && uint64(v) != c.a*c.b {
+			t.Errorf("mul(%d, %d) = %d, %v", c.a, c.b, v, ok)
+		}
+	}
+	bud := &budget{r: bytes.NewReader(make([]byte, 100)), size: 100, left: 10}
+	if err := bud.read(make([]byte, 10), 90); err != nil {
+		t.Fatalf("within budget: %v", err)
+	}
+	if err := bud.read(make([]byte, 1), 0); !errors.Is(err, errBudget) {
+		t.Errorf("past budget: %v", err)
+	}
+	bud.left = 1000
+	for _, c := range [][2]int64{{-1, 1}, {91, 10}, {0, 101}, {100, 1}} {
+		if err := bud.read(make([]byte, c[1]), c[0]); err == nil {
+			t.Errorf("read %d at %d outside a 100-byte disk", c[1], c[0])
+		}
+	}
+	if bud.left != 1000 {
+		t.Errorf("refused reads spent budget: %d", bud.left)
+	}
+}
+
+// failAt is a disk whose reads at or past off fail (a bad sector).
+type failAt struct {
+	r   io.ReaderAt
+	off int64
+}
+
+func (f failAt) ReadAt(p []byte, off int64) (int, error) {
+	if off+int64(len(p)) > f.off {
+		return 0, errors.New("medium error")
+	}
+	return f.r.ReadAt(p, off)
+}
+
+// A partition whose first bytes cannot be read is listed without a
+// signature and flags the disk partly unreadable.
+func TestProbeBadSectorInWindow(t *testing.T) {
+	b := mbrDisk(4096, []tpart{
+		{mbr: 0x07, start: 64, n: 1000, sig: SigNTFS},
+		{mbr: 0x07, start: 2000, n: 1000, sig: SigBitLocker},
+	})
+	d, err := Probe(failAt{bytes.NewReader(b), 2000 * 512}, int64(len(b)), 512)
+	if err != nil || len(d.Partitions) != 2 || d.Partitions[1].Signature != SigNone || d.Problem != ProblemPartial || !d.NeedsSecondConfirm() {
+		t.Fatalf("%v %+v", err, d)
+	}
+}
+
+// Two readings of a disk's start: the one the kernel uses is described,
+// and the disk is flagged ambiguous, which needs the second confirmation
+// (L3 on #172).
+func TestProbeAmbiguousTables(t *testing.T) {
+	// A volume boot record whose boot code also parses as an MBR.
+	b := mbrDisk(4096, []tpart{{mbr: 0x07, start: 64, n: 1000, sig: SigNTFS}})
+	writeSig(b, SigNTFS)
+	d := probeBytes(t, b, 512)
+	if d.Signature != SigNTFS || d.Table != TableMBR || len(d.Partitions) != 1 || d.Problem != ProblemAmbiguous || !d.NeedsSecondConfirm() {
+		t.Errorf("volume and MBR: %+v", d)
+	}
+	// Ambiguity outranks a partition past the end: both need the second
+	// confirmation, and ambiguity says more.
+	b = mbrDisk(4096, []tpart{{mbr: 0x07, start: 64, n: 8000}})
+	writeSig(b, SigNTFS)
+	if d := probeBytes(t, b, 512); d.Problem != ProblemAmbiguous {
+		t.Errorf("ambiguous and partial: %+v", d)
+	}
+	// A GPT whose protective MBR was wiped: nothing else, so the GPT.
+	b = windowsLaptop(512)
+	copy(b[446:510], make([]byte, 64))
+	d = probeBytes(t, b, 512)
+	if d.Table != TableGPT || len(d.Partitions) != 4 || d.Problem != ProblemAmbiguous || !d.HasBitLocker {
+		t.Errorf("GPT without protective MBR: %+v", d)
+	}
+	// A stale GPT under a new MBR: the MBR, as the kernel reads it.
+	b = windowsLaptop(512)
+	b[446+4] = 0x07
+	d = probeBytes(t, b, 512)
+	if d.Table != TableMBR || len(d.Partitions) != 1 || d.Problem != ProblemAmbiguous {
+		t.Errorf("stale GPT: %+v", d)
+	}
+}
+
+// An MBR partition reaching past the disk, or starting past it, is listed
+// and flags the disk partly unreadable.
+func TestProbeMBROutOfRange(t *testing.T) {
+	for _, p := range []tpart{{mbr: 0x07, start: 100, n: 29}, {mbr: 0x07, start: 128, n: 4}} {
+		d := probeBytes(t, mbrDisk(128, []tpart{p}), 512)
+		if len(d.Partitions) != 1 || d.Problem != ProblemPartial || !d.NeedsSecondConfirm() {
+			t.Errorf("%+v: %+v", p, d)
+		}
+	}
+	if d := probeBytes(t, mbrDisk(128, []tpart{{mbr: 0x07, start: 100, n: 28}}), 512); d.Problem != ProblemNone {
+		t.Errorf("last sector: %+v", d)
 	}
 }
 
@@ -121,6 +249,13 @@ func TestProbeBoundsEBRChain(t *testing.T) {
 	}
 	if d := probeBytes(t, ebrChain(ok), 512); len(d.Partitions) != 64 {
 		t.Fatalf("64 logical partitions: %d", len(d.Partitions))
+	}
+	// Logical partitions are numbered by count, as the kernel does: an
+	// empty EBR takes no number.
+	gap := ebrChain([]uint32{0, 4, 8})
+	gap[(100+4)*512+446+4] = 0
+	if d := probeBytes(t, gap, 512); len(d.Partitions) != 2 || d.Partitions[0].Number != 5 || d.Partitions[1].Number != 6 {
+		t.Fatalf("numbering: %+v", d.Partitions)
 	}
 	long := append(ok, 200)
 	if _, err := Probe(bytes.NewReader(ebrChain(long)), 8192*512, 512); !errors.Is(err, ErrUnreadableTable) {

@@ -87,6 +87,8 @@ type Problem string
 const (
 	ProblemNone        Problem = ""
 	ProblemTable       Problem = "unreadable-table"
+	ProblemPartial     Problem = "partly-unreadable" // a partition reaches past the disk, or its start could not be read
+	ProblemAmbiguous   Problem = "ambiguous-table"   // two readings of the disk's start disagree; both are described
 	ProblemOpen        Problem = "cannot-open"
 	ProblemSizeUnknown Problem = "size-unknown"
 )
@@ -240,13 +242,13 @@ func probe(r io.ReaderAt, size int64, sector int, want [16]byte) (Disk, bool, er
 			}
 		}
 	}
-	found := false
+	found, partial := false, false
 	if protective {
 		// A hybrid MBR (0xEE beside other entries) is read as the GPT it
 		// fronts; if no GPT copy is valid the disk is unreadable, never
 		// described from the hybrid entries.
 		d.Table = TableGPT
-		parts, ok, err := probeGPT(b, size, ss, want)
+		parts, ok, err := probeGPT(b, size, ss, want, &partial)
 		if err != nil {
 			return fail(err)
 		}
@@ -256,26 +258,48 @@ func probe(r io.ReaderAt, size int64, sector int, want [16]byte) (Disk, bool, er
 		if err := b.read(w, 0); err != nil {
 			return fail(ErrUnreadableTable)
 		}
-		if sig := detect(w); sig != SigNone {
-			d.Signature = sig
-		} else if bootSig && validMBR(mbr) {
-			d.Table = TableMBR
-			parts, err := probeMBR(b, size, ss, mbr)
-			if err != nil {
+		d.Signature = detect(w)
+		if bootSig && validMBR(mbr) {
+			parts, err := probeMBR(b, size, ss, mbr, &partial)
+			switch {
+			case err != nil && d.Signature == SigNone:
 				return fail(err)
+			case err == nil:
+				d.Table, d.Partitions = TableMBR, parts
 			}
-			d.Partitions = parts
+			if d.Signature != SigNone {
+				// A volume at sector 0 whose boot code also parses as a
+				// partition table: either may be real.
+				d.Problem = ProblemAmbiguous
+			}
+		}
+		// A valid primary GPT with no protective MBR (sector 0 rewritten
+		// by an MBR-only tool, or a stale GPT under a new MBR). Like the
+		// kernel, the MBR or volume reading wins; the disk is flagged.
+		// With nothing else on the disk the GPT is described.
+		var gptCut bool
+		if parts, ok, err := readGPT(b, size, ss, 1, want, &gptCut); err == nil {
+			d.Problem = ProblemAmbiguous
+			if d.Table == TableNone && d.Signature == SigNone {
+				d.Table, d.Partitions, found, partial = TableGPT, parts, ok, gptCut
+			}
 		}
 	}
 	for i := range d.Partitions {
 		p := &d.Partitions[i]
 		if p.Start < 0 || p.Start >= size || p.Size <= 0 {
+			partial = true
 			continue
 		}
 		w := make([]byte, min(int64(WindowSize), p.Size, size-p.Start))
-		if err := b.read(w, p.Start); err == nil {
-			p.Signature = detect(w)
+		if err := b.read(w, p.Start); err != nil {
+			partial = true
+			continue
 		}
+		p.Signature = detect(w)
+	}
+	if partial && d.Problem == ProblemNone {
+		d.Problem = ProblemPartial
 	}
 	summarize(&d)
 	return d, found, nil
@@ -371,12 +395,14 @@ func onDisk(s string) [16]byte {
 	return out
 }
 
-func probeGPT(b *budget, size, ss int64, want [16]byte) ([]Partition, bool, error) {
+// probeGPT reads the primary GPT, else the backup. partial is set when a
+// valid table lists a partition the probe cannot fully describe.
+func probeGPT(b *budget, size, ss int64, want [16]byte, partial *bool) ([]Partition, bool, error) {
 	for _, lba := range []int64{1, size/ss - 1} {
 		if lba < 1 {
 			continue
 		}
-		if parts, found, err := readGPT(b, size, ss, lba, want); err == nil {
+		if parts, found, err := readGPT(b, size, ss, lba, want, partial); err == nil {
 			return parts, found, nil
 		}
 	}
@@ -385,7 +411,7 @@ func probeGPT(b *budget, size, ss int64, want [16]byte) ([]Partition, bool, erro
 
 var errGPT = errors.New("hostdisk: GPT copy invalid")
 
-func readGPT(b *budget, size, ss, lba int64, want [16]byte) ([]Partition, bool, error) {
+func readGPT(b *budget, size, ss, lba int64, want [16]byte, partial *bool) ([]Partition, bool, error) {
 	sectors := uint64(size / ss)
 	h := make([]byte, ss)
 	off, ok := mul(uint64(lba), uint64(ss))
@@ -432,7 +458,7 @@ func readGPT(b *budget, size, ss, lba int64, want [16]byte) ([]Partition, bool, 
 		return nil, false, errGPT
 	}
 	parts := []Partition{}
-	found := false
+	found, cut := false, false
 	for i := uint64(0); i < num; i++ {
 		e := ent[i*esize : (i+1)*esize]
 		var typ, uniq [16]byte
@@ -442,14 +468,15 @@ func readGPT(b *budget, size, ss, lba int64, want [16]byte) ([]Partition, bool, 
 			continue
 		}
 		first, last := binary.LittleEndian.Uint64(e[32:]), binary.LittleEndian.Uint64(e[40:])
-		if last < first || last >= sectors {
-			continue // outside the disk: not a partition the probe describes
+		if last < first || first >= sectors {
+			cut = true
+			continue // outside the disk: not a partition the probe can describe
 		}
-		start, ok1 := mul(first, uint64(ss))
-		n, ok2 := mul(last-first+1, uint64(ss))
-		if !ok1 || !ok2 {
-			continue
+		if last >= sectors {
+			cut, last = true, sectors-1 // described as far as the disk goes
 		}
+		start, _ := mul(first, uint64(ss))
+		n, _ := mul(last-first+1, uint64(ss))
 		kind, ok := gptKinds[typ]
 		if !ok {
 			kind = KindOther
@@ -459,6 +486,7 @@ func readGPT(b *budget, size, ss, lba int64, want [16]byte) ([]Partition, bool, 
 		}
 		parts = append(parts, Partition{Number: int(i + 1), Start: start, Size: n, Kind: kind})
 	}
+	*partial = *partial || cut
 	return parts, found, nil
 }
 
@@ -478,9 +506,10 @@ func validMBR(mbr []byte) bool {
 
 func isExtended(t byte) bool { return t == 0x05 || t == 0x0F || t == 0x85 }
 
-func probeMBR(b *budget, size, ss int64, mbr []byte) ([]Partition, error) {
+func probeMBR(b *budget, size, ss int64, mbr []byte, partial *bool) ([]Partition, error) {
 	sectors := uint64(size / ss)
 	parts := []Partition{}
+	cut := false
 	add := func(e []byte, base uint64, number int) {
 		t := e[4]
 		first := base + uint64(binary.LittleEndian.Uint32(e[8:]))
@@ -493,6 +522,9 @@ func probeMBR(b *budget, size, ss int64, mbr []byte) ([]Partition, error) {
 		if first < sectors {
 			p.Start, _ = mul(first, uint64(ss))
 			p.Size, _ = mul(min(count, sectors-first), uint64(ss))
+		}
+		if first >= sectors || count > sectors-first {
+			cut = true
 		}
 		parts = append(parts, p)
 	}
@@ -511,11 +543,13 @@ func probeMBR(b *budget, size, ss int64, mbr []byte) ([]Partition, error) {
 		}
 	}
 	if !hasExt {
+		*partial = *partial || cut
 		return parts, nil
 	}
 	ebr := make([]byte, 512)
 	seen := map[uint64]bool{}
 	next := uint64(0)
+	logical := 0
 	for n := 0; n < maxLogical; n++ {
 		at := extStart + next
 		if seen[at] || at >= sectors {
@@ -530,10 +564,14 @@ func probeMBR(b *budget, size, ss int64, mbr []byte) ([]Partition, error) {
 			return nil, ErrUnreadableTable
 		}
 		if e := ebr[446:462]; e[4] != 0 {
-			add(e, at, 5+n)
+			// The kernel numbers logical partitions by count, skipping
+			// empty EBRs.
+			add(e, at, 5+logical)
+			logical++
 		}
 		link := ebr[462:478]
 		if !isExtended(link[4]) {
+			*partial = *partial || cut
 			return parts, nil
 		}
 		next = uint64(binary.LittleEndian.Uint32(link[8:]))

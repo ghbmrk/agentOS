@@ -7,7 +7,7 @@
 //
 // It only reads partition tables and volume signatures, opened read-only.
 // The image installs it root-owned at /usr/lib/agentos/agentos-hostdisk for
-// udev/61-agentos-host-disks.rules.
+// broker/hostdisk/udev/59-agentos-host-disks.rules.
 package main
 
 import (

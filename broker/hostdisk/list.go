@@ -77,14 +77,26 @@ const (
 )
 
 var (
-	validName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]*$`)
+	// A sysfs block name; "!" stands for "/" under /dev (cciss!c0d0 is
+	// /dev/cciss/c0d0), and every segment starts with a letter or digit,
+	// so none is "." or "..".
+	validName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]*(![A-Za-z0-9][A-Za-z0-9_.:-]*)*$`)
 	validMM   = regexp.MustCompile(`^[0-9]+:[0-9]+$`)
 	validGUID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 	// Only these are the box's own virtual devices (security H7). md and
 	// dm devices are classified by what they are built on.
 	virtualPrefix = []string{"loop", "ram", "zram", "nbd"}
 	stackedPrefix = []string{"dm-", "md"}
+	// Optical drives are never opened: an open can close an ejected tray,
+	// and a disc is not a disk the owner can give the box (L3 on #172).
+	// udev still hides them as host.
+	opticalPrefix = []string{"sr"}
 )
+
+// probeable reports whether name is a physical disk the list may open.
+func probeable(name string) bool {
+	return validName.MatchString(name) && !hasPrefix(name, virtualPrefix) && !hasPrefix(name, stackedPrefix) && !hasPrefix(name, opticalPrefix)
+}
 
 func hasPrefix(name string, ps []string) bool {
 	for _, p := range ps {
@@ -255,7 +267,7 @@ func (s System) rootDisk() string {
 	set := map[string]bool{}
 	for _, e := range ents {
 		n := e.Name()
-		if !validName.MatchString(n) || hasPrefix(n, virtualPrefix) || hasPrefix(n, stackedPrefix) {
+		if !probeable(n) {
 			continue
 		}
 		if _, found := s.describe(n, want); found {
@@ -319,6 +331,7 @@ func (s System) findDrive() driveState {
 // Classify says what the named /sys/block device is, for the udev rule.
 func (s System) Classify(name string) Class {
 	s = s.fill()
+	name = strings.ReplaceAll(name, "/", "!") // udev's %k spells "!" as "/"
 	if !validName.MatchString(name) || hasPrefix(name, virtualPrefix) {
 		return ClassUnknown
 	}
@@ -356,8 +369,9 @@ type Listing struct {
 
 // HostDisks describes every physical disk of the host other than the one
 // holding the running root, for the HW-8a list. Virtual, dm and md
-// devices are left out: they are built on disks already listed. A disk
-// that cannot be read is listed with Problem set.
+// devices are left out: they are built on disks already listed. Optical
+// drives are left out and never opened. A disk that cannot be read is
+// listed with Problem set.
 func (s System) HostDisks() (Listing, error) {
 	s = s.fill()
 	ents, err := os.ReadDir(filepath.Join(s.Sys, "block"))
@@ -369,7 +383,7 @@ func (s System) HostDisks() (Listing, error) {
 	var names []string
 	for _, e := range ents {
 		n := e.Name()
-		if validName.MatchString(n) && !hasPrefix(n, virtualPrefix) && !hasPrefix(n, stackedPrefix) && n != st.root {
+		if probeable(n) && n != st.root {
 			names = append(names, n)
 		}
 	}
@@ -397,7 +411,7 @@ func (s System) describe(name string, want [16]byte) (Disk, bool) {
 	if err != nil {
 		lbs = 512
 	}
-	dev, err := s.open(filepath.Join(s.Dev, name))
+	dev, err := s.open(filepath.Join(s.Dev, strings.ReplaceAll(name, "!", "/")))
 	if err != nil {
 		d.Problem = ProblemOpen
 		return d, false

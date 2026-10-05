@@ -206,6 +206,57 @@ func TestHostDisksListsEveryHostDiskButTheDrive(t *testing.T) {
 	}
 }
 
+// L3 on #172: an optical drive is never opened or listed (an open can
+// close its tray), yet udev still hides it; a name with "!" (cciss) is a
+// path under /dev and classifies whether udev spells it "!" or "/".
+func TestHostDisksOpticalAndBangNames(t *testing.T) {
+	h := newFakeHost(t)
+	h.disk("sr0", "pci0000:00/0000:00:17.0/ata2/host2/target2:0:0/2:0:0:0", "11:0", "DVD-RW", true, make([]byte, 64*512))
+	h.disk("cciss!c0d0", "pci0000:00/0000:00:1c.0/0000:02:00.0/cciss0", "104:0", "LOGICAL VOLUME", false,
+		gptDisk(512, 4096, "eeeeeeee-0000-4000-8000-000000000003", []tpart{{typ: tBasic, start: 64, n: 3900, sig: SigNTFS}}))
+	h.images[h.path("dev/cciss/c0d0")] = h.images[h.path("dev/cciss!c0d0")]
+	delete(h.images, h.path("dev/cciss!c0d0"))
+	s := h.system()
+	l, err := s.HostDisks()
+	if err != nil || names(l.Disks) != "cciss!c0d0,nvme0n1,sdb" || l.Disks[0].Problem != ProblemNone || len(l.Disks[0].Partitions) != 1 {
+		t.Fatalf("%v %+v", err, l)
+	}
+	classes(t, s, map[string]Class{"sr0": ClassHost, "cciss!c0d0": ClassHost, "cciss/c0d0": ClassHost,
+		"cciss!..": ClassUnknown, "../sda": ClassUnknown, "!sda": ClassUnknown})
+	for n, want := range map[string]bool{"cciss!c0d0": true, "nvme0n1": true, "cciss!..": false, "cciss!.x": false,
+		"a!!b": false, "a!": false, "a/b": false, "..": false} {
+		if validName.MatchString(n) != want {
+			t.Errorf("validName(%q) != %v", n, want)
+		}
+	}
+	for _, p := range h.opened {
+		if strings.Contains(p, "sr0") {
+			t.Errorf("opened %s", p)
+		}
+	}
+	// With no root on a block device, the loader fallback opens no
+	// optical drive either.
+	h.mountinfo("0:30 / tmpfs rw")
+	h.opened = nil
+	if got := s.Classify("sda"); got != ClassDrive {
+		t.Errorf("loader fallback: sda %s", got)
+	}
+	for _, p := range h.opened {
+		if strings.Contains(p, "sr0") {
+			t.Errorf("fallback opened %s", p)
+		}
+	}
+}
+
+// An overlay that names itself as a layer is cut off by the depth cap;
+// the drive is then found from /usr.
+func TestOverlaySelfReference(t *testing.T) {
+	h := newFakeHost(t)
+	h.mountinfo("0:30 / overlay rw,lowerdir=/,upperdir=/upper,workdir=/w", "0:31 /upper overlay rw,lowerdir=/", "8:2 /usr ext4 ro")
+	s := h.system()
+	classes(t, s, map[string]Class{"sda": ClassDrive, "sdb": ClassHost})
+}
+
 // Security H1 on HOST-1a: the drive is the disk holding the running root,
 // cross-checked against systemd-boot's partition; dm and md devices take
 // the class of the disks they are built on; removable media are host
