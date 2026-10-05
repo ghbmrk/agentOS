@@ -87,13 +87,17 @@ func (c *Compiler) CaseClass(intentID string) change.Class {
 }
 
 // usable returns the successful trajectories the builder may see: those
-// of tasks behind a dev case, grouped by shape.
+// of tasks whose canonical intent (the first carrying the owner's verdict)
+// is a dev case, grouped by shape. A case on any other intent of the task
+// does not make it dev, so a task split across dev and held-out by two
+// cases is compiled only when its canonical case is on the dev side (CHG-1;
+// the harvester's contract is one case per task, K4).
 func (c *Compiler) usable() map[string][]*Trajectory {
 	all := trajectories(c.cfg.Journal, c.cfg.Group, c.cfg.OwnerSource, c.cfg.Redacted)
 	goalOf := map[string]string{}
 	for g, t := range all {
-		for _, id := range t.Intents {
-			goalOf[id] = g
+		if t.Canonical != "" {
+			goalOf[t.Canonical] = g
 		}
 	}
 	dev := map[string]bool{}

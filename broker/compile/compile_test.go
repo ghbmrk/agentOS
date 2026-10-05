@@ -536,3 +536,58 @@ func TestBuildSkillFromEvidence(t *testing.T) {
 		t.Fatalf("read beyond the evidence: %v", err)
 	}
 }
+
+// CHG-1 (L3 review): a task is dev only through its canonical intent, the
+// first carrying the owner's verdict. A dev case on another intent of a
+// task whose canonical case is held out does not let the compiler see it.
+func TestSplitTaskIsNotDev(t *testing.T) {
+	r := newRig(t)
+	r.accepted("g1", "ann@example.test", 40)
+	r.accepted("g2", "bo@example.test", 41)
+	id := r.task("g3", "private", time.Second, weekly("cy@example.test", 42)...)
+	r.judge(id, journal.VerdictGood, "owner")
+	second := strings.TrimSuffix(id, "-1") + "-2"
+	r.judge(second, journal.VerdictGood, "owner")
+	r.dev[second] = true // its canonical case (on id) is held out
+	for _, c := range r.compiler().Candidates(change.Tree{}) {
+		for p := range c.Files {
+			if strings.HasPrefix(p, "skills/") {
+				t.Fatalf("compiled from a task whose canonical case is held out: %s", p)
+			}
+		}
+	}
+}
+
+// CAP-5 (L3 review): a value the journal clipped at MaxTextBytes is never
+// replayed, and a null that is the same in every run is kept as a literal.
+func TestClippedAndNullValues(t *testing.T) {
+	r := newRig(t)
+	for i := 0; i < 3; i++ {
+		id := r.task(fmt.Sprintf("n%d", i), "private", time.Second,
+			step{"mail", "draft.create", map[string]any{"to": fmt.Sprintf("u%d@example.test", i), "cc": nil}, nil},
+			step{"mail", "message.send", nil, []string{fmt.Sprintf("u%d@example.test", i)}})
+		r.judge(id, journal.VerdictGood, "owner")
+		r.dev[id] = true
+	}
+	_, sk, _ := only(t, r.compiler().Candidates(change.Tree{}))
+	if string(sk.Steps[0].Params["cc"].Lit) != "null" {
+		t.Fatalf("cc %+v", sk.Steps[0].Params["cc"])
+	}
+	params, _, err := sk.Fill(0, map[string]any{"to": "z@example.test"})
+	if v, ok := params["cc"]; err != nil || !ok || v != nil {
+		t.Fatalf("null must round-trip: %v %v", params, err)
+	}
+
+	r = newRig(t)
+	for i := 0; i < 3; i++ {
+		body := fmt.Sprintf("long text %d…[cut 900 bytes, sha256 ab12]", i)
+		id := r.task(fmt.Sprintf("c%d", i), "private", time.Second,
+			step{"mail", "draft.create", map[string]any{"body": body}, nil},
+			step{"mail", "message.send", nil, []string{"x@example.test"}})
+		r.judge(id, journal.VerdictGood, "owner")
+		r.dev[id] = true
+	}
+	if cs := r.compiler().Candidates(change.Tree{}); len(cs) != 0 {
+		t.Fatalf("clipped values compiled: %+v", cs)
+	}
+}

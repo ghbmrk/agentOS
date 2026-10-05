@@ -33,9 +33,12 @@ type Step struct {
 type Trajectory struct {
 	Goal    string
 	Intents []string
-	Steps   []Step
-	Start   time.Time
-	End     time.Time
+	// Canonical is the first intent carrying an owner verdict: the one a
+	// task's case must name.
+	Canonical string
+	Steps     []Step
+	Start     time.Time
+	End       time.Time
 	// Succeeded: every effect succeeded. Good: the owner judged the task
 	// good and nobody judged any of it wrong. Public: every intent came
 	// from a public machine (REV-5).
@@ -98,19 +101,30 @@ func trajectories(j Journal, group func(journal.Intent) string, ownerSource stri
 			if in.Label != "public" {
 				t.Public = false
 			}
+			if t.Canonical == "" && s.Quality.Source == ownerSource && s.Quality.Verdict != "" {
+				t.Canonical = id
+			}
 			switch s.Quality.Verdict {
 			case journal.VerdictWrong:
 				wrong = true
 			case journal.VerdictGood:
 				owner = owner || s.Quality.Source == ownerSource
 			}
-			if redacted != nil && anyString(in.Params, in.Recipients, redacted) {
+			if anyString(in.Params, in.Recipients, func(v string) bool {
+				return clipped(v) || (redacted != nil && redacted(v))
+			}) {
 				t.Redacted = true
 			}
 		}
 		t.Good = owner && !wrong
 	}
 	return byGoal
+}
+
+// clipped reports a value the journal cut at MaxTextBytes ("…[cut N bytes,
+// sha256 …]"): replaying it would send a truncated value.
+func clipped(s string) bool {
+	return strings.Contains(s, "…[cut ") && strings.Contains(s, " bytes, sha256 ")
 }
 
 func anyString(params map[string]any, recips []string, f func(string) bool) bool {

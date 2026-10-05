@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync/atomic"
+	"time"
 )
 
 // Server is an MCP tool server (streamable HTTP, one JSON response per
@@ -24,6 +25,13 @@ type Server struct {
 	Dir     string
 	Effects Effects
 }
+
+// RunTimeout bounds one whole skill run; StepTimeout one step's request.
+// A step past its time stops the run like any other failed step.
+var (
+	RunTimeout  = 10 * time.Minute
+	StepTimeout = 3 * time.Minute
+)
 
 // ToolPrefix starts every skill tool's name.
 const ToolPrefix = "skill_"
@@ -191,7 +199,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				args[k] = v
 			}
 		}
-		res := Run(r.Context(), sk, runID, args, s.Effects)
+		ctx, cancel := context.WithTimeout(r.Context(), RunTimeout)
+		defer cancel()
+		res := Run(ctx, sk, runID, args, s.Effects)
 		b, _ := json.Marshal(res)
 		writeRPC(w, req.ID, toolText(string(b), false), 0, "")
 	default:
@@ -231,6 +241,8 @@ func (m *MCPEffects) Request(ctx context.Context, e Effect) (State, error) {
 		"jsonrpc": "2.0", "id": m.seq.Add(1), "method": "tools/call",
 		"params": map[string]any{"name": "effect_request", "arguments": json.RawMessage(args)},
 	})
+	ctx, cancel := context.WithTimeout(ctx, StepTimeout)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.URL, bytes.NewReader(body))
 	if err != nil {
 		return State{}, err
