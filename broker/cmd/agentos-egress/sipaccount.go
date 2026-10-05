@@ -7,6 +7,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/sipsign"
 	"github.com/ghbmrk/agentos/broker/vault"
 )
@@ -221,6 +222,26 @@ func (c *custody) sipStatus() (sipStatus, error) {
 	}
 	return sipStatus{Set: true, Settings: rec.Settings, RealmRecorded: rec.Realm != "", Realm: rec.Realm, RealmConfirmed: rec.Confirmed,
 		WaitingForRegistration: c.learning(rec), SetAt: rec.SetAt}, nil
+}
+
+// secondLineState is the second line's state for agentosd's STATUS and
+// digest lines (potency R1 on #139): a recorded realm the owner has not
+// confirmed, or no registration within RealmWindow of setup.
+func (c *custody) secondLineState() (modelroute.SecondLineState, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	rec, _, err := c.sipAccount()
+	switch {
+	case errors.Is(err, sipsign.ErrLocked):
+		return modelroute.SecondLineOK, errLocked
+	case err != nil, rec.Confirmed:
+		return modelroute.SecondLineOK, nil
+	case rec.Realm != "":
+		return modelroute.SecondLineConfirm, nil
+	case !c.learning(rec):
+		return modelroute.SecondLineUnreached, nil
+	}
+	return modelroute.SecondLineOK, nil
 }
 
 // signStore is the custody as sign.sock serves it (sipsign.Store).

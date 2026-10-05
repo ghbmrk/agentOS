@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/sipsign"
 	"github.com/ghbmrk/agentos/broker/vault"
 )
@@ -391,4 +392,58 @@ func TestTheModemUIDMustBeTheBridgesOwn(t *testing.T) {
 	if err := run(self + 3); err == nil || strings.Contains(err.Error(), "-modem-uid") {
 		t.Fatalf("a distinct modem uid: %v", err)
 	}
+}
+
+// Potency R1 on #139: agentosd learns, on the verify socket, when the
+// second line waits on the owner (a realm to confirm) or never reached
+// its provider, so STATUS and the digest can say so. It learns nothing
+// else about the account.
+func TestAgentosdLearnsWhenTheSecondLineWaitsOnTheOwner(t *testing.T) {
+	r := newFastRig(t, true)
+	run := filepath.Join(t.TempDir(), "run")
+	srvs, err := serve(run, r.c, testRouter(t), nil, nil, os.Getuid(), os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		for _, s := range srvs {
+			s.Close()
+		}
+	})
+	v := modelroute.NewVerifier(filepath.Join(run, VerifySocket))
+	ctx := context.Background()
+	if _, err := v.SecondLine(ctx); err != modelroute.ErrVaultLocked {
+		t.Fatalf("while locked: %v", err)
+	}
+	tk := r.unlock(t)
+	if err := r.c.confirm(tk, r.code()); err != nil {
+		t.Fatal(err)
+	}
+	want := func(step string, s modelroute.SecondLineState) {
+		t.Helper()
+		got, err := v.SecondLine(ctx)
+		if err != nil || got != s {
+			t.Fatalf("%s: %q %v, want %q", step, got, err, s)
+		}
+	}
+	want("no account", modelroute.SecondLineOK)
+	if err := r.c.setSIP(sipSettings, synthetic(t, "canary-sip-")); err != nil {
+		t.Fatal(err)
+	}
+	want("waiting for registration", modelroute.SecondLineOK)
+	r.clk.add(RealmWindow)
+	want("window passed", modelroute.SecondLineUnreached)
+	if err := r.c.setSIP(sipSettings, synthetic(t, "canary-sip-")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (signStore{r.c}).LearnRealm(sipRealm); err != nil {
+		t.Fatal(err)
+	}
+	want("realm recorded", modelroute.SecondLineConfirm)
+	r.clk.add(RealmWindow)
+	want("realm still unconfirmed", modelroute.SecondLineConfirm)
+	if err := r.c.confirmRealm(sipRealm); err != nil {
+		t.Fatal(err)
+	}
+	want("confirmed", modelroute.SecondLineOK)
 }
