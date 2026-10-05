@@ -121,8 +121,10 @@ func newBox(t *testing.T) *box {
 	must(t, os.WriteFile(filepath.Join(layer, "tool"), []byte("#!/bin/sh\n"), 0o755))
 	if os.Geteuid() == 0 {
 		// A guest user's file: setgid is kept only for a group other than
-		// root's.
-		must(t, os.Chown(filepath.Join(layer, "tool"), 1000, 1000))
+		// root's. In a user namespace (the A9 sandbox) uid 1000 may be
+		// unmapped; the file then stays root's, which no test with kept
+		// owners runs under.
+		_ = os.Chown(filepath.Join(layer, "tool"), 1000, 1000)
 	}
 	must(t, os.Chmod(filepath.Join(layer, "tool"), 0o755|os.ModeSetgid))
 	big := make([]byte, 3*chunkSize+123) // spans several sealed chunks
