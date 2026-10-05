@@ -12,8 +12,8 @@ import (
 
 // REQ: ARC-1, CRED-1
 
-// Only the egress proxy (and the future egress binary that constructs it)
-// may import the vault. Every other broker package, and above all anything
+// Only the egress proxy and the vault process that holds the vault and
+// constructs it (cmd/agentos-egress, P2-4a) may import the vault. Every other broker package, and above all anything
 // a guest's socket reaches, gets no code path to a credential value. The
 // daemon (cmd/agentosd) is on the ARC-2 control path and may not.
 var vaultImporters = map[string]bool{"egress": true, "cmd/agentos-egress": true}
@@ -39,6 +39,12 @@ func TestOnlyEgressImportsVault(t *testing.T) {
 			}
 			if pkg == "vault" && ((p == "net" || strings.HasPrefix(p, "net/") && p != "net/url") || p == "os/exec" || strings.HasPrefix(p, "github.com/ghbmrk/agentos/broker/")) {
 				t.Errorf("vault imports %s; it must stay a leaf with no I/O but its file", p)
+			}
+			// Argon2id (CRED-8) is the one third-party import: the Go
+			// project's own x/crypto, pinned in go.sum, rather than
+			// hand-rolled key derivation.
+			if pkg == "vault" && strings.Contains(strings.SplitN(p, "/", 2)[0], ".") && p != "golang.org/x/crypto/argon2" {
+				t.Errorf("vault imports third-party %s; only golang.org/x/crypto/argon2 is allowed", p)
 			}
 		}
 		return nil

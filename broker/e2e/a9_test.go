@@ -26,8 +26,8 @@ import (
 // STOP and STATUS from the owner, serve a guest's broker tools and owner
 // inbox, then restart and recover, with no network at all. tools/depaudit.py
 // runs it with every connect and DNS lookup logged; any attempt off the
-// box fails the gate. Model egress is not wired here, as on the box before
-// the vault can be unlocked (P2-4).
+// box fails the gate. Model egress is not wired here: on the box it is
+// forwarded to the vault process (P2-4a), which this scenario does not run.
 
 const ownerNumber = "+15550000001"
 
