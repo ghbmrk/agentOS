@@ -41,7 +41,7 @@ import (
 
 // ChannelPinned is UPD-4's pinned channel: no automatic updates, security
 // notices only. Stable and fast are update.ChannelStable and ChannelFast.
-const ChannelPinned = "pinned"
+const ChannelPinned = loops.ChannelPinned
 
 // Proposer is the part of the change pipeline Loop 3 uses.
 type Proposer interface {
@@ -58,9 +58,6 @@ type Config struct {
 	// Online reports network access. No mirror is contacted while it is
 	// false, and the box is never reported current. Required.
 	Online func() bool
-	// Channel is the owner's update channel: update.ChannelStable (the
-	// default), update.ChannelFast, or ChannelPinned (UPD-4).
-	Channel func() string
 	// Attestations fetches attestations for a release manifest path (for
 	// example releases/12.json). They arrive from anyone and are checked
 	// by update. Nil: none are known.
@@ -83,8 +80,9 @@ type Config struct {
 	// independent. Nil: none.
 	OwnKey ed25519.PublicKey
 	// Settings reads the owner's loop settings (the scheduler's
-	// Settings), so the status can say when update checks are off. Nil:
-	// every loop on.
+	// Settings): whether update checks are on, and the owner's update
+	// channel and cadence (UPD-4, UPD-5; loops.UpdateSettings), read at
+	// each check. Nil: every loop on, and the spec defaults.
 	Settings func() loops.Settings
 	// Pipeline is the change pipeline (§11).
 	Pipeline Proposer
@@ -95,9 +93,6 @@ type Config struct {
 	// Retry is how soon to look again after a failed check, or for a
 	// security fix waiting for its attestation. Default 1 hour.
 	Retry time.Duration
-	// Soak is how long a stable box waits after first seeing an ordinary
-	// stable release before proposing it (UPD-5). Default 7 days.
-	Soak time.Duration
 	// MinPasses is how many independent passing fast-channel attestations
 	// an ordinary stable release needs (UPD-5's "sufficient"). Default 1.
 	MinPasses int
@@ -202,9 +197,6 @@ func New(cfg Config) (*Loop3, error) {
 	if cfg.Mirrors == nil {
 		cfg.Mirrors = func() []update.Source { return nil }
 	}
-	if cfg.Channel == nil {
-		cfg.Channel = func() string { return update.ChannelStable }
-	}
 	if cfg.Settings == nil {
 		cfg.Settings = func() loops.Settings { return loops.Settings{} }
 	}
@@ -213,9 +205,6 @@ func New(cfg Config) (*Loop3, error) {
 	}
 	if cfg.Retry <= 0 {
 		cfg.Retry = time.Hour
-	}
-	if cfg.Soak <= 0 {
-		cfg.Soak = 7 * 24 * time.Hour
 	}
 	if cfg.AttestWait <= 0 {
 		cfg.AttestWait = 24 * time.Hour
@@ -317,7 +306,8 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 	if err := ctx.Err(); err != nil {
 		return loops.Result{Err: err}
 	}
-	channel := l.cfg.Channel()
+	set := l.cfg.Settings().Updates
+	channel := set.ChannelName()
 	opts := update.Options{Channel: channel, Now: l.cfg.Now, Attestors: l.cfg.Attestors, InterimAttestors: l.cfg.InterimAttestors}
 	if channel == ChannelPinned {
 		// Checked as stable, for security notices only (UPD-4).
@@ -425,7 +415,7 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 		return loops.Result{Err: serr}
 	}
 
-	o := l.decide(ctx, rel, m, security, channel, seen, now)
+	o := l.decide(ctx, rel, m, security, set, seen, now)
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -549,14 +539,18 @@ type outcome struct {
 
 // decide applies UPD-8 and UPD-5 to a verified release newer than the
 // installed one and proposes it when they allow.
-func (l *Loop3) decide(ctx context.Context, rel *update.Verified, m update.Manifest, security bool, channel string, seen, now time.Time) outcome {
+func (l *Loop3) decide(ctx context.Context, rel *update.Verified, m update.Manifest, security bool, set loops.UpdateSettings, seen, now time.Time) outcome {
 	mf, err := rel.ManifestFile()
 	if err != nil {
 		return outcome{wait: &pending{Version: m.Version, Security: security, Why: waitPropose}, err: err}
 	}
 	// update counts only reports from the allow-list (Options.Attestors).
 	atts, aerr := l.attestations(ctx, mf.Path)
-	if security {
+	if security && set.SecurityAsk {
+		// SECURITY UPDATES ASK: every security fix goes to the owner at
+		// once, never staged on its own (UPD-5).
+		atts = nil
+	} else if security {
 		// UPD-8, D6: a security fix auto-stages only with a passing report
 		// from a listed attestor. Without one it waits a day for one, then
 		// goes to the owner (CH-3); with no attestor listed it goes to the
@@ -568,11 +562,11 @@ func (l *Loop3) decide(ctx context.Context, rel *update.Verified, m update.Manif
 			len(l.cfg.Attestors) > 0 && now.Before(seen.Add(l.cfg.AttestWait)) {
 			return outcome{wait: &pending{Version: m.Version, Security: true, Why: waitAttestation}, err: aerr}
 		}
-	} else if channel != update.ChannelFast {
+	} else if set.ChannelName() != update.ChannelFast {
 		// UPD-5: an ordinary stable release soaks, and needs passing
 		// reports from listed attestors when any exist, before it is
 		// offered.
-		until := seen.Add(l.cfg.Soak)
+		until := seen.Add(time.Duration(set.Soak()) * 24 * time.Hour)
 		if now.Before(until) || (len(l.cfg.Attestors) > 0 && rel.IndependentPasses(atts, l.cfg.OwnKey) < l.cfg.MinPasses) {
 			return outcome{wait: &pending{Version: m.Version, Why: waitSoak, Until: until}, err: aerr}
 		}
@@ -714,9 +708,9 @@ func (l *Loop3) statusLocked(online bool, set loops.Settings, in update.Installe
 func pendingLine(p *pending) string {
 	switch {
 	case p.Why == waitPinned && p.Security:
-		return fmt.Sprintf("Security update %d is out, but this box is pinned, so it will not install it on its own.", p.Version)
+		return fmt.Sprintf("Security update %d is out, but this box is pinned, so it will not install it on its own. Reply UPDATES STABLE to take it.", p.Version)
 	case p.Why == waitPinned:
-		return "Updates: this box is pinned, so it does not install updates on its own."
+		return "Updates: this box is pinned, so it does not install updates on its own. Reply UPDATES STABLE to take them."
 	case p.Why == waitAttestation:
 		return fmt.Sprintf("Security update %d is waiting for an independent test report before it installs.", p.Version)
 	case p.Why == waitSoak:
