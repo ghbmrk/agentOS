@@ -134,17 +134,27 @@ func (v *Vault) finishKeys() error {
 }
 
 // dropStaleStaged removes a staged next keys file left beside the keys
-// file once no slot change is under way. It opens nothing (stagedKeys),
-// so this is housekeeping and a failure is ignored. It assumes one open
+// file once no slot change is under way, and reports whether it changed
+// the passphrase: a passphrase change that never took effect (P2-4g). It
+// opens nothing (stagedKeys), so this is housekeeping and a failure is
+// ignored. It assumes one open
 // Vault per keys path, as the vault process keeps: a second Vault mid
 // change on the same path would lose its staged file. Caller does not
 // hold mu.
-func (v *Vault) dropStaleStaged() {
+func (v *Vault) dropStaleStaged() bool {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if v.nextKeys == nil {
+	if v.nextKeys != nil {
+		return false
+	}
+	changed := false
+	if nraw, err := os.ReadFile(v.keysPath + nextSuffix); err == nil {
+		cur, cerr := readKeys(v.keysPath)
+		nkf, nerr := parseKeys(nraw)
+		changed = cerr == nil && nerr == nil && passphraseChanged(cur, nkf)
 		os.Remove(v.keysPath + nextSuffix)
 	}
+	return changed
 }
 
 // stagedKeys reports whether raw, read from the staged next keys file,
@@ -174,6 +184,10 @@ func (v *Vault) checkKeys(raw []byte, kf *keyFile, want []byte, opened Slot) err
 			return err
 		}
 		if !nkf.has(opened) {
+			if opened.Kind == SlotPassphrase && passphraseChanged(kf, nkf) {
+				// The change replaced this passphrase (P2-4g).
+				return ErrChangeInterrupted
+			}
 			return ErrNoSlotOpens
 		}
 		if err := v.finishKeys(); err != nil {
@@ -189,6 +203,27 @@ func (v *Vault) checkKeys(raw []byte, kf *keyFile, want []byte, opened Slot) err
 		return v.replaceKeys(&keyFile{Magic: kf.Magic, Version: kf.Version, Slots: slotsFor(kf, want)})
 	}
 	return nil
+}
+
+// passphraseChanged reports whether next holds other passphrase slots
+// than cur: the slot change between them is a passphrase change.
+func passphraseChanged(cur, next *keyFile) bool {
+	n := 0
+	for _, s := range next.Slots {
+		if s.Kind != SlotPassphrase {
+			continue
+		}
+		n++
+		if !cur.has(s) {
+			return true
+		}
+	}
+	for _, s := range cur.Slots {
+		if s.Kind == SlotPassphrase {
+			n--
+		}
+	}
+	return n != 0
 }
 
 // has reports whether the file holds slot s unchanged.

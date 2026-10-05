@@ -799,3 +799,27 @@ func TestLockoutDuringSupersedingDerivation(t *testing.T) {
 		}
 	}
 }
+
+// P2-4g: a passphrase refused while a passphrase change is staged gets the
+// fixed interrupted line instead of the plain one, and still counts as a
+// wrong passphrase for the owner's notice.
+func TestInterruptedChangeRefusal(t *testing.T) {
+	r := newFastRig(t, true)
+	inner := r.c.open
+	r.c.open = func(p string) (*vault.Vault, error) {
+		if p == "old passphrase" {
+			return nil, vault.ErrChangeInterrupted
+		}
+		return inner(p)
+	}
+	r.clk.add(MinAttemptGap)
+	if _, err := r.c.unlock("old passphrase"); err != errChangeInterrupted {
+		t.Fatalf("interrupted change: %v", err)
+	}
+	if len(r.notes) != 1 || r.notes[0] != "wrong vault passphrase tried on the box's Wi-Fi" {
+		t.Fatalf("notes %q", r.notes)
+	}
+	if r.phase() != locked {
+		t.Fatalf("phase %v", r.phase())
+	}
+}

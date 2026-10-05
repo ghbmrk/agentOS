@@ -52,6 +52,9 @@ type VaultStatus struct {
 	BootChanged, Updated, SecureBoot bool
 	// KeptTrusted, after Confirm, reports that this PC stays trusted.
 	KeptTrusted bool
+	// ChangeUnfinished: the passphrase opened the vault beside a
+	// passphrase change that never took effect (P2-4g).
+	ChangeUnfinished bool
 }
 
 // VaultError is a refusal from the vault process: its HTTP status and its
@@ -92,11 +95,13 @@ type wireStatus struct {
 	Updated     bool `json:"updated"`
 	SecureBoot  bool `json:"secure_boot"`
 	KeptTrusted bool `json:"kept_trusted"`
+
+	ChangeUnfinished bool `json:"change_unfinished"`
 }
 
 func (w wireStatus) status() VaultStatus {
 	st := VaultStatus{State: w.State, PIN: w.PIN, BootChanged: w.BootChanged, Updated: w.Updated,
-		SecureBoot: w.SecureBoot, KeptTrusted: w.KeptTrusted}
+		SecureBoot: w.SecureBoot, KeptTrusted: w.KeptTrusted, ChangeUnfinished: w.ChangeUnfinished}
 	if t, err := time.Parse(time.RFC3339, w.Expires); err == nil {
 		st.Expires = t
 	}
@@ -305,6 +310,9 @@ type vaultView struct {
 	Keep bool
 	// Kept: the unlock kept this PC trusted.
 	Kept bool
+	// Change is the unfinished passphrase change line (P2-4g), "" for
+	// none.
+	Change string
 	// SignedIn: this phone is signed in (after its unlock, P2-4f).
 	SignedIn bool
 	Mine     bool
@@ -341,6 +349,9 @@ func (s *Server) vaultPage(w http.ResponseWriter, r *http.Request, errText strin
 		return
 	}
 	v.State, v.PIN = st.State, st.PIN
+	if st.ChangeUnfinished && (st.State == "pending" || st.State == "open") {
+		v.Change = "Your passphrase change did not finish; change it again."
+	}
 	if st.BootChanged {
 		// "Keep this PC trusted" is never ticked by default: Updated and
 		// SecureBoot come from the drive, so they only pick the wording
@@ -570,6 +581,8 @@ func vaultText(err error) string {
 	switch ve.Msg {
 	case "the passphrase does not open this vault":
 		return "Those words do not open this box. Check them against your card, or take the photo again."
+	case "a passphrase change was interrupted; try your new passphrase":
+		return "A passphrase change was interrupted. Try your new passphrase."
 	case "wait a moment before trying again":
 		return "Wait a moment, then try again."
 	}

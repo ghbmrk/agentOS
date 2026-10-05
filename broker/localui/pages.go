@@ -68,10 +68,12 @@ form { margin: .6em 0 1.2em; }
 <h1>Unlock the box</h1>
 {{if .Down}}<p>The box is still starting. This page reloads by itself.</p>
 {{else if eq .State "open"}}<p class="ok">The box is unlocked.{{if .Kept}} This PC stays trusted.{{end}}</p>
+{{with .Change}}<p class="err">{{.}}</p>{{end}}
 {{if .SignedIn}}<p>This phone is signed in, and chat by text is unlocked.</p>
 {{else}}<p>To approve by text again, <a href="/unlock">sign in</a> with your next code.</p>{{end}}
 {{else if eq .State "opening"}}<p>Checking the passphrase. This page reloads by itself.</p>
 {{else if eq .State "pending"}}{{if .Mine}}<p class="ok">Passphrase accepted.</p>
+{{with .Change}}<p class="err">{{.}}</p>{{end}}
 <form method="post" action="/unlock/vault"><input type="hidden" name="step" value="code">
 <label>Code from your code generator, by {{.Expires}}
 <input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required autofocus></label>

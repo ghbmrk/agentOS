@@ -108,6 +108,9 @@ type Vault struct {
 	// nextKeys the keys file a slot change is moving to (keysbind.go).
 	keysOK   [][]byte
 	nextKeys []byte
+	// unfinished: OpenSealed found a passphrase change that never took
+	// effect (ChangeUnfinished).
+	unfinished bool
 	// warn tells the owner about a rollback check left unfinished.
 	warn func(string)
 }
