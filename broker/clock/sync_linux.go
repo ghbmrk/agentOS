@@ -2,22 +2,35 @@ package clock
 
 import (
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"golang.org/x/sys/unix"
 )
 
-// Synced reports whether NTP (systemd-timesyncd on the box) has set the
-// kernel clock: adjtimex, read-only, answers TIME_ERROR while the clock is
-// unsynchronized.
-func Synced() (bool, error) {
-	var tx unix.Timex // Modes 0: read only
-	state, err := unix.Adjtimex(&tx)
+// RTC reads the host's hardware clock as the kernel does (as if UTC),
+// read-only from sysfs. It is never written (HW-8).
+func RTC() (time.Time, error) {
+	b, err := os.ReadFile("/sys/class/rtc/rtc0/since_epoch")
 	if err != nil {
-		return false, err
+		return time.Time{}, err
 	}
-	return state != unix.TIME_ERROR && tx.Status&unix.STA_UNSYNC == 0, nil
+	n, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return time.Unix(n, 0).UTC(), nil
+}
+
+// HostID is the firmware's system UUID (SMBIOS), which names the PC the
+// box is booted on; root-readable only. It is hashed before it is kept.
+func HostID() string {
+	b, err := os.ReadFile("/sys/class/dmi/id/product_uuid")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
 }
 
 // bootElapsed is CLOCK_BOOTTIME: monotonic, counting suspend, and the same

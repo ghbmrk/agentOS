@@ -49,6 +49,7 @@ type Machines interface {
 	Destroy(ctx context.Context, id string) error
 	RaiseLabel(id string, l vm.Label) error
 	Park(ctx context.Context, id string) (vm.Snapshot, error)
+	DeleteFiles(ctx context.Context, id string, d vm.Deletion) (vm.DeleteReport, error)
 }
 
 // Limits bound what one lineage may ask for.
@@ -147,6 +148,7 @@ const (
 	toolList     = "worker_list"
 	toolFit      = "worker_fit"
 	toolKeep     = "worker_keep"
+	toolDelete   = "worker_delete"
 )
 
 func obj(props map[string]any, required ...string) map[string]any {
@@ -182,6 +184,10 @@ func (t *Tools) List() []map[string]any {
 				"content_base64": map[string]any{"type": "string", "description": "Binary content, base64; instead of content."}}, "name", "path")},
 		{"name": toolCkpt, "description": "Checkpoint a worker, memory included; returns the snapshot id to roll back to or diff.",
 			"inputSchema": obj(map[string]any{"name": pName}, "name")},
+		{"name": toolDelete, "description": fmt.Sprintf("Delete files from a worker without running anything in it: the way to shrink a worker over its file cap. The broker stops the worker (ending anything running in it, background processes included), removes the paths from what it wrote (a symlink is removed itself, never followed), and starts it again once it is under its cap; files that came with the base image cannot be deleted and free nothing. Up to %d absolute paths; a directory needs recursive. A directory nested more than %d deep answers too_deep: delete a deeper path first, or roll the worker back with worker_rollback or destroy it with worker_destroy. more_remains means the call's entry or time budget ran out: ask again to continue.", vm.MaxDeletePaths, overlay.MaxTreeDepth),
+			"inputSchema": obj(map[string]any{"name": pName,
+				"paths":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": vm.MaxDeletePaths, "description": "Absolute paths inside the worker."},
+				"recursive": map[string]any{"type": "boolean", "description": "Also delete directories and everything in them."}}, "name", "paths")},
 		{"name": toolFork, "description": "Checkpoint a worker and start one new worker per name from it, memory included; each is admitted on its own budget, and either all start or none do. With up_to_fit, only as many as fit now start (in the order named) and the rest come back as skipped.",
 			"inputSchema": obj(map[string]any{"name": pName, "into": strList,
 				"up_to_fit": map[string]any{"type": "boolean", "description": "Start only as many forks as fit (see worker_fit)."}}, "name", "into")},
@@ -214,7 +220,7 @@ func nameOf(lineage, id string) string {
 }
 
 // errNoWorker never says whether another lineage has such a worker.
-var errNoWorker = errors.New("no such worker")
+var errNoWorker = said{"no such worker"}
 
 type caller struct {
 	machine, lineage string
@@ -224,21 +230,39 @@ type caller struct {
 
 // Call serves one worker tool for machine of lineage; handled is false for
 // names it does not serve.
-func (t *Tools) Call(ctx context.Context, machine, lineage, name string, raw json.RawMessage) (string, bool, error) {
+func (t *Tools) Call(ctx context.Context, machine, lineage, name string, raw json.RawMessage) (text string, handled bool, err error) {
 	if !strings.HasPrefix(name, "worker_") {
 		return "", false, nil
 	}
+	// Every error leaves through guestErr, a panic's too, so none carries
+	// a host path or an internal ID to the guest (SR2-3f, security R1 on
+	// #174, F2).
+	defer func() {
+		if p := recover(); p != nil {
+			text, handled, err = "", true, recovered(p)
+		}
+		if err != nil {
+			err = guestErr(machine, name, err)
+		}
+	}()
+	return t.call(ctx, machine, lineage, name, raw)
+}
+
+func (t *Tools) call(ctx context.Context, machine, lineage, name string, raw json.RawMessage) (string, bool, error) {
 	if strings.HasPrefix(machine, vm.WorkerPrefix) {
-		return "", true, errors.New("a worker cannot drive workers")
+		return "", true, said{"a worker cannot drive workers"}
 	}
 	me, err := t.M.Get(machine)
 	if err != nil || me.Lineage != lineage {
-		return "", true, errors.New("broker: unknown machine")
+		return "", true, said{"broker: unknown machine"}
 	}
 	c := caller{machine: machine, lineage: lineage, label: me.Label, spec: me.Spec}
 	t.called(machine, 1)
 	defer t.called(machine, -1)
 	var out any
+	if (name == toolCreate || name == toolFork || name == toolRollback) && t.Stopped != nil && t.Stopped() {
+		return "", true, errStartStopped
+	}
 	switch name {
 	case toolCreate:
 		out, err = t.create(ctx, c, raw)
@@ -264,8 +288,10 @@ func (t *Tools) Call(ctx context.Context, machine, lineage, name string, raw jso
 		out, err = t.fitTool(c, raw)
 	case toolKeep:
 		out, err = t.keep(ctx, c, raw)
+	case toolDelete:
+		out, err = t.del(ctx, c, raw)
 	default:
-		return "", true, fmt.Errorf("no tool %q", name)
+		return "", true, say("no tool %q", guest(name))
 	}
 	if err != nil {
 		return "", true, err
@@ -279,7 +305,7 @@ func decode(raw json.RawMessage, v any) error {
 		raw = []byte("{}")
 	}
 	if err := json.Unmarshal(raw, v); err != nil {
-		return errors.New("arguments must be an object of the documented fields")
+		return said{"arguments must be an object of the documented fields"}
 	}
 	return nil
 }
@@ -287,7 +313,7 @@ func decode(raw json.RawMessage, v any) error {
 // worker resolves name to one of the caller's lineage's workers.
 func (t *Tools) worker(c caller, name string) (vm.Machine, error) {
 	if !nameRE.MatchString(name) {
-		return vm.Machine{}, errors.New("name: lowercase letters, digits and '-', at most 20")
+		return vm.Machine{}, said{"name: lowercase letters, digits and '-', at most 20"}
 	}
 	w, err := t.M.Get(workerID(c.lineage, name))
 	if err != nil || w.Lineage != c.lineage {
@@ -302,7 +328,7 @@ func (t *Tools) worker(c caller, name string) (vm.Machine, error) {
 // keep do not wait behind a command (L3 MUST-1 on #158, K11).
 func (t *Tools) owned(c caller, name string) (string, error) {
 	if !nameRE.MatchString(name) {
-		return "", errors.New("name: lowercase letters, digits and '-', at most 20")
+		return "", said{"name: lowercase letters, digits and '-', at most 20"}
 	}
 	id := workerID(c.lineage, name)
 	if !slices.Contains(t.M.Workers(c.lineage), id) {
@@ -315,7 +341,7 @@ func (t *Tools) owned(c caller, name string) (string, error) {
 // snapshot (REV-5).
 func readable(c caller, l vm.Label) error {
 	if l > c.label {
-		return errors.New("that worker holds private data; a public machine cannot read it")
+		return said{"that worker holds private data; a public machine cannot read it"}
 	}
 	return nil
 }
@@ -396,21 +422,25 @@ func (t *Tools) create(ctx context.Context, c caller, raw json.RawMessage) (any,
 		return nil, err
 	}
 	if !nameRE.MatchString(a.Name) {
-		return nil, errors.New("name: lowercase letters, digits and '-', at most 20")
+		return nil, said{"name: lowercase letters, digits and '-', at most 20"}
 	}
 	if a.MemMB == 0 {
 		a.MemMB = DefaultMemMB
 	}
 	if a.MemMB < MinMemMB || a.MemMB > t.MaxMemMB {
-		return nil, fmt.Errorf("mem_mb must be between %d and %d", MinMemMB, t.MaxMemMB)
+		return nil, say("mem_mb must be between %d and %d", num(MinMemMB), num(t.MaxMemMB))
 	}
 	id := workerID(c.lineage, a.Name)
 	if !t.reserve(c.lineage, []string{id}) {
-		return nil, fmt.Errorf("at most %d workers at once, each with its own name; destroy one first", MaxWorkers)
+		return nil, say("at most %d workers at once, each with its own name; destroy one first", num(MaxWorkers))
 	}
 	s := vm.Spec{Image: t.Image, Class: workerClass(c), MemMB: a.MemMB, Argv: t.Argv, Label: c.label}
+	// Settled even if the start panics, so a reservation never outlives
+	// its call (security F2 on SR2-3f).
+	made := false
+	defer func() { t.settle([]string{id}, made) }()
 	w, err := t.M.CreateWorker(ctx, id, c.lineage, s)
-	t.settle([]string{id}, err == nil)
+	made = err == nil
 	if err != nil {
 		return nil, startErr(a.Name, err)
 	}
@@ -425,7 +455,11 @@ type execOut struct {
 	TimedOut  bool   `json:"timed_out"`
 }
 
-var errStopped = errors.New("the owner sent STOP: worker commands wait until RESUME")
+var errStopped = said{"the owner sent STOP: worker commands wait until RESUME"}
+
+// errStartStopped refuses starting workers while STOP holds (security R1
+// on #150, CAP-8c).
+var errStartStopped = said{"the owner sent STOP: no worker starts until RESUME"}
 
 func (t *Tools) run(ctx context.Context, c caller, name string, cmd vm.Command, timeout time.Duration) (vm.ExecResult, error) {
 	if t.Stopped != nil && t.Stopped() {
@@ -453,7 +487,7 @@ func (t *Tools) run(ctx context.Context, c caller, name string, cmd vm.Command, 
 	if errors.Is(err, vm.ErrPreempted) {
 		// A speculative branch cut short is not a failing test (potency
 		// R1 on #158).
-		return vm.ExecResult{}, fmt.Errorf("preempted, retry: worker %s was stopped for higher-priority work, so the command has no result (it did not fail); roll the worker back to a snapshot with worker_rollback and run it again", name)
+		return vm.ExecResult{}, say("preempted, retry: worker %s was stopped for higher-priority work, so the command has no result (it did not fail); roll the worker back to a snapshot with worker_rollback, or destroy and recreate it, and run it again", named(name))
 	}
 	if err != nil {
 		return vm.ExecResult{}, workerErr(name, err)
@@ -475,25 +509,25 @@ func input(plain, b64 string) ([]byte, error) {
 		return []byte(plain), nil
 	}
 	if plain != "" {
-		return nil, errors.New("give the text or the base64 form, not both")
+		return nil, said{"give the text or the base64 form, not both"}
 	}
 	b, err := base64.StdEncoding.DecodeString(b64)
 	if err != nil {
-		return nil, errors.New("base64 input does not decode")
+		return nil, said{"base64 input does not decode"}
 	}
 	return b, nil
 }
 
 func checkArgv(argv []string) error {
 	if len(argv) == 0 || len(argv) > MaxArgs {
-		return fmt.Errorf("argv needs 1 to %d entries", MaxArgs)
+		return say("argv needs 1 to %d entries", num(MaxArgs))
 	}
 	n := 0
 	for _, s := range argv {
 		n += len(s)
 	}
 	if n > MaxArgBytes || argv[0] == "" {
-		return fmt.Errorf("argv must name a command and total at most %d bytes", MaxArgBytes)
+		return say("argv must name a command and total at most %d bytes", num(MaxArgBytes))
 	}
 	return nil
 }
@@ -518,7 +552,7 @@ func (t *Tools) exec(ctx context.Context, c caller, raw json.RawMessage) (any, e
 		return nil, err
 	}
 	if len(stdin) > MaxStdin {
-		return nil, fmt.Errorf("stdin is larger than %d bytes", MaxStdin)
+		return nil, say("stdin is larger than %d bytes", num(MaxStdin))
 	}
 	timeout := DefaultTimeout
 	if a.Timeout > 0 {
@@ -537,7 +571,7 @@ func (t *Tools) exec(ctx context.Context, c caller, raw json.RawMessage) (any, e
 
 func checkPath(p string) error {
 	if !strings.HasPrefix(p, "/") || len(p) > 4096 || strings.ContainsRune(p, 0) {
-		return errors.New("path must be absolute")
+		return said{"path must be absolute"}
 	}
 	return nil
 }
@@ -557,7 +591,7 @@ func (t *Tools) read(ctx context.Context, c caller, raw json.RawMessage) (any, e
 		return nil, err
 	}
 	if a.Offset < 0 || a.Offset > MaxOffset || a.Length < 0 || a.Length > MaxOutput {
-		return nil, fmt.Errorf("offset must be 0 to %d and length 0 to %d", int64(MaxOffset), MaxOutput)
+		return nil, say("offset must be 0 to %d and length 0 to %d", num(MaxOffset), num(MaxOutput))
 	}
 	if a.Length == 0 {
 		a.Length = MaxOutput
@@ -569,7 +603,7 @@ func (t *Tools) read(ctx context.Context, c caller, raw json.RawMessage) (any, e
 		return nil, err
 	}
 	if r.ExitCode != 0 {
-		return nil, fmt.Errorf("cannot read %s: %s", a.Path, strings.TrimSpace(string(r.Stderr)))
+		return nil, say("cannot read %s: %s", guest(a.Path), guest(strings.TrimSpace(string(r.Stderr))))
 	}
 	// truncated: the file goes on past offset+length; read on from there.
 	return map[string]any{"content": text(r.Stdout, a.B64), "truncated": r.Truncated}, nil
@@ -593,7 +627,7 @@ func (t *Tools) write(ctx context.Context, c caller, raw json.RawMessage) (any, 
 		return nil, err
 	}
 	if len(content) > MaxStdin {
-		return nil, fmt.Errorf("content is larger than %d bytes", MaxStdin)
+		return nil, say("content is larger than %d bytes", num(MaxStdin))
 	}
 	// tee echoes what it writes; keep one byte of it.
 	r, err := t.run(ctx, c, a.Name, vm.Command{Argv: []string{"tee", "--", a.Path}, Stdin: content, MaxOutput: 1}, DefaultTimeout)
@@ -601,7 +635,7 @@ func (t *Tools) write(ctx context.Context, c caller, raw json.RawMessage) (any, 
 		return nil, err
 	}
 	if r.ExitCode != 0 {
-		return nil, fmt.Errorf("cannot write %s: %s", a.Path, strings.TrimSpace(string(r.Stderr)))
+		return nil, say("cannot write %s: %s", guest(a.Path), guest(strings.TrimSpace(string(r.Stderr))))
 	}
 	return map[string]any{"written": len(content)}, nil
 }
@@ -641,14 +675,14 @@ func (t *Tools) fork(ctx context.Context, c caller, raw json.RawMessage) (any, e
 	}
 	for _, n := range a.Into {
 		if !nameRE.MatchString(n) {
-			return nil, fmt.Errorf("into: bad name %q", n)
+			return nil, say("into: bad name %q", guest(n))
 		}
 	}
 	var skipped []string
 	if a.UpToFit && len(a.Into) > 0 {
 		f := t.fit(c, w.Spec.MemMB, w.Spec.Class)
 		if f.Fit == 0 {
-			return nil, fmt.Errorf("no fork fits now: %s", f.Why)
+			return nil, say("no fork fits now: %s", f.why)
 		}
 		if f.Fit < len(a.Into) {
 			a.Into, skipped = a.Into[:f.Fit], a.Into[f.Fit:]
@@ -659,10 +693,12 @@ func (t *Tools) fork(ctx context.Context, c caller, raw json.RawMessage) (any, e
 		ids[i] = workerID(c.lineage, n)
 	}
 	if len(ids) == 0 || !t.reserve(c.lineage, ids) {
-		return nil, fmt.Errorf("into needs 1 or more new names, with at most %d workers at once", MaxWorkers)
+		return nil, say("into needs 1 or more new names, with at most %d workers at once", num(MaxWorkers))
 	}
+	made := false
+	defer func() { t.settle(ids, made) }()
 	s, err := t.M.Fork(ctx, w.ID, ids)
-	t.settle(ids, err == nil)
+	made = err == nil
 	if err != nil {
 		return nil, startErr(a.Name, err)
 	}
@@ -678,7 +714,7 @@ func (t *Tools) fork(ctx context.Context, c caller, raw json.RawMessage) (any, e
 func (t *Tools) snapshot(c caller, id string) (vm.Snapshot, error) {
 	s, err := t.M.Snapshot(id)
 	if err != nil || s.Lineage != c.lineage || !strings.HasPrefix(s.Machine, workerID(c.lineage, "")) {
-		return vm.Snapshot{}, fmt.Errorf("no snapshot %q of your workers", id)
+		return vm.Snapshot{}, say("no snapshot %q of your workers", guest(id))
 	}
 	return s, readable(c, s.Label)
 }
@@ -731,20 +767,25 @@ func (t *Tools) rollback(ctx context.Context, c caller, raw json.RawMessage) (an
 // startErr says what to do when admission has no room (UX-146-2).
 func startErr(name string, err error) error {
 	if errors.Is(err, admission.ErrNoRoom) || errors.Is(err, admission.ErrPressure) {
-		return fmt.Errorf("no room for worker %s now: destroy a worker, or ask for less memory with mem_mb", name)
+		return say("no room for worker %s now: destroy a worker, or ask for less memory with mem_mb", named(name))
 	}
 	return workerErr(name, err)
 }
 
-// workerErr names the worker in err. Over its layer cap every command is
-// refused, deletions included, so the way out it names is a rollback or
-// destroy (UX-150-1).
+// workerErr names the worker in a known sentinel's fixed text (guestErr);
+// anything else is left for Call to answer as a ref. Over its layer cap
+// every command is refused, so the ways out it names are worker_delete,
+// a rollback or destroy (UX-150-1, CAP-8c).
 func workerErr(name string, err error) error {
 	var full *vm.WorkerFull
 	if errors.As(err, &full) {
-		return fmt.Errorf("worker %s holds more files than its %d MB cap; roll it back to a snapshot or destroy it", name, (full.Cap+1<<20-1)>>20)
+		s, _ := sentinel(err)
+		return say("worker %s %s", named(name), s)
 	}
-	return fmt.Errorf("worker %s: %w", name, err)
+	if s, ok := sentinel(err); ok {
+		return say("worker %s: %s", named(name), s)
+	}
+	return err
 }
 
 // Reap checkpoints and stops (parks) each running worker that no tool has
@@ -842,6 +883,7 @@ type fitAnswer struct {
 	MemMB       int64  `json:"mem_mb"`
 	WorkersLeft int    `json:"workers_left"`
 	Why         string `json:"why,omitempty"`
+	why         said   // Why, as text an error may carry
 }
 
 const (
@@ -858,14 +900,14 @@ const (
 type fitRoom struct {
 	mb  int64 // -1: unbounded (neither source set)
 	at  time.Time
-	why string
+	why said
 }
 
 // room is the smaller of admission's declared room for the caller's class
 // and measured free memory, rounded down to FitStepMB and reused for
 // FitFor per lineage. Unreadable measurement falls back to the declared
 // budget, which admission enforces anyway.
-func (t *Tools) room(c caller, class admission.Class) (int64, string) {
+func (t *Tools) room(c caller, class admission.Class) (int64, said) {
 	now := t.now()
 	key := fmt.Sprint(c.lineage, "/", class)
 	t.mu.Lock()
@@ -874,13 +916,13 @@ func (t *Tools) room(c caller, class admission.Class) (int64, string) {
 		return r.mb, r.why
 	}
 	t.mu.Unlock()
-	mb, why := int64(-1), ""
+	mb, why := int64(-1), said{}
 	if t.Free != nil {
 		mb = max(t.Free(class), 0)
 	}
 	if t.Avail != nil {
 		if m, err := t.Avail(); err != nil {
-			why = "free memory could not be measured, so this uses the declared budget"
+			why = said{"free memory could not be measured, so this uses the declared budget"}
 		} else if mb < 0 || m < mb {
 			mb = max(m, 0)
 		}
@@ -907,8 +949,8 @@ func (t *Tools) fit(c caller, memMB int64, class admission.Class) fitAnswer {
 	t.mu.Unlock()
 	a.WorkersLeft = max(MaxWorkers-n, 0)
 	room, why := t.room(c, class)
-	whys := []string{}
-	if why != "" {
+	whys := []said{}
+	if why != (said{}) {
 		whys = append(whys, why)
 	}
 	a.Fit = a.WorkersLeft
@@ -918,18 +960,19 @@ func (t *Tools) fit(c caller, memMB int64, class admission.Class) fitAnswer {
 	switch {
 	case a.Fit > 0:
 	case a.WorkersLeft == 0:
-		whys = append(whys, fmt.Sprintf("you hold %d workers, the most at once; destroy one first", MaxWorkers))
+		whys = append(whys, say("you hold %d workers, the most at once; destroy one first", num(MaxWorkers)))
 	default:
-		whys = append(whys, fmt.Sprintf("not enough free memory for one %d MB worker now; work sequentially in one worker, ask for less memory, or destroy a worker", memMB))
+		whys = append(whys, say("not enough free memory for one %d MB worker now; work sequentially in one worker, ask for less memory, or destroy a worker", num(memMB)))
 	}
 	// The same rounded room sizes the smaller count, so it says nothing
 	// finer about memory than fit does (potency on #158, security F1).
 	if room >= 0 && memMB > SmallMemMB {
 		if n := min(a.WorkersLeft, int(room/SmallMemMB)); n > a.Fit {
-			whys = append(whys, fmt.Sprintf("smaller workers fit more: %d at %d MB", n, SmallMemMB))
+			whys = append(whys, say("smaller workers fit more: %d at %d MB", num(n), num(SmallMemMB)))
 		}
 	}
-	a.Why = strings.Join(whys, "; ")
+	a.why = joined(whys, "; ")
+	a.Why = a.why.s
 	return a
 }
 
@@ -944,7 +987,7 @@ func (t *Tools) fitTool(c caller, raw json.RawMessage) (any, error) {
 		a.MemMB = DefaultMemMB
 	}
 	if a.MemMB < MinMemMB || a.MemMB > t.MaxMemMB {
-		return nil, fmt.Errorf("mem_mb must be between %d and %d", MinMemMB, t.MaxMemMB)
+		return nil, say("mem_mb must be between %d and %d", num(MinMemMB), num(t.MaxMemMB))
 	}
 	return t.fit(c, a.MemMB, workerClass(c)), nil
 }
@@ -961,34 +1004,46 @@ func (t *Tools) keep(ctx context.Context, c caller, raw json.RawMessage) (any, e
 		return nil, err
 	}
 	// A fork still starting has no ForkBase yet, so keep would miss it
-	// (L3 SHOULD-5 on #158).
+	// (L3 SHOULD-5 on #158). The siblings are read under the same lock
+	// that reserves new workers, so none can start between the check and
+	// the read (L3 nit 3 on #158).
 	t.mu.Lock()
 	starting := false
 	for _, l := range t.pending {
 		starting = starting || l == c.lineage
 	}
+	var base string
+	var sibs []string
+	if !starting {
+		base, sibs, err = t.M.ForkSiblings(id)
+	}
 	t.mu.Unlock()
 	if starting {
-		return nil, errors.New("workers are still starting; keep the winner once worker_fork returns")
+		return nil, said{"some of your workers are still starting; keep the winner once worker_create or worker_fork returns"}
 	}
-	base, sibs, err := t.M.ForkSiblings(id)
 	if err != nil {
 		return nil, errNoWorker
 	}
 	if base == "" {
-		return nil, fmt.Errorf("worker %s is not a fork: nothing to discard", a.Name)
+		return nil, say("worker %s is not a fork: nothing to discard", named(a.Name))
 	}
 	t.touch(id)
 	destroyed := []string{}
 	for _, sid := range sibs {
-		if err := t.M.Destroy(ctx, sid); err != nil {
+		if err := t.M.Destroy(ctx, sid); errors.Is(err, vm.ErrUnknown) {
+			continue // already gone (L3 nit 2 on #158)
+		} else if err != nil {
 			// Call returns no answer with an error, so the error says what
 			// went (L3 SHOULD-8 on #158).
-			err = workerErr(nameOf(c.lineage, sid), err)
-			if len(destroyed) > 0 {
-				err = fmt.Errorf("%w (already destroyed: %s)", err, strings.Join(destroyed, ", "))
+			sib := nameOf(c.lineage, sid)
+			s, ok := workerErr(sib, err).(said)
+			if !ok {
+				s = say("worker %s: %s", named(sib), logged(c.machine, toolKeep, err))
 			}
-			return nil, err
+			if len(destroyed) > 0 {
+				s = say("%s (already destroyed: %s)", s, named(strings.Join(destroyed, ", ")))
+			}
+			return nil, s
 		}
 		t.mu.Lock()
 		delete(t.used, sid)
@@ -996,4 +1051,57 @@ func (t *Tools) keep(ctx context.Context, c caller, raw json.RawMessage) (any, e
 		destroyed = append(destroyed, nameOf(c.lineage, sid))
 	}
 	return map[string]any{"kept": a.Name, "destroyed": destroyed}, nil
+}
+
+// del removes files from a worker without running its code (CAP-8c,
+// security R-DEL1 to R-DEL6). The answer holds fixed codes and counts,
+// and names no path beyond those asked.
+func (t *Tools) del(ctx context.Context, c caller, raw json.RawMessage) (any, error) {
+	var a struct {
+		Name      string   `json:"name"`
+		Paths     []string `json:"paths"`
+		Recursive bool     `json:"recursive"`
+	}
+	if err := decode(raw, &a); err != nil {
+		return nil, err
+	}
+	if len(a.Paths) == 0 || len(a.Paths) > vm.MaxDeletePaths {
+		return nil, say("paths: 1 to %d absolute paths", num(vm.MaxDeletePaths))
+	}
+	if t.Stopped != nil && t.Stopped() {
+		return nil, errStopped
+	}
+	id, err := t.owned(c, a.Name)
+	if err != nil {
+		return nil, err
+	}
+	t.touch(id)
+	rep, err := t.M.DeleteFiles(ctx, id, vm.Deletion{Paths: a.Paths, Recursive: a.Recursive, As: c.label, Hold: t.Stopped})
+	if errors.Is(err, vm.ErrHeld) {
+		return nil, errStopped
+	}
+	var full *vm.WorkerFull
+	if err != nil && !errors.Is(err, vm.ErrLabel) && !errors.Is(err, vm.ErrUnknown) && !errors.As(err, &full) {
+		// The cause may name host paths; the broker logged it (security
+		// F3 on #166).
+		return nil, say("worker %s: the deletion could not finish; try again, or roll back or destroy it", named(a.Name))
+	}
+	if err != nil {
+		return nil, workerErr(a.Name, err)
+	}
+	type row struct {
+		Path   string `json:"path"`
+		Result string `json:"result"`
+	}
+	rows := make([]row, len(a.Paths))
+	for i, p := range a.Paths {
+		rows[i] = row{p, rep.Codes[i]}
+	}
+	state := "running"
+	if !rep.Restarted {
+		w, _ := t.M.TryGet(id)
+		state = string(w.State)
+	}
+	return map[string]any{"results": rows, "removed": rep.Files, "freed_bytes": rep.Bytes,
+		"over_cap": rep.Over, "more_remains": rep.More, "state": state}, nil
 }

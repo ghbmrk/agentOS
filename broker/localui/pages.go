@@ -178,7 +178,8 @@ form { margin: .6em 0 1.2em; }
 {{if .Odd}}<p class="err">Has an unusual character, shown as [U+…]. Letters from other alphabets can look like plain ones; deny if you didn't expect it.</p>{{end}}
 <p class="muted">{{.Undo}}</p>{{end}}
 <form method="post" action="/approvals/"><input type="hidden" name="id" value="{{.ID}}"><input type="hidden" name="tok" value="{{.Tok}}"><input type="hidden" name="sum" value="{{.Sum}}">
-<label>Code from your code generator, to approve<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code"></label>
+{{with .Lets}}<p>Approving lets your agent {{.}}.</p>{{end}}
+<label>Code from your code generator (not the one I texted), to approve<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code"></label>
 <button name="answer" value="approve">Approve</button> <button name="answer" value="deny" class="stop">Deny</button></form></section>
 {{else}}<p>Nothing is waiting for you.</p>{{end}}
 <p class="muted">Each answer here is texted to you.</p>

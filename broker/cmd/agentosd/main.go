@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -26,6 +27,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/loopbuild"
 	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/modelroute"
+	"github.com/ghbmrk/agentos/broker/modemlink"
 	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/recall"
 	"github.com/ghbmrk/agentos/broker/recalltool"
@@ -64,7 +66,103 @@ type machines struct{ m *vm.Manager }
 
 func (a machines) Step(ctx context.Context, id string) error {
 	_, err := a.m.Step(ctx, id)
+	return stepErr(err)
+}
+
+// stepErr marks a failed step snapshot's reason for the guest plane,
+// which tells the agent and STATUS a fixed text for it (SR2-3s). A layer
+// too deep to measure is checked first: the manager reports it as a
+// disk budget too.
+func stepErr(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, vm.ErrTooDeep):
+		return fmt.Errorf("%w: %w", guest.ErrStepTooDeep, err)
+	case errors.Is(err, vm.ErrQuota):
+		return fmt.Errorf("%w: %w", guest.ErrStepNoRoom, err)
+	}
 	return err
+}
+
+// stepSource is the guest plane's view of failing step snapshots.
+type stepSource interface {
+	StepNote() string
+	StepLine() (string, time.Time)
+}
+
+type stepSrc struct{ stepSource }
+
+// stepNotes is STATUS's line while the agent's step snapshots keep
+// failing, once the guest plane is open (SR2-3s).
+type stepNotes struct{ p atomic.Pointer[stepSrc] }
+
+// newStepNotes adds the line to STATUS's notes; it stays empty until open.
+func newStepNotes(notes *[]func() string) *stepNotes {
+	n := &stepNotes{}
+	*notes = append(*notes, n.Note)
+	return n
+}
+
+// open points the line at src and, with a digest to tell, starts telling
+// it there.
+func (n *stepNotes) open(ctx context.Context, src stepSource, notice func(key, line string) error) {
+	n.p.Store(&stepSrc{src})
+	if notice != nil {
+		go n.digest(ctx, notice)
+	}
+}
+
+func (n *stepNotes) Note() string {
+	if p := n.p.Load(); p != nil {
+		return p.StepNote()
+	}
+	return ""
+}
+
+// digestPeriod is how long the Rollback line stands before the digest
+// carries it too (security R1, UX on SR2-3s).
+const digestPeriod = 24 * time.Hour
+
+// stepDigestKey is the digest notice key for the Rollback line STATUS has
+// carried since shown, at now: none in the first digest period, then one
+// a day for 7 days, then one a week (W5's cadence). The key holds the
+// line, so a new reason or since-time is told at once; a success clears
+// the line, and with it any further key.
+func stepDigestKey(line string, shown, now time.Time) (string, bool) {
+	if line == "" || now.Sub(shown) < digestPeriod {
+		return "", false
+	}
+	d := int(now.Sub(shown) / digestPeriod)
+	if d > 7 {
+		d = 8 + (d-8)/7
+	}
+	return fmt.Sprintf("sr2-3s:%d:%s", d, line), true
+}
+
+// digest queues the Rollback line for the owner's digest on stepDigestKey's
+// cadence, each minute until ctx ends. The line is the STATUS line,
+// verbatim: the digest adds no wording of its own.
+func (n *stepNotes) digest(ctx context.Context, notice func(key, line string) error) {
+	t := time.NewTicker(time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		p := n.p.Load()
+		if p == nil {
+			continue
+		}
+		line, shown := p.StepLine()
+		if key, ok := stepDigestKey(line, shown, time.Now()); ok {
+			if err := notice(key, line); err != nil {
+				log.Printf("rollback digest line: %v", err)
+			}
+		}
+	}
 }
 
 func (a machines) RaisePrivate(id string) error { return a.m.RaiseLabel(id, vm.Private) }
@@ -143,7 +241,11 @@ func (l *lateAgent) Deliver(ctx context.Context, text string, public bool) error
 	}
 	err := (*a).Deliver(ctx, text, public)
 	if err == nil {
-		l.delivered(time.Now())
+		now := time.Now
+		if s := l.sleep.Load(); s != nil {
+			now = s.cfg.Now // the clock the sleeper measures the hold on
+		}
+		l.delivered(now())
 	}
 	return err
 }
@@ -239,12 +341,14 @@ func main() {
 	var diskQuota, sleepHoursFlag string
 	var builderImage, builderLaunch, keptPath string
 	var learn learnPaths
-	var cgroupVouched bool
+	var cgroupVouched, modemBridge, ownerMessage bool
 	floor := budget.Floor()
 	flag.StringVar(&cfg.JournalPath, "journal", "/var/lib/agentos/journal.log", "journal file")
-	flag.StringVar(&cfg.SocketDir, "sockets", "/run/agentos", "socket directory (created 0700)")
+	flag.StringVar(&cfg.SocketDir, "sockets", "/run/agentos", "socket directory (created 0700; 0711 once owner.sock, 0660 to the modem bridge's group, is up)")
 	flag.StringVar(&cfg.OwnerNumber, "owner", "", "owner's phone number, E.164")
 	flag.IntVar(&cfg.ModemUID, "modem-uid", -1, "uid of the modem bridge, the only peer allowed on the owner socket")
+	flag.BoolVar(&modemBridge, "modem-bridge", true, "serve the modem bridge's ops on the owner socket and send the owner channel's texts through it")
+	flag.BoolVar(&ownerMessage, "owner-message", false, "also serve the raw \"message\" op on the owner socket with the bridge on (simulator and test builds only; it skips the bridge's checks)")
 	flag.Int64Var(&cfg.Admission.CapacityMB, "capacity-mb", defaultCapacityMB, "memory for agent machines, MB; unset, MemTotal less the floor budget outside the pool, at most 4500 or one OpenClaw machine per two cores, whichever is more (PE6, RES-2c)")
 	flag.Int64Var(&floor.HeadroomMB, "headroom-mb", floor.HeadroomMB, "memory never admitted into, MB")
 	flag.Int64Var(&floor.HostMB, "host-mb", floor.HostMB, "budget: host image, broker and journal (protected), MB (RES-2)")
@@ -293,6 +397,9 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	if err := checkDiskQuotaFlag(diskQuota); err != nil {
+		log.Fatal(err)
+	}
 	meminfo, _ := os.ReadFile("/proc/meminfo")
 	mem := planMemory(string(meminfo), runtime.NumCPU(), flagSet(flag.CommandLine, "capacity-mb"), cfg.Admission.CapacityMB, floor, agentMemMB)
 	cfg.Admission = mem.Budget.Admission()
@@ -307,6 +414,14 @@ func main() {
 	}
 	if cfg.ModemUID < 0 || cfg.ModemUID == os.Getuid() {
 		log.Fatal("-modem-uid must name the modem bridge's own uid, distinct from the broker's")
+	}
+	// The owner socket is the bridge user's primary group's, 0660 (R3).
+	if u, err := user.LookupId(strconv.Itoa(cfg.ModemUID)); err != nil {
+		log.Fatalf("-modem-uid %d: %v", cfg.ModemUID, err)
+	} else if gid, err := strconv.Atoi(u.Gid); err != nil {
+		log.Fatalf("-modem-uid %d: group %q: %v", cfg.ModemUID, u.Gid, err)
+	} else {
+		cfg.ModemGID = &gid
 	}
 
 	// RES-3: nothing below depends on what is found here. No local
@@ -380,11 +495,23 @@ func main() {
 	cfg.Recall = recallExec
 	cfg.Grants.Contained = recallExec.Contained
 	cfg.Notes = append(cfg.Notes, recallExec.Status)
+	var md machineDisk
+	if runsc != "" {
+		md = openMachineDisk(diskQuota, stateDir, &cfg.Notes)
+	}
 	if line != nil {
 		cfg.Notes = append(cfg.Notes, line.Note, line.TextsNote)
 	}
-	// No modem driver exists before P2-3, so texts arrive only through the
-	// owner socket and the channel's own outbound texts are not sent.
+	// The modem bridge (agentos-modem, P2-3w) hands owner texts in and
+	// pulls the channel's own texts from the owner socket; until it
+	// reports the owner line, sends fail as down and are counted for the
+	// recovery text. Its line note is for the box's local page (U-B1);
+	// the local UI's wiring shows it.
+	if modemBridge {
+		link := modemlink.New(modemlink.Config{Owner: cfg.OwnerNumber})
+		cfg.Modem, cfg.OwnerOps = link, link.Ops()
+		cfg.BridgeOnly = !ownerMessage
+	}
 
 	// The learning plane failing must not take the owner channel down
 	// either: without it loop settings are refused and nothing adopts.
@@ -411,6 +538,7 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	steps := newStepNotes(&cfg.Notes)
 	d, err := daemon.Run(ctx, cfg)
 	if err != nil {
 		log.Fatal(err)
@@ -441,20 +569,11 @@ func main() {
 	}
 	// At exit the question loops stop before the guard's notices flush.
 	defer func() { stop(); qs.wait() }()
-	var mq vm.Quota
-	var noQuota bool
-	var qerr error
-	if runsc != "" {
-		mq, noQuota, qerr = machineQuota(diskQuota, stateDir)
-		if noQuota {
-			log.Printf("-disk-quota=off: agent machines run without disk quotas; a guest can fill the state disk (RES-4)")
-		}
-	}
-	if runsc != "" && qerr != nil {
-		log.Printf("agent machines disabled: %v", qerr)
+	if runsc != "" && md.err != nil {
+		log.Printf("agent machines disabled: %v", md.err)
 	} else if runsc != "" {
 		services := &lateServices{}
-		m, err := vm.Open(ctx, vm.Config{
+		vmc := vm.Config{
 			StateDir: stateDir,
 			Images:   imgs,
 			Runtime:  &gvisor.Runtime{Bin: runsc, StateDir: filepath.Join(stateDir, "runsc")},
@@ -463,14 +582,14 @@ func main() {
 			Services: services,
 
 			DiskReserveBytes: diskReserveMB << 20,
-			Quota:            mq,
-			NoQuota:          noQuota,
 			MachineDiskBytes: machineDiskMB << 20,
 			WorkerLayerBytes: workerLayerBytes(workerLayerMB),
 			// A lineage holding a record the owner deleted is not forked
 			// or merged until that is settled (recall W10).
 			Contained: recallExec.Contained,
-		})
+		}
+		md.set(&vmc)
+		m, err := vm.Open(ctx, vmc)
 		if err != nil {
 			log.Printf("agent machines disabled: %v", err)
 		} else {
@@ -489,6 +608,11 @@ func main() {
 				log.Printf("agent machines disabled: %v", err)
 			} else {
 				services.live.Store(&svc{plane})
+				var notice func(key, line string) error
+				if lp != nil {
+					notice = lp.pipe.Notice
+				}
+				steps.open(ctx, plane, notice)
 				oa := &guest.OwnerAgent{Plane: plane, Machine: agentMachine}
 				if lp != nil {
 					oa.Delivered = lp.delivered

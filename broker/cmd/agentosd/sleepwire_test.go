@@ -231,13 +231,9 @@ func TestOwnerChatToASleepingAgent(t *testing.T) {
 		t.Fatal("a failed delivery woke the agent or counted as the owner's")
 	}
 	to = fakeOwnerAgent{}
-	slow := make(chan struct{})
-	r.f.mu.Lock()
-	r.f.slow = slow
-	r.f.mu.Unlock()
-	go func() { time.Sleep(100 * time.Millisecond); close(slow) }()
+	r.slowly(100 * time.Millisecond)
 	must(t, a.Deliver(context.Background(), "hello", false))
-	if d := time.Since(a.lastDelivered()); d < 0 || d > time.Second {
+	if d := r.clock().Sub(a.lastDelivered()); d < 0 || d > time.Second {
 		t.Fatalf("delivery noted %v ago", d)
 	}
 	deadline := time.Now().Add(5 * time.Second)
@@ -247,7 +243,6 @@ func TestOwnerChatToASleepingAgent(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	time.Sleep(10 * time.Millisecond)
 	if r.holdCount() != 1 || r.last().Cause != wakeOwner {
 		t.Fatalf("holding lines %d, journal %+v", r.holdCount(), r.last())
 	}

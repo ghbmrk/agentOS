@@ -90,6 +90,10 @@ type sleepConfig struct {
 	Journal func(journal.SleepNote) error
 	Hold    func()
 	Logf    func(format string, args ...any)
+	// AfterFunc runs f once d has passed on the clock Now reads, and
+	// returns what stops it. Nil is time.AfterFunc; tests drive the
+	// holding line on their own clock.
+	AfterFunc func(d time.Duration, f func()) (stop func() bool)
 }
 
 // sleeper stops the agent machine with its memory saved while the box
@@ -109,7 +113,7 @@ type sleeper struct {
 	rested time.Time // no sleep before this, after a wake at MaxSleep
 	// hold is this sleep's holding-line timer, armed by the first owner
 	// message; held is set once the line went (one per sleep).
-	hold   *time.Timer
+	hold   func() bool // stops the timer
 	held   bool
 	cuts   map[int]context.CancelCauseFunc
 	nextID int
@@ -139,6 +143,9 @@ func newSleeper(cfg sleepConfig) *sleeper {
 	}
 	if cfg.Logf == nil {
 		cfg.Logf = log.Printf
+	}
+	if cfg.AfterFunc == nil {
+		cfg.AfterFunc = func(d time.Duration, f func()) func() bool { return time.AfterFunc(d, f).Stop }
 	}
 	return &sleeper{cfg: cfg, cuts: map[int]context.CancelCauseFunc{}}
 }
@@ -283,7 +290,7 @@ func (s *sleeper) OwnerMessage(at time.Time) {
 	// One timer per sleep, from the first message: later messages during
 	// the same wake send no second line (L3 MUST-A on #149).
 	if s.cfg.Hold != nil && s.hold == nil && !s.held {
-		s.hold = time.AfterFunc(s.cfg.HoldAfter-time.Since(at), s.holdLine)
+		s.hold = s.cfg.AfterFunc(s.cfg.HoldAfter-s.cfg.Now().Sub(at), s.holdLine)
 	}
 	s.mu.Unlock()
 	s.cut(wakeOwner)
@@ -341,7 +348,7 @@ func (s *sleeper) wakeLocked(cause string) {
 	s.mu.Lock()
 	s.asleep, s.snap = false, ""
 	if s.hold != nil {
-		s.hold.Stop()
+		s.hold()
 		s.hold = nil
 	}
 	if cause == wakeMax {

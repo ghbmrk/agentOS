@@ -1,0 +1,54 @@
+# AgentOS: the host PC's disks are left as they were (HW-8, HOST-1a).
+# Installed by the image (P2-1) to /usr/lib/udev/rules.d/ with its two
+# companions (64-agentos-host-disks-assembly.rules, 72-agentos-host-disks-late.rules)
+# and the helper at /usr/lib/agentos/agentos-hostdisk (root only). Not in the
+# initrd.
+#
+# The helper classifies each block disk, including dm and md devices by what
+# they are built on, and partitions take their disk's answer:
+#   drive    the disk holding the running root, cross-checked against the
+#            partition systemd-boot booted from: left alone;
+#   host     every other disk, removable media included: hidden, below;
+#   unknown  no answer (no single root disk, the helper failed or printed
+#            anything else): kept from udisks here and from RAID, LVM and
+#            bcache assembly in the 64 file, but its .device unit stays, so
+#            the box still boots (its own dm-verity and dm-crypt devices
+#            included).
+# A hidden disk or partition:
+#   UDEV_DISABLE_PERSISTENT_STORAGE_RULES_FLAG
+#                       60-persistent-storage skips it: blkid never probes it,
+#                       so no ID_FS_* (labels, UUIDs, RAID or LVM membership)
+#                       is recorded in /run/udev/data and no /dev/disk/by-*
+#                       link names a label, partition label or serial;
+#   DM_UDEV_DISABLE_DISK_RULES_FLAG, DM_UDEV_DISABLE_OTHER_RULES_FLAG
+#                       the same for a dm device: 60-persistent-storage-dm,
+#                       69-lvm and 69-bcache skip it (set after 55-dm, which
+#                       sets them from the device's own flags);
+#   SYSTEMD_READY=0     no .device unit becomes active, so no .mount or .swap
+#                       unit (fstab, a generator, a dependency) can use it;
+#   UDISKS_*            udisks never offers, automounts or shows it;
+#   ID_FS_TYPE          held by the 64 file, so no assembly or bcache rule
+#                       acts on it;
+#   root:root 0600      no other uid (services, agent machines, executors)
+#                       can open the node (":=" so no later rule widens it;
+#                       the 72 file strips the uaccess tag 70-uaccess adds).
+#
+# Numbered 59: before 60-persistent-storage, which honors the flag.
+
+ACTION=="remove", GOTO="agentos_host_disks_end"
+SUBSYSTEM!="block", GOTO="agentos_host_disks_end"
+KERNEL=="loop*|ram*|zram*|nbd*", GOTO="agentos_host_disks_end"
+
+ENV{DEVTYPE}=="disk", IMPORT{program}="/usr/lib/agentos/agentos-hostdisk classify %k"
+ENV{DEVTYPE}=="partition", IMPORT{parent}="AGENTOS_DISK"
+ENV{AGENTOS_DISK}=="drive", GOTO="agentos_host_disks_end"
+ENV{AGENTOS_DISK}=="host", GOTO="agentos_host_disk"
+
+ENV{UDISKS_IGNORE}="1", ENV{UDISKS_AUTO}="0"
+GOTO="agentos_host_disks_end"
+
+LABEL="agentos_host_disk"
+ENV{UDEV_DISABLE_PERSISTENT_STORAGE_RULES_FLAG}="1", ENV{SYSTEMD_READY}="0", ENV{UDISKS_IGNORE}="1", ENV{UDISKS_AUTO}="0", ENV{UDISKS_SYSTEM}="1", OWNER:="root", GROUP:="root", MODE:="0600"
+KERNEL=="dm-*", ENV{DM_UDEV_DISABLE_DISK_RULES_FLAG}="1", ENV{DM_UDEV_DISABLE_OTHER_RULES_FLAG}="1"
+
+LABEL="agentos_host_disks_end"

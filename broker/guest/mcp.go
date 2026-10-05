@@ -140,15 +140,15 @@ func (p *Plane) mcp(m *machine, w http.ResponseWriter, r *http.Request) {
 		if call.Name != "effect_request" && call.Name != "effect_status" && p.cfg.Tools != nil {
 			lineage, err := p.cfg.Machines.Lineage(m.id)
 			if err != nil {
-				writeRPC(w, req.ID, toolResult("broker: unknown machine", true), nil)
+				writeRPC(w, req.ID, m.result("broker: unknown machine", true), nil)
 				return
 			}
 			text, handled, err := p.cfg.Tools.Call(r.Context(), m.id, lineage, call.Name, call.Arguments)
 			if handled {
 				if err != nil {
-					writeRPC(w, req.ID, toolResult(err.Error(), true), nil)
+					writeRPC(w, req.ID, m.result(err.Error(), true), nil)
 				} else {
-					writeRPC(w, req.ID, toolResult(text, false), nil)
+					writeRPC(w, req.ID, m.result(text, false), nil)
 				}
 				return
 			}
@@ -158,14 +158,25 @@ func (p *Plane) mcp(m *machine, w http.ResponseWriter, r *http.Request) {
 			p.step(m) // REV-1: after every effect request the journal took
 		}
 		if err != nil {
-			writeRPC(w, req.ID, toolResult(err.Error(), true), nil)
+			writeRPC(w, req.ID, m.result(err.Error(), true), nil)
 			return
 		}
 		b, _ := json.Marshal(res)
-		writeRPC(w, req.ID, toolResult(string(b), false), nil)
+		writeRPC(w, req.ID, m.result(string(b), false), nil)
 	default:
 		writeRPC(w, req.ID, nil, &rpcError{-32601, "method not found"})
 	}
+}
+
+// result is a tool result for machine m, carrying after it any untold
+// note about a failed step snapshot as its own content item, so a JSON
+// result stays whole (SR2-3s).
+func (m *machine) result(text string, isErr bool) map[string]any {
+	res := toolResult(text, isErr)
+	if n := m.takeNote(); n != "" {
+		res["content"] = append(res["content"].([]map[string]string), map[string]string{"type": "text", "text": n})
+	}
+	return res
 }
 
 func toolResult(text string, isErr bool) map[string]any {

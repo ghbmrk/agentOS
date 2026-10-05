@@ -29,6 +29,10 @@ var controlPath = map[string][]string{
 	"accel":     {"admission"},           // RES-3 discovery from sysfs (P2-5)
 	"owner":     {"control", "journal", "modem"},
 	"modem":     {},
+	// The modem bridge's contract and agentosd's end of it (P2-3w): types
+	// and an in-process queue; the bridge's client is bridgeclient.
+	"bridgeproto": {},
+	"modemlink":   {"bridgeproto", "modem", "sockets"},
 	// The approval policy (grants) runs inside the engine's checks, so it
 	// is on the control path too; adapters reach it only through its
 	// Verifier interface.
@@ -64,7 +68,7 @@ var controlPath = map[string][]string{
 	// plane. It opens the machines' disk quotas (quota, RES-4); quota
 	// imports golang.org/x/sys/unix, so like clock it is held by
 	// TestAgentosdLinksNoInference through netOK.
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool", "workers", "quota"},
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool", "workers", "quota", "modemlink"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies

@@ -85,11 +85,14 @@ var netOK = map[string]allowance{
 	"update":     {"flock on the update store", []string{"syscall.Flock", "syscall.LOCK_EX"}},
 	// Recall (CAP-3, #59): one broker per index, as for the journal.
 	"recall": {"flock on the recall store", []string{"syscall.Flock", "syscall.LOCK_EX", "syscall.LOCK_NB"}},
-	"vm/overlay": {"overlay files: xattrs, device nodes, stat, timestamps, and the FICLONE ioctl for copies",
-		[]string{"syscall.EINVAL", "syscall.ENOTDIR", "syscall.ENXIO", "syscall.Getxattr", "syscall.Listxattr",
-			"syscall.Mknod", "syscall.NsecToTimespec", "syscall.O_NOFOLLOW", "syscall.Removexattr", "syscall.SYS_IOCTL",
-			"syscall.S_IFCHR", "syscall.Setxattr", "syscall.Stat_t", "syscall.Statfs", "syscall.Statfs_t",
-			"syscall.Syscall", "syscall.Timespec", "syscall.TimespecToNsec", "syscall.UtimesNano"}},
+	"vm/overlay": {"overlay files: xattrs, device nodes, stat, timestamps, the FICLONE ioctl for copies, and handle-relative deletion in a stopped worker's layer (CAP-8c), and directory handles to measure a layer past the path limit",
+		[]string{"syscall.Close", "syscall.Dup", "syscall.EEXIST", "syscall.EINVAL", "syscall.ELOOP", "syscall.ENAMETOOLONG", "syscall.ENOENT",
+			"syscall.ENOTDIR", "syscall.ENOTEMPTY", "syscall.ENXIO", "syscall.Fstat", "syscall.Getxattr", "syscall.Listxattr",
+			"syscall.Mknod", "syscall.NsecToTimespec", "syscall.O_CLOEXEC", "syscall.O_DIRECTORY", "syscall.O_NOFOLLOW",
+			"syscall.O_RDONLY", "syscall.Open", "syscall.Openat", "syscall.Removexattr", "syscall.Rmdir", "syscall.SYS_IOCTL",
+			"syscall.S_IFCHR", "syscall.S_IFDIR", "syscall.S_IFLNK", "syscall.S_IFMT", "syscall.S_IFREG", "syscall.Setxattr",
+			"syscall.Stat_t", "syscall.Statfs", "syscall.Statfs_t", "syscall.Syscall", "syscall.Timespec",
+			"syscall.TimespecToNsec", "syscall.Unlinkat", "syscall.UtimesNano"}},
 	"vm/gvisor": {"mounts and cgroup directory handles for runsc, and its SysProcAttr",
 		[]string{"syscall.Close", "syscall.EINVAL", "syscall.ENOENT", "syscall.MNT_DETACH", "syscall.MS_NODEV",
 			"syscall.MS_NOSUID", "syscall.MS_PRIVATE", "syscall.Mount", "syscall.O_CLOEXEC", "syscall.O_DIRECTORY",
@@ -111,6 +114,7 @@ var netOK = map[string]allowance{
 // import (escapes), and why.
 var escapeOK = map[string]map[string]string{
 	"vm/gvisor": {"os/exec": "starts runsc, the only executable (vm/gvisor TestOnlyRunscIsExecuted)"},
+	"clock":     {"os/exec": "runs /usr/bin/chronyc for read-only sync queries, the only executable (clock TestOnlyChronycIsExecuted; HOST-1b)"},
 	"quota":     {"unsafe": "hands the quotactl and fsxattr structs to the kernel"},
 }
 

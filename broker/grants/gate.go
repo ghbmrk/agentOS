@@ -48,9 +48,10 @@ const (
 type Owner interface {
 	Request(items []owner.Item, ttl time.Duration) (string, error)
 	RequestEach(items []owner.Item, ttls []time.Duration) ([]string, error)
-	// RequestLocal asks one item on the local page, when its recipients
-	// cannot be shown in a text (owner.SMSApprovable; P2-2a).
-	RequestLocal(item owner.Item, ttl time.Duration) (string, error)
+	// RequestLocalEach asks items on the local page, one request each,
+	// when their recipients cannot be shown in a text
+	// (owner.SMSApprovable; P2-2a), their notices texted together.
+	RequestLocalEach(items []owner.Item, ttls []time.Duration) ([]string, error)
 	Tier(owner.Facts) owner.Tier
 	Active(within time.Duration) bool
 	QueueAutoReply(owner.AutoReply) (owner.QueueResult, error)
@@ -508,6 +509,19 @@ func (g *Gate) reissueDue() {
 // RecipientsNotTextable is the reason an action is refused when its
 // recipients cannot be shown in an approval text (owner.SMSApprovable).
 const RecipientsNotTextable = "can't be approved by text: each recipient must be a plain email address, a full +country number or acct ...1234, at most 100 characters in all; ask again with a new request_id"
+
+// WaitingOnThePage is the reason an agent sees while an action waits for
+// the owner on the Wi-Fi page; it says how to ask by text instead
+// (Potency R1 on P2-2a).
+const WaitingOnThePage = "waiting for the owner's approval on the box's Wi-Fi page; to ask by text instead, each recipient must be a plain email address, a full +country number or acct ...1234, at most 100 characters in all, in a new request_id"
+
+// onPage reports whether a waiting intent is asked on the local page:
+// its recipients cannot be texted, or it needs the owner's confirmation
+// there (CH-3), which the page's one answer gives (Security Q1 on P2-2a
+// part 2).
+func (g *Gate) onPage(w *wait) bool {
+	return g.cfg.LocalUI && (w.local || !owner.SMSApprovable(w.item))
+}
 
 // closeIntent denies a pending intent with a fixed reason.
 func (g *Gate) closeIntent(id, why string) {
@@ -1365,17 +1379,34 @@ func (g *Gate) annotate(st *journal.Status) {
 		st.Permission.Reason = "approved; held for the owner's undo window until " + w.sendAt.UTC().Format("15:04") + " UTC"
 	} else if w != nil && w.reply != "" {
 		st.Permission.Reason = "auto-reply queued; it sends at " + w.sendAt.UTC().Format("15:04") + " UTC unless the owner cancels it"
+	} else if w != nil && g.cfg.LocalUI && w.local {
+		st.Permission.Reason = "waiting for the owner's approval on the box's Wi-Fi page"
 	} else if w != nil && g.cfg.LocalUI && !owner.SMSApprovable(w.item) {
 		// After held and reply: an approved page item is held, not
 		// waiting (L3 S1 on #165).
-		st.Permission.Reason = "waiting for the owner's approval on the box's Wi-Fi page"
+		st.Permission.Reason = WaitingOnThePage
 	} else if w != nil {
 		st.Permission.Reason = "waiting for the owner's approval"
 	} else if r := g.retry[id]; r != "" {
 		st.Permission.Reason = r
-	} else if f := g.failed[id]; f != "" {
+	} else if f := g.failed[id]; f == LineDown {
+		st.Permission.Reason = LineDown
+	} else if f != "" {
 		st.Permission.Reason = "could not ask the owner (" + f + "); retry later"
 	}
+}
+
+// LineDown is the agent's reason for an ask that could not be texted
+// because the owner's phone line was down: the request was dropped, and
+// asking again once the line is back reaches the owner (UX on #170; the
+// recovery text tells the owner the agent can ask again).
+const LineDown = "not sent: the owner's phone line is down; ask again later"
+
+func failReason(err error) string {
+	if owner.LineDown(err) {
+		return LineDown
+	}
+	return err.Error()
 }
 
 func (g *Gate) queueReply(id string, v verdict) {
@@ -1399,7 +1430,7 @@ func (g *Gate) queueReply(id string, v verdict) {
 	case w == nil:
 	case err != nil:
 		delete(g.waiting, id)
-		g.failed[id] = err.Error()
+		g.failed[id] = failReason(err)
 	case res.Queued != nil:
 		w.reply, w.sendAt = res.Queued.ID, res.Queued.SendAt
 	default:
@@ -1553,7 +1584,7 @@ func (g *Gate) flush(paced bool) {
 				lapsed = append(lapsed, id)
 			case stopped:
 				g.batch = append(g.batch, id)
-			case g.cfg.LocalUI && !owner.SMSApprovable(w.item):
+			case g.onPage(w):
 				page = append(page, w.item)
 				pageTTLs = append(pageTTLs, w.expires.Sub(now))
 			default:
@@ -1562,9 +1593,10 @@ func (g *Gate) flush(paced bool) {
 			}
 			continue
 		}
-		if g.cfg.LocalUI && !owner.SMSApprovable(w.item) {
-			// Its recipients cannot be texted: asked alone on the local
-			// page (P2-2a), never in a texted batch.
+		if g.onPage(w) {
+			// Its recipients cannot be texted, or it needs the owner's
+			// confirmation: asked alone on the local page (P2-2a), never
+			// in a texted batch, and never YES by text (Security Q1).
 			page = append(page, w.item)
 			pageTTLs = append(pageTTLs, 0)
 			continue
@@ -1600,14 +1632,16 @@ func (g *Gate) flush(paced bool) {
 				if err == nil {
 					err = errors.New("not sent")
 				}
-				g.failed[it.Ref] = err.Error()
+				g.failed[it.Ref] = failReason(err)
 			}
 		}
 		g.mu.Unlock()
 	}
+	var ask []owner.Item
+	var askTTLs []time.Duration
 	for i, it := range page {
-		// Each is one notice text to the owner, counted like a request;
-		// re-issued ones always go, as above.
+		// Each counts like a request; re-issued ones always go, as above.
+		// Their notices share texts (Potency R2).
 		if pageTTLs[i] == 0 && g.take(paced, 1) == 0 {
 			g.requeue([]owner.Item{it})
 			continue
@@ -1615,18 +1649,27 @@ func (g *Gate) flush(paced bool) {
 		if pageTTLs[i] != 0 {
 			g.take(false, 1)
 		}
-		req := ""
+		ask, askTTLs = append(ask, it), append(askTTLs, pageTTLs[i])
+	}
+	if len(ask) > 0 {
+		reqs := make([]string, len(ask))
 		err := errors.New("no owner channel")
 		if own != nil {
-			req, err = own.RequestLocal(it, pageTTLs[i])
+			reqs, err = own.RequestLocalEach(ask, askTTLs)
 		}
 		g.mu.Lock()
-		if w := g.waiting[it.Ref]; w != nil {
-			if err != nil {
-				delete(g.waiting, it.Ref)
-				g.failed[it.Ref] = err.Error()
-			} else {
-				w.request = req
+		for i, it := range ask {
+			if w := g.waiting[it.Ref]; w != nil {
+				if i >= len(reqs) || reqs[i] == "" {
+					delete(g.waiting, it.Ref)
+					why := "owner: not asked"
+					if err != nil {
+						why = failReason(err)
+					}
+					g.failed[it.Ref] = why
+				} else {
+					w.request = reqs[i]
+				}
 			}
 		}
 		g.mu.Unlock()
@@ -1666,7 +1709,7 @@ func (g *Gate) flush(paced bool) {
 				if err != nil {
 					// Retrying the request_id asks again.
 					delete(g.waiting, it.Ref)
-					g.failed[it.Ref] = err.Error()
+					g.failed[it.Ref] = failReason(err)
 				} else {
 					w.request = req
 				}
@@ -1719,6 +1762,15 @@ func (g *Gate) Decide(d owner.Decision) {
 	why := d.Why
 	if why == "" {
 		why = "owner"
+	}
+	if d.Approved && local && d.Page {
+		// Approved on the page with a fresh code: that answer confirms
+		// it, if the item is the one the page showed (Security P1).
+		if d.Sum == owner.ItemSum(item) {
+			g.confirmed[d.Ref] = true
+		} else {
+			d.Approved, why = false, "it changed since the page showed it"
+		}
 	}
 	hold, attempt := "", 0
 	if w != nil {
@@ -2391,13 +2443,29 @@ func (g *Gate) Narrow(word, id string) string {
 // Execute runs a grant intent: it is the engine executor for ExecutorName.
 func (g *Gate) Execute(_ context.Context, in journal.Intent, _ int) journal.Outcome {
 	g.mu.Lock()
+	before := make([]string, 0, len(g.grants))
+	for k := range g.grants {
+		before = append(before, k)
+	}
 	id, err := g.applyLocked(in)
+	// Every grant the intent ended: the one named, and the pre-allowances
+	// a revoked connection takes with it (L3 S1 on #169).
+	var ended []string
+	if err == nil && unpauses(in) {
+		ended = append(ended, id)
+		for _, k := range before {
+			if _, live := g.grants[k]; !live && k != id {
+				ended = append(ended, k)
+			}
+		}
+		sort.Strings(ended[1:])
+	}
 	g.mu.Unlock()
 	if err != nil {
 		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: err.Error()}
 	}
-	if unpauses(in) {
-		g.unpaused(id)
+	for _, k := range ended {
+		g.unpaused(k)
 	}
 	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: id}
 }

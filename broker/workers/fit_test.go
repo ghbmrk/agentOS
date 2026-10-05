@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -370,7 +371,7 @@ func TestCAP1KeepWaitsForStartingForks(t *testing.T) {
 	forked := make(chan error, 1)
 	go func() { forked <- r.call("agent", toolFork, m{"name": "a", "into": []string{"late"}}, nil) }()
 	<-h.forking
-	if err := r.call("agent", toolKeep, m{"name": "b"}, nil); err == nil || !strings.Contains(err.Error(), "still starting") {
+	if err := r.call("agent", toolKeep, m{"name": "b"}, nil); err == nil || err.Error() != "some of your workers are still starting; keep the winner once worker_create or worker_fork returns" {
 		t.Fatalf("keep beside a starting fork: %v", err)
 	}
 	close(h.release)
@@ -490,7 +491,8 @@ func TestCAP1KeepSaysWhatWentBeforeAnError(t *testing.T) {
 	r.must("agent", toolFork, m{"name": "src", "into": []string{"a", "b", "c", "d"}}, nil)
 	r.tools.M = failDestroy{r.m, workerID(ag.Lineage, "c")}
 	err := r.call("agent", toolKeep, m{"name": "a"}, nil)
-	if err == nil || !strings.Contains(err.Error(), "worker c: disk busy (already destroyed: b)") {
+	// The cause goes to the broker's log; the guest gets its ref (SR2-3f).
+	if err == nil || !regexp.MustCompile(`^worker c: failed \(ref [0-9a-f]{8}\); the broker's log has the detail \(already destroyed: b\)$`).MatchString(err.Error()) {
 		t.Fatalf("keep with a failed destroy: %v", err)
 	}
 }
@@ -522,7 +524,35 @@ func TestCAP1PreemptedCommandSaysRetry(t *testing.T) {
 			t.Fatal("the preemption never finished")
 		}
 	}
-	if err == nil || !strings.HasPrefix(err.Error(), "preempted, retry: worker w ") || !strings.Contains(err.Error(), "did not fail") {
+	if err == nil || !strings.HasPrefix(err.Error(), "preempted, retry: worker w ") || !strings.Contains(err.Error(), "did not fail") || !strings.Contains(err.Error(), "destroy and recreate it") {
 		t.Fatalf("preempted exec = %v", err)
+	}
+}
+
+// goneDestroy reports one machine as already gone.
+type goneDestroy struct {
+	*vm.Manager
+	id string
+}
+
+func (g goneDestroy) Destroy(ctx context.Context, id string) error {
+	if id == g.id {
+		return fmt.Errorf("%w: machine %s", vm.ErrUnknown, id)
+	}
+	return g.Manager.Destroy(ctx, id)
+}
+
+// A sibling destroyed meanwhile counts as gone, not as a failed keep (L3
+// nit 2 on #158).
+func TestCAP1KeepSkipsASiblingAlreadyGone(t *testing.T) {
+	r := newRig(t, 16000)
+	ag := r.agent("agent", vm.Public)
+	r.must("agent", toolCreate, m{"name": "src", "mem_mb": MinMemMB}, nil)
+	r.must("agent", toolFork, m{"name": "src", "into": []string{"a", "b", "c", "d"}}, nil)
+	r.tools.M = goneDestroy{r.m, workerID(ag.Lineage, "c")}
+	var kept struct{ Destroyed []string }
+	r.must("agent", toolKeep, m{"name": "a"}, &kept)
+	if fmt.Sprint(kept.Destroyed) != "[b d]" {
+		t.Fatalf("keep beside a vanished sibling = %+v", kept)
 	}
 }

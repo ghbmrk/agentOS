@@ -174,6 +174,10 @@ func (c *Channel) takeLocalNotesLocked() []string {
 var (
 	ErrWrongCode = errors.New("owner: wrong code")
 	ErrTooMany   = errors.New("owner: too many local attempts; try again later")
+	// ErrTextedCode: the page was given the request's texted code. The
+	// channel does not count it (L3 S-a on #165); the page counts it for
+	// the phone (Security F1 on #171).
+	ErrTextedCode = errors.New("That's the code I texted. Here, use a code from your code generator.")
 )
 
 // LocalStatus is what the local status page may show without sign-in.
@@ -301,6 +305,7 @@ func (c *Channel) lockAlertsLocked(locked bool, now time.Time) []string {
 	}
 	if c.codes.justChallenged {
 		c.codes.justChallenged = false
+		c.floods.challenge++ // for the digest, as floodLocked counts it (L3 N2 on #165)
 		c.held = nil
 		c.alertAt = now
 		alerts = append(alerts, fmt.Sprintf("Too many wrong codes, the last on the box's Wi-Fi. Codes by text now need a challenge: reply UNLOCK %s and a code from your code generator within %s.",
@@ -466,6 +471,17 @@ func (c *Channel) LocalAnswer(id, sum string, approve bool, code string) (string
 			return "", err
 		}
 	}
+	if approve && !r.local && r.code != "" && eq(code, r.code) {
+		// The page takes a code-generator code; the texted one is refused
+		// here, not counted as wrong, since a phone offers it from the
+		// text (L3 S-a on #165). It still spends a saved try of the day's
+		// bound first, like any code, so the hint is no oracle once the
+		// bound is spent or while the state cannot be saved (L3 on #171).
+		// A page-only request's code is never texted.
+		c.mu.Unlock()
+		c.decide(decided)
+		return "", ErrTextedCode
+	}
 	rp := reply{word: "NO", id: id}
 	if approve {
 		rp.word, rp.code = "YES", code
@@ -501,15 +517,21 @@ func (c *Channel) LocalAnswer(id, sum string, approve bool, code string) (string
 		note = "Approved " + id
 		// The page's own wording (UX A4); a hold that failed keeps the
 		// channel's reply, which says the item did not run (L3 S4).
-		ran := true
+		ran, some := true, false
 		for _, d := range decided[n:] {
 			ran = ran && d.Approved
+			some = some || d.Approved
 		}
 		if ran {
-			msg = "Approved. Your agent can go ahead." + strings.TrimPrefix(msg, "Approved "+id+".")
+			msg = "Approved " + id + ". Your agent can go ahead." + strings.TrimPrefix(msg, "Approved "+id+".")
+		} else {
+			note += " (it did not run)" // L3 N3 on #165
+			if some {
+				note = "Approved " + id + " (not all of it ran)" // L3 nit on #171
+			}
 		}
 	default:
-		note, msg = "Denied "+id, "Denied."
+		note, msg = "Denied "+id, "Denied "+id+"." // with its ID (UX U-2A-2)
 	}
 	var text string
 	var ns, na int

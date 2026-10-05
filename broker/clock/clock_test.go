@@ -25,11 +25,12 @@ type rig struct {
 	reads   int
 	texts   []string
 	gs      []*Guard
+	boot    string // reboot changes it (unverified_test.go)
 }
 
 func newRig() *rig {
 	t0 := time.Date(2026, 10, 5, 4, 0, 0, 0, time.UTC)
-	return &rig{wall: t0, carrier: t0, synced: true}
+	return &rig{wall: t0, carrier: t0, synced: true, boot: "b0"}
 }
 
 // advance moves real time: wall, monotonic and carrier together.
@@ -409,7 +410,7 @@ func TestTIM1LosingTheCarrierDoesNotLiftRestriction(t *testing.T) {
 func TestTIM1StatusLine(t *testing.T) {
 	r := newRig()
 	g := r.guard(t, nil)
-	if got := g.Status().Line(time.UTC); got != "Time check: not checked." {
+	if got := g.Status().Line(time.UTC); !strings.HasPrefix(got, "Time check: not confirmed since start at 04:00") {
 		t.Fatalf("line = %q", got)
 	}
 	g.Check(bg)
@@ -430,7 +431,7 @@ func TestTIM1StatusLine(t *testing.T) {
 	r.synced = false
 	g = r.guard(t, nil)
 	g.Check(bg)
-	if got := g.Status().Line(time.UTC); got != "Time check: not checked." {
+	if got := g.Status().Line(time.UTC); !strings.HasPrefix(got, "Time check: not confirmed since start at 04:00") {
 		t.Fatalf("line = %q", got)
 	}
 	r.synced = true

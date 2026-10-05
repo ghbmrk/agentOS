@@ -133,6 +133,12 @@ type Decision struct {
 	// or "restart") cancels it.
 	Hold  string
 	Until time.Time
+	// Page: approved on the box's Wi-Fi page with a fresh strong code,
+	// and Sum is ItemSum of the item as the page showed it, so a change
+	// that needs the page's confirmation is confirmed by this same
+	// answer (Security Q1 and P1 on P2-2a part 2).
+	Page bool
+	Sum  string
 }
 
 // Channel is the owner channel. It implements control.Auth.

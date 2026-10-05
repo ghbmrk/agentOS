@@ -406,6 +406,27 @@ func TestContextScopedReplies(t *testing.T) {
 
 // REQ: CH-10
 
+// UX on #170: an ask dropped because the owner's phone line was down
+// tells the agent so in fixed words, and that it can ask again.
+func TestALineDownAskTellsTheAgentToAskAgain(t *testing.T) {
+	r := newRig(t, nil)
+	r.grant(mailGrant())
+	r.ver.set("inv-1042", sam())
+	r.own.lineDown = true
+	r.effect("agent/s1", "invoice.send", map[string]any{"record": "inv-1042"}, "sam@example.com")
+	r.g.Flush()
+	if st := r.state("agent/s1"); st.State != journal.Pending || st.Permission.Reason != "not sent: the owner's phone line is down; ask again later" {
+		t.Fatalf("%s %q", st.State, st.Permission.Reason)
+	}
+	n := r.own.count()
+	r.own.lineDown = false
+	r.effect("agent/s1", "invoice.send", map[string]any{"record": "inv-1042"}, "sam@example.com")
+	r.g.Flush()
+	if r.own.count() != n+1 {
+		t.Fatalf("asking again did not text the owner: %d %+v", r.own.count(), r.state("agent/s1").Permission)
+	}
+}
+
 // TestOwnerUnreachableLeavesItPending: if the owner cannot be texted, the
 // intent stays pending with the reason and a retry asks again.
 func TestOwnerUnreachableLeavesItPending(t *testing.T) {
@@ -564,6 +585,7 @@ func TestRecipientsThatCannotBeShownAreRefusedWithAFix(t *testing.T) {
 func TestRecipientsThatCannotBeShownAreAskedOnThePage(t *testing.T) {
 	r := newRig(t, func(c *Config) { c.Verifiers = nil })
 	r.grant(mailGrant())
+	r.own.local, r.own.localCalls = nil, 0 // the grant was asked there
 	ok := r.effect("agent/p1", "message.send", map[string]any{"body": "hi"}, "sam@example.com")
 	bad := r.effect("agent/p2", "message.send", map[string]any{"body": "yo"},
 		"mom@example.com", "dad@example.com", "sis@example.com", "bro@example.com", "gran@example.com", "x@attacker.example")
@@ -578,7 +600,7 @@ func TestRecipientsThatCannotBeShownAreAskedOnThePage(t *testing.T) {
 	if len(local) != 1 || local[0].Ref != bad.Intent.ID {
 		t.Fatalf("asked on the page: %+v", local)
 	}
-	if st := r.state(bad.Intent.ID); st.State != journal.Pending || st.Permission.Reason != "waiting for the owner's approval on the box's Wi-Fi page" {
+	if st := r.state(bad.Intent.ID); st.State != journal.Pending || st.Permission.Reason != "waiting for the owner's approval on the box's Wi-Fi page; to ask by text instead, each recipient must be a plain email address, a full +country number or acct ...1234, at most 100 characters in all, in a new request_id" {
 		t.Fatalf("page item: %s %q", st.State, st.Permission.Reason)
 	}
 	if st := r.state(ok.Intent.ID); st.State != journal.Pending || st.Permission.Reason != "waiting for the owner's approval" {
@@ -603,6 +625,7 @@ func TestRecipientsThatCannotBeShownAreAskedOnThePage(t *testing.T) {
 func TestAHeldPageItemSaysHeld(t *testing.T) {
 	r := newRig(t, func(c *Config) { c.Verifiers = nil })
 	r.grant(mailGrant())
+	r.own.local, r.own.localCalls = nil, 0 // the grant was asked there
 	bad := r.effect("agent/p2", "message.send", map[string]any{"body": "yo"},
 		"mom@example.com", "dad@example.com", "sis@example.com", "bro@example.com", "gran@example.com", "x@attacker.example")
 	r.g.Flush()
@@ -661,5 +684,35 @@ func TestAnUntextableItemDoesNotFailItsBatch(t *testing.T) {
 	}
 	if st := r.state(bad.Intent.ID); st.State != journal.Denied || !strings.HasSuffix(st.Permission.Reason, RecipientsNotTextable) {
 		t.Fatalf("untextable item: %s %q", st.State, st.Permission.Reason)
+	}
+}
+
+// Potency R2 on P2-2a: page requests from one flush go to the owner
+// channel together, so their notices share texts.
+func TestPageRequestsInOneFlushAreAskedTogether(t *testing.T) {
+	r := newRig(t, func(c *Config) { c.Verifiers = nil })
+	r.grant(mailGrant())
+	r.own.local, r.own.localCalls = nil, 0 // the grant was asked there
+	many := []string{"mom@example.com", "dad@example.com", "sis@example.com", "bro@example.com", "gran@example.com", "x@attacker.example"}
+	a := r.effect("agent/q1", "message.send", map[string]any{"body": "hi"}, many...)
+	b := r.effect("agent/q2", "message.send", map[string]any{"body": "yo"}, many...)
+	r.g.Flush()
+	r.own.mu.Lock()
+	calls, local := r.own.localCalls, append([]string(nil), r.own.local...)
+	r.own.mu.Unlock()
+	if calls != 1 || len(local) != 2 {
+		t.Fatalf("%d calls, local %v", calls, local)
+	}
+	for _, id := range []string{a.Intent.ID, b.Intent.ID} {
+		if st := r.state(id); st.State != journal.Pending || !strings.HasPrefix(st.Permission.Reason, "waiting for the owner's approval on the box's Wi-Fi page;") {
+			t.Fatalf("%s: %s %q", id, st.State, st.Permission.Reason)
+		}
+	}
+	// If the channel cannot ask, the agent is told so, not to wait.
+	r.own.down = true
+	c := r.effect("agent/q3", "message.send", map[string]any{"body": "hey"}, many...)
+	r.g.Flush()
+	if st := r.state(c.Intent.ID); st.State != journal.Pending || !strings.Contains(st.Permission.Reason, "could not ask the owner") {
+		t.Fatalf("unasked: %s %q", st.State, st.Permission.Reason)
 	}
 }
