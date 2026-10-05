@@ -35,13 +35,18 @@ var All = []Change{
 	// broker's own SRK is transient.
 	{"tpm-srk", TPM},
 	// On a trusted PC, one NV counter per vault (V6 rollback counter,
-	// tpmseal/counter.go).
+	// tpmseal/counter.go). Nothing undefines them, so they stay after the
+	// drive is gone and accumulate with each vault trusted on the PC.
 	{"tpm-vault-counter", TPM},
 	// When a boot PIN is turned on: the lockout authorization, held
 	// while the PIN is on and given back (empty) when it is turned off,
 	// and the dictionary-attack settings, set once and left as set (D7,
 	// tpmseal TakeLockout/ReleaseLockout).
 	{"tpm-lockout", TPM},
+	// shim's SBAT revocation level (SbatLevel), written when the shim on
+	// the drive carries a newer revocation policy than the PC (shim 15.7
+	// and later); it can stop older Linux boot media on that PC.
+	{"sbat-level", UEFI},
 	// A possible Windows recovery-key prompt at the next Windows start.
 	{"windows-recovery-prompt", Windows},
 }
