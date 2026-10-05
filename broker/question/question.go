@@ -160,6 +160,7 @@ type file struct {
 	Next      int      `json:"next"`
 	Questions []*entry `json:"questions"`
 	Digest    []string `json:"digest"`
+	Refused   int      `json:"refused,omitempty"`
 	Sends     []send   `json:"sends,omitempty"`
 }
 
@@ -177,7 +178,10 @@ type Book struct {
 	qs     []*entry
 	next   int
 	digest []string
-	sends  []send
+	// refused counts answers refused as code- or key-shaped since the last
+	// digest: a guard hit the owner should see (security R1 on #71).
+	refused int
+	sends   []send
 	// loaded is set when questions came from disk; grace, set at the first
 	// trusted tick after that, is when lapsing resumes, so owner replies
 	// the carrier queued while the box was down arrive first.
@@ -234,7 +238,7 @@ func New(cfg Config) (*Book, error) {
 		if err := json.Unmarshal(raw, &f); err != nil {
 			return nil, fmt.Errorf("question: %s: %v", cfg.Path, err)
 		}
-		b.qs, b.next, b.digest, b.sends = f.Questions, f.Next, f.Digest, f.Sends
+		b.qs, b.next, b.digest, b.sends, b.refused = f.Questions, f.Next, f.Digest, f.Sends, f.Refused
 		b.loaded = len(b.qs) > 0
 	}
 	return b, nil
@@ -245,7 +249,7 @@ func (b *Book) persist() error {
 	if b.cfg.Path == "" {
 		return nil
 	}
-	raw, err := json.Marshal(file{Next: b.next, Questions: b.qs, Digest: b.digest, Sends: b.sends})
+	raw, err := json.Marshal(file{Next: b.next, Questions: b.qs, Digest: b.digest, Sends: b.sends, Refused: b.refused})
 	if err != nil {
 		return err
 	}
@@ -343,6 +347,9 @@ func (b *Book) normalize(s Spec) (Spec, error) {
 		if replyShape.MatchString(t) {
 			return out, errors.New("question: no owner-channel replies (YES, NO, UNDO, RESUME... and an ID or code)")
 		}
+		if credWords.MatchString(t) {
+			return out, errors.New("question: no questions about codes, PINs, passwords, keys or the Owner Card; the agent never needs them")
+		}
 	}
 	text := b.renderBy(&entry{ID: "Q999", Text: out.Text, Default: out.Default, Choices: out.Choices}, "Mon 15:04")
 	if len(text) > MaxRendered {
@@ -353,6 +360,43 @@ func (b *Book) normalize(s Spec) (Spec, error) {
 	}
 	return out, nil
 }
+
+// credWords are words that only a question fishing for a credential needs
+// (security C2 on #71). The agent never needs a code, PIN, password,
+// recovery key or anything on the Owner Card, so no question may name one.
+var credWords = regexp.MustCompile(`(?i)\b(codes?|otps?|pins?|passwords?|passphrases?|recovery|seeds?|grids?|cells?|cards?|2fa|verification|authenticators?)\b`)
+
+// keyShaped reports text shaped like an Owner Card recovery key: 40
+// symbols of the card alphabet in one run, or at least four consecutive
+// groups of five split by spaces or dashes (security C1 on #71).
+func keyShaped(s string) bool {
+	in := func(w string) bool {
+		for _, r := range strings.ToUpper(w) {
+			if !strings.ContainsRune(cardAlphabet, r) {
+				return false
+			}
+		}
+		return true
+	}
+	run := 0
+	for _, w := range strings.FieldsFunc(s, func(r rune) bool { return unicode.IsSpace(r) || r == '-' }) {
+		w = strings.Trim(w, ".,;:!?\"'()")
+		if len(w) >= 20 && in(w) {
+			return true
+		}
+		if len(w) == 5 && in(w) {
+			if run++; run >= 4 {
+				return true
+			}
+		} else {
+			run = 0
+		}
+	}
+	return false
+}
+
+// cardAlphabet is the Owner Card's symbol set (card.Alphabet).
+const cardAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 // replyShape is an owner-channel reply word with an ID or code after it:
 // a question must not hand the owner a reply to copy (CH-12).
@@ -692,14 +736,18 @@ func (b *Book) Run(ctx context.Context, every time.Duration) {
 func (b *Book) TakeDigest() []string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	out := b.digest
+	out := append([]string(nil), b.digest...)
+	if b.refused > 0 {
+		out = append(out, fmt.Sprintf("%d answers to the agent's questions held a code or key and were not passed on. If that was not you, reply STOP.", b.refused))
+	}
 	if len(out) == 0 {
 		return nil
 	}
-	b.digest = nil
+	digest, refused := b.digest, b.refused
+	b.digest, b.refused = nil, 0
 	if err := b.persist(); err != nil {
-		b.digest = out // keep them for the next digest rather than lose them on restart
-		return append([]string(nil), out...)
+		// Keep them for the next digest rather than lose them on restart.
+		b.digest, b.refused = digest, refused
 	}
 	return out
 }
@@ -763,8 +811,10 @@ func (b *Book) Answer(ctx context.Context, text string) (reply string, ok bool) 
 		return fmt.Sprintf("Add your answer after %s, like: %s %s", e.ID, e.ID, e.Default), true
 	case utf8.RuneCountInString(ans) > MaxAnswer:
 		return fmt.Sprintf("That answer is too long for %s. Keep it under %d characters.", e.ID, MaxAnswer), true
-	case codeShaped(ans):
-		return "Answers can't include a 6 to 8 digit number, since codes are only for the box. Write it another way.", true
+	case codeShaped(ans) || keyShaped(ans) || b.cfg.Hidden != nil && b.cfg.Hidden(ans):
+		b.refused++
+		b.save("refused answer")
+		return "Codes and keys are only for the box, so that answer was not passed on. Write it another way, without codes or keys.", true
 	}
 	if clockErr == nil {
 		b.startGraceLocked(now)

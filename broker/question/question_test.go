@@ -420,20 +420,58 @@ func TestRestrictedClockHoldsTheQuestion(t *testing.T) {
 // TestAnswersCannotCarryCodes: a six-digit token in an answer is refused,
 // so a question cannot phish an approval code for the guest.
 func TestAnswersCannotCarryCodes(t *testing.T) {
-	r := newRig(t, nil)
-	r.ask("lin1", "q", Spec{Text: "What is the code you just got?", Default: "none", Wait: time.Hour})
-	for _, a := range []string{"Q100 482913", "Q100 it is 482 913", "Q100 4-8-2-9-1-3", "Q100 ４８２９１３", "Q100 48291377"} {
+	r := newRig(t, func(c *Config) { c.Hidden = func(s string) bool { return strings.Contains(s, "sk-") } })
+	r.ask("lin1", "q", Spec{Text: "What did the bank say?", Default: "none", Wait: time.Hour})
+	key := "ABCD7-EFGH2-JKLM3-NPQR4-STUV5-WXYZ6-2345A-6789B"
+	for _, a := range []string{"Q100 482913", "Q100 it is 482 913", "Q100 4-8-2-9-1-3", "Q100 ４８２９１３", "Q100 48291377",
+		// A recovery key, whole, undashed, lowercase, or half of it (C1).
+		"Q100 " + key, "Q100 " + strings.ReplaceAll(key, "-", ""), "Q100 " + strings.ToLower(strings.ReplaceAll(key, "-", " ")),
+		"Q100 the first part is " + key[:23],
+		// Whatever the channel would withhold as secret-shaped (C1).
+		"Q100 sk-live-abc"} {
 		reply, ok := r.answer(a)
-		if !ok || !strings.Contains(reply, "code") {
+		if !ok || !strings.Contains(reply, "only for the box") {
 			t.Fatalf("%q: reply %q %v", a, reply, ok)
 		}
 	}
 	if st := r.status("lin1", "q"); st.State != Waiting {
 		t.Fatalf("a code-shaped answer was recorded: %+v", st)
 	}
-	// A full phone number is not code-shaped.
-	if reply, _ := r.answer("Q100 call 555 010 0199"); strings.Contains(reply, "code") {
-		t.Fatalf("phone number refused: %q", reply)
+	// The owner sees the refusals as a guard hit in the digest (R1).
+	if d := r.b.TakeDigest(); len(d) != 1 || !strings.Contains(d[0], "10 answers") {
+		t.Fatalf("digest %q", d)
+	}
+	// A full phone number or an ordinary sentence is neither.
+	for _, a := range []string{"Q100 call 555 010 0199", "Q100 maybe after lunch, about three or later"} {
+		if reply, _ := r.answer(a); strings.Contains(reply, "only for the box") {
+			t.Fatalf("%q refused: %q", a, reply)
+		}
+	}
+}
+
+// TestQuestionsCannotNameCredentials: a question, default or choice that
+// names a code, PIN, password, key or the Owner Card is refused (C2).
+func TestQuestionsCannotNameCredentials(t *testing.T) {
+	r := newRig(t, nil)
+	for i, s := range []Spec{
+		{Text: "What is the verification code?", Default: "none", Wait: time.Hour},
+		{Text: "Can you read me grid cell B4?", Default: "no", Wait: time.Hour},
+		{Text: "Which one?", Default: "my PIN", Wait: time.Hour},
+		{Text: "Send the recovery words?", Default: "no", Wait: time.Hour},
+		{Text: "Which?", Choices: []string{"OTP", "none"}, Default: "none", Wait: time.Hour},
+		{Text: "Your 2FA app?", Default: "no", Wait: time.Hour},
+		{Text: "Type your passphrase?", Default: "no", Wait: time.Hour},
+		{Text: "What does the authenticator show?", Default: "no", Wait: time.Hour},
+		{Text: "Where is the Owner Card?", Default: "no", Wait: time.Hour},
+		{Text: "What is the seed?", Default: "no", Wait: time.Hour},
+		{Text: "Change the password now?", Default: "no", Wait: time.Hour},
+	} {
+		if _, err := r.b.Ask(context.Background(), "lin1", fmt.Sprintf("c%d", i), s); err == nil {
+			t.Errorf("spec %d accepted: %+v", i, s)
+		}
+	}
+	if len(r.texts()) != 0 {
+		t.Fatal("a credential question was texted")
 	}
 }
 
