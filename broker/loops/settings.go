@@ -216,9 +216,10 @@ func ParseText(msg string) (Request, bool) {
 		return Request{Kind: KindHelp}, true
 	case len(f) == 2 && f[0] == "HELP" && f[1] == "UPDATES":
 		return Request{Kind: KindHelpUpdates}, true
-	case len(f) == 2 && f[0] == "UPDATES" && channelWords[f[1]] != "":
+	// UPDATE and UPDATES are both taken (UX-130-1).
+	case len(f) == 2 && (f[0] == "UPDATES" || f[0] == "UPDATE") && channelWords[f[1]] != "":
 		return Request{Kind: KindChannel, Channel: channelWords[f[1]]}, true
-	case (len(f) == 3 || len(f) == 4 && (f[3] == "DAYS" || f[3] == "DAY")) && f[0] == "UPDATE" && f[1] == "SOAK":
+	case (len(f) == 3 || len(f) == 4 && (f[3] == "DAYS" || f[3] == "DAY")) && (f[0] == "UPDATE" || f[0] == "UPDATES") && f[1] == "SOAK":
 		n, err := strconv.Atoi(f[2])
 		if errors.Is(err, strconv.ErrRange) && strings.Trim(f[2], "0123456789") == "" {
 			n, err = MaxSoakDays+1, nil
@@ -254,11 +255,11 @@ var loopAliases = map[Loop]string{
 const HelpLine = "LOOPS OFF/ON: spare-time learning and self-tests. HELP LOOPS for more."
 
 // HelpText is the reply to HELP LOOPS.
-const HelpText = "LOOPS OFF/ON: all spare-time work. LEARNING, SECURITY TESTS or UPDATE CHECKS OFF/ON: one part. " +
-	"SPARE BUDGET 100: AI calls a day. STOP SHARING."
+const HelpText = "LOOPS OFF/ON: all spare-time work. LEARNING, SECURITY TESTS, UPDATE CHECKS OFF/ON: one part. " +
+	"SPARE BUDGET 100: AI calls/day. STOP SHARING. HELP UPDATES."
 
 // HelpUpdates is the reply to HELP UPDATES.
-const HelpUpdates = "UPDATES STABLE, FAST or PINNED: which releases install. UPDATE SOAK 7: days other boxes test a release first. " +
+const HelpUpdates = "UPDATES STABLE, FAST or PINNED: which releases the box offers. UPDATE SOAK 7: days other boxes test a release first. " +
 	"SECURITY UPDATES AUTO or ASK."
 
 // Confirm is the owner's one-line reply once a request took effect
@@ -278,7 +279,11 @@ func Confirm(r Request, set Settings) string {
 		}
 		return fmt.Sprintf("Updates: stable channel. Releases are offered after other boxes have tested them for %d days.", set.Updates.Soak())
 	case KindSoak:
-		return fmt.Sprintf("Stable releases now wait %d days before the box offers them.", set.Updates.Soak())
+		reply := fmt.Sprintf("Stable releases now wait %d days before the box offers them.", set.Updates.Soak())
+		if set.Updates.ChannelName() != ChannelStable {
+			reply += " It applies once you're on UPDATES STABLE." // UX-130-3
+		}
+		return reply
 	case KindSecurity:
 		if r.On {
 			return "Tested security fixes install on their own again. Reply SECURITY UPDATES ASK if this wasn't you."

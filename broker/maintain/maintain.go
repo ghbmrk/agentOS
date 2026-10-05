@@ -708,9 +708,9 @@ func (l *Loop3) statusLocked(online bool, set loops.Settings, in update.Installe
 func pendingLine(p *pending) string {
 	switch {
 	case p.Why == waitPinned && p.Security:
-		return fmt.Sprintf("Security update %d is out, but this box is pinned, so it will not install it on its own. Reply UPDATES STABLE to take it.", p.Version)
+		return fmt.Sprintf("Security update %d is out. This box is pinned, so it won't install it. Reply UPDATES STABLE to take it and later tested releases.", p.Version)
 	case p.Why == waitPinned:
-		return "Updates: this box is pinned, so it does not install updates on its own. Reply UPDATES STABLE to take them."
+		return "Updates: this box is pinned, so it does not install updates on its own. Reply UPDATES STABLE to take them and later tested releases."
 	case p.Why == waitAttestation:
 		return fmt.Sprintf("Security update %d is waiting for an independent test report before it installs.", p.Version)
 	case p.Why == waitSoak:

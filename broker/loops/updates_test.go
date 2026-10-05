@@ -25,6 +25,9 @@ func TestUpdateTextsParse(t *testing.T) {
 		"SECURITY UPDATES ASK":    {Kind: KindSecurity},
 		"security updates auto":   {Kind: KindSecurity, On: true},
 		"HELP UPDATES":            {Kind: KindHelpUpdates},
+		// UX-130-1: UPDATE and UPDATES alike.
+		"UPDATE PINNED":   {Kind: KindChannel, Channel: ChannelPinned},
+		"updates soak 14": {Kind: KindSoak, Days: 14},
 	} {
 		got, ok := ParseText(msg)
 		if !ok || got != want {
@@ -57,12 +60,14 @@ func TestOwnerTextsSetTheUpdateChannelAndCadence(t *testing.T) {
 		{"SECURITY UPDATES ASK", "The box will ask you before it installs each security fix. Reply SECURITY UPDATES AUTO to undo."},
 		{"SECURITY UPDATES AUTO", "Tested security fixes install on their own again. Reply SECURITY UPDATES ASK if this wasn't you."},
 		{"UPDATES PINNED", "Updates: pinned. Nothing installs on its own; the box still tells you about security fixes. Reply UPDATES STABLE to undo."},
+		// UX-130-3: a soak set off the stable channel says when it applies.
+		{"UPDATES SOAK 9 DAYS", "Stable releases now wait 9 days before the box offers them. It applies once you're on UPDATES STABLE. Reply UPDATE SOAK 10 if this wasn't you."},
 	} {
 		if got, ok := r.s.Text(ctx, c.msg, true); !ok || got != c.reply {
 			t.Fatalf("%s: %q %v", c.msg, got, ok)
 		}
 	}
-	if u := r.s.Settings().Updates; u.ChannelName() != ChannelPinned || u.Soak() != 10 || u.SecurityAsk {
+	if u := r.s.Settings().Updates; u.ChannelName() != ChannelPinned || u.Soak() != 9 || u.SecurityAsk {
 		t.Fatalf("%+v", u)
 	}
 	// Out of range: answered with the bound, nothing changes.
@@ -74,7 +79,7 @@ func TestOwnerTextsSetTheUpdateChannelAndCadence(t *testing.T) {
 			t.Fatalf("%s: %q %v", msg, got, ok)
 		}
 	}
-	if r.s.Settings().Updates.Soak() != 10 {
+	if r.s.Settings().Updates.Soak() != 9 {
 		t.Fatalf("%+v", r.s.Settings().Updates)
 	}
 	// Journaled like the loop settings, and kept across a restart.
@@ -87,11 +92,11 @@ func TestOwnerTextsSetTheUpdateChannelAndCadence(t *testing.T) {
 			ids = append(ids, st.Intent.ID)
 		}
 	}
-	if len(ids) != 7 {
+	if len(ids) != 8 {
 		t.Fatalf("journaled %q", ids)
 	}
 	r.restart()
-	if u := r.s.Settings().Updates; u.ChannelName() != ChannelPinned || u.Soak() != 10 {
+	if u := r.s.Settings().Updates; u.ChannelName() != ChannelPinned || u.Soak() != 9 {
 		t.Fatalf("after restart: %+v", u)
 	}
 }
@@ -131,7 +136,10 @@ func TestHelpUpdatesFitsOneSegment(t *testing.T) {
 	if !ok || got != HelpUpdates {
 		t.Fatalf("%q %v", got, ok)
 	}
-	if len(HelpUpdates) > 153 {
+	if !strings.Contains(HelpText, "HELP UPDATES") {
+		t.Fatal("HELP LOOPS does not point to HELP UPDATES (UX-130 Q1)")
+	}
+	if len(HelpUpdates) > 153 || len(HelpText) > 153 {
 		t.Fatalf("HELP UPDATES is %d characters", len(HelpUpdates))
 	}
 }

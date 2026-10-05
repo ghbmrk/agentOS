@@ -92,7 +92,7 @@ func TestPinnedNoticeSaysHowToTakeUpdates(t *testing.T) {
 	r.settings.Updates.Channel = loops.ChannelPinned
 	r.release(2, func(m *update.Manifest) { m.Security = true })
 	r.tick()
-	if d := r.digest(); !strings.Contains(d, "Reply UPDATES STABLE") {
+	if d := r.digest(); !strings.Contains(d, "Reply UPDATES STABLE to take it and later tested releases") {
 		t.Fatalf("digest: %q", d)
 	}
 	if st := r.l.Status(); !strings.Contains(st.Line, "Reply UPDATES STABLE") {
