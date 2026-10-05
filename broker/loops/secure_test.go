@@ -1,0 +1,402 @@
+package loops
+
+// REQ: LOOP-8, LOOP-9, LOOP-10
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/ghbmrk/agentos/broker/change"
+	"github.com/ghbmrk/agentos/broker/journal"
+)
+
+// box is a fake box for the passive checks.
+type box struct {
+	signed   map[string]string
+	measured map[string]string
+	pkgs     []Package
+	snap     Snapshot
+	adopted  map[string]string
+	live     map[string]string
+	expiries []Expiry
+}
+
+func (b *box) Box() Box {
+	return Box{
+		Signed: func() (map[string]string, error) { return b.signed, nil },
+		Artifacts: []Artifact{
+			{Name: "guest-image/openclaw", Contain: &Target{Kind: "executor", Name: "openclaw"}},
+			{Name: "dep/libfoo"},
+		},
+		Measure: func(n string) (string, error) {
+			d, ok := b.measured[n]
+			if !ok {
+				return "", errors.New("gone")
+			}
+			return d, nil
+		},
+		Installed:  func() ([]Package, error) { return b.pkgs, nil },
+		Advisories: func() (Snapshot, error) { return b.snap, nil },
+		Adopted:    func() (map[string]string, error) { return b.adopted, nil },
+		Live:       func() (map[string]string, error) { return b.live, nil },
+		Expiries:   func() ([]Expiry, error) { return b.expiries, nil },
+	}
+}
+
+var t0 = time.Date(2026, 10, 5, 3, 0, 0, 0, time.UTC)
+
+func cleanBox() *box {
+	return &box{
+		signed:   map[string]string{"guest-image/openclaw": "aa", "dep/libfoo": "bb"},
+		measured: map[string]string{"guest-image/openclaw": "aa", "dep/libfoo": "bb"},
+		pkgs:     []Package{{Name: "openssl", Version: "3.0.15", Contain: &Target{Kind: "executor", Name: "egress"}}},
+		snap: Snapshot{Fetched: t0.Add(-time.Hour), Advisories: []Advisory{
+			{ID: "ADV-1", Package: "openssl", Fixed: "3.0.14", Severity: "high"},
+		}},
+		adopted:  map[string]string{"config/quiet.json": "c1"},
+		live:     map[string]string{"config/quiet.json": "c1"},
+		expiries: []Expiry{{Name: "mail-oauth", NotAfter: t0.Add(90 * 24 * time.Hour)}},
+	}
+}
+
+// fixtureEval answers Loop 2 fixtures from the facts file of the tree
+// under test, and other probes with the tree file they name.
+type fixtureEval struct{}
+
+func (fixtureEval) Run(_ context.Context, t change.Tree, p change.Probe) ([]byte, error) {
+	if strings.HasPrefix(string(p.Input), `{"check"`) {
+		var f Facts
+		if b, ok := t["config/facts.json"]; ok {
+			if err := json.Unmarshal(b, &f); err != nil {
+				return nil, err
+			}
+		}
+		return AnswerFixture(p.Input, f), nil
+	}
+	b, ok := t[string(p.Input)]
+	if !ok {
+		return nil, errors.New("no file")
+	}
+	return b, nil
+}
+
+func facts(openssl string) []byte {
+	b, _ := json.Marshal(Facts{Versions: map[string]string{"openssl": openssl}})
+	return b
+}
+
+func newPipe(t *testing.T) *change.Pipeline {
+	t.Helper()
+	p, err := change.New(change.Config{
+		Store:     &change.MemStore{},
+		Evaluator: fixtureEval{},
+		Initial:   change.Tree{"config/facts.json": facts("3.0.13"), "skills/greet": []byte("hi")},
+		Now:       func() time.Time { return t0 },
+		Rand:      fixed{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng, err := journal.Open(&journal.MemStore{}, &policy{p: p, approve: true}, map[string]journal.Executor{change.Executor: p},
+		func(s string) string { return s }, journal.WithClock(func() time.Time { return t0 }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Attach(eng)
+	return p
+}
+
+type contain struct {
+	mu   sync.Mutex
+	got  []Target
+	fail bool
+}
+
+func (c *contain) Contain(_ context.Context, t Target, _ string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.fail {
+		return errors.New("gate refused")
+	}
+	c.got = append(c.got, t)
+	return nil
+}
+
+type fixer struct {
+	cand  change.Candidate
+	calls int
+}
+
+func (f *fixer) Fix(context.Context, Finding) (change.Candidate, error) {
+	f.calls++
+	c := f.cand
+	c.Origin, c.Public = "fixer-claims-this", true // must be overwritten
+	return c, nil
+}
+
+type guardRig struct {
+	b     *box
+	p     *change.Pipeline
+	c     *contain
+	fx    *fixer
+	store *change.MemStore
+	now   time.Time
+	texts []string
+	g     *Guard
+}
+
+func newGuardRig(t *testing.T, b *box) *guardRig {
+	t.Helper()
+	r := &guardRig{b: b, p: newPipe(t), c: &contain{}, store: &change.MemStore{}, now: t0}
+	r.reopen(t)
+	return r
+}
+
+func (r *guardRig) reopen(t *testing.T) {
+	t.Helper()
+	cfg := GuardConfig{Box: r.b.Box(), Pipeline: r.p, Store: r.store, Contain: r.c,
+		Notify: func(s string) { r.texts = append(r.texts, s) }, Now: func() time.Time { return r.now }}
+	if r.fx != nil {
+		cfg.Fixer = r.fx
+	}
+	g, err := NewGuard(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.g = g
+}
+
+func (r *guardRig) pass(t *testing.T) int {
+	t.Helper()
+	n, err := r.g.Pass(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+func checks(fs []Record) map[Check]int {
+	out := map[Check]int{}
+	for _, f := range fs {
+		out[f.Finding.Check]++
+	}
+	return out
+}
+
+// LOOP-8: a clean box has no findings; each passive check finds its own
+// kind of problem, the advisory check runs offline on the last snapshot,
+// and an old snapshot is never reported as current.
+func TestPassiveChecks(t *testing.T) {
+	r := newGuardRig(t, cleanBox())
+	if n := r.pass(t); n != 0 {
+		t.Fatalf("clean box: %d findings: %+v", n, r.g.Evidence())
+	}
+	if d := r.g.Digest(); len(d) != 0 {
+		t.Fatalf("clean digest: %q", d)
+	}
+
+	b := cleanBox()
+	b.measured["guest-image/openclaw"] = "tampered" // hash mismatch
+	delete(b.measured, "dep/libfoo")                // cannot be measured: fail closed
+	b.pkgs[0].Version = "3.0.9"                     // below the fixed version
+	b.snap.Fetched = t0.Add(-30 * 24 * time.Hour)   // offline for a month
+	b.live["config/quiet.json"] = "edited"          // drift
+	b.live["config/extra.json"] = "x"               // not adopted
+	b.expiries = append(b.expiries,
+		Expiry{Name: "cal-cert", NotAfter: t0.Add(3 * 24 * time.Hour)}, // soon
+		Expiry{Name: "old-token", NotAfter: t0.Add(-time.Hour)})        // expired
+	r = newGuardRig(t, b)
+	if n := r.pass(t); n != 7 {
+		t.Fatalf("findings = %d, want 7: %+v", n, r.g.Evidence())
+	}
+	got := checks(r.g.Evidence())
+	want := map[Check]int{CheckHash: 2, CheckAdvisory: 1, CheckDrift: 2, CheckExpiry: 2}
+	for c, n := range want {
+		if got[c] != n {
+			t.Errorf("%s: %d findings, want %d", c, got[c], n)
+		}
+	}
+	d := strings.Join(r.g.Digest(), "\n")
+	if !strings.Contains(d, "last fetched 30 days ago") || !strings.Contains(d, "not current") {
+		t.Errorf("stale snapshot not reported: %s", d)
+	}
+
+	// Version comparison, including unparseable versions (fail closed).
+	for _, c := range []struct {
+		v, fixed string
+		below    bool
+	}{{"1.2.3", "1.2.4", true}, {"1.10", "1.9", false}, {"2", "2.0.0", false}, {"1.2", "1.2.1", true}, {"1.2-rc1", "1.2", true}} {
+		if versionBelow(c.v, c.fixed) != c.below {
+			t.Errorf("versionBelow(%s, %s) != %v", c.v, c.fixed, c.below)
+		}
+	}
+
+	// A check with nothing wired is named as not run, never as passed.
+	g, _ := NewGuard(GuardConfig{Pipeline: newPipe(t), Store: &change.MemStore{}, Now: func() time.Time { return t0 }})
+	if _, err := g.Pass(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if d := strings.Join(g.Digest(), " "); !strings.Contains(d, "not run: hash, advisory, drift, expiry") {
+		t.Errorf("unwired checks: %s", d)
+	}
+}
+
+// LOOP-9: a finding is contained, its evidence preserved, a regression
+// fixture added to the security suite, a fix proposed through the change
+// pipeline, and the owner told by severity. It is handled once while it
+// persists, and again if it comes back.
+func TestFindingHandling(t *testing.T) {
+	b := cleanBox()
+	b.pkgs[0].Version = "3.0.13"
+	b.expiries = []Expiry{{Name: "cal-cert", NotAfter: t0.Add(3 * 24 * time.Hour)}}
+	r := newGuardRig(t, b)
+	r.fx = &fixer{cand: change.Candidate{Files: change.Tree{"config/facts.json": facts("3.0.14")}}}
+	r.reopen(t)
+	if n := r.pass(t); n != 2 {
+		t.Fatalf("findings = %d, want 2", n)
+	}
+	if len(r.c.got) != 1 || r.c.got[0] != (Target{Kind: "executor", Name: "egress"}) {
+		t.Fatalf("contained %+v", r.c.got)
+	}
+	ev := r.g.Evidence()
+	var adv Record
+	for _, e := range ev {
+		if e.Finding.Check == CheckAdvisory {
+			adv = e
+		}
+		if e.Digest != digestOf(e.Finding) {
+			t.Errorf("evidence digest does not match its finding")
+		}
+	}
+	if adv.Contained != "paused" || adv.Fixture == "" {
+		t.Fatalf("advisory record %+v", adv)
+	}
+	// The fix went through the pipeline and passed the new fixture; it is
+	// a config change, so it adopts only on the owner's approval (given here).
+	if r.fx.calls != 1 || adv.Fix != string(change.StateAdopted) {
+		t.Fatalf("fix calls %d, state %q (%s)", r.fx.calls, adv.Fix, adv.FixReason)
+	}
+	// Only the High finding is texted; the Low one is in the digest.
+	if len(r.texts) != 1 || !strings.Contains(r.texts[0], "known vulnerability: openssl") || !strings.Contains(r.texts[0], "Paused executor egress") {
+		t.Fatalf("texts %q", r.texts)
+	}
+	if d := strings.Join(r.g.Digest(), "\n"); !strings.Contains(d, "cal-cert") {
+		t.Errorf("low finding not in digest: %s", d)
+	}
+
+	// Still there on the next pass, and after a restart: handled once.
+	r.now = r.now.Add(7 * time.Hour)
+	r.reopen(t)
+	if n := r.pass(t); n != 0 || len(r.c.got) != 1 || len(r.texts) != 1 || r.fx.calls != 1 {
+		t.Fatalf("re-handled: n=%d contained=%d texts=%d fixes=%d", n, len(r.c.got), len(r.texts), r.fx.calls)
+	}
+	// Fixed, then back: handled again, and the evidence keeps both.
+	b.pkgs[0].Version = "3.0.14"
+	r.pass(t)
+	b.pkgs[0].Version = "3.0.13"
+	r.fx.cand.Files = change.Tree{"config/facts.json": facts("3.0.15")}
+	if n := r.pass(t); n != 1 || len(r.c.got) != 2 {
+		t.Fatalf("reappearance: n=%d contained=%d", n, len(r.c.got))
+	}
+	if got := checks(r.g.Evidence())[CheckAdvisory]; got != 2 {
+		t.Fatalf("advisory evidence records = %d, want 2", got)
+	}
+
+	// Containment that fails is recorded and said, never silent.
+	b2 := cleanBox()
+	b2.measured["guest-image/openclaw"] = "tampered"
+	r2 := newGuardRig(t, b2)
+	r2.c.fail = true
+	if _, err := r2.g.Pass(context.Background()); err == nil {
+		t.Fatal("failed containment returned no error")
+	}
+	if len(r2.texts) != 1 || !strings.Contains(r2.texts[0], "Could not pause it") {
+		t.Fatalf("texts %q", r2.texts)
+	}
+}
+
+// LOOP-10: a fix that disables a check, widens authority, or fails a
+// security fixture fails qualification, and Loop 2 only adds fixtures.
+func TestFixesCannotWeaken(t *testing.T) {
+	b := cleanBox()
+	b.pkgs[0].Version = "3.0.13"
+	for _, c := range []struct {
+		name  string
+		files change.Tree
+		why   string
+	}{
+		{"disables a check", change.Tree{"checks/advisory.json": []byte(`{"off":true}`)}, "LOOP-10"},
+		{"widens authority", change.Tree{"grants/mail.json": []byte(`{"send":"any"}`)}, "LOOP-10"},
+		{"edits the suite", change.Tree{"security/loop2.json": []byte(`[]`)}, "CHG-2"},
+		{"fails the new fixture", change.Tree{"config/facts.json": facts("3.0.12")}, "security suite"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := newGuardRig(t, b)
+			r.fx = &fixer{cand: change.Candidate{Files: c.files}}
+			r.reopen(t)
+			r.pass(t)
+			var adv Record
+			for _, e := range r.g.Evidence() {
+				if e.Finding.Check == CheckAdvisory {
+					adv = e
+				}
+			}
+			if adv.Fix != string(change.StateRejected) {
+				t.Fatalf("fix state %q, want rejected", adv.Fix)
+			}
+			if !strings.Contains(adv.FixReason, c.why) {
+				t.Fatalf("reason %q, want %q", adv.FixReason, c.why)
+			}
+		})
+	}
+
+	// The fixture outlives the fix: a later candidate that brings the
+	// vulnerable version back is rejected by the pipeline itself.
+	r := newGuardRig(t, b)
+	r.pass(t)
+	rep, err := r.p.Propose(context.Background(), change.Candidate{Source: change.Local, Files: change.Tree{"config/facts.json": facts("3.0.1")}})
+	if err != nil || rep.State != change.StateRejected || rep.SecurityPassed == rep.Security {
+		t.Fatalf("regressing candidate: %+v %v", rep, err)
+	}
+	// A duplicate fixture (the same finding after restart with a lost
+	// state) is not an error: the suite already has it.
+	r.store = &change.MemStore{}
+	r.reopen(t)
+	if n := r.pass(t); n != 1 {
+		t.Fatalf("n=%d", n)
+	}
+}
+
+// LOOP-3 with Loop 2: the scheduler runs the passive pass as spare work,
+// measures its value as new findings, and Loop 2 sleeps until due.
+func TestGuardInScheduler(t *testing.T) {
+	b := cleanBox()
+	b.pkgs[0].Version = "3.0.13"
+	gr := newGuardRig(t, b)
+	r := newRig(t, gr.g)
+	gr.now = r.clk.now()
+	if job, ok := gr.g.Next(context.Background(), false); !ok || job.UsesModel {
+		t.Fatalf("first pass not offered without model budget: %v %+v", ok, job)
+	}
+	if ran, _ := r.s.Tick(context.Background()); !ran {
+		t.Fatal("pass did not run")
+	}
+	if len(gr.g.Evidence()) != 1 {
+		t.Fatalf("evidence %+v", gr.g.Evidence())
+	}
+	if _, ok := gr.g.Next(context.Background(), true); ok {
+		t.Fatal("offered again before due")
+	}
+	gr.g.Trigger()
+	if _, ok := gr.g.Next(context.Background(), true); !ok {
+		t.Fatal("Trigger did not make a pass due")
+	}
+	if sh := r.s.Share()[Secure]; sh != 1 {
+		t.Fatalf("share %v", sh)
+	}
+}
