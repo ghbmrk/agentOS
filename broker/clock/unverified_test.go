@@ -13,11 +13,27 @@ import (
 
 // rtcRig is a box whose hardware clock reads rtc (as the kernel reads it,
 // as if UTC): a Windows PC keeps it in local time.
-func rtcGuard(t *testing.T, r *rig, path string, rtc *time.Time) *Guard {
+// testHost is a synthetic firmware system UUID.
+const testHost = "4a1b2c3d-0000-4000-8000-0000000c10c6"
+
+func rtcGuard(t *testing.T, r *rig, path string, rtc *time.Time, edit ...func(*Config)) *Guard {
 	return r.guard(t, func(c *Config) {
 		c.StatePath = path
 		c.BootID = func() string { r.mu.Lock(); defer r.mu.Unlock(); return r.boot }
 		c.RTC = func() (time.Time, error) { r.mu.Lock(); defer r.mu.Unlock(); return *rtc, nil }
+		c.HostID = func() string { return testHost }
+		// The rig's sync is NTS-authenticated unless a test says otherwise.
+		c.Sync = func() (SyncKind, error) {
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			if !r.synced || r.syncErr != nil {
+				return NotSynced, r.syncErr
+			}
+			return SyncedNTS, nil
+		}
+		for _, e := range edit {
+			e(c)
+		}
 	})
 }
 
@@ -229,6 +245,67 @@ func TestHW8FloorAheadOfVerifiedTimeIsReplaced(t *testing.T) {
 	}
 }
 
+// L3 MUST on #177 (security T3): a plain NTP sync, which an on-path
+// attacker can forge, verifies only a box clock at or after the floor, like
+// carrier time; below it the clock stays unverified and bounded by the
+// floor for the rest of the boot. An NTS sync verifies either way.
+func TestHW8PlainSyncBelowTheFloorDoesNotVerify(t *testing.T) {
+	for _, kind := range []SyncKind{SyncedPlain, SyncedNTS} {
+		path := filepath.Join(t.TempDir(), "clock.json")
+		r := newRig()
+		r.carrier = time.Time{}
+		rtc := r.wall
+		rtcGuard(t, r, path, &rtc).Check(bg)
+		floor := r.wall
+		r.reboot(floor.Add(-10 * time.Hour))
+		var logs []string
+		g := rtcGuard(t, r, path, &rtc, func(c *Config) {
+			c.Sync = func() (SyncKind, error) { return kind, nil }
+			c.Logf = func(f string, a ...any) { logs = append(logs, f) }
+		})
+		g.Check(bg)
+		g.Check(bg)
+		s := g.Status()
+		latest, _ := g.Latest(bg)
+		if kind == SyncedPlain {
+			if s.Verified || latest.Before(floor) || len(logs) != 1 {
+				t.Errorf("plain below floor: verified %v, latest %v, logs %d", s.Verified, latest, len(logs))
+			}
+			// Within tolerance of the floor, plain time verifies.
+			r.reboot(floor.Add(-DefaultTolerance / 2))
+			g = rtcGuard(t, r, path, &rtc, func(c *Config) {
+				c.Sync = func() (SyncKind, error) { return kind, nil }
+			})
+			g.Check(bg)
+			if !g.Status().Verified {
+				t.Error("plain sync at the floor not verified")
+			}
+		} else if !s.Verified || !latest.Before(floor) {
+			t.Errorf("NTS below floor: verified %v, latest %v", s.Verified, latest)
+		}
+	}
+}
+
+// L3 MUST on #177: a step held within a boot neither verifies nor moves
+// the floor, even with a sync.
+func TestHW8HeldStepDoesNotAdvanceTheFloor(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "clock.json")
+	r := newRig()
+	r.carrier = time.Time{}
+	rtc := r.wall
+	g := rtcGuard(t, r, path, &rtc)
+	g.Check(bg)
+	floor := readSaved(t, path).Floor
+	r.step(10 * 24 * time.Hour)
+	g.Check(bg)
+	if s := g.Status(); s.State != Held {
+		t.Fatalf("not held: %+v", s)
+	}
+	if got := readSaved(t, path).Floor; !got.Equal(floor) {
+		t.Fatalf("held step moved the floor to %v from %v", got, floor)
+	}
+}
+
 // Potency C1, security T7: the offset between the hardware clock and UTC
 // is learned at a verified NTP sync, rounded to 15 minutes, only within
 // ±14 hours, and kept; BootEstimate turns a later boot's RTC reading into
@@ -245,9 +322,42 @@ func TestHW8LearnsTheRTCOffset(t *testing.T) {
 		t.Fatalf("offset %v %v", v.HaveOffset, v.Offset)
 	}
 	later := time.Date(2026, 10, 9, 20, 0, 0, 0, time.UTC)
-	est, ok := BootEstimate(path, later)
+	est, ok := BootEstimate(path, later, testHost)
 	if !ok || !est.Equal(later.Add(-2*time.Hour)) {
 		t.Fatalf("estimate %v %v", est, ok)
+	}
+	// L3 on #177: the offset belongs to the PC it was learned on; on
+	// another PC, or one with no or a placeholder UUID, there is none. The
+	// UUID itself is not kept.
+	for _, other := range []string{"4a1b2c3d-0000-4000-8000-0000000c10c7", "", "00000000-0000-0000-0000-000000000000",
+		"FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF", "not-a-uuid"} {
+		if _, ok := BootEstimate(path, later, other); ok {
+			t.Errorf("estimate on host %q", other)
+		}
+	}
+	if _, ok := BootEstimate(path, later, strings.ToUpper(testHost)); !ok {
+		t.Error("upper-case UUID not the same PC")
+	}
+	if b, _ := os.ReadFile(path); strings.Contains(string(b), "0000000c10c6") {
+		t.Error("state file keeps the system UUID")
+	}
+
+	// A plain NTP sync, which can be forged on path, teaches no offset;
+	// nor does a PC with no UUID.
+	for name, edit := range map[string]func(*Config){
+		"plain":     func(c *Config) { c.Sync = func() (SyncKind, error) { return SyncedPlain, nil } },
+		"no host":   func(c *Config) { c.HostID = func() string { return "" } },
+		"zero UUID": func(c *Config) { c.HostID = func() string { return "00000000-0000-0000-0000-000000000000" } },
+		"F UUID":    func(c *Config) { c.HostID = func() string { return "ffffffff-ffff-ffff-ffff-ffffffffffff" } },
+	} {
+		p := filepath.Join(t.TempDir(), "clock.json")
+		rp := newRig()
+		rtcp := rp.wall.Add(2 * time.Hour)
+		rp.carrier = time.Time{}
+		rtcGuard(t, rp, p, &rtcp, edit).Check(bg)
+		if readSaved(t, p).HaveOffset {
+			t.Errorf("%s taught an offset", name)
+		}
 	}
 
 	// Carrier-only verification does not teach an offset; an offset past
@@ -269,15 +379,15 @@ func TestHW8LearnsTheRTCOffset(t *testing.T) {
 	}
 
 	// No offset known, or a file that cannot be read: no estimate.
-	if _, ok := BootEstimate(path2, later); ok {
+	if _, ok := BootEstimate(path2, later, testHost); ok {
 		t.Fatal("estimate without an offset")
 	}
-	if _, ok := BootEstimate(filepath.Join(t.TempDir(), "none"), later); ok {
+	if _, ok := BootEstimate(filepath.Join(t.TempDir(), "none"), later, testHost); ok {
 		t.Fatal("estimate without a file")
 	}
 	bad := filepath.Join(t.TempDir(), "bad")
 	os.WriteFile(bad, []byte(`{"have_offset":true,"offset":3600000000001}`), 0o600)
-	if _, ok := BootEstimate(bad, later); ok {
+	if _, ok := BootEstimate(bad, later, testHost); ok {
 		t.Fatal("estimate from an offset not on a 15-minute step")
 	}
 }

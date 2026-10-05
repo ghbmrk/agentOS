@@ -31,11 +31,15 @@ package clock
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -248,14 +252,19 @@ type Config struct {
 	// Sync is required.
 	Synced func() (bool, error)
 	// Sync, when set, is used instead of Synced and says how the sync was
-	// verified (Sync: chronyd). Only an NTS sync may lower the saved floor
-	// (security R1 on #177); a sync through Synced counts as plain.
+	// verified (Sync: chronyd). Only an NTS sync verifies a box clock below
+	// the saved floor, lowers the floor, or teaches the hardware-clock
+	// offset (security R1, L3 on #177); a sync through Synced is plain.
 	Sync func() (SyncKind, error)
 	// RTC reads the host's hardware clock as the kernel does, as if UTC
-	// (RTC, from sysfs, on Linux). At a verified sync the guard learns its
+	// (RTC, from sysfs, on Linux). At an NTS-verified sync the guard learns its
 	// offset from UTC for BootEstimate (potency C1, security T7). Nil
 	// learns none. It is never written.
 	RTC func() (time.Time, error)
+	// HostID names the PC the box runs on (HostID: the firmware's system
+	// UUID). The offset is learned only with one and used only on the same
+	// PC, since the drive moves between PCs (L3 on #177). Nil learns none.
+	HostID func() string
 	// Carrier reads carrier network time from the modem; nil without a
 	// modem. Any error counts as no carrier time, never as a disagreement.
 	Carrier func(context.Context) (time.Time, error)
@@ -333,11 +342,12 @@ type Guard struct {
 	// offset: the hardware clock minus UTC at the last verified sync.
 	verified bool
 	floor    time.Time
-	// floorKeptLogged: a floor ahead of unauthenticated time was logged
-	// this boot.
-	floorKeptLogged bool
-	offset          time.Duration
-	haveOffset      bool
+	// belowFloorLogged: an unauthenticated sync below the floor was
+	// logged this boot.
+	belowFloorLogged bool
+	offset           time.Duration
+	haveOffset       bool
+	offsetHost       string
 
 	running atomic.Int32 // Run loops live
 	fmu     sync.Mutex
@@ -559,29 +569,31 @@ func (g *Guard) check(ctx context.Context) Status {
 			s.Since = prev.Since
 		}
 	}
-	// Verified time: a verified NTP sync, or carrier time agreeing with a
-	// box clock at or after the floor (carrier time alone is only a
-	// tie-break, security T4); never while restricted or held.
-	carrierOK := have && (s.State == CarrierOnly || s.State == Agreed) &&
-		(g.floor.IsZero() || !now.Before(g.floor.Add(-g.cfg.Tolerance)))
-	verifiedNow := (synced || carrierOK) && s.State != Disagree && s.State != Held
+	// Verified time: an NTS-authenticated sync; or a plain NTP sync, or
+	// carrier time agreeing (carrier time alone is only a tie-break,
+	// security T4), with a box clock at or after the floor, since either
+	// can be forged on path (security R1, L3 on #177); never while
+	// restricted or held.
+	aboveFloor := g.floor.IsZero() || !now.Before(g.floor.Add(-g.cfg.Tolerance))
+	carrierOK := have && (s.State == CarrierOnly || s.State == Agreed) && aboveFloor
+	syncOK := nts || synced && aboveFloor
+	if synced && !syncOK && !g.belowFloorLogged {
+		g.cfg.Logf("clock: unauthenticated time %v is behind the saved floor %v; not verified", now, g.floor)
+		g.belowFloorLogged = true
+	}
+	verifiedNow := (syncOK || carrierOK) && s.State != Disagree && s.State != Held
 	if verifiedNow {
 		g.verified = true
 		switch {
 		case now.After(g.floor):
 			g.floor = now
-		case g.floor.Sub(now) > g.cfg.Tolerance && nts:
-			// Authenticated time is the authority: a floor ahead of it is
-			// a corrupt or tampered file, never true time.
+		case g.floor.Sub(now) > g.cfg.Tolerance:
+			// Only authenticated time gets here below the floor: a floor
+			// ahead of it is a corrupt or tampered file, never true time.
 			g.cfg.Logf("clock: saved floor %v is ahead of verified time %v; replaced", g.floor, now)
 			g.floor = now
-		case g.floor.Sub(now) > g.cfg.Tolerance && !g.floorKeptLogged:
-			// Plain NTP or carrier time can be forged on path: it never
-			// rolls the floor back (security R1 on #177).
-			g.cfg.Logf("clock: saved floor %v is ahead of unauthenticated time %v; kept", g.floor, now)
-			g.floorKeptLogged = true
 		}
-		if synced {
+		if nts {
 			g.learnOffsetLocked(now)
 		}
 	}
@@ -810,6 +822,7 @@ type saved struct {
 	Floor        time.Time     `json:"floor"`
 	Offset       time.Duration `json:"offset"`
 	HaveOffset   bool          `json:"have_offset"`
+	OffsetHost   string        `json:"offset_host,omitempty"` // HostKey of the PC it was learned on
 }
 
 func (g *Guard) load() {
@@ -837,7 +850,7 @@ func (g *Guard) load() {
 	sameBoot := v.Boot != "" && v.Boot == g.cfg.BootID()
 	g.floor = v.Floor
 	if validOffset(v.Offset) {
-		g.offset, g.haveOffset = v.Offset, v.HaveOffset
+		g.offset, g.haveOffset, g.offsetHost = v.Offset, v.HaveOffset, v.OffsetHost
 	}
 	g.verified = v.VerifiedBoot != "" && v.VerifiedBoot == g.cfg.BootID()
 	if v.Anchored && sameBoot {
@@ -877,7 +890,7 @@ func (g *Guard) saveLocked() {
 		Alerts: g.alerts, SavedMono: g.cfg.Elapsed(),
 	}
 	v.SavedWall = g.latestLocked(g.cfg.Now(), v.SavedMono)
-	v.Floor, v.Offset, v.HaveOffset = g.floor, g.offset, g.haveOffset
+	v.Floor, v.Offset, v.HaveOffset, v.OffsetHost = g.floor, g.offset, g.haveOffset, g.offsetHost
 	if g.verified {
 		v.VerifiedBoot = g.cfg.BootID()
 	}
@@ -935,8 +948,12 @@ func validOffset(d time.Duration) bool {
 // now, rounded to 15 minutes (time zones are whole quarter hours), if it
 // is within ±14 hours (potency C1, security T7).
 func (g *Guard) learnOffsetLocked(now time.Time) {
-	if g.cfg.RTC == nil {
+	if g.cfg.RTC == nil || g.cfg.HostID == nil {
 		return
+	}
+	host := HostKey(g.cfg.HostID())
+	if host == "" {
+		return // the offset belongs to one PC's clock; with no PC named, none
 	}
 	rtc, err := g.cfg.RTC()
 	if err != nil || rtc.IsZero() {
@@ -947,8 +964,22 @@ func (g *Guard) learnOffsetLocked(now time.Time) {
 		g.cfg.Logf("clock: hardware clock offset %v outside ±14h; not learned", rtc.Sub(now))
 		return
 	}
-	g.offset, g.haveOffset = d, true
+	g.offset, g.haveOffset, g.offsetHost = d, true, host
 }
+
+// HostKey names the PC an offset was learned on without keeping its
+// identifier: a hash of the firmware's system UUID. An absent or
+// placeholder UUID names no PC.
+func HostKey(id string) string {
+	id = strings.ToLower(strings.TrimSpace(id))
+	if !validHostID.MatchString(id) || strings.Trim(id, "0-") == "" || strings.Trim(id, "f-") == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte("agentos clock host\x00" + id))
+	return hex.EncodeToString(sum[:16])
+}
+
+var validHostID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 func (g *Guard) startLocked() time.Time { return g.cfg.Now().Add(-g.cfg.Elapsed()) }
 
@@ -957,7 +988,7 @@ func (g *Guard) startLocked() time.Time { return g.cfg.Now().Add(-g.cfg.Elapsed(
 // verified sync, from the guard's state file. ok is false with no offset
 // learned or no readable file; then the clock is left as the kernel set it.
 // The estimate stays unverified: the guard's floor still bounds it.
-func BootEstimate(statePath string, rtc time.Time) (time.Time, bool) {
+func BootEstimate(statePath string, rtc time.Time, hostID string) (time.Time, bool) {
 	b, err := os.ReadFile(statePath)
 	if err != nil {
 		return time.Time{}, false
@@ -965,6 +996,9 @@ func BootEstimate(statePath string, rtc time.Time) (time.Time, bool) {
 	var v saved
 	if json.Unmarshal(b, &v) != nil || !v.HaveOffset || !validOffset(v.Offset) {
 		return time.Time{}, false
+	}
+	if h := HostKey(hostID); h == "" || h != v.OffsetHost {
+		return time.Time{}, false // learned on another PC, or this one unnamed (L3 on #177)
 	}
 	return rtc.Add(-v.Offset), true
 }

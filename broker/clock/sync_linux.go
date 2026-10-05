@@ -23,6 +23,16 @@ func RTC() (time.Time, error) {
 	return time.Unix(n, 0).UTC(), nil
 }
 
+// HostID is the firmware's system UUID (SMBIOS), which names the PC the
+// box is booted on; root-readable only. It is hashed before it is kept.
+func HostID() string {
+	b, err := os.ReadFile("/sys/class/dmi/id/product_uuid")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
 // bootElapsed is CLOCK_BOOTTIME: monotonic, counting suspend, and the same
 // for every process of one boot, so an anchor survives a broker restart.
 func bootElapsed() time.Duration {

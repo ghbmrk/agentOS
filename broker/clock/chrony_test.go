@@ -39,6 +39,9 @@ const (
 	srcThree      = "^,*,192.0.2.1,2,6,377,12,0,0,0\n^,+,192.0.2.2,2,6,377,12,0,0,0\n^,+,192.0.2.3,2,6,377,12,0,0,0\n^,-,192.0.2.4,2,6,377,12,0,0,0\n"
 	srcTwo        = "^,*,192.0.2.1,2,6,377,12,0,0,0\n^,+,192.0.2.2,2,6,377,12,0,0,0\n^,-,192.0.2.3,2,6,377,12,0,0,0\n"
 	authNTS       = "192.0.2.1,NTS,1,15,256,33m,0,0,8,100\n198.51.100.7,NTS,0,0,0,-,0,0,0,0\n"
+	trackLeapOff  = "C0000201,192.0.2.1,2,1791230000.123456789,-0.000001,0.000002,0.000003,-1.234,0.001,0.010,0.012,0.001,64.1,Not synchronised\n"
+	srcRefclock   = "#,*,PPS0,0,4,377,8,0,0,0\n=,+,192.0.2.9,2,6,377,12,0,0,0\n#,+,GPS,0,4,377,8,0,0,0\n^,+,192.0.2.2,2,6,377,12,0,0,0\n"
+	authOtherNTS  = "192.0.2.1,-,0,0,0,-,0,0,0,0\n192.0.2.2,NTS,1,15,256,33m,0,0,8,100\n"
 	authNTSKey0   = "192.0.2.1,NTS,0,15,256,33m,0,0,8,100\n"
 	authNone      = "192.0.2.1,-,0,0,0,-,0,0,0,0\n"
 )
@@ -62,6 +65,10 @@ func TestHW8SyncedFromChrony(t *testing.T) {
 		{"three plain NTP agree", trackOK, srcThree, authNone, nil, SyncedPlain},
 		{"three plain NTP, authdata refused", trackOK, srcThree, "", errors.New("501 Not authorised"), SyncedPlain},
 		{"two plain NTP", trackOK, srcTwo, authNone, nil, NotSynced},
+		{"plain selected, another source NTS", trackOK, srcThree, authOtherNTS, nil, SyncedPlain},
+		{"one plain selected, another NTS", trackOK, srcTwo, authOtherNTS, nil, NotSynced},
+		{"only non-NTP lines selected or combined", trackOK, srcRefclock, authNTS, nil, NotSynced},
+		{"leap status not synchronised", trackLeapOff, srcThree, authNTS, nil, NotSynced},
 		{"one plain NTP", trackOK, srcNTS, authNone, nil, NotSynced},
 		{"NTS listed but authdata refused", trackOK, srcNTS, "", errors.New("501 Not authorised"), NotSynced},
 		{"not synchronised", trackUnsynced, srcThree, authNTS, nil, NotSynced},
@@ -117,7 +124,7 @@ func TestHW8ChronyConfig(t *testing.T) {
 	}
 	defer f.Close()
 	var servers []string
-	keys := map[string]bool{}
+	keys, values := map[string]bool{}, map[string]string{}
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		l := strings.TrimSpace(sc.Text())
@@ -126,6 +133,7 @@ func TestHW8ChronyConfig(t *testing.T) {
 		}
 		fs := strings.Fields(l)
 		keys[fs[0]] = true
+		values[fs[0]] = strings.Join(fs[1:], " ")
 		if fs[0] == "server" || fs[0] == "pool" {
 			servers = append(servers, l)
 		}
@@ -143,12 +151,23 @@ func TestHW8ChronyConfig(t *testing.T) {
 		if !strings.HasPrefix(servers[i], w+" ") {
 			t.Errorf("source %d = %q, want %q first", i, servers[i], w)
 		}
-		if nts := strings.Contains(servers[i], " nts"); nts != (i < 3) {
+		nts := false
+		for _, opt := range strings.Fields(servers[i])[2:] {
+			nts = nts || opt == "nts"
+		}
+		if nts != (i < 3) {
 			t.Errorf("source %q: nts %v", servers[i], nts)
 		}
 	}
-	if !keys["makestep"] || !keys["ntsdumpdir"] {
-		t.Error("makestep or ntsdumpdir missing")
+	// No NTP server or UDP command port (chronyc uses the root-only unix
+	// socket); a start-up step only; slewing no faster than 500 ppm (about
+	// 43 s a day, K9); unauthenticated sources only when no NTS one is
+	// selectable (L3 on #177).
+	for k, v := range map[string]string{"port": "0", "cmdport": "0", "makestep": "1 3", "maxslewrate": "500",
+		"authselectmode": "prefer", "ntsdumpdir": "/var/lib/chrony"} {
+		if got := values[k]; got != v {
+			t.Errorf("%s %q, want %q", k, got, v)
+		}
 	}
 }
 
@@ -171,6 +190,16 @@ func TestOnlyChronycIsExecuted(t *testing.T) {
 		f, err := parser.ParseFile(fs, path, nil, 0)
 		if err != nil {
 			t.Fatal(err)
+		}
+		// Launchers are found by name, so the packages that have them may
+		// not be imported under another (L3 on #177).
+		for _, im := range f.Imports {
+			switch strings.Trim(im.Path.Value, `"`) {
+			case "os/exec", "os", "syscall", "golang.org/x/sys/unix":
+				if im.Name != nil {
+					t.Errorf("%s imports %s as %s", path, im.Path.Value, im.Name.Name)
+				}
+			}
 		}
 		ast.Inspect(f, func(x ast.Node) bool {
 			call, ok := x.(*ast.CallExpr)
@@ -198,6 +227,9 @@ func TestOnlyChronycIsExecuted(t *testing.T) {
 	}
 	if n != 1 || chronyc != "/usr/bin/chronyc" {
 		t.Fatalf("%d process starts, chronyc %q", n, chronyc)
+	}
+	if got := strings.Join(chronycArgv([]string{"tracking"}), " "); got != "-c -n tracking" {
+		t.Errorf("chronyc %s", got)
 	}
 	var queries []string
 	run := func(_ context.Context, args ...string) ([]byte, error) {

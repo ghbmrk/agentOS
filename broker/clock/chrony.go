@@ -19,8 +19,11 @@ const chronycTimeout = 3 * time.Second
 func runChronyc(ctx context.Context, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, chronycTimeout)
 	defer cancel()
-	return exec.CommandContext(ctx, chronyc, append([]string{"-c", "-n"}, args...)...).Output()
+	return exec.CommandContext(ctx, chronyc, chronycArgv(args)...).Output()
 }
+
+// chronycArgv: CSV output (-c), no name lookups (-n), then the query.
+func chronycArgv(query []string) []string { return append([]string{"-c", "-n"}, query...) }
 
 // Sync reports how chronyd's sync is verified (HW-8; security T4, T5, and
 // R1 on #177): SyncedNTS when its selected source is NTS-authenticated,
