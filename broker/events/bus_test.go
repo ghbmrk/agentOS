@@ -5,12 +5,14 @@ package events
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/recall"
 )
@@ -38,9 +40,35 @@ func (r *recorder) count() int {
 	return len(r.got)
 }
 
-func mustOpen(t *testing.T, s recall.Store, ts []Trigger, opts ...Option) *Bus {
+var testKeyer = func() recall.Keyer {
+	k, err := recall.NewKeyer([]byte("synthetic-test-key-0123456789"))
+	if err != nil {
+		panic(err)
+	}
+	return k
+}()
+
+// stores is a log and a seen store for one bus.
+type stores struct{ log, seen recall.Store }
+
+func mem() stores { return stores{&recall.MemStore{}, &recall.MemStore{}} }
+
+func files(t *testing.T, dir string) (stores, func()) {
 	t.Helper()
-	b, err := Open(s, ts, opts...)
+	l, err := recall.OpenFile(filepath.Join(dir, "bus.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := recall.OpenFile(filepath.Join(dir, "seen.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return stores{l, s}, func() { l.Close(); s.Close() }
+}
+
+func mustOpen(t *testing.T, s stores, ts []Trigger, opts ...Option) *Bus {
+	t.Helper()
+	b, err := Open(Config{Log: s.log, Seen: s.seen, Keyer: testKeyer, Triggers: ts}, opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +88,7 @@ var ctx = context.Background()
 
 func TestEventsTriggerMatchingWork(t *testing.T) {
 	mail, all := &recorder{}, &recorder{}
-	b := mustOpen(t, &recall.MemStore{}, []Trigger{
+	b := mustOpen(t, mem(), []Trigger{
 		{Name: "invoices", Kinds: []Kind{Mail}, Match: func(e Event) bool { return strings.Contains(e.Summary, "Invoice") }, Start: mail.start},
 		{Name: "all", Start: all.start},
 	})
@@ -85,7 +113,7 @@ func TestEventsTriggerMatchingWork(t *testing.T) {
 
 func TestOnlyChangesCauseWork(t *testing.T) {
 	r := &recorder{}
-	b := mustOpen(t, &recall.MemStore{}, []Trigger{{Name: "watch", Kinds: []Kind{Web}, Start: r.start}})
+	b := mustOpen(t, mem(), []Trigger{{Name: "watch", Kinds: []Kind{Web}, Start: r.start}})
 	_, fresh := mustPublish(t, b, Event{Kind: Web, Ref: "https://example.test/p", Version: "h1"})
 	_, again := mustPublish(t, b, Event{Kind: Web, Ref: "https://example.test/p", Version: "h1"})
 	_, changed := mustPublish(t, b, Event{Kind: Web, Ref: "https://example.test/p", Version: "h2"})
@@ -99,7 +127,6 @@ func TestOnlyChangesCauseWork(t *testing.T) {
 }
 
 func TestLabels(t *testing.T) {
-	b := mustOpen(t, &recall.MemStore{}, nil)
 	cases := []struct {
 		e    Event
 		want recall.Label
@@ -107,52 +134,66 @@ func TestLabels(t *testing.T) {
 		{Event{Kind: Mail, Ref: "m", Label: recall.Public}, recall.Private},
 		{Event{Kind: File, Ref: "f", Label: recall.Public}, recall.Private},
 		{Event{Kind: Calendar, Ref: "c", Label: recall.Public}, recall.Private},
+		{Event{Kind: "contact", Ref: "k", Label: recall.Public}, recall.Private},
+		{Event{Kind: "credentialed", Ref: "cr", Label: recall.Public}, recall.Private},
+		{Event{Kind: "webb", Ref: "typo", Label: recall.Public}, recall.Private},
 		{Event{Kind: Web, Ref: "w"}, recall.Private},
 		{Event{Kind: Web, Ref: "w2", Label: recall.Public}, recall.Public},
 		{Event{Kind: Timer, Ref: "t", Label: "public?"}, recall.Private},
 	}
 	r := &recorder{}
-	b = mustOpen(t, &recall.MemStore{}, []Trigger{{Name: "r", Start: r.start}})
+	b := mustOpen(t, mem(), []Trigger{{Name: "r", Start: r.start}})
 	for _, c := range cases {
 		mustPublish(t, b, c.e)
 	}
 	b.Pump(ctx)
+	if r.count() != len(cases) {
+		t.Fatalf("deliveries: %d of %d", r.count(), len(cases))
+	}
 	for i, d := range r.got {
 		if d.Event.Label != cases[i].want {
 			t.Fatalf("%s/%s: label %q want %q", d.Event.Kind, d.Event.Ref, d.Event.Label, cases[i].want)
+		}
+	}
+	for _, k := range []Kind{"owner", "preference"} {
+		if _, _, err := b.Publish(Event{Kind: k, Ref: "x"}); !errors.Is(err, ErrReservedKind) {
+			t.Fatalf("%s: reserved kind accepted: %v", k, err)
 		}
 	}
 }
 
 func TestDurableAcrossRestartAndRetries(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "bus.jsonl")
-	st, err := recall.OpenFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	clock := WithClock(func() time.Time { return now })
 	r := &recorder{fail: 2}
 	att := NewAttention()
-	b := mustOpen(t, st, []Trigger{{Name: "w", Start: r.start}}, WithMaxAttempts(5), WithAttention(att))
+	st, done := files(t, dir)
+	b := mustOpen(t, st, []Trigger{{Name: "w", Start: r.start}}, WithMaxAttempts(5), WithAttention(att), clock)
 	id, _ := mustPublish(t, b, Event{Kind: Mail, Ref: "<a@x>", Summary: "hello"})
 	b.Pump(ctx) // fails once
-	st.Close()
+	b.Pump(ctx) // backing off: not tried
+	if r.fail != 1 {
+		t.Fatal("a failed delivery must back off before the next try")
+	}
+	done()
 
 	// Restart: the pending delivery survives with its attempt count.
-	st, _ = recall.OpenFile(path)
-	b = mustOpen(t, st, []Trigger{{Name: "w", Start: r.start}}, WithMaxAttempts(5), WithAttention(att))
+	st, done = files(t, dir)
+	b = mustOpen(t, st, []Trigger{{Name: "w", Start: r.start}}, WithMaxAttempts(5), WithAttention(att), clock)
 	if b.Pending() != 1 {
 		t.Fatalf("pending after restart: %d", b.Pending())
 	}
 	b.Pump(ctx) // fails again
+	now = now.Add(time.Hour)
 	b.Pump(ctx) // succeeds
 	if r.count() != 1 || r.got[0].Attempt != 3 || r.got[0].Event.ID != id {
 		t.Fatalf("retries: %+v", r.got)
 	}
+	done()
 	// Republishing a delivered event after restart does nothing.
-	st.Close()
-	st, _ = recall.OpenFile(path)
-	defer st.Close()
+	st, done = files(t, dir)
+	defer done()
 	b = mustOpen(t, st, []Trigger{{Name: "w", Start: r.start}})
 	if _, fresh := mustPublish(t, b, Event{Kind: Mail, Ref: "<a@x>", Summary: "hello"}); fresh {
 		t.Fatal("a delivered event must not be delivered again after restart")
@@ -161,24 +202,25 @@ func TestDurableAcrossRestartAndRetries(t *testing.T) {
 
 func TestDeadDeliveryGoesToDigest(t *testing.T) {
 	att := NewAttention()
+	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
 	bad := Trigger{Name: "flaky", Start: func(context.Context, Delivery) error { panic("boom") }}
-	b := mustOpen(t, &recall.MemStore{}, []Trigger{bad}, WithMaxAttempts(2), WithAttention(att))
+	b := mustOpen(t, mem(), []Trigger{bad}, WithMaxAttempts(2), WithAttention(att), WithClock(func() time.Time { return now }))
 	mustPublish(t, b, Event{Kind: File, Ref: "/x"})
 	b.Pump(ctx)
+	now = now.Add(time.Hour)
 	b.Pump(ctx)
 	if b.Pending() != 0 {
 		t.Fatal("a delivery past its tries must stop")
 	}
 	notes, decisions := att.TakeDigest()
-	if len(notes) != 1 || !strings.Contains(notes[0], "flaky") || len(decisions) != 0 {
+	if len(notes) != 1 || !strings.Contains(notes[0], "flaky") || !strings.Contains(notes[0], "won't try again") || len(decisions) != 0 {
 		t.Fatalf("digest: %v %v", notes, decisions)
 	}
 }
 
 func TestTimers(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "bus.jsonl")
-	st, _ := recall.OpenFile(path)
+	st, done := files(t, dir)
 	r := &recorder{}
 	trig := []Trigger{{Name: "t", Kinds: []Kind{Timer}, Start: r.start}}
 	b := mustOpen(t, st, trig)
@@ -194,32 +236,59 @@ func TestTimers(t *testing.T) {
 	if r.count() != 1 || r.got[0].Event.Label != recall.Private {
 		t.Fatalf("first firing: %+v", r.got)
 	}
-	st.Close()
+	// Enough settled events to compact the log: timer state must survive it.
+	for i := 0; i < 2*staleLimit; i++ {
+		b.Publish(Event{Kind: Timer, Ref: fmt.Sprint("other-", i), Version: "v"})
+		b.Pump(ctx)
+	}
+	done()
 	// Down for three days: one coalesced firing, for the latest due time.
-	st, _ = recall.OpenFile(path)
-	defer st.Close()
+	st, done = files(t, dir)
+	defer done()
 	b = mustOpen(t, st, trig)
 	b.AddTimer(sched)
 	b.Tick(t0.Add(3*24*time.Hour + time.Hour))
 	b.Tick(t0.Add(3*24*time.Hour + 2*time.Hour))
 	b.Pump(ctx)
-	if r.count() != 2 || !r.got[1].Event.At.Equal(t0.Add(3*24*time.Hour)) {
-		t.Fatalf("coalesced firing: %+v", r.got)
+	var daily []Delivery
+	for _, d := range r.got {
+		if d.Event.Ref == "daily-review" {
+			daily = append(daily, d)
+		}
 	}
+	if len(daily) != 2 || !daily[1].Event.At.Equal(t0.Add(3*24*time.Hour)) {
+		t.Fatalf("coalesced firing: %+v", daily)
+	}
+}
+
+// indexedBus is a recall index on a file store and a bus sharing its keyer.
+func indexedBus(t *testing.T, dir string, extra ...Trigger) (*recall.Index, *Bus, func()) {
+	t.Helper()
+	rst, err := recall.OpenFile(filepath.Join(dir, "recall.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ix, err := recall.Open(rst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, done := files(t, dir)
+	b, err := Open(Config{Log: st.log, Seen: st.seen, Keyer: ix.Keyer(), Triggers: append([]Trigger{IndexInto(ix)}, extra...)},
+		WithMaxAttempts(1000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ix.OnDelete(b.ForgetSource); err != nil {
+		t.Fatal(err)
+	}
+	return ix, b, func() { done(); rst.Close() }
 }
 
 func TestEventsIndexedAndDeletionPropagates(t *testing.T) {
 	dir := t.TempDir()
-	busPath := filepath.Join(dir, "bus.jsonl")
-	bst, _ := recall.OpenFile(busPath)
-	defer bst.Close()
-	ix, err := recall.Open(&recall.MemStore{})
-	if err != nil {
-		t.Fatal(err)
-	}
 	slow := &recorder{fail: 100}
-	b := mustOpen(t, bst, []Trigger{IndexInto(ix), {Name: "slow", Start: slow.start}}, WithMaxAttempts(1000))
-	ix.OnDelete(b.ForgetSource)
+	ix, b, done := indexedBus(t, dir, Trigger{Name: "slow", Start: slow.start})
+	defer done()
 
 	mustPublish(t, b, Event{Kind: Mail, Account: "o@example.test", Ref: "<lab@x>", Summary: "Lab results", Body: "glucose quokkafruit normal"})
 	b.Pump(ctx)
@@ -227,18 +296,18 @@ func TestEventsIndexedAndDeletionPropagates(t *testing.T) {
 	if len(rs) != 1 || rs[0].Source.Kind != "mail" || rs[0].Source.Ref != "<lab@x>" || rs[0].Label != recall.Private {
 		t.Fatalf("event not indexed with provenance: %+v", rs)
 	}
-	// "slow" still holds a pending delivery carrying the content. Deleting
-	// the item in recall must drop it from the bus and its store too.
 	if b.Pending() != 1 {
 		t.Fatalf("pending: %d", b.Pending())
 	}
-	if _, err := ix.Delete(rs[0].ID); err != nil {
+	// Deleting by the raw source name reaches the item and the bus's
+	// pending copy, and leaves no copy in the bus log.
+	if _, err := ix.DeleteSource("mail", "o@example.test", "<lab@x>"); err != nil {
 		t.Fatal(err)
 	}
-	if b.Pending() != 0 {
-		t.Fatal("deletion did not reach the pending delivery")
+	if ix.Len() != 0 || b.Pending() != 0 {
+		t.Fatalf("deletion did not propagate: items %d pending %d", ix.Len(), b.Pending())
 	}
-	data, _ := os.ReadFile(busPath)
+	data, _ := os.ReadFile(filepath.Join(dir, "bus.jsonl"))
 	if strings.Contains(string(data), "quokkafruit") {
 		t.Fatal("deleted content remains in the bus store")
 	}
@@ -247,54 +316,168 @@ func TestEventsIndexedAndDeletionPropagates(t *testing.T) {
 	}
 }
 
-func TestSettledContentLeavesStore(t *testing.T) {
-	st := &recall.MemStore{}
-	r := &recorder{}
-	b := mustOpen(t, st, []Trigger{{Name: "r", Start: r.start}})
-	for i := 0; i < 100; i++ {
-		mustPublish(t, b, Event{Kind: File, Ref: "/f", Version: string(rune('a'+i%26)) + strings.Repeat("x", i), Body: "secretplan wombat"})
-		b.Pump(ctx)
+// A random-looking ref (scrubbed for display) is still deletable by its raw
+// form after a bus ingest (review item 3).
+func TestDeleteByRawRefAfterBusIngest(t *testing.T) {
+	ix, b, done := indexedBus(t, t.TempDir())
+	defer done()
+	raw := "https://files.example.test/s/Kx9vQ2mWp7LrT4nZ8bYc?sig=Ab3dE5fG7hJ9kL1mN3pQ"
+	mustPublish(t, b, Event{Kind: Web, Ref: raw, Version: "1", Body: "shared doc"})
+	mustPublish(t, b, Event{Kind: Web, Ref: "https://files.example.test/s/Qw8eR4tY6uI2oP9aS5dF?sig=Zx1cV3bN5mL7kJ9hG2fD", Version: "1", Body: "other doc"})
+	b.Pump(ctx)
+	if ix.Len() != 2 {
+		t.Fatalf("refs that scrub alike collided: %d items", ix.Len())
 	}
-	data, _ := st.ReadAll()
-	if n := strings.Count(string(data), "wombat"); n > 64 {
-		t.Fatalf("settled bodies are not compacted away: %d remain", n)
+	rep, err := ix.DeleteSource("web", "", raw)
+	if err != nil || len(rep.Items) != 1 || ix.Len() != 1 {
+		t.Fatalf("delete by raw ref: %v %+v", err, rep)
 	}
 }
 
-func TestCredentialsScrubbed(t *testing.T) {
-	st := &recall.MemStore{}
+// A deletion that arrives while the event is still pending on the bus, or
+// during Pump, is not undone (review items 4 and 5).
+func TestDeletionBeforeAndDuringIndexing(t *testing.T) {
+	dir := t.TempDir()
+	ix, b, done := indexedBus(t, dir)
+	defer done()
+	mustPublish(t, b, Event{Kind: Mail, Account: "o", Ref: "<early@x>", Body: "early marmoset"})
+	if _, err := ix.DeleteSource("mail", "o", "<early@x>"); err != nil {
+		t.Fatal(err)
+	}
+	b.Pump(ctx)
+	if ix.Len() != 0 || b.Pending() != 0 {
+		t.Fatalf("deletion before indexing lost: items %d pending %d", ix.Len(), b.Pending())
+	}
+
+	// During Pump: the first trigger deletes the source; the indexing
+	// trigger, already queued in the same Pump, must not bring it back.
+	var once sync.Once
+	var target *recall.Index
+	deleter := Trigger{Name: "a-deleter", Start: func(context.Context, Delivery) error {
+		once.Do(func() { target.DeleteSource("mail", "o", "<race@x>") })
+		return nil
+	}}
+	ix2, b2, done2 := indexedBus(t, t.TempDir(), deleter)
+	defer done2()
+	target = ix2
+	mustPublish(t, b2, Event{Kind: Mail, Account: "o", Ref: "<race@x>", Body: "race lemur"})
+	b2.Pump(ctx)
+	if ix2.Len() != 0 {
+		t.Fatal("a deletion during Pump was undone by a stale delivery")
+	}
+
+	// A stale IndexInto that already passed the bus re-check is refused by
+	// the recall tombstone.
+	old := Event{Kind: Mail, Account: "o", Ref: "<stale@x>", At: time.Now().Add(-time.Hour), Body: "stale"}
+	old.Source = ix2.SourceID("mail", "o", "<stale@x>")
+	if _, err := ix2.DeleteSource("mail", "o", "<stale@x>"); err != nil {
+		t.Fatal(err)
+	}
+	if err := IndexInto(ix2).Start(ctx, Delivery{Event: old}); err != nil || ix2.Len() != 0 {
+		t.Fatalf("stale ingest after deletion: %v, %d items", err, ix2.Len())
+	}
+}
+
+// Tombstones replay to the bus on restart, so a deletion a crash cut off
+// before the bus heard of it still reaches the bus.
+func TestDeletionReplayedAtStart(t *testing.T) {
+	dir := t.TempDir()
+	slow := &recorder{fail: 100}
+	_, b, done := indexedBus(t, dir, Trigger{Name: "slow", Start: slow.start})
+	mustPublish(t, b, Event{Kind: File, Ref: "/secret.txt", Body: "pangolin"})
+	done()
+
+	// The deletion lands in recall while the bus is down (as after a crash
+	// between the tombstone and the hook).
+	rst, err := recall.OpenFile(filepath.Join(dir, "recall.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ix, err := recall.Open(rst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ix.DeleteSource("file", "", "/secret.txt"); err != nil {
+		t.Fatal(err)
+	}
+	rst.Close()
+
+	_, b, done = indexedBus(t, dir, Trigger{Name: "slow", Start: slow.start})
+	defer done()
+	if b.Pending() != 0 {
+		t.Fatalf("tombstone not replayed to the bus: %d pending", b.Pending())
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "bus.jsonl"))
+	if strings.Contains(string(data), "pangolin") {
+		t.Fatal("deleted content remains in the bus log")
+	}
+}
+
+func TestSettledContentLeavesStore(t *testing.T) {
+	st := mem()
+	r := &recorder{}
+	b := mustOpen(t, st, []Trigger{{Name: "r", Start: r.start}})
+	for i := 0; i < 100; i++ {
+		mustPublish(t, b, Event{Kind: File, Ref: "/f", Version: fmt.Sprint(i), Body: "secretplan wombat"})
+		b.Pump(ctx)
+	}
+	data, _ := st.log.ReadAll()
+	if n := strings.Count(string(data), "wombat"); n >= staleLimit {
+		t.Fatalf("settled bodies are not compacted away: %d remain", n)
+	}
+	seen, _ := st.seen.ReadAll()
+	if strings.Contains(string(seen), "wombat") || strings.Contains(string(seen), "/f") {
+		t.Fatal("the seen list must hold IDs only")
+	}
+}
+
+func TestCredentialsScrubbedAndBodyCut(t *testing.T) {
+	st := mem()
 	r := &recorder{}
 	b := mustOpen(t, st, []Trigger{{Name: "r", Start: r.start}})
 	key := "sk-" + "Q7v" + "Lr2Zp9XwT4kYb8NcJ3mHd6FsA1gEu5RoVi0"
 	mustPublish(t, b, Event{Kind: Mail, Ref: "https://mail.example.test/m?token=" + key,
 		Summary: "Your API key", Body: "api_key: " + key + "\nAuthorization: Bearer " + key})
-	data, _ := st.ReadAll()
+	data, _ := st.log.ReadAll()
 	if strings.Contains(string(data), key[3:20]) {
 		t.Fatal("credential stored in the bus")
 	}
+	mustPublish(t, b, Event{Kind: File, Ref: "/big", Body: strings.Repeat("é", MaxBody)})
 	b.Pump(ctx)
 	if strings.Contains(r.got[0].Event.Body, key[3:20]) {
 		t.Fatal("credential delivered")
 	}
+	if body := r.got[1].Event.Body; len(body) > MaxBody+16 || !utf8.ValidString(body) {
+		t.Fatalf("body not cut cleanly: %d bytes", len(body))
+	}
 }
 
-func TestTriggerValidation(t *testing.T) {
-	if _, err := Open(&recall.MemStore{}, []Trigger{{Name: "x"}}); !errors.Is(err, ErrTrigger) {
+func TestOpenValidation(t *testing.T) {
+	ok := func(context.Context, Delivery) error { return nil }
+	m := mem()
+	if _, err := Open(Config{Log: m.log, Seen: m.seen, Keyer: testKeyer, Triggers: []Trigger{{Name: "x"}}}); !errors.Is(err, ErrTrigger) {
 		t.Fatalf("nil Start: %v", err)
 	}
-	ok := func(context.Context, Delivery) error { return nil }
-	if _, err := Open(&recall.MemStore{}, []Trigger{{Name: "x", Start: ok}, {Name: "x", Start: ok}}); !errors.Is(err, ErrTrigger) {
+	if _, err := Open(Config{Log: m.log, Seen: m.seen, Keyer: testKeyer, Triggers: []Trigger{{Name: "x", Start: ok}, {Name: "x", Start: ok}}}); !errors.Is(err, ErrTrigger) {
 		t.Fatalf("duplicate: %v", err)
 	}
-	b := mustOpen(t, &recall.MemStore{}, nil)
+	if _, err := Open(Config{Log: m.log, Seen: m.seen}); !errors.Is(err, ErrConfig) {
+		t.Fatalf("no keyer: %v", err)
+	}
+	b := mustOpen(t, mem(), nil)
 	if _, _, err := b.Publish(Event{Kind: Mail}); !errors.Is(err, ErrNoRef) {
 		t.Fatalf("no ref: %v", err)
+	}
+	// A corrupt line does not stop the bus.
+	m.log.Append([]byte("{garbage\n"))
+	if _, err := Open(Config{Log: m.log, Seen: m.seen, Keyer: testKeyer}); err != nil {
+		t.Fatalf("corrupt line: %v", err)
 	}
 }
 
 func TestRunDeliversOnPublish(t *testing.T) {
 	r := &recorder{}
-	b := mustOpen(t, &recall.MemStore{}, []Trigger{{Name: "r", Start: r.start}})
+	b := mustOpen(t, mem(), []Trigger{{Name: "r", Start: r.start}})
 	c, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() { b.Run(c, time.Hour); close(done) }()

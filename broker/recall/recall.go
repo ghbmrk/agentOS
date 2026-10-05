@@ -1,7 +1,10 @@
 package recall
 
 import (
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -21,30 +24,39 @@ const (
 	Private Label = "private"
 )
 
-func (l Label) norm() Label {
-	if l == Public {
+// publicKinds are the only source kinds that may be public, and only when
+// the caller declares exactly Public (REV-5). web: an uncredentialed fetch
+// (a credentialed read is kind "credentialed", set by the executor). timer
+// and task: task text the owner marked PUBLIC (D1). agent: output of a
+// machine the broker labelled public. Every other kind, including new or
+// misspelt ones, is private.
+var publicKinds = map[string]bool{"web": true, "timer": true, "task": true, "agent": true}
+
+// EffectiveLabel is the label an item or event of this kind gets when its
+// producer declares declared. The recall index and the event bus share it.
+func EffectiveLabel(kind string, declared Label) Label {
+	if declared == Public && publicKinds[kind] {
 		return Public
 	}
 	return Private
 }
 
-// ownerData are source kinds that are owner data whatever the caller
-// declares (REV-5: mail, files, owner chat; D1: task text unless the owner
-// marked the task PUBLIC, which the caller states with Label Public).
-var ownerData = map[string]bool{
-	"mail": true, "file": true, "calendar": true, "contact": true,
-	"owner": true, "credentialed": true, "preference": true,
-}
+// ReservedKinds are kinds only the broker's owner channel may produce.
+// Ingest refuses "preference" (preferences have their own write path) and
+// the event bus refuses both.
+var ReservedKinds = map[string]bool{"owner": true, "preference": true}
 
 // Source is an item's provenance (CAP-3).
 type Source struct {
-	// Kind is where the item came from: mail, file, calendar, web, timer,
-	// task, agent, owner, credentialed (an executor read), and so on.
-	Kind    string    `json:"kind"`
-	Account string    `json:"account,omitempty"`
-	Ref     string    `json:"ref"` // message ID, path, URL, task ID
-	Seen    time.Time `json:"seen"`
-	// DerivedFrom lists the items this one was computed from (a summary,
+	// Kind is where the item came from: mail, file, calendar, contact, web,
+	// timer, task, agent, owner, credentialed (an executor read), ...
+	Kind    string `json:"kind"`
+	Account string `json:"account,omitempty"`
+	// Ref names the item in its origin (message ID, path, URL, task ID).
+	// It is stored and shown scrubbed; identity uses the raw ref, keyed.
+	Ref  string    `json:"ref"`
+	Seen time.Time `json:"seen"`
+	// DerivedFrom lists the item IDs this one was computed from (a summary,
 	// extracted facts). Deleting a parent deletes it too.
 	DerivedFrom []string `json:"derived_from,omitempty"`
 }
@@ -64,6 +76,7 @@ type Item struct {
 	Text   string    `json:"text,omitempty"`
 	Facts  []Fact    `json:"facts,omitempty"`
 	Vector []float32 `json:"vec,omitempty"`
+	VecID  string    `json:"vec_id,omitempty"` // Embedder.ID of Vector
 }
 
 // OwnerMessage is an authenticated owner-channel message (owner text or
@@ -92,19 +105,63 @@ type Labeler interface {
 	Raise(machine string) error
 }
 
+// Keyer derives identities from raw source names with a broker key
+// (HMAC-SHA256), so identity survives scrubbing of the displayed ref, refs
+// that scrub alike stay distinct, and a stored ID does not reveal a
+// low-entropy raw ref to someone without the key.
+type Keyer struct{ key []byte }
+
+// NewKeyer returns a Keyer for key (at least 16 bytes).
+func NewKeyer(key []byte) (Keyer, error) {
+	if len(key) < 16 {
+		return Keyer{}, errors.New("recall: identity key must be at least 16 bytes")
+	}
+	return Keyer{key: append([]byte(nil), key...)}, nil
+}
+
+// ID hashes length-prefixed parts.
+func (k Keyer) ID(parts ...string) string {
+	m := hmac.New(sha256.New, k.key)
+	var n [8]byte
+	for _, p := range parts {
+		binary.BigEndian.PutUint64(n[:], uint64(len(p)))
+		m.Write(n[:])
+		m.Write([]byte(p))
+	}
+	return hex.EncodeToString(m.Sum(nil)[:16])
+}
+
+// SourceID is the identity of the item for a raw source name. The event
+// bus uses the same identity, so a deletion reaches its copy.
+func (k Keyer) SourceID(kind, account, rawRef string) string {
+	return k.ID("src", kind, account, rawRef)
+}
+
+// Valid reports whether the keyer has a key.
+func (k Keyer) Valid() bool { return len(k.key) >= 16 }
+
+// Deleted is passed to OnDelete hooks. Source is empty when the item was
+// never indexed here (a deletion that arrived first) or is a replayed
+// tombstone.
+type Deleted struct {
+	ID     string
+	Source Source
+}
+
 var (
 	ErrNoSource     = errors.New("recall: item needs a source kind and ref")
+	ErrReservedKind = errors.New("recall: reserved source kind")
+	ErrDeleted      = errors.New("recall: source was deleted; refusing content seen before the deletion")
 	ErrNotOwner     = errors.New("recall: preferences are written only from an authenticated owner-channel message")
 	ErrNoLabeler    = errors.New("recall: private results need a labeler to raise the caller (REV-5)")
 	ErrUnknownPref  = errors.New("recall: no such preference")
-	ErrCorruptStore = errors.New("recall: store has an unreadable record")
 )
 
 // Index is the broker-owned recall index (CAP-3): full text, embeddings and
 // structured facts over everything the system has seen, with provenance.
 // Agents reach it only through Search and PreferencesFor, which raise the
-// caller's label before returning owner data, and see results only as
-// untrusted content (Render). Only the broker writes to it.
+// caller's label before returning owner data, and see results only through
+// Render (untrusted content, no scores). Only the broker writes to it.
 type Index struct {
 	mu       sync.RWMutex
 	store    Store
@@ -113,11 +170,17 @@ type Index struct {
 	labels   Labeler
 	owner    OwnerAuth
 	now      func() time.Time
+	keyer    Keyer
+	keyGiven bool
+	hdrEmb   string
 	items    map[string]*Item
-	text     *textIndex
+	all      *textIndex // every item
+	pub      *textIndex // public items only: public-only searches rank here
 	prefs    map[string]Preference
-	onDelete []func(Source)
+	tombs    map[string]time.Time // deleted ID -> deletion time
+	onDelete []func(Deleted) error
 	lines    int // records in the store
+	skipped  int
 }
 
 // Option configures an Index.
@@ -138,16 +201,31 @@ func WithVaultRedactor(r func(string) string) Option {
 	return func(ix *Index) { ix.scrub = NewScrubber(r) }
 }
 
+// WithKeyer sets the identity key, normally a vault-held broker key. Without
+// it a random key is generated on first open and kept in the store header.
+func WithKeyer(k Keyer) Option {
+	return func(ix *Index) { ix.keyer, ix.keyGiven = k, k.Valid() }
+}
+
 // WithClock sets the clock.
 func WithClock(now func() time.Time) Option { return func(ix *Index) { ix.now = now } }
 
-type record struct {
-	Op   string      `json:"op"` // "put", "pref"
-	Item *Item       `json:"item,omitempty"`
-	Pref *Preference `json:"pref,omitempty"`
+type header struct {
+	Key      string `json:"key,omitempty"` // hex; only when generated here
+	Embedder string `json:"embedder,omitempty"`
 }
 
-// Open loads the index from store.
+type record struct {
+	Op     string      `json:"op"` // "hdr", "put", "pref", "tomb"
+	Header *header     `json:"hdr,omitempty"`
+	Item   *Item       `json:"item,omitempty"`
+	Pref   *Preference `json:"pref,omitempty"`
+	ID     string      `json:"id,omitempty"`
+	At     time.Time   `json:"at,omitempty"`
+}
+
+// Open loads the index from store. An unreadable record is skipped (and
+// counted by Skipped), and the store is rewritten without it.
 func Open(store Store, opts ...Option) (*Index, error) {
 	ix := &Index{
 		store: store,
@@ -155,8 +233,10 @@ func Open(store Store, opts ...Option) (*Index, error) {
 		emb:   HashEmbedder{},
 		now:   func() time.Time { return time.Now().UTC() },
 		items: map[string]*Item{},
-		text:  newTextIndex(),
+		all:   newTextIndex(),
+		pub:   newTextIndex(),
 		prefs: map[string]Preference{},
+		tombs: map[string]time.Time{},
 	}
 	for _, o := range opts {
 		o(ix)
@@ -169,12 +249,24 @@ func Open(store Store, opts ...Option) (*Index, error) {
 	for _, l := range lines {
 		var r record
 		if err := json.Unmarshal(l, &r); err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrCorruptStore, err)
+			ix.skipped++
+			continue
 		}
 		ix.apply(r)
 	}
 	ix.lines = len(lines)
-	if torn {
+	if !ix.keyer.Valid() {
+		key := make([]byte, 32)
+		if _, err := rand.Read(key); err != nil {
+			return nil, err
+		}
+		ix.keyer = Keyer{key: key}
+		torn = true // write the header
+	}
+	if ix.hdrEmb != ix.embID() {
+		torn = true
+	}
+	if torn || ix.skipped > 0 {
 		if err := ix.compact(); err != nil {
 			return nil, err
 		}
@@ -182,27 +274,54 @@ func Open(store Store, opts ...Option) (*Index, error) {
 	return ix, nil
 }
 
-// ItemID is the stable ID of the item for a source. Re-ingesting the same
-// source replaces the item. The hash is of the raw ref, so a ref the
-// scrubber shortens still maps to one item and can be deleted by its raw
-// form.
-func ItemID(kind, account, ref string) string {
-	h := sha256.Sum256([]byte(kind + "\x00" + account + "\x00" + ref))
-	return hex.EncodeToString(h[:12])
+// Skipped returns how many unreadable records Open dropped.
+func (ix *Index) Skipped() int { return ix.skipped }
+
+// Keyer returns the identity keyer, for the event bus.
+func (ix *Index) Keyer() Keyer { return ix.keyer }
+
+// SourceID is the item ID for a raw source name.
+func (ix *Index) SourceID(kind, account, rawRef string) string {
+	return ix.keyer.SourceID(kind, account, rawRef)
+}
+
+func (ix *Index) embID() string {
+	if ix.emb == nil {
+		return ""
+	}
+	return ix.emb.ID()
+}
+
+func (ix *Index) minCosine() float64 {
+	if f, ok := ix.emb.(CosineFloor); ok {
+		return f.MinCosine()
+	}
+	return defaultMinCosine
 }
 
 // Ingest indexes an item, replacing any earlier item from the same source.
-// Text, facts and ref are scrubbed of credentials first (CRED-1). Ingest
-// never creates a preference, whatever the text says (CAP-3).
+// The ID is the keyed identity of the raw ref; text, facts and the displayed
+// ref are scrubbed of credentials first (CRED-1). Ingest never creates a
+// preference, whatever the text says (CAP-3).
 func (ix *Index) Ingest(it Item) (string, error) {
 	if it.Source.Kind == "" || it.Source.Ref == "" {
 		return "", ErrNoSource
 	}
-	it.ID = ItemID(it.Source.Kind, it.Source.Account, it.Source.Ref)
-	it.Label = it.Label.norm()
-	if ownerData[it.Source.Kind] {
-		it.Label = Private
+	return ix.IngestKeyed(ix.SourceID(it.Source.Kind, it.Source.Account, it.Source.Ref), it)
+}
+
+// IngestKeyed is Ingest with an identity already computed by this index's
+// Keyer from the raw ref (the event bus passes it, since it stores only the
+// scrubbed ref).
+func (ix *Index) IngestKeyed(id string, it Item) (string, error) {
+	if it.Source.Kind == "" || it.Source.Ref == "" || id == "" {
+		return "", ErrNoSource
 	}
+	if it.Source.Kind == "preference" {
+		return "", fmt.Errorf("%w: %s", ErrReservedKind, it.Source.Kind)
+	}
+	it.ID = id
+	it.Label = EffectiveLabel(it.Source.Kind, it.Label)
 	if it.Source.Seen.IsZero() {
 		it.Source.Seen = ix.now()
 	}
@@ -214,18 +333,33 @@ func (ix *Index) Ingest(it Item) (string, error) {
 	}
 	it.Facts = facts
 	it.Source.DerivedFrom = append([]string(nil), it.Source.DerivedFrom...)
-	it.Vector = nil
+	it.Vector, it.VecID = nil, ""
 	if ix.emb != nil {
 		if vs, err := ix.emb.Embed([]string{searchText(&it)}); err == nil && len(vs) == 1 {
-			it.Vector = vs[0]
+			it.Vector, it.VecID = vs[0], ix.emb.ID()
 		}
 	}
 
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
-	// A derived item is at least as private as its parents.
+	// Content seen before a deletion of this source never comes back (a
+	// stale delivery racing the deletion).
+	// A source clock ahead of the broker's cannot outrun a tombstone.
+	seen := it.Source.Seen
+	if now := ix.now(); seen.After(now) {
+		seen = now
+	}
+	if t, ok := ix.tombs[id]; ok && !seen.After(t) {
+		return "", ErrDeleted
+	}
+	// A label never falls on re-ingest.
+	if old := ix.items[id]; old != nil && old.Label == Private {
+		it.Label = Private
+	}
+	// A derived item is at least as private as its parents, and private if
+	// any parent is unknown here.
 	for _, p := range it.Source.DerivedFrom {
-		if pi := ix.items[p]; pi != nil && pi.Label == Private {
+		if pi := ix.items[p]; pi == nil || pi.Label == Private {
 			it.Label = Private
 		}
 	}
@@ -264,35 +398,100 @@ func (ix *Index) Len() int {
 	return len(ix.items)
 }
 
+// Reembed re-embeds up to limit items whose vectors are from another
+// embedder (or missing) and returns how many it did. The broker runs it in
+// the background after the embedder changes; until then those items match
+// by text and facts only.
+func (ix *Index) Reembed(limit int) (int, error) {
+	if ix.emb == nil {
+		return 0, nil
+	}
+	want := ix.emb.ID()
+	ix.mu.RLock()
+	var stale []Item
+	for _, it := range ix.items {
+		if it.VecID != want {
+			stale = append(stale, *it)
+			if len(stale) >= limit {
+				break
+			}
+		}
+	}
+	ix.mu.RUnlock()
+	n := 0
+	for _, it := range stale {
+		vs, err := ix.emb.Embed([]string{searchText(&it)})
+		if err != nil || len(vs) != 1 {
+			return n, err
+		}
+		ix.mu.Lock()
+		cur := ix.items[it.ID]
+		if cur != nil && cur.VecID != want {
+			up := *cur
+			up.Vector, up.VecID = vs[0], want
+			if err := ix.append(record{Op: "put", Item: &up}); err != nil {
+				ix.mu.Unlock()
+				return n, err
+			}
+			ix.apply(record{Op: "put", Item: &up})
+			n++
+		}
+		err = ix.maybeCompact()
+		ix.mu.Unlock()
+		if err != nil {
+			return n, err
+		}
+	}
+	return n, nil
+}
+
 // DeleteReport lists what a deletion removed.
 type DeleteReport struct {
 	Items   []string
 	Sources []Source
 }
 
-// OnDelete registers a hook called with each deleted item's source after a
-// deletion is durable, so other stores (the event bus, caches) drop their
-// copies (CAP-3: deletion requests propagate).
-func (ix *Index) OnDelete(f func(Source)) {
+// OnDelete registers a hook called for every deleted ID after the deletion
+// is durable, so other stores (the event bus, caches) drop their copies
+// (CAP-3: deletion requests propagate). On registration it is called once
+// for every tombstone already recorded, so a deletion that a crash cut off
+// before its hooks ran still arrives.
+func (ix *Index) OnDelete(f func(Deleted) error) error {
 	ix.mu.Lock()
-	defer ix.mu.Unlock()
 	ix.onDelete = append(ix.onDelete, f)
+	ids := make([]string, 0, len(ix.tombs))
+	for id := range ix.tombs {
+		ids = append(ids, id)
+	}
+	ix.mu.Unlock()
+	sort.Strings(ids)
+	var errs []error
+	for _, id := range ids {
+		if err := f(Deleted{ID: id}); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
-// DeleteSource deletes the item for a source, by its raw ref.
-func (ix *Index) DeleteSource(kind, account, ref string) (DeleteReport, error) {
-	return ix.Delete(ItemID(kind, account, ref))
+// DeleteSource deletes the item for a raw source name, whether or not it
+// has been indexed yet.
+func (ix *Index) DeleteSource(kind, account, rawRef string) (DeleteReport, error) {
+	return ix.Delete(ix.SourceID(kind, account, rawRef))
 }
 
-// Delete removes items, every item derived from them (transitively), their
-// facts and vectors, and rewrites the store so no copy remains in it. Then
-// it calls the OnDelete hooks.
+// Delete removes items and every item derived from them (transitively),
+// with their facts and vectors, records a tombstone for each requested and
+// removed ID, rewrites the store so no copy remains in it, and then calls
+// the OnDelete hooks for each of those IDs, including requested IDs that
+// were not indexed (the event bus may still hold them). Hook errors are
+// returned after the deletion is durable.
 func (ix *Index) Delete(ids ...string) (DeleteReport, error) {
 	ix.mu.Lock()
 	gone := map[string]bool{}
-	queue := []string{}
+	var queue []string
 	for _, id := range ids {
-		if _, ok := ix.items[id]; ok && !gone[id] {
+		if id != "" && !gone[id] {
 			gone[id] = true
 			queue = append(queue, id)
 		}
@@ -315,33 +514,56 @@ func (ix *Index) Delete(ids ...string) (DeleteReport, error) {
 	}
 	var rep DeleteReport
 	removed := map[string]*Item{}
+	oldTombs := map[string]time.Time{}
+	now := ix.now()
+	all := make([]string, 0, len(gone))
 	for id := range gone {
-		removed[id] = ix.items[id]
-		rep.Items = append(rep.Items, id)
-		rep.Sources = append(rep.Sources, ix.items[id].Source)
-		delete(ix.items, id)
-		ix.text.remove(id)
-	}
-	sort.Strings(rep.Items)
-	if len(gone) > 0 {
-		if err := ix.compact(); err != nil {
-			// Not durable: restore so memory matches the store.
-			for id, it := range removed {
-				ix.items[id] = it
-				ix.text.add(id, searchText(it))
-			}
-			ix.mu.Unlock()
-			return DeleteReport{}, err
+		all = append(all, id)
+		if t, ok := ix.tombs[id]; ok {
+			oldTombs[id] = t
+		}
+		ix.tombs[id] = now
+		if it := ix.items[id]; it != nil {
+			removed[id] = it
+			delete(ix.items, id)
+			ix.all.remove(id)
+			ix.pub.remove(id)
 		}
 	}
-	hooks := append([]func(Source){}, ix.onDelete...)
+	sort.Strings(all)
+	if err := ix.compact(); err != nil {
+		// Not durable: restore so memory matches the store.
+		for _, it := range removed {
+			ix.apply(record{Op: "put", Item: it})
+		}
+		for id := range gone {
+			delete(ix.tombs, id)
+		}
+		for id, t := range oldTombs {
+			ix.tombs[id] = t
+		}
+		ix.mu.Unlock()
+		return DeleteReport{}, err
+	}
+	srcs := map[string]Source{}
+	for _, id := range all {
+		if it := removed[id]; it != nil {
+			rep.Items = append(rep.Items, id)
+			rep.Sources = append(rep.Sources, it.Source)
+			srcs[id] = it.Source
+		}
+	}
+	hooks := append([]func(Deleted) error{}, ix.onDelete...)
 	ix.mu.Unlock()
-	for _, s := range rep.Sources {
+	var errs []error
+	for _, id := range all {
 		for _, h := range hooks {
-			h(s)
+			if err := h(Deleted{ID: id, Source: srcs[id]}); err != nil {
+				errs = append(errs, err)
+			}
 		}
 	}
-	return rep, nil
+	return rep, errors.Join(errs...)
 }
 
 // SetPreference stores or replaces an owner preference. messageID must name
@@ -358,12 +580,18 @@ func (ix *Index) SetPreference(messageID, key, value string) error {
 	p := Preference{Key: key, Value: ix.scrub.Scrub(value), Provenance: msg}
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
-	if err := ix.append(record{Op: "pref", Pref: &p}); err != nil {
+	old, had := ix.prefs[key]
+	ix.prefs[key] = p
+	// Rewrite so an edited value leaves no earlier copy in the store.
+	if err := ix.compact(); err != nil {
+		if had {
+			ix.prefs[key] = old
+		} else {
+			delete(ix.prefs, key)
+		}
 		return err
 	}
-	ix.apply(record{Op: "pref", Pref: &p})
-	// Rewrite so an edited value leaves no earlier copy in the store.
-	return ix.compact()
+	return nil
 }
 
 // DeletePreference removes an owner preference, on an authenticated owner
@@ -410,16 +638,13 @@ func (ix *Index) Preferences() []Preference {
 }
 
 // PreferencesFor returns the preferences for delivery to an agent machine.
-// They are owner data, so the machine is raised to private first (REV-5).
+// They are owner data, so the machine is raised to private first (REV-5),
+// whether or not any exist, so the answer reveals nothing to a public one.
 func (ix *Index) PreferencesFor(machine string) ([]Preference, error) {
-	ps := ix.Preferences()
-	if len(ps) == 0 {
-		return nil, nil
-	}
 	if err := ix.raise(machine); err != nil {
 		return nil, err
 	}
-	return ps, nil
+	return ix.Preferences(), nil
 }
 
 func (ix *Index) raise(machine string) error {
@@ -455,12 +680,14 @@ type Query struct {
 	Fact  *FactPattern
 	Kinds []string // source kinds to include; empty means all
 	Limit int      // default 10, at most 100
-	// PublicOnly restricts results to public items, so a public machine can
-	// search without rising to private.
+	// PublicOnly searches public items only, ranked on public items only, so
+	// neither the results nor their order depend on private data, and the
+	// caller is not raised.
 	PublicOnly bool
 }
 
-// Result is one search hit.
+// Result is one search hit. Score is broker-side only: Search zeroes it and
+// Render never shows it.
 type Result struct {
 	ID     string
 	Source Source
@@ -470,10 +697,6 @@ type Result struct {
 	Score  float64
 }
 
-// minCosine is the similarity below which an embedding match alone is noise.
-// Tuned for HashEmbedder; a model embedder may need its own value.
-const minCosine = 0.2
-
 // Lookup searches on the broker's or owner's behalf. It changes no label.
 func (ix *Index) Lookup(q Query) []Result {
 	ix.mu.RLock()
@@ -481,19 +704,21 @@ func (ix *Index) Lookup(q Query) []Result {
 	return ix.search(q)
 }
 
-// Search searches on behalf of an agent machine. If any result is private,
-// the machine is raised to private before the results are returned; if it
-// cannot be raised, no results are returned (REV-5). Deliver results to the
-// agent only through Render (CAP-3: untrusted content, never instructions).
+// Search searches on behalf of an agent machine (REV-5). A PublicOnly query
+// reads only public items and public statistics and leaves the machine's
+// label alone. Any other query raises the machine to private before it is
+// run, whatever it finds, since even "nothing matched" is owner data; if the
+// raise fails, nothing is returned. Deliver results to the agent only
+// through Render (CAP-3: untrusted content, never instructions).
 func (ix *Index) Search(machine string, q Query) ([]Result, error) {
-	rs := ix.Lookup(q)
-	for _, r := range rs {
-		if r.Label != Public {
-			if err := ix.raise(machine); err != nil {
-				return nil, err
-			}
-			break
+	if !q.PublicOnly {
+		if err := ix.raise(machine); err != nil {
+			return nil, err
 		}
+	}
+	rs := ix.Lookup(q)
+	for i := range rs {
+		rs[i].Score = 0
 	}
 	return rs, nil
 }
@@ -539,29 +764,37 @@ func (ix *Index) search(q Query) []Result {
 			}
 		}
 	} else {
-		bm := ix.text.score(q.Text)
+		text := ix.all
+		if q.PublicOnly {
+			text = ix.pub
+		}
+		bm := text.score(q.Text)
 		var max float64
-		for _, s := range bm {
-			if s > max {
+		for id, s := range bm {
+			if s > max && eligible(ix.items[id]) {
 				max = s
 			}
 		}
 		var qv []float32
+		embID := ix.embID()
 		if ix.emb != nil {
 			if vs, err := ix.emb.Embed([]string{q.Text}); err == nil && len(vs) == 1 {
 				qv = vs[0]
 			}
 		}
+		floor := ix.minCosine()
 		for id, it := range ix.items {
 			if !eligible(it) {
 				continue
 			}
 			var s float64
-			if b := bm[id]; b > 0 {
+			if b := bm[id]; b > 0 && max > 0 {
 				s += 0.6 * b / max
 			}
-			if c := cosine(qv, it.Vector); c >= minCosine {
-				s += 0.4 * c
+			if it.VecID == embID {
+				if c := cosine(qv, it.Vector); c >= floor {
+					s += 0.4 * c
+				}
 			}
 			if s > 0 {
 				scores[id] = s
@@ -604,16 +837,36 @@ func (ix *Index) append(r record) error {
 
 func (ix *Index) apply(r record) {
 	switch r.Op {
+	case "hdr":
+		if r.Header == nil {
+			return
+		}
+		ix.hdrEmb = r.Header.Embedder
+		if !ix.keyGiven && r.Header.Key != "" {
+			if k, err := hex.DecodeString(r.Header.Key); err == nil && len(k) >= 16 {
+				ix.keyer = Keyer{key: k}
+			}
+		}
 	case "put":
 		if r.Item == nil {
 			return
 		}
 		it := *r.Item
 		ix.items[it.ID] = &it
-		ix.text.add(it.ID, searchText(&it))
+		st := searchText(&it)
+		ix.all.add(it.ID, st)
+		if it.Label == Public {
+			ix.pub.add(it.ID, st)
+		} else {
+			ix.pub.remove(it.ID)
+		}
 	case "pref":
 		if r.Pref != nil {
 			ix.prefs[r.Pref.Key] = *r.Pref
+		}
+	case "tomb":
+		if r.ID != "" {
+			ix.tombs[r.ID] = r.At
 		}
 	}
 }
@@ -621,29 +874,43 @@ func (ix *Index) apply(r record) {
 // maybeCompact rewrites the store once replaced items make up more than
 // half of it, so an overwritten version does not linger indefinitely.
 func (ix *Index) maybeCompact() error {
-	live := len(ix.items) + len(ix.prefs)
+	live := len(ix.items) + len(ix.prefs) + len(ix.tombs) + 1
 	if ix.lines > 64 && ix.lines > 2*live {
 		return ix.compact()
 	}
 	return nil
 }
 
-// compact rewrites the store with only the live state. Caller holds mu.
+// compact rewrites the store with only the live state: header, items,
+// preferences and tombstones. Caller holds mu.
 func (ix *Index) compact() error {
 	var buf []byte
-	ids := make([]string, 0, len(ix.items))
-	for id := range ix.items {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
 	n := 0
-	for _, id := range ids {
-		b, err := json.Marshal(record{Op: "put", Item: ix.items[id]})
+	put := func(r record) error {
+		b, err := json.Marshal(r)
 		if err != nil {
 			return err
 		}
 		buf = append(append(buf, b...), '\n')
 		n++
+		return nil
+	}
+	h := &header{Embedder: ix.embID()}
+	if !ix.keyGiven {
+		h.Key = hex.EncodeToString(ix.keyer.key)
+	}
+	if err := put(record{Op: "hdr", Header: h}); err != nil {
+		return err
+	}
+	ids := make([]string, 0, len(ix.items))
+	for id := range ix.items {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		if err := put(record{Op: "put", Item: ix.items[id]}); err != nil {
+			return err
+		}
 	}
 	keys := make([]string, 0, len(ix.prefs))
 	for k := range ix.prefs {
@@ -652,16 +919,24 @@ func (ix *Index) compact() error {
 	sort.Strings(keys)
 	for _, k := range keys {
 		p := ix.prefs[k]
-		b, err := json.Marshal(record{Op: "pref", Pref: &p})
-		if err != nil {
+		if err := put(record{Op: "pref", Pref: &p}); err != nil {
 			return err
 		}
-		buf = append(append(buf, b...), '\n')
-		n++
+	}
+	tids := make([]string, 0, len(ix.tombs))
+	for id := range ix.tombs {
+		tids = append(tids, id)
+	}
+	sort.Strings(tids)
+	for _, id := range tids {
+		if err := put(record{Op: "tomb", ID: id, At: ix.tombs[id]}); err != nil {
+			return err
+		}
 	}
 	if err := ix.store.Rewrite(buf); err != nil {
 		return err
 	}
 	ix.lines = n
+	ix.hdrEmb = h.Embedder
 	return nil
 }

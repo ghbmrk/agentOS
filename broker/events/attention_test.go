@@ -34,3 +34,35 @@ func TestOnlyIrreversibleDecisionsInterrupt(t *testing.T) {
 		t.Fatal("with no urgent classes every irreversible decision is batched")
 	}
 }
+
+// Work the owner asked for answers in the conversation at once; only
+// event- and timer-started work follows the digest rule (review item 6).
+func TestOwnerRequestsAnswerInConversation(t *testing.T) {
+	a := NewAttention("security")
+	for _, n := range []Notice{
+		{Text: "Send this reply to Ann?", Origin: OwnerRequest, Decision: true, Irreversible: true},
+		{Text: "Your trip summary is ready", Origin: OwnerRequest},
+		{Text: "Couldn't reach the airline site", Origin: OwnerRequest, Class: "work"},
+		{Text: "Rename the folder?", Origin: OwnerRequest, Decision: true},
+	} {
+		if got := a.Submit(n); got != Conversation {
+			t.Fatalf("%q: got %v want conversation", n.Text, got)
+		}
+	}
+	for _, c := range []struct {
+		n    Notice
+		want Route
+	}{
+		{Notice{Text: "Reply to the school newsletter?", Origin: Background, Decision: true, Irreversible: true}, Batch},
+		{Notice{Text: "New invoice filed", Origin: Background}, Digest},
+		{Notice{Text: "Approve new device?", Origin: Background, Decision: true, Irreversible: true, Class: "security"}, Interrupt},
+	} {
+		if got := a.Submit(c.n); got != c.want {
+			t.Fatalf("%q: got %v want %v", c.n.Text, got, c.want)
+		}
+	}
+	notes, decisions := a.TakeDigest()
+	if len(notes) != 1 || len(decisions) != 1 {
+		t.Fatalf("owner requests must not enter the digest: %v %v", notes, decisions)
+	}
+}

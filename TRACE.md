@@ -27,7 +27,7 @@ Covered: 55 / 144 requirement IDs
 | REV-2 | `broker/daemon/grants_wiring_test.go`, `broker/grants/gate_test.go` |
 | REV-3 | — |
 | REV-4 | `broker/vm/gvisor/gvisor_test.go`, `broker/vm/overlay/overlay_test.go`, `broker/vm/vm_test.go` |
-| REV-5 | `broker/e2e/a14_test.go`, `broker/e2e/openclaw_test.go`, `broker/e2e/owner_test.go`, `broker/events/bus_test.go`, `broker/guest/plane_test.go`, `broker/journal/provenance_test.go`, `broker/recall/recall_test.go`, `broker/route/route_test.go`, `broker/vm/services_test.go`, `broker/vm/vm_test.go` |
+| REV-5 | `broker/e2e/a14_test.go`, `broker/e2e/openclaw_test.go`, `broker/e2e/owner_test.go`, `broker/events/bus_test.go`, `broker/guest/plane_test.go`, `broker/journal/provenance_test.go`, `broker/recall/recall_test.go`, `broker/recall/review_test.go`, `broker/route/route_test.go`, `broker/vm/services_test.go`, `broker/vm/vm_test.go` |
 | CH-1 | `broker/e2e/owner_test.go`, `broker/modem/modem_test.go`, `broker/owner/channel_test.go` |
 | CH-2 | `broker/control/handler_test.go`, `broker/control/parse_test.go`, `broker/control/text_test.go`, `broker/daemon/daemon_test.go`, `broker/e2e/a9_test.go`, `broker/owner/arc2_test.go`, `broker/owner/channel_test.go`, `broker/owner/review_test.go` |
 | CH-3 | `broker/grants/channel_test.go`, `broker/grants/grant_test.go`, `broker/owner/channel_test.go`, `broker/owner/classify_test.go`, `broker/owner/review_test.go` |
@@ -82,7 +82,7 @@ Covered: 55 / 144 requirement IDs
 | OP-8 | `broker/e2e/a14_test.go`, `broker/e2e/openclaw_test.go`, `broker/e2e/routed_test.go`, `broker/guest/plane_test.go`, `broker/meter/limit_test.go`, `broker/meter/meter_test.go` |
 | CAP-1 | — |
 | CAP-2 | — |
-| CAP-3 | `broker/events/bus_test.go`, `broker/recall/recall_test.go` |
+| CAP-3 | `broker/events/bus_test.go`, `broker/recall/recall_test.go`, `broker/recall/review_test.go` |
 | CAP-4 | `broker/events/attention_test.go`, `broker/events/bus_test.go` |
 | CAP-5 | — |
 | CAP-6 | — |

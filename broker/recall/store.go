@@ -31,6 +31,10 @@ type FileStore struct {
 	path string
 	f    *os.File
 	lock *os.File
+	// broken is set when a rewrite renamed the new file into place but
+	// could not reopen it; appends then fail rather than go to the old,
+	// unlinked file.
+	broken error
 }
 
 // OpenFile opens or creates the store at path. A lock file next to it keeps
@@ -46,6 +50,12 @@ func OpenFile(path string) (*FileStore, error) {
 	}
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
+		lock.Close()
+		return nil, err
+	}
+	// A file created by an older build or by hand is tightened to owner-only.
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
 		lock.Close()
 		return nil, err
 	}
@@ -69,6 +79,9 @@ func syncDir(dir string) error {
 func (s *FileStore) Append(line []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.broken != nil {
+		return s.broken
+	}
 	if _, err := s.f.Write(line); err != nil {
 		return err
 	}
@@ -107,16 +120,17 @@ func (s *FileStore) Rewrite(data []byte) error {
 		os.Remove(tmp)
 		return err
 	}
-	if err := syncDir(filepath.Dir(s.path)); err != nil {
-		return err
-	}
+	// The old handle now points at an unlinked file: swap before anything
+	// else can fail.
 	f, err := os.OpenFile(s.path, os.O_RDWR|os.O_APPEND, 0o600)
-	if err != nil {
-		return err
-	}
 	s.f.Close()
+	if err != nil {
+		s.broken = fmt.Errorf("recall: store reopen after rewrite: %w", err)
+		return s.broken
+	}
 	s.f = f
-	return nil
+	s.broken = nil
+	return syncDir(filepath.Dir(s.path))
 }
 
 // Close releases the file and the lock.

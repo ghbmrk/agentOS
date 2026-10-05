@@ -2,14 +2,13 @@ package events
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/recall"
 )
@@ -25,30 +24,28 @@ const (
 	Timer    Kind = "timer"
 )
 
-// ownerData kinds are private whatever the publisher declares (REV-5).
-var ownerData = map[Kind]bool{Mail: true, File: true, Calendar: true}
+// MaxBody bounds an event body after scrubbing; longer bodies are cut.
+const MaxBody = 64 << 10
 
 // Event is one thing that happened. Ref names the thing (message ID, path,
 // URL, timer name) and Version the state seen (message ID again, mtime,
 // content hash, due time). The bus delivers each (kind, account, ref,
-// version) once, so a watcher that republishes an unchanged page or an
-// already-seen mail causes no work.
+// version) once, so a watcher may republish an unchanged page or an
+// already-seen mail without causing work.
 type Event struct {
+	// ID and Source are keyed identities computed from the raw ref and
+	// version before scrubbing (recall.Keyer). Source equals the recall
+	// item ID for the same source, so deletions match.
 	ID      string       `json:"id"`
+	Source  string       `json:"src"`
 	Kind    Kind         `json:"kind"`
 	Account string       `json:"account,omitempty"`
-	Ref     string       `json:"ref"`
+	Ref     string       `json:"ref"` // scrubbed, for display
 	Version string       `json:"version,omitempty"`
 	At      time.Time    `json:"at"`
 	Label   recall.Label `json:"label"`
 	Summary string       `json:"summary,omitempty"`
 	Body    string       `json:"body,omitempty"`
-}
-
-// EventID is the dedupe key of an event.
-func EventID(k Kind, account, ref, version string) string {
-	h := sha256.Sum256([]byte(string(k) + "\x00" + account + "\x00" + ref + "\x00" + version))
-	return hex.EncodeToString(h[:12])
 }
 
 // Delivery is one event handed to one trigger. Key is stable across
@@ -98,44 +95,62 @@ type Schedule struct {
 
 var (
 	ErrNoRef        = errors.New("events: event needs a kind and ref")
+	ErrReservedKind = errors.New("events: only the owner channel produces this kind")
 	ErrTrigger      = errors.New("events: trigger needs a unique name and a Start function")
-	ErrCorruptStore = errors.New("events: store has an unreadable record")
+	ErrConfig       = errors.New("events: Config needs Log, Seen and a Keyer")
 )
 
+// Config is what a Bus is opened with.
+type Config struct {
+	// Log holds live events, delivery progress and timer state. It is
+	// rewritten as events settle, so delivered content leaves it.
+	Log recall.Store
+	// Seen is an append-only list of event IDs (hashes only, no content),
+	// so dedupe never needs the content kept.
+	Seen recall.Store
+	// Keyer must be the recall index's (Index.Keyer), so event sources and
+	// recall items share identities.
+	Keyer    recall.Keyer
+	Triggers []Trigger
+}
+
 type record struct {
-	Op      string   `json:"op"` // pub, ack, fail, dead, seen, timer
-	Event   *Event   `json:"event,omitempty"`
-	Targets []string `json:"targets,omitempty"`
-	ID      string   `json:"id,omitempty"`
-	Trigger string   `json:"trigger,omitempty"`
-	Name    string   `json:"name,omitempty"`
-	Due     string   `json:"due,omitempty"`
+	Op      string    `json:"op"` // pub, ack, fail, dead, timer
+	Event   *Event    `json:"event,omitempty"`
+	Targets []string  `json:"targets,omitempty"`
+	ID      string    `json:"id,omitempty"`
+	Trigger string    `json:"trigger,omitempty"`
+	Src     string    `json:"src,omitempty"`
+	At      time.Time `json:"at,omitempty"`
 }
 
 type entry struct {
 	ev      Event
-	pending map[string]int // trigger -> failed attempts so far
+	pending map[string]int       // trigger -> failed attempts so far
+	next    map[string]time.Time // trigger -> earliest retry (not persisted)
 }
 
 // Bus is the durable event bus (CAP-4). Published events are journaled
-// before Publish returns; deliveries are at-least-once per (event,
-// trigger) and survive restarts. Settled events keep only their ID: their
-// content leaves memory at once and the store at the next compaction, which
-// runs once settled records outnumber live ones (and on every Forget).
+// before Publish returns; deliveries are at-least-once per (event, trigger)
+// and survive restarts. A settled event keeps only its ID: its content
+// leaves memory at once and the log within a few settlements (and at once
+// on Forget).
 type Bus struct {
 	mu        sync.Mutex
-	store     recall.Store
+	log, seen recall.Store
+	keyer     recall.Keyer
 	scrub     *recall.Scrubber
 	triggers  map[string]Trigger
 	att       *Attention
 	now       func() time.Time
 	maxTries  int
-	seen      map[string]bool
+	seenIDs   map[string]bool
 	live      map[string]*entry
 	order     []string
 	timers    map[string]Schedule
-	lastFired map[string]time.Time
-	lines     int
+	lastFired map[string]time.Time // timer source ID -> latest due fired
+	lines     int                  // records in the log
+	stale     int                  // settled events whose records are still in the log
 	wake      chan struct{}
 }
 
@@ -156,17 +171,26 @@ func WithVaultRedactor(r func(string) string) Option {
 	return func(b *Bus) { b.scrub = recall.NewScrubber(r) }
 }
 
-// Open loads the bus from store. Triggers must be the same set on every
-// start: deliveries recorded for a trigger that is no longer registered are
-// dropped with a digest note.
-func Open(store recall.Store, triggers []Trigger, opts ...Option) (*Bus, error) {
+// staleLimit is how many settled events may keep records in the log before
+// it is rewritten.
+const staleLimit = 8
+
+// Open loads the bus. Triggers must be the same set on every start:
+// deliveries recorded for a trigger that is no longer registered are
+// dropped with a digest note. Unreadable records are skipped.
+func Open(cfg Config, opts ...Option) (*Bus, error) {
+	if cfg.Log == nil || cfg.Seen == nil || !cfg.Keyer.Valid() {
+		return nil, ErrConfig
+	}
 	b := &Bus{
-		store:     store,
+		log:       cfg.Log,
+		seen:      cfg.Seen,
+		keyer:     cfg.Keyer,
 		scrub:     recall.NewScrubber(nil),
 		triggers:  map[string]Trigger{},
 		now:       func() time.Time { return time.Now().UTC() },
 		maxTries:  5,
-		seen:      map[string]bool{},
+		seenIDs:   map[string]bool{},
 		live:      map[string]*entry{},
 		timers:    map[string]Schedule{},
 		lastFired: map[string]time.Time{},
@@ -175,25 +199,50 @@ func Open(store recall.Store, triggers []Trigger, opts ...Option) (*Bus, error) 
 	for _, o := range opts {
 		o(b)
 	}
-	for _, t := range triggers {
+	for _, t := range cfg.Triggers {
 		if t.Name == "" || t.Start == nil || b.triggers[t.Name].Name != "" {
 			return nil, fmt.Errorf("%w: %q", ErrTrigger, t.Name)
 		}
 		b.triggers[t.Name] = t
 	}
-	data, err := store.ReadAll()
+	data, err := b.seen.ReadAll()
+	if err != nil {
+		return nil, err
+	}
+	lines, _ := recall.Lines(data)
+	for _, l := range lines {
+		var s struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal(l, &s) == nil && s.ID != "" {
+			b.seenIDs[s.ID] = true
+		}
+	}
+	data, err = b.log.ReadAll()
 	if err != nil {
 		return nil, err
 	}
 	lines, torn := recall.Lines(data)
+	skipped := 0
 	for _, l := range lines {
 		var r record
 		if err := json.Unmarshal(l, &r); err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrCorruptStore, err)
+			skipped++
+			continue
 		}
 		b.apply(r)
 	}
 	b.lines = len(lines)
+	// A pub whose seen line a crash cut off is recorded now, before the log
+	// can be compacted without it.
+	for id := range b.live {
+		if !b.seenIDs[id] {
+			if err := b.markSeen(id); err != nil {
+				return nil, err
+			}
+			b.seenIDs[id] = true
+		}
+	}
 	var dropped []string
 	for _, id := range b.order {
 		e := b.live[id]
@@ -205,14 +254,14 @@ func Open(store recall.Store, triggers []Trigger, opts ...Option) (*Bus, error) 
 		}
 	}
 	b.settle()
-	if torn || len(dropped) > 0 {
+	if torn || skipped > 0 || len(dropped) > 0 || b.stale > 0 {
 		if err := b.compact(); err != nil {
 			return nil, err
 		}
 	}
 	if b.att != nil && len(dropped) > 0 {
 		sort.Strings(dropped)
-		b.att.Note(fmt.Sprintf("Event deliveries dropped for %d removed trigger(s): %v", len(dropped), dedupe(dropped)))
+		b.att.Note(fmt.Sprintf("Some new items were not acted on because %v is no longer set up.", dedupe(dropped)))
 	}
 	return b, nil
 }
@@ -228,32 +277,45 @@ func dedupe(ss []string) []string {
 }
 
 // Publish records an event and queues it for every matching trigger. It
-// returns false if the event was already seen. Summary, body and ref are
-// scrubbed of credentials before they are stored (CRED-1); the ID is
-// computed from the raw values first.
+// returns false if the event was already seen. Identities are computed from
+// the raw ref and version; then summary, body, ref and version are scrubbed
+// of credentials (CRED-1) and the body is cut to MaxBody.
 func (b *Bus) Publish(e Event) (string, bool, error) {
 	if e.Kind == "" || e.Ref == "" {
 		return "", false, ErrNoRef
 	}
-	e.ID = EventID(e.Kind, e.Account, e.Ref, e.Version)
-	if e.Label != recall.Public || ownerData[e.Kind] {
-		e.Label = recall.Private
+	if recall.ReservedKinds[string(e.Kind)] {
+		return "", false, fmt.Errorf("%w: %s", ErrReservedKind, e.Kind)
 	}
+	e.Source = b.keyer.SourceID(string(e.Kind), e.Account, e.Ref)
+	e.ID = b.keyer.ID("evt", string(e.Kind), e.Account, e.Ref, e.Version)
+	e.Label = recall.EffectiveLabel(string(e.Kind), e.Label)
 	if e.At.IsZero() {
 		e.At = b.now()
 	}
 	e.Ref = b.scrub.Scrub(e.Ref)
 	e.Version = b.scrub.Scrub(e.Version)
 	e.Summary = b.scrub.Scrub(e.Summary)
-	e.Body = b.scrub.Scrub(e.Body)
+	e.Body = cut(b.scrub.Scrub(e.Body), MaxBody)
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.publishLocked(e)
 }
 
+func cut(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	s = s[:n]
+	for len(s) > 0 && !utf8.ValidString(s) {
+		s = s[:len(s)-1]
+	}
+	return s + "\n[cut]"
+}
+
 func (b *Bus) publishLocked(e Event) (string, bool, error) {
-	if b.seen[e.ID] {
+	if b.seenIDs[e.ID] {
 		return e.ID, false, nil
 	}
 	var targets []string
@@ -263,16 +325,27 @@ func (b *Bus) publishLocked(e Event) (string, bool, error) {
 		}
 	}
 	sort.Strings(targets)
-	r := record{Op: "pub", Event: &e, Targets: targets}
-	if len(targets) == 0 {
-		r = record{Op: "seen", ID: e.ID}
+	if len(targets) > 0 || e.Kind == Timer {
+		r := record{Op: "pub", Event: &e, Targets: targets}
+		if err := b.append(r); err != nil {
+			return "", false, err
+		}
+		b.apply(r)
+		b.settle()
 	}
-	if err := b.append(r); err != nil {
+	if err := b.markSeen(e.ID); err != nil {
 		return "", false, err
 	}
-	b.apply(r)
+	b.seenIDs[e.ID] = true
 	b.signal()
 	return e.ID, true, nil
+}
+
+func (b *Bus) markSeen(id string) error {
+	line, _ := json.Marshal(struct {
+		ID string `json:"id"`
+	}{id})
+	return b.seen.Append(append(line, '\n'))
 }
 
 func (b *Bus) signal() {
@@ -283,7 +356,7 @@ func (b *Bus) signal() {
 }
 
 // AddTimer registers a timer source. Its last firing is read from the
-// store, so a restart neither repeats nor loses a due time.
+// log, so a restart neither repeats nor loses a due time.
 func (b *Bus) AddTimer(s Schedule) error {
 	if s.Name == "" || s.First.IsZero() || s.Every < 0 {
 		return errors.New("events: timer needs a name and a first time")
@@ -294,7 +367,9 @@ func (b *Bus) AddTimer(s Schedule) error {
 	return nil
 }
 
-// Tick fires every timer that has come due by now.
+// Tick fires every timer that has come due by now. The firing is published
+// (durably) before it counts as fired, so a crash in between repeats the
+// publish, which dedupe absorbs, rather than losing it.
 func (b *Bus) Tick(now time.Time) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -312,46 +387,52 @@ func (b *Bus) Tick(now time.Time) error {
 		if s.Every > 0 {
 			due = s.First.Add(now.Sub(s.First) / s.Every * s.Every)
 		}
-		if last, ok := b.lastFired[n]; ok && !due.After(last) {
+		src := b.keyer.SourceID(string(Timer), "", n)
+		if last, ok := b.lastFired[src]; ok && !due.After(last) {
 			continue
 		}
 		dueText := due.UTC().Format(time.RFC3339Nano)
-		if err := b.append(record{Op: "timer", Name: n, Due: dueText}); err != nil {
-			return err
+		e := Event{
+			ID:      b.keyer.ID("evt", string(Timer), "", n, dueText),
+			Source:  src,
+			Kind:    Timer,
+			Ref:     b.scrub.Scrub(n),
+			Version: dueText,
+			At:      due,
+			Label:   recall.EffectiveLabel(string(Timer), s.Label),
+			Summary: b.scrub.Scrub(s.Summary),
 		}
-		b.lastFired[n] = due
-		label := s.Label
-		if label != recall.Public {
-			label = recall.Private
-		}
-		e := Event{Kind: Timer, Ref: n, Version: dueText, At: due, Label: label, Summary: b.scrub.Scrub(s.Summary)}
-		e.ID = EventID(Timer, "", n, dueText)
 		if _, _, err := b.publishLocked(e); err != nil {
 			return err
 		}
+		b.lastFired[src] = due
 	}
 	return nil
 }
 
-// Pump delivers every pending (event, trigger) pair once, in publish
-// order, and returns how many deliveries succeeded. Start runs outside the
-// bus lock.
+// Pump tries every pending (event, trigger) pair that is due, in publish
+// order, and returns how many deliveries succeeded. Before each Start it
+// re-checks, under the lock, that the delivery is still pending, so a
+// deletion during Pump is not undone by a stale delivery. A failure is
+// retried after a backoff (2s doubling, at most an hour).
 func (b *Bus) Pump(ctx context.Context) int {
 	type job struct {
-		d Delivery
-		t Trigger
+		id, trigger string
 	}
 	b.mu.Lock()
+	now := b.now()
 	var jobs []job
 	for _, id := range b.order {
 		e := b.live[id]
 		names := make([]string, 0, len(e.pending))
 		for n := range e.pending {
-			names = append(names, n)
+			if t, ok := e.next[n]; !ok || !now.Before(t) {
+				names = append(names, n)
+			}
 		}
 		sort.Strings(names)
 		for _, n := range names {
-			jobs = append(jobs, job{Delivery{Key: id + "/" + n, Trigger: n, Attempt: e.pending[n] + 1, Event: e.ev}, b.triggers[n]})
+			jobs = append(jobs, job{id, n})
 		}
 	}
 	b.mu.Unlock()
@@ -361,31 +442,56 @@ func (b *Bus) Pump(ctx context.Context) int {
 		if ctx.Err() != nil {
 			break
 		}
-		err := safeStart(ctx, j.t, j.d)
 		b.mu.Lock()
-		e := b.live[j.d.Event.ID]
+		e := b.live[j.id]
 		if e == nil {
 			b.mu.Unlock()
-			continue // forgotten meanwhile
+			continue
 		}
-		if _, still := e.pending[j.d.Trigger]; !still {
+		tries, still := e.pending[j.trigger]
+		if !still {
+			b.mu.Unlock()
+			continue
+		}
+		d := Delivery{Key: j.id + "/" + j.trigger, Trigger: j.trigger, Attempt: tries + 1, Event: e.ev}
+		t := b.triggers[j.trigger]
+		b.mu.Unlock()
+
+		err := safeStart(ctx, t, d)
+
+		b.mu.Lock()
+		e = b.live[j.id]
+		if e == nil {
+			b.mu.Unlock()
+			continue
+		}
+		if _, still := e.pending[j.trigger]; !still {
 			b.mu.Unlock()
 			continue
 		}
 		var r record
 		switch {
 		case err == nil:
-			r = record{Op: "ack", ID: j.d.Event.ID, Trigger: j.d.Trigger}
+			r = record{Op: "ack", ID: j.id, Trigger: j.trigger}
 			ok++
-		case j.d.Attempt >= b.maxTries:
-			r = record{Op: "dead", ID: j.d.Event.ID, Trigger: j.d.Trigger}
+		case d.Attempt >= b.maxTries:
+			r = record{Op: "dead", ID: j.id, Trigger: j.trigger}
 		default:
-			r = record{Op: "fail", ID: j.d.Event.ID, Trigger: j.d.Trigger}
+			r = record{Op: "fail", ID: j.id, Trigger: j.trigger}
 		}
 		if aerr := b.append(r); aerr == nil {
 			b.apply(r)
-			if r.Op == "dead" && b.att != nil {
-				b.att.Note(fmt.Sprintf("Could not start %s for a %s event after %d tries.", j.d.Trigger, j.d.Event.Kind, j.d.Attempt))
+			switch r.Op {
+			case "fail":
+				back := 2 * time.Second << uint(d.Attempt-1)
+				if back > time.Hour || back <= 0 {
+					back = time.Hour
+				}
+				e.next[j.trigger] = b.now().Add(back)
+			case "dead":
+				if b.att != nil {
+					b.att.Note(fmt.Sprintf("Couldn't act on a new %s item: %s failed %d times and won't try again.", d.Event.Kind, d.Trigger, d.Attempt))
+				}
 			}
 		}
 		b.settle()
@@ -435,36 +541,36 @@ func (b *Bus) Pending() int {
 	return n
 }
 
-// Forget drops every event, pending or not, about a source and rewrites
-// the store, so a deletion request reaches the bus's copy too (CAP-3). Only
-// the event IDs are kept, so the same item is not delivered again. ref is
-// compared after scrubbing, as stored.
-func (b *Bus) Forget(kind Kind, account, ref string) error {
-	ref = b.scrub.Scrub(ref)
+// Forget drops every event, pending or not, about a source (its keyed
+// identity, as recall.Index.SourceID gives it) and rewrites the log, so a
+// deletion reaches the bus's copy too (CAP-3). Event IDs stay in the seen
+// list, so the same version is not delivered again.
+func (b *Bus) Forget(source string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	hit := false
 	for id, e := range b.live {
-		if e.ev.Kind == kind && e.ev.Account == account && e.ev.Ref == ref {
+		if e.ev.Source == source {
 			delete(b.live, id)
+			hit = true
 		}
 	}
+	if !hit && b.stale == 0 {
+		return nil
+	}
 	b.reorder()
-	// Always rewrite: a settled event's content can still be in the store
-	// until the next compaction.
 	return b.compact()
 }
 
 // ForgetSource adapts Forget to recall.Index.OnDelete.
-func (b *Bus) ForgetSource(s recall.Source) {
-	_ = b.Forget(Kind(s.Kind), s.Account, s.Ref)
-}
+func (b *Bus) ForgetSource(d recall.Deleted) error { return b.Forget(d.ID) }
 
 func (b *Bus) append(r record) error {
 	data, err := json.Marshal(r)
 	if err != nil {
 		return err
 	}
-	if err := b.store.Append(append(data, '\n')); err != nil {
+	if err := b.log.Append(append(data, '\n')); err != nil {
 		return err
 	}
 	b.lines++
@@ -477,15 +583,17 @@ func (b *Bus) apply(r record) {
 		if r.Event == nil {
 			return
 		}
-		b.seen[r.Event.ID] = true
-		e := &entry{ev: *r.Event, pending: map[string]int{}}
+		e := &entry{ev: *r.Event, pending: map[string]int{}, next: map[string]time.Time{}}
 		for _, t := range r.Targets {
 			e.pending[t] = 0
 		}
 		b.live[r.Event.ID] = e
 		b.order = append(b.order, r.Event.ID)
-	case "seen":
-		b.seen[r.ID] = true
+		if r.Event.Kind == Timer {
+			if t, err := time.Parse(time.RFC3339Nano, r.Event.Version); err == nil && t.After(b.lastFired[r.Event.Source]) {
+				b.lastFired[r.Event.Source] = t
+			}
+		}
 	case "ack", "dead":
 		if e := b.live[r.ID]; e != nil {
 			delete(e.pending, r.Trigger)
@@ -497,18 +605,19 @@ func (b *Bus) apply(r record) {
 			}
 		}
 	case "timer":
-		if t, err := time.Parse(time.RFC3339Nano, r.Due); err == nil {
-			b.lastFired[r.Name] = t
+		if r.At.After(b.lastFired[r.Src]) {
+			b.lastFired[r.Src] = r.At
 		}
 	}
 }
 
-// settle drops content of events with no pending delivery.
+// settle drops the content of events with no pending delivery.
 func (b *Bus) settle() {
 	changed := false
 	for id, e := range b.live {
 		if len(e.pending) == 0 {
 			delete(b.live, id)
+			b.stale++
 			changed = true
 		}
 	}
@@ -527,49 +636,36 @@ func (b *Bus) reorder() {
 	b.order = out
 }
 
-// maybeCompact rewrites the store when settled records dominate it, so
-// delivered event content does not linger.
 func (b *Bus) maybeCompact() error {
-	if b.lines > 64 && b.lines > 2*(len(b.live)+len(b.lastFired))+len(b.seen) {
+	if b.stale >= staleLimit {
 		return b.compact()
 	}
 	return nil
 }
 
+// compact rewrites the log with timer state and live events only. Its cost
+// is proportional to live events, not to history.
 func (b *Bus) compact() error {
 	var buf []byte
+	n := 0
 	put := func(r record) error {
 		data, err := json.Marshal(r)
 		if err != nil {
 			return err
 		}
 		buf = append(append(buf, data...), '\n')
+		n++
 		return nil
 	}
-	ids := make([]string, 0, len(b.seen))
-	for id := range b.seen {
-		if b.live[id] == nil {
-			ids = append(ids, id)
-		}
+	srcs := make([]string, 0, len(b.lastFired))
+	for s := range b.lastFired {
+		srcs = append(srcs, s)
 	}
-	sort.Strings(ids)
-	n := 0
-	for _, id := range ids {
-		if err := put(record{Op: "seen", ID: id}); err != nil {
+	sort.Strings(srcs)
+	for _, s := range srcs {
+		if err := put(record{Op: "timer", Src: s, At: b.lastFired[s]}); err != nil {
 			return err
 		}
-		n++
-	}
-	names := make([]string, 0, len(b.lastFired))
-	for name := range b.lastFired {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		if err := put(record{Op: "timer", Name: name, Due: b.lastFired[name].UTC().Format(time.RFC3339Nano)}); err != nil {
-			return err
-		}
-		n++
 	}
 	for _, id := range b.order {
 		e := b.live[id]
@@ -582,30 +678,33 @@ func (b *Bus) compact() error {
 		if err := put(record{Op: "pub", Event: &ev, Targets: targets}); err != nil {
 			return err
 		}
-		n++
 		for _, t := range targets {
 			for k := 0; k < e.pending[t]; k++ {
 				if err := put(record{Op: "fail", ID: id, Trigger: t}); err != nil {
 					return err
 				}
-				n++
 			}
 		}
 	}
-	if err := b.store.Rewrite(buf); err != nil {
+	if err := b.log.Rewrite(buf); err != nil {
 		return err
 	}
 	b.lines = n
+	b.stale = 0
 	return nil
 }
 
 // IndexInto returns a trigger that records every event in the recall index
-// with its provenance (CAP-3: everything the system has seen).
+// with its provenance (CAP-3: everything the system has seen), under the
+// event's source identity. ix must be the index whose Keyer the bus uses.
 func IndexInto(ix *recall.Index) Trigger {
 	return Trigger{
 		Name: "recall",
 		Start: func(_ context.Context, d Delivery) error {
 			e := d.Event
+			if recall.ReservedKinds[string(e.Kind)] {
+				return fmt.Errorf("%w: %s", ErrReservedKind, e.Kind)
+			}
 			text := e.Summary
 			if e.Body != "" {
 				if text != "" {
@@ -613,11 +712,14 @@ func IndexInto(ix *recall.Index) Trigger {
 				}
 				text += e.Body
 			}
-			_, err := ix.Ingest(recall.Item{
+			_, err := ix.IngestKeyed(e.Source, recall.Item{
 				Source: recall.Source{Kind: string(e.Kind), Account: e.Account, Ref: e.Ref, Seen: e.At},
 				Label:  e.Label,
 				Text:   text,
 			})
+			if errors.Is(err, recall.ErrDeleted) {
+				return nil // deleted meanwhile: nothing to index
+			}
 			return err
 		},
 	}

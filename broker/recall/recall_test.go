@@ -142,7 +142,10 @@ func TestReingestReplaces(t *testing.T) {
 // private unless marked public; derived items inherit privacy.
 func TestLabels(t *testing.T) {
 	ix := open(t, &MemStore{})
-	for _, k := range []string{"mail", "file", "calendar", "owner"} {
+	for _, k := range []string{"mail", "file", "calendar", "owner", "contact", "credentialed", "webb", "Web", ""} {
+		if k == "" {
+			continue
+		}
 		id := mustIngest(t, ix, Item{Source: Source{Kind: k, Ref: "r"}, Label: Public, Text: "x"})
 		if it, _ := ix.Get(id); it.Label != Private {
 			t.Fatalf("%s declared public must be private", k)
@@ -163,6 +166,23 @@ func TestLabels(t *testing.T) {
 	sum := mustIngest(t, ix, Item{Source: Source{Kind: "agent", Ref: "summary", DerivedFrom: []string{task}}, Label: Public, Text: "trip summary"})
 	if it, _ := ix.Get(sum); it.Label != Private {
 		t.Fatal("an item derived from a private item must be private")
+	}
+	orphan := mustIngest(t, ix, Item{Source: Source{Kind: "agent", Ref: "orphan", DerivedFrom: []string{"no-such-item"}}, Label: Public, Text: "x"})
+	if it, _ := ix.Get(orphan); it.Label != Private {
+		t.Fatal("an item derived from an unknown parent must be private")
+	}
+	fromPub := mustIngest(t, ix, Item{Source: Source{Kind: "agent", Ref: "frompub", DerivedFrom: []string{pub}}, Label: Public, Text: "x"})
+	if it, _ := ix.Get(fromPub); it.Label != Public {
+		t.Fatal("an agent item derived only from public items may be public")
+	}
+	// Re-ingest never lowers a label.
+	w := mustIngest(t, ix, Item{Source: Source{Kind: "web", Ref: "page"}, Text: "x"})
+	mustIngest(t, ix, Item{Source: Source{Kind: "web", Ref: "page"}, Label: Public, Text: "y"})
+	if it, _ := ix.Get(w); it.Label != Private {
+		t.Fatal("re-ingest lowered a label")
+	}
+	if _, err := ix.Ingest(Item{Source: Source{Kind: "preference", Ref: "p"}, Text: "x"}); !errors.Is(err, ErrReservedKind) {
+		t.Fatalf("preference kind must be refused: %v", err)
 	}
 }
 
@@ -187,6 +207,15 @@ func TestSearchRaisesMachineBeforePrivateResults(t *testing.T) {
 	if labels.Label("m-1") != Private {
 		t.Fatal("receiving recall results must raise the machine to private")
 	}
+	// Even a search that finds nothing raises: "no match" is owner data.
+	if _, err := ix.Search("m-4", Query{Text: "nothing-matches-this"}); err != nil || labels.Label("m-4") != Private {
+		t.Fatalf("an empty private-capable search must raise: %v", err)
+	}
+	for _, r := range rs {
+		if r.Score != 0 {
+			t.Fatal("scores must not reach agents")
+		}
+	}
 
 	labels.failing = true
 	if rs, err := ix.Search("m-2", Query{Text: "flight"}); err == nil || rs != nil {
@@ -196,6 +225,9 @@ func TestSearchRaisesMachineBeforePrivateResults(t *testing.T) {
 	mustIngest(t, noLabels, Item{Source: Source{Kind: "mail", Ref: "m"}, Text: "flight"})
 	if _, err := noLabels.Search("m-3", Query{Text: "flight"}); !errors.Is(err, ErrNoLabeler) {
 		t.Fatalf("without a labeler private results must be refused, got %v", err)
+	}
+	if _, err := noLabels.Search("m-3", Query{Text: "flight", PublicOnly: true}); err != nil {
+		t.Fatalf("a public-only search needs no labeler: %v", err)
 	}
 }
 
@@ -283,8 +315,8 @@ func TestDeletionPropagates(t *testing.T) {
 		t.Fatal(err)
 	}
 	ix := open(t, st)
-	var hooked []Source
-	ix.OnDelete(func(s Source) { hooked = append(hooked, s) })
+	var hooked []Deleted
+	ix.OnDelete(func(d Deleted) error { hooked = append(hooked, d); return nil })
 	mail := mustIngest(t, ix, Item{Source: Source{Kind: "mail", Ref: "<m@x>"}, Text: "biopsy results attached zebracorn"})
 	sum := mustIngest(t, ix, Item{Source: Source{Kind: "agent", Ref: "s1", DerivedFrom: []string{mail}},
 		Text: "summary: zebracorn results normal", Facts: []Fact{{"owner", "result", "zebracorn"}}})
@@ -295,7 +327,7 @@ func TestDeletionPropagates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rep.Items) != 3 || len(hooked) != 3 {
+	if len(rep.Items) != 3 || len(hooked) != 3 || hooked[0].Source.Kind == "" {
 		t.Fatalf("cascade: %+v hooks %d", rep, len(hooked))
 	}
 	if rs := ix.Lookup(Query{Text: "zebracorn"}); len(rs) != 0 {

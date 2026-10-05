@@ -33,6 +33,8 @@ var (
 	otpauthURI = regexp.MustCompile(`(?i)otpauth://\S+`)
 	urlRe      = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://[^\s<>"']+`)
 	emailRe    = regexp.MustCompile(`^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$`)
+	// Identifier shapes that are public by design: UPS tracking numbers.
+	nonSecretID = regexp.MustCompile(`^1Z[0-9A-Z]{16}$`)
 	// Grouped codes such as XXXXX-XXXXX-XXXXX (recovery and backup codes).
 	groupedCode = regexp.MustCompile(`\b[A-Za-z0-9]{4,8}(?:-[A-Za-z0-9]{4,8}){2,}\b`)
 )
@@ -161,7 +163,7 @@ func isSpace(c byte) bool { return c == ' ' || c == '\t' || c == '\n' || c == '\
 // per-character entropy, or at least 20 characters of very high entropy.
 // Email addresses are kept.
 func randomLooking(t string) bool {
-	if len(t) < 16 || emailRe.MatchString(t) {
+	if len(t) < 16 || emailRe.MatchString(t) || nonSecretID.MatchString(t) {
 		return false
 	}
 	h := entropy(t)

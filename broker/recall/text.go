@@ -1,6 +1,7 @@
 package recall
 
 import (
+	"fmt"
 	"hash/fnv"
 	"math"
 	"strings"
@@ -17,20 +18,44 @@ func tokens(s string) []string {
 // Embedder turns texts into vectors. The production embedder is the local
 // inference service (SPEC §3: an untrusted service on the box); recall works
 // without one, on full text and facts alone (DEP-1 style degradation).
+//
+// ID names the vector space (model, version, dimension). Vectors are stored
+// with it and compared only with query vectors of the same ID, so a new
+// embedder never compares across spaces; BM25 still answers meanwhile and
+// Index.Reembed brings old vectors over.
 type Embedder interface {
+	ID() string
 	Embed(texts []string) ([][]float32, error)
 }
+
+// CosineFloor is optional on an Embedder: the similarity below which a
+// vector match alone is noise in its space. Without it, defaultMinCosine.
+type CosineFloor interface {
+	MinCosine() float64
+}
+
+const defaultMinCosine = 0.3
 
 // HashEmbedder is a stdlib-only embedder: feature hashing of words and
 // character trigrams, L2-normalised. It gives fuzzy matching (inflections,
 // typos) with no model, and is the fallback when local inference is absent.
 type HashEmbedder struct{ Dim int }
 
-func (h HashEmbedder) Embed(texts []string) ([][]float32, error) {
-	dim := h.Dim
-	if dim <= 0 {
-		dim = 512
+func (h HashEmbedder) dim() int {
+	if h.Dim <= 0 {
+		return 512
 	}
+	return h.Dim
+}
+
+// ID names the hashing space and its dimension.
+func (h HashEmbedder) ID() string { return fmt.Sprintf("hash-v1/%d", h.dim()) }
+
+// MinCosine is the noise floor measured for this embedder.
+func (h HashEmbedder) MinCosine() float64 { return 0.2 }
+
+func (h HashEmbedder) Embed(texts []string) ([][]float32, error) {
+	dim := h.dim()
 	out := make([][]float32, len(texts))
 	for i, t := range texts {
 		v := make([]float32, dim)
