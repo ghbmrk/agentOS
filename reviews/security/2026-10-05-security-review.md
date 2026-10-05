@@ -270,3 +270,7 @@ Nothing here needs Mark.
 - Confirm the code fixes for findings 1–4 landed.
 - Check that V18 is set in the image (#41 follow-up).
 - Re-check the ENOSPC behaviour of the CH-18 counters once the quota exists.
+
+## Carried to run 3
+
+- CH-20 [Risk] wording: under rule (a) the text summary is the reply's first sentence, so during an unlocked window S reads one sentence of private content per reply. "Summaries, not content" overstates it. Add a [Risk] line in run 3's spec diff (CH-20 design ruling, 2026-10-05).
