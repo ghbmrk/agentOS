@@ -186,9 +186,14 @@ var (
 // Agents reach it only through Search and PreferencesFor, which raise the
 // caller's label before returning owner data, and see results only through
 // Render (untrusted content, no scores). Only the broker writes to it.
+//
+// Memory holds what search needs (postings, quantized vectors, facts,
+// labels); item text and provenance stay in the segments on disk and are
+// read for the results returned (R8).
 type Index struct {
 	mu       sync.RWMutex
-	store    Store
+	dir      Dir
+	meta     Store
 	scrub    *Scrubber
 	emb      Embedder
 	labels   Labeler
@@ -197,15 +202,26 @@ type Index struct {
 	keyer    Keyer
 	keyGiven bool
 	hdrEmb   string
-	items    map[string]*Item
-	all      *textIndex // every item
-	pub      *textIndex // public items only: public-only searches rank here
-	prefs    map[string]Preference
-	tombs    map[string]time.Time // deleted ID -> deletion time
-	used     map[string]bool      // owner message IDs already acted on
-	onDelete []func(Deleted) error
-	lines    int // records in the store
-	skipped  int
+
+	items    map[string]*entry
+	byDoc    map[uint32]*entry
+	children map[string][]string // parent ID -> IDs derived from it
+	older    map[string][]uint32 // ID -> segments still holding superseded versions
+	all      *textIndex          // every item
+	pub      *textIndex          // public items only: public-only searches rank here
+	nextDoc  uint32
+
+	segs     map[uint32]*segInfo
+	active   uint32
+	dirty    map[uint32]bool // segments that lost live lines since the last check
+	unerased map[uint32]bool // segments a failed rewrite left holding deleted data
+
+	prefs     map[string]Preference
+	tombs     map[string]time.Time // deleted ID -> deletion time
+	used      map[string]bool      // owner message IDs already acted on
+	onDelete  []func(Deleted) error
+	metaLines int
+	skipped   int
 }
 
 // Option configures an Index.
@@ -227,7 +243,7 @@ func WithVaultRedactor(r func(string) string) Option {
 }
 
 // WithKeyer sets the identity key, normally a vault-held broker key. Without
-// it a random key is generated on first open and kept in the store header.
+// it a random key is generated on first open and kept in the meta header.
 func WithKeyer(k Keyer) Option {
 	return func(ix *Index) { ix.keyer, ix.keyGiven = k, k.Valid() }
 }
@@ -240,62 +256,63 @@ type header struct {
 	Embedder string `json:"embedder,omitempty"`
 }
 
+// record is a meta-log record.
 type record struct {
-	Op     string      `json:"op"` // "hdr", "put", "pref", "tomb"
+	Op     string      `json:"op"` // "hdr", "pref", "tomb", "used"
 	Header *header     `json:"hdr,omitempty"`
-	Item   *Item       `json:"item,omitempty"`
 	Pref   *Preference `json:"pref,omitempty"`
 	ID     string      `json:"id,omitempty"`
 	At     time.Time   `json:"at,omitempty"`
 }
 
-// Open loads the index from store. An unreadable record is skipped (and
-// counted by Skipped), and the store is rewritten without it.
-func Open(store Store, opts ...Option) (*Index, error) {
+// Open loads the index from d. Unreadable records are skipped (and counted
+// by Skipped) and rewritten away, and so is any content a deletion that a
+// crash cut off had not yet erased.
+func Open(d Dir, opts ...Option) (*Index, error) {
 	ix := &Index{
-		store: store,
-		scrub: NewScrubber(nil),
-		emb:   HashEmbedder{},
-		now:   func() time.Time { return time.Now().UTC() },
-		items: map[string]*Item{},
-		all:   newTextIndex(),
-		pub:   newTextIndex(),
-		prefs: map[string]Preference{},
-		tombs: map[string]time.Time{},
-		used:  map[string]bool{},
+		dir:      d,
+		meta:     d.Meta(),
+		scrub:    NewScrubber(nil),
+		emb:      HashEmbedder{},
+		now:      func() time.Time { return time.Now().UTC() },
+		items:    map[string]*entry{},
+		byDoc:    map[uint32]*entry{},
+		children: map[string][]string{},
+		older:    map[string][]uint32{},
+		all:      newTextIndex(),
+		pub:      newTextIndex(),
+		segs:     map[uint32]*segInfo{},
+		dirty:    map[uint32]bool{},
+		unerased: map[uint32]bool{},
+		prefs:    map[string]Preference{},
+		tombs:    map[string]time.Time{},
+		used:     map[string]bool{},
 	}
 	for _, o := range opts {
 		o(ix)
 	}
-	data, err := store.ReadAll()
+	rewriteMeta, err := ix.loadMeta()
 	if err != nil {
 		return nil, err
 	}
-	lines, torn := Lines(data)
-	for _, l := range lines {
-		var r record
-		if err := json.Unmarshal(l, &r); err != nil {
-			ix.skipped++
-			continue
-		}
-		ix.apply(r)
-	}
-	ix.lines = len(lines)
 	if !ix.keyer.Valid() {
 		key := make([]byte, 32)
 		if _, err := rand.Read(key); err != nil {
 			return nil, err
 		}
 		ix.keyer = Keyer{key: key}
-		torn = true // write the header
+		rewriteMeta = true
 	}
 	if ix.hdrEmb != ix.embID() {
-		torn = true
+		rewriteMeta = true
 	}
-	if torn || ix.skipped > 0 {
-		if err := ix.compact(); err != nil {
+	if rewriteMeta {
+		if err := ix.compactMeta(); err != nil {
 			return nil, err
 		}
+	}
+	if err := ix.loadSegments(); err != nil {
+		return nil, err
 	}
 	return ix, nil
 }
@@ -340,21 +357,107 @@ func (ix *Index) Ingest(it Item) (string, error) {
 // Keyer from the raw ref (the event bus passes it, since it stores only the
 // scrubbed ref).
 func (ix *Index) IngestKeyed(id string, it Item) (string, error) {
+	ids, errs := ix.ingest([]string{id}, []Item{it})
+	return ids[0], errs[0]
+}
+
+// IngestBatch ingests items with one durable write per segment rather than
+// one per item, for backfills (a mailbox's history). Each item is admitted
+// or refused exactly as by Ingest; ids[i] and errs[i] are item i's outcome.
+func (ix *Index) IngestBatch(items []Item) (ids []string, errs []error) {
+	keys := make([]string, len(items))
+	for i, it := range items {
+		if it.Source.Kind != "" && it.Source.Ref != "" {
+			keys[i] = ix.SourceID(it.Source.Kind, it.Source.Account, it.Source.Ref)
+		}
+	}
+	return ix.ingest(keys, items)
+}
+
+// pendingPut is an admitted item and whether its receipt time was unknown.
+type pendingPut struct {
+	i       int
+	it      Item
+	unknown bool
+}
+
+func (ix *Index) ingest(keys []string, items []Item) ([]string, []error) {
+	ids := make([]string, len(items))
+	errs := make([]error, len(items))
+	now := ix.now()
+	var ready []pendingPut
+	for i, it := range items {
+		p, err := ix.prepare(keys[i], it, now)
+		if err != nil {
+			errs[i] = err
+			continue
+		}
+		ready = append(ready, p)
+		ready[len(ready)-1].i = i
+	}
+
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	var batch []*Item
+	var idx []int
+	inBatch := map[string]bool{}
+	flush := func() {
+		if len(batch) == 0 {
+			return
+		}
+		// Items before a failed append are durable and indexed: report
+		// them as ingested, and the error only for the rest. A compaction
+		// failure after all are applied is retried by later writes.
+		n, err := ix.putLockedN(batch)
+		for k, i := range idx {
+			if k < n {
+				ids[i] = batch[k].ID
+			} else {
+				errs[i] = err
+			}
+		}
+		batch, idx, inBatch = nil, nil, map[string]bool{}
+	}
+	for _, p := range ready {
+		// An item whose identity or a parent is earlier in this batch is
+		// admitted against the stored state, so the earlier one goes first.
+		dep := inBatch[p.it.ID]
+		for _, par := range p.it.Source.DerivedFrom {
+			dep = dep || inBatch[par]
+		}
+		if dep {
+			flush()
+		}
+		it := p.it
+		if err := ix.admitLocked(&it, p.unknown); err != nil {
+			errs[p.i] = err
+			continue
+		}
+		batch = append(batch, &it)
+		idx = append(idx, p.i)
+		inBatch[it.ID] = true
+	}
+	flush()
+	return ids, errs
+}
+
+// prepare checks and scrubs an item and embeds it, outside the lock.
+func (ix *Index) prepare(id string, it Item, now time.Time) (pendingPut, error) {
 	if it.Source.Kind == "" || it.Source.Ref == "" || id == "" {
-		return "", ErrNoSource
+		return pendingPut{}, ErrNoSource
 	}
 	if it.Source.Kind == "preference" {
-		return "", fmt.Errorf("%w: %s", ErrReservedKind, it.Source.Kind)
+		return pendingPut{}, fmt.Errorf("%w: %s", ErrReservedKind, it.Source.Kind)
 	}
 	it.ID = id
 	it.Label = EffectiveLabel(it.Source.Kind, it.Label)
-	now := ix.now()
-	unknownReceipt := it.Received.IsZero()
-	if unknownReceipt {
+	it.LabelBy = ""
+	unknown := it.Received.IsZero()
+	if unknown {
 		it.Received = now
 	}
 	if it.Received.After(now) {
-		return "", ErrFuture
+		return pendingPut{}, ErrFuture
 	}
 	if it.Source.Seen.IsZero() {
 		it.Source.Seen = it.Received
@@ -373,38 +476,36 @@ func (ix *Index) IngestKeyed(id string, it Item) (string, error) {
 			it.Vector, it.VecID = vs[0], ix.emb.ID()
 		}
 	}
+	return pendingPut{it: it, unknown: unknown}, nil
+}
 
-	ix.mu.Lock()
-	defer ix.mu.Unlock()
+// admitLocked applies the rules that depend on stored state. Caller holds mu.
+func (ix *Index) admitLocked(it *Item, unknownReceipt bool) error {
 	// Content the broker received before a deletion of this source never
 	// comes back (a stale delivery racing the deletion). Receipt time is the
 	// broker's own, so a source cannot date its way past a tombstone.
 	// An unknown receipt time counts as stale against a tombstone.
-	if t, ok := ix.tombs[id]; ok && (unknownReceipt || !it.Received.After(t)) {
-		return "", ErrDeleted
+	if t, ok := ix.tombs[it.ID]; ok && (unknownReceipt || !it.Received.After(t)) {
+		return ErrDeleted
 	}
 	// A label never falls on re-ingest; only Relabel lowers one. An owner
 	// relabel to public carries over while the caller still declares public.
-	if old := ix.items[id]; old != nil {
+	if old := ix.items[it.ID]; old != nil {
 		switch {
-		case old.Label == Private:
+		case old.label == Private:
 			it.Label = Private
-		case old.LabelBy != "" && it.Label == Public:
-			it.LabelBy = old.LabelBy
+		case old.labelBy != "" && it.Label == Public:
+			it.LabelBy = old.labelBy
 		}
 	}
 	// A derived item is at least as private as its parents, and private if
 	// any parent is unknown here.
 	for _, p := range it.Source.DerivedFrom {
-		if pi := ix.items[p]; pi == nil || pi.Label == Private {
+		if pi := ix.items[p]; pi == nil || pi.label == Private {
 			it.Label = Private
 		}
 	}
-	if err := ix.append(record{Op: "put", Item: &it}); err != nil {
-		return "", err
-	}
-	ix.apply(record{Op: "put", Item: &it})
-	return it.ID, ix.maybeCompact()
+	return nil
 }
 
 func searchText(it *Item) string {
@@ -421,11 +522,15 @@ func searchText(it *Item) string {
 func (ix *Index) Get(id string) (Item, bool) {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
-	it, ok := ix.items[id]
+	e, ok := ix.items[id]
 	if !ok {
 		return Item{}, false
 	}
-	return *it, true
+	it, err := ix.readItem(e)
+	if err != nil {
+		return Item{}, false
+	}
+	return it, true
 }
 
 // Len returns the number of items.
@@ -445,10 +550,10 @@ func (ix *Index) Reembed(limit int) (int, error) {
 	}
 	want := ix.emb.ID()
 	ix.mu.RLock()
-	var stale []Item
-	for _, it := range ix.items {
-		if it.VecID != want {
-			stale = append(stale, *it)
+	var stale []string
+	for id, e := range ix.items {
+		if e.vecID != want {
+			stale = append(stale, id)
 			if len(stale) >= limit {
 				break
 			}
@@ -456,28 +561,36 @@ func (ix *Index) Reembed(limit int) (int, error) {
 	}
 	ix.mu.RUnlock()
 	n := 0
-	for _, it := range stale {
+	for _, id := range stale {
+		ix.mu.RLock()
+		e := ix.items[id]
+		var it Item
+		var err error
+		if e != nil {
+			it, err = ix.readItem(e)
+		}
+		ix.mu.RUnlock()
+		if e == nil {
+			continue
+		}
+		if err != nil {
+			return n, err
+		}
 		vs, err := ix.emb.Embed([]string{searchText(&it)})
 		if err != nil || len(vs) != 1 {
 			return n, err
 		}
 		ix.mu.Lock()
-		cur := ix.items[it.ID]
-		if cur != nil && cur.VecID != want {
-			up := *cur
-			up.Vector, up.VecID = vs[0], want
-			if err := ix.append(record{Op: "put", Item: &up}); err != nil {
+		// Only the version that was read: a newer one has its own vector.
+		if cur := ix.items[id]; cur == e && cur.vecID != want {
+			it.Vector, it.VecID = vs[0], want
+			if err := ix.putLocked([]*Item{&it}); err != nil {
 				ix.mu.Unlock()
 				return n, err
 			}
-			ix.apply(record{Op: "put", Item: &up})
 			n++
 		}
-		err = ix.maybeCompact()
 		ix.mu.Unlock()
-		if err != nil {
-			return n, err
-		}
 	}
 	return n, nil
 }
@@ -518,11 +631,14 @@ func (ix *Index) DeleteSource(kind, account, rawRef string) (DeleteReport, error
 }
 
 // Delete removes items and every item derived from them (transitively),
-// with their facts and vectors, records a tombstone for each requested and
-// removed ID, rewrites the store so no copy remains in it, and then calls
-// the OnDelete hooks for each of those IDs, including requested IDs that
-// were not indexed (the event bus may still hold them). Hook errors are
-// returned after the deletion is durable.
+// with their facts and vectors. It records a durable tombstone for each
+// requested and removed ID first, then rewrites the segments that held any
+// version of them so no copy remains in a live file, and then calls the
+// OnDelete hooks for each of those IDs, including requested IDs that were
+// not indexed (the event bus may still hold them). Once the tombstones are
+// durable the deletion has taken effect: if a segment rewrite fails, the
+// error is returned, the rewrite is retried on the next deletion, and
+// Open erases what is left. Hook errors are returned likewise.
 func (ix *Index) Delete(ids ...string) (DeleteReport, error) {
 	ix.mu.Lock()
 	gone := map[string]bool{}
@@ -536,63 +652,69 @@ func (ix *Index) Delete(ids ...string) (DeleteReport, error) {
 	for len(queue) > 0 {
 		cur := queue[0]
 		queue = queue[1:]
-		for id, it := range ix.items {
-			if gone[id] {
-				continue
-			}
-			for _, p := range it.Source.DerivedFrom {
-				if p == cur {
-					gone[id] = true
-					queue = append(queue, id)
-					break
-				}
+		for _, c := range ix.children[cur] {
+			if !gone[c] {
+				gone[c] = true
+				queue = append(queue, c)
 			}
 		}
 	}
-	var rep DeleteReport
-	removed := map[string]*Item{}
-	oldTombs := map[string]time.Time{}
-	now := ix.now()
 	all := make([]string, 0, len(gone))
 	for id := range gone {
 		all = append(all, id)
-		if t, ok := ix.tombs[id]; ok {
-			oldTombs[id] = t
-		}
-		ix.tombs[id] = now
-		if it := ix.items[id]; it != nil {
-			removed[id] = it
-			delete(ix.items, id)
-			ix.all.remove(id)
-			ix.pub.remove(id)
-		}
 	}
 	sort.Strings(all)
-	if err := ix.compact(); err != nil {
-		// Not durable: restore so memory matches the store.
-		for _, it := range removed {
-			ix.apply(record{Op: "put", Item: it})
+	removed := map[string]Item{}
+	for _, id := range all {
+		if e := ix.items[id]; e != nil {
+			// An unreadable item is still deleted: its tombstone is
+			// written, its segment rewritten without it, and its source
+			// reported empty.
+			it, _ := ix.readItem(e)
+			removed[id] = it
 		}
-		for id := range gone {
-			delete(ix.tombs, id)
+	}
+	now := ix.now()
+	var buf []byte
+	for _, id := range all {
+		b, err := json.Marshal(record{Op: "tomb", ID: id, At: now})
+		if err != nil {
+			ix.mu.Unlock()
+			return DeleteReport{}, err
 		}
-		for id, t := range oldTombs {
-			ix.tombs[id] = t
-		}
+		buf = append(append(buf, b...), '\n')
+	}
+	if err := ix.meta.Append(buf); err != nil {
 		ix.mu.Unlock()
 		return DeleteReport{}, err
 	}
+	ix.metaLines += len(all)
+	erase := map[uint32]bool{}
+	for n := range ix.unerased {
+		erase[n] = true
+	}
+	var rep DeleteReport
 	srcs := map[string]Source{}
 	for _, id := range all {
-		if it := removed[id]; it != nil {
+		ix.tombs[id] = now
+		if e := ix.items[id]; e != nil {
+			it := removed[id]
+			erase[e.seg] = true
+			ix.dropLocked(e, searchText(&it), false)
 			rep.Items = append(rep.Items, id)
 			rep.Sources = append(rep.Sources, it.Source)
 			srcs[id] = it.Source
 		}
+		for _, n := range ix.older[id] {
+			erase[n] = true
+		}
+		delete(ix.older, id)
 	}
+	errErase := ix.rewriteSegs(erase)
+	errMeta := ix.maybeCompactMeta()
 	hooks := append([]func(Deleted) error{}, ix.onDelete...)
 	ix.mu.Unlock()
-	var errs []error
+	errs := []error{errErase, errMeta}
 	for _, id := range all {
 		for _, h := range hooks {
 			if err := h(Deleted{ID: id, Source: srcs[id]}); err != nil {
@@ -636,50 +758,50 @@ func (ix *Index) Relabel(messageID, id string, l Label) error {
 		if ix.used[msg.ID] {
 			return ErrUsedMessage
 		}
-		if !publicKinds[cur.Source.Kind] {
+		if !publicKinds[cur.kind] {
 			return ErrNotRelabelable
 		}
-		for _, p := range cur.Source.DerivedFrom {
-			if pi := ix.items[p]; pi == nil || pi.Label != Public {
+		for _, p := range cur.derived {
+			if pi := ix.items[p]; pi == nil || pi.label != Public {
 				return ErrNotRelabelable
 			}
 		}
-		if err := ix.append(record{Op: "used", ID: msg.ID}); err != nil {
+		if err := ix.appendMeta(record{Op: "used", ID: msg.ID}); err != nil {
 			return err
 		}
 		ix.used[msg.ID] = true
 	}
-	by := msg.ID
-	up := *cur
-	up.Label, up.LabelBy = l, by
-	if err := ix.append(record{Op: "put", Item: &up}); err != nil {
+	up, err := ix.readItem(cur)
+	if err != nil {
 		return err
 	}
-	ix.apply(record{Op: "put", Item: &up})
+	up.Label, up.LabelBy = l, msg.ID
+	puts := []*Item{&up}
 	if l == Private {
 		// Raise everything derived from it too, transitively.
-		for changed := true; changed; {
-			changed = false
-			for _, it := range ix.items {
-				if it.Label != Public {
-					continue
-				}
-				for _, p := range it.Source.DerivedFrom {
-					if pi := ix.items[p]; pi == nil || pi.Label != Public {
-						d := *it
-						d.Label, d.LabelBy = Private, ""
-						if err := ix.append(record{Op: "put", Item: &d}); err != nil {
-							return err
-						}
-						ix.apply(record{Op: "put", Item: &d})
-						changed = true
-						break
-					}
-				}
+		seen := map[string]bool{id: true}
+		queue := append([]string(nil), ix.children[id]...)
+		for len(queue) > 0 {
+			c := queue[0]
+			queue = queue[1:]
+			if seen[c] {
+				continue
 			}
+			seen[c] = true
+			queue = append(queue, ix.children[c]...)
+			e := ix.items[c]
+			if e == nil || e.label != Public {
+				continue
+			}
+			d, err := ix.readItem(e)
+			if err != nil {
+				return err
+			}
+			d.Label, d.LabelBy = Private, ""
+			puts = append(puts, &d)
 		}
 	}
-	return ix.maybeCompact()
+	return ix.putLocked(puts)
 }
 
 // SetPreference stores or replaces an owner preference. messageID must name
@@ -703,7 +825,7 @@ func (ix *Index) SetPreference(messageID, key, value string) error {
 	ix.prefs[key] = p
 	ix.used[msg.ID] = true
 	// Rewrite so an edited value leaves no earlier copy in the store.
-	if err := ix.compact(); err != nil {
+	if err := ix.compactMeta(); err != nil {
 		delete(ix.used, msg.ID)
 		if had {
 			ix.prefs[key] = old
@@ -733,7 +855,7 @@ func (ix *Index) DeletePreference(messageID, key string) error {
 	}
 	delete(ix.prefs, key)
 	ix.used[msg.ID] = true
-	if err := ix.compact(); err != nil {
+	if err := ix.compactMeta(); err != nil {
 		delete(ix.used, msg.ID)
 		ix.prefs[key] = old
 		return err
@@ -762,13 +884,24 @@ const MinTombstoneAge = 24 * time.Hour
 // A tombstone only has to outlive deliveries already in flight when the
 // deletion happened (the bus gives up after its tries, within minutes) and
 // the hooks' replay after a crash; the broker prunes with a margin of days
-// (default policy: 30 days).
+// (default policy: 30 days). Nothing is pruned while a deleted item's
+// content still waits to be erased from a segment, since the tombstone is
+// what keeps it from coming back.
 func (ix *Index) PruneTombstones(maxAge time.Duration) (int, error) {
 	if maxAge < MinTombstoneAge {
 		return 0, fmt.Errorf("recall: tombstones must be kept at least %v", MinTombstoneAge)
 	}
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
+	if len(ix.unerased) > 0 {
+		retry := map[uint32]bool{}
+		for n := range ix.unerased {
+			retry[n] = true
+		}
+		if err := ix.rewriteSegs(retry); err != nil {
+			return 0, err
+		}
+	}
 	cut := ix.now().Add(-maxAge)
 	old := map[string]time.Time{}
 	for id, t := range ix.tombs {
@@ -780,7 +913,7 @@ func (ix *Index) PruneTombstones(maxAge time.Duration) (int, error) {
 	if len(old) == 0 {
 		return 0, nil
 	}
-	if err := ix.compact(); err != nil {
+	if err := ix.compactMeta(); err != nil {
 		for id, t := range old {
 			ix.tombs[id] = t
 		}
@@ -899,15 +1032,18 @@ func (ix *Index) search(q Query) []Result {
 	for _, k := range q.Kinds {
 		kinds[k] = true
 	}
-	eligible := func(it *Item) bool {
-		if q.PublicOnly && it.Label != Public {
+	eligible := func(e *entry) bool {
+		if e == nil {
 			return false
 		}
-		if len(kinds) > 0 && !kinds[it.Source.Kind] {
+		if q.PublicOnly && e.label != Public {
+			return false
+		}
+		if len(kinds) > 0 && !kinds[e.kind] {
 			return false
 		}
 		if q.Fact != nil {
-			for _, f := range it.Facts {
+			for _, f := range e.facts {
 				if q.Fact.match(f) {
 					return true
 				}
@@ -917,14 +1053,18 @@ func (ix *Index) search(q Query) []Result {
 		return true
 	}
 
-	scores := map[string]float64{}
+	type cand struct {
+		e     *entry
+		score float64
+	}
+	var cands []cand
 	if strings.TrimSpace(q.Text) == "" {
 		if q.Fact == nil {
 			return nil
 		}
-		for id, it := range ix.items {
-			if eligible(it) {
-				scores[id] = 1
+		for _, e := range ix.items {
+			if eligible(e) {
+				cands = append(cands, cand{e, 1})
 			}
 		}
 	} else {
@@ -934,187 +1074,59 @@ func (ix *Index) search(q Query) []Result {
 		}
 		bm := text.score(q.Text)
 		var max float64
-		for id, s := range bm {
-			if s > max && eligible(ix.items[id]) {
+		for doc, s := range bm {
+			if s > max && eligible(ix.byDoc[doc]) {
 				max = s
 			}
 		}
 		var qv []float32
+		var qn float64
 		embID := ix.embID()
 		if ix.emb != nil {
 			if vs, err := ix.emb.Embed([]string{q.Text}); err == nil && len(vs) == 1 {
-				qv = vs[0]
+				qv, qn = vs[0], norm(vs[0])
 			}
 		}
 		floor := ix.minCosine()
-		for id, it := range ix.items {
-			if !eligible(it) {
+		for _, e := range ix.items {
+			if !eligible(e) {
 				continue
 			}
 			var s float64
-			if b := bm[id]; b > 0 && max > 0 {
+			if b := bm[e.doc]; b > 0 && max > 0 {
 				s += 0.6 * b / max
 			}
-			if it.VecID == embID {
-				if c := cosine(qv, it.Vector); c >= floor {
+			if qv != nil && e.vecID == embID {
+				if c := cosineQ(qv, qn, e.vec, e.vnorm); c >= floor {
 					s += 0.4 * c
 				}
 			}
 			if s > 0 {
-				scores[id] = s
+				cands = append(cands, cand{e, s})
 			}
 		}
 	}
-
-	out := make([]Result, 0, len(scores))
-	for id, s := range scores {
-		it := ix.items[id]
-		out = append(out, Result{ID: id, Source: it.Source, Label: it.Label, Text: it.Text,
-			Facts: append([]Fact(nil), it.Facts...), Score: s})
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Score != out[j].Score {
-			return out[i].Score > out[j].Score
+	sort.Slice(cands, func(i, j int) bool {
+		a, b := cands[i], cands[j]
+		if a.score != b.score {
+			return a.score > b.score
 		}
-		if !out[i].Source.Seen.Equal(out[j].Source.Seen) {
-			return out[i].Source.Seen.After(out[j].Source.Seen)
+		if !a.e.seen.Equal(b.e.seen) {
+			return a.e.seen.After(b.e.seen)
 		}
-		return out[i].ID < out[j].ID
+		return a.e.id < b.e.id
 	})
-	if len(out) > limit {
-		out = out[:limit]
+	out := make([]Result, 0, limit)
+	for _, c := range cands {
+		if len(out) == limit {
+			break
+		}
+		it, err := ix.readItem(c.e)
+		if err != nil {
+			continue // unreadable on the medium: not served
+		}
+		out = append(out, Result{ID: it.ID, Source: it.Source, Label: c.e.label, Text: it.Text,
+			Facts: append([]Fact(nil), it.Facts...), Score: c.score})
 	}
 	return out
-}
-
-func (ix *Index) append(r record) error {
-	b, err := json.Marshal(r)
-	if err != nil {
-		return err
-	}
-	if err := ix.store.Append(append(b, '\n')); err != nil {
-		return err
-	}
-	ix.lines++
-	return nil
-}
-
-func (ix *Index) apply(r record) {
-	switch r.Op {
-	case "hdr":
-		if r.Header == nil {
-			return
-		}
-		ix.hdrEmb = r.Header.Embedder
-		if !ix.keyGiven && r.Header.Key != "" {
-			if k, err := hex.DecodeString(r.Header.Key); err == nil && len(k) >= 16 {
-				ix.keyer = Keyer{key: k}
-			}
-		}
-	case "put":
-		if r.Item == nil {
-			return
-		}
-		it := *r.Item
-		ix.items[it.ID] = &it
-		st := searchText(&it)
-		ix.all.add(it.ID, st)
-		if it.Label == Public {
-			ix.pub.add(it.ID, st)
-		} else {
-			ix.pub.remove(it.ID)
-		}
-	case "pref":
-		if r.Pref != nil {
-			ix.prefs[r.Pref.Key] = *r.Pref
-		}
-	case "tomb":
-		if r.ID != "" {
-			ix.tombs[r.ID] = r.At
-		}
-	case "used":
-		if r.ID != "" {
-			ix.used[r.ID] = true
-		}
-	}
-}
-
-// maybeCompact rewrites the store once replaced items make up more than
-// half of it, so an overwritten version does not linger indefinitely.
-func (ix *Index) maybeCompact() error {
-	live := len(ix.items) + len(ix.prefs) + len(ix.tombs) + len(ix.used) + 1
-	if ix.lines > 64 && ix.lines > 2*live {
-		return ix.compact()
-	}
-	return nil
-}
-
-// compact rewrites the store with only the live state: header, items,
-// preferences and tombstones. Caller holds mu.
-func (ix *Index) compact() error {
-	var buf []byte
-	n := 0
-	put := func(r record) error {
-		b, err := json.Marshal(r)
-		if err != nil {
-			return err
-		}
-		buf = append(append(buf, b...), '\n')
-		n++
-		return nil
-	}
-	h := &header{Embedder: ix.embID()}
-	if !ix.keyGiven {
-		h.Key = hex.EncodeToString(ix.keyer.key)
-	}
-	if err := put(record{Op: "hdr", Header: h}); err != nil {
-		return err
-	}
-	ids := make([]string, 0, len(ix.items))
-	for id := range ix.items {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	for _, id := range ids {
-		if err := put(record{Op: "put", Item: ix.items[id]}); err != nil {
-			return err
-		}
-	}
-	keys := make([]string, 0, len(ix.prefs))
-	for k := range ix.prefs {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		p := ix.prefs[k]
-		if err := put(record{Op: "pref", Pref: &p}); err != nil {
-			return err
-		}
-	}
-	tids := make([]string, 0, len(ix.tombs))
-	for id := range ix.tombs {
-		tids = append(tids, id)
-	}
-	sort.Strings(tids)
-	for _, id := range tids {
-		if err := put(record{Op: "tomb", ID: id, At: ix.tombs[id]}); err != nil {
-			return err
-		}
-	}
-	uids := make([]string, 0, len(ix.used))
-	for id := range ix.used {
-		uids = append(uids, id)
-	}
-	sort.Strings(uids)
-	for _, id := range uids {
-		if err := put(record{Op: "used", ID: id}); err != nil {
-			return err
-		}
-	}
-	if err := ix.store.Rewrite(buf); err != nil {
-		return err
-	}
-	ix.lines = n
-	ix.hdrEmb = h.Embedder
-	return nil
 }

@@ -39,8 +39,9 @@ var controlPath = map[string][]string{
 	// It forwards each machine's model route to the vault process
 	// (modelroute, P2-4) and journals the denials that come back, and
 	// gives the owner channel the vault process's verify operation
-	// (owner.Verifier, egress K7).
-	"cmd/agentosd": {"daemon", "cgroup", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner"},
+	// (owner.Verifier, egress K7). It keeps the owner's agent machine
+	// running as foreground work (admission.Foreground, RES-1).
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies

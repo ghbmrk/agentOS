@@ -27,7 +27,7 @@ func TestPublicOnlySearchIgnoresPrivateStatistics(t *testing.T) {
 	run := func(privates int) string {
 		var out []string
 		for _, emb := range []Embedder{nil, HashEmbedder{}} {
-			ix := open(t, &MemStore{}, WithKeyer(testKeyer(t)), WithEmbedder(emb))
+			ix := open(t, NewMemDir(), WithKeyer(testKeyer(t)), WithEmbedder(emb))
 			for _, it := range pubItems {
 				mustIngest(t, ix, it)
 			}
@@ -69,7 +69,7 @@ func testKeyer(t *testing.T) Keyer {
 // Identity uses the raw ref, keyed, so refs that scrub alike stay distinct
 // and deletion by raw ref works (review item 3).
 func TestIdentityFromRawRef(t *testing.T) {
-	ix := open(t, &MemStore{})
+	ix := open(t, NewMemDir())
 	r1 := "https://site.example.test/doc?token=Zq8XkP3vLm2RtY7wNb4C"
 	r2 := "https://site.example.test/doc?token=Hd5JsQ9aWe1UoI6pVc3T"
 	a := mustIngest(t, ix, Item{Source: Source{Kind: "web", Ref: r1}, Text: "first"})
@@ -91,7 +91,7 @@ func TestIdentityFromRawRef(t *testing.T) {
 
 // The identity key survives a restart (generated key kept in the header).
 func TestGeneratedKeyPersists(t *testing.T) {
-	st := &MemStore{}
+	st := NewMemDir()
 	ix := open(t, st)
 	id := mustIngest(t, ix, Item{Source: Source{Kind: "file", Ref: "/a"}, Text: "x"})
 	re := open(t, st)
@@ -105,7 +105,7 @@ func TestGeneratedKeyPersists(t *testing.T) {
 func TestDeletionBeforeIndexingAndTombstones(t *testing.T) {
 	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
-	st := &MemStore{}
+	st := NewMemDir()
 	ix := open(t, st, WithClock(clock))
 	var hooked []Deleted
 	ix.OnDelete(func(d Deleted) error { hooked = append(hooked, d); return nil })
@@ -139,7 +139,7 @@ func TestDeletionBeforeIndexingAndTombstones(t *testing.T) {
 		t.Fatalf("tombstone not replayed: %+v", replayed)
 	}
 	// Hook errors are reported after the deletion is durable.
-	bad := open(t, &MemStore{})
+	bad := open(t, NewMemDir())
 	bad.OnDelete(func(Deleted) error { return errors.New("bus store full") })
 	x := mustIngest(t, bad, Item{Source: Source{Kind: "file", Ref: "/x"}, Text: "x"})
 	if _, err := bad.Delete(x); err == nil {
@@ -164,7 +164,7 @@ func (otherEmbedder) Embed(ts []string) ([][]float32, error) {
 // Vectors carry their embedder's identity; vectors from another space are
 // ignored until re-embedded (review item 7).
 func TestEmbedderIdentity(t *testing.T) {
-	st := &MemStore{}
+	st := NewMemDir()
 	ix := open(t, st)
 	id := mustIngest(t, ix, Item{Source: Source{Kind: "file", Ref: "/a"}, Text: "Quarterly invoicing summary"})
 	if it, _ := ix.Get(id); it.VecID != (HashEmbedder{}).ID() {
@@ -187,17 +187,17 @@ func TestEmbedderIdentity(t *testing.T) {
 	if it, _ := re.Get(id); it.VecID != "other-model/3" {
 		t.Fatal("not re-embedded")
 	}
-	data, _ := st.ReadAll()
+	data, _ := st.Bytes(), error(nil)
 	if !strings.Contains(string(data), `"embedder":"other-model/3"`) {
 		t.Fatal("store header does not name the embedder")
 	}
 }
 
 func TestCorruptMiddleLineSkipped(t *testing.T) {
-	st := &MemStore{}
+	st := NewMemDir()
 	ix := open(t, st)
 	mustIngest(t, ix, Item{Source: Source{Kind: "file", Ref: "/a"}, Text: "alpha"})
-	st.Append([]byte("{not json\n"))
+	st.Append(1, []byte("{not json\n"))
 	ix2 := open(t, st)
 	mustIngest(t, ix2, Item{Source: Source{Kind: "file", Ref: "/b"}, Text: "beta"})
 	re := open(t, st)
@@ -234,7 +234,7 @@ func TestPublicIdentifiersKept(t *testing.T) {
 // opt-out or a local-UI relabel) naming that item, each message once
 // (arbitrator and re-review on #38).
 func TestRelabelOnlyByOwner(t *testing.T) {
-	st := &MemStore{}
+	st := NewMemDir()
 	ix0 := open(t, st, WithKeyer(testKeyer(t)))
 	task := ix0.SourceID("task", "", "t1")
 	sumID := ix0.SourceID("agent", "", "s")
@@ -308,7 +308,7 @@ func TestRelabelOnlyByOwner(t *testing.T) {
 // time cannot outlive a deletion, and a future receipt time is refused.
 func TestReceiptTimeDecidesStaleness(t *testing.T) {
 	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
-	ix := open(t, &MemStore{}, WithClock(func() time.Time { return now }))
+	ix := open(t, NewMemDir(), WithClock(func() time.Time { return now }))
 	received := now
 	now = now.Add(time.Minute)
 	if _, err := ix.DeleteSource("mail", "", "<f@x>"); err != nil {
@@ -327,7 +327,7 @@ func TestReceiptTimeDecidesStaleness(t *testing.T) {
 
 func TestPruneTombstones(t *testing.T) {
 	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
-	st := &MemStore{}
+	st := NewMemDir()
 	ix := open(t, st, WithClock(func() time.Time { return now }))
 	ix.DeleteSource("file", "", "/old")
 	now = now.Add(40 * 24 * time.Hour)
