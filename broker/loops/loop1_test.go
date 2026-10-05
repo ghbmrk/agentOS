@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -833,5 +835,27 @@ func TestAHeldOutGoalAlsoHoldsItsOriginsUnstampedWork(t *testing.T) {
 	}
 	if ev.Held("origin:guest:other") {
 		t.Fatal("another origin was held")
+	}
+}
+
+// REQ: LOOP-5
+// K3 and C14 (d): nothing about evaluations reaches a builder. If a field
+// is added here, it must be one a builder may see.
+func TestBuildersSeeOnlyTheHypothesisAndTheDevSplit(t *testing.T) {
+	var names []string
+	for _, f := range reflect.VisibleFields(reflect.TypeOf(Brief{})) {
+		names = append(names, f.Name)
+	}
+	sort.Strings(names)
+	if strings.Join(names, ",") != "Dev,Hypothesis" {
+		t.Fatalf("Brief fields %v", names)
+	}
+	var hf []string
+	for _, f := range reflect.VisibleFields(reflect.TypeOf(Hypothesis{})) {
+		hf = append(hf, f.Name)
+	}
+	sort.Strings(hf)
+	if strings.Join(hf, ",") != "Class,Evidence,Key,Signal,Tasks" {
+		t.Fatalf("Hypothesis fields %v", hf)
 	}
 }

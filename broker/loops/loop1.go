@@ -163,7 +163,7 @@ type LearnConfig struct {
 	Builder Builder
 	// Router may be nil: no routing candidates.
 	Router change.Router
-	// ModelWired reports that replay has model access (EvalModel). Without
+	// ModelWired reports that replay has model access (replay.RuleModel). Without
 	// it evaluation is offline, so routing candidates are not proposed
 	// (both sides would answer alike) and no evaluation counts as model
 	// work.

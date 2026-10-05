@@ -263,6 +263,10 @@ type decision struct {
 	// of the intent it was (REV-3).
 	hold    string
 	attempt int
+	// tries is how many attempts the intent had when the owner answered.
+	// The approval covers the next one only: the journal's dispatch
+	// record uses it up (GR8, Security on #76).
+	tries int
 }
 
 // New returns a gate that denies everything until Attach.
@@ -880,7 +884,29 @@ func (g *Gate) Check(ctx context.Context, phase journal.Phase, in journal.Intent
 	if phase == journal.PhaseDispatch && g.cfg.Now().Sub(d.at) > g.cfg.Fresh {
 		return fmt.Errorf("the approval is older than %s; ask again", g.cfg.Fresh)
 	}
+	// The engine commits the dispatch only if nothing was journaled since
+	// this check, so an attempt started by a concurrent Dispatch, before
+	// spend runs, is seen here or forces the check again (GR8).
+	if phase == journal.PhaseDispatch && g.tries(in.ID) != d.tries {
+		return errors.New("the owner's approval was used by an earlier attempt; ask again")
+	}
 	return nil
+}
+
+// tries is how many attempts the intent has started. The engine is read
+// without g.mu: its policy calls take g.mu.
+func (g *Gate) tries(id string) int {
+	g.mu.Lock()
+	eng := g.eng
+	g.mu.Unlock()
+	if eng == nil {
+		return 0
+	}
+	st, err := eng.Get(id)
+	if err != nil {
+		return 0
+	}
+	return len(st.Attempts)
 }
 
 func (g *Gate) isConfirmed(id string) bool {
@@ -1241,6 +1267,7 @@ func (g *Gate) Decide(d owner.Decision) {
 		return
 	}
 	unstaged := d.Approved && g.unstaged(d.Ref)
+	tries := g.tries(d.Ref)
 	g.mu.Lock()
 	w := g.waiting[d.Ref]
 	if w == nil && (d.Approved || g.eng == nil) {
@@ -1279,7 +1306,7 @@ func (g *Gate) Decide(d owner.Decision) {
 			d.Approved, why = false, "its staged copy could not be made"
 		}
 	}
-	g.decided[d.Ref] = decision{approved: d.Approved, why: why, at: g.cfg.Now(), item: item, local: local, hold: hold, attempt: attempt}
+	g.decided[d.Ref] = decision{approved: d.Approved, why: why, at: g.cfg.Now(), item: item, local: local, hold: hold, attempt: attempt, tries: tries}
 	wait := d.Approved && local && !g.confirmed[d.Ref]
 	own := g.own
 	g.mu.Unlock()
