@@ -41,7 +41,7 @@ jobs:
         run: sudo env "PATH=$PATH" HOME=/root GOCACHE=/tmp/gocache MKOSI=/opt/mkosi/bin/mkosi image/build.sh "$RUNNER_TEMP/out"
       - name: Boot test (Secure Boot on)
         if: matrix.run == 'a'
-        run: sudo image/ci_boot.sh "$RUNNER_TEMP"/out/agentos_*[0-9].raw "$RUNNER_TEMP/boot"
+        run: sudo image/ci_boot.sh "$RUNNER_TEMP/out/agentos_$(jq -r .version "$RUNNER_TEMP"/out/*.release.json).raw" "$RUNNER_TEMP/boot"
       - name: Keep the console log
         if: always() && matrix.run == 'a'
         run: sudo cp "$RUNNER_TEMP/boot/console.log" "$RUNNER_TEMP/out/qemu-console.log" || true
@@ -58,7 +58,7 @@ jobs:
           if-no-files-found: warn
       - name: Compress the image
         if: matrix.run == 'a'
-        run: sudo zstd -q -T0 -10 "$RUNNER_TEMP"/out/agentos_*[0-9].raw -o "$RUNNER_TEMP/out/agentos.raw.zst"
+        run: sudo zstd -q -T0 -10 "$RUNNER_TEMP/out/agentos_$(jq -r .version "$RUNNER_TEMP"/out/*.release.json).raw" -o "$RUNNER_TEMP/out/agentos.raw.zst"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: always() && matrix.run == 'a'
         with:
