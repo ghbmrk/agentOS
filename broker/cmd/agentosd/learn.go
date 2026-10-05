@@ -61,6 +61,9 @@ type learning struct {
 	// noRoom is set when replay evaluation was not opened because the
 	// agent machine and one replay machine do not fit in memory (PE2).
 	noRoom atomic.Bool
+	// builderOff is set when -builder-image was given but the builder
+	// did not start (UX-126-1).
+	builderOff atomic.Bool
 }
 
 // learnPaths are where the learning plane keeps its state.
@@ -180,7 +183,7 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	cfg.BrokerExecutors[change.Executor] = l.pipe
 	cfg.BrokerExecutors[loops.Executor] = l.sched
 	cfg.Settings = l.settings
-	cfg.Notes = append(cfg.Notes, l.note)
+	cfg.Notes = append(cfg.Notes, l.note, l.builderNote)
 	cfg.Narrows = l.sched.Narrows
 	cfg.HelpExtra = loops.HelpLine
 	// The owner's verdicts on the agent's effects become Loop 1's cases

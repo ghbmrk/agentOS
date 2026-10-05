@@ -143,6 +143,9 @@ func builderGrants(g grants, from string) (grants, error) {
 	if strings.HasPrefix(from, modelroute.BuilderPrefix) || strings.HasPrefix(from, modelroute.EvalPrefix) {
 		return nil, fmt.Errorf("-builder-from %s: name the agent machine whose grants builders use", from)
 	}
+	if len(g[from]) == 0 {
+		return nil, fmt.Errorf("-builder-from %s: that machine has no -grant", from)
+	}
 	out[modelroute.BuilderPrefix] = append([]string(nil), g[from]...)
 	return out, nil
 }
@@ -154,6 +157,26 @@ func grantsKey(machine string) string {
 		return modelroute.BuilderPrefix
 	}
 	return machine
+}
+
+// modelRouting checks the grants, adds the builders' (builderGrants), and
+// builds the router over the result, in that order, so the router sees
+// every grant it serves (L3 MUST 1 on #126).
+func modelRouting(rule route.Rule, g grants, privateOK map[string]bool, builderFrom string) (grants, *route.Router, error) {
+	for m := range g {
+		if strings.HasPrefix(m, modelroute.EvalPrefix) {
+			return nil, nil, fmt.Errorf("-grant %s: replay machines take -eval-from's grants, never their own", m)
+		}
+	}
+	g, err := builderGrants(g, builderFrom)
+	if err != nil {
+		return nil, nil, err
+	}
+	rt, err := newRouter(rule, g, privateOK)
+	if err != nil {
+		return nil, nil, err
+	}
+	return g, rt, nil
 }
 
 func newRouter(rule route.Rule, g map[string][]string, privateOK map[string]bool) (*route.Router, error) {
@@ -274,7 +297,7 @@ func serveCmd(args []string) error {
 	if rule, err = startRule(base, *routingPath); err != nil {
 		log.Printf("routing: starting from -rule: %v", err)
 	}
-	rt, err := newRouter(rule, g, pok)
+	g, rt, err := modelRouting(rule, g, pok, *builderFrom)
 	if err != nil {
 		return err
 	}
@@ -285,14 +308,6 @@ func serveCmd(args []string) error {
 			return err
 		}
 		ev = &evalRoute{From: *evalFrom, Grants: g[*evalFrom], PrivateOK: pok, Active: rule, Prices: ps}
-	}
-	for m := range g {
-		if strings.HasPrefix(m, modelroute.EvalPrefix) {
-			return fmt.Errorf("-grant %s: replay machines take -eval-from's grants, never their own", m)
-		}
-	}
-	if g, err = builderGrants(g, *builderFrom); err != nil {
-		return err
 	}
 	self := os.Getuid()
 	if *brokerUID < 0 || *brokerUID == self {

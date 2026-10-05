@@ -308,10 +308,8 @@ func main() {
 						log.Printf("replay evaluation disabled: %v", err)
 					}
 					if builderImage != "" {
-						if err := lp.openBuilder(m, imgs, services, buildConfig{Dir: filepath.Join(cfg.SocketDir, "build"), Image: builderImage, AgentImage: namedAgentImage,
-							Launch: builderLaunch, MemMB: builderMemMB, Egress: egressSocket}); err != nil {
-							log.Printf("loop 1 builder machines disabled: %v", err)
-						}
+						lp.startBuilder(m, imgs, services, buildConfig{Dir: filepath.Join(cfg.SocketDir, "build"), Image: builderImage, AgentImage: namedAgentImage,
+							Launch: builderLaunch, MemMB: builderMemMB, Egress: egressSocket})
 					}
 				}
 				spec, err := agentSpec(imgs, agentImage, agentLaunch, agentMemMB)

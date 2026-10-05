@@ -19,14 +19,16 @@ func TestBuilderMachinesTakeBuilderFromsGrantsAsPrivate(t *testing.T) {
 	if _, err := builderGrants(grants{"lb-x": {"openai"}}, ""); err == nil {
 		t.Fatal("-grant gave a builder machine grants of its own")
 	}
-	if _, err := builderGrants(grants{"agent": {"openai"}}, "lb-x"); err == nil {
-		t.Fatal("-builder-from named a builder machine")
+	for _, from := range []string{"lb-x", "eval-x"} {
+		if _, err := builderGrants(grants{"agent": {"openai"}, from: {"openai"}}, from); err == nil {
+			t.Fatalf("-builder-from named %s", from)
+		}
 	}
-	g, err := builderGrants(grants{"agent": {"openai"}}, "agent")
-	if err != nil || len(g[modelroute.BuilderPrefix]) != 1 {
-		t.Fatalf("builder grants %v %v", g, err)
+	// L3 S5 on #126: a -builder-from with no grants is a mistake, not a
+	// builder with no model access.
+	if _, err := builderGrants(grants{"agent": {"openai"}}, "agnet"); err == nil {
+		t.Fatal("-builder-from named a machine with no grants")
 	}
-	none, _ := builderGrants(grants{"agent": {"openai"}}, "")
 	rule := route.Rule{"default": {{Provider: "openai", Model: "gpt-test"}}}
 	ok := func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -34,21 +36,23 @@ func TestBuilderMachinesTakeBuilderFromsGrantsAsPrivate(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		name      string
-		g         grants
+		from      string
 		privateOK map[string]bool
 		machine   string
 		want      int
 	}{
-		{"builder, provider allowed private data", g, map[string]bool{"openai": true}, "lb-0a1b", 200},
-		{"builder sent as public is still private", g, map[string]bool{}, "lb-0a1b", http.StatusForbidden},
-		{"agent sent as public", g, map[string]bool{}, "agent", 200},
-		{"no -builder-from", none, map[string]bool{"openai": true}, "lb-0a1b", http.StatusForbidden},
+		{"builder, provider allowed private data", "agent", map[string]bool{"openai": true}, "lb-0a1b", 200},
+		{"builder sent as public is still private", "agent", map[string]bool{}, "lb-0a1b", http.StatusForbidden},
+		{"agent sent as public", "agent", map[string]bool{}, "agent", 200},
+		{"no -builder-from", "", map[string]bool{"openai": true}, "lb-0a1b", http.StatusForbidden},
 	} {
-		rt, err := newRouter(rule, tc.g, tc.privateOK)
+		// The same setup run uses, so the router sees the builder's
+		// grants (L3 MUST 1 on #126).
+		g, rt, err := modelRouting(rule, grants{"agent": {"openai"}}, tc.privateOK, tc.from)
 		if err != nil {
 			t.Fatal(err)
 		}
-		sock := serveModelGrants(t, rt, nil, tc.g, ok)
+		sock := serveModelGrants(t, rt, nil, g, ok)
 		fwd := modelroute.Forward(modelroute.Config{Socket: sock, Label: func(string) string { return "public" }, Denied: func(string, modelroute.Denial) {}})
 		if resp := chat(fwd(tc.machine)); resp.StatusCode != tc.want {
 			t.Errorf("%s: %d, want %d", tc.name, resp.StatusCode, tc.want)

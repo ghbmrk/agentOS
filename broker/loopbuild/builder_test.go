@@ -1,6 +1,6 @@
 package loopbuild
 
-// REQ: LOOP-2, LOOP-6, CHG-1, OP-8, REV-5
+// REQ: LOOP-2, LOOP-6, CHG-1, CHG-5, OP-8, REV-5
 
 import (
 	"bytes"
@@ -34,10 +34,20 @@ type machines struct {
 	services  vm.Services
 	guest     func(id, dir string)
 	forkBase  string
+	// image and public, when set, make the manager report a machine that
+	// is not what was asked for.
+	image  string
+	public bool
 }
 
 func (f *machines) Create(_ context.Context, id string, s vm.Spec) (vm.Machine, error) {
 	m := vm.Machine{ID: id, Spec: s, Label: s.Label, State: vm.Running, ForkBase: f.forkBase}
+	if f.image != "" {
+		m.Spec.Image = f.image
+	}
+	if f.public {
+		m.Label = vm.Public
+	}
 	f.mu.Lock()
 	f.ms[id] = m
 	f.mu.Unlock()
@@ -224,13 +234,20 @@ func TestTheMachineIsAFreshPrivateExperiment(t *testing.T) {
 		t.Fatalf("spec %+v", spec)
 	}
 
-	f2 := &machines{forkBase: "agent@snap"}
-	b2 := newBuilder(t, f2, nil)
-	if _, err := b2.Build(context.Background(), brief(change.ClassSkill)); !errors.Is(err, ErrNotClean) {
-		t.Fatalf("forked machine: %v", err)
-	}
-	if len(f2.Machines()) != 0 {
-		t.Fatal("a refused machine was kept")
+	// L3 S2 on #126: a forked machine, another image, or a public label
+	// is refused and destroyed.
+	for name, f2 := range map[string]*machines{
+		"forked":        {forkBase: "agent@snap"},
+		"another image": {image: "openclaw"},
+		"public":        {public: true},
+	} {
+		b2 := newBuilder(t, f2, func(c *Config) { c.Timeout = time.Second })
+		if _, err := b2.Build(context.Background(), brief(change.ClassSkill)); !errors.Is(err, ErrNotClean) {
+			t.Fatalf("%s machine: %v", name, err)
+		}
+		if len(f2.Machines()) != 0 {
+			t.Fatalf("a refused %s machine was kept", name)
+		}
 	}
 }
 
@@ -443,5 +460,54 @@ func TestConcurrentModelCallsKeepTheJobCap(t *testing.T) {
 	}
 	if served != 1 {
 		t.Fatalf("served %d model calls past a 50-token cap", served)
+	}
+}
+
+// L3 MUST 2 on #126: a builder holds at most maxConns connections to its
+// socket; one past that is not served until another closes, so a
+// compromised builder cannot use up agentosd's file descriptors.
+func TestABuilderHoldsFewConnections(t *testing.T) {
+	f := &machines{}
+	served := make(chan bool, 1)
+	f.guest = func(id, dir string) {
+		sock := filepath.Join(dir, Socket)
+		var held []net.Conn
+		for i := 0; i < maxConns; i++ {
+			c, err := net.Dial("unix", sock)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			held = append(held, c)
+		}
+		// Each held connection is accepted (it is served when written to).
+		for _, c := range held {
+			io.WriteString(c, "GET /brief HTTP/1.1\r\nHost: b\r\n\r\n")
+			c.SetReadDeadline(time.Now().Add(2 * time.Second))
+			if _, err := c.Read(make([]byte, 1)); err != nil {
+				t.Errorf("a connection within the cap was not served: %v", err)
+			}
+		}
+		extra, err := net.Dial("unix", sock)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		io.WriteString(extra, "GET /brief HTTP/1.1\r\nHost: b\r\n\r\n")
+		extra.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+		_, err = extra.Read(make([]byte, 1))
+		served <- err == nil
+		extra.Close()
+		for _, c := range held {
+			c.Close()
+		}
+		call(guestClient(dir), "POST", "/candidate", Submission{Files: map[string]string{"procedures/mail": "v"}})
+	}
+	b := newBuilder(t, f, nil)
+	if _, err := b.Build(context.Background(), brief(change.ClassProcedure)); err != nil {
+		t.Fatal(err)
+	}
+	if <-served {
+		t.Fatalf("connection %d was served", maxConns+1)
 	}
 }

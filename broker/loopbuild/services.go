@@ -33,6 +33,7 @@ const (
 	MaxFileBytes      = 64 << 10
 	MaxCandidateBytes = 512 << 10
 	maxPath           = 160
+	maxConns          = 4 // connections a builder may hold open (L3 MUST 2 on #126)
 	maxInFlight       = 4
 	maxBriefSteps     = 256
 )
@@ -236,10 +237,11 @@ func (b *Builder) open(id string) (string, error) {
 	s.srv = &http.Server{
 		Handler:           s.handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
 		IdleTimeout:       15 * time.Second,
 		BaseContext:       func(net.Listener) context.Context { return context.Background() },
 	}
-	go s.srv.Serve(l)
+	go s.srv.Serve(newLimitListener(l, maxConns))
 	return dir, nil
 }
 
@@ -401,4 +403,50 @@ func admit(sub Submission, ns string) (map[string][]byte, error) {
 		out[p] = []byte(text)
 	}
 	return out, nil
+}
+
+// limitListener accepts at most n open connections; past that, Accept
+// waits until one closes, so connections beyond the cap wait in the
+// kernel's queue and cost agentosd no file descriptor (L3 MUST 2 on #126).
+// The guest plane's own (guest.newLimitListener) is not imported: builder
+// code never links the guest plane.
+type limitListener struct {
+	net.Listener
+	sem  chan struct{}
+	done chan struct{}
+	once sync.Once
+}
+
+func newLimitListener(l net.Listener, n int) *limitListener {
+	return &limitListener{Listener: l, sem: make(chan struct{}, n), done: make(chan struct{})}
+}
+
+func (l *limitListener) Accept() (net.Conn, error) {
+	select {
+	case l.sem <- struct{}{}:
+	case <-l.done:
+		return nil, net.ErrClosed
+	}
+	c, err := l.Listener.Accept()
+	if err != nil {
+		<-l.sem
+		return nil, err
+	}
+	return &limitConn{Conn: c, release: sync.OnceFunc(func() { <-l.sem })}, nil
+}
+
+func (l *limitListener) Close() error {
+	l.once.Do(func() { close(l.done) })
+	return l.Listener.Close()
+}
+
+type limitConn struct {
+	net.Conn
+	release func()
+}
+
+func (c *limitConn) Close() error {
+	err := c.Conn.Close()
+	c.release()
+	return err
 }

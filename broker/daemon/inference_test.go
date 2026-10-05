@@ -80,7 +80,7 @@ var netOK = map[string]allowance{
 			"syscall.SOL_SOCKET", "syscall.SO_PEERCRED", "syscall.Stat_t", "syscall.Ucred"}},
 	"guest":      {"the guest plane's unix listeners", []string{"net.Conn", "net.ErrClosed", "net.Listen", "net.Listener"}},
 	"modelroute": {"dials only the vault process's unix socket", []string{"net.Conn", "net.Dialer", "net.OpError"}},
-	"loopbuild":  {"builder machines' unix listeners (W3-builder)", []string{"net.Listen", "net.Listener"}},
+	"loopbuild":  {"builder machines' unix listeners, capped (W3-builder)", []string{"net.Listen", "net.Listener", "net.Conn", "net.ErrClosed"}},
 	"journal":    {"flock on the journal file", []string{"syscall.Flock", "syscall.LOCK_EX", "syscall.LOCK_NB"}},
 	"update":     {"flock on the update store", []string{"syscall.Flock", "syscall.LOCK_EX"}},
 	"vm/overlay": {"overlay files: xattrs, device nodes, stat, timestamps, and the FICLONE ioctl for copies",

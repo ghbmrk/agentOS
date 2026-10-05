@@ -2,14 +2,18 @@ package main
 
 import (
 	"context"
+	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/loopbuild"
 	"github.com/ghbmrk/agentos/broker/loops"
 	"github.com/ghbmrk/agentos/broker/modelroute"
+	"github.com/ghbmrk/agentos/broker/vm"
 )
 
 // REQ: LOOP-2, OP-8, REV-5
@@ -79,5 +83,69 @@ func TestTheBuilderNeverRunsTheAgentImage(t *testing.T) {
 	}
 	if s.build.Load() != nil {
 		t.Fatal("a builder was attached")
+	}
+}
+
+// UX-126-1: when -builder-image is set and the builder cannot start,
+// STATUS says that learning from failed, corrected, slow or costly tasks
+// is not running; with no builder attempted, nothing is said.
+func TestStatusSaysWhenTheBuilderDidNotStart(t *testing.T) {
+	var l learning
+	if n := l.builderNote(); n != "" {
+		t.Fatalf("no builder attempted, note %q", n)
+	}
+	var s lateServices
+	l.startBuilder(nil, images{}, &s, buildConfig{Image: "missing"})
+	if n := l.builderNote(); n != builderOffNote {
+		t.Fatalf("note %q", n)
+	}
+}
+
+// fakeBuilderMachines is a vm manager with leftover builder machines and
+// no others.
+type fakeBuilderMachines struct{ destroyed []string }
+
+func (f *fakeBuilderMachines) Create(context.Context, string, vm.Spec) (vm.Machine, error) {
+	return vm.Machine{}, errors.New("not in this test")
+}
+func (f *fakeBuilderMachines) Get(string) (vm.Machine, error) {
+	return vm.Machine{}, errors.New("no such machine")
+}
+func (f *fakeBuilderMachines) Resume(context.Context, string) error { return nil }
+func (f *fakeBuilderMachines) Destroy(_ context.Context, id string) error {
+	f.destroyed = append(f.destroyed, id)
+	return nil
+}
+func (f *fakeBuilderMachines) Machines() []string {
+	return []string{"agent", loopbuild.Prefix + "left"}
+}
+func (f *fakeBuilderMachines) DataLabel(string) string { return "private" }
+
+// L3 S1 on #126: openBuilder's happy path attaches the builder to Loop 1
+// and to builder machines' services, destroys builder machines a
+// previous run left, and leaves no STATUS note.
+func TestOpenBuilderAttachesTheBuilder(t *testing.T) {
+	dir := t.TempDir()
+	cfg := daemon.Config{
+		JournalPath: filepath.Join(dir, "journal.log"), SocketDir: filepath.Join(dir, "run"),
+		OwnerNumber: ownerNum, ModemUID: os.Getuid(), Admission: admission.Config{CapacityMB: 4500, HeadroomMB: 600},
+		OwnerState: filepath.Join(dir, "owner.json"),
+	}
+	lp, err := openLearning(learnPaths{Dir: dir, Spare: filepath.Join(dir, "spare.json")}, false, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeBuilderMachines{}
+	var s lateServices
+	lp.startBuilder(f, images{"builder": "/img/builder", "openclaw": "/img/openclaw"}, &s,
+		buildConfig{Dir: filepath.Join(dir, "build"), Image: "builder", AgentImage: "openclaw", Egress: filepath.Join(dir, "egress.sock")})
+	if n := lp.builderNote(); n != "" {
+		t.Fatalf("note %q", n)
+	}
+	if s.build.Load() == nil || !lp.build.Ready(loops.Brief{}) {
+		t.Fatal("the builder was not attached")
+	}
+	if len(f.destroyed) != 1 || f.destroyed[0] != loopbuild.Prefix+"left" {
+		t.Fatalf("destroyed %v", f.destroyed)
 	}
 }

@@ -13,7 +13,6 @@ import (
 	"github.com/ghbmrk/agentos/broker/loops"
 	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/modelroute"
-	"github.com/ghbmrk/agentos/broker/vm"
 )
 
 // builderShareMax is the most of the spare budget Loop 1's builder
@@ -82,7 +81,14 @@ type buildConfig struct {
 // machines (loopbuild.Prefix) get its socket and nothing else
 // (lateServices.build), and their model calls go to the vault process as
 // private (C-3c-6), metered on the spare meter's builder share (C-3c-5).
-func (l *learning) openBuilder(m *vm.Manager, imgs images, services *lateServices, c buildConfig) error {
+// builderMachines is the part of vm.Manager the builder and its model
+// route use.
+type builderMachines interface {
+	loopbuild.Machines
+	DataLabel(id string) string
+}
+
+func (l *learning) openBuilder(m builderMachines, imgs images, services *lateServices, c buildConfig) error {
 	if _, ok := imgs[c.Image]; !ok {
 		return fmt.Errorf("image %q is not registered with -image", c.Image)
 	}
@@ -109,4 +115,24 @@ func (l *learning) openBuilder(m *vm.Manager, imgs images, services *lateService
 	services.build.Store(&svc{b})
 	l.build.b.Store(b)
 	return nil
+}
+
+// builderOffNote is STATUS's line when -builder-image is set but the
+// builder did not start (UX-126-1).
+const builderOffNote = "Learning from failed, corrected, slow or costly tasks: not running. Restarting the box may fix it."
+
+// startBuilder opens the builder, and on failure logs it and keeps the
+// STATUS note on.
+func (l *learning) startBuilder(m builderMachines, imgs images, services *lateServices, c buildConfig) {
+	if err := l.openBuilder(m, imgs, services, c); err != nil {
+		log.Printf("loop 1 builder machines disabled: %v", err)
+		l.builderOff.Store(true)
+	}
+}
+
+func (l *learning) builderNote() string {
+	if l.builderOff.Load() {
+		return builderOffNote
+	}
+	return ""
 }
