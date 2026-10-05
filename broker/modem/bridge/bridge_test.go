@@ -19,7 +19,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
-// REQ: CH-1, CH-2, ADP-12
+// REQ: CH-1, CH-2
 
 const (
 	ownerNum = "+15550000999"
@@ -37,26 +37,39 @@ type rig struct {
 	devs    []*atsim.Device
 	iccid   string
 	openErr error
-	cancel  context.CancelFunc
-	done    chan error
+	// preload, if set, stores texts in each new device before it opens.
+	preload func(*atsim.Device)
+	// failFirst names ops whose first call fails, as a dropped
+	// connection does.
+	failFirst map[string]bool
+	cancel    context.CancelFunc
+	done      chan error
 }
 
 func newRig(t *testing.T, iccid func(*atsim.Device) string) *rig {
 	t.Helper()
-	r := &rig{t: t, carrier: modem.NewCarrier(), done: make(chan error, 1)}
+	return newRigWith(t, iccid, nil)
+}
+
+func newRigWith(t *testing.T, iccid func(*atsim.Device) string, preload func(*atsim.Device), failFirst ...string) *rig {
+	t.Helper()
+	r := &rig{t: t, carrier: modem.NewCarrier(), done: make(chan error, 1), preload: preload, failFirst: map[string]bool{}}
+	for _, op := range failFirst {
+		r.failFirst[op] = true
+	}
 	r.phone = r.carrier.Line(ownerNum)
 	r.link = modemlink.New(modemlink.Config{Owner: ownerNum, SendWait: 5 * time.Second, PollWait: 200 * time.Millisecond})
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
 	r.cancel = cancel
 	srv := &sockets.Server{Dir: dir}
-	if err := srv.Start(ctx, sockets.Endpoint{Name: "owner.sock", Peer: sockets.Peer{Kind: "owner"}, Ops: r.link.Ops(), MaxConns: 8}); err != nil {
+	if err := srv.Start(ctx, sockets.Endpoint{Name: "owner.sock", Peer: sockets.Peer{Kind: "owner"}, Ops: r.link.Ops(), MaxConns: 8, HangupOps: map[string]bool{bridgeproto.OpOutbox: true}}); err != nil {
 		t.Fatal(err)
 	}
 	r.iccid = iccid(atsim.New(at.SIMCom, "SIMCOM_SIM7600G-H", modem.NewCarrier().Line(boxNum), time.Millisecond))
 	cfg := bridge.Config{
-		Agentosd: bridgeclient.Client{Path: filepath.Join(dir, "owner.sock")},
-		OpenOwner: func(ctx context.Context) (bridge.Owner, error) {
+		Agentosd: &flaky{r: r, c: bridgeclient.Client{Path: filepath.Join(dir, "owner.sock")}},
+		OpenOwner: func(ctx context.Context, check func(string) error) (bridge.Owner, error) {
 			r.mu.Lock()
 			err := r.openErr
 			r.mu.Unlock()
@@ -65,13 +78,14 @@ func newRig(t *testing.T, iccid func(*atsim.Device) string) *rig {
 			}
 			// Each open is a fresh port, as a reopened serial device is.
 			dev := r.newDevice()
-			return at.Open(ctx, at.Config{Profile: at.SIMCom, Port: dev.Port(), Number: boxNum, CountryCode: "1", Owner: ownerNum,
+			return at.Open(ctx, at.Config{Profile: at.SIMCom, Port: dev.Port(), Number: boxNum, CountryCode: "1", Owner: ownerNum, CheckSIM: check,
 				Poll: 5 * time.Millisecond, Sweep: 20 * time.Millisecond})
 		},
-		OwnerICCID: func() string { r.mu.Lock(); defer r.mu.Unlock(); return r.iccid },
-		Retry:      50 * time.Millisecond,
-		StateEvery: 50 * time.Millisecond,
-		Logf:       t.Logf,
+		OwnerICCID:   func() string { r.mu.Lock(); defer r.mu.Unlock(); return r.iccid },
+		Retry:        50 * time.Millisecond,
+		StateEvery:   time.Hour, // only the open's own report reaches agentosd
+		InboundRetry: 10 * time.Millisecond,
+		Logf:         t.Logf,
 	}
 	go func() { r.done <- bridge.Run(ctx, cfg) }()
 	t.Cleanup(func() {
@@ -84,8 +98,32 @@ func newRig(t *testing.T, iccid func(*atsim.Device) string) *rig {
 	return r
 }
 
+// flaky fails the first call of each op in r.failFirst (for state, the
+// first that reports the line ok).
+type flaky struct {
+	r *rig
+	c bridge.Caller
+}
+
+func (f *flaky) Call(ctx context.Context, op string, args, out any) error {
+	if st, ok := args.(bridgeproto.State); ok && st.OwnerLine != bridgeproto.StateOK {
+		return f.c.Call(ctx, op, args, out) // only an ok report counts
+	}
+	f.r.mu.Lock()
+	fail := f.r.failFirst[op]
+	delete(f.r.failFirst, op)
+	f.r.mu.Unlock()
+	if fail {
+		return errors.New("connection reset")
+	}
+	return f.c.Call(ctx, op, args, out)
+}
+
 func (r *rig) newDevice() *atsim.Device {
 	dev := atsim.New(at.SIMCom, "SIMCOM_SIM7600G-H", r.carrier.Line(boxNum), time.Millisecond)
+	if r.preload != nil {
+		r.preload(dev)
+	}
 	r.mu.Lock()
 	r.devs = append(r.devs, dev)
 	r.mu.Unlock()
@@ -210,3 +248,54 @@ func TestAnUnpluggedModemIsDownAndRecovers(t *testing.T) {
 }
 
 var _ = bridgeproto.OpState
+
+// storeFromOwner stores texts from the owner, as if they arrived while the
+// bridge was away.
+func storeFromOwner(texts ...string) func(*atsim.Device) {
+	return func(d *atsim.Device) {
+		for i, text := range texts {
+			pdus, err := at.EncodeDeliver(ownerNum, text, byte(i))
+			if err != nil {
+				panic(err)
+			}
+			for _, p := range pdus {
+				d.StorePDU(p)
+			}
+		}
+	}
+}
+
+// L3 on #170: texts stored while the bridge was away (the modem gives
+// them up as they are read) reach agentosd, though it reads the line as
+// down until the bridge says otherwise. The bridge's first report of the
+// line and its first offer of a text both fail, as a dropped connection
+// does: it reports again before reading any text, and offers the text
+// again.
+func TestTextsStoredWhileAwayReachAgentosd(t *testing.T) {
+	r := newRigWith(t, recorded, storeFromOwner("STOP", "STATUS"), bridgeproto.OpState, bridgeproto.OpInbound)
+	for _, want := range []string{"STOP", "STATUS"} {
+		select {
+		case m := <-r.link.Inbox():
+			if m.From != ownerNum || m.Text != want {
+				t.Fatalf("delivered %+v, want %q", m, want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("the stored %q did not reach agentosd", want)
+		}
+	}
+}
+
+// L3 on #170: a SIM that is not the recorded one is turned away before a
+// stored text is read off it, so its texts stay stored.
+func TestAWrongSIMKeepsItsStoredTexts(t *testing.T) {
+	r := newRigWith(t, func(*atsim.Device) string { return "8900000000000000001" }, storeFromOwner("STOP"))
+	r.waitNote(func(n string) bool { return strings.Contains(n, "SIM") && strings.Contains(n, "changed") })
+	r.mu.Lock()
+	devs := append([]*atsim.Device(nil), r.devs...)
+	r.mu.Unlock()
+	for i, d := range devs {
+		if n := d.Stored(); n != 1 {
+			t.Fatalf("device %d keeps %d stored texts, want 1", i, n)
+		}
+	}
+}

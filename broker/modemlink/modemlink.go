@@ -29,8 +29,11 @@ import (
 
 // Defaults and limits.
 const (
-	// SendWait bounds how long Send waits for the bridge's result.
-	SendWait = 60 * time.Second
+	// SendWait bounds how long Send waits for the bridge's result: past
+	// the slowest send that can still succeed, a poll's wait and three
+	// segments (owner.MaxSegments) at the modem's 60 s each, plus a margin,
+	// so a text still going out is not reported down (L3 on #170).
+	SendWait = bridgeproto.OutboxWait + 3*60*time.Second + 15*time.Second
 	// Silent is how long the bridge may say nothing before the owner line
 	// reads as down: two missed state reports and a margin.
 	Silent = 2*bridgeproto.StateEvery + 30*time.Second
@@ -46,10 +49,10 @@ var ErrRecipient = errors.New("modemlink: the owner channel texts only the owner
 
 // Refusals on owner.sock, as fixed codes.
 const (
-	errBadInbound = sockets.Code("bad inbound")
-	errPaused     = sockets.Code("owner line paused")
-	errSecond     = sockets.Code("second line not served")
-	errLimited    = sockets.Code("inbound limited")
+	errBadInbound = sockets.Code(bridgeproto.RefusedBad)
+	errPaused     = sockets.Code(bridgeproto.RefusedPaused)
+	errSecond     = sockets.Code(bridgeproto.RefusedSecond)
+	errLimited    = sockets.Code(bridgeproto.RefusedLimited)
 	errBadSent    = sockets.Code("bad result")
 	errBadState   = sockets.Code("bad state")
 )
@@ -62,6 +65,9 @@ type Config struct {
 	// SendWait and PollWait override SendWait and bridgeproto.OutboxWait
 	// (tests).
 	SendWait, PollWait time.Duration
+	// Location is the time zone of the recovery text's times: the box's
+	// (default time.Local).
+	Location *time.Location
 }
 
 // Outage is a stretch when the owner line could not be used, and how many
@@ -93,6 +99,9 @@ type Link struct {
 	last        Outage
 	stray       int
 	dropped     bool
+	others      int
+	timedOut    int
+	inboundIDs  map[string]time.Time // taken inbound IDs, for a minute past their last try
 	inboundTime []time.Time
 	// okSince is when the owner line last became usable. A poll that
 	// began before it may be a dead bridge's connection, so it is handed
@@ -108,6 +117,9 @@ func New(cfg Config) *Link {
 	}
 	if cfg.SendWait == 0 {
 		cfg.SendWait = SendWait
+	}
+	if cfg.Location == nil {
+		cfg.Location = time.Local
 	}
 	if cfg.PollWait == 0 {
 		cfg.PollWait = bridgeproto.OutboxWait
@@ -150,7 +162,7 @@ func (l *Link) heardLocked(now time.Time) {
 	if o.Missed == 0 {
 		return
 	}
-	it := &item{Item: bridgeproto.Item{ID: newID(), Line: bridgeproto.LineOwner, To: l.cfg.Owner, Text: recoveryText(o)}}
+	it := &item{Item: bridgeproto.Item{ID: newID(), Line: bridgeproto.LineOwner, To: l.cfg.Owner, Text: recoveryText(o, l.cfg.Location)}}
 	l.queue = append([]*item{it}, l.queue...)
 	l.wakeLocked()
 }
@@ -158,7 +170,8 @@ func (l *Link) heardLocked(now time.Time) {
 // recoveryText counts what did not reach the owner. A dropped approval
 // request is never re-sent, but the agent was told it can ask again
 // (grants), so the text says so (UX on #170).
-func recoveryText(o Outage) string {
+func recoveryText(o Outage, loc *time.Location) string {
+	o.From, o.To = o.From.In(loc), o.To.In(loc)
 	layout := "15:04"
 	if o.To.Sub(o.From) >= 24*time.Hour || o.From.Day() != o.To.Day() {
 		layout = "Jan 2 15:04"
@@ -235,6 +248,7 @@ func (l *Link) send(to, text string, request bool) error {
 	case <-t.C:
 		l.mu.Lock()
 		l.dropLocked(it)
+		l.timedOut++
 		l.mu.Unlock()
 		return modem.ErrDown
 	}
@@ -257,6 +271,22 @@ func (l *Link) Stray() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.stray
+}
+
+// TimedOut counts sends the bridge gave no result for within SendWait,
+// reported down to the owner channel though they may still have gone.
+func (l *Link) TimedOut() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.timedOut
+}
+
+// Others counts texts on the owner line from anyone but the owner, set
+// aside unread: the owner channel acts only on the owner's.
+func (l *Link) Others() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.others
 }
 
 // Dropped says inbound texts were dropped past the rate limit.
@@ -322,6 +352,21 @@ func (l *Link) inbound(_ context.Context, _ sockets.Peer, args json.RawMessage) 
 	if l.state != bridgeproto.StateOK {
 		return nil, errPaused // swapped or unbound: not the owner's SIM
 	}
+	for id, t := range l.inboundIDs {
+		if now.Sub(t) > 2*time.Minute {
+			delete(l.inboundIDs, id)
+		}
+	}
+	if _, again := l.inboundIDs[in.ID]; again && in.ID != "" {
+		return struct{}{}, nil // a try whose answer was lost
+	}
+	if in.Named || in.From != l.cfg.Owner {
+		// Set aside before the rate limit and the inbox, so no one else's
+		// texts can crowd out the owner's (L3 on #170). Taken, so the
+		// bridge does not retry it.
+		l.others++
+		return struct{}{}, nil
+	}
 	kept := l.inboundTime[:0]
 	for _, t := range l.inboundTime {
 		if now.Sub(t) < time.Minute {
@@ -341,6 +386,12 @@ func (l *Link) inbound(_ context.Context, _ sockets.Peer, args json.RawMessage) 
 		return nil, errLimited
 	}
 	l.inboundTime = append(l.inboundTime, now)
+	if in.ID != "" {
+		if l.inboundIDs == nil {
+			l.inboundIDs = map[string]time.Time{}
+		}
+		l.inboundIDs[in.ID] = now
+	}
 	return struct{}{}, nil
 }
 
@@ -352,7 +403,9 @@ func (l *Link) outbox(ctx context.Context, _ sockets.Peer, _ json.RawMessage) (a
 		l.mu.Lock()
 		now := l.cfg.Now()
 		l.heardLocked(now)
-		if l.usableLocked(now) && len(l.queue) > 0 && !began.Before(l.okSince) {
+		// A poll whose bridge hung up (its context ended) is handed
+		// nothing, nor one that began before the line last recovered.
+		if ctx.Err() == nil && l.usableLocked(now) && len(l.queue) > 0 && !began.Before(l.okSince) {
 			it := l.queue[0]
 			l.queue = l.queue[1:]
 			l.out[it.ID] = it

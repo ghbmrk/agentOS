@@ -13,6 +13,7 @@
 package bridgeproto
 
 import (
+	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -25,6 +26,26 @@ const (
 	OpSent    = "sent"
 	OpState   = "state"
 )
+
+// Refusals of an inbound text. The bridge sends a refused text again only
+// while the refusal can pass (Retryable): paused until agentosd hears the
+// line is ok, limited until the minute's count falls.
+const (
+	RefusedBad     = "bad inbound"
+	RefusedSecond  = "second line not served"
+	RefusedPaused  = "owner line paused"
+	RefusedLimited = "inbound limited"
+)
+
+// Retryable says an inbound call that failed with err may be sent again:
+// any failure but a refusal that cannot pass (bad text, second line).
+func Retryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return !strings.HasSuffix(s, RefusedBad) && !strings.HasSuffix(s, RefusedSecond)
+}
 
 // Lines. The line a text arrived on, never its sender, decides whether it
 // can reach the owner channel (security S-B8 on the P2-3w design).
@@ -41,7 +62,14 @@ type Inbound struct {
 	// Named: From is a sender name (TP-OA alphanumeric), not a number. It
 	// is never the owner (CH-1).
 	Named bool `json:"named,omitempty"`
+	// ID names this text across the bridge's tries, so a try whose answer
+	// was lost is not taken twice (a repeated approval code would count as
+	// a wrong one). Up to MaxID characters; "" is never matched.
+	ID string `json:"id,omitempty"`
 }
+
+// MaxID bounds Inbound.ID.
+const MaxID = 64
 
 // Limits on an Inbound (security S-B4): a text of at most MaxText bytes of
 // UTF-8, a sender of at most MaxFrom printable characters.
@@ -57,7 +85,7 @@ func (in Inbound) Valid() bool {
 	if in.Line != LineOwner && in.Line != LineSecond {
 		return false
 	}
-	if in.From == "" || len(in.From) > MaxFrom || !utf8.ValidString(in.Text) || len(in.Text) > MaxText {
+	if len(in.ID) > MaxID || in.From == "" || len(in.From) > MaxFrom || !utf8.ValidString(in.Text) || len(in.Text) > MaxText {
 		return false
 	}
 	for i, r := range in.From {

@@ -116,6 +116,17 @@ func TestASilentBridgeIsDown(t *testing.T) {
 	if time.Since(start) < time.Second {
 		t.Fatal("send gave up before SendWait")
 	}
+	if n := l.TimedOut(); n != 1 {
+		t.Fatalf("timed out sends counted %d, want 1", n)
+	}
+}
+
+// L3 on #170: SendWait covers the slowest send that can still succeed (a
+// poll's wait, then three segments at the modem's 60 s each).
+func TestSendWaitCoversTheSlowestSend(t *testing.T) {
+	if SendWait <= bridgeproto.OutboxWait+3*time.Minute {
+		t.Fatalf("SendWait %v", SendWait)
+	}
 }
 
 // Security S-B3: item IDs are unguessable and single-use while outstanding;
@@ -146,7 +157,8 @@ func TestSentIDsAreSingleUse(t *testing.T) {
 }
 
 // Security S-B4: inbound texts are bounded, agentosd stamps its own
-// receive time, and a named sender is never the owner.
+// receive time, and only the owner's texts reach the owner channel: a named
+// sender is never the owner, whatever it spells.
 func TestInboundTextsAreCheckedAndStamped(t *testing.T) {
 	l, clk := rig(t)
 	for _, in := range []bridgeproto.Inbound{
@@ -164,7 +176,6 @@ func TestInboundTextsAreCheckedAndStamped(t *testing.T) {
 	for _, in := range []bridgeproto.Inbound{
 		{Line: bridgeproto.LineOwner, From: ownerNum, Text: "STATUS"},
 		{Line: bridgeproto.LineOwner, From: ownerNum, Text: strings.Repeat("é", bridgeproto.MaxText/2)},
-		{Line: bridgeproto.LineOwner, From: "MyBank", Text: "code 1234", Named: true},
 	} {
 		if err := call(t, l, bridgeproto.OpInbound, in, nil); err != nil {
 			t.Fatalf("%+v: %v", in, err)
@@ -173,6 +184,42 @@ func TestInboundTextsAreCheckedAndStamped(t *testing.T) {
 		if m.From != in.From || m.Text != in.Text || m.To != "" && m.To != ownerNum || !m.At.Equal(clk.now()) || m.Alphanumeric != in.Named {
 			t.Fatalf("delivered %+v for %+v", m, in)
 		}
+	}
+	for _, in := range []bridgeproto.Inbound{
+		{Line: bridgeproto.LineOwner, From: "MyBank", Text: "code 1234", Named: true},
+		{Line: bridgeproto.LineOwner, From: ownerNum, Text: "STOP", Named: true},
+		{Line: bridgeproto.LineOwner, From: "+15550000123", Text: "STOP"},
+	} {
+		if err := call(t, l, bridgeproto.OpInbound, in, nil); err != nil {
+			t.Fatalf("%+v: %v", in, err)
+		}
+	}
+	select {
+	case m := <-l.Inbox():
+		t.Fatalf("a text not from the owner was delivered: %+v", m)
+	default:
+	}
+	if n := l.Others(); n != 3 {
+		t.Fatalf("others counted %d, want 3", n)
+	}
+}
+
+// L3 on #170: texts from anyone but the owner are set aside before the
+// rate limit and the inbox, so a stranger's flood cannot crowd out the
+// owner's STOP.
+func TestStrangersCannotCrowdOutTheOwner(t *testing.T) {
+	l, _ := rig(t)
+	for i := 0; i < 10*InboundPerMinute; i++ {
+		call(t, l, bridgeproto.OpInbound, bridgeproto.Inbound{Line: bridgeproto.LineOwner, From: "+15550000123", Text: "spam"}, nil)
+	}
+	if err := call(t, l, bridgeproto.OpInbound, bridgeproto.Inbound{Line: bridgeproto.LineOwner, From: ownerNum, Text: "STOP"}, nil); err != nil {
+		t.Fatalf("the owner's STOP after a stranger's flood: %v", err)
+	}
+	if m := <-l.Inbox(); m.From != ownerNum || m.Text != "STOP" {
+		t.Fatalf("delivered %+v", m)
+	}
+	if l.Dropped() {
+		t.Fatal("the stranger's texts were counted against the owner's limit")
 	}
 }
 
@@ -343,8 +390,116 @@ func TestRecoveryTextWording(t *testing.T) {
 		{Outage{at(13, 5), at(15, 20), 2, 2}, "I couldn't text you from 13:05 to 15:20. 2 approval requests didn't reach you; your agent can ask again."},
 		{Outage{at(23, 5), at(9, 0).AddDate(0, 0, 1), 2, 1}, "I couldn't text you from Oct 5 23:05 to Oct 6 09:00. 1 approval request and 1 other text didn't reach you; your agent can ask again."},
 	} {
-		if got := recoveryText(c.o); got != c.want {
+		if got := recoveryText(c.o, time.UTC); got != c.want {
 			t.Errorf("%+v: %q", c.o, got)
 		}
+	}
+}
+
+// L3 on #170: the bridge offers a text again when an answer is lost; a
+// try already taken is answered ok and not delivered twice, so a repeated
+// approval code never counts as a wrong one.
+func TestATextOfferedAgainIsTakenOnce(t *testing.T) {
+	l, clk := rig(t)
+	in := bridgeproto.Inbound{Line: bridgeproto.LineOwner, From: ownerNum, Text: "123456", ID: "t1"}
+	for i := 0; i < 3; i++ {
+		if err := call(t, l, bridgeproto.OpInbound, in, nil); err != nil {
+			t.Fatalf("try %d: %v", i+1, err)
+		}
+	}
+	<-l.Inbox()
+	select {
+	case m := <-l.Inbox():
+		t.Fatalf("delivered twice: %+v", m)
+	default:
+	}
+	in.ID = strings.Repeat("x", bridgeproto.MaxID+1)
+	if err := call(t, l, bridgeproto.OpInbound, in, nil); err == nil {
+		t.Fatal("an oversized ID was taken")
+	}
+	clk.add(3 * time.Minute)
+	in.ID = "t1"
+	if err := call(t, l, bridgeproto.OpInbound, in, nil); err != nil {
+		t.Fatal(err)
+	}
+	if m := <-l.Inbox(); m.Text != "123456" {
+		t.Fatalf("delivered %+v", m)
+	}
+}
+
+// L3 on #170 (M15): the outbox hands texts out in the order they were
+// sent.
+func TestTheOutboxIsFirstInFirstOut(t *testing.T) {
+	l, _ := rig(t)
+	for _, text := range []string{"one", "two", "three"} {
+		sendAsync(l, ownerNum, text)
+		time.Sleep(30 * time.Millisecond)
+	}
+	for _, want := range []string{"one", "two", "three"} {
+		if it := poll(t, l); it.Text != want {
+			t.Fatalf("handed out %q, want %q", it.Text, want)
+		}
+	}
+}
+
+// L3 on #170 (M16, M17): the line is usable up to Silent after the bridge
+// was last heard and down past it; on recovery the recovery text goes out
+// ahead of a text queued before the outage.
+func TestTheSilentRuleAndTheRecoveryTextGoesFirst(t *testing.T) {
+	l, clk := rig(t)
+	clk.add(Silent)
+	sendAsync(l, ownerNum, "queued")
+	time.Sleep(30 * time.Millisecond)
+	clk.add(time.Second)
+	start := time.Now()
+	if err := l.Send(ownerNum, "lost"); !errors.Is(err, modem.ErrDown) || time.Since(start) > time.Second {
+		t.Fatalf("send past Silent: %v after %v", err, time.Since(start))
+	}
+	call(t, l, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateOK}, nil)
+	if it := poll(t, l); !strings.HasPrefix(it.Text, "I couldn't text you") {
+		t.Fatalf("first after recovery: %q", it.Text)
+	}
+	if it := poll(t, l); it.Text != "queued" {
+		t.Fatalf("second after recovery: %q", it.Text)
+	}
+}
+
+// L3 on #170 (M19): past MaxQueued texts waiting for the bridge, a send
+// fails at once as down.
+func TestTheQueueIsCapped(t *testing.T) {
+	l, _ := rig(t)
+	for i := 0; i < MaxQueued; i++ {
+		sendAsync(l, ownerNum, "hi")
+	}
+	time.Sleep(100 * time.Millisecond)
+	start := time.Now()
+	if err := l.Send(ownerNum, "one more"); !errors.Is(err, modem.ErrDown) || time.Since(start) > time.Second {
+		t.Fatalf("send past MaxQueued: %v after %v", err, time.Since(start))
+	}
+}
+
+// L3 on #170: a poll whose bridge hung up is handed nothing; the text
+// waits for the next poll.
+func TestAHungUpPollGetsNothing(t *testing.T) {
+	l, _ := rig(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	sendAsync(l, ownerNum, "hi")
+	time.Sleep(30 * time.Millisecond)
+	if res, err := l.Ops()[bridgeproto.OpOutbox](ctx, sockets.Peer{Kind: "owner"}, []byte("{}")); err == nil {
+		t.Fatalf("a hung-up poll got %v", res)
+	}
+	if it := poll(t, l); it.Text != "hi" {
+		t.Fatalf("handed out %q", it.Text)
+	}
+}
+
+// L3 on #170: the recovery text's times are in the box's zone, whatever
+// zone the clock reads in.
+func TestRecoveryTextUsesTheBoxsZone(t *testing.T) {
+	zone := time.FixedZone("box", -7*3600)
+	o := Outage{time.Date(2026, 10, 5, 20, 5, 0, 0, time.UTC), time.Date(2026, 10, 5, 22, 20, 0, 0, time.UTC), 1, 0}
+	if got, want := recoveryText(o, zone), "I couldn't text you from 13:05 to 15:20. 1 text didn't reach you."; got != want {
+		t.Fatalf("%q", got)
 	}
 }

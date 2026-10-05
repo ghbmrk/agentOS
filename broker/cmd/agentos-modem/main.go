@@ -31,20 +31,22 @@ func main() {
 	var ownerSock, roles, boxNumber, ownerNumber, countryCode, sysRoot string
 	flag.StringVar(&ownerSock, "owner-sock", "/run/agentos/owner.sock", "agentosd's owner socket (agentosd -sockets)")
 	flag.StringVar(&roles, "roles", "/var/lib/agentos/modem-roles.json", "the lines' SIM serials recorded at setup")
-	flag.StringVar(&boxNumber, "box-number", "", "the owner line's own number, E.164 (AT+CNUM is tried when empty)")
-	flag.StringVar(&ownerNumber, "owner-number", "", "the owner's number, E.164")
-	flag.StringVar(&countryCode, "country-code", "", "the home country code, as in 1 or 44")
+	// The numbers default from the environment (the unit's EnvironmentFile),
+	// so they are not on the command line for any process to read.
+	flag.StringVar(&boxNumber, "box-number", os.Getenv("BOX_NUMBER"), "the owner line's own number, E.164 (AT+CNUM is tried when empty); default $BOX_NUMBER")
+	flag.StringVar(&ownerNumber, "owner-number", os.Getenv("OWNER_NUMBER"), "the owner's number, E.164; default $OWNER_NUMBER")
+	flag.StringVar(&countryCode, "country-code", os.Getenv("COUNTRY_CODE"), "the home country code, as in 1 or 44; default $COUNTRY_CODE")
 	flag.StringVar(&sysRoot, "sys-root", "/", "root of sysfs and procfs, for finding the modem")
 	flag.Parse()
 	if ownerNumber == "" || countryCode == "" {
-		log.Fatal("-owner-number and -country-code are required")
+		log.Fatal("the owner's number and country code are required (OWNER_NUMBER, COUNTRY_CODE)")
 	}
 	log.SetFlags(0)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	err := bridge.Run(ctx, bridge.Config{
 		Agentosd: bridgeclient.Client{Path: ownerSock},
-		OpenOwner: func(ctx context.Context) (bridge.Owner, error) {
+		OpenOwner: func(ctx context.Context, check func(string) error) (bridge.Owner, error) {
 			found := at.Discover(sysRoot)
 			if len(found) == 0 || found[0].ATPort == "" {
 				return nil, errors.New("no qualified modem found")
@@ -54,7 +56,7 @@ func main() {
 			if err != nil {
 				return nil, err
 			}
-			m, err := at.Open(ctx, at.Config{Profile: f.Profile, Port: port, Number: boxNumber, CountryCode: countryCode, Owner: ownerNumber})
+			m, err := at.Open(ctx, at.Config{Profile: f.Profile, Port: port, Number: boxNumber, CountryCode: countryCode, Owner: ownerNumber, CheckSIM: check})
 			if err != nil {
 				port.Close()
 				return nil, err

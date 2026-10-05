@@ -78,7 +78,9 @@ type Config struct {
 	// socket, and carries its outbound texts.
 	Modem modem.Modem
 	// OwnerOps are more ops on the owner socket: the modem bridge's
-	// (modemlink.Link.Ops, P2-3w). They cannot replace "message".
+	// (modemlink.Link.Ops, P2-3w). They cannot replace "message". Each
+	// runs with a context that ends if the bridge hangs up first, so the
+	// outbox's long poll hands no text to a dead bridge.
 	OwnerOps map[string]sockets.Handler
 	// BridgeOnly drops "message" from the owner socket, leaving OwnerOps:
 	// with the modem bridge on, owner texts arrive only through its
@@ -295,6 +297,10 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 	for op, h := range cfg.OwnerOps {
 		if _, taken := eps[0].Ops[op]; !taken && op != "message" {
 			eps[0].Ops[op] = h
+			if eps[0].HangupOps == nil {
+				eps[0].HangupOps = map[string]bool{}
+			}
+			eps[0].HangupOps[op] = true
 		}
 	}
 	for _, id := range cfg.Machines {

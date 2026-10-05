@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// REQ: CH-1, ADP-12
+// REQ: CH-1
 
 // Security S-B7 on the P2-3w design read: the bridge's unit runs as its
 // own user with no privileges, a read-only system, a seccomp allow-list,
@@ -40,6 +40,8 @@ func TestTheUnitIsHardened(t *testing.T) {
 		"ProtectProc":             {"invisible"},
 		"PrivateIPC":              {"yes"},
 		"RemoveIPC":               {"yes"},
+		"TemporaryFileSystem":     {"/var/lib/agentos:ro"},
+		"BindReadOnlyPaths":       {"/var/lib/agentos/modem-roles.json"},
 	} {
 		if strings.Join(set[k], "|") != strings.Join(want, "|") {
 			t.Errorf("%s = %q, want %q", k, set[k], want)
@@ -47,8 +49,13 @@ func TestTheUnitIsHardened(t *testing.T) {
 	}
 	// The socket agentosd serves (its -sockets default plus owner.sock),
 	// not a path nothing listens on (security F2 on #170).
-	if want := "-owner-sock /run/agentos/owner.sock "; !strings.Contains(strings.Join(set["ExecStart"], ""), want) {
-		t.Errorf("ExecStart %q lacks %q", set["ExecStart"], want)
+	exec := strings.Join(set["ExecStart"], "")
+	if want := "-owner-sock /run/agentos/owner.sock "; !strings.Contains(exec, want) {
+		t.Errorf("ExecStart %q lacks %q", exec, want)
+	}
+	// No number on the command line, where any process could read it.
+	if strings.Contains(exec, "NUMBER") || strings.Contains(exec, "-owner-number") {
+		t.Errorf("ExecStart %q carries a number", exec)
 	}
 }
 

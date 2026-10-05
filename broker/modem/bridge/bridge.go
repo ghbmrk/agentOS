@@ -12,6 +12,8 @@ package bridge
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"sync"
 	"time"
@@ -38,16 +40,19 @@ type Owner interface {
 type Config struct {
 	Agentosd Caller
 	// OpenOwner opens the owner line's modem; an *at.SIMError means no
-	// usable SIM.
-	OpenOwner func(ctx context.Context) (Owner, error)
+	// usable SIM. It passes check to at.Config.CheckSIM, so a SIM that is
+	// not the recorded one is turned away before any stored text is read
+	// off it (L3 on #170).
+	OpenOwner func(ctx context.Context, check func(iccid string) error) (Owner, error)
 	// OwnerICCID is the owner line's SIM serial recorded at setup ("": none
 	// yet). It is read again at each open, so a SIM the owner confirms on
 	// the local page is taken without a restart.
 	OwnerICCID func() string
 	// Retry is how long to wait before opening the modem again (default
 	// 10 s); StateEvery is how often the state is sent unchanged (default
-	// bridgeproto.StateEvery).
-	Retry, StateEvery time.Duration
+	// bridgeproto.StateEvery); InboundRetry is the first wait before a
+	// refused inbound text is sent again, doubling each time (default 1 s).
+	Retry, StateEvery, InboundRetry time.Duration
 	// Logf logs counts and states, never numbers, texts or serials.
 	Logf func(format string, args ...any)
 }
@@ -62,6 +67,9 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	if cfg.StateEvery == 0 {
 		cfg.StateEvery = bridgeproto.StateEvery
+	}
+	if cfg.InboundRetry == 0 {
+		cfg.InboundRetry = time.Second
 	}
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
@@ -91,14 +99,29 @@ type runner struct {
 	changed chan struct{}
 }
 
+var (
+	errUnbound = errors.New("bridge: no SIM recorded for the owner line")
+	errSwapped = errors.New("bridge: not the owner line's recorded SIM")
+)
+
 // open opens the modem and checks its SIM: the modem only when ok.
 func (b *runner) open(ctx context.Context) (Owner, string) {
 	want := b.cfg.OwnerICCID()
-	m, err := b.cfg.OpenOwner(ctx)
+	m, err := b.cfg.OpenOwner(ctx, func(iccid string) error {
+		switch {
+		case want == "":
+			return errUnbound
+		case iccid == "" || !sameICCID(iccid, want):
+			return errSwapped
+		}
+		return nil
+	})
 	var simErr *at.SIMError
 	switch {
-	case errors.As(err, &simErr):
+	case errors.As(err, &simErr), errors.Is(err, errUnbound):
 		return nil, bridgeproto.StateUnbound
+	case errors.Is(err, errSwapped):
+		return nil, bridgeproto.StateSwapped
 	case err != nil:
 		b.cfg.Logf("bridge: owner modem not open")
 		return nil, bridgeproto.StateDown
@@ -170,9 +193,17 @@ func (b *runner) report(ctx context.Context) {
 	}
 }
 
-// serve carries texts while the modem answers.
-func (b *runner) serve(ctx context.Context, m Owner) {
-	ctx, cancel := context.WithCancel(ctx)
+// InboundTries is how many times an inbound text is offered to agentosd.
+// With the 1 s first wait, the last try is about a minute after the first:
+// past a minute's rate limit, and past a restart of agentosd.
+const InboundTries = 7
+
+// serve carries texts while the modem answers. agentosd hears the line is
+// ok before any text is read, so the first texts (those stored while the
+// bridge was away, which the modem gives up as they are read) do not meet
+// a line agentosd still reads as down (L3 on #170).
+func (b *runner) serve(runCtx context.Context, m Owner) {
+	ctx, cancel := context.WithCancel(runCtx)
 	defer cancel()
 	go func() {
 		select {
@@ -181,6 +212,17 @@ func (b *runner) serve(ctx context.Context, m Owner) {
 		case <-ctx.Done():
 		}
 	}()
+	for wait := b.cfg.InboundRetry; ; wait = min(2*wait, b.cfg.Retry) {
+		err := b.cfg.Agentosd.Call(ctx, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateOK}, nil)
+		if err == nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
+	}
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -193,11 +235,33 @@ func (b *runner) serve(ctx context.Context, m Owner) {
 			wg.Wait()
 			return
 		case sms := <-m.Inbox():
-			in := bridgeproto.Inbound{Line: bridgeproto.LineOwner, From: sms.From, Text: sms.Text, Named: sms.Alphanumeric}
-			if err := b.cfg.Agentosd.Call(ctx, bridgeproto.OpInbound, in, nil); err != nil && ctx.Err() == nil {
-				b.cfg.Logf("bridge: an inbound text was refused")
-			}
+			// The modem has given the text up, so it is offered on the
+			// bridge's own context: the modem going away does not drop it.
+			var id [16]byte
+			rand.Read(id[:])
+			b.inbound(runCtx, bridgeproto.Inbound{Line: bridgeproto.LineOwner, From: sms.From, Text: sms.Text, Named: sms.Alphanumeric, ID: hex.EncodeToString(id[:])})
 		}
+	}
+}
+
+// inbound offers one text to agentosd, again while the refusal can pass.
+func (b *runner) inbound(ctx context.Context, in bridgeproto.Inbound) {
+	wait := b.cfg.InboundRetry
+	for try := 1; ; try++ {
+		err := b.cfg.Agentosd.Call(ctx, bridgeproto.OpInbound, in, nil)
+		if err == nil || ctx.Err() != nil {
+			return
+		}
+		if !bridgeproto.Retryable(err) || try == InboundTries {
+			b.cfg.Logf("bridge: an inbound text was refused")
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
+		wait *= 2
 	}
 }
 

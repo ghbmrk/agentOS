@@ -58,6 +58,11 @@ type Config struct {
 	// CountryCode is the home country code from setup ("1", "44"), used to
 	// write national-format numbers as E.164 so they match the owner's.
 	CountryCode string
+	// CheckSIM, if set, is given the SIM's serial (ICCID) before any stored
+	// text is read; an error ends Open with that error, leaving every text
+	// stored, so a text is never taken off a SIM that is not the one
+	// expected.
+	CheckSIM func(iccid string) error
 	// Owner is the owner's number when this SIM is the owner line. A long
 	// text from it that arrives garbled (conflicting parts) gets the fixed
 	// GarbledText reply, at most once an hour.
@@ -203,6 +208,11 @@ func (m *Modem) init(ctx context.Context) error {
 		return &SIMError{Status: st}
 	}
 	m.iccid = m.readICCID(ctx)
+	if m.cfg.CheckSIM != nil {
+		if err := m.cfg.CheckSIM(m.iccid); err != nil {
+			return err
+		}
+	}
 	if err := do("AT+CMGF=0"); err != nil {
 		return err
 	}

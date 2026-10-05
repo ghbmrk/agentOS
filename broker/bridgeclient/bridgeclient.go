@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"time"
 
@@ -19,6 +20,9 @@ import (
 type Client struct {
 	Path string
 }
+
+// MaxAnswer bounds one answer from agentosd.
+const MaxAnswer = 64 << 10
 
 // ErrRefused is a call agentosd answered with an error code; the code is
 // in the error's text.
@@ -46,7 +50,9 @@ func (c Client) Call(ctx context.Context, op string, args, out any) error {
 	if _, err := conn.Write(append(b, '\n')); err != nil {
 		return err
 	}
-	line, err := bufio.NewReader(conn).ReadBytes('\n')
+	// An answer is one line, bounded: an item's text is at most
+	// bridgeproto.MaxText bytes.
+	line, err := bufio.NewReader(io.LimitReader(conn, MaxAnswer)).ReadBytes('\n')
 	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()

@@ -10,7 +10,9 @@ Requires=agentosd.service
 [Service]
 User=agentos-modem
 Group=agentos-modem
-ExecStart=/usr/lib/agentos/agentos-modem -owner-sock /run/agentos/owner.sock -roles /var/lib/agentos/modem-roles.json -owner-number ${OWNER_NUMBER} -country-code ${COUNTRY_CODE} -box-number ${BOX_NUMBER}
+ExecStart=/usr/lib/agentos/agentos-modem -owner-sock /run/agentos/owner.sock -roles /var/lib/agentos/modem-roles.json
+# OWNER_NUMBER, COUNTRY_CODE and BOX_NUMBER, read from the environment so
+# no number is on the command line.
 EnvironmentFile=/etc/agentos/modem.env
 Restart=always
 RestartSec=5
@@ -54,7 +56,10 @@ DeviceAllow=char-alsa rw
 # account (part 2) reaches only its provider through the egress allow-list.
 IPAddressDeny=any
 RestrictAddressFamilies=AF_UNIX
-ReadOnlyPaths=/var/lib/agentos/modem-roles.json
+# Of AgentOS's state, only the roles file is visible, read-only (L3 on
+# #170).
+TemporaryFileSystem=/var/lib/agentos:ro
+BindReadOnlyPaths=/var/lib/agentos/modem-roles.json
 
 [Install]
 WantedBy=multi-user.target

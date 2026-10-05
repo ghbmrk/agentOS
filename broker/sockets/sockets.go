@@ -59,6 +59,10 @@ type Endpoint struct {
 	// 0660, so the peer's process can connect while it runs as its own
 	// user; the directory is then 0711. Without it the socket is 0600.
 	PeerGID *int
+	// HangupOps are ops whose context ends when the peer hangs up while
+	// the op runs: long polls, whose answer would be lost on a closed
+	// connection. Other ops run to the end whoever hangs up.
+	HangupOps map[string]bool
 }
 
 // listened is a test hook, called after each socket is listened on and
@@ -289,10 +293,64 @@ func (s *Server) serve(ctx context.Context, c net.Conn, ep Endpoint) {
 		if err != nil {
 			return
 		}
+		if ep.HangupOps[opOf(line)] {
+			if !s.serveWatched(ctx, c, r, enc, ep, line) {
+				return
+			}
+			continue
+		}
 		if err := enc.Encode(handle(ctx, ep, line)); err != nil {
 			return
 		}
 	}
+}
+
+// serveWatched serves one HangupOps request, ending its context if the
+// peer hangs up first: a read on the connection that returns while the
+// op runs is end of file (or a next request, which is kept). It reports
+// whether the connection stays open.
+func (s *Server) serveWatched(ctx context.Context, c net.Conn, r *bufio.Reader, enc *json.Encoder, ep Endpoint, line []byte) bool {
+	hctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	c.SetReadDeadline(time.Time{})
+	peeked := make(chan error, 1)
+	go func() { _, err := r.Peek(1); peeked <- err }()
+	done := make(chan Response, 1)
+	go func() { done <- handle(hctx, ep, line) }()
+	var resp Response
+	var peekErr error
+	select {
+	case resp = <-done:
+		if err := enc.Encode(resp); err != nil {
+			c.Close() // ends the pending read
+			<-peeked
+			return false
+		}
+		if ep.IdleTimeout > 0 {
+			c.SetReadDeadline(time.Now().Add(ep.IdleTimeout))
+		}
+		peekErr = <-peeked
+	case peekErr = <-peeked:
+		if peekErr != nil {
+			cancel()
+		}
+		resp = <-done
+		if err := enc.Encode(resp); err != nil {
+			return false
+		}
+	}
+	return peekErr == nil
+}
+
+// opOf is a request's op, "" if it has none.
+func opOf(line []byte) string {
+	var req struct {
+		Op string `json:"op"`
+	}
+	if json.Unmarshal(line, &req) != nil {
+		return ""
+	}
+	return req.Op
 }
 
 var errTooLarge = errors.New("too large")
