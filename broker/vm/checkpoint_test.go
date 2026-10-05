@@ -1,6 +1,7 @@
 package vm
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -329,5 +330,24 @@ func TestPE7ModeChangeFailsTheHash(t *testing.T) {
 	w, err := e.m.ResumeFromCheckpoint(bg, "agent", cp.ID)
 	if err != nil || w.Restored || w.Cold != ColdChanged {
 		t.Fatalf("woke %+v, %v: want cold (%s)", w, err, ColdChanged)
+	}
+}
+
+// PE7 (L3 on #149): the cold start after a refused restore does not
+// depend on the caller's context, which a slow restore may have used up:
+// the machine is started all the same.
+func TestPE7ColdResumeOutlivesTheCallersContext(t *testing.T) {
+	e := newEnv(t, 4096)
+	e.create("agent", admission.Foreground, 1600)
+	cp := sleep(t, e, "agent")
+	must(t, os.WriteFile(filepath.Join(e.m.snapDir(cp.ID), "mem", "mem"), []byte("666"), 0o600))
+	ctx, cancel := context.WithCancel(bg)
+	cancel()
+	w, err := e.m.ResumeFromCheckpoint(ctx, "agent", cp.ID)
+	if err != nil || w.Cold != ColdChanged {
+		t.Fatalf("woke %+v, %v", w, err)
+	}
+	if mc, _ := e.m.Get("agent"); mc.State != Running {
+		t.Fatalf("agent %s after a cold resume on a spent context", mc.State)
 	}
 }

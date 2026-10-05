@@ -31,6 +31,7 @@ type sleepFake struct {
 	// fails ResumeFromCheckpoint, cold fallback included.
 	during    func()
 	resumeErr error
+	deadline  time.Time // the last ResumeFromCheckpoint's ctx deadline
 }
 
 func newSleepFake() *sleepFake {
@@ -71,8 +72,9 @@ func (f *sleepFake) CheckpointAndStop(_ context.Context, id string) (vm.Snapshot
 	return s, nil
 }
 
-func (f *sleepFake) ResumeFromCheckpoint(_ context.Context, id, snap string) (vm.Wake, error) {
+func (f *sleepFake) ResumeFromCheckpoint(ctx context.Context, id, snap string) (vm.Wake, error) {
 	f.mu.Lock()
+	f.deadline, _ = ctx.Deadline()
 	slow := f.slow
 	f.mu.Unlock()
 	if slow != nil {
@@ -485,6 +487,72 @@ func TestRecoverLeavesOtherStatesAlone(t *testing.T) {
 		r2.s.recover(context.Background())
 		if len(r.f.resumed) != 0 || len(r2.notes) != 0 {
 			t.Fatalf("%s: resumed %v, journal %+v", tc.name, r.f.resumed, r2.notes)
+		}
+	}
+}
+
+// PE7 (condition 14, L3 MUST-A on #149): one sleep's wake sends the
+// holding line at most once, however many owner messages arrive during
+// it, and never once the agent is awake.
+func TestHoldingLineOncePerWake(t *testing.T) {
+	r := newSleepRig(t)
+	must(t, r.s.Sleep(context.Background()))
+	slow := make(chan struct{})
+	r.f.mu.Lock()
+	r.f.slow = slow
+	r.f.mu.Unlock()
+	var wg sync.WaitGroup
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); r.s.OwnerMessage(time.Now()) }()
+	}
+	time.Sleep(100 * time.Millisecond) // past HoldAfter for every message
+	close(slow)
+	wg.Wait()
+	time.Sleep(50 * time.Millisecond)
+	if n := r.holdCount(); n != 1 {
+		t.Fatalf("%d holding lines for one wake, want 1", n)
+	}
+	// The next sleep may send its own.
+	must(t, r.s.Sleep(context.Background()))
+	slow = make(chan struct{})
+	r.f.mu.Lock()
+	r.f.slow = slow
+	r.f.mu.Unlock()
+	go func() { time.Sleep(80 * time.Millisecond); close(slow) }()
+	r.s.OwnerMessage(time.Now())
+	if n := r.holdCount(); n != 2 {
+		t.Fatalf("%d holding lines after a second slow wake, want 2", n)
+	}
+
+	// A message whose line would fall due just after the wake ends sends
+	// none.
+	r = newSleepRig(t)
+	r.s.cfg.HoldAfter = 60 * time.Millisecond
+	must(t, r.s.Sleep(context.Background()))
+	r.s.OwnerMessage(time.Now())
+	time.Sleep(120 * time.Millisecond)
+	if n := r.holdCount(); n != 0 {
+		t.Fatalf("a holding line after the agent woke (%d)", n)
+	}
+}
+
+// PE7 (L3 on #149): a wake's restore is bounded by RestoreFor, 2 minutes
+// unless set.
+func TestRestoreIsBounded(t *testing.T) {
+	for _, tc := range []struct {
+		set, want time.Duration
+	}{{0, 2 * time.Minute}, {-time.Second, 2 * time.Minute}, {5 * time.Second, 5 * time.Second}} {
+		r := newSleepRig(t)
+		r.s = newSleeper(sleepConfig{Machines: r.f, ID: "agent", Now: r.clock, Hours: func(time.Time) bool { return true }, RestoreFor: tc.set})
+		must(t, r.s.Sleep(context.Background()))
+		start := time.Now()
+		r.s.Wake(wakeUnit)
+		r.f.mu.Lock()
+		got := r.f.deadline.Sub(start)
+		r.f.mu.Unlock()
+		if got < tc.want-time.Second || got > tc.want+time.Second {
+			t.Errorf("RestoreFor %v: restore deadline in %v, want about %v", tc.set, got, tc.want)
 		}
 	}
 }

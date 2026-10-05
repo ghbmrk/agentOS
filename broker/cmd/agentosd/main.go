@@ -131,7 +131,7 @@ func (l *lateStatus) Status() string {
 // waits in the agent's inbox meanwhile, and its start hands it over, warm
 // or cold alike (UX P2-c).
 type lateAgent struct {
-	a     atomic.Pointer[guest.OwnerAgent]
+	a     atomic.Pointer[ownerAgent]
 	sleep atomic.Pointer[sleeper]
 	last  atomic.Int64 // unix nanoseconds of the last delivery
 }
@@ -141,11 +141,16 @@ func (l *lateAgent) Deliver(ctx context.Context, text string, public bool) error
 	if a == nil {
 		return errors.New("no agent machine is running")
 	}
-	err := a.Deliver(ctx, text, public)
+	err := (*a).Deliver(ctx, text, public)
 	if err == nil {
 		l.delivered(time.Now())
 	}
 	return err
+}
+
+// ownerAgent is where owner chat goes (guest.OwnerAgent).
+type ownerAgent interface {
+	Deliver(ctx context.Context, text string, public bool) error
 }
 
 // delivered notes an owner message that reached the agent's inbox at t,
@@ -468,7 +473,8 @@ func main() {
 				if lp != nil {
 					oa.Delivered = lp.delivered
 				}
-				agent.a.Store(oa)
+				var to ownerAgent = oa
+				agent.a.Store(&to)
 				defer plane.Shutdown()
 				if lp != nil {
 					// Replay machines run the agent's image and launch.

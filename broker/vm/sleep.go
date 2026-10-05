@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // CheckpointAndStop puts a machine to sleep (PE7): it pauses it, takes a
@@ -138,8 +139,17 @@ func (m *Manager) ResumeFromCheckpoint(ctx context.Context, id, snapID string) (
 			return Wake{Cold: cold}, nil
 		}
 	}
-	return Wake{Cold: cold}, m.Resume(ctx, id)
+	// The cold start gets a context of its own, bounded by ColdResumeFor:
+	// a restore that ran out the caller's must still leave the machine
+	// started, not wait for the keeper's next try (L3 on #149).
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ColdResumeFor)
+	defer cancel()
+	return Wake{Cold: cold}, m.Resume(cctx, id)
 }
+
+// ColdResumeFor bounds the cold start that follows a refused or failed
+// restore in ResumeFromCheckpoint.
+const ColdResumeFor = time.Minute
 
 func (m *Manager) hashMatches(s Snapshot) bool {
 	if s.Hash == "" {

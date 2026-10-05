@@ -107,6 +107,10 @@ type sleeper struct {
 	snap   string
 	since  time.Time
 	rested time.Time // no sleep before this, after a wake at MaxSleep
+	// hold is this sleep's holding-line timer, armed by the first owner
+	// message; held is set once the line went (one per sleep).
+	hold   *time.Timer
+	held   bool
 	cuts   map[int]context.CancelCauseFunc
 	nextID int
 }
@@ -195,6 +199,7 @@ func (s *sleeper) Sleep(ctx context.Context) error {
 	// Marked first, so the keeper does not restart the agent under the
 	// checkpoint.
 	s.asleep, s.since = true, now
+	s.hold, s.held = nil, false
 	s.mu.Unlock()
 	snap, err := s.cfg.Machines.CheckpointAndStop(ctx, s.cfg.ID)
 	if err != nil {
@@ -211,7 +216,7 @@ func (s *sleeper) Sleep(ctx context.Context) error {
 	// Work that arrived while the checkpoint was taken wakes the agent
 	// again at once (condition 2, L3 on #149).
 	if s.pending() != "" {
-		s.wakeLocked(wakeWork, nil)
+		s.wakeLocked(wakeWork)
 		return errNoSleep
 	}
 	return nil
@@ -261,7 +266,7 @@ func (s *sleeper) Wake(cause string) {
 	s.cut(cause)
 	s.op.Lock()
 	defer s.op.Unlock()
-	s.wakeLocked(cause, nil)
+	s.wakeLocked(cause)
 }
 
 // OwnerMessage wakes the agent for an owner message delivered to its
@@ -270,17 +275,34 @@ func (s *sleeper) Wake(cause string) {
 // 14): the clock runs from the delivery, not from when the wake gets its
 // turn behind a checkpoint in progress (L3 on #149).
 func (s *sleeper) OwnerMessage(at time.Time) {
-	if !s.Asleep() {
+	s.mu.Lock()
+	if !s.asleep {
+		s.mu.Unlock()
 		return
 	}
-	s.cut(wakeOwner)
-	var hold *time.Timer
-	if s.cfg.Hold != nil {
-		hold = time.AfterFunc(s.cfg.HoldAfter-time.Since(at), s.cfg.Hold)
+	// One timer per sleep, from the first message: later messages during
+	// the same wake send no second line (L3 MUST-A on #149).
+	if s.cfg.Hold != nil && s.hold == nil && !s.held {
+		s.hold = time.AfterFunc(s.cfg.HoldAfter-time.Since(at), s.holdLine)
 	}
+	s.mu.Unlock()
+	s.cut(wakeOwner)
 	s.op.Lock()
 	defer s.op.Unlock()
-	s.wakeLocked(wakeOwner, hold)
+	s.wakeLocked(wakeOwner)
+}
+
+// holdLine sends the holding line if the agent is still asleep and the
+// line has not gone this sleep.
+func (s *sleeper) holdLine() {
+	s.mu.Lock()
+	if !s.asleep || s.held {
+		s.mu.Unlock()
+		return
+	}
+	s.held = true
+	s.mu.Unlock()
+	s.cfg.Hold()
 }
 
 // cut ends every guarded evaluation with the owner's cause for a wake.
@@ -296,13 +318,11 @@ func (s *sleeper) cut(cause string) {
 	s.mu.Unlock()
 }
 
-// wakeLocked restores the agent with s.op held; hold, if set, is stopped
-// once the agent is awake. The agent is marked awake even if the restore
-// and its cold fallback both fail, so the keeper starts it again.
-func (s *sleeper) wakeLocked(cause string, hold *time.Timer) {
-	if hold != nil {
-		defer hold.Stop()
-	}
+// wakeLocked restores the agent with s.op held, and stops the holding
+// line's timer as it marks the agent awake. The agent is marked awake even
+// if the restore and its cold fallback both fail, so the keeper starts it
+// again.
+func (s *sleeper) wakeLocked(cause string) {
 	s.mu.Lock()
 	if !s.asleep {
 		s.mu.Unlock()
@@ -320,6 +340,10 @@ func (s *sleeper) wakeLocked(cause string, hold *time.Timer) {
 	}
 	s.mu.Lock()
 	s.asleep, s.snap = false, ""
+	if s.hold != nil {
+		s.hold.Stop()
+		s.hold = nil
+	}
 	if cause == wakeMax {
 		s.rested = s.cfg.Now().Add(s.cfg.IdleAfter)
 	}

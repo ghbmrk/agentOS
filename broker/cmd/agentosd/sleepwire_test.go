@@ -205,3 +205,48 @@ func TestParseSleepHours(t *testing.T) {
 		}
 	}
 }
+
+type fakeOwnerAgent struct{ err error }
+
+func (f fakeOwnerAgent) Deliver(context.Context, string, bool) error { return f.err }
+
+// PE7 (condition 14, L3 on #149): owner chat delivered to a sleeping
+// agent is noted at its delivery time and wakes the agent as an owner
+// message, with the holding line on a slow wake; a failed delivery wakes
+// nothing.
+func TestOwnerChatToASleepingAgent(t *testing.T) {
+	r := newSleepRig(t)
+	var a lateAgent
+	a.sleep.Store(r.s)
+	var to ownerAgent = fakeOwnerAgent{errors.New("no services")}
+	a.a.Store(&to)
+	must(t, r.s.Sleep(context.Background()))
+	if err := a.Deliver(context.Background(), "hello", false); err == nil {
+		t.Fatal("a failed delivery reported success")
+	}
+	time.Sleep(20 * time.Millisecond)
+	if !r.s.Asleep() || !a.lastDelivered().IsZero() {
+		t.Fatal("a failed delivery woke the agent or counted as the owner's")
+	}
+	to = fakeOwnerAgent{}
+	slow := make(chan struct{})
+	r.f.mu.Lock()
+	r.f.slow = slow
+	r.f.mu.Unlock()
+	go func() { time.Sleep(100 * time.Millisecond); close(slow) }()
+	must(t, a.Deliver(context.Background(), "hello", false))
+	if d := time.Since(a.lastDelivered()); d < 0 || d > time.Second {
+		t.Fatalf("delivery noted %v ago", d)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for r.s.Asleep() {
+		if time.Now().After(deadline) {
+			t.Fatal("the agent slept through owner chat")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(10 * time.Millisecond)
+	if r.holdCount() != 1 || r.last().Cause != wakeOwner {
+		t.Fatalf("holding lines %d, journal %+v", r.holdCount(), r.last())
+	}
+}
