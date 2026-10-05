@@ -14,7 +14,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/cgroup"
 )
 
-// REQ: REV-1, REV-4, ARC-4, RES-1, RES-2, RES-4, REV-5
+// REQ: REV-1, REV-4, ARC-4, RES-1, RES-2, RES-4, REV-5, LOOP-5
 
 var bg = context.Background()
 
@@ -771,5 +771,102 @@ func TestRES4ForkRefusedAfterCheckpointLeavesNoSnapshot(t *testing.T) {
 	if len(e.m.Snapshots("src")) != 0 || len(ents) != 0 || m.Last != "" || m.State != Running ||
 		len(e.m.Machines()) != 1 || e.adm.Snapshot().FreeMB != before {
 		t.Fatalf("refused fork left state: %d snapshots, %d dirs, last %q, %s", len(e.m.Snapshots("src")), len(ents), m.Last, m.State)
+	}
+}
+
+// LOOP-5: a replay hands the guest its inputs by seeding a fresh machine's
+// layer; seed paths cannot leave the layer.
+func TestLOOP5SeededMachineSeesItsInputs(t *testing.T) {
+	e := newEnv(t, 4096)
+	seed := map[string][]byte{"etc/agentos/tree/procedures/a.md": []byte("step one")}
+	if _, err := e.m.CreateSeeded(bg, "m", Spec{Image: "base", Class: admission.Experiment, MemMB: 100}, seed); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.guestRead("m", "etc/agentos/tree/procedures/a.md"); got != "step one" {
+		t.Fatalf("seed = %q", got)
+	}
+	if e.guestRead("m", "etc/os-release") != "image v1" {
+		t.Fatal("seed hid the image")
+	}
+	must(t, os.Remove(e.upper("m", "etc/agentos/tree/procedures/a.md")))
+	must(t, e.m.Rebuild(bg, "m"))
+	if got := e.guestRead("m", "etc/agentos/tree/procedures/a.md"); got != "step one" {
+		t.Fatalf("seed after rebuild = %q", got)
+	}
+	for _, p := range []string{"../escape", "/etc/passwd", "a/../../b", "a//b", ""} {
+		if _, err := e.m.CreateSeeded(bg, "bad", Spec{Image: "base", Class: admission.Experiment, MemMB: 100}, map[string][]byte{p: nil}); err == nil {
+			t.Errorf("seed path %q accepted", p)
+		}
+	}
+	if len(e.m.Machines()) != 1 {
+		t.Fatalf("refused seeds left machines: %v", e.m.Machines())
+	}
+}
+
+// LOOP-5, ARC-6: replay machine IDs are kept for replay. Nothing else can
+// take one, and a replay machine is never forked or forked into, so its
+// guest services stay replay's.
+func TestLOOP5ReplayIDsAreReserved(t *testing.T) {
+	e := newEnv(t, 4096)
+	if _, err := e.m.Create(bg, EvalPrefix+"x", Spec{Image: "base", Class: admission.Experiment, MemMB: 100}); err == nil {
+		t.Fatal("Create took a replay id")
+	}
+	e.create("src", admission.Accepted, 100)
+	if _, err := e.m.Fork(bg, "src", []string{EvalPrefix + "y"}); err == nil {
+		t.Fatal("Fork made a replay id")
+	}
+	if _, err := e.m.CreateSeeded(bg, EvalPrefix+"r", Spec{Image: "base", Class: admission.Experiment, MemMB: 100}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.m.Fork(bg, EvalPrefix+"r", []string{"f"}); err == nil {
+		t.Fatal("a replay machine was forked")
+	}
+	s, err := e.m.Step(bg, "src")
+	must(t, err)
+	if err := e.m.Rollback(bg, EvalPrefix+"r", s.ID); err == nil {
+		t.Fatal("a replay machine was rolled back")
+	}
+	if _, err := e.m.Merge(bg, "src", EvalPrefix+"r"); err == nil {
+		t.Fatal("a replay machine was merged from")
+	}
+	if _, err := e.m.Merge(bg, EvalPrefix+"r", "src"); err == nil {
+		t.Fatal("a replay machine was merged into")
+	}
+}
+
+// RES-4: a seed is admitted against the disk like any layer copy.
+func TestRES4SeedAdmittedOnTheDisk(t *testing.T) {
+	e := newEnv(t, 4096)
+	e.cfg.DiskReserveBytes = 1 << 20
+	e.cfg.FreeBytes = func(string) (int64, error) { return 1<<20 + 64<<10, nil }
+	e.open()
+	big := map[string][]byte{"etc/big": make([]byte, 128<<10)}
+	if _, err := e.m.CreateSeeded(bg, "m", Spec{Image: "base", Class: admission.Experiment, MemMB: 100}, big); !errors.Is(err, ErrQuota) {
+		t.Fatalf("seed over the disk budget: %v", err)
+	}
+	e.cfg.FreeBytes = func(string) (int64, error) { return 1 << 40, nil }
+	e.cfg.MaxLayerBytes = 64 << 10
+	e.open()
+	if _, err := e.m.CreateSeeded(bg, "m", Spec{Image: "base", Class: admission.Experiment, MemMB: 100}, big); !errors.Is(err, ErrQuota) {
+		t.Fatalf("seed over the layer cap: %v", err)
+	}
+	if len(e.m.Machines()) != 0 {
+		t.Fatalf("refused seeds left machines: %v", e.m.Machines())
+	}
+	// A rebuild writes the seed again, and is admitted on the disk too.
+	free := int64(1 << 40)
+	e.cfg.MaxLayerBytes = 0
+	e.cfg.FreeBytes = func(string) (int64, error) { return free, nil }
+	e.open()
+	if _, err := e.m.CreateSeeded(bg, "m", Spec{Image: "base", Class: admission.Experiment, MemMB: 100}, big); err != nil {
+		t.Fatal(err)
+	}
+	free = 1<<20 + 64<<10
+	if err := e.m.Rebuild(bg, "m"); !errors.Is(err, ErrQuota) {
+		t.Fatalf("rebuild over the disk budget: %v", err)
+	}
+	// Refusal changes nothing: the machine runs on its layer as before.
+	if m, _ := e.m.Get("m"); m.State != Running || len(e.guestRead("m", "etc/big")) != 128<<10 {
+		t.Fatalf("refused rebuild changed the machine: %s", m.State)
 	}
 }
