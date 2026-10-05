@@ -40,9 +40,9 @@ const (
 
 // Evidence an adapter returns, with a not-applied result, when the
 // effect is released but its staged copy is not what the stage made
-// (arbitrator on #76). Gone: the owner deleted it in their own app, which
-// is a cancel. Edited: it changed after the owner approved it, so it is
-// not sent; the owner is told and can send it from their own app.
+// (arbitrator on #76). Gone: it was deleted, which is a cancel. Edited:
+// it changed after the owner approved it, so it is not sent; the owner is
+// told and can send it from their own app.
 const (
 	EvidenceGone   = "reversible: the staged copy is gone"
 	EvidenceEdited = "reversible: the staged copy was edited"

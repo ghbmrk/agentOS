@@ -223,8 +223,10 @@ type decision struct {
 	at       time.Time
 	item     owner.Item
 	local    bool
-	// hold is the UNDO ID a cancelled held effect was under (REV-3).
-	hold string
+	// hold is the UNDO ID a held effect was under, and attempt which hold
+	// of the intent it was (REV-3).
+	hold    string
+	attempt int
 }
 
 // New returns a gate that denies everything until Attach.
@@ -1150,7 +1152,10 @@ func (g *Gate) Decide(d owner.Decision) {
 	if why == "" {
 		why = "owner"
 	}
-	hold := ""
+	hold, attempt := "", 0
+	if w != nil {
+		attempt = w.attempt
+	}
 	switch {
 	case !d.Approved && (d.Why == "undo" || d.Why == "restart"):
 		hold = d.Request
@@ -1162,7 +1167,7 @@ func (g *Gate) Decide(d owner.Decision) {
 			d.Approved, why = false, "its staged copy could not be made"
 		}
 	}
-	g.decided[d.Ref] = decision{approved: d.Approved, why: why, at: g.cfg.Now(), item: item, local: local, hold: hold}
+	g.decided[d.Ref] = decision{approved: d.Approved, why: why, at: g.cfg.Now(), item: item, local: local, hold: hold, attempt: attempt}
 	wait := d.Approved && local && !g.confirmed[d.Ref]
 	own := g.own
 	g.mu.Unlock()
@@ -1187,6 +1192,10 @@ func (g *Gate) unhold(d owner.Decision) {
 		g.mu.Unlock()
 		return
 	}
+	n := 0
+	if w != nil {
+		n = w.attempt
+	}
 	delete(g.waiting, d.Ref)
 	delete(g.decided, d.Ref)
 	if d.Why == "not held" {
@@ -1198,11 +1207,17 @@ func (g *Gate) unhold(d owner.Decision) {
 	if eng == nil {
 		return
 	}
-	if st, err := eng.Get(d.Ref); err == nil {
+	if n == 0 {
+		// After a restart the gate kept no hold: the cancel is for the
+		// latest one, resolved now, before Reissue can start the next
+		// (security R1 on #76).
+		n, _ = g.lastStage(d.Ref)
+	}
+	if st, err := eng.Get(d.Ref); err == nil && n > 0 {
 		g.wg.Add(1)
 		go func() {
 			defer g.wg.Done()
-			g.unstage(st.Intent, d.Request)
+			g.unstage(st.Intent, d.Request, n)
 		}()
 	}
 }
@@ -1225,12 +1240,17 @@ func (g *Gate) lastStage(p string) (int, journal.Status) {
 // not succeed, once any stage attempt in flight has ended.
 func (g *Gate) unstaged(id string) bool {
 	g.mu.Lock()
-	w, done := g.waiting[id], g.staging[id]
+	w := g.waiting[id]
+	var done chan struct{}
+	n := 0
+	if w != nil {
+		n = w.attempt
+		done = g.staging[reversible.StageID(id, n)]
+	}
 	g.mu.Unlock()
 	if w == nil || !w.held {
 		return false
 	}
-	n := w.attempt
 	st, err := g.eng.Get(id)
 	if err != nil {
 		return false
@@ -1292,7 +1312,7 @@ func (g *Gate) hold(d owner.Decision) {
 	done := make(chan struct{})
 	g.mu.Lock()
 	g.derived[in.ID] = true
-	g.staging[d.Ref] = done
+	g.staging[in.ID] = done
 	g.mu.Unlock()
 	g.wg.Add(1)
 	go func() {
@@ -1307,13 +1327,13 @@ func (g *Gate) hold(d owner.Decision) {
 
 // afterHold settles a held effect's staged copy once the effect is
 // settled (arbitrator on #76). Sent: the copy is the sent message. Gone:
-// the owner deleted it, a cancel. Edited: it is not sent and stays for the
+// it is gone (deleted), a cancel. Edited: it is not sent and stays for the
 // owner, who is told in a fixed line offering no YES, because an approval
 // could not be bound to the edited version (arbitrator re-ruling).
 // Anything else that did not happen (UNDO, a restart, a
 // recheck denial, a failed send) unstages (C2). An unknown outcome, or an
 // effect STOP still holds, leaves it alone.
-func (g *Gate) afterHold(st journal.Status, hold string) {
+func (g *Gate) afterHold(st journal.Status, hold string, n int) {
 	switch {
 	case st.State == journal.NotApplied && lastEvidence(st) == reversible.EvidenceGone:
 	case st.State == journal.NotApplied && lastEvidence(st) == reversible.EvidenceEdited:
@@ -1324,7 +1344,7 @@ func (g *Gate) afterHold(st journal.Status, hold string) {
 			_ = own.Inform(fmt.Sprintf("%s not sent: its draft changed after you approved it. Send it from your mail app if you still want it.", clip(hold)))
 		}
 	case st.State == journal.Denied || st.State == journal.NotApplied:
-		g.unstage(st.Intent, hold)
+		g.unstage(st.Intent, hold, n)
 	}
 }
 
@@ -1332,22 +1352,23 @@ func (g *Gate) afterHold(st journal.Status, hold string) {
 // stage attempt has ended. A stage that did not succeed left nothing. If
 // the inverse is not applied (the copy changed since, or the grant is
 // gone), the copy is left as is and the owner is told.
-func (g *Gate) unstage(p journal.Intent, hold string) {
+func (g *Gate) unstage(p journal.Intent, hold string, n int) {
 	f, ok := g.forms[p.Executor][p.Action]
-	if !ok || f.Stage == "" {
+	if !ok || f.Stage == "" || n < 1 {
 		return
 	}
+	sid := reversible.StageID(p.ID, n)
 	g.mu.Lock()
-	done := g.staging[p.ID]
+	done := g.staging[sid]
 	g.mu.Unlock()
 	if done != nil {
 		<-done
 	}
 	g.mu.Lock()
-	delete(g.staging, p.ID)
+	delete(g.staging, sid)
 	g.mu.Unlock()
-	n, st := g.lastStage(p.ID)
-	if n == 0 || st.State != journal.Succeeded || len(st.Attempts) == 0 {
+	st, err := g.eng.Get(sid)
+	if err != nil || st.State != journal.Succeeded || len(st.Attempts) == 0 {
 		return
 	}
 	if _, err := g.eng.Get(reversible.InverseID(p.ID, n)); err == nil {
@@ -1481,7 +1502,7 @@ func (g *Gate) settle(id string) {
 		own := g.own
 		g.mu.Unlock()
 		if d.hold != "" {
-			g.afterHold(st, d.hold)
+			g.afterHold(st, d.hold, d.attempt)
 		}
 		if st.Intent.Origin == reversible.Origin && st.State != journal.Pending && st.State != journal.Authorized {
 			g.mu.Lock()
