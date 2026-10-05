@@ -6,7 +6,7 @@ This guide answers common questions about your box. This part covers your PC.
 
 AgentOS runs entirely from its own drive. It does not open, change, or repair your PC's own disks, and it does not set your PC's clock. When you take the drive out and start the PC again, the PC is as it was, apart from the few small things listed below.
 
-Most PCs start from the drive by themselves, with no screen or keyboard. If the box's Wi-Fi does not appear a few minutes after you turn the PC on, the PC did not start from the drive. Then use its one-time boot key; you'll need a screen and keyboard for that one start: turn the PC on, press its boot key a few times until a menu appears, then choose the USB drive. The back of your card lists the boot key for each major PC brand. This choice lasts for one start only.
+Many PCs start from the drive by themselves, with no screen or keyboard. If the box's Wi-Fi does not appear a few minutes after you turn the PC on, the PC did not start from the drive. Then use its one-time boot key; you'll need a screen and keyboard for that one start: turn the PC on, press its boot key a few times until a menu appears, then choose the USB drive. The back of your card lists the boot key for each major PC brand. This choice lasts for one start only.
 
 You never need to change your PC's settings, and you never need to turn Secure Boot off.
 

@@ -24,7 +24,7 @@ const (
 // QuickStart is the card's quick-start, at most five steps (ONB-7).
 var QuickStart = []string{
 	"Put the SIM in the modem. Plug the drive and the modem into the back of the PC.",
-	"Turn the PC on. Usually no screen or keyboard is needed. Your PC's own disks are left untouched.",
+	"Turn the PC on. Often no screen or keyboard is needed. Your PC's own disks are left untouched.",
 	fmt.Sprintf("Wait %d minutes, then point your phone's camera at the Wi-Fi code.", WaitMinutes),
 	"Join the Wi-Fi. The setup page opens by itself; follow it.",
 	"Done. Text your box any time. Text HELP for commands.",
