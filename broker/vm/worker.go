@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"time"
 )
@@ -123,6 +124,36 @@ func (m *Manager) Workers(lineage string) []string {
 	return out
 }
 
+// setForkBase sets mc's ForkBase. The caller holds mc.mu; the write also
+// takes the table lock, so ForkSiblings can read it without mc.mu.
+func (m *Manager) setForkBase(mc *machine, base string) {
+	m.mu.Lock()
+	mc.ForkBase = base
+	m.mu.Unlock()
+}
+
+// ForkSiblings returns the snapshot worker id was forked from and the
+// other workers of its lineage forked from it. Like Workers it reads the
+// table alone, so it never waits behind a worker's command (CAP-1 keep).
+func (m *Manager) ForkSiblings(id string) (string, []string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	mc, ok := m.machines[id]
+	if !ok {
+		return "", nil, fmt.Errorf("%w: machine %s", ErrUnknown, id)
+	}
+	var sibs []string
+	if mc.ForkBase != "" {
+		for oid, o := range m.machines {
+			if oid != id && strings.HasPrefix(oid, WorkerPrefix) && o.Lineage == mc.Lineage && o.ForkBase == mc.ForkBase {
+				sibs = append(sibs, oid)
+			}
+		}
+	}
+	sort.Strings(sibs)
+	return mc.ForkBase, sibs, nil
+}
+
 // TryGet returns machine id, or false when it is unknown or busy (its lock
 // is held by a command, snapshot or start), without waiting.
 func (m *Manager) TryGet(id string) (Machine, bool) {
@@ -157,6 +188,9 @@ func (m *Manager) Exec(ctx context.Context, id string, c Command, timeout time.D
 	}
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
+	if mc.State == Preempted {
+		return ExecResult{}, fmt.Errorf("%w: %s", ErrPreempted, id)
+	}
 	if mc.State != Running {
 		return ExecResult{}, fmt.Errorf("%w: %s is %s", ErrState, id, mc.State)
 	}
@@ -182,6 +216,11 @@ func (m *Manager) Exec(ctx context.Context, id string, c Command, timeout time.D
 		return ExecResult{}, ErrHeld
 	}
 	r, err := m.awaitExec(ctx, ex, id, c)
+	if mc.preempting.Load() {
+		// Preempt ended the command with the machine: it has no result,
+		// not a failed exit (potency R1 on #158).
+		return ExecResult{}, fmt.Errorf("%w: %s: the command did not finish", ErrPreempted, id)
+	}
 	if err != nil && ctx.Err() == context.Canceled {
 		return ExecResult{}, fmt.Errorf("vm: %s: command ended before it finished", id)
 	}

@@ -11,7 +11,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/cgroup"
 )
 
-// REQ: RES-2, RES-4
+// REQ: RES-2, RES-4, CAP-1
 
 func TestRES2FloorBudgetMatchesTheSpecTable(t *testing.T) {
 	f := Floor()
@@ -212,5 +212,19 @@ func TestRES2TestKitUsesTheSameFloor(t *testing.T) {
 	}
 	if !strings.Contains(string(b), fmt.Sprintf("OPENCLAW_MB = %d", OpenClawMB)) {
 		t.Fatalf("testkit.py has no OPENCLAW_MB = %d", OpenClawMB)
+	}
+}
+
+// MemAvailable is read the same way, for how many forks fit (CAP-1).
+func TestMemAvailableFromMeminfo(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "meminfo")
+	os.WriteFile(p, []byte("MemTotal:       16000000 kB\nMemFree:          100 kB\nMemAvailable:    2097152 kB\n"), 0o644)
+	mb, err := MemAvailableMB(p)
+	if err != nil || mb != 2048 {
+		t.Fatalf("MemAvailableMB = %d, %v; want 2048", mb, err)
+	}
+	os.WriteFile(p, []byte("MemTotal: 16000000 kB\n"), 0o644)
+	if _, err := MemAvailableMB(p); err == nil {
+		t.Fatal("no MemAvailable line read as a value")
 	}
 }
