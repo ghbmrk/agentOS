@@ -39,11 +39,10 @@ P1-4 follow-ups (from the #23 review), for P1-7 or the loop scheduler:
 - Guest sockets follow the B8 per-machine identity rule when P1-7 mounts them (V15, Security). Done in P1-7: identity is the socket (G1).
 - On the N95, measure zram together with the 1/16 `memory.high` margin (Potency).
 
-## Phase 2: real hardware
-
-Cloud parts first; the rest waits on Mark's hardware.
+## Phase 2: real hardware (cloud parts)
 
 | ID | Package | Needs | State |
 |---|---|---|---|
+| P2-7 | Provider adapters: model router (CAP-9) over two API routes, OpenAI and Anthropic, behind the one chat-completions guest interface; failover on exhaustion, grants and data labels checked before sending, measured routes and Loop 1 rule candidates ([assumptions](broker/route/ASSUMPTIONS.md)). A3's consumer route waits on S6. Wiring: serve `Router.Handler` behind the OP-8 meter in place of the raw proxy | P1-3, P1-7 | in review |
 | P2-4a | Vault passphrase key slot and vault process: Argon2id passphrase slot with a TPM seam, `agentos-egress` holding the unlocked vault and serving the model route `agentosd` forwards, unknown-host unlock by passphrase plus code-generator code (CRED-8; carries P1-7's G8) ([assumptions](broker/egress/ASSUMPTIONS.md), K1–K8). Carry-forward: P2-2 scans the passphrase on the local page, offers the grid challenge, and texts the owner about unlock pending, unlocked, wrong code with tries left, and lockout with retry time, plus a "Box locked after restart" reply, with P2-3 (K6); a verify operation sharing one last accepted step on the vault process gives the owner channel its high-tier codes (K7) | P1-3, P1-7 | in review |
 | P2-4b | Trusted-host TPM slot (optional boot PIN), N95 Argon2id tuning, TPM NV rollback counter (CRED-8, CRED-9, V6) | **Mark: hardware** | queued |

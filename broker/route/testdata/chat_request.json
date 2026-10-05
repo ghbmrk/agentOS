@@ -1,0 +1,26 @@
+{
+  "model": "default",
+  "messages": [
+    {"role": "system", "content": "You are a careful assistant."},
+    {"role": "developer", "content": [{"type": "text", "text": "Prefer metric units."}]},
+    {"role": "user", "content": [
+      {"type": "text", "text": "What is the weather here?"},
+      {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}}
+    ]},
+    {"role": "assistant", "content": null, "tool_calls": [
+      {"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\":\"Paris\"}"}}
+    ]},
+    {"role": "tool", "tool_call_id": "call_1", "content": "18 C, clear"},
+    {"role": "user", "content": "Thanks. Anything else?"}
+  ],
+  "max_completion_tokens": 512,
+  "temperature": 0.2,
+  "stop": "END",
+  "tools": [
+    {"type": "function", "function": {"name": "get_weather", "description": "Current weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}}
+  ],
+  "tool_choice": "required",
+  "parallel_tool_calls": false,
+  "user": "guest-supplied-field-that-is-dropped",
+  "metadata": {"x": "dropped"}
+}
