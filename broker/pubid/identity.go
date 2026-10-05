@@ -78,10 +78,8 @@ func Open(path string, now func() time.Time) (*Identity, error) {
 	}
 	id := &Identity{path: path, now: now, rand: rand.Reader}
 	// Others who can write the directory could swap the file (L3 on #163).
-	if fi, err := os.Stat(filepath.Dir(path)); err != nil {
+	if err := checkDir(filepath.Dir(path)); err != nil {
 		return nil, err
-	} else if fi.Mode().Perm()&0o022 != 0 {
-		return nil, errors.New("pubid: identity directory is writable by others")
 	}
 	if err := sweepTemp(filepath.Dir(path)); err != nil {
 		return nil, err

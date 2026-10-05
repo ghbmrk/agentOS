@@ -207,14 +207,61 @@ func TestOSS6FarFutureDueIsRedrawn(t *testing.T) {
 	}
 	must(t, g.p.Queue("artifact", []byte("y")))
 
-	// On load too.
+	// Not on load, which may run before the clock is right; at the next
+	// release.
 	h := newRig(t, 0)
 	h.c.t = right.Add(100 * 365 * 24 * time.Hour)
 	must(t, h.p.Queue("artifact", []byte("z")))
+	far := h.p.st.Items[0].Due
 	h.c.t = right
 	h.reopen(t)
+	if d := h.p.st.Items[0].Due; d != far {
+		t.Fatalf("redrawn on load: %s", d)
+	}
+	must(t, h.p.Release())
 	if d := h.p.st.Items[0].Due; d > day(right.AddDate(0, 0, DefaultMaxDelayDays)) {
-		t.Fatalf("due %s not redrawn on load", d)
+		t.Fatalf("due %s not redrawn at release", d)
+	}
+
+	// The threshold: due redrawAfterDays after today stays, one day more
+	// is redrawn.
+	k := newRig(t, 0)
+	k.day(1, 12*time.Hour)
+	now := k.c.t
+	must(t, k.p.Queue("artifact", []byte("p")))
+	must(t, k.p.Queue("artifact", []byte("q")))
+	edge := day(now.AddDate(0, 0, redrawAfterDays))
+	k.p.st.Items[0].Due, k.p.st.Items[1].Due = edge, day(now.AddDate(0, 0, redrawAfterDays+1))
+	must(t, k.p.Release())
+	if k.p.st.Items[0].Due != edge || k.p.st.Items[1].Due > day(now.AddDate(0, 0, DefaultMaxDelayDays)) {
+		t.Fatalf("threshold: %s, %s", k.p.st.Items[0].Due, k.p.st.Items[1].Due)
+	}
+}
+
+// A clock that steps back (a hardware clock in local time, or by days)
+// never pulls a correct due day in: the item still waits its drawn delay
+// once the clock is right (L3 round 3 MUST on #163).
+func TestOSS6ClockBehindKeepsTheDelay(t *testing.T) {
+	for _, back := range []time.Duration{5 * time.Hour, 10 * 24 * time.Hour, 27 * 24 * time.Hour} {
+		g := newRig(t, 2) // every delay is 3 days
+		g.day(0, 2*time.Hour)
+		queued := g.c.t
+		must(t, g.p.Queue("artifact", []byte("a")))
+		due := g.p.st.Items[0].Due
+		g.c.t = queued.Add(-back)
+		g.reopen(t)
+		must(t, g.p.Release())
+		g.c.t = queued.Add(10 * time.Hour)
+		g.reopen(t)
+		must(t, g.p.Release())
+		if len(g.out.got) != 0 || g.p.st.Items[0].Due != due {
+			t.Fatalf("back %v: published %d, due %s (was %s)", back, len(g.out.got), g.p.st.Items[0].Due, due)
+		}
+		g.day(3, 12*time.Hour)
+		must(t, g.p.Release())
+		if len(g.out.got) != 1 || g.out.got[0].day != due {
+			t.Fatalf("back %v: %+v", back, g.out.got)
+		}
 	}
 }
 
@@ -326,8 +373,17 @@ func TestOSS6LoadUnderAWrongClockAndDayHistory(t *testing.T) {
 		g.day(n, 12*time.Hour)
 		must(t, g.p.Release())
 	}
-	if len(g.p.st.Days) != maxDays {
-		t.Fatalf("%d days remembered", len(g.p.st.Days))
+	if len(g.p.st.Days) != maxDays || g.p.st.Days[maxDays-1] != g.out.got[len(g.out.got)-1].day {
+		t.Fatalf("%d days remembered, newest %s", len(g.p.st.Days), g.p.st.Days[len(g.p.st.Days)-1])
+	}
+	// A one-day step back publishes nothing.
+	n := len(g.out.got)
+	g.day(maxDays+5, 13*time.Hour)
+	must(t, g.p.Queue("artifact", []byte("late")))
+	g.p.st.Items[len(g.p.st.Items)-1].Due = day(g.c.t)
+	must(t, g.p.Release())
+	if len(g.out.got) != n {
+		t.Fatal("published again after a one-day step back")
 	}
 	g.reopen(t)
 	path := filepath.Join(g.dir, "outbox.json")
@@ -335,5 +391,71 @@ func TestOSS6LoadUnderAWrongClockAndDayHistory(t *testing.T) {
 	must(t, os.WriteFile(path, []byte(`{"items":[],"days":[`+days+`]}`), 0o600))
 	if _, err := NewPublisher(Config{Path: path, Identity: g.id, Sender: g.out, Signers: map[string]Signer{"a": signer}}); err == nil {
 		t.Fatal("an outbox with too many days was accepted")
+	}
+}
+
+// Days from a clock far ahead never push real days out of the history, so
+// no real day is published twice (L3 round 3 SHOULD 1 on #163).
+func TestOSS6FarDaysNeverEvictRealOnes(t *testing.T) {
+	g := newRig(t, 0)
+	must(t, g.p.Queue("artifact", []byte("a")))
+	g.day(1, 12*time.Hour)
+	must(t, g.p.Release())
+	real := g.out.got[0].day
+	right := g.c.t
+	ahead := right.Add(100 * 365 * 24 * time.Hour)
+	for i := 0; i < maxDays+1; i++ {
+		g.c.t = ahead.AddDate(0, 0, i-1)
+		must(t, g.p.Queue("artifact", []byte{byte(i), 3}))
+		g.c.t = ahead.AddDate(0, 0, i)
+		must(t, g.p.Release())
+	}
+	if len(g.out.got) != maxDays+2 {
+		t.Fatalf("far batches %d", len(g.out.got)-1)
+	}
+	g.c.t = right.Add(-3 * 24 * time.Hour)
+	must(t, g.p.Queue("artifact", []byte("b")))
+	g.p.st.Items[0].Due = real
+	g.c.t = right.Add(8 * time.Hour)
+	must(t, g.p.Release())
+	if len(g.out.got) != maxDays+2 {
+		t.Fatalf("day %s published twice", real)
+	}
+}
+
+// Trim keeps the newest maxEnds days that end a run before a far jump,
+// then the newest of the rest, and nothing more.
+func TestOSS6TrimKeepsTheNewestEnds(t *testing.T) {
+	base := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	var days, ends []string
+	for i := 0; i < maxEnds+2; i++ {
+		d := day(base.AddDate(0, 0, 30*i))
+		days, ends = append(days, d), append(ends, d)
+	}
+	start := base.AddDate(0, 0, 30*(maxEnds+2))
+	for i := 0; i < maxDays; i++ {
+		days = append(days, day(start.AddDate(0, 0, i)))
+	}
+	got := (&Publisher{}).trim(append([]string(nil), days...))
+	// The newest day is itself an end, so maxEnds-1 isolated days stay.
+	want := append(append([]string(nil), ends[3:]...), days[len(days)-(maxDays-maxEnds+1):]...)
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("trim:\n got %v\nwant %v", got, want)
+	}
+	short := days[:5]
+	if got := (&Publisher{}).trim(append([]string(nil), short...)); fmt.Sprint(got) != fmt.Sprint(short) {
+		t.Fatalf("short history trimmed: %v", got)
+	}
+}
+
+// An outbox in a directory others can write is refused: they could swap
+// in items for the box to sign (L3 round 3 SHOULD 3).
+func TestOSS6OutboxDirectoryMode(t *testing.T) {
+	g := newRig(t, 0)
+	dir := filepath.Join(t.TempDir(), "open")
+	must(t, os.Mkdir(dir, 0o700))
+	must(t, os.Chmod(dir, 0o777))
+	if _, err := NewPublisher(Config{Path: filepath.Join(dir, "o.json"), Identity: g.id, Sender: g.out, Signers: map[string]Signer{"a": signer}}); err == nil {
+		t.Fatal("an outbox directory others can write was accepted")
 	}
 }

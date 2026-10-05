@@ -32,6 +32,14 @@ const (
 	// maxDays is how many published days the outbox remembers, so no day
 	// is published twice even after a wrong clock is corrected.
 	maxDays = 64
+	// maxEnds bounds the days trim keeps from before clock jumps.
+	maxEnds = 8
+	// redrawAfterDays: an item due more than this many days after today
+	// was queued under a clock that was wrong, far beyond any plausible
+	// clock error (a clock kept in local time, a step back of days), so it
+	// gets a new draw. Smaller would let a clock behind pull a correct due
+	// day in and lose the delay (L3 round 3 on #163).
+	redrawAfterDays = 28
 )
 
 // ErrFull means MaxQueue items are already waiting.
@@ -125,6 +133,11 @@ func NewPublisher(cfg Config) (*Publisher, error) {
 		cfg.Rand = rand.Reader
 	}
 	p := &Publisher{cfg: cfg}
+	// Others who can write the directory could swap in items for the box
+	// to sign (L3 round 3 on #163).
+	if err := checkDir(filepath.Dir(cfg.Path)); err != nil {
+		return nil, err
+	}
 	if err := sweepTemp(filepath.Dir(cfg.Path)); err != nil {
 		return nil, err
 	}
@@ -143,11 +156,9 @@ func NewPublisher(cfg Config) (*Publisher, error) {
 		if err != nil {
 			return nil, fmt.Errorf("pubid: outbox %s: %w", cfg.Path, err)
 		}
-		redrawn, err := p.redraw(cfg.Now().UTC())
-		if err != nil {
-			return nil, err
-		}
-		if dropped || redrawn {
+		// No redraw here: a load runs just after boot, maybe before the
+		// clock is right (L3 round 3 on #163).
+		if dropped {
 			if err := p.save(); err != nil {
 				return nil, err
 			}
@@ -230,34 +241,41 @@ func (p *Publisher) draw(now time.Time) (string, error) {
 	return day(base.AddDate(0, 0, 1+int(r[0])%p.cfg.MaxDelayDays)), nil
 }
 
-// redraw gives a new leaving day to every item due further ahead than an
-// item can wait, as one queued under a clock that was wrong would be;
-// otherwise it would never leave, or fill the queue for good (L3 round 2
-// on #163). It reports whether it changed any.
-func (p *Publisher) redraw(now time.Time) (bool, error) {
-	if !p.plausible(now) {
-		return false, nil
-	}
-	limit := day(now.AddDate(0, 0, p.cfg.MaxDelayDays))
-	if l := p.last(now); l > day(now) {
-		t, _ := time.Parse("2006-01-02", l)
-		limit = day(t.AddDate(0, 0, p.cfg.MaxDelayDays))
-	}
-	changed := false
+// redraw gives a new leaving day to every item due more than
+// redrawAfterDays after today, as one queued under a clock far ahead
+// would be; otherwise it would never leave, or fill the queue for good
+// (L3 round 2 on #163). Only Release calls it, with a plausible clock past
+// the last published day.
+func (p *Publisher) redraw(now time.Time) error {
+	limit := day(now.AddDate(0, 0, redrawAfterDays))
 	for i := range p.st.Items {
 		if p.st.Items[i].Due <= limit {
 			continue
 		}
 		d, err := p.draw(now)
 		if err != nil {
-			return changed, err
+			return err
 		}
-		p.st.Items[i].Due, changed = d, true
+		p.st.Items[i].Due = d
 	}
-	return changed, nil
+	return nil
 }
 
-// sweepTemp removes temporary files a crash left in dir.
+// checkDir refuses a directory others can write.
+func checkDir(dir string) error {
+	fi, err := os.Stat(dir)
+	if err != nil {
+		return err
+	}
+	if fi.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("pubid: %s is writable by others", dir)
+	}
+	return nil
+}
+
+// sweepTemp removes temporary files a crash left in dir. The identity and
+// the outbox belong to one broker process, which opens each once at start,
+// so no other writer's temporary file is in flight then.
 func sweepTemp(dir string) error {
 	names, err := filepath.Glob(filepath.Join(dir, ".pubid-*"))
 	if err != nil {
@@ -356,8 +374,8 @@ func (p *Publisher) Release() error {
 	if today <= p.last(now) {
 		return nil
 	}
-	// Saved with the batch below; if none forms, a restart redraws again.
-	if _, err := p.redraw(now); err != nil {
+	// Saved with the batch below; if none forms, the next release redraws again.
+	if err := p.redraw(now); err != nil {
 		return err
 	}
 	var due, rest []item
@@ -414,13 +432,47 @@ func (p *Publisher) send() error {
 	if err := p.cfg.Sender.Publish(f.Day, f.Batch); err != nil {
 		return fmt.Errorf("pubid: publishing %s: %w", f.Day, err)
 	}
-	days := append(p.st.Days, f.Day)
-	sort.Strings(days)
-	if len(days) > maxDays {
-		days = days[len(days)-maxDays:]
-	}
-	p.st.Pending, p.st.Days = nil, days
+	p.st.Pending, p.st.Days = nil, p.trim(append(p.st.Days, f.Day))
 	return p.save()
+}
+
+// trim keeps at most maxDays published days: the newest day before each
+// jump of more than redrawAfterDays (the true newest day when a clock was
+// far ahead, so it is never pushed out and never published again; the
+// newest maxEnds such days), then the newest of the rest (L3 round 3 on
+// #163).
+func (p *Publisher) trim(days []string) []string {
+	sort.Strings(days)
+	var ends []string
+	for i, d := range days {
+		if i == len(days)-1 || gap(d, days[i+1]) > redrawAfterDays {
+			ends = append(ends, d)
+		}
+	}
+	if len(ends) > maxEnds {
+		ends = ends[len(ends)-maxEnds:]
+	}
+	keep := map[string]bool{}
+	for _, d := range ends {
+		keep[d] = true
+	}
+	for i := len(days) - 1; i >= 0 && len(keep) < maxDays; i-- {
+		keep[days[i]] = true
+	}
+	out := days[:0]
+	for _, d := range days {
+		if keep[d] {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// gap is how many days b is after a (both valid days).
+func gap(a, b string) int {
+	ta, _ := time.Parse("2006-01-02", a)
+	tb, _ := time.Parse("2006-01-02", b)
+	return int(tb.Sub(ta) / (24 * time.Hour))
 }
 
 func (p *Publisher) save() error {
