@@ -38,6 +38,11 @@ const KindTOTPSeed = "totp_seed"
 // vault.
 const KindPCRPolicyKey = "pcr_policy_key"
 
+// KindTPMLockoutAuth is a trusted PC's TPM lockout authorization (CRED-8
+// boot PIN): whoever holds it can reset the TPM's PIN guess counter, so
+// it lives only in the vault.
+const KindTPMLockoutAuth = "tpm_lockout_auth"
+
 // MinPassphraseLen is the shortest normalized passphrase enrolled. The
 // Owner Card's generated passphrase carries at least 80 bits (§8.1); this
 // floor only stops an obviously weak replacement.

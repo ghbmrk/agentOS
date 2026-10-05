@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/owner"
@@ -85,6 +86,7 @@ var (
 	errBootChanged  = uerr(http.StatusConflict, "this PC's boot path changed since it was trusted; unlock with the vault passphrase and a code")
 	errNoSuchHost   = uerr(http.StatusNotFound, "no trusted host with that id")
 	errHostNotSaved = uerr(http.StatusInternalServerError, "could not make this PC trusted; nothing was changed")
+	errLockoutOwned = uerr(http.StatusConflict, "other software already manages this PC's TPM, so the box can't limit guesses at a boot PIN here. Trust this PC without a PIN instead.")
 )
 
 func errWrongCode(left int) error {
@@ -504,7 +506,7 @@ func (c *custody) put(name string, value []byte) error {
 	if c.ph != open {
 		return errLocked
 	}
-	if name == "" || name == SeedName || name == PolicyKeyName || len(name) > 64 {
+	if name == "" || name == SeedName || name == PolicyKeyName || strings.HasPrefix(name, lockoutAuthPrefix) || len(name) > 64 {
 		return errBadCredential
 	}
 	for _, e := range c.v.List() {
@@ -717,7 +719,7 @@ func (c *custody) tier4(code string) (*vault.Vault, error) {
 // trust makes this PC a trusted host (CRED-9): its TPM slot opens the
 // vault on this boot path from now on, with the boot PIN if pin is set.
 func (c *custody) trust(code, pin string) (string, error) {
-	if pin != "" && (len(pin) < 4 || len(pin) > 64) {
+	if n := utf8.RuneCountInString(pin); pin != "" && (n < 4 || n > 64) {
 		return "", errBadPIN
 	}
 	v, err := c.tier4(code)
@@ -725,6 +727,9 @@ func (c *custody) trust(code, pin string) (string, error) {
 		return "", err
 	}
 	name, err := c.host.enroll(v, pin)
+	if errors.Is(err, tpmseal.ErrLockoutOwned) {
+		return "", errLockoutOwned
+	}
 	if err != nil {
 		return "", errHostNotSaved
 	}

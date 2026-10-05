@@ -284,6 +284,10 @@ func TestBootPIN(t *testing.T) {
 	if _, err := r.c.trust(r.code(), "12"); err != errBadPIN {
 		t.Fatalf("short PIN: %v", err)
 	}
+	// Characters, not bytes: three letters are too short in any script.
+	if _, err := r.c.trust(r.code(), "äöü"); err != errBadPIN {
+		t.Fatalf("three-character PIN: %v", err)
+	}
 	if _, err := r.c.trust(r.code(), "2468"); err != nil {
 		t.Fatal(err)
 	}
@@ -430,5 +434,67 @@ func TestTrustedHostOverTheUnlockSocket(t *testing.T) {
 	id, _ := hosts[0].(map[string]any)["id"].(string)
 	if code, _ := call("POST", "/untrust", map[string]string{"code": r.code(), "id": id}); code != http.StatusNoContent {
 		t.Fatalf("untrust: %d", code)
+	}
+}
+
+// CRED-8: a PIN slot takes the TPM's lockout hierarchy with an
+// authorization kept only in the vault, so a thief cannot reset the TPM's
+// guess counter with the factory-empty lockout password.
+func TestBootPINTakesTheLockoutHierarchy(t *testing.T) {
+	r := newPCRig(t)
+	r.unknownHostUnlock(t)
+	if _, err := r.c.trust(r.code(), "2468"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.tpm.ThiefLockReset(); err == nil {
+		t.Fatal("empty lockout password still resets the PIN guess counter")
+	}
+	var name string
+	for _, e := range r.c.v.List() {
+		if e.Kind == vault.KindTPMLockoutAuth {
+			name = e.Name
+		}
+	}
+	if name == "" {
+		t.Fatal("no lockout authorization in the vault")
+	}
+	if _, ok := (apiKeysOnly{r.c.v}).Secret(name); ok {
+		t.Fatal("proxy can inject the lockout authorization")
+	}
+	if err := r.c.put(name, []byte(synthetic(t, "sk-"))); !errors.Is(err, errBadCredential) {
+		t.Fatalf("put over the lockout authorization: %v", err)
+	}
+	if err := r.c.put(lockoutAuthPrefix+"x", []byte(synthetic(t, "sk-"))); !errors.Is(err, errBadCredential) {
+		t.Fatalf("put under the reserved prefix: %v", err)
+	}
+	// Re-trusting the PC (say, to change the PIN) keeps the same one.
+	if _, err := r.c.trust(r.code(), "13579"); err != nil {
+		t.Fatalf("re-trust with a new PIN: %v", err)
+	}
+}
+
+// When other software already set the lockout password, the box cannot
+// vouch for the PIN's guess limit: a PIN is refused, and nothing guesses
+// that password. Trusting the PC without a PIN still works.
+func TestBootPINRefusedWhenLockoutIsOwned(t *testing.T) {
+	r := newPCRig(t)
+	other, _ := tpmseal.NewLockoutAuth()
+	if err := tpmseal.TakeLockout(r.tpm.TPM(), other, false); err != nil {
+		t.Fatal(err)
+	}
+	r.unknownHostUnlock(t)
+	if _, err := r.c.trust(r.code(), "2468"); err != errLockoutOwned {
+		t.Fatalf("PIN with a foreign lockout password: %v", err)
+	}
+	if r.tpmSlots(t) != 0 {
+		t.Fatal("slot added anyway")
+	}
+	for _, e := range r.c.v.List() {
+		if e.Kind == vault.KindTPMLockoutAuth {
+			t.Fatal("unused lockout authorization left in the vault")
+		}
+	}
+	if _, err := r.c.trust(r.code(), ""); err != nil {
+		t.Fatalf("trust without a PIN: %v", err)
 	}
 }

@@ -26,6 +26,10 @@ import (
 // the vault.
 const PolicyKeyName = "pcr-policy-key"
 
+// lockoutAuthPrefix names the vault entries holding a trusted PC's TPM
+// lockout authorization, one per TPM, followed by part of its SRK name.
+const lockoutAuthPrefix = "tpm-lockout-"
+
 // maxPolicies bounds the approved boot paths kept; the oldest go first.
 const maxPolicies = 16
 
@@ -219,6 +223,9 @@ func (h *tpmHost) open(pin string) (*vault.Vault, error) {
 // policyKey returns the vault's policy key, making it on first use.
 func policyKey(v *vault.Vault) (*ecdsa.PrivateKey, error) {
 	if s, ok := v.Secret(PolicyKeyName); ok {
+		if !hasKind(v, PolicyKeyName, vault.KindPCRPolicyKey) {
+			return nil, errors.New("policy key entry has the wrong kind")
+		}
 		return tpmseal.ParsePolicyKey([]byte(s.Reveal()))
 	}
 	k, err := tpmseal.NewPolicyKey()
@@ -260,6 +267,11 @@ func (h *tpmHost) enroll(v *vault.Vault, pin string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if pin != "" {
+		if err := takeLockout(v, t, id); err != nil {
+			return "", err
+		}
+	}
 	if err := v.AddSlot(&tpmFactor{t: t, pin: pin, pub: &key.PublicKey, name: h.name}, func(s vault.Slot) bool {
 		sealed, err := sealedOf(s)
 		return err == nil && bytes.Equal(sealed.SRKName, id)
@@ -267,6 +279,54 @@ func (h *tpmHost) enroll(v *vault.Vault, pin string) (string, error) {
 		return "", err
 	}
 	return h.name, nil
+}
+
+// takeLockout makes the TPM's lockout hierarchy the vault's before a PIN
+// slot is sealed (tpmseal.TakeLockout). The authorization is stored in the
+// vault first, so it is never set on the TPM without being kept; if the
+// TPM refuses, a new entry is removed again.
+func takeLockout(v *vault.Vault, t transport.TPM, id []byte) error {
+	name := lockoutAuthName(id)
+	var auth []byte
+	held := false
+	for _, e := range v.List() {
+		if e.Name != name {
+			continue
+		}
+		if e.Kind != vault.KindTPMLockoutAuth {
+			return errors.New("lockout authorization entry has the wrong kind")
+		}
+		s, _ := v.Secret(name)
+		auth, held = []byte(s.Reveal()), true
+	}
+	if !held {
+		var err error
+		if auth, err = tpmseal.NewLockoutAuth(); err != nil {
+			return err
+		}
+		if err := v.Put(name, vault.KindTPMLockoutAuth, auth); err != nil {
+			return err
+		}
+	}
+	err := tpmseal.TakeLockout(t, auth, held)
+	clear(auth)
+	if err != nil && !held {
+		v.Delete(name)
+	}
+	return err
+}
+
+// lockoutAuthName is the vault entry for the TPM whose SRK name is id: the
+// first 16 bytes of the name's digest, in hex.
+func lockoutAuthName(id []byte) string {
+	d := id
+	if len(d) > 2 {
+		d = d[2:] // drop the name's hash algorithm
+	}
+	if len(d) > 16 {
+		d = d[:16]
+	}
+	return lockoutAuthPrefix + hex.EncodeToString(d)
 }
 
 func (h *tpmHost) remove(v *vault.Vault, id string) (int, error) {

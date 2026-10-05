@@ -6,6 +6,7 @@ package swtpm
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"os"
@@ -156,6 +157,25 @@ func Predict(data ...string) []byte {
 		v = h.Sum(nil)
 	}
 	return v
+}
+
+// ThiefLockReset sends TPM2_DictionaryAttackLockReset with an empty
+// lockout password, as someone holding the PC would to reset the PIN
+// guess counter. It returns the TPM's answer.
+func (s *TPM) ThiefLockReset() error {
+	cmd := []byte{
+		0x80, 0x02, 0, 0, 0, 27, 0, 0, 0x01, 0x39, // sessions, size, DictionaryAttackLockReset
+		0x40, 0, 0, 0x0a, // TPM_RH_LOCKOUT
+		0, 0, 0, 9, 0x40, 0, 0, 0x09, 0, 0, 0, 0, 0, // password session, empty
+	}
+	rsp, err := s.tpm.Send(cmd)
+	if err != nil {
+		return err
+	}
+	if rc := binary.BigEndian.Uint32(rsp[6:10]); rc != 0 {
+		return tpm2.TPMRC(rc)
+	}
+	return nil
 }
 
 func (s *TPM) String() string { return fmt.Sprintf("swtpm(%s)", s.dir) }
