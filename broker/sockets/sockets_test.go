@@ -150,3 +150,27 @@ func TestEndpointNameCannotEscapeTheDirectory(t *testing.T) {
 		t.Fatal("accepted a path outside the socket directory")
 	}
 }
+
+// The owner socket's client (agentos-modem) runs as its own uid: the
+// directory is traversable but not listable, that socket is connectable (the
+// SO_PEERCRED check still refuses every other uid), and the others stay
+// owner-only.
+func TestAPeerUIDSocketIsReachableByThatUID(t *testing.T) {
+	modem := os.Getuid() + 1
+	_, dir := serve(t,
+		Endpoint{Name: "owner.sock", Peer: Peer{Kind: "owner"}, PeerUID: &modem, Ops: map[string]Handler{"ping": echoPeer}},
+		Endpoint{Name: "guest-m1.sock", Peer: Peer{Kind: "guest", ID: "m1"}, Ops: map[string]Handler{"ping": echoPeer}},
+	)
+	for name, want := range map[string]os.FileMode{"": 0o711, "owner.sock": 0o666, "guest-m1.sock": 0o600} {
+		fi, err := os.Stat(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode().Perm() != want {
+			t.Fatalf("%q mode %v, want %v", name, fi.Mode().Perm(), want)
+		}
+	}
+	if r := call(t, filepath.Join(dir, "owner.sock"), `{"op":"ping"}`); r.OK {
+		t.Fatalf("a uid other than PeerUID was served: %+v", r)
+	}
+}

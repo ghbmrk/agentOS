@@ -76,6 +76,11 @@ type Config struct {
 	// OwnerOps are more ops on the owner socket: the modem bridge's
 	// (modemlink.Link.Ops, P2-3w). They cannot replace "message".
 	OwnerOps map[string]sockets.Handler
+	// BridgeOnly drops "message" from the owner socket, leaving OwnerOps:
+	// with the modem bridge on, owner texts arrive only through its
+	// checked "inbound" op (security F1 on #170). "message" stays for
+	// simulator and test builds.
+	BridgeOnly bool
 	// Agent receives the owner's task chat: the guest plane's owner inbox
 	// for the agent's machine (ARC-6 (c)). Nil: no agent running.
 	Agent control.Agent
@@ -276,8 +281,11 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 			},
 		},
 	}}
+	if cfg.BridgeOnly {
+		delete(eps[0].Ops, "message")
+	}
 	for op, h := range cfg.OwnerOps {
-		if _, taken := eps[0].Ops[op]; !taken {
+		if _, taken := eps[0].Ops[op]; !taken && op != "message" {
 			eps[0].Ops[op] = h
 		}
 	}

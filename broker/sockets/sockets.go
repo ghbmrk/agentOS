@@ -107,7 +107,16 @@ func (s *Server) Start(ctx context.Context, eps ...Endpoint) error {
 		}
 		seen[ep.Name] = true
 	}
-	if err := secureDir(s.Dir); err != nil {
+	// A PeerUID endpoint is for another local uid, so the directory must be
+	// traversable (not listable) and that socket connectable; the kernel's
+	// SO_PEERCRED check in accept still turns away every other uid.
+	dirMode := os.FileMode(0o700)
+	for _, ep := range eps {
+		if ep.PeerUID != nil {
+			dirMode = 0o711
+		}
+	}
+	if err := secureDir(s.Dir, dirMode); err != nil {
 		return err
 	}
 	unlock, err := lockDir(s.Dir)
@@ -131,7 +140,11 @@ func (s *Server) Start(ctx context.Context, eps ...Endpoint) error {
 		}
 		ln.(*net.UnixListener).SetUnlinkOnClose(true)
 		lns = append(lns, ln)
-		if err := os.Chmod(path, 0o600); err != nil {
+		mode := os.FileMode(0o600)
+		if ep.PeerUID != nil {
+			mode = 0o666
+		}
+		if err := os.Chmod(path, mode); err != nil {
 			return fail(err)
 		}
 	}
@@ -152,14 +165,14 @@ func (s *Server) Start(ctx context.Context, eps ...Endpoint) error {
 // Wait returns once every listener and connection has finished.
 func (s *Server) Wait() { s.wg.Wait() }
 
-// secureDir creates dir 0700, or checks that an existing one is a real
+// secureDir creates dir with mode, or checks that an existing one is a real
 // directory (not a symlink) owned by this process's uid, and resets it to
-// 0700.
-func secureDir(dir string) error {
+// mode.
+func secureDir(dir string, mode os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
 		return err
 	}
-	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+	if err := os.Mkdir(dir, mode); err != nil && !errors.Is(err, os.ErrExist) {
 		return err
 	}
 	fi, err := os.Lstat(dir)
@@ -172,7 +185,7 @@ func secureDir(dir string) error {
 	if uid, ok := fileUID(fi); !ok || uid != os.Getuid() {
 		return fmt.Errorf("sockets: %s is not owned by uid %d", dir, os.Getuid())
 	}
-	return os.Chmod(dir, 0o700)
+	return os.Chmod(dir, mode)
 }
 
 func closeAll(lns []net.Listener) {

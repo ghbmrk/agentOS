@@ -300,3 +300,25 @@ func TestOwnerSocketServesTheBridgeOps(t *testing.T) {
 		t.Fatal("an extra op replaced message")
 	}
 }
+
+// With the bridge on, an owner text must pass the bridge's checks (line,
+// sender, size, rate): the raw "message" op, which takes any sender, is
+// not served, and no extra op can put it back (security F1 on #170).
+func TestABridgeOnlyOwnerSocketRefusesRawMessages(t *testing.T) {
+	dir := t.TempDir()
+	cancel, _ := startWith(t, dir, func(c *Config) {
+		c.BridgeOnly = true
+		c.OwnerOps = map[string]sockets.Handler{
+			"state":   func(context.Context, sockets.Peer, json.RawMessage) (any, error) { return "noted", nil },
+			"message": func(context.Context, sockets.Peer, json.RawMessage) (any, error) { return "hijacked", nil },
+		}
+	})
+	defer cancel()
+	sock := filepath.Join(dir, "run", OwnerSocket)
+	if r := send(t, sock, "message", map[string]string{"from": "+15550000999", "text": "STATUS"}); r.OK || !strings.Contains(r.Error, "unknown op") {
+		t.Fatalf("message served with the bridge on: %+v", r)
+	}
+	if r := send(t, sock, "state", map[string]string{}); !r.OK {
+		t.Fatalf("state: %+v", r)
+	}
+}

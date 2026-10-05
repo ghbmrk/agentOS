@@ -37,10 +37,18 @@ func TestTheUnitIsHardened(t *testing.T) {
 		"DeviceAllow":             {"char-ttyUSB rw", "char-alsa rw"},
 		"IPAddressDeny":           {"any"},
 		"RestrictAddressFamilies": {"AF_UNIX"},
+		"ProtectProc":             {"invisible"},
+		"PrivateIPC":              {"yes"},
+		"RemoveIPC":               {"yes"},
 	} {
 		if strings.Join(set[k], "|") != strings.Join(want, "|") {
 			t.Errorf("%s = %q, want %q", k, set[k], want)
 		}
+	}
+	// The socket agentosd serves (its -sockets default plus owner.sock),
+	// not a path nothing listens on (security F2 on #170).
+	if want := "-owner-sock /run/agentos/owner.sock "; !strings.Contains(strings.Join(set["ExecStart"], ""), want) {
+		t.Errorf("ExecStart %q lacks %q", set["ExecStart"], want)
 	}
 }
 

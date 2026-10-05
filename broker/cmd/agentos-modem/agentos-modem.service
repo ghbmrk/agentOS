@@ -10,7 +10,7 @@ Requires=agentosd.service
 [Service]
 User=agentos-modem
 Group=agentos-modem
-ExecStart=/usr/lib/agentos/agentos-modem -owner-sock /run/agentosd/owner.sock -roles /var/lib/agentos/modem-roles.json -owner-number ${OWNER_NUMBER} -country-code ${COUNTRY_CODE} -box-number ${BOX_NUMBER}
+ExecStart=/usr/lib/agentos/agentos-modem -owner-sock /run/agentos/owner.sock -roles /var/lib/agentos/modem-roles.json -owner-number ${OWNER_NUMBER} -country-code ${COUNTRY_CODE} -box-number ${BOX_NUMBER}
 EnvironmentFile=/etc/agentos/modem.env
 Restart=always
 RestartSec=5
@@ -36,6 +36,12 @@ SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources
 UMask=0077
+# No other process's /proc entries and no System V IPC (security R1 on
+# #170). ProcSubset=pid is left off: discovery pairs each modem with its
+# sound card through /proc/asound, which that would hide.
+ProtectProc=invisible
+PrivateIPC=yes
+RemoveIPC=yes
 
 # Devices: the modems' serial nodes and sound card only. The udev rule
 # makes only qualified modems' nodes this user's; every other serial or

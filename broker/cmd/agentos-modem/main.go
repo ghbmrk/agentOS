@@ -29,7 +29,7 @@ import (
 
 func main() {
 	var ownerSock, roles, boxNumber, ownerNumber, countryCode, sysRoot string
-	flag.StringVar(&ownerSock, "owner-sock", "/run/agentosd/owner.sock", "agentosd's owner socket")
+	flag.StringVar(&ownerSock, "owner-sock", "/run/agentos/owner.sock", "agentosd's owner socket (agentosd -sockets)")
 	flag.StringVar(&roles, "roles", "/var/lib/agentos/modem-roles.json", "the lines' SIM serials recorded at setup")
 	flag.StringVar(&boxNumber, "box-number", "", "the owner line's own number, E.164 (AT+CNUM is tried when empty)")
 	flag.StringVar(&ownerNumber, "owner-number", "", "the owner's number, E.164")
