@@ -211,6 +211,7 @@ func New(cfg Config) (*Scheduler, error) {
 	if s.st.Applied == nil {
 		s.st.Applied = map[string]bool{}
 	}
+	s.orderLocked()
 	if err := cfg.Spare.SetOverallCap(SpareLimits(s.st.Settings.SpareCalls)); err != nil {
 		return nil, err
 	}
@@ -503,7 +504,7 @@ func (s *Scheduler) Digest() []string {
 	} else {
 		for _, l := range All {
 			if set.Paused[l] {
-				out = append(out, fmt.Sprintf("%s is off. Reply %s ON to restart it.", capitalize(strings.ToLower(loopAliases[l])), loopAliases[l]))
+				out = append(out, fmt.Sprintf("%s %s off. Reply %s ON to restart %s.", capitalize(strings.ToLower(loopAliases[l])), be(l), loopAliases[l], it(l)))
 			}
 		}
 	}
@@ -536,4 +537,12 @@ func (s *Scheduler) Evaluating() bool { return s.evaluating.Load() }
 // Spare.SetShares (loops L3).
 func (s *Scheduler) EvalShare() meter.Share {
 	return meter.Share{Prefix: vm.EvalPrefix, Reserve: EvalReserve, Active: s.Evaluating}
+}
+
+// it is the pronoun for a loop's word name.
+func it(l Loop) string {
+	if be(l) == "are" {
+		return "them"
+	}
+	return "it"
 }

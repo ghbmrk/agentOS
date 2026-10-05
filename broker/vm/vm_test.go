@@ -779,7 +779,7 @@ func TestRES4ForkRefusedAfterCheckpointLeavesNoSnapshot(t *testing.T) {
 func TestLOOP5SeededMachineSeesItsInputs(t *testing.T) {
 	e := newEnv(t, 4096)
 	seed := map[string][]byte{"etc/agentos/tree/procedures/a.md": []byte("step one")}
-	if _, err := e.m.CreateSeeded(bg, "m", Spec{Image: "base", Class: admission.Experiment, MemMB: 100}, seed); err != nil {
+	if _, err := e.m.CreateSeeded(bg, "m", Spec{Image: "base", Class: admission.Experiment, MemMB: 100, Label: Private}, seed); err != nil {
 		t.Fatal(err)
 	}
 	if got := e.guestRead("m", "etc/agentos/tree/procedures/a.md"); got != "step one" {
@@ -794,12 +794,44 @@ func TestLOOP5SeededMachineSeesItsInputs(t *testing.T) {
 		t.Fatalf("seed after rebuild = %q", got)
 	}
 	for _, p := range []string{"../escape", "/etc/passwd", "a/../../b", "a//b", ""} {
-		if _, err := e.m.CreateSeeded(bg, "bad", Spec{Image: "base", Class: admission.Experiment, MemMB: 100}, map[string][]byte{p: nil}); err == nil {
+		if _, err := e.m.CreateSeeded(bg, "bad", Spec{Image: "base", Class: admission.Experiment, MemMB: 100, Label: Private}, map[string][]byte{p: nil}); err == nil {
 			t.Errorf("seed path %q accepted", p)
 		}
 	}
 	if len(e.m.Machines()) != 1 {
 		t.Fatalf("refused seeds left machines: %v", e.m.Machines())
+	}
+}
+
+// REV-5, compile K7: a seed is derived from owner data until its files carry
+// a public mark, so only a private machine may read one. A public machine
+// with a seed would hold owner data under a label that lets it egress.
+func TestREV5SeedGoesOnlyIntoPrivateMachines(t *testing.T) {
+	e := newEnv(t, 4096)
+	seed := map[string][]byte{"etc/agentos/tree/skills/a.md": []byte("from a private task")}
+	if _, err := e.m.CreateSeeded(bg, "pub", Spec{Image: "base", Class: admission.Experiment, MemMB: 100, Label: Public}, seed); !errors.Is(err, ErrSeedLabel) {
+		t.Fatalf("seed into a public machine: %v", err)
+	}
+	if len(e.m.Machines()) != 0 || e.adm.Snapshot().FreeMB != 4096 {
+		t.Fatalf("refused seed left state: %v", e.m.Machines())
+	}
+	// No seed, no owner data: a public machine is still fine.
+	if _, err := e.m.CreateSeeded(bg, "pub", Spec{Image: "base", Class: admission.Experiment, MemMB: 100, Label: Public}, nil); err != nil {
+		t.Fatal(err)
+	}
+	m, err := e.m.CreateSeeded(bg, "priv", Spec{Image: "base", Class: admission.Experiment, MemMB: 100, Label: Private}, seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Label != Private || e.m.DataLabel("priv") != "private" {
+		t.Fatalf("seeded machine label %v", m.Label)
+	}
+	// Forks of a seeded machine inherit its label, so the seed never
+	// reaches a public machine that way either.
+	_, err = e.m.Fork(bg, "priv", []string{"child"})
+	must(t, err)
+	if l, _ := e.m.Label("child"); l != Private {
+		t.Fatalf("fork of a seeded machine is %v", l)
 	}
 }
 
@@ -841,13 +873,13 @@ func TestRES4SeedAdmittedOnTheDisk(t *testing.T) {
 	e.cfg.FreeBytes = func(string) (int64, error) { return 1<<20 + 64<<10, nil }
 	e.open()
 	big := map[string][]byte{"etc/big": make([]byte, 128<<10)}
-	if _, err := e.m.CreateSeeded(bg, "m", Spec{Image: "base", Class: admission.Experiment, MemMB: 100}, big); !errors.Is(err, ErrQuota) {
+	if _, err := e.m.CreateSeeded(bg, "m", Spec{Image: "base", Class: admission.Experiment, MemMB: 100, Label: Private}, big); !errors.Is(err, ErrQuota) {
 		t.Fatalf("seed over the disk budget: %v", err)
 	}
 	e.cfg.FreeBytes = func(string) (int64, error) { return 1 << 40, nil }
 	e.cfg.MaxLayerBytes = 64 << 10
 	e.open()
-	if _, err := e.m.CreateSeeded(bg, "m", Spec{Image: "base", Class: admission.Experiment, MemMB: 100}, big); !errors.Is(err, ErrQuota) {
+	if _, err := e.m.CreateSeeded(bg, "m", Spec{Image: "base", Class: admission.Experiment, MemMB: 100, Label: Private}, big); !errors.Is(err, ErrQuota) {
 		t.Fatalf("seed over the layer cap: %v", err)
 	}
 	if len(e.m.Machines()) != 0 {
@@ -858,7 +890,7 @@ func TestRES4SeedAdmittedOnTheDisk(t *testing.T) {
 	e.cfg.MaxLayerBytes = 0
 	e.cfg.FreeBytes = func(string) (int64, error) { return free, nil }
 	e.open()
-	if _, err := e.m.CreateSeeded(bg, "m", Spec{Image: "base", Class: admission.Experiment, MemMB: 100}, big); err != nil {
+	if _, err := e.m.CreateSeeded(bg, "m", Spec{Image: "base", Class: admission.Experiment, MemMB: 100, Label: Private}, big); err != nil {
 		t.Fatal(err)
 	}
 	free = 1<<20 + 64<<10

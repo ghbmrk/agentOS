@@ -287,8 +287,13 @@ func (b *Builder) runJob(ctx context.Context, j *job) error {
 		return fmt.Errorf("creating clean room: %w", err)
 	}
 	defer b.destroy(id)
-	// A job's outcome is logged once its machine is gone.
+	// A job's outcome is logged once its machine is gone. Ending the
+	// session first means no result can commit after a failure is logged;
+	// one that already committed makes the job built.
 	done := func(o Outcome) error {
+		if a := s.end(); a != "" {
+			o = Outcome{Result: "built", Artifact: a}
+		}
 		b.destroy(id)
 		return b.finish(j, h.Kind, o)
 	}
@@ -322,6 +327,10 @@ func (b *Builder) runJob(ctx context.Context, j *job) error {
 		case <-deadline.C:
 			if j.Attempts >= b.cfg.Attempts {
 				return done(Outcome{Result: "failed", Reason: "timed out"})
+			}
+			if s.end() != "" {
+				// Committed at the deadline: the job is built.
+				return done(Outcome{})
 			}
 			return errors.New("timed out; trying again on a fresh machine")
 		case <-tick.C:
@@ -455,12 +464,15 @@ func (b *Builder) Requeue() (int, error) {
 			continue
 		}
 		if in, ok := have[j.Hint]; ok {
+			// Removed first, so a job that stays parked is not logged
+			// coalesced again on the next Requeue.
+			if err := os.Remove(j.path); err != nil {
+				b.cfg.Logf("cleanroom: removing coalesced parked job %s: %v", j.ID, err)
+				continue
+			}
 			o := Outcome{Job: j.ID, Day: j.Day, Kind: h.Kind, Result: "coalesced", Reason: "same hint as " + in.desc, Artifact: in.artifact}
 			if err := b.logOutcome(o); err != nil {
 				return n, err
-			}
-			if err := os.Remove(j.path); err != nil {
-				b.cfg.Logf("cleanroom: removing coalesced parked job %s: %v", j.ID, err)
 			}
 			continue
 		}

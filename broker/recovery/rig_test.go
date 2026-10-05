@@ -104,7 +104,7 @@ func newBox(t *testing.T) *box {
 	must(t, err)
 	t.Cleanup(func() { x.b.V.Close() })
 	must(t, Provision(x.b, x.card, Factor(x.rk)))
-	must(t, vault.Rekey(x.b.KeysPath, Factor(x.rk), fakeTPM{[]byte("sealed-to-host-a-tpm")}))
+	must(t, x.b.V.Rekey(Factor(x.rk), fakeTPM{[]byte("sealed-to-host-a-tpm")}))
 	x.seed, _ = random(nil, TOTPSeedBytes)
 	must(t, x.b.V.Put(SeedName, vault.KindTOTPSeed, x.seed))
 	x.apiKey = []byte(fmt.Sprintf("sk-synthetic-%x", x.seed[:12]))
@@ -135,7 +135,7 @@ func newBox(t *testing.T) *box {
 
 // withPassphrase adds the card's passphrase slot (one Argon2id run).
 func (x *box) withPassphrase() {
-	must(x.t, vault.Rekey(x.b.KeysPath, Factor(x.rk), vault.Passphrase(x.card.VaultPassphrase)))
+	must(x.t, x.b.V.Rekey(Factor(x.rk), vault.Passphrase(x.card.VaultPassphrase)))
 }
 
 func (x *box) roots() []Root {

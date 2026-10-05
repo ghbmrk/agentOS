@@ -53,6 +53,18 @@ func (s *session) fail(reason string) {
 	}
 }
 
+// end finishes the session if nothing has, so no result commits after it,
+// and returns the artifact if one already did.
+func (s *session) end() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.finished {
+		s.finished = true
+		close(s.done)
+	}
+	return s.artifact
+}
+
 // Services returns the vm.Services every machine's start goes through. A
 // machine whose ID has the clean-room prefix gets its clean room's socket
 // if a job is running it, and nothing otherwise: it is never handed to

@@ -481,8 +481,9 @@ func TestCleanRoomWithPrivateLabelPublishesNothing(t *testing.T) {
 	r.run()
 	waitFor(t, "outcome", func() bool { return len(r.outcomes()) == 1 })
 	r.f.wg.Wait()
-	// 403, or 409 when the poll saw the label first: refused either way.
-	if code != http.StatusForbidden && code != http.StatusConflict {
+	// 403; 409 when the poll saw the label first; 0 when the poll's failure
+	// closed the socket before the post connected. Refused every way.
+	if code != http.StatusForbidden && code != http.StatusConflict && code != 0 {
 		t.Fatalf("result from a private machine: %d", code)
 	}
 	if o := r.outcomes()[0]; o.Result != "failed" {

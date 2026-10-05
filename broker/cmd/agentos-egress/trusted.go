@@ -65,6 +65,19 @@ type trustedHost interface {
 	remove(v *vault.Vault, id string) (int, error)
 	// list describes the trusted PCs.
 	list() ([]hostInfo, error)
+	// anchor binds the open vault to this PC's rollback counter, making
+	// the counter if needed (V6); trust calls it before enroll.
+	anchor(v *vault.Vault) error
+	// reencrypt moves the open vault to a fresh data key (vault.Reencrypt,
+	// proving owner) and a new policy key, and seals fresh slots for this
+	// PC (with pin if its slot has one) and for every other trusted PC it
+	// can reach without that PC. It returns how many other PCs must be
+	// trusted again.
+	reencrypt(v *vault.Vault, pin string, owner []vault.Factor) (int, error)
+	// bind checks an open vault against this PC's rollback counter and
+	// binds it, so every later write advances the counter (V6). It
+	// returns vault.ErrRolledBack for an old copy of the drive.
+	bind(v *vault.Vault) error
 	// approve adds the running boot path to the approved ones, without
 	// touching any slot ("Keep this PC trusted" after a fallback unlock).
 	approve(v *vault.Vault) error
@@ -342,24 +355,329 @@ func (h *tpmHost) open(pin string) (*vault.Vault, error) {
 	if err != nil {
 		return nil, err
 	}
+	v, err := func() (*vault.Vault, error) {
+		t, err := h.openTPM()
+		if err != nil {
+			return nil, err
+		}
+		defer t.Close()
+		return vault.OpenSealed(h.vaultPath, h.keysPath, &tpmFactor{t: t, pin: pin, policies: pols})
+	}()
+	if err != nil {
+		return nil, err
+	}
+	// The TPM connection is closed: the counter opens its own.
+	if err := h.bindLocked(v); err != nil {
+		v.Close()
+		return nil, err
+	}
+	h.noteRelease()
+	// Opened without a PIN, so this PC's slot has none: give back a
+	// lockout hierarchy an earlier PIN-off could not (giveBack).
+	if pin == "" {
+		if t, err := h.openTPM(); err == nil {
+			if id, err := tpmseal.Identity(t); err == nil {
+				h.giveBack(v, t, id)
+			}
+			t.Close()
+		}
+	}
+	return v, nil
+}
+
+// tpmCounter is this PC's TPM as the vault's rollback counter (V6,
+// tpmseal/counter.go). Each call opens its own TPM connection, so callers
+// must not hold one while writing the vault.
+type tpmCounter struct {
+	openTPM func() (transport.TPMCloser, error)
+	srk     []byte // this TPM's storage root key name, pinned
+}
+
+func (c *tpmCounter) Host() string { return hex.EncodeToString(c.srk) }
+
+func (c *tpmCounter) with(f func(transport.TPM) error) error {
+	t, err := c.openTPM()
+	if err != nil {
+		return err
+	}
+	defer t.Close()
+	return f(t)
+}
+
+func (c *tpmCounter) Find(id []byte) (ref []byte, ok bool, err error) {
+	err = c.with(func(t transport.TPM) (err error) {
+		ok, err = tpmseal.FindCounter(t, id)
+		return err
+	})
+	return nil, ok, err
+}
+
+func (c *tpmCounter) Define(id, auth []byte) (ref []byte, err error) {
+	err = c.with(func(t transport.TPM) error {
+		r, err := tpmseal.DefineCounter(t, c.srk, id, auth)
+		ref = r.Marshal()
+		return err
+	})
+	return ref, err
+}
+
+func (c *tpmCounter) Read(ref, auth []byte) (n uint64, err error) {
+	r, err := tpmseal.ParseCounterRef(ref)
+	if err != nil {
+		return 0, err
+	}
+	err = c.with(func(t transport.TPM) (err error) {
+		n, err = tpmseal.ReadCounter(t, c.srk, r, auth)
+		return err
+	})
+	return n, err
+}
+
+func (c *tpmCounter) Increment(ref, auth []byte) error {
+	r, err := tpmseal.ParseCounterRef(ref)
+	if err != nil {
+		return err
+	}
+	return c.with(func(t transport.TPM) error { return tpmseal.IncrementCounter(t, c.srk, r, auth) })
+}
+
+// offlineFactor seals a fresh slot for another trusted PC while it is
+// away (tpmseal.SealTo), from the SRK public area its old slot recorded.
+type offlineFactor struct {
+	srkPublic []byte
+	pub       *ecdsa.PublicKey
+	host      string
+	trusted   int64
+}
+
+func (*offlineFactor) Kind() string { return vault.SlotTPM }
+
+func (f *offlineFactor) Enroll() (vault.Slot, []byte, error) {
+	kek := make([]byte, vault.KeySize)
+	if _, err := rand.Read(kek); err != nil {
+		return vault.Slot{}, nil, err
+	}
+	s, err := tpmseal.SealTo(f.srkPublic, kek, f.pub, f.host)
+	if err != nil {
+		return vault.Slot{}, nil, err
+	}
+	s.Trusted = f.trusted
+	raw, err := json.Marshal(s)
+	if err != nil {
+		return vault.Slot{}, nil, err
+	}
+	return vault.Slot{Kind: vault.SlotTPM, Sealed: raw}, kek, nil
+}
+
+func (*offlineFactor) KEK(vault.Slot) ([]byte, error) { return nil, vault.ErrSkipSlot }
+
+// errWrongPINReencrypt: this PC's slot has a boot PIN and the one given
+// does not open it, so nothing was changed.
+var errWrongPINReencrypt = errors.New("this PC's boot PIN did not open its slot")
+
+// reencrypt is V7 with the review of #45 (B5) and the arbitrator's
+// ruling. Whoever kept the old data key may also hold the old policy key
+// and every slot's old key-encryption key, so no slot keeps either: the
+// vault moves to a new data key with every trusted-host slot dropped,
+// then gets a new policy key, the approved boot paths are re-signed under
+// it, and each trusted PC gets a slot with a fresh key-encryption key.
+// This PC is sealed on its TPM; another PC is sealed from its recorded
+// SRK public area, so it needs no visit. A PC with a boot PIN, or whose
+// slot predates the recorded SRK, cannot be sealed while away and is
+// counted for the owner to trust again. A crash part way leaves fewer
+// trusted PCs, never a slot under an old key: those PCs fall back to the
+// owner's unlock.
+func (h *tpmHost) reencrypt(v *vault.Vault, pin string, owner []vault.Factor) (_ int, err error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	oldKey, err := policyKey(v)
+	if err != nil {
+		return 0, err
+	}
+	pf, err := h.readFile()
+	if err != nil {
+		return 0, err
+	}
+	slots, err := vault.ReadSlots(h.keysPath)
+	if err != nil {
+		return 0, err
+	}
+	t, err := h.openTPM()
+	if err != nil {
+		return 0, err
+	}
+	id, err := tpmseal.Identity(t)
+	t.Close()
+	if err != nil {
+		return 0, err
+	}
+	var here *tpmseal.Sealed
+	var away []*tpmseal.Sealed
+	dropped := 0
+	for _, sl := range slots {
+		if sl.Kind != vault.SlotTPM {
+			continue
+		}
+		sealed, err := sealedOf(sl)
+		switch {
+		case err != nil:
+			dropped++
+		case bytes.Equal(sealed.SRKName, id):
+			here = sealed
+		case !sealed.HasPIN() && tpmseal.SameSRK(sealed.SRKPublic, sealed.SRKName):
+			away = append(away, sealed)
+		default:
+			dropped++
+		}
+	}
+	if here != nil && here.HasPIN() {
+		// The PIN is sealed into the new slot too, so prove it first
+		// rather than set a mistyped one.
+		t, err := h.openTPM()
+		if err != nil {
+			return 0, err
+		}
+		kek, err := tpmseal.Unseal(t, here, pf.Policies, pin)
+		t.Close()
+		if err != nil {
+			return 0, fmt.Errorf("%w: %v", errWrongPINReencrypt, err)
+		}
+		clear(kek)
+	}
+
+	if _, err := v.Reencrypt(owner...); err != nil {
+		return 0, err
+	}
+	// From here every trusted-host slot is gone; a failure leaves the
+	// PCs not yet sealed again for the owner to trust again by name.
+	pending := append([]*tpmseal.Sealed(nil), away...)
+	if here != nil {
+		pending = append([]*tpmseal.Sealed{here}, pending...)
+	}
+	defer func() {
+		if err != nil && len(pending) > 0 {
+			names := make([]string, len(pending))
+			for i, p := range pending {
+				names[i] = p.Host
+				if names[i] == "" {
+					names[i] = "a trusted PC"
+				}
+			}
+			h.say("The vault's new key is in place, but these PCs must be trusted again: " + strings.Join(names, ", "))
+		}
+	}()
+	newKey, err := tpmseal.NewPolicyKey()
+	if err != nil {
+		return 0, err
+	}
+	der, err := tpmseal.MarshalPolicyKey(newKey)
+	if err != nil {
+		return 0, err
+	}
+	if err := v.Put(PolicyKeyName, vault.KindPCRPolicyKey, der); err != nil {
+		return 0, err
+	}
+	var resigned []tpmseal.Policy
+	for _, p := range pf.Policies {
+		if !tpmseal.SignedBy(p, &oldKey.PublicKey) {
+			continue
+		}
+		q, err := tpmseal.Resign(newKey, p)
+		if err != nil {
+			return 0, err
+		}
+		resigned = append(resigned, q)
+	}
+	pf.Policies = resigned
+	if err := h.writeFile(pf); err != nil {
+		return 0, err
+	}
+	if here != nil {
+		t, err := h.openTPM()
+		if err != nil {
+			return dropped + len(away), err
+		}
+		err = v.AddSlot(&tpmFactor{t: t, pin: pin, pub: &newKey.PublicKey, name: here.Host, now: time.Unix(here.Trusted, 0)}, func(s vault.Slot) bool {
+			sealed, err := sealedOf(s)
+			return err == nil && bytes.Equal(sealed.SRKName, id)
+		})
+		t.Close()
+		if err != nil {
+			return dropped + len(away), err
+		}
+		pending = pending[1:]
+	}
+	for i, a := range away {
+		if err := v.AddSlot(&offlineFactor{srkPublic: a.SRKPublic, pub: &newKey.PublicKey, host: a.Host, trusted: a.Trusted}, func(s vault.Slot) bool {
+			sealed, err := sealedOf(s)
+			return err == nil && bytes.Equal(sealed.SRKName, a.SRKName)
+		}); err != nil {
+			return dropped + len(away) - i, err
+		}
+		pending = pending[1:]
+	}
+	return dropped, nil
+}
+
+// counter returns this PC's TPM as a rollback counter. Caller holds mu.
+func (h *tpmHost) counter() (*tpmCounter, error) {
 	t, err := h.openTPM()
 	if err != nil {
 		return nil, err
 	}
-	defer t.Close()
-	v, err := vault.OpenSealed(h.vaultPath, h.keysPath, &tpmFactor{t: t, pin: pin, policies: pols})
-	if err == nil {
-		h.noteRelease()
-		// Opened without a PIN, so this PC's slot has none: give back a
-		// lockout hierarchy an earlier PIN-off could not (giveBack).
-		if pin == "" {
-			if id, err := tpmseal.Identity(t); err == nil {
-				h.giveBack(v, t, id)
-			}
+	id, err := tpmseal.Identity(t)
+	t.Close()
+	if err != nil {
+		return nil, err
+	}
+	return &tpmCounter{openTPM: h.openTPM, srk: id}, nil
+}
+
+func (h *tpmHost) bind(v *vault.Vault) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.bindLocked(v)
+}
+
+// bindLocked binds v to this PC's counter. A TPM that cannot even name
+// itself binds nothing: v.Bind then has no anchor to check, which is the
+// unknown-host case the owner unlocks in person. Caller holds mu.
+func (h *tpmHost) bindLocked(v *vault.Vault) error {
+	c, err := h.counter()
+	if err != nil {
+		if len(v.Anchors()) > 0 {
+			// The vault is anchored somewhere; whether here cannot be
+			// told without the TPM, so refuse rather than guess.
+			return fmt.Errorf("%w: %v", errRollbackCheck, err)
+		}
+		return nil
+	}
+	err = v.Bind(c)
+	if err != nil && !errors.Is(err, vault.ErrRolledBack) && !errors.Is(err, vault.ErrCounterMissing) {
+		return fmt.Errorf("%w: %v", errRollbackCheck, err)
+	}
+	if err == nil && len(v.Anchors()) > 0 && !anchoredTo(v, c.Host()) {
+		h.say(noteUnanchored)
+	}
+	return err
+}
+
+// noteUnanchored tells the owner that this PC cannot check the drive for
+// an older copy, because only other PCs hold its counter (V6 limit a).
+const noteUnanchored = "This drive is trusted on another PC, so this PC can't tell whether it's an older copy. Unlock here only if the drive has stayed with you."
+
+func anchoredTo(v *vault.Vault, host string) bool {
+	for _, a := range v.Anchors() {
+		if a.Host == host {
+			return true
 		}
 	}
-	return v, err
+	return false
 }
+
+// errRollbackCheck marks a rollback check the TPM did not answer; the
+// owner sees noteTPMSilent and the detail goes to the log (UX-45-3).
+var errRollbackCheck = errors.New("this PC's TPM did not answer the rollback check")
 
 // policyKey returns the vault's policy key, making it on first use.
 func policyKey(v *vault.Vault) (*ecdsa.PrivateKey, error) {
@@ -434,6 +752,19 @@ func (h *tpmHost) enroll(v *vault.Vault, pin string) (_ string, err error) {
 		return "", err
 	}
 	return h.name, nil
+}
+
+// anchor binds the vault to this PC's rollback counter, making the
+// counter if this PC has none for the vault (V6). trust calls it before
+// enroll, so a PC is never trusted without the counter.
+func (h *tpmHost) anchor(v *vault.Vault) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	c, err := h.counter()
+	if err != nil {
+		return err
+	}
+	return v.Anchor(c)
 }
 
 // takeLockout makes the TPM's lockout hierarchy the vault's before a PIN
