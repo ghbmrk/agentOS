@@ -74,8 +74,10 @@ var guestPlane = map[string]struct {
 	"guest": {[]string{"journal", "meter", "route"}, []string{"os/exec", "plugin", "unsafe", "C"}},
 	"meter": {nil, []string{"net", "os/exec", "plugin", "unsafe", "C"}},
 	// modelroute forwards to the vault process over its Unix socket and
-	// reports usage to the meter; never the vault or the proxy.
-	"modelroute": {[]string{"meter"}, []string{"os/exec", "plugin", "unsafe", "C"}},
+	// reports usage to the meter; never the vault or the proxy. It
+	// journals the denials that come back (modelroute.Journal), coalesced
+	// by the journal's own gate, as the guest plane may.
+	"modelroute": {[]string{"journal", "meter"}, []string{"os/exec", "plugin", "unsafe", "C"}},
 	"route":      {nil, []string{"net", "os/exec", "plugin", "unsafe", "C"}},
 	// Replay (LOOP-5) serves replay machines through a guest plane of its
 	// own: no journal writes, no executors, no network clients.

@@ -20,11 +20,29 @@ import (
 
 // REQ: OP-8, CAP-9, REV-5, CRED-7
 
-// openModel opens a fastRig's vault through the code and serves its model
-// socket with rt, reaching provider for every provider host. It returns
-// the broker side: the forwarder behind a meter, and the denials it
-// journaled.
+// openModel serves a model socket (openModelSocket) and returns the broker
+// side: the forwarder behind a meter, and the denials it journaled.
 func openModel(t *testing.T, rt *route.Router, provider http.HandlerFunc) (http.Handler, *meter.Meter, *[]modelroute.Denial) {
+	t.Helper()
+	sock := openModelSocket(t, rt, provider)
+	var denied []modelroute.Denial
+	fwd := modelroute.Forward(modelroute.Config{
+		Socket: sock,
+		Label:  func(string) string { return "private" },
+		Denied: func(_ string, d modelroute.Denial) { denied = append(denied, d) },
+	})
+	m, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "meter.json"),
+		MachineCap: meter.Limits{Calls: 100, Tokens: 1 << 30}, OverallCap: meter.Limits{Calls: 100, Tokens: 1 << 30}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m.Wrap("agent", fwd("agent")), m, &denied
+}
+
+// openModelSocket opens a fastRig's vault through the code and serves its
+// model socket with rt, reaching provider for every provider host. It
+// returns the socket's path.
+func openModelSocket(t *testing.T, rt *route.Router, provider http.HandlerFunc) string {
 	t.Helper()
 	prov := httptest.NewTLSServer(provider)
 	t.Cleanup(prov.Close)
@@ -51,18 +69,7 @@ func openModel(t *testing.T, rt *route.Router, provider http.HandlerFunc) (http.
 	srv := newServer(modelHandler(r.c, rt))
 	go srv.Serve(ln)
 	t.Cleanup(func() { srv.Close() })
-	var denied []modelroute.Denial
-	fwd := modelroute.Forward(modelroute.Config{
-		Socket: sock,
-		Label:  func(string) string { return "private" },
-		Denied: func(_ string, d modelroute.Denial) { denied = append(denied, d) },
-	})
-	m, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "meter.json"),
-		MachineCap: meter.Limits{Calls: 100, Tokens: 1 << 30}, OverallCap: meter.Limits{Calls: 100, Tokens: 1 << 30}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return m.Wrap("agent", fwd("agent")), m, &denied
+	return sock
 }
 
 func chat(h http.Handler) *http.Response {
