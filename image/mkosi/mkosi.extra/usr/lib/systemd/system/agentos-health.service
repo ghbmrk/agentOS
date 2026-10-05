@@ -1,0 +1,13 @@
+[Unit]
+Description=AgentOS boot health check
+Documentation=file:/usr/lib/agentos/health
+Before=boot-complete.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/agentos/health
+StandardOutput=journal+console
+
+[Install]
+RequiredBy=boot-complete.target

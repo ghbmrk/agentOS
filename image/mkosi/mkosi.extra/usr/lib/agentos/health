@@ -1,0 +1,29 @@
+#!/bin/sh
+# AgentOS boot health check (UPD-1). boot-complete.target requires it, so systemd-bless-boot
+# blesses this boot's entry only when it passes; a release that fails it on every try is
+# abandoned by systemd-boot's boot counting and the previous one boots instead.
+# Secure Boot off is reported, not failed: HW-5 allows PCs whose firmware has it off.
+# AGENTOS_LIB and AGENTOS_HEALTH_ROOT exist for tests/test_image.py.
+L=${AGENTOS_LIB:-/usr/lib/agentos}
+R=${AGENTOS_HEALTH_ROOT:-}
+fail() { echo "agentos-health: FAIL $*"; exit 1; }
+
+sb=unknown
+v=$R/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c
+if [ -r "$v" ]; then
+	case $(od -An -tu1 -j4 -N1 "$v" | tr -d ' ') in
+	1) sb=on ;;
+	0) sb=off ;;
+	esac
+fi
+
+veritysetup status usr 2>/dev/null | grep -Eq '^ *status: *verified' || fail "/usr is not under dm-verity"
+case ,$(findmnt -no OPTIONS /usr), in
+*,ro,*) ;;
+*) fail "/usr is mounted writable" ;;
+esac
+[ -x "$L/agentosd" ] || fail "broker missing"
+"$L/agentosd" -h >/dev/null 2>&1 || fail "broker does not start"
+"$L/runsc" --version >/dev/null 2>&1 || fail "gVisor runsc does not start"
+[ -d "$L/images/openclaw/opt/openclaw" ] || fail "OpenClaw guest image missing"
+echo "agentos-health: PASS secure_boot=$sb usr=verity"

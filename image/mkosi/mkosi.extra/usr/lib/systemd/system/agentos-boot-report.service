@@ -1,0 +1,11 @@
+[Unit]
+Description=AgentOS boot report
+After=systemd-bless-boot.service boot-complete.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/agentos/boot-report
+StandardOutput=journal+console
+
+[Install]
+WantedBy=multi-user.target
