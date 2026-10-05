@@ -63,6 +63,39 @@ form { margin: .6em 0 1.2em; }
 <p><a href="/status">Status</a></p>
 {{template "foot"}}{{end}}
 
+{{define "vault"}}{{template "head" .Refresh}}
+<h1>Unlock the box</h1>
+{{if .Down}}<p>The vault is not answering yet. This page reloads by itself.</p>
+{{else if eq .State "open"}}<p class="ok">The box is unlocked.</p>
+<p>To approve by text again, <a href="/unlock">sign in</a> with your next code.</p>
+{{else if eq .State "opening"}}<p>Checking the passphrase. This page reloads by itself.</p>
+{{else if eq .State "pending"}}{{if .Mine}}<p class="ok">Passphrase accepted.</p>
+<form method="post" action="/unlock/vault"><input type="hidden" name="step" value="code">
+<label>Code from your code generator, by {{.Expires}}
+<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required autofocus></label>
+{{with .Err}}<p class="err">{{.}}</p>{{end}}
+<button>Unlock</button></form>
+{{else}}{{with .Err}}<p class="err">{{.}}</p>{{end}}
+<p>An unlock is waiting for a code on another phone. If that was not you, it ends by itself at {{.Expires}} without the code.</p>{{end}}
+{{else}}
+<p><b>If this drive was out of your hands, unlock it only on your trusted PC.</b></p>
+{{with .Err}}<p class="err">{{.}}</p>{{end}}
+{{if .PIN}}<form method="post" action="/unlock/vault"><input type="hidden" name="step" value="pin">
+<label>This PC is trusted and has a boot PIN. Enter it
+<input type="password" name="pin" inputmode="numeric" autocomplete="off" required></label>
+<button>Unlock</button></form>
+<h2>Or use your Owner Card</h2>{{end}}
+<form method="post" action="/unlock/vault" enctype="multipart/form-data"><input type="hidden" name="step" value="passphrase">
+<label>Photo of the vault passphrase QR code on your card
+<input type="file" name="photo" accept="image/*"></label>
+<p class="muted">Or type the passphrase words.</p>
+<input type="text" name="passphrase" autocomplete="off" autocapitalize="none" spellcheck="false" aria-label="Passphrase words">
+<button>Next</button></form>
+<p class="muted">Next, the box asks for a code from your code generator. The passphrase alone does not unlock it.</p>
+{{end}}
+<p><a href="/status">Status</a></p>
+{{template "foot"}}{{end}}
+
 {{define "home"}}{{template "head" ""}}
 <h1>AgentOS</h1>
 <ul>{{range .}}<li><a href="{{.Path}}">{{.Title}}</a></li>{{else}}<li class="muted">Nothing else to show here yet.</li>{{end}}</ul>
