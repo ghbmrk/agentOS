@@ -274,3 +274,73 @@ func TestProxySeesOnlyAPIKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// K7: the broker's high-tier check runs here, against the seed in the
+// vault, and only while the vault is open. A pending vault holds the seed
+// but serves nothing, verify included.
+func TestVerifyNeedsAnOpenVault(t *testing.T) {
+	r := newFastRig(t, true)
+	if _, _, err := r.c.verify(r.code(), 0); err != errLocked {
+		t.Fatalf("locked: %v", err)
+	}
+	r.c.unlock(goodPass)
+	if _, _, err := r.c.verify(r.code(), 0); err != errLocked {
+		t.Fatalf("pending: %v", err)
+	}
+	if r.phase() != pending {
+		t.Fatalf("verify changed the unlock: %v", r.phase())
+	}
+}
+
+// K7, O6: the unlock and the broker share one last step, so the code that
+// unlocked the vault is not accepted again for the channel, and each code
+// the channel uses works once whatever after the broker sends.
+func TestVerifySharesTheLastStepWithUnlock(t *testing.T) {
+	r := newFastRig(t, true)
+	r.c.unlock(goodPass)
+	used := r.code()
+	if err := r.c.confirm(used); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := r.c.verify(used, 0); ok || err != nil {
+		t.Fatalf("unlock code accepted for the channel: %v %v", ok, err)
+	}
+	r.clk.add(30 * time.Second)
+	code := r.code()
+	step, ok, err := r.c.verify(code, 0)
+	if !ok || err != nil || step != r.clk.now().Unix()/30 {
+		t.Fatalf("fresh code: %d %v %v", step, ok, err)
+	}
+	if _, ok, _ := r.c.verify(code, 0); ok {
+		t.Fatal("code accepted twice")
+	}
+	r.clk.add(30 * time.Second)
+	if _, ok, _ := r.c.verify(r.code(), r.clk.now().Unix()/30); ok {
+		t.Fatal("code at or before the broker's last step accepted")
+	}
+}
+
+// A broker that has been taken over cannot grind codes: wrong verifies are
+// bounded here, independently of the channel's own counting, and the bound
+// ages out.
+func TestWrongVerifiesAreBounded(t *testing.T) {
+	r := newFastRig(t, true)
+	r.c.unlock(goodPass)
+	r.c.confirm(r.code())
+	r.clk.add(30 * time.Second)
+	for i := 0; i < MaxWrongVerifies; i++ {
+		if _, ok, err := r.c.verify("000000", 0); ok || err != nil {
+			t.Fatalf("wrong verify %d: %v %v", i, ok, err)
+		}
+	}
+	if _, _, err := r.c.verify(r.code(), 0); err != errTooManyWrong {
+		t.Fatalf("after %d wrong: %v", MaxWrongVerifies, err)
+	}
+	r.clk.add(VerifyWindow)
+	if _, ok, err := r.c.verify(r.code(), 0); !ok || err != nil {
+		t.Fatalf("after the window: %v %v", ok, err)
+	}
+	if r.phase() != open {
+		t.Fatal("wrong verifies changed the vault")
+	}
+}

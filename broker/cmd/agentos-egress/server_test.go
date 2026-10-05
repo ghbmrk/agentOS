@@ -185,7 +185,7 @@ func TestSocketsAdmitOnlyTheirPeer(t *testing.T) {
 			s.Close()
 		}
 	}()
-	for _, name := range []string{ModelSocket, UnlockSocket} {
+	for _, name := range []string{ModelSocket, UnlockSocket, VerifySocket} {
 		resp, err := unixClient(filepath.Join(run, name)).Get("http://x/status")
 		if err == nil {
 			resp.Body.Close()
@@ -217,5 +217,48 @@ func TestStatusShowsPhaseOnly(t *testing.T) {
 	json.Unmarshal(w.Body.Bytes(), &out)
 	if out["state"] != "locked" || len(out) != 1 {
 		t.Fatalf("status %v", out)
+	}
+}
+
+// K7: agentosd's owner channel reaches the verify operation through its
+// own socket, with the client agentosd links. The answer carries a step
+// and a yes or no, never the seed; a locked vault is an error, so the
+// channel counts nothing.
+func TestVerifySocketForTheBroker(t *testing.T) {
+	r := newFastRig(t, true)
+	run := filepath.Join(t.TempDir(), "run")
+	srvs, err := serve(run, r.c, os.Getuid(), os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		for _, s := range srvs {
+			s.Close()
+		}
+	}()
+	v := modelroute.NewVerifier(filepath.Join(run, VerifySocket))
+	if _, _, err := v.VerifyTOTP(r.code(), 0); err == nil {
+		t.Fatal("locked vault answered")
+	}
+	r.c.unlock(goodPass)
+	r.c.confirm(r.code())
+	r.clk.add(30 * time.Second)
+	if _, ok, err := v.VerifyTOTP("000000", 0); ok || err != nil {
+		t.Fatalf("wrong code: %v %v", ok, err)
+	}
+	step, ok, err := v.VerifyTOTP(r.code(), 0)
+	if !ok || err != nil || step != r.clk.now().Unix()/30 {
+		t.Fatalf("right code: %d %v %v", step, ok, err)
+	}
+
+	w := httptest.NewRecorder()
+	verifyHandler(r.c).ServeHTTP(w, httptest.NewRequest("POST", "/verify", strings.NewReader(`{"code":"000000"}`)))
+	if b := w.Body.String(); strings.Contains(b, string(r.seed)) || strings.Contains(b, "seed") {
+		t.Fatalf("verify answer: %s", b)
+	}
+	w = httptest.NewRecorder()
+	verifyHandler(r.c).ServeHTTP(w, httptest.NewRequest("GET", "/verify", nil))
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET: %d", w.Code)
 	}
 }

@@ -105,7 +105,7 @@ func (l *lateAgent) Deliver(ctx context.Context, text string, public bool) error
 func main() {
 	var cfg daemon.Config
 	imgs := images{}
-	var stateDir, runsc, cgroupParent, meterPath, agentMachine, egressSocket string
+	var stateDir, runsc, cgroupParent, meterPath, agentMachine, egressSocket, verifySocket string
 	var diskReserveMB int64
 	flag.StringVar(&cfg.JournalPath, "journal", "/var/lib/agentos/journal.log", "journal file")
 	flag.StringVar(&cfg.SocketDir, "sockets", "/run/agentos", "socket directory (created 0700)")
@@ -123,6 +123,7 @@ func main() {
 	flag.StringVar(&cfg.OwnerState, "owner-state", "/var/lib/agentos/owner.json", "owner channel state (P1-5)")
 	flag.StringVar(&agentMachine, "agent-machine", "agent", "machine whose guest receives the owner's task chat")
 	flag.StringVar(&egressSocket, "egress", "/run/agentos-egress/model.sock", "the vault process's model socket (agentos-egress); empty serves no model route")
+	flag.StringVar(&verifySocket, "owner-verify", "/run/agentos-egress/verify.sock", "the vault process's verify socket, which checks the owner's code-generator codes; empty refuses high-tier codes")
 	flag.Parse()
 	if cfg.ModemUID < 0 || cfg.ModemUID == os.Getuid() {
 		log.Fatal("-modem-uid must name the modem bridge's own uid, distinct from the broker's")
@@ -150,9 +151,13 @@ func main() {
 	cfg.Preempter = pre
 	agent := &lateAgent{}
 	cfg.Agent = agent
-	// The high-tier code seeds live in the vault, which only the vault
-	// process holds (P2-4a); until it offers a verify operation the
-	// channel refuses high-tier codes (egress K7).
+	// The code-generator seed lives in the vault, which only the vault
+	// process holds (P2-4a); the channel asks it to check high-tier codes
+	// (egress K7). While the vault is locked those checks fail and count
+	// nothing.
+	if verifySocket != "" {
+		cfg.OwnerVerifier = modelroute.NewVerifier(verifySocket)
+	}
 	// No modem driver exists before P2-3, so texts arrive only through the
 	// owner socket and the channel's own outbound texts are not sent.
 

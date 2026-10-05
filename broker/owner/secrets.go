@@ -21,6 +21,17 @@ type Secrets struct {
 	GridSeed []byte
 }
 
+// Verifier checks code-generator codes where the seed is held: the vault
+// process (egress K7), so the seed never reaches the broker. It accepts the
+// current 30-second step or the one before, never at or before after (the
+// channel's last accepted step) nor its own last accepted step, and spends
+// a step that matches. err means no check ran (the vault is locked, the
+// process is down, or it is refusing after too many wrong codes); the
+// channel then counts nothing.
+type Verifier interface {
+	VerifyTOTP(code string, after int64) (step int64, ok bool, err error)
+}
+
 const (
 	totpStep   = 30 // seconds
 	codeDigits = 6

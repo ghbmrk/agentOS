@@ -21,6 +21,16 @@ const (
 	WrongWindow   = 24 * time.Hour
 )
 
+// MaxWrongVerifies wrong codes from the broker within VerifyWindow refuse
+// further verifies until the oldest ages out (K7). The channel counts and
+// locks on its own; this bound holds even if agentosd is taken over, and
+// stays above what the channel lets through for the owner (5 wrong codes
+// lock it, and challenge mode allows one attempt per texted token).
+const (
+	MaxWrongVerifies = 10
+	VerifyWindow     = 10 * time.Minute
+)
+
 // Fixed errors, safe to show on the unlock socket.
 var (
 	errBusy            = errors.New("an unlock is already in progress or the vault is open")
@@ -61,15 +71,18 @@ type custody struct {
 	// notify reports unlock events for the owner (CRED-8 visibility).
 	notify func(string)
 
-	mu       sync.Mutex
-	ph       phase
-	gen      int // bumped by lock, so an unlock in flight is cancelled
-	v        *vault.Vault
-	proxy    *egress.Proxy
-	expires  time.Time
-	timer    *time.Timer
-	lastStep int64
-	wrong    []time.Time
+	mu      sync.Mutex
+	ph      phase
+	gen     int // bumped by lock, so an unlock in flight is cancelled
+	v       *vault.Vault
+	proxy   *egress.Proxy
+	expires time.Time
+	timer   *time.Timer
+	// lastStep is the last code-generator step accepted, by confirm or
+	// verify, so a code works once across both (O6, K7).
+	lastStep    int64
+	wrong       []time.Time
+	wrongVerify []time.Time
 }
 
 // status reports the phase and, while pending, when the code is due.
@@ -158,6 +171,31 @@ func (c *custody) confirm(code string) error {
 	return nil
 }
 
+// verify checks a code-generator code for the broker's owner channel (CH-4,
+// K7), so the seed never leaves this process. It accepts the current step
+// or the one before, after both the broker's last step and this process's
+// own, and spends a step that matches. Only an open vault verifies.
+func (c *custody) verify(code string, after int64) (int64, bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ph != open {
+		return 0, false, errLocked
+	}
+	now := c.now()
+	c.wrongVerify = since(c.wrongVerify, now.Add(-VerifyWindow))
+	if len(c.wrongVerify) >= MaxWrongVerifies {
+		return 0, false, errTooManyWrong
+	}
+	seed, _ := c.v.Secret(SeedName)
+	step, ok := owner.MatchTOTP([]byte(seed.Reveal()), code, now, max(after, c.lastStep))
+	if !ok {
+		c.wrongVerify = append(c.wrongVerify, now)
+		return 0, false, nil
+	}
+	c.lastStep = step
+	return step, true, nil
+}
+
 // lock discards the key in any phase and cancels an unlock in flight.
 func (c *custody) lock() {
 	c.mu.Lock()
@@ -215,15 +253,19 @@ func (c *custody) put(name string, value []byte) error {
 // recentWrong counts wrong codes inside WrongWindow and forgets older ones.
 // Caller holds mu.
 func (c *custody) recentWrong() int {
-	cut := c.now().Add(-WrongWindow)
-	kept := c.wrong[:0]
-	for _, t := range c.wrong {
+	c.wrong = since(c.wrong, c.now().Add(-WrongWindow))
+	return len(c.wrong)
+}
+
+// since keeps the times after cut, in place.
+func since(ts []time.Time, cut time.Time) []time.Time {
+	kept := ts[:0]
+	for _, t := range ts {
 		if t.After(cut) {
 			kept = append(kept, t)
 		}
 	}
-	c.wrong = kept
-	return len(kept)
+	return kept
 }
 
 func hasKind(v *vault.Vault, name, kind string) bool {

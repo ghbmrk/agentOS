@@ -61,9 +61,14 @@ type Config struct {
 	// session unlock. Its state lives in this file.
 	OwnerState string
 	// OwnerSecrets are the high-tier verifiers from the vault (CRED-8).
-	// Empty until the vault can be unlocked (P2-4): the channel then
-	// refuses every high-tier code rather than accept a guessable one.
+	// agentosd leaves them empty: the seeds stay in the vault process
+	// (egress K7). With no verifier the channel refuses every high-tier
+	// code rather than accept a guessable one.
 	OwnerSecrets ownerch.Secrets
+	// OwnerVerifier checks code-generator codes in the vault process,
+	// which holds the seed (egress K7); it takes the place of
+	// OwnerSecrets.TOTPSeed.
+	OwnerVerifier ownerch.Verifier
 	// Modem, when set, is served by the owner channel as well as the owner
 	// socket, and carries its outbound texts.
 	Modem modem.Modem
@@ -151,7 +156,7 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 	if cfg.OwnerState != "" {
 		if ch, err = ownerch.New(ownerch.Config{
 			Owner: cfg.OwnerNumber, Modem: cfg.Modem, Engine: eng, Agent: cfg.Agent,
-			Machines: adm.Summary, Secrets: cfg.OwnerSecrets, Store: ownerch.FileStore{Path: cfg.OwnerState},
+			Machines: adm.Summary, Secrets: cfg.OwnerSecrets, Verifier: cfg.OwnerVerifier, Store: ownerch.FileStore{Path: cfg.OwnerState},
 		}); err != nil {
 			store.Close()
 			return nil, err

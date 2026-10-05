@@ -28,7 +28,7 @@ Covered: 43 / 139 requirement IDs
 | CH-1 | `broker/e2e/owner_test.go`, `broker/modem/modem_test.go`, `broker/owner/channel_test.go` |
 | CH-2 | `broker/control/handler_test.go`, `broker/control/parse_test.go`, `broker/control/text_test.go`, `broker/daemon/daemon_test.go`, `broker/e2e/a9_test.go`, `broker/owner/arc2_test.go`, `broker/owner/channel_test.go`, `broker/owner/review_test.go` |
 | CH-3 | `broker/owner/channel_test.go`, `broker/owner/classify_test.go`, `broker/owner/review_test.go` |
-| CH-4 | `broker/cmd/agentos-egress/custody_test.go`, `broker/owner/channel_test.go`, `broker/owner/review_test.go`, `broker/owner/secrets_test.go`, `broker/owner/totp_test.go` |
+| CH-4 | `broker/cmd/agentos-egress/custody_test.go`, `broker/owner/channel_test.go`, `broker/owner/review_test.go`, `broker/owner/secrets_test.go`, `broker/owner/totp_test.go`, `broker/owner/verifier_test.go` |
 | CH-5 | — |
 | CH-10 | `broker/owner/channel_test.go`, `broker/owner/classify_test.go` |
 | CH-6 | — |
@@ -39,7 +39,7 @@ Covered: 43 / 139 requirement IDs
 | CH-15 | `broker/owner/review_test.go` |
 | CH-16 | `broker/owner/channel_test.go` |
 | CH-17 | — |
-| CH-18 | `broker/owner/channel_test.go`, `broker/owner/review_test.go` |
+| CH-18 | `broker/owner/channel_test.go`, `broker/owner/review_test.go`, `broker/owner/verifier_test.go` |
 | CH-19 | `broker/e2e/owner_test.go`, `broker/owner/channel_test.go`, `broker/owner/disclose_test.go`, `broker/owner/review_test.go` |
 | CH-7 | — |
 | CH-8 | — |
@@ -54,7 +54,7 @@ Covered: 43 / 139 requirement IDs
 | CRED-5 | `broker/cmd/agentos-egress/server_test.go`, `broker/e2e/a14_test.go`, `broker/egress/egress_test.go`, `broker/egress/handlerfor_test.go` |
 | CRED-6 | — |
 | CRED-7 | `broker/cmd/agentos-egress/server_test.go`, `broker/e2e/a14_test.go`, `broker/egress/egress_test.go`, `broker/vault/redact_test.go` |
-| CRED-8 | `broker/cmd/agentos-egress/custody_test.go`, `broker/cmd/agentos-egress/server_test.go`, `broker/owner/totp_test.go`, `broker/vault/keyslot_test.go` |
+| CRED-8 | `broker/cmd/agentos-egress/custody_test.go`, `broker/cmd/agentos-egress/server_test.go`, `broker/owner/totp_test.go`, `broker/owner/verifier_test.go`, `broker/vault/keyslot_test.go` |
 | CRED-9 | — |
 | CRED-10 | `tests/test_s5_executor.py`, `tests/test_s5_protocol.py` |
 | REC-1 | — |

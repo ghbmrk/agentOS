@@ -39,10 +39,13 @@ const (
 // failed save never leaves a step, a cell, or an unlock live in memory that
 // a restart would forget (CH-18).
 type codes struct {
-	sec   Secrets
-	st    State
-	store Store
-	rand  io.Reader
+	sec Secrets
+	// verify, when set, checks code-generator codes where the seed is
+	// held; sec.TOTPSeed is then not used.
+	verify Verifier
+	st     State
+	store  Store
+	rand   io.Reader
 	// challenge is the grid cell last asked for; only it is accepted.
 	challenge string
 	// unlockCh is the current challenge-mode token and its expiry. It is
@@ -84,33 +87,45 @@ type strongOpts struct {
 	count bool
 }
 
-// matchStrong finds which strong code got is, without changing anything:
+// matchStrong finds which strong code got is: the challenged grid cell, or
 // a code-generator step (the current one or the one before, since texts
-// arrive late; never at or before the last step accepted) or the
-// challenged grid cell. step is 0 for a grid cell.
-func (c *codes) matchStrong(got string, now time.Time) (ok bool, step int64, cell string) {
+// arrive late; never at or before the last step accepted). step is 0 for a
+// grid cell. Nothing here changes, except that a Verifier spends a step
+// that matches. err means the Verifier could not check.
+func (c *codes) matchStrong(got string, now time.Time) (ok bool, step int64, cell string, err error) {
+	if c.challenge != "" && !c.gridUsed(c.challenge) && len(c.sec.GridSeed) > 0 &&
+		eq(got, GridCell(c.sec.GridSeed, c.challenge)) {
+		return true, 0, c.challenge, nil
+	}
+	if c.verify != nil {
+		step, ok, err := c.verify.VerifyTOTP(got, c.st.LastStep)
+		if err != nil || !ok || step <= c.st.LastStep {
+			return false, 0, "", err
+		}
+		return true, step, "", nil
+	}
 	cur := now.Unix() / totpStep
 	if len(c.sec.TOTPSeed) > 0 {
 		for _, s := range []int64{cur, cur - 1} {
 			if s > c.st.LastStep && eq(got, hotp(c.sec.TOTPSeed, uint64(s))) {
-				return true, s, ""
+				return true, s, "", nil
 			}
 		}
 	}
-	if c.challenge != "" && !c.gridUsed(c.challenge) && len(c.sec.GridSeed) > 0 &&
-		eq(got, GridCell(c.sec.GridSeed, c.challenge)) {
-		return true, 0, c.challenge
-	}
-	return false, 0, ""
+	return false, 0, "", nil
 }
 
 // checkStrong checks a code-generator code or grid cell. On success the
 // code is spent, the low-tier lock lifts, and the session unlock extends if
 // o.unlock is set; wrong codes are not forgiven, they age out (CH-18). A
-// save failure is a failure. locked reports that this wrong code crossed
+// save failure is a failure, and so is a Verifier that could not check;
+// neither is counted. locked reports that this wrong code crossed
 // WrongToLock.
 func (c *codes) checkStrong(got string, now time.Time, o strongOpts) (res strongResult, locked bool, err error) {
-	ok, step, cell := c.matchStrong(got, now)
+	ok, step, cell, err := c.matchStrong(got, now)
+	if err != nil {
+		return strongWrong, false, err
+	}
 	if !ok {
 		if !o.count {
 			return strongWrong, false, nil

@@ -54,6 +54,9 @@ type Config struct {
 	Agent    control.Agent
 	Machines func() string
 	Secrets  Secrets
+	// Verifier, when set, checks code-generator codes in place of
+	// Secrets.TOTPSeed, which is then ignored (egress K7).
+	Verifier Verifier
 	Store    Store
 	Limits   Limits
 	// Commitments is the owner's phrase list for ADP-11.
@@ -158,7 +161,7 @@ func New(cfg Config) (*Channel, error) {
 	}
 	c := &Channel{
 		cfg:    cfg,
-		codes:  codes{sec: cfg.Secrets, st: st, store: cfg.Store, rand: cfg.Rand},
+		codes:  codes{sec: cfg.Secrets, verify: cfg.Verifier, st: st, store: cfg.Store, rand: cfg.Rand},
 		open:   map[string]*request{},
 		queued: map[string]*Queued{},
 		boot:   &bootReport{pending: st.Pending, queued: st.Queued},
@@ -496,7 +499,7 @@ func (c *Channel) TakeDigestNotes() []string {
 	return out
 }
 
-const stateErr = "Could not save the code check, so it did not count. Try again."
+const stateErr = "Could not check or save the code, so it did not count. Try again."
 
 func (c *Channel) untilText() string {
 	return c.codes.st.UnlockedUntil.In(c.cfg.Location).Format("Jan 2 15:04")

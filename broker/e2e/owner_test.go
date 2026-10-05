@@ -41,6 +41,20 @@ func totp(seed []byte, t time.Time) string {
 	return fmt.Sprintf("%06d", (binary.BigEndian.Uint32(sum[off:off+4])&0x7fffffff)%1_000_000)
 }
 
+// seedVerifier stands in for the vault process's verify operation.
+type seedVerifier struct {
+	seed []byte
+	last atomic.Int64
+}
+
+func (v *seedVerifier) VerifyTOTP(code string, after int64) (int64, bool, error) {
+	step, ok := owner.MatchTOTP(v.seed, code, time.Now(), max(after, v.last.Load()))
+	if ok {
+		v.last.Store(step)
+	}
+	return step, ok, nil
+}
+
 // lateAgent lets the daemon take an Agent before the plane exists.
 type lateAgent struct {
 	a atomic.Pointer[guest.OwnerAgent]
@@ -80,8 +94,10 @@ func TestARC6OwnerChatReachesTheGuestAndBack(t *testing.T) {
 	d, err := daemon.Run(ctx, daemon.Config{
 		JournalPath: filepath.Join(dir, "journal.log"), SocketDir: filepath.Join(dir, "run"),
 		OwnerNumber: ownerNumber, ModemUID: os.Getuid(),
-		Admission:  admission.Config{CapacityMB: 4500, HeadroomMB: 600},
-		OwnerState: filepath.Join(dir, "owner.json"), OwnerSecrets: owner.Secrets{TOTPSeed: seed},
+		Admission: admission.Config{CapacityMB: 4500, HeadroomMB: 600},
+		// The seed stays with the vault process, which checks codes for
+		// the channel (egress K7); agentosd holds none.
+		OwnerState: filepath.Join(dir, "owner.json"), OwnerVerifier: &seedVerifier{seed: seed},
 		Modem: box, Agent: agent,
 	})
 	if err != nil {
