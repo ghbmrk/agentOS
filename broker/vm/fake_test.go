@@ -25,6 +25,7 @@ type fakeRuntime struct {
 	launches []Launch
 	kills    int
 	failNext error
+	onPause  func(id string) // runs as the guest is paused
 }
 
 func newFake() *fakeRuntime {
@@ -72,6 +73,9 @@ func (f *fakeRuntime) Pause(_ context.Context, id string) error {
 	defer f.mu.Unlock()
 	if _, ok := f.running[id]; !ok {
 		return fmt.Errorf("fake: pause %s: not running", id)
+	}
+	if f.onPause != nil {
+		f.onPause(id)
 	}
 	f.paused[id] = true
 	return nil

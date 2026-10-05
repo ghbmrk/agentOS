@@ -1,0 +1,27 @@
+{
+  "model": "claude-fixture",
+  "system": [
+    {"type": "text", "text": "You are a careful assistant."},
+    {"type": "text", "text": "Prefer metric units.", "cache_control": {"type": "ephemeral"}}
+  ],
+  "messages": [
+    {"role": "user", "content": [
+      {"type": "text", "text": "What is the weather here?"},
+      {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}}
+    ]},
+    {"role": "assistant", "content": [
+      {"type": "tool_use", "id": "call_1", "name": "get_weather", "input": {"city": "Paris"}, "cache_control": {"type": "ephemeral"}}
+    ]},
+    {"role": "user", "content": [
+      {"type": "tool_result", "tool_use_id": "call_1", "content": [{"type": "text", "text": "18 C, clear"}]},
+      {"type": "text", "text": "Thanks. Anything else?", "cache_control": {"type": "ephemeral"}}
+    ]}
+  ],
+  "max_tokens": 512,
+  "temperature": 0.2,
+  "stop_sequences": ["END"],
+  "tools": [
+    {"name": "get_weather", "description": "Current weather", "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}, "cache_control": {"type": "ephemeral"}}
+  ],
+  "tool_choice": {"type": "any", "disable_parallel_tool_use": true}
+}

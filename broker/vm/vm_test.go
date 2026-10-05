@@ -737,3 +737,39 @@ func TestRES4MergeRefusedLeavesDestinationRunning(t *testing.T) {
 		t.Fatalf("merge with room: %v", err)
 	}
 }
+
+// RES-4: a guest that grows its layer while the fork checkpoints it can
+// push the fork over the disk budget after the checkpoint is taken; the
+// fork is refused and its checkpoint is not left behind.
+func TestRES4ForkRefusedAfterCheckpointLeavesNoSnapshot(t *testing.T) {
+	e := newEnv(t, 4096)
+	e.cfg.DiskReserveBytes = 1 << 20
+	calls := 0
+	e.cfg.FreeBytes = func(string) (int64, error) {
+		calls++
+		if calls > 2 { // the reservation before the checkpoint, the checkpoint's own
+			return 1<<20 + 64<<10, nil
+		}
+		return 1 << 40, nil
+	}
+	e.open()
+	e.create("src", admission.Accepted, 1)
+	e.guestWrite("src", "small", "x")
+	e.rt.onPause = func(id string) {
+		e.rt.onPause = nil
+		e.guestWrite(id, "grown", strings.Repeat("x", 256<<10))
+	}
+	before := e.adm.Snapshot().FreeMB
+	if _, err := e.m.Fork(bg, "src", []string{"f1", "f2"}); !errors.Is(err, ErrQuota) {
+		t.Fatalf("fork over budget after checkpoint: %v", err)
+	}
+	if calls != 3 {
+		t.Fatalf("disk checked %d times, want the post-checkpoint check to run", calls)
+	}
+	m, _ := e.m.Get("src")
+	ents, _ := os.ReadDir(filepath.Join(e.cfg.StateDir, "snapshots"))
+	if len(e.m.Snapshots("src")) != 0 || len(ents) != 0 || m.Last != "" || m.State != Running ||
+		len(e.m.Machines()) != 1 || e.adm.Snapshot().FreeMB != before {
+		t.Fatalf("refused fork left state: %d snapshots, %d dirs, last %q, %s", len(e.m.Snapshots("src")), len(ents), m.Last, m.State)
+	}
+}
