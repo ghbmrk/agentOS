@@ -22,11 +22,13 @@ type AutoReply struct {
 	Facts Facts
 }
 
-// Queued is a reply waiting out its undo window.
+// Queued is a reply, or an approved effect (Held), waiting out its undo
+// window. A held effect's Reply carries only its Ref.
 type Queued struct {
 	ID     string
 	SendAt time.Time
 	Reply  AutoReply
+	Held   bool
 }
 
 // QueueResult says what happened to a reply.
@@ -91,8 +93,8 @@ func (c *Channel) QueueAutoReply(ar AutoReply) (QueueResult, error) {
 	return QueueResult{Queued: &out}, nil
 }
 
-// DueAutoReplies returns and removes replies whose undo window has passed;
-// the caller sends them through the account's adapter. Nothing is released
+// DueAutoReplies returns and removes replies and held effects whose undo
+// window has passed; the caller runs them through the account's adapter. Nothing is released
 // while the broker is stopped (ADP-11: STOP applies).
 func (c *Channel) DueAutoReplies() []Queued {
 	if c.cfg.Engine.Stopped() {
@@ -125,6 +127,9 @@ func (c *Channel) undoLocked(id string, now time.Time, decided *[]Decision) stri
 	delete(c.queued, id)
 	c.retireLocked(id, now)
 	*decided = append(*decided, Decision{Request: id, Item: 1, Ref: q.Reply.Ref, Why: "undo"})
+	if q.Held {
+		return fmt.Sprintf("Cancelled %s. It did not run.", id)
+	}
 	return fmt.Sprintf("Cancelled %s. The reply was not sent.", id)
 }
 

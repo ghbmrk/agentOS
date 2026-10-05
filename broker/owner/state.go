@@ -65,10 +65,12 @@ type PendingRef struct {
 	Sums    []string  `json:"sums,omitempty"`
 }
 
-// QueuedRef is a queued auto-reply as a restart sees it.
+// QueuedRef is a queued auto-reply, or a held effect, as a restart sees
+// it.
 type QueuedRef struct {
-	ID  string `json:"id"`
-	Ref string `json:"ref"`
+	ID   string `json:"id"`
+	Ref  string `json:"ref"`
+	Held bool   `json:"held,omitempty"`
 }
 
 // Store persists State.

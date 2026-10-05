@@ -109,8 +109,14 @@ type Decision struct {
 	Approved bool
 	// Why: "owner", "expired", "void" (wrong codes), "not chosen" (left
 	// out of a partial YES), "restart" (dropped by a reboot), or "undo"
-	// (an auto-reply the owner cancelled).
+	// (an auto-reply or held effect the owner cancelled).
 	Why string
+	// Hold, on an approval, is the UNDO ID the effect is held under until
+	// Until (REV-3, CH-16): the caller keeps it from running until
+	// DueAutoReplies releases it, and a later decision on Hold (Why "undo"
+	// or "restart") cancels it.
+	Hold  string
+	Until time.Time
 }
 
 // Channel is the owner channel. It implements control.Auth.

@@ -307,15 +307,71 @@ func (c *Channel) answerLocked(rp reply, now time.Time, decided *[]Decision) (ou
 			denied = append(denied, i+1)
 		}
 	}
+	n := len(*decided)
 	c.closeLocked(r, func(i int) (bool, bool) { return true, all || chosen[i] }, "", now, decided)
+	held := c.holdLocked(r, (*decided)[n:], now)
 	if all {
-		return []string{"Approved " + r.id + "."}, true, false
+		return []string{"Approved " + r.id + "." + held}, true, false
 	}
 	s := fmt.Sprintf("Approved %s item %s.", r.id, list(rp.items))
 	if len(denied) > 0 {
 		s += fmt.Sprintf(" Denied %s.", list(denied))
 	}
-	return []string{s}, true, false
+	return []string{s + held}, true, false
+}
+
+// holdLocked holds each approved item of r that has an undo window (REV-3):
+// it is queued under its own UNDO ID until the window passes, recorded for
+// a restart, and its decision carries the hold. It returns the sentence
+// the confirmation ends with (CH-16): when the first held item runs and
+// the IDs that stop them. An item that cannot be held (no free ID, the
+// restart record cannot be saved) is denied rather than run without the
+// undo its request promised.
+func (c *Channel) holdLocked(r *request, ds []Decision, now time.Time) string {
+	var items []int
+	var ids []string
+	var first time.Time
+	var failed []int
+	for k := range ds {
+		d := &ds[k]
+		if !d.Approved || r.items[d.Item-1].UndoWindow <= 0 {
+			continue
+		}
+		until := now.Add(r.items[d.Item-1].UndoWindow)
+		id, err := c.newIDLocked(now)
+		if err == nil {
+			err = c.codes.commit(func(s *State) { s.Queued = append(s.Queued, QueuedRef{ID: id, Ref: d.Ref, Held: true}) })
+		}
+		if err != nil {
+			d.Approved, d.Why = false, "not held"
+			failed = append(failed, d.Item)
+			continue
+		}
+		c.queued[id] = &Queued{ID: id, SendAt: until, Reply: AutoReply{Ref: d.Ref}, Held: true}
+		d.Hold, d.Until = id, until
+		items = append(items, d.Item)
+		ids = append(ids, id)
+		if first.IsZero() || until.Before(first) {
+			first = until
+		}
+	}
+	s := ""
+	switch {
+	case len(ids) == 1 && len(r.items) == 1:
+		s = fmt.Sprintf(" It runs at %s unless you reply UNDO %s.", c.clock(first), ids[0])
+	case len(ids) == 1:
+		s = fmt.Sprintf(" Item %d runs at %s unless you reply UNDO %s.", items[0], c.clock(first), ids[0])
+	case len(ids) > 1:
+		pairs := make([]string, len(ids))
+		for i := range ids {
+			pairs[i] = fmt.Sprintf("%s for %d", ids[i], items[i])
+		}
+		s = fmt.Sprintf(" Held items run from %s unless you reply UNDO and an ID: %s.", c.clock(first), strings.Join(pairs, ", "))
+	}
+	if len(failed) > 0 {
+		s += fmt.Sprintf(" Could not hold %s for undo, so it did not run.", list(failed))
+	}
+	return s
 }
 
 // findLocked resolves which request a reply answers.
