@@ -287,11 +287,16 @@ func (m *Manager) Park(ctx context.Context, id string) (Snapshot, error) {
 		return Snapshot{}, fmt.Errorf("%w: %s is %s", ErrState, id, mc.State)
 	}
 	s, err := m.takeLocked(ctx, mc, Full)
-	var full *WorkerFull
-	if errors.As(err, &full) {
-		// Over its layer cap no snapshot can be taken, but its memory
-		// must still go back: stop it as it is. It revives by rollback
-		// to an earlier snapshot, which also brings it under the cap.
+	if err != nil {
+		// No snapshot could be taken: over its layer cap, nested too deep
+		// to measure (security M4 on SR2-3i), or any other copy failure
+		// (L3 SHOULD on #174). Its memory must still go back, so it is
+		// stopped as it is, never left running. It revives by rollback to
+		// an earlier snapshot, which also brings it under the cap.
+		var full *WorkerFull
+		if !errors.As(err, &full) && !errors.Is(err, ErrQuota) {
+			log.Printf("vm: %s: parking without a snapshot: %v", id, err)
+		}
 		s, err = Snapshot{}, nil
 	}
 	if err == nil {

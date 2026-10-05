@@ -711,40 +711,39 @@ func TestCAP8cRefusedDeleteEndsNoCommand(t *testing.T) {
 	<-done
 }
 
-// A deletion never depends on measuring the layer: one too deep for the
-// host to measure counts as over the cap, so the deletion stands and the
-// worker stays stopped (security M4 via SR2-3i).
+// A deletion never depends on measuring the layer (security M4 via
+// SR2-3i). A layer the broker cannot copy, nested deeper than
+// overlay.MaxTreeDepth or with paths past the host's PATH_MAX (L3 MUST-1
+// on #174), counts as over the cap: the deletion stands and the worker
+// stays stopped, until a deletion flattens it and it starts again
+// (SR2-3d, F1(b) on #174).
 func TestCAP8cDeleteStandsWhenTheLayerCannotBeMeasured(t *testing.T) {
-	e := newEnv(t, 4096)
-	agent := e.create("agent", admission.Experiment, 500)
-	_, err := e.m.CreateWorker(bg, "wk-a", agent.Lineage, workerSpec(Public))
-	must(t, err)
-	_, err = e.m.Exec(bg, "wk-a", Command{Argv: []string{"write", "f"}}, time.Second)
-	must(t, err)
-	fd, err := syscall.Open(e.upper("wk-a", ""), syscall.O_RDONLY|syscall.O_DIRECTORY, 0)
-	must(t, err)
-	name := strings.Repeat("n", 200)
-	for range 25 { // past the host's PATH_MAX under upper
-		must(t, syscall.Mkdirat(fd, name, 0o755))
-		next, err := syscall.Openat(fd, name, syscall.O_RDONLY|syscall.O_DIRECTORY, 0)
-		syscall.Close(fd)
-		must(t, err)
-		fd = next
-	}
-	syscall.Close(fd)
-	rep, err := e.m.DeleteFiles(bg, "wk-a", Deletion{Paths: []string{"/f"}})
-	must(t, err)
-	if rep.Codes[0] != "removed" || !rep.Over || rep.Restarted {
-		t.Fatalf("delete in an unmeasurable layer = %+v", rep)
-	}
-	if w, _ := e.m.Get("wk-a"); w.State != Stopped {
-		t.Fatalf("worker is %s, want stopped", w.State)
-	}
-	// The deep tree itself can be deleted, and then the worker starts.
-	rep, err = e.m.DeleteFiles(bg, "wk-a", Deletion{Paths: []string{"/" + name}, Recursive: true})
-	must(t, err)
-	if rep.Codes[0] != "removed" || rep.Over || !rep.Restarted {
-		t.Fatalf("deleting the deep tree = %+v", rep)
+	for name, shape := range shapes {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t, 4096)
+			agent := e.create("agent", admission.Experiment, 500)
+			_, err := e.m.CreateWorker(bg, "wk-a", agent.Lineage, workerSpec(Public))
+			must(t, err)
+			_, err = e.m.Exec(bg, "wk-a", Command{Argv: []string{"write", "f"}}, time.Second)
+			must(t, err)
+			shape(e, "wk-a")
+			rep, err := e.m.DeleteFiles(bg, "wk-a", Deletion{Paths: []string{"/f"}})
+			must(t, err)
+			if rep.Codes[0] != "removed" || !rep.Over || rep.Restarted {
+				t.Fatalf("delete in a layer that cannot be copied = %+v", rep)
+			}
+			if w, _ := e.m.Get("wk-a"); w.State != Stopped {
+				t.Fatalf("worker is %s, want stopped", w.State)
+			}
+			// Deleting the tree from partway down (a delete descends at
+			// most MaxTreeDepth too) flattens it, and then the worker
+			// starts.
+			rep, err = e.m.DeleteFiles(bg, "wk-a", Deletion{Paths: []string{"/" + strings.Repeat("a/", 100) + "a", "/" + strings.Repeat("n", 200)}, Recursive: true})
+			must(t, err)
+			if rep.Over || !rep.Restarted {
+				t.Fatalf("flattening the tree = %+v", rep)
+			}
+		})
 	}
 }
 

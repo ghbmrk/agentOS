@@ -457,7 +457,203 @@ func TestMeasureSkipsFilesThatVanish(t *testing.T) {
 	}
 	close(stop)
 	<-done
-	if _, err := Measure(filepath.Join(root, "missing")); err == nil {
-		t.Fatal("measure of a missing layer reported nothing")
+	if _, err := Measure(filepath.Join(root, "missing")); err == nil || strings.Contains(err.Error(), root) {
+		t.Fatalf("measure of a missing layer: %v", err)
+	}
+}
+
+// chain makes a directory chain depth levels deep under root, each level
+// named name, through directory handles, so it can pass the host's path
+// limit (PATH_MAX), and returns the bytes and inodes it allocated.
+func chain(t *testing.T, root, name string, depth int) Usage {
+	t.Helper()
+	fd, err := syscall.Open(root, syscall.O_RDONLY|syscall.O_DIRECTORY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var u Usage
+	for i := 0; i < depth; i++ {
+		if err := syscall.Mkdirat(fd, name, 0o755); err != nil {
+			t.Fatalf("level %d: %v", i, err)
+		}
+		next, err := syscall.Openat(fd, name, syscall.O_RDONLY|syscall.O_DIRECTORY, 0)
+		syscall.Close(fd)
+		if err != nil {
+			t.Fatalf("level %d: %v", i, err)
+		}
+		fd = next
+		var st syscall.Stat_t
+		if err := syscall.Fstat(fd, &st); err != nil {
+			t.Fatal(err)
+		}
+		u.Bytes += st.Blocks * 512
+		u.Inodes++
+	}
+	syscall.Close(fd)
+	return u
+}
+
+// R4 on #166, L3 MUST-1 on #174: Measure walks by handles, so long paths
+// never make it fail; it counts a layer whose paths a copy can still take,
+// and reports one whose paths a copy cannot (Copy and Scan walk by host
+// path) as too deep, never as an error naming a host path.
+func TestMeasureRefusesPathsTooLongToCopy(t *testing.T) {
+	root := t.TempDir()
+	name := strings.Repeat("d", 200)
+	want := chain(t, root, name, 10) // about 2,000 bytes of path
+	var st syscall.Stat_t
+	if err := syscall.Lstat(root, &st); err != nil {
+		t.Fatal(err)
+	}
+	want.Bytes += st.Blocks * 512
+	want.Inodes++
+	got, err := Measure(root)
+	if err != nil || got != want {
+		t.Fatalf("measured %+v (%v), want %+v", got, err, want)
+	}
+	root = t.TempDir()
+	chain(t, root, name, 25) // past PATH_MAX, though only 25 deep
+	_, err = Measure(root)
+	if !errors.Is(err, ErrTooDeep) || strings.Contains(err.Error(), root) {
+		t.Fatalf("measure past PATH_MAX: %v", err)
+	}
+}
+
+// openFDs counts this process's open file descriptors.
+func openFDs(t *testing.T) int {
+	t.Helper()
+	ents, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Skip(err)
+	}
+	return len(ents)
+}
+
+// Measure closes every handle it opens, on a wide tree, a deep one, and
+// one it refuses as too deep (L3 S2 on #174).
+func TestMeasureLeavesNoHandleOpen(t *testing.T) {
+	wide := t.TempDir()
+	for i := range 300 {
+		d := filepath.Join(wide, fmt.Sprintf("d%d", i))
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "f"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deep, tooDeep := t.TempDir(), t.TempDir()
+	chain(t, deep, "a", MaxTreeDepth)
+	chain(t, tooDeep, "a", MaxTreeDepth+1)
+	before := openFDs(t)
+	for range 3 {
+		for _, root := range []string{wide, deep, tooDeep} {
+			Measure(root)
+		}
+	}
+	if after := openFDs(t); after != before {
+		t.Fatalf("%d handles open after measuring, %d before", after, before)
+	}
+}
+
+// Measure does not cross into a file system mounted inside the layer: it
+// refuses the layer (L3 S1 on #174).
+func TestMeasureRefusesAMountInsideTheLayer(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("mounting needs root (CI machines job)")
+	}
+	root := t.TempDir()
+	mnt := filepath.Join(root, "m")
+	if err := os.Mkdir(mnt, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mount("tmpfs", mnt, "tmpfs", 0, "size=1m"); err != nil {
+		t.Skip(err)
+	}
+	defer syscall.Unmount(mnt, syscall.MNT_DETACH)
+	if _, err := Measure(root); err == nil || errors.Is(err, ErrTooDeep) {
+		t.Fatalf("measured across a mount: %v", err)
+	}
+}
+
+// A layer nested deeper than MaxTreeDepth is reported as too deep, a refusal
+// callers treat as over the cap, never as no use; fds stay bounded.
+func TestMeasureRefusesALayerDeeperThanTheCap(t *testing.T) {
+	root := t.TempDir()
+	chain(t, root, "a", MaxTreeDepth)
+	if _, err := Measure(root); err != nil {
+		t.Fatalf("measure at the cap: %v", err)
+	}
+	root = t.TempDir()
+	chain(t, root, "a", MaxTreeDepth+1)
+	if _, err := Measure(root); !errors.Is(err, ErrTooDeep) {
+		t.Fatalf("measure past the cap: %v", err)
+	}
+}
+
+// Measure never follows a symlink, to a directory or out of the layer.
+func TestMeasureDoesNotFollowSymlinks(t *testing.T) {
+	root, outside := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "big"), make([]byte, 1<<20), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "out")); err != nil {
+		t.Fatal(err)
+	}
+	u, err := Measure(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Inodes != 2 || u.Bytes >= 1<<20 {
+		t.Fatalf("followed a symlink: %+v", u)
+	}
+}
+
+// A layer is a directory: a root that is a file or a symlink, even to a
+// directory, is an error, not a one-inode layer (security N1 on #174).
+func TestMeasureRefusesARootThatIsNotADirectory(t *testing.T) {
+	dir := t.TempDir()
+	f, l := filepath.Join(dir, "f"), filepath.Join(dir, "l")
+	if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(dir, l); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{f, l} {
+		if _, err := Measure(p); !errors.Is(err, syscall.ENOTDIR) || strings.Contains(err.Error(), dir) {
+			t.Fatalf("measure of %s: %v", filepath.Base(p), err)
+		}
+	}
+}
+
+// The path limit is exact, for a directory and a file name alike: a path
+// of the most bytes a copy can open under the longest root is measured,
+// one byte more is too long (L3 SHOULD-1 on #174).
+func TestMeasurePathLimitIsExact(t *testing.T) {
+	const room = 300
+	longest := maxPathLen - 1 - room // root + "/" + path + NUL
+	for _, kind := range []string{"dir", "file"} {
+		for _, extra := range []int{0, 1} {
+			root := t.TempDir()
+			top := filepath.Join(root, strings.Repeat("d", 149))
+			if err := os.Mkdir(top, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			leaf := filepath.Join(top, strings.Repeat("e", 149+extra)) // "/d…/e…": 300 bytes, or 301
+			var err error
+			if kind == "dir" {
+				err = os.Mkdir(leaf, 0o755)
+			} else {
+				err = os.WriteFile(leaf, nil, 0o644)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = MeasureUnder(root, longest)
+			if extra == 0 && err != nil || extra == 1 && !errors.Is(err, ErrTooDeep) {
+				t.Fatalf("%s at limit+%d: %v", kind, extra, err)
+			}
+		}
 	}
 }
