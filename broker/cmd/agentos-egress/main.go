@@ -47,7 +47,6 @@ import (
 const (
 	defaultVault = "/var/lib/agentos-egress/vault"
 	defaultKeys  = "/var/lib/agentos-egress/vault.keys"
-	defaultPol   = "/var/lib/agentos-egress/vault.pcrpolicy"
 	defaultTPM   = "/dev/tpmrm0"
 	// defaultPCRs measure the Type #1 boot path of S7's host stack: PCR 4
 	// the boot loader and kernel, 9 the initrd, 12 the kernel command
@@ -187,7 +186,7 @@ func serveCmd(args []string) error {
 	rulePath := fs.String("rule", "", "routing rule: JSON task class -> routes (P2-7)")
 	privateOK := fs.String("private-ok", "", "providers the owner allowed for private data, comma-separated (CAP-9)")
 	tpmPath := fs.String("tpm", defaultTPM, "this PC's TPM (trusted host, CRED-8); absent means every boot is an unknown host")
-	polPath := fs.String("pcr-policy", defaultPol, "approved boot paths: signed PCR policies (HW-5a)")
+	polPath := fs.String("pcr-policy", "", "approved boot paths: signed PCR policies (HW-5a); default vault.pcrpolicy beside the keys")
 	pcrList := fs.String("pcrs", defaultPCRs, "PCRs a trusted host's boot path is measured into (SHA-256 bank)")
 	fs.Parse(args)
 	pcrs, err := parsePCRs(*pcrList)
@@ -217,6 +216,9 @@ func serveCmd(args []string) error {
 	}
 	if *statePath == "" {
 		*statePath = statePathFor(*keysPath)
+	}
+	if *polPath == "" {
+		*polPath = filepath.Join(filepath.Dir(*keysPath), "vault.pcrpolicy")
 	}
 	c, err := newCustody(&custody{
 		keysPath: *keysPath,
@@ -429,7 +431,8 @@ func unlockCmd(args []string, in io.Reader, out io.Writer) error {
 	fs.Parse(args)
 	c := unixClient(filepath.Join(*run, UnlockSocket))
 	r := bufio.NewReader(in)
-	if st, _, err := get(c, "/status"); err == nil && st["pin"] == true {
+	st, _, err := get(c, "/status")
+	if err == nil && st["pin"] == true {
 		fmt.Fprint(out, "Boot PIN for this trusted PC: ")
 		pin, _ := r.ReadString('\n')
 		res, code, err := post(c, "/unlock-pin", map[string]string{"pin": strings.TrimSpace(pin)})
@@ -441,6 +444,18 @@ func unlockCmd(args []string, in io.Reader, out io.Writer) error {
 		}
 		fmt.Fprintln(out, "Vault unlocked.")
 		return nil
+	}
+	keep := false
+	if err == nil && st["boot_changed"] == true {
+		if st["updated"] == true {
+			fmt.Fprintln(out, "Box updated. Unlock once with your passphrase and a code; this PC stays trusted after that.")
+		} else {
+			fmt.Fprintln(out, "This PC started the box in a way it hasn't before. If you didn't change anything, the drive may have been tampered with. Unlock only if you're sure.")
+		}
+		fmt.Fprint(out, "Keep this PC trusted? [Y/n] ")
+		ans, _ := r.ReadString('\n')
+		ans = strings.ToLower(strings.TrimSpace(ans))
+		keep = ans == "" || ans == "y" || ans == "yes"
 	}
 	fmt.Fprint(out, "Vault passphrase: ")
 	pass, _ := r.ReadString('\n')
@@ -456,11 +471,14 @@ func unlockCmd(args []string, in io.Reader, out io.Writer) error {
 		fmt.Fprintf(out, "Code-generator code (6 digits, due by %v): ", res["expires"])
 		otp, rerr := r.ReadString('\n')
 		var cres map[string]any
-		cres, code, err = post(c, "/confirm", map[string]string{"ticket": ticket, "code": strings.TrimSpace(otp)})
+		cres, code, err = post(c, "/confirm", map[string]any{"ticket": ticket, "code": strings.TrimSpace(otp), "keep_trusted": keep})
 		if err != nil {
 			return err
 		}
 		if code == http.StatusOK {
+			if keep && cres["kept_trusted"] != true {
+				fmt.Fprintln(out, "Could not keep this PC trusted; trust it again with: agentos-egress trust")
+			}
 			break
 		}
 		// A wrong code leaves the unlock pending until it expires or
@@ -516,6 +534,7 @@ func trustCmd(args []string, in io.Reader, out io.Writer) error {
 	code, _ := r.ReadString('\n')
 	var pin string
 	if *withPIN {
+		fmt.Fprintln(out, "With a PIN, the box won't restart by itself after a power cut until you enter the PIN.")
 		fmt.Fprint(out, "New boot PIN: ")
 		pin, _ = r.ReadString('\n')
 		pin = strings.TrimSpace(pin)
@@ -570,14 +589,14 @@ func hostsCmd(args []string, out io.Writer) error {
 	}
 	for _, h := range hosts {
 		m, _ := h.(map[string]any)
-		line := fmt.Sprintf("%v  %v", m["id"], m["host"])
+		line := fmt.Sprintf("%v", m["label"])
 		if m["this"] == true {
 			line += "  (this PC)"
 		}
 		if m["pin"] == true {
 			line += "  (boot PIN)"
 		}
-		fmt.Fprintln(out, line)
+		fmt.Fprintf(out, "%s\n    id %v\n", line, m["id"])
 	}
 	return nil
 }

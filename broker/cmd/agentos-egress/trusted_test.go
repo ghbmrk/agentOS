@@ -55,6 +55,8 @@ type pcRig struct {
 	tpm   *swtpm.TPM
 	c     *custody
 	notes []string
+	// release is the image version this boot runs (os-release).
+	release string
 }
 
 func newPCRig(t *testing.T) *pcRig {
@@ -67,6 +69,8 @@ func newPCRig(t *testing.T) *pcRig {
 		clk:   &clock{t: time.Unix(1_800_000_000, 0)},
 		seed:  []byte(synthetic(t, "seed-")),
 		tpm:   swtpm.Start(t),
+
+		release: "2026.10.1",
 	}
 	v, err := vault.CreateSealed(r.vault, r.keys, cardFactor{})
 	if err != nil {
@@ -95,6 +99,8 @@ func (r *pcRig) start(t *testing.T, pc *swtpm.TPM) {
 			policyPath: filepath.Join(r.dir, "vault.pcrpolicy"),
 			pcrs:       testPCRs,
 			name:       "Test PC",
+			release:    func() string { return r.release },
+			now:        r.clk.now,
 		}
 	}
 	c, err := newCustody(&custody{
@@ -235,7 +241,7 @@ func TestModifiedBootPathDoesNotUnlockUnattended(t *testing.T) {
 		if r.phase() != locked || r.c.model() != nil {
 			t.Fatalf("modified boot path %q unlocked", b)
 		}
-		if !r.noted("boot path changed") {
+		if !r.noted("started the box in a way it hasn't before") || !r.noted("tampered") {
 			t.Fatalf("owner not told: %q", r.notes)
 		}
 	}
@@ -326,6 +332,9 @@ func TestRemoveTrustedHost(t *testing.T) {
 	hosts, err := r.c.hosts()
 	if err != nil || len(hosts) != 1 || !hosts[0].This || hosts[0].Host != "Test PC" || hosts[0].PIN {
 		t.Fatalf("hosts: %+v, %v", hosts, err)
+	}
+	if want := "Test PC, trusted " + r.clk.now().Local().Format("Jan 2"); hosts[0].Label != want {
+		t.Fatalf("host label %q, want %q", hosts[0].Label, want)
 	}
 	if _, err := r.c.untrust("000000", hosts[0].ID); err == nil {
 		t.Fatal("untrust with a wrong code")
@@ -496,5 +505,138 @@ func TestBootPINRefusedWhenLockoutIsOwned(t *testing.T) {
 	}
 	if _, err := r.c.trust(r.code(), ""); err != nil {
 		t.Fatalf("trust without a PIN: %v", err)
+	}
+}
+
+// After the box's own update the trusted PC is refused like any changed
+// boot path (no signed policy yet), but the owner is told it is the
+// update, not tampering.
+func TestBoxUpdateIsNotCalledTampering(t *testing.T) {
+	r := newPCRig(t)
+	r.unknownHostUnlock(t)
+	if _, err := r.c.trust(r.code(), ""); err != nil {
+		t.Fatal(err)
+	}
+	r.release = "2026.11.1"
+	bootPC(r.tpm, "initrd-B", "usrhash=bbbb quiet")
+	r.notes = nil
+	r.start(t, r.tpm)
+	if r.phase() != locked {
+		t.Fatal("unapproved release unlocked unattended")
+	}
+	if !r.noted("Box updated. Unlock once with your passphrase and a code; this PC stays trusted after that.") || r.noted("tampered") {
+		t.Fatalf("update notes: %q", r.notes)
+	}
+	if ch, upd := r.c.bootChange(); !ch || !upd {
+		t.Fatalf("boot change %v, update %v", ch, upd)
+	}
+}
+
+// "Keep this PC trusted": after a changed boot path, the fallback unlock's
+// own proof (passphrase, code, local page) approves the new boot path, so
+// the next restart is unattended again, and a PIN slot keeps its PIN.
+func TestKeepThisPCTrusted(t *testing.T) {
+	r := newPCRig(t)
+	r.unknownHostUnlock(t)
+	if _, err := r.c.trust(r.code(), "2468"); err != nil {
+		t.Fatal(err)
+	}
+	r.release = "2026.11.1"
+	newPath := func() { bootPC(r.tpm, "initrd-B", "usrhash=bbbb quiet") }
+	newPath()
+	r.start(t, r.tpm)
+	r.clk.add(MinAttemptGap)
+	if err := r.c.unlockPIN("2468"); err != errBootChanged {
+		t.Fatalf("PIN on a changed boot path: %v", err)
+	}
+
+	r.clk.add(MinAttemptGap)
+	tk, err := r.c.unlock(goodPass)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept, err := r.c.confirmKeep(tk, r.code(), true)
+	if err != nil || !kept {
+		t.Fatalf("keep trusted: %v, %v", kept, err)
+	}
+	if r.tpmSlots(t) != 1 {
+		t.Fatal("keeping the PC trusted resealed its slot")
+	}
+	newPath()
+	r.start(t, r.tpm)
+	if !r.c.pinWanted() {
+		t.Fatalf("kept PC: wants PIN %v, notes %q", r.c.pinWanted(), r.notes)
+	}
+	r.clk.add(MinAttemptGap)
+	if err := r.c.unlockPIN("2468"); err != nil {
+		t.Fatalf("PIN after keeping the PC trusted: %v", err)
+	}
+	if ch, _ := r.c.bootChange(); ch {
+		t.Fatal("boot change still reported after unlocking")
+	}
+}
+
+// Unticking "Keep this PC trusted" approves nothing, and keep has no
+// effect when the boot path did not change (an unknown host stays one).
+func TestKeepTrustedOnlyWhenAsked(t *testing.T) {
+	r := newPCRig(t)
+	r.clk.add(MinAttemptGap)
+	tk, _ := r.c.unlock(goodPass)
+	if kept, err := r.c.confirmKeep(tk, r.code(), true); err != nil || kept {
+		t.Fatalf("unknown host kept: %v, %v", kept, err)
+	}
+	if r.tpmSlots(t) != 0 {
+		t.Fatal("unknown host became trusted without /trust")
+	}
+	if _, err := r.c.trust(r.code(), ""); err != nil {
+		t.Fatal(err)
+	}
+	bootPC(r.tpm, "initrd-B", "usrhash=bbbb quiet")
+	r.start(t, r.tpm)
+	r.clk.add(MinAttemptGap)
+	tk, _ = r.c.unlock(goodPass)
+	if kept, err := r.c.confirmKeep(tk, r.code(), false); err != nil || kept {
+		t.Fatalf("unticked: %v, %v", kept, err)
+	}
+	bootPC(r.tpm, "initrd-B", "usrhash=bbbb quiet")
+	r.start(t, r.tpm)
+	if r.phase() != locked {
+		t.Fatal("changed boot path approved without the owner asking")
+	}
+}
+
+// The local page learns of a changed boot path from /status and sends
+// "Keep this PC trusted" with /confirm.
+func TestKeepTrustedOverTheUnlockSocket(t *testing.T) {
+	r := newPCRig(t)
+	r.unknownHostUnlock(t)
+	if _, err := r.c.trust(r.code(), ""); err != nil {
+		t.Fatal(err)
+	}
+	call := func(method, path string, body any) map[string]any {
+		t.Helper()
+		var rd io.Reader
+		if body != nil {
+			raw, _ := json.Marshal(body)
+			rd = bytes.NewReader(raw)
+		}
+		w := httptest.NewRecorder()
+		unlockHandler(r.c).ServeHTTP(w, httptest.NewRequest(method, path, rd))
+		out := map[string]any{}
+		json.Unmarshal(w.Body.Bytes(), &out)
+		return out
+	}
+	bootPC(r.tpm, "initrd-A", "usrhash=aaaa quiet init=/bin/sh")
+	r.start(t, r.tpm)
+	if out := call("GET", "/status", nil); out["boot_changed"] != true || out["updated"] != false {
+		t.Fatalf("status after a changed boot path: %v", out)
+	}
+	r.clk.add(MinAttemptGap)
+	tk, _ := call("POST", "/unlock", map[string]string{"passphrase": goodPass})["ticket"].(string)
+	if out := call("POST", "/confirm", map[string]any{"ticket": tk, "code": r.code(), "keep_trusted": true}); out["state"] != "open" || out["kept_trusted"] != true {
+		t.Fatalf("confirm keeping the PC trusted: %v", out)
+	}
+	if out := call("GET", "/status", nil); out["boot_changed"] != nil {
+		t.Fatalf("status once open: %v", out)
 	}
 }

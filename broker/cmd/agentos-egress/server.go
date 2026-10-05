@@ -166,6 +166,12 @@ func unlockHandler(c *custody) http.Handler {
 		if c.pinWanted() {
 			out["pin"] = true
 		}
+		// The local page words the fallback unlock from these, and
+		// offers "Keep this PC trusted", ticked, on /confirm.
+		if changed, updated := c.bootChange(); changed {
+			out["boot_changed"] = true
+			out["updated"] = updated
+		}
 		reply(w, http.StatusOK, out)
 	}
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) { status(w) })
@@ -188,15 +194,20 @@ func unlockHandler(c *custody) http.Handler {
 		var req struct {
 			Ticket string `json:"ticket"`
 			Code   string `json:"code"`
+			// KeepTrusted: "Keep this PC trusted" after a changed
+			// boot path (status boot_changed).
+			KeepTrusted bool `json:"keep_trusted"`
 		}
 		if !read(w, r, &req) {
 			return
 		}
-		if err := c.confirm(req.Ticket, req.Code); err != nil {
+		kept, err := c.confirmKeep(req.Ticket, req.Code, req.KeepTrusted)
+		if err != nil {
 			fail(w, err)
 			return
 		}
-		status(w)
+		ph, _ := c.status()
+		reply(w, http.StatusOK, map[string]any{"state": ph.String(), "kept_trusted": kept})
 	})
 	// Trusted hosts (CRED-8, CRED-9). The local UI's socket is the local
 	// confirmation; the code is the approval.

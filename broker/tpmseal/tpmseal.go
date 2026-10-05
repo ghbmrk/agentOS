@@ -84,6 +84,8 @@ type Sealed struct {
 	PINSalt []byte `json:"pin_salt,omitempty"`
 	// Host names the PC for the owner (its DMI product name), if known.
 	Host string `json:"host,omitempty"`
+	// Trusted is when the owner trusted the PC (Unix seconds), if known.
+	Trusted int64 `json:"trusted,omitempty"`
 }
 
 // HasPIN reports whether unsealing needs the boot PIN.
