@@ -55,9 +55,11 @@ var ErrClock = errors.New("pubid: the clock is not plausible")
 // the bytes to publish.
 type Signer func(priv ed25519.PrivateKey, payload []byte) ([]byte, error)
 
-// Sender publishes one day's batch. It must be idempotent by day: after a
-// crash or an error that came after delivery, the same batch for the same
-// day is sent again.
+// Sender publishes one day's batch. It must be idempotent by day and
+// batch: after a crash or an error that came after delivery, the same
+// batch for the same day is sent again. A different batch for a day
+// already published (a clock behind by more than maxDays) is new, never a
+// duplicate (security N1 on #163).
 type Sender interface {
 	Publish(day string, batch [][]byte) error
 }
@@ -75,8 +77,8 @@ type Config struct {
 	// MaxDelayDays (0 means DefaultMaxDelayDays).
 	MaxDelayDays int
 	Rand         io.Reader // delay draws; nil means crypto/rand
-	// Mono is monotonic time since some fixed point in this process; nil
-	// means time since NewPublisher, by Go's monotonic clock.
+	// Mono is monotonic time since some fixed point; nil means
+	// CLOCK_BOOTTIME, which counts suspend (Go's monotonic clock off Linux).
 	Mono func() time.Duration
 }
 
@@ -172,8 +174,7 @@ func NewPublisher(cfg Config) (*Publisher, error) {
 		cfg.Rand = rand.Reader
 	}
 	if cfg.Mono == nil {
-		start := time.Now()
-		cfg.Mono = func() time.Duration { return time.Since(start) }
+		cfg.Mono = monoClock()
 	}
 	p := &Publisher{cfg: cfg}
 	// Others who can write the directory could swap in items for the box

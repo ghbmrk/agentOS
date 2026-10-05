@@ -66,6 +66,11 @@ const (
 	// agent replies and evidence go to (CH-20). Clearing it sends them by
 	// text again, so it is not narrowing.
 	ActionEvidence = "meta.evidence"
+	// ActionUpdateFollow switches the root of trust the box takes updates
+	// from: a fork's, or back to the project's (OSS-10). Either way it
+	// changes who decides what software the box installs, so it is never
+	// narrowing.
+	ActionUpdateFollow = "meta.update.follow"
 )
 
 // Authority-narrowing broker-state changes. Pausing or revoking must always
