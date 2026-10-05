@@ -148,6 +148,10 @@ type GuardConfig struct {
 	Fixer Fixer
 	// Notify texts the owner a High finding at once, in fixed wording.
 	Notify func(line string)
+	// MaxPauses caps automatic containment per pass, so a bad advisory
+	// feed cannot pause everything; the owner is texted about the rest.
+	// Default 3.
+	MaxPauses int
 	// Every is how often the passive checks run. Default 6 hours.
 	Every time.Duration
 	// Warn is how far ahead an expiry is reported. Default 14 days.
@@ -181,7 +185,7 @@ type secureState struct {
 type Record struct {
 	Finding   Finding   `json:"finding"`
 	At        time.Time `json:"at"`
-	Contained string    `json:"contained"` // "paused", "failed", "none"
+	Contained string    `json:"contained"` // "paused", "failed", "capped", "none"
 	Fixture   string    `json:"fixture,omitempty"`
 	Fix       string    `json:"fix,omitempty"` // pipeline state of the fix, if any
 	FixReason string    `json:"fix_reason,omitempty"`
@@ -192,6 +196,9 @@ type Record struct {
 func NewGuard(cfg GuardConfig) (*Guard, error) {
 	if cfg.Pipeline == nil || cfg.Store == nil {
 		return nil, errors.New("loops: Pipeline and Store are required")
+	}
+	if cfg.MaxPauses <= 0 {
+		cfg.MaxPauses = 3
 	}
 	if cfg.Every <= 0 {
 		cfg.Every = 6 * time.Hour
@@ -271,11 +278,16 @@ func (s *Guard) Pass(ctx context.Context) (int, error) {
 	}
 	s.mu.Unlock()
 	var errs []error
+	pauses := 0
 	for _, f := range fresh {
 		if ctx.Err() != nil {
 			break
 		}
-		if err := s.handle(ctx, f); err != nil {
+		pause := f.Contain != nil && pauses < s.cfg.MaxPauses
+		if pause {
+			pauses++
+		}
+		if err := s.handle(ctx, f, pause); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -287,11 +299,13 @@ func (s *Guard) Pass(ctx context.Context) (int, error) {
 
 // handle is LOOP-9: contain, preserve evidence, add the regression
 // fixture, propose a fix, notify.
-func (s *Guard) handle(ctx context.Context, f Finding) error {
+func (s *Guard) handle(ctx context.Context, f Finding, pause bool) error {
 	rec := Record{Finding: f, At: s.cfg.Now(), Contained: "none", Digest: digestOf(f)}
 	var errs []error
 	if f.Contain != nil {
-		if s.cfg.Contain == nil {
+		if !pause {
+			rec.Contained = "capped"
+		} else if s.cfg.Contain == nil {
 			rec.Contained = "failed"
 		} else if err := s.cfg.Contain.Contain(ctx, *f.Contain, f.ID); err != nil {
 			rec.Contained = "failed"
@@ -335,7 +349,7 @@ func (s *Guard) handle(ctx context.Context, f Finding) error {
 	s.st.Open[f.ID] = rec
 	s.st.Evidence[len(s.st.Evidence)-1] = rec
 	s.mu.Unlock()
-	if f.Severity == High {
+	if f.Severity == High || rec.Contained == "capped" {
 		s.cfg.Notify(ownerLine(rec))
 	}
 	return errors.Join(errs...)
@@ -606,6 +620,13 @@ func ownerLine(r Record) string {
 		line += fmt.Sprintf(" Paused %s %s until it is fixed.", f.Contain.Kind, safeName(f.Contain.Name))
 	case "failed":
 		line += " Could not pause it. STOP pauses everything."
+	case "capped":
+		line += " Not paused: too many findings at once."
+		if f.Contain.Kind == "grant" {
+			line += fmt.Sprintf(" Reply PAUSE %s to pause it, or STOP to pause everything.", safeName(f.Contain.Name))
+		} else {
+			line += " Reply STOP to pause everything."
+		}
 	}
 	return line
 }

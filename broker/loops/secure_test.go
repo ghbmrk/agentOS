@@ -320,6 +320,34 @@ func TestFindingHandling(t *testing.T) {
 	}
 }
 
+// LOOP-9 with a bad feed: automatic pauses are capped per pass, and the
+// owner is texted about each finding left unpaused.
+func TestPauseCap(t *testing.T) {
+	b := cleanBox()
+	b.pkgs = nil
+	b.snap.Advisories = nil
+	for _, n := range []string{"a", "b", "c", "d", "e"} {
+		b.pkgs = append(b.pkgs, Package{Name: n, Version: "1.0", Contain: &Target{Kind: "grant", Name: "g-" + n}})
+		b.snap.Advisories = append(b.snap.Advisories, Advisory{ID: "ADV-" + n, Package: n, Fixed: "1.1", Severity: "low"})
+	}
+	r := newGuardRig(t, b)
+	if n := r.pass(t); n != 5 {
+		t.Fatalf("findings = %d", n)
+	}
+	if len(r.c.got) != 3 {
+		t.Fatalf("paused %d, want 3", len(r.c.got))
+	}
+	capped := 0
+	for _, x := range r.texts {
+		if strings.Contains(x, "Not paused: too many findings at once") {
+			capped++
+		}
+	}
+	if capped != 2 || len(r.texts) != 2 {
+		t.Fatalf("texts %q", r.texts)
+	}
+}
+
 // LOOP-10: a fix that disables a check, widens authority, or fails a
 // security fixture fails qualification, and Loop 2 only adds fixtures.
 func TestFixesCannotWeaken(t *testing.T) {
