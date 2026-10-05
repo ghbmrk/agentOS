@@ -44,6 +44,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/route"
+	"github.com/ghbmrk/agentos/broker/smsapi"
 	"github.com/ghbmrk/agentos/broker/vault"
 )
 
@@ -267,7 +268,8 @@ func serveCmd(args []string) error {
 	run := fs.String("run", defaultRun, "socket directory (created 0711)")
 	brokerUID := fs.Int("broker-uid", -1, "uid of agentosd, the only peer on the model socket")
 	unlockUID := fs.Int("unlock-uid", -1, "uid of the local UI, the only peer on the unlock socket")
-	modemUID := fs.Int("modem-uid", -1, "uid of the modem bridge, the only peer on the sign socket (a SIP second line); -1 serves no sign socket")
+	modemUID := fs.Int("modem-uid", -1, "uid of the modem bridge, the only peer on the sign and sms sockets (the second line); -1 serves neither")
+	ownerNumber := fs.String("owner-number", "", "the owner's number (E.164), which the second line never texts or calls; required with -modem-uid")
 	ttl := fs.Duration("code-ttl", owner.DefaultCodeTTL, "how long a decrypted vault waits for its approval code")
 	g := grants{}
 	fs.Var(g, "grant", "machine=adapter[,adapter] (repeatable)")
@@ -324,6 +326,9 @@ func serveCmd(args []string) error {
 	if *modemUID >= 0 && (*modemUID == self || *modemUID == *brokerUID || *modemUID == *unlockUID) {
 		return errors.New("-modem-uid must name the modem bridge's own uid, distinct from this process's, agentosd's and the local UI's")
 	}
+	if *modemUID >= 0 && smsapi.CheckRecipient(*ownerNumber, "", "") != nil {
+		return errors.New("-owner-number must be the owner's number with its country code, like +447700900123, when -modem-uid is set")
+	}
 	if *statePath == "" {
 		*statePath = statePathFor(*keysPath)
 	}
@@ -341,6 +346,7 @@ func serveCmd(args []string) error {
 		notify:    func(s string) { log.Print(s) },
 		statePath: *statePath,
 		host:      newTPMHost(*tpmPath, *vaultPath, *keysPath, *polPath, pcrs),
+		owner:     *ownerNumber,
 	})
 	if err != nil {
 		return err
@@ -365,6 +371,14 @@ func serveCmd(args []string) error {
 			return err
 		}
 		srvs = append(srvs, sign)
+		sms, err := serveSMS(*run, c, *modemUID)
+		if err != nil {
+			for _, s := range srvs {
+				s.Close()
+			}
+			return err
+		}
+		srvs = append(srvs, sms)
 	}
 	c.bootTrusted()
 	ph, _ := c.status()

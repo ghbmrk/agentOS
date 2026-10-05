@@ -370,7 +370,7 @@ func main() {
 		cfg.OwnerVerifier = ownerVerifier{verifier}
 		// The second line's STATUS line (potency R1 on #139); its digest
 		// line waits for the digest's sender.
-		line = &secondLine{get: verifier.SecondLine}
+		line = &secondLine{get: verifier.SecondLine, texts: verifier.SecondLineTexts}
 	}
 	recallTools := &recalltool.Late{}
 	// Rollbacks the owner approves run here (recalltool W10).
@@ -379,7 +379,7 @@ func main() {
 	cfg.Grants.Contained = recallExec.Contained
 	cfg.Notes = append(cfg.Notes, recallExec.Status)
 	if line != nil {
-		cfg.Notes = append(cfg.Notes, line.Note)
+		cfg.Notes = append(cfg.Notes, line.Note, line.TextsNote)
 	}
 	// No modem driver exists before P2-3, so texts arrive only through the
 	// owner socket and the channel's own outbound texts are not sent.

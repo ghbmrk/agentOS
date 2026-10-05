@@ -16,6 +16,13 @@ func ParseOffer(body []byte, private bool) (string, error) {
 
 // SetInbound shortens the waits for a call to the line and sets the clock
 // the clip limits read, until the returned restore is called.
+// SetPollEvery sets how often the line polls its texting account.
+func SetPollEvery(d time.Duration) (restore func()) {
+	p := pollEvery
+	pollEvery = d
+	return func() { pollEvery = p }
+}
+
 func SetInbound(ack, latch time.Duration, clock func() time.Time) (restore func()) {
 	a, l, n := ackWait, latchWait, now
 	ackWait, latchWait, now = ack, latch, clock

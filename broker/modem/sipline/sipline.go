@@ -34,6 +34,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/modem/secondline"
 	"github.com/ghbmrk/agentos/broker/sipsign"
+	"github.com/ghbmrk/agentos/broker/smsapi"
 )
 
 // Config configures the line.
@@ -66,7 +67,21 @@ type Config struct {
 	// played over SRTP to anyone who calls the line, which then hangs up.
 	// Empty declines calls (603) instead.
 	NoCallsClip []byte
+	// Texts, when set, carries the line's texts over the provider's HTTP
+	// API through the vault process (smsapi.Client on sms.sock; potency
+	// PL1 on #102): Send goes through it instead of SIP MESSAGE, and the
+	// line polls it for incoming texts. Calls stay on SIP.
+	Texts Texts
 }
+
+// Texts is the vault process's texting socket (smsapi.Client).
+type Texts interface {
+	Send(ctx context.Context, to, text string) error
+	Poll(ctx context.Context) ([]smsapi.Inbound, error)
+}
+
+// pollEvery is how often the line polls its texting account.
+var pollEvery = 30 * time.Second
 
 // NoCallsText is what a caller to the second line hears (NoCallsClip):
 // the line answers only texts until a call handler exists (at M13).
@@ -120,6 +135,18 @@ func OwnerText(err error) string {
 		return "The second line's calling account isn't set up. Set it up on the box's local page."
 	case errors.Is(err, sipsign.ErrRefused):
 		return "The second line's sign-in needs confirming. Check the provider name on the box's local page."
+	case errors.Is(err, smsapi.ErrLocked):
+		return "The second line can't text while the box is locked. Unlock it on the box's Wi-Fi page."
+	case errors.Is(err, smsapi.ErrNoAccount):
+		return "The second line's texting account isn't set up. Set it up on the box's Wi-Fi page."
+	case errors.Is(err, smsapi.ErrTooLong):
+		return "That text is too long for the second line. Shorten it and send it again."
+	case errors.Is(err, smsapi.ErrRefused):
+		return "The second line's provider didn't accept that text. Check the number, or try again later."
+	case errors.Is(err, sipsign.ErrLimited), errors.Is(err, smsapi.ErrLimited):
+		return "The second line has sent as many texts as it may for now, so that didn't go through. Try again later."
+	case errors.Is(err, sipsign.ErrRecipient), errors.Is(err, smsapi.ErrRecipient):
+		return "The second line doesn't text or call that number. It takes a full number with its country code, never your own number or a short code."
 	}
 	return "The second line couldn't reach its provider, so that didn't go through. It will keep trying to reconnect."
 }
@@ -225,6 +252,9 @@ func Open(ctx context.Context, cfg Config) (*Line, error) {
 		return nil, err
 	}
 	go l.keep(granted)
+	if cfg.Texts != nil {
+		go l.poll()
+	}
 	return l, nil
 }
 
@@ -265,12 +295,19 @@ func (l *Line) Send(to, text string) error {
 		return ErrClosed
 	default:
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if l.cfg.Texts != nil {
+		n, err := e164(to)
+		if err != nil {
+			return err
+		}
+		return l.cfg.Texts.Send(ctx, n, text)
+	}
 	uri, err := l.numberURI(to)
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
 	req := l.request(sip.MESSAGE, uri, uri)
 	req.AppendHeader(sip.NewHeader("Content-Type", "text/plain;charset=UTF-8"))
 	req.SetBody([]byte(text))
@@ -282,6 +319,62 @@ func (l *Line) Send(to, text string) error {
 		return fmt.Errorf("%w: %d", ErrTextRefused, res.StatusCode)
 	}
 	return nil
+}
+
+// e164 is number with its visual separators dropped, which must leave a
+// "+" and digits only.
+func e164(number string) (string, error) {
+	var b strings.Builder
+	for i, r := range strings.TrimSpace(number) {
+		switch {
+		case r >= '0' && r <= '9', r == '+' && i == 0:
+			b.WriteRune(r)
+		case r == ' ' || r == '-' || r == '(' || r == ')' || r == '.':
+		default:
+			return "", ErrNumber
+		}
+	}
+	n := b.String()
+	if len(n) < 3 || n[0] != '+' {
+		return "", ErrNumber
+	}
+	return n, nil
+}
+
+// poll fetches the texting account's incoming texts until the line
+// closes. They reach Inbox as SIP MESSAGE texts do: data, a sender name
+// labelled as one (CH-1).
+func (l *Line) poll() {
+	t := time.NewTicker(pollEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-l.done:
+			return
+		case <-t.C:
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		in, err := l.cfg.Texts.Poll(ctx)
+		cancel()
+		if err != nil {
+			continue
+		}
+		dropped := 0
+		for _, i := range in {
+			m := modem.SMS{From: i.From, To: l.cfg.Number, Text: i.Text, At: i.At}
+			if i.Named {
+				m.From, m.Alphanumeric = "alpha:"+name(i.From), true
+			}
+			select {
+			case l.inbox <- m:
+			default: // a full inbox drops texts rather than queueing without bound
+				dropped++
+			}
+		}
+		if dropped > 0 {
+			l.cfg.Log.Warn("sipline: inbox full, polled texts dropped", "count", dropped)
+		}
+	}
 }
 
 // numberURI makes a Request-URI from a phone number. Anything but digits,
