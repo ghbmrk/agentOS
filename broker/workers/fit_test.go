@@ -199,6 +199,63 @@ func TestCAP1KeepTheWinnerDiscardsTheRest(t *testing.T) {
 	}
 }
 
+// Smaller workers fit more, and fit says how many from the same rounded,
+// cached room (potency on #158, keeping security F1).
+func TestCAP1FitSaysSmallerWorkersFitMore(t *testing.T) {
+	floor, err := budget.ForHost(7680, 4, budget.Floor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := newRig(t, floor.PoolMB)
+	clk := newClock(r)
+	if _, err := r.m.Create(context.Background(), "agent", vm.Spec{Image: "base", Class: admission.Foreground, MemMB: budget.OpenClawMB}); err != nil {
+		t.Fatal(err)
+	}
+	r.tools.Free = func(admission.Class) int64 { return r.adm.Snapshot().FreeMB }
+	var f fitOut
+	r.must("agent", toolFit, m{}, &f) // 1944 free rounds to 1536
+	if f.Fit != 6 || !strings.Contains(f.Why, "smaller workers fit more: 8 at 192 MB") {
+		t.Fatalf("fit at the default on the floor = %+v", f)
+	}
+	measured := int64(1500) // 7 at 192 unrounded; 1024 rounded holds 5
+	r.tools.Avail = func() (int64, error) { return measured, nil }
+	clk.next()
+	r.must("agent", toolFit, m{"mem_mb": 512}, &f)
+	if f.Fit != 2 || !strings.Contains(f.Why, "5 at 192 MB") {
+		t.Fatalf("fit at 512 = %+v, want 2 and 5 at 192 from 1024", f)
+	}
+	measured = 100
+	r.must("agent", toolFit, m{"mem_mb": 512}, &f) // cached: still 1024
+	if !strings.Contains(f.Why, "5 at 192 MB") {
+		t.Fatalf("smaller count measured inside the window: %+v", f)
+	}
+	for _, mem := range []int64{SmallMemMB, MinMemMB} {
+		f = fitOut{} // why is omitted when empty
+		r.must("agent", toolFit, m{"mem_mb": mem}, &f)
+		if strings.Contains(f.Why, "smaller") {
+			t.Fatalf("fit at %d MiB offers smaller workers: %+v", mem, f)
+		}
+	}
+	// No hint when the worker cap, not memory, binds.
+	clk.next()
+	measured = 1 << 20
+	r.tools.Free = func(admission.Class) int64 { return 1 << 20 }
+	f = fitOut{}
+	r.must("agent", toolFit, m{"mem_mb": 512}, &f)
+	if f.Fit != MaxWorkers || strings.Contains(f.Why, "smaller") {
+		t.Fatalf("fit with room for all = %+v", f)
+	}
+	var create string
+	for _, tl := range r.tools.List() {
+		if tl["name"] == toolCreate {
+			create = tl["description"].(string)
+		}
+	}
+	if !strings.Contains(create, "7 fit beside you at 256 MiB, 8 at 192 MiB") {
+		t.Fatalf("worker_create does not say smaller workers fit more: %q", create)
+	}
+}
+
 // A15WorkerMB is a worker size at which A15's 8 forks fit beside the
 // agent on the floor host: (3496 - 1552 - 192) rounds to 1536 = 8 x 192.
 const A15WorkerMB = 192

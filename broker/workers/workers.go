@@ -55,6 +55,7 @@ const (
 	MaxWorkers     = 16        // live workers per lineage; A15 needs 8
 	DefaultMemMB   = 256       // a worker's budget when none is asked; on the floor host 7 fit beside the agent, 8 at 192 MiB (K16)
 	MinMemMB       = 64        // below this a base image does not start
+	SmallMemMB     = 192       // the smaller size worker_fit offers when it fits more (K16)
 	MaxArgs        = 64        // arguments in one command
 	MaxArgBytes    = 16 << 10  // all arguments together
 	MaxStdin       = 512 << 10 // stdin or a written file; under the guest plane's 1 MiB body
@@ -161,7 +162,7 @@ var (
 // List is the worker tools' descriptions.
 func (t *Tools) List() []map[string]any {
 	return []map[string]any{
-		{"name": toolCreate, "description": "Start a worker machine: a sandboxed machine with no agent, no network and no broker tools, built from the base image, that you drive with the other worker_ tools. It runs on your admission class and the memory you ask for; the box refuses it when there is no room. It holds your data label: a worker made by a private machine is private.",
+		{"name": toolCreate, "description": "Start a worker machine: a sandboxed machine with no agent, no network and no broker tools, built from the base image, that you drive with the other worker_ tools. It runs on your admission class and the memory you ask for; the box refuses it when there is no room. It holds your data label: a worker made by a private machine is private. Smaller workers fit more: on the smallest box 7 fit beside you at 256 MiB, 8 at 192 MiB; worker_fit says how many fit now.",
 			"inputSchema": obj(map[string]any{"name": pName, "mem_mb": map[string]any{"type": "number", "description": fmt.Sprintf("Memory budget in MiB; default %d, at most %d.", DefaultMemMB, t.MaxMemMB)}}, "name")},
 		{"name": toolExec, "description": "Run a command in a worker, as root from /, and wait for it. Returns exit_code, stdout, stderr (each capped), truncated and timed_out. A non-zero exit is a result, not an error. " +
 			"To move a directory tree, send a tar archive as stdin_base64 to [\"tar\", \"-x\", \"-C\", \"/dir\"], or read one back with [\"tar\", \"-c\", \"-C\", \"/dir\", \".\"] and output_base64.",
@@ -885,6 +886,13 @@ func (t *Tools) fit(c caller, memMB int64) fitAnswer {
 		whys = append(whys, fmt.Sprintf("you hold %d workers, the most at once; destroy one first", MaxWorkers))
 	default:
 		whys = append(whys, fmt.Sprintf("not enough free memory for one %d MB worker now; work sequentially in one worker, ask for less memory, or destroy a worker", memMB))
+	}
+	// The same rounded room sizes the smaller count, so it says nothing
+	// finer about memory than fit does (potency on #158, security F1).
+	if room >= 0 && memMB > SmallMemMB {
+		if n := min(a.WorkersLeft, int(room/SmallMemMB)); n > a.Fit {
+			whys = append(whys, fmt.Sprintf("smaller workers fit more: %d at %d MB", n, SmallMemMB))
+		}
 	}
 	a.Why = strings.Join(whys, "; ")
 	return a
