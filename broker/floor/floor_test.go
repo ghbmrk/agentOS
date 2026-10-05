@@ -238,6 +238,7 @@ func TestFloorAdmissionAndPreemption(t *testing.T) {
 
 		// RES-1, experiment in the middle of a full checkpoint (seconds for
 		// a 1.4 GiB heap, S3).
+		before := len(r.m.Snapshots("e1"))
 		ck := make(chan error, 1)
 		go func() { _, err := r.m.Checkpoint(ctx, "e1"); ck <- err }()
 		time.Sleep(300 * time.Millisecond)
@@ -245,6 +246,16 @@ func TestFloorAdmissionAndPreemption(t *testing.T) {
 		underCkpt = append(underCkpt, r.pre.last())
 		ckErr := <-ck
 		t.Logf("rep %d: preempt experiment mid-checkpoint %v (create %v; checkpoint returned %v)", i, r.pre.last().Round(time.Millisecond), total.Round(time.Millisecond), ckErr)
+		// The foreground may have preempted e2 instead, or the checkpoint
+		// may have finished first, so success is allowed; what is not is a
+		// failed checkpoint leaving a snapshot behind, or a successful one
+		// leaving none (Security R2 on #124).
+		if published := len(r.m.Snapshots("e1")) - before; (ckErr == nil) != (published == 1) {
+			t.Fatalf("rep %d: checkpoint returned %v and published %d snapshots", i, ckErr, published)
+		}
+		if errors.Is(ckErr, vm.ErrPreempted) {
+			t.Logf("rep %d: the cut-short checkpoint was discarded", i)
+		}
 
 		for _, id := range r.m.Machines() {
 			must(t, r.m.Destroy(ctx, id))
