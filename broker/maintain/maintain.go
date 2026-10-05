@@ -168,6 +168,10 @@ type state struct {
 	// RootRotatedTo: a check accepted new signing keys; the digest says
 	// so once (security R3 on #46).
 	RootRotatedTo int64 `json:"root_rotated_to,omitempty"`
+	// TestedBy says whose report let the newest security fix stage on its
+	// own: testedProject (D6 interim, the project's own test box) or
+	// testedIndependent; empty when the owner approves it.
+	TestedBy string `json:"tested_by,omitempty"`
 }
 
 // Loop3 is the maintenance loop's scheduler source.
@@ -421,6 +425,7 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 			l.st.ProposedAt = map[int64]time.Time{}
 		}
 		l.st.ProposedAt[v] = now
+		l.st.TestedBy = o.tested
 	case o.wait == nil:
 		// Preempted before proposing: offered again.
 		l.st.Pending = &pending{Version: v, Security: security, Why: waitPreempted}
@@ -504,10 +509,17 @@ func imageKey(rel *update.Verified) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+// Whose report let a security fix stage on its own (State.TestedBy).
+const (
+	testedProject     = "project"
+	testedIndependent = "independent"
+)
+
 // outcome is what decide did with a release: proposed it (proposed is the
 // pipeline's state), is waiting (wait), or was preempted (neither).
 type outcome struct {
 	proposed change.State
+	tested   string
 	wait     *pending
 	value    float64
 	err      error
@@ -554,6 +566,12 @@ func (l *Loop3) decide(ctx context.Context, rel *update.Verified, m update.Manif
 		return outcome{wait: &pending{Version: m.Version, Security: security, Why: waitPropose}, err: err}
 	}
 	o := outcome{proposed: rep.State}
+	if security && rel.SecurityAutoStage(atts, l.cfg.OwnKey) == nil {
+		o.tested = testedIndependent
+		if rel.InterimAttestation() {
+			o.tested = testedProject
+		}
+	}
 	switch {
 	case rep.State == change.StateRejected:
 	case security:
@@ -648,7 +666,14 @@ func (l *Loop3) statusLocked(online bool, set loops.Settings, in update.Installe
 		case change.StateRejected:
 			return Status{Line: fmt.Sprintf("Update %d did worse on this box's tests and was not installed.", st.Newest)}
 		case change.StateAdopted:
-			return Status{Line: fmt.Sprintf("Update %d is ready and installs at the next quiet time.", st.Newest)}
+			ready := fmt.Sprintf("update %d is ready and installs at the next quiet time.", st.Newest)
+			switch {
+			case st.NewestSecurity && st.TestedBy == testedProject:
+				return Status{Line: "Security " + ready + " It was tested by the AgentOS project's own test box, not an independent tester."}
+			case st.NewestSecurity && st.TestedBy == testedIndependent:
+				return Status{Line: "Security " + ready + " An independent tester's report passed."}
+			}
+			return Status{Line: "U" + ready[1:]}
 		}
 		if at, ok := st.ProposedAt[st.Newest]; ok && st.NewestSecurity {
 			return Status{Line: fmt.Sprintf("Security update %d needs your approval: no trusted independent test report yet. Asked %s.", st.Newest, at.Format("Mon 2 Jan"))}

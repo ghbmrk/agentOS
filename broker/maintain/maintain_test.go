@@ -686,3 +686,32 @@ func TestSecurityFixBehindNewerReleaseNotSoaked(t *testing.T) {
 		t.Fatalf("status: %q", st.Line)
 	}
 }
+
+func TestDigestSaysWhoTestedAnAutoStagedSecurityFix(t *testing.T) {
+	// D6 interim (Mark, 2026-10-05): while the allow-list holds only the
+	// project's own test box, its report counts, and the digest says the
+	// fix was tested by the project, not an independent tester, for as
+	// long as it waits to install.
+	for name, c := range map[string]struct {
+		maintainer bool
+		want       string
+	}{
+		"interim":     {true, "Security update 2 is ready and installs at the next quiet time. It was tested by the AgentOS project's own test box, not an independent tester."},
+		"independent": {false, "Security update 2 is ready and installs at the next quiet time. An independent tester's report passed."},
+	} {
+		r := newRig(t)
+		r.p.state = change.StateAdopted
+		if c.maintainer {
+			r.must(r.repo.SetMaintainerAttestors([]ed25519.PublicKey{r.attestor.Public().(ed25519.PublicKey)}))
+		}
+		r.release(2, func(m *update.Manifest) { m.Security = true })
+		r.attest()
+		r.tick()
+		if got := r.p.proposed(); len(got) != 1 || !got[0].Security() {
+			t.Fatalf("%s: proposed %+v", name, got)
+		}
+		if d := r.digest(); !strings.Contains(d, c.want) {
+			t.Fatalf("%s: digest %q, want %q", name, d, c.want)
+		}
+	}
+}
