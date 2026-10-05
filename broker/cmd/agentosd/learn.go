@@ -76,8 +76,7 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	var target change.Target = heldRouting{}
 	var sync *syncedRouting
 	if p.Routing != "" {
-		sync = &syncedRouting{r: modelroute.NewRouting(p.Routing), restoring: true, logf: log.Printf,
-			told: change.FileStore{Path: filepath.Join(p.Dir, "routing-told.json")}}
+		sync = &syncedRouting{r: modelroute.NewRouting(p.Routing), restoring: true, logf: log.Printf}
 		target = sync
 	}
 	if l.pipe, err = change.New(change.Config{
@@ -92,6 +91,7 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		sync.doneRestoring()
 		pipe := l.pipe
 		sync.active = func() routerule.Rule { return routerOf{pipe: pipe}.active() }
+		sync.note = pipe.Notice
 		l.routing = sync
 		router = routerOf{sync, l.pipe}
 	}
@@ -188,15 +188,6 @@ func (l *learning) attach(ctx context.Context, d *daemon.Daemon) {
 	l.eng.Store(eng)
 	l.adm.Store(d.Admission())
 	if l.routing != nil {
-		l.routing.mu.Lock()
-		l.routing.inform = func(text string) error {
-			ch := d.Owner()
-			if ch == nil {
-				return errors.New("no owner channel")
-			}
-			return ch.Inform(text)
-		}
-		l.routing.mu.Unlock()
 		go l.routing.run(ctx, 30*time.Second)
 	}
 	go l.sched.Run(ctx)
@@ -397,7 +388,7 @@ type routingClient interface {
 // the vault process restarts or loses it (L3 S1 on #96). A rule the vault
 // process refuses there (the owner changed -rule) gives way to the owner's
 // rule and stands for it from then on, so a later revert to it is not
-// refused (security R1 on PW4); the owner is told once (W3-route).
+// refused (security R1 on PW4); the owner's digest says so once (W3-route).
 type syncedRouting struct {
 	r      routingClient
 	logf   func(string, ...any)
@@ -411,19 +402,18 @@ type syncedRouting struct {
 	refused   routerule.Rule  // a rule the vault process refused at restore or check
 	applied   int             // Applies so far, so a check never pushes a rule read before one
 
-	// inform texts the owner a fixed notice (owner.Channel.Inform); nil
-	// until the daemon runs. told is the file recording the refused rule
-	// the owner was last told of, so a restart does not repeat it; owe is
-	// a refused rule not yet told (W3-route).
-	inform func(string) error
-	told   change.Store
-	owe    routerule.Rule
+	// note queues a digest line once per key (change.Pipeline.Notice);
+	// nil until the pipeline exists. owe is a refused rule whose line is
+	// not queued yet (W3-route).
+	note func(key, line string) error
+	owe  routerule.Rule
 }
 
-// routingStandsInText tells the owner that their own model order is in use
-// in place of an order the box learned, because they changed their AI
-// settings since (W3-route, L3 S1 on #96). One GSM-7 segment.
-const routingStandsInText = "Your AI settings changed, so the order of AI models the box had learned no longer fits them. Your own order is in use now."
+// routingStandsInText is the digest line telling the owner that their own
+// model order is in use in place of an order the box learned, because
+// they changed their AI settings since (W3-route; UX-108-1 on #108). Not
+// urgent, so it waits for the digest (CH-15).
+const routingStandsInText = "Your AI model settings changed, so the box uses your order of models. It learns a new order over time while learning is on."
 
 func (s *syncedRouting) Current() (change.Tree, error) {
 	s.mu.Lock()
@@ -538,45 +528,31 @@ func (s *syncedRouting) push(ctx context.Context) bool {
 	return false
 }
 
-// check pushes as push does, then tells the owner of a refused rule.
+// check pushes as push does, then queues the owner's digest line for a
+// refused rule.
 func (s *syncedRouting) check(ctx context.Context) bool {
 	ok := s.push(ctx)
 	s.tell()
 	return ok
 }
 
-// tell texts the owner once per refused rule that their own rule stands in
-// for it. The text is sent outside mu; one that fails is tried again at
-// the next check.
+// tell queues the digest line once per refused rule, keyed by the rule, so
+// a restart that refuses it again adds nothing. It runs outside mu, since
+// the pipeline holds its own lock while it calls Apply; a line that could
+// not be queued is tried again at the next check.
 func (s *syncedRouting) tell() {
 	s.mu.Lock()
-	owe, inform, told := s.owe, s.inform, s.told
+	owe, note := s.owe, s.note
 	s.mu.Unlock()
-	if owe == nil || inform == nil {
+	if owe == nil || note == nil {
 		return
 	}
-	text := ruleText(owe)
-	if told != nil {
-		if b, err := told.Load(); err == nil && string(b) == text {
-			s.clearOwe(owe)
-			return
-		}
-	}
-	if err := inform(routingStandsInText); err != nil {
-		s.logf("routing: owner not told that their rule stands in: %v", err)
+	if err := note("routing-refused:"+ruleText(owe), routingStandsInText); err != nil {
+		s.logf("routing: the owner's digest line was not queued: %v", err)
 		return
 	}
-	if told != nil {
-		if err := told.Save([]byte(text)); err != nil {
-			s.logf("routing: could not record that the owner was told: %v", err)
-		}
-	}
-	s.clearOwe(owe)
-}
-
-func (s *syncedRouting) clearOwe(r routerule.Rule) {
 	s.mu.Lock()
-	if sameRule(s.owe, r) {
+	if sameRule(s.owe, owe) {
 		s.owe = nil
 	}
 	s.mu.Unlock()
