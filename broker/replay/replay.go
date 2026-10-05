@@ -76,6 +76,9 @@ type Machines interface {
 	CreateSeeded(ctx context.Context, id string, s vm.Spec, seed map[string][]byte) (vm.Machine, error)
 	Destroy(ctx context.Context, id string) error
 	Machines() []string
+	// Get reports a machine's state, so a run sees admission preempt its
+	// machine (PE3).
+	Get(id string) (vm.Machine, error)
 }
 
 // Recordings supplies the effects recorded for a probe: the journaled
@@ -112,6 +115,9 @@ type Config struct {
 	// Timeout bounds one run, from creating the machine to its reply.
 	// Default 10 minutes.
 	Timeout time.Duration
+	// PreemptPoll is how often a run checks whether admission preempted
+	// its machine. Default 500 ms.
+	PreemptPoll time.Duration
 	// Logf reports broker-side faults. Nil is silent.
 	Logf func(format string, args ...any)
 }
@@ -132,6 +138,12 @@ var (
 	// vault process refused its model calls (security C1 on #62). It wraps
 	// change.ErrNotEvaluated: never a pass or a fail.
 	ErrOverPriceCeiling = fmt.Errorf("replay: routes above the active price ceiling: %w", change.ErrNotEvaluated)
+	// ErrPreempted: admission refused the replay machine (memory pressure,
+	// no room, or admission withdrawn before it started) or preempted it
+	// mid-run for higher-class work (RES-1). It wraps
+	// change.ErrInterrupted, so the pipeline gives no verdict and keeps
+	// what finished (change C15, PE3); it is never a fail.
+	ErrPreempted = fmt.Errorf("replay: machine refused or preempted by admission: %w", change.ErrInterrupted)
 )
 
 // destroyTimeout bounds destroying a replay machine after its run.
@@ -155,6 +167,9 @@ func New(cfg Config) (*Evaluator, error) {
 	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 10 * time.Minute
+	}
+	if cfg.PreemptPoll <= 0 {
+		cfg.PreemptPoll = 500 * time.Millisecond
 	}
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
@@ -247,6 +262,9 @@ func (e *Evaluator) Run(ctx context.Context, t change.Tree, c change.Probe) ([]b
 	ctx, cancel := context.WithTimeout(ctx, e.cfg.Timeout)
 	defer cancel()
 	if _, err := e.cfg.Machines.CreateSeeded(ctx, r.id, e.cfg.Spec, seed(t)); err != nil {
+		if refused(err) {
+			return nil, fmt.Errorf("replay: start %s: %w: %v", c.ID, ErrPreempted, err)
+		}
 		return nil, fmt.Errorf("replay: start %s: %w", c.ID, err)
 	}
 	defer func() {
@@ -263,22 +281,37 @@ func (e *Evaluator) Run(ctx context.Context, t change.Tree, c change.Probe) ([]b
 	if err != nil {
 		return nil, fmt.Errorf("replay: deliver %s: %w", c.ID, err)
 	}
-	select {
-	case out := <-r.out:
-		// A failure recorded before the reply arrived wins: a run that
-		// asked for an unrecorded effect or a route over the price ceiling
-		// is never a pass because the guest replied anyway.
+	poll := time.NewTicker(e.cfg.PreemptPoll)
+	defer poll.Stop()
+	for {
 		select {
+		case <-poll.C:
+			if m, err := e.cfg.Machines.Get(r.id); err == nil && m.State == vm.Preempted {
+				return nil, fmt.Errorf("replay %s: %w", c.ID, ErrPreempted)
+			}
+			continue
+		case out := <-r.out:
+			// A failure recorded before the reply arrived wins: a run that
+			// asked for an unrecorded effect or a route over the price ceiling
+			// is never a pass because the guest replied anyway.
+			select {
+			case err := <-r.fail:
+				return nil, fmt.Errorf("replay %s: %w", c.ID, err)
+			default:
+			}
+			return out, nil
 		case err := <-r.fail:
 			return nil, fmt.Errorf("replay %s: %w", c.ID, err)
-		default:
+		case <-ctx.Done():
+			return nil, fmt.Errorf("replay %s: %w: %v", c.ID, ErrNoReply, ctx.Err())
 		}
-		return out, nil
-	case err := <-r.fail:
-		return nil, fmt.Errorf("replay %s: %w", c.ID, err)
-	case <-ctx.Done():
-		return nil, fmt.Errorf("replay %s: %w: %v", c.ID, ErrNoReply, ctx.Err())
 	}
+}
+
+// refused reports a start error that is admission's, not the machine's:
+// the box is busy now, which says nothing about the tree under test.
+func refused(err error) bool {
+	return errors.Is(err, admission.ErrPressure) || errors.Is(err, admission.ErrNoRoom) || errors.Is(err, vm.ErrRevoked)
 }
 
 func inNamespace(t change.Tree, ns string) change.Tree {

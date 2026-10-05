@@ -309,7 +309,7 @@ func (l *Learn) Next(ctx context.Context, modelOK bool) (Job, bool) {
 	if due {
 		return Job{Name: "recheck", UsesModel: evalModel, Evaluates: true, Run: func(ctx context.Context) Result {
 			reverted, err := l.cfg.Pipeline.Recheck(ctx)
-			if ctx.Err() == nil {
+			if ctx.Err() == nil && !errors.Is(err, change.ErrInterrupted) {
 				l.mu.Lock()
 				l.recheckedAt, l.lastRecheck = ev.HeldOut, l.cfg.Now()
 				l.mu.Unlock()
@@ -332,7 +332,7 @@ func (l *Learn) Next(ctx context.Context, modelOK bool) (Job, bool) {
 		if l.tried[key] < ev.HeldOut && l.mayAskLocked(key) {
 			return Job{Name: "routing", UsesModel: true, Evaluates: true, Run: func(ctx context.Context) Result {
 				rep, ok, err := l.cfg.Pipeline.ProposeRouting(ctx, l.cfg.Router)
-				l.done(ctx, key, ev.HeldOut)
+				l.done(ctx, err, key, ev.HeldOut)
 				l.asked(key, rep)
 				if !ok {
 					return Result{Err: err}
@@ -360,7 +360,7 @@ func (l *Learn) Next(ctx context.Context, modelOK bool) (Job, bool) {
 		h := h
 		return Job{Name: "candidate", UsesModel: true, Evaluates: true, Run: func(ctx context.Context) Result {
 			rep, err := l.propose(ctx, h, ev)
-			l.done(ctx, h.Key, len(h.Tasks))
+			l.done(ctx, err, h.Key, len(h.Tasks))
 			l.asked(h.Key, rep)
 			return Result{Value: value(rep), Err: err}
 		}}, true
@@ -386,10 +386,10 @@ func (l *Learn) asked(key string, rep change.Report) {
 	l.notBefore[key] = l.cfg.Now().Add(l.cfg.Backoff << (l.asks[key] - 1))
 }
 
-// done marks a key tried, unless the work was preempted: then it is
-// offered again.
-func (l *Learn) done(ctx context.Context, key string, n int) {
-	if ctx.Err() != nil {
+// done marks a key tried, unless the work was preempted (ctx ended, or
+// the evaluator was interrupted, PE3): then it is offered again.
+func (l *Learn) done(ctx context.Context, err error, key string, n int) {
+	if ctx.Err() != nil || errors.Is(err, change.ErrInterrupted) {
 		return
 	}
 	l.mu.Lock()

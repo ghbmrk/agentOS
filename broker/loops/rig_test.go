@@ -214,15 +214,23 @@ type evaluator struct {
 	ran int
 	// hook, if set, runs at the start of run number n (from 1).
 	hook func(ctx context.Context, n int)
+	// refuse, if set and returning an error for run n, fails the run with
+	// it (an evaluator interruption, say).
+	refuse func(n int) error
 }
 
 func (e *evaluator) Run(ctx context.Context, t change.Tree, pr change.Probe) ([]byte, error) {
 	e.mu.Lock()
 	e.ran++
-	n, hook := e.ran, e.hook
+	n, hook, refuse := e.ran, e.hook, e.refuse
 	e.mu.Unlock()
 	if hook != nil {
 		hook(ctx, n)
+	}
+	if refuse != nil {
+		if err := refuse(n); err != nil {
+			return nil, err
+		}
 	}
 	if string(pr.Input) == "probe:exfil" {
 		for p, b := range t {
