@@ -16,11 +16,20 @@ import (
 // that the response ended normally, OutputChars the content, argument,
 // and reasoning characters the provider produced. Provider names the
 // egress adapter, which sets the cache weights.
+//
+// NoResponse and Unanswered say the egress gave no response and the
+// handler wrote only its own error page, which is never charged as
+// output. NoResponse is for a call that never reached the egress (it
+// could not connect): no provider saw it, so it is charged its input
+// estimate. Unanswered is for one that reached it and got no answer: a
+// provider may have billed output the broker never saw, so it is charged
+// its full output reservation.
 type Usage struct {
 	Provider                             string
 	Input, Output, CacheRead, CacheWrite int64
 	Reported, Complete                   bool
 	OutputChars                          int64
+	NoResponse, Unanswered               bool
 }
 
 type reportKey struct{}
@@ -192,8 +201,16 @@ func (u *usageWriter) line(l []byte) {
 // in, the request estimate. A body that could not be read (too large, or
 // not the JSON it claimed to be) is charged by its size. A report from
 // the serving handler (rep) takes the place of what the broker read from
-// the response.
-func (u *usageWriter) used(in int64, rep *Usage) int64 {
+// the response. A call the egress gave no response is charged its input
+// estimate (rep.NoResponse) or that plus its output reservation, reserve
+// (rep.Unanswered); the broker's own error page is never model output.
+func (u *usageWriter) used(in, reserve int64, rep *Usage) int64 {
+	if rep != nil && rep.Unanswered {
+		return in + reserve
+	}
+	if rep != nil && rep.NoResponse {
+		return in
+	}
 	complete := false
 	switch u.mode {
 	case 1:
