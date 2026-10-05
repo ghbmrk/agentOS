@@ -217,7 +217,15 @@ func (b *Builder) Run(ctx context.Context) error {
 		jobs, err := b.queued()
 		b.qmu.Unlock()
 		if err != nil {
-			return err
+			// Keep running: a queue that cannot be read now may be
+			// readable later, and nothing else builds hints.
+			b.cfg.Logf("cleanroom: reading the queue: %v", err)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(b.cfg.Retry):
+			}
+			continue
 		}
 		if len(jobs) == 0 {
 			select {
@@ -384,19 +392,22 @@ func (b *Builder) parkDir() string { return filepath.Join(b.cfg.Dir, "parked") }
 // park logs a job that needs public material as failed and keeps it aside
 // for Requeue (potency PR2).
 func (b *Builder) park(j *job, kind, reason string) error {
-	if err := b.logOutcome(Outcome{Job: j.ID, Day: j.Day, Kind: kind, Result: "parked", Reason: reason}); err != nil {
-		return err
-	}
+	// Move first, then log: the log never says parked for a job still
+	// queued, and a crash between the two cannot log it twice.
 	b.qmu.Lock()
-	defer b.qmu.Unlock()
-	if err := os.MkdirAll(b.parkDir(), 0o700); err != nil {
+	err := os.MkdirAll(b.parkDir(), 0o700)
+	if err == nil {
+		err = os.Rename(j.path, filepath.Join(b.parkDir(), filepath.Base(j.path)))
+	}
+	if err == nil {
+		syncDir(filepath.Dir(j.path))
+		err = syncDir(b.parkDir())
+	}
+	b.qmu.Unlock()
+	if err != nil {
 		return err
 	}
-	if err := os.Rename(j.path, filepath.Join(b.parkDir(), filepath.Base(j.path))); err != nil {
-		return err
-	}
-	syncDir(filepath.Dir(j.path))
-	return syncDir(b.parkDir())
+	return b.logOutcome(Outcome{Job: j.ID, Day: j.Day, Kind: kind, Result: "parked", Reason: reason})
 }
 
 // parked lists parked jobs.
@@ -425,16 +436,16 @@ func (b *Builder) Requeue() (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	have := map[string]string{}
+	have := map[string]into{}
 	for _, j := range jobs {
-		have[j.Hint] = "job " + j.ID
+		have[j.Hint] = into{desc: "job " + j.ID}
 	}
 	built, err := b.store.list(func(Manifest) bool { return true })
 	if err != nil {
 		return 0, err
 	}
 	for _, a := range built {
-		have[string(a.m.Hint)] = a.m.ID
+		have[string(a.m.Hint)] = into{desc: a.m.ID, artifact: a.m.ID}
 	}
 	dir := filepath.Join(b.queueDir(), "requeue-"+newID())
 	n := 0
@@ -443,18 +454,17 @@ func (b *Builder) Requeue() (int, error) {
 		if err != nil || embargo {
 			continue
 		}
-		if into, ok := have[j.Hint]; ok {
-			o := Outcome{Job: j.ID, Day: j.Day, Kind: h.Kind, Result: "coalesced", Reason: "same hint as " + into}
-			if !strings.HasPrefix(into, "job ") {
-				o.Artifact = into
-			}
+		if in, ok := have[j.Hint]; ok {
+			o := Outcome{Job: j.ID, Day: j.Day, Kind: h.Kind, Result: "coalesced", Reason: "same hint as " + in.desc, Artifact: in.artifact}
 			if err := b.logOutcome(o); err != nil {
 				return n, err
 			}
-			os.Remove(j.path)
+			if err := os.Remove(j.path); err != nil {
+				b.cfg.Logf("cleanroom: removing coalesced parked job %s: %v", j.ID, err)
+			}
 			continue
 		}
-		have[j.Hint] = "job " + j.ID
+		have[j.Hint] = into{desc: "job " + j.ID}
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return n, err
 		}

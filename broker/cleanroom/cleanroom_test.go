@@ -413,14 +413,14 @@ func TestSendTakesOnlyCanonicalHints(t *testing.T) {
 			t.Errorf("%s: %v, want ErrHint", name, err)
 		}
 	}
-	jobs, _ := r.b.queued()
+	jobs, _ := r.queued()
 	if len(jobs) != 0 {
 		t.Fatalf("%d jobs queued from refused batches", len(jobs))
 	}
 	if err := r.b.Send(nextDay(), [][]byte{good, vulnHint(t)}); err != nil {
 		t.Fatal(err)
 	}
-	jobs, _ = r.b.queued()
+	jobs, _ = r.queued()
 	if len(jobs) != 2 || jobs[0].Hint != string(good) {
 		t.Fatalf("queued %+v", jobs)
 	}
@@ -481,7 +481,8 @@ func TestCleanRoomWithPrivateLabelPublishesNothing(t *testing.T) {
 	r.run()
 	waitFor(t, "outcome", func() bool { return len(r.outcomes()) == 1 })
 	r.f.wg.Wait()
-	if code != http.StatusForbidden {
+	// 403, or 409 when the poll saw the label first: refused either way.
+	if code != http.StatusForbidden && code != http.StatusConflict {
 		t.Fatalf("result from a private machine: %d", code)
 	}
 	if o := r.outcomes()[0]; o.Result != "failed" {
@@ -614,7 +615,7 @@ func TestNoCapacityKeepsJobQueued(t *testing.T) {
 	r.b.Send(nextDay(), [][]byte{skillHint(t)})
 	r.run()
 	time.Sleep(100 * time.Millisecond)
-	jobs, _ := r.b.queued()
+	jobs, _ := r.queued()
 	if len(jobs) != 1 || jobs[0].Attempts != 0 || len(r.outcomes()) != 0 {
 		t.Fatalf("jobs %+v outcomes %v", jobs, r.outcomes())
 	}
@@ -710,7 +711,7 @@ func TestStateIsBrokerOnly(t *testing.T) {
 			t.Fatalf("%s: %v %v", d, fi.Mode(), err)
 		}
 	}
-	jobs, _ := r.b.queued()
+	jobs, _ := r.queued()
 	fi, _ := os.Stat(jobs[0].path)
 	if fi.Mode().Perm() != 0o600 {
 		t.Fatal(fmt.Sprint("job file mode ", fi.Mode()))
@@ -741,7 +742,7 @@ func TestSendIsIdempotentByDay(t *testing.T) {
 	if err := r.b.Send("2026-10-04", batch); err != nil {
 		t.Fatal(err)
 	}
-	jobs, _ := r.b.queued()
+	jobs, _ := r.queued()
 	if len(jobs) != 2 || jobs[0].Day != "2026-10-04" {
 		t.Fatalf("queued %+v", jobs)
 	}
@@ -759,7 +760,7 @@ func TestSendIsIdempotentByDay(t *testing.T) {
 	if err := b2.Send("2026-10-04", batch); err != nil {
 		t.Fatal(err)
 	}
-	if jobs, _ := b2.queued(); len(jobs) != 0 {
+	if jobs, _ := queuedOf(b2); len(jobs) != 0 {
 		t.Fatalf("resent day queued again: %d jobs", len(jobs))
 	}
 	for _, d := range []string{"", "2026-1-4", "2026-13-01", "../x", "2026-10-04T00:00"} {
@@ -775,7 +776,7 @@ func TestIdenticalHintsCoalesce(t *testing.T) {
 	r := newRig(t, nil)
 	r.b.Send(nextDay(), [][]byte{skillHint(t)})
 	r.b.Send(nextDay(), [][]byte{skillHint(t), vulnHint(t)})
-	jobs, _ := r.b.queued()
+	jobs, _ := r.queued()
 	if len(jobs) != 2 {
 		t.Fatalf("%d jobs, want the repeat coalesced", len(jobs))
 	}
@@ -830,7 +831,7 @@ func TestNeedsPublicMaterialParksAndRequeues(t *testing.T) {
 	if o := r.outcomes()[0]; o.Result != "parked" || len(codes) != 2 || codes[0] != 400 || codes[1] != 200 {
 		t.Fatalf("outcome %+v codes %v", o, codes)
 	}
-	if jobs, _ := r.b.queued(); len(jobs) != 0 {
+	if jobs, _ := r.queued(); len(jobs) != 0 {
 		t.Fatal("parked job still queued")
 	}
 	if n, err := r.b.Requeue(); n != 1 || err != nil {
@@ -928,5 +929,49 @@ func TestRequeueHoldsVulnJobs(t *testing.T) {
 	}
 	if len(r.b.parked()) != 1 {
 		t.Fatal("vuln job left the parked set")
+	}
+}
+
+// queued reads the queue as the builder does, under its lock.
+func (r *rig) queued() ([]*job, error) { return queuedOf(r.b) }
+
+func queuedOf(b *Builder) ([]*job, error) {
+	b.qmu.Lock()
+	defer b.qmu.Unlock()
+	return b.queued()
+}
+
+// A day marker written before batch hashes acknowledges a resend and
+// takes its hash.
+func TestLegacyEmptyDayMarker(t *testing.T) {
+	r := newRig(t, nil)
+	if err := os.WriteFile(filepath.Join(r.cfg.Dir, "days", "2026-10-04"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.b.Send("2026-10-04", [][]byte{skillHint(t)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.b.Send("2026-10-04", [][]byte{vulnHint(t)}); !errors.Is(err, ErrDayTaken) {
+		t.Fatalf("after the hash was recorded: %v", err)
+	}
+	if jobs, _ := r.queued(); len(jobs) != 0 {
+		t.Fatal("legacy-acknowledged day queued jobs")
+	}
+}
+
+// A hint coalesced into a parked job names no artifact.
+func TestCoalescedIntoParkedJobHasNoArtifact(t *testing.T) {
+	r := newRig(t, nil)
+	r.f.guest = func(id, dir string) {
+		call(client(dir), "POST", "/cleanroom/unable", []byte(`{"reason":"needs_public_material"}`))
+	}
+	r.b.Send(nextDay(), [][]byte{skillHint(t)})
+	r.run()
+	waitFor(t, "parked", func() bool { return len(r.outcomes()) == 1 })
+	r.f.wg.Wait()
+	r.b.Send(nextDay(), [][]byte{skillHint(t)})
+	waitFor(t, "coalesced", func() bool { return len(r.outcomes()) == 2 })
+	if o := r.outcomes()[1]; o.Result != "coalesced" || o.Artifact != "" {
+		t.Fatalf("outcome %+v", o)
 	}
 }

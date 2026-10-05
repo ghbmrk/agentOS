@@ -82,6 +82,10 @@ func (b *Builder) Send(day string, batch [][]byte) error {
 	marker := filepath.Join(b.cfg.Dir, "days", day)
 	sum := batchSum(batch)
 	if got, err := os.ReadFile(marker); err == nil {
+		if len(got) == 0 {
+			// A marker from before batch hashes: acknowledge, record the hash.
+			return writeFile(marker, []byte(sum))
+		}
 		if string(got) != sum {
 			// The emitter resends a day's recorded bytes; anything else
 			// for a day already taken is refused, never dropped silently.
@@ -98,33 +102,29 @@ func (b *Builder) Send(day string, batch [][]byte) error {
 	if err != nil {
 		return err
 	}
-	have := map[string]string{} // canonical hint -> what it coalesces into
+	have := map[string]into{} // canonical hint -> what it coalesces into
 	for _, j := range jobs {
-		have[j.Hint] = "job " + j.ID
+		have[j.Hint] = into{desc: "job " + j.ID}
 	}
 	built, err := b.store.list(func(Manifest) bool { return true })
 	if err != nil {
 		return err
 	}
 	for _, a := range built {
-		have[string(a.m.Hint)] = a.m.ID
+		have[string(a.m.Hint)] = into{desc: a.m.ID, artifact: a.m.ID}
 	}
 	for _, j := range b.parked() {
-		have[j.Hint] = "parked job " + j.ID
+		have[j.Hint] = into{desc: "parked job " + j.ID}
 	}
 	var fresh [][]byte
 	var merged []Outcome
 	for _, c := range batch {
-		if into, ok := have[string(c)]; ok {
+		if in, ok := have[string(c)]; ok {
 			h, _, _ := parseCanonical(b.cfg.Schema, c)
-			o := Outcome{Day: day, Kind: h.Kind, Result: "coalesced", Reason: "same hint as " + into}
-			if !strings.HasPrefix(into, "job ") {
-				o.Artifact = into
-			}
-			merged = append(merged, o)
+			merged = append(merged, Outcome{Day: day, Kind: h.Kind, Result: "coalesced", Reason: "same hint as " + in.desc, Artifact: in.artifact})
 			continue
 		}
-		have[string(c)] = "this batch"
+		have[string(c)] = into{desc: "this batch"}
 		fresh = append(fresh, c)
 	}
 	if len(jobs)+len(fresh) > b.cfg.MaxQueue {
@@ -184,7 +184,12 @@ func batchSum(batch [][]byte) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// into is what a repeated hint coalesces into: a description for the log,
+// and the artifact when it is one.
+type into struct{ desc, artifact string }
+
 // pruneDays drops day records more than daysKept days before day.
+// Age is measured from the incoming day, not the clock.
 func (b *Builder) pruneDays(day string) {
 	t, _ := time.Parse("2006-01-02", day)
 	cut := t.AddDate(0, 0, -daysKept).Format("2006-01-02")
@@ -211,6 +216,9 @@ func (b *Builder) queued() ([]*job, error) {
 		}
 		dir := filepath.Join(b.queueDir(), d.Name())
 		ents, err := os.ReadDir(dir)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -225,7 +233,9 @@ func (b *Builder) queued() ([]*job, error) {
 			}
 			j := &job{}
 			p := filepath.Join(dir, e.Name())
-			if err := readJSON(p, j); err != nil {
+			if err := readJSON(p, j); errors.Is(err, os.ErrNotExist) {
+				continue
+			} else if err != nil {
 				return nil, err
 			}
 			j.path = p

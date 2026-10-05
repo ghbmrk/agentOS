@@ -3,6 +3,7 @@ package cleanroom
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -255,7 +256,11 @@ func (s *session) result(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		if s.finished {
 			late = true
-		} else if a, err = s.b.store.commit(staged, man); err == nil {
+		} else if a, err = s.b.store.commit(staged, man); err == nil || errors.Is(err, errCommittedUnsynced) {
+			if err != nil {
+				s.b.cfg.Logf("cleanroom: %s: %v", s.id, err)
+				err = nil
+			}
 			stored = true
 			s.finished, s.artifact = true, a.m.ID
 		}

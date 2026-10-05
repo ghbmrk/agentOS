@@ -26,6 +26,9 @@ const (
 // ErrResult marks a result the clean room refuses.
 var ErrResult = errors.New("cleanroom: result refused")
 
+// errCommittedUnsynced: the artifact is committed, its directory sync failed.
+var errCommittedUnsynced = errors.New("cleanroom: committed; directory sync failed")
+
 // ErrNoArtifact is returned when an ID names no stored artifact.
 var ErrNoArtifact = errors.New("cleanroom: no such artifact")
 
@@ -210,10 +213,14 @@ func (s *Store) commit(staged string, m Manifest) (Artifact, error) {
 	if err := os.Rename(staged, dir); err != nil {
 		return Artifact{}, err
 	}
+	// Once renamed the artifact is in place: a failed directory sync is
+	// not a failed commit, or a stored artifact would outlive a job logged
+	// as failed. It is reported for the log.
+	a := Artifact{m: m, dir: dir}
 	if err := syncDir(s.dir); err != nil {
-		return Artifact{}, err
+		return a, fmt.Errorf("%w: %v", errCommittedUnsynced, err)
 	}
-	return Artifact{m: m, dir: dir}, nil
+	return a, nil
 }
 
 // put stages and commits at once.
