@@ -37,9 +37,9 @@ func TestPE7ResumeFromCheckpointRestoresOnce(t *testing.T) {
 	if cp.Tier != Full || cp.Hash == "" {
 		t.Fatalf("checkpoint %+v: want full, hashed", cp)
 	}
-	restored, err := e.m.ResumeFromCheckpoint(bg, "agent", cp.ID)
-	if err != nil || !restored {
-		t.Fatalf("restore: %v %v", restored, err)
+	w, err := e.m.ResumeFromCheckpoint(bg, "agent", cp.ID)
+	if err != nil || !w.Restored || w.Cold != "" {
+		t.Fatalf("restore: %+v %v", w, err)
 	}
 	if mem, ok := e.rt.memOf("agent"); !ok || mem != 7 {
 		t.Fatalf("memory %d running %v, want 7", mem, ok)
@@ -67,32 +67,41 @@ func TestPE7ResumeFromCheckpointRefuses(t *testing.T) {
 		name  string
 		after func(e *env, cp Snapshot) string // returns the snapshot ID to restore
 		kept  bool                             // the snapshot is another machine's: not deleted
+		cold  string                           // the cold wake's reason
 	}{
 		{name: "started since", after: func(e *env, cp Snapshot) string {
 			must(e.t, e.m.Resume(bg, "agent"))
 			must(e.t, e.m.Preempt("agent"))
 			e.adm.Release("agent")
 			return cp.ID
-		}},
+		}, cold: ColdStarted},
+		{name: "newer snapshot", after: func(e *env, cp Snapshot) string {
+			must(e.t, e.m.Resume(bg, "agent"))
+			_, err := e.m.Checkpoint(bg, "agent")
+			must(e.t, err)
+			must(e.t, e.m.Preempt("agent"))
+			e.adm.Release("agent")
+			return cp.ID
+		}, cold: ColdNewer},
 		{name: "files tampered", after: func(e *env, cp Snapshot) string {
 			write(e.t, filepath.Join(e.m.snapDir(cp.ID), "fs"), "notes", "evil")
 			return cp.ID
-		}},
+		}, cold: ColdChanged},
 		{name: "memory tampered", after: func(e *env, cp Snapshot) string {
 			must(e.t, os.WriteFile(filepath.Join(e.m.snapDir(cp.ID), "mem", "mem"), []byte("666"), 0o600))
 			return cp.ID
-		}},
+		}, cold: ColdChanged},
 		{name: "file added", after: func(e *env, cp Snapshot) string {
 			write(e.t, filepath.Join(e.m.snapDir(cp.ID), "fs"), "extra", "x")
 			return cp.ID
-		}},
+		}, cold: ColdChanged},
 		{name: "another machine's checkpoint", kept: true, after: func(e *env, cp Snapshot) string {
 			e.create("other", admission.Accepted, 500)
 			o, err := e.m.Checkpoint(bg, "other")
 			must(e.t, err)
 			return o.ID
-		}},
-		{name: "unknown snapshot", after: func(e *env, cp Snapshot) string { return "s9999999999" }},
+		}, cold: ColdNotSleep},
+		{name: "unknown snapshot", after: func(e *env, cp Snapshot) string { return "s9999999999" }, cold: ColdNotSleep},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newEnv(t, 4096)
@@ -102,9 +111,9 @@ func TestPE7ResumeFromCheckpointRefuses(t *testing.T) {
 			cp := sleep(t, e, "agent")
 			id := tc.after(e, cp)
 			must(t, e.m.RaiseLabel("agent", Private))
-			restored, err := e.m.ResumeFromCheckpoint(bg, "agent", id)
-			if err != nil || restored {
-				t.Fatalf("restored %v, %v: want a cold resume", restored, err)
+			w, err := e.m.ResumeFromCheckpoint(bg, "agent", id)
+			if err != nil || w.Restored || w.Cold != tc.cold {
+				t.Fatalf("woke %+v, %v: want a cold resume (%s)", w, err, tc.cold)
 			}
 			if mem, ok := e.rt.memOf("agent"); !ok || mem != 0 {
 				t.Fatalf("memory %d running %v: want a cold start", mem, ok)
@@ -140,9 +149,9 @@ func TestPE7ResumeFromCheckpointOnlyItsOwn(t *testing.T) {
 	must(t, e.m.Preempt("agent"))
 	e.adm.Release("agent")
 	for _, id := range []string{old.ID, step.ID} {
-		restored, err := e.m.ResumeFromCheckpoint(bg, "agent", id)
-		if err != nil || restored {
-			t.Fatalf("%s: restored %v, %v", id, restored, err)
+		w, err := e.m.ResumeFromCheckpoint(bg, "agent", id)
+		if err != nil || w.Restored || w.Cold != ColdNotSleep {
+			t.Fatalf("%s: woke %+v, %v", id, w, err)
 		}
 		if _, err := e.m.Snapshot(id); err != nil {
 			t.Fatalf("the owner's snapshot %s was deleted", id)
@@ -174,9 +183,9 @@ func TestPE7SleepCheckpointSurvivesARestart(t *testing.T) {
 	e.rt.work("agent", 7)
 	cp := sleep(t, e, "agent")
 	e.open()
-	restored, err := e.m.ResumeFromCheckpoint(bg, "agent", cp.ID)
-	if err != nil || !restored {
-		t.Fatalf("after a restart: %v %v", restored, err)
+	w, err := e.m.ResumeFromCheckpoint(bg, "agent", cp.ID)
+	if err != nil || !w.Restored {
+		t.Fatalf("after a restart: %+v %v", w, err)
 	}
 	if mem, _ := e.rt.memOf("agent"); mem != 7 {
 		t.Fatalf("memory %d, want 7", mem)
