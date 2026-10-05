@@ -184,7 +184,7 @@ func (t *Tools) List() []map[string]any {
 				"content_base64": map[string]any{"type": "string", "description": "Binary content, base64; instead of content."}}, "name", "path")},
 		{"name": toolCkpt, "description": "Checkpoint a worker, memory included; returns the snapshot id to roll back to or diff.",
 			"inputSchema": obj(map[string]any{"name": pName}, "name")},
-		{"name": toolDelete, "description": fmt.Sprintf("Delete files from a worker without running anything in it: the way to shrink a worker over its file cap. The broker stops the worker, removes the paths from what it wrote (a symlink is removed itself, never followed), and starts it again once it is under its cap; files that came with the base image cannot be deleted and free nothing. Up to %d absolute paths; a directory needs recursive.", vm.MaxDeletePaths),
+		{"name": toolDelete, "description": fmt.Sprintf("Delete files from a worker without running anything in it: the way to shrink a worker over its file cap. The broker stops the worker (ending anything running in it, background processes included), removes the paths from what it wrote (a symlink is removed itself, never followed), and starts it again once it is under its cap; files that came with the base image cannot be deleted and free nothing. Up to %d absolute paths; a directory needs recursive.", vm.MaxDeletePaths),
 			"inputSchema": obj(map[string]any{"name": pName,
 				"paths":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": vm.MaxDeletePaths, "description": "Absolute paths inside the worker."},
 				"recursive": map[string]any{"type": "boolean", "description": "Also delete directories and everything in them."}}, "name", "paths")},

@@ -616,3 +616,48 @@ func TestCAP8cDeleteFilesGuards(t *testing.T) {
 		t.Fatalf("over the entry budget = %+v", rep)
 	}
 }
+
+// STOP arriving during a deletion holds the restart: the files are gone
+// and the worker stays stopped (security F1 on #166). A preempted worker
+// is not resumed by a deletion (security R2).
+func TestCAP8cDeleteDuringSTOPLeavesTheWorkerStopped(t *testing.T) {
+	e := newEnv(t, 4096)
+	agent := e.create("agent", admission.Experiment, 500)
+	_, err := e.m.CreateWorker(bg, "wk-a", agent.Lineage, workerSpec(Public))
+	must(t, err)
+	_, err = e.m.Exec(bg, "wk-a", Command{Argv: []string{"write", "f"}}, time.Second)
+	must(t, err)
+	calls := 0
+	hold := func() bool { calls++; return calls > 1 } // free at the start, STOP after
+	rep, err := e.m.DeleteFiles(bg, "wk-a", Deletion{Paths: []string{"/f"}, Hold: hold})
+	must(t, err)
+	if rep.Restarted || rep.Codes[0] != "removed" {
+		t.Fatalf("delete with STOP arriving = %+v", rep)
+	}
+	if w, _ := e.m.Get("wk-a"); w.State != Stopped {
+		t.Fatalf("worker is %s, want stopped", w.State)
+	}
+	// Stopped already, STOP arriving: still no restart.
+	_, err = e.m.Exec(bg, "wk-a", Command{Argv: []string{"echo"}}, time.Second)
+	if err == nil {
+		t.Fatal("a stopped worker ran a command")
+	}
+	calls = 0
+	rep, err = e.m.DeleteFiles(bg, "wk-a", Deletion{Paths: []string{"/g"}, Hold: hold})
+	must(t, err)
+	if rep.Restarted {
+		t.Fatal("a stopped worker restarted under STOP")
+	}
+	// Without STOP it starts again.
+	rep, err = e.m.DeleteFiles(bg, "wk-a", Deletion{Paths: []string{"/g"}})
+	must(t, err)
+	if !rep.Restarted {
+		t.Fatalf("restart without STOP = %+v", rep)
+	}
+	must(t, e.m.Preempt("wk-a"))
+	rep, err = e.m.DeleteFiles(bg, "wk-a", Deletion{Paths: []string{"/g"}})
+	must(t, err)
+	if w, _ := e.m.Get("wk-a"); rep.Restarted || w.State != Preempted {
+		t.Fatalf("a deletion resumed a preempted worker: %+v, %s", rep, w.State)
+	}
+}

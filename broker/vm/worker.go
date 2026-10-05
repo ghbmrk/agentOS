@@ -374,9 +374,11 @@ func (m *Manager) DeleteFiles(ctx context.Context, id string, d Deletion) (Delet
 	if stopped {
 		m.cfg.Admit.Release(id)
 	}
-	if err == nil && !rep.Over && was != Running {
-		// Admission may have no room now; the worker then stays stopped
-		// and the deletion still stands.
+	// A preempted worker waits for its own resume, not a deletion's
+	// (security R2 on #166). Admission may have no room now, or STOP may
+	// have come meanwhile; the worker then stays stopped and the deletion
+	// still stands (security F1 on #166).
+	if err == nil && !rep.Over && was == Stopped && !held(d) {
 		rep.Restarted = m.Resume(ctx, id) == nil
 	}
 	return rep, err
@@ -418,7 +420,7 @@ func (m *Manager) deleteLocked(ctx context.Context, mc *machine, d Deletion) (De
 	} else if cerr != nil {
 		return rep, running, cerr
 	}
-	if !running || rep.Over {
+	if !running || rep.Over || held(d) {
 		return rep, running, nil
 	}
 	if err := m.restartLocked(ctx, mc, keepLayer); err != nil {
@@ -427,3 +429,5 @@ func (m *Manager) deleteLocked(ctx context.Context, mc *machine, d Deletion) (De
 	rep.Restarted = true
 	return rep, false, nil
 }
+
+func held(d Deletion) bool { return d.Hold != nil && d.Hold() }
