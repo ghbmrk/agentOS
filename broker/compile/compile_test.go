@@ -466,3 +466,73 @@ func TestMeasureSpeedup(t *testing.T) {
 		t.Fatalf("speedup %+v", m)
 	}
 }
+
+// CAP-5 (security review B1): a key that is data (an address used as a map
+// key) never becomes structure, a slot name, or part of the tool schema.
+// A nested object keyed by data is one input; params keyed by data are
+// never compiled.
+func TestDataKeysAreNotStructure(t *testing.T) {
+	r := newRig(t)
+	for i, who := range []string{"alice@example.test", "bob@example.test", "cy@example.test"} {
+		id := r.task(fmt.Sprintf("g%d", i), "private", time.Second,
+			step{"mail", "label.set", map[string]any{"labels": map[string]any{who: true}}, nil},
+			step{"mail", "message.send", nil, []string{"team@example.test"}})
+		r.judge(id, journal.VerdictGood, "owner")
+		r.dev[id] = true
+	}
+	_, sk, cand := only(t, r.compiler().Candidates(change.Tree{}))
+	for _, b := range cand.Files {
+		if bytes.Contains(b, []byte("alice")) || bytes.Contains(b, []byte("bob@")) {
+			t.Fatalf("a data key reached the skill: %s", b)
+		}
+	}
+	if n := sk.Steps[0].Params["labels"]; n.Slot != "labels" || n.Obj != nil {
+		t.Fatalf("labels must be one input: %+v", n)
+	}
+
+	r = newRig(t)
+	for i, who := range []string{"alice@example.test", "bob@example.test", "cy@example.test"} {
+		id := r.task(fmt.Sprintf("h%d", i), "private", time.Second,
+			step{"mail", "label.set", map[string]any{who: true}, nil},
+			step{"mail", "message.send", nil, []string{"team@example.test"}})
+		r.judge(id, journal.VerdictGood, "owner")
+		r.dev[id] = true
+	}
+	if cs := r.compiler().Candidates(change.Tree{}); len(cs) != 0 {
+		t.Fatalf("params keyed by data compiled: %+v", cs)
+	}
+}
+
+// CAP-5, CHG-1: Loop 1's repeat hypothesis hands the compiler only its
+// brief's evidence (never a held-out task); BuildSkill compiles the
+// largest repeated shape from it and writes only under skills/.
+func TestBuildSkillFromEvidence(t *testing.T) {
+	r := newRig(t)
+	r.accepted("g1", "ann@example.test", 40)
+	r.accepted("g2", "bo@example.test", 41)
+	c := r.compiler()
+	if _, err := c.BuildSkill(r.eng.List()); !errors.Is(err, ErrNoSkill) {
+		t.Fatalf("two runs: %v", err)
+	}
+	r.accepted("g3", "cy@example.test", 42)
+	cand, err := c.BuildSkill(r.eng.List())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for p := range cand.Files {
+		if !strings.HasPrefix(p, "skills/k") {
+			t.Fatalf("wrote %s", p)
+		}
+	}
+	// The same evidence without g3's statuses has too few runs: nothing
+	// outside the evidence is read.
+	var ev []journal.Status
+	for _, s := range r.eng.List() {
+		if s.Intent.GoalID != "g3" {
+			ev = append(ev, s)
+		}
+	}
+	if _, err := c.BuildSkill(ev); !errors.Is(err, ErrNoSkill) {
+		t.Fatalf("read beyond the evidence: %v", err)
+	}
+}

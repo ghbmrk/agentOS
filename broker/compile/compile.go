@@ -3,6 +3,7 @@ package compile
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -105,7 +106,7 @@ func (c *Compiler) usable() map[string][]*Trajectory {
 	}
 	out := map[string][]*Trajectory{}
 	for g, t := range all {
-		if !dev[g] || !t.Succeeded || !t.Good || t.Redacted || len(t.Steps) < c.cfg.MinSteps || len(t.Steps) > skill.MaxSteps {
+		if !dev[g] || !t.Succeeded || !t.Good || t.Redacted || !structured(t) || len(t.Steps) < c.cfg.MinSteps || len(t.Steps) > skill.MaxSteps {
 			continue
 		}
 		sh := Shape(t)
@@ -271,6 +272,9 @@ func slotFor(l0 leaf, per [][]leaf, li int, taken map[string]bool) *skill.Slot {
 		}
 	}
 	bound := min(skill.MaxValue, max(64, 2*longest))
+	if l0.path == nil {
+		bound = min(bound, 320) // a recipient: the guest plane's own bound
+	}
 	switch l0.kind {
 	case 's':
 		sl.Type, sl.Max = skill.Text, bound
@@ -313,4 +317,55 @@ func place(st *skill.Step, l leaf, node skill.Node) {
 		m = n.Obj
 	}
 	m[l.path[len(l.path)-1]] = node
+}
+
+// ErrNoSkill: the evidence holds no shape with MinRuns successful,
+// owner-accepted trajectories.
+var ErrNoSkill = errors.New("compile: no repeated trajectory to compile")
+
+// BuildSkill compiles a skill from the journal statuses Loop 1 hands over
+// with a repeat hypothesis (its brief's evidence, which never holds a
+// held-out task, CHG-1). It reads nothing else. The candidate writes only
+// under skills/; Loop 1 sets its source, origin, and public mark.
+func (c *Compiler) BuildSkill(evidence []journal.Status) (change.Candidate, error) {
+	all := trajectories(evidenceJournal(evidence), c.cfg.Group, c.cfg.OwnerSource, c.cfg.Redacted)
+	groups := map[string][]*Trajectory{}
+	for _, t := range all {
+		if !t.Succeeded || !t.Good || t.Redacted || !structured(t) || len(t.Steps) < c.cfg.MinSteps || len(t.Steps) > skill.MaxSteps {
+			continue
+		}
+		sh := Shape(t)
+		groups[sh] = append(groups[sh], t)
+	}
+	best := ""
+	for sh, ts := range groups {
+		if len(ts) >= c.cfg.MinRuns && (best == "" || len(ts) > len(groups[best]) || (len(ts) == len(groups[best]) && sh < best)) {
+			best = sh
+		}
+	}
+	if best == "" {
+		return change.Candidate{}, ErrNoSkill
+	}
+	ts := groups[best]
+	sort.Slice(ts, func(i, j int) bool { return ts[i].Goal < ts[j].Goal })
+	sk := Compile(best, ts)
+	if sk == nil || sk.Validate() != nil {
+		return change.Candidate{}, ErrNoSkill
+	}
+	return change.Candidate{Source: change.Local, Origin: Origin, Files: map[string][]byte{sk.Path(): sk.Encode()}}, nil
+}
+
+// evidenceJournal presents statuses, in the order given, as a journal with
+// no timestamps.
+type evidenceJournal []journal.Status
+
+func (e evidenceJournal) List() []journal.Status { return e }
+
+func (e evidenceJournal) Trail() []journal.Record {
+	out := make([]journal.Record, 0, len(e))
+	for i := range e {
+		in := e[i].Intent
+		out = append(out, journal.Record{Type: journal.RecSubmitted, ID: in.ID, Intent: &in})
+	}
+	return out
 }

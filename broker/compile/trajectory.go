@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -124,8 +125,8 @@ func anyString(params map[string]any, recips []string, f func(string) bool) bool
 		case string:
 			return f(x)
 		case map[string]any:
-			for _, c := range x {
-				if walk(c) {
+			for k, c := range x {
+				if f(k) || walk(c) {
 					return true
 				}
 			}
@@ -167,14 +168,42 @@ func escape(ps []string) []string {
 	return out
 }
 
-// leaves flattens a trajectory's values. Objects are walked into; lists
-// and empty objects are leaves.
+// keyRE is a schema-like param key. Only objects whose keys all look like
+// this are walked into: a data-valued key (an address used as a map key)
+// would otherwise become a structural key and a slot name, and reach the
+// skill file and the tool's input schema (security review B1). Any other
+// object is one JSON leaf.
+var keyRE = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
+
+func schemaKeys(m map[string]any) bool {
+	for k := range m {
+		if !keyRE.MatchString(k) {
+			return false
+		}
+	}
+	return true
+}
+
+// structured reports whether every step's top-level param keys are
+// schema-like. A trajectory whose params are keyed by data is never
+// compiled: its keys would be recorded as structure.
+func structured(t *Trajectory) bool {
+	for _, st := range t.Steps {
+		if !schemaKeys(st.Params) {
+			return false
+		}
+	}
+	return true
+}
+
+// leaves flattens a trajectory's values. Objects with schema-like keys are
+// walked into; lists, empty objects, and other objects are leaves.
 func leaves(t *Trajectory) []leaf {
 	var out []leaf
 	for i, st := range t.Steps {
 		var walk func(path []string, v any)
 		walk = func(path []string, v any) {
-			if m, ok := v.(map[string]any); ok && len(m) > 0 && len(path) < 8 {
+			if m, ok := v.(map[string]any); ok && len(m) > 0 && len(path) < 8 && schemaKeys(m) {
 				keys := make([]string, 0, len(m))
 				for k := range m {
 					keys = append(keys, k)
