@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -587,9 +588,15 @@ func TestWrongPassphrasesAreToldNotCounted(t *testing.T) {
 	if got := notes(); len(got) != 2 || got[1] != "wrong vault passphrase tried on the box's Wi-Fi (4 more since the last notice)" {
 		t.Fatalf("notes: %q", got)
 	}
-	// Still no lockout: the right passphrase opens the pending unlock.
+	// Still no lockout: the right passphrase opens the pending unlock,
+	// and a burst since the last notice is reported then.
+	try()
+	try()
 	r.unlock(t)
 	if r.phase() != pending {
 		t.Fatalf("phase %v", r.phase())
+	}
+	if !slices.Contains(r.notes, "2 more wrong vault passphrases were tried on the box's Wi-Fi since the last notice") {
+		t.Fatalf("burst not flushed: %q", r.notes)
 	}
 }

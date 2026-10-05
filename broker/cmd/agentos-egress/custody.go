@@ -267,6 +267,11 @@ func (c *custody) unlock(passphrase string) (string, error) {
 	c.ph, c.v, c.ticket = pending, v, hex.EncodeToString(b)
 	c.expires = now.Add(c.ttl)
 	c.timer = time.AfterFunc(c.ttl, c.expire)
+	if c.wrongPassQuiet > 0 {
+		// A burst that stopped still reports its total.
+		c.notify(fmt.Sprintf("%d more wrong vault passphrases were tried on the box's Wi-Fi since the last notice", c.wrongPassQuiet))
+		c.wrongPassQuiet = 0
+	}
 	c.notify("vault passphrase accepted; waiting for a code-generator code")
 	return c.ticket, nil
 }
