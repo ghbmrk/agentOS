@@ -240,7 +240,7 @@ func cardPhoto(t *testing.T, payloads ...string) []byte {
 
 // qrPNG renders one QR code at eight pixels a module with its quiet zone,
 // in colour, as a screenshot.
-func qrPNG(t *testing.T, payload string) []byte {
+func qrPNG(t testing.TB, payload string) []byte {
 	t.Helper()
 	c, err := qr.Encode(payload, qr.M)
 	if err != nil {
@@ -643,7 +643,60 @@ func FuzzScanPassphrase(f *testing.F) {
 	png.Encode(&b, image.NewGray(image.Rect(0, 0, 8, 8)))
 	f.Add(b.Bytes())
 	f.Add([]byte{0xff, 0xd8, 0xff, 0xe0})
+	f.Add(qrPNG(f, "correct horse battery staple wing duck tree"))
 	f.Fuzz(func(t *testing.T, photo []byte) {
 		ScanPassphrase(photo)
 	})
+}
+
+// A progressive JPEG keeps every coefficient until the end, so it has a
+// lower pixel bound than a camera's baseline JPEG (#50 L3 F1).
+func TestScanBoundsProgressiveJPEG(t *testing.T) {
+	var b bytes.Buffer
+	jpeg.Encode(&b, image.NewGray(image.Rect(0, 0, 8, 8)), nil)
+	sof := bytes.Index(b.Bytes(), []byte{0xff, 0xc0})
+	if sof < 0 {
+		t.Fatal("no SOF0")
+	}
+	sized := func(w, h int, marker byte) []byte {
+		j := append([]byte(nil), b.Bytes()...)
+		j[sof+1] = marker
+		binary.BigEndian.PutUint16(j[sof+5:], uint16(h))
+		binary.BigEndian.PutUint16(j[sof+7:], uint16(w))
+		return j
+	}
+	// 20 MP: a baseline header passes the bounds (and then fails to
+	// decode, being a stub); a progressive one is refused before decoding.
+	if _, err := ScanPassphrase(sized(5000, 4000, 0xc0)); errors.Is(err, ErrPhotoSize) {
+		t.Fatalf("baseline 20 MP: %v", err)
+	}
+	if _, err := ScanPassphrase(sized(5000, 4000, 0xc2)); !errors.Is(err, ErrPhotoSize) {
+		t.Fatalf("progressive 20 MP: %v", err)
+	}
+	// Above 24 MP, any JPEG is refused.
+	if _, err := ScanPassphrase(sized(6000, 5000, 0xc0)); !errors.Is(err, ErrPhotoSize) {
+		t.Fatalf("baseline 30 MP: %v", err)
+	}
+}
+
+// A photo spends an attempt before it is read, even one with no code in
+// it, so scans cannot be repeated outside the budget (#50 L3 F2).
+func TestVaultPhotoSpendsAnAttempt(t *testing.T) {
+	r, _ := vaultRig(t)
+	blank := cardPhoto(t)
+	send := func() string {
+		var b bytes.Buffer
+		mw := multipart.NewWriter(&b)
+		mw.WriteField("step", "passphrase")
+		fw, _ := mw.CreateFormFile("photo", "IMG.jpg")
+		fw.Write(blank)
+		mw.Close()
+		return r.doBody("POST", "/unlock/vault", &b, mw.FormDataContentType()).Body.String()
+	}
+	if body := send(); !strings.Contains(body, "No QR code found") {
+		t.Fatalf("first photo:\n%s", body)
+	}
+	if body := send(); !strings.Contains(body, "Wait a few seconds") {
+		t.Fatalf("second photo inside the gap was scanned:\n%s", body)
+	}
 }

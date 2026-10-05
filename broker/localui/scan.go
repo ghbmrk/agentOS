@@ -30,9 +30,11 @@ var (
 // photo is read at a time (Server.scan).
 const (
 	MaxPhotoBytes  = 20 << 20
-	MaxPhotoPixels = 50_000_000
-	// MaxOtherPixels bounds a photo that does not decode to YCbCr.
-	MaxOtherPixels = 25_000_000
+	MaxPhotoPixels = 24_000_000
+	// MaxProgressivePixels bounds a progressive JPEG, whose decoder keeps
+	// every coefficient as an int32 until the end (an 8000x6000 4:4:4
+	// progressive JPEG of 550 KB peaks at about 700 MB; #50 L3 F1).
+	MaxProgressivePixels = 12_000_000
 	// scanEdge is the longest side a photo is reduced to before the QR
 	// search: a card-sized code is still several pixels per module.
 	scanEdge = 2048
@@ -53,17 +55,15 @@ func ScanPassphrase(photo []byte) (string, error) {
 	if cfg.Width <= 0 || cfg.Height <= 0 || px > MaxPhotoPixels {
 		return "", ErrPhotoSize
 	}
-	// A camera JPEG decodes to YCbCr at 1.5 bytes a pixel; anything else
-	// (PNG) to as much as 4, so it gets a lower bound, and 16-bit
-	// channels (8 bytes a pixel) are refused (#50 security B2).
+	// 16-bit channels (8 bytes a pixel) are refused (#50 security B2),
+	// and a progressive JPEG has a lower bound (L3 F1). Phone cameras
+	// write baseline JPEGs.
 	switch cfg.ColorModel {
-	case color.YCbCrModel:
 	case color.RGBA64Model, color.NRGBA64Model, color.Gray16Model, color.Alpha16Model:
 		return "", ErrNotPhoto
-	default:
-		if px > MaxOtherPixels {
-			return "", ErrPhotoSize
-		}
+	}
+	if px > MaxProgressivePixels && progressiveJPEG(photo) {
+		return "", ErrPhotoSize
 	}
 	img, _, err := image.Decode(bytes.NewReader(photo))
 	if err != nil {
@@ -103,6 +103,35 @@ func ScanPassphrase(photo []byte) (string, error) {
 		return "", ErrWiFiQR
 	}
 	return "", ErrNoQR
+}
+
+// progressiveJPEG reports whether b is a JPEG whose first frame header is
+// progressive (SOF2, SOF6, SOF10 or SOF14). Anything it cannot walk counts
+// as progressive, so the lower bound applies.
+func progressiveJPEG(b []byte) bool {
+	if len(b) < 4 || b[0] != 0xff || b[1] != 0xd8 {
+		return false
+	}
+	for i := 2; i+4 <= len(b); {
+		if b[i] != 0xff {
+			return true
+		}
+		m := b[i+1]
+		switch {
+		case m == 0xff: // fill byte
+			i++
+			continue
+		case m == 0xd8 || m == 0x01 || (m >= 0xd0 && m <= 0xd7):
+			i += 2
+			continue
+		case m == 0xc2 || m == 0xc6 || m == 0xca || m == 0xce:
+			return true
+		case m >= 0xc0 && m <= 0xcf && m != 0xc4 && m != 0xc8 && m != 0xcc:
+			return false
+		}
+		i += 2 + int(b[i+2])<<8 | int(b[i+3])
+	}
+	return true
 }
 
 // decodeQR returns the text of every QR code found in g.

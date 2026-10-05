@@ -109,6 +109,9 @@ func (u *UnlockClient) call(ctx context.Context, method, path string, body any) 
 		if err != nil {
 			return out, err
 		}
+		// The request may carry the passphrase; its bytes are wiped once
+		// the call returns (the caller's string is left to the collector).
+		defer clear(b)
 		rd = bytes.NewReader(b)
 	}
 	// The host is a placeholder; the transport dials the unlock socket.
@@ -226,6 +229,9 @@ func (s *Server) vaultTry(addr string) string {
 	return ""
 }
 
+// uploadWindow bounds how long one upload may take to arrive.
+const uploadWindow = 60 * time.Second
+
 // vaultCookie binds a pending unlock's ticket to the phone that sent the
 // passphrase, so another phone on the Wi-Fi can neither answer nor spoil
 // it (egress K5).
@@ -335,8 +341,15 @@ func (s *Server) vaultPost(w http.ResponseWriter, r *http.Request) {
 // read part by part into memory, never spooled to a temporary file, so
 // the passphrase never reaches the drive.
 func (s *Server) vaultPassphrase(w http.ResponseWriter, r *http.Request) {
+	// Every passphrase post spends an attempt before its body is read,
+	// photo or not, so scans are budgeted too (#50 L3 F2).
+	if msg := s.vaultTry(r.RemoteAddr); msg != "" {
+		s.vaultPage(w, r, msg)
+		return
+	}
 	// One upload at a time, taken before the body is read, so parallel
-	// uploads cannot each hold a photo in memory (#50 security B2).
+	// uploads cannot each hold a photo in memory (#50 security B2); a
+	// slow sender cannot hold the slot past uploadWindow.
 	select {
 	case s.scanning <- struct{}{}:
 		defer func() { <-s.scanning }()
@@ -344,6 +357,7 @@ func (s *Server) vaultPassphrase(w http.ResponseWriter, r *http.Request) {
 		s.vaultPage(w, r, scanText(ErrScanBusy))
 		return
 	}
+	http.NewResponseController(w).SetReadDeadline(time.Now().Add(uploadWindow))
 	r.Body = http.MaxBytesReader(w, r.Body, MaxPhotoBytes+64<<10)
 	mr, err := r.MultipartReader()
 	if err != nil {
@@ -351,6 +365,7 @@ func (s *Server) vaultPassphrase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var photo []byte
+	defer func() { clear(photo) }()
 	var typed string
 	for {
 		p, err := mr.NextPart()
@@ -363,6 +378,7 @@ func (s *Server) vaultPassphrase(w http.ResponseWriter, r *http.Request) {
 		}
 		switch p.FormName() {
 		case "photo":
+			clear(photo) // a repeated part replaces the first
 			if photo, err = readPhoto(p); err != nil {
 				s.vaultPage(w, r, "The photo is too large or did not arrive whole. Try again, or type the words.")
 				return
@@ -381,13 +397,8 @@ func (s *Server) vaultPassphrase(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	clear(photo)
 	if pass == "" {
 		s.vaultPage(w, r, "Take a photo of the passphrase code, or type the words.")
-		return
-	}
-	if msg := s.vaultTry(r.RemoteAddr); msg != "" {
-		s.vaultPage(w, r, msg)
 		return
 	}
 	st, ticket, err := s.cfg.Vault.Unlock(r.Context(), pass)
