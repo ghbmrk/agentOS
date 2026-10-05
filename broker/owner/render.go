@@ -227,22 +227,47 @@ func (it Item) line() string {
 // sets are approvable only on the local page.
 const MaxRecipientChars = 100
 
-// recipientText renders recipients in full, folded to plain text (CH-10),
-// or reports that they cannot be: a character outside the fixed alphabet,
-// a line break, secret-shaped content (CH-19), or more than
-// MaxRecipientChars. Nothing is cut, hidden, or collapsed, because a
+// recipientText renders recipients in full (CH-10), or reports that they
+// cannot be. Each recipient must be a canonical identifier (canonical):
+// anything else, including agent-written text that would plant a fake
+// expiry, request ID or code inside the broker's own text (security
+// review 2, finding 1), goes to the local page. The set must also be
+// plain text already (a look-alike is not shown folded, since the folded
+// form is not where the effect goes), not secret-shaped (CH-19), and at
+// most MaxRecipientChars. Nothing is cut, hidden, or collapsed, because a
 // shortened recipient can hide where an effect goes.
 func recipientText(s string) (string, bool) {
-	f := strings.TrimSpace(fold(s))
-	if f == "" || len(f) > MaxRecipientChars || SecretShaped(f) {
+	f := strings.TrimSpace(s)
+	if f == "" || len(f) > MaxRecipientChars || fold(f) != f || SecretShaped(f) {
 		return "", false
 	}
-	for _, r := range f {
-		if !fieldChar(r) {
+	for _, r := range strings.Split(f, ",") {
+		if !canonical(strings.TrimSpace(r)) {
 			return "", false
 		}
 	}
 	return f, true
+}
+
+// Canonical recipients (CH-10): a plain email address, a full E.164
+// number (a country code, 7 to 15 digits), or an account's last 4 digits.
+var (
+	canonEmail   = regexp.MustCompile(`^[A-Za-z0-9._%+'-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$`)
+	canonNumber  = regexp.MustCompile(`^\+[1-9][0-9]{6,14}$`)
+	canonAccount = regexp.MustCompile(`^acct \.\.\.[0-9]{4}$`)
+)
+
+// canonical reports whether r is one canonical recipient. An email
+// address with a run of 6 or more digits is not, since it would read like
+// a code; it goes to the local page rather than being digit-collapsed.
+func canonical(r string) bool {
+	switch {
+	case canonEmail.MatchString(r):
+		return !longDigits.MatchString(r) && !strings.HasPrefix(r, ".") && !strings.Contains(r, "..")
+	case canonNumber.MatchString(r), canonAccount.MatchString(r):
+		return true
+	}
+	return false
 }
 
 // SMSApprovable reports whether an item can be approved by text: its

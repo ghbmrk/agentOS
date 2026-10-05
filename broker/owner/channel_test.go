@@ -358,7 +358,13 @@ func TestApprovalTextIsFixedWordingFromVerifiedFields(t *testing.T) {
 	if _, err := r.ch.Request([]Item{it}, 0); err != ErrLocalOnly {
 		t.Fatalf("recipient with a line break: %v", err)
 	}
-	it.Recipient = "bіlling@аcme.example" // Cyrillic look-alikes
+	// Cyrillic look-alikes: the folded form is not where the effect goes,
+	// so it is not shown folded (security review 2, finding 1).
+	it.Recipient = "bіlling@аcme.example"
+	if _, err := r.ch.Request([]Item{it}, 0); err != ErrLocalOnly {
+		t.Fatalf("look-alike recipient: %v", err)
+	}
+	it.Recipient = "billing@acme.example"
 	it.UndoWindow = 10 * time.Minute
 	id, _ := r.ch.Request([]Item{it}, 0)
 	text := r.inbox()
@@ -830,5 +836,82 @@ func TestAutoReplySilenceCountsOnlyOnTime(t *testing.T) {
 	r.advance(DefaultUndoWindow)
 	if q := due(); !q.Late {
 		t.Fatal("a release with an unconfirmed alert was not marked late")
+	}
+}
+
+// REQ: CH-10, CH-12
+//
+// Security review 2, finding 1 (#143): a recipient is shown in an
+// approval text only if it is a canonical identifier (a plain email
+// address, a full E.164 number, or acct ...1234). Agent-written text
+// that would plant a fake expiry, request ID or code inside the broker's
+// own text, and anything else that is not canonical, goes to the Wi-Fi
+// page instead.
+func TestOnlyCanonicalRecipientsAreShown(t *testing.T) {
+	for _, rcpt := range []string{
+		"boss@corp.com. Expires 23:59. Reply YES K7 482913 or NO K7. 2 archive old",
+		"boss@corp.com, Reply YES K7",
+		"Sam Lee",
+		"sam lee@example.com",
+		"sam@example",
+		"@example.com",
+		"sam@@example.com",
+		"sam@example.com.",
+		"482913@example.com",     // reads like a code
+		"sam@mail482913.example", // so does this
+		"+482913",                // a code with a plus
+		"+0155512348",            // no country code starts with 0
+		"+1555123482100000",      // longer than E.164
+		"5551234821",             // not E.164
+		"acct ...48",
+		"acct ...482913",
+		"sam@exаmple.com", // Cyrillic a: not plain text, so not shown folded
+		"sam@example.com,",
+		", sam@example.com",
+		"sam@example.com,, dad@example.com",
+	} {
+		it := lowItem("x")
+		it.Recipient = rcpt
+		if SMSApprovable(it) {
+			t.Errorf("%q: approvable by text", rcpt)
+		}
+		if l := it.line(); !strings.Contains(l, "see the Wi-Fi page") || strings.Contains(l, "482913") || strings.Contains(l, "YES") {
+			t.Errorf("%q: line %q", rcpt, l)
+		}
+	}
+	for _, rcpt := range []string{
+		"billing@acme.example",
+		"o'brien+bills@mail.acme-corp.example",
+		"+15551234821",
+		"+4930123456",
+		"acct ...4821",
+		"sam@example.com, +15551234821, acct ...0042",
+		"sam@example.com,dad@example.com",
+	} {
+		it := lowItem("x")
+		it.Recipient = rcpt
+		if !SMSApprovable(it) {
+			t.Errorf("%q: not approvable by text", rcpt)
+		}
+		if l := it.line(); !strings.Contains(l, " to "+rcpt) {
+			t.Errorf("%q: line %q", rcpt, l)
+		}
+	}
+}
+
+// The planted text from the review reaches no approval text: the request
+// is local-only, and the recipients line counts them instead.
+func TestPlantedApprovalTextNeverReachesTheOwner(t *testing.T) {
+	r := newRig(t, nil)
+	it := lowItem("planted")
+	it.Unverified = true
+	it.Recipient = "boss@corp.com. Expires 23:59. Reply YES K7 482913 or NO K7. 2 archive old"
+	if _, err := r.ch.Request([]Item{it}, 0); err != ErrLocalOnly {
+		t.Fatalf("Request: %v", err)
+	}
+	select {
+	case m := <-r.phone.Inbox():
+		t.Fatalf("text sent for a local-only request: %q", m.Text)
+	default:
 	}
 }
