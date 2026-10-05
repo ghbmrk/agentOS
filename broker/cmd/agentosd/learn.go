@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/change"
@@ -16,6 +19,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/replay"
+	"github.com/ghbmrk/agentos/broker/routerule"
 	"github.com/ghbmrk/agentos/broker/vm"
 )
 
@@ -34,12 +38,17 @@ type learning struct {
 	eval    lateEvaluator
 	eng     atomic.Pointer[journal.Engine]
 	adm     atomic.Pointer[admission.Controller]
+	routing *syncedRouting // nil: routing held
 }
 
 // learnPaths are where the learning plane keeps its state.
 type learnPaths struct {
 	Dir   string // pipeline, scheduler, and harvest state
 	Spare string // the spare meter (LOOP-2), apart from the guests' OP-8 meter
+	// Routing is the vault process's routing socket, through which the
+	// pipeline reads and adopts the active routing rule (PW4 on #90).
+	// Empty holds routing changes (heldRouting).
+	Routing string
 }
 
 // openLearning opens the learning plane and wires it into the daemon's
@@ -58,18 +67,31 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		return nil, err
 	}
 	l.spare = spare
+	var target change.Target = heldRouting{}
+	var sync *syncedRouting
+	if p.Routing != "" {
+		sync = &syncedRouting{r: modelroute.NewRouting(p.Routing), restoring: true, logf: log.Printf}
+		target = sync
+	}
 	if l.pipe, err = change.New(change.Config{
 		Store:     change.FileStore{Path: filepath.Join(p.Dir, "change.json")},
 		Evaluator: &l.eval,
-		Targets:   map[string]change.Target{"routing": heldRouting{}},
+		Targets:   map[string]change.Target{"routing": target},
 	}); err != nil {
 		return nil, err
+	}
+	var router change.Router
+	if sync != nil {
+		sync.doneRestoring()
+		l.routing = sync
+		router = routerOf{sync, l.pipe}
 	}
 	l.harvest = &loops.Harvester{J: lateQuality{&l.eng}, Pipeline: l.pipe, Store: change.FileStore{Path: filepath.Join(p.Dir, "harvest.json")}}
 	learn, err := loops.NewLearn(loops.LearnConfig{
 		Pipeline:   l.pipe,
 		Journal:    lateReader{&l.eng},
 		Harvest:    l.harvest,
+		Router:     router,
 		ModelWired: modelWired,
 	})
 	if err != nil {
@@ -141,6 +163,9 @@ func (l *learning) attach(ctx context.Context, d *daemon.Daemon) {
 	l.sched.Attach(eng)
 	l.eng.Store(eng)
 	l.adm.Store(d.Admission())
+	if l.routing != nil {
+		go l.routing.run(ctx, 30*time.Second)
+	}
 	go l.sched.Run(ctx)
 }
 
@@ -222,11 +247,11 @@ func evalDenied(logf func(string, ...any)) func(machine string, d modelroute.Den
 	}
 }
 
-// heldRouting is the routing namespace's target until agentos-egress,
-// which holds the router, follows routing adoptions (its -rule is read at
-// start). Until then an adoption would leave the vault process routing,
-// and pricing evaluations, by another rule than the pipeline's, so none
-// applies; Loop 1 gets no Router, so none is proposed either.
+// heldRouting is the routing namespace's target when agentosd has no
+// routing socket to the vault process, which holds the router: an adoption
+// would leave the vault process routing, and pricing evaluations, by
+// another rule than the pipeline's, so none applies; Loop 1 gets no
+// Router, so none is proposed either.
 type heldRouting struct{}
 
 func (heldRouting) Current() (change.Tree, error) { return change.Tree{}, nil }
@@ -282,4 +307,175 @@ func (q lateQuality) RecordQuality(id string, v journal.Quality) (journal.Status
 		return e.RecordQuality(id, v)
 	}
 	return journal.Status{}, errors.New("journal not open")
+}
+
+// routingClient is the vault process's routing socket (modelroute.Routing).
+type routingClient interface {
+	State(ctx context.Context) (modelroute.RoutingState, error)
+	Set(ctx context.Context, rule routerule.Rule) error
+}
+
+// syncedRouting is the routing namespace's target over the vault
+// process's routing socket (PW4 on #90). An empty routing tree is the
+// owner's -rule. Current is the vault process's active rule, or, if it
+// cannot be reached on first start, the owner's -rule, pushed once it can
+// (potency PW6). Apply adopts a rule there, which the vault process takes
+// only as a reordering of the owner's -rule. While the pipeline restores
+// its state at start, a rule the vault process cannot take yet is kept
+// and pushed by run; one it refuses (the owner changed -rule since) stands
+// for the owner's -rule from then on, so a later revert to it is not
+// refused (security R1 on PW4). After start, an adoption the vault process
+// does not take fails, so nothing is recorded as adopted that the router
+// does not route by.
+type syncedRouting struct {
+	r    routingClient
+	logf func(string, ...any)
+
+	mu        sync.Mutex
+	restoring bool
+	pending   *routerule.Rule // to push once the vault process is up; empty: -rule
+	refused   routerule.Rule  // a restored rule the vault process refused
+}
+
+func (s *syncedRouting) Current() (change.Tree, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	st, err := s.r.State(ctx)
+	if err != nil {
+		s.logf("routing: vault process not reachable at first start; recording the owner's rule")
+		s.mu.Lock()
+		s.pending = &routerule.Rule{}
+		s.mu.Unlock()
+		return change.Tree{}, nil
+	}
+	b, err := json.Marshal(st.Rule)
+	if err != nil {
+		return nil, err
+	}
+	return change.Tree{change.RoutingPath: b}, nil
+}
+
+func (s *syncedRouting) Apply(t change.Tree) error {
+	var rule routerule.Rule
+	if len(t) != 0 {
+		b, ok := t[change.RoutingPath]
+		if !ok || len(t) != 1 {
+			return errors.New("routing needs exactly " + change.RoutingPath)
+		}
+		if err := json.Unmarshal(b, &rule); err != nil {
+			return err
+		}
+	}
+	s.mu.Lock()
+	if s.refused != nil && sameRule(rule, s.refused) {
+		rule = nil
+	}
+	s.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := s.r.Set(ctx, rule)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case err == nil:
+		s.pending = nil
+	case s.restoring:
+		s.pending = &rule
+		return nil
+	}
+	return err
+}
+
+func (s *syncedRouting) doneRestoring() {
+	s.mu.Lock()
+	s.restoring = false
+	s.mu.Unlock()
+}
+
+// push sends a rule kept from the start, if any; it reports whether none
+// is left. A refused one is replaced by the owner's -rule.
+func (s *syncedRouting) push(ctx context.Context) bool {
+	s.mu.Lock()
+	p := s.pending
+	s.mu.Unlock()
+	if p == nil {
+		return true
+	}
+	rule := *p
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	err := s.r.Set(ctx, rule)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pending != p { // a later Apply replaced it
+		return s.pending == nil
+	}
+	switch {
+	case err == nil:
+		s.pending = nil
+	case errors.Is(err, modelroute.ErrRoutingRefused) && len(rule) != 0:
+		s.logf("routing: the restored rule no longer reorders the owner's rule; using the owner's rule")
+		s.refused = rule
+		s.pending = &routerule.Rule{}
+	default:
+		s.logf("routing: vault process not reachable yet")
+	}
+	return s.pending == nil
+}
+
+// run pushes the rule kept from the start until the vault process has it.
+func (s *syncedRouting) run(ctx context.Context, every time.Duration) {
+	for !s.push(ctx) {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(every):
+		}
+	}
+}
+
+func sameRule(a, b routerule.Rule) bool {
+	x, _ := json.Marshal(a)
+	y, _ := json.Marshal(b)
+	return string(x) == string(y)
+}
+
+// routerOf is Loop 1's router (ADP-4): the vault process's measured
+// proposal. If the vault process cannot be reached, the proposal is the
+// pipeline's own active rule, so nothing is proposed.
+type routerOf struct {
+	s    *syncedRouting
+	pipe *change.Pipeline
+}
+
+func (r routerOf) state() (modelroute.RoutingState, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return r.s.r.State(ctx)
+}
+
+func (r routerOf) active() routerule.Rule {
+	var rule routerule.Rule
+	_ = json.Unmarshal(r.pipe.Files("routing")[change.RoutingPath], &rule)
+	return rule
+}
+
+func (r routerOf) Rule() routerule.Rule {
+	if st, err := r.state(); err == nil {
+		return st.Rule
+	}
+	return r.active()
+}
+
+func (r routerOf) SetRule(rule routerule.Rule) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return r.s.r.Set(ctx, rule)
+}
+
+func (r routerOf) Candidate() routerule.Rule {
+	if st, err := r.state(); err == nil && len(st.Candidate) > 0 {
+		return st.Candidate
+	}
+	return r.active()
 }

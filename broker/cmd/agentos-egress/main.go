@@ -207,7 +207,8 @@ func serveCmd(args []string) error {
 	ttl := fs.Duration("code-ttl", owner.DefaultCodeTTL, "how long a decrypted vault waits for its approval code")
 	g := grants{}
 	fs.Var(g, "grant", "machine=adapter[,adapter] (repeatable)")
-	rulePath := fs.String("rule", "", "routing rule: JSON task class -> routes (P2-7)")
+	rulePath := fs.String("rule", "", "routing rule: JSON task class -> routes (P2-7); adoptions may only reorder its routes")
+	routingPath := fs.String("routing-state", "", "the adopted routing rule, kept across restarts (W3); default routing.json beside the keys")
 	pricesPath := fs.String("prices", "", "model price table for evaluation routes: JSON \"provider/model\" -> {input, output} per million tokens; empty refuses every evaluation route")
 	evalFrom := fs.String("eval-from", "", "the agent machine whose model grants replay machines use (LOOP-5); empty (the default) gives replay no model access")
 	privateOK := fs.String("private-ok", "", "providers the owner allowed for private data, comma-separated (CAP-9)")
@@ -228,6 +229,13 @@ func serveCmd(args []string) error {
 		if p = strings.TrimSpace(p); p != "" {
 			pok[p] = true
 		}
+	}
+	if *routingPath == "" {
+		*routingPath = filepath.Join(filepath.Dir(*keysPath), "routing.json")
+	}
+	base := rule
+	if rule, err = startRule(base, *routingPath); err != nil {
+		log.Printf("routing: starting from -rule: %v", err)
 	}
 	rt, err := newRouter(rule, g, pok)
 	if err != nil {
@@ -280,7 +288,8 @@ func serveCmd(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	srvs, err := serve(*run, c, rt, ev, *brokerUID, *unlockUID)
+	ro := &routing{base: base, rt: rt, ev: ev, path: *routingPath}
+	srvs, err := serve(*run, c, rt, ev, ro, *brokerUID, *unlockUID)
 	if err != nil {
 		return err
 	}
@@ -302,7 +311,10 @@ func (emptyVault) Redactor() (*vault.Redactor, error) { return vault.NewRedactor
 
 // serve opens the model, verify and unlock sockets in dir and serves them
 // until closed. The model and verify sockets admit the broker's uid only.
-func serve(dir string, c *custody, rt *route.Router, ev *evalRoute, brokerUID, unlockUID int) ([]*http.Server, error) {
+func serve(dir string, c *custody, rt *route.Router, ev *evalRoute, ro *routing, brokerUID, unlockUID int) ([]*http.Server, error) {
+	if ro == nil {
+		ro = &routing{base: rt.Rule(), rt: rt, ev: ev}
+	}
 	if err := runDir(dir); err != nil {
 		return nil, err
 	}
@@ -312,6 +324,7 @@ func serve(dir string, c *custody, rt *route.Router, ev *evalRoute, brokerUID, u
 		h    http.Handler
 	}{
 		{ModelSocket, brokerUID, modelHandler(c, rt, ev)},
+		{RoutingSocket, brokerUID, ro.handler()},
 		{VerifySocket, brokerUID, verifyHandler(c)},
 		{UnlockSocket, unlockUID, unlockHandler(c)},
 	}
