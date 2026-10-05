@@ -221,6 +221,10 @@ func main() {
 
 	// The learning plane failing must not take the owner channel down
 	// either: without it loop settings are refused and nothing adopts.
+	// The tree's procedures, skills and context reach the agent through
+	// managed_tree, private machines only (W4).
+	tree := newLiveTree(log.Printf)
+	learn.Tree = tree
 	var lp *learning
 	if err := os.MkdirAll(learn.Dir, 0o700); err != nil {
 		log.Printf("learning disabled: %v", err)
@@ -263,7 +267,8 @@ func main() {
 			log.Printf("agent machines disabled: %v", err)
 		} else {
 			pre.m.Store(m)
-			if plane, err := openGuestPlane(m, d, cfg.SocketDir, meterPath, inboxPath, egressSocket, qs.tools()); err != nil {
+			tree.setMachines(m)
+			if plane, err := openGuestPlane(m, d, cfg.SocketDir, meterPath, inboxPath, egressSocket, toolSet{qs.tools(), tree}); err != nil {
 				// Machines cannot start without their guest sockets.
 				log.Printf("agent machines disabled: %v", err)
 			} else {
@@ -485,7 +490,8 @@ func openGuestPlane(m *vm.Manager, d *daemon.Daemon, socketDir, meterPath, inbox
 				log.Printf("reply from %s not sent: %v", machine, err)
 			}
 		},
-		// Further broker tools: the owner-question tools (W9).
+		// Further broker tools: the owner-question tools (W9) and the
+		// managed tree (W4).
 		Tools: tools,
 		Logf:  log.Printf,
 	}

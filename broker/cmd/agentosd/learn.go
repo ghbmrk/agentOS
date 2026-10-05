@@ -62,6 +62,9 @@ type learnPaths struct {
 	// pipeline reads and adopts the active routing rule (PW4 on #90).
 	// Empty holds routing changes (heldRouting).
 	Routing string
+	// Tree, if set, is the live agent's copy of the tree's procedures,
+	// skills and context (W4); nil holds them in the pipeline.
+	Tree *liveTree
 }
 
 // openLearning opens the learning plane and wires it into the daemon's
@@ -86,10 +89,16 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		sync = &syncedRouting{r: modelroute.NewRouting(p.Routing), restoring: true, logf: log.Printf}
 		target = sync
 	}
+	targets := map[string]change.Target{"routing": target}
+	if p.Tree != nil {
+		for ns, t := range p.Tree.targets() {
+			targets[ns] = t
+		}
+	}
 	if l.pipe, err = change.New(change.Config{
 		Store:     change.FileStore{Path: filepath.Join(p.Dir, "change.json")},
 		Evaluator: &l.eval,
-		Targets:   map[string]change.Target{"routing": target},
+		Targets:   targets,
 	}); err != nil {
 		return nil, err
 	}

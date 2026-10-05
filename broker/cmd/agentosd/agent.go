@@ -38,8 +38,8 @@ type liveMachines interface {
 // preempted, it resumes it on its layer; the guest plane then hands it the
 // unanswered owner messages again (guest G5). A machine that already exists
 // keeps its image: moving it to a new one is the update path's, not this.
-// The machine is created without a seed: the managed tree reaches only
-// private machines (vm.ErrSeedLabel, compile K7).
+// The machine is created without a seed: the managed tree reaches it
+// through managed_tree once it is private (W4, tree.go; compile K7).
 type keeper struct {
 	m     liveMachines
 	id    string
