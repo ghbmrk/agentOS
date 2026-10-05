@@ -31,7 +31,7 @@ func TestUpToDateOnlyAfterOnlineCheck(t *testing.T) {
 	if st := r.l.Status(); st.Current {
 		t.Fatalf("current before any check: %+v", st)
 	}
-	if ok, v := r.tick(); !ok || v != valueChecked {
+	if ok, v := r.tick(); !ok || v != 0 {
 		t.Fatalf("first check: ran %v value %v", ok, v)
 	}
 	st := r.l.Status()
@@ -565,5 +565,55 @@ func TestKeyRotationReportedOnce(t *testing.T) {
 	}
 	if d := r.digest(); strings.Contains(d, "signing keys") {
 		t.Fatalf("said twice: %q", d)
+	}
+}
+
+func TestWakeUnparksLoop3(t *testing.T) {
+	// Three daily checks that find nothing park Loop 3 as dry (LOOP-3);
+	// a Wake (network up, channel change, new release) brings it back.
+	r := newRig(t)
+	spare, err := meter.Open(meter.Config{
+		Path:       filepath.Join(t.TempDir(), "spare.json"),
+		MachineCap: meter.Limits{Calls: 50, Tokens: 500_000},
+		OverallCap: loops.SpareLimits(loops.DefaultSpareCalls),
+		Now:        r.clk.now,
+	})
+	r.must(err)
+	s, err := loops.New(loops.Config{Store: &change.MemStore{}, Spare: spare, Sources: []loops.Source{r.l}, Now: r.clk.now})
+	r.must(err)
+	for d := 0; d < 3; d++ {
+		if d > 0 {
+			r.clk.add(24 * time.Hour)
+			r.refresh()
+		}
+		s.Tick(context.Background())
+	}
+	if s.Share()[loops.Maintain] != 0 {
+		t.Fatalf("not parked after 3 dry checks: %v", s.Share())
+	}
+	s.Wake()
+	if s.Share()[loops.Maintain] == 0 {
+		t.Fatal("Wake did not unpark Loop 3")
+	}
+}
+
+func TestUrgentWhileSecurityFixOrRetryDue(t *testing.T) {
+	r := newRig(t)
+	r.tick()
+	if r.l.Urgent() {
+		t.Fatal("urgent while current")
+	}
+	r.release(2, func(m *update.Manifest) { m.Security = true })
+	r.clk.add(24 * time.Hour)
+	r.refresh()
+	r.tick()
+	if !r.l.Urgent() {
+		t.Fatal("not urgent while a security fix waits for its attestation")
+	}
+	r2 := newRig(t)
+	r2.mirrors = []update.Source{failSource{}}
+	r2.tick()
+	if !r2.l.Urgent() {
+		t.Fatal("not urgent while a failed check is retried")
 	}
 }

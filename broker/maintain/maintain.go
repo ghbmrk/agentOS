@@ -93,11 +93,7 @@ type Config struct {
 // Values a check reports to the scheduler (LOOP-3): a qualified update is
 // Loop 3's product, and a security fix counts double.
 const (
-	valueRelease = 1.0
-	// valueChecked is a verified check, current or waiting: the box knows
-	// where it stands. It keeps Loop 3 from being parked as dry (LOOP-3)
-	// while a security fix waits for its attestation.
-	valueChecked  = 0.1
+	valueRelease  = 1.0
 	valueSecurity = 2.0
 )
 
@@ -173,6 +169,7 @@ type Loop3 struct {
 var (
 	_ loops.Source   = (*Loop3)(nil)
 	_ loops.Digester = (*Loop3)(nil)
+	_ loops.Urgent   = (*Loop3)(nil)
 )
 
 // New loads Loop 3's state. Proposals the pipeline was holding for the
@@ -228,6 +225,19 @@ func New(cfg Config) (*Loop3, error) {
 
 // Loop is loops.Maintain.
 func (l *Loop3) Loop() loops.Loop { return loops.Maintain }
+
+// Urgent reports work that must not wait out a dry-run park (LOOP-11,
+// security first; arbitrator ruling on #53): a security fix waiting for
+// its attestation or a retry, or a failed check being retried.
+func (l *Loop3) Urgent() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.st.Failure != "" {
+		return true
+	}
+	p := l.st.Pending
+	return p != nil && p.Security && p.Why != waitPinned
+}
 
 // Next offers a check when one is due: daily, within the hour after a
 // failed check or for a security fix waiting for its attestation, and at
@@ -356,7 +366,7 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 	if rel == nil {
 		serr := l.saveLocked()
 		l.mu.Unlock()
-		return loops.Result{Value: valueChecked, Err: serr}
+		return loops.Result{Err: serr}
 	}
 	v := m.Version
 	l.st.Newest = v
@@ -373,7 +383,7 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 	if channel == ChannelPinned || proposed {
 		// Pinned: a notice only. Proposed: the pipeline has it, or
 		// rejected it.
-		return loops.Result{Value: valueChecked, Err: serr}
+		return loops.Result{Err: serr}
 	}
 
 	o := l.decide(ctx, rel, m, channel, seen, now)
@@ -496,14 +506,14 @@ func (l *Loop3) decide(ctx context.Context, rel *update.Verified, m update.Manif
 	if m.Security {
 		// UPD-8, D6: a security fix waits for one independent attestation.
 		if err := rel.SecurityAutoStage(atts, l.cfg.OwnKey); err != nil {
-			return outcome{wait: &pending{Version: m.Version, Security: true, Why: waitAttestation}, value: valueChecked, err: aerr}
+			return outcome{wait: &pending{Version: m.Version, Security: true, Why: waitAttestation}, err: aerr}
 		}
 	} else if channel != update.ChannelFast {
 		// UPD-5: an ordinary stable release soaks, and needs independent
 		// passing attestations, before it is offered.
 		until := seen.Add(l.cfg.Soak)
 		if now.Before(until) || rel.IndependentPasses(atts, l.cfg.OwnKey) < l.cfg.MinPasses {
-			return outcome{wait: &pending{Version: m.Version, Why: waitSoak, Until: until}, value: valueChecked, err: aerr}
+			return outcome{wait: &pending{Version: m.Version, Why: waitSoak, Until: until}, err: aerr}
 		}
 	}
 	if err := ctx.Err(); err != nil {
@@ -519,7 +529,6 @@ func (l *Loop3) decide(ctx context.Context, rel *update.Verified, m update.Manif
 	o := outcome{proposed: rep.State}
 	switch {
 	case rep.State == change.StateRejected:
-		o.value = valueChecked
 	case m.Security:
 		o.value = valueSecurity
 	default:
