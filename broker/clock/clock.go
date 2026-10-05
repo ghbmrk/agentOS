@@ -66,6 +66,8 @@ type Status struct {
 	Skew time.Duration
 	// At is the box clock when the check ran.
 	At time.Time
+	// Since is the box clock when the current restriction began.
+	Since time.Time
 }
 
 // Restricted reports whether time-sensitive checks must not proceed.
@@ -89,17 +91,51 @@ const (
 	// DefaultInterval is how often Run checks, and how old a check may be
 	// before Now checks again.
 	DefaultInterval = 15 * time.Minute
-	// NotifyEvery bounds the owner texts: at most one disagreement text,
-	// and its all-clear, per period, however often the sources flap.
-	NotifyEvery = 24 * time.Hour
+	// AgreeAfter is how long the sources must agree before the owner gets
+	// the all-clear. The restriction lifts at once; only the text waits, so
+	// flapping sources never leave "back to normal" as the last word.
+	AgreeAfter = time.Hour
 )
 
 // AgreeText tells the owner a restriction has lifted.
 const AgreeText = "The box clock agrees with the phone network again. Time checks are back to normal."
 
-// DisagreeText is the owner text for a disagreement of skew.
+// DisagreeText is the owner text for a disagreement of skew (at most two
+// text segments). It names what the wiring does while restricted (K7).
 func DisagreeText(skew time.Duration) string {
-	return fmt.Sprintf("The box clock and the phone network's time differ by %s. Time checks (code, grant and update expiry) are paused until they agree.", about(skew))
+	t := fmt.Sprintf("The box clock and the phone network's time differ by %s, so the box is playing safe: pre-allowances with an end date ask you first, requests won't expire, and updates wait. Codes and STOP work as usual.", about(skew))
+	if zoneLike(skew) {
+		t += " This is often a phone-network time-zone error."
+	}
+	return t
+}
+
+// zoneLike reports a skew within a minute of a whole number of quarter
+// hours, the shape of a wrong time zone rather than a moved clock.
+func zoneLike(skew time.Duration) bool {
+	if skew < 0 {
+		skew = -skew
+	}
+	if skew < 14*time.Minute {
+		return false
+	}
+	r := skew % (15 * time.Minute)
+	return r <= time.Minute || r >= 14*time.Minute
+}
+
+// Line is the status for the owner's STATUS reply, with times in loc.
+func (s Status) Line(loc *time.Location) string {
+	switch s.State {
+	case Disagree:
+		return fmt.Sprintf("Time check: restricted since %s (box and phone network differ by %s).", s.Since.In(loc).Format("15:04"), about(s.Skew))
+	case Agreed:
+		return "Time check: box and phone network agree."
+	case NetworkOnly:
+		return "Time check: network only (no phone-network time)."
+	case CarrierOnly:
+		return "Time check: phone network only (offline)."
+	}
+	return "Time check: not checked."
 }
 
 func about(d time.Duration) string {
@@ -154,8 +190,8 @@ type Guard struct {
 	checked  bool
 	mono     time.Duration // Elapsed at the last check
 	told     bool          // a disagreement text is outstanding
-	lastTold time.Duration // Elapsed when it was sent
-	everTold bool
+	agreeAt  time.Duration // Elapsed when agreement resumed after it
+	agreeing bool
 }
 
 // New makes a Guard. Nothing is read until the first Check or Now.
@@ -216,6 +252,12 @@ func (g *Guard) Check(ctx context.Context) Status {
 		// time) must not lift it.
 		s.State, s.Skew = Disagree, g.status.Skew
 	}
+	if s.Restricted() {
+		s.Since = s.At
+		if g.status.Restricted() {
+			s.Since = g.status.Since
+		}
+	}
 	g.status, g.checked, g.mono = s, true, mono
 	text := g.noticeLocked(s, mono)
 	g.mu.Unlock()
@@ -225,16 +267,25 @@ func (g *Guard) Check(ctx context.Context) Status {
 	return s
 }
 
-// noticeLocked decides the owner text for a new status: one disagreement
-// text per NotifyEvery, and one all-clear for each text sent.
+// noticeLocked decides the owner text for a new status: a disagreement
+// text when none is outstanding, and its all-clear once the sources have
+// agreed for AgreeAfter. A disagreement in between resets the wait.
 func (g *Guard) noticeLocked(s Status, mono time.Duration) string {
 	switch {
-	case s.Restricted() && !g.told && (!g.everTold || mono-g.lastTold >= NotifyEvery):
-		g.told, g.everTold, g.lastTold = true, true, mono
-		return DisagreeText(s.Skew)
-	case !s.Restricted() && s.State != Unchecked && g.told:
-		g.told = false
-		return AgreeText
+	case s.Restricted():
+		g.agreeing = false
+		if !g.told {
+			g.told = true
+			return DisagreeText(s.Skew)
+		}
+	case s.State != Unchecked && g.told:
+		if !g.agreeing {
+			g.agreeing, g.agreeAt = true, mono
+		}
+		if mono-g.agreeAt >= AgreeAfter {
+			g.told, g.agreeing = false, false
+			return AgreeText
+		}
 	}
 	return ""
 }

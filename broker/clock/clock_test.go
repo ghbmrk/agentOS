@@ -168,9 +168,15 @@ func TestTIM1RecoveryLiftsRestrictionAndTellsOwner(t *testing.T) {
 	if s := g.Check(bg); s.State != Agreed {
 		t.Fatalf("status = %+v", s)
 	}
+	// The restriction lifts at once; the all-clear waits for AgreeAfter.
 	if _, err := g.Now(bg); err != nil {
 		t.Fatal(err)
 	}
+	if len(r.texts) != 1 {
+		t.Fatalf("all-clear sent early: %q", r.texts)
+	}
+	r.advance(AgreeAfter)
+	g.Check(bg)
 	if len(r.texts) != 2 || r.texts[1] != AgreeText {
 		t.Fatalf("texts = %q", r.texts)
 	}
@@ -186,15 +192,45 @@ func TestTIM1OwnerTextsAreBoundedUnderFlapping(t *testing.T) {
 		g.Check(bg)
 		r.advance(time.Minute)
 	}
-	// One disagreement text and its all-clear within the quiet period.
-	if len(r.texts) != 2 {
-		t.Fatalf("texts = %d %q, want 2", len(r.texts), r.texts)
+	// Agreement never lasted AgreeAfter: one text, and the owner's last
+	// word is still the disagreement, never a stale all-clear.
+	if len(r.texts) != 1 {
+		t.Fatalf("texts = %d %q, want 1", len(r.texts), r.texts)
 	}
-	r.advance(NotifyEvery)
+	r.advance(AgreeAfter)
+	g.Check(bg)
+	if len(r.texts) != 2 || r.texts[1] != AgreeText {
+		t.Fatalf("after steady agreement: texts = %q", r.texts)
+	}
+	// A new disagreement after the all-clear is told again.
 	r.step(time.Hour)
 	g.Check(bg)
 	if len(r.texts) != 3 {
-		t.Fatalf("after quiet period: texts = %q", r.texts)
+		t.Fatalf("new disagreement: texts = %q", r.texts)
+	}
+}
+
+func TestTIM1FlapResetsAllClearWait(t *testing.T) {
+	r := newRig()
+	g := r.guard(t, nil)
+	r.step(time.Hour)
+	g.Check(bg) // disagree: text 1
+	r.step(-time.Hour)
+	g.Check(bg) // agree, wait starts
+	r.advance(AgreeAfter - time.Minute)
+	r.step(time.Hour)
+	g.Check(bg) // disagree again before the all-clear: no new text
+	r.step(-time.Hour)
+	g.Check(bg) // agree, wait restarts
+	r.advance(AgreeAfter - time.Minute)
+	g.Check(bg)
+	if len(r.texts) != 1 {
+		t.Fatalf("texts = %q, want only the disagreement", r.texts)
+	}
+	r.advance(time.Minute)
+	g.Check(bg)
+	if len(r.texts) != 2 || r.texts[1] != AgreeText {
+		t.Fatalf("texts = %q", r.texts)
 	}
 }
 
@@ -277,8 +313,20 @@ func TestTIM1OwnerTextIsPlain(t *testing.T) {
 	g := r.guard(t, nil)
 	g.Check(bg)
 	txt := r.texts[0]
-	if !strings.Contains(txt, "about 3 hours") || len(txt) > 160 {
+	// Two GSM-7 segments at most.
+	if !strings.Contains(txt, "about 3 hours") || !strings.Contains(txt, "Codes and STOP work as usual.") || len(txt) > 306 {
 		t.Fatalf("text = %q (%d chars)", txt, len(txt))
+	}
+	if strings.Contains(txt, "time-zone") {
+		t.Fatalf("3h04m is not zone-shaped: %q", txt)
+	}
+	for _, skew := range []time.Duration{3 * time.Hour, -5*time.Hour - 30*time.Minute - 40*time.Second, 45*time.Minute + 50*time.Second} {
+		if got := DisagreeText(skew); !strings.Contains(got, "time-zone error") || len(got) > 306 {
+			t.Errorf("DisagreeText(%v) = %q", skew, got)
+		}
+	}
+	if got := DisagreeText(7 * time.Minute); strings.Contains(got, "time-zone") {
+		t.Errorf("7m is not zone-shaped: %q", got)
 	}
 	for skew, want := range map[time.Duration]string{
 		7 * time.Minute:       "about 7 minutes",
@@ -330,5 +378,39 @@ func TestTIM1LosingTheCarrierDoesNotLiftRestriction(t *testing.T) {
 	}
 	if len(r.texts) != 1 {
 		t.Fatalf("texts = %q", r.texts)
+	}
+}
+
+func TestTIM1StatusLine(t *testing.T) {
+	r := newRig()
+	g := r.guard(t, nil)
+	if got := g.Status().Line(time.UTC); got != "Time check: not checked." {
+		t.Fatalf("line = %q", got)
+	}
+	g.Check(bg)
+	if got := g.Status().Line(time.UTC); !strings.Contains(got, "agree") {
+		t.Fatalf("line = %q", got)
+	}
+	r.carrier = r.carrier.Add(-3 * time.Hour)
+	g.Check(bg) // restricted at 04:00 UTC
+	r.advance(10 * time.Minute)
+	g.Check(bg)
+	got := g.Status().Line(time.FixedZone("x", 2*3600))
+	if got != "Time check: restricted since 06:00 (box and phone network differ by about 3 hours)." {
+		t.Fatalf("line = %q", got)
+	}
+	r.mu.Lock()
+	r.carrier = time.Time{}
+	r.mu.Unlock()
+	r.synced = false
+	g = r.guard(t, nil)
+	g.Check(bg)
+	if got := g.Status().Line(time.UTC); got != "Time check: not checked." {
+		t.Fatalf("line = %q", got)
+	}
+	r.synced = true
+	g.Check(bg)
+	if got := g.Status().Line(time.UTC); !strings.Contains(got, "network only") {
+		t.Fatalf("line = %q", got)
 	}
 }
