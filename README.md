@@ -11,7 +11,7 @@ A computer for delegated work. Frontier AI you already pay for does the reasonin
 | [BOARD.md](BOARD.md) | Current work packages and their states. |
 | [LEDGER.md](LEDGER.md) | Model-usage budget, allocated vs spent. |
 | [DECISIONS.md](DECISIONS.md) | Decisions with dates and evidence. |
-| [TRACE.md](TRACE.md) | Generated: which tests cover which requirement IDs. |
+| [TRACE.md](TRACE.md) | Generated on main after each merge: which tests cover which requirement IDs. |
 | [CLAUDE.md](CLAUDE.md) | Rules for the AI agents that build this repository. |
 
 No license has been chosen yet; all rights reserved until one is (spec OSS-12).

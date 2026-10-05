@@ -1,5 +1,14 @@
 {
-  "note": "Every network endpoint AgentOS code may contact, classed per SPEC.md §2. Checked by tools/depaudit.py (A9). Adding an endpoint is a reviewed change: inherent and commodity endpoints must be justified against §2; optional ones must be removable (DEP-3). AgentOS-operated endpoints are forbidden (DEP-2) and cannot be declared.",
-  "forbidden_host_patterns": ["*agentos*"],
-  "endpoints": []
+  "note": "Every network endpoint AgentOS code may contact, classed per SPEC.md \u00a72. Checked by tools/depaudit.py (A9). Adding an endpoint is a reviewed change: inherent and commodity endpoints must be justified against \u00a72; optional ones must be removable (DEP-3). AgentOS-operated endpoints are forbidden (DEP-2) and cannot be declared.",
+  "forbidden_host_patterns": [
+    "*agentos*"
+  ],
+  "endpoints": [],
+  "inert_literals": [
+    {
+      "file": "broker/vendor/rsc.io/qr/png.go",
+      "host": "qr.swtch.com",
+      "why": "PNG tEXt metadata string in rsc.io/qr's PNG writer, which AgentOS does not call; never contacted (P2-2)."
+    }
+  ]
 }
