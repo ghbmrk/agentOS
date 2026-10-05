@@ -46,6 +46,12 @@ type learning struct {
 	// builder is Loop 1's: the skill compiler for repeated trajectories,
 	// in-process since it calls no model (W3 step 3a).
 	builder loops.BySignal
+	// values are the guest's task values, for the compiler only
+	// (W3-values); mining is the journal everything else in Loop 1 reads,
+	// which keeps none (security V3).
+	values   *taskValues
+	mining   lateReader
+	observed chan journal.Intent
 	// verdicts queues the gate's owner verdicts for harvesting, so a slow
 	// learning plane never holds the gate (security A2 on PW3).
 	verdicts chan grants.OwnerOutcome
@@ -110,14 +116,18 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	// the daemon redacts all free text: a trajectory holding the mark is
 	// never compiled, so it builds nothing until the journal keeps values
 	// (W3 step 3b).
-	comp, err := compile.New(compile.Config{Journal: lateReader{&l.eng}, Cases: l.pipe, Redacted: journalRedacted})
+	if l.values, err = openTaskValues(change.FileStore{Path: filepath.Join(p.Dir, "values.json")}, filepath.Join(p.Dir, "values.key"), time.Now, log.Printf); err != nil {
+		return nil, err
+	}
+	l.mining = lateReader{&l.eng}
+	comp, err := compile.New(compile.Config{Journal: valuedJournal{l.mining, l.values}, Cases: l.pipe, Redacted: journalRedacted})
 	if err != nil {
 		return nil, err
 	}
 	l.builder = loops.BySignal{loops.SignalRepeat: compile.LoopBuilder{C: comp}}
 	learn, err := loops.NewLearn(loops.LearnConfig{
 		Pipeline:   l.pipe,
-		Journal:    lateReader{&l.eng},
+		Journal:    l.mining,
 		Harvest:    l.harvest,
 		Builder:    l.builder,
 		Router:     router,
@@ -159,6 +169,20 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	// The owner's verdicts on the agent's effects become Loop 1's cases
 	// (loops L6; potency PW3 on #90). Set last, once nothing
 	// can fail, so a plane that did not open has no hook (security F1).
+	// The guest's task values reach the compiler from the gate, as the
+	// guest wrote them, only while learning is on (W3-values; security
+	// V1, UX-S3-2); a full queue drops, never holds the gate.
+	l.observed = make(chan journal.Intent, maxObserved)
+	cfg.Grants.Observe = func(in journal.Intent) {
+		if !strings.HasPrefix(in.Origin, "guest:") || !l.learningOn() {
+			return
+		}
+		select {
+		case l.observed <- in:
+		default:
+			log.Printf("learning: task values not kept: queue full")
+		}
+	}
 	l.verdicts = make(chan grants.OwnerOutcome, maxVerdicts)
 	cfg.Grants.Outcome = func(o grants.OwnerOutcome) {
 		select {
@@ -266,6 +290,8 @@ func (l *learning) attach(ctx context.Context, d *daemon.Daemon) {
 					}()
 					l.record(o)
 				}()
+			case in := <-l.observed:
+				l.values.observe(in)
 			}
 		}
 	}()
@@ -283,8 +309,11 @@ func (l *learning) delivered(goal, text string, public bool) {
 	}
 }
 
-// record harvests an owner verdict as a Loop 1 case (loops L6).
+// record harvests an owner verdict as a Loop 1 case (loops L6). The goal's
+// task values follow the verdict whether learning is on or not, so a NO
+// drops them.
 func (l *learning) record(o grants.OwnerOutcome) {
+	l.values.verdict(o)
 	if l.learningOn() {
 		harvestOutcome(l.cases, l.tasks, o, log.Printf)
 	}
