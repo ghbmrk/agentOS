@@ -13,7 +13,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/owner"
 )
 
-// REQ: ONB-7, ONB-1, CH-4, CRED-8, CH-7
+// REQ: ONB-7, ONB-1, CH-4, CRED-8, CH-7, HW-8
 
 // detRand is a deterministic source for tests only.
 func detRand(seed int64) *rand.Rand { return rand.New(rand.NewSource(seed)) }
@@ -203,6 +203,28 @@ func assertSelfContained(t *testing.T, page string) {
 	}
 	if strings.Contains(page, "<script") {
 		t.Fatal("card has a script")
+	}
+}
+
+// ONB-7, HW-8: the quick-start says the PC's own disks are left alone,
+// and the card never mentions BitLocker, Secure Boot, or firmware
+// settings: starting from the drive uses the one-time boot key only.
+func TestCardLeavesTheHostAlone(t *testing.T) {
+	out, err := HTML(mustGen(t, 4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(QuickStart, " "), "Your PC's own disks are left untouched.") {
+		t.Error("quick-start does not say the PC's disks are left untouched")
+	}
+	low := strings.ToLower(string(out))
+	for _, bad := range []string{"bitlocker", "secure boot", "bios", "uefi", "firmware", "boot order", "settings"} {
+		if strings.Contains(low, bad) {
+			t.Errorf("card mentions %q", bad)
+		}
+	}
+	if !strings.Contains(low, "press its boot key until a menu appears; choose the usb drive") {
+		t.Error("card does not give the one-time boot key")
 	}
 }
 
