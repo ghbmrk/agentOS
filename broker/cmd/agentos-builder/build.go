@@ -11,6 +11,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/skill/format"
@@ -137,7 +138,9 @@ func (b *builder) submit(ctx context.Context, files map[string]string) (bool, er
 
 // giveUp tells the broker there is nothing to submit, so the job ends now.
 func (b *builder) giveUp(ctx context.Context) {
-	if _, _, err := b.post(context.WithoutCancel(ctx), "/done", nil); err != nil {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if _, _, err := b.post(ctx, "/done", nil); err != nil {
 		b.logf("builder: /done: %v", err)
 	}
 }

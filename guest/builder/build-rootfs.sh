@@ -10,6 +10,11 @@
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../.." && pwd)
+# A fresh directory only: the image is exactly what this script writes.
+if [ -e "$1" ] && [ -n "$(ls -A "$1")" ]; then
+	echo "build-rootfs.sh: $1 is not empty" >&2
+	exit 1
+fi
 out=$(mkdir -p "$1" && cd "$1" && pwd)
 
 cd "$out"

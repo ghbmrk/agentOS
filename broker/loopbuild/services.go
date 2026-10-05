@@ -237,7 +237,7 @@ func (b *Builder) open(id string) (string, error) {
 	s.srv = &http.Server{
 		Handler:           s.handler(),
 		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
+		ReadTimeout:       readTimeout,
 		IdleTimeout:       15 * time.Second,
 		BaseContext:       func(net.Listener) context.Context { return context.Background() },
 	}
@@ -428,6 +428,10 @@ func admit(sub Submission, ns string) (map[string][]byte, error) {
 	}
 	return out, nil
 }
+
+// readTimeout bounds reading one request, body included (L3 MUST 2 on
+// #126). A variable so a test can shorten it.
+var readTimeout = 30 * time.Second
 
 // limitListener accepts at most n open connections; past that, Accept
 // waits until one closes, so connections beyond the cap wait in the
