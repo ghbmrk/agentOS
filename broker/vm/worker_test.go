@@ -5,6 +5,7 @@ package vm
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -468,5 +469,65 @@ func TestCAP1PreemptedCommandIsNotAFailure(t *testing.T) {
 	}
 	if _, err := e.m.Exec(bg, "wk-1", Command{Argv: []string{"echo"}, As: Public}, time.Second); !errors.Is(err, ErrPreempted) {
 		t.Fatalf("command on a preempted worker = %v", err)
+	}
+}
+
+// A runtime that reports the kill as exit 137 with no error still reads
+// preempted, not a failed exit (L3 nit 5 on #158).
+func TestCAP1PreemptedExit137IsNotAFailure(t *testing.T) {
+	e := newEnv(t, 4096)
+	agent := e.create("agent", admission.Experiment, 500)
+	_, err := e.m.CreateWorker(bg, "wk-1", agent.Lineage, workerSpec(Public))
+	must(t, err)
+	done := make(chan error, 1)
+	go func() {
+		r, err := e.m.Exec(bg, "wk-1", Command{Argv: []string{"killed"}, As: Public}, 10*time.Minute)
+		if err == nil {
+			err = fmt.Errorf("exit %d", r.ExitCode)
+		}
+		done <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+	must(t, e.m.Preempt("wk-1"))
+	if err := <-done; !errors.Is(err, ErrPreempted) {
+		t.Fatalf("killed command = %v, want ErrPreempted", err)
+	}
+}
+
+// ForkBase is written under the table lock as well as the machine's, so
+// ForkSiblings, which takes only the table lock, races with neither a
+// fork nor erasure (run with -race; L3 nit 1 on #158).
+func TestCAP1ForkSiblingsReadsForkBaseUnderTheTableLock(t *testing.T) {
+	e := newEnv(t, 8192)
+	agent := e.create("agent", admission.Experiment, 500)
+	_, err := e.m.CreateWorker(bg, "wk-src", agent.Lineage, workerSpec(Public))
+	must(t, err)
+	since := time.Now()
+	stop := make(chan struct{})
+	read := make(chan struct{})
+	go func() {
+		defer close(read)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				e.m.ForkSiblings("wk-a")
+				e.m.ForkSiblings("wk-src")
+			}
+		}
+	}()
+	_, err = e.m.Fork(bg, "wk-src", []string{"wk-a", "wk-b"})
+	must(t, err)
+	base, sibs, err := e.m.ForkSiblings("wk-a")
+	must(t, err)
+	if base == "" || fmt.Sprint(sibs) != "[wk-b]" {
+		t.Fatalf("siblings of wk-a = %q %v", base, sibs)
+	}
+	must(t, e.m.ForgetSince(bg, agent.Lineage, since)) // clears the fork bases
+	close(stop)
+	<-read
+	if base, _, _ := e.m.ForkSiblings("wk-a"); base != "" {
+		t.Fatalf("fork base %q survived erasure", base)
 	}
 }

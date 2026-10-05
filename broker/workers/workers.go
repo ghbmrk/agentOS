@@ -453,7 +453,7 @@ func (t *Tools) run(ctx context.Context, c caller, name string, cmd vm.Command, 
 	if errors.Is(err, vm.ErrPreempted) {
 		// A speculative branch cut short is not a failing test (potency
 		// R1 on #158).
-		return vm.ExecResult{}, fmt.Errorf("preempted, retry: worker %s was stopped for higher-priority work, so the command has no result (it did not fail); roll the worker back to a snapshot with worker_rollback and run it again", name)
+		return vm.ExecResult{}, fmt.Errorf("preempted, retry: worker %s was stopped for higher-priority work, so the command has no result (it did not fail); roll the worker back to a snapshot with worker_rollback, or destroy and recreate it, and run it again", name)
 	}
 	if err != nil {
 		return vm.ExecResult{}, workerErr(name, err)
@@ -961,17 +961,23 @@ func (t *Tools) keep(ctx context.Context, c caller, raw json.RawMessage) (any, e
 		return nil, err
 	}
 	// A fork still starting has no ForkBase yet, so keep would miss it
-	// (L3 SHOULD-5 on #158).
+	// (L3 SHOULD-5 on #158). The siblings are read under the same lock
+	// that reserves new workers, so none can start between the check and
+	// the read (L3 nit 3 on #158).
 	t.mu.Lock()
 	starting := false
 	for _, l := range t.pending {
 		starting = starting || l == c.lineage
 	}
+	var base string
+	var sibs []string
+	if !starting {
+		base, sibs, err = t.M.ForkSiblings(id)
+	}
 	t.mu.Unlock()
 	if starting {
-		return nil, errors.New("workers are still starting; keep the winner once worker_fork returns")
+		return nil, errors.New("some of your workers are still starting; keep the winner once worker_create or worker_fork returns")
 	}
-	base, sibs, err := t.M.ForkSiblings(id)
 	if err != nil {
 		return nil, errNoWorker
 	}
@@ -981,7 +987,9 @@ func (t *Tools) keep(ctx context.Context, c caller, raw json.RawMessage) (any, e
 	t.touch(id)
 	destroyed := []string{}
 	for _, sid := range sibs {
-		if err := t.M.Destroy(ctx, sid); err != nil {
+		if err := t.M.Destroy(ctx, sid); errors.Is(err, vm.ErrUnknown) {
+			continue // already gone (L3 nit 2 on #158)
+		} else if err != nil {
 			// Call returns no answer with an error, so the error says what
 			// went (L3 SHOULD-8 on #158).
 			err = workerErr(nameOf(c.lineage, sid), err)
