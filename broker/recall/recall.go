@@ -664,11 +664,10 @@ func (ix *Index) Delete(ids ...string) (DeleteReport, error) {
 	removed := map[string]Item{}
 	for _, id := range all {
 		if e := ix.items[id]; e != nil {
-			it, err := ix.readItem(e)
-			if err != nil {
-				ix.mu.Unlock()
-				return DeleteReport{}, err
-			}
+			// An unreadable item is still deleted: its tombstone is
+			// written, its segment rewritten without it, and its source
+			// reported empty.
+			it, _ := ix.readItem(e)
 			removed[id] = it
 		}
 	}

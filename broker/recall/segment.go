@@ -169,8 +169,18 @@ func (ix *Index) putLocked(items []*Item) error {
 		}
 		off, err := ix.dir.Append(ix.active, buf)
 		if err != nil {
-			// A failed append may leave a partial line: write elsewhere.
-			ix.active++
+			// A failed append may have left whole or partial lines on disk
+			// that memory does not know, so a later deletion would not
+			// erase them (CAP-3). Cut the segment back to what memory
+			// knows; if that fails too, write elsewhere and keep the
+			// segment marked for erase, which blocks tombstone pruning
+			// until it succeeds.
+			ix.unerased[ix.active] = true
+			if rerr := ix.rewriteSeg(ix.active); rerr == nil {
+				delete(ix.unerased, ix.active)
+			} else {
+				ix.active++
+			}
 			return err
 		}
 		si := ix.seg(ix.active)

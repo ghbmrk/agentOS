@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -203,3 +204,60 @@ func (g *mailGen) item(i int) Item {
 }
 
 func (g *mailGen) query() string { return g.vocab[40] + " " + g.vocab[900] + " " + g.vocab[5000] }
+
+// R8: int8 vectors keep vector ranking close to float32. Over synthetic
+// mail, the top 10 by quantized cosine overlap the float top 10 by at
+// least 0.85 on average (measured 0.88 in review of #51).
+func TestInt8RankingAccuracy(t *testing.T) {
+	g := newMailGen(7)
+	const n, queries, k = 1000, 40, 10
+	texts := make([]string, n)
+	for i := range texts {
+		texts[i] = g.item(i).Text
+	}
+	var emb HashEmbedder
+	vs, err := emb.Embed(texts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	qs := make([][]int8, n)
+	qn := make([]float32, n)
+	for i, v := range vs {
+		qs[i], _ = quantize(v)
+		qn[i] = normQ(qs[i])
+	}
+	top := func(score func(i int) float64) map[int]bool {
+		idx := make([]int, n)
+		for i := range idx {
+			idx[i] = i
+		}
+		sort.SliceStable(idx, func(a, b int) bool { return score(idx[a]) > score(idx[b]) })
+		out := map[int]bool{}
+		for _, i := range idx[:k] {
+			out[i] = true
+		}
+		return out
+	}
+	total := 0.0
+	for q := 0; q < queries; q++ {
+		qv, err := emb.Embed([]string{g.words(3)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		a, an := qv[0], norm(qv[0])
+		exact := top(func(i int) float64 { return cosine(a, vs[i]) })
+		approx := top(func(i int) float64 { return cosineQ(a, an, qs[i], qn[i]) })
+		hit := 0
+		for i := range approx {
+			if exact[i] {
+				hit++
+			}
+		}
+		total += float64(hit) / k
+	}
+	if avg := total / queries; avg < 0.85 {
+		t.Fatalf("int8 top-%d overlap %.3f, floor 0.85", k, avg)
+	} else {
+		t.Logf("int8 top-%d overlap %.3f", k, avg)
+	}
+}

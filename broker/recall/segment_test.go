@@ -187,3 +187,110 @@ func TestSupersededVersionsCompacted(t *testing.T) {
 		t.Fatalf("after compaction: %d results", len(rs))
 	}
 }
+
+// appendFailDir fails appends after writing all of the data (a failed
+// fsync) or half of it (a partial write), and rewrites while rewriteFail.
+type appendFailDir struct {
+	*MemDir
+	appendFail, partial, rewriteFail bool
+}
+
+func (f *appendFailDir) Append(n uint32, data []byte) (int64, error) {
+	if !f.appendFail {
+		return f.MemDir.Append(n, data)
+	}
+	if f.partial {
+		data = data[:len(data)/2]
+	}
+	f.MemDir.Append(n, data)
+	return 0, errors.New("fsync failed")
+}
+
+func (f *appendFailDir) Rewrite(n uint32, data []byte) error {
+	if f.rewriteFail {
+		return errors.New("disk full")
+	}
+	return f.MemDir.Rewrite(n, data)
+}
+
+// A failed append leaves nothing memory does not know in a live segment,
+// so the item can neither come back on reopen nor outlive its deletion,
+// even after the tombstone is pruned (CAP-3, review of #51). If cutting
+// the segment back fails too, the segment stays marked for erase and
+// tombstones are not pruned until it is erased.
+func TestFailedAppendLeavesNothingBehind(t *testing.T) {
+	for _, tc := range []struct {
+		name                 string
+		partial, cutBackFail bool
+	}{{"fsync", false, false}, {"partial", true, false}, {"fsync, cut back fails", false, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+			st := &appendFailDir{MemDir: NewMemDir()}
+			ix := open(t, st, WithKeyer(testKeyer(t)), WithClock(func() time.Time { return now }))
+			mustIngest(t, ix, Item{Source: Source{Kind: "file", Ref: "/keep"}, Text: "kept item"})
+			st.appendFail, st.partial, st.rewriteFail = true, tc.partial, tc.cutBackFail
+			src := Source{Kind: "mail", Ref: "<z@x>"}
+			if _, err := ix.Ingest(Item{Source: src, Text: "zebracanary synthetic"}); err == nil {
+				t.Fatal("failed append reported success")
+			}
+			st.appendFail = false
+			if _, err := ix.DeleteSource("mail", "", "<z@x>"); err != nil && !tc.cutBackFail {
+				t.Fatal(err)
+			}
+			now = now.Add(40 * 24 * time.Hour)
+			if tc.cutBackFail {
+				if _, err := ix.PruneTombstones(30 * 24 * time.Hour); err == nil {
+					t.Fatal("tombstones pruned while a segment holds unerased content")
+				}
+				st.rewriteFail = false
+			}
+			if _, err := ix.PruneTombstones(30 * 24 * time.Hour); err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(st.Bytes()), "zebracanary") {
+				t.Fatal("content of a failed append remains on the medium")
+			}
+			re := open(t, st, WithKeyer(testKeyer(t)))
+			if rs := re.Lookup(Query{Text: "zebracanary"}); len(rs) != 0 || re.Len() != 1 {
+				t.Fatalf("after reopen: %d results, %d items", len(rs), re.Len())
+			}
+			// Ingest works again afterwards.
+			mustIngest(t, re, Item{Source: Source{Kind: "file", Ref: "/after"}, Text: "after"})
+		})
+	}
+}
+
+// An item whose stored line cannot be read is still deleted: tombstone
+// written, bytes erased, nothing returned for it (CAP-3, review of #51).
+func TestUnreadableItemIsStillDeleted(t *testing.T) {
+	path := t.TempDir()
+	st, err := OpenDir(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ix := open(t, st, WithKeyer(testKeyer(t)))
+	id := mustIngest(t, ix, Item{Source: Source{Kind: "mail", Ref: "<c@x>"}, Text: "yakcanary synthetic"})
+	mustIngest(t, ix, Item{Source: Source{Kind: "file", Ref: "/keep"}, Text: "kept item"})
+	segs, _ := st.Segments()
+	data, err := st.ReadSegment(segs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := strings.Index(string(data), "yakcanary")
+	data[i-2] = 0 // break the line's JSON just before the text
+	if err := st.Rewrite(segs[0], data); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ix.Delete(id); err != nil {
+		t.Fatalf("delete of an unreadable item: %v", err)
+	}
+	if _, ok := ix.Get(id); ok {
+		t.Fatal("item still present")
+	}
+	if strings.Contains(string(readDir(t, path)), "yakcanary") {
+		t.Fatal("bytes of the deleted item remain")
+	}
+	if ix.Len() != 1 {
+		t.Fatalf("other items: %d", ix.Len())
+	}
+}
