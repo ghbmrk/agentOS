@@ -178,6 +178,8 @@ type rig struct {
 	// boot is what the next open's owner channel hands back as carried
 	// over a restart (owner Boot calling Reissue).
 	boot []owner.Carried
+	// execs are more executors to register, such as the change pipeline.
+	execs map[string]journal.Executor
 }
 
 func (r *rig) now() time.Time {
@@ -192,9 +194,12 @@ func (r *rig) advance(d time.Duration) {
 	r.cmu.Unlock()
 }
 
-func newRig(t *testing.T, edit func(*Config)) *rig {
+func newRig(t *testing.T, edit func(*Config)) *rig { return newRigExecs(t, edit, nil) }
+
+// newRigExecs is newRig with more executors registered on the engine.
+func newRigExecs(t *testing.T, edit func(*Config), execs map[string]journal.Executor) *rig {
 	r := &rig{t: t, store: &journal.MemStore{}, clock: time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC),
-		exec: &fakeExec{ran: map[string]int{}}, ver: &fakeVerifier{records: map[string]Verified{}}}
+		exec: &fakeExec{ran: map[string]int{}}, ver: &fakeVerifier{records: map[string]Verified{}}, execs: execs}
 	r.cfg = Config{Declared: map[string]map[string]string{"mail": mailOps(), "cal": {"event.add": "draft"}}, Verifiers: map[string]Verifier{"mail": r.ver}, LocalUI: true, Now: r.now}
 	if edit != nil {
 		edit(&r.cfg)
@@ -218,8 +223,11 @@ func (r *rig) open() {
 func (r *rig) openWith(mk func() Owner) {
 	r.t.Helper()
 	r.g = New(r.cfg)
-	eng, err := journal.Open(r.store, r.g, map[string]journal.Executor{"mail": r.exec, ExecutorName: r.g},
-		func(s string) string { return s }, journal.WithClock(r.now))
+	execs := map[string]journal.Executor{"mail": r.exec, ExecutorName: r.g}
+	for k, x := range r.execs {
+		execs[k] = x
+	}
+	eng, err := journal.Open(r.store, r.g, execs, func(s string) string { return s }, journal.WithClock(r.now))
 	if err != nil {
 		r.t.Fatal(err)
 	}

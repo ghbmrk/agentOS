@@ -52,6 +52,30 @@ type Owner interface {
 	Inform(text string) error
 }
 
+// Changes is the change pipeline (change.Pipeline) as the gate uses it:
+// the policy for meta.change.* intents (change C8). The gate does not
+// import the pipeline: its dependencies are outside the control path
+// (ARC-2).
+type Changes interface {
+	// Check returns nil to allow, change.ErrNeedsOwner itself (an error
+	// whose NeedsOwner() is true, not wrapped or joined) to ask the owner,
+	// and any other error to deny.
+	Check(ctx context.Context, phase journal.Phase, in journal.Intent) error
+	// Line is the approval item for an intent Check sends to the owner:
+	// verb, object, detail, how to reverse it, and its kind. The gate sets
+	// Ref, keeps it free of recipients and amounts, and treats any kind
+	// but Ordinary as GrantChange (high tier). Verb "install" marks the
+	// adoption of a release, which also needs the local page (CH-3).
+	Line(in journal.Intent) (owner.Item, error)
+	// Decided is called once the owner's request for a change intent has
+	// closed, answered or not (change C7); declined is true only when the
+	// owner said NO.
+	Decided(ctx context.Context, in journal.Intent, declined bool)
+}
+
+// changeAction reports a change pipeline action.
+func changeAction(action string) bool { return strings.HasPrefix(action, "meta.change.") }
+
 // Verifier reads, from the source system, the fields of one intent that
 // the owner judges and pre-allowances test (CH-10, ADP-9). An account's
 // adapter supplies it. The agent's claims never fill these fields.
@@ -99,6 +123,8 @@ type Config struct {
 	// egress). It is keyed by machine, not lineage, so a fork of a
 	// composer is not one. Nil: none is, so reply rules never match.
 	Isolated func(machine string) bool
+	// Changes decides meta.change.* intents. Nil: they are denied.
+	Changes Changes
 	// Coalesce, CoalesceIdle, and RequestsPerHour pace approval requests
 	// (CH-15); zero takes the defaults. Urgent marks owner-defined urgent
 	// items, sent at once and in quiet hours. Quiet reports the owner's
@@ -274,7 +300,7 @@ func (g *Gate) reissueDue() {
 			g.closeIntent(c.Ref, "the approval request expired; ask again with a new request_id")
 			continue
 		}
-		v := g.evaluate(ctx, st.Intent)
+		v := g.evaluate(ctx, journal.PhaseAuthorize, st.Intent)
 		if v.kind != ask || owner.ItemSum(v.item) != c.Sum {
 			// OP-3 at re-issue: what the owner was asked no longer
 			// holds, so it is not re-sent.
@@ -363,6 +389,7 @@ type verdict struct {
 	why   string
 	item  owner.Item
 	local bool
+	hold  bool // waits for the local page without texting the owner
 	reply *owner.AutoReply
 }
 
@@ -370,9 +397,9 @@ type verdict struct {
 // an undeclared operation, a malformed grant, or narrowing from anyone
 // but the owner. Every irreversible effect that no pre-allowance covers
 // is asked of the owner (REV-2).
-func (g *Gate) evaluate(ctx context.Context, in journal.Intent) verdict {
+func (g *Gate) evaluate(ctx context.Context, phase journal.Phase, in journal.Intent) verdict {
 	if in.Account == journal.BrokerAccount {
-		return g.evaluateBroker(in)
+		return g.evaluateBroker(ctx, phase, in)
 	}
 	// Reasons are fixed wording: a guest reads them back through
 	// effect_status, so they never echo what a guest wrote (REV-5).
@@ -518,9 +545,12 @@ func (g *Gate) matches(r Rule, in journal.Intent, v Verified) error {
 }
 
 // evaluateBroker decides broker-state intents (OP-5).
-func (g *Gate) evaluateBroker(in journal.Intent) verdict {
+func (g *Gate) evaluateBroker(ctx context.Context, phase journal.Phase, in journal.Intent) verdict {
 	if strings.HasPrefix(in.Origin, "guest:") {
 		return verdict{kind: deny, why: "broker actions are not available to agents"}
+	}
+	if changeAction(in.Action) {
+		return g.evaluateChange(ctx, phase, in)
 	}
 	switch in.Action {
 	case journal.ActionGrantChange:
@@ -554,6 +584,57 @@ func (g *Gate) evaluateBroker(in journal.Intent) verdict {
 	return verdict{kind: deny, why: "this broker action is not handled here"}
 }
 
+// evaluateChange delegates a meta.change.* intent to the change pipeline
+// (change C8). What the pipeline's standing rules allow runs; what only the
+// owner may allow is a high-tier request whose line the pipeline renders
+// from broker-known fields; anything else is denied with the pipeline's
+// reason, which only the owner and the pipeline can read (no guest reaches
+// this point).
+func (g *Gate) evaluateChange(ctx context.Context, phase journal.Phase, in journal.Intent) verdict {
+	if g.cfg.Changes == nil {
+		return verdict{kind: deny, why: "the change pipeline is not running"}
+	}
+	err := g.cfg.Changes.Check(ctx, phase, in)
+	// Only the sentinel itself asks: an error that wraps or joins it with
+	// a refusal denies (fails closed).
+	no, ok := err.(interface{ NeedsOwner() bool })
+	switch {
+	case err == nil:
+		return verdict{kind: allow}
+	case !ok || !no.NeedsOwner():
+		return verdict{kind: deny, why: err.Error()}
+	}
+	l, err := g.cfg.Changes.Line(in)
+	if err != nil {
+		return verdict{kind: deny, why: err.Error()}
+	}
+	local := sharingOn(in)
+	if local && !g.cfg.LocalUI {
+		return verdict{kind: deny, why: "turning sharing on needs confirmation on the box's local page, which this build does not have yet (CHG-4)"}
+	}
+	hold := false
+	if l.Facts.Verb == "install" {
+		// Adopting a release needs the code and the local page (CH-3).
+		// Without the page it is held, not denied, so the box can still
+		// take a security fix once the page exists; no code is texted
+		// for a request that cannot complete.
+		local, hold = true, !g.cfg.LocalUI
+	}
+	kind := owner.GrantChange
+	if l.Facts.Kind == owner.Ordinary && !local {
+		kind = owner.Ordinary // a tested, undoable learned change: low tier
+	}
+	return verdict{kind: ask, local: local, hold: hold, item: owner.Item{Ref: in.ID, Object: l.Object, Detail: l.Detail, UndoBy: l.UndoBy,
+		Facts: owner.Facts{Kind: kind, Verb: l.Facts.Verb, NoRecipient: true}}}
+}
+
+// sharingOn reports the intent that turns sharing on: it changes what
+// leaves the box (CHG-4, CHG-5), so like a grant it also needs the local
+// page (CH-3). Turning learning on, or any setting off, needs only the code.
+func sharingOn(in journal.Intent) bool {
+	return in.Action == "meta.change.policy" && strings.HasSuffix(in.ID, ":sharing:on")
+}
+
 // Check is the journal policy (OP-3): it runs at authorize and again
 // immediately before dispatch.
 func (g *Gate) Check(ctx context.Context, phase journal.Phase, in journal.Intent) error {
@@ -567,7 +648,7 @@ func (g *Gate) Check(ctx context.Context, phase journal.Phase, in journal.Intent
 	if decided && !d.approved {
 		return errors.New("not approved: " + d.why)
 	}
-	v := g.evaluate(ctx, in)
+	v := g.evaluate(ctx, phase, in)
 	switch v.kind {
 	case deny:
 		return errors.New(v.why)
@@ -632,12 +713,12 @@ func (g *Gate) Authorize(ctx context.Context, id string) (journal.Status, error)
 	case decided:
 		return g.eng.Authorize(ctx, id)
 	}
-	v := g.evaluate(ctx, st.Intent)
+	v := g.evaluate(ctx, journal.PhaseAuthorize, st.Intent)
 	switch v.kind {
 	case deny, allow:
 		return g.eng.Authorize(ctx, id)
 	case ask:
-		onlyUI := !owner.SMSApprovable(v.item)
+		onlyUI := !owner.SMSApprovable(v.item) || v.hold
 		g.mu.Lock()
 		fresh := g.waiting[id] == nil
 		if fresh {
@@ -654,7 +735,11 @@ func (g *Gate) Authorize(ctx context.Context, id string) (journal.Status, error)
 		delete(g.failed, id)
 		own := g.own
 		g.mu.Unlock()
-		if fresh && onlyUI && own != nil {
+		if fresh && v.hold && own != nil {
+			// Arbitrator Q1 on #48: one fixed line, no code.
+			_ = own.Inform("Waiting for your confirmation on the box's local page, or your recovery key.")
+		}
+		if fresh && onlyUI && !v.hold && own != nil {
 			// Recipients that cannot be shown in full are never approved
 			// by text (CH-10, CH-12).
 			n := len(strings.Split(v.item.Recipient, ","))
@@ -871,6 +956,10 @@ func (g *Gate) Flush() {
 // Decide). An approval settles only the request it answers; a denial for
 // an intent this run never asked about (a restart's) still closes it.
 func (g *Gate) Decide(d owner.Decision) {
+	if !d.Approved && d.Why != "owner" && g.isChange(d.Ref) {
+		g.lapse(d)
+		return
+	}
 	g.mu.Lock()
 	w := g.waiting[d.Ref]
 	if w == nil && (d.Approved || g.eng == nil) {
@@ -902,15 +991,57 @@ func (g *Gate) Decide(d owner.Decision) {
 	}
 }
 
+// isChange reports a pending change pipeline intent.
+func (g *Gate) isChange(id string) bool {
+	g.mu.Lock()
+	eng := g.eng
+	g.mu.Unlock()
+	if eng == nil {
+		return false
+	}
+	st, err := eng.Get(id)
+	return err == nil && st.State == journal.Pending && st.Intent.Account == journal.BrokerAccount && changeAction(st.Intent.Action)
+}
+
+// lapse closes the owner's request for a change intent that ended without
+// the owner's answer: expired, voided by wrong codes, left out of a partial
+// YES, or dropped by a restart (change C7). The pipeline drops its
+// proposal without recording a decline, then the intent closes as "lapsed,
+// not declined" (arbitrator Q3 on #48): it never runs, the owner channel
+// lists the expired item in the digest (CH-13), and neither learning nor
+// Loop 1's backoff reads silence as a rejection. Only the owner's NO is a
+// decline.
+func (g *Gate) lapse(d owner.Decision) {
+	g.mu.Lock()
+	w := g.waiting[d.Ref]
+	if w != nil && w.request != "" && d.Request != w.request {
+		g.mu.Unlock()
+		return
+	}
+	delete(g.waiting, d.Ref)
+	eng := g.eng
+	g.mu.Unlock()
+	if st, err := eng.Get(d.Ref); err == nil && g.cfg.Changes != nil {
+		g.cfg.Changes.Decided(context.Background(), st.Intent, false)
+	}
+	g.closeIntent(d.Ref, lapsed)
+}
+
+// lapsed is the reason a change request closed without the owner's answer.
+const lapsed = "lapsed, not declined: the owner did not answer"
+
 // ConfirmLocal records the owner's confirmation on the local page for a
-// grant intent (CH-3). The local UI (P2-2) calls it after showing
+// grant intent (CH-3), or for a change that needs it: turning sharing on
+// or adopting a release (GR17). The local UI (P2-2) calls it after showing
 // Describe; the code and the confirmation may come in either order.
 func (g *Gate) ConfirmLocal(id string) error {
 	st, err := g.eng.Get(id)
 	if err != nil {
 		return err
 	}
-	if st.State != journal.Pending || st.Intent.Account != journal.BrokerAccount || st.Intent.Action != journal.ActionGrantChange {
+	if st.State != journal.Pending || st.Intent.Account != journal.BrokerAccount ||
+		(st.Intent.Action != journal.ActionGrantChange && !(changeAction(st.Intent.Action) &&
+			g.evaluate(context.Background(), journal.PhaseAuthorize, st.Intent).local)) {
 		return errors.New("grants: nothing to confirm for " + clip(id))
 	}
 	g.mu.Lock()
@@ -930,6 +1061,9 @@ func (g *Gate) settle(id string) {
 	g.wg.Add(1)
 	go func() {
 		defer g.wg.Done()
+		g.mu.Lock()
+		d := g.decided[id]
+		g.mu.Unlock()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		st, err := g.eng.Authorize(ctx, id)
@@ -948,6 +1082,12 @@ func (g *Gate) settle(id string) {
 		delete(g.failed, id)
 		own := g.own
 		g.mu.Unlock()
+		if g.cfg.Changes != nil && changeAction(st.Intent.Action) && st.Intent.Account == journal.BrokerAccount &&
+			(st.State == journal.Denied || st.State == journal.Succeeded || st.State == journal.NotApplied) {
+			// Only the owner's NO is a decline; a refusal at the recheck
+			// (stale approval, changed state) is not (change C7).
+			g.cfg.Changes.Decided(ctx, st.Intent, !d.approved && d.why == "owner")
+		}
 		if st.State == journal.Succeeded && st.Intent.Executor == ExecutorName && own != nil && len(st.Attempts) > 0 {
 			if gid := st.Attempts[len(st.Attempts)-1].Evidence; gid != "" {
 				_ = own.Inform(fmt.Sprintf("Added %s. Text PAUSE %s or REVOKE %s to stop it.", gid, gid, gid))
@@ -1108,7 +1248,7 @@ func (g *Gate) grantIDLocked(intentID string) string {
 func sameItem(a, b owner.Item) bool {
 	fa, fb := a.Facts, b.Facts
 	return a.Object == b.Object && a.Recipient == b.Recipient && a.Amount == b.Amount &&
-		a.UndoWindow == b.UndoWindow && a.Unverified == b.Unverified &&
+		a.UndoWindow == b.UndoWindow && a.Detail == b.Detail && a.UndoBy == b.UndoBy && a.Unverified == b.Unverified &&
 		fa.Kind == fb.Kind && fa.Verb == fb.Verb && fa.RecipientChecked == fb.RecipientChecked &&
 		fa.NoRecipient == fb.NoRecipient && fa.RecipientExists == fb.RecipientExists &&
 		fa.RecipientByOwner == fb.RecipientByOwner && fa.RecipientSince.Equal(fb.RecipientSince) &&

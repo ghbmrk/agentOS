@@ -9,11 +9,13 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/meter"
+	"github.com/ghbmrk/agentos/broker/vm"
 )
 
 // Job is one unit of loop work.
@@ -23,6 +25,9 @@ type Job struct {
 	// UsesModel marks work that makes model calls. It is not offered while
 	// the spare budget has no room.
 	UsesModel bool
+	// Evaluates marks work that runs replay evaluations; while it runs,
+	// the spare meter keeps evaluation's reserved share (EvalShare).
+	Evaluates bool
 	// Run does the work. It must return soon after ctx is cancelled (the
 	// scheduler's Preempt), and a source whose job was cancelled offers
 	// that work again later.
@@ -119,6 +124,7 @@ type Scheduler struct {
 	runningLoop Loop
 	done        chan struct{}
 	preempted   bool
+	evaluating  atomic.Bool
 	last        time.Time // when spent was last decayed
 }
 
@@ -409,7 +415,9 @@ func (s *Scheduler) run(ctx context.Context, l Loop, job Job) {
 			}
 		}
 	}()
+	s.evaluating.Store(job.Evaluates)
 	res := s.safeRun(jctx, job)
+	s.evaluating.Store(false)
 	close(watch)
 
 	after, _ := s.cfg.Spare.Overall()
@@ -512,3 +520,20 @@ func (s *Scheduler) Digest() []string {
 }
 
 var _ journal.Executor = (*Scheduler)(nil)
+
+// EvalReserve is the share of the spare budget kept for replay evaluation
+// while evaluation work runs (LOOP-5's separate evaluation budget; the
+// arbitrator's work-conserving reserve on #49).
+const EvalReserve = 0.3
+
+// Evaluating reports whether the unit running now runs replay evaluations.
+func (s *Scheduler) Evaluating() bool { return s.evaluating.Load() }
+
+// EvalShare is the spare meter's share for replay machines: EvalReserve of
+// the spare budget, kept from every other spare-meter user (builders, the
+// clean room) while the scheduler runs evaluation work, and lent to them
+// otherwise. The wiring passes it, with the clean room's share, to
+// Spare.SetShares (loops L3).
+func (s *Scheduler) EvalShare() meter.Share {
+	return meter.Share{Prefix: vm.EvalPrefix, Reserve: EvalReserve, Active: s.Evaluating}
+}
