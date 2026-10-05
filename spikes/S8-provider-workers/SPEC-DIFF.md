@@ -1,0 +1,71 @@
+# S8 draft spec diff (not applied to SPEC.md)
+
+Draft for an L1 spec-diff PR. It changes SPEC.md only after Mark approves it in his own words in the S8 thread. New IDs: **CAP-11** (provider agents as workers), **CAP-12** (resource-aware coordination), **RES-5** (quota admission per usage pool), **ONB-9** (plans in plain words). Mark's additions: per-product usage pools (RES-5) and a provider-agnostic declaration (CAP-11). Changed: CRED-5, CAP-9, §8.1 step 6, OP-8, LOOP-1, §17 risk 3, A3, A14, A15. Evidence: [RESULT.md](RESULT.md).
+
+Lens notes for the gate are at the end.
+
+---
+
+## CAP-11 (new row in the capability table, after CAP-10)
+
+| **CAP-11** | Provider agents as workers | A guest MAY delegate a whole subtask to a **provider agent**: the official, unmodified agent CLI of a model provider (e.g. Claude Code, Codex CLI, and any other frontier agent tool such as Gemini's or Grok's once its terms allow) run headless with its tools on inside a worker machine (CAP-8), signed in to the owner's own plan with that provider. The route type is provider-agnostic: each provider agent is added by a **declaration**, not by code in the router: the CLI and its qualified versions, the headless command and how the brief and result pass, the custody mode and the terms it rests on (CRED-5), the declared model hosts and endpoints (ADP-10), its usage pools and where each pool's state is read (RES-5), and how it signals a used-up pool. The guest gives a brief and receives the result through broker tools; the provider agent never reaches the guest, the owner channel, or any adapter. It is a route type for CAP-9, an optional dependency (DEP-3), and is qualified per provider and CLI version (ARC-7). The worker inherits its creator's data label and budget reservation (REV-5); a private worker uses a provider agent only if the owner marked that plan as allowed for private data. The CLI's auto-update and telemetry are off; versions change only through image updates. Driving a provider's consumer website or app is never a route. |
+
+## CAP-12 (new row, after CAP-11)
+
+| **CAP-12** | Resource-aware coordination | The guest MUST be able to plan across everything it can use: provider agents (CAP-11), API and local model routes (CAP-9), worker machines (CAP-8), and its granted adapters and tools. A broker tool `resources` answers, per granted route and tool, without any credential or account detail: its kind (plan agent, API, local, adapter), the task classes it is qualified for with measured acceptance and latency (ADP-4), each usage pool's headroom above the owner's reserve and its reset time (RES-5), its marginal cost (zero on a plan within its pools), free concurrency, and whether the calling machine's data label may use it (REV-5). The guest MAY attach a route preference to a model call or a delegation (e.g. "Codex for this, Claude to review it", or several runs in parallel across pools); the broker honours it when the route is granted, admitted (RES-2, RES-5), and allowed for the label, and otherwise routes per CAP-9 and says which route ran. Information moves between workers only through broker tools: a provider agent's result (files, diff, summary) returns to the guest as a worker artifact, which the guest MAY hand to another worker or provider agent as input, under the same label rules. A preference never adds a route, raises a reserve, or bypasses a grant. |
+
+## CRED-5 (replace)
+
+- **CRED-5** A provider's consumer plan login MAY be used only by that provider's official, unmodified CLI, in one of two custody modes, chosen per provider by its published terms and recorded in the adapter's declaration:
+  - **Broker-held.** The login stays in the vault process. The CLI holds a placeholder, and the broker's egress proxy injects the real credential into declared model endpoints only, including the CLI's own token-refresh request, whose response it swaps back to placeholders (ADP-10). CRED-1 holds unchanged. Used only where the provider's terms permit a proxy to hold the login.
+  - **Worker-held.** Where the terms require that sign-in complete through the provider's own flow and the login stay with its client, the owner signs in through that flow inside a worker, and the CLI keeps its login on a per-provider login volume mounted only into that provider's workers. This is the one exception to CRED-1: the login is readable by the CLI, a model-directed process, and by nothing else. The volume is excluded from snapshots, recall, the journal, logs, and evidence. The worker's egress is a pass-through tunnel to the provider's declared model hosts only, so the broker never sees the login. Results leaving the worker are checked for the provider's credential formats and withheld on a match (CRED-7). Removing the plan deletes the volume.
+  
+  Either way the CLI's non-interactive mode takes the brief, and the plan's credential is never used by any other client. A provider without a qualified CLI, or whose terms allow neither mode, uses an API key injected by the broker's egress proxy into declared inference endpoints only (ADP-10).
+
+Rationale: the old text allowed a consumer login only with tools off. S8 shows both CLIs run as full workers, and that the terms, not the mechanics, decide custody (Anthropic: "developers may not collect, store, or intermediate Claude.ai credentials or session tokens").
+
+## RES-5 (new, after RES-4)
+
+- **RES-5** **Plan quota is a resource, per usage pool.** A plan has one or more **usage pools**: the unit the provider meters, each with its own rate windows (e.g. 5 hours and 7 days). Pools follow the provider's metering, not the provider: a provider may meter each of its products separately on one plan (e.g. Codex apart from ChatGPT chat), and a plan may add model-specific pools (e.g. Claude's Opus and Sonnet weeks). Pools are declared, so any provider's product split is expressed the same way. A provider agent's declaration (CAP-11) names the pools a run draws on. The broker tracks each pool's utilization and reset time, read from the provider's responses on its own connection in broker-held mode, or from the CLI's reported events in worker-held mode, which inform routing only and never OP-8 spend. Admission to a plan route is refused when starting the run would take any pool it draws on past the owner's **reserve**: the share of each pool the owner keeps for their own use (default 30%, per pool, set as a budget, OP-5). Spare-class work (LOOP-1) is admitted only while the pool resets before the work's deadline would need it; foreground work may use the pool down to the reserve. Concurrent provider-agent workers per pool are capped (default 2). A run refused or cut off by a pool's limit fails over per CAP-9 within a second, and that pool's reset time is the route's cooldown; routes on other pools of the same plan stay available.
+
+## CAP-9 (replace)
+
+| **CAP-9** | Model routing | The broker routes each model call, or each provider-agent run (CAP-11), across the routes the owner has granted, by task class, scored on measured acceptance, latency, cost, and remaining quota. **Default order** within a class: (1) plan routes whose usage pools are above the owner's reserve (RES-5), spreading parallel runs across pools and providers; (2) local models; (3) API routes, cheapest first among those that meet the class's measured acceptance. When a route is exhausted, the call or run fails over to the next granted route; the API is the fallback that always completes work, so losing a plan route makes work dearer, never stops it (DEP-3). Routing rules are a Loop 1 candidate class adopted through §11 (as ADP-4); routing never adds a provider the owner has not granted. Within a provider-agent run the provider picks its own models; the broker routes per run. The owner MAY restrict which data classes reach each provider; the broker enforces this from the calling machine's data label (REV-5), and no routing rule can override it. By default, private-class calls go only to providers the owner marked as allowed for private data when connecting them. The digest reports plan exhaustion and fallback in plain words ("Claude plan used up until 14:00, used the API: $0.42"). |
+
+## OP-8 (append)
+
+> A provider-agent run (CAP-11) on a plan route is metered as runs, wall time, and plan quota, not tokens, and charged to the task's reservation by a per-run allowance in place of a token count; its spend is zero unless the provider bills overage, which the broker keeps off where the provider allows and otherwise treats as an API route. The broker caps each run by wall clock and machine limits (RES-2), and in broker-held mode also by calls and tokens at egress, answering past the cap with a broker-marked refusal.
+
+## LOOP-1 (amend the example)
+
+> ... plus AI quota the owner has designated as spare, e.g. the part of a plan's usage pool above the owner's reserve that will reset unused (RES-5).
+
+## §8.1 step 6 and ONB-9 (onboarding)
+
+Step 6 (replace):
+
+6. **Connect AI:** one provider is enough to finish; more can be added later. Per provider the page offers **Use my plan** (when a qualified provider agent exists, CAP-11) and **Use an API key**, either or both. **Use my plan** runs the provider's own sign-in flow: the page shows the provider's link and code from its CLI, the owner approves on the phone in the provider's own page, and nothing of the login passes through AgentOS's own pages beyond what that flow shows (CRED-5). An API key is entered on the local setup page. Never by text. After sign-in the screen lists the usage pools the provider agent's declaration names and the box detected (RES-5), says in one line "I use your plans first and an API key only when a plan runs out", and asks two things per plan with defaults: "Use this plan for private things (mail, documents)?" (default no, CAP-9) and "Keep part of each limit for your own use?" (default 30%, RES-5). If only plans are connected, the page says once: "When a plan's limit runs out, work waits for it to reset. Add an API key to keep going, paid per use." Waits for the first-boot update if it hasn't finished.
+
+- **ONB-9** **Plans in plain words.** Each connected plan appears on the box's local page as one line per usage pool, named as the provider names it, with use and reset time ("Claude: 42% of the 5-hour limit, resets 14:00; 81% of the week"; "ChatGPT Codex: 12% of the week"). STATUS by text adds one line when any pool is at the owner's reserve. Failover is told, not asked: the digest line is "Claude plan limit reached until 14:00. Used the API instead: $0.42 today." Without an API route the owner gets one text the first time a foreground task waits: "Waiting for your Claude plan to reset at 14:00. Add an API key on my Wi-Fi page to keep going." Spare work waiting for a reset is never texted (LOOP-1). A plan whose sign-in stopped working (signed out, plan ended, terms changed) is one STATUS and digest line with what to do, and its route is skipped until fixed (ADP-7). ONB-3's minimum path is unchanged: one provider, by plan or key.
+
+## §17 risk 3 (replace)
+
+3. **Plan routes depend on provider terms** (CAP-11, CRED-5). Terms have changed several times in 2026 (Anthropic restricted third-party use of plan logins; Google ended plan access for open-source agents; OpenAI opened ChatGPT sign-in to third-party tools). The API fallback (CAP-9) keeps the box working when a plan route goes; it only costs more. Each provider's custody mode is re-read against its terms at every CLI qualification.
+
+## Acceptance (amend)
+
+- **A3**: "two frontier providers (at least one plan route run as a provider-agent worker (CAP-11), the other either)".
+- **A14** (add): a provider agent in a worker cannot reach any host but its provider's declared model endpoints; in broker-held mode a canary login never appears in the worker; in worker-held mode the login volume is absent from every snapshot, the recall index, and the journal, and a result containing a canary in the provider's token format is withheld.
+- **A15** (add): the guest reads `resources`, splits one task across two plan agents on different pools in parallel and has the second review the first's result, with no credential or account detail in what it reads; with a plan route at its reserve, foreground work fails over to an API route within a second and the digest says so; spare work waits for the window's reset instead of using the API.
+
+---
+
+## Lens notes (for the gate)
+
+- **Potency:** plan economics (roughly 5-10x work per dollar for heavy use, per the Q&A thread's estimate), the providers' own coding harnesses as specialists, parallel workers across plans, cross-provider review. Cost: no per-call routing inside a run.
+- **Security:** worker-held mode is a real CRED-1 exception. Bounded by: one plan's model quota as blast radius, egress pinned to model hosts, the login on a volume outside snapshots and recall, the result scan, and per-version qualification. A prompt-injected provider agent can spend the owner's plan quota and return poisoned results; the grants gate still governs every outside effect, since the worker reaches no adapter.
+- **UX:** one sign-in per provider in the provider's own flow; the reserve keeps the owner's personal use of their plan intact; the digest explains fallbacks and their cost.
+- **Mark's additions (2026-10-05 21:58Z, Q&A thread):** usage pools per product (Codex vs ChatGPT) rather than per provider (RES-5), and a provider-agnostic route type open to further frontier tools such as Grok and Gemini when their terms allow (CAP-11 declarations).
+- **Mark's additions (22:00Z):** pools per product are general across providers, not only Codex/ChatGPT (RES-5); onboarding impact (§8.1 step 6, ONB-9).
+- **Mark's addition (22:01Z, S8 thread):** the guest must coordinate resources and information across all of these and whatever else it has access to (CAP-12).
+- **Open for Mark:** whether to ask Anthropic if a self-hosted owner box running unmodified Claude Code counts under "a platform hosting Claude Code", and the default reserve (30%) and per-plan concurrency (2).
