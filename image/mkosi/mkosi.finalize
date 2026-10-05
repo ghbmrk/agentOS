@@ -17,6 +17,7 @@ GENERATED = ("var/lib/systemd/random-seed", "var/lib/systemd/credential.secret",
              "var/lib/dbus/machine-id", "etc/ssh/ssh_host_*", "etc/ssl/private/*",
              "etc/credstore*/*", "var/lib/systemd/credential*/*")
 # Owner configuration and broker state. Created on the drive at onboarding, never in the image.
+# var/lib/agentos may hold only the machines volume's empty mount point (mkosi applies tmpfiles.d).
 OWNER_DIRS = ("etc/agentos", "var/lib/agentos")
 # Content scan: where build-generated keys land. /usr is package content, the same for everyone.
 SCAN = ("etc", "var", "root", "home", "srv", "opt", "boot", "efi")
@@ -50,7 +51,8 @@ def violations(root):
         p = root / d
         if d == "etc/agentos" and p.exists():
             out.append("etc/agentos: owner configuration; written at onboarding only")
-        elif d == "var/lib/agentos" and p.is_dir() and any(p.iterdir()):
+        elif d == "var/lib/agentos" and p.is_dir() and any(c.name != "machines" or not c.is_dir() or c.is_symlink()
+                                                         or any(c.iterdir()) for c in p.iterdir()):
             out.append("var/lib/agentos: broker state; must be empty")
     for pat in HOST_TOUCHING:
         for f in sorted(root.glob(pat)):

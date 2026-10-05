@@ -114,6 +114,13 @@ class TreeCheckTest(unittest.TestCase):
         write(self.root, "var/lib/agentos/journal.log", "{}")
         self.assertIn("var/lib/agentos", " ".join(check.violations(self.root)))
 
+    def test_empty_machines_mount_point_may_ship(self):
+        # mkosi applies tmpfiles.d at build, so the machines volume's empty mount point is there.
+        (self.root / "var/lib/agentos/machines").mkdir(parents=True)
+        self.assertNotIn("var/lib/agentos", " ".join(check.violations(self.root)))
+        write(self.root, "var/lib/agentos/machines/m1/rootfs", "x")
+        self.assertIn("var/lib/agentos", " ".join(check.violations(self.root)))
+
     def test_credstore_and_other_key_formats(self):
         write(self.root, "etc/credstore.encrypted/agentos.token", "x")
         write(self.root, "etc/backup/key.asc", "-----BEGIN PGP PRIVATE KEY BLOCK-----\n")
