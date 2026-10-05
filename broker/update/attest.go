@@ -7,8 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
-	"strings"
 )
 
 // Attestations (OSS-8): an installation that reproduced a release says
@@ -20,10 +18,42 @@ import (
 // here is UPD-8 with Mark's D6: a security fix auto-stages only with its
 // threshold signatures plus at least one independent passing attestation
 // from the fast channel. Independent means signed by a key that is not
-// one of the repository's root-listed keys and not this box's own.
+// that any root this box has accepted listed (for any role), not marked
+// maintainer-operated, and not this box's own (arbitrator ruling on D6).
+//
+// A maintainer-run CI attestor still attests from day one: its key is in
+// the signed target AttestorsPath and its statements carry Operator
+// "maintainer". Its passes are shown as evidence (MaintainerPasses) and
+// never count as independent.
 
 // AttestationType is the DSSE payload type.
 const AttestationType = "application/vnd.agentos.attestation.v1+json"
+
+// AttestorsPath is the signed target listing maintainer-operated attestor
+// keys: {"keys": ["<base64 Ed25519 public key>", ...]}.
+const AttestorsPath = "attestors/maintainer.json"
+
+// OperatorMaintainer marks a statement from a maintainer-operated attestor.
+const OperatorMaintainer = "maintainer"
+
+type attestorList struct {
+	Keys []string `json:"keys"`
+}
+
+var attestorListFields = fields("keys")
+
+// attestorFingerprint is the seen-key fingerprint of a base64 Ed25519 key.
+func attestorFingerprint(b64 string) (string, error) {
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil || len(raw) != ed25519.PublicKeySize {
+		return "", errors.New("attestor is not an Ed25519 key")
+	}
+	der, err := x509.MarshalPKIXPublicKey(ed25519.PublicKey(raw))
+	if err != nil {
+		return "", err
+	}
+	return fingerprint(der), nil
+}
 
 // Attestation results.
 const (
@@ -44,7 +74,16 @@ type Statement struct {
 	Versions      map[string]string `json:"versions,omitempty"`
 	// Attestor is the signer's Ed25519 public key, standard base64.
 	Attestor string `json:"attestor"`
+	// Operator is OperatorMaintainer for a maintainer-run attestor, else
+	// empty. A statement with any operator never counts as independent.
+	Operator string `json:"operator,omitempty"`
 }
+
+var (
+	statementFields = fields("release", "manifest_sha256", "result", "channel", "hardware_class", "versions", "attestor", "operator")
+	envelopeFields  = fields("payloadType", "payload", "signatures")
+	signatureFields = fields("keyid", "sig")
+)
 
 // ErrNeedsAttestation: a security fix lacks an independent attestation.
 var ErrNeedsAttestation = errors.New("security fix has no independent fast-channel attestation yet")
@@ -70,7 +109,7 @@ func pae(payloadType string, payload []byte) []byte {
 
 // Attest signs a statement for the release v names. Attestor and the
 // release fields are filled in from v and priv.
-func Attest(priv ed25519.PrivateKey, v *Checked, st Statement) ([]byte, error) {
+func Attest(priv ed25519.PrivateKey, v *Verified, st Statement) ([]byte, error) {
 	if !v.ok() {
 		return nil, ErrNotChecked
 	}
@@ -79,6 +118,9 @@ func Attest(priv ed25519.PrivateKey, v *Checked, st Statement) ([]byte, error) {
 	st.Attestor = base64.StdEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
 	if st.Result != ResultPass && st.Result != ResultFail {
 		return nil, fmt.Errorf("result %q is not pass or fail", st.Result)
+	}
+	if st.Operator != "" && st.Operator != OperatorMaintainer {
+		return nil, fmt.Errorf("operator %q is not %q", st.Operator, OperatorMaintainer)
 	}
 	body, err := json.Marshal(st)
 	if err != nil {
@@ -96,31 +138,42 @@ func Attest(priv ed25519.PrivateKey, v *Checked, st Statement) ([]byte, error) {
 }
 
 // ParseAttestation checks an envelope's signature and returns its
-// statement and the attestor key.
+// statement and the attestor key. Envelope, signatures and statement are
+// decoded strictly: no unknown, duplicate or case-variant key.
 func ParseAttestation(b []byte) (Statement, ed25519.PublicKey, error) {
-	var env envelope
-	if err := json.Unmarshal(b, &env); err != nil {
-		return Statement{}, nil, err
+	var env struct {
+		PayloadType string            `json:"payloadType"`
+		Payload     string            `json:"payload"`
+		Signatures  []json.RawMessage `json:"signatures"`
+	}
+	if err := decodeStrict(b, &env, envelopeFields); err != nil {
+		return Statement{}, nil, fmt.Errorf("attestation envelope: %w", err)
 	}
 	if env.PayloadType != AttestationType {
 		return Statement{}, nil, fmt.Errorf("payload type %q", env.PayloadType)
+	}
+	sigs := make([]envSignature, 0, len(env.Signatures))
+	for _, raw := range env.Signatures {
+		var sig envSignature
+		if err := decodeStrict(raw, &sig, signatureFields); err != nil {
+			return Statement{}, nil, fmt.Errorf("attestation signature: %w", err)
+		}
+		sigs = append(sigs, sig)
 	}
 	body, err := base64.StdEncoding.DecodeString(env.Payload)
 	if err != nil {
 		return Statement{}, nil, err
 	}
 	var st Statement
-	dec := json.NewDecoder(strings.NewReader(string(body)))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&st); err != nil {
-		return Statement{}, nil, err
+	if err := decodeStrict(body, &st, statementFields); err != nil {
+		return Statement{}, nil, fmt.Errorf("attestation statement: %w", err)
 	}
 	raw, err := base64.StdEncoding.DecodeString(st.Attestor)
 	if err != nil || len(raw) != ed25519.PublicKeySize {
 		return Statement{}, nil, errors.New("attestor is not an Ed25519 key")
 	}
 	pub := ed25519.PublicKey(raw)
-	for _, sig := range env.Signatures {
+	for _, sig := range sigs {
 		raw, err := base64.StdEncoding.DecodeString(sig.Sig)
 		if err == nil && ed25519.Verify(pub, pae(env.PayloadType, body), raw) {
 			return st, pub, nil
@@ -129,15 +182,12 @@ func ParseAttestation(b []byte) (Statement, ed25519.PublicKey, error) {
 	return Statement{}, nil, errors.New("attestation signature does not verify")
 }
 
-// IndependentPasses counts distinct attestors with a valid, passing,
-// fast-channel attestation for exactly this release, excluding
-// root-listed keys and own (this box's key; may be nil). Malformed or
-// unrelated attestations are skipped, not fatal: they arrive from anyone.
-func (v *Checked) IndependentPasses(atts [][]byte, own ed25519.PublicKey) int {
-	if !v.ok() {
-		return 0
-	}
-	seen := map[string]bool{}
+// passes calls f with the fingerprint and statement of each distinct
+// attestor with a valid, passing, fast-channel attestation for exactly
+// this release, other than own. Malformed or unrelated attestations are
+// skipped, not fatal: they arrive from anyone.
+func (v *Verified) passes(atts [][]byte, own ed25519.PublicKey, f func(fp string, st Statement)) {
+	done := map[string]bool{}
 	for _, b := range atts {
 		st, pub, err := ParseAttestation(b)
 		if err != nil || st.Release != v.manifest.Path || st.ManifestSHA256 != v.manifest.SHA256 ||
@@ -152,19 +202,50 @@ func (v *Checked) IndependentPasses(atts [][]byte, own ed25519.PublicKey) int {
 			continue
 		}
 		fp := fingerprint(der)
-		if v.maintainers[fp] {
-			continue
+		if !done[fp] {
+			done[fp] = true
+			f(fp, st)
 		}
-		seen[fp] = true
 	}
-	return len(seen)
+}
+
+// IndependentPasses counts distinct independent attestors (see above)
+// with a valid, passing, fast-channel attestation for exactly this
+// release. own is this box's key and may be nil.
+func (v *Verified) IndependentPasses(atts [][]byte, own ed25519.PublicKey) int {
+	if !v.ok() {
+		return 0
+	}
+	n := 0
+	v.passes(atts, own, func(fp string, st Statement) {
+		if !v.maintainers[fp] && !v.operated[fp] && st.Operator == "" {
+			n++
+		}
+	})
+	return n
+}
+
+// MaintainerPasses counts passing attestations from maintainer-operated
+// attestors (listed in AttestorsPath or self-marked). They are evidence
+// for the owner's digest, labelled maintainer-operated, never authority.
+func (v *Verified) MaintainerPasses(atts [][]byte, own ed25519.PublicKey) int {
+	if !v.ok() {
+		return 0
+	}
+	n := 0
+	v.passes(atts, own, func(fp string, st Statement) {
+		if v.operated[fp] || st.Operator == OperatorMaintainer {
+			n++
+		}
+	})
+	return n
 }
 
 // SecurityAutoStage reports whether a security fix may stage without the
 // owner: threshold signatures (already checked to make v) plus at least
 // one independent fast-channel attestation (UPD-8, D6). Other releases
 // follow UPD-5's soak, which is not decided here.
-func (v *Checked) SecurityAutoStage(atts [][]byte, own ed25519.PublicKey) error {
+func (v *Verified) SecurityAutoStage(atts [][]byte, own ed25519.PublicKey) error {
 	if !v.ok() {
 		return ErrNotChecked
 	}
@@ -175,21 +256,4 @@ func (v *Checked) SecurityAutoStage(atts [][]byte, own ed25519.PublicKey) error 
 		return ErrNeedsAttestation
 	}
 	return nil
-}
-
-// Verified hands a checked release to the change pipeline as the Verified
-// value it consumes (CHG-3, #34): the signed version and image digests,
-// with Security set only for a security fix that also has an independent
-// fast-channel attestation (UPD-8, D6).
-// An unsealed v gives the zero Verified, which the pipeline refuses (OK).
-func (v *Checked) Verified(atts [][]byte, own ed25519.PublicKey) Verified {
-	if !v.ok() {
-		return Verified{}
-	}
-	images := make(map[string]string, len(v.files))
-	for p, f := range v.files {
-		images[p] = f.SHA256
-	}
-	r := Release{Version: strconv.FormatInt(v.release.Version, 10), Security: v.release.Security, Images: images}
-	return Verified{r: r, security: r.Security && v.IndependentPasses(atts, own) >= 1}
 }

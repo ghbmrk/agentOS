@@ -2,7 +2,6 @@ package update
 
 import (
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"path"
@@ -85,15 +84,12 @@ func (r Manifest) Check() error {
 	return nil
 }
 
+var manifestFields = fields("version", "channel", "security", "usr_root_hash", "files")
+
 func parseManifest(b []byte) (Manifest, error) {
 	var r Manifest
-	dec := json.NewDecoder(strings.NewReader(string(b)))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&r); err != nil {
+	if err := decodeStrict(b, &r, manifestFields); err != nil {
 		return Manifest{}, fmt.Errorf("release manifest: %w", err)
-	}
-	if dec.More() {
-		return Manifest{}, errors.New("release manifest: trailing data")
 	}
 	return r, r.Check()
 }

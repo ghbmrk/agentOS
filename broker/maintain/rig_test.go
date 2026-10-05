@@ -35,12 +35,12 @@ func (c *clock) add(d time.Duration) {
 // proposer stands in for the change pipeline.
 type proposer struct {
 	mu    sync.Mutex
-	got   []update.Verified
+	got   []*update.Verified
 	state change.State
 	err   error
 }
 
-func (p *proposer) ProposeRelease(_ context.Context, v update.Verified) (change.Report, error) {
+func (p *proposer) ProposeRelease(_ context.Context, v *update.Verified) (change.Report, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.err != nil {
@@ -54,10 +54,10 @@ func (p *proposer) ProposeRelease(_ context.Context, v update.Verified) (change.
 	return change.Report{ID: fmt.Sprintf("c%d", len(p.got)), State: st}, nil
 }
 
-func (p *proposer) proposed() []update.Verified {
+func (p *proposer) proposed() []*update.Verified {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return append([]update.Verified(nil), p.got...)
+	return append([]*update.Verified(nil), p.got...)
 }
 
 // failSource is a mirror that cannot be reached.
@@ -73,6 +73,7 @@ type rig struct {
 	clk      *clock
 	repo     update.Repo
 	tgt      []ed25519.PrivateKey
+	root     []ed25519.PrivateKey
 	snap, ts ed25519.PrivateKey
 	rootJSON []byte
 	store    *update.Store
@@ -113,6 +114,7 @@ func newRig(t *testing.T) *rig {
 	r := &rig{t: t, dir: dir, clk: &clock{t: time.Date(2026, 10, 5, 3, 0, 0, 0, time.UTC)},
 		state: &change.MemStore{}, p: &proposer{}, online: true, channel: update.ChannelStable}
 	root, rp := keys(t, kdir, "root", 3)
+	r.root = root
 	var tp, sp, tsp []ed25519.PublicKey
 	r.tgt, tp = keys(t, kdir, "targets", 3)
 	s, sp := keys(t, kdir, "snapshot", 1)

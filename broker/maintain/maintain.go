@@ -45,7 +45,7 @@ const ChannelPinned = "pinned"
 
 // Proposer is the part of the change pipeline Loop 3 uses.
 type Proposer interface {
-	ProposeRelease(ctx context.Context, v update.Verified) (change.Report, error)
+	ProposeRelease(ctx context.Context, v *update.Verified) (change.Report, error)
 }
 
 // Config configures New.
@@ -154,6 +154,12 @@ type state struct {
 	// Confirmed: an online check cleared a drive install's pending
 	// freshness check; the digest says so once.
 	Confirmed bool `json:"confirmed,omitempty"`
+	// FreshFailed: an online check did not find the drive install in the
+	// signed release list (update U4); it stays unconfirmed.
+	FreshFailed bool `json:"fresh_failed,omitempty"`
+	// RootRotatedTo: a check accepted new signing keys; the digest says
+	// so once (security R3 on #46).
+	RootRotatedTo int64 `json:"root_rotated_to,omitempty"`
 }
 
 // Loop3 is the maintenance loop's scheduler source.
@@ -292,7 +298,7 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 		failure, err = failState, ierr
 	}
 	var (
-		rel *update.Checked
+		rel *update.Verified
 		m   update.Manifest
 		key string
 	)
@@ -319,6 +325,10 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 		return loops.Result{Err: errors.Join(err, serr)}
 	}
 	l.st.LastOnline, l.st.Failure = now, ""
+	l.st.FreshFailed = res.FreshnessFailed
+	if res.RootRotatedTo > 0 {
+		l.st.RootRotatedTo = res.RootRotatedTo
+	}
 	if res.FreshnessConfirmed && rel == nil {
 		// Only when nothing newer is out: the drive install is then
 		// confirmed current, not just checked (UPD-8).
@@ -444,7 +454,7 @@ const seenKeep = 90 * 24 * time.Hour
 // imageKey identifies a release's image: its /usr verity root hash and
 // every file's signed path and hash. A promotion that republishes the same
 // image under a new version has the same key.
-func imageKey(rel *update.Checked) (string, error) {
+func imageKey(rel *update.Verified) (string, error) {
 	m, err := rel.Manifest()
 	if err != nil {
 		return "", err
@@ -477,7 +487,7 @@ type outcome struct {
 
 // decide applies UPD-8 and UPD-5 to a verified release newer than the
 // installed one and proposes it when they allow.
-func (l *Loop3) decide(ctx context.Context, rel *update.Checked, m update.Manifest, channel string, seen, now time.Time) outcome {
+func (l *Loop3) decide(ctx context.Context, rel *update.Verified, m update.Manifest, channel string, seen, now time.Time) outcome {
 	mf, err := rel.ManifestFile()
 	if err != nil {
 		return outcome{wait: &pending{Version: m.Version, Security: m.Security, Why: waitPropose}, err: err}
@@ -499,7 +509,7 @@ func (l *Loop3) decide(ctx context.Context, rel *update.Checked, m update.Manife
 	if err := ctx.Err(); err != nil {
 		return outcome{err: err}
 	}
-	rep, err := l.cfg.Pipeline.ProposeRelease(ctx, rel.Verified(atts, l.cfg.OwnKey))
+	rep, err := l.cfg.Pipeline.ProposeRelease(ctx, rel.WithAttestations(atts, l.cfg.OwnKey))
 	if err != nil {
 		if ctx.Err() != nil {
 			return outcome{err: err}
@@ -585,6 +595,8 @@ func (l *Loop3) statusLocked(online bool, set loops.Settings, in update.Installe
 		return Status{Line: "Updates: not checked yet." + drive}
 	case now.Before(st.LastOnline):
 		return Status{Line: fmt.Sprintf("Updates: this box's clock is behind its last check (%s), so it will check again.", last)}
+	case in.UnconfirmedFreshness && st.FreshFailed:
+		return Status{Line: update.NotConfirmedNotice}
 	case in.UnconfirmedFreshness:
 		return Status{Line: "Updates: the last update was installed from a drive and has not been checked online yet."}
 	case now.Sub(st.LastOnline) > 2*l.cfg.Interval:
@@ -648,6 +660,11 @@ func (l *Loop3) Digest() []string {
 	if l.st.Confirmed {
 		out = append(out, "The update installed from a drive has now been checked online.")
 		l.st.Confirmed = false
+		l.saveLocked()
+	}
+	if l.st.RootRotatedTo > 0 {
+		out = append(out, fmt.Sprintf("Update signing keys changed to version %d.", l.st.RootRotatedTo))
+		l.st.RootRotatedTo = 0
 		l.saveLocked()
 	}
 	return out

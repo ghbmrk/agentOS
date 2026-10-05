@@ -548,3 +548,22 @@ func TestPreemptedProposalNotShownAsAwaitingApproval(t *testing.T) {
 		t.Fatalf("preempted: %q", st.Line)
 	}
 }
+
+func TestKeyRotationReportedOnce(t *testing.T) {
+	r := newRig(t)
+	r.tick()
+	_, pub := keys(t, t.TempDir(), "targets-new", 1)
+	r.must(r.repo.Rotate("targets", pub, nil, 0))
+	r.must(r.repo.Sign("root", r.root[0]))
+	r.must(r.repo.Sign("root", r.root[1]))
+	r.must(r.repo.Publish(r.snap, r.ts))
+	r.clk.add(24 * time.Hour)
+	r.refresh()
+	r.tick()
+	if d := r.digest(); !strings.Contains(d, "signing keys changed to version 2") {
+		t.Fatalf("digest: %q", d)
+	}
+	if d := r.digest(); strings.Contains(d, "signing keys") {
+		t.Fatalf("said twice: %q", d)
+	}
+}
