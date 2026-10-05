@@ -29,3 +29,16 @@ func machineQuota(mode, stateDir string) (q vm.Quota, off bool, err error) {
 	}
 	return fs, false, nil
 }
+
+// quotaNote is STATUS's line while agent machines run without disk quotas
+// (security R2 on #152): declared off, or on but unavailable, when no
+// machine starts. It names no path: the log has the cause.
+func quotaNote(off bool, err error) string {
+	switch {
+	case err != nil:
+		return "Agent machines are off: this box's disk can't limit what each one writes."
+	case off:
+		return "Disk limits are off: an agent machine could fill the disk."
+	}
+	return ""
+}

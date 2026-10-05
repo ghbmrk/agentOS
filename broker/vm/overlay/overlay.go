@@ -299,42 +299,93 @@ func FreeBytes(path string) (int64, error) {
 	return int64(st.Bavail) * int64(st.Bsize), nil
 }
 
+// MaxDepth is how deeply Measure follows nested directories: as deep as
+// a worker's deletes go (CAP-8c's too_deep), with one open directory
+// handle per level.
+const MaxDepth = 256
+
+// ErrTooDeep is a layer nested deeper than MaxDepth. Callers treat it as
+// over the layer's cap: never as no use.
+var ErrTooDeep = errors.New("directories nest more than 256 deep; flatten them")
+
 // Measure returns a layer's usage without following symlinks. It may run
-// on a live layer: files that vanish mid-walk are skipped.
+// on a live layer: files that vanish mid-walk are skipped. It walks by
+// directory handles, never by host path, so a layer nested past the host's
+// path limit is still counted (security R4 on #166); one nested deeper
+// than MaxDepth is ErrTooDeep.
 func Measure(root string) (Usage, error) {
-	var u Usage
-	seen := map[[2]uint64]bool{}
-	// A file removed between its directory's read and its stat is not
-	// there to count: a running machine's layer changes under the walk.
-	gone := func(p string, err error) bool { return p != root && errors.Is(err, fs.ErrNotExist) }
-	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			if gone(p, err) {
-				return nil
+	w := measurer{seen: map[[2]uint64]bool{}}
+	fd, err := syscall.Open(root, oPath|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return w.u, &fs.PathError{Op: "open", Path: root, Err: err}
+	}
+	if err = w.handle(fd, 0); err != nil && !errors.Is(err, ErrTooDeep) {
+		err = fmt.Errorf("measure %s: %w", root, err)
+	}
+	return w.u, err
+}
+
+// oPath is O_PATH, which syscall leaves undefined on amd64: a handle that
+// can be stat'd and opened relative to, but not read, so an entry is
+// never opened as a device or FIFO to learn what it is.
+const oPath = 0x200000
+
+type measurer struct {
+	u    Usage
+	seen map[[2]uint64]bool
+}
+
+// handle counts the entry O_PATH handle fd names, depth levels below the
+// root, and what it holds if it is a directory; it closes fd.
+func (w *measurer) handle(fd, depth int) error {
+	var st syscall.Stat_t
+	err := syscall.Fstat(fd, &st)
+	key := [2]uint64{uint64(st.Dev), st.Ino}
+	dir := err == nil && st.Mode&syscall.S_IFMT == syscall.S_IFDIR && !w.seen[key]
+	if err == nil && !w.seen[key] {
+		w.seen[key] = true
+		w.u.Inodes++
+		w.u.Bytes += st.Blocks * 512
+	}
+	if dir && depth > MaxDepth {
+		err = ErrTooDeep
+	}
+	if !dir || err != nil {
+		syscall.Close(fd)
+		return err
+	}
+	// "." through the handle is the directory just stat'd, whatever its
+	// name now points at. One handle per level stays open below here.
+	dfd, err := syscall.Openat(fd, ".", syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
+	syscall.Close(fd)
+	if err != nil {
+		return err
+	}
+	f := os.NewFile(uintptr(dfd), "")
+	defer f.Close()
+	for {
+		ents, err := f.ReadDir(256)
+		for _, e := range ents {
+			cfd, err := syscall.Openat(dfd, e.Name(), oPath|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+			if errors.Is(err, syscall.ENOENT) {
+				continue // removed since its directory was read
 			}
+			if err != nil {
+				return err
+			}
+			if err := w.handle(cfd, depth+1); err != nil {
+				return err
+			}
+		}
+		switch {
+		case err == io.EOF:
+			return nil
+		case depth > 0 && errors.Is(err, syscall.ENOENT):
+			return nil // removed while it was read
+		case err != nil:
 			return err
 		}
-		fi, err := d.Info()
-		if err != nil {
-			if gone(p, err) {
-				return nil
-			}
-			return err
-		}
-		st, ok := fi.Sys().(*syscall.Stat_t)
-		if !ok {
-			return nil
-		}
-		key := [2]uint64{uint64(st.Dev), st.Ino}
-		if seen[key] {
-			return nil
-		}
-		seen[key] = true
-		u.Inodes++
-		u.Bytes += st.Blocks * 512
-		return nil
-	})
-	return u, err
+	}
 }
 
 // View is what a guest sees: an upper layer over a lower one.

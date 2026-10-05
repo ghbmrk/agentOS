@@ -461,3 +461,88 @@ func TestMeasureSkipsFilesThatVanish(t *testing.T) {
 		t.Fatal("measure of a missing layer reported nothing")
 	}
 }
+
+// chain makes a directory chain depth levels deep under root, each level
+// named name, through directory handles, so it can pass the host's path
+// limit (PATH_MAX), and returns the bytes and inodes it allocated.
+func chain(t *testing.T, root, name string, depth int) Usage {
+	t.Helper()
+	fd, err := syscall.Open(root, syscall.O_RDONLY|syscall.O_DIRECTORY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var u Usage
+	for i := 0; i < depth; i++ {
+		if err := syscall.Mkdirat(fd, name, 0o755); err != nil {
+			t.Fatalf("level %d: %v", i, err)
+		}
+		next, err := syscall.Openat(fd, name, syscall.O_RDONLY|syscall.O_DIRECTORY, 0)
+		syscall.Close(fd)
+		if err != nil {
+			t.Fatalf("level %d: %v", i, err)
+		}
+		fd = next
+		var st syscall.Stat_t
+		if err := syscall.Fstat(fd, &st); err != nil {
+			t.Fatal(err)
+		}
+		u.Bytes += st.Blocks * 512
+		u.Inodes++
+	}
+	syscall.Close(fd)
+	return u
+}
+
+// R4 on #166: a layer nested past the host's path limit is measured, not
+// failed, so a deep worker can still be counted and cleaned.
+func TestMeasureCountsALayerPastThePathLimit(t *testing.T) {
+	root := t.TempDir()
+	name := strings.Repeat("d", 40)
+	want := chain(t, root, name, 200) // about 8,200 bytes of path
+	var st syscall.Stat_t
+	if err := syscall.Lstat(root, &st); err != nil {
+		t.Fatal(err)
+	}
+	want.Bytes += st.Blocks * 512
+	want.Inodes++
+	got, err := Measure(root)
+	if err != nil {
+		t.Fatalf("measure past PATH_MAX: %v", err)
+	}
+	if got != want {
+		t.Fatalf("measured %+v, want %+v", got, want)
+	}
+}
+
+// A layer nested deeper than MaxDepth is reported as too deep, a refusal
+// callers treat as over the cap, never as no use; fds stay bounded.
+func TestMeasureRefusesALayerDeeperThanTheCap(t *testing.T) {
+	root := t.TempDir()
+	chain(t, root, "a", MaxDepth)
+	if _, err := Measure(root); err != nil {
+		t.Fatalf("measure at the cap: %v", err)
+	}
+	root = t.TempDir()
+	chain(t, root, "a", MaxDepth+1)
+	if _, err := Measure(root); !errors.Is(err, ErrTooDeep) {
+		t.Fatalf("measure past the cap: %v", err)
+	}
+}
+
+// Measure never follows a symlink, to a directory or out of the layer.
+func TestMeasureDoesNotFollowSymlinks(t *testing.T) {
+	root, outside := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "big"), make([]byte, 1<<20), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "out")); err != nil {
+		t.Fatal(err)
+	}
+	u, err := Measure(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Inodes != 2 || u.Bytes >= 1<<20 {
+		t.Fatalf("followed a symlink: %+v", u)
+	}
+}

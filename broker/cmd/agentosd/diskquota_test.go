@@ -35,3 +35,18 @@ func TestMachinesGetTheStateFileSystemsQuota(t *testing.T) {
 		t.Fatalf("on, with quotas: %v %v %v", q, off, err)
 	}
 }
+
+// Security R2 on #152 (SR2-3i): quotas off, declared or missing, is an
+// owner-visible STATUS line, not only a log line; quotas on adds none.
+func TestQuotasOffIsAStatusLine(t *testing.T) {
+	if n := quotaNote(false, nil); n != "" {
+		t.Fatalf("quotas on: %q", n)
+	}
+	if n := quotaNote(true, nil); !strings.Contains(n, "could fill the disk") {
+		t.Fatalf("declared off: %q", n)
+	}
+	n := quotaNote(false, quota.ErrUnsupported)
+	if !strings.Contains(n, "Agent machines are off") || strings.Contains(n, "/") {
+		t.Fatalf("unavailable: %q", n)
+	}
+}

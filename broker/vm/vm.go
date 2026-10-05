@@ -1070,9 +1070,20 @@ func (m *Manager) captureAs(ctx context.Context, mc *machine, t Tier, sleep bool
 
 // checkCaps measures a layer about to be snapshotted and refuses it if it
 // is over the per-layer caps. Copies keep holes and hardlinks, so a copy
+// measure is overlay.Measure, with a layer too deep to measure over the
+// cap (security R4 on #166): refused as a disk budget the guest can act
+// on, never taken as no use.
+func measure(dir string) (overlay.Usage, error) {
+	u, err := overlay.Measure(dir)
+	if errors.Is(err, overlay.ErrTooDeep) {
+		err = fmt.Errorf("%w (%w)", ErrQuota, err)
+	}
+	return u, err
+}
+
 // costs no more than this measure.
 func (m *Manager) checkCaps(id, upper string) (overlay.Usage, error) {
-	u, err := overlay.Measure(upper)
+	u, err := measure(upper)
 	if err != nil {
 		return u, err
 	}
@@ -1110,7 +1121,7 @@ func (m *Manager) reserveDisk(need int64) (*diskHold, error) {
 
 // reserveRestore reserves the disk for n copies of snapshot id's layer.
 func (m *Manager) reserveRestore(n int64, id string) (*diskHold, error) {
-	u, err := overlay.Measure(filepath.Join(m.snapDir(id), "fs"))
+	u, err := measure(filepath.Join(m.snapDir(id), "fs"))
 	if err != nil {
 		return nil, err
 	}
@@ -1341,7 +1352,7 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 	// Reserve the disk for every fork's copy before checkpointing anything,
 	// held until all have started, so a disk too small for n forks refuses
 	// the fork outright instead of failing part-way.
-	u, err := overlay.Measure(m.launch(src).Upper)
+	u, err := measure(m.launch(src).Upper)
 	if err != nil {
 		undo()
 		return Snapshot{}, err
@@ -1362,7 +1373,7 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 		return Snapshot{}, err
 	}
 	// The guest ran until it was paused; cover any growth since.
-	v, err := overlay.Measure(filepath.Join(m.snapDir(s.ID), "fs"))
+	v, err := measure(filepath.Join(m.snapDir(s.ID), "fs"))
 	if err == nil {
 		err = h.grow(n*v.Bytes - h.n)
 	}
@@ -1505,11 +1516,11 @@ func (m *Manager) mergeLocked(ctx context.Context, dm *machine, base, ss Snapsho
 	// Reserve the disk for the merged layer (at most dst's layer plus the
 	// fork's) and for restarting dst on it, before touching dst.
 	cost := func(dstUpper string) (int64, error) {
-		d, err := overlay.Measure(dstUpper)
+		d, err := measure(dstUpper)
 		if err != nil {
 			return 0, err
 		}
-		f, err := overlay.Measure(m.view(ss).Upper)
+		f, err := measure(m.view(ss).Upper)
 		return 2 * (d.Bytes + f.Bytes), err
 	}
 	need, err := cost(m.launch(dm).Upper)

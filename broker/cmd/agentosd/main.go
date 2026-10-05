@@ -380,6 +380,18 @@ func main() {
 	cfg.Recall = recallExec
 	cfg.Grants.Contained = recallExec.Contained
 	cfg.Notes = append(cfg.Notes, recallExec.Status)
+	var mq vm.Quota
+	var noQuota bool
+	var qerr error
+	if runsc != "" {
+		mq, noQuota, qerr = machineQuota(diskQuota, stateDir)
+		if noQuota {
+			log.Printf("-disk-quota=off: agent machines run without disk quotas; a guest can fill the state disk (RES-4)")
+		}
+		if n := quotaNote(noQuota, qerr); n != "" {
+			cfg.Notes = append(cfg.Notes, func() string { return n })
+		}
+	}
 	if line != nil {
 		cfg.Notes = append(cfg.Notes, line.Note, line.TextsNote)
 	}
@@ -441,15 +453,6 @@ func main() {
 	}
 	// At exit the question loops stop before the guard's notices flush.
 	defer func() { stop(); qs.wait() }()
-	var mq vm.Quota
-	var noQuota bool
-	var qerr error
-	if runsc != "" {
-		mq, noQuota, qerr = machineQuota(diskQuota, stateDir)
-		if noQuota {
-			log.Printf("-disk-quota=off: agent machines run without disk quotas; a guest can fill the state disk (RES-4)")
-		}
-	}
 	if runsc != "" && qerr != nil {
 		log.Printf("agent machines disabled: %v", qerr)
 	} else if runsc != "" {
