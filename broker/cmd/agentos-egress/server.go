@@ -177,13 +177,15 @@ func verifyHandler(c *custody) http.Handler {
 			http.Error(w, "malformed request", http.StatusBadRequest)
 			return
 		}
-		step, ok, err := c.verify(req.Code, req.After)
-		switch err {
-		case nil:
-		case errLocked:
+		step, ok, err := c.verify(req.Code, req.After, req.Counted)
+		var paused *pausedError
+		switch {
+		case err == nil:
+		case err == errLocked:
 			http.Error(w, err.Error(), http.StatusServiceUnavailable)
 			return
-		case errTooManyWrong:
+		case errors.As(err, &paused):
+			w.Header().Set(modelroute.HeaderPausedUntil, paused.until.UTC().Format(time.RFC3339))
 			http.Error(w, err.Error(), http.StatusTooManyRequests)
 			return
 		default:

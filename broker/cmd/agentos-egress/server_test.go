@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -237,18 +238,36 @@ func TestVerifySocketForTheBroker(t *testing.T) {
 		}
 	}()
 	v := modelroute.NewVerifier(filepath.Join(run, VerifySocket))
-	if _, _, err := v.VerifyTOTP(r.code(), 0); err == nil {
-		t.Fatal("locked vault answered")
+	kind := func(err error) modelroute.VerifyFailure {
+		var ve *modelroute.VerifyError
+		if !errors.As(err, &ve) {
+			t.Fatalf("not a VerifyError: %v", err)
+		}
+		return ve.Kind
+	}
+	if _, _, err := v.VerifyTOTP(r.code(), 0, true); kind(err) != modelroute.VerifyLocked {
+		t.Fatalf("locked vault: %v", err)
 	}
 	r.c.unlock(goodPass)
 	r.c.confirm(r.code())
 	r.clk.add(30 * time.Second)
-	if _, ok, err := v.VerifyTOTP("000000", 0); ok || err != nil {
+	if _, ok, err := v.VerifyTOTP("000000", 0, true); ok || err != nil {
 		t.Fatalf("wrong code: %v %v", ok, err)
 	}
-	step, ok, err := v.VerifyTOTP(r.code(), 0)
+	step, ok, err := v.VerifyTOTP(r.code(), 0, true)
 	if !ok || err != nil || step != r.clk.now().Unix()/30 {
 		t.Fatalf("right code: %d %v %v", step, ok, err)
+	}
+	for i := 0; i < MaxWrongSilent; i++ {
+		v.VerifyTOTP("000000", 0, false)
+	}
+	_, _, err = v.VerifyTOTP("000000", 0, false)
+	var ve *modelroute.VerifyError
+	if kind(err) != modelroute.VerifyPaused || !errors.As(err, &ve) || !ve.Until.Equal(r.clk.now().Add(VerifyWindow).Truncate(time.Second)) {
+		t.Fatalf("silent bucket full: %v %+v", err, ve)
+	}
+	if _, _, err := modelroute.NewVerifier(filepath.Join(run, "absent.sock")).VerifyTOTP("000000", 0, true); kind(err) != modelroute.VerifyDown {
+		t.Fatalf("no process: %v", err)
 	}
 
 	w := httptest.NewRecorder()

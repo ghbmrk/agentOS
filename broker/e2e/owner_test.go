@@ -47,7 +47,7 @@ type seedVerifier struct {
 	last atomic.Int64
 }
 
-func (v *seedVerifier) VerifyTOTP(code string, after int64) (int64, bool, error) {
+func (v *seedVerifier) VerifyTOTP(code string, after int64, _ bool) (int64, bool, error) {
 	step, ok := owner.MatchTOTP(v.seed, code, time.Now(), max(after, v.last.Load()))
 	if ok {
 		v.last.Store(step)

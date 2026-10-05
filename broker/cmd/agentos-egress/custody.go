@@ -21,15 +21,25 @@ const (
 	WrongWindow   = 24 * time.Hour
 )
 
-// MaxWrongVerifies wrong codes from the broker within VerifyWindow refuse
-// further verifies until the oldest ages out (K7). The channel counts and
-// locks on its own; this bound holds even if agentosd is taken over, and
-// stays above what the channel lets through for the owner (5 wrong codes
-// lock it, and challenge mode allows one attempt per texted token).
+// Wrong verifies from the broker are bounded here on their own (K7), so a
+// taken-over agentosd cannot grind codes. There are two buckets, each over
+// a sliding VerifyWindow. Counted checks (the owner's deliberate codes)
+// may be wrong MaxWrongCounted times, above the channel's own
+// WrongToChallenge (10), after which each attempt needs a texted
+// challenge. Silent checks of codes in chat (O5) may be wrong
+// MaxWrongSilent times; a full silent bucket refuses silent checks only,
+// so a spoofer's flood never refuses the owner's counted code.
 const (
-	MaxWrongVerifies = 10
-	VerifyWindow     = 10 * time.Minute
+	MaxWrongCounted = 20
+	MaxWrongSilent  = 10
+	VerifyWindow    = 10 * time.Minute
 )
+
+// pausedError refuses a verify until the oldest wrong one in its bucket
+// ages out.
+type pausedError struct{ until time.Time }
+
+func (e *pausedError) Error() string { return errTooManyWrong.Error() }
 
 // Fixed errors, safe to show on the unlock socket.
 var (
@@ -80,9 +90,11 @@ type custody struct {
 	timer   *time.Timer
 	// lastStep is the last code-generator step accepted, by confirm or
 	// verify, so a code works once across both (O6, K7).
-	lastStep    int64
-	wrong       []time.Time
-	wrongVerify []time.Time
+	lastStep int64
+	wrong    []time.Time
+	// wrongCounted and wrongSilent are the wrong verifies per bucket.
+	wrongCounted []time.Time
+	wrongSilent  []time.Time
 }
 
 // status reports the phase and, while pending, when the code is due.
@@ -174,22 +186,27 @@ func (c *custody) confirm(code string) error {
 // verify checks a code-generator code for the broker's owner channel (CH-4,
 // K7), so the seed never leaves this process. It accepts the current step
 // or the one before, after both the broker's last step and this process's
-// own, and spends a step that matches. Only an open vault verifies.
-func (c *custody) verify(code string, after int64) (int64, bool, error) {
+// own, and spends a step that matches. Only an open vault verifies. counted
+// picks the bucket a wrong code is charged to.
+func (c *custody) verify(code string, after int64, counted bool) (int64, bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.ph != open {
 		return 0, false, errLocked
 	}
 	now := c.now()
-	c.wrongVerify = since(c.wrongVerify, now.Add(-VerifyWindow))
-	if len(c.wrongVerify) >= MaxWrongVerifies {
-		return 0, false, errTooManyWrong
+	bucket, limit := &c.wrongSilent, MaxWrongSilent
+	if counted {
+		bucket, limit = &c.wrongCounted, MaxWrongCounted
+	}
+	*bucket = since(*bucket, now.Add(-VerifyWindow))
+	if len(*bucket) >= limit {
+		return 0, false, &pausedError{until: (*bucket)[0].Add(VerifyWindow)}
 	}
 	seed, _ := c.v.Secret(SeedName)
 	step, ok := owner.MatchTOTP([]byte(seed.Reveal()), code, now, max(after, c.lastStep))
 	if !ok {
-		c.wrongVerify = append(c.wrongVerify, now)
+		*bucket = append(*bucket, now)
 		return 0, false, nil
 	}
 	c.lastStep = step

@@ -3,6 +3,7 @@ package owner
 import (
 	"crypto/rand"
 	"crypto/subtle"
+	"errors"
 	"io"
 	"math/big"
 	"time"
@@ -43,9 +44,11 @@ type codes struct {
 	// verify, when set, checks code-generator codes where the seed is
 	// held; sec.TOTPSeed is then not used.
 	verify Verifier
-	st     State
-	store  Store
-	rand   io.Reader
+	// verifyOffUntil is set by VerifyBreaker.
+	verifyOffUntil time.Time
+	st             State
+	store          Store
+	rand           io.Reader
 	// challenge is the grid cell last asked for; only it is accepted.
 	challenge string
 	// unlockCh is the current challenge-mode token and its expiry. It is
@@ -85,20 +88,35 @@ type strongOpts struct {
 	unlock time.Duration
 	// count records a failure as a wrong code.
 	count bool
+	// silent is an O5 check of a code in chat: the vault process bounds
+	// these apart from counted checks.
+	silent bool
 }
+
+// VerifyBreaker is how long the channel stops asking the vault process
+// after a check got no answer, so a backlog of coded texts cannot queue
+// behind a hung process (CH-2).
+const VerifyBreaker = 30 * time.Second
 
 // matchStrong finds which strong code got is: the challenged grid cell, or
 // a code-generator step (the current one or the one before, since texts
 // arrive late; never at or before the last step accepted). step is 0 for a
 // grid cell. Nothing here changes, except that a Verifier spends a step
 // that matches. err means the Verifier could not check.
-func (c *codes) matchStrong(got string, now time.Time) (ok bool, step int64, cell string, err error) {
+func (c *codes) matchStrong(got string, now time.Time, silent bool) (ok bool, step int64, cell string, err error) {
 	if c.challenge != "" && !c.gridUsed(c.challenge) && len(c.sec.GridSeed) > 0 &&
 		eq(got, GridCell(c.sec.GridSeed, c.challenge)) {
 		return true, 0, c.challenge, nil
 	}
 	if c.verify != nil {
-		step, ok, err := c.verify.VerifyTOTP(got, c.st.LastStep)
+		if now.Before(c.verifyOffUntil) {
+			return false, 0, "", &VerifyError{Kind: VaultDown}
+		}
+		step, ok, err := c.verify.VerifyTOTP(got, c.st.LastStep, !silent)
+		var ve *VerifyError
+		if errors.As(err, &ve) && ve.Kind == VerifyLost {
+			c.verifyOffUntil = now.Add(VerifyBreaker)
+		}
 		if err != nil || !ok || step <= c.st.LastStep {
 			return false, 0, "", err
 		}
@@ -122,7 +140,7 @@ func (c *codes) matchStrong(got string, now time.Time) (ok bool, step int64, cel
 // neither is counted. locked reports that this wrong code crossed
 // WrongToLock.
 func (c *codes) checkStrong(got string, now time.Time, o strongOpts) (res strongResult, locked bool, err error) {
-	ok, step, cell, err := c.matchStrong(got, now)
+	ok, step, cell, err := c.matchStrong(got, now, o.silent)
 	if err != nil {
 		return strongWrong, false, err
 	}
@@ -241,6 +259,17 @@ func (c *codes) takeAttempt(now time.Time) (bool, error) {
 		}
 	})
 	return ok && err == nil, err
+}
+
+// refundAttempt undoes takeAttempt when the vault process could not check
+// the code: the owner keeps the token and the attempt (O4).
+func (c *codes) refundAttempt(token string, expires time.Time) error {
+	c.unlockCh, c.unlockChExpires = token, expires
+	return c.commit(func(s *State) {
+		if s.BoundUsed > 0 {
+			s.BoundUsed--
+		}
+	})
 }
 
 // recent keeps the times inside WrongWindow.

@@ -19,6 +19,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/modelroute"
+	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/vm"
 	"github.com/ghbmrk/agentos/broker/vm/gvisor"
 )
@@ -156,7 +157,7 @@ func main() {
 	// (egress K7). While the vault is locked those checks fail and count
 	// nothing.
 	if verifySocket != "" {
-		cfg.OwnerVerifier = modelroute.NewVerifier(verifySocket)
+		cfg.OwnerVerifier = ownerVerifier{modelroute.NewVerifier(verifySocket)}
 	}
 	// No modem driver exists before P2-3, so texts arrive only through the
 	// owner socket and the channel's own outbound texts are not sent.
@@ -262,4 +263,27 @@ func openGuestPlane(m *vm.Manager, d *daemon.Daemon, socketDir, meterPath, egres
 		})
 	}
 	return guest.New(gcfg)
+}
+
+// ownerVerifier gives the owner channel the vault process's verify
+// operation, translating why a check did not run into the channel's terms.
+type ownerVerifier struct{ v *modelroute.Verifier }
+
+func (o ownerVerifier) VerifyTOTP(code string, after int64, counted bool) (int64, bool, error) {
+	step, ok, err := o.v.VerifyTOTP(code, after, counted)
+	return step, ok, ownerVerifyErr(err)
+}
+
+func ownerVerifyErr(err error) error {
+	var ve *modelroute.VerifyError
+	if err == nil || !errors.As(err, &ve) {
+		return err
+	}
+	kind := map[modelroute.VerifyFailure]owner.VerifyFailure{
+		modelroute.VerifyDown:   owner.VaultDown,
+		modelroute.VerifyLocked: owner.VaultLocked,
+		modelroute.VerifyPaused: owner.VerifyPaused,
+		modelroute.VerifyLost:   owner.VerifyLost,
+	}[ve.Kind]
+	return &owner.VerifyError{Kind: kind, Until: ve.Until}
 }
