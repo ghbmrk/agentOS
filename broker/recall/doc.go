@@ -23,8 +23,12 @@
 // of the raw source name, so scrubbing never merges or loses items.
 // Deletion propagates: it removes derived items, keeps a durable tombstone
 // (so stale content is refused and late hooks are replayed), rewrites the
-// store so no copy remains in the live file, and notifies OnDelete hooks
-// (the event bus) even for sources not yet indexed.
+// segments that held any version so no copy remains in a live file, and
+// notifies OnDelete hooks (the event bus) even for sources not yet indexed.
+//
+// Scale (R8): items live in segments on disk; memory holds compact postings,
+// int8 vectors and facts, so a mailbox-sized index (100k items) fits the
+// floor host and a deletion rewrites one segment, not the whole index.
 //
 // The package uses only the Go standard library and needs no inference
 // (DEP-1); a local embedding service is optional. Assumptions are listed in

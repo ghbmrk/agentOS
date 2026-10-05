@@ -4,3 +4,4 @@ __pycache__/
 /broker/agentos-egress
 /broker/cmd/agentos-egress/agentos-egress
 /broker/cmd/agentosd/agentosd
+*.test
