@@ -457,8 +457,8 @@ func TestMeasureSkipsFilesThatVanish(t *testing.T) {
 	}
 	close(stop)
 	<-done
-	if _, err := Measure(filepath.Join(root, "missing")); err == nil {
-		t.Fatal("measure of a missing layer reported nothing")
+	if _, err := Measure(filepath.Join(root, "missing")); err == nil || strings.Contains(err.Error(), root) {
+		t.Fatalf("measure of a missing layer: %v", err)
 	}
 }
 
@@ -544,5 +544,23 @@ func TestMeasureDoesNotFollowSymlinks(t *testing.T) {
 	}
 	if u.Inodes != 2 || u.Bytes >= 1<<20 {
 		t.Fatalf("followed a symlink: %+v", u)
+	}
+}
+
+// A layer is a directory: a root that is a file or a symlink, even to a
+// directory, is an error, not a one-inode layer (security N1 on #174).
+func TestMeasureRefusesARootThatIsNotADirectory(t *testing.T) {
+	dir := t.TempDir()
+	f, l := filepath.Join(dir, "f"), filepath.Join(dir, "l")
+	if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(dir, l); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{f, l} {
+		if _, err := Measure(p); !errors.Is(err, syscall.ENOTDIR) || strings.Contains(err.Error(), dir) {
+			t.Fatalf("measure of %s: %v", filepath.Base(p), err)
+		}
 	}
 }

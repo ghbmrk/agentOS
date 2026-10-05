@@ -315,12 +315,22 @@ var ErrTooDeep = errors.New("directories nest more than 256 deep; flatten them")
 // than MaxTreeDepth is ErrTooDeep.
 func Measure(root string) (Usage, error) {
 	w := measurer{seen: map[[2]uint64]bool{}}
+	// Errors name no host path: they can reach a guest's text (security
+	// N2 on #174).
 	fd, err := syscall.Open(root, oPath|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 	if err != nil {
-		return w.u, &fs.PathError{Op: "open", Path: root, Err: err}
+		return w.u, fmt.Errorf("overlay: measure: %w", err)
+	}
+	var st syscall.Stat_t
+	if err := syscall.Fstat(fd, &st); err != nil || st.Mode&syscall.S_IFMT != syscall.S_IFDIR {
+		syscall.Close(fd)
+		if err == nil {
+			err = syscall.ENOTDIR // a layer is a directory, never a link to one
+		}
+		return w.u, fmt.Errorf("overlay: measure: %w", err)
 	}
 	if err = w.handle(fd, 0); err != nil && !errors.Is(err, ErrTooDeep) {
-		err = fmt.Errorf("measure %s: %w", root, err)
+		err = fmt.Errorf("overlay: measure: %w", err)
 	}
 	return w.u, err
 }
