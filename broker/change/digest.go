@@ -241,6 +241,12 @@ func (p *Pipeline) Digest() []string {
 			a.ConcernSeen = true
 		}
 	}
+	for i := range p.st.Notices {
+		if n := &p.st.Notices[i]; !n.Seen {
+			out = append(out, n.Line)
+			n.Seen = true
+		}
+	}
 	if p.st.Outages >= OutageAlert && !p.st.OutageSeen {
 		out = append(out, fmt.Sprintf("The box could not re-test its learned changes the last %d times it tried; they stay as they are until it can.", p.st.Outages))
 		p.st.OutageSeen = true
@@ -249,6 +255,43 @@ func (p *Pipeline) Digest() []string {
 		_ = p.saveLocked()
 	}
 	return out
+}
+
+// MaxNotices bounds the notice keys the pipeline keeps.
+const MaxNotices = 32
+
+// Notice queues one broker line for the digest under key, once: a key
+// already kept, listed or not, adds nothing, across restarts. Callers pass
+// fixed broker wording only, never candidate or agent text (CH-12). It is
+// for what is not urgent, which CH-15 holds for the digest (UX-108-1). The
+// oldest kept keys go first once there are more than MaxNotices, listed
+// ones before any still waiting.
+func (p *Pipeline) Notice(key, line string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, n := range p.st.Notices {
+		if n.Key == key {
+			return nil
+		}
+	}
+	prev := p.st.Notices
+	ns := append(append([]notice(nil), prev...), notice{Key: key, Line: line})
+	for len(ns) > MaxNotices {
+		drop := 0
+		for i, n := range ns {
+			if n.Seen {
+				drop = i
+				break
+			}
+		}
+		ns = append(ns[:drop], ns[drop+1:]...)
+	}
+	p.st.Notices = ns
+	if err := p.saveLocked(); err != nil {
+		p.st.Notices = prev
+		return err
+	}
+	return nil
 }
 
 // Ask is the one plain line the owner gets for a proposal that waits on

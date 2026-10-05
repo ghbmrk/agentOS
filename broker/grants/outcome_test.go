@@ -239,9 +239,12 @@ func TestOnlyTheOwnersAnswersAreVerdicts(t *testing.T) {
 // owner's acceptance, nor as an explicit one.
 func TestALateReleaseIsNoVerdict(t *testing.T) {
 	var o outcomes
+	quiet := new(func(time.Time) bool)
+	*quiet = func(time.Time) bool { return false }
 	r := newRig(t, func(c *Config) {
 		c.Isolated = func(m string) bool { return m == "reply-1" }
 		c.Outcome = o.add
+		c.Quiet = func(t time.Time) bool { return (*quiet)(t) }
 	})
 	r.grant(mailGrant())
 	r.grant(Spec{Account: "mail", Rule: &Rule{Action: "message.send", PerRecord: 5, PerDay: 20, Reply: true}})
@@ -261,5 +264,40 @@ func TestALateReleaseIsNoVerdict(t *testing.T) {
 	}
 	if got := o.take(); got != "" {
 		t.Fatalf("a late release was reported: %q", got)
+	}
+
+	// Security F1 on #109: quiet hours at the alert or the release make
+	// the silence not the owner's either.
+	for _, at := range []string{"alert", "release"} {
+		id := "reply-1/quiet-" + at
+		r.submit(journal.Intent{ID: id, Origin: "guest:reply-1", Machine: "reply-1", Account: "mail", Action: "message.send",
+			Params: map[string]any{"record": "thr-1", "body": "Thanks, got it."}, Recipients: []string{"sam@example.com"}, Executor: "mail"})
+		r.own.mu.Lock()
+		alerted := r.now()
+		r.own.due[len(r.own.due)-1].Alerted = alerted
+		r.own.mu.Unlock()
+		quietAt := alerted
+		if at == "release" {
+			quietAt = alerted.Add(11 * time.Minute)
+		}
+		*quiet = func(t time.Time) bool { return t.Equal(quietAt) }
+		r.advance(11 * time.Minute)
+		r.g.Tick()
+		r.g.Wait()
+		if got := o.take(); got != "" {
+			t.Fatalf("silence in quiet hours at the %s was reported: %q", at, got)
+		}
+	}
+	*quiet = func(time.Time) bool { return false }
+	r.submit(journal.Intent{ID: "reply-1/awake", Origin: "guest:reply-1", Machine: "reply-1", Account: "mail", Action: "message.send",
+		Params: map[string]any{"record": "thr-1", "body": "Thanks, got it."}, Recipients: []string{"sam@example.com"}, Executor: "mail"})
+	r.own.mu.Lock()
+	r.own.due[len(r.own.due)-1].Alerted = r.now()
+	r.own.mu.Unlock()
+	r.advance(11 * time.Minute)
+	r.g.Tick()
+	r.g.Wait()
+	if got := o.take(); got != "reply-1/awake accepted-implicitly" {
+		t.Fatalf("on time, outside quiet hours: %q", got)
 	}
 }

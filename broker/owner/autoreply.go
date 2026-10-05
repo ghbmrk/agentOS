@@ -37,8 +37,9 @@ type Queued struct {
 	// line fail to send: its silence is not the owner's (security B1(a)
 	// on PW3), so it is never read as an implicit acceptance.
 	Late bool
-	// alerted is when the owner was texted the reply's alert.
-	alerted time.Time
+	// Alerted is when the owner was texted the reply's alert; zero for a
+	// held effect, or before the alert went out.
+	Alerted time.Time
 }
 
 // LateRelease is how long after its window a queued reply may be released
@@ -118,7 +119,7 @@ func (c *Channel) QueueAutoReply(ar AutoReply) (QueueResult, error) {
 		return QueueResult{}, err
 	}
 	c.mu.Lock()
-	q.alerted = now
+	q.Alerted = now
 	out := *q
 	c.mu.Unlock()
 	return QueueResult{Queued: &out}, nil
@@ -139,7 +140,7 @@ func (c *Channel) DueAutoReplies() []Queued {
 		if !now.Before(q.SendAt) {
 			if !q.Held {
 				failed := time.Unix(0, c.lineFailed.Load())
-				q.Late = now.Sub(q.SendAt) > LateRelease || q.alerted.IsZero() || !failed.Before(q.alerted)
+				q.Late = now.Sub(q.SendAt) > LateRelease || q.Alerted.IsZero() || !failed.Before(q.Alerted)
 			}
 			out = append(out, *q)
 			delete(c.queued, id)

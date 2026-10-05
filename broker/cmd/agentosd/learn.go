@@ -91,6 +91,7 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		sync.doneRestoring()
 		pipe := l.pipe
 		sync.active = func() routerule.Rule { return routerOf{pipe: pipe}.active() }
+		sync.note = pipe.Notice
 		l.routing = sync
 		router = routerOf{sync, l.pipe}
 	}
@@ -394,7 +395,7 @@ type routingClient interface {
 // the vault process restarts or loses it (L3 S1 on #96). A rule the vault
 // process refuses there (the owner changed -rule) gives way to the owner's
 // rule and stands for it from then on, so a later revert to it is not
-// refused (security R1 on PW4).
+// refused (security R1 on PW4); the owner's digest says so once (W3-route).
 type syncedRouting struct {
 	r      routingClient
 	logf   func(string, ...any)
@@ -407,7 +408,19 @@ type syncedRouting struct {
 	pending   *routerule.Rule // to push once the vault process is up; empty: -rule
 	refused   routerule.Rule  // a rule the vault process refused at restore or check
 	applied   int             // Applies so far, so a check never pushes a rule read before one
+
+	// note queues a digest line once per key (change.Pipeline.Notice);
+	// nil until the pipeline exists. owe is a refused rule whose line is
+	// not queued yet (W3-route).
+	note func(key, line string) error
+	owe  routerule.Rule
 }
+
+// routingStandsInText is the digest line telling the owner that their own
+// model order is in use in place of an order the box learned, because
+// they changed their AI settings since (W3-route; UX-108-1 on #108). Not
+// urgent, so it waits for the digest (CH-15).
+const routingStandsInText = "Your AI model settings changed, so the box uses your order of models. It learns a new order over time while learning is on."
 
 func (s *syncedRouting) Current() (change.Tree, error) {
 	s.mu.Lock()
@@ -512,6 +525,7 @@ func (s *syncedRouting) push(ctx context.Context) bool {
 		s.logf("routing: the adopted rule %s no longer reorders the owner's rule; using the owner's rule", ruleText(want))
 		s.refused = want
 		s.pending = &routerule.Rule{}
+		s.owe = want
 	default:
 		s.logf("routing: vault process not reachable or did not keep the rule")
 		if s.pending == nil {
@@ -521,11 +535,41 @@ func (s *syncedRouting) push(ctx context.Context) bool {
 	return false
 }
 
+// check pushes as push does, then queues the owner's digest line for a
+// refused rule.
+func (s *syncedRouting) check(ctx context.Context) bool {
+	ok := s.push(ctx)
+	s.tell()
+	return ok
+}
+
+// tell queues the digest line once per refused rule, keyed by the rule, so
+// a restart that refuses it again adds nothing. It runs outside mu, since
+// the pipeline holds its own lock while it calls Apply; a line that could
+// not be queued is tried again at the next check.
+func (s *syncedRouting) tell() {
+	s.mu.Lock()
+	owe, note := s.owe, s.note
+	s.mu.Unlock()
+	if owe == nil || note == nil {
+		return
+	}
+	if err := note("routing-refused:"+ruleText(owe), routingStandsInText); err != nil {
+		s.logf("routing: the owner's digest line was not queued: %v", err)
+		return
+	}
+	s.mu.Lock()
+	if sameRule(s.owe, owe) {
+		s.owe = nil
+	}
+	s.mu.Unlock()
+}
+
 // run keeps the vault process on the pipeline's rule: it pushes the rule
 // kept from the start, then checks every period.
 func (s *syncedRouting) run(ctx context.Context, every time.Duration) {
 	for {
-		s.push(ctx)
+		s.check(ctx)
 		select {
 		case <-ctx.Done():
 			return

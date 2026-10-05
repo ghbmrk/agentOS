@@ -279,6 +279,16 @@ type state struct {
 	Cases      map[string]Case `json:"cases"`
 	// Applied lists intents whose effect took place, for Reconcile.
 	Applied map[string]bool `json:"applied"`
+	// Notices are broker notices for the digest, kept once per key
+	// (Notice).
+	Notices []notice `json:"notices,omitempty"`
+}
+
+// notice is one broker digest line; Seen once the digest listed it.
+type notice struct {
+	Key  string `json:"key"`
+	Line string `json:"line"`
+	Seen bool   `json:"seen,omitempty"`
 }
 
 func (s *state) copyCases() map[string]Case {
@@ -709,6 +719,10 @@ func (p *Pipeline) prop(id string) *proposal {
 	defer p.mu.Unlock()
 	return p.props[id]
 }
+
+// Waiting reports whether proposal id still waits on the owner: it is
+// dropped once adopted, declined, refused or lapsed.
+func (p *Pipeline) Waiting(id string) bool { return p.prop(id) != nil }
 
 func (p *Pipeline) drop(id string) {
 	p.mu.Lock()

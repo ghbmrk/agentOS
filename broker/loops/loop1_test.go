@@ -945,18 +945,22 @@ func TestImplicitGainWeighsHalfAndAnchorHoldsAreCounted(t *testing.T) {
 		t.Fatalf("value %v", v)
 	}
 	r := newRig(t)
-	l, err := NewLearn(LearnConfig{Pipeline: r.p, Journal: r.eng, Harvest: r.harvester()})
+	p := &waitingPipeline{Pipeline: r.p, open: map[string]bool{"c1": true, "c2": true, "c4": true}}
+	l, err := NewLearn(LearnConfig{Pipeline: p, Journal: r.eng, Harvest: r.harvester()})
 	must(t, err)
-	held := change.Report{State: change.StateAwaitingOwner, NeedsExplicit: true}
-	l.asked("a", held)
-	l.asked("b", held)
+	held := func(id string) change.Report {
+		return change.Report{ID: id, State: change.StateAwaitingOwner, NeedsExplicit: true}
+	}
+	l.asked("a", held("c1"))
+	l.asked("b", held("c2"))
+	l.asked("lapsed", held("c3")) // no longer waiting: the owner channel lists it (L18)
 	l.asked("c", change.Report{State: change.StateAwaitingOwner})
-	if d := strings.Join(l.Digest(), "\n"); !strings.Contains(d, "Learning: 2 ideas went to you instead of being adopted on their own: none was tested on a task you approved.") {
+	if d := strings.Join(l.Digest(), "\n"); !strings.Contains(d, "Learning: 2 ideas are waiting for your approval instead of taking effect on their own, because none was tested on a task you approved.") {
 		t.Fatalf("digest %q", d)
 	}
 	l.asked("c", change.Report{State: change.StateRejected})
 	l.asked("b", change.Report{State: change.StateRejected})
-	if d := strings.Join(l.Digest(), "\n"); d != "Learning: 1 idea went to you instead of being adopted on its own: it was not tested on a task you approved." {
+	if d := strings.Join(l.Digest(), "\n"); d != "Learning: 1 idea is waiting for your approval instead of taking effect on its own, because it wasn't tested on a task you approved." {
 		t.Fatalf("digest for one %q", d)
 	}
 	l.asked("a", change.Report{State: change.StateAdopted})
@@ -965,3 +969,11 @@ func TestImplicitGainWeighsHalfAndAnchorHoldsAreCounted(t *testing.T) {
 		t.Fatalf("digest after they settled %q", d)
 	}
 }
+
+// waitingPipeline reports which proposals still wait on the owner.
+type waitingPipeline struct {
+	Pipeline
+	open map[string]bool
+}
+
+func (w *waitingPipeline) Waiting(id string) bool { return w.open[id] }

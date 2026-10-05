@@ -201,9 +201,10 @@ type Learn struct {
 	tried     map[string]int // hypothesis or routing key -> evidence when tried
 	asks      map[string]int // key -> proposals that waited on the owner
 	notBefore map[string]time.Time
-	// needsExplicit are the keys whose last proposal the explicit-case
-	// anchor sent to the owner instead of adopting (change NeedsExplicit).
-	needsExplicit map[string]bool
+	// needsExplicit maps the keys whose last proposal the explicit-case
+	// anchor sent to the owner instead of adopting (change NeedsExplicit)
+	// to that proposal's ID.
+	needsExplicit map[string]string
 	waiting       int // hypotheses held for evidence
 	heldOut       int
 	lastRecheck   time.Time
@@ -243,7 +244,7 @@ func NewLearn(cfg LearnConfig) (*Learn, error) {
 		cfg.Now = time.Now
 	}
 	return &Learn{cfg: cfg, tried: map[string]int{}, asks: map[string]int{}, notBefore: map[string]time.Time{},
-		needsExplicit: map[string]bool{}, lastRecheck: cfg.Now()}, nil
+		needsExplicit: map[string]string{}, lastRecheck: cfg.Now()}, nil
 }
 
 func (l *Learn) Loop() Loop { return Improve }
@@ -349,7 +350,7 @@ func (l *Learn) asked(key string, rep change.Report) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if rep.NeedsExplicit && rep.State == change.StateAwaitingOwner {
-		l.needsExplicit[key] = true
+		l.needsExplicit[key] = rep.ID
 	} else {
 		delete(l.needsExplicit, key)
 	}
@@ -473,11 +474,20 @@ func (l *Learn) Digest() []string {
 		out = append(out, fmt.Sprintf("Learning: %d ideas are waiting until there are %d past tasks to test them on (%d so far).",
 			l.waiting, l.cfg.MinHeldOut, l.heldOut))
 	}
-	switch n := len(l.needsExplicit); {
+	// Only requests still waiting count: one that lapsed is listed by the
+	// owner channel instead (L18), never twice (UX on #109).
+	w, _ := l.cfg.Pipeline.(interface{ Waiting(id string) bool })
+	n := 0
+	for _, id := range l.needsExplicit {
+		if w == nil || w.Waiting(id) {
+			n++
+		}
+	}
+	switch {
 	case n == 1:
-		out = append(out, "Learning: 1 idea went to you instead of being adopted on its own: it was not tested on a task you approved.")
+		out = append(out, "Learning: 1 idea is waiting for your approval instead of taking effect on its own, because it wasn't tested on a task you approved.")
 	case n > 1:
-		out = append(out, fmt.Sprintf("Learning: %d ideas went to you instead of being adopted on their own: none was tested on a task you approved.", n))
+		out = append(out, fmt.Sprintf("Learning: %d ideas are waiting for your approval instead of taking effect on their own, because none was tested on a task you approved.", n))
 	}
 	return out
 }

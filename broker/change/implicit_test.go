@@ -44,6 +44,9 @@ func TestImplicitCasesNeverAnchorAnAdoption(t *testing.T) {
 	if rep.State != StateAwaitingOwner || rep.Basis != BasisOwner || !rep.NeedsExplicit {
 		t.Fatalf("an implicit-only win adopted on its own: %+v", rep)
 	}
+	if !e.p.Waiting(rep.ID) || e.p.Waiting("c999") {
+		t.Fatal("Waiting does not track the open request")
+	}
 	if it, err := e.p.Line(journal.Intent{ID: adoptID(rep.ID), Action: ActionAdopt}); err != nil || it.Facts.Kind != owner.Ordinary {
 		t.Fatalf("a tested, undoable local skill is not low tier: %+v %v", it, err)
 	}

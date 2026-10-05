@@ -1925,9 +1925,13 @@ func (g *Gate) Tick() {
 	if own == nil {
 		return
 	}
+	now := g.cfg.Now()
 	for _, q := range own.DueAutoReplies() {
 		why := whyReleased
-		if q.Late {
+		// Silence in quiet hours, when the owner asked not to be reached,
+		// is not acceptance either (security F1 on #109).
+		quiet := g.cfg.Quiet != nil && (g.cfg.Quiet(q.Alerted) || g.cfg.Quiet(now))
+		if q.Late || quiet {
 			why = whyReleasedLate
 		}
 		g.Decide(owner.Decision{Request: q.ID, Item: 1, Ref: q.Reply.Ref, Approved: true, Why: why})
