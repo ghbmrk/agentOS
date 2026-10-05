@@ -74,17 +74,31 @@ var guestPlane = map[string]struct {
 	allowed []string
 	forbid  []string
 }{
-	"guest": {[]string{"journal", "meter", "route"}, []string{"os/exec", "plugin", "unsafe", "C"}},
+	"guest": {[]string{"journal", "meter"}, []string{"os/exec", "plugin", "unsafe", "C"}},
 	"meter": {nil, []string{"net", "os/exec", "plugin", "unsafe", "C"}},
 	// modelroute forwards to the vault process over its Unix socket and
 	// reports usage to the meter; never the vault or the proxy. It
 	// journals the denials that come back (modelroute.Journal), coalesced
 	// by the journal's own gate, as the guest plane may.
 	"modelroute": {[]string{"journal", "meter"}, []string{"os/exec", "plugin", "unsafe", "C"}},
-	"route":      {nil, []string{"net", "os/exec", "plugin", "unsafe", "C"}},
+	// The router's rule types, without the router (W3): what the change
+	// pipeline and Loop 1 read and change.
+	"routerule": {nil, forbiddenStd},
 	// Replay (LOOP-5) serves replay machines through a guest plane of its
 	// own: no journal writes, no executors, no network clients.
 	"replay": {[]string{"admission", "change", "guest", "journal", "meter", "vm"}, []string{"net", "os/exec", "plugin", "unsafe", "C"}},
+}
+
+// The learning plane (W3; arbitrator, adopting potency PW1 on #56): the
+// deterministic change pipeline and loop scheduler, linked into agentosd.
+// They decide and record; model-calling builders stay behind a socket
+// (TestAgentosdLinksNoInference).
+var learningPlane = map[string]struct {
+	allowed []string
+	forbid  []string
+}{
+	"change": {[]string{"journal", "owner", "routerule", "update"}, forbiddenStd},
+	"loops":  {[]string{"change", "journal", "meter", "owner", "vm"}, forbiddenStd},
 }
 
 var forbiddenStd = []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "syscall", "unsafe", "C"}
@@ -110,6 +124,9 @@ func TestARC2ControlPathCannotReachInference(t *testing.T) {
 		checkImports(t, pkg, rule.allowed, rule.forbid, nil)
 	}
 	for pkg, rule := range guestPlane {
+		checkImports(t, pkg, rule.allowed, rule.forbid, nil)
+	}
+	for pkg, rule := range learningPlane {
 		checkImports(t, pkg, rule.allowed, rule.forbid, nil)
 	}
 }
