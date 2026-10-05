@@ -127,3 +127,33 @@ func TestTaskTextsAreBounded(t *testing.T) {
 		t.Fatalf("tasks.json: %v, %v", fi.Mode(), err)
 	}
 }
+
+// REQ: CAP-3
+
+// W3-tasks part 1 (security R1 on PW3): forgetting a task deletes its kept
+// text from the learn directory, and a later verdict on it makes no case.
+func TestForgetDeletesTheTaskText(t *testing.T) {
+	now := time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)
+	store := change.FileStore{Path: filepath.Join(t.TempDir(), "tasks.json")}
+	tasks, err := openTaskTexts(store, func() time.Time { return now }, t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks.put("owner:a1", "send Sam the invoice CANARY-forget", false)
+	tasks.put("owner:a2", "book the dentist", false)
+	if !tasks.forget("owner:a1") || tasks.forget("owner:a1") {
+		t.Fatal("forget reported the wrong result")
+	}
+	raw, err := os.ReadFile(store.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "CANARY-forget") || !strings.Contains(string(raw), "dentist") {
+		t.Fatalf("saved texts: %s", raw)
+	}
+	h := &fakeHarvest{}
+	harvestOutcome(h, tasks, grants.OwnerOutcome{Intent: journal.Intent{ID: "agent/1", GoalID: "owner:a1"}, Verdict: grants.OwnerAccepted}, t.Logf)
+	if len(h.got) != 0 {
+		t.Fatalf("a forgotten task made a case: %+v", h.got)
+	}
+}

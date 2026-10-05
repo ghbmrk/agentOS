@@ -225,6 +225,19 @@ func (v *taskValues) observe(in journal.Intent) {
 	v.saveLocked()
 }
 
+// forget deletes goal's values with its task text (W3-values (d), CAP-3)
+// and reports whether any were kept.
+func (v *taskValues) forget(goal string) bool {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.st[goal] == nil {
+		return false
+	}
+	delete(v.st, goal)
+	v.saveLocked()
+	return true
+}
+
 // verdict applies the owner's verdict on an effect to its goal's values.
 func (v *taskValues) verdict(o grants.OwnerOutcome) {
 	goal := o.Intent.GoalID

@@ -105,6 +105,19 @@ func (t *taskTexts) pruneLocked(now time.Time) {
 	}
 }
 
+// forget deletes goal's task text (W3-tasks, CAP-3) and reports whether
+// one was kept. A failed save is logged, as for put.
+func (t *taskTexts) forget(goal string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if _, ok := t.st[goal]; !ok {
+		return false
+	}
+	delete(t.st, goal)
+	t.saveLocked()
+	return true
+}
+
 func (t *taskTexts) get(goal string) (taskText, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()

@@ -275,6 +275,22 @@ func learningOff(cfg *daemon.Config) {
 	cfg.Notes = append(cfg.Notes, func() string { return learningOffNote })
 }
 
+// forgetTask deletes what the learning plane keeps of one task: its text,
+// its values and the Loop 1 cases harvested from it (W3-tasks part 1,
+// CAP-3). Only an authenticated owner forget may call it; none exists yet,
+// so nothing does. Adopted skills and procedures whose evidence includes
+// the task, and held candidates (loops L19), are the cascade's (security
+// C1 on #120; BOARD W3-tasks).
+func (l *learning) forgetTask(goal string) error {
+	if goal == "" {
+		return errors.New("learning: forget needs a goal")
+	}
+	l.tasks.forget(goal)
+	l.values.forget(goal)
+	_, err := l.pipe.ForgetGoal(goal)
+	return err
+}
+
 // attach binds the running daemon's engine and admission and starts the
 // scheduler. Before it, the box reads as busy and stopped: no loop work.
 func (l *learning) attach(ctx context.Context, d *daemon.Daemon) {

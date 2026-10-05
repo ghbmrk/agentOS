@@ -424,3 +424,61 @@ func TestTaskValuesBounds(t *testing.T) {
 		t.Fatal("a key file others can read was used")
 	}
 }
+
+// REQ: CAP-3
+
+// W3-tasks part 1 (W3-values (d)): forgetting a task deletes its kept
+// values with its text.
+func TestForgetDeletesTheTaskValues(t *testing.T) {
+	r := newValuesRig(t)
+	r.weekly("owner:w1", "sam@example.com", 1)
+	r.weekly("owner:w2", "ana@example.com", 1)
+	if !r.values.forget("owner:w1") || r.values.forget("owner:w1") {
+		t.Fatal("forget reported the wrong result")
+	}
+	raw, err := r.values.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "sam@example.com") || !strings.Contains(string(raw), "ana@example.com") {
+		t.Fatalf("saved values: %s", raw)
+	}
+}
+
+// W3-tasks part 1: the learning plane forgets a task's text and values
+// together (its cases: change TestForgetGoalRemovesItsCases).
+func TestLearningForgetsATask(t *testing.T) {
+	dir := t.TempDir()
+	cfg := daemon.Config{
+		JournalPath: filepath.Join(dir, "journal.log"), SocketDir: filepath.Join(dir, "run"),
+		OwnerNumber: ownerNum, ModemUID: os.Getuid(), Admission: admission.Config{CapacityMB: 4500, HeadroomMB: 600},
+		OwnerState: filepath.Join(dir, "owner.json"),
+	}
+	lp, err := openLearning(learnPaths{Dir: dir, Spare: filepath.Join(dir, "spare.json")}, false, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lp.tasks.put("owner:f1", "pay the CANARY-forget invoice", false)
+	lp.values.observe(journal.Intent{ID: "agent/1", GoalID: "owner:f1", Origin: "guest:agent", Params: map[string]any{"to": "ann@example.test"}})
+	lp.values.mu.Lock()
+	_, had := lp.values.st["owner:f1"]
+	lp.values.mu.Unlock()
+	if _, ok := lp.tasks.get("owner:f1"); !ok || !had {
+		t.Fatal("nothing kept to forget")
+	}
+	if err := lp.forgetTask("owner:f1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := lp.tasks.get("owner:f1"); ok {
+		t.Fatal("task text kept")
+	}
+	lp.values.mu.Lock()
+	_, kept := lp.values.st["owner:f1"]
+	lp.values.mu.Unlock()
+	if kept {
+		t.Fatal("task values kept")
+	}
+	if err := lp.forgetTask(""); err == nil {
+		t.Fatal("forgot with no goal")
+	}
+}
