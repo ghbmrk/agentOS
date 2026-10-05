@@ -206,7 +206,8 @@ func (c *Channel) LocalSignIn(code string) (until time.Time, err error) {
 	}
 	// A refused unlock proof is not a wrong code: it is refused when the
 	// vault process has no proof to match (a late redirect, no Verifier),
-	// and the vault process counts a wrong one itself (#65 L3 follow-up 1).
+	// and the vault process counts a wrong one itself (#65 L3 follow-up 1);
+	// nor is the owner, who just unlocked, texted about it (#75 L3).
 	proof := strings.HasPrefix(code, UnlockProofPrefix)
 	res, locked, err := c.codes.checkStrong(code, now, strongOpts{unlock: c.cfg.UnlockFor, count: !proof, proof: true})
 	var alerts []string
@@ -242,7 +243,7 @@ func (c *Channel) LocalSignIn(code string) (until time.Time, err error) {
 			c.local.evicted += evicted
 		}
 		signIn, signIns = c.signInTextLocked(now)
-	case err == nil:
+	case err == nil && !proof:
 		alerts = append(alerts, c.wrongLocalLocked(now)...)
 	}
 	c.mu.Unlock()
