@@ -61,7 +61,7 @@ func (e *Evaluator) untestedNamespaces() []string {
 	if e.cfg.Model == nil {
 		// Routing acts only through Model: with none, both sides of a
 		// routing change give the same output, which is no evidence.
-		return append(untested, "routing")
+		return append(append([]string(nil), untested...), "routing")
 	}
 	return untested
 }
