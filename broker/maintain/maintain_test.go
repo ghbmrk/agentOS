@@ -31,7 +31,7 @@ func TestUpToDateOnlyAfterOnlineCheck(t *testing.T) {
 	if st := r.l.Status(); st.Current {
 		t.Fatalf("current before any check: %+v", st)
 	}
-	if ok, v := r.tick(); !ok || v != 0 {
+	if ok, v := r.tick(); !ok || v != valueChecked {
 		t.Fatalf("first check: ran %v value %v", ok, v)
 	}
 	st := r.l.Status()
@@ -147,7 +147,7 @@ func TestStaleCheckNotCurrent(t *testing.T) {
 func TestSecurityFixWaitsForIndependentAttestation(t *testing.T) {
 	r := newRig(t)
 	r.release(2, func(m *update.Manifest) { m.Security = true })
-	if ok, v := r.tick(); !ok || v != 0 {
+	if ok, v := r.tick(); !ok || v >= valueRelease {
 		t.Fatalf("value %v without an attestation", v)
 	}
 	if len(r.p.proposed()) != 0 {
@@ -492,5 +492,59 @@ func TestOnlineRequired(t *testing.T) {
 	r := newRig(t)
 	if _, err := New(Config{Store: r.store, Pipeline: r.p, State: r.state}); err == nil {
 		t.Fatal("New without Online: the wiring must say how the box knows it is online")
+	}
+}
+
+func TestWaitingSecurityFixNotParkedByScheduler(t *testing.T) {
+	// LOOP-3 parks a loop after 3 runs without value; a security fix
+	// waiting hourly for its attestation must not be parked for a day.
+	r := newRig(t)
+	r.release(2, func(m *update.Manifest) { m.Security = true })
+	spare, err := meter.Open(meter.Config{
+		Path:       filepath.Join(t.TempDir(), "spare.json"),
+		MachineCap: meter.Limits{Calls: 50, Tokens: 500_000},
+		OverallCap: loops.SpareLimits(loops.DefaultSpareCalls),
+		Now:        r.clk.now,
+	})
+	r.must(err)
+	s, err := loops.New(loops.Config{Store: &change.MemStore{}, Spare: spare, Sources: []loops.Source{r.l}, Now: r.clk.now})
+	r.must(err)
+	for h := 0; h < 6; h++ {
+		if h == 4 {
+			r.attest()
+		}
+		s.Tick(context.Background())
+		r.clk.add(time.Hour)
+	}
+	got := r.p.proposed()
+	if len(got) != 1 || !got[0].Security() {
+		t.Fatalf("security fix attested at hour 4, proposed by hour 6: %+v (share %v)", got, s.Share())
+	}
+}
+
+func TestDriveConfirmedOnlyWhenNothingNewer(t *testing.T) {
+	r := newRig(t)
+	r.release(2, nil)
+	res, err := r.store.Check(update.DirSource(r.repo.Dir), update.Options{Offline: true})
+	r.must(err)
+	r.must(r.store.Commit(res.Release))
+	r.release(3, nil)
+	r.tick()
+	if d := r.digest(); strings.Contains(d, "checked online") || strings.Contains(d, "latest") {
+		t.Fatalf("a newer release is out: %q", d)
+	}
+}
+
+func TestPreemptedProposalNotShownAsAwaitingApproval(t *testing.T) {
+	r := newRig(t)
+	r.channel = update.ChannelFast
+	r.release(2, func(m *update.Manifest) { m.Channel = update.ChannelFast })
+	r.p.err = context.Canceled
+	ctx, cancel := context.WithCancel(context.Background())
+	job, _ := r.l.Next(ctx, true)
+	r.l.cfg.Attestations = func(context.Context, string) ([][]byte, error) { cancel(); return nil, nil }
+	job.Run(ctx)
+	if st := r.l.Status(); strings.Contains(st.Line, "approval") {
+		t.Fatalf("preempted: %q", st.Line)
 	}
 }

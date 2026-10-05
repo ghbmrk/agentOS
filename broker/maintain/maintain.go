@@ -76,8 +76,6 @@ type Config struct {
 	Pipeline Proposer
 	// State persists Loop 3's own state.
 	State change.Store
-	// MinThreshold is passed to update.Options (default 2 there).
-	MinThreshold int
 	// Interval is how often to check (UPD-5: daily). Default 24 hours.
 	Interval time.Duration
 	// Retry is how soon to look again after a failed check, or for a
@@ -95,7 +93,11 @@ type Config struct {
 // Values a check reports to the scheduler (LOOP-3): a qualified update is
 // Loop 3's product, and a security fix counts double.
 const (
-	valueRelease  = 1.0
+	valueRelease = 1.0
+	// valueChecked is a verified check, current or waiting: the box knows
+	// where it stands. It keeps Loop 3 from being parked as dry (LOOP-3)
+	// while a security fix waits for its attestation.
+	valueChecked  = 0.1
 	valueSecurity = 2.0
 )
 
@@ -105,6 +107,7 @@ const (
 	waitSoak        = "soak"
 	waitPinned      = "pinned"
 	waitPropose     = "propose"
+	waitPreempted   = "preempted"
 )
 
 // Failure kinds of a check, for the owner's line.
@@ -115,6 +118,7 @@ const (
 	failReach     = "unreachable"
 	failNoMirrors = "no-mirrors"
 	failState     = "state"
+	failRelease   = "release"
 )
 
 type pending struct {
@@ -263,7 +267,7 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 		return loops.Result{Err: err}
 	}
 	channel := l.cfg.Channel()
-	opts := update.Options{Channel: channel, MinThreshold: l.cfg.MinThreshold, Now: l.cfg.Now}
+	opts := update.Options{Channel: channel, Now: l.cfg.Now}
 	if channel == ChannelPinned {
 		// Checked as stable, for security notices only (UPD-4).
 		opts.Channel = update.ChannelStable
@@ -284,8 +288,24 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 		return loops.Result{Err: cerr}
 	}
 	installed, ierr := l.cfg.Store.Installed()
-	if ierr != nil {
+	if failure == "" && ierr != nil {
 		failure, err = failState, ierr
+	}
+	var (
+		rel *update.Checked
+		m   update.Manifest
+		key string
+	)
+	if failure == "" && res.Release != nil {
+		rel = res.Release
+		m, err = rel.Manifest()
+		if err == nil {
+			key, err = imageKey(rel)
+		}
+		if err != nil {
+			// Fail closed: a release the box cannot read is not "current".
+			failure = failRelease
+		}
 	}
 	now := l.cfg.Now()
 
@@ -294,12 +314,14 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 	if failure != "" {
 		l.st.Failure = failure
 		l.st.Next = now.Add(l.cfg.Retry)
-		l.saveLocked()
+		serr := l.saveLocked()
 		l.mu.Unlock()
-		return loops.Result{Err: err}
+		return loops.Result{Err: errors.Join(err, serr)}
 	}
 	l.st.LastOnline, l.st.Failure = now, ""
-	if res.FreshnessConfirmed {
+	if res.FreshnessConfirmed && rel == nil {
+		// Only when nothing newer is out: the drive install is then
+		// confirmed current, not just checked (UPD-8).
 		l.st.Confirmed = true
 	}
 	if l.st.Seen == nil {
@@ -321,26 +343,13 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 	}
 	l.st.Newest, l.st.Pending = 0, nil
 	l.st.Next = now.Add(l.cfg.Interval)
-	if res.Release == nil {
-		l.saveLocked()
+	if rel == nil {
+		serr := l.saveLocked()
 		l.mu.Unlock()
-		return loops.Result{}
-	}
-	rel := res.Release
-	m, err := rel.Manifest()
-	if err != nil {
-		l.saveLocked()
-		l.mu.Unlock()
-		return loops.Result{Err: err}
+		return loops.Result{Value: valueChecked, Err: serr}
 	}
 	v := m.Version
 	l.st.Newest = v
-	key, err := imageKey(rel)
-	if err != nil {
-		l.saveLocked()
-		l.mu.Unlock()
-		return loops.Result{Err: err}
-	}
 	if _, ok := l.st.Seen[key]; !ok {
 		l.st.Seen[key] = now
 	}
@@ -349,12 +358,12 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 	if channel == ChannelPinned {
 		l.st.Pending = &pending{Version: v, Security: m.Security, Why: waitPinned}
 	}
-	l.saveLocked()
+	serr := l.saveLocked()
 	l.mu.Unlock()
 	if channel == ChannelPinned || proposed {
 		// Pinned: a notice only. Proposed: the pipeline has it, or
 		// rejected it.
-		return loops.Result{}
+		return loops.Result{Value: valueChecked, Err: serr}
 	}
 
 	o := l.decide(ctx, rel, m, channel, seen, now)
@@ -362,7 +371,7 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.st.Newest != v {
-		return loops.Result{Value: o.value, Err: o.err} // superseded meanwhile
+		return loops.Result{Value: o.value, Err: errors.Join(o.err, serr)} // superseded meanwhile
 	}
 	switch {
 	case o.proposed != "":
@@ -376,6 +385,7 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 		l.st.ProposedAt[v] = now
 	case o.wait == nil:
 		// Preempted before proposing: offered again.
+		l.st.Pending = &pending{Version: v, Security: m.Security, Why: waitPreempted}
 		l.st.Next = time.Time{}
 	default:
 		l.st.Pending = o.wait
@@ -389,8 +399,7 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 			}
 		}
 	}
-	l.saveLocked()
-	return loops.Result{Value: o.value, Err: o.err}
+	return loops.Result{Value: o.value, Err: errors.Join(o.err, serr, l.saveLocked())}
 }
 
 // checkMirrors tries each mirror in turn and returns the first full pass.
@@ -477,14 +486,14 @@ func (l *Loop3) decide(ctx context.Context, rel *update.Checked, m update.Manife
 	if m.Security {
 		// UPD-8, D6: a security fix waits for one independent attestation.
 		if err := rel.SecurityAutoStage(atts, l.cfg.OwnKey); err != nil {
-			return outcome{wait: &pending{Version: m.Version, Security: true, Why: waitAttestation}, err: aerr}
+			return outcome{wait: &pending{Version: m.Version, Security: true, Why: waitAttestation}, value: valueChecked, err: aerr}
 		}
 	} else if channel != update.ChannelFast {
 		// UPD-5: an ordinary stable release soaks, and needs independent
 		// passing attestations, before it is offered.
 		until := seen.Add(l.cfg.Soak)
 		if now.Before(until) || rel.IndependentPasses(atts, l.cfg.OwnKey) < l.cfg.MinPasses {
-			return outcome{wait: &pending{Version: m.Version, Why: waitSoak, Until: until}, err: aerr}
+			return outcome{wait: &pending{Version: m.Version, Why: waitSoak, Until: until}, value: valueChecked, err: aerr}
 		}
 	}
 	if err := ctx.Err(); err != nil {
@@ -500,6 +509,7 @@ func (l *Loop3) decide(ctx context.Context, rel *update.Checked, m update.Manife
 	o := outcome{proposed: rep.State}
 	switch {
 	case rep.State == change.StateRejected:
+		o.value = valueChecked
 	case m.Security:
 		o.value = valueSecurity
 	default:
@@ -535,6 +545,7 @@ var failText = map[string]string{
 	failReach:     "the update source could not be reached",
 	failNoMirrors: "no update source is set up",
 	failState:     "this box's update record could not be read",
+	failRelease:   "the newest release could not be read",
 }
 
 // Status reports whether the box is up to date, and says why not.
@@ -609,6 +620,8 @@ func pendingLine(p *pending) string {
 		return fmt.Sprintf("Security update %d is waiting for an independent test report before it installs.", p.Version)
 	case p.Why == waitSoak:
 		return fmt.Sprintf("Update %d is out. The box will offer it after %s, once other boxes have tested it.", p.Version, p.Until.Format("Mon 2 Jan"))
+	case p.Why == waitPreempted:
+		return fmt.Sprintf("Update %d was found. The box will look at it again soon.", p.Version)
 	case p.Security:
 		return fmt.Sprintf("Security update %d was found but could not be tested yet. The box will try again within the hour.", p.Version)
 	}
