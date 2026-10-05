@@ -22,6 +22,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -87,6 +88,27 @@ func get(sock, path string) string {
 	_, body, _ := strings.Cut(rest, "\r\n\r\n")
 	_, status, _ = strings.Cut(status, " ") // drop the protocol version
 	return status + " " + strings.TrimSpace(body)
+}
+
+func fill(path string, mb int) string {
+	f, err := os.Create(path)
+	if err != nil {
+		return "ERR " + err.Error()
+	}
+	defer f.Close()
+	buf := make([]byte, 1<<20)
+	for i := range buf {
+		buf[i] = byte(i) | 1
+	}
+	for i := 0; i < mb; i++ {
+		if _, err := f.Write(buf); err != nil {
+			return fmt.Sprintf("ERR after %d MiB: %v", i, err)
+		}
+		if err := f.Sync(); err != nil {
+			return fmt.Sprintf("ERR after %d MiB: %v", i, err)
+		}
+	}
+	return "ok"
 }
 
 func serve() {
@@ -157,6 +179,18 @@ func serve() {
 			} else {
 				out = "ok"
 			}
+		case "fill":
+			// fill PATH MB: write MB MiB, synced, or as much as fits.
+			mb, _ := strconv.Atoi(f[2])
+			out = fill(f[1], mb)
+		case "spam":
+			// spam MB: print MB MiB to the console.
+			mb, _ := strconv.Atoi(f[1])
+			line := strings.Repeat("y", 1023) + "\n"
+			for i := 0; i < mb<<10; i++ {
+				os.Stdout.WriteString(line)
+			}
+			out = "ok"
 		case "stat":
 			if _, err := os.Stat(f[1]); err != nil {
 				out = "absent"
