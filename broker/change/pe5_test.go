@@ -121,7 +121,7 @@ func TestOnlyCandidateCausableCutsCount(t *testing.T) {
 // cannot take the evaluator back from other work. Another candidate is
 // unaffected.
 func TestOwnerCutCandidateIsParked(t *testing.T) {
-	e, pe := newPreemptEnv(t, func(c *Config) { c.MinHeldOut = 100 })
+	e, pe := newPreemptEnv(t, func(c *Config) { c.MinHeldOut = 100; c.DevPercent = parkDev })
 	e.cases(12, ClassSkill, "skills/greet", "hello")
 	park(t, e, pe, greet)
 	pe.arm(0)
@@ -156,6 +156,12 @@ func TestOwnerCutCandidateIsParked(t *testing.T) {
 		t.Fatalf("exempt count reset by a finished pass: %v", err)
 	}
 }
+
+// parkDev keeps nearly every case held out where a test parks a
+// candidate: park needs MaxExempt distinct held-out cases to cut, and at
+// the default 30% dev share 12 cases sometimes left too few (a flake on
+// main after #145).
+const parkDev = 1
 
 // park cuts c short for the owner MaxExempt times, each time on the
 // candidate side of a case not cut before, so no case passes its own

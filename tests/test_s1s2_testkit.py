@@ -1,6 +1,7 @@
 # Unit tests for the S1/S2 test kit's pure logic. No coverage claims: a spike measures, it does not
 # implement requirements. The image itself is checked end to end by .github/workflows/testkit.yml.
 import importlib.util
+import os
 import pathlib
 import random
 import sys
@@ -142,6 +143,37 @@ class FloorFitTest(unittest.TestCase):
 
     def test_unreadable(self):
         self.assertTrue(tk.floor_fit("", 4).startswith("unknown"))
+
+
+class WakeEstimateTest(unittest.TestCase):
+    # PE7 (UX P2-a on #147): the warm wake's hash and read-back against the 15 s holding line.
+    def test_ssd_passes(self):
+        out = tk.wake_estimate(400, 1000)
+        self.assertTrue(out.startswith("PASS"), out)
+        self.assertIn("about 8.1 s", out)
+        self.assertIn("1536 MiB", out)
+
+    def test_slow_disk_fails(self):
+        out = tk.wake_estimate(100, 1000)
+        self.assertTrue(out.startswith("FAIL"), out)
+        self.assertIn("about 32.2 s", out)
+
+    def test_slow_hash_bounds_the_first_pass(self):
+        self.assertIn("about 12.1 s", tk.wake_estimate(400, 200))
+
+    def test_unmeasured(self):
+        self.assertTrue(tk.wake_estimate(0, 100).startswith("unknown"))
+
+    def test_probe_measures(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            sh, tk.sh = tk.sh, lambda *a, **k: ""
+            try:
+                out = tk.wake_probe(os.path.join(d, "w"))
+            finally:
+                tk.sh = sh
+            self.assertRegex(out, r"^(PASS|FAIL): about ")
+            self.assertEqual(os.listdir(d), [])
 
 
 class S2HelpersTest(unittest.TestCase):

@@ -623,3 +623,33 @@ func TestCAP8ConcurrentCreatesStayUnderTheCap(t *testing.T) {
 		t.Fatalf("%d workers after the race, want exactly %d", n, MaxWorkers)
 	}
 }
+
+// PE7 (condition 2, L3 on #149): a machine with a worker tool call in
+// flight, such as a running worker_exec, is busy, so the agent sleeper
+// does not stop it; it is idle again once the call returns.
+func TestWorkerCallInFlightKeepsTheCallerBusy(t *testing.T) {
+	r := newRig(t, 8000)
+	r.agent("agent", vm.Public)
+	r.must("agent", toolCreate, m{"name": "w"}, nil)
+	if r.tools.Busy("agent") {
+		t.Fatal("busy with no call in flight")
+	}
+	in, release := make(chan struct{}), make(chan struct{})
+	r.tools.M = interleave{r.m, func() { close(in); <-release }}
+	done := make(chan error, 1)
+	go func() { done <- r.call("agent", toolExec, m{"name": "w", "argv": []string{"echo", "x"}}, nil) }()
+	<-in
+	if !r.tools.Busy("agent") {
+		t.Fatal("a running worker_exec did not keep its caller busy")
+	}
+	if r.tools.Busy("other") {
+		t.Fatal("another machine counted as busy")
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if r.tools.Busy("agent") {
+		t.Fatal("still busy after the call returned")
+	}
+}

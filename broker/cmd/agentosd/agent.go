@@ -47,12 +47,19 @@ type keeper struct {
 	every time.Duration
 	logf  func(format string, args ...any)
 
+	// sleep, if set, is the agent's sleeper (PE7): the keeper does not
+	// start an agent it put to sleep.
+	sleep *sleeper
+
 	mu     sync.Mutex
 	status string // STATUS line while not running; empty once it runs
 }
 
 // Status is the keeper's STATUS line: empty while the machine runs.
 func (k *keeper) Status() string {
+	if k.sleep != nil && k.sleep.Asleep() {
+		return sleepStatus
+	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	return k.status
@@ -72,8 +79,16 @@ func (k *keeper) setStatus(err error) {
 	k.mu.Unlock()
 }
 
-// ensure brings the machine to running, or says why it is not.
+// ensure brings the machine to running, or says why it is not; an agent
+// asleep is left to its sleeper.
 func (k *keeper) ensure(ctx context.Context) error {
+	if k.sleep != nil {
+		return k.sleep.whileAwake(func() error { return k.start(ctx) })
+	}
+	return k.start(ctx)
+}
+
+func (k *keeper) start(ctx context.Context) error {
 	mc, err := k.m.Get(k.id)
 	switch {
 	case errors.Is(err, vm.ErrUnknown):

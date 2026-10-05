@@ -126,9 +126,14 @@ func (l *lateStatus) Status() string {
 	return agentNotSet
 }
 
-// lateAgent hands owner chat to the guest plane once it exists.
+// lateAgent hands owner chat to the guest plane once it exists. A
+// message delivered while the agent sleeps wakes it (PE7): the message
+// waits in the agent's inbox meanwhile, and its start hands it over, warm
+// or cold alike (UX P2-c).
 type lateAgent struct {
-	a atomic.Pointer[guest.OwnerAgent]
+	a     atomic.Pointer[ownerAgent]
+	sleep atomic.Pointer[sleeper]
+	last  atomic.Int64 // unix nanoseconds of the last delivery
 }
 
 func (l *lateAgent) Deliver(ctx context.Context, text string, public bool) error {
@@ -136,7 +141,33 @@ func (l *lateAgent) Deliver(ctx context.Context, text string, public bool) error
 	if a == nil {
 		return errors.New("no agent machine is running")
 	}
-	return a.Deliver(ctx, text, public)
+	err := (*a).Deliver(ctx, text, public)
+	if err == nil {
+		l.delivered(time.Now())
+	}
+	return err
+}
+
+// ownerAgent is where owner chat goes (guest.OwnerAgent).
+type ownerAgent interface {
+	Deliver(ctx context.Context, text string, public bool) error
+}
+
+// delivered notes an owner message that reached the agent's inbox at t,
+// and wakes the agent if it sleeps.
+func (l *lateAgent) delivered(t time.Time) {
+	l.last.Store(t.UnixNano())
+	if s := l.sleep.Load(); s != nil && s.Asleep() {
+		go s.OwnerMessage(t)
+	}
+}
+
+// lastDelivered is when an owner message last reached the agent.
+func (l *lateAgent) lastDelivered() time.Time {
+	if n := l.last.Load(); n != 0 {
+		return time.Unix(0, n)
+	}
+	return time.Time{}
 }
 
 // recallLabels gives the recall index the machine manager's REV-5 labels.
@@ -205,6 +236,7 @@ func main() {
 	var stateDir, runsc, cgroupRoot, accelMode, meterPath, agentMachine, inboxPath, egressSocket, verifySocket, recallDir string
 	var agentImage, agentLaunch string
 	var diskReserveMB, agentMemMB, replayMemMB, builderMemMB int64
+	var sleepHoursFlag string
 	var builderImage, builderLaunch, keptPath string
 	var learn learnPaths
 	var cgroupVouched bool
@@ -242,6 +274,7 @@ func main() {
 	flag.StringVar(&builderImage, "builder-image", "", "the minimal image Loop 1's builder machines run (W3-builder), registered with -image; empty runs no model-backed builder")
 	flag.StringVar(&builderLaunch, "builder-launch", "", "how a builder machine starts: argv and env; empty uses the image's own")
 	flag.Int64Var(&builderMemMB, "builder-mem-mb", loopbuild.DefaultMemMB, "a builder machine's memory budget, MB")
+	flag.StringVar(&sleepHoursFlag, "sleep-hours", "", "on a box where the agent and a replay machine do not fit together, the hours the agent may sleep while the box tests changes, HH:MM-HH:MM box time (PE7); empty is 01:00-06:00")
 	var workerImage, workerArgv string
 	var workerMaxMB int64
 	flag.StringVar(&workerImage, "worker-image", "", "the base image worker machines are built from (CAP-8), registered with -image; empty offers guests no worker tools")
@@ -253,6 +286,10 @@ func main() {
 	flag.StringVar(&qcfg.Path, "questions", qcfg.Path, "agents' questions to the owner, kept across restarts (P3-8)")
 	flag.StringVar(&qcfg.ClockPath, "clock-state", qcfg.ClockPath, "the box clock check's state (P2-9)")
 	flag.Parse()
+	sleepHours, err := parseSleepHours(sleepHoursFlag)
+	if err != nil {
+		log.Fatal(err)
+	}
 	meminfo, _ := os.ReadFile("/proc/meminfo")
 	mem := planMemory(string(meminfo), runtime.NumCPU(), flagSet(flag.CommandLine, "capacity-mb"), cfg.Admission.CapacityMB, floor, agentMemMB)
 	cfg.Admission = mem.Budget.Admission()
@@ -422,7 +459,8 @@ func main() {
 			go m.RunPruner(vm.PrunePolicy{LowWaterBytes: 1 << 30}, time.Minute, ctx.Done())
 			tree.setMachines(m)
 			tools := toolSet{qs.tools(), tree, recallTools}
-			if wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB); wt != nil {
+			wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB)
+			if wt != nil {
 				tools = append(tools, wt)
 				go reapWorkers(ctx, wt)
 			}
@@ -435,7 +473,8 @@ func main() {
 				if lp != nil {
 					oa.Delivered = lp.delivered
 				}
-				agent.a.Store(oa)
+				var to ownerAgent = oa
+				agent.a.Store(&to)
 				defer plane.Shutdown()
 				if lp != nil {
 					// Replay machines run the agent's image and launch.
@@ -443,6 +482,14 @@ func main() {
 					if err == nil {
 						if err = replayFits(cfg.Admission.CapacityMB, cfg.Admission.HeadroomMB, agentMemMB, replayMemMB); err != nil {
 							lp.noRoom.Store(true) // STATUS and LEARNING ON say so
+							// The agent sleeps while the box evaluates (PE7).
+							sl := openSleeper(ctx, sleepDeps{d: d, m: m, plane: plane, qs: qs, agent: agent, id: agentMachine, hours: sleepHours, workers: wt})
+							lp.sleep.Store(sl)
+							agent.sleep.Store(sl)
+							if nerr := lp.pipe.Notice("pe7:sleep-mode", sleepDigest); nerr != nil {
+								log.Printf("sleep mode digest line: %v", nerr)
+							}
+							err = nil
 						}
 					}
 					if err == nil {
@@ -461,7 +508,7 @@ func main() {
 				if err != nil {
 					log.Printf("no agent machine kept running: %v", err)
 				} else {
-					k := &keeper{m: m, id: agentMachine, spec: spec, every: 30 * time.Second, logf: log.Printf, status: agentWaiting}
+					k := agentKeeper(ctx, m, d.Engine().RecordSleep, agentMachine, spec, agent.sleep.Load())
 					agentStatus.k.Store(k)
 					go k.run(ctx)
 				}

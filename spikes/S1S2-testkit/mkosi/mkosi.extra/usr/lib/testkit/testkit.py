@@ -232,6 +232,55 @@ def floor_fit(meminfo, cores):
         FLOOR["headroom"], AGENT_MB, REPLAY_MB, need, min(pool + FLOOR["headroom"], cap), cap, cores)
 
 
+# PE7 (UX P2-a on #147): a warm wake hashes the agent's sleep checkpoint (vm treeHash, one read
+# of its memory file) and gVisor reads it again to restore. The owner waits at most WAKE_LIMIT_S
+# before the holding line (U1). This bounds the disk and hash part from a sample; gVisor's own
+# restore work is not measured here.
+WAKE_LIMIT_S = 15
+WAKE_SAMPLE_MB = 256
+
+
+def wake_estimate(read_mbs, hash_mbs, mem_mb=AGENT_MB):
+    """The warm-wake disk and hash time for an agent of mem_mb, from measured MB/s."""
+    if read_mbs <= 0 or hash_mbs <= 0:
+        return "unknown: no throughput measured"
+    mb = mem_mb * 1.048576
+    s = mb / min(read_mbs, hash_mbs) + mb / read_mbs
+    return "%s: about %.1f s to hash and read back a %d MiB agent (disk %.0f MB/s, sha256 %.0f MB/s), limit %d s before the holding line; gVisor restore time not included" % (
+        "PASS" if s <= WAKE_LIMIT_S else "FAIL", s, mem_mb, read_mbs, hash_mbs, WAKE_LIMIT_S)
+
+
+def wake_probe(path="/var/tmp/testkit-wake"):
+    """Measures cold disk reads and sha256 on this PC with a WAKE_SAMPLE_MB file on the boot disk."""
+    chunk = os.urandom(4 << 20)
+    try:
+        with open(path, "wb") as f:
+            for _ in range(WAKE_SAMPLE_MB // 4):
+                f.write(chunk)
+            f.flush()
+            os.fsync(f.fileno())
+        sh("sync; echo 3 > /proc/sys/vm/drop_caches")
+        t = time.monotonic()
+        with open(path, "rb", buffering=0) as f:
+            while f.read(4 << 20):
+                pass
+        read_s = time.monotonic() - t
+    except OSError as e:
+        return "unknown: %s" % e
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    h = hashlib.sha256()
+    t = time.monotonic()
+    for _ in range(WAKE_SAMPLE_MB // 4):
+        h.update(chunk)
+    hash_s = time.monotonic() - t
+    mb = WAKE_SAMPLE_MB * 1.048576
+    return wake_estimate(mb / read_s if read_s else 0, mb / hash_s if hash_s else 0)
+
+
 def probe(disk):
     dmi = "/sys/class/dmi/id/"
     tpm = read("/sys/class/tpm/tpm0/tpm_version_major")
@@ -244,6 +293,7 @@ def probe(disk):
         ("cpu", "%s, %d threads" % (cpu.group(1) if cpu else "?", os.cpu_count() or 0)),
         ("ram_gb", "%.1f" % (int(mem.group(1)) / 1048576) if mem else "?"),
         ("agent_and_replay_fit", floor_fit(read("/proc/meminfo"), len(os.sched_getaffinity(0)))),
+        ("agent_warm_wake", wake_probe()),
         ("secure_boot", sh("mokutil --sb-state").splitlines()[0] if sh("mokutil --sb-state") else "?"),
         ("loader", efivar("LoaderInfo") or "not systemd-boot"),
         ("found_root_via_gpt_auto", "yes" if efivar("LoaderDevicePartUUID") else "no"),

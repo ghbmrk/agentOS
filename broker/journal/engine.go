@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -519,6 +520,21 @@ func (e *Engine) Resume() error {
 	return e.commit(Record{Type: RecResume})
 }
 
+// GuestActive reports an intent the agent submitted (origin "guest:")
+// that is authorized but not yet dispatched, or in flight: work the agent
+// has in hand, so the sleeper does not stop it (PE7 condition 2).
+func (e *Engine) GuestActive() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, id := range e.order {
+		en := e.intents[id]
+		if strings.HasPrefix(en.intent.Origin, "guest:") && (en.state == Authorized || en.state == InFlight) {
+			return true
+		}
+	}
+	return false
+}
+
 // Stopped reports whether STOP is in force.
 func (e *Engine) Stopped() bool {
 	e.mu.Lock()
@@ -668,6 +684,12 @@ func (e *Engine) validate(r Record) error {
 		}
 		return nil
 	}
+	if r.Type == RecSleep {
+		if r.Sleep == nil || !r.Sleep.valid() || r.ID != "" {
+			return fmt.Errorf("sleep record without a valid note")
+		}
+		return nil
+	}
 	if r.Type == RecResume {
 		if !e.stopped {
 			return fmt.Errorf("resume while not stopped")
@@ -752,7 +774,7 @@ func (e *Engine) apply(r Record) {
 	case RecResume:
 		e.stopped = false
 		return
-	case RecEgress:
+	case RecEgress, RecSleep:
 		return
 	case RecSubmitted:
 		in := *r.Intent
