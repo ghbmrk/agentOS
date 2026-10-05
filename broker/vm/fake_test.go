@@ -163,6 +163,8 @@ func newEnv(t *testing.T, capacityMB int64) *env {
 		Runtime:   e.rt,
 		Admit:     e.adm,
 		NoCgroups: true,
+		// Disk quota tests set Quota (diskquota_test.go).
+		NoQuota: true,
 		// Unit tests don't depend on the host's disk; RES-4 tests set this.
 		FreeBytes: func(string) (int64, error) { return 1 << 50, nil },
 	}
@@ -191,13 +193,13 @@ func (e *env) create(id string, c admission.Class, mb int64) Machine {
 // guestWrite is a guest writing a file in its root.
 func (e *env) guestWrite(id, rel, s string) {
 	e.t.Helper()
-	write(e.t, filepath.Join(e.cfg.StateDir, "machines", id, "upper"), rel, s)
+	write(e.t, filepath.Join(e.cfg.StateDir, "machines", id, "disk", "upper"), rel, s)
 }
 
 // guestRead returns what the guest sees at rel ("" if absent).
 func (e *env) guestRead(id, rel string) string {
 	e.t.Helper()
-	for _, root := range []string{filepath.Join(e.cfg.StateDir, "machines", id, "upper"), e.img} {
+	for _, root := range []string{filepath.Join(e.cfg.StateDir, "machines", id, "disk", "upper"), e.img} {
 		if b, err := os.ReadFile(filepath.Join(root, rel)); err == nil {
 			return string(b)
 		}
@@ -225,12 +227,12 @@ func must(t *testing.T, err error) {
 
 // upper is a path in machine id's layer, for a guest's deletions.
 func (e *env) upper(id, rel string) string {
-	return filepath.Join(e.cfg.StateDir, "machines", id, "upper", rel)
+	return filepath.Join(e.cfg.StateDir, "machines", id, "disk", "upper", rel)
 }
 
 // Exec runs a few commands against the machine's upper layer: "echo"
 // prints its arguments, "write PATH" stores stdin, "cat PATH" prints the
-// file, "sleep" waits for the context, "hang" ignores it for a second, and
+// file, "sleep" waits for the context, "hang" ignores it for a second, "killed" exits 137 once it ends, and
 // "exit N" exits N.
 func (f *fakeRuntime) Exec(ctx context.Context, id string, c Command) (ExecResult, error) {
 	f.mu.Lock()
@@ -265,6 +267,9 @@ func (f *fakeRuntime) Exec(ctx context.Context, id string, c Command) (ExecResul
 	case "sleep":
 		<-ctx.Done()
 		return ExecResult{ExitCode: -1}, ctx.Err()
+	case "killed": // a runtime that reports a kill as an exit code
+		<-ctx.Done()
+		return ExecResult{ExitCode: 137}, nil
 	case "hang": // a runtime that ignores cancellation
 		time.Sleep(time.Second)
 		return ExecResult{}, ctx.Err()

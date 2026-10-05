@@ -1,6 +1,6 @@
 package gvisor
 
-// REQ: RES-3, REV-1
+// REQ: RES-3, REV-1, HW-8
 
 import (
 	"encoding/json"
@@ -16,6 +16,9 @@ import (
 // #124): the bundle declares no devices and binds nothing from the host but
 // the machine's own service directory, and runsc gets no device-passthrough
 // flag. Accelerators stay with broker-run services that lease them (RES-3).
+// The same check keeps every host disk node from every machine (HW-8,
+// security H6 on HOST-1a): only the root-only agentos-hostdisk helper
+// reads a host disk, and only its partition table.
 func TestRES3NoHostDevicesReachAMachine(t *testing.T) {
 	dir := t.TempDir()
 	services := filepath.Join(dir, "svc")
