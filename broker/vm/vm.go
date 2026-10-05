@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -26,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
@@ -174,6 +176,9 @@ type machine struct {
 	// revoked: admission preempted the machine after admitting it but
 	// before it started, so it must not start on that admission.
 	revoked bool
+	// preempting is set, without the lock, while a preemption is under way
+	// (see Preempt); startFrom refuses to start the machine meanwhile.
+	preempting atomic.Bool
 }
 
 // Manager is safe for concurrent use.
@@ -187,6 +192,8 @@ type Manager struct {
 
 	diskMu   sync.Mutex // serializes disk reservations
 	diskHeld int64      // bytes reserved for copies in progress
+
+	now func() time.Time // nil: time.Now (tests age snapshots for Prune)
 }
 
 // Open opens (or creates) the state directory. Machines recorded by an
@@ -366,6 +373,9 @@ func (m *Manager) startFrom(ctx context.Context, mc *machine, s *Snapshot) error
 			return err
 		}
 	}
+	if mc.preempting.Load() {
+		return fmt.Errorf("%w: %s", ErrRevoked, mc.ID)
+	}
 	var err error
 	if s != nil && s.Tier == Full {
 		err = m.cfg.Runtime.Restore(ctx, l, filepath.Join(m.snapDir(s.ID), "mem"))
@@ -374,6 +384,10 @@ func (m *Manager) startFrom(ctx context.Context, mc *machine, s *Snapshot) error
 	}
 	if err != nil {
 		return err
+	}
+	if mc.preempting.Load() {
+		// Preempted while starting: the caller's failure path stops it.
+		return fmt.Errorf("%w: %s", ErrRevoked, mc.ID)
 	}
 	mc.State = Running
 	return m.saveMachine(mc)
@@ -1096,13 +1110,39 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 // layer stays on disk and Resume restarts it there. Memory since the last
 // full checkpoint is lost. Preempting a machine that is not running is a
 // no-op.
+//
+// Preemption never waits for an operation already holding the machine (a
+// checkpoint or a fork takes seconds, longer than the frozen target): it
+// kills the sandbox under that operation, which then fails, and the
+// machine is recorded as preempted once the operation lets go. While that
+// is pending the machine cannot be started again.
 func (m *Manager) Preempt(id string) error {
 	mc, err := m.get(id)
 	if err != nil {
 		return nil // already gone: nothing holds memory
 	}
-	mc.mu.Lock()
-	defer mc.mu.Unlock()
+	mc.preempting.Store(true)
+	if mc.mu.TryLock() {
+		defer mc.mu.Unlock()
+		return m.preemptLocked(mc)
+	}
+	if err := m.kill(mc); err != nil {
+		return err
+	}
+	go func() {
+		mc.mu.Lock()
+		defer mc.mu.Unlock()
+		if err := m.preemptLocked(mc); err != nil {
+			log.Printf("vm: %s: finishing preemption: %v", mc.ID, err)
+		}
+	}()
+	return nil
+}
+
+// preemptLocked stops mc and records it as preempted. Called with mc.mu
+// held and mc.preempting set; it clears preempting.
+func (m *Manager) preemptLocked(mc *machine) error {
+	defer mc.preempting.Store(false)
 	if mc.State != Running {
 		// Admitted but not started yet: it must not start now.
 		mc.revoked = true
@@ -1110,12 +1150,29 @@ func (m *Manager) Preempt(id string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.KillTimeout)
 	defer cancel()
-	m.cfg.Runtime.Pause(ctx, id) // stop its CPU use now; the kill follows
+	m.cfg.Runtime.Pause(ctx, mc.ID) // stop its CPU use now; the kill follows
 	if err := m.stopRuntime(ctx, mc); err != nil {
 		return err
 	}
 	mc.State = Preempted
 	return m.saveMachine(mc)
+}
+
+// kill releases a machine's memory without its lock: it empties the
+// machine's cgroup, or asks the runtime when there are no cgroups. Only
+// fields fixed at creation are read. The runtime's own state is cleaned up
+// later, under the lock, by stopRuntime.
+func (m *Manager) kill(mc *machine) error {
+	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.KillTimeout)
+	defer cancel()
+	l := m.launch(mc)
+	if l.Cgroup == "" {
+		return m.cfg.Runtime.Kill(ctx, l)
+	}
+	if _, err := os.Stat(l.Cgroup); err != nil {
+		return nil // never started: nothing holds memory
+	}
+	return (&cgroup.Group{Path: l.Cgroup}).Kill(ctx)
 }
 
 // Machines lists machine IDs, sorted.

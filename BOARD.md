@@ -36,3 +36,9 @@ P1-4 follow-ups (from the #23 review), for P1-7 or the loop scheduler:
 - After a broker restart, accepted work resumes once the journal reconciles, and the boot text names the resumed tasks (UX).
 - Guest sockets follow the B8 per-machine identity rule when P1-7 mounts them (V15, Security).
 - On the N95, measure zram together with the 1/16 `memory.high` margin (Potency).
+
+## Phase 2: real hardware
+
+| ID | Package | Needs | State |
+|---|---|---|---|
+| P2-5 | Resource admission, preemption, memory budgets, accelerator discovery (RES-1–4): per-component cgroups from the declared floor budget, preemption that never waits behind a checkpoint, accelerator leases with CPU fallback, RES-4 reserve and snapshot pruning, measured in a 7680 MiB floor-sized group on CI ([assumptions](broker/budget/ASSUMPTIONS.md)). N95 re-run of `broker/floor` is part of A2 | P1-4 | in review |

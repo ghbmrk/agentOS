@@ -25,10 +25,12 @@ var controlPath = map[string][]string{
 	"admission": {},
 	"sockets":   {},
 	"cgroup":    {},
+	"budget":    {"admission", "cgroup"}, // RES-2 component budget (P2-5)
+	"accel":     {"admission"},           // RES-3 discovery from sysfs (P2-5)
 	"daemon":    {"journal", "control", "admission", "sockets"},
 	// The composition root also opens the machine plane (below) and hands
 	// it to admission as a Preempter.
-	"cmd/agentosd": {"daemon", "cgroup", "vm", "vm/gvisor"},
+	"cmd/agentosd": {"daemon", "cgroup", "budget", "accel", "vm", "vm/gvisor"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies
