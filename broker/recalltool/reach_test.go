@@ -17,7 +17,8 @@ import (
 )
 
 type fakeJournal struct {
-	submitted map[string]time.Time // intent -> when, all from guest:root
+	submitted map[string]time.Time // intent -> when, from guest:root unless in origin
+	origin    map[string]string
 	erased    map[string]bool
 	inFlight  map[string]bool
 	denied    map[string]bool
@@ -39,7 +40,11 @@ func (j *fakeJournal) Get(id string) (journal.Status, error) {
 func (j *fakeJournal) Between(origin string, from, until time.Time) []string {
 	var out []string
 	for id, at := range j.submitted {
-		if origin == "guest:root" && !at.Before(from) && (until.IsZero() || at.Before(until)) {
+		o := j.origin[id]
+		if o == "" {
+			o = "guest:root"
+		}
+		if origin == o && !at.Before(from) && (until.IsZero() || at.Before(until)) {
 			out = append(out, id)
 		}
 	}
@@ -66,11 +71,15 @@ type fakeMachines struct {
 	plan    Plan
 	planErr error
 	fail    error
+	during  func() // runs while the machines go back
 }
 
 func (m *fakeMachines) ForgetSince(_ context.Context, lineage string, since time.Time) error {
 	if m.fail != nil {
 		return m.fail
+	}
+	if m.during != nil {
+		m.during()
 	}
 	m.calls = append(m.calls, lineage)
 	m.since = append(m.since, since)
@@ -94,6 +103,7 @@ type fakeAsk struct {
 	st    map[string]journal.Status
 	asked []string
 	reach *Reach
+	j     *fakeJournal // the broker's questions are journal intents too
 }
 
 func (a *fakeAsk) Submit(in journal.Intent) (journal.Status, error) {
@@ -102,6 +112,9 @@ func (a *fakeAsk) Submit(in journal.Intent) (journal.Status, error) {
 	}
 	st := journal.Status{Intent: in, State: journal.Pending}
 	a.st[in.ID] = st
+	if a.j != nil {
+		a.j.submitted[in.ID], a.j.origin[in.ID] = a.reach.now(), in.Origin
+	}
 	return st, nil
 }
 
@@ -175,7 +188,7 @@ func newReachRig(t *testing.T) (*reachRig, time.Time) {
 	r := newRig(t)
 	x := &reachRig{r: r, clock: time.Now().UTC().Truncate(time.Minute).Add(-time.Hour)} // notes refuse future receipt
 	r.tl.cfg.Now = func() time.Time { return x.clock }
-	x.j = &fakeJournal{submitted: map[string]time.Time{}, erased: map[string]bool{}, inFlight: map[string]bool{}, denied: map[string]bool{}}
+	x.j = &fakeJournal{submitted: map[string]time.Time{}, origin: map[string]string{}, erased: map[string]bool{}, inFlight: map[string]bool{}, denied: map[string]bool{}}
 	x.before = x.clock.Add(-10 * time.Minute)
 	x.vm = &fakeMachines{plan: Plan{To: x.before}}
 	x.cs = &fakeCases{forgot: map[string]bool{}}
@@ -183,7 +196,7 @@ func newReachRig(t *testing.T) (*reachRig, time.Time) {
 	x.reach = &Reach{Prov: r.prov, Journal: x.j, Machines: x.vm, Cases: x.cs, Ask: x.ask, Deleted: r.ix.Deleted,
 		Now: func() time.Time { return x.clock }, Location: time.UTC,
 		Notify: func(s string) error { x.told = append(x.told, s); return nil }}
-	x.ask.reach = x.reach
+	x.ask.reach, x.ask.j = x.reach, x.j
 	r.ix.KeepTombstones(x.reach.Needed)
 	if err := r.ix.OnDelete(x.reach.OnDelete); err != nil {
 		t.Fatal(err)
@@ -378,6 +391,105 @@ func TestCAP3OneQuestionPerAgentAndStaleApprovals(t *testing.T) {
 	}
 }
 
+// #59 L3 third review 1: the later read's question is withdrawn in every
+// form, a re-ask after no answer or one naming new items after a NO, so
+// the owner still has one question per agent; a YES that raced the
+// withdrawal resets nothing and leaves the lineage contained.
+func TestCAP3OneQuestionPerAgentInEveryForm(t *testing.T) {
+	for _, form := range []string{"re-ask", "after NO"} {
+		t.Run(form, func(t *testing.T) {
+			x, read := newReachRig(t)
+			x.j.submitted["late"] = read.Add(time.Second)
+			pub := x.r.ix.SourceID("web", "", "https://shed.example.test/")
+			x.del(t, x.mail)
+			switch form {
+			case "re-ask":
+				x.ask.answer("lapse")
+				x.clock = x.clock.Add(ReaskEvery)
+			case "after NO":
+				x.ask.answer("no")
+				// A record read after the mail, then deleted: a new
+				// question from the same read, naming both.
+				hose, err := x.r.ix.Ingest(recall.Item{Source: recall.Source{Kind: "web", Ref: "https://hose.example.test/"}, Label: recall.Public, Text: "garden hose prices", Received: x.clock.Add(-time.Hour)})
+				if err != nil {
+					t.Fatal(err)
+				}
+				x.r.call("root", "root", "recall_search", map[string]any{"query": "hose", "scope": "public"})
+				x.del(t, hose)
+			}
+			x.reach.Retry(context.Background())
+			var later string
+			for id, st := range x.ask.st {
+				if st.State == journal.Pending {
+					later = id
+				}
+			}
+			if later == "" {
+				t.Fatalf("no later question: %+v", x.ask.st)
+			}
+			stale := x.ask.st[later].Intent
+			x.del(t, pub)
+			var open []journal.Intent
+			for _, st := range x.ask.st {
+				if st.State == journal.Pending {
+					open = append(open, st.Intent)
+				}
+			}
+			if len(open) != 1 || open[0].ID == later || x.ask.st[later].Permission.Reason != "not approved: superseded" || open[0].Params["since"] == stale.Params["since"] {
+				t.Fatalf("questions: %+v", x.ask.st)
+			}
+			out := x.reach.Execute(context.Background(), stale, 1)
+			roots := 0
+			for _, l := range x.vm.calls {
+				if l == "root" {
+					roots++
+				}
+			}
+			if out.Evidence != supersededEvidence || roots != 0 || !x.reach.Contained("root") || !strings.HasPrefix(x.told[len(x.told)-1], "Nothing done yet: root") {
+				t.Fatalf("raced YES: %+v, resets %v, told %q", out, x.vm.calls, x.told)
+			}
+		})
+	}
+}
+
+// #59 L3 third review: intents submitted while the machines go back are
+// erased with the rest; the erase runs to when the reset finished, not
+// to when it started.
+func TestCAP3IntentsDuringTheResetAreErased(t *testing.T) {
+	x, read := newReachRig(t)
+	x.vm.plan.Changes = 0
+	x.vm.during = func() {
+		x.clock = x.clock.Add(time.Minute)
+		x.j.submitted["during"] = x.clock.Add(-30 * time.Second)
+	}
+	x.del(t, x.mail)
+	rs := x.vm.since
+	if len(rs) != 1 || !rs[0].Equal(read) || !x.j.erased["during"] || x.reach.Pending() != 0 {
+		t.Fatalf("resets %v erased %v", rs, x.j.erased)
+	}
+}
+
+// #59 L3 third review: after a restart, a question left unanswered is not
+// asked again at once; the day starts at the first sighting.
+func TestCAP3ReaskClockStartsAgainAfterARestart(t *testing.T) {
+	x, read := newReachRig(t)
+	x.j.submitted["late"] = read.Add(time.Second)
+	x.del(t, x.mail)
+	x.ask.answer("lapse")
+	x.clock = x.clock.Add(2 * ReaskEvery)
+	// The broker restarts: a new Reach over the same records.
+	again := &Reach{Prov: x.reach.Prov, Journal: x.j, Machines: x.vm, Ask: x.ask, Deleted: x.reach.Deleted, Now: x.reach.Now, Location: time.UTC}
+	x.ask.reach = again
+	if err := again.settle(context.Background(), "root"); !errors.Is(err, errWaiting) || len(x.ask.st) != 1 || !again.Contained("root") {
+		t.Fatalf("asked at once after a restart: %v, %d", err, len(x.ask.st))
+	}
+	x.clock = x.clock.Add(ReaskEvery)
+	again.settle(context.Background(), "root")
+	if len(x.ask.st) != 2 {
+		t.Fatalf("not asked a day after the restart: %d", len(x.ask.st))
+	}
+}
+
 // #59 L3 re-review 1: a record read in the window between the read of
 // the deleted one and the reset, and read again after the reset, is held
 // again: a later deletion of it still reaches the lineage.
@@ -440,7 +552,7 @@ func TestCAP3UnmeasuredRestorePointIsNotNamed(t *testing.T) {
 	x.j.submitted["late"] = read.Add(time.Second)
 	x.del(t, x.mail)
 	in := x.ask.st[x.ask.asked[0]].Intent
-	if in.Params["detail"] != "back to before "+read.Format("15:04 Jan 2")+"; 1 stays done" {
+	if in.Params["detail"] != "back before "+read.Format("15:04")+"; 1 action stays done" {
 		t.Fatalf("detail %q", in.Params["detail"])
 	}
 }
@@ -459,8 +571,15 @@ func TestCAP3ContainedUntilRecallOpens(t *testing.T) {
 	}
 	var off LateExecutor
 	off.Off()
-	if off.Contained("agent") {
+	if off.Contained("agent") || off.Status() != "" {
 		t.Fatal("contained with recall off")
+	}
+	// Configured but failed to open: still contained, and STATUS says so
+	// (#59 L3 third review).
+	var failed LateExecutor
+	failed.Failed()
+	if !failed.Contained("agent") || failed.Status() == "" {
+		t.Fatalf("recall failed to open: contained %v, status %q", failed.Contained("agent"), failed.Status())
 	}
 }
 
@@ -689,15 +808,20 @@ func TestRollbackLineFitsTheCaps(t *testing.T) {
 		for _, ids := range [][]string{{"a"}, {"a", "b"}, {"a", "c"}, {"c"}, {"zz"}} {
 			for _, to := range restore {
 				for _, n := range []int{0, 1, 9, 12, 1234} {
-					known := n != 9
-					obj, det := r.line(lineage, ids, to, known, n)
-					for _, f := range []string{obj, det} {
-						if len(f) > fieldCap || f == "" || strings.Contains(strings.ToLower(f), "undo") {
-							t.Fatalf("field %q (%d chars)", f, len(f))
+					for _, known := range []bool{true, false} {
+						obj, det := r.line(lineage, ids, to, known, n)
+						for _, f := range []string{obj, det} {
+							if len(f) > fieldCap || f == "" || strings.Contains(strings.ToLower(f), "undo") {
+								t.Fatalf("field %q (%d chars)", f, len(f))
+							}
 						}
-					}
-					if !strings.HasPrefix(det, "back to ") || !strings.Contains(obj, "you deleted") {
-						t.Fatalf("line %q / %q", obj, det)
+						if !strings.HasPrefix(det, "back ") || !strings.Contains(obj, "you deleted") {
+							t.Fatalf("line %q / %q", obj, det)
+						}
+						// A single action is named as one (#59 L3 third review).
+						if n == 1 && !strings.Contains(det, "1 action") {
+							t.Fatalf("one action not named: %q", det)
+						}
 					}
 				}
 			}

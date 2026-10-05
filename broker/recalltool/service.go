@@ -192,13 +192,20 @@ func (l *Late) Call(ctx context.Context, machine, lineage, name string, args jso
 // before recall is open is recorded as approved, machines not reset, so
 // Retry carries it through once recall opens.
 type LateExecutor struct {
-	r   atomic.Pointer[Reach]
-	off atomic.Bool
+	r      atomic.Pointer[Reach]
+	off    atomic.Bool
+	failed atomic.Bool
 }
 
-// Off records that recall will not open (not configured, or failed): no
-// deletion can reach anything, so nothing is contained.
+// Off records that recall is not configured: there is no index, so no
+// deletion can reach anything and nothing is contained.
 func (l *LateExecutor) Off() { l.off.Store(true) }
+
+// Failed records that recall is configured but did not open. Its
+// tombstones were never replayed, so which lineages hold a deleted record
+// is unknown: every one stays contained (fail closed, #59 L3 third
+// review), and STATUS says so.
+func (l *LateExecutor) Failed() { l.failed.Store(true) }
 
 // Set makes r the executor.
 func (l *LateExecutor) Set(r *Reach) { l.r.Store(r) }
@@ -222,10 +229,14 @@ func (l *LateExecutor) Contained(lineage string) bool {
 	return !l.off.Load()
 }
 
-// Status is Reach.Status once recall is open, "" before.
+// Status is Reach.Status once recall is open, "" before, and a line
+// saying agents are held back if it failed to open.
 func (l *LateExecutor) Status() string {
 	if r := l.r.Load(); r != nil {
 		return r.Status()
+	}
+	if l.failed.Load() && !l.off.Load() {
+		return "Memory did not open; agents cannot fork or merge"
 	}
 	return ""
 }

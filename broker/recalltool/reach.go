@@ -428,25 +428,30 @@ func (r *Reach) reaskDue(lineage string) bool {
 	return r.now().Sub(last) >= ReaskEvery
 }
 
-// supersede withdraws lineage's open questions from later reads: the one
-// for since covers them (#59 L3 re-review 2), so the owner has one
-// question per agent.
+// supersede withdraws lineage's open questions about later reads, in
+// every form (the first one, a re-ask, one naming items after a NO): the
+// one for since covers them (#59 L3 re-review 2, third review 1), so the
+// owner has one question per agent. A question about a read at t is
+// submitted after t, so the broker's questions from since on are all it
+// looks at.
 func (r *Reach) supersede(lineage string, since time.Time) {
 	w, ok := r.Ask.(Withdrawer)
-	if !ok {
+	if !ok || r.Journal == nil {
 		return
 	}
-	seen := map[int64]bool{}
-	for id, t := range r.Prov.Items(lineage) {
-		if !t.After(since) || seen[t.UnixNano()] || r.Deleted == nil || !r.Deleted(id) {
+	for _, id := range r.Journal.Between(Origin, since, time.Time{}) {
+		st, err := r.Ask.Get(id)
+		if err != nil || st.State != journal.Pending || st.Intent.Action != journal.ActionRecallRollback {
 			continue
 		}
-		seen[t.UnixNano()] = true
-		old := rollbackID(lineage, t, nil, 0)
-		if st, err := r.Ask.Get(old); err == nil && st.State == journal.Pending {
-			if err := w.Withdraw(old); err != nil && r.Logf != nil {
-				r.Logf("recall: withdrawing %s: %v", old, err)
-			}
+		l, _ := st.Intent.Params["lineage"].(string)
+		s, _ := st.Intent.Params["since"].(string)
+		t, err := time.Parse(time.RFC3339Nano, s)
+		if l != lineage || err != nil || !t.After(since) {
+			continue
+		}
+		if err := w.Withdraw(id); err != nil && r.Logf != nil {
+			r.Logf("recall: withdrawing %s: %v", id, err)
 		}
 	}
 }
@@ -498,13 +503,17 @@ func (r *Reach) Execute(ctx context.Context, in journal.Intent, _ int) journal.O
 	// owner approved (the agent no longer holds the record) already
 	// holds, so the intent closes as done, with nothing reset, rather
 	// than staying open as not applied.
-	if _, first := r.heldBy(lineage); first.IsZero() || first.After(since) {
-		if r.Notify != nil {
-			if err := r.Notify("Nothing more to do: " + agentName(lineage) + " had already forgotten what you deleted."); err != nil && r.Logf != nil {
-				r.Logf("recall: stale rollback of %s; owner not told: %v", lineage, err)
-			}
-		}
+	_, first := r.heldBy(lineage)
+	if first.IsZero() || first.After(since) {
+		r.tell(lineage, "Nothing more to do: "+agentName(lineage)+" had already forgotten what you deleted.")
 		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: staleEvidence}
+	}
+	// One approved after a record it read earlier was deleted: the
+	// question about that earlier read covers it, and resetting from here
+	// would leave that record held (#59 L3 third review 1).
+	if first.Before(since) {
+		r.tell(lineage, "Nothing done yet: "+agentName(lineage)+" read another record you deleted before this one; the question about that one covers both.")
+		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: supersededEvidence}
 	}
 	// The owner's YES is the effect: once approved, the rollback is
 	// carried through by Retry whatever fails now.
@@ -517,6 +526,20 @@ func (r *Reach) Execute(ctx context.Context, in journal.Intent, _ int) journal.O
 	}
 	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: approvedOnly + err.Error()}
 }
+
+// tell sends the owner a text about lineage's rollback.
+func (r *Reach) tell(lineage, text string) {
+	if r.Notify == nil {
+		return
+	}
+	if err := r.Notify(text); err != nil && r.Logf != nil {
+		r.Logf("recall: rollback of %s; owner not told: %v", lineage, err)
+	}
+}
+
+// supersededEvidence closes an approval a question about an earlier read
+// covers.
+const supersededEvidence = "nothing reset: a question about an earlier read covers it"
 
 // staleEvidence closes an approval an earlier rollback made moot.
 const staleEvidence = "nothing reset: an earlier rollback already took the record back"
@@ -549,22 +572,35 @@ func (r *Reach) reset(ctx context.Context, lineage string, since time.Time, appr
 	if err := r.Prov.MarkReset(lineage, rs); err != nil {
 		return err
 	}
-	if approved && r.Notify != nil {
-		ids, _ := r.heldBy(lineage)
+	if approved {
 		to := plan.To
 		if perr != nil {
 			to = since
 		}
-		if err := r.Notify(r.done(lineage, ids, to, perr == nil, r.actions(lineage, since, rs.Until))); err != nil && r.Logf != nil {
-			r.Logf("recall: rollback of %s done; owner not told: %v", lineage, err)
-		}
+		r.tell(lineage, r.done(lineage, r.forgotten(lineage, rs), to, perr == nil, r.actions(lineage, since, rs.Until)))
 	}
 	if err := r.finish(lineage, rs); err != nil {
 		return err
 	}
-	r.set(&r.held, lineage, false)
+	// A deleted record it still holds (read after the reset) keeps it
+	// contained until settled (#59 L3 third review 1).
+	ids, _ := r.heldBy(lineage)
+	r.set(&r.held, lineage, len(ids) > 0)
 	r.set(&r.kept, lineage, false)
 	return nil
+}
+
+// forgotten lists the deleted items a reset takes back: those lineage was
+// given between its since and its time.
+func (r *Reach) forgotten(lineage string, rs Reset) []string {
+	var ids []string
+	for id, t := range r.Prov.Items(lineage) {
+		if !t.Before(rs.Since) && t.Before(rs.At) && r.Deleted != nil && r.Deleted(id) {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 // finish erases what lineage did between a reset's since and its time,
@@ -679,9 +715,9 @@ func (r *Reach) line(lineage string, ids []string, to time.Time, known bool, act
 	var points []string
 	// Unknown (the restore point could not be measured): to is the read,
 	// and only "before" it is claimed.
-	before := ""
+	lead, before := "back to ", ""
 	if !known {
-		before = "before "
+		lead, before = "back ", "before "
 	}
 	if to.IsZero() {
 		points = []string{"its start"}
@@ -697,21 +733,22 @@ func (r *Reach) line(lineage string, ids []string, to time.Time, known bool, act
 	case 0:
 		tails = []string{"; no actions yet", ""}
 	case 1:
-		tails = []string{"; 1 action so far stays done", "; 1 action stays done", "; 1 stays done", ""}
+		tails = []string{"; 1 action so far stays done", "; 1 action stays done", "; 1 action done", ""}
 	default:
 		tails = []string{
 			fmt.Sprintf("; %d actions so far stay done", actions),
 			fmt.Sprintf("; %d actions stay done", actions),
+			fmt.Sprintf("; %d actions done", actions),
 			fmt.Sprintf("; %d stay done", actions), ""}
 	}
 	for _, tail := range tails {
 		for _, p := range points {
-			if d := "back to " + p + tail; len(d) <= fieldCap {
+			if d := lead + p + tail; len(d) <= fieldCap {
 				return object, d
 			}
 		}
 	}
-	return object, "back to " + points[len(points)-1]
+	return object, lead + points[len(points)-1]
 }
 
 // done is the confirmation after an approved rollback, with the real count

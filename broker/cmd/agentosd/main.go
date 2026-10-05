@@ -158,8 +158,8 @@ func openRecall(ctx context.Context, v *modelroute.Verifier, sc recalltool.Servi
 	svc, err := recalltool.OpenService(sc)
 	clear(key)
 	if err != nil {
-		log.Printf("recall disabled: %v", err)
-		exec.Off()
+		log.Printf("recall disabled: %v; agents stay contained", err)
+		exec.Failed()
 		return
 	}
 	late.Set(svc.Tools)
