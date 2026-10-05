@@ -3,10 +3,13 @@ package clock
 // REQ: TIM-1
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -140,30 +143,39 @@ func TestTIM1HeldThenCarrierDisagreesEscalates(t *testing.T) {
 	}
 }
 
-func TestTIM1AllClearsAreCapped(t *testing.T) {
+func TestTIM1OwnerTextsAreCappedAgainstAFakeCell(t *testing.T) {
+	// A fake cell 3 h wrong, then right for 75 minutes, over and over
+	// (L3 D4): at most MaxAlertsPerDay alerts in any 24 hours, and no
+	// all-clear once no further alert could follow it.
 	r := newRig()
-	g := r.guard(t, nil)
-	g.Check(bg)
-	for i := 0; i < 10; i++ {
-		r.step(time.Hour)
-		g.Check(bg)
-		r.step(-time.Hour)
-		g.Check(bg)
-		r.advance(AgreeAfter)
-		g.Check(bg)
-	}
-	clears := 0
-	for _, x := range r.texts {
-		if x == AgreeText {
-			clears++
+	var log []string
+	g := r.guard(t, func(c *Config) {
+		c.Notify = func(s string) {
+			kind := "alert"
+			if s == AgreeText {
+				kind = "clear"
+			}
+			log = append(log, fmt.Sprintf("%s@%v", kind, r.mono))
 		}
+	})
+	g.Check(bg)
+	for elapsed := time.Duration(0); elapsed < 25*time.Hour; elapsed += 3 * time.Hour {
+		r.mu.Lock()
+		r.carrier = r.wall.Add(3 * time.Hour)
+		r.mu.Unlock()
+		g.Check(bg)
+		r.advance(105 * time.Minute)
+		g.Check(bg)
+		r.mu.Lock()
+		r.carrier = r.wall
+		r.mu.Unlock()
+		g.Check(bg)
+		r.advance(75 * time.Minute)
+		g.Check(bg)
 	}
-	if clears != MaxAllClearsPerDay || len(r.texts) != 2*MaxAllClearsPerDay+1 {
-		t.Fatalf("texts = %d (%d all-clears)", len(r.texts), clears)
-	}
-	// The owner's last word is the disagreement, never a stale all-clear.
-	if last := r.texts[len(r.texts)-1]; last == AgreeText {
-		t.Fatalf("last text = %q", last)
+	want := []string{"alert@0s", "clear@3h0m0s", "alert@3h0m0s", "clear@24h0m0s", "alert@24h0m0s", "clear@27h0m0s"}
+	if fmt.Sprint(log) != fmt.Sprint(want) {
+		t.Fatalf("texts = %v, want %v", log, want)
 	}
 }
 
@@ -237,4 +249,91 @@ func TestTIM1AnchorSurvivesRestartWithinBoot(t *testing.T) {
 	if s := g.Check(bg); s.State != NetworkOnly {
 		t.Fatalf("new boot: %+v", s)
 	}
+}
+
+func TestTIM1WallStepsAreSeenWithRealTime(t *testing.T) {
+	// time.Now carries a monotonic reading, and Sub between two such times
+	// ignores the wall clock (L3 D1). The guard strips it, so a wall step
+	// is visible however Now is supplied.
+	var offset atomic.Int64
+	g, err := New(Config{
+		Synced:  func() (bool, error) { return true, nil },
+		Carrier: func(context.Context) (time.Time, error) { return time.Now(), nil },
+		Now:     func() time.Time { return time.Now() },
+		Elapsed: func() time.Duration { return time.Duration(offset.Load()) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.Check(bg)
+	if at := g.Status().At; strings.Contains(at.String(), "m=") {
+		t.Fatalf("status time keeps a monotonic reading: %v", at)
+	}
+	// Elapsed stands still for an hour of wall time: a wall step of an hour.
+	g.cfg.Now = func() time.Time { return time.Now().Round(0).Add(time.Hour) }
+	if _, err := g.Now(bg); !errors.Is(err, ErrRestricted) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestTIM1CallerDeadlineDoesNotPoisonSharedCheck(t *testing.T) {
+	r := newRig()
+	r.carrier = r.carrier.Add(time.Hour)
+	release := make(chan struct{})
+	g := r.guard(t, func(c *Config) {
+		c.Carrier = func(ctx context.Context) (time.Time, error) {
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return time.Time{}, ctx.Err()
+			}
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			return r.carrier, nil
+		}
+	})
+	short, cancel := context.WithTimeout(bg, 5*time.Millisecond)
+	defer cancel()
+	done := make(chan Status)
+	go func() { done <- g.Check(short) }()
+	time.Sleep(20 * time.Millisecond) // the leader's deadline has passed
+	joined := make(chan Status)
+	go func() { joined <- g.Check(bg) }()
+	time.Sleep(5 * time.Millisecond)
+	close(release)
+	if s := <-done; s.State != Disagree {
+		t.Fatalf("leader: %+v", s)
+	}
+	if s := <-joined; s.State != Disagree {
+		t.Fatalf("joined: %+v", s)
+	}
+}
+
+func TestTIM1NotifyMayCheckAgain(t *testing.T) {
+	// A notifier that reads the guard (a lapse sweep, say) must not
+	// deadlock, and a slow one must not hold other callers (L3 D3).
+	r := newRig()
+	r.carrier = r.carrier.Add(time.Hour)
+	var g *Guard
+	slow := make(chan struct{})
+	g = r.guard(t, func(c *Config) {
+		c.Notify = func(string) {
+			_, _ = g.Now(bg)
+			<-slow
+		}
+		c.OnChange = func(Status) { g.Check(bg) }
+	})
+	go g.Check(bg)
+	time.Sleep(20 * time.Millisecond)
+	got := make(chan error)
+	go func() { _, err := g.Now(bg); got <- err }()
+	select {
+	case err := <-got:
+		if !errors.Is(err, ErrRestricted) {
+			t.Fatalf("err = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a caller waited on the slow notifier")
+	}
+	close(slow)
 }

@@ -26,6 +26,9 @@ func TestTIM1ParseNetworkTime(t *testing.T) {
 		{parseCCLK, `+CCLK: "26/10/05,06:10:22+99"`, time.Time{}},
 		{parseCCLK, `+CCLK: "26/10/05,06:10:22"`, time.Time{}},
 		{parseCCLK, `OK`, time.Time{}},
+		{parseCCLK, `+CCLK: "26/10/05,06:10:22+-5"`, time.Time{}},
+		{parseCCLK, `+CCLK: "26/10/05,06:10:22++8"`, time.Time{}},
+		{parseCCLK, `+CCLK: "26/10/05,06:10:22+008"`, time.Time{}},
 	} {
 		got, ok := c.parse([]string{c.line})
 		if ok != !c.want.IsZero() || (ok && !got.Equal(c.want)) {

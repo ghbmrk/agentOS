@@ -189,8 +189,9 @@ func parseCCLK(lines []string) (time.Time, bool) {
 			return time.Time{}, false
 		}
 		local, err := time.Parse("06/01/02,15:04:05", v[:17])
-		q, qerr := strconv.Atoi(v[18:])
-		if err != nil || qerr != nil || q > 56 {
+		z := v[18:]
+		q, qerr := strconv.Atoi(z)
+		if err != nil || qerr != nil || len(z) != 2 || z[0] < '0' || z[0] > '9' || z[1] < '0' || z[1] > '9' || q > 56 {
 			return time.Time{}, false
 		}
 		if v[17] == '-' {
