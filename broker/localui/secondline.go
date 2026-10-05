@@ -27,7 +27,7 @@ type SecondLine interface {
 	SetSecondLine(ctx context.Context, s sipsign.Settings, password string) error
 	ConfirmRealm(ctx context.Context, realm string) error
 	RemoveSecondLine(ctx context.Context) error
-	// The texting account over the provider's web API (egress K14); its
+	// The texting account over the provider's web API (egress K16); its
 	// token is never read back either.
 	SMSStatus(ctx context.Context) (SMSStatus, error)
 	SetSMS(ctx context.Context, s smsapi.Settings, token string) error

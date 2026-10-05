@@ -13,7 +13,7 @@ import (
 // while they last (CH-12's exception lines), and the digest repeats them.
 const (
 	secondLineConfirmLine   = "Second line: confirm your provider on the box's Wi-Fi page. Texts and calls wait until you do."
-	secondLineUnreachedLine = "Second line: the box couldn't reach your provider. Check the server name and password on the box's Wi-Fi page."
+	secondLineUnreachedLine = "Second line: the box couldn't reach your provider. Check the server name and password on the box's Wi-Fi page, or remove it there."
 )
 
 // secondLineEvery is how often agentosd asks the vault process.
