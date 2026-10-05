@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -38,6 +39,14 @@ type valuesRig struct {
 	now    time.Time
 	eng    *journal.Engine
 	values *taskValues
+	mu     sync.Mutex
+	log    []string
+}
+
+func (r *valuesRig) logs() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return strings.Join(r.log, "\n")
 }
 
 func newValuesRig(t *testing.T) *valuesRig {
@@ -56,7 +65,12 @@ func newValuesRig(t *testing.T) *valuesRig {
 	r.eng = eng
 	dir := t.TempDir()
 	r.values, err = openTaskValues(change.FileStore{Path: filepath.Join(dir, "values.json")}, filepath.Join(dir, "values.key"),
-		func() time.Time { return r.now }, t.Logf)
+		func() time.Time { return r.now }, func(f string, a ...any) {
+			r.mu.Lock()
+			r.log = append(r.log, fmt.Sprintf(f, a...))
+			r.mu.Unlock()
+			t.Logf(f, a...)
+		})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,6 +190,9 @@ func TestSecretShapedValuesAreNotKept(t *testing.T) {
 		"card": float64(4111111111111111), "code": float64(123456), "acct": "4111 1111 1111 1111",
 		"pin": json.Number("4821"), "otp": "903114", "week": float64(3), "amount": 125.5, "zip": "90210",
 	}})
+	if !strings.Contains(r.logs(), "task values: 5 values not kept (secret-shaped)") {
+		t.Errorf("refusals not counted: %q", r.logs())
+	}
 	r.values.verdict(grants.OwnerOutcome{Intent: journal.Intent{ID: "i2", GoalID: "n"}, Verdict: grants.OwnerAccepted})
 	n, _ := r.values.values("n", "i2")
 	for _, k := range []string{"card", "code", "acct", "pin", "otp"} {
@@ -422,5 +439,30 @@ func TestTaskValuesBounds(t *testing.T) {
 	}
 	if _, err := openTaskValues(store, keyPath, func() time.Time { return r.now }, t.Logf); err == nil {
 		t.Fatal("a key file others can read was used")
+	}
+}
+
+// W3-values-mix (potency on #119): an explicit run beside implicit runs,
+// which keep only keyed hashes, compiles through the box's hash, and a
+// value equal across them stays the explicit run's literal.
+func TestMixedRunsCompileThroughTheHash(t *testing.T) {
+	r := newValuesRig(t)
+	r.judge("g0", r.weekly("g0", "ann@example.test", 40), grants.OwnerAccepted)
+	for i, g := range []string{"g1", "g2"} {
+		r.judge(g, r.weekly(g, "ann@example.test", 41+i), grants.OwnerAcceptedImplicitly)
+	}
+	b, err := skillBuilder(r.eng, r.values, devAll{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	br := loops.Brief{Hypothesis: loops.Hypothesis{Signal: loops.SignalRepeat, Key: "repeat:k", Evidence: r.eng.List()}}
+	cand, err := b.Build(context.Background(), br)
+	if err != nil {
+		t.Fatalf("one explicit and two implicit runs: %v", err)
+	}
+	for _, f := range cand.Files {
+		if !strings.Contains(string(f), "Weekly report") || !strings.Contains(string(f), "ann@example.test") {
+			t.Fatalf("constants became inputs: %s", f)
+		}
 	}
 }
