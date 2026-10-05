@@ -598,6 +598,23 @@ func TestRecipientsThatCannotBeShownAreAskedOnThePage(t *testing.T) {
 	}
 }
 
+// L3 S1 on #165: an approved page item held for its undo window says it
+// is held, not that it waits for the page.
+func TestAHeldPageItemSaysHeld(t *testing.T) {
+	r := newRig(t, func(c *Config) { c.Verifiers = nil })
+	r.grant(mailGrant())
+	bad := r.effect("agent/p2", "message.send", map[string]any{"body": "yo"},
+		"mom@example.com", "dad@example.com", "sis@example.com", "bro@example.com", "gran@example.com", "x@attacker.example")
+	r.g.Flush()
+	if len(r.own.local) != 1 {
+		t.Fatalf("local %v", r.own.local)
+	}
+	r.g.Decide(owner.Decision{Request: r.own.local[0], Item: 1, Ref: bad.Intent.ID, Approved: true, Why: "owner", Hold: "H1", Until: r.now().Add(10 * time.Minute)})
+	if st := r.state(bad.Intent.ID); !strings.HasPrefix(st.Permission.Reason, "approved; held for the owner's undo window") {
+		t.Fatalf("reason %q", st.Permission.Reason)
+	}
+}
+
 // Security D6 on P2-2a: until the daemon serves the Approvals page (part
 // 2), no binary turns LocalUI on, so #144's refusal and its wording stay
 // what every build shows.

@@ -71,7 +71,7 @@ func TestThePageApprovesWithACode(t *testing.T) {
 		t.Fatalf("no code: %v", err)
 	}
 	msg, err := r.ch.LocalAnswer(id, r.sum(id), true, r.totp())
-	if err != nil || !strings.HasPrefix(msg, "Approved "+id) || !strings.Contains(msg, "UNDO") {
+	if err != nil || !strings.HasPrefix(msg, "Approved. Your agent can go ahead. It runs at") || !strings.Contains(msg, "UNDO") {
 		t.Fatalf("approve: %q %v", msg, err)
 	}
 	if d := r.decisions(); len(d) != 1 || !d[0].Approved || d[0].Hold == "" {
@@ -332,5 +332,102 @@ func TestARefusedTextedCodeIsSpent(t *testing.T) {
 	}
 	if len(r.decisions()) != 0 {
 		t.Fatal("decided")
+	}
+}
+
+// L3 M1 on #165: a texted low-tier request shown on the page is approved
+// there with a code-generator code, as the page asks; its texted code is
+// not taken there.
+func TestThePageApprovesTextedRequestsWithAStrongCode(t *testing.T) {
+	r := newRig(t, nil)
+	id, _ := r.ch.Request([]Item{lowItem("t1")}, 0)
+	texted := lowCodeRe.FindStringSubmatch(r.inbox())[2]
+	if _, err := r.ch.LocalAnswer(id, r.sum(id), true, texted); err != ErrWrongCode {
+		t.Fatalf("texted code on the page: %v", err)
+	}
+	msg, err := r.ch.LocalAnswer(id, r.sum(id), true, r.totp())
+	if err != nil || !strings.HasPrefix(msg, "Approved. Your agent can go ahead.") {
+		t.Fatalf("strong code: %q %v", msg, err)
+	}
+	if d := r.decisions(); len(d) != 1 || !d[0].Approved {
+		t.Fatalf("decisions %+v", d)
+	}
+}
+
+// L3 S4: when an approved item could not be held for undo it did not run,
+// and the page says so rather than "go ahead".
+func TestThePageSaysWhenAnApprovedItemDidNotRun(t *testing.T) {
+	r := newRig(t, nil)
+	it := localItem("i1")
+	it.UndoWindow = 10 * time.Minute
+	id, _ := r.ch.RequestLocal(it, 0)
+	r.inbox()
+	sum, code := r.sum(id), r.totp()
+	// No ID left for the hold.
+	r.ch.mu.Lock()
+	for _, l := range idLetters {
+		for d := 0; d < 100; d++ {
+			r.ch.codes.st.Retired[fmt.Sprintf("%c%d", l, d)] = r.clock()
+			r.ch.codes.st.Retired[fmt.Sprintf("%c%02d", l, d)] = r.clock()
+		}
+	}
+	r.ch.mu.Unlock()
+	msg, err := r.ch.LocalAnswer(id, sum, true, code)
+	if err != nil || strings.Contains(msg, "go ahead") || !strings.Contains(msg, "did not run") {
+		t.Fatalf("approve: %q %v", msg, err)
+	}
+}
+
+// L3 S2: wrong page codes that lock the session or switch on challenge
+// mode are texted like a sign-in's.
+func TestWrongPageCodesThatLockAreTexted(t *testing.T) {
+	r := newRig(t, nil)
+	var ids []string
+	for i := 0; i < WrongToLock; i++ {
+		id, _ := r.ch.RequestLocal(localItem(fmt.Sprint("i", i)), 0)
+		r.inbox()
+		ids = append(ids, id)
+	}
+	for i := 0; i < WrongToLock; i++ {
+		r.ch.LocalAnswer(ids[i/2], r.sum(ids[i/2]), true, fmt.Sprintf("%06d", i))
+	}
+	var all []string
+	for {
+		select {
+		case m := <-r.phone.Inbox():
+			all = append(all, m.Text)
+			continue
+		default:
+		}
+		break
+	}
+	if !strings.Contains(strings.Join(all, "\n"), "Texted codes are off and the session is locked") {
+		t.Fatalf("not told of the lock: %q", all)
+	}
+}
+
+// L3 S3: an answer after expiry but before Tick finds the request closed.
+func TestAnAnswerAfterExpiryIsRefused(t *testing.T) {
+	r := newRig(t, nil)
+	id, _ := r.ch.RequestLocal(localItem("i1"), 0)
+	r.inbox()
+	sum := r.sum(id)
+	r.advance(LocalTTL)
+	if _, err := r.ch.LocalAnswer(id, sum, true, r.totp()); err != ErrNoRequest {
+		t.Fatalf("after expiry: %v", err)
+	}
+	if d := r.decisions(); len(d) != 1 || d[0].Approved || d[0].Why != "expired" {
+		t.Fatalf("decisions %+v", d)
+	}
+}
+
+// L3 nit: the sum covers the expiry, so a request asked again under a
+// reused ID has another sum.
+func TestTheSumCoversTheExpiry(t *testing.T) {
+	r := &request{id: "K1", items: []Item{lowItem("a")}, done: []bool{false}, expires: time.Unix(1000, 0)}
+	later := *r
+	later.expires = r.expires.Add(time.Hour)
+	if requestSum(r) == requestSum(&later) {
+		t.Fatal("expiry not in the sum")
 	}
 }

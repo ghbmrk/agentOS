@@ -1353,12 +1353,14 @@ func (g *Gate) annotate(st *journal.Status) {
 		st.Permission.Reason = "approved by code; waiting for the owner to confirm on the box's local page"
 	} else if w := g.waiting[id]; w != nil && w.onlyUI {
 		st.Permission.Reason = "waiting for the owner's approval on the box's local page"
-	} else if w != nil && g.cfg.LocalUI && !owner.SMSApprovable(w.item) {
-		st.Permission.Reason = "waiting for the owner's approval on the box's Wi-Fi page"
 	} else if w != nil && w.held {
 		st.Permission.Reason = "approved; held for the owner's undo window until " + w.sendAt.UTC().Format("15:04") + " UTC"
 	} else if w != nil && w.reply != "" {
 		st.Permission.Reason = "auto-reply queued; it sends at " + w.sendAt.UTC().Format("15:04") + " UTC unless the owner cancels it"
+	} else if w != nil && g.cfg.LocalUI && !owner.SMSApprovable(w.item) {
+		// After held and reply: an approved page item is held, not
+		// waiting (L3 S1 on #165).
+		st.Permission.Reason = "waiting for the owner's approval on the box's Wi-Fi page"
 	} else if w != nil {
 		st.Permission.Reason = "waiting for the owner's approval"
 	} else if r := g.retry[id]; r != "" {

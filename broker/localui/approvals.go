@@ -102,6 +102,12 @@ func (s *Server) answer(o Owner, sess string, f map[string][]string) (msg, refus
 	if approve && code == "" {
 		return "", "Enter a code from your code generator to approve."
 	}
+	if approve {
+		// One approval at a time, so two posts cannot both pass mayTry
+		// before either records a wrong code (L3 on #165).
+		s.approveMu.Lock()
+		defer s.approveMu.Unlock()
+	}
 	if approve && !s.mayTry(sess) {
 		return "", "Too many wrong codes from this phone. Wait a minute, then try again."
 	}
@@ -110,11 +116,8 @@ func (s *Server) answer(o Owner, sess string, f map[string][]string) (msg, refus
 	}
 	out, err := o.LocalAnswer(id, sum, approve, code)
 	switch {
-	case err == nil && approve:
-		// The channel's reply goes on to any undo window it holds for.
-		return "Approved. Your agent can go ahead." + strings.TrimPrefix(out, "Approved "+id+"."), ""
 	case err == nil:
-		return "Denied.", ""
+		return out, ""
 	case errors.Is(err, owner.ErrTooMany):
 		return "", "Too many tries on the box's Wi-Fi in the last day, so approving here is paused for up to 24 hours. Deny still works here, and NO by text."
 	case errors.Is(err, owner.ErrWrongCode):

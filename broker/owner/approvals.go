@@ -345,7 +345,9 @@ func (c *Channel) answerLocked(rp reply, now time.Time, decided *[]Decision, pag
 		return []string{fmt.Sprintf("Include the ID and the code: YES %s <code>.", r.id)}, false, false
 	}
 	texted := r.code
-	if r.tier == High {
+	if r.tier == High || page {
+		// The page takes a code-generator code for every request, as it
+		// asks; the texted code is only in the text (L3 M1 on #165).
 		texted = ""
 	}
 	ok, locked, emsg := c.checkLocked(texted, rp.code, now)

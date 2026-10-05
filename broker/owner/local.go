@@ -235,18 +235,8 @@ func (c *Channel) LocalSignIn(code string) (until time.Time, err error) {
 	// nor is the owner, who just unlocked, texted about it (#75 L3).
 	proof := strings.HasPrefix(code, UnlockProofPrefix)
 	res, locked, err := c.codes.checkStrong(code, now, strongOpts{unlock: c.cfg.UnlockFor, count: !proof, proof: true})
-	var alerts []string
+	alerts := c.lockAlertsLocked(locked, now)
 	signIn, signIns, answers := "", 0, 0
-	if locked {
-		alerts = append(alerts, fmt.Sprintf("%d wrong codes, the last on the box's Wi-Fi. Texted codes are off and the session is locked until you send a code-generator code.", WrongToLock))
-	}
-	if c.codes.justChallenged {
-		c.codes.justChallenged = false
-		c.held = nil
-		c.alertAt = now
-		alerts = append(alerts, fmt.Sprintf("Too many wrong codes, the last on the box's Wi-Fi. Codes by text now need a challenge: reply UNLOCK %s and a code from your code generator within %s.",
-			c.codes.currentChallenge(now), dur(ChallengeTTL)))
-	}
 	switch {
 	case err == nil && res == strongOK:
 		until = c.codes.st.UnlockedUntil
@@ -300,6 +290,23 @@ func (c *Channel) takeLocalLocked(now time.Time) (bool, error) {
 		}
 	})
 	return ok && err == nil, err
+}
+
+// lockAlertsLocked returns the texts for a wrong code on the box's Wi-Fi
+// that locked the session or switched on challenge mode.
+func (c *Channel) lockAlertsLocked(locked bool, now time.Time) []string {
+	var alerts []string
+	if locked {
+		alerts = append(alerts, fmt.Sprintf("%d wrong codes, the last on the box's Wi-Fi. Texted codes are off and the session is locked until you send a code-generator code.", WrongToLock))
+	}
+	if c.codes.justChallenged {
+		c.codes.justChallenged = false
+		c.held = nil
+		c.alertAt = now
+		alerts = append(alerts, fmt.Sprintf("Too many wrong codes, the last on the box's Wi-Fi. Codes by text now need a challenge: reply UNLOCK %s and a code from your code generator within %s.",
+			c.codes.currentChallenge(now), dur(ChallengeTTL)))
+	}
+	return alerts
 }
 
 // LocalStop is STOP from the local UI. Like STOP by text it needs no code,
@@ -464,6 +471,7 @@ func (c *Channel) LocalAnswer(id, sum string, approve bool, code string) (string
 		rp.word, rp.code = "YES", code
 	}
 	n := len(decided)
+	wasLocked := c.codes.st.LowLocked
 	out, _, wrong := c.answerLocked(rp, now, &decided, true)
 	msg := strings.Join(out, " ")
 	var alerts []string
@@ -472,7 +480,9 @@ func (c *Channel) LocalAnswer(id, sum string, approve bool, code string) (string
 	switch {
 	case wrong:
 		err = ErrWrongCode
-		alerts = c.wrongLocalLocked(now)
+		// A lock or challenge mode this code set off is told like one from
+		// a sign-in (L3 S2 on #165).
+		alerts = append(c.wrongLocalLocked(now), c.lockAlertsLocked(!wasLocked && c.codes.st.LowLocked, now)...)
 		until := c.clock(c.codes.st.LocalStart.Add(WrongWindow))
 		switch left := LocalBound - c.codes.st.LocalUsed; {
 		case left <= 0:
@@ -489,8 +499,17 @@ func (c *Channel) LocalAnswer(id, sum string, approve bool, code string) (string
 		err = errors.New(msg) // nothing settled
 	case approve:
 		note = "Approved " + id
+		// The page's own wording (UX A4); a hold that failed keeps the
+		// channel's reply, which says the item did not run (L3 S4).
+		ran := true
+		for _, d := range decided[n:] {
+			ran = ran && d.Approved
+		}
+		if ran {
+			msg = "Approved. Your agent can go ahead." + strings.TrimPrefix(msg, "Approved "+id+".")
+		}
 	default:
-		note = "Denied " + id
+		note, msg = "Denied "+id, "Denied."
 	}
 	var text string
 	var ns, na int
