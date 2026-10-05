@@ -50,3 +50,9 @@ P1-4 follow-ups (from the #23 review), for P1-7 or the loop scheduler:
 | ID | Package | Needs | State |
 |---|---|---|---|
 | P2-7 | Provider adapters: model router (CAP-9) over two API routes, OpenAI and Anthropic, behind the one chat-completions guest interface; failover on exhaustion, grants and data labels checked before sending, measured routes and Loop 1 rule candidates ([assumptions](broker/route/ASSUMPTIONS.md)). A3's consumer route waits on S6. Wiring: serve `Router.Handler` behind the OP-8 meter in place of the raw proxy | P1-3, P1-7 | in review |
+
+## Phase 4: open source
+
+| ID | Package | Needs | State |
+|---|---|---|---|
+| P4-1 | Hint schema: public enumerated schema with structural rules and a 16-bit cap per hint, strict wire parser, canonical form, embargo mark on `vuln`, emitter with owner-visible log, per-category policy (automatic, ask, never), daily bound and dedupe (OSS-1, OSS-5, OSS-7) ([assumptions](broker/hint/ASSUMPTIONS.md)). Carry-forward: P2-2 shows the log and sets the policy; the clean-room builder (OSS-2) implements `Outbox` and routes embargoed hints; loops 1 and 2 emit through `Emitter` | — | in review |
