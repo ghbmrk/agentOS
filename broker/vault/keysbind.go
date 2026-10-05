@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 )
 
 // The keys file is bound to the vault (V6, security review of #45, F1).
@@ -20,8 +21,10 @@ import (
 //
 // A slot change first seals the whole next keys file into the vault
 // (L3 review round 2 of #45): from then the change is decided and only
-// rolls forward. It then writes the keys file, then records the next
-// file's hash and clears it. A crash anywhere leaves the vault either
+// rolls forward. The next file is staged at keysPath+nextSuffix before
+// that seal, so a factor whose slot only the next file holds can open the
+// vault mid-change. The change then writes the keys file, records the next
+// file's hash, clears it, and removes the staged copy. A crash anywhere leaves the vault either
 // before the change or holding the next file; OpenSealed then writes the
 // next file over whichever keys file is on the drive, and opens only if
 // the slot that opened is one the next file keeps, so a slot the change
@@ -30,6 +33,14 @@ import (
 // crashKeysSealed is the crashPoint after a slot change sealed the next
 // keys file and before it wrote it (tests).
 const crashKeysSealed = 3
+
+// nextSuffix names the staged copy of the next keys file, written beside
+// the keys file before the seal (defect fix in P2-4d). Without it, a
+// Rekey interrupted after the seal left only the file before on the
+// drive: the old passphrase's slot is not in the next file, and the new
+// passphrase's slot was in no file, so neither opened the vault. The
+// staged file counts only when it is the next file the vault sealed.
+const nextSuffix = ".next"
 
 func keysHash(raw []byte) []byte {
 	h := sha256.Sum256(raw)
@@ -81,8 +92,14 @@ func (v *Vault) replaceKeys(kf *keyFile) error {
 	if err != nil {
 		return err
 	}
+	if err := writeAtomic(v.keysPath+nextSuffix, raw); err != nil {
+		return err
+	}
 	v.nextKeys = raw
 	if err := v.save(); err != nil {
+		// The staged file stays: save can fail after the vault file
+		// landed (a failed directory sync), and then the drive needs it.
+		// A leftover copy is inert (stagedKeys, dropStaleStaged).
 		v.nextKeys = nil
 		return err
 	}
@@ -110,7 +127,32 @@ func (v *Vault) finishKeys() error {
 		v.keysOK, v.nextKeys = prev, next
 		return err
 	}
+	// A staged copy left behind opens nothing (stagedKeys), so failing to
+	// remove it is not an error.
+	os.Remove(v.keysPath + nextSuffix)
 	return nil
+}
+
+// dropStaleStaged removes a staged next keys file left beside the keys
+// file once no slot change is under way. It opens nothing (stagedKeys),
+// so this is housekeeping and a failure is ignored. It assumes one open
+// Vault per keys path, as the vault process keeps: a second Vault mid
+// change on the same path would lose its staged file. Caller does not
+// hold mu.
+func (v *Vault) dropStaleStaged() {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.nextKeys == nil {
+		os.Remove(v.keysPath + nextSuffix)
+	}
+}
+
+// stagedKeys reports whether raw, read from the staged next keys file,
+// is the next file this vault sealed. Caller does not hold mu.
+func (v *Vault) stagedKeys(raw []byte) bool {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.nextKeys != nil && bytes.Equal(raw, v.nextKeys)
 }
 
 // checkKeys is OpenSealed's check of the keys file raw (parsed as kf),
