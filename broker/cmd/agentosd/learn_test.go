@@ -443,11 +443,11 @@ func TestLoop1BuildsCompiledSkillsOnly(t *testing.T) {
 	if !lp.builder.Handles(loops.SignalRepeat) {
 		t.Fatal("no skill compiler")
 	}
-	// Until W4 seeds them, skills and procedures are held, not asked about
-	// (UX-S3-1); anything else is proposed.
-	for files, want := range map[string]bool{"skills/k1.json": true, "procedures/p1.json": true, "routing/rule.json": false} {
-		if got := unseeded(change.Candidate{Files: map[string][]byte{files: nil}}); got != want {
-			t.Fatalf("unseeded(%s) = %v", files, got)
+	// The managed tree reaches the agent (W4), so skills and procedures
+	// are proposed like anything else, never held (loops L21).
+	for _, files := range []string{"skills/k1.json", "procedures/p1.json", "context/c1.md", "routing/rule.json"} {
+		if lp.learn.Holds(change.Candidate{Files: map[string][]byte{files: nil}}) {
+			t.Fatalf("%s is held", files)
 		}
 	}
 	if vaultPlaceholder != vault.Placeholder {

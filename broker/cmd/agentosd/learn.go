@@ -45,6 +45,7 @@ type learning struct {
 	// builder is Loop 1's: the skill compiler for repeated trajectories,
 	// in-process since it calls no model (W3 step 3a).
 	builder loops.BySignal
+	learn   *loops.Learn
 	// values are the guest's task values, for the compiler only
 	// (W3-values); mining is the journal everything else in Loop 1 reads,
 	// which keeps none (security V3).
@@ -67,6 +68,9 @@ type learnPaths struct {
 	// pipeline reads and adopts the active routing rule (PW4 on #90).
 	// Empty holds routing changes (heldRouting).
 	Routing string
+	// Tree, if set, is the live agent's copy of the tree's procedures,
+	// skills and context (W4); nil holds them in the pipeline.
+	Tree *liveTree
 }
 
 // openLearning opens the learning plane and wires it into the daemon's
@@ -91,12 +95,21 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		sync = &syncedRouting{r: modelroute.NewRouting(p.Routing), restoring: true, logf: log.Printf}
 		target = sync
 	}
+	targets := map[string]change.Target{"routing": target}
+	if p.Tree != nil {
+		for ns, t := range p.Tree.targets() {
+			targets[ns] = t
+		}
+	}
 	if l.pipe, err = change.New(change.Config{
 		Store:     change.FileStore{Path: filepath.Join(p.Dir, "change.json")},
 		Evaluator: &l.eval,
-		Targets:   map[string]change.Target{"routing": target},
+		Targets:   targets,
 	}); err != nil {
 		return nil, err
+	}
+	if p.Tree != nil {
+		p.Tree.markReady() // the pipeline applied its state, if it had any
 	}
 	var router change.Router
 	if sync != nil {
@@ -127,13 +140,13 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		Journal:    l.mining,
 		Harvest:    l.harvest,
 		Builder:    l.builder,
-		Unseeded:   unseeded,
 		Router:     router,
 		ModelWired: modelWired,
 	})
 	if err != nil {
 		return nil, err
 	}
+	l.learn = learn
 	if l.sched, err = loops.New(loops.Config{
 		Store:   change.FileStore{Path: filepath.Join(p.Dir, "loops.json")},
 		Spare:   spare,
@@ -190,22 +203,6 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		}
 	}
 	return l, nil
-}
-
-// unseeded reports a candidate that writes only skills and procedures
-// (format.SkillsNS, format.ProceduresNS):
-// nothing seeds the agent machine from them until W4, so Loop 1 holds it
-// instead of asking the owner about a change with no effect (UX-S3-1).
-func unseeded(c change.Candidate) bool {
-	if len(c.Files) == 0 {
-		return false
-	}
-	for p := range c.Files {
-		if ns, _, _ := strings.Cut(p, "/"); ns != "skills" && ns != "procedures" {
-			return false
-		}
-	}
-	return true
 }
 
 // vaultPlaceholder is the vault redactor's mark for a secret
