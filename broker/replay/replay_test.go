@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/guest"
 	"github.com/ghbmrk/agentos/broker/journal"
@@ -43,9 +45,41 @@ type machines struct {
 	seeds   map[string]map[string][]byte
 	live    map[string]bool
 	created []string
+	// createErr, if set, refuses every machine; states overrides a
+	// machine's state (Running otherwise).
+	createErr error
+	states    map[string]vm.State
+}
+
+func (m *machines) Get(id string) (vm.Machine, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.live[id] {
+		return vm.Machine{}, vm.ErrUnknown
+	}
+	st := vm.Running
+	if s, ok := m.states[id]; ok {
+		st = s
+	}
+	return vm.Machine{ID: id, State: st}, nil
+}
+
+func (m *machines) setState(id string, st vm.State) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.states == nil {
+		m.states = map[string]vm.State{}
+	}
+	m.states[id] = st
 }
 
 func (m *machines) CreateSeeded(_ context.Context, id string, s vm.Spec, seed map[string][]byte) (vm.Machine, error) {
+	m.mu.Lock()
+	cerr := m.createErr
+	m.mu.Unlock()
+	if cerr != nil {
+		return vm.Machine{}, cerr
+	}
 	dir, err := m.svc.Open(id)
 	if err != nil {
 		return vm.Machine{}, err
@@ -672,5 +706,57 @@ func settled(t *testing.T, mtr *meter.Meter, ids []string) {
 			}
 			time.Sleep(time.Millisecond)
 		}
+	}
+}
+
+// REQ: RES-1, CHG-1
+// PE3: admission refusing a replay machine (memory pressure, no room, or
+// admission withdrawn before it started) interrupts the run rather than
+// failing it: the pipeline then gives no verdict (change C15). Any other
+// start error is still a failure.
+func TestRES1RefusedReplayMachineInterrupts(t *testing.T) {
+	for _, cause := range []error{admission.ErrPressure, admission.ErrNoRoom, fmt.Errorf("%w: eval-x", vm.ErrRevoked)} {
+		r := newRig(t, recs{}, func(*client, string) string { return "ok" }, nil)
+		r.ms.createErr = cause
+		_, err := r.e.Run(bg, tree, change.Probe{ID: "p1", Input: []byte("go")})
+		if !errors.Is(err, ErrPreempted) || !errors.Is(err, change.ErrInterrupted) {
+			t.Fatalf("%v: %v", cause, err)
+		}
+	}
+	r := newRig(t, recs{}, func(*client, string) string { return "ok" }, nil)
+	r.ms.createErr = errors.New("disk on fire")
+	if _, err := r.e.Run(bg, tree, change.Probe{ID: "p1", Input: []byte("go")}); err == nil || errors.Is(err, change.ErrInterrupted) {
+		t.Fatalf("another start error: %v", err)
+	}
+}
+
+// REQ: RES-1, CHG-1
+// PE3: a replay machine admission preempts mid-run ends the run at once as
+// interrupted, not at the timeout and not as a failure, and the machine is
+// destroyed.
+func TestRES1PreemptedReplayMachineInterrupts(t *testing.T) {
+	started := make(chan string, 1)
+	r := newRig(t, recs{}, func(*client, string) string { return "" }, func(c *Config) {
+		c.Timeout = 10 * time.Second
+		c.PreemptPoll = 10 * time.Millisecond
+	})
+	r.ms.guest = func(*client, string) string {
+		r.ms.mu.Lock()
+		id := r.ms.created[len(r.ms.created)-1]
+		r.ms.mu.Unlock()
+		started <- id
+		return ""
+	}
+	go func() { r.ms.setState(<-started, vm.Preempted) }()
+	begin := time.Now()
+	_, err := r.e.Run(bg, tree, change.Probe{ID: "p1", Input: []byte("go")})
+	if !errors.Is(err, ErrPreempted) || !errors.Is(err, change.ErrInterrupted) {
+		t.Fatalf("preempted run: %v", err)
+	}
+	if time.Since(begin) > 5*time.Second {
+		t.Fatal("a preempted run waited for the timeout")
+	}
+	if r.ms.running() != 0 {
+		t.Fatal("preempted replay machine not destroyed")
 	}
 }

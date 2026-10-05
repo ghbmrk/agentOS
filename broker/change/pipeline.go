@@ -799,7 +799,8 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 		}
 		p.mu.Unlock()
 	}()
-	var cut *run // the run in flight when ctx ended
+	var cut *run      // the run in flight when ctx ended or the evaluator was interrupted
+	var stopped error // the evaluator's interruption, if any
 	for _, r := range runs {
 		if r.struck {
 			continue
@@ -811,7 +812,16 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 		if r.cand {
 			t = next
 		}
-		r.ok, r.ev, r.err = p.pass(ctx, t, r.c, r.probe)
+		var err error
+		r.ok, r.ev, err = p.pass(ctx, t, r.c, r.probe)
+		r.err = err != nil
+		if errors.Is(err, ErrInterrupted) {
+			// The evaluator was interrupted under this run (admission
+			// refused or preempted its machine, PE3): the evaluation
+			// stops as if ctx had ended.
+			cut, stopped = r, err
+			break
+		}
 		// A run that returns after the preemption may have failed
 		// because of it: it is discarded, never counted or kept.
 		r.done = ctx.Err() == nil
@@ -819,7 +829,7 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 			cut = r
 		}
 	}
-	interrupted := ctx.Err() != nil
+	interrupted := ctx.Err() != nil || stopped != nil
 	for _, r := range runs {
 		if !r.done {
 			continue
@@ -855,6 +865,9 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 			}
 		}
 		p.mu.Unlock()
+		if stopped != nil {
+			return Score{}, stopped
+		}
 		return Score{}, fmt.Errorf("%w: %w", ErrInterrupted, ctx.Err())
 	}
 	p.mu.Lock()
@@ -961,19 +974,19 @@ var ErrNotEvaluated = errors.New("change: not evaluated on this box")
 
 // pass reports whether the case passed on t, and whether it was evaluated
 // at all. Any other evaluator error is a fail.
-func (p *Pipeline) pass(ctx context.Context, t Tree, c Case, probe string) (ok, evaluated, errored bool) {
+func (p *Pipeline) pass(ctx context.Context, t Tree, c Case, probe string) (ok, evaluated bool, err error) {
 	out, err := p.cfg.Evaluator.Run(ctx, t.clone(), Probe{ID: probe, Input: append([]byte(nil), c.Input...)})
 	if errors.Is(err, ErrNotEvaluated) {
-		return false, false, false
+		return false, false, nil
 	}
 	if err != nil {
-		return false, true, true
+		return false, true, err
 	}
 	g := p.cfg.Graders[c.Class]
 	if g == nil {
 		g = DefaultGrader
 	}
-	return g(c, out), true, false
+	return g(c, out), true, nil
 }
 
 // ProbeTask maps a probe ID of a running evaluation back to the journal
