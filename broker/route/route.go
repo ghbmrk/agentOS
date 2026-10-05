@@ -145,6 +145,10 @@ type Config struct {
 	// Every call is sent with a limit at or below it, so the meter can
 	// reserve it up front. Zero means DefaultMaxOutputTokens.
 	MaxOutputTokens int
+	// CredentialRejected is told when a provider rejects the owner's
+	// credential (401), at most once per provider a day, so the owner can
+	// be texted once; the call itself fails over silently.
+	CredentialRejected func(provider string)
 	// Cooldown is how long an exhausted route is skipped when the provider
 	// gives no Retry-After; zero means DefaultCooldown.
 	Cooldown time.Duration
@@ -174,6 +178,7 @@ type Router struct {
 	mu    sync.Mutex
 	rule  Rule
 	until map[string]time.Time // route -> exhausted until
+	told  map[string]time.Time // provider -> last CredentialRejected
 	stats map[string]*Stats
 }
 
@@ -182,7 +187,7 @@ func New(cfg Config) (*Router, error) {
 	if cfg.Granted == nil || cfg.Upstream == nil || cfg.Audit == nil {
 		return nil, errors.New("route: Granted, Upstream, and Audit are required")
 	}
-	r := &Router{cfg: cfg, providers: map[string]Provider{}, until: map[string]time.Time{}, stats: map[string]*Stats{}}
+	r := &Router{cfg: cfg, providers: map[string]Provider{}, until: map[string]time.Time{}, told: map[string]time.Time{}, stats: map[string]*Stats{}}
 	for _, p := range cfg.Providers {
 		if _, dup := r.providers[p.Name()]; dup {
 			return nil, fmt.Errorf("route: provider %s declared twice", p.Name())
@@ -439,9 +444,18 @@ func (r *Router) serve(machine string, w http.ResponseWriter, req *http.Request)
 			r.writeError(w, a.status, a.header, nil, a.body)
 			return
 		case a.failover:
+			tell := false
 			r.mu.Lock()
 			r.until[key] = a.until
+			if a.status == http.StatusUnauthorized && r.cfg.CredentialRejected != nil {
+				if last, ok := r.told[rt.Provider]; !ok || r.cfg.Now().Sub(last) >= 24*time.Hour {
+					r.told[rt.Provider], tell = r.cfg.Now(), true
+				}
+			}
 			r.mu.Unlock()
+			if tell {
+				r.cfg.CredentialRejected(rt.Provider)
+			}
 			if soonest.IsZero() || a.until.Before(soonest) {
 				soonest = a.until
 			}

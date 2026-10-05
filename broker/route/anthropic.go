@@ -286,7 +286,8 @@ type aUsage struct {
 }
 
 func (u aUsage) usage() Usage {
-	return Usage{Input: u.InputTokens, Output: u.OutputTokens, CacheRead: u.CacheReadInputTokens, CacheWrite: u.CacheCreationInputTokens}
+	return Usage{Input: u.InputTokens, Output: u.OutputTokens, CacheRead: u.CacheReadInputTokens, CacheWrite: u.CacheCreationInputTokens,
+		Reported: u.InputTokens+u.OutputTokens+u.CacheReadInputTokens+u.CacheCreationInputTokens > 0}
 }
 
 // merge takes the nonzero counts of a later usage report (message_delta
@@ -342,6 +343,11 @@ func (anthropic) Response(body []byte, class string) ([]byte, Usage, error) {
 		msg["tool_calls"] = calls
 	}
 	u := r.Usage.usage()
+	u.Complete = true
+	u.OutputChars = int64(text.Len())
+	for _, c := range calls {
+		u.OutputChars += int64(len(c.Function.Arguments))
+	}
 	out, err := json.Marshal(map[string]any{
 		"id": "chatcmpl-" + r.ID, "object": "chat.completion", "created": time.Now().Unix(), "model": class,
 		"choices": []any{map[string]any{"index": 0, "message": msg, "finish_reason": finishReason(r.StopReason)}},
@@ -419,8 +425,15 @@ func (anthropic) Stream(dst io.Writer, flush func(), src io.Reader, class string
 		created = time.Now().Unix()
 		usage   aUsage
 		started bool
+		chars   int64           // content and tool-argument characters seen
 		tools   = map[int]int{} // Messages block index -> chat tool call index
 	)
+	complete := false
+	result := func() Usage {
+		u := usage.usage()
+		u.OutputChars, u.Complete = chars, complete
+		return u
+	}
 	send := func(v any) error {
 		b, err := json.Marshal(v)
 		if err != nil {
@@ -445,7 +458,7 @@ func (anthropic) Stream(dst io.Writer, flush func(), src io.Reader, class string
 		}
 		var ev aEvent
 		if err := json.Unmarshal([]byte(strings.TrimSpace(data)), &ev); err != nil {
-			return usage.usage(), fmt.Errorf("provider stream: %v", err)
+			return result(), fmt.Errorf("provider stream: %v", err)
 		}
 		var err error
 		switch ev.Type {
@@ -467,6 +480,7 @@ func (anthropic) Stream(dst io.Writer, flush func(), src io.Reader, class string
 						"function": map[string]any{"name": b.Name, "arguments": ""},
 					}}}, nil)
 				case b.Type == "text" && b.Text != "":
+					chars += int64(len(b.Text))
 					err = chunk(map[string]any{"content": b.Text}, nil)
 				}
 			}
@@ -474,8 +488,10 @@ func (anthropic) Stream(dst io.Writer, flush func(), src io.Reader, class string
 			if d := ev.Delta; d != nil {
 				switch d.Type {
 				case "text_delta":
+					chars += int64(len(d.Text))
 					err = chunk(map[string]any{"content": d.Text}, nil)
 				case "input_json_delta":
+					chars += int64(len(d.PartialJSON))
 					if i, ok := tools[ev.Index]; ok {
 						err = chunk(map[string]any{"tool_calls": []any{map[string]any{
 							"index": i, "function": map[string]any{"arguments": d.PartialJSON},
@@ -491,17 +507,18 @@ func (anthropic) Stream(dst io.Writer, flush func(), src io.Reader, class string
 				err = chunk(map[string]any{}, finishReason(ev.Delta.StopReason))
 			}
 		case "message_stop":
+			complete = true
 			if includeUsage {
 				if err := send(map[string]any{
 					"id": id, "object": "chat.completion.chunk", "created": created, "model": class,
 					"choices": []any{}, "usage": usage.usage().openAI(),
 				}); err != nil {
-					return usage.usage(), err
+					return result(), err
 				}
 			}
 			_, err := io.WriteString(dst, "data: [DONE]\n\n")
 			flush()
-			return usage.usage(), err
+			return result(), err
 		case "error":
 			msg, typ := "provider stream error", "server_error"
 			if ev.Error != nil {
@@ -511,18 +528,18 @@ func (anthropic) Stream(dst io.Writer, flush func(), src io.Reader, class string
 				}
 			}
 			if !started {
-				return usage.usage(), errNotStarted
+				return result(), errNotStarted
 			}
 			fmt.Fprintf(dst, "data: %s\n\n", apiError(msg, typ, ""))
 			flush()
-			return usage.usage(), errors.New("provider stream ended with an error event")
+			return result(), errors.New("provider stream ended with an error event")
 		}
 		if err != nil {
-			return usage.usage(), err
+			return result(), err
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return usage.usage(), err
+		return result(), err
 	}
-	return usage.usage(), io.ErrUnexpectedEOF
+	return result(), io.ErrUnexpectedEOF
 }

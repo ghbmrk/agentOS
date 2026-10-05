@@ -34,7 +34,10 @@ func (openAI) Request(req *chatRequest, model string) ([]byte, error) {
 
 func (openAI) Response(body []byte, _ string) ([]byte, Usage, error) {
 	var r struct {
-		Usage *oaUsage `json:"usage"`
+		Usage   *oaUsage `json:"usage"`
+		Choices []struct {
+			Message oaDelta `json:"message"`
+		} `json:"choices"`
 	}
 	if err := json.Unmarshal(body, &r); err != nil {
 		return nil, Usage{}, fmt.Errorf("provider response is not a completion: %v", err)
@@ -43,7 +46,25 @@ func (openAI) Response(body []byte, _ string) ([]byte, Usage, error) {
 	if r.Usage != nil {
 		u = r.Usage.usage()
 	}
+	for _, c := range r.Choices {
+		u.OutputChars += c.Message.chars()
+	}
+	u.Complete = true
 	return body, u, nil
+}
+
+// oaDelta is the generated part of a message or stream delta.
+type oaDelta struct {
+	Content   string     `json:"content"`
+	ToolCalls []toolCall `json:"tool_calls"`
+}
+
+func (d oaDelta) chars() int64 {
+	n := int64(len(d.Content))
+	for _, tc := range d.ToolCalls {
+		n += int64(len(tc.Function.Arguments))
+	}
+	return n
 }
 
 // Stream passes events through as sent, except the usage-only chunk when
@@ -59,19 +80,27 @@ func (openAI) Stream(dst io.Writer, flush func(), src io.Reader, _ string, inclu
 		}
 		data = strings.TrimSpace(data)
 		if data == "[DONE]" {
+			u.Complete = true
 			_, err := io.WriteString(dst, "data: [DONE]\n\n")
 			flush()
 			return u, err
 		}
 		var c struct {
-			Usage   *oaUsage          `json:"usage"`
-			Choices []json.RawMessage `json:"choices"`
+			Usage   *oaUsage `json:"usage"`
+			Choices []struct {
+				Delta oaDelta `json:"delta"`
+			} `json:"choices"`
 		}
 		if err := json.Unmarshal([]byte(data), &c); err != nil {
 			return u, fmt.Errorf("provider stream: %v", err)
 		}
+		for _, ch := range c.Choices {
+			u.OutputChars += ch.Delta.chars()
+		}
 		if c.Usage != nil {
+			chars := u.OutputChars
 			u = c.Usage.usage()
+			u.OutputChars = chars
 			if len(c.Choices) == 0 && !includeUsage {
 				continue
 			}

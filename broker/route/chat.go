@@ -265,13 +265,21 @@ func isAPIError(b []byte) bool {
 	return json.Unmarshal(b, &e) == nil && e.Error != nil
 }
 
-// Usage is what a provider reported for one call. Input excludes cached
-// tokens: CacheRead and CacheWrite count them separately.
+// Usage is what one call cost. Input excludes cached tokens: CacheRead
+// and CacheWrite count them separately, since providers bill them at
+// their own weights. Reported says the provider gave the counts; Complete
+// says the response finished normally. When usage is not reported, or
+// the stream was cut off, the meter falls back to OutputChars, the
+// characters of content and tool arguments the provider produced as the
+// router saw them (also the floor for a cut-off stream).
 type Usage struct {
-	Input      int64 `json:"input"`
-	Output     int64 `json:"output"`
-	CacheRead  int64 `json:"cache_read,omitempty"`
-	CacheWrite int64 `json:"cache_write,omitempty"`
+	Input       int64 `json:"input"`
+	Output      int64 `json:"output"`
+	CacheRead   int64 `json:"cache_read,omitempty"`
+	CacheWrite  int64 `json:"cache_write,omitempty"`
+	Reported    bool  `json:"reported"`
+	Complete    bool  `json:"complete"`
+	OutputChars int64 `json:"output_chars"`
 }
 
 // Total is every token the call was billed for.
@@ -297,5 +305,5 @@ type oaUsage struct {
 }
 
 func (o oaUsage) usage() Usage {
-	return Usage{Input: o.PromptTokens - o.PromptTokensDetails.CachedTokens, Output: o.CompletionTokens, CacheRead: o.PromptTokensDetails.CachedTokens}
+	return Usage{Input: o.PromptTokens - o.PromptTokensDetails.CachedTokens, Output: o.CompletionTokens, CacheRead: o.PromptTokensDetails.CachedTokens, Reported: true}
 }

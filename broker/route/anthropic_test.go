@@ -172,7 +172,7 @@ func TestAnthropicResponseTranslation(t *testing.T) {
 		c.Usage.Details.CachedTokens != 3000 {
 		t.Fatalf("usage %+v", c.Usage)
 	}
-	if u != (Usage{Input: 412, Output: 57, CacheRead: 3000, CacheWrite: 200}) {
+	if u != (Usage{Input: 412, Output: 57, CacheRead: 3000, CacheWrite: 200, Reported: true, Complete: true, OutputChars: 51}) {
 		t.Fatalf("reported usage %+v", u)
 	}
 }
@@ -269,7 +269,7 @@ func TestAnthropicStreamTranslation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if u != (Usage{Input: 25, Output: 32, CacheRead: 1800}) {
+	if u != (Usage{Input: 25, Output: 32, CacheRead: 1800, Reported: true, Complete: true, OutputChars: 29}) {
 		t.Fatalf("reported usage %+v", u)
 	}
 	a := reassemble(t, out.Bytes())
@@ -292,8 +292,14 @@ func TestAnthropicStreamTruncatedOrError(t *testing.T) {
 	full := fixture(t, "anthropic_stream.sse")
 	cut := full[:bytes.Index(full, []byte("event: message_delta"))]
 	var out bytes.Buffer
-	if _, err := Anthropic().Stream(&out, func() {}, bytes.NewReader(cut), "default", false); err == nil {
+	u, err := Anthropic().Stream(&out, func() {}, bytes.NewReader(cut), "default", false)
+	if err == nil {
 		t.Fatal("a stream without message_stop must report an error")
+	}
+	// A cut-off stream is marked incomplete, with the characters seen as
+	// the meter's floor.
+	if u.Complete || u.OutputChars != 29 {
+		t.Fatalf("cut-off usage %+v", u)
 	}
 	if strings.Contains(out.String(), "[DONE]") {
 		t.Fatal("a truncated stream must not claim completion")
