@@ -1,6 +1,6 @@
 package vm
 
-// REQ: CAP-8, REV-5, CAP-3, OP-6, RES-4
+// REQ: CAP-8, REV-5, CAP-3, OP-6, RES-4, CAP-1, RES-1
 
 import (
 	"context"
@@ -430,5 +430,43 @@ func TestOP6HeldCommandDoesNotStart(t *testing.T) {
 	}
 	if got := e.guestRead("wk-a", "f"); got != "" {
 		t.Fatal("the held command ran")
+	}
+}
+
+// Preemption ends a worker's command at once, and the command reports
+// preempted, never a failed exit, so a speculative branch is not read as
+// a failing test (potency R1 on #158). Later commands say the same until
+// the worker is revived.
+func TestCAP1PreemptedCommandIsNotAFailure(t *testing.T) {
+	e := newEnv(t, 4096)
+	agent := e.create("agent", admission.Experiment, 500)
+	_, err := e.m.CreateWorker(bg, "wk-1", agent.Lineage, workerSpec(Public))
+	must(t, err)
+	done := make(chan error, 1)
+	go func() {
+		_, err := e.m.Exec(bg, "wk-1", Command{Argv: []string{"sleep"}, As: Public}, 10*time.Minute)
+		done <- err
+	}()
+	time.Sleep(20 * time.Millisecond) // the command holds the worker
+	must(t, e.m.Preempt("wk-1"))
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrPreempted) {
+			t.Fatalf("preempted command = %v, want ErrPreempted", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("preemption did not end the command")
+	}
+	for deadline := time.Now().Add(2 * time.Second); ; {
+		if w, _ := e.m.Get("wk-1"); w.State == Preempted {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("worker never recorded preempted")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, err := e.m.Exec(bg, "wk-1", Command{Argv: []string{"echo"}, As: Public}, time.Second); !errors.Is(err, ErrPreempted) {
+		t.Fatalf("command on a preempted worker = %v", err)
 	}
 }

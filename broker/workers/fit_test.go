@@ -494,3 +494,23 @@ func TestCAP1KeepSaysWhatWentBeforeAnError(t *testing.T) {
 		t.Fatalf("keep with a failed destroy: %v", err)
 	}
 }
+
+// The guest sees "preempted, retry", not an exit code, when its worker is
+// preempted mid-command (potency R1 on #158).
+func TestCAP1PreemptedCommandSaysRetry(t *testing.T) {
+	r := newRig(t, 16000)
+	ag := r.agent("agent", vm.Public)
+	r.must("agent", toolCreate, m{"name": "w", "mem_mb": MinMemMB}, nil)
+	done := make(chan error, 1)
+	go func() {
+		done <- r.call("agent", toolExec, m{"name": "w", "argv": []string{"sleep"}, "timeout_seconds": 600}, nil)
+	}()
+	time.Sleep(20 * time.Millisecond)
+	if err := r.m.Preempt(workerID(ag.Lineage, "w")); err != nil {
+		t.Fatal(err)
+	}
+	err := <-done
+	if err == nil || !strings.HasPrefix(err.Error(), "preempted, retry: worker w ") || !strings.Contains(err.Error(), "did not fail") {
+		t.Fatalf("preempted exec = %v", err)
+	}
+}

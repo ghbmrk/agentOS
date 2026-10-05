@@ -188,6 +188,9 @@ func (m *Manager) Exec(ctx context.Context, id string, c Command, timeout time.D
 	}
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
+	if mc.State == Preempted {
+		return ExecResult{}, fmt.Errorf("%w: %s", ErrPreempted, id)
+	}
 	if mc.State != Running {
 		return ExecResult{}, fmt.Errorf("%w: %s is %s", ErrState, id, mc.State)
 	}
@@ -213,6 +216,11 @@ func (m *Manager) Exec(ctx context.Context, id string, c Command, timeout time.D
 		return ExecResult{}, ErrHeld
 	}
 	r, err := m.awaitExec(ctx, ex, id, c)
+	if mc.preempting.Load() {
+		// Preempt ended the command with the machine: it has no result,
+		// not a failed exit (potency R1 on #158).
+		return ExecResult{}, fmt.Errorf("%w: %s: the command did not finish", ErrPreempted, id)
+	}
 	if err != nil && ctx.Err() == context.Canceled {
 		return ExecResult{}, fmt.Errorf("vm: %s: command ended before it finished", id)
 	}

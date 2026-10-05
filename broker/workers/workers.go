@@ -450,6 +450,11 @@ func (t *Tools) run(ctx context.Context, c caller, name string, cmd vm.Command, 
 	if errors.Is(err, vm.ErrHeld) {
 		return vm.ExecResult{}, errStopped
 	}
+	if errors.Is(err, vm.ErrPreempted) {
+		// A speculative branch cut short is not a failing test (potency
+		// R1 on #158).
+		return vm.ExecResult{}, fmt.Errorf("preempted, retry: worker %s was stopped for higher-priority work, so the command has no result (it did not fail); roll the worker back to a snapshot with worker_rollback and run it again", name)
+	}
 	if err != nil {
 		return vm.ExecResult{}, workerErr(name, err)
 	}

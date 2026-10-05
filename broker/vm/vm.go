@@ -1515,7 +1515,11 @@ func (m *Manager) Preempt(id string) error {
 	}
 	// The completion is scheduled even if the kill fails: once the holding
 	// operation lets go, the machine is stopped under its lock and
-	// recorded preempted, and preempting is cleared (L3 on #124).
+	// recorded preempted, and preempting is cleared (L3 on #124). A
+	// worker's command in flight is ended with it.
+	if c := mc.execCancel.Load(); c != nil {
+		(*c)()
+	}
 	kerr := m.kill(mc)
 	go func() {
 		mc.mu.Lock()
