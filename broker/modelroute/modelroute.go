@@ -95,6 +95,9 @@ func Forward(cfg Config) func(machine string) http.Handler {
 		MaxIdleConns:       16,
 		IdleConnTimeout:    90 * time.Second,
 		Proxy:              nil,
+		// The vault process clips what it reports (a denial reason
+		// to 1 KiB); a larger header block is not its.
+		MaxResponseHeaderBytes: 64 << 10,
 	}
 	return func(machine string) http.Handler {
 		rp := &httputil.ReverseProxy{

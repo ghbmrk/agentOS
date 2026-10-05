@@ -38,51 +38,87 @@ func (noGrants) Check(context.Context, journal.Phase, journal.Intent) error {
 // class, a body it does not accept, an ungranted provider) reaches no
 // provider, and each distinct refusal is journaled through the broker's
 // wiring (modelroute.Journal) with the method the guest used.
-func TestA14RouterDenialsAreJournaled(t *testing.T) {
-	var mu sync.Mutex
-	calls := 0
-	sock := openModelSocket(t, testRouter(t), func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		calls++
-		mu.Unlock()
+// routerRig is the box's model path for machine "agent", as agentosd
+// wires it, journaling into its own engine. calls counts provider calls.
+type routerRig struct {
+	c     *http.Client
+	eng   *journal.Engine
+	mu    sync.Mutex
+	calls int
+}
+
+func newRouterRig(t *testing.T) *routerRig {
+	t.Helper()
+	r := &routerRig{}
+	sock := openModelSocket(t, testRouter(t), func(w http.ResponseWriter, _ *http.Request) {
+		r.mu.Lock()
+		r.calls++
+		r.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"hi"}}]}`)
 	})
-
 	work := t.TempDir()
 	jstore, err := journal.OpenFile(filepath.Join(work, "journal.log"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer jstore.Close()
-	eng, err := journal.Open(jstore, noGrants{}, map[string]journal.Executor{}, func(s string) string { return s })
+	t.Cleanup(func() { jstore.Close() })
+	r.eng, err = journal.Open(jstore, noGrants{}, map[string]journal.Executor{}, func(s string) string { return s })
 	if err != nil {
 		t.Fatal(err)
 	}
 	fwd := modelroute.Forward(modelroute.Config{
 		Socket: sock,
 		Label:  func(string) string { return "private" },
-		Denied: modelroute.Journal(eng, t.Logf),
+		Denied: modelroute.Journal(r.eng, t.Logf),
 	})
 	mtr, err := meter.Open(meter.Config{Path: filepath.Join(work, "meter.json"),
 		MachineCap: meter.Limits{Calls: 100, Tokens: 1 << 30}, OverallCap: meter.Limits{Calls: 100, Tokens: 1 << 30}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	plane, err := guest.New(guest.Config{Dir: filepath.Join(work, "guests"), Machines: plainMachines{}, Effects: eng, Model: fwd, Meter: mtr})
+	plane, err := guest.New(guest.Config{Dir: filepath.Join(work, "guests"), Machines: plainMachines{}, Effects: r.eng, Model: fwd, Meter: mtr})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer plane.Shutdown()
+	t.Cleanup(plane.Shutdown)
 	dir, err := plane.Open("agent")
 	if err != nil {
 		t.Fatal(err)
 	}
 	gsock := filepath.Join(dir, guest.Socket)
-	c := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+	r.c = &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "unix", gsock)
 	}}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	return r
+}
 
+func (r *routerRig) do(t *testing.T, method, path, body string) int {
+	t.Helper()
+	req, _ := http.NewRequest(method, "http://broker"+path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := r.c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	return resp.StatusCode
+}
+
+// notes are the egress records journaled so far.
+func (r *routerRig) notes() []journal.EgressNote {
+	var out []journal.EgressNote
+	for _, rec := range r.eng.Trail() {
+		if rec.Type == journal.RecEgress {
+			out = append(out, *rec.Egress)
+		}
+	}
+	return out
+}
+
+func TestA14RouterDenialsAreJournaled(t *testing.T) {
+	r := newRouterRig(t)
 	ok := `{"model":"default","messages":[{"role":"user","content":"hi"}]}`
 	for _, a := range []struct {
 		method, path, body string
@@ -96,24 +132,21 @@ func TestA14RouterDenialsAreJournaled(t *testing.T) {
 		{"POST", "/model/v1/chat/completions?x=1", ok, 404},
 		{"POST", "/model/v1/chat/completions", `{"model":"nope","messages":[{"role":"user","content":"hi"}]}`, 404},
 		{"POST", "/model/v1/chat/completions", `{"model":"default","messages":[{"role":"wizard","content":"hi"}]}`, 400},
+		// Guest numbers the parser reports outside quotes: same class.
+		{"POST", "/model/v1/chat/completions", `{"model":"default","seed":1.5,"messages":[{"role":"user","content":"hi"}]}`, 400},
+		{"POST", "/model/v1/chat/completions", `{"model":"default","seed":2.5,"messages":[{"role":"user","content":"hi"}]}`, 400},
+		{"POST", "/model/v1/chat/completions", `{"model":"default","seed":3.5,"messages":[{"role":"user","content":"hi"}]}`, 400},
 		{"POST", "/model/v1/chat/completions", `{"model":"claude","messages":[{"role":"user","content":"hi"}]}`, 403},
 	} {
-		req, _ := http.NewRequest(a.method, "http://broker"+a.path, strings.NewReader(a.body))
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := c.Do(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		resp.Body.Close()
-		if resp.StatusCode != a.status {
-			t.Errorf("%s %s: %d, want %d", a.method, a.path, resp.StatusCode, a.status)
+		if got := r.do(t, a.method, a.path, a.body); got != a.status {
+			t.Errorf("%s %s: %d, want %d", a.method, a.path, got, a.status)
 		}
 	}
-	mu.Lock()
-	if calls != 1 {
-		t.Errorf("provider called %d times, want 1 (only the clean request)", calls)
+	r.mu.Lock()
+	if r.calls != 1 {
+		t.Errorf("provider called %d times, want 1 (only the clean request)", r.calls)
 	}
-	mu.Unlock()
+	r.mu.Unlock()
 
 	type key struct {
 		method string
@@ -121,14 +154,11 @@ func TestA14RouterDenialsAreJournaled(t *testing.T) {
 		reason string
 	}
 	got := map[key]int{}
-	for _, r := range eng.Trail() {
-		if r.Type != journal.RecEgress {
-			continue
+	for _, n := range r.notes() {
+		if n.Machine != "agent" || n.Adapter != "router" {
+			t.Errorf("journaled %+v, want the router's denial for agent", n)
 		}
-		if r.Egress.Machine != "agent" || r.Egress.Adapter != "router" {
-			t.Errorf("journaled %+v, want the router's denial for agent", *r.Egress)
-		}
-		got[key{r.Egress.Method, r.Egress.Status, r.Egress.Reason}]++
+		got[key{n.Method, n.Status, n.Reason}]++
 	}
 	const path = "only POST /v1/chat/completions is served"
 	for _, k := range []key{
@@ -146,5 +176,24 @@ func TestA14RouterDenialsAreJournaled(t *testing.T) {
 	// fill the journal.
 	if n := got[key{"POST", 404, path}]; n != 0 {
 		t.Errorf("POST path refusals journaled %d times after the GET opened the window", n)
+	}
+}
+
+// TestA14OversizedRouterReasonIsJournaled: a refusal whose reason quotes a
+// huge guest value (a role of soft hyphens grows about 3.5 times through
+// %q and JSON) is still answered 400 and journaled, with the reason clipped
+// in the denial header rather than overflowing it.
+func TestA14OversizedRouterReasonIsJournaled(t *testing.T) {
+	r := newRouterRig(t)
+	role := strings.Repeat("\u00ad", 100<<10)
+	if got := r.do(t, "POST", "/model/v1/chat/completions", `{"model":"default","messages":[{"role":"`+role+`","content":"hi"}]}`); got != 400 {
+		t.Fatalf("status %d, want 400", got)
+	}
+	ns := r.notes()
+	if len(ns) != 1 || ns[0].Status != 400 || ns[0].Adapter != "router" {
+		t.Fatalf("journaled %+v, want one router 400", ns)
+	}
+	if len(ns[0].Reason) > 2<<10 {
+		t.Fatalf("journaled a %d-byte reason", len(ns[0].Reason))
 	}
 }

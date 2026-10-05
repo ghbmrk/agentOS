@@ -107,10 +107,25 @@ func (a *callAudit) decide(w http.ResponseWriter, method string) func(route.Deci
 		if den == nil {
 			return
 		}
-		if b, err := json.Marshal(den); err == nil {
+		out := *den
+		out.Reason = clipReason(out.Reason)
+		if b, err := json.Marshal(out); err == nil {
 			w.Header().Set(modelroute.HeaderDenial, string(b))
 		}
 	}
+}
+
+// maxDenialReason bounds a reported denial reason, which can quote guest
+// input: the reason's class comes before any quote, so clipping keeps it,
+// and the denial header stays far below the broker's header limit.
+const maxDenialReason = 1 << 10
+
+// clipReason cuts r to maxDenialReason bytes on a rune boundary.
+func clipReason(r string) string {
+	if len(r) <= maxDenialReason {
+		return r
+	}
+	return strings.ToValidUTF8(r[:maxDenialReason], "") + "…[clipped]"
 }
 
 // usage renders a served call's usage as the HeaderUsage trailer, with the
