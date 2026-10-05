@@ -645,6 +645,17 @@ class HostUntouchedImageTest(unittest.TestCase):
         v = finish.initrd_violations(bad)
         self.assertEqual(len(v), 4, v)
 
+    def test_entry_initrds_checked_together(self):
+        # The entry loads mkosi's initrd and a kernel-modules initrd; the kernel joins them, so
+        # the drive ID check may sit in either, and LVM or MD in either fails.
+        main = ["usr/lib/agentos/drive-ids", "usr/lib/systemd/system/agentos-drive-ids.service",
+                "usr/lib/systemd/system/sysroot.mount.d/agentos-drive-ids.conf"]
+        mods = ["usr/lib/modules/6.12/kernel/drivers/md/dm-verity.ko"]
+        self.assertEqual(finish.entry_initrd_violations([main, mods]), [])
+        self.assertEqual(len(finish.entry_initrd_violations([mods])), 3)
+        self.assertEqual(finish.entry_initrd_violations([main, mods + ["usr/sbin/lvm"]]),
+                         ["assembles LVM or MD: usr/sbin/lvm"])
+
     def test_initrd_names_reads_concatenated_cpio(self):
         def newc(names):
             out = b""

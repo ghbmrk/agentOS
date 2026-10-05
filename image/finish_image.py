@@ -140,6 +140,12 @@ def initrd_violations(names):
     return out
 
 
+def entry_initrd_violations(listings):
+    """initrd_violations over every initrd the entry loads: the kernel unpacks them into one
+    file system, so the required files may be in any of them."""
+    return initrd_violations([n for names in listings for n in names])
+
+
 def manifest(version, roothash, entry_name, entry_text, files, boot=None):
     """The release (UPD-1a): /usr verity root hash plus the boot entry that mounts it, and the
     sha256 of the kernel and initrd that entry boots."""
@@ -197,15 +203,16 @@ def main(out, version):
     bad = esp_violations(paths, text)
     if bad:
         sys.exit("ESP holds files outside the allowlist (HW-1): %s" % bad)
-    boot = {}
+    boot, listings = {}, []
     for p in boot_files(text):
         data_ = subprocess.check_output(["mtype", "-i", fs, "::/" + p])
         boot[p] = hashlib.sha256(data_).hexdigest()
         if re.match(r"initrd\s+/?%s$" % re.escape(p), next(l for l in text.splitlines() if p in l)):
-            bad = initrd_violations(initrd_names(data_))
-            if bad:
-                sys.exit("initrd check: %s" % bad)
-            print("initrd check: clean")
+            listings.append(initrd_names(data_))
+    bad = entry_initrd_violations(listings)
+    if bad:
+        sys.exit("initrd check: %s" % bad)
+    print("initrd check: %d initrd(s) clean" % len(listings))
     roothash = usrhash(text)
     data, tree = out / ("agentos_%s.usr.raw" % version), out / ("agentos_%s.usr-verity.raw" % version)
     verify_usr(data, tree, roothash)
