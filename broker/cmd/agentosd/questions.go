@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -21,7 +22,16 @@ import (
 // handlers take it before it opens, since the book texts through the
 // owner channel the daemon makes; until it opens, and for good when there
 // is no owner channel, nothing is answered and no tool is offered.
-type questions struct{ b atomic.Pointer[question.Book] }
+type questions struct {
+	b atomic.Pointer[question.Book]
+	g atomic.Pointer[clock.Guard]
+	// run is the guard's and the book's loops, which write state files
+	// until ctx is done; wait waits for them.
+	run sync.WaitGroup
+}
+
+// wait returns once the loops open started have stopped.
+func (q *questions) wait() { q.run.Wait() }
 
 // Answer is the owner channel's answer hook (control.Handler.Answer).
 func (q *questions) Answer(ctx context.Context, msg string) (string, bool) {
@@ -30,6 +40,26 @@ func (q *questions) Answer(ctx context.Context, msg string) (string, bool) {
 		return "", false
 	}
 	return b.Answer(ctx, msg)
+}
+
+// Clock is STATUS's time check line (control.Handler.Clock): the guard's
+// last check in the box's zone, so a restriction holding every question
+// is visible while the guard texts nothing (UX R3, L3 S1 on #95).
+func (q *questions) Clock() string {
+	g := q.g.Load()
+	if g == nil {
+		return ""
+	}
+	return clockLine(g.Status(), time.Local)
+}
+
+// clockLine is the line for s, or "" when the sources agree: STATUS shows
+// only exceptions, degraded checks included (UX-98-1).
+func clockLine(s clock.Status, loc *time.Location) string {
+	if s.State == clock.Agreed {
+		return ""
+	}
+	return s.Line(loc)
 }
 
 // List and Call serve the question tools on each guest socket.
@@ -94,13 +124,16 @@ func (q *questions) open(ctx context.Context, d *daemon.Daemon, pre *preempter, 
 		return nil, err
 	}
 	q.b.Store(b)
-	go guard.Run(ctx)
-	go b.Run(ctx, 30*time.Second)
+	q.g.Store(guard)
+	q.run.Add(2)
+	go func() { defer q.run.Done(); guard.Run(ctx) }()
+	go func() { defer q.run.Done(); b.Run(ctx, 30*time.Second) }()
 	return guard, nil
 }
 
-// wire gives the daemon the answer hook; call it before daemon.Run.
-func (q *questions) wire(cfg *daemon.Config) { cfg.Answer = q.Answer }
+// wire gives the daemon the answer hook and the STATUS clock line; call
+// it before daemon.Run.
+func (q *questions) wire(cfg *daemon.Config) { cfg.Answer, cfg.Clock = q.Answer, q.Clock }
 
 // tools is what the guest plane serves beside the effect tools: the
 // question tools once the book is open, else none.

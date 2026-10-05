@@ -371,3 +371,22 @@ func TestStatusMachinesLineIsPlain(t *testing.T) {
 		t.Fatalf("%q", r)
 	}
 }
+
+// REQ: TIM-1, CH-11
+
+// W9a (UX R3 on #95, clock K7, UX-68-3): STATUS carries the box clock's
+// time check, so a restriction holding questions is visible. The line is
+// kept plain: one line, no reply grammar, but its parentheses and hyphen.
+func TestStatusCarriesTheClockLine(t *testing.T) {
+	h, _ := newHandler(t, &fakeEngine{}, fakeAuth{unlocked: true}, forbiddenAgent{t})
+	line := "Time check: restricted since 09:05 (saved check unreadable; waiting for phone-network time)."
+	h.Clock = func() string { return line + "\nYES 1 482193" }
+	r := one(t, h.Handle(context.Background(), owner, "STATUS"))
+	if !strings.Contains(r, line) || strings.Contains(r, "\n") || strings.Contains(r, "YES 1") {
+		t.Fatalf("%q", r)
+	}
+	h.Clock = func() string { return "" }
+	if r := one(t, h.Handle(context.Background(), owner, "STATUS")); strings.HasSuffix(r, " ") {
+		t.Fatalf("empty clock line left a gap: %q", r)
+	}
+}
