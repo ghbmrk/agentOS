@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/owner"
@@ -868,6 +869,8 @@ func (g *Gate) evaluateBroker(ctx context.Context, phase journal.Phase, in journ
 			Facts: owner.Facts{Kind: owner.Ordinary, Verb: "forget", NoRecipient: true}}}
 	case journal.ActionEvidence:
 		return g.evaluateEvidence(in)
+	case journal.ActionUpdateFollow:
+		return g.evaluateFollow(in)
 	case journal.ActionGrantPause, journal.ActionGrantRevoke:
 		// Loop 2 may pause on a finding (loops K-S2): pausing only
 		// narrows, and revoking stays the owner's.
@@ -915,6 +918,56 @@ func (g *Gate) evaluateEvidence(in journal.Intent) verdict {
 	}
 	return verdict{kind: ask, local: true, item: owner.Item{Ref: in.ID, Object: "send private replies to " + d.Address,
 		Facts: owner.Facts{Kind: owner.GrantChange, Verb: "share", NoRecipient: true}}}
+}
+
+// evaluateFollow decides a switch of the box's update source (OSS-10). It
+// changes who decides what software the box installs, so it is a tier-4
+// act: the owner's code-generator code plus confirmation on the local
+// page, and it comes only from that page (Security C6). The request names
+// only the owner's own name for the source; the page shows the keys,
+// thresholds and expiry the digest binds. One intent runs once, so one
+// approval buys one switch.
+func (g *Gate) evaluateFollow(in journal.Intent) verdict {
+	if in.Origin != originLocal {
+		return verdict{kind: deny, why: "only the owner, on the box's local page, changes where updates come from"}
+	}
+	name, ok1 := in.Params[ParamFollowName].(string)
+	digest, ok2 := in.Params[ParamFollowDigest].(string)
+	if !ok1 || !ok2 || len(in.Params) != 2 || in.Executor != FollowExecutor || !hexDigest(digest) || !followName(name) {
+		return verdict{kind: deny, why: "malformed request to change where updates come from"}
+	}
+	if !g.cfg.LocalUI {
+		return verdict{kind: deny, why: "changing where updates come from needs confirmation on the box's local page, which this build does not have yet (OSS-10)"}
+	}
+	return verdict{kind: ask, local: true, item: owner.Item{Ref: in.ID, Object: "get updates from " + name,
+		Facts: owner.Facts{Kind: owner.GrantChange, Verb: "follow", NoRecipient: true}}}
+}
+
+// hexDigest is 64 lower-case hex characters.
+func hexDigest(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// followName is the owner's name for a source: 1 to MaxFollowName
+// printable characters on one line (no control or bidi formatting
+// characters), with no leading or trailing space.
+func followName(s string) bool {
+	n := 0
+	for _, c := range s {
+		if !unicode.IsPrint(c) {
+			return false
+		}
+		n++
+	}
+	return n > 0 && n <= MaxFollowName && strings.TrimSpace(s) == s
 }
 
 // evaluateDelivery decides a delivery to the evidence destination: a
@@ -2035,7 +2088,8 @@ func (g *Gate) ConfirmLocal(id string) error {
 		return err
 	}
 	if st.State != journal.Pending || st.Intent.Account != journal.BrokerAccount ||
-		(st.Intent.Action != journal.ActionGrantChange && st.Intent.Action != journal.ActionEvidence && !(changeAction(st.Intent.Action) &&
+		(st.Intent.Action != journal.ActionGrantChange && st.Intent.Action != journal.ActionEvidence &&
+			st.Intent.Action != journal.ActionUpdateFollow && !(changeAction(st.Intent.Action) &&
 			g.evaluate(context.Background(), journal.PhaseAuthorize, st.Intent).local)) {
 		return errors.New("grants: nothing to confirm for " + clip(id))
 	}

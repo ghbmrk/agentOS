@@ -87,6 +87,25 @@ func EvidenceIntent(id, origin, address, account string) journal.Intent {
 		Params: map[string]any{ParamEvidenceAddress: address, ParamEvidenceAccount: account}, Executor: ExecutorName}
 }
 
+// Params of a journal.ActionUpdateFollow intent: the name the owner gave
+// the source, and the digest of the root summary the page showed
+// (update.RootSummary.Digest), which the updater follows and nothing else.
+const (
+	ParamFollowName   = "name"
+	ParamFollowDigest = "digest"
+	// FollowExecutor is the updater, which runs the switch.
+	FollowExecutor = "update"
+	// MaxFollowName bounds the owner-typed name, in characters.
+	MaxFollowName = 40
+)
+
+// FollowIntent is the local page's request to follow the root whose
+// summary has digest, under the owner's name for it.
+func FollowIntent(id, name, digest string) journal.Intent {
+	return journal.Intent{ID: id, Origin: originLocal, Account: journal.BrokerAccount, Action: journal.ActionUpdateFollow,
+		Params: map[string]any{ParamFollowName: name, ParamFollowDigest: digest}, Executor: FollowExecutor}
+}
+
 // Params keys a pre-allowed intent may carry besides the rule's fixed
 // params: the source record it acts on, and for a context-scoped reply
 // (ADP-11) the reply's body. Nothing else, so there is no free text
