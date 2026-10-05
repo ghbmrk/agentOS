@@ -1,6 +1,7 @@
 package localui
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -68,7 +69,7 @@ func (u *UnlockClient) RemoveSecondLine(ctx context.Context) error {
 
 // do sends one request to the unlock socket and decodes a 200 reply into
 // out; 204 is success with no reply. Refusals are VaultError with the
-// vault process's fixed message.
+// vault process's fixed message, or none.
 func (u *UnlockClient) do(ctx context.Context, method, path string, body, out any) error {
 	var rd io.Reader
 	if body != nil {
@@ -78,7 +79,7 @@ func (u *UnlockClient) do(ctx context.Context, method, path string, body, out an
 		}
 		// The request may carry the account's password.
 		defer clear(b)
-		rd = strings.NewReader(string(b))
+		rd = bytes.NewReader(b)
 	}
 	to := url.URL{Scheme: "http", Host: "agentos-egress", Path: path}
 	req, err := http.NewRequestWithContext(ctx, method, to.String(), rd)
@@ -109,11 +110,10 @@ func (u *UnlockClient) do(ctx context.Context, method, path string, body, out an
 	var e struct {
 		Error string `json:"error"`
 	}
-	msg := "the vault process refused the request"
-	if json.NewDecoder(lr).Decode(&e) == nil && e.Error != "" {
-		msg = e.Error
-	}
-	return &VaultError{resp.StatusCode, msg}
+	// Msg stays empty without the vault process's own wording, so the
+	// page never shows the owner a made-up or internal reason.
+	_ = json.NewDecoder(lr).Decode(&e)
+	return &VaultError{resp.StatusCode, e.Error}
 }
 
 // secondLineView is the second line's page.
@@ -181,13 +181,16 @@ func (s *Server) secondLine(w http.ResponseWriter, r *http.Request) {
 		}
 		v.Err = "That didn't go through. Try again."
 		var ve *VaultError
-		if errors.As(err, &ve) && ve.Status < http.StatusInternalServerError && ve.Msg != "the vault is locked" {
+		if errors.As(err, &ve) && ve.Status < http.StatusInternalServerError && ve.Msg != "" && ve.Msg != lockedMsg {
 			v.Err = ve.Msg // the vault process's fixed owner wording (UX-116-1)
 		}
 	}
 	st, err := s.cfg.SecondLine.SecondLineStatus(ctx)
 	if err != nil {
-		v.Down, v.Refresh = true, "5"
+		// A refusal here is the vault locking since the check above.
+		if v.Locked = isVaultError(err); !v.Locked {
+			v.Down, v.Refresh = true, "5"
+		}
 		s.render(w, "secondline", v)
 		return
 	}
@@ -209,6 +212,10 @@ func (s *Server) secondLine(w http.ResponseWriter, r *http.Request) {
 	}
 	s.render(w, "secondline", v)
 }
+
+// lockedMsg is the vault process's refusal while locked (egress
+// errLocked), which the page answers with its locked view instead.
+const lockedMsg = "the vault is locked"
 
 func isVaultError(err error) bool {
 	var ve *VaultError

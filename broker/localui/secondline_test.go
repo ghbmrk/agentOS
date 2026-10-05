@@ -2,8 +2,10 @@ package localui
 
 import (
 	"context"
+	"html"
 	"math/rand"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"regexp"
 	"strings"
@@ -33,11 +35,17 @@ type fakeLine struct {
 	waiting   bool
 	removed   int
 	calls     int
+	// failSet and failStatus, when set, are what SetSecondLine and
+	// SecondLineStatus return instead.
+	failSet, failStatus error
 }
 
 func (f *fakeLine) SecondLineStatus(ctx context.Context) (SecondLineStatus, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failStatus != nil {
+		return SecondLineStatus{}, f.failStatus
+	}
 	if !f.set {
 		return SecondLineStatus{}, nil
 	}
@@ -49,6 +57,9 @@ func (f *fakeLine) SetSecondLine(ctx context.Context, s sipsign.Settings, passwo
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
+	if f.failSet != nil {
+		return f.failSet
+	}
 	s = s.Normalize()
 	if s.Check() == sipsign.ErrServer {
 		return &VaultError{400, "Enter the server as a host name and port, like sip.example.net:5061."}
@@ -295,5 +306,93 @@ func TestNoSecondLineWithoutItsSocket(t *testing.T) {
 	}
 	if _, err := New(Config{AP: testAP(), Hooks: r.hooks, Store: &MemStore{}, SecondLine: &fakeLine{}, Now: time.Now}); err == nil {
 		t.Fatal("a second line without the vault socket")
+	}
+}
+
+// confirmAsRendered posts the confirm form's hidden realm exactly as the
+// page renders it, as a browser would.
+func (r *rig) confirmAsRendered() *httptest.ResponseRecorder {
+	r.t.Helper()
+	m := regexp.MustCompile(`name="realm" value="([^"]*)"`).FindStringSubmatch(r.get("/second-line/"))
+	if m == nil {
+		r.t.Fatal("no confirm form")
+	}
+	return r.post("/second-line/", url.Values{"step": {"confirm"}, "realm": {html.UnescapeString(m[1])}})
+}
+
+// L3 SHOULD 4 on #139: the confirm form carries the recorded realm
+// exactly, so even a realm shown escaped can be confirmed from the page.
+func TestTheConfirmFormCarriesTheRecordedRealm(t *testing.T) {
+	r, _, fl := lineRig(t)
+	r.signIn()
+	r.post("/second-line/", lineForm("sip.example.net"))
+	fl.register("voip.example.net\u202egro.live \"x\" <y>")
+	if w := r.confirmAsRendered(); w.Code != http.StatusSeeOther || !fl.confirmed {
+		t.Fatalf("confirm as rendered: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// L3 SHOULD 5 on #139: a realm matches only when it is plain and equal,
+// ignoring ASCII case, to the domain or the server's host. A Kelvin sign
+// folds to "k" but is not a match.
+func TestOnlyAPlainEqualRealmMatches(t *testing.T) {
+	r, _, fl := lineRig(t)
+	r.signIn()
+	f := lineForm("sip.example.net")
+	f.Set("domain", "kite.example.net")
+	r.post("/second-line/", f)
+	for realm, match := range map[string]bool{
+		"kite.example.net":      true,
+		"KITE.example.net":      true,
+		"sip.example.net":       true,
+		"\u212Aite.example.net": false,
+		"other.example.net":     false,
+		strings.Repeat("a", 81): false,
+	} {
+		fl.register(realm)
+		p := r.get("/second-line/")
+		if got := strings.Contains(p, "matches the domain you entered"); got != match {
+			t.Errorf("%q: match %v", realm, got)
+		}
+	}
+	// Past 80 bytes even a plain realm is shown quoted.
+	fl.register(strings.Repeat("a", 81))
+	if p := r.get("/second-line/"); !strings.Contains(p, "&#34;"+strings.Repeat("a", 81)+"&#34;") {
+		t.Fatal("a long realm shown unquoted")
+	}
+}
+
+// L3 SHOULDs 2, 3 and 6 on #139: replies that are not the vault process's
+// owner wording never reach the page, a vault that locks mid-request reads
+// as locked, and other paths are not found.
+func TestTheSecondLinePageHidesInternalReplies(t *testing.T) {
+	r, _, fl := lineRig(t)
+	r.signIn()
+	for _, err := range []error{
+		&VaultError{409, "the vault is locked"},
+		&VaultError{500, "internal error"},
+		&VaultError{400, ""},
+	} {
+		fl.mu.Lock()
+		fl.failSet = err
+		fl.mu.Unlock()
+		b := r.post("/second-line/", lineForm("sip.example.net")).Body.String()
+		if !strings.Contains(html.UnescapeString(b), "That didn't go through. Try again.") {
+			t.Fatalf("%v shown as:\n%s", err, b)
+		}
+		for _, internal := range []string{"internal error", "the vault is locked", "vault process"} {
+			if strings.Contains(b, internal) {
+				t.Fatalf("%v shows %q", err, internal)
+			}
+		}
+	}
+	fl.mu.Lock()
+	fl.failSet, fl.failStatus = nil, &VaultError{409, "the vault is locked"}
+	fl.mu.Unlock()
+	if p := r.get("/second-line/"); !strings.Contains(p, `href="/unlock/vault"`) || strings.Contains(p, "still starting") {
+		t.Fatalf("locked mid-request:\n%s", p)
+	}
+	if w := r.do("GET", "/second-line/x", nil); w.Code != http.StatusNotFound {
+		t.Fatalf("unknown path: %d", w.Code)
 	}
 }
