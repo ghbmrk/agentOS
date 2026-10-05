@@ -80,6 +80,9 @@ func TestLearningOpenReplaysAnInterruptedForget(t *testing.T) {
 	must(t, err)
 	must(t, os.WriteFile(path, raw, 0o600))
 	must(t, os.WriteFile(filepath.Join(dir, "forgotten.json"), []byte(`{"owner:f1":"2026-10-05T09:00:00Z"}`), 0o600))
+	// The forget had not reached the harvester or the task texts either.
+	must(t, os.WriteFile(filepath.Join(dir, "harvest.json"), []byte(`{"tasks":{"c1":"CANARY-key"},"added":{"c1":true}}`), 0o600))
+	must(t, os.WriteFile(filepath.Join(dir, "tasks.json"), []byte(`{"owner:f1":{"text":"CANARY-text","at":"2026-10-05T08:00:00Z"}}`), 0o600))
 
 	cfg := daemon.Config{
 		JournalPath: filepath.Join(dir, "journal.log"), SocketDir: filepath.Join(dir, "run"),
@@ -97,11 +100,49 @@ func TestLearningOpenReplaysAnInterruptedForget(t *testing.T) {
 	if raw, _ := os.ReadFile(path); bytes.Contains(raw, []byte("Q0FOQVJZ")) { // base64 of "CANARY"
 		t.Fatal("the saved pipeline still holds the forgotten goal's files or case")
 	}
+	for _, f := range []string{"harvest.json", "tasks.json"} {
+		if raw, _ := os.ReadFile(filepath.Join(dir, f)); bytes.Contains(raw, []byte("CANARY")) {
+			t.Fatalf("%s still holds the forgotten goal's records", f)
+		}
+	}
 	eng, err := journal.Open(&journal.MemStore{}, allowAll{}, map[string]journal.Executor{"task": succeeds{}, change.Executor: lp.pipe}, func(string) string { return daemon.Redacted })
 	must(t, err)
 	lp.pipe.Attach(eng)
 	cand := change.Candidate{Source: change.Local, Goals: []string{"owner:f1"}, Files: change.Tree{"skills/note.json": []byte("x")}}
 	if _, err := lp.pipe.Propose(context.Background(), cand); !errors.Is(err, change.ErrForgotten) {
 		t.Fatalf("a forgotten task's candidate after the restart: %v", err)
+	}
+}
+
+// A replay that cannot save leaves learning off, and the agent never gets
+// the tree with the forgotten files on it.
+func TestLearningStaysOffWhenTheReplayFails(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "change.json")
+	if _, err := change.New(change.Config{Store: change.FileStore{Path: path}, Evaluator: noEval{},
+		Initial: change.Tree{"skills/greet.json": []byte("hi")}}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	must(t, err)
+	var st map[string]any
+	must(t, json.Unmarshal(raw, &st))
+	st["cases"] = map[string]any{"c1": map[string]any{"id": "c1", "class": "skill", "goal": "owner:f1"}}
+	raw, err = json.Marshal(st)
+	must(t, err)
+	must(t, os.WriteFile(path, raw, 0o600))
+	must(t, os.WriteFile(filepath.Join(dir, "forgotten.json"), []byte(`{"owner:f1":"2026-10-05T09:00:00Z"}`), 0o600))
+	must(t, os.Mkdir(path+".tmp", 0o700)) // the pipeline's save cannot write
+	cfg := daemon.Config{
+		JournalPath: filepath.Join(dir, "journal.log"), SocketDir: filepath.Join(dir, "run"),
+		OwnerNumber: ownerNum, ModemUID: os.Getuid(), Admission: admission.Config{CapacityMB: 4500, HeadroomMB: 600},
+		OwnerState: filepath.Join(dir, "owner.json"),
+	}
+	lt := newLiveTree(t.Logf)
+	if _, err := openLearning(learnPaths{Dir: dir, Spare: filepath.Join(dir, "spare.json"), Tree: lt}, false, &cfg); err == nil {
+		t.Fatal("learning opened with the replay unsaved")
+	}
+	if lt.ready {
+		t.Fatal("the tree was marked ready")
 	}
 }

@@ -384,3 +384,121 @@ func TestALearnedCandidateStaysInLearnedClasses(t *testing.T) {
 		t.Fatalf("context refused: %+v", ok)
 	}
 }
+
+// L3 MUST-A on #160: a live delete whose Before went back past a
+// forgotten file holds nothing either side, like a cleared edit, but is
+// still the delete. w writes x, z deletes it, a writes it again, b deletes
+// it; forgetting a then z leaves x deleted by b, and UNDO b brings back
+// w's x, as if neither forgotten adoption had happened.
+func TestForgetGoalKeepsALiveDeleteThatHoldsNothing(t *testing.T) {
+	e := newEnv(t, nil)
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	w := e.propose(Candidate{Source: Local, Goals: []string{"owner:g0"}, Files: Tree{"skills/greet": []byte("hello"), "skills/x": []byte("v5")}})
+	z := e.propose(Candidate{Source: Local, Goals: []string{"owner:g2"}, Delete: []string{"skills/x"}})
+	a := e.propose(Candidate{Source: Local, Goals: []string{"owner:g1"}, Files: Tree{"skills/x": []byte("CANARY-g1")}})
+	b := e.propose(Candidate{Source: Local, Goals: []string{"owner:g3"}, Delete: []string{"skills/x"}})
+	for _, r := range []Report{w, z, a, b} {
+		if r.State != StateAdopted {
+			t.Fatalf("setup: %+v", r)
+		}
+	}
+	for _, g := range []string{"owner:g1", "owner:g2"} {
+		if _, err := e.p.ForgetGoal(g); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, ok := e.p.Files("skills")["skills/x"]; ok {
+		t.Fatal("b's delete was undone by the forgets")
+	}
+	if more, _ := e.p.More(b.Short); strings.Contains(more[0], "forgotten") {
+		t.Fatalf("MORE b: %q", more)
+	}
+	if err := e.p.Revert(bg, b.ID, OriginOwner); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(e.p.Files("skills")["skills/x"]); got != "v5" {
+		t.Fatalf("UNDO b left %q, want w's v5", got)
+	}
+}
+
+// A later adoption still active that wrote the forgotten adoption's bytes
+// again keeps the file: b changed it, c wrote a's bytes back. The forget
+// leaves c's file, and UNDO b goes back to before a.
+func TestForgetGoalLeavesAFileALaterAdoptionWroteBack(t *testing.T) {
+	e := newEnv(t, nil)
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	a := e.propose(Candidate{Source: Local, Goals: []string{"owner:g1"}, Files: Tree{"skills/greet": []byte("hello"), "skills/note": []byte("v1")}})
+	b := e.propose(Candidate{Source: Local, Goals: []string{"owner:g2"}, Files: Tree{"skills/note": []byte("v2")}})
+	c := e.propose(Candidate{Source: Local, Goals: []string{"owner:g3"}, Files: Tree{"skills/note": []byte("v1")}})
+	for _, r := range []Report{a, b, c} {
+		if r.State != StateAdopted {
+			t.Fatalf("setup: %+v", r)
+		}
+	}
+	if _, err := e.p.ForgetGoal("owner:g1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(e.p.Files("skills")["skills/note"]); got != "v1" {
+		t.Fatalf("c's file became %q", got)
+	}
+	for _, id := range []string{c.ID, b.ID} {
+		if err := e.p.Revert(bg, id, OriginOwner); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, ok := e.p.Files("skills")["skills/note"]; ok {
+		t.Fatal("UNDO b did not go back to before a")
+	}
+}
+
+// SHOULD-A on #160: an empty file stays an empty file across a restart,
+// so a forget after one still removes the file the adoption created.
+func TestAnEmptyFileSurvivesARestart(t *testing.T) {
+	e := newEnv(t, nil)
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	a := e.propose(Candidate{Source: Local, Goals: []string{"owner:g1"},
+		Files: Tree{"skills/greet": []byte("hello"), "skills/empty": {}}})
+	if a.State != StateAdopted {
+		t.Fatalf("setup: %+v", a)
+	}
+	p, err := New(e.p.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.ForgetGoal("owner:g1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := p.Files("skills")["skills/empty"]; ok {
+		t.Fatal("after a restart, the forget left the empty file")
+	}
+}
+
+// Recheck reads an adoption again after evaluating it: one a forget undid
+// meanwhile is skipped, not reverted a second time.
+func TestRecheckSkipsAnAdoptionForgottenMeanwhile(t *testing.T) {
+	var armed bool
+	var e *env
+	e = newEnv(t, func(c *Config) {
+		ev := c.Evaluator
+		c.Evaluator = evalFunc(func(ctx context.Context, tr Tree, pr Probe) ([]byte, error) {
+			if armed {
+				armed = false
+				if _, err := e.p.ForgetGoal("owner:g1"); err != nil {
+					t.Error(err)
+				}
+			}
+			return ev.Run(ctx, tr, pr)
+		})
+	})
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	a := e.propose(Candidate{Source: Local, Goals: []string{"owner:g1"}, Files: Tree{"skills/greet": []byte("hello")}})
+	if a.State != StateAdopted {
+		t.Fatalf("setup: %+v", a)
+	}
+	e.p.AddSecurityCase(Case{ID: "sec-2", Class: ClassSkill, Input: []byte("skills/greet"), Expect: []byte("hi")})
+	armed = true
+	ids, err := e.p.Recheck(bg)
+	if err != nil || len(ids) != 0 {
+		t.Fatalf("Recheck: %v %v", ids, err)
+	}
+}

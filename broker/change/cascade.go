@@ -91,7 +91,7 @@ func (p *Pipeline) forgetAdoptionsLocked(goal string) (Tree, []*Adoption, []Edit
 				}
 				touched = append(touched, Edit{Path: e.Path})
 			}
-			a.Edits[k] = Edit{Path: e.Path}
+			a.Edits[k] = Edit{Path: e.Path, Forgotten: true}
 			changed = true
 		}
 		if a.Reverted == "" {
@@ -102,6 +102,7 @@ func (p *Pipeline) forgetAdoptionsLocked(goal string) (Tree, []*Adoption, []Edit
 	return next, ads, touched, changed
 }
 
-// cleared reports whether a forget cleared e: no edit writes nothing over
-// nothing.
-func cleared(e Edit) bool { return e.Before == nil && e.After == nil }
+// cleared reports whether a forget cleared e. A live delete can also hold
+// nothing either side, once its Before went back past a forgotten file
+// (L3 MUST-A on #160), so it is the mark, never the contents.
+func cleared(e Edit) bool { return e.Forgotten }

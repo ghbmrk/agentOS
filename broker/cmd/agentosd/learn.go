@@ -327,28 +327,33 @@ func (l *learning) forgetTask(goal string) error {
 	// The tombstone first: once it holds, nothing keeps the goal again,
 	// even if a deletion below fails.
 	ferr := l.forgotten.add(goal)
+	return errors.Join(ferr, l.forgetStores(goal))
+}
+
+// forgetStores deletes one forgotten goal from every learning store, each
+// even when another's save failed. Each step is idempotent, and one that
+// finds nothing saves nothing.
+func (l *learning) forgetStores(goal string) error {
 	_, terr := l.tasks.forget(goal)
 	_, verr := l.values.forget(goal)
 	l.learn.ForgetGoal(goal)
 	ids, cerr := l.pipe.ForgetGoal(goal)
 	herr := l.harvest.ForgetCases(ids)
-	return errors.Join(ferr, terr, verr, cerr, herr)
+	return errors.Join(terr, verr, cerr, herr)
 }
 
-// replayForgotten runs the cascade again for every tombstoned goal when
-// the learning plane opens (L3 MUST-2 on #160). A forget writes the live
-// tree before it saves the pipeline, and the in-flight refusals are kept
-// in memory only, so a crash between the two would bring the forgotten
-// files back and let a candidate from the goal be adopted. Each step is
-// idempotent, and one that finds nothing saves nothing. It runs before the
-// tree is marked ready, so on a failure the agent never gets the tree and
-// learning stays off until a start succeeds.
+// replayForgotten runs every tombstoned goal's forget again when the
+// learning plane opens (L3 MUST-2 on #160). A forget writes the live tree
+// before it saves the pipeline, the other stores save one by one, and the
+// in-flight refusals are kept in memory only, so a crash midway would
+// bring forgotten files back and let a candidate from the goal be
+// adopted. It runs before the tree is marked ready, so on a failure the
+// agent never gets the tree and learning stays off until a start
+// succeeds.
 func (l *learning) replayForgotten() error {
 	var errs []error
 	for _, g := range l.forgotten.goals() {
-		l.learn.ForgetGoal(g)
-		ids, err := l.pipe.ForgetGoal(g)
-		errs = append(errs, err, l.harvest.ForgetCases(ids))
+		errs = append(errs, l.forgetStores(g))
 	}
 	return errors.Join(errs...)
 }
