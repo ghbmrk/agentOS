@@ -191,7 +191,14 @@ func (l *Late) Call(ctx context.Context, machine, lineage, name string, args jso
 // before and after the service opens. An approved rollback that runs
 // before recall is open is recorded as approved, machines not reset, so
 // Retry carries it through once recall opens.
-type LateExecutor struct{ r atomic.Pointer[Reach] }
+type LateExecutor struct {
+	r   atomic.Pointer[Reach]
+	off atomic.Bool
+}
+
+// Off records that recall will not open (not configured, or failed): no
+// deletion can reach anything, so nothing is contained.
+func (l *LateExecutor) Off() { l.off.Store(true) }
 
 // Set makes r the executor.
 func (l *LateExecutor) Set(r *Reach) { l.r.Store(r) }
@@ -204,13 +211,15 @@ func (l *LateExecutor) Execute(ctx context.Context, in journal.Intent, n int) jo
 	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: approvedOnly + "recall is not open yet"}
 }
 
-// Contained is Reach.Contained once recall is open. Before, nothing is
-// known to be contained; the tombstone replay at open restores it.
+// Contained is Reach.Contained once recall is open. Before (the vault is
+// still locked after a restart), which lineages hold a deleted record is
+// not known yet, so every one is contained until the tombstone replay at
+// open settles it (#59 L3 re-review 4); unless recall is Off.
 func (l *LateExecutor) Contained(lineage string) bool {
 	if r := l.r.Load(); r != nil {
 		return r.Contained(lineage)
 	}
-	return false
+	return !l.off.Load()
 }
 
 // Status is Reach.Status once recall is open, "" before.

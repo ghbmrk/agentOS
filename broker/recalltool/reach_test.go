@@ -61,10 +61,11 @@ func (j *fakeJournal) Erase(ids []string) (erased, held []string, err error) {
 }
 
 type fakeMachines struct {
-	calls []string
-	since []time.Time
-	plan  Plan
-	fail  error
+	calls   []string
+	since   []time.Time
+	plan    Plan
+	planErr error
+	fail    error
 }
 
 func (m *fakeMachines) ForgetSince(_ context.Context, lineage string, since time.Time) error {
@@ -76,7 +77,7 @@ func (m *fakeMachines) ForgetSince(_ context.Context, lineage string, since time
 	return nil
 }
 
-func (m *fakeMachines) Plan(string, time.Time) (Plan, error) { return m.plan, nil }
+func (m *fakeMachines) Plan(string, time.Time) (Plan, error) { return m.plan, m.planErr }
 
 type fakeCases struct{ forgot map[string]bool }
 
@@ -107,6 +108,15 @@ func (a *fakeAsk) Submit(in journal.Intent) (journal.Status, error) {
 func (a *fakeAsk) Authorize(_ context.Context, id string) (journal.Status, error) {
 	a.asked = append(a.asked, id)
 	return a.st[id], nil
+}
+
+func (a *fakeAsk) Withdraw(id string) error {
+	st := a.st[id]
+	if st.State == journal.Pending {
+		st.State, st.Permission = journal.Denied, journal.Permission{Decision: "denied", Reason: "not approved: superseded"}
+		a.st[id] = st
+	}
+	return nil
 }
 
 func (a *fakeAsk) Get(id string) (journal.Status, error) {
@@ -321,9 +331,11 @@ func TestCAP3ReadAfterTheResetIsKept(t *testing.T) {
 	}
 }
 
-// #59 L3 4: one question per lineage, at its earliest deleted item; an
-// approval that is stale by the time it runs undoes nothing.
-func TestCAP3StaleApprovalUndoesNothing(t *testing.T) {
+// #59 L3 4 and re-review 2: one question per lineage, at its earliest
+// deleted item; a later one is withdrawn when an earlier one is asked. An
+// approval that is stale by the time it runs undoes nothing, and the
+// owner is told so.
+func TestCAP3OneQuestionPerAgentAndStaleApprovals(t *testing.T) {
 	x, read := newReachRig(t)
 	x.j.submitted["late"] = read.Add(time.Second)
 	// The lineage was given the public page before the mail: deleting the
@@ -331,15 +343,18 @@ func TestCAP3StaleApprovalUndoesNothing(t *testing.T) {
 	pub := x.r.ix.SourceID("web", "", "https://shed.example.test/")
 	x.del(t, x.mail)
 	first := x.ask.asked[0]
+	stale := x.ask.st[first].Intent
 	x.del(t, pub)
+	open := 0
 	var second string
-	for _, id := range x.ask.asked {
-		if id != first {
+	for id, st := range x.ask.st {
+		if st.State == journal.Pending {
+			open++
 			second = id
 		}
 	}
-	if second == "" {
-		t.Fatalf("no question from the earlier read: %v", x.ask.asked)
+	if open != 1 || second == first || x.ask.st[first].Permission.Reason != "not approved: superseded" {
+		t.Fatalf("questions: %+v", x.ask.st)
 	}
 	x.ask.settle(second, "yes")
 	resets := func() (n int) {
@@ -353,12 +368,99 @@ func TestCAP3StaleApprovalUndoesNothing(t *testing.T) {
 	if resets() != 1 || len(x.r.prov.Of("root")) != 0 {
 		t.Fatalf("earlier rollback: %v %v", x.vm.calls, x.r.prov.Of("root"))
 	}
-	// The lineage works on; then the stale question is answered YES.
+	// The lineage works on; then a YES on the withdrawn question reaches
+	// the executor anyway (it raced the withdrawal).
 	x.clock = x.clock.Add(time.Minute)
 	x.j.submitted["new"] = x.clock
-	x.ask.settle(first, "yes")
-	if st := x.ask.st[first]; st.Attempts[0].Evidence != staleEvidence || resets() != 1 || x.j.erased["new"] || len(x.told) != 2 || !strings.HasPrefix(x.told[1], "Nothing more to do: root") {
-		t.Fatalf("stale approval: %s, resets %v, erased %v", st.State, x.vm.calls, x.j.erased)
+	out := x.reach.Execute(context.Background(), stale, 1)
+	if out.Evidence != staleEvidence || resets() != 1 || x.j.erased["new"] || len(x.told) != 2 || !strings.HasPrefix(x.told[1], "Nothing more to do: root") {
+		t.Fatalf("stale approval: %+v, resets %v, erased %v, told %q", out, x.vm.calls, x.j.erased, x.told)
+	}
+}
+
+// #59 L3 re-review 1: a record read in the window between the read of
+// the deleted one and the reset, and read again after the reset, is held
+// again: a later deletion of it still reaches the lineage.
+func TestCAP3ReReadAfterTheResetIsHeld(t *testing.T) {
+	x, read := newReachRig(t)
+	hose, err := x.r.ix.Ingest(recall.Item{Source: recall.Source{Kind: "web", Ref: "https://hose.example.test/"}, Label: recall.Public, Text: "garden hose prices", Received: x.clock.Add(-time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	x.r.call("root", "root", "recall_search", map[string]any{"query": "hose", "scope": "public"})
+	x.clock = x.clock.Add(time.Minute) // the reset comes after that read
+	x.j.submitted["running"] = read.Add(time.Second)
+	x.j.inFlight["running"] = true
+	x.del(t, x.mail)
+	x.ask.answer("yes")
+	if len(x.r.prov.Resets("root")) != 1 {
+		t.Fatal("no reset recorded")
+	}
+	x.clock = x.clock.Add(time.Minute)
+	reread := x.clock
+	x.r.call("root", "root", "recall_search", map[string]any{"query": "hose", "scope": "public"})
+	delete(x.j.inFlight, "running")
+	if err := x.reach.Retry(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if g, ok := x.r.prov.Holders(hose)["root"]; !ok || g.Before(reread) {
+		t.Fatalf("re-read after the reset: given %v, held %v", g, ok)
+	}
+}
+
+// W10 (arbitrator), #59 L3 re-review 3: a question that closes without
+// an answer is asked again, as a new question, a day later; the lineage
+// stays contained meanwhile, and a YES then takes it back.
+func TestCAP3UnansweredQuestionIsAskedAgain(t *testing.T) {
+	x, read := newReachRig(t)
+	x.j.submitted["late"] = read.Add(time.Second)
+	x.del(t, x.mail)
+	x.ask.answer("lapse")
+	x.reach.Retry(context.Background())
+	if len(x.ask.st) != 1 || !x.reach.Contained("root") || x.reach.Pending() != 1 {
+		t.Fatalf("asked again at once: %d", len(x.ask.st))
+	}
+	x.clock = x.clock.Add(ReaskEvery)
+	x.reach.Retry(context.Background())
+	if len(x.ask.st) != 2 {
+		t.Fatalf("not asked again after a day: %d", len(x.ask.st))
+	}
+	x.ask.answer("yes")
+	x.reach.Retry(context.Background())
+	if len(x.vm.calls) != 1 || x.reach.Contained("root") || x.reach.Pending() != 0 {
+		t.Fatalf("after YES to the second ask: %v", x.vm.calls)
+	}
+}
+
+// #59 L3 re-review 7: a restore point that could not be measured is not
+// named.
+func TestCAP3UnmeasuredRestorePointIsNotNamed(t *testing.T) {
+	x, read := newReachRig(t)
+	x.vm.planErr = errors.New("layer unreadable")
+	x.j.submitted["late"] = read.Add(time.Second)
+	x.del(t, x.mail)
+	in := x.ask.st[x.ask.asked[0]].Intent
+	if in.Params["detail"] != "back to before "+read.Format("15:04 Jan 2")+"; 1 stays done" {
+		t.Fatalf("detail %q", in.Params["detail"])
+	}
+}
+
+// #59 L3 re-review 4: until recall opens after a restart, every lineage is
+// contained; once it opens, the replay settles which are; with recall
+// off, none is.
+func TestCAP3ContainedUntilRecallOpens(t *testing.T) {
+	var l LateExecutor
+	if !l.Contained("agent") {
+		t.Fatal("not contained before recall opens")
+	}
+	l.Set(&Reach{})
+	if l.Contained("agent") {
+		t.Fatal("contained after open with nothing held")
+	}
+	var off LateExecutor
+	off.Off()
+	if off.Contained("agent") {
+		t.Fatal("contained with recall off")
 	}
 }
 
@@ -483,7 +585,7 @@ func TestCAP3ServiceReplaysReachAtStart(t *testing.T) {
 	must(s.Prov.Given("root", ids[:1], t0))
 	must(s.Prov.Given("other", ids[1:], t0))
 	// "other" was reset before a crash; its reach was not finished.
-	must(s.Prov.MarkReset("other", t0, t0.Add(time.Second)))
+	must(s.Prov.MarkReset("other", Reset{Since: t0, At: t0.Add(time.Second), Until: t0.Add(2 * time.Second)}))
 	// Not wired to machines: the index deletes, the lineages keep their
 	// record of what they were given.
 	if _, err := s.Index.Delete(ids...); err != nil {
@@ -587,7 +689,8 @@ func TestRollbackLineFitsTheCaps(t *testing.T) {
 		for _, ids := range [][]string{{"a"}, {"a", "b"}, {"a", "c"}, {"c"}, {"zz"}} {
 			for _, to := range restore {
 				for _, n := range []int{0, 1, 9, 12, 1234} {
-					obj, det := r.line(lineage, ids, to, n)
+					known := n != 9
+					obj, det := r.line(lineage, ids, to, known, n)
 					for _, f := range []string{obj, det} {
 						if len(f) > fieldCap || f == "" || strings.Contains(strings.ToLower(f), "undo") {
 							t.Fatalf("field %q (%d chars)", f, len(f))
@@ -600,7 +703,7 @@ func TestRollbackLineFitsTheCaps(t *testing.T) {
 			}
 		}
 	}
-	if obj, det := r.line("agent.x", []string{"a"}, restore[1], 2); obj != "a mail you deleted from agent" || det != "back to 08:12 Oct 5; 2 actions stay done" {
+	if obj, det := r.line("agent.x", []string{"a"}, restore[1], true, 2); obj != "a mail you deleted from agent" || det != "back to 08:12 Oct 5; 2 actions stay done" {
 		t.Fatalf("%q / %q", obj, det)
 	}
 }
@@ -617,13 +720,13 @@ func TestProvenanceResetMarks(t *testing.T) {
 	p.Given("l", []string{"before"}, t0.Add(-time.Minute))
 	p.Given("l", []string{"between"}, t0.Add(time.Minute))
 	p.Given("l", []string{"after"}, t0.Add(3*time.Minute))
-	if err := p.MarkReset("l", t0, t0.Add(2*time.Minute)); err != nil {
+	if err := p.MarkReset("l", Reset{Since: t0, At: t0.Add(2 * time.Minute), Until: t0.Add(150 * time.Second)}); err != nil {
 		t.Fatal(err)
 	}
 	p.compact()
 	p2, _ := OpenProvenance(st)
 	rs := p2.Resets("l")
-	if len(rs) != 1 || !rs[0].Since.Equal(t0) || !rs[0].At.Equal(t0.Add(2*time.Minute)) {
+	if len(rs) != 1 || !rs[0].Since.Equal(t0) || !rs[0].At.Equal(t0.Add(2*time.Minute)) || !rs[0].Until.Equal(t0.Add(150*time.Second)) {
 		t.Fatalf("resets after reopen: %+v", rs)
 	}
 	if err := p2.Finish("l", rs[0]); err != nil {

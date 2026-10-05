@@ -52,6 +52,12 @@ type Asker interface {
 	Get(id string) (journal.Status, error)
 }
 
+// Withdrawer closes a broker question still waiting for the owner, as
+// superseded (grants.Gate.Withdraw).
+type Withdrawer interface {
+	Withdraw(id string) error
+}
+
 // The broker's rollback intents (journal.ActionRecallRollback). The grants
 // gate checks the same names (grants.OriginRecall, grants.RecallExecutor).
 const (
@@ -117,6 +123,7 @@ type Reach struct {
 	mu      sync.Mutex
 	pending map[string]bool   // deleted item IDs not yet fully reached
 	kinds   map[string]string // deleted item ID -> source kind, as deleted
+	asked   map[string]time.Time // lineage -> when last asked
 	// held: lineages asked about and not yet taken back (contained);
 	// kept: lineages the owner said NO for, which still hold a deleted
 	// record.
@@ -293,7 +300,8 @@ func (r *Reach) settle(ctx context.Context, lineage string) error {
 	}
 	actions := r.actions(lineage, since, time.Time{})
 	plan, err := r.Machines.Plan(lineage, since)
-	if err != nil {
+	known := err == nil
+	if !known {
 		plan.Changes = 1 // unmeasured: ask rather than lose work unasked
 	}
 	if actions == 0 && plan.Changes == 0 {
@@ -303,16 +311,23 @@ func (r *Reach) settle(ctx context.Context, lineage string) error {
 	if r.Ask == nil {
 		return errWaiting
 	}
+	r.supersede(lineage, since)
 	id, st, err := r.current(lineage, since, ids)
-	if errors.Is(err, errKept) {
+	switch {
+	case errors.Is(err, errKept):
 		r.set(&r.held, lineage, false)
 		r.set(&r.kept, lineage, true)
 		return nil
-	}
-	if err != nil {
-		// First ask: the line is fixed now, so a later count does not
-		// make the same intent disagree with itself (OP-1).
-		object, detail := r.line(lineage, ids, plan.To, actions)
+	case errors.Is(err, errUnanswered) && !r.reaskDue(lineage):
+		return errWaiting
+	case err != nil:
+		// A new question: the line is fixed now, so a later count does
+		// not make the same intent disagree with itself (OP-1).
+		to := plan.To
+		if !known {
+			to = since
+		}
+		object, detail := r.line(lineage, ids, to, known, actions)
 		in := journal.Intent{ID: id, Origin: Origin, Account: journal.BrokerAccount,
 			Action: journal.ActionRecallRollback, Executor: ExecutorName,
 			Params: map[string]any{"lineage": lineage, "since": since.UTC().Format(time.RFC3339Nano),
@@ -320,6 +335,12 @@ func (r *Reach) settle(ctx context.Context, lineage string) error {
 		if st, err = r.Ask.Submit(in); err != nil {
 			return err
 		}
+		r.mu.Lock()
+		if r.asked == nil {
+			r.asked = map[string]time.Time{}
+		}
+		r.asked[lineage] = r.now()
+		r.mu.Unlock()
 	}
 	switch st.State {
 	case journal.Pending:
@@ -330,32 +351,48 @@ func (r *Reach) settle(ctx context.Context, lineage string) error {
 	case journal.Succeeded:
 		// Approved, but Execute could not reset the machines: do it now.
 		return r.reset(ctx, lineage, since, true)
-	case journal.Denied:
-		// No answer is not a decline: pending and contained until the
-		// owner answers (the digest asks again; BOARD W5).
-		return errWaiting
 	default:
 		return errWaiting
 	}
 }
 
 // errKept: the owner said NO to taking back every deleted item lineage
-// holds.
-var errKept = errors.New("kept by the owner")
+// holds. errNew: no question exists yet. errUnanswered: the last one
+// closed without an answer.
+var (
+	errKept       = errors.New("kept by the owner")
+	errNew        = errors.New("not asked yet")
+	errUnanswered = errors.New("not answered")
+)
 
-// current finds the lineage's rollback question for since: the first one
-// asked, or, once the owner said NO to it, one naming the deleted items
-// that NO did not cover. ids: the deleted items it holds now. An error
-// other than errKept means no question exists yet: Submit one as id.
+// ReaskEvery paces asking again after a question closed unanswered: no
+// more often than the digest (W10; the digest takes it over, BOARD W5).
+const ReaskEvery = 24 * time.Hour
+
+// current finds the lineage's rollback question for since. Questions are
+// chained by ID: the first one asked; after the owner's NO, one naming
+// the deleted items that NO did not cover; after no answer (expired,
+// void, restart), the same question again as a new round. ids: the
+// deleted items it holds now. errNew or errUnanswered: Submit one as id.
 func (r *Reach) current(lineage string, since time.Time, ids []string) (string, journal.Status, error) {
-	id := rollbackID(lineage, since, nil)
+	var items []string
+	round := 0
+	unanswered := false
 	for {
+		id := rollbackID(lineage, since, items, round)
 		st, err := r.Ask.Get(id)
-		if err != nil {
-			return id, st, err
-		}
-		if st.State != journal.Denied || st.Permission.Reason != ownerNo {
+		switch {
+		case err != nil && unanswered:
+			return id, st, errUnanswered
+		case err != nil:
+			return id, st, errNew
+		case st.State != journal.Denied:
 			return id, st, nil
+		case st.Permission.Reason != ownerNo:
+			// No answer is not a decline (#59 arbitrator): ask again.
+			round++
+			unanswered = true
+			continue
 		}
 		// NO keeps everything it named (#59 arbitrator, W10). An item
 		// deleted after that is a new question, asked once.
@@ -368,14 +405,49 @@ func (r *Reach) current(lineage string, since time.Time, ids []string) (string, 
 		for _, x := range ids {
 			all = all && covered[x]
 		}
-		if all {
+		if all || rollbackID(lineage, since, ids, 0) == id {
 			return id, st, errKept
 		}
-		next := rollbackID(lineage, since, ids)
-		if next == id {
-			return id, st, errKept
+		items, round, unanswered = ids, 0, false
+	}
+}
+
+// reaskDue reports whether an unanswered question may be asked again: a
+// day after it was last asked. After a restart the day starts again.
+func (r *Reach) reaskDue(lineage string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.asked == nil {
+		r.asked = map[string]time.Time{}
+	}
+	last, ok := r.asked[lineage]
+	if !ok {
+		r.asked[lineage] = r.now()
+		return false
+	}
+	return r.now().Sub(last) >= ReaskEvery
+}
+
+// supersede withdraws lineage's open questions from later reads: the one
+// for since covers them (#59 L3 re-review 2), so the owner has one
+// question per agent.
+func (r *Reach) supersede(lineage string, since time.Time) {
+	w, ok := r.Ask.(Withdrawer)
+	if !ok {
+		return
+	}
+	seen := map[int64]bool{}
+	for id, t := range r.Prov.Items(lineage) {
+		if !t.After(since) || seen[t.UnixNano()] || r.Deleted == nil || !r.Deleted(id) {
+			continue
 		}
-		id = next
+		seen[t.UnixNano()] = true
+		old := rollbackID(lineage, t, nil, 0)
+		if st, err := r.Ask.Get(old); err == nil && st.State == journal.Pending {
+			if err := w.Withdraw(old); err != nil && r.Logf != nil {
+				r.Logf("recall: withdrawing %s: %v", old, err)
+			}
+		}
 	}
 }
 
@@ -466,17 +538,24 @@ func (r *Reach) reset(ctx context.Context, lineage string, since time.Time, appr
 	// R is taken before the machines go back: a read while they do may be
 	// by a machine already reset, so it is kept (#59 L3 2).
 	at := r.now()
-	plan, _ := r.Machines.Plan(lineage, since)
+	plan, perr := r.Machines.Plan(lineage, since)
 	if err := r.Machines.ForgetSince(ctx, lineage, since); err != nil {
 		return err
 	}
-	rs := Reset{Since: since, At: at}
-	if err := r.Prov.MarkReset(lineage, since, at); err != nil {
+	// Intents submitted while the machines went back may be from one not
+	// yet reset: the journal is erased up to when the last was back
+	// (#59 L3 re-review 5).
+	rs := Reset{Since: since, At: at, Until: r.now()}
+	if err := r.Prov.MarkReset(lineage, rs); err != nil {
 		return err
 	}
 	if approved && r.Notify != nil {
 		ids, _ := r.heldBy(lineage)
-		if err := r.Notify(r.done(lineage, ids, plan.To, r.actions(lineage, since, at))); err != nil && r.Logf != nil {
+		to := plan.To
+		if perr != nil {
+			to = since
+		}
+		if err := r.Notify(r.done(lineage, ids, to, perr == nil, r.actions(lineage, since, rs.Until))); err != nil && r.Logf != nil {
 			r.Logf("recall: rollback of %s done; owner not told: %v", lineage, err)
 		}
 	}
@@ -492,7 +571,11 @@ func (r *Reach) reset(ctx context.Context, lineage string, since time.Time, appr
 // and forgets what it was given then. Called with run held.
 func (r *Reach) finish(lineage string, rs Reset) error {
 	if r.Journal != nil {
-		ids := r.Journal.Between("guest:"+lineage, rs.Since, rs.At)
+		until := rs.Until
+		if until.IsZero() {
+			until = rs.At
+		}
+		ids := r.Journal.Between("guest:"+lineage, rs.Since, until)
 		_, held, err := r.Journal.Erase(ids)
 		if err != nil {
 			return err
@@ -523,11 +606,15 @@ func resetKey(lineage string, since time.Time) string {
 }
 
 // rollbackID names the rollback question for lineage from since: the
-// first one asked (items nil), or the one after a NO, naming the items.
-func rollbackID(lineage string, since time.Time, items []string) string {
+// first one asked (items nil), the one after a NO, naming the items, and
+// each later round after no answer.
+func rollbackID(lineage string, since time.Time, items []string, round int) string {
 	k := resetKey(lineage, since)
 	if items != nil {
 		k += "#" + strings.Join(items, ",")
+	}
+	if round > 0 {
+		k += fmt.Sprintf("#r%d", round)
 	}
 	h := sha256.Sum256([]byte(k))
 	return "recall-rollback-" + hex.EncodeToString(h[:12])
@@ -584,19 +671,25 @@ const fieldCap = 40
 //
 //	forget a mail you deleted from agent, back to 08:12 Oct 5; 2 actions
 //	stay done, cannot be undone
-func (r *Reach) line(lineage string, ids []string, to time.Time, actions int) (object, detail string) {
+func (r *Reach) line(lineage string, ids []string, to time.Time, known bool, actions int) (object, detail string) {
 	object = r.what(ids) + " you deleted from " + agentName(lineage)
 	if len(object) > fieldCap {
 		object = r.what(ids) + " you deleted"
 	}
 	var points []string
+	// Unknown (the restore point could not be measured): to is the read,
+	// and only "before" it is claimed.
+	before := ""
+	if !known {
+		before = "before "
+	}
 	if to.IsZero() {
 		points = []string{"its start"}
 	} else {
 		t := to.In(r.loc())
-		points = []string{t.Format("15:04 Jan 2")}
+		points = []string{before + t.Format("15:04 Jan 2")}
 		if now := r.now().In(r.loc()); now.YearDay() == t.YearDay() && now.Year() == t.Year() {
-			points = append(points, t.Format("15:04"))
+			points = append(points, before+t.Format("15:04"))
 		}
 	}
 	var tails []string
@@ -604,7 +697,7 @@ func (r *Reach) line(lineage string, ids []string, to time.Time, actions int) (o
 	case 0:
 		tails = []string{"; no actions yet", ""}
 	case 1:
-		tails = []string{"; 1 action so far stays done", "; 1 action stays done", ""}
+		tails = []string{"; 1 action so far stays done", "; 1 action stays done", "; 1 stays done", ""}
 	default:
 		tails = []string{
 			fmt.Sprintf("; %d actions so far stay done", actions),
@@ -623,9 +716,12 @@ func (r *Reach) line(lineage string, ids []string, to time.Time, actions int) (o
 
 // done is the confirmation after an approved rollback, with the real count
 // (#59 UX-59-2).
-func (r *Reach) done(lineage string, ids []string, to time.Time, actions int) string {
+func (r *Reach) done(lineage string, ids []string, to time.Time, known bool, actions int) string {
 	back := "its start"
-	if !to.IsZero() {
+	switch {
+	case !known:
+		back = "before " + to.In(r.loc()).Format("15:04 Jan 2")
+	case !to.IsZero():
 		back = to.In(r.loc()).Format("15:04 Jan 2")
 	}
 	what := "a record you deleted"

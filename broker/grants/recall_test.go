@@ -84,3 +84,35 @@ func TestContainedLineageGetsNoPreAllowance(t *testing.T) {
 		t.Fatalf("after release: %s %q", st.State, st.Permission.Reason)
 	}
 }
+
+// recalltool W10 (#59 L3): a rollback question superseded by an earlier
+// one is withdrawn: closed as superseded, and a later YES runs nothing.
+// Nothing else can be withdrawn.
+func TestRecallRollbackCanBeWithdrawn(t *testing.T) {
+	ex := &recordExec{}
+	r := newRigExecs(t, nil, map[string]journal.Executor{RecallExecutor: ex})
+	in := journal.Intent{ID: "rb", Origin: OriginRecall, Account: journal.BrokerAccount,
+		Action: journal.ActionRecallRollback, Executor: RecallExecutor,
+		Params: map[string]any{"lineage": "agent.x", "since": "2026-10-05T09:00:00Z",
+			"object": "a mail you deleted from agent", "detail": "back to 08:12 Oct 5; 2 actions stay done"}}
+	if st := r.submit(in); st.State != journal.Pending {
+		t.Fatal(st.State)
+	}
+	r.g.Flush()
+	if err := r.g.Withdraw("rb"); err != nil {
+		t.Fatal(err)
+	}
+	if st := r.state("rb"); st.State != journal.Denied || st.Permission.Reason != "not approved: superseded" {
+		t.Fatalf("withdrawn: %s %q", st.State, st.Permission.Reason)
+	}
+	r.decide(true, "owner")
+	if len(ex.ran) != 0 {
+		t.Fatal("a withdrawn rollback ran")
+	}
+	other := in
+	other.ID, other.Origin = "o", "guest:agent.x"
+	r.submit(other)
+	if err := r.g.Withdraw("o"); err == nil {
+		t.Fatal("withdrew an intent that is not a recall rollback")
+	}
+}

@@ -160,6 +160,7 @@ func openRecall(ctx context.Context, v *modelroute.Verifier, sc recalltool.Servi
 	clear(key)
 	if err != nil {
 		log.Printf("recall disabled: %v", err)
+		exec.Off()
 		return
 	}
 	late.Set(svc.Tools)
@@ -303,6 +304,8 @@ func main() {
 	// the vault process can hand it over.
 	if recallDir != "" && verifier != nil {
 		go openRecall(ctx, verifier, recallCfg, recallTools, recallExec)
+	} else {
+		recallExec.Off()
 	}
 	log.Printf("broker up; owner socket %s/%s", cfg.SocketDir, daemon.OwnerSocket)
 	d.Wait()

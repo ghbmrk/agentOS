@@ -753,6 +753,25 @@ func (g *Gate) Dispatch(ctx context.Context, id string) (journal.Status, error) 
 	return g.eng.Dispatch(ctx, id)
 }
 
+// Withdraw closes a recall rollback question still waiting for the owner,
+// as superseded by an earlier one for the same agent (recalltool W10): it
+// is denied with "not approved: superseded" and an answer to it later
+// does nothing. Only the broker's recall rollbacks can be withdrawn.
+func (g *Gate) Withdraw(id string) error {
+	st, err := g.eng.Get(id)
+	if err != nil {
+		return err
+	}
+	if st.Intent.Origin != OriginRecall || st.Intent.Action != journal.ActionRecallRollback {
+		return errors.New("grants: only a recall rollback can be withdrawn")
+	}
+	if st.State != journal.Pending {
+		return nil
+	}
+	g.closeIntent(id, "superseded")
+	return nil
+}
+
 func (g *Gate) Get(id string) (journal.Status, error) {
 	st, err := g.eng.Get(id)
 	if err == nil {

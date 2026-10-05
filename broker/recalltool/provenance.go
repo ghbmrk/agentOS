@@ -20,9 +20,9 @@ type Provenance struct {
 	mu    sync.Mutex
 	store recall.Store
 	sets  map[string]map[string]time.Time // lineage -> item ID -> first given
-	// resets: lineages whose machines went back to before since at reset,
-	// whose reach is not finished (Reach). since and reset in UnixNano.
-	resets map[string]map[int64]int64
+	// resets: lineages whose machines went back to before since, whose
+	// reach is not finished (Reach), by since in UnixNano.
+	resets map[string]map[int64]Reset
 	lines  int
 }
 
@@ -35,12 +35,14 @@ type provRecord struct {
 	// Reset. With Forget, the reach from At is done: IDs are dropped and
 	// the mark goes.
 	Reset time.Time `json:"reset,omitempty"`
+	// Until, with Reset: when the machines were all back.
+	Until time.Time `json:"until,omitempty"`
 }
 
 // OpenProvenance loads the record from store (a recall.FileStore in the
 // broker's state directory; unreadable lines are skipped).
 func OpenProvenance(store recall.Store) (*Provenance, error) {
-	p := &Provenance{store: store, sets: map[string]map[string]time.Time{}, resets: map[string]map[int64]int64{}}
+	p := &Provenance{store: store, sets: map[string]map[string]time.Time{}, resets: map[string]map[int64]Reset{}}
 	data, err := store.ReadAll()
 	if err != nil {
 		return nil, err
@@ -78,9 +80,13 @@ func (p *Provenance) apply(r provRecord) {
 			return
 		}
 		if p.resets[r.Lineage] == nil {
-			p.resets[r.Lineage] = map[int64]int64{}
+			p.resets[r.Lineage] = map[int64]Reset{}
 		}
-		p.resets[r.Lineage][since] = r.Reset.UnixNano()
+		until := r.Until
+		if until.IsZero() {
+			until = r.Reset
+		}
+		p.resets[r.Lineage][since] = Reset{Since: r.At.UTC(), At: r.Reset.UTC(), Until: until.UTC()}
 		return
 	}
 	if r.Forget {
@@ -99,10 +105,22 @@ func (p *Provenance) apply(r provRecord) {
 		p.sets[r.Lineage] = s
 	}
 	for _, id := range r.IDs {
-		if _, ok := s[id]; !ok {
+		if t, ok := s[id]; !ok || p.undone(r.Lineage, t) {
 			s[id] = r.At
 		}
 	}
+}
+
+// undone reports a time inside an unfinished reset of lineage: what was
+// given then is no longer in its machines, so giving it again is new
+// (#59 L3 re-review 1). Called with mu held, or while loading.
+func (p *Provenance) undone(lineage string, t time.Time) bool {
+	for _, rs := range p.resets[lineage] {
+		if !t.Before(rs.Since) && t.Before(rs.At) {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *Provenance) write(r provRecord) error {
@@ -124,7 +142,7 @@ func (p *Provenance) Given(lineage string, ids []string, at time.Time) error {
 	defer p.mu.Unlock()
 	var fresh []string
 	for _, id := range ids {
-		if _, ok := p.sets[lineage][id]; !ok && id != "" {
+		if t, ok := p.sets[lineage][id]; (!ok || p.undone(lineage, t)) && id != "" {
 			fresh = append(fresh, id)
 		}
 	}
@@ -201,8 +219,8 @@ func (p *Provenance) compact() error {
 		}
 	}
 	for _, l := range sortedKeys(p.resets) {
-		for since, at := range p.resets[l] {
-			b, err := json.Marshal(provRecord{Lineage: l, At: time.Unix(0, since).UTC(), Reset: time.Unix(0, at).UTC()})
+		for _, rs := range p.resets[l] {
+			b, err := json.Marshal(provRecord{Lineage: l, At: rs.Since, Reset: rs.At, Until: rs.Until})
 			if err != nil {
 				return err
 			}
@@ -228,17 +246,18 @@ func (p *Provenance) Items(lineage string) map[string]time.Time {
 	return out
 }
 
-// Reset is a lineage whose machines went back to before Since at At, its
-// reach not yet finished.
-type Reset struct{ Since, At time.Time }
+// Reset is a lineage whose machines went back to before Since: the reset
+// began at At and the last machine was back at Until. Its reach is not
+// yet finished.
+type Reset struct{ Since, At, Until time.Time }
 
 // MarkReset records, durably, that lineage's machines went back to before
-// since at at: a reach finished later (or after a restart) forgets only
-// what was given between the two, and does not reset the machines again.
-func (p *Provenance) MarkReset(lineage string, since, at time.Time) error {
+// rs.Since: a reach finished later (or after a restart) forgets only what
+// was given from Since until At, and does not reset the machines again.
+func (p *Provenance) MarkReset(lineage string, rs Reset) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.write(provRecord{Lineage: lineage, At: since.UTC(), Reset: at.UTC()})
+	return p.write(provRecord{Lineage: lineage, At: rs.Since.UTC(), Reset: rs.At.UTC(), Until: rs.Until.UTC()})
 }
 
 // Resets lists lineage's unfinished resets, oldest first.
@@ -246,8 +265,8 @@ func (p *Provenance) Resets(lineage string) []Reset {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	var out []Reset
-	for since, at := range p.resets[lineage] {
-		out = append(out, Reset{Since: time.Unix(0, since).UTC(), At: time.Unix(0, at).UTC()})
+	for _, rs := range p.resets[lineage] {
+		out = append(out, rs)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Since.Before(out[j].Since) })
 	return out
