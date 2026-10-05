@@ -25,7 +25,7 @@ type fakeRuntime struct {
 	launches []Launch
 	kills    int
 	failNext error
-	failKill error // Kill's error, after it kills
+	failKill error           // Kill's error, after it kills
 	onPause  func(id string) // runs as the guest is paused
 	onCkpt   func(id string) // runs during a memory checkpoint
 }
