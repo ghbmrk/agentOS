@@ -51,7 +51,7 @@ var controlPath = map[string][]string{
 	// clock imports golang.org/x/sys/unix (adjtimex), so it has no entry
 	// below, whose rules refuse third-party imports; TestAgentosdLinks-
 	// NoInference holds it instead, through netOK.
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock"},
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies
@@ -86,8 +86,9 @@ var guestPlane = map[string]struct {
 	// modelroute forwards to the vault process over its Unix socket and
 	// reports usage to the meter; never the vault or the proxy. It
 	// journals the denials that come back (modelroute.Journal), coalesced
-	// by the journal's own gate, as the guest plane may.
-	"modelroute": {[]string{"journal", "meter"}, []string{"os/exec", "plugin", "unsafe", "C"}},
+	// by the journal's own gate, as the guest plane may. Its routing client
+	// carries the router's rule types (W3, potency PW4 on #90).
+	"modelroute": {[]string{"journal", "meter", "routerule"}, []string{"os/exec", "plugin", "unsafe", "C"}},
 	// The router's rule types, without the router (W3): what the change
 	// pipeline and Loop 1 read and change.
 	"routerule": {nil, forbiddenStd},

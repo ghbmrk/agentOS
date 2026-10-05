@@ -25,9 +25,10 @@ import (
 
 // Socket names inside the run directory.
 const (
-	ModelSocket  = "model.sock"
-	UnlockSocket = "unlock.sock"
-	VerifySocket = "verify.sock"
+	ModelSocket   = "model.sock"
+	RoutingSocket = "routing.sock"
+	UnlockSocket  = "unlock.sock"
+	VerifySocket  = "verify.sock"
 )
 
 var machineRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
@@ -90,8 +91,30 @@ type evalRoute struct {
 	From      string
 	Grants    []string
 	PrivateOK map[string]bool
-	Active    route.Rule
-	Prices    prices
+	// Active is the active rule at start; routing adoptions replace it
+	// (setActive, routing.go), so the ceiling follows them (PW4 on #90).
+	Active route.Rule
+	Prices prices
+
+	mu      sync.RWMutex
+	adopted route.Rule
+}
+
+// active is the rule live machines route by: Active, or the latest one
+// routing adoptions set.
+func (ev *evalRoute) active() route.Rule {
+	ev.mu.RLock()
+	defer ev.mu.RUnlock()
+	if ev.adopted != nil {
+		return ev.adopted
+	}
+	return ev.Active
+}
+
+func (ev *evalRoute) setActive(rule route.Rule) {
+	ev.mu.Lock()
+	defer ev.mu.Unlock()
+	ev.adopted = rule
 }
 
 // price is a model's provider price per million tokens.
@@ -153,7 +176,7 @@ func (ev *evalRoute) serve(c *custody, machine string, w http.ResponseWriter, r 
 			"message": "the routing rule under evaluation is not usable", "type": "invalid_request_error"}})
 		return
 	}
-	if !ev.Prices.within(rule, ev.Active, ev.Grants, ev.PrivateOK) {
+	if !ev.Prices.within(rule, ev.active(), ev.Grants, ev.PrivateOK) {
 		b, _ := json.Marshal(modelroute.Denial{Adapter: "router", Method: r.Method, Status: http.StatusForbidden, Reason: modelroute.ReasonEvalCeiling})
 		w.Header().Set(modelroute.HeaderDenial, string(b))
 		http.Error(w, modelroute.ReasonEvalCeiling, http.StatusForbidden)
@@ -174,7 +197,7 @@ func (ev *evalRoute) serve(c *custody, machine string, w http.ResponseWriter, r 
 
 func (ev *evalRoute) rule(raw string) (route.Rule, error) {
 	if raw == "" {
-		return ev.Active, nil
+		return ev.active(), nil
 	}
 	b, err := base64.StdEncoding.DecodeString(raw)
 	if err != nil || len(b) > modelroute.MaxRule {

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/route"
+	"github.com/ghbmrk/agentos/broker/routerule"
 )
 
 // newRouter builds a real router whose openai route always fails over
@@ -233,5 +234,20 @@ func TestRoutingAdoptionRefusedByTheTargetLeavesActiveUnchanged(t *testing.T) {
 	}
 	if len(e.p.Adoptions()) != 0 {
 		t.Fatalf("adoptions %+v", e.p.Adoptions())
+	}
+}
+
+type emptyRouter struct{}
+
+func (emptyRouter) Rule() routerule.Rule         { return nil }
+func (emptyRouter) SetRule(routerule.Rule) error { return nil }
+func (emptyRouter) Candidate() routerule.Rule    { return nil }
+
+// ADP-4: a router with no proposal (the vault process unreachable, or no
+// rule yet) proposes nothing, even while the active routing tree is empty.
+func TestAnEmptyRoutingProposalIsNoCandidate(t *testing.T) {
+	e := newEnv(t, func(c *Config) { c.Targets = map[string]Target{"routing": refusingRouting{}} })
+	if _, changed, err := e.p.ProposeRouting(bg, emptyRouter{}); changed || err != nil {
+		t.Fatalf("an empty proposal: %v %v", changed, err)
 	}
 }

@@ -38,9 +38,14 @@ func (t RoutingTarget) Apply(files Tree) error {
 
 // ProposeRouting turns the router's measured proposal into a candidate and
 // runs it through the pipeline (ADP-4, CAP-9). It returns ok=false when the
-// proposal equals the active rule.
+// proposal equals the active rule, or is empty: a router with no rule
+// proposes nothing.
 func (p *Pipeline) ProposeRouting(ctx context.Context, r Router) (Report, bool, error) {
-	next := canonicalJSON(r.Candidate())
+	cand := r.Candidate()
+	if len(cand) == 0 {
+		return Report{}, false, nil
+	}
+	next := canonicalJSON(cand)
 	p.mu.Lock()
 	same := string(p.st.Active[RoutingPath]) == string(next)
 	p.mu.Unlock()
