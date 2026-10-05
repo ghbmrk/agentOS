@@ -58,6 +58,8 @@ jobs:
           want=$(awk '$1 == "toolchain" {print $2}' "$GITHUB_WORKSPACE/broker/go.mod")
           got=$(go version | awk '{print $3}')
           [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }
+      - name: Software TPM for the trusted-host slot (P2-4b)
+        run: sudo apt-get update -q && sudo apt-get install -yq swtpm
       - name: Format
         # Vendored code keeps its upstream formatting.
         run: |
@@ -66,6 +68,9 @@ jobs:
       - name: Vet
         run: go vet ./...
       - name: Tests (race detector)
+        # The TPM tests fail rather than skip if swtpm is missing.
+        env:
+          AGENTOS_REQUIRE_SWTPM: "1"
         run: go test -race -count=1 ./...
   machines:
     # Agent-machine lifecycle against the real kernel (P1-4): cgroup v2,

@@ -5,6 +5,7 @@ go 1.25.0
 toolchain go1.26.8
 
 require (
+	github.com/google/go-tpm v0.9.8
 	github.com/sigstore/sigstore v1.10.6
 	github.com/theupdateframework/go-tuf/v2 v2.4.2
 	golang.org/x/crypto v0.50.0
