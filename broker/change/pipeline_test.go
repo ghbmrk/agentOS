@@ -22,8 +22,10 @@ func TestDevSplitHidesHeldOut(t *testing.T) {
 	e := newEnv(t, nil)
 	e.cases(30, ClassSkill, "skills/greet", "hello")
 	dev := map[string]bool{}
+	devTask := map[string]bool{}
 	for _, c := range e.p.Dev(ClassSkill) {
 		dev[c.ID] = true
+		devTask[c.Task] = true
 		if c.Security {
 			t.Fatal("Dev returned a security fixture")
 		}
@@ -36,13 +38,18 @@ func TestDevSplitHidesHeldOut(t *testing.T) {
 	if rep.HeldOut != 30-len(dev) {
 		t.Fatalf("evaluated %d held-out cases, want %d", rep.HeldOut, 30-len(dev))
 	}
-	for id := range dev {
-		if e.ev.ran[e.p.probeID(id)] {
-			t.Fatalf("dev case %s was used as held-out evidence", id)
+	for task := range e.ev.tasks {
+		if devTask[task] {
+			t.Fatalf("dev case of %s was used as held-out evidence", task)
 		}
+	}
+	for id := range dev {
 		if e.ev.ran[id] {
 			t.Fatal("the evaluator saw a case's own ID")
 		}
+	}
+	if len(e.ev.tasks) != rep.HeldOut {
+		t.Fatalf("probe-to-task lookup found %d tasks, want %d", len(e.ev.tasks), rep.HeldOut)
 	}
 }
 
@@ -570,13 +577,25 @@ func TestRestart(t *testing.T) {
 }
 
 type fakeTarget struct {
-	ns      string
-	fail    error
-	applied Tree
+	ns        string
+	fail      error
+	applied   Tree
+	cur       Tree // nil: one file, <ns>/greet = hi
+	panicOnce bool
 }
 
-func (f *fakeTarget) Current() (Tree, error) { return Tree{f.ns + "/greet": []byte("hi")}, nil }
+func (f *fakeTarget) Current() (Tree, error) {
+	if f.cur != nil {
+		return f.cur, nil
+	}
+	return Tree{f.ns + "/greet": []byte("hi")}, nil
+}
+
 func (f *fakeTarget) Apply(t Tree) error {
+	if f.panicOnce {
+		f.panicOnce = false
+		panic("lost")
+	}
 	if f.fail != nil {
 		return f.fail
 	}

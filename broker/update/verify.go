@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"path"
 	"strings"
 )
@@ -83,21 +84,36 @@ func Verify(root Root, meta []byte, sigs []Signature, attestations int) (Verifie
 	if root.Threshold < 1 || len(root.Keys) < root.Threshold {
 		return Verified{}, errors.New("update: root threshold is not satisfiable")
 	}
+	// The threshold counts keys, not key IDs: a root listing one key
+	// under two IDs is refused.
+	seenKey := map[string]bool{}
+	for _, k := range root.Keys {
+		if len(k) != ed25519.PublicKeySize || seenKey[string(k)] {
+			return Verified{}, errors.New("update: root has a malformed or repeated key")
+		}
+		seenKey[string(k)] = true
+	}
 	good := map[string]bool{}
 	for _, s := range sigs {
 		k, ok := root.Keys[s.KeyID]
-		if ok && len(k) == ed25519.PublicKeySize && ed25519.Verify(k, meta, s.Sig) {
-			good[s.KeyID] = true
+		if ok && ed25519.Verify(k, meta, s.Sig) {
+			good[string(k)] = true
 		}
 	}
 	if len(good) < root.Threshold {
 		return Verified{}, fmt.Errorf("update: %d of %d required signatures", len(good), root.Threshold)
 	}
+	if err := noDuplicateKeys(meta); err != nil {
+		return Verified{}, fmt.Errorf("update: metadata does not parse: %v", err)
+	}
 	var r Release
 	d := json.NewDecoder(bytes.NewReader(meta))
 	d.DisallowUnknownFields()
-	if err := d.Decode(&r); err != nil || d.More() {
+	if err := d.Decode(&r); err != nil {
 		return Verified{}, fmt.Errorf("update: metadata does not parse: %v", err)
+	}
+	if _, err := d.Token(); err != io.EOF {
+		return Verified{}, errors.New("update: metadata has trailing data")
 	}
 	if r.Version == "" || len(r.Images) == 0 {
 		return Verified{}, errors.New("update: metadata needs a version and images")
@@ -112,4 +128,47 @@ func Verify(root Root, meta []byte, sigs []Signature, attestations int) (Verifie
 		}
 	}
 	return Verified{r: r, security: r.Security && attestations >= 1}, nil
+}
+
+// noDuplicateKeys rejects JSON with a repeated key in any object, which
+// encoding/json would otherwise resolve silently (last one wins).
+func noDuplicateKeys(b []byte) error {
+	d := json.NewDecoder(bytes.NewReader(b))
+	var walk func() error
+	walk = func() error {
+		t, err := d.Token()
+		if err != nil {
+			return err
+		}
+		switch t {
+		case json.Delim('{'):
+			keys := map[string]bool{}
+			for d.More() {
+				k, err := d.Token()
+				if err != nil {
+					return err
+				}
+				ks, _ := k.(string)
+				if keys[ks] {
+					return fmt.Errorf("duplicate key %q", ks)
+				}
+				keys[ks] = true
+				if err := walk(); err != nil {
+					return err
+				}
+			}
+			_, err = d.Token()
+			return err
+		case json.Delim('['):
+			for d.More() {
+				if err := walk(); err != nil {
+					return err
+				}
+			}
+			_, err = d.Token()
+			return err
+		}
+		return nil
+	}
+	return walk()
 }

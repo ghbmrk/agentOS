@@ -44,7 +44,7 @@ func (p *Pipeline) shortLocked() (string, error) {
 }
 
 func shortOK(id string) bool {
-	if len(id) < 2 || len(id) > 3 || id[0] < 'A' || id[0] > 'Z' {
+	if len(id) < 2 || len(id) > 3 || !strings.ContainsRune(idLetters, rune(id[0])) {
 		return false
 	}
 	for _, c := range id[1:] {
@@ -208,8 +208,25 @@ func (p *Pipeline) Digest() []string {
 			a.RevertSeen = true
 		}
 	}
-	for _, v := range p.st.Declined {
-		out = append(out, "You declined security update "+safe(v)+"; the box is still on the previous version until a newer update is installed.")
+	seen := map[string]bool{}
+	for _, d := range p.st.Declined {
+		if !seen[d.Version] {
+			seen[d.Version] = true
+			out = append(out, "You declined security update "+safe(d.Version)+"; the box is still on the previous version until a newer update is installed.")
+		}
+	}
+	for _, a := range p.st.Adoptions {
+		if a.Concern != "" && !a.ConcernSeen && a.Reverted == "" {
+			s := a.ConcernScore
+			line := p.what(&Adoption{Classes: a.Classes, Origin: a.Origin}) + " now"
+			if a.Concern == WhySecurity {
+				line += " fails a newer security check"
+			} else {
+				line += fmt.Sprintf(" does worse on %d of %d newer tasks", s.Regressions, s.HeldOut)
+			}
+			out = append(out, line+". Reply UNDO "+a.Short+" to go back to the previous version, or nothing to keep it.")
+			a.ConcernSeen = true
+		}
 	}
 	if len(out) > 0 {
 		_ = p.saveLocked()

@@ -106,7 +106,9 @@ func TestRecheckSecurity(t *testing.T) {
 	if a.State != StateAdopted {
 		t.Fatal(a)
 	}
-	e.p.AddSecurityCase(Case{ID: "sec-2", Class: ClassSkill, Input: []byte("skills/y"), Expect: []byte("refused")})
+	// A new fixture the state without the adoption passes and the adopted
+	// state fails.
+	e.p.AddSecurityCase(Case{ID: "sec-2", Class: ClassSkill, Input: []byte("skills/greet"), Expect: []byte("hi")})
 	ids, err := e.p.Recheck(bg)
 	if err != nil || len(ids) != 1 {
 		t.Fatal(ids, err)
@@ -258,14 +260,125 @@ func TestNotEvaluated(t *testing.T) {
 // fixtures and unknown probes map to nothing.
 func TestProbeTask(t *testing.T) {
 	e := newEnv(t, nil)
-	c := e.taskCase(ClassSkill, "skills/greet", "hello", Accepted)
-	if task, ok := e.p.ProbeTask(e.p.probeID(c.ID)); !ok || task != c.Task {
-		t.Fatal(task, ok)
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	e.ev.reset()
+	rep := e.propose(Candidate{Source: Local, Files: Tree{"skills/greet": []byte("hello")}})
+	if len(e.ev.tasks) != rep.HeldOut {
+		t.Fatalf("mapped %d tasks for %d held-out cases", len(e.ev.tasks), rep.HeldOut)
 	}
-	if _, ok := e.p.ProbeTask(e.p.probeID("sec-1")); ok {
-		t.Fatal("security fixture mapped to a task")
+	// The security fixture's probes mapped to nothing. Both sides of a case
+	// share its probe ID, so the evaluator cannot tell which is the
+	// candidate.
+	if len(e.ev.ran) != rep.HeldOut+rep.Security || e.ev.unmapped != 2*rep.Security {
+		t.Fatalf("ran %d probes, %d unmapped", len(e.ev.ran), e.ev.unmapped)
 	}
-	if _, ok := e.p.ProbeTask("nope"); ok {
-		t.Fatal("unknown probe")
+	// Probe IDs do not outlive their evaluation.
+	for probe := range e.ev.ran {
+		if _, ok := e.p.ProbeTask(probe); ok {
+			t.Fatal("a finished evaluation's probe still maps")
+		}
+	}
+}
+
+// Second review, blocker 1: Recheck never auto-reverts an owner-approved
+// or attested image; it asks instead.
+func TestRecheckKeepsProtectedImages(t *testing.T) {
+	e := newEnv(t, func(c *Config) { c.SecurityAutoStage = true })
+	e.cases(12, ClassSkill, "skills/greet", "hi")
+	e.owner.approve = true
+	ev := e.p.cfg.Evaluator
+	worse := false
+	e.p.cfg.Evaluator = evalFunc(func(ctx context.Context, tr Tree, pr Probe) ([]byte, error) {
+		if _, ok := tr["host-image/release"]; ok && worse && string(pr.Input) != exfilProbe {
+			return []byte("worse"), nil
+		}
+		return ev.Run(ctx, tr, pr)
+	})
+	sec := e.release(release(t, "5.0", true, map[string][]byte{"host-image/release": []byte("a")}))
+	if sec.State != StateAdopted || sec.Basis != BasisSecurity {
+		t.Fatal(sec)
+	}
+	e.p.Digest()
+	worse = true
+	if ids, err := e.p.Recheck(bg); err != nil || len(ids) != 0 {
+		t.Fatal("reverted a protected image:", ids, err)
+	}
+	if got := string(e.p.Files("host-image")["host-image/release"]); got != update.Digest([]byte("a")) {
+		t.Fatal("image changed")
+	}
+	d := e.p.Digest()
+	if len(d) != 1 || !strings.Contains(d[0], " now does worse on ") || !strings.HasSuffix(d[0], "Reply UNDO "+sec.Short+" to go back to the previous version, or nothing to keep it.") {
+		t.Fatalf("concern: %q", d)
+	}
+	if len(e.p.Digest()) != 0 {
+		t.Fatal("concern listed twice")
+	}
+}
+
+// Second review, blocker 1: an evaluator outage (nothing passes on either
+// side) blames no adoption.
+func TestRecheckOutageRevertsNothing(t *testing.T) {
+	e := newEnv(t, nil)
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	a := e.propose(Candidate{Source: Local, Files: Tree{"skills/greet": []byte("hello")}})
+	if a.State != StateAdopted {
+		t.Fatal(a)
+	}
+	e.p.cfg.Evaluator = brokenEvaluator{}
+	if ids, err := e.p.Recheck(bg); err != nil || len(ids) != 0 {
+		t.Fatal("outage reverted:", ids, err)
+	}
+}
+
+// Second review, blocker 1: no revert leaves a target namespace empty.
+func TestRevertNeverEmptiesTarget(t *testing.T) {
+	tg := &fakeTarget{ns: "host-image"}
+	tg.cur = Tree{}
+	e := newEnv(t, func(c *Config) { c.Targets = map[string]Target{"host-image": tg} })
+	e.cases(12, ClassSkill, "skills/greet", "hi")
+	e.owner.approve = true
+	r := e.release(release(t, "1.0", false, map[string][]byte{"host-image/release": []byte("a")}))
+	if r.State != StateAdopted {
+		t.Fatal(r)
+	}
+	if err := e.p.Revert(bg, r.Short, OriginOwner); err == nil || !strings.Contains(err.Error(), "nothing to run") {
+		t.Fatalf("emptied the image slot: %v", err)
+	}
+	if len(tg.applied) == 0 {
+		t.Fatal("target emptied")
+	}
+}
+
+// Second review, blocker 2: a revert whose outcome is unknown does not
+// block a different revert.
+func TestUnknownRevertDoesNotBlockAnother(t *testing.T) {
+	tg := &fakeTarget{ns: "skills"}
+	e := newEnv(t, func(c *Config) { c.Targets = map[string]Target{"skills": tg} })
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	a := e.propose(Candidate{Source: Local, Files: Tree{"skills/greet": []byte("hello")}})
+	b := e.propose(Candidate{Source: Local, Files: Tree{"skills/other": []byte("x")}})
+	if a.State != StateAdopted || b.State != StateAdopted {
+		t.Fatal(a, b)
+	}
+	tg.panicOnce = true
+	if err := e.p.Revert(bg, a.Short, OriginOwner); err == nil {
+		t.Fatal("panicking revert reported success")
+	}
+	if err := e.p.Revert(bg, b.Short, OriginOwner); err != nil {
+		t.Fatal("second revert blocked:", err)
+	}
+}
+
+// STOP holds the pipeline's own reverts (they are not narrowing).
+func TestStopHoldsAutoRevert(t *testing.T) {
+	e := newEnv(t, nil)
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	a := e.propose(Candidate{Source: Local, Files: Tree{"skills/greet": []byte("hello")}})
+	e.eng.Stop(bg)
+	if err := e.p.Revert(bg, a.Short, OriginPipeline); err == nil {
+		t.Fatal("auto revert ran during STOP")
+	}
+	if string(e.p.Files("skills")["skills/greet"]) != "hello" {
+		t.Fatal("reverted during STOP")
 	}
 }

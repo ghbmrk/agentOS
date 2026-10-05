@@ -62,13 +62,13 @@ func (p *Pipeline) Check(_ context.Context, _ journal.Phase, in journal.Intent) 
 			return nil
 		}
 		return ErrNeedsOwner
-	case ActionRevert:
+	case ActionRevert, ActionRevertAuto:
 		if len(parts) != 5 || parts[2] != "revert" {
 			return errors.New("change: malformed revert")
 		}
 		switch {
-		case in.Origin == OriginOwner && parts[4] == WhyOwner:
-		case in.Origin == OriginPipeline && (parts[4] == WhyRegression || parts[4] == WhySecurity || parts[4] == WhyFallback):
+		case in.Action == ActionRevert && in.Origin == OriginOwner && parts[4] == WhyOwner:
+		case in.Action == ActionRevertAuto && in.Origin == OriginPipeline && (parts[4] == WhyRegression || parts[4] == WhySecurity || parts[4] == WhyFallback):
 		default:
 			return errors.New("change: only the owner or the pipeline reverts")
 		}
@@ -139,7 +139,7 @@ func (p *Pipeline) Execute(_ context.Context, in journal.Intent, _ int) journal.
 	switch in.Action {
 	case ActionAdopt:
 		err = p.adoptLocked(parts[1], in.GrantRef)
-	case ActionRevert:
+	case ActionRevert, ActionRevertAuto:
 		err = p.revertLocked(parts[1], parts[4])
 	case ActionPolicy, ActionPolicyOff:
 		on := in.Action == ActionPolicy
@@ -227,7 +227,15 @@ func (p *Pipeline) adoptLocked(id, basis string) error {
 	}
 	p.st.Active = pr.next
 	if pr.cand.Source == Upstream {
-		p.st.Declined = nil // a later release supersedes declined ones
+		// A later release supersedes declined ones in the namespaces it
+		// installs.
+		kept := p.st.Declined[:0]
+		for _, d := range p.st.Declined {
+			if !touchesNS(pr.edits, d.NS) {
+				kept = append(kept, d)
+			}
+		}
+		p.st.Declined = kept
 	}
 	p.st.Adoptions = append(p.st.Adoptions, &Adoption{ID: id, Short: short, Source: pr.cand.Source,
 		Classes: pr.classes, Basis: basis, Edits: pr.edits, Score: pr.report.Score, Public: pr.cand.Public,
@@ -318,6 +326,12 @@ func (p *Pipeline) revertLocked(id, why string) error {
 	if err != nil {
 		return err
 	}
+	for _, e := range a.Edits {
+		ns := namespace(e.Path)
+		if p.cfg.Targets[ns] != nil && len(next.under(ns)) == 0 {
+			return fmt.Errorf("undoing %s would leave %s with nothing to run; install another version instead", a.Short, ns)
+		}
+	}
 	if err := p.activateLocked(p.st.Active, next, a.Edits); err != nil {
 		return err
 	}
@@ -355,8 +369,13 @@ func (p *Pipeline) revert(ctx context.Context, ref, origin, why string) error {
 	if err != nil {
 		return err
 	}
+	action := ActionRevert
+	if origin == OriginPipeline {
+		action = ActionRevertAuto // not narrowing: held by STOP like other automation
+	}
 	return p.run(ctx, journal.Intent{ID: fmt.Sprintf("chg:%s:revert:%s:%s", id, n, why), Origin: origin,
-		Account: journal.BrokerAccount, Action: ActionRevert, Executor: Executor})
+		Account: journal.BrokerAccount, Action: action, Executor: Executor,
+		Params: map[string]any{"adoption": id, "why": why}})
 }
 
 // ConfirmStaged records that a staged image booted and passed its health
@@ -399,7 +418,8 @@ func (p *Pipeline) setPolicy(ctx context.Context, key string, on bool) error {
 		return err
 	}
 	return p.run(ctx, journal.Intent{ID: fmt.Sprintf("chg:policy:%s:%s:%s", n, key, v),
-		Origin: OriginOwner, Account: journal.BrokerAccount, Action: action, Executor: Executor})
+		Origin: OriginOwner, Account: journal.BrokerAccount, Action: action, Executor: Executor,
+		Params: map[string]any{"setting": key, "value": v}})
 }
 
 // RemoveCase removes a case from a suite, which only the owner approves
@@ -410,7 +430,8 @@ func (p *Pipeline) RemoveCase(ctx context.Context, caseID string) error {
 		return err
 	}
 	return p.run(ctx, journal.Intent{ID: fmt.Sprintf("chg:suite:%s:remove:%s", n, caseID),
-		Origin: OriginOwner, Account: journal.BrokerAccount, Action: ActionSuite, Executor: Executor})
+		Origin: OriginOwner, Account: journal.BrokerAccount, Action: ActionSuite, Executor: Executor,
+		Params: map[string]any{"case": caseID}})
 }
 
 // nonce returns a fresh sequence number, saved before use so it never
@@ -464,45 +485,84 @@ func (p *Pipeline) run(ctx context.Context, in journal.Intent) error {
 
 // Recheck re-evaluates active adoptions, newest first, on the current
 // held-out and security suites, which grow after adoption. One that now
-// regresses against the state without it, or fails a security fixture, is
-// reverted (ADP-4: roll back on regression; LOOP-10). It returns the
-// reverted IDs.
+// regresses against the state without it, or fails a security fixture that
+// state passes, is reverted (ADP-4: roll back on regression; LOOP-10).
+// Nothing is blamed during an evaluator outage (nothing passes on either
+// side). An image the owner approved or an attested security release is
+// never auto-reverted: its new regression is put to the owner instead
+// (arbitrator R2). It returns the reverted IDs.
 func (p *Pipeline) Recheck(ctx context.Context) ([]string, error) {
 	p.mu.Lock()
-	type job struct {
-		id        string
-		cur, prev Tree
-		set       frozen
-	}
-	var jobs []job
+	var ids []string
 	for i := len(p.st.Adoptions) - 1; i >= 0; i-- {
-		a := p.st.Adoptions[i]
-		if a.Reverted != "" {
+		if p.st.Adoptions[i].Reverted == "" {
+			ids = append(ids, p.st.Adoptions[i].ID)
+		}
+	}
+	p.mu.Unlock()
+	var out []string
+	for _, id := range ids {
+		// Read the tree per adoption, so earlier reverts in this pass
+		// are seen.
+		p.mu.Lock()
+		a := p.adoptionLocked(id)
+		if a == nil || a.Reverted != "" {
+			p.mu.Unlock()
 			continue
 		}
 		prev, _, err := undoTree(p.st.Active, a)
 		if err != nil {
+			p.mu.Unlock()
 			continue
 		}
-		jobs = append(jobs, job{a.ID, p.st.Active.clone(), prev, p.freezeLocked(a.Classes)})
-	}
-	p.mu.Unlock()
-	var out []string
-	for _, jb := range jobs {
-		s := p.evaluate(ctx, jb.prev, jb.cur, jb.set)
+		cur, set := p.st.Active.clone(), p.freezeLocked(a.Classes)
+		p.mu.Unlock()
+
+		s := p.evaluate(ctx, prev, cur, set)
 		why := ""
 		switch {
-		case s.SecurityPassed < s.Security:
+		case s.outage():
+			continue
+		case s.SecurityRegressions > 0:
 			why = WhySecurity
 		case s.Regressions > 0 || s.Passed < s.BaselinePassed:
 			why = WhyRegression
 		default:
 			continue
 		}
-		if err := p.revert(ctx, jb.id, OriginPipeline, why); err != nil {
+		p.mu.Lock()
+		protected := a.protected()
+		if protected && a.Concern == "" {
+			a.Concern, a.ConcernScore = why, s
+			_ = p.saveLocked()
+		}
+		p.mu.Unlock()
+		if protected {
+			continue
+		}
+		if err := p.revert(ctx, id, OriginPipeline, why); err != nil {
 			return out, err
 		}
-		out = append(out, jb.id)
+		out = append(out, id)
 	}
 	return out, nil
+}
+
+// protected reports an image adoption the owner approved or that rests on
+// an attested security release: the pipeline never undoes it on its own.
+func (a *Adoption) protected() bool {
+	image := false
+	for _, c := range a.Classes {
+		image = image || c == ClassGuestImage || c == ClassHostImage
+	}
+	return image && (a.Basis == BasisOwner || a.Basis == BasisSecurity)
+}
+
+func touchesNS(edits []Edit, ns string) bool {
+	for _, e := range edits {
+		if namespace(e.Path) == ns {
+			return true
+		}
+	}
+	return false
 }
