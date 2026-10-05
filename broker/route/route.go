@@ -38,6 +38,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/routerule"
 )
 
 // deniedHeader is egress.DeniedHeader: the proxy's mark on a response it
@@ -77,17 +79,13 @@ func unsupported(what string) error { return errUnsupported{what} }
 var errNotStarted = errors.New("provider stream failed before it started")
 
 // Route is one way to serve a class: a provider and its model.
-type Route struct {
-	Provider string `json:"provider"`
-	Model    string `json:"model"`
-}
-
-func (r Route) String() string { return r.Provider + "/" + r.Model }
+type Route = routerule.Route
 
 // Rule maps each task class to its routes in preference order. ADP-3's
 // default order puts API routes first; the order within a class is what
-// Loop 1 improves (ADP-4).
-type Rule map[string][]Route
+// Loop 1 improves (ADP-4). The types live in routerule so code that only
+// reads or changes a rule need not link the router.
+type Rule = routerule.Rule
 
 // Decision is one routing outcome. It carries no request or response
 // content. Usage is what the provider reported for a served call; the
@@ -418,7 +416,7 @@ func (r *Router) serve(c caller, w http.ResponseWriter, req *http.Request) {
 		w.WriteHeader(status)
 		w.Write(apiError(reason, typ, code))
 	}
-	if req.Method != http.MethodPost || !paths[req.URL.Path] || req.URL.RawQuery != "" {
+	if req.Method != http.MethodPost || !paths[req.URL.Path] || req.URL.RawPath != "" || req.URL.RawQuery != "" {
 		fail(http.StatusNotFound, "invalid_request_error", "not_found", "only POST /v1/chat/completions is served")
 		return
 	}
@@ -427,9 +425,12 @@ func (r *Router) serve(c caller, w http.ResponseWriter, req *http.Request) {
 		fail(http.StatusRequestEntityTooLarge, "invalid_request_error", "", "request body unreadable or too large")
 		return
 	}
+	// A refusal's reason quotes anything the guest sent, so its class (the
+	// text before the first quote) is fixed and the journal's coalescing
+	// key cannot vary with the request (egress E6).
 	chat, err := parseChat(body)
 	if err != nil {
-		fail(http.StatusBadRequest, "invalid_request_error", "", err.Error())
+		fail(http.StatusBadRequest, "invalid_request_error", "", fmt.Sprintf("request not accepted: %q", err.Error()))
 		return
 	}
 	d.Class = chat.Model
@@ -527,7 +528,7 @@ func (r *Router) serve(c caller, w http.ResponseWriter, req *http.Request) {
 	case exhausted > 0:
 		fail(http.StatusTooManyRequests, "rate_limit_error", "routes_exhausted", "every permitted route is exhausted; try again later")
 	default:
-		fail(http.StatusBadRequest, "invalid_request_error", "unsupported", unsupportedWhy)
+		fail(http.StatusBadRequest, "invalid_request_error", "unsupported", fmt.Sprintf("no permitted route can serve this request: %q", unsupportedWhy))
 	}
 }
 

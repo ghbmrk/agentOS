@@ -46,6 +46,13 @@ type inbox struct {
 	msgs    []*ownerMsg
 	wake    chan struct{}
 	closed  bool
+	// stored is set while messages loaded from the store have not yet been
+	// handed out under a private label. The store can outlive the machine
+	// record (a restored state directory, a destroy while the plane was
+	// closed), so the machine now serving this ID may be a fresh public one;
+	// stored messages are owner data, so the label rises before the guest
+	// reads one (REV-5).
+	stored bool
 }
 
 func newInbox(machine string, st *store) *inbox {
@@ -53,7 +60,20 @@ func newInbox(machine string, st *store) *inbox {
 	for _, m := range st.load(machine) {
 		b.msgs = append(b.msgs, &ownerMsg{ID: m.ID, Text: m.Text})
 	}
+	b.stored = len(b.msgs) > 0
 	return b
+}
+
+func (b *inbox) needsRaise() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.stored
+}
+
+func (b *inbox) raised() {
+	b.mu.Lock()
+	b.stored = false
+	b.mu.Unlock()
 }
 
 // persist writes the inbox through to the store. Called with mu held.
@@ -99,6 +119,20 @@ func (b *inbox) next() (*ownerMsg, <-chan struct{}) {
 		}
 	}
 	return nil, b.wake
+}
+
+// handed returns the IDs of messages handed to this incarnation and not
+// yet answered.
+func (b *inbox) handed() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var ids []string
+	for _, m := range b.msgs {
+		if m.out {
+			ids = append(ids, m.ID)
+		}
+	}
+	return ids
 }
 
 func (b *inbox) answer(id string) bool {
@@ -164,6 +198,11 @@ func (p *Plane) DeliverOwner(machine, text string, public bool) (string, error) 
 	if err := m.box.put(msg); err != nil {
 		return "", err
 	}
+	// New work has arrived: the lineage no longer serves its last
+	// answered message (G14). Messages still held open keep their claim.
+	if l := p.lineageOf(m); l != "" {
+		p.store.setGoal(l, "", time.Time{})
+	}
 	return msg.ID, nil
 }
 
@@ -171,6 +210,15 @@ func (p *Plane) ownerNext(m *machine, w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "GET only", http.StatusMethodNotAllowed)
 		return
+	}
+	// Not in Open: the machine manager opens services while holding the
+	// machine's lock, which RaisePrivate takes.
+	if m.box.needsRaise() {
+		if err := p.cfg.Machines.RaisePrivate(m.id); err != nil {
+			http.Error(w, "machine label", http.StatusServiceUnavailable)
+			return
+		}
+		m.box.raised()
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), pollWait)
 	defer cancel()
@@ -181,6 +229,7 @@ func (p *Plane) ownerNext(m *machine, w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if msg != nil {
+			p.handedOut(m, msg.ID)
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(msg)
 			return
@@ -224,10 +273,16 @@ func (p *Plane) ownerReply(m *machine, w http.ResponseWriter, r *http.Request) {
 type OwnerAgent struct {
 	Plane   *Plane
 	Machine string
+	// Delivered, if set, is told each delivered message's goal ID (GoalID)
+	// and text, for Loop 1's harvesting (W3).
+	Delivered func(goal, text string, public bool)
 }
 
 // Deliver implements control.Agent.
 func (a OwnerAgent) Deliver(_ context.Context, text string, public bool) error {
-	_, err := a.Plane.DeliverOwner(a.Machine, text, public)
+	id, err := a.Plane.DeliverOwner(a.Machine, text, public)
+	if err == nil && a.Delivered != nil {
+		a.Delivered(GoalID(id), text, public)
+	}
 	return err
 }

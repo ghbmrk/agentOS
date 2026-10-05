@@ -25,20 +25,38 @@ var controlPath = map[string][]string{
 	"admission": {},
 	"sockets":   {},
 	"cgroup":    {},
+	"budget":    {"admission", "cgroup"}, // RES-2 component budget (P2-5)
+	"accel":     {"admission"},           // RES-3 discovery from sysfs (P2-5)
 	"owner":     {"control", "journal", "modem"},
 	"modem":     {},
 	// The approval policy (grants) runs inside the engine's checks, so it
 	// is on the control path too; adapters reach it only through its
 	// Verifier interface.
-	"grants": {"journal", "owner", "verb"},
+	"grants": {"journal", "owner", "reversible", "verb"},
 	"verb":   {},
-	"daemon": {"journal", "control", "admission", "sockets", "owner", "modem", "grants"},
+	// Reversible forms (REV-3) are declarations the gate validates: pure
+	// data, held to the control path's rules.
+	"reversible": {"journal", "verb"},
+	"daemon":     {"journal", "control", "admission", "sockets", "owner", "modem", "grants"},
 	// The composition root also opens the machine plane (below) and hands
 	// it to admission as a Preempter, and serves the guest plane (below)
 	// on each machine's socket.
 	// It forwards each machine's model route to the vault process
-	// (modelroute, P2-4) and journals the denials that come back.
-	"cmd/agentosd": {"daemon", "cgroup", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal"},
+	// (modelroute, P2-4) and journals the denials that come back, and
+	// gives the owner channel the vault process's verify operation
+	// (owner.Verifier, egress K7). It keeps the owner's agent machine
+	// running as foreground work (admission.Foreground, RES-1). It runs the
+	// learning plane in-process (W3): the change pipeline, the loop
+	// scheduler, and the replay evaluator, whose transitive imports
+	// TestAgentosdLinksNoInference holds free of inference. It names the
+	// grants gate's types to harvest the owner's verdicts (PW3 on #90).
+	// Loop 1's skill compiler (compile) is its one in-process builder: it
+	// calls no model and imports only the skill file format (W3 step 3a).
+	// It runs the owner-question book (W9) on the box clock (P2-9).
+	// clock imports golang.org/x/sys/unix (adjtimex), so it has no entry
+	// below, whose rules refuse third-party imports; TestAgentosdLinks-
+	// NoInference holds it instead, through netOK.
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies
@@ -68,12 +86,38 @@ var guestPlane = map[string]struct {
 	allowed []string
 	forbid  []string
 }{
-	"guest": {[]string{"journal", "meter", "route"}, []string{"os/exec", "plugin", "unsafe", "C"}},
+	"guest": {[]string{"journal", "meter"}, []string{"os/exec", "plugin", "unsafe", "C"}},
 	"meter": {nil, []string{"net", "os/exec", "plugin", "unsafe", "C"}},
 	// modelroute forwards to the vault process over its Unix socket and
-	// reports usage to the meter; never the vault or the proxy.
-	"modelroute": {[]string{"meter"}, []string{"os/exec", "plugin", "unsafe", "C"}},
-	"route":      {nil, []string{"net", "os/exec", "plugin", "unsafe", "C"}},
+	// reports usage to the meter; never the vault or the proxy. It
+	// journals the denials that come back (modelroute.Journal), coalesced
+	// by the journal's own gate, as the guest plane may. Its routing client
+	// carries the router's rule types (W3, potency PW4 on #90).
+	"modelroute": {[]string{"journal", "meter", "routerule"}, []string{"os/exec", "plugin", "unsafe", "C"}},
+	// The router's rule types, without the router (W3): what the change
+	// pipeline and Loop 1 read and change.
+	"routerule": {nil, forbiddenStd},
+	// Replay (LOOP-5) serves replay machines through a guest plane of its
+	// own: no journal writes, no executors, no network clients.
+	"replay": {[]string{"admission", "change", "guest", "journal", "meter", "vm"}, []string{"net", "os/exec", "plugin", "unsafe", "C"}},
+	// Agents' questions to the owner (P3-8, W9): served to guests and
+	// answered from the owner channel, through hooks the wiring passes.
+	"question": {nil, forbiddenStd},
+}
+
+// The learning plane (W3; arbitrator, adopting potency PW1 on #56): the
+// deterministic change pipeline and loop scheduler, linked into agentosd.
+// They decide and record; model-calling builders stay behind a socket
+// (TestAgentosdLinksNoInference).
+var learningPlane = map[string]struct {
+	allowed []string
+	forbid  []string
+}{
+	"change": {[]string{"journal", "owner", "routerule", "update"}, forbiddenStd},
+	"loops":  {[]string{"change", "journal", "meter", "owner", "skill/format", "vm"}, forbiddenStd},
+	// The skill file format without the bridge (P3-6e): Loop 1 decodes
+	// the skills and procedures a builder writes.
+	"skill/format": {nil, forbiddenStd},
 }
 
 var forbiddenStd = []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "syscall", "unsafe", "C"}
@@ -101,18 +145,21 @@ func TestARC2ControlPathCannotReachInference(t *testing.T) {
 	for pkg, rule := range guestPlane {
 		checkImports(t, pkg, rule.allowed, rule.forbid, nil)
 	}
+	for pkg, rule := range learningPlane {
+		checkImports(t, pkg, rule.allowed, rule.forbid, nil)
+	}
 }
 
 // TestDaemonLinksNoCredentialCustody: the daemon process, which serves the
-// guest sockets, links neither the vault nor the credentialed egress proxy
-// (vault V2, ARC-1). Model egress runs where the vault is unlocked (P2-4).
+// guest sockets, links neither the vault, the credentialed egress proxy,
+// nor the TPM seal (vault V2, ARC-1, P2-4b). Model egress runs where the vault is unlocked (P2-4).
 func TestDaemonLinksNoCredentialCustody(t *testing.T) {
 	out, err := exec.Command("go", "list", "-C", "..", "-deps", "./"+compositionRoot).Output()
 	if err != nil {
 		t.Fatalf("go list: %v", err)
 	}
 	for _, dep := range strings.Fields(string(out)) {
-		if dep == module+"vault" || dep == module+"egress" {
+		if dep == module+"vault" || dep == module+"egress" || dep == module+"tpmseal" {
 			t.Errorf("agentosd links %s", dep)
 		}
 	}

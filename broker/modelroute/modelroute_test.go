@@ -1,6 +1,7 @@
 package modelroute
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net"
@@ -10,7 +11,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/meter"
 )
@@ -100,6 +103,21 @@ func TestForwardNamesMachineAndLabelAndReturnsDenials(t *testing.T) {
 	}
 }
 
+// The path reaches the vault process byte for byte, escapes and dot
+// segments included, so its shape checks see what the guest sent rather
+// than a decoded or cleaned copy that matches a served path (ADP-10).
+func TestForwardKeepsThePathAsSent(t *testing.T) {
+	fe := &fakeEgress{h: func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, r.RequestURI) }}
+	fwd := Forward(Config{Socket: serveUnix(t, fe), Label: func(string) string { return "public" }, Denied: (&denials{}).add})
+	for _, p := range []string{"/v1/chat%2Fcompletions", "/openai%2Fv1/chat/completions", "/v1/../v1/chat/completions", "/v1/./chat/completions", "/%761/chat/completions"} {
+		w := httptest.NewRecorder()
+		fwd("m1").ServeHTTP(w, httptest.NewRequest("POST", p, strings.NewReader(`{}`)))
+		if w.Body.String() != p {
+			t.Errorf("sent %s, vault process saw %s", p, w.Body)
+		}
+	}
+}
+
 // A machine with no known label is sent as private, never as public.
 func TestUnknownLabelIsSentAsPrivate(t *testing.T) {
 	fe := &fakeEgress{h: func(w http.ResponseWriter, r *http.Request) {}}
@@ -120,6 +138,80 @@ func TestVaultProcessDownIs503(t *testing.T) {
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("got %d", w.Code)
 	}
+}
+
+// A metered call the vault process gives no response is never charged
+// the broker's 503 page as output (OP-8). One that never reached it (a
+// dial failure) is charged its input estimate; one that reached it and
+// got no answer, its output reservation too, since a provider may have
+// billed output the broker never saw.
+func TestUnansweredCallCharges(t *testing.T) {
+	const small = `{"model":"default","max_tokens":100}`
+	const large = `{"model":"default","max_tokens":32000}`
+	stalled := make(chan struct{})
+	defer close(stalled)
+	for _, c := range []struct {
+		name  string
+		body  string
+		sock  func(t *testing.T) string // a socket nothing serves
+		h     http.HandlerFunc
+		extra int64 // output charged beyond the input estimate
+	}{
+		{"absent socket", small, func(t *testing.T) string { return filepath.Join(t.TempDir(), "absent.sock") }, nil, 0},
+		{"stale socket", small, staleUnix, nil, 0},
+		{"stalls past the call bound", large, nil, func(w http.ResponseWriter, r *http.Request) {
+			io.Copy(io.Discard, r.Body)
+			<-stalled
+		}, 32000},
+		{"hangs up after the request", small, nil, func(w http.ResponseWriter, r *http.Request) {
+			io.Copy(io.Discard, r.Body)
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err == nil {
+				conn.Close()
+			}
+		}, 100},
+		{"aborts after the request", small, nil, func(w http.ResponseWriter, r *http.Request) {
+			io.Copy(io.Discard, r.Body)
+			panic(http.ErrAbortHandler)
+		}, 100},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var sock string
+			if c.h != nil {
+				sock = serveUnix(t, &fakeEgress{h: c.h})
+			} else {
+				sock = c.sock(t)
+			}
+			fwd := Forward(Config{Socket: sock, Label: func(string) string { return "public" }, Denied: func(string, Denial) {}})
+			m, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "meter.json"), CallTimeout: 100 * time.Millisecond,
+				MachineCap: meter.Limits{Calls: 10, Tokens: 1 << 30}, OverallCap: meter.Limits{Calls: 10, Tokens: 1 << 30}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			w := httptest.NewRecorder()
+			m.Wrap("m1", fwd("m1")).ServeHTTP(w, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(c.body)))
+			if w.Code != http.StatusServiceUnavailable {
+				t.Fatalf("got %d", w.Code)
+			}
+			want := meter.Tokens(int64(len(c.body))) + c.extra
+			if u := m.Usage("m1"); u.Tokens != want || u.Calls != 1 {
+				t.Fatalf("charged %d tokens and %d calls, want %d and 1", u.Tokens, u.Calls, want)
+			}
+		})
+	}
+}
+
+// staleUnix leaves a socket file behind with nothing listening on it, as
+// a vault process that died does.
+func staleUnix(t *testing.T) string {
+	sock := filepath.Join(t.TempDir(), "stale.sock")
+	l, err := net.ListenUnix("unix", &net.UnixAddr{Name: sock, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.SetUnlinkOnClose(false)
+	l.Close()
+	return sock
 }
 
 // Token streams keep flowing: each chunk the vault process flushes reaches
@@ -150,6 +242,79 @@ func TestStreamsAreFlushed(t *testing.T) {
 	rest, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(rest), "two") {
 		t.Fatalf("rest %q", rest)
+	}
+}
+
+// gateBody hands over the guest's request body, then holds the
+// transport's trailing EOF read until gate closes.
+type gateBody struct {
+	orig io.ReadCloser
+	gate chan struct{}
+	eof  bool
+}
+
+func (g *gateBody) Read(b []byte) (int, error) {
+	if g.eof {
+		<-g.gate
+		return g.orig.Read(b)
+	}
+	n, err := g.orig.Read(b)
+	if err == io.EOF {
+		g.eof = true
+		if n == 0 {
+			<-g.gate
+			return g.orig.Read(b)
+		}
+		return n, nil
+	}
+	return n, err
+}
+
+func (g *gateBody) Close() error { return g.orig.Close() }
+
+// The guest's request body stays readable by the transport after the
+// response has started. Its trailing EOF read is held until the guest has
+// the first chunk; had the server drained and closed the body when the
+// response began, that read would fail, the transport would drop the
+// vault connection, and the rest of the stream would be lost.
+func TestStreamSurvivesTrailingBodyRead(t *testing.T) {
+	next := make(chan struct{})
+	fe := &fakeEgress{h: func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "data: one\n\n")
+		w.(http.Flusher).Flush()
+		<-next
+		// A dropped connection shows here as a cancelled request; the
+		// second chunk must not race it.
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(50 * time.Millisecond):
+		}
+		io.WriteString(w, "data: two\n\n")
+	}}
+	sock := serveUnix(t, fe)
+	fwd := Forward(Config{Socket: sock, Label: func(string) string { return "public" }, Denied: func(string, Denial) {}})
+	gate := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = &gateBody{orig: r.Body, gate: gate}
+		fwd("m1").ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+	resp, err := http.Post(srv.URL+"/openai/v1/chat/completions", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	buf := make([]byte, 64)
+	n, _ := resp.Body.Read(buf)
+	if !strings.Contains(string(buf[:n]), "one") {
+		t.Fatalf("first chunk %q", buf[:n])
+	}
+	close(gate)
+	close(next)
+	rest, err := io.ReadAll(resp.Body)
+	if !strings.Contains(string(rest), "two") {
+		t.Fatalf("rest %q err %v", rest, err)
 	}
 }
 
@@ -265,6 +430,11 @@ func TestEgressDeniedMarkIsScrubbed(t *testing.T) {
 // declared: the meter keeps its own count of what the guest got.
 func TestTruncatedBodyReportsNoUsage(t *testing.T) {
 	fe := &fakeEgress{h: func(w http.ResponseWriter, r *http.Request) {
+		// Read the request first: closing a socket with unread data
+		// resets it, and a reset can reach the broker before the
+		// response does, which turns the call into a 503 with no
+		// stream to cut.
+		io.Copy(io.Discard, r.Body)
 		conn, buf, err := w.(http.Hijacker).Hijack()
 		if err != nil {
 			return
@@ -286,5 +456,90 @@ func TestTruncatedBodyReportsNoUsage(t *testing.T) {
 	m.Wrap("m1", fwd("m1")).ServeHTTP(w, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
 	if want := meter.Tokens(int64(len(body))) + meter.Tokens(2); m.Usage("m1").Tokens != want {
 		t.Fatalf("charged %d tokens, want the counted floor %d", m.Usage("m1").Tokens, want)
+	}
+}
+
+// REQ: LOOP-5, CHG-1
+
+// A replay machine's calls go to the vault process like a live machine's,
+// always labelled private, carrying the routing rule of the tree under
+// evaluation; the vault process applies it within the owner's grants. A
+// guest cannot send a rule of its own, and a machine outside the replay
+// prefix never gets the evaluation route.
+func TestLOOP5EvaluationCallsCarryTheTreesRule(t *testing.T) {
+	fe := &fakeEgress{h: func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, `{"ok":true}`) }}
+	sock := serveUnix(t, fe)
+	ev := Evaluation(Config{Socket: sock, Label: func(string) string { return "public" }, Denied: (&denials{}).add, OverCeiling: func(string) {}})
+
+	rule := []byte(`{"chat":[{"provider":"anthropic","model":"m"}]}`)
+	for _, c := range []struct {
+		rule []byte
+		want string
+	}{{rule, base64.StdEncoding.EncodeToString(rule)}, {nil, ""}} {
+		req := httptest.NewRequest("POST", "/openai/v1/chat/completions", strings.NewReader(`{}`))
+		req.Header.Set(HeaderRule, "eyJndWVzdCI6MX0=")
+		w := httptest.NewRecorder()
+		ev("eval-0a1b", c.rule).ServeHTTP(w, req)
+		if w.Code != 200 {
+			t.Fatalf("status %d", w.Code)
+		}
+		fe.mu.Lock()
+		got := fe.seen[len(fe.seen)-1]
+		fe.mu.Unlock()
+		if got.Header.Get(HeaderRule) != c.want || got.Header.Get(HeaderLabel) != "private" || got.Header.Get(HeaderMachine) != "eval-0a1b" {
+			t.Errorf("rule %q label %q machine %q", got.Header.Get(HeaderRule), got.Header.Get(HeaderLabel), got.Header.Get(HeaderMachine))
+		}
+	}
+
+	n := len(fe.seen)
+	w := httptest.NewRecorder()
+	ev("agent", rule).ServeHTTP(w, httptest.NewRequest("POST", "/openai/v1/chat/completions", strings.NewReader(`{}`)))
+	if w.Code != http.StatusServiceUnavailable || len(fe.seen) != n {
+		t.Fatalf("non-replay machine: status %d, forwarded %d", w.Code, len(fe.seen)-n)
+	}
+
+	// The live route never forwards a rule, whatever the guest sends.
+	req := httptest.NewRequest("POST", "/openai/v1/chat/completions", strings.NewReader(`{}`))
+	req.Header.Set(HeaderRule, base64.StdEncoding.EncodeToString(rule))
+	Forward(Config{Socket: sock, Label: func(string) string { return "private" }, Denied: (&denials{}).add})("agent").ServeHTTP(httptest.NewRecorder(), req)
+	fe.mu.Lock()
+	defer fe.mu.Unlock()
+	if r := fe.seen[len(fe.seen)-1]; r.Header.Get(HeaderRule) != "" {
+		t.Fatalf("live route forwarded a rule: %q", r.Header.Get(HeaderRule))
+	}
+}
+
+// Evaluation needs somewhere to report a ceiling refusal: without
+// OverCeiling it forwards nothing. With it, a refusal the vault process
+// gives with ReasonEvalCeiling names the replay machine to OverCeiling,
+// and other denials do not.
+func TestLOOP5CeilingRefusalsReachTheEvaluator(t *testing.T) {
+	var reason atomic.Value
+	reason.Store(ReasonEvalCeiling)
+	fe := &fakeEgress{h: func(w http.ResponseWriter, r *http.Request) {
+		b, _ := json.Marshal(Denial{Adapter: "router", Method: r.Method, Status: 403, Reason: reason.Load().(string)})
+		w.Header().Set(HeaderDenial, string(b))
+		http.Error(w, "refused", 403)
+	}}
+	sock := serveUnix(t, fe)
+	call := func(cfg Config) {
+		w := httptest.NewRecorder()
+		Evaluation(cfg)("eval-0a1b", nil).ServeHTTP(w, httptest.NewRequest("POST", "/openai/v1/chat/completions", strings.NewReader(`{}`)))
+	}
+	cfg := Config{Socket: sock, Label: func(string) string { return "private" }, Denied: (&denials{}).add}
+	call(cfg)
+	fe.mu.Lock()
+	n := len(fe.seen)
+	fe.mu.Unlock()
+	if n != 0 {
+		t.Fatal("forwarded without OverCeiling")
+	}
+	var over []string
+	cfg.OverCeiling = func(m string) { over = append(over, m) }
+	call(cfg)
+	reason.Store("no declared operation matches")
+	call(cfg)
+	if len(over) != 1 || over[0] != "eval-0a1b" {
+		t.Fatalf("OverCeiling got %q", over)
 	}
 }

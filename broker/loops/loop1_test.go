@@ -1,0 +1,1331 @@
+package loops
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"reflect"
+	"sort"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/ghbmrk/agentos/broker/change"
+	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/route"
+	"github.com/ghbmrk/agentos/broker/skill/format"
+)
+
+// REQ: LOOP-4, LOOP-6, CHG-1, OP-7
+//
+// Loop 1 on a real journal and change pipeline: owner outcomes become
+// verdicts and held-out cases; the journal is mined for failures,
+// corrections, slow and expensive steps, and repeated trajectories; a
+// builder sees only the dev split and tasks with no held-out case; and the
+// only way a candidate takes effect is through the pipeline.
+
+type builder struct {
+	mu     sync.Mutex
+	briefs []Brief
+	files  map[string][]byte
+	err    error
+}
+
+func (b *builder) Build(_ context.Context, br Brief) (change.Candidate, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.briefs = append(b.briefs, br)
+	if b.err != nil {
+		return change.Candidate{}, b.err
+	}
+	// A builder may claim anything; Loop 1 overrides what is the broker's.
+	return change.Candidate{Source: change.Upstream, Origin: "builder", Public: true, Files: b.files}, nil
+}
+
+func (b *builder) got() []Brief {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]Brief(nil), b.briefs...)
+}
+
+func (r *rig) harvester() *Harvester {
+	return &Harvester{J: r.eng, Pipeline: r.p, Store: &change.MemStore{}}
+}
+
+// corrected journals a task in its own goal whose draft the owner edited
+// from v1 to v2, and harvests it.
+func (r *rig) corrected(h *Harvester, n int) {
+	r.t.Helper()
+	id := fmt.Sprintf("draft-%d", n)
+	r.task(id, fmt.Sprintf("g%d", n), "mail", "draft", "private")
+	must(r.t, h.Harvest(Outcome{Intent: id, Action: Edited, Input: []byte("procedures/mail"),
+		Output: []byte("v1"), Correction: []byte("v2")}))
+}
+
+func TestOwnerOutcomesBecomeVerdictsAndCases(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	acts := []Action{Approved, Edited, Denied, Undone}
+	for i, a := range acts {
+		id := fmt.Sprintf("t%d", i)
+		r.task(id, "g"+id, "mail", "send", "private")
+		must(t, h.Harvest(Outcome{Intent: id, Action: a, Input: []byte("reply to Sam"), Output: []byte("ok"), Correction: []byte("fixed")}))
+		st, err := r.eng.Get(id)
+		must(t, err)
+		want := journal.VerdictWrong
+		if a == Approved {
+			want = journal.VerdictGood
+		}
+		if st.Quality.Verdict != want || st.Quality.Source != "owner" {
+			t.Fatalf("%s: quality %+v", a, st.Quality)
+		}
+	}
+	ev, err := h.Evidence()
+	must(t, err)
+	if ev.HeldOut+len(ev.Dev) != len(acts) {
+		t.Fatalf("held out %d + dev %d, want %d cases", ev.HeldOut, len(ev.Dev), len(acts))
+	}
+	for _, c := range ev.Dev {
+		if c.Class != change.ClassTask {
+			t.Fatalf("dev case class %s", c.Class)
+		}
+	}
+	r.task("t9", "g9", "mail", "send", "private")
+	if err := h.Harvest(Outcome{Intent: "t9", Action: Edited, Input: []byte("x"), Output: []byte("y")}); !errors.Is(err, ErrAction) {
+		t.Fatalf("an edit with no correction: %v", err)
+	}
+	if err := h.Harvest(Outcome{Intent: "nope", Action: Approved, Input: []byte("x")}); err == nil {
+		t.Fatal("outcome on an intent that does not exist")
+	}
+}
+
+func TestMinerFindsTheLoop4Signals(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	// Failures: an effect that did not happen.
+	r.tasks.out["pay-1"] = journal.ResultNotApplied
+	r.task("pay-1", "f1", "bank", "pay", "private")
+	// Slow steps, twice.
+	r.tasks.delay["book-1"], r.tasks.delay["book-2"] = 5*time.Minute, 4*time.Minute
+	r.task("book-1", "s1", "calendar", "book", "private")
+	r.task("book-2", "s2", "calendar", "book", "private")
+	// A repeated trajectory over three tasks.
+	for i := 0; i < 3; i++ {
+		g := fmt.Sprintf("rep%d", i)
+		r.task(g+"-a", g, "mail", "search", "private")
+		r.task(g+"-b", g, "mail", "label", "private")
+	}
+	// An owner correction.
+	r.corrected(h, 1)
+	cost := map[string]int64{"goal:f1": 100, "goal:s1": 100, "goal:s2": 100, "goal:rep0": 2000}
+	l, err := NewLearn(LearnConfig{Pipeline: r.p, Journal: r.eng, Harvest: h,
+		Cost: func(k string) (int64, bool) { c, ok := cost[k]; return c, ok }})
+	must(t, err)
+	ev, err := h.Evidence()
+	must(t, err)
+	got := map[string]change.Class{}
+	for _, hy := range l.mine(ev) {
+		got[hy.Key] = hy.Class
+		for _, k := range hy.Tasks {
+			if ev.Held(k) {
+				t.Fatalf("hypothesis %s cites held-out task %s", hy.Key, k)
+			}
+		}
+	}
+	want := map[string]change.Class{
+		"failure:bank/pay":              change.ClassProcedure,
+		"slow:calendar/book":            change.ClassSkill,
+		"repeat:mail/search>mail/label": change.ClassSkill,
+		"expensive:mail/search":         change.ClassContext,
+	}
+	if !ev.Held("goal:g1") {
+		want["correction:mail/draft"] = change.ClassProcedure
+	}
+	for k, c := range want {
+		if got[k] != c {
+			t.Errorf("missing %s (%s); mined %v", k, c, got)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("mined %v, want %v", got, want)
+	}
+}
+
+func TestLoop1WaitsForEvidenceThenAdoptsThroughThePipeline(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	b := &builder{files: map[string][]byte{"procedures/mail": []byte("v2")}}
+	l, err := NewLearn(LearnConfig{Pipeline: r.p, Journal: r.eng, Harvest: h, Builder: b, Now: r.clk.now})
+	must(t, err)
+	r.restart(l)
+	h.Wake = r.s.Wake
+
+	n := 0
+	for {
+		ev, err := h.Evidence()
+		must(t, err)
+		if ev.HeldOut == 4 && len(ev.Dev) > 0 {
+			break
+		}
+		n++
+		r.corrected(h, n)
+	}
+	if ran, _ := r.s.Tick(context.Background()); ran {
+		t.Fatal("Loop 1 proposed with 4 held-out cases")
+	}
+	if d := strings.Join(r.s.Digest(), "\n"); !strings.Contains(d, "waiting until there are 5 past tasks to test them on (4 so far)") {
+		t.Fatalf("digest does not say Loop 1 is waiting: %q", d)
+	}
+	if r.ev.runs() != 0 {
+		t.Fatal("evaluated while waiting for evidence")
+	}
+	for ev, _ := h.Evidence(); ev.HeldOut < 5; ev, _ = h.Evidence() {
+		n++
+		r.corrected(h, n)
+	}
+	if ran, _ := r.s.Tick(context.Background()); !ran {
+		t.Fatal("Loop 1 did nothing with enough evidence")
+	}
+	if got := r.p.Files("procedures")["procedures/mail"]; string(got) != "v2" {
+		t.Fatalf("procedure is %q after Loop 1's candidate", got)
+	}
+	ads := r.p.Adoptions()
+	if len(ads) != 1 || ads[0].Basis != change.BasisStanding || ads[0].Origin != "loop1" || ads[0].Public || ads[0].Source != change.Local {
+		t.Fatalf("adoption %+v", ads)
+	}
+	if sh := r.s.Share()[Improve]; sh != 1 {
+		t.Fatalf("Loop 1's measured share %v after a gain", sh)
+	}
+	// Every brief held dev cases only and no held-out task.
+	ev, _ := h.Evidence()
+	for _, br := range b.got() {
+		dev := map[string]bool{}
+		for _, c := range ev.Dev {
+			dev[c.ID] = true
+		}
+		for _, c := range br.Dev {
+			if !dev[c.ID] || c.Expect == nil && c.Outcome == "" {
+				t.Fatalf("brief carries non-dev case %s", c.ID)
+			}
+		}
+		for _, s := range br.Hypothesis.Evidence {
+			if ev.Held(TaskKey(s.Intent)) {
+				t.Fatalf("brief carries held-out task %s", s.Intent.ID)
+			}
+		}
+	}
+	if len(b.got()) != 1 {
+		t.Fatalf("%d builds, want 1", len(b.got()))
+	}
+	// The same hypothesis is not tried again until more evidence arrives.
+	if ran, _ := r.s.Tick(context.Background()); ran {
+		t.Fatal("tried the same hypothesis again with no new evidence")
+	}
+}
+
+func TestCandidatesOutsideTheirClassNeverReachThePipeline(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	n := 0
+	for _, files := range []map[string][]byte{
+		{"budget/spare.json": []byte(`{"calls":5000}`)},
+		{"suites/drop": []byte("x")},
+		{"skills/greet": []byte("hello")}, // a procedure hypothesis may not write skills
+	} {
+		b := &builder{files: files}
+		l, err := NewLearn(LearnConfig{Pipeline: r.p, Journal: r.eng, Harvest: h, Builder: b, MinHeldOut: 1})
+		must(t, err)
+		for i := 0; i < 8; i++ {
+			n++
+			r.corrected(h, n)
+		}
+		job, ok := l.Next(context.Background(), true)
+		if !ok {
+			t.Fatal("no job offered")
+		}
+		res := job.Run(context.Background())
+		if !errors.Is(res.Err, ErrOutOfClass) || res.Value != 0 {
+			t.Fatalf("%v: result %+v", files, res)
+		}
+	}
+	if r.ev.runs() != 0 || len(r.p.Adoptions()) != 0 {
+		t.Fatalf("an out-of-class candidate was evaluated (%d runs)", r.ev.runs())
+	}
+}
+
+// notReady is a builder whose evidence cannot yield a candidate yet.
+type notReady struct {
+	builder
+	ready bool
+}
+
+func (b *notReady) Ready(Brief) bool { return b.ready }
+
+// LOOP-3, L10: a builder that is not ready for a hypothesis gets no job, so
+// nothing is measured against Loop 1 (no dry run toward parking); the
+// hypothesis waits for more supporting tasks.
+func TestNotReadyWaitsForMoreTasks(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	b := &notReady{builder: builder{files: map[string][]byte{"procedures/mail": []byte("v2")}}}
+	l, err := NewLearn(LearnConfig{Pipeline: r.p, Journal: r.eng, Harvest: h, Builder: b, MinHeldOut: 1})
+	must(t, err)
+	n := 0
+	for i := 0; i < 8; i++ {
+		n++
+		r.corrected(h, n)
+	}
+	if job, ok := l.Next(context.Background(), true); ok {
+		t.Fatalf("offered %s while the builder was not ready", job.Name)
+	}
+	b.ready = true
+	if _, ok := l.Next(context.Background(), true); ok {
+		t.Fatal("offered again with no new supporting task")
+	}
+	// Held-out tasks never support a hypothesis, so add tasks until one
+	// lands in its evidence.
+	var job Job
+	ok := false
+	for i := 0; i < 20 && !ok; i++ {
+		n++
+		r.corrected(h, n)
+		job, ok = l.Next(context.Background(), true)
+	}
+	if !ok || job.Name != "candidate" {
+		t.Fatalf("no candidate after new supporting tasks: %v %v", job.Name, ok)
+	}
+	if len(b.got()) != 0 {
+		t.Fatal("Build ran before the job")
+	}
+}
+
+// skillFile is a valid one-step skill or procedure file for account,
+// with the shape its content gives.
+func skillFile(t *testing.T, kind format.Kind, account string) (shape string, b []byte) {
+	t.Helper()
+	return skillWith(t, kind, account, nil)
+}
+
+// skillWith is skillFile with extra params on its step, named after the
+// shape without them.
+func skillWith(t *testing.T, kind format.Kind, account string, params map[string]format.Node) (shape string, b []byte) {
+	t.Helper()
+	sk := &format.Skill{Version: format.Version, Kind: kind, ID: "k000000000000", Runs: 1,
+		Slots: []format.Slot{{Name: "to", Type: format.Email, Max: 64}},
+		Steps: []format.Step{{Account: account, Action: "send", Recipients: []format.Node{{Slot: "to"}}}}}
+	shape = sk.Shape()
+	sk.ID = "k" + shape
+	if kind == format.KindProcedure {
+		sk.ID = "p" + shape
+	}
+	sk.Steps[0].Params = params
+	if params == nil {
+		if err := sk.Validate(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return shape, sk.Encode()
+}
+
+// CAP-5: a skill candidate may delete the procedure it replaces, but may
+// not write there, and no other class may delete outside its namespace.
+// "Replaces" is the shape the skill file's own steps give, not its name
+// (P3-6e, security R1 on #74).
+func TestSkillMaySupersedeItsProcedure(t *testing.T) {
+	s1, b1 := skillFile(t, format.KindSkill, "mail")
+	s2, b2 := skillFile(t, format.KindSkill, "chat")
+	_, pb := skillFile(t, format.KindProcedure, "mail")
+	ps2, pb2 := skillFile(t, format.KindProcedure, "chat")
+	if err := inClass(change.ClassProcedure, change.Candidate{Files: map[string][]byte{"procedures/p" + ps2 + ".json": pb2}}); err != nil {
+		t.Fatal(err)
+	}
+	_, emptyObj := skillWith(t, format.KindSkill, "mail", map[string]format.Node{"zzz": {Obj: map[string]format.Node{}}})
+	dup := bytes.Replace(b1, []byte(`{"version":1,`), []byte(`{"version":1,"kind":"procedure",`), 1)
+	k := func(s string) string { return "skills/k" + s + ".json" }
+	p := func(s string) string { return "procedures/p" + s + ".json" }
+	ok := change.Candidate{Files: map[string][]byte{k(s1): b1}, Delete: []string{p(s1)}}
+	if err := inClass(change.ClassSkill, ok); err != nil {
+		t.Fatal(err)
+	}
+	sk := map[string][]byte{k(s1): b1}
+	for name, c := range map[string]struct {
+		class change.Class
+		cand  change.Candidate
+	}{
+		"skill writes procedures": {change.ClassSkill, change.Candidate{Files: map[string][]byte{p(s1): pb}}},
+		"skill deletes budget":    {change.ClassSkill, change.Candidate{Delete: []string{"budget/spare.json"}}},
+		"other shape's procedure": {change.ClassSkill, change.Candidate{Files: sk, Delete: []string{p(s2)}}},
+		"procedure with no skill": {change.ClassSkill, change.Candidate{Delete: []string{p(s1)}}},
+		"two skills":              {change.ClassSkill, change.Candidate{Files: map[string][]byte{k(s1): b1, k(s2): b2}, Delete: []string{p(s1)}}},
+		"procedure deletes skill": {change.ClassProcedure, change.Candidate{Delete: []string{k(s1)}}},
+		// The builder names the file after s1's shape, but its steps are s2's.
+		"skill renamed to another shape": {change.ClassSkill, change.Candidate{Files: map[string][]byte{k(s1): b2}, Delete: []string{p(s1)}}},
+		"skill file not a skill":         {change.ClassSkill, change.Candidate{Files: map[string][]byte{k(s1): []byte("{}")}, Delete: []string{p(s1)}}},
+		"procedure file under skills":    {change.ClassSkill, change.Candidate{Files: map[string][]byte{k(s1): pb}, Delete: []string{p(s1)}}},
+		// A task-B procedure named as task A's (security C1 on #89).
+		"procedure mislabelled": {change.ClassProcedure, change.Candidate{Files: map[string][]byte{p(s1): pb2}}},
+		// An empty object adds a {} param but no shape leaf (L3 on #89).
+		"skill with an empty obj":  {change.ClassSkill, change.Candidate{Files: map[string][]byte{k(s1): emptyObj}, Delete: []string{p(s1)}}},
+		"skill with duplicate key": {change.ClassSkill, change.Candidate{Files: map[string][]byte{k(s1): dup}, Delete: []string{p(s1)}}},
+		"skill with trailing }":    {change.ClassSkill, change.Candidate{Files: map[string][]byte{k(s1): append(bytes.Clone(b1), '}')}, Delete: []string{p(s1)}}},
+		// Not skill-file names: a free-form file is never superseded, and
+		// on a case-insensitive disk pABC… could alias the real pabc…
+		// (L3 and security R1 on #89).
+		"free-form names":     {change.ClassSkill, change.Candidate{Files: map[string][]byte{"skills/kABCDEF012345.json": []byte("x")}, Delete: []string{"procedures/pABCDEF012345.json"}}},
+		"free-form shape":     {change.ClassSkill, change.Candidate{Files: map[string][]byte{"skills/kx.json": []byte("x")}, Delete: []string{"procedures/px.json"}}},
+		"skill not canonical": {change.ClassSkill, change.Candidate{Files: map[string][]byte{k(s1): append([]byte(" "), b1...)}, Delete: []string{p(s1)}}},
+	} {
+		if err := inClass(c.class, c.cand); !errors.Is(err, ErrOutOfClass) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+// fakePipeline records what Loop 1 asks of the pipeline.
+type fakePipeline struct {
+	mu       sync.Mutex
+	routing  int
+	rechecks int
+}
+
+func (f *fakePipeline) Propose(context.Context, change.Candidate) (change.Report, error) {
+	return change.Report{State: change.StateRejected}, nil
+}
+func (f *fakePipeline) ProposeRouting(context.Context, change.Router) (change.Report, bool, error) {
+	f.mu.Lock()
+	f.routing++
+	f.mu.Unlock()
+	return change.Report{State: change.StateAdopted, Score: change.Score{Passed: 6, BaselinePassed: 5}}, true, nil
+}
+func (f *fakePipeline) Adoptions() []change.Adoption {
+	return []change.Adoption{{ID: "c1"}}
+}
+func (f *fakePipeline) Recheck(context.Context) ([]string, error) {
+	f.mu.Lock()
+	f.rechecks++
+	f.mu.Unlock()
+	return []string{"c1"}, nil
+}
+
+type router struct{ active, cand route.Rule }
+
+func (r *router) Rule() route.Rule           { return r.active }
+func (r *router) SetRule(x route.Rule) error { r.active = x; return nil }
+func (r *router) Candidate() route.Rule      { return r.cand }
+
+func TestRoutingCandidatesNeedLiveReplay(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	for i := 1; i <= 12; i++ {
+		r.corrected(h, i)
+	}
+	fp := &fakePipeline{}
+	rt := &router{active: route.Rule{"chat": {{Provider: "openai", Model: "a"}, {Provider: "anthropic", Model: "b"}}},
+		cand: route.Rule{"chat": {{Provider: "anthropic", Model: "b"}, {Provider: "openai", Model: "a"}}}}
+	cfg := LearnConfig{Pipeline: fp, Journal: r.eng, Harvest: h, Router: rt, RecheckCases: 1000, Now: r.clk.now}
+	l, err := NewLearn(cfg)
+	must(t, err)
+	if job, ok := l.Next(context.Background(), true); ok {
+		t.Fatalf("offline replay: offered %s", job.Name)
+	}
+	cfg.ModelWired = true
+	l, err = NewLearn(cfg)
+	must(t, err)
+	if _, ok := l.Next(context.Background(), false); ok {
+		t.Fatal("offered evaluation with no spare budget")
+	}
+	job, ok := l.Next(context.Background(), true)
+	if !ok || job.Name != "routing" || !job.UsesModel {
+		t.Fatalf("job %+v, %v", job, ok)
+	}
+	if res := job.Run(context.Background()); res.Value != 1.25 || fp.routing != 1 {
+		t.Fatalf("routing result %+v, proposals %d", res, fp.routing)
+	}
+	if _, ok := l.Next(context.Background(), true); ok {
+		t.Fatal("same routing rule offered again with no new evidence")
+	}
+}
+
+func TestRecheckRunsWhenNewEvidenceArrives(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	fp := &fakePipeline{}
+	l, err := NewLearn(LearnConfig{Pipeline: fp, Journal: r.eng, Harvest: h, Now: r.clk.now})
+	must(t, err)
+	n := 0
+	held := func() int { ev, _ := h.Evidence(); return ev.HeldOut }
+	for held() < 4 {
+		n++
+		r.corrected(h, n)
+	}
+	if _, ok := l.Next(context.Background(), true); ok {
+		t.Fatal("recheck before 5 new held-out cases")
+	}
+	for held() < 5 {
+		n++
+		r.corrected(h, n)
+	}
+	job, ok := l.Next(context.Background(), true)
+	if !ok || job.Name != "recheck" {
+		t.Fatalf("job %+v, %v", job, ok)
+	}
+	if res := job.Run(context.Background()); res.Value != 1 || fp.rechecks != 1 {
+		t.Fatalf("recheck result %+v", res)
+	}
+	if _, ok := l.Next(context.Background(), true); ok {
+		t.Fatal("recheck offered again with no new evidence")
+	}
+	// One more case, and a week later, it runs again.
+	for held() < 6 {
+		n++
+		r.corrected(h, n)
+	}
+	r.clk.add(8 * 24 * time.Hour)
+	if job, ok := l.Next(context.Background(), true); !ok || job.Name != "recheck" {
+		t.Fatal("weekly recheck not offered")
+	}
+}
+
+// askPipeline answers every proposal with "waiting on the owner".
+type askPipeline struct {
+	fakePipeline
+	proposals int
+}
+
+func (a *askPipeline) Propose(context.Context, change.Candidate) (change.Report, error) {
+	a.mu.Lock()
+	a.proposals++
+	a.mu.Unlock()
+	return change.Report{State: change.StateAwaitingOwner}, nil
+}
+
+func TestALapsedOwnerRequestBacksOffThenStops(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	n := 0
+	more := func(k int) {
+		for i := 0; i < k; i++ {
+			n++
+			r.corrected(h, n)
+		}
+	}
+	more(12)
+	ap := &askPipeline{}
+	b := &builder{files: map[string][]byte{"procedures/mail": []byte("v2")}}
+	l, err := NewLearn(LearnConfig{Pipeline: ap, Journal: r.eng, Harvest: h, Builder: b, RecheckCases: 1000,
+		RecheckEvery: 365 * 24 * time.Hour, Now: r.clk.now})
+	must(t, err)
+	run := func() bool {
+		job, ok := l.Next(context.Background(), true)
+		if ok {
+			job.Run(context.Background())
+		}
+		return ok
+	}
+	if !run() || ap.proposals != 1 {
+		t.Fatal("first proposal not made")
+	}
+	// New evidence, but the owner was just asked: wait for the backoff.
+	// (Thirteen tasks, so one lands in dev outside the next goal of a
+	// held-out task, which mining also skips; the split is deterministic.)
+	more(13)
+	if run() {
+		t.Fatal("re-proposed inside the backoff")
+	}
+	r.clk.add(25 * time.Hour)
+	if !run() || ap.proposals != 2 {
+		t.Fatal("not re-proposed after the backoff")
+	}
+	// After two lapsed asks it is not proposed again, however long, even
+	// with new mined evidence (so the stop, not a lack of evidence, holds
+	// it back).
+	mined := func() int {
+		ev, err := h.Evidence()
+		must(t, err)
+		n := 0
+		for _, hy := range l.mine(ev) {
+			if hy.Key == "correction:mail/draft" {
+				n = len(hy.Tasks)
+			}
+		}
+		return n
+	}
+	before := mined()
+	for i := 0; i < 40 && mined() <= before; i++ {
+		more(1)
+	}
+	if mined() <= before {
+		t.Fatal("no new mined evidence for the third round")
+	}
+	r.clk.add(30 * 24 * time.Hour)
+	if run() {
+		t.Fatal("proposed a third time; it should wait in the digest")
+	}
+}
+
+func TestBuildersAreChosenBySignal(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	for i := 1; i <= 12; i++ {
+		r.corrected(h, i)
+	}
+	skills := &builder{files: map[string][]byte{"skills/x": []byte("y")}}
+	l, err := NewLearn(LearnConfig{Pipeline: &fakePipeline{}, Journal: r.eng, Harvest: h, RecheckCases: 1000,
+		Builder: BySignal{SignalRepeat: skills}})
+	must(t, err)
+	// Only correction hypotheses exist; the repeat-only builder gets none.
+	if job, ok := l.Next(context.Background(), true); ok {
+		t.Fatalf("offered %s with no builder for its signal", job.Name)
+	}
+	for i := 0; i < 3; i++ {
+		g := fmt.Sprintf("rep%d", i)
+		r.task(g+"-a", g, "mail", "search", "private")
+		r.task(g+"-b", g, "mail", "label", "private")
+	}
+	job, ok := l.Next(context.Background(), true)
+	if !ok {
+		t.Fatal("repeat hypothesis not offered to its builder")
+	}
+	job.Run(context.Background())
+	if got := skills.got(); len(got) != 1 || got[0].Hypothesis.Signal != SignalRepeat {
+		t.Fatalf("briefs %+v", got)
+	}
+}
+
+// cases captures what Harvest adds.
+type cases struct{ got []change.Case }
+
+func (c *cases) AddTaskCase(x change.Case) error { c.got = append(c.got, x); return nil }
+func (c *cases) Dev(change.Class) []change.Case  { return nil }
+
+func TestHarvestNeverWidensTheJournalLabel(t *testing.T) {
+	r := newRig(t)
+	cs := &cases{}
+	h := &Harvester{J: r.eng, Pipeline: cs, Store: &change.MemStore{}}
+	r.task("priv", "gp", "mail", "send", "private")
+	r.task("pub", "gq", "mail", "send", "public")
+	r.task("pub2", "gr", "mail", "send", "public")
+	must(t, h.Harvest(Outcome{Intent: "priv", Action: Approved, Input: []byte("x"), Output: []byte("y"), Public: true}))
+	must(t, h.Harvest(Outcome{Intent: "pub", Action: Approved, Input: []byte("x"), Output: []byte("y"), Public: true}))
+	must(t, h.Harvest(Outcome{Intent: "pub2", Action: Approved, Input: []byte("x"), Output: []byte("y")}))
+	want := map[string]bool{"priv": false, "pub": true, "pub2": false}
+	for _, c := range cs.got {
+		if c.Public != want[c.ID] {
+			t.Fatalf("case %s public=%v", c.ID, c.Public)
+		}
+	}
+	if len(cs.got) != 3 {
+		t.Fatalf("%d cases", len(cs.got))
+	}
+}
+
+// failSecond saves once, then fails: a crash between the harvester's two
+// writes.
+type failSecond struct {
+	change.MemStore
+	n int
+}
+
+func (f *failSecond) Save(b []byte) error {
+	f.n++
+	if f.n > 1 {
+		return errors.New("disk gone")
+	}
+	return f.MemStore.Save(b)
+}
+
+func TestACrashMidHarvestStillKeepsTheTaskFromTheBuilder(t *testing.T) {
+	r := newRig(t)
+	st := &failSecond{}
+	h := &Harvester{J: r.eng, Pipeline: r.p, Store: st}
+	// Find a task whose case lands held out, so it must never be mined.
+	var id string
+	for i := 0; ; i++ {
+		id = fmt.Sprintf("crash-%d", i)
+		r.task(id, "gc"+id, "mail", "draft", "private")
+		st.n = 0
+		err := h.Harvest(Outcome{Intent: id, Action: Edited, Input: []byte("procedures/mail"), Output: []byte("v1"), Correction: []byte("v2")})
+		if err == nil {
+			t.Fatal("second save did not fail")
+		}
+		dev := false
+		for _, c := range r.p.Dev(change.ClassTask) {
+			dev = dev || c.ID == id
+		}
+		if !dev {
+			break
+		}
+	}
+	// The box restarts: a fresh harvester over what was saved.
+	h2 := &Harvester{J: r.eng, Pipeline: r.p, Store: &st.MemStore}
+	ev, err := h2.Evidence()
+	must(t, err)
+	if !ev.Held("goal:gc" + id) {
+		t.Fatal("a held-out task the pipeline holds is not excluded from mining after a crash")
+	}
+	if ev.HeldOut != 0 {
+		t.Fatalf("an unconfirmed case counted as evidence: %d", ev.HeldOut)
+	}
+	// Retrying the harvest completes it.
+	must(t, h2.Harvest(Outcome{Intent: id, Action: Edited, Input: []byte("procedures/mail"), Output: []byte("v1"), Correction: []byte("v2")}))
+	if ev, _ := h2.Evidence(); ev.HeldOut != 1 {
+		t.Fatalf("after retry: held out %d", ev.HeldOut)
+	}
+}
+
+// TestAHeldOutGoalsWorkIsNotMinedWhereverItLanded: a held-out task's work
+// can land unstamped (the origin bucket), under a goal that ran while it
+// was active, or under the goal that came after it (guest G14). None is
+// mined; a goal that starts later is, so one held-out case does not stop
+// Loop 1 on a one-guest box (#55 B2, arbitrator).
+func TestAHeldOutGoalsWorkIsNotMinedWhereverItLanded(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	var id string
+	for i := 0; ; i++ {
+		id = fmt.Sprintf("held-%d", i)
+		r.task(id, "owner:m"+id, "mail", "draft", "private")
+		must(t, h.Harvest(Outcome{Intent: id, Action: Edited, Input: []byte("procedures/mail"), Output: []byte("v1"), Correction: []byte("v2")}))
+		dev := false
+		for _, c := range r.p.Dev(change.ClassTask) {
+			dev = dev || c.ID == id
+		}
+		if !dev {
+			break
+		}
+	}
+	for _, x := range []struct{ id, goal, action string }{
+		{"loose", "", "refund"},             // unstamped: the origin bucket
+		{"during", "owner:mC", "send"},      // C runs inside A's span
+		{"a-again", "owner:m" + id, "file"}, // A is still active
+		{"trail", "owner:mB", "pay"},        // the goal after A: may be A's trailing work
+		{"later", "owner:mD", "move"},       // starts after A's span and the goal after it
+	} {
+		r.tasks.out[x.id] = journal.ResultNotApplied
+		r.task(x.id, x.goal, "bank", x.action, "private")
+	}
+	l, err := NewLearn(LearnConfig{Pipeline: r.p, Journal: r.eng, Harvest: h})
+	must(t, err)
+	ev, err := h.Evidence()
+	must(t, err)
+	got := map[string]bool{}
+	for _, hy := range l.mine(ev) {
+		got[hy.Key] = true
+	}
+	if got["failure:bank/refund"] || got["failure:bank/pay"] || got["failure:bank/send"] || got["failure:bank/file"] {
+		t.Fatalf("held-out work was mined: %v", got)
+	}
+	if !got["failure:bank/move"] {
+		t.Fatalf("a later task of the lineage was not mined: %v", got)
+	}
+}
+
+// heldCase journals intents of goal(i) until one lands held out and
+// returns its ID.
+func heldCase(t *testing.T, r *rig, h *Harvester, prefix string, goal func(i int) string) string {
+	t.Helper()
+	for i := 0; ; i++ {
+		id := fmt.Sprintf("%s-%d", prefix, i)
+		r.task(id, goal(i), "mail", "draft", "private")
+		must(t, h.Harvest(Outcome{Intent: id, Action: Edited, Input: []byte("procedures/mail"), Output: []byte("v1"), Correction: []byte("v2")}))
+		dev := false
+		for _, c := range r.p.Dev(change.ClassTask) {
+			dev = dev || c.ID == id
+		}
+		if !dev {
+			return id
+		}
+	}
+}
+
+// failing journals a failed intent, so mining reports it if it is mined.
+func (r *rig) failing(id, goal, action string) {
+	r.tasks.out[id] = journal.ResultNotApplied
+	r.task(id, goal, "bank", action, "private")
+}
+
+func minedKeys(t *testing.T, r *rig, h *Harvester) map[string]bool {
+	t.Helper()
+	l, err := NewLearn(LearnConfig{Pipeline: r.p, Journal: r.eng, Harvest: h})
+	must(t, err)
+	ev, err := h.Evidence()
+	must(t, err)
+	got := map[string]bool{}
+	for _, hy := range l.mine(ev) {
+		got[hy.Key] = true
+	}
+	return got
+}
+
+// TestAHeldOutUnstampedCaseHoldsTheGoalsAroundIt: a held case with no goal
+// (the guest held two messages open) may be the work of the goal stamped
+// just before it or of the one stamped just after it (#55 L3 round 2).
+func TestAHeldOutUnstampedCaseHoldsTheGoalsAroundIt(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	r.failing("x", "owner:mX", "refund")
+	heldCase(t, r, h, "none", func(int) string { return "" })
+	r.failing("y", "owner:mY", "pay")
+	r.failing("z", "owner:mZ", "move")
+	got := minedKeys(t, r, h)
+	if got["failure:bank/refund"] || got["failure:bank/pay"] {
+		t.Fatalf("a goal around a held unstamped case was mined: %v", got)
+	}
+	if !got["failure:bank/move"] {
+		t.Fatalf("a later goal was not mined: %v", got)
+	}
+}
+
+// TestAHeldGoalHoldsItsNeighboursInEveryLineageItReached: a goal's work
+// can land in another lineage (a CAP-8 worker stamped with its creator's
+// goal); the goal after it there is held too (#55 L3 round 3).
+func TestAHeldGoalHoldsItsNeighboursInEveryLineageItReached(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	g := heldCase(t, r, h, "g", func(i int) string { return fmt.Sprintf("owner:mG%d", i) })
+	goal := "owner:mG" + g[len("g-"):]
+	for _, x := range []struct{ id, goal, action string }{
+		{"w-g", goal, "label"},          // the held goal's work in the worker
+		{"w-n", "owner:mN", "pay"},      // the worker's next goal: held
+		{"w-later", "owner:mL", "move"}, // clear of it: mined
+	} {
+		r.tasks.out[x.id] = journal.ResultNotApplied
+		in := journal.Intent{ID: x.id, GoalID: x.goal, Origin: "guest:worker", Account: "bank", Action: x.action,
+			Executor: "task", Machine: "worker", Label: "private"}
+		if _, err := r.eng.Submit(in); err != nil {
+			t.Fatal(err)
+		}
+		r.eng.Authorize(context.Background(), x.id)
+		r.eng.Dispatch(context.Background(), x.id)
+	}
+	got := minedKeys(t, r, h)
+	if got["failure:bank/pay"] || got["failure:bank/label"] {
+		t.Fatalf("the held goal's neighbour in the worker was mined: %v", got)
+	}
+	if !got["failure:bank/move"] {
+		t.Fatalf("a later worker goal was not mined: %v", got)
+	}
+}
+
+// TestSeveralHeldGoalsEachHoldTheirNeighbours: with two held goals and
+// interleaved work, each holds the goals in its span and the first after
+// it; goals clear of both are mined.
+func TestSeveralHeldGoalsEachHoldTheirNeighbours(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	heldCase(t, r, h, "a", func(i int) string { return fmt.Sprintf("owner:mA%d", i) })
+	r.failing("p", "owner:mP", "send") // first goal after A: held
+	r.failing("q", "owner:mQ", "file") // clear of A: mined
+	b := heldCase(t, r, h, "b", func(i int) string { return fmt.Sprintf("owner:mB%d", i) })
+	r.failing("s", "owner:mS", "post") // inside B's span: held
+	r.task(b+"-again", "owner:mB"+b[len("b-"):], "mail", "label", "private")
+	r.failing("u", "owner:mU", "pay")  // first goal after B: held
+	r.failing("v", "owner:mV", "move") // clear of B: mined
+	got := minedKeys(t, r, h)
+	for _, k := range []string{"failure:bank/send", "failure:bank/post", "failure:bank/pay"} {
+		if got[k] {
+			t.Errorf("%s mined: %v", k, got)
+		}
+	}
+	for _, k := range []string{"failure:bank/file", "failure:bank/move"} {
+		if !got[k] {
+			t.Errorf("%s not mined: %v", k, got)
+		}
+	}
+}
+
+// TestAHeldOutGoalAlsoHoldsItsOriginsUnstampedWork: a guest's intents with
+// no goal (two messages open, none fetched yet, or after the quiet window;
+// guest G14) fall into its origin bucket, which may carry a held-out
+// task's own effects. So a held-out case on a goal holds that origin's
+// bucket too (#55 review B2).
+func TestAHeldOutGoalAlsoHoldsItsOriginsUnstampedWork(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	var id string
+	for i := 0; ; i++ {
+		id = fmt.Sprintf("held-%d", i)
+		r.task(id, "owner:m"+id, "mail", "draft", "private")
+		must(t, h.Harvest(Outcome{Intent: id, Action: Edited, Input: []byte("procedures/mail"), Output: []byte("v1"), Correction: []byte("v2")}))
+		dev := false
+		for _, c := range r.p.Dev(change.ClassTask) {
+			dev = dev || c.ID == id
+		}
+		if !dev {
+			break
+		}
+	}
+	ev, err := h.Evidence()
+	must(t, err)
+	if !ev.Held("goal:owner:m"+id) || !ev.Held("origin:guest:mail-agent") {
+		t.Fatal("a held-out goal's origin bucket is still mined")
+	}
+	if ev.Held("origin:guest:other") {
+		t.Fatal("another origin was held")
+	}
+}
+
+// REQ: LOOP-5
+// K3 and C14 (d): nothing about evaluations reaches a builder. If a field
+// is added here, it must be one a builder may see.
+func TestBuildersSeeOnlyTheHypothesisAndTheDevSplit(t *testing.T) {
+	var names []string
+	for _, f := range reflect.VisibleFields(reflect.TypeOf(Brief{})) {
+		names = append(names, f.Name)
+	}
+	sort.Strings(names)
+	if strings.Join(names, ",") != "Dev,Hypothesis" {
+		t.Fatalf("Brief fields %v", names)
+	}
+	var hf []string
+	for _, f := range reflect.VisibleFields(reflect.TypeOf(Hypothesis{})) {
+		hf = append(hf, f.Name)
+	}
+	sort.Strings(hf)
+	if strings.Join(hf, ",") != "Class,Evidence,Key,Signal,Tasks" {
+		t.Fatalf("Hypothesis fields %v", hf)
+	}
+}
+
+// PW3 part B (potency PK2; security B1, potency C3 on #90): an auto-reply
+// the owner let go is a weaker good verdict. It is recorded under its own
+// source, never the owner's; at most MaxImplicitPerDay a day per guest
+// lineage become cases, so one burst cannot flood the suite; and each
+// counts half towards the evidence hold.
+func TestImplicitAcceptancesAreCappedAndWeighHalf(t *testing.T) {
+	r := newRig(t)
+	cs := &cases{}
+	now := time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)
+	h := &Harvester{J: r.eng, Pipeline: cs, Store: &change.MemStore{}, Now: func() time.Time { return now }}
+	implicit := func(id string) error {
+		r.task(id, "g"+id, "mail", "send", "private")
+		return h.Harvest(Outcome{Intent: id, Action: Implicit, Input: []byte("task"), Output: []byte("reply")})
+	}
+	for i := 0; i < MaxImplicitPerDay; i++ {
+		must(t, implicit(fmt.Sprint("i", i)))
+	}
+	if err := implicit("over"); !errors.Is(err, ErrImplicitCap) {
+		t.Fatalf("over the cap: %v", err)
+	}
+	if st, _ := r.eng.Get("over"); st.Quality.Verdict != "" {
+		t.Fatalf("a capped acceptance was recorded: %+v", st.Quality)
+	}
+	if st, _ := r.eng.Get("i0"); st.Quality.Verdict != journal.VerdictGood || st.Quality.Source != "owner-implicit" {
+		t.Fatalf("implicit verdict: %+v", st.Quality)
+	}
+	for _, c := range cs.got {
+		if !c.Implicit || c.Outcome != change.Accepted || string(c.Expect) != "reply" {
+			t.Fatalf("implicit case %+v", c)
+		}
+	}
+	ev, err := h.Evidence()
+	must(t, err)
+	if ev.HeldOut != MaxImplicitPerDay/2 || ev.Explicit != 0 {
+		t.Fatalf("evidence from %d implicit cases: %+v", MaxImplicitPerDay, ev)
+	}
+	r.task("yes", "gyes", "mail", "send", "private")
+	must(t, h.Harvest(Outcome{Intent: "yes", Action: Approved, Input: []byte("task"), Output: []byte("reply")}))
+	if ev, _ := h.Evidence(); ev.HeldOut != 1+MaxImplicitPerDay/2 || ev.Explicit != 1 {
+		t.Fatalf("with one explicit case: %+v", ev)
+	}
+	now = now.Add(24 * time.Hour)
+	must(t, implicit("next-day"))
+}
+
+// L3 MUST-1 and MUST-2 on #109: concurrent harvests never overshoot the
+// lineage's cap, and guests that renew their lineage (recreated machines)
+// share a box-wide daily ceiling.
+func TestImplicitCapsHoldUnderConcurrencyAndRenewedLineages(t *testing.T) {
+	r := newRig(t)
+	cs := &cases{}
+	now := time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)
+	h := &Harvester{J: r.eng, Pipeline: cs, Store: &change.MemStore{}, Now: func() time.Time { return now }}
+	task := func(id, machine string) {
+		in := journal.Intent{ID: id, GoalID: "g" + id, Origin: "guest:" + machine, Account: "mail", Action: "send",
+			Executor: "task", Machine: machine, Label: "private"}
+		if _, err := r.eng.Submit(in); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.eng.Authorize(context.Background(), id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.eng.Dispatch(context.Background(), id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	harvest := func(id string) error {
+		return h.Harvest(Outcome{Intent: id, Action: Implicit, Input: []byte("task"), Output: []byte("reply")})
+	}
+	const n = 40
+	for i := 0; i < n; i++ {
+		task(fmt.Sprint("c", i), "burst")
+	}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	ok, capped := 0, 0
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			err := harvest(id)
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err == nil:
+				ok++
+			case errors.Is(err, ErrImplicitCap):
+				capped++
+			default:
+				t.Errorf("%s: %v", id, err)
+			}
+		}(fmt.Sprint("c", i))
+	}
+	wg.Wait()
+	if ok != MaxImplicitPerDay || capped != n-MaxImplicitPerDay || len(cs.got) != MaxImplicitPerDay {
+		t.Fatalf("%d concurrent harvests: %d kept, %d capped, %d cases", n, ok, capped, len(cs.got))
+	}
+	// Renewed lineages: each is under its own cap, but the box's is shared.
+	kept := ok
+	for m := 0; kept < MaxImplicitBoxPerDay; m++ {
+		id := fmt.Sprint("r", m)
+		task(id, fmt.Sprint("renewed-", m))
+		must(t, harvest(id))
+		kept++
+	}
+	task("one-more", "renewed-new")
+	if err := harvest("one-more"); !errors.Is(err, ErrImplicitCap) {
+		t.Fatalf("over the box's daily cap: %v", err)
+	}
+	// L3 SHOULD-B on #109: the counts survive a restart.
+	h2 := &Harvester{J: r.eng, Pipeline: cs, Store: h.Store, Now: h.Now}
+	task("after-restart", "renewed-after")
+	if err := h2.Harvest(Outcome{Intent: "after-restart", Action: Implicit, Input: []byte("task"), Output: []byte("reply")}); !errors.Is(err, ErrImplicitCap) {
+		t.Fatalf("over the box's daily cap after a restart: %v", err)
+	}
+	now = now.Add(24 * time.Hour)
+	task("tomorrow", "renewed-new")
+	must(t, harvest("tomorrow"))
+	h.mu.Lock()
+	days := len(h.st.Daily)
+	h.mu.Unlock()
+	if days != 2 { // the lineage and the box, today's only
+		t.Fatalf("old daily counts kept: %d entries", days)
+	}
+}
+
+// Potency C3(c), L14: implicit gain counts half toward a proposal's value;
+// and the digest counts the ideas the explicit-case anchor sent to the
+// owner instead of adopting (potency on the PW3 design).
+func TestImplicitGainWeighsHalfAndAnchorHoldsAreCounted(t *testing.T) {
+	adopted := change.Report{State: change.StateAdopted, Score: change.Score{HeldOut: 6, Passed: 6, BaselinePassed: 2,
+		Implicit: 4, ImplicitPassed: 4, ImplicitBaselinePassed: 2}}
+	// Explicit gain 2, implicit gain 2 at half: 3, plus 0.25 for adopting.
+	if v := value(adopted); v != 3.25 {
+		t.Fatalf("value %v", v)
+	}
+	r := newRig(t)
+	p := &waitingPipeline{Pipeline: r.p, open: map[string]bool{"c1": true, "c2": true, "c4": true}}
+	l, err := NewLearn(LearnConfig{Pipeline: p, Journal: r.eng, Harvest: r.harvester()})
+	must(t, err)
+	held := func(id string) change.Report {
+		return change.Report{ID: id, State: change.StateAwaitingOwner, NeedsExplicit: true}
+	}
+	l.asked("a", held("c1"))
+	l.asked("b", held("c2"))
+	l.asked("lapsed", held("c3")) // no longer waiting: the owner channel lists it (L18)
+	l.asked("c", change.Report{State: change.StateAwaitingOwner})
+	if d := strings.Join(l.Digest(), "\n"); !strings.Contains(d, "Learning: 2 ideas are waiting for your approval instead of taking effect on their own, because none was tested on a task you said YES to.") {
+		t.Fatalf("digest %q", d)
+	}
+	l.asked("c", change.Report{State: change.StateRejected})
+	l.asked("b", change.Report{State: change.StateRejected})
+	if d := strings.Join(l.Digest(), "\n"); d != "Learning: 1 idea is waiting for your approval instead of taking effect on its own, because it wasn't tested on a task you said YES to." {
+		t.Fatalf("digest for one %q", d)
+	}
+	l.asked("a", change.Report{State: change.StateAdopted})
+	l.asked("b", change.Report{State: change.StateRejected})
+	if d := l.Digest(); len(d) != 0 {
+		t.Fatalf("digest after they settled %q", d)
+	}
+}
+
+// waitingPipeline reports which proposals still wait on the owner.
+type waitingPipeline struct {
+	Pipeline
+	open map[string]bool
+}
+
+func (w *waitingPipeline) Waiting(id string) bool { return w.open[id] }
+
+// REQ: LOOP-1, RES-1
+// PE1: a candidate whose evaluation is preempted is kept, so when Loop 1
+// is offered spare time again it re-proposes the same candidate without
+// another build (no second model spend), and the pipeline resumes its
+// evaluation from the completed pairs.
+func TestAPreemptedCandidateIsResumedNotRebuilt(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	b := &builder{files: map[string][]byte{"procedures/mail": []byte("v2")}}
+	l, err := NewLearn(LearnConfig{Pipeline: r.p, Journal: r.eng, Harvest: h, Builder: b, Now: r.clk.now})
+	must(t, err)
+	r.restart(l)
+	for n := 1; ; n++ {
+		ev, err := h.Evidence()
+		must(t, err)
+		if ev.HeldOut >= 6 && len(ev.Dev) > 0 {
+			break
+		}
+		r.corrected(h, n)
+	}
+	ev, _ := h.Evidence()
+	total := 2 * (ev.HeldOut + 1) // held-out cases plus the security fixture, both sides
+	var once sync.Once
+	r.ev.mu.Lock()
+	r.ev.hook = func(ctx context.Context, n int) {
+		if n == total-1 {
+			once.Do(func() { go r.s.Preempt() })
+			<-ctx.Done()
+		}
+	}
+	r.ev.mu.Unlock()
+	if ran, _ := r.s.Tick(context.Background()); !ran {
+		t.Fatal("Loop 1 did nothing")
+	}
+	if len(r.p.Adoptions()) != 0 {
+		t.Fatal("a preempted evaluation adopted")
+	}
+	first := r.ev.runs()
+	r.ev.mu.Lock()
+	r.ev.hook = nil
+	r.ev.mu.Unlock()
+	if ran, _ := r.s.Tick(context.Background()); !ran {
+		t.Fatal("the preempted candidate was not offered again")
+	}
+	if got := r.p.Files("procedures")["procedures/mail"]; string(got) != "v2" {
+		t.Fatalf("procedure is %q after the resumed candidate", got)
+	}
+	if n := len(b.got()); n != 1 {
+		t.Fatalf("%d builds, want 1: a preempted candidate was rebuilt", n)
+	}
+	if resumed := r.ev.runs() - first; resumed >= total {
+		t.Fatalf("resumed evaluation ran %d probes of %d: it started over", resumed, total)
+	}
+}
+
+// interruptingPipeline answers every proposal as preempted, and records
+// what it was given.
+type interruptingPipeline struct {
+	Pipeline
+	got []change.Candidate
+}
+
+func (p *interruptingPipeline) Propose(_ context.Context, c change.Candidate) (change.Report, error) {
+	p.got = append(p.got, c)
+	return change.Report{}, change.ErrInterrupted
+}
+
+func newKeepRig(t *testing.T) (*Learn, *interruptingPipeline, *builder, *clock) {
+	t.Helper()
+	pl := &interruptingPipeline{}
+	b := &builder{files: map[string][]byte{"procedures/mail": []byte("v2")}}
+	clk := &clock{t: time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)}
+	l, err := NewLearn(LearnConfig{Pipeline: pl, Journal: &journal.Engine{}, Harvest: &Harvester{}, Builder: b, Now: clk.now})
+	must(t, err)
+	return l, pl, b, clk
+}
+
+func hyp(key string, tasks ...string) Hypothesis {
+	h := Hypothesis{Signal: SignalCorrection, Class: change.ClassProcedure, Key: key, Tasks: tasks}
+	for _, task := range tasks {
+		h.Evidence = append(h.Evidence, journal.Status{Intent: journal.Intent{ID: task, Label: "private"}})
+	}
+	return h
+}
+
+// REQ: CHG-1, LOOP-1
+// L3 MUST-1 on #103: a kept candidate is reused only for the very brief it
+// was built from. The same number of tasks with one swapped, a task now
+// held out, or an expired candidate builds afresh.
+func TestAKeptCandidateNeedsTheSameBrief(t *testing.T) {
+	l, _, b, clk := newKeepRig(t)
+	ev := Evidence{}
+	h := hyp("k", "task-a", "task-b")
+	l.propose(context.Background(), h, ev)
+	l.propose(context.Background(), h, ev)
+	if n := len(b.got()); n != 1 {
+		t.Fatalf("%d builds for the same brief, want 1", n)
+	}
+
+	swapped := hyp("k", "task-a", "task-c") // same count, another task
+	l.propose(context.Background(), swapped, ev)
+	if n := len(b.got()); n != 2 {
+		t.Fatalf("%d builds after a task was swapped, want 2", n)
+	}
+
+	held := Evidence{heldTasks: map[string]bool{"task-a": true}}
+	l.propose(context.Background(), swapped, held)
+	if n := len(b.got()); n != 3 {
+		t.Fatalf("%d builds after a task was held out, want 3", n)
+	}
+
+	l.propose(context.Background(), swapped, ev) // kept, then reused once the hold lifts
+	if n := len(b.got()); n != 3 {
+		t.Fatalf("%d builds for an unchanged brief, want 3", n)
+	}
+	clk.mu.Lock()
+	clk.t = clk.t.Add(change.ResumeFor + time.Minute)
+	clk.mu.Unlock()
+	l.propose(context.Background(), swapped, ev)
+	if n := len(b.got()); n != 4 {
+		t.Fatalf("%d builds after the kept candidate expired, want 4", n)
+	}
+
+	dev := Evidence{Dev: []change.Case{{ID: "dev-1"}}}
+	l.propose(context.Background(), swapped, dev)
+	if n := len(b.got()); n != 5 {
+		t.Fatalf("%d builds after the dev split changed, want 5", n)
+	}
+}
+
+// REQ: LOOP-1
+// At most maxKeptCandidates candidates are kept, oldest dropped first.
+func TestKeptCandidatesAreBounded(t *testing.T) {
+	l, _, b, clk := newKeepRig(t)
+	for i := 0; i <= maxKeptCandidates; i++ {
+		clk.mu.Lock()
+		clk.t = clk.t.Add(time.Second)
+		clk.mu.Unlock()
+		l.propose(context.Background(), hyp(fmt.Sprintf("k%d", i), "t"), Evidence{})
+	}
+	l.mu.Lock()
+	n := len(l.built)
+	_, oldest := l.built["k0"]
+	l.mu.Unlock()
+	if n != maxKeptCandidates || oldest {
+		t.Fatalf("%d kept (oldest kept: %v), want %d without the oldest", n, oldest, maxKeptCandidates)
+	}
+	before := len(b.got())
+	l.propose(context.Background(), hyp(fmt.Sprintf("k%d", maxKeptCandidates), "t"), Evidence{})
+	if len(b.got()) != before {
+		t.Fatal("the newest kept candidate was rebuilt")
+	}
+}
+
+// devOnly is a pipeline whose dev split is fixed.
+type devOnly struct {
+	cases
+	dev []change.Case
+}
+
+func (d *devOnly) Dev(change.Class) []change.Case { return d.dev }
+
+// L3 MUST-3 on #109: a builder's brief never carries an implicit case,
+// even on the dev side (change C17).
+func TestABriefNeverCarriesAnImplicitCase(t *testing.T) {
+	p := &devOnly{dev: []change.Case{{ID: "e", Input: []byte("x")}, {ID: "i", Implicit: true}}}
+	h := &Harvester{J: newRig(t).eng, Pipeline: p, Store: &change.MemStore{}}
+	ev, err := h.Evidence()
+	must(t, err)
+	if len(ev.Dev) != 1 || ev.Dev[0].ID != "e" {
+		t.Fatalf("brief's dev cases: %+v", ev.Dev)
+	}
+}
+
+// REQ: RES-1, LOOP-1, LOOP-3
+// PE3: when admission refuses or preempts an evaluation machine with the
+// unit's context still live, the scheduler treats the unit as preempted:
+// it is not measured, the scheduler waits Retry before looking again
+// (no spin while the box has no room), and Loop 1 offers the same
+// candidate again without another build.
+func TestAnEvaluatorInterruptionIsAPreemption(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	b := &builder{files: map[string][]byte{"procedures/mail": []byte("v2")}}
+	l, err := NewLearn(LearnConfig{Pipeline: r.p, Journal: r.eng, Harvest: h, Builder: b, Now: r.clk.now})
+	must(t, err)
+	r.restart(l)
+	for n := 1; ; n++ {
+		ev, err := h.Evidence()
+		must(t, err)
+		if ev.HeldOut >= 6 && len(ev.Dev) > 0 {
+			break
+		}
+		r.corrected(h, n)
+	}
+	refused := fmt.Errorf("admission: no room: %w", change.ErrInterrupted)
+	r.ev.mu.Lock()
+	r.ev.refuse = func(n int) error {
+		if n == 3 {
+			return refused
+		}
+		return nil
+	}
+	r.ev.mu.Unlock()
+	ran, wait := r.s.Tick(context.Background())
+	if !ran || wait != time.Minute {
+		t.Fatalf("interrupted unit: ran %v, wait %v; want a Retry wait", ran, wait)
+	}
+	if len(r.p.Adoptions()) != 0 {
+		t.Fatal("an interrupted evaluation adopted")
+	}
+	r.s.mu.Lock()
+	runs := r.s.loops[Improve].runs
+	r.s.mu.Unlock()
+	if runs != 0 {
+		t.Fatalf("an interrupted unit was measured (%d runs)", runs)
+	}
+	r.ev.mu.Lock()
+	r.ev.refuse = nil
+	r.ev.mu.Unlock()
+	if ran, _ := r.s.Tick(context.Background()); !ran {
+		t.Fatal("the interrupted candidate was not offered again")
+	}
+	if got := r.p.Files("procedures")["procedures/mail"]; string(got) != "v2" {
+		t.Fatalf("procedure is %q after the resumed candidate", got)
+	}
+	if n := len(b.got()); n != 1 {
+		t.Fatalf("%d builds, want 1", n)
+	}
+}
+
+// REQ: LOOP-4, CH-15
+// UX-S3-1 on W3 step 3: a candidate nothing could use yet is built but not
+// proposed, so the owner is never asked about it, and the digest counts it.
+func TestAnUnseededCandidateIsNeverProposed(t *testing.T) {
+	l, pl, b, _ := newKeepRig(t)
+	l.cfg.Unseeded = func(c change.Candidate) bool { _, ok := c.Files["procedures/mail"]; return ok }
+	for _, k := range []string{"k1", "k2", "k1"} { // k1 rebuilt as its evidence grows (UX-119-1)
+		if _, err := l.propose(context.Background(), hyp(k, "task-"+k), Evidence{}); !errors.Is(err, ErrUnseeded) {
+			t.Fatalf("propose %s: %v", k, err)
+		}
+	}
+	if len(pl.got) != 0 || len(b.got()) != 3 {
+		t.Fatalf("%d proposed, %d built", len(pl.got), len(b.got()))
+	}
+	if d := strings.Join(l.Digest(), "\n"); d != "Learning: 2 new skills drafted. They'll be tested once your agent can use them." {
+		t.Fatalf("digest %q", d)
+	}
+	l.cfg.Unseeded = func(change.Candidate) bool { return false } // W4 seeds them
+	l.propose(context.Background(), hyp("k1", "task-k1"), Evidence{})
+	if len(pl.got) != 1 {
+		t.Fatal("not proposed once it can be used")
+	}
+	if d := strings.Join(l.Digest(), "\n"); d != "Learning: 1 new skill drafted. It'll be tested once your agent can use it." {
+		t.Fatalf("digest for one %q", d)
+	}
+	// Once none is held, the next digest says once that they are being
+	// tested (potency C1, UX-120-1 on #120).
+	l.propose(context.Background(), hyp("k2", "task-k2"), Evidence{})
+	if d := strings.Join(l.Digest(), "\n"); d != "Learning: drafted skills are now being tested." {
+		t.Fatalf("digest once proposed %q", d)
+	}
+	if d := l.Digest(); len(d) != 0 {
+		t.Fatalf("said twice: %q", d)
+	}
+	l.propose(context.Background(), hyp("k3", "task-k3"), Evidence{})
+	if d := l.Digest(); len(d) != 0 {
+		t.Fatalf("a candidate never held is announced: %q", d)
+	}
+}

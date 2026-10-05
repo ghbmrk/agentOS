@@ -15,18 +15,19 @@ import (
 // fakeOwner stands in for owner.Channel: it records requests and replies
 // and leaves deciding to the test.
 type fakeOwner struct {
-	mu     sync.Mutex
-	limits owner.Limits
-	now    func() time.Time
-	reqs   map[string][]owner.Item
-	order  []string
-	queued []owner.AutoReply
-	due    []owner.Queued
-	notes  []string
-	commit bool     // QueueAutoReply turns replies into requests
-	down   bool     // Request fails
-	active bool     // the owner is texting
-	each   []string // requests opened by RequestEach
+	mu       sync.Mutex
+	limits   owner.Limits
+	now      func() time.Time
+	reqs     map[string][]owner.Item
+	order    []string
+	queued   []owner.AutoReply
+	due      []owner.Queued
+	notes    []string
+	commit   bool            // QueueAutoReply turns replies into requests
+	down     bool            // Request fails
+	active   bool            // the owner is texting
+	each     []string        // requests opened by RequestEach
+	lateUndo map[string]bool // UndoneAfterRelease
 }
 
 func (f *fakeOwner) Request(items []owner.Item, _ time.Duration) (string, error) {
@@ -93,6 +94,12 @@ func (f *fakeOwner) DueAutoReplies() []owner.Queued {
 	return out
 }
 
+func (f *fakeOwner) UndoneAfterRelease(id string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lateUndo[id]
+}
+
 func (f *fakeOwner) Inform(text string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -118,17 +125,41 @@ func (f *fakeOwner) count() int {
 	return len(f.order)
 }
 
-// fakeExec counts executions per intent.
+// fakeExec counts executions per intent and records the last params each
+// ran with. An intent in fail is not applied.
 type fakeExec struct {
-	mu  sync.Mutex
-	ran map[string]int
+	mu     sync.Mutex
+	ran    map[string]int
+	params map[string]map[string]any
+	fail   map[string]bool
+	// evidence overrides a failed intent's evidence.
+	evidence map[string]string
+	// block holds an intent's attempts until its channel is closed.
+	block map[string]chan struct{}
 }
 
 func (e *fakeExec) Execute(_ context.Context, in journal.Intent, _ int) journal.Outcome {
 	e.mu.Lock()
+	b := e.block[in.ID]
+	e.mu.Unlock()
+	if b != nil {
+		<-b
+	}
+	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.ran[in.ID]++
-	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "sent"}
+	if e.params == nil {
+		e.params = map[string]map[string]any{}
+	}
+	e.params[in.ID] = in.Params
+	if e.fail[in.ID] {
+		ev := "changed since"
+		if x := e.evidence[in.ID]; x != "" {
+			ev = x
+		}
+		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: ev}
+	}
+	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "done:" + in.ID}
 }
 
 func (e *fakeExec) Reconcile(context.Context, journal.Intent, int) journal.Outcome {
@@ -178,6 +209,8 @@ type rig struct {
 	// boot is what the next open's owner channel hands back as carried
 	// over a restart (owner Boot calling Reissue).
 	boot []owner.Carried
+	// execs are more executors to register, such as the change pipeline.
+	execs map[string]journal.Executor
 }
 
 func (r *rig) now() time.Time {
@@ -192,9 +225,12 @@ func (r *rig) advance(d time.Duration) {
 	r.cmu.Unlock()
 }
 
-func newRig(t *testing.T, edit func(*Config)) *rig {
+func newRig(t *testing.T, edit func(*Config)) *rig { return newRigExecs(t, edit, nil) }
+
+// newRigExecs is newRig with more executors registered on the engine.
+func newRigExecs(t *testing.T, edit func(*Config), execs map[string]journal.Executor) *rig {
 	r := &rig{t: t, store: &journal.MemStore{}, clock: time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC),
-		exec: &fakeExec{ran: map[string]int{}}, ver: &fakeVerifier{records: map[string]Verified{}}}
+		exec: &fakeExec{ran: map[string]int{}}, ver: &fakeVerifier{records: map[string]Verified{}}, execs: execs}
 	r.cfg = Config{Declared: map[string]map[string]string{"mail": mailOps(), "cal": {"event.add": "draft"}}, Verifiers: map[string]Verifier{"mail": r.ver}, LocalUI: true, Now: r.now}
 	if edit != nil {
 		edit(&r.cfg)
@@ -218,8 +254,11 @@ func (r *rig) open() {
 func (r *rig) openWith(mk func() Owner) {
 	r.t.Helper()
 	r.g = New(r.cfg)
-	eng, err := journal.Open(r.store, r.g, map[string]journal.Executor{"mail": r.exec, ExecutorName: r.g},
-		func(s string) string { return s }, journal.WithClock(r.now))
+	execs := map[string]journal.Executor{"mail": r.exec, ExecutorName: r.g}
+	for k, x := range r.execs {
+		execs[k] = x
+	}
+	eng, err := journal.Open(r.store, r.g, execs, func(s string) string { return s }, journal.WithClock(r.now))
 	if err != nil {
 		r.t.Fatal(err)
 	}

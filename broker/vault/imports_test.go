@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"io/fs"
@@ -15,8 +16,11 @@ import (
 // Only the egress proxy and the vault process that holds the vault and
 // constructs it (cmd/agentos-egress, P2-4a) may import the vault. Every other broker package, and above all anything
 // a guest's socket reaches, gets no code path to a credential value. The
-// daemon (cmd/agentosd) is on the ARC-2 control path and may not.
-var vaultImporters = map[string]bool{"egress": true, "cmd/agentos-egress": true}
+// daemon (cmd/agentosd) is on the ARC-2 control path and may not. The
+// recovery package (P2-8) runs inside the vault process, and agentos-a8scan
+// is A8's audit tool run by hand on a drive; recovery's imports test keeps
+// every other package from importing it.
+var vaultImporters = map[string]bool{"egress": true, "cmd/agentos-egress": true, "recovery": true, "cmd/agentos-a8scan": true}
 
 const vaultPkg = "github.com/ghbmrk/agentos/broker/vault"
 
@@ -47,6 +51,44 @@ func TestOnlyEgressImportsVault(t *testing.T) {
 				t.Errorf("vault imports third-party %s; only golang.org/x/crypto/argon2 is allowed", p)
 			}
 		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Rebase resets the rollback binding (V6). Only the recovery-key restore
+// (package recovery, P2-8) may call it; anything else could turn an old
+// copy into one the counter accepts (security review of #45, F2).
+var rebaseCallers = map[string]bool{"vault": true, "recovery": true}
+
+func TestOnlyRecoveryCallsRebase(t *testing.T) {
+	root := ".."
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() && d.Name() == "vendor" {
+			return filepath.SkipDir
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		pkg, _ := filepath.Rel(root, filepath.Dir(path))
+		if rebaseCallers[filepath.ToSlash(pkg)] {
+			return nil
+		}
+		af, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if err != nil {
+			return err
+		}
+		ast.Inspect(af, func(n ast.Node) bool {
+			if s, ok := n.(*ast.SelectorExpr); ok && s.Sel.Name == "Rebase" {
+				t.Errorf("%s uses Rebase; only %v may", path, rebaseCallers)
+			}
+			return true
+		})
 		return nil
 	})
 	if err != nil {

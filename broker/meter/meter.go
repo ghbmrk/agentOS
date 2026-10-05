@@ -26,6 +26,10 @@
 // extension itself cannot raise. Usage is written to disk on every change,
 // so restarting the broker does not reset a looping guest's budget.
 //
+// A call may also be counted against the goal its machine serves
+// (StartFor, WithGoal), for accounting only: GoalUsage is a task's model
+// use for the loops, and limits nothing.
+//
 // The meter holds no credential and makes no network call.
 package meter
 
@@ -138,14 +142,28 @@ type state struct {
 	Bound    map[string]string   `json:"bound"`    // machine -> task
 	Ext      map[string]Limits   `json:"ext"`      // UTC day -> extensions granted
 	Notified map[string]bool     `json:"notified"` // scope:subject already told
+	Shares   map[string][]bucket `json:"shares"`   // share prefix -> use
+	Goals    map[string]*goalUse `json:"goals"`    // goal -> use, for accounting only
 }
+
+// goalUse is one goal's model use. It limits nothing: caps stay per
+// machine, task, and box. It is kept until the goal has been idle for
+// GoalKeep, so the map stays bounded by recent work.
+type goalUse struct {
+	Used Limits `json:"used"`
+	Last int64  `json:"last"` // unix seconds of the last charge
+}
+
+// GoalKeep is how long an idle goal's usage is kept.
+const GoalKeep = 7 * 24 * time.Hour
 
 // Meter is safe for concurrent use.
 type Meter struct {
-	cfg  Config
-	slot int64
-	mu   sync.Mutex
-	st   state
+	cfg    Config
+	slot   int64
+	mu     sync.Mutex
+	st     state
+	shares []Share
 }
 
 // Open loads (or creates) the meter's state.
@@ -207,6 +225,12 @@ func Open(cfg Config) (*Meter, error) {
 	}
 	if m.st.Notified == nil {
 		m.st.Notified = map[string]bool{}
+	}
+	if m.st.Shares == nil {
+		m.st.Shares = map[string][]bucket{}
+	}
+	if m.st.Goals == nil {
+		m.st.Goals = map[string]*goalUse{}
 	}
 	return m, nil
 }
@@ -278,6 +302,7 @@ type Call struct {
 	m       *Meter
 	machine string
 	task    string
+	goal    string
 	charged int64 // tokens charged at Start
 	at      int64 // start of the bucket they were charged to
 	once    sync.Once
@@ -288,13 +313,34 @@ type Call struct {
 // call and both amounts are charged at once, so parallel calls cannot pass
 // a limit together.
 func (m *Meter) Start(machine string, in, reserve int64) (*Call, error) {
+	return m.StartFor(machine, "", in, reserve)
+}
+
+// StartFor is Start for a call made while machine serves goal (the owner
+// message its lineage is working on, chosen by the broker). The call is
+// also counted against goal, for accounting only (GoalUsage); an empty
+// goal counts nowhere.
+func (m *Meter) StartFor(machine, goal string, in, reserve int64) (*Call, error) {
 	if in < 0 || reserve < 0 {
 		return nil, errors.New("meter: negative charge")
+	}
+	// Share activity is read before taking the lock: Active is the
+	// caller's function and must not run under the meter's lock.
+	m.mu.Lock()
+	shares := m.shares
+	m.mu.Unlock()
+	active := make([]bool, len(shares))
+	for i, sh := range shares {
+		active[i] = sh.Active == nil || sh.Active()
 	}
 	m.mu.Lock()
 	now := m.cfg.Now().Unix()
 	tid := m.st.Bound[machine]
-	ex, err := m.admit(machine, tid, now, in+reserve)
+	if err := m.admitShares(shares, active, machine, now, in+reserve); err != nil {
+		m.mu.Unlock()
+		return nil, err
+	}
+	ex, err := m.admit(machine, tid, goal, now, in+reserve)
 	if ex != nil {
 		if m.st.Notified[ex.key()] {
 			ex = nil // told once per exhaustion
@@ -312,7 +358,7 @@ func (m *Meter) Start(machine string, in, reserve int64) (*Call, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Call{m: m, machine: machine, task: tid, charged: in + reserve, at: now - now%m.slot}, nil
+	return &Call{m: m, machine: machine, task: tid, goal: goal, charged: in + reserve, at: now - now%m.slot}, nil
 }
 
 func (e Exhausted) key() string {
@@ -326,7 +372,7 @@ func (e Exhausted) key() string {
 }
 
 // admit checks every limit and charges the call. Called with mu held.
-func (m *Meter) admit(machine, tid string, now, in int64) (*Exhausted, error) {
+func (m *Meter) admit(machine, tid, goal string, now, in int64) (*Exhausted, error) {
 	if used := m.sum(m.st.Overall, now); over(used, m.cfg.OverallCap, in) {
 		return &Exhausted{Scope: ScopeOverall, Machine: machine, Used: used, Limit: m.cfg.OverallCap}, ErrExhausted
 	}
@@ -337,7 +383,7 @@ func (m *Meter) admit(machine, tid string, now, in int64) (*Exhausted, error) {
 	} else if used := m.sum(m.st.Machines[machine], now); over(used, m.cfg.MachineCap, in) {
 		return &Exhausted{Scope: ScopeMachine, Machine: machine, Used: used, Limit: m.cfg.MachineCap}, ErrExhausted
 	}
-	m.add(machine, tid, now, Limits{Calls: 1, Tokens: in})
+	m.add(machine, tid, goal, now, Limits{Calls: 1, Tokens: in})
 	// A task's notice stays sent until the owner extends it (Extend), so
 	// the owner is asked at most once per task. Rolling caps re-arm once
 	// a call gets through again.
@@ -346,12 +392,47 @@ func (m *Meter) admit(machine, tid string, now, in int64) (*Exhausted, error) {
 	return nil, m.save()
 }
 
-func (m *Meter) add(machine, tid string, now int64, use Limits) {
+func (m *Meter) add(machine, tid, goal string, now int64, use Limits) {
 	m.st.Overall = m.charge(m.st.Overall, now, use)
 	m.st.Machines[machine] = m.charge(m.st.Machines[machine], now, use)
+	if p, ok := m.shareOf(machine); ok {
+		m.st.Shares[p] = m.charge(m.st.Shares[p], now, use)
+	}
 	if t := m.st.Tasks[tid]; t != nil {
 		t.Used = t.Used.add(use)
 	}
+	m.chargeGoal(goal, now, use)
+}
+
+// chargeGoal counts use against goal and forgets goals idle past
+// GoalKeep. Called with mu held.
+func (m *Meter) chargeGoal(goal string, now int64, use Limits) {
+	for g, u := range m.st.Goals {
+		if u.Last <= now-int64(GoalKeep/time.Second) {
+			delete(m.st.Goals, g)
+		}
+	}
+	if goal == "" {
+		return
+	}
+	u := m.st.Goals[goal]
+	if u == nil {
+		u = &goalUse{}
+		m.st.Goals[goal] = u
+	}
+	u.Used = Limits{Calls: u.Used.Calls + use.Calls, Tokens: max(0, u.Used.Tokens+use.Tokens)}
+	u.Last = now
+}
+
+// GoalUsage is the model use counted against goal: every call started
+// for it, settled, while it was used in the last GoalKeep.
+func (m *Meter) GoalUsage(goal string) Limits {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if u := m.st.Goals[goal]; u != nil && u.Last > m.cfg.Now().Unix()-int64(GoalKeep/time.Second) {
+		return u.Used
+	}
+	return Limits{}
 }
 
 // Done settles the call to used, the tokens it actually used (input and
@@ -372,12 +453,18 @@ func (m *Meter) settle(c *Call, used int64) {
 	defer m.mu.Unlock()
 	switch d := used - c.charged; {
 	case d > 0:
-		m.add(c.machine, c.task, m.cfg.Now().Unix(), Limits{Tokens: d})
+		m.add(c.machine, c.task, c.goal, m.cfg.Now().Unix(), Limits{Tokens: d})
 	case d < 0:
 		refund(m.st.Overall, c.at, -d)
 		refund(m.st.Machines[c.machine], c.at, -d)
+		if p, ok := m.shareOf(c.machine); ok {
+			refund(m.st.Shares[p], c.at, -d)
+		}
 		if t := m.st.Tasks[c.task]; t != nil {
 			t.Used.Tokens = max(0, t.Used.Tokens+d)
+		}
+		if u := m.st.Goals[c.goal]; u != nil {
+			u.Used.Tokens = max(0, u.Used.Tokens+d)
 		}
 	default:
 		return
@@ -460,6 +547,126 @@ func (m *Meter) Usage(machine string) Limits {
 	return m.sum(m.st.Machines[machine], m.cfg.Now().Unix())
 }
 
+// Overall is the whole box's use in the current window, against its cap.
+func (m *Meter) Overall() (used, limit Limits) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.sum(m.st.Overall, m.cfg.Now().Unix()), m.cfg.OverallCap
+}
+
+// SetOverallCap changes the overall cap, for a meter whose cap is an owner
+// setting (the spare budget, LOOP-2). Calls already started keep their
+// charge; the next Start is checked against the new cap. Like Open, it
+// refuses a cap that does not limit both calls and tokens.
+func (m *Meter) SetOverallCap(l Limits) error {
+	if l.Calls <= 0 || l.Tokens <= 0 {
+		return errors.New("meter: the overall cap must limit both calls and tokens")
+	}
+	m.mu.Lock()
+	m.cfg.OverallCap = l
+	m.mu.Unlock()
+	return nil
+}
+
+// Share sets part of the overall cap apart for the machines whose IDs
+// start with Prefix (one meter shared by several kinds of work, such as
+// the spare budget's evaluation, builders, and clean room; loops L3).
+//
+// Reserve is the fraction of the overall cap kept for the share while it
+// is Active: other machines' calls are refused when they would leave the
+// share less than its reserve minus what it already used in the window.
+// While it is not Active, others may use its reserve; they hand it back
+// as soon as it is Active again, for calls not yet made (spend already
+// made in the window stays spent). Max, when above 0, is the most of the
+// overall cap the share's machines may use. Active nil means always.
+// Fractions are taken of the overall cap at each call, so they follow
+// SetOverallCap. Refusals by a share are ErrExhausted with no Notify:
+// they are the meter's own scheduling, not an owner's limit.
+type Share struct {
+	Prefix  string
+	Reserve float64
+	Max     float64
+	Active  func() bool
+}
+
+// SetShares replaces the meter's shares. Prefixes must be distinct, not
+// empty, and not prefixes of one another; fractions must be in [0, 1] and
+// reserves may not add up to more than 1.
+func (m *Meter) SetShares(shares []Share) error {
+	total := 0.0
+	for i, sh := range shares {
+		if sh.Prefix == "" || sh.Reserve < 0 || sh.Reserve > 1 || sh.Max < 0 || sh.Max > 1 {
+			return errors.New("meter: a share needs a prefix and fractions between 0 and 1")
+		}
+		if sh.Max > 0 && sh.Max < sh.Reserve {
+			return errors.New("meter: a share's maximum is below its reserve")
+		}
+		for _, o := range shares[:i] {
+			if strings.HasPrefix(sh.Prefix, o.Prefix) || strings.HasPrefix(o.Prefix, sh.Prefix) {
+				return fmt.Errorf("meter: share prefixes %q and %q overlap", o.Prefix, sh.Prefix)
+			}
+		}
+		total += sh.Reserve
+	}
+	if total > 1 {
+		return errors.New("meter: share reserves add up to more than the overall cap")
+	}
+	m.mu.Lock()
+	m.shares = append([]Share(nil), shares...)
+	m.mu.Unlock()
+	return nil
+}
+
+// ShareUsage is the use in the current window by the share with prefix.
+func (m *Meter) ShareUsage(prefix string) Limits {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.sum(m.st.Shares[prefix], m.cfg.Now().Unix())
+}
+
+// shareOf is the prefix of the share machine belongs to. Called with mu
+// held.
+func (m *Meter) shareOf(machine string) (string, bool) {
+	for _, sh := range m.shares {
+		if strings.HasPrefix(machine, sh.Prefix) {
+			return sh.Prefix, true
+		}
+	}
+	return "", false
+}
+
+func frac(l Limits, f float64) Limits {
+	return Limits{int64(float64(l.Calls) * f), int64(float64(l.Tokens) * f)}
+}
+
+// admitShares refuses a call carrying in tokens that would pass its own
+// share's Max or eat into another Active share's unused reserve. Called
+// with mu held; active[i] is shares[i].Active().
+func (m *Meter) admitShares(shares []Share, active []bool, machine string, now, in int64) error {
+	cap := m.cfg.OverallCap
+	var held Limits // other active shares' reserves not yet used
+	for i, sh := range shares {
+		used := m.sum(m.st.Shares[sh.Prefix], now)
+		if strings.HasPrefix(machine, sh.Prefix) {
+			if sh.Max > 0 && over(used, frac(cap, sh.Max), in) {
+				return ErrExhausted
+			}
+			continue
+		}
+		if active[i] {
+			r := frac(cap, sh.Reserve)
+			held = held.add(Limits{max(0, r.Calls-used.Calls), max(0, r.Tokens-used.Tokens)})
+		}
+	}
+	if held == (Limits{}) {
+		return nil
+	}
+	if over(m.sum(m.st.Overall, now).add(held), cap, in) {
+		return ErrExhausted
+	}
+	return nil
+}
+
 // Tokens estimates tokens from bytes: one token per 4 bytes, rounded up.
 func Tokens(n int64) int64 { return (n + 3) / 4 }
 
@@ -469,7 +676,8 @@ func Tokens(n int64) int64 { return (n + 3) / 4 }
 // context the guest cannot cancel (bounded by CallTimeout), and keeps
 // writing after the guest hangs up, so the provider's whole answer, and
 // the usage it reports, is seen and charged. A refused call gets 429 and
-// never reaches next.
+// never reaches next. The call counts against the goal the broker put on
+// the request's context (WithGoal), if any.
 func (m *Meter) Wrap(machine string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(io.LimitReader(r.Body, m.cfg.MaxBody+1))
@@ -487,7 +695,7 @@ func (m *Meter) Wrap(machine string, next http.Handler) http.Handler {
 			http.Error(w, "model request refused: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		c, err := m.Start(machine, in, reserve)
+		c, err := m.StartFor(machine, GoalFrom(r.Context()), in, reserve)
 		if err != nil {
 			code, msg := http.StatusTooManyRequests, "model spend limit reached for this task; the owner has been told and may extend it"
 			if !errors.Is(err, ErrExhausted) {
@@ -508,7 +716,7 @@ func (m *Meter) Wrap(machine string, next http.Handler) http.Handler {
 		r.ContentLength = int64(len(body))
 		r.Header.Del("Content-Length")
 		uw := &usageWriter{w: w, max: m.cfg.MaxBody}
-		defer func() { c.Done(uw.used(in, rep.get())) }()
+		defer func() { c.Done(uw.used(in, reserve, rep.get())) }()
 		next.ServeHTTP(uw, r)
 	})
 }
@@ -575,3 +783,18 @@ func (m *Meter) limit(path string, body []byte) ([]byte, int64, error) {
 
 // limitKeys are the request keys that bound a call's output.
 var limitKeys = []string{"max_tokens", "max_completion_tokens", "max_output_tokens"}
+
+type goalKey struct{}
+
+// WithGoal marks a model request's context with the goal the broker found
+// its machine serving, for Wrap to count it against. Only the broker sets
+// it; nothing the guest sends names a goal.
+func WithGoal(ctx context.Context, goal string) context.Context {
+	return context.WithValue(ctx, goalKey{}, goal)
+}
+
+// GoalFrom returns the goal WithGoal set, or "".
+func GoalFrom(ctx context.Context) string {
+	g, _ := ctx.Value(goalKey{}).(string)
+	return g
+}

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -99,7 +100,7 @@ func TestUnknownHostUnlockThenModelRoute(t *testing.T) {
 	}
 	defer c.lock()
 	run := filepath.Join(dir, "run")
-	srvs, err := serve(run, c, testRouter(t), os.Getuid(), os.Getuid())
+	srvs, err := serve(run, c, testRouter(t), nil, nil, os.Getuid(), os.Getuid())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +228,7 @@ func readCard(t *testing.T, card string) (string, []byte) {
 func TestSocketsAdmitOnlyTheirPeer(t *testing.T) {
 	c := &custody{now: time.Now, notify: func(string) {}}
 	run := filepath.Join(t.TempDir(), "run")
-	srvs, err := serve(run, c, testRouter(t), os.Getuid()+1, os.Getuid()+1)
+	srvs, err := serve(run, c, testRouter(t), nil, nil, os.Getuid()+1, os.Getuid()+1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +237,7 @@ func TestSocketsAdmitOnlyTheirPeer(t *testing.T) {
 			s.Close()
 		}
 	}()
-	for _, name := range []string{ModelSocket, UnlockSocket} {
+	for _, name := range []string{ModelSocket, RoutingSocket, UnlockSocket, VerifySocket} {
 		resp, err := unixClient(filepath.Join(run, name)).Get("http://x/status")
 		if err == nil {
 			resp.Body.Close()
@@ -252,7 +253,7 @@ func TestModelSocketNeedsAMachine(t *testing.T) {
 		w := httptest.NewRecorder()
 		r := httptest.NewRequest("POST", "/openai/v1/chat/completions", nil)
 		r.Header.Set(modelroute.HeaderMachine, m)
-		modelHandler(c, testRouter(t)).ServeHTTP(w, r)
+		modelHandler(c, testRouter(t), nil).ServeHTTP(w, r)
 		if w.Code != http.StatusBadRequest {
 			t.Fatalf("machine %q: %d", m, w.Code)
 		}
@@ -271,6 +272,66 @@ func TestStatusShowsPhaseOnly(t *testing.T) {
 	}
 }
 
+// K7: agentosd's owner channel reaches the verify operation through its
+// own socket, with the client agentosd links. The answer carries a step
+// and a yes or no, never the seed; a locked vault is an error, so the
+// channel counts nothing.
+func TestVerifySocketForTheBroker(t *testing.T) {
+	r := newFastRig(t, true)
+	run := filepath.Join(t.TempDir(), "run")
+	srvs, err := serve(run, r.c, testRouter(t), nil, nil, os.Getuid(), os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		for _, s := range srvs {
+			s.Close()
+		}
+	}()
+	v := modelroute.NewVerifier(filepath.Join(run, VerifySocket))
+	kind := func(err error) modelroute.VerifyFailure {
+		var ve *modelroute.VerifyError
+		if !errors.As(err, &ve) {
+			t.Fatalf("not a VerifyError: %v", err)
+		}
+		return ve.Kind
+	}
+	if _, _, err := v.VerifyTOTP(r.code(), 0, true); kind(err) != modelroute.VerifyLocked {
+		t.Fatalf("locked vault: %v", err)
+	}
+	r.c.confirm(r.unlock(t), r.code())
+	r.clk.add(30 * time.Second)
+	if _, ok, err := v.VerifyTOTP("000000", 0, true); ok || err != nil {
+		t.Fatalf("wrong code: %v %v", ok, err)
+	}
+	step, ok, err := v.VerifyTOTP(r.code(), 0, true)
+	if !ok || err != nil || step != r.clk.now().Unix()/30 {
+		t.Fatalf("right code: %d %v %v", step, ok, err)
+	}
+	for i := 0; i < MaxWrongSilent; i++ {
+		v.VerifyTOTP("000000", 0, false)
+	}
+	_, _, err = v.VerifyTOTP("000000", 0, false)
+	var ve *modelroute.VerifyError
+	if kind(err) != modelroute.VerifyPaused || !errors.As(err, &ve) || !ve.Until.Equal(r.clk.now().Add(VerifyWindow).Truncate(time.Second)) {
+		t.Fatalf("silent bucket full: %v %+v", err, ve)
+	}
+	if _, _, err := modelroute.NewVerifier(filepath.Join(run, "absent.sock")).VerifyTOTP("000000", 0, true); kind(err) != modelroute.VerifyDown {
+		t.Fatalf("no process: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	verifyHandler(r.c).ServeHTTP(w, httptest.NewRequest("POST", "/verify", strings.NewReader(`{"code":"000000"}`)))
+	if b := w.Body.String(); strings.Contains(b, string(r.seed)) || strings.Contains(b, "seed") {
+		t.Fatalf("verify answer: %s", b)
+	}
+	w = httptest.NewRecorder()
+	verifyHandler(r.c).ServeHTTP(w, httptest.NewRequest("GET", "/verify", nil))
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET: %d", w.Code)
+	}
+}
+
 // Usage goes to the meter with the serving provider, so cached input is
 // weighed at that provider's rates.
 func TestUsageTrailerNamesProvider(t *testing.T) {
@@ -284,13 +345,13 @@ func TestUsageTrailerNamesProvider(t *testing.T) {
 		{"openai/gpt-test", route.Usage{OutputChars: 40}, `{"provider":"openai","input":0,"output":0,"cache_read":0,"cache_write":0,"reported":false,"complete":false,"output_chars":40}`},
 	} {
 		var a callAudit
-		a.decide(httptest.NewRecorder())(route.Decision{Outcome: route.Served, Route: c.route, Usage: &c.u})
+		a.decide(httptest.NewRecorder(), "POST")(route.Decision{Outcome: route.Served, Route: c.route, Usage: &c.u})
 		if got := a.usage(); got != c.want {
 			t.Fatalf("%s: %s, want %s", c.route, got, c.want)
 		}
 	}
 	var none callAudit
-	none.decide(httptest.NewRecorder())(route.Decision{Outcome: route.Denied, Status: 400})
+	none.decide(httptest.NewRecorder(), "POST")(route.Decision{Outcome: route.Denied, Status: 400})
 	if got := none.usage(); got != "" {
 		t.Fatalf("usage for a refused call: %s", got)
 	}

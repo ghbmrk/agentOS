@@ -5,20 +5,27 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
+	"time"
 
+	"github.com/ghbmrk/agentos/broker/accel"
+	"github.com/ghbmrk/agentos/broker/admission"
+	"github.com/ghbmrk/agentos/broker/budget"
 	"github.com/ghbmrk/agentos/broker/cgroup"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/guest"
-	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/modelroute"
+	"github.com/ghbmrk/agentos/broker/owner"
+	"github.com/ghbmrk/agentos/broker/replay"
 	"github.com/ghbmrk/agentos/broker/vm"
 	"github.com/ghbmrk/agentos/broker/vm/gvisor"
 )
@@ -62,22 +69,51 @@ func (a machines) Lineage(id string) (string, error) {
 	return mc.Lineage, err
 }
 
-// lateServices forwards to the guest plane, which needs the manager and so
-// is built after it; machines start only once both exist.
-type lateServices struct{ p atomic.Pointer[guest.Plane] }
+// lateServices routes each machine to its guest services, which need the
+// manager and so are built after it; machines start only once they exist.
+// Replay machines (vm.EvalPrefix) go only to the evaluator's plane, never
+// the live one with its journal, executors and owner (replay R7); every
+// other machine goes to the live guest plane.
+type lateServices struct{ live, eval atomic.Pointer[svc] }
+
+type svc struct{ vm.Services }
+
+func (l *lateServices) pick(id string) *svc {
+	if strings.HasPrefix(id, vm.EvalPrefix) {
+		return l.eval.Load()
+	}
+	return l.live.Load()
+}
 
 func (l *lateServices) Open(id string) (string, error) {
-	p := l.p.Load()
-	if p == nil {
-		return "", errors.New("guest plane not open")
+	s := l.pick(id)
+	if s == nil {
+		return "", fmt.Errorf("no guest services for %s yet", id)
 	}
-	return p.Open(id)
+	return s.Open(id)
 }
 
 func (l *lateServices) Close(id string) {
-	if p := l.p.Load(); p != nil {
-		p.Close(id)
+	if s := l.pick(id); s != nil {
+		s.Close(id)
 	}
+}
+
+// lateStatus is STATUS's agent line: the keeper's once it runs, and "not
+// set up" before that or when no keeper could start.
+type lateStatus struct {
+	k   atomic.Pointer[keeper]
+	off string // set before the daemon runs: why the agent is off (PE6)
+}
+
+func (l *lateStatus) Status() string {
+	if k := l.k.Load(); k != nil {
+		return k.Status()
+	}
+	if l.off != "" {
+		return l.off
+	}
+	return agentNotSet
 }
 
 // lateAgent hands owner chat to the guest plane once it exists.
@@ -96,41 +132,90 @@ func (l *lateAgent) Deliver(ctx context.Context, text string, public bool) error
 func main() {
 	var cfg daemon.Config
 	imgs := images{}
-	var stateDir, runsc, cgroupParent, meterPath, agentMachine, inboxPath, egressSocket string
-	var diskReserveMB int64
+	var stateDir, runsc, cgroupRoot, accelMode, meterPath, agentMachine, inboxPath, egressSocket, verifySocket string
+	var agentImage, agentLaunch string
+	var diskReserveMB, agentMemMB, replayMemMB int64
+	var learn learnPaths
+	var cgroupVouched bool
+	floor := budget.Floor()
 	flag.StringVar(&cfg.JournalPath, "journal", "/var/lib/agentos/journal.log", "journal file")
 	flag.StringVar(&cfg.SocketDir, "sockets", "/run/agentos", "socket directory (created 0700)")
 	flag.StringVar(&cfg.OwnerNumber, "owner", "", "owner's phone number, E.164")
 	flag.IntVar(&cfg.ModemUID, "modem-uid", -1, "uid of the modem bridge, the only peer allowed on the owner socket")
-	flag.Int64Var(&cfg.Admission.CapacityMB, "capacity-mb", 4500, "memory for agent machines, MB")
-	flag.Int64Var(&cfg.Admission.HeadroomMB, "headroom-mb", 600, "memory never admitted into, MB")
+	flag.Int64Var(&cfg.Admission.CapacityMB, "capacity-mb", defaultCapacityMB, "memory for agent machines, MB; unset, MemTotal less the floor budget outside the pool, at most the default (PE6)")
+	flag.Int64Var(&floor.HeadroomMB, "headroom-mb", floor.HeadroomMB, "memory never admitted into, MB")
+	flag.Int64Var(&floor.HostMB, "host-mb", floor.HostMB, "budget: host image, broker and journal (protected), MB (RES-2)")
+	flag.Int64Var(&floor.InferenceMB, "inference-mb", floor.InferenceMB, "budget: local inference, MB (RES-2)")
+	flag.Int64Var(&floor.BrowserMB, "browser-mb", floor.BrowserMB, "budget: one credentialed browser, MB (RES-2)")
+	flag.StringVar(&cgroupRoot, "cgroup-root", "", "cgroup v2 group for the broker's components (RES-2): its own group or below; empty is the broker's own group")
+	flag.BoolVar(&cgroupVouched, "cgroup-delegated", false, "-cgroup-root is delegated to the broker (without it, systemd's delegate mark is required)")
+	flag.StringVar(&accelMode, "accel", "auto", "accelerator discovery: auto or off (RES-3)")
 	flag.Float64Var(&cfg.MaxPressure, "max-pressure", 10, "memory PSI (some avg10, %) above which only foreground is admitted")
 	flag.StringVar(&stateDir, "machines", "/var/lib/agentos/machines", "agent-machine layers and snapshots (created 0700)")
 	flag.StringVar(&runsc, "runsc", "", "gVisor runsc binary; empty runs no agent machines")
-	flag.StringVar(&cgroupParent, "cgroup", "/sys/fs/cgroup/agentos.slice/machines", "cgroup v2 parent for agent machines")
-	flag.Int64Var(&diskReserveMB, "disk-reserve-mb", 2048, "state-disk space snapshots never use (RES-4 reserve), MB")
+	flag.Int64Var(&diskReserveMB, "disk-reserve-mb", budget.FloorDisk().ReserveBytes()>>20, "state-disk space snapshots never use (RES-4 reserve), MB")
 	flag.Var(imgs, "image", "agent-machine image, name=dir (repeatable)")
 	flag.StringVar(&meterPath, "meter", "/var/lib/agentos/meter.json", "model-spend meter state (OP-8)")
 	flag.StringVar(&cfg.OwnerState, "owner-state", "/var/lib/agentos/owner.json", "owner channel state (P1-5)")
 	flag.StringVar(&agentMachine, "agent-machine", "agent", "machine whose guest receives the owner's task chat")
+	flag.StringVar(&agentImage, "agent-image", "openclaw", "image the agent machine is created from on first start; empty keeps no agent machine")
+	flag.StringVar(&agentLaunch, "agent-launch", "/usr/lib/agentos/guest/launch.json", "how the agent machine starts: argv and env (guest/openclaw/launch.json)")
+	flag.Int64Var(&agentMemMB, "agent-mem-mb", defaultAgentMemMB, "the agent machine's memory budget, MB")
 	flag.StringVar(&inboxPath, "guest-inbox", "/var/lib/agentos/guest-inbox.json", "unanswered owner messages to guests, kept across restarts")
 	flag.StringVar(&egressSocket, "egress", "/run/agentos-egress/model.sock", "the vault process's model socket (agentos-egress); empty serves no model route")
+	flag.StringVar(&verifySocket, "owner-verify", "/run/agentos-egress/verify.sock", "the vault process's verify socket, which checks the owner's code-generator codes; empty refuses high-tier codes")
+	flag.StringVar(&learn.Dir, "learn", "/var/lib/agentos/learn", "change pipeline and loop scheduler state (W3)")
+	flag.StringVar(&learn.Spare, "spare-meter", "/var/lib/agentos/spare-meter.json", "spare-time model budget state (LOOP-2), apart from -meter")
+	flag.StringVar(&learn.Routing, "routing", "/run/agentos-egress/routing.sock", "the vault process's routing socket, through which routing changes are read and adopted (W3); empty holds routing changes")
+	flag.Int64Var(&replayMemMB, "replay-mem-mb", defaultReplayMemMB, "a replay machine's memory budget, MB (LOOP-5); with -agent-mem-mb it must fit in -capacity-mb less -headroom-mb")
+	qcfg := defaultQuestionConfig("/var/lib/agentos")
+	flag.StringVar(&qcfg.Path, "questions", qcfg.Path, "agents' questions to the owner, kept across restarts (P3-8)")
+	flag.StringVar(&qcfg.ClockPath, "clock-state", qcfg.ClockPath, "the box clock check's state (P2-9)")
 	flag.Parse()
+	meminfo, _ := os.ReadFile("/proc/meminfo")
+	mem := planMemory(string(meminfo), flagSet(flag.CommandLine, "capacity-mb"), cfg.Admission.CapacityMB, floor, agentMemMB)
+	cfg.Admission = mem.Budget.Admission()
+	log.Printf("admission capacity: %d MB (%s); budget MB: host %d, inference %d, browser %d, headroom %d, machines %d",
+		mem.CapacityMB, mem.Why, mem.Budget.HostMB, mem.Budget.InferenceMB, mem.Budget.BrowserMB, mem.Budget.HeadroomMB, mem.Budget.PoolMB)
+	if mem.AgentOff != "" {
+		// The broker stays up, STOP and STATUS included; no agent machine
+		// is kept and no replay machine opened, and STATUS says why.
+		log.Printf("agent machine disabled: %s", mem.AgentOff)
+		agentImage = ""
+	}
 	if cfg.ModemUID < 0 || cfg.ModemUID == os.Getuid() {
 		log.Fatal("-modem-uid must name the modem bridge's own uid, distinct from the broker's")
 	}
 
+	// RES-3: nothing below depends on what is found here. No local
+	// inference service exists yet to take leases (budget R8).
+	var devs []accel.Device
+	if accelMode != "off" {
+		var err error
+		if devs, err = accel.Discover("/sys"); err != nil {
+			log.Printf("accelerator discovery failed, using CPU: %v", err)
+			devs = nil
+		}
+	}
+	log.Print(accel.NewPool(devs).Summary())
+
 	// The machine plane failing must not take the owner channel down with
 	// it: STOP and STATUS keep working, and no machines run.
+	// Without a delegated group no machine may start: none runs outside
+	// its budget (RES-2), and STATUS says why.
 	var cg *cgroup.Group
 	psiPath := "/proc/pressure/memory"
+	agentOff := mem.AgentOff
 	if runsc != "" {
-		g, err := openCgroup(cgroupParent)
+		g, err := openMachines(liveCgroups, cgroupRoot, cgroupVouched, mem.Budget)
 		if err != nil {
 			log.Printf("agent machines disabled: %v", err)
 			runsc = ""
+			if agentOff == "" {
+				agentOff = agentNoMemControls
+			}
 		} else {
-			cg, psiPath = g, filepath.Join(cgroupParent, "memory.pressure")
+			cg, psiPath = g, filepath.Join(g.Path, "memory.pressure")
 		}
 	}
 	if read, ok := cgroup.PressureSource(psiPath); ok {
@@ -140,13 +225,43 @@ func main() {
 	}
 	pre := &preempter{}
 	cfg.Preempter = pre
+	// Agents' questions (W9): owner replies are answered before task chat
+	// reaches the agent.
+	qs := &questions{}
+	// STATUS notes read in wiring order: the time check, then spare-time
+	// work not running (learningOff, below). Keep the clock first.
+	qs.wire(&cfg)
 	agent := &lateAgent{}
 	cfg.Agent = agent
-	// The high-tier code seeds live in the vault, which only the vault
-	// process holds (P2-4a); until it offers a verify operation the
-	// channel refuses high-tier codes (egress K7).
+	// Until the keeper runs, STATUS says the agent is not set up; it says
+	// so for good if the machine plane or the agent's setup fails.
+	agentStatus := &lateStatus{off: agentOff}
+	cfg.AgentStatus = agentStatus.Status
+	// The code-generator seed lives in the vault, which only the vault
+	// process holds (P2-4a); the channel asks it to check high-tier codes
+	// (egress K7). While the vault is locked those checks fail and count
+	// nothing.
+	if verifySocket != "" {
+		cfg.OwnerVerifier = ownerVerifier{modelroute.NewVerifier(verifySocket)}
+	}
 	// No modem driver exists before P2-3, so texts arrive only through the
 	// owner socket and the channel's own outbound texts are not sent.
+
+	// The learning plane failing must not take the owner channel down
+	// either: without it loop settings are refused and nothing adopts.
+	// The tree's procedures, skills and context reach the agent through
+	// managed_tree, private machines only (W4).
+	tree := newLiveTree(log.Printf)
+	learn.Tree = tree
+	var lp *learning
+	if err := os.MkdirAll(learn.Dir, 0o700); err != nil {
+		log.Printf("learning disabled: %v", err)
+	} else if lp, err = openLearning(learn, runsc != "" && egressSocket != "", &cfg); err != nil {
+		log.Printf("learning disabled: %v", err)
+	}
+	if lp == nil {
+		learningOff(&cfg)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -154,15 +269,25 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	if lp != nil {
+		lp.attach(ctx, d)
+	}
+	// The owner channel failing to take questions must not take it down:
+	// the tools are then not offered and replies are task chat.
+	if err := qs.open(ctx, d, pre, qcfg); err != nil {
+		log.Printf("owner questions disabled: %v", err)
+	}
+	// At exit the question loops stop before the guard's notices flush.
+	defer func() { stop(); qs.wait() }()
 	if runsc != "" {
-		svc := &lateServices{}
+		services := &lateServices{}
 		m, err := vm.Open(ctx, vm.Config{
 			StateDir: stateDir,
 			Images:   imgs,
 			Runtime:  &gvisor.Runtime{Bin: runsc, StateDir: filepath.Join(stateDir, "runsc")},
 			Admit:    d.Admission(),
 			Cgroups:  cg,
-			Services: svc,
+			Services: services,
 
 			DiskReserveBytes: diskReserveMB << 20,
 		})
@@ -170,13 +295,45 @@ func main() {
 			log.Printf("agent machines disabled: %v", err)
 		} else {
 			pre.m.Store(m)
-			if plane, err := openGuestPlane(m, d, cfg.SocketDir, meterPath, inboxPath, egressSocket); err != nil {
+			go m.RunPruner(vm.PrunePolicy{LowWaterBytes: 1 << 30}, time.Minute, ctx.Done())
+			tree.setMachines(m)
+			if plane, err := openGuestPlane(m, d, cfg.SocketDir, meterPath, inboxPath, egressSocket, toolSet{qs.tools(), tree}); err != nil {
 				// Machines cannot start without their guest sockets.
 				log.Printf("agent machines disabled: %v", err)
 			} else {
-				svc.p.Store(plane)
-				agent.a.Store(&guest.OwnerAgent{Plane: plane, Machine: agentMachine})
+				services.live.Store(&svc{plane})
+				oa := &guest.OwnerAgent{Plane: plane, Machine: agentMachine}
+				if lp != nil {
+					oa.Delivered = lp.delivered
+				}
+				agent.a.Store(oa)
 				defer plane.Shutdown()
+				if lp != nil {
+					// Replay machines run the agent's image and launch.
+					spec, err := agentSpec(imgs, agentImage, agentLaunch, replayMemMB)
+					if err == nil {
+						if err = replayFits(cfg.Admission.CapacityMB, cfg.Admission.HeadroomMB, agentMemMB, replayMemMB); err != nil {
+							lp.noRoom.Store(true) // STATUS and LEARNING ON say so
+						}
+					}
+					if err == nil {
+						var ev *replay.Evaluator
+						if ev, err = lp.openEvaluator(m, services, evalConfig{Dir: filepath.Join(cfg.SocketDir, "replay"), Spec: spec, Egress: egressSocket}); err == nil {
+							defer ev.Shutdown()
+						}
+					}
+					if err != nil {
+						log.Printf("replay evaluation disabled: %v", err)
+					}
+				}
+				spec, err := agentSpec(imgs, agentImage, agentLaunch, agentMemMB)
+				if err != nil {
+					log.Printf("no agent machine kept running: %v", err)
+				} else {
+					k := &keeper{m: m, id: agentMachine, spec: spec, every: 30 * time.Second, logf: log.Printf, status: agentWaiting}
+					agentStatus.k.Store(k)
+					go k.run(ctx)
+				}
 			}
 		}
 	}
@@ -184,16 +341,154 @@ func main() {
 	d.Wait()
 }
 
-func openCgroup(path string) (*cgroup.Group, error) {
-	if err := os.MkdirAll(path, 0o755); err != nil {
+// Memory defaults, MB, from the RES-2 floor budget: an agent-machine pool
+// of about 3.9 GB (capacity less headroom) on the N95. A replay machine
+// gets its own budget, smaller than the agent's (PE2).
+const (
+	defaultCapacityMB  = budget.MaxCapacityMB
+	defaultHeadroomMB  = 600 // budget.Floor's
+	defaultAgentMemMB  = 1536
+	defaultReplayMemMB = 1024
+)
+
+// capacityFor is PE6: unless -capacity-mb was given, admission's capacity
+// is MemTotal less the floor budget outside the pool (budget.ForHost), at
+// most budget.MaxCapacityMB, so a box smaller than the budget assumed (the
+// N95 has about 7.5 GB usable, not 8) is not over-committed. An unreadable
+// MemTotal gives the N95's figure, the floor (HW-4). It returns the
+// capacity, MemTotal in MB (0 if unreadable), and why, for the log.
+func capacityFor(meminfo string, explicit bool, flagMB int64, floor budget.Memory) (capacity, totalMB int64, why string) {
+	var kb int64
+	for _, line := range strings.Split(meminfo, "\n") {
+		if v, ok := strings.CutPrefix(line, "MemTotal:"); ok {
+			kb, _ = strconv.ParseInt(strings.TrimSuffix(strings.TrimSpace(v), " kB"), 10, 64)
+		}
+	}
+	totalMB = max(kb>>10, 0)
+	switch {
+	case explicit:
+		return flagMB, totalMB, "set by -capacity-mb"
+	case totalMB == 0:
+		return n95CapacityMB, 0, fmt.Sprintf("MemTotal unreadable; the N95 floor's %d", n95CapacityMB)
+	}
+	m, err := budget.ForHost(totalMB, floor)
+	if err != nil {
+		return n95CapacityMB, totalMB, fmt.Sprintf("%v; the N95 floor's %d", err, n95CapacityMB)
+	}
+	return m.PoolMB + m.HeadroomMB, totalMB, fmt.Sprintf("MemTotal %d MB less host %d, inference %d and browser %d, at most %d",
+		totalMB, floor.HostMB, floor.InferenceMB, floor.BrowserMB, budget.MaxCapacityMB)
+}
+
+// n95CapacityMB is capacityFor's figure on the N95 (about 7680 MB).
+const n95CapacityMB = 4096
+
+// memPlan is agentosd's start-time memory plan (PE6, P2-5r).
+type memPlan struct {
+	CapacityMB int64
+	Why        string
+	// Budget is the per-component budget, its pool what admission hands
+	// out (capacity less headroom); agentosd applies it as cgroups (RES-2).
+	Budget budget.Memory
+	// AgentOff, when set, is STATUS's agent line: the agent machine does
+	// not fit in the pool, so it is not started (potency C1 on #118).
+	AgentOff string
+}
+
+// planMemory sets admission's capacity (capacityFor) and checks the agent
+// machine fits in the pool it leaves. If not, the agent is off and the
+// capacity is kept above headroom, so admission still opens and agentosd
+// stays up (STOP, STATUS) instead of failing at start or refusing every
+// launch without a word.
+func planMemory(meminfo string, explicit bool, flagMB int64, floor budget.Memory, agentMB int64) memPlan {
+	c, total, why := capacityFor(meminfo, explicit, flagMB, floor)
+	headroomMB := floor.HeadroomMB
+	p := memPlan{CapacityMB: c, Why: why}
+	if c-headroomMB < agentMB {
+		need := agentMB + headroomMB
+		if !explicit {
+			need += floor.HostMB + floor.InferenceMB + floor.BrowserMB
+		}
+		if total > 0 && !explicit {
+			p.AgentOff = fmt.Sprintf("Agent: off, this box has %s of memory and running the agent needs about %s.", gb(total), gb(need))
+		} else {
+			p.AgentOff = "Agent: off, the memory set aside for it is too small to run it."
+		}
+		p.CapacityMB = max(c, headroomMB+1)
+	}
+	p.Budget = floor
+	p.Budget.PoolMB = p.CapacityMB - headroomMB
+	return p
+}
+
+// gb renders MB as GB with one decimal.
+func gb(mb int64) string { return fmt.Sprintf("%.1f GB", float64(mb)/1024) }
+
+// flagSet reports whether flag name was given on fs's command line.
+func flagSet(fs *flag.FlagSet, name string) bool {
+	set := false
+	fs.Visit(func(f *flag.Flag) { set = set || f.Name == name })
+	return set
+}
+
+// replayFits is PE2: the agent machine and one replay machine must fit in
+// the pool admission hands out (capacity less headroom) at once. If they
+// do not, admission refuses or preempts every evaluation while the agent
+// runs (replay R6) and learning stalls without a word, so replay
+// evaluation is not opened and the log says why.
+func replayFits(capacityMB, headroomMB, agentMB, replayMB int64) error {
+	if replayMB <= 0 {
+		return fmt.Errorf("-replay-mem-mb is %d", replayMB)
+	}
+	if pool := capacityMB - headroomMB; agentMB+replayMB > pool {
+		return fmt.Errorf("the agent machine (%d MB) and one replay machine (%d MB) do not fit in the %d MB pool (-capacity-mb less -headroom-mb)", agentMB, replayMB, pool)
+	}
+	return nil
+}
+
+// agentSpec is how the owner's agent machine starts, from the image flags
+// and the guest rig's launch file.
+func agentSpec(imgs images, image, launch string, memMB int64) (vm.Spec, error) {
+	if image == "" {
+		return vm.Spec{}, errors.New("-agent-image is empty")
+	}
+	if _, ok := imgs[image]; !ok {
+		return vm.Spec{}, fmt.Errorf("image %q is not registered with -image", image)
+	}
+	argv, env, err := launchSpec(launch)
+	if err != nil {
+		return vm.Spec{}, err
+	}
+	return vm.Spec{Image: image, Class: admission.Foreground, MemMB: memMB, Argv: argv, Env: env, Label: vm.Public}, nil
+}
+
+// openPool applies the component budget under root and returns the
+// machine pool's group, with the broker in its protected group (budget
+// R3). root must already be checked as delegated (openMachines).
+// The broker moves first: cgroup v2 will not enable controllers for the
+// children of a group that still holds a process (systemd Delegate=yes
+// starts the broker in root itself).
+func openPool(root string, mem budget.Memory) (*cgroup.Group, error) {
+	b := &cgroup.Group{Path: filepath.Join(root, "broker")}
+	if err := os.MkdirAll(b.Path, 0o755); err != nil {
 		return nil, err
 	}
-	return cgroup.Open(path)
+	if err := b.Join(os.Getpid()); err != nil {
+		return nil, err
+	}
+	r, err := cgroup.Open(root)
+	if err != nil {
+		return nil, err
+	}
+	gs, err := mem.Apply(r)
+	if err != nil {
+		return nil, err
+	}
+	return gs.Machines, nil
 }
 
 // openGuestPlane opens the OP-8 meter and the guest plane (ARC-6) over the
 // machine manager. Without them no agent machine can start.
-func openGuestPlane(m *vm.Manager, d *daemon.Daemon, socketDir, meterPath, inboxPath, egressSocket string) (*guest.Plane, error) {
+func openGuestPlane(m *vm.Manager, d *daemon.Daemon, socketDir, meterPath, inboxPath, egressSocket string, tools guest.Tools) (*guest.Plane, error) {
 	eng := d.Engine()
 	mtr, err := meter.Open(meter.Config{
 		Path:           meterPath,
@@ -242,23 +537,41 @@ func openGuestPlane(m *vm.Manager, d *daemon.Daemon, socketDir, meterPath, inbox
 				log.Printf("reply from %s not sent: %v", machine, err)
 			}
 		},
-		Logf: log.Printf,
+		// Further broker tools: the owner-question tools (W9) and the
+		// managed tree (W4).
+		Tools: tools,
+		Logf:  log.Printf,
 	}
 	if egressSocket != "" {
 		gcfg.Model = modelroute.Forward(modelroute.Config{
 			Socket: egressSocket,
 			Label:  m.DataLabel,
-			Denied: func(machine string, x modelroute.Denial) {
-				n := journal.EgressNote{Machine: machine, Adapter: x.Adapter, Operation: x.Operation, Method: x.Method, Status: x.Status, Reason: x.Reason}
-				if n.Reason == "" {
-					n.Reason = "denied"
-				}
-				if err := eng.RecordEgress(n); err != nil {
-					log.Printf("journal egress denial for %s: %v", machine, err)
-				}
-			},
-			Logf: log.Printf,
+			Denied: modelroute.Journal(eng, log.Printf),
+			Logf:   log.Printf,
 		})
 	}
 	return guest.New(gcfg)
+}
+
+// ownerVerifier gives the owner channel the vault process's verify
+// operation, translating why a check did not run into the channel's terms.
+type ownerVerifier struct{ v *modelroute.Verifier }
+
+func (o ownerVerifier) VerifyTOTP(code string, after int64, counted bool) (int64, bool, error) {
+	step, ok, err := o.v.VerifyTOTP(code, after, counted)
+	return step, ok, ownerVerifyErr(err)
+}
+
+func ownerVerifyErr(err error) error {
+	var ve *modelroute.VerifyError
+	if err == nil || !errors.As(err, &ve) {
+		return err
+	}
+	kind := map[modelroute.VerifyFailure]owner.VerifyFailure{
+		modelroute.VerifyDown:   owner.VaultDown,
+		modelroute.VerifyLocked: owner.VaultLocked,
+		modelroute.VerifyPaused: owner.VerifyPaused,
+		modelroute.VerifyLost:   owner.VerifyLost,
+	}[ve.Kind]
+	return &owner.VerifyError{Kind: kind, Until: ve.Until}
 }

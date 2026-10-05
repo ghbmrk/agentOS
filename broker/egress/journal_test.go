@@ -95,7 +95,7 @@ func TestADP10DenialReasonsQuoteGuestContent(t *testing.T) {
 				if err == nil {
 					continue
 				}
-				if strings.Contains(reasonClass(err.Error()), mark) {
+				if strings.Contains(journal.EgressReasonClass(err.Error()), mark) {
 					t.Errorf("%s %s: reason %q carries request content outside quotes", a.Name, op.Name, err)
 				}
 			}

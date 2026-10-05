@@ -5,7 +5,7 @@ Read SPEC.md for what to build and PLAN.md for how. This file is the working con
 ## Builder (L2)
 - Work only from a package brief on BOARD.md. Touch only files inside the brief's declared scope.
 - **Tests first.** For each requirement ID in the brief, write a failing test, then the smallest change that passes it.
-- Claim coverage with a marker comment in the test file: `REQ: CRED-1, CRED-4`. Then run `python3 tools/trace.py` and commit the regenerated TRACE.md.
+- Claim coverage with a marker comment in the test file: `REQ: CRED-1, CRED-4`. Run `python3 tools/trace.py` locally to see coverage, but never commit TRACE.md: CI fails a PR that changes it, and the `trace` workflow commits the regenerated file to main after each merge.
 - "Done" = CI green + every brief ID covered by a passing test. Never assert done without that evidence.
 - **Stop on lack of progress, not on spend:**
   - The brief's usage figure is an *estimate and checkpoint*, not a ceiling. At the checkpoint, continue if tests are moving toward green (note the extension in the PR), otherwise escalate.
@@ -26,4 +26,5 @@ Read SPEC.md for what to build and PLAN.md for how. This file is the working con
 
 ## Repository conventions
 - Branch per package: `pkg/<id>-<slug>-<suffix>`. The coordinator sets the `pkg/<id>-<slug>` stem when it starts a thread; the server appends a session-unique suffix. Threads started without a stem keep their assigned `claude/…` branch, and the PR title starts with the package ID (DECISIONS.md). PRs use the template's trace table.
+- A PR that fixes a defect in already-merged code carries a `Defect: <package ID>` line in its body; METRICS.md counts them for L4.
 - SPEC.md changes only through an L1 spec-diff PR that Mark approves.

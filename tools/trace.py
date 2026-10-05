@@ -4,7 +4,7 @@
 Requirement IDs are bold tokens like **CRED-1** in SPEC.md.
 Tests claim coverage with a marker comment anywhere in a file:  REQ: CRED-1, CRED-4
 Usage:
-  tools/trace.py            write TRACE.md
+  tools/trace.py            write TRACE.md (PRs don't commit it; .github/workflows/trace.yml does, on main)
   tools/trace.py --check    fail if TRACE.md is stale or a marker cites an unknown ID
   tools/trace.py --gate A,B fail unless every listed ID has at least one covering file
 """

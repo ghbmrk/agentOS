@@ -117,7 +117,17 @@ func (p *Plane) mcp(m *machine, w http.ResponseWriter, r *http.Request) {
 	case "ping":
 		writeRPC(w, req.ID, map[string]any{}, nil)
 	case "tools/list":
-		writeRPC(w, req.ID, map[string]any{"tools": tools}, nil)
+		list := tools
+		if p.cfg.Tools != nil {
+			list = append([]map[string]any(nil), tools...)
+			for _, t := range p.cfg.Tools.List() {
+				// The effect tools' names are the broker's own.
+				if n := t["name"]; n != "effect_request" && n != "effect_status" {
+					list = append(list, t)
+				}
+			}
+		}
+		writeRPC(w, req.ID, map[string]any{"tools": list}, nil)
 	case "tools/call":
 		var call struct {
 			Name      string          `json:"name"`
@@ -126,6 +136,22 @@ func (p *Plane) mcp(m *machine, w http.ResponseWriter, r *http.Request) {
 		if err := json.Unmarshal(req.Params, &call); err != nil {
 			writeRPC(w, req.ID, nil, &rpcError{-32602, "bad params"})
 			return
+		}
+		if call.Name != "effect_request" && call.Name != "effect_status" && p.cfg.Tools != nil {
+			lineage, err := p.cfg.Machines.Lineage(m.id)
+			if err != nil {
+				writeRPC(w, req.ID, toolResult("broker: unknown machine", true), nil)
+				return
+			}
+			text, handled, err := p.cfg.Tools.Call(r.Context(), m.id, lineage, call.Name, call.Arguments)
+			if handled {
+				if err != nil {
+					writeRPC(w, req.ID, toolResult(err.Error(), true), nil)
+				} else {
+					writeRPC(w, req.ID, toolResult(text, false), nil)
+				}
+				return
+			}
 		}
 		res, submitted, err := p.callTool(r.Context(), m, call.Name, call.Arguments)
 		if submitted {
@@ -191,8 +217,8 @@ const (
 // collide with it. The origin therefore names the lineage, not the fork.
 // Errors the guest sees are fixed strings; broker detail goes to Logf.
 func (p *Plane) callTool(ctx context.Context, m *machine, name string, raw json.RawMessage) (effectState, bool, error) {
-	lineage, err := p.cfg.Machines.Lineage(m.id)
-	if err != nil {
+	lineage := p.lineageOf(m)
+	if lineage == "" {
 		return effectState{}, false, errors.New("broker: unknown machine")
 	}
 	switch name {
@@ -234,12 +260,28 @@ func (p *Plane) callTool(ctx context.Context, m *machine, name string, raw json.
 			return effectState{RequestID: a.RequestID, State: "refused", Reason: "no adapter is connected for that account"}, false, nil
 		}
 		label := p.label(m.id)
-		id, readOnly := p.intentID(lineage, a.RequestID, label)
-		st, err := p.cfg.Effects.Submit(journal.Intent{
-			ID: id, Origin: "guest:" + lineage, Account: a.Account, Action: a.Action,
+		id, readOnly, prior, seen := p.intentID(lineage, a.RequestID, label)
+		// The goal is fixed by the first submission (G14): a repeat keeps
+		// the goal its request was journaled with, even if the lineage
+		// has moved on to another owner message since.
+		goal := prior.Intent.GoalID
+		if !seen {
+			goal = p.goal(lineage)
+		}
+		in := journal.Intent{
+			ID: id, GoalID: goal, Origin: "guest:" + lineage, Account: a.Account, Action: a.Action,
 			Params: a.Params, Recipients: a.Recipients, Executor: exec,
 			Machine: m.id, Label: label,
-		})
+		}
+		st, err := p.cfg.Effects.Submit(in)
+		if errors.Is(err, journal.ErrConflict) && !seen {
+			// A concurrent first submission of the same request may have
+			// won with another goal; the request is still the same one.
+			if prior, gerr := p.cfg.Effects.Get(id); gerr == nil && prior.Intent.GoalID != goal {
+				in.GoalID = prior.Intent.GoalID
+				st, err = p.cfg.Effects.Submit(in)
+			}
+		}
 		if err != nil {
 			if errors.Is(err, journal.ErrConflict) {
 				return effectState{}, false, fmt.Errorf("request_id %s was already used with different arguments", a.RequestID)
@@ -317,19 +359,23 @@ func (p *Plane) label(machine string) string {
 // never sees, collides with, or learns anything from a private machine's
 // request. A private machine repeating a request its lineage made while
 // public gets that intent, read-only (OP-1: it runs at most once).
-func (p *Plane) intentID(lineage, reqID, label string) (id string, readOnly bool) {
+//
+// When the request was journaled before, prior is its status and seen is
+// true.
+func (p *Plane) intentID(lineage, reqID, label string) (id string, readOnly bool, prior journal.Status, seen bool) {
 	pub := lineage + "/" + reqID
 	if label != "private" {
-		return pub, false
+		st, err := p.cfg.Effects.Get(pub)
+		return pub, false, st, err == nil
 	}
 	priv := privateID(lineage, reqID)
-	if _, err := p.cfg.Effects.Get(priv); err == nil {
-		return priv, false
+	if st, err := p.cfg.Effects.Get(priv); err == nil {
+		return priv, false, st, true
 	}
-	if _, err := p.cfg.Effects.Get(pub); err == nil {
-		return pub, true
+	if st, err := p.cfg.Effects.Get(pub); err == nil {
+		return pub, true, st, true
 	}
-	return priv, false
+	return priv, false, journal.Status{}, false
 }
 
 func privateID(lineage, reqID string) string { return lineage + "/private/" + reqID }

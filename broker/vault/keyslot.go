@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
@@ -15,12 +16,14 @@ import (
 // a keys file beside the vault holds it wrapped (AES-256-GCM) under each
 // slot's key-encryption key. A slot's kind decides where that key comes
 // from: the Owner Card's vault passphrase through Argon2id, a TPM seal
-// (P2-4b), or the recovery key (REC-1). Every slot's kind and parameters
+// (P2-4b, implemented by the vault process over package tpmseal), or the
+// recovery key (REC-1). Every slot's kind and parameters
 // are bound into its wrap as associated data, so an edited slot opens
 // nothing.
 
-// Slot kinds. Only the passphrase is a Factor in this build; the others are
-// known so that a keys file carrying them loads and keeps them.
+// Slot kinds. The passphrase factor is here; the TPM factor lives in the
+// vault process (cmd/agentos-egress), which alone talks to the TPM. Every
+// known kind loads and is kept, whether or not this build can open it.
 const (
 	SlotPassphrase = "passphrase"
 	SlotTPM        = "tpm"
@@ -30,6 +33,16 @@ const (
 // KindTOTPSeed is the owner's code-generator seed (CH-4). It lives only in
 // the vault, so a copy of the drive cannot compute approval codes (CRED-8).
 const KindTOTPSeed = "totp_seed"
+
+// KindPCRPolicyKey is the box's PCR policy key (HW-5a): it approves the
+// boot paths a trusted host may unlock on, so it too lives only in the
+// vault.
+const KindPCRPolicyKey = "pcr_policy_key"
+
+// KindTPMLockoutAuth is a trusted PC's TPM lockout authorization (CRED-8
+// boot PIN): whoever holds it can reset the TPM's PIN guess counter, so
+// it lives only in the vault.
+const KindTPMLockoutAuth = "tpm_lockout_auth"
 
 // MinPassphraseLen is the shortest normalized passphrase enrolled. The
 // Owner Card's generated passphrase carries at least 80 bits (§8.1); this
@@ -70,7 +83,10 @@ type Slot struct {
 	// KDF is set for passphrase (and recovery) slots.
 	KDF *KDF `json:"kdf,omitempty"`
 	// Sealed is opaque factor data, such as a TPM-sealed blob (P2-4b).
-	Sealed  []byte `json:"sealed,omitempty"`
+	Sealed []byte `json:"sealed,omitempty"`
+	// KeyID names the data key the slot wraps, once the vault has been
+	// re-encrypted (reencrypt.go); empty before. It is bound into the wrap.
+	KeyID   []byte `json:"key_id,omitempty"`
 	Nonce   []byte `json:"nonce"`
 	Wrapped []byte `json:"wrapped"`
 }
@@ -83,13 +99,14 @@ func (s Slot) aad() []byte {
 		Kind    string `json:"kind"`
 		KDF     *KDF   `json:"kdf,omitempty"`
 		Sealed  []byte `json:"sealed,omitempty"`
-	}{keysMagic, keysVersion, s.Kind, s.KDF, s.Sealed})
+		KeyID   []byte `json:"key_id,omitempty"`
+	}{keysMagic, keysVersion, s.Kind, s.KDF, s.Sealed, s.KeyID})
 	return b
 }
 
-// Factor derives a slot's key-encryption key. Passphrase is the factor of
-// this build; the TPM factor (P2-4b) implements the same interface over
-// Slot.Sealed.
+// Factor derives a slot's key-encryption key. The TPM factor (P2-4b)
+// implements it over Slot.Sealed and answers ErrSkipSlot for a slot sealed
+// on another PC.
 type Factor interface {
 	Kind() string
 	// Enroll makes a new slot of this kind and returns it, without its
@@ -99,9 +116,19 @@ type Factor interface {
 	KEK(Slot) ([]byte, error)
 }
 
+// ErrSkipSlot is what a factor's KEK returns for a slot that is not its
+// own, such as a TPM slot sealed on another PC: unwrap tries the next one.
+var ErrSkipSlot = errors.New("vault: key slot belongs to another factor instance")
+
 // ErrNoSlotOpens is the one answer for a wrong factor, a slot of another
 // kind, and an edited slot.
 var ErrNoSlotOpens = errors.New("vault: no key slot opens with this factor")
+
+// ErrChangeInterrupted is ErrNoSlotOpens for a passphrase while a
+// passphrase change is staged beside the keys file (keysbind.go): the
+// vault may already be under the new passphrase (P2-4g). It says only
+// that an interrupted change exists.
+var ErrChangeInterrupted = fmt.Errorf("%w; a passphrase change was interrupted", ErrNoSlotOpens)
 
 // Passphrase is the Owner Card's vault passphrase as a factor. It is
 // normalized first (see normalize), so a scan and a typed copy agree.
@@ -169,6 +196,10 @@ func readKeys(path string) (*keyFile, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parseKeys(raw)
+}
+
+func parseKeys(raw []byte) (*keyFile, error) {
 	var kf keyFile
 	if err := json.Unmarshal(raw, &kf); err != nil || kf.Magic != keysMagic || kf.Version != keysVersion {
 		return nil, errors.New("vault: not a keys file this version can read")
@@ -183,45 +214,62 @@ func readKeys(path string) (*keyFile, error) {
 	return &kf, nil
 }
 
-func writeKeys(path string, kf *keyFile) error {
-	raw, err := json.Marshal(kf)
-	if err != nil {
-		return err
-	}
-	return writeAtomic(path, raw)
+// unwrap returns the data key from the first slot of f's kind that opens,
+// among the slots for key ID want.
+func (kf *keyFile) unwrap(f Factor, want []byte) ([]byte, error) {
+	key, _, err := kf.unwrapSlot(f, want)
+	return key, err
 }
 
-// unwrap returns the data key from the first slot of f's kind that opens.
-func (kf *keyFile) unwrap(f Factor) ([]byte, error) {
+// unwrapSlot is unwrap also returning the slot that opened.
+func (kf *keyFile) unwrapSlot(f Factor, want []byte) ([]byte, Slot, error) {
 	for _, s := range kf.Slots {
-		if s.Kind != f.Kind() {
+		if s.Kind != f.Kind() || !bytes.Equal(s.KeyID, want) {
 			continue
 		}
 		kek, err := f.KEK(s)
+		if errors.Is(err, ErrSkipSlot) {
+			continue
+		}
 		if err != nil {
-			return nil, err
+			return nil, Slot{}, err
 		}
 		aead, err := newAEAD(kek)
 		wipe(kek)
 		if err != nil {
-			return nil, err
+			return nil, Slot{}, err
 		}
 		if len(s.Nonce) != aead.NonceSize() {
 			continue
 		}
 		if key, err := aead.Open(nil, s.Nonce, s.Wrapped, s.aad()); err == nil && len(key) == KeySize {
-			return key, nil
+			return key, s, nil
 		}
 	}
-	return nil, ErrNoSlotOpens
+	return nil, Slot{}, ErrNoSlotOpens
 }
 
-// wrap makes a slot for f holding key.
-func wrap(f Factor, key []byte) (Slot, error) {
+// keyID returns the one key ID every slot in the file shares, or
+// ErrReencryptPending if a re-encryption was interrupted and the file holds
+// slots for two keys (OpenSealed finishes it).
+func (kf *keyFile) keyID() ([]byte, error) {
+	var id []byte
+	for i, s := range kf.Slots {
+		if i > 0 && !bytes.Equal(s.KeyID, id) {
+			return nil, ErrReencryptPending
+		}
+		id = s.KeyID
+	}
+	return id, nil
+}
+
+// wrap makes a slot for f holding key, whose ID is keyID.
+func wrap(f Factor, key, keyID []byte) (Slot, error) {
 	s, kek, err := f.Enroll()
 	if err != nil {
 		return Slot{}, err
 	}
+	s.KeyID = keyID
 	aead, err := newAEAD(kek)
 	wipe(kek)
 	if err != nil {
@@ -235,9 +283,134 @@ func wrap(f Factor, key []byte) (Slot, error) {
 	return s, nil
 }
 
+// ReadSlots lists the keys file's slots. Nothing in a slot is secret: the
+// wrap is ciphertext, and Sealed is a factor's public or TPM-encrypted data.
+func ReadSlots(keysPath string) ([]Slot, error) {
+	kf, err := readKeys(keysPath)
+	if err != nil {
+		return nil, err
+	}
+	return kf.Slots, nil
+}
+
+// sealedBy records the keys file and a copy of the data key on a vault
+// opened through its slots, so AddSlot can wrap the key for a new factor
+// without the owner proving an old one again. Close wipes the copy. The
+// cipher's AES key schedule already holds the key's equivalent in memory
+// while the vault is open, so the copy adds no exposure.
+func (v *Vault) sealedBy(keysPath string, key []byte) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.keysPath, v.key = keysPath, append([]byte(nil), key...)
+}
+
+// AddSlot wraps the open vault's data key for f and adds the slot,
+// first removing any existing slot of f's kind for which replace returns
+// true (the same PC enrolled again). CRED-9 makes adding a trusted host a
+// tier-4 action: the caller checks the approval before calling.
+func (v *Vault) AddSlot(f Factor, replace func(Slot) bool) error {
+	defer wipeFactor(f)
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	kf, err := v.slotsForChange()
+	if err != nil {
+		return err
+	}
+	s, err := wrap(f, v.key, v.keyID)
+	if err != nil {
+		return err
+	}
+	out := kf.Slots[:0:0]
+	for _, old := range kf.Slots {
+		if old.Kind == f.Kind() && replace != nil && replace(old) {
+			continue
+		}
+		out = append(out, old)
+	}
+	kf.Slots = append(out, s)
+	return v.replaceKeys(kf)
+}
+
+// RemoveSlots drops the trusted-host slots for which match returns true
+// and reports how many. Only TPM slots are removed this way: the
+// passphrase is replaced with Rekey, and the recovery slot belongs to
+// REC-1. CRED-9: the caller checks the tier-4 approval first.
+func (v *Vault) RemoveSlots(kind string, match func(Slot) bool) (int, error) {
+	if kind != SlotTPM {
+		return 0, errors.New("vault: only trusted-host slots can be removed")
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	kf, err := v.slotsForChange()
+	if err != nil {
+		return 0, err
+	}
+	out, n := kf.Slots[:0:0], 0
+	for _, s := range kf.Slots {
+		if s.Kind == kind && match(s) {
+			n++
+			continue
+		}
+		out = append(out, s)
+	}
+	if n == 0 {
+		return 0, nil
+	}
+	kf.Slots = out
+	return n, v.replaceKeys(kf)
+}
+
+// Rekey proves have against the keys file, then replaces every slot of
+// next's kind with one new slot for next. Slots of other kinds stay. A
+// copy of the keys file taken earlier no longer opens the vault written
+// since (the keys file's hash is in the vault, keysbind.go), but a whole
+// earlier copy of the drive still opens with what it held (CRED-8:
+// replacement protects only against later copies; Reencrypt closes the
+// data key too).
+func (v *Vault) Rekey(have, next Factor) error {
+	defer wipeFactor(have)
+	defer wipeFactor(next)
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	kf, err := v.slotsForChange()
+	if err != nil {
+		return err
+	}
+	if proveSlotOfKind(kf, v.key, have) == false {
+		return ErrNoSlotOpens
+	}
+	s, err := wrap(next, v.key, v.keyID)
+	if err != nil {
+		return err
+	}
+	out := kf.Slots[:0:0]
+	for _, old := range kf.Slots {
+		if old.Kind != next.Kind() {
+			out = append(out, old)
+		}
+	}
+	kf.Slots = append(out, s)
+	return v.replaceKeys(kf)
+}
+
+// proveSlotOfKind reports whether f opens one of its kind's slots to key.
+func proveSlotOfKind(kf *keyFile, key []byte, f Factor) bool {
+	for _, s := range kf.Slots {
+		if s.Kind != f.Kind() {
+			continue
+		}
+		if kek := proveSlot(s, key, []Factor{f}); kek != nil {
+			wipe(kek)
+			return true
+		}
+	}
+	return false
+}
+
 // CreateSealed makes a new, empty vault at vaultPath under a fresh random
 // data key, and a keys file at keysPath with one slot for f. It refuses to
-// replace either file. The data key is wiped before it returns.
+// replace either file. Its local copy of the data key is wiped before it
+// returns; the open vault keeps one for AddSlot, wiped by Close.
 func CreateSealed(vaultPath, keysPath string, f Factor) (*Vault, error) {
 	defer wipeFactor(f)
 	if _, err := os.Lstat(keysPath); err == nil {
@@ -250,65 +423,99 @@ func CreateSealed(vaultPath, keysPath string, f Factor) (*Vault, error) {
 	if _, err := rand.Read(key); err != nil {
 		return nil, err
 	}
-	s, err := wrap(f, key)
+	s, err := wrap(f, key, nil)
 	if err != nil {
 		return nil, err
 	}
-	v, err := Create(vaultPath, key)
+	raw, err := json.Marshal(&keyFile{Magic: keysMagic, Version: keysVersion, Slots: []Slot{s}})
 	if err != nil {
 		return nil, err
 	}
-	if err := writeKeys(keysPath, &keyFile{Magic: keysMagic, Version: keysVersion, Slots: []Slot{s}}); err != nil {
+	v, err := create(vaultPath, key, [][]byte{keysHash(raw)})
+	if err != nil {
+		return nil, err
+	}
+	if err := writeAtomic(keysPath, raw); err != nil {
 		v.Close()
 		os.Remove(vaultPath)
 		return nil, err
 	}
+	v.sealedBy(keysPath, key)
 	return v, nil
 }
 
-// OpenSealed unwraps the data key with f and opens the vault. The data key
-// and the factor's secret bytes are wiped before it returns; the open vault
-// keeps only its cipher.
+// OpenSealed unwraps the data key with f and opens the vault. The keys
+// file must be one the vault recorded (keysbind.go): an earlier keys file
+// beside a later vault is refused with ErrRolledBack. The factor's secret
+// bytes and the unwrapped key are wiped before it returns; the open vault
+// keeps its cipher and one copy of the key for AddSlot, wiped by Close. If
+// a slot change or re-encryption was interrupted, it finishes it.
 func OpenSealed(vaultPath, keysPath string, f Factor) (*Vault, error) {
 	defer wipeFactor(f)
-	kf, err := readKeys(keysPath)
+	raw, err := os.ReadFile(keysPath)
 	if err != nil {
 		return nil, err
 	}
-	key, err := kf.unwrap(f)
+	kf, err := parseKeys(raw)
 	if err != nil {
 		return nil, err
+	}
+	want, err := fileKeyID(vaultPath)
+	if err != nil {
+		return nil, err
+	}
+	key, slot, err := kf.unwrapSlot(f, want)
+	staged := false
+	if err != nil {
+		// A slot change interrupted after its seal: f's slot may be only
+		// in the staged next file (keysbind.go). It counts only if the
+		// vault it opens sealed that same file. Only a plain miss looks
+		// there: a factor whose KEK failed otherwise (a TPM refusing a
+		// PIN) is not asked again, so the staged file never doubles its
+		// attempts before lockout.
+		if !errors.Is(err, ErrNoSlotOpens) {
+			return nil, err
+		}
+		nraw, rerr := os.ReadFile(keysPath + nextSuffix)
+		if rerr != nil {
+			return nil, err
+		}
+		nkf, perr := parseKeys(nraw)
+		if perr != nil {
+			return nil, err
+		}
+		nkey, nslot, nerr := nkf.unwrapSlot(f, want)
+		if nerr != nil {
+			if errors.Is(nerr, ErrNoSlotOpens) && f.Kind() == SlotPassphrase && passphraseChanged(kf, nkf) {
+				return nil, ErrChangeInterrupted
+			}
+			return nil, err
+		}
+		raw, kf, key, slot, staged = nraw, nkf, nkey, nslot, true
 	}
 	defer wipe(key)
-	return Open(vaultPath, key)
+	v, err := Open(vaultPath, key)
+	if err != nil {
+		return nil, err
+	}
+	if staged && !v.stagedKeys(raw) {
+		v.Close()
+		return nil, ErrNoSlotOpens
+	}
+	v.sealedBy(keysPath, key)
+	if err := v.checkKeys(raw, kf, want, slot); err != nil {
+		v.Close()
+		return nil, err
+	}
+	v.unfinished = v.dropStaleStaged()
+	return v, nil
 }
 
-// Rekey proves have against the keys file, then replaces every slot of
-// next's kind with one new slot for next. Slots of other kinds stay. A
-// copy of the keys file taken earlier still opens with what it held
-// (CRED-8: replacement protects only against later copies).
-func Rekey(keysPath string, have, next Factor) error {
-	defer wipeFactor(have)
-	defer wipeFactor(next)
-	kf, err := readKeys(keysPath)
-	if err != nil {
-		return err
-	}
-	key, err := kf.unwrap(have)
-	if err != nil {
-		return err
-	}
-	defer wipe(key)
-	s, err := wrap(next, key)
-	if err != nil {
-		return err
-	}
-	out := kf.Slots[:0:0]
-	for _, old := range kf.Slots {
-		if old.Kind != next.Kind() {
-			out = append(out, old)
-		}
-	}
-	kf.Slots = append(out, s)
-	return writeKeys(keysPath, kf)
+// ChangeUnfinished reports that OpenSealed found a passphrase change that
+// was staged but never sealed, so it did not happen and the owner should
+// change the passphrase again (P2-4g).
+func (v *Vault) ChangeUnfinished() bool {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return v.unfinished
 }

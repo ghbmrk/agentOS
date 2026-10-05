@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -23,8 +25,10 @@ import (
 
 // Socket names inside the run directory.
 const (
-	ModelSocket  = "model.sock"
-	UnlockSocket = "unlock.sock"
+	ModelSocket   = "model.sock"
+	RoutingSocket = "routing.sock"
+	UnlockSocket  = "unlock.sock"
+	VerifySocket  = "verify.sock"
 )
 
 var machineRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
@@ -34,11 +38,22 @@ var machineRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
 // Every call goes through the model router (P2-7), which sends it through
 // the egress proxy over the open vault (egress K9). While the vault is not
 // open every request gets 503.
-func modelHandler(c *custody, rt *route.Router) http.Handler {
+//
+// A replay machine's calls (modelroute.EvalPrefix) take the evaluation
+// route, ev; see evalRoute.
+func modelHandler(c *custody, rt *route.Router, ev *evalRoute) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		machine := r.Header.Get(modelroute.HeaderMachine)
 		if !machineRE.MatchString(machine) {
 			http.Error(w, "no machine named", http.StatusBadRequest)
+			return
+		}
+		if strings.HasPrefix(machine, modelroute.EvalPrefix) {
+			ev.serve(c, machine, w, r)
+			return
+		}
+		if r.Header.Get(modelroute.HeaderRule) != "" {
+			http.Error(w, "a routing rule is only for replay machines", http.StatusBadRequest)
 			return
 		}
 		label := "private"
@@ -52,11 +67,147 @@ func modelHandler(c *custody, rt *route.Router) http.Handler {
 		}
 		var ca callAudit
 		w.Header().Set("Trailer", modelroute.HeaderUsage)
-		rt.HandlerFor(machine, label, p.HandlerFor(machine, label, &ca), ca.decide(w)).ServeHTTP(w, r)
+		rt.HandlerFor(machine, label, p.HandlerFor(machine, label, &ca), ca.decide(w, r.Method)).ServeHTTP(w, r)
 		if u := ca.usage(); u != "" {
 			w.Header().Set(modelroute.HeaderUsage, u)
 		}
 	})
+}
+
+// evalRoute is the model access of replay machines (LOOP-5, replay K1).
+// Only the order among routes comes from the tree under evaluation, in the
+// broker's HeaderRule (absent: Active). Everything else is this process's
+// configuration: the calls get the grants and private-data allowance of
+// the agent machine From, go out through the proxy under From's adapter
+// grants, and are always private data. Nil: replay machines get no model
+// access, and the broker does not evaluate routing changes.
+//
+// A rule may name only models priced, from Prices, and no dearer in input
+// or in output than one priced route of Active on a granted provider; any
+// other refuses the call before any provider with
+// modelroute.ReasonEvalCeiling (security C1, L3 F2 on #62). Each replay machine
+// is admitted against its own limits, never From's (L3 R1).
+type evalRoute struct {
+	From      string
+	Grants    []string
+	PrivateOK map[string]bool
+	// Active is the active rule at start; routing adoptions replace it
+	// (setActive, routing.go), so the ceiling follows them (PW4 on #90).
+	Active route.Rule
+	Prices prices
+
+	mu      sync.RWMutex
+	adopted route.Rule
+}
+
+// active is the rule live machines route by: Active, or the latest one
+// routing adoptions set.
+func (ev *evalRoute) active() route.Rule {
+	ev.mu.RLock()
+	defer ev.mu.RUnlock()
+	if ev.adopted != nil {
+		return ev.adopted
+	}
+	return ev.Active
+}
+
+func (ev *evalRoute) setActive(rule route.Rule) {
+	ev.mu.Lock()
+	defer ev.mu.Unlock()
+	ev.adopted = rule
+}
+
+// price is a model's provider price per million tokens.
+type price struct {
+	Input  float64 `json:"input"`
+	Output float64 `json:"output"`
+}
+
+// prices is this process's price table, keyed "provider/model" (-prices).
+type prices map[string]price
+
+// within reports whether every route in rule on a usable provider is
+// priced, and no dearer in input or in output than one priced route of
+// active on a usable provider (security C1; L3 F2 on #62). A usable
+// provider is granted and allowed private data, since evaluation calls are
+// always private; the router refuses every other, so those routes are
+// never called.
+func (ps prices) within(rule, active route.Rule, granted []string, privateOK map[string]bool) bool {
+	ok := map[string]bool{}
+	for _, g := range granted {
+		ok[g] = privateOK[g]
+	}
+	var ceil []price
+	for _, routes := range active {
+		for _, r := range routes {
+			if p, priced := ps[r.String()]; priced && ok[r.Provider] {
+				ceil = append(ceil, p)
+			}
+		}
+	}
+	for _, routes := range rule {
+		for _, r := range routes {
+			if !ok[r.Provider] {
+				continue // never routed: the router refuses an ungranted provider
+			}
+			p, priced := ps[r.String()]
+			if !priced || !slices.ContainsFunc(ceil, func(c price) bool { return p.Input <= c.Input && p.Output <= c.Output }) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func (ev *evalRoute) serve(c *custody, machine string, w http.ResponseWriter, r *http.Request) {
+	if ev == nil {
+		http.Error(w, "evaluation has no model access", http.StatusServiceUnavailable)
+		return
+	}
+	rule, err := ev.rule(r.Header.Get(modelroute.HeaderRule))
+	var rt *route.Router
+	if err == nil {
+		rt, err = newRouter(rule, map[string][]string{machine: ev.Grants}, ev.PrivateOK)
+	}
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{
+			"message": "the routing rule under evaluation is not usable", "type": "invalid_request_error"}})
+		return
+	}
+	if !ev.Prices.within(rule, ev.active(), ev.Grants, ev.PrivateOK) {
+		b, _ := json.Marshal(modelroute.Denial{Adapter: "router", Method: r.Method, Status: http.StatusForbidden, Reason: modelroute.ReasonEvalCeiling})
+		w.Header().Set(modelroute.HeaderDenial, string(b))
+		http.Error(w, modelroute.ReasonEvalCeiling, http.StatusForbidden)
+		return
+	}
+	p := c.model()
+	if p == nil {
+		http.Error(w, "the vault is locked; model egress is unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	var ca callAudit
+	w.Header().Set("Trailer", modelroute.HeaderUsage)
+	rt.HandlerFor(machine, "private", p.HandlerWithGrantsOf(machine, ev.From, "private", &ca), ca.decide(w, r.Method)).ServeHTTP(w, r)
+	if u := ca.usage(); u != "" {
+		w.Header().Set(modelroute.HeaderUsage, u)
+	}
+}
+
+func (ev *evalRoute) rule(raw string) (route.Rule, error) {
+	if raw == "" {
+		return ev.active(), nil
+	}
+	b, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil || len(b) > modelroute.MaxRule {
+		return nil, errors.New("unreadable rule")
+	}
+	var rule route.Rule
+	if err := json.Unmarshal(b, &rule); err != nil {
+		return nil, err
+	}
+	return rule, nil
 }
 
 // callAudit carries one call's outcome back to the broker: a denial in a
@@ -81,10 +232,13 @@ func (a *callAudit) Egress(ev egress.Event) {
 
 // decide takes the router's decisions. The router audits a denial before
 // writing its status line, so the header always goes out with it. A call
-// the proxy refused reports the proxy's denial; the router's own refusal
-// for want of a granted route allowed for the label is reported too, since
-// an ungranted provider never reaches the proxy.
-func (a *callAudit) decide(w http.ResponseWriter) func(route.Decision) {
+// the proxy refused reports the proxy's denial. Every refusal of the
+// router's own is reported too (ADP-10): an undeclared or unclean path, an
+// unknown class, a body it does not accept, no granted route allowed for
+// the label, or every route exhausted; none of these reaches the proxy.
+// method is the guest's; the operation is named only once the body parsed
+// as a chat completion.
+func (a *callAudit) decide(w http.ResponseWriter, method string) func(route.Decision) {
 	return func(d route.Decision) {
 		a.mu.Lock()
 		defer a.mu.Unlock()
@@ -94,16 +248,34 @@ func (a *callAudit) decide(w http.ResponseWriter) func(route.Decision) {
 			a.served = &d
 		case d.Outcome == route.Denied && a.denial != nil:
 			den = a.denial
-		case d.Outcome == route.Denied && d.Status == http.StatusForbidden:
-			den = &modelroute.Denial{Adapter: "router", Operation: "chat_completions", Method: http.MethodPost, Status: d.Status, Reason: d.Reason}
+		case d.Outcome == route.Denied:
+			den = &modelroute.Denial{Adapter: "router", Method: method, Status: d.Status, Reason: d.Reason}
+			if d.Class != "" {
+				den.Operation = "chat_completions"
+			}
 		}
 		if den == nil {
 			return
 		}
-		if b, err := json.Marshal(den); err == nil {
+		out := *den
+		out.Reason = clipReason(out.Reason)
+		if b, err := json.Marshal(out); err == nil {
 			w.Header().Set(modelroute.HeaderDenial, string(b))
 		}
 	}
+}
+
+// maxDenialReason bounds a reported denial reason, which can quote guest
+// input: the reason's class comes before any quote, so clipping keeps it,
+// and the denial header stays far below the broker's header limit.
+const maxDenialReason = 1 << 10
+
+// clipReason cuts r to maxDenialReason bytes on a rune boundary.
+func clipReason(r string) string {
+	if len(r) <= maxDenialReason {
+		return r
+	}
+	return strings.ToValidUTF8(r[:maxDenialReason], "") + "…[clipped]"
 }
 
 // usage renders a served call's usage as the HeaderUsage trailer, with the
@@ -162,6 +334,20 @@ func unlockHandler(c *custody) http.Handler {
 		if ph == pending {
 			out["expires"] = exp.UTC().Format(time.RFC3339)
 		}
+		if c.pinWanted() {
+			out["pin"] = true
+		}
+		// The local page words the fallback unlock from these, and
+		// offers "Keep this PC trusted" on /confirm, never ticked by
+		// default: these hints come from files on the drive.
+		if changed, updated, sb := c.bootChange(); changed {
+			out["boot_changed"] = true
+			out["updated"] = updated
+			out["secure_boot"] = sb
+		}
+		if c.changeUnfinished() {
+			out["change_unfinished"] = true
+		}
 		reply(w, http.StatusOK, out)
 	}
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) { status(w) })
@@ -178,21 +364,79 @@ func unlockHandler(c *custody) http.Handler {
 			return
 		}
 		_, exp := c.status()
-		reply(w, http.StatusOK, map[string]any{"state": pending.String(), "expires": exp.UTC().Format(time.RFC3339), "ticket": ticket})
+		reply(w, http.StatusOK, map[string]any{"state": pending.String(), "expires": exp.UTC().Format(time.RFC3339), "ticket": ticket,
+			"change_unfinished": c.changeUnfinished()})
 	})
 	mux.HandleFunc("/confirm", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Ticket string `json:"ticket"`
 			Code   string `json:"code"`
+			// KeepTrusted: "Keep this PC trusted" after a changed
+			// boot path (status boot_changed).
+			KeepTrusted bool `json:"keep_trusted"`
 		}
 		if !read(w, r, &req) {
 			return
 		}
-		if err := c.confirm(req.Ticket, req.Code); err != nil {
+		kept, err := c.confirmKeep(req.Ticket, req.Code, req.KeepTrusted)
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		ph, _ := c.status()
+		reply(w, http.StatusOK, map[string]any{"state": ph.String(), "kept_trusted": kept, "change_unfinished": c.changeUnfinished()})
+	})
+	// Trusted hosts (CRED-8, CRED-9). The local UI's socket is the local
+	// confirmation; the code is the approval.
+	mux.HandleFunc("/unlock-pin", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			PIN string `json:"pin"`
+		}
+		if !read(w, r, &req) {
+			return
+		}
+		if err := c.unlockPIN(req.PIN); err != nil {
 			fail(w, err)
 			return
 		}
 		status(w)
+	})
+	mux.HandleFunc("/hosts", func(w http.ResponseWriter, r *http.Request) {
+		h, err := c.hosts()
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		reply(w, http.StatusOK, map[string]any{"hosts": h})
+	})
+	mux.HandleFunc("/trust", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Code string `json:"code"`
+			PIN  string `json:"pin"`
+		}
+		if !read(w, r, &req) {
+			return
+		}
+		name, err := c.trust(req.Code, req.PIN)
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		reply(w, http.StatusOK, map[string]any{"host": name})
+	})
+	mux.HandleFunc("/untrust", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Code string `json:"code"`
+			ID   string `json:"id"`
+		}
+		if !read(w, r, &req) {
+			return
+		}
+		if _, err := c.untrust(req.Code, req.ID); err != nil {
+			fail(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("/lock", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -216,7 +460,43 @@ func unlockHandler(c *custody) http.Handler {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
+	secondLineRoutes(mux, c, read, reply, fail)
 	return mux
+}
+
+// verifyHandler serves the verify socket: agentosd's owner channel checks
+// a high-tier code here (K7). It is a socket of its own, not a path on the
+// model socket, because the model socket forwards whatever path a guest
+// asks for. The answer is a step and a yes or no, never the seed.
+func verifyHandler(c *custody) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/verify" {
+			http.Error(w, "POST /verify only", http.StatusMethodNotAllowed)
+			return
+		}
+		var req modelroute.VerifyRequest
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<10)).Decode(&req); err != nil {
+			http.Error(w, "malformed request", http.StatusBadRequest)
+			return
+		}
+		step, ok, err := c.verify(req.Code, req.After, req.Counted)
+		var paused *pausedError
+		switch {
+		case err == nil:
+		case err == errLocked:
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		case errors.As(err, &paused):
+			w.Header().Set(modelroute.HeaderPausedUntil, paused.until.UTC().Format(time.RFC3339))
+			http.Error(w, err.Error(), http.StatusTooManyRequests)
+			return
+		default:
+			http.Error(w, errInternal.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(modelroute.VerifyResult{OK: ok, Step: step})
+	})
 }
 
 // peerListener accepts only connections from one uid (SO_PEERCRED); every

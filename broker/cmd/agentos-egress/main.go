@@ -4,13 +4,19 @@
 // neither the vault nor the proxy (vault V2).
 //
 //	agentos-egress init     create a sealed vault: passphrase slot and code-generator seed
-//	agentos-egress serve    hold the vault; serve the model and unlock sockets
+//	agentos-egress serve    hold the vault; serve the model, verify and unlock sockets
 //	agentos-egress unlock   unknown-host unlock from a terminal: passphrase, then code
+//	                        (or the boot PIN, on a trusted host that has one)
 //	agentos-egress put      store a provider API key in the open vault
+//	agentos-egress trust    make this PC a trusted host (code; optional boot PIN)
+//	agentos-egress untrust  remove a trusted host (code)
+//	agentos-egress hosts    list the trusted hosts
 //
 // It runs as its own uid. The vault and keys files are readable by it only;
-// the model socket admits the broker's uid only, and the unlock socket the
-// local UI's uid only.
+// the model and verify sockets admit the broker's uid only, the unlock
+// socket the local UI's uid only, and the sign socket (the second line's
+// calling account, served only with -modem-uid) the modem bridge's uid
+// only.
 package main
 
 import (
@@ -35,6 +41,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/egress"
+	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/route"
 	"github.com/ghbmrk/agentos/broker/vault"
@@ -43,13 +50,19 @@ import (
 const (
 	defaultVault = "/var/lib/agentos-egress/vault"
 	defaultKeys  = "/var/lib/agentos-egress/vault.keys"
-	defaultRun   = "/run/agentos-egress"
+	defaultTPM   = "/dev/tpmrm0"
+	// defaultPCRs measure the Type #1 boot path of S7's host stack: PCR 4
+	// the boot loader and kernel, 7 the Secure Boot state (db, dbx;
+	// arbitrator, #42), 9 the initrd, 12 the kernel command line, which
+	// carries the /usr root hash (HW-5a).
+	defaultPCRs = "4,7,9,12"
+	defaultRun  = "/run/agentos-egress"
 )
 
 func main() {
 	log.SetFlags(0)
 	if len(os.Args) < 2 {
-		log.Fatal("usage: agentos-egress init|serve|unlock|put [flags]")
+		log.Fatal("usage: agentos-egress init|serve|unlock|put|trust|untrust|hosts [flags]")
 	}
 	cmd, args := os.Args[1], os.Args[2:]
 	var err error
@@ -62,6 +75,12 @@ func main() {
 		err = unlockCmd(args, os.Stdin, os.Stdout)
 	case "put":
 		err = putCmd(args, os.Stdin)
+	case "trust":
+		err = trustCmd(args, os.Stdin, os.Stdout)
+	case "untrust":
+		err = untrustCmd(args, os.Stdin)
+	case "hosts":
+		err = hostsCmd(args, os.Stdout)
 	default:
 		err = fmt.Errorf("unknown command %q", cmd)
 	}
@@ -136,6 +155,28 @@ func newRouter(rule route.Rule, g map[string][]string, privateOK map[string]bool
 	})
 }
 
+// readPrices reads the evaluation price table; an empty path is an empty
+// table, which refuses every evaluation route.
+func readPrices(path string) (prices, error) {
+	ps := prices{}
+	if path == "" {
+		return ps, nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(b, &ps); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	for k, p := range ps {
+		if p.Input < 0 || p.Output < 0 {
+			return nil, fmt.Errorf("%s: %s has a negative price", path, k)
+		}
+	}
+	return ps, nil
+}
+
 // readRule reads a routing rule: a JSON object from task class to routes
 // in preference order, e.g. {"default":[{"provider":"anthropic","model":"..."}]}.
 func readRule(path string) (route.Rule, error) {
@@ -165,12 +206,23 @@ func serveCmd(args []string) error {
 	run := fs.String("run", defaultRun, "socket directory (created 0711)")
 	brokerUID := fs.Int("broker-uid", -1, "uid of agentosd, the only peer on the model socket")
 	unlockUID := fs.Int("unlock-uid", -1, "uid of the local UI, the only peer on the unlock socket")
+	modemUID := fs.Int("modem-uid", -1, "uid of the modem bridge, the only peer on the sign socket (a SIP second line); -1 serves no sign socket")
 	ttl := fs.Duration("code-ttl", owner.DefaultCodeTTL, "how long a decrypted vault waits for its approval code")
 	g := grants{}
 	fs.Var(g, "grant", "machine=adapter[,adapter] (repeatable)")
-	rulePath := fs.String("rule", "", "routing rule: JSON task class -> routes (P2-7)")
+	rulePath := fs.String("rule", "", "routing rule: JSON task class -> routes (P2-7); adoptions may only reorder its routes")
+	routingPath := fs.String("routing-state", "", "the adopted routing rule, kept across restarts (W3); default routing.json beside the keys")
+	pricesPath := fs.String("prices", "", "model price table for evaluation routes: JSON \"provider/model\" -> {input, output} per million tokens; empty refuses every evaluation route")
+	evalFrom := fs.String("eval-from", "", "the agent machine whose model grants replay machines use (LOOP-5); empty (the default) gives replay no model access")
 	privateOK := fs.String("private-ok", "", "providers the owner allowed for private data, comma-separated (CAP-9)")
+	tpmPath := fs.String("tpm", defaultTPM, "this PC's TPM (trusted host, CRED-8); absent means every boot is an unknown host")
+	polPath := fs.String("pcr-policy", "", "approved boot paths: signed PCR policies (HW-5a); default vault.pcrpolicy beside the keys")
+	pcrList := fs.String("pcrs", defaultPCRs, "PCRs a trusted host's boot path is measured into (SHA-256 bank)")
 	fs.Parse(args)
+	pcrs, err := parsePCRs(*pcrList)
+	if err != nil {
+		return err
+	}
 	rule, err := readRule(*rulePath)
 	if err != nil {
 		return err
@@ -181,9 +233,29 @@ func serveCmd(args []string) error {
 			pok[p] = true
 		}
 	}
+	if *routingPath == "" {
+		*routingPath = filepath.Join(filepath.Dir(*keysPath), "routing.json")
+	}
+	base := rule
+	if rule, err = startRule(base, *routingPath); err != nil {
+		log.Printf("routing: starting from -rule: %v", err)
+	}
 	rt, err := newRouter(rule, g, pok)
 	if err != nil {
 		return err
+	}
+	var ev *evalRoute
+	if *evalFrom != "" {
+		ps, err := readPrices(*pricesPath)
+		if err != nil {
+			return err
+		}
+		ev = &evalRoute{From: *evalFrom, Grants: g[*evalFrom], PrivateOK: pok, Active: rule, Prices: ps}
+	}
+	for m := range g {
+		if strings.HasPrefix(m, modelroute.EvalPrefix) {
+			return fmt.Errorf("-grant %s: replay machines take -eval-from's grants, never their own", m)
+		}
 	}
 	self := os.Getuid()
 	if *brokerUID < 0 || *brokerUID == self {
@@ -192,8 +264,14 @@ func serveCmd(args []string) error {
 	if *unlockUID < 0 || *unlockUID == *brokerUID {
 		return errors.New("-unlock-uid must name the local UI's uid, distinct from agentosd's")
 	}
+	if *modemUID >= 0 && (*modemUID == self || *modemUID == *brokerUID || *modemUID == *unlockUID) {
+		return errors.New("-modem-uid must name the modem bridge's own uid, distinct from this process's, agentosd's and the local UI's")
+	}
 	if *statePath == "" {
 		*statePath = statePathFor(*keysPath)
+	}
+	if *polPath == "" {
+		*polPath = filepath.Join(filepath.Dir(*keysPath), "vault.pcrpolicy")
 	}
 	c, err := newCustody(&custody{
 		keysPath: *keysPath,
@@ -205,6 +283,7 @@ func serveCmd(args []string) error {
 		now:       time.Now,
 		notify:    func(s string) { log.Print(s) },
 		statePath: *statePath,
+		host:      newTPMHost(*tpmPath, *vaultPath, *keysPath, *polPath, pcrs),
 	})
 	if err != nil {
 		return err
@@ -215,11 +294,24 @@ func serveCmd(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	srvs, err := serve(*run, c, rt, *brokerUID, *unlockUID)
+	ro := &routing{base: base, rt: rt, ev: ev, path: *routingPath}
+	srvs, err := serve(*run, c, rt, ev, ro, *brokerUID, *unlockUID)
 	if err != nil {
 		return err
 	}
-	log.Printf("vault process up, vault locked; sockets in %s", *run)
+	if *modemUID >= 0 {
+		sign, err := serveSign(*run, c, *modemUID)
+		if err != nil {
+			for _, s := range srvs {
+				s.Close()
+			}
+			return err
+		}
+		srvs = append(srvs, sign)
+	}
+	c.bootTrusted()
+	ph, _ := c.status()
+	log.Printf("vault process up, vault %s; sockets in %s", ph, *run)
 	<-ctx.Done()
 	for _, s := range srvs {
 		s.Close()
@@ -233,24 +325,43 @@ type emptyVault struct{}
 func (emptyVault) Secret(string) (vault.Secret, bool) { return vault.Secret{}, false }
 func (emptyVault) Redactor() (*vault.Redactor, error) { return vault.NewRedactor(nil), nil }
 
-// serve opens both sockets in dir and serves them until closed.
-func serve(dir string, c *custody, rt *route.Router, brokerUID, unlockUID int) ([]*http.Server, error) {
+// serve opens the model, verify and unlock sockets in dir and serves them
+// until closed. The model and verify sockets admit the broker's uid only.
+func serve(dir string, c *custody, rt *route.Router, ev *evalRoute, ro *routing, brokerUID, unlockUID int) ([]*http.Server, error) {
+	if ro == nil {
+		ro = &routing{base: rt.Rule(), rt: rt, ev: ev}
+	}
 	if err := runDir(dir); err != nil {
 		return nil, err
 	}
-	mln, err := listen(dir, ModelSocket, brokerUID)
-	if err != nil {
-		return nil, err
+	socks := []struct {
+		name string
+		uid  int
+		h    http.Handler
+	}{
+		{ModelSocket, brokerUID, modelHandler(c, rt, ev)},
+		{RoutingSocket, brokerUID, ro.handler()},
+		{VerifySocket, brokerUID, verifyHandler(c)},
+		{UnlockSocket, unlockUID, unlockHandler(c)},
 	}
-	uln, err := listen(dir, UnlockSocket, unlockUID)
-	if err != nil {
-		mln.Close()
-		return nil, err
+	var lns []net.Listener
+	for _, s := range socks {
+		ln, err := listen(dir, s.name, s.uid)
+		if err != nil {
+			for _, l := range lns {
+				l.Close()
+			}
+			return nil, err
+		}
+		lns = append(lns, ln)
 	}
-	ms, us := newServer(modelHandler(c, rt)), newServer(unlockHandler(c))
-	go ms.Serve(mln)
-	go us.Serve(uln)
-	return []*http.Server{ms, us}, nil
+	var srvs []*http.Server
+	for i, s := range socks {
+		srv := newServer(s.h)
+		go srv.Serve(lns[i])
+		srvs = append(srvs, srv)
+	}
+	return srvs, nil
 }
 
 // initCmd creates a sealed vault: a generated passphrase (100 bits) in the
@@ -388,6 +499,39 @@ func unlockCmd(args []string, in io.Reader, out io.Writer) error {
 	fs.Parse(args)
 	c := unixClient(filepath.Join(*run, UnlockSocket))
 	r := bufio.NewReader(in)
+	st, _, err := get(c, "/status")
+	if err == nil && st["pin"] == true {
+		fmt.Fprint(out, "Boot PIN for this trusted PC: ")
+		pin, _ := r.ReadString('\n')
+		res, code, err := post(c, "/unlock-pin", map[string]string{"pin": strings.TrimSpace(pin)})
+		if err != nil {
+			return err
+		}
+		if code != http.StatusOK {
+			return fmt.Errorf("unlock: %v", res["error"])
+		}
+		fmt.Fprintln(out, "Vault unlocked.")
+		return nil
+	}
+	keep := false
+	if err == nil && st["boot_changed"] == true {
+		if st["secure_boot"] == true {
+			fmt.Fprintln(out, "Secure Boot settings on this PC changed. If you updated firmware, unlock with your card to keep this PC trusted.")
+		} else if st["updated"] == true {
+			fmt.Fprintln(out, "Box updated. Unlock once with your passphrase and a code; this PC stays trusted after that.")
+		} else {
+			fmt.Fprintln(out, "This PC started the box in a way it hasn't before. If you didn't change anything, the drive may have been tampered with. Unlock only if you're sure.")
+		}
+		// Never ticked by default: updated and secure_boot come from
+		// files on the drive, not from a verified release's measured
+		// boot, so a tampered boot path must not become trusted unless
+		// the owner says so. (A release the updater verified has its
+		// policy signed before the reboot, and never gets here.)
+		fmt.Fprint(out, "Keep this PC trusted? [y/N] ")
+		ans, _ := r.ReadString('\n')
+		ans = strings.ToLower(strings.TrimSpace(ans))
+		keep = ans == "y" || ans == "yes"
+	}
 	fmt.Fprint(out, "Vault passphrase: ")
 	pass, _ := r.ReadString('\n')
 	res, code, err := post(c, "/unlock", map[string]string{"passphrase": strings.TrimSpace(pass)})
@@ -402,11 +546,14 @@ func unlockCmd(args []string, in io.Reader, out io.Writer) error {
 		fmt.Fprintf(out, "Code-generator code (6 digits, due by %v): ", res["expires"])
 		otp, rerr := r.ReadString('\n')
 		var cres map[string]any
-		cres, code, err = post(c, "/confirm", map[string]string{"ticket": ticket, "code": strings.TrimSpace(otp)})
+		cres, code, err = post(c, "/confirm", map[string]any{"ticket": ticket, "code": strings.TrimSpace(otp), "keep_trusted": keep})
 		if err != nil {
 			return err
 		}
 		if code == http.StatusOK {
+			if keep && cres["kept_trusted"] != true {
+				fmt.Fprintln(out, "Could not keep this PC trusted; trust it again with: agentos-egress trust")
+			}
 			break
 		}
 		// A wrong code leaves the unlock pending until it expires or
@@ -434,6 +581,98 @@ func putCmd(args []string, in io.Reader) error {
 	}
 	if code != http.StatusNoContent {
 		return fmt.Errorf("put: %v", res["error"])
+	}
+	return nil
+}
+
+func get(c *http.Client, path string) (map[string]any, int, error) {
+	u := url.URL{Scheme: "http", Host: "agentos-egress", Path: path}
+	resp, err := c.Get(u.String())
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	out := map[string]any{}
+	json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&out)
+	return out, resp.StatusCode, nil
+}
+
+// trustCmd makes this PC a trusted host (CRED-9): it reads a
+// code-generator code and, with -pin, then the boot PIN, from in.
+func trustCmd(args []string, in io.Reader, out io.Writer) error {
+	fs := flag.NewFlagSet("trust", flag.ExitOnError)
+	run := fs.String("run", defaultRun, "socket directory")
+	withPIN := fs.Bool("pin", false, "also require a boot PIN on this PC (no unattended restart)")
+	fs.Parse(args)
+	r := bufio.NewReader(io.LimitReader(in, maxUnlockBody))
+	fmt.Fprint(out, "Code-generator code: ")
+	code, _ := r.ReadString('\n')
+	var pin string
+	if *withPIN {
+		fmt.Fprintln(out, "With a PIN, the box won't restart by itself after a power cut until you enter the PIN.")
+		fmt.Fprintln(out, "This also locks this PC's TPM reset to the box until you turn the PIN off.")
+		fmt.Fprint(out, "New boot PIN: ")
+		pin, _ = r.ReadString('\n')
+		pin = strings.TrimSpace(pin)
+		if pin == "" {
+			return errors.New("trust: -pin needs a PIN")
+		}
+	}
+	res, status, err := post(unixClient(filepath.Join(*run, UnlockSocket)), "/trust", map[string]string{"code": strings.TrimSpace(code), "pin": pin})
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK {
+		return fmt.Errorf("trust: %v", res["error"])
+	}
+	fmt.Fprintf(out, "%v is now a trusted host.\n", res["host"])
+	return nil
+}
+
+// untrustCmd removes the trusted host -id (from hosts), reading a
+// code-generator code from in.
+func untrustCmd(args []string, in io.Reader) error {
+	fs := flag.NewFlagSet("untrust", flag.ExitOnError)
+	run := fs.String("run", defaultRun, "socket directory")
+	id := fs.String("id", "", "host id, as hosts prints it")
+	fs.Parse(args)
+	code, _ := bufio.NewReader(io.LimitReader(in, maxUnlockBody)).ReadString('\n')
+	res, status, err := post(unixClient(filepath.Join(*run, UnlockSocket)), "/untrust", map[string]string{"code": strings.TrimSpace(code), "id": *id})
+	if err != nil {
+		return err
+	}
+	if status != http.StatusNoContent {
+		return fmt.Errorf("untrust: %v", res["error"])
+	}
+	return nil
+}
+
+// hostsCmd lists the trusted hosts.
+func hostsCmd(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("hosts", flag.ExitOnError)
+	run := fs.String("run", defaultRun, "socket directory")
+	fs.Parse(args)
+	res, status, err := get(unixClient(filepath.Join(*run, UnlockSocket)), "/hosts")
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK {
+		return fmt.Errorf("hosts: %v", res["error"])
+	}
+	hosts, _ := res["hosts"].([]any)
+	if len(hosts) == 0 {
+		fmt.Fprintln(out, "No trusted hosts: every boot needs the vault passphrase and a code.")
+	}
+	for _, h := range hosts {
+		m, _ := h.(map[string]any)
+		line := fmt.Sprintf("%v", m["label"])
+		if m["this"] == true {
+			line += "  (this PC)"
+		}
+		if m["pin"] == true {
+			line += "  (boot PIN)"
+		}
+		fmt.Fprintf(out, "%s\n    id %v\n", line, m["id"])
 	}
 	return nil
 }

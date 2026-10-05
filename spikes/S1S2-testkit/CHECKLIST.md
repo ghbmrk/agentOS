@@ -39,6 +39,8 @@ Boot-menu keys (common, not guaranteed): Dell F12 · HP Esc then F9 · Lenovo F1
 
 Pass for S1: at least 3 of 3 vendors switch off by themselves with no keys, either straight away or after fix A once.
 
+On the N95, also read the results file's `agent_and_replay_fit` line: **PASS** means the agent machine and one replay machine fit in memory beside the rest of the floor budget. Note it here: ________
+
 ## 2. S2: modem test (about 20 minutes per modem)
 
 Use one PC that passed S1, ideally the N95 floor machine.

@@ -8,6 +8,13 @@
 //     machine's broker socket (/run/agentos/broker.sock), because guests
 //     such as OpenClaw speak HTTP to a URL, not to a Unix socket. Model
 //     calls (/model/...) and broker tools (/mcp) go this way (ARC-6 (a), (b)).
+//   - Serve the tree's compiled skills and procedures as MCP tools on
+//     /skills/mcp (CAP-5, package skill). A skill runs here, in the guest,
+//     and sends each step to the broker as an ordinary effect_request, so
+//     it carries no authority the guest lacks.
+//   - Keep the tree directory a copy of the box's adopted procedures,
+//     skills and context, fetched with the broker tool managed_tree, which
+//     answers only a private machine (W4, tree.go).
 //   - Fetch owner messages from the broker (/owner/next), hand each to the
 //     guest's own inbound API (OpenAI-compatible chat completions on the
 //     gateway), and post the answer back (/owner/reply) (ARC-6 (c)).
@@ -35,6 +42,8 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/skill"
 )
 
 func main() {
@@ -42,6 +51,8 @@ func main() {
 	listen := flag.String("listen", "127.0.0.1:18080", "where the guest reaches the broker")
 	gateway := flag.String("gateway", "http://127.0.0.1:18789", "the guest's inbound API")
 	model := flag.String("inbound-model", "openclaw", "model name the inbound API expects")
+	tree := flag.String("tree", "/etc/agentos/tree", "the managed tree's skills and procedures (CAP-5)")
+	treeEvery := flag.Duration("tree-sync", 30*time.Second, "how often to fetch the managed tree from the broker (W4); 0 never")
 	flag.Parse()
 
 	var b [24]byte
@@ -53,19 +64,11 @@ func main() {
 		},
 	}}
 
-	rp := &httputil.ReverseProxy{
-		Rewrite: func(r *httputil.ProxyRequest) {
-			r.SetURL(&url.URL{Scheme: "http", Host: "broker.localhost"})
-			r.Out.Host = "broker.localhost"
-		},
-		Transport:     broker.Transport,
-		FlushInterval: -1, // model streams flow through as they arrive
-	}
 	l, err := net.Listen("tcp", *listen)
 	if err != nil {
 		log.Fatal(err)
 	}
-	go http.Serve(l, rp)
+	go http.Serve(l, routes(broker, *tree))
 
 	var child *exec.Cmd
 	if args := flag.Args(); len(args) > 0 {
@@ -77,6 +80,9 @@ func main() {
 		}
 	}
 	go owner(broker, *gateway, *model, token)
+	if *treeEvery > 0 {
+		go syncTree(context.Background(), broker, *tree, *treeEvery)
+	}
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
@@ -87,6 +93,24 @@ func main() {
 		}
 	}()
 	reap(child)
+}
+
+// routes forwards the guest's requests to the broker and serves the
+// tree's skills, whose steps go back to the broker's own effect_request.
+func routes(broker *http.Client, tree string) http.Handler {
+	rp := &httputil.ReverseProxy{
+		Rewrite: func(r *httputil.ProxyRequest) {
+			r.SetURL(&url.URL{Scheme: "http", Host: "broker.localhost"})
+			r.Out.Host = "broker.localhost"
+		},
+		Transport:     broker.Transport,
+		FlushInterval: -1, // model streams flow through as they arrive
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/", rp)
+	mux.Handle("/skills/mcp", &skill.Server{Dir: tree,
+		Effects: &skill.MCPEffects{Client: broker, URL: "http://broker.localhost/mcp"}})
+	return mux
 }
 
 // reap waits for every child, as PID 1 must, and exits with the runtime.

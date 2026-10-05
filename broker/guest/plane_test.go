@@ -3,6 +3,7 @@ package guest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,6 +28,10 @@ type fakeMachines struct {
 	private map[string]bool
 	lineage map[string]string
 	events  []string
+	// locked mimics the manager holding its lock while it calls Open;
+	// a Lineage call then would deadlock on the box.
+	locked bool
+	misuse int
 }
 
 func newMachines() *fakeMachines {
@@ -51,6 +57,9 @@ func (f *fakeMachines) RaisePrivate(id string) error {
 func (f *fakeMachines) Lineage(id string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.locked {
+		f.misuse++
+	}
 	if l := f.lineage[id]; l != "" {
 		return l, nil
 	}
@@ -122,7 +131,7 @@ func newRig(t *testing.T, mod func(*Config)) *rig {
 				r.mu.Lock()
 				r.model++
 				r.mu.Unlock()
-				fmt.Fprintf(w, `{"machine":%q,"path":%q}`, machine, req.URL.Path)
+				fmt.Fprintf(w, `{"machine":%q,"path":%q,"raw":%q}`, machine, req.URL.Path, req.URL.EscapedPath())
 			})
 		},
 		Meter: m,
@@ -221,7 +230,7 @@ func TestARC6SocketServesOnlyTheGuestInterface(t *testing.T) {
 		{"GET", "/"}, {"GET", "/admin"}, {"POST", "/v1/chat/completions"}, {"GET", "/owner"},
 		{"POST", "/sockets/owner"}, {"GET", "/../etc/passwd"},
 	} {
-		if code, _ := r.do("m1", c.method, c.path, ""); code != 404 && code != 405 && code != 301 {
+		if code, _ := r.do("m1", c.method, c.path, ""); code != 404 && code != 405 {
 			t.Errorf("%s %s answered %d", c.method, c.path, code)
 		}
 	}
@@ -231,6 +240,66 @@ func TestARC6SocketServesOnlyTheGuestInterface(t *testing.T) {
 	r2 := newRig(t, func(c *Config) { c.Model, c.Meter = nil, nil })
 	if code, _ := r2.do("m1", "POST", "/model/openai/v1/chat/completions", "{}"); code != 503 {
 		t.Errorf("model without egress: %d", code)
+	}
+}
+
+// TestADP10SocketNeverNormalizesAPath: the socket routes on the path the
+// guest sent, byte for byte. A dot segment, an escaped separator, or an
+// empty segment is never cleaned or redirected into a declared shape: on a
+// model path it reaches the model chain as sent, whose shape check denies
+// it (egress E1), and anywhere else it is 404. Go 1.26's ServeMux answers
+// an unclean path with a 307 that keeps the method and body, so a guest
+// that follows it lands on the clean path (security, ADP-10).
+func TestADP10SocketNeverNormalizesAPath(t *testing.T) {
+	r := newRig(t, nil)
+	noFollow := func(id string) *http.Client {
+		c := r.client(id)
+		c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		return c
+	}
+	send := func(id, method, path string) (int, string) {
+		t.Helper()
+		req, _ := http.NewRequest(method, "http://broker"+path, strings.NewReader("{}"))
+		resp, err := noFollow(id).Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(b)
+	}
+	// Model paths reach the model chain unchanged, one machine each so
+	// the meter's per-machine cap does not interfere.
+	for i, p := range []string{
+		"/model/openai/v1/../v1/chat/completions",
+		"/model/openai/v1/chat%2Fcompletions",
+		"/model/openai%2Fv1/chat/completions",
+		"/model/openai/v1/%2e%2e/v1/chat/completions",
+		"/model/openai/v1/./chat/completions",
+		"/model/openai//v1/chat/completions",
+		"/model/openai/v1/chat/completions/..",
+		"/model/../model/openai/v1/chat/completions",
+	} {
+		id := fmt.Sprintf("n%d", i)
+		code, body := send(id, "POST", p)
+		want := fmt.Sprintf(`"raw":%q`, strings.TrimPrefix(p, "/model"))
+		if code != 200 || !strings.Contains(body, want) {
+			t.Errorf("POST %s: %d %s; want the model chain to see %s", p, code, body, want)
+		}
+	}
+	// Everything else unclean is 404, never a redirect.
+	for _, c := range []struct{ method, path string }{
+		{"POST", "/mcp/../mcp"}, {"POST", "/./mcp"}, {"POST", "//mcp"}, {"POST", "/mcp/"},
+		{"GET", "/owner%2Fnext"}, {"GET", "/owner/./next"}, {"POST", "/owner//reply"},
+		{"GET", "/owner/next/.."}, {"POST", "/x/../model/openai/v1/chat/completions"},
+		{"POST", "//model/openai/v1/chat/completions"}, {"POST", "/model"}, {"POST", "/%6dcp"},
+	} {
+		if code, body := send("m1", c.method, c.path); code != 404 {
+			t.Errorf("%s %s answered %d %s; want 404", c.method, c.path, code, body)
+		}
+	}
+	if r.model != 8 {
+		t.Errorf("model chain saw %d calls, want 8", r.model)
 	}
 }
 
@@ -338,7 +407,9 @@ func TestADP10NoAdapterNoIntent(t *testing.T) {
 // of requests shares one trailing snapshot, so a looping guest cannot
 // flood the snapshot store (RES-4).
 func TestREV1StepAfterEveryEffectRequest(t *testing.T) {
-	r := newRig(t, func(c *Config) { c.StepInterval = 300 * time.Millisecond })
+	// The burst below must finish inside one interval; 1 s leaves room
+	// for a loaded -race run.
+	r := newRig(t, func(c *Config) { c.StepInterval = time.Second })
 	r.tool("m1", "effect_request", send("r1"))
 	if n := r.ms.stepsOf("m1"); n != 1 {
 		t.Fatalf("%d steps after one effect request", n)
@@ -354,13 +425,42 @@ func TestREV1StepAfterEveryEffectRequest(t *testing.T) {
 	if n := r.ms.stepsOf("m1"); n != 1 {
 		t.Fatalf("%d steps inside the interval, want the first only", n)
 	}
-	time.Sleep(700 * time.Millisecond)
+	r.stepsSettle("m1")
 	if n := r.ms.stepsOf("m1"); n != 2 {
 		t.Fatalf("%d steps after the burst, want one trailing snapshot", n)
 	}
 	r.tool("m1", "effect_request", send("r20"))
 	if n := r.ms.stepsOf("m1"); n != 3 {
 		t.Fatalf("%d steps: a request after the interval snapshots at once", n)
+	}
+}
+
+// stepsSettle waits until machine id's stepper owes nothing and a full
+// StepInterval has passed since its last snapshot, so the next effect
+// request snapshots at once. It reads the stepper's state rather than
+// sleeping a fixed time, which a late timer under load can outlast. A
+// trailing snapshot is due within one interval; one not taken within
+// three fails the test.
+func (r *rig) stepsSettle(id string) {
+	r.t.Helper()
+	m := r.p.get(id)
+	deadline := time.Now().Add(3 * r.p.cfg.StepInterval)
+	for {
+		s := &m.steps
+		s.mu.Lock()
+		idle := !s.running && !s.pending && s.timer == nil
+		wait := r.p.cfg.StepInterval - time.Since(s.last)
+		s.mu.Unlock()
+		switch {
+		case idle && wait <= 0:
+			return
+		case idle:
+			time.Sleep(wait)
+		case time.Now().After(deadline):
+			r.t.Fatalf("stepper of %s still owes a snapshot after %v", id, 3*r.p.cfg.StepInterval)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
 	}
 }
 
@@ -502,6 +602,47 @@ func TestG5OwnerMessagesSurviveABrokerRestart(t *testing.T) {
 	if code, body := r3.do("m1", "GET", "/owner/next", ""); code != 204 {
 		t.Fatalf("an answered message came back: %s", body)
 	}
+}
+
+// TestREV5StoredOwnerMessagesRaiseTheMachine: the inbox store can outlive
+// the machine record, so a machine created fresh (public) under an ID with
+// stored owner messages is raised to private before the guest reads one,
+// and a failed raise hands out nothing (security C1 on #56).
+func TestREV5StoredOwnerMessagesRaiseTheMachine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inbox.json")
+	r := newRig(t, func(c *Config) { c.InboxPath = path })
+	r.client("agent")
+	if _, err := r.p.DeliverOwner("agent", "my bank details", false); err != nil {
+		t.Fatal(err)
+	}
+	r.p.Shutdown()
+
+	fail := &failRaise{fakeMachines: newMachines(), fail: true}
+	r2 := newRig(t, func(c *Config) { c.InboxPath = path; c.Machines = fail })
+	r2.client("agent")
+	if code, body := r2.do("agent", "GET", "/owner/next", ""); code != 503 || strings.Contains(body, "bank") {
+		t.Fatalf("raise failed, yet: %d %s", code, body)
+	}
+	fail.fail = false
+	code, body := r2.do("agent", "GET", "/owner/next", "")
+	if code != 200 || !strings.Contains(body, "bank") {
+		t.Fatalf("after raise: %d %s", code, body)
+	}
+	if !fail.private["agent"] {
+		t.Fatal("stored message handed out without raising the machine")
+	}
+}
+
+type failRaise struct {
+	*fakeMachines
+	fail bool
+}
+
+func (f *failRaise) RaisePrivate(id string) error {
+	if f.fail {
+		return errors.New("label store down")
+	}
+	return f.fakeMachines.RaisePrivate(id)
 }
 
 // TestOP8ModelRouteIsMeteredByMachine: model calls go through the meter,
@@ -744,5 +885,52 @@ func TestLabelsPartitionRequests(t *testing.T) {
 	}
 	if s, _ := r.eng.Get("m1/q1"); s.Intent.Label != "public" {
 		t.Fatalf("label %q", s.Intent.Label)
+	}
+}
+
+// REQ: OP-8
+//
+// TestShutdownWaitsForCallsInFlight: a model call whose response the guest
+// already has may still be settling the meter; Shutdown returns only once
+// it has ended, so nothing writes the broker's files after shutdown.
+func TestShutdownWaitsForCallsInFlight(t *testing.T) {
+	var ended atomic.Bool
+	r := newRig(t, func(c *Config) {
+		c.Model = func(string) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				io.WriteString(w, `{}`)
+				w.(http.Flusher).Flush()
+				time.Sleep(200 * time.Millisecond)
+				ended.Store(true)
+			})
+		}
+	})
+	resp, err := r.client("m1").Post("http://broker/model/openai/v1/chat/completions", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.ReadAll(io.LimitReader(resp.Body, 2))
+	resp.Body.Close()
+	r.p.Shutdown()
+	if !ended.Load() {
+		t.Fatal("Shutdown returned with a call still in flight")
+	}
+}
+
+// TestOwnerAgentReportsDeliveredTasks: W3 (potency PW3 on #90) keeps the
+// owner's task text by goal ID for harvesting, so the agent adapter says
+// which goal each delivered message starts; an undelivered one is not
+// reported.
+func TestOwnerAgentReportsDeliveredTasks(t *testing.T) {
+	r := newRig(t, nil)
+	r.client("m1")
+	var got []string
+	note := func(goal, text string, public bool) { got = append(got, fmt.Sprint(goal, "|", text, "|", public)) }
+	if err := (OwnerAgent{Plane: r.p, Machine: "m1", Delivered: note}).Deliver(context.Background(), "find bus times", true); err != nil {
+		t.Fatal(err)
+	}
+	_ = (OwnerAgent{Plane: r.p, Machine: "absent", Delivered: note}).Deliver(context.Background(), "x", false)
+	if len(got) != 1 || !strings.HasPrefix(got[0], "owner:") || !strings.HasSuffix(got[0], "|find bus times|true") {
+		t.Fatalf("reported %q", got)
 	}
 }
