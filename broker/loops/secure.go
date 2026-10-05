@@ -195,7 +195,23 @@ type Guard struct {
 	notes []string // checks that could not run on the last pass
 	stale string
 	more  []string // lines held back from the last text, for MORE
+	// held are fix candidates whose evaluation was preempted, by finding
+	// ID, offered again without another fixer call (PE4); memory only.
+	held map[string]heldFix
 }
+
+// heldFix is a checked fix candidate kept after a preempted evaluation.
+type heldFix struct {
+	cand change.Candidate
+	at   time.Time
+}
+
+// FixPreempted is a Record's Fix while its fix waits to be proposed again:
+// the fixer or the evaluation was preempted (PE4).
+const FixPreempted = "preempted"
+
+// maxHeldFixes bounds the kept candidates, oldest dropped first.
+const maxHeldFixes = 16
 
 type secureState struct {
 	Last time.Time `json:"last"`
@@ -335,6 +351,7 @@ func (s *Guard) Pass(ctx context.Context) (int, error) {
 		// No longer observed; its evidence stays. A pause it caused stays
 		// too, and the owner hears it cleared where they heard of it.
 		delete(s.st.Open, id)
+		delete(s.held, id)
 		s.st.Cleared[id] = now
 		if rec.Contained == "paused" && rec.Texted {
 			later = append(later, clearedLine(rec))
@@ -362,6 +379,9 @@ func (s *Guard) Pass(ctx context.Context) (int, error) {
 		return checkRank[a.Check] < checkRank[b.Check]
 	})
 	var errs []error
+	if err := s.retryFixes(ctx); err != nil {
+		errs = append(errs, err)
+	}
 	pauses := 0
 	for _, f := range fresh {
 		if ctx.Err() != nil {
@@ -485,16 +505,8 @@ func (s *Guard) handle(ctx context.Context, f Finding, pause bool) (Record, erro
 		}
 	}
 	if s.cfg.Fixer != nil && f.Rule != nil {
-		cand, err := s.cfg.Fixer.Fix(ctx, f)
-		if err == nil {
-			// Loop 2 sets these, never the fixer.
-			cand.Source, cand.Origin, cand.Public = change.Local, "loop2", false
-			var rep change.Report
-			rep, err = s.cfg.Pipeline.Propose(ctx, cand)
-			rec.Fix, rec.FixReason = string(rep.State), rep.Reason
-		}
-		if err != nil {
-			errs = append(errs, fmt.Errorf("fix %s: %w", f.ID, err))
+		if err := s.fix(ctx, &rec); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	s.mu.Lock()
@@ -503,6 +515,105 @@ func (s *Guard) handle(ctx context.Context, f Finding, pause bool) (Record, erro
 	e.Fixture, e.Fix, e.FixReason = rec.Fixture, rec.Fix, rec.FixReason
 	s.mu.Unlock()
 	return rec, errors.Join(errs...)
+}
+
+// fix proposes a fix for rec's finding through the pipeline. A candidate
+// kept from a preempted evaluation of the same finding is offered again
+// without calling the fixer, within change.ResumeFor; otherwise the fixer
+// builds one. If the fixer or the evaluation is preempted, the fix stays
+// FixPreempted and the next pass offers it again (PE4, L3 on #103), so a
+// preemption never leaves a finding without a fix for good.
+func (s *Guard) fix(ctx context.Context, rec *Record) error {
+	f := rec.Finding
+	s.mu.Lock()
+	h, ok := s.held[f.ID]
+	delete(s.held, f.ID)
+	s.mu.Unlock()
+	cand := h.cand
+	if !ok || s.cfg.Now().Sub(h.at) > change.ResumeFor {
+		var err error
+		if cand, err = s.cfg.Fixer.Fix(ctx, f); err != nil {
+			if ctx.Err() != nil {
+				rec.Fix, rec.FixReason = FixPreempted, ""
+				return nil
+			}
+			return fmt.Errorf("fix %s: %w", f.ID, err)
+		}
+		// Loop 2 sets these, never the fixer.
+		cand.Source, cand.Origin, cand.Public = change.Local, "loop2", false
+	}
+	rep, err := s.cfg.Pipeline.Propose(ctx, cand)
+	if errors.Is(err, change.ErrInterrupted) {
+		s.keep(f.ID, cand)
+		rec.Fix, rec.FixReason = FixPreempted, ""
+		return nil
+	}
+	rec.Fix, rec.FixReason = string(rep.State), rep.Reason
+	if err != nil {
+		return fmt.Errorf("fix %s: %w", f.ID, err)
+	}
+	return nil
+}
+
+// keep holds a preempted fix candidate, dropping the oldest past
+// maxHeldFixes.
+func (s *Guard) keep(id string, cand change.Candidate) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.held == nil {
+		s.held = map[string]heldFix{}
+	}
+	s.held[id] = heldFix{cand: cand, at: s.cfg.Now()}
+	for len(s.held) > maxHeldFixes {
+		oldest := ""
+		for k, v := range s.held {
+			if oldest == "" || v.at.Before(s.held[oldest].at) {
+				oldest = k
+			}
+		}
+		delete(s.held, oldest)
+	}
+}
+
+// retryFixes offers again every open finding's fix left FixPreempted.
+func (s *Guard) retryFixes(ctx context.Context) error {
+	if s.cfg.Fixer == nil {
+		return nil
+	}
+	s.mu.Lock()
+	var ids []string
+	for _, id := range sortedKeys(s.st.Open) {
+		if s.st.Open[id].Fix == FixPreempted {
+			ids = append(ids, id)
+		}
+	}
+	s.mu.Unlock()
+	var errs []error
+	for _, id := range ids {
+		if ctx.Err() != nil {
+			break
+		}
+		s.mu.Lock()
+		rec, ok := s.st.Open[id]
+		s.mu.Unlock()
+		if !ok {
+			continue
+		}
+		if err := s.fix(ctx, &rec); err != nil {
+			errs = append(errs, err)
+		}
+		s.mu.Lock()
+		if _, still := s.st.Open[id]; still {
+			s.st.Open[id] = rec
+			for i := range s.st.Evidence {
+				if e := &s.st.Evidence[i]; e.Digest == rec.Digest {
+					e.Fix, e.FixReason = rec.Fix, rec.FixReason
+				}
+			}
+		}
+		s.mu.Unlock()
+	}
+	return errors.Join(errs...)
 }
 
 // evidenceLocked records a finding's evidence, once per digest, and
