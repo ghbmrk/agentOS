@@ -168,9 +168,10 @@ func unlockHandler(c *custody) http.Handler {
 		}
 		// The local page words the fallback unlock from these, and
 		// offers "Keep this PC trusted", ticked, on /confirm.
-		if changed, updated := c.bootChange(); changed {
+		if changed, updated, sb := c.bootChange(); changed {
 			out["boot_changed"] = true
 			out["updated"] = updated
+			out["secure_boot"] = sb
 		}
 		reply(w, http.StatusOK, out)
 	}

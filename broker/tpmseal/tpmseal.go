@@ -753,3 +753,35 @@ func daParameters(t transport.TPM) error {
 	}
 	return nil
 }
+
+// ReleaseLockout gives the lockout hierarchy back: it changes the lockout
+// authorization from auth, the box's, to empty, as it was before a PIN
+// slot took it (the PIN turned off, or the PC no longer trusted). It does
+// nothing when the authorization is already empty.
+func ReleaseLockout(t transport.TPM, auth []byte) error {
+	set, err := lockoutAuthSet(t)
+	if err != nil || !set {
+		return err
+	}
+	s, err := loadSRK(t)
+	if err != nil {
+		return err
+	}
+	defer flush(t, s.handle)
+	// As in TakeLockout, the TPM keys its answer with the new (empty)
+	// value, which go-tpm checks against the old one; the TPM's state
+	// says whether the change took effect.
+	first := tpm2.HierarchyChangeAuth{
+		AuthHandle: tpm2.AuthHandle{
+			Handle: tpm2.TPMRHLockout,
+			Auth: tpm2.HMAC(tpm2.TPMAlgSHA256, 16,
+				tpm2.Auth(auth),
+				tpm2.Salted(s.handle, s.pub)),
+		},
+	}.Execute
+	_, cerr := first(t)
+	if set, err := lockoutAuthSet(t); err != nil || set {
+		return fmt.Errorf("tpmseal: release lockout authorization: %w", errors.Join(cerr, err))
+	}
+	return nil
+}

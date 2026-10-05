@@ -380,7 +380,8 @@ func TestSubstitutedSRKPublicRefused(t *testing.T) {
 
 // A PIN slot takes the TPM's lockout hierarchy, so the guess counter can't
 // be reset with the factory-empty lockout password; a lockout password
-// someone else set is refused rather than guessed.
+// someone else set is refused rather than guessed; turning the PIN off
+// gives the hierarchy back.
 func TestPINSlotTakesTheLockoutHierarchy(t *testing.T) {
 	s := swtpm.Start(t)
 	if err := s.ThiefLockReset(); err != nil {
@@ -393,15 +394,25 @@ func TestPINSlotTakesTheLockoutHierarchy(t *testing.T) {
 	if err := tpmseal.TakeLockout(s.TPM(), auth, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ThiefLockReset(); err == nil {
-		t.Fatal("empty-password reset still works after the box took the lockout hierarchy")
-	}
 	if err := tpmseal.TakeLockout(s.TPM(), auth, true); err != nil {
 		t.Fatalf("box's own lockout authorization: %v", err)
 	}
 	other, _ := tpmseal.NewLockoutAuth()
 	if err := tpmseal.TakeLockout(s.TPM(), other, false); !errors.Is(err, tpmseal.ErrLockoutOwned) {
 		t.Fatalf("lockout set by someone else: got %v, want ErrLockoutOwned", err)
+	}
+	// Turning the PIN off gives the lockout hierarchy back: empty again.
+	if err := tpmseal.ReleaseLockout(s.TPM(), auth); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ThiefLockReset(); err != nil {
+		t.Fatalf("lockout not back to empty after release: %v", err)
+	}
+	if err := tpmseal.TakeLockout(s.TPM(), auth, false); err != nil {
+		t.Fatalf("taking the released lockout again: %v", err)
+	}
+	if err := s.ThiefLockReset(); err == nil {
+		t.Fatal("empty-password reset still works after the box took the lockout hierarchy")
 	}
 }
 
