@@ -60,7 +60,9 @@ var controlPath = map[string][]string{
 	// NoInference holds it instead, through netOK.
 	// It opens recall (recalltool) once the vault process hands over the
 	// identity key, and serves the recall tools on the guest plane.
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool"},
+	// It serves the worker-machine tools (workers, CAP-8) on the live guest
+	// plane.
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool", "workers"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies
@@ -114,6 +116,10 @@ var guestPlane = map[string]struct {
 	// machine its own socket, as replay does: the brief, one candidate,
 	// and the metered model route; no executors, no network clients.
 	"loopbuild": {[]string{"admission", "change", "journal", "loops", "meter", "vm"}, []string{"net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}},
+	// Worker machines (CAP-8): served to guests as tools over the machine
+	// manager; no journal, no executors, no network clients, no processes
+	// (commands run through vm/gvisor's runsc exec).
+	"workers": {[]string{"admission", "vm", "vm/overlay"}, forbiddenStd},
 	// Agents' questions to the owner (P3-8, W9): served to guests and
 	// answered from the owner channel, through hooks the wiring passes.
 	"question": {nil, forbiddenStd},

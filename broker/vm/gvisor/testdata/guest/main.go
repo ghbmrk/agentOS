@@ -3,6 +3,9 @@
 //	guest serve      hold a random token in memory and serve requests
 //	guest svc SOCK PATH  GET PATH from the broker service socket SOCK and
 //	                 print the status and body
+//	guest stdin N    copy stdin to stdout, then exit N (worker exec)
+//	guest linger     ignore catchable signals, keep stdout open, and append
+//	                 a byte to /work/linger every 20ms until killed
 //	guest <cmd> ...  send one request to the server and print the answer
 //
 // Requests: token; write PATH TEXT; read PATH; remove PATH; stat PATH;
@@ -18,7 +21,9 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -28,6 +33,15 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "serve" {
 		serve()
 		return
+	}
+	if len(os.Args) == 3 && os.Args[1] == "stdin" {
+		io.Copy(os.Stdout, os.Stdin)
+		var n int
+		fmt.Sscan(os.Args[2], &n)
+		os.Exit(n)
+	}
+	if len(os.Args) == 2 && os.Args[1] == "linger" {
+		linger()
 	}
 	if len(os.Args) == 4 && os.Args[1] == "svc" {
 		fmt.Println(get(os.Args[2], os.Args[3]))
@@ -41,6 +55,20 @@ func main() {
 	fmt.Fprintln(c, strings.Join(os.Args[1:], " "))
 	line, _ := bufio.NewReader(c).ReadString('\n')
 	fmt.Print(line)
+}
+
+// linger stands in for a command that outlives its timeout: only SIGKILL
+// ends it, and it holds stdout open while it runs.
+func linger() {
+	signal.Ignore(syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP, syscall.SIGPIPE)
+	fmt.Println("lingering")
+	for {
+		if f, err := os.OpenFile("/work/linger", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+			f.Write([]byte("."))
+			f.Close()
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 var held []net.Conn

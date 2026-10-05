@@ -7,8 +7,10 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
 )
@@ -220,4 +222,51 @@ func must(t *testing.T, err error) {
 // upper is a path in machine id's layer, for a guest's deletions.
 func (e *env) upper(id, rel string) string {
 	return filepath.Join(e.cfg.StateDir, "machines", id, "upper", rel)
+}
+
+// Exec runs a few commands against the machine's upper layer: "echo"
+// prints its arguments, "write PATH" stores stdin, "cat PATH" prints the
+// file, "sleep" waits for the context, "hang" ignores it for a second, and
+// "exit N" exits N.
+func (f *fakeRuntime) Exec(ctx context.Context, id string, c Command) (ExecResult, error) {
+	f.mu.Lock()
+	l, ok := f.running[id]
+	f.mu.Unlock()
+	if !ok {
+		return ExecResult{}, fmt.Errorf("fake: exec %s: not running", id)
+	}
+	out := func(b []byte) ExecResult {
+		r := ExecResult{Stdout: b}
+		if c.MaxOutput > 0 && len(b) > c.MaxOutput {
+			r.Stdout, r.Truncated = b[:c.MaxOutput], true
+		}
+		return r
+	}
+	switch a := c.Argv; a[0] {
+	case "echo":
+		return out([]byte(strings.Join(a[1:], " ") + "\n")), nil
+	case "write":
+		p := filepath.Join(l.Upper, a[1])
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			return ExecResult{}, err
+		}
+		return ExecResult{}, os.WriteFile(p, c.Stdin, 0o644)
+	case "cat":
+		for _, root := range []string{l.Upper, l.Lower} {
+			if b, err := os.ReadFile(filepath.Join(root, a[1])); err == nil {
+				return out(b), nil
+			}
+		}
+		return ExecResult{ExitCode: 1, Stderr: []byte("no such file\n")}, nil
+	case "sleep":
+		<-ctx.Done()
+		return ExecResult{ExitCode: -1}, ctx.Err()
+	case "hang": // a runtime that ignores cancellation
+		time.Sleep(time.Second)
+		return ExecResult{}, ctx.Err()
+	case "exit":
+		n, _ := strconv.Atoi(a[1])
+		return ExecResult{ExitCode: n}, nil
+	}
+	return ExecResult{ExitCode: 127, Stderr: []byte("not found\n")}, nil
 }
