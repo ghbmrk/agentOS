@@ -24,6 +24,8 @@ var (
 	ErrTarget   = errors.New("mail: not an allowed organize target (ADP-2)")
 	ErrAccount  = errors.New("mail: intent is for another account or executor")
 	ErrOp       = errors.New("mail: operation not declared (ADP-1)")
+	// ErrAmbiguous: two different messages carry the record's Message-ID.
+	ErrAmbiguous = errors.New("mail: two different messages carry this Message-ID")
 )
 
 // folders returns the account's folders by role and by name.
@@ -79,7 +81,13 @@ func (a *Adapter) locate(ctx context.Context, record, hint string) (Message, err
 		sort.Strings(rest)
 		order = append(order, rest...)
 	}
+	// Every candidate folder is searched: a Message-ID is the sender's
+	// choice, so a second message claiming the same ID (a forged copy of
+	// one the owner sent) makes the record ambiguous and is refused. Copies
+	// of one message (the same sender, date and subject, e.g. a label
+	// folder) are not ambiguous.
 	seen := map[string]bool{}
+	var found []Message
 	for _, f := range order {
 		if seen[f] {
 			continue
@@ -89,11 +97,17 @@ func (a *Adapter) locate(ctx context.Context, record, hint string) (Message, err
 		if err != nil {
 			return Message{}, err
 		}
-		if len(ms) > 0 {
-			return ms[0], nil
+		found = append(found, ms...)
+	}
+	if len(found) == 0 {
+		return Message{}, ErrNotFound
+	}
+	for _, m := range found[1:] {
+		if m.From != found[0].From || !m.Date.Equal(found[0].Date) || m.Subject != found[0].Subject {
+			return Message{}, ErrAmbiguous
 		}
 	}
-	return Message{}, ErrNotFound
+	return found[0], nil
 }
 
 var trashNames = regexp.MustCompile(`(?i)(^|[/.\]])\s*(trash|bin|deleted( items| messages)?|junk|spam|bulk mail)\s*$`)
@@ -157,7 +171,17 @@ func (a *Adapter) planOrganize(ctx context.Context, o Op, p map[string]string) (
 		return plan{}, err
 	}
 	pl := plan{op: o, msg: m, verb: o.Verb}
-	inInbox := byName[m.Folder] == Inbox
+	// The source is guarded like a target: nothing is organized out of
+	// trash, junk or a retention folder (unarchiving from junk would put
+	// phishing in the inbox), and an effect in a shared folder is share.
+	src := byName[m.Folder]
+	if src == Trash || src == Junk || trashNames.MatchString(m.Folder) || contains(a.cfg.Retention, m.Folder) {
+		return plan{}, ErrTarget
+	}
+	if contains(a.cfg.Shared, m.Folder) && o.Verb == verb.Organize {
+		pl.verb = verb.Share
+	}
+	inInbox := src == Inbox
 	moveTo := func(dst string) error {
 		if dst == "" {
 			return ErrTarget
@@ -169,7 +193,10 @@ func (a *Adapter) planOrganize(ctx context.Context, o Op, p map[string]string) (
 		if err != nil {
 			return err
 		}
-		pl.to, pl.verb = dst, c
+		pl.to = dst
+		if c == verb.Share {
+			pl.verb = c
+		}
 		return nil
 	}
 	switch o.Name {
@@ -184,7 +211,9 @@ func (a *Adapter) planOrganize(ctx context.Context, o Op, p map[string]string) (
 	case OpLabel, OpUnlabel:
 		var c string
 		if c, err = a.labelClass(p[ParamLabel]); err == nil {
-			pl.verb = c
+			if c == verb.Share {
+				pl.verb = c
+			}
 			if o.Name == OpLabel {
 				pl.add = []string{p[ParamLabel]}
 			} else {
@@ -314,9 +343,12 @@ func (a *Adapter) Escalate(ctx context.Context, in journal.Intent) (grants.Escal
 	var why []string
 	if pl.verb == verb.Share {
 		e.Verb = verb.Share
-		if pl.to != "" {
+		switch {
+		case contains(a.cfg.Shared, pl.msg.Folder):
+			why = append(why, "in shared folder "+pl.msg.Folder)
+		case pl.to != "":
 			why = append(why, "into shared folder "+pl.to)
-		} else {
+		default:
 			why = append(why, "shared label "+p[ParamLabel])
 		}
 	}
@@ -324,7 +356,7 @@ func (a *Adapter) Escalate(ctx context.Context, in journal.Intent) (grants.Escal
 		e.Verb = verb.ChangeAccount
 		why = append(why, "hides an alert from "+clip(domainOf(pl.msg.From), 20))
 	}
-	if a.organizedToday(in.ID) >= a.cfg.DailyLimit {
+	if !a.reserve(in.ID) {
 		e.Ask = true
 		why = append(why, fmt.Sprintf("past today's %d", a.cfg.DailyLimit))
 	}
@@ -341,26 +373,47 @@ func clip(s string, n int) string {
 	return string(r[:n-1]) + "…"
 }
 
-// organizedToday counts the organize effects the journal authorized on
-// this account in the last day, other than id. Without the journal hook
-// every effect counts as past the bound, so none runs unasked.
-func (a *Adapter) organizedToday(id string) int {
+// reserve takes a place under the day's organize bound for id, and
+// reports whether one was free. The count and the reservation happen under
+// one lock, so concurrent checks cannot all see room for the last place.
+// The count is the journal's authorized organize intents in the last day
+// (which survives restarts) together with places reserved here and not
+// yet authorized there. Without the journal hook every effect is past the
+// bound, so none runs unasked.
+func (a *Adapter) reserve(id string) bool {
 	if a.cfg.Authorized == nil {
-		return a.cfg.DailyLimit
+		return false
 	}
-	since := a.cfg.Now().Add(-dayWindow)
-	n := 0
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	now := a.cfg.Now()
+	since := now.Add(-dayWindow)
+	counted := map[string]bool{}
 	for _, o := range ops {
 		if o.Verb != verb.Organize {
 			continue
 		}
 		for _, x := range a.cfg.Authorized(o.Name, since) {
-			if x.ID != id && x.Account == a.cfg.Account {
-				n++
+			if x.Account == a.cfg.Account {
+				counted[x.ID] = true
 			}
 		}
 	}
-	return n
+	for r, at := range a.reserved {
+		if at.Before(since) {
+			delete(a.reserved, r)
+			continue
+		}
+		counted[r] = true
+	}
+	if counted[id] {
+		return true // already holds a place (the recheck before dispatch)
+	}
+	if len(counted) >= a.cfg.DailyLimit {
+		return false
+	}
+	a.reserved[id] = now
+	return true
 }
 
 // intent checks in is for this adapter and returns its operation and

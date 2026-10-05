@@ -484,10 +484,15 @@ func (g *Gate) evaluate(ctx context.Context, phase journal.Phase, in journal.Int
 			return verdict{kind: deny, why: "the adapter's guard refuses this effect (ADP-2)"}
 		}
 		if esc.Verb != "" {
-			if v = stricter(v, esc.Verb); !verb.Valid(v) {
+			// Only a strictly higher class replaces the granted verb, so
+			// an escalation can never relabel an effect sideways.
+			ec, ok := verb.ClassOf(esc.Verb)
+			if !ok {
 				return verdict{kind: deny, why: "this operation's verb is not on the broker's list (ADP-2)"}
 			}
-			cls, _ = verb.ClassOf(v)
+			if ec > cls {
+				v, cls = esc.Verb, ec
+			}
 		}
 	}
 	if cls == verb.Reversible && !esc.Ask {

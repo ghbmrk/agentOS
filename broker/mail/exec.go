@@ -34,6 +34,9 @@ type Change struct {
 	// Alert marks an effect on a message the alert guard caught that ran
 	// all the same (a label or star), for the digest's guard hits.
 	Alert bool `json:"alert,omitempty"`
+	// Reconciled marks evidence from Reconcile, which sees the state after
+	// the effect but not the state before: Undo skips it.
+	Reconciled bool `json:"reconciled,omitempty"`
 }
 
 // Outgoing is the journaled evidence of a sent or saved message.
@@ -137,7 +140,7 @@ func (a *Adapter) Reconcile(ctx context.Context, in journal.Intent, attempt int)
 		done = done && !has(pl.msg.Flags, f)
 	}
 	if done {
-		return succeeded(Change{Op: o.Name, Record: pl.msg.MessageID, Sender: pl.msg.From, From: pl.msg.Folder})
+		return succeeded(Change{Op: o.Name, Record: pl.msg.MessageID, Sender: pl.msg.From, From: pl.msg.Folder, Reconciled: true})
 	}
 	return notApplied(errors.New("mail: the message is not in the state the effect sets"))
 }
@@ -191,7 +194,7 @@ func (a *Adapter) send(ctx context.Context, in journal.Intent, attempt int, o Op
 			return notApplied(errors.New("mail: the reply's recipients are not the thread's participants"))
 		}
 		for _, x := range append([]string{m.From}, m.To...) {
-			if !a.self[x] && !has(to, x) {
+			if !a.isSelf(x) && !has(to, x) {
 				to = append(to, x)
 			}
 		}
@@ -208,7 +211,7 @@ func (a *Adapter) send(ctx context.Context, in journal.Intent, attempt int, o Op
 			return notApplied(errors.New("mail: a message needs valid recipients"))
 		}
 		for _, x := range to {
-			if a.self[x] {
+			if a.isSelf(x) {
 				// The owner channel is the owner's; mail to the owner's
 				// own address would be a way around it.
 				return notApplied(errors.New("mail: the owner's own address is not a recipient"))

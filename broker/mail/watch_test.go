@@ -188,3 +188,56 @@ func TestAllMailViewIsWatchedAlone(t *testing.T) {
 		t.Fatalf("archived in all-mail read as deleted: %+v", r)
 	}
 }
+
+// TestBrokenListingsNeverReadAsDeletion: a listing without the inbox
+// concludes nothing; a known folder missing from the listing keeps its
+// mail present until three listings in a row lack it.
+func TestBrokenListingsNeverReadAsDeletion(t *testing.T) {
+	x := newH(t, nil)
+	p := newPipe(t)
+	w := x.watcher(t, p, &recall.MemStore{}, nil)
+	x.deliver("Receipts", msg{id: "<r@shop.example>", from: "a@shop.example", to: me, subject: "Receipt", body: "quollnut"})
+	x.news(1)
+	poll(t, w, p)
+	for _, f := range []string{"INBOX", "Archive", "Drafts", "Sent", "Trash", "Junk", "Receipts", "Team", "Legal"} {
+		x.srv.Hide(f, true)
+	}
+	if r, err := w.Poll(ctx); err == nil || r.Deleted != 0 {
+		t.Fatalf("empty listing: %+v %v", r, err)
+	}
+	for _, f := range []string{"INBOX", "Archive", "Drafts", "Sent", "Trash", "Junk", "Team", "Legal"} {
+		x.srv.Hide(f, false)
+	}
+	for i := 0; i < 2; i++ {
+		if r, _ := w.Poll(ctx); r.Deleted != 0 || r.Complete || len(p.find("quollnut")) != 1 {
+			t.Fatalf("poll %d without Receipts: %+v", i, r)
+		}
+	}
+	if r := poll(t, w, p); r.Deleted != 1 || len(p.find("quollnut")) != 0 {
+		t.Fatalf("third poll without Receipts: %+v", r)
+	}
+}
+
+// TestRenumberedFolderReadIsBounded: after a UID validity reset the
+// re-read is bounded like a first read, and what it leaves unread stays
+// present.
+func TestRenumberedFolderReadIsBounded(t *testing.T) {
+	x := newH(t, nil)
+	p := newPipe(t)
+	for i := 0; i < 5; i++ {
+		x.news(i)
+	}
+	fetches := 0
+	w := x.watcher(t, p, &recall.MemStore{}, func(c *mail.WatchConfig) { c.Backfill = 5 })
+	poll(t, w, p)
+	w = x.watcher(t, p, &recall.MemStore{}, func(c *mail.WatchConfig) { c.Backfill = 2 })
+	_ = fetches
+	poll(t, w, p) // fresh state: bounded first read
+	x.srv.Renumber("INBOX")
+	if r := poll(t, w, p); r.Deleted != 0 || p.ix.Len() != 5 {
+		t.Fatalf("renumbered: %+v, %d in recall", r, p.ix.Len())
+	}
+	if n, total := w.Coverage(); n != 2 || total != 5 {
+		t.Fatalf("coverage %d of %d", n, total)
+	}
+}

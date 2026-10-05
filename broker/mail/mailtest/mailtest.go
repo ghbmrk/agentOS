@@ -70,6 +70,7 @@ type Server struct {
 	validity  uint32
 	submitted []Submission
 	failList  map[string]bool
+	hidden    map[string]bool
 	logins    []string
 	smtpFail  bool
 }
@@ -101,7 +102,7 @@ type msg struct {
 // folders (with their special-use attributes) until the test ends.
 func Start(t *testing.T) *Server {
 	t.Helper()
-	s := &Server{boxes: map[string]*box{}, validity: 1, failList: map[string]bool{}}
+	s := &Server{boxes: map[string]*box{}, validity: 1, failList: map[string]bool{}, hidden: map[string]bool{}}
 	for name, attr := range map[string]string{"INBOX": "", "Archive": imap.ArchiveAttr, "Drafts": imap.DraftsAttr,
 		"Sent": imap.SentAttr, "Trash": imap.TrashAttr, "Junk": imap.JunkAttr} {
 		s.boxes[name] = &box{name: name, attr: attr, next: 1, validity: 1}
@@ -172,6 +173,13 @@ func (s *Server) FailList(folder string, fail bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.failList[folder] = fail
+}
+
+// Hide leaves folder out of LIST (or not), as a broken listing would.
+func (s *Server) Hide(folder string, hide bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.hidden[folder] = hide
 }
 
 // FailSMTP makes the SMTP sink refuse DATA (or not).
@@ -281,7 +289,9 @@ func (u *usr) ListMailboxes(bool) ([]backend.Mailbox, error) {
 	defer u.s.mu.Unlock()
 	var out []backend.Mailbox
 	for n := range u.s.boxes {
-		out = append(out, &mbox{u.s, n})
+		if !u.s.hidden[n] {
+			out = append(out, &mbox{u.s, n})
+		}
 	}
 	return out, nil
 }

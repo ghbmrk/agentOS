@@ -68,7 +68,7 @@ func (a *Adapter) Verify(ctx context.Context, in journal.Intent) (grants.Verifie
 func (a *Adapter) participants(m Message) []string {
 	set := map[string]bool{}
 	for _, x := range append(append([]string{m.From}, m.To...), m.Cc...) {
-		if x != "" && !a.self[x] {
+		if x != "" && !a.isSelf(x) {
 			set[x] = true
 		}
 	}
@@ -81,22 +81,51 @@ func (a *Adapter) participants(m Message) []string {
 }
 
 // threadVerified reports whether the thread was started by the owner, or
-// by a contact in the owner's address book (ADP-11). The starter is the
-// first message the References header names, or the message itself; one
-// the mailbox no longer holds does not verify.
+// by a contact in the owner's address book (ADP-11). References and
+// In-Reply-To are the sender's to write, so a cold sender could name a
+// message the owner sent to someone else. The broker therefore walks the
+// In-Reply-To chain from m through messages the mailbox holds, and each
+// message's sender must have been a participant of the one it answers;
+// the starter is where the chain ends. A link the mailbox does not hold,
+// an ambiguous one, or a chain longer than maxChain does not verify.
 func (a *Adapter) threadVerified(ctx context.Context, m Message) bool {
-	start := m
-	if len(m.References) > 0 && m.References[0] != m.MessageID {
-		s, err := a.locate(ctx, m.References[0], "")
+	cur := m
+	seen := map[string]bool{m.MessageID: true}
+	for i := 0; ; i++ {
+		if cur.InReplyTo == "" {
+			break
+		}
+		if i >= maxChain || seen[cur.InReplyTo] {
+			return false
+		}
+		seen[cur.InReplyTo] = true
+		parent, err := a.locate(ctx, cur.InReplyTo, "")
 		if err != nil {
 			return false
 		}
-		start = s
+		if !a.participant(cur.From, parent) {
+			return false
+		}
+		cur = parent
 	}
-	if a.self[start.From] {
+	if a.isSelf(cur.From) {
 		return true
 	}
-	return a.cfg.Contacts != nil && start.From != "" && a.cfg.Contacts(start.From)
+	return a.cfg.Contacts != nil && cur.From != "" && a.cfg.Contacts(cur.From)
+}
+
+// maxChain bounds the In-Reply-To links walked to verify a thread.
+const maxChain = 50
+
+// participant reports whether addr took part in x: its sender or one of
+// its recipients (the owner's own addresses count as one).
+func (a *Adapter) participant(addr string, x Message) bool {
+	for _, y := range append(append([]string{x.From}, x.To...), x.Cc...) {
+		if y == addr || a.isSelf(addr) && a.isSelf(y) {
+			return true
+		}
+	}
+	return false
 }
 
 // Thread returns what an ADP-11 reply composer may read for a reply to

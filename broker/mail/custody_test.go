@@ -146,3 +146,18 @@ func TestStoreCarriesOnlyDeclaredRequests(t *testing.T) {
 		t.Fatal("a refused intent moved mail")
 	}
 }
+
+// TestUnknownSecurityIsRefused: a connection security value outside the
+// three known ones is refused, never treated as plaintext.
+func TestUnknownSecurityIsRefused(t *testing.T) {
+	cred := func(context.Context) (imapsmtp.Login, error) { return imapsmtp.Login{}, nil }
+	for _, c := range []imapsmtp.Config{
+		{IMAP: "imap.example.com:993", SMTP: "smtp.example.com:465", IMAPSec: imapsmtp.Security(7), From: me, Credential: cred},
+		{IMAP: "imap.example.com:993", SMTP: "smtp.example.com:465", SMTPSec: imapsmtp.Security(-1), From: me, Credential: cred},
+		{IMAP: "imap.example.com:143", SMTP: "smtp.example.com:465", IMAPSec: imapsmtp.StartTLS, From: me, Credential: cred},
+	} {
+		if _, err := imapsmtp.New(c); err == nil {
+			t.Fatalf("accepted %+v", c)
+		}
+	}
+}

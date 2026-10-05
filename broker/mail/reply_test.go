@@ -24,7 +24,7 @@ func reply(id, body string) map[string]any {
 	return map[string]any{mail.ParamRecord: id, mail.ParamBody: body}
 }
 
-// REQ: ADP-11, CH-10
+// REQ: ADP-11, CH-10, OP-1, OP-2
 
 // TestReplyIsVerifiedFromTheSource: a reply's recipients are the thread's
 // participants as the source headers name them, never the agent's, and
@@ -184,4 +184,46 @@ func sortedCopy(l []string) []string {
 	out := slices.Clone(l)
 	slices.Sort(out)
 	return out
+}
+
+// TestForgedThreadsDoNotVerify: References and In-Reply-To are the
+// sender's to write. A cold sender naming a message the owner sent to
+// someone else does not verify, and a second message forging that
+// message's Message-ID makes the record ambiguous.
+func TestForgedThreadsDoNotVerify(t *testing.T) {
+	x := newH(t, nil)
+	thread(x)
+	x.deliver("INBOX", msg{id: "<f1@evil.example>", from: "eve@evil.example", to: me, subject: "Re: Lunch",
+		body: "Me too", inReplyTo: "<t1@example.test>", refs: "<t1@example.test>"})
+	v, err := x.a.Verify(ctx, x.intent(mail.OpReply, reply("<f1@evil.example>", "ok"), "eve@evil.example"))
+	if err != nil || v.ThreadVerified {
+		t.Fatalf("forged thread verified: %+v %v", v, err)
+	}
+	// Sam's reply in the real thread still verifies.
+	if v, _ := x.a.Verify(ctx, x.intent(mail.OpReply, reply("<t3@example.com>", "ok"), "sam@example.com", "bob@example.com")); !v.ThreadVerified {
+		t.Fatal("the real thread no longer verifies")
+	}
+	// A forged copy of the owner's starter makes it ambiguous: the chain
+	// through it no longer verifies, and the record is refused.
+	x.deliver("INBOX", msg{id: "<t1@example.test>", from: "eve@evil.example", to: me, subject: "Lunch", body: "forged"})
+	if v, _ := x.a.Verify(ctx, x.intent(mail.OpReply, reply("<t3@example.com>", "ok"), "sam@example.com", "bob@example.com")); v.ThreadVerified {
+		t.Fatal("a chain through an ambiguous message verified")
+	}
+	if _, err := x.a.Verify(ctx, x.intent(mail.OpReply, reply("<t1@example.test>", "ok"), "sam@example.com")); !errors.Is(err, mail.ErrAmbiguous) {
+		t.Fatalf("ambiguous record: %v", err)
+	}
+}
+
+// TestOwnerPlusAddressesAreTheOwner: a plus-address variant of the
+// owner's address is never a reply recipient.
+func TestOwnerPlusAddressesAreTheOwner(t *testing.T) {
+	x := newH(t, nil)
+	x.deliver("INBOX", msg{id: "<p1@example.com>", from: "sam@example.com", to: "owner+lists@example.test", cc: "bob@example.com", subject: "Hi", body: "x"})
+	v, err := x.a.Verify(ctx, x.intent(mail.OpReply, reply("<p1@example.com>", "ok"), "sam@example.com", "bob@example.com"))
+	if err != nil || !slices.Equal(v.Recipients, []string{"bob@example.com", "sam@example.com"}) {
+		t.Fatalf("recipients %+v %v", v.Recipients, err)
+	}
+	if out := x.run(x.intent(mail.OpSend, map[string]any{"subject": "s", "body": "b"}, "owner+x@example.test")); out.Result != journal.ResultNotApplied {
+		t.Fatalf("sent to the owner's plus-address: %+v", out)
+	}
 }

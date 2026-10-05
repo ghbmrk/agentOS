@@ -44,7 +44,10 @@ func (r UndoReport) Text() string {
 // folder the effect moved it to, with the flags it added and without the
 // ones it removed. Anything else, including an item no longer found, is
 // skipped, so an undo never overrides a change made since. Trash and spam
-// moves are not organize effects and are skipped.
+// moves are not organize effects and are skipped, as is evidence from a
+// reconciliation, which holds no prior state. The check and the restore
+// are separate IMAP commands (no CONDSTORE), so a change landing between
+// them is overwritten (ASSUMPTIONS M9).
 func (a *Adapter) Undo(ctx context.Context, changes []Change) UndoReport {
 	var r UndoReport
 	for _, c := range changes {
@@ -58,7 +61,7 @@ func (a *Adapter) Undo(ctx context.Context, changes []Change) UndoReport {
 }
 
 func (a *Adapter) undoOne(ctx context.Context, c Change) bool {
-	if o, ok := byName[c.Op]; !ok || o.Inverse == "" {
+	if o, ok := byName[c.Op]; !ok || o.Inverse == "" || c.Reconciled {
 		return false
 	}
 	at := c.From

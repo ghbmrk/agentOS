@@ -66,7 +66,18 @@ type watchState struct {
 type folderState struct {
 	Validity uint32            `json:"validity"`
 	UIDs     map[uint32]string `json:"uids"` // UID -> recall identity, "" if never published
+	// Legacy are identities published from this folder before a UID
+	// validity reset that the bounded re-read did not reach. They count as
+	// present, so a reset never reads as deletion; such items no longer
+	// propagate a source deletion (ASSUMPTIONS M12).
+	Legacy []string `json:"legacy,omitempty"`
+	// Missing counts consecutive polls whose listing lacked this folder.
+	Missing int `json:"missing,omitempty"`
 }
+
+// missingPolls is how many consecutive listings must lack a known folder
+// before its messages count as deleted with it.
+const missingPolls = 3
 
 // PollReport is what one poll did: events the bus took as new, and
 // messages reported deleted.
@@ -155,7 +166,43 @@ func (w *Watcher) Poll(ctx context.Context) (PollReport, error) {
 	complete := true
 	var errs []error
 	next := map[string]*folderState{}
-	for _, name := range watched(fs) {
+	names := watched(fs)
+	// A listing without the inbox (or the all-mail view) is not a
+	// mailbox's real listing: nothing is concluded from it.
+	hasInbox := false
+	for _, f := range fs {
+		if f.Role == Inbox || f.Role == All || strings.EqualFold(f.Name, "INBOX") {
+			hasInbox = true
+		}
+	}
+	if !hasInbox {
+		return rep, errors.New("mail: the folder listing has no inbox")
+	}
+	// A known folder missing from the listing keeps its contents present
+	// until missingPolls listings in a row lack it, so a short or broken
+	// listing never reads as mass deletion.
+	listed := map[string]bool{}
+	for _, n := range names {
+		listed[n] = true
+	}
+	for name, old := range w.st.Folders {
+		if listed[name] {
+			continue
+		}
+		if old.Missing+1 < missingPolls {
+			kept := *old
+			kept.Missing++
+			next[name] = &kept
+			complete = false
+			for _, id := range old.UIDs {
+				present[id] = true
+			}
+			for _, id := range old.Legacy {
+				present[id] = true
+			}
+		}
+	}
+	for _, name := range names {
 		old := w.st.Folders[name]
 		validity, uids, err := w.a.cfg.Store.UIDs(ctx, name)
 		if err != nil {
@@ -166,13 +213,27 @@ func (w *Watcher) Poll(ctx context.Context) (PollReport, error) {
 				for _, id := range old.UIDs {
 					present[id] = true
 				}
+				for _, id := range old.Legacy {
+					present[id] = true
+				}
 			}
 			continue
 		}
 		fst := &folderState{Validity: validity, UIDs: map[uint32]string{}}
 		first := old == nil
-		if old != nil && old.Validity != validity {
-			old = nil // UIDs were renumbered: read the folder again
+		var legacy, renumbered []string
+		if old != nil {
+			legacy = append(legacy, old.Legacy...)
+			if old.Validity != validity {
+				// UIDs were renumbered: read the folder again, bounded
+				// like a first read.
+				for _, id := range old.UIDs {
+					if id != "" {
+						renumbered = append(renumbered, id)
+					}
+				}
+				old, first = nil, true
+			}
 		}
 		var fresh []uint32
 		for _, u := range uids {
@@ -191,6 +252,9 @@ func (w *Watcher) Poll(ctx context.Context) (PollReport, error) {
 				fst.UIDs[u] = ""
 			}
 			fresh = fresh[len(fresh)-w.cfg.Backfill:]
+			// The bound left part of a renumbered folder unread: what was
+			// published from it before stays present (M12).
+			legacy = append(legacy, renumbered...)
 		}
 		n, err := w.publish(ctx, name, fresh, fst, present)
 		rep.Published += n
@@ -198,6 +262,13 @@ func (w *Watcher) Poll(ctx context.Context) (PollReport, error) {
 			complete = false
 			errs = append(errs, err)
 		}
+		for _, id := range legacy {
+			if !present[id] {
+				fst.Legacy = append(fst.Legacy, id)
+				present[id] = true
+			}
+		}
+		sort.Strings(fst.Legacy)
 		next[name] = fst
 	}
 	w.st.Folders = next

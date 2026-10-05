@@ -16,6 +16,7 @@ import (
 	"errors"
 	"net/mail"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/journal"
@@ -163,6 +164,9 @@ const DefaultDailyLimit = 200
 type Adapter struct {
 	cfg  Config
 	self map[string]bool
+
+	mu       sync.Mutex
+	reserved map[string]time.Time // organize bound places not yet in the journal
 }
 
 // ErrConfig is returned by New for an incomplete configuration.
@@ -186,7 +190,7 @@ func New(cfg Config) (*Adapter, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	a := &Adapter{cfg: cfg, self: map[string]bool{addr: true}}
+	a := &Adapter{cfg: cfg, self: map[string]bool{addr: true}, reserved: map[string]time.Time{}}
 	for _, x := range cfg.Aliases {
 		if c, ok := canon(x); ok {
 			a.self[c] = true
@@ -203,6 +207,22 @@ func canon(s string) (string, bool) {
 		return "", false
 	}
 	return strings.ToLower(a.Address), true
+}
+
+// isSelf reports whether addr is one of the owner's addresses, including
+// a plus-address variant of one (owner+tag@example.com).
+func (a *Adapter) isSelf(addr string) bool {
+	if a.self[addr] {
+		return true
+	}
+	local, dom, ok := strings.Cut(addr, "@")
+	if !ok {
+		return false
+	}
+	if i := strings.IndexByte(local, '+'); i > 0 {
+		return a.self[local[:i]+"@"+dom]
+	}
+	return false
 }
 
 func domainOf(addr string) string {

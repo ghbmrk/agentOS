@@ -22,6 +22,7 @@ import (
 
 	"github.com/emersion/go-imap"
 	"github.com/emersion/go-imap/client"
+	"github.com/emersion/go-imap/commands"
 	"github.com/emersion/go-sasl"
 
 	"github.com/ghbmrk/agentos/broker/mail"
@@ -78,9 +79,15 @@ func New(cfg Config) (*Store, error) {
 		addr string
 		sec  Security
 	}{{cfg.IMAP, cfg.IMAPSec}, {cfg.SMTP, cfg.SMTPSec}} {
-		if x.sec == Plain && !loopback(x.addr) {
+		switch {
+		case x.sec != TLS && x.sec != StartTLS && x.sec != Plain:
+			return nil, fmt.Errorf("imapsmtp: unknown connection security %d", x.sec)
+		case x.sec == Plain && !loopback(x.addr):
 			return nil, ErrInsecure
 		}
+	}
+	if cfg.IMAPSec == StartTLS {
+		return nil, errors.New("imapsmtp: IMAP uses implicit TLS, or plain to loopback only")
 	}
 	if cfg.Timeout == 0 {
 		cfg.Timeout = 60 * time.Second
@@ -126,9 +133,10 @@ func (s *Store) session(ctx context.Context, f func(c *client.Client) error) err
 	switch s.cfg.IMAPSec {
 	case TLS:
 		conn = tls.Client(conn, s.tlsConfig(s.cfg.IMAP))
-	case StartTLS:
+	case Plain:
+	default:
 		conn.Close()
-		return errors.New("imapsmtp: IMAP uses implicit TLS or loopback only")
+		return errors.New("imapsmtp: IMAP uses implicit TLS, or plain to loopback only")
 	}
 	c, err := client.New(conn)
 	if err != nil {
@@ -327,7 +335,13 @@ func (s *Store) Move(ctx context.Context, from string, uid uint32, to string) er
 		}
 		set := new(imap.SeqSet)
 		set.AddNum(uid)
-		return c.UidMove(set, to)
+		// UID MOVE itself, never go-imap's COPY, STORE and EXPUNGE
+		// fallback.
+		st, err := c.Execute(&commands.Uid{Cmd: &commands.Move{SeqSet: set, Mailbox: to}}, nil)
+		if err != nil {
+			return err
+		}
+		return st.Err()
 	})
 }
 
@@ -372,8 +386,13 @@ func (s *Store) Submit(ctx context.Context, rcpt []string, raw []byte) error {
 	}
 	stop := context.AfterFunc(ctx, func() { conn.Close() })
 	defer stop()
-	if s.cfg.SMTPSec == TLS {
+	switch s.cfg.SMTPSec {
+	case TLS:
 		conn = tls.Client(conn, s.tlsConfig(s.cfg.SMTP))
+	case StartTLS, Plain:
+	default:
+		conn.Close()
+		return errors.New("imapsmtp: unknown connection security")
 	}
 	host, _, _ := net.SplitHostPort(s.cfg.SMTP)
 	c, err := smtp.NewClient(conn, host)

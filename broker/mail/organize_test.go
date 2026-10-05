@@ -60,7 +60,7 @@ func TestDeclarationUsesTheFixedVerbList(t *testing.T) {
 	}
 }
 
-// REQ: ADP-2, REV-2
+// REQ: ADP-2, REV-2, OP-2
 
 // TestOrganizeJournalsPriorStateAndLabels: an archive moves the message,
 // labels it AgentOS, and its evidence holds the state before.
@@ -259,8 +259,17 @@ func TestOrganizeBoundAsksPastTheDailyLimit(t *testing.T) {
 	if !since.Equal(x.now.Add(-24 * time.Hour)) {
 		t.Fatalf("counted since %v", since)
 	}
+	// The recheck of the same intent keeps its place.
+	if e, _ := x.a.Escalate(ctx, in); e.Ask {
+		t.Fatal("the recheck lost its place")
+	}
+	// That place counts at once, before the journal authorizes it, so a
+	// second check cannot take the 200th place too.
+	if e, _ := x.a.Escalate(ctx, x.intent(mail.OpArchive, rec(id))); !e.Ask || e.Verb != "" || e.Reason != "past today's 200" {
+		t.Fatalf("past the bound: %+v", e)
+	}
 	authorized = mail.DefaultDailyLimit
-	if e, _ := x.a.Escalate(ctx, in); !e.Ask || e.Verb != "" || e.Reason != "past today's 200" {
+	if e, _ := x.a.Escalate(ctx, x.intent(mail.OpArchive, rec(id))); !e.Ask {
 		t.Fatalf("past the bound: %+v", e)
 	}
 	y := newH(t, func(c *mail.Config) { c.Authorized = nil })
@@ -329,4 +338,47 @@ func TestUndoRestoresOnlyWhatIsUnchanged(t *testing.T) {
 
 func hasFlag(l []string, f string) bool {
 	return slices.ContainsFunc(l, func(x string) bool { return strings.EqualFold(x, f) })
+}
+
+// TestOrganizeSourcesAreGuarded: nothing is organized out of trash, junk
+// or a retention folder (unarchiving from junk would put phishing in the
+// inbox), and an effect in a shared folder is share.
+func TestOrganizeSourcesAreGuarded(t *testing.T) {
+	x := newH(t, nil)
+	x.deliver("Junk", msg{id: "<phish@evil.example>", from: "eve@evil.example", to: me, subject: "Invoice", body: "x"})
+	x.deliver("Legal", msg{id: "<hold@law.example>", from: "a@law.example", to: me, subject: "Hold", body: "x"})
+	x.deliver("Team", msg{id: "<team@work.example>", from: "a@work.example", to: me, subject: "Plan", body: "x"})
+	for _, c := range [][2]string{{"<phish@evil.example>", "Junk"}, {"<hold@law.example>", "Legal"}} {
+		for _, op := range []string{mail.OpUnarchive, mail.OpStar, mail.OpMarkRead} {
+			if _, err := x.a.Escalate(ctx, x.intent(op, map[string]any{"record": c[0], "folder": c[1]})); !errors.Is(err, mail.ErrTarget) {
+				t.Fatalf("%s from %s: %v", op, c[1], err)
+			}
+		}
+		if out := x.run(x.intent(mail.OpUnarchive, map[string]any{"record": c[0], "folder": c[1]})); out.Result != journal.ResultNotApplied {
+			t.Fatalf("executor moved out of %s: %+v", c[1], out)
+		}
+	}
+	e, err := x.a.Escalate(ctx, x.intent(mail.OpStar, map[string]any{"record": "<team@work.example>", "folder": "Team"}))
+	if err != nil || e.Verb != verb.Share || e.Reason != "in shared folder Team" {
+		t.Fatalf("star in a shared folder: %+v %v", e, err)
+	}
+}
+
+// TestUndoSkipsReconciledEvidence: a reconciliation sees no prior state,
+// so its evidence is skipped rather than reported restored.
+func TestUndoSkipsReconciledEvidence(t *testing.T) {
+	x := newH(t, nil)
+	id := x.news(1)
+	in := x.intent(mail.OpArchive, rec(id))
+	x.mustRun(in)
+	out := x.a.Reconcile(ctx, in, 1)
+	if out.Result != journal.ResultSucceeded {
+		t.Fatalf("reconcile %+v", out)
+	}
+	if r := x.a.Undo(ctx, []mail.Change{change(t, out)}); r.Restored != 0 || r.Skipped != 1 {
+		t.Fatalf("undo of reconciled evidence: %+v", r)
+	}
+	if folder, _, _ := x.srv.Find(id); folder != "Archive" {
+		t.Fatal("moved")
+	}
 }
