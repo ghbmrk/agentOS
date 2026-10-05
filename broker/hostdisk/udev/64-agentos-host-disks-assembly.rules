@@ -1,0 +1,25 @@
+# AgentOS: nothing on a disk that is not the drive is assembled or
+# registered (HW-8, security F1 and L3 on #172): a degraded array's resync,
+# an LVM activation or a bcache registration (journal replay, writeback)
+# would write it. Runs after every blkid probe (60-persistent-storage,
+# 60-persistent-storage-dm, mdadm's 63-md-raid-arrays) and before
+# 64-md-raid-assembly, 69-lvm and bcache-tools' 69-bcache, which each act
+# only on their own member type, and 69-bcache also on an empty one: it
+# probes such a device itself and registers what it finds.
+#
+# So on every device but the drive's, a member type or an empty type
+# becomes the sentinel "agentos_held", which none of them acts on. Any
+# other type is the device's own and stays, as does ID_FS_USAGE, so
+# 99-systemd keeps an unknown dm-verity or dm-crypt device ready and
+# routes it as it would. A host device's blkid result is dropped whole.
+
+ACTION=="remove", GOTO="agentos_assembly_end"
+SUBSYSTEM!="block", GOTO="agentos_assembly_end"
+KERNEL=="loop*|ram*|zram*|nbd*", GOTO="agentos_assembly_end"
+ENV{AGENTOS_DISK}=="drive", GOTO="agentos_assembly_end"
+
+ENV{AGENTOS_DISK}=="host", ENV{ID_FS_TYPE}="agentos_held", ENV{ID_FS_USAGE}="", ENV{ID_FS_LABEL}="", ENV{ID_FS_LABEL_ENC}="", ENV{ID_FS_UUID}="", ENV{ID_FS_UUID_ENC}=""
+ENV{ID_FS_TYPE}=="", ENV{ID_FS_TYPE}="agentos_held"
+ENV{ID_FS_TYPE}=="*_raid_member|LVM2_member|bcache|zfs_member", ENV{ID_FS_TYPE}="agentos_held"
+
+LABEL="agentos_assembly_end"
