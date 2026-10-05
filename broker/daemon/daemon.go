@@ -19,6 +19,8 @@ import (
 	"github.com/ghbmrk/agentos/broker/control"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/localapi"
+	"github.com/ghbmrk/agentos/broker/localsrv"
 	"github.com/ghbmrk/agentos/broker/modem"
 	ownerch "github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/sockets"
@@ -122,10 +124,28 @@ type Config struct {
 	// Notes are STATUS's exception lines (control.Handler.Notes); recall
 	// adds one while an agent holds a record the owner deleted (W10).
 	Notes []func() string
+	// PageSocket, when set, serves localui.sock: the box's Wi-Fi page's ops
+	// on the owner channel (localapi, P2-2w). It needs OwnerState.
+	PageSocket *PageSocket
 	// Redactor scrubs journaled free text. Nil journals none at all until
 	// the vault's redactor (CRED-7 values plus CH-19 patterns) is wired
 	// with the vault unlock (P2-4).
 	Redactor journal.Redactor
+}
+
+// PageSocket is the local UI's socket. The local UI runs as its own user and
+// decodes untrusted input, so it is treated as compromised: agentosd
+// mints and checks its session tokens and counts its wrong codes
+// (localsrv; Security L1, L2 on the P2-2w plan).
+type PageSocket struct {
+	// UID is the only uid allowed on the socket (SO_PEERCRED).
+	UID int
+	// GID, if set, is the local UI's group: the socket is given it, mode
+	// 0660. Unset, the socket is 0600 (same-uid tests only).
+	GID *int
+	// LineNote is the owner line's note (modemlink.Link.OwnerLineNote);
+	// nil without the modem bridge.
+	LineNote func() string
 }
 
 // Daemon is a running broker.
@@ -312,6 +332,23 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 			Ops: map[string]sockets.Handler{
 				"whoami": func(_ context.Context, p sockets.Peer, _ json.RawMessage) (any, error) { return p, nil },
 			},
+		})
+	}
+	if cfg.PageSocket != nil {
+		if ch == nil {
+			store.Close()
+			return nil, errors.New("daemon: the local UI's socket needs the owner channel (OwnerState)")
+		}
+		ui := localsrv.New(localsrv.Config{Owner: ch, LineNote: cfg.PageSocket.LineNote})
+		uid := cfg.PageSocket.UID
+		eps = append(eps, sockets.Endpoint{
+			Name:        localapi.Socket,
+			Peer:        sockets.Peer{Kind: "localui"},
+			PeerUID:     &uid,
+			PeerGID:     cfg.PageSocket.GID,
+			MaxConns:    8,
+			IdleTimeout: 30 * time.Second,
+			Ops:         ui.Ops(),
 		})
 	}
 	srv := &sockets.Server{Dir: cfg.SocketDir}

@@ -1,0 +1,146 @@
+// Package localapi is the local UI's contract with agentosd on
+// localui.sock (P2-2w; ARC-2, L15, CH-7, CH-10). The local UI
+// (agentos-localui) serves the box's Wi-Fi page under its own uid and is
+// always the client. It decodes untrusted input (photos, forms from
+// anyone on the access point), so it is treated as compromised: agentosd
+// decides every op that carries authority, from its own state (Security
+// L1 on the P2-2w plan). A code or grid cell passes through to agentosd,
+// which mints an opaque session token on a good sign-in; every op that
+// acts or reads the owner's requests presents that token. Only status,
+// STOP, the grid cell's challenge and sign-in itself need none.
+//
+// agentosd links this package and not the local UI, whose QR decoder
+// parses untrusted photos (L15). It carries no network client.
+package localapi
+
+import (
+	"time"
+
+	"github.com/ghbmrk/agentos/broker/owner"
+)
+
+// Socket is the local UI's socket file in agentosd's socket directory.
+const Socket = "localui.sock"
+
+// Ops on localui.sock. All carry the "page_" prefix, so none can be an
+// op of another socket (Security L3).
+const (
+	OpStatus   = "page_status"    // no token: the box's flags and the owner line's note
+	OpStop     = "page_stop"      // no token: STOP is fail-safe (Security L4)
+	OpGridCell = "page_grid_cell" // no token: the sign-in challenge
+	OpSignIn   = "page_sign_in"   // a code or grid cell: a token
+	OpSignOut  = "page_sign_out"
+	OpLines    = "page_lines" // STATUS's full lines
+	OpResume   = "page_resume"
+	OpRequests = "page_requests"
+	OpAnswer   = "page_answer"
+	OpWaiting  = "page_waiting"
+)
+
+// Ops lists every op, for the disjointness test.
+var Ops = []string{OpStatus, OpStop, OpGridCell, OpSignIn, OpSignOut, OpLines, OpResume, OpRequests, OpAnswer, OpWaiting}
+
+// Fixed refusals, sent as sockets codes.
+const (
+	ErrUnauthorized = "unauthorized" // no token, or one agentosd did not mint or has revoked
+	ErrBadArgs      = "bad args"     // a field missing or past its bound
+	ErrLimited      = "limited"      // too many wrong codes on this socket in the last minute
+	ErrFailed       = "failed"       // the owner channel could not act
+)
+
+// Bounds on string fields (Security L3). Tokens are TokenBytes random
+// bytes, hex.
+const (
+	TokenBytes = 16
+	MaxCode    = 64
+	MaxID      = 16
+	MaxSum     = 128
+)
+
+// Status is the box's state as the page shows it before sign-in: fixed
+// flags and fixed wording only, never task text, request contents,
+// recipients or counts (Security D1 on the P2-2w plan).
+type Status struct {
+	Stopped       bool      `json:"stopped"`
+	Unlocked      bool      `json:"unlocked"`
+	UnlockedUntil time.Time `json:"unlocked_until"`
+	LowLocked     bool      `json:"low_locked"`
+	Challenged    bool      `json:"challenged"`
+	// LineNote is the owner line's note, empty while the line is fine
+	// (Potency R2): fixed text, shown on the home page.
+	LineNote string `json:"line_note,omitempty"`
+}
+
+// SignIn carries a code-generator code or the grid cell's answer.
+type SignIn struct {
+	Code string `json:"code"`
+}
+
+// Session is a sign-in's result: the token, valid until Until unless
+// revoked first (sign-out, a session lock).
+type Session struct {
+	Token string    `json:"token"`
+	Until time.Time `json:"until"`
+}
+
+// Auth carries a token.
+type Auth struct {
+	Token string `json:"token"`
+}
+
+// Lines are STATUS's own lines, OP-9 causes included (Potency R3).
+type Lines struct {
+	Status string `json:"status"`
+}
+
+// Resume is RESUME from a signed-in page. Within FreshFor of the
+// session's last sign-in it needs no code; after that it takes a
+// code-generator code or the asked grid cell, checked as a sign-in
+// (Security S2 on step a, UX option B): RESUME undoes STOP, and a token
+// may be days old.
+type Resume struct {
+	Token string `json:"token"`
+	Code  string `json:"code,omitempty"`
+}
+
+// FreshFor is how long after a sign-in the page may RESUME without a code.
+const FreshFor = 15 * time.Minute
+
+// Text is a fixed reply from the owner channel.
+type Text struct {
+	Text string `json:"text"`
+}
+
+// Answer settles one request from the page.
+type Answer struct {
+	Token   string `json:"token"`
+	ID      string `json:"id"`
+	Sum     string `json:"sum"`
+	Approve bool   `json:"approve"`
+	Code    string `json:"code,omitempty"`
+}
+
+// Answered is the channel's reply to an Answer or a Resume. Refusal, when set, is
+// one of the Refused* values; Text is then the channel's own wording
+// (tries left, the texted code's hint), if any.
+type Answered struct {
+	Text    string `json:"text,omitempty"`
+	Refusal string `json:"refusal,omitempty"`
+}
+
+// Refusals of an Answer, each an owner channel error.
+const (
+	RefusedWrongCode  = "wrong code"
+	RefusedTooMany    = "too many"
+	RefusedNoRequest  = "no request"
+	RefusedChanged    = "changed"
+	RefusedTextedCode = "texted code"
+	RefusedNotSettled = "not settled"
+	// RefusedCodeNeeded: a RESUME past FreshFor came without a code.
+	RefusedCodeNeeded = "code needed"
+)
+
+// Requests are the open requests, as the owner channel lists them.
+type Requests struct {
+	Requests []owner.LocalRequest `json:"requests"`
+}

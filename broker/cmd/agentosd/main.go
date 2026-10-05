@@ -342,11 +342,13 @@ func main() {
 	var builderImage, builderLaunch, keptPath string
 	var learn learnPaths
 	var cgroupVouched, modemBridge, ownerMessage bool
+	localUIUID := -1
 	floor := budget.Floor()
 	flag.StringVar(&cfg.JournalPath, "journal", "/var/lib/agentos/journal.log", "journal file")
 	flag.StringVar(&cfg.SocketDir, "sockets", "/run/agentos", "socket directory (created 0700; 0711 once owner.sock, 0660 to the modem bridge's group, is up)")
 	flag.StringVar(&cfg.OwnerNumber, "owner", "", "owner's phone number, E.164")
 	flag.IntVar(&cfg.ModemUID, "modem-uid", -1, "uid of the modem bridge, the only peer allowed on the owner socket")
+	flag.IntVar(&localUIUID, "localui-uid", -1, "uid of the local UI (agentos-localui), the only peer allowed on localui.sock; unset, the socket is not served (P2-2w)")
 	flag.BoolVar(&modemBridge, "modem-bridge", true, "serve the modem bridge's ops on the owner socket and send the owner channel's texts through it")
 	flag.BoolVar(&ownerMessage, "owner-message", false, "also serve the raw \"message\" op on the owner socket with the bridge on (simulator and test builds only; it skips the bridge's checks)")
 	flag.Int64Var(&cfg.Admission.CapacityMB, "capacity-mb", defaultCapacityMB, "memory for agent machines, MB; unset, MemTotal less the floor budget outside the pool, at most 4500 or one OpenClaw machine per two cores, whichever is more (PE6, RES-2c)")
@@ -422,6 +424,22 @@ func main() {
 		log.Fatalf("-modem-uid %d: group %q: %v", cfg.ModemUID, u.Gid, err)
 	} else {
 		cfg.ModemGID = &gid
+	}
+	// localui.sock is the local UI user's primary group's, 0660, like the
+	// owner socket (Security L3 on the P2-2w plan).
+	if localUIUID >= 0 {
+		if localUIUID == os.Getuid() || localUIUID == cfg.ModemUID {
+			log.Fatal("-localui-uid must name the local UI's own uid, distinct from the broker's and the modem bridge's")
+		}
+		u, err := user.LookupId(strconv.Itoa(localUIUID))
+		if err != nil {
+			log.Fatalf("-localui-uid %d: %v", localUIUID, err)
+		}
+		gid, err := strconv.Atoi(u.Gid)
+		if err != nil {
+			log.Fatalf("-localui-uid %d: group %q: %v", localUIUID, u.Gid, err)
+		}
+		cfg.PageSocket = &daemon.PageSocket{UID: localUIUID, GID: &gid}
 	}
 
 	// RES-3: nothing below depends on what is found here. No local
@@ -505,11 +523,13 @@ func main() {
 	// The modem bridge (agentos-modem, P2-3w) hands owner texts in and
 	// pulls the channel's own texts from the owner socket; until it
 	// reports the owner line, sends fail as down and are counted for the
-	// recovery text. Its line note is for the box's local page (U-B1);
-	// the local UI's wiring shows it.
+	// recovery text. Its line note is for the box's local page (U-B1).
 	if modemBridge {
 		link := modemlink.New(modemlink.Config{Owner: cfg.OwnerNumber})
 		cfg.Modem, cfg.OwnerOps = link, link.Ops()
+		if cfg.PageSocket != nil {
+			cfg.PageSocket.LineNote = link.OwnerLineNote
+		}
 		cfg.BridgeOnly = !ownerMessage
 	}
 
