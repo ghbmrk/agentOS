@@ -64,7 +64,34 @@ type machines struct{ m *vm.Manager }
 
 func (a machines) Step(ctx context.Context, id string) error {
 	_, err := a.m.Step(ctx, id)
+	return stepErr(err)
+}
+
+// stepErr marks a failed step snapshot's reason for the guest plane,
+// which tells the agent and STATUS a fixed text for it (SR2-3s). A layer
+// too deep to measure is checked first: the manager reports it as a
+// disk budget too.
+func stepErr(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, vm.ErrTooDeep):
+		return fmt.Errorf("%w: %w", guest.ErrStepTooDeep, err)
+	case errors.Is(err, vm.ErrQuota):
+		return fmt.Errorf("%w: %w", guest.ErrStepNoRoom, err)
+	}
 	return err
+}
+
+// stepNotes is STATUS's line while the agent's step snapshots keep
+// failing, once the guest plane is open (SR2-3s).
+type stepNotes struct{ p atomic.Pointer[guest.Plane] }
+
+func (n *stepNotes) Note() string {
+	if p := n.p.Load(); p != nil {
+		return p.StepNote()
+	}
+	return ""
 }
 
 func (a machines) RaisePrivate(id string) error { return a.m.RaiseLabel(id, vm.Private) }
@@ -418,6 +445,8 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	steps := &stepNotes{}
+	cfg.Notes = append(cfg.Notes, steps.Note)
 	d, err := daemon.Run(ctx, cfg)
 	if err != nil {
 		log.Fatal(err)
@@ -487,6 +516,7 @@ func main() {
 				log.Printf("agent machines disabled: %v", err)
 			} else {
 				services.live.Store(&svc{plane})
+				steps.p.Store(plane)
 				oa := &guest.OwnerAgent{Plane: plane, Machine: agentMachine}
 				if lp != nil {
 					oa.Delivered = lp.delivered

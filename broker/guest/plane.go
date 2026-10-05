@@ -370,6 +370,90 @@ type stepper struct {
 	pending bool // a snapshot is owed after the current one or the interval
 	timer   *time.Timer
 	stopped bool
+	// fails counts snapshots failed in a row; reason is the latest
+	// failure's; note is the agent's untold note about it (SR2-3s).
+	fails  int
+	reason int
+	note   string
+}
+
+// A failed step snapshot's reason, as the machine manager's adapter
+// marks it: the plane cannot import the manager (ARC-2). Anything else
+// is a fault the guest learns nothing more about.
+var (
+	ErrStepNoRoom  = errors.New("guest: step snapshot: no room")
+	ErrStepTooDeep = errors.New("guest: step snapshot: folders nest too deep")
+)
+
+const (
+	stepOther = iota
+	stepNoRoom
+	stepTooDeep
+)
+
+// What the agent and STATUS are told of a failed step snapshot: fixed
+// text per reason, never the error, so no host path, errno or size
+// reaches either (SR2-3s; security R1 on #174). No room covers the
+// machine's own cap and the box's disk alike, so it says nothing about
+// other machines.
+const (
+	stepNoteNoRoom  = "The rollback point after your last effect request was not saved: there is no room for it. Delete files you no longer need; until a rollback point is saved, these steps can't be rolled back."
+	stepNoteTooDeep = "The rollback point after your last effect request was not saved: folders in your machine nest more than 256 deep. Flatten or delete them; until a rollback point is saved, these steps can't be rolled back."
+	stepNoteOther   = "The rollback point after your last effect request was not saved. The broker tries again after your next effect request; until then these steps can't be rolled back."
+	statusNoRoom    = "The agent's recent steps can't be undone: its files have no room left."
+	statusTooDeep   = "The agent's recent steps can't be undone: its folders nest too deep to save."
+	statusOther     = "The agent's recent steps can't be undone: the box couldn't save them."
+)
+
+var (
+	stepNotes    = [...]string{stepOther: stepNoteOther, stepNoRoom: stepNoteNoRoom, stepTooDeep: stepNoteTooDeep}
+	stepStatuses = [...]string{stepOther: statusOther, stepNoRoom: statusNoRoom, stepTooDeep: statusTooDeep}
+)
+
+func stepReason(err error) int {
+	switch {
+	case errors.Is(err, ErrStepTooDeep):
+		return stepTooDeep
+	case errors.Is(err, ErrStepNoRoom):
+		return stepNoRoom
+	}
+	return stepOther
+}
+
+// stepFailsShown is how many step snapshots in a row must fail before
+// STATUS carries the line: one failure is told to the agent alone.
+const stepFailsShown = 2
+
+// StepNote is STATUS's line while a machine's step snapshots keep
+// failing, or "". It names no machine or path (SR2-3s).
+func (p *Plane) StepNote() string {
+	p.mu.Lock()
+	ms := make([]*machine, 0, len(p.ms))
+	for _, m := range p.ms {
+		ms = append(ms, m)
+	}
+	p.mu.Unlock()
+	line, latest := "", time.Time{}
+	for _, m := range ms {
+		s := &m.steps
+		s.mu.Lock()
+		if s.fails >= stepFailsShown && s.last.After(latest) {
+			line, latest = stepStatuses[s.reason], s.last
+		}
+		s.mu.Unlock()
+	}
+	return line
+}
+
+// takeNote returns machine m's untold note about a failed step snapshot,
+// once.
+func (m *machine) takeNote() string {
+	s := &m.steps
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := s.note
+	s.note = ""
+	return n
 }
 
 // step snapshots machine m after an effect request reached the journal.
@@ -423,6 +507,13 @@ func (p *Plane) snapshot(m *machine) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.running, s.last = false, time.Now()
+	if err != nil {
+		s.fails++
+		s.reason = stepReason(err)
+		s.note = stepNotes[s.reason]
+	} else {
+		s.fails = 0
+	}
 	if s.pending && !s.stopped && s.timer == nil {
 		s.timer = time.AfterFunc(p.cfg.StepInterval, func() { p.trailing(m) })
 	}
