@@ -112,8 +112,9 @@ func (c *Channel) DueAutoReplies() []Queued {
 	return out
 }
 
-// undoLocked cancels a queued reply inside its window (CH-16).
-func (c *Channel) undoLocked(id string, now time.Time) string {
+// undoLocked cancels a queued reply inside its window (CH-16); the reply's
+// item is decided as denied with Why "undo".
+func (c *Channel) undoLocked(id string, now time.Time, decided *[]Decision) string {
 	q := c.queued[id]
 	if q == nil {
 		return fmt.Sprintf("Nothing to undo for %s.", id)
@@ -123,6 +124,7 @@ func (c *Channel) undoLocked(id string, now time.Time) string {
 	}
 	delete(c.queued, id)
 	c.retireLocked(id, now)
+	*decided = append(*decided, Decision{Request: id, Item: 1, Ref: q.Reply.Ref, Why: "undo"})
 	return fmt.Sprintf("Cancelled %s. The reply was not sent.", id)
 }
 
