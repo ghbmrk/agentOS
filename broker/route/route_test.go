@@ -134,6 +134,8 @@ type rigOpts struct {
 	grants    map[string][]string
 	labels    map[string]string
 	privateOK map[string]bool
+	cap       egress.Cap
+	maxOut    int
 }
 
 func newRig(t *testing.T, o rigOpts) *rig {
@@ -181,6 +183,7 @@ func newRig(t *testing.T, o rigOpts) *rig {
 		Transport: tr,
 		Audit:     r,
 		Label:     label,
+		Cap:       o.cap,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -196,9 +199,10 @@ func newRig(t *testing.T, o rigOpts) *rig {
 			}
 			return false
 		},
-		PrivateOK: o.privateOK,
-		Label:     label,
-		Upstream:  px.Handler,
+		PrivateOK:       o.privateOK,
+		MaxOutputTokens: o.maxOut,
+		Label:           label,
+		Upstream:        px.Handler,
 		Audit: func(d Decision) {
 			r.mu.Lock()
 			r.decisions = append(r.decisions, d)
@@ -224,7 +228,7 @@ func (r *rig) do(t *testing.T, machine, body string) *httptest.ResponseRecorder 
 	return w
 }
 
-func content(t *testing.T, w *httptest.ResponseRecorder) string {
+func completionText(t *testing.T, w *httptest.ResponseRecorder) string {
 	t.Helper()
 	var c struct {
 		Choices []struct{ Message struct{ Content string } }
@@ -241,7 +245,7 @@ func TestServesFromFirstRouteThroughEgress(t *testing.T) {
 	r := newRig(t, rigOpts{})
 	r.up.set(hostAnthropic, serveFixture(200, "application/json", fixture(t, "anthropic_message.json")))
 	w := r.do(t, "m1", simpleChat)
-	if w.Code != 200 || content(t, w) != "Checking the weather." {
+	if w.Code != 200 || completionText(t, w) != "Checking the weather." {
 		t.Fatalf("%d %s", w.Code, w.Body)
 	}
 	if r.up.count(hostOpenAI) != 0 {
@@ -273,7 +277,7 @@ func TestFailsOverOnExhaustionAndHonorsRetryAfter(t *testing.T) {
 	r.up.set(hostOpenAI, serveFixture(200, "application/json", fixture(t, "openai_completion.json")))
 
 	w := r.do(t, "m1", simpleChat)
-	if w.Code != 200 || content(t, w) != "Hello from the fixture." {
+	if w.Code != 200 || completionText(t, w) != "Hello from the fixture." {
 		t.Fatalf("%d %s", w.Code, w.Body)
 	}
 	if r.up.count(hostAnthropic) != 1 || r.up.count(hostOpenAI) != 1 {
@@ -294,7 +298,7 @@ func TestFailsOverOnExhaustionAndHonorsRetryAfter(t *testing.T) {
 	}
 	r.advance(25 * time.Second)
 	r.up.set(hostAnthropic, serveFixture(200, "application/json", fixture(t, "anthropic_message.json")))
-	if w := r.do(t, "m1", simpleChat); w.Code != 200 || content(t, w) != "Checking the weather." {
+	if w := r.do(t, "m1", simpleChat); w.Code != 200 || completionText(t, w) != "Checking the weather." {
 		t.Fatalf("%d %s", w.Code, w.Body)
 	}
 	st := r.router.Stats()
@@ -392,7 +396,7 @@ func TestPrivateCallsOnlyToPrivateAllowedProviders(t *testing.T) {
 		t.Fatalf("public machine: %d, openai=%d", w.Code, r.up.count(hostOpenAI))
 	}
 	for _, m := range []string{"priv", "unlabelled"} {
-		if w := r.do(t, m, simpleChat); w.Code != 200 || content(t, w) != "Checking the weather." {
+		if w := r.do(t, m, simpleChat); w.Code != 200 || completionText(t, w) != "Checking the weather." {
 			t.Fatalf("%s: %d %s", m, w.Code, w.Body)
 		}
 	}
@@ -483,7 +487,7 @@ func TestStreamsTranslatedThroughEgress(t *testing.T) {
 		t.Fatalf("%d %v", w.Code, w.Header())
 	}
 	a := reassemble(t, w.Body.Bytes())
-	if !a.done || a.text != "Hello, world" || a.names[0] != "get_weather" || a.usage["completion_tokens"] != 32 {
+	if !a.done || a.text != "Hello, world" || a.names[0] != "get_weather" || a.usage["completion_tokens"] != float64(32) {
 		t.Fatalf("%+v", a)
 	}
 	var sent aRequest
@@ -610,5 +614,231 @@ func TestNewRequiresWiring(t *testing.T) {
 		Granted: func(string, string) bool { return true }, Upstream: h, Audit: func(Decision) {}})
 	if err == nil {
 		t.Fatal("duplicate provider accepted")
+	}
+}
+
+func (r *rig) doPath(t *testing.T, machine, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest("POST", path, strings.NewReader(body))
+	w := httptest.NewRecorder()
+	r.router.Handler(machine).ServeHTTP(w, req)
+	return w
+}
+
+func (r *rig) lastDecision() Decision {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.decisions[len(r.decisions)-1]
+}
+
+// The router's copy of the proxy's denial mark is the proxy's.
+func TestDeniedHeaderMatchesEgress(t *testing.T) {
+	if deniedHeader != egress.DeniedHeader {
+		t.Fatalf("%q != %q", deniedHeader, egress.DeniedHeader)
+	}
+}
+
+// CAP-9: one machine's own proxy limits never cool a route for another
+// machine; the denial goes to that machine's guest as an OpenAI error.
+func TestProxyLimitsStayPerMachine(t *testing.T) {
+	r := newRig(t, rigOpts{
+		grants: map[string][]string{"a": {"openai", "anthropic"}, "b": {"openai", "anthropic"}},
+		labels: map[string]string{"a": LabelPublic, "b": LabelPublic},
+		cap:    egress.Cap{Requests: 1},
+	})
+	r.up.set(hostAnthropic, serveFixture(200, "application/json", fixture(t, "anthropic_message.json")))
+	r.up.set(hostOpenAI, serveFixture(200, "application/json", fixture(t, "openai_completion.json")))
+	if w := r.do(t, "a", simpleChat); w.Code != 200 {
+		t.Fatalf("first call %d", w.Code)
+	}
+	w := r.do(t, "a", simpleChat)
+	if w.Code != 429 || r.up.count(hostOpenAI) != 0 {
+		t.Fatalf("capped machine: %d, openai=%d", w.Code, r.up.count(hostOpenAI))
+	}
+	var e struct {
+		Error struct{ Type, Message string }
+	}
+	if json.Unmarshal(w.Body.Bytes(), &e) != nil || e.Error.Type != "rate_limit_error" || !strings.Contains(e.Error.Message, "request cap") {
+		t.Fatalf("guest error %s", w.Body)
+	}
+	if d := r.lastDecision(); d.Outcome != Denied || d.Reason != "egress denied" {
+		t.Fatalf("decision %+v", d)
+	}
+	if w := r.do(t, "b", simpleChat); w.Code != 200 || completionText(t, w) != "Checking the weather." || r.up.count(hostAnthropic) != 2 {
+		t.Fatalf("other machine: %d anthropic=%d", w.Code, r.up.count(hostAnthropic))
+	}
+	if st := r.router.Stats()["anthropic/claude-fixture"]; st.Failovers != 0 || st.Calls != 2 {
+		t.Fatalf("proxy denial counted against the route: %+v", st)
+	}
+}
+
+// OP-8 groundwork: served calls report the provider's usage, cache tokens
+// included, whether or not the guest asked for it.
+func TestDecisionsReportProviderUsage(t *testing.T) {
+	r := newRig(t, rigOpts{})
+	r.up.set(hostAnthropic, serveFixture(200, "application/json", fixture(t, "anthropic_message.json")))
+	r.do(t, "m1", simpleChat)
+	if d := r.lastDecision(); d.Usage == nil || *d.Usage != (Usage{Input: 412, Output: 57, CacheRead: 3000, CacheWrite: 200}) {
+		t.Fatalf("decision %+v", d)
+	}
+	r.up.set(hostAnthropic, serveFixture(200, "text/event-stream", fixture(t, "anthropic_stream.sse")))
+	w := r.do(t, "m1", `{"model":"default","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	if a := reassemble(t, w.Body.Bytes()); a.usage != nil || !a.done {
+		t.Fatalf("usage chunk sent unasked: %+v", a)
+	}
+	if d := r.lastDecision(); d.Usage == nil || *d.Usage != (Usage{Input: 25, Output: 32, CacheRead: 1800}) {
+		t.Fatalf("stream decision %+v", d)
+	}
+
+	// OpenAI: usage is always requested upstream, and its usage-only chunk
+	// is dropped when the guest did not ask for it.
+	r2 := newRig(t, rigOpts{rule: Rule{"default": {{"openai", "gpt-fixture"}}}})
+	r2.up.set(hostOpenAI, serveFixture(200, "text/event-stream", fixture(t, "openai_stream.sse")))
+	w = r2.do(t, "m1", `{"model":"default","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	if a := reassemble(t, w.Body.Bytes()); a.usage != nil || !a.done || a.text != "Hi" {
+		t.Fatalf("%+v", a)
+	}
+	var sent struct {
+		StreamOptions *streamOptions `json:"stream_options"`
+	}
+	json.Unmarshal(r2.up.lastBody(hostOpenAI), &sent)
+	if sent.StreamOptions == nil || !sent.StreamOptions.IncludeUsage {
+		t.Fatalf("usage not requested upstream: %s", r2.up.lastBody(hostOpenAI))
+	}
+	if d := r2.lastDecision(); d.Usage == nil || *d.Usage != (Usage{Input: 9, Output: 2, CacheRead: 10}) {
+		t.Fatalf("openai stream decision %+v", d.Usage)
+	}
+	w = r2.do(t, "m1", `{"model":"default","stream":true,"stream_options":{"include_usage":true},"messages":[{"role":"user","content":"hi"}]}`)
+	if a := reassemble(t, w.Body.Bytes()); a.usage == nil {
+		t.Fatal("usage chunk dropped although the guest asked for it")
+	}
+}
+
+// Every call goes upstream with an output limit at or below the owner's
+// ceiling, so the meter can reserve it.
+func TestOutputTokensClampedToCeiling(t *testing.T) {
+	r := newRig(t, rigOpts{rule: Rule{"default": {{"openai", "gpt-fixture"}}}, maxOut: 1000})
+	r.up.set(hostOpenAI, serveFixture(200, "application/json", fixture(t, "openai_completion.json")))
+	for _, c := range []struct{ body, key string }{
+		{simpleChat, "max_completion_tokens"},
+		{`{"model":"default","max_tokens":999999,"messages":[{"role":"user","content":"x"}]}`, "max_tokens"},
+		{`{"model":"default","max_completion_tokens":5000,"messages":[{"role":"user","content":"x"}]}`, "max_completion_tokens"},
+	} {
+		r.do(t, "m1", c.body)
+		var sent map[string]any
+		json.Unmarshal(r.up.lastBody(hostOpenAI), &sent)
+		if sent[c.key] != float64(1000) {
+			t.Fatalf("%s: sent %v", c.body, sent)
+		}
+	}
+	r.do(t, "m1", `{"model":"default","max_tokens":10,"messages":[{"role":"user","content":"x"}]}`)
+	var sent map[string]any
+	json.Unmarshal(r.up.lastBody(hostOpenAI), &sent)
+	if sent["max_tokens"] != float64(10) {
+		t.Fatalf("a lower limit must stay: %v", sent)
+	}
+	if r.router.MaxOutputTokens() != 1000 {
+		t.Fatal("ceiling not exposed")
+	}
+
+	r2 := newRig(t, rigOpts{maxOut: 1000})
+	r2.up.set(hostAnthropic, serveFixture(200, "application/json", fixture(t, "anthropic_message.json")))
+	r2.do(t, "m1", `{"model":"default","max_tokens":999999,"messages":[{"role":"user","content":"x"}]}`)
+	var a aRequest
+	json.Unmarshal(r2.up.lastBody(hostAnthropic), &a)
+	if a.MaxTokens != 1000 {
+		t.Fatalf("anthropic max_tokens %d", a.MaxTokens)
+	}
+}
+
+// The guest's existing base URL (the openai adapter's mount) is served too.
+func TestServesOpenAIMountPath(t *testing.T) {
+	r := newRig(t, rigOpts{})
+	r.up.set(hostAnthropic, serveFixture(200, "application/json", fixture(t, "anthropic_message.json")))
+	if w := r.doPath(t, "m1", "/openai/v1/chat/completions", simpleChat); w.Code != 200 {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	if w := r.doPath(t, "m1", "/anthropic/v1/messages", simpleChat); w.Code != 404 {
+		t.Fatalf("raw provider path served: %d", w.Code)
+	}
+}
+
+// A stream that fails before its first byte fails over like any response.
+func TestStreamErrorBeforeFirstByteFailsOver(t *testing.T) {
+	r := newRig(t, rigOpts{})
+	early := "event: error\ndata: " + strings.TrimSpace(string(fixture(t, "anthropic_overloaded.json"))) + "\n\n"
+	r.up.set(hostAnthropic, serveFixture(200, "text/event-stream", []byte(early)))
+	r.up.set(hostOpenAI, serveFixture(200, "text/event-stream", fixture(t, "openai_stream.sse")))
+	w := r.do(t, "m1", `{"model":"default","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	if a := reassemble(t, w.Body.Bytes()); w.Code != 200 || !a.done || a.text != "Hi" || strings.Contains(w.Body.String(), "Overloaded") {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	if st := r.router.Stats()["anthropic/claude-fixture"]; st.Failovers != 1 {
+		t.Fatalf("stats %+v", st)
+	}
+}
+
+// Three routes with mixed outcomes: each exhausted one is passed over in
+// order, and the first that answers serves.
+func TestMixedOutcomesAcrossThreeRoutes(t *testing.T) {
+	r := newRig(t, rigOpts{rule: Rule{"default": {
+		{"anthropic", "claude-a"}, {"anthropic", "claude-b"}, {"openai", "gpt-fixture"},
+	}}})
+	r.up.set(hostAnthropic, func(w http.ResponseWriter, req *http.Request) {
+		r.up.mu.Lock()
+		b := r.up.bodies[hostAnthropic][len(r.up.bodies[hostAnthropic])-1]
+		r.up.mu.Unlock()
+		if strings.Contains(string(b), `"claude-a"`) {
+			serveFixture(429, "application/json", fixture(t, "anthropic_rate_limit.json"))(w, req)
+			return
+		}
+		serveFixture(500, "application/json", []byte(`{"type":"error","error":{"type":"api_error","message":"x"}}`))(w, req)
+	})
+	r.up.set(hostOpenAI, serveFixture(200, "application/json", fixture(t, "openai_completion.json")))
+	if w := r.do(t, "m1", simpleChat); w.Code != 200 || completionText(t, w) != "Hello from the fixture." {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	var outcomes []string
+	for _, d := range r.decisions {
+		outcomes = append(outcomes, d.Outcome+":"+d.Route)
+	}
+	want := "failover:anthropic/claude-a failover:anthropic/claude-b served:openai/gpt-fixture"
+	if strings.Join(outcomes, " ") != want {
+		t.Fatalf("%v", outcomes)
+	}
+}
+
+// When every permitted route is cooling down, the guest is told when to
+// retry; an HTTP-date Retry-After counts like seconds.
+func TestRetryAfterReachesGuest(t *testing.T) {
+	r := newRig(t, rigOpts{rule: Rule{"default": {{"anthropic", "claude-fixture"}}}})
+	date := r.clock().Add(90 * time.Second).UTC().Format(http.TimeFormat)
+	r.up.set(hostAnthropic, serveFixture(429, "application/json", fixture(t, "anthropic_rate_limit.json"), "Retry-After", date))
+	w := r.do(t, "m1", simpleChat)
+	if w.Code != 429 || w.Header().Get("Retry-After") == "" {
+		t.Fatalf("%d retry-after %q", w.Code, w.Header().Get("Retry-After"))
+	}
+	r.advance(60 * time.Second)
+	w = r.do(t, "m1", simpleChat)
+	if w.Code != 429 || r.up.count(hostAnthropic) != 1 {
+		t.Fatalf("HTTP-date Retry-After not honored: %d, calls %d", w.Code, r.up.count(hostAnthropic))
+	}
+	if s, _ := strconv.Atoi(w.Header().Get("Retry-After")); s < 29 || s > 31 {
+		t.Fatalf("retry-after %q", w.Header().Get("Retry-After"))
+	}
+}
+
+// Requests the provider refuses as invalid do not count against the route.
+func TestCandidateIgnoresGuestErrors(t *testing.T) {
+	r := newRig(t, rigOpts{})
+	r.up.set(hostAnthropic, serveFixture(400, "application/json", fixture(t, "anthropic_invalid.json")))
+	for i := 0; i < 3; i++ {
+		r.do(t, "m1", simpleChat)
+	}
+	if st := r.router.Stats()["anthropic/claude-fixture"]; st.Calls != 0 {
+		t.Fatalf("guest errors counted: %+v", st)
+	}
+	if r.router.Candidate()["default"][0].Provider != "anthropic" {
+		t.Fatal("guest errors flipped the candidate")
 	}
 }

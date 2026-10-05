@@ -35,7 +35,7 @@ func (anthropic) Headers() map[string]string {
 
 type aRequest struct {
 	Model         string       `json:"model"`
-	System        string       `json:"system,omitempty"`
+	System        []aBlock     `json:"system,omitempty"`
 	Messages      []aMessage   `json:"messages"`
 	MaxTokens     int          `json:"max_tokens"`
 	Temperature   *float64     `json:"temperature,omitempty"`
@@ -60,7 +60,17 @@ type aBlock struct {
 	Input     json.RawMessage `json:"input,omitempty"`
 	ToolUseID string          `json:"tool_use_id,omitempty"`
 	Content   []aBlock        `json:"content,omitempty"`
+	Cache     *cacheControl   `json:"cache_control,omitempty"`
 }
+
+// cacheControl marks a prompt-cache breakpoint: the prefix up to and
+// including the marked block is cached, and later calls that resend it
+// are billed at the cache-read rate (about a tenth of input).
+type cacheControl struct {
+	Type string `json:"type"`
+}
+
+var ephemeral = &cacheControl{Type: "ephemeral"}
 
 type aSource struct {
 	Type      string `json:"type"`
@@ -73,6 +83,7 @@ type aTool struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	InputSchema json.RawMessage `json:"input_schema"`
+	Cache       *cacheControl   `json:"cache_control,omitempty"`
 }
 
 type aToolChoice struct {
@@ -81,43 +92,47 @@ type aToolChoice struct {
 	DisableParallelToolUse bool   `json:"disable_parallel_tool_use,omitempty"`
 }
 
-// Request translates a chat-completions request. Features the Messages API
-// cannot honor (several choices, a structured response format) make the
+// Request translates a chat-completions request. A valid request the
+// Messages API cannot express (several choices, a structured response
+// format, the legacy function role, non-text system content) makes the
 // route unable to cover the call, so the router tries the next one.
+//
+// Agent loops resend a growing prefix (tools, system prompt, history) on
+// every call, so Request marks prompt-cache breakpoints: after the tools,
+// after the system prompt, and on the last two messages (four, the API's
+// limit). A prefix below the model's minimum cacheable length is simply
+// not cached.
 func (anthropic) Request(req *chatRequest, model string) ([]byte, error) {
 	if req.N != nil && *req.N != 1 {
 		return nil, unsupported("n other than 1")
 	}
-	if len(req.ResponseFormat) > 0 && !bytes.Equal(bytes.TrimSpace(req.ResponseFormat), []byte("null")) {
-		var rf struct{ Type string }
-		if json.Unmarshal(req.ResponseFormat, &rf) != nil || rf.Type != "text" {
-			return nil, unsupported("response_format other than text")
-		}
+	if rf := req.ResponseFormat; rf != nil && rf.Type != "text" {
+		return nil, unsupported("response_format " + rf.Type)
 	}
 	out := aRequest{Model: model, Temperature: req.Temperature, TopP: req.TopP, Stream: req.Stream, MaxTokens: DefaultMaxTokens}
+	if t := out.Temperature; t != nil && *t > 1 {
+		// Chat completions allows up to 2, the Messages API up to 1.
+		one := 1.0
+		out.Temperature = &one
+	}
 	switch {
 	case req.MaxCompletionTokens != nil:
 		out.MaxTokens = *req.MaxCompletionTokens
 	case req.MaxTokens != nil:
 		out.MaxTokens = *req.MaxTokens
 	}
-	var err error
-	if out.StopSequences, err = stops(req.Stop); err != nil {
-		return nil, badRequest("stop must be a string or a list of strings")
-	}
-	var system []string
+	out.StopSequences = req.Stop
 	for _, m := range req.Messages {
-		ps, err := parts(m.Content)
-		if err != nil {
-			return nil, badRequest(err.Error())
-		}
+		ps := m.Content.parts()
 		switch m.Role {
 		case "system", "developer":
 			for _, p := range ps {
 				if p.Type != "text" {
-					return nil, badRequest("system content must be text")
+					return nil, unsupported("non-text system content")
 				}
-				system = append(system, p.Text)
+				if p.Text != "" {
+					out.System = append(out.System, aBlock{Type: "text", Text: p.Text})
+				}
 			}
 		case "user":
 			var blocks []aBlock
@@ -135,7 +150,7 @@ func (anthropic) Request(req *chatRequest, model string) ([]byte, error) {
 			var blocks []aBlock
 			for _, p := range ps {
 				if p.Type != "text" {
-					return nil, badRequest("assistant content must be text")
+					return nil, unsupported("non-text assistant content")
 				}
 				if p.Text != "" {
 					blocks = append(blocks, aBlock{Type: "text", Text: p.Text})
@@ -157,7 +172,7 @@ func (anthropic) Request(req *chatRequest, model string) ([]byte, error) {
 			var inner []aBlock
 			for _, p := range ps {
 				if p.Type != "text" {
-					return nil, badRequest("tool content must be text")
+					return nil, unsupported("non-text tool content")
 				}
 				if p.Text != "" {
 					inner = append(inner, aBlock{Type: "text", Text: p.Text})
@@ -165,12 +180,11 @@ func (anthropic) Request(req *chatRequest, model string) ([]byte, error) {
 			}
 			out.Messages = appendTurn(out.Messages, "user", []aBlock{{Type: "tool_result", ToolUseID: m.ToolCallID, Content: inner}})
 		default:
-			return nil, badRequest("unknown message role " + m.Role)
+			return nil, unsupported("message role " + m.Role)
 		}
 	}
-	out.System = strings.Join(system, "\n\n")
 	if len(out.Messages) == 0 {
-		return nil, badRequest("no user or assistant messages")
+		return nil, unsupported("a conversation with no user or assistant messages")
 	}
 	for _, t := range req.Tools {
 		schema := t.Function.Parameters
@@ -179,8 +193,15 @@ func (anthropic) Request(req *chatRequest, model string) ([]byte, error) {
 		}
 		out.Tools = append(out.Tools, aTool{Name: t.Function.Name, Description: t.Function.Description, InputSchema: schema})
 	}
-	if out.ToolChoice, err = toolChoice(req.ToolChoice); err != nil {
-		return nil, err
+	if tc := req.ToolChoice; tc != nil {
+		switch {
+		case tc.Function != "":
+			out.ToolChoice = &aToolChoice{Type: "tool", Name: tc.Function}
+		case tc.Mode == "required":
+			out.ToolChoice = &aToolChoice{Type: "any"}
+		default:
+			out.ToolChoice = &aToolChoice{Type: tc.Mode}
+		}
 	}
 	if req.ParallelToolCalls != nil && !*req.ParallelToolCalls && len(out.Tools) > 0 {
 		if out.ToolChoice == nil {
@@ -189,6 +210,16 @@ func (anthropic) Request(req *chatRequest, model string) ([]byte, error) {
 		if out.ToolChoice.Type != "none" {
 			out.ToolChoice.DisableParallelToolUse = true
 		}
+	}
+	if n := len(out.Tools); n > 0 {
+		out.Tools[n-1].Cache = ephemeral
+	}
+	if n := len(out.System); n > 0 {
+		out.System[n-1].Cache = ephemeral
+	}
+	for i := len(out.Messages) - 1; i >= 0 && i >= len(out.Messages)-2; i-- {
+		c := out.Messages[i].Content
+		c[len(c)-1].Cache = ephemeral
 	}
 	return json.Marshal(out)
 }
@@ -215,14 +246,14 @@ func userBlock(p contentPart) (*aBlock, error) {
 		return &aBlock{Type: "text", Text: p.Text}, nil
 	case "image_url":
 		if p.ImageURL == nil || p.ImageURL.URL == "" {
-			return nil, badRequest("image_url part without a url")
+			return nil, unsupported("image_url part without a url")
 		}
 		u := p.ImageURL.URL
 		if rest, ok := strings.CutPrefix(u, "data:"); ok {
 			meta, data, ok := strings.Cut(rest, ",")
 			mt, isB64 := strings.CutSuffix(meta, ";base64")
 			if !ok || !isB64 || mt == "" {
-				return nil, badRequest("image data URL must be base64")
+				return nil, unsupported("image data URL that is not base64")
 			}
 			return &aBlock{Type: "image", Source: &aSource{Type: "base64", MediaType: mt, Data: data}}, nil
 		}
@@ -232,35 +263,6 @@ func userBlock(p contentPart) (*aBlock, error) {
 	default:
 		return nil, unsupported("content part type " + p.Type)
 	}
-}
-
-func toolChoice(raw json.RawMessage) (*aToolChoice, error) {
-	raw = bytes.TrimSpace(raw)
-	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
-		return nil, nil
-	}
-	var s string
-	if json.Unmarshal(raw, &s) == nil {
-		switch s {
-		case "auto":
-			return &aToolChoice{Type: "auto"}, nil
-		case "none":
-			return &aToolChoice{Type: "none"}, nil
-		case "required":
-			return &aToolChoice{Type: "any"}, nil
-		}
-		return nil, badRequest("tool_choice " + s)
-	}
-	var o struct {
-		Type     string `json:"type"`
-		Function struct {
-			Name string `json:"name"`
-		} `json:"function"`
-	}
-	if json.Unmarshal(raw, &o) != nil || o.Type != "function" || o.Function.Name == "" {
-		return nil, badRequest("tool_choice must name a function")
-	}
-	return &aToolChoice{Type: "tool", Name: o.Function.Name}, nil
 }
 
 type aResponse struct {
@@ -277,14 +279,29 @@ type aResponse struct {
 }
 
 type aUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens              int64 `json:"input_tokens"`
+	OutputTokens             int64 `json:"output_tokens"`
+	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
 }
 
-func (u aUsage) openAI() map[string]int {
-	return map[string]int{
-		"prompt_tokens": u.InputTokens, "completion_tokens": u.OutputTokens,
-		"total_tokens": u.InputTokens + u.OutputTokens,
+func (u aUsage) usage() Usage {
+	return Usage{Input: u.InputTokens, Output: u.OutputTokens, CacheRead: u.CacheReadInputTokens, CacheWrite: u.CacheCreationInputTokens}
+}
+
+// merge takes the nonzero counts of a later usage report (message_delta
+// carries cumulative counts, sometimes only the output).
+func (u *aUsage) merge(o aUsage) {
+	for _, f := range []struct {
+		dst *int64
+		src int64
+	}{
+		{&u.InputTokens, o.InputTokens}, {&u.OutputTokens, o.OutputTokens},
+		{&u.CacheReadInputTokens, o.CacheReadInputTokens}, {&u.CacheCreationInputTokens, o.CacheCreationInputTokens},
+	} {
+		if f.src != 0 {
+			*f.dst = f.src
+		}
 	}
 }
 
@@ -302,10 +319,10 @@ func finishReason(stop string) string {
 
 // Response translates a Messages response to a chat completion. The model
 // the guest sees is the class it asked for.
-func (anthropic) Response(body []byte, class string) ([]byte, error) {
+func (anthropic) Response(body []byte, class string) ([]byte, Usage, error) {
 	var r aResponse
 	if err := json.Unmarshal(body, &r); err != nil {
-		return nil, fmt.Errorf("provider response is not a message: %v", err)
+		return nil, Usage{}, fmt.Errorf("provider response is not a message: %v", err)
 	}
 	var text strings.Builder
 	var calls []toolCall
@@ -324,11 +341,13 @@ func (anthropic) Response(body []byte, class string) ([]byte, error) {
 	if len(calls) > 0 {
 		msg["tool_calls"] = calls
 	}
-	return json.Marshal(map[string]any{
+	u := r.Usage.usage()
+	out, err := json.Marshal(map[string]any{
 		"id": "chatcmpl-" + r.ID, "object": "chat.completion", "created": time.Now().Unix(), "model": class,
 		"choices": []any{map[string]any{"index": 0, "message": msg, "finish_reason": finishReason(r.StopReason)}},
-		"usage":   r.Usage.openAI(),
+		"usage":   u.openAI(),
 	})
+	return out, u, err
 }
 
 // errorTypes maps Messages API error types to the OpenAI types a guest's
@@ -388,14 +407,18 @@ type aEvent struct {
 }
 
 // Stream translates Messages server-sent events into chat-completion
-// chunks, ending with data: [DONE] as OpenAI clients expect.
-func (anthropic) Stream(dst io.Writer, flush func(), src io.Reader, class string, includeUsage bool) error {
+// chunks, ending with data: [DONE] as OpenAI clients expect. Usage is read
+// from message_start and message_delta whether or not the guest asked for
+// it. An error event before the message starts writes nothing, so the
+// router can still fail over.
+func (anthropic) Stream(dst io.Writer, flush func(), src io.Reader, class string, includeUsage bool) (Usage, error) {
 	sc := bufio.NewScanner(src)
 	sc.Buffer(make([]byte, 64<<10), 8<<20)
 	var (
 		id      = "chatcmpl-stream"
 		created = time.Now().Unix()
 		usage   aUsage
+		started bool
 		tools   = map[int]int{} // Messages block index -> chat tool call index
 	)
 	send := func(v any) error {
@@ -422,14 +445,15 @@ func (anthropic) Stream(dst io.Writer, flush func(), src io.Reader, class string
 		}
 		var ev aEvent
 		if err := json.Unmarshal([]byte(strings.TrimSpace(data)), &ev); err != nil {
-			return fmt.Errorf("provider stream: %v", err)
+			return usage.usage(), fmt.Errorf("provider stream: %v", err)
 		}
 		var err error
 		switch ev.Type {
 		case "message_start":
+			started = true
 			if ev.Message != nil {
 				id = "chatcmpl-" + ev.Message.ID
-				usage.InputTokens = ev.Message.Usage.InputTokens
+				usage.merge(ev.Message.Usage)
 			}
 			err = chunk(map[string]any{"role": "assistant", "content": ""}, nil)
 		case "content_block_start":
@@ -461,7 +485,7 @@ func (anthropic) Stream(dst io.Writer, flush func(), src io.Reader, class string
 			}
 		case "message_delta":
 			if ev.Usage != nil {
-				usage.OutputTokens = ev.Usage.OutputTokens
+				usage.merge(*ev.Usage)
 			}
 			if ev.Delta != nil && ev.Delta.StopReason != "" {
 				err = chunk(map[string]any{}, finishReason(ev.Delta.StopReason))
@@ -470,14 +494,14 @@ func (anthropic) Stream(dst io.Writer, flush func(), src io.Reader, class string
 			if includeUsage {
 				if err := send(map[string]any{
 					"id": id, "object": "chat.completion.chunk", "created": created, "model": class,
-					"choices": []any{}, "usage": usage.openAI(),
+					"choices": []any{}, "usage": usage.usage().openAI(),
 				}); err != nil {
-					return err
+					return usage.usage(), err
 				}
 			}
 			_, err := io.WriteString(dst, "data: [DONE]\n\n")
 			flush()
-			return err
+			return usage.usage(), err
 		case "error":
 			msg, typ := "provider stream error", "server_error"
 			if ev.Error != nil {
@@ -486,16 +510,19 @@ func (anthropic) Stream(dst io.Writer, flush func(), src io.Reader, class string
 					typ = t
 				}
 			}
+			if !started {
+				return usage.usage(), errNotStarted
+			}
 			fmt.Fprintf(dst, "data: %s\n\n", apiError(msg, typ, ""))
 			flush()
-			return errors.New("provider stream ended with an error event")
+			return usage.usage(), errors.New("provider stream ended with an error event")
 		}
 		if err != nil {
-			return err
+			return usage.usage(), err
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return err
+		return usage.usage(), err
 	}
-	return io.ErrUnexpectedEOF
+	return usage.usage(), io.ErrUnexpectedEOF
 }

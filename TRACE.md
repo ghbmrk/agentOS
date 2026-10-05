@@ -95,7 +95,7 @@ Covered: 38 / 139 requirement IDs
 | ADP-7 | `broker/route/route_test.go` |
 | ADP-8 | — |
 | ADP-9 | — |
-| ADP-10 | `broker/egress/egress_test.go` |
+| ADP-10 | `broker/egress/denied_test.go`, `broker/egress/egress_test.go` |
 | ADP-11 | `broker/owner/channel_test.go`, `broker/owner/commit_test.go`, `broker/owner/review_test.go` |
 | ADP-12 | `broker/owner/channel_test.go` |
 | CHG-1 | — |

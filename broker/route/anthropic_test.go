@@ -48,6 +48,8 @@ func TestAnthropicRequestTranslation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The golden body carries the four prompt-cache breakpoints: last tool,
+	// end of the system prompt, and the last two messages.
 	jsonEqual(t, got, fixture(t, "anthropic_request.golden.json"))
 	for _, dropped := range []string{"guest-supplied-field", `"metadata"`, `"user":`} {
 		if bytes.Contains(got, []byte(dropped)) {
@@ -77,22 +79,42 @@ func TestAnthropicRequestDefaultsAndChoices(t *testing.T) {
 	}
 }
 
+// ADP-3: valid chat-completions requests the Messages API cannot express
+// are unsupported (the router tries the next route), not refused.
 func TestAnthropicCannotExpress(t *testing.T) {
 	for _, body := range []string{
 		`{"model":"c","n":2,"messages":[{"role":"user","content":"hi"}]}`,
-		`{"model":"c","response_format":{"type":"json_schema","json_schema":{}},"messages":[{"role":"user","content":"hi"}]}`,
-		`{"model":"c","messages":[{"role":"user","content":[{"type":"input_audio"}]}]}`,
+		`{"model":"c","response_format":{"type":"json_schema","json_schema":{"name":"x","schema":{}}},"messages":[{"role":"user","content":"hi"}]}`,
+		`{"model":"c","response_format":{"type":"json_object"},"messages":[{"role":"user","content":"hi"}]}`,
+		`{"model":"c","messages":[{"role":"function","name":"f","content":"42"}]}`,
+		`{"model":"c","messages":[{"role":"system","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}]},{"role":"user","content":"hi"}]}`,
 		`{"model":"c","messages":[{"role":"assistant","tool_calls":[{"id":"x","type":"function","function":{"name":"f","arguments":"[1]"}}]}]}`,
+		`{"model":"c","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png,AA"}}]}]}`,
+		`{"model":"c","messages":[{"role":"system","content":"only a system prompt"}]}`,
 	} {
 		req, err := parseChat([]byte(body))
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("%s: %v", body, err)
 		}
 		_, err = Anthropic().Request(req, "m")
 		var u errUnsupported
 		if !asUnsupported(err, &u) {
 			t.Fatalf("%s: want unsupported, got %v", body, err)
 		}
+	}
+}
+
+// Temperatures above the Messages API's maximum of 1 are clamped to 1.
+func TestAnthropicClampsTemperature(t *testing.T) {
+	req, _ := parseChat([]byte(`{"model":"c","temperature":1.5,"messages":[{"role":"user","content":"hi"}]}`))
+	b, err := Anthropic().Request(req, "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var a aRequest
+	json.Unmarshal(b, &a)
+	if a.Temperature == nil || *a.Temperature != 1 {
+		t.Fatalf("temperature %v", a.Temperature)
 	}
 }
 
@@ -105,7 +127,7 @@ func asUnsupported(err error, u *errUnsupported) bool {
 }
 
 func TestAnthropicResponseTranslation(t *testing.T) {
-	out, err := Anthropic().Response(fixture(t, "anthropic_message.json"), "default")
+	out, u, err := Anthropic().Response(fixture(t, "anthropic_message.json"), "default")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +143,14 @@ func TestAnthropicResponseTranslation(t *testing.T) {
 			}
 			FinishReason string `json:"finish_reason"`
 		}
-		Usage map[string]int
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+			Details          struct {
+				CachedTokens int `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
+		}
 	}
 	if err := json.Unmarshal(out, &c); err != nil {
 		t.Fatal(err)
@@ -138,8 +167,13 @@ func TestAnthropicResponseTranslation(t *testing.T) {
 		t.Fatalf("tool call %+v", tc)
 	}
 	jsonEqual(t, []byte(tc.Function.Arguments), []byte(`{"city":"Paris","unit":"c"}`))
-	if c.Usage["prompt_tokens"] != 412 || c.Usage["completion_tokens"] != 57 || c.Usage["total_tokens"] != 469 {
-		t.Fatalf("usage %v", c.Usage)
+	// Prompt tokens include cached ones; cache reads show as cached_tokens.
+	if c.Usage.PromptTokens != 412+3000+200 || c.Usage.CompletionTokens != 57 || c.Usage.TotalTokens != 3669 ||
+		c.Usage.Details.CachedTokens != 3000 {
+		t.Fatalf("usage %+v", c.Usage)
+	}
+	if u != (Usage{Input: 412, Output: 57, CacheRead: 3000, CacheWrite: 200}) {
+		t.Fatalf("reported usage %+v", u)
 	}
 }
 
@@ -165,7 +199,7 @@ type assembled struct {
 	names   map[int]string
 	ids     map[int]string
 	finish  string
-	usage   map[string]int
+	usage   map[string]any
 	done    bool
 	nChunks int
 }
@@ -193,7 +227,7 @@ func reassemble(t *testing.T, stream []byte) assembled {
 				}
 				FinishReason *string `json:"finish_reason"`
 			}
-			Usage map[string]int
+			Usage map[string]any
 		}
 		if err := json.Unmarshal([]byte(data), &c); err != nil {
 			t.Fatalf("chunk %q: %v", data, err)
@@ -231,9 +265,12 @@ func reassemble(t *testing.T, stream []byte) assembled {
 func TestAnthropicStreamTranslation(t *testing.T) {
 	var out bytes.Buffer
 	flushes := 0
-	err := Anthropic().Stream(&out, func() { flushes++ }, bytes.NewReader(fixture(t, "anthropic_stream.sse")), "default", true)
+	u, err := Anthropic().Stream(&out, func() { flushes++ }, bytes.NewReader(fixture(t, "anthropic_stream.sse")), "default", true)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if u != (Usage{Input: 25, Output: 32, CacheRead: 1800}) {
+		t.Fatalf("reported usage %+v", u)
 	}
 	a := reassemble(t, out.Bytes())
 	if !a.done || a.role != "assistant" || a.text != "Hello, world" || a.finish != "tool_calls" {
@@ -243,7 +280,7 @@ func TestAnthropicStreamTranslation(t *testing.T) {
 		t.Fatalf("tool call %+v", a)
 	}
 	jsonEqual(t, []byte(a.args[0]), []byte(`{"city":"Paris"}`))
-	if a.usage["prompt_tokens"] != 25 || a.usage["completion_tokens"] != 32 {
+	if a.usage["prompt_tokens"] != float64(25+1800) || a.usage["completion_tokens"] != float64(32) {
 		t.Fatalf("usage %v", a.usage)
 	}
 	if flushes < a.nChunks {
@@ -255,18 +292,65 @@ func TestAnthropicStreamTruncatedOrError(t *testing.T) {
 	full := fixture(t, "anthropic_stream.sse")
 	cut := full[:bytes.Index(full, []byte("event: message_delta"))]
 	var out bytes.Buffer
-	if err := Anthropic().Stream(&out, func() {}, bytes.NewReader(cut), "default", false); err == nil {
+	if _, err := Anthropic().Stream(&out, func() {}, bytes.NewReader(cut), "default", false); err == nil {
 		t.Fatal("a stream without message_stop must report an error")
 	}
 	if strings.Contains(out.String(), "[DONE]") {
 		t.Fatal("a truncated stream must not claim completion")
 	}
+
+	// An error before the message starts writes nothing: the router can
+	// still fail over.
 	out.Reset()
-	errStream := "event: error\ndata: " + strings.TrimSpace(string(fixture(t, "anthropic_overloaded.json"))) + "\n\n"
-	if err := Anthropic().Stream(&out, func() {}, strings.NewReader(errStream), "default", false); err == nil {
+	errEvent := "event: error\ndata: " + strings.TrimSpace(string(fixture(t, "anthropic_overloaded.json"))) + "\n\n"
+	if _, err := Anthropic().Stream(&out, func() {}, strings.NewReader(errEvent), "default", false); err != errNotStarted || out.Len() != 0 {
+		t.Fatalf("early error: %v, wrote %q", err, out.String())
+	}
+
+	// An error after it started ends the guest's stream with an error chunk.
+	out.Reset()
+	started := string(full[:bytes.Index(full, []byte("event: content_block_start"))]) + errEvent
+	if _, err := Anthropic().Stream(&out, func() {}, strings.NewReader(started), "default", false); err == nil {
 		t.Fatal("error event must end the stream with an error")
 	}
 	if !strings.Contains(out.String(), `"server_error"`) || strings.Contains(out.String(), "[DONE]") {
 		t.Fatalf("guest must see an error chunk: %s", out.String())
+	}
+}
+
+// R4: nested fields are typed allow-lists. Unknown part types, tool_choice
+// forms, response formats, and roles are refused; extra keys inside
+// accepted objects are dropped.
+func TestTypedAllowLists(t *testing.T) {
+	for _, body := range []string{
+		`{"model":"c","messages":[{"role":"user","content":[{"type":"file","file":{"file_id":"file-canary"}}]}]}`,
+		`{"model":"c","messages":[{"role":"user","content":[{"type":"input_audio","input_audio":{"data":"AA","format":"wav"}}]}]}`,
+		`{"model":"c","messages":[{"role":"user","content":"x"}],"tool_choice":{"type":"custom","custom":{"name":"f"}}}`,
+		`{"model":"c","messages":[{"role":"user","content":"x"}],"tool_choice":{"type":"allowed_tools","allowed_tools":{"mode":"auto","tools":[]}}}`,
+		`{"model":"c","messages":[{"role":"user","content":"x"}],"response_format":{"type":"json_schema"}}`,
+		`{"model":"c","messages":[{"role":"user","content":"x"}],"response_format":{"type":"grammar"}}`,
+		`{"model":"c","messages":[{"role":"critic","content":"x"}]}`,
+	} {
+		if _, err := parseChat([]byte(body)); err == nil {
+			t.Fatalf("accepted %s", body)
+		}
+	}
+	req, err := parseChat([]byte(`{"model":"c","messages":[{"role":"user","extra_smuggle":1,"content":[{"type":"text","text":"hi","extra_smuggle":2},
+		{"type":"image_url","image_url":{"url":"data:image/png;base64,AA==","extra_smuggle":3}}]}],
+		"tool_choice":"auto","response_format":{"type":"json_object","extra_smuggle":4},"stop":"END"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := OpenAI().Request(req, "gpt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(b, []byte("extra_smuggle")) {
+		t.Fatalf("extra keys reached the provider: %s", b)
+	}
+	var sent map[string]any
+	json.Unmarshal(b, &sent)
+	if sent["tool_choice"] != "auto" || sent["stop"].([]any)[0] != "END" || sent["response_format"].(map[string]any)["type"] != "json_object" {
+		t.Fatalf("re-encoded %s", b)
 	}
 }
