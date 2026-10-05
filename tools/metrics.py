@@ -4,8 +4,9 @@
 Sources, all re-read in full on every run so METRICS.md is regenerated, never appended:
   git, first-parent history of --ref   TRACE.md covered count; BOARD.md package states
   LEDGER.md                            usage readings (weekly %, all models and Fable only); phase table
-  GitHub API                           PRs: L3 verdicts in reviews, `Defect: <ID>` lines in bodies;
-                                       Actions runs and their attempts (CI flakes)
+  GitHub API                           PRs: L3 verdicts in collaborators' reviews, `Defect: <ID>`
+                                       lines in bodies; this repository's own Actions runs and
+                                       their attempts (CI flakes)
 GitHub drops Actions runs after its retention window; a value already in METRICS.md is kept
 when the source no longer has data for that week.
 
@@ -56,6 +57,20 @@ def verdict(body):
 def is_l3(body):
     """Only L3 reviews carry the verdict; lens, correction or bot reviews do not count."""
     return bool(body) and re.search(r"\bL3\b", body) is not None
+
+
+# Security review 2, finding 8: the repository is public, so anyone can post a review or
+# run a fork's CI. Only collaborators' reviews and this repository's own runs count.
+TRUSTED = {"OWNER", "MEMBER", "COLLABORATOR"}
+
+
+def trusted_review(r):
+    return r.get("author_association") in TRUSTED
+
+
+def own_run(r, repo):
+    head = r.get("head_repository") or {}
+    return (head.get("full_name") or "").lower() == repo.lower()
 
 
 def defects(body):
@@ -189,7 +204,8 @@ def collect_github(repo, token, since=None):
         if p.get("merged_at") and (since is None or p["merged_at"] >= since):
             reviews = list(_pages(repo, f"pulls/{p['number']}/reviews", token))
             reviews.sort(key=lambda r: r.get("submitted_at") or "")
-            verdicts = [v for v in (verdict(r.get("body")) for r in reviews if is_l3(r.get("body"))) if v]
+            verdicts = [v for v in (verdict(r.get("body")) for r in reviews
+                                    if trusted_review(r) and is_l3(r.get("body"))) if v]
         pulls.append({"number": p["number"], "merged_at": p.get("merged_at"),
                       "body": p.get("body") or "", "verdicts": verdicts})
     runs = []
@@ -199,7 +215,7 @@ def collect_github(repo, token, since=None):
     for r in _pages(repo, "actions/runs", token, "workflow_runs"):
         if since is not None and r["created_at"] < since:
             break
-        if r.get("status") != "completed":
+        if r.get("status") != "completed" or not own_run(r, repo):
             continue
         conclusions = [r["conclusion"]]
         for n in range(1, r.get("run_attempt", 1)):

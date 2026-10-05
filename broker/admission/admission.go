@@ -230,6 +230,33 @@ func (c *Controller) Snapshot() Snapshot {
 	return s
 }
 
+// RoomFor is the memory Admit would find now for a request of class,
+// without admitting anything: the free budget, plus the running
+// experiments a higher class may preempt. Under memory pressure (or an
+// unreadable reading) experiments get none and accepted work only what it
+// may preempt, as in Admit. Never negative (CAP-1: how many forks fit).
+func (c *Controller) RoomFor(class Class) int64 {
+	pressured := false
+	if class != Foreground && c.Pressure != nil {
+		p := c.Pressure()
+		pressured = math.IsNaN(p) || p < 0 || p > c.MaxPressure
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	room := max(c.freeLocked(), 0)
+	if pressured {
+		room = 0
+	}
+	if class.Outranks(Experiment) {
+		for id, r := range c.running {
+			if r.Class == Experiment && !c.yielding[id] {
+				room += r.MemMB
+			}
+		}
+	}
+	return room
+}
+
 // Busy reports that the box has no spare compute for loop work (LOOP-1):
 // accepted work is running, or memory pressure is over MaxPressure (or not
 // a real reading). Foreground machines alone do not count: the owner's

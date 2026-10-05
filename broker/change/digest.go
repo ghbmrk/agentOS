@@ -211,6 +211,7 @@ func (p *Pipeline) Digest() []string {
 				WhyRegression: ": it did worse on newer tasks.",
 				WhySecurity:   ": it failed a security check.",
 				WhyFallback:   ": the update did not start cleanly, so the box kept the previous one.",
+				WhyForgotten:  ": it was learned from a task you asked the box to forget.",
 			}[a.Reverted]
 			out = append(out, "Undid "+a.Short+why)
 			a.RevertSeen = true
@@ -520,6 +521,8 @@ func (p *Pipeline) More(ref string) ([]string, error) {
 		}
 		how := "changed"
 		switch {
+		case cleared(e):
+			how = "forgotten"
 		case e.Before == nil:
 			how = "new"
 		case e.After == nil:

@@ -127,7 +127,7 @@ type Machine struct {
 	Spec     Spec
 	Label    Label
 	State    State
-	ForkBase string // snapshot this machine was forked from, if any
+	ForkBase string // snapshot this machine was forked from, if any; written under m.mu too (ForkSiblings)
 	// Lineage names the creation this machine descends from by fork: the
 	// root machine's ID plus a nonce drawn when it was created. Forks share their source's memory, so the broker treats a
 	// lineage as one requester for idempotency (OP-1).
@@ -1191,7 +1191,7 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 	}
 	for i, mc := range reserved {
 		mc.mu.Lock()
-		mc.ForkBase = s.ID
+		m.setForkBase(mc, s.ID)
 		mc.Label = maxLabel(mc.Label, s.Label)
 		err := claimLocked(mc)
 		if err == nil {
@@ -1515,7 +1515,11 @@ func (m *Manager) Preempt(id string) error {
 	}
 	// The completion is scheduled even if the kill fails: once the holding
 	// operation lets go, the machine is stopped under its lock and
-	// recorded preempted, and preempting is cleared (L3 on #124).
+	// recorded preempted, and preempting is cleared (L3 on #124). A
+	// worker's command in flight is ended with it.
+	if c := mc.execCancel.Load(); c != nil {
+		(*c)()
+	}
 	kerr := m.kill(mc)
 	go func() {
 		mc.mu.Lock()

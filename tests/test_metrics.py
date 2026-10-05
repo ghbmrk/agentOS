@@ -195,7 +195,8 @@ class CollectTest(unittest.TestCase):
     def test_runs_listing_is_unfiltered_paged_and_skips_unfinished_runs(self):
         calls = []
         runs = [{"id": i, "name": "ci", "head_sha": f"s{i}", "created_at": "2026-10-05T00:00:00Z",
-                 "status": "completed", "conclusion": "success", "run_attempt": 1} for i in range(150)]
+                 "status": "completed", "conclusion": "success", "run_attempt": 1,
+                 "head_repository": {"full_name": "o/r"}} for i in range(150)]
         runs[0]["status"], runs[0]["conclusion"] = "in_progress", None
         runs[1]["run_attempt"] = 2
 
@@ -205,8 +206,8 @@ class CollectTest(unittest.TestCase):
                 return [{"number": 7, "merged_at": "2026-10-05T01:00:00Z", "body": ""},
                         {"number": 6, "merged_at": "2026-09-01T01:00:00Z", "body": ""}] if "page=1&" in path + "&" else []
             if path.startswith("pulls/7/reviews"):
-                return [{"body": "## Lens review: fix-list", "submitted_at": "1"},
-                        {"body": "**L3 review. Verdict: accept.**", "submitted_at": "2"}]
+                return [{"body": "## Lens review: fix-list", "submitted_at": "1", "author_association": "OWNER"},
+                        {"body": "**L3 review. Verdict: accept.**", "submitted_at": "2", "author_association": "OWNER"}]
             if path.startswith("pulls/6/reviews"):
                 return []
             if path.startswith("actions/runs?"):
@@ -240,6 +241,45 @@ class CollectTest(unittest.TestCase):
         self.assertEqual(next(r for r in got if r["sha"] == "s1")["conclusions"], ["failure", "success"])
         # Only the L3 review counts as a verdict.
         self.assertEqual(next(p for p in pulls if p["number"] == 7)["verdicts"], ["accept"])
+
+
+class TrustTest(unittest.TestCase):
+    """Security review 2, finding 8: on a public repository anyone can post a review or run
+    a fork's CI, so only collaborators' reviews and this repository's own runs count."""
+
+    def test_only_collaborator_reviews_and_own_runs_count(self):
+        own = {"full_name": "o/R"}
+        fork = {"full_name": "stranger/r"}
+        runs = [{"id": 1, "name": "ci", "head_sha": "a", "created_at": "2026-10-05T00:00:00Z", "status": "completed",
+                 "conclusion": "success", "run_attempt": 1, "head_repository": own},
+                {"id": 2, "name": "ci", "head_sha": "a", "created_at": "2026-10-05T00:01:00Z", "status": "completed",
+                 "conclusion": "failure", "run_attempt": 1, "head_repository": fork},
+                {"id": 3, "name": "ci", "head_sha": "b", "created_at": "2026-10-05T00:02:00Z", "status": "completed",
+                 "conclusion": "failure", "run_attempt": 1, "head_repository": None}]
+
+        def api(repo, path, token):
+            if path.startswith("pulls?"):
+                return [{"number": 7, "merged_at": "2026-10-05T01:00:00Z", "body": ""}] if "page=1&" in path + "&" else []
+            if path.startswith("pulls/7/reviews"):
+                return [{"body": "L3 review. Verdict: reject.", "submitted_at": "1", "author_association": "NONE"},
+                        {"body": "L3 review. Verdict: reject.", "submitted_at": "2", "author_association": "CONTRIBUTOR"},
+                        {"body": "L3 review. Verdict: fix-list.", "submitted_at": "3", "author_association": "OWNER"},
+                        {"body": "L3 review. Verdict: accept.", "submitted_at": "4", "author_association": "COLLABORATOR"},
+                        {"body": "L3 review. Verdict: accept.", "submitted_at": "5", "author_association": "MEMBER"}]
+            if path.startswith("actions/runs?"):
+                return {"workflow_runs": runs} if path.endswith("page=1") else {"workflow_runs": []}
+            raise AssertionError(path)
+
+        orig = metrics._api
+        metrics._api = api
+        try:
+            pulls, got = metrics.collect_github("o/r", None)
+        finally:
+            metrics._api = orig
+        self.assertEqual(pulls[0]["verdicts"], ["fix-list", "accept", "accept"])
+        # The fork's failure on the same commit would read as a flake; a run with no head
+        # repository (deleted fork) is not known to be this repository's.
+        self.assertEqual([(r["sha"], r["conclusions"]) for r in got], [("a", ["success"])])
 
 
 class SinceTest(unittest.TestCase):

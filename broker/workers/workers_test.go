@@ -87,6 +87,7 @@ func (r *runtime) Exec(ctx context.Context, id string, c vm.Command) (vm.ExecRes
 type rig struct {
 	t     *testing.T
 	m     *vm.Manager
+	adm   *admission.Controller
 	tools *Tools
 }
 
@@ -103,6 +104,7 @@ func newRigLayer(t *testing.T, capacityMB, layerBytes int64) *rig {
 	if err != nil {
 		t.Fatal(err)
 	}
+	r.adm = adm
 	img := t.TempDir()
 	r.m, err = vm.Open(context.Background(), vm.Config{
 		StateDir: filepath.Join(t.TempDir(), "state"), Images: map[string]string{"base": img},
