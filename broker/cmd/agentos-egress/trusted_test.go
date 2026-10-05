@@ -831,12 +831,18 @@ func TestStaleLockoutEntryIsDropped(t *testing.T) {
 	if r.lockoutEntry() != "" {
 		t.Fatal("stale lockout authorization kept for retries")
 	}
-	if !r.noted("Another system on this PC now controls the TPM") {
+	if !r.noted("Another system on this PC, probably Windows, now controls its security chip's lockout, so I've dropped my copy of that setting. The limit on wrong guesses stays as I set it. Nothing to do.") {
 		t.Fatalf("owner not told: %q", r.notes)
 	}
 	// The settings the stale lockout guarded are the other system's now:
 	// their kept originals go too, without a second message (HOST-1f).
-	if n, _ := r.daEntry(); n != "" || r.noted("security chip") {
+	chip := 0
+	for _, n := range r.notes {
+		if strings.Contains(n, "security chip") {
+			chip++
+		}
+	}
+	if n, _ := r.daEntry(); n != "" || chip != 1 {
 		t.Fatalf("originals entry %q, notes %q", n, r.notes)
 	}
 }

@@ -943,7 +943,7 @@ func (h *tpmHost) giveBack(v *vault.Vault, t transport.TPM, id []byte) {
 		case errors.Is(err, tpmseal.ErrLockoutOwned):
 			// Proved stale: retrying would only re-arm the TPM's lockout.
 			// The settings it guards are the other system's now.
-			h.say("Another system on this PC now controls the TPM's lockout, so the box has forgotten its own copy; the limit on wrong guesses stays as the box set it.")
+			h.say("Another system on this PC, probably Windows, now controls its security chip's lockout, so I've dropped my copy of that setting. The limit on wrong guesses stays as I set it. Nothing to do.")
 			if hasKind(v, daOriginalName(id), vault.KindTPMDAOriginal) {
 				v.Delete(daOriginalName(id))
 			}
