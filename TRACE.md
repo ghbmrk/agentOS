@@ -120,13 +120,13 @@ Covered: 58 / 144 requirement IDs
 | LOOP-9 | — |
 | LOOP-10 | — |
 | LOOP-11 | — |
-| OSS-1 | — |
+| OSS-1 | `broker/hint/emitter_test.go`, `broker/hint/hint_test.go`, `broker/hint/schema_test.go` |
 | OSS-2 | — |
 | OSS-3 | — |
 | OSS-4 | — |
-| OSS-5 | — |
-| OSS-6 | — |
-| OSS-7 | — |
+| OSS-5 | `broker/hint/emitter_test.go`, `broker/hint/hint_test.go`, `broker/hint/schema_test.go` |
+| OSS-6 | `broker/hint/emitter_test.go` |
+| OSS-7 | `broker/hint/emitter_test.go` |
 | OSS-8 | — |
 | OSS-9 | — |
 | OSS-10 | — |
