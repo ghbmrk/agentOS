@@ -193,3 +193,49 @@ func TestOSS4HardwareDecodesStrictly(t *testing.T) {
 		t.Fatal(string(out))
 	}
 }
+
+// TestOSS4OlderSchemaReadsNewerStatements: a box on schema N reads a
+// statement written under N+1 by mapping what N does not list to
+// Unlisted (dropping unknown components), so D6 keeps counting it;
+// shapes that no schema could list are still refused.
+func TestOSS4OlderSchemaReadsNewerStatements(t *testing.T) {
+	s, err := Parse([]byte(good))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hw := map[Hardware]Hardware{
+		{"acme", "box_1", "v7"}:        {"acme", "box_1", "v7"},
+		{"acme", "box_1", "v9"}:        {"acme", "box_1", Unlisted},
+		{"acme", "box_9", "v7"}:        {"acme", Unlisted, Unlisted},
+		{"newco", "box_1", "v7"}:       {Unlisted, Unlisted, Unlisted},
+		{Unlisted, Unlisted, Unlisted}: {Unlisted, Unlisted, Unlisted},
+		{"acme", Unlisted, Unlisted}:   {"acme", Unlisted, Unlisted},
+		{"newco", "box_9", Unlisted}:   {Unlisted, Unlisted, Unlisted},
+	}
+	for in, want := range hw {
+		got, err := s.ReadHardware(in)
+		if err != nil || got != want {
+			t.Errorf("%+v: got %+v, %v", in, got, err)
+		}
+	}
+	for _, in := range []Hardware{
+		{},
+		{"acme", "box_1", "v7 (kitchen)"},
+		{"Acme", "box_1", "v7"},
+		{Unlisted, "box_1", Unlisted},
+		{"acme", Unlisted, "v7"},
+	} {
+		if _, err := s.ReadHardware(in); !errors.Is(err, ErrInvalid) {
+			t.Errorf("%+v read (%v)", in, err)
+		}
+	}
+	got, err := s.ReadVersions(map[string]string{"openclaw": "2026.10.1", "kernel": "6.12.0"})
+	if err != nil || len(got) != 1 || got["openclaw"] != Unlisted {
+		t.Fatal(got, err)
+	}
+	for _, in := range []map[string]string{{"openclaw": "hello world"}, {"my notes": "x"}, {"openclaw": ""}} {
+		if _, err := s.ReadVersions(in); !errors.Is(err, ErrInvalid) {
+			t.Errorf("%v read (%v)", in, err)
+		}
+	}
+}

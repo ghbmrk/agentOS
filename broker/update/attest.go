@@ -134,6 +134,40 @@ func isReleasePath(p string) bool {
 // every other field a value the public attestation schema lists. The
 // attestor key is checked where it is decoded.
 func checkStatement(st Statement) error {
+	if err := checkFixed(st); err != nil {
+		return err
+	}
+	s := attest.Default()
+	if err := s.CheckHardware(st.Hardware); err != nil {
+		return err
+	}
+	return s.CheckVersions(st.Versions)
+}
+
+// readStatement is checkStatement for a statement signed elsewhere,
+// perhaps under a newer schema than this box's: hardware and versions
+// need only the schema's token shape, and come back mapped onto this
+// box's schema, with what it does not list as attest.Unlisted (potency
+// PB1 on #73). Otherwise a box on release N would refuse every
+// attestation of N+1 that names N+1's new versions, and the security fix
+// would never auto-stage (D6).
+func readStatement(st Statement) (Statement, error) {
+	if err := checkFixed(st); err != nil {
+		return Statement{}, err
+	}
+	s := attest.Default()
+	var err error
+	if st.Hardware, err = s.ReadHardware(st.Hardware); err != nil {
+		return Statement{}, err
+	}
+	if st.Versions, err = s.ReadVersions(st.Versions); err != nil {
+		return Statement{}, err
+	}
+	return st, nil
+}
+
+// checkFixed checks the fields every schema version shares.
+func checkFixed(st Statement) error {
 	s := attest.Default()
 	if !isReleasePath(st.Release) || !sha256RE.MatchString(st.ManifestSHA256) {
 		return errors.New("statement does not name a release manifest")
@@ -147,10 +181,7 @@ func checkStatement(st Statement) error {
 	if st.Operator != "" && st.Operator != OperatorMaintainer {
 		return fmt.Errorf("operator %q is not %q", st.Operator, OperatorMaintainer)
 	}
-	if err := s.CheckHardware(st.Hardware); err != nil {
-		return err
-	}
-	return s.CheckVersions(st.Versions)
+	return nil
 }
 
 // Attest signs a statement for the release v names. Attestor and the
@@ -183,8 +214,9 @@ func Attest(priv ed25519.PrivateKey, v *Verified, st Statement) ([]byte, error) 
 
 // ParseAttestation checks an envelope's signature and returns its
 // statement and the attestor key. Envelope, signatures and statement are
-// decoded strictly: no unknown, duplicate or case-variant key, and a
-// statement outside the public attestation schema is refused (OSS-4).
+// decoded strictly: no unknown, duplicate or case-variant key. Hardware
+// and versions must have the schema's token shape; values this box's
+// schema does not list come back as attest.Unlisted (readStatement).
 func ParseAttestation(b []byte) (Statement, ed25519.PublicKey, error) {
 	var env struct {
 		PayloadType string            `json:"payloadType"`
@@ -213,7 +245,7 @@ func ParseAttestation(b []byte) (Statement, ed25519.PublicKey, error) {
 	if err := decodeStrict(body, &st, statementFields); err != nil {
 		return Statement{}, nil, fmt.Errorf("attestation statement: %w", err)
 	}
-	if err := checkStatement(st); err != nil {
+	if st, err = readStatement(st); err != nil {
 		return Statement{}, nil, fmt.Errorf("attestation statement: %w", err)
 	}
 	raw, err := base64.StdEncoding.DecodeString(st.Attestor)

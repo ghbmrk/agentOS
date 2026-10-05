@@ -469,8 +469,8 @@ func TestOSS4AttestRefusesWhatTheSchemaDoesNotList(t *testing.T) {
 }
 
 // TestOSS4ParseRefusesStatementsOutsideTheSchema: a statement signed
-// elsewhere with fields outside the schema does not parse, so it never
-// counts (D6) or reaches the owner's digest as evidence (OSS-9).
+// elsewhere with fields no schema version could hold does not parse, so
+// it never counts (D6) or reaches the owner's digest as evidence (OSS-9).
 func TestOSS4ParseRefusesStatementsOutsideTheSchema(t *testing.T) {
 	_, v := securityFix(t)
 	k := newKey(t)
@@ -504,8 +504,11 @@ func TestOSS4ParseRefusesStatementsOutsideTheSchema(t *testing.T) {
 		"hardware extra key": func(m map[string]any) {
 			m["hardware"] = map[string]any{"vendor": "geekom", "model": "air12_lite", "firmware": "unlisted", "serial": "x"}
 		},
-		"hardware unlisted": func(m map[string]any) {
-			m["hardware"] = map[string]any{"vendor": "geekom", "model": "kitchen", "firmware": "unlisted"}
+		"hardware free text": func(m map[string]any) {
+			m["hardware"] = map[string]any{"vendor": "geekom", "model": "Mark's kitchen PC", "firmware": "unlisted"}
+		},
+		"hardware under unlisted": func(m map[string]any) {
+			m["hardware"] = map[string]any{"vendor": "unlisted", "model": "air12_lite", "firmware": "unlisted"}
 		},
 		"version unlisted": func(m map[string]any) { m["versions"] = map[string]any{"openclaw": "hello world"} },
 		"channel":          func(m map[string]any) { m["channel"] = "nightly" },
@@ -524,5 +527,39 @@ func TestOSS4ParseRefusesStatementsOutsideTheSchema(t *testing.T) {
 		if n := v.MaintainerPasses([][]byte{stmt(func(m map[string]any) { m["operator"] = "maintainer"; edit(m) })}, nil); n != 0 {
 			t.Errorf("%s: counted as evidence", name)
 		}
+	}
+}
+
+// TestOSS4NewerSchemaStatementStillCounts (potency PB1 on #73): an
+// attestor already on release N+1 names N+1's hardware and versions,
+// which this box's schema N does not list yet. The statement still counts
+// for D6, and comes back with only what this box lists.
+func TestOSS4NewerSchemaStatementStillCounts(t *testing.T) {
+	f, v := securityFix(t)
+	k := f.att[0]
+	m := mustV(v.ManifestFile())
+	body, _ := json.Marshal(map[string]any{
+		"release": m.Path, "manifest_sha256": m.SHA256, "result": "pass", "channel": "fast",
+		"hardware": map[string]any{"vendor": "geekom", "model": "air12_lite", "firmware": "1.0.9"},
+		"versions": map[string]any{"openclaw": "2026.11.2", "kernel": "6.12.48"},
+		"attestor": base64.StdEncoding.EncodeToString(k.Public().(ed25519.PublicKey)),
+	})
+	b := envelopeOf(k, string(body))
+	st, _, err := ParseAttestation(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Hardware != floorPC || len(st.Versions) != 1 || st.Versions["openclaw"] != attest.Unlisted {
+		t.Fatalf("%+v", st)
+	}
+	if n := v.IndependentPasses([][]byte{b}, nil); n != 1 {
+		t.Fatalf("independent passes %d", n)
+	}
+	if err := v.SecurityAutoStage([][]byte{b}, nil); err != nil {
+		t.Fatal(err)
+	}
+	// Signing stays strict: this box cannot write what its schema does not list.
+	if _, err := Attest(k, v, Statement{Result: ResultPass, Channel: ChannelFast, Hardware: st.Hardware, Versions: map[string]string{"openclaw": "2026.11.2"}}); err == nil {
+		t.Fatal("signed an unlisted version")
 	}
 }

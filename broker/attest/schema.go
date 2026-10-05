@@ -248,6 +248,69 @@ func (s *Schema) CheckVersions(vs map[string]string) error {
 	return nil
 }
 
+// Shape reports whether h could be a listed choice under some version of
+// the schema: every level a token, and Unlisted at one level forcing it
+// below.
+func Shape(h Hardware) error {
+	for _, v := range []string{h.Vendor, h.Model, h.Firmware} {
+		if !token.MatchString(v) {
+			return fmt.Errorf("%w: hardware %q/%q/%q is not tokens", ErrInvalid, h.Vendor, h.Model, h.Firmware)
+		}
+	}
+	if (h.Vendor == Unlisted && h.Model != Unlisted) || (h.Model == Unlisted && h.Firmware != Unlisted) {
+		return fmt.Errorf("%w: hardware %q/%q/%q lists a level under an unlisted one", ErrInvalid, h.Vendor, h.Model, h.Firmware)
+	}
+	return nil
+}
+
+// ReadHardware maps hardware from a statement signed under any version of
+// the schema onto this one: a level this schema does not list becomes
+// Unlisted, and so does every level below it. A box on an older schema
+// thus still counts a statement written under a newer one, and keeps or
+// shows only what it lists itself. A bad shape is refused.
+func (s *Schema) ReadHardware(h Hardware) (Hardware, error) {
+	if err := Shape(h); err != nil {
+		return Hardware{}, err
+	}
+	models, ok := s.hardware[h.Vendor]
+	if !ok {
+		return Hardware{Unlisted, Unlisted, Unlisted}, nil
+	}
+	firmware, ok := models[h.Model]
+	if !ok {
+		return Hardware{h.Vendor, Unlisted, Unlisted}, nil
+	}
+	if !firmware[h.Firmware] {
+		h.Firmware = Unlisted
+	}
+	return h, nil
+}
+
+// ReadVersions maps versions from a statement signed under any version of
+// the schema onto this one: a version this schema does not list becomes
+// Unlisted, and a component it does not list is dropped. A key or value
+// that is not a token is refused.
+func (s *Schema) ReadVersions(vs map[string]string) (map[string]string, error) {
+	if vs == nil {
+		return nil, nil
+	}
+	out := map[string]string{}
+	for c, v := range vs {
+		if !token.MatchString(c) || !token.MatchString(v) {
+			return nil, fmt.Errorf("%w: version %q of %q is not tokens", ErrInvalid, v, c)
+		}
+		allowed, ok := s.versions[c]
+		if !ok {
+			continue
+		}
+		if !allowed[v] {
+			v = Unlisted
+		}
+		out[c] = v
+	}
+	return out, nil
+}
+
 // strictKeys refuses JSON that is not one object with exactly the schema's
 // top-level keys, or that repeats a key in any object.
 func strictKeys(data []byte) error {
