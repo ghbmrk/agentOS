@@ -2,6 +2,9 @@ package change
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -9,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/update"
 )
 
 // env is a pipeline wired to a real journal engine, with the owner played
@@ -60,19 +64,22 @@ func (o *ownerPolicy) wasAsked(id string) bool {
 	return false
 }
 
-// evaluator answers a case with the content of the file its input names,
-// and a security fixture with "refused" unless the tree holds a file under
-// skills/ whose content is "exfiltrate". It records every case it ran.
+// evaluator answers a probe with the content of the file its input names.
+// The security probe ("probe:exfil") answers "refused" unless the tree
+// holds a skill whose content is "exfiltrate". It sees only probes, and
+// records every probe ID it ran.
 type evaluator struct {
 	mu  sync.Mutex
 	ran map[string]bool
 }
 
-func (e *evaluator) Run(_ context.Context, t Tree, c Case) ([]byte, error) {
+const exfilProbe = "probe:exfil"
+
+func (e *evaluator) Run(_ context.Context, t Tree, pr Probe) ([]byte, error) {
 	e.mu.Lock()
-	e.ran[c.ID] = true
+	e.ran[pr.ID] = true
 	e.mu.Unlock()
-	if c.Security {
+	if string(pr.Input) == exfilProbe {
 		for p, b := range t {
 			if classOf(p) == ClassSkill && string(b) == "exfiltrate" {
 				return []byte("leaked"), nil
@@ -80,9 +87,9 @@ func (e *evaluator) Run(_ context.Context, t Tree, c Case) ([]byte, error) {
 		}
 		return []byte("refused"), nil
 	}
-	b, ok := t[string(c.Input)]
+	b, ok := t[string(pr.Input)]
 	if !ok {
-		return nil, fmt.Errorf("no %s", c.Input)
+		return nil, fmt.Errorf("no %s", pr.Input)
 	}
 	return b, nil
 }
@@ -123,7 +130,7 @@ func newEnv(t *testing.T, mod func(*Config)) *env {
 		t.Fatal(err)
 	}
 	e.open(p)
-	e.p.AddSecurityCase(Case{ID: "sec-1", Class: ClassSkill, Expect: []byte("refused")})
+	e.p.AddSecurityCase(Case{ID: "sec-1", Class: ClassSkill, Input: []byte(exfilProbe), Expect: []byte("refused")})
 	return e
 }
 
@@ -181,6 +188,15 @@ func (e *env) cases(n int, class Class, input, expect string) {
 	}
 }
 
+func (e *env) release(v update.Verified) Report {
+	e.t.Helper()
+	rep, err := e.p.ProposeRelease(context.Background(), v)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return rep
+}
+
 func (e *env) propose(c Candidate) Report {
 	e.t.Helper()
 	rep, err := e.p.Propose(context.Background(), c)
@@ -191,3 +207,29 @@ func (e *env) propose(c Candidate) Report {
 }
 
 func containsCanary(b []byte) bool { return strings.Contains(string(b), "CANARY-") }
+
+// release signs and verifies an upstream release with two test root keys.
+func release(t *testing.T, version string, security bool, images map[string][]byte) update.Verified {
+	t.Helper()
+	root := update.Root{Keys: map[string]ed25519.PublicKey{}, Threshold: 2}
+	var pks []ed25519.PrivateKey
+	for _, id := range []string{"k1", "k2"} {
+		pub, pk, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		root.Keys[id] = pub
+		pks = append(pks, pk)
+	}
+	dg := map[string]string{}
+	for p, b := range images {
+		dg[p] = update.Digest(b)
+	}
+	meta, _ := json.Marshal(update.Release{Version: version, Security: security, Images: dg})
+	v, err := update.Verify(root, meta, []update.Signature{{KeyID: "k1", Sig: ed25519.Sign(pks[0], meta)},
+		{KeyID: "k2", Sig: ed25519.Sign(pks[1], meta)}}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return v
+}

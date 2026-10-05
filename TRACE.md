@@ -93,7 +93,7 @@ Covered: 48 / 144 requirement IDs
 | ADP-1 | — |
 | ADP-2 | — |
 | ADP-3 | `broker/route/anthropic_test.go`, `broker/route/route_test.go` |
-| ADP-4 | `broker/change/routing_test.go`, `broker/route/route_test.go` |
+| ADP-4 | `broker/change/review_test.go`, `broker/change/routing_test.go`, `broker/route/route_test.go` |
 | ADP-5 | — |
 | ADP-6 | — |
 | ADP-7 | `broker/route/route_test.go` |
@@ -102,12 +102,12 @@ Covered: 48 / 144 requirement IDs
 | ADP-10 | `broker/egress/denied_test.go`, `broker/egress/egress_test.go` |
 | ADP-11 | `broker/owner/channel_test.go`, `broker/owner/commit_test.go`, `broker/owner/review_test.go` |
 | ADP-12 | `broker/owner/channel_test.go` |
-| CHG-1 | `broker/change/pipeline_test.go` |
+| CHG-1 | `broker/change/pipeline_test.go`, `broker/change/review_test.go` |
 | CHG-2 | `broker/change/pipeline_test.go` |
-| CHG-3 | `broker/change/pipeline_test.go` |
+| CHG-3 | `broker/change/pipeline_test.go`, `broker/change/review_test.go`, `broker/update/verify_test.go` |
 | CHG-4 | `broker/change/share_test.go` |
 | CHG-5 | `broker/change/share_test.go` |
-| CHG-6 | `broker/change/pipeline_test.go`, `broker/change/routing_test.go` |
+| CHG-6 | `broker/change/pipeline_test.go`, `broker/change/review_test.go`, `broker/change/routing_test.go` |
 | LOOP-0 | — |
 | LOOP-1 | — |
 | LOOP-2 | — |

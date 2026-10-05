@@ -72,7 +72,7 @@ func (p *Pipeline) Export(ctx context.Context, id string) ([]byte, error) {
 		}
 		pkg.Files[e.Path] = e.After
 	}
-	prev, err := undoTree(p.st.Active, a)
+	prev, _, err := undoTree(p.st.Active, a)
 	if err != nil {
 		p.mu.Unlock()
 		return nil, fmt.Errorf("%w: %v", ErrNotShareable, err)
@@ -118,6 +118,6 @@ func (p *Pipeline) Import(ctx context.Context, data []byte) (Report, Package, er
 			return Report{}, pkg, fmt.Errorf("change: package refused: %s is %s (CHG-5)", path, c)
 		}
 	}
-	rep, err := p.Propose(ctx, Candidate{Source: Shared, Origin: "share", Files: pkg.Files})
+	rep, err := p.propose(ctx, Candidate{Source: Shared, Origin: "share", Files: pkg.Files}, false)
 	return rep, pkg, err
 }

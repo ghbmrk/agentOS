@@ -60,6 +60,12 @@ const (
 	ActionGrantRevoke = "meta.grant.revoke" // also revokes a pre-allowance
 	ActionGrantPause  = "meta.grant.pause"  // also pauses a pre-allowance or loop
 	ActionBudgetLower = "meta.budget.lower"
+	// Change-pipeline narrowing (broker/change): undoing an adoption
+	// restores a state that was already qualified and active, and no
+	// adoption can change authority; turning auto-adoption or sharing off
+	// only removes automation.
+	ActionChangeRevert    = "meta.change.revert"
+	ActionChangePolicyOff = "meta.change.policy.off"
 )
 
 // narrowing reports whether an intent only takes authority away.
@@ -68,7 +74,7 @@ func narrowing(in Intent) bool {
 		return false
 	}
 	switch in.Action {
-	case ActionGrantRevoke, ActionGrantPause, ActionBudgetLower:
+	case ActionGrantRevoke, ActionGrantPause, ActionBudgetLower, ActionChangeRevert, ActionChangePolicyOff:
 		return true
 	}
 	return false

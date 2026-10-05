@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -19,7 +20,7 @@ type classification struct {
 }
 
 // classify decides what a set of edits is. Called with p.mu held.
-func (p *Pipeline) classify(edits []Edit, src Source) classification {
+func (p *Pipeline) classify(edits []Edit, base Tree, src Source) classification {
 	cl := classification{neutral: src == Local}
 	seen := map[Class]bool{}
 	for _, e := range edits {
@@ -36,6 +37,11 @@ func (p *Pipeline) classify(edits []Edit, src Source) classification {
 		case ClassUnknown:
 			cl.forbid(fmt.Sprintf("changes %s, which is not a known namespace", namespace(e.Path)))
 		case ClassProcedure, ClassSkill:
+			if id := newIdentifier(e.After, base); id != "" {
+				// An address the box has never used is a new destination
+				// in effect, so the owner sees it (Security, #34).
+				cl.neutral = false
+			}
 		case ClassRouting:
 			p.checkRouting(&cl, e)
 		case ClassContext:
@@ -43,12 +49,50 @@ func (p *Pipeline) classify(edits []Edit, src Source) classification {
 		default:
 			cl.neutral = false // config and images are behavior changes (CHG-3)
 		}
-		if src == Shared && c != ClassProcedure && c != ClassSkill {
+		image := c == ClassGuestImage || c == ClassHostImage
+		switch {
+		case src == Shared && c != ClassProcedure && c != ClassSkill:
 			cl.forbid("a shared package carries only procedures and skills (CHG-5)")
+		case src == Upstream && !image:
+			cl.forbid("an upstream release changes only images (CHG-3)")
+		case src != Upstream && image:
+			cl.forbid("only a signed upstream release changes an image (UPD-8)")
 		}
 	}
 	sort.Slice(cl.classes, func(i, j int) bool { return cl.classes[i] < cl.classes[j] })
 	return cl
+}
+
+// imagesOnly reports that every edit is to an image namespace.
+func (cl *classification) imagesOnly() bool {
+	for _, c := range cl.classes {
+		if c != ClassGuestImage && c != ClassHostImage {
+			return false
+		}
+	}
+	return len(cl.classes) > 0
+}
+
+// identifier patterns: URLs, email addresses, and phone numbers in
+// international or (NNN) NNN-NNNN form, so dates and times do not match.
+var identifiers = regexp.MustCompile(`(?i)[a-z][a-z0-9+.-]*://[^\s"'<>]+|[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}|\+\d[\d ().-]{7,}\d|\(\d{3}\) ?\d{3}-\d{4}`)
+
+// newIdentifier returns the first external identifier in b that appears
+// nowhere in the active tree, or "".
+func newIdentifier(b []byte, base Tree) string {
+	for _, m := range identifiers.FindAll(b, -1) {
+		found := false
+		for _, f := range base {
+			if bytes.Contains(f, m) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return string(m)
+		}
+	}
+	return ""
 }
 
 func (cl *classification) forbid(why string) {
@@ -86,6 +130,10 @@ func (p *Pipeline) checkRouting(cl *classification, e Edit) {
 	var next route.Rule
 	if err := decodeStrict(e.After, &next); err != nil {
 		cl.forbid("routing rule does not parse: " + err.Error())
+		return
+	}
+	if len(next) == 0 {
+		cl.forbid("a routing rule needs at least one task class")
 		return
 	}
 	for class, routes := range next {

@@ -160,7 +160,7 @@ func TestRoutingRollsBackOnRegression(t *testing.T) {
 	}
 	found := false
 	for _, l := range e.p.Digest() {
-		found = found || strings.Contains(l, "Reverted "+rep.ID+" after it regressed")
+		found = found || l == "Undid "+rep.Short+": it did worse on newer tasks."
 	}
 	if !found {
 		t.Fatal("digest does not list the rollback")
