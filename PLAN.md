@@ -1,6 +1,6 @@
 # AgentOS — Build Plan
 
-Builds spec v0.11 (`/mnt/project-files/spec/agentos-core-spec-v0.11.md`) with Claude models under a **finite usage budget**, using nested iterative loops.
+Builds the spec in `SPEC.md` (v0.12 at P0 exit; v0.11 started at `/mnt/project-files/spec/agentos-core-spec-v0.11.md`) with Claude models under a **finite usage budget**, using nested iterative loops.
 Labels: **[Fact]**, **[Inference]**, **[Rec]**, **[Mark]** = needs Mark's hands, money, or decision.
 
 ---
@@ -186,7 +186,7 @@ Usage credits are off.
 **Rules (flexible by design):**
 Rigid caps breed waste: work abandoned at 95% done, padding to "use the budget", or allowance that resets unused. So the only **hard** limit is the subscription itself (B-4). Everything else is a **target with a checkpoint**: on reaching it, the loop decides on evidence whether continuing is worth it, and records why.
 
-- **B-1 Weekly envelope (adaptive):** the default target is ~70% of the week for the build, ~30% left for Mark. The weekly allowance resets, so **unspent allowance at week's end is pure waste.**
+- **B-1 Weekly envelope (adaptive):** *superseded 2026-10-04 by §4B's pacing rule (~100% used at each reset, ~14% a day).* The original default target was ~70% of the week for the build, ~30% left for Mark. The weekly allowance resets, so **unspent allowance at week's end is pure waste.**
   - The protected share for Mark shrinks as the week goes on: from ~30% early in the week to ~10% in the final day, adjusted to his actual recent usage.
   - Late in the week the build may use what Mark predictably won't.
   - If Mark's own usage spikes, the build backs off first.
@@ -209,6 +209,43 @@ Rigid caps breed waste: work abandoned at 95% done, padding to "use the budget",
 | Reserve | 10% | 1–2 |
 
 This totals roughly **3–5 months** of calendar time at this plan level. That figure is a sizing guess, not a commitment. Mark's physical test sessions and spike outcomes will move it more than token efficiency will.
+
+## 4B. Re-estimate at P0 exit (2026-10-04)
+
+**Measured (B-6), Mark's usage screen, Sunday 2026-10-04 19:50 local:** weekly all models 23% (resets Sun 06:00); Fable only 11% (unchanged since 10:58); current session window 22% (resets in 1 h 59 min); usage credits off.
+
+| Reading | Weekly, all models | Weekly, Fable only | Between readings |
+|---|---|---|---|
+| 10:58 | 14% | 11% | spec design (mostly Mark's own thread) |
+| 19:50 | 23% | 11% | +9 points: three spikes' review fixes, three lens reviews, arbitration, the spec PRs, PR reviews, this package, and P1-1, P1-2, P1-5 building in parallel |
+
+**Pace: tokens are the binding constraint, and the whole allowance is used.** The week reset at 06:00 Sunday, so 23% is one day's spend, about 160% of the week if sustained. **Pacing rule (Mark, 2026-10-04 23:55: "faster and sooner, should be 100% at reset"):** aim to have used ~100% of the weekly limit at each reset, spread evenly so it never runs out early: ~14% a day, with as many parallel threads as that pace allows. This replaces the 70% default envelope (B-1) and the short-lived 8%/day rule. Usage credits stay off (B-4), so the limit itself is the only hard stop. Mark's own use counts inside the 100%, and the build backs off when it spikes. Day one's 23% is ahead of pace, so the following days run lighter until the cumulative line meets ~14% × days.
+
+**What changed since §4A.**
+- **Scope grew.** SPEC.md went from 101 requirement IDs and 12 acceptance tests (v0.11 as imported, 25f9b2b) to 144 IDs and 15 tests (v0.12), and from 40 KB to 88 KB. Review 1 added 38 IDs (adapters ADP-1–12, owner channel CH-10–20, onboarding ONB-3–8, data labels, worker machines, routing, TUF); the spikes added 5 (HW-5a, UPD-1a, ARC-6, ARC-7, OP-8). Requirements also got denser, so ID count understates the growth.
+- **P0 cost, measured:** at most **0.23 WAU** in total, and that also covers the design session and the first P1 packages. That is inside P0's 10% share (≈ 0.9–1.4 WAU of the §4A total). The 9 points between the two readings come from two of Mark's screens; how they split across threads is inferred. S1, S2, S5, S6 remain.
+- **Standing overhead.** Four weekly review loops plus PR review now run every week. Their per-run cost isn't split out of the 9 points; ≈ 3–10% of a week is the plausible range [Inference]. Running loops on change only (recommendation 2) keeps that share for building.
+- **No calibration yet for build cost.** P0 merged spikes and spec text, not requirement-covering code, so tokens per merged requirement (the number L1 needs) is first measured in P1.
+
+**Revised forecast** (weeks at the effective envelope; ranges scale each phase by the new IDs that land in it):
+
+| Phase | New IDs landing there | Scale | §4A weeks | Revised weeks |
+|---|---|---|---|---|
+| P0 (incl. S1, S2, S5, S6) | — | — | 1–2 | 1–2 (on forecast; S1/S2 wait on hardware) |
+| P1 core in a VM | ARC-5–7, REV-5, OP-8, CAP-8/9, CH-10–19 against the simulator | ×1.5 | 3–5 | 4.5–7.5 |
+| P2 real hardware | ADP-1–3, 5–7, 9–12, ONB-3–8, CRED-10, REC-4, CH-20, HW-5a, UPD-1a | ×1.5 | 4–6 | 6–9 |
+| P3 compounding | CHG-6, CAP-10, ADP-4/8 | ×1.15 | 3–4 | 3.5–4.5 |
+| P4 open source | UPD-8 | ×1.1 | 1 | 1 |
+| Reserve | 10% | — | 1–2 | 1.5–2.5 |
+| **Total** | | | 13–20 (3–5 months) | **17.5–26.5 at 70% (4–6 months)** |
+
+**Reading the forecast after the measurement.** The weeks column assumes a 70% envelope. At ~100% used each week, with Mark's own use taking ≈ 5–10%, the build gets ≈ 90–95%, which shortens the forecast by about 70/92 ≈ 0.76×: roughly **13–20 weeks (3–5 months)**. That assumes the work can absorb the extra threads. Review turnaround and Mark's hardware sessions (S1, S2, P2) still bound the calendar, whatever the token supply. P1's measured cost per merged requirement replaces these factors (recommendation 3).
+
+**Recommendations.**
+1. **Start P1 now** on the merged S3/S4/S7 results; S5 (cloud) runs beside P1, and S1, S2, S6 stay open as P0 tails that gate only P2. Nothing in P1 depends on them (§3).
+2. **Run review loops on change only:** a lens loop runs when SPEC.md or security-critical code changed since its last run, else it records "no change" and stops. Every point saved goes to building, and no review of new material is skipped.
+3. **Recalibrate after the first three P1 packages** from tokens per merged requirement, and replace the scale factors above with that measurement.
+4. **Hold P1's first package to the smallest end-to-end slice** (journal + broker STOP/STATUS, OP-1–6, ARC-2, CH-2) so the first measurement comes early.
 
 ## 5. Artifacts the harness maintains (in the repo)
 
