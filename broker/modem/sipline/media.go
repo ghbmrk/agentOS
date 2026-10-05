@@ -68,10 +68,17 @@ type answer struct {
 	key  []byte // the far end's master key and salt, for its audio to us
 }
 
+// ErrMediaAddress is returned when an answer aims the call's audio at an
+// address the line will not send to.
+var ErrMediaAddress = errors.New("sipline: the provider's audio address is not a public unicast address")
+
 // parseAnswer reads an SDP answer. It fails closed: no audio stream, a
-// codec that was not offered, or a stream without SAVP and an
-// AES_CM_128_HMAC_SHA1_80 key is refused.
-func parseAnswer(body []byte) (answer, error) {
+// codec that was not offered, a stream without SAVP and an
+// AES_CM_128_HMAC_SHA1_80 key under the offer's tag, or an audio address
+// that is not public unicast is refused. A private or loopback address is
+// allowed only when the provider itself is on one (private), so a provider
+// answer cannot aim the call's packets at the box's own network.
+func parseAnswer(body []byte, private bool) (answer, error) {
 	var d sdp.SessionDescription
 	if err := d.Unmarshal(body); err != nil {
 		return answer{}, fmt.Errorf("sipline: SDP answer: %w", err)
@@ -99,7 +106,7 @@ func parseAnswer(body []byte) (answer, error) {
 				continue
 			}
 			f := strings.Fields(at.Value)
-			if len(f) < 3 || f[1] != Suite || !strings.HasPrefix(f[2], "inline:") {
+			if len(f) < 3 || f[0] != "1" || f[1] != Suite || !strings.HasPrefix(f[2], "inline:") {
 				continue
 			}
 			kp, _, _ := strings.Cut(strings.TrimPrefix(f[2], "inline:"), "|")
@@ -121,13 +128,27 @@ func parseAnswer(body []byte) (answer, error) {
 			return answer{}, errors.New("sipline: SDP answer has no address")
 		}
 		ip := net.ParseIP(c.Address.Address)
-		if ip == nil || ip.IsUnspecified() {
-			return answer{}, errors.New("sipline: SDP answer has no usable address")
+		if !mediaAddr(ip, private) {
+			return answer{}, ErrMediaAddress
 		}
 		a.addr = &net.UDPAddr{IP: ip, Port: m.MediaName.Port.Value}
 		return a, nil
 	}
 	return answer{}, errors.New("sipline: SDP answer has no audio")
+}
+
+func mediaAddr(ip net.IP, private bool) bool {
+	switch {
+	case ip == nil:
+		return false
+	case ip.IsLoopback():
+		return private
+	case !ip.IsGlobalUnicast():
+		return false // unspecified, multicast, link-local, broadcast
+	case ip.IsPrivate():
+		return private
+	}
+	return true
 }
 
 // Context returns the SRTP context for a master key and salt.

@@ -255,9 +255,10 @@ func TestRolesAreBoundToTheSIMAndFailClosed(t *testing.T) {
 		t.Fatalf("swapped: %v", err)
 	}
 	for name, r := range map[string]secondline.Roles{
-		"nothing recorded":      {},
-		"owner SIM replaced":    {OwnerICCID: "89019999999999999999", SecondICCID: set.SecondICCID},
-		"second SIM unrecorded": {OwnerICCID: set.OwnerICCID},
+		"nothing recorded":        {},
+		"owner SIM replaced":      {OwnerICCID: "89019999999999999999", SecondICCID: set.SecondICCID},
+		"second SIM unrecorded":   {OwnerICCID: set.OwnerICCID},
+		"an account recorded too": {OwnerICCID: set.OwnerICCID, SecondICCID: set.SecondICCID, SecondAccount: "sip:acct1001@voip.test"},
 	} {
 		if _, err := secondline.New(cfg(owner.m, second.m, r)); !errors.Is(err, secondline.ErrUnbound) {
 			t.Errorf("%s: %v", name, err)

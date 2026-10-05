@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -31,9 +32,10 @@ type call struct {
 	ended  chan struct{}
 	endMu  sync.Once
 
-	say sync.Mutex // serializes Say and owns seq and ts
-	seq uint16
-	ts  uint32
+	say  sync.Mutex // serializes Say and owns seq and ts
+	seq  uint16
+	ts   uint32
+	sent bool // a frame has been sent (the first carries the marker bit)
 
 	mu  sync.Mutex // guards the fields below
 	id  string     // dialog ID once answered
@@ -90,9 +92,11 @@ func (l *Line) Dial(ctx context.Context, number string) (secondline.Call, error)
 
 	cctx, cancel := context.WithCancel(context.Background())
 	c := &call{l: l, conn: conn, ctx: cctx, cancel: cancel, active: make(chan struct{}), ended: make(chan struct{})}
-	var b [4]byte
+	var b [10]byte
 	_, _ = rand.Read(b[:])
 	c.ss = binary.BigEndian.Uint32(b[:])
+	c.seq = binary.BigEndian.Uint16(b[4:]) // RFC 3550: random first sequence number and timestamp
+	c.ts = binary.BigEndian.Uint32(b[6:])
 	ua := &sipgo.DialogUA{Client: l.cli, ContactHDR: contact, RewriteContact: true}
 	if c.dlg, err = ua.WriteInvite(ctx, req); err != nil {
 		cancel()
@@ -132,14 +136,19 @@ func (c *call) run(off offer) {
 		c.end(err)
 		return
 	}
-	ans, err := parseAnswer(d.InviteResponse.Body())
+	c.l.mu.Lock()
+	p := c.l.provider
+	c.l.mu.Unlock()
+	ans, err := parseAnswer(d.InviteResponse.Body(), p != nil && (p.IsLoopback() || p.IsPrivate()))
 	var tx *srtp.Context
 	if err == nil {
 		tx, err = Context(off.key)
 	}
 	if err != nil {
 		// Answered without SRTP (or unusably): hang up before a word.
-		_ = d.Bye(ackCtx)
+		if bye := d.Bye(ackCtx); bye != nil {
+			err = errors.Join(err, fmt.Errorf("sipline: hanging up: %w", bye))
+		}
 		c.end(err)
 		return
 	}
@@ -221,7 +230,7 @@ func (c *call) Say(ctx context.Context, pcm []byte) error {
 		for j := n; j < frameSamples; j++ {
 			frame[j] = silence
 		}
-		p := rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: uint8(ans.pt), SequenceNumber: c.seq, Timestamp: c.ts, SSRC: c.ss, Marker: c.seq == 0}, Payload: frame}
+		p := rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: uint8(ans.pt), SequenceNumber: c.seq, Timestamp: c.ts, SSRC: c.ss, Marker: !c.sent}, Payload: frame}
 		raw, err := p.Marshal()
 		if err != nil {
 			return err
@@ -235,6 +244,7 @@ func (c *call) Say(ctx context.Context, pcm []byte) error {
 		}
 		c.seq++
 		c.ts += frameSamples
+		c.sent = true
 		select {
 		case <-tick.C:
 		case <-c.ended:

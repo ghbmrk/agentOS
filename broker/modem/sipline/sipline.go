@@ -24,7 +24,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/emiago/sipgo"
 	"github.com/emiago/sipgo/sip"
@@ -70,6 +72,21 @@ var (
 	ErrClosed   = errors.New("sipline: line closed")
 )
 
+// quiet discards everything the SIP stack would log. sipgo logs a whole
+// message it cannot parse, which can carry a third party's text or the far
+// end's SRTP key; no SIP message ever reaches a log (CRED-1, CLAUDE.md).
+// It is also sipgo's process-wide default, for the places that log through
+// it directly rather than through a configured logger.
+var quiet = slog.New(slog.DiscardHandler)
+
+func init() { sip.SetDefaultLogger(quiet) }
+
+// Limits on incoming texts.
+const (
+	maxText = 1600 // bytes: ten SMS segments
+	maxName = 32   // characters of a named (alphanumeric) sender
+)
+
 // Line is a registered SIP account.
 type Line struct {
 	cfg   Config
@@ -80,9 +97,12 @@ type Line struct {
 	done  chan struct{}
 	once  sync.Once
 
-	mu      sync.Mutex
-	contact sip.ContactHeader
-	call    *call
+	registered atomic.Bool
+
+	mu       sync.Mutex
+	contact  sip.ContactHeader
+	provider net.IP // the provider's address on the signaling connection
+	call     *call
 }
 
 var _ secondline.Account = (*Line)(nil)
@@ -119,13 +139,15 @@ func Open(ctx context.Context, cfg Config) (*Line, error) {
 	if cfg.Log == nil {
 		cfg.Log = slog.New(slog.DiscardHandler)
 	}
-	ua, err := sipgo.NewUA(sipgo.WithUserAgent("agentos"), sipgo.WithUserAgentHostname(cfg.Domain), sipgo.WithUserAgenTLSConfig(tc))
+	ua, err := sipgo.NewUA(sipgo.WithUserAgent("agentos"), sipgo.WithUserAgentHostname(cfg.Domain), sipgo.WithUserAgenTLSConfig(tc),
+		sipgo.WithUserAgentTransportLayerOptions(sip.WithTransportLayerLogger(quiet)),
+		sipgo.WithUserAgentTransactionLayerOptions(sip.WithTransactionLayerLogger(quiet)))
 	if err != nil {
 		return nil, err
 	}
 	l := &Line{cfg: cfg, ua: ua, inbox: make(chan modem.SMS, 64), done: make(chan struct{})}
-	if l.cli, err = sipgo.NewClient(ua); err == nil {
-		l.srv, err = sipgo.NewServer(ua)
+	if l.cli, err = sipgo.NewClient(ua, sipgo.WithClientLogger(quiet)); err == nil {
+		l.srv, err = sipgo.NewServer(ua, sipgo.WithServerLogger(quiet))
 	}
 	if err != nil {
 		_ = ua.Close()
@@ -200,7 +222,7 @@ func (l *Line) Send(to, text string) error {
 		return err
 	}
 	if !res.IsSuccess() {
-		return fmt.Errorf("sipline: text refused: %d %s", res.StatusCode, res.Reason)
+		return fmt.Errorf("sipline: text refused: %d", res.StatusCode)
 	}
 	return nil
 }
@@ -284,14 +306,16 @@ func (l *Line) register(ctx context.Context, expiry time.Duration) (time.Duratio
 	aor := sip.Uri{Scheme: "sip", User: l.cfg.User, Host: l.cfg.Domain}
 	if expiry > 0 {
 		probe := l.request(sip.OPTIONS, domain, domain)
-		if _, err := l.cli.Do(ctx, probe); err != nil {
+		res, err := l.cli.Do(ctx, probe)
+		if err != nil {
 			return 0, fmt.Errorf("sipline: provider unreachable: %w", err)
 		}
+		host, _, _ := net.SplitHostPort(res.Source())
 		via := probe.Via()
 		c := sip.ContactHeader{Address: sip.Uri{Scheme: "sip", User: l.cfg.User, Host: via.Host, Port: via.Port, UriParams: sip.NewParams()}}
 		c.Address.UriParams.Add("transport", "tls")
 		l.mu.Lock()
-		l.contact = c
+		l.contact, l.provider = c, net.ParseIP(host)
 		l.mu.Unlock()
 	}
 	l.mu.Lock()
@@ -309,7 +333,7 @@ func (l *Line) register(ctx context.Context, expiry time.Duration) (time.Duratio
 		return 0, err
 	}
 	if !res.IsSuccess() {
-		return 0, fmt.Errorf("sipline: registration refused: %d %s", res.StatusCode, res.Reason)
+		return 0, fmt.Errorf("sipline: registration refused: %d", res.StatusCode)
 	}
 	granted := expiry
 	if h := res.GetHeader("Expires"); h != nil {
@@ -317,8 +341,13 @@ func (l *Line) register(ctx context.Context, expiry time.Duration) (time.Duratio
 			granted = time.Duration(s) * time.Second
 		}
 	}
+	l.registered.Store(expiry > 0)
 	return granted, nil
 }
+
+// Registered reports whether the last registration or renewal succeeded.
+// The line keeps retrying while it fails; Done closes only on Close.
+func (l *Line) Registered() bool { return l.registered.Load() }
 
 // keep renews the registration at half its lifetime, and retries sooner
 // after a failure, until the line is closed.
@@ -336,6 +365,7 @@ func (l *Line) keep(granted time.Duration) {
 		g, err := l.register(ctx, l.cfg.Expiry)
 		cancel()
 		if err != nil {
+			l.registered.Store(false)
 			l.cfg.Log.Warn("sipline: registration renewal failed", "err", err)
 			wait = min(granted/4, 30*time.Second)
 			continue
@@ -345,31 +375,78 @@ func (l *Line) keep(granted time.Duration) {
 }
 
 // onMessage delivers a text. It reaches the line only over its own
-// connection to the provider; the sender is what the provider says, and a
-// sender that is not a phone number is marked alphanumeric, so it can
-// never pass for the owner (CH-1).
+// connection to the provider. The sender's number is believed only as the
+// provider asserts it: P-Asserted-Identity, or a From in the provider's
+// own domain. Any other sender, or one that is not a phone number, is
+// delivered as a named sender ("alpha:"), so it can never pass for the
+// owner (CH-1). Bodies are plain UTF-8 text of at most maxText bytes.
 func (l *Line) onMessage(req *sip.Request, tx sip.ServerTransaction) {
 	ct := ""
 	if h := req.ContentType(); h != nil {
 		ct = strings.ToLower(strings.TrimSpace(h.Value()))
 	}
-	if ct != "text/plain" && !strings.HasPrefix(ct, "text/plain;") {
+	body := req.Body()
+	switch {
+	case ct != "text/plain" && !strings.HasPrefix(ct, "text/plain;"), !utf8.Valid(body):
 		_ = tx.Respond(sip.NewResponseFromRequest(req, sip.StatusUnsupportedMediaType, "Unsupported Media Type", nil))
+		return
+	case len(body) > maxText:
+		_ = tx.Respond(sip.NewResponseFromRequest(req, sip.StatusRequestEntityTooLarge, "Request Entity Too Large", nil))
 		return
 	}
 	_ = tx.Respond(sip.NewResponseFromRequest(req, sip.StatusOK, "OK", nil))
-	from := ""
-	if f := req.From(); f != nil {
-		from = f.Address.User
-	}
-	m := modem.SMS{From: from, To: l.cfg.Number, Text: string(req.Body()), At: time.Now()}
-	if !phone(from) {
-		m.From, m.Alphanumeric = "alpha:"+from, true
+	m := modem.SMS{To: l.cfg.Number, Text: string(body), At: time.Now()}
+	if from, ok := l.sender(req); ok {
+		m.From = from
+	} else {
+		m.From, m.Alphanumeric = "alpha:"+name(from), true
 	}
 	select {
 	case l.inbox <- m:
 	default: // a full inbox drops texts rather than queueing without bound
 	}
+}
+
+// sender reads who sent req and whether that is a phone number the
+// provider vouches for.
+func (l *Line) sender(req *sip.Request) (string, bool) {
+	if h := req.GetHeader("P-Asserted-Identity"); h != nil {
+		v := h.Value()
+		if i, j := strings.IndexByte(v, '<'), strings.IndexByte(v, '>'); i >= 0 && j > i {
+			v = v[i+1 : j]
+		}
+		v, _, _ = strings.Cut(v, ";")
+		switch {
+		case strings.HasPrefix(strings.ToLower(v), "tel:"):
+			v = v[4:]
+		case strings.HasPrefix(strings.ToLower(v), "sip:"):
+			v, _, _ = strings.Cut(v[4:], "@")
+		}
+		return v, phone(v)
+	}
+	f := req.From()
+	if f == nil {
+		return "", false
+	}
+	return f.Address.User, phone(f.Address.User) && strings.EqualFold(f.Address.Host, l.cfg.Domain)
+}
+
+// name renders a named sender as at most maxName printable ASCII
+// characters.
+func name(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if b.Len() == maxName {
+			break
+		}
+		if r > ' ' && r < 0x7f {
+			b.WriteRune(r)
+		}
+	}
+	if b.Len() == 0 {
+		return "unknown"
+	}
+	return b.String()
 }
 
 func phone(s string) bool {

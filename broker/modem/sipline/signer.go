@@ -45,6 +45,13 @@ type Account struct {
 	Realm string
 }
 
+// String names the account without its password, so a stray log line
+// cannot carry it.
+func (a Account) String() string { return "sipline.Account{" + a.Username + " @ " + a.Realm + "}" }
+
+// GoString is String for %#v.
+func (a Account) GoString() string { return a.String() }
+
 // Sign implements Signer.
 func (a Account) Sign(_ context.Context, c Challenge) (string, error) {
 	ch, err := digest.ParseChallenge(c.Header)
@@ -58,7 +65,8 @@ func (a Account) Sign(_ context.Context, c Challenge) (string, error) {
 	if !signable[c.Method] {
 		return "", ErrMethod
 	}
-	if !digest.CanDigest(ch) || (len(ch.QOP) > 0 && !ch.SupportsQOP("auth")) {
+	// qop=auth only: RFC 2069 challenges (no qop) carry no client nonce.
+	if !digest.CanDigest(ch) || !ch.SupportsQOP("auth") {
 		return "", errors.New("sipline: unsupported digest challenge")
 	}
 	cred, err := digest.Digest(ch, digest.Options{Method: c.Method, URI: c.URI, Username: a.Username, Password: a.Password})

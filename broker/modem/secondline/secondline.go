@@ -127,8 +127,8 @@ var (
 
 // Check verifies that owner and second are the SIMs recorded for their
 // roles. It fails closed: an unreadable or unrecorded serial, one SIM in
-// both roles, or a missing owner line is refused. The supervisor runs it
-// again after reopening either modem.
+// both roles, a missing owner line, or an account recorded as well is
+// refused. The supervisor runs it again after reopening either modem.
 func (r Roles) Check(owner, second SIM) error {
 	if owner == nil || second == nil {
 		return ErrUnbound
@@ -136,7 +136,7 @@ func (r Roles) Check(owner, second SIM) error {
 	o, s := norm(owner.ICCID()), norm(second.ICCID())
 	ro, rs := norm(r.OwnerICCID), norm(r.SecondICCID)
 	switch {
-	case o == "" || s == "" || ro == "" || rs == "":
+	case o == "" || s == "" || ro == "" || rs == "" || strings.TrimSpace(r.SecondAccount) != "":
 		return ErrUnbound
 	case o == s || ro == rs:
 		return ErrOwnerLine

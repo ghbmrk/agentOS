@@ -4,7 +4,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
 	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -539,5 +544,199 @@ func TestG711(t *testing.T) {
 	}
 	if got := sipline.ALaw(pcm(0, 32767, -32768, 16, -16)); !bytes.Equal(got, []byte{0xD5, 0xAA, 0x2A, 0xD4, 0x55}) {
 		t.Errorf("ALaw % X", got)
+	}
+}
+
+// Nothing the SIP stack sees reaches a log: a frame it cannot parse, which
+// could carry a third party's text or an SRTP key, is dropped silently
+// (CRED-1, CLAUDE.md).
+func TestNoSIPMessageReachesTheLog(t *testing.T) {
+	var buf bytes.Buffer
+	var mu sync.Mutex
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(lockedWriter{&mu, &buf}, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(prev)
+
+	p := provider(t)
+	l := open(t, p, config(p, vault(p)))
+	const canary = "canary-third-party-text-7f3a"
+	if err := p.SendRaw(user, []byte("NOT SIP AT ALL "+canary+"\r\nX: y\r\n\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	_ = l
+	mu.Lock()
+	defer mu.Unlock()
+	if buf.Len() != 0 {
+		t.Fatalf("the default logger got:\n%s", buf.String())
+	}
+}
+
+type lockedWriter struct {
+	mu *sync.Mutex
+	w  *bytes.Buffer
+}
+
+func (w lockedWriter) Write(b []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.w.Write(b)
+}
+
+func TestTheLineRefusesTLSOlderThan12(t *testing.T) {
+	p, err := sipsim.StartTLS(domain, user, password, tls.VersionTLS11)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	cfg := config(p, vault(p))
+	cfg.TLS.MinVersion = tls.VersionTLS10 // asked for, raised to 1.2 anyway
+	if _, err := sipline.Open(context.Background(), cfg); err == nil {
+		t.Fatal("registered over TLS 1.1")
+	}
+	if p.Registered(user) != 0 {
+		t.Fatal("registered")
+	}
+}
+
+func TestTheVerifierCannotBeReplaced(t *testing.T) {
+	p := provider(t)
+	cfg := config(p, vault(p))
+	cfg.TLS.VerifyPeerCertificate = func([][]byte, [][]*x509.Certificate) error { return nil }
+	if _, err := sipline.Open(context.Background(), cfg); !errors.Is(err, sipline.ErrInsecure) {
+		t.Fatalf("VerifyPeerCertificate: %v", err)
+	}
+}
+
+// A BYE that carries the call's Call-ID but not its dialog's tags is not
+// the far end hanging up; the call goes on.
+func TestABYEForAnotherDialogDoesNotEndTheCall(t *testing.T) {
+	p := provider(t)
+	l := open(t, p, config(p, vault(p)))
+	c, err := l.Dial(context.Background(), shopNum)
+	if err != nil {
+		t.Fatal(err)
+	}
+	far := <-p.Calls()
+	if err := far.Answer(sipline.PCMU); err != nil {
+		t.Fatal(err)
+	}
+	<-c.Active()
+	if code, err := far.ForgedBye(context.Background()); err != nil || code != 481 {
+		t.Fatalf("forged BYE: %d %v", code, err)
+	}
+	select {
+	case <-c.Ended():
+		t.Fatal("a forged BYE ended the call")
+	case <-time.After(30 * time.Millisecond):
+	}
+	if err := c.Hangup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAnswersAreCheckedForSRTPAndWhereTheAudioGoes(t *testing.T) {
+	key := "inline:" + base64.StdEncoding.EncodeToString(make([]byte, 30))
+	sdp := func(addr, proto, crypto string) []byte {
+		s := "v=0\r\no=- 1 1 IN IP4 " + addr + "\r\ns=-\r\nc=IN IP4 " + addr + "\r\nt=0 0\r\nm=audio 4000 " + proto + " 0\r\n"
+		if crypto != "" {
+			s += "a=crypto:" + crypto + "\r\n"
+		}
+		return []byte(s)
+	}
+	ok := "1 " + sipline.Suite + " " + key
+	for name, c := range map[string]struct {
+		body    []byte
+		private bool
+		want    error
+	}{
+		"public SRTP":                {sdp("203.0.113.9", "RTP/SAVP", ok), false, nil},
+		"SAVP without a key":         {sdp("203.0.113.9", "RTP/SAVP", ""), false, sipline.ErrNoSRTP},
+		"AVP with a key":             {sdp("203.0.113.9", "RTP/AVP", ok), false, sipline.ErrNoSRTP},
+		"another tag":                {sdp("203.0.113.9", "RTP/SAVP", "2 "+sipline.Suite+" "+key), false, sipline.ErrNoSRTP},
+		"another suite":              {sdp("203.0.113.9", "RTP/SAVP", "1 AES_CM_128_HMAC_SHA1_32 "+key), false, sipline.ErrNoSRTP},
+		"loopback":                   {sdp("127.0.0.1", "RTP/SAVP", ok), false, sipline.ErrMediaAddress},
+		"LAN host":                   {sdp("192.168.1.1", "RTP/SAVP", ok), false, sipline.ErrMediaAddress},
+		"link-local":                 {sdp("169.254.169.254", "RTP/SAVP", ok), false, sipline.ErrMediaAddress},
+		"multicast":                  {sdp("239.1.1.1", "RTP/SAVP", ok), false, sipline.ErrMediaAddress},
+		"unspecified":                {sdp("0.0.0.0", "RTP/SAVP", ok), false, sipline.ErrMediaAddress},
+		"broadcast":                  {sdp("255.255.255.255", "RTP/SAVP", ok), false, sipline.ErrMediaAddress},
+		"LAN, provider on the LAN":   {sdp("192.168.1.1", "RTP/SAVP", ok), true, nil},
+		"loopback, provider local":   {sdp("127.0.0.1", "RTP/SAVP", ok), true, nil},
+		"multicast, provider on LAN": {sdp("239.1.1.1", "RTP/SAVP", ok), true, sipline.ErrMediaAddress},
+	} {
+		if err := sipline.ParseAnswer(c.body, c.private); !errors.Is(err, c.want) || (c.want == nil && err != nil) {
+			t.Errorf("%s: %v, want %v", name, err, c.want)
+		}
+	}
+}
+
+func TestIncomingTextsAreBoundedAndOnlyTheProviderVouchesForNumbers(t *testing.T) {
+	p := provider(t)
+	l := open(t, p, config(p, vault(p)))
+	ctx := context.Background()
+	relay := func(in sipsim.Incoming) int {
+		t.Helper()
+		in.User = user
+		if in.ContentType == "" {
+			in.ContentType = "text/plain"
+		}
+		code, err := p.Relay(ctx, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return code
+	}
+	got := func() modem.SMS {
+		t.Helper()
+		select {
+		case m := <-l.Inbox():
+			return m
+		case <-time.After(3 * time.Second):
+			t.Fatal("nothing delivered")
+		}
+		return modem.SMS{}
+	}
+	if code := relay(sipsim.Incoming{From: shopNum, Body: strings.Repeat("x", 1601)}); code != 413 {
+		t.Fatalf("long text: %d", code)
+	}
+	if code := relay(sipsim.Incoming{From: shopNum, Body: "\xff\xfe"}); code != 415 {
+		t.Fatalf("invalid UTF-8: %d", code)
+	}
+	relay(sipsim.Incoming{From: shopNum, Body: strings.Repeat("x", 1600)})
+	if m := got(); len(m.Text) != 1600 || m.Alphanumeric {
+		t.Fatalf("1600 bytes: %d %v", len(m.Text), m.Alphanumeric)
+	}
+	// A number in another domain's From is not the provider's word for it.
+	relay(sipsim.Incoming{From: ownerNum, FromHost: "elsewhere.example", Body: "YES K3 482913"})
+	if m := got(); !m.Alphanumeric || !strings.HasPrefix(m.From, "alpha:") {
+		t.Fatalf("foreign From: %+v", m)
+	}
+	// The provider's asserted identity is.
+	relay(sipsim.Incoming{From: "anonymous", FromHost: "elsewhere.example", PAI: "<tel:" + shopNum + ">", Body: "hi"})
+	if m := got(); m.Alphanumeric || m.From != shopNum {
+		t.Fatalf("PAI: %+v", m)
+	}
+	relay(sipsim.Incoming{From: "x", PAI: `"Shop" <sip:` + shopNum + `@` + domain + `;user=phone>`, Body: "hi"})
+	if m := got(); m.Alphanumeric || m.From != shopNum {
+		t.Fatalf("sip PAI: %+v", m)
+	}
+	// Named senders are short printable ASCII.
+	relay(sipsim.Incoming{From: strings.Repeat("Shop%0aCo", 10), Body: "hi"})
+	if m := got(); !m.Alphanumeric || len(m.From) > len("alpha:")+32 {
+		t.Fatalf("long name: %q", m.From)
+	}
+}
+
+func TestTheVaultAccountNeverPrintsItsPassword(t *testing.T) {
+	a := sipline.Account{Username: user, Password: password, Realm: "r"}
+	for _, f := range []string{"%v", "%+v", "%#v", "%s"} {
+		if s := fmt.Sprintf(f, a); strings.Contains(s, password) {
+			t.Errorf("%s: %s", f, s)
+		}
+	}
+	// RFC 2069 challenges (no qop, no client nonce) are not answered.
+	if _, err := a.Sign(context.Background(), sipline.Challenge{Header: `Digest realm="r", nonce="n"`, Method: "REGISTER", URI: "sip:x"}); err == nil {
+		t.Fatal("signed a challenge without qop")
 	}
 }

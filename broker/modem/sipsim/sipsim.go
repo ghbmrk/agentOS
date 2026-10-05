@@ -15,6 +15,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"strings"
@@ -54,7 +55,8 @@ type Provider struct {
 	grant    uint32
 	texts    chan Text
 	calls    chan *Call
-	refuse   map[string]int // method -> status to answer once authenticated
+	live     map[string]*Call // by Call-ID
+	refuse   map[string]int   // method -> status to answer once authenticated
 }
 
 type reg struct {
@@ -69,6 +71,12 @@ type Text struct {
 
 // Start starts a provider for domain with one account.
 func Start(domain, user, password string) (*Provider, error) {
+	return StartTLS(domain, user, password, 0)
+}
+
+// StartTLS is Start with the provider's newest TLS version capped at
+// maxTLS (0 for no cap), to stand in for an outdated provider.
+func StartTLS(domain, user, password string, maxTLS uint16) (*Provider, error) {
 	cert, roots, err := selfSigned()
 	if err != nil {
 		return nil, err
@@ -79,7 +87,7 @@ func Start(domain, user, password string) (*Provider, error) {
 	}
 	p := &Provider{Roots: roots, Realm: domain + " realm", Domain: domain, ua: ua,
 		users: map[string]string{user: password}, contacts: map[string]reg{}, nonces: map[string]bool{},
-		authOK: map[string]int{}, grant: 3600, texts: make(chan Text, 64), calls: make(chan *Call, 8), refuse: map[string]int{}}
+		authOK: map[string]int{}, grant: 3600, texts: make(chan Text, 64), calls: make(chan *Call, 8), live: map[string]*Call{}, refuse: map[string]int{}}
 	if p.srv, err = sipgo.NewServer(ua); err != nil {
 		return nil, err
 	}
@@ -91,11 +99,15 @@ func Start(domain, user, password string) (*Provider, error) {
 	p.srv.OnMessage(p.onMessage)
 	p.srv.OnInvite(p.onInvite)
 	p.srv.OnAck(func(req *sip.Request, tx sip.ServerTransaction) { _ = p.dc.ReadAck(req, tx) })
-	p.srv.OnBye(func(req *sip.Request, tx sip.ServerTransaction) { _ = p.dc.ReadBye(req, tx) })
+	p.srv.OnBye(p.onBye)
 	p.srv.OnOptions(func(req *sip.Request, tx sip.ServerTransaction) {
 		_ = tx.Respond(sip.NewResponseFromRequest(req, sip.StatusOK, "OK", nil))
 	})
-	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}})
+	tc := &tls.Config{Certificates: []tls.Certificate{cert}}
+	if maxTLS != 0 {
+		tc.MinVersion, tc.MaxVersion = tls.VersionTLS10, maxTLS
+	}
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", tc)
 	if err != nil {
 		return nil, err
 	}
@@ -254,10 +266,31 @@ func (p *Provider) onMessage(req *sip.Request, tx sip.ServerTransaction) {
 // SendText delivers a text from a number to a registered user over that
 // user's own connection, as a provider relays an incoming SMS.
 func (p *Provider) SendText(ctx context.Context, from, user, contentType, body string) (int, error) {
-	req, err := p.toLine(sip.MESSAGE, from, user)
+	return p.Relay(ctx, Incoming{From: from, User: user, ContentType: contentType, Body: body})
+}
+
+// Incoming is a text the provider relays to a line.
+type Incoming struct {
+	From              string // From's user part
+	FromHost          string // From's host; default the provider's domain
+	PAI               string // P-Asserted-Identity value, if any
+	User              string // the registered user it is for
+	ContentType, Body string
+}
+
+// Relay delivers in to its user over that user's own connection.
+func (p *Provider) Relay(ctx context.Context, in Incoming) (int, error) {
+	req, err := p.toLine(sip.MESSAGE, in.From, in.User)
 	if err != nil {
 		return 0, err
 	}
+	if in.FromHost != "" {
+		req.From().Address.Host = in.FromHost
+	}
+	if in.PAI != "" {
+		req.AppendHeader(sip.NewHeader("P-Asserted-Identity", in.PAI))
+	}
+	contentType, body := in.ContentType, in.Body
 	req.AppendHeader(sip.NewHeader("Content-Type", contentType))
 	req.SetBody([]byte(body))
 	res, err := p.cli.Do(ctx, req)
@@ -282,6 +315,27 @@ func (p *Provider) CallLine(ctx context.Context, from, user string) (int, error)
 		return 0, err
 	}
 	return res.StatusCode, nil
+}
+
+// SendRaw writes data as-is on a registered user's connection, as a
+// broken or hostile provider might.
+func (p *Provider) SendRaw(user string, data []byte) error {
+	p.mu.Lock()
+	r, ok := p.contacts[user]
+	p.mu.Unlock()
+	if !ok {
+		return errors.New("sipsim: user not registered")
+	}
+	c, err := p.ua.TransportLayer().GetConnection("tls", r.source)
+	if err != nil || c == nil {
+		return fmt.Errorf("sipsim: no connection: %v", err)
+	}
+	w, ok := c.(io.Writer)
+	if !ok {
+		return errors.New("sipsim: connection cannot be written raw")
+	}
+	_, err = w.Write(data)
+	return err
 }
 
 func (p *Provider) toLine(method sip.RequestMethod, from, user string) (*sip.Request, error) {
@@ -309,9 +363,20 @@ func (p *Provider) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 		_ = tx.Respond(sip.NewResponseFromRequest(req, sip.StatusInternalServerError, "Error", nil))
 		return
 	}
-	c := &Call{To: req.Recipient.User, Offer: append([]byte(nil), req.Body()...), d: d}
+	c := &Call{p: p, invite: req, To: req.Recipient.User, Offer: append([]byte(nil), req.Body()...), d: d, bye: make(chan struct{}), done: make(chan struct{})}
+	id := req.CallID().Value()
+	p.mu.Lock()
+	p.live[id] = c
+	p.mu.Unlock()
 	p.calls <- c
-	<-d.Context().Done()
+	select {
+	case <-d.Context().Done():
+	case <-c.bye:
+	}
+	close(c.done)
+	p.mu.Lock()
+	delete(p.live, id)
+	p.mu.Unlock()
 	c.mu.Lock()
 	if c.media != nil {
 		_ = c.media.Close()
@@ -319,11 +384,37 @@ func (p *Provider) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 	c.mu.Unlock()
 }
 
+// onBye ends a call the line hangs up. It answers the BYE itself rather
+// than through sipgo's DialogServerSession.ReadBye: over TLS the BYE's
+// server transaction can terminate as soon as the 200 is sent, and ReadBye
+// then reports that as an error and leaves the dialog open, so the
+// simulator would never see the hangup.
+func (p *Provider) onBye(req *sip.Request, tx sip.ServerTransaction) {
+	id := ""
+	if h := req.CallID(); h != nil {
+		id = h.Value()
+	}
+	p.mu.Lock()
+	c := p.live[id]
+	p.mu.Unlock()
+	if c == nil {
+		_ = tx.Respond(sip.NewResponseFromRequest(req, sip.StatusCallTransactionDoesNotExists, "Call/Transaction Does Not Exist", nil))
+		return
+	}
+	_ = tx.Respond(sip.NewResponseFromRequest(req, sip.StatusOK, "OK", nil))
+	c.byeOnce.Do(func() { close(c.bye) })
+}
+
 // Call is a call a line placed.
 type Call struct {
-	To    string
-	Offer []byte
-	d     *sipgo.DialogServerSession
+	To      string
+	Offer   []byte
+	d       *sipgo.DialogServerSession
+	p       *Provider
+	invite  *sip.Request
+	bye     chan struct{} // closed when the line hangs up
+	done    chan struct{} // closed when the call ends either way
+	byeOnce sync.Once
 
 	mu    sync.Mutex
 	media *net.UDPConn
@@ -337,8 +428,33 @@ func (c *Call) Ring() error { return c.d.Respond(sip.StatusRinging, "Ringing", n
 // Reject answers with a final failure status.
 func (c *Call) Reject(code int) error { return c.d.Respond(code, "Rejected", nil) }
 
-// Done is closed when the call ends, including by CANCEL before an answer.
-func (c *Call) Done() <-chan struct{} { return c.d.Context().Done() }
+// Done is closed when the call ends: the line's BYE, its CANCEL before an
+// answer, or the far end's hangup.
+func (c *Call) Done() <-chan struct{} { return c.done }
+
+// ForgedBye sends the line a BYE with this call's Call-ID but a far-end
+// tag that is not the dialog's, as an off-path party guessing the Call-ID
+// would, and returns the line's status.
+func (c *Call) ForgedBye(ctx context.Context) (int, error) {
+	inv := c.invite
+	req := sip.NewRequest(sip.BYE, inv.Contact().Address)
+	req.SetTransport("TLS")
+	req.SetDestination(inv.Source())
+	f := &sip.FromHeader{Address: inv.To().Address, Params: sip.NewParams()}
+	f.Params.Add("tag", "forged")
+	req.AppendHeader(f)
+	to := &sip.ToHeader{Address: inv.From().Address, Params: sip.NewParams()}
+	if tag, ok := inv.From().Params.Get("tag"); ok {
+		to.Params.Add("tag", tag)
+	}
+	req.AppendHeader(to)
+	req.AppendHeader(sip.HeaderClone(inv.CallID()))
+	res, err := c.p.cli.Do(ctx, req)
+	if err != nil {
+		return 0, err
+	}
+	return res.StatusCode, nil
+}
 
 // Hangup ends an answered call from the far end.
 func (c *Call) Hangup(ctx context.Context) error { return c.d.Bye(ctx) }
@@ -402,7 +518,7 @@ func (c *Call) answer(pt int, secure bool) error {
 	}()
 	if err := c.d.RespondSDP([]byte(sdp)); err != nil {
 		select {
-		case <-c.d.Context().Done():
+		case <-c.Done():
 			// The line hung up at once (as it does on an answer it
 			// refuses), racing the ACK wait; the answer was delivered.
 		default:
