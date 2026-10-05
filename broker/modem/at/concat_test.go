@@ -96,3 +96,22 @@ func TestCH1OwnerSlotsAreTheOwnersNumberOnly(t *testing.T) {
 		t.Fatalf("owner has %d texts pending, want 4", n)
 	}
 }
+
+// The whole buffer never holds more than 32 texts, owner's and strangers'
+// together (L3 on #161).
+func TestCH1BufferHoldsAtMost32TextsInAll(t *testing.T) {
+	r := newRig(t, vendors[1], at.KeysInBand, nil)
+	for i := 1; i <= 4; i++ {
+		r.firstPart(t, ownerNum, byte(i))
+	}
+	for i := 0; i < 40; i++ {
+		r.firstPart(t, fmt.Sprintf("+1555700%04d", i), byte(i))
+	}
+	eventually(t, "strangers' overflow dropped", func() bool { return r.m.Dropped() == 12 })
+	if n := r.m.PendingTotal(); n != 32 {
+		t.Fatalf("%d texts pending, want 32", n)
+	}
+	if n := r.m.PendingFrom(ownerNum); n != 4 {
+		t.Fatalf("owner has %d pending, want 4", n)
+	}
+}
