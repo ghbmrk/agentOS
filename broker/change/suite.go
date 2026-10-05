@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/journal"
@@ -33,6 +34,9 @@ type Case struct {
 	Outcome Outcome `json:"outcome,omitempty"`
 	// Task is the journal intent the owner's outcome was recorded on.
 	Task string `json:"task,omitempty"`
+	// Goal is the goal ID the journal stamped on that intent, never the
+	// caller's: it decides the case's side of the split (CHG-1).
+	Goal string `json:"goal,omitempty"`
 	// Public marks a case built only from public inputs; only public cases
 	// count toward evidence in a shared package (CHG-4).
 	Public   bool `json:"public,omitempty"`
@@ -60,6 +64,17 @@ func splitOf(key []byte, id string, devPercent int) split {
 	return heldOut
 }
 
+// splitKey is what decides a case's side. Every case of one goal shares a
+// side, so a goal's siblings are never both training and evidence (CHG-1).
+// A case without a goal hashes on its bare ID, as every case did before
+// goals were stamped, so a persisted suite never reshuffles.
+func splitKey(c Case) string {
+	if c.Goal != "" {
+		return "goal:" + c.Goal
+	}
+	return c.ID
+}
+
 var (
 	ErrProvenance = errors.New("change: case has no owner outcome behind it")
 	ErrDuplicate  = errors.New("change: case already in the suite")
@@ -75,6 +90,11 @@ func (p *Pipeline) AddTaskCase(c Case) error {
 	if c.ID == "" || c.Task == "" || c.Security {
 		return fmt.Errorf("%w: a task case needs an id and a task", ErrProvenance)
 	}
+	if strings.HasPrefix(c.ID, "goal:") {
+		// splitKey would hash it like that goal's cases, letting whoever
+		// names the case put it beside a goal it does not belong to.
+		return fmt.Errorf("%w: a case id may not start with goal:", ErrProvenance)
+	}
 	st, err := p.j.Get(c.Task)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrProvenance, err)
@@ -89,6 +109,7 @@ func (p *Pipeline) AddTaskCase(c Case) error {
 	default:
 		return fmt.Errorf("%w: outcome %q does not match verdict %q", ErrProvenance, c.Outcome, q.Verdict)
 	}
+	c.Goal = st.Intent.GoalID
 	c.At = p.cfg.Now()
 	return p.addCase(c)
 }
@@ -99,7 +120,7 @@ func (p *Pipeline) AddSecurityCase(c Case) error {
 	if c.ID == "" {
 		return errors.New("change: a security case needs an id")
 	}
-	c.Security, c.Task, c.Outcome = true, "", ""
+	c.Security, c.Task, c.Outcome, c.Goal = true, "", "", ""
 	return p.addCase(c)
 }
 
@@ -127,7 +148,7 @@ func (p *Pipeline) Dev(class Class) []Case {
 	defer p.mu.Unlock()
 	var out []Case
 	for _, c := range p.st.Cases {
-		if !c.Security && (c.Class == class || c.Class == ClassTask && taskClasses[class]) && splitOf(p.key, c.ID, p.cfg.DevPercent) == dev {
+		if !c.Security && (c.Class == class || c.Class == ClassTask && taskClasses[class]) && splitOf(p.key, splitKey(c), p.cfg.DevPercent) == dev {
 			out = append(out, c)
 		}
 	}
@@ -156,7 +177,7 @@ func (p *Pipeline) freezeLocked(classes []Class) frozen {
 		switch {
 		case c.Security:
 			f.security = append(f.security, c)
-		case splitOf(p.key, c.ID, p.cfg.DevPercent) == dev:
+		case splitOf(p.key, splitKey(c), p.cfg.DevPercent) == dev:
 		case rel[c.Class] || images || c.Class == ClassTask && taskRel:
 			// A new image runs every task, so every held-out case is
 			// relevant to it.

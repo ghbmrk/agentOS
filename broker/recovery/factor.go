@@ -47,6 +47,14 @@ type Box struct {
 	VaultPath, KeysPath string
 	V                   *vault.Vault
 
+	// Reencrypt moves the vault to a fresh data key, rewrapping the slots
+	// owner proves (vault.Reencrypt; R10a). The vault process sets it to
+	// its custody.reencrypt, which also gives the vault a new policy key
+	// and reseals the trusted PCs it can (egress V7); nil calls
+	// V.Reencrypt, which drops every TPM slot. It returns how many
+	// trusted PCs must be trusted again.
+	Reencrypt func(owner ...vault.Factor) (dropped int, err error)
+
 	// mu serializes this package's read-modify-write operations on the
 	// vault (re-confirmation, rotation, re-enrollment).
 	mu sync.Mutex
@@ -126,7 +134,7 @@ type backupValue struct {
 	Slot   []byte `json:"slot"`
 }
 
-const backupKeyFormat = "agentos-backup-key-v1"
+const backupKeyFormat = "agentos-backup-key-v2"
 
 func storeBackupKey(b *Box, rk RecoveryKey) error {
 	pub, err := backupPublic(rk)
@@ -185,6 +193,29 @@ func ensureMACKey(v *vault.Vault) error {
 	}
 	defer wipe(k)
 	return v.Put(MACKeyName, KindMACKey, k)
+}
+
+// rotateMACKey replaces the backup MAC key, which Reencrypt carries over
+// and an earlier copy holds: with it, a backup the new recovery key opens
+// could be altered outside its vault (R10a).
+func rotateMACKey(v *vault.Vault) error {
+	if _, _, err := reserved(v, MACKeyName, KindMACKey); err != nil {
+		return err
+	}
+	k, err := random(nil, 32)
+	if err != nil {
+		return err
+	}
+	defer wipe(k)
+	return v.Put(MACKeyName, KindMACKey, k)
+}
+
+// reencrypt runs the box's re-encryption.
+func (b *Box) reencrypt(owner ...vault.Factor) (int, error) {
+	if b.Reencrypt != nil {
+		return b.Reencrypt(owner...)
+	}
+	return b.V.Reencrypt(owner...)
 }
 
 func macKey(v *vault.Vault) ([]byte, error) {

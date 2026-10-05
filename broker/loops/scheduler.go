@@ -51,6 +51,18 @@ type Source interface {
 	Next(ctx context.Context, modelOK bool) (Job, bool)
 }
 
+// Urgent is a source whose work must not wait out a dry-run park: Loop 3
+// while a security fix or a failed check's retry is due (LOOP-11, security
+// first). A parked source that reports Urgent is offered work anyway.
+type Urgent interface {
+	Urgent() bool
+}
+
+func urgent(src Source) bool {
+	u, ok := src.(Urgent)
+	return ok && u.Urgent()
+}
+
 // Digester is a source with lines for the owner's digest.
 type Digester interface {
 	Digest() []string
@@ -228,9 +240,13 @@ func New(cfg Config) (*Scheduler, error) {
 func (s *Scheduler) Attach(j Journal) { s.cfg.Journal = j }
 
 // Wake tells a sleeping scheduler that something new arrived: an owner
-// outcome, a new release, the box going idle.
+// outcome, a new release, the box going idle or online. Parked loops are
+// offered work again, since what parked them may have changed.
 func (s *Scheduler) Wake() {
 	s.mu.Lock()
+	for _, m := range s.loops {
+		m.parked, m.dry = time.Time{}, 0
+	}
 	s.wakeLocked()
 	s.mu.Unlock()
 }
@@ -349,7 +365,7 @@ func (s *Scheduler) order(set Settings) []Source {
 	for _, src := range s.cfg.Sources {
 		l := src.Loop()
 		m := s.loops[l]
-		if !set.On(l) || now.Before(m.parked) {
+		if !set.On(l) || (now.Before(m.parked) && !urgent(src)) {
 			continue
 		}
 		share := 1.0 // unmeasured: explore
@@ -465,7 +481,7 @@ func (s *Scheduler) safeRun(ctx context.Context, job Job) (res Result) {
 
 // Share reports each loop's current share of spare capacity, for STATUS
 // and tests: its measured return relative to the best loop's, or 1 while
-// unmeasured, and 0 while parked or off.
+// unmeasured, and 0 while off or parked (unless Urgent).
 func (s *Scheduler) Share() map[Loop]float64 {
 	set := s.Settings()
 	s.mu.Lock()
@@ -477,10 +493,14 @@ func (s *Scheduler) Share() map[Loop]float64 {
 			best = r
 		}
 	}
+	urgentNow := map[Loop]bool{}
+	for _, src := range s.cfg.Sources {
+		urgentNow[src.Loop()] = urgentNow[src.Loop()] || urgent(src)
+	}
 	out := map[Loop]float64{}
 	for l, m := range s.loops {
 		switch {
-		case !set.On(l) || now.Before(m.parked):
+		case !set.On(l) || (now.Before(m.parked) && !urgentNow[l]):
 			out[l] = 0
 		case m.runs == 0:
 			out[l] = 1

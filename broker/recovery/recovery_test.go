@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -247,8 +248,17 @@ func TestOnlyTheRecoveryKeyOpensABackupAndDamageIsRefused(t *testing.T) {
 		t.Fatal("wrong key opened the backup")
 	}
 	pl := int(binary.BigEndian.Uint32(bk[:4]))
-	if pre := string(bk[4 : 4+pl]); strings.Contains(pre, "passphrase") || strings.Contains(pre, "tpm") || strings.Contains(pre, "slot") {
-		t.Fatalf("preamble carries a slot: %s", pre)
+	// The preamble's fields are exactly prefix's: no slot of any kind.
+	// (Its values are random base64, so they are not searched for words.)
+	var pre map[string]json.RawMessage
+	must(t, json.Unmarshal(bk[4:4+pl], &pre))
+	var keys []string
+	for k := range pre {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	if strings.Join(keys, ",") != "created,ephemeral,magic,nonce_prefix,version" {
+		t.Fatalf("preamble fields: %v", keys)
 	}
 	cases := map[string][]byte{
 		"flipped byte late":   flip(bk, len(bk)-40),
