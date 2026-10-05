@@ -304,3 +304,86 @@ func TestBusyIsAcceptedWorkOrPressure(t *testing.T) {
 		}
 	}
 }
+
+// PE5 (security P2): BusyCause reads Busy, whether the busy work is the
+// owner's, and whether pressure is over its limit in one call, so the
+// scheduler's cause for a preemption is consistent. Only accepted work the
+// broker marked as the owner's (Request.Owner) is the owner's: accepted
+// work without the mark (a loop's, a replay's) is busy but not owner work.
+// An unreadable reading is pressure, as for Busy. Experiments cannot carry
+// the mark.
+func TestBusyCauseSaysWhetherPressureHolds(t *testing.T) {
+	p := 0.0
+	c, err := New(Config{CapacityMB: 4000, HeadroomMB: 500}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Pressure, c.MaxPressure = func() float64 { return p }, 10
+	if b, o, pr := c.BusyCause(); b || o || pr {
+		t.Fatalf("idle: %v %v %v", b, o, pr)
+	}
+	if _, err := c.Admit(Request{ID: "eval-x", Class: Experiment, MemMB: 100, Owner: true}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("an experiment marked the owner's: %v", err)
+	}
+	if _, err := c.Admit(Request{ID: "loop-job", Class: Accepted, MemMB: 500}); err != nil {
+		t.Fatal(err)
+	}
+	if b, o, pr := c.BusyCause(); !b || o || pr {
+		t.Fatalf("accepted work not the owner's: %v %v %v", b, o, pr)
+	}
+	if _, err := c.Admit(Request{ID: "job", Class: Accepted, MemMB: 500, Owner: true}); err != nil {
+		t.Fatal(err)
+	}
+	if b, o, pr := c.BusyCause(); !b || !o || pr {
+		t.Fatalf("the owner's accepted work: %v %v %v", b, o, pr)
+	}
+	for _, v := range []float64{11, math.NaN(), -1} {
+		p = v
+		if b, _, pr := c.BusyCause(); !b || !pr {
+			t.Fatalf("pressure %v: %v %v", v, b, pr)
+		}
+	}
+}
+
+// PE5 (security P3): admission records, when it picks a victim, whether it
+// was revoked for the owner's work without pressure: foreground, or
+// accepted work marked the owner's. A revoke for unmarked accepted work,
+// or under pressure, is not the owner's. The record is read once.
+func TestRevokeRecordsWhetherItWasForTheOwner(t *testing.T) {
+	p := 0.0
+	for _, tc := range []struct {
+		name     string
+		req      Request
+		pressure float64
+		want     bool
+	}{
+		{name: "foreground", req: Request{ID: "agent", Class: Foreground, MemMB: 3000}, want: true},
+		{name: "foreground under pressure", req: Request{ID: "agent", Class: Foreground, MemMB: 3000}, pressure: 50, want: true},
+		{name: "the owner's accepted work", req: Request{ID: "job", Class: Accepted, MemMB: 3000, Owner: true}, want: true},
+		{name: "the owner's accepted work under pressure", req: Request{ID: "job", Class: Accepted, MemMB: 3000, Owner: true}, pressure: 50},
+		{name: "accepted work not the owner's", req: Request{ID: "loop-job", Class: Accepted, MemMB: 3000}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := New(Config{CapacityMB: 4000, HeadroomMB: 500}, &recPreempter{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.Pressure, c.MaxPressure = func() float64 { return p }, 10
+			p = 0
+			if _, err := c.Admit(Request{ID: "eval-1", Class: Experiment, MemMB: 3000}); err != nil {
+				t.Fatal(err)
+			}
+			p = tc.pressure
+			d, err := c.Admit(tc.req)
+			if err != nil || len(d.Preempted) != 1 {
+				t.Fatalf("%+v %v", d, err)
+			}
+			if got := c.RevokedForOwner("eval-1"); got != tc.want {
+				t.Fatalf("for the owner: %v, want %v", got, tc.want)
+			}
+			if c.RevokedForOwner("eval-1") {
+				t.Fatal("the record was read twice")
+			}
+		})
+	}
+}

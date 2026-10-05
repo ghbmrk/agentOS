@@ -144,8 +144,11 @@ type Config struct {
 	// resume only under the same ID (PE1, security R1 on #103). Nil: the
 	// evaluator is fixed for the pipeline's life.
 	EvaluatorID func() string
-	Now         func() time.Time
-	Rand        io.Reader
+	// Logf logs each counted candidate cut by a fixed class only (PE5).
+	// Nil: not logged.
+	Logf func(string, ...any)
+	Now  func() time.Time
+	Rand io.Reader
 }
 
 // Bases: why an adoption may run.
@@ -337,6 +340,10 @@ type Pipeline struct {
 	kept      map[string]pairResult
 	keptOrder []keptAt // put order, for dropping the oldest
 	keptSeq   uint64
+	// exempt counts each candidate's exempt interruptions (MaxExempt),
+	// in first-seen order for dropping the oldest.
+	exempt      map[string]int
+	exemptOrder []string
 }
 
 // New loads the persisted state, or seeds it on first start, and applies
@@ -542,6 +549,11 @@ func (p *Pipeline) proposeInner(ctx context.Context, c Candidate, security bool)
 	if len(edits) == 0 {
 		p.mu.Unlock()
 		return Report{}, errors.New("change: candidate changes nothing")
+	}
+	if p.exempt[p.candidateKey(base, next)] >= MaxExempt && !IsIdle(ctx) {
+		// Parked (PE5): refused before it spends an ID or a save.
+		p.mu.Unlock()
+		return Report{}, ErrParked
 	}
 	p.st.Seq++
 	id := "c" + strconv.Itoa(p.st.Seq)
@@ -774,6 +786,13 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 		struck bool
 		err    bool // the evaluator errored (a fail, unlike a grader's)
 	}
+	ck := p.candidateKey(base, next)
+	p.mu.Lock()
+	parked := p.exempt[ck] >= MaxExempt
+	p.mu.Unlock()
+	if parked && !IsIdle(ctx) {
+		return Score{}, ErrParked
+	}
 	nonce := make([]byte, 16)
 	_, _ = rand.Read(nonce)
 	keys := map[string]string{}
@@ -878,13 +897,36 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 		res[r.c.ID] = pr
 	}
 	if interrupted {
+		// Only a cut the candidate could have caused counts (PE5): any
+		// cause the host did not mark as the owner's, unknown included.
+		// Both the evaluator's interruption and the context's cause are
+		// read, and either one unmarked makes the cut count; that one is
+		// the cause logged.
+		var causes []error
+		if stopped != nil {
+			causes = append(causes, stopped)
+		}
+		if ctx.Err() != nil {
+			causes = append(causes, context.Cause(ctx))
+		}
+		cause, exempt := causes[0], true
+		for _, c := range causes {
+			if !errors.Is(c, ErrOwnerPreempt) {
+				cause, exempt = c, false
+				break
+			}
+		}
+		counted := cut != nil && cut.cand && !exempt
 		p.mu.Lock()
+		if exempt {
+			p.exemptLocked(ck)
+		}
 		// Every side that finished is kept, so a result once seen is
 		// never run again. The candidate side cut short is counted, so
 		// a candidate that forces preemptions cannot re-roll a case
 		// without limit.
 		for id, pr := range res {
-			if cut != nil && cut.cand && cut.c.ID == id {
+			if counted && cut.c.ID == id {
 				pr.interrupted++
 			}
 			if pr.baseDone || pr.nextDone || pr.interrupted > 0 {
@@ -892,6 +934,14 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 			}
 		}
 		p.mu.Unlock()
+		if p.cfg.Logf != nil {
+			switch {
+			case counted:
+				p.cfg.Logf("change: a candidate run was cut short (%s); counted", cutClass(cause, stopped != nil && cause == stopped))
+			case exempt:
+				p.cfg.Logf("change: a candidate run was cut short (%s); not counted", exemptClass(cause))
+			}
+		}
 		if stopped != nil {
 			return Score{}, stopped
 		}

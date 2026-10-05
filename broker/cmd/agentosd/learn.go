@@ -115,6 +115,7 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		Store:     change.FileStore{Path: filepath.Join(p.Dir, "change.json")},
 		Evaluator: &l.eval,
 		Targets:   targets,
+		Logf:      log.Printf,
 	}); err != nil {
 		return nil, err
 	}
@@ -164,13 +165,14 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	}
 	l.learn = learn
 	if l.sched, err = loops.New(loops.Config{
-		Store:   change.FileStore{Path: filepath.Join(p.Dir, "loops.json")},
-		Spare:   spare,
-		Sources: []loops.Source{learn},
-		Sharing: l.pipe.SetSharing,
-		Busy:    l.busy,
-		Stopped: l.stopped,
-		Logf:    log.Printf,
+		Store:     change.FileStore{Path: filepath.Join(p.Dir, "loops.json")},
+		Spare:     spare,
+		Sources:   []loops.Source{learn},
+		Sharing:   l.pipe.SetSharing,
+		Busy:      l.busy,
+		BusyCause: l.busyCause,
+		Stopped:   l.stopped,
+		Logf:      log.Printf,
 	}); err != nil {
 		return nil, err
 	}
@@ -383,6 +385,25 @@ func (l *learning) busy() bool {
 	return a == nil || a.Busy()
 }
 
+// busyCause is admission's BusyCause for the scheduler (PE5). Before the
+// daemon attaches, the box reads as busy under pressure, so a cut then
+// counts.
+func (l *learning) busyCause() (busy, owner, pressure bool) {
+	a := l.adm.Load()
+	if a == nil {
+		return true, false, true
+	}
+	return a.BusyCause()
+}
+
+// revokedForOwner is admission's RevokedForOwner for the replay evaluator
+// (PE5): before the daemon attaches there is no record, so a revoke
+// counts.
+func (l *learning) revokedForOwner(id string) bool {
+	a := l.adm.Load()
+	return a != nil && a.RevokedForOwner(id)
+}
+
 func (l *learning) stopped() bool {
 	e := l.eng.Load()
 	return e == nil || e.Stopped()
@@ -412,7 +433,9 @@ func (l *learning) openEvaluator(m *vm.Manager, services *lateServices, c evalCo
 		Active:     l.pipe.Files,
 		Spec:       c.Spec,
 		Dir:        c.Dir,
-		Logf:       log.Printf,
+		// A revoke is the owner's only as admission recorded it (PE5).
+		RevokedForOwner: l.revokedForOwner,
+		Logf:            log.Printf,
 	}
 	if c.Egress != "" {
 		rc.Meter = l.spare

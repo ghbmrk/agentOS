@@ -38,6 +38,11 @@ type Request struct {
 	ID    string
 	Class Class
 	MemMB int64
+	// Owner marks the owner's own work: set only by broker code for the
+	// owner's machines, never for a loop's, a replay's or the clean
+	// room's. Experiments cannot carry it. It makes accepted work count as
+	// the owner's for BusyCause and RevokedForOwner (PE5, security P2).
+	Owner bool
 }
 
 // Decision is a successful admission and what was preempted for it.
@@ -78,6 +83,9 @@ type Controller struct {
 	running  map[string]Request
 	order    []string        // admission order, for newest-first preemption
 	yielding map[string]bool // experiments being preempted right now
+	// revokes records, per victim, whether it was preempted for the
+	// owner's work without pressure (RevokedForOwner).
+	revokes map[string]bool
 }
 
 // New returns a controller for cfg, which needs capacity > headroom >= 0.
@@ -93,7 +101,7 @@ func New(cfg Config, pre Preempter) (*Controller, error) {
 // so STATUS and other admissions never wait behind a VM freeze; r's memory
 // is reserved meanwhile.
 func (c *Controller) Admit(r Request) (Decision, error) {
-	if r.ID == "" || !r.Class.valid() || r.MemMB <= 0 {
+	if r.ID == "" || !r.Class.valid() || r.MemMB <= 0 || r.Owner && r.Class == Experiment {
 		return Decision{}, fmt.Errorf("%w: %+v", ErrInvalid, r)
 	}
 	if r.MemMB > c.cfg.CapacityMB-c.cfg.HeadroomMB {
@@ -137,8 +145,16 @@ func (c *Controller) Admit(r Request) (Decision, error) {
 	}
 	c.running[r.ID] = r
 	c.order = append(c.order, r.ID)
+	forOwner := !pressured && (r.Class == Foreground || r.Class == Accepted && r.Owner)
+	if len(c.revokes)+len(victims) > maxRevokes {
+		c.revokes = nil // unread records go; a missing one is not the owner's
+	}
+	if c.revokes == nil {
+		c.revokes = map[string]bool{}
+	}
 	for _, id := range victims {
 		c.yielding[id] = true
+		c.revokes[id] = forOwner
 	}
 	c.mu.Unlock()
 
@@ -174,6 +190,22 @@ func (c *Controller) Admit(r Request) (Decision, error) {
 	return Decision{Preempted: done}, nil
 }
 
+// maxRevokes bounds the revoke records kept unread.
+const maxRevokes = 256
+
+// RevokedForOwner reports, once, whether admission preempted machine id
+// for the owner's work without memory pressure: foreground, or accepted
+// work marked Owner. It is recorded when the victim is picked, under the
+// same lock, so it is the reason for that preemption and no later one.
+// False when there is no record (PE5, security P3).
+func (c *Controller) RevokedForOwner(id string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	v := c.revokes[id]
+	delete(c.revokes, id)
+	return v
+}
+
 // Release returns a machine's memory.
 func (c *Controller) Release(id string) {
 	c.mu.Lock()
@@ -204,19 +236,29 @@ func (c *Controller) Snapshot() Snapshot {
 // agent machine runs all the time, and when foreground needs memory,
 // Admit preempts experiments for it.
 func (c *Controller) Busy() bool {
+	busy, _, _ := c.BusyCause()
+	return busy
+}
+
+// BusyCause is Busy, whether the busy work is the owner's (accepted work
+// marked Owner), and whether memory pressure is over its limit (an
+// unreadable reading counts as over), read together so the loop
+// scheduler's cause for a preemption is consistent (PE5).
+func (c *Controller) BusyCause() (busy, owner, pressure bool) {
 	if c.Pressure != nil {
 		if p := c.Pressure(); math.IsNaN(p) || p < 0 || p > c.MaxPressure {
-			return true
+			pressure = true
 		}
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, r := range c.running {
 		if r.Class == Accepted {
-			return true
+			busy = true
+			owner = owner || r.Owner
 		}
 	}
-	return false
+	return busy || pressure, owner, pressure
 }
 
 // Summary is STATUS's one line about machines, in fixed wording.
