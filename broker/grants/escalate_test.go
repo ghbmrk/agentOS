@@ -24,6 +24,10 @@ func (v escVerifier) Escalate(_ context.Context, in journal.Intent) (Escalation,
 		return Escalation{Ask: true, Reason: "past today's 200"}, nil
 	case "trash":
 		return Escalation{}, errors.New("not an allowed target")
+	case "lower":
+		return Escalation{Verb: "organize"}, nil
+	case "held":
+		return Escalation{Held: true, Reason: "held past today's 200"}, nil
 	}
 	return Escalation{}, nil
 }
@@ -66,9 +70,18 @@ func TestOrganizeEscalatesOnlyWhatTheAdapterFlags(t *testing.T) {
 	if st := r.effect("agent/a4", "message.archive", map[string]any{"record": "trash"}); st.State != journal.Denied || !strings.Contains(st.Permission.Reason, "guard") {
 		t.Fatalf("refused target: %s %q", st.State, st.Permission.Reason)
 	}
+	// Held: refused for now, with a reason that says to try again.
+	if st := r.effect("agent/a5", "message.archive", map[string]any{"record": "held"}); st.State != journal.Denied || !strings.Contains(st.Permission.Reason, "try again") {
+		t.Fatalf("held: %s %q", st.State, st.Permission.Reason)
+	}
 	r.decide(true, "owner")
 	if r.exec.runs("agent/a2") != 1 || r.exec.runs("agent/a3") != 1 {
 		t.Fatal("approved organize effects did not run")
+	}
+	// An escalation to a lower class is ignored: a send stays a send.
+	st = r.effect("agent/a6", "message.send", map[string]any{"record": "lower"})
+	if st.State != journal.Pending || r.exec.runs("agent/a6") != 0 {
+		t.Fatalf("lower-class escalation ran a send: %s", st.State)
 	}
 }
 

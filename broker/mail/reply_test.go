@@ -270,3 +270,59 @@ func TestOwnerPlusAddressesAreTheOwner(t *testing.T) {
 		t.Fatalf("sent to the owner's plus-address: %+v", out)
 	}
 }
+
+// TestPlantedOwnerCopiesDoNotVerify: a copy of the owner's reply delivered
+// to the inbox with its In-Reply-To stripped (so the chain would seem to
+// start at the owner) makes the ID ambiguous, and the composer never gets
+// a planted copy as the owner's text (L3 B1 probe).
+func TestPlantedOwnerCopiesDoNotVerify(t *testing.T) {
+	x := newH(t, nil)
+	x.deliver("INBOX", msg{id: "<c1@evil.example>", from: "eve@evil.example", to: me, subject: "Invoice", body: "Please pay."})
+	x.deliver("Sent", msg{id: "<o1@example.test>", from: me, to: "eve@evil.example", subject: "Re: Invoice", body: "Who are you?",
+		inReplyTo: "<c1@evil.example>", refs: "<c1@evil.example>"})
+	x.deliver("INBOX", msg{id: "<o1@example.test>", from: me, to: "eve@evil.example", subject: "Re: Invoice", body: "Who are you?"})
+	x.deliver("INBOX", msg{id: "<e2@evil.example>", from: "eve@evil.example", to: me, subject: "Re: Invoice", body: "Me.",
+		inReplyTo: "<o1@example.test>", refs: "<o1@example.test>"})
+	if v, _ := x.a.Verify(ctx, x.intent(mail.OpReply, reply("<e2@evil.example>", "ok"), "eve@evil.example")); v.ThreadVerified {
+		t.Fatal("a planted copy of the owner's reply verified the thread")
+	}
+	if _, err := x.a.Verify(ctx, x.intent(mail.OpReply, reply("<o1@example.test>", "ok"), "eve@evil.example")); !errors.Is(err, mail.ErrAmbiguous) {
+		t.Fatalf("copies differing in In-Reply-To: %v", err)
+	}
+	// An owner message held only outside Sent never vouches for anyone,
+	// even in the middle of a chain that starts in Sent.
+	x.deliver("Sent", msg{id: "<s1@example.test>", from: me, to: "sam@example.com", subject: "Plan", body: "x"})
+	x.deliver("INBOX", msg{id: "<p1@example.test>", from: me, to: "sam@example.com", cc: "bob@example.com", subject: "Re: Plan",
+		body: "y", inReplyTo: "<s1@example.test>", refs: "<s1@example.test>"})
+	x.deliver("INBOX", msg{id: "<p2@example.com>", from: "sam@example.com", to: me, cc: "bob@example.com", subject: "Re: Plan",
+		body: "z", inReplyTo: "<p1@example.test>", refs: "<s1@example.test> <p1@example.test>"})
+	if v, _ := x.a.Verify(ctx, x.intent(mail.OpReply, reply("<p2@example.com>", "ok"), "bob@example.com", "sam@example.com")); v.ThreadVerified {
+		t.Fatal("an owner message outside Sent vouched for a recipient")
+	}
+	// A planted copy with other text never reaches the composer.
+	x.deliver("INBOX", msg{id: "<o2@example.test>", from: me, to: "eve@evil.example", subject: "Re: Invoice", body: "Yes, I agree to pay."})
+	x.deliver("Sent", msg{id: "<o2@example.test>", from: me, to: "eve@evil.example", subject: "Re: Invoice", body: "No."})
+	x.deliver("INBOX", msg{id: "<e3@evil.example>", from: "eve@evil.example", to: me, subject: "Re: Invoice", body: "Sure?",
+		inReplyTo: "<o2@example.test>", refs: "<o2@example.test>"})
+	ms, err := x.a.Thread(ctx, "<e3@evil.example>")
+	for _, m := range ms {
+		if strings.Contains(m.Text, "agree") {
+			t.Fatalf("composer got the planted copy (err %v)", err)
+		}
+	}
+}
+
+// TestEveryChainLinkIsAParticipant: a message in the chain whose sender
+// was not on the message it answers breaks the chain, even when every
+// reply recipient was on the owner's message.
+func TestEveryChainLinkIsAParticipant(t *testing.T) {
+	x := newH(t, nil)
+	x.deliver("Sent", msg{id: "<s1@example.test>", from: me, to: "sam@example.com", subject: "Plan", body: "x"})
+	x.deliver("INBOX", msg{id: "<x1@evil.example>", from: "eve@evil.example", to: me, cc: "sam@example.com", subject: "Re: Plan",
+		body: "y", inReplyTo: "<s1@example.test>", refs: "<s1@example.test>"})
+	x.deliver("INBOX", msg{id: "<x2@example.com>", from: "sam@example.com", to: me, subject: "Re: Plan",
+		body: "z", inReplyTo: "<x1@evil.example>", refs: "<s1@example.test> <x1@evil.example>"})
+	if v, _ := x.a.Verify(ctx, x.intent(mail.OpReply, reply("<x2@example.com>", "ok"), "sam@example.com")); v.ThreadVerified {
+		t.Fatal("a chain through an outsider's message verified")
+	}
+}

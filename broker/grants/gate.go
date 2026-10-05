@@ -121,6 +121,10 @@ type Escalation struct {
 	// built only from broker-held fields (never a message's subject or
 	// body). It becomes the approval line's Detail.
 	Reason string
+	// Held refuses the effect for now, with a reason that says it may be
+	// tried again (past a daily bound while the owner has not allowed
+	// more).
+	Held bool
 }
 
 // Verified is what a Verifier read.
@@ -482,6 +486,9 @@ func (g *Gate) evaluate(ctx context.Context, phase journal.Phase, in journal.Int
 		if esc, err = e.Escalate(ctx, in); err != nil {
 			g.cfg.Logf("grants: guarding %s: %v", in.ID, err)
 			return verdict{kind: deny, why: "the adapter's guard refuses this effect (ADP-2)"}
+		}
+		if esc.Held {
+			return verdict{kind: deny, why: "held: past the account's daily bound until the owner allows more; try again later (ADP-2)"}
 		}
 		if esc.Verb != "" {
 			// Only a strictly higher class replaces the granted verb, so

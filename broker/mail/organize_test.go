@@ -192,7 +192,9 @@ func TestAlertsAskBeforeTheyAreHidden(t *testing.T) {
 		// A pass inside a comment, or inside a quoted string, is not a
 		// result (Security C2).
 		mk("<q4@bank.example>", "statements@bank.example", "Your statement",
-			"Authentication-Results: mx.example.test; dmarc=fail (dmarc=pass header.from=bank.example) header.from=bank.example"),
+			"Authentication-Results: mx.example.test; dmarc=fail (x; dmarc=pass header.from=bank.example ) header.from=bank.example"),
+		mk("<q7@bank.example>", "statements@bank.example", "Your statement",
+			"Authentication-Results: mx.example.test; spf=pass (x; dmarc=pass header.from=bank.example ) smtp.mailfrom=bank.example"),
 		mk("<q5@bank.example>", "statements@bank.example", "Your statement",
 			`Authentication-Results: mx.example.test; spf=pass smtp.mailfrom="x; dmarc=pass header.from=bank.example"`),
 		mk("<q6@bank.example>", "statements@bank.example", "Your statement",
@@ -249,6 +251,7 @@ func TestAlertsAskBeforeTheyAreHidden(t *testing.T) {
 // effect; without the journal count none runs unasked (UX-69-1).
 func TestOrganizeBoundAsksPastTheDailyLimit(t *testing.T) {
 	var authorized int
+	var approved []string // intents the owner approved past the bound
 	var since time.Time
 	x := newH(t, func(c *mail.Config) {
 		c.Authorized = func(action string, s time.Time) []journal.Intent {
@@ -259,6 +262,9 @@ func TestOrganizeBoundAsksPastTheDailyLimit(t *testing.T) {
 			var out []journal.Intent
 			for i := 0; i < authorized; i++ {
 				out = append(out, journal.Intent{ID: fmt.Sprint("earlier/", i), Account: "mail"})
+			}
+			for _, a := range approved {
+				out = append(out, journal.Intent{ID: a, Account: "mail"})
 			}
 			return out
 		}
@@ -282,16 +288,23 @@ func TestOrganizeBoundAsksPastTheDailyLimit(t *testing.T) {
 	if e, err := x.a.Escalate(ctx, first); err != nil || !e.Ask || e.Verb != "" || e.Reason != "past today's 200; YES allows 2000" {
 		t.Fatalf("past the bound: %+v %v", e, err)
 	}
-	// While it is open (or after a NO) the rest are held, not asked.
-	if _, err := x.a.Escalate(ctx, x.intent(mail.OpArchive, rec(id))); !errors.Is(err, mail.ErrHeld) {
-		t.Fatalf("second past the bound: %v", err)
+	// While it is open (or after a NO) the rest are held, not asked, with
+	// a reason that says they may be tried again.
+	if e, err := x.a.Escalate(ctx, x.intent(mail.OpArchive, rec(id))); err != nil || !e.Held || e.Ask || e.Reason != "held past today's 200" {
+		t.Fatalf("second past the bound: %+v %v", e, err)
 	}
 	if e, err := x.a.Escalate(ctx, first); err != nil || !e.Ask {
 		t.Fatalf("the asked effect's recheck: %+v %v", e, err)
 	}
-	// YES: the journal holds more than the bound, so the rest of the day
+	// Other owner approvals (a share, an alert) can take the count past
+	// the bound: that is no YES to this ask, and nothing is lifted.
+	authorized = mail.DefaultDailyLimit + 5
+	if e, err := x.a.Escalate(ctx, x.intent(mail.OpArchive, rec(id))); err != nil || !e.Held {
+		t.Fatalf("count past the bound without a YES: %+v %v", e, err)
+	}
+	// YES: the journal authorized the asked effect, so the rest of the day
 	// runs unasked up to the ceiling.
-	authorized = mail.DefaultDailyLimit + 1
+	approved = []string{first.ID}
 	if e, err := x.a.Escalate(ctx, x.intent(mail.OpArchive, rec(id))); err != nil || e.Ask {
 		t.Fatalf("after YES: %+v %v", e, err)
 	}
@@ -304,20 +317,32 @@ func TestOrganizeBoundAsksPastTheDailyLimit(t *testing.T) {
 	if e, err := x.a.Escalate(ctx, x.intent(mail.OpArchive, rec(id))); err != nil || !e.Ask || e.Reason != "past today's 2000" {
 		t.Fatalf("past the ceiling: %+v %v", e, err)
 	}
-	if e, err := x.a.Escalate(ctx, x.intent(mail.OpArchive, rec(id))); err != nil || !e.Ask {
+	if e, err := x.a.Escalate(ctx, x.intent(mail.OpArchive, rec(id))); err != nil || !e.Ask || e.Held {
 		t.Fatalf("past the ceiling, asked again: %+v %v", e, err)
 	}
+	// The lift lasts the day the ask was made.
+	x.now = x.now.Add(25 * time.Hour)
+	authorized, approved = mail.DefaultDailyLimit, nil
+	if e, err := x.a.Escalate(ctx, x.intent(mail.OpArchive, rec(id))); err != nil || e.Reason != "past today's 200; YES allows 2000" {
+		t.Fatalf("next day: %+v %v", e, err)
+	}
 	// The ceiling is the owner's to set.
+	zj := []journal.Intent{{ID: "a", Account: "mail"}, {ID: "b", Account: "mail"}}
 	z := newH(t, func(c *mail.Config) {
 		c.DailyLimit, c.DailyCeiling = 2, 3
 		c.Authorized = func(action string, _ time.Time) []journal.Intent {
 			if action != mail.OpArchive {
 				return nil
 			}
-			return []journal.Intent{{ID: "a", Account: "mail"}, {ID: "b", Account: "mail"}, {ID: "c", Account: "mail"}}
+			return zj
 		}
 	})
 	id = z.news(1)
+	zin := z.intent(mail.OpArchive, rec(id))
+	if e, _ := z.a.Escalate(ctx, zin); !e.Ask || e.Reason != "past today's 2; YES allows 3" {
+		t.Fatalf("owner's ceiling, ask: %+v", e)
+	}
+	zj = append(zj, journal.Intent{ID: zin.ID, Account: "mail"})
 	if e, _ := z.a.Escalate(ctx, z.intent(mail.OpArchive, rec(id))); !e.Ask || e.Reason != "past today's 3" {
 		t.Fatalf("owner's ceiling: %+v", e)
 	}

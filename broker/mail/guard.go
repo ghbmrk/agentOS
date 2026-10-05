@@ -85,8 +85,7 @@ func (a *Adapter) locate(ctx context.Context, record, hint string) (Message, err
 	// Every candidate folder is searched: a Message-ID is the sender's
 	// choice, so a second message claiming the same ID (a forged copy of
 	// one the owner sent) makes the record ambiguous and is refused. Copies
-	// of one message (the same sender, date, subject and recipients, e.g. a
-	// label folder) are not ambiguous.
+	// of one message (sameMessage, e.g. a label folder) are not ambiguous.
 	seen := map[string]bool{}
 	var found []Message
 	for _, f := range order {
@@ -112,10 +111,13 @@ func (a *Adapter) locate(ctx context.Context, record, hint string) (Message, err
 }
 
 // sameMessage reports whether two copies carrying one Message-ID are the
-// same message: the same sender, date, subject and recipients.
+// same message: the same sender, date, subject, recipients, threading
+// headers and text. A copy that differs in any of them (an inbox copy of
+// the owner's reply with its In-Reply-To stripped) makes the ID ambiguous.
 func sameMessage(x, y Message) bool {
 	return x.From == y.From && x.Date.Equal(y.Date) && x.Subject == y.Subject &&
-		slices.Equal(sorted(x.To), sorted(y.To)) && slices.Equal(sorted(x.Cc), sorted(y.Cc))
+		slices.Equal(sorted(x.To), sorted(y.To)) && slices.Equal(sorted(x.Cc), sorted(y.Cc)) &&
+		x.InReplyTo == y.InReplyTo && slices.Equal(x.References, y.References) && x.Text == y.Text
 }
 
 var trashNames = regexp.MustCompile(`(?i)(^|[/.\]])\s*(trash|bin|deleted( items| messages)?|junk|spam|bulk mail)\s*$`)
@@ -370,7 +372,7 @@ func (a *Adapter) Escalate(ctx context.Context, in journal.Intent) (grants.Escal
 		e.Ask = true
 		why = append(why, fmt.Sprintf("past today's %d", a.cfg.DailyCeiling))
 	case held:
-		return grants.Escalation{}, ErrHeld
+		return grants.Escalation{Held: true, Reason: fmt.Sprintf("held past today's %d", a.cfg.DailyLimit)}, nil
 	}
 	e.Reason = strings.Join(why, "; ")
 	return e, nil
@@ -395,11 +397,6 @@ const (
 	askEach              // past the ceiling a YES lifted the bound to
 )
 
-// ErrHeld refuses an organize effect past the day's bound while the owner
-// has not said YES to the one ask (ADP-2); it may be tried again once the
-// owner does, or tomorrow.
-var ErrHeld = errors.New("mail: past today's organize bound; held until the owner allows more")
-
 // reserve takes a place under the day's organize bound for id. The count
 // and the reservation happen under one lock, so concurrent checks cannot
 // all see room for the last place. The count is the journal's authorized
@@ -409,9 +406,11 @@ var ErrHeld = errors.New("mail: past today's organize bound; held until the owne
 // Past the bound the owner is asked once (ADP-2's "asked once, as one
 // batch"): the first effect past it is asked, and the rest are held while
 // that ask is open, after a NO, or with no answer, until the count falls
-// back under the bound. The journal shows a YES: only an owner's approval
-// can authorize more than the bound, so a count above it means the bound
-// is lifted for the day, up to DailyCeiling; past that each is asked.
+// back under the bound. A YES is the journal authorizing that one asked
+// effect (not any count above the bound, which owner-approved share or
+// alert asks can also reach): it lifts the bound for the day the ask was
+// made, up to DailyCeiling; past that each is asked. The open ask is kept
+// in memory, so after a restart the owner may be asked once more.
 // The YES lifts only the count: every effect still meets the target,
 // share and alert guards. Without the journal hook every effect is asked.
 func (a *Adapter) reserve(id string) place {
@@ -433,6 +432,8 @@ func (a *Adapter) reserve(id string) place {
 			}
 		}
 	}
+	open := a.over.id != "" && !a.over.at.Before(since)
+	lifted := open && counted[a.over.id]
 	for r, at := range a.reserved {
 		if at.Before(since) {
 			delete(a.reserved, r)
@@ -444,7 +445,6 @@ func (a *Adapter) reserve(id string) place {
 		return placed // already holds a place (the recheck before dispatch)
 	}
 	limit := a.cfg.DailyLimit
-	lifted := len(counted) > limit
 	if lifted {
 		limit = a.cfg.DailyCeiling
 	}
@@ -455,7 +455,7 @@ func (a *Adapter) reserve(id string) place {
 	if lifted {
 		return askEach
 	}
-	if a.over.id == "" || a.over.id == id || a.over.at.Before(since) {
+	if !open || a.over.id == id {
 		a.over = overAsk{id: id, at: now}
 		return askOnce
 	}
