@@ -314,7 +314,9 @@ type Pipeline struct {
 	probes    map[string]int
 	probeTask map[string]string
 	// kept holds preempted evaluations' completed pairs (PE1).
-	kept map[string]pairResult
+	kept      map[string]pairResult
+	keptOrder []keptAt // put order, for dropping the oldest
+	keptSeq   uint64
 }
 
 // New loads the persisted state, or seeds it on first start, and applies
@@ -743,6 +745,7 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 		done  bool
 		// struck: failed without running (MaxInterruptions).
 		struck bool
+		err    bool // the evaluator errored (a fail, unlike a grader's)
 	}
 	nonce := make([]byte, 16)
 	_, _ = rand.Read(nonce)
@@ -808,7 +811,7 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 		if r.cand {
 			t = next
 		}
-		r.ok, r.ev = p.pass(ctx, t, r.c, r.probe)
+		r.ok, r.ev, r.err = p.pass(ctx, t, r.c, r.probe)
 		// A run that returns after the preemption may have failed
 		// because of it: it is discarded, never counted or kept.
 		r.done = ctx.Err() == nil
@@ -816,8 +819,17 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 			cut = r
 		}
 	}
+	interrupted := ctx.Err() != nil
 	for _, r := range runs {
 		if !r.done {
+			continue
+		}
+		if interrupted && r.err && !r.cand {
+			// An erroring baseline (a model outage, a rate limit) is
+			// not kept: kept as a fail it could hide a regression for
+			// as long as it is kept. It runs again on resume. A
+			// candidate's error stays a fail: the candidate may cause
+			// it, and must not re-roll by it (security F1 on #103).
 			continue
 		}
 		pr := res[r.c.ID]
@@ -828,7 +840,7 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 		}
 		res[r.c.ID] = pr
 	}
-	if err := ctx.Err(); err != nil {
+	if interrupted {
 		p.mu.Lock()
 		// Every side that finished is kept, so a result once seen is
 		// never run again. The candidate side cut short is counted, so
@@ -843,7 +855,7 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 			}
 		}
 		p.mu.Unlock()
-		return Score{}, fmt.Errorf("%w: %w", ErrInterrupted, err)
+		return Score{}, fmt.Errorf("%w: %w", ErrInterrupted, ctx.Err())
 	}
 	p.mu.Lock()
 	for _, k := range keys {
@@ -949,19 +961,19 @@ var ErrNotEvaluated = errors.New("change: not evaluated on this box")
 
 // pass reports whether the case passed on t, and whether it was evaluated
 // at all. Any other evaluator error is a fail.
-func (p *Pipeline) pass(ctx context.Context, t Tree, c Case, probe string) (ok, evaluated bool) {
+func (p *Pipeline) pass(ctx context.Context, t Tree, c Case, probe string) (ok, evaluated, errored bool) {
 	out, err := p.cfg.Evaluator.Run(ctx, t.clone(), Probe{ID: probe, Input: append([]byte(nil), c.Input...)})
 	if errors.Is(err, ErrNotEvaluated) {
-		return false, false
+		return false, false, false
 	}
 	if err != nil {
-		return false, true
+		return false, true, true
 	}
 	g := p.cfg.Graders[c.Class]
 	if g == nil {
 		g = DefaultGrader
 	}
-	return g(c, out), true
+	return g(c, out), true, false
 }
 
 // ProbeTask maps a probe ID of a running evaluation back to the journal

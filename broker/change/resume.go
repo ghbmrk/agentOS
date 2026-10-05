@@ -39,6 +39,7 @@ type pairResult struct {
 	baseDone, nextDone             bool
 	interrupted                    int
 	at                             time.Time
+	seq                            uint64 // put order (Pipeline.keptOrder)
 }
 
 // resumeKey binds a pair to the exact base tree, candidate tree, case
@@ -86,26 +87,42 @@ func (p *Pipeline) keepLocked(key string, r pairResult) {
 }
 
 func (p *Pipeline) putLocked(key string, r pairResult) {
-	now := p.cfg.Now()
-	r.at = now
+	p.keptSeq++
+	r.at, r.seq = p.cfg.Now(), p.keptSeq
 	p.kept[key] = r
-	if len(p.kept) <= MaxKeptPairs {
-		return
-	}
-	for k, v := range p.kept {
-		if now.Sub(v.at) > ResumeFor {
-			delete(p.kept, k)
+	p.keptOrder = append(p.keptOrder, keptAt{key, r.seq})
+	// Drop the oldest while over the cap. An order entry whose key was
+	// put again since, or removed, is stale and skipped, so each entry is
+	// looked at once: amortized O(1) per put (L3 nit on #103).
+	for len(p.kept) > MaxKeptPairs && len(p.keptOrder) > 0 {
+		o := p.keptOrder[0]
+		p.keptOrder = p.keptOrder[1:]
+		if v, ok := p.kept[o.key]; ok && v.seq == o.seq {
+			delete(p.kept, o.key)
 		}
 	}
-	for len(p.kept) > MaxKeptPairs {
-		oldest := ""
-		for k, v := range p.kept {
-			if oldest == "" || v.at.Before(p.kept[oldest].at) || v.at.Equal(p.kept[oldest].at) && k < oldest {
-				oldest = k
-			}
-		}
-		delete(p.kept, oldest)
+	if len(p.keptOrder) > 2*MaxKeptPairs {
+		p.compactKeptLocked()
 	}
+}
+
+// keptAt is an entry of the pipeline's kept order: a key and its put's
+// sequence number.
+type keptAt struct {
+	key string
+	seq uint64
+}
+
+// compactKeptLocked rebuilds the kept order from the kept entries, oldest
+// first, dropping stale order entries.
+func (p *Pipeline) compactKeptLocked() {
+	var live []keptAt
+	for _, o := range p.keptOrder {
+		if v, ok := p.kept[o.key]; ok && v.seq == o.seq {
+			live = append(live, o)
+		}
+	}
+	p.keptOrder = live
 }
 
 // keptPairs counts the pairs kept with both sides finished.

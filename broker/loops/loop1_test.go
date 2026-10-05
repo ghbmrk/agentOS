@@ -943,3 +943,102 @@ func TestAPreemptedCandidateIsResumedNotRebuilt(t *testing.T) {
 		t.Fatalf("resumed evaluation ran %d probes of %d: it started over", resumed, total)
 	}
 }
+
+// interruptingPipeline answers every proposal as preempted, and records
+// what it was given.
+type interruptingPipeline struct {
+	Pipeline
+	got []change.Candidate
+}
+
+func (p *interruptingPipeline) Propose(_ context.Context, c change.Candidate) (change.Report, error) {
+	p.got = append(p.got, c)
+	return change.Report{}, change.ErrInterrupted
+}
+
+func newKeepRig(t *testing.T) (*Learn, *interruptingPipeline, *builder, *clock) {
+	t.Helper()
+	pl := &interruptingPipeline{}
+	b := &builder{files: map[string][]byte{"procedures/mail": []byte("v2")}}
+	clk := &clock{t: time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)}
+	l, err := NewLearn(LearnConfig{Pipeline: pl, Journal: &journal.Engine{}, Harvest: &Harvester{}, Builder: b, Now: clk.now})
+	must(t, err)
+	return l, pl, b, clk
+}
+
+func hyp(key string, tasks ...string) Hypothesis {
+	h := Hypothesis{Signal: SignalCorrection, Class: change.ClassProcedure, Key: key, Tasks: tasks}
+	for _, task := range tasks {
+		h.Evidence = append(h.Evidence, journal.Status{Intent: journal.Intent{ID: task, Label: "private"}})
+	}
+	return h
+}
+
+// REQ: CHG-1, LOOP-1
+// L3 MUST-1 on #103: a kept candidate is reused only for the very brief it
+// was built from. The same number of tasks with one swapped, a task now
+// held out, or an expired candidate builds afresh.
+func TestAKeptCandidateNeedsTheSameBrief(t *testing.T) {
+	l, _, b, clk := newKeepRig(t)
+	ev := Evidence{}
+	h := hyp("k", "task-a", "task-b")
+	l.propose(context.Background(), h, ev)
+	l.propose(context.Background(), h, ev)
+	if n := len(b.got()); n != 1 {
+		t.Fatalf("%d builds for the same brief, want 1", n)
+	}
+
+	swapped := hyp("k", "task-a", "task-c") // same count, another task
+	l.propose(context.Background(), swapped, ev)
+	if n := len(b.got()); n != 2 {
+		t.Fatalf("%d builds after a task was swapped, want 2", n)
+	}
+
+	held := Evidence{heldTasks: map[string]bool{"task-a": true}}
+	l.propose(context.Background(), swapped, held)
+	if n := len(b.got()); n != 3 {
+		t.Fatalf("%d builds after a task was held out, want 3", n)
+	}
+
+	l.propose(context.Background(), swapped, ev) // kept, then reused once the hold lifts
+	if n := len(b.got()); n != 3 {
+		t.Fatalf("%d builds for an unchanged brief, want 3", n)
+	}
+	clk.mu.Lock()
+	clk.t = clk.t.Add(change.ResumeFor + time.Minute)
+	clk.mu.Unlock()
+	l.propose(context.Background(), swapped, ev)
+	if n := len(b.got()); n != 4 {
+		t.Fatalf("%d builds after the kept candidate expired, want 4", n)
+	}
+
+	dev := Evidence{Dev: []change.Case{{ID: "dev-1"}}}
+	l.propose(context.Background(), swapped, dev)
+	if n := len(b.got()); n != 5 {
+		t.Fatalf("%d builds after the dev split changed, want 5", n)
+	}
+}
+
+// REQ: LOOP-1
+// At most maxKeptCandidates candidates are kept, oldest dropped first.
+func TestKeptCandidatesAreBounded(t *testing.T) {
+	l, _, b, clk := newKeepRig(t)
+	for i := 0; i <= maxKeptCandidates; i++ {
+		clk.mu.Lock()
+		clk.t = clk.t.Add(time.Second)
+		clk.mu.Unlock()
+		l.propose(context.Background(), hyp(fmt.Sprintf("k%d", i), "t"), Evidence{})
+	}
+	l.mu.Lock()
+	n := len(l.built)
+	_, oldest := l.built["k0"]
+	l.mu.Unlock()
+	if n != maxKeptCandidates || oldest {
+		t.Fatalf("%d kept (oldest kept: %v), want %d without the oldest", n, oldest, maxKeptCandidates)
+	}
+	before := len(b.got())
+	l.propose(context.Background(), hyp(fmt.Sprintf("k%d", maxKeptCandidates), "t"), Evidence{})
+	if len(b.got()) != before {
+		t.Fatal("the newest kept candidate was rebuilt")
+	}
+}

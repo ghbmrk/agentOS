@@ -211,11 +211,31 @@ type Learn struct {
 	built map[string]keptCandidate
 }
 
-// keptCandidate is a built candidate and the evidence it was built on.
+// keptCandidate is a built candidate and the brief it was built from.
 type keptCandidate struct {
 	cand  change.Candidate
-	tasks int
+	brief string // briefDigest of the builder's brief
+	tasks []string
 	at    time.Time
+}
+
+// briefDigest names everything a builder saw: the hypothesis's tasks, its
+// evidence intents and their labels, and the dev cases. A kept candidate
+// is reused only for the same brief (L3 MUST-1 on #103), so a candidate
+// built from a task that is now held out is never scored on that task.
+func briefDigest(h Hypothesis, dev []change.Case) string {
+	var parts []string
+	for _, t := range h.Tasks {
+		parts = append(parts, "t\x00"+t)
+	}
+	for _, s := range h.Evidence {
+		parts = append(parts, "e\x00"+s.Intent.ID+"\x00"+s.Intent.Label)
+	}
+	for _, c := range dev {
+		parts = append(parts, "d\x00"+c.ID)
+	}
+	sort.Strings(parts)
+	return digest(h.Key + "\x01" + strings.Join(parts, "\x01"))
 }
 
 // maxKeptCandidates bounds Learn.built.
@@ -382,13 +402,19 @@ func (l *Learn) done(ctx context.Context, key string, n int) {
 var ErrOutOfClass = errors.New("loops: candidate writes outside its hypothesis's namespace")
 
 func (l *Learn) propose(ctx context.Context, h Hypothesis, ev Evidence) (change.Report, error) {
+	brief := briefDigest(h, ev.Dev)
 	l.mu.Lock()
 	k, ok := l.built[h.Key]
 	delete(l.built, h.Key)
 	l.mu.Unlock()
 	cand := k.cand
-	if !ok || k.tasks != len(h.Tasks) {
-		// No kept candidate, or new evidence since: build afresh.
+	reuse := ok && k.brief == brief && l.cfg.Now().Sub(k.at) <= change.ResumeFor
+	for _, t := range k.tasks {
+		reuse = reuse && !ev.Held(t)
+	}
+	if !reuse {
+		// No kept candidate, or its brief changed, it expired, or one of
+		// its tasks is now held out: build afresh.
 		built, err := l.cfg.Builder.Build(ctx, Brief{Hypothesis: h, Dev: ev.Dev})
 		if err != nil {
 			return change.Report{}, err
@@ -408,7 +434,7 @@ func (l *Learn) propose(ctx context.Context, h Hypothesis, ev Evidence) (change.
 		// Preempted mid-evaluation: keep the checked candidate for the
 		// next offer, so the pipeline can resume its pairs.
 		l.mu.Lock()
-		l.built[h.Key] = keptCandidate{cand: cand, tasks: len(h.Tasks), at: l.cfg.Now()}
+		l.built[h.Key] = keptCandidate{cand: cand, brief: brief, tasks: slices.Clone(h.Tasks), at: l.cfg.Now()}
 		for len(l.built) > maxKeptCandidates {
 			oldest := ""
 			for k, v := range l.built {

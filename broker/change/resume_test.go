@@ -394,3 +394,110 @@ func TestKeptResultsNeedTheSameEvaluator(t *testing.T) {
 		t.Fatalf("another evaluator reused kept results: %d probes, want %d", pe.runs(), 2*total)
 	}
 }
+
+// L3 MUST-2 on #103: kept results are bound to the base tree on its own.
+// Two evaluations with the same candidate tree and different bases (two
+// adoptions of one path in a Recheck) never share results.
+func TestKeptResultsNeedTheSameBase(t *testing.T) {
+	e, pe := newPreemptEnv(t, nil)
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	next := Tree{"skills/greet": []byte("hello")}
+	base1 := Tree{"skills/greet": []byte("hi")}
+	base2 := Tree{"skills/greet": []byte("hi"), "context/x": []byte("1")}
+	e.p.mu.Lock()
+	set := e.p.freezeLocked([]Class{ClassSkill})
+	e.p.mu.Unlock()
+	total := len(set.heldOut) + len(set.security)
+	st := strictFor(Local, []Class{ClassSkill})
+	if _, err := e.p.evaluate(pe.arm(2*total-1), base1, next, set, st); !errors.Is(err, ErrInterrupted) {
+		t.Fatal(err)
+	}
+	if e.p.keptSides() == 0 {
+		t.Fatal("nothing kept")
+	}
+	pe.arm(0)
+	if _, err := e.p.evaluate(context.Background(), base2, next, set, st); err != nil {
+		t.Fatal(err)
+	}
+	if pe.runs() != 2*total {
+		t.Fatalf("another base reused kept results: %d probes, want %d", pe.runs(), 2*total)
+	}
+}
+
+// L3 MUST-3 on #103: a preempted Export exports nothing.
+func TestPreemptedExportExportsNothing(t *testing.T) {
+	e, pe := newPreemptEnv(t, nil)
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	pe.arm(0)
+	rep, err := e.p.Propose(context.Background(), Candidate{Source: Local, Public: true, Files: Tree{"skills/greet": []byte("hello")}})
+	if err != nil || rep.State != StateAdopted {
+		t.Fatalf("%+v %v", rep, err)
+	}
+	e.owner.approve = true
+	if err := e.p.SetSharing(bg, true); err != nil {
+		t.Fatal(err)
+	}
+	pkg, err := e.p.Export(pe.arm(1), rep.ID)
+	if !errors.Is(err, ErrInterrupted) || pkg != nil {
+		t.Fatalf("preempted export: %q %v", pkg, err)
+	}
+	pe.arm(0)
+	if pkg, err := e.p.Export(bg, rep.ID); err != nil || pkg == nil {
+		t.Fatalf("export after the preemption: %v", err)
+	}
+}
+
+// L3 nit on #103 (M4): a case whose content changed under the same ID runs
+// afresh on both sides.
+func TestAChangedCaseRunsAfresh(t *testing.T) {
+	e, pe := newPreemptEnv(t, func(c *Config) { c.MinHeldOut = 100 })
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	if _, err := e.p.Propose(lateArm(e, pe), greet); !errors.Is(err, ErrInterrupted) {
+		t.Fatal(err)
+	}
+	kept := pe.sides()
+	e.p.mu.Lock()
+	for id, c := range e.p.st.Cases {
+		c.Expect = []byte("changed")
+		e.p.st.Cases[id] = c
+	}
+	e.p.mu.Unlock()
+	pe.arm(0)
+	rep, err := e.p.Propose(context.Background(), greet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total := rep.HeldOut + rep.Security + rep.NotEvaluated; kept == 0 || pe.runs() != 2*total {
+		t.Fatalf("changed cases reused kept results: %d probes, want %d", pe.runs(), 2*total)
+	}
+}
+
+// L3 nit on #103: a baseline run the evaluator errored on (a model outage)
+// is not kept, so it cannot sit as a fail and hide a regression; it runs
+// again on resume. A candidate's error is kept as a fail (security F1).
+func TestAnErroringBaselineIsNotKept(t *testing.T) {
+	e, pe := newPreemptEnv(t, func(c *Config) { c.MinHeldOut = 100 })
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	// Break the baseline: its tree loses the file every case reads.
+	e.p.mu.Lock()
+	delete(e.p.st.Active, "skills/greet")
+	set := e.p.freezeLocked([]Class{ClassSkill})
+	e.p.mu.Unlock()
+	base := Tree{"procedures/file": []byte("v1")}
+	next := Tree{"procedures/file": []byte("v1"), "skills/greet": []byte("hello")}
+	total := len(set.heldOut) + len(set.security)
+	st := strictFor(Local, []Class{ClassSkill})
+	if _, err := e.p.evaluate(pe.arm(2*total-1), base, next, set, st); !errors.Is(err, ErrInterrupted) {
+		t.Fatal(err)
+	}
+	e.p.mu.Lock()
+	for _, r := range e.p.kept {
+		if r.baseDone && !r.BaseOK && r.BaseEv {
+			// The fixture's baseline passes ("refused"); every other
+			// baseline errored and must not be kept.
+			e.p.mu.Unlock()
+			t.Fatal("an erroring baseline was kept")
+		}
+	}
+	e.p.mu.Unlock()
+}
