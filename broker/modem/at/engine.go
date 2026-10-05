@@ -38,6 +38,10 @@ type pending struct {
 	cmd    string
 	resp   string          // "+CMGR" for AT+CMGR=1: its information lines are never URCs
 	finals map[string]bool // extra final results (ATD, ATA)
+	// marker, when set, must appear before a final result counts: finals
+	// that arrive first belong to an earlier, timed-out command.
+	marker string
+	marked bool
 	lines  []string
 	prompt chan struct{}
 	final  chan string
@@ -56,7 +60,11 @@ var ErrTimeout = errors.New("at: timeout")
 
 // baseURCs are the TS 27.005/27.007 and V.250 unsolicited results.
 var baseURCs = []string{"+CMTI:", "+CMT:", "+CDS:", "+CDSI:", "RING", "+CRING:", "+CLIP:", "+CCWA:",
-	"NO CARRIER", "BUSY", "NO ANSWER", "+CUSD:", "+CREG:", "+CGREG:", "+CEREG:"}
+	"NO CARRIER", "BUSY", "NO ANSWER", "+CUSD:", "+CREG:", "+CGREG:", "+CEREG:", "+CPIN:"}
+
+// maxLine bounds one line from the modem. The longest real line is a
+// 176-octet PDU in hex (352 characters).
+const maxLine = 4096
 
 // callFinals end ATD and ATA as well as OK and the errors.
 var callFinals = map[string]bool{"NO CARRIER": true, "BUSY": true, "NO ANSWER": true, "NO DIALTONE": true}
@@ -95,11 +103,20 @@ func (e *Engine) read() {
 	br := bufio.NewReader(e.port)
 	var line []byte
 	var err error
+	overlong := false
 	for {
 		var b byte
 		b, err = br.ReadByte()
 		if err != nil {
 			break
+		}
+		if overlong { // discard up to the next line end
+			overlong = b != '\n'
+			continue
+		}
+		if len(line) >= maxLine {
+			line, overlong = line[:0], b != '\n'
+			continue
 		}
 		switch b {
 		case '\n':
@@ -140,6 +157,14 @@ func (e *Engine) line(l string) {
 	if p != nil {
 		if l == p.cmd { // echo before ATE0 takes effect
 			return
+		}
+		if p.marker != "" && strings.HasPrefix(l, p.marker) {
+			p.marked = true
+			p.lines = append(p.lines, l)
+			return
+		}
+		if (isFinal(l) || p.finals[l]) && p.marker != "" && !p.marked {
+			return // a late final of the command that timed out
 		}
 		if isFinal(l) || p.finals[l] {
 			e.mu.Lock()
@@ -187,8 +212,15 @@ func (e *Engine) run(ctx context.Context, cmd, payload string, timeout time.Dura
 	e.stale = false
 	e.mu.Unlock()
 	if stale {
-		_, _ = e.exchange(ctx, "AT", "", time.Second)
-		time.Sleep(50 * time.Millisecond) // a second late OK lands with no command and is dropped
+		// Resynchronize on a reply only this probe produces: any final
+		// result before its +CSQ line is a late answer to the command that
+		// timed out, and is dropped.
+		if _, err := e.exchangeMarked(ctx, "AT+CSQ", "+CSQ:", 2*time.Second); err != nil {
+			e.mu.Lock()
+			e.stale = true
+			e.mu.Unlock()
+			return nil, err
+		}
 	}
 	lines, err := e.exchange(ctx, cmd, payload, timeout)
 	if err == ErrTimeout || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -200,7 +232,15 @@ func (e *Engine) run(ctx context.Context, cmd, payload string, timeout time.Dura
 }
 
 func (e *Engine) exchange(ctx context.Context, cmd, payload string, timeout time.Duration) ([]string, error) {
-	p := &pending{cmd: cmd, resp: respPrefix(cmd), final: make(chan string, 1)}
+	return e.exchangeWith(ctx, &pending{cmd: cmd, resp: respPrefix(cmd), final: make(chan string, 1)}, payload, timeout)
+}
+
+func (e *Engine) exchangeMarked(ctx context.Context, cmd, marker string, timeout time.Duration) ([]string, error) {
+	return e.exchangeWith(ctx, &pending{cmd: cmd, marker: marker, final: make(chan string, 1)}, "", timeout)
+}
+
+func (e *Engine) exchangeWith(ctx context.Context, p *pending, payload string, timeout time.Duration) ([]string, error) {
+	cmd := p.cmd
 	if strings.HasPrefix(cmd, "ATD") || cmd == "ATA" {
 		p.finals = callFinals
 	}

@@ -31,12 +31,6 @@ Started before spec v0.12 on parts unlikely to change; each package lists its sp
 | P1-5 | Owner channel on a modem simulator: SMS, two-tier approval codes, tiers, inline unlock, code hygiene, disclosure and commitment filters (CH-1–4, CH-10–14, CH-16, CH-18, CH-19, ADP-11) ([assumptions](broker/owner/ASSUMPTIONS.md)). Carry-forward: P2-2's local UI must offer RESUME and a local unlock that clears challenge mode (O4) as defense in depth; P1-7 tells the owner what a restart dropped (`Boot`) and closes approval-pending intents with no live request | P1-2 | in review |
 | P1-4 | Agent-machine lifecycle: create, snapshot, fork, diff, merge, rollback, rebuild, destroy under gVisor with cgroup budgets and preemption (REV-1, REV-4, ARC-4, RES-1, RES-2) ([assumptions](broker/vm/ASSUMPTIONS.md)) | P1-2 | in review |
 
-## Phase 2: real hardware (cloud parts)
-
-| ID | Package | Needs | State |
-|---|---|---|---|
-| P2-3 | Real modem integration, cloud part: AT driver for Quectel EC25/EG25 (USB Audio Class voice) and SIMCom SIM7600G-H (PCM over serial), SMS in PDU mode, calls with keypad decoding in the broker and tones muted before speech, an AT-level simulator on the P1-5 carrier, and ADP-12's second-line tool (HW-2, CH-1, CH-5, CH-17, ADP-12) ([assumptions](broker/modem/at/ASSUMPTIONS.md)). Final tuning waits on S2 ([what S2 must confirm](broker/modem/at/S2-CONFIRM.md)) | P1-5, S2 | in review |
-
 P1-4 follow-ups (from the #23 review), for P1-7 or the loop scheduler:
 - Re-admit preempted experiments: nothing calls `Manager.Resume` with retries yet (Potency).
 - Long experiments take an idle-time full checkpoint, so repeated preemption still makes progress (Potency).
@@ -49,3 +43,5 @@ P1-4 follow-ups (from the #23 review), for P1-7 or the loop scheduler:
 | ID | Package | Needs | State |
 |---|---|---|---|
 | P2-7 | Provider adapters: model router (CAP-9) over two API routes, OpenAI and Anthropic, behind the one chat-completions guest interface; failover on exhaustion, grants and data labels checked before sending, measured routes and Loop 1 rule candidates ([assumptions](broker/route/ASSUMPTIONS.md)). A3's consumer route waits on S6. Wiring: serve `Router.Handler` behind the OP-8 meter in place of the raw proxy | P1-3, P1-7 | in review |
+| P2-3 | Real modem integration, cloud part: AT driver for Quectel EC25/EG25 (USB Audio Class voice) and SIMCom SIM7600G-H (PCM over serial), SMS in PDU mode, calls with keypad decoding in the broker and tones muted before speech, an AT-level simulator on the P1-5 carrier, and ADP-12's second-line tool (HW-2, CH-1, CH-5, CH-17, ADP-12) ([assumptions](broker/modem/at/ASSUMPTIONS.md)). Final tuning waits on S2 ([what S2 must confirm](broker/modem/at/S2-CONFIRM.md)) | P1-5, S2 | in review |
+| P2-3b | Second line as an owner-held VoIP/SIP account (ADP-12), so most owners get third-party calls and texts without buying a second modem (from the #33 review, Potency) | P2-3 | queued |

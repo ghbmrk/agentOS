@@ -55,6 +55,13 @@ type Submit struct {
 // simulator).
 type Deliver struct {
 	Addr string // sender of a DELIVER, recipient of a SUBMIT
+	// TON is the address's type of number (TS 23.040 9.1.2.5): 1 is
+	// international, 5 alphanumeric. An alphanumeric address is a sender
+	// ID that can spell any text, a phone number included.
+	TON byte
+	// PID is TP-PID. 0x40 (silent Type-0) and 0x41-0x47 (replace-message)
+	// are not texts for anyone to read.
+	PID  byte
 	Text string
 	// Concat is set on one part of a concatenated text.
 	Concat *Concat
@@ -111,6 +118,10 @@ func EncodeDeliver(from, text string, ref byte) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	return encodeDeliver(oa, 0x00, text, ref)
+}
+
+func encodeDeliver(oa []byte, pid byte, text string, ref byte) ([]string, error) {
 	parts, ucs2, err := split(text)
 	if err != nil {
 		return nil, err
@@ -132,7 +143,7 @@ func EncodeDeliver(from, text string, ref byte) ([]string, error) {
 		if ucs2 {
 			dcs = 0x08
 		}
-		b = append(b, 0x00, dcs, 0x62, 0x01, 0x40, 0x21, 0x00, 0x00, 0x00)
+		b = append(b, pid, dcs, 0x62, 0x01, 0x40, 0x21, 0x00, 0x00, 0x00)
 		b = append(b, userData(p, udh, ucs2)...)
 		out = append(out, strings.ToUpper(hex.EncodeToString(b)))
 	}
@@ -333,11 +344,16 @@ func (r *reader) bytes(n int) []byte {
 	return r.b[r.pos-n : r.pos]
 }
 
-// addr reads a TP-OA/TP-DA. Alphanumeric senders (type 101) are returned as
-// text; they are never the owner's number.
-func (r *reader) addr() string {
+// addr reads a TP-OA/TP-DA and its type of number. Alphanumeric senders
+// (type 101) are returned as text; the caller must never treat one as a
+// phone number, since the text can spell one.
+func (r *reader) addr() (string, byte) {
 	n := int(r.byte())
 	toa := r.byte()
+	return r.addrBody(n, toa), (toa >> 4) & 7
+}
+
+func (r *reader) addrBody(n int, toa byte) string {
 	if n > 20 {
 		r.err = ErrPDU
 		return ""
@@ -404,8 +420,8 @@ func decode(h string, submit bool) (Deliver, error) {
 		return Deliver{}, ErrPDU
 	}
 	var d Deliver
-	d.Addr = r.addr()
-	r.byte() // TP-PID
+	d.Addr, d.TON = r.addr()
+	d.PID = r.byte()
 	dcs := r.byte()
 	if submit {
 		switch fo >> 3 & 0x3 { // TP-VPF
@@ -500,4 +516,19 @@ func validConcat(ref, total, seq int) *Concat {
 		return nil
 	}
 	return &Concat{Ref: ref, Total: total, Seq: seq}
+}
+
+// Silent reports a PDU that is not a text for anyone to read: a silent
+// Type-0 message or a replace-message type.
+func (d Deliver) Silent() bool { return d.PID >= 0x40 && d.PID <= 0x47 }
+
+// TPDULen returns the length AT+CMGR and AT+CMGL report for a PDU: its
+// octets without the SMSC field. A line whose length disagrees is not the
+// PDU the header announced.
+func TPDULen(h string) (int, bool) {
+	b, err := hex.DecodeString(strings.TrimSpace(h))
+	if err != nil || len(b) == 0 || int(b[0])+1 > len(b) {
+		return 0, false
+	}
+	return len(b) - int(b[0]) - 1, true
 }

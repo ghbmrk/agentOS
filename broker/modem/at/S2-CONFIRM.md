@@ -19,6 +19,10 @@ the extra reading to take while S2 runs, and the change if it fails.
 | C9 | Texts: `AT+CPMS="ME","ME","ME"` is accepted, `+CMTI` arrives on the AT port, and a long text from the owner's phone (two or more segments) arrives whole. | `sms_in` PASS; extra: send a 200-character text | SIM storage is the fallback already; fix URC routing (`AT+QURCCFG`, SIMCom port). |
 | C10 | The keypad gate on real speech: muting stays near the key presses (a few frames each) and ordinary speech is never decoded as a key. | Extra: the recorded `call-*.raw` files in `private/`, run through `at.Decode` and the gate offline | Retune the gate's loose test. |
 | C11 | The modem restart after `AT+CFUN=1,1` takes under the 20 s the kit allows. | `quectel_uac` then registration | Lengthen the reopen wait. |
+| C12 | How the carrier presents the owner's number on texts and calls: international (`+…`), national, or with a trunk prefix. The driver writes all three as E.164 (M15). | Extra: on the stick, the type of the `sms_in` sender and of the `call_in` caller | Add the carrier's form to `E164`. |
+| C13 | `AT+QCCID` (Quectel) and `AT+CICCID` (SIMCom) return the SIM serial; `AT+CPIN?`, `AT+CEREG?` and `AT+CSQ` answer in the 27.007 form. | Extra: run each once | Fix `readICCID` or `status.go`. |
 
 Recordings stay in the kit's `private/` folder and never leave the drive;
 C10 is run on the drive or by Mark, not uploaded.
+
+The #33 review suggests folding the manual readings (C3, C7, C9, C10, C12, C13) into the S2 kit so Mark only inserts the SIM, makes the one call and sends the one text. That changes the kit image (`spikes/S1S2-testkit`), which is outside this package; it is listed for the kit's owner.

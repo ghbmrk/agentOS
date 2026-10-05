@@ -56,6 +56,10 @@ func disclosure() []byte {
 	return b
 }
 
+func roles(owner, second line) secondline.Roles {
+	return secondline.Roles{OwnerICCID: owner.dev.ICCID(), SecondICCID: second.dev.ICCID()}
+}
+
 func dialed(dev *atsim.Device) []string {
 	var out []string
 	for _, c := range dev.Commands() {
@@ -96,9 +100,19 @@ func TestThirdPartyTrafficUsesOnlyTheSecondLineAndCallsOpenWithTheDisclosure(t *
 	shop := c.Line(shopNum)
 	owner := open(t, c, at.SIMCom, "SIMCOM_SIM7600G-H", boxNum)
 	second := open(t, c, at.Quectel, "EG25", secondNum)
-	tool, err := secondline.New(secondline.Config{Owner: owner.m, Second: secondline.FromAT(second.m), Disclosure: disclosure()})
+	tool, err := secondline.New(secondline.Config{Owner: owner.m, Second: secondline.FromAT(second.m),
+		Roles: roles(owner, second), Disclosure: disclosure(), OwnerPhone: ownerNum, CountryCode: "1"})
 	if err != nil {
 		t.Fatal(err)
+	}
+	// Never to the owner's phone or either of the box's numbers, in any format.
+	for _, to := range []string{ownerNum, "5550000001", boxNum, secondNum, "1 (555) 000-0200"} {
+		if err := tool.Text(to, "Reply with your code"); !errors.Is(err, secondline.ErrRecipient) {
+			t.Errorf("Text to %s: %v", to, err)
+		}
+		if _, err := tool.Call(context.Background(), to); !errors.Is(err, secondline.ErrRecipient) {
+			t.Errorf("Call to %s: %v", to, err)
+		}
 	}
 	if err := tool.Text(shopNum, "Table for 2 at 7?"); err != nil {
 		t.Fatal(err)
@@ -161,7 +175,7 @@ func TestInboundOnTheSecondLineIsUntrustedAndNeverReachesTheOwnerChannel(t *test
 	c := modem.NewCarrier()
 	owner := open(t, c, at.SIMCom, "SIMCOM_SIM7600G-H", boxNum)
 	second := open(t, c, at.SIMCom, "SIMCOM_SIM7600G-H", secondNum)
-	tool, err := secondline.New(secondline.Config{Owner: owner.m, Second: secondline.FromAT(second.m), Disclosure: disclosure()})
+	tool, err := secondline.New(secondline.Config{Owner: owner.m, Second: secondline.FromAT(second.m), Roles: roles(owner, second), Disclosure: disclosure()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,17 +199,54 @@ func TestInboundOnTheSecondLineIsUntrustedAndNeverReachesTheOwnerChannel(t *test
 func TestASecondLineThatIsTheOwnerLineIsRefused(t *testing.T) {
 	c := modem.NewCarrier()
 	owner := open(t, c, at.SIMCom, "SIMCOM_SIM7600G-H", boxNum)
-	if _, err := secondline.New(secondline.Config{Owner: owner.m, Second: secondline.FromAT(owner.m), Disclosure: disclosure()}); !errors.Is(err, secondline.ErrOwnerLine) {
+	if _, err := secondline.New(secondline.Config{Owner: owner.m, Second: secondline.FromAT(owner.m),
+		Roles: roles(owner, owner), Disclosure: disclosure()}); !errors.Is(err, secondline.ErrOwnerLine) {
 		t.Fatalf("same modem: %v", err)
 	}
 	// A different modem holding a SIM with the same number (a misconfigured
 	// or cloned SIM) is refused too.
 	twin := open(t, c, at.Quectel, "EC25", "+1 555 000 0100")
-	if _, err := secondline.New(secondline.Config{Owner: owner.m, Second: secondline.FromAT(twin.m), Disclosure: disclosure()}); !errors.Is(err, secondline.ErrOwnerLine) {
-		t.Fatalf("same number: %v", err)
+	if _, err := secondline.New(secondline.Config{Owner: owner.m, Second: secondline.FromAT(twin.m),
+		Roles: secondline.Roles{OwnerICCID: owner.dev.ICCID(), SecondICCID: "89010000000000000099"}, Disclosure: disclosure()}); err == nil {
+		t.Fatal("accepted a twin")
 	}
 	other := open(t, c, at.Quectel, "EC25", secondNum)
-	if _, err := secondline.New(secondline.Config{Owner: owner.m, Second: secondline.FromAT(other.m)}); err == nil {
+	if _, err := secondline.New(secondline.Config{Owner: owner.m, Second: secondline.FromAT(other.m), Roles: roles(owner, other)}); err == nil {
 		t.Fatal("accepted a second line with no disclosure audio")
+	}
+}
+
+// Roles follow the SIM, not the USB port: modems swapped between ports,
+// an unknown SIM, or no owner line all fail closed (ADP-12, CH-1).
+func TestRolesAreBoundToTheSIMAndFailClosed(t *testing.T) {
+	c := modem.NewCarrier()
+	owner := open(t, c, at.SIMCom, "SIMCOM_SIM7600G-H", boxNum)
+	second := open(t, c, at.Quectel, "EG25", secondNum)
+	set := roles(owner, second)
+	cfg := func(o secondline.SIM, s *at.Modem, r secondline.Roles) secondline.Config {
+		return secondline.Config{Owner: o, Second: secondline.FromAT(s), Roles: r, Disclosure: disclosure()}
+	}
+	if _, err := secondline.New(cfg(owner.m, second.m, set)); err != nil {
+		t.Fatal(err)
+	}
+	// The modems came back on each other's ports, so the supervisor opened
+	// them in the wrong roles.
+	if _, err := secondline.New(cfg(second.m, owner.m, set)); !errors.Is(err, secondline.ErrSwapped) {
+		t.Fatalf("swapped: %v", err)
+	}
+	for name, r := range map[string]secondline.Roles{
+		"nothing recorded":      {},
+		"owner SIM replaced":    {OwnerICCID: "89019999999999999999", SecondICCID: set.SecondICCID},
+		"second SIM unrecorded": {OwnerICCID: set.OwnerICCID},
+	} {
+		if _, err := secondline.New(cfg(owner.m, second.m, r)); !errors.Is(err, secondline.ErrUnbound) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	if _, err := secondline.New(cfg(nil, second.m, set)); !errors.Is(err, secondline.ErrUnbound) {
+		t.Fatalf("no owner line: %v", err)
+	}
+	if err := set.Check(owner.m, second.m); err != nil {
+		t.Fatalf("Check: %v", err)
 	}
 }

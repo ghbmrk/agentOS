@@ -40,6 +40,8 @@ type Profile struct {
 	CallURCs []string
 	// Key parses the modem's DTMF URC.
 	Key func(string) (byte, bool)
+	// ICCIDCmd reads the SIM serial number (AT+CCID is the fallback).
+	ICCIDCmd string
 }
 
 // Quectel covers the EC25 and EG25-G (S2 modem 1). Voice audio is USB Audio
@@ -56,6 +58,7 @@ var Quectel = &Profile{
 	AudioOn:  []string{"AT+QPCMV=1,2"},
 	AudioOff: []string{"AT+QPCMV=0"},
 	KeysOn:   "AT+QTONEDET=1",
+	ICCIDCmd: "AT+QCCID",
 	URCs:     []string{"+QTONEDET:", "+QIND:"},
 	Key: func(l string) (byte, bool) {
 		v, ok := urcValue(l, "+QTONEDET:")
@@ -83,7 +86,8 @@ var SIMCom = &Profile{
 	AudioOn:        []string{"AT+CPCMREG=1"},
 	AudioOff:       []string{"AT+CPCMREG=0"},
 	KeysOn:         "AT+DDET=1",
-	URCs:           []string{"+RXDTMF:", "VOICE CALL:", "MISSED_CALL:"},
+	ICCIDCmd:       "AT+CICCID",
+	URCs:           []string{"+RXDTMF:", "VOICE CALL:", "MISSED_CALL:", "+SIMCARD:"},
 	CallURCs:       []string{"VOICE CALL:", "MISSED_CALL:"},
 	Key: func(l string) (byte, bool) {
 		v, ok := urcValue(l, "+RXDTMF:")

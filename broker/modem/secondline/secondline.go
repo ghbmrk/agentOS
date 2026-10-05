@@ -31,11 +31,21 @@ type Call interface {
 	Hangup(ctx context.Context) error
 }
 
+// SIM is a modem line that knows its SIM's serial number (ICCID).
+type SIM interface {
+	modem.Modem
+	ICCID() string
+	// Done is closed when the modem has gone away.
+	Done() <-chan struct{}
+}
+
 // Line is a SIM that can text and call.
 type Line interface {
-	modem.Modem
+	SIM
 	Dial(ctx context.Context, number string) (Call, error)
 }
+
+var _ SIM = (*at.Modem)(nil)
 
 // FromAT adapts the real driver.
 func FromAT(m *at.Modem) Line { return atLine{m} }
@@ -53,10 +63,21 @@ func (l atLine) Dial(ctx context.Context, number string) (Call, error) {
 // Config configures the tool.
 type Config struct {
 	// Owner is the owner channel's line (CH-1). It is only compared
-	// against, never used.
-	Owner modem.Modem
+	// against, never used, and it is required.
+	Owner SIM
 	// Second is the second line; nil leaves the tool unavailable.
 	Second Line
+	// Roles are the SIM serial numbers recorded when the owner assigned
+	// each line at setup. Roles follow the SIM, not the USB port: modems
+	// moved to each other's ports are caught as swapped.
+	Roles Roles
+	// OwnerPhone is the owner's own number. Third-party traffic never goes
+	// to it or to either of the box's numbers, so the agent cannot use the
+	// second line to ask the owner for a code and read the answer as
+	// untrusted data (CH-19).
+	OwnerPhone string
+	// CountryCode is the home country code, for comparing numbers.
+	CountryCode string
 	// Disclosure is the broker-rendered audio (8 kHz S16_LE mono) that
 	// opens every call: an automated assistant is calling for the owner.
 	Disclosure []byte
@@ -71,12 +92,45 @@ type Untrusted struct {
 	At         time.Time
 }
 
+// Roles binds each line to its SIM.
+type Roles struct {
+	OwnerICCID, SecondICCID string
+}
+
 // Errors.
 var (
 	ErrUnavailable = errors.New("secondline: no second line configured")
 	ErrOwnerLine   = errors.New("secondline: the second line is the owner-channel line")
+	ErrSwapped     = errors.New("secondline: the owner and second lines are swapped; move the modems back or set the lines up again")
+	ErrUnbound     = errors.New("secondline: a line's SIM is unknown or not the one set up for it")
+	ErrRecipient   = errors.New("secondline: not a third-party number")
 	ErrNoAnswer    = errors.New("secondline: call not answered")
 )
+
+// Check verifies that owner and second are the SIMs recorded for their
+// roles. It fails closed: an unreadable or unrecorded serial, one SIM in
+// both roles, or a missing owner line is refused. The supervisor runs it
+// again after reopening either modem.
+func (r Roles) Check(owner, second SIM) error {
+	if owner == nil || second == nil {
+		return ErrUnbound
+	}
+	o, s := norm(owner.ICCID()), norm(second.ICCID())
+	ro, rs := norm(r.OwnerICCID), norm(r.SecondICCID)
+	switch {
+	case o == "" || s == "" || ro == "" || rs == "":
+		return ErrUnbound
+	case o == s || ro == rs:
+		return ErrOwnerLine
+	case o == rs && s == ro:
+		return ErrSwapped
+	case o != ro || s != rs:
+		return ErrUnbound
+	}
+	return nil
+}
+
+func norm(iccid string) string { return strings.ToUpper(strings.TrimSpace(iccid)) }
 
 // Tool is the second-line tool.
 type Tool struct {
@@ -84,9 +138,10 @@ type Tool struct {
 	inbound chan Untrusted
 }
 
-// New checks the configuration. A second line that is the owner's line, by
-// identity or by number, or whose number is unknown, is refused, as is a
-// second line with no disclosure audio.
+// New checks the configuration. Without a second line the tool is
+// unavailable and nothing more is checked. With one, the owner line is
+// required, both lines must be the SIMs recorded for their roles, their
+// numbers must differ, and calls need disclosure audio.
 func New(cfg Config) (*Tool, error) {
 	if cfg.AnswerWait == 0 {
 		cfg.AnswerWait = 60 * time.Second
@@ -110,21 +165,22 @@ func New(cfg Config) (*Tool, error) {
 // before every use.
 func (t *Tool) check() error {
 	s, o := t.cfg.Second, t.cfg.Owner
-	if o != nil {
-		if same(s, o) {
-			return ErrOwnerLine
-		}
-		if digits(s.Number()) != "" && digits(s.Number()) == digits(o.Number()) {
-			return ErrOwnerLine
-		}
+	if o == nil {
+		return ErrUnbound
 	}
-	if digits(s.Number()) == "" {
-		return errors.New("secondline: the second line's number is unknown, so it cannot be told apart")
+	if same(s, o) {
+		return ErrOwnerLine
+	}
+	if err := t.cfg.Roles.Check(o, s); err != nil {
+		return err
+	}
+	if at.SameNumber(s.Number(), o.Number(), t.cfg.CountryCode) {
+		return ErrOwnerLine
 	}
 	return nil
 }
 
-func same(s Line, o modem.Modem) bool {
+func same(s Line, o SIM) bool {
 	if a, ok := s.(atLine); ok {
 		if b, ok := o.(*at.Modem); ok {
 			return a.Modem == b
@@ -133,14 +189,14 @@ func same(s Line, o modem.Modem) bool {
 	return any(s) == any(o)
 }
 
-func digits(n string) string {
-	var sb strings.Builder
-	for _, c := range n {
-		if c >= '0' && c <= '9' {
-			sb.WriteRune(c)
+// recipient refuses the owner's own phone and the box's two numbers.
+func (t *Tool) recipient(to string) error {
+	for _, n := range []string{t.cfg.OwnerPhone, t.cfg.Owner.Number(), t.cfg.Second.Number()} {
+		if n != "" && at.SameNumber(to, n, t.cfg.CountryCode) {
+			return ErrRecipient
 		}
 	}
-	return sb.String()
+	return nil
 }
 
 // Available reports whether third-party texts and calls can be made.
@@ -154,6 +210,9 @@ func (t *Tool) Text(to, text string) error {
 	if err := t.check(); err != nil {
 		return err
 	}
+	if err := t.recipient(to); err != nil {
+		return err
+	}
 	return t.cfg.Second.Send(to, text)
 }
 
@@ -165,6 +224,9 @@ func (t *Tool) Call(ctx context.Context, to string) (Call, error) {
 		return nil, ErrUnavailable
 	}
 	if err := t.check(); err != nil {
+		return nil, err
+	}
+	if err := t.recipient(to); err != nil {
 		return nil, err
 	}
 	c, err := t.cfg.Second.Dial(ctx, to)
@@ -196,11 +258,18 @@ func (t *Tool) Call(ctx context.Context, to string) (Call, error) {
 // It is closed when there is no second line.
 func (t *Tool) Inbound() <-chan Untrusted { return t.inbound }
 
+// pump runs until the second line's modem goes away.
 func (t *Tool) pump() {
-	for m := range t.cfg.Second.Inbox() {
+	in, done := t.cfg.Second.Inbox(), t.cfg.Second.Done()
+	for {
 		select {
-		case t.inbound <- Untrusted{From: m.From, Text: m.Text, At: m.At}:
-		default: // unread third-party texts are dropped, never queued unbounded
+		case <-done:
+			return
+		case m := <-in:
+			select {
+			case t.inbound <- Untrusted{From: m.From, Text: m.Text, At: m.At}:
+			default: // unread third-party texts are dropped, never queued unbounded
+			}
 		}
 	}
 }

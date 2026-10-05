@@ -120,3 +120,11 @@ func TestParsersReadQuotedFieldsAndVoiceCallsOnly(t *testing.T) {
 		t.Fatalf("%q", f)
 	}
 }
+
+func TestEngineDiscardsOverlongLines(t *testing.T) {
+	e, _ := script(t, map[string]string{"AT+CSQ": "\r\n" + strings.Repeat("A", 10000) + "\r\n+CSQ: 20,99\r\nOK\r\n"})
+	lines, err := e.Do(context.Background(), "AT+CSQ", time.Second)
+	if err != nil || len(lines) != 1 || lines[0] != "+CSQ: 20,99" {
+		t.Fatalf("%d lines %v", len(lines), err)
+	}
+}

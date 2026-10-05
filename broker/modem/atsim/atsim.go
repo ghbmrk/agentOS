@@ -56,6 +56,10 @@ type Device struct {
 	cmds     []string
 	closed   bool
 	upW      net.Conn // device end carrying the uplink (SIMCom port or Quectel capture)
+	sim      string   // AT+CPIN? answer; "" means no SIM
+	iccid    string
+	reg      int // +CEREG stat
+	csq      int
 }
 
 // New attaches a simulated modem of profile p to a carrier line. model is
@@ -64,6 +68,7 @@ type Device struct {
 func New(p *at.Profile, model string, line *modem.Line, tick time.Duration) *Device {
 	host, dev := net.Pipe()
 	d := &Device{prof: p, model: model, line: line, tick: tick, host: host, dev: dev, echo: true,
+		sim: "READY", iccid: iccidFor(line.Number()), reg: 1, csq: 20,
 		store: map[int]string{}, outParts: map[string]map[int]string{}, outgoing: make(chan *Far, 4), nextCall: 1}
 	go d.serve()
 	go d.receive()
@@ -240,6 +245,23 @@ func (d *Device) handle(cmd string) []string {
 		return []string{"OK"}
 	case cmd == "AT+CGMM":
 		return []string{d.model, "OK"}
+	case cmd == "AT+CPIN?":
+		if d.sim == "" {
+			return []string{"+CME ERROR: 10"}
+		}
+		return []string{"+CPIN: " + d.sim, "OK"}
+	case cmd == "AT+CEREG=1", cmd == "AT+CREG=1":
+		return []string{"OK"}
+	case cmd == "AT+CEREG?":
+		return []string{fmt.Sprintf("+CEREG: 1,%d", d.reg), "OK"}
+	case cmd == "AT+CREG?":
+		return []string{"+CREG: 1,0", "OK"} // LTE only: circuit-switched not registered
+	case cmd == "AT+CSQ":
+		return []string{fmt.Sprintf("+CSQ: %d,99", d.csq), "OK"}
+	case quectel && cmd == "AT+QCCID":
+		return []string{"+QCCID: " + d.iccid, "OK"}
+	case simcom && cmd == "AT+CICCID":
+		return []string{"ICCID: " + d.iccid, "OK"}
 	case cmd == "AT+CMGF=0":
 		d.pduMode = true
 		return []string{"OK"}
@@ -256,7 +278,8 @@ func (d *Device) handle(cmd string) []string {
 		if !ok {
 			return []string{"+CMS ERROR: 321"}
 		}
-		return []string{fmt.Sprintf("+CMGR: 0,,%d", len(p)/2-8), p, "OK"}
+		n, _ := at.TPDULen(p)
+		return []string{fmt.Sprintf("+CMGR: 0,,%d", n), p, "OK"}
 	case strings.HasPrefix(cmd, "AT+CMGD="):
 		i, _ := strconv.Atoi(strings.TrimPrefix(cmd, "AT+CMGD="))
 		delete(d.store, i)
@@ -269,7 +292,8 @@ func (d *Device) handle(cmd string) []string {
 		sort.Ints(idx)
 		var out []string
 		for _, i := range idx {
-			out = append(out, fmt.Sprintf("+CMGL: %d,0,,%d", i, len(d.store[i])/2-8), d.store[i])
+			n, _ := at.TPDULen(d.store[i])
+			out = append(out, fmt.Sprintf("+CMGL: %d,0,,%d", i, n), d.store[i])
 		}
 		return append(out, "OK")
 	case strings.HasPrefix(cmd, "ATD") && strings.HasSuffix(cmd, ";"):
@@ -358,6 +382,44 @@ func (d *Device) handle(cmd string) []string {
 }
 
 func (d *Device) setCNMI() bool { d.cnmi = true; return true }
+
+// iccidFor derives a synthetic SIM serial from the line's number, so each
+// simulated SIM has its own.
+func iccidFor(number string) string {
+	var digits []byte
+	for i := 0; i < len(number); i++ {
+		if number[i] >= '0' && number[i] <= '9' {
+			digits = append(digits, number[i])
+		}
+	}
+	s := "8901" + string(digits) + "0000000000000000"
+	return s[:19] + "F"
+}
+
+// ICCID is the simulated SIM's serial number.
+func (d *Device) ICCID() string { d.mu.Lock(); defer d.mu.Unlock(); return d.iccid }
+
+// SetSIM sets the AT+CPIN? answer ("READY", "SIM PIN"; "" for no SIM)
+// and announces the change.
+func (d *Device) SetSIM(state string) {
+	d.mu.Lock()
+	d.sim = state
+	d.mu.Unlock()
+	v := state
+	if v == "" {
+		v = "NOT READY"
+	}
+	go d.urc("+CPIN: " + v) // no driver may be reading yet
+}
+
+// SetNetwork sets registration (+CEREG stat: 1 home, 2 searching, 3
+// denied, 5 roaming) and the AT+CSQ rssi, and announces the change.
+func (d *Device) SetNetwork(stat, rssi int) {
+	d.mu.Lock()
+	d.reg, d.csq = stat, rssi
+	d.mu.Unlock()
+	go d.urc(fmt.Sprintf("+CEREG: %d", stat))
+}
 
 // ---- calls ----
 

@@ -53,8 +53,11 @@ type Config struct {
 	// Poll is how often call state is re-read during calls (default 1 s).
 	Poll time.Duration
 	// Sweep is how often stored texts are re-read in case a +CMTI was
-	// lost (default 30 s).
+	// lost, and status re-read (default 30 s).
 	Sweep time.Duration
+	// CountryCode is the home country code from setup ("1", "44"), used to
+	// write national-format numbers as E.164 so they match the owner's.
+	CountryCode string
 }
 
 // Errors.
@@ -76,6 +79,10 @@ const (
 	// maxConcat bounds texts being reassembled, so forged parts cannot grow
 	// memory.
 	maxConcat = 32
+	// dupTTL is how long a delivered PDU is remembered, so a text the
+	// modem hands over twice (a delete that did not happen) is not
+	// delivered twice: a replayed code would count as a wrong code.
+	dupTTL = 10 * time.Minute
 )
 
 // Modem is one modem's SIM.
@@ -83,30 +90,36 @@ type Modem struct {
 	cfg    Config
 	e      *Engine
 	number string
+	iccid  string
 
-	inbox    chan modem.SMS
-	incoming chan *Call
-	smsKick  chan int
-	callKick chan struct{}
-	stop     chan struct{}
-	stopOnce sync.Once
-	wg       sync.WaitGroup
+	inbox      chan modem.SMS
+	incoming   chan *Call
+	smsKick    chan int
+	callKick   chan struct{}
+	statusKick chan struct{}
+	stop       chan struct{}
+	stopOnce   sync.Once
+	wg         sync.WaitGroup
 
 	mu      sync.Mutex
 	ref     byte
 	calls   map[int]*Call
 	dialing chan *Call
 	parts   map[string]*assembly
+	seen    map[string]time.Time // delivered PDUs, for dupTTL
 	dropped int
+	status  Status
 }
 
 var _ modem.Modem = (*Modem)(nil)
 
 type assembly struct {
-	from  string
-	first time.Time
-	total int
-	parts map[int]string
+	from     string
+	alpha    bool
+	first    time.Time
+	total    int
+	parts    map[int]string
+	conflict bool
 }
 
 // Open initializes the modem on cfg.Port and starts serving it.
@@ -130,8 +143,8 @@ func Open(ctx context.Context, cfg Config) (*Modem, error) {
 	m := &Modem{
 		cfg: cfg, e: NewEngine(cfg.Port, urcs), number: cfg.Number,
 		inbox: make(chan modem.SMS, 64), incoming: make(chan *Call, 4),
-		smsKick: make(chan int, 64), callKick: make(chan struct{}, 1), stop: make(chan struct{}),
-		calls: map[int]*Call{}, parts: map[string]*assembly{},
+		smsKick: make(chan int, 64), callKick: make(chan struct{}, 1), statusKick: make(chan struct{}, 1),
+		stop: make(chan struct{}), calls: map[int]*Call{}, parts: map[string]*assembly{}, seen: map[string]time.Time{},
 	}
 	if err := m.init(ctx); err != nil {
 		_ = m.e.Close()
@@ -170,6 +183,10 @@ func (m *Modem) init(ctx context.Context) error {
 	if len(lines) == 0 || !m.cfg.Profile.accepts(strings.TrimPrefix(lines[0], "+CGMM: ")) {
 		return fmt.Errorf("%w: %q", ErrModel, strings.Join(lines, " "))
 	}
+	if st := m.readStatus(ctx); st.SIM != SIMReady {
+		return &SIMError{Status: st}
+	}
+	m.iccid = m.readICCID(ctx)
 	if err := do("AT+CMGF=0"); err != nil {
 		return err
 	}
@@ -189,11 +206,15 @@ func (m *Modem) init(ctx context.Context) error {
 			return err
 		}
 	}
+	// Registration notices, so a lost network shows at once. Best effort.
+	_ = do("AT+CEREG=1")
+	_ = do("AT+CREG=1")
+	m.readStatus(ctx)
 	if m.number == "" {
 		if lines, err := m.e.Do(ctx, "AT+CNUM", cmdTimeout); err == nil {
 			for _, l := range lines {
 				if f := fields(strings.TrimPrefix(l, "+CNUM:")); len(f) >= 2 && f[1] != "" {
-					m.number = f[1]
+					m.number = E164(f[1], 0, m.cfg.CountryCode)
 					break
 				}
 			}
@@ -267,6 +288,12 @@ func (m *Modem) urcLoop() {
 					}
 				}
 			}
+		case strings.HasPrefix(l, "+CPIN:"), strings.HasPrefix(l, "+CEREG:"), strings.HasPrefix(l, "+CREG:"),
+			strings.HasPrefix(l, "+SIMCARD:"):
+			select {
+			case m.statusKick <- struct{}{}:
+			default:
+			}
 		case m.isKey(l):
 			if k, ok := m.cfg.Profile.Key(l); ok && m.cfg.Keys == KeysModem {
 				if c := m.activeCall(); c != nil {
@@ -315,12 +342,15 @@ func (m *Modem) smsLoop() {
 			}
 			for j := 0; j+1 < len(lines); j++ {
 				if strings.HasPrefix(lines[j], "+CMGR:") {
-					m.receive(ctx, i, lines[j+1])
+					m.receive(ctx, i, lines[j], lines[j+1])
 					break
 				}
 			}
+		case <-m.statusKick:
+			m.readStatus(ctx)
 		case <-t.C:
 			m.sweep(ctx)
+			m.readStatus(ctx)
 		}
 	}
 }
@@ -341,7 +371,7 @@ func (m *Modem) sweep(ctx context.Context) {
 		if err != nil {
 			continue
 		}
-		m.receive(ctx, i, lines[j+1])
+		m.receive(ctx, i, lines[j], lines[j+1])
 		j++
 	}
 	m.expireParts()
@@ -349,25 +379,51 @@ func (m *Modem) sweep(ctx context.Context) {
 
 // receive decodes one stored text, deletes it from the modem, and delivers
 // it once whole. Deleting first means a crash loses a text rather than
-// replaying it: a replayed approval code would count as a wrong code.
-func (m *Modem) receive(ctx context.Context, idx int, pdu string) {
+// replaying it: a replayed approval code would count as a wrong code. A
+// line that is not the PDU its header announced (a stray boot line, a
+// URC) is left stored for the next sweep.
+func (m *Modem) receive(ctx context.Context, idx int, header, pdu string) {
+	hf := fields(header[strings.IndexByte(header, ':')+1:])
+	want, err := strconv.Atoi(hf[len(hf)-1])
+	if got, ok := TPDULen(pdu); err != nil || !ok || got != want {
+		return
+	}
 	d, err := DecodeDeliver(pdu)
 	if _, derr := m.e.Do(ctx, "AT+CMGD="+strconv.Itoa(idx), cmdTimeout); derr != nil && !errors.Is(derr, modem.ErrDown) {
 		// Left stored; the next sweep tries again.
 		return
 	}
-	if err != nil {
-		m.mu.Lock()
-		m.dropped++
+	now := m.cfg.Now()
+	m.mu.Lock()
+	for k, at := range m.seen {
+		if now.Sub(at) > dupTTL {
+			delete(m.seen, k)
+		}
+	}
+	key := strings.ToUpper(strings.TrimSpace(pdu))
+	_, dup := m.seen[key]
+	m.seen[key] = now
+	if err != nil || d.Silent() || dup {
+		if !dup {
+			m.dropped++
+		}
 		m.mu.Unlock()
 		return
+	}
+	m.mu.Unlock()
+	alpha := d.TON == 5
+	if alpha {
+		// A sender ID can spell any number; it never reads as one.
+		d.Addr = "alpha:" + d.Addr
+	} else {
+		d.Addr = E164(d.Addr, d.TON, m.cfg.CountryCode)
 	}
 	text, ok := m.assemble(d)
 	if !ok {
 		return
 	}
 	select {
-	case m.inbox <- modem.SMS{From: d.Addr, To: m.number, Text: text, At: m.cfg.Now(), Segments: segments(text)}:
+	case m.inbox <- modem.SMS{From: d.Addr, To: m.number, Text: text, At: now, Segments: segments(text), Alphanumeric: alpha}:
 	case <-m.stop:
 	}
 }
@@ -389,13 +445,21 @@ func (m *Modem) assemble(d Deliver) (string, bool) {
 		a = &assembly{from: d.Addr, first: m.cfg.Now(), total: d.Concat.Total, parts: map[int]string{}}
 		m.parts[key] = a
 	}
-	if _, dup := a.parts[d.Concat.Seq]; !dup {
+	if prev, dup := a.parts[d.Concat.Seq]; !dup {
 		a.parts[d.Concat.Seq] = d.Text
+	} else if prev != d.Text {
+		// Two different bodies for one part: someone guessed the reference
+		// and is trying to replace a segment. Drop the whole text.
+		a.conflict = true
 	}
 	if len(a.parts) < a.total {
 		return "", false
 	}
 	delete(m.parts, key)
+	if a.conflict {
+		m.dropped++
+		return "", false
+	}
 	var sb strings.Builder
 	for i := 1; i <= a.total; i++ {
 		sb.WriteString(a.parts[i])
@@ -527,10 +591,20 @@ func (c *Call) Say(ctx context.Context, pcm []byte) error {
 	defer c.sayMu.Unlock()
 	t := time.NewTicker(c.m.cfg.FramePace)
 	defer t.Stop()
+	prev := make([]byte, FrameBytes)
 	for i := 0; i < len(pcm); i += FrameBytes {
-		f := pcm[i:min(i+FrameBytes, len(pcm))]
+		f := append([]byte(nil), pcm[i:min(i+FrameBytes, len(pcm))]...)
 		if len(f) < FrameBytes {
-			f = append(append([]byte(nil), f...), make([]byte, FrameBytes-len(f))...)
+			f = append(f, make([]byte, FrameBytes-len(f))...)
+		}
+		// Downlink audio comes from the speech service, which is untrusted:
+		// it must not be able to play keypad tones into the call (to an IVR
+		// or the owner's voicemail) under the box's name.
+		if HasTone(append(append([]byte(nil), prev...), f...)) {
+			prev = f
+			f = make([]byte, FrameBytes)
+		} else {
+			prev = f
 		}
 		if _, err := c.stream.Write(f); err != nil {
 			return ErrCallEnded
@@ -686,6 +760,9 @@ func parseCLCC(lines []string) []clcc {
 		if len(f) >= 6 {
 			c.number = f[5]
 		}
+		if len(f) >= 7 && f[6] == "145" && c.number != "" {
+			c.number = "+" + strings.TrimPrefix(c.number, "+")
+		}
 		out = append(out, c)
 	}
 	return out
@@ -720,7 +797,11 @@ func (m *Modem) reconcile() {
 		m.mu.Lock()
 		c := m.calls[e.id]
 		if c == nil {
-			c = &Call{m: m, id: e.id, incoming: e.incoming, number: e.number,
+			num := e.number
+			if num != "" {
+				num = E164(num, 0, m.cfg.CountryCode)
+			}
+			c = &Call{m: m, id: e.id, incoming: e.incoming, number: num,
 				active: make(chan struct{}), ended: make(chan struct{}), audio: make(chan struct{}),
 				speech: make(chan []byte, 50), keys: make(chan byte, 64), pumpDone: make(chan struct{})}
 			m.calls[e.id] = c

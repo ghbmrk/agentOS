@@ -64,7 +64,7 @@ func newRig(t *testing.T, v vendor, keys at.KeySource, before func(*atsim.Device
 
 func (r *rig) config(v vendor, keys at.KeySource) at.Config {
 	cfg := at.Config{Profile: v.prof, Port: r.dev.Port(), Number: boxNum, Keys: keys,
-		Now: r.clock, FramePace: time.Millisecond, Poll: 5 * time.Millisecond, Sweep: 20 * time.Millisecond}
+		Now: r.clock, FramePace: time.Millisecond, Poll: 5 * time.Millisecond, Sweep: 20 * time.Millisecond, CountryCode: "1"}
 	if v.prof == at.Quectel {
 		cfg.Audio = at.UACAudio(atsim.Card, r.dev.Runner())
 	} else {
@@ -432,3 +432,148 @@ func TestUnpluggedModemFailsSendsAndEndsCalls(t *testing.T) {
 }
 
 func sinf(f float64, i int) float64 { return math.Sin(2 * math.Pi * f * float64(i) / at.Rate) }
+
+// A sender ID can spell the owner's number. It arrives flagged and
+// prefixed, and the owner channel ignores it (CH-1, CH-18).
+func TestAlphanumericSenderSpellingTheOwnersNumberIsNeverTheOwner(t *testing.T) {
+	// A sender ID holds at most 11 characters, so an owner number of 11
+	// characters or fewer can be spelled exactly.
+	const shortOwner = "+4670123456"
+	r := newRig(t, vendors[1], at.KeysInBand, nil)
+	r.dev.StorePDU(at.DeliverAlpha(shortOwner, "STOP"))
+	got := r.text()
+	if !got.Alphanumeric || got.From != "alpha:"+shortOwner {
+		t.Fatalf("got %+v", got)
+	}
+
+	r = newRig(t, vendors[0], at.KeysInBand, nil)
+	eng := &fakeEngine{}
+	ch, err := owner.New(owner.Config{Owner: shortOwner, Modem: r.m, Engine: eng, Store: &owner.MemStore{},
+		Secrets: owner.Secrets{TOTPSeed: []byte("12345678901234567890"), GridSeed: []byte("synthetic-grid-seed")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go ch.Run(ctx)
+	r.dev.StorePDU(at.DeliverAlpha(shortOwner, "STOP"))
+	eventually(t, "spoof deleted", func() bool { return r.dev.Stored() == 0 })
+	time.Sleep(50 * time.Millisecond)
+	if eng.Stopped() {
+		t.Fatal("an alphanumeric sender stopped the box")
+	}
+}
+
+// The owner's texts match their number whatever format the network uses.
+func TestNationalFormatSendersAreWrittenAsE164(t *testing.T) {
+	r := newRig(t, vendors[1], at.KeysInBand, nil)
+	r.dev.StorePDU(at.DeliverNational("5550000001", "STATUS"))
+	if got := r.text(); got.From != ownerNum || got.Alphanumeric {
+		t.Fatalf("got %+v", got)
+	}
+	for _, c := range []struct{ in, cc, want string }{
+		{"5555123456", "1", "+15555123456"},
+		{"15555123456", "1", "+15555123456"},
+		{"011447700900123", "1", "+447700900123"},
+		{"07700900123", "44", "+447700900123"},
+		{"00447700900123", "44", "+447700900123"},
+		{"447700900123", "44", "+447700900123"},
+		{"5555123456", "", "5555123456"},
+	} {
+		if got := at.E164(c.in, 0, c.cc); got != c.want {
+			t.Errorf("E164(%q, %q) = %q, want %q", c.in, c.cc, got, c.want)
+		}
+	}
+}
+
+func TestSilentForgedReplayedAndStrayTextsAreNotDelivered(t *testing.T) {
+	r := newRig(t, vendors[1], at.KeysInBand, nil)
+	// Silent Type-0 and replace-message texts.
+	r.dev.StorePDU(at.DeliverPID(ownerNum, 0x40, "STOP"))
+	r.dev.StorePDU(at.DeliverPID(ownerNum, 0x41, "STOP"))
+	// A long text whose part 2 arrives twice with different bodies.
+	parts, _ := at.EncodeDeliver(ownerNum, strings.Repeat("send invoice 1042 ", 12), 5)
+	evil, _ := at.EncodeDeliver(ownerNum, strings.Repeat("pay acct 9999 now ", 12), 5)
+	r.dev.StorePDU(parts[1])
+	r.dev.StorePDU(evil[1])
+	r.dev.StorePDU(parts[0])
+	eventually(t, "all deleted", func() bool { return r.dev.Stored() == 0 })
+	eventually(t, "all dropped", func() bool { return r.m.Dropped() == 3 })
+	// The same PDU handed over twice (a delete that did not happen) is
+	// delivered once.
+	one, _ := at.EncodeDeliver(ownerNum, "YES K3 482913", 6)
+	r.dev.StorePDU(one[0])
+	if got := r.text(); got.Text != "YES K3 482913" {
+		t.Fatalf("got %q", got.Text)
+	}
+	r.dev.StorePDU(one[0])
+	eventually(t, "replay deleted", func() bool { return r.dev.Stored() == 0 })
+	select {
+	case got := <-r.m.Inbox():
+		t.Fatalf("delivered %+v", got)
+	case <-time.After(60 * time.Millisecond):
+	}
+	// A stored line that is not a PDU of the announced length stays put.
+	r.dev.StorePDU("RDY")
+	time.Sleep(60 * time.Millisecond)
+	if r.dev.Stored() != 1 {
+		t.Fatal("a stray line was deleted unread")
+	}
+}
+
+func TestSIMNetworkAndSignalAreReportedInPlainWords(t *testing.T) {
+	for _, c := range []struct {
+		sim  string
+		want string
+	}{{"", "No SIM found. Check it is in the modem."}, {"SIM PIN", "The SIM is PIN-locked. Remove the PIN in a phone, then put it back."}} {
+		dev := atsim.New(at.SIMCom, "SIMCOM_SIM7600G-H", modem.NewCarrier().Line(boxNum), time.Millisecond)
+		dev.SetSIM(c.sim)
+		_, err := at.Open(context.Background(), at.Config{Profile: at.SIMCom, Port: dev.Port()})
+		var se *at.SIMError
+		if !errors.As(err, &se) || se.Status.Line() != c.want {
+			t.Fatalf("SIM %q: %v", c.sim, err)
+		}
+	}
+	for _, v := range vendors {
+		r := newRig(t, v, at.KeysInBand, nil)
+		if s := r.m.Status(); !s.Registered() || s.Bars != 4 || !strings.HasPrefix(s.Line(), "Connected") {
+			t.Fatalf("%s: %+v %q", v.prof.Name, s, s.Line())
+		}
+		if r.m.ICCID() == "" || r.m.ICCID() != r.dev.ICCID() {
+			t.Fatalf("%s: ICCID %q", v.prof.Name, r.m.ICCID())
+		}
+		for _, n := range []struct {
+			stat, rssi int
+			want       string
+		}{
+			{3, 15, "The carrier refused the SIM. Check it is activated."},
+			{2, 99, "No mobile signal here. Move the box nearer a window."},
+			{2, 12, "Looking for the mobile network."},
+			{5, 12, "Connected to a partner network (roaming), signal 2 of 4."},
+		} {
+			r.dev.SetNetwork(n.stat, n.rssi)
+			eventually(t, n.want, func() bool { return r.m.Status().Line() == n.want })
+		}
+		r.dev.SetSIM("")
+		eventually(t, "SIM gone", func() bool { return r.m.Status().SIM == at.SIMMissing })
+	}
+}
+
+// Downlink audio comes from an untrusted speech service: keypad tones in
+// it are zeroed before they reach the call.
+func TestTheBoxNeverPlaysKeypadTonesIntoACall(t *testing.T) {
+	r := newRig(t, vendors[1], at.KeysInBand, nil)
+	far := r.dev.Ring(ownerNum)
+	c := <-r.m.Calls()
+	_ = c.Answer(context.Background())
+	wait(t, "active", c.Active())
+	pcm := append(append(speech(200), atsim.Tone('5', 120, 60)...), speech(200)...)
+	if err := c.Say(context.Background(), pcm); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "heard", func() bool { return len(far.Heard()) >= len(pcm) })
+	if h := far.Heard(); at.HasTone(h) || at.Decode(h) != "" {
+		t.Fatal("a keypad tone reached the far end")
+	}
+	far.Hangup()
+}
