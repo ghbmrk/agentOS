@@ -175,7 +175,7 @@ func TestUnverifiedRejectionResets(t *testing.T) {
 		"edit":  func(d *Decision) { d.Edited = true },
 		"wrong": func(d *Decision) { d.Wrong = true },
 	} {
-		o := newOpt(t, &change.MemStore{}, nil)
+		o := newOpt(t, &change.MemStore{}, strict)
 		for i := 0; i < 25; i++ {
 			d := reply(i, false)
 			if i == 10 {
@@ -200,9 +200,20 @@ func TestUnverifiedRejectionResets(t *testing.T) {
 			t.Errorf("ADP-9 %s: suggested %q", name, s[0].Text)
 		}
 	}
+	// Under the default light-edit rule, unverified edits still count in
+	// the edit rate: 4 unverified edits among 24 replies (17%) earn nothing.
+	o := newOpt(t, &change.MemStore{}, nil)
+	for i := 0; i < 24; i++ {
+		d := reply(i, i%6 == 0)
+		d.Verified = i%6 != 0
+		observe(t, o, d)
+	}
+	if s := suggestions(t, o); len(s) != 0 {
+		t.Fatalf("unverified edits left out of the rate: %q", s[0].Text)
+	}
 	// The reviewer's probe: an unverified NO at #10 and edit at #11 among
 	// 25 replies leave a run of 13, short of 20.
-	o := newOpt(t, &change.MemStore{}, nil)
+	o = newOpt(t, &change.MemStore{}, nil)
 	for i := 0; i < 25; i++ {
 		d := reply(i, i == 10)
 		if i == 9 || i == 10 {
@@ -224,11 +235,14 @@ func reply(i int, edited bool) Decision {
 		Recipients: []string{"same@peer.test"}, At: t0.Add(time.Duration(i) * time.Hour)}
 }
 
-// ADP-11, CAP-6, A15: by default (the spec as written) a reply rule is
-// offered only after a run of 20 unedited approvals; an edit, a NO, or a
-// wrong verdict resets the run. The rule fixes no recipients and no money.
+// strict is the reply rule without light edits: any edit resets the run.
+func strict(c *Config) { c.ReplyEditPercent = -1 }
+
+// ADP-11, CAP-6, A15: with the strict setting a reply rule is offered only
+// after a run of 20 unedited approvals; an edit, a NO, or a wrong verdict
+// resets the run. The rule fixes no recipients and no money.
 func TestReplyRuleIsEarned(t *testing.T) {
-	o := newOpt(t, &change.MemStore{}, nil)
+	o := newOpt(t, &change.MemStore{}, strict)
 	for i := 0; i < 15; i++ {
 		observe(t, o, reply(i, false))
 	}
@@ -249,12 +263,12 @@ func TestReplyRuleIsEarned(t *testing.T) {
 	}
 }
 
-// ADP-11 with Config.ReplyEditPercent (potency PA2, pending a spec-diff):
-// 20 unedited approvals, edited ones never counting, with at most 10%
-// edited among the last 30 answered. A cosmetic edit still earns; a higher
-// edit rate does not; a NO or a wrong verdict resets.
-func TestReplyEditRateWhenEnabled(t *testing.T) {
-	pa2 := func(c *Config) { c.ReplyEditPercent = 10 }
+// ADP-11 by default (Mark, 2026-10-05, "Allow light edits"): 20 unedited
+// approvals, edited ones never counting, with at most 10% edited among the
+// last 30 answered. A cosmetic edit still earns; a higher edit rate does
+// not; a NO or a wrong verdict resets.
+func TestReplyLightEdits(t *testing.T) {
+	var pa2 func(*Config)
 	o := newOpt(t, &change.MemStore{}, pa2)
 	for i := 0; i < 19; i++ {
 		observe(t, o, reply(i, i == 7)) // one cosmetic edit
