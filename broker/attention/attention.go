@@ -39,9 +39,12 @@ type Decision struct {
 	// Expired: the request lapsed unanswered. Silence is not a judgment,
 	// so it neither counts nor resets (potency PA1).
 	Expired bool
-	// Edited: the owner changed the item before it went out, or later
-	// judged it wrong (OP-7). It resets the run like a NO.
+	// Edited: the owner changed the item before it went out. It resets an
+	// ADP-9 run like a NO; for a reply class it never counts toward the
+	// earned total and enters the edit rate (EditWindow).
 	Edited bool
+	// Wrong: the owner later judged it wrong (OP-7). It resets any run.
+	Wrong bool
 	// Verified: the approval line came from the account's verifier. An
 	// unverified item can never match a pre-allowance (grants GR5), so it
 	// neither counts nor resets.
@@ -96,6 +99,9 @@ type class struct {
 	SameRcpt   bool              `json:"same_rcpt"`
 	MaxAmount  int64             `json:"max_amount,omitempty"`
 	Days       map[string]int    `json:"days,omitempty"`
+	// Recent holds whether each of the last EditWindow answered replies
+	// was edited (reply classes only).
+	Recent []bool `json:"recent,omitempty"`
 	// Declined: the owner said NO to a suggestion; it returns only at
 	// twice the threshold (Snooze), counted from the NO.
 	Snooze int    `json:"snooze,omitempty"`
@@ -147,6 +153,17 @@ func New(cfg Config) (*Optimizer, error) {
 	return o, nil
 }
 
+// ADP-11 reply rules are earned, per Mark's D2 decision ("earned after
+// ~20 unedited approved replies") as the arbitrator read it on #52: at
+// least ReplyThreshold unedited approvals since the last NO, UNDO, or wrong
+// verdict (edited replies never count toward them), and at most
+// MaxEditPercent edited among the last EditWindow answered replies. ADP-9
+// rules keep the strict run: any edit resets.
+const (
+	EditWindow     = 30
+	MaxEditPercent = 10
+)
+
 // Body is the param that makes a send an in-thread reply (grants
 // ParamBody); Record names the source record (grants ParamRecord).
 const (
@@ -187,9 +204,18 @@ func (o *Optimizer) Observe(d Decision) error {
 			o.st.Necessary++
 		}
 	}
-	if !d.Approved || d.Edited {
+	if !d.Approved || d.Wrong || (d.Edited && !reply) {
 		c.reset()
 		return o.save()
+	}
+	if reply {
+		c.Recent = append(c.Recent, d.Edited)
+		if len(c.Recent) > EditWindow {
+			c.Recent = c.Recent[len(c.Recent)-EditWindow:]
+		}
+		if d.Edited {
+			return o.save() // never counts toward the earned total
+		}
 	}
 	fixed, ok := fixedParams(d.Params, reply)
 	day := d.At.UTC().Format("2006-01-02")
@@ -215,11 +241,23 @@ func (o *Optimizer) earnedLocked(c *class) bool {
 	if c.Run < o.threshold(c) || c.Snooze > 0 || !c.Templated {
 		return false
 	}
+	if c.Reply {
+		edits := 0
+		for _, e := range c.Recent {
+			if e {
+				edits++
+			}
+		}
+		if edits*100 > MaxEditPercent*len(c.Recent) {
+			return false
+		}
+	}
 	return o.cfg.UserContent == nil || !o.cfg.UserContent(c.Account)
 }
 
 func (c *class) reset() {
 	c.Run, c.Fixed, c.Templated, c.Recipients, c.SameRcpt, c.MaxAmount, c.Days = 0, nil, false, nil, false, 0, nil
+	c.Recent = nil
 	c.Short, c.Offered, c.Offers = "", time.Time{}, 0
 }
 
@@ -289,6 +327,16 @@ type Suggestion struct {
 	Detail string
 }
 
+// evidence is the owner-facing run: strict for ADP-9, unedited count for
+// replies (which may include edits that did not count).
+func evidence(c *class) string {
+	since := c.Since.UTC().Format("Jan 2")
+	if c.Reply {
+		return fmt.Sprintf("You approved %d of the agent's replies on %s unedited since %s.", c.Run, c.Account, since)
+	}
+	return fmt.Sprintf("You approved %s on %s %d times in a row since %s, never changed.", c.Action, c.Account, c.Run, since)
+}
+
 // MaxText is CH-12's three GSM-7 segments.
 const MaxText = 3 * 153
 
@@ -349,9 +397,8 @@ func (o *Optimizer) Suggestions() ([]Suggestion, error) {
 		spec := grants.Spec{Account: c.Account, Rule: r}
 		out[len(out)-1] = Suggestion{
 			Short: c.Short, Spec: spec, Approved: c.Run, Since: c.Since,
-			Text: fmt.Sprintf("You approved %s on %s %d times in a row since %s, never changed. Suggestion: %s "+
-				"To set it up, open the box's Wi-Fi page. Reply NO %s to stop suggesting it.",
-				c.Action, c.Account, c.Run, c.Since.UTC().Format("Jan 2"), summary(spec), c.Short),
+			Text: evidence(c) + fmt.Sprintf(" Suggestion: %s To set it up, open the box's Wi-Fi page. Reply NO %s to stop suggesting it.",
+				summary(spec), c.Short),
 			Detail: grants.Describe(spec),
 		}
 	}

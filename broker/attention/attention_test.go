@@ -162,34 +162,64 @@ func TestExclusions(t *testing.T) {
 	}
 }
 
-// ADP-11, CAP-6: context-scoped replies are offered only after the owner
-// approved ReplyThreshold (20) of the agent's replies on that account
-// unedited; an edit resets the count. The rule is a reply rule with no
-// recipients fixed and no money.
+// ADP-11, CAP-6: context-scoped replies are earned per Mark's D2 ("earned
+// after ~20 unedited approved replies", arbitrator on #52): 20 unedited
+// approvals, edited ones never counting, with at most 10% edited among the
+// last 30 answered. A cosmetic edit among them still earns; a higher edit
+// rate does not; a NO resets. The rule fixes no recipients and no money.
 func TestReplyRuleIsEarned(t *testing.T) {
-	o := newOpt(t, &change.MemStore{}, nil)
 	reply := func(i int, edited bool) Decision {
 		return Decision{Account: "mail", Action: "message.reply", Verb: verb.Send, Approved: true, Verified: true, Edited: edited,
 			Params:     map[string]any{Record: "thread-" + strconv.Itoa(i), Body: "free text " + strconv.Itoa(i)},
 			Recipients: []string{"same@peer.test"}, At: t0.Add(time.Duration(i) * time.Hour)}
 	}
-	for i := 0; i < 15; i++ {
-		observe(t, o, reply(i, false))
-	}
-	observe(t, o, reply(15, true))
-	for i := 16; i < 35; i++ {
-		observe(t, o, reply(i, false))
+	o := newOpt(t, &change.MemStore{}, nil)
+	for i := 0; i < 19; i++ {
+		observe(t, o, reply(i, i == 7)) // one cosmetic edit
 	}
 	if s := suggestions(t, o); len(s) != 0 {
-		t.Fatalf("offered after 19 unedited: %+v", s)
+		t.Fatalf("offered after 18 unedited: %+v", s)
 	}
-	observe(t, o, reply(35, false))
+	observe(t, o, reply(19, false))
+	observe(t, o, reply(20, false))
 	s := suggestions(t, o)
 	if len(s) != 1 || !s[0].Spec.Rule.Reply || len(s[0].Spec.Rule.Recipients) != 0 || s[0].Spec.Rule.AmountCap != 0 || len(s[0].Spec.Rule.Params) != 0 {
-		t.Fatalf("%+v", s)
+		t.Fatalf("one edit among 21 must still earn: %+v", s)
 	}
-	if !strings.Contains(s[0].Text, "reply in existing threads") {
+	if !strings.Contains(s[0].Text, "20 of the agent's replies on mail unedited") || !strings.Contains(s[0].Text, "reply in existing threads") {
 		t.Fatalf("text %q", s[0].Text)
+	}
+
+	o = newOpt(t, &change.MemStore{}, nil)
+	for i := 0; i < 24; i++ {
+		observe(t, o, reply(i, i%6 == 0)) // 4 of 24 edited: 17%
+	}
+	if s := suggestions(t, o); len(s) != 0 {
+		t.Fatalf("an edit rate above 10%% earned: %+v", s)
+	}
+
+	o = newOpt(t, &change.MemStore{}, nil)
+	for i := 0; i < 25; i++ {
+		d := reply(i, false)
+		if i == 10 {
+			d.Approved = false // a NO
+		}
+		observe(t, o, d)
+	}
+	if s := suggestions(t, o); len(s) != 0 {
+		t.Fatalf("a NO must reset: %+v", s)
+	}
+	d := reply(30, false)
+	d.Wrong = true
+	o = newOpt(t, &change.MemStore{}, nil)
+	for i := 0; i < 25; i++ {
+		observe(t, o, reply(i, false))
+		if i == 10 {
+			observe(t, o, d)
+		}
+	}
+	if s := suggestions(t, o); len(s) != 0 {
+		t.Fatalf("a wrong verdict must reset: %+v", s)
 	}
 }
 
