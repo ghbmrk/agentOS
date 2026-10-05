@@ -1144,7 +1144,7 @@ func newKeepRig(t *testing.T) (*Learn, *interruptingPipeline, *builder, *clock) 
 	pl := &interruptingPipeline{}
 	b := &builder{files: map[string][]byte{"procedures/mail": []byte("v2")}}
 	clk := &clock{t: time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)}
-	l, err := NewLearn(LearnConfig{Pipeline: pl, Journal: &journal.Engine{}, Harvest: &Harvester{}, Builder: b, Now: clk.now})
+	l, err := NewLearn(LearnConfig{Pipeline: pl, Journal: &journal.Engine{}, Harvest: &Harvester{Store: &change.MemStore{}}, Builder: b, Now: clk.now})
 	must(t, err)
 	return l, pl, b, clk
 }

@@ -201,6 +201,7 @@ func (p *Pipeline) reloadLocked() error {
 		st.Applied = map[string]bool{}
 	}
 	p.st = st
+	p.dropOldBasesLocked(p.st.Active.Hash())
 	for ns, tg := range p.cfg.Targets {
 		if err := tg.Apply(p.st.Active.under(ns)); err != nil {
 			return err
@@ -229,6 +230,7 @@ func (p *Pipeline) adoptLocked(id, basis string) error {
 		staged = staged || c == ClassGuestImage || c == ClassHostImage
 	}
 	p.st.Active = pr.next
+	p.dropOldBasesLocked(pr.next.Hash())
 	if pr.cand.Source == Upstream {
 		// A later release supersedes declined ones in the namespaces it
 		// installs.
@@ -336,6 +338,7 @@ func (p *Pipeline) revertLocked(id, why string) error {
 		return err
 	}
 	p.st.Active = next
+	p.dropOldBasesLocked(next.Hash())
 	a.Reverted = why
 	return nil
 }
