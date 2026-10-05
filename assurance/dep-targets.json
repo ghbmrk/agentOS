@@ -6,6 +6,12 @@
       "cmd": [
         "broker/test/a9-scenario.sh"
       ]
+    },
+    {
+      "name": "recovery-offline",
+      "cmd": [
+        "broker/test/a9-recovery-scenario.sh"
+      ]
     }
   ]
 }
