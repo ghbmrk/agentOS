@@ -223,7 +223,7 @@ func TestCardLeavesTheHostAlone(t *testing.T) {
 			t.Errorf("card mentions %q", bad)
 		}
 	}
-	if !strings.Contains(low, "press its boot key until a menu appears; choose the usb drive") {
+	if !strings.Contains(low, "for this one start you need a screen and keyboard: turn the pc off, then on, and press its boot key until a menu appears; choose the usb drive") {
 		t.Error("card does not give the one-time boot key")
 	}
 }

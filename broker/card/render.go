@@ -24,7 +24,7 @@ const (
 // QuickStart is the card's quick-start, at most five steps (ONB-7).
 var QuickStart = []string{
 	"Put the SIM in the modem. Plug the drive and the modem into the back of the PC.",
-	"Turn the PC on. No screen or keyboard is needed. Your PC's own disks are left untouched.",
+	"Turn the PC on. Usually no screen or keyboard is needed. Your PC's own disks are left untouched.",
 	fmt.Sprintf("Wait %d minutes, then point your phone's camera at the Wi-Fi code.", WaitMinutes),
 	"Join the Wi-Fi. The setup page opens by itself; follow it.",
 	"Done. Text your box any time. Text HELP for commands.",
@@ -140,7 +140,7 @@ Password: <span class="mono big">{{.WiFiPassword}}</span></p>
 <h2>Nothing happened?</h2>
 <p>Wait {{.WaitMinutes}} minutes after turning the PC on, then look for the Wi-Fi <span class="mono">{{.WiFiName}}</span>.
 Wi-Fi joined but no page? Open <span class="mono">{{.BoxPage}}</span> in your browser.
-If the Wi-Fi never appears, the PC did not start from the drive. Turn it off, then on, and press its boot key until a menu appears; choose the USB drive.</p>
+If the Wi-Fi never appears, the PC did not start from the drive. For this one start you need a screen and keyboard: turn the PC off, then on, and press its boot key until a menu appears; choose the USB drive.</p>
 <table class="keys">{{range .BootKeys}}<tr><td>{{.Brand}}</td><td>{{.Key}}</td></tr>{{end}}</table>
 </div>
 
