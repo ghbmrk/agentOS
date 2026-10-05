@@ -261,7 +261,9 @@ func main() {
 					// Replay machines run the agent's image and launch.
 					spec, err := agentSpec(imgs, agentImage, agentLaunch, replayMemMB)
 					if err == nil {
-						err = replayFits(cfg.Admission.CapacityMB, cfg.Admission.HeadroomMB, agentMemMB, replayMemMB)
+						if err = replayFits(cfg.Admission.CapacityMB, cfg.Admission.HeadroomMB, agentMemMB, replayMemMB); err != nil {
+							lp.noRoom.Store(true) // STATUS and LEARNING ON say so
+						}
 					}
 					if err == nil {
 						var ev *replay.Evaluator
