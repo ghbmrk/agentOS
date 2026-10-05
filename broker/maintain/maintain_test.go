@@ -381,3 +381,97 @@ func TestRunsUnderScheduler(t *testing.T) {
 		t.Fatal("did not run in spare time")
 	}
 }
+
+func TestStaleCheckSaysWhy(t *testing.T) {
+	r := newRig(t)
+	r.tick()
+	r.clk.add(72 * time.Hour)
+	if st := r.l.Status(); !strings.Contains(st.Line, "check again soon") {
+		t.Fatalf("busy box: %q", st.Line)
+	}
+	r.settings = loops.Settings{Paused: map[loops.Loop]bool{loops.Maintain: true}}
+	if st := r.l.Status(); st.Current || !strings.Contains(st.Line, "Reply LOOP 3 ON") {
+		t.Fatalf("Loop 3 off: %q", st.Line)
+	}
+	r.settings = loops.Settings{Off: true}
+	if st := r.l.Status(); st.Current || !strings.Contains(st.Line, "Reply LOOPS ON") {
+		t.Fatalf("loops off: %q", st.Line)
+	}
+}
+
+func TestChecksOffNeverCurrent(t *testing.T) {
+	// Even a fresh check does not make a box with checks off current: it
+	// will stop checking.
+	r := newRig(t)
+	r.tick()
+	r.settings = loops.Settings{Off: true}
+	if st := r.l.Status(); st.Current || !strings.Contains(st.Line, "off") {
+		t.Fatalf("checks off: %+v", st)
+	}
+}
+
+func TestExpiredMentionsClock(t *testing.T) {
+	r := newRig(t)
+	r.clk.add(48 * time.Hour)
+	r.tick()
+	if st := r.l.Status(); !strings.Contains(st.Line, "clock") || strings.Contains(st.Line, "server") {
+		t.Fatalf("expired: %q", st.Line)
+	}
+}
+
+func TestDigestQuietWhileCurrent(t *testing.T) {
+	r := newRig(t)
+	r.tick()
+	if d := r.digest(); !strings.Contains(d, "up to date") {
+		t.Fatalf("first digest after becoming current: %q", d)
+	}
+	r.clk.add(24 * time.Hour)
+	r.refresh()
+	r.tick()
+	if d := r.digest(); d != "" {
+		t.Fatalf("still current, nothing changed: %q", d)
+	}
+	r.online = false
+	if d := r.digest(); !strings.Contains(d, "offline") {
+		t.Fatalf("not current: %q", d)
+	}
+	r.online = true
+	if d := r.digest(); !strings.Contains(d, "up to date") {
+		t.Fatalf("current again: %q", d)
+	}
+}
+
+func TestApprovalLineSaysWhenAsked(t *testing.T) {
+	r := newRig(t)
+	r.channel = update.ChannelFast
+	r.release(2, func(m *update.Manifest) { m.Channel = update.ChannelFast })
+	r.tick()
+	if st := r.l.Status(); !strings.Contains(st.Line, "waiting for your approval since Mon 5 Oct") {
+		t.Fatalf("approval line: %q", st.Line)
+	}
+}
+
+func TestSoakCountsFromFirstSightOnFast(t *testing.T) {
+	r0 := newRig(t)
+	r0.release(2, func(m *update.Manifest) { m.Channel = update.ChannelFast })
+	r0.tick()
+	if len(r0.p.proposed()) != 0 {
+		t.Fatal("stable box took a fast release")
+	}
+
+	// A stable box notes a release when it reaches fast, so its promotion
+	// to stable does not start a second 7-day wait.
+	r := newRig(t)
+	r.release(2, func(m *update.Manifest) { m.Channel = update.ChannelFast })
+	r.tick()
+	r.clk.add(7 * 24 * time.Hour)
+	r.refresh()
+	// Maintainers promote it: stable release 3 with the same image.
+	r.promote(2, 3)
+	r.attest()
+	r.tick()
+	got := r.p.proposed()
+	if len(got) != 1 || got[0].Version() != "3" {
+		t.Fatalf("after 7 days on fast: %+v", got)
+	}
+}

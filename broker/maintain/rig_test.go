@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/change"
+	"github.com/ghbmrk/agentos/broker/loops"
 	"github.com/ghbmrk/agentos/broker/update"
 )
 
@@ -82,6 +83,7 @@ type rig struct {
 	atts     [][]byte
 	own      ed25519.PrivateKey
 	mirrors  []update.Source
+	settings loops.Settings
 	l        *Loop3
 }
 
@@ -155,6 +157,7 @@ func (r *rig) newLoop() *Loop3 {
 		},
 		OwnKey:   r.own.Public().(ed25519.PublicKey),
 		Pipeline: r.p,
+		Settings: func() loops.Settings { return r.settings },
 		State:    r.state,
 		Now:      r.clk.now,
 	})
@@ -188,6 +191,20 @@ func (r *rig) release(v int64, mod func(*update.Manifest)) {
 		mod(&rel)
 	}
 	r.must(r.repo.AddRelease(rel, files))
+	r.must(r.repo.Sign("targets", r.tgt[0]))
+	r.must(r.repo.Sign("targets", r.tgt[2]))
+	r.must(r.repo.Publish(r.snap, r.ts))
+}
+
+// promote publishes release to as a stable release with the same image
+// as release from.
+func (r *rig) promote(from, to int64) {
+	r.t.Helper()
+	rel := update.Manifest{Version: to, Channel: update.ChannelStable, UsrRootHash: strings.Repeat("ab", 32)}
+	for _, name := range []string{"entry.conf", "usr.img"} {
+		rel.Files = append(rel.Files, fmt.Sprintf("host-image/%d/%s", from, name))
+	}
+	r.must(r.repo.AddRelease(rel, nil))
 	r.must(r.repo.Sign("targets", r.tgt[0]))
 	r.must(r.repo.Sign("targets", r.tgt[2]))
 	r.must(r.repo.Publish(r.snap, r.ts))

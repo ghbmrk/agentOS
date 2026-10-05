@@ -25,9 +25,12 @@ package maintain
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -65,6 +68,10 @@ type Config struct {
 	// OwnKey is this box's attestation key, which never counts as
 	// independent. Nil: none.
 	OwnKey ed25519.PublicKey
+	// Settings reads the owner's loop settings (the scheduler's
+	// Settings), so the status can say when update checks are off. Nil:
+	// every loop on.
+	Settings func() loops.Settings
 	// Pipeline is the change pipeline (§11).
 	Pipeline Proposer
 	// State persists Loop 3's own state.
@@ -129,10 +136,17 @@ type state struct {
 	OfflineSince time.Time `json:"offline_since,omitempty"`
 	// Newest is the newest release above the installed one the last good
 	// check found on the box's channel, or 0.
-	Newest   int64                  `json:"newest,omitempty"`
-	Pending  *pending               `json:"pending,omitempty"`
-	Seen     map[int64]time.Time    `json:"seen,omitempty"`
-	Proposed map[int64]change.State `json:"proposed,omitempty"`
+	Newest  int64    `json:"newest,omitempty"`
+	Pending *pending `json:"pending,omitempty"`
+	// Seen is when the box first saw each release image, on any channel,
+	// keyed by imageKey: a release promoted from fast to stable keeps its
+	// image, so its soak counts from first sight on fast (UPD-5).
+	Seen       map[string]time.Time   `json:"seen,omitempty"`
+	Proposed   map[int64]change.State `json:"proposed,omitempty"`
+	ProposedAt map[int64]time.Time    `json:"proposed_at,omitempty"`
+	// DigestCurrent: the last digest already said the box is up to date,
+	// so the next stays quiet while it still is.
+	DigestCurrent bool `json:"digest_current,omitempty"`
 	// Confirmed: an online check cleared a drive install's pending
 	// freshness check; the digest says so once.
 	Confirmed bool `json:"confirmed,omitempty"`
@@ -167,6 +181,9 @@ func New(cfg Config) (*Loop3, error) {
 	if cfg.Channel == nil {
 		cfg.Channel = func() string { return update.ChannelStable }
 	}
+	if cfg.Settings == nil {
+		cfg.Settings = func() loops.Settings { return loops.Settings{} }
+	}
 	if cfg.Interval <= 0 {
 		cfg.Interval = 24 * time.Hour
 	}
@@ -195,6 +212,7 @@ func New(cfg Config) (*Loop3, error) {
 	for v, s := range l.st.Proposed {
 		if s == change.StateAwaitingOwner {
 			delete(l.st.Proposed, v)
+			delete(l.st.ProposedAt, v)
 			l.st.Next = time.Time{}
 		}
 	}
@@ -252,6 +270,16 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 		opts.Channel = update.ChannelStable
 	}
 	res, failure, err := l.checkMirrors(opts)
+	var sighted string
+	if failure == "" && opts.Channel == update.ChannelStable {
+		// Note when an image first reaches fast, without taking it, so a
+		// later promotion to stable is not soaked twice (UPD-5).
+		fopts := opts
+		fopts.Channel = update.ChannelFast
+		if fres, f, _ := l.checkMirrors(fopts); f == "" && fres.Release != nil {
+			sighted, _ = imageKey(fres.Release)
+		}
+	}
 	if cerr := ctx.Err(); cerr != nil {
 		// Preempted: nothing is recorded, and the check is offered again.
 		return loops.Result{Err: cerr}
@@ -275,14 +303,21 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 	if res.FreshnessConfirmed {
 		l.st.Confirmed = true
 	}
-	for v := range l.st.Seen {
-		if v <= installed.Version {
-			delete(l.st.Seen, v)
+	if l.st.Seen == nil {
+		l.st.Seen = map[string]time.Time{}
+	}
+	for k, t := range l.st.Seen {
+		if now.Sub(t) > seenKeep {
+			delete(l.st.Seen, k)
 		}
+	}
+	if _, ok := l.st.Seen[sighted]; sighted != "" && !ok {
+		l.st.Seen[sighted] = now
 	}
 	for v := range l.st.Proposed {
 		if v <= installed.Version {
 			delete(l.st.Proposed, v)
+			delete(l.st.ProposedAt, v)
 		}
 	}
 	l.st.Newest, l.st.Pending = 0, nil
@@ -301,13 +336,16 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 	}
 	v := m.Version
 	l.st.Newest = v
-	if l.st.Seen == nil {
-		l.st.Seen = map[int64]time.Time{}
+	key, err := imageKey(rel)
+	if err != nil {
+		l.saveLocked()
+		l.mu.Unlock()
+		return loops.Result{Err: err}
 	}
-	if _, ok := l.st.Seen[v]; !ok {
-		l.st.Seen[v] = now
+	if _, ok := l.st.Seen[key]; !ok {
+		l.st.Seen[key] = now
 	}
-	seen := l.st.Seen[v]
+	seen := l.st.Seen[key]
 	_, proposed := l.st.Proposed[v]
 	if channel == ChannelPinned {
 		l.st.Pending = &pending{Version: v, Security: m.Security, Why: waitPinned}
@@ -333,6 +371,10 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 			l.st.Proposed = map[int64]change.State{}
 		}
 		l.st.Proposed[v] = o.proposed
+		if l.st.ProposedAt == nil {
+			l.st.ProposedAt = map[int64]time.Time{}
+		}
+		l.st.ProposedAt[v] = now
 	case o.wait == nil:
 		// Preempted before proposing: offered again.
 		l.st.Next = time.Time{}
@@ -386,6 +428,34 @@ func classify(err error) (string, int) {
 		return failExpired, 2
 	}
 	return failReach, 1
+}
+
+// seenKeep is how long a first sighting is remembered.
+const seenKeep = 90 * 24 * time.Hour
+
+// imageKey identifies a release's image: its /usr verity root hash and
+// every file's signed path and hash. A promotion that republishes the same
+// image under a new version has the same key.
+func imageKey(rel *update.Checked) (string, error) {
+	m, err := rel.Manifest()
+	if err != nil {
+		return "", err
+	}
+	files, err := rel.Files()
+	if err != nil {
+		return "", err
+	}
+	parts := []string{m.UsrRootHash}
+	for _, f := range files {
+		parts = append(parts, f.Path+"="+f.SHA256)
+	}
+	sort.Strings(parts[1:])
+	h := sha256.New()
+	for _, p := range parts {
+		h.Write([]byte(p))
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // outcome is what decide did with a release: proposed it (proposed is the
@@ -460,24 +530,24 @@ type Status struct {
 const when = "Mon 2 Jan 15:04"
 
 var failText = map[string]string{
-	failExpired:   "the update server's data has expired, so it may be hiding newer updates",
+	failExpired:   "the update source's data has expired, or this box's clock is wrong, so newer updates may be hidden",
 	failSigned:    "the update data was not properly signed",
-	failRollback:  "the update server offered older data than this box already has",
-	failReach:     "the update server could not be reached",
-	failNoMirrors: "no update server is set up",
+	failRollback:  "the update source offered older data than this box already has",
+	failReach:     "the update source could not be reached",
+	failNoMirrors: "no update source is set up",
 	failState:     "this box's update record could not be read",
 }
 
 // Status reports whether the box is up to date, and says why not.
 func (l *Loop3) Status() Status {
-	online := l.cfg.Online()
+	online, set := l.cfg.Online(), l.cfg.Settings()
 	installed, ierr := l.cfg.Store.Installed()
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.statusLocked(online, installed, ierr)
+	return l.statusLocked(online, set, installed, ierr)
 }
 
-func (l *Loop3) statusLocked(online bool, in update.Installed, ierr error) Status {
+func (l *Loop3) statusLocked(online bool, set loops.Settings, in update.Installed, ierr error) Status {
 	now := l.cfg.Now()
 	st := l.st
 	last := "never"
@@ -495,6 +565,10 @@ func (l *Loop3) statusLocked(online bool, in update.Installed, ierr error) Statu
 		return Status{Line: "Updates: not checked yet, because the box is offline." + drive}
 	case !online:
 		return Status{Line: fmt.Sprintf("Updates: not checked since %s, because the box is offline.", last) + drive}
+	case set.Off:
+		return Status{Line: fmt.Sprintf("Updates: last checked %s, but update checks are off. Reply LOOPS ON to restart them.", last) + drive}
+	case !set.On(loops.Maintain):
+		return Status{Line: fmt.Sprintf("Updates: last checked %s, but update checks are off. Reply LOOP 3 ON to restart them.", last) + drive}
 	case st.Failure != "":
 		return Status{Line: fmt.Sprintf("Updates: could not check: %s. Last good check: %s.", failText[st.Failure], last) + drive}
 	case st.LastOnline.IsZero():
@@ -502,7 +576,9 @@ func (l *Loop3) statusLocked(online bool, in update.Installed, ierr error) Statu
 	case in.UnconfirmedFreshness:
 		return Status{Line: "Updates: the last update was installed from a drive and has not been checked online yet."}
 	case now.Sub(st.LastOnline) > 2*l.cfg.Interval:
-		return Status{Line: fmt.Sprintf("Updates: last checked %s.", last)}
+		// Loop 3 runs only in spare time (LOOP-1), and makes no model
+		// calls, so a busy box is the only other reason.
+		return Status{Line: fmt.Sprintf("Updates: last checked %s. The box has been busy and will check again soon.", last)}
 	}
 	if p := st.Pending; p != nil {
 		return Status{Line: pendingLine(p)}
@@ -513,6 +589,9 @@ func (l *Loop3) statusLocked(online bool, in update.Installed, ierr error) Statu
 			return Status{Line: fmt.Sprintf("Update %d did worse on this box's tests and was not installed.", st.Newest)}
 		case change.StateAdopted:
 			return Status{Line: fmt.Sprintf("Update %d is ready and installs at the next quiet time.", st.Newest)}
+		}
+		if at, ok := st.ProposedAt[st.Newest]; ok {
+			return Status{Line: fmt.Sprintf("Update %d has been waiting for your approval since %s.", st.Newest, at.Format("Mon 2 Jan"))}
 		}
 		return Status{Line: fmt.Sprintf("Update %d is waiting for your approval.", st.Newest)}
 	}
@@ -535,16 +614,25 @@ func pendingLine(p *pending) string {
 	return fmt.Sprintf("Update %d was found but could not be tested yet.", p.Version)
 }
 
-// Digest is Loop 3's lines for the owner's digest: the update status, and
-// once, that a drive install has been confirmed online.
+// Digest is Loop 3's lines for the owner's digest: the update status,
+// except while the box stays up to date (said once when it becomes so),
+// and once, that a drive install has been confirmed online.
 func (l *Loop3) Digest() []string {
-	online := l.cfg.Online()
+	online, set := l.cfg.Online(), l.cfg.Settings()
 	installed, ierr := l.cfg.Store.Installed()
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	out := []string{l.statusLocked(online, installed, ierr).Line}
+	st := l.statusLocked(online, set, installed, ierr)
+	var out []string
+	if !st.Current || !l.st.DigestCurrent {
+		out = append(out, st.Line)
+	}
+	if st.Current != l.st.DigestCurrent {
+		l.st.DigestCurrent = st.Current
+		l.saveLocked()
+	}
 	if l.st.Confirmed {
-		out = append(out, "The update installed from a drive is now confirmed as the latest by the update server.")
+		out = append(out, "The update installed from a drive is now confirmed as the latest by the update source.")
 		l.st.Confirmed = false
 		l.saveLocked()
 	}
