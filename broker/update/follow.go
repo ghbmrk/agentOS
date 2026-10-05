@@ -1,7 +1,6 @@
 package update
 
 import (
-	"bytes"
 	"crypto/x509"
 	"encoding/json"
 	"errors"
@@ -129,13 +128,45 @@ func describe(b []byte, m *metadata.Metadata[metadata.RootType]) (RootSummary, e
 	return s, nil
 }
 
-// followFile marks a switch in progress: it holds the new root's digest,
-// written before the root. The next store operation finishes the switch if
-// the root was written, or forgets it if not (settle).
+// followFile marks a switch in progress: it holds the Followed being
+// switched to, written before the root. The next store operation finishes
+// the switch if the root was written, or forgets it if not (settle).
 const followFile = "following"
 
+// sourceFile records the fork the box follows; absent on the project's
+// own chain.
+const sourceFile = "source.json"
+
 // followSteps are the switch's writes, in order, under the store lock.
-var followSteps = []string{"seen_keys", "interim_flag", "marker", "root", "timestamp", "snapshot", "staged", "done"}
+var followSteps = []string{"seen_keys", "interim_flag", "marker", "root", "timestamp", "snapshot", "staged", "source", "done"}
+
+// Followed is the fork the box takes updates from, for STATUS, the digest
+// and the audit (Security C7). The zero Followed is the project's own chain.
+type Followed struct {
+	// Name is the owner's own name for the fork, as typed on the page.
+	Name string `json:"name"`
+	// Since is when the owner switched.
+	Since time.Time `json:"since"`
+	// RootSHA256 is the digest of the root the owner chose.
+	RootSHA256 string `json:"root_sha256"`
+	// Fingerprint is the first of that root's root-role key fingerprints
+	// (sorted), as the page showed it.
+	Fingerprint string `json:"fingerprint"`
+}
+
+// Following reads the fork the box follows; the zero Followed when it
+// follows the project.
+func (s *Store) Following() (Followed, error) {
+	var src Followed
+	b, err := os.ReadFile(s.p(sourceFile))
+	if errors.Is(err, os.ErrNotExist) {
+		return src, nil
+	}
+	if err != nil {
+		return src, err
+	}
+	return src, json.Unmarshal(b, &src)
+}
 
 // followFault, set only by tests, fails the switch before a step, as a
 // crash there would.
@@ -150,12 +181,14 @@ func step(name string) error {
 
 // FollowRoot makes root the box's trusted root, replacing whatever chain it
 // followed (OSS-10). Only the owner's tier-4 intent calls it, with the
-// Digest of the summary the owner approved. The root must pass verifyRoot.
+// Digest of the summary the owner approved and the owner's name for the
+// fork; an empty name means the root is the project's own (switching
+// back), which the caller knows from the root its image ships. The root must pass verifyRoot.
 // The installed version is kept, so a fork must release above it (UPD-8,
 // Security C5); every key the new root and the current one list, in any
-// role, joins seen_keys and never leaves (C2, C8); and the project's interim test box stops counting for
-// good (C1, B2). The allow-list itself is the caller's and is unchanged.
-func (s *Store) FollowRoot(root []byte, approved string, o Options) error {
+// role, joins seen_keys and never leaves (C2, C8); and the project's
+// interim test box stops counting for good (C1, B2). The allow-list itself is the caller's and is unchanged.
+func (s *Store) FollowRoot(root []byte, approved, name string, o Options) error {
 	m, err := verifyRoot(root, o)
 	if err != nil {
 		return err
@@ -209,7 +242,16 @@ func (s *Store) FollowRoot(root []byte, approved string, o Options) error {
 	if err := step("marker"); err != nil {
 		return err
 	}
-	if err := writeAtomic(s.p(followFile), []byte(sum.RootSHA256+"\n"), 0o600); err != nil {
+	src := Followed{}
+	if name != "" {
+		now := time.Now()
+		if o.Now != nil {
+			now = o.Now()
+		}
+		src = Followed{Name: name, Since: now.UTC(), RootSHA256: sum.RootSHA256, Fingerprint: sum.Keys[metadata.ROOT][0]}
+	}
+	b, _ := json.Marshal(marker{Root: sum.RootSHA256, Source: src})
+	if err := writeAtomic(s.p(followFile), b, 0o600); err != nil {
 		return err
 	}
 	if err := step("root"); err != nil {
@@ -218,18 +260,38 @@ func (s *Store) FollowRoot(root []byte, approved string, o Options) error {
 	if err := writeAtomic(s.p("root.json"), root, 0o600); err != nil {
 		return err
 	}
-	return s.finishFollow()
+	return s.finishFollow(src)
+}
+
+// marker is followFile's content.
+type marker struct {
+	Root   string   `json:"root_sha256"`
+	Source Followed `json:"source"`
 }
 
 // finishFollow clears what the old chain left once the new root is written:
 // the saved timestamp and snapshot (their versions belong to the old chain)
-// and any staged release, then the marker. The caller holds the lock.
-func (s *Store) finishFollow() error {
+// and any staged release; records the source; then drops the marker. The
+// caller holds the lock.
+func (s *Store) finishFollow(src Followed) error {
 	for _, n := range []string{"timestamp", "snapshot", "staged"} {
 		if err := step(n); err != nil {
 			return err
 		}
 		if err := os.Remove(s.p(n + ".json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	if err := step("source"); err != nil {
+		return err
+	}
+	if src.Name == "" {
+		if err := os.Remove(s.p(sourceFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	} else {
+		b, _ := json.Marshal(src)
+		if err := writeAtomic(s.p(sourceFile), b, 0o600); err != nil {
 			return err
 		}
 	}
@@ -247,19 +309,23 @@ func (s *Store) finishFollow() error {
 // needs no settling, since a release checked under the old root fails
 // trustUnchanged once the root is written.
 func (s *Store) settle() error {
-	want, err := os.ReadFile(s.p(followFile))
+	b, err := os.ReadFile(s.p(followFile))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
+	var want marker
+	if err := json.Unmarshal(b, &want); err != nil {
+		return fmt.Errorf("update: unreadable switch record: %v", err)
+	}
 	root, err := os.ReadFile(s.p("root.json"))
 	if err != nil {
 		return err
 	}
-	if bytes.Equal(bytes.TrimSpace(want), []byte(Digest(root))) {
-		return s.finishFollow()
+	if want.Root == Digest(root) {
+		return s.finishFollow(want.Source)
 	}
 	// The root was never written: the old chain stands. What was written
 	// (seen keys, the interim flag) only narrows.

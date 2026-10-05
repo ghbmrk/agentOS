@@ -33,11 +33,15 @@ func (f *fixture) opts(o Options) Options {
 // follow switches f's box to root, as the tier-4 page does: describe what
 // the owner is shown, then follow exactly that.
 func (f *fixture) follow(root []byte, o Options) error {
+	name := "Acme"
+	if bytes.Equal(root, f.rootFile(1)) {
+		name = "" // switching back to the project
+	}
 	sum, err := DescribeRoot(root, f.opts(o))
 	if err != nil {
 		return err
 	}
-	return f.store.FollowRoot(root, sum.Digest, f.opts(o))
+	return f.store.FollowRoot(root, sum.Digest, name, f.opts(o))
 }
 
 // checkAt checks the repository of other with f's box.
@@ -93,6 +97,11 @@ func TestOSS9FollowForkRoot(t *testing.T) {
 	if err != nil || res.Release == nil || res.Release.Version() != "3" {
 		t.Fatal("fork release after following:", res.Release, err)
 	}
+	shown := mustV(DescribeRoot(fork.rootFile(1), f.opts(Options{})))
+	if src := mustV(f.store.Following()); src.Name != "Acme" || !src.Since.Equal(t0) ||
+		src.RootSHA256 != shown.RootSHA256 || src.Fingerprint != shown.Keys[metadata.ROOT][0] {
+		t.Fatalf("source %+v", src)
+	}
 	if _, err := f.check(Options{}); !errors.Is(err, ErrSignatures) {
 		t.Fatalf("the project's repository still passed after the switch: %v", err)
 	}
@@ -100,6 +109,9 @@ func TestOSS9FollowForkRoot(t *testing.T) {
 	f.must(f.follow(f.rootFile(1), Options{}))
 	if res, err := f.check(Options{}); err != nil || res.Release == nil || res.Release.Version() != "2" {
 		t.Fatal("project release after switching back:", res.Release, err)
+	}
+	if src := mustV(f.store.Following()); src != (Followed{}) || storeFile(t, f, sourceFile) != nil {
+		t.Fatalf("still following %+v after switching back", src)
 	}
 }
 
@@ -161,7 +173,7 @@ func TestOSS9FollowRootRefusesWeakRoots(t *testing.T) {
 			if _, err := DescribeRoot(c.root, f.opts(c.o)); !errors.Is(err, c.want) {
 				t.Fatalf("describe: %v, want %v", err, c.want)
 			}
-			if err := f.store.FollowRoot(c.root, Digest(c.root), f.opts(c.o)); !errors.Is(err, c.want) {
+			if err := f.store.FollowRoot(c.root, Digest(c.root), "Acme", f.opts(c.o)); !errors.Is(err, c.want) {
 				t.Fatalf("follow: %v, want %v", err, c.want)
 			}
 			if !bytes.Equal(before, storeFile(t, f, "root.json")) || storeFile(t, f, outsideFile) != nil {
@@ -188,14 +200,14 @@ func TestOSS9FollowRootNeedsTheApprovedDigest(t *testing.T) {
 		"the bytes alone": Digest(fork.rootFile(1)),
 		"none":            "",
 	} {
-		if err := f.store.FollowRoot(fork.rootFile(1), d, f.opts(Options{})); !errors.Is(err, ErrFollowNotApproved) {
+		if err := f.store.FollowRoot(fork.rootFile(1), d, "Acme", f.opts(Options{})); !errors.Is(err, ErrFollowNotApproved) {
 			t.Fatalf("%s digest: %v", name, err)
 		}
 	}
 	if !bytes.Equal(before, storeFile(t, f, "root.json")) {
 		t.Fatal("an unapproved follow changed the root")
 	}
-	f.must(f.store.FollowRoot(fork.rootFile(1), shown.Digest, f.opts(Options{})))
+	f.must(f.store.FollowRoot(fork.rootFile(1), shown.Digest, "Acme", f.opts(Options{})))
 	// Same bytes, different shown expiry: a different digest.
 	later := shown
 	later.Expires = later.Expires.Add(time.Hour)
@@ -402,6 +414,9 @@ func TestOSS9FollowIsCrashSafe(t *testing.T) {
 				if err != nil || res.Release == nil || res.Release.Version() != "3" {
 					t.Fatal("the switch did not finish:", res.Release, err)
 				}
+				if mustV(f.store.Following()).Name != "Acme" {
+					t.Fatal("the finished switch lost the fork's name")
+				}
 				for _, n := range []string{"staged.json", followFile} {
 					if storeFile(t, f, n) != nil {
 						t.Fatalf("%s left after the switch finished", n)
@@ -415,8 +430,8 @@ func TestOSS9FollowIsCrashSafe(t *testing.T) {
 			if _, ok, _ := f.store.Staged(); !ok {
 				t.Fatal("a crash before the root dropped the staged release")
 			}
-			if storeFile(t, f, followFile) != nil {
-				t.Fatal("an unfinished switch's marker was left")
+			if storeFile(t, f, followFile) != nil || mustV(f.store.Following()).Name != "" {
+				t.Fatal("an unfinished switch's marker or source was left")
 			}
 		})
 	}
