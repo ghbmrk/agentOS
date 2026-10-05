@@ -936,7 +936,7 @@ func TestVaultInterruptedPassphraseChange(t *testing.T) {
 	}
 
 	fv.interrupted, fv.unfinished = false, true
-	const line = "Your passphrase change did not finish; change it again."
+	const line = "Your passphrase change did not finish, so your old passphrase still works. Change it again the same way you started it."
 	if page := r.get("/unlock/vault"); strings.Contains(page, line) {
 		t.Fatalf("shown while locked:\n%s", page)
 	}

@@ -383,7 +383,7 @@ func (s *Server) vaultPage(w http.ResponseWriter, r *http.Request, errText strin
 	opener := s.vaultOpener != "" && s.vaultOpener != "-" && s.vaultOpener == vaultKey(r)
 	s.mu.Unlock()
 	if st.ChangeUnfinished && ((st.State == "pending" && v.Mine) || (st.State == "open" && (v.SignedIn || opener))) {
-		v.Change = "Your passphrase change did not finish; change it again."
+		v.Change = "Your passphrase change did not finish, so your old passphrase still works. Change it again the same way you started it."
 	}
 	if !st.Expires.IsZero() {
 		v.Expires = st.Expires.In(s.cfg.Now().Location()).Format("15:04")
