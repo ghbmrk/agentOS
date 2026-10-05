@@ -97,6 +97,9 @@ const (
 	FollowExecutor = "update"
 	// MaxFollowName bounds the owner-typed name, in characters.
 	MaxFollowName = 40
+	// MaxFollowDigits bounds the digits in that name, so it can carry a
+	// year but never a code.
+	MaxFollowDigits = 4
 )
 
 // FollowIntent is the local page's request to follow the root whose

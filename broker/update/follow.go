@@ -1,6 +1,7 @@
 package update
 
 import (
+	"bytes"
 	"crypto/x509"
 	"encoding/json"
 	"errors"
@@ -87,6 +88,21 @@ func verifyRoot(b []byte, o Options) (*metadata.Metadata[metadata.RootType], err
 		return nil, fmt.Errorf("%w: root v%d expired %s", ErrExpired, m.Signed.Version, m.Signed.Expires.UTC().Format(time.DateOnly))
 	}
 	return m, nil
+}
+
+// rootKeysWithin reports whether every root-role key a lists is one b
+// lists.
+func rootKeysWithin(a, b *metadata.Metadata[metadata.RootType]) bool {
+	in := map[string]bool{}
+	for _, k := range b.Signed.Roles[metadata.ROOT].KeyIDs {
+		in[k] = true
+	}
+	for _, k := range a.Signed.Roles[metadata.ROOT].KeyIDs {
+		if !in[k] {
+			return false
+		}
+	}
+	return true
 }
 
 // DescribeRoot verifies a root as FollowRoot will and returns what the
@@ -227,6 +243,14 @@ func (s *Store) FollowRoot(root []byte, approved, name string, o Options) error 
 	old, err := metadata.Root().FromBytes(cur)
 	if err != nil {
 		return classify(err)
+	}
+	// A root no newer than the one the box trusts, whose root keys all
+	// come from it, is the same chain going back, not a fork: it could
+	// trust keys a later root revoked (security R2 on #180). The trusted
+	// root itself, byte for byte, re-trusts nothing and may be followed
+	// again under another name.
+	if rootKeysWithin(m, old) && m.Signed.Version <= old.Signed.Version && !bytes.Equal(root, cur) {
+		return fmt.Errorf("%w: root v%d is not newer than this chain's v%d", ErrRollback, m.Signed.Version, old.Signed.Version)
 	}
 	addKeys(seen, old)
 	addKeys(seen, m)

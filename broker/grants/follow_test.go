@@ -31,6 +31,9 @@ func TestOSS10FollowIsATier4PageAct(t *testing.T) {
 		FollowIntent("f/space", " Acme", rootDigest),
 		FollowIntent("f/long", strings.Repeat("a", MaxFollowName+1), rootDigest),
 		FollowIntent("f/bidi", "Acme\u202egpj", rootDigest),
+		FollowIntent("f/code", "Fork 123456", rootDigest),
+		FollowIntent("f/spaced", "REPLY YES 48 29 13", rootDigest),
+		FollowIntent("f/wide", "Fork \uff11\uff12\uff13\uff14\uff15", rootDigest),
 		withParam(FollowIntent("f/extra", "Acme", rootDigest), "fingerprint", "x"),
 		withExecutor(FollowIntent("f/exec", "Acme", rootDigest), ExecutorName),
 	} {
@@ -41,6 +44,9 @@ func TestOSS10FollowIsATier4PageAct(t *testing.T) {
 	m := newRigExecs(t, nil, map[string]journal.Executor{FollowExecutor: exec})
 	if st := m.submit(FollowIntent("f/max", strings.Repeat("é", MaxFollowName), rootDigest)); st.State != journal.Pending {
 		t.Fatalf("a %d-character name: %s %q", MaxFollowName, st.State, st.Permission.Reason)
+	}
+	if st := m.submit(FollowIntent("f/year", "Fork 2026b", rootDigest)); st.State != journal.Pending {
+		t.Fatalf("a name with a year: %s %q", st.State, st.Permission.Reason)
 	}
 	n := r.own.count()
 	st := r.submit(FollowIntent("f/1", "Acme Fork", rootDigest))

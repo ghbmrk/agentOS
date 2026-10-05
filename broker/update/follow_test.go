@@ -241,6 +241,37 @@ func TestOSS9FollowKeepsAntiRollback(t *testing.T) {
 	}
 }
 
+// Security R2 on #180: a root of the chain the box follows now that is no
+// newer is a rollback, refused before anything is written; a root of
+// another chain with a lower version, such as the project's own, is a
+// switch.
+func TestOSS9FollowRefusesAnOlderRootOfTheSameChain(t *testing.T) {
+	f := newFixture(t)
+	fork := forkOf(t, 2)
+	v2 := resign(t, fork.rootFile(1), func(m *metadata.Metadata[metadata.RootType]) { m.Signed.Version = 2 }, fork.root[0], fork.root[1])
+	sibling := resign(t, fork.rootFile(1), func(m *metadata.Metadata[metadata.RootType]) {
+		m.Signed.Version = 2
+		m.Signed.Expires = m.Signed.Expires.Add(-time.Hour)
+	}, fork.root[0], fork.root[1])
+	f.must(f.follow(v2, Options{}))
+	before := storeFile(t, f, "root.json")
+	for _, r := range [][]byte{fork.rootFile(1), sibling} {
+		if err := f.follow(r, Options{}); !errors.Is(err, ErrRollback) {
+			t.Fatalf("a root of the same chain, no newer: %v", err)
+		}
+	}
+	if !bytes.Equal(before, storeFile(t, f, "root.json")) {
+		t.Fatal("a refused rollback changed the store")
+	}
+	// The trusted root itself re-trusts nothing: following it again only
+	// renames the source.
+	f.must(f.follow(v2, Options{}))
+	if !bytes.Equal(before, storeFile(t, f, "root.json")) {
+		t.Fatal("following the trusted root again changed it")
+	}
+	f.must(f.follow(f.rootFile(1), Options{}))
+}
+
 // Security C2 and C8: every key the fork's root lists, in any role, joins
 // seen_keys before the switch and never leaves it, so a fork maintainer's
 // key never counts as an attestor, even allow-listed and even after

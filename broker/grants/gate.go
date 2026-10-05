@@ -958,16 +958,22 @@ func hexDigest(s string) bool {
 
 // followName is the owner's name for a source: 1 to MaxFollowName
 // printable characters on one line (no control or bidi formatting
-// characters), with no leading or trailing space.
+// characters), with no leading or trailing space, and at most
+// MaxFollowDigits digits in all. The name reaches the owner in
+// broker-voiced texts, so it must never carry a code, even spaced out
+// (security R1 on #180; codes are 6 digits).
 func followName(s string) bool {
-	n := 0
+	n, digits := 0, 0
 	for _, c := range s {
 		if !unicode.IsPrint(c) {
 			return false
 		}
+		if unicode.IsDigit(c) {
+			digits++
+		}
 		n++
 	}
-	return n > 0 && n <= MaxFollowName && strings.TrimSpace(s) == s
+	return n > 0 && n <= MaxFollowName && digits <= MaxFollowDigits && strings.TrimSpace(s) == s
 }
 
 // evaluateDelivery decides a delivery to the evidence destination: a
