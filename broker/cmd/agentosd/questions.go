@@ -50,8 +50,8 @@ func (q *questions) Answer(ctx context.Context, msg string) (string, bool) {
 }
 
 // Clock is STATUS's time check line (a control.Handler note): the guard's
-// last check in the box's zone, so a restriction holding every question
-// is visible while the guard texts nothing (UX R3, L3 S1 on #95).
+// last check in the box's zone, so a restriction is visible while the
+// guard texts nothing (UX R3, L3 S1 on #95).
 func (q *questions) Clock() string {
 	g := q.g.Load()
 	if g == nil {
@@ -101,8 +101,9 @@ func (q *questions) open(ctx context.Context, d *daemon.Daemon, pre *preempter, 
 	}
 	// No Notify yet: the guard's texts tell the owner that pre-allowances,
 	// request expiry and updates are playing safe, and those move onto the
-	// guard only with the rest of P2-9's carry-forward (clock K7). Until
-	// then a restriction holds questions without a text.
+	// guard only with the rest of P2-9's carry-forward (clock K7).
+	// Questions keep going out through a restriction, their waits on the
+	// monotonic clock (question Q15).
 	guard, err := clock.New(clock.Config{
 		Synced:    clock.Synced,
 		StatePath: cfg.ClockPath,

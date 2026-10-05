@@ -25,7 +25,7 @@ func TestHeldQuestionsShareOneText(t *testing.T) {
 	reserved := 0
 	r := newRig(t, func(c *Config) {
 		c.SendsPerHour = 1
-		c.Reserve = func(time.Time) bool { mu.Lock(); reserved++; mu.Unlock(); return true }
+		c.Reserve = func(bool) bool { mu.Lock(); reserved++; mu.Unlock(); return true }
 		c.Hidden = func(t string) bool { return strings.Count(t, "Ferry") > 1 } // synthetic
 	})
 	r.ask("lin1", "a", short("Lunch at noon?"))

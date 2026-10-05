@@ -8,7 +8,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 )
 
 // TestGuestToolsServeTheBook (W9): the guest socket lists the question
@@ -48,7 +47,7 @@ func TestQuestionsReserveTheSharedBudget(t *testing.T) {
 	var mu sync.Mutex
 	grant, asked := false, 0
 	r := newRig(t, func(c *Config) {
-		c.Reserve = func(time.Time) bool {
+		c.Reserve = func(bool) bool {
 			mu.Lock()
 			defer mu.Unlock()
 			asked++

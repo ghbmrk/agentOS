@@ -45,6 +45,9 @@ const (
 	// MaxPoll bounds one owner_question_status wait (PQ3), as the guest
 	// plane's own /owner/next poll is bounded.
 	MaxPoll = 25 * time.Second
+	// DefaultAgedAfter is how long a question waits unsent before its
+	// text may go ahead of a waiting approval batch (PQ5; Config.Reserve).
+	DefaultAgedAfter = time.Hour
 
 	MaxText = 200 // runes
 	// MaxRendered is the longest owner text a question may render to, in
@@ -153,9 +156,11 @@ type Config struct {
 	// with approval requests, just before a question is texted; false
 	// holds the question (Q3, UX-71-1). The wiring passes the gate's
 	// Reserve, which refuses while an approval request waits to be sent
-	// and counts the text in the same step. Nil: questions are paced
-	// alone, by SendsPerHour.
-	Reserve func(now time.Time) bool
+	// and counts the text in the same step. aged is set when the text's
+	// first question has waited AgedAfter unsent: the gate then lets it
+	// ahead of a waiting batch, at most once an hour (PQ5). Nil:
+	// questions are paced alone, by SendsPerHour.
+	Reserve func(aged bool) bool
 	// Mono reads a monotonic clock (any origin). While Now is restricted,
 	// a texted question's wait is counted on it, so a restriction never
 	// stretches a deadline the owner was given (PQ4). Nil: the process's
@@ -170,6 +175,9 @@ type Config struct {
 	WaitersPerMachine int
 	RestartGrace      time.Duration
 	Keep              time.Duration
+	// AgedAfter: a question held this long since it was asked leads the
+	// next text and may go ahead of a waiting approval batch (PQ5).
+	AgedAfter time.Duration
 }
 
 type entry struct {
@@ -185,7 +193,11 @@ type entry struct {
 	AskWithin time.Duration `json:"ask_within,omitempty"`
 	Asked     time.Time     `json:"asked,omitempty"`
 
-	State     State     `json:"state"`
+	State State `json:"state"`
+	// Texted is set when the question's text went out; Sent and Deadline
+	// stay zero for a text sent while the clock was restricted until the
+	// next trusted tick dates them (PQ4).
+	Texted    bool      `json:"texted,omitempty"`
 	Sent      time.Time `json:"sent,omitempty"`
 	Deadline  time.Time `json:"deadline,omitempty"`
 	Closed    time.Time `json:"closed,omitempty"`
@@ -193,18 +205,24 @@ type entry struct {
 	FromOwner bool      `json:"from_owner,omitempty"`
 	Late      string    `json:"late,omitempty"`
 
-	// sentMono is Mono when the question was texted, set only for a text
-	// sent by this process (monotonic time does not survive a restart).
-	sentMono time.Duration
-	monoSet  bool
+	// sentMono is Mono when the question was texted (monoSet), and
+	// askedMono when it was asked (askMono). Monotonic time does not
+	// survive a restart, so a loaded question takes the time of loading:
+	// its wait and its age never run short.
+	sentMono, askedMono time.Duration
+	monoSet, askMono    bool
 }
+
+// texted reports whether e's text went out (Sent, from files written
+// before Texted, or Texted).
+func (e *entry) texted() bool { return e.Texted || !e.Sent.IsZero() }
 
 func (e *entry) open() bool { return e.State == Held || e.State == Waiting }
 
 // due reports whether e may be texted at now: held, never sent, and not
 // past its ask-by.
 func (e *entry) due(now time.Time) bool {
-	return e.State == Held && e.Sent.IsZero() && !e.pastAskBy(now)
+	return e.State == Held && !e.texted() && !e.pastAskBy(now)
 }
 
 func (e *entry) pastAskBy(now time.Time) bool {
@@ -214,7 +232,7 @@ func (e *entry) pastAskBy(now time.Time) bool {
 // tagged reports whether e's tag means something to the owner: it is
 // open, or it was texted. A question closed without a text never showed
 // its tag, so the tag is free again (PQ2).
-func (e *entry) tagged() bool { return e.open() || !e.Sent.IsZero() }
+func (e *entry) tagged() bool { return e.open() || e.texted() }
 
 type file struct {
 	Next      int      `json:"next"`
@@ -231,9 +249,13 @@ type file struct {
 // send is one owner text, kept an hour for pacing (CH-15). Others are
 // the askers of further questions that shared it (PQ1).
 type send struct {
-	At     time.Time `json:"at"`
+	At     time.Time `json:"at"` // zero for a text sent while restricted
 	Asker  string    `json:"asker"`
 	Others []string  `json:"others,omitempty"`
+	// mono is Mono at the text (monoSet), or at loading, so pacing holds
+	// while the clock is restricted (PQ4).
+	mono    time.Duration
+	monoSet bool
 }
 
 // Book holds the box's questions.
@@ -282,6 +304,7 @@ func New(cfg Config) (*Book, error) {
 	def(&cfg.MaxWait, DefaultMaxWait)
 	def(&cfg.RestartGrace, DefaultRestartGrace)
 	def(&cfg.Keep, DefaultKeep)
+	def(&cfg.AgedAfter, DefaultAgedAfter)
 	defi(&cfg.PerAsker, DefaultPerAsker)
 	defi(&cfg.MaxOpen, DefaultMaxOpen)
 	defi(&cfg.SendsPerHour, DefaultSendsPerHour)
@@ -324,6 +347,20 @@ func New(cfg Config) (*Book, error) {
 		b.qs, b.next, b.digest, b.sends, b.refused = f.Questions, f.Next, f.Digest, f.Sends, f.Refused
 		b.notAskedLines, b.notAskedMore = f.NotAskedLines, f.NotAskedMore
 		b.loaded = len(b.qs) > 0
+		m := cfg.Mono()
+		for _, e := range b.qs {
+			if e.State == Held && !e.texted() {
+				e.askedMono, e.askMono = m, true
+			}
+			if e.State == Waiting && e.Deadline.IsZero() {
+				e.sentMono, e.monoSet = m, true // texted while restricted
+			}
+		}
+		for i := range b.sends {
+			if b.sends[i].At.IsZero() {
+				b.sends[i].mono, b.sends[i].monoSet = m, true
+			}
+		}
 	}
 	return b, nil
 }
@@ -448,7 +485,11 @@ func (b *Book) normalize(s Spec) (Spec, error) {
 			return out, errors.New("question: no questions about codes, PINs, passwords, keys or the Owner Card; the agent never needs them")
 		}
 	}
-	text := b.renderBy(&entry{ID: "Q999", Text: out.Text, Default: out.Default, Choices: out.Choices}, "Mon 15:04")
+	q := &entry{ID: "Q999", Text: out.Text, Default: out.Default, Choices: out.Choices}
+	text := b.renderBy(q, "by Mon 15:04")
+	if t := b.renderBy(q, "within "+waitWords(out.Wait)); len(t) > len(text) {
+		text = t
+	}
 	if len(text) > MaxRendered {
 		return out, fmt.Errorf("question: the question, choices and default are too long for one text (%d bytes, at most %d)", len(text), MaxRendered)
 	}
@@ -696,9 +737,10 @@ func (b *Book) Ask(ctx context.Context, asker, req string, s Spec) (Status, erro
 	}
 	e := &entry{ID: id, Asker: asker, Req: req, Text: s.Text, Default: s.Default, Choices: s.Choices, Wait: s.Wait,
 		AskWithin: s.AskWithin, State: Held}
-	if e.AskWithin > 0 && clockErr == nil {
+	if clockErr == nil {
 		e.Asked = now // else the first trusted tick sets it
 	}
+	e.askedMono, e.askMono = b.cfg.Mono(), true
 	b.qs = append(b.qs, e)
 	if err := b.persist(); err != nil {
 		b.qs = b.qs[:len(b.qs)-1]
@@ -760,7 +802,7 @@ func (b *Book) byIDLocked(id string) *entry {
 // Status reports asker's question by request ID. Before it returns text
 // the owner wrote, it raises machine's label (Config.Reveal).
 func (b *Book) Status(ctx context.Context, asker, req, machine string) (Status, error) {
-	_, clockErr := b.cfg.Now(ctx)
+	now, clockErr := b.cfg.Now(ctx)
 	b.mu.Lock()
 	e := b.findLocked(asker, req)
 	if e == nil {
@@ -774,6 +816,9 @@ func (b *Book) Status(ctx context.Context, asker, req, machine string) (Status, 
 		st.Reason = "not texted yet (pacing or quiet hours); the deadline starts when the owner is texted"
 	case Waiting:
 		st.Deadline = e.Deadline
+		if st.Deadline.IsZero() && clockErr == nil {
+			st.Deadline = now.Add(e.Wait - (b.cfg.Mono() - e.sentMono)) // texted while restricted (PQ4)
+		}
 	case Answered:
 		st.Answer, st.FromOwner = e.Answer, true
 	case Defaulted:
@@ -784,7 +829,7 @@ func (b *Book) Status(ctx context.Context, asker, req, machine string) (Status, 
 	b.mu.Unlock()
 	switch {
 	case clockErr != nil && counting:
-		st.Reason = "the box clock is being checked; the wait still runs out at the deadline the owner was given"
+		st.Reason = "the box clock is being checked; the wait the owner was given still runs"
 	case clockErr != nil && (st.State == Held || st.State == Waiting):
 		st.State, st.Deadline = Held, time.Time{}
 		st.Reason = "the box clock is being checked; the default waits until it is"
@@ -805,24 +850,29 @@ func (b *Book) Status(ctx context.Context, asker, req, machine string) (Status, 
 	return st, nil
 }
 
-// sendDue texts held questions, oldest first, while the clock is trusted,
-// it is not quiet hours, and the hourly budget allows (CH-15). One text
-// carries up to MaxPerText questions that fit in it together (PQ1), so
-// the budget counts texts, not questions. A question's deadline starts
-// when its text is sent; a failed text leaves them all held.
+// sendDue texts held questions, oldest first, while it is not quiet hours
+// and the hourly budget allows (CH-15). One text carries up to MaxPerText
+// questions that fit in it together (PQ1), so the budget counts texts,
+// not questions. A question's wait starts when its text is sent; a failed
+// text leaves them all held. While the clock is restricted, texts still
+// go out, giving the wait ("within 2 hours") instead of a clock time, and
+// pacing and the wait run on the monotonic clock (PQ4); with quiet hours
+// configured nothing is texted then, since they cannot be told.
 func (b *Book) sendDue(ctx context.Context) {
 	b.sendMu.Lock()
 	defer b.sendMu.Unlock()
 	for {
 		now, err := b.cfg.Now(ctx)
-		if err != nil || (b.cfg.Quiet != nil && b.cfg.Quiet(now)) {
+		trusted := err == nil
+		if b.cfg.Quiet != nil && (!trusted || b.cfg.Quiet(now)) {
 			return
 		}
+		m := b.cfg.Mono()
 		b.mu.Lock()
 		keep := b.sends[:0]
 		recent := map[string]bool{}
 		for _, t := range b.sends {
-			if now.Sub(t.At) < time.Hour {
+			if b.withinHour(t, now, trusted, m) {
 				keep = append(keep, t)
 				recent[t.Asker] = true
 				for _, a := range t.Others {
@@ -832,12 +882,23 @@ func (b *Book) sendDue(ctx context.Context) {
 		}
 		b.sends = keep
 		// Oldest first, but an asker texted in the last hour waits behind
-		// one that was not, so one lineage cannot take the whole budget.
+		// one that was not, so one lineage cannot take the whole budget;
+		// a question held AgedAfter goes first (PQ5).
 		var batch []*entry
 		if len(b.sends) < b.cfg.SendsPerHour {
-			for _, fresh := range []bool{true, false} {
+			for tier := range 3 {
 				for _, q := range b.qs {
-					if q.due(now) && recent[q.Asker] != fresh {
+					if !q.due(now) {
+						continue
+					}
+					t := 2
+					switch {
+					case b.heldFor(q, now, trusted, m) >= b.cfg.AgedAfter:
+						t = 0
+					case !recent[q.Asker]:
+						t = 1
+					}
+					if t == tier {
 						batch = append(batch, q)
 					}
 				}
@@ -847,15 +908,22 @@ func (b *Book) sendDue(ctx context.Context) {
 			b.mu.Unlock()
 			return
 		}
+		by := func(q *entry) string {
+			if trusted {
+				return "by " + b.clock(now, now.Add(q.Wait))
+			}
+			return "within " + waitWords(q.Wait)
+		}
+		aged := b.heldFor(batch[0], now, trusted, m) >= b.cfg.AgedAfter
 		// The first goes alone if need be; the rest join while the text
 		// still fits and is not withheld as secret-shaped (CH-19).
-		text := b.render(batch[0], now, now.Add(batch[0].Wait))
+		text := b.renderBy(batch[0], by(batch[0]))
 		n := 1
 		for _, q := range batch[1:] {
 			if n == MaxPerText {
 				break
 			}
-			t := text + " " + b.render(q, now, now.Add(q.Wait))
+			t := text + " " + b.renderBy(q, by(q))
 			if len(t) > MaxRendered || b.cfg.Hidden != nil && b.cfg.Hidden(t) {
 				continue
 			}
@@ -866,31 +934,85 @@ func (b *Book) sendDue(ctx context.Context) {
 		b.mu.Unlock()
 		// The shared budget is reserved outside b.mu, and sendMu keeps it
 		// to one text at a time.
-		if b.cfg.Reserve != nil && !b.cfg.Reserve(now) {
+		if b.cfg.Reserve != nil && !b.cfg.Reserve(aged) {
 			return
 		}
 		if err := b.cfg.Send(text); err != nil {
 			return
 		}
-		m := b.cfg.Mono()
 		b.mu.Lock()
-		s := send{At: now, Asker: batch[0].Asker}
+		s := send{Asker: batch[0].Asker, mono: m, monoSet: true}
+		if trusted {
+			s.At = now
+		}
 		for _, e := range batch {
 			if e != batch[0] {
 				s.Others = append(s.Others, e.Asker)
 			}
+			// How long questions wait for a text, to tune AgedAfter (PQ5).
+			b.cfg.Logf("question %s texted after %s held", e.ID, b.heldFor(e, now, trusted, m).Round(time.Minute))
 			if e.State == Held { // the owner may have answered meanwhile
-				e.State, e.Sent, e.Deadline = Waiting, now, now.Add(e.Wait)
-			} else {
+				e.State = Waiting
+				if trusted {
+					e.Deadline = now.Add(e.Wait)
+				}
+			}
+			if trusted {
 				e.Sent = now
 			}
-			e.sentMono, e.monoSet = m, true
+			e.Texted, e.sentMono, e.monoSet = true, m, true
 		}
 		b.sends = append(b.sends, s)
 		b.wakeLocked()
 		b.save("send")
 		b.mu.Unlock()
 	}
+}
+
+// withinHour reports whether t counts against this hour's texts: on the
+// monotonic clock when it has a reading, else on trusted time, else
+// (restricted, no reading) it does.
+func (b *Book) withinHour(t send, now time.Time, trusted bool, m time.Duration) bool {
+	switch {
+	case t.monoSet:
+		return m-t.mono < time.Hour
+	case trusted:
+		return now.Sub(t.At) < time.Hour
+	}
+	return true
+}
+
+// heldFor is how long q has waited since it was asked: the longer of the
+// monotonic reading and, with a trusted clock, Asked.
+func (b *Book) heldFor(q *entry, now time.Time, trusted bool, m time.Duration) time.Duration {
+	var d time.Duration
+	if q.askMono {
+		d = m - q.askedMono
+	}
+	if trusted && !q.Asked.IsZero() {
+		d = max(d, now.Sub(q.Asked))
+	}
+	return d
+}
+
+// waitWords renders a wait for a text sent while the clock is restricted:
+// "2 hours", "1 hour 30 minutes", "45 minutes". Seconds are dropped, so
+// the owner is never given longer than the wait.
+func waitWords(d time.Duration) string {
+	unit := func(n int, one string) string {
+		if n == 1 {
+			return "1 " + one
+		}
+		return fmt.Sprintf("%d %ss", n, one)
+	}
+	h, m := int(d/time.Hour), int(d%time.Hour/time.Minute)
+	switch {
+	case h == 0:
+		return unit(m, "minute")
+	case m == 0:
+		return unit(h, "hour")
+	}
+	return unit(h, "hour") + " " + unit(m, "minute")
 }
 
 // wakeLocked wakes every owner_question_status wait (PQ3).
@@ -909,12 +1031,9 @@ func (b *Book) clock(now, t time.Time) string {
 	return t.Format("Mon 15:04")
 }
 
-// render is the owner's text for a question. It is sent through Notify,
-// which marks it as agent text.
-func (b *Book) render(e *entry, now, deadline time.Time) string {
-	return b.renderBy(e, b.clock(now, deadline))
-}
-
+// renderBy is the owner's text for a question, by being "by 14:30" or,
+// while the clock is restricted, "within 2 hours" (PQ4). It is sent
+// through Notify, which marks it as agent text.
 func (b *Book) renderBy(e *entry, by string) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%s: %s", e.ID, e.Text)
@@ -925,7 +1044,7 @@ func (b *Book) renderBy(e *entry, by string) string {
 		}
 		sb.WriteString(".")
 	}
-	fmt.Fprintf(&sb, ` Reply %s and your answer by %s. No reply: it goes ahead with "%s".`, e.ID, by, e.Default)
+	fmt.Fprintf(&sb, ` Reply %s and your answer %s. No reply: it goes ahead with "%s".`, e.ID, by, e.Default)
 	return sb.String()
 }
 
@@ -938,10 +1057,16 @@ func clip(s string, n int) string {
 }
 
 // lapseLocked closes e on its default and queues its digest line.
+// A question texted while the clock was restricted and lapsed before it
+// was trusted again has no deadline, so its line gives the wait (PQ4).
 func (b *Book) lapseLocked(e *entry, now time.Time) {
 	e.State, e.Closed = Defaulted, now
-	b.digest = append(b.digest, fmt.Sprintf(`%s "%s": no reply by %s, so the agent went ahead with "%s".`,
-		e.ID, clip(e.Text, 60), b.clock(now, e.Deadline), e.Default))
+	by := "within " + waitWords(e.Wait)
+	if !e.Deadline.IsZero() {
+		by = "by " + b.clock(now, e.Deadline)
+	}
+	b.digest = append(b.digest, fmt.Sprintf(`%s "%s": no reply %s, so the agent went ahead with "%s".`,
+		e.ID, clip(e.Text, 60), by, e.Default))
 }
 
 // maxNotAsked is how many not-asked questions are kept for status reads;
@@ -983,8 +1108,9 @@ func (b *Book) monoLapsedLocked(e *entry, m time.Duration) bool {
 }
 
 // tickRestricted lapses, on the monotonic clock, the questions whose wait
-// ran out while Now is restricted (PQ4). The deadline was set from a
-// trusted time when the owner was texted, so the lapse is dated at it.
+// ran out while Now is restricted (PQ4). A deadline set from a trusted
+// time dates the lapse; one texted while restricted has none, and the
+// next trusted tick dates its close.
 func (b *Book) tickRestricted() {
 	m := b.cfg.Mono()
 	b.mu.Lock()
@@ -1003,24 +1129,32 @@ func (b *Book) tickRestricted() {
 }
 
 // Tick lapses questions past their deadline, drops old closed ones, and
-// texts held ones. With the clock restricted it only lapses texted
-// questions whose wait ran out on the monotonic clock (PQ4).
+// texts held ones. With the clock restricted it lapses only texted
+// questions whose wait ran out on the monotonic clock, and texts held
+// ones with their wait instead of a time (PQ4).
 func (b *Book) Tick(ctx context.Context) {
 	now, err := b.cfg.Now(ctx)
 	if err != nil {
 		b.tickRestricted()
+		b.sendDue(ctx)
 		return
 	}
+	m := b.cfg.Mono()
 	b.mu.Lock()
 	b.startGraceLocked(now)
 	changed := false
 	keep := b.qs[:0]
 	for _, e := range b.qs {
+		if e.State == Waiting && e.Deadline.IsZero() {
+			// Texted while restricted: date it from the monotonic clock.
+			e.Sent = now.Add(-(m - e.sentMono))
+			e.Deadline, changed = e.Sent.Add(e.Wait), true
+		}
 		if e.State == Waiting && !now.Before(e.Deadline) && !now.Before(b.grace) {
 			b.lapseLocked(e, now)
 			changed = true
 		}
-		if e.State == Held && e.Sent.IsZero() && e.AskWithin > 0 {
+		if e.State == Held && !e.texted() {
 			switch {
 			case e.Asked.IsZero():
 				e.Asked, changed = now, true // asked while the clock was restricted
@@ -1116,7 +1250,7 @@ func (b *Book) untaggedLocked(text string) *entry {
 			only = e
 		}
 	}
-	if only == nil || only.Sent.IsZero() || b.cfg.ApprovalsOpen == nil || b.cfg.ApprovalsOpen() {
+	if only == nil || !only.texted() || b.cfg.ApprovalsOpen == nil || b.cfg.ApprovalsOpen() {
 		return nil
 	}
 	for _, c := range only.Choices {
@@ -1189,8 +1323,12 @@ func (b *Book) Answer(ctx context.Context, text string) (reply string, ok bool) 
 			b.wakeLocked()
 			b.save("late answer")
 		}
-		return fmt.Sprintf("Too late for %s: the agent went ahead with \"%s\" at %s. Your answer is passed to it.",
-			e.ID, e.Default, b.clock(now, e.Closed)), true
+		at := ""
+		if !e.Closed.IsZero() {
+			at = " at " + b.clock(now, e.Closed)
+		}
+		return fmt.Sprintf("Too late for %s: the agent went ahead with \"%s\"%s. Your answer is passed to it.",
+			e.ID, e.Default, at), true
 	}
 	if len(e.Choices) > 0 {
 		pick := ""
@@ -1217,7 +1355,7 @@ func (b *Book) Answer(ctx context.Context, text string) (reply string, ok bool) 
 	}
 	if err := b.persist(); err != nil {
 		e.State, e.Answer, e.FromOwner, e.Closed = Held, "", false, time.Time{}
-		if !e.Sent.IsZero() {
+		if e.texted() {
 			e.State = Waiting
 		}
 		return "Could not save your answer. Send it again.", true
