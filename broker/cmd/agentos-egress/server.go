@@ -106,31 +106,20 @@ func (a *callAudit) decide(w http.ResponseWriter) func(route.Decision) {
 	}
 }
 
-// usage renders a served call's reported usage as the HeaderUsage trailer,
-// in its provider's own shape so the meter weighs cached input by that
-// provider's rates; "" if the provider reported none.
+// usage renders a served call's usage as the HeaderUsage trailer, with the
+// serving provider so the meter weighs cached input at that provider's
+// rates; "" if no call was served. Unreported usage still carries the
+// output characters the router counted.
 func (a *callAudit) usage() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.served == nil || a.served.Usage == nil || !a.served.Usage.Reported {
+	if a.served == nil || a.served.Usage == nil {
 		return ""
 	}
 	u := a.served.Usage
-	native := map[string]any{
-		"prompt_tokens":         u.Input + u.CacheRead + u.CacheWrite,
-		"prompt_tokens_details": map[string]int64{"cached_tokens": u.CacheRead},
-		"completion_tokens":     u.Output,
-	}
-	if provider, _, _ := strings.Cut(a.served.Route, "/"); provider == "anthropic" {
-		native = map[string]any{
-			"input_tokens":                u.Input,
-			"cache_read_input_tokens":     u.CacheRead,
-			"cache_creation_input_tokens": u.CacheWrite,
-			"output_tokens":               u.Output,
-		}
-	}
-	raw, _ := json.Marshal(native)
-	b, err := json.Marshal(modelroute.Usage{Usage: raw, Complete: u.Complete})
+	provider, _, _ := strings.Cut(a.served.Route, "/")
+	b, err := json.Marshal(modelroute.Usage{Provider: provider, Input: u.Input, Output: u.Output, CacheRead: u.CacheRead,
+		CacheWrite: u.CacheWrite, Reported: u.Reported, Complete: u.Complete, OutputChars: u.OutputChars})
 	if err != nil {
 		return ""
 	}

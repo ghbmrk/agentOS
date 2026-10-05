@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/egress"
+	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/route"
 	"github.com/ghbmrk/agentos/broker/vault"
@@ -40,16 +41,6 @@ func testRouter(t *testing.T) *route.Router {
 	}
 	return rt
 }
-
-// meterStub stands in for the OP-8 meter's writer in front of the
-// forwarder.
-type meterStub struct {
-	http.ResponseWriter
-	usage    string
-	complete bool
-}
-
-func (m *meterStub) ReportUsage(u []byte, complete bool) { m.usage, m.complete = string(u), complete }
 
 // TestUnknownHostUnlockThenModelRoute is the P2-4a chain on one host:
 // `init` seals a vault under a generated passphrase, the vault process
@@ -127,13 +118,15 @@ func TestUnknownHostUnlockThenModelRoute(t *testing.T) {
 		Label:  func(string) string { return "private" },
 		Denied: func(_ string, d modelroute.Denial) { denied = append(denied, d) },
 	})
-	var meter *meterStub
+	mtr, err := meter.Open(meter.Config{Path: filepath.Join(dir, "meter.json"), MachineCap: meter.Limits{Calls: 100, Tokens: 1 << 30}, OverallCap: meter.Limits{Calls: 100, Tokens: 1 << 30}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	ask := func(class string) *httptest.ResponseRecorder {
 		w := httptest.NewRecorder()
 		req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"`+class+`","messages":[{"role":"user","content":"hi"}]}`))
 		req.Header.Set("Authorization", "Bearer placeholder")
-		meter = &meterStub{ResponseWriter: w}
-		fwd("agent").ServeHTTP(meter, req)
+		mtr.Wrap("agent", fwd("agent")).ServeHTTP(w, req)
 		return w
 	}
 
@@ -172,6 +165,7 @@ func TestUnknownHostUnlockThenModelRoute(t *testing.T) {
 	if err := putCmd([]string{"-run", run, "-name", "openai"}, strings.NewReader(key+"\n")); err != nil {
 		t.Fatal(err)
 	}
+	before := mtr.Usage("agent").Tokens
 	w := ask("default")
 	if w.Code != 200 || strings.Contains(w.Body.String(), key) || !strings.Contains(w.Body.String(), "key is") {
 		t.Fatalf("model call: %d %s", w.Code, w.Body)
@@ -181,17 +175,10 @@ func TestUnknownHostUnlockThenModelRoute(t *testing.T) {
 		t.Fatalf("provider did not get the routed model with the vault key: %q", models)
 	}
 	mu.Unlock()
-	// The provider's own usage object reaches the meter; nothing of ours
-	// reaches the guest.
-	var u struct {
-		Prompt  int64 `json:"prompt_tokens"`
-		Out     int64 `json:"completion_tokens"`
-		Details struct {
-			Cached int64 `json:"cached_tokens"`
-		} `json:"prompt_tokens_details"`
-	}
-	if err := json.Unmarshal([]byte(meter.usage), &u); err != nil || u.Prompt != 40 || u.Details.Cached != 30 || u.Out != 3 || !meter.complete {
-		t.Fatalf("usage to the meter: %q %v", meter.usage, meter.complete)
+	// The provider's usage reaches the meter: 10 uncached + 30 cached at
+	// OpenAI's 0.5, and 3 output.
+	if got := mtr.Usage("agent").Tokens - before; got != 10+15+3 {
+		t.Fatalf("meter charged %d tokens for the call, want 28", got)
 	}
 	for k := range w.Result().Trailer {
 		t.Fatalf("guest got trailer %s", k)
@@ -205,9 +192,6 @@ func TestUnknownHostUnlockThenModelRoute(t *testing.T) {
 	}
 	if len(denied) != n+1 || denied[n].Adapter != "router" || denied[n].Machine != "agent" || denied[n].Status != 403 {
 		t.Fatalf("denial: %+v", denied[n:])
-	}
-	if meter.usage != "" {
-		t.Fatalf("usage reported for a refused call: %q", meter.usage)
 	}
 
 	if _, code, _ := post(ui, "/lock", nil); code != 200 {
@@ -287,23 +271,27 @@ func TestStatusShowsPhaseOnly(t *testing.T) {
 	}
 }
 
-// Usage goes to the meter in the serving provider's own shape, so cached
-// input is weighed at that provider's rates; unreported usage sends none.
-func TestUsageTrailerInProviderShape(t *testing.T) {
-	u := route.Usage{Input: 50, Output: 777, CacheRead: 200, CacheWrite: 10, Reported: true, Complete: true}
+// Usage goes to the meter with the serving provider, so cached input is
+// weighed at that provider's rates.
+func TestUsageTrailerNamesProvider(t *testing.T) {
+	u := route.Usage{Input: 50, Output: 777, CacheRead: 200, CacheWrite: 10, Reported: true, Complete: true, OutputChars: 3000}
 	for _, c := range []struct {
 		route string
 		u     route.Usage
 		want  string
 	}{
-		{"anthropic/claude-test", u, `{"usage":{"cache_creation_input_tokens":10,"cache_read_input_tokens":200,"input_tokens":50,"output_tokens":777},"complete":true}`},
-		{"openai/gpt-test", u, `{"usage":{"completion_tokens":777,"prompt_tokens":260,"prompt_tokens_details":{"cached_tokens":200}},"complete":true}`},
-		{"openai/gpt-test", route.Usage{OutputChars: 40, Complete: true}, ``},
+		{"anthropic/claude-test", u, `{"provider":"anthropic","input":50,"output":777,"cache_read":200,"cache_write":10,"reported":true,"complete":true,"output_chars":3000}`},
+		{"openai/gpt-test", route.Usage{OutputChars: 40}, `{"provider":"openai","input":0,"output":0,"cache_read":0,"cache_write":0,"reported":false,"complete":false,"output_chars":40}`},
 	} {
 		var a callAudit
 		a.decide(httptest.NewRecorder())(route.Decision{Outcome: route.Served, Route: c.route, Usage: &c.u})
 		if got := a.usage(); got != c.want {
 			t.Fatalf("%s: %s, want %s", c.route, got, c.want)
 		}
+	}
+	var none callAudit
+	none.decide(httptest.NewRecorder())(route.Decision{Outcome: route.Denied, Status: 400})
+	if got := none.usage(); got != "" {
+		t.Fatalf("usage for a refused call: %s", got)
 	}
 }
