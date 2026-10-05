@@ -282,6 +282,13 @@ func (l *Learn) ForgetGoal(goal string) {
 	}
 }
 
+// Forgot reports whether ForgetGoal was called for goal since start.
+func (l *Learn) Forgot(goal string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.gone[goal]
+}
+
 func (l *Learn) goneLocked(goals []string) bool {
 	for _, g := range goals {
 		if l.gone[g] {
