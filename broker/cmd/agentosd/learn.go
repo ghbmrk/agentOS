@@ -76,7 +76,8 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	var target change.Target = heldRouting{}
 	var sync *syncedRouting
 	if p.Routing != "" {
-		sync = &syncedRouting{r: modelroute.NewRouting(p.Routing), restoring: true, logf: log.Printf}
+		sync = &syncedRouting{r: modelroute.NewRouting(p.Routing), restoring: true, logf: log.Printf,
+			told: change.FileStore{Path: filepath.Join(p.Dir, "routing-told.json")}}
 		target = sync
 	}
 	if l.pipe, err = change.New(change.Config{
@@ -187,6 +188,15 @@ func (l *learning) attach(ctx context.Context, d *daemon.Daemon) {
 	l.eng.Store(eng)
 	l.adm.Store(d.Admission())
 	if l.routing != nil {
+		l.routing.mu.Lock()
+		l.routing.inform = func(text string) error {
+			ch := d.Owner()
+			if ch == nil {
+				return errors.New("no owner channel")
+			}
+			return ch.Inform(text)
+		}
+		l.routing.mu.Unlock()
 		go l.routing.run(ctx, 30*time.Second)
 	}
 	go l.sched.Run(ctx)
@@ -387,7 +397,7 @@ type routingClient interface {
 // the vault process restarts or loses it (L3 S1 on #96). A rule the vault
 // process refuses there (the owner changed -rule) gives way to the owner's
 // rule and stands for it from then on, so a later revert to it is not
-// refused (security R1 on PW4).
+// refused (security R1 on PW4); the owner is told once (W3-route).
 type syncedRouting struct {
 	r      routingClient
 	logf   func(string, ...any)
@@ -400,7 +410,20 @@ type syncedRouting struct {
 	pending   *routerule.Rule // to push once the vault process is up; empty: -rule
 	refused   routerule.Rule  // a rule the vault process refused at restore or check
 	applied   int             // Applies so far, so a check never pushes a rule read before one
+
+	// inform texts the owner a fixed notice (owner.Channel.Inform); nil
+	// until the daemon runs. told is the file recording the refused rule
+	// the owner was last told of, so a restart does not repeat it; owe is
+	// a refused rule not yet told (W3-route).
+	inform func(string) error
+	told   change.Store
+	owe    routerule.Rule
 }
+
+// routingStandsInText tells the owner that their own model order is in use
+// in place of an order the box learned, because they changed their AI
+// settings since (W3-route, L3 S1 on #96). One GSM-7 segment.
+const routingStandsInText = "Your AI settings changed, so the order of AI models the box had learned no longer fits them. Your own order is in use now."
 
 func (s *syncedRouting) Current() (change.Tree, error) {
 	s.mu.Lock()
@@ -505,6 +528,7 @@ func (s *syncedRouting) push(ctx context.Context) bool {
 		s.logf("routing: the adopted rule %s no longer reorders the owner's rule; using the owner's rule", ruleText(want))
 		s.refused = want
 		s.pending = &routerule.Rule{}
+		s.owe = want
 	default:
 		s.logf("routing: vault process not reachable or did not keep the rule")
 		if s.pending == nil {
@@ -514,11 +538,55 @@ func (s *syncedRouting) push(ctx context.Context) bool {
 	return false
 }
 
+// check pushes as push does, then tells the owner of a refused rule.
+func (s *syncedRouting) check(ctx context.Context) bool {
+	ok := s.push(ctx)
+	s.tell()
+	return ok
+}
+
+// tell texts the owner once per refused rule that their own rule stands in
+// for it. The text is sent outside mu; one that fails is tried again at
+// the next check.
+func (s *syncedRouting) tell() {
+	s.mu.Lock()
+	owe, inform, told := s.owe, s.inform, s.told
+	s.mu.Unlock()
+	if owe == nil || inform == nil {
+		return
+	}
+	text := ruleText(owe)
+	if told != nil {
+		if b, err := told.Load(); err == nil && string(b) == text {
+			s.clearOwe(owe)
+			return
+		}
+	}
+	if err := inform(routingStandsInText); err != nil {
+		s.logf("routing: owner not told that their rule stands in: %v", err)
+		return
+	}
+	if told != nil {
+		if err := told.Save([]byte(text)); err != nil {
+			s.logf("routing: could not record that the owner was told: %v", err)
+		}
+	}
+	s.clearOwe(owe)
+}
+
+func (s *syncedRouting) clearOwe(r routerule.Rule) {
+	s.mu.Lock()
+	if sameRule(s.owe, r) {
+		s.owe = nil
+	}
+	s.mu.Unlock()
+}
+
 // run keeps the vault process on the pipeline's rule: it pushes the rule
 // kept from the start, then checks every period.
 func (s *syncedRouting) run(ctx context.Context, every time.Duration) {
 	for {
-		s.push(ctx)
+		s.check(ctx)
 		select {
 		case <-ctx.Done():
 			return
