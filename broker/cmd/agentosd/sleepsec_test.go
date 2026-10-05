@@ -57,7 +57,7 @@ func openManager(t *testing.T, state, img string) *vm.Manager {
 	must(t, err)
 	m, err = vm.Open(context.Background(), vm.Config{
 		StateDir: state, Images: map[string]string{"base": img},
-		Runtime: &sleepRuntime{running: map[string]bool{}}, Admit: adm, NoCgroups: true,
+		Runtime: &sleepRuntime{running: map[string]bool{}}, Admit: adm, NoCgroups: true, NoQuota: true,
 		FreeBytes: func(string) (int64, error) { return 1 << 50, nil },
 	})
 	must(t, err)
