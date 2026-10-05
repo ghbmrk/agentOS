@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 	"unicode"
 
@@ -255,9 +256,9 @@ func (c *custody) lineNumbers() []string {
 }
 
 // allowSend applies the second line's recipient rules and spends its
-// shared budget (security C1, Q2 on the #142 design read). Caller holds
-// mu.
-func (c *custody) allowSend(to string, spend bool) error {
+// shared budget (security C1, Q2 on the #142 design read): a text, or a
+// call, which also has a cap of its own (SR2-5). Caller holds mu.
+func (c *custody) allowSend(to string, call bool) error {
 	if err := smsapi.CheckRecipient(to, c.owner, ""); err != nil {
 		return err
 	}
@@ -266,8 +267,8 @@ func (c *custody) allowSend(to string, spend bool) error {
 			return smsapi.ErrRecipient
 		}
 	}
-	if !spend {
-		return nil
+	if call {
+		return c.budget.TakeCall(to, c.now())
 	}
 	return c.budget.Take(to, c.now())
 }
@@ -285,7 +286,7 @@ func (s smsStore) SMSAccount() (smsapi.Settings, string, error) {
 func (s smsStore) AllowText(to string) error {
 	s.c.mu.Lock()
 	defer s.c.mu.Unlock()
-	return s.c.allowSend(to, true)
+	return s.c.allowSend(to, false)
 }
 
 func (s smsStore) Mark() (smsapi.Mark, uint64, error) {
@@ -326,8 +327,8 @@ func (s smsStore) SetMark(m smsapi.Mark, gen uint64) error {
 }
 
 // Allow checks a MESSAGE or INVITE before sign.sock signs it: the same
-// recipient rules, and for a MESSAGE the same budget, as a text over the
-// HTTP account (sipsign.Limiter).
+// recipient rules and the same budget as a text over the HTTP account, a
+// call spending it as a call (sipsign.Limiter; SR2-5).
 func (s signStore) Allow(ch sipsign.Challenge) error {
 	c := s.c
 	c.mu.Lock()
@@ -337,22 +338,47 @@ func (s signStore) Allow(ch sipsign.Challenge) error {
 		return err
 	}
 	to := sipsign.Recipient(ch.URI, rec.NoPlus)
-	if rec.NoPlus && sipsign.Recipient(ch.URI, false) == "" && to != "" {
-		// Dialed without the +: the provider may read it as a national
-		// or international-prefix number.
+	if rec.NoPlus && to != "" {
+		// The provider may read the digits, with or without a +, as a
+		// national or international-prefix number, so the owner's and
+		// the line's numbers, and premium-rate ranges, are checked in
+		// those forms too (security F1, L3 SHOULD-A on #164). A user-part
+		// parameter other than user=phone, such as phone-context, could
+		// move the number to another country, so it is refused (L3
+		// MUST-A).
+		if !plainUser(ch.URI) {
+			return sipsign.ErrRecipient
+		}
 		for _, n := range append(c.lineNumbers(), c.owner) {
 			if smsapi.SameNumber(to[1:], n) {
 				return sipsign.ErrRecipient
 			}
 		}
+		if smsapi.PremiumDialed(to[1:], rec.Number) {
+			return sipsign.ErrRecipient
+		}
 	}
-	switch c.allowSend(to, ch.Method == "MESSAGE") {
+	switch c.allowSend(to, ch.Method == "INVITE") {
 	case nil:
 		return nil
 	case smsapi.ErrLimited:
 		return sipsign.ErrLimited
 	}
 	return sipsign.ErrRecipient
+}
+
+// plainUser says the user part of a sip: or sips: URI carries no
+// parameter other than user=phone.
+func plainUser(uri string) bool {
+	_, rest, _ := strings.Cut(uri, ":")
+	user, _, _ := strings.Cut(rest, "@")
+	params := strings.Split(user, ";")[1:]
+	for _, p := range params {
+		if !strings.EqualFold(p, "user=phone") {
+			return false
+		}
+	}
+	return true
 }
 
 // serveSMS opens sms.sock in dir for the modem bridge's uid.
