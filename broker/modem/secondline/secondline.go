@@ -26,7 +26,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/modem/at"
-	"github.com/ghbmrk/agentos/broker/smsapi"
+	"github.com/ghbmrk/agentos/broker/sendrules"
 )
 
 // Call is a voice call on the second line.
@@ -110,7 +110,7 @@ type Config struct {
 	// Budget is a second SIM's sending budget, shared by its texts and
 	// calls (ADP-12, SR2-5); nil is a new one. A calling account's budget
 	// is the vault process's (egress K16), so it is not spent here.
-	Budget *smsapi.Budget
+	Budget *sendrules.Budget
 	// Now is the clock for the budget; nil is time.Now.
 	Now func() time.Time
 }
@@ -162,7 +162,7 @@ var (
 	ErrNoAnswer    = errors.New("secondline: call not answered")
 	ErrOwnerPhone  = errors.New("secondline: the owner's number and home country code are required")
 	// ErrLimited: the line's budget is spent (sipline.OwnerText words it).
-	ErrLimited = smsapi.ErrLimited
+	ErrLimited = sendrules.ErrLimited
 )
 
 // Check verifies that owner and second are the SIMs recorded for their
@@ -242,7 +242,7 @@ func New(cfg Config) (*Tool, error) {
 		cfg.AnswerWait = 60 * time.Second
 	}
 	if cfg.Budget == nil {
-		cfg.Budget = &smsapi.Budget{}
+		cfg.Budget = &sendrules.Budget{}
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
@@ -313,7 +313,7 @@ func (t *Tool) recipient(to string, call bool) error {
 		}
 	}
 	contact := t.cfg.Contact != nil && t.cfg.Contact(to)
-	if !contact && smsapi.CheckRecipient(to, "", "") != nil {
+	if !contact && sendrules.CheckRecipient(to, "", "") != nil {
 		return ErrRecipient
 	}
 	if _, ok := t.cfg.Second.(Account); ok {

@@ -10,7 +10,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/modem/at"
 	"github.com/ghbmrk/agentos/broker/modem/secondline"
-	"github.com/ghbmrk/agentos/broker/smsapi"
+	"github.com/ghbmrk/agentos/broker/sendrules"
 )
 
 // REQ: ADP-12
@@ -55,7 +55,7 @@ func TestASecondSIMHasOneBudgetForTextsAndCalls(t *testing.T) {
 	owner := open(t, c, at.SIMCom, "SIMCOM_SIM7600G-H", boxNum)
 	second := open(t, c, at.Quectel, "EG25", secondNum)
 	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
-	budget := &smsapi.Budget{}
+	budget := &sendrules.Budget{}
 	tool, err := secondline.New(secondline.Config{Owner: owner.m, Second: secondline.FromAT(second.m), Roles: roles(owner, second),
 		Disclosure: disclosure(), OwnerPhone: ownerNum, CountryCode: "1", Budget: budget, Now: func() time.Time { return now }})
 	if err != nil {
@@ -64,7 +64,7 @@ func TestASecondSIMHasOneBudgetForTextsAndCalls(t *testing.T) {
 	if err := tool.Text(shopNum, "Table for 2 at 7?"); err != nil {
 		t.Fatal(err)
 	}
-	for i := 1; i < smsapi.PerHour; i++ {
+	for i := 1; i < sendrules.PerHour; i++ {
 		if err := budget.Take(fmt.Sprintf("+1555070%04d", i), now); err != nil {
 			t.Fatal(err)
 		}
