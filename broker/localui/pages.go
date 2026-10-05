@@ -108,6 +108,42 @@ form { margin: .6em 0 1.2em; }
 <p class="muted">Next, the box asks for a code from your code generator. The passphrase alone does not unlock it.</p>
 <script>{{shrinkjs}}</script>{{end}}
 
+{{define "secondline"}}{{template "head" .Refresh}}
+<h1>Second line</h1>
+{{if .Down}}<p>The box is still starting. This page reloads by itself.</p>
+{{else if .Locked}}<p>The box is locked, so it can't read or change the second line. <a href="/unlock/vault">Unlock the box</a>, then come back here.</p>
+{{else}}
+{{with .Err}}<p class="err">{{.}}</p>{{end}}
+{{if .St.Set}}
+{{if .St.RealmConfirmed}}<p class="ok">The second line is ready: {{.St.Settings.Number}} through {{.St.Settings.Domain}}.</p>
+{{else if .St.RealmRecorded}}<p>The box signed in to your provider, which calls itself <b class="mono">{{.Realm}}</b>.
+{{if .Matches}}This matches the domain you entered.{{else}}This differs from the domain you entered ({{.St.Settings.Domain}}). Some providers use another name here; check it on your provider's setup page.{{end}}</p>
+<p>Texts and calls start once you confirm it is your provider.</p>
+<form method="post" action="/second-line/"><input type="hidden" name="step" value="confirm"><input type="hidden" name="realm" value="{{.RealmExact}}"><button>It is my provider</button></form>
+<p class="muted">If it is not, remove the second line below and check the server name with your provider.</p>
+{{else if .St.WaitingForRegistration}}<p>Waiting for the box to sign in to your provider. This page reloads by itself.</p>
+{{else}}<p class="err">The box didn't reach your provider within 30 minutes of setup. Check the server name and password with your provider, then save the account again.</p>{{end}}
+<p class="muted">{{.St.Settings.User}} at {{.St.Settings.Server}}, number {{.St.Settings.Number}}.</p>
+<details{{if and (not .St.RealmRecorded) (not .St.WaitingForRegistration)}} open{{end}}><summary>Change the account</summary>{{template "lineform" .Form}}</details>
+<form method="post" action="/second-line/"><input type="hidden" name="step" value="remove"><button class="stop">Remove the second line</button></form>
+<p class="muted">The box texts you when the account is changed or removed.</p>
+{{else}}
+<p>A second line lets the box text and call businesses for you from its own number, a calling (SIP) account you hold with a provider. Your own number stays private.</p>
+<p>First, in your provider's settings: turn on encrypted calls (SRTP), and turn off voicemail on this number, so callers hear the box's message asking them to text instead.</p>
+{{template "lineform" .Form}}
+{{end}}{{end}}
+<p><a href="/home">More</a> · <a href="/status">Status</a></p>
+{{template "foot"}}{{end}}
+
+{{define "lineform"}}<form method="post" action="/second-line/"><input type="hidden" name="step" value="set">
+<label>Server and port<input type="text" name="server" value="{{.Server}}" placeholder="sip.example.net:5061" autocapitalize="none" autocorrect="off" spellcheck="false" required></label>
+<label>SIP domain<input type="text" name="domain" value="{{.Domain}}" placeholder="example.net" autocapitalize="none" autocorrect="off" spellcheck="false" required></label>
+<label>SIP user name<input type="text" name="user" value="{{.User}}" autocapitalize="none" autocorrect="off" spellcheck="false" required></label>
+<label>The account's phone number<input type="tel" name="number" value="{{.Number}}" placeholder="+44 7700 900123" required></label>
+<label><input type="checkbox" name="no_plus" value="1"{{if .NoPlus}} checked{{end}}> My provider dials numbers without the + sign</label><br>
+<label>SIP password your provider generated<input type="password" name="password" autocomplete="off" required></label>
+<button>Save</button></form>{{end}}
+
 {{define "home"}}{{template "head" ""}}
 <h1>AgentOS</h1>
 <ul>{{range .}}<li><a href="{{.Path}}">{{.Title}}</a></li>{{else}}<li class="muted">Nothing else to show here yet.</li>{{end}}</ul>
