@@ -493,12 +493,14 @@ func chain(t *testing.T, root, name string, depth int) Usage {
 	return u
 }
 
-// R4 on #166: a layer nested past the host's path limit is measured, not
-// failed, so a deep worker can still be counted and cleaned.
-func TestMeasureCountsALayerPastThePathLimit(t *testing.T) {
+// R4 on #166, L3 MUST-1 on #174: Measure walks by handles, so long paths
+// never make it fail; it counts a layer whose paths a copy can still take,
+// and reports one whose paths a copy cannot (Copy and Scan walk by host
+// path) as too deep, never as an error naming a host path.
+func TestMeasureRefusesPathsTooLongToCopy(t *testing.T) {
 	root := t.TempDir()
-	name := strings.Repeat("d", 40)
-	want := chain(t, root, name, 200) // about 8,200 bytes of path
+	name := strings.Repeat("d", 200)
+	want := chain(t, root, name, 10) // about 2,000 bytes of path
 	var st syscall.Stat_t
 	if err := syscall.Lstat(root, &st); err != nil {
 		t.Fatal(err)
@@ -506,11 +508,71 @@ func TestMeasureCountsALayerPastThePathLimit(t *testing.T) {
 	want.Bytes += st.Blocks * 512
 	want.Inodes++
 	got, err := Measure(root)
-	if err != nil {
+	if err != nil || got != want {
+		t.Fatalf("measured %+v (%v), want %+v", got, err, want)
+	}
+	root = t.TempDir()
+	chain(t, root, name, 25) // past PATH_MAX, though only 25 deep
+	_, err = Measure(root)
+	if !errors.Is(err, ErrTooDeep) || strings.Contains(err.Error(), root) {
 		t.Fatalf("measure past PATH_MAX: %v", err)
 	}
-	if got != want {
-		t.Fatalf("measured %+v, want %+v", got, want)
+}
+
+// openFDs counts this process's open file descriptors.
+func openFDs(t *testing.T) int {
+	t.Helper()
+	ents, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Skip(err)
+	}
+	return len(ents)
+}
+
+// Measure closes every handle it opens, on a wide tree, a deep one, and
+// one it refuses as too deep (L3 S2 on #174).
+func TestMeasureLeavesNoHandleOpen(t *testing.T) {
+	wide := t.TempDir()
+	for i := range 300 {
+		d := filepath.Join(wide, fmt.Sprintf("d%d", i))
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "f"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deep, tooDeep := t.TempDir(), t.TempDir()
+	chain(t, deep, "a", MaxTreeDepth)
+	chain(t, tooDeep, "a", MaxTreeDepth+1)
+	before := openFDs(t)
+	for range 3 {
+		for _, root := range []string{wide, deep, tooDeep} {
+			Measure(root)
+		}
+	}
+	if after := openFDs(t); after != before {
+		t.Fatalf("%d handles open after measuring, %d before", after, before)
+	}
+}
+
+// Measure does not cross into a file system mounted inside the layer: it
+// refuses the layer (L3 S1 on #174).
+func TestMeasureRefusesAMountInsideTheLayer(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("mounting needs root (CI machines job)")
+	}
+	root := t.TempDir()
+	mnt := filepath.Join(root, "m")
+	if err := os.Mkdir(mnt, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mount("tmpfs", mnt, "tmpfs", 0, "size=1m"); err != nil {
+		t.Skip(err)
+	}
+	defer syscall.Unmount(mnt, syscall.MNT_DETACH)
+	if _, err := Measure(root); err == nil || errors.Is(err, ErrTooDeep) {
+		t.Fatalf("measured across a mount: %v", err)
 	}
 }
 

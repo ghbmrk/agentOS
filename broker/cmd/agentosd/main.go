@@ -293,6 +293,9 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	if err := checkDiskQuotaFlag(diskQuota); err != nil {
+		log.Fatal(err)
+	}
 	meminfo, _ := os.ReadFile("/proc/meminfo")
 	mem := planMemory(string(meminfo), runtime.NumCPU(), flagSet(flag.CommandLine, "capacity-mb"), cfg.Admission.CapacityMB, floor, agentMemMB)
 	cfg.Admission = mem.Budget.Admission()
@@ -380,17 +383,9 @@ func main() {
 	cfg.Recall = recallExec
 	cfg.Grants.Contained = recallExec.Contained
 	cfg.Notes = append(cfg.Notes, recallExec.Status)
-	var mq vm.Quota
-	var noQuota bool
-	var qerr error
+	var md machineDisk
 	if runsc != "" {
-		mq, noQuota, qerr = machineQuota(diskQuota, stateDir)
-		if noQuota {
-			log.Printf("-disk-quota=off: agent machines run without disk quotas; a guest can fill the state disk (RES-4)")
-		}
-		if n := quotaNote(noQuota, qerr); n != "" {
-			cfg.Notes = append(cfg.Notes, func() string { return n })
-		}
+		md = openMachineDisk(diskQuota, stateDir, &cfg.Notes)
 	}
 	if line != nil {
 		cfg.Notes = append(cfg.Notes, line.Note, line.TextsNote)
@@ -453,11 +448,11 @@ func main() {
 	}
 	// At exit the question loops stop before the guard's notices flush.
 	defer func() { stop(); qs.wait() }()
-	if runsc != "" && qerr != nil {
-		log.Printf("agent machines disabled: %v", qerr)
+	if runsc != "" && md.err != nil {
+		log.Printf("agent machines disabled: %v", md.err)
 	} else if runsc != "" {
 		services := &lateServices{}
-		m, err := vm.Open(ctx, vm.Config{
+		vmc := vm.Config{
 			StateDir: stateDir,
 			Images:   imgs,
 			Runtime:  &gvisor.Runtime{Bin: runsc, StateDir: filepath.Join(stateDir, "runsc")},
@@ -466,14 +461,14 @@ func main() {
 			Services: services,
 
 			DiskReserveBytes: diskReserveMB << 20,
-			Quota:            mq,
-			NoQuota:          noQuota,
 			MachineDiskBytes: machineDiskMB << 20,
 			WorkerLayerBytes: workerLayerBytes(workerLayerMB),
 			// A lineage holding a record the owner deleted is not forked
 			// or merged until that is settled (recall W10).
 			Contained: recallExec.Contained,
-		})
+		}
+		md.set(&vmc)
+		m, err := vm.Open(ctx, vmc)
 		if err != nil {
 			log.Printf("agent machines disabled: %v", err)
 		} else {

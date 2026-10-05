@@ -1073,11 +1073,10 @@ func (m *Manager) captureAs(ctx context.Context, mc *machine, t Tier, sleep bool
 	return s, m.saveMachine(mc)
 }
 
-// checkCaps measures a layer about to be snapshotted and refuses it if it
-// is over the per-layer caps. Copies keep holes and hardlinks, so a copy
-// measure is overlay.Measure, with a layer too deep to measure over the
-// cap (security R4 on #166): refused as a disk budget the guest can act
-// on, never taken as no use.
+// measure is overlay.Measure, with a layer too deep or with paths too long
+// for the broker to copy over the cap (security R4 on #166, L3 MUST-1 on
+// #174): refused as a disk budget the guest can act on, never taken as no
+// use.
 func measure(dir string) (overlay.Usage, error) {
 	u, err := overlay.Measure(dir)
 	if errors.Is(err, overlay.ErrTooDeep) {
@@ -1086,6 +1085,8 @@ func measure(dir string) (overlay.Usage, error) {
 	return u, err
 }
 
+// checkCaps measures a layer about to be snapshotted and refuses it if it
+// is over the per-layer caps. Copies keep holes and hardlinks, so a copy
 // costs no more than this measure.
 func (m *Manager) checkCaps(id, upper string) (overlay.Usage, error) {
 	u, err := measure(upper)

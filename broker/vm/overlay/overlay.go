@@ -299,17 +299,31 @@ func FreeBytes(path string) (int64, error) {
 	return int64(st.Bavail) * int64(st.Bsize), nil
 }
 
-// ErrTooDeep is a layer nested deeper than MaxTreeDepth. Callers treat it as
-// over the layer's cap: never as no use.
-var ErrTooDeep = errors.New("directories nest more than 256 deep; flatten them")
+// ErrTooDeep is a layer nested deeper than MaxTreeDepth, or holding a path
+// too long for the broker to copy it (L3 MUST-1 on #174): Copy and Scan
+// walk by host path. Callers treat it as over the layer's cap, never as no
+// use. Its text names no path.
+var ErrTooDeep = fmt.Errorf("directories nest more than %d deep, or a path is too long; flatten them", MaxTreeDepth)
 
-// Measure returns a layer's usage without following symlinks. It may run
-// on a live layer: files that vanish mid-walk are skipped. It walks by
-// directory handles, never by host path, so a layer nested past the host's
-// path limit is still counted (security R4 on #166); one nested deeper
-// than MaxTreeDepth is ErrTooDeep.
+// copySlack is room kept under the host's path limit for the longest other
+// root a layer's paths are copied under (a snapshot's fs, a fork's layer),
+// so a layer Measure accepts can be copied.
+const copySlack = 512
+
+// errOtherFS is an entry on another file system than the layer's root: a
+// mount inside the layer, which a guest cannot make, so the layer is not
+// measured (L3 S1 on #174).
+var errOtherFS = errors.New("a mount inside the layer")
+
+// Measure returns a layer's usage without following symlinks or crossing
+// into another file system. It may run on a live layer: files that vanish
+// mid-walk are skipped. It walks by directory handles, so it holds one
+// open directory per level and never fails on a host path's length
+// (security R4 on #166); a layer nested deeper than MaxTreeDepth, or with
+// a path that under root, plus copySlack, would reach the host's path
+// limit, is ErrTooDeep.
 func Measure(root string) (Usage, error) {
-	w := measurer{seen: map[[2]uint64]bool{}}
+	w := measurer{seen: map[[2]uint64]bool{}, room: maxPathLen - copySlack - len(root)}
 	// Errors name no host path: they can reach a guest's text (security
 	// N2 on #174).
 	fd, err := syscall.Open(root, oPath|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
@@ -324,7 +338,8 @@ func Measure(root string) (Usage, error) {
 		}
 		return w.u, fmt.Errorf("overlay: measure: %w", err)
 	}
-	if err = w.handle(fd, 0); err != nil && !errors.Is(err, ErrTooDeep) {
+	w.dev = st.Dev
+	if err = w.handle(fd, 0, 0); err != nil && !errors.Is(err, ErrTooDeep) {
 		err = fmt.Errorf("overlay: measure: %w", err)
 	}
 	return w.u, err
@@ -333,13 +348,19 @@ func Measure(root string) (Usage, error) {
 type measurer struct {
 	u    Usage
 	seen map[[2]uint64]bool
+	dev  uint64 // the root's file system
+	room int    // the longest relative path a copy can take
 }
 
-// handle counts the entry O_PATH handle fd names, depth levels below the
-// root, and what it holds if it is a directory; it closes fd.
-func (w *measurer) handle(fd, depth int) error {
+// handle counts the entry O_PATH handle fd names, depth levels and plen
+// bytes of relative path below the root, and what it holds if it is a
+// directory; it closes fd.
+func (w *measurer) handle(fd, depth, plen int) error {
 	var st syscall.Stat_t
 	err := syscall.Fstat(fd, &st)
+	if err == nil && uint64(st.Dev) != w.dev {
+		err = errOtherFS
+	}
 	key := [2]uint64{uint64(st.Dev), st.Ino}
 	dir := err == nil && st.Mode&syscall.S_IFMT == syscall.S_IFDIR && !w.seen[key]
 	if err == nil && !w.seen[key] {
@@ -347,7 +368,7 @@ func (w *measurer) handle(fd, depth int) error {
 		w.u.Inodes++
 		w.u.Bytes += st.Blocks * 512
 	}
-	if dir && depth > MaxTreeDepth {
+	if err == nil && (plen > w.room || dir && depth > MaxTreeDepth) {
 		err = ErrTooDeep
 	}
 	if !dir || err != nil {
@@ -373,7 +394,7 @@ func (w *measurer) handle(fd, depth int) error {
 			if err != nil {
 				return err
 			}
-			if err := w.handle(cfd, depth+1); err != nil {
+			if err := w.handle(cfd, depth+1, plen+1+len(e.Name())); err != nil {
 				return err
 			}
 		}
