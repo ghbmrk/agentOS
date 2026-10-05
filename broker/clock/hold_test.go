@@ -145,15 +145,18 @@ func TestTIM1HeldThenCarrierDisagreesEscalates(t *testing.T) {
 
 func TestTIM1OwnerTextsAreCappedAgainstAFakeCell(t *testing.T) {
 	// A fake cell 3 h wrong, then right for 75 minutes, over and over
-	// (L3 D4): at most MaxAlertsPerDay alerts in any 24 hours, and no
-	// all-clear once no further alert could follow it.
+	// (L3 D4): at most MaxAlertsPerDay alerts in any 24 hours, each with
+	// its all-clear; the one that uses up the day says so.
 	r := newRig()
 	var log []string
 	g := r.guard(t, func(c *Config) {
 		c.Notify = func(s string) {
 			kind := "alert"
-			if s == AgreeText {
+			switch s {
+			case AgreeText:
 				kind = "clear"
+			case AgreeLastText:
+				kind = "last-clear"
 			}
 			log = append(log, fmt.Sprintf("%s@%v", kind, r.mono))
 		}
@@ -173,7 +176,7 @@ func TestTIM1OwnerTextsAreCappedAgainstAFakeCell(t *testing.T) {
 		r.advance(75 * time.Minute)
 		g.Check(bg)
 	}
-	want := []string{"alert@0s", "clear@3h0m0s", "alert@3h0m0s", "clear@24h0m0s", "alert@24h0m0s", "clear@27h0m0s"}
+	want := []string{"alert@0s", "clear@3h0m0s", "alert@3h0m0s", "last-clear@6h0m0s", "alert@24h0m0s", "clear@27h0m0s"}
 	if fmt.Sprint(log) != fmt.Sprint(want) {
 		t.Fatalf("texts = %v, want %v", log, want)
 	}
@@ -336,4 +339,43 @@ func TestTIM1NotifyMayCheckAgain(t *testing.T) {
 		t.Fatal("a caller waited on the slow notifier")
 	}
 	close(slow)
+}
+
+func TestTIM1AlertCapSurvivesRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "clock.json")
+	r := newRig()
+	mod := func(c *Config) { c.StatePath = path; c.BootID = func() string { return "boot-a" } }
+	g := r.guard(t, mod)
+	g.Check(bg)
+	cycle := func() {
+		r.step(time.Hour)
+		g.Check(bg)
+		r.step(-time.Hour)
+		g.Check(bg)
+		r.advance(AgreeAfter)
+		g.Check(bg)
+	}
+	cycle()
+	g = r.guard(t, mod) // restart
+	cycle()
+	g = r.guard(t, mod)
+	cycle() // the cap is used up: no alert, so no all-clear either
+	alerts := 0
+	for _, x := range r.texts {
+		if x != AgreeText && x != AgreeLastText {
+			alerts++
+		}
+	}
+	if alerts != MaxAlertsPerDay || r.texts[len(r.texts)-1] != AgreeLastText {
+		t.Fatalf("texts = %q", r.texts)
+	}
+	// After a reboot, the earlier boot's alerts still count by their age.
+	mod2 := func(c *Config) { c.StatePath = path; c.BootID = func() string { return "boot-b" } }
+	g = r.guard(t, mod2)
+	n := len(r.texts)
+	r.step(time.Hour)
+	g.Check(bg)
+	if len(r.texts) != n {
+		t.Fatalf("alert after reboot within the day: %q", r.texts[n:])
+	}
 }

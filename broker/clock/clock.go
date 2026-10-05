@@ -117,11 +117,13 @@ const (
 	// the all-clear. The restriction lifts at once; only the text waits, so
 	// flapping sources never leave "back to normal" as the last word.
 	AgreeAfter = time.Hour
-	// MaxAlertsPerDay caps disagreement and hold texts in any 24 hours. An
-	// all-clear goes only while another alert could still follow it, so the
-	// owner gets at most MaxAlertsPerDay+1 texts a day however the sources
-	// flap (a fake cell included, CH-15), and the last is never a stale
-	// all-clear. Suppressed texts are not queued; STATUS is always live.
+	// MaxAlertsPerDay caps disagreement and hold texts sent in any 24
+	// hours, counted across restarts. Every alert sent gets its all-clear,
+	// so the owner gets at most 2*MaxAlertsPerDay texts a day however the
+	// sources flap (a fake cell included, CH-15) and is never left on a
+	// stale alarm. The all-clear that uses up the day's alerts says no more
+	// texts will come today (AgreeLastText). Suppressed alerts are not
+	// queued; STATUS and the digest show the live state.
 	MaxAlertsPerDay = 2
 	// slewPPM is the kernel's largest NTP slew rate: a held anchor allows
 	// the wall clock this much honest drift on top of the tolerance.
@@ -130,6 +132,10 @@ const (
 
 // AgreeText tells the owner a restriction or hold has ended.
 const AgreeText = "The box clock agrees with the phone network again. Time checks are back to normal."
+
+// AgreeLastText is the all-clear once the day's alerts are used up, so a
+// later disagreement the box does not text about is not a surprise.
+const AgreeLastText = "The box clock agrees with the phone network again. Time checks are back to normal. If they disagree again today the box won't text; send STATUS to check."
 
 // DisagreeText is the owner text for a disagreement of skew (at most two
 // text segments). It names what the wiring does while restricted (K7).
@@ -260,7 +266,7 @@ type Guard struct {
 	told     told
 	agreeAt  time.Duration // Elapsed when carrier agreement resumed
 	agreeing bool
-	alerts   []time.Duration // Elapsed of alert texts in the last day
+	alerts   []stamp // alert texts sent in the last day
 
 	seq      uint64 // checks finished, for ordering their notices
 	nmu      sync.Mutex
@@ -273,6 +279,13 @@ type Guard struct {
 	running atomic.Int32 // Run loops live
 	fmu     sync.Mutex
 	flight  *flight // the check in progress, shared by concurrent callers
+}
+
+// stamp is when an alert text went: Elapsed within this boot, and the box
+// clock for a record from an earlier boot.
+type stamp struct {
+	Mono time.Duration `json:"mono"`
+	Wall time.Time     `json:"wall"`
 }
 
 type flight struct {
@@ -450,31 +463,31 @@ func (g *Guard) check(ctx context.Context) (Status, notice) {
 // disagreement, or a hold) when none is outstanding (a disagreement also
 // when only a hold text is), and the all-clear once carrier time has agreed
 // for AgreeAfter. A restriction or hold in between resets the wait. Alerts
-// are capped at MaxAlertsPerDay, and an all-clear goes only while another
-// alert could follow it.
+// are capped at MaxAlertsPerDay; every alert sent gets its all-clear.
 func (g *Guard) noticeLocked(s Status, mono time.Duration) string {
 	recent := g.alerts[:0]
 	for _, a := range g.alerts {
-		if mono-a < 24*time.Hour {
+		if mono-a.Mono < 24*time.Hour {
 			recent = append(recent, a)
 		}
 	}
 	g.alerts = recent
 	room := len(g.alerts) < MaxAlertsPerDay
+	alert := func(t told, text string) string {
+		g.told = t
+		g.alerts = append(g.alerts, stamp{Mono: mono, Wall: s.At})
+		return text
+	}
 	switch s.State {
 	case Disagree:
 		g.agreeing = false
 		if g.told != toldDisagree && room {
-			g.told = toldDisagree
-			g.alerts = append(g.alerts, mono)
-			return DisagreeText(s.Skew)
+			return alert(toldDisagree, DisagreeText(s.Skew))
 		}
 	case Held:
 		g.agreeing = false
 		if g.told == toldNone && room {
-			g.told = toldHeld
-			g.alerts = append(g.alerts, mono)
-			return HeldText(s.Skew)
+			return alert(toldHeld, HeldText(s.Skew))
 		}
 	case Agreed, CarrierOnly:
 		if g.told == toldNone {
@@ -483,10 +496,14 @@ func (g *Guard) noticeLocked(s Status, mono time.Duration) string {
 		if !g.agreeing {
 			g.agreeing, g.agreeAt = true, mono
 		}
-		if mono-g.agreeAt < AgreeAfter || !room {
-			return "" // the outstanding alert stands; STATUS tells the rest
+		if mono-g.agreeAt < AgreeAfter {
+			return ""
 		}
+		// Every alert sent gets its all-clear (security on #68).
 		g.told, g.agreeing = toldNone, false
+		if !room {
+			return AgreeLastText
+		}
 		return AgreeText
 	}
 	return ""
@@ -594,6 +611,8 @@ type saved struct {
 	Anchored   bool          `json:"anchored"`
 	AnchorWall time.Time     `json:"anchor_wall"`
 	AnchorMono time.Duration `json:"anchor_mono"`
+	// Alerts sent in the last day, counted toward MaxAlertsPerDay.
+	Alerts []stamp `json:"alerts"`
 }
 
 func (g *Guard) load() {
@@ -614,8 +633,23 @@ func (g *Guard) load() {
 		g.status = Status{State: Disagree, Skew: v.Skew, Since: v.Since}
 	}
 	g.told = v.Told
-	if v.Anchored && v.Boot != "" && v.Boot == g.cfg.BootID() {
+	sameBoot := v.Boot != "" && v.Boot == g.cfg.BootID()
+	if v.Anchored && sameBoot {
 		g.anchored, g.anchorWall, g.anchorMono = true, v.AnchorWall, v.AnchorMono
+	}
+	// Alerts from an earlier boot are placed on this boot's monotonic clock
+	// by their box-clock age; one that would lie in the future counts as
+	// sent now, so a clock moved back cannot free the cap.
+	mono, wall := g.cfg.Elapsed(), g.cfg.Now()
+	for _, a := range v.Alerts {
+		if !sameBoot {
+			age := wall.Sub(a.Wall)
+			if age < 0 {
+				age = 0
+			}
+			a.Mono = mono - age
+		}
+		g.alerts = append(g.alerts, a)
 	}
 }
 
@@ -628,6 +662,7 @@ func (g *Guard) saveLocked() {
 	v := saved{
 		Restricted: g.status.Restricted(), Told: g.told,
 		Boot: g.cfg.BootID(), Anchored: g.anchored, AnchorWall: g.anchorWall, AnchorMono: g.anchorMono,
+		Alerts: g.alerts,
 	}
 	if v.Restricted {
 		v.Skew, v.Since = g.status.Skew, g.status.Since
