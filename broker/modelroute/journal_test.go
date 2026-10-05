@@ -40,19 +40,25 @@ func TestADP10ReportedDenialsAreCoalesced(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		j("m1", Denial{Adapter: "router", Method: "POST", Status: 400, Reason: fmt.Sprintf("message role %q is not accepted", fmt.Sprint("r", i))})
 	}
+	// The router quotes the parser's error, numbers included (route
+	// TestADP10DenialReasonClassIsFixed): one class.
+	for _, num := range []string{"123456789012345678901", "987654321098765432109"} {
+		j("m1", Denial{Adapter: "router", Method: "POST", Status: 400, Reason: fmt.Sprintf("request not accepted: %q",
+			"json: cannot unmarshal number "+num+" into Go struct field chatRequest.max_tokens of type int")})
+	}
 	j("m1", Denial{Status: 403})
-	if len(rec.got) != 4 {
-		t.Fatalf("journaled %d notes, want 4: %+v", len(rec.got), rec.got)
+	if len(rec.got) != 5 {
+		t.Fatalf("journaled %d notes, want 5: %+v", len(rec.got), rec.got)
 	}
 	if n := rec.got[0]; n.Machine != "m1" || n.Adapter != "router" || n.Method != "GET" || n.Status != 404 {
 		t.Fatalf("note: %+v", n)
 	}
-	if rec.got[3].Reason != "denied" {
-		t.Fatalf("a denial without a reason: %+v", rec.got[3])
+	if rec.got[4].Reason != "denied" {
+		t.Fatalf("a denial without a reason: %+v", rec.got[4])
 	}
 	now = now.Add(61 * time.Second)
 	j("m1", Denial{Adapter: "router", Method: "GET", Status: 404, Reason: "only POST /v1/chat/completions is served"})
-	if n := rec.got[len(rec.got)-1]; len(rec.got) != 5 || n.Suppressed != 499 {
+	if n := rec.got[len(rec.got)-1]; len(rec.got) != 6 || n.Suppressed != 499 {
 		t.Fatalf("after the window: %+v", rec.got)
 	}
 

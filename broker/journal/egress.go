@@ -66,7 +66,8 @@ func token(s string) string {
 // journal: per machine and reason class (EgressReasonClass), the first
 // note in a window (default one minute) is admitted, the rest are
 // counted, and the count rides on the next admitted note for that machine
-// and reason (Suppressed). The zero value is ready to use.
+// and reason (Suppressed). Past maxEgressKeys live entries, new classes
+// share one overflow entry per machine. The zero value is ready to use.
 type EgressGate struct {
 	Window time.Duration    // default 1 minute
 	Now    func() time.Time // default time.Now
@@ -116,7 +117,7 @@ func (g *EgressGate) Admit(n *EgressNote) bool {
 	if d != nil {
 		n.Suppressed = d.suppressed
 	}
-	if len(g.seen) >= maxEgressKeys {
+	if len(g.seen) >= maxEgressKeys && d == nil {
 		for k2, d2 := range g.seen {
 			if now.Sub(d2.since) >= win {
 				delete(g.seen, k2)
@@ -124,9 +125,22 @@ func (g *EgressGate) Admit(n *EgressNote) bool {
 		}
 	}
 	if len(g.seen) >= maxEgressKeys && d == nil {
-		// Every key is live: journal this one without tracking it.
-		return true
+		// Every key is live: fold the note into the machine's overflow
+		// entry, never admit it untracked. Machine names are the
+		// broker's, so overflow entries are bounded by the machines.
+		k = [2]string{n.Machine, egressOverflow}
+		if d = g.seen[k]; d != nil && now.Sub(d.since) < win {
+			d.suppressed++
+			return false
+		}
+		if d != nil {
+			n.Suppressed = d.suppressed
+		}
 	}
 	g.seen[k] = &egressSeen{since: now}
 	return true
 }
+
+// egressOverflow is the reason class of a machine's overflow entry; no
+// reason class starts with a NUL.
+const egressOverflow = "\x00overflow"

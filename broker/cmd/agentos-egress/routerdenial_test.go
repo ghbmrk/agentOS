@@ -134,7 +134,7 @@ func TestA14RouterDenialsAreJournaled(t *testing.T) {
 	for _, k := range []key{
 		{"GET", 404, path},
 		{"POST", 404, "no such model class"},
-		{"POST", 400, `message role "wizard" is not accepted`},
+		{"POST", 400, `request not accepted: "message role \"wizard\" is not accepted"`},
 		{"POST", 403, "no route for this class is granted and allowed for this machine's data label"},
 	} {
 		if got[k] != 1 {
