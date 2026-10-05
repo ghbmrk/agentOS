@@ -2,6 +2,12 @@ package grants
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/journal"
@@ -33,7 +39,9 @@ func TestLoop2PausesAGrantAndNothingElse(t *testing.T) {
 	if _, err := r.eng.Stop(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if st := r.submit(in("loop2/pause", OriginLoop2, journal.ActionGrantPause)); st.State != journal.Succeeded {
+	pause := in("loop2/pause", OriginLoop2, journal.ActionGrantPause)
+	pause.Params = map[string]any{"finding": "advisory:f1"} // as agentosd records it
+	if st := r.submit(pause); st.State != journal.Succeeded {
 		t.Fatalf("Loop 2's pause during STOP: %s", st.State)
 	}
 	r.eng.Resume()
@@ -68,5 +76,50 @@ func TestEndingAPauseIsReported(t *testing.T) {
 	}
 	if len(got) != 2 || got[1] != rule {
 		t.Fatalf("after REVOKE: %v", got)
+	}
+}
+
+// Security L1 on W5a: the Loop 2 origin is set only by agentosd's own
+// in-process call. No other package names it, and none spells it as a
+// string, so no socket, JSON or intent payload can be turned into it.
+func TestOnlyTheDaemonUsesTheLoop2Origin(t *testing.T) {
+	root := ".."
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if name := d.Name(); name == "vendor" || name == "testdata" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		rel, _ := filepath.Rel(root, path)
+		dir := filepath.ToSlash(filepath.Dir(rel))
+		f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if err != nil {
+			return err
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.SelectorExpr:
+				if x.Sel.Name == "OriginLoop2" && dir != "cmd/agentosd" {
+					t.Errorf("%s uses grants.OriginLoop2; only cmd/agentosd may", rel)
+				}
+			case *ast.BasicLit:
+				if x.Kind == token.STRING && strings.Contains(x.Value, "loop2") && strings.Contains(x.Value, "broker:") &&
+					!(dir == "grants" && filepath.Base(rel) == "grant.go") {
+					t.Errorf("%s spells the Loop 2 origin", rel)
+				}
+			}
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }

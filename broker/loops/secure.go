@@ -125,7 +125,8 @@ type Finding struct {
 }
 
 // Containment pauses a grant or executor. Pausing only narrows authority
-// (journal A9), so it works during STOP.
+// (journal A9), so it works during STOP. finding is "<check>:<finding
+// ID>", for the pause's record (security L2 on W5a).
 type Containment interface {
 	Contain(ctx context.Context, t Target, finding string) error
 }
@@ -174,6 +175,9 @@ type GuardConfig struct {
 	// feed cannot pause everything; the owner is texted about the rest.
 	// Default 3.
 	MaxPauses int
+	// MaxPausesPerDay caps them per UTC day (security L2 on W5a); past
+	// either cap the owner is texted how to pause instead. Default 10.
+	MaxPausesPerDay int
 	// ReText is how long a finding must stay clear to be texted again when
 	// it comes back; sooner, it is in the digest as "again". Default 24
 	// hours.
@@ -240,6 +244,10 @@ type secureState struct {
 	// Cleared is when each finding last cleared, so a flapping finding is
 	// not texted again unless it stayed clear for ReText.
 	Cleared map[string]time.Time `json:"cleared,omitempty"`
+	// PauseDay and Pauses count the automatic pauses on one UTC day
+	// (MaxPausesPerDay).
+	PauseDay string `json:"pause_day,omitempty"`
+	Pauses   int    `json:"pauses,omitempty"`
 }
 
 // Record is a finding's preserved evidence (LOOP-9).
@@ -267,6 +275,9 @@ func NewGuard(cfg GuardConfig) (*Guard, error) {
 	}
 	if cfg.UncomparedAlert <= 0 {
 		cfg.UncomparedAlert = 7 * 24 * time.Hour
+	}
+	if cfg.MaxPausesPerDay <= 0 {
+		cfg.MaxPausesPerDay = 10
 	}
 	if cfg.MaxPauses <= 0 {
 		cfg.MaxPauses = 3
@@ -404,14 +415,22 @@ func (s *Guard) Pass(ctx context.Context) (int, error) {
 	var errs []error
 	var ids []string
 	pauses := 0
+	s.mu.Lock()
+	if day := now.UTC().Format(time.DateOnly); s.st.PauseDay != day {
+		s.st.PauseDay, s.st.Pauses = day, 0
+	}
+	s.mu.Unlock()
 	for _, f := range fresh {
 		if ctx.Err() != nil {
 			break
 		}
-		pause := f.Contain != nil && pauses < s.cfg.MaxPauses
+		s.mu.Lock()
+		pause := f.Contain != nil && pauses < s.cfg.MaxPauses && s.st.Pauses < s.cfg.MaxPausesPerDay
 		if pause {
 			pauses++
+			s.st.Pauses++
 		}
+		s.mu.Unlock()
 		rec, err := s.handle(ctx, f, pause)
 		if err != nil {
 			errs = append(errs, err)
@@ -498,7 +517,7 @@ func (s *Guard) handle(ctx context.Context, f Finding, pause bool) (Record, erro
 			rec.Contained = "capped"
 		} else if s.cfg.Contain == nil {
 			rec.Contained = "failed"
-		} else if err := s.cfg.Contain.Contain(ctx, *f.Contain, f.ID); err != nil {
+		} else if err := s.cfg.Contain.Contain(ctx, *f.Contain, string(f.Check)+":"+f.ID); err != nil {
 			rec.Contained = "failed"
 			errs = append(errs, fmt.Errorf("contain %s: %w", f.ID, err))
 		} else {
@@ -509,7 +528,15 @@ func (s *Guard) handle(ctx context.Context, f Finding, pause bool) (Record, erro
 	if t, ok := s.st.Cleared[f.ID]; ok && rec.At.Sub(t) < s.cfg.ReText {
 		rec.Again = true // back too soon: the digest says so instead
 	}
-	rec.Texted = !rec.Again && (f.Severity == High || rec.Contained == "capped")
+	// Every automatic pause is texted at once (security L2 on W5a),
+	// unless the target was still paused from before: a finding back too
+	// soon then stays in the digest as "again".
+	newPause := false
+	if rec.Contained == "paused" {
+		_, still := s.st.Paused[targetKey(*f.Contain)]
+		newPause = !still
+	}
+	rec.Texted = newPause || !rec.Again && (f.Severity == High || rec.Contained == "capped")
 	// Evidence is saved before anything slower runs.
 	s.st.Open[f.ID] = rec
 	if rec.Contained == "paused" {
@@ -1020,7 +1047,7 @@ func ownerLine(r Record) string {
 	line := findingText(f)
 	switch r.Contained {
 	case "paused":
-		line += " Paused " + label(f.Contain) + ". It stays paused until you turn it back on."
+		line += " Paused " + label(f.Contain) + ". It stays paused until you resume it on the box page."
 	case "failed":
 		line += " Could not pause " + label(f.Contain) + ". STOP pauses everything."
 	case "capped":

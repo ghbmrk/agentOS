@@ -44,12 +44,12 @@ func TestLoop2PausesThroughTheGate(t *testing.T) {
 		t.Fatal("paused with no gate attached")
 	}
 	c.gate.Store(&pauseGateBox{g})
-	if err := c.Contain(context.Background(), loops.Target{Kind: "grant", Name: "G2"}, "f1"); err != nil {
+	if err := c.Contain(context.Background(), loops.Target{Kind: "grant", Name: "G2"}, "hash:f1"); err != nil {
 		t.Fatal(err)
 	}
 	in := g.got[0]
 	if in.Origin != grants.OriginLoop2 || in.Action != journal.ActionGrantPause || in.GrantRef != "G2" ||
-		in.Executor != grants.ExecutorName || in.Account != journal.BrokerAccount {
+		in.Executor != grants.ExecutorName || in.Account != journal.BrokerAccount || in.Params["finding"] != "hash:f1" {
 		t.Fatalf("pause intent: %+v", in)
 	}
 	if err := c.Contain(context.Background(), loops.Target{Kind: "executor", Name: "egress"}, "f2"); err == nil || len(g.got) != 1 {

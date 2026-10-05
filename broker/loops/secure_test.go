@@ -296,7 +296,7 @@ func TestFindingHandling(t *testing.T) {
 	// Only the High finding is texted; the Low one is in the digest.
 	if len(r.texts) != 1 || !r.urgent[0] ||
 		!strings.Contains(r.texts[0], "Known vulnerability in openssl (ADV-1), fixed in 3.0.14.") ||
-		!strings.Contains(r.texts[0], "Paused the network gateway. It stays paused until you turn it back on.") ||
+		!strings.Contains(r.texts[0], "Paused the network gateway. It stays paused until you resume it on the box page.") ||
 		strings.Contains(r.texts[0], "executor") || strings.Contains(r.texts[0], "grant") {
 		t.Fatalf("texts %q", r.texts)
 	}
@@ -370,9 +370,43 @@ func TestPauseCap(t *testing.T) {
 	if len(r.c.got) != 3 {
 		t.Fatalf("paused %d, want 3", len(r.c.got))
 	}
-	capped := strings.Count(strings.Join(r.texts, " "), "Not paused (too many findings at once)")
-	if capped != 2 || len(r.texts) != 1 { // one text for the pass
-		t.Fatalf("texts %q", r.texts)
+	// One text for the pass, the rest on MORE: each pause is told at once,
+	// though the advisories are Low (security L2 on W5a).
+	all := strings.Join(append(r.texts, r.g.More()...), " ")
+	if len(r.texts) != 1 || strings.Count(all, "Not paused (too many findings at once)") != 2 || strings.Count(all, "Paused the affected tool") != 3 {
+		t.Fatalf("texts %q, all %q", r.texts, all)
+	}
+}
+
+// Security L2 on W5a: automatic pauses are also capped per day, so a feed
+// that drips findings across passes cannot pause a grant set either.
+func TestPauseCapPerDay(t *testing.T) {
+	b := cleanBox()
+	b.pkgs, b.snap.Advisories = nil, nil
+	r := newGuardRig(t, b)
+	paused := 0
+	for i := range 6 {
+		n := fmt.Sprint("p", i)
+		for j := range 2 {
+			m := fmt.Sprint(n, j)
+			b.pkgs = append(b.pkgs, Package{Name: m, Version: "1.0", Contain: &Target{Kind: "grant", Name: "g-" + m}})
+			b.snap.Advisories = append(b.snap.Advisories, Advisory{ID: "ADV-" + m, Package: m, Fixed: "1.1", Severity: "high"})
+		}
+		r.now = r.now.Add(time.Hour)
+		r.reopen(t)
+		r.pass(t)
+		paused = len(r.c.got)
+	}
+	if paused != 10 {
+		t.Fatalf("paused %d in a day, want 10", paused)
+	}
+	r.now = r.now.Add(24 * time.Hour)
+	b.pkgs = append(b.pkgs, Package{Name: "next", Version: "1.0", Contain: &Target{Kind: "grant", Name: "g-next"}})
+	b.snap.Advisories = append(b.snap.Advisories, Advisory{ID: "ADV-next", Package: "next", Fixed: "1.1", Severity: "high"})
+	r.reopen(t)
+	r.pass(t)
+	if len(r.c.got) != 11 {
+		t.Fatalf("the next day paused %d in all", len(r.c.got))
 	}
 }
 
