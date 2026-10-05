@@ -110,3 +110,10 @@ jobs:
           cd broker && sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
             AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_OPENCLAW_ROOTFS=/tmp/ocroot \
             go test -count=1 -v -run '^TestIntegrationOpenClawGuest$' ./e2e
+      - name: Floor box admission and preemption (P2-5)
+        # A 7680 MiB group stands in for the 8 GB N95 (HW-4); prints FLOOR-RESULT.
+        working-directory: broker
+        run: |
+          sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
+            AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \
+            go test -count=1 -v -timeout 20m ./floor
