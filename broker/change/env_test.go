@@ -4,9 +4,10 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -200,7 +201,7 @@ func (e *env) cases(n int, class Class, input, expect string) {
 	}
 }
 
-func (e *env) release(v update.Verified) Report {
+func (e *env) release(v *update.Verified) Report {
 	e.t.Helper()
 	rep, err := e.p.ProposeRelease(context.Background(), v)
 	if err != nil {
@@ -220,28 +221,70 @@ func (e *env) propose(c Candidate) Report {
 
 func containsCanary(b []byte) bool { return strings.Contains(string(b), "CANARY-") }
 
-// release signs and verifies an upstream release with two test root keys.
-func release(t *testing.T, version string, security bool, images map[string][]byte) update.Verified {
+// release publishes an upstream release in a throwaway TUF repository
+// signed by synthetic 2-of-2 root and targets keys, and returns what a
+// box's update.Store.Check makes of it.
+// A security release also gets one independent passing attestation, so
+// its Security() holds (UPD-8, D6).
+func release(t *testing.T, version int64, security bool, images map[string][]byte) *update.Verified {
 	t.Helper()
-	root := update.Root{Keys: map[string]ed25519.PublicKey{}, Threshold: 2}
-	var pks []ed25519.PrivateKey
-	for _, id := range []string{"k1", "k2"} {
+	d := t.TempDir()
+	key := func() (ed25519.PublicKey, ed25519.PrivateKey) {
 		pub, pk, err := ed25519.GenerateKey(rand.Reader)
 		if err != nil {
 			t.Fatal(err)
 		}
-		root.Keys[id] = pub
-		pks = append(pks, pk)
+		return pub, pk
 	}
-	dg := map[string]string{}
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	p1, k1 := key()
+	p2, k2 := key()
+	sp, sk := key()
+	tp, tk := key()
+	repo, err := update.Init(filepath.Join(d, "repo"), update.RootConfig{
+		Root: []ed25519.PublicKey{p1, p2}, Targets: []ed25519.PublicKey{p1, p2},
+		Snapshot: []ed25519.PublicKey{sp}, Timestamp: []ed25519.PublicKey{tp},
+		RootThreshold: 2, TargetsThreshold: 2})
+	must(err)
+	sign := func() {
+		for _, k := range []ed25519.PrivateKey{k1, k2} {
+			must(repo.Sign("targets", k))
+		}
+		must(repo.Publish(sk, tk))
+	}
+	for _, k := range []ed25519.PrivateKey{k1, k2} {
+		must(repo.Sign("root", k))
+	}
+	sign()
+	rel := update.Manifest{Version: version, Channel: update.ChannelStable, Security: security, UsrRootHash: strings.Repeat("0f", 32)}
+	local := map[string]string{}
 	for p, b := range images {
-		dg[p] = update.Digest(b)
+		f := filepath.Join(d, fmt.Sprintf("img%d", len(local)))
+		must(os.WriteFile(f, b, 0o600))
+		rel.Files = append(rel.Files, p)
+		local[p] = f
 	}
-	meta, _ := json.Marshal(update.Release{Version: version, Security: security, Images: dg})
-	v, err := update.Verify(root, meta, []update.Signature{{KeyID: "k1", Sig: ed25519.Sign(pks[0], meta)},
-		{KeyID: "k2", Sig: ed25519.Sign(pks[1], meta)}}, 1)
-	if err != nil {
-		t.Fatal(err)
+	must(repo.AddRelease(rel, local))
+	sign()
+	root, err := os.ReadFile(filepath.Join(repo.Dir, "metadata", "1.root.json"))
+	must(err)
+	st, err := update.InitStore(filepath.Join(d, "box"), root, 0)
+	must(err)
+	res, err := st.Check(update.DirSource(repo.Dir), update.Options{})
+	must(err)
+	if res.Release == nil {
+		t.Fatal("no release")
 	}
-	return v
+	if !security {
+		return res.Release
+	}
+	_, ak := key()
+	att, err := update.Attest(ak, res.Release, update.Statement{Result: update.ResultPass, Channel: update.ChannelFast, HardwareClass: "test"})
+	must(err)
+	return res.Release.WithAttestations([][]byte{att}, nil)
 }

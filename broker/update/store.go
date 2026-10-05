@@ -1,6 +1,7 @@
 package update
 
 import (
+	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -82,6 +84,10 @@ func classify(err error) error {
 // drive (UPD-8). P2-2 and the owner channel show it.
 const OfflineNotice = "Update installed from a drive without a freshness check. The box will check it the next time it is online."
 
+// NotConfirmedNotice is what the owner sees when an online check finds the
+// release installed from a drive missing from the fresh metadata.
+const NotConfirmedNotice = "The update installed from a drive is not in the latest signed release list. It may have been withdrawn; the box will offer the current release."
+
 // Options for one check.
 type Options struct {
 	// Offline: reading a drive with no network. Signatures, thresholds and
@@ -91,16 +97,18 @@ type Options struct {
 	// stable releases.
 	Channel string
 	// MinThreshold is the fewest keys the root and targets roles may
-	// require (default 2), so one stolen key cannot sign a release.
+	// require, so one stolen key cannot sign a release. Values below 2
+	// count as 2; it can only be raised.
 	MinThreshold int
 	// Now is the clock for online expiry; nil means time.Now.
 	Now func() time.Time
 }
 
 // Store is a box's update state: the trusted root, the newest timestamp
-// and snapshot it has accepted, and the installed release.
+// and snapshot it has accepted, every key any accepted root has listed,
+// and the installed release.
 //
-//	root.json, timestamp.json, snapshot.json, installed.json
+//	root.json, timestamp.json, snapshot.json, seen_keys.json, installed.json
 type Store struct {
 	Dir string
 }
@@ -108,9 +116,13 @@ type Store struct {
 // Installed is the box's current release.
 type Installed struct {
 	Version int64 `json:"version"`
-	// UnconfirmedFreshness: installed offline; the next online check
-	// clears it (UPD-8).
+	// UnconfirmedFreshness: installed offline; an online check clears it
+	// only if the fresh targets list this exact manifest (UPD-8).
 	UnconfirmedFreshness bool `json:"unconfirmed_freshness,omitempty"`
+	// ManifestPath and ManifestSHA256 name the installed release's
+	// manifest bytes, recorded at Commit.
+	ManifestPath   string `json:"manifest_path,omitempty"`
+	ManifestSHA256 string `json:"manifest_sha256,omitempty"`
 }
 
 // InitStore bootstraps a box from the root shipped in its image and the
@@ -160,27 +172,29 @@ type File struct {
 	SHA256 string
 }
 
-// Checked is a release whose metadata passed every check. Only Check
+// Verified is a release whose metadata passed every check. Only Check
 // makes one, so code that must act only on a verified release (A/B
 // activation, UPD-1; signing a PCR policy for the new boot path, HW-5a)
-// takes a *Checked. A Checked built anywhere else (a zero value) is
+// takes a *Verified. A Verified built anywhere else (a zero value) is
 // refused by every method: only load sets sealed.
-type Checked struct {
+type Verified struct {
 	sealed      bool
 	release     Manifest
 	manifest    File
 	files       map[string]File
 	fresh       bool
-	maintainers map[string]bool
+	maintainers map[string]bool // keys any accepted root listed (no attestor)
+	operated    map[string]bool // maintainer-operated attestor keys
+	security    bool            // set only by WithAttestations
 }
 
-// ErrNotChecked: a Checked that Store.Check did not make.
+// ErrNotChecked: a Verified that Store.Check did not make.
 var ErrNotChecked = errors.New("update: release was not made by Store.Check")
 
-func (v *Checked) ok() bool { return v != nil && v.sealed }
+func (v *Verified) ok() bool { return v != nil && v.sealed }
 
 // Manifest is the verified manifest.
-func (v *Checked) Manifest() (Manifest, error) {
+func (v *Verified) Manifest() (Manifest, error) {
 	if !v.ok() {
 		return Manifest{}, ErrNotChecked
 	}
@@ -189,11 +203,51 @@ func (v *Checked) Manifest() (Manifest, error) {
 	return r, nil
 }
 
+// OK reports whether v was made by Store.Check (a zero value or nil was not).
+func (v *Verified) OK() bool { return v.ok() }
+
+// Version is the release version as the change pipeline names it.
+func (v *Verified) Version() string {
+	if !v.ok() {
+		return ""
+	}
+	return strconv.FormatInt(v.release.Version, 10)
+}
+
+// Images maps each release file (under host-image/ or guest-image/) to
+// its signed SHA-256, the form the change pipeline evaluates (CHG-3).
+func (v *Verified) Images() map[string]string {
+	if !v.ok() {
+		return nil
+	}
+	out := make(map[string]string, len(v.files))
+	for p, f := range v.files {
+		out[p] = f.SHA256
+	}
+	return out
+}
+
+// Security is true only for a security fix whose independent attestation
+// WithAttestations has checked (UPD-8, D6). It is never the manifest flag
+// alone.
+func (v *Verified) Security() bool { return v.ok() && v.security }
+
+// WithAttestations returns a copy whose Security reflects
+// SecurityAutoStage(atts, own). An unsealed v gives nil.
+func (v *Verified) WithAttestations(atts [][]byte, own ed25519.PublicKey) *Verified {
+	if !v.ok() {
+		return nil
+	}
+	c := *v
+	c.security = v.SecurityAutoStage(atts, own) == nil
+	return &c
+}
+
 // Fresh is false when the check ran offline (UPD-8), or v is not sealed.
-func (v *Checked) Fresh() bool { return v.ok() && v.fresh }
+func (v *Verified) Fresh() bool { return v.ok() && v.fresh }
 
 // ManifestFile is the release manifest target itself.
-func (v *Checked) ManifestFile() (File, error) {
+func (v *Verified) ManifestFile() (File, error) {
 	if !v.ok() {
 		return File{}, ErrNotChecked
 	}
@@ -201,7 +255,7 @@ func (v *Checked) ManifestFile() (File, error) {
 }
 
 // Files lists the release's files with their signed lengths and hashes.
-func (v *Checked) Files() ([]File, error) {
+func (v *Verified) Files() ([]File, error) {
 	if !v.ok() {
 		return nil, ErrNotChecked
 	}
@@ -214,7 +268,7 @@ func (v *Checked) Files() ([]File, error) {
 
 // Fetch copies one of the release's files from src to dst, which appears
 // only if the bytes match the signed length and hash.
-func (v *Checked) Fetch(src Source, targetPath, dst string) error {
+func (v *Verified) Fetch(src Source, targetPath, dst string) error {
 	if !v.ok() {
 		return ErrNotChecked
 	}
@@ -234,6 +288,9 @@ func (v *Checked) Fetch(src Source, targetPath, dst string) error {
 	defer os.Remove(tmp.Name())
 	h := sha256.New()
 	n, err := io.Copy(io.MultiWriter(tmp, h), io.LimitReader(rc, f.Length+1))
+	if err == nil {
+		err = tmp.Sync()
+	}
 	if cerr := tmp.Close(); err == nil {
 		err = cerr
 	}
@@ -243,17 +300,27 @@ func (v *Checked) Fetch(src Source, targetPath, dst string) error {
 	if n != f.Length || hex.EncodeToString(h.Sum(nil)) != f.SHA256 {
 		return fmt.Errorf("%w: %s does not match its signed hash", ErrBadRepository, targetPath)
 	}
-	return os.Rename(tmp.Name(), dst)
+	if err := os.Rename(tmp.Name(), dst); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(dst))
 }
 
 // Result of a check.
 type Result struct {
 	// Release is the newest verified release above the installed one on
 	// the box's channel, or nil if there is none.
-	Release *Checked
-	// FreshnessConfirmed: an online check cleared an offline install's
-	// pending freshness check.
+	Release *Verified
+	// FreshnessConfirmed: an online check found the release installed
+	// from a drive in the fresh targets and cleared its pending check.
 	FreshnessConfirmed bool
+	// FreshnessFailed: an online check found the release installed from a
+	// drive missing from the fresh targets (or changed); the check stays
+	// pending and the owner sees NotConfirmedNotice.
+	FreshnessFailed bool
+	// RootRotatedTo is the new root version when this check accepted a
+	// key rotation, else 0; the digest reports it (Security R3).
+	RootRotatedTo int64
 }
 
 func readAll(src Source, name string, max int64) ([]byte, error) {
@@ -272,6 +339,18 @@ func readAll(src Source, name string, max int64) ([]byte, error) {
 	return b, nil
 }
 
+// readMeta reads a metadata file: capped, and refused if it holds a null.
+func readMeta(src Source, name string) ([]byte, error) {
+	b, err := readAll(src, name, maxMetadata)
+	if err != nil {
+		return nil, err
+	}
+	if err := noNull(b); err != nil {
+		return nil, fmt.Errorf("%w: %s: %v", ErrBadRepository, name, err)
+	}
+	return b, nil
+}
+
 // Check reads the repository at src and returns the newest release this
 // box may install (UPD-2, UPD-8). Root rotations are followed and saved;
 // the timestamp and snapshot it accepts are saved for rollback checks.
@@ -282,7 +361,7 @@ func (s *Store) Check(src Source, o Options) (Result, error) {
 	if o.Channel != ChannelStable && o.Channel != ChannelFast {
 		return Result{}, fmt.Errorf("channel %q has no automatic updates", o.Channel)
 	}
-	if o.MinThreshold == 0 {
+	if o.MinThreshold < 2 {
 		o.MinThreshold = 2
 	}
 	installed, err := s.Installed()
@@ -310,11 +389,16 @@ func (s *Store) Check(src Source, o Options) (Result, error) {
 	if err := floor(tm.Root, o.MinThreshold); err != nil {
 		return Result{}, err
 	}
+	seen, err := s.seenKeys()
+	if err != nil {
+		return Result{}, err
+	}
+	addKeys(seen, tm.Root)
 	// Root rotations, each signed by the previous root and itself.
 	rotated := false
 	for i := 0; i < MaxRootRotations; i++ {
 		name := fmt.Sprintf("metadata/%d.root.json", tm.Root.Signed.Version+1)
-		b, err := readAll(src, name, maxMetadata)
+		b, err := readMeta(src, name)
 		if errors.Is(err, os.ErrNotExist) {
 			break
 		}
@@ -327,12 +411,18 @@ func (s *Store) Check(src Source, o Options) (Result, error) {
 		if err := floor(tm.Root, o.MinThreshold); err != nil {
 			return Result{}, err
 		}
+		addKeys(seen, tm.Root)
 		rootBytes, rotated = b, true
 	}
+	var res Result
 	if rotated {
+		if err := s.writeSeenKeys(seen); err != nil {
+			return Result{}, err
+		}
 		if err := writeAtomic(s.p("root.json"), rootBytes, 0o600); err != nil {
 			return Result{}, err
 		}
+		res.RootRotatedTo = tm.Root.Signed.Version
 	}
 
 	// Timestamp: the saved one first, for rollback protection. If a root
@@ -341,7 +431,7 @@ func (s *Store) Check(src Source, o Options) (Result, error) {
 	if b, err := os.ReadFile(s.p("timestamp.json")); err == nil {
 		tm.UpdateTimestamp(b)
 	}
-	tsBytes, err := readAll(src, "metadata/timestamp.json", maxMetadata)
+	tsBytes, err := readMeta(src, "metadata/timestamp.json")
 	if err != nil {
 		return Result{}, err
 	}
@@ -363,7 +453,7 @@ func (s *Store) Check(src Source, o Options) (Result, error) {
 	if sm == nil {
 		return Result{}, fmt.Errorf("%w: timestamp names no snapshot", ErrBadRepository)
 	}
-	snapBytes, err := readAll(src, fmt.Sprintf("metadata/%d.snapshot.json", sm.Version), maxMetadata)
+	snapBytes, err := readMeta(src, fmt.Sprintf("metadata/%d.snapshot.json", sm.Version))
 	if err != nil {
 		return Result{}, err
 	}
@@ -375,7 +465,7 @@ func (s *Store) Check(src Source, o Options) (Result, error) {
 	if tmeta == nil {
 		return Result{}, fmt.Errorf("%w: snapshot names no targets", ErrBadRepository)
 	}
-	tb, err := readAll(src, fmt.Sprintf("metadata/%d.targets.json", tmeta.Version), maxMetadata)
+	tb, err := readMeta(src, fmt.Sprintf("metadata/%d.targets.json", tmeta.Version))
 	if err != nil {
 		return Result{}, err
 	}
@@ -394,13 +484,9 @@ func (s *Store) Check(src Source, o Options) (Result, error) {
 		return Result{}, err
 	}
 
-	var res Result
-	if !o.Offline && installed.UnconfirmedFreshness {
-		installed.UnconfirmedFreshness = false
-		if err := s.writeInstalled(installed); err != nil {
-			return Result{}, err
-		}
-		res.FreshnessConfirmed = true
+	attestors, err := s.operatedAttestors(src, targets)
+	if err != nil {
+		return Result{}, err
 	}
 
 	var versions []int64
@@ -411,17 +497,106 @@ func (s *Store) Check(src Source, o Options) (Result, error) {
 	}
 	sort.Slice(versions, func(i, j int) bool { return versions[i] > versions[j] })
 	for _, n := range versions {
-		v, err := s.load(src, tm.Root, targets, n)
+		v, err := s.load(src, seen, attestors, targets, n)
 		if err != nil {
-			return res, err
+			return Result{}, err
 		}
 		if v.release.Channel == ChannelStable || o.Channel == ChannelFast {
 			v.fresh = !o.Offline
 			res.Release = v
-			return res, nil
+			break
+		}
+	}
+
+	// The whole check passed: only now settle an offline install's
+	// freshness, and only against the exact manifest it installed.
+	if !o.Offline && installed.UnconfirmedFreshness {
+		f, err := fileOf(installed.ManifestPath, targets.Signed.Targets[installed.ManifestPath])
+		if err == nil && f.SHA256 == installed.ManifestSHA256 {
+			installed.UnconfirmedFreshness = false
+			if err := s.writeInstalled(installed); err != nil {
+				return Result{}, err
+			}
+			res.FreshnessConfirmed = true
+		} else {
+			res.FreshnessFailed = true
 		}
 	}
 	return res, nil
+}
+
+func addKeys(seen map[string]bool, root *metadata.Metadata[metadata.RootType]) {
+	for _, k := range root.Signed.Keys {
+		pub, err := k.ToPublicKey()
+		if err != nil {
+			continue
+		}
+		if der, err := x509.MarshalPKIXPublicKey(pub); err == nil {
+			seen[fingerprint(der)] = true
+		}
+	}
+}
+
+func (s *Store) seenKeys() (map[string]bool, error) {
+	seen := map[string]bool{}
+	b, err := os.ReadFile(s.p("seen_keys.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return seen, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var list []string
+	if err := json.Unmarshal(b, &list); err != nil {
+		return nil, err
+	}
+	for _, k := range list {
+		seen[k] = true
+	}
+	return seen, nil
+}
+
+func (s *Store) writeSeenKeys(seen map[string]bool) error {
+	list := make([]string, 0, len(seen))
+	for k := range seen {
+		list = append(list, k)
+	}
+	sort.Strings(list)
+	b, _ := json.Marshal(list)
+	return writeAtomic(s.p("seen_keys.json"), b, 0o600)
+}
+
+// operatedAttestors reads the signed list of maintainer-operated attestor
+// keys (attestors/maintainer.json), if the repository has one.
+func (s *Store) operatedAttestors(src Source, targets *metadata.Metadata[metadata.TargetsType]) (map[string]bool, error) {
+	out := map[string]bool{}
+	tf := targets.Signed.Targets[AttestorsPath]
+	if tf == nil {
+		return out, nil
+	}
+	f, err := fileOf(AttestorsPath, tf)
+	if err != nil {
+		return nil, err
+	}
+	b, err := readAll(src, targetFile(f.Path, f.SHA256), maxManifest)
+	if err != nil {
+		return nil, err
+	}
+	if err := tf.VerifyLengthHashes(b); err != nil {
+		return nil, classify(err)
+	}
+	var list attestorList
+	if err := decodeStrict(b, &list, attestorListFields); err != nil {
+		return nil, fmt.Errorf("%w: %s: %v", ErrBadRepository, AttestorsPath, err)
+	}
+	for _, k := range list.Keys {
+		fp, err := attestorFingerprint(k)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %s: %v", ErrBadRepository, AttestorsPath, err)
+		}
+		out[fp] = true
+	}
+	return out, nil
 }
 
 func floor(root *metadata.Metadata[metadata.RootType], min int) error {
@@ -439,6 +614,9 @@ func floor(root *metadata.Metadata[metadata.RootType], min int) error {
 }
 
 func fileOf(p string, tf *metadata.TargetFiles) (File, error) {
+	if tf == nil {
+		return File{}, fmt.Errorf("%w: no target %s", ErrBadRepository, p)
+	}
 	sum, ok := tf.Hashes["sha256"]
 	if !ok || len(sum) != sha256.Size || tf.Length < 0 {
 		return File{}, fmt.Errorf("%w: target %s has no SHA-256", ErrBadRepository, p)
@@ -446,7 +624,7 @@ func fileOf(p string, tf *metadata.TargetFiles) (File, error) {
 	return File{Path: p, Length: tf.Length, SHA256: hex.EncodeToString(sum)}, nil
 }
 
-func (s *Store) load(src Source, root *metadata.Metadata[metadata.RootType], targets *metadata.Metadata[metadata.TargetsType], n int64) (*Checked, error) {
+func (s *Store) load(src Source, seen, attestors map[string]bool, targets *metadata.Metadata[metadata.TargetsType], n int64) (*Verified, error) {
 	p := ReleasePath(n)
 	man, err := fileOf(p, targets.Signed.Targets[p])
 	if err != nil {
@@ -469,7 +647,7 @@ func (s *Store) load(src Source, root *metadata.Metadata[metadata.RootType], tar
 	if rel.Version != n {
 		return nil, fmt.Errorf("%w: %s holds version %d", ErrBadRepository, p, rel.Version)
 	}
-	v := &Checked{sealed: true, release: rel, manifest: man, files: map[string]File{}, maintainers: map[string]bool{}}
+	v := &Verified{sealed: true, release: rel, manifest: man, files: map[string]File{}, maintainers: seen, operated: attestors}
 	for _, f := range rel.Files {
 		tf, ok := targets.Signed.Targets[f]
 		if !ok {
@@ -478,17 +656,6 @@ func (s *Store) load(src Source, root *metadata.Metadata[metadata.RootType], tar
 		if v.files[f], err = fileOf(f, tf); err != nil {
 			return nil, err
 		}
-	}
-	for _, k := range root.Signed.Keys {
-		pub, err := k.ToPublicKey()
-		if err != nil {
-			continue
-		}
-		der, err := x509.MarshalPKIXPublicKey(pub)
-		if err != nil {
-			continue
-		}
-		v.maintainers[fingerprint(der)] = true
 	}
 	return v, nil
 }
@@ -501,7 +668,7 @@ func fingerprint(der []byte) string {
 // Commit records a release as installed once A/B activation passed its
 // health check (UPD-1). An offline release leaves the freshness check
 // pending, and the owner sees OfflineNotice.
-func (s *Store) Commit(v *Checked) error {
+func (s *Store) Commit(v *Verified) error {
 	if !v.ok() {
 		return ErrNotChecked
 	}
@@ -512,5 +679,6 @@ func (s *Store) Commit(v *Checked) error {
 	if v.release.Version <= in.Version {
 		return fmt.Errorf("%w: release %d is not newer than installed %d", ErrRollback, v.release.Version, in.Version)
 	}
-	return s.writeInstalled(Installed{Version: v.release.Version, UnconfirmedFreshness: !v.fresh})
+	return s.writeInstalled(Installed{Version: v.release.Version, UnconfirmedFreshness: !v.fresh,
+		ManifestPath: v.manifest.Path, ManifestSHA256: v.manifest.SHA256})
 }

@@ -11,6 +11,7 @@
 //	    -file boot/N/entry.conf=./entry.conf ... [-channel fast] [-security]
 //	agentos-release rotate -repo D -role targets -add new.pub -remove lost.pub [-threshold N]
 //	agentos-release sign -repo D -role root|targets -key k.key
+//	agentos-release attestors -repo D -keys ci.pub,...   maintainer-operated attestors
 //	agentos-release publish -repo D -snapshot-key s.key -timestamp-key t.key
 //	agentos-release refresh -repo D -snapshot-key s.key -timestamp-key t.key
 //	agentos-release verify -repo D -root 1.root.json -installed N [-offline] [-channel fast]
@@ -60,7 +61,7 @@ func pubs(list string) ([]ed25519.PublicKey, error) {
 
 func run(args []string, out io.Writer) error {
 	if len(args) < 1 {
-		return errors.New("usage: agentos-release keygen|init|add-release|rotate|sign|publish|refresh|verify [flags]")
+		return errors.New("usage: agentos-release keygen|init|add-release|rotate|sign|attestors|publish|refresh|verify [flags]")
 	}
 	cmd, args := args[0], args[1:]
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
@@ -87,6 +88,7 @@ func run(args []string, out io.Writer) error {
 		}
 		id, _ := update.KeyID(pub)
 		fmt.Fprintf(out, "key id %s\n", id)
+		fmt.Fprintf(out, "%s.key is a signing key: keep it on offline media, not on a networked machine.\n", fs.Arg(0))
 		return nil
 
 	case "init":
@@ -194,6 +196,25 @@ func run(args []string, out io.Writer) error {
 			return err
 		}
 		fmt.Fprintf(out, "signed staged %s\n", role)
+		return nil
+
+	case "attestors":
+		var keys string
+		fs.StringVar(&keys, "keys", "", "maintainer-operated attestor public keys, comma-separated")
+		if err := fs.Parse(args); err != nil {
+			return err
+		}
+		if err := needRepo(); err != nil {
+			return err
+		}
+		k, err := pubs(keys)
+		if err != nil {
+			return err
+		}
+		if err := r().SetMaintainerAttestors(k); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "staged %d maintainer-operated attestor keys; sign targets, then publish\n", len(k))
 		return nil
 
 	case "publish", "refresh":

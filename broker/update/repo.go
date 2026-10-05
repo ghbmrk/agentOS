@@ -3,6 +3,7 @@ package update
 import (
 	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -147,7 +148,23 @@ func writeAtomic(name string, b []byte, mode os.FileMode) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), name)
+	if err := os.Rename(tmp.Name(), name); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(name))
+}
+
+// syncDir makes a rename in dir durable across power loss.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	err = d.Sync()
+	if cerr := d.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }
 
 // latest returns the highest published version of a versioned role, or 0.
@@ -344,13 +361,60 @@ func (r Repo) AddRelease(rel Manifest, files map[string]string) error {
 		return err
 	}
 	defer os.Remove(tmp.Name())
-	tmp.Write(man)
-	tmp.Close()
+	if _, err := tmp.Write(man); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
 	tf, err := r.storeTarget(ReleasePath(rel.Version), tmp.Name())
 	if err != nil {
 		return err
 	}
 	m.Signed.Targets[ReleasePath(rel.Version)] = tf
+	m.Signed.Expires = r.now().Add(TargetsExpiry)
+	m.ClearSignatures()
+	return writeMeta(r.p("staged", "targets.json"), m)
+}
+
+// SetMaintainerAttestors stages the signed list of maintainer-operated
+// attestor keys (AttestorsPath), replacing any earlier list. Boxes show
+// those keys' attestations as evidence and never count them as
+// independent (D6).
+func (r Repo) SetMaintainerAttestors(keys []ed25519.PublicKey) error {
+	list := attestorList{Keys: []string{}}
+	for _, k := range keys {
+		if len(k) != ed25519.PublicKeySize {
+			return errors.New("attestor is not an Ed25519 key")
+		}
+		list.Keys = append(list.Keys, base64.StdEncoding.EncodeToString(k))
+	}
+	m, err := r.stagedTargets()
+	if err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(list, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(r.Dir, ".attestors-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(b); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	tf, err := r.storeTarget(AttestorsPath, tmp.Name())
+	if err != nil {
+		return err
+	}
+	m.Signed.Targets[AttestorsPath] = tf
 	m.Signed.Expires = r.now().Add(TargetsExpiry)
 	m.ClearSignatures()
 	return writeMeta(r.p("staged", "targets.json"), m)

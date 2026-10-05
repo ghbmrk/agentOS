@@ -5,12 +5,14 @@ package update
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 )
 
-func securityFix(t *testing.T) (*fixture, *Checked) {
+func securityFix(t *testing.T) (*fixture, *Verified) {
 	f := newFixture(t)
 	f.release(2, func(r *Manifest) { r.Security = true })
 	f.publish(0, 1)
@@ -29,7 +31,7 @@ func newKey(t *testing.T) ed25519.PrivateKey {
 	return k
 }
 
-func pass(t *testing.T, k ed25519.PrivateKey, v *Checked) []byte {
+func pass(t *testing.T, k ed25519.PrivateKey, v *Verified) []byte {
 	b, err := Attest(k, v, Statement{Result: ResultPass, Channel: ChannelFast, HardwareClass: "n95-8g", Versions: map[string]string{"openclaw": "1.2.3"}})
 	if err != nil {
 		t.Fatal(err)
@@ -106,25 +108,150 @@ func TestOnlySecurityFixesUseTheAttestationRule(t *testing.T) {
 	}
 }
 
-// A TUF-checked release reaches the change pipeline as the same Verified
-// value #34's seam makes: version, signed image digests, and Security only
-// with an independent attestation.
-func TestCheckedReleaseBecomesPipelineVerified(t *testing.T) {
-	_, c := securityFix(t)
-	plain := c.Verified(nil, nil)
-	if !plain.OK() || plain.Version() != "2" || plain.Security() {
-		t.Fatalf("unattested: ok=%v version=%q security=%v", plain.OK(), plain.Version(), plain.Security())
+// A TUF-checked release is what the change pipeline takes (#34's seam):
+// version, signed image digests, and Security only for a security fix
+// with an independent attestation, never from the manifest flag alone.
+func TestCheckedReleaseFeedsThePipeline(t *testing.T) {
+	_, v := securityFix(t)
+	if !v.OK() || v.Version() != "2" || v.Security() {
+		t.Fatalf("unattested: ok=%v version=%q security=%v", v.OK(), v.Version(), v.Security())
 	}
-	imgs := plain.Images()
+	imgs := v.Images()
 	if len(imgs) != 3 {
 		t.Fatalf("images %v", imgs)
 	}
-	for _, f := range mustV(c.Files()) {
+	for _, f := range mustV(v.Files()) {
 		if imgs[f.Path] != f.SHA256 {
 			t.Fatalf("%s: %q, signed %q", f.Path, imgs[f.Path], f.SHA256)
 		}
 	}
-	if !c.Verified([][]byte{pass(t, newKey(t), c)}, nil).Security() {
-		t.Fatal("attested security fix not marked security")
+	if v.WithAttestations(nil, nil).Security() {
+		t.Fatal("security fix with no attestation marked security")
+	}
+	att := v.WithAttestations([][]byte{pass(t, newKey(t), v)}, nil)
+	if !att.Security() || v.Security() {
+		t.Fatal("attested security fix not marked security, or the original changed")
+	}
+	f := newFixture(t)
+	f.release(2, nil)
+	f.publish(0, 1)
+	res, _ := f.check(Options{})
+	if res.Release.WithAttestations([][]byte{pass(t, newKey(t), res.Release)}, nil).Security() {
+		t.Fatal("an attested non-security release marked security")
+	}
+}
+
+// Arbitrator ruling on D6: a maintainer-run attestor is evidence, labelled
+// maintainer-operated, and never independent, whether the signed attestor
+// list names its key or its statement marks itself.
+func TestMaintainerOperatedAttestorNeverIndependent(t *testing.T) {
+	f := newFixture(t)
+	ci := newKey(t)
+	f.must(f.repo.SetMaintainerAttestors([]ed25519.PublicKey{ci.Public().(ed25519.PublicKey)}))
+	f.release(2, func(r *Manifest) { r.Security = true })
+	f.publish(0, 1)
+	res, err := f.check(Options{})
+	if err != nil || res.Release == nil {
+		t.Fatal(res.Release, err)
+	}
+	v := res.Release
+	listed := pass(t, ci, v)
+	marked, err := Attest(newKey(t), v, Statement{Result: ResultPass, Channel: ChannelFast, Operator: OperatorMaintainer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	atts := [][]byte{listed, marked}
+	if n := v.IndependentPasses(atts, nil); n != 0 {
+		t.Fatalf("maintainer-operated counted as independent: %d", n)
+	}
+	if n := v.MaintainerPasses(atts, nil); n != 2 {
+		t.Fatalf("maintainer evidence: %d", n)
+	}
+	if v.WithAttestations(atts, nil).Security() || !errors.Is(v.SecurityAutoStage(atts, nil), ErrNeedsAttestation) {
+		t.Fatal("maintainer-operated attestations auto-staged a security fix")
+	}
+	if _, err := Attest(newKey(t), v, Statement{Result: ResultPass, Channel: ChannelFast, Operator: "ci"}); err == nil {
+		t.Fatal("unknown operator label")
+	}
+	ind := pass(t, newKey(t), v)
+	if v.IndependentPasses(append(atts, ind), nil) != 1 || v.MaintainerPasses(append(atts, ind), nil) != 2 {
+		t.Fatal("independent attestor miscounted")
+	}
+}
+
+// A key any root this box accepted listed stays a maintainer key after a
+// rotation drops it (Security R2).
+func TestRotatedOutKeyStillNotIndependent(t *testing.T) {
+	f := newFixture(t)
+	if _, err := f.check(Options{}); err != nil {
+		t.Fatal(err)
+	}
+	old := f.tgt[2]
+	f.must(f.repo.Rotate("targets", nil, []ed25519.PublicKey{old.Public().(ed25519.PublicKey)}, 0))
+	f.must(f.repo.Sign("root", f.root[0]))
+	f.must(f.repo.Sign("root", f.root[1]))
+	f.release(2, func(r *Manifest) { r.Security = true })
+	f.publish(0, 1)
+	res, err := f.check(Options{})
+	if err != nil || res.Release == nil || res.RootRotatedTo != 2 {
+		t.Fatalf("%+v %v", res, err)
+	}
+	if n := res.Release.IndependentPasses([][]byte{pass(t, old, res.Release)}, nil); n != 0 {
+		t.Fatal("a rotated-out targets key counted as independent")
+	}
+	// A box that sees no new root reports no rotation.
+	if res, _ := f.check(Options{}); res.RootRotatedTo != 0 {
+		t.Fatalf("RootRotatedTo %d without a rotation", res.RootRotatedTo)
+	}
+}
+
+// envelopeOf signs body as a DSSE attestation without Attest's checks, so
+// tests can sign statements Attest would never write.
+func envelopeOf(k ed25519.PrivateKey, body string) []byte {
+	sig := base64.StdEncoding.EncodeToString(ed25519.Sign(k, pae(AttestationType, []byte(body))))
+	return []byte(`{"payloadType":"` + AttestationType + `","payload":"` + base64.StdEncoding.EncodeToString([]byte(body)) +
+		`","signatures":[{"keyid":"x","sig":"` + sig + `"}]}`)
+}
+
+// Attestations decode strictly: a signed statement with a duplicate or
+// case-variant key is refused, not resolved last-wins (#34's guarantee).
+func TestStrictAttestations(t *testing.T) {
+	_, v := securityFix(t)
+	k := newKey(t)
+	m := mustV(v.ManifestFile())
+	pub := base64.StdEncoding.EncodeToString(k.Public().(ed25519.PublicKey))
+	head := `{"release":"` + m.Path + `","manifest_sha256":"` + m.SHA256 + `","channel":"fast","hardware_class":"x","attestor":"` + pub + `"`
+	good := envelopeOf(k, head+`,"result":"pass"}`)
+	if v.IndependentPasses([][]byte{good}, nil) != 1 {
+		t.Fatal("fixture: the well-formed statement does not count")
+	}
+	for _, body := range []string{
+		head + `,"result":"fail","result":"pass"}`,
+		head + `,"result":"fail","Result":"pass"}`,
+		head + `,"RESULT":"pass"}`,
+		head + `,"result":"pass","operator":"maintainer","Operator":""}`,
+		head + `,"result":"pass","extra":1}`,
+		head + `,"result":"pass","versions":{"a":"1","a":"2"}}`,
+		head + `,"result":"pass"}{}`,
+	} {
+		b := envelopeOf(k, body)
+		if _, _, err := ParseAttestation(b); err == nil {
+			t.Fatalf("accepted %s", body)
+		}
+		if v.IndependentPasses([][]byte{b}, nil) != 0 {
+			t.Fatalf("counted %s", body)
+		}
+	}
+	s := string(good)
+	for _, env := range []string{
+		strings.Replace(s, `"payloadType"`, `"PayloadType"`, 1),
+		strings.Replace(s, `"keyid"`, `"KeyID"`, 1),
+		strings.Replace(s, `"sig":`, `"Sig":`, 1),
+		strings.Replace(s, `{"payloadType"`, `{"payload":"e30=","payloadType"`, 1),
+		s + `x`,
+	} {
+		if _, _, err := ParseAttestation([]byte(env)); err == nil {
+			t.Fatalf("accepted envelope %s", env)
+		}
 	}
 }

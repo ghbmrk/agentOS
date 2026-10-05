@@ -36,6 +36,10 @@ func TestReleaseFlowThroughTheCommand(t *testing.T) {
 	if err := do("keygen", k("r0")); err == nil {
 		t.Fatal("keygen overwrote a key")
 	}
+	must("keygen", k("ci"))
+	if !strings.Contains(out.String(), "offline media") {
+		t.Fatalf("keygen gave no custody reminder: %q", out.String())
+	}
 	must("init", "-repo", repo,
 		"-root", k("r0.pub")+","+k("r1.pub")+","+k("r2.pub"),
 		"-targets", k("t0.pub")+","+k("t1.pub")+","+k("t2.pub"),
@@ -45,6 +49,15 @@ func TestReleaseFlowThroughTheCommand(t *testing.T) {
 	must("sign", "-repo", repo, "-role", "targets", "-key", k("t1.key"))
 	must("sign", "-repo", repo, "-role", "targets", "-key", k("t2.key"))
 	must("publish", "-repo", repo, "-snapshot-key", k("snap.key"), "-timestamp-key", k("ts.key"))
+	must("attestors", "-repo", repo, "-keys", k("ci.pub"))
+	must("sign", "-repo", repo, "-role", "targets", "-key", k("t0.key"))
+	must("sign", "-repo", repo, "-role", "targets", "-key", k("t1.key"))
+	must("publish", "-repo", repo, "-snapshot-key", k("snap.key"), "-timestamp-key", k("ts.key"))
+	os.Chmod(k("snap.key"), 0o644)
+	if err := do("refresh", "-repo", repo, "-snapshot-key", k("snap.key"), "-timestamp-key", k("ts.key")); err == nil {
+		t.Fatal("used a world-readable key")
+	}
+	os.Chmod(k("snap.key"), 0o600)
 
 	entry := k("entry.conf")
 	os.WriteFile(entry, []byte("title AgentOS 7\n"), 0o644)

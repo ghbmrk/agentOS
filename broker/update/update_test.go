@@ -424,8 +424,11 @@ func TestWeakThresholdRefused(t *testing.T) {
 	if _, err := f.check(Options{}); !errors.Is(err, ErrWeakThreshold) {
 		t.Fatalf("targets threshold 1: %v", err)
 	}
-	if res, err := f.check(Options{MinThreshold: 1}); err != nil || res.Release == nil {
-		t.Fatalf("floor 1: %v %v", res.Release, err)
+	// A configured floor below 2 counts as 2: it cannot be lowered.
+	for _, min := range []int{-1, 0, 1} {
+		if _, err := f.check(Options{MinThreshold: min}); !errors.Is(err, ErrWeakThreshold) {
+			t.Fatalf("floor %d: %v", min, err)
+		}
 	}
 }
 
@@ -496,7 +499,7 @@ func TestDirSourceRefusesEscapes(t *testing.T) {
 	}
 }
 
-// mustV unwraps a sealed Checked's accessor in tests.
+// mustV unwraps a sealed Verified's accessor in tests.
 func mustV[T any](v T, err error) T {
 	if err != nil {
 		panic(err)
@@ -504,10 +507,10 @@ func mustV[T any](v T, err error) T {
 	return v
 }
 
-// Every method refuses a Checked that Check did not make.
+// Every method refuses a Verified that Check did not make.
 func TestUnsealedCheckedIsRefused(t *testing.T) {
 	f := newFixture(t)
-	for _, c := range []*Checked{{}, nil, {release: Manifest{Version: 9}, files: map[string]File{"host-image/x": {Path: "host-image/x"}}}} {
+	for _, c := range []*Verified{{}, nil, {release: Manifest{Version: 9}, files: map[string]File{"host-image/x": {Path: "host-image/x"}}}} {
 		if _, err := c.Manifest(); !errors.Is(err, ErrNotChecked) {
 			t.Fatalf("Manifest: %v", err)
 		}
@@ -529,8 +532,11 @@ func TestUnsealedCheckedIsRefused(t *testing.T) {
 		if err := f.store.Commit(c); !errors.Is(err, ErrNotChecked) {
 			t.Fatalf("Commit: %v", err)
 		}
-		if c.Fresh() || c.IndependentPasses(nil, nil) != 0 || c.Verified(nil, nil).OK() {
+		if c.Fresh() || c.IndependentPasses(nil, nil) != 0 || c.MaintainerPasses(nil, nil) != 0 || c.WithAttestations(nil, nil) != nil {
 			t.Fatal("unsealed release reported fresh, attested or verified")
+		}
+		if c.OK() || c.Security() || c.Version() != "" || c.Images() != nil {
+			t.Fatal("unsealed release passed the pipeline accessors")
 		}
 	}
 	if in, _ := f.store.Installed(); in.Version != 1 {

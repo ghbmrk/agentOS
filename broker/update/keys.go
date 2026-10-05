@@ -84,8 +84,17 @@ func LoadPublicKey(name string) (ed25519.PublicKey, error) {
 	return pub, nil
 }
 
-// LoadPrivateKey reads an Ed25519 private key file.
+// LoadPrivateKey reads an Ed25519 private key file. It refuses a file
+// that its group or others can read or write: a key left that open may
+// already have been copied.
 func LoadPrivateKey(name string) (ed25519.PrivateKey, error) {
+	fi, err := os.Stat(name)
+	if err != nil {
+		return nil, err
+	}
+	if fi.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf("%s: mode %v lets other users read the key; chmod 600 it", name, fi.Mode().Perm())
+	}
 	der, err := readPEM(name, "PRIVATE KEY")
 	if err != nil {
 		return nil, err
