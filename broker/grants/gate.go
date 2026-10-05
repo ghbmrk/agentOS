@@ -48,6 +48,9 @@ const (
 type Owner interface {
 	Request(items []owner.Item, ttl time.Duration) (string, error)
 	RequestEach(items []owner.Item, ttls []time.Duration) ([]string, error)
+	// RequestLocal asks one item on the local page, when its recipients
+	// cannot be shown in a text (owner.SMSApprovable; P2-2a).
+	RequestLocal(item owner.Item, ttl time.Duration) (string, error)
 	Tier(owner.Facts) owner.Tier
 	Active(within time.Duration) bool
 	QueueAutoReply(owner.AutoReply) (owner.QueueResult, error)
@@ -201,6 +204,11 @@ type Config struct {
 	// must not block, and a panic in it is logged and changes nothing
 	// (security V1 on W3-values). Nil: none.
 	Observe func(journal.Intent)
+	// Unpaused is told the ID of a grant whose pause the owner ended by
+	// resuming or revoking it, so Loop 2 stops listing it as paused (loops
+	// S4, W5a). Called outside the gate's lock, never on replay; it must
+	// not block, and a panic in it is logged. Nil: none.
+	Unpaused func(grantID string)
 	// Delivery names, per adapter executor, the one declared share
 	// operation that delivers to the owner's evidence destination (CH-20;
 	// mail.OpDeliver). Only OriginEvidence submits it, and it runs
@@ -861,7 +869,10 @@ func (g *Gate) evaluateBroker(ctx context.Context, phase journal.Phase, in journ
 	case journal.ActionEvidence:
 		return g.evaluateEvidence(in)
 	case journal.ActionGrantPause, journal.ActionGrantRevoke:
-		if in.Origin != OriginOwner {
+		// Loop 2 may pause on a finding (loops K-S2): pausing only
+		// narrows, and revoking stays the owner's.
+		loop2Pause := in.Origin == OriginLoop2 && in.Action == journal.ActionGrantPause
+		if in.Origin != OriginOwner && !loop2Pause {
 			return verdict{kind: deny, why: "only the owner pauses or revokes a grant"}
 		}
 		g.mu.Lock()
@@ -1288,11 +1299,11 @@ func (g *Gate) Authorize(ctx context.Context, id string) (journal.Status, error)
 	case deny, allow:
 		return g.eng.Authorize(ctx, id)
 	case ask:
-		if !v.hold && !owner.SMSApprovable(v.item) {
+		if !v.hold && !owner.SMSApprovable(v.item) && !g.cfg.LocalUI {
 			// Recipients that cannot be shown in an approval text are never
-			// approved by text (CH-10, CH-12). This build has no local
-			// approvals page to wait for, so the agent is told what to
-			// change (UX-144-2).
+			// approved by text (CH-10, CH-12). Without the local approvals
+			// page to wait for, the agent is told what to change
+			// (UX-144-2); with it, flush asks there (P2-2a).
 			g.closeIntent(id, RecipientsNotTextable)
 			return g.eng.Get(id)
 		}
@@ -1354,6 +1365,10 @@ func (g *Gate) annotate(st *journal.Status) {
 		st.Permission.Reason = "approved; held for the owner's undo window until " + w.sendAt.UTC().Format("15:04") + " UTC"
 	} else if w != nil && w.reply != "" {
 		st.Permission.Reason = "auto-reply queued; it sends at " + w.sendAt.UTC().Format("15:04") + " UTC unless the owner cancels it"
+	} else if w != nil && g.cfg.LocalUI && !owner.SMSApprovable(w.item) {
+		// After held and reply: an approved page item is held, not
+		// waiting (L3 S1 on #165).
+		st.Permission.Reason = "waiting for the owner's approval on the box's Wi-Fi page"
 	} else if w != nil {
 		st.Permission.Reason = "waiting for the owner's approval"
 	} else if r := g.retry[id]; r != "" {
@@ -1522,8 +1537,8 @@ func (g *Gate) flush(paced bool) {
 	ids, own := g.batch, g.own
 	stopped := g.eng != nil && g.eng.Stopped()
 	g.batch = nil
-	var low, high, again []owner.Item
-	var ttls []time.Duration
+	var low, high, again, page []owner.Item
+	var ttls, pageTTLs []time.Duration
 	var lapsed []string
 	for _, id := range ids {
 		w := g.waiting[id]
@@ -1538,10 +1553,20 @@ func (g *Gate) flush(paced bool) {
 				lapsed = append(lapsed, id)
 			case stopped:
 				g.batch = append(g.batch, id)
+			case g.cfg.LocalUI && !owner.SMSApprovable(w.item):
+				page = append(page, w.item)
+				pageTTLs = append(pageTTLs, w.expires.Sub(now))
 			default:
 				again = append(again, w.item)
 				ttls = append(ttls, w.expires.Sub(now))
 			}
+			continue
+		}
+		if g.cfg.LocalUI && !owner.SMSApprovable(w.item) {
+			// Its recipients cannot be texted: asked alone on the local
+			// page (P2-2a), never in a texted batch.
+			page = append(page, w.item)
+			pageTTLs = append(pageTTLs, 0)
 			continue
 		}
 		if own != nil && own.Tier(w.item.Facts) == owner.Low {
@@ -1576,6 +1601,32 @@ func (g *Gate) flush(paced bool) {
 					err = errors.New("not sent")
 				}
 				g.failed[it.Ref] = err.Error()
+			}
+		}
+		g.mu.Unlock()
+	}
+	for i, it := range page {
+		// Each is one notice text to the owner, counted like a request;
+		// re-issued ones always go, as above.
+		if pageTTLs[i] == 0 && g.take(paced, 1) == 0 {
+			g.requeue([]owner.Item{it})
+			continue
+		}
+		if pageTTLs[i] != 0 {
+			g.take(false, 1)
+		}
+		req := ""
+		err := errors.New("no owner channel")
+		if own != nil {
+			req, err = own.RequestLocal(it, pageTTLs[i])
+		}
+		g.mu.Lock()
+		if w := g.waiting[it.Ref]; w != nil {
+			if err != nil {
+				delete(g.waiting, it.Ref)
+				g.failed[it.Ref] = err.Error()
+			} else {
+				w.request = req
 			}
 		}
 		g.mu.Unlock()
@@ -2340,12 +2391,39 @@ func (g *Gate) Narrow(word, id string) string {
 // Execute runs a grant intent: it is the engine executor for ExecutorName.
 func (g *Gate) Execute(_ context.Context, in journal.Intent, _ int) journal.Outcome {
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	id, err := g.applyLocked(in)
+	g.mu.Unlock()
 	if err != nil {
 		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: err.Error()}
 	}
+	if unpauses(in) {
+		g.unpaused(id)
+	}
 	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: id}
+}
+
+// unpauses reports an intent that ends a grant's pause: the owner resumed
+// or revoked it.
+func unpauses(in journal.Intent) bool {
+	if in.Action == journal.ActionGrantRevoke {
+		return true
+	}
+	s, err := parseSpec(in)
+	return in.Action == journal.ActionGrantChange && err == nil && s.Resume != ""
+}
+
+// unpaused calls Config.Unpaused outside the gate's lock; a panic in it is
+// logged and changes nothing.
+func (g *Gate) unpaused(id string) {
+	if g.cfg.Unpaused == nil {
+		return
+	}
+	defer func() {
+		if recover() != nil && g.cfg.Logf != nil {
+			g.cfg.Logf("grants: unpause hook failed")
+		}
+	}()
+	g.cfg.Unpaused(id)
 }
 
 // Reconcile: grant state is rebuilt only from succeeded records, so an

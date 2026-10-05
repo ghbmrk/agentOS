@@ -69,7 +69,7 @@ func TestLearningPlaneRunsInAgentosd(t *testing.T) {
 	}
 	cases := &fakeHarvest{}
 	lp.cases = cases
-	lp.attach(ctx, d)
+	attachForTest(t, lp, ctx, cancel, d)
 	if lp.busy() || lp.stopped() {
 		t.Fatal("an idle box reads busy or stopped")
 	}

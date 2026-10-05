@@ -282,6 +282,9 @@ func SMSApprovable(it Item) bool {
 	return ok
 }
 
+// DurText is d as the owner's texts write it ("10 min", "3 h").
+func DurText(d time.Duration) string { return dur(d) }
+
 func dur(d time.Duration) string {
 	switch {
 	case d >= 48*time.Hour:
