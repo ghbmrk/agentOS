@@ -3,6 +3,7 @@ package guest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -509,6 +510,47 @@ func TestG5OwnerMessagesSurviveABrokerRestart(t *testing.T) {
 	if code, body := r3.do("m1", "GET", "/owner/next", ""); code != 204 {
 		t.Fatalf("an answered message came back: %s", body)
 	}
+}
+
+// TestREV5StoredOwnerMessagesRaiseTheMachine: the inbox store can outlive
+// the machine record, so a machine created fresh (public) under an ID with
+// stored owner messages is raised to private before the guest reads one,
+// and a failed raise hands out nothing (security C1 on #56).
+func TestREV5StoredOwnerMessagesRaiseTheMachine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inbox.json")
+	r := newRig(t, func(c *Config) { c.InboxPath = path })
+	r.client("agent")
+	if _, err := r.p.DeliverOwner("agent", "my bank details", false); err != nil {
+		t.Fatal(err)
+	}
+	r.p.Shutdown()
+
+	fail := &failRaise{fakeMachines: newMachines(), fail: true}
+	r2 := newRig(t, func(c *Config) { c.InboxPath = path; c.Machines = fail })
+	r2.client("agent")
+	if code, body := r2.do("agent", "GET", "/owner/next", ""); code != 503 || strings.Contains(body, "bank") {
+		t.Fatalf("raise failed, yet: %d %s", code, body)
+	}
+	fail.fail = false
+	code, body := r2.do("agent", "GET", "/owner/next", "")
+	if code != 200 || !strings.Contains(body, "bank") {
+		t.Fatalf("after raise: %d %s", code, body)
+	}
+	if !fail.private["agent"] {
+		t.Fatal("stored message handed out without raising the machine")
+	}
+}
+
+type failRaise struct {
+	*fakeMachines
+	fail bool
+}
+
+func (f *failRaise) RaisePrivate(id string) error {
+	if f.fail {
+		return errors.New("label store down")
+	}
+	return f.fakeMachines.RaisePrivate(id)
 }
 
 // TestOP8ModelRouteIsMeteredByMachine: model calls go through the meter,

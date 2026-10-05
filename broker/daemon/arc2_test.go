@@ -39,8 +39,9 @@ var controlPath = map[string][]string{
 	// It forwards each machine's model route to the vault process
 	// (modelroute, P2-4) and journals the denials that come back, and
 	// gives the owner channel the vault process's verify operation
-	// (owner.Verifier, egress K7).
-	"cmd/agentosd": {"daemon", "cgroup", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner"},
+	// (owner.Verifier, egress K7). It keeps the owner's agent machine
+	// running as foreground work (admission.Foreground, RES-1).
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies
@@ -109,15 +110,15 @@ func TestARC2ControlPathCannotReachInference(t *testing.T) {
 }
 
 // TestDaemonLinksNoCredentialCustody: the daemon process, which serves the
-// guest sockets, links neither the vault nor the credentialed egress proxy
-// (vault V2, ARC-1). Model egress runs where the vault is unlocked (P2-4).
+// guest sockets, links neither the vault, the credentialed egress proxy,
+// nor the TPM seal (vault V2, ARC-1, P2-4b). Model egress runs where the vault is unlocked (P2-4).
 func TestDaemonLinksNoCredentialCustody(t *testing.T) {
 	out, err := exec.Command("go", "list", "-C", "..", "-deps", "./"+compositionRoot).Output()
 	if err != nil {
 		t.Fatalf("go list: %v", err)
 	}
 	for _, dep := range strings.Fields(string(out)) {
-		if dep == module+"vault" || dep == module+"egress" {
+		if dep == module+"vault" || dep == module+"egress" || dep == module+"tpmseal" {
 			t.Errorf("agentosd links %s", dep)
 		}
 	}

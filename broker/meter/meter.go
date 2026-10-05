@@ -142,6 +142,7 @@ type state struct {
 	Bound    map[string]string   `json:"bound"`    // machine -> task
 	Ext      map[string]Limits   `json:"ext"`      // UTC day -> extensions granted
 	Notified map[string]bool     `json:"notified"` // scope:subject already told
+	Shares   map[string][]bucket `json:"shares"`   // share prefix -> use
 	Goals    map[string]*goalUse `json:"goals"`    // goal -> use, for accounting only
 }
 
@@ -158,10 +159,11 @@ const GoalKeep = 7 * 24 * time.Hour
 
 // Meter is safe for concurrent use.
 type Meter struct {
-	cfg  Config
-	slot int64
-	mu   sync.Mutex
-	st   state
+	cfg    Config
+	slot   int64
+	mu     sync.Mutex
+	st     state
+	shares []Share
 }
 
 // Open loads (or creates) the meter's state.
@@ -223,6 +225,9 @@ func Open(cfg Config) (*Meter, error) {
 	}
 	if m.st.Notified == nil {
 		m.st.Notified = map[string]bool{}
+	}
+	if m.st.Shares == nil {
+		m.st.Shares = map[string][]bucket{}
 	}
 	if m.st.Goals == nil {
 		m.st.Goals = map[string]*goalUse{}
@@ -319,9 +324,22 @@ func (m *Meter) StartFor(machine, goal string, in, reserve int64) (*Call, error)
 	if in < 0 || reserve < 0 {
 		return nil, errors.New("meter: negative charge")
 	}
+	// Share activity is read before taking the lock: Active is the
+	// caller's function and must not run under the meter's lock.
+	m.mu.Lock()
+	shares := m.shares
+	m.mu.Unlock()
+	active := make([]bool, len(shares))
+	for i, sh := range shares {
+		active[i] = sh.Active == nil || sh.Active()
+	}
 	m.mu.Lock()
 	now := m.cfg.Now().Unix()
 	tid := m.st.Bound[machine]
+	if err := m.admitShares(shares, active, machine, now, in+reserve); err != nil {
+		m.mu.Unlock()
+		return nil, err
+	}
 	ex, err := m.admit(machine, tid, goal, now, in+reserve)
 	if ex != nil {
 		if m.st.Notified[ex.key()] {
@@ -377,6 +395,9 @@ func (m *Meter) admit(machine, tid, goal string, now, in int64) (*Exhausted, err
 func (m *Meter) add(machine, tid, goal string, now int64, use Limits) {
 	m.st.Overall = m.charge(m.st.Overall, now, use)
 	m.st.Machines[machine] = m.charge(m.st.Machines[machine], now, use)
+	if p, ok := m.shareOf(machine); ok {
+		m.st.Shares[p] = m.charge(m.st.Shares[p], now, use)
+	}
 	if t := m.st.Tasks[tid]; t != nil {
 		t.Used = t.Used.add(use)
 	}
@@ -436,6 +457,9 @@ func (m *Meter) settle(c *Call, used int64) {
 	case d < 0:
 		refund(m.st.Overall, c.at, -d)
 		refund(m.st.Machines[c.machine], c.at, -d)
+		if p, ok := m.shareOf(c.machine); ok {
+			refund(m.st.Shares[p], c.at, -d)
+		}
 		if t := m.st.Tasks[c.task]; t != nil {
 			t.Used.Tokens = max(0, t.Used.Tokens+d)
 		}
@@ -521,6 +545,126 @@ func (m *Meter) Usage(machine string) Limits {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.sum(m.st.Machines[machine], m.cfg.Now().Unix())
+}
+
+// Overall is the whole box's use in the current window, against its cap.
+func (m *Meter) Overall() (used, limit Limits) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.sum(m.st.Overall, m.cfg.Now().Unix()), m.cfg.OverallCap
+}
+
+// SetOverallCap changes the overall cap, for a meter whose cap is an owner
+// setting (the spare budget, LOOP-2). Calls already started keep their
+// charge; the next Start is checked against the new cap. Like Open, it
+// refuses a cap that does not limit both calls and tokens.
+func (m *Meter) SetOverallCap(l Limits) error {
+	if l.Calls <= 0 || l.Tokens <= 0 {
+		return errors.New("meter: the overall cap must limit both calls and tokens")
+	}
+	m.mu.Lock()
+	m.cfg.OverallCap = l
+	m.mu.Unlock()
+	return nil
+}
+
+// Share sets part of the overall cap apart for the machines whose IDs
+// start with Prefix (one meter shared by several kinds of work, such as
+// the spare budget's evaluation, builders, and clean room; loops L3).
+//
+// Reserve is the fraction of the overall cap kept for the share while it
+// is Active: other machines' calls are refused when they would leave the
+// share less than its reserve minus what it already used in the window.
+// While it is not Active, others may use its reserve; they hand it back
+// as soon as it is Active again, for calls not yet made (spend already
+// made in the window stays spent). Max, when above 0, is the most of the
+// overall cap the share's machines may use. Active nil means always.
+// Fractions are taken of the overall cap at each call, so they follow
+// SetOverallCap. Refusals by a share are ErrExhausted with no Notify:
+// they are the meter's own scheduling, not an owner's limit.
+type Share struct {
+	Prefix  string
+	Reserve float64
+	Max     float64
+	Active  func() bool
+}
+
+// SetShares replaces the meter's shares. Prefixes must be distinct, not
+// empty, and not prefixes of one another; fractions must be in [0, 1] and
+// reserves may not add up to more than 1.
+func (m *Meter) SetShares(shares []Share) error {
+	total := 0.0
+	for i, sh := range shares {
+		if sh.Prefix == "" || sh.Reserve < 0 || sh.Reserve > 1 || sh.Max < 0 || sh.Max > 1 {
+			return errors.New("meter: a share needs a prefix and fractions between 0 and 1")
+		}
+		if sh.Max > 0 && sh.Max < sh.Reserve {
+			return errors.New("meter: a share's maximum is below its reserve")
+		}
+		for _, o := range shares[:i] {
+			if strings.HasPrefix(sh.Prefix, o.Prefix) || strings.HasPrefix(o.Prefix, sh.Prefix) {
+				return fmt.Errorf("meter: share prefixes %q and %q overlap", o.Prefix, sh.Prefix)
+			}
+		}
+		total += sh.Reserve
+	}
+	if total > 1 {
+		return errors.New("meter: share reserves add up to more than the overall cap")
+	}
+	m.mu.Lock()
+	m.shares = append([]Share(nil), shares...)
+	m.mu.Unlock()
+	return nil
+}
+
+// ShareUsage is the use in the current window by the share with prefix.
+func (m *Meter) ShareUsage(prefix string) Limits {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.sum(m.st.Shares[prefix], m.cfg.Now().Unix())
+}
+
+// shareOf is the prefix of the share machine belongs to. Called with mu
+// held.
+func (m *Meter) shareOf(machine string) (string, bool) {
+	for _, sh := range m.shares {
+		if strings.HasPrefix(machine, sh.Prefix) {
+			return sh.Prefix, true
+		}
+	}
+	return "", false
+}
+
+func frac(l Limits, f float64) Limits {
+	return Limits{int64(float64(l.Calls) * f), int64(float64(l.Tokens) * f)}
+}
+
+// admitShares refuses a call carrying in tokens that would pass its own
+// share's Max or eat into another Active share's unused reserve. Called
+// with mu held; active[i] is shares[i].Active().
+func (m *Meter) admitShares(shares []Share, active []bool, machine string, now, in int64) error {
+	cap := m.cfg.OverallCap
+	var held Limits // other active shares' reserves not yet used
+	for i, sh := range shares {
+		used := m.sum(m.st.Shares[sh.Prefix], now)
+		if strings.HasPrefix(machine, sh.Prefix) {
+			if sh.Max > 0 && over(used, frac(cap, sh.Max), in) {
+				return ErrExhausted
+			}
+			continue
+		}
+		if active[i] {
+			r := frac(cap, sh.Reserve)
+			held = held.add(Limits{max(0, r.Calls-used.Calls), max(0, r.Tokens-used.Tokens)})
+		}
+	}
+	if held == (Limits{}) {
+		return nil
+	}
+	if over(m.sum(m.st.Overall, now).add(held), cap, in) {
+		return ErrExhausted
+	}
+	return nil
 }
 
 // Tokens estimates tokens from bytes: one token per 4 bytes, rounded up.
