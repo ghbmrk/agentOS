@@ -303,3 +303,79 @@ func TestAnUnconfirmedRealmSignsOnlyRegistration(t *testing.T) {
 		}
 	}
 }
+
+// limited is a store whose MESSAGE and INVITE pass a limiter first.
+type limited struct {
+	*store
+	mu      sync.Mutex
+	allowed []string
+	refuse  error
+}
+
+func (l *limited) Allow(c sipsign.Challenge) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.allowed = append(l.allowed, c.Method+" "+c.URI)
+	return l.refuse
+}
+
+// Security C1 and Q2 on the #142 design read: the vault process checks
+// each MESSAGE and INVITE against the second line's recipient rules and
+// shared budget before it signs, and the line sees why it was refused.
+func TestMessagesAndCallsPassTheLimiterBeforeSigning(t *testing.T) {
+	ctx := context.Background()
+	l := &limited{store: &store{acct: sipsign.Account{Username: user, Password: password, Realm: realm}}}
+	path := filepath.Join(t.TempDir(), "sign.sock")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: sipsign.Handler(l)}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+	c := sipsign.NewClient(path)
+	msg := sipsign.Challenge{Header: challenge(realm), Method: "MESSAGE", URI: "sip:+15550000777@voip.test"}
+	if _, err := c.Sign(ctx, msg); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range []string{"REGISTER", "BYE", "CANCEL"} {
+		if _, err := c.Sign(ctx, sipsign.Challenge{Header: challenge(realm), Method: m, URI: "sip:voip.test"}); err != nil {
+			t.Fatalf("%s: %v", m, err)
+		}
+	}
+	if len(l.allowed) != 1 || l.allowed[0] != "MESSAGE sip:+15550000777@voip.test" {
+		t.Fatalf("limiter saw %v", l.allowed)
+	}
+	for _, refuse := range []error{sipsign.ErrLimited, sipsign.ErrRecipient} {
+		l.refuse = refuse
+		for _, m := range []string{"MESSAGE", "INVITE"} {
+			if _, err := c.Sign(ctx, sipsign.Challenge{Header: challenge(realm), Method: m, URI: msg.URI}); !errors.Is(err, refuse) {
+				t.Fatalf("%s refused with %v: %v", m, refuse, err)
+			}
+		}
+	}
+}
+
+// The recipient of a MESSAGE or INVITE is the Request-URI's user part,
+// with its + restored for a provider that dials without it.
+func TestRecipientIsTheRequestURIsNumber(t *testing.T) {
+	for _, c := range []struct {
+		uri    string
+		noPlus bool
+		want   string
+	}{
+		{"sip:+15550000777@voip.test", false, "+15550000777"},
+		{"sips:+15550000777@voip.test;transport=tls", false, "+15550000777"},
+		{"sip:+15550000777;user=x@voip.test", false, "+15550000777"},
+		{"sip:15550000777@voip.test", true, "+15550000777"},
+		{"sip:15550000777@voip.test", false, ""},
+		{"sip:alice@voip.test", false, ""},
+		{"tel:+15550000777", false, ""},
+		{"sip:+1555@voip.test", false, "+1555"},
+		{"sip:@voip.test", false, ""},
+	} {
+		if got := sipsign.Recipient(c.uri, c.noPlus); got != c.want {
+			t.Errorf("%q noPlus=%v: %q, want %q", c.uri, c.noPlus, got, c.want)
+		}
+	}
+}

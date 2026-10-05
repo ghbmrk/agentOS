@@ -19,6 +19,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/owner"
+	"github.com/ghbmrk/agentos/broker/smsapi"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 	"github.com/ghbmrk/agentos/broker/vault"
 )
@@ -188,6 +189,15 @@ type custody struct {
 	statePath string
 	// host is this PC's TPM (trusted.go); nil without one.
 	host trustedHost
+	// owner is the owner's number, which the second line never texts or
+	// calls (security C1 on the #142 design read).
+	owner string
+	// smsHTTP is the texting provider's client; nil is
+	// smsapi.NewHTTPClient(). Only tests set it.
+	smsHTTP *http.Client
+	// budget is the second line's sending budget, shared by SIP MESSAGE
+	// and the HTTP account (security Q2).
+	budget smsapi.Budget
 
 	mu          sync.Mutex
 	st          unlockState

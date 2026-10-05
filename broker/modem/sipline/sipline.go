@@ -120,6 +120,10 @@ func OwnerText(err error) string {
 		return "The second line's calling account isn't set up. Set it up on the box's local page."
 	case errors.Is(err, sipsign.ErrRefused):
 		return "The second line's sign-in needs confirming. Check the provider name on the box's local page."
+	case errors.Is(err, sipsign.ErrLimited):
+		return "The second line has sent as many texts as it may for now, so that didn't go through. Try again later."
+	case errors.Is(err, sipsign.ErrRecipient):
+		return "The second line doesn't text or call that number. It takes a full number with its country code, never your own number or a short code."
 	}
 	return "The second line couldn't reach its provider, so that didn't go through. It will keep trying to reconnect."
 }
