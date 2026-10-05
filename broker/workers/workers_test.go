@@ -1,6 +1,6 @@
 package workers
 
-// REQ: CAP-8, REV-5, A14, A15
+// REQ: CAP-8, REV-5, A14, A15, OP-6, RES-4
 
 import (
 	"context"
@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -774,4 +775,62 @@ func TestCAP8OverTheCapSaysRollBackOrDestroy(t *testing.T) {
 	}
 	r.must("agent", toolRollback, m{"name": "w", "snapshot": snap.Snapshot}, nil)
 	r.must("agent", toolExec, m{"name": "w", "argv": []string{"echo"}}, nil)
+}
+
+// A command queued on a busy worker's lock when STOP comes does not start
+// once the lock frees: STOP is checked again under the lock (L3 MUST-2 on
+// #150).
+func TestOP6QueuedCommandDoesNotStartAfterStop(t *testing.T) {
+	r := newRig(t, 8000)
+	var stopped atomic.Bool
+	r.tools.Stopped = stopped.Load
+	r.agent("agent", vm.Public)
+	r.must("agent", toolCreate, m{"name": "w"}, nil)
+	first := make(chan error, 1)
+	go func() {
+		first <- r.call("agent", toolExec, m{"name": "w", "argv": []string{"sleep"}, "timeout_seconds": 600}, nil)
+	}()
+	time.Sleep(20 * time.Millisecond) // the first command holds the worker
+	queued := make(chan error, 1)
+	go func() {
+		queued <- r.call("agent", toolWrite, m{"name": "w", "path": "/f", "content": "after stop"}, nil)
+	}()
+	time.Sleep(20 * time.Millisecond) // the second waits on the lock
+	stopped.Store(true)
+	r.m.EndCommands()
+	if err := <-first; err == nil {
+		t.Fatal("the command in flight survived STOP")
+	}
+	if err := <-queued; err == nil || !strings.Contains(err.Error(), "STOP") {
+		t.Fatalf("queued command after STOP: %v", err)
+	}
+	stopped.Store(false)
+	var read struct{ Content string }
+	if err := r.call("agent", toolRead, m{"name": "w", "path": "/f"}, &read); err == nil && read.Content != "" {
+		t.Fatalf("the queued command wrote %q", read.Content)
+	}
+}
+
+// Read offsets and lengths are bounded both ways: a negative length would
+// uncap the output, and a huge offset would overflow (L3 SHOULD on #150).
+func TestCAP8ReadBoundsAreExact(t *testing.T) {
+	r := newRig(t, 8000)
+	r.agent("agent", vm.Public)
+	rec := &record{Manager: r.m}
+	r.tools.M = rec
+	r.must("agent", toolCreate, m{"name": "w"}, nil)
+	r.must("agent", toolWrite, m{"name": "w", "path": "/f", "content": "0123456789"}, nil)
+	want := fmt.Sprintf("offset must be 0 to %d and length 0 to %d", int64(MaxOffset), MaxOutput)
+	for _, args := range []m{
+		{"length": -1}, {"offset": -1}, {"length": MaxOutput + 1}, {"offset": int64(MaxOffset) + 1},
+	} {
+		args["name"], args["path"] = "w", "/f"
+		if err := r.call("agent", toolRead, args, nil); err == nil || err.Error() != want {
+			t.Errorf("read %v: %v, want %q", args, err, want)
+		}
+	}
+	r.must("agent", toolRead, m{"name": "w", "path": "/f", "offset": int64(MaxOffset), "length": MaxOutput}, nil)
+	if a := rec.cmd.Argv; a[2] != fmt.Sprintf("+%d", int64(MaxOffset)+1) || rec.cmd.MaxOutput != MaxOutput {
+		t.Errorf("read at the bounds ran %q with cap %d", a, rec.cmd.MaxOutput)
+	}
 }

@@ -60,7 +60,8 @@ const (
 	MaxOutput      = 64 << 10  // each of stdout and stderr
 	DefaultTimeout = time.Minute
 	MaxTimeout     = 10 * time.Minute
-	MaxChanges     = 500 // diff entries returned
+	MaxChanges     = 500     // diff entries returned
+	MaxOffset      = 1 << 50 // read offsets (1 PiB): offset+1 cannot overflow
 	// IdleAfter parks a worker no tool has named for this long (UX-146-1).
 	IdleAfter = time.Hour
 )
@@ -140,8 +141,8 @@ func (t *Tools) List() []map[string]any {
 				"timeout_seconds": map[string]any{"type": "number", "description": fmt.Sprintf("Default %d, at most %d.", int(DefaultTimeout.Seconds()), int(MaxTimeout.Seconds()))}}, "name", "argv")},
 		{"name": toolRead, "description": fmt.Sprintf("Read a file from a worker, or length bytes of it from offset (at most %d at once; its image needs tail). truncated: true means more follows: read again from offset+length.", MaxOutput),
 			"inputSchema": obj(map[string]any{"name": pName, "path": pPath,
-				"offset": map[string]any{"type": "number", "description": "Byte offset to start at; default 0."},
-				"length": map[string]any{"type": "number", "description": fmt.Sprintf("Bytes to read; default and at most %d.", MaxOutput)},
+				"offset": map[string]any{"type": "integer", "description": fmt.Sprintf("Byte offset to start at; default 0, at most %d.", int64(MaxOffset))},
+				"length": map[string]any{"type": "integer", "description": fmt.Sprintf("Bytes to read; default and at most %d.", MaxOutput)},
 				"base64": map[string]any{"type": "boolean", "description": "Return the content base64-encoded, for binary files."}}, "name", "path")},
 		{"name": toolWrite, "description": "Write a file in a worker, replacing it (its image needs tee).",
 			"inputSchema": obj(map[string]any{"name": pName, "path": pPath, "content": map[string]any{"type": "string"},
@@ -347,9 +348,11 @@ type execOut struct {
 	TimedOut  bool   `json:"timed_out"`
 }
 
+var errStopped = errors.New("the owner sent STOP: worker commands wait until RESUME")
+
 func (t *Tools) run(ctx context.Context, c caller, name string, cmd vm.Command, timeout time.Duration) (vm.ExecResult, error) {
 	if t.Stopped != nil && t.Stopped() {
-		return vm.ExecResult{}, errors.New("the owner sent STOP: worker commands wait until RESUME")
+		return vm.ExecResult{}, errStopped
 	}
 	w, err := t.worker(c, name)
 	if err != nil {
@@ -360,10 +363,16 @@ func (t *Tools) run(ctx context.Context, c caller, name string, cmd vm.Command, 
 	// may read it under the worker's lock, so no other machine's raise
 	// lands between the check and the command (A14, REV-5).
 	cmd.As = c.label
+	// Checked again under the worker's lock, so a command queued behind
+	// another cannot start after STOP (OP-6).
+	cmd.Hold = t.Stopped
 	if cmd.MaxOutput == 0 {
 		cmd.MaxOutput = MaxOutput
 	}
 	r, err := t.M.Exec(ctx, w.ID, cmd, timeout)
+	if errors.Is(err, vm.ErrHeld) {
+		return vm.ExecResult{}, errStopped
+	}
 	if err != nil {
 		return vm.ExecResult{}, workerErr(name, err)
 	}
@@ -465,8 +474,8 @@ func (t *Tools) read(ctx context.Context, c caller, raw json.RawMessage) (any, e
 	if err := checkPath(a.Path); err != nil {
 		return nil, err
 	}
-	if a.Offset < 0 || a.Length < 0 || a.Length > MaxOutput {
-		return nil, fmt.Errorf("offset must be 0 or more and length at most %d", MaxOutput)
+	if a.Offset < 0 || a.Offset > MaxOffset || a.Length < 0 || a.Length > MaxOutput {
+		return nil, fmt.Errorf("offset must be 0 to %d and length 0 to %d", int64(MaxOffset), MaxOutput)
 	}
 	if a.Length == 0 {
 		a.Length = MaxOutput

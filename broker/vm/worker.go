@@ -35,7 +35,15 @@ type Command struct {
 	// writes anything (A14), and refuses a worker labelled above it, whose
 	// output the caller may not read (REV-5).
 	As Label
+	// Hold, when set, is asked under the worker's lock once the command
+	// can be ended (EndCommands reaches it): true refuses it with ErrHeld.
+	// The owner's STOP holds commands through it, so one queued on the
+	// lock cannot start after STOP (OP-6).
+	Hold func() bool
 }
+
+// ErrHeld refuses a command while its Hold says so.
+var ErrHeld = errors.New("vm: commands are held")
 
 // WorkerFull refuses a command or snapshot of a worker whose files are
 // over its layer cap (Config.WorkerLayerBytes). It is an ErrQuota.
@@ -170,6 +178,9 @@ func (m *Manager) Exec(ctx context.Context, id string, c Command, timeout time.D
 	defer cancel()
 	mc.execCancel.Store(&cancel)
 	defer mc.execCancel.Store(nil)
+	if c.Hold != nil && c.Hold() {
+		return ExecResult{}, ErrHeld
+	}
 	r, err := m.awaitExec(ctx, ex, id, c)
 	if err != nil && ctx.Err() == context.Canceled {
 		return ExecResult{}, fmt.Errorf("vm: %s: command ended before it finished", id)
@@ -214,7 +225,9 @@ func (m *Manager) awaitExec(ctx context.Context, ex Execer, id string, c Command
 // handing its memory back to admission (UX-146-1). The checkpoint becomes
 // the worker's newest snapshot; rolling back to it revives the worker as
 // it was. A busy worker (a command holds its lock) is refused with
-// ErrBusy at once, so Reap never waits out a command.
+// ErrBusy at once, so Reap never waits out a command. A worker over its
+// layer cap is stopped without a checkpoint (the zero Snapshot): it
+// revives by rollback to an earlier snapshot.
 func (m *Manager) Park(ctx context.Context, id string) (Snapshot, error) {
 	if !strings.HasPrefix(id, WorkerPrefix) {
 		return Snapshot{}, fmt.Errorf("vm: %s is not a worker", id)
@@ -233,6 +246,13 @@ func (m *Manager) Park(ctx context.Context, id string) (Snapshot, error) {
 		return Snapshot{}, fmt.Errorf("%w: %s is %s", ErrState, id, mc.State)
 	}
 	s, err := m.takeLocked(ctx, mc, Full)
+	var full *WorkerFull
+	if errors.As(err, &full) {
+		// Over its layer cap no snapshot can be taken, but its memory
+		// must still go back: stop it as it is. It revives by rollback
+		// to an earlier snapshot, which also brings it under the cap.
+		s, err = Snapshot{}, nil
+	}
 	if err == nil {
 		err = m.stopRuntime(ctx, mc)
 		if serr := m.saveMachine(mc); err == nil {

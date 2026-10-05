@@ -1,6 +1,6 @@
 package vm
 
-// REQ: CAP-8, REV-5, CAP-3
+// REQ: CAP-8, REV-5, CAP-3, OP-6, RES-4
 
 import (
 	"context"
@@ -379,4 +379,56 @@ func TestCAP8ParkRefusesABusyWorker(t *testing.T) {
 	}
 	must(t, e.m.Destroy(bg, "wk-a"))
 	<-done
+}
+
+// A worker over its layer cap can take no checkpoint, but parking still
+// stops it and hands back its memory; rollback to an earlier snapshot
+// revives it under the cap (L3 MUST-1 on #150).
+func TestCAP8FullWorkerParksWithoutACheckpoint(t *testing.T) {
+	e := newEnv(t, 4096)
+	e.cfg.WorkerLayerBytes = 16 << 10
+	e.open()
+	agent := e.create("agent", admission.Experiment, 500)
+	_, err := e.m.CreateWorker(bg, "wk-a", agent.Lineage, workerSpec(Public))
+	must(t, err)
+	early, err := e.m.Step(bg, "wk-a")
+	must(t, err)
+	_, err = e.m.Exec(bg, "wk-a", Command{Argv: []string{"write", "big"}, Stdin: make([]byte, 64<<10)}, time.Second)
+	must(t, err)
+	before := len(e.m.Snapshots("wk-a"))
+	s, err := e.m.Park(bg, "wk-a")
+	if err != nil || s.ID != "" {
+		t.Fatalf("park of a full worker = %+v, %v; want stopped without a snapshot", s, err)
+	}
+	if w, _ := e.m.Get("wk-a"); w.State != Stopped {
+		t.Fatalf("full worker is %s after park", w.State)
+	}
+	for _, r := range e.adm.Snapshot().Running {
+		if r.ID == "wk-a" {
+			t.Fatal("parked full worker still admitted")
+		}
+	}
+	if n := len(e.m.Snapshots("wk-a")); n != before {
+		t.Fatalf("park left %d snapshots, had %d", n, before)
+	}
+	must(t, e.m.Rollback(bg, "wk-a", early.ID))
+	if _, err := e.m.Exec(bg, "wk-a", Command{Argv: []string{"echo"}}, time.Second); err != nil {
+		t.Fatalf("revived worker: %v", err)
+	}
+}
+
+// Hold is asked under the worker's lock: a command that took the lock
+// after the owner's STOP does not start (L3 MUST-2 on #150).
+func TestOP6HeldCommandDoesNotStart(t *testing.T) {
+	e := newEnv(t, 4096)
+	agent := e.create("agent", admission.Experiment, 500)
+	_, err := e.m.CreateWorker(bg, "wk-a", agent.Lineage, workerSpec(Public))
+	must(t, err)
+	held := true
+	if _, err := e.m.Exec(bg, "wk-a", Command{Argv: []string{"write", "f"}, Stdin: []byte("ran"), Hold: func() bool { return held }}, time.Second); !errors.Is(err, ErrHeld) {
+		t.Fatalf("held command: %v, want ErrHeld", err)
+	}
+	if got := e.guestRead("wk-a", "f"); got != "" {
+		t.Fatal("the held command ran")
+	}
 }

@@ -411,7 +411,7 @@ func main() {
 			Services: services,
 
 			DiskReserveBytes: diskReserveMB << 20,
-			WorkerLayerBytes: workerLayerMB << 20,
+			WorkerLayerBytes: workerLayerBytes(workerLayerMB),
 			// A lineage holding a record the owner deleted is not forked
 			// or merged until that is settled (recall W10).
 			Contained: recallExec.Contained,
@@ -424,10 +424,9 @@ func main() {
 			go m.RunPruner(vm.PrunePolicy{LowWaterBytes: 1 << 30}, time.Minute, ctx.Done())
 			tree.setMachines(m)
 			tools := toolSet{qs.tools(), tree, recallTools}
-			if wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB); wt != nil {
-				wt.Stopped = d.Engine().Stopped
+			if wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB, d.Engine().Stopped); wt != nil {
 				tools = append(tools, wt)
-				go reapWorkers(ctx, wt, m, d.Engine().Stopped)
+				go reapWorkers(ctx, wt, m, d.Engine().Stopped, 5*time.Second)
 			}
 			if plane, err := openGuestPlane(m, d, ev, cfg.SocketDir, meterPath, inboxPath, egressSocket, tools); err != nil {
 				// Machines cannot start without their guest sockets.
@@ -593,7 +592,7 @@ func replayFits(capacityMB, headroomMB, agentMB, replayMB int64) error {
 // workerTools serves the worker-machine tools (CAP-8) on the live guest
 // plane only: replay and builder machines never get them. Nil, offering
 // none, when no worker image is registered.
-func workerTools(m *vm.Manager, imgs images, image, argv string, maxMB int64) *workers.Tools {
+func workerTools(m *vm.Manager, imgs images, image, argv string, maxMB int64, stopped func() bool) *workers.Tools {
 	if image == "" {
 		return nil
 	}
@@ -601,14 +600,24 @@ func workerTools(m *vm.Manager, imgs images, image, argv string, maxMB int64) *w
 		log.Printf("worker tools off: image %q is not registered with -image", image)
 		return nil
 	}
-	return &workers.Tools{M: m, Image: image, Argv: strings.Fields(argv), MaxMemMB: maxMB}
+	return &workers.Tools{M: m, Image: image, Argv: strings.Fields(argv), MaxMemMB: maxMB, Stopped: stopped}
+}
+
+// workerLayerBytes is -worker-layer-mb in bytes: 0 or less is no cap
+// beyond the disk reserve, and a value past 1 PiB is clamped there
+// rather than overflow.
+func workerLayerBytes(mb int64) int64 {
+	if mb <= 0 {
+		return 0
+	}
+	return min(mb, 1<<30) << 20
 }
 
 // reapWorkers ends worker commands in flight while STOP holds, checked
 // every 5 s (security R2 on #146), and parks idle and orphaned workers
 // every minute (UX-146-1).
-func reapWorkers(ctx context.Context, wt *workers.Tools, m *vm.Manager, stopped func() bool) {
-	t := time.NewTicker(5 * time.Second)
+func reapWorkers(ctx context.Context, wt reaper, m commandEnder, stopped func() bool, tick time.Duration) {
+	t := time.NewTicker(tick)
 	defer t.Stop()
 	last := time.Now()
 	for {
@@ -630,6 +639,11 @@ func reapWorkers(ctx context.Context, wt *workers.Tools, m *vm.Manager, stopped 
 		}
 	}
 }
+
+// reaper and commandEnder are what reapWorkers uses of the worker tools
+// and the machine manager.
+type reaper interface{ Reap(context.Context) []string }
+type commandEnder interface{ EndCommands() int }
 
 // agentSpec is how the owner's agent machine starts, from the image flags
 // and the guest rig's launch file.
