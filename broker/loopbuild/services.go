@@ -280,6 +280,7 @@ func (s *session) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/brief", s.serveBrief)
 	mux.HandleFunc("/candidate", s.candidate)
+	mux.HandleFunc("/done", s.giveUp)
 	mux.Handle("/model/", http.StripPrefix("/model", s.model()))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
@@ -371,6 +372,29 @@ func (s *session) candidate(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	io.WriteString(w, `{"accepted":true}`)
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+	close(s.done)
+}
+
+// giveUp ends the job with no candidate: the builder has nothing to
+// submit, so the one builder slot is freed at once (W3-builder-image).
+func (s *session) giveUp(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	s.mu.Lock()
+	if s.finished {
+		s.mu.Unlock()
+		http.Error(w, "this job is finished", http.StatusConflict)
+		return
+	}
+	s.finished = true
+	s.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	io.WriteString(w, `{"done":true}`)
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}

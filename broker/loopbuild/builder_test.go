@@ -511,3 +511,29 @@ func TestABuilderHoldsFewConnections(t *testing.T) {
 		t.Fatalf("connection %d was served", maxConns+1)
 	}
 }
+
+// W3-builder-image: a builder that has nothing to submit says so on
+// /done, and the job ends at once with no result, instead of holding the
+// one builder slot until its time runs out. /done takes no candidate.
+func TestABuilderCanGiveUp(t *testing.T) {
+	f := &machines{}
+	codes := make(chan int, 2)
+	f.guest = func(id, dir string) {
+		c := guestClient(dir)
+		code, _ := call(c, "GET", "/done", nil)
+		codes <- code
+		code, _ = call(c, "POST", "/done", nil)
+		codes <- code
+	}
+	b := newBuilder(t, f, func(c *Config) { c.Timeout = time.Minute })
+	start := time.Now()
+	if _, err := b.Build(context.Background(), brief(change.ClassProcedure)); !errors.Is(err, ErrNoResult) {
+		t.Fatalf("gave up: %v", err)
+	}
+	if time.Since(start) > 10*time.Second {
+		t.Fatal("the job waited out its time after the builder gave up")
+	}
+	if a, p := <-codes, <-codes; a != http.StatusMethodNotAllowed || p != 200 {
+		t.Fatalf("/done answered %d, %d", a, p)
+	}
+}
