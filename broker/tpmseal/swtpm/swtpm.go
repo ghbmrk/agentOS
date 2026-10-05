@@ -7,6 +7,7 @@ package swtpm
 import (
 	"crypto/sha256"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -73,12 +74,15 @@ func (s *TPM) start() {
 	if err := s.cmd.Start(); err != nil {
 		s.t.Fatal(err)
 	}
+	// The socket file appears before swtpm listens on it, so wait until a
+	// connection is accepted, not merely until the file exists.
 	for i := 0; ; i++ {
-		if _, err := os.Stat(s.sock()); err == nil {
+		if c, err := net.Dial("unix", s.sock()); err == nil {
+			c.Close()
 			break
 		}
-		if i == 200 {
-			s.t.Fatal("swtpm did not open its socket")
+		if i == 500 {
+			s.t.Fatal("swtpm did not accept connections on its socket")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
