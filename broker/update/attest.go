@@ -225,8 +225,17 @@ func (v *Verified) IndependentPasses(atts [][]byte, own ed25519.PublicKey) int {
 	}
 	n := 0
 	v.passes(atts, own, func(fp string, st Statement) {
-		maintainerRun := v.operated[fp] || st.Operator != ""
-		if v.allowed[fp] && !v.maintainers[fp] && (!maintainerRun || v.interim && v.operated[fp]) {
+		if !v.allowed[fp] || v.maintainers[fp] {
+			return
+		}
+		if v.pinned[fp] {
+			// The project's test box: only the interim check.
+			if v.interim {
+				n++
+			}
+			return
+		}
+		if !v.operated[fp] && st.Operator == "" {
 			n++
 		}
 	})
@@ -242,7 +251,7 @@ func (v *Verified) MaintainerPasses(atts [][]byte, own ed25519.PublicKey) int {
 	}
 	n := 0
 	v.passes(atts, own, func(fp string, st Statement) {
-		if v.operated[fp] || st.Operator == OperatorMaintainer {
+		if v.operated[fp] || v.pinned[fp] || st.Operator == OperatorMaintainer {
 			n++
 		}
 	})
@@ -251,13 +260,15 @@ func (v *Verified) MaintainerPasses(atts [][]byte, own ed25519.PublicKey) int {
 
 // SecurityAutoStage reports whether a security fix may stage without the
 // owner: threshold signatures (already checked to make v) plus at least
-// one independent fast-channel attestation (UPD-8, D6). Other releases
+// one independent fast-channel attestation of exactly v (UPD-8, D6). The
+// newest release counts as a security fix when it supersedes one
+// (Result.SecurityFix, security lens C2). Other releases
 // follow UPD-5's soak, which is not decided here.
 func (v *Verified) SecurityAutoStage(atts [][]byte, own ed25519.PublicKey) error {
 	if !v.ok() {
 		return ErrNotChecked
 	}
-	if !v.release.Security {
+	if !v.release.Security && !v.coversFix {
 		return errors.New("not a security fix")
 	}
 	if v.IndependentPasses(atts, own) < 1 {
@@ -267,6 +278,7 @@ func (v *Verified) SecurityAutoStage(atts [][]byte, own ed25519.PublicKey) error
 }
 
 // InterimAttestation reports whether the box's allow-list holds only the
-// project's own test box, so the digest can say the fix was checked by the
+// project's own test box (Options.InterimAttestors) and never held an
+// outside attestor, so the digest can say the fix was checked by the
 // project rather than an outside attestor.
 func (v *Verified) InterimAttestation() bool { return v.ok() && v.interim }
