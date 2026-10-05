@@ -460,6 +460,27 @@ func (m *Meter) Usage(machine string) Limits {
 	return m.sum(m.st.Machines[machine], m.cfg.Now().Unix())
 }
 
+// Overall is the whole box's use in the current window, against its cap.
+func (m *Meter) Overall() (used, limit Limits) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.sum(m.st.Overall, m.cfg.Now().Unix()), m.cfg.OverallCap
+}
+
+// SetOverallCap changes the overall cap, for a meter whose cap is an owner
+// setting (the spare budget, LOOP-2). Calls already started keep their
+// charge; the next Start is checked against the new cap. Like Open, it
+// refuses a cap that does not limit both calls and tokens.
+func (m *Meter) SetOverallCap(l Limits) error {
+	if l.Calls <= 0 || l.Tokens <= 0 {
+		return errors.New("meter: the overall cap must limit both calls and tokens")
+	}
+	m.mu.Lock()
+	m.cfg.OverallCap = l
+	m.mu.Unlock()
+	return nil
+}
+
 // Tokens estimates tokens from bytes: one token per 4 bytes, rounded up.
 func Tokens(n int64) int64 { return (n + 3) / 4 }
 
