@@ -24,7 +24,8 @@
 // through the change pipeline (§11, LOOP-6). Owner outcomes become the
 // pipeline's held-out cases through Harvester (OP-7, CHG-1).
 //
-// Loops 2 and 3 plug in as Sources. The package uses no inference (ARC-2).
+// Loop 2's passive checks and finding handling (LOOP-8 to LOOP-10) are
+// Guard, in secure.go. Loop 3 plugs in as a Source. The package uses no inference (ARC-2).
 //
 // Assumptions are listed in ASSUMPTIONS.md next to this file.
 package loops
