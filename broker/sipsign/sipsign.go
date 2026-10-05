@@ -50,7 +50,48 @@ var (
 	ErrNoAccount = errors.New("sipsign: no calling account is set up")
 	ErrRefused   = errors.New("sipsign: the vault process refused to sign")
 	ErrDown      = errors.New("sipsign: the vault process did not answer")
+	// ErrRecipient and ErrLimited: a MESSAGE or INVITE refused by the
+	// second line's recipient rules or its sending budget, which the vault
+	// process shares with the HTTP account (smsapi; security C1 and Q2 on
+	// the #142 design read).
+	ErrRecipient = errors.New("sipsign: the second line may not reach that number")
+	ErrLimited   = errors.New("sipsign: the second line's sending limit is reached")
 )
+
+// Limiter, when the Store implements it, checks each MESSAGE and INVITE
+// before it is signed.
+type Limiter interface {
+	Allow(c Challenge) error
+}
+
+// Recipient is the E.164 number a MESSAGE or INVITE's Request-URI names
+// (sip: or sips:, the user part before any parameter), with the + restored
+// when the provider dials without it; "" when it names no number.
+func Recipient(uri string, noPlus bool) string {
+	rest, ok := strings.CutPrefix(uri, "sip:")
+	if !ok {
+		if rest, ok = strings.CutPrefix(uri, "sips:"); !ok {
+			return ""
+		}
+	}
+	user, _, ok := strings.Cut(rest, "@")
+	if !ok {
+		return ""
+	}
+	user, _, _ = strings.Cut(user, ";")
+	if noPlus && !strings.HasPrefix(user, "+") {
+		user = "+" + user
+	}
+	if len(user) < 2 || user[0] != '+' {
+		return ""
+	}
+	for _, r := range user[1:] {
+		if r < '0' || r > '9' {
+			return ""
+		}
+	}
+	return user
+}
 
 // fieldErr is a refusal of one setting, which is ErrSettings too.
 type fieldErr string
@@ -247,6 +288,10 @@ func Handler(st Store) http.Handler {
 			http.Error(w, "vault locked", http.StatusServiceUnavailable)
 		case errors.Is(err, ErrNoAccount):
 			http.Error(w, "no account", http.StatusNotFound)
+		case errors.Is(err, ErrLimited):
+			http.Error(w, "limited", http.StatusTooManyRequests)
+		case errors.Is(err, ErrRecipient):
+			http.Error(w, "recipient", http.StatusUnprocessableEntity)
 		default:
 			http.Error(w, "refused", http.StatusForbidden)
 		}
@@ -281,6 +326,12 @@ func Handler(st Store) http.Handler {
 		if err != nil {
 			fail(w, err)
 			return
+		}
+		if l, ok := st.(Limiter); ok && (c.Method == "MESSAGE" || c.Method == "INVITE") {
+			if err := l.Allow(c); err != nil {
+				fail(w, err)
+				return
+			}
 		}
 		var auth string
 		if acct.Realm == "" {
@@ -356,6 +407,10 @@ func (c *Client) do(req *http.Request, out any) error {
 		return ErrNoAccount
 	case http.StatusForbidden:
 		return ErrRefused
+	case http.StatusTooManyRequests:
+		return ErrLimited
+	case http.StatusUnprocessableEntity:
+		return ErrRecipient
 	default:
 		return ErrDown
 	}

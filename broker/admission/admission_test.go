@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// REQ: RES-1, RES-2
+// REQ: RES-1, RES-2, CAP-1
 
 type recPreempter struct {
 	frozen []string
@@ -385,5 +385,88 @@ func TestRevokeRecordsWhetherItWasForTheOwner(t *testing.T) {
 				t.Fatal("the record was read twice")
 			}
 		})
+	}
+}
+
+// RoomFor is what Admit would find for a class, without admitting: free
+// budget, plus running experiments for a class that preempts them; under
+// pressure experiments get none and accepted work only what it preempts
+// (CAP-1, RES-1, RES-2).
+func TestRoomForMirrorsAdmit(t *testing.T) {
+	c := newCtl(&recPreempter{})
+	if _, err := c.Admit(Request{ID: "fg", Class: Foreground, MemMB: 1600}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Admit(Request{ID: "x", Class: Experiment, MemMB: 1000}); err != nil {
+		t.Fatal(err)
+	}
+	// 3900 - 2600 = 1300 free; 1000 more is preemptible.
+	for _, w := range []struct {
+		class Class
+		want  int64
+	}{{Experiment, 1300}, {Accepted, 2300}, {Foreground, 2300}} {
+		if got := c.RoomFor(w.class); got != w.want {
+			t.Errorf("RoomFor(%v) = %d, want %d", w.class, got, w.want)
+		}
+	}
+	c.Pressure, c.MaxPressure = func() float64 { return 50 }, 10
+	for _, w := range []struct {
+		class Class
+		want  int64
+	}{{Experiment, 0}, {Accepted, 1000}, {Foreground, 2300}} {
+		if got := c.RoomFor(w.class); got != w.want {
+			t.Errorf("under pressure RoomFor(%v) = %d, want %d", w.class, got, w.want)
+		}
+	}
+	// What RoomFor says fits does fit.
+	c.Pressure = nil
+	if _, err := c.Admit(Request{ID: "e2", Class: Experiment, MemMB: c.RoomFor(Experiment)}); err != nil {
+		t.Fatalf("RoomFor's room refused: %v", err)
+	}
+	if got := c.RoomFor(Experiment); got != 0 {
+		t.Fatalf("room after filling it = %d", got)
+	}
+}
+
+// RoomFor's guards (L3 SHOULD-7 on #158): a NaN or negative reading is
+// pressure, a reading at the limit is not, an experiment already yielding
+// is not offered twice, and an overcommitted budget reads 0, never less.
+func TestRoomForGuards(t *testing.T) {
+	c := newCtl(&recPreempter{})
+	mustAdmit(t, c, Request{ID: "x", Class: Experiment, MemMB: 1000})
+	c.MaxPressure = 10
+	for _, w := range []struct {
+		p          float64
+		exp, accep int64
+	}{{math.NaN(), 0, 1000}, {-1, 0, 1000}, {math.Inf(-1), 0, 1000}, {10, 2900, 3900}, {10.01, 0, 1000}} {
+		c.Pressure = func() float64 { return w.p }
+		if got := c.RoomFor(Experiment); got != w.exp {
+			t.Errorf("pressure %v: RoomFor(Experiment) = %d, want %d", w.p, got, w.exp)
+		}
+		if got := c.RoomFor(Accepted); got != w.accep {
+			t.Errorf("pressure %v: RoomFor(Accepted) = %d, want %d", w.p, got, w.accep)
+		}
+	}
+	c.Pressure = nil
+	// While x yields to a call, it is no longer room for anyone else.
+	p := &recPreempter{}
+	c2 := newCtl(p)
+	mustAdmit(t, c2, Request{ID: "x", Class: Experiment, MemMB: 3000})
+	var during int64 = -1
+	p.during = func() { during = c2.RoomFor(Accepted) }
+	mustAdmit(t, c2, Request{ID: "call", Class: Foreground, MemMB: 1500})
+	if during != 0 { // 3900 - 3000 - 1500 < 0 free, and x is yielding
+		t.Fatalf("RoomFor while x yields = %d, want 0", during)
+	}
+	// Overcommitted (the books can run over while a preemption settles):
+	// free reads 0.
+	c.mu.Lock()
+	c.running["over"] = Request{ID: "over", Class: Foreground, MemMB: 5000}
+	c.mu.Unlock()
+	if got := c.RoomFor(Experiment); got != 0 {
+		t.Fatalf("overcommitted RoomFor(Experiment) = %d", got)
+	}
+	if got := c.RoomFor(Accepted); got != 1000 {
+		t.Fatalf("overcommitted RoomFor(Accepted) = %d, want only the experiment's 1000", got)
 	}
 }

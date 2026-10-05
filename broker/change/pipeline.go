@@ -50,6 +50,11 @@ type Candidate struct {
 	// required to share it (CHG-5). Loop 1 sets it in broker code from the
 	// REV-5 labels of every input; the builder never asserts it.
 	Public bool
+	// Goals are the goals of the owner tasks its builder read: the
+	// journal intents behind its hypothesis and its dev cases. Loop 1 sets
+	// them in broker code; the builder never asserts them. Forgetting one
+	// undoes the adoption (ForgetGoal, C23).
+	Goals []string
 }
 
 // Probe is what the evaluator sees of a case: its ID and input. The
@@ -277,6 +282,8 @@ type Adoption struct {
 	ConcernSeen  bool   `json:"concern_seen,omitempty"`
 	Listed       bool   `json:"listed,omitempty"`
 	RevertSeen   bool   `json:"revert_seen,omitempty"`
+	// Goals are the candidate's Goals, IDs only (C23).
+	Goals []string `json:"goals,omitempty"`
 }
 
 // state is everything the pipeline persists.
@@ -358,6 +365,10 @@ type Pipeline struct {
 	// parks and parkSeq order parked candidates' idle turns (PE5b).
 	parks   map[string]*parkMark
 	parkSeq uint64
+	// gone holds the goals forgotten since start, so a candidate built
+	// from one and still in flight is never adopted (C23). In memory: a
+	// restarted Loop 1 builds nothing from a forgotten goal.
+	gone map[string]bool
 }
 
 // New loads the persisted state, or seeds it on first start, and applies
@@ -551,6 +562,10 @@ func (p *Pipeline) proposeInner(ctx context.Context, c Candidate, security bool)
 	}
 
 	p.mu.Lock()
+	if p.goneLocked(c.Goals) {
+		p.mu.Unlock()
+		return Report{}, ErrForgotten
+	}
 	base := p.st.Active.clone()
 	next := base.clone()
 	for _, path := range c.Delete {
@@ -583,6 +598,12 @@ func (p *Pipeline) proposeInner(ctx context.Context, c Candidate, security bool)
 	rep := Report{ID: id, Classes: cl.classes, Neutral: cl.neutral}
 	if cl.forbidden != "" {
 		rep.State, rep.Reason = StateRejected, cl.forbidden
+		return rep, nil
+	}
+	if len(c.Goals) > 0 && slices.ContainsFunc(cl.classes, func(k Class) bool { return !learnedClass[k] }) {
+		// The forget cascade undoes only what Loop 1 builds (L3 on #160):
+		// an image, setting or authority is never learned from a task.
+		rep.State, rep.Reason = StateRejected, "learned from owner tasks, so it may change only skills, procedures and context"
 		return rep, nil
 	}
 	score, err := p.evaluate(ctx, base, next, set, strictFor(c.Source, cl.classes))
@@ -633,6 +654,12 @@ func (p *Pipeline) proposeInner(ctx context.Context, c Candidate, security bool)
 	}
 
 	p.mu.Lock()
+	if p.goneLocked(c.Goals) {
+		// Forgotten while it was evaluated.
+		p.mu.Unlock()
+		return Report{}, ErrForgotten
+	}
+	c.Goals = slices.Clone(c.Goals)
 	p.props[id] = &proposal{cand: c, base: base.Hash(), next: next, edits: edits, report: rep, classes: cl.classes,
 		security: security && cl.imagesOnly()}
 	p.mu.Unlock()

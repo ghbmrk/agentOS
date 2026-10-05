@@ -99,7 +99,7 @@ func (m *Manager) forgetMachine(ctx context.Context, mc *machine, since time.Tim
 	}
 	if mc.ForkBase != "" && (target == nil || target.ID < mc.ForkBase) {
 		// The fork point itself was taken at or after since; it goes.
-		mc.ForkBase = ""
+		m.setForkBase(mc, "")
 	}
 	var errs []error
 	if err := m.saveMachine(mc); err != nil {

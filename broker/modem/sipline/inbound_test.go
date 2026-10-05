@@ -216,6 +216,8 @@ func TestLineErrorsHaveOwnerWording(t *testing.T) {
 		sipsign.ErrLocked:                            "while the box is locked",
 		sipsign.ErrNoAccount:                         "isn't set up",
 		sipsign.ErrRefused:                           "local page",
+		sipsign.ErrLimited:                           "sent as many texts as it may for now",
+		sipsign.ErrRecipient:                         "doesn't text or call that number",
 		errors.New("anything else 486 Busy"):         "couldn't reach its provider, so that didn't go through",
 	} {
 		got := sipline.OwnerText(err)

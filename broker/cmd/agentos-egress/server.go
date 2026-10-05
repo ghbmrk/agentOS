@@ -468,6 +468,7 @@ func unlockHandler(c *custody) http.Handler {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	secondLineRoutes(mux, c, read, reply, fail)
+	smsRoutes(mux, c, read, reply, fail)
 	return mux
 }
 
@@ -478,7 +479,9 @@ func unlockHandler(c *custody) http.Handler {
 //
 // POST /recall-key hands agentosd the recall index's identity key (recall
 // K5), only while the vault is open. GET /second-line says whether the
-// second line waits on the owner (egress K13), and nothing else.
+// second line waits on the owner (egress K13), and GET /second-line/texts
+// whether its texting account's polls are failing (K16), and nothing
+// else.
 func verifyHandler(c *custody) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == "/recall-key" {
@@ -507,8 +510,21 @@ func verifyHandler(c *custody) http.Handler {
 			}
 			return
 		}
+		if r.Method == http.MethodGet && r.URL.Path == "/second-line/texts" {
+			st, err := c.textsState()
+			switch {
+			case err == errLocked:
+				http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			case err != nil:
+				http.Error(w, errInternal.Error(), http.StatusInternalServerError)
+			default:
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(map[string]modelroute.TextsState{"texts": st})
+			}
+			return
+		}
 		if r.Method != http.MethodPost || r.URL.Path != "/verify" {
-			http.Error(w, "POST /verify or /recall-key, or GET /second-line, only", http.StatusMethodNotAllowed)
+			http.Error(w, "POST /verify or /recall-key, or GET /second-line or /second-line/texts, only", http.StatusMethodNotAllowed)
 			return
 		}
 		var req modelroute.VerifyRequest
