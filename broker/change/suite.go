@@ -41,6 +41,10 @@ type Case struct {
 	// count toward evidence in a shared package (CHG-4).
 	Public   bool `json:"public,omitempty"`
 	Security bool `json:"security,omitempty"`
+	// Implicit marks a case from an implicit acceptance (loops L6): it
+	// counts half, never anchors an auto-adoption, and is never shown to
+	// the owner as an example (security B1, potency C3 on #90).
+	Implicit bool `json:"implicit,omitempty"`
 	// At is when the case was added, for owner-facing examples.
 	At time.Time `json:"at,omitempty"`
 }
@@ -100,10 +104,15 @@ func (p *Pipeline) AddTaskCase(c Case) error {
 		return fmt.Errorf("%w: %v", ErrProvenance, err)
 	}
 	q := st.Quality
-	if q.Source != p.cfg.OwnerSource {
+	// The journal's source decides whether a case is implicit, never the
+	// caller (loops L6): an implicit acceptance is only ever good.
+	c.Implicit = q.Source == p.cfg.OwnerSource+ImplicitSuffix
+	if q.Source != p.cfg.OwnerSource && !c.Implicit {
 		return fmt.Errorf("%w: verdict source is %q", ErrProvenance, q.Source)
 	}
 	switch {
+	case c.Implicit && (c.Outcome != Accepted || q.Verdict != journal.VerdictGood):
+		return fmt.Errorf("%w: an implicit acceptance makes only an accepted case", ErrProvenance)
 	case c.Outcome == Accepted && q.Verdict == journal.VerdictGood:
 	case (c.Outcome == Corrected || c.Outcome == Rejected) && q.Verdict == journal.VerdictWrong:
 	default:
@@ -113,6 +122,10 @@ func (p *Pipeline) AddTaskCase(c Case) error {
 	c.At = p.cfg.Now()
 	return p.addCase(c)
 }
+
+// ImplicitSuffix marks the verdict source of an implicit acceptance: the
+// owner's source plus it (loops L6), so it is never read as the owner's.
+const ImplicitSuffix = "-implicit"
 
 // AddSecurityCase adds a security fixture. The security suite only grows;
 // removing a fixture is an owner-approved intent (LOOP-10, CHG-2).

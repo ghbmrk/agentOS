@@ -197,14 +197,17 @@ type LearnConfig struct {
 type Learn struct {
 	cfg LearnConfig
 
-	mu          sync.Mutex
-	tried       map[string]int // hypothesis or routing key -> evidence when tried
-	asks        map[string]int // key -> proposals that waited on the owner
-	notBefore   map[string]time.Time
-	waiting     int // hypotheses held for evidence
-	heldOut     int
-	lastRecheck time.Time
-	recheckedAt int // held-out count at the last recheck
+	mu        sync.Mutex
+	tried     map[string]int // hypothesis or routing key -> evidence when tried
+	asks      map[string]int // key -> proposals that waited on the owner
+	notBefore map[string]time.Time
+	// needsExplicit are the keys whose last proposal the explicit-case
+	// anchor sent to the owner instead of adopting (change NeedsExplicit).
+	needsExplicit map[string]bool
+	waiting       int // hypotheses held for evidence
+	heldOut       int
+	lastRecheck   time.Time
+	recheckedAt   int // held-out count at the last recheck
 }
 
 // NewLearn checks cfg and returns Loop 1's source.
@@ -240,7 +243,7 @@ func NewLearn(cfg LearnConfig) (*Learn, error) {
 		cfg.Now = time.Now
 	}
 	return &Learn{cfg: cfg, tried: map[string]int{}, asks: map[string]int{}, notBefore: map[string]time.Time{},
-		lastRecheck: cfg.Now()}, nil
+		needsExplicit: map[string]bool{}, lastRecheck: cfg.Now()}, nil
 }
 
 func (l *Learn) Loop() Loop { return Improve }
@@ -343,11 +346,16 @@ func (l *Learn) mayAskLocked(key string) bool {
 // asked starts key's backoff when its proposal waited on the owner, so an
 // owner who lets a request lapse is not asked again every cycle.
 func (l *Learn) asked(key string, rep change.Report) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if rep.NeedsExplicit && rep.State == change.StateAwaitingOwner {
+		l.needsExplicit[key] = true
+	} else {
+		delete(l.needsExplicit, key)
+	}
 	if rep.State != change.StateAwaitingOwner {
 		return
 	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
 	l.asks[key]++
 	l.notBefore[key] = l.cfg.Now().Add(l.cfg.Backoff << (l.asks[key] - 1))
 }
@@ -425,10 +433,12 @@ func inClass(class change.Class, cand change.Candidate) error {
 }
 
 // value is a proposal's measured return: its held-out gain over the
-// baseline, plus a little for an adoption with no gain (it qualified with
-// no regression), half for one waiting on the owner, none if rejected.
+// baseline, implicit cases' gain counted half (potency C3(c) on #90), plus
+// a little for an adoption with no gain (it qualified with no regression),
+// half for one waiting on the owner, none if rejected.
 func value(rep change.Report) float64 {
-	gain := math.Max(float64(rep.Passed-rep.BaselinePassed), 0)
+	explicit := (rep.Passed - rep.ImplicitPassed) - (rep.BaselinePassed - rep.ImplicitBaselinePassed)
+	gain := math.Max(float64(explicit)+float64(rep.ImplicitPassed-rep.ImplicitBaselinePassed)/2, 0)
 	switch rep.State {
 	case change.StateAdopted:
 		return gain + 0.25
@@ -452,15 +462,24 @@ func public(h Hypothesis, dev []change.Case) bool {
 	return true
 }
 
-// Digest is Loop 1's line while it waits for evidence (C14 (b)).
+// Digest is Loop 1's lines: while it waits for evidence (C14 (b)), and
+// for ideas the explicit-case anchor sent to the owner (change
+// NeedsExplicit; potency on the PW3 design).
 func (l *Learn) Digest() []string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.waiting == 0 || l.heldOut >= l.cfg.MinHeldOut {
-		return nil
+	var out []string
+	if l.waiting > 0 && l.heldOut < l.cfg.MinHeldOut {
+		out = append(out, fmt.Sprintf("Learning: %d ideas are waiting until there are %d past tasks to test them on (%d so far).",
+			l.waiting, l.cfg.MinHeldOut, l.heldOut))
 	}
-	return []string{fmt.Sprintf("Learning: %d ideas are waiting until there are %d past tasks to test them on (%d so far).",
-		l.waiting, l.cfg.MinHeldOut, l.heldOut)}
+	switch n := len(l.needsExplicit); {
+	case n == 1:
+		out = append(out, "Learning: 1 idea went to you instead of being adopted on its own: it was not tested on a task you approved.")
+	case n > 1:
+		out = append(out, fmt.Sprintf("Learning: %d ideas went to you instead of being adopted on their own: none was tested on a task you approved.", n))
+	}
+	return out
 }
 
 // TaskKey is the task an intent belongs to: its goal, or, for intents

@@ -274,9 +274,12 @@ type decision struct {
 	// asked is set when the decision answered a waiting request, and
 	// implicit when it released an auto-reply the owner never answered.
 	asked, implicit bool
-	at              time.Time
-	item            owner.Item
-	local           bool
+	// late is set when it released an auto-reply whose silence is not the
+	// owner's (owner Queued.Late): no verdict (security B1(a) on PW3).
+	late  bool
+	at    time.Time
+	item  owner.Item
+	local bool
 	// hold is the UNDO ID a held effect was under, and attempt which hold
 	// of the intent it was (REV-3).
 	hold    string
@@ -988,6 +991,12 @@ func (g *Gate) endHeld(ids ...string) {
 	for _, id := range ids {
 		// The engine is read without g.mu: its policy calls take g.mu.
 		st, err := g.eng.Get(id)
+		if errors.Is(err, journal.ErrNotFound) {
+			// Nothing will end it: drop its unsent verdict (security on #101).
+			g.mu.Lock()
+			delete(g.sending, id)
+			g.mu.Unlock()
+		}
 		if err != nil || st.State == journal.Authorized || st.State == journal.InFlight {
 			continue
 		}
@@ -1415,8 +1424,10 @@ func (g *Gate) Decide(d owner.Decision) {
 			d.Approved, why = false, "its staged copy could not be made"
 		}
 	}
-	implicit := d.Approved && d.Why == "undo window passed" && (w == nil || !w.held)
-	g.decided[d.Ref] = decision{approved: d.Approved, why: why, asked: w != nil, implicit: implicit,
+	unheld := d.Approved && (w == nil || !w.held)
+	implicit := unheld && d.Why == whyReleased
+	late := unheld && d.Why == whyReleasedLate
+	g.decided[d.Ref] = decision{approved: d.Approved, why: why, asked: w != nil, implicit: implicit, late: late,
 		at: g.cfg.Now(), item: item, local: local, hold: hold, attempt: attempt, tries: tries}
 	wait := d.Approved && local && !g.confirmed[d.Ref]
 	own := g.own
@@ -1800,6 +1811,13 @@ func (g *Gate) settle(id string) {
 	}()
 }
 
+// The reasons Tick releases an auto-reply with: its undo window passed, on
+// time or not (owner Queued.Late).
+const (
+	whyReleased     = "undo window passed"
+	whyReleasedLate = "undo window passed late"
+)
+
 // OwnerVerdict is the owner's final verdict on an agent's effect.
 type OwnerVerdict string
 
@@ -1843,9 +1861,6 @@ func (g *Gate) reportOnce(id string) bool {
 	return true
 }
 
-// report calls Outcome outside the gate's lock, after the journal has the
-// final state; a panic in it is logged, never the owner's answer's
-// failure (security A2 on PW3).
 // reportSent reports verdict v on st once it is final. An acceptance
 // counts only once the effect was sent (or may have been); a failed send
 // or a changed draft (not_applied) is not the owner's verdict.
@@ -1861,6 +1876,9 @@ func (g *Gate) reportSent(v OwnerVerdict, st journal.Status) {
 	}
 }
 
+// report calls Outcome outside the gate's lock, after the journal has the
+// final state; a panic in it is logged, never the owner's answer's
+// failure (security A2 on PW3).
 func (g *Gate) report(o OwnerOutcome) {
 	defer func() {
 		if recover() != nil {
@@ -1877,7 +1895,7 @@ func (g *Gate) report(o OwnerOutcome) {
 // a guest's effect. An approval STOP holds is still the owner's verdict,
 // reported only once its send ends (reportSent).
 func ownerVerdict(d decision, st journal.Status) OwnerVerdict {
-	if !d.asked || !strings.HasPrefix(st.Intent.Origin, "guest:") || st.Intent.Account == journal.BrokerAccount {
+	if !d.asked || d.late || !strings.HasPrefix(st.Intent.Origin, "guest:") || st.Intent.Account == journal.BrokerAccount {
 		return ""
 	}
 	switch {
@@ -1908,7 +1926,11 @@ func (g *Gate) Tick() {
 		return
 	}
 	for _, q := range own.DueAutoReplies() {
-		g.Decide(owner.Decision{Request: q.ID, Item: 1, Ref: q.Reply.Ref, Approved: true, Why: "undo window passed"})
+		why := whyReleased
+		if q.Late {
+			why = whyReleasedLate
+		}
+		g.Decide(owner.Decision{Request: q.ID, Item: 1, Ref: q.Reply.Ref, Approved: true, Why: why})
 	}
 }
 

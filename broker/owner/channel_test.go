@@ -765,3 +765,49 @@ func TestAutoReplyAlertUndoAndCommitmentFilter(t *testing.T) {
 		t.Fatalf("approval: %q", text)
 	}
 }
+
+// Security B1(a) on PW3: an auto-reply released unanswered is the owner's
+// silence only if the alert went out and the window ran out on time. One
+// released late, or whose window saw the box's line fail to send, is
+// marked Late: silence over a channel that was down is not acceptance.
+func TestAutoReplySilenceCountsOnlyOnTime(t *testing.T) {
+	r := newRig(t, nil)
+	queue := func(ref string) {
+		t.Helper()
+		if res, err := r.ch.QueueAutoReply(AutoReply{Ref: ref, Recipients: []string{"sam@example.com"}, Body: "Thanks."}); err != nil || res.Queued == nil {
+			t.Fatalf("%+v %v", res, err)
+		}
+		r.inbox()
+	}
+	due := func() Queued {
+		t.Helper()
+		d := r.ch.DueAutoReplies()
+		if len(d) != 1 {
+			t.Fatalf("due %+v", d)
+		}
+		return d[0]
+	}
+	queue("r1")
+	r.advance(DefaultUndoWindow)
+	if q := due(); q.Late {
+		t.Fatal("an on-time release was marked late")
+	}
+
+	queue("r2")
+	r.advance(time.Minute)
+	r.box.SetDown(true)
+	if r.ch.Inform("A notice.") == nil {
+		t.Fatal("a down line sent")
+	}
+	r.box.SetDown(false)
+	r.advance(DefaultUndoWindow)
+	if q := due(); !q.Late {
+		t.Fatal("a window with a failed send was not marked late")
+	}
+
+	queue("r3")
+	r.advance(DefaultUndoWindow + LateRelease + time.Second)
+	if q := due(); !q.Late {
+		t.Fatal("a late release was not marked late")
+	}
+}

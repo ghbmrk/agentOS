@@ -226,9 +226,40 @@ func TestOnlyTheOwnersAnswersAreVerdicts(t *testing.T) {
 		{"not a guest's", yes, at(local, journal.Succeeded), ""},
 		{"the broker's", no, at(broker, journal.Denied), ""},
 		{"never asked this run", decision{why: "owner"}, at(guest, journal.Denied), ""},
+		{"released late", decision{approved: true, why: whyReleasedLate, asked: true, late: true}, at(guest, journal.Succeeded), ""},
 	} {
 		if got := ownerVerdict(c.d, c.st); got != c.want {
 			t.Errorf("%s: %q, want %q", c.name, got, c.want)
 		}
+	}
+}
+
+// Security B1(a) on PW3: an auto-reply released late, or after its alert's
+// line failed, is still sent, but its silence is not reported as the
+// owner's acceptance, nor as an explicit one.
+func TestALateReleaseIsNoVerdict(t *testing.T) {
+	var o outcomes
+	r := newRig(t, func(c *Config) {
+		c.Isolated = func(m string) bool { return m == "reply-1" }
+		c.Outcome = o.add
+	})
+	r.grant(mailGrant())
+	r.grant(Spec{Account: "mail", Rule: &Rule{Action: "message.send", PerRecord: 5, PerDay: 20, Reply: true}})
+	r.ver.set("thr-1", Verified{Item: owner.Item{Object: "reply in thread", Recipient: "sam@example.com",
+		Facts: owner.Facts{RecipientChecked: true, RecipientExists: true, RecipientByOwner: true}},
+		Recipients: []string{"sam@example.com"}, Record: "thr-1", ThreadVerified: true})
+	r.submit(journal.Intent{ID: "reply-1/late", Origin: "guest:reply-1", Machine: "reply-1", Account: "mail", Action: "message.send",
+		Params: map[string]any{"record": "thr-1", "body": "Thanks, got it."}, Recipients: []string{"sam@example.com"}, Executor: "mail"})
+	r.own.mu.Lock()
+	r.own.due[len(r.own.due)-1].Late = true
+	r.own.mu.Unlock()
+	r.advance(11 * time.Minute)
+	r.g.Tick()
+	r.g.Wait()
+	if st := r.state("reply-1/late"); st.State != journal.Succeeded {
+		t.Fatalf("a late release was not sent: %s", st.State)
+	}
+	if got := o.take(); got != "" {
+		t.Fatalf("a late release was reported: %q", got)
 	}
 }

@@ -888,3 +888,80 @@ func TestBuildersSeeOnlyTheHypothesisAndTheDevSplit(t *testing.T) {
 		t.Fatalf("Hypothesis fields %v", hf)
 	}
 }
+
+// PW3 part B (potency PK2; security B1, potency C3 on #90): an auto-reply
+// the owner let go is a weaker good verdict. It is recorded under its own
+// source, never the owner's; at most MaxImplicitPerDay a day per guest
+// lineage become cases, so one burst cannot flood the suite; and each
+// counts half towards the evidence hold.
+func TestImplicitAcceptancesAreCappedAndWeighHalf(t *testing.T) {
+	r := newRig(t)
+	cs := &cases{}
+	now := time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)
+	h := &Harvester{J: r.eng, Pipeline: cs, Store: &change.MemStore{}, Now: func() time.Time { return now }}
+	implicit := func(id string) error {
+		r.task(id, "g"+id, "mail", "send", "private")
+		return h.Harvest(Outcome{Intent: id, Action: Implicit, Input: []byte("task"), Output: []byte("reply")})
+	}
+	for i := 0; i < MaxImplicitPerDay; i++ {
+		must(t, implicit(fmt.Sprint("i", i)))
+	}
+	if err := implicit("over"); !errors.Is(err, ErrImplicitCap) {
+		t.Fatalf("over the cap: %v", err)
+	}
+	if st, _ := r.eng.Get("over"); st.Quality.Verdict != "" {
+		t.Fatalf("a capped acceptance was recorded: %+v", st.Quality)
+	}
+	if st, _ := r.eng.Get("i0"); st.Quality.Verdict != journal.VerdictGood || st.Quality.Source != "owner-implicit" {
+		t.Fatalf("implicit verdict: %+v", st.Quality)
+	}
+	for _, c := range cs.got {
+		if !c.Implicit || c.Outcome != change.Accepted || string(c.Expect) != "reply" {
+			t.Fatalf("implicit case %+v", c)
+		}
+	}
+	ev, err := h.Evidence()
+	must(t, err)
+	if ev.HeldOut != MaxImplicitPerDay/2 || ev.Explicit != 0 {
+		t.Fatalf("evidence from %d implicit cases: %+v", MaxImplicitPerDay, ev)
+	}
+	r.task("yes", "gyes", "mail", "send", "private")
+	must(t, h.Harvest(Outcome{Intent: "yes", Action: Approved, Input: []byte("task"), Output: []byte("reply")}))
+	if ev, _ := h.Evidence(); ev.HeldOut != 1+MaxImplicitPerDay/2 || ev.Explicit != 1 {
+		t.Fatalf("with one explicit case: %+v", ev)
+	}
+	now = now.Add(24 * time.Hour)
+	must(t, implicit("next-day"))
+}
+
+// Potency C3(c), L14: implicit gain counts half toward a proposal's value;
+// and the digest counts the ideas the explicit-case anchor sent to the
+// owner instead of adopting (potency on the PW3 design).
+func TestImplicitGainWeighsHalfAndAnchorHoldsAreCounted(t *testing.T) {
+	adopted := change.Report{State: change.StateAdopted, Score: change.Score{HeldOut: 6, Passed: 6, BaselinePassed: 2,
+		Implicit: 4, ImplicitPassed: 4, ImplicitBaselinePassed: 2}}
+	// Explicit gain 2, implicit gain 2 at half: 3, plus 0.25 for adopting.
+	if v := value(adopted); v != 3.25 {
+		t.Fatalf("value %v", v)
+	}
+	r := newRig(t)
+	l, err := NewLearn(LearnConfig{Pipeline: r.p, Journal: r.eng, Harvest: r.harvester()})
+	must(t, err)
+	held := change.Report{State: change.StateAwaitingOwner, NeedsExplicit: true}
+	l.asked("a", held)
+	l.asked("b", held)
+	l.asked("c", change.Report{State: change.StateAwaitingOwner})
+	if d := strings.Join(l.Digest(), "\n"); !strings.Contains(d, "Learning: 2 ideas went to you instead of being adopted on their own: none was tested on a task you approved.") {
+		t.Fatalf("digest %q", d)
+	}
+	l.asked("c", change.Report{State: change.StateRejected})
+	l.asked("b", change.Report{State: change.StateRejected})
+	if d := strings.Join(l.Digest(), "\n"); d != "Learning: 1 idea went to you instead of being adopted on its own: it was not tested on a task you approved." {
+		t.Fatalf("digest for one %q", d)
+	}
+	l.asked("a", change.Report{State: change.StateAdopted})
+	l.asked("b", change.Report{State: change.StateRejected})
+	if d := l.Digest(); len(d) != 0 {
+		t.Fatalf("digest after they settled %q", d)
+	}
+}

@@ -198,8 +198,16 @@ type Report struct {
 	Neutral bool    `json:"neutral"`
 	Basis   string  `json:"basis"`
 	Reason  string  `json:"reason,omitempty"`
+	// NeedsExplicit is set when the candidate would have adopted on its
+	// own but passed no explicit owner case: it went to the owner instead
+	// (security B1(d) on #90; counted in Loop 1's digest line).
+	NeedsExplicit bool `json:"needs_explicit,omitempty"`
 	Score
 }
+
+// weighed is s's held-out evidence: explicit cases count one, implicit
+// ones half, rounded down (potency C3(c) on #90).
+func weighed(s Score) int { return s.HeldOut - s.Implicit + s.Implicit/2 }
 
 // Score is the evaluation evidence: counts only, no case content.
 type Score struct {
@@ -212,6 +220,13 @@ type Score struct {
 	// NotEvaluated counts cases the evaluator could not run on this box
 	// (ErrNotEvaluated); they are in no other count.
 	NotEvaluated int `json:"not_evaluated,omitempty"`
+	// Implicit, ImplicitPassed and ImplicitBaselinePassed are the part of
+	// HeldOut, Passed and BaselinePassed from implicit acceptances (loops
+	// L6): they count half toward MinHeldOut and never alone toward an
+	// auto-adoption (security B1(d), potency C3 on #90).
+	Implicit               int `json:"implicit,omitempty"`
+	ImplicitPassed         int `json:"implicit_passed,omitempty"`
+	ImplicitBaselinePassed int `json:"implicit_baseline_passed,omitempty"`
 	// Security fixtures on the baseline, so Recheck blames an adoption
 	// only for a fixture the state without it passes.
 	BaselineSecurityPassed int   `json:"baseline_security_passed"`
@@ -545,10 +560,13 @@ func (p *Pipeline) proposeInner(ctx context.Context, c Candidate, security bool)
 	// A change the box cannot evaluate is never authority-neutral by
 	// evidence: it goes to the owner, marked not tested, or for an attested
 	// security release rests on the signatures and attestation (UPD-8).
-	enough := rep.HeldOut >= p.cfg.MinHeldOut && rep.Security >= p.cfg.MinSecurity && rep.NotEvaluated == 0
+	enough := weighed(rep.Score) >= p.cfg.MinHeldOut && rep.Security >= p.cfg.MinSecurity && rep.NotEvaluated == 0
+	anchored := rep.Passed > rep.ImplicitPassed
 	switch {
-	case c.Source == Local && cl.neutral && auto && enough:
+	case c.Source == Local && cl.neutral && auto && enough && anchored:
 		rep.Basis = BasisStanding
+	case c.Source == Local && cl.neutral && auto && enough:
+		rep.Basis, rep.NeedsExplicit = BasisOwner, true
 	case c.Source == Upstream && security && images && !regressed && p.cfg.SecurityAutoStage:
 		rep.Basis = BasisSecurity
 	default:
@@ -797,9 +815,18 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 		if n.ok {
 			s.Passed++
 		}
+		if n.c.Implicit {
+			s.Implicit++
+			if b.ok {
+				s.ImplicitBaselinePassed++
+			}
+			if n.ok {
+				s.ImplicitPassed++
+			}
+		}
 		if b.ok && !n.ok {
 			s.Regressions++
-			if s.example == nil {
+			if s.example == nil && !n.c.Implicit {
 				cc := n.c
 				s.example = &cc
 			}

@@ -368,6 +368,13 @@ func (q lateQuality) RecordQuality(id string, v journal.Quality) (journal.Status
 	return journal.Status{}, errors.New("journal not open")
 }
 
+func (q lateQuality) Get(id string) (journal.Status, error) {
+	if e := q.e.Load(); e != nil {
+		return e.Get(id)
+	}
+	return journal.Status{}, errors.New("journal not open")
+}
+
 // routingClient is the vault process's routing socket (modelroute.Routing).
 type routingClient interface {
 	State(ctx context.Context) (modelroute.RoutingState, error)
