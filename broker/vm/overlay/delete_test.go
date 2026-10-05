@@ -207,3 +207,86 @@ func TestDeleteRefusesAMountPoint(t *testing.T) {
 		}
 	}
 }
+
+// A recursive delete stops at MaxTreeDepth with too_deep, holding at most
+// that many directory handles; deleting a deeper path first shortens the
+// tree (L3 MUST-1 on #166).
+func TestDeleteDepthIsBounded(t *testing.T) {
+	r := newDelRig(t)
+	deep := func(n int) string {
+		p := "/c"
+		for range n - 1 {
+			p += "/c"
+		}
+		return p
+	}
+	if err := os.MkdirAll(filepath.Join(r.upper, deep(MaxTreeDepth+40)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out := r.del(true, 100_000, "/c"); out.Codes[0] != TooDeep {
+		t.Fatalf("a chain deeper than the bound = %+v", out)
+	}
+	if !exists(filepath.Join(r.upper, deep(MaxTreeDepth+40))) {
+		t.Fatal("a refused walk removed part of the chain")
+	}
+	if out := r.del(true, 100_000, deep(41)); out.Codes[0] != Removed {
+		t.Fatalf("the deeper part = %+v", out)
+	}
+	if out := r.del(true, 100_000, "/c"); out.Codes[0] != Removed || out.Files != 40 {
+		t.Fatalf("the rest = %+v", out)
+	}
+}
+
+// Nothing a guest sees names a host path: an over-long path is bad_path,
+// and errors carry no broker directory (L3 S1 on #166).
+func TestDeleteNamesNoHostPath(t *testing.T) {
+	r := newDelRig(t)
+	name := strings.Repeat("n", 255)
+	long := ""
+	for len(long)+256 <= maxPathLen {
+		long += "/" + name
+	}
+	r.file(r.upper, "f", "x")
+	// Build the guest path's directories handle by handle: under the
+	// broker's upper directory the host path passes the kernel's limit.
+	fd, err := syscall.Open(r.upper, syscall.O_RDONLY|syscall.O_DIRECTORY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := strings.Split(long[1:], "/")
+	for _, c := range parts[:len(parts)-1] {
+		if err := syscall.Mkdirat(fd, c, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		next, err := syscall.Openat(fd, c, syscall.O_RDONLY|syscall.O_DIRECTORY, 0)
+		syscall.Close(fd)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fd = next
+	}
+	syscall.Close(fd)
+	out := r.del(false, 100, long, "/"+strings.Repeat("n", 256))
+	if fmt.Sprint(out.Codes) != fmt.Sprint([]string{BadPath, BadPath}) {
+		t.Fatalf("over-long paths = %v", out.Codes)
+	}
+	_, err = Delete(filepath.Join(r.upper, "missing"), r.lower, []string{"/f"}, false, 100)
+	if err == nil || strings.Contains(err.Error(), r.upper) || strings.Contains(err.Error(), "/tmp") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+// freed bytes count a file only when no other link keeps its blocks.
+func TestDeleteFreedBytesSkipHardlinks(t *testing.T) {
+	r := newDelRig(t)
+	r.file(r.upper, "a", strings.Repeat("x", 64<<10))
+	if err := os.Link(filepath.Join(r.upper, "a"), filepath.Join(r.upper, "b")); err != nil {
+		t.Fatal(err)
+	}
+	if out := r.del(false, 100, "/a"); out.Files != 1 || out.Bytes != 0 {
+		t.Fatalf("a linked file freed %d bytes", out.Bytes)
+	}
+	if out := r.del(false, 100, "/b"); out.Bytes < 64<<10 {
+		t.Fatalf("the last link freed %d bytes", out.Bytes)
+	}
+}

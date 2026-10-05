@@ -22,7 +22,14 @@ const (
 	MountPoint    = "mount_point"       // another file system: refused
 	BadPath       = "bad_path"          // not a clean absolute path below /
 	MoreRemains   = "more_remains"      // the entry budget ran out part way
+	TooDeep       = "too_deep"          // nested deeper than MaxTreeDepth: delete a deeper path first
 )
+
+// MaxTreeDepth bounds how deep a recursive delete descends: each level
+// holds a directory handle, so a worker's deep chain of directories must
+// not exhaust the broker's handles or memory (L3 MUST-1 on #166). A
+// deeper tree is shortened by deleting a deeper path first.
+const MaxTreeDepth = 256
 
 // DeleteResult is what Delete did: a code per path, in order, and counts.
 // It names no file beyond the paths asked.
@@ -36,6 +43,7 @@ type DeleteResult struct {
 const (
 	oPath      = 0x200000 // O_PATH: a handle on the entry itself, opens nothing
 	maxPathLen = 4096
+	maxNameLen = 255
 )
 
 // Delete removes paths, as the guest names them, from the upper layer of
@@ -55,6 +63,25 @@ const (
 // only in the base image is refused, and removing an upper copy may bring
 // the base version back, which the code says.
 func Delete(upper, lower string, paths []string, recursive bool, maxEntries int) (DeleteResult, error) {
+	out, err := deleteAll(upper, lower, paths, recursive, maxEntries)
+	return out, hostless(err)
+}
+
+// hostless drops the host paths from err: the answer goes to a guest,
+// which learns no broker path (L3 S1 on #166).
+func hostless(err error) error {
+	var pe *os.PathError
+	if errors.As(err, &pe) {
+		return errors.New("overlay: delete: " + pe.Op + ": " + pe.Err.Error())
+	}
+	var le *os.LinkError
+	if errors.As(err, &le) {
+		return errors.New("overlay: delete: " + le.Op + ": " + le.Err.Error())
+	}
+	return err
+}
+
+func deleteAll(upper, lower string, paths []string, recursive bool, maxEntries int) (DeleteResult, error) {
 	root, err := syscall.Open(upper, oPath|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return DeleteResult{}, &os.PathError{Op: "open", Path: upper, Err: err}
@@ -153,7 +180,14 @@ func guestParts(p string) ([]string, bool) {
 	if len(p) > maxPathLen || !strings.HasPrefix(p, "/") || strings.ContainsRune(p, 0) || filepath.Clean(p) != p || p == "/" {
 		return nil, false
 	}
-	return strings.Split(p[1:], "/"), true
+	parts := strings.Split(p[1:], "/")
+	for _, c := range parts {
+		if len(c) > maxNameLen {
+			return nil, false
+		}
+	}
+	// Room for a recursive walk's names, so descending never copies.
+	return append(make([]string, 0, len(parts)+MaxTreeDepth+1), parts...), true
 }
 
 func (d *deleter) one(p string, recursive bool) (string, error) {
@@ -161,6 +195,14 @@ func (d *deleter) one(p string, recursive bool) (string, error) {
 	if !ok {
 		return BadPath, nil
 	}
+	code, err := d.oneParts(parts, recursive)
+	if errors.Is(err, syscall.ENAMETOOLONG) {
+		return BadPath, nil // the host path is too long for the kernel
+	}
+	return code, err
+}
+
+func (d *deleter) oneParts(parts []string, recursive bool) (string, error) {
 	dir, code, err := d.parent(parts[:len(parts)-1])
 	if err != nil || code == SymlinkInPath || code == MountPoint {
 		return code, err
@@ -197,7 +239,7 @@ func (d *deleter) one(p string, recursive bool) (string, error) {
 			d.left--
 			return d.after(parts)
 		}
-		done, code, err := d.removeTree(dir, name, parts)
+		done, code, err := d.removeTree(dir, name, parts, 1)
 		if err != nil || code != "" {
 			return code, err
 		}
@@ -273,7 +315,10 @@ func (d *deleter) parent(parts []string) (int, string, error) {
 
 // removeTree empties and removes directory name under dir, within the
 // entry budget. done is false when the budget ran out first.
-func (d *deleter) removeTree(dir int, name string, parts []string) (done bool, code string, err error) {
+func (d *deleter) removeTree(dir int, name string, parts []string, depth int) (done bool, code string, err error) {
+	if depth > MaxTreeDepth {
+		return false, TooDeep, nil
+	}
 	fd, err := syscall.Openat(dir, name, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return false, "", err
@@ -300,12 +345,14 @@ func (d *deleter) removeTree(dir int, name string, parts []string) (done bool, c
 			if err != nil {
 				return false, "", err
 			}
-			child := append(parts[:len(parts):len(parts)], e.Name())
+			// parts has room for the walk's names (guestParts), so this
+			// writes in place: each level owns only its own last slot.
+			child := append(parts, e.Name())
 			if cst.Dev != d.dev || d.mounted(child) {
 				return false, MountPoint, nil
 			}
 			if cst.Mode&syscall.S_IFMT == syscall.S_IFDIR {
-				ok, code, err := d.removeTree(fd, e.Name(), child)
+				ok, code, err := d.removeTree(fd, e.Name(), child, depth+1)
 				if err != nil || code != "" || !ok {
 					return false, code, err
 				}

@@ -370,7 +370,7 @@ func TestCAP1KeepWaitsForStartingForks(t *testing.T) {
 	forked := make(chan error, 1)
 	go func() { forked <- r.call("agent", toolFork, m{"name": "a", "into": []string{"late"}}, nil) }()
 	<-h.forking
-	if err := r.call("agent", toolKeep, m{"name": "b"}, nil); err == nil || !strings.Contains(err.Error(), "still starting") {
+	if err := r.call("agent", toolKeep, m{"name": "b"}, nil); err == nil || err.Error() != "some of your workers are still starting; keep the winner once worker_create or worker_fork returns" {
 		t.Fatalf("keep beside a starting fork: %v", err)
 	}
 	close(h.release)

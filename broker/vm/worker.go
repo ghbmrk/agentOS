@@ -367,7 +367,9 @@ func (m *Manager) DeleteFiles(ctx context.Context, id string, d Deletion) (Delet
 	if err != nil {
 		return DeleteReport{}, err
 	}
-	mc.mu.Lock()
+	// A command in the worker ends: the deletion stops the worker anyway
+	// (L3 nit on #166).
+	mc.lockEndingExec()
 	was := mc.State
 	rep, stopped, err := m.deleteLocked(ctx, mc, d)
 	mc.mu.Unlock()
@@ -423,8 +425,12 @@ func (m *Manager) deleteLocked(ctx context.Context, mc *machine, d Deletion) (De
 	if !running || rep.Over || held(d) {
 		return rep, running, nil
 	}
+	// A failed start leaves the worker stopped; the deletion and its
+	// codes still stand, so they are answered rather than lost (L3 nit
+	// on #166).
 	if err := m.restartLocked(ctx, mc, keepLayer); err != nil {
-		return rep, true, fmt.Errorf("%s: starting again: %w", mc.ID, err)
+		log.Printf("vm: %s: starting again after a deletion: %v", mc.ID, err)
+		return rep, true, nil
 	}
 	rep.Restarted = true
 	return rep, false, nil
