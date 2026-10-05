@@ -20,6 +20,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/control"
@@ -55,6 +56,9 @@ type Config struct {
 	Agent    control.Agent
 	Machines func() string
 	Secrets  Secrets
+	// Verifier, when set, checks code-generator codes in place of
+	// Secrets.TOTPSeed, which is then ignored (egress K7).
+	Verifier Verifier
 	Store    Store
 	Limits   Limits
 	// Commitments is the owner's phrase list for ADP-11.
@@ -124,6 +128,18 @@ type Channel struct {
 	limited     []time.Time
 	active      time.Time // last owner message the control handler ran
 	alertAt     time.Time
+	// floodAlertAt is the last flood alert; floods counts the events for
+	// the digest by kind.
+	floodAlertAt time.Time
+	floods       floodCounts
+	// stops counts STOPs; a RESUME code issued before the latest STOP is
+	// void (taken on the fast path, outside mu).
+	stops atomic.Int64
+	// stopMu orders a fast-path STOP against a RESUME: stopNow holds it
+	// across counting and applying the STOP, and resumeUnlessStopped
+	// across its re-check and Resume, so a STOP that arrives while a
+	// RESUME code is being checked is never lifted by it (CH-2).
+	stopMu sync.Mutex
 	// challengeTexts are the challenge texts sent in the last hour.
 	challengeTexts []time.Time
 	dropped        int
@@ -136,6 +152,7 @@ var _ control.Auth = (*Channel)(nil)
 
 type resumeCode struct {
 	code    string // "" when the low tier is locked: a strong code is needed
+	stops   int64  // Channel.stops when issued
 	expires time.Time
 	wrong   int
 }
@@ -181,7 +198,7 @@ func New(cfg Config) (*Channel, error) {
 	}
 	c := &Channel{
 		cfg:    cfg,
-		codes:  codes{sec: cfg.Secrets, st: st, store: cfg.Store, rand: cfg.Rand},
+		codes:  codes{sec: cfg.Secrets, verify: cfg.Verifier, st: st, store: cfg.Store, rand: cfg.Rand},
 		open:   map[string]*request{},
 		queued: map[string]*Queued{},
 		boot:   &bootReport{pending: st.Pending, queued: st.Queued},
@@ -226,12 +243,52 @@ type route struct {
 // Handle processes one text from number from and returns the texts to send
 // back to it.
 func (c *Channel) Handle(ctx context.Context, from, text string) []string {
+	if out, ok := c.stopNow(ctx, from, text); ok {
+		return out
+	}
 	rt, ok := c.route(from, text)
 	if !ok {
 		return nil
 	}
 	return c.finish(ctx, from, rt)
 }
+
+// stopNow applies STOP from the owner at once, without mu, so it never
+// waits behind a code check in progress or queued (CH-2). A RESUME code
+// issued before it is void (stops).
+func (c *Channel) stopNow(ctx context.Context, from, text string) ([]string, bool) {
+	if !c.IsOwner(from) || control.Parse(text).Word != control.WordStop {
+		return nil, false
+	}
+	c.stopMu.Lock()
+	c.stops.Add(1)
+	replies := c.ctrl.Handle(ctx, from, text)
+	c.stopMu.Unlock()
+	var out []string
+	for _, r := range replies {
+		if r != "" {
+			out = append(out, control.Fit(r))
+		}
+	}
+	return out, true
+}
+
+// errStoppedMeanwhile reports a RESUME overtaken by a STOP sent while its
+// code was being checked.
+var errStoppedMeanwhile = errors.New("stopped while the code was checked")
+
+// resumeUnlessStopped lifts STOP only if no STOP arrived since stops was
+// gen, checked and applied under stopMu.
+func (c *Channel) resumeUnlessStopped(gen int64) error {
+	c.stopMu.Lock()
+	defer c.stopMu.Unlock()
+	if c.stops.Load() != gen {
+		return errStoppedMeanwhile
+	}
+	return c.cfg.Engine.Resume()
+}
+
+const stoppedMeanwhile = "A STOP arrived while the code was checked, so nothing resumed. Still stopped."
 
 // route makes every decision the channel itself owns, in arrival order.
 func (c *Channel) route(from, text string) (route, bool) {
@@ -242,12 +299,15 @@ func (c *Channel) route(from, text string) (route, bool) {
 	c.mu.Lock()
 	decided := c.expireLocked(now)
 	rt := c.routeLocked(text, now, &decided)
+	flood := c.floodLocked(now)
 	if c.codes.justChallenged {
 		c.codes.justChallenged = false
 		c.held = nil
 		c.alertAt = now
 		rt.alerts = append(rt.alerts, fmt.Sprintf("Too many wrong codes. Codes by text now need a challenge: reply UNLOCK %s and a code from your code generator within %s.",
-			c.codes.currentChallenge(now), dur(ChallengeTTL)))
+			c.codes.currentChallenge(now), dur(ChallengeTTL))+flood)
+	} else if flood != "" {
+		rt.alerts = append(rt.alerts, strings.TrimSpace(flood))
 	}
 	c.mu.Unlock()
 	c.decide(decided)
@@ -381,12 +441,16 @@ func splitCode(text string) (rest, code string) {
 // the agent sees it (O5).
 func (c *Channel) unlockedChatLocked(text, rest, code string, now time.Time) route {
 	if code != "" {
-		if res, _, err := c.codes.checkStrong(code, now, strongOpts{}); err == nil && res == strongOK {
+		res, _, err := c.codes.checkStrong(code, now, strongOpts{silent: true})
+		if err == nil && res == strongOK {
 			if rest == "" {
 				return route{replies: []string{"You are already unlocked until " + c.untilText() + "."}}
 			}
 			return route{delegate: rest, run: true}
 		}
+		// Otherwise the chat passes on as sent. If the vault's bound on
+		// silent checks is full, that includes the code (route raises
+		// the flood alert); counted codes still work.
 	}
 	return route{delegate: text, run: true}
 }
@@ -407,7 +471,7 @@ func (c *Channel) lockedLocked(rest, code string, now time.Time) route {
 	res, locked, err := c.codes.checkStrong(code, now, strongOpts{unlock: c.cfg.UnlockFor, count: true})
 	switch {
 	case err != nil:
-		return route{replies: []string{stateErr}, limited: true}
+		return route{replies: []string{c.codeErr(err)}, limited: true}
 	case res == strongWrong:
 		dropped := ""
 		if c.held != nil || rest != "" {
@@ -460,6 +524,8 @@ func (c *Channel) challengeLocked(text string, now time.Time) (route, bool) {
 			}
 			return c.dropLocked(now), true
 		}
+		token, expires := c.codes.unlockCh, c.codes.unlockChExpires
+		gen := c.stops.Load()
 		ok, err := c.codes.takeAttempt(now)
 		switch {
 		case err != nil:
@@ -469,7 +535,13 @@ func (c *Channel) challengeLocked(text string, now time.Time) (route, bool) {
 		}
 		res, _, err := c.codes.checkStrong(r.code, now, strongOpts{unlock: c.cfg.UnlockFor})
 		if err != nil {
-			return route{replies: []string{stateErr}, limited: true}, true
+			var ve *VerifyError
+			if errors.As(err, &ve) {
+				// The vault never checked it: keep the token and the
+				// attempt. A failed refund leaves the attempt spent.
+				c.codes.refundAttempt(token, expires)
+			}
+			return route{replies: []string{c.codeErr(err)}, limited: true}, true
 		}
 		if res != strongOK {
 			return c.challengeText(now, fmt.Sprintf("Wrong code. New challenge: reply %s %s and a code from your code generator.",
@@ -479,7 +551,10 @@ func (c *Channel) challengeLocked(text string, now time.Time) (route, bool) {
 		msg := "Unlocked until " + c.untilText() + ". Codes work normally again."
 		if r.word == "RESUME" {
 			c.resume = nil
-			if err := c.cfg.Engine.Resume(); err != nil {
+			switch err := c.resumeUnlessStopped(gen); {
+			case err == errStoppedMeanwhile:
+				return route{replies: []string{msg + " " + stoppedMeanwhile}}, true
+			case err != nil:
 				return route{replies: []string{msg + " RESUME failed to record. Still stopped."}}, true
 			}
 			msg += " Resumed."
@@ -519,6 +594,45 @@ func (c *Channel) dropLocked(now time.Time) route {
 	return route{alerts: []string{"Codes without the current challenge are being ignored. Reply UNLOCK for a one-time challenge."}}
 }
 
+// FloodAlertEvery is the least time between two flood alerts by text; every
+// flood event also goes in the digest (arbitrator, P2-4c).
+const FloodAlertEvery = 24 * time.Hour
+
+// floodCounts are the flood events since the last digest.
+type floodCounts struct{ silent, counted, challenge int }
+
+// floodLocked records what the last code check showed: the vault's bound
+// on silent checks full, its bound on counted checks full, or challenge
+// mode switched on. Each is a sign someone may be texting as the owner. It
+// returns the flood alert, with a leading space, at most once per
+// FloodAlertEvery, and "" otherwise.
+func (c *Channel) floodLocked(now time.Time) string {
+	k := &c.codes
+	if !k.pausedSilent && !k.pausedCounted && !k.justChallenged {
+		return ""
+	}
+	if k.pausedSilent {
+		c.floods.silent++
+	}
+	if k.pausedCounted {
+		c.floods.counted++
+	}
+	if k.justChallenged {
+		c.floods.challenge++
+	}
+	silent, until := k.pausedSilent, k.pausedUntil
+	k.pausedSilent, k.pausedCounted = false, false
+	if !c.floodAlertAt.IsZero() && now.Sub(c.floodAlertAt) < FloodAlertEvery {
+		return ""
+	}
+	c.floodAlertAt = now
+	msg := " Many wrong codes have come from your number. If they were not yours, someone may be texting as you: reply STOP."
+	if silent {
+		msg += " Codes in chat pass on unchecked until " + until.In(c.cfg.Location).Format("15:04") + "."
+	}
+	return msg
+}
+
 // TakeDigestNotes returns and clears owner-channel lines for the next
 // digest (O4).
 func (c *Channel) TakeDigestNotes() []string {
@@ -529,10 +643,44 @@ func (c *Channel) TakeDigestNotes() []string {
 		out = append(out, fmt.Sprintf("%d code messages without the current challenge were ignored.", c.dropped))
 		c.dropped = 0
 	}
+	if f := c.floods; f != (floodCounts{}) {
+		var parts []string
+		if f.silent > 0 {
+			parts = append(parts, fmt.Sprintf("%d texts with a code passed on unchecked", f.silent))
+		}
+		if f.counted > 0 {
+			parts = append(parts, fmt.Sprintf("%d codes refused at the vault's limit", f.counted))
+		}
+		if f.challenge > 0 {
+			parts = append(parts, fmt.Sprintf("challenge mode switched on %d times", f.challenge))
+		}
+		out = append(out, "Possible code flood: "+strings.Join(parts, ", ")+".")
+		c.floods = floodCounts{}
+	}
 	return out
 }
 
 const stateErr = "Could not save the code check, so it did not count. Try again."
+
+// codeErr is the reply when a code could not be checked or saved. Each
+// vault-process failure gets its own fixed wording, since retrying helps
+// only in some of them (CH-18).
+func (c *Channel) codeErr(err error) string {
+	var ve *VerifyError
+	if !errors.As(err, &ve) {
+		return stateErr
+	}
+	switch ve.Kind {
+	case VaultLocked:
+		return "The vault is locked, so the code could not be checked and did not count. Unlock the vault first."
+	case VerifyPaused:
+		return "Too many wrong codes reached the vault. Code checks are paused until " +
+			ve.Until.In(c.cfg.Location).Format("15:04") + ". This code did not count."
+	case VerifyLost:
+		return "The vault did not answer in time and may have used that code. It did not count. Try again with the next code."
+	}
+	return "The vault is not answering, so the code was not checked and did not count. Try again shortly."
+}
 
 func (c *Channel) untilText() string {
 	return c.codes.st.UnlockedUntil.In(c.cfg.Location).Format("Jan 2 15:04")
@@ -571,8 +719,8 @@ func (c *Channel) resumeLocked(r reply, now time.Time) (out []string, accepted b
 		return []string{"Not stopped. Nothing to resume."}, false
 	}
 	if r.code == "" {
-		if p := c.resume; p == nil || !now.Before(p.expires) {
-			c.resume = &resumeCode{expires: now.Add(c.cfg.CodeTTL)}
+		if p := c.resume; p == nil || !now.Before(p.expires) || p.stops != c.stops.Load() {
+			c.resume = &resumeCode{expires: now.Add(c.cfg.CodeTTL), stops: c.stops.Load()}
 			if !c.codes.st.LowLocked {
 				c.resume.code = c.codes.textedCode()
 			}
@@ -588,7 +736,7 @@ func (c *Channel) resumeLocked(r reply, now time.Time) (out []string, accepted b
 		return []string{fmt.Sprintf("To restart all actions, reply RESUME %s within %s.", c.resume.code, dur(c.resume.expires.Sub(now)))}, false
 	}
 	p := c.resume
-	if p == nil || !now.Before(p.expires) {
+	if p == nil || !now.Before(p.expires) || p.stops != c.stops.Load() {
 		c.resume = nil
 		return []string{"No valid code. Reply RESUME for a new one."}, false
 	}
@@ -605,7 +753,10 @@ func (c *Channel) resumeLocked(r reply, now time.Time) (out []string, accepted b
 		return []string{"Wrong code. Reply RESUME <code>." + lockNote(locked)}, false
 	}
 	c.resume = nil
-	if err := c.cfg.Engine.Resume(); err != nil {
+	switch err := c.resumeUnlessStopped(p.stops); {
+	case err == errStoppedMeanwhile:
+		return []string{stoppedMeanwhile}, true
+	case err != nil:
 		return []string{"RESUME failed to record. Still stopped."}, true
 	}
 	n := 0
@@ -626,7 +777,7 @@ func (c *Channel) checkLocked(texted, got string, now time.Time) (ok, locked boo
 		res, locked, err := c.codes.checkStrong(got, now, strongOpts{unlock: c.cfg.UnlockFor, count: true})
 		switch {
 		case err != nil:
-			return false, false, stateErr
+			return false, false, c.codeErr(err)
 		}
 		return res == strongOK, locked, ""
 	}
@@ -689,17 +840,17 @@ func (c *Channel) Inform(text string) error {
 }
 
 // Run serves the modem until ctx is done. It first reports what a restart
-// dropped (Boot). The channel's own decisions run in arrival order; the
-// control handler's part (task chat waits on the agent for up to
-// control.DeliverTimeout) runs on its own goroutine, so a slow agent never
-// delays a STOP behind it (CH-2, B11).
+// dropped (Boot). STOP is applied as soon as it is read, ahead of anything
+// queued (stopNow). The channel's other decisions run in arrival order on
+// one worker, which may wait on a code check; the control handler's part
+// (task chat waits on the agent for up to control.DeliverTimeout) runs on
+// its own goroutine, so a slow agent never delays a STOP behind it (CH-2,
+// B11).
 func (c *Channel) Run(ctx context.Context) error {
 	if c.cfg.Modem == nil {
 		return errors.New("owner: no modem")
 	}
 	c.Boot()
-	tick := time.NewTicker(time.Minute)
-	defer tick.Stop()
 	var wg sync.WaitGroup
 	defer wg.Wait()
 	send := func(to string, rs []string) {
@@ -709,26 +860,52 @@ func (c *Channel) Run(ctx context.Context) error {
 			}
 		}
 	}
+	work := make(chan modem.SMS, 256)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		tick := time.NewTicker(time.Minute)
+		defer tick.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+				c.Tick()
+			case m := <-work:
+				rt, ok := c.route(m.From, m.Text)
+				if !ok {
+					continue
+				}
+				if !rt.run {
+					send(m.From, c.finish(ctx, m.From, rt))
+					continue
+				}
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					send(m.From, c.finish(ctx, m.From, rt))
+				}()
+			}
+		}
+	}()
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-tick.C:
-			c.Tick()
 		case m := <-c.cfg.Modem.Inbox():
-			rt, ok := c.route(m.From, m.Text)
-			if !ok {
+			if m.Alphanumeric {
+				continue // a sender ID, not a number: never the owner
+			}
+			if out, ok := c.stopNow(ctx, m.From, m.Text); ok {
+				send(m.From, out)
 				continue
 			}
-			if !rt.run {
-				send(m.From, c.finish(ctx, m.From, rt))
-				continue
+			select {
+			case work <- m:
+			case <-ctx.Done():
+				return ctx.Err()
 			}
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				send(m.From, c.finish(ctx, m.From, rt))
-			}()
 		}
 	}
 }
