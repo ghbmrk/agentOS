@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -84,18 +85,22 @@ func TestTIM1SmallStepsThatAddUpAreHeld(t *testing.T) {
 	}
 }
 
-func TestTIM1HonestSlewIsNotHeld(t *testing.T) {
-	// NTP slews at most 500 ppm: 43 s a day. Over ten days that passes the
-	// 5-minute tolerance but stays inside the slew allowance.
+func TestTIM1StepsLongAfterTheAnchorAreHeld(t *testing.T) {
+	// NTP slewing moves the wall and boot clocks together, so time since
+	// the anchor buys no allowance (L3 F6): 30 days on, steps that sum past
+	// the tolerance are still held.
 	r := noCarrier()
 	g := r.guard(t, nil)
 	g.Check(bg)
-	for d := 0; d < 10; d++ {
-		r.advance(24 * time.Hour)
-		r.step(43 * time.Second)
-		if s := g.Check(bg); s.State != NetworkOnly {
-			t.Fatalf("day %d: %+v", d, s)
-		}
+	r.advance(30 * 24 * time.Hour)
+	if s := g.Check(bg); s.State != NetworkOnly {
+		t.Fatalf("30 days on, no step: %+v", s)
+	}
+	r.step(3 * time.Minute)
+	g.Check(bg)
+	r.step(3 * time.Minute)
+	if s := g.Check(bg); s.State != Held {
+		t.Fatalf("status = %+v, want held", s)
 	}
 }
 
@@ -328,12 +333,12 @@ func TestTIM1NotifyMayCheckAgain(t *testing.T) {
 	})
 	go g.Check(bg)
 	time.Sleep(20 * time.Millisecond)
-	got := make(chan error)
-	go func() { _, err := g.Now(bg); got <- err }()
+	got := make(chan Status)
+	go func() { got <- g.Check(bg) }()
 	select {
-	case err := <-got:
-		if !errors.Is(err, ErrRestricted) {
-			t.Fatalf("err = %v", err)
+	case st := <-got:
+		if !st.Restricted() {
+			t.Fatalf("status = %+v", st)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("a caller waited on the slow notifier")
@@ -377,5 +382,280 @@ func TestTIM1AlertCapSurvivesRestart(t *testing.T) {
 	g.Check(bg)
 	if len(r.texts) != n {
 		t.Fatalf("alert after reboot within the day: %q", r.texts[n:])
+	}
+}
+
+func TestTIM1JoinedCallersDoNotWaitForTexts(t *testing.T) {
+	// Callers that joined a check get its result when it is published, not
+	// after its owner text has gone out (L3 D3, F7).
+	r := newRig()
+	r.carrier = r.carrier.Add(time.Hour)
+	release, slow := make(chan struct{}), make(chan struct{})
+	g := r.guard(t, func(c *Config) {
+		c.Carrier = func(context.Context) (time.Time, error) {
+			<-release
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			return r.carrier, nil
+		}
+		c.Notify = func(string) { <-slow }
+	})
+	defer close(slow)
+	go g.Check(bg) // the leader, which will send the text
+	time.Sleep(10 * time.Millisecond)
+	joined := make(chan Status)
+	go func() { joined <- g.Check(bg) }()
+	time.Sleep(10 * time.Millisecond)
+	close(release)
+	select {
+	case s := <-joined:
+		if !s.Restricted() {
+			t.Fatalf("status = %+v", s)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a joined caller waited on the owner text")
+	}
+}
+
+func TestTIM1EarliestForMinimumAges(t *testing.T) {
+	r := newRig()
+	g := r.guard(t, nil)
+	g.Check(bg)
+	r.advance(10 * time.Minute)
+	// A clock pushed 3 minutes forward (inside the tolerance) must not end
+	// a hold period early: Earliest answers from the carrier reading.
+	r.step(3 * time.Minute)
+	got, s := g.Earliest(bg)
+	if s.Restricted() || !got.Equal(time.Date(2026, 10, 5, 4, 10, 0, 0, time.UTC)) {
+		t.Fatalf("Earliest = %v, %+v", got, s)
+	}
+	if late, _ := g.Latest(bg); !late.Equal(r.wall) {
+		t.Fatalf("Latest = %v, want the box clock %v", late, r.wall)
+	}
+}
+
+func TestTIM1CrossBootAlertAges(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "clock.json")
+	r := newRig()
+	r.mono = 50 * time.Hour // a long first boot
+	boot := "boot-a"
+	mod := func(c *Config) { c.StatePath = path; c.BootID = func() string { return boot } }
+	g := r.guard(t, mod)
+	g.Check(bg)
+	alarm := func() {
+		r.step(time.Hour)
+		g.Check(bg)
+		r.step(-time.Hour)
+		g.Check(bg)
+		r.advance(AgreeAfter)
+		g.Check(bg)
+	}
+	alarm()
+	alarm() // the cap is used
+	n := len(r.texts)
+	// Reboot: the boot clock starts again, and the box clock is set two
+	// days ahead. Neither frees the cap.
+	boot = "boot-b"
+	r.mu.Lock()
+	r.mono = time.Minute
+	r.wall = r.wall.Add(48 * time.Hour)
+	r.carrier = r.wall
+	r.mu.Unlock()
+	g = r.guard(t, mod)
+	g.Check(bg)
+	alarm()
+	if len(r.texts) != n {
+		t.Fatalf("alert after reboot: %q", r.texts[n:])
+	}
+	// After a day of uptime the earlier boot's alerts have aged out.
+	r.advance(24 * time.Hour)
+	g.Check(bg)
+	alarm()
+	if len(r.texts) == n {
+		t.Fatal("cap never freed after a day of uptime")
+	}
+}
+
+func TestTIM1TextsAreFIFOAndOnChangeSupersedes(t *testing.T) {
+	r := newRig()
+	block := make(chan struct{})
+	var mu sync.Mutex
+	var got []string
+	var changes []State
+	first := true
+	g := r.guard(t, func(c *Config) {
+		c.Notify = func(x string) {
+			mu.Lock()
+			wait := first
+			first = false
+			got = append(got, x)
+			mu.Unlock()
+			if wait {
+				<-block
+			}
+		}
+		c.OnChange = func(s Status) { mu.Lock(); changes = append(changes, s.State); mu.Unlock() }
+	})
+	g.Check(bg) // Agreed: OnChange only
+	r.step(time.Hour)
+	done := make(chan struct{})
+	go func() { g.Check(bg); close(done) }() // disagreement text, held up in Notify
+	for {
+		mu.Lock()
+		n := len(got)
+		mu.Unlock()
+		if n == 1 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// While the text is held up, the clock comes right and goes wrong
+	// again: two more changes queue behind it.
+	r.step(-time.Hour)
+	g.Check(bg)
+	r.step(2 * time.Hour)
+	g.Check(bg)
+	close(block)
+	<-done
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 1 || !strings.Contains(got[0], "playing safe") {
+		t.Fatalf("texts = %q", got)
+	}
+	// The Agreed in between was superseded before delivery; the last state
+	// always arrives.
+	if len(changes) == 0 || changes[len(changes)-1] != Disagree {
+		t.Fatalf("changes = %v", changes)
+	}
+	for i, c := range changes {
+		if c == Agreed && i > 0 {
+			t.Fatalf("superseded change delivered: %v", changes)
+		}
+	}
+}
+
+func TestTIM1HoldEscalatesEvenAtTheCap(t *testing.T) {
+	r := noCarrier()
+	g := r.guard(t, nil)
+	g.Check(bg)
+	// Use up the day's alerts with holds that end on their own.
+	for i := 0; i < MaxAlertsPerDay; i++ {
+		r.step(time.Hour)
+		g.Check(bg)
+		r.step(-time.Hour)
+		g.Check(bg)
+		r.advance(AgreeAfter)
+		g.Check(bg)
+	}
+	n := len(r.texts)
+	r.step(time.Hour)
+	g.Check(bg) // a third hold: capped, no text
+	if len(r.texts) != n {
+		t.Fatalf("capped hold texted: %q", r.texts[n:])
+	}
+	// A hold already texted escalates even with the cap full.
+	r2 := noCarrier()
+	g2 := r2.guard(t, nil)
+	g2.Check(bg)
+	t0 := r2.wall
+	r2.step(time.Hour)
+	g2.Check(bg) // hold text, 1 of 2
+	g2.mu.Lock()
+	g2.alerts = append(g2.alerts, stamp{Mono: r2.mono}) // the cap is now full
+	g2.mu.Unlock()
+	r2.mu.Lock()
+	r2.carrier = t0
+	r2.mu.Unlock()
+	g2.Check(bg)
+	if len(r2.texts) != 2 || !strings.Contains(r2.texts[1], "playing safe") {
+		t.Fatalf("escalation at cap: %q", r2.texts)
+	}
+}
+
+func TestTIM1HoldEndsWithoutCarrierGetsAllClear(t *testing.T) {
+	r := noCarrier()
+	g := r.guard(t, nil)
+	g.Check(bg)
+	r.step(time.Hour)
+	g.Check(bg)
+	r.step(-time.Hour) // the clock comes back in line; still no carrier
+	g.Check(bg)
+	r.advance(AgreeAfter)
+	g.Check(bg)
+	if len(r.texts) != 2 || r.texts[1] != HoldEndText {
+		t.Fatalf("texts = %q", r.texts)
+	}
+}
+
+func TestTIM1StateLostHasFixedText(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "clock.json")
+	if err := os.WriteFile(path, []byte("garbage"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := noCarrier()
+	var logged []string
+	g := r.guard(t, func(c *Config) {
+		c.StatePath = path
+		c.Logf = func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) }
+	})
+	g.Check(bg)
+	if len(r.texts) != 1 || r.texts[0] != StateLostText {
+		t.Fatalf("texts = %q", r.texts)
+	}
+	if line := g.Status().Line(time.UTC); strings.Contains(line, "about 0") {
+		t.Fatalf("line = %q", line)
+	}
+	if len(logged) == 0 {
+		t.Fatal("unreadable state not logged")
+	}
+}
+
+func TestTIM1AgreementReanchors(t *testing.T) {
+	// After carrier time confirms a stepped clock, losing the carrier must
+	// not hold the box to the old anchor.
+	r := noCarrier()
+	g := r.guard(t, nil)
+	g.Check(bg)
+	r.step(3 * time.Hour)
+	g.Check(bg) // held
+	r.mu.Lock()
+	r.carrier = r.wall
+	r.mu.Unlock()
+	g.Check(bg) // agreed: re-anchored
+	r.mu.Lock()
+	r.carrier = time.Time{}
+	r.mu.Unlock()
+	r.advance(time.Minute)
+	if s := g.Check(bg); s.State != NetworkOnly {
+		t.Fatalf("status = %+v", s)
+	}
+	if now, _ := g.Now(bg); !now.Equal(r.wall) {
+		t.Fatalf("Now = %v, want %v", now, r.wall)
+	}
+}
+
+func TestTIM1DriftFromAnchorChecksWithRunLive(t *testing.T) {
+	// With Run live, stale reads do not check; small steps each under the
+	// tolerance since the last check are caught only by the drift-from-
+	// anchor test in refresh.
+	r := noCarrier()
+	tick := make(chan time.Time)
+	g := r.guard(t, func(c *Config) { c.Tick = tick })
+	ctx, cancel := context.WithCancel(bg)
+	defer cancel()
+	go g.Run(ctx)
+	for r.readCount() < 1 {
+		time.Sleep(time.Millisecond)
+	}
+	g.Check(bg)
+	t0 := r.wall
+	r.step(4 * time.Minute)
+	if _, err := g.Now(bg); err != nil {
+		t.Fatal(err)
+	}
+	r.step(4 * time.Minute)
+	now, err := g.Now(bg)
+	if err != nil || !now.Equal(t0) {
+		t.Fatalf("Now = %v, %v; want held %v", now, err, t0)
 	}
 }

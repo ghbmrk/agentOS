@@ -12,8 +12,8 @@
 // The box clock is also held to an anchor: the last check carrier time
 // confirmed, or, before any carrier time this boot, the first check after
 // NTP synced. A wall clock that has moved from the anchor by more than the
-// tolerance (plus the kernel's 500 ppm slew limit) against the monotonic
-// clock, with no carrier reading to confirm it, is held: Guard.Now answers
+// tolerance against the boot clock, with no carrier reading to confirm it,
+// is held: Guard.Now answers
 // the anchor carried forward on the monotonic clock, not the moved clock.
 // So a spoofed NTP step, or many small ones, never becomes the answer
 // without the carrier's word.
@@ -21,7 +21,8 @@
 // Guard.Now answers from the last check, but checks again first when the
 // wall clock has moved against the monotonic clock since then, or when the
 // last check is stale and no Run loop keeps it fresh. Guard.Latest gives
-// expiry checks the latest credible time. With one source or none the box
+// expiry checks the latest credible time, and Guard.Earliest gives
+// minimum-age checks the earliest. With one source or none the box
 // keeps working on its own clock (DEP-2, DEP-4: offline is normal).
 //
 // The package holds no credential and makes no network call; the carrier
@@ -125,9 +126,10 @@ const (
 	// texts will come today (AgreeLastText). Suppressed alerts are not
 	// queued; STATUS and the digest show the live state.
 	MaxAlertsPerDay = 2
-	// slewPPM is the kernel's largest NTP slew rate: a held anchor allows
-	// the wall clock this much honest drift on top of the tolerance.
-	slewPPM = 500
+	// anchorSlack is the honest wall-vs-boot-clock movement a hold allows on
+	// top of the tolerance. NTP slewing moves the wall and boot clocks
+	// together, so only steps open a gap (L3 F6 on #68).
+	anchorSlack = 5 * time.Second
 )
 
 // AgreeText tells the owner a restriction or hold has ended.
@@ -135,7 +137,7 @@ const AgreeText = "The box clock agrees with the phone network again. Time check
 
 // AgreeLastText is the all-clear once the day's alerts are used up, so a
 // later disagreement the box does not text about is not a surprise.
-const AgreeLastText = "The box clock agrees with the phone network again. Time checks are back to normal. If they disagree again today the box won't text; send STATUS to check."
+const AgreeLastText = AgreeText + LastSuffix
 
 // DisagreeText is the owner text for a disagreement of skew (at most two
 // text segments). It names what the wiring does while restricted (K7).
@@ -146,6 +148,17 @@ func DisagreeText(skew time.Duration) string {
 	}
 	return t
 }
+
+// HoldEndText ends a hold that no carrier time confirmed either way: the
+// box clock is back in line with the box's own count.
+const HoldEndText = "The box clock is back in line with the box's own count of time. Time checks are back to normal."
+
+// LastSuffix ends the all-clear that uses up the day's alerts.
+const LastSuffix = " If it happens again today the box won't text; send STATUS to check."
+
+// StateLostText is the alert when the saved clock check could not be read
+// at start, so a restriction it may have held is kept.
+const StateLostText = "The box couldn't read its saved clock check, so it is playing safe until the phone network's time confirms the clock: pre-allowances with an end date ask you first, requests won't expire, and updates wait. Codes and STOP work as usual."
 
 // HeldText is the owner text when the box clock jumps with no phone-network
 // time to confirm it.
@@ -170,6 +183,9 @@ func zoneLike(skew time.Duration) bool {
 func (s Status) Line(loc *time.Location) string {
 	switch s.State {
 	case Disagree:
+		if s.Skew == 0 {
+			return fmt.Sprintf("Time check: restricted since %s (saved check unreadable; waiting for phone-network time).", s.Since.In(loc).Format("15:04"))
+		}
 		return fmt.Sprintf("Time check: restricted since %s (box and phone network differ by %s).", s.Since.In(loc).Format("15:04"), about(s.Skew))
 	case Held:
 		return fmt.Sprintf("Time check: box clock held since %s (it jumped by %s, unconfirmed).", s.Since.In(loc).Format("15:04"), about(s.Skew))
@@ -235,8 +251,11 @@ type Config struct {
 	// slow modem cannot hold a time-sensitive caller.
 	CarrierTimeout time.Duration
 	// OnChange, if set, is called after a check that changed the state, so
-	// the wiring can re-run lapse sweeps when a restriction lifts.
+	// the wiring can re-run lapse sweeps when a restriction lifts. A change
+	// a later one supersedes before it is delivered may be skipped.
 	OnChange func(Status)
+	// Logf reports state-file faults. Nil is silent.
+	Logf func(format string, args ...any)
 }
 
 // told is the owner text outstanding.
@@ -268,9 +287,9 @@ type Guard struct {
 	agreeing bool
 	alerts   []stamp // alert texts sent in the last day
 
-	seq      uint64 // checks finished, for ordering their notices
-	nmu      sync.Mutex
-	notified uint64 // the last check whose notices went out
+	lost     bool     // the state file was unreadable at start
+	queue    []notice // notices in check order, delivered after publish
+	draining bool
 
 	// The last carrier reading and Elapsed when it was taken (Latest).
 	carrier     time.Time
@@ -291,12 +310,11 @@ type stamp struct {
 type flight struct {
 	done chan struct{}
 	s    Status
-	n    notice
 }
 
 // notice is what a finished check tells the outside, after it is published.
 type notice struct {
-	seq     uint64
+	s       Status
 	text    string
 	changed bool
 }
@@ -331,6 +349,9 @@ func New(cfg Config) (*Guard, error) {
 	if cfg.BootID == nil {
 		cfg.BootID = bootID
 	}
+	if cfg.Logf == nil {
+		cfg.Logf = func(string, ...any) {}
+	}
 	g := &Guard{cfg: cfg}
 	g.load()
 	return g, nil
@@ -355,44 +376,55 @@ func (g *Guard) Check(ctx context.Context) Status {
 	// The shared check must not inherit this caller's deadline: a short one
 	// would poison every joined caller's answer (L3 D2). CarrierTimeout
 	// bounds it instead.
-	f.s, f.n = g.check(context.WithoutCancel(ctx))
+	f.s = g.check(context.WithoutCancel(ctx))
 	g.fmu.Lock()
 	g.flight = nil
 	g.fmu.Unlock()
 	close(f.done)
 	// Tell the outside only after the result is published, so a slow text
 	// or a callback that checks again never holds joined callers (L3 D3).
-	g.deliver(f.s, f.n)
+	g.drain()
 	return f.s
 }
 
-// deliver sends a check's notices unless a later check's already went.
-func (g *Guard) deliver(s Status, n notice) {
-	if n.text == "" && !n.changed {
+// drain delivers queued notices in check order, one caller at a time. A
+// caller that finds another draining leaves its notices to it, so Notify
+// may itself check. Texts are never dropped; an OnChange that a later
+// queued change supersedes is skipped (L3 F2 on #68).
+func (g *Guard) drain() {
+	g.mu.Lock()
+	if g.draining {
+		g.mu.Unlock()
 		return
 	}
-	g.nmu.Lock()
-	if n.seq <= g.notified {
-		g.nmu.Unlock()
-		return
+	g.draining = true
+	for len(g.queue) > 0 {
+		n := g.queue[0]
+		g.queue = g.queue[1:]
+		superseded := false
+		for _, later := range g.queue {
+			superseded = superseded || later.changed
+		}
+		g.mu.Unlock()
+		if n.text != "" && g.cfg.Notify != nil {
+			g.cfg.Notify(n.text)
+		}
+		if n.changed && !superseded && g.cfg.OnChange != nil {
+			g.cfg.OnChange(n.s)
+		}
+		g.mu.Lock()
 	}
-	g.notified = n.seq
-	g.nmu.Unlock()
-	if n.text != "" && g.cfg.Notify != nil {
-		g.cfg.Notify(n.text)
-	}
-	if n.changed && g.cfg.OnChange != nil {
-		g.cfg.OnChange(s)
-	}
+	g.draining = false
+	g.mu.Unlock()
 }
 
 // allowedLocked is how far the wall clock may move from the anchor, against
 // the monotonic clock, at mono.
-func (g *Guard) allowedLocked(mono time.Duration) time.Duration {
-	return g.cfg.Tolerance + (mono-g.anchorMono)/(1e6/slewPPM)
+func (g *Guard) allowedLocked(time.Duration) time.Duration {
+	return g.cfg.Tolerance + anchorSlack
 }
 
-func (g *Guard) check(ctx context.Context) (Status, notice) {
+func (g *Guard) check(ctx context.Context) Status {
 	synced, err := g.cfg.Synced()
 	synced = synced && err == nil
 	var carrier time.Time
@@ -453,17 +485,21 @@ func (g *Guard) check(ctx context.Context) (Status, notice) {
 	if !wasChecked || prev.State != s.State || prev.Since != s.Since || text != "" || have {
 		g.saveLocked()
 	}
-	g.seq++
-	n := notice{seq: g.seq, text: text, changed: !wasChecked || prev.State != s.State}
+	if changed := !wasChecked || prev.State != s.State; text != "" || changed {
+		g.queue = append(g.queue, notice{s: s, text: text, changed: changed})
+	}
 	g.mu.Unlock()
-	return s, n
+	return s
 }
 
 // noticeLocked decides the owner text for a new status: an alert (a
-// disagreement, or a hold) when none is outstanding (a disagreement also
-// when only a hold text is), and the all-clear once carrier time has agreed
-// for AgreeAfter. A restriction or hold in between resets the wait. Alerts
-// are capped at MaxAlertsPerDay; every alert sent gets its all-clear.
+// disagreement, or a hold) when none is outstanding, a disagreement also
+// when only a hold text is, and the all-clear for an outstanding alert once
+// the alarm has been over for AgreeAfter: carrier agreement for either, or,
+// for a hold, the box clock back in line without a carrier. A restriction
+// or hold in between resets the wait. Alerts are capped at MaxAlertsPerDay,
+// except a hold's escalation to a disagreement; every alert sent gets its
+// all-clear.
 func (g *Guard) noticeLocked(s Status, mono time.Duration) string {
 	recent := g.alerts[:0]
 	for _, a := range g.alerts {
@@ -475,13 +511,16 @@ func (g *Guard) noticeLocked(s Status, mono time.Duration) string {
 	room := len(g.alerts) < MaxAlertsPerDay
 	alert := func(t told, text string) string {
 		g.told = t
-		g.alerts = append(g.alerts, stamp{Mono: mono, Wall: s.At})
+		g.alerts = append(g.alerts, stamp{Mono: mono, Wall: g.latestLocked(s.At, mono)})
 		return text
 	}
 	switch s.State {
 	case Disagree:
 		g.agreeing = false
-		if g.told != toldDisagree && room {
+		if g.told != toldDisagree && (room || g.told == toldHeld) {
+			if g.lost && s.Skew == 0 {
+				return alert(toldDisagree, StateLostText)
+			}
 			return alert(toldDisagree, DisagreeText(s.Skew))
 		}
 	case Held:
@@ -489,8 +528,9 @@ func (g *Guard) noticeLocked(s Status, mono time.Duration) string {
 		if g.told == toldNone && room {
 			return alert(toldHeld, HeldText(s.Skew))
 		}
-	case Agreed, CarrierOnly:
-		if g.told == toldNone {
+	case Agreed, CarrierOnly, NetworkOnly, Unchecked:
+		over := s.State == Agreed || s.State == CarrierOnly || g.told == toldHeld
+		if g.told == toldNone || !over {
 			return ""
 		}
 		if !g.agreeing {
@@ -500,11 +540,15 @@ func (g *Guard) noticeLocked(s Status, mono time.Duration) string {
 			return ""
 		}
 		// Every alert sent gets its all-clear (security on #68).
+		text := AgreeText
+		if s.State != Agreed && s.State != CarrierOnly {
+			text = HoldEndText
+		}
 		g.told, g.agreeing = toldNone, false
 		if !room {
-			return AgreeLastText
+			text += LastSuffix
 		}
-		return AgreeText
+		return text
 	}
 	return ""
 }
@@ -534,18 +578,46 @@ func (g *Guard) Now(ctx context.Context) (time.Time, error) {
 // monotonic clock. A caller deciding whether something has expired uses
 // it, so a clock moved back cannot keep a grant alive (potency PT1 on #68).
 // It answers while restricted too; the caller reads the Status.
+//
+// Use it only where a later time is the stricter answer (has it expired?).
+// A check that something is old enough (a hold period, a soak, a quiet
+// window, a wait) uses Earliest instead.
 func (g *Guard) Latest(ctx context.Context) (time.Time, Status) {
 	now, s := g.refresh(ctx)
 	mono := g.cfg.Elapsed()
 	g.mu.Lock()
-	c, cm := g.carrier, g.carrierMono
-	g.mu.Unlock()
-	if !c.IsZero() {
-		if t := c.Add(mono - cm); t.After(now) {
-			now = t
-		}
+	defer g.mu.Unlock()
+	return g.latestLocked(now, mono), s
+}
+
+// Earliest is the earliest credible time: the earlier of the box clock (the
+// held time while held) and the last carrier reading carried forward. A
+// caller deciding whether something is old enough uses it, so a clock moved
+// forward cannot end a hold, soak or quiet window early (L3 C4 on #68). It
+// answers while restricted too; the caller reads the Status.
+func (g *Guard) Earliest(ctx context.Context) (time.Time, Status) {
+	now, s := g.refresh(ctx)
+	mono := g.cfg.Elapsed()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if c := g.carrierForwardLocked(mono); !c.IsZero() && c.Before(now) {
+		now = c
 	}
 	return now, s
+}
+
+func (g *Guard) carrierForwardLocked(mono time.Duration) time.Time {
+	if g.carrier.IsZero() {
+		return time.Time{}
+	}
+	return g.carrier.Add(mono - g.carrierMono)
+}
+
+func (g *Guard) latestLocked(now time.Time, mono time.Duration) time.Time {
+	if c := g.carrierForwardLocked(mono); c.After(now) {
+		return c
+	}
+	return now
 }
 
 // refresh returns the time to answer and a status current enough to act
@@ -626,7 +698,8 @@ func (g *Guard) load() {
 	var v saved
 	if err != nil || json.Unmarshal(b, &v) != nil {
 		// Fail closed: an unreadable record may have held a restriction.
-		g.status = Status{State: Disagree}
+		g.cfg.Logf("clock: state file unreadable, restricting until carrier time agrees: %v", err)
+		g.status, g.lost = Status{State: Disagree}, true
 		return
 	}
 	if v.Restricted {
@@ -637,16 +710,14 @@ func (g *Guard) load() {
 	if v.Anchored && sameBoot {
 		g.anchored, g.anchorWall, g.anchorMono = true, v.AnchorWall, v.AnchorMono
 	}
-	// Alerts from an earlier boot are placed on this boot's monotonic clock
-	// by their box-clock age; one that would lie in the future counts as
-	// sent now, so a clock moved back cannot free the cap.
+	// Alerts from an earlier boot are placed on this boot's clock by their
+	// age, which the box clock gives at both ends and so cannot be trusted:
+	// it is clamped to between zero and this boot's uptime, so no clock
+	// setting frees the cap before a day of uptime (L3 F1 on #68).
 	mono, wall := g.cfg.Elapsed(), g.cfg.Now()
 	for _, a := range v.Alerts {
 		if !sameBoot {
-			age := wall.Sub(a.Wall)
-			if age < 0 {
-				age = 0
-			}
+			age := min(max(wall.Sub(a.Wall), 0), mono)
 			a.Mono = mono - age
 		}
 		g.alerts = append(g.alerts, a)
@@ -667,13 +738,22 @@ func (g *Guard) saveLocked() {
 	if v.Restricted {
 		v.Skew, v.Since = g.status.Skew, g.status.Since
 	}
+	if err := writeAtomic(g.cfg.StatePath, v); err != nil {
+		g.cfg.Logf("clock: state not saved: %v", err)
+	}
+}
+
+// writeAtomic writes v to path through a synced temporary file, renamed
+// into place, and syncs the directory so the rename survives power loss.
+func writeAtomic(path string, v saved) error {
 	b, err := json.Marshal(v)
 	if err != nil {
-		return
+		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(g.cfg.StatePath), ".clock-*")
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".clock-*")
 	if err != nil {
-		return
+		return err
 	}
 	_, werr := tmp.Write(b)
 	if serr := tmp.Sync(); werr == nil {
@@ -682,7 +762,17 @@ func (g *Guard) saveLocked() {
 	if cerr := tmp.Close(); werr == nil {
 		werr = cerr
 	}
-	if werr != nil || os.Rename(tmp.Name(), g.cfg.StatePath) != nil {
-		_ = os.Remove(tmp.Name())
+	if werr == nil {
+		werr = os.Rename(tmp.Name(), path)
 	}
+	if werr != nil {
+		_ = os.Remove(tmp.Name())
+		return werr
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
