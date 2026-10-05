@@ -122,14 +122,14 @@ func TestForgetListsRecentTasksAndShowsOnlyTextedOnes(t *testing.T) {
 		t.Fatalf("five at most: %q", got)
 	}
 	r.say("FORGET") // the list as sent now
-	if got := r.say("FORGET 2"); !strings.HasPrefix(got, `Forget "book a table for friday…"?`) {
+	if got := r.say("FORGET 2"); got != "" {
 		t.Fatalf("pick 2: %q", got)
 	}
 	if in := r.gate.got[0]; in.Origin != grants.OriginForget || in.Action != journal.ActionLearnForget ||
 		in.Executor != grants.ForgetExecutor || in.Account != journal.BrokerAccount || grants.ForgetGoal(in.ID) != "owner:a" || len(in.Params) != 0 {
 		t.Fatalf("forget intent: %+v", in)
 	}
-	if got := r.say("forget last"); !strings.HasPrefix(got, "Forget (a task, today 13:02)?") {
+	if got := r.say("forget last"); got != "" {
 		t.Fatalf("LAST: %q", got)
 	}
 	if g := grants.ForgetGoal(r.gate.got[1].ID); g != "owner:b" {
@@ -167,17 +167,16 @@ func TestForgetNeedsAnUnlockedSession(t *testing.T) {
 	}
 }
 
-// UX F2, potency R1: the notice says what the forget undoes before
-// anything is deleted, as an upper bound; the approval line is the
-// box's, by goal.
+// UX F2, U-F8, potency R1: the request is the notice. FORGET n gets no
+// reply of its own; the approval line, the box's by goal, says what the
+// forget undoes before anything is deleted, as an upper bound.
 func TestForgetNoticeAndApprovalLine(t *testing.T) {
 	r := newForgetRig(t)
 	r.task("owner:a", "book a table for friday at the usual place", r.now, viaSMS)
 	r.learned["owner:a"] = 2
 	r.say("FORGET")
-	want := `Forget "book a table for friday…"? It undoes 2 things I learned; I relearn what I can without it. I'm texting you the request.`
-	if got := r.say("FORGET 1"); got != want {
-		t.Fatalf("notice:\n got %q\nwant %q", got, want)
+	if got := r.say("FORGET 1"); got != "" || len(r.gate.got) != 1 {
+		t.Fatalf("FORGET 1: %q, asked %d", got, len(r.gate.got))
 	}
 	if obj, detail, ok := r.f.Item("owner:a"); !ok || obj != "'book a table for friday..'" || detail != "undoes 2 things I learned" {
 		t.Fatalf("item: %q %q %v", obj, detail, ok)
@@ -187,7 +186,7 @@ func TestForgetNoticeAndApprovalLine(t *testing.T) {
 		t.Fatalf("one: %q", detail)
 	}
 	r.learned["owner:a"] = 0
-	if got := r.say("FORGET LAST"); got != `Forget "book a table for friday…"? I'm texting you the request.` {
+	if got := r.say("FORGET LAST"); got != "" {
 		t.Fatalf("nothing learned: %q", got)
 	}
 	if _, detail, _ := r.f.Item("owner:a"); detail != "" {
@@ -214,7 +213,7 @@ func TestForgetRepliesOnlyAfterEverySave(t *testing.T) {
 	if out := r.f.Execute(context.Background(), in, 1); out.Result != journal.ResultSucceeded {
 		t.Fatalf("execute: %+v", out)
 	}
-	if want := []string{"Forgotten. I also undid 2 things I learned from it."}; strings.Join(r.texts, "|") != want[0] {
+	if want := []string{"Forgotten. I also undid 2 things I learned from it; I'll relearn what I can without it."}; strings.Join(r.texts, "|") != want[0] {
 		t.Fatalf("texts %q", r.texts)
 	}
 	r.texts = nil
@@ -302,8 +301,8 @@ func TestForgetEndToEnd(t *testing.T) {
 	if got, ok := cfg.Settings(ctx, "FORGET", true); !ok || !strings.Contains(got, `1 "book a table for friday…"`) {
 		t.Fatalf("list: %q", got)
 	}
-	if got, _ := cfg.Settings(ctx, "FORGET 1", true); got != `Forget "book a table for friday…"? I'm texting you the request.` {
-		t.Fatalf("notice: %q", got)
+	if got, ok := cfg.Settings(ctx, "FORGET 1", true); !ok || got != "" {
+		t.Fatalf("FORGET 1: %q", got)
 	}
 	d.Gate().Flush()
 	req := text()

@@ -149,18 +149,17 @@ func (f *ownerForget) Text(ctx context.Context, msg string, unlocked bool) (stri
 	default:
 		return forgetStale, true
 	}
-	t, ok := f.tasks.get(goal)
-	if !ok {
+	if _, ok := f.tasks.get(goal); !ok {
 		return forgetStale, true
 	}
 	if !f.ask(ctx, goal) {
 		return forgetRefused, true
 	}
-	notice := "Forget " + f.shown(t, false) + "?"
-	if c := f.learned(goal); c > 0 {
-		notice += fmt.Sprintf(" It undoes %s; I relearn what I can without it.", things(c))
-	}
-	return notice + " I'm texting you the request.", true
+	// No reply of its own (UX U-F8): the request names the task and what
+	// it undoes, says it cannot be undone, and comes before anything is
+	// deleted, so it is the notice. The gate sends it at its next tick,
+	// at once for an owner active in chat.
+	return "", true
 }
 
 // ask submits the forget intent; the gate asks the owner.
@@ -300,7 +299,7 @@ func forgetDone(undone int) string {
 	if undone == 0 {
 		return "Forgotten."
 	}
-	return "Forgotten. I also undid " + things(undone) + " from it."
+	return "Forgotten. I also undid " + things(undone) + " from it; I'll relearn what I can without it."
 }
 
 // Reconcile: a forget interrupted by a restart is finished by the
