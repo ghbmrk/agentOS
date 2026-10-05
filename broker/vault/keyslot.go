@@ -463,7 +463,13 @@ func OpenSealed(vaultPath, keysPath string, f Factor) (*Vault, error) {
 	if err != nil {
 		// A slot change interrupted after its seal: f's slot may be only
 		// in the staged next file (keysbind.go). It counts only if the
-		// vault it opens sealed that same file.
+		// vault it opens sealed that same file. Only a plain miss looks
+		// there: a factor whose KEK failed otherwise (a TPM refusing a
+		// PIN) is not asked again, so the staged file never doubles its
+		// attempts before lockout.
+		if !errors.Is(err, ErrNoSlotOpens) {
+			return nil, err
+		}
 		nraw, rerr := os.ReadFile(keysPath + nextSuffix)
 		if rerr != nil {
 			return nil, err
@@ -492,5 +498,6 @@ func OpenSealed(vaultPath, keysPath string, f Factor) (*Vault, error) {
 		v.Close()
 		return nil, err
 	}
+	v.dropStaleStaged()
 	return v, nil
 }

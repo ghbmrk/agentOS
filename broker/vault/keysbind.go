@@ -131,6 +131,18 @@ func (v *Vault) finishKeys() error {
 	return nil
 }
 
+// dropStaleStaged removes a staged next keys file left beside the keys
+// file once no slot change is under way. It opens nothing (stagedKeys),
+// so this is housekeeping and a failure is ignored. Caller does not
+// hold mu.
+func (v *Vault) dropStaleStaged() {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.nextKeys == nil {
+		os.Remove(v.keysPath + nextSuffix)
+	}
+}
+
 // stagedKeys reports whether raw, read from the staged next keys file,
 // is the next file this vault sealed. Caller does not hold mu.
 func (v *Vault) stagedKeys(raw []byte) bool {

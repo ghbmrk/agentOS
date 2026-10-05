@@ -341,3 +341,57 @@ func TestReencryptRollsForwardFromBothSlotSets(t *testing.T) {
 		t.Fatalf("staged file left: %v", err)
 	}
 }
+
+// refusingFactor is a passphrase factor whose KEK fails with err, counting
+// the calls, as a TPM refusing a PIN would.
+type refusingFactor struct {
+	err   error
+	calls *int
+}
+
+func (refusingFactor) Kind() string                  { return SlotPassphrase }
+func (refusingFactor) Enroll() (Slot, []byte, error) { return Slot{}, nil, errors.New("unused") }
+func (f refusingFactor) KEK(Slot) ([]byte, error) {
+	*f.calls++
+	return nil, f.err
+}
+
+// Security lens C1 on #63: only a plain miss on the keys file looks in the
+// staged file. A factor whose KEK fails any other way is asked once, so a
+// crashed change does not halve its attempts before lockout.
+func TestStagedKeysFileNotTriedAfterFactorError(t *testing.T) {
+	v, vp, kp := openWithPassphrase(t)
+	crashAt(t, 1)
+	if err := v.Rekey(Passphrase(testPass), Passphrase(newPass)); err == nil {
+		t.Fatal("no crash")
+	}
+	v.Close()
+	crashPoint = func(int) error { return nil }
+	if _, err := os.Stat(kp + nextSuffix); err != nil {
+		t.Fatalf("no staged file: %v", err)
+	}
+	refused := errors.New("tpm: pin refused")
+	calls := 0
+	if _, err := OpenSealed(vp, kp, refusingFactor{refused, &calls}); !errors.Is(err, refused) {
+		t.Fatalf("factor error: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("KEK asked %d times, want 1", calls)
+	}
+}
+
+// Security lens R1 on #63: a staged file left beside the keys file with no
+// change under way is removed at the next open.
+func TestStaleStagedKeysFileRemovedOnOpen(t *testing.T) {
+	v, vp, kp := openWithPassphrase(t)
+	v.Close()
+	putFile(t, kp+nextSuffix, readBytes(t, kp))
+	w, err := OpenSealed(vp, kp, Passphrase(testPass))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	if _, err := os.Stat(kp + nextSuffix); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale staged file kept: %v", err)
+	}
+}
