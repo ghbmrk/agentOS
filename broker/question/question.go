@@ -454,34 +454,64 @@ var controlWords = map[string]bool{
 // a question must not hand the owner a reply to copy (CH-12).
 var replyShape = regexp.MustCompile(`(?i)\b(yes|no|undo|more|resume|unlock|pause|revoke|run)\b[^a-z0-9]*([a-z][0-9]{1,4}|[0-9]{4,})\b`)
 
-// codeShaped reports a run of 6 to 8 digits, after folding Unicode digits
-// to ASCII and joining digit groups split by spaces, dots or dashes
-// ("482 913", "4-8-2-9-1-3"), as owner.SecretShaped does.
+// codeShaped reports a run of 6 to 8 digits, any Unicode digits counted,
+// with digit groups joined across up to maxJoin separators ("482 913",
+// "4-8-2-9-1-3"), as owner.SecretShaped does. A run is excused only when
+// the whole run, exactly, is a strict date or a list of clock times
+// (benign): when in doubt, refuse.
 func codeShaped(s string) bool {
-	s = benign.ReplaceAllString(s, "x")
-	var runs []int
-	n, gap := 0, 0
-	for _, r := range s {
+	start, end, n, gap := -1, 0, 0, 0
+	flush := func() bool {
+		hit := n >= 6 && n <= 8 && !benign(s[start:end])
+		start, n, gap = -1, 0, 0
+		return hit
+	}
+	for i, r := range s {
 		switch {
 		case unicode.IsDigit(r):
+			if n == 0 {
+				start = i
+			}
 			n++
 			gap = 0
+			end = i + utf8.RuneLen(r)
 		case n > 0 && gap < maxJoin && !unicode.IsLetter(r):
 			gap++ // a short run of separators joins two groups
 		default:
-			if n > 0 {
-				runs = append(runs, n)
+			if n > 0 && flush() {
+				return true
 			}
-			n, gap = 0, 0
 		}
 	}
-	if n > 0 {
-		runs = append(runs, n)
+	return n > 0 && flush()
+}
+
+// Strict shapes a digit run may be and not be a code (#71 L3): clock times
+// alone or in a list ("9:30, 10:00"), and dates with a four-digit year and
+// real day and month ranges ("05/10/2026", "2026-10-05"), or a season
+// ("2026/27", the next year). Amounts are not excused: "£1,250.00" is
+// refused, and the owner writes it another way ("1250 pounds").
+var (
+	clockList = regexp.MustCompile(`^([01]?[0-9]|2[0-3]):[0-5][0-9](( ?[,–-] ?| )([01]?[0-9]|2[0-3]):[0-5][0-9])*$`)
+	dmy       = regexp.MustCompile(`^(0?[1-9]|[12][0-9]|3[01])([/.-])(0?[1-9]|[12][0-9]|3[01])([/.-])(19|20)[0-9]{2}$`)
+	iso       = regexp.MustCompile(`^(19|20)[0-9]{2}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$`)
+	season    = regexp.MustCompile(`^((?:19|20)[0-9]{2})/([0-9]{2})$`)
+)
+
+func benign(run string) bool {
+	if clockList.MatchString(run) || iso.MatchString(run) {
+		return true
 	}
-	for _, k := range runs {
-		if k >= 6 && k <= 8 {
-			return true
-		}
+	if m := dmy.FindStringSubmatch(run); m != nil {
+		// Day and month in either order, but one of them is a month.
+		a, _ := strconv.Atoi(m[1])
+		b, _ := strconv.Atoi(m[3])
+		return m[2] == m[4] && (a <= 12 || b <= 12)
+	}
+	if m := season.FindStringSubmatch(run); m != nil {
+		y, _ := strconv.Atoi(m[1])
+		yy, _ := strconv.Atoi(m[2])
+		return (y+1)%100 == yy
 	}
 	return false
 }
@@ -489,16 +519,6 @@ func codeShaped(s string) bool {
 // maxJoin is the longest run of separators (anything but a letter or a
 // digit) that joins two digit groups: "482 913", "482/913", "482:913",
 // "4, 8, 2, 9, 1, 3".
-
-// benign matches number shapes that are not codes, blanked before digit
-// groups are joined (#71 L3): clock times (9:30, 23:59), dates
-// (05/10/2026, 2026-10-05, 2026/27), and amounts written with thousands
-// separators and a currency sign, a decimal part, or two or more groups
-// (£1,250.00, 1,234,567). "482,913" alone stays code-shaped.
-var benign = regexp.MustCompile(`\b([01]?[0-9]|2[0-3]):[0-5][0-9]\b` +
-	`|\b[0-9]{1,2}[/.-][0-9]{1,2}[/.-][0-9]{2,4}\b|\b[0-9]{4}-[0-9]{2}-[0-9]{2}\b|\b(19|20)[0-9]{2}/[0-9]{2}\b` +
-	`|[$£€¥][0-9]{1,3}(,[0-9]{3})*(\.[0-9]+)?|\b[0-9]{1,3}(,[0-9]{3})+\.[0-9]+|\b[0-9]{1,3}(,[0-9]{3}){2,}\b`)
-
 const maxJoin = 3
 
 func same(e *entry, s Spec) bool {
