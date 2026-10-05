@@ -326,3 +326,14 @@ func TestEveryChainLinkIsAParticipant(t *testing.T) {
 		t.Fatal("a chain through an outsider's message verified")
 	}
 }
+
+// TestComposerNeverGetsAnOwnerRecordOutsideSent: a record with the
+// owner's address in From that exists only outside Sent is not the
+// owner's, so the composer gets nothing for it.
+func TestComposerNeverGetsAnOwnerRecordOutsideSent(t *testing.T) {
+	x := newH(t, nil)
+	x.deliver("INBOX", msg{id: "<fake@example.test>", from: me, to: "eve@evil.example", subject: "Deal", body: "I agree."})
+	if ms, err := x.a.Thread(ctx, "<fake@example.test>"); err == nil || len(ms) != 0 {
+		t.Fatalf("composer got %d messages, err %v", len(ms), err)
+	}
+}

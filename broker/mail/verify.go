@@ -211,6 +211,13 @@ func (a *Adapter) Thread(ctx context.Context, record string) ([]Message, error) 
 	if err != nil {
 		return nil, err
 	}
+	if a.isSelf(m.From) {
+		s, ok := a.sentCopy(ctx, byRole[Sent], m)
+		if !ok {
+			return nil, ErrNotFound
+		}
+		m = s
+	}
 	rc := a.participants(m)
 	want := append(append([]string{}, m.References...), m.InReplyTo)
 	var out []Message
