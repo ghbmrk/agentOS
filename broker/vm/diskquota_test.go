@@ -310,6 +310,12 @@ func TestAWorkersQuotaIsItsLayerCap(t *testing.T) {
 	e := newEnv(t, 8192)
 	q := newFakeQuota()
 	e.cfg.Quota, e.cfg.MachineDiskBytes, e.cfg.WorkerLayerBytes = q, 64<<20, 16<<20
+	// Room for the agent's budget and the worker's cap, not two budgets:
+	// the reserve holds back what each may write, the worker's cap for it.
+	const reserve = int64(32 << 20)
+	e.cfg.DiskReserveBytes = reserve
+	free := reserve + (64<<20 + ConsoleMaxBytes) + (16<<20 + ConsoleMaxBytes) + 1<<20
+	e.cfg.FreeBytes = func(string) (int64, error) { return free, nil }
 	e.open()
 	a := e.create("agent", admission.Accepted, 100)
 	if _, err := e.m.CreateWorker(bg, WorkerPrefix+"1", a.Lineage, Spec{Image: "base", Class: admission.Accepted, MemMB: 100}); err != nil {

@@ -75,6 +75,9 @@ func projectStopsAtItsHardLimit(t *testing.T, root string) {
 	if !overLimit(ierr) {
 		t.Fatalf("made 20 files under a 10-inode quota: %v", ierr)
 	}
+	if u, err := q.Usage(4243); err != nil || u.LimitInodes != 10 || u.Inodes > 10 || u.Inodes < 9 {
+		t.Fatalf("project 4243 after a refused create: usage %+v (%v), want at its 10-inode limit", u, err)
+	}
 	// Cleared, the project writes freely.
 	must(t, q.Clear(4243))
 	must(t, Enforced(func() error { return os.WriteFile(filepath.Join(e, "after-clear"), nil, 0o600) }))
