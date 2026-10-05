@@ -472,3 +472,22 @@ func TestHeldLockoutIsProved(t *testing.T) {
 		t.Fatalf("held but wrong: got %v, want ErrLockoutOwned", err)
 	}
 }
+
+// Giving back a lockout the box no longer holds (its value is stale) is
+// told apart from a TPM that is only refusing for now.
+func TestReleaseWithStaleValue(t *testing.T) {
+	s := swtpm.Start(t)
+	auth, _ := tpmseal.NewLockoutAuth()
+	if err := tpmseal.TakeLockout(s.TPM(), auth, false); err != nil {
+		t.Fatal(err)
+	}
+	stale, _ := tpmseal.NewLockoutAuth()
+	if err := tpmseal.ReleaseLockout(s.TPM(), stale); !errors.Is(err, tpmseal.ErrLockoutOwned) {
+		t.Fatalf("stale value: got %v, want ErrLockoutOwned", err)
+	}
+	// Now in lockout for the lockout hierarchy: the right value is
+	// refused for the moment, and that is not ErrLockoutOwned.
+	if err := tpmseal.ReleaseLockout(s.TPM(), auth); err == nil || errors.Is(err, tpmseal.ErrLockoutOwned) {
+		t.Fatalf("right value during lockout: got %v", err)
+	}
+}

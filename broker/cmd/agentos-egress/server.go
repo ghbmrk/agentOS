@@ -167,7 +167,8 @@ func unlockHandler(c *custody) http.Handler {
 			out["pin"] = true
 		}
 		// The local page words the fallback unlock from these, and
-		// offers "Keep this PC trusted", ticked, on /confirm.
+		// offers "Keep this PC trusted" on /confirm, never ticked by
+		// default: these hints come from files on the drive.
 		if changed, updated, sb := c.bootChange(); changed {
 			out["boot_changed"] = true
 			out["updated"] = updated

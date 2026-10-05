@@ -455,18 +455,15 @@ func unlockCmd(args []string, in io.Reader, out io.Writer) error {
 		} else {
 			fmt.Fprintln(out, "This PC started the box in a way it hasn't before. If you didn't change anything, the drive may have been tampered with. Unlock only if you're sure.")
 		}
-		// Ticked when the change has an innocent explanation; for an
-		// unexplained one the owner opts in (the hints are editable on
-		// the drive, so a tampered boot must not persist by default).
-		explained := st["updated"] == true || st["secure_boot"] == true
-		if explained {
-			fmt.Fprint(out, "Keep this PC trusted? [Y/n] ")
-		} else {
-			fmt.Fprint(out, "Keep this PC trusted? [y/N] ")
-		}
+		// Never ticked by default: updated and secure_boot come from
+		// files on the drive, not from a verified release's measured
+		// boot, so a tampered boot path must not become trusted unless
+		// the owner says so. (A release the updater verified has its
+		// policy signed before the reboot, and never gets here.)
+		fmt.Fprint(out, "Keep this PC trusted? [y/N] ")
 		ans, _ := r.ReadString('\n')
 		ans = strings.ToLower(strings.TrimSpace(ans))
-		keep = ans == "y" || ans == "yes" || (explained && ans == "")
+		keep = ans == "y" || ans == "yes"
 	}
 	fmt.Fprint(out, "Vault passphrase: ")
 	pass, _ := r.ReadString('\n')
