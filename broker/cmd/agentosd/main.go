@@ -18,11 +18,13 @@ import (
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/cgroup"
 	"github.com/ghbmrk/agentos/broker/daemon"
+	"github.com/ghbmrk/agentos/broker/evalsock"
 	"github.com/ghbmrk/agentos/broker/guest"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/owner"
+	"github.com/ghbmrk/agentos/broker/replay"
 	"github.com/ghbmrk/agentos/broker/vm"
 	"github.com/ghbmrk/agentos/broker/vm/gvisor"
 )
@@ -67,10 +69,22 @@ func (a machines) Lineage(id string) (string, error) {
 }
 
 // lateServices forwards to the guest plane, which needs the manager and so
-// is built after it; machines start only once both exist.
-type lateServices struct{ p atomic.Pointer[guest.Plane] }
+// is built after it; machines start only once both exist. Replay machines
+// (vm.EvalPrefix) get the replay evaluator's services instead, never the
+// live plane's (replay R7, R8).
+type lateServices struct {
+	p atomic.Pointer[guest.Plane]
+	r atomic.Pointer[replay.Evaluator]
+}
 
 func (l *lateServices) Open(id string) (string, error) {
+	if strings.HasPrefix(id, vm.EvalPrefix) {
+		r := l.r.Load()
+		if r == nil {
+			return "", errors.New("replay evaluator not open")
+		}
+		return r.Open(id)
+	}
 	p := l.p.Load()
 	if p == nil {
 		return "", errors.New("guest plane not open")
@@ -79,6 +93,12 @@ func (l *lateServices) Open(id string) (string, error) {
 }
 
 func (l *lateServices) Close(id string) {
+	if strings.HasPrefix(id, vm.EvalPrefix) {
+		if r := l.r.Load(); r != nil {
+			r.Close(id)
+		}
+		return
+	}
 	if p := l.p.Load(); p != nil {
 		p.Close(id)
 	}
@@ -101,7 +121,8 @@ func main() {
 	var cfg daemon.Config
 	imgs := images{}
 	var stateDir, runsc, cgroupParent, meterPath, agentMachine, inboxPath, egressSocket, verifySocket string
-	var agentImage, agentLaunch string
+	var agentImage, agentLaunch, evalSocket string
+	var learnUID int
 	var diskReserveMB, agentMemMB int64
 	flag.StringVar(&cfg.JournalPath, "journal", "/var/lib/agentos/journal.log", "journal file")
 	flag.StringVar(&cfg.SocketDir, "sockets", "/run/agentos", "socket directory (created 0700)")
@@ -121,6 +142,8 @@ func main() {
 	flag.StringVar(&agentImage, "agent-image", "openclaw", "image the agent machine is created from on first start; empty keeps no agent machine")
 	flag.StringVar(&agentLaunch, "agent-launch", "/usr/lib/agentos/guest/launch.json", "how the agent machine starts: argv and env (guest/openclaw/launch.json)")
 	flag.Int64Var(&agentMemMB, "agent-mem-mb", 1536, "the agent machine's memory budget, MB")
+	flag.StringVar(&evalSocket, "eval-socket", "/run/agentos-eval/eval.sock", "evaluation socket the learning process's change pipeline calls (replay, LOOP-5)")
+	flag.IntVar(&learnUID, "learn-uid", -1, "uid of the learning process, the only peer on the evaluation socket; -1 serves no evaluations")
 	flag.StringVar(&inboxPath, "guest-inbox", "/var/lib/agentos/guest-inbox.json", "unanswered owner messages to guests, kept across restarts")
 	flag.StringVar(&egressSocket, "egress", "/run/agentos-egress/model.sock", "the vault process's model socket (agentos-egress); empty serves no model route")
 	flag.StringVar(&verifySocket, "owner-verify", "/run/agentos-egress/verify.sock", "the vault process's verify socket, which checks the owner's code-generator codes; empty refuses high-tier codes")
@@ -190,10 +213,22 @@ func main() {
 				svc.p.Store(plane)
 				agent.a.Store(&guest.OwnerAgent{Plane: plane, Machine: agentMachine})
 				defer plane.Shutdown()
-				if k, err := agentKeeper(m, imgs, agentMachine, agentImage, agentLaunch, agentMemMB); err != nil {
+				spec, err := agentSpec(imgs, agentImage, agentLaunch, agentMemMB)
+				if err != nil {
 					log.Printf("no agent machine kept running: %v", err)
 				} else {
+					k := &keeper{m: m, id: agentMachine, spec: spec, every: 30 * time.Second, logf: log.Printf}
 					go k.run(ctx)
+				}
+				if learnUID < 0 || learnUID == os.Getuid() {
+					log.Printf("no evaluations served: -learn-uid must name the learning process's own uid")
+				} else if err != nil {
+					log.Printf("no evaluations served: %v", err)
+				} else if ev, err := serveEvaluations(ctx, m, d, spec, filepath.Join(cfg.SocketDir, "eval-guests"), evalSocket, learnUID); err != nil {
+					log.Printf("no evaluations served: %v", err)
+				} else {
+					svc.r.Store(ev)
+					defer ev.Shutdown()
 				}
 			}
 		}
@@ -202,25 +237,57 @@ func main() {
 	d.Wait()
 }
 
-// agentKeeper keeps the owner's agent machine running (keeper).
-func agentKeeper(m *vm.Manager, imgs images, id, image, launch string, memMB int64) (*keeper, error) {
+// agentSpec is how the owner's agent machine starts, from the image flags
+// and the guest rig's launch file. Replay machines start the same way.
+func agentSpec(imgs images, image, launch string, memMB int64) (vm.Spec, error) {
 	if image == "" {
-		return nil, errors.New("-agent-image is empty")
+		return vm.Spec{}, errors.New("-agent-image is empty")
 	}
 	if _, ok := imgs[image]; !ok {
-		return nil, fmt.Errorf("image %q is not registered with -image", image)
+		return vm.Spec{}, fmt.Errorf("image %q is not registered with -image", image)
 	}
 	argv, env, err := launchSpec(launch)
 	if err != nil {
+		return vm.Spec{}, err
+	}
+	return vm.Spec{Image: image, Class: admission.Foreground, MemMB: memMB, Argv: argv, Env: env, Label: vm.Public}, nil
+}
+
+// serveEvaluations runs the change pipeline's evaluator here, beside the
+// machine manager, for the learning process, which ARC-2 keeps out of this
+// process (loops L16, replay R8). Each run is a replay in a fresh private
+// experiment machine; recorded effects come from this journal, so none
+// crosses the socket. Model access stays off (replay R2) until the model
+// wiring lands.
+func serveEvaluations(ctx context.Context, m *vm.Manager, d *daemon.Daemon, spec vm.Spec, dir, socket string, uid int) (*replay.Evaluator, error) {
+	srv := &evalsock.Server{Logf: log.Printf}
+	ev, err := replay.New(replay.Config{
+		Machines:   m,
+		Recordings: replay.JournalRecordings{J: d.Engine(), Task: srv.Task},
+		Active:     srv.Active,
+		Spec:       vm.Spec{Image: spec.Image, MemMB: spec.MemMB, Argv: spec.Argv, Env: spec.Env},
+		Dir:        dir,
+		Logf:       log.Printf,
+	})
+	if err != nil {
 		return nil, err
 	}
-	return &keeper{
-		m:     m,
-		id:    id,
-		spec:  vm.Spec{Image: image, Class: admission.Foreground, MemMB: memMB, Argv: argv, Env: env, Label: vm.Public},
-		every: 30 * time.Second,
-		logf:  log.Printf,
-	}, nil
+	srv.Runner = ev
+	if err := os.MkdirAll(filepath.Dir(socket), 0o711); err != nil {
+		ev.Shutdown()
+		return nil, err
+	}
+	ln, err := evalsock.Listen(socket, uid)
+	if err != nil {
+		ev.Shutdown()
+		return nil, err
+	}
+	go func() {
+		if err := evalsock.Serve(ctx, ln, srv); err != nil {
+			log.Printf("evaluation socket: %v", err)
+		}
+	}()
+	return ev, nil
 }
 
 func openCgroup(path string) (*cgroup.Group, error) {

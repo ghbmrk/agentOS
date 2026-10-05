@@ -51,19 +51,19 @@ const Prefix = vm.EvalPrefix
 // TreeDir is where the guest finds the tree under evaluation.
 const TreeDir = "etc/agentos/tree"
 
-// untested are the namespaces a replay cannot exercise: it boots the
+// Untested are the namespaces a replay cannot exercise: it boots the
 // configured image and guest configuration, not the tree's. A tree that
 // changes them is not evaluated (ErrNotEvaluated). Without model access,
 // routing is not exercised either (untestedNamespaces).
-var untested = []string{"config", "guest-image", "host-image"}
+var Untested = []string{"config", "guest-image", "host-image"}
 
 func (e *Evaluator) untestedNamespaces() []string {
 	if e.cfg.Model == nil {
 		// Routing acts only through Model: with none, both sides of a
 		// routing change give the same output, which is no evidence.
-		return append(append([]string(nil), untested...), "routing")
+		return append(append([]string(nil), Untested...), "routing")
 	}
-	return untested
+	return Untested
 }
 
 // guestNamespaces are the tree namespaces a guest reads. Routing is applied
