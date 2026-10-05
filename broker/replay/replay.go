@@ -118,6 +118,12 @@ type Config struct {
 	// PreemptPoll is how often a run checks whether admission preempted
 	// its machine. Default 500 ms.
 	PreemptPoll time.Duration
+	// RevokedForOwner reports, once, whether admission preempted replay
+	// machine id for the owner's work without memory pressure, as it
+	// recorded when it picked the victim (admission's RevokedForOwner).
+	// Only then is a revoke the owner's (change.ErrClassRevoke); nil: every
+	// revoke counts against the candidate (PE5, security P3).
+	RevokedForOwner func(id string) bool
 	// Logf reports broker-side faults. Nil is silent.
 	Logf func(format string, args ...any)
 }
@@ -262,13 +268,8 @@ func (e *Evaluator) Run(ctx context.Context, t change.Tree, c change.Probe) ([]b
 	ctx, cancel := context.WithTimeout(ctx, e.cfg.Timeout)
 	defer cancel()
 	if _, err := e.cfg.Machines.CreateSeeded(ctx, r.id, e.cfg.Spec, seed(t)); err != nil {
-		if errors.Is(err, admission.ErrNoRoom) {
-			// No room, reckoned on declared budgets: the owner's work has
-			// the box, which no candidate can cause (PE5).
-			return nil, fmt.Errorf("replay: start %s: %w: %w: %v", c.ID, ErrPreempted, change.ErrOwnerPreempt, err)
-		}
 		if refused(err) {
-			return nil, fmt.Errorf("replay: start %s: %w: %v", c.ID, ErrPreempted, err)
+			return nil, fmt.Errorf("replay: start %s: %w", c.ID, e.preempted(r.id, err))
 		}
 		return nil, fmt.Errorf("replay: start %s: %w", c.ID, err)
 	}
@@ -292,7 +293,7 @@ func (e *Evaluator) Run(ctx context.Context, t change.Tree, c change.Probe) ([]b
 		select {
 		case <-poll.C:
 			if m, err := e.cfg.Machines.Get(r.id); err == nil && m.State == vm.Preempted {
-				return nil, fmt.Errorf("replay %s: %w", c.ID, ErrPreempted)
+				return nil, fmt.Errorf("replay %s: %w", c.ID, e.preempted(r.id, vm.ErrRevoked))
 			}
 			continue
 		case out := <-r.out:
@@ -311,6 +312,34 @@ func (e *Evaluator) Run(ctx context.Context, t change.Tree, c change.Probe) ([]b
 			return nil, fmt.Errorf("replay %s: %w: %v", c.ID, ErrNoReply, ctx.Err())
 		}
 	}
+}
+
+// preempted is ErrPreempted for admission's refusal or revoke err of
+// replay machine id, marked the owner's when no candidate can have caused
+// it (PE5): change.ErrNoRoomPreempt for no room while no other replay
+// machine holds room (room is reckoned on the fixed Spec's declared
+// budget, which no tree changes), change.ErrClassRevoke for a revoke
+// admission recorded as for the owner's work. Otherwise the interruption
+// counts. Only these error values mark it, never a machine's or guest's
+// text, which is kept as text only (security P1).
+func (e *Evaluator) preempted(id string, err error) error {
+	switch {
+	case errors.Is(err, admission.ErrNoRoom) && !e.otherMachines(id):
+		return fmt.Errorf("%w: %w: %v", ErrPreempted, change.ErrNoRoomPreempt, err)
+	case errors.Is(err, vm.ErrRevoked) && e.cfg.RevokedForOwner != nil && e.cfg.RevokedForOwner(id):
+		return fmt.Errorf("%w: %w: %v", ErrPreempted, change.ErrClassRevoke, err)
+	}
+	return fmt.Errorf("%w: %v", ErrPreempted, err)
+}
+
+// otherMachines reports whether a replay machine other than id exists.
+func (e *Evaluator) otherMachines(id string) bool {
+	for _, m := range e.cfg.Machines.Machines() {
+		if m != id && strings.HasPrefix(m, Prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // refused reports a start error that is admission's, not the machine's:

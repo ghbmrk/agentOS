@@ -340,6 +340,10 @@ type Pipeline struct {
 	kept      map[string]pairResult
 	keptOrder []keptAt // put order, for dropping the oldest
 	keptSeq   uint64
+	// exempt counts each candidate's exempt interruptions (MaxExempt),
+	// in first-seen order for dropping the oldest.
+	exempt      map[string]int
+	exemptOrder []string
 }
 
 // New loads the persisted state, or seeds it on first start, and applies
@@ -777,6 +781,13 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 		struck bool
 		err    bool // the evaluator errored (a fail, unlike a grader's)
 	}
+	ck := p.candidateKey(base, next)
+	p.mu.Lock()
+	parked := p.exempt[ck] >= MaxExempt
+	p.mu.Unlock()
+	if parked && !IsIdle(ctx) {
+		return Score{}, ErrParked
+	}
 	nonce := make([]byte, 16)
 	_, _ = rand.Read(nonce)
 	keys := map[string]string{}
@@ -887,8 +898,12 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 		}
 		// Only a cut the candidate could have caused counts (PE5): any
 		// cause the host did not mark as the owner's, unknown included.
-		counted := cut != nil && cut.cand && !errors.Is(cause, ErrOwnerPreempt)
+		exempt := errors.Is(cause, ErrOwnerPreempt)
+		counted := cut != nil && cut.cand && !exempt
 		p.mu.Lock()
+		if exempt {
+			p.exemptLocked(ck)
+		}
 		// Every side that finished is kept, so a result once seen is
 		// never run again. The candidate side cut short is counted, so
 		// a candidate that forces preemptions cannot re-roll a case
@@ -902,8 +917,13 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 			}
 		}
 		p.mu.Unlock()
-		if counted && p.cfg.Logf != nil {
-			p.cfg.Logf("change: a candidate run was cut short (%s); counted", cutClass(cause, stopped != nil))
+		if p.cfg.Logf != nil {
+			switch {
+			case counted:
+				p.cfg.Logf("change: a candidate run was cut short (%s); counted", cutClass(cause, stopped != nil))
+			case exempt:
+				p.cfg.Logf("change: a candidate run was cut short (%s); not counted", exemptClass(cause))
+			}
 		}
 		if stopped != nil {
 			return Score{}, stopped

@@ -1,10 +1,12 @@
 package change
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -25,6 +27,63 @@ var ErrInterrupted = errors.New("change: evaluation interrupted; completed pairs
 // ErrNoRoom (arbitrator on PE5). It is never derived from replay or guest
 // output, so its text in an error is just text.
 var ErrOwnerPreempt = errors.New("change: interrupted for the owner's work")
+
+// The host's exempt causes, each logged by a fixed class only (security
+// P5 on PE5). Each wraps ErrOwnerPreempt; ErrOwnerPreempt alone logs as
+// owner-work.
+var (
+	// ErrOwnerStop: STOP, LOOPS OFF, or the owner pausing a loop.
+	ErrOwnerStop = fmt.Errorf("change: stopped by the owner: %w", ErrOwnerPreempt)
+	// ErrOwnerWork: the owner's accepted work arrived without pressure.
+	ErrOwnerWork = fmt.Errorf("change: the owner's work needs the box: %w", ErrOwnerPreempt)
+	// ErrNoRoomPreempt: admission had no room for the replay machine's
+	// fixed budget, with no other replay machine holding room.
+	ErrNoRoomPreempt = fmt.Errorf("change: no room for the replay machine: %w", ErrOwnerPreempt)
+	// ErrClassRevoke: admission revoked the replay machine for the owner's
+	// higher-class work without pressure, as it recorded when it chose
+	// the victim.
+	ErrClassRevoke = fmt.Errorf("change: revoked for the owner's work: %w", ErrOwnerPreempt)
+)
+
+// MaxExempt is how many exempt interruptions one candidate may take before
+// it is parked (security P4 on PE5): it is not struck and gets no verdict,
+// but its evaluation is refused with ErrParked unless the scheduler marks
+// the evaluator idle (WithIdle). The count is never reset, so a parked
+// candidate never takes the evaluator back from other work. It bounds the
+// spare compute an owner-busy box spends re-running one candidate.
+const MaxExempt = 6
+
+// ErrParked: the candidate was cut short for the owner MaxExempt times and
+// waits until the evaluator is idle. It wraps ErrInterrupted, so callers
+// keep the candidate and the pipeline keeps its pairs (ResumeFor,
+// MaxKeptPairs).
+var ErrParked = fmt.Errorf("change: candidate parked until the evaluator is idle: %w", ErrInterrupted)
+
+type idleKey struct{}
+
+// WithIdle marks ctx as the evaluator's idle time: nothing else is waiting
+// for it, so a parked candidate may run. Only the loop scheduler sets it.
+func WithIdle(ctx context.Context) context.Context { return context.WithValue(ctx, idleKey{}, true) }
+
+// IsIdle reports whether ctx carries WithIdle's mark.
+func IsIdle(ctx context.Context) bool { v, _ := ctx.Value(idleKey{}).(bool); return v }
+
+// maxExemptCandidates bounds the exempt counts kept; past it the oldest
+// is dropped.
+const maxExemptCandidates = 1024
+
+// exemptClass is an exempt cut's fixed log class.
+func exemptClass(cause error) string {
+	switch {
+	case errors.Is(cause, ErrOwnerStop):
+		return "owner-stop"
+	case errors.Is(cause, ErrNoRoomPreempt):
+		return "no-room"
+	case errors.Is(cause, ErrClassRevoke):
+		return "class-revoke"
+	}
+	return "owner-work"
+}
 
 // ErrPressurePreempt is the scheduler's cause for a preemption under
 // memory pressure, which a candidate can drive by thrashing in its own
@@ -180,4 +239,36 @@ func (p *Pipeline) keptSides() int {
 		}
 	}
 	return n
+}
+
+// candidateKey names one candidate's evaluation: the evaluator's identity
+// and the two trees.
+func (p *Pipeline) candidateKey(base, next Tree) string {
+	id := ""
+	if p.cfg.EvaluatorID != nil {
+		id = p.cfg.EvaluatorID()
+	}
+	h := sha256.New()
+	h.Write([]byte(id))
+	h.Write([]byte{0})
+	h.Write([]byte(base.Hash()))
+	h.Write([]byte{0})
+	h.Write([]byte(next.Hash()))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// exemptLocked adds one exempt interruption to key's count, dropping the
+// oldest key past maxExemptCandidates.
+func (p *Pipeline) exemptLocked(key string) {
+	if p.exempt == nil {
+		p.exempt = map[string]int{}
+	}
+	if _, ok := p.exempt[key]; !ok {
+		p.exemptOrder = append(p.exemptOrder, key)
+	}
+	p.exempt[key]++
+	for len(p.exemptOrder) > maxExemptCandidates {
+		delete(p.exempt, p.exemptOrder[0])
+		p.exemptOrder = p.exemptOrder[1:]
+	}
 }

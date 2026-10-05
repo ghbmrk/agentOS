@@ -379,12 +379,20 @@ func (l *learning) busy() bool {
 // busyCause is admission's BusyCause for the scheduler (PE5). Before the
 // daemon attaches, the box reads as busy under pressure, so a cut then
 // counts.
-func (l *learning) busyCause() (busy, pressure bool) {
+func (l *learning) busyCause() (busy, owner, pressure bool) {
 	a := l.adm.Load()
 	if a == nil {
-		return true, true
+		return true, false, true
 	}
 	return a.BusyCause()
+}
+
+// revokedForOwner is admission's RevokedForOwner for the replay evaluator
+// (PE5): before the daemon attaches there is no record, so a revoke
+// counts.
+func (l *learning) revokedForOwner(id string) bool {
+	a := l.adm.Load()
+	return a != nil && a.RevokedForOwner(id)
 }
 
 func (l *learning) stopped() bool {
@@ -416,7 +424,9 @@ func (l *learning) openEvaluator(m *vm.Manager, services *lateServices, c evalCo
 		Active:     l.pipe.Files,
 		Spec:       c.Spec,
 		Dir:        c.Dir,
-		Logf:       log.Printf,
+		// A revoke is the owner's only as admission recorded it (PE5).
+		RevokedForOwner: l.revokedForOwner,
+		Logf:            log.Printf,
 	}
 	if c.Egress != "" {
 		rc.Meter = l.spare

@@ -591,7 +591,7 @@ func (s *Scheduler) Execute(_ context.Context, in journal.Intent, _ int) journal
 	if s.done != nil && (next.Off || next.Paused[s.runningLoop]) {
 		s.preempted = true // offered again if the loop comes back on
 		// The owner's setting: not a cut a candidate caused (PE5).
-		s.cancelLocked(change.ErrOwnerPreempt)
+		s.cancelLocked(change.ErrOwnerStop)
 	}
 	s.wakeLocked()
 	return journal.Outcome{Result: journal.ResultSucceeded}

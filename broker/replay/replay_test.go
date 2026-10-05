@@ -762,26 +762,76 @@ func TestRES1PreemptedReplayMachineInterrupts(t *testing.T) {
 }
 
 // REQ: RES-1, CHG-1
-// PE5: a start admission refused for want of room, which it reckons on
-// declared budgets, is the owner's (change.ErrOwnerPreempt) and does not
-// count against the candidate; pressure and a revoke still count, and so
-// does any other error, whatever its text.
+// PE5 (security P1, P3): a start admission refused for want of room is
+// the owner's (change.ErrNoRoomPreempt) only while no other replay machine
+// holds room: room is reckoned on the fixed replay spec's declared budget,
+// which no tree changes, but a leftover replay machine is the loops' own.
+// A revoke is the owner's (change.ErrClassRevoke) only when admission
+// recorded it as for the owner's work without pressure. Pressure, any
+// other revoke and any other error count, whatever their text: a machine
+// or guest naming the owner's preemption gets nothing from it.
 func TestRES1NoRoomIsTheOwners(t *testing.T) {
 	for _, tc := range []struct {
-		cause error
-		owner bool
+		name     string
+		cause    error
+		leftover bool // another replay machine still holds room
+		forOwner bool // admission recorded the revoke as the owner's
+		want     error
 	}{
-		{admission.ErrNoRoom, true},
-		{fmt.Errorf("start: %w", admission.ErrNoRoom), true},
-		{admission.ErrPressure, false},
-		{fmt.Errorf("%w: eval-x", vm.ErrRevoked), false},
-		{errors.New(change.ErrOwnerPreempt.Error()), false},
+		{name: "no room", cause: admission.ErrNoRoom, want: change.ErrNoRoomPreempt},
+		{name: "no room, wrapped", cause: fmt.Errorf("start: %w", admission.ErrNoRoom), want: change.ErrNoRoomPreempt},
+		{name: "no room, replay machine left", cause: admission.ErrNoRoom, leftover: true},
+		{name: "pressure", cause: admission.ErrPressure},
+		{name: "revoked", cause: fmt.Errorf("%w: eval-x", vm.ErrRevoked)},
+		{name: "revoked for the owner", cause: fmt.Errorf("%w: eval-x", vm.ErrRevoked), forOwner: true, want: change.ErrClassRevoke},
+		{name: "pressure, revoke recorded", cause: admission.ErrPressure, forOwner: true},
+		{name: "machine text naming the owner", cause: errors.New(change.ErrOwnerStop.Error())},
 	} {
-		r := newRig(t, recs{}, func(*client, string) string { return "ok" }, nil)
-		r.ms.createErr = tc.cause
+		t.Run(tc.name, func(t *testing.T) {
+			var asked []string
+			r := newRig(t, recs{}, func(*client, string) string { return "ok" }, func(c *Config) {
+				c.RevokedForOwner = func(id string) bool { asked = append(asked, id); return tc.forOwner }
+			})
+			r.ms.createErr = tc.cause
+			if tc.leftover {
+				r.ms.live[Prefix+"left"] = true
+			}
+			_, err := r.e.Run(bg, tree, change.Probe{ID: "p1", Input: []byte("go")})
+			owner := errors.Is(err, change.ErrOwnerPreempt)
+			if tc.want == nil && owner || tc.want != nil && !errors.Is(err, tc.want) {
+				t.Fatalf("%v: got %v, want %v", tc.cause, err, tc.want)
+			}
+			for _, id := range asked {
+				if !strings.HasPrefix(id, Prefix) || id == Prefix+"left" {
+					t.Fatalf("asked about %q", id)
+				}
+			}
+		})
+	}
+}
+
+// REQ: RES-1, CHG-1
+// PE5 (security P3): a replay machine preempted mid-run is the owner's
+// (change.ErrClassRevoke) only when admission recorded the revoke as for
+// the owner's work; otherwise the interruption counts.
+func TestRES1MidRunRevokeIsTheOwnersOnlyByRecord(t *testing.T) {
+	for _, forOwner := range []bool{false, true} {
+		started := make(chan string, 1)
+		r := newRig(t, recs{}, func(*client, string) string { return "" }, func(c *Config) {
+			c.PreemptPoll = 10 * time.Millisecond
+			c.RevokedForOwner = func(string) bool { return forOwner }
+		})
+		r.ms.guest = func(*client, string) string {
+			r.ms.mu.Lock()
+			id := r.ms.created[len(r.ms.created)-1]
+			r.ms.mu.Unlock()
+			started <- id
+			return ""
+		}
+		go func() { r.ms.setState(<-started, vm.Preempted) }()
 		_, err := r.e.Run(bg, tree, change.Probe{ID: "p1", Input: []byte("go")})
-		if got := errors.Is(err, change.ErrOwnerPreempt); got != tc.owner {
-			t.Fatalf("%v: owner's %v, want %v (%v)", tc.cause, got, tc.owner, err)
+		if !errors.Is(err, ErrPreempted) || errors.Is(err, change.ErrClassRevoke) != forOwner || errors.Is(err, change.ErrOwnerPreempt) != forOwner {
+			t.Fatalf("recorded for the owner %v: %v", forOwner, err)
 		}
 	}
 }
