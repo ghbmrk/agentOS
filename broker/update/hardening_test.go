@@ -381,3 +381,51 @@ func TestOpenPrivateKeyFileRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Security lens C2: a security fix followed by an ordinary release is
+// still reported, so the newest is treated as carrying the fix.
+func TestSecurityFixNotHiddenByNewerRelease(t *testing.T) {
+	f := newFixture(t)
+	f.release(2, func(r *Manifest) { r.Security = true })
+	f.release(3, nil)
+	f.release(4, func(r *Manifest) { r.Channel = ChannelFast; r.Security = true })
+	f.publish(0, 1)
+	res, err := f.check(Options{})
+	if err != nil || mustV(res.Release.Manifest()).Version != 3 || res.SecurityFix != 2 {
+		t.Fatalf("stable: %+v %v", res, err)
+	}
+	res, err = f.check(Options{Channel: ChannelFast})
+	if err != nil || mustV(res.Release.Manifest()).Version != 4 || res.SecurityFix != 4 {
+		t.Fatalf("fast: %+v %v", res, err)
+	}
+	g := newFixture(t)
+	g.release(2, nil)
+	g.publish(0, 1)
+	if res, _ := g.check(Options{}); res.SecurityFix != 0 {
+		t.Fatalf("no security fix, got %d", res.SecurityFix)
+	}
+}
+
+// Security lens C3: concurrent checks on one store (two mirrors, or the
+// updater beside Loop 3) are serialized and all succeed.
+func TestConcurrentChecksSerialize(t *testing.T) {
+	f := newFixture(t)
+	f.release(2, nil)
+	f.publish(0, 1)
+	errs := make(chan error, 8)
+	for i := 0; i < 8; i++ {
+		go func() {
+			st := &Store{Dir: f.store.Dir} // as a second process would open it
+			_, err := st.Check(DirSource(f.repo.Dir), Options{Now: func() time.Time { return f.now }})
+			errs <- err
+		}()
+	}
+	for i := 0; i < 8; i++ {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(f.store.Dir, ".lock")); err != nil {
+		t.Fatal(err)
+	}
+}

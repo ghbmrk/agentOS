@@ -5,8 +5,9 @@ on:
   pull_request:
 permissions:
   contents: read
-# Builds never download a Go toolchain: setup-go installs the one go.mod
-# names, and an offline build fails rather than fetch one.
+# Builds never download a Go toolchain: setup-go installs the one go.mod's
+# toolchain line names (setup-go's go-version-file reads only the go line),
+# each job checks it, and an offline build fails rather than fetch one.
 env:
   GOTOOLCHAIN: local
 jobs:
@@ -19,12 +20,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      # The canary and audit self-tests build the broker, so install the
-      # toolchain go.mod names (GOTOOLCHAIN=local never downloads one).
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0 (reads the toolchain line)
+      # The harness tests build the broker.
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         with:
-          go-version-file: broker/go.mod
+          go-version: "1.26.8" # = broker/go.mod's toolchain line; checked below
           cache: false
+      - name: Go is the toolchain go.mod names
+        run: |
+          want=$(awk '$1 == "toolchain" {print $2}' "$GITHUB_WORKSPACE/broker/go.mod")
+          got=$(go version | awk '{print $3}')
+          [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }
       - name: Unit tests
         run: python -m unittest discover -s tests -v
       - name: Traceability (markers cite known IDs; checked on a regenerated TRACE.md)
@@ -44,15 +49,17 @@ jobs:
         working-directory: broker
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0 (reads the toolchain line)
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         with:
-          go-version-file: broker/go.mod
+          go-version: "1.26.8" # = broker/go.mod's toolchain line; checked below
           cache: false
       - name: Go is the toolchain go.mod names
         run: |
-          want=$(awk '$1 == "toolchain" {print $2}' broker/go.mod)
+          want=$(awk '$1 == "toolchain" {print $2}' "$GITHUB_WORKSPACE/broker/go.mod")
           got=$(go version | awk '{print $3}')
           [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }
+      - name: Software TPM for the trusted-host slot (P2-4b)
+        run: sudo apt-get update -q && sudo apt-get install -yq swtpm
       - name: Format
         # Vendored code keeps its upstream formatting.
         run: |
@@ -61,6 +68,9 @@ jobs:
       - name: Vet
         run: go vet ./...
       - name: Tests (race detector)
+        # The TPM tests fail rather than skip if swtpm is missing.
+        env:
+          AGENTOS_REQUIRE_SWTPM: "1"
         run: go test -race -count=1 ./...
   machines:
     # Agent-machine lifecycle against the real kernel (P1-4): cgroup v2,
@@ -68,13 +78,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0 (reads the toolchain line)
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         with:
-          go-version-file: broker/go.mod
+          go-version: "1.26.8" # = broker/go.mod's toolchain line; checked below
           cache: false
       - name: Go is the toolchain go.mod names
         run: |
-          want=$(awk '$1 == "toolchain" {print $2}' broker/go.mod)
+          want=$(awk '$1 == "toolchain" {print $2}' "$GITHUB_WORKSPACE/broker/go.mod")
           got=$(go version | awk '{print $3}')
           [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }
       - name: Install gVisor release-20260928.0 (checksum pinned)

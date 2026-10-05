@@ -13,22 +13,22 @@
     {
       "file": "broker/vendor/golang.org/x/sys/unix/mkall.sh",
       "host": "cgit.freebsd.org",
-      "why": "golang.org/x/sys build script (generates syscall tables); not compiled into any binary (P4-3)"
+      "why": "golang.org/x/sys build script (generates syscall tables); not compiled into any binary (P2-4b, P4-3)"
     },
     {
       "file": "broker/vendor/golang.org/x/sys/unix/mkall.sh",
       "host": "cvsweb.netbsd.org",
-      "why": "golang.org/x/sys build script (generates syscall tables); not compiled into any binary (P4-3)"
+      "why": "golang.org/x/sys build script (generates syscall tables); not compiled into any binary (P2-4b, P4-3)"
     },
     {
       "file": "broker/vendor/golang.org/x/sys/unix/mkall.sh",
       "host": "gitweb.dragonflybsd.org",
-      "why": "golang.org/x/sys build script (generates syscall tables); not compiled into any binary (P4-3)"
+      "why": "golang.org/x/sys build script (generates syscall tables); not compiled into any binary (P2-4b, P4-3)"
     },
     {
       "file": "broker/vendor/golang.org/x/sys/unix/syscall_solaris.go",
       "host": "go.dev",
-      "why": "bug link inside a Solaris-only panic message; not compiled for Linux and never contacted (P4-3)"
+      "why": "bug link inside a Solaris-only panic message; not compiled for Linux and never contacted (P2-4b, P4-3)"
     },
     {
       "file": "broker/vendor/github.com/secure-systems-lab/go-securesystemslib/cjson/canonicaljson.go",

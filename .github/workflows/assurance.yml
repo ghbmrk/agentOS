@@ -11,8 +11,9 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
-# Builds never download a Go toolchain: setup-go installs the one go.mod
-# names, and an offline build fails rather than fetch one.
+# Builds never download a Go toolchain: setup-go installs the one go.mod's
+# toolchain line names (setup-go's go-version-file reads only the go line),
+# each job checks it, and an offline build fails rather than fetch one.
 env:
   GOTOOLCHAIN: local
 # Both harnesses are stdlib-only, so they use the runner's system python3: no
@@ -27,11 +28,11 @@ jobs:
       # Some canary targets build the broker, so they need go.mod's Go.
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         with:
-          go-version-file: broker/go.mod
+          go-version: "1.26.8" # = broker/go.mod's toolchain line; checked below
           cache: false
       - name: Go is the toolchain go.mod names
         run: |
-          want=$(awk '$1 == "toolchain" {print $2}' broker/go.mod)
+          want=$(awk '$1 == "toolchain" {print $2}' "$GITHUB_WORKSPACE/broker/go.mod")
           got=$(go version | awk '{print $3}')
           [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }
       - name: Canary scan (A5), fresh canaries every round
@@ -52,11 +53,11 @@ jobs:
       # toolchain go.mod names must already be installed (no download).
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         with:
-          go-version-file: broker/go.mod
+          go-version: "1.26.8" # = broker/go.mod's toolchain line; checked below
           cache: false
       - name: Go is the toolchain go.mod names
         run: |
-          want=$(awk '$1 == "toolchain" {print $2}' broker/go.mod)
+          want=$(awk '$1 == "toolchain" {print $2}' "$GITHUB_WORKSPACE/broker/go.mod")
           got=$(go version | awk '{print $3}')
           [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }
       - name: Sandbox prerequisites (user namespaces, io_uring off, strace)

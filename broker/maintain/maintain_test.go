@@ -668,3 +668,21 @@ func TestUrgentWhileRetryDue(t *testing.T) {
 		t.Fatal("not urgent while a failed check is retried")
 	}
 }
+
+func TestSecurityFixBehindNewerReleaseNotSoaked(t *testing.T) {
+	// Security fix 2 is followed by ordinary release 3 before the box
+	// checks: 3 carries the fix, so it is treated as a security update
+	// (no soak) and, since 3 itself is not marked security and cannot
+	// auto-stage, goes to the owner at once (security lens C2, PM1).
+	r := newRig(t)
+	r.release(2, func(m *update.Manifest) { m.Security = true })
+	r.release(3, nil)
+	r.tick()
+	got := r.p.proposed()
+	if len(got) != 1 || got[0].Version() != "3" || got[0].Security() {
+		t.Fatalf("proposed %+v", got)
+	}
+	if st := r.l.Status(); !strings.Contains(st.Line, "Security update 3 needs your approval") {
+		t.Fatalf("status: %q", st.Line)
+	}
+}

@@ -384,14 +384,17 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 		return loops.Result{Err: serr}
 	}
 	v := m.Version
-	l.st.Newest, l.st.NewestSecurity = v, m.Security
+	// A newer ordinary release carries an earlier security fix (update
+	// SecurityFix), so it is handled as one (M5).
+	security := m.Security || res.SecurityFix != 0
+	l.st.Newest, l.st.NewestSecurity = v, security
 	if _, ok := l.st.Seen[key]; !ok {
 		l.st.Seen[key] = now
 	}
 	seen := l.st.Seen[key]
 	_, proposed := l.st.Proposed[v]
 	if channel == ChannelPinned {
-		l.st.Pending = &pending{Version: v, Security: m.Security, Why: waitPinned}
+		l.st.Pending = &pending{Version: v, Security: security, Why: waitPinned}
 	}
 	serr := l.saveLocked()
 	l.mu.Unlock()
@@ -401,7 +404,7 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 		return loops.Result{Err: serr}
 	}
 
-	o := l.decide(ctx, rel, m, channel, seen, now)
+	o := l.decide(ctx, rel, m, security, channel, seen, now)
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -420,7 +423,7 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 		l.st.ProposedAt[v] = now
 	case o.wait == nil:
 		// Preempted before proposing: offered again.
-		l.st.Pending = &pending{Version: v, Security: m.Security, Why: waitPreempted}
+		l.st.Pending = &pending{Version: v, Security: security, Why: waitPreempted}
 		l.st.Next = time.Time{}
 	default:
 		l.st.Pending = o.wait
@@ -512,19 +515,22 @@ type outcome struct {
 
 // decide applies UPD-8 and UPD-5 to a verified release newer than the
 // installed one and proposes it when they allow.
-func (l *Loop3) decide(ctx context.Context, rel *update.Verified, m update.Manifest, channel string, seen, now time.Time) outcome {
+func (l *Loop3) decide(ctx context.Context, rel *update.Verified, m update.Manifest, security bool, channel string, seen, now time.Time) outcome {
 	mf, err := rel.ManifestFile()
 	if err != nil {
-		return outcome{wait: &pending{Version: m.Version, Security: m.Security, Why: waitPropose}, err: err}
+		return outcome{wait: &pending{Version: m.Version, Security: security, Why: waitPropose}, err: err}
 	}
 	all, aerr := l.attestations(ctx, mf.Path)
 	atts := l.listed(all)
-	if m.Security {
+	if security {
 		// UPD-8, D6: a security fix auto-stages only with a passing report
 		// from a listed attestor. Without one it waits a day for one, then
 		// goes to the owner (CH-3); with no attestor listed it goes to the
 		// owner at once.
-		if err := rel.SecurityAutoStage(atts, l.cfg.OwnKey); err != nil &&
+		// A newer release carrying the fix but not marked security itself
+		// cannot auto-stage (update judges the newest), so it goes to the
+		// owner at once.
+		if err := rel.SecurityAutoStage(atts, l.cfg.OwnKey); err != nil && m.Security &&
 			len(l.cfg.Attestors) > 0 && now.Before(seen.Add(l.cfg.AttestWait)) {
 			return outcome{wait: &pending{Version: m.Version, Security: true, Why: waitAttestation}, err: aerr}
 		}
@@ -545,12 +551,12 @@ func (l *Loop3) decide(ctx context.Context, rel *update.Verified, m update.Manif
 		if ctx.Err() != nil {
 			return outcome{err: err}
 		}
-		return outcome{wait: &pending{Version: m.Version, Security: m.Security, Why: waitPropose}, err: err}
+		return outcome{wait: &pending{Version: m.Version, Security: security, Why: waitPropose}, err: err}
 	}
 	o := outcome{proposed: rep.State}
 	switch {
 	case rep.State == change.StateRejected:
-	case m.Security:
+	case security:
 		o.value = valueSecurity
 	default:
 		o.value = valueRelease
