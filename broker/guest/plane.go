@@ -25,6 +25,7 @@ package guest
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -109,6 +110,18 @@ type Config struct {
 	// it for this long (G14); default DefaultGoalQuiet. Now is the clock.
 	GoalQuiet time.Duration
 	Now       func() time.Time
+	// Tools are further broker tools beside effect_request and
+	// effect_status (the recall tools, CAP-3). Nil offers none.
+	Tools Tools
+}
+
+// Tools serves broker tools beyond effects. Identity is the machine the
+// socket belongs to and its fork lineage, never anything the guest sends.
+// Call reports handled=false for a name it does not serve. Its text and
+// error strings go to the guest as they are.
+type Tools interface {
+	List() []map[string]any
+	Call(ctx context.Context, machine, lineage, name string, args json.RawMessage) (text string, handled bool, err error)
 }
 
 // Plane serves every machine's socket. It implements vm.Services.

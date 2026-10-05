@@ -131,6 +131,13 @@ type Config struct {
 	// when none is, so a bare reply meant for a request never lands here.
 	// Nil: untagged replies are never answers.
 	ApprovalsOpen func() bool
+	// Reserve takes one text of the owner channel's CH-15 budget, shared
+	// with approval requests, just before a question is texted; false
+	// holds the question (Q3, UX-71-1). The wiring passes the gate's
+	// Reserve, which refuses while an approval request waits to be sent
+	// and counts the text in the same step. Nil: questions are paced
+	// alone, by SendsPerHour.
+	Reserve func(now time.Time) bool
 	// Logf records store failures. Nil: discarded.
 	Logf func(format string, args ...any)
 
@@ -736,6 +743,11 @@ func (b *Book) sendDue(ctx context.Context) {
 		deadline := now.Add(e.Wait)
 		text := b.render(e, now, deadline)
 		b.mu.Unlock()
+		// The shared budget is reserved outside b.mu, and sendMu keeps it
+		// to one question at a time.
+		if b.cfg.Reserve != nil && !b.cfg.Reserve(now) {
+			return
+		}
 		if err := b.cfg.Send(text); err != nil {
 			return
 		}

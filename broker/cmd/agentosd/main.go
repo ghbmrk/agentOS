@@ -151,6 +151,9 @@ func main() {
 	flag.StringVar(&learn.Dir, "learn", "/var/lib/agentos/learn", "change pipeline and loop scheduler state (W3)")
 	flag.StringVar(&learn.Spare, "spare-meter", "/var/lib/agentos/spare-meter.json", "spare-time model budget state (LOOP-2), apart from -meter")
 	flag.Int64Var(&replayMemMB, "replay-mem-mb", 1024, "a replay machine's memory budget, MB (LOOP-5)")
+	qcfg := defaultQuestionConfig("/var/lib/agentos")
+	flag.StringVar(&qcfg.Path, "questions", qcfg.Path, "agents' questions to the owner, kept across restarts (P3-8)")
+	flag.StringVar(&qcfg.ClockPath, "clock-state", qcfg.ClockPath, "the box clock check's state (P2-9)")
 	flag.Parse()
 	if cfg.ModemUID < 0 || cfg.ModemUID == os.Getuid() {
 		log.Fatal("-modem-uid must name the modem bridge's own uid, distinct from the broker's")
@@ -176,6 +179,10 @@ func main() {
 	}
 	pre := &preempter{}
 	cfg.Preempter = pre
+	// Agents' questions (W9): owner replies are answered before task chat
+	// reaches the agent.
+	qs := &questions{}
+	qs.wire(&cfg)
 	agent := &lateAgent{}
 	cfg.Agent = agent
 	// Until the keeper runs, STATUS says the agent is not set up; it says
@@ -213,6 +220,13 @@ func main() {
 	if lp != nil {
 		lp.attach(ctx, d)
 	}
+	// The owner channel failing to take questions must not take it down:
+	// the tools are then not offered and replies are task chat.
+	if guard, err := qs.open(ctx, d, pre, qcfg); err != nil {
+		log.Printf("owner questions disabled: %v", err)
+	} else {
+		defer guard.Flush()
+	}
 	if runsc != "" {
 		services := &lateServices{}
 		m, err := vm.Open(ctx, vm.Config{
@@ -229,7 +243,7 @@ func main() {
 			log.Printf("agent machines disabled: %v", err)
 		} else {
 			pre.m.Store(m)
-			if plane, err := openGuestPlane(m, d, cfg.SocketDir, meterPath, inboxPath, egressSocket); err != nil {
+			if plane, err := openGuestPlane(m, d, cfg.SocketDir, meterPath, inboxPath, egressSocket, qs.tools()); err != nil {
 				// Machines cannot start without their guest sockets.
 				log.Printf("agent machines disabled: %v", err)
 			} else {
@@ -289,7 +303,7 @@ func openCgroup(path string) (*cgroup.Group, error) {
 
 // openGuestPlane opens the OP-8 meter and the guest plane (ARC-6) over the
 // machine manager. Without them no agent machine can start.
-func openGuestPlane(m *vm.Manager, d *daemon.Daemon, socketDir, meterPath, inboxPath, egressSocket string) (*guest.Plane, error) {
+func openGuestPlane(m *vm.Manager, d *daemon.Daemon, socketDir, meterPath, inboxPath, egressSocket string, tools guest.Tools) (*guest.Plane, error) {
 	eng := d.Engine()
 	mtr, err := meter.Open(meter.Config{
 		Path:           meterPath,
@@ -338,7 +352,9 @@ func openGuestPlane(m *vm.Manager, d *daemon.Daemon, socketDir, meterPath, inbox
 				log.Printf("reply from %s not sent: %v", machine, err)
 			}
 		},
-		Logf: log.Printf,
+		// Further broker tools: the owner-question tools (W9).
+		Tools: tools,
+		Logf:  log.Printf,
 	}
 	if egressSocket != "" {
 		gcfg.Model = modelroute.Forward(modelroute.Config{
