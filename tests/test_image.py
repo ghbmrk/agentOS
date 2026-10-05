@@ -6,6 +6,7 @@ import configparser
 import importlib.machinery
 import importlib.util
 import os
+import re
 import pathlib
 import socket
 import stat
@@ -13,7 +14,8 @@ import subprocess
 import tempfile
 import unittest
 
-IMG = pathlib.Path(__file__).resolve().parent.parent / "image"
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+IMG = ROOT / "image"
 MK = IMG / "mkosi"
 
 
@@ -87,6 +89,14 @@ class TreeCheckTest(unittest.TestCase):
         write(self.root, "var/lib/agentos/journal.log", "{}")
         self.assertIn("var/lib/agentos", " ".join(check.violations(self.root)))
 
+    def test_credstore_and_other_key_formats(self):
+        write(self.root, "etc/credstore.encrypted/agentos.token", "x")
+        write(self.root, "etc/backup/key.asc", "-----BEGIN PGP PRIVATE KEY BLOCK-----\n")
+        write(self.root, "var/lib/age/key.txt", "AGE-SECRET-KEY-1SYNTHETICCANARY\n")
+        v = " ".join(check.violations(self.root))
+        for rel in ("etc/credstore.encrypted/agentos.token", "etc/backup/key.asc", "var/lib/age/key.txt"):
+            self.assertIn(rel, v)
+
     def test_private_key_content(self):
         # A synthetic header only: no real key material in the repository.
         write(self.root, "etc/something/key.pem", "-----BEGIN PRIVATE KEY-----\nAAAA\n")
@@ -149,6 +159,45 @@ class ReleaseTest(unittest.TestCase):
         self.assertEqual(len(m["boot_entry"]["sha256"]), 64)
         self.assertEqual(m["files"], {"agentos_7.usr.raw": "11" * 32})
 
+    def test_manifest_records_the_boot_payload(self):
+        name, text = finish.counted_entry(ENTRY % H, "7", tries=3)
+        boot = {"debian/6.12.48+deb13-amd64/linux": "22" * 32, "debian/6.12.48+deb13-amd64/initrd": "33" * 32}
+        self.assertEqual(finish.boot_files(text), list(reversed(sorted(boot))))
+        self.assertEqual(finish.manifest("7", H, name, text, {}, boot)["boot"], boot)
+
+    def test_loader_conf_has_no_editor_or_enrollment(self):
+        # F1: with the editor on, anyone at the keyboard could drop usrhash= or add init=/bin/sh.
+        lines = finish.LOADER_CONF.splitlines()
+        self.assertIn("timeout 0", lines)
+        self.assertIn("editor no", lines)
+        self.assertIn("secure-boot-enroll off", lines)
+
+    def test_esp_allowlist(self):
+        name, text = finish.counted_entry(ENTRY % H, "7", tries=3)
+        clean = ["EFI/BOOT/BOOTX64.EFI", "EFI/BOOT/grubx64.efi", "EFI/BOOT/mmx64.efi",
+                 "EFI/systemd/systemd-bootx64.efi", "loader/loader.conf", "loader/entries.srel",
+                 "loader/entries/" + name, "debian/6.12.48+deb13-amd64/linux", "debian/6.12.48+deb13-amd64/initrd"]
+        self.assertEqual(finish.esp_violations(clean, text), [])
+        planted = clean + ["loader/random-seed", "loader/credentials/agentos.cred", "debian/other/initrd",
+                           "loader/entries/debian-6.12.conf"]
+        self.assertEqual(finish.esp_violations(planted, text),
+                         ["debian/other/initrd", "loader/credentials/agentos.cred",
+                          "loader/entries/debian-6.12.conf", "loader/random-seed"])
+
+    def test_verify_usr_fails_when_veritysetup_refuses(self):
+        with tempfile.TemporaryDirectory() as t:
+            b = pathlib.Path(t)
+            stub(b, "veritysetup", "exit 1")
+            old = os.environ["PATH"]
+            os.environ["PATH"] = "%s:%s" % (b, old)
+            try:
+                with self.assertRaises(ValueError):
+                    finish.verify_usr("d", "t", H)
+                stub(b, "veritysetup", '[ "$1" = verify ] && [ "$4" = "%s" ]' % H)
+                finish.verify_usr("d", "t", H)
+            finally:
+                os.environ["PATH"] = old
+
     def test_manifest_refuses_a_mismatched_entry(self):
         name, text = finish.counted_entry(ENTRY % H, "7", tries=3)
         with self.assertRaises(ValueError):
@@ -167,14 +216,19 @@ class HealthTest(unittest.TestCase):
         t = pathlib.Path(self.tmp.name)
         self.bin, self.lib, self.root = t / "bin", t / "lib", t / "root"
         stub(self.bin, "veritysetup", 'echo "/dev/mapper/usr is active and is in use."; echo "  type:        VERITY";'
-                                      ' echo "  status:      verified"')
-        stub(self.bin, "findmnt", 'echo "ro,relatime"')
+                                      ' echo "  status:      verified"; echo "  root hash:   %s"' % H)
+        self.findmnt("/dev/mapper/usr", "ro,relatime")
         stub(self.lib, "agentosd", "exit 0")
         stub(self.lib, "runsc", 'echo "runsc version release-20260928.0"')
         (self.lib / "images/openclaw/opt/openclaw").mkdir(parents=True)
+        write(self.lib, "guest/launch.json", "{}")
+        write(self.root, "proc/cmdline", "console=ttyS0 rw quiet usrhash=%s\n" % H)
         ev = self.root / "sys/firmware/efi/efivars"
         ev.mkdir(parents=True)
         (ev / "SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c").write_bytes(b"\x06\x00\x00\x00\x01")
+
+    def findmnt(self, source, options):
+        stub(self.bin, "findmnt", 'case "$2" in SOURCE) echo "%s" ;; *) echo "%s" ;; esac' % (source, options))
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -201,7 +255,11 @@ class HealthTest(unittest.TestCase):
     def test_fail_cases(self):
         cases = {
             "usr not verity": lambda: stub(self.bin, "veritysetup", "exit 4"),
-            "usr writable": lambda: stub(self.bin, "findmnt", 'echo "rw,relatime"'),
+            "usr writable": lambda: self.findmnt("/dev/mapper/usr", "rw,relatime"),
+            "usr not from verity device": lambda: self.findmnt("/dev/sda3", "ro,relatime"),
+            "usr is another release": lambda: write(self.root, "proc/cmdline", "usrhash=%s\n" % ("cd" * 32)),
+            "entry names no release": lambda: write(self.root, "proc/cmdline", "rw quiet\n"),
+            "launch.json missing": lambda: (self.lib / "guest/launch.json").unlink(),
             "broker missing": lambda: (self.lib / "agentosd").unlink(),
             "broker broken": lambda: stub(self.lib, "agentosd", "exit 2"),
             "runsc broken": lambda: stub(self.lib, "runsc", "exit 1"),
@@ -262,6 +320,27 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(u["Install"]["RequiredBy"], "boot-complete.target")
         preset = (MK / "mkosi.extra/usr/lib/systemd/system-preset/50-agentos.preset").read_text()
         self.assertIn("enable agentos-health.service", preset)
+
+    def test_root_is_locked(self):
+        self.assertEqual(ini(MK / "mkosi.conf")["Content"]["RootPassword"], "hashed:!")
+
+    def test_broker_flags_exist(self):
+        # MUST 1 on #41: a flag agentosd lacks makes it exit at start and loop on restart.
+        src = (ROOT / "broker/cmd/agentosd").glob("*.go")
+        defined = set()
+        for f in src:
+            defined |= set(re.findall(r'flag\.\w+\([^,]+,\s*"([\w-]+)"', f.read_text()))
+        exe = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")["Service"]["ExecStart"]
+        used = re.findall(r"(?:^|\s)-([a-z][\w-]*)", exe)
+        self.assertTrue(used)
+        self.assertEqual(sorted(set(used) - defined), [])
+
+    def test_broker_starts_when_onboarding_writes_its_settings(self):
+        p = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.path")
+        self.assertEqual(p["Path"]["PathExists"], "/etc/agentos/agentosd.env")
+        self.assertEqual(p["Path"]["Unit"], "agentosd.service")
+        preset = (MK / "mkosi.extra/usr/lib/systemd/system-preset/50-agentos.preset").read_text()
+        self.assertIn("enable agentosd.path", preset)
 
     def test_broker_waits_for_onboarding(self):
         u = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")

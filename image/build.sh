@@ -40,6 +40,8 @@ rm -rf "$OUT/gvisor.tar.bz2" "$OUT/gvisor"
 
 # The OpenClaw guest's root file system (P1-7), as an agent-machine image.
 sh "$REPO/guest/openclaw/build-rootfs.sh" "$STAGE/usr/lib/agentos/images/openclaw"
+# How agentosd starts the agent machine (W1): its -agent-launch default.
+install -D -m 0644 "$REPO/guest/openclaw/launch.json" "$STAGE/usr/lib/agentos/guest/launch.json"
 chmod -R u+w,go-w "$STAGE"
 
 $MKOSI -C "$HERE/mkosi" -f --image-version="$VERSION" --extra-tree="$STAGE:/" --output-dir "$OUT" build

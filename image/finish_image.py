@@ -18,6 +18,14 @@ import sys
 
 ESP = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
 TRIES = 3
+# No menu: boot the default entry at once (a held key still shows it on a PC with a screen).
+# No editor: anyone at the keyboard could otherwise drop usrhash= or add init=/bin/sh (Type #1
+# entries are not covered by Secure Boot, HW-5a). Never offer to enroll keys.
+LOADER_CONF = "timeout 0\neditor no\nsecure-boot-enroll off\n"
+# What the ESP may hold, besides the kernel and initrd the entry names. Anything else (a
+# loader/random-seed, a system token) would ship identical on every drive (HW-1).
+ESP_ALLOWED = (r"EFI/BOOT/[^/]+", r"EFI/systemd/[^/]+", r"loader/loader\.conf", r"loader/entries\.srel",
+               r"loader/entries/agentos_[^/]+\.conf")
 
 
 def usrhash(entry):
@@ -35,8 +43,22 @@ def counted_entry(src, version, tries=TRIES):
     return "agentos_%s+%d.conf" % (version, tries), "\n".join(lines) + "\n"
 
 
-def manifest(version, roothash, entry_name, entry_text, files):
-    """The release (UPD-1a): /usr verity root hash plus the boot entry that mounts it."""
+def boot_files(entry):
+    """The ESP paths the entry boots: its linux and initrd lines, without the leading slash."""
+    return [ln.split(None, 1)[1].strip().lstrip("/") for ln in entry.splitlines()
+            if re.match(r"(linux|initrd)\s", ln)]
+
+
+def esp_violations(paths, entry):
+    """ESP files outside the allowlist (HW-1). paths: every file on the ESP, relative."""
+    allowed = set(boot_files(entry))
+    return sorted(p for p in paths
+                  if p not in allowed and not any(re.fullmatch(a, p) for a in ESP_ALLOWED))
+
+
+def manifest(version, roothash, entry_name, entry_text, files, boot=None):
+    """The release (UPD-1a): /usr verity root hash plus the boot entry that mounts it, and the
+    sha256 of the kernel and initrd that entry boots."""
     if usrhash(entry_text) != roothash:
         raise ValueError("entry usrhash %s != /usr root hash %s" % (usrhash(entry_text), roothash))
     return {
@@ -44,8 +66,16 @@ def manifest(version, roothash, entry_name, entry_text, files):
         "usrhash": roothash,
         "boot_entry": {"name": re.sub(r"\+\d+(-\d+)?\.conf$", ".conf", entry_name),
                        "sha256": hashlib.sha256(entry_text.encode()).hexdigest()},
+        "boot": boot or {},
         "files": files,
     }
+
+
+def verify_usr(data, tree, roothash):
+    """Check the /usr partition and its hash tree against the entry's usrhash, independently of mkosi."""
+    r = subprocess.run(["veritysetup", "verify", str(data), str(tree), roothash])
+    if r.returncode != 0:
+        raise ValueError("/usr does not verify against usrhash=%s" % roothash)
 
 
 def esp_offset(img):
@@ -74,16 +104,24 @@ def main(out, version):
     name, text = counted_entry(src, version)
     subprocess.run(["mcopy", "-o", "-i", fs, "-", "::/loader/entries/" + name], input=text.encode(), check=True)
     subprocess.run(["mdel", "-i", fs, "::/loader/entries/" + names[0]], check=True)
-    # No menu: boot the default entry at once. A held key still shows the menu on a PC with a screen.
-    subprocess.run(["mcopy", "-o", "-i", fs, "-", "::/loader/loader.conf"], input=b"timeout 0\n", check=True)
+    subprocess.run(["mcopy", "-o", "-i", fs, "-", "::/loader/loader.conf"], input=LOADER_CONF.encode(), check=True)
     (out / name).write_text(text)
-    # Check the /usr partition and its hash tree against the entry's usrhash, independently of mkosi.
+    listing = subprocess.check_output(["mdir", "-i", fs, "-/", "-b", "::/"], text=True).splitlines()
+    paths = [p[3:] for p in listing if p.startswith("::/") and not p.endswith("/")]
+    print("ESP:\n  " + "\n  ".join(sorted(paths)))
+    bad = esp_violations(paths, text)
+    if bad:
+        sys.exit("ESP holds files outside the allowlist (HW-1): %s" % bad)
+    boot = {}
+    for p in boot_files(text):
+        data_ = subprocess.check_output(["mtype", "-i", fs, "::/" + p])
+        boot[p] = hashlib.sha256(data_).hexdigest()
     roothash = usrhash(text)
     data, tree = out / ("agentos_%s.usr.raw" % version), out / ("agentos_%s.usr-verity.raw" % version)
-    subprocess.run(["veritysetup", "verify", str(data), str(tree), roothash], check=True)
+    verify_usr(data, tree, roothash)
     # Only the two files just verified: mkosi also leaves arch-named split copies beside them.
     files = {p.name: sha256(p) for p in (data, tree)}
-    m = manifest(version, roothash, name, text, files)
+    m = manifest(version, roothash, name, text, files, boot)
     (out / ("agentos_%s.release.json" % version)).write_text(json.dumps(m, indent=2, sort_keys=True) + "\n")
     print(json.dumps(m, indent=2, sort_keys=True))
 

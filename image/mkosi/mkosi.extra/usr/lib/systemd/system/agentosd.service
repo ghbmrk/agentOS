@@ -1,5 +1,6 @@
 # The broker starts once onboarding (P2-2) has written the owner's settings, never from the image
-# alone (HW-1). agentosd.env sets AGENTOS_OWNER (E.164) and AGENTOS_MODEM_UID.
+# alone (HW-1): agentosd.path starts it when /etc/agentos/agentosd.env appears, and at boot.
+# agentosd.env sets AGENTOS_OWNER (E.164) and AGENTOS_MODEM_UID.
 [Unit]
 Description=AgentOS broker
 ConditionPathExists=/etc/agentos/agentosd.env
@@ -7,13 +8,12 @@ After=local-fs.target network.target
 
 [Service]
 EnvironmentFile=/etc/agentos/agentosd.env
-# Agent machines live in a delegated subtree; the broker itself runs in its supervisor subgroup.
+# The service's group is delegated to the broker, which moves itself into broker/ and puts its
+# components beside it (RES-2, #124); -cgroup-root defaults to the broker's own group.
 Slice=agentos.slice
 Delegate=yes
-DelegateSubgroup=supervisor
 ExecStart=/usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER} -modem-uid ${AGENTOS_MODEM_UID} \
-        -runsc /usr/lib/agentos/runsc -image openclaw=/usr/lib/agentos/images/openclaw \
-        -cgroup /sys/fs/cgroup/agentos.slice/agentosd.service/machines
+        -runsc /usr/lib/agentos/runsc -image openclaw=/usr/lib/agentos/images/openclaw
 Restart=on-failure
 
 [Install]

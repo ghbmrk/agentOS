@@ -23,7 +23,9 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
-      - uses: actions/setup-go@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5.6.0
         with:
           go-version-file: broker/go.mod
           cache: false
@@ -69,12 +71,13 @@ jobs:
           retention-days: 7
           if-no-files-found: warn
   reproduce:
-    # Two runners, one commit: the release (/usr root hash) must match. The whole-disk hash is
-    # reported; it also covers the ESP and root, which hold nothing a release names.
+    # Two runners, one commit: the release must match: the /usr root hash, the boot entry and the
+    # kernel. The initrd is compared but only reported until it is reproducible (BOARD IMG-2).
+    # The whole-disk hash is reported too.
     needs: build
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
           path: rec
       - name: Compare
@@ -84,4 +87,16 @@ jobs:
           diff rec/release-a/SHA256SUMS rec/release-b/SHA256SUMS && echo "every output identical" || true
           diff <(jq -S . rec/release-a/*.manifest) <(jq -S . rec/release-b/*.manifest) >/dev/null \
             && echo "same packages" || echo "package manifests differ"
-          [ -n "$a" ] && [ "$a" = "$b" ]
+          A=$(ls rec/release-a/*.release.json); B=$(ls rec/release-b/*.release.json)
+          ok=1
+          [ -n "$a" ] && [ "$a" = "$b" ] || { echo "MISMATCH /usr root hash"; ok=0; }
+          [ "$(jq -r .boot_entry.sha256 "$A")" = "$(jq -r .boot_entry.sha256 "$B")" ] \
+            && echo "same boot entry" || { echo "MISMATCH boot entry"; ok=0; }
+          for f in $(jq -r '.boot | keys[]' "$A"); do
+            ha=$(jq -r --arg f "$f" '.boot[$f]' "$A"); hb=$(jq -r --arg f "$f" '.boot[$f] // ""' "$B")
+            if [ "$ha" = "$hb" ]; then echo "same $f"
+            elif [ "${f##*/}" = initrd ]; then echo "::warning::initrd differs between runners ($f); report-only until IMG-2"
+            else echo "MISMATCH $f"; ok=0; fi
+          done
+          [ "$(jq '.boot | length' "$A")" -ge 2 ] || { echo "MISMATCH release.json lists no kernel and initrd"; ok=0; }
+          [ $ok = 1 ]

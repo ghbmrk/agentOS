@@ -13,12 +13,15 @@ import sys
 
 # Files that systemd, dbus, OpenSSH or ssl-cert generate per install. Must not exist in the image.
 GENERATED = ("var/lib/systemd/random-seed", "var/lib/systemd/credential.secret",
-             "var/lib/dbus/machine-id", "etc/ssh/ssh_host_*", "etc/ssl/private/*")
+             "var/lib/dbus/machine-id", "etc/ssh/ssh_host_*", "etc/ssl/private/*",
+             "etc/credstore*/*", "var/lib/systemd/credential*/*")
 # Owner configuration and broker state. Created on the drive at onboarding, never in the image.
 OWNER_DIRS = ("etc/agentos", "var/lib/agentos")
 # Content scan: where build-generated keys land. /usr is package content, the same for everyone.
 SCAN = ("etc", "var", "root", "home", "srv", "opt", "boot", "efi")
-KEY_MARKERS = (b"PRIVATE KEY-----",)
+KEY_MARKERS = (b"PRIVATE KEY-----", b"PGP PRIVATE KEY BLOCK", b"AGE-SECRET-KEY-")
+# Larger files are not content-scanned (key files are small); the OpenClaw guest under /usr is
+# package content from pinned sources and is covered only by the socket check.
 SCAN_MAX = 1 << 20
 
 
