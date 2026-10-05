@@ -55,3 +55,30 @@ func TestOSS9UnlistedReportsAreNeverAuthority(t *testing.T) {
 		t.Fatalf("the listed report counted %d", n)
 	}
 }
+
+// Evidence for the owner's text (OSS-9 A2): listed independent attestors,
+// and maintainer-operated keys the signed list or the image names. A key
+// that only labels itself maintainer-operated, or any other unlisted key,
+// is not counted at all (Q-A).
+func TestOSS9EvidenceCountsOnlyListedKeys(t *testing.T) {
+	f := newFixture(t)
+	ci, box, stranger, listed := newKey(t), newKey(t), newKey(t), newKey(t)
+	f.must(f.repo.SetMaintainerAttestors([]ed25519.PublicKey{ci.Public().(ed25519.PublicKey)}))
+	f.release(2, nil)
+	f.publish(0, 1)
+	pinned := []ed25519.PublicKey{box.Public().(ed25519.PublicKey)}
+	res, err := f.check(Options{Attestors: f.attestors(listed), InterimAttestors: pinned})
+	if err != nil || res.Release == nil {
+		t.Fatal(res.Release, err)
+	}
+	v := res.Release
+	claim, err := Attest(stranger, v, Statement{Result: ResultPass, Channel: ChannelFast, Hardware: floorPC, Operator: OperatorMaintainer})
+	f.must(err)
+	atts := [][]byte{pass(t, ci, v), pass(t, box, v), claim, pass(t, newKey(t), v), pass(t, listed, v)}
+	if e := v.Evidence(atts, nil); e != (Evidence{Independent: 1, Maintainer: 2}) {
+		t.Fatalf("evidence %+v", e)
+	}
+	if e := (&Verified{}).Evidence(atts, nil); e != (Evidence{}) {
+		t.Fatalf("an unchecked release has evidence: %+v", e)
+	}
+}
