@@ -358,7 +358,7 @@ func TestEvidenceSetting(t *testing.T) {
 	ctx := context.Background()
 	r := newEvRig(t, "")
 	r.gate.state = journal.Pending
-	for _, msg := range []string{"evidence", "evidence to me", "please evidence on", "EVIDENCE OFF now", "evidence of the leak"} {
+	for _, msg := range []string{"evidence", "evidence to me", "please evidence on", "EVIDENCE OFF now", "evidence of the leak", "email replies", "email replies to me", "email replies are slow"} {
 		if got, ok := r.ev.settings(ctx, msg, true); ok {
 			t.Fatalf("%q taken: %q", msg, got)
 		}
@@ -376,7 +376,7 @@ func TestEvidenceSetting(t *testing.T) {
 		in.Params[grants.ParamEvidenceAddress] != destAddr || in.Params[grants.ParamEvidenceAccount] != "mail" {
 		t.Fatalf("intent %+v", in)
 	}
-	if got, _ := r.ev.settings(ctx, "evidence to Alias@Example.test", true); got != evidenceEffect || r.gate.subs[1].Params[grants.ParamEvidenceAddress] != "alias@example.test" {
+	if got, _ := r.ev.settings(ctx, "Email replies to Alias@Example.test", true); got != evidenceEffect || r.gate.subs[1].Params[grants.ParamEvidenceAddress] != "alias@example.test" {
 		t.Fatalf("to alias: %q", got)
 	}
 	got, _ := r.ev.settings(ctx, "evidence to eve@example.net", true)
@@ -394,12 +394,12 @@ func TestEvidenceSetting(t *testing.T) {
 	// OFF tells the old destination, then clears it.
 	o := newEvRig(t, destAddr)
 	n := len(o.gate.subs)
-	if got, _ := o.ev.settings(ctx, "evidence off", true); got != evidenceOff {
+	if got, _ := o.ev.settings(ctx, "email replies off", true); got != evidenceOff {
 		t.Fatalf("off: %q", got)
 	}
 	subs := o.gate.subs[n:]
 	if len(subs) != 2 || subs[0].Action != opDeliver || subs[0].Params[grants.ParamFrom] != grants.DeliverFromBox ||
-		subs[0].Recipients[0] != destAddr || !strings.HasPrefix(subs[0].Params[grants.ParamBody].(string), "Evidence delivery was turned off by text at 09:00") ||
+		subs[0].Recipients[0] != destAddr || !strings.HasPrefix(subs[0].Params[grants.ParamBody].(string), "Emailing private replies was turned off by text at 09:00") ||
 		subs[1].Action != journal.ActionEvidence || subs[1].Params[grants.ParamEvidenceAddress] != "" {
 		t.Fatalf("off submitted %+v", subs)
 	}

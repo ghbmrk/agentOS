@@ -79,7 +79,7 @@ type evidenceJob struct {
 
 // Fixed wording, in the box's first-person voice (UX U7).
 const (
-	keptLong         = "I kept the full reply on the box."
+	keptLong         = "I kept the full reply on the box. Ask me for the rest."
 	capNote          = "I've emailed the most replies I send in a day, so I kept this one on the box."
 	failNote         = "I couldn't email the full reply, so I kept it on the box. Check that your mail account still signs in."
 	evidenceEffect   = "With this on, I email your private replies and texts carry a one-line summary. Send EVIDENCE OFF to stop. A request for your code follows; then confirm on my Wi-Fi page."
@@ -90,7 +90,7 @@ const (
 	evidenceFailed   = "I couldn't save that setting. Try again later."
 	// offNotice goes to the old destination when it is cleared by text
 	// (security C3 on #148, its wording).
-	offNotice = "Evidence delivery was turned off by text at %s. If that wasn't you, turn it back on from the box's Wi-Fi page."
+	offNotice = "Emailing private replies was turned off by text at %s. If that wasn't you, turn it back on from my Wi-Fi page."
 )
 
 // Sizes.
@@ -329,7 +329,7 @@ func (e *evidence) note() string {
 	if e.failing.IsZero() {
 		return ""
 	}
-	return "Evidence email: failing since " + e.failing.Local().Format("15:04") + "; I'm keeping private replies on the box."
+	return "Emailing replies: failing since " + e.failing.Local().Format("15:04") + ". Check that your mail account still signs in."
 }
 
 // digestLines are the digest's lines: a new destination confirmed once,
@@ -355,13 +355,15 @@ func (e *evidence) digestLines() []string {
 }
 
 // settings takes EVIDENCE ON (the account's main address), EVIDENCE TO
-// <address> and EVIDENCE OFF (control.Handler.Settings), only in an
+// <address> and EVIDENCE OFF, or the same with EMAIL REPLIES, (control.Handler.Settings), only in an
 // unlocked session; a locked one gets the unlock prompt. Turning it on is
 // asked by the gate with a code and the local page (CH-10); turning it off
 // needs neither, and the old destination is told (security C3).
 func (e *evidence) settings(ctx context.Context, msg string, unlocked bool) (string, bool) {
 	f := strings.Fields(msg)
-	if len(f) < 2 || !strings.EqualFold(f[0], "EVIDENCE") {
+	if len(f) > 2 && strings.EqualFold(f[0], "EMAIL") && strings.EqualFold(f[1], "REPLIES") {
+		f = f[1:] // EMAIL REPLIES is EVIDENCE's other name (UX N2)
+	} else if len(f) < 2 || !strings.EqualFold(f[0], "EVIDENCE") {
 		return "", false
 	}
 	on, addr := false, ""
@@ -436,7 +438,7 @@ func (e *evidence) off(ctx context.Context, g evidenceGate) string {
 		return evidenceFailed
 	}
 	e.mu.Lock()
-	e.digest = append(e.digest, "Evidence email was turned off by text at "+at+".")
+	e.digest = append(e.digest, "Emailing private replies was turned off by text at "+at+".")
 	e.shown = ""
 	e.mu.Unlock()
 	return evidenceOff
