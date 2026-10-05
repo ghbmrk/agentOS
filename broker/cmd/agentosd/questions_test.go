@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/daemon"
@@ -26,13 +27,15 @@ func TestQuestionsRunInAgentosd(t *testing.T) {
 		JournalPath: filepath.Join(dir, "journal.log"), SocketDir: filepath.Join(dir, "run"),
 		OwnerNumber: ownerNum, ModemUID: os.Getuid(), Admission: admission.Config{CapacityMB: 4500, HeadroomMB: 600},
 		OwnerState: filepath.Join(dir, "owner.json"),
-		Answer:     qs.Answer,
 	}
-	cfg.Grants.OtherTexts = qs.Texts
+	qs.wire(&cfg) // as main does
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if _, ok := qs.Answer(ctx, "Q100 yes"); ok {
 		t.Fatal("answered before the book opened")
+	}
+	if qs.tools() != nil {
+		t.Fatal("tools offered before the book opened")
 	}
 	d, err := daemon.Run(ctx, cfg)
 	if err != nil {
@@ -43,6 +46,9 @@ func TestQuestionsRunInAgentosd(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer guard.Flush()
+	if qs.tools() == nil {
+		t.Fatal("no tools for the guest plane once the book is open")
+	}
 
 	text, handled, err := qs.Call(ctx, "agent", "agent", question.ToolAsk,
 		json.RawMessage(`{"request_id":"q1","question":"Which slot?","choices":["9:00","9:30"],"default":"9:30","wait_minutes":30}`))
@@ -59,8 +65,23 @@ func TestQuestionsRunInAgentosd(t *testing.T) {
 	if _, handled, _ := qs.Call(ctx, "agent", "agent", "effect_request", nil); handled {
 		t.Fatal("took the effect tool")
 	}
-	if reply, ok := qs.Answer(ctx, "Q100 9:00"); !ok || !strings.Contains(reply, "Q100") {
+	// Hidden is owner.SecretShaped: an answer only it calls secret-shaped
+	// (a short code beside a code word; the book's own checks pass it) is
+	// refused.
+	if reply, ok := cfg.Answer(ctx, "Q100 my pin is A1B2"); !ok || !strings.Contains(reply, "Codes and keys") {
+		t.Fatalf("secret-shaped answer: %q %v", reply, ok)
+	}
+	if reply, ok := cfg.Answer(ctx, "Q100 9:00"); !ok || !strings.Contains(reply, "Q100") {
 		t.Fatalf("answer hook: %q %v", reply, ok)
+	}
+	// Reserve is the gate's: with the hour's CH-15 budget spent on the
+	// gate, a new question is held, not texted.
+	for d.Gate().Reserve(time.Now()) {
+	}
+	text, _, err = qs.Call(ctx, "agent", "agent", question.ToolAsk,
+		json.RawMessage(`{"request_id":"q2","question":"Lunch at noon?","default":"yes","wait_minutes":30}`))
+	if err != nil || !strings.Contains(text, `"state":"held"`) {
+		t.Fatalf("question with the budget spent: %s %v", text, err)
 	}
 	// A locked session never reaches the hook, so the reply is the unlock
 	// prompt (the hook's own tests cover the unlocked path).

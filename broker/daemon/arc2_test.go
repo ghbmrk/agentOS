@@ -48,6 +48,9 @@ var controlPath = map[string][]string{
 	// scheduler, and the replay evaluator, whose transitive imports
 	// TestAgentosdLinksNoInference holds free of inference.
 	// It runs the owner-question book (W9) on the box clock (P2-9).
+	// clock imports golang.org/x/sys/unix (adjtimex), so it has no entry
+	// below, whose rules refuse third-party imports; TestAgentosdLinks-
+	// NoInference holds it instead, through netOK.
 	"cmd/agentosd": {"daemon", "admission", "cgroup", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock"},
 }
 

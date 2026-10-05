@@ -180,10 +180,9 @@ func main() {
 	pre := &preempter{}
 	cfg.Preempter = pre
 	// Agents' questions (W9): owner replies are answered before task chat
-	// reaches the agent, and question texts count on the gate's budget.
+	// reaches the agent.
 	qs := &questions{}
-	cfg.Answer = qs.Answer
-	cfg.Grants.OtherTexts = qs.Texts
+	qs.wire(&cfg)
 	agent := &lateAgent{}
 	cfg.Agent = agent
 	// Until the keeper runs, STATUS says the agent is not set up; it says
@@ -223,11 +222,9 @@ func main() {
 	}
 	// The owner channel failing to take questions must not take it down:
 	// the tools are then not offered and replies are task chat.
-	var guestTools guest.Tools
 	if guard, err := qs.open(ctx, d, pre, qcfg); err != nil {
 		log.Printf("owner questions disabled: %v", err)
 	} else {
-		guestTools = qs
 		defer guard.Flush()
 	}
 	if runsc != "" {
@@ -246,7 +243,7 @@ func main() {
 			log.Printf("agent machines disabled: %v", err)
 		} else {
 			pre.m.Store(m)
-			if plane, err := openGuestPlane(m, d, cfg.SocketDir, meterPath, inboxPath, egressSocket, guestTools); err != nil {
+			if plane, err := openGuestPlane(m, d, cfg.SocketDir, meterPath, inboxPath, egressSocket, qs.tools()); err != nil {
 				// Machines cannot start without their guest sockets.
 				log.Printf("agent machines disabled: %v", err)
 			} else {

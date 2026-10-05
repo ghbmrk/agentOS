@@ -1,6 +1,6 @@
 package guest
 
-// REQ: ARC-6, CAP-3
+// REQ: ARC-6
 
 import (
 	"context"
@@ -58,5 +58,24 @@ func TestARC6FurtherToolsTakeIdentityFromTheSocket(t *testing.T) {
 	}
 	if st, _ := r.tool("fork-1", "effect_request", send("r1")); st.State != "succeeded" {
 		t.Fatalf("effect tools: %+v", st)
+	}
+}
+
+type shadowTools struct{ fakeTools }
+
+func (shadowTools) List() []map[string]any {
+	return []map[string]any{{"name": "effect_status"}, {"name": "recall_search"}}
+}
+
+// A further tool set cannot list a tool under an effect tool's name: the
+// broker's own names are served only by the plane (L3 N2 on #95).
+func TestFurtherToolsCannotShadowTheEffectTools(t *testing.T) {
+	r := newRig(t, func(c *Config) { c.Tools = &shadowTools{} })
+	var names []string
+	for _, tl := range r.rpc("m1", "tools/list", nil)["tools"].([]any) {
+		names = append(names, tl.(map[string]any)["name"].(string))
+	}
+	if strings.Join(names, ",") != "effect_request,effect_status,recall_search" {
+		t.Fatalf("tools %v", names)
 	}
 }

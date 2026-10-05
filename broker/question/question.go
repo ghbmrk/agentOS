@@ -131,14 +131,13 @@ type Config struct {
 	// when none is, so a bare reply meant for a request never lands here.
 	// Nil: untagged replies are never answers.
 	ApprovalsOpen func() bool
-	// Shared reports the owner channel's other unsolicited texts on the
-	// same CH-15 budget: approval request texts in the hour before now,
-	// and whether an approval request is waiting to be sent. Approval
-	// requests go first: no question is texted while one waits, and a
-	// question is texted only while both kinds together are under
-	// SendsPerHour (Q3, UX-71-1; the wiring passes the gate's counter and
-	// gives the gate Texts). Nil: questions are paced alone.
-	Shared func(now time.Time) (texts int, waiting bool)
+	// Reserve takes one text of the owner channel's CH-15 budget, shared
+	// with approval requests, just before a question is texted; false
+	// holds the question (Q3, UX-71-1). The wiring passes the gate's
+	// Reserve, which refuses while an approval request waits to be sent
+	// and counts the text in the same step. Nil: questions are paced
+	// alone, by SendsPerHour.
+	Reserve func(now time.Time) bool
 	// Logf records store failures. Nil: discarded.
 	Logf func(format string, args ...any)
 
@@ -717,15 +716,6 @@ func (b *Book) sendDue(ctx context.Context) {
 		if err != nil || (b.cfg.Quiet != nil && b.cfg.Quiet(now)) {
 			return
 		}
-		// Asked before b.mu: the gate's counter takes the gate's lock,
-		// and the gate asks Texts under its own (no lock-order cycle).
-		others, waiting := 0, false
-		if b.cfg.Shared != nil {
-			others, waiting = b.cfg.Shared(now)
-		}
-		if waiting {
-			return
-		}
 		b.mu.Lock()
 		keep := b.sends[:0]
 		recent := map[string]bool{}
@@ -739,7 +729,7 @@ func (b *Book) sendDue(ctx context.Context) {
 		// Oldest first, but an asker texted in the last hour waits behind
 		// one that was not, so one lineage cannot take the whole budget.
 		var e *entry
-		if len(b.sends)+others < b.cfg.SendsPerHour {
+		if len(b.sends) < b.cfg.SendsPerHour {
 			for _, q := range b.qs {
 				if q.State == Held && q.Sent.IsZero() && (e == nil || recent[e.Asker] && !recent[q.Asker]) {
 					e = q
@@ -753,6 +743,11 @@ func (b *Book) sendDue(ctx context.Context) {
 		deadline := now.Add(e.Wait)
 		text := b.render(e, now, deadline)
 		b.mu.Unlock()
+		// The shared budget is reserved outside b.mu, and sendMu keeps it
+		// to one question at a time.
+		if b.cfg.Reserve != nil && !b.cfg.Reserve(now) {
+			return
+		}
 		if err := b.cfg.Send(text); err != nil {
 			return
 		}
@@ -766,20 +761,6 @@ func (b *Book) sendDue(ctx context.Context) {
 		b.save("send")
 		b.mu.Unlock()
 	}
-}
-
-// Texts is how many question texts went in the hour before now: the
-// gate counts them toward the shared CH-15 budget (Shared).
-func (b *Book) Texts(now time.Time) int {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	n := 0
-	for _, t := range b.sends {
-		if now.Sub(t.At) < time.Hour {
-			n++
-		}
-	}
-	return n
 }
 
 func (b *Book) clock(now, t time.Time) string {

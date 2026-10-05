@@ -187,16 +187,11 @@ type Config struct {
 	Coalesce        time.Duration
 	CoalesceIdle    time.Duration
 	RequestsPerHour int
-	// OtherTexts counts the owner channel's other unsolicited texts in the
-	// hour before now (owner questions, question.Book.Texts): they draw on
-	// the same RequestsPerHour (W9, question Q3). Nil: none. It is called
-	// without the gate's lock held.
-	OtherTexts func(now time.Time) int
-	Urgent     func(owner.Item) bool
-	Quiet      func(time.Time) bool
-	Fresh      time.Duration
-	Now        func() time.Time
-	Logf       func(format string, args ...any)
+	Urgent          func(owner.Item) bool
+	Quiet           func(time.Time) bool
+	Fresh           time.Duration
+	Now             func() time.Time
+	Logf            func(format string, args ...any)
 }
 
 // Gate is the approval policy. It is the engine's journal.Policy, the
@@ -205,15 +200,18 @@ type Config struct {
 type Gate struct {
 	cfg Config
 
-	mu        sync.Mutex
-	eng       *journal.Engine
-	own       Owner
-	grants    map[string]*Grant
-	waiting   map[string]*wait
-	batch     []string
-	first     time.Time // when the batch's first item arrived
-	last      time.Time // when its latest item arrived
-	sent      []time.Time
+	mu      sync.Mutex
+	eng     *journal.Engine
+	own     Owner
+	grants  map[string]*Grant
+	waiting map[string]*wait
+	batch   []string
+	first   time.Time // when the batch's first item arrived
+	last    time.Time // when its latest item arrived
+	sent    []time.Time
+	// asked are owner-question texts reserved on the same budget
+	// (Reserve, W9).
+	asked     []time.Time
 	decided   map[string]decision
 	confirmed map[string]bool
 	failed    map[string]string
@@ -1132,10 +1130,6 @@ func (g *Gate) queueReply(id string, v verdict) {
 // and within RequestsPerHour.
 func (g *Gate) flushDue() {
 	now := g.cfg.Now()
-	others := 0
-	if g.cfg.OtherTexts != nil {
-		others = g.cfg.OtherTexts(now)
-	}
 	g.mu.Lock()
 	if len(g.batch) == 0 {
 		g.mu.Unlock()
@@ -1150,42 +1144,90 @@ func (g *Gate) flushDue() {
 		}
 	}
 	own := g.own
-	keep := g.sent[:0]
-	for _, t := range g.sent {
-		if now.Sub(t) < time.Hour {
-			keep = append(keep, t)
-		}
-	}
-	g.sent = keep
-	budget := len(g.sent)+others < g.cfg.RequestsPerHour
+	budget := g.textsLocked(now) < g.cfg.RequestsPerHour
 	ripe := now.Sub(g.first) >= g.cfg.Coalesce || now.Sub(g.last) >= g.cfg.CoalesceIdle
 	g.mu.Unlock()
 	active := own != nil && own.Active(activeFor)
 	quiet := g.cfg.Quiet != nil && g.cfg.Quiet(now)
-	if urgent || (!quiet && (active || (ripe && budget))) {
+	switch {
+	case urgent || (!quiet && active):
 		g.Flush()
+	case !quiet && ripe && budget:
+		g.flush(true)
 	}
 }
 
-// Pacing reports the approval request texts sent in the hour before now
-// and whether items wait in a batch, for the owner-question book, which
-// shares this budget and lets approval requests go first (W9, question
-// Q3, UX-71-1).
-func (g *Gate) Pacing(now time.Time) (texts int, waiting bool) {
+// textsLocked is the unsolicited texts on the CH-15 budget in the hour
+// before now: approval requests and reserved owner questions.
+func (g *Gate) textsLocked(now time.Time) int {
+	prune := func(ts []time.Time) []time.Time {
+		keep := ts[:0]
+		for _, t := range ts {
+			if now.Sub(t) < time.Hour {
+				keep = append(keep, t)
+			}
+		}
+		return keep
+	}
+	g.sent, g.asked = prune(g.sent), prune(g.asked)
+	return len(g.sent) + len(g.asked)
+}
+
+// Reserve takes one text of the CH-15 budget for an owner question (W9,
+// question Q3). Approval requests go first: it refuses while items wait
+// in a batch, and when approval requests and questions together have
+// used RequestsPerHour in the hour before now. A granted reservation
+// counts at once, sent or not, so the check and the count are one step.
+func (g *Gate) Reserve(now time.Time) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	for _, t := range g.sent {
-		if now.Sub(t) < time.Hour {
-			texts++
+	if len(g.batch) > 0 || g.textsLocked(now) >= g.cfg.RequestsPerHour {
+		return false
+	}
+	g.asked = append(g.asked, now)
+	return true
+}
+
+// take counts n request texts about to be sent and returns how many may
+// go. Paced, it grants only what the budget has left; unpaced (an urgent
+// item, an owner active in chat) it grants all. Counted before sending,
+// so no question is reserved in between.
+func (g *Gate) take(paced bool, n int) int {
+	now := g.cfg.Now()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if paced {
+		n = max(0, min(n, g.cfg.RequestsPerHour-g.textsLocked(now)))
+	}
+	for range n {
+		g.sent = append(g.sent, now)
+	}
+	return n
+}
+
+// requeue puts items the budget did not cover back in the batch.
+func (g *Gate) requeue(items []owner.Item) {
+	if len(items) == 0 {
+		return
+	}
+	g.mu.Lock()
+	for _, it := range items {
+		if g.waiting[it.Ref] != nil {
+			g.batch = append(g.batch, it.Ref)
 		}
 	}
-	return texts, len(g.batch) > 0
+	g.mu.Unlock()
 }
 
 // Flush sends batched items now: one request per tier, at most MaxBatch
 // items each, so a high-risk item does not raise the code needed for
-// low-risk ones (CH-10). Each request text counts toward RequestsPerHour.
-func (g *Gate) Flush() {
+// low-risk ones (CH-10). Each request text counts toward RequestsPerHour,
+// but Flush itself is unpaced: it sends everything batched.
+func (g *Gate) Flush() { g.flush(false) }
+
+// flush sends batched items, each request text counted on the CH-15
+// budget before it goes; paced, texts past the budget stay batched.
+func (g *Gate) flush(paced bool) {
 	now := g.cfg.Now()
 	g.mu.Lock()
 	ids, own := g.batch, g.own
@@ -1223,6 +1265,11 @@ func (g *Gate) Flush() {
 	for _, id := range lapsed {
 		g.closeIntent(id, "the approval request expired; ask again with a new request_id")
 	}
+	if n := g.take(paced, len(again)); n < len(again) {
+		// Each re-issued intent is its own request text.
+		g.requeue(again[n:])
+		again, ttls = again[:n], ttls[:n]
+	}
 	if len(again) > 0 {
 		reqs := make([]string, len(again))
 		err := errors.New("no owner channel")
@@ -1230,9 +1277,6 @@ func (g *Gate) Flush() {
 			reqs, err = own.RequestEach(again, ttls)
 		}
 		g.mu.Lock()
-		if slices.ContainsFunc(reqs, func(r string) bool { return r != "" }) {
-			g.sent = append(g.sent, g.cfg.Now())
-		}
 		for i, it := range again {
 			w := g.waiting[it.Ref]
 			switch {
@@ -1251,6 +1295,10 @@ func (g *Gate) Flush() {
 	}
 	for _, items := range [][]owner.Item{low, high} {
 		for len(items) > 0 {
+			if g.take(paced, 1) == 0 {
+				g.requeue(items)
+				break
+			}
 			n := min(len(items), MaxBatch)
 			chunk := items[:n]
 			items = items[n:]
@@ -1260,9 +1308,6 @@ func (g *Gate) Flush() {
 				req, err = own.Request(chunk, 0)
 			}
 			g.mu.Lock()
-			if err == nil {
-				g.sent = append(g.sent, g.cfg.Now())
-			}
 			for _, it := range chunk {
 				w := g.waiting[it.Ref]
 				if w == nil {

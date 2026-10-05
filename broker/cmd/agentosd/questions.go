@@ -11,16 +11,16 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/clock"
 	"github.com/ghbmrk/agentos/broker/daemon"
+	"github.com/ghbmrk/agentos/broker/guest"
 	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/question"
 	"github.com/ghbmrk/agentos/broker/vm"
 )
 
 // questions is the owner-question book (P3-8) live (W9). The daemon's
-// handlers and the grants gate take it before it opens, since the book
-// texts through the owner channel the daemon makes; until it opens, and
-// for good when there is no owner channel, nothing is answered and no
-// question text counts.
+// handlers take it before it opens, since the book texts through the
+// owner channel the daemon makes; until it opens, and for good when there
+// is no owner channel, nothing is answered and no tool is offered.
 type questions struct{ b atomic.Pointer[question.Book] }
 
 // Answer is the owner channel's answer hook (control.Handler.Answer).
@@ -30,15 +30,6 @@ func (q *questions) Answer(ctx context.Context, msg string) (string, bool) {
 		return "", false
 	}
 	return b.Answer(ctx, msg)
-}
-
-// Texts is the gate's count of question texts on the shared CH-15 budget.
-func (q *questions) Texts(now time.Time) int {
-	b := q.b.Load()
-	if b == nil {
-		return 0
-	}
-	return b.Texts(now)
 }
 
 // List and Call serve the question tools on each guest socket.
@@ -64,7 +55,8 @@ type questionConfig struct {
 // channel. Deadlines run on the guard's time and hold while it is
 // restricted (TIM-1). Reveal raises the reading machine to private before it
 // sees the owner's words (REV-5). Questions and approval requests share
-// the gate's CH-15 budget, approval requests first (question Q3).
+// the gate's CH-15 budget, approval requests first (question Q3): the
+// gate reserves each question's text under its own lock.
 func (q *questions) open(ctx context.Context, d *daemon.Daemon, pre *preempter, cfg questionConfig) (*clock.Guard, error) {
 	ch := d.Owner()
 	if ch == nil {
@@ -95,7 +87,7 @@ func (q *questions) open(ctx context.Context, d *daemon.Daemon, pre *preempter, 
 		Path:          cfg.Path,
 		Hidden:        owner.SecretShaped,
 		ApprovalsOpen: ch.ApprovalsOpen,
-		Shared:        d.Gate().Pacing,
+		Reserve:       d.Gate().Reserve,
 		Logf:          log.Printf,
 	})
 	if err != nil {
@@ -105,6 +97,18 @@ func (q *questions) open(ctx context.Context, d *daemon.Daemon, pre *preempter, 
 	go guard.Run(ctx)
 	go b.Run(ctx, 30*time.Second)
 	return guard, nil
+}
+
+// wire gives the daemon the answer hook; call it before daemon.Run.
+func (q *questions) wire(cfg *daemon.Config) { cfg.Answer = q.Answer }
+
+// tools is what the guest plane serves beside the effect tools: the
+// question tools once the book is open, else none.
+func (q *questions) tools() guest.Tools {
+	if q.b.Load() == nil {
+		return nil
+	}
+	return q
 }
 
 func defaultQuestionConfig(dir string) questionConfig {

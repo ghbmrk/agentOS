@@ -119,7 +119,13 @@ func (p *Plane) mcp(m *machine, w http.ResponseWriter, r *http.Request) {
 	case "tools/list":
 		list := tools
 		if p.cfg.Tools != nil {
-			list = append(append([]map[string]any(nil), tools...), p.cfg.Tools.List()...)
+			list = append([]map[string]any(nil), tools...)
+			for _, t := range p.cfg.Tools.List() {
+				// The effect tools' names are the broker's own.
+				if n := t["name"]; n != "effect_request" && n != "effect_status" {
+					list = append(list, t)
+				}
+			}
 		}
 		writeRPC(w, req.ID, map[string]any{"tools": list}, nil)
 	case "tools/call":

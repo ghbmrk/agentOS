@@ -41,52 +41,34 @@ func TestGuestToolsServeTheBook(t *testing.T) {
 	}
 }
 
-// TestQuestionsShareTheApprovalBudget (W9, Q3, UX-71-1): questions and
-// approval requests draw on one CH-15 budget, and approval requests go
-// first: a question is texted only while no approval request is waiting
-// to be sent and the texts of both in the last hour are under the budget.
-func TestQuestionsShareTheApprovalBudget(t *testing.T) {
+// TestQuestionsReserveTheSharedBudget (W9, Q3, UX-71-1): a question is
+// texted only when the owner channel's shared CH-15 budget grants its
+// text, one Reserve per text; a refusal holds it for the next tick.
+func TestQuestionsReserveTheSharedBudget(t *testing.T) {
 	var mu sync.Mutex
-	others, waiting := 0, false
+	grant, asked := false, 0
 	r := newRig(t, func(c *Config) {
-		c.Shared = func(time.Time) (int, bool) {
+		c.Reserve = func(time.Time) bool {
 			mu.Lock()
 			defer mu.Unlock()
-			return others, waiting
+			asked++
+			return grant
 		}
 	})
-	set := func(n int, w bool) { mu.Lock(); others, waiting = n, w; mu.Unlock() }
-
-	set(3, false) // three approval requests this hour: the budget is spent
-	if st := r.ask("lin1", "a", slot()); st.State != Held {
-		t.Fatalf("texted past the shared budget: %s", st.State)
+	if st := r.ask("lin1", "a", slot()); st.State != Held || len(r.sent) != 0 {
+		t.Fatalf("texted without a reservation: %s", st.State)
 	}
-	set(1, true) // budget left, but an approval request waits: it goes first
-	r.b.Tick(context.Background())
-	if len(r.sent) != 0 {
-		t.Fatalf("texted ahead of a waiting approval request: %q", r.sent)
-	}
-	set(1, false)
+	mu.Lock()
+	grant = true
+	mu.Unlock()
 	r.b.Tick(context.Background())
 	if len(r.sent) != 1 {
-		t.Fatalf("sent %d with budget free", len(r.sent))
-	}
-	// The gate counts question texts toward its own budget.
-	if n := r.b.Texts(r.clock); n != 1 {
-		t.Fatalf("Texts %d", n)
-	}
-	set(2, false) // 2 approvals + 1 question: spent
-	if st := r.ask("lin2", "b", slot()); st.State != Held {
-		t.Fatalf("texted past the shared budget: %s", st.State)
+		t.Fatalf("sent %d with the budget granted", len(r.sent))
 	}
 	r.b.Tick(context.Background())
-	if len(r.sent) != 1 {
-		t.Fatalf("sent %d: questions and approvals over 3 an hour", len(r.sent))
-	}
-	r.advance(time.Hour)
-	set(0, false)
-	r.b.Tick(context.Background())
-	if len(r.sent) != 2 || r.b.Texts(r.clock) != 1 {
-		t.Fatalf("after the hour: sent %d, Texts %d", len(r.sent), r.b.Texts(r.clock))
+	mu.Lock()
+	defer mu.Unlock()
+	if asked != 2 {
+		t.Fatalf("Reserve called %d times for one text and one refusal", asked)
 	}
 }
