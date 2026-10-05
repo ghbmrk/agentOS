@@ -8,6 +8,7 @@ package verb
 const (
 	Read          = "read"
 	Draft         = "draft"
+	Organize      = "organize"
 	Send          = "send"
 	Post          = "post"
 	Buy           = "buy"
@@ -22,7 +23,9 @@ type Class int
 
 const (
 	// Reversible verbs leave nothing outside the box that cannot be taken
-	// back: reading, and drafts in the owner's own account.
+	// back: reading, drafts in the owner's own account, and organize
+	// (ADP-2: changes only the owner sees that fully undo in the account,
+	// each declared with its inverse and journaled with the prior state).
 	Reversible Class = iota
 	// Irreversible verbs reach or change the world (REV-2): every one is
 	// gated by an owner approval or an owner pre-allowance (ADP-9).
@@ -33,7 +36,7 @@ const (
 )
 
 var classes = map[string]Class{
-	Read: Reversible, Draft: Reversible,
+	Read: Reversible, Draft: Reversible, Organize: Reversible,
 	Send: Irreversible, Post: Irreversible, Buy: Irreversible, Share: Irreversible,
 	DeleteRemote: Irreversible, ChangeAccount: Irreversible,
 	RevealSecret: Secret,

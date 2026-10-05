@@ -100,6 +100,25 @@ type Verifier interface {
 	Verify(ctx context.Context, in journal.Intent) (Verified, error)
 }
 
+// Escalator is implemented by verifiers whose adapter guards a
+// reversible verb (ADP-2's organize guards): it reads the source and says
+// whether this one effect must be treated more strictly. It runs at
+// authorization and again at the recheck before dispatch (OP-3).
+type Escalator interface {
+	Escalate(ctx context.Context, in journal.Intent) (Escalation, error)
+}
+
+// Escalation is what an Escalator decided. The zero value changes
+// nothing. An error denies the effect: a target the adapter never allows.
+type Escalation struct {
+	// Verb, if set, applies when stricter than the granted verb (an
+	// archive that hides a security alert is change-account).
+	Verb string
+	// Ask sends the effect to the owner at its verb, reversible or not
+	// (past a daily bound).
+	Ask bool
+}
+
 // Verified is what a Verifier read.
 type Verified struct {
 	// Item is the approval line as the source shows it: object, canonical
@@ -453,7 +472,21 @@ func (g *Gate) evaluate(ctx context.Context, phase journal.Phase, in journal.Int
 	if !ok {
 		return verdict{kind: deny, why: "this operation's verb is not on the broker's list (ADP-2)"}
 	}
-	if cls == verb.Reversible {
+	var esc Escalation
+	if e, ok := g.cfg.Verifiers[in.Account].(Escalator); ok {
+		var err error
+		if esc, err = e.Escalate(ctx, in); err != nil {
+			g.cfg.Logf("grants: guarding %s: %v", in.ID, err)
+			return verdict{kind: deny, why: "the adapter's guard refuses this effect (ADP-2)"}
+		}
+		if esc.Verb != "" {
+			if v = stricter(v, esc.Verb); !verb.Valid(v) {
+				return verdict{kind: deny, why: "this operation's verb is not on the broker's list (ADP-2)"}
+			}
+			cls, _ = verb.ClassOf(v)
+		}
+	}
+	if cls == verb.Reversible && !esc.Ask {
 		return verdict{kind: allow}
 	}
 	var ver Verified
