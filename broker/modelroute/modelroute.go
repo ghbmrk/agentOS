@@ -15,6 +15,7 @@ package modelroute
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -90,6 +91,10 @@ func Forward(cfg Config) func(machine string) http.Handler {
 			ModifyResponse: func(resp *http.Response) error {
 				raw := resp.Header.Get(HeaderDenial)
 				dropOurs(resp.Header)
+				dropOurs(resp.Trailer)
+				// Trailer values arrive with the end of the body; strip
+				// ours again once they have.
+				resp.Body = &scrubTrailers{ReadCloser: resp.Body, resp: resp}
 				if raw != "" {
 					var d Denial
 					if err := json.Unmarshal([]byte(raw), &d); err != nil {
@@ -107,6 +112,21 @@ func Forward(cfg Config) func(machine string) http.Handler {
 			},
 		}
 	}
+}
+
+// scrubTrailers drops our headers from the response trailers once the body
+// ends, before the reverse proxy copies the trailers to the guest.
+type scrubTrailers struct {
+	io.ReadCloser
+	resp *http.Response
+}
+
+func (s *scrubTrailers) Read(b []byte) (int, error) {
+	n, err := s.ReadCloser.Read(b)
+	if err != nil {
+		dropOurs(s.resp.Trailer)
+	}
+	return n, err
 }
 
 func dropOurs(h http.Header) {

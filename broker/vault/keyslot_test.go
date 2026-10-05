@@ -14,7 +14,7 @@ import (
 
 // REQ: CRED-8, CRED-1
 
-const testPass = "tulip-orbit-canary-mosaic-ember-quartz-lantern"
+const testPass = "tulip orbit canary mosaic t-shirt quartz lantern"
 
 // fastKDF lowers the Argon2id floor and default for one test, so the slot
 // logic is exercised without paying 256 MiB per derivation. The spec
@@ -46,9 +46,10 @@ func TestPassphraseSlotOpensTheVault(t *testing.T) {
 	}
 	v.Close()
 
-	// Scanned or typed: case, surrounding space, and separators between
-	// words do not matter.
-	for _, typed := range []string{testPass, "  " + strings.ToUpper(testPass) + "\n", strings.ReplaceAll(testPass, "-", "  ")} {
+	// Scanned or typed: case and runs of whitespace do not matter
+	// (card.NormalizePassphrase's canonical form, P2-2). A hyphen inside
+	// a word list entry such as "t-shirt" is part of the word.
+	for _, typed := range []string{testPass, "  " + strings.ToUpper(testPass) + "\n", strings.ReplaceAll(testPass, " ", " \t ")} {
 		v2, err := OpenSealed(vp, kp, Passphrase(typed))
 		if err != nil {
 			t.Fatalf("%q: %v", typed, err)
@@ -69,6 +70,9 @@ func TestWrongPassphraseOpensNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	v.Close()
+	if _, err := OpenSealed(vp, kp, Passphrase(strings.ReplaceAll(testPass, "t-shirt", "t shirt"))); !errors.Is(err, ErrNoSlotOpens) {
+		t.Fatalf("hyphen dropped: %v", err)
+	}
 	if _, err := OpenSealed(vp, kp, Passphrase(testPass+"-x")); !errors.Is(err, ErrNoSlotOpens) {
 		t.Fatalf("wrong passphrase: %v", err)
 	}
@@ -102,7 +106,14 @@ func TestDriveHoldsNoKeyMaterial(t *testing.T) {
 		t.Fatal(err)
 	}
 	secrets := [][]byte{key, []byte(testPass), normalize(testPass), seed}
-	for _, path := range []string{vp, kp} {
+	// Everything the drive holds: the whole state directory, temporary
+	// files included.
+	files, err := os.ReadDir(filepath.Dir(vp))
+	if err != nil || len(files) < 2 {
+		t.Fatalf("state dir: %v %v", files, err)
+	}
+	for _, f := range files {
+		path := filepath.Join(filepath.Dir(vp), f.Name())
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
@@ -110,12 +121,34 @@ func TestDriveHoldsNoKeyMaterial(t *testing.T) {
 		for _, s := range secrets {
 			for _, form := range [][]byte{s, []byte(hex.EncodeToString(s)), []byte(base64.StdEncoding.EncodeToString(s)), []byte(base64.RawStdEncoding.EncodeToString(s))} {
 				if bytes.Contains(raw, form) {
-					t.Fatalf("%s holds key material in the clear", filepath.Base(path))
+					t.Fatalf("%s holds key material in the clear", f.Name())
 				}
 			}
 		}
 		if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
-			t.Fatalf("%s mode %v, want 0600", filepath.Base(path), fi.Mode().Perm())
+			t.Fatalf("%s mode %v, want 0600", f.Name(), fi.Mode().Perm())
+		}
+	}
+}
+
+func TestPassphraseBytesAreWipedAfterUse(t *testing.T) {
+	fastKDF(t)
+	vp, kp := sealedPaths(t)
+	f := Passphrase(testPass)
+	v, err := CreateSealed(vp, kp, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v.Close()
+	g := Passphrase(testPass)
+	v, err = OpenSealed(vp, kp, g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v.Close()
+	for _, p := range []Factor{f, g} {
+		if bytes.Count(p.(passphrase), []byte{0}) != len(p.(passphrase)) {
+			t.Fatal("passphrase bytes left in memory")
 		}
 	}
 }
@@ -243,7 +276,7 @@ func TestRekeyReplacesThePassphrase(t *testing.T) {
 	}
 	v.Close()
 	old, _ := os.ReadFile(kp)
-	const next = "harbor-violet-canary-signal-maple-cobalt-fern"
+	const next = "harbor violet canary signal maple cobalt fern"
 	if err := Rekey(kp, Passphrase("not-the-passphrase-at-all"), Passphrase(next)); !errors.Is(err, ErrNoSlotOpens) {
 		t.Fatalf("rekey without the old passphrase: %v", err)
 	}
@@ -291,7 +324,7 @@ func TestOtherSlotKindsAreKeptAndUnknownKindsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	v.Close()
-	const next = "harbor-violet-canary-signal-maple-cobalt-fern"
+	const next = "harbor violet canary signal maple cobalt fern"
 	if err := Rekey(kp, Passphrase(testPass), Passphrase(next)); err != nil {
 		t.Fatal(err)
 	}
