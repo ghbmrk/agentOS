@@ -25,6 +25,8 @@ var controlPath = map[string][]string{
 	"admission": {},
 	"sockets":   {},
 	"cgroup":    {},
+	"budget":    {"admission", "cgroup"}, // RES-2 component budget (P2-5)
+	"accel":     {"admission"},           // RES-3 discovery from sysfs (P2-5)
 	"owner":     {"control", "journal", "modem"},
 	"modem":     {},
 	// The approval policy (grants) runs inside the engine's checks, so it
@@ -54,7 +56,7 @@ var controlPath = map[string][]string{
 	// clock imports golang.org/x/sys/unix (adjtimex), so it has no entry
 	// below, whose rules refuse third-party imports; TestAgentosdLinks-
 	// NoInference holds it instead, through netOK.
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile"},
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies

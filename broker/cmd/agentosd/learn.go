@@ -49,9 +49,13 @@ type learning struct {
 	// values are the guest's task values, for the compiler only
 	// (W3-values); mining is the journal everything else in Loop 1 reads,
 	// which keeps none (security V3).
-	values   *taskValues
-	mining   lateReader
-	observed chan journal.Intent
+	values *taskValues
+	mining lateReader
+	// forgotten tombstones the goals the owner forgot (security F1 on
+	// #123): mining skips their intents, and nothing is kept for them
+	// again.
+	forgotten *forgotten
+	observed  chan journal.Intent
 	// verdicts queues the gate's owner verdicts for harvesting, so a slow
 	// learning plane never holds the gate (security A2 on PW3).
 	verdicts chan grants.OwnerOutcome
@@ -131,7 +135,10 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	if l.values, err = openTaskValues(change.FileStore{Path: filepath.Join(p.Dir, "values.json")}, filepath.Join(p.Dir, "values.key"), time.Now, log.Printf); err != nil {
 		return nil, err
 	}
-	l.mining = lateReader{&l.eng}
+	if l.forgotten, err = openForgotten(change.FileStore{Path: filepath.Join(p.Dir, "forgotten.json")}, time.Now); err != nil {
+		return nil, err
+	}
+	l.mining = lateReader{&l.eng, l.forgotten}
 	if l.builder, err = skillBuilder(l.mining, l.values, l.pipe); err != nil {
 		return nil, err
 	}
@@ -275,6 +282,29 @@ func learningOff(cfg *daemon.Config) {
 	cfg.Notes = append(cfg.Notes, func() string { return learningOffNote })
 }
 
+// forgetTask deletes what the learning plane keeps of one task: its text,
+// its values, the Loop 1 cases harvested from it and the harvester's
+// records of them (W3-tasks part 1,
+// CAP-3). Only an authenticated owner forget may call it; none exists yet,
+// so nothing does. Adopted skills and procedures whose evidence includes
+// the task, and held candidates (loops L19), are the cascade's (security
+// C1 on #120; BOARD W3-tasks).
+func (l *learning) forgetTask(goal string) error {
+	if goal == "" {
+		return errors.New("learning: forget needs a goal")
+	}
+	// Each store forgets even when another's save failed; any failure is
+	// returned, so a forget is never reported done while data is at rest.
+	// The tombstone first: once it holds, nothing keeps the goal again,
+	// even if a deletion below fails.
+	ferr := l.forgotten.add(goal)
+	_, terr := l.tasks.forget(goal)
+	_, verr := l.values.forget(goal)
+	ids, cerr := l.pipe.ForgetGoal(goal)
+	herr := l.harvest.ForgetCases(ids)
+	return errors.Join(ferr, terr, verr, cerr, herr)
+}
+
 // attach binds the running daemon's engine and admission and starts the
 // scheduler. Before it, the box reads as busy and stopped: no loop work.
 func (l *learning) attach(ctx context.Context, d *daemon.Daemon) {
@@ -302,12 +332,19 @@ func (l *learning) attach(ctx context.Context, d *daemon.Daemon) {
 					l.record(o)
 				}()
 			case in := <-l.observed:
-				if l.learningOn() { // again: it may have been turned off while queued (UX-S3-2)
-					l.values.observe(in)
-				}
+				l.observeIntent(in)
 			}
 		}
 	}()
+}
+
+// observeIntent keeps a guest intent's values, unless learning is off
+// (again: it may have been turned off while queued, UX-S3-2) or its goal
+// was forgotten.
+func (l *learning) observeIntent(in journal.Intent) {
+	if l.learningOn() && !l.forgotten.has(in.GoalID) {
+		l.values.observe(in)
+	}
 }
 
 // learningOn reports whether the owner has learning on: the Improve loop
@@ -317,7 +354,7 @@ func (l *learning) learningOn() bool { return l.sched.Settings().On(loops.Improv
 
 // delivered keeps the owner's task text for harvesting (guest G16).
 func (l *learning) delivered(goal, text string, public bool) {
-	if l.learningOn() {
+	if l.learningOn() && !l.forgotten.has(goal) {
 		l.tasks.put(goal, text, public)
 	}
 }
@@ -327,7 +364,7 @@ func (l *learning) delivered(goal, text string, public bool) {
 // drops them.
 func (l *learning) record(o grants.OwnerOutcome) {
 	l.values.verdict(o)
-	if l.learningOn() {
+	if l.learningOn() && !l.forgotten.has(o.Intent.GoalID) {
 		harvestOutcome(l.cases, l.tasks, o, log.Printf)
 	}
 }
@@ -443,21 +480,8 @@ func (l *lateEvaluator) Run(ctx context.Context, t change.Tree, p change.Probe) 
 
 // lateReader is Loop 1's journal reader, empty until the engine runs.
 type lateReader struct {
-	e *atomic.Pointer[journal.Engine]
-}
-
-func (r lateReader) List() []journal.Status {
-	if e := r.e.Load(); e != nil {
-		return e.List()
-	}
-	return nil
-}
-
-func (r lateReader) Trail() []journal.Record {
-	if e := r.e.Load(); e != nil {
-		return e.Trail()
-	}
-	return nil
+	e    *atomic.Pointer[journal.Engine]
+	gone *forgotten // goals whose intents it skips (forgotten.go)
 }
 
 // lateQuality records the harvester's owner verdicts once the engine runs.

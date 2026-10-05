@@ -303,6 +303,30 @@ func (h *Harvester) saveLocked() error {
 	return h.Store.Save(b)
 }
 
+// ForgetCases drops the harvester's records of cases the pipeline forgot
+// with their task (W3-tasks part 1, CAP-3; the IDs change.ForgetGoal
+// returns), so the held-out evidence no longer counts them and the saved
+// state no longer names them. Only the broker's handling of an
+// authenticated owner forget calls it: dropping a record un-holds its task
+// for mining (change TestOnlyTheDaemonForgets).
+func (h *Harvester) ForgetCases(ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if err := h.loadLocked(); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		delete(h.st.Tasks, id)
+		delete(h.st.Added, id)
+		delete(h.st.Origins, id)
+		delete(h.st.Implicit, id)
+	}
+	return h.saveLocked()
+}
+
 // Evidence is what Loop 1 may know about the harvested cases: which tasks
 // are held out, so it never mines them, and how many there are.
 type Evidence struct {

@@ -54,4 +54,13 @@ func TestPublicArtifactsTakeTheLocalPath(t *testing.T) {
 	if len(e.ev.ran) == 0 {
 		t.Fatalf("upstream release staged unevaluated: %+v", up)
 	}
+	// One that fails evaluation never stages.
+	e.p.cfg.Evaluator = brokenEvaluator{}
+	bad := e.release(release(t, 21, false, map[string][]byte{"guest-image/openclaw": []byte("img2")}))
+	e.p.mu.Lock()
+	staged := string(e.p.st.Active["guest-image/openclaw"])
+	e.p.mu.Unlock()
+	if bad.State != StateRejected || staged == "img2" {
+		t.Fatalf("failing upstream release: %+v, active %q", bad, staged)
+	}
 }
