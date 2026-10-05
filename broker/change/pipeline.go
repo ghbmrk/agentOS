@@ -3,18 +3,21 @@ package change
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/update"
 )
 
 // Source is where a candidate comes from (§11).
@@ -26,7 +29,9 @@ const (
 	Shared   Source = "shared"   // packages from other installations (Import)
 )
 
-// Candidate is a proposed change to the managed tree.
+// Candidate is a proposed change to the managed tree. Propose takes only
+// local candidates; upstream ones come from ProposeRelease and shared ones
+// from Import, which set Source themselves.
 type Candidate struct {
 	Source Source
 	// Origin names what produced it, for the journal ("loop1", "router",
@@ -39,19 +44,25 @@ type Candidate struct {
 	// it, and no owner-facing text carries it (CHG-6).
 	Claim string
 	// Public marks a candidate built only from public inputs, which is
-	// required to share it (CHG-5).
+	// required to share it (CHG-5). Loop 1 sets it in broker code from the
+	// REV-5 labels of every input; the builder never asserts it.
 	Public bool
-	// Security marks an upstream security fix, set by the update channel
-	// from signed release metadata (UPD-8). Refused on any other source.
-	Security bool
 }
 
-// Evaluator runs one case against a candidate tree inside an agent machine,
-// by counterfactual replay against recorded external responses (LOOP-5):
-// no live effects, and any unrecorded call fails closed. It returns the
-// output the grader judges.
+// Probe is what the evaluator sees of a case: its ID and input. The
+// expected output, the owner's outcome, and whether it is a security
+// fixture stay in the broker, which grades (CHG-1).
+type Probe struct {
+	ID    string
+	Input []byte
+}
+
+// Evaluator runs one probe against a candidate tree inside an agent
+// machine, by counterfactual replay against recorded external responses
+// (LOOP-5): no live effects, and any unrecorded call fails closed. It
+// returns the output the broker's grader judges.
 type Evaluator interface {
-	Run(ctx context.Context, state Tree, c Case) ([]byte, error)
+	Run(ctx context.Context, state Tree, p Probe) ([]byte, error)
 }
 
 // Grader judges an output against a case. Graders are broker code chosen
@@ -111,12 +122,20 @@ type Config struct {
 	// RouteGranted reports whether the owner granted a provider; a routing
 	// candidate naming one that is not granted fails (ADP-4, CAP-9).
 	RouteGranted func(provider string) bool
+	// LocalProvider reports a provider that is a local model, so the
+	// digest can say when a reorder drops the local fallback. Nil: none.
+	LocalProvider func(provider string) bool
 	// Receives lists the data sources a machine already receives; a
 	// context rule may only select among them (CHG-6). Nil: none.
 	Receives func(machine string) []string
 	// Private reports content that must never leave the box: vault values,
 	// canaries, private corpora (CHG-5). Nil: nothing can be shared.
 	Private func([]byte) bool
+	// ShortID gives the owner-facing ID for an adoption (CH-12: at most 3
+	// characters). The wiring passes the owner channel's allocator so IDs
+	// never clash with open requests; taken reports IDs the pipeline still
+	// uses. Nil: the pipeline's own letter-and-digits sequence.
+	ShortID func(taken func(string) bool) (string, error)
 	Now     func() time.Time
 	Rand    io.Reader
 }
@@ -136,9 +155,12 @@ const (
 	OriginOwner    = "owner"
 
 	ActionAdopt  = "meta.change.adopt"
-	ActionRevert = "meta.change.revert"
-	ActionPolicy = "meta.change.policy"
+	ActionRevert = journal.ActionChangeRevert // authority-narrowing (journal A9)
+	ActionPolicy = "meta.change.policy"       // turning a setting on
 	ActionSuite  = "meta.change.suite"
+	// ActionPolicyOff turns a setting off; authority-narrowing, so it
+	// works during STOP (journal A9).
+	ActionPolicyOff = journal.ActionChangePolicyOff
 )
 
 // ErrNeedsOwner is returned by Check for a change only the owner may
@@ -157,6 +179,7 @@ const (
 // Report is the result of a proposal.
 type Report struct {
 	ID      string  `json:"id"`
+	Short   string  `json:"short,omitempty"` // owner-facing, once adopted
 	State   State   `json:"state"`
 	Classes []Class `json:"classes"`
 	Neutral bool    `json:"neutral"`
@@ -167,26 +190,32 @@ type Report struct {
 
 // Score is the evaluation evidence: counts only, no case content.
 type Score struct {
-	HeldOut        int `json:"held_out"`
-	Passed         int `json:"passed"`
-	BaselinePassed int `json:"baseline_passed"`
-	Regressions    int `json:"regressions"`
-	Security       int `json:"security"`
-	SecurityPassed int `json:"security_passed"`
+	HeldOut        int   `json:"held_out"`
+	Passed         int   `json:"passed"`
+	BaselinePassed int   `json:"baseline_passed"`
+	Regressions    int   `json:"regressions"`
+	Security       int   `json:"security"`
+	SecurityPassed int   `json:"security_passed"`
+	example        *Case // first regressed case, for the owner's line
 }
 
 // Adoption is a change that took effect and its rollback point.
 type Adoption struct {
 	ID      string    `json:"id"`
+	Short   string    `json:"short"` // owner-facing (UNDO, MORE)
 	Source  Source    `json:"source"`
 	Classes []Class   `json:"classes"`
 	Basis   string    `json:"basis"`
 	Edits   []Edit    `json:"edits"`
 	Score   Score     `json:"score"`
+	Origin  string    `json:"origin,omitempty"`
 	Public  bool      `json:"public,omitempty"`
 	At      time.Time `json:"at"`
-	// Reverted names why the adoption was undone ("owner", "regression"),
-	// empty while it is active.
+	// Staged marks an image change written to the inactive slot and not
+	// yet confirmed by the update code after boot (UPD-1).
+	Staged bool `json:"staged,omitempty"`
+	// Reverted names why the adoption was undone ("owner", "regression",
+	// "security", "fallback"), empty while it is active.
 	Reverted   string `json:"reverted,omitempty"`
 	Listed     bool   `json:"listed,omitempty"`
 	RevertSeen bool   `json:"revert_seen,omitempty"`
@@ -194,13 +223,16 @@ type Adoption struct {
 
 // state is everything the pipeline persists.
 type state struct {
-	Seq       int             `json:"seq"`
-	SplitKey  []byte          `json:"split_key"`
-	Active    Tree            `json:"active"`
-	Adoptions []*Adoption     `json:"adoptions"`
-	AutoAdopt bool            `json:"auto_adopt"`
-	Sharing   bool            `json:"sharing"`
-	Cases     map[string]Case `json:"cases"`
+	Seq       int         `json:"seq"`
+	SplitKey  []byte      `json:"split_key"`
+	Active    Tree        `json:"active"`
+	Adoptions []*Adoption `json:"adoptions"`
+	AutoAdopt bool        `json:"auto_adopt"`
+	Sharing   bool        `json:"sharing"`
+	// Declined lists security releases the owner declined; the digest
+	// repeats them until a later release is adopted (arbitrator R2).
+	Declined []string        `json:"declined,omitempty"`
+	Cases    map[string]Case `json:"cases"`
 	// Applied lists intents whose effect took place, for Reconcile.
 	Applied map[string]bool `json:"applied"`
 }
@@ -215,22 +247,25 @@ func (s *state) copyCases() map[string]Case {
 
 // proposal is a qualified candidate waiting for its adoption intent.
 type proposal struct {
-	cand    Candidate
-	base    string // hash of the tree it was evaluated against
-	next    Tree
-	edits   []Edit
-	report  Report
-	classes []Class
+	cand     Candidate
+	base     string // hash of the tree it was evaluated against
+	next     Tree
+	edits    []Edit
+	report   Report
+	classes  []Class
+	security bool // a verified, attested security release
 }
 
 // Pipeline is the one change pipeline (§11). It is safe for concurrent use.
 type Pipeline struct {
 	cfg Config
 	j   Journal
+	key []byte // split and probe key, fixed after New
 
-	mu    sync.Mutex
-	st    state
-	props map[string]*proposal
+	mu     sync.Mutex
+	st     state
+	props  map[string]*proposal
+	broken error // set when state could neither be saved nor reloaded
 }
 
 // New loads the persisted state, or seeds it on first start, and applies
@@ -265,6 +300,14 @@ func New(cfg Config) (*Pipeline, error) {
 	if raw != nil {
 		if err := json.Unmarshal(raw, &p.st); err != nil {
 			return nil, fmt.Errorf("change: corrupt state: %w", err)
+		}
+		if len(p.st.SplitKey) != 32 {
+			return nil, errors.New("change: corrupt state: bad split key")
+		}
+		for path := range p.st.Active {
+			if err := cleanPath(path); err != nil {
+				return nil, fmt.Errorf("change: corrupt state: %w", err)
+			}
 		}
 		for ns, t := range cfg.Targets {
 			if err := t.Apply(p.st.Active.under(ns)); err != nil {
@@ -305,7 +348,16 @@ func New(cfg Config) (*Pipeline, error) {
 	if p.st.Applied == nil {
 		p.st.Applied = map[string]bool{}
 	}
+	p.key = append([]byte(nil), p.st.SplitKey...)
 	return p, nil
+}
+
+// healthy refuses new work once the state could not be saved or reloaded:
+// the pipeline then fails stop rather than run on state it cannot keep.
+func (p *Pipeline) healthy() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.broken
 }
 
 // Attach connects the journal. The pipeline must also be registered as the
@@ -314,6 +366,9 @@ func New(cfg Config) (*Pipeline, error) {
 func (p *Pipeline) Attach(j Journal) { p.j = j }
 
 func (p *Pipeline) saveLocked() error {
+	if p.broken != nil {
+		return p.broken
+	}
 	b, err := json.Marshal(p.st)
 	if err != nil {
 		return err
@@ -350,16 +405,37 @@ func (p *Pipeline) Adoptions() []Adoption {
 // and, if it qualifies, submits its adoption intent: candidate → build →
 // evaluate → adoption intent → activate with fallback → rollback point.
 func (p *Pipeline) Propose(ctx context.Context, c Candidate) (Report, error) {
+	if c.Source == "" {
+		c.Source = Local
+	}
+	if c.Source != Local {
+		return Report{}, errors.New("change: Propose takes local candidates; use ProposeRelease or Import")
+	}
+	return p.propose(ctx, c, false)
+}
+
+// ProposeRelease runs a verified upstream release through the pipeline.
+// The candidate is built here from the signed image digests, so what is
+// evaluated and staged is exactly what the maintainers signed. Only a
+// release that update.Verify marked as security (signature threshold plus
+// an independent attestation, UPD-8) can use the security standing policy.
+func (p *Pipeline) ProposeRelease(ctx context.Context, v update.Verified) (Report, error) {
+	if !v.OK() {
+		return Report{}, errors.New("change: release is not verified")
+	}
+	files := Tree{}
+	for path, d := range v.Images() {
+		files[path] = []byte(d)
+	}
+	return p.propose(ctx, Candidate{Source: Upstream, Origin: "update:" + v.Version(), Files: files}, v.Security())
+}
+
+func (p *Pipeline) propose(ctx context.Context, c Candidate, security bool) (Report, error) {
 	if p.j == nil {
 		return Report{}, errors.New("change: no journal attached")
 	}
-	switch c.Source {
-	case Local, Upstream, Shared:
-	default:
-		return Report{}, fmt.Errorf("change: unknown source %q", c.Source)
-	}
-	if c.Security && c.Source != Upstream {
-		return Report{}, errors.New("change: only an upstream release can be a security fix")
+	if err := p.healthy(); err != nil {
+		return Report{}, err
 	}
 	for path := range c.Files {
 		if err := cleanPath(path); err != nil {
@@ -392,7 +468,7 @@ func (p *Pipeline) Propose(ctx context.Context, c Candidate) (Report, error) {
 		p.mu.Unlock()
 		return Report{}, err
 	}
-	cl := p.classify(edits, c.Source)
+	cl := p.classify(edits, base, c.Source)
 	set := p.freezeLocked(cl.classes)
 	auto := p.st.AutoAdopt
 	p.mu.Unlock()
@@ -403,26 +479,43 @@ func (p *Pipeline) Propose(ctx context.Context, c Candidate) (Report, error) {
 		return rep, nil
 	}
 	rep.Score = p.evaluate(ctx, base, next, set)
+	images := cl.imagesOnly()
+	regressed := rep.Regressions > 0 || rep.Passed < rep.BaselinePassed
 	switch {
-	case rep.Regressions > 0 || rep.Passed < rep.BaselinePassed:
+	case regressed && !(security && images):
 		rep.State, rep.Reason = StateRejected, "regresses on the held-out suite"
 		return rep, nil
 	case rep.SecurityPassed < rep.Security:
 		rep.State, rep.Reason = StateRejected, "fails the security suite"
+		return rep, nil
+	case rep.Security < p.cfg.MinSecurity:
+		// Without fixtures nothing shows the evaluator ran at all.
+		rep.State, rep.Reason = StateRejected, "too few security fixtures to qualify anything"
+		return rep, nil
+	case rep.HeldOut > 0 && rep.Passed == 0 && rep.BaselinePassed == 0:
+		// Zero passes on both sides reads as "no regression" when the
+		// evaluator cannot run (no model access, every case erroring). A
+		// candidate passing nothing where the baseline passed is a
+		// regression, handled above.
+		rep.State, rep.Reason = StateRejected, "passes no held-out case"
 		return rep, nil
 	}
 	enough := rep.HeldOut >= p.cfg.MinHeldOut && rep.Security >= p.cfg.MinSecurity
 	switch {
 	case c.Source == Local && cl.neutral && auto && enough:
 		rep.Basis = BasisStanding
-	case c.Source == Upstream && c.Security && p.cfg.SecurityAutoStage && rep.Security >= p.cfg.MinSecurity:
+	case c.Source == Upstream && security && images && !regressed && p.cfg.SecurityAutoStage:
 		rep.Basis = BasisSecurity
 	default:
+		// A security release that regresses still goes to the owner with
+		// its counts: rejecting it would leave the box on the vulnerable
+		// image.
 		rep.Basis = BasisOwner
 	}
 
 	p.mu.Lock()
-	p.props[id] = &proposal{cand: c, base: base.Hash(), next: next, edits: edits, report: rep, classes: cl.classes}
+	p.props[id] = &proposal{cand: c, base: base.Hash(), next: next, edits: edits, report: rep, classes: cl.classes,
+		security: security && cl.imagesOnly()}
 	p.mu.Unlock()
 
 	in := journal.Intent{
@@ -466,6 +559,12 @@ func (p *Pipeline) drive(ctx context.Context, id string, rep Report, authorize b
 		return rep, nil
 	case journal.Denied:
 		rep.State, rep.Reason = StateRejected, st.Permission.Reason
+		p.mu.Lock()
+		if pr := p.props[id]; pr != nil && pr.security {
+			p.st.Declined = append(p.st.Declined, strings.TrimPrefix(pr.cand.Origin, "update:"))
+			_ = p.saveLocked()
+		}
+		p.mu.Unlock()
 		p.drop(id)
 		return rep, nil
 	case journal.Authorized:
@@ -479,6 +578,11 @@ func (p *Pipeline) drive(ctx context.Context, id string, rep Report, authorize b
 	p.drop(id)
 	if st.State == journal.Succeeded {
 		rep.State = StateAdopted
+		p.mu.Lock()
+		if a := p.adoptionLocked(id); a != nil {
+			rep.Short = a.Short
+		}
+		p.mu.Unlock()
 		return rep, nil
 	}
 	rep.State = StateRejected
@@ -510,6 +614,10 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen) Sc
 		}
 		if b && !n {
 			s.Regressions++
+			if s.example == nil {
+				cc := c
+				s.example = &cc
+			}
 		}
 	}
 	for _, c := range set.security {
@@ -522,7 +630,7 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen) Sc
 }
 
 func (p *Pipeline) pass(ctx context.Context, t Tree, c Case) bool {
-	out, err := p.cfg.Evaluator.Run(ctx, t.clone(), c)
+	out, err := p.cfg.Evaluator.Run(ctx, t.clone(), Probe{ID: p.probeID(c.ID), Input: append([]byte(nil), c.Input...)})
 	if err != nil {
 		return false
 	}
@@ -531,6 +639,14 @@ func (p *Pipeline) pass(ctx context.Context, t Tree, c Case) bool {
 		g = DefaultGrader
 	}
 	return g(c, out)
+}
+
+// probeID is an opaque per-installation name for a case, so the evaluator
+// cannot tell a security fixture or a task case by its name.
+func (p *Pipeline) probeID(caseID string) string {
+	m := hmac.New(sha256.New, p.key)
+	m.Write([]byte("probe:" + caseID))
+	return hex.EncodeToString(m.Sum(nil)[:8])
 }
 
 func adoptID(id string) string { return "chg:" + id + ":adopt" }
@@ -550,407 +666,4 @@ func parseID(id string) []string {
 		return nil
 	}
 	return parts
-}
-
-// Check is the policy for meta.change intents (OP-3), run at authorize and
-// again before dispatch. It returns nil when the pipeline's own standing
-// rules allow the intent, ErrNeedsOwner when only the owner may, and any
-// other error to deny.
-func (p *Pipeline) Check(_ context.Context, _ journal.Phase, in journal.Intent) error {
-	if in.Account != journal.BrokerAccount || in.Executor != Executor {
-		return errors.New("change: not a change intent")
-	}
-	parts := parseID(in.ID)
-	if parts == nil {
-		return errors.New("change: malformed change intent")
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	switch in.Action {
-	case ActionAdopt:
-		pr := p.props[parts[1]]
-		if pr == nil || in.ID != adoptID(parts[1]) || in.Origin != OriginPipeline {
-			return errors.New("change: no qualified candidate for this intent")
-		}
-		if pr.report.Basis != in.GrantRef {
-			return errors.New("change: basis differs from the evaluation")
-		}
-		if pr.base != p.st.Active.Hash() {
-			return errors.New("change: the active state changed since evaluation; propose again")
-		}
-		switch in.GrantRef {
-		case BasisStanding:
-			if !p.st.AutoAdopt {
-				return ErrNeedsOwner
-			}
-			return nil
-		case BasisSecurity:
-			if !p.cfg.SecurityAutoStage {
-				return ErrNeedsOwner
-			}
-			return nil
-		}
-		return ErrNeedsOwner
-	case ActionRevert:
-		if in.Origin != OriginOwner && in.Origin != OriginPipeline {
-			return errors.New("change: only the owner or the pipeline reverts")
-		}
-		a := p.adoptionLocked(parts[1])
-		if a == nil || a.Reverted != "" {
-			return errors.New("change: no active adoption " + parts[1])
-		}
-		return nil
-	case ActionPolicy:
-		if in.Origin != OriginOwner || len(parts) != 5 {
-			return errors.New("change: only the owner changes adoption policy")
-		}
-		if parts[3] != "auto_adopt" && parts[3] != "sharing" {
-			return errors.New("change: unknown policy setting")
-		}
-		switch parts[4] {
-		case "off":
-			return nil // narrowing needs only the owner's text
-		case "on":
-			return ErrNeedsOwner // widening is an owner-approved intent (CHG-2)
-		}
-		return errors.New("change: policy value is on or off")
-	case ActionSuite:
-		if in.Origin != OriginOwner || len(parts) != 5 || parts[3] != "remove" {
-			return errors.New("change: only the owner changes a suite")
-		}
-		if _, ok := p.st.Cases[parts[4]]; !ok {
-			return errors.New("change: no such case")
-		}
-		return ErrNeedsOwner
-	}
-	return errors.New("change: unknown change action")
-}
-
-func (p *Pipeline) adoptionLocked(id string) *Adoption {
-	for _, a := range p.st.Adoptions {
-		if a.ID == id {
-			return a
-		}
-	}
-	return nil
-}
-
-// Execute performs a change intent; the journal calls it after the
-// dispatch record is durable.
-func (p *Pipeline) Execute(_ context.Context, in journal.Intent, _ int) journal.Outcome {
-	parts := parseID(in.ID)
-	if parts == nil {
-		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "malformed change intent"}
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.st.Applied[in.ID] {
-		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "already applied"}
-	}
-	var err error
-	switch in.Action {
-	case ActionAdopt:
-		err = p.adoptLocked(parts[1], in.GrantRef)
-	case ActionRevert:
-		why := "owner"
-		if in.Origin == OriginPipeline {
-			why = "regression"
-		}
-		err = p.revertLocked(parts[1], why)
-	case ActionPolicy:
-		on := parts[4] == "on"
-		if parts[3] == "auto_adopt" {
-			p.st.AutoAdopt = on
-		} else {
-			p.st.Sharing = on
-		}
-	case ActionSuite:
-		next := p.st.copyCases()
-		delete(next, parts[4])
-		p.st.Cases = next
-	default:
-		err = errors.New("unknown change action")
-	}
-	if err != nil {
-		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: err.Error()}
-	}
-	p.st.Applied[in.ID] = true
-	if err := p.saveLocked(); err != nil {
-		// The in-memory state moved but is not durable; reload what is.
-		p.reloadLocked()
-		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "state not saved: " + err.Error()}
-	}
-	return journal.Outcome{Result: journal.ResultSucceeded}
-}
-
-// Reconcile reports from the pipeline's own durable state. A crash before
-// the state was saved leaves the old tree, which New re-applies, so the
-// effect did not happen.
-func (p *Pipeline) Reconcile(_ context.Context, in journal.Intent, _ int) journal.Outcome {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.st.Applied[in.ID] {
-		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "in saved state"}
-	}
-	return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "not in saved state"}
-}
-
-func (p *Pipeline) reloadLocked() {
-	raw, err := p.cfg.Store.Load()
-	if err != nil || raw == nil {
-		return
-	}
-	var st state
-	if json.Unmarshal(raw, &st) == nil {
-		p.st = st
-		p.applyAllLocked(p.st.Active)
-	}
-}
-
-func (p *Pipeline) applyAllLocked(t Tree) {
-	for ns, tg := range p.cfg.Targets {
-		_ = tg.Apply(t.under(ns))
-	}
-}
-
-func (p *Pipeline) adoptLocked(id, basis string) error {
-	pr := p.props[id]
-	if pr == nil {
-		return errors.New("no qualified candidate")
-	}
-	if pr.base != p.st.Active.Hash() {
-		return errors.New("the active state changed since evaluation")
-	}
-	if err := p.activateLocked(p.st.Active, pr.next, pr.edits); err != nil {
-		return err
-	}
-	p.st.Active = pr.next
-	p.st.Adoptions = append(p.st.Adoptions, &Adoption{ID: id, Source: pr.cand.Source, Classes: pr.classes,
-		Basis: basis, Edits: pr.edits, Score: pr.report.Score, Public: pr.cand.Public, At: p.cfg.Now()})
-	return nil
-}
-
-// activateLocked applies next to every target whose namespace an edit
-// touches. If one fails, the targets already changed get prev back:
-// activate with fallback.
-func (p *Pipeline) activateLocked(prev, next Tree, edits []Edit) error {
-	touched := map[string]bool{}
-	for _, e := range edits {
-		touched[namespace(e.Path)] = true
-	}
-	nss := make([]string, 0, len(touched))
-	for ns := range touched {
-		if p.cfg.Targets[ns] != nil {
-			nss = append(nss, ns)
-		}
-	}
-	sort.Strings(nss)
-	for i, ns := range nss {
-		if err := p.cfg.Targets[ns].Apply(next.under(ns)); err != nil {
-			for _, done := range nss[:i+1] {
-				_ = p.cfg.Targets[done].Apply(prev.under(done))
-			}
-			return fmt.Errorf("activating %s failed, kept the previous state: %v", ns, err)
-		}
-	}
-	return nil
-}
-
-// undoTree returns the active tree with one adoption's edits undone, or an
-// error if any path it changed has changed again since.
-func undoTree(cur Tree, a *Adoption) (Tree, error) {
-	next := cur.clone()
-	for _, e := range a.Edits {
-		now, present := cur[e.Path]
-		if present != (e.After != nil) || !bytes.Equal(now, e.After) {
-			return nil, fmt.Errorf("%s changed since %s; undo the later change first", e.Path, a.ID)
-		}
-		if e.Before == nil {
-			delete(next, e.Path)
-		} else {
-			next[e.Path] = append([]byte{}, e.Before...)
-		}
-	}
-	return next, nil
-}
-
-func (p *Pipeline) revertLocked(id, why string) error {
-	a := p.adoptionLocked(id)
-	if a == nil || a.Reverted != "" {
-		return errors.New("no active adoption " + id)
-	}
-	next, err := undoTree(p.st.Active, a)
-	if err != nil {
-		return err
-	}
-	if err := p.activateLocked(p.st.Active, next, a.Edits); err != nil {
-		return err
-	}
-	p.st.Active = next
-	a.Reverted = why
-	return nil
-}
-
-// Revert undoes an adoption: the owner's one-word reply (UNDO <id>), or
-// the pipeline itself on a regression.
-func (p *Pipeline) Revert(ctx context.Context, id, origin string) error {
-	p.mu.Lock()
-	a := p.adoptionLocked(id)
-	active := a != nil && a.Reverted == ""
-	p.mu.Unlock()
-	if !active {
-		return fmt.Errorf("change: %s is not an active adoption", id)
-	}
-	return p.run(ctx, journal.Intent{ID: "chg:" + id + ":revert", Origin: origin,
-		Account: journal.BrokerAccount, Action: ActionRevert, Executor: Executor})
-}
-
-// SetAutoAdopt turns the CHG-6 standing grant off (the owner's text is
-// enough) or back on (an owner-approved intent).
-func (p *Pipeline) SetAutoAdopt(ctx context.Context, on bool) error {
-	return p.setPolicy(ctx, "auto_adopt", on)
-}
-
-// SetSharing opts in to sharing (an owner-approved intent) or out (CHG-4).
-func (p *Pipeline) SetSharing(ctx context.Context, on bool) error {
-	return p.setPolicy(ctx, "sharing", on)
-}
-
-func (p *Pipeline) setPolicy(ctx context.Context, key string, on bool) error {
-	v := "off"
-	if on {
-		v = "on"
-	}
-	return p.run(ctx, journal.Intent{ID: fmt.Sprintf("chg:policy:%s:%s:%s", p.nonce(), key, v),
-		Origin: OriginOwner, Account: journal.BrokerAccount, Action: ActionPolicy, Executor: Executor})
-}
-
-// RemoveCase removes a case from a suite, which only the owner approves
-// (CHG-2, LOOP-10).
-func (p *Pipeline) RemoveCase(ctx context.Context, caseID string) error {
-	return p.run(ctx, journal.Intent{ID: fmt.Sprintf("chg:suite:%s:remove:%s", p.nonce(), caseID),
-		Origin: OriginOwner, Account: journal.BrokerAccount, Action: ActionSuite, Executor: Executor})
-}
-
-func (p *Pipeline) nonce() string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.st.Seq++
-	_ = p.saveLocked()
-	return "n" + strconv.Itoa(p.st.Seq)
-}
-
-// ErrPending means the intent is waiting for the owner.
-var ErrPending = errors.New("change: waiting for the owner")
-
-func (p *Pipeline) run(ctx context.Context, in journal.Intent) error {
-	if p.j == nil {
-		return errors.New("change: no journal attached")
-	}
-	st, err := p.j.Submit(in)
-	if err != nil {
-		return err
-	}
-	if st.State == journal.Pending {
-		if st, err = p.j.Authorize(ctx, in.ID); err != nil {
-			return err
-		}
-	}
-	switch st.State {
-	case journal.Pending:
-		return ErrPending
-	case journal.Denied:
-		return errors.New("change: refused: " + st.Permission.Reason)
-	case journal.Authorized:
-		if st, err = p.j.Dispatch(ctx, in.ID); err != nil {
-			return err
-		}
-	}
-	if st.State != journal.Succeeded {
-		ev := ""
-		if n := len(st.Attempts); n > 0 {
-			ev = st.Attempts[n-1].Evidence
-		}
-		return errors.New("change: not applied: " + ev)
-	}
-	return nil
-}
-
-// Recheck re-evaluates active adoptions, newest first, on the current
-// held-out suite, which grows with owner outcomes after adoption. One that
-// now regresses against the state without it is reverted (ADP-4: roll back
-// on regression). It returns the reverted IDs.
-func (p *Pipeline) Recheck(ctx context.Context) ([]string, error) {
-	p.mu.Lock()
-	type job struct {
-		id        string
-		cur, prev Tree
-		set       frozen
-	}
-	var jobs []job
-	for i := len(p.st.Adoptions) - 1; i >= 0; i-- {
-		a := p.st.Adoptions[i]
-		if a.Reverted != "" {
-			continue
-		}
-		prev, err := undoTree(p.st.Active, a)
-		if err != nil {
-			continue
-		}
-		jobs = append(jobs, job{a.ID, p.st.Active.clone(), prev, p.freezeLocked(a.Classes)})
-	}
-	p.mu.Unlock()
-	var out []string
-	for _, jb := range jobs {
-		s := p.evaluate(ctx, jb.prev, jb.cur, jb.set)
-		if s.Regressions == 0 && s.Passed >= s.BaselinePassed {
-			continue
-		}
-		if err := p.Revert(ctx, jb.id, OriginPipeline); err != nil {
-			return out, err
-		}
-		out = append(out, jb.id)
-	}
-	return out, nil
-}
-
-// Digest returns one fixed-template line per adoption or revert not yet
-// listed, and marks them listed. No line carries a candidate's own text.
-func (p *Pipeline) Digest() []string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	var out []string
-	for _, a := range p.st.Adoptions {
-		if !a.Listed {
-			how := "with your approval"
-			switch a.Basis {
-			case BasisStanding:
-				how = "without asking (authority-neutral)"
-			case BasisSecurity:
-				how = "as a security update"
-			}
-			ev := "no held-out cases yet"
-			if a.Score.HeldOut > 0 {
-				ev = fmt.Sprintf("held-out %d/%d, no regression", a.Score.Passed, a.Score.HeldOut)
-			}
-			line := fmt.Sprintf("Adopted %s change %s %s; %s.", joinClasses(a.Classes), a.ID, how, ev)
-			if a.Reverted == "" {
-				line += " UNDO " + a.ID
-			}
-			out = append(out, line)
-			a.Listed = true
-		}
-		if a.Reverted != "" && !a.RevertSeen {
-			why := "by your reply"
-			if a.Reverted == "regression" {
-				why = "after it regressed on new cases"
-			}
-			out = append(out, fmt.Sprintf("Reverted %s %s.", a.ID, why))
-			a.RevertSeen = true
-		}
-	}
-	if len(out) > 0 {
-		_ = p.saveLocked()
-	}
-	return out
 }

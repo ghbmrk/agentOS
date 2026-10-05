@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/journal"
 )
@@ -36,6 +37,8 @@ type Case struct {
 	// count toward evidence in a shared package (CHG-4).
 	Public   bool `json:"public,omitempty"`
 	Security bool `json:"security,omitempty"`
+	// At is when the case was added, for owner-facing examples.
+	At time.Time `json:"at,omitempty"`
 }
 
 // split is which side of the held-out boundary a case is on.
@@ -86,6 +89,7 @@ func (p *Pipeline) AddTaskCase(c Case) error {
 	default:
 		return fmt.Errorf("%w: outcome %q does not match verdict %q", ErrProvenance, c.Outcome, q.Verdict)
 	}
+	c.At = p.cfg.Now()
 	return p.addCase(c)
 }
 
@@ -123,7 +127,7 @@ func (p *Pipeline) Dev(class Class) []Case {
 	defer p.mu.Unlock()
 	var out []Case
 	for _, c := range p.st.Cases {
-		if !c.Security && c.Class == class && splitOf(p.st.SplitKey, c.ID, p.cfg.DevPercent) == dev {
+		if !c.Security && c.Class == class && splitOf(p.key, c.ID, p.cfg.DevPercent) == dev {
 			out = append(out, c)
 		}
 	}
@@ -150,7 +154,7 @@ func (p *Pipeline) freezeLocked(classes []Class) frozen {
 		switch {
 		case c.Security:
 			f.security = append(f.security, c)
-		case splitOf(p.st.SplitKey, c.ID, p.cfg.DevPercent) == dev:
+		case splitOf(p.key, c.ID, p.cfg.DevPercent) == dev:
 		case rel[c.Class] || images:
 			// A new image runs every task, so every held-out case is
 			// relevant to it.

@@ -6,10 +6,12 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/update"
 )
 
 var bg = context.Background()
@@ -34,9 +36,12 @@ func TestDevSplitHidesHeldOut(t *testing.T) {
 	if rep.HeldOut != 30-len(dev) {
 		t.Fatalf("evaluated %d held-out cases, want %d", rep.HeldOut, 30-len(dev))
 	}
-	for id := range e.ev.ran {
-		if dev[id] {
+	for id := range dev {
+		if e.ev.ran[e.p.probeID(id)] {
 			t.Fatalf("dev case %s was used as held-out evidence", id)
+		}
+		if e.ev.ran[id] {
+			t.Fatal("the evaluator saw a case's own ID")
 		}
 	}
 }
@@ -105,7 +110,8 @@ func TestGoodAdoptsBadRejected(t *testing.T) {
 		t.Fatalf("adoption not journaled: %+v %v", st, err)
 	}
 	d := e.p.Digest()
-	if len(d) != 1 || !strings.Contains(d[0], "UNDO "+good.ID) || strings.Contains(d[0], "IGNORE") {
+	want := "Learned a new way to do a task. Tested on " + itoa(good.HeldOut) + " of your past tasks, none worse. UNDO " + good.Short + " / MORE " + good.Short
+	if len(d) != 1 || d[0] != want || len(good.Short) > 3 {
 		t.Fatalf("digest: %q", d)
 	}
 	if len(e.p.Digest()) != 0 {
@@ -135,12 +141,44 @@ func TestSecuritySuiteBlocks(t *testing.T) {
 }
 
 // CHG-6: auto-adoption needs at least MinSecurity fixtures.
-func TestNoSecurityFixturesAsks(t *testing.T) {
+// CHG-1: nothing adopts with fewer than MinSecurity fixtures, even with
+// the owner's approval.
+func TestNoSecurityFixturesRejects(t *testing.T) {
 	e := newEnv(t, func(c *Config) { c.MinSecurity = 2 })
 	e.cases(12, ClassSkill, "skills/greet", "hello")
+	e.owner.approve = true
 	rep := e.propose(Candidate{Source: Local, Files: Tree{"skills/greet": []byte("hello")}})
-	if rep.Basis != BasisOwner {
-		t.Fatalf("auto-adopted with too few fixtures: %+v", rep)
+	if rep.State != StateRejected || len(e.owner.asked) != 0 {
+		t.Fatalf("adopted with too few fixtures: %+v", rep)
+	}
+}
+
+type brokenEvaluator struct{}
+
+func (brokenEvaluator) Run(context.Context, Tree, Probe) ([]byte, error) {
+	return nil, errors.New("no model access")
+}
+
+// CHG-1: an evaluator that cannot run fails every case on both sides; that
+// is not "no regression", and nothing adopts.
+func TestBrokenEvaluatorAdoptsNothing(t *testing.T) {
+	e := newEnv(t, nil)
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	e.p.cfg.Evaluator = brokenEvaluator{}
+	e.owner.approve = true
+	if rep := e.propose(Candidate{Source: Local, Files: Tree{"skills/greet": []byte("hello")}}); rep.State != StateRejected || len(e.owner.asked) != 0 {
+		t.Fatalf("broken evaluator: %+v", rep)
+	}
+	if rep := e.release(release(t, "2.0", false, map[string][]byte{"guest-image/openclaw": []byte("img")})); rep.State != StateRejected || len(e.owner.asked) != 0 {
+		t.Fatalf("broken evaluator, release: %+v", rep)
+	}
+	// Even with fixtures that the broken evaluator happened to pass, zero
+	// held-out passes rejects.
+	f := newEnv(t, nil)
+	f.cases(12, ClassSkill, "skills/greet", "hello")
+	f.p.cfg.Graders = map[Class]Grader{ClassSkill: func(c Case, _ []byte) bool { return c.Security }}
+	if rep := f.propose(Candidate{Source: Local, Files: Tree{"skills/greet": []byte("hello")}}); rep.State != StateRejected || rep.Reason != "passes no held-out case" {
+		t.Fatalf("zero held-out passes: %+v", rep)
 	}
 }
 
@@ -173,7 +211,9 @@ func TestRevertByReply(t *testing.T) {
 	if c.State != StateAdopted || d.State != StateAdopted {
 		t.Fatalf("setup: %+v %+v", c, d)
 	}
-	if err := e.p.Revert(bg, c.ID, OriginOwner); err == nil || !strings.Contains(err.Error(), "changed since") {
+	err := e.p.Revert(bg, c.Short, OriginOwner)
+	var ue *UndoError
+	if !errors.As(err, &ue) || err.Error() != "Can't undo "+c.Short+" alone: "+d.Short+" changed the same thing later. Reply UNDO "+d.Short+" "+c.Short+" to undo both." {
 		t.Fatalf("revert under a later change: %v", err)
 	}
 	if string(e.p.Files("procedures")["procedures/file"]) != "v3" {
@@ -181,7 +221,7 @@ func TestRevertByReply(t *testing.T) {
 	}
 	found := false
 	for _, l := range e.p.Digest() {
-		found = found || strings.Contains(l, "Reverted "+a.ID+" by your reply")
+		found = found || l == "Undid "+a.Short+" as you asked."
 	}
 	if !found {
 		t.Fatal("digest does not list the revert")
@@ -296,38 +336,124 @@ func TestOffMeansAsk(t *testing.T) {
 }
 
 // CHG-3: behavior changes (config, upstream images) need the owner unless
-// a standing policy covers the class; an upstream security fix auto-stages
-// under that policy. Only upstream releases can be security fixes.
+// a standing policy covers the class; a verified, attested security release
+// auto-stages under that policy.
 func TestBehaviorChangesNeedOwner(t *testing.T) {
 	e := newEnv(t, nil)
 	e.cases(12, ClassSkill, "skills/greet", "hi")
 	cfg := e.propose(Candidate{Source: Local, Files: Tree{"config/digest-time": []byte("08:00")}})
-	img := e.propose(Candidate{Source: Upstream, Origin: "update", Files: Tree{"guest-image/openclaw": []byte("sha256:1")}})
-	sec := e.propose(Candidate{Source: Upstream, Security: true, Files: Tree{"host-image/release": []byte("sha256:2")}})
+	img := e.release(release(t, "2.0", false, map[string][]byte{"guest-image/openclaw": []byte("img")}))
+	sec := e.release(release(t, "2.1", true, map[string][]byte{"host-image/release": []byte("host")}))
 	for _, r := range []Report{cfg, img, sec} {
 		if r.Basis != BasisOwner || r.State != StateRejected || !e.owner.wasAsked(adoptID(r.ID)) {
 			t.Fatalf("without approval: %+v", r)
 		}
 	}
 	e.owner.approve = true
-	img = e.propose(Candidate{Source: Upstream, Files: Tree{"guest-image/openclaw": []byte("sha256:1")}})
+	img = e.release(release(t, "2.0", false, map[string][]byte{"guest-image/openclaw": []byte("img")}))
 	if img.State != StateAdopted || img.HeldOut == 0 {
 		t.Fatalf("owner-approved image: %+v", img)
 	}
-	if _, err := e.p.Propose(bg, Candidate{Source: Local, Security: true, Files: Tree{"skills/a": []byte("x")}}); err == nil {
-		t.Fatal("a local candidate claimed to be a security fix")
+	if got := string(e.p.Files("guest-image")["guest-image/openclaw"]); got != update.Digest([]byte("img")) {
+		t.Fatalf("staged %q, not the signed digest", got)
 	}
 
 	s := newEnv(t, func(c *Config) { c.SecurityAutoStage = true })
-	r := s.propose(Candidate{Source: Upstream, Security: true, Files: Tree{"host-image/release": []byte("sha256:2")}})
+	r := s.release(release(t, "2.1", true, map[string][]byte{"host-image/release": []byte("host")}))
 	if r.State != StateAdopted || r.Basis != BasisSecurity || len(s.owner.asked) != 0 {
 		t.Fatalf("security auto-stage: %+v", r)
 	}
-	r = s.propose(Candidate{Source: Upstream, Files: Tree{"host-image/release": []byte("sha256:3")}})
+	r = s.release(release(t, "2.2", false, map[string][]byte{"host-image/release": []byte("host2")}))
 	if r.Basis != BasisOwner {
-		t.Fatalf("non-security upstream under the security policy: %+v", r)
+		t.Fatalf("non-security release under the security policy: %+v", r)
 	}
 }
+
+// CHG-3, UPD-8: only a verified release reaches upstream; Propose takes
+// local candidates only, and no local or shared change touches an image.
+func TestUpstreamOnlyThroughRelease(t *testing.T) {
+	e := newEnv(t, func(c *Config) { c.SecurityAutoStage = true })
+	e.owner.approve = true
+	for _, src := range []Source{Upstream, Shared} {
+		if _, err := e.p.Propose(bg, Candidate{Source: src, Files: Tree{"host-image/release": []byte("x")}}); err == nil {
+			t.Fatalf("Propose took a %s candidate", src)
+		}
+	}
+	if _, err := e.p.ProposeRelease(bg, update.Verified{}); err == nil {
+		t.Fatal("unverified release")
+	}
+	if r := e.propose(Candidate{Source: Local, Files: Tree{"guest-image/openclaw": []byte("x")}}); r.State != StateRejected || !strings.Contains(r.Reason, "signed upstream release") {
+		t.Fatalf("local image change: %+v", r)
+	}
+	// An upstream candidate writing beyond images (the #34 probe) fails,
+	// even under the security policy.
+	e.p.mu.Lock()
+	cl := e.p.classify(diff(e.p.st.Active, Tree{"host-image/r": []byte("x"), "config/a": []byte("1"),
+		"procedures/p": []byte("x"), RoutingPath: []byte("{}")}), e.p.st.Active, Upstream)
+	e.p.mu.Unlock()
+	if cl.forbidden == "" {
+		t.Fatalf("upstream beyond images: %+v", cl)
+	}
+}
+
+// CHG-3: a security release that regresses goes to the owner with its
+// counts instead of being rejected, so the box is not left vulnerable.
+func TestRegressingSecurityReleaseAsks(t *testing.T) {
+	e := newEnv(t, func(c *Config) { c.SecurityAutoStage = true })
+	e.cases(12, ClassSkill, "skills/greet", "hi")
+	e.p.cfg.Graders = map[Class]Grader{ClassSkill: func(c Case, out []byte) bool {
+		return c.Security || string(out) == "hi"
+	}}
+	ev := e.p.cfg.Evaluator
+	e.p.cfg.Evaluator = evalFunc(func(ctx context.Context, t Tree, pr Probe) ([]byte, error) {
+		if _, ok := t["host-image/release"]; ok {
+			return []byte("worse"), nil
+		}
+		return ev.Run(ctx, t, pr)
+	})
+	e.p.Attach(holdJournal{e.eng})
+	r := e.release(release(t, "3.0", true, map[string][]byte{"host-image/release": []byte("h")}))
+	if r.Basis != BasisOwner || r.Regressions == 0 || r.State != StateAwaitingOwner {
+		t.Fatalf("regressing security release: %+v", r)
+	}
+	ask, err := e.p.Ask(r.ID)
+	want := "Security update 3.0 fixes a security issue. It did worse on " + itoa(r.Regressions) + " of " + itoa(r.HeldOut) +
+		" past tasks, for example a skill task from "
+	if err != nil || !strings.HasPrefix(ask, want) || !strings.HasSuffix(ask, ". Approve or decline?") {
+		t.Fatalf("ask: %q %v", ask, err)
+	}
+	// The owner declines: recorded, and repeated in every digest.
+	e.eng.Authorize(bg, adoptID(r.ID))
+	if r, _ := e.p.Settle(bg, r.ID); r.State != StateRejected {
+		t.Fatal(r)
+	}
+	declined := "You declined security update 3.0; the box is still on the previous version until a newer update is installed."
+	for i := 0; i < 2; i++ {
+		if d := e.p.Digest(); len(d) != 1 || d[0] != declined {
+			t.Fatalf("digest %d: %q", i, d)
+		}
+	}
+	// A later release that is adopted supersedes it.
+	e.p.cfg.Evaluator = ev
+	e.owner.approve = true
+	r2 := e.release(release(t, "3.1", true, map[string][]byte{"host-image/release": []byte("h2")}))
+	if r2.State == StateAwaitingOwner {
+		e.eng.Authorize(bg, adoptID(r2.ID))
+		r2, _ = e.p.Settle(bg, r2.ID)
+	}
+	if r2.State != StateAdopted {
+		t.Fatal(r2)
+	}
+	for _, l := range e.p.Digest() {
+		if l == declined {
+			t.Fatal("declined release still listed after a newer one")
+		}
+	}
+}
+
+type evalFunc func(context.Context, Tree, Probe) ([]byte, error)
+
+func (f evalFunc) Run(ctx context.Context, t Tree, p Probe) ([]byte, error) { return f(ctx, t, p) }
 
 // holdJournal leaves authorization to the owner's gate: Authorize only
 // reports the intent pending, as the real gate does while it asks.
@@ -429,7 +555,13 @@ func TestRestart(t *testing.T) {
 		t.Fatal("revert after restart")
 	}
 	// Reconcile reads the saved state.
-	if o := p.Reconcile(bg, journal.Intent{ID: "chg:" + rep.ID + ":revert"}, 1); o.Result != journal.ResultSucceeded {
+	var revertID string
+	for _, st := range e.eng.List() {
+		if st.Intent.Action == ActionRevert {
+			revertID = st.Intent.ID
+		}
+	}
+	if o := p.Reconcile(bg, journal.Intent{ID: revertID}, 1); o.Result != journal.ResultSucceeded {
 		t.Fatal(o)
 	}
 	if o := p.Reconcile(bg, journal.Intent{ID: "chg:c404:adopt"}, 1); o.Result != journal.ResultNotApplied {
@@ -451,3 +583,5 @@ func (f *fakeTarget) Apply(t Tree) error {
 	f.applied = t
 	return nil
 }
+
+func itoa(n int) string { return strconv.Itoa(n) }

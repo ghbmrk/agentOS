@@ -91,6 +91,11 @@ func TestRouterCandidateAdoptsThroughPipeline(t *testing.T) {
 	if got := r.Rule()["chat"][0].Provider; got != "anthropic" {
 		t.Fatal("adoption did not set the router's rule:", got)
 	}
+	d := e.p.Digest()
+	if len(d) != 1 || !strings.HasPrefix(d[0], "Changed AI routing: chat tasks now go first to anthropic instead of openai. Tested on ") ||
+		!strings.HasSuffix(d[0], "UNDO "+rep.Short+" / MORE "+rep.Short) {
+		t.Fatalf("routing-primary digest: %q", d)
+	}
 	if err := e.p.Revert(bg, rep.ID, OriginOwner); err != nil {
 		t.Fatal(err)
 	}
@@ -160,9 +165,28 @@ func TestRoutingRollsBackOnRegression(t *testing.T) {
 	}
 	found := false
 	for _, l := range e.p.Digest() {
-		found = found || strings.Contains(l, "Reverted "+rep.ID+" after it regressed")
+		found = found || l == "Undid "+rep.Short+": it did worse on newer tasks."
 	}
 	if !found {
 		t.Fatal("digest does not list the rollback")
+	}
+}
+
+// Arbitrator R1: a reorder that drops the local fallback says so.
+func TestDroppedLocalFallbackSaysSo(t *testing.T) {
+	cur := route.Rule{"mail": {{Provider: "openai", Model: "m"}, {Provider: "local", Model: "l"}}}
+	e := newEnv(t, func(c *Config) {
+		c.Initial[RoutingPath] = canonicalJSON(cur)
+		c.RouteGranted = func(string) bool { return true }
+		c.LocalProvider = func(p string) bool { return p == "local" }
+	})
+	next := route.Rule{"mail": {{Provider: "openai", Model: "m"}}}
+	ruleCase(e, next, 12)
+	rep := e.propose(Candidate{Source: Local, Files: Tree{RoutingPath: canonicalJSON(next)}})
+	if rep.State != StateAdopted {
+		t.Fatal(rep)
+	}
+	if d := e.p.Digest(); len(d) != 1 || !strings.HasPrefix(d[0], "Changed AI routing: mail tasks no longer fall back to the local model.") {
+		t.Fatalf("%q", d)
 	}
 }

@@ -30,6 +30,14 @@ type Intent struct {
 	Reservation   *Reservation   `json:"reservation,omitempty"`
 	Preconditions []string       `json:"preconditions,omitempty"`
 	Executor      string         `json:"executor"`
+	// Machine and Label record which agent machine submitted the intent
+	// and its data label (REV-5) at that moment. They are provenance, not
+	// parameters: the first submission's values are kept, and a repeat
+	// from a fork with another label is still the same intent (OP-1),
+	// since the effect, and so what it discloses, is fixed by the fields
+	// above.
+	Machine string `json:"machine,omitempty"`
+	Label   string `json:"label,omitempty"`
 }
 
 // Reservation is the budget held for an intent until it settles.
@@ -60,6 +68,12 @@ const (
 	ActionGrantRevoke = "meta.grant.revoke" // also revokes a pre-allowance
 	ActionGrantPause  = "meta.grant.pause"  // also pauses a pre-allowance or loop
 	ActionBudgetLower = "meta.budget.lower"
+	// Change-pipeline narrowing (broker/change): undoing an adoption
+	// restores a state that was already qualified and active, and no
+	// adoption can change authority; turning auto-adoption or sharing off
+	// only removes automation.
+	ActionChangeRevert    = "meta.change.revert"
+	ActionChangePolicyOff = "meta.change.policy.off"
 )
 
 // narrowing reports whether an intent only takes authority away.
@@ -68,7 +82,7 @@ func narrowing(in Intent) bool {
 		return false
 	}
 	switch in.Action {
-	case ActionGrantRevoke, ActionGrantPause, ActionBudgetLower:
+	case ActionGrantRevoke, ActionGrantPause, ActionBudgetLower, ActionChangeRevert, ActionChangePolicyOff:
 		return true
 	}
 	return false
@@ -252,9 +266,11 @@ func effectFingerprint(in Intent) string {
 	return hex.EncodeToString(h[:])
 }
 
-// fingerprint is a hash over every field of the intent. encoding/json sorts
-// map keys, so equal parameters give equal fingerprints.
+// fingerprint is a hash over every field of the intent except its
+// provenance (Machine, Label). encoding/json sorts map keys, so equal
+// parameters give equal fingerprints.
 func fingerprint(in Intent) string {
+	in.Machine, in.Label = "", ""
 	b, _ := json.Marshal(in)
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])
