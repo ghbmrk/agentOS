@@ -504,7 +504,9 @@ func (g *Guard) check(ctx context.Context) Status {
 	}
 	g.status, g.checked, g.mono = s, true, mono
 	text := g.noticeLocked(s, mono)
-	if !wasChecked || prev.State != s.State || prev.Since != s.Since || text != "" || have {
+	// While alerts count toward the cap, every check saves, so a reboot
+	// finds this boot's uptime no older than the last check (L3 F1, round 4).
+	if !wasChecked || prev.State != s.State || prev.Since != s.Since || text != "" || have || len(g.alerts) > 0 {
 		g.saveLocked()
 	}
 	if changed := !wasChecked || prev.State != s.State; text != "" || changed {

@@ -84,6 +84,11 @@ func (r *rig) guard(t *testing.T, mod func(*Config)) *Guard {
 	if mod != nil {
 		mod(&cfg)
 	}
+	// A restart follows the old guard's delivered texts, as a broker exit
+	// does: no old drainer may text or save after the new guard loads.
+	for _, old := range r.gs {
+		old.Flush()
+	}
 	g, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)

@@ -715,6 +715,64 @@ func TestTIM1HonestRebootsAgeAlertsOut(t *testing.T) {
 	}
 }
 
+func TestTIM1HonestRebootsAgeAlertsOutWithoutCarrier(t *testing.T) {
+	// No carrier time, a reboot every 10 hours, a check every 15 minutes:
+	// hold alerts still age out a day after they were sent, because each
+	// check refreshes the saved boot clock while alerts count (L3 F1,
+	// round 4).
+	path := filepath.Join(t.TempDir(), "clock.json")
+	r := noCarrier()
+	boot := 0
+	mod := func(c *Config) {
+		c.StatePath = path
+		c.BootID = func() string { return fmt.Sprint("boot-", boot) }
+	}
+	g := r.guard(t, mod)
+	g.Check(bg)
+	up := func(d time.Duration) {
+		for i := time.Duration(0); i < d; i += 15 * time.Minute {
+			r.advance(15 * time.Minute)
+			g.Check(bg)
+		}
+	}
+	alarm := func() {
+		r.step(time.Hour)
+		g.Check(bg)
+		r.step(-time.Hour)
+		g.Check(bg)
+		up(AgreeAfter)
+	}
+	alarm()
+	alarm() // cap used at about 2 h
+	n := len(r.sent())
+	if n != 2*MaxAlertsPerDay {
+		t.Fatalf("texts = %q", r.sent())
+	}
+	reboot := func() {
+		g.Flush()
+		boot++
+		r.mu.Lock()
+		r.wall = r.wall.Add(2 * time.Minute)
+		r.mono = 0
+		r.mu.Unlock()
+		g = r.guard(t, mod)
+		g.Check(bg)
+	}
+	up(8 * time.Hour)
+	reboot()
+	up(10 * time.Hour)
+	reboot() // about 20 h since the alerts
+	alarm()
+	if len(r.sent()) != n {
+		t.Fatalf("cap freed early: %q", r.sent()[n:])
+	}
+	up(6 * time.Hour) // a day since the alerts
+	alarm()
+	if len(r.sent()) == n {
+		t.Fatal("honest reboots without carrier kept the cap full past a day")
+	}
+}
+
 func TestTIM1QueuedTextsAreNeverSuperseded(t *testing.T) {
 	// A hold text stuck in Notify, then an escalation, then agreement: both
 	// alerts reach the owner (L3 F7, round 3).
