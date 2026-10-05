@@ -9,7 +9,7 @@ Covered: 46 / 144 requirement IDs
 | DEP-3 | `broker/modem/secondline/secondline_test.go` |
 | DEP-4 | — |
 | HW-1 | — |
-| HW-2 | `broker/modem/at/discover_test.go`, `broker/modem/at/driver_test.go`, `broker/modem/at/engine_test.go`, `broker/modem/at/pdu_test.go`, `broker/modem/at/serial_linux_test.go` |
+| HW-2 | `broker/modem/at/discover_test.go`, `broker/modem/at/driver_test.go`, `broker/modem/at/engine_test.go`, `broker/modem/at/pdu_test.go`, `broker/modem/at/serial_linux_test.go`, `broker/modem/at/udev_test.go` |
 | HW-3 | — |
 | HW-4 | — |
 | HW-5 | — |

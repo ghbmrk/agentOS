@@ -1,0 +1,18 @@
+# AgentOS: qualified modems belong to the broker alone (HW-2, P2-3 M1).
+# Installed by the image (P2-1) to /usr/lib/udev/rules.d/. Every serial and
+# sound node of a Quectel (2c7c) or SIMCom (1e0e) modem is mode 0600 and
+# owned by the broker's modem user, never the dialout or audio group, and
+# ModemManager is told to leave the modem alone.
+
+ACTION=="remove", GOTO="agentos_modem_end"
+
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="2c7c", ENV{ID_MM_DEVICE_IGNORE}="1"
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="1e0e", ENV{ID_MM_DEVICE_IGNORE}="1"
+
+SUBSYSTEM=="tty", KERNEL=="ttyUSB*", ATTRS{idVendor}=="2c7c", ENV{ID_MM_DEVICE_IGNORE}="1", OWNER="agentos-modem", GROUP="agentos-modem", MODE="0600"
+SUBSYSTEM=="tty", KERNEL=="ttyUSB*", ATTRS{idVendor}=="1e0e", ENV{ID_MM_DEVICE_IGNORE}="1", OWNER="agentos-modem", GROUP="agentos-modem", MODE="0600"
+
+# Quectel call audio (USB Audio Class card).
+SUBSYSTEM=="sound", ATTRS{idVendor}=="2c7c", OWNER="agentos-modem", GROUP="agentos-modem", MODE="0600"
+
+LABEL="agentos_modem_end"

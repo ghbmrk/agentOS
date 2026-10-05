@@ -64,7 +64,7 @@ func newRig(t *testing.T, v vendor, keys at.KeySource, before func(*atsim.Device
 
 func (r *rig) config(v vendor, keys at.KeySource) at.Config {
 	cfg := at.Config{Profile: v.prof, Port: r.dev.Port(), Number: boxNum, Keys: keys,
-		Now: r.clock, FramePace: time.Millisecond, Poll: 5 * time.Millisecond, Sweep: 20 * time.Millisecond, CountryCode: "1"}
+		Now: r.clock, FramePace: time.Millisecond, Poll: 5 * time.Millisecond, Sweep: 20 * time.Millisecond, CountryCode: "1", Owner: ownerNum}
 	if v.prof == at.Quectel {
 		cfg.Audio = at.UACAudio(atsim.Card, r.dev.Runner())
 	} else {
@@ -499,6 +499,22 @@ func TestSilentForgedReplayedAndStrayTextsAreNotDelivered(t *testing.T) {
 	r.dev.StorePDU(parts[0])
 	eventually(t, "all deleted", func() bool { return r.dev.Stored() == 0 })
 	eventually(t, "all dropped", func() bool { return r.m.Dropped() == 3 })
+	// The owner hears once that the long text was garbled, not once per
+	// forged part: a second conflict within the hour gets no reply.
+	if got := r.phoneText(); got.Text != at.GarbledText {
+		t.Fatalf("owner got %q", got.Text)
+	}
+	again, _ := at.EncodeDeliver(ownerNum, strings.Repeat("pay acct 1111 now ", 12), 7)
+	again2, _ := at.EncodeDeliver(ownerNum, strings.Repeat("pay acct 2222 now ", 12), 7)
+	r.dev.StorePDU(again[0])
+	r.dev.StorePDU(again2[0])
+	r.dev.StorePDU(again[1])
+	eventually(t, "second conflict dropped", func() bool { return r.m.Dropped() == 4 })
+	select {
+	case m := <-r.phone.Inbox():
+		t.Fatalf("second garbled reply %q", m.Text)
+	case <-time.After(60 * time.Millisecond):
+	}
 	// The same PDU handed over twice (a delete that did not happen) is
 	// delivered once.
 	one, _ := at.EncodeDeliver(ownerNum, "YES K3 482913", 6)

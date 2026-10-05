@@ -258,14 +258,28 @@ func (t *Tool) Call(ctx context.Context, to string) (Call, error) {
 // It is closed when there is no second line.
 func (t *Tool) Inbound() <-chan Untrusted { return t.inbound }
 
-// pump runs until the second line's modem goes away.
+// MainNumberText answers the owner when they text the second line.
+const MainNumberText = "This is your box's second line. Text your box on its main number."
+
+// pump runs until the second line's modem goes away. A text from the
+// owner's own number never reaches an agent: the second line is not an
+// owner channel, so codes and instructions sent to it are not read. The
+// owner gets the fixed MainNumberText, at most once an hour.
 func (t *Tool) pump() {
 	in, done := t.cfg.Second.Inbox(), t.cfg.Second.Done()
+	var told time.Time
 	for {
 		select {
 		case <-done:
 			return
 		case m := <-in:
+			if t.cfg.OwnerPhone != "" && !m.Alphanumeric && at.SameNumber(m.From, t.cfg.OwnerPhone, t.cfg.CountryCode) {
+				if now := time.Now(); told.IsZero() || now.Sub(told) >= time.Hour {
+					told = now
+					_ = t.cfg.Second.Send(t.cfg.OwnerPhone, MainNumberText)
+				}
+				continue
+			}
 			select {
 			case t.inbound <- Untrusted{From: m.From, Text: m.Text, At: m.At}:
 			default: // unread third-party texts are dropped, never queued unbounded

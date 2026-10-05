@@ -173,26 +173,45 @@ func TestThirdPartyTrafficUsesOnlyTheSecondLineAndCallsOpenWithTheDisclosure(t *
 
 func TestInboundOnTheSecondLineIsUntrustedAndNeverReachesTheOwnerChannel(t *testing.T) {
 	c := modem.NewCarrier()
+	phone := c.Line(ownerNum)
 	owner := open(t, c, at.SIMCom, "SIMCOM_SIM7600G-H", boxNum)
 	second := open(t, c, at.SIMCom, "SIMCOM_SIM7600G-H", secondNum)
-	tool, err := secondline.New(secondline.Config{Owner: owner.m, Second: secondline.FromAT(second.m), Roles: roles(owner, second), Disclosure: disclosure()})
+	tool, err := secondline.New(secondline.Config{Owner: owner.m, Second: secondline.FromAT(second.m), Roles: roles(owner, second),
+		Disclosure: disclosure(), OwnerPhone: ownerNum, CountryCode: "1"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Even a text forged to look like the owner is data here.
-	c.Inject(ownerNum, secondNum, "STOP")
+	// A third party's text is data for the agent, even one that reads
+	// like a control word.
+	c.Inject(shopNum, secondNum, "STOP")
 	select {
 	case u := <-tool.Inbound():
-		if u.From != ownerNum || u.Text != "STOP" {
+		if u.From != shopNum || u.Text != "STOP" {
 			t.Fatalf("%+v", u)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("no inbound")
 	}
+	// A text from the owner's number, real or forged, reaches no agent and
+	// no owner channel; the owner is pointed to the main number once.
+	_ = phone.Send(secondNum, "YES K3 482913")
+	c.Inject(ownerNum, secondNum, "STOP")
 	select {
+	case m := <-phone.Inbox():
+		if m.From != secondNum || m.Text != secondline.MainNumberText {
+			t.Fatalf("owner got %+v", m)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("owner not told")
+	}
+	select {
+	case u := <-tool.Inbound():
+		t.Fatalf("agent got %+v", u)
 	case m := <-owner.m.Inbox():
 		t.Fatalf("owner channel got %+v", m)
-	case <-time.After(30 * time.Millisecond):
+	case m := <-phone.Inbox():
+		t.Fatalf("second reply %+v", m)
+	case <-time.After(60 * time.Millisecond):
 	}
 }
 

@@ -58,7 +58,14 @@ type Config struct {
 	// CountryCode is the home country code from setup ("1", "44"), used to
 	// write national-format numbers as E.164 so they match the owner's.
 	CountryCode string
+	// Owner is the owner's number when this SIM is the owner line. A long
+	// text from it that arrives garbled (conflicting parts) gets the fixed
+	// GarbledText reply, at most once an hour.
+	Owner string
 }
+
+// GarbledText is the reply to an owner text dropped for conflicting parts.
+const GarbledText = "Message garbled, please resend."
 
 // Errors.
 var (
@@ -107,6 +114,7 @@ type Modem struct {
 	dialing chan *Call
 	parts   map[string]*assembly
 	seen    map[string]time.Time // delivered PDUs, for dupTTL
+	garbled time.Time            // last GarbledText sent
 	dropped int
 	status  Status
 }
@@ -418,7 +426,18 @@ func (m *Modem) receive(ctx context.Context, idx int, header, pdu string) {
 	} else {
 		d.Addr = E164(d.Addr, d.TON, m.cfg.CountryCode)
 	}
-	text, ok := m.assemble(d)
+	text, ok, conflict := m.assemble(d)
+	if conflict && !alpha && m.cfg.Owner != "" && SameNumber(d.Addr, m.cfg.Owner, m.cfg.CountryCode) {
+		m.mu.Lock()
+		due := m.garbled.IsZero() || now.Sub(m.garbled) >= time.Hour
+		if due {
+			m.garbled = now
+		}
+		m.mu.Unlock()
+		if due {
+			_ = m.Send(m.cfg.Owner, GarbledText)
+		}
+	}
 	if !ok {
 		return
 	}
@@ -430,9 +449,11 @@ func (m *Modem) receive(ctx context.Context, idx int, header, pdu string) {
 
 func segments(text string) int { n, _ := modem.Segments(text); return n }
 
-func (m *Modem) assemble(d Deliver) (string, bool) {
+// assemble returns a whole text once every part is in; conflict reports a
+// text dropped because two parts disagreed.
+func (m *Modem) assemble(d Deliver) (text string, ok, conflict bool) {
 	if d.Concat == nil || d.Concat.Total == 1 {
-		return d.Text, true
+		return d.Text, true, false
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -453,18 +474,18 @@ func (m *Modem) assemble(d Deliver) (string, bool) {
 		a.conflict = true
 	}
 	if len(a.parts) < a.total {
-		return "", false
+		return "", false, false
 	}
 	delete(m.parts, key)
 	if a.conflict {
 		m.dropped++
-		return "", false
+		return "", false, true
 	}
 	var sb strings.Builder
 	for i := 1; i <= a.total; i++ {
 		sb.WriteString(a.parts[i])
 	}
-	return sb.String(), true
+	return sb.String(), true, false
 }
 
 func (m *Modem) dropOldestLocked() {
