@@ -7,8 +7,18 @@ package daemon
 // scheduler, the replay evaluator, the grants gate), hold no
 // inference-capable code. No model router or provider adapter, no egress
 // proxy, and no network client except the modelroute proxy, which speaks
-// only to the vault process's unix socket. A package that newly imports
-// net/http must be added to httpOK below, with its reason, by review.
+// only to the vault process's unix socket. A package that newly needs
+// net/http, a socket-level import, or an escape hatch (cgo, unsafe, plugin,
+// os/exec, assembly) must be added below, with its reason, by review.
+//
+// This is a tripwire against drift, not proof against an adversary (L3 on
+// #83). Residuals it does not cover, held by review instead: the standard
+// library's and third-party packages' own internals beyond their imports
+// (only their socket-capable imports are checked); reflection; values
+// built from the allowed types and handed across packages (modelroute's
+// transport, once built, is only as good as the code that builds it, which
+// this test reads); and code generated or loaded at run time (plugin and
+// os/exec are refused outside their allow-lists, so none is expected).
 
 import (
 	"bufio"
@@ -39,7 +49,7 @@ var providerSDK = regexp.MustCompile(`(?i)(anthropic|openai|genai|generativeai|m
 
 // httpOK are the broker packages in the graph allowed to import net/http
 // (or anything that depends on it), and why. None may hold an HTTP client
-// except modelroute, whose every dial is to a unix socket (clientUse).
+// except modelroute, whose every dial is to a unix socket (sourceUse).
 var httpOK = map[string]string{
 	"meter":      "wraps guest model handlers (OP-8); serves, never dials",
 	"guest":      "serves the guest plane over the machine socket; never dials",
@@ -47,19 +57,47 @@ var httpOK = map[string]string{
 	"replay":     "serves replay machines' plane like guest; never dials",
 }
 
-// netOK are the broker packages in the graph allowed to import net,
-// syscall, or golang.org/x/sys/unix directly, and why. Their dials are held
-// to clientUse too.
-var netOK = map[string]string{
-	"sockets":       "unix listeners and SO_PEERCRED",
-	"guest":         "the guest plane's unix listeners",
-	"modelroute":    "dials only the vault process's unix socket",
-	"journal":       "flock on the journal file",
-	"update":        "flock on the update store",
-	"vm/overlay":    "overlay mounts",
-	"vm/gvisor":     "signals to runsc",
-	compositionRoot: "signal numbers for shutdown",
+// allowance is what one package may use of a socket-capable import: the
+// names it may refer to, and why.
+type allowance struct {
+	why  string
+	uses []string // "net.Listen", "syscall.Flock"
 }
+
+// netOK are the broker packages in the graph allowed to import net,
+// syscall, or golang.org/x/sys/unix directly, the names they may use from
+// them, and why. Every net.Listen and dial must name "unix" (sourceUse).
+var netOK = map[string]allowance{
+	"sockets": {"unix listeners, SO_PEERCRED peer checks, and flock on the socket lock",
+		[]string{"net.Conn", "net.ErrClosed", "net.Listen", "net.Listener", "net.UnixConn", "net.UnixListener",
+			"syscall.EWOULDBLOCK", "syscall.Flock", "syscall.GetsockoptUcred", "syscall.LOCK_EX", "syscall.LOCK_NB",
+			"syscall.SOL_SOCKET", "syscall.SO_PEERCRED", "syscall.Stat_t", "syscall.Ucred"}},
+	"guest":      {"the guest plane's unix listeners", []string{"net.Conn", "net.ErrClosed", "net.Listen", "net.Listener"}},
+	"modelroute": {"dials only the vault process's unix socket", []string{"net.Conn", "net.Dialer", "net.OpError"}},
+	"journal":    {"flock on the journal file", []string{"syscall.Flock", "syscall.LOCK_EX", "syscall.LOCK_NB"}},
+	"update":     {"flock on the update store", []string{"syscall.Flock", "syscall.LOCK_EX"}},
+	"vm/overlay": {"overlay files: xattrs, device nodes, stat, timestamps, and the FICLONE ioctl for copies",
+		[]string{"syscall.EINVAL", "syscall.ENOTDIR", "syscall.ENXIO", "syscall.Getxattr", "syscall.Listxattr",
+			"syscall.Mknod", "syscall.NsecToTimespec", "syscall.O_NOFOLLOW", "syscall.Removexattr", "syscall.SYS_IOCTL",
+			"syscall.S_IFCHR", "syscall.Setxattr", "syscall.Stat_t", "syscall.Statfs", "syscall.Statfs_t",
+			"syscall.Syscall", "syscall.Timespec", "syscall.TimespecToNsec", "syscall.UtimesNano"}},
+	"vm/gvisor": {"mounts and cgroup directory handles for runsc, and its SysProcAttr",
+		[]string{"syscall.Close", "syscall.EINVAL", "syscall.ENOENT", "syscall.MNT_DETACH", "syscall.MS_NODEV",
+			"syscall.MS_NOSUID", "syscall.MS_PRIVATE", "syscall.Mount", "syscall.O_CLOEXEC", "syscall.O_DIRECTORY",
+			"syscall.O_RDONLY", "syscall.Open", "syscall.SysProcAttr", "syscall.Unmount"}},
+	compositionRoot: {"SIGTERM for shutdown; O_NOFOLLOW, O_NONBLOCK, and Stat_t to open the launch file safely",
+		[]string{"syscall.O_NOFOLLOW", "syscall.O_NONBLOCK", "syscall.SIGTERM", "syscall.Stat_t"}},
+}
+
+// escapeOK are the broker packages in the graph allowed an escape hatch
+// import (escapes), and why.
+var escapeOK = map[string]map[string]string{
+	"vm/gvisor": {"os/exec": "starts runsc, the only executable (vm/gvisor TestOnlyRunscIsExecuted)"},
+}
+
+// escapes are imports past the checks above: foreign code, unchecked
+// memory (and go:linkname, which needs it), loaded code, and processes.
+var escapes = map[string]bool{"C": true, "unsafe": true, "plugin": true, "os/exec": true}
 
 // thirdPartyNet are the third-party packages in the graph allowed a
 // socket-capable import, and which one.
@@ -69,7 +107,7 @@ var thirdPartyNet = map[string]string{
 	"golang.org/x/term":                               "golang.org/x/sys/unix", // sigstore cryptoutils' terminal prompt
 }
 
-// sockets are the standard (and x/sys) packages that can open a network
+// socketPkgs are the standard (and x/sys) packages that can open a network
 // connection or raw socket; anything that depends on net/http counts too
 // (httpReach).
 var socketPkgs = map[string]bool{
@@ -77,9 +115,10 @@ var socketPkgs = map[string]bool{
 	"log/syslog": true, "syscall": true, "golang.org/x/sys/unix": true,
 }
 
-// dialers are the names that open a connection, by package. In modelroute
-// they are allowed only in the forms clientUse checks.
-var dialers = map[string]map[string]bool{
+// clients are the names that hold or open a connection, by package. In
+// modelroute the types are allowed only as composite literals that set
+// their own non-nil transport or dialer (clientTypes).
+var clients = map[string]map[string]bool{
 	"net/http":          {"Client": true, "DefaultClient": true, "DefaultTransport": true, "Transport": true, "Get": true, "Head": true, "Post": true, "PostForm": true},
 	"net":               {"Dial": true, "DialTimeout": true, "DialTCP": true, "DialUDP": true, "DialIP": true, "DialUnix": true, "Dialer": true},
 	"crypto/tls":        {"Dial": true, "DialWithDialer": true, "Dialer": true},
@@ -87,19 +126,29 @@ var dialers = map[string]map[string]bool{
 	"net/http/httputil": {"NewSingleHostReverseProxy": true, "ReverseProxy": true},
 }
 
-// modelrouteMay are the dialers modelroute may name, each held to its
-// unix-only form by clientUse.
-var modelrouteMay = map[string]bool{"net/http.Client": true, "net/http.Transport": true, "net.Dialer": true, "net/http/httputil.ReverseProxy": true}
+// clientTypes are the client types modelroute may build, and the field
+// each literal must set to a non-nil value.
+var clientTypes = map[string]string{
+	"net/http.Client":                "Transport",
+	"net/http.Transport":             "DialContext",
+	"net/http/httputil.ReverseProxy": "Transport",
+	"net.Dialer":                     "",
+}
+
+// dials are method or function names that open a connection, and the
+// index of their network argument, which must be "unix".
+var dials = map[string]int{"Dial": 0, "DialTimeout": 0, "DialContext": 1, "Listen": 0}
 
 type listed struct {
 	path, dir string
 	imports   []string
 	files     []string
+	cgo, asm  int
 }
 
 func linkedDeps(t *testing.T) []listed {
 	t.Helper()
-	args := []string{"list", "-deps", "-f", "{{.ImportPath}}\t{{.Dir}}\t{{join .Imports \" \"}}\t{{join .GoFiles \" \"}}"}
+	args := []string{"list", "-deps", "-f", "{{.ImportPath}}\t{{.Dir}}\t{{join .Imports \" \"}}\t{{join .GoFiles \" \"}}\t{{len .CgoFiles}}\t{{len .SFiles}}"}
 	for _, p := range linked {
 		args = append(args, module+p)
 	}
@@ -116,10 +165,12 @@ func linkedDeps(t *testing.T) []listed {
 	sc.Buffer(nil, 1<<20)
 	for sc.Scan() {
 		f := strings.Split(sc.Text(), "\t")
-		if len(f) != 4 {
+		if len(f) != 6 {
 			t.Fatalf("go list line: %q", sc.Text())
 		}
-		ps = append(ps, listed{path: f[0], dir: f[1], imports: strings.Fields(f[2]), files: strings.Fields(f[3])})
+		cgo, _ := strconv.Atoi(f[4])
+		asm, _ := strconv.Atoi(f[5])
+		ps = append(ps, listed{path: f[0], dir: f[1], imports: strings.Fields(f[2]), files: strings.Fields(f[3]), cgo: cgo, asm: asm})
 	}
 	return ps
 }
@@ -144,6 +195,9 @@ func TestAgentosdLinksNoInference(t *testing.T) {
 		if !ours && !strings.Contains(strings.SplitN(p.path, "/", 2)[0], ".") {
 			continue // the standard library
 		}
+		if ours && (p.cgo > 0 || p.asm > 0) {
+			bad = append(bad, p.path+": cgo or assembly sources")
+		}
 		for _, im := range p.imports {
 			if strings.HasPrefix(im, module) {
 				continue // checked as a package of its own
@@ -153,15 +207,17 @@ func TestAgentosdLinksNoInference(t *testing.T) {
 				bad = append(bad, p.path+": third-party package imports "+im)
 			case ours && reach[im] && httpOK[rel] == "":
 				bad = append(bad, p.path+": imports "+im+", which reaches net/http; add it to httpOK with its reason, by review")
-			case ours && socketPkgs[im] && !reach[im] && netOK[rel] == "":
+			case ours && socketPkgs[im] && !reach[im] && netOK[rel].why == "":
 				bad = append(bad, p.path+": imports "+im+"; add it to netOK with its reason, by review")
+			case ours && escapes[im] && escapeOK[rel][im] == "":
+				bad = append(bad, p.path+": imports "+im+"; add it to escapeOK with its reason, by review")
 			}
 		}
 		if !ours {
 			continue
 		}
 		for _, f := range p.files {
-			bad = append(bad, clientUse(t, filepath.Join(p.dir, f), p.path+"/"+f, rel == "modelroute")...)
+			bad = append(bad, sourceUse(t, filepath.Join(p.dir, f), p.path+"/"+f, rel)...)
 		}
 	}
 	sort.Strings(bad)
@@ -197,12 +253,14 @@ func httpReach(ps []listed) map[string]bool {
 	return memo
 }
 
-// clientUse reports the network clients in one source file, by what its
-// imports are called there (renamed and dot imports included). In
-// modelroute, http.Client, http.Transport, httputil.ReverseProxy, and
-// net.Dialer are allowed only as literals that set their transport or
-// dialer, and every dial names the "unix" network.
-func clientUse(t *testing.T, path, name string, modelroute bool) []string {
+// sourceUse reports, in one source file of broker package rel, by what its
+// imports are called there (renamed and dot imports included):
+//   - any client name (clients), except in modelroute a client type used
+//     as a composite literal's type that sets its own non-nil transport or
+//     dialer (clientTypes), or as a pointer type;
+//   - any name from net, syscall, or x/sys/unix outside rel's netOK uses;
+//   - any dial or Listen not called directly, or not on "unix".
+func sourceUse(t *testing.T, path, name, rel string) []string {
 	t.Helper()
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, path, nil, 0)
@@ -213,7 +271,7 @@ func clientUse(t *testing.T, path, name string, modelroute bool) []string {
 	var bad []string
 	for _, im := range f.Imports {
 		p, _ := strconv.Unquote(im.Path.Value)
-		if dialers[p] == nil {
+		if clients[p] == nil && !socketPkgs[p] {
 			continue
 		}
 		n := p[strings.LastIndex(p, "/")+1:]
@@ -224,6 +282,10 @@ func clientUse(t *testing.T, path, name string, modelroute bool) []string {
 			bad = append(bad, name+": dot-imports "+p)
 		}
 		local[n] = p
+	}
+	uses := map[string]bool{}
+	for _, u := range netOK[rel].uses {
+		uses[u] = true
 	}
 	sel := func(e ast.Expr) string {
 		if se, ok := e.(*ast.SelectorExpr); ok {
@@ -236,34 +298,55 @@ func clientUse(t *testing.T, path, name string, modelroute bool) []string {
 	at := func(n ast.Node, what string) {
 		bad = append(bad, fmt.Sprintf("%s:%d: %s", name, fset.Position(n.Pos()).Line, what))
 	}
+	literalType := map[ast.Expr]bool{} // client types built as checked literals
+	callee := map[ast.Expr]bool{}
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch n := n.(type) {
+		case *ast.CompositeLit:
+			full := sel(n.Type)
+			key, isClient := clientTypes[full]
+			if !isClient {
+				return true
+			}
+			if key != "" && !setsNonNil(n, key) {
+				at(n, full+" without its own "+key)
+			}
+			if rel == "modelroute" {
+				literalType[n.Type] = true
+			}
+		case *ast.StarExpr:
+			// A pointer type (a field holding a built client) has no
+			// value of its own but nil or a checked literal's.
+			if _, isClient := clientTypes[sel(n.X)]; isClient && rel == "modelroute" {
+				literalType[n.X] = true
+			}
+		case *ast.CallExpr:
+			callee[n.Fun] = true
+			se, ok := n.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			i, isDial := dials[se.Sel.Name]
+			if !isDial || len(n.Args) <= i {
+				return true
+			}
+			if lit, ok := n.Args[i].(*ast.BasicLit); !ok || lit.Value != `"unix"` {
+				at(n, se.Sel.Name+" on a network other than \"unix\"")
+			}
 		case *ast.SelectorExpr:
+			if _, isDial := dials[n.Sel.Name]; isDial && !callee[n] {
+				at(n, n.Sel.Name+" used as a value, not called")
+			}
 			full := sel(n)
 			if full == "" {
 				return true
 			}
 			pkg, id := full[:strings.LastIndex(full, ".")], n.Sel.Name
-			if dialers[pkg][id] && !(modelroute && modelrouteMay[full]) {
+			switch {
+			case clients[pkg][id] && !literalType[n]:
 				at(n, "network client ("+full+")")
-			}
-		case *ast.CompositeLit:
-			key := map[string]string{"net/http.Transport": "DialContext", "net/http.Client": "Transport", "net/http/httputil.ReverseProxy": "Transport"}[sel(n.Type)]
-			if key != "" && !hasKey(n, key) {
-				at(n, sel(n.Type)+" without its own "+key)
-			}
-		case *ast.CallExpr:
-			se, ok := n.Fun.(*ast.SelectorExpr)
-			if !ok {
-				return true
-			}
-			arg := map[string]int{"Dial": 0, "DialTimeout": 0, "DialContext": 1}
-			i, isDial := arg[se.Sel.Name]
-			if !isDial || len(n.Args) <= i {
-				return true
-			}
-			if lit, ok := n.Args[i].(*ast.BasicLit); !ok || lit.Value != `"unix"` {
-				at(n, se.Sel.Name+" to a network other than \"unix\"")
+			case socketPkgs[pkg] && !clients[pkg][id] && !uses[full]:
+				at(n, full+" is outside this package's netOK uses")
 			}
 		}
 		return true
@@ -271,21 +354,27 @@ func clientUse(t *testing.T, path, name string, modelroute bool) []string {
 	return bad
 }
 
-func hasKey(c *ast.CompositeLit, key string) bool {
+// setsNonNil reports that a composite literal sets field key to something
+// other than nil.
+func setsNonNil(c *ast.CompositeLit, key string) bool {
 	for _, e := range c.Elts {
-		if kv, ok := e.(*ast.KeyValueExpr); ok {
-			if id, ok := kv.Key.(*ast.Ident); ok && id.Name == key {
-				return true
-			}
+		kv, ok := e.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		if id, ok := kv.Key.(*ast.Ident); ok && id.Name == key {
+			v, isIdent := kv.Value.(*ast.Ident)
+			return !isIdent || v.Name != "nil"
 		}
 	}
 	return false
 }
 
-// The checks themselves catch what they are for, including the probes
-// L3 on #83 got past the first version: clients reached through other
-// standard packages, a renamed import, raw sockets, and a dial to anything
-// but a unix socket.
+// The checks themselves catch what they are for, including the probes L3
+// on #83 got past earlier versions: clients reached through other standard
+// packages, renamed imports, raw sockets, a dial to anything but a unix
+// socket, client values built outside a checked literal, and dial methods
+// taken as values.
 func TestImportCheckCatchesARouter(t *testing.T) {
 	if !providerSDK.MatchString("github.com/anthropics/anthropic-sdk-go") || !providerSDK.MatchString("github.com/sashabaranov/go-openai") {
 		t.Fatal("provider pattern misses an SDK")
@@ -293,37 +382,52 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 	if !contains(forbidden, "route") {
 		t.Fatal("route is not forbidden")
 	}
-	for src, modelroute := range map[string]bool{
-		"package p\nimport nh \"net/http\"\nvar c = &nh.Client{}\n":                                  false,
-		"package p\nimport . \"net/http\"\nvar c = DefaultClient\n":                                  false,
-		"package p\nimport \"net/http/httputil\"\nvar p = httputil.NewSingleHostReverseProxy(nil)\n": false,
-		"package p\nimport \"net/http/httptest\"\nvar c = httptest.NewServer(nil).Client()\n":        false,
-		"package p\nimport \"crypto/tls\"\nvar c, _ = tls.Dial(\"tcp\", \"x:443\", nil)\n":           false,
-		"package p\nimport \"net\"\nvar c, _ = (&net.Dialer{}).Dial(\"tcp\", \"x:443\")\n":           true,
-		"package p\nimport \"net/http\"\nvar c = &http.Client{}\n":                                   true,
-		"package p\nimport \"net/http\"\nvar c = &http.Transport{}\n":                                true,
-		"package p\nimport \"net/http/httputil\"\nvar p = &httputil.ReverseProxy{}\n":                true,
-		"package p\nimport \"net/http\"\nvar r, _ = http.Get(\"http://x\")\n":                        true,
+	src := func(imports, body string) string { return "package p\nimport (" + imports + ")\n" + body + "\n" }
+	for _, c := range []struct{ rel, src string }{
+		{"guest", src(`nh "net/http"`, `var c = &nh.Client{}`)},
+		{"guest", src(`. "net/http"`, `var c = DefaultClient`)},
+		{"loops", src(`"net/http/httputil"`, `var p = httputil.NewSingleHostReverseProxy(nil)`)},
+		{"replay", src(`"net/http/httptest"`, `var c = httptest.NewServer(nil).Client()`)},
+		{"loops", src(`"crypto/tls"`, `var c, _ = tls.Dial("tcp", "x:443", nil)`)},
+		{"journal", src(`"syscall"`, `var fd, _ = syscall.Socket(2, 1, 0)`)},
+		{"guest", src(`"net"`, `var c, _ = net.ListenPacket("udp", ":0")`)},
+		{"guest", src(`"net"`, `var a, _ = net.LookupHost("x")`)},
+		{"guest", src(`"net"`, `var l, _ = net.Listen("tcp", ":0")`)},
+		{"modelroute", src(`"net"`, `var c, _ = (&net.Dialer{}).Dial("tcp", "x:443")`)},
+		{"modelroute", src(`"net/http"`, `var c = &http.Client{}`)},
+		{"modelroute", src(`"net/http"`, `var c = &http.Client{Transport: nil}`)},
+		{"modelroute", src(`"net/http"`, `var c = new(http.Client)`)},
+		{"modelroute", src(`"net/http"`, `var tr http.Transport`)},
+		{"modelroute", src(`"net/http"`, `var tr = &http.Transport{}`)},
+		{"modelroute", src(`"net/http/httputil"`, `var p = &httputil.ReverseProxy{}`)},
+		{"modelroute", src(`"net/http"`, `var r, _ = http.Get("http://x")`)},
+		{"modelroute", src(`"net"`, `var d net.Dialer; var f = d.DialContext`)},
+		{"modelroute", src(`"net"`, `func g() { d := &net.Dialer{}; f := d.DialContext; f(nil, "tcp", "x:443") }`)},
 	} {
 		path := filepath.Join(t.TempDir(), "p.go")
-		if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
+		if err := os.WriteFile(path, []byte(c.src), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if len(clientUse(t, path, "p.go", modelroute)) == 0 {
-			t.Errorf("missed (modelroute %v):\n%s", modelroute, src)
+		if len(sourceUse(t, path, "p.go", c.rel)) == 0 {
+			t.Errorf("missed in %s:\n%s", c.rel, c.src)
 		}
 	}
-	ok := "package p\nimport (\"net\"; \"net/http\")\nvar t = &http.Transport{DialContext: func() { (&net.Dialer{}).DialContext(nil, \"unix\", \"s\") }}\n"
+	ok := src(`"net"; "net/http"`, `var t = &http.Transport{DialContext: func() { (&net.Dialer{}).DialContext(nil, "unix", "s") }}`)
 	path := filepath.Join(t.TempDir(), "ok.go")
 	if err := os.WriteFile(path, []byte(ok), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := clientUse(t, path, "ok.go", true); len(got) != 0 {
+	if got := sourceUse(t, path, "ok.go", "modelroute"); len(got) != 0 {
 		t.Errorf("modelroute's unix dial flagged: %q", got)
 	}
-	// Imports: an RPC, mail, or raw-socket package outside the lists.
+	// Imports: RPC, mail, raw sockets, and escape hatches.
 	reach := httpReach([]listed{{path: "net/rpc", imports: []string{"net/http"}}, {path: "net/http"}})
 	if !reach["net/rpc"] || !socketPkgs["net/smtp"] || !socketPkgs["syscall"] || !socketPkgs["golang.org/x/sys/unix"] {
 		t.Fatal("socket-capable imports not caught")
+	}
+	for _, e := range []string{"C", "unsafe", "plugin", "os/exec"} {
+		if !escapes[e] {
+			t.Fatalf("%s is not an escape", e)
+		}
 	}
 }
