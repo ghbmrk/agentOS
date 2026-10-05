@@ -614,7 +614,7 @@ func (b *Book) renderBy(e *entry, by string) string {
 		}
 		sb.WriteString(".")
 	}
-	fmt.Fprintf(&sb, ` Reply "%s" and your answer by %s. With no reply it goes ahead with "%s".`, e.ID, by, e.Default)
+	fmt.Fprintf(&sb, ` Reply %s and your answer by %s. No reply: it goes ahead with "%s".`, e.ID, by, e.Default)
 	return sb.String()
 }
 
@@ -708,6 +708,30 @@ var (
 	tagRE = regexp.MustCompile(`^[Qq]([1-9][0-9]{2})[:.,]?$`)
 )
 
+// untaggedLocked returns the only open question when it has choices and
+// text is exactly one of them (UX R2 on #71): with one question open, "9:30"
+// can only mean it. Anything else untagged stays chat.
+func (b *Book) untaggedLocked(text string) *entry {
+	var only *entry
+	for _, e := range b.qs {
+		if e.open() {
+			if only != nil {
+				return nil
+			}
+			only = e
+		}
+	}
+	if only == nil || only.Sent.IsZero() {
+		return nil
+	}
+	for _, c := range only.Choices {
+		if strings.EqualFold(c, text) {
+			return only
+		}
+	}
+	return nil
+}
+
 // Answer takes an owner text that starts with a question's tag ("Q4 yes")
 // and returns the fixed reply. ok is false when the text is not an answer
 // to a known question; the channel then treats it as chat. The wiring
@@ -716,17 +740,24 @@ var (
 // stripped (CH-3, CH-14).
 func (b *Book) Answer(ctx context.Context, text string) (reply string, ok bool) {
 	f := strings.Fields(text)
-	if len(f) == 0 || !tagRE.MatchString(f[0]) {
+	if len(f) == 0 {
 		return "", false
 	}
 	now, clockErr := b.cfg.Now(ctx)
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	e := b.byIDLocked("Q" + tagRE.FindStringSubmatch(f[0])[1])
-	if e == nil {
+	var e *entry
+	var ans string
+	if tagRE.MatchString(f[0]) {
+		if e = b.byIDLocked("Q" + tagRE.FindStringSubmatch(f[0])[1]); e == nil {
+			return "", false
+		}
+		ans = flatten(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(text), f[0])))
+	} else if e = b.untaggedLocked(flatten(text)); e != nil {
+		ans = flatten(text)
+	} else {
 		return "", false
 	}
-	ans := flatten(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(text), f[0])))
 	switch {
 	case ans == "":
 		return fmt.Sprintf("Add your answer after %s, like: %s %s", e.ID, e.ID, e.Default), true
@@ -749,7 +780,7 @@ func (b *Book) Answer(ctx context.Context, text string) (reply string, ok bool) 
 			e.Late = ans
 			b.save("late answer")
 		}
-		return fmt.Sprintf("%s already went ahead with \"%s\" at %s, since there was no reply by then. Your answer is passed to the agent.",
+		return fmt.Sprintf("Too late for %s: the agent went ahead with \"%s\" at %s. Your answer is passed to it.",
 			e.ID, e.Default, b.clock(now, e.Closed)), true
 	}
 	if len(e.Choices) > 0 {

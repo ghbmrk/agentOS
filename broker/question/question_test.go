@@ -136,7 +136,7 @@ func TestQuestionIsTextedWithItsDefaultAndDeadline(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("texts %q", got)
 	}
-	for _, want := range []string{"Q100", "Book the 9:00 or the 9:30 dentist slot?", `"9:30"`, "13:30", `Reply "Q100"`} {
+	for _, want := range []string{"Q100", "Book the 9:00 or the 9:30 dentist slot?", `"9:30"`, "13:30", "Reply Q100 and"} {
 		if !strings.Contains(got[0], want) {
 			t.Errorf("text %q lacks %q", got[0], want)
 		}
@@ -221,6 +221,32 @@ func TestChoicesBoundTheAnswer(t *testing.T) {
 	}
 }
 
+// TestUntaggedChoiceAnswersTheOnlyQuestion: with one question open, an
+// untagged reply that is exactly one of its choices answers it (UX R2);
+// with two open, or a reply that is not a choice, it stays chat.
+func TestUntaggedChoiceAnswersTheOnlyQuestion(t *testing.T) {
+	r := newRig(t, nil)
+	s := Spec{Text: "Which slot?", Choices: []string{"9:00", "9:30"}, Default: "9:30", Wait: time.Hour}
+	r.ask("lin1", "a", s)
+	if _, ok := r.answer("sure, 9:00 works"); ok {
+		t.Fatal("chat taken as an answer")
+	}
+	if _, ok := r.answer("1"); ok {
+		t.Fatal("an untagged number taken as an answer")
+	}
+	r.ask("lin1", "b", s)
+	if _, ok := r.answer("9:00"); ok {
+		t.Fatal("untagged reply taken with two questions open")
+	}
+	r.answer("Q101 9:30")
+	if reply, ok := r.answer("9:00"); !ok || !strings.Contains(reply, "Q100") {
+		t.Fatalf("reply %q %v", reply, ok)
+	}
+	if st := r.status("lin1", "a"); st.State != Answered || st.Answer != "9:00" {
+		t.Fatalf("status %+v", st)
+	}
+}
+
 // TestNoReplyByTheDeadlineTakesTheDefault: the broker's timer lapses the
 // question, the guest proceeds on the default, and the digest lists it.
 func TestNoReplyByTheDeadlineTakesTheDefault(t *testing.T) {
@@ -249,7 +275,7 @@ func TestNoReplyByTheDeadlineTakesTheDefault(t *testing.T) {
 	}
 	// A late reply is told the default stands and is passed on as late.
 	reply, ok := r.answer("Q100 9:00 please")
-	if !ok || !strings.Contains(reply, "went ahead") {
+	if !ok || !strings.Contains(reply, "Too late for Q100") {
 		t.Fatalf("late reply %q %v", reply, ok)
 	}
 	if st := r.status("lin1", "q"); st.State != Defaulted || st.Late != "9:00 please" {
@@ -484,7 +510,7 @@ func TestAReplyAfterTheDeadlineIsLate(t *testing.T) {
 	r := newRig(t, nil)
 	r.ask("lin1", "q", slot())
 	r.advance(31 * time.Minute)
-	if reply, ok := r.answer("Q100 9:00"); !ok || !strings.Contains(reply, "went ahead") {
+	if reply, ok := r.answer("Q100 9:00"); !ok || !strings.Contains(reply, "Too late for Q100") {
 		t.Fatalf("reply %q %v", reply, ok)
 	}
 	if st := r.status("lin1", "q"); st.State != Defaulted || st.Answer != "9:30" || st.Late != "9:00" {
