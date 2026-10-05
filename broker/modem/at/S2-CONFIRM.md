@@ -23,6 +23,7 @@ the extra reading to take while S2 runs, and the change if it fails.
 | C13 | `AT+QCCID` (Quectel) and `AT+CICCID` (SIMCom) return the SIM serial; `AT+CPIN?`, `AT+CEREG?` and `AT+CSQ` answer in the 27.007 form. | Extra: run each once | Fix `readICCID` or `status.go`. |
 | C14 | SIMCom: `AT+CTZU=1` is accepted, and `AT+CCLK?` follows network time once registered (`+CCLK: "yy/MM/dd,hh:mm:ss±zz"`, local time with the zone in quarter hours); after a power cycle with no network it shows a date before 2025. | Extra: `AT+CCLK?` before and after registering, against a phone's clock | Read the `*PSUTTZ` network-time notice instead (TIM-1, clock K2). |
 | C15 | Quectel: `AT+QLTS=1` answers `+QLTS: ""` before the network sends a time and UTC after it; Mark's carrier sends network time at all. | Extra: `AT+QLTS=1` and `AT+QLTS=2` once registered | No carrier time: the box runs on NTP alone (`NetworkOnly`, clock K4). |
+| C16 | Carrier time against a phone's clock across a day on Mark's carrier, including a DST change if one falls in the test window: the skew stays well inside the 5-minute tolerance (clock K3). | Extra: `NetworkTime` every 15 min for a day, against NTP | Raise `DefaultTolerance`, or treat the carrier as NetworkOnly when it drifts (clock K3, K8). |
 
 Recordings stay in the kit's `private/` folder and never leave the drive;
 C10 is run on the drive or by Mark, not uploaded.

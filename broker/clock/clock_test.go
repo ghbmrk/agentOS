@@ -7,6 +7,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -40,6 +41,8 @@ func (r *rig) advance(d time.Duration) {
 		r.carrier = r.carrier.Add(d)
 	}
 }
+
+func (r *rig) readCount() int { r.mu.Lock(); defer r.mu.Unlock(); return r.reads }
 
 // step sets the box's wall clock only, as NTP (or someone spoofing it) does.
 func (r *rig) step(d time.Duration) { r.mu.Lock(); r.wall = r.wall.Add(d); r.mu.Unlock() }
@@ -412,5 +415,131 @@ func TestTIM1StatusLine(t *testing.T) {
 	g.Check(bg)
 	if got := g.Status().Line(time.UTC); !strings.Contains(got, "network only") {
 		t.Fatalf("line = %q", got)
+	}
+}
+
+func TestTIM1ConcurrentStaleReadsShareOneModemRead(t *testing.T) {
+	r := newRig()
+	release := make(chan struct{})
+	var reads atomic.Int32
+	g := r.guard(t, func(c *Config) {
+		c.Carrier = func(context.Context) (time.Time, error) {
+			reads.Add(1)
+			<-release
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			return r.carrier, nil
+		}
+	})
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := g.Now(bg); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	for reads.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(20 * time.Millisecond) // let the others join the flight
+	close(release)
+	wg.Wait()
+	if n := reads.Load(); n != 1 {
+		t.Fatalf("modem reads = %d, want 1", n)
+	}
+}
+
+func TestTIM1RunLiveAnswersStaleFromLastCheck(t *testing.T) {
+	r := newRig()
+	tick := make(chan time.Time)
+	g := r.guard(t, func(c *Config) { c.Tick = tick })
+	ctx, cancel := context.WithCancel(bg)
+	defer cancel()
+	go g.Run(ctx)
+	tick <- time.Time{}
+	tick <- time.Time{} // returns only after the first tick's check ran
+	reads := r.readCount()
+	r.advance(DefaultInterval + time.Minute)
+	if _, err := g.Now(bg); err != nil {
+		t.Fatal(err)
+	}
+	if r.readCount() != reads {
+		t.Fatalf("stale read with Run live hit the modem")
+	}
+	// A jump is still checked inline.
+	r.step(time.Hour)
+	if _, err := g.Now(bg); !errors.Is(err, ErrRestricted) {
+		t.Fatalf("jump with Run live: err = %v", err)
+	}
+}
+
+func TestTIM1SlowModemIsBounded(t *testing.T) {
+	r := newRig()
+	g := r.guard(t, func(c *Config) {
+		c.CarrierTimeout = 20 * time.Millisecond
+		c.Carrier = func(ctx context.Context) (time.Time, error) {
+			<-ctx.Done()
+			return time.Time{}, ctx.Err()
+		}
+	})
+	start := time.Now()
+	if s := g.Check(bg); s.State != NetworkOnly {
+		t.Fatalf("status = %+v", s)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("check took %v", d)
+	}
+}
+
+func TestTIM1LatestCredibleTime(t *testing.T) {
+	r := newRig()
+	g := r.guard(t, nil)
+	g.Check(bg)
+	r.advance(10 * time.Minute)
+	// The box clock is moved back three minutes: within tolerance, so not
+	// restricted, but Latest still answers from the carrier reading.
+	r.step(-3 * time.Minute)
+	got, s := g.Latest(bg)
+	if s.Restricted() {
+		t.Fatalf("status = %+v", s)
+	}
+	want := time.Date(2026, 10, 5, 4, 10, 0, 0, time.UTC)
+	if !got.Equal(want) {
+		t.Fatalf("Latest = %v, want %v", got, want)
+	}
+	// A box clock ahead of the carrier is itself the latest.
+	r.step(4 * time.Minute)
+	if got, _ := g.Latest(bg); !got.Equal(want.Add(time.Minute)) {
+		t.Fatalf("Latest = %v", got)
+	}
+	// Restricted: still answers, with the status.
+	r.step(-48 * time.Hour)
+	got, s = g.Latest(bg)
+	if !s.Restricted() || got.Before(want) {
+		t.Fatalf("Latest = %v, %+v", got, s)
+	}
+}
+
+func TestTIM1OnChange(t *testing.T) {
+	r := newRig()
+	var seen []State
+	g := r.guard(t, func(c *Config) { c.OnChange = func(s Status) { seen = append(seen, s.State) } })
+	g.Check(bg)
+	g.Check(bg)
+	r.step(time.Hour)
+	g.Check(bg)
+	r.step(-time.Hour)
+	g.Check(bg)
+	want := []State{Agreed, Disagree, Agreed}
+	if len(seen) != len(want) {
+		t.Fatalf("seen = %v", seen)
+	}
+	for i := range want {
+		if seen[i] != want[i] {
+			t.Fatalf("seen = %v", seen)
+		}
 	}
 }

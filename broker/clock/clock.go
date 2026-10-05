@@ -9,10 +9,11 @@
 // metadata has expired fails closed instead of trusting a moved clock.
 //
 // A check reads both sources. Guard.Now answers from the last check, but
-// checks again first when the last one is stale or when the box's wall clock
-// has moved against its monotonic clock since then (an NTP step, or someone
-// setting the clock), so a step never goes unchecked until the next
-// interval. With one source or none the box keeps working on its own clock;
+// checks again first when the box's wall clock has moved against its
+// monotonic clock since then (an NTP step, or someone setting the clock),
+// so a step never goes unchecked until the next interval, and when the last
+// check is stale and no Run loop keeps it fresh. Guard.Latest gives expiry
+// checks the latest credible time. With one source or none the box keeps working on its own clock;
 // only a disagreement restricts it (DEP-2, DEP-4: offline is normal), and
 // only carrier time that agrees again lifts it.
 //
@@ -25,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -91,6 +93,8 @@ const (
 	// DefaultInterval is how often Run checks, and how old a check may be
 	// before Now checks again.
 	DefaultInterval = 15 * time.Minute
+	// DefaultCarrierTimeout bounds one modem read.
+	DefaultCarrierTimeout = 5 * time.Second
 	// AgreeAfter is how long the sources must agree before the owner gets
 	// the all-clear. The restriction lifts at once; only the text waits, so
 	// flapping sources never leave "back to normal" as the last word.
@@ -179,6 +183,12 @@ type Config struct {
 	Elapsed func() time.Duration
 	// Tick replaces Run's ticker in tests.
 	Tick <-chan time.Time
+	// CarrierTimeout bounds one carrier read (DefaultCarrierTimeout), so a
+	// slow modem cannot hold a time-sensitive caller.
+	CarrierTimeout time.Duration
+	// OnChange, if set, is called after a check that changed the state, so
+	// the wiring can re-run lapse sweeps when a restriction lifts.
+	OnChange func(Status)
 }
 
 // Guard keeps the last check and answers time-sensitive callers.
@@ -192,6 +202,19 @@ type Guard struct {
 	told     bool          // a disagreement text is outstanding
 	agreeAt  time.Duration // Elapsed when agreement resumed after it
 	agreeing bool
+
+	// The last carrier reading and Elapsed when it was taken (Latest).
+	carrier     time.Time
+	carrierMono time.Duration
+
+	running atomic.Int32 // Run loops live
+	fmu     sync.Mutex
+	flight  *flight // the check in progress, shared by concurrent callers
+}
+
+type flight struct {
+	done chan struct{}
+	s    Status
 }
 
 // New makes a Guard. Nothing is read until the first Check or Now.
@@ -205,6 +228,9 @@ func New(cfg Config) (*Guard, error) {
 	if cfg.Interval <= 0 {
 		cfg.Interval = DefaultInterval
 	}
+	if cfg.CarrierTimeout <= 0 {
+		cfg.CarrierTimeout = DefaultCarrierTimeout
+	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
@@ -215,16 +241,41 @@ func New(cfg Config) (*Guard, error) {
 	return &Guard{cfg: cfg}, nil
 }
 
-// Check reads both sources now and records the result.
+// Check reads both sources now and records the result. Concurrent calls
+// share one read of each source.
 func (g *Guard) Check(ctx context.Context) Status {
+	g.fmu.Lock()
+	if f := g.flight; f != nil {
+		g.fmu.Unlock()
+		select {
+		case <-f.done:
+			return f.s
+		case <-ctx.Done():
+			return g.Status()
+		}
+	}
+	f := &flight{done: make(chan struct{})}
+	g.flight = f
+	g.fmu.Unlock()
+	f.s = g.check(ctx)
+	g.fmu.Lock()
+	g.flight = nil
+	g.fmu.Unlock()
+	close(f.done)
+	return f.s
+}
+
+func (g *Guard) check(ctx context.Context) Status {
 	synced, err := g.cfg.Synced()
 	synced = synced && err == nil
 	var carrier time.Time
 	have := false
 	if g.cfg.Carrier != nil {
-		if t, err := g.cfg.Carrier(ctx); err == nil && !t.IsZero() {
+		cctx, cancel := context.WithTimeout(ctx, g.cfg.CarrierTimeout)
+		if t, err := g.cfg.Carrier(cctx); err == nil && !t.IsZero() {
 			carrier, have = t, true
 		}
+		cancel()
 	}
 	// Read the box clock after the modem answers, so the modem's latency
 	// does not count as skew.
@@ -246,6 +297,10 @@ func (g *Guard) Check(ctx context.Context) Status {
 	}
 
 	g.mu.Lock()
+	prev, wasChecked := g.status.State, g.checked
+	if have {
+		g.carrier, g.carrierMono = carrier, mono
+	}
 	if !have && g.status.Restricted() {
 		// A disagreement ends only when carrier time agrees again: losing
 		// the carrier (jammed, unplugged, or a network that stops sending
@@ -263,6 +318,9 @@ func (g *Guard) Check(ctx context.Context) Status {
 	g.mu.Unlock()
 	if text != "" && g.cfg.Notify != nil {
 		g.cfg.Notify(text)
+	}
+	if g.cfg.OnChange != nil && (!wasChecked || prev != s.State) {
+		g.cfg.OnChange(s)
 	}
 	return s
 }
@@ -298,23 +356,57 @@ func (g *Guard) Status() Status {
 }
 
 // Now is the time for a time-sensitive check, or ErrRestricted while the
-// sources disagree. It checks again first when there has been no check,
-// the last is older than the interval, or the wall clock has moved against
-// the monotonic clock by more than the tolerance since it.
+// sources disagree.
 func (g *Guard) Now(ctx context.Context) (time.Time, error) {
-	now, mono := g.cfg.Now(), g.cfg.Elapsed()
-	g.mu.Lock()
-	s, checked, last := g.status, g.checked, g.mono
-	g.mu.Unlock()
-	jump := now.Sub(s.At) - (mono - last)
-	if !checked || mono-last >= g.cfg.Interval || jump > g.cfg.Tolerance || -jump > g.cfg.Tolerance {
-		s = g.Check(ctx)
-		now = s.At
+	now, s := g.refresh(ctx)
+	if err := ctx.Err(); err != nil {
+		return time.Time{}, err
 	}
 	if s.Restricted() {
 		return time.Time{}, ErrRestricted
 	}
 	return now, nil
+}
+
+// Latest is the latest credible time: the later of the box clock and the
+// last carrier reading carried forward on the monotonic clock. A caller
+// deciding whether something has expired uses it, so a clock moved back
+// cannot keep a grant alive (potency PT1 on #68). It answers while
+// restricted too; the caller reads the Status.
+func (g *Guard) Latest(ctx context.Context) (time.Time, Status) {
+	now, s := g.refresh(ctx)
+	mono := g.cfg.Elapsed()
+	g.mu.Lock()
+	c, cm := g.carrier, g.carrierMono
+	g.mu.Unlock()
+	if !c.IsZero() {
+		if t := c.Add(mono - cm); t.After(now) {
+			now = t
+		}
+	}
+	return now, s
+}
+
+// refresh returns the box clock and a status current enough to act on. It
+// checks again first when there has been no check, when the wall clock has
+// moved against the monotonic clock by more than the tolerance since the
+// last one, or, when no Run loop is live, when the last is older than the
+// interval. With Run live a stale read answers from the last check, so a
+// burst of callers never queues on the modem.
+func (g *Guard) refresh(ctx context.Context) (time.Time, Status) {
+	now, mono := g.cfg.Now(), g.cfg.Elapsed()
+	g.mu.Lock()
+	s, checked, last := g.status, g.checked, g.mono
+	g.mu.Unlock()
+	jump := now.Sub(s.At) - (mono - last)
+	stale := mono-last >= g.cfg.Interval && g.running.Load() == 0
+	if !checked || stale || jump > g.cfg.Tolerance || -jump > g.cfg.Tolerance {
+		s = g.Check(ctx)
+		if !s.At.IsZero() {
+			now = s.At
+		}
+	}
+	return now, s
 }
 
 // Run checks at once and then every interval until ctx ends.
@@ -325,6 +417,8 @@ func (g *Guard) Run(ctx context.Context) {
 		defer t.Stop()
 		tick = t.C
 	}
+	g.running.Add(1)
+	defer g.running.Add(-1)
 	g.Check(ctx)
 	for {
 		select {
