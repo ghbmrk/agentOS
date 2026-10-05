@@ -82,9 +82,9 @@ func TestSR23sStatusWhileStepsKeepFailing(t *testing.T) {
 		err  error
 		line string
 	}{
-		{ErrStepNoRoom, "Undo: the agent's actions since %s can't be undone yet; its files are full. It has been told to free space. Nothing to do unless this lasts."},
-		{ErrStepTooDeep, "Undo: the agent's actions since %s can't be undone yet; its folders nest too deep to save. It has been told to flatten them. Nothing to do unless this lasts."},
-		{errors.New("pause failed"), "Undo: the agent's actions since %s can't be undone yet; the box couldn't save them. It tries again after the agent's next action. Nothing to do unless this lasts."},
+		{ErrStepNoRoom, "Rollback: the agent's files since %s can't be rolled back yet; they're full. It has been told to free space. UNDO still works. Nothing to do unless this lasts."},
+		{ErrStepTooDeep, "Rollback: the agent's files since %s can't be rolled back yet; its folders nest too deep to save. It has been told to flatten them. UNDO still works. Nothing to do unless this lasts."},
+		{errors.New("pause failed"), "Rollback: the agent's files since %s can't be rolled back yet; the box couldn't save them. It tries again after the agent's next action. UNDO still works. Nothing to do unless this lasts."},
 	} {
 		r := newRig(t, func(c *Config) { c.StepInterval = time.Millisecond })
 		r.tool("m1", "effect_request", send("r0")) // a rollback point is saved

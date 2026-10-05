@@ -94,11 +94,11 @@ func (n *stepNotes) Note() string {
 	return ""
 }
 
-// digestPeriod is how long the Undo line stands before the digest
+// digestPeriod is how long the Rollback line stands before the digest
 // carries it too (security R1, UX on SR2-3s).
 const digestPeriod = 24 * time.Hour
 
-// stepDigestKey is the digest notice key for the Undo line STATUS has
+// stepDigestKey is the digest notice key for the Rollback line STATUS has
 // carried since shown, at now: none in the first digest period, then one
 // a day for 7 days, then one a week (W5's cadence). The key holds the
 // line, so a new reason or since-time is told at once; a success clears
@@ -114,7 +114,7 @@ func stepDigestKey(line string, shown, now time.Time) (string, bool) {
 	return fmt.Sprintf("sr2-3s:%d:%s", d, line), true
 }
 
-// digest queues the Undo line for the owner's digest on stepDigestKey's
+// digest queues the Rollback line for the owner's digest on stepDigestKey's
 // cadence, each minute until ctx ends. The line is the STATUS line,
 // verbatim: the digest adds no wording of its own.
 func (n *stepNotes) digest(ctx context.Context, notice func(key, line string) error) {
@@ -133,7 +133,7 @@ func (n *stepNotes) digest(ctx context.Context, notice func(key, line string) er
 		line, shown := p.StepLine()
 		if key, ok := stepDigestKey(line, shown, time.Now()); ok {
 			if err := notice(key, line); err != nil {
-				log.Printf("undo digest line: %v", err)
+				log.Printf("rollback digest line: %v", err)
 			}
 		}
 	}

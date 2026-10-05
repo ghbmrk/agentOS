@@ -40,12 +40,12 @@ func TestSR23sStepErrMarksTheReason(t *testing.T) {
 	}
 }
 
-// The digest carries the Undo line verbatim once it outlasts a digest
+// The digest carries the Rollback line verbatim once it outlasts a digest
 // period: daily for 7 days, then weekly, and at once when the line
 // changes (UX on SR2-3s R1).
 func TestSR23sDigestCadence(t *testing.T) {
 	shown := time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)
-	line := "Undo: the agent's actions since 08:59 can't be undone yet; its files are full. It has been told to free space. Nothing to do unless this lasts."
+	line := "Rollback: the agent's files since 08:59 can't be rolled back yet; they're full. It has been told to free space. UNDO still works. Nothing to do unless this lasts."
 	if _, ok := stepDigestKey("", shown, shown.Add(48*time.Hour)); ok {
 		t.Fatal("a key with no line")
 	}

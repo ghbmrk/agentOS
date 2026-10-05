@@ -406,10 +406,10 @@ const (
 	stepNoteTooDeep = "The rollback point after your last effect request was not saved: folders in your machine nest more than 256 deep. Flatten or delete them; until a rollback point is saved, your steps since then can't be rolled back."
 	stepNoteOther   = "The rollback point after your last effect request was not saved. The broker tries again after your next effect request; until then your steps since then can't be rolled back."
 	// The owner's STATUS lines take the time of the last saved rollback
-	// point, in the box's local time (UX-SR23s-1, CH-12).
-	statusNoRoom  = "Undo: the agent's actions since %s can't be undone yet; its files are full. It has been told to free space. Nothing to do unless this lasts."
-	statusTooDeep = "Undo: the agent's actions since %s can't be undone yet; its folders nest too deep to save. It has been told to flatten them. Nothing to do unless this lasts."
-	statusOther   = "Undo: the agent's actions since %s can't be undone yet; the box couldn't save them. It tries again after the agent's next action. Nothing to do unless this lasts."
+	// point, in the box's local time (UX-SR23s-1, CH-12): rollback, not UNDO, which still works.
+	statusNoRoom  = "Rollback: the agent's files since %s can't be rolled back yet; they're full. It has been told to free space. UNDO still works. Nothing to do unless this lasts."
+	statusTooDeep = "Rollback: the agent's files since %s can't be rolled back yet; its folders nest too deep to save. It has been told to flatten them. UNDO still works. Nothing to do unless this lasts."
+	statusOther   = "Rollback: the agent's files since %s can't be rolled back yet; the box couldn't save them. It tries again after the agent's next action. UNDO still works. Nothing to do unless this lasts."
 )
 
 var (
