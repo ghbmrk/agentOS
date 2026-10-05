@@ -12,7 +12,7 @@ import (
 	"testing"
 )
 
-// REQ: REV-1, REV-4
+// REQ: REV-1, REV-4, RES-4
 
 func must(t *testing.T, err error) {
 	t.Helper()
@@ -421,5 +421,43 @@ func TestREV4PutCarriesDirectoryOwnerAndXattrs(t *testing.T) {
 	must(t, err)
 	if len(left) != 0 {
 		t.Fatalf("after Put, dst still differs from the fork: %s", ops(left))
+	}
+}
+
+// Measure runs on a live worker's layer: files removed while it walks
+// are skipped, not an error (L3 MUST-3 on #150).
+func TestMeasureSkipsFilesThatVanish(t *testing.T) {
+	root := t.TempDir()
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			d := filepath.Join(root, fmt.Sprintf("d%d", i%8))
+			os.MkdirAll(d, 0o755)
+			p := filepath.Join(d, fmt.Sprintf("f%d", i%64))
+			os.WriteFile(p, []byte("x"), 0o644)
+			os.Remove(p)
+			if i%16 == 0 {
+				os.RemoveAll(d)
+			}
+		}
+	}()
+	for range 300 {
+		if _, err := Measure(root); err != nil {
+			close(stop)
+			<-done
+			t.Fatalf("measure under churn: %v", err)
+		}
+	}
+	close(stop)
+	<-done
+	if _, err := Measure(filepath.Join(root, "missing")); err == nil {
+		t.Fatal("measure of a missing layer reported nothing")
 	}
 }

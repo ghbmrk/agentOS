@@ -195,6 +195,10 @@ type Config struct {
 	// MaxLayerBytes optionally caps one machine's layer on top of that
 	// (zero: no fixed cap). MaxLayerInodes caps its inodes (zero: 200,000).
 	MaxLayerBytes, MaxLayerInodes int64
+	// WorkerLayerBytes caps one worker's layer (zero: MaxLayerBytes
+	// alone). A worker over it takes no snapshot and no command until
+	// files are deleted or it is rolled back (security R3 on #146).
+	WorkerLayerBytes int64
 	// FreeBytes reports the state disk's free space; nil measures it.
 	FreeBytes func(path string) (int64, error)
 	// Contained reports a lineage that holds a record the owner deleted
@@ -779,7 +783,7 @@ func (m *Manager) capture(ctx context.Context, mc *machine, t Tier) (Snapshot, e
 // captureAs is capture; sleep marks a sleep checkpoint, with the
 // machine's start count and the hash of what was written.
 func (m *Manager) captureAs(ctx context.Context, mc *machine, t Tier, sleep bool) (Snapshot, error) {
-	u, err := m.checkCaps(m.launch(mc).Upper)
+	u, err := m.checkCaps(mc.ID, m.launch(mc).Upper)
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("%s: %w", mc.ID, err)
 	}
@@ -847,12 +851,14 @@ func (m *Manager) captureAs(ctx context.Context, mc *machine, t Tier, sleep bool
 // checkCaps measures a layer about to be snapshotted and refuses it if it
 // is over the per-layer caps. Copies keep holes and hardlinks, so a copy
 // costs no more than this measure.
-func (m *Manager) checkCaps(upper string) (overlay.Usage, error) {
+func (m *Manager) checkCaps(id, upper string) (overlay.Usage, error) {
 	u, err := overlay.Measure(upper)
 	if err != nil {
 		return u, err
 	}
 	switch {
+	case strings.HasPrefix(id, WorkerPrefix) && m.cfg.WorkerLayerBytes > 0 && u.Bytes > m.cfg.WorkerLayerBytes:
+		return u, &WorkerFull{ID: id, Bytes: u.Bytes, Cap: m.cfg.WorkerLayerBytes}
 	case m.cfg.MaxLayerBytes > 0 && u.Bytes > m.cfg.MaxLayerBytes:
 		return u, fmt.Errorf("%w (layer %d bytes, cap %d)", ErrQuota, u.Bytes, m.cfg.MaxLayerBytes)
 	case u.Inodes > m.cfg.MaxLayerInodes:
