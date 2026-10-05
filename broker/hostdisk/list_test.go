@@ -276,6 +276,11 @@ func TestClassify(t *testing.T) {
 		"loop0": ClassUnknown, "zram0": ClassUnknown, "nosuch": ClassUnknown,
 		"": ClassUnknown, "../sda": ClassUnknown, "sda/..": ClassUnknown, "sda\n": ClassUnknown,
 	})
+	// dm devices whose slaves loop are cut off by the depth cap: unknown.
+	h.stacked("dm-3", "253:3")
+	h.stacked("dm-4", "253:4", "dm-3")
+	h.link("sys/devices/virtual/block/dm-3/slaves/dm-4", h.path("sys/devices/virtual/block/dm-4"))
+	classes(t, s, map[string]Class{"dm-3": ClassUnknown, "dm-4": ClassUnknown})
 	if got := s.ClassifyEnv("sda"); got != "AGENTOS_DISK=drive\n" {
 		t.Errorf("env %q", got)
 	}

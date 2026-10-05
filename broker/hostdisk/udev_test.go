@@ -29,6 +29,7 @@ type udevDev struct {
 	locked                    map[string]bool
 	tags                      map[string]bool
 	links                     []string
+	written                   []string // what a stock rule would write: md, LVM, bcache
 }
 
 type udevKV struct{ key, op, val string }
@@ -152,16 +153,13 @@ func runRules(t *testing.T, rules [][]udevKV, d *udevDev, classify func(string) 
 }
 
 // The stock rules the AgentOS files sit between, modelled for the keys
-// that matter here (systemd's 60-persistent-storage, 70-uaccess and
-// 99-systemd, and lvm2's 13-dm-disk; cdrom_id's ID_CDROM is taken as already set). The real
-// files' behaviour is a P2-1 VM-test carry (ASSUMPTIONS H8).
+// that matter here: systemd's 60-persistent-storage, 70-uaccess and
+// 99-systemd; dmsetup's 60-persistent-storage-dm (Debian and Ubuntu);
+// mdadm's 64-md-raid-assembly, lvm2's 69-lvm and bcache-tools' 69-bcache.
+// cdrom_id's ID_CDROM is taken as already set. The real files' behaviour
+// is a P2-1 VM-test carry (ASSUMPTIONS H8).
 
-// persistentStorage: skipped when the flag is set; otherwise blkid
-// records the file system and its label, and by-label/by-uuid links appear.
-func persistentStorage(d *udevDev) {
-	if d.action == "remove" || d.subsystem != "block" || d.env["UDEV_DISABLE_PERSISTENT_STORAGE_RULES_FLAG"] == "1" {
-		return
-	}
+func (d *udevDev) blkid() {
 	if d.probe.fsType == "" {
 		return
 	}
@@ -169,6 +167,39 @@ func persistentStorage(d *udevDev) {
 	if d.probe.label != "" {
 		d.env["ID_FS_LABEL"] = d.probe.label
 		d.links = append(d.links, "disk/by-label/"+d.probe.label)
+	}
+}
+
+// persistentStorage: skipped when the flag is set, and for dm and md
+// devices, which it does not list; otherwise blkid records the file
+// system and its label, and by-label links appear.
+func persistentStorage(d *udevDev) {
+	if d.action == "remove" || d.subsystem != "block" || d.env["UDEV_DISABLE_PERSISTENT_STORAGE_RULES_FLAG"] == "1" ||
+		strings.HasPrefix(d.kernel, "dm-") || strings.HasPrefix(d.kernel, "md") {
+		return
+	}
+	d.blkid()
+}
+
+// persistentStorageDM: dm devices are probed here, whatever the flag says.
+func persistentStorageDM(d *udevDev) {
+	if d.action != "remove" && d.subsystem == "block" && strings.HasPrefix(d.kernel, "dm-") {
+		d.blkid()
+	}
+}
+
+// assembly: md assembles a RAID member and LVM scans a PV; bcache-tools
+// probes any device with no type and registers a bcache one. Each is a
+// write to the device.
+func assembly(d *udevDev) {
+	if d.action == "remove" || d.subsystem != "block" {
+		return
+	}
+	switch t := d.env["ID_FS_TYPE"]; {
+	case t == "linux_raid_member" || t == "LVM2_member":
+		d.written = append(d.written, t)
+	case t == "" && d.probe.fsType == "bcache", t == "bcache":
+		d.written = append(d.written, "bcache")
 	}
 }
 
@@ -185,14 +216,6 @@ func uaccess(d *udevDev) {
 func systemdReady(d *udevDev) {
 	if d.subsystem == "block" && strings.HasPrefix(d.env["DM_UUID"], "CRYPT-") && d.env["ID_FS_USAGE"] == "" {
 		d.env["SYSTEMD_READY"] = "0"
-	}
-}
-
-// dmDisk: lvm2's 13-dm-disk probes a device-mapper device with blkid
-// before the AgentOS rules run.
-func dmDisk(d *udevDev) {
-	if d.action != "remove" && strings.HasPrefix(d.kernel, "dm-") && d.probe.fsType != "" {
-		d.env["ID_FS_TYPE"], d.env["ID_FS_USAGE"] = d.probe.fsType, d.probe.fsUsage
 	}
 }
 
@@ -219,18 +242,22 @@ func (s *udevStack) run(d *udevDev, parent map[string]string) {
 	if d.probe.dmUUID != "" {
 		d.env["DM_UUID"] = d.probe.dmUUID
 	}
-	dmDisk(d)
 	runRules(s.t, s.ours["59"], d, s.classify, parent)
 	persistentStorage(d)
+	persistentStorageDM(d)
 	runRules(s.t, s.ours["61"], d, s.classify, parent)
+	assembly(d)
 	uaccess(d)
 	runRules(s.t, s.ours["72"], d, s.classify, parent)
 	systemdReady(d)
 }
 
+// hidden: the host-disk outcome. A dm device keeps the links
+// 60-persistent-storage-dm made (ASSUMPTIONS H8); nothing else does.
 func hidden(d *udevDev) bool {
 	return d.env["SYSTEMD_READY"] == "0" && d.env["UDISKS_IGNORE"] == "1" && d.env["UDISKS_AUTO"] == "0" &&
-		d.env["ID_FS_TYPE"] == "" && d.env["ID_FS_USAGE"] == "" && d.env["ID_FS_LABEL"] == "" && len(d.links) == 0 &&
+		d.env["ID_FS_TYPE"] == "agentos_held" && d.env["ID_FS_USAGE"] == "" && d.env["ID_FS_LABEL"] == "" &&
+		(len(d.links) == 0 || strings.HasPrefix(d.kernel, "dm-")) && len(d.written) == 0 &&
 		d.owner == "root" && d.group == "root" && d.mode == "0600" &&
 		d.locked["OWNER"] && d.locked["GROUP"] && d.locked["MODE"] && !d.tags["uaccess"]
 }
@@ -256,7 +283,8 @@ func outcomeOf(d *udevDev) outcome {
 	switch {
 	case hidden(d):
 		return hiddenFully
-	case d.env["UDISKS_IGNORE"] == "1" && d.env["UDISKS_AUTO"] == "0" && d.env["SYSTEMD_READY"] == "" && d.group == "disk":
+	case d.env["UDISKS_IGNORE"] == "1" && d.env["UDISKS_AUTO"] == "0" && d.env["SYSTEMD_READY"] == "" && d.group == "disk" &&
+		len(d.written) == 0 && !d.tags["uaccess"]:
 		return keptFromUdisks
 	case d.env["UDISKS_IGNORE"] == "" && d.env["SYSTEMD_READY"] == "" && d.group == "disk" && d.env["ID_FS_TYPE"] == d.probe.fsType:
 		return untouched
@@ -330,23 +358,40 @@ func TestUdevRuleHidesHostDisks(t *testing.T) {
 		}
 	}
 
-	// Security F1 on #172: an unknown disk holding a RAID or LVM member
-	// is not assembled (a degraded array's resync would write it), and its
-	// .device unit stays so the box still boots.
+	// Security F1 and L3 on #172: a RAID, LVM or bcache member on an unknown
+	// or host disk is neither assembled nor registered (a resync, an
+	// activation or a journal replay would write it); the type is held,
+	// never left empty, since bcache-tools probes and registers a device
+	// with no type. An unknown disk's .device unit stays so the box still
+	// boots.
 	for _, typ := range []string{"linux_raid_member", "LVM2_member", "isw_raid_member", "ddf_raid_member", "bcache", "zfs_member"} {
-		d := blockDev("sde", "disk")
-		d.probe.fsType, d.probe.fsUsage = typ, "raid"
-		s.run(d, nil)
-		if d.env["ID_FS_TYPE"] != "" || d.env["ID_FS_USAGE"] != "" || outcomeOf(d) != keptFromUdisks {
-			t.Errorf("unknown %s member: %+v", typ, d)
+		for _, c := range []struct {
+			kernel string
+			want   outcome
+		}{{"sde", keptFromUdisks}, {"sdb", hiddenFully}, {"dm-2", keptFromUdisks}, {"dm-1", hiddenFully}} {
+			d := blockDev(c.kernel, "disk")
+			d.probe.fsType, d.probe.fsUsage = typ, "raid"
+			s.run(d, nil)
+			if d.env["ID_FS_TYPE"] != "agentos_held" || len(d.written) != 0 || outcomeOf(d) != c.want {
+				t.Errorf("%s %s member: %v %+v", c.kernel, typ, outcomeOf(d), d)
+			}
 		}
 	}
 	// The drive's own members are left for the stock rules.
 	d := blockDev("sda", "disk")
 	d.probe.fsType, d.probe.fsUsage = "LVM2_member", "raid"
 	s.run(d, nil)
-	if d.env["ID_FS_TYPE"] != "LVM2_member" {
+	if d.env["ID_FS_TYPE"] != "LVM2_member" || len(d.written) != 1 {
 		t.Errorf("drive LVM member: %+v", d)
+	}
+	// The model itself: with no type, bcache-tools finds and registers a
+	// bcache device.
+	ctl := blockDev("loop0", "disk")
+	ctl.probe.fsType = "bcache"
+	ctl.env["ID_FS_TYPE"] = ""
+	assembly(ctl)
+	if len(ctl.written) != 1 {
+		t.Errorf("bcache control: %+v", ctl)
 	}
 
 	// A remove event and a non-block device are untouched.
@@ -370,11 +415,13 @@ func TestUdevRuleHidesHostDisks(t *testing.T) {
 func TestUdevRuleUnknownVerityStaysReady(t *testing.T) {
 	s := newUdevStack(t, testClassify(t))
 	for _, uuid := range []string{"CRYPT-VERITY-0123456789abcdef-root", "CRYPT-LUKS2-0123456789abcdef-home"} {
-		d := blockDev("dm-2", "disk")
-		d.probe = udevProbe{fsType: "erofs", fsUsage: "filesystem", dmUUID: uuid}
-		s.run(d, nil)
-		if d.env["ID_FS_USAGE"] != "filesystem" || d.env["SYSTEMD_READY"] != "" || outcomeOf(d) != keptFromUdisks {
-			t.Errorf("unknown %s: %+v", uuid, d)
+		for _, fs := range [][2]string{{"erofs", "filesystem"}, {"LVM2_member", "raid"}, {"linux_raid_member", "raid"}} {
+			d := blockDev("dm-2", "disk")
+			d.probe = udevProbe{fsType: fs[0], fsUsage: fs[1], dmUUID: uuid}
+			s.run(d, nil)
+			if d.env["ID_FS_USAGE"] != fs[1] || d.env["SYSTEMD_READY"] != "" || outcomeOf(d) != keptFromUdisks {
+				t.Errorf("unknown %s holding %s: %+v", uuid, fs[0], d)
+			}
 		}
 	}
 	// The model itself: a CRYPT device with no file system result is not ready.
@@ -403,18 +450,15 @@ func TestUdevRuleClosesGenericNodes(t *testing.T) {
 			t.Errorf("%s: %+v", c.kernel, d)
 		}
 	}
-	// The drive's own optical drive (none ships, but the rule must not
-	// reach past host) keeps the stock tag; a host one loses it.
-	for kernel, want := range map[string]bool{"sr0": false, "sr1": true} {
+	// Only the drive's own optical drive (none ships, but the rule must
+	// not reach past host and unknown) keeps the stock tag.
+	for kernel, cls := range map[string]string{"sr0": "host", "sr1": "drive", "sr2": "unknown", "sr3": ""} {
 		d := blockDev(kernel, "disk")
 		d.probe.cdrom = true
-		classify := testClassify(t)
-		if want {
-			classify = func(string) string { return "AGENTOS_DISK=drive\n" }
-		}
+		classify := func(string) string { return "AGENTOS_DISK=" + cls + "\n" }
 		newUdevStack(t, classify).run(d, nil)
-		if d.tags["uaccess"] != want {
-			t.Errorf("%s uaccess %v, want %v", kernel, d.tags["uaccess"], want)
+		if d.tags["uaccess"] != (cls == "drive") {
+			t.Errorf("%s (%q) uaccess %v", kernel, cls, d.tags["uaccess"])
 		}
 	}
 }

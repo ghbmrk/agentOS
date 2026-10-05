@@ -10,9 +10,10 @@
 #            partition systemd-boot booted from: left alone;
 #   host     every other disk, removable media included: hidden, below;
 #   unknown  no answer (no single root disk, the helper failed or printed
-#            anything else): kept from udisks here and from RAID/LVM assembly
-#            in the 61 file, but its .device unit stays, so the box still
-#            boots (its own dm-verity and dm-crypt devices included).
+#            anything else): kept from udisks here and from RAID, LVM and
+#            bcache assembly in the 61 file, but its .device unit stays, so
+#            the box still boots (its own dm-verity and dm-crypt devices
+#            included).
 # A hidden disk or partition:
 #   UDEV_DISABLE_PERSISTENT_STORAGE_RULES_FLAG
 #                       60-persistent-storage skips it: blkid never probes it,
@@ -22,11 +23,11 @@
 #   SYSTEMD_READY=0     no .device unit becomes active, so no .mount or .swap
 #                       unit (fstab, a generator, a dependency) can use it;
 #   UDISKS_*            udisks never offers, automounts or shows it;
-#   ID_FS_TYPE/USAGE    cleared for a dm device, which 13-dm-disk probed
-#                       before this file;
+#   ID_FS_TYPE          set to a sentinel by the 61 file, so no assembly or
+#                       bcache rule acts on it;
 #   root:root 0600      no other uid (services, agent machines, executors)
 #                       can open the node (":=" so no later rule widens it;
-#                       the 72 file strips the uaccess tag 70-uaccess re-adds).
+#                       the 72 file strips the uaccess tag 70-uaccess adds).
 #
 # Numbered 59: before 60-persistent-storage, which honors the flag.
 
@@ -43,6 +44,6 @@ ENV{UDISKS_IGNORE}="1", ENV{UDISKS_AUTO}="0"
 GOTO="agentos_host_disks_end"
 
 LABEL="agentos_host_disk"
-ENV{UDEV_DISABLE_PERSISTENT_STORAGE_RULES_FLAG}="1", ENV{SYSTEMD_READY}="0", ENV{UDISKS_IGNORE}="1", ENV{UDISKS_AUTO}="0", ENV{UDISKS_SYSTEM}="1", ENV{ID_FS_TYPE}="", ENV{ID_FS_USAGE}="", OWNER:="root", GROUP:="root", MODE:="0600", TAG-="uaccess"
+ENV{UDEV_DISABLE_PERSISTENT_STORAGE_RULES_FLAG}="1", ENV{SYSTEMD_READY}="0", ENV{UDISKS_IGNORE}="1", ENV{UDISKS_AUTO}="0", ENV{UDISKS_SYSTEM}="1", OWNER:="root", GROUP:="root", MODE:="0600"
 
 LABEL="agentos_host_disks_end"

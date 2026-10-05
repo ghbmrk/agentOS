@@ -193,13 +193,16 @@ func TestProbeAmbiguousTables(t *testing.T) {
 // An MBR partition reaching past the disk, or starting past it, is listed
 // and flags the disk partly unreadable.
 func TestProbeMBROutOfRange(t *testing.T) {
-	for _, p := range []tpart{{mbr: 0x07, start: 100, n: 29}, {mbr: 0x07, start: 128, n: 4}} {
-		d := probeBytes(t, mbrDisk(128, []tpart{p}), 512)
-		if len(d.Partitions) != 1 || d.Problem != ProblemPartial || !d.NeedsSecondConfirm() {
-			t.Errorf("%+v: %+v", p, d)
+	for _, c := range []struct {
+		p    tpart
+		size int64
+	}{{tpart{mbr: 0x07, start: 100, n: 29}, 28 * 512}, {tpart{mbr: 0x07, start: 100, n: 1 << 30}, 28 * 512}, {tpart{mbr: 0x07, start: 128, n: 4}, 0}} {
+		d := probeBytes(t, mbrDisk(128, []tpart{c.p}), 512)
+		if len(d.Partitions) != 1 || d.Partitions[0].Size != c.size || d.Problem != ProblemPartial || !d.NeedsSecondConfirm() {
+			t.Errorf("%+v: %+v", c.p, d)
 		}
 	}
-	if d := probeBytes(t, mbrDisk(128, []tpart{{mbr: 0x07, start: 100, n: 28}}), 512); d.Problem != ProblemNone {
+	if d := probeBytes(t, mbrDisk(128, []tpart{{mbr: 0x07, start: 100, n: 28}}), 512); d.Problem != ProblemNone || d.Partitions[0].Size != 28*512 {
 		t.Errorf("last sector: %+v", d)
 	}
 }
