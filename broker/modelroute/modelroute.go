@@ -187,6 +187,10 @@ func forward(cfg Config) func(machine string, eval bool, rule []byte) http.Handl
 			},
 			ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 				logf("model route %s: vault process: %v", machine, err)
+				// No response came back, so nothing a provider produced
+				// reaches the guest; the meter must not charge this page
+				// as output (OP-8 counts content, not the broker's text).
+				meter.Report(r.Context(), meter.Usage{NoResponse: true})
 				http.Error(w, "model egress unavailable", http.StatusServiceUnavailable)
 			},
 		}

@@ -140,6 +140,26 @@ func TestVaultProcessDownIs503(t *testing.T) {
 	}
 }
 
+// A metered call the vault process never answers is charged its input
+// estimate only: the 503 page the guest gets is the broker's, not model
+// output (OP-8).
+func TestUnansweredCallChargesNoOutput(t *testing.T) {
+	fwd := Forward(Config{Socket: filepath.Join(t.TempDir(), "absent.sock"), Label: func(string) string { return "public" }, Denied: func(string, Denial) {}})
+	m, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "meter.json"), MachineCap: meter.Limits{Calls: 10, Tokens: 1 << 30}, OverallCap: meter.Limits{Calls: 10, Tokens: 1 << 30}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const body = `{"model":"default","max_tokens":100}`
+	w := httptest.NewRecorder()
+	m.Wrap("m1", fwd("m1")).ServeHTTP(w, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("got %d", w.Code)
+	}
+	if u, want := m.Usage("m1"), meter.Tokens(int64(len(body))); u.Tokens != want || u.Calls != 1 {
+		t.Fatalf("charged %d tokens and %d calls, want %d and 1", u.Tokens, u.Calls, want)
+	}
+}
+
 // Token streams keep flowing: each chunk the vault process flushes reaches
 // the guest before the response ends.
 func TestStreamsAreFlushed(t *testing.T) {

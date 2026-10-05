@@ -15,12 +15,16 @@ import (
 // writes, and output; Reported says the provider gave the counts, Complete
 // that the response ended normally, OutputChars the content, argument,
 // and reasoning characters the provider produced. Provider names the
-// egress adapter, which sets the cache weights.
+// egress adapter, which sets the cache weights. NoResponse says the
+// egress never answered and the handler wrote only its own error page:
+// no provider output reached the guest, so the call is charged its input
+// estimate and no output.
 type Usage struct {
 	Provider                             string
 	Input, Output, CacheRead, CacheWrite int64
 	Reported, Complete                   bool
 	OutputChars                          int64
+	NoResponse                           bool
 }
 
 type reportKey struct{}
@@ -192,8 +196,13 @@ func (u *usageWriter) line(l []byte) {
 // in, the request estimate. A body that could not be read (too large, or
 // not the JSON it claimed to be) is charged by its size. A report from
 // the serving handler (rep) takes the place of what the broker read from
-// the response.
+// the response. A call the egress never answered (rep.NoResponse) is
+// charged its input estimate only: the broker's own error page is not
+// model output.
 func (u *usageWriter) used(in int64, rep *Usage) int64 {
+	if rep != nil && rep.NoResponse {
+		return in
+	}
 	complete := false
 	switch u.mode {
 	case 1:

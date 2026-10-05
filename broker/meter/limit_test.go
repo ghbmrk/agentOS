@@ -175,3 +175,33 @@ func TestOP8ServerReportedUsageSettlesTheCall(t *testing.T) {
 		}
 	}
 }
+
+// TestOP8NoResponseChargesInputOnly: when the egress never answers, the
+// serving handler writes its own error page and reports NoResponse; the
+// call is charged its input estimate and no output for that page.
+func TestOP8NoResponseChargesInputOnly(t *testing.T) {
+	body := `{"messages":[]}`
+	est := Tokens(int64(len(body)))
+	page := "model egress unavailable\n"
+	for _, tc := range []struct {
+		name   string
+		report bool
+		want   int64
+	}{
+		{"reported", true, est},
+		// Without the report the page is an unreadable body, charged by size.
+		{"unreported", false, est + Tokens(int64(len(page)))},
+	} {
+		m, _, _ := open(t, Config{MachineCap: Limits{Calls: 10, Tokens: 1 << 30}, OverallCap: big})
+		h := m.Wrap("m1", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if tc.report {
+				Report(r.Context(), Usage{NoResponse: true})
+			}
+			http.Error(w, strings.TrimSuffix(page, "\n"), http.StatusServiceUnavailable)
+		}))
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/", strings.NewReader(body)))
+		if u := m.Usage("m1"); u.Tokens != tc.want || u.Calls != 1 {
+			t.Errorf("%s: charged %d tokens and %d calls, want %d and 1", tc.name, u.Tokens, u.Calls, tc.want)
+		}
+	}
+}
