@@ -111,6 +111,17 @@ type passphrase []byte
 
 func (passphrase) Kind() string { return SlotPassphrase }
 
+func (p passphrase) wipe() { wipe(p) }
+
+// wipeFactor clears a factor's secret bytes once the call that took it is
+// done, where the factor holds any (the normalized passphrase). Callers
+// pass a fresh factor for each call.
+func wipeFactor(f Factor) {
+	if w, ok := f.(interface{ wipe() }); ok {
+		w.wipe()
+	}
+}
+
 func (p passphrase) Enroll() (Slot, []byte, error) {
 	if len(p) < MinPassphraseLen {
 		return Slot{}, nil, fmt.Errorf("vault: passphrase shorter than %d characters", MinPassphraseLen)
@@ -140,12 +151,11 @@ func (p passphrase) KEK(s Slot) ([]byte, error) {
 }
 
 // normalize lowercases the passphrase and joins its words with single
-// spaces, treating runs of whitespace and hyphens as one separator.
+// spaces: card.NormalizePassphrase's canonical form (P2-2), so the card
+// and the slot agree on what a scanned or typed passphrase is. Hyphens are
+// kept; they belong to some word-list entries.
 func normalize(p string) []byte {
-	words := strings.FieldsFunc(strings.ToLower(p), func(r rune) bool {
-		return r == '-' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
-	})
-	return []byte(strings.Join(words, " "))
+	return []byte(strings.Join(strings.Fields(strings.ToLower(p)), " "))
 }
 
 type keyFile struct {
@@ -229,6 +239,7 @@ func wrap(f Factor, key []byte) (Slot, error) {
 // data key, and a keys file at keysPath with one slot for f. It refuses to
 // replace either file. The data key is wiped before it returns.
 func CreateSealed(vaultPath, keysPath string, f Factor) (*Vault, error) {
+	defer wipeFactor(f)
 	if _, err := os.Lstat(keysPath); err == nil {
 		return nil, errors.New("vault: keys file already exists")
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -256,8 +267,10 @@ func CreateSealed(vaultPath, keysPath string, f Factor) (*Vault, error) {
 }
 
 // OpenSealed unwraps the data key with f and opens the vault. The data key
-// is wiped before it returns; the open vault keeps only its cipher.
+// and the factor's secret bytes are wiped before it returns; the open vault
+// keeps only its cipher.
 func OpenSealed(vaultPath, keysPath string, f Factor) (*Vault, error) {
+	defer wipeFactor(f)
 	kf, err := readKeys(keysPath)
 	if err != nil {
 		return nil, err
@@ -275,6 +288,8 @@ func OpenSealed(vaultPath, keysPath string, f Factor) (*Vault, error) {
 // copy of the keys file taken earlier still opens with what it held
 // (CRED-8: replacement protects only against later copies).
 func Rekey(keysPath string, have, next Factor) error {
+	defer wipeFactor(have)
+	defer wipeFactor(next)
 	kf, err := readKeys(keysPath)
 	if err != nil {
 		return err

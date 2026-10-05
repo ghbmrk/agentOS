@@ -77,18 +77,11 @@ func unlockHandler(c *custody) http.Handler {
 		json.NewEncoder(w).Encode(v)
 	}
 	fail := func(w http.ResponseWriter, err error) {
-		code := http.StatusForbidden
-		switch err {
-		case errBusy, errNotPending, errLocked, errUnlockCancelled:
-			code = http.StatusConflict
-		case errTooManyWrong:
-			code = http.StatusTooManyRequests
-		case errBadCredential:
-			code = http.StatusBadRequest
-		case errInternal:
-			code = http.StatusInternalServerError
+		var ue *unlockErr
+		if !errors.As(err, &ue) {
+			ue = errInternal
 		}
-		reply(w, code, map[string]string{"error": err.Error()})
+		reply(w, ue.status, map[string]string{"error": ue.msg})
 	}
 	read := func(w http.ResponseWriter, r *http.Request, v any) bool {
 		if r.Method != http.MethodPost {
@@ -117,20 +110,23 @@ func unlockHandler(c *custody) http.Handler {
 		if !read(w, r, &req) {
 			return
 		}
-		if err := c.unlock(req.Passphrase); err != nil {
+		ticket, err := c.unlock(req.Passphrase)
+		if err != nil {
 			fail(w, err)
 			return
 		}
-		status(w)
+		_, exp := c.status()
+		reply(w, http.StatusOK, map[string]any{"state": pending.String(), "expires": exp.UTC().Format(time.RFC3339), "ticket": ticket})
 	})
 	mux.HandleFunc("/confirm", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Code string `json:"code"`
+			Ticket string `json:"ticket"`
+			Code   string `json:"code"`
 		}
 		if !read(w, r, &req) {
 			return
 		}
-		if err := c.confirm(req.Code); err != nil {
+		if err := c.confirm(req.Ticket, req.Code); err != nil {
 			fail(w, err)
 			return
 		}

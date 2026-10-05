@@ -21,8 +21,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/vault"
 )
 
-// REQ: CRED-8, CRED-1, CRED-5, CRED-7, ADP-10, REV-5
-// SPEC v0.12 IDs (PR #15; move into REQ when it merges): ARC-6
+// REQ: CRED-8, CRED-1, CRED-5, CRED-7, ADP-10, REV-5, ARC-6
 
 // TestUnknownHostUnlockThenModelRoute is the P2-4a chain on one host:
 // `init` seals a vault under a generated passphrase, the vault process
@@ -62,14 +61,18 @@ func TestUnknownHostUnlockThenModelRoute(t *testing.T) {
 	}
 
 	clk := &clock{t: time.Now()}
-	c := &custody{
-		open: func(p string) (*vault.Vault, error) { return vault.OpenSealed(vp, kp, vault.Passphrase(p)) },
+	c, err := newCustody(&custody{
+		statePath: filepath.Join(dir, "state", "unlock.json"),
+		open:      func(p string) (*vault.Vault, error) { return vault.OpenSealed(vp, kp, vault.Passphrase(p)) },
 		build: func(v *vault.Vault) (*egress.Proxy, error) {
 			return newProxy(v, map[string][]string{"agent": {"openai"}}, tr)
 		},
 		ttl:    15 * time.Minute,
 		now:    clk.now,
 		notify: func(string) {},
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 	defer c.lock()
 	run := filepath.Join(dir, "run")
@@ -108,13 +111,22 @@ func TestUnknownHostUnlockThenModelRoute(t *testing.T) {
 	if _, code, _ := post(ui, "/unlock", map[string]string{"passphrase": "wrong " + pass}); code != http.StatusForbidden {
 		t.Fatalf("wrong passphrase: %d", code)
 	}
-	if res, code, err := post(ui, "/unlock", map[string]string{"passphrase": strings.ToUpper(pass)}); err != nil || code != 200 || res["state"] != "pending" {
+	if _, code, _ := post(ui, "/unlock", map[string]string{"passphrase": pass}); code != http.StatusTooManyRequests {
+		t.Fatalf("attempt inside the gap: %d", code)
+	}
+	clk.add(MinAttemptGap)
+	res, code, err := post(ui, "/unlock", map[string]string{"passphrase": strings.ToUpper(pass)})
+	if err != nil || code != 200 || res["state"] != "pending" {
 		t.Fatalf("unlock: %v %d %v", res, code, err)
 	}
+	ticket, _ := res["ticket"].(string)
 	if w := ask("/openai/v1/chat/completions"); w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("passphrase alone opened the route: %d", w.Code)
 	}
-	if res, code, _ := post(ui, "/confirm", map[string]string{"code": totp(seed, clk.now())}); code != 200 || res["state"] != "open" {
+	if res, code, _ := post(ui, "/confirm", map[string]string{"ticket": ticket, "code": "000000"}); code != http.StatusForbidden || res["error"] != "wrong code; 2 tries left" {
+		t.Fatalf("wrong code: %v %d", res, code)
+	}
+	if res, code, _ := post(ui, "/confirm", map[string]string{"ticket": ticket, "code": totp(seed, clk.now())}); code != 200 || res["state"] != "open" {
 		t.Fatalf("confirm: %v %d", res, code)
 	}
 
@@ -166,7 +178,7 @@ func readCard(t *testing.T, card string) (string, []byte) {
 	if pass == "" || err != nil || len(seed) != 20 {
 		t.Fatalf("card: %q", card)
 	}
-	if n := len(strings.ReplaceAll(pass, "-", "")); n != 20 {
+	if n := len(strings.ReplaceAll(pass, " ", "")); n != 20 {
 		t.Fatalf("passphrase has %d characters, want 20 (100 bits)", n)
 	}
 	return pass, seed

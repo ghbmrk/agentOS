@@ -853,6 +853,9 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 		return Snapshot{}, fmt.Errorf("%s: fork(%d): %w", id, n, err)
 	}
 	defer h.release()
+	src.mu.Lock()
+	prevLast := src.Last
+	src.mu.Unlock()
 	s, err := m.take(ctx, id, Full)
 	if err != nil {
 		undo()
@@ -864,6 +867,9 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 		err = h.grow(n*v.Bytes - h.n)
 	}
 	if err != nil {
+		// No fork will use the checkpoint, so it goes too: a refused fork
+		// leaves nothing behind.
+		m.dropSnapshot(src, s.ID, prevLast)
 		undo()
 		return Snapshot{}, fmt.Errorf("%s: fork(%d): %w", id, n, err)
 	}
@@ -889,6 +895,21 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 		}
 	}
 	return s, nil
+}
+
+// dropSnapshot deletes snapshot id, just taken of mc, that nothing uses;
+// mc's newest snapshot goes back to prev.
+func (m *Manager) dropSnapshot(mc *machine, id, prev string) {
+	m.mu.Lock()
+	delete(m.snaps, id)
+	m.mu.Unlock()
+	os.RemoveAll(m.snapDir(id))
+	mc.mu.Lock()
+	if mc.Last == id {
+		mc.Last = prev
+		m.saveMachine(mc)
+	}
+	mc.mu.Unlock()
 }
 
 // Diff lists file-system changes from snapshot a to snapshot b (REV-4).
