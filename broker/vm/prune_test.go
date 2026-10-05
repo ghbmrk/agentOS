@@ -151,3 +151,25 @@ func TestRES4PressurePrunesDownToTheEssentials(t *testing.T) {
 		t.Fatalf("under pressure kept %v, want the template and the newest", ids(left))
 	}
 }
+
+// A symlink inside a pruned snapshot is removed, never followed: what it
+// points at outside the state directory survives.
+func TestRES4PruneDoesNotFollowSymlinks(t *testing.T) {
+	e := pruneEnv(t)
+	e.create("tmp", admission.Experiment, 100)
+	s, err := e.m.Step(bg, "tmp")
+	must(t, err)
+	outside := filepath.Join(t.TempDir(), "keep")
+	must(t, os.MkdirAll(outside, 0o755))
+	must(t, os.WriteFile(filepath.Join(outside, "f"), []byte("x"), 0o644))
+	must(t, os.Symlink(outside, filepath.Join(e.cfg.StateDir, "snapshots", s.ID, "link")))
+	must(t, e.m.Destroy(bg, "tmp"))
+	gone, err := e.m.Prune(PrunePolicy{})
+	must(t, err)
+	if len(gone) != 1 {
+		t.Fatalf("pruned %v, want %s", gone, s.ID)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "f")); err != nil {
+		t.Fatalf("prune followed a symlink: %v", err)
+	}
+}

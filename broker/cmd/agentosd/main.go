@@ -132,10 +132,11 @@ func (l *lateAgent) Deliver(ctx context.Context, text string, public bool) error
 func main() {
 	var cfg daemon.Config
 	imgs := images{}
-	var stateDir, runsc, cgroupParent, cgroupRoot, accelMode, meterPath, agentMachine, inboxPath, egressSocket, verifySocket string
+	var stateDir, runsc, cgroupRoot, accelMode, meterPath, agentMachine, inboxPath, egressSocket, verifySocket string
 	var agentImage, agentLaunch string
 	var diskReserveMB, agentMemMB, replayMemMB int64
 	var learn learnPaths
+	var cgroupVouched bool
 	floor := budget.Floor()
 	flag.StringVar(&cfg.JournalPath, "journal", "/var/lib/agentos/journal.log", "journal file")
 	flag.StringVar(&cfg.SocketDir, "sockets", "/run/agentos", "socket directory (created 0700)")
@@ -146,12 +147,12 @@ func main() {
 	flag.Int64Var(&floor.HostMB, "host-mb", floor.HostMB, "budget: host image, broker and journal (protected), MB (RES-2)")
 	flag.Int64Var(&floor.InferenceMB, "inference-mb", floor.InferenceMB, "budget: local inference, MB (RES-2)")
 	flag.Int64Var(&floor.BrowserMB, "browser-mb", floor.BrowserMB, "budget: one credentialed browser, MB (RES-2)")
-	flag.StringVar(&cgroupRoot, "cgroup-root", "/sys/fs/cgroup/agentos.slice", "cgroup v2 group for the broker's components (RES-2); empty uses -cgroup alone")
+	flag.StringVar(&cgroupRoot, "cgroup-root", "", "cgroup v2 group for the broker's components (RES-2): its own group or below; empty is the broker's own group")
+	flag.BoolVar(&cgroupVouched, "cgroup-delegated", false, "-cgroup-root is delegated to the broker (without it, systemd's delegate mark is required)")
 	flag.StringVar(&accelMode, "accel", "auto", "accelerator discovery: auto or off (RES-3)")
 	flag.Float64Var(&cfg.MaxPressure, "max-pressure", 10, "memory PSI (some avg10, %) above which only foreground is admitted")
 	flag.StringVar(&stateDir, "machines", "/var/lib/agentos/machines", "agent-machine layers and snapshots (created 0700)")
 	flag.StringVar(&runsc, "runsc", "", "gVisor runsc binary; empty runs no agent machines")
-	flag.StringVar(&cgroupParent, "cgroup", "/sys/fs/cgroup/agentos.slice/machines", "cgroup v2 parent for agent machines")
 	flag.Int64Var(&diskReserveMB, "disk-reserve-mb", budget.FloorDisk().ReserveBytes()>>20, "state-disk space snapshots never use (RES-4 reserve), MB")
 	flag.Var(imgs, "image", "agent-machine image, name=dir (repeatable)")
 	flag.StringVar(&meterPath, "meter", "/var/lib/agentos/meter.json", "model-spend meter state (OP-8)")
@@ -200,13 +201,19 @@ func main() {
 
 	// The machine plane failing must not take the owner channel down with
 	// it: STOP and STATUS keep working, and no machines run.
+	// Without a delegated group no machine may start: none runs outside
+	// its budget (RES-2), and STATUS says why.
 	var cg *cgroup.Group
 	psiPath := "/proc/pressure/memory"
+	agentOff := mem.AgentOff
 	if runsc != "" {
-		g, err := openPool(cgroupRoot, cgroupParent, mem.Budget)
+		g, err := openMachines(liveCgroups, cgroupRoot, cgroupVouched, mem.Budget)
 		if err != nil {
 			log.Printf("agent machines disabled: %v", err)
 			runsc = ""
+			if agentOff == "" {
+				agentOff = agentNoMemControls
+			}
 		} else {
 			cg, psiPath = g, filepath.Join(g.Path, "memory.pressure")
 		}
@@ -228,7 +235,7 @@ func main() {
 	cfg.Agent = agent
 	// Until the keeper runs, STATUS says the agent is not set up; it says
 	// so for good if the machine plane or the agent's setup fails.
-	agentStatus := &lateStatus{off: mem.AgentOff}
+	agentStatus := &lateStatus{off: agentOff}
 	cfg.AgentStatus = agentStatus.Status
 	// The code-generator seed lives in the vault, which only the vault
 	// process holds (P2-4a); the channel asks it to check high-tier codes
@@ -456,14 +463,11 @@ func agentSpec(imgs images, image, launch string, memMB int64) (vm.Spec, error) 
 
 // openPool applies the component budget under root and returns the
 // machine pool's group, with the broker in its protected group (budget
-// R3). With no root, machines go under parent with no component groups.
+// R3). root must already be checked as delegated (openMachines).
 // The broker moves first: cgroup v2 will not enable controllers for the
 // children of a group that still holds a process (systemd Delegate=yes
 // starts the broker in root itself).
-func openPool(root, parent string, mem budget.Memory) (*cgroup.Group, error) {
-	if root == "" {
-		return openCgroup(parent)
-	}
+func openPool(root string, mem budget.Memory) (*cgroup.Group, error) {
 	b := &cgroup.Group{Path: filepath.Join(root, "broker")}
 	if err := os.MkdirAll(b.Path, 0o755); err != nil {
 		return nil, err
@@ -480,13 +484,6 @@ func openPool(root, parent string, mem budget.Memory) (*cgroup.Group, error) {
 		return nil, err
 	}
 	return gs.Machines, nil
-}
-
-func openCgroup(path string) (*cgroup.Group, error) {
-	if err := os.MkdirAll(path, 0o755); err != nil {
-		return nil, err
-	}
-	return cgroup.Open(path)
 }
 
 // openGuestPlane opens the OP-8 meter and the guest plane (ARC-6) over the

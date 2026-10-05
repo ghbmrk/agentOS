@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -1331,9 +1332,10 @@ func (m *Manager) Preempt(id string) error {
 		defer mc.mu.Unlock()
 		return m.preemptLocked(mc)
 	}
-	if err := m.kill(mc); err != nil {
-		return err
-	}
+	// The completion is scheduled even if the kill fails: once the holding
+	// operation lets go, the machine is stopped under its lock and
+	// recorded preempted, and preempting is cleared (L3 on #124).
+	kerr := m.kill(mc)
 	go func() {
 		mc.mu.Lock()
 		defer mc.mu.Unlock()
@@ -1341,7 +1343,7 @@ func (m *Manager) Preempt(id string) error {
 			log.Printf("vm: %s: finishing preemption: %v", mc.ID, err)
 		}
 	}()
-	return nil
+	return kerr
 }
 
 // preemptLocked stops mc and records it as preempted. Called with mc.mu
@@ -1374,8 +1376,10 @@ func (m *Manager) kill(mc *machine) error {
 	if l.Cgroup == "" {
 		return m.cfg.Runtime.Kill(ctx, l)
 	}
-	if _, err := os.Stat(l.Cgroup); err != nil {
+	if _, err := os.Stat(l.Cgroup); errors.Is(err, fs.ErrNotExist) {
 		return nil // never started: nothing holds memory
+	} else if err != nil {
+		return err // unknown: memory may still be held
 	}
 	return (&cgroup.Group{Path: l.Cgroup}).Kill(ctx)
 }

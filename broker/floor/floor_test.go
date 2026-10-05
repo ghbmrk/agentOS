@@ -1,5 +1,5 @@
 // Package floor measures resource admission on a host sized like the HW-4
-// floor box (N95, 8 GB): RES-1 preemption time against the frozen target,
+// floor box (N95, 8 GB): RES-1 preemption time against the provisional target,
 // and RES-2 admission against the declared budget, with every component
 // loaded. It needs root, cgroup v2 and runsc, so it runs only in CI's
 // machines job; elsewhere it skips.
@@ -29,8 +29,10 @@ import (
 
 // REQ: RES-1, RES-2
 
-// PreemptTarget is the frozen RES-1 target at the floor (DECISIONS.md):
-// from a foreground request to the experiment's memory being released.
+// PreemptTarget is the provisional RES-1 target at the floor: from a
+// foreground request to the experiment's memory being released. No
+// DECISIONS.md row freezes it yet; it is proposed for freezing once the
+// N95 run (A2) confirms it (budget R6).
 const PreemptTarget = time.Second
 
 // floorMiB is what an 8 GB N95 reports as MemTotal (firmware and the iGPU
@@ -207,7 +209,7 @@ func pct(ds []time.Duration, q float64) time.Duration {
 // (inference and browser hogs at their budgets, two OpenClaw-sized
 // experiments in the pool), then: a third experiment is refused before it
 // cuts into the headroom; a foreground machine preempts an experiment
-// within the frozen target, both idle and while the experiment is in the
+// within the provisional target, both idle and while the experiment is in the
 // middle of a full checkpoint; and nothing is OOM-killed.
 func TestFloorAdmissionAndPreemption(t *testing.T) {
 	r := newFloor(t)

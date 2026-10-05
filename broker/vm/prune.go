@@ -1,6 +1,7 @@
 package vm
 
 import (
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -86,7 +87,7 @@ func (m *Manager) Prune(p PrunePolicy) ([]string, error) {
 	}
 
 	cutoff := m.clock().Add(-p.MinAge)
-	var gone []string
+	var gone, dirs []string
 	var firstErr error
 	owners := make([]string, 0, len(byMachine))
 	for id := range byMachine {
@@ -126,33 +127,41 @@ func (m *Manager) Prune(p PrunePolicy) ([]string, error) {
 			if keep[s.ID] || forkBases[s.ID] || !s.Taken.Before(cutoff) {
 				continue
 			}
-			if err := m.deleteSnapshot(s.ID); err != nil {
+			if err := m.unpublishSnapshot(s.ID); err != nil {
 				if firstErr == nil {
 					firstErr = err
 				}
 				continue
 			}
 			gone = append(gone, s.ID)
+			dirs = append(dirs, m.snapDir(s.ID))
 		}
 		if mc != nil {
 			mc.mu.Unlock()
+		}
+	}
+	// The files go outside the machine's lock (L3 on #124): unpublished
+	// snapshots are found by no rollback, fork, or merge.
+	for _, dir := range dirs {
+		if err := os.RemoveAll(dir); err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
 	sort.Strings(gone)
 	return gone, firstErr
 }
 
-// deleteSnapshot unpublishes a snapshot (its record first, then its
-// metadata, so a crash leaves a directory that load drops) and deletes it.
-func (m *Manager) deleteSnapshot(id string) error {
+// unpublishSnapshot unpublishes a snapshot: its record first, then its
+// metadata, so a crash leaves a directory that load drops. The caller
+// deletes the directory.
+func (m *Manager) unpublishSnapshot(id string) error {
 	m.mu.Lock()
 	delete(m.snaps, id)
 	m.mu.Unlock()
-	dir := m.snapDir(id)
-	if err := os.Remove(filepath.Join(dir, "meta.json")); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(filepath.Join(m.snapDir(id), "meta.json")); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	return os.RemoveAll(dir)
+	return nil
 }
 
 // RunPruner prunes by p every interval until stop is closed.
@@ -160,7 +169,9 @@ func (m *Manager) RunPruner(p PrunePolicy, interval time.Duration, stop <-chan s
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
-		m.Prune(p)
+		if _, err := m.Prune(p); err != nil {
+			log.Printf("vm: pruning snapshots: %v", err)
+		}
 		select {
 		case <-stop:
 			return
