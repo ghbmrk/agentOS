@@ -1,6 +1,7 @@
 package update
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/x509"
 	"encoding/base64"
@@ -214,9 +215,15 @@ func Attest(priv ed25519.PrivateKey, v *Verified, st Statement) ([]byte, error) 
 
 // ParseAttestation checks an envelope's signature and returns its
 // statement and the attestor key. Envelope, signatures and statement are
-// decoded strictly: no unknown, duplicate or case-variant key. Hardware
-// and versions must have the schema's token shape; values this box's
-// schema does not list come back as attest.Unlisted (readStatement).
+// decoded strictly: no unknown, duplicate or case-variant key. The input
+// must also be canonical, exactly the bytes Attest would write for that
+// statement: one signature, its keyid the attestor's KeyID, the payload
+// json.Marshal of the statement, and the envelope json.Marshal of the
+// result, so whitespace, key order, escapes, base64 padding or line
+// breaks, and extra signatures cannot carry anything (OSS-4, security C1
+// on #73). Hardware and versions must have the schema's token shape;
+// values this box's schema does not list come back as attest.Unlisted
+// (readStatement).
 func ParseAttestation(b []byte) (Statement, ed25519.PublicKey, error) {
 	var env struct {
 		PayloadType string            `json:"payloadType"`
@@ -229,13 +236,12 @@ func ParseAttestation(b []byte) (Statement, ed25519.PublicKey, error) {
 	if env.PayloadType != AttestationType {
 		return Statement{}, nil, fmt.Errorf("payload type %q", env.PayloadType)
 	}
-	sigs := make([]envSignature, 0, len(env.Signatures))
-	for _, raw := range env.Signatures {
-		var sig envSignature
-		if err := decodeStrict(raw, &sig, signatureFields); err != nil {
-			return Statement{}, nil, fmt.Errorf("attestation signature: %w", err)
-		}
-		sigs = append(sigs, sig)
+	if len(env.Signatures) != 1 {
+		return Statement{}, nil, fmt.Errorf("attestation has %d signatures, not one", len(env.Signatures))
+	}
+	var sig envSignature
+	if err := decodeStrict(env.Signatures[0], &sig, signatureFields); err != nil {
+		return Statement{}, nil, fmt.Errorf("attestation signature: %w", err)
 	}
 	body, err := base64.StdEncoding.DecodeString(env.Payload)
 	if err != nil {
@@ -245,21 +251,34 @@ func ParseAttestation(b []byte) (Statement, ed25519.PublicKey, error) {
 	if err := decodeStrict(body, &st, statementFields); err != nil {
 		return Statement{}, nil, fmt.Errorf("attestation statement: %w", err)
 	}
+	raw, err := base64.StdEncoding.DecodeString(st.Attestor)
+	if err != nil || len(raw) != ed25519.PublicKeySize || base64.StdEncoding.EncodeToString(raw) != st.Attestor {
+		return Statement{}, nil, errors.New("attestor is not a canonical Ed25519 key")
+	}
+	pub := ed25519.PublicKey(raw)
+	sigRaw, err := base64.StdEncoding.DecodeString(sig.Sig)
+	if err != nil || !ed25519.Verify(pub, pae(env.PayloadType, body), sigRaw) {
+		return Statement{}, nil, errors.New("attestation signature does not verify")
+	}
+	if id, err := KeyID(pub); err != nil || sig.KeyID != id {
+		return Statement{}, nil, errors.New("attestation keyid is not the attestor's")
+	}
+	canon, err := json.Marshal(st)
+	if err != nil || !bytes.Equal(canon, body) {
+		return Statement{}, nil, errors.New("attestation statement is not canonical")
+	}
+	want, err := json.Marshal(envelope{
+		PayloadType: AttestationType,
+		Payload:     base64.StdEncoding.EncodeToString(body),
+		Signatures:  []envSignature{{KeyID: sig.KeyID, Sig: base64.StdEncoding.EncodeToString(sigRaw)}},
+	})
+	if err != nil || !bytes.Equal(want, b) {
+		return Statement{}, nil, errors.New("attestation envelope is not canonical")
+	}
 	if st, err = readStatement(st); err != nil {
 		return Statement{}, nil, fmt.Errorf("attestation statement: %w", err)
 	}
-	raw, err := base64.StdEncoding.DecodeString(st.Attestor)
-	if err != nil || len(raw) != ed25519.PublicKeySize {
-		return Statement{}, nil, errors.New("attestor is not an Ed25519 key")
-	}
-	pub := ed25519.PublicKey(raw)
-	for _, sig := range sigs {
-		raw, err := base64.StdEncoding.DecodeString(sig.Sig)
-		if err == nil && ed25519.Verify(pub, pae(env.PayloadType, body), raw) {
-			return st, pub, nil
-		}
-	}
-	return Statement{}, nil, errors.New("attestation signature does not verify")
+	return st, pub, nil
 }
 
 // passes calls f with the fingerprint and statement of each distinct

@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -214,9 +215,19 @@ func TestRotatedOutKeyStillNotIndependent(t *testing.T) {
 // envelopeOf signs body as a DSSE attestation without Attest's checks, so
 // tests can sign statements Attest would never write.
 func envelopeOf(k ed25519.PrivateKey, body string) []byte {
-	sig := base64.StdEncoding.EncodeToString(ed25519.Sign(k, pae(AttestationType, []byte(body))))
-	return []byte(`{"payloadType":"` + AttestationType + `","payload":"` + base64.StdEncoding.EncodeToString([]byte(body)) +
-		`","signatures":[{"keyid":"x","sig":"` + sig + `"}]}`)
+	id, _ := KeyID(k.Public())
+	b, _ := json.Marshal(envelope{
+		PayloadType: AttestationType,
+		Payload:     base64.StdEncoding.EncodeToString([]byte(body)),
+		Signatures:  []envSignature{{KeyID: id, Sig: base64.StdEncoding.EncodeToString(ed25519.Sign(k, pae(AttestationType, []byte(body))))}},
+	})
+	return b
+}
+
+// canonical is the canonical statement body Attest would sign for st.
+func canonical(st Statement) string {
+	b, _ := json.Marshal(st)
+	return string(b)
 }
 
 // Attestations decode strictly: a signed statement with a duplicate or
@@ -227,7 +238,8 @@ func TestStrictAttestations(t *testing.T) {
 	m := mustV(v.ManifestFile())
 	pub := base64.StdEncoding.EncodeToString(k.Public().(ed25519.PublicKey))
 	head := `{"release":"` + m.Path + `","manifest_sha256":"` + m.SHA256 + `","channel":"fast","hardware":{"vendor":"unlisted","model":"unlisted","firmware":"unlisted"},"attestor":"` + pub + `"`
-	good := envelopeOf(k, head+`,"result":"pass"}`)
+	unknown := attest.Hardware{Vendor: attest.Unlisted, Model: attest.Unlisted, Firmware: attest.Unlisted}
+	good := envelopeOf(k, canonical(Statement{Release: m.Path, ManifestSHA256: m.SHA256, Result: ResultPass, Channel: ChannelFast, Hardware: unknown, Attestor: pub}))
 	if v.IndependentPasses([][]byte{good}, nil) != 1 {
 		t.Fatal("fixture: the well-formed statement does not count")
 	}
@@ -476,17 +488,27 @@ func TestOSS4ParseRefusesStatementsOutsideTheSchema(t *testing.T) {
 	k := newKey(t)
 	pub := base64.StdEncoding.EncodeToString(k.Public().(ed25519.PublicKey))
 	sha := mustV(v.ManifestFile()).SHA256
+	// stmt signs a canonical statement edited as a map, so the edit, not
+	// key order, is what a refusal is about.
 	stmt := func(edit func(m map[string]any)) []byte {
-		m := map[string]any{
-			"release": "releases/2.json", "manifest_sha256": sha, "result": "pass", "channel": "fast",
-			"hardware": map[string]any{"vendor": "geekom", "model": "air12_lite", "firmware": "unlisted"},
-			"attestor": pub,
-		}
+		var m map[string]any
+		json.Unmarshal([]byte(canonical(Statement{Release: "releases/2.json", ManifestSHA256: sha, Result: ResultPass, Channel: ChannelFast, Hardware: floorPC, Attestor: pub})), &m)
 		if edit != nil {
 			edit(m)
 		}
-		b, _ := json.Marshal(m)
-		return envelopeOf(k, string(b))
+		// Re-encode in Statement's field order when the keys still fit it.
+		raw, _ := json.Marshal(m)
+		var st Statement
+		if err := decodeStrict(raw, &st, statementFields); err == nil {
+			if c := canonical(st); len(c) > 0 {
+				var back map[string]any
+				json.Unmarshal([]byte(c), &back)
+				if reflect.DeepEqual(back, m) {
+					return envelopeOf(k, c)
+				}
+			}
+		}
+		return envelopeOf(k, string(raw))
 	}
 	if _, _, err := ParseAttestation(stmt(nil)); err != nil {
 		t.Fatal(err)
@@ -538,13 +560,13 @@ func TestOSS4NewerSchemaStatementStillCounts(t *testing.T) {
 	f, v := securityFix(t)
 	k := f.att[0]
 	m := mustV(v.ManifestFile())
-	body, _ := json.Marshal(map[string]any{
-		"release": m.Path, "manifest_sha256": m.SHA256, "result": "pass", "channel": "fast",
-		"hardware": map[string]any{"vendor": "geekom", "model": "air12_lite", "firmware": "1.0.9"},
-		"versions": map[string]any{"openclaw": "2026.11.2", "kernel": "6.12.48"},
-		"attestor": base64.StdEncoding.EncodeToString(k.Public().(ed25519.PublicKey)),
+	body := canonical(Statement{
+		Release: m.Path, ManifestSHA256: m.SHA256, Result: ResultPass, Channel: ChannelFast,
+		Hardware: attest.Hardware{Vendor: "geekom", Model: "air12_lite", Firmware: "1.0.9"},
+		Versions: map[string]string{"openclaw": "2026.11.2", "kernel": "6.12.48"},
+		Attestor: base64.StdEncoding.EncodeToString(k.Public().(ed25519.PublicKey)),
 	})
-	b := envelopeOf(k, string(body))
+	b := envelopeOf(k, body)
 	st, _, err := ParseAttestation(b)
 	if err != nil {
 		t.Fatal(err)
@@ -561,5 +583,72 @@ func TestOSS4NewerSchemaStatementStillCounts(t *testing.T) {
 	// Signing stays strict: this box cannot write what its schema does not list.
 	if _, err := Attest(k, v, Statement{Result: ResultPass, Channel: ChannelFast, Hardware: st.Hardware, Versions: map[string]string{"openclaw": "2026.11.2"}}); err == nil {
 		t.Fatal("signed an unlisted version")
+	}
+}
+
+// TestOSS4OnlyCanonicalAttestationsParse (security C1 on #73): an
+// attestation parses only as the exact bytes Attest writes, so nothing
+// outside the statement's fields (extra signatures, keyids, whitespace,
+// key order, escapes, empty fields, base64 forms) can carry bits.
+func TestOSS4OnlyCanonicalAttestationsParse(t *testing.T) {
+	f, v := securityFix(t)
+	k := f.att[0]
+	good, err := Attest(k, v, Statement{Result: ResultPass, Channel: ChannelFast, Hardware: floorPC, Versions: map[string]string{"openclaw": "2026.9.8"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ParseAttestation(good); err != nil || v.IndependentPasses([][]byte{good}, nil) != 1 {
+		t.Fatal("fixture: Attest's own output does not parse and count", err)
+	}
+	var env envelope
+	if err := json.Unmarshal(good, &env); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := base64.StdEncoding.DecodeString(env.Payload)
+	sig := env.Signatures[0]
+	reenc := func(e envelope) []byte { b, _ := json.Marshal(e); return b }
+	resign := func(body string) []byte { return envelopeOf(k, body) }
+	other := newKey(t)
+	otherSig := base64.StdEncoding.EncodeToString(ed25519.Sign(other, pae(AttestationType, body)))
+	otherID, _ := KeyID(other.Public())
+	bs := string(body)
+	pubB64 := base64.StdEncoding.EncodeToString(k.Public().(ed25519.PublicKey))
+	// A non-canonical encoding of the same key: flip the unused low bits
+	// of the last base64 digit before the padding.
+	alphabet := "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+	last := strings.IndexByte(alphabet, pubB64[len(pubB64)-2])
+	altKey := pubB64[:len(pubB64)-2] + string(alphabet[last^1]) + "="
+	cases := map[string][]byte{
+		"second signature":  reenc(envelope{PayloadType: env.PayloadType, Payload: env.Payload, Signatures: []envSignature{sig, {KeyID: otherID, Sig: otherSig}}}),
+		"junk signature":    reenc(envelope{PayloadType: env.PayloadType, Payload: env.Payload, Signatures: []envSignature{sig, {KeyID: "x", Sig: "AAAA"}}}),
+		"no signature":      reenc(envelope{PayloadType: env.PayloadType, Payload: env.Payload, Signatures: []envSignature{}}),
+		"keyid free text":   reenc(envelope{PayloadType: env.PayloadType, Payload: env.Payload, Signatures: []envSignature{{KeyID: "hello", Sig: sig.Sig}}}),
+		"envelope spaces":   []byte(strings.Replace(string(good), `,"payload"`, `, "payload"`, 1)),
+		"envelope newline":  append(append([]byte{}, good...), '\n'),
+		"base64 line break": []byte(strings.Replace(string(good), env.Payload, env.Payload[:8]+`\r\n`+env.Payload[8:], 1)),
+		"body whitespace":   resign(strings.Replace(bs, `,"result"`, `, "result"`, 1)),
+		"body key order":    resign(strings.Replace(bs, `"result":"pass","channel":"fast"`, `"channel":"fast","result":"pass"`, 1)),
+		"body escape":       resign(strings.Replace(bs, `"pass"`, `"\u0070ass"`, 1)),
+		"empty versions":    resign(strings.Replace(bs, `"versions":{"openclaw":"2026.9.8"}`, `"versions":{}`, 1)),
+		"empty operator":    resign(strings.Replace(bs, `}`, `,"operator":""}`, 1)),
+		"attestor bits":     resign(strings.Replace(bs, pubB64, altKey, 1)),
+	}
+	if string(reenc(env)) != string(good) {
+		t.Fatal("fixture: re-encoding is not canonical")
+	}
+	if !strings.Contains(bs, `"result":"pass","channel":"fast"`) || altKey == pubB64 {
+		t.Fatal("fixture: canonical body has an unexpected shape:", bs)
+	}
+	for name, b := range cases {
+		if string(b) == string(good) {
+			t.Errorf("%s: fixture did not change the attestation", name)
+			continue
+		}
+		if _, _, err := ParseAttestation(b); err == nil {
+			t.Errorf("%s: parsed", name)
+		}
+		if v.IndependentPasses([][]byte{b}, nil) != 0 {
+			t.Errorf("%s: counted", name)
+		}
 	}
 }
