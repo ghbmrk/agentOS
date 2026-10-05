@@ -323,7 +323,9 @@ func (s *Guard) Pass(ctx context.Context) (int, error) {
 			fresh = append(fresh, f)
 		}
 	}
-	var lines []string
+	// later holds cleared and uncomparable lines, which follow new
+	// findings in the text so a new alert is never pushed into MORE.
+	var lines, later []string
 	urgent := false
 	for _, id := range sortedKeys(s.st.Open) {
 		rec := s.st.Open[id]
@@ -335,7 +337,7 @@ func (s *Guard) Pass(ctx context.Context) (int, error) {
 		delete(s.st.Open, id)
 		s.st.Cleared[id] = now
 		if rec.Contained == "paused" && rec.Texted {
-			lines = append(lines, clearedLine(rec))
+			later = append(later, clearedLine(rec))
 		}
 	}
 	// A version that stays uncomparable for UncomparedAlert is texted once
@@ -345,10 +347,19 @@ func (s *Guard) Pass(ctx context.Context) (int, error) {
 		if seen[id] && !rec.Texted && strings.HasPrefix(rec.Finding.Detail, uncompared) && now.Sub(rec.At) >= s.cfg.UncomparedAlert {
 			rec.Texted = true
 			s.st.Open[id] = rec
-			lines = append(lines, findingText(rec.Finding))
+			later = append(later, findingText(rec.Finding))
 		}
 	}
 	s.mu.Unlock()
+	// Most serious first, so the pause cap and the text go to tampering
+	// before anything a noisy feed can produce.
+	sort.SliceStable(fresh, func(i, j int) bool {
+		a, b := fresh[i], fresh[j]
+		if (a.Severity == High) != (b.Severity == High) {
+			return a.Severity == High
+		}
+		return checkRank[a.Check] < checkRank[b.Check]
+	})
 	var errs []error
 	pauses := 0
 	for _, f := range fresh {
@@ -368,7 +379,7 @@ func (s *Guard) Pass(ctx context.Context) (int, error) {
 			urgent = urgent || rec.Finding.Check != CheckExpiry
 		}
 	}
-	text := s.batch(lines)
+	text := s.batch(append(lines, later...))
 	s.mu.Lock()
 	err := s.saveLocked()
 	s.mu.Unlock()
@@ -595,6 +606,13 @@ func (s *Guard) check() (found []Finding, notes []string, stale string) {
 						continue
 					}
 					c, ok := compareVersions(p.Scheme, p.Version, a.Fixed)
+					if _, vok := compareVersions(p.Scheme, p.Version, p.Version); !ok && vok {
+						// The installed version reads; the advisory's fixed
+						// version does not. Name the advisory, not the
+						// package's version.
+						add(CheckAdvisory, p.Name, unreadable+a.ID, Low, nil, nil)
+						continue
+					}
 					if !ok {
 						// Neither assumed fixed nor assumed vulnerable: one
 						// Low finding per package and version, in the
@@ -730,9 +748,15 @@ func AnswerFixture(input []byte, f Facts) []byte {
 	return []byte("fails")
 }
 
+// checkRank orders findings of one severity: tampering first.
+var checkRank = map[Check]int{CheckHash: 0, CheckDrift: 1, CheckAdvisory: 2, CheckExpiry: 3}
+
 // uncompared marks an advisory finding whose versions could not be
 // compared.
 const uncompared = "uncompared:"
+
+// unreadable marks an advisory whose fixed version does not parse.
+const unreadable = "unreadable:"
 
 // plainCheck names a check for the owner.
 var plainCheck = map[Check]string{
@@ -747,6 +771,22 @@ func safeName(s string) string {
 	var b strings.Builder
 	for _, r := range s {
 		if r < 128 && (r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("-_./: ", r)) {
+			b.WriteRune(r)
+		}
+		if b.Len() >= 48 {
+			break
+		}
+	}
+	return b.String()
+}
+
+// safeVersion is safeName for version strings, which also keeps "~" and
+// "+": both change dpkg order, so dropping them would name the wrong
+// version.
+func safeVersion(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r < 128 && (r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("-_./:~+", r)) {
 			b.WriteRune(r)
 		}
 		if b.Len() >= 48 {
@@ -785,10 +825,14 @@ func findingText(f Finding) string {
 	case CheckAdvisory:
 		if v, ok := strings.CutPrefix(f.Detail, uncompared); ok {
 			return fmt.Sprintf("Could not check %s version %s against known vulnerabilities. Check it on the box page.",
-				sub, safeName(v))
+				sub, safeVersion(v))
+		}
+		if id, ok := strings.CutPrefix(f.Detail, unreadable); ok {
+			return fmt.Sprintf("Could not read the fixed version in advisory %s for %s. Check it on the box page.",
+				safeName(id), sub)
 		}
 		return fmt.Sprintf("Known vulnerability in %s (%s), fixed in %s. The box takes the fix when an update has it.",
-			sub, safeName(f.Detail), safeName(f.Fixed))
+			sub, safeName(f.Detail), safeVersion(f.Fixed))
 	case CheckDrift:
 		switch f.Detail {
 		case "missing":
@@ -849,7 +893,7 @@ func (s *Guard) Digest() []string {
 	pkgs := map[string][]Record{}
 	for _, id := range sortedKeys(s.st.Open) {
 		r := s.st.Open[id]
-		if r.Finding.Check == CheckAdvisory && !strings.HasPrefix(r.Finding.Detail, uncompared) {
+		if r.Finding.Check == CheckAdvisory && !strings.HasPrefix(r.Finding.Detail, uncompared) && !strings.HasPrefix(r.Finding.Detail, unreadable) {
 			pkgs[r.Finding.Subject] = append(pkgs[r.Finding.Subject], r)
 			continue
 		}
@@ -881,7 +925,7 @@ func (s *Guard) Digest() []string {
 			}
 		}
 		items = append(items, item{high, fmt.Sprintf("Known vulnerabilities in %s (%s), all fixed in %s. The box takes the fix when an update has it.",
-			safeName(name), strings.Join(ids, ", "), safeName(fixed))})
+			safeName(name), strings.Join(ids, ", "), safeVersion(fixed))})
 	}
 	sort.SliceStable(items, func(i, j int) bool { return items[i].high && !items[j].high })
 	var out []string

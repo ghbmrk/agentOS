@@ -565,6 +565,54 @@ func TestFixturesDeferred(t *testing.T) {
 	}
 }
 
+// L3 round 2 on #54: the pause cap and the text go to tampering first, so
+// Low findings from a noisy feed cannot use up the cap (F1, F3); a hash
+// text is urgent (T1); version text keeps "~" and "+" (F2); an unreadable
+// fixed version names the advisory (F4).
+func TestSeverityOrder(t *testing.T) {
+	b := cleanBox()
+	b.pkgs, b.snap.Advisories = nil, nil
+	for _, n := range []string{"a", "b", "c"} {
+		b.pkgs = append(b.pkgs, Package{Name: n, Version: "1.0", Contain: &Target{Kind: "grant", Name: "g-" + n, Label: "pre-allowance " + n}})
+		b.snap.Advisories = append(b.snap.Advisories, Advisory{ID: "ADV-" + n, Package: n, Fixed: "1.1", Severity: "low"})
+	}
+	b.measured["guest-image/openclaw"] = "tampered"
+	r := newGuardRig(t, b)
+	r.pass(t)
+	if len(r.c.got) != 3 || r.c.got[0] != *b.Box().Artifacts[0].Contain {
+		t.Fatalf("paused %+v: the tampered image must be paused first", r.c.got)
+	}
+	if len(r.texts) != 1 || !r.urgent[0] || !strings.HasPrefix(r.texts[0], "Security checks: File guest-image/openclaw does not match the signed release. Paused the agent machine.") {
+		t.Fatalf("texts %q urgent %v", r.texts, r.urgent)
+	}
+
+	// A new tamper alert leads the text even when a cleared line is due.
+	b2 := cleanBox()
+	b2.pkgs[0].Version = "3.0.13"
+	r2 := newGuardRig(t, b2)
+	r2.pass(t)
+	b2.pkgs[0].Version = "3.0.14"
+	b2.measured["guest-image/openclaw"] = "tampered"
+	r2.pass(t)
+	if len(r2.texts) != 2 || !strings.HasPrefix(r2.texts[1], "Security checks: File guest-image/openclaw") || !strings.Contains(r2.texts[1], "Cleared: openssl.") {
+		t.Fatalf("texts %q", r2.texts)
+	}
+
+	f := Finding{Check: CheckAdvisory, Subject: "openssl", Detail: "DSA-1", Fixed: "1:3.0.14-1~deb12u1+b1"}
+	if got, want := findingText(f), "Known vulnerability in openssl (DSA-1), fixed in 1:3.0.14-1~deb12u1+b1. The box takes the fix when an update has it."; got != want {
+		t.Errorf("got  %q\nwant %q", got, want)
+	}
+
+	b3 := cleanBox()
+	b3.snap.Advisories[0].Fixed = "not-a-version!"
+	r3 := newGuardRig(t, b3)
+	r3.pass(t)
+	want := "Security check: Could not read the fixed version in advisory ADV-1 for openssl. Check it on the box page."
+	if d := r3.g.Digest(); len(d) != 1 || d[0] != want || len(r3.c.got) != 0 {
+		t.Fatalf("digest %q\nwant %q", d, want)
+	}
+}
+
 // LOOP-10: a fix that disables a check, widens authority, or fails a
 // security fixture fails qualification, and Loop 2 only adds fixtures.
 func TestFixesCannotWeaken(t *testing.T) {
