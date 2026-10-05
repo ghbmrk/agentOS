@@ -167,7 +167,7 @@ func outcomeOf(d *udevDev) outcome {
 	case hidden(d):
 		return hiddenFully
 	case d.env["UDISKS_IGNORE"] == "1" && d.env["UDISKS_AUTO"] == "0" && d.env["SYSTEMD_READY"] == "" &&
-		d.group == "disk" && d.env["ID_FS_TYPE"] == "ntfs":
+		d.group == "disk" && d.env["ID_FS_TYPE"] == "" && d.env["ID_FS_USAGE"] == "":
 		return keptFromUdisks
 	case d.env["UDISKS_IGNORE"] == "" && d.env["SYSTEMD_READY"] == "" && d.group == "disk" && d.env["ID_FS_TYPE"] == "ntfs":
 		return untouched
@@ -232,6 +232,18 @@ func TestUdevRuleHidesHostDisks(t *testing.T) {
 		}
 		if got := outcomeOf(c.dev); got != c.want {
 			t.Errorf("%s: %v, want %v (%+v)", c.dev.kernel, got, c.want, c.dev)
+		}
+	}
+
+	// Security F1 on #172: an unknown disk holding a RAID or LVM member
+	// is not assembled (a degraded array's resync would write it), and its
+	// .device unit stays so the box still boots.
+	for _, typ := range []string{"linux_raid_member", "LVM2_member", "isw_raid_member"} {
+		d := blockDev("sde", "disk")
+		d.env["ID_FS_TYPE"], d.env["ID_FS_USAGE"] = typ, "raid"
+		runRules(t, rules, d, classify, nil)
+		if d.env["ID_FS_TYPE"] != "" || d.env["ID_FS_USAGE"] != "" || d.env["SYSTEMD_READY"] != "" || outcomeOf(d) != keptFromUdisks {
+			t.Errorf("unknown %s member: %+v", typ, d)
 		}
 	}
 

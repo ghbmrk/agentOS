@@ -8,7 +8,10 @@
 #            partition systemd-boot booted from: left alone;
 #   host     every other disk, removable media included: hidden, below;
 #   unknown  no answer (no single root disk, the helper failed or printed
-#            anything else): kept from udisks only, so the box still boots.
+#            anything else): kept from udisks and from LVM/MD assembly (a
+#            degraded array's resync would write the disk; security F1 on
+#            #172), but its .device unit stays, so the box still boots. The
+#            drive's own LVM or MD, if any, assembles in the initrd.
 # A hidden disk or partition:
 #   SYSTEMD_READY=0     no .device unit becomes active, so no .mount or .swap
 #                       unit (fstab, a generator, a dependency) can use it;
@@ -31,7 +34,7 @@ ENV{DEVTYPE}=="partition", IMPORT{parent}="AGENTOS_DISK"
 ENV{AGENTOS_DISK}=="drive", GOTO="agentos_host_disks_end"
 ENV{AGENTOS_DISK}=="host", GOTO="agentos_host_disk"
 
-ENV{UDISKS_IGNORE}="1", ENV{UDISKS_AUTO}="0"
+ENV{UDISKS_IGNORE}="1", ENV{UDISKS_AUTO}="0", ENV{ID_FS_TYPE}="", ENV{ID_FS_USAGE}=""
 GOTO="agentos_host_disks_end"
 
 LABEL="agentos_host_disk"

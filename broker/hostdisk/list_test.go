@@ -273,21 +273,89 @@ func TestDriveMismatch(t *testing.T) {
 	classes(t, s, map[string]Class{"sda": ClassUnknown, "nvme0n1": ClassHost})
 }
 
-// With no single root disk (root not on a block device, or on dm over
-// two disks) nothing can be the drive: every device is unknown, and the
-// listing carries the health item.
+// mountinfo writes mountinfo lines "mm point fstype superopts".
+func (h *fakeHost) mountinfo(lines ...string) {
+	var b strings.Builder
+	for i, l := range lines {
+		f := strings.Fields(l)
+		b.WriteString(strconv.Itoa(20+i) + " 1 " + f[0] + " / " + f[1] + " rw - " + f[2] + " src " + f[3] + "\n")
+	}
+	h.write("proc/self/mountinfo", b.String())
+}
+
+// #41's layout (security F2 on #172): ESP, /usr A and B with verity
+// partitions, root last; / on the root partition, /usr on dm-verity over
+// the A slot and its hash partition, /efi on the ESP.
+func TestClassifyImageLayout(t *testing.T) {
+	h := newFakeHost(t)
+	h.disk("sdd", "pci0000:00/0000:00:14.0/usb2/2-3/2-3:1.0/host3/target3:0:0/3:0:0:0", "8:48", "AgentOS Drive", true,
+		gptDisk(512, 8192, "dddddddd-0000-4000-8000-0000000000d1", []tpart{
+			{typ: tESP, start: 64, n: 128, sig: SigFAT, uuid: "11111111-0000-4000-8000-0000000000e5"},
+		}), "sdd1:8:49", "sdd2:8:50", "sdd3:8:51", "sdd4:8:52", "sdd5:8:53", "sdd6:8:54")
+	h.stacked("dm-0", "253:0", "sdd/sdd2", "sdd/sdd3")
+	h.efivar("11111111-0000-4000-8000-0000000000e5")
+	h.mountinfo("8:54 / ext4 rw", "253:0 /usr ext4 ro", "8:49 /efi vfat rw", "0:22 /proc proc rw", "0:25 /tmp tmpfs rw")
+	s := h.system()
+	classes(t, s, map[string]Class{"sdd": ClassDrive, "dm-0": ClassDrive, "sda": ClassHost, "nvme0n1": ClassHost, "sdb": ClassHost})
+	if l, err := s.HostDisks(); err != nil || l.Health != HealthOK || names(l.Disks) != "nvme0n1,sda,sdb" {
+		t.Fatalf("%v %+v", err, l)
+	}
+
+	// A volatile root (tmpfs) on the same image: the drive is the disk
+	// under /usr.
+	h.mountinfo("0:30 / tmpfs rw", "253:0 /usr ext4 ro")
+	classes(t, s, map[string]Class{"sdd": ClassDrive, "sda": ClassHost})
+
+	// An overlay root: the drive is the disk under its upper and lower
+	// directories.
+	h.mountinfo("0:30 / overlay rw,lowerdir=/run/lower:/usr/share/base,upperdir=/var/upper/u,workdir=/var/upper/w",
+		"8:54 /var ext4 rw", "253:0 /usr ext4 ro", "8:49 /run/lower vfat ro")
+	classes(t, s, map[string]Class{"sdd": ClassDrive, "sda": ClassHost})
+
+	// An overlay whose layers span two disks is not one disk: nothing is
+	// the drive.
+	h.mountinfo("0:30 / overlay rw,lowerdir=/mnt/x,upperdir=/var/u,workdir=/var/w",
+		"8:54 /var ext4 rw", "8:17 /mnt/x ntfs3 ro", "253:0 /usr ext4 ro")
+	if got := s.Classify("sdd"); got != ClassUnknown {
+		t.Errorf("overlay over two disks: sdd %s", got)
+	}
+}
+
+// With no root on a block device, the drive is the one disk holding the
+// partition systemd-boot booted from; with no loader variable, or with
+// two disks carrying it (every AgentOS drive has the same partition GUIDs,
+// #41's fixed mkosi seed), nothing is the drive and every device is
+// unknown.
 func TestNoRootDisk(t *testing.T) {
 	h := newFakeHost(t)
 	h.mountRoot("0:31")
 	s := h.system()
+	classes(t, s, map[string]Class{"sda": ClassDrive, "nvme0n1": ClassHost})
+
+	h.noEfivar()
 	classes(t, s, map[string]Class{"sda": ClassUnknown, "nvme0n1": ClassUnknown})
 	l, err := s.HostDisks()
 	if err != nil || l.Health != HealthNoRoot || names(l.Disks) != "nvme0n1,sda,sdb" {
 		t.Fatalf("%v %+v", err, l)
 	}
+
+	h.efivar(driveESP)
+	h.disk("sdf", "pci0000:00/0000:00:14.0/usb2/2-4/2-4:1.0/host4/target4:0:0/4:0:0:0", "8:80", "Second AgentOS Drive", true,
+		gptDisk(512, 1024, "ffffffff-0000-4000-8000-000000000001", []tpart{{typ: tESP, start: 64, n: 128, sig: SigFAT, uuid: driveESP}}), "sdf1:8:81")
+	classes(t, s, map[string]Class{"sda": ClassUnknown, "sdf": ClassUnknown, "nvme0n1": ClassUnknown})
+
+	// Root on dm over two disks is not one disk either.
 	h.stacked("dm-3", "253:3", "sda/sda2", "sdb/sdb1")
 	h.mountRoot("253:3")
+	h.noEfivar()
 	classes(t, s, map[string]Class{"sda": ClassUnknown, "sdb": ClassUnknown})
+}
+
+// Mountinfo escapes spaces and other characters in mount points.
+func TestUnescape(t *testing.T) {
+	if got := unescape(`/mnt/a\040b\134c`); got != `/mnt/a b\c` {
+		t.Fatalf("%q", got)
+	}
 }
 
 // Potency R1 on HOST-1a: a disk that cannot be read is listed, flagged,

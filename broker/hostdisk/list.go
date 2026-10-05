@@ -132,33 +132,137 @@ func (s System) diskOf(dir string, depth int, out map[string]bool) bool {
 	return true
 }
 
-// rootDisk returns the one physical disk holding the running root file
-// system, or "" when it is not on exactly one disk.
-func (s System) rootDisk() string {
+// mount is one line of mountinfo.
+type mount struct {
+	mm, point, fstype, opts string
+}
+
+// unescape undoes mountinfo's octal escapes (\040 for a space).
+func unescape(s string) string {
+	if !strings.Contains(s, "\\") {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+3 < len(s) {
+			if v, err := strconv.ParseUint(s[i+1:i+4], 8, 8); err == nil {
+				b.WriteByte(byte(v))
+				i += 3
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+func (s System) mounts() []mount {
 	f, err := os.Open(s.Mountinfo)
 	if err != nil {
-		return ""
+		return nil
 	}
 	defer f.Close()
-	mm := ""
+	var out []mount
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 64*1024), 1024*1024)
 	for sc.Scan() {
-		if fs := strings.Fields(sc.Text()); len(fs) > 4 && fs[4] == "/" {
-			mm = fs[2] // the last mount on / is the one in effect
+		pre, post, ok := strings.Cut(sc.Text(), " - ")
+		fs, ps := strings.Fields(pre), strings.Fields(post)
+		if !ok || len(fs) < 5 || len(ps) < 3 {
+			continue
+		}
+		out = append(out, mount{mm: fs[2], point: unescape(fs[4]), fstype: ps[0], opts: ps[2]})
+	}
+	return out
+}
+
+// mountOf returns the mount in effect at path: the longest mount point
+// that contains it, the last one listed when stacked.
+func mountOf(ms []mount, path string) (mount, bool) {
+	var best mount
+	found := false
+	for _, m := range ms {
+		p := strings.TrimSuffix(m.point, "/")
+		if path == m.point || path == p || strings.HasPrefix(path, p+"/") {
+			if !found || len(m.point) >= len(best.point) {
+				best, found = m, true
+			}
 		}
 	}
-	if !validMM.MatchString(mm) || strings.HasPrefix(mm, "0:") {
+	return best, found
+}
+
+// backing adds the physical disks under the file system mounted at path:
+// a block device through sysfs (partitions to their disk, dm and md
+// through their slaves), an overlay through its upper and lower
+// directories. A tmpfs or other device-less file system adds nothing.
+func (s System) backing(ms []mount, path string, depth int, out map[string]bool) bool {
+	m, ok := mountOf(ms, path)
+	if !ok || depth > 8 {
+		return false
+	}
+	if validMM.MatchString(m.mm) && !strings.HasPrefix(m.mm, "0:") {
+		return s.diskOf(filepath.Join(s.Sys, "dev", "block", m.mm), 0, out)
+	}
+	if m.fstype != "overlay" {
+		return false
+	}
+	any := false
+	for _, o := range strings.Split(m.opts, ",") {
+		k, v, _ := strings.Cut(o, "=")
+		if k != "upperdir" && k != "lowerdir" {
+			continue
+		}
+		for _, dir := range strings.Split(v, ":") {
+			if dir == "" || !strings.HasPrefix(dir, "/") {
+				continue
+			}
+			if !s.backing(ms, dir, depth+1, out) {
+				return false
+			}
+			any = true
+		}
+	}
+	return any
+}
+
+// rootDisk returns the one physical disk the running system is on (security
+// H1, F2 on #172): the disk backing /, or, for a root with no block device
+// (tmpfs), the one backing /usr. When neither resolves to exactly one disk
+// it is the disk holding systemd-boot's partition, if exactly one does.
+func (s System) rootDisk() string {
+	ms := s.mounts()
+	one := func(set map[string]bool) string {
+		if len(set) != 1 {
+			return ""
+		}
+		for d := range set {
+			return d
+		}
 		return ""
 	}
-	disks := map[string]bool{}
-	if !s.diskOf(filepath.Join(s.Sys, "dev", "block", mm), 0, disks) || len(disks) != 1 {
+	for _, p := range []string{"/", "/usr"} {
+		set := map[string]bool{}
+		if s.backing(ms, p, 0, set) {
+			return one(set)
+		}
+	}
+	want, ok := s.loaderPartition()
+	if !ok {
 		return ""
 	}
-	for d := range disks {
-		return d
+	ents, _ := os.ReadDir(filepath.Join(s.Sys, "block"))
+	set := map[string]bool{}
+	for _, e := range ents {
+		n := e.Name()
+		if !validName.MatchString(n) || hasPrefix(n, virtualPrefix) || hasPrefix(n, stackedPrefix) {
+			continue
+		}
+		if _, found := s.describe(n, want); found {
+			set[n] = true
+		}
 	}
-	return ""
+	return one(set)
 }
 
 // loaderPartition returns the partition systemd-boot booted from, in
