@@ -41,6 +41,32 @@ const (
 	RecallExecutor = "recall"
 )
 
+// OriginForget and ForgetExecutor mark the broker's forget of an owner
+// task (journal.ActionLearnForget, W3-forget): agentosd submits it on the
+// owner's FORGET and runs it once the owner approves.
+const (
+	OriginForget   = "broker:forget"
+	ForgetExecutor = "forget"
+)
+
+// ForgetID is the ID of a forget intent for goal; nonce is unique per ask
+// and holds no "/". The goal rides in the ID because the journal keeps
+// identifiers as they are while it redacts params (journal.Redactor).
+func ForgetID(nonce, goal string) string { return "forget/" + nonce + "/" + goal }
+
+// ForgetGoal is the goal a forget intent's ID names; "" if malformed.
+func ForgetGoal(id string) string {
+	rest, ok := strings.CutPrefix(id, "forget/")
+	if !ok {
+		return ""
+	}
+	nonce, goal, ok := strings.Cut(rest, "/")
+	if !ok || nonce == "" {
+		return ""
+	}
+	return goal
+}
+
 // OriginLoop2 marks Loop 2's containment (loops S8, K-S2): a pause of a
 // grant on a finding, and nothing else. Only the broker submits it; guest
 // intents carry "guest:<lineage>".
@@ -85,6 +111,28 @@ func EvidenceIntent(id, origin, address, account string) journal.Intent {
 	}
 	return journal.Intent{ID: id, Origin: origin, Account: journal.BrokerAccount, Action: journal.ActionEvidence,
 		Params: map[string]any{ParamEvidenceAddress: address, ParamEvidenceAccount: account}, Executor: ExecutorName}
+}
+
+// Params of a journal.ActionUpdateFollow intent: the name the owner gave
+// the source, and the digest of the root summary the page showed
+// (update.RootSummary.Digest), which the updater follows and nothing else.
+const (
+	ParamFollowName   = "name"
+	ParamFollowDigest = "digest"
+	// FollowExecutor is the updater, which runs the switch.
+	FollowExecutor = "update"
+	// MaxFollowName bounds the owner-typed name, in characters.
+	MaxFollowName = 40
+	// MaxFollowDigits bounds the digits in that name, so it can carry a
+	// year but never a code.
+	MaxFollowDigits = 4
+)
+
+// FollowIntent is the local page's request to follow the root whose
+// summary has digest, under the owner's name for it.
+func FollowIntent(id, name, digest string) journal.Intent {
+	return journal.Intent{ID: id, Origin: originLocal, Account: journal.BrokerAccount, Action: journal.ActionUpdateFollow,
+		Params: map[string]any{ParamFollowName: name, ParamFollowDigest: digest}, Executor: FollowExecutor}
 }
 
 // Params keys a pre-allowed intent may carry besides the rule's fixed

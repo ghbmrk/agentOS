@@ -231,6 +231,9 @@ type Verified struct {
 	storeDir       string
 	rootVersion    int64
 	targetsVersion int64
+	// rootSHA256 is the trusted root's digest: after a switch to a fork
+	// whose versions match, the version alone would not tell them apart.
+	rootSHA256 string
 }
 
 // ErrNotChecked: a Verified that Store.Check did not make.
@@ -437,6 +440,9 @@ func (s *Store) check(src Source, o Options) (Result, error) {
 		return Result{}, err
 	}
 	defer unlock()
+	if err := s.settle(); err != nil {
+		return Result{}, err
+	}
 	// Record an outside attestor first, so a check that fails later still
 	// ends the interim rule.
 	var proto Verified
@@ -593,6 +599,7 @@ func (s *Store) check(src Source, o Options) (Result, error) {
 
 	var versions []int64
 	proto.storeDir, proto.rootVersion, proto.targetsVersion = s.Dir, tm.Root.Signed.Version, targets.Signed.Version
+	proto.rootSHA256 = Digest(rootBytes)
 	for p := range targets.Signed.Targets {
 		if n, ok := releaseVersion(p); ok && n > installed.Version {
 			versions = append(versions, n)
@@ -671,7 +678,8 @@ func (s *Store) seenKeys() (map[string]bool, error) {
 }
 
 // outsideFile records that an outside attestor was once allow-listed on
-// this box. It is never removed: the interim rule ends for good.
+// this box, or that the box once followed another root (FollowRoot). It is
+// never removed: the interim rule ends for good.
 const outsideFile = "outside_attestor_listed"
 
 // NoteAttestors records the allow-list as the owner changes it, so an
@@ -928,6 +936,9 @@ func (s *Store) CommitStaged(version int64) error {
 		return err
 	}
 	defer unlock()
+	if err := s.settle(); err != nil {
+		return err
+	}
 	st, ok, err := s.Staged()
 	if err != nil {
 		return err
@@ -993,7 +1004,7 @@ func (s *Store) trustUnchanged(v *Verified) error {
 		return classify(err)
 	}
 	tm, ok := snap.Signed.Meta["targets.json"]
-	if !ok || root.Signed.Version != v.rootVersion || tm.Version != v.targetsVersion {
+	if !ok || root.Signed.Version != v.rootVersion || tm.Version != v.targetsVersion || Digest(rb) != v.rootSHA256 {
 		return ErrTrustMoved
 	}
 	return nil

@@ -566,3 +566,29 @@ func TestParseDAIsStrict(t *testing.T) {
 		}
 	}
 }
+
+// relabel answers GetCapability for the dictionary-attack properties with
+// the first property's tag changed, as a TPM listing other properties
+// would; ReadDA must refuse rather than take values for the wrong ones.
+type relabel struct{ transport.TPM }
+
+func (r relabel) Send(cmd []byte) ([]byte, error) {
+	rsp, err := r.TPM.Send(cmd)
+	if err == nil && len(cmd) >= 22 && binary.BigEndian.Uint32(cmd[6:10]) == 0x17A &&
+		binary.BigEndian.Uint32(cmd[14:18]) == 0x20F && len(rsp) >= 23 {
+		rsp = append([]byte(nil), rsp...)
+		binary.BigEndian.PutUint32(rsp[19:23], 0x20E)
+	}
+	return rsp, err
+}
+
+// L3 on #188: ReadDA checks each property's tag.
+func TestReadDAChecksTheProperties(t *testing.T) {
+	s := swtpm.Start(t)
+	if _, err := tpmseal.ReadDA(s.TPM()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tpmseal.ReadDA(relabel{s.TPM()}); err == nil {
+		t.Fatal("ReadDA took values for the wrong properties")
+	}
+}

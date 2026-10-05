@@ -1,0 +1,166 @@
+name: soak
+# Long unattended runs (CI-SOAK): native Go fuzzing of the parsers that read
+# untrusted input, and a race/shuffle soak of the whole broker. Each job runs
+# for hours, so this never runs on pull requests. A failing run uploads its
+# crashers and logs as artifacts and opens, or comments on, one issue titled
+# "Soak failures". A crasher becomes a regression test by copying it into the
+# package's testdata/fuzz/<Target>/ directory.
+on:
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: Fuzzing time per target (Go duration, at most 5h)
+        default: 3h
+      soak_minutes:
+        description: Minutes each soak shard keeps starting new full runs (at most 280)
+        default: "270"
+  schedule:
+    - cron: "17 2 * * *" # daily, with the defaults above
+permissions:
+  contents: read
+concurrency:
+  group: soak
+  cancel-in-progress: false
+env:
+  GOTOOLCHAIN: local
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 345 # under GitHub's 6h job limit
+    strategy:
+      fail-fast: false
+      max-parallel: 6 # leaves runners for pull-request CI (13 targets: three waves)
+      matrix:
+        include:
+          - { pkg: owner, target: FuzzParseReply }
+          - { pkg: control, target: FuzzParse }
+          - { pkg: loops, target: FuzzParseText }
+          - { pkg: mail, target: FuzzParse }
+          - { pkg: localui, target: FuzzScanPassphrase }
+          - { pkg: update, target: FuzzParseAttestation }
+          - { pkg: modem/at, target: FuzzDecodeDeliver }
+          - { pkg: modem/at, target: FuzzTIM1ParseNetworkTime }
+          - { pkg: hostdisk, target: FuzzProbe }
+          - { pkg: recovery, target: FuzzParseRecoveryKey }
+          - { pkg: tpmseal, target: FuzzParse }
+          - { pkg: hint, target: FuzzParse }
+          - { pkg: attest, target: FuzzParse }
+    name: fuzz ${{ matrix.pkg }} ${{ matrix.target }}
+    defaults:
+      run:
+        shell: bash # -eo pipefail, so a failing go test is not masked by tee
+        working-directory: broker
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        with:
+          go-version: "1.26.8" # = broker/go.mod's toolchain line; checked below
+          cache: false
+      - name: Go is the toolchain go.mod names
+        run: |
+          want=$(awk '$1 == "toolchain" {print $2}' go.mod)
+          got=$(go version | awk '{print $3}')
+          [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; go.mod names $want" >&2; exit 1; }
+      - name: Fuzz
+        env:
+          FUZZTIME: ${{ inputs.fuzztime || '3h' }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/out"
+          go test "./${{ matrix.pkg }}" -run '^$' -fuzz '^${{ matrix.target }}$' \
+            -fuzztime "$FUZZTIME" -timeout 330m 2>&1 | tee "$RUNNER_TEMP/out/fuzz.log"
+      - name: Keep crashers
+        if: failure()
+        run: cp -r "${{ matrix.pkg }}/testdata/fuzz" "$RUNNER_TEMP/out/" 2>/dev/null || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        if: failure()
+        with:
+          name: fuzz-${{ strategy.job-index }}-${{ matrix.target }}
+          path: ${{ runner.temp }}/out
+          if-no-files-found: ignore
+  soak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 345
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: race, flags: "-race" }
+          - { name: race-cpu1, flags: "-race -cpu 1" } # one P: different interleavings
+    name: soak ${{ matrix.name }}
+    defaults:
+      run:
+        shell: bash # -eo pipefail, so a failing go test is not masked by tee
+        working-directory: broker
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        with:
+          go-version: "1.26.8" # = broker/go.mod's toolchain line; checked below
+          cache: false
+      - name: Go is the toolchain go.mod names
+        run: |
+          want=$(awk '$1 == "toolchain" {print $2}' go.mod)
+          got=$(go version | awk '{print $3}')
+          [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; go.mod names $want" >&2; exit 1; }
+      - name: Software TPM for the trusted-host slot (P2-4b)
+        run: sudo apt-get update -q && sudo apt-get install -yq swtpm
+      - name: Soak (full runs, shuffled, until time is up)
+        # Each run gets a fresh shuffle seed; a failing run's log keeps the
+        # "-test.shuffle N" line that replays its order.
+        env:
+          AGENTOS_REQUIRE_SWTPM: "1"
+          MINUTES: ${{ inputs.soak_minutes || '270' }}
+          FLAGS: ${{ matrix.flags }}
+        run: |
+          out="$RUNNER_TEMP/out"; mkdir -p "$out"
+          end=$(( $(date +%s) + MINUTES * 60 ))
+          runs=0; fails=0
+          while [ "$(date +%s)" -lt "$end" ]; do
+            runs=$((runs + 1))
+            # FLAGS is a word list on purpose.
+            # shellcheck disable=SC2086
+            if go test $FLAGS -shuffle=on -count=1 ./... > "$out/run-$runs.log" 2>&1; then
+              rm "$out/run-$runs.log"
+            else
+              fails=$((fails + 1))
+              grep -E -- '^(--- FAIL|FAIL|panic:|WARNING: DATA RACE)|-test.shuffle' "$out/run-$runs.log" \
+                | sed "s/^/run $runs: /" >> "$out/failures.txt" || true
+            fi
+          done
+          echo "soak ${{ matrix.name }}: $runs full runs, $fails failed" | tee -a "$GITHUB_STEP_SUMMARY"
+          [ -s "$out/failures.txt" ] && sort "$out/failures.txt" | uniq -c | sort -rn | head -50 >> "$GITHUB_STEP_SUMMARY"
+          [ "$fails" -eq 0 ]
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        if: failure()
+        with:
+          name: soak-${{ matrix.name }}
+          path: ${{ runner.temp }}/out
+          if-no-files-found: ignore
+  report:
+    needs: [fuzz, soak]
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      issues: write
+    steps:
+      - name: Open or append the "Soak failures" issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN: ${{ github.run_id }}
+        run: |
+          url="$GITHUB_SERVER_URL/$GH_REPO/actions/runs/$RUN"
+          failed=$(gh run view "$RUN" --json jobs --jq '.jobs[] | select(.conclusion == "failure") | "- " + .name')
+          body=$(printf 'Soak run %s (%s) failed.\n\nFailed jobs:\n%s\n\nCrashers and logs are in the run artifacts. To replay a crasher, copy it into broker/<pkg>/testdata/fuzz/<Target>/ and run go test on that package.' \
+            "$url" "$(date -u +%Y-%m-%dT%H:%MZ)" "$failed")
+          n=$(gh issue list --state open --search 'in:title "Soak failures"' --json number --jq '.[0].number // empty')
+          if [ -n "$n" ]; then
+            gh issue comment "$n" --body "$body"
+          else
+            gh issue create --title "Soak failures (fuzz and race)" --body "$body"
+          fi

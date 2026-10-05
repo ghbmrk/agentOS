@@ -117,6 +117,9 @@ type tpmHost struct {
 	notify func(string)
 
 	mu sync.Mutex // one TPM conversation at a time
+	// daWarned: the owner was told this run that the chip's limit on
+	// wrong guesses could not be put back yet (HOST-1f).
+	daWarned bool
 }
 
 // openTPMAt opens the TPM at path: the kernel's resource manager
@@ -843,8 +846,9 @@ func tpmTag(id []byte) string {
 // while they are still the PC's own: only while the lockout authorization
 // is empty, since the box sets its own settings only then, and never over
 // an entry already kept, which holds the first, true originals (a take cut
-// off midway, or a TPM cleared under a held PIN, would otherwise replace
-// them with the box's).
+// off midway would otherwise replace them with the box's). A TPM clear
+// changes the SRK name, so an entry kept before it no longer matches this
+// TPM: it is never applied, and stays in the vault (tpmseal T12).
 func keepDAOriginal(v *vault.Vault, t transport.TPM, id []byte) error {
 	name := daOriginalName(id)
 	for _, e := range v.List() {
@@ -939,7 +943,7 @@ func (h *tpmHost) giveBack(v *vault.Vault, t transport.TPM, id []byte) {
 		case errors.Is(err, tpmseal.ErrLockoutOwned):
 			// Proved stale: retrying would only re-arm the TPM's lockout.
 			// The settings it guards are the other system's now.
-			h.say("Another system on this PC now controls the TPM's lockout, so the box has forgotten its own copy.")
+			h.say("Another system on this PC now controls the TPM's lockout, so the box has forgotten its own copy; the limit on wrong guesses stays as the box set it.")
 			if hasKind(v, daOriginalName(id), vault.KindTPMDAOriginal) {
 				v.Delete(daOriginalName(id))
 			}
@@ -971,15 +975,28 @@ func (h *tpmHost) restoreDA(v *vault.Vault, t transport.TPM, id []byte) {
 	raw, ok := strings.CutPrefix(s.Reveal(), daValuePrefix)
 	p, err := tpmseal.ParseDA(raw)
 	if !ok || err != nil {
+		h.warnDA()
 		return
 	}
 	switch err := tpmseal.RestoreDA(t, p); {
 	case errors.Is(err, tpmseal.ErrLockoutSet):
 		h.say("Another system on this PC, probably Windows, now controls its security chip's lockout, so I couldn't put back the chip's limit on wrong guesses. Nothing to do: your PIN is off and the box works as before.")
 	case err != nil:
+		h.warnDA()
 		return
 	}
-	v.Delete(name)
+	if err := v.Delete(name); err != nil {
+		h.say("couldn't remove the box's copy of this PC's security chip settings from the vault: " + err.Error())
+	}
+}
+
+// warnDA tells the owner, once per run, that a restore is still pending:
+// the guide promises the settings come back as they were.
+func (h *tpmHost) warnDA() {
+	if !h.daWarned {
+		h.daWarned = true
+		h.say("I couldn't put back this PC's security chip limit on wrong guesses yet; I'll try again at each restart. Nothing to do.")
+	}
 }
 
 func (h *tpmHost) say(s string) {

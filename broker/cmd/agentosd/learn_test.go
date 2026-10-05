@@ -161,6 +161,10 @@ func TestLearningOffIsSaid(t *testing.T) {
 	if _, ok := cfg.Settings(context.Background(), "book a table", true); ok || cfg.Narrows("book a table") {
 		t.Fatal("task chat taken as a setting")
 	}
+	// W3-forget: FORGET is never task chat, plane or not.
+	if got, ok := cfg.Settings(context.Background(), "FORGET LAST", true); !ok || got != forgetOffText {
+		t.Fatalf("FORGET with the plane off: %q %v", got, ok)
+	}
 	// W3-off (UX R1 on #92): STATUS says so too, without a loop text.
 	if len(cfg.Notes) != 1 || cfg.Notes[0]() != learningOffNote {
 		t.Fatalf("STATUS notes: %d", len(cfg.Notes))

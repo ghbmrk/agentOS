@@ -702,3 +702,16 @@ func TestPageDecisionsAreToldNamingThePage(t *testing.T) {
 		t.Fatalf("coalesced: %q", got)
 	}
 }
+
+// Potency R3 on the P2-2w plan: the signed-in page shows STATUS's own
+// text, the page-only requests' line included, as the phone gets it.
+func TestThePageGetsStatusAsThePhoneDoes(t *testing.T) {
+	r := newRig(t, nil)
+	r.ch.RequestLocal(localItem("i1"), 0)
+	r.inbox()
+	r.unlock()
+	got := r.ch.LocalStatusLines()
+	if want := r.say("STATUS"); got != want || !strings.Contains(got, "1 waiting for you on my Wi-Fi page.") {
+		t.Fatalf("page %q\nphone %q", got, want)
+	}
+}

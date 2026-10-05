@@ -61,3 +61,28 @@ func TestSettingsReachTheHookAndNarrowingSkipsTheLock(t *testing.T) {
 		t.Fatalf("HELP: %q", got)
 	}
 }
+
+// W3-forget (UX U-F8, L3 on #182): a setting that answers with no text,
+// because the request it raised is the reply, sends nothing and does not
+// reach the agent.
+func TestASettingWithNoTextSendsNothing(t *testing.T) {
+	var got []string
+	r := newRig(t, nil)
+	r.edit = func(c *Config) {
+		c.Settings = func(_ context.Context, msg string, unlocked bool) (string, bool) {
+			if !unlocked || !strings.EqualFold(msg, "FORGET 1") {
+				return "", false
+			}
+			got = append(got, msg)
+			return "", true
+		}
+	}
+	r.ch = r.open()
+	r.unlock()
+	if out := r.ch.Handle(context.Background(), ownerNum, "FORGET 1"); len(out) != 0 {
+		t.Fatalf("sent %q", out)
+	}
+	if len(got) != 1 || len(r.agent.got()) != 0 {
+		t.Fatalf("hook got %q, agent got %d", got, len(r.agent.got()))
+	}
+}

@@ -176,7 +176,7 @@ func TestOSS6Defaults(t *testing.T) {
 	must(t, err)
 	if DefaultReleaseAt != 5*time.Hour || p.cfg.ReleaseAt != DefaultReleaseAt || p.cfg.Rand != rand.Reader ||
 		p.cfg.MaxDelayDays != DefaultMaxDelayDays || DefaultMaxDelayDays != 3 || minCountGap != 20*time.Hour ||
-		p.cfg.Mono == nil || p.cfg.Mono() < 0 || p.cfg.Mono() > time.Minute {
+		p.cfg.Mono == nil || p.cfg.Mono() <= 0 {
 		t.Fatalf("defaults %+v", p.cfg)
 	}
 	// The caller's signer map is copied: changing it later changes nothing.

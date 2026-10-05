@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -20,7 +21,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/vault"
 )
 
-// REQ: CRED-8, CRED-9, HW-5a, A8, HW-8
+// REQ: CRED-8, CRED-9, HW-5a, A8, CH-12, HW-8
 
 // cardFactor stands in for the Owner Card's passphrase slot, so the
 // trusted-host rules run without paying Argon2id on every test; the real
@@ -314,6 +315,10 @@ func TestBootPIN(t *testing.T) {
 	r.start(t, r.tpm)
 	if r.phase() != locked || !r.c.pinWanted() {
 		t.Fatalf("PIN host after restart: phase %v, wants PIN %v", r.phase(), r.c.pinWanted())
+	}
+	// CH-12: the owner is pointed at the box's Wi-Fi page.
+	if !r.noted("This PC starts with a boot PIN: enter the PIN on the box's Wi-Fi page.") {
+		t.Fatalf("PIN note: %q", r.notes)
 	}
 	r.clk.add(MinAttemptGap)
 	if err := r.c.unlockPIN("135711"); err != errWrongPIN {
@@ -652,6 +657,58 @@ func TestKeepThisPCTrusted(t *testing.T) {
 	}
 	if ch, _, _ := r.c.bootChange(); ch {
 		t.Fatal("boot change still reported after unlocking")
+	}
+}
+
+// failApprove is this PC's TPM with approving a boot path failing.
+type failApprove struct {
+	trustedHost
+	err error
+}
+
+func (f failApprove) approve(*vault.Vault) error { return f.err }
+
+// CH-12: when keeping this PC trusted fails, the owner hears a fixed
+// reason and where to try again; the error itself goes only to the
+// journal, never into the owner's text.
+func TestKeepTrustedFailureTellsAFixedReason(t *testing.T) {
+	r := newPCRig(t)
+	r.unknownHostUnlock(t)
+	if _, err := r.c.trust(r.code(), ""); err != nil {
+		t.Fatal(err)
+	}
+	r.release = "2026.11.1"
+	bootPC(r.tpm, "initrd-B", "usrhash=bbbb quiet")
+	r.start(t, r.tpm)
+	canary := "canary-approve-7f3a"
+	r.c.mu.Lock()
+	r.c.host = failApprove{r.c.host, errors.New("tpm: " + canary)}
+	r.c.mu.Unlock()
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	defer log.SetOutput(os.Stderr)
+
+	r.clk.add(MinAttemptGap)
+	tk, err := r.c.unlock(goodPass)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kept, err := r.c.confirmKeep(tk, r.code(), true); err != nil || kept {
+		t.Fatalf("keep with a failing TPM: %v, %v", kept, err)
+	}
+	if r.phase() != open {
+		t.Fatal("a failed keep closed the vault")
+	}
+	if !r.noted(noteKeepTrustedFailed) || !strings.HasSuffix(noteKeepTrustedFailed, " on the box's Wi-Fi page.") {
+		t.Fatalf("notes %q", r.notes)
+	}
+	for _, n := range r.notes {
+		if strings.Contains(n, canary) || strings.Contains(n, "local page") {
+			t.Errorf("owner note %q", n)
+		}
+	}
+	if !strings.Contains(logs.String(), canary) {
+		t.Fatalf("detail not journaled: %q", logs.String())
 	}
 }
 
@@ -1049,7 +1106,7 @@ func TestDAOriginalsOnlyForTheirOwnTPM(t *testing.T) {
 	}
 	r.c.v.Delete(otherPC)
 	id, _ := tpmseal.Identity(r.tpm.TPM())
-	for _, bad := range []string{daValuePrefix + "1,1", daValuePrefix + "1, 1,1", "tpm-da-v2 1,1,1", daValuePrefix + "01,1,1"} {
+	for _, bad := range []string{daValuePrefix + "1,1", daValuePrefix + "1, 1,1", "tpm-da-v2 1,1,1", daValuePrefix + "01,1,1", "4294967295,1,1"} {
 		if err := r.c.v.Put(daOriginalName(id), vault.KindTPMDAOriginal, []byte(bad)); err != nil {
 			t.Fatal(err)
 		}
@@ -1061,6 +1118,9 @@ func TestDAOriginalsOnlyForTheirOwnTPM(t *testing.T) {
 		if _, v := r.daEntry(); v != bad {
 			t.Fatalf("malformed %q dropped or changed: %q", bad, v)
 		}
+	}
+	if !r.noted("I couldn't put back this PC's security chip limit on wrong guesses yet") {
+		t.Fatalf("pending restore not told: %q", r.notes)
 	}
 }
 

@@ -382,3 +382,23 @@ func (v *Verified) SecurityAutoStage(atts [][]byte, own ed25519.PublicKey) error
 // outside attestor, so the digest can say the fix was checked by the
 // project rather than an outside attestor.
 func (v *Verified) InterimAttestation() bool { return v.ok() && v.interim }
+
+// Evidence is who passed a release, for the owner's text (OSS-9): listed
+// independent attestors (IndependentPasses), and maintainer-operated ones
+// the box or the signed list names. A key that only labels itself
+// maintainer-operated is unlisted, so it is not counted (Q-A).
+type Evidence struct {
+	Independent int
+	Maintainer  int
+}
+
+// Evidence counts atts for the owner's text. It never decides anything.
+func (v *Verified) Evidence(atts [][]byte, own ed25519.PublicKey) Evidence {
+	e := Evidence{Independent: v.IndependentPasses(atts, own)}
+	v.passes(atts, own, func(fp string, _ Statement) {
+		if v.operated[fp] || v.pinned[fp] {
+			e.Maintainer++
+		}
+	})
+	return e
+}

@@ -802,3 +802,33 @@ func TestBackOnlineStaysDueUntilACheckRuns(t *testing.T) {
 		t.Fatal("still due after the check ran")
 	}
 }
+
+// REQ: OSS-9
+// Reports from keys the box does not list never end a soak, however many
+// there are (OSS-9: evidence, never authority).
+func TestOSS9UnlistedReportsNeverEndASoak(t *testing.T) {
+	r := newRig(t)
+	r.release(2, nil)
+	for i := 0; i < 8; i++ {
+		r.tick()
+		r.clk.add(24 * time.Hour)
+		r.refresh()
+	}
+	for i := 0; i < 50; i++ {
+		_, k, err := ed25519.GenerateKey(nil)
+		r.must(err)
+		r.attestWith(k)
+	}
+	r.clk.add(24 * time.Hour)
+	r.refresh()
+	if ran, _ := r.tick(); !ran || len(r.p.proposed()) != 0 {
+		t.Fatal("unlisted reports ended the soak")
+	}
+	r.attest()
+	r.clk.add(24 * time.Hour)
+	r.refresh()
+	r.tick()
+	if len(r.p.proposed()) != 1 {
+		t.Fatal("not proposed once a listed attestor passed it")
+	}
+}
