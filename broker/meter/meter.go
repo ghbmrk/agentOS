@@ -716,7 +716,7 @@ func (m *Meter) Wrap(machine string, next http.Handler) http.Handler {
 		r.ContentLength = int64(len(body))
 		r.Header.Del("Content-Length")
 		uw := &usageWriter{w: w, max: m.cfg.MaxBody}
-		defer func() { c.Done(uw.used(in, rep.get())) }()
+		defer func() { c.Done(uw.used(in, reserve, rep.get())) }()
 		next.ServeHTTP(uw, r)
 	})
 }

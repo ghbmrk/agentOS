@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -187,10 +188,17 @@ func forward(cfg Config) func(machine string, eval bool, rule []byte) http.Handl
 			},
 			ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 				logf("model route %s: vault process: %v", machine, err)
-				// No response came back, so nothing a provider produced
-				// reaches the guest; the meter must not charge this page
-				// as output (OP-8 counts content, not the broker's text).
-				meter.Report(r.Context(), meter.Usage{NoResponse: true})
+				// No response came back, and this page is not model output
+				// (OP-8 counts content, not the broker's text). A call that
+				// could not connect never reached a provider; any other
+				// failure may come after a provider billed output, so the
+				// meter charges the call's full output reservation.
+				var op *net.OpError
+				if errors.As(err, &op) && op.Op == "dial" {
+					meter.Report(r.Context(), meter.Usage{NoResponse: true})
+				} else {
+					meter.Report(r.Context(), meter.Usage{Unanswered: true})
+				}
 				http.Error(w, "model egress unavailable", http.StatusServiceUnavailable)
 			},
 		}

@@ -140,23 +140,54 @@ func TestVaultProcessDownIs503(t *testing.T) {
 	}
 }
 
-// A metered call the vault process never answers is charged its input
-// estimate only: the 503 page the guest gets is the broker's, not model
-// output (OP-8).
-func TestUnansweredCallChargesNoOutput(t *testing.T) {
-	fwd := Forward(Config{Socket: filepath.Join(t.TempDir(), "absent.sock"), Label: func(string) string { return "public" }, Denied: func(string, Denial) {}})
-	m, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "meter.json"), MachineCap: meter.Limits{Calls: 10, Tokens: 1 << 30}, OverallCap: meter.Limits{Calls: 10, Tokens: 1 << 30}})
-	if err != nil {
-		t.Fatal(err)
-	}
+// A metered call the vault process gives no response is never charged
+// the broker's 503 page as output (OP-8). One that never reached it (a
+// dial failure) is charged its input estimate; one that reached it and
+// got no answer, its output reservation too, since a provider may have
+// billed output the broker never saw.
+func TestUnansweredCallCharges(t *testing.T) {
 	const body = `{"model":"default","max_tokens":100}`
-	w := httptest.NewRecorder()
-	m.Wrap("m1", fwd("m1")).ServeHTTP(w, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
-	if w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("got %d", w.Code)
-	}
-	if u, want := m.Usage("m1"), meter.Tokens(int64(len(body))); u.Tokens != want || u.Calls != 1 {
-		t.Fatalf("charged %d tokens and %d calls, want %d and 1", u.Tokens, u.Calls, want)
+	in := meter.Tokens(int64(len(body)))
+	stalled := make(chan struct{})
+	defer close(stalled)
+	for _, c := range []struct {
+		name string
+		h    http.HandlerFunc // nil: no vault process listening
+		want int64
+	}{
+		{"absent socket", nil, in},
+		{"stalls past the call bound", func(w http.ResponseWriter, r *http.Request) {
+			io.Copy(io.Discard, r.Body)
+			<-stalled
+		}, in + 100},
+		{"hangs up after the request", func(w http.ResponseWriter, r *http.Request) {
+			io.Copy(io.Discard, r.Body)
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err == nil {
+				conn.Close()
+			}
+		}, in + 100},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			sock := filepath.Join(t.TempDir(), "absent.sock")
+			if c.h != nil {
+				sock = serveUnix(t, &fakeEgress{h: c.h})
+			}
+			fwd := Forward(Config{Socket: sock, Label: func(string) string { return "public" }, Denied: func(string, Denial) {}})
+			m, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "meter.json"), CallTimeout: 300 * time.Millisecond,
+				MachineCap: meter.Limits{Calls: 10, Tokens: 1 << 30}, OverallCap: meter.Limits{Calls: 10, Tokens: 1 << 30}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			w := httptest.NewRecorder()
+			m.Wrap("m1", fwd("m1")).ServeHTTP(w, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
+			if w.Code != http.StatusServiceUnavailable {
+				t.Fatalf("got %d", w.Code)
+			}
+			if u := m.Usage("m1"); u.Tokens != c.want || u.Calls != 1 {
+				t.Fatalf("charged %d tokens and %d calls, want %d and 1", u.Tokens, u.Calls, c.want)
+			}
+		})
 	}
 }
 
