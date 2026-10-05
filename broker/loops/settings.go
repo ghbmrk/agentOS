@@ -286,7 +286,7 @@ func (s *Scheduler) Text(ctx context.Context, msg string, unlocked bool) (reply 
 	case errors.Is(err, errNoSharing):
 		return "Sharing is not available yet.", true
 	case errors.As(err, &no):
-		return fit1("Not allowed: " + no.reason + "."), true
+		return "Not allowed: " + no.reason + ".", true
 	default:
 		return "The box could not save that setting. Try again later.", true
 	}
@@ -303,14 +303,6 @@ func (s *Scheduler) narrowing(r Request) bool {
 		return r.Calls <= s.Settings().SpareCalls
 	}
 	return false
-}
-
-// fit1 cuts a reply to one SMS segment (153 characters).
-func fit1(s string) string {
-	if len(s) <= 153 {
-		return s
-	}
-	return s[:150] + "..."
 }
 
 // refused is a setting the broker's policy denied, with its reason.

@@ -2,6 +2,7 @@ package loops
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
@@ -243,5 +244,42 @@ func TestAFailedSettingSaysWhy(t *testing.T) {
 	r.s.cfg.Journal = nil
 	if got, _ := r.s.Text(ctx, "LOOPS OFF", true); got != "The box could not save that setting. Try again later." {
 		t.Fatalf("%q", got)
+	}
+}
+
+// L3 on #57: state saved before Order existed is ordered by submission on
+// load, malformed IDs first, and the next apply prunes to keepApplied.
+func TestOldStateIsOrderedOnLoad(t *testing.T) {
+	r := newRig(t)
+	old := state{Seq: 300, Settings: Settings{SpareCalls: DefaultSpareCalls}, Applied: map[string]bool{"bad": true}}
+	for n := 300; n > 300-keepApplied-5; n-- {
+		old.Applied[fmt.Sprintf("loops:n%d:off:all", n)] = true
+	}
+	b, err := json.Marshal(old)
+	must(t, err)
+	must(t, r.store.Save(b))
+	r.restart()
+	r.s.mu.Lock()
+	order := append([]string(nil), r.s.st.Order...)
+	r.s.mu.Unlock()
+	if len(order) != keepApplied+6 || order[0] != "bad" || order[1] != "loops:n40:off:all" || order[len(order)-1] != "loops:n300:off:all" {
+		t.Fatalf("order after load: %d, first %q %q, last %q", len(order), order[0], order[1], order[len(order)-1])
+	}
+	in := journal.Intent{ID: "loops:n301:on:all", Origin: OriginOwner, Account: journal.BrokerAccount, Action: ActionOn, Executor: Executor}
+	if o := r.s.Execute(context.Background(), in, 1); o.Result != journal.ResultSucceeded {
+		t.Fatalf("%+v", o)
+	}
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	if len(r.s.st.Applied) != keepApplied || len(r.s.st.Order) != keepApplied {
+		t.Fatalf("kept %d applied, %d in order", len(r.s.st.Applied), len(r.s.st.Order))
+	}
+	for _, gone := range []string{"bad", "loops:n40:off:all", "loops:n45:off:all"} {
+		if r.s.st.Applied[gone] {
+			t.Fatalf("%s was not pruned first", gone)
+		}
+	}
+	if !r.s.st.Applied["loops:n46:off:all"] || !r.s.st.Applied[in.ID] {
+		t.Fatal("pruned past the oldest")
 	}
 }

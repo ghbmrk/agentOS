@@ -139,3 +139,40 @@ func TestOnlyTheLoopsSentinelItselfAsks(t *testing.T) {
 		t.Fatal(v.kind)
 	}
 }
+
+// recordingChanges counts Decided calls.
+type recordingChanges struct {
+	fakeChanges
+	decided int
+}
+
+func (r *recordingChanges) Decided(context.Context, journal.Intent, bool) { r.decided++ }
+
+// #48 C7/Q3 regression (L3 on #57): a lapsed loop setting never reaches
+// the change pipeline's Decided.
+func TestALapsedRaiseIsNotAChangeDecision(t *testing.T) {
+	spare, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "spare.json"),
+		MachineCap: meter.Limits{Calls: 50, Tokens: 500_000}, OverallCap: loops.SpareLimits(loops.DefaultSpareCalls)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := loops.New(loops.Config{Store: &change.MemStore{}, Spare: spare})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch := &recordingChanges{}
+	r := newRigExecs(t, func(c *Config) { c.Loops, c.Changes = s, ch }, map[string]journal.Executor{loops.Executor: s})
+	s.Attach(r.g)
+	if _, ok := s.Text(context.Background(), "SPARE BUDGET 150", true); !ok {
+		t.Fatal("not a setting")
+	}
+	r.g.Flush()
+	_, items := r.own.last(t)
+	r.decide(false, "expired")
+	if st := r.state(items[0].Ref); !strings.Contains(st.Permission.Reason, "lapsed, not declined") {
+		t.Fatalf("%s %q", st.State, st.Permission.Reason)
+	}
+	if ch.decided != 0 {
+		t.Fatalf("a lapsed loop setting called Changes.Decided %d times", ch.decided)
+	}
+}
