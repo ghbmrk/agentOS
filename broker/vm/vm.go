@@ -328,7 +328,11 @@ func (m *Manager) create(ctx context.Context, id string, s Spec, seed map[string
 	mc.mu.Lock()
 	err = claimLocked(mc)
 	if err == nil {
-		err = m.startFrom(ctx, mc, nil)
+		var h *diskHold
+		if h, err = m.reserveSeed(mc); err == nil {
+			err = m.startFrom(ctx, mc, nil)
+			h.release()
+		}
 	}
 	if err != nil {
 		m.stopRuntime(ctx, mc)
@@ -430,20 +434,8 @@ func (m *Manager) startFrom(ctx context.Context, mc *machine, s *Snapshot) error
 		if err := os.Mkdir(l.Upper, 0o755); err != nil {
 			return err
 		}
-		if len(mc.seed) > 0 {
-			var size int64
-			for _, b := range mc.seed {
-				size += int64(len(b))
-			}
-			h, err := m.reserveDisk(size)
-			if err != nil {
-				return fmt.Errorf("%s: seed: %w", mc.ID, err)
-			}
-			err = writeSeed(l.Upper, mc.seed)
-			h.release()
-			if err != nil {
-				return err
-			}
+		if err := writeSeed(l.Upper, mc.seed); err != nil {
+			return err
 		}
 	} else if err := overlay.Copy(filepath.Join(m.snapDir(s.ID), "fs"), l.Upper); err != nil {
 		return err
@@ -477,6 +469,20 @@ func (m *Manager) startFrom(ctx context.Context, mc *machine, s *Snapshot) error
 	}
 	mc.State = Running
 	return m.saveMachine(mc)
+}
+
+// reserveSeed reserves the disk for writing mc's seed into a fresh layer,
+// before anything is stopped or removed, so a refusal changes nothing.
+func (m *Manager) reserveSeed(mc *machine) (*diskHold, error) {
+	var size int64
+	for _, b := range mc.seed {
+		size += int64(len(b))
+	}
+	h, err := m.reserveDisk(size)
+	if err != nil {
+		return nil, fmt.Errorf("%s: seed: %w", mc.ID, err)
+	}
+	return h, nil
 }
 
 // writeSeed writes seed files into a fresh, broker-only layer. Nothing else
@@ -835,6 +841,13 @@ func (m *Manager) Rollback(ctx context.Context, id, snapID string) error {
 // disk refuses the restart and leaves the machine as it was. On other
 // failures the machine is left Stopped and the caller releases admission.
 func (m *Manager) restartLocked(ctx context.Context, mc *machine, s *Snapshot) error {
+	if s == nil {
+		h, err := m.reserveSeed(mc)
+		if err != nil {
+			return err
+		}
+		defer h.release()
+	}
 	if s != nil && s != keepLayer {
 		h, err := m.reserveRestore(1, s.ID)
 		if err != nil {

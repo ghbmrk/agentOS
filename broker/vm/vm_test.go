@@ -865,4 +865,8 @@ func TestRES4SeedAdmittedOnTheDisk(t *testing.T) {
 	if err := e.m.Rebuild(bg, "m"); !errors.Is(err, ErrQuota) {
 		t.Fatalf("rebuild over the disk budget: %v", err)
 	}
+	// Refusal changes nothing: the machine runs on its layer as before.
+	if m, _ := e.m.Get("m"); m.State != Running || len(e.guestRead("m", "etc/big")) != 128<<10 {
+		t.Fatalf("refused rebuild changed the machine: %s", m.State)
+	}
 }
