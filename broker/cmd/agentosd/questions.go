@@ -30,6 +30,12 @@ type questions struct {
 	run sync.WaitGroup
 }
 
+// pending reports a question held or waiting for the owner (PE7).
+func (q *questions) pending() bool {
+	b := q.b.Load()
+	return b != nil && b.Open()
+}
+
 // wait returns once the loops open started have stopped (cancel their
 // ctx first) and the guard's queued notices are delivered. Flushing only
 // after the loops stop keeps Flush from racing the guard's own checks.

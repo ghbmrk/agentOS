@@ -38,6 +38,9 @@ type learning struct {
 	harvest *loops.Harvester
 	cases   harvester // where owner verdicts go: harvest, or a test's
 	eval    lateEvaluator
+	// sleep is the agent sleeper on a box where the agent and a replay
+	// machine do not fit together (PE7); nil elsewhere.
+	sleep   atomic.Pointer[sleeper]
 	eng     atomic.Pointer[journal.Engine]
 	adm     atomic.Pointer[admission.Controller]
 	routing *syncedRouting // nil: routing held
@@ -91,6 +94,7 @@ type learnPaths struct {
 // and the owner's settings texts.
 func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning, error) {
 	l := &learning{}
+	l.eval.sleep = &l.sleep
 	spare, err := meter.Open(meter.Config{
 		Path: p.Spare,
 		// The scheduler sets the overall cap from the owner's setting;
@@ -170,7 +174,7 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	if l.sched, err = loops.New(loops.Config{
 		Store:     change.FileStore{Path: filepath.Join(p.Dir, "loops.json")},
 		Spare:     spare,
-		Sources:   []loops.Source{learn},
+		Sources:   []loops.Source{sleepSource{learn, &l.sleep}},
 		Sharing:   l.pipe.SetSharing,
 		Busy:      l.busy,
 		BusyCause: l.busyCause,
@@ -247,6 +251,9 @@ const noRoomOn = "Learning is on, but the box's memory is too small to test chan
 
 func (l *learning) note() string {
 	if l.noRoom.Load() {
+		if l.sleep.Load() != nil {
+			return sleepModeNote
+		}
 		return noRoomNote
 	}
 	return ""
@@ -259,7 +266,7 @@ func (l *learning) note() string {
 func (l *learning) settings(ctx context.Context, msg string, unlocked bool) (string, bool) {
 	reply, ok := l.sched.Text(ctx, msg, unlocked)
 	r, _ := loops.ParseText(msg)
-	if !ok || !l.noRoom.Load() || r.Kind != loops.KindLoops || !r.On || (r.Loop != "" && r.Loop != loops.Improve) ||
+	if !ok || !l.noRoom.Load() || l.sleep.Load() != nil || r.Kind != loops.KindLoops || !r.On || (r.Loop != "" && r.Loop != loops.Improve) ||
 		reply != loops.Confirm(r, l.sched.Settings()) {
 		return reply, ok
 	}
@@ -400,6 +407,9 @@ func (l *learning) record(o grants.OwnerOutcome) {
 }
 
 func (l *learning) busy() bool {
+	if sl := l.sleep.Load(); sl != nil && sl.keepsAwake() {
+		return true
+	}
 	a := l.adm.Load()
 	return a == nil || a.Busy()
 }
@@ -412,7 +422,13 @@ func (l *learning) busyCause() (busy, owner, pressure bool) {
 	if a == nil {
 		return true, false, true
 	}
-	return a.BusyCause()
+	busy, owner, pressure = a.BusyCause()
+	if sl := l.sleep.Load(); sl != nil && sl.keepsAwake() {
+		// The agent is awake for the owner (PE7 condition 7); pressure
+		// still wins.
+		return true, true, pressure
+	}
+	return busy, owner, pressure
 }
 
 // revokedForOwner is admission's RevokedForOwner for the replay evaluator
@@ -519,6 +535,8 @@ func (heldRouting) Apply(t change.Tree) error {
 // evaluated and nothing adopts (change C8: no evaluation, no adoption).
 type lateEvaluator struct {
 	e atomic.Pointer[replay.Evaluator]
+	// sleep, if set, guards each run while the agent sleeps (PE7).
+	sleep *atomic.Pointer[sleeper]
 }
 
 func (l *lateEvaluator) Run(ctx context.Context, t change.Tree, p change.Probe) ([]byte, error) {
@@ -526,7 +544,11 @@ func (l *lateEvaluator) Run(ctx context.Context, t change.Tree, p change.Probe) 
 	if e == nil {
 		return nil, change.ErrNotEvaluated
 	}
-	return e.Run(ctx, t, p)
+	var sl *sleeper
+	if l.sleep != nil {
+		sl = l.sleep.Load()
+	}
+	return sleepGuard(ctx, sl, func(ctx context.Context) ([]byte, error) { return e.Run(ctx, t, p) })
 }
 
 // lateReader is Loop 1's journal reader, empty until the engine runs.

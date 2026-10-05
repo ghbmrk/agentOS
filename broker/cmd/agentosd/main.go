@@ -125,9 +125,14 @@ func (l *lateStatus) Status() string {
 	return agentNotSet
 }
 
-// lateAgent hands owner chat to the guest plane once it exists.
+// lateAgent hands owner chat to the guest plane once it exists. A
+// message delivered while the agent sleeps wakes it (PE7): the message
+// waits in the agent's inbox meanwhile, and its start hands it over, warm
+// or cold alike (UX P2-c).
 type lateAgent struct {
-	a atomic.Pointer[guest.OwnerAgent]
+	a     atomic.Pointer[guest.OwnerAgent]
+	sleep atomic.Pointer[sleeper]
+	last  atomic.Int64 // unix nanoseconds of the last delivery
 }
 
 func (l *lateAgent) Deliver(ctx context.Context, text string, public bool) error {
@@ -135,7 +140,28 @@ func (l *lateAgent) Deliver(ctx context.Context, text string, public bool) error
 	if a == nil {
 		return errors.New("no agent machine is running")
 	}
-	return a.Deliver(ctx, text, public)
+	err := a.Deliver(ctx, text, public)
+	if err == nil {
+		l.delivered(time.Now())
+	}
+	return err
+}
+
+// delivered notes an owner message that reached the agent's inbox at t,
+// and wakes the agent if it sleeps.
+func (l *lateAgent) delivered(t time.Time) {
+	l.last.Store(t.UnixNano())
+	if s := l.sleep.Load(); s != nil && s.Asleep() {
+		go s.Wake(wakeOwner)
+	}
+}
+
+// lastDelivered is when an owner message last reached the agent.
+func (l *lateAgent) lastDelivered() time.Time {
+	if n := l.last.Load(); n != 0 {
+		return time.Unix(0, n)
+	}
+	return time.Time{}
 }
 
 // recallLabels gives the recall index the machine manager's REV-5 labels.
@@ -204,6 +230,7 @@ func main() {
 	var stateDir, runsc, cgroupRoot, accelMode, meterPath, agentMachine, inboxPath, egressSocket, verifySocket, recallDir string
 	var agentImage, agentLaunch string
 	var diskReserveMB, agentMemMB, replayMemMB, builderMemMB int64
+	var sleepHoursFlag string
 	var builderImage, builderLaunch string
 	var learn learnPaths
 	var cgroupVouched bool
@@ -241,11 +268,16 @@ func main() {
 	flag.StringVar(&builderImage, "builder-image", "", "the minimal image Loop 1's builder machines run (W3-builder), registered with -image; empty runs no model-backed builder")
 	flag.StringVar(&builderLaunch, "builder-launch", "", "how a builder machine starts: argv and env; empty uses the image's own")
 	flag.Int64Var(&builderMemMB, "builder-mem-mb", loopbuild.DefaultMemMB, "a builder machine's memory budget, MB")
+	flag.StringVar(&sleepHoursFlag, "sleep-hours", "", "on a box where the agent and a replay machine do not fit together, the hours the agent may sleep while the box tests changes, HH:MM-HH:MM box time (PE7); empty is 01:00-06:00")
 	flag.Int64Var(&replayMemMB, "replay-mem-mb", defaultReplayMemMB, "a replay machine's memory budget, MB (LOOP-5); with -agent-mem-mb it must fit in -capacity-mb less -headroom-mb")
 	qcfg := defaultQuestionConfig("/var/lib/agentos")
 	flag.StringVar(&qcfg.Path, "questions", qcfg.Path, "agents' questions to the owner, kept across restarts (P3-8)")
 	flag.StringVar(&qcfg.ClockPath, "clock-state", qcfg.ClockPath, "the box clock check's state (P2-9)")
 	flag.Parse()
+	sleepHours, err := parseSleepHours(sleepHoursFlag)
+	if err != nil {
+		log.Fatal(err)
+	}
 	meminfo, _ := os.ReadFile("/proc/meminfo")
 	mem := planMemory(string(meminfo), runtime.NumCPU(), flagSet(flag.CommandLine, "capacity-mb"), cfg.Admission.CapacityMB, floor, agentMemMB)
 	cfg.Admission = mem.Budget.Admission()
@@ -422,6 +454,14 @@ func main() {
 					if err == nil {
 						if err = replayFits(cfg.Admission.CapacityMB, cfg.Admission.HeadroomMB, agentMemMB, replayMemMB); err != nil {
 							lp.noRoom.Store(true) // STATUS and LEARNING ON say so
+							// The agent sleeps while the box evaluates (PE7).
+							sl := openSleeper(ctx, sleepDeps{d: d, m: m, plane: plane, qs: qs, agent: agent, id: agentMachine, hours: sleepHours})
+							lp.sleep.Store(sl)
+							agent.sleep.Store(sl)
+							if nerr := lp.pipe.Notice("pe7:sleep-mode", sleepDigest); nerr != nil {
+								log.Printf("sleep mode digest line: %v", nerr)
+							}
+							err = nil
 						}
 					}
 					if err == nil {
@@ -440,7 +480,7 @@ func main() {
 				if err != nil {
 					log.Printf("no agent machine kept running: %v", err)
 				} else {
-					k := &keeper{m: m, id: agentMachine, spec: spec, every: 30 * time.Second, logf: log.Printf, status: agentWaiting}
+					k := &keeper{m: m, id: agentMachine, spec: spec, every: 30 * time.Second, logf: log.Printf, status: agentWaiting, sleep: agent.sleep.Load()}
 					agentStatus.k.Store(k)
 					go k.run(ctx)
 				}
