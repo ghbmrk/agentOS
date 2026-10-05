@@ -45,4 +45,4 @@
 | Proposed | External-drive-only (no internal install) | Not yet confirmed |
 | Pending | License | Before first public release (OSS-12) |
 | 2026-10-05 | The box has a name (suggested made-up full name at setup, `NAME` to change) and speaks to the owner in the first person; to others it is "<name> (<owner>'s AgentOS assistant)" (CH-21) | Mark, box email thread |
-| 2026-10-05 | The box may have its own mailbox at a free provider, created almost automatically with the owner completing the human check; account recovery through the owner's number, never the box's SIM (ADP-13) | Mark, box email thread |
+| 2026-10-05 | The box may have its own mailbox at a free provider, created almost automatically with the owner completing the human check; account recovery never through the box's SIM; owner's email vs owner's number pending Mark (ADP-13) | Mark, box email thread |
