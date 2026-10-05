@@ -110,6 +110,14 @@ jobs:
           cd broker && sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
             AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_OPENCLAW_ROOTFS=/tmp/ocroot \
             go test -count=1 -v -run '^TestIntegrationOpenClawGuest$' ./e2e
+      - name: Loop 1 builder image under gVisor (W3-builder-image)
+        # The minimal builder image (brief client only) runs a builder job in
+        # a private lb- machine; a scripted model stands in for a provider.
+        run: |
+          sh guest/builder/build-rootfs.sh /tmp/lbroot
+          cd broker && sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
+            AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_BUILDER_ROOTFS=/tmp/lbroot \
+            go test -count=1 -v -run '^TestIntegrationBuilderImage$' ./e2e
       - name: Floor box admission and preemption (P2-5)
         # A 7680 MiB group stands in for the 8 GB N95 (HW-4); prints FLOOR-RESULT.
         working-directory: broker
