@@ -64,6 +64,21 @@ func TestImplicitCasesNeverAnchorAnAdoption(t *testing.T) {
 	if rep.Passed-rep.ImplicitPassed == 0 || rep.State != StateAdopted || rep.Basis != BasisStanding || rep.NeedsExplicit {
 		t.Fatalf("with explicit evidence: %+v", rep)
 	}
+
+	// L3 SHOULD-5 on #109: passing only refused items (not repeating
+	// them) beside implicit wins anchors nothing either.
+	e = newEnv(t, nil)
+	for i := 0; i < 8; i++ {
+		e.implicitCase(ClassSkill, "skills/greet", "hello")
+	}
+	for i := 0; i < 12; i++ {
+		e.taskCase(ClassSkill, "skills/greet", "bye", Rejected)
+	}
+	e.p.Attach(holdJournal{e.eng})
+	rep = e.propose(Candidate{Source: Local, Files: Tree{"skills/greet": []byte("hello")}})
+	if rep.Passed-rep.ImplicitPassed == 0 || rep.EndorsedPassed != 0 || rep.State != StateAwaitingOwner || !rep.NeedsExplicit {
+		t.Fatalf("anchored on refused items: %+v", rep)
+	}
 }
 
 // Half weight: too few implicit cases leave a candidate short of the
@@ -164,5 +179,31 @@ func TestAnImplicitCaseIsNeverAnExample(t *testing.T) {
 	}
 	if ask, err := e.p.Ask(r.ID); err != nil || strings.Contains(ask, "for example") {
 		t.Fatalf("ask: %q %v", ask, err)
+	}
+}
+
+// L3 MUST-3 on #109: a dev-split implicit case reaches a builder without
+// its input or reply (count, not content); an explicit one keeps both.
+func TestADevImplicitCaseHasNoContent(t *testing.T) {
+	e := newEnv(t, nil)
+	for i := 0; i < 20; i++ {
+		e.implicitCase(ClassSkill, "secret-task", "injected-reply")
+		e.taskCase(ClassSkill, "skills/greet", "hi", Accepted)
+	}
+	implicit, explicit := 0, 0
+	for _, c := range e.p.Dev(ClassSkill) {
+		switch {
+		case c.Implicit && (c.Input != nil || c.Expect != nil || c.Task == ""):
+			t.Fatalf("dev implicit case %+v", c)
+		case c.Implicit:
+			implicit++
+		case len(c.Input) == 0:
+			t.Fatalf("dev explicit case lost its content: %+v", c)
+		default:
+			explicit++
+		}
+	}
+	if implicit == 0 || explicit == 0 {
+		t.Fatalf("dev split: %d implicit, %d explicit", implicit, explicit)
 	}
 }

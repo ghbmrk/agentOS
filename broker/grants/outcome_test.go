@@ -101,8 +101,31 @@ func TestOwnerOutcomesAreReportedOnceFinal(t *testing.T) {
 	r.advance(11 * time.Minute)
 	r.g.Tick()
 	r.g.Wait()
+	if got := o.take(); got != "" {
+		t.Fatalf("auto-reply reported before a late UNDO could come: %q", got)
+	}
+	r.advance(owner.LateRelease)
+	r.g.Tick()
+	r.g.Wait()
 	if got := o.take(); got != "reply-1/r1 accepted-implicitly" {
 		t.Fatalf("auto-reply let go: %q", got)
+	}
+
+	// L3 MUST-4 on #109: an UNDO just after the release was too late to
+	// stop the reply, but the owner did not let it go: no verdict.
+	reply("reply-1/r3")
+	q3 := r.own.due[len(r.own.due)-1]
+	r.advance(11 * time.Minute)
+	r.g.Tick()
+	r.g.Wait()
+	r.own.mu.Lock()
+	r.own.lateUndo = map[string]bool{q3.ID: true}
+	r.own.mu.Unlock()
+	r.advance(owner.LateRelease)
+	r.g.Tick()
+	r.g.Wait()
+	if got := o.take(); got != "" {
+		t.Fatalf("an UNDO after the release left a verdict: %q", got)
 	}
 	reply("reply-1/r2")
 	q := r.own.due[len(r.own.due)-1]
@@ -297,7 +320,29 @@ func TestALateReleaseIsNoVerdict(t *testing.T) {
 	r.advance(11 * time.Minute)
 	r.g.Tick()
 	r.g.Wait()
+	r.advance(owner.LateRelease)
+	r.g.Tick()
+	r.g.Wait()
 	if got := o.take(); got != "reply-1/awake accepted-implicitly" {
 		t.Fatalf("on time, outside quiet hours: %q", got)
+	}
+}
+
+// Security on #101 (BOARD follow-up on #109): an unsent acceptance whose
+// intent the journal no longer has is dropped, never reported, so the
+// held set cannot fill with verdicts nothing will end.
+func TestAnUnsentVerdictForAMissingIntentIsDropped(t *testing.T) {
+	var got []OwnerOutcome
+	r := newRig(t, func(c *Config) { c.Outcome = func(o OwnerOutcome) { got = append(got, o) } })
+	r.g.mu.Lock()
+	r.g.sending["gone/1"] = pending{v: OwnerAccepted}
+	r.g.mu.Unlock()
+	r.g.Tick()
+	r.g.Wait()
+	r.g.mu.Lock()
+	_, kept := r.g.sending["gone/1"]
+	r.g.mu.Unlock()
+	if kept || len(got) != 0 {
+		t.Fatalf("missing intent: kept %v, reported %+v", kept, got)
 	}
 }

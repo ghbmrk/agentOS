@@ -550,9 +550,9 @@ func (l *Learn) Digest() []string {
 	}
 	switch {
 	case n == 1:
-		out = append(out, "Learning: 1 idea is waiting for your approval instead of taking effect on its own, because it wasn't tested on a task you approved.")
+		out = append(out, "Learning: 1 idea is waiting for your approval instead of taking effect on its own, because it wasn't tested on a task you said YES to.")
 	case n > 1:
-		out = append(out, fmt.Sprintf("Learning: %d ideas are waiting for your approval instead of taking effect on their own, because none was tested on a task you approved.", n))
+		out = append(out, fmt.Sprintf("Learning: %d ideas are waiting for your approval instead of taking effect on their own, because none was tested on a task you said YES to.", n))
 	}
 	return out
 }

@@ -51,6 +51,9 @@ type Owner interface {
 	Active(within time.Duration) bool
 	QueueAutoReply(owner.AutoReply) (owner.QueueResult, error)
 	DueAutoReplies() []owner.Queued
+	// UndoneAfterRelease reports whether the owner texted UNDO for a
+	// released auto-reply after its release (owner O18).
+	UndoneAfterRelease(id string) bool
 	Inform(text string) error
 }
 
@@ -244,8 +247,26 @@ type Gate struct {
 	// sending holds owner acceptances of effects that were authorized
 	// but not yet sent; each is reported once its send ends (L3 MUST-1
 	// on #101), never for a failed send or a changed draft.
-	sending map[string]OwnerVerdict
-	wg      sync.WaitGroup
+	sending map[string]pending
+	// implicit holds implicit acceptances of sent auto-replies until
+	// LateRelease after the send, reported only if the owner did not
+	// text UNDO meanwhile (L3 MUST-4 on #109).
+	implicit []heldImplicit
+	wg       sync.WaitGroup
+}
+
+// pending is an owner verdict not yet reported, and the request it
+// answered (an auto-reply's UNDO ID).
+type pending struct {
+	v   OwnerVerdict
+	req string
+}
+
+// heldImplicit is an implicit acceptance waiting out the late-UNDO grace.
+type heldImplicit struct {
+	in  journal.Intent
+	req string
+	due time.Time
 }
 
 // wait is an intent waiting on the owner.
@@ -276,7 +297,9 @@ type decision struct {
 	asked, implicit bool
 	// late is set when it released an auto-reply whose silence is not the
 	// owner's (owner Queued.Late): no verdict (security B1(a) on PW3).
-	late  bool
+	late bool
+	// req is the request the decision answered (an auto-reply's ID).
+	req   string
 	at    time.Time
 	item  owner.Item
 	local bool
@@ -313,7 +336,7 @@ func New(cfg Config) *Gate {
 	return &Gate{cfg: cfg, grants: map[string]*Grant{},
 		waiting: map[string]*wait{}, decided: map[string]decision{}, confirmed: map[string]bool{}, failed: map[string]string{},
 		carried: map[string]bool{}, forms: checkForms(cfg), derived: map[string]bool{}, staging: map[string]chan struct{}{},
-		retry: map[string]string{}, after: map[string]afterRef{}, sending: map[string]OwnerVerdict{}, reported: map[string]bool{}}
+		retry: map[string]string{}, after: map[string]afterRef{}, sending: map[string]pending{}, reported: map[string]bool{}}
 }
 
 // checkForms keeps the forms reversible.Check accepts against each
@@ -1428,7 +1451,7 @@ func (g *Gate) Decide(d owner.Decision) {
 	implicit := unheld && d.Why == whyReleased
 	late := unheld && d.Why == whyReleasedLate
 	g.decided[d.Ref] = decision{approved: d.Approved, why: why, asked: w != nil, implicit: implicit, late: late,
-		at: g.cfg.Now(), item: item, local: local, hold: hold, attempt: attempt, tries: tries}
+		req: d.Request, at: g.cfg.Now(), item: item, local: local, hold: hold, attempt: attempt, tries: tries}
 	wait := d.Approved && local && !g.confirmed[d.Ref]
 	own := g.own
 	g.mu.Unlock()
@@ -1788,8 +1811,8 @@ func (g *Gate) settle(id string) {
 			// (stale approval, changed state) is not (change C7).
 			g.cfg.Changes.Decided(ctx, st.Intent, !d.approved && d.why == "owner")
 		}
-		switch v := ownerVerdict(d, st); {
-		case v == "" || g.cfg.Outcome == nil:
+		switch v := (pending{ownerVerdict(d, st), d.req}); {
+		case v.v == "" || g.cfg.Outcome == nil:
 		case st.State == journal.Authorized || st.State == journal.InFlight:
 			// STOP, a fence, or a slow send: the acceptance waits for
 			// the send to end (endHeld, from Dispatch or Tick).
@@ -1861,18 +1884,57 @@ func (g *Gate) reportOnce(id string) bool {
 	return true
 }
 
-// reportSent reports verdict v on st once it is final. An acceptance
+// reportSent reports verdict p on st once it is final. An acceptance
 // counts only once the effect was sent (or may have been); a failed send
-// or a changed draft (not_applied) is not the owner's verdict.
-func (g *Gate) reportSent(v OwnerVerdict, st journal.Status) {
+// or a changed draft (not_applied) is not the owner's verdict. An implicit
+// acceptance waits a further LateRelease for a late UNDO (reportImplicit).
+func (g *Gate) reportSent(p pending, st journal.Status) {
+	v := p.v
 	if v == "" || g.cfg.Outcome == nil {
 		return
 	}
 	if (v == OwnerAccepted || v == OwnerAcceptedImplicitly) && st.State != journal.Succeeded && st.State != journal.OutcomeUnknown {
 		return
 	}
+	if v == OwnerAcceptedImplicitly {
+		g.mu.Lock()
+		if len(g.implicit) < maxReported {
+			g.implicit = append(g.implicit, heldImplicit{in: st.Intent, req: p.req, due: g.cfg.Now().Add(owner.LateRelease)})
+		} else {
+			g.cfg.Logf("grants: owner verdict not reported: too many implicit acceptances waiting")
+		}
+		g.mu.Unlock()
+		return
+	}
 	if g.reportOnce(st.Intent.ID) {
 		g.report(OwnerOutcome{Intent: st.Intent, Verdict: v})
+	}
+}
+
+// reportImplicit reports the implicit acceptances whose grace has passed,
+// except one the owner texted UNDO for after its release: that reply was
+// not let go, it was too late to stop (L3 MUST-4 on #109).
+func (g *Gate) reportImplicit(own Owner) {
+	now := g.cfg.Now()
+	g.mu.Lock()
+	var due []heldImplicit
+	keep := g.implicit[:0]
+	for _, h := range g.implicit {
+		if now.Before(h.due) {
+			keep = append(keep, h)
+		} else {
+			due = append(due, h)
+		}
+	}
+	g.implicit = keep
+	g.mu.Unlock()
+	for _, h := range due {
+		if own.UndoneAfterRelease(h.req) {
+			continue
+		}
+		if g.reportOnce(h.in.ID) {
+			g.report(OwnerOutcome{Intent: h.in, Verdict: OwnerAcceptedImplicitly})
+		}
 	}
 }
 
@@ -1925,6 +1987,7 @@ func (g *Gate) Tick() {
 	if own == nil {
 		return
 	}
+	g.reportImplicit(own)
 	now := g.cfg.Now()
 	for _, q := range own.DueAutoReplies() {
 		why := whyReleased

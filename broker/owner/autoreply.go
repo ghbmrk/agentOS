@@ -151,9 +151,19 @@ func (c *Channel) DueAutoReplies() []Queued {
 	for id, t := range c.released {
 		if now.Sub(t) >= RetireFor {
 			delete(c.released, id)
+			delete(c.lateUndo, id)
 		}
 	}
 	return out
+}
+
+// UndoneAfterRelease reports whether the owner texted UNDO for id after
+// it was released: too late to stop it, but not silence the owner chose,
+// so the gate reports no implicit acceptance for it (L3 MUST-4 on #109).
+func (c *Channel) UndoneAfterRelease(id string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lateUndo[id]
 }
 
 // ResumeWindow is the fresh undo window RESUME gives each held effect or
@@ -168,6 +178,7 @@ func (c *Channel) undoLocked(id string, now time.Time, decided *[]Decision) stri
 	q := c.queued[id]
 	if q == nil {
 		if _, ok := c.released[id]; ok {
+			c.lateUndo[id] = true
 			return fmt.Sprintf("%s is past its undo window; it was released.", id)
 		}
 		return fmt.Sprintf("Nothing to undo for %s.", id)

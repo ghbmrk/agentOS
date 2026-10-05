@@ -934,6 +934,81 @@ func TestImplicitAcceptancesAreCappedAndWeighHalf(t *testing.T) {
 	must(t, implicit("next-day"))
 }
 
+// L3 MUST-1 and MUST-2 on #109: concurrent harvests never overshoot the
+// lineage's cap, and guests that renew their lineage (recreated machines)
+// share a box-wide daily ceiling.
+func TestImplicitCapsHoldUnderConcurrencyAndRenewedLineages(t *testing.T) {
+	r := newRig(t)
+	cs := &cases{}
+	now := time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)
+	h := &Harvester{J: r.eng, Pipeline: cs, Store: &change.MemStore{}, Now: func() time.Time { return now }}
+	task := func(id, machine string) {
+		in := journal.Intent{ID: id, GoalID: "g" + id, Origin: "guest:" + machine, Account: "mail", Action: "send",
+			Executor: "task", Machine: machine, Label: "private"}
+		if _, err := r.eng.Submit(in); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.eng.Authorize(context.Background(), id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.eng.Dispatch(context.Background(), id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	harvest := func(id string) error {
+		return h.Harvest(Outcome{Intent: id, Action: Implicit, Input: []byte("task"), Output: []byte("reply")})
+	}
+	const n = 40
+	for i := 0; i < n; i++ {
+		task(fmt.Sprint("c", i), "burst")
+	}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	ok, capped := 0, 0
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			err := harvest(id)
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err == nil:
+				ok++
+			case errors.Is(err, ErrImplicitCap):
+				capped++
+			default:
+				t.Errorf("%s: %v", id, err)
+			}
+		}(fmt.Sprint("c", i))
+	}
+	wg.Wait()
+	if ok != MaxImplicitPerDay || capped != n-MaxImplicitPerDay || len(cs.got) != MaxImplicitPerDay {
+		t.Fatalf("%d concurrent harvests: %d kept, %d capped, %d cases", n, ok, capped, len(cs.got))
+	}
+	// Renewed lineages: each is under its own cap, but the box's is shared.
+	kept := ok
+	for m := 0; kept < MaxImplicitBoxPerDay; m++ {
+		id := fmt.Sprint("r", m)
+		task(id, fmt.Sprint("renewed-", m))
+		must(t, harvest(id))
+		kept++
+	}
+	task("one-more", "renewed-new")
+	if err := harvest("one-more"); !errors.Is(err, ErrImplicitCap) {
+		t.Fatalf("over the box's daily cap: %v", err)
+	}
+	now = now.Add(24 * time.Hour)
+	task("tomorrow", "renewed-new")
+	must(t, harvest("tomorrow"))
+	h.mu.Lock()
+	days := len(h.st.Daily)
+	h.mu.Unlock()
+	if days != 2 { // the lineage and the box, today's only
+		t.Fatalf("old daily counts kept: %d entries", days)
+	}
+}
+
 // Potency C3(c), L14: implicit gain counts half toward a proposal's value;
 // and the digest counts the ideas the explicit-case anchor sent to the
 // owner instead of adopting (potency on the PW3 design).
@@ -955,12 +1030,12 @@ func TestImplicitGainWeighsHalfAndAnchorHoldsAreCounted(t *testing.T) {
 	l.asked("b", held("c2"))
 	l.asked("lapsed", held("c3")) // no longer waiting: the owner channel lists it (L18)
 	l.asked("c", change.Report{State: change.StateAwaitingOwner})
-	if d := strings.Join(l.Digest(), "\n"); !strings.Contains(d, "Learning: 2 ideas are waiting for your approval instead of taking effect on their own, because none was tested on a task you approved.") {
+	if d := strings.Join(l.Digest(), "\n"); !strings.Contains(d, "Learning: 2 ideas are waiting for your approval instead of taking effect on their own, because none was tested on a task you said YES to.") {
 		t.Fatalf("digest %q", d)
 	}
 	l.asked("c", change.Report{State: change.StateRejected})
 	l.asked("b", change.Report{State: change.StateRejected})
-	if d := strings.Join(l.Digest(), "\n"); d != "Learning: 1 idea is waiting for your approval instead of taking effect on its own, because it wasn't tested on a task you approved." {
+	if d := strings.Join(l.Digest(), "\n"); d != "Learning: 1 idea is waiting for your approval instead of taking effect on its own, because it wasn't tested on a task you said YES to." {
 		t.Fatalf("digest for one %q", d)
 	}
 	l.asked("a", change.Report{State: change.StateAdopted})
@@ -1129,5 +1204,25 @@ func TestKeptCandidatesAreBounded(t *testing.T) {
 	l.propose(context.Background(), hyp(fmt.Sprintf("k%d", maxKeptCandidates), "t"), Evidence{})
 	if len(b.got()) != before {
 		t.Fatal("the newest kept candidate was rebuilt")
+	}
+}
+
+// devOnly is a pipeline whose dev split is fixed.
+type devOnly struct {
+	cases
+	dev []change.Case
+}
+
+func (d *devOnly) Dev(change.Class) []change.Case { return d.dev }
+
+// L3 MUST-3 on #109: a builder's brief never carries an implicit case,
+// even on the dev side (change C17).
+func TestABriefNeverCarriesAnImplicitCase(t *testing.T) {
+	p := &devOnly{dev: []change.Case{{ID: "e", Input: []byte("x")}, {ID: "i", Implicit: true}}}
+	h := &Harvester{J: newRig(t).eng, Pipeline: p, Store: &change.MemStore{}}
+	ev, err := h.Evidence()
+	must(t, err)
+	if len(ev.Dev) != 1 || ev.Dev[0].ID != "e" {
+		t.Fatalf("brief's dev cases: %+v", ev.Dev)
 	}
 }

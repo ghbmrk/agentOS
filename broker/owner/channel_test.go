@@ -751,8 +751,16 @@ func TestAutoReplyAlertUndoAndCommitmentFilter(t *testing.T) {
 	if due := r.ch.DueAutoReplies(); len(due) != 1 || due[0].Reply.Ref != "r2" {
 		t.Fatalf("due %+v", due)
 	}
+	if r.ch.UndoneAfterRelease(res.Queued.ID) {
+		t.Fatal("released reply marked undone before any UNDO")
+	}
 	if got := r.say("UNDO " + res.Queued.ID); got != res.Queued.ID+" is past its undo window; it was released." {
 		t.Fatalf("undo after send: %q", got)
+	}
+	// L3 MUST-4 on #109: the late UNDO is kept, so the reply's silence is
+	// never read as the owner's acceptance.
+	if !r.ch.UndoneAfterRelease(res.Queued.ID) || r.ch.UndoneAfterRelease(id) {
+		t.Fatal("late UNDO not recorded, or recorded for a reply cancelled in time")
 	}
 
 	// A commitment makes it a normal approval request.
@@ -809,5 +817,18 @@ func TestAutoReplySilenceCountsOnlyOnTime(t *testing.T) {
 	r.advance(DefaultUndoWindow + LateRelease + time.Second)
 	if q := due(); !q.Late {
 		t.Fatal("a late release was not marked late")
+	}
+
+	// An alert whose send never returned before the release (Alerted
+	// zero) was never confirmed shown: no silence either.
+	queue("r4")
+	r.ch.mu.Lock()
+	for _, q := range r.ch.queued {
+		q.Alerted = time.Time{}
+	}
+	r.ch.mu.Unlock()
+	r.advance(DefaultUndoWindow)
+	if q := due(); !q.Late {
+		t.Fatal("a release with an unconfirmed alert was not marked late")
 	}
 }

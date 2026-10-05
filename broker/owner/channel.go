@@ -145,6 +145,7 @@ type Channel struct {
 	open     map[string]*request
 	queued   map[string]*Queued
 	released map[string]time.Time // queued IDs released, for UNDO's reply
+	lateUndo map[string]bool      // released IDs the owner texted UNDO for
 	resume   *resumeCode
 	// lineFailed is when the box's line last failed to send (unix nanos
 	// of cfg.Now), so a queued reply's silence is not read as the
@@ -229,7 +230,7 @@ func New(cfg Config) (*Channel, error) {
 		cfg:    cfg,
 		codes:  codes{sec: cfg.Secrets, verify: cfg.Verifier, st: st, store: cfg.Store, rand: cfg.Rand},
 		open:   map[string]*request{},
-		queued: map[string]*Queued{}, released: map[string]time.Time{},
+		queued: map[string]*Queued{}, released: map[string]time.Time{}, lateUndo: map[string]bool{},
 		boot: &bootReport{pending: st.Pending, queued: st.Queued},
 	}
 	if cfg.Modem != nil {

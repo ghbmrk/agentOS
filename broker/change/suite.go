@@ -155,13 +155,20 @@ func (p *Pipeline) addCase(c Case) error {
 }
 
 // Dev returns the dev split for a class: the only cases a candidate's
-// builder may see (CHG-1). Held-out and security cases are never returned.
+// builder may see (CHG-1). Held-out and security cases are never returned,
+// and an implicit case comes without its input and reply (C17).
 func (p *Pipeline) Dev(class Class) []Case {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	var out []Case
 	for _, c := range p.st.Cases {
 		if !c.Security && (c.Class == class || c.Class == ClassTask && taskClasses[class]) && splitOf(p.key, splitKey(c), p.cfg.DevPercent) == dev {
+			if c.Implicit {
+				// Counted, never read: its reply is one no owner looked
+				// at, which an injected guest may have written (C17;
+				// arbitrator "count, not content", L3 MUST-3 on #109).
+				c.Input, c.Expect = nil, nil
+			}
 			out = append(out, c)
 		}
 	}

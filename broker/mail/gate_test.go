@@ -57,6 +57,7 @@ func (o *ownerFake) QueueAutoReply(ar owner.AutoReply) (owner.QueueResult, error
 	return owner.QueueResult{Queued: &owner.Queued{ID: "Q", SendAt: o.now().Add(10 * time.Minute), Reply: ar}}, nil
 }
 func (o *ownerFake) DueAutoReplies() []owner.Queued { return nil }
+func (o *ownerFake) UndoneAfterRelease(string) bool { return false }
 func (o *ownerFake) Inform(string) error            { return nil }
 
 func (o *ownerFake) last() (string, []owner.Item) {

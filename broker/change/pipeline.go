@@ -232,6 +232,11 @@ type Score struct {
 	Implicit               int `json:"implicit,omitempty"`
 	ImplicitPassed         int `json:"implicit_passed,omitempty"`
 	ImplicitBaselinePassed int `json:"implicit_baseline_passed,omitempty"`
+	// EndorsedPassed counts the passed explicit cases whose reference the
+	// owner approved (YES) or wrote (an edit): only these anchor an
+	// auto-adoption (C17; L3 SHOULD-5 on #109), since not repeating a
+	// refused item is a weaker signal.
+	EndorsedPassed int `json:"endorsed_passed,omitempty"`
 	// Security fixtures on the baseline, so Recheck blames an adoption
 	// only for a fixture the state without it passes.
 	BaselineSecurityPassed int   `json:"baseline_security_passed"`
@@ -586,7 +591,7 @@ func (p *Pipeline) proposeInner(ctx context.Context, c Candidate, security bool)
 	// evidence: it goes to the owner, marked not tested, or for an attested
 	// security release rests on the signatures and attestation (UPD-8).
 	enough := weighed(rep.Score) >= p.cfg.MinHeldOut && rep.Security >= p.cfg.MinSecurity && rep.NotEvaluated == 0
-	anchored := rep.Passed > rep.ImplicitPassed
+	anchored := rep.EndorsedPassed > 0
 	switch {
 	case c.Source == Local && cl.neutral && auto && enough && anchored:
 		rep.Basis = BasisStanding
@@ -931,6 +936,9 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 		}
 		if pr.NextOK {
 			s.Passed++
+		}
+		if pr.NextOK && !c.Implicit && (c.Outcome == Accepted || c.Outcome == Corrected) {
+			s.EndorsedPassed++
 		}
 		if c.Implicit {
 			s.Implicit++
