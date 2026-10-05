@@ -33,7 +33,18 @@ const (
 	DefaultMaxOpen      = 8
 	DefaultSendsPerHour = 3 // CH-15's default for unsolicited texts
 	DefaultRestartGrace = 2 * time.Minute
-	DefaultKeep         = 7 * 24 * time.Hour
+	DefaultKeep         = 4 * 24 * time.Hour
+	// DefaultWaitersPerMachine is how many owner_question_status calls
+	// one machine may hold open at once (PQ3): the guest plane serves a
+	// machine 8 requests at a time (guest G1), and its bridge holds one
+	// for owner messages, so two leaves the rest for effects and models.
+	DefaultWaitersPerMachine = 2
+
+	// MaxPerText is how many questions share one owner text (PQ1).
+	MaxPerText = 3
+	// MaxPoll bounds one owner_question_status wait (PQ3), as the guest
+	// plane's own /owner/next poll is bounded.
+	MaxPoll = 25 * time.Second
 
 	MaxText = 200 // runes
 	// MaxRendered is the longest owner text a question may render to, in
@@ -70,6 +81,9 @@ const (
 	Answered State = "answered"
 	// Defaulted: no reply by the deadline; the default stands.
 	Defaulted State = "defaulted"
+	// NotAsked: still unsent when the asker's ask-by time passed, so the
+	// owner never saw it (PQ2).
+	NotAsked State = "not_asked"
 )
 
 // Spec is what a guest asks.
@@ -82,6 +96,10 @@ type Spec struct {
 	// Wait is how long after the owner is texted the default takes over.
 	// It is clamped to [MinWait, MaxWait].
 	Wait time.Duration
+	// AskWithin, when set, is how long after asking the question may
+	// still be texted; past it, an unsent question closes NotAsked (PQ2).
+	// It is clamped to [MinWait, MaxWait].
+	AskWithin time.Duration
 }
 
 // Status is what the asker learns.
@@ -144,6 +162,7 @@ type Config struct {
 	MinWait, MaxWait  time.Duration
 	PerAsker, MaxOpen int
 	SendsPerHour      int
+	WaitersPerMachine int
 	RestartGrace      time.Duration
 	Keep              time.Duration
 }
@@ -156,6 +175,10 @@ type entry struct {
 	Default string        `json:"default"`
 	Choices []string      `json:"choices,omitempty"`
 	Wait    time.Duration `json:"wait"`
+	// AskWithin is the asker's ask-by, counted from Asked: the first
+	// trusted time after the question was asked (PQ2).
+	AskWithin time.Duration `json:"ask_within,omitempty"`
+	Asked     time.Time     `json:"asked,omitempty"`
 
 	State     State     `json:"state"`
 	Sent      time.Time `json:"sent,omitempty"`
@@ -168,6 +191,21 @@ type entry struct {
 
 func (e *entry) open() bool { return e.State == Held || e.State == Waiting }
 
+// due reports whether e may be texted at now: held, never sent, and not
+// past its ask-by.
+func (e *entry) due(now time.Time) bool {
+	return e.State == Held && e.Sent.IsZero() && !e.pastAskBy(now)
+}
+
+func (e *entry) pastAskBy(now time.Time) bool {
+	return e.AskWithin > 0 && !e.Asked.IsZero() && !now.Before(e.Asked.Add(e.AskWithin))
+}
+
+// tagged reports whether e's tag means something to the owner: it is
+// open, or it was texted. A question closed without a text never showed
+// its tag, so the tag is free again (PQ2).
+func (e *entry) tagged() bool { return e.open() || !e.Sent.IsZero() }
+
 type file struct {
 	Next      int      `json:"next"`
 	Questions []*entry `json:"questions"`
@@ -176,10 +214,12 @@ type file struct {
 	Sends     []send   `json:"sends,omitempty"`
 }
 
-// send is one question text, kept an hour for pacing (CH-15).
+// send is one owner text, kept an hour for pacing (CH-15). Others are
+// the askers of further questions that shared it (PQ1).
 type send struct {
-	At    time.Time `json:"at"`
-	Asker string    `json:"asker"`
+	At     time.Time `json:"at"`
+	Asker  string    `json:"asker"`
+	Others []string  `json:"others,omitempty"`
 }
 
 // Book holds the box's questions.
@@ -199,6 +239,11 @@ type Book struct {
 	// the carrier queued while the box was down arrive first.
 	loaded bool
 	grace  time.Time
+	// changed is closed, and replaced, whenever a question changes state,
+	// waking owner_question_status waits (PQ3); waiters counts them by
+	// machine.
+	changed chan struct{}
+	waiters map[string]int
 }
 
 // New opens a Book, loading Config.Path if it exists.
@@ -223,17 +268,19 @@ func New(cfg Config) (*Book, error) {
 	defi(&cfg.PerAsker, DefaultPerAsker)
 	defi(&cfg.MaxOpen, DefaultMaxOpen)
 	defi(&cfg.SendsPerHour, DefaultSendsPerHour)
+	defi(&cfg.WaitersPerMachine, DefaultWaitersPerMachine)
 	if cfg.Location == nil {
 		cfg.Location = time.Local
 	}
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
 	}
-	// Tags are held while their question is kept. Questions close only
-	// after a text, so at most SendsPerHour an hour close; keeping them
-	// for less than tags/SendsPerHour hours means a tag is always free
-	// for an asker under its open cap (P3-8 Q5).
-	if maxKeep := time.Duration((numTags-1)/cfg.SendsPerHour) * time.Hour; cfg.Keep > maxKeep {
+	// Tags are held while their question is kept and was texted (a
+	// question closed unsent frees its tag at once). At most SendsPerHour
+	// texts an hour carry at most MaxPerText questions each, so keeping
+	// them for less than tags/(SendsPerHour*MaxPerText) hours means a tag
+	// is always free for an asker under its open cap (P3-8 Q5).
+	if maxKeep := time.Duration((numTags-1)/(cfg.SendsPerHour*MaxPerText)) * time.Hour; cfg.Keep > maxKeep {
 		cfg.Keep = maxKeep
 	}
 	b := &Book{cfg: cfg}
@@ -313,7 +360,7 @@ func flatten(s string) string {
 }
 
 func (b *Book) normalize(s Spec) (Spec, error) {
-	out := Spec{Text: flatten(s.Text), Default: flatten(s.Default), Wait: s.Wait}
+	out := Spec{Text: flatten(s.Text), Default: flatten(s.Default), Wait: s.Wait, AskWithin: s.AskWithin}
 	switch n := utf8.RuneCountInString(out.Text); {
 	case n == 0:
 		return out, errors.New("question: the question is empty")
@@ -330,6 +377,12 @@ func (b *Book) normalize(s Spec) (Spec, error) {
 		return out, errors.New("question: a wait is required")
 	}
 	out.Wait = min(max(out.Wait, b.cfg.MinWait), b.cfg.MaxWait)
+	if out.AskWithin < 0 {
+		return out, errors.New("question: ask-by must be positive")
+	}
+	if out.AskWithin > 0 {
+		out.AskWithin = min(max(out.AskWithin, b.cfg.MinWait), b.cfg.MaxWait)
+	}
 	if len(s.Choices) > MaxChoices {
 		return out, fmt.Errorf("question: more than %d choices", MaxChoices)
 	}
@@ -558,7 +611,7 @@ func benign(run string) bool {
 const maxJoin = 3
 
 func same(e *entry, s Spec) bool {
-	if e.Text != s.Text || e.Default != s.Default || e.Wait != s.Wait || len(e.Choices) != len(s.Choices) {
+	if e.Text != s.Text || e.Default != s.Default || e.Wait != s.Wait || e.AskWithin != s.AskWithin || len(e.Choices) != len(s.Choices) {
 		return false
 	}
 	for i := range e.Choices {
@@ -580,6 +633,7 @@ func (b *Book) Ask(ctx context.Context, asker, req string, s Spec) (Status, erro
 	if err != nil {
 		return Status{}, err
 	}
+	now, clockErr := b.cfg.Now(ctx)
 	b.mu.Lock()
 	if e := b.findLocked(asker, req); e != nil {
 		b.mu.Unlock()
@@ -606,7 +660,11 @@ func (b *Book) Ask(ctx context.Context, asker, req string, s Spec) (Status, erro
 		b.mu.Unlock()
 		return Status{}, ErrTooMany
 	}
-	e := &entry{ID: id, Asker: asker, Req: req, Text: s.Text, Default: s.Default, Choices: s.Choices, Wait: s.Wait, State: Held}
+	e := &entry{ID: id, Asker: asker, Req: req, Text: s.Text, Default: s.Default, Choices: s.Choices, Wait: s.Wait,
+		AskWithin: s.AskWithin, State: Held}
+	if e.AskWithin > 0 && clockErr == nil {
+		e.Asked = now // else the first trusted tick sets it
+	}
 	b.qs = append(b.qs, e)
 	if err := b.persist(); err != nil {
 		b.qs = b.qs[:len(b.qs)-1]
@@ -631,7 +689,9 @@ const (
 func (b *Book) allocLocked() string {
 	used := map[string]bool{}
 	for _, e := range b.qs {
-		used[e.ID] = true
+		if e.tagged() {
+			used[e.ID] = true
+		}
 	}
 	if b.next < firstTag {
 		b.next = firstTag - 1
@@ -656,7 +716,7 @@ func (b *Book) findLocked(asker, req string) *entry {
 
 func (b *Book) byIDLocked(id string) *entry {
 	for _, e := range b.qs {
-		if strings.EqualFold(e.ID, id) {
+		if e.tagged() && strings.EqualFold(e.ID, id) {
 			return e
 		}
 	}
@@ -683,6 +743,8 @@ func (b *Book) Status(ctx context.Context, asker, req, machine string) (Status, 
 		st.Answer, st.FromOwner = e.Answer, true
 	case Defaulted:
 		st.Answer = e.Default
+	case NotAsked:
+		st.Reason = "not texted by its ask-by time (pacing, quiet hours or the clock check), so the owner never saw it"
 	}
 	b.mu.Unlock()
 	if clockErr != nil && (st.State == Held || st.State == Waiting) {
@@ -706,8 +768,10 @@ func (b *Book) Status(ctx context.Context, asker, req, machine string) (Status, 
 }
 
 // sendDue texts held questions, oldest first, while the clock is trusted,
-// it is not quiet hours, and the hourly budget allows (CH-15). A question's
-// deadline starts when its text is sent; a failed text leaves it held.
+// it is not quiet hours, and the hourly budget allows (CH-15). One text
+// carries up to MaxPerText questions that fit in it together (PQ1), so
+// the budget counts texts, not questions. A question's deadline starts
+// when its text is sent; a failed text leaves them all held.
 func (b *Book) sendDue(ctx context.Context) {
 	b.sendMu.Lock()
 	defer b.sendMu.Unlock()
@@ -723,28 +787,47 @@ func (b *Book) sendDue(ctx context.Context) {
 			if now.Sub(t.At) < time.Hour {
 				keep = append(keep, t)
 				recent[t.Asker] = true
+				for _, a := range t.Others {
+					recent[a] = true
+				}
 			}
 		}
 		b.sends = keep
 		// Oldest first, but an asker texted in the last hour waits behind
 		// one that was not, so one lineage cannot take the whole budget.
-		var e *entry
+		var batch []*entry
 		if len(b.sends) < b.cfg.SendsPerHour {
-			for _, q := range b.qs {
-				if q.State == Held && q.Sent.IsZero() && (e == nil || recent[e.Asker] && !recent[q.Asker]) {
-					e = q
+			for _, fresh := range []bool{true, false} {
+				for _, q := range b.qs {
+					if q.due(now) && recent[q.Asker] != fresh {
+						batch = append(batch, q)
+					}
 				}
 			}
 		}
-		if e == nil {
+		if len(batch) == 0 {
 			b.mu.Unlock()
 			return
 		}
-		deadline := now.Add(e.Wait)
-		text := b.render(e, now, deadline)
+		// The first goes alone if need be; the rest join while the text
+		// still fits and is not withheld as secret-shaped (CH-19).
+		text := b.render(batch[0], now, now.Add(batch[0].Wait))
+		n := 1
+		for _, q := range batch[1:] {
+			if n == MaxPerText {
+				break
+			}
+			t := text + " " + b.render(q, now, now.Add(q.Wait))
+			if len(t) > MaxRendered || b.cfg.Hidden != nil && b.cfg.Hidden(t) {
+				continue
+			}
+			text, batch[n] = t, q
+			n++
+		}
+		batch = batch[:n]
 		b.mu.Unlock()
 		// The shared budget is reserved outside b.mu, and sendMu keeps it
-		// to one question at a time.
+		// to one text at a time.
 		if b.cfg.Reserve != nil && !b.cfg.Reserve(now) {
 			return
 		}
@@ -752,14 +835,29 @@ func (b *Book) sendDue(ctx context.Context) {
 			return
 		}
 		b.mu.Lock()
-		b.sends = append(b.sends, send{At: now, Asker: e.Asker})
-		if e.State == Held { // the owner may have answered meanwhile
-			e.State, e.Sent, e.Deadline = Waiting, now, deadline
-		} else {
-			e.Sent = now
+		s := send{At: now, Asker: batch[0].Asker}
+		for _, e := range batch {
+			if e != batch[0] {
+				s.Others = append(s.Others, e.Asker)
+			}
+			if e.State == Held { // the owner may have answered meanwhile
+				e.State, e.Sent, e.Deadline = Waiting, now, now.Add(e.Wait)
+			} else {
+				e.Sent = now
+			}
 		}
+		b.sends = append(b.sends, s)
+		b.wakeLocked()
 		b.save("send")
 		b.mu.Unlock()
+	}
+}
+
+// wakeLocked wakes every owner_question_status wait (PQ3).
+func (b *Book) wakeLocked() {
+	if b.changed != nil {
+		close(b.changed)
+		b.changed = nil
 	}
 }
 
@@ -806,6 +904,15 @@ func (b *Book) lapseLocked(e *entry, now time.Time) {
 		e.ID, clip(e.Text, 60), b.clock(now, e.Deadline), e.Default))
 }
 
+// notAskedLocked closes e, never texted, past its ask-by (PQ2), and
+// queues its digest line. The owner never saw its tag, so the line has
+// none.
+func (b *Book) notAskedLocked(e *entry, now time.Time) {
+	e.State, e.Closed = NotAsked, now
+	b.digest = append(b.digest, fmt.Sprintf(`Not asked: the agent's question "%s" was held (texts paced, or quiet hours) past %s, so it went on without it.`,
+		clip(e.Text, 60), b.clock(now, e.Asked.Add(e.AskWithin))))
+}
+
 // startGraceLocked starts the restart grace at the first trusted time
 // after questions were loaded from disk.
 func (b *Book) startGraceLocked(now time.Time) {
@@ -830,6 +937,15 @@ func (b *Book) Tick(ctx context.Context) {
 			b.lapseLocked(e, now)
 			changed = true
 		}
+		if e.State == Held && e.Sent.IsZero() && e.AskWithin > 0 {
+			switch {
+			case e.Asked.IsZero():
+				e.Asked, changed = now, true // asked while the clock was restricted
+			case e.pastAskBy(now):
+				b.notAskedLocked(e, now)
+				changed = true
+			}
+		}
 		if !e.open() && e.Closed.IsZero() {
 			e.Closed, changed = now, true // answered while the clock was restricted
 		}
@@ -841,6 +957,7 @@ func (b *Book) Tick(ctx context.Context) {
 	}
 	b.qs = keep
 	if changed {
+		b.wakeLocked()
 		b.save("tick")
 	}
 	b.mu.Unlock()
@@ -961,6 +1078,7 @@ func (b *Book) Answer(ctx context.Context, text string) (reply string, ok bool) 
 	case Defaulted:
 		if e.Late == "" {
 			e.Late = ans
+			b.wakeLocked()
 			b.save("late answer")
 		}
 		return fmt.Sprintf("Too late for %s: the agent went ahead with \"%s\" at %s. Your answer is passed to it.",
@@ -996,5 +1114,63 @@ func (b *Book) Answer(ctx context.Context, text string) (reply string, ok bool) 
 		}
 		return "Could not save your answer. Send it again.", true
 	}
+	b.wakeLocked()
 	return fmt.Sprintf("Got it: %s answered \"%s\".", e.ID, clip(ans, 60)), true
+}
+
+// Await is Status after waiting up to d (at most MaxPoll) for asker's open
+// question to change state: texted, answered, defaulted or not asked
+// (PQ3), so a guest need not spend turns polling. At most
+// WaitersPerMachine waits per machine are held (guest G1); past that, and
+// for a closed question, it answers at once.
+func (b *Book) Await(ctx context.Context, asker, req, machine string, d time.Duration) (Status, error) {
+	if d = min(d, MaxPoll); d > 0 && machine != "" && b.enterWait(machine) {
+		defer b.leaveWait(machine)
+		timer := time.NewTimer(d)
+		defer timer.Stop()
+		var from State
+		for {
+			b.mu.Lock()
+			e := b.findLocked(asker, req)
+			if e == nil || !e.open() || from != "" && e.State != from {
+				b.mu.Unlock()
+				break
+			}
+			from = e.State
+			if b.changed == nil {
+				b.changed = make(chan struct{})
+			}
+			ch := b.changed
+			b.mu.Unlock()
+			select {
+			case <-ch:
+				continue
+			case <-timer.C:
+			case <-ctx.Done():
+			}
+			break
+		}
+	}
+	return b.Status(ctx, asker, req, machine)
+}
+
+func (b *Book) enterWait(machine string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.waiters[machine] >= b.cfg.WaitersPerMachine {
+		return false
+	}
+	if b.waiters == nil {
+		b.waiters = map[string]int{}
+	}
+	b.waiters[machine]++
+	return true
+}
+
+func (b *Book) leaveWait(machine string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.waiters[machine]--; b.waiters[machine] <= 0 {
+		delete(b.waiters, machine)
+	}
 }
