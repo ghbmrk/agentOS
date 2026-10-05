@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
 )
 
@@ -60,6 +61,8 @@ func (a *Adapter) Execute(ctx context.Context, in journal.Intent, attempt int) j
 		return a.draft(ctx, in, attempt, p)
 	case OpSend, OpReply:
 		return a.send(ctx, in, attempt, o, p)
+	case OpDeliver:
+		return a.deliver(ctx, in, attempt, p)
 	}
 	pl, err := a.planOrganize(ctx, o, p)
 	if err != nil {
@@ -107,7 +110,7 @@ func (a *Adapter) Reconcile(ctx context.Context, in journal.Intent, attempt int)
 		return unknown(err)
 	}
 	switch o.Name {
-	case OpDraft, OpSend, OpReply:
+	case OpDraft, OpSend, OpReply, OpDeliver:
 		id := a.messageID(in.ID, attempt)
 		folder := byRole[Sent]
 		if o.Name == OpDraft {
@@ -219,11 +222,15 @@ func (a *Adapter) send(ctx context.Context, in journal.Intent, attempt int, o Op
 		}
 	}
 	id := a.messageID(in.ID, attempt)
-	raw := a.build(h, to, cc, subject, p[ParamBody], id)
-	if err := a.cfg.Store.Submit(ctx, append(append([]string{}, to...), cc...), raw); err != nil {
+	return a.submit(ctx, o.Name, id, append(append([]string{}, to...), cc...), a.build(h, to, cc, subject, p[ParamBody], id))
+}
+
+// submit sends raw and, where the provider does not, saves it to Sent.
+func (a *Adapter) submit(ctx context.Context, op, id string, rcpt []string, raw []byte) journal.Outcome {
+	if err := a.cfg.Store.Submit(ctx, rcpt, raw); err != nil {
 		return unknown(err)
 	}
-	ev := Outgoing{Op: o.Name, MessageID: id}
+	ev := Outgoing{Op: op, MessageID: id}
 	if a.cfg.AppendSent {
 		if byRole, _, err := a.folders(ctx); err == nil && byRole[Sent] != "" {
 			if a.cfg.Store.Append(ctx, byRole[Sent], []string{Seen}, a.cfg.Now(), raw) == nil {
@@ -232,6 +239,27 @@ func (a *Adapter) send(ctx context.Context, in journal.Intent, attempt int, o Op
 		}
 	}
 	return succeeded(ev)
+}
+
+// deliver mails the owner a reply at the owner's own address (CH-20). The
+// gate allows it only from the broker and only to the destination the
+// owner set; this re-checks the origin and that the one recipient is the
+// owner's, so even a gate without the delivery rule never lets an agent
+// mail the owner around the owner channel, or anyone else.
+func (a *Adapter) deliver(ctx context.Context, in journal.Intent, attempt int, p map[string]string) journal.Outcome {
+	if in.Origin != grants.OriginEvidence {
+		return notApplied(errors.New("mail: only the broker delivers evidence"))
+	}
+	to, err := canonAll(in.Recipients)
+	if err != nil || len(to) != 1 || !a.isSelf(to[0]) {
+		return notApplied(errors.New("mail: evidence goes only to the owner's own address"))
+	}
+	body := p[ParamBody]
+	if a.cfg.Redact != nil {
+		body = a.cfg.Redact(body)
+	}
+	id := a.messageID(in.ID, attempt)
+	return a.submit(ctx, OpDeliver, id, to, a.build(header{}, to, nil, DeliverSubject, body, id))
 }
 
 // messageID is the outgoing Message-ID of an attempt: stable, so

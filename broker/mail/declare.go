@@ -34,7 +34,15 @@ const (
 	OpUnstar     = "mail.unstar"
 	OpDelete     = "mail.delete"
 	OpReportSpam = "mail.report_spam"
+	// OpDeliver mails the owner an agent reply too private for a text
+	// (CH-20). Only the broker submits it, to the destination the owner
+	// set; its one recipient is the account's own address.
+	OpDeliver = "mail.deliver"
 )
+
+// DeliverSubject is the fixed subject of an OpDeliver message: nothing
+// the agent writes is in it.
+const DeliverSubject = "Your agent's reply"
 
 // Params.
 const (
@@ -60,6 +68,7 @@ type Op struct {
 }
 
 var ops = []Op{
+	{Name: OpDeliver, Verb: verb.Share, Required: []string{ParamBody}},
 	{Name: OpDraft, Verb: verb.Draft, Required: []string{ParamBody}, Optional: []string{ParamSubject, ParamRecord}},
 	{Name: OpSend, Verb: verb.Send, Required: []string{ParamSubject, ParamBody}},
 	// A reply carries exactly record and body, so an ADP-11 reply rule can

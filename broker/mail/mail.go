@@ -158,6 +158,11 @@ type Config struct {
 	// do not (Gmail does; most IMAP servers do not).
 	AppendSent bool
 
+	// Redact, if set, rewrites an OpDeliver body before it is sent: the
+	// vault process passes its redactor, so no vault value leaves in
+	// evidence (CRED-7).
+	Redact func(string) string
+
 	Now func() time.Time
 }
 
@@ -235,6 +240,13 @@ func canon(s string) (string, bool) {
 // one that differs only in dots in the local part.
 func (a *Adapter) isSelf(addr string) bool {
 	return a.self[addr] || a.self[selfKey(addr)]
+}
+
+// Owns reports whether addr is one of the owner's addresses on this
+// account: the evidence destination must be (CH-20).
+func (a *Adapter) Owns(addr string) bool {
+	c, ok := canon(addr)
+	return ok && a.isSelf(c)
 }
 
 // selfKey is addr with a +tag removed and, for Gmail's domains, the dots
