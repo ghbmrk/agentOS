@@ -1,7 +1,6 @@
 package replay
 
 import (
-	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/journal"
 )
 
@@ -11,17 +10,23 @@ type Journal interface {
 	List() []journal.Status
 }
 
-// JournalRecordings reads a case's recorded effects from the journal: the
-// intents of the case's task. A task is the intents sharing the case
-// intent's goal ID, or, for intents with none, its origin (the guest
-// lineage that ran it). Broker-state intents are never recordings.
-type JournalRecordings struct{ J Journal }
+// JournalRecordings reads a probe's recorded effects from the journal: the
+// intents of its case's task. Task maps an opaque probe ID to the journal
+// intent the case was recorded on; it is the broker's (the change
+// pipeline's case store), never the evaluator's. A task is the intents
+// sharing that intent's goal ID, or, for intents with none, its origin (the
+// guest lineage that ran it). Broker-state intents are never recordings.
+type JournalRecordings struct {
+	J    Journal
+	Task func(probeID string) (intentID string, ok bool)
+}
 
-func (r JournalRecordings) Effects(c change.Case) ([]journal.Status, error) {
-	if c.Task == "" {
-		return nil, nil // security fixtures: no recorded effects
+func (r JournalRecordings) Effects(probeID string) ([]journal.Status, error) {
+	task, ok := r.Task(probeID)
+	if !ok || task == "" {
+		return nil, nil // no task (a security fixture): nothing recorded
 	}
-	t, err := r.J.Get(c.Task)
+	t, err := r.J.Get(task)
 	if err != nil {
 		return nil, err
 	}

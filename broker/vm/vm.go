@@ -275,8 +275,16 @@ func (m *Manager) launch(mc *machine) Launch {
 
 // Create admits and starts a new machine from an image.
 func (m *Manager) Create(ctx context.Context, id string, s Spec) (Machine, error) {
+	if strings.HasPrefix(id, EvalPrefix) {
+		return Machine{}, fmt.Errorf("vm: machine ids starting %q are kept for replay", EvalPrefix)
+	}
 	return m.create(ctx, id, s, nil)
 }
+
+// EvalPrefix starts the IDs of replay machines (LOOP-5), whose guest
+// services are replay's, never the live plane's. Only CreateSeeded makes
+// them, and they cannot be forked or forked into.
+const EvalPrefix = "eval-"
 
 // CreateSeeded is Create with files written into the machine's fresh layer
 // before its guest first runs, at paths relative to the guest's root: how
@@ -286,11 +294,22 @@ func (m *Manager) Create(ctx context.Context, id string, s Spec) (Machine, error
 // seed again; the seed is not persisted, so after a broker restart the
 // machine has only its layer.
 func (m *Manager) CreateSeeded(ctx context.Context, id string, s Spec, seed map[string][]byte) (Machine, error) {
-	for p := range seed {
+	var size int64
+	for p, b := range seed {
 		if !filepath.IsLocal(p) || filepath.Clean(p) != p {
 			return Machine{}, fmt.Errorf("vm: bad seed path %q", p)
 		}
+		size += int64(len(b))
 	}
+	// The seed lands on the state disk like a layer copy (RES-4).
+	if m.cfg.MaxLayerBytes > 0 && size > m.cfg.MaxLayerBytes {
+		return Machine{}, fmt.Errorf("%w (seed %d bytes, cap %d)", ErrQuota, size, m.cfg.MaxLayerBytes)
+	}
+	h, err := m.reserveDisk(size)
+	if err != nil {
+		return Machine{}, fmt.Errorf("%s: seed: %w", id, err)
+	}
+	defer h.release()
 	return m.create(ctx, id, s, seed)
 }
 
@@ -874,7 +893,13 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 	if len(ids) == 0 {
 		return Snapshot{}, errors.New("vm: fork needs at least one new machine")
 	}
+	if strings.HasPrefix(id, EvalPrefix) {
+		return Snapshot{}, fmt.Errorf("vm: replay machine %s cannot be forked", id)
+	}
 	for _, f := range ids {
+		if strings.HasPrefix(f, EvalPrefix) {
+			return Snapshot{}, fmt.Errorf("vm: machine ids starting %q are kept for replay", EvalPrefix)
+		}
 		if !idRE.MatchString(f) {
 			return Snapshot{}, fmt.Errorf("vm: bad machine id %q", f)
 		}

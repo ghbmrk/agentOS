@@ -24,6 +24,7 @@
 package replay
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -43,11 +44,17 @@ import (
 	"github.com/ghbmrk/agentos/broker/vm"
 )
 
-// Prefix starts every replay machine's ID. Services routes on it.
-const Prefix = "eval-"
+// Prefix starts every replay machine's ID. Services routes on it, and the
+// machine manager keeps it for replay (vm.EvalPrefix).
+const Prefix = vm.EvalPrefix
 
 // TreeDir is where the guest finds the tree under evaluation.
 const TreeDir = "etc/agentos/tree"
+
+// untested are the namespaces a replay cannot exercise: it boots the
+// configured image and guest configuration, not the tree's. A tree that
+// changes them is not evaluated (ErrNotEvaluated).
+var untested = []string{"config", "guest-image", "host-image"}
 
 // guestNamespaces are the tree namespaces a guest reads. Routing is applied
 // on the broker side (Config.Model); the authority and governance
@@ -58,18 +65,25 @@ var guestNamespaces = map[string]bool{"procedures": true, "skills": true, "conte
 type Machines interface {
 	CreateSeeded(ctx context.Context, id string, s vm.Spec, seed map[string][]byte) (vm.Machine, error)
 	Destroy(ctx context.Context, id string) error
+	Machines() []string
 }
 
-// Recordings supplies the effects recorded for a case: the journaled
-// intents of the real task it came from.
+// Recordings supplies the effects recorded for a probe: the journaled
+// intents of the real task its case came from. The probe ID is opaque to
+// the evaluator; the lookup is the broker's (the change pipeline's case
+// store). A probe with no task, such as a security fixture, has none.
 type Recordings interface {
-	Effects(c change.Case) ([]journal.Status, error)
+	Effects(probeID string) ([]journal.Status, error)
 }
 
 // Config configures New.
 type Config struct {
 	Machines   Machines
 	Recordings Recordings
+	// Active returns the active tree's files in namespace ns (the change
+	// pipeline's Files). A tree that differs from it under the untested
+	// namespaces is not evaluated.
+	Active func(ns string) change.Tree
 	// Spec is the replay machine: Image, MemMB, Argv, Env. Class is always
 	// Experiment and Label private (owner task data, REV-5).
 	Spec vm.Spec
@@ -91,7 +105,14 @@ var (
 	ErrUnrecorded = errors.New("replay: unrecorded effect; replay fails closed")
 	// ErrNoReply: the guest did not answer within the run's time.
 	ErrNoReply = errors.New("replay: no reply from the guest")
+	// ErrNotEvaluated: the tree changes what a replay cannot run (the
+	// image or the guest configuration), so it was not tested on this box.
+	// It is never a pass.
+	ErrNotEvaluated = errors.New("replay: not tested on this box (changes the image or configuration)")
 )
+
+// destroyTimeout bounds destroying a replay machine after its run.
+const destroyTimeout = 2 * time.Minute
 
 // Evaluator implements change.Evaluator. It is also the vm.Services for
 // replay machines (see Services).
@@ -104,8 +125,8 @@ type Evaluator struct {
 
 // New checks cfg and starts the replay plane.
 func New(cfg Config) (*Evaluator, error) {
-	if cfg.Machines == nil || cfg.Recordings == nil || cfg.Dir == "" || cfg.Spec.Image == "" {
-		return nil, errors.New("replay: Machines, Recordings, Dir, and Spec.Image are required")
+	if cfg.Machines == nil || cfg.Recordings == nil || cfg.Active == nil || cfg.Dir == "" || cfg.Spec.Image == "" {
+		return nil, errors.New("replay: Machines, Recordings, Active, Dir, and Spec.Image are required")
 	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 10 * time.Minute
@@ -140,6 +161,16 @@ func New(cfg Config) (*Evaluator, error) {
 		return nil, fmt.Errorf("replay: %w", err)
 	}
 	e.plane = p
+	// Replay machines left by an earlier broker run belong to no run.
+	for _, id := range cfg.Machines.Machines() {
+		if strings.HasPrefix(id, Prefix) {
+			ctx, cancel := context.WithTimeout(context.Background(), destroyTimeout)
+			if err := cfg.Machines.Destroy(ctx, id); err != nil {
+				cfg.Logf("replay: destroy leftover %s: %v", id, err)
+			}
+			cancel()
+		}
+	}
 	return e, nil
 }
 
@@ -159,9 +190,14 @@ func (r *run) failed(err error) {
 	r.once.Do(func() { r.fail <- err })
 }
 
-// Run replays case c on tree t and returns the guest's reply.
-func (e *Evaluator) Run(ctx context.Context, t change.Tree, c change.Case) ([]byte, error) {
-	recs, err := e.cfg.Recordings.Effects(c)
+// Run replays probe c on tree t and returns the guest's reply.
+func (e *Evaluator) Run(ctx context.Context, t change.Tree, c change.Probe) ([]byte, error) {
+	for _, ns := range untested {
+		if !sameFiles(inNamespace(t, ns), e.cfg.Active(ns)) {
+			return nil, fmt.Errorf("%w: %s", ErrNotEvaluated, ns)
+		}
+	}
+	recs, err := e.cfg.Recordings.Effects(c.ID)
 	if err != nil {
 		return nil, fmt.Errorf("replay: recordings for %s: %w", c.ID, err)
 	}
@@ -189,7 +225,9 @@ func (e *Evaluator) Run(ctx context.Context, t change.Tree, c change.Case) ([]by
 		return nil, fmt.Errorf("replay: start %s: %w", c.ID, err)
 	}
 	defer func() {
-		if err := e.cfg.Machines.Destroy(context.WithoutCancel(ctx), r.id); err != nil {
+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), destroyTimeout)
+		defer cancel()
+		if err := e.cfg.Machines.Destroy(dctx, r.id); err != nil {
 			e.cfg.Logf("replay: destroy %s: %v", r.id, err)
 		}
 	}()
@@ -208,6 +246,29 @@ func (e *Evaluator) Run(ctx context.Context, t change.Tree, c change.Case) ([]by
 	case <-ctx.Done():
 		return nil, fmt.Errorf("replay %s: %w: %v", c.ID, ErrNoReply, ctx.Err())
 	}
+}
+
+func inNamespace(t change.Tree, ns string) change.Tree {
+	out := change.Tree{}
+	for p, b := range t {
+		if first, _, _ := strings.Cut(p, "/"); first == ns {
+			out[p] = b
+		}
+	}
+	return out
+}
+
+func sameFiles(a, b change.Tree) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for p, x := range a {
+		y, ok := b[p]
+		if !ok || !bytes.Equal(x, y) {
+			return false
+		}
+	}
+	return true
 }
 
 // seed lays the guest-facing part of t out under TreeDir. Tree paths are

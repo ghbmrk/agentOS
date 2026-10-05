@@ -1,6 +1,6 @@
 package replay
 
-// REQ: LOOP-5, CHG-1
+// REQ: LOOP-5, CHG-1, CHG-3
 
 import (
 	"bytes"
@@ -64,6 +64,16 @@ func (m *machines) Destroy(_ context.Context, id string) error {
 	m.mu.Unlock()
 	m.svc.Close(id)
 	return nil
+}
+
+func (m *machines) Machines() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []string
+	for id := range m.live {
+		out = append(out, id)
+	}
+	return out
 }
 
 func (m *machines) running() int {
@@ -148,7 +158,10 @@ func (g *client) effect(reqID, account, action string, params map[string]any) st
 
 type recs []journal.Status
 
-func (r recs) Effects(change.Case) ([]journal.Status, error) { return r, nil }
+func (r recs) Effects(string) ([]journal.Status, error) { return r, nil }
+
+// active is the active tree's namespaces, as the pipeline's Files gives.
+func active(ns string) change.Tree { return inNamespace(tree, ns) }
 
 func sent(state journal.State) journal.Status {
 	return journal.Status{State: state, Intent: journal.Intent{ID: "g.1/r1", Origin: "guest:g.1",
@@ -168,7 +181,7 @@ func newRig(t *testing.T, r Recordings, s script, mod func(*Config)) *rig {
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	ms := &machines{t: t, guest: s, seeds: map[string]map[string][]byte{}, live: map[string]bool{}}
-	cfg := Config{Machines: ms, Recordings: r, Spec: vm.Spec{Image: "openclaw", MemMB: 512}, Dir: dir, Timeout: 5 * time.Second}
+	cfg := Config{Machines: ms, Recordings: r, Active: active, Spec: vm.Spec{Image: "openclaw", MemMB: 512}, Dir: dir, Timeout: 5 * time.Second}
 	if mod != nil {
 		mod(&cfg)
 	}
@@ -183,6 +196,7 @@ func newRig(t *testing.T, r Recordings, s script, mod func(*Config)) *rig {
 
 var tree = change.Tree{
 	"procedures/send.md": []byte("send the reply"),
+	"config/guest.json":  []byte(`{"tools":"default"}`),
 	"grants/mail.json":   []byte(`{"allow":"all"}`),
 	"routing/rule.json":  []byte(`{"order":["b"]}`),
 }
@@ -191,7 +205,7 @@ func TestLOOP5ReplayAnswersEffectsFromTheRecording(t *testing.T) {
 	r := newRig(t, recs{sent(journal.Succeeded)}, func(g *client, in string) string {
 		return in + ": " + g.effect("x", "owner-mail", "message.send", map[string]any{"text": "hello"})
 	}, nil)
-	out, err := r.e.Run(bg, tree, change.Case{ID: "c1", Input: []byte("reply to Ann")})
+	out, err := r.e.Run(bg, tree, change.Probe{ID: "p1", Input: []byte("reply to Ann")})
 	if err != nil || string(out) != "reply to Ann: succeeded" {
 		t.Fatalf("run = %q, %v", out, err)
 	}
@@ -215,7 +229,7 @@ func TestLOOP5UnrecordedEffectFailsClosed(t *testing.T) {
 		g.effect("x", "owner-mail", "message.send", map[string]any{"text": "something else"})
 		return "done anyway"
 	}, nil)
-	_, err := r.e.Run(bg, tree, change.Case{ID: "c1", Input: []byte("go")})
+	_, err := r.e.Run(bg, tree, change.Probe{ID: "p1", Input: []byte("go")})
 	if !errors.Is(err, ErrUnrecorded) {
 		t.Fatalf("unrecorded effect: %v", err)
 	}
@@ -235,7 +249,7 @@ func TestLOOP5EachRecordingAnswersOnce(t *testing.T) {
 		second <- g.effect("y", "owner-mail", "message.send", map[string]any{"text": "hello"})
 		return "sent twice"
 	}, nil)
-	_, err := r.e.Run(bg, tree, change.Case{ID: "c1", Input: []byte("go")})
+	_, err := r.e.Run(bg, tree, change.Probe{ID: "p1", Input: []byte("go")})
 	// The run ends at the miss and its machine goes with it, so the guest
 	// may see the refusal or a closed socket; never a second success.
 	if s := <-second; !errors.Is(err, ErrUnrecorded) || s == "succeeded" {
@@ -247,7 +261,7 @@ func TestLOOP5RecordedDenialIsReplayed(t *testing.T) {
 	r := newRig(t, recs{sent(journal.Denied)}, func(g *client, in string) string {
 		return g.effect("x", "owner-mail", "message.send", map[string]any{"text": "hello"})
 	}, nil)
-	out, err := r.e.Run(bg, tree, change.Case{ID: "c1", Input: []byte("go")})
+	out, err := r.e.Run(bg, tree, change.Probe{ID: "p1", Input: []byte("go")})
 	if err != nil || string(out) != "denied" {
 		t.Fatalf("run = %q, %v", out, err)
 	}
@@ -255,7 +269,7 @@ func TestLOOP5RecordedDenialIsReplayed(t *testing.T) {
 
 func TestLOOP5SilentGuestTimesOut(t *testing.T) {
 	r := newRig(t, recs{}, func(*client, string) string { return "" }, func(c *Config) { c.Timeout = 200 * time.Millisecond })
-	if _, err := r.e.Run(bg, tree, change.Case{ID: "c1", Input: []byte("go")}); !errors.Is(err, ErrNoReply) {
+	if _, err := r.e.Run(bg, tree, change.Probe{ID: "p1", Input: []byte("go")}); !errors.Is(err, ErrNoReply) {
 		t.Fatalf("silent guest: %v", err)
 	}
 	if r.ms.running() != 0 {
@@ -277,7 +291,7 @@ func modelCall(g *client) string {
 func TestLOOP5ModelAccessIsTheTreesAndMetered(t *testing.T) {
 	r := newRig(t, recs{}, func(g *client, _ string) string { return modelCall(g) }, nil)
 	// Without a model handler replay is offline: model calls fail.
-	out, err := r.e.Run(bg, tree, change.Case{ID: "c1", Input: []byte("go")})
+	out, err := r.e.Run(bg, tree, change.Probe{ID: "p1", Input: []byte("go")})
 	if err != nil || string(out) != "status Service Unavailable" {
 		t.Fatalf("offline replay model call: %q, %v", out, err)
 	}
@@ -292,7 +306,7 @@ func TestLOOP5ModelAccessIsTheTreesAndMetered(t *testing.T) {
 			return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.Write(rule) })
 		}
 	})
-	out, err = r.e.Run(bg, tree, change.Case{ID: "c1", Input: []byte("go")})
+	out, err = r.e.Run(bg, tree, change.Probe{ID: "p1", Input: []byte("go")})
 	if err != nil || string(out) != `{"order":["b"]}` {
 		t.Fatalf("model call under the candidate's routing: %q, %v", out, err)
 	}
@@ -302,7 +316,7 @@ func TestLOOP5ModelAccessIsTheTreesAndMetered(t *testing.T) {
 }
 
 func TestLOOP5ModelNeedsAMeter(t *testing.T) {
-	_, err := New(Config{Machines: &machines{}, Recordings: recs{}, Spec: vm.Spec{Image: "i"}, Dir: t.TempDir(),
+	_, err := New(Config{Machines: &machines{}, Recordings: recs{}, Active: active, Spec: vm.Spec{Image: "i"}, Dir: t.TempDir(),
 		Model: func(change.Tree) http.Handler { return http.NotFoundHandler() }})
 	if err == nil {
 		t.Fatal("unmetered model access accepted")
@@ -358,8 +372,9 @@ func TestLOOP5RecordingsAreTheTasksOwnIntents(t *testing.T) {
 		st("h/2", "", "guest:h", "mail"),
 		st("k/1", "", "guest:k", "mail"),
 	}
-	ids := func(c change.Case) string {
-		got, err := JournalRecordings{J: j}.Effects(c)
+	tasks := map[string]string{"p-g": "g/1", "p-h": "h/2"}
+	ids := func(probe string) string {
+		got, err := JournalRecordings{J: j, Task: func(p string) (string, bool) { t, ok := tasks[p]; return t, ok }}.Effects(probe)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -369,13 +384,73 @@ func TestLOOP5RecordingsAreTheTasksOwnIntents(t *testing.T) {
 		}
 		return strings.Join(out, ",")
 	}
-	if got := ids(change.Case{Task: "g/1"}); got != "g/1,g/2" {
+	if got := ids("p-g"); got != "g/1,g/2" {
 		t.Fatalf("by goal: %s", got)
 	}
-	if got := ids(change.Case{Task: "h/2"}); got != "h/1,h/2" {
+	if got := ids("p-h"); got != "h/1,h/2" {
 		t.Fatalf("by origin: %s", got)
 	}
-	if got := ids(change.Case{Security: true}); got != "" {
+	// A probe with no task (a security fixture) has nothing recorded, so
+	// any effect it asks for fails closed.
+	if got := ids("p-fixture"); got != "" {
 		t.Fatalf("security fixture: %s", got)
+	}
+}
+
+// CHG-1, CHG-3: a tree that changes what replay cannot run (the image or
+// the guest configuration) is not evaluated, never passed; the active tree
+// itself, and changes elsewhere, still run.
+func TestCHG1UntestableChangesAreNotEvaluated(t *testing.T) {
+	r := newRig(t, recs{}, func(*client, string) string { return "ran" }, nil)
+	for _, p := range []string{"config/guest.json", "guest-image/ref", "host-image/ref"} {
+		cand := change.Tree{}
+		for k, v := range tree {
+			cand[k] = v
+		}
+		cand[p] = []byte("changed")
+		if _, err := r.e.Run(bg, cand, change.Probe{ID: "p1", Input: []byte("go")}); !errors.Is(err, ErrNotEvaluated) {
+			t.Fatalf("%s change: %v", p, err)
+		}
+	}
+	if len(r.ms.created) != 0 {
+		t.Fatal("an unevaluable tree started a machine")
+	}
+	removed := change.Tree{}
+	for k, v := range tree {
+		if k != "config/guest.json" {
+			removed[k] = v
+		}
+	}
+	if _, err := r.e.Run(bg, removed, change.Probe{ID: "p1", Input: []byte("go")}); !errors.Is(err, ErrNotEvaluated) {
+		t.Fatalf("config removed: %v", err)
+	}
+	cand := change.Tree{"procedures/new.md": []byte("x")}
+	for k, v := range tree {
+		cand[k] = v
+	}
+	for _, tr := range []change.Tree{tree, cand} {
+		if out, err := r.e.Run(bg, tr, change.Probe{ID: "p1", Input: []byte("go")}); err != nil || string(out) != "ran" {
+			t.Fatalf("evaluable tree: %q %v", out, err)
+		}
+	}
+}
+
+// LOOP-5: replay machines a crashed broker left behind are destroyed when
+// the evaluator starts; other machines are untouched.
+func TestLOOP5LeftoverReplayMachinesAreDestroyed(t *testing.T) {
+	dir, err := os.MkdirTemp("", "rp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	ms := &machines{t: t, seeds: map[string]map[string][]byte{}, live: map[string]bool{Prefix + "old": true, "main": true}}
+	ms.svc = &liveServices{}
+	e, err := New(Config{Machines: ms, Recordings: recs{}, Active: active, Spec: vm.Spec{Image: "i"}, Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Shutdown()
+	if got := ms.Machines(); len(got) != 1 || got[0] != "main" {
+		t.Fatalf("after start: %v", got)
 	}
 }

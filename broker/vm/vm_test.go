@@ -802,3 +802,44 @@ func TestLOOP5SeededMachineSeesItsInputs(t *testing.T) {
 		t.Fatalf("refused seeds left machines: %v", e.m.Machines())
 	}
 }
+
+// LOOP-5, ARC-6: replay machine IDs are kept for replay. Nothing else can
+// take one, and a replay machine is never forked or forked into, so its
+// guest services stay replay's.
+func TestLOOP5ReplayIDsAreReserved(t *testing.T) {
+	e := newEnv(t, 4096)
+	if _, err := e.m.Create(bg, EvalPrefix+"x", Spec{Image: "base", Class: admission.Experiment, MemMB: 100}); err == nil {
+		t.Fatal("Create took a replay id")
+	}
+	e.create("src", admission.Accepted, 100)
+	if _, err := e.m.Fork(bg, "src", []string{EvalPrefix + "y"}); err == nil {
+		t.Fatal("Fork made a replay id")
+	}
+	if _, err := e.m.CreateSeeded(bg, EvalPrefix+"r", Spec{Image: "base", Class: admission.Experiment, MemMB: 100}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.m.Fork(bg, EvalPrefix+"r", []string{"f"}); err == nil {
+		t.Fatal("a replay machine was forked")
+	}
+}
+
+// RES-4: a seed is admitted against the disk like any layer copy.
+func TestRES4SeedAdmittedOnTheDisk(t *testing.T) {
+	e := newEnv(t, 4096)
+	e.cfg.DiskReserveBytes = 1 << 20
+	e.cfg.FreeBytes = func(string) (int64, error) { return 1<<20 + 64<<10, nil }
+	e.open()
+	big := map[string][]byte{"etc/big": make([]byte, 128<<10)}
+	if _, err := e.m.CreateSeeded(bg, "m", Spec{Image: "base", Class: admission.Experiment, MemMB: 100}, big); !errors.Is(err, ErrQuota) {
+		t.Fatalf("seed over the disk budget: %v", err)
+	}
+	e.cfg.FreeBytes = func(string) (int64, error) { return 1 << 40, nil }
+	e.cfg.MaxLayerBytes = 64 << 10
+	e.open()
+	if _, err := e.m.CreateSeeded(bg, "m", Spec{Image: "base", Class: admission.Experiment, MemMB: 100}, big); !errors.Is(err, ErrQuota) {
+		t.Fatalf("seed over the layer cap: %v", err)
+	}
+	if len(e.m.Machines()) != 0 {
+		t.Fatalf("refused seeds left machines: %v", e.m.Machines())
+	}
+}
