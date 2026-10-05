@@ -28,20 +28,26 @@ func reply(id, body string) map[string]any {
 
 // TestReplyIsVerifiedFromTheSource: a reply's recipients are the thread's
 // participants as the source headers name them, never the agent's, and
-// the thread counts as verified only when the owner or a contact started
-// it.
+// the thread counts as verified only when the owner (as Sent shows) or an
+// authenticated contact started it and every recipient was on a message
+// the owner sent or that contact's first one.
 func TestReplyIsVerifiedFromTheSource(t *testing.T) {
 	x := newH(t, func(c *mail.Config) { c.AppendSent = true })
 	thread(x)
-	in := x.intent(mail.OpReply, reply("<t3@example.com>", "Works for me."), "sam@example.com", "bob@example.com")
-	v, err := x.a.Verify(ctx, in)
+	v, err := x.a.Verify(ctx, x.intent(mail.OpReply, reply("<t2@example.com>", "Works for me."), "sam@example.com"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(v.Recipients, []string{"bob@example.com", "sam@example.com"}) || v.Record != "<t3@example.com>" ||
-		!v.ThreadVerified || v.Attachments || v.Item.Recipient != "bob@example.com, sam@example.com" ||
+	if !slices.Equal(v.Recipients, []string{"sam@example.com"}) || v.Record != "<t2@example.com>" ||
+		!v.ThreadVerified || v.Attachments || v.Item.Recipient != "sam@example.com" ||
 		v.Item.Object != `reply to "Re: Lunch"` || !v.Item.Facts.RecipientChecked {
 		t.Fatalf("verified %+v", v)
+	}
+	// Sam copied Bob in: a reply goes to both, but the thread no longer
+	// counts as verified, since the owner never wrote to Bob.
+	v, err = x.a.Verify(ctx, x.intent(mail.OpReply, reply("<t3@example.com>", "Works for me."), "sam@example.com", "bob@example.com"))
+	if err != nil || !slices.Equal(v.Recipients, []string{"bob@example.com", "sam@example.com"}) || v.ThreadVerified {
+		t.Fatalf("third party's Cc: %+v %v", v, err)
 	}
 	// Reply-To cannot redirect a reply.
 	x.deliver("INBOX", msg{id: "<cold@x.example>", from: "stranger@x.example", to: me, subject: "Hi",
@@ -50,11 +56,17 @@ func TestReplyIsVerifiedFromTheSource(t *testing.T) {
 	if err != nil || !slices.Equal(v.Recipients, []string{"stranger@x.example"}) || v.ThreadVerified {
 		t.Fatalf("cold message: %+v %v", v, err)
 	}
-	// A contact's thread verifies.
+	// A contact's thread verifies only with an aligned DMARC pass from
+	// the provider: anyone can put a contact's address in From.
 	y := newH(t, func(c *mail.Config) { c.Contacts = func(a string) bool { return a == "stranger@x.example" } })
-	y.deliver("INBOX", msg{id: "<cold@x.example>", from: "stranger@x.example", to: me, subject: "Hi", body: "hello"})
+	y.deliver("INBOX", msg{id: "<cold@x.example>", from: "stranger@x.example", to: me, subject: "Hi", body: "hello",
+		extra: []string{"Authentication-Results: mx.example.test; dmarc=pass header.from=x.example"}})
 	if v, _ := y.a.Verify(ctx, y.intent(mail.OpReply, reply("<cold@x.example>", "Hi"), "stranger@x.example")); !v.ThreadVerified || !v.Item.Facts.RecipientExists {
 		t.Fatalf("contact's thread: %+v", v)
+	}
+	y.deliver("INBOX", msg{id: "<spoof@x.example>", from: "stranger@x.example", to: me, subject: "Hi", body: "hello"})
+	if v, _ := y.a.Verify(ctx, y.intent(mail.OpReply, reply("<spoof@x.example>", "Hi"), "stranger@x.example")); v.ThreadVerified {
+		t.Fatal("an unauthenticated contact's thread verified")
 	}
 	// A new message has no source record: the gate shows it unverified.
 	if _, err := x.a.Verify(ctx, x.intent(mail.OpSend, map[string]any{"subject": "s", "body": "b"}, "sam@example.com")); !errors.Is(err, mail.ErrUnverifiable) {
@@ -200,13 +212,39 @@ func TestForgedThreadsDoNotVerify(t *testing.T) {
 		t.Fatalf("forged thread verified: %+v %v", v, err)
 	}
 	// Sam's reply in the real thread still verifies.
-	if v, _ := x.a.Verify(ctx, x.intent(mail.OpReply, reply("<t3@example.com>", "ok"), "sam@example.com", "bob@example.com")); !v.ThreadVerified {
+	if v, _ := x.a.Verify(ctx, x.intent(mail.OpReply, reply("<t2@example.com>", "ok"), "sam@example.com")); !v.ThreadVerified {
 		t.Fatal("the real thread no longer verifies")
+	}
+	// References alone, pointing at the owner's message, from a new
+	// sender: the message starts its own thread, which is cold.
+	x.deliver("INBOX", msg{id: "<f2@evil.example>", from: "eve@evil.example", to: me, subject: "Re: Lunch",
+		body: "Me too", refs: "<t1@example.test>"})
+	if v, _ := x.a.Verify(ctx, x.intent(mail.OpReply, reply("<f2@evil.example>", "ok"), "eve@evil.example")); v.ThreadVerified {
+		t.Fatal("a References header verified a new sender")
+	}
+	// A starter with the owner's address in From, planted in the inbox,
+	// is not one the owner sent.
+	x.deliver("INBOX", msg{id: "<s1@example.test>", from: me, to: "eve@evil.example", subject: "Plan", body: "x"})
+	x.deliver("INBOX", msg{id: "<f3@evil.example>", from: "eve@evil.example", to: me, subject: "Re: Plan",
+		body: "ok", inReplyTo: "<s1@example.test>", refs: "<s1@example.test>"})
+	if v, _ := x.a.Verify(ctx, x.intent(mail.OpReply, reply("<f3@evil.example>", "ok"), "eve@evil.example")); v.ThreadVerified {
+		t.Fatal("a spoofed owner starter verified")
+	}
+	// A participant copying someone new on their own message: the reply
+	// would reach them, so the thread does not verify, and the executor
+	// refuses a recipient set other than the source's.
+	x.deliver("INBOX", msg{id: "<t4@example.com>", from: "sam@example.com", to: me, cc: "eve@evil.example", subject: "Re: Lunch",
+		body: "ok", inReplyTo: "<t2@example.com>", refs: "<t1@example.test> <t2@example.com>"})
+	if v, _ := x.a.Verify(ctx, x.intent(mail.OpReply, reply("<t4@example.com>", "ok"), "eve@evil.example", "sam@example.com")); v.ThreadVerified {
+		t.Fatal("an added Cc verified")
+	}
+	if out := x.run(x.intent(mail.OpReply, reply("<t4@example.com>", "ok"), "sam@example.com")); out.Result != journal.ResultNotApplied || len(x.srv.Submitted()) != 0 {
+		t.Fatalf("reply without the added Cc ran: %+v", out)
 	}
 	// A forged copy of the owner's starter makes it ambiguous: the chain
 	// through it no longer verifies, and the record is refused.
 	x.deliver("INBOX", msg{id: "<t1@example.test>", from: "eve@evil.example", to: me, subject: "Lunch", body: "forged"})
-	if v, _ := x.a.Verify(ctx, x.intent(mail.OpReply, reply("<t3@example.com>", "ok"), "sam@example.com", "bob@example.com")); v.ThreadVerified {
+	if v, _ := x.a.Verify(ctx, x.intent(mail.OpReply, reply("<t2@example.com>", "ok"), "sam@example.com")); v.ThreadVerified {
 		t.Fatal("a chain through an ambiguous message verified")
 	}
 	if _, err := x.a.Verify(ctx, x.intent(mail.OpReply, reply("<t1@example.test>", "ok"), "sam@example.com")); !errors.Is(err, mail.ErrAmbiguous) {
@@ -217,6 +255,11 @@ func TestForgedThreadsDoNotVerify(t *testing.T) {
 // TestOwnerPlusAddressesAreTheOwner: a plus-address variant of the
 // owner's address is never a reply recipient.
 func TestOwnerPlusAddressesAreTheOwner(t *testing.T) {
+	g := newH(t, func(c *mail.Config) { c.Aliases = []string{"first.last@gmail.com"} })
+	g.deliver("INBOX", msg{id: "<g1@example.com>", from: "sam@example.com", to: "FirstLast+news@googlemail.com", subject: "Hi", body: "x"})
+	if v, err := g.a.Verify(ctx, g.intent(mail.OpReply, reply("<g1@example.com>", "ok"), "sam@example.com")); err != nil || !slices.Equal(v.Recipients, []string{"sam@example.com"}) {
+		t.Fatalf("Gmail variant of the owner: %+v %v", v.Recipients, err)
+	}
 	x := newH(t, nil)
 	x.deliver("INBOX", msg{id: "<p1@example.com>", from: "sam@example.com", to: "owner+lists@example.test", cc: "bob@example.com", subject: "Hi", body: "x"})
 	v, err := x.a.Verify(ctx, x.intent(mail.OpReply, reply("<p1@example.com>", "ok"), "sam@example.com", "bob@example.com"))

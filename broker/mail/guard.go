@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -84,8 +85,8 @@ func (a *Adapter) locate(ctx context.Context, record, hint string) (Message, err
 	// Every candidate folder is searched: a Message-ID is the sender's
 	// choice, so a second message claiming the same ID (a forged copy of
 	// one the owner sent) makes the record ambiguous and is refused. Copies
-	// of one message (the same sender, date and subject, e.g. a label
-	// folder) are not ambiguous.
+	// of one message (the same sender, date, subject and recipients, e.g. a
+	// label folder) are not ambiguous.
 	seen := map[string]bool{}
 	var found []Message
 	for _, f := range order {
@@ -103,11 +104,18 @@ func (a *Adapter) locate(ctx context.Context, record, hint string) (Message, err
 		return Message{}, ErrNotFound
 	}
 	for _, m := range found[1:] {
-		if m.From != found[0].From || !m.Date.Equal(found[0].Date) || m.Subject != found[0].Subject {
+		if !sameMessage(m, found[0]) {
 			return Message{}, ErrAmbiguous
 		}
 	}
 	return found[0], nil
+}
+
+// sameMessage reports whether two copies carrying one Message-ID are the
+// same message: the same sender, date, subject and recipients.
+func sameMessage(x, y Message) bool {
+	return x.From == y.From && x.Date.Equal(y.Date) && x.Subject == y.Subject &&
+		slices.Equal(sorted(x.To), sorted(y.To)) && slices.Equal(sorted(x.Cc), sorted(y.Cc))
 }
 
 var trashNames = regexp.MustCompile(`(?i)(^|[/.\]])\s*(trash|bin|deleted( items| messages)?|junk|spam|bulk mail)\s*$`)
@@ -294,25 +302,22 @@ func (a *Adapter) isAlert(m Message) bool {
 	return false
 }
 
-var (
-	dmarcPat   = regexp.MustCompile(`(?i)(^|[;\s])dmarc\s*=\s*pass\b[^;]*`)
-	headerFrom = regexp.MustCompile(`(?i)header\.from\s*=\s*"?([a-z0-9.-]+)`)
-)
-
 // dmarcPass reads only the topmost Authentication-Results header, and only
 // if the provider's own server wrote it (its authserv-id): a sender can
-// add more of these headers, never above the provider's.
+// add more of these headers, never above the provider's. The header is
+// parsed per RFC 8601 (parseAuthResults), so a result inside a comment or
+// a quoted string does not count, and the DMARC result must be aligned
+// with the From domain.
 func (a *Adapter) dmarcPass(m Message) bool {
 	if a.cfg.AuthServ == "" || len(m.AuthResults) == 0 || m.From == "" {
 		return false
 	}
-	ar := m.AuthResults[0]
-	id, _, _ := strings.Cut(ar, ";")
-	if f := strings.Fields(id); len(f) == 0 || !strings.EqualFold(f[0], a.cfg.AuthServ) {
+	id, rs := parseAuthResults(m.AuthResults[0])
+	if !strings.EqualFold(id, a.cfg.AuthServ) {
 		return false
 	}
-	for _, d := range dmarcPat.FindAllString(ar, -1) {
-		if h := headerFrom.FindStringSubmatch(d); h != nil && strings.EqualFold(h[1], domainOf(m.From)) {
+	for _, r := range rs {
+		if r.Method == "dmarc" && r.Result == "pass" && strings.EqualFold(r.Props["header.from"], domainOf(m.From)) {
 			return true
 		}
 	}
@@ -322,7 +327,8 @@ func (a *Adapter) dmarcPass(m Message) bool {
 // Escalate is the gate's guard hook for this account (grants.Escalator).
 // An organize effect whose target is not allowed is refused; one on a
 // shared target is share; one that hides an alert is change-account; and
-// past the day's bound each is asked.
+// past the day's bound the owner is asked once and the rest are held
+// (reserve).
 func (a *Adapter) Escalate(ctx context.Context, in journal.Intent) (grants.Escalation, error) {
 	o, p, err := a.intent(in)
 	if err != nil {
@@ -356,9 +362,15 @@ func (a *Adapter) Escalate(ctx context.Context, in journal.Intent) (grants.Escal
 		e.Verb = verb.ChangeAccount
 		why = append(why, "hides an alert from "+clip(domainOf(pl.msg.From), 20))
 	}
-	if !a.reserve(in.ID) {
+	switch a.reserve(in.ID) {
+	case askOnce:
 		e.Ask = true
-		why = append(why, fmt.Sprintf("past today's %d", a.cfg.DailyLimit))
+		why = append(why, fmt.Sprintf("past today's %d; YES allows %d", a.cfg.DailyLimit, a.cfg.DailyCeiling))
+	case askEach:
+		e.Ask = true
+		why = append(why, fmt.Sprintf("past today's %d", a.cfg.DailyCeiling))
+	case held:
+		return grants.Escalation{}, ErrHeld
 	}
 	e.Reason = strings.Join(why, "; ")
 	return e, nil
@@ -373,16 +385,38 @@ func clip(s string, n int) string {
 	return string(r[:n-1]) + "…"
 }
 
-// reserve takes a place under the day's organize bound for id, and
-// reports whether one was free. The count and the reservation happen under
-// one lock, so concurrent checks cannot all see room for the last place.
-// The count is the journal's authorized organize intents in the last day
-// (which survives restarts) together with places reserved here and not
-// yet authorized there. Without the journal hook every effect is past the
-// bound, so none runs unasked.
-func (a *Adapter) reserve(id string) bool {
+// place is what the day's organize bound says of one effect.
+type place int
+
+const (
+	placed  place = iota // within the bound: runs unasked
+	askOnce              // the first past the bound: the one ask
+	held                 // past the bound while that ask is open or after a NO
+	askEach              // past the ceiling a YES lifted the bound to
+)
+
+// ErrHeld refuses an organize effect past the day's bound while the owner
+// has not said YES to the one ask (ADP-2); it may be tried again once the
+// owner does, or tomorrow.
+var ErrHeld = errors.New("mail: past today's organize bound; held until the owner allows more")
+
+// reserve takes a place under the day's organize bound for id. The count
+// and the reservation happen under one lock, so concurrent checks cannot
+// all see room for the last place. The count is the journal's authorized
+// organize intents in the last day (which survives restarts) together
+// with places reserved here and not yet authorized there.
+//
+// Past the bound the owner is asked once (ADP-2's "asked once, as one
+// batch"): the first effect past it is asked, and the rest are held while
+// that ask is open, after a NO, or with no answer, until the count falls
+// back under the bound. The journal shows a YES: only an owner's approval
+// can authorize more than the bound, so a count above it means the bound
+// is lifted for the day, up to DailyCeiling; past that each is asked.
+// The YES lifts only the count: every effect still meets the target,
+// share and alert guards. Without the journal hook every effect is asked.
+func (a *Adapter) reserve(id string) place {
 	if a.cfg.Authorized == nil {
-		return false
+		return askEach
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -407,13 +441,25 @@ func (a *Adapter) reserve(id string) bool {
 		counted[r] = true
 	}
 	if counted[id] {
-		return true // already holds a place (the recheck before dispatch)
+		return placed // already holds a place (the recheck before dispatch)
 	}
-	if len(counted) >= a.cfg.DailyLimit {
-		return false
+	limit := a.cfg.DailyLimit
+	lifted := len(counted) > limit
+	if lifted {
+		limit = a.cfg.DailyCeiling
 	}
-	a.reserved[id] = now
-	return true
+	if len(counted) < limit {
+		a.reserved[id] = now
+		return placed
+	}
+	if lifted {
+		return askEach
+	}
+	if a.over.id == "" || a.over.id == id || a.over.at.Before(since) {
+		a.over = overAsk{id: id, at: now}
+		return askOnce
+	}
+	return held
 }
 
 // intent checks in is for this adapter and returns its operation and

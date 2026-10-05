@@ -3,7 +3,6 @@ package mail
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/events"
 	"github.com/ghbmrk/agentos/broker/recall"
@@ -34,7 +34,9 @@ type WatchConfig struct {
 	State recall.Store
 	// Deleted is called with the recall identities of messages gone from
 	// every watched folder (deleted at the source, or moved to trash or
-	// junk). It is called only after a poll that listed every folder.
+	// junk). It is called only after a poll that listed every folder,
+	// and only for messages whose last folders were read again under the
+	// same UID validity.
 	// Until the owner decides whether a mail deleted at the source also
 	// takes back agent work, the wiring passes a recall-only deletion
 	// (ASSUMPTIONS M7).
@@ -66,11 +68,6 @@ type watchState struct {
 type folderState struct {
 	Validity uint32            `json:"validity"`
 	UIDs     map[uint32]string `json:"uids"` // UID -> recall identity, "" if never published
-	// Legacy are identities published from this folder before a UID
-	// validity reset that the bounded re-read did not reach. They count as
-	// present, so a reset never reads as deletion; such items no longer
-	// propagate a source deletion (ASSUMPTIONS M12).
-	Legacy []string `json:"legacy,omitempty"`
 	// Missing counts consecutive polls whose listing lacked this folder.
 	Missing int `json:"missing,omitempty"`
 }
@@ -144,8 +141,11 @@ func watched(fs []Folder) []string {
 
 // Poll reads every watched folder once: new messages are published, and
 // messages gone from all of them are reported deleted. A folder that
-// cannot be listed keeps its last known contents, and deletions wait for
-// a poll that lists everything, so an outage never reads as deletion.
+// cannot be listed keeps its last known contents, deletions wait for a
+// poll that lists everything, and a message counts as deleted only if
+// every folder it was last seen in was read again under the same UID
+// validity, so an outage, a short listing, a change in the watched set or
+// a renumbering never reads as deletion.
 func (w *Watcher) Poll(ctx context.Context) (PollReport, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -154,14 +154,20 @@ func (w *Watcher) Poll(ctx context.Context) (PollReport, error) {
 	if err != nil {
 		return rep, err
 	}
-	before := map[string]bool{}
-	for _, f := range w.st.Folders {
+	// Where each published message was last seen. A message counts as
+	// deleted only if every folder it was last seen in was listed and read
+	// again under the same UID validity: a folder that left the listing or
+	// the watched set (an all-mail view that lost its role), or was
+	// renumbered, never makes its messages read as deleted.
+	lastIn := map[string][]string{}
+	for name, f := range w.st.Folders {
 		for _, id := range f.UIDs {
 			if id != "" {
-				before[id] = true
+				lastIn[id] = append(lastIn[id], name)
 			}
 		}
 	}
+	stable := map[string]bool{}
 	present := map[string]bool{}
 	complete := true
 	var errs []error
@@ -194,12 +200,6 @@ func (w *Watcher) Poll(ctx context.Context) (PollReport, error) {
 			kept.Missing++
 			next[name] = &kept
 			complete = false
-			for _, id := range old.UIDs {
-				present[id] = true
-			}
-			for _, id := range old.Legacy {
-				present[id] = true
-			}
 		}
 	}
 	for _, name := range names {
@@ -210,31 +210,17 @@ func (w *Watcher) Poll(ctx context.Context) (PollReport, error) {
 			errs = append(errs, err)
 			if old != nil {
 				next[name] = old
-				for _, id := range old.UIDs {
-					present[id] = true
-				}
-				for _, id := range old.Legacy {
-					present[id] = true
-				}
 			}
 			continue
 		}
 		fst := &folderState{Validity: validity, UIDs: map[uint32]string{}}
 		first := old == nil
-		var legacy, renumbered []string
-		if old != nil {
-			legacy = append(legacy, old.Legacy...)
-			if old.Validity != validity {
-				// UIDs were renumbered: read the folder again, bounded
-				// like a first read.
-				for _, id := range old.UIDs {
-					if id != "" {
-						renumbered = append(renumbered, id)
-					}
-				}
-				old, first = nil, true
-			}
+		if old != nil && old.Validity != validity {
+			// UIDs were renumbered: read the folder again, bounded like a
+			// first read.
+			old, first = nil, true
 		}
+		readAll := true
 		var fresh []uint32
 		for _, u := range uids {
 			if old != nil {
@@ -252,23 +238,15 @@ func (w *Watcher) Poll(ctx context.Context) (PollReport, error) {
 				fst.UIDs[u] = ""
 			}
 			fresh = fresh[len(fresh)-w.cfg.Backfill:]
-			// The bound left part of a renumbered folder unread: what was
-			// published from it before stays present (M12).
-			legacy = append(legacy, renumbered...)
 		}
 		n, err := w.publish(ctx, name, fresh, fst, present)
 		rep.Published += n
 		if err != nil {
 			complete = false
+			readAll = false
 			errs = append(errs, err)
 		}
-		for _, id := range legacy {
-			if !present[id] {
-				fst.Legacy = append(fst.Legacy, id)
-				present[id] = true
-			}
-		}
-		sort.Strings(fst.Legacy)
+		stable[name] = readAll && !first
 		next[name] = fst
 	}
 	w.st.Folders = next
@@ -278,10 +256,17 @@ func (w *Watcher) Poll(ctx context.Context) (PollReport, error) {
 	rep.Complete = complete
 	if complete {
 		var gone []string
-		for id := range before {
-			if !present[id] {
-				gone = append(gone, id)
+	ids:
+		for id, in := range lastIn {
+			if present[id] {
+				continue
 			}
+			for _, f := range in {
+				if !stable[f] {
+					continue ids
+				}
+			}
+			gone = append(gone, id)
 		}
 		sort.Strings(gone)
 		if len(gone) > 0 {
@@ -327,15 +312,41 @@ func (w *Watcher) publish(ctx context.Context, folder string, fresh []uint32, fs
 	return n, nil
 }
 
-// refOf names a message for the bus and recall: its Message-ID, which a
-// move keeps. A message without one is named by a hash of its location
-// and headers; a move makes it a new item.
+// refOf names a message for the bus and recall. A Message-ID is the
+// sender's to choose, so it is not the identity alone: the ref is the
+// Message-ID with a digest of the sender, date and the first bytes of the
+// text. A move keeps it; a different message reusing the ID (to replace
+// or shadow one in recall) is a separate item. A message without a
+// Message-ID is named by a digest of its location and headers; a move
+// makes it a new item.
 func refOf(folder string, m Message) string {
 	if m.MessageID != "" {
-		return m.MessageID
+		text := m.Text
+		if len(text) > refText {
+			text = text[:refText]
+		}
+		return m.MessageID + " #" + digest(m.From, m.Date.UTC().Format(time.RFC3339), text)
 	}
-	h := sha256.Sum256([]byte(folder + "\x00" + strconv.FormatUint(uint64(m.UID), 10) + "\x00" + m.From + "\x00" + m.Subject + "\x00" + m.Date.String()))
-	return "nomid:" + hex.EncodeToString(h[:12])
+	return "nomid: #" + digest(folder, strconv.FormatUint(uint64(m.UID), 10), m.From, m.Subject, m.Date.String())
+}
+
+// refText is how much of a message's text its ref digests.
+const refText = 256
+
+// digest is 72 bits of a SHA-256 over parts, as 18 letters a to p. The
+// letters keep the ref readable in recall, whose scrubber removes long
+// random-looking tokens (CRED-1) but keeps letter runs under 20.
+func digest(parts ...string) string {
+	h := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	b := make([]byte, 18)
+	for i := range b {
+		n := h[i/2]
+		if i%2 == 0 {
+			n >>= 4
+		}
+		b[i] = 'a' + n&0x0f
+	}
+	return string(b)
 }
 
 // summary is the event's header lines. Everything in it came from the

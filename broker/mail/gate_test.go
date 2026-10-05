@@ -205,13 +205,14 @@ func TestGateRunsOrganizeAndAsksWhatTheGuardsFlag(t *testing.T) {
 // TestReplyRuleQueuesOnlyCommitmentFreeReplies: under an ADP-11 reply
 // rule, a composer's reply in a verified thread is queued with an undo
 // window; one naming a date or a commitment phrase (D2) becomes a normal
-// approval request; a cold thread never matches the rule.
+// approval request; a cold thread, or one where a third party copied
+// someone in, never matches the rule.
 func TestReplyRuleQueuesOnlyCommitmentFreeReplies(t *testing.T) {
 	r := newGated(t, nil)
 	r.grant(grants.Spec{Account: "mail", Rule: &grants.Rule{Action: mail.OpReply, Reply: true, PerRecord: 3, PerDay: 10}})
 	thread(r.h)
 	composer := func(body string) journal.Status {
-		in := r.intent(mail.OpReply, reply("<t3@example.com>", body), "sam@example.com", "bob@example.com")
+		in := r.intent(mail.OpReply, reply("<t2@example.com>", body), "sam@example.com")
 		in.Machine, in.Label = "composer", "private"
 		return r.submit(in)
 	}
@@ -238,5 +239,12 @@ func TestReplyRuleQueuesOnlyCommitmentFreeReplies(t *testing.T) {
 	r.submit(in)
 	if len(r.own.queued) != 1 {
 		t.Fatal("a cold thread opened an auto-reply")
+	}
+	in = r.intent(mail.OpReply, reply("<t3@example.com>", "Thanks!"), "sam@example.com", "bob@example.com")
+	in.Machine = "composer"
+	r.submit(in)
+	r.g.Tick()
+	if len(r.own.queued) != 1 || len(r.srv.Submitted()) != 0 {
+		t.Fatal("a third party's Cc opened an auto-reply")
 	}
 }

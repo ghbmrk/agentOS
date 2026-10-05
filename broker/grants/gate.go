@@ -494,6 +494,10 @@ func (g *Gate) evaluate(ctx context.Context, phase journal.Phase, in journal.Int
 				v, cls = esc.Verb, ec
 			}
 		}
+	} else if v == verb.Organize {
+		// Organize is reversible only behind its adapter's guards
+		// (ADP-2): without them, every effect is asked.
+		esc = Escalation{Ask: true, Reason: "no guard for this account"}
 	}
 	if cls == verb.Reversible && !esc.Ask {
 		return verdict{kind: allow}

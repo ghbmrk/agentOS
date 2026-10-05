@@ -52,7 +52,7 @@ func (a *Adapter) Verify(ctx context.Context, in journal.Intent) (grants.Verifie
 			known = known && a.cfg.Contacts(r)
 		}
 		v.Recipients = rc
-		v.ThreadVerified = a.threadVerified(ctx, m)
+		v.ThreadVerified = a.threadVerified(ctx, m, rc)
 		v.Item = owner.Item{Object: "reply to " + quote(m.Subject), Recipient: strings.Join(rc, ", "),
 			Facts: owner.Facts{RecipientChecked: true, RecipientExists: known}}
 	default:
@@ -80,38 +80,82 @@ func (a *Adapter) participants(m Message) []string {
 	return out
 }
 
-// threadVerified reports whether the thread was started by the owner, or
-// by a contact in the owner's address book (ADP-11). References and
-// In-Reply-To are the sender's to write, so a cold sender could name a
-// message the owner sent to someone else. The broker therefore walks the
-// In-Reply-To chain from m through messages the mailbox holds, and each
-// message's sender must have been a participant of the one it answers;
-// the starter is where the chain ends. A link the mailbox does not hold,
-// an ambiguous one, or a chain longer than maxChain does not verify.
-func (a *Adapter) threadVerified(ctx context.Context, m Message) bool {
-	cur := m
+// threadVerified reports whether a reply to m to rc may count as on a
+// verified thread (ADP-11). Every header that names the thread is the
+// sender's to write, so a cold sender could name a message the owner sent
+// to someone else, plant a copy of one with a forged From, or copy anyone
+// on its own message. So:
+//
+//   - The In-Reply-To chain is walked from m through messages the mailbox
+//     holds (at most maxChain links); each message's sender must have been
+//     a participant of the message it answers. A missing, ambiguous or
+//     looping link fails.
+//   - The thread's starter must be the owner, as the copy in the Sent
+//     folder shows (not one in the inbox, which anyone can deliver), or a
+//     contact whose message passes an aligned DMARC check.
+//   - Every recipient, the latest sender included, must be a participant
+//     of a vouched-for message in the chain: one in the owner's Sent
+//     folder, or the contact's authenticated starter. Someone a third
+//     party copied in is not.
+func (a *Adapter) threadVerified(ctx context.Context, m Message, rc []string) bool {
+	byRole, _, err := a.folders(ctx)
+	if err != nil {
+		return false
+	}
+	chain := []Message{m}
 	seen := map[string]bool{m.MessageID: true}
-	for i := 0; ; i++ {
-		if cur.InReplyTo == "" {
-			break
-		}
-		if i >= maxChain || seen[cur.InReplyTo] {
+	for cur := m; cur.InReplyTo != ""; {
+		if len(chain) > maxChain || seen[cur.InReplyTo] {
 			return false
 		}
 		seen[cur.InReplyTo] = true
 		parent, err := a.locate(ctx, cur.InReplyTo, "")
-		if err != nil {
+		if err != nil || !a.participant(cur.From, parent) {
 			return false
 		}
-		if !a.participant(cur.From, parent) {
-			return false
-		}
+		chain = append(chain, parent)
 		cur = parent
 	}
-	if a.isSelf(cur.From) {
-		return true
+	var vouched []Message
+	for i, x := range chain {
+		if a.isSelf(x.From) {
+			if s, ok := a.sentCopy(ctx, byRole[Sent], x); ok {
+				vouched = append(vouched, s)
+			} else if i == len(chain)-1 {
+				return false // an owner starter not in Sent is forged
+			}
+		}
 	}
-	return a.cfg.Contacts != nil && cur.From != "" && a.cfg.Contacts(cur.From)
+	starter := chain[len(chain)-1]
+	if !a.isSelf(starter.From) {
+		if a.cfg.Contacts == nil || starter.From == "" || !a.cfg.Contacts(starter.From) || !a.dmarcPass(starter) {
+			return false
+		}
+		vouched = append(vouched, starter)
+	}
+	for _, r := range rc {
+		ok := false
+		for _, v := range vouched {
+			ok = ok || a.participant(r, v)
+		}
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// sentCopy returns the copy of x in the Sent folder, if there is exactly
+// one and it is the same message.
+func (a *Adapter) sentCopy(ctx context.Context, sent string, x Message) (Message, bool) {
+	if sent == "" {
+		return Message{}, false
+	}
+	ms, err := a.cfg.Store.Find(ctx, sent, x.MessageID)
+	if err != nil || len(ms) != 1 || !a.isSelf(ms[0].From) || !sameMessage(ms[0], x) {
+		return Message{}, false
+	}
+	return ms[0], true
 }
 
 // maxChain bounds the In-Reply-To links walked to verify a thread.

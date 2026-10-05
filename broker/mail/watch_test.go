@@ -2,6 +2,8 @@ package mail_test
 
 import (
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/events"
@@ -92,7 +94,7 @@ func TestNewMailReachesTheBusAndRecall(t *testing.T) {
 	}
 	rs := p.find("quokkafruit")
 	if len(rs) != 1 || rs[0].Label != recall.Private || rs[0].Source.Kind != "mail" || rs[0].Source.Account != "mail" ||
-		rs[0].ID != p.ix.SourceID("mail", "mail", "<lab@clinic.example>") {
+		!strings.HasPrefix(rs[0].Source.Ref, "<lab@clinic.example> #") || rs[0].ID != p.ix.SourceID("mail", "mail", rs[0].Source.Ref) {
 		t.Fatalf("recall %+v", rs)
 	}
 	if got := x.srv.Messages("INBOX"); len(got[0].Flags) != 0 {
@@ -120,6 +122,7 @@ func TestSourceDeletionIsRecallOnly(t *testing.T) {
 	x.deliver("INBOX", msg{id: "<lab@clinic.example>", from: "results@clinic.example", to: me, subject: "Lab", body: "quokkafruit"})
 	x.deliver("INBOX", msg{id: "<memo@work.example>", from: "boss@work.example", to: me, subject: "Memo", body: "wombatberry"})
 	poll(t, w, p)
+	lab := p.find("quokkafruit")[0].ID
 	x.mustRun(x.intent(mail.OpArchive, rec("<lab@clinic.example>")))
 	x.srv.Renumber("INBOX")
 	if r := poll(t, w, p); r.Deleted != 0 || r.Published != 0 || len(p.find("quokkafruit")) != 1 {
@@ -135,7 +138,7 @@ func TestSourceDeletionIsRecallOnly(t *testing.T) {
 	if r := poll(t, w, p); r.Deleted != 1 || len(p.find("quokkafruit")) != 0 {
 		t.Fatalf("source deletion: %+v", r)
 	}
-	if len(p.deleted) != 1 || p.deleted[0][0] != p.ix.SourceID("mail", "mail", "<lab@clinic.example>") {
+	if len(p.deleted) != 1 || p.deleted[0][0] != lab {
 		t.Fatalf("deleted %v", p.deleted)
 	}
 	// Trash is a deletion from the owner's view.
@@ -157,9 +160,12 @@ func TestBackfillIsBounded(t *testing.T) {
 	if r := poll(t, w, p); r.Published != 2 {
 		t.Fatalf("backfill %+v", r)
 	}
-	_, newest := p.ix.Get(p.ix.SourceID("mail", "mail", "<news-4@shop.example>"))
-	_, oldest := p.ix.Get(p.ix.SourceID("mail", "mail", "<news-0@shop.example>"))
-	if !newest || oldest || p.ix.Len() != 2 {
+	var refs []string
+	for _, r := range p.find("boots") {
+		refs = append(refs, strings.SplitN(r.Source.Ref, " ", 2)[0])
+	}
+	slices.Sort(refs)
+	if !slices.Equal(refs, []string{"<news-3@shop.example>", "<news-4@shop.example>"}) || p.ix.Len() != 2 {
 		t.Fatal("backfill took the wrong messages")
 	}
 	if n, total := w.Coverage(); n != 2 || total != 5 {
@@ -191,7 +197,8 @@ func TestAllMailViewIsWatchedAlone(t *testing.T) {
 
 // TestBrokenListingsNeverReadAsDeletion: a listing without the inbox
 // concludes nothing; a known folder missing from the listing keeps its
-// mail present until three listings in a row lack it.
+// mail present, and one that leaves the listing never makes its mail read
+// as deleted.
 func TestBrokenListingsNeverReadAsDeletion(t *testing.T) {
 	x := newH(t, nil)
 	p := newPipe(t)
@@ -208,13 +215,10 @@ func TestBrokenListingsNeverReadAsDeletion(t *testing.T) {
 	for _, f := range []string{"INBOX", "Archive", "Drafts", "Sent", "Trash", "Junk", "Team", "Legal"} {
 		x.srv.Hide(f, false)
 	}
-	for i := 0; i < 2; i++ {
-		if r, _ := w.Poll(ctx); r.Deleted != 0 || r.Complete || len(p.find("quollnut")) != 1 {
+	for i := 0; i < 4; i++ {
+		if r, _ := w.Poll(ctx); r.Deleted != 0 || r.Complete != (i >= 2) || len(p.find("quollnut")) != 1 {
 			t.Fatalf("poll %d without Receipts: %+v", i, r)
 		}
-	}
-	if r := poll(t, w, p); r.Deleted != 1 || len(p.find("quollnut")) != 0 {
-		t.Fatalf("third poll without Receipts: %+v", r)
 	}
 }
 
@@ -239,5 +243,50 @@ func TestRenumberedFolderReadIsBounded(t *testing.T) {
 	}
 	if n, total := w.Coverage(); n != 2 || total != 5 {
 		t.Fatalf("coverage %d of %d", n, total)
+	}
+}
+
+// TestWatchedSetChangesNeverReadAsDeletion: when the all-mail view loses
+// its role for a poll, the watcher reads the other folders instead, and
+// nothing it saw only in the view counts as deleted (Security C3).
+func TestWatchedSetChangesNeverReadAsDeletion(t *testing.T) {
+	x := newH(t, nil)
+	x.srv.AddFolder("All Mail", `\All`)
+	p := newPipe(t)
+	w := x.watcher(t, p, &recall.MemStore{}, nil)
+	x.deliver("All Mail", msg{id: "<a@x.example>", from: "a@x.example", to: me, subject: "S", body: "bilbyroot"})
+	poll(t, w, p)
+	x.srv.SetAttr("All Mail", "")
+	x.srv.Hide("All Mail", true)
+	for i := 0; i < 4; i++ {
+		if r, _ := w.Poll(ctx); r.Deleted != 0 || len(p.find("bilbyroot")) != 1 {
+			t.Fatalf("poll %d without the view: %+v", i, r)
+		}
+	}
+	x.srv.Hide("All Mail", false)
+	x.srv.SetAttr("All Mail", `\All`)
+	if r := poll(t, w, p); r.Deleted != 0 || len(p.find("bilbyroot")) != 1 {
+		t.Fatalf("view back: %+v", r)
+	}
+}
+
+// TestReusedMessageIDsAreSeparateItems: a Message-ID is the sender's to
+// choose, so a second message reusing one is its own recall item and
+// cannot replace or shadow the first (Security C4).
+func TestReusedMessageIDsAreSeparateItems(t *testing.T) {
+	x := newH(t, nil)
+	p := newPipe(t)
+	w := x.watcher(t, p, &recall.MemStore{}, nil)
+	x.deliver("INBOX", msg{id: "<lab@clinic.example>", from: "results@clinic.example", to: me, subject: "Lab", body: "quokkafruit normal"})
+	poll(t, w, p)
+	x.deliver("Receipts", msg{id: "<lab@clinic.example>", from: "eve@evil.example", to: me, subject: "Lab", body: "quokkafruit call this number"})
+	if r := poll(t, w, p); r.Published != 1 || len(p.find("quokkafruit")) != 2 {
+		t.Fatalf("reused ID: %+v, %d items", r, len(p.find("quokkafruit")))
+	}
+	// Without a Message-ID a message is still named by its location.
+	x.srv.Deliver("INBOX", "From: a@x.example\nTo: "+me+"\nSubject: n\nDate: Mon, 05 Oct 2026 08:00:00 +0000\n\nwallabyseed\n")
+	poll(t, w, p)
+	if rs := p.find("wallabyseed"); len(rs) != 1 || !strings.HasPrefix(rs[0].Source.Ref, "nomid: #") {
+		t.Fatalf("no Message-ID: %+v", rs)
 	}
 }

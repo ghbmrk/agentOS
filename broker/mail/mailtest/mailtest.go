@@ -133,6 +133,14 @@ func (s *Server) AddFolder(name, attr string) {
 	s.boxes[name] = &box{name: name, attr: attr, next: 1, validity: 1}
 }
 
+// SetAttr changes a folder's special-use attribute, keeping its messages
+// and UID validity (a provider dropping or restoring a role).
+func (s *Server) SetAttr(name, attr string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.boxes[name].attr = attr
+}
+
 // Deliver puts a raw message in folder, as arriving mail would.
 func (s *Server) Deliver(folder string, raw string, flags ...string) {
 	s.mu.Lock()

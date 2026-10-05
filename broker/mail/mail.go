@@ -139,11 +139,15 @@ type Config struct {
 	Phrases         []string
 
 	// DailyLimit bounds organize effects per account per day (default
-	// 200); beyond it each is asked. Authorized returns the intents on
-	// this account with action that the journal authorized since then
-	// (journal.Engine.AuthorizedSince), so the count survives restarts.
-	DailyLimit int
-	Authorized func(action string, since time.Time) []journal.Intent
+	// 200). Past it the owner is asked once; while that ask is open or
+	// after a NO, the rest are held, and a YES lifts the bound for the
+	// day up to DailyCeiling (default 2000), past which each is asked.
+	// Authorized returns the intents on this account with action that the
+	// journal authorized since then (journal.Engine.AuthorizedSince), so
+	// the count survives restarts.
+	DailyLimit   int
+	DailyCeiling int
+	Authorized   func(action string, since time.Time) []journal.Intent
 
 	// Contacts reports whether addr is in the owner's contacts, read from
 	// the source (CH-10's existence rule for ADP-11 thread starters). Nil:
@@ -157,8 +161,12 @@ type Config struct {
 	Now func() time.Time
 }
 
-// DefaultDailyLimit is ADP-2's default organize bound.
-const DefaultDailyLimit = 200
+// DefaultDailyLimit is ADP-2's default organize bound, and
+// DefaultDailyCeiling how far an owner's YES lifts it for the day.
+const (
+	DefaultDailyLimit   = 200
+	DefaultDailyCeiling = 2000
+)
 
 // Adapter is one connected mail account.
 type Adapter struct {
@@ -167,6 +175,13 @@ type Adapter struct {
 
 	mu       sync.Mutex
 	reserved map[string]time.Time // organize bound places not yet in the journal
+	over     overAsk              // the open "past today's bound" ask
+}
+
+// overAsk is the one intent asked past the day's bound, and when.
+type overAsk struct {
+	id string
+	at time.Time
 }
 
 // ErrConfig is returned by New for an incomplete configuration.
@@ -187,13 +202,19 @@ func New(cfg Config) (*Adapter, error) {
 	if cfg.DailyLimit == 0 {
 		cfg.DailyLimit = DefaultDailyLimit
 	}
+	if cfg.DailyCeiling == 0 {
+		cfg.DailyCeiling = DefaultDailyCeiling
+	}
+	if cfg.DailyCeiling < cfg.DailyLimit {
+		cfg.DailyCeiling = cfg.DailyLimit
+	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	a := &Adapter{cfg: cfg, self: map[string]bool{addr: true}, reserved: map[string]time.Time{}}
+	a := &Adapter{cfg: cfg, self: map[string]bool{addr: true, selfKey(addr): true}, reserved: map[string]time.Time{}}
 	for _, x := range cfg.Aliases {
 		if c, ok := canon(x); ok {
-			a.self[c] = true
+			a.self[c], a.self[selfKey(c)] = true, true
 		}
 	}
 	a.cfg.Address = addr
@@ -210,19 +231,27 @@ func canon(s string) (string, bool) {
 }
 
 // isSelf reports whether addr is one of the owner's addresses, including
-// a plus-address variant of one (owner+tag@example.com).
+// a plus-address variant of one (owner+tag@example.com) and, on Gmail,
+// one that differs only in dots in the local part.
 func (a *Adapter) isSelf(addr string) bool {
-	if a.self[addr] {
-		return true
-	}
+	return a.self[addr] || a.self[selfKey(addr)]
+}
+
+// selfKey is addr with a +tag removed and, for Gmail's domains, the dots
+// in the local part removed: the forms that reach the same mailbox.
+func selfKey(addr string) string {
 	local, dom, ok := strings.Cut(addr, "@")
 	if !ok {
-		return false
+		return addr
 	}
 	if i := strings.IndexByte(local, '+'); i > 0 {
-		return a.self[local[:i]+"@"+dom]
+		local = local[:i]
 	}
-	return false
+	if dom == "gmail.com" || dom == "googlemail.com" {
+		local = strings.ReplaceAll(local, ".", "")
+		dom = "gmail.com"
+	}
+	return local + "@" + dom
 }
 
 func domainOf(addr string) string {

@@ -71,3 +71,24 @@ func TestOrganizeEscalatesOnlyWhatTheAdapterFlags(t *testing.T) {
 		t.Fatal("approved organize effects did not run")
 	}
 }
+
+// TestOrganizeWithoutAGuardIsAsked: organize is reversible only behind its
+// adapter's guards, so an account whose verifier has none asks every
+// organize effect instead of running it (Security C1).
+func TestOrganizeWithoutAGuardIsAsked(t *testing.T) {
+	r := newRig(t, func(c *Config) {
+		c.Declared["mail"]["message.archive"] = "organize"
+		c.Verifiers["mail"] = &fakeVerifier{records: map[string]Verified{}}
+	})
+	ops := mailOps()
+	ops["message.archive"] = "organize"
+	r.grant(Spec{Account: "mail", Executor: "mail", Ops: ops})
+	st := r.effect("agent/a1", "message.archive", map[string]any{"record": "news"})
+	if st.State != journal.Pending || r.exec.runs("agent/a1") != 0 {
+		t.Fatalf("unguarded organize: %s", st.State)
+	}
+	r.g.Flush()
+	if _, items := r.own.last(t); len(items) != 1 || items[0].Detail != "no guard for this account" {
+		t.Fatalf("asked %+v", items)
+	}
+}
