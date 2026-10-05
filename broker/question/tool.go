@@ -125,3 +125,22 @@ func result(req string, st Status) ToolResult {
 	}
 	return out
 }
+
+// GuestTools serves the question tools on a guest socket (guest.Tools,
+// W9). The asker is the lineage the socket fixes, never anything the
+// guest sends. Names other than the question tools are not handled.
+type GuestTools struct{ Book *Book }
+
+func (g GuestTools) List() []map[string]any { return Tools }
+
+func (g GuestTools) Call(ctx context.Context, machine, lineage, name string, args json.RawMessage) (string, bool, error) {
+	if name != ToolAsk && name != ToolStatus {
+		return "", false, nil
+	}
+	res, err := g.Book.Call(ctx, lineage, machine, name, args)
+	if err != nil {
+		return "", true, err
+	}
+	b, _ := json.Marshal(res)
+	return string(b), true, nil
+}

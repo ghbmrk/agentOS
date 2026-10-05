@@ -72,6 +72,11 @@ type Handler struct {
 	Settings func(ctx context.Context, msg string, unlocked bool) (reply string, ok bool)
 	// HelpExtra, if set, is appended to HELP's reply (loops.HelpLine).
 	HelpExtra string
+	// Answer, if set, takes an owner reply to an agent's question ("Q104
+	// yes", question.Book.Answer) in an unlocked session, after Settings
+	// and before the agent: ok true answers it with reply and the agent
+	// never sees it. A PUBLIC task never reaches it (W9).
+	Answer func(ctx context.Context, msg string) (reply string, ok bool)
 
 	mu     sync.Mutex
 	resume *pendingCode
@@ -132,6 +137,8 @@ func (h *Handler) Handle(ctx context.Context, from, msg string) []string {
 			out = append(out, reply)
 		} else if !unlocked {
 			out = append(out, unlockText)
+		} else if reply, ok := h.answer(ctx, cmd); ok {
+			out = append(out, reply)
 		} else if !h.deliver(ctx, cmd) {
 			out = append(out, "Your agent is not running. STOP, RESUME, STATUS and HELP still work.")
 		}
@@ -171,6 +178,14 @@ func (h *Handler) setting(ctx context.Context, cmd Command, unlocked bool) (stri
 		return "", false
 	}
 	return h.Settings(ctx, cmd.Text, unlocked)
+}
+
+// answer tries the Answer hook on task chat that is not PUBLIC.
+func (h *Handler) answer(ctx context.Context, cmd Command) (string, bool) {
+	if h.Answer == nil || cmd.Public {
+		return "", false
+	}
+	return h.Answer(ctx, cmd.Text)
 }
 
 func (h *Handler) deliver(ctx context.Context, cmd Command) bool {

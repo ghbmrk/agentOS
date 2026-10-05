@@ -47,7 +47,8 @@ var controlPath = map[string][]string{
 	// learning plane in-process (W3): the change pipeline, the loop
 	// scheduler, and the replay evaluator, whose transitive imports
 	// TestAgentosdLinksNoInference holds free of inference.
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay"},
+	// It runs the owner-question book (W9) on the box clock (P2-9).
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies
@@ -90,6 +91,9 @@ var guestPlane = map[string]struct {
 	// Replay (LOOP-5) serves replay machines through a guest plane of its
 	// own: no journal writes, no executors, no network clients.
 	"replay": {[]string{"admission", "change", "guest", "journal", "meter", "vm"}, []string{"net", "os/exec", "plugin", "unsafe", "C"}},
+	// Agents' questions to the owner (P3-8, W9): served to guests and
+	// answered from the owner channel, through hooks the wiring passes.
+	"question": {nil, forbiddenStd},
 }
 
 // The learning plane (W3; arbitrator, adopting potency PW1 on #56): the

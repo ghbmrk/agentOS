@@ -187,11 +187,16 @@ type Config struct {
 	Coalesce        time.Duration
 	CoalesceIdle    time.Duration
 	RequestsPerHour int
-	Urgent          func(owner.Item) bool
-	Quiet           func(time.Time) bool
-	Fresh           time.Duration
-	Now             func() time.Time
-	Logf            func(format string, args ...any)
+	// OtherTexts counts the owner channel's other unsolicited texts in the
+	// hour before now (owner questions, question.Book.Texts): they draw on
+	// the same RequestsPerHour (W9, question Q3). Nil: none. It is called
+	// without the gate's lock held.
+	OtherTexts func(now time.Time) int
+	Urgent     func(owner.Item) bool
+	Quiet      func(time.Time) bool
+	Fresh      time.Duration
+	Now        func() time.Time
+	Logf       func(format string, args ...any)
 }
 
 // Gate is the approval policy. It is the engine's journal.Policy, the
@@ -1127,6 +1132,10 @@ func (g *Gate) queueReply(id string, v verdict) {
 // and within RequestsPerHour.
 func (g *Gate) flushDue() {
 	now := g.cfg.Now()
+	others := 0
+	if g.cfg.OtherTexts != nil {
+		others = g.cfg.OtherTexts(now)
+	}
 	g.mu.Lock()
 	if len(g.batch) == 0 {
 		g.mu.Unlock()
@@ -1148,7 +1157,7 @@ func (g *Gate) flushDue() {
 		}
 	}
 	g.sent = keep
-	budget := len(g.sent) < g.cfg.RequestsPerHour
+	budget := len(g.sent)+others < g.cfg.RequestsPerHour
 	ripe := now.Sub(g.first) >= g.cfg.Coalesce || now.Sub(g.last) >= g.cfg.CoalesceIdle
 	g.mu.Unlock()
 	active := own != nil && own.Active(activeFor)
@@ -1156,6 +1165,21 @@ func (g *Gate) flushDue() {
 	if urgent || (!quiet && (active || (ripe && budget))) {
 		g.Flush()
 	}
+}
+
+// Pacing reports the approval request texts sent in the hour before now
+// and whether items wait in a batch, for the owner-question book, which
+// shares this budget and lets approval requests go first (W9, question
+// Q3, UX-71-1).
+func (g *Gate) Pacing(now time.Time) (texts int, waiting bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, t := range g.sent {
+		if now.Sub(t) < time.Hour {
+			texts++
+		}
+	}
+	return texts, len(g.batch) > 0
 }
 
 // Flush sends batched items now: one request per tier, at most MaxBatch

@@ -98,6 +98,9 @@ type Config struct {
 	Settings  func(ctx context.Context, msg string, unlocked bool) (reply string, ok bool)
 	HelpExtra string
 	Narrows   func(msg string) bool
+	// Answer takes the owner's replies to agents' questions before they
+	// reach the agent (question.Book.Answer, W9). Nil: none.
+	Answer func(ctx context.Context, msg string) (reply string, ok bool)
 	// Redactor scrubs journaled free text. Nil journals none at all until
 	// the vault's redactor (CRED-7 values plus CH-19 patterns) is wired
 	// with the vault unlock (P2-4).
@@ -214,7 +217,7 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 		}
 	}
 	h := &control.Handler{Engine: eng, Auth: cfg.Auth, Agent: cfg.Agent, Machines: machines,
-		Settings: cfg.Settings, HelpExtra: cfg.HelpExtra}
+		Settings: cfg.Settings, HelpExtra: cfg.HelpExtra, Answer: cfg.Answer}
 	handle := h.Handle
 	var ch *ownerch.Channel
 	if cfg.OwnerState != "" {
@@ -222,7 +225,7 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 			Owner: cfg.OwnerNumber, Modem: cfg.Modem, Engine: eng, Agent: cfg.Agent,
 			Machines: machines, Secrets: cfg.OwnerSecrets, Verifier: cfg.OwnerVerifier, Store: ownerch.FileStore{Path: cfg.OwnerState},
 			Decide: gate.Decide, Narrow: gate.Narrow, Reissue: gate.Reissue,
-			Settings: cfg.Settings, HelpExtra: cfg.HelpExtra, Narrows: cfg.Narrows,
+			Settings: cfg.Settings, HelpExtra: cfg.HelpExtra, Narrows: cfg.Narrows, Answer: cfg.Answer,
 		}); err != nil {
 			store.Close()
 			return nil, err

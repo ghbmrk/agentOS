@@ -99,6 +99,10 @@ type Config struct {
 	// word (CH-11), rather than being held for the unlock. It must not
 	// call back into the channel.
 	Narrows func(msg string) bool
+	// Answer takes an owner reply to an agent's question (question.Book
+	// .Answer) in an unlocked session, with any code stripped, before it
+	// would reach the agent (control.Handler.Answer, W9). Nil: none.
+	Answer func(ctx context.Context, msg string) (reply string, ok bool)
 }
 
 // Carried is an item of a request open at the last shutdown, handed to
@@ -223,8 +227,17 @@ func New(cfg Config) (*Channel, error) {
 		boot: &bootReport{pending: st.Pending, queued: st.Queued},
 	}
 	c.ctrl = &control.Handler{Engine: cfg.Engine, Auth: c, Agent: cfg.Agent, Machines: cfg.Machines, Now: cfg.Now,
-		Settings: cfg.Settings, HelpExtra: cfg.HelpExtra}
+		Settings: cfg.Settings, HelpExtra: cfg.HelpExtra, Answer: cfg.Answer}
 	return c, nil
+}
+
+// ApprovalsOpen reports whether an approval request is open, so an
+// untagged reply is never taken as a question's answer while the owner
+// may mean the request (question Config.ApprovalsOpen, W9).
+func (c *Channel) ApprovalsOpen() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.open) > 0
 }
 
 // IsOwner implements control.Auth (CH-3).
