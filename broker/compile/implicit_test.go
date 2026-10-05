@@ -69,12 +69,17 @@ func TestImplicitRunsCountButNeverTeach(t *testing.T) {
 			t.Fatalf("kind %s", sk.Kind)
 		}
 		for _, b := range cand.Files {
-			if strings.Contains(string(b), "CANARY-") || strings.Contains(string(b), "ann@") {
+			if strings.Contains(string(b), "CANARY-") || strings.Contains(string(b), "ann@") || strings.Contains(string(b), "fay@") {
 				t.Fatalf("an implicit run's value reached the skill: %s", b)
 			}
 		}
 		if sk.Steps[0].Params["subject"].Slot == "" {
 			t.Fatalf("a value implicit runs vary must be an input: %+v", sk.Steps[0].Params["subject"])
+		}
+		// The recipient, which only implicit runs vary, stays the explicit
+		// run's literal (arbitrator on #109).
+		if string(sk.Steps[0].Params["to"].Lit) != `"dee@example.test"` || string(sk.Steps[1].Recipients[0].Lit) != `"dee@example.test"` {
+			t.Fatalf("an implicit run widened a recipient: %+v", sk.Steps)
 		}
 	}
 }
