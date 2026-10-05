@@ -121,11 +121,14 @@ func (h *Handler) Handle(ctx context.Context, from, msg string) []string {
 		r = "Not understood, and not sent to your agent. Reply HELP for commands."
 	default:
 		var out []string
-		if StopNearMiss(cmd.Text) && h.takeHint() {
+		unlocked := h.Auth.SessionUnlocked(h.now())
+		reply, isSetting := h.setting(ctx, cmd, unlocked)
+		// A setting is not a near-miss (STOP SHARING, UX-90-1): it gets
+		// only its own reply and leaves the hourly hint unspent.
+		if !isSetting && StopNearMiss(cmd.Text) && h.takeHint() {
 			out = append(out, stopHint)
 		}
-		unlocked := h.Auth.SessionUnlocked(h.now())
-		if reply, ok := h.setting(ctx, cmd, unlocked); ok {
+		if isSetting {
 			out = append(out, reply)
 		} else if !unlocked {
 			out = append(out, unlockText)

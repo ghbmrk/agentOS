@@ -88,6 +88,8 @@ type rig struct {
 	decided  []Decision
 	// reissue, if set, is the next open channel's Config.Reissue.
 	reissue func([]Carried)
+	// edit, if set, changes the next open channel's Config.
+	edit func(*Config)
 }
 
 func newRig(t *testing.T, store Store) *rig {
@@ -113,14 +115,18 @@ func (r *rig) open() *Channel {
 	if r.verifier != nil {
 		sec.TOTPSeed = nil
 	}
-	ch, err := New(Config{
+	cfg := Config{
 		Owner: ownerNum, Modem: r.box, Engine: r.eng, Agent: agent, Secrets: sec, Verifier: r.verifier, Store: r.store,
 		Limits:     Limits{Hold: 7 * 24 * time.Hour, AmountLimit: 10000},
 		ReplyLimit: r.replyLimit,
 		Location:   time.UTC, Now: r.clock,
 		Decide:  func(d Decision) { r.mu.Lock(); r.decided = append(r.decided, d); r.mu.Unlock() },
 		Reissue: r.reissue,
-	})
+	}
+	if r.edit != nil {
+		r.edit(&cfg)
+	}
+	ch, err := New(cfg)
 	if err != nil {
 		r.t.Fatal(err)
 	}

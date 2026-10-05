@@ -16,6 +16,10 @@ import (
 // guest asked for no usage and the response it got carries none.
 // Configure the meter's MaxReserve as the router's MaxOutputTokens. It
 // lives here, not in guest, so the guest plane links no router (ARC-2).
+// It does not report meter.Usage's NoResponse or Unanswered (#84), so a
+// failed upstream call is metered as the guest saw it; agentosd forwards
+// to the vault process through modelroute, which does, and Routed must
+// not take its place without that rule.
 func Routed(r *Router) func(machine string) http.Handler {
 	return func(machine string) http.Handler {
 		h := r.Handler(machine)

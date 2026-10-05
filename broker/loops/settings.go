@@ -292,6 +292,13 @@ func (s *Scheduler) Text(ctx context.Context, msg string, unlocked bool) (reply 
 	}
 }
 
+// Narrows reports that msg is a loop setting a locked session takes: the
+// owner channel runs it at once instead of holding it for the unlock.
+func (s *Scheduler) Narrows(msg string) bool {
+	r, ok := ParseText(msg)
+	return ok && s.narrowing(r)
+}
+
 // narrowing reports a request whose worst case is a pause.
 func (s *Scheduler) narrowing(r Request) bool {
 	switch r.Kind {

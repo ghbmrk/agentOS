@@ -43,8 +43,11 @@ var controlPath = map[string][]string{
 	// (modelroute, P2-4) and journals the denials that come back, and
 	// gives the owner channel the vault process's verify operation
 	// (owner.Verifier, egress K7). It keeps the owner's agent machine
-	// running as foreground work (admission.Foreground, RES-1).
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner"},
+	// running as foreground work (admission.Foreground, RES-1). It runs the
+	// learning plane in-process (W3): the change pipeline, the loop
+	// scheduler, and the replay evaluator, whose transitive imports
+	// TestAgentosdLinksNoInference holds free of inference.
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies

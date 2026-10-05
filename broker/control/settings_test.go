@@ -66,3 +66,23 @@ func TestHelpCarriesTheExtraLine(t *testing.T) {
 		t.Fatalf("%q", got)
 	}
 }
+
+// UX-90-1: a setting that starts with STOP (STOP SHARING) gets only its
+// own reply, not the STOP hint, and leaves the hourly hint for a real
+// near-miss.
+func TestASettingIsNotAStopNearMiss(t *testing.T) {
+	agent := &recAgent{}
+	h, _ := newHandler(t, &fakeEngine{}, fakeAuth{unlocked: true}, agent)
+	h.Settings = func(_ context.Context, msg string, _ bool) (string, bool) {
+		if msg == "STOP SHARING" {
+			return "Sharing is off.", true
+		}
+		return "", false
+	}
+	if got := one(t, h.Handle(context.Background(), owner, "STOP SHARING")); got != "Sharing is off." {
+		t.Fatalf("%q", got)
+	}
+	if out := h.Handle(context.Background(), owner, "STOP NOW"); len(out) == 0 || out[0] != stopHint {
+		t.Fatalf("near-miss after a setting: %q", out)
+	}
+}

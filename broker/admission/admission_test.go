@@ -265,3 +265,42 @@ func TestPreemptionRunsWithoutTheLock(t *testing.T) {
 		t.Fatal("preempter not called")
 	}
 }
+
+// REQ: LOOP-1
+// Busy is the loop scheduler's "spare" signal: accepted work running, or
+// memory pressure over the limit, needs the box; the owner's always-on
+// foreground agent alone does not (admission already preempts experiments
+// when foreground needs memory).
+func TestBusyIsAcceptedWorkOrPressure(t *testing.T) {
+	p := 0.0
+	c, err := New(Config{CapacityMB: 4000, HeadroomMB: 500}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Pressure, c.MaxPressure = func() float64 { return p }, 10
+	if c.Busy() {
+		t.Fatal("idle box is busy")
+	}
+	if _, err := c.Admit(Request{ID: "agent", Class: Foreground, MemMB: 1000}); err != nil {
+		t.Fatal(err)
+	}
+	if c.Busy() {
+		t.Fatal("the foreground agent alone made the box busy")
+	}
+	if _, err := c.Admit(Request{ID: "job", Class: Accepted, MemMB: 500}); err != nil {
+		t.Fatal(err)
+	}
+	if !c.Busy() {
+		t.Fatal("accepted work running, not busy")
+	}
+	c.Release("job")
+	if c.Busy() {
+		t.Fatal("still busy after the work ended")
+	}
+	for _, v := range []float64{11, math.NaN(), -1} {
+		p = v
+		if !c.Busy() {
+			t.Fatalf("pressure %v, not busy", v)
+		}
+	}
+}
