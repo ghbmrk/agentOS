@@ -21,6 +21,10 @@ const (
 	// RetireFor keeps a closed ID from being reused, so a late reply
 	// cannot land on a new request with the same ID (CH-18).
 	RetireFor = 24 * time.Hour
+	// LocalTTL is how long a request asked only on the Wi-Fi page stays
+	// open by default: the owner has to reach the box's Wi-Fi first
+	// (P2-2a, UX A1).
+	LocalTTL = 4 * time.Hour
 )
 
 // ErrFull is returned when MaxOpen requests and replies are already open.
@@ -32,6 +36,8 @@ var ErrLocalOnly = errors.New("owner: approvable only on the local page")
 
 type request struct {
 	id      string
+	n       uint64 // opening order, for the local page
+	local   bool   // asked on the local page only (P2-2a)
 	items   []Item
 	tier    Tier
 	code    string // texted code, low tier only
@@ -49,7 +55,7 @@ func (c *Channel) Request(items []Item, ttl time.Duration) (string, error) {
 	}
 	now := c.cfg.Now()
 	c.mu.Lock()
-	r, err := c.openLocked(items, ttl, now)
+	r, err := c.openLocked(items, ttl, now, false)
 	if err != nil {
 		c.mu.Unlock()
 		return "", err
@@ -85,7 +91,7 @@ func (c *Channel) RequestEach(items []Item, ttls []time.Duration) (ids []string,
 	var parts []part
 	c.mu.Lock()
 	for i, it := range items {
-		r, e := c.openLocked([]Item{it}, ttls[i], now)
+		r, e := c.openLocked([]Item{it}, ttls[i], now, false)
 		if e != nil {
 			if err == nil {
 				err = e
@@ -118,14 +124,41 @@ func (c *Channel) RequestEach(items []Item, ttls []time.Duration) (ids []string,
 	return ids, err
 }
 
+// RequestLocal opens a request for an item that can be approved only on
+// the local page (P2-2a, UX-144-2), its recipients not textable
+// (ErrLocalOnly), and texts the owner a notice that names no recipient.
+// It is always high tier and has no texted code: the page approves it
+// with a code-generator code (LocalAnswer). NO works by text; YES by text
+// is refused, since the owner never saw where it goes.
+func (c *Channel) RequestLocal(it Item, ttl time.Duration) (string, error) {
+	if c.cfg.Modem == nil {
+		return "", errors.New("owner: no modem")
+	}
+	now := c.cfg.Now()
+	c.mu.Lock()
+	r, err := c.openLocked([]Item{it}, ttl, now, true)
+	if err != nil {
+		c.mu.Unlock()
+		return "", err
+	}
+	text := c.renderLocked(r)
+	c.mu.Unlock()
+	if err := c.cfg.Modem.Send(c.cfg.Owner, text); err != nil {
+		c.dropOpen([]string{r.id}, now)
+		return "", err
+	}
+	return r.id, nil
+}
+
 // openLocked validates items and opens a request for them, recorded for a
-// restart, without texting it.
-func (c *Channel) openLocked(items []Item, ttl time.Duration, now time.Time) (*request, error) {
+// restart, without texting it. A local request skips the text check and
+// is always high tier.
+func (c *Channel) openLocked(items []Item, ttl time.Duration, now time.Time, local bool) (*request, error) {
 	if len(items) == 0 || len(items) > 20 {
 		return nil, errors.New("owner: a request has 1 to 20 items")
 	}
 	for _, it := range items {
-		if !SMSApprovable(it) {
+		if !local && !SMSApprovable(it) {
 			return nil, ErrLocalOnly
 		}
 	}
@@ -138,11 +171,14 @@ func (c *Channel) openLocked(items []Item, ttl time.Duration, now time.Time) (*r
 			tier = High
 		}
 	}
-	if c.codes.st.LowLocked {
-		tier = High // texted codes are off (CH-18)
+	if c.codes.st.LowLocked || local {
+		tier = High // texted codes are off (CH-18), or the page asks it
 	}
 	if ttl <= 0 {
 		ttl = c.cfg.CodeTTL
+		if local {
+			ttl = LocalTTL
+		}
 	}
 	if ttl > MaxTTL {
 		ttl = MaxTTL
@@ -154,7 +190,8 @@ func (c *Channel) openLocked(items []Item, ttl time.Duration, now time.Time) (*r
 	if err != nil {
 		return nil, err
 	}
-	r := &request{id: id, items: append([]Item(nil), items...), tier: tier,
+	c.reqN++
+	r := &request{id: id, n: c.reqN, local: local, items: append([]Item(nil), items...), tier: tier,
 		expires: now.Add(ttl), done: make([]bool, len(items))}
 	if tier == Low {
 		r.code = c.codes.textedCode()
@@ -192,6 +229,18 @@ func (c *Channel) dropOpen(ids []string, now time.Time) {
 func (c *Channel) renderLocked(r *request) string {
 	exp := r.expires.In(c.cfg.Location).Format("15:04")
 	var replies string
+	if r.local {
+		// Only the verified verb, object and recipient count: the page
+		// shows the rest (Security D4, UX A2).
+		it := r.items[0]
+		n := len(strings.Split(it.Recipient, ","))
+		pre := ""
+		if it.Unverified {
+			pre = "UNVERIFIED: "
+		}
+		return fmt.Sprintf("%s: %syour agent wants to %s \"%s\" to %d recipient%s I can't show in a text. Approve or deny on my Wi-Fi page before %s, or reply NO %s.",
+			r.id, pre, field(it.Facts.Verb, 12), field(it.Object, 40), n, map[bool]string{true: "s"}[n != 1], exp, r.id)
+	}
 	switch {
 	case r.tier == High && len(r.items) == 1:
 		replies = fmt.Sprintf("Reply YES %s and a code from your code generator%s, or NO %s.", r.id, c.gridOr(), r.id)
@@ -245,8 +294,10 @@ func (c *Channel) moreLocked(id string) string {
 }
 
 // answerLocked applies YES or NO to a request (CH-13). accepted reports an
-// accepted code; wrong reports a code that counted as wrong.
-func (c *Channel) answerLocked(rp reply, now time.Time, decided *[]Decision) (out []string, accepted, wrong bool) {
+// accepted code; wrong reports a code that counted as wrong. page is set
+// for an answer from the local page, the only place a local request can
+// be approved.
+func (c *Channel) answerLocked(rp reply, now time.Time, decided *[]Decision, page bool) (out []string, accepted, wrong bool) {
 	r, msg := c.findLocked(rp)
 	if r == nil {
 		if rp.word == "YES" && rp.code != "" && rp.id == "" {
@@ -259,6 +310,16 @@ func (c *Channel) answerLocked(rp reply, now time.Time, decided *[]Decision) (ou
 			return []string{"Wrong code. " + msg + lockNote(locked)}, false, true
 		}
 		return []string{msg}, false, false
+	}
+	if r.local && rp.word == "YES" && !page {
+		// Not a wrong code: the owner never saw where it goes (P2-2a).
+		// A valid code is spent all the same, so a text that leaked it
+		// cannot be replayed on the page (Security R1 on #165); a save
+		// failure only leaves it as unspent as before.
+		if rp.code != "" {
+			_, _, _ = c.codes.checkStrong(rp.code, now, strongOpts{silent: true})
+		}
+		return []string{fmt.Sprintf("Approve %s on my Wi-Fi page: it shows where this goes. Or reply NO %s.", r.id, r.id)}, false, false
 	}
 	for _, n := range rp.items {
 		if n > len(r.items) || r.done[n-1] {
@@ -284,7 +345,9 @@ func (c *Channel) answerLocked(rp reply, now time.Time, decided *[]Decision) (ou
 		return []string{fmt.Sprintf("Include the ID and the code: YES %s <code>.", r.id)}, false, false
 	}
 	texted := r.code
-	if r.tier == High {
+	if r.tier == High || page {
+		// The page takes a code-generator code for every request, as it
+		// asks; the texted code is only in the text (L3 M1 on #165).
 		texted = ""
 	}
 	ok, locked, emsg := c.checkLocked(texted, rp.code, now)

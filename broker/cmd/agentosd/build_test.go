@@ -129,7 +129,7 @@ func testLearning(t *testing.T) *learning {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lp.attach(ctx, d)
+	attachForTest(t, lp, ctx, cancel, d)
 	return lp
 }
 

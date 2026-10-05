@@ -143,6 +143,7 @@ type Channel struct {
 	mu       sync.Mutex
 	codes    codes
 	open     map[string]*request
+	reqN     uint64 // requests opened, for their order
 	queued   map[string]*Queued
 	released map[string]time.Time // queued IDs released, for UNDO's reply
 	lateUndo map[string]bool      // released IDs the owner texted UNDO for
@@ -236,7 +237,7 @@ func New(cfg Config) (*Channel, error) {
 	if cfg.Modem != nil {
 		c.cfg.Modem = watchedLine{Modem: cfg.Modem, c: c}
 	}
-	c.ctrl = &control.Handler{Engine: cfg.Engine, Auth: c, Agent: cfg.Agent, Machines: cfg.Machines, Notes: cfg.Notes, Now: cfg.Now,
+	c.ctrl = &control.Handler{Engine: cfg.Engine, Auth: c, Agent: cfg.Agent, Machines: cfg.Machines, Notes: append(cfg.Notes[:len(cfg.Notes):len(cfg.Notes)], c.LocalWaiting), Now: cfg.Now,
 		Settings: cfg.Settings, HelpExtra: cfg.HelpExtra, Answer: cfg.Answer}
 	return c, nil
 }
@@ -442,7 +443,7 @@ func (c *Channel) routeLocked(text string, now time.Time, decided *[]Decision) r
 			return route{replies: []string{"Nothing is held."}, limited: !unlocked}
 		default: // YES, NO
 			if len(c.open) > 0 || r.id != "" {
-				out, accepted, wrong := c.answerLocked(r, now, decided)
+				out, accepted, wrong := c.answerLocked(r, now, decided, false)
 				return route{replies: out, limited: !accepted && (wrong || !unlocked)}
 			}
 			if r.word == "YES" && r.code == "" && len(r.items) == 0 {
