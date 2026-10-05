@@ -39,9 +39,9 @@ type Decision struct {
 	// Expired: the request lapsed unanswered. Silence is not a judgment,
 	// so it neither counts nor resets (potency PA1).
 	Expired bool
-	// Edited: the owner changed the item before it went out. It resets an
-	// ADP-9 run like a NO; for a reply class it never counts toward the
-	// earned total and enters the edit rate (EditWindow).
+	// Edited: the owner changed the item before it went out. It resets the
+	// run like a NO (ADP-9, ADP-11), unless Config.ReplyEditPercent is set
+	// for a reply class.
 	Edited bool
 	// Wrong: the owner later judged it wrong (OP-7). It resets any run.
 	Wrong bool
@@ -73,6 +73,14 @@ type Config struct {
 	// ReplyThreshold is the run that earns a context-scoped reply rule
 	// (ADP-11 "earned"). Default 20.
 	ReplyThreshold int
+	// ReplyEditPercent, when above 0, lets an ADP-11 reply class earn its
+	// suggestion despite edits: ReplyThreshold unedited approvals (edited
+	// ones never count) with at most this percentage edited among the
+	// last EditWindow answered. This is potency PA2, the arbitrator's
+	// reading of Mark's D2 ("earned after ~20 unedited approved replies").
+	// It NEEDS A SPEC-DIFF before use: SPEC ADP-11 says "A rejection or an
+	// edit resets the count". Default 0: the strict run, any edit resets.
+	ReplyEditPercent int
 	// UserContent reports an account whose service publishes user content
 	// (paste sites, file shares, URL shorteners): never suggested, since
 	// an attacker can read what it receives (the SPEC egress-allowlist note, security review).
@@ -153,16 +161,9 @@ func New(cfg Config) (*Optimizer, error) {
 	return o, nil
 }
 
-// ADP-11 reply rules are earned, per Mark's D2 decision ("earned after
-// ~20 unedited approved replies") as the arbitrator read it on #52: at
-// least ReplyThreshold unedited approvals since the last NO, UNDO, or wrong
-// verdict (edited replies never count toward them), and at most
-// MaxEditPercent edited among the last EditWindow answered replies. ADP-9
-// rules keep the strict run: any edit resets.
-const (
-	EditWindow     = 30
-	MaxEditPercent = 10
-)
+// EditWindow is how many answered replies the edit rate covers when
+// Config.ReplyEditPercent is set.
+const EditWindow = 30
 
 // Body is the param that makes a send an in-thread reply (grants
 // ParamBody); Record names the source record (grants ParamRecord).
@@ -204,7 +205,7 @@ func (o *Optimizer) Observe(d Decision) error {
 			o.st.Necessary++
 		}
 	}
-	if !d.Approved || d.Wrong || (d.Edited && !reply) {
+	if !d.Approved || d.Wrong || (d.Edited && (!reply || o.cfg.ReplyEditPercent <= 0)) {
 		c.reset()
 		return o.save()
 	}
@@ -248,7 +249,7 @@ func (o *Optimizer) earnedLocked(c *class) bool {
 				edits++
 			}
 		}
-		if edits*100 > MaxEditPercent*len(c.Recent) {
+		if edits*100 > o.cfg.ReplyEditPercent*len(c.Recent) {
 			return false
 		}
 	}
