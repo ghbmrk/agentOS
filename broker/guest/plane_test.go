@@ -3,6 +3,7 @@ package guest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -338,7 +339,9 @@ func TestADP10NoAdapterNoIntent(t *testing.T) {
 // of requests shares one trailing snapshot, so a looping guest cannot
 // flood the snapshot store (RES-4).
 func TestREV1StepAfterEveryEffectRequest(t *testing.T) {
-	r := newRig(t, func(c *Config) { c.StepInterval = 300 * time.Millisecond })
+	// The burst below must finish inside one interval; 1 s leaves room
+	// for a loaded -race run.
+	r := newRig(t, func(c *Config) { c.StepInterval = time.Second })
 	r.tool("m1", "effect_request", send("r1"))
 	if n := r.ms.stepsOf("m1"); n != 1 {
 		t.Fatalf("%d steps after one effect request", n)
@@ -354,13 +357,42 @@ func TestREV1StepAfterEveryEffectRequest(t *testing.T) {
 	if n := r.ms.stepsOf("m1"); n != 1 {
 		t.Fatalf("%d steps inside the interval, want the first only", n)
 	}
-	time.Sleep(700 * time.Millisecond)
+	r.stepsSettle("m1")
 	if n := r.ms.stepsOf("m1"); n != 2 {
 		t.Fatalf("%d steps after the burst, want one trailing snapshot", n)
 	}
 	r.tool("m1", "effect_request", send("r20"))
 	if n := r.ms.stepsOf("m1"); n != 3 {
 		t.Fatalf("%d steps: a request after the interval snapshots at once", n)
+	}
+}
+
+// stepsSettle waits until machine id's stepper owes nothing and a full
+// StepInterval has passed since its last snapshot, so the next effect
+// request snapshots at once. It reads the stepper's state rather than
+// sleeping a fixed time, which a late timer under load can outlast. A
+// trailing snapshot is due within one interval; one not taken within
+// three fails the test.
+func (r *rig) stepsSettle(id string) {
+	r.t.Helper()
+	m := r.p.get(id)
+	deadline := time.Now().Add(3 * r.p.cfg.StepInterval)
+	for {
+		s := &m.steps
+		s.mu.Lock()
+		idle := !s.running && !s.pending && s.timer == nil
+		wait := r.p.cfg.StepInterval - time.Since(s.last)
+		s.mu.Unlock()
+		switch {
+		case idle && wait <= 0:
+			return
+		case idle:
+			time.Sleep(wait)
+		case time.Now().After(deadline):
+			r.t.Fatalf("stepper of %s still owes a snapshot after %v", id, 3*r.p.cfg.StepInterval)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
 	}
 }
 
@@ -502,6 +534,47 @@ func TestG5OwnerMessagesSurviveABrokerRestart(t *testing.T) {
 	if code, body := r3.do("m1", "GET", "/owner/next", ""); code != 204 {
 		t.Fatalf("an answered message came back: %s", body)
 	}
+}
+
+// TestREV5StoredOwnerMessagesRaiseTheMachine: the inbox store can outlive
+// the machine record, so a machine created fresh (public) under an ID with
+// stored owner messages is raised to private before the guest reads one,
+// and a failed raise hands out nothing (security C1 on #56).
+func TestREV5StoredOwnerMessagesRaiseTheMachine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inbox.json")
+	r := newRig(t, func(c *Config) { c.InboxPath = path })
+	r.client("agent")
+	if _, err := r.p.DeliverOwner("agent", "my bank details", false); err != nil {
+		t.Fatal(err)
+	}
+	r.p.Shutdown()
+
+	fail := &failRaise{fakeMachines: newMachines(), fail: true}
+	r2 := newRig(t, func(c *Config) { c.InboxPath = path; c.Machines = fail })
+	r2.client("agent")
+	if code, body := r2.do("agent", "GET", "/owner/next", ""); code != 503 || strings.Contains(body, "bank") {
+		t.Fatalf("raise failed, yet: %d %s", code, body)
+	}
+	fail.fail = false
+	code, body := r2.do("agent", "GET", "/owner/next", "")
+	if code != 200 || !strings.Contains(body, "bank") {
+		t.Fatalf("after raise: %d %s", code, body)
+	}
+	if !fail.private["agent"] {
+		t.Fatal("stored message handed out without raising the machine")
+	}
+}
+
+type failRaise struct {
+	*fakeMachines
+	fail bool
+}
+
+func (f *failRaise) RaisePrivate(id string) error {
+	if f.fail {
+		return errors.New("label store down")
+	}
+	return f.fakeMachines.RaisePrivate(id)
 }
 
 // TestOP8ModelRouteIsMeteredByMachine: model calls go through the meter,

@@ -191,6 +191,10 @@ var (
 	ErrImage    = errors.New("vm: snapshots are of different images")
 	ErrRevoked  = errors.New("vm: admission was withdrawn before the machine started")
 	ErrQuota    = errors.New("vm: disk budget exceeded: snapshot refused; free space in the machine (delete files) or roll back, then retry")
+	// ErrSeedLabel refuses a seed for a machine not labelled private: seeds
+	// are derived from owner data until their files carry a public mark
+	// (REV-5, compile K7).
+	ErrSeedLabel = errors.New("vm: a seeded machine must be labelled private")
 )
 
 var idRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
@@ -290,10 +294,16 @@ const EvalPrefix = "eval-"
 // before its guest first runs, at paths relative to the guest's root: how
 // the broker hands a machine read-only inputs, such as the managed tree a
 // replay evaluates (LOOP-5). Paths must be local and clean; files are
-// root-owned 0644 in 0755 directories. A rebuild from the image writes the
+// root-owned 0644 in 0755 directories. A non-empty seed needs s.Label
+// Private: the managed tree is derived from owner tasks, and no file carries
+// a public mark yet, so only a private machine may read it (REV-5, compile
+// K7); forks inherit the label, so the seed stays private. A rebuild from the image writes the
 // seed again; the seed is not persisted, so after a broker restart the
 // machine has only its layer.
 func (m *Manager) CreateSeeded(ctx context.Context, id string, s Spec, seed map[string][]byte) (Machine, error) {
+	if len(seed) > 0 && s.Label != Private {
+		return Machine{}, fmt.Errorf("%w: %s is %v", ErrSeedLabel, id, s.Label)
+	}
 	var size int64
 	for p, b := range seed {
 		if !filepath.IsLocal(p) || filepath.Clean(p) != p {

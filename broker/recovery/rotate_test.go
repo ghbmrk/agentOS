@@ -208,18 +208,29 @@ func TestAPartialRotationReturnsWhatIsInEffect(t *testing.T) {
 	}
 }
 
-// The marker exists before the first slot write: a crash at that write
-// cannot leave a rotation unrecorded.
+// The marker is on the drive before the first slot write: a crash at that
+// write cannot leave a rotation unrecorded. The slot write proves its
+// factor under the vault's lock, so the check reads the vault file itself,
+// which also shows the marker was written and not only held in memory.
 type markerCheck struct {
 	vault.Factor
 	b     *Box
+	rk    RecoveryKey
 	armed *bool
 	seen  *bool
 }
 
 func (m markerCheck) KEK(s vault.Slot) ([]byte, error) {
 	if *m.armed {
-		_, ok := RotationUnfinished(m.b)
+		ok := false
+		if raw, err := os.ReadFile(m.b.KeysPath); err == nil {
+			if key, err := unwrapRecovery(raw, m.rk); err == nil {
+				if v, err := vault.Open(m.b.VaultPath, key); err == nil {
+					_, ok = RotationUnfinished(&Box{VaultPath: m.b.VaultPath, KeysPath: m.b.KeysPath, V: v})
+					v.Close()
+				}
+			}
+		}
 		*m.seen = *m.seen || !ok
 	}
 	return m.Factor.KEK(s)
@@ -228,7 +239,7 @@ func (m markerCheck) KEK(s vault.Slot) ([]byte, error) {
 func TestTheRotationMarkerPrecedesTheFirstSlotWrite(t *testing.T) {
 	x := newBox(t)
 	var armed, missing bool
-	proof := Proof{Host: func() vault.Factor { return markerCheck{Factor(x.rk), x.b, &armed, &missing} }}
+	proof := Proof{Host: func() vault.Factor { return markerCheck{Factor(x.rk), x.b, x.rk, &armed, &missing} }}
 	p, err := BeginRotate(x.b, []Part{PartPassphrase, PartRecovery}, Auth{Code: true, Local: true}, proof, testGen, nil, t0)
 	must(t, err)
 	armed = true

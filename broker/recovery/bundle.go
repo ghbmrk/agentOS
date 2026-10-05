@@ -392,13 +392,16 @@ func restore(r io.Reader, rk RecoveryKey, dst string, lay Layout, opt Options, n
 	if err := CheckKeys(raw); err != nil {
 		return rep, err
 	}
-	if rep.DroppedHostSlots, err = dropHostSlots(b.KeysPath); err != nil {
-		return rep, err
-	}
 	if b.V, err = vault.OpenSealed(b.VaultPath, b.KeysPath, Factor(rk)); err != nil {
 		return rep, fmt.Errorf("recovery: the restored vault does not open with this recovery key: %w", err)
 	}
-	err = x.verify(b.V, drive)
+	// A backup is a deliberate rollback: Rebase gives the vault a new
+	// rollback identity and drops every TPM slot with it, so new hardware
+	// is trusted only when the owner adds it (CRED-9, V6).
+	rep.DroppedHostSlots, err = b.V.Rebase(Factor(rk))
+	if err == nil {
+		err = x.verify(b.V, drive)
+	}
 	if err == nil {
 		// Declines are for good, across restores too.
 		prev := LoadState(b.V)

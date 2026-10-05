@@ -9,6 +9,8 @@
 //   /model/openai/v1  model access with a placeholder key (ARC-6 (a)); the
 //                     broker's egress proxy injects the real key (CRED-5)
 //   /mcp              broker tools: effect_request, effect_status (ARC-6 (b))
+//   /skills/mcp       compiled skills and procedures from the managed tree,
+//                     run by the bridge as effect_requests (CAP-5)
 // Owner messages arrive on the gateway's chat-completions endpoint, posted
 // by the bridge with a guest-local token (ARC-6 (c)).
 {
@@ -27,7 +29,10 @@
     },
   },
   agents: { defaults: { model: { primary: "broker/@MODEL@" }, sandbox: { mode: "off" } } },
-  mcp: { servers: { broker: { url: "http://127.0.0.1:18080/mcp", transport: "streamable-http" } } },
+  mcp: { servers: {
+    broker: { url: "http://127.0.0.1:18080/mcp", transport: "streamable-http" },
+    skills: { url: "http://127.0.0.1:18080/skills/mcp", transport: "streamable-http" },
+  } },
   tools: {
     profile: "coding",
     // External-effect and credential-acquiring built-ins (S4, CRED-1).

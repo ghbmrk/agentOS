@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,9 +26,13 @@ func (unlocked) IsOwner(from string) bool       { return from == owner }
 func (unlocked) SessionUnlocked(time.Time) bool { return true }
 
 func start(t *testing.T, dir string) (context.CancelFunc, *Daemon) {
+	return startWith(t, dir, nil)
+}
+
+func startWith(t *testing.T, dir string, mod func(*Config)) (context.CancelFunc, *Daemon) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	d, err := Run(ctx, Config{
+	cfg := Config{
 		JournalPath: filepath.Join(dir, "journal.log"),
 		SocketDir:   filepath.Join(dir, "run"),
 		OwnerNumber: owner,
@@ -35,7 +40,11 @@ func start(t *testing.T, dir string) (context.CancelFunc, *Daemon) {
 		Machines:    []string{"m1"},
 		Admission:   admission.Config{CapacityMB: 4500, HeadroomMB: 600},
 		Auth:        unlocked{},
-	})
+	}
+	if mod != nil {
+		mod(&cfg)
+	}
+	d, err := Run(ctx, cfg)
 	if err != nil {
 		cancel()
 		t.Fatal(err)
@@ -119,6 +128,31 @@ func TestCH2ControlWordsOverTheOwnerSocketWithEverythingElseDown(t *testing.T) {
 	}
 	if r := text(t, dir, owner, "STATUS"); !strings.HasPrefix(r[0], "Running.") {
 		t.Fatalf("after RESUME: %q", r)
+	}
+}
+
+// STATUS tells the owner, in fixed words, when the agent machine is not
+// running, in place of the machine counts (UX-56-1 on #56).
+func TestCH2StatusSaysWhyTheAgentIsDown(t *testing.T) {
+	dir, err := os.MkdirTemp("", "bk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	var mu sync.Mutex
+	line := "Agent: starting, waiting for memory."
+	cancel, d := startWith(t, dir, func(c *Config) {
+		c.AgentStatus = func() string { mu.Lock(); defer mu.Unlock(); return line }
+	})
+	defer func() { cancel(); d.Wait() }()
+	if r := text(t, dir, owner, "STATUS"); !strings.HasSuffix(r[0], " Agent: starting, waiting for memory.") {
+		t.Fatalf("STATUS while the agent waits: %q", r)
+	}
+	mu.Lock()
+	line = ""
+	mu.Unlock()
+	if r := text(t, dir, owner, "STATUS"); !strings.Contains(r[0], "Machines:") || strings.Contains(r[0], "Agent:") {
+		t.Fatalf("STATUS while the agent runs: %q", r)
 	}
 }
 

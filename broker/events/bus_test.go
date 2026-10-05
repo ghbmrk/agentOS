@@ -264,7 +264,7 @@ func TestTimers(t *testing.T) {
 // indexedBus is a recall index on a file store and a bus sharing its keyer.
 func indexedBus(t *testing.T, dir string, extra ...Trigger) (*recall.Index, *Bus, func()) {
 	t.Helper()
-	rst, err := recall.OpenFile(filepath.Join(dir, "recall.jsonl"))
+	rst, err := recall.OpenDir(filepath.Join(dir, "recall"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,7 +395,7 @@ func TestDeletionReplayedAtStart(t *testing.T) {
 
 	// The deletion lands in recall while the bus is down (as after a crash
 	// between the tombstone and the hook).
-	rst, err := recall.OpenFile(filepath.Join(dir, "recall.jsonl"))
+	rst, err := recall.OpenDir(filepath.Join(dir, "recall"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -73,6 +73,23 @@ type Changes interface {
 	Decided(ctx context.Context, in journal.Intent, declined bool)
 }
 
+// Loops is the loop scheduler (loops.Scheduler) as the gate uses it: the
+// policy for meta.loops.* intents, the owner's spare-time settings
+// (LOOP-0, loops L2). Like Changes, it is an interface so the gate does
+// not import the scheduler (ARC-2).
+type Loops interface {
+	// Check returns nil to allow, the scheduler's ErrNeedsOwner itself
+	// (NeedsOwner() true, not wrapped or joined) to ask the owner, and
+	// any other error to deny.
+	Check(ctx context.Context, phase journal.Phase, in journal.Intent) error
+	// Line is the approval item for an intent Check sends to the owner
+	// (raising the spare budget), rendered from broker state.
+	Line(in journal.Intent) (owner.Item, error)
+}
+
+// loopsAction reports a loop setting action.
+func loopsAction(action string) bool { return strings.HasPrefix(action, "meta.loops.") }
+
 // changeAction reports a change pipeline action.
 func changeAction(action string) bool { return strings.HasPrefix(action, "meta.change.") }
 
@@ -125,6 +142,8 @@ type Config struct {
 	Isolated func(machine string) bool
 	// Changes decides meta.change.* intents. Nil: they are denied.
 	Changes Changes
+	// Loops decides meta.loops.* intents. Nil: they are denied.
+	Loops Loops
 	// Coalesce, CoalesceIdle, and RequestsPerHour pace approval requests
 	// (CH-15); zero takes the defaults. Urgent marks owner-defined urgent
 	// items, sent at once and in quiet hours. Quiet reports the owner's
@@ -552,6 +571,9 @@ func (g *Gate) evaluateBroker(ctx context.Context, phase journal.Phase, in journ
 	if changeAction(in.Action) {
 		return g.evaluateChange(ctx, phase, in)
 	}
+	if loopsAction(in.Action) {
+		return g.evaluateLoops(ctx, phase, in)
+	}
 	switch in.Action {
 	case journal.ActionGrantChange:
 		s, err := parseSpec(in)
@@ -626,6 +648,30 @@ func (g *Gate) evaluateChange(ctx context.Context, phase journal.Phase, in journ
 	}
 	return verdict{kind: ask, local: local, hold: hold, item: owner.Item{Ref: in.ID, Object: l.Object, Detail: l.Detail, UndoBy: l.UndoBy,
 		Facts: owner.Facts{Kind: kind, Verb: l.Facts.Verb, NoRecipient: true}}}
+}
+
+// evaluateLoops delegates a meta.loops.* intent to the loop scheduler
+// (GR18). What the scheduler allows on the owner's text runs; raising the
+// spare budget is an owner request with the scheduler's line, low tier
+// unless the scheduler marks it otherwise, with no recipient or amount.
+func (g *Gate) evaluateLoops(ctx context.Context, phase journal.Phase, in journal.Intent) verdict {
+	if g.cfg.Loops == nil {
+		return verdict{kind: deny, why: "the loop scheduler is not running"}
+	}
+	err := g.cfg.Loops.Check(ctx, phase, in)
+	no, ok := err.(interface{ NeedsOwner() bool })
+	switch {
+	case err == nil:
+		return verdict{kind: allow}
+	case !ok || !no.NeedsOwner():
+		return verdict{kind: deny, why: err.Error()}
+	}
+	l, err := g.cfg.Loops.Line(in)
+	if err != nil {
+		return verdict{kind: deny, why: err.Error()}
+	}
+	return verdict{kind: ask, item: owner.Item{Ref: in.ID, Object: l.Object, Detail: l.Detail, UndoBy: l.UndoBy,
+		Facts: owner.Facts{Kind: l.Facts.Kind, Verb: l.Facts.Verb, NoRecipient: true}}}
 }
 
 // sharingOn reports the intent that turns sharing on: it changes what
@@ -956,7 +1002,7 @@ func (g *Gate) Flush() {
 // Decide). An approval settles only the request it answers; a denial for
 // an intent this run never asked about (a restart's) still closes it.
 func (g *Gate) Decide(d owner.Decision) {
-	if !d.Approved && d.Why != "owner" && g.isChange(d.Ref) {
+	if !d.Approved && d.Why != "owner" && g.isSetting(d.Ref) {
 		g.lapse(d)
 		return
 	}
@@ -991,8 +1037,9 @@ func (g *Gate) Decide(d owner.Decision) {
 	}
 }
 
-// isChange reports a pending change pipeline intent.
-func (g *Gate) isChange(id string) bool {
+// isSetting reports a pending change pipeline or loop setting intent: one
+// whose unanswered request lapses rather than being declined.
+func (g *Gate) isSetting(id string) bool {
 	g.mu.Lock()
 	eng := g.eng
 	g.mu.Unlock()
@@ -1000,12 +1047,14 @@ func (g *Gate) isChange(id string) bool {
 		return false
 	}
 	st, err := eng.Get(id)
-	return err == nil && st.State == journal.Pending && st.Intent.Account == journal.BrokerAccount && changeAction(st.Intent.Action)
+	return err == nil && st.State == journal.Pending && st.Intent.Account == journal.BrokerAccount &&
+		(changeAction(st.Intent.Action) || loopsAction(st.Intent.Action))
 }
 
-// lapse closes the owner's request for a change intent that ended without
-// the owner's answer: expired, voided by wrong codes, left out of a partial
-// YES, or dropped by a restart (change C7). The pipeline drops its
+// lapse closes the owner's request for a change or loop setting intent
+// that ended without the owner's answer: expired, voided by wrong codes,
+// left out of a partial YES, or dropped by a restart (change C7). For a
+// change, the pipeline drops its
 // proposal without recording a decline, then the intent closes as "lapsed,
 // not declined" (arbitrator Q3 on #48): it never runs, the owner channel
 // lists the expired item in the digest (CH-13), and neither learning nor
@@ -1021,7 +1070,7 @@ func (g *Gate) lapse(d owner.Decision) {
 	delete(g.waiting, d.Ref)
 	eng := g.eng
 	g.mu.Unlock()
-	if st, err := eng.Get(d.Ref); err == nil && g.cfg.Changes != nil {
+	if st, err := eng.Get(d.Ref); err == nil && g.cfg.Changes != nil && changeAction(st.Intent.Action) {
 		g.cfg.Changes.Decided(context.Background(), st.Intent, false)
 	}
 	g.closeIntent(d.Ref, lapsed)

@@ -60,6 +60,18 @@ type Handler struct {
 	Now      func() time.Time
 	// NewCode returns a fresh texted code; nil means 6 random digits.
 	NewCode func() string
+	// Settings, if set, answers an owner text that is a whole-message
+	// setting outside the control words above (the loops' LOOPS OFF,
+	// SPARE BUDGET n, HELP LOOPS; loops.Scheduler.Text). It is tried
+	// after the control words, so it cannot shadow STOP. unlocked says
+	// whether the session is unlocked: locked, the hook takes only
+	// settings whose worst case is a pause (CH-11's pause words need no
+	// unlock) and returns ok false for the rest, which get the unlock
+	// prompt. ok false in an unlocked session passes the message on to
+	// the agent.
+	Settings func(ctx context.Context, msg string, unlocked bool) (reply string, ok bool)
+	// HelpExtra, if set, is appended to HELP's reply (loops.HelpLine).
+	HelpExtra string
 
 	mu     sync.Mutex
 	resume *pendingCode
@@ -98,6 +110,9 @@ func (h *Handler) Handle(ctx context.Context, from, msg string) []string {
 		}
 	case WordHelp:
 		r = helpText
+		if h.HelpExtra != "" {
+			r += " " + h.HelpExtra
+		}
 	case WordYes, WordNo:
 		r = "No open requests."
 	case WordUndo, WordMore:
@@ -109,7 +124,10 @@ func (h *Handler) Handle(ctx context.Context, from, msg string) []string {
 		if StopNearMiss(cmd.Text) && h.takeHint() {
 			out = append(out, stopHint)
 		}
-		if !h.Auth.SessionUnlocked(h.now()) {
+		unlocked := h.Auth.SessionUnlocked(h.now())
+		if reply, ok := h.setting(ctx, cmd, unlocked); ok {
+			out = append(out, reply)
+		} else if !unlocked {
 			out = append(out, unlockText)
 		} else if !h.deliver(ctx, cmd) {
 			out = append(out, "Your agent is not running. STOP, RESUME, STATUS and HELP still work.")
@@ -141,6 +159,15 @@ func (h *Handler) takeHint() bool {
 	}
 	h.hintAt = now
 	return true
+}
+
+// setting tries the Settings hook on a whole message that is not marked
+// PUBLIC (a PUBLIC task is always task chat).
+func (h *Handler) setting(ctx context.Context, cmd Command, unlocked bool) (string, bool) {
+	if h.Settings == nil || cmd.Public {
+		return "", false
+	}
+	return h.Settings(ctx, cmd.Text, unlocked)
 }
 
 func (h *Handler) deliver(ctx context.Context, cmd Command) bool {
