@@ -201,6 +201,9 @@ type machine struct {
 	// revoked: admission preempted the machine after admitting it but
 	// before it started, so it must not start on that admission.
 	revoked bool
+	// seed is written into a fresh layer before the machine starts from its
+	// image (CreateSeeded). Kept in memory only.
+	seed map[string][]byte
 }
 
 // Manager is safe for concurrent use.
@@ -272,6 +275,26 @@ func (m *Manager) launch(mc *machine) Launch {
 
 // Create admits and starts a new machine from an image.
 func (m *Manager) Create(ctx context.Context, id string, s Spec) (Machine, error) {
+	return m.create(ctx, id, s, nil)
+}
+
+// CreateSeeded is Create with files written into the machine's fresh layer
+// before its guest first runs, at paths relative to the guest's root: how
+// the broker hands a machine read-only inputs, such as the managed tree a
+// replay evaluates (LOOP-5). Paths must be local and clean; files are
+// root-owned 0644 in 0755 directories. A rebuild from the image writes the
+// seed again; the seed is not persisted, so after a broker restart the
+// machine has only its layer.
+func (m *Manager) CreateSeeded(ctx context.Context, id string, s Spec, seed map[string][]byte) (Machine, error) {
+	for p := range seed {
+		if !filepath.IsLocal(p) || filepath.Clean(p) != p {
+			return Machine{}, fmt.Errorf("vm: bad seed path %q", p)
+		}
+	}
+	return m.create(ctx, id, s, seed)
+}
+
+func (m *Manager) create(ctx context.Context, id string, s Spec, seed map[string][]byte) (Machine, error) {
 	if !idRE.MatchString(id) {
 		return Machine{}, fmt.Errorf("vm: bad machine id %q", id)
 	}
@@ -282,6 +305,7 @@ func (m *Manager) Create(ctx context.Context, id string, s Spec) (Machine, error
 	if err != nil {
 		return Machine{}, err
 	}
+	mc.seed = seed
 	if err := m.admit(mc); err != nil {
 		m.unreserve(id)
 		return Machine{}, err
@@ -391,6 +415,9 @@ func (m *Manager) startFrom(ctx context.Context, mc *machine, s *Snapshot) error
 		if err := os.Mkdir(l.Upper, 0o755); err != nil {
 			return err
 		}
+		if err := writeSeed(l.Upper, mc.seed); err != nil {
+			return err
+		}
 	} else if err := overlay.Copy(filepath.Join(m.snapDir(s.ID), "fs"), l.Upper); err != nil {
 		return err
 	}
@@ -423,6 +450,30 @@ func (m *Manager) startFrom(ctx context.Context, mc *machine, s *Snapshot) error
 	}
 	mc.State = Running
 	return m.saveMachine(mc)
+}
+
+// writeSeed writes seed files into a fresh, broker-only layer. Nothing else
+// has written to upper yet, so no path in it can be a symlink; O_EXCL
+// refuses one at the final component anyway.
+func writeSeed(upper string, seed map[string][]byte) error {
+	for p, b := range seed {
+		dst := filepath.Join(upper, p)
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return err
+		}
+		f, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if err != nil {
+			return err
+		}
+		_, err = f.Write(b)
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // stopRuntime kills the machine and waits until its memory is released.

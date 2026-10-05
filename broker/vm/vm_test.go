@@ -14,7 +14,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/cgroup"
 )
 
-// REQ: REV-1, REV-4, ARC-4, RES-1, RES-2, RES-4, REV-5
+// REQ: REV-1, REV-4, ARC-4, RES-1, RES-2, RES-4, REV-5, LOOP-5
 
 var bg = context.Background()
 
@@ -771,5 +771,34 @@ func TestRES4ForkRefusedAfterCheckpointLeavesNoSnapshot(t *testing.T) {
 	if len(e.m.Snapshots("src")) != 0 || len(ents) != 0 || m.Last != "" || m.State != Running ||
 		len(e.m.Machines()) != 1 || e.adm.Snapshot().FreeMB != before {
 		t.Fatalf("refused fork left state: %d snapshots, %d dirs, last %q, %s", len(e.m.Snapshots("src")), len(ents), m.Last, m.State)
+	}
+}
+
+// LOOP-5: a replay hands the guest its inputs by seeding a fresh machine's
+// layer; seed paths cannot leave the layer.
+func TestLOOP5SeededMachineSeesItsInputs(t *testing.T) {
+	e := newEnv(t, 4096)
+	seed := map[string][]byte{"etc/agentos/tree/procedures/a.md": []byte("step one")}
+	if _, err := e.m.CreateSeeded(bg, "m", Spec{Image: "base", Class: admission.Experiment, MemMB: 100}, seed); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.guestRead("m", "etc/agentos/tree/procedures/a.md"); got != "step one" {
+		t.Fatalf("seed = %q", got)
+	}
+	if e.guestRead("m", "etc/os-release") != "image v1" {
+		t.Fatal("seed hid the image")
+	}
+	must(t, os.Remove(e.upper("m", "etc/agentos/tree/procedures/a.md")))
+	must(t, e.m.Rebuild(bg, "m"))
+	if got := e.guestRead("m", "etc/agentos/tree/procedures/a.md"); got != "step one" {
+		t.Fatalf("seed after rebuild = %q", got)
+	}
+	for _, p := range []string{"../escape", "/etc/passwd", "a/../../b", "a//b", ""} {
+		if _, err := e.m.CreateSeeded(bg, "bad", Spec{Image: "base", Class: admission.Experiment, MemMB: 100}, map[string][]byte{p: nil}); err == nil {
+			t.Errorf("seed path %q accepted", p)
+		}
+	}
+	if len(e.m.Machines()) != 1 {
+		t.Fatalf("refused seeds left machines: %v", e.m.Machines())
 	}
 }
