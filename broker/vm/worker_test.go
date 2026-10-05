@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"syscall"
 	"testing"
@@ -710,10 +711,10 @@ func TestCAP8cRefusedDeleteEndsNoCommand(t *testing.T) {
 	<-done
 }
 
-// Any failure past the guards reaches the caller as overlay's fixed
-// error, naming no host path, here a layer too deep for the host to
-// measure (L3 SHOULD-3 on #166).
-func TestCAP8cDeleteFailureNamesNoHostPath(t *testing.T) {
+// A deletion never depends on measuring the layer: one too deep for the
+// host to measure counts as over the cap, so the deletion stands and the
+// worker stays stopped (security M4 via SR2-3i).
+func TestCAP8cDeleteStandsWhenTheLayerCannotBeMeasured(t *testing.T) {
 	e := newEnv(t, 4096)
 	agent := e.create("agent", admission.Experiment, 500)
 	_, err := e.m.CreateWorker(bg, "wk-a", agent.Lineage, workerSpec(Public))
@@ -731,9 +732,36 @@ func TestCAP8cDeleteFailureNamesNoHostPath(t *testing.T) {
 		fd = next
 	}
 	syscall.Close(fd)
+	rep, err := e.m.DeleteFiles(bg, "wk-a", Deletion{Paths: []string{"/f"}})
+	must(t, err)
+	if rep.Codes[0] != "removed" || !rep.Over || rep.Restarted {
+		t.Fatalf("delete in an unmeasurable layer = %+v", rep)
+	}
+	if w, _ := e.m.Get("wk-a"); w.State != Stopped {
+		t.Fatalf("worker is %s, want stopped", w.State)
+	}
+	// The deep tree itself can be deleted, and then the worker starts.
+	rep, err = e.m.DeleteFiles(bg, "wk-a", Deletion{Paths: []string{"/" + name}, Recursive: true})
+	must(t, err)
+	if rep.Codes[0] != "removed" || rep.Over || !rep.Restarted {
+		t.Fatalf("deleting the deep tree = %+v", rep)
+	}
+}
+
+// Any other failure past the guards reaches the caller as overlay's
+// fixed error, naming no host path: here stopping the runtime fails (L3
+// SHOULD-3 on #166).
+func TestCAP8cDeleteFailureNamesNoHostPath(t *testing.T) {
+	e := newEnv(t, 4096)
+	agent := e.create("agent", admission.Experiment, 500)
+	_, err := e.m.CreateWorker(bg, "wk-a", agent.Lineage, workerSpec(Public))
+	must(t, err)
+	e.rt.mu.Lock()
+	e.rt.failKill = &os.PathError{Op: "kill", Path: e.upper("wk-a", ""), Err: syscall.EIO}
+	e.rt.mu.Unlock()
 	_, err = e.m.DeleteFiles(bg, "wk-a", Deletion{Paths: []string{"/f"}})
 	if !errors.Is(err, overlay.ErrDeleteFailed) || strings.Contains(err.Error(), "/") {
-		t.Fatalf("a failed measure = %v", err)
+		t.Fatalf("a failed stop = %v", err)
 	}
 }
 

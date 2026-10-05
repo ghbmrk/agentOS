@@ -436,10 +436,15 @@ func (m *Manager) deleteLocked(ctx context.Context, mc *machine, d Deletion) (De
 	if err != nil {
 		return rep, running, fmt.Errorf("%s: %w", mc.ID, err)
 	}
+	// A deletion never depends on measuring the layer: one that cannot
+	// be measured (too deep for the host, say) counts as over the cap, so
+	// the deletion stands and the worker stays stopped (security M4,
+	// SR2-3i on #174).
 	if _, cerr := m.checkCaps(mc.ID, l.Upper); errors.Is(cerr, ErrQuota) {
 		rep.Over = true
 	} else if cerr != nil {
-		return rep, running, cerr
+		log.Printf("vm: %s: measuring after a deletion: %v", mc.ID, cerr)
+		rep.Over = true
 	}
 	if !running || rep.Over || held(d) {
 		return rep, running, nil
