@@ -228,7 +228,10 @@ type Gate struct {
 	sent    []time.Time
 	// asked are owner-question texts reserved on the same budget
 	// (Reserve, W9).
-	asked     []time.Time
+	asked []time.Time
+	// agedAt is when a question last went ahead of a waiting batch
+	// (Reserve, question PQ5).
+	agedAt    time.Time
 	decided   map[string]decision
 	reported  map[string]bool // intents whose owner verdict went to Outcome
 	reportedQ []string        // their order, to bound reported
@@ -1273,13 +1276,24 @@ func (g *Gate) textsLocked(now time.Time) int {
 // Reserve takes one text of the CH-15 budget for an owner question (W9,
 // question Q3). Approval requests go first: it refuses while items wait
 // in a batch, and when approval requests and questions together have
-// used RequestsPerHour in the hour before now. A granted reservation
-// counts at once, sent or not, so the check and the count are one step.
-func (g *Gate) Reserve(now time.Time) bool {
+// used RequestsPerHour in the hour before now. A question that has waited
+// unsent for its AgedAfter (aged, question Config.AgedAfter) may go ahead of a waiting batch,
+// once an hour, so steady approval traffic never holds it indefinitely
+// and approvals keep the rest of the budget (question PQ5). A granted
+// reservation counts at once, sent or not, so the check and the count are
+// one step. Time is the gate's own clock, as for request texts.
+func (g *Gate) Reserve(aged bool) bool {
+	now := g.cfg.Now()
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if len(g.batch) > 0 || g.textsLocked(now) >= g.cfg.RequestsPerHour {
+	if g.textsLocked(now) >= g.cfg.RequestsPerHour {
 		return false
+	}
+	if len(g.batch) > 0 {
+		if !aged || !g.agedAt.IsZero() && now.Sub(g.agedAt) < time.Hour {
+			return false
+		}
+		g.agedAt = now
 	}
 	g.asked = append(g.asked, now)
 	return true

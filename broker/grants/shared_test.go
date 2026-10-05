@@ -22,10 +22,10 @@ func TestQuestionsReserveOnTheRequestBudget(t *testing.T) {
 	r := newRig(t, func(c *Config) { c.RequestsPerHour = 3 })
 	r.grant(mailGrant()) // the grant's request: one text
 	base := r.own.count()
-	if !r.g.Reserve(r.now()) || !r.g.Reserve(r.now()) {
+	if !r.g.Reserve(false) || !r.g.Reserve(false) {
 		t.Fatal("two questions refused with two texts left")
 	}
-	if r.g.Reserve(r.now()) {
+	if r.g.Reserve(false) {
 		t.Fatal("a fourth text in the hour")
 	}
 
@@ -38,7 +38,7 @@ func TestQuestionsReserveOnTheRequestBudget(t *testing.T) {
 		r.effect("agent/"+id, "invoice.send", map[string]any{"record": id}, "sam@example.com")
 	}
 	ask("a")
-	if r.g.Reserve(r.now()) {
+	if r.g.Reserve(false) {
 		t.Fatal("a question went ahead of a waiting approval request")
 	}
 	r.advance(2 * time.Minute)
@@ -46,7 +46,7 @@ func TestQuestionsReserveOnTheRequestBudget(t *testing.T) {
 	if r.own.count() != base+1 {
 		t.Fatalf("batch not sent: %d", r.own.count()-base)
 	}
-	if !r.g.Reserve(r.now()) {
+	if !r.g.Reserve(false) {
 		t.Fatal("refused with the batch sent and a text left")
 	}
 
@@ -60,7 +60,7 @@ func TestQuestionsReserveOnTheRequestBudget(t *testing.T) {
 	if r.own.count() != base+2 {
 		t.Fatalf("paced flush sent %d texts, want 1", r.own.count()-base-1)
 	}
-	if r.g.Reserve(r.now()) {
+	if r.g.Reserve(false) {
 		t.Fatal("reserved with items still batched")
 	}
 	r.advance(time.Hour)
@@ -97,7 +97,7 @@ func TestReissuedIntentsGoOutsideTheBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.open() // restart under STOP: nothing is re-issued yet
-	if !r.g.Reserve(r.now()) || !r.g.Reserve(r.now()) {
+	if !r.g.Reserve(false) || !r.g.Reserve(false) {
 		t.Fatal("questions refused on a fresh budget")
 	}
 	base := r.own.count()
@@ -114,7 +114,68 @@ func TestReissuedIntentsGoOutsideTheBudget(t *testing.T) {
 		}
 	}
 	r.advance(30 * time.Minute)
-	if r.g.Reserve(r.now()) {
+	if r.g.Reserve(false) {
 		t.Fatal("re-issued texts were not counted: a question went out over the budget")
+	}
+}
+
+// REQ: CH-15, CAP-10
+//
+// W9a PQ5 (potency on #95): a question that has waited AgedAfter unsent
+// goes ahead of a waiting approval batch, at most once an hour, and never
+// past the hour's budget, so steady approval traffic cannot hold it
+// indefinitely and approvals keep the rest of the budget.
+func TestAnAgedQuestionGoesAheadOfABatchOnceAnHour(t *testing.T) {
+	r := newRig(t, func(c *Config) { c.RequestsPerHour = 3 })
+	r.grant(mailGrant()) // the grant's request: one text
+	ask := func(id string) {
+		t.Helper()
+		x := sam()
+		x.Record = id
+		r.ver.set(id, x)
+		r.effect("agent/"+id, "invoice.send", map[string]any{"record": id}, "sam@example.com")
+	}
+	ask("a")
+	if r.g.Reserve(false) {
+		t.Fatal("a question went ahead of a waiting batch")
+	}
+	if !r.g.Reserve(true) {
+		t.Fatal("an aged question was held behind the batch")
+	}
+	if r.g.Reserve(true) {
+		t.Fatal("a second aged question went ahead in the same hour")
+	}
+	r.advance(59 * time.Minute)
+	if r.g.Reserve(true) {
+		t.Fatal("went ahead again within the hour")
+	}
+	r.advance(time.Minute)
+	if !r.g.Reserve(true) {
+		t.Fatal("refused an hour after the last one went ahead")
+	}
+
+	// The budget still bounds it.
+	r.advance(2 * time.Hour)
+	r.g.Tick()
+	for n := 0; r.g.Reserve(false); n++ { // spend what the batch left
+		if n == 3 {
+			t.Fatal("more than the hour's budget")
+		}
+	}
+	ask("b")
+	if r.g.Reserve(true) {
+		t.Fatal("went ahead with the hour's budget spent")
+	}
+
+	// With no batch waiting, an aged question is an ordinary reservation
+	// and spends no turn ahead.
+	r.advance(2 * time.Hour)
+	r.g.Tick()
+	if !r.g.Reserve(true) {
+		t.Fatal("refused with no batch and the budget free")
+	}
+	ask("c")
+	if !r.g.Reserve(true) {
+		t.Fatal("an ordinary reservation used the hour's turn ahead")
 	}
 }

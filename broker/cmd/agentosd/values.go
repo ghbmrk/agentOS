@@ -75,7 +75,10 @@ type taskValues struct {
 	redact journal.Redactor
 
 	mu sync.Mutex
-	st map[string]*valueGoal // goal ID -> its values
+	// dirty: the last save failed, so memory may hold less than the
+	// file (security R1 on #123).
+	dirty bool
+	st    map[string]*valueGoal // goal ID -> its values
 }
 
 // openTaskValues loads the record and its hash key, made on first use.
@@ -228,6 +231,23 @@ func (v *taskValues) observe(in journal.Intent) {
 	}
 	v.pruneLocked(v.now())
 	v.saveLocked()
+}
+
+// forget deletes goal's values with its task text (W3-values (d), CAP-3)
+// and reports whether any were kept, and any failed save.
+func (v *taskValues) forget(goal string) (bool, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.st[goal] == nil {
+		if v.dirty {
+			// An earlier save failed: the entry left memory but may
+			// still be on disk (security R1 on #123).
+			return false, v.saveLocked()
+		}
+		return false, nil
+	}
+	delete(v.st, goal)
+	return true, v.saveLocked()
 }
 
 // verdict applies the owner's verdict on an effect to its goal's values.
@@ -471,7 +491,7 @@ func copyValue(x any) any {
 	return x
 }
 
-func (v *taskValues) saveLocked() {
+func (v *taskValues) saveLocked() error {
 	b, err := json.Marshal(v.st)
 	if err == nil {
 		err = v.store.Save(b)
@@ -479,6 +499,8 @@ func (v *taskValues) saveLocked() {
 	if err != nil {
 		v.logf("learning: task values not saved: %v", err)
 	}
+	v.dirty = err != nil
+	return err
 }
 
 // pruneLocked drops goals past keepValues and the oldest past
