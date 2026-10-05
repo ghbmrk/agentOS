@@ -98,10 +98,6 @@ func (a *Adapter) participants(m Message) []string {
 //     folder, or the contact's authenticated starter. Someone a third
 //     party copied in is not.
 func (a *Adapter) threadVerified(ctx context.Context, m Message, rc []string) bool {
-	byRole, _, err := a.folders(ctx)
-	if err != nil {
-		return false
-	}
 	chain := []Message{m}
 	seen := map[string]bool{m.MessageID: true}
 	for cur := m; cur.InReplyTo != ""; {
@@ -109,29 +105,20 @@ func (a *Adapter) threadVerified(ctx context.Context, m Message, rc []string) bo
 			return false
 		}
 		seen[cur.InReplyTo] = true
-		parent, err := a.threadMessage(ctx, cur.InReplyTo, byRole[Sent])
+		parent, err := a.locate(ctx, cur.InReplyTo, "")
 		if err != nil || !a.participant(cur.From, parent) {
 			return false
 		}
 		chain = append(chain, parent)
 		cur = parent
 	}
-	// Every message from the owner past m was read from its Sent copy
-	// (threadMessage), so its headers, recipients and text are the
-	// owner's own.
+	// locate reads every message from the owner from its Sent copy, so its
+	// headers, recipients and text are the owner's own.
 	var vouched []Message
-	for i, x := range chain {
-		if !a.isSelf(x.From) {
-			continue
+	for _, x := range chain {
+		if a.isSelf(x.From) {
+			vouched = append(vouched, x)
 		}
-		if i == 0 {
-			s, ok := a.sentCopy(ctx, byRole[Sent], x)
-			if !ok {
-				return false
-			}
-			x = s
-		}
-		vouched = append(vouched, x)
 	}
 	starter := chain[len(chain)-1]
 	if !a.isSelf(starter.From) {
@@ -150,35 +137,6 @@ func (a *Adapter) threadVerified(ctx context.Context, m Message, rc []string) bo
 		}
 	}
 	return true
-}
-
-// threadMessage reads a message a thread names. One from the owner is
-// read from its Sent copy, never another folder's, which anyone can
-// deliver to; an owner message not in Sent is refused.
-func (a *Adapter) threadMessage(ctx context.Context, id, sent string) (Message, error) {
-	x, err := a.locate(ctx, id, "")
-	if err != nil || !a.isSelf(x.From) {
-		return x, err
-	}
-	s, ok := a.sentCopy(ctx, sent, x)
-	if !ok {
-		return Message{}, ErrNotFound
-	}
-	return s, nil
-}
-
-// sentCopy returns the copy of x in the Sent folder, if there is exactly
-// one and it is the same message. (locate already refuses an ID whose
-// copies differ; the comparison here is defence in depth.)
-func (a *Adapter) sentCopy(ctx context.Context, sent string, x Message) (Message, bool) {
-	if sent == "" {
-		return Message{}, false
-	}
-	ms, err := a.cfg.Store.Find(ctx, sent, x.MessageID)
-	if err != nil || len(ms) != 1 || !a.isSelf(ms[0].From) || !sameMessage(ms[0], x) {
-		return Message{}, false
-	}
-	return ms[0], true
 }
 
 // maxChain bounds the In-Reply-To links walked to verify a thread.
@@ -207,17 +165,6 @@ func (a *Adapter) Thread(ctx context.Context, record string) ([]Message, error) 
 	if err != nil {
 		return nil, err
 	}
-	byRole, _, err := a.folders(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if a.isSelf(m.From) {
-		s, ok := a.sentCopy(ctx, byRole[Sent], m)
-		if !ok {
-			return nil, ErrNotFound
-		}
-		m = s
-	}
 	rc := a.participants(m)
 	want := append(append([]string{}, m.References...), m.InReplyTo)
 	var out []Message
@@ -227,8 +174,8 @@ func (a *Adapter) Thread(ctx context.Context, record string) ([]Message, error) 
 			continue
 		}
 		seen[id] = true
-		x, err := a.threadMessage(ctx, id, byRole[Sent])
-		if errors.Is(err, ErrNotFound) {
+		x, err := a.locate(ctx, id, "")
+		if errors.Is(err, ErrNotFound) || errors.Is(err, ErrNotSent) {
 			continue
 		}
 		if err != nil {

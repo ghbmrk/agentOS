@@ -286,8 +286,9 @@ func TestPlantedOwnerCopiesDoNotVerify(t *testing.T) {
 	if v, _ := x.a.Verify(ctx, x.intent(mail.OpReply, reply("<e2@evil.example>", "ok"), "eve@evil.example")); v.ThreadVerified {
 		t.Fatal("a planted copy of the owner's reply verified the thread")
 	}
-	if _, err := x.a.Verify(ctx, x.intent(mail.OpReply, reply("<o1@example.test>", "ok"), "eve@evil.example")); !errors.Is(err, mail.ErrAmbiguous) {
-		t.Fatalf("copies differing in In-Reply-To: %v", err)
+	// The owner's message is the Sent copy, In-Reply-To and all.
+	if ms, err := x.a.Thread(ctx, "<o1@example.test>"); err != nil || ms[len(ms)-1].InReplyTo != "<c1@evil.example>" {
+		t.Fatalf("owner's message resolved to %+v %v", ms, err)
 	}
 	// An owner message held only outside Sent never vouches for anyone,
 	// even in the middle of a chain that starts in Sent.
@@ -335,5 +336,39 @@ func TestComposerNeverGetsAnOwnerRecordOutsideSent(t *testing.T) {
 	x.deliver("INBOX", msg{id: "<fake@example.test>", from: me, to: "eve@evil.example", subject: "Deal", body: "I agree."})
 	if ms, err := x.a.Thread(ctx, "<fake@example.test>"); err == nil || len(ms) != 0 {
 		t.Fatalf("composer got %d messages, err %v", len(ms), err)
+	}
+}
+
+// TestOwnerCopiesResolveToSent: a copy of the owner's message altered in
+// transit (a list footer, CRLF line ends) is ignored in favour of the Sent
+// copy, so the thread still verifies; a same-ID copy from anyone else is
+// refused; and an owner-From message with no Sent copy is refused.
+func TestOwnerCopiesResolveToSent(t *testing.T) {
+	x := newH(t, nil)
+	thread(x)
+	x.deliver("INBOX", msg{id: "<t1@example.test>", from: me, to: "sam@example.com", subject: "Lunch",
+		body: "Lunch next week?\r\n--\r\nYou received this because you are subscribed to lunch-club."})
+	v, err := x.a.Verify(ctx, x.intent(mail.OpReply, reply("<t2@example.com>", "ok"), "sam@example.com"))
+	if err != nil || !v.ThreadVerified {
+		t.Fatalf("an honest duplicate broke the thread: %+v %v", v, err)
+	}
+	if ms, err := x.a.Thread(ctx, "<t2@example.com>"); err != nil || len(ms) != 2 || strings.Contains(ms[0].Text, "subscribed") {
+		t.Fatalf("composer got %+v %v", ms, err)
+	}
+	// Organizing the owner's copy in the inbox acts on that copy, not on
+	// the Sent one.
+	x.mustRun(x.intent(mail.OpArchive, map[string]any{mail.ParamRecord: "<t1@example.test>", mail.ParamFolder: "INBOX"}))
+	if n := len(x.srv.Messages("Sent")); n != 1 {
+		t.Fatalf("archive moved the Sent copy: %d left in Sent", n)
+	}
+	// A same-ID copy from anyone else is refused.
+	x.deliver("Receipts", msg{id: "<t1@example.test>", from: "eve@evil.example", to: me, subject: "Lunch", body: "x"})
+	if _, err := x.a.Thread(ctx, "<t1@example.test>"); !errors.Is(err, mail.ErrAmbiguous) {
+		t.Fatalf("non-owner copy: %v", err)
+	}
+	// An owner-From message the Sent folder does not hold is refused.
+	x.deliver("INBOX", msg{id: "<only@example.test>", from: me, to: "sam@example.com", subject: "Hi", body: "x"})
+	if _, err := x.a.Verify(ctx, x.intent(mail.OpReply, reply("<only@example.test>", "ok"), "sam@example.com")); !errors.Is(err, mail.ErrNotSent) {
+		t.Fatalf("owner message outside Sent: %v", err)
 	}
 }

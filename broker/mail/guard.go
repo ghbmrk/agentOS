@@ -27,6 +27,9 @@ var (
 	ErrOp       = errors.New("mail: operation not declared (ADP-1)")
 	// ErrAmbiguous: two different messages carry the record's Message-ID.
 	ErrAmbiguous = errors.New("mail: two different messages carry this Message-ID")
+	// ErrNotSent: a message From the owner that the Sent folder does not
+	// hold is not the owner's.
+	ErrNotSent = errors.New("mail: a message from the owner's address that is not in Sent")
 )
 
 // folders returns the account's folders by role and by name.
@@ -83,31 +86,89 @@ func (a *Adapter) locate(ctx context.Context, record, hint string) (Message, err
 		order = append(order, rest...)
 	}
 	// Every candidate folder is searched: a Message-ID is the sender's
-	// choice, so a second message claiming the same ID (a forged copy of
-	// one the owner sent) makes the record ambiguous and is refused. Copies
-	// of one message (sameMessage, e.g. a label folder) are not ambiguous.
+	// choice, so a second message claiming the same ID makes the record
+	// ambiguous and is refused. Copies of one message (sameMessage, e.g. a
+	// label folder) are not ambiguous.
+	//
+	// A message from the owner is the owner's only as the Sent folder
+	// holds it: its copy there (exactly one, From the owner, in the folder
+	// with the Sent role) is the message, and other copies From the owner
+	// (a mailing list's footer, a gateway's disclaimer, CRLF for LF) are
+	// ignored in its favour. A same-ID copy From anyone else stays
+	// ambiguous, and an owner message with no Sent copy is refused. With a
+	// hint, the Sent folder is searched as well, and the copy in the hint
+	// folder gives the location an organize effect acts on.
+	sent := byRole[Sent]
 	seen := map[string]bool{}
 	var found []Message
-	for _, f := range order {
-		if seen[f] {
-			continue
+	search := func(f string) error {
+		if f == "" || seen[f] {
+			return nil
 		}
 		seen[f] = true
 		ms, err := a.cfg.Store.Find(ctx, f, record)
-		if err != nil {
+		found = append(found, ms...)
+		return err
+	}
+	for _, f := range order {
+		if err := search(f); err != nil {
 			return Message{}, err
 		}
-		found = append(found, ms...)
 	}
 	if len(found) == 0 {
 		return Message{}, ErrNotFound
 	}
-	for _, m := range found[1:] {
-		if !sameMessage(m, found[0]) {
-			return Message{}, ErrAmbiguous
+	var mine, others []Message
+	for _, m := range found {
+		if a.isSelf(m.From) {
+			mine = append(mine, m)
+		} else {
+			others = append(others, m)
 		}
 	}
-	return found[0], nil
+	if len(mine) == 0 {
+		for _, m := range found[1:] {
+			if !sameMessage(m, found[0]) {
+				return Message{}, ErrAmbiguous
+			}
+		}
+		return found[0], nil
+	}
+	if err := search(sent); err != nil {
+		return Message{}, err
+	}
+	mine, others = mine[:0], others[:0]
+	for _, m := range found {
+		if a.isSelf(m.From) {
+			mine = append(mine, m)
+		} else {
+			others = append(others, m)
+		}
+	}
+	if len(others) > 0 {
+		return Message{}, ErrAmbiguous
+	}
+	var inSent []Message
+	var here *Message
+	for i, m := range mine {
+		if sent != "" && m.Folder == sent {
+			inSent = append(inSent, m)
+		}
+		if hint != "" && m.Folder == hint && here == nil {
+			here = &mine[i]
+		}
+	}
+	switch {
+	case len(inSent) == 0:
+		return Message{}, ErrNotSent
+	case len(inSent) > 1:
+		return Message{}, ErrAmbiguous
+	}
+	m := inSent[0]
+	if here != nil {
+		m.Folder, m.UID, m.Flags = here.Folder, here.UID, here.Flags
+	}
+	return m, nil
 }
 
 // sameMessage reports whether two copies carrying one Message-ID are the
