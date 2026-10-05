@@ -119,22 +119,29 @@ class FloorFitTest(unittest.TestCase):
     # PE2: on the N95, the agent machine and one replay machine fit in the pool left after the
     # RES-2 floor budget (host, inference, browser, headroom).
     def test_n95_fits(self):
-        out = tk.floor_fit("MemTotal:        7864320 kB\nMemAvailable:    7340032 kB\n")
+        out = tk.floor_fit("MemTotal:        7864320 kB\nMemAvailable:    7340032 kB\n", 4)
         self.assertTrue(out.startswith("PASS"), out)
         self.assertIn("pool 3496 MiB", out)
         self.assertIn("agent 1536 + one replay 1024 = 2560", out)
         self.assertIn("-capacity-mb 4096", out)
 
     def test_small_pc_fails(self):
-        out = tk.floor_fit("MemTotal:        6291456 kB\n")
+        out = tk.floor_fit("MemTotal:        6291456 kB\n", 4)
         self.assertTrue(out.startswith("FAIL"), out)
         self.assertIn("pool 1960 MiB", out)
 
     def test_large_box_capacity_is_capped(self):
-        self.assertIn("-capacity-mb 4500 here", tk.floor_fit("MemTotal: 16777216 kB\n"))
+        self.assertIn("-capacity-mb 4500 here", tk.floor_fit("MemTotal: 16777216 kB\n", 4))
+
+    # RES-2c: the cap grows by one OpenClaw machine per two cores past four.
+    def test_cap_grows_with_cores(self):
+        out = tk.floor_fit("MemTotal: 33554432 kB\n", 16)
+        self.assertIn("-capacity-mb 13016 here", out)
+        self.assertIn("at most 13016 for 16 cores", out)
+        self.assertIn("-capacity-mb 12800 here", tk.floor_fit("MemTotal: 16777216 kB\n", 16))
 
     def test_unreadable(self):
-        self.assertTrue(tk.floor_fit("").startswith("unknown"))
+        self.assertTrue(tk.floor_fit("", 4).startswith("unknown"))
 
 
 class S2HelpersTest(unittest.TestCase):

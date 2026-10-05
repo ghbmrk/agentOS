@@ -129,6 +129,19 @@ func TestACallToTheLineWhileItIsOnACallIsDeclined(t *testing.T) {
 	if c, err := p.RingLine(ctx, ownerNum, user, sipsim.Ring{}); err != nil || c.Status != 603 {
 		t.Fatalf("while busy: %v %v", c, err)
 	}
+	// Security R1 on #132: a call declined as busy uses none of the
+	// caller's clips, so the same caller hears the clip once the line is free.
+	if err := out.Hangup(ctx); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the clip once the line is free", func() bool {
+		c, err := p.RingLine(ctx, ownerNum, user, sipsim.Ring{})
+		if err != nil || c.Status != 200 {
+			return false
+		}
+		<-c.Done()
+		return true
+	})
 }
 
 // A caller hanging up mid-clip ends the call at once, and the line is free.

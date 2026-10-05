@@ -620,8 +620,8 @@ func (l *Line) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 	hangup()
 }
 
-// allowClip counts a clip against the caller's and the line's limits, or
-// refuses it. Caller holds l.mu.
+// allowClip reports whether the caller and the line are within their clip
+// limits, dropping counts that have aged out. Caller holds l.mu.
 func (l *Line) allowClip(caller string) bool {
 	t := now()
 	kept := l.clips[:0]
@@ -639,15 +639,19 @@ func (l *Line) allowClip(caller string) bool {
 	if len(l.clips) >= clipsPerHour {
 		return false
 	}
-	if _, recent := l.lastClip[caller]; recent {
-		return false
-	}
+	_, recent := l.lastClip[caller]
+	return !recent
+}
+
+// countClip counts an answered call against the caller's and the line's
+// limits. Caller holds l.mu.
+func (l *Line) countClip(caller string) {
+	t := now()
 	if l.lastClip == nil {
 		l.lastClip = map[string]time.Time{}
 	}
 	l.clips = append(l.clips, t)
 	l.lastClip[caller] = t
-	return true
 }
 
 // claim makes the incoming call the line's one call, with its audio socket
@@ -687,6 +691,10 @@ func (l *Line) claim(req *sip.Request, tx sip.ServerTransaction, contact sip.Con
 		_ = conn.Close()
 		return nil, offer{}, err
 	}
+	// Counted only now, after the busy check and once the call is the
+	// line's, so a declined call uses none of the caller's clips (security
+	// R1 on #132).
+	l.countClip(caller)
 	c := newCall(l, conn)
 	c.sdlg, c.id = d, d.ID
 	l.call = c

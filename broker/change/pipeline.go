@@ -298,6 +298,9 @@ type state struct {
 	// Notices are broker notices for the digest, kept once per key
 	// (Notice).
 	Notices []notice `json:"notices,omitempty"`
+	// Cuts counts each (candidate, case) pair's cut candidate-side runs
+	// (PE5b), so a restart cannot reset them.
+	Cuts map[string]cutCount `json:"cuts,omitempty"`
 }
 
 // notice is one broker digest line; Seen once the digest listed it.
@@ -347,6 +350,9 @@ type Pipeline struct {
 	// in first-seen order for dropping the oldest.
 	exempt      map[string]int
 	exemptOrder []string
+	// parks and parkSeq order parked candidates' idle turns (PE5b).
+	parks   map[string]*parkMark
+	parkSeq uint64
 }
 
 // New loads the persisted state, or seeds it on first start, and applies
@@ -553,7 +559,7 @@ func (p *Pipeline) proposeInner(ctx context.Context, c Candidate, security bool)
 		p.mu.Unlock()
 		return Report{}, errors.New("change: candidate changes nothing")
 	}
-	if p.exempt[p.candidateKey(base, next)] >= MaxExempt && !IsIdle(ctx) {
+	if !p.parkedMayRunLocked(ctx, p.candidateKey(base, next)) {
 		// Parked (PE5): refused before it spends an ID or a save.
 		p.mu.Unlock()
 		return Report{}, ErrParked
@@ -791,9 +797,9 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 	}
 	ck := p.candidateKey(base, next)
 	p.mu.Lock()
-	parked := p.exempt[ck] >= MaxExempt
+	mayRun := p.exempt[ck] < MaxExempt || IsIdle(ctx) // proposeInner took the turn
 	p.mu.Unlock()
-	if parked && !IsIdle(ctx) {
+	if !mayRun {
 		return Score{}, ErrParked
 	}
 	nonce := make([]byte, 16)
@@ -813,7 +819,7 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 			}
 			switch {
 			case r.nextDone:
-			case r.interrupted >= MaxInterruptions:
+			case p.cutsLocked(k).Counted >= MaxInterruptions:
 				// Cut short too often on this case: failed without
 				// another run (security F1 on #103).
 				runs = append(runs, &run{c: c, cand: true, ev: true, done: true, struck: true})
@@ -919,26 +925,35 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 				break
 			}
 		}
-		counted := cut != nil && cut.cand && !exempt
 		p.mu.Lock()
 		if exempt {
 			p.exemptLocked(ck)
 		}
+		// The candidate side cut short is counted, so a candidate that
+		// forces preemptions cannot re-roll a case without limit; an
+		// owner's cut is exempt only MaxExemptPerCase times per pair
+		// (PE5b). The counts are saved, so a restart does not reset them.
+		counted := false
+		var saveErr error
+		if cut != nil && cut.cand {
+			counted = p.cutLocked(keys[cut.c.ID], exempt)
+			saveErr = p.saveLocked()
+		}
 		// Every side that finished is kept, so a result once seen is
-		// never run again. The candidate side cut short is counted, so
-		// a candidate that forces preemptions cannot re-roll a case
-		// without limit.
+		// never run again.
 		for id, pr := range res {
-			if counted && cut.c.ID == id {
-				pr.interrupted++
-			}
-			if pr.baseDone || pr.nextDone || pr.interrupted > 0 {
+			if pr.baseDone || pr.nextDone {
 				p.keepLocked(keys[id], pr)
 			}
 		}
 		p.mu.Unlock()
 		if p.cfg.Logf != nil {
+			if saveErr != nil {
+				p.cfg.Logf("change: saving a cut count failed; it holds until restart")
+			}
 			switch {
+			case counted && exempt:
+				p.cfg.Logf("change: a candidate run was cut short (%s, past its exempt limit); counted", exemptClass(cause))
 			case counted:
 				p.cfg.Logf("change: a candidate run was cut short (%s); counted", cutClass(cause, stopped != nil && cause == stopped))
 			case exempt:
@@ -952,7 +967,8 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 	}
 	p.mu.Lock()
 	for _, k := range keys {
-		delete(p.kept, k) // kept sides and interruption counts are used up
+		delete(p.kept, k)    // kept sides are used up
+		delete(p.st.Cuts, k) // and so are the cut counts; saved with the verdict
 	}
 	p.mu.Unlock()
 	cases := map[string]Case{}

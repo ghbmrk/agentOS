@@ -209,19 +209,27 @@ def read_verify():
 # browser and headroom is the agent-machine pool; it must hold the agent and one replay machine.
 FLOOR = {"host": 1024, "inference": 2048, "browser": 512, "headroom": 600}
 AGENT_MB, REPLAY_MB = 1536, 1024
+# RES-2c: agentosd's cap on capacity is budget.CapMB, one OpenClaw machine (budget.OpenClawMB)
+# per two cores plus headroom, at least 4500.
+OPENCLAW_MB = 1552
 
 
-def floor_fit(meminfo):
-    """Whether the agent machine and one replay machine fit in this PC's pool (PE2), from /proc/meminfo."""
+def capacity_cap(cores):
+    return max(4500, FLOOR["headroom"] + cores // 2 * OPENCLAW_MB)
+
+
+def floor_fit(meminfo, cores):
+    """Whether the agent machine and one replay machine fit in this PC's pool (PE2), from /proc/meminfo and the core count."""
     m = re.search(r"MemTotal:\s+(\d+)", meminfo)
     if not m:
         return "unknown: MemTotal unreadable"
     total = int(m.group(1)) >> 10
     pool = total - sum(FLOOR.values())
     need = AGENT_MB + REPLAY_MB
-    return "%s: pool %d MiB (MemTotal %d - host %d - inference %d - browser %d - headroom %d) for agent %d + one replay %d = %d; agentosd -capacity-mb %d here (its default: this, at most 4500)" % (
+    cap = capacity_cap(cores)
+    return "%s: pool %d MiB (MemTotal %d - host %d - inference %d - browser %d - headroom %d) for agent %d + one replay %d = %d; agentosd -capacity-mb %d here (its default: this, at most %d for %d cores)" % (
         "PASS" if pool >= need else "FAIL", pool, total, FLOOR["host"], FLOOR["inference"], FLOOR["browser"],
-        FLOOR["headroom"], AGENT_MB, REPLAY_MB, need, min(pool + FLOOR["headroom"], 4500))
+        FLOOR["headroom"], AGENT_MB, REPLAY_MB, need, min(pool + FLOOR["headroom"], cap), cap, cores)
 
 
 def probe(disk):
@@ -235,7 +243,7 @@ def probe(disk):
         ("firmware", "%s %s %s" % (read(dmi + "bios_vendor"), read(dmi + "bios_version"), read(dmi + "bios_date"))),
         ("cpu", "%s, %d threads" % (cpu.group(1) if cpu else "?", os.cpu_count() or 0)),
         ("ram_gb", "%.1f" % (int(mem.group(1)) / 1048576) if mem else "?"),
-        ("agent_and_replay_fit", floor_fit(read("/proc/meminfo"))),
+        ("agent_and_replay_fit", floor_fit(read("/proc/meminfo"), len(os.sched_getaffinity(0)))),
         ("secure_boot", sh("mokutil --sb-state").splitlines()[0] if sh("mokutil --sb-state") else "?"),
         ("loader", efivar("LoaderInfo") or "not systemd-boot"),
         ("found_root_via_gpt_auto", "yes" if efivar("LoaderDevicePartUUID") else "no"),
