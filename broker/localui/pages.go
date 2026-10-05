@@ -65,7 +65,7 @@ form { margin: .6em 0 1.2em; }
 
 {{define "vault"}}{{template "head" .Refresh}}
 <h1>Unlock the box</h1>
-{{if .Down}}<p>The vault is not answering yet. This page reloads by itself.</p>
+{{if .Down}}<p>The box is still starting. This page reloads by itself.</p>
 {{else if eq .State "open"}}<p class="ok">The box is unlocked.{{if .Kept}} This PC stays trusted.{{end}}</p>
 <p>To approve by text again, <a href="/unlock">sign in</a> with your next code.</p>
 {{else if eq .State "opening"}}<p>Checking the passphrase. This page reloads by itself.</p>
@@ -77,7 +77,7 @@ form { margin: .6em 0 1.2em; }
 {{with .Err}}<p class="err">{{.}}</p>{{end}}
 <button>Unlock</button></form>
 {{else}}{{with .Err}}<p class="err">{{.}}</p>{{end}}
-<p>An unlock is waiting for a code on another phone. If that was not you, it ends by itself at {{.Expires}} without the code.</p>{{end}}
+<p>An unlock is waiting for a code on another phone or a closed page. It ends by itself at {{.Expires}}.</p>{{end}}
 {{else}}
 <p><b>If this drive was out of your hands, unlock it only on your trusted PC.</b></p>
 {{with .Boot}}<p class="err">{{.}}</p>{{end}}

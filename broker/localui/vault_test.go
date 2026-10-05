@@ -350,7 +350,7 @@ func TestVaultUnlockByPhotoThenCode(t *testing.T) {
 	other := &rig{t: t, srv: r.srv, ip: "10.42.0.77:40000"}
 	other.jar, _ = cookiejar.New(nil)
 	op := other.get("/unlock/vault")
-	if strings.Contains(op, `name="code"`) || !strings.Contains(op, "another phone") {
+	if strings.Contains(op, `name="code"`) || !strings.Contains(op, "another phone or a closed page") {
 		t.Fatalf("other phone:\n%s", op)
 	}
 	w := other.post("/unlock/vault", url.Values{"step": {"code"}, "code": {"123456"}})
@@ -487,7 +487,7 @@ func TestVaultNotAnswering(t *testing.T) {
 	r, fv := vaultRig(t)
 	fv.down = true
 	page := r.get("/unlock/vault")
-	if !strings.Contains(page, "not answering") || !strings.Contains(page, `http-equiv="refresh"`) {
+	if !strings.Contains(page, "still starting") || !strings.Contains(page, `http-equiv="refresh"`) {
 		t.Fatalf("down:\n%s", page)
 	}
 }

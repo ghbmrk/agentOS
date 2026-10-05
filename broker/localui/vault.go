@@ -409,7 +409,7 @@ func scanText(err error) string {
 func vaultText(err error) string {
 	var ve *VaultError
 	if !errors.As(err, &ve) {
-		return "The vault is not answering. Wait a moment and try again."
+		return "The box is not answering yet. Wait a moment and try again."
 	}
 	switch ve.Msg {
 	case "the passphrase does not open this vault":
@@ -419,7 +419,7 @@ func vaultText(err error) string {
 	}
 	m := strings.TrimSpace(ve.Msg)
 	if m == "" {
-		return "The vault refused that. Try again."
+		return "The box refused that. Try again."
 	}
 	r, n := utf8.DecodeRuneInString(m)
 	m = string(unicode.ToUpper(r)) + m[n:]
