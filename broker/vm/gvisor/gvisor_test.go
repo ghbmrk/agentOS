@@ -94,6 +94,13 @@ func newRig(t *testing.T, capacityMB int64) *rig { return newRigWith(t, capacity
 
 func newRigWith(t *testing.T, capacityMB int64, svc vm.Services) *rig {
 	t.Helper()
+	return newRigOn(t, capacityMB, svc, "", nil)
+}
+
+// newRigOn is newRigWith with its state under state ("": a temporary
+// directory) and the manager's configuration adjusted by adjust.
+func newRigOn(t *testing.T, capacityMB int64, svc vm.Services, state string, adjust func(*vm.Config)) *rig {
+	t.Helper()
 	bin := os.Getenv("AGENTOS_RUNSC")
 	if bin == "" || os.Geteuid() != 0 {
 		t.Skip("set AGENTOS_RUNSC to a runsc binary and run as root (CI integration job)")
@@ -109,7 +116,9 @@ func newRigWith(t *testing.T, capacityMB int64, svc vm.Services) *rig {
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("building guest: %v\n%s", err, out)
 	}
-	state := t.TempDir()
+	if state == "" {
+		state = t.TempDir()
+	}
 	r := &rig{t: t, rt: &Runtime{Bin: bin, StateDir: filepath.Join(state, "runsc")}}
 	adm, err := admission.New(admission.Config{CapacityMB: capacityMB}, late{&r.m})
 	if err != nil {
@@ -122,6 +131,7 @@ func newRigWith(t *testing.T, capacityMB int64, svc vm.Services) *rig {
 		Runtime:  r.rt,
 		Admit:    r.adm,
 		Services: svc,
+		NoQuota:  true, // quota_test.go runs on a file system with quotas
 	}
 	if p := os.Getenv("AGENTOS_CGROUP_PARENT"); p != "" {
 		g, err := cgroup.Open(p)
@@ -132,6 +142,9 @@ func newRigWith(t *testing.T, capacityMB int64, svc vm.Services) *rig {
 	} else {
 		r.cfg.NoCgroups = true
 		t.Log("no AGENTOS_CGROUP_PARENT: running without cgroups")
+	}
+	if adjust != nil {
+		adjust(&r.cfg)
 	}
 	m, err := vm.Open(context.Background(), r.cfg)
 	if err != nil {

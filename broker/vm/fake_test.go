@@ -159,6 +159,8 @@ func newEnv(t *testing.T, capacityMB int64) *env {
 		Runtime:   e.rt,
 		Admit:     e.adm,
 		NoCgroups: true,
+		// Disk quota tests set Quota (diskquota_test.go).
+		NoQuota: true,
 		// Unit tests don't depend on the host's disk; RES-4 tests set this.
 		FreeBytes: func(string) (int64, error) { return 1 << 50, nil },
 	}
@@ -187,13 +189,13 @@ func (e *env) create(id string, c admission.Class, mb int64) Machine {
 // guestWrite is a guest writing a file in its root.
 func (e *env) guestWrite(id, rel, s string) {
 	e.t.Helper()
-	write(e.t, filepath.Join(e.cfg.StateDir, "machines", id, "upper"), rel, s)
+	write(e.t, filepath.Join(e.cfg.StateDir, "machines", id, "disk", "upper"), rel, s)
 }
 
 // guestRead returns what the guest sees at rel ("" if absent).
 func (e *env) guestRead(id, rel string) string {
 	e.t.Helper()
-	for _, root := range []string{filepath.Join(e.cfg.StateDir, "machines", id, "upper"), e.img} {
+	for _, root := range []string{filepath.Join(e.cfg.StateDir, "machines", id, "disk", "upper"), e.img} {
 		if b, err := os.ReadFile(filepath.Join(root, rel)); err == nil {
 			return string(b)
 		}
@@ -221,7 +223,7 @@ func must(t *testing.T, err error) {
 
 // upper is a path in machine id's layer, for a guest's deletions.
 func (e *env) upper(id, rel string) string {
-	return filepath.Join(e.cfg.StateDir, "machines", id, "upper", rel)
+	return filepath.Join(e.cfg.StateDir, "machines", id, "disk", "upper", rel)
 }
 
 // Exec runs a few commands against the machine's upper layer: "echo"

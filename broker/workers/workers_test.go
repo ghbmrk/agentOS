@@ -90,7 +90,7 @@ func newRig(t *testing.T, capacityMB int64) *rig {
 	img := t.TempDir()
 	r.m, err = vm.Open(context.Background(), vm.Config{
 		StateDir: filepath.Join(t.TempDir(), "state"), Images: map[string]string{"base": img},
-		Runtime: &runtime{running: map[string]vm.Launch{}}, Admit: adm, NoCgroups: true,
+		Runtime: &runtime{running: map[string]vm.Launch{}}, Admit: adm, NoCgroups: true, NoQuota: true,
 		FreeBytes: func(string) (int64, error) { return 1 << 50, nil },
 	})
 	if err != nil {

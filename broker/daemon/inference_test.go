@@ -94,6 +94,11 @@ var netOK = map[string]allowance{
 		[]string{"syscall.Close", "syscall.EINVAL", "syscall.ENOENT", "syscall.MNT_DETACH", "syscall.MS_NODEV",
 			"syscall.MS_NOSUID", "syscall.MS_PRIVATE", "syscall.Mount", "syscall.O_CLOEXEC", "syscall.O_DIRECTORY",
 			"syscall.O_RDONLY", "syscall.Open", "syscall.SysProcAttr", "syscall.Unmount"}},
+	// Per-machine disk quotas (RES-4, SR2-3).
+	"quota": {"quotactl_fd and FS_IOC_FS[GS]ETXATTR on the machines' directories; capget/capset to drop CAP_SYS_RESOURCE on one thread; no network client",
+		[]string{"golang.org/x/sys/unix.CAP_SYS_RESOURCE", "golang.org/x/sys/unix.CapUserData", "golang.org/x/sys/unix.CapUserHeader",
+			"golang.org/x/sys/unix.Capget", "golang.org/x/sys/unix.Capset", "golang.org/x/sys/unix.LINUX_CAPABILITY_VERSION_3",
+			"golang.org/x/sys/unix.SYS_IOCTL", "golang.org/x/sys/unix.SYS_QUOTACTL_FD", "golang.org/x/sys/unix.Syscall", "golang.org/x/sys/unix.Syscall6"}},
 	// The box clock check (P2-9, W9 links it for question deadlines).
 	"clock": {"read-only adjtimex (is NTP synced) and CLOCK_BOOTTIME; no network client",
 		[]string{"golang.org/x/sys/unix.Adjtimex", "golang.org/x/sys/unix.CLOCK_BOOTTIME", "golang.org/x/sys/unix.ClockGettime", "golang.org/x/sys/unix.STA_UNSYNC", "golang.org/x/sys/unix.TIME_ERROR", "golang.org/x/sys/unix.Timespec", "golang.org/x/sys/unix.Timex"}},
@@ -105,6 +110,13 @@ var netOK = map[string]allowance{
 // import (escapes), and why.
 var escapeOK = map[string]map[string]string{
 	"vm/gvisor": {"os/exec": "starts runsc, the only executable (vm/gvisor TestOnlyRunscIsExecuted)"},
+	"quota":     {"unsafe": "hands the quotactl and fsxattr structs to the kernel"},
+}
+
+// rawOK are the syscall numbers besides SYS_IOCTL a broker package may
+// pass to a raw Syscall, and why: a raw call could otherwise open a socket.
+var rawOK = map[string]map[string]string{
+	"quota": {"golang.org/x/sys/unix.SYS_QUOTACTL_FD": "reads and sets project quotas (RES-4)"},
 }
 
 // escapes are imports past the checks above: foreign code, unchecked
@@ -351,9 +363,14 @@ func sourceUse(t *testing.T, path, name, rel string) []string {
 			if !ok {
 				return true
 			}
-			if strings.HasPrefix(sel(se), "syscall.Syscall") || strings.HasPrefix(sel(se), "syscall.RawSyscall") {
-				if len(n.Args) == 0 || sel(n.Args[0]) != "syscall.SYS_IOCTL" {
-					at(n, sel(se)+" other than SYS_IOCTL")
+			if fn := sel(se); strings.HasPrefix(fn, "syscall.Syscall") || strings.HasPrefix(fn, "syscall.RawSyscall") ||
+				strings.HasPrefix(fn, "golang.org/x/sys/unix.Syscall") || strings.HasPrefix(fn, "golang.org/x/sys/unix.RawSyscall") {
+				nr := ""
+				if len(n.Args) > 0 {
+					nr = sel(n.Args[0])
+				}
+				if nr != "syscall.SYS_IOCTL" && nr != "golang.org/x/sys/unix.SYS_IOCTL" && rawOK[rel][nr] == "" {
+					at(n, fn+" other than SYS_IOCTL")
 				}
 			}
 			i, isDial := dials[se.Sel.Name]
