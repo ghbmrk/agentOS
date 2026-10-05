@@ -25,6 +25,7 @@ type fakeRuntime struct {
 	launches []Launch
 	kills    int
 	failNext error
+	onPause  func(id string) // runs as the guest is paused
 }
 
 func newFake() *fakeRuntime {
@@ -72,6 +73,9 @@ func (f *fakeRuntime) Pause(_ context.Context, id string) error {
 	defer f.mu.Unlock()
 	if _, ok := f.running[id]; !ok {
 		return fmt.Errorf("fake: pause %s: not running", id)
+	}
+	if f.onPause != nil {
+		f.onPause(id)
 	}
 	f.paused[id] = true
 	return nil
@@ -148,6 +152,8 @@ func newEnv(t *testing.T, capacityMB int64) *env {
 		Runtime:   e.rt,
 		Admit:     e.adm,
 		NoCgroups: true,
+		// Unit tests don't depend on the host's disk; RES-4 tests set this.
+		FreeBytes: func(string) (int64, error) { return 1 << 50, nil },
 	}
 	e.open()
 	return e

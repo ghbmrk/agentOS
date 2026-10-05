@@ -389,3 +389,37 @@ func TestREV1KernelHidesImageSymlinkUnderUpperDir(t *testing.T) {
 		t.Fatalf("view %v\nkernel %v", got, kernel)
 	}
 }
+
+// REV-4: merging a directory brings its owner, mode and guest xattrs, both
+// for a directory the fork added and for one it only changed.
+func TestREV4PutCarriesDirectoryOwnerAndXattrs(t *testing.T) {
+	needRoot(t)
+	low := image(t)
+	base := View{Lower: low, Upper: t.TempDir()}
+	fork := View{Lower: low, Upper: t.TempDir()}
+	dst := View{Lower: low, Upper: t.TempDir()}
+	proj := filepath.Join(fork.Upper, "proj")
+	must(t, os.Mkdir(proj, 0o750))
+	must(t, os.Lchown(proj, 1000, 1000))
+	must(t, syscall.Setxattr(proj, "user.tag", []byte("fork"), 0))
+	write(t, fork.Upper, "proj/f", "x")
+	must(t, os.Lchown(filepath.Join(proj, "f"), 1000, 1000))
+	etc := filepath.Join(fork.Upper, "etc")
+	must(t, os.Mkdir(etc, 0o755))
+	must(t, os.Lchown(etc, 1000, 1000))
+	must(t, syscall.Setxattr(etc, "user.tag", []byte("fork"), 0))
+	// dst's copy of etc carries an xattr the fork's does not.
+	must(t, os.Mkdir(filepath.Join(dst.Upper, "etc"), 0o755))
+	must(t, syscall.Setxattr(filepath.Join(dst.Upper, "etc"), "user.old", []byte("1"), 0))
+
+	ch, err := Diff(base, fork)
+	must(t, err)
+	for _, c := range ch {
+		must(t, Put(dst, fork, c.Path))
+	}
+	left, err := Diff(dst, fork)
+	must(t, err)
+	if len(left) != 0 {
+		t.Fatalf("after Put, dst still differs from the fork: %s", ops(left))
+	}
+}
