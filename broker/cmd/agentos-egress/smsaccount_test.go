@@ -236,22 +236,31 @@ func TestThePollMarkStartsAtSetup(t *testing.T) {
 		t.Fatal(err)
 	}
 	set := r.clk.now().UTC()
-	if m, err := st.Mark(); err != nil || !m.Since.Equal(time.Unix(set.Unix(), 0)) || len(m.IDs) != 0 {
+	m, gen, err := st.Mark()
+	if err != nil || !m.Since.Equal(time.Unix(set.Unix(), 0)) || len(m.IDs) != 0 {
 		t.Fatalf("first mark %+v %v", m, err)
 	}
 	later := smsapi.Mark{Since: set.Add(time.Hour), IDs: []string{"SM1"}}
-	if err := st.SetMark(later); err != nil {
+	if err := st.SetMark(later, gen); err != nil {
 		t.Fatal(err)
 	}
-	if m, _ := (smsStore{r.c}).Mark(); !m.Since.Equal(later.Since) || len(m.IDs) != 1 {
+	if m, _, _ := (smsStore{r.c}).Mark(); !m.Since.Equal(later.Since) || len(m.IDs) != 1 {
 		t.Fatalf("kept mark %+v", m)
 	}
 	r.clk.add(2 * time.Hour)
 	if err := r.c.setSMS(smsSettings, synthetic(t, "canary-sms-")); err != nil {
 		t.Fatal(err)
 	}
-	if m, _ := st.Mark(); !m.Since.Equal(time.Unix(r.clk.now().Unix(), 0)) || len(m.IDs) != 0 {
+	if m, _, _ := st.Mark(); !m.Since.Equal(time.Unix(r.clk.now().Unix(), 0)) || len(m.IDs) != 0 {
 		t.Fatalf("mark after a new setup %+v", m)
+	}
+	// L3 on #159: a poll that read the mark before the new setup cannot
+	// write it back over the new account's.
+	if err := st.SetMark(later, gen); err == nil {
+		t.Fatal("a mark from before the setup was kept")
+	}
+	if m, _, _ := st.Mark(); !m.Since.Equal(time.Unix(r.clk.now().Unix(), 0)) {
+		t.Fatalf("mark after a stale write %+v", m)
 	}
 }
 
@@ -452,5 +461,46 @@ func TestTheOwnerIsToldWhenTextsMayBeMissed(t *testing.T) {
 	bridge.Poll(context.Background())
 	if n := told(); n != 2 {
 		t.Fatalf("told %d times after an hour", n)
+	}
+}
+
+// L3 MUST-1 on #159 (security C1): on an account that dials without the
+// +, a national or international-prefix form of the owner's number or the
+// line's own is refused like the number itself; other numbers in those
+// forms pass.
+func TestNationalFormsOfTheOwnersNumberAreRefused(t *testing.T) {
+	r, _, sign, _ := smsRig(t)
+	ctx := context.Background()
+	set := sipSettings
+	set.NoPlus = true
+	if err := r.c.setSIP(set, synthetic(t, "canary-sip-")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (signStore{r.c}).LearnRealm(sipRealm); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.c.confirmRealm(sipRealm); err != nil {
+		t.Fatal(err)
+	}
+	ch := func(method, user string) sipsign.Challenge {
+		c := sipChallenge(sipRealm)
+		c.Method, c.URI = method, "sip:"+user+"@voip.test"
+		return c
+	}
+	own := strings.TrimPrefix(set.Number, "+")
+	for _, user := range []string{
+		"15550000999", "5550000999", "15550000999;user=phone", "0115550000999", "0015550000999", // the owner
+		own, own[1:], // the line's own number
+	} {
+		for _, m := range []string{"MESSAGE", "INVITE"} {
+			if _, err := sign.Sign(ctx, ch(m, user)); !errors.Is(err, sipsign.ErrRecipient) {
+				t.Errorf("%s to %s: %v", m, user, err)
+			}
+		}
+	}
+	for _, user := range []string{"15550200001", "5550200001", "+15550200001"} {
+		if _, err := sign.Sign(ctx, ch("MESSAGE", user)); err != nil {
+			t.Errorf("MESSAGE to %s: %v", user, err)
+		}
 	}
 }

@@ -17,8 +17,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/modem"
 )
 
 // REQ: ADP-12, CRED-1
@@ -44,6 +47,13 @@ type provider struct {
 	redirect bool // answer 302 to another host
 	hosts    []string
 	queries  []string
+	// delay holds each answer back, outside mu; endless streams a body
+	// without end; overfull answers that many messages on one page.
+	delay    time.Duration
+	endless  bool
+	overfull int
+	inflight atomic.Int32
+	most     atomic.Int32
 }
 
 func newProvider(t *testing.T) *provider {
@@ -54,6 +64,22 @@ func newProvider(t *testing.T) *provider {
 }
 
 func (p *provider) serve(w http.ResponseWriter, r *http.Request) {
+	if n := p.inflight.Add(1); n > p.most.Load() {
+		p.most.Store(n)
+	}
+	defer p.inflight.Add(-1)
+	p.mu.Lock()
+	d, endless := p.delay, p.endless
+	p.mu.Unlock()
+	time.Sleep(d)
+	if endless {
+		chunk := bytes.Repeat([]byte("x"), 32<<10)
+		for {
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+		}
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.hosts = append(p.hosts, r.Host)
@@ -95,6 +121,10 @@ func (p *provider) serve(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
+	if p.overfull > 0 {
+		json.NewEncoder(w).Encode(map[string]any{"messages": p.inbox[:p.overfull]})
+		return
+	}
 	lo, hi := min(n*PageSize, len(p.inbox)), min((n+1)*PageSize, len(p.inbox))
 	page := map[string]any{"messages": p.inbox[lo:hi]}
 	if hi < len(p.inbox) {
@@ -128,9 +158,14 @@ type memStore struct {
 	set    Settings
 	token  string
 	locked bool
-	budget Budget
-	now    func() time.Time
-	mark   Mark
+	// gen is the setup generation; failMark makes SetMark fail.
+	gen      uint64
+	failMark bool
+	// allowErr, when set, is what AllowText returns.
+	allowErr error
+	budget   Budget
+	now      func() time.Time
+	mark     Mark
 }
 
 func (m *memStore) SMSAccount() (Settings, string, error) {
@@ -146,16 +181,30 @@ func (m *memStore) SMSAccount() (Settings, string, error) {
 }
 
 func (m *memStore) AllowText(to string) error {
+	m.mu.Lock()
+	ae := m.allowErr
+	m.mu.Unlock()
+	if ae != nil {
+		return ae
+	}
 	if err := CheckRecipient(to, ownerNum, lineNum); err != nil {
 		return err
 	}
 	return m.budget.Take(to, m.now())
 }
 
-func (m *memStore) Mark() (Mark, error) { m.mu.Lock(); defer m.mu.Unlock(); return m.mark, nil }
-func (m *memStore) SetMark(k Mark) error {
+func (m *memStore) Mark() (Mark, uint64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.mark, m.gen, nil
+}
+
+func (m *memStore) SetMark(k Mark, gen uint64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failMark || gen != m.gen {
+		return errors.New("mark not kept")
+	}
 	m.mark = k
 	return nil
 }
@@ -532,5 +581,170 @@ func TestABurstOfTextsIsReadPageByPage(t *testing.T) {
 	r.advance(MinPollGap)
 	if again, err := r.cl.Poll(ctx); err != nil || len(again) != 0 || missed != 1 {
 		t.Fatalf("after the bound: %d %v missed=%d", len(again), err, missed)
+	}
+}
+
+// L3 MUST-1 on #159: national and international-prefix forms of a number
+// match it; other numbers and short forms do not.
+func TestSameNumberCatchesNationalForms(t *testing.T) {
+	for _, c := range []struct {
+		dialed, number string
+		want           bool
+	}{
+		{"15550109999", "+15550109999", true},
+		{"5550109999", "+15550109999", true},
+		{"0115550109999", "+15550109999", true},
+		{"07700900123", "+447700900123", true},
+		{"00447700900123", "+447700900123", true},
+		{"5550109998", "+15550109999", false},
+		{"0109999", "+15550109999", false},
+		{"447700900124", "+447700900123", false},
+	} {
+		if got := SameNumber(c.dialed, c.number); got != c.want {
+			t.Errorf("%s vs %s: %v", c.dialed, c.number, got)
+		}
+	}
+}
+
+// L3 on #159: polls run one at a time, so a slow poll cannot write its
+// mark over a later one's.
+func TestPollsRunOneAtATime(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	r.p.mu.Lock()
+	r.p.delay = 100 * time.Millisecond
+	r.p.mu.Unlock()
+	var wg sync.WaitGroup
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); r.svc.Poll(ctx) }()
+		time.Sleep(20 * time.Millisecond)
+		r.advance(MinPollGap)
+	}
+	wg.Wait()
+	if n := r.p.most.Load(); n != 1 {
+		t.Fatalf("%d polls at the provider at once", n)
+	}
+}
+
+// L3 on #159 (surviving mutants): each inbound check, the page cap, the
+// reply cap, a lost mark and an unknown refusal, each held by a test.
+func TestEachInboundCheckHolds(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	t0 := r.at
+	cjk := strings.Repeat("字", 670) // 10 segments, but 2010 bytes
+	r.p.receive("SMo", shopNum, lineNum, "outbound", t0, "outbound-api")
+	r.p.receive("SMc", shopNum, lineNum, cjk, t0, "inbound")
+	r.p.receive("SMk", shopNum, lineNum, "kept", t0, "inbound")
+	if n, _ := modem.Segments(cjk); n > MaxParts {
+		t.Fatalf("the CJK text takes %d segments", n)
+	}
+	got, err := r.cl.Poll(ctx)
+	if err != nil || len(got) != 1 || got[0].Text != "kept" {
+		t.Fatalf("delivered %+v %v", got, err)
+	}
+
+	// Invalid UTF-8 cannot come through JSON, so fresh is held directly.
+	at := t0.Add(time.Minute).Format(time.RFC1123Z)
+	in, _ := fresh([]apiMessage{{SID: "SMu", From: shopNum, To: lineNum, Body: "a\xffb", Direction: "inbound", DateSent: at}}, Mark{Since: t0}, lineNum)
+	if len(in) != 0 {
+		t.Fatalf("invalid UTF-8 delivered: %+v", in)
+	}
+
+	// A page longer than PageSize is cut to it.
+	r = newRig(t)
+	for i := 0; i < PageSize+10; i++ {
+		r.p.receive(fmt.Sprintf("SO%03d", i), shopNum, lineNum, "x", t0.Add(time.Duration(i)*time.Second), "inbound")
+	}
+	r.p.mu.Lock()
+	r.p.overfull = PageSize + 10
+	r.p.mu.Unlock()
+	if got, err := r.cl.Poll(ctx); err != nil || len(got) != PageSize {
+		t.Fatalf("overfull page: %d %v", len(got), err)
+	}
+
+	// A mark that cannot be kept delivers nothing; the next poll does.
+	r = newRig(t)
+	r.p.receive("SMm", shopNum, lineNum, "once", t0, "inbound")
+	r.st.mu.Lock()
+	r.st.failMark = true
+	r.st.mu.Unlock()
+	if got, err := r.cl.Poll(ctx); err != ErrUnreachable || len(got) != 0 {
+		t.Fatalf("lost mark: %+v %v", got, err)
+	}
+	r.st.mu.Lock()
+	r.st.failMark = false
+	r.st.mu.Unlock()
+	r.advance(MinPollGap)
+	if got, err := r.cl.Poll(ctx); err != nil || len(got) != 1 {
+		t.Fatalf("after the lost mark: %+v %v", got, err)
+	}
+
+	// A reply without end is cut at MaxResponse, not read to the
+	// client's timeout.
+	r.p.mu.Lock()
+	r.p.endless = true
+	r.p.mu.Unlock()
+	r.advance(MinPollGap)
+	start := time.Now()
+	if _, err := r.cl.Poll(ctx); err != ErrUnreachable || time.Since(start) > 5*time.Second {
+		t.Fatalf("endless reply: %v after %v", err, time.Since(start))
+	}
+}
+
+// The production client is TLS 1.2 or later, with no proxy and no
+// redirects followed.
+func TestTheProductionClientIsPinned(t *testing.T) {
+	c := NewHTTPClient()
+	tr, ok := c.Transport.(*http.Transport)
+	if !ok || tr.TLSClientConfig == nil || tr.TLSClientConfig.MinVersion != tls.VersionTLS12 || tr.Proxy != nil || tr.TLSClientConfig.RootCAs != nil {
+		t.Fatalf("transport %+v", tr)
+	}
+	if c.CheckRedirect == nil || c.CheckRedirect(nil, nil) != http.ErrUseLastResponse || c.Timeout == 0 {
+		t.Fatal("redirects or timeout")
+	}
+}
+
+// A refusal the socket has no code for goes out as "unreachable", never
+// as its own text.
+func TestUnknownRefusalsAreUnreachable(t *testing.T) {
+	r := newRig(t)
+	r.st.mu.Lock()
+	r.st.allowErr = errors.New("detail-canary-7f3a")
+	r.st.mu.Unlock()
+	w := httptest.NewRecorder()
+	Handler(r.svc).ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/send", strings.NewReader(`{"to":"+15550200001","text":"hi"}`)))
+	if b := w.Body.String(); w.Code != http.StatusConflict || !strings.Contains(b, `"unreachable"`) || strings.Contains(b, "detail-canary") {
+		t.Fatalf("%d %s", w.Code, b)
+	}
+	// A request past the socket's limit is refused unread.
+	w = httptest.NewRecorder()
+	big := `{"to":"+15550200001","text":"` + strings.Repeat("x", 8<<10) + `"}`
+	Handler(r.svc).ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/send", strings.NewReader(big)))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("oversized request: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// Security F1 on #159: only the expected page number and a short
+// printable token are taken from the provider's next_page_uri.
+func TestOnlyTheNextPageIsAskedFor(t *testing.T) {
+	for _, c := range []struct {
+		uri  string
+		want bool
+	}{
+		{"/x?Page=1&PageToken=PASM1", true},
+		{"https://elsewhere.example/x?Page=1&PageToken=PASM1", true}, // the host is never used
+		{"/x?Page=5&PageToken=PASM1", false},
+		{"/x?Page=1", false},
+		{"/x?Page=1&PageToken=" + strings.Repeat("a", 129), false},
+		{"/x?Page=1&PageToken=a%20b", false},
+		{"", false},
+	} {
+		tok, ok := nextPage(c.uri, 1)
+		if ok != c.want || ok && tok != "PASM1" {
+			t.Errorf("%q: %q %v", c.uri, tok, ok)
+		}
 	}
 }

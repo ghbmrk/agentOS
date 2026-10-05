@@ -181,6 +181,22 @@ func CheckRecipient(to, owner, own string) error {
 	return nil
 }
 
+// SameNumber says dialed, the digits of a Request-URI on an account that
+// dials without the + (no +), may reach number (E.164): after any leading
+// zeros (a trunk or international prefix), one is the other or ends with
+// it. So a national form ("5550109999", "07700900123") or an
+// international-prefix form ("0115550109999") of the owner's number or the
+// line's own is caught, whatever the provider's country (L3 MUST-1 on
+// #159, security C1).
+func SameNumber(dialed, number string) bool {
+	d := strings.TrimLeft(dialed, "0")
+	n := strings.TrimPrefix(number, "+")
+	if len(d) < 7 || n == "" {
+		return false
+	}
+	return strings.HasSuffix(n, d) || strings.HasSuffix(d, n)
+}
+
 // Budget limits (security Q2): the whole second line, SIP MESSAGE and
 // HTTP texts together, and each recipient.
 const (
@@ -191,7 +207,9 @@ const (
 
 // Budget is the second line's sending budget, held in the vault process
 // and shared by every way the line sends. It is in memory: a restart of
-// the vault process starts it again, which needs the owner's unlock.
+// the vault process starts it again. That needs the owner's unlock unless
+// a trusted PC unlocks the box (bootTrusted), so a vault process that
+// restarts often could send past it (egress K16 residual).
 type Budget struct {
 	mu   sync.Mutex
 	sent []sent

@@ -209,6 +209,9 @@ type custody struct {
 	// smsMissedAt is when the owner was last told texts may have been
 	// missed.
 	smsMissedAt time.Time
+	// smsGen counts texting account setups and removals; a poll's mark
+	// from an earlier one is not kept.
+	smsGen      uint64
 	st          unlockState
 	ph          phase
 	gen         int // bumped by lock, so an unlock in flight is cancelled

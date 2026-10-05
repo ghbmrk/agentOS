@@ -22,9 +22,11 @@ type Store interface {
 	// the second line's shared budget (Budget.Take).
 	AllowText(to string) error
 	// Mark and SetMark keep the poll's high-water mark across restarts;
-	// before the first poll, Mark is the time setup ran.
-	Mark() (Mark, error)
-	SetMark(Mark) error
+	// before the first poll, Mark is the time setup ran. Mark also returns
+	// the account's setup generation, and SetMark refuses a mark from an
+	// earlier one, so a poll in flight across a new setup writes nothing.
+	Mark() (Mark, uint64, error)
+	SetMark(Mark, uint64) error
 }
 
 // MinPollGap is the shortest time between two polls the vault process
@@ -45,6 +47,9 @@ type Service struct {
 	// read, so older texts were passed over (security F1 on #159).
 	Missed func()
 
+	// polling serializes polls, so a slow poll cannot write its mark
+	// over a later one's.
+	polling  sync.Mutex
 	mu       sync.Mutex
 	lastPoll time.Time
 	client   *http.Client
@@ -93,6 +98,15 @@ func (s *Service) Send(ctx context.Context, to, text string) error {
 // Poll returns the texts the provider received for the line since the
 // last poll, oldest first, each once.
 func (s *Service) Poll(ctx context.Context) ([]Inbound, error) {
+	s.polling.Lock()
+	defer s.polling.Unlock()
+	m, gen, err := s.Store.Mark()
+	switch {
+	case errors.Is(err, ErrLocked), errors.Is(err, ErrNoAccount):
+		return nil, err
+	case err != nil:
+		return nil, ErrUnreachable
+	}
 	u, err := s.upstream()
 	if err != nil {
 		return nil, err
@@ -105,10 +119,6 @@ func (s *Service) Poll(ctx context.Context) ([]Inbound, error) {
 	}
 	s.lastPoll = now
 	s.mu.Unlock()
-	m, err := s.Store.Mark()
-	if err != nil {
-		return nil, ErrUnreachable
-	}
 	msgs, missed, err := u.list(ctx, m.Since)
 	if s.Polled != nil {
 		s.Polled(err)
@@ -117,7 +127,7 @@ func (s *Service) Poll(ctx context.Context) ([]Inbound, error) {
 		return nil, err
 	}
 	out, next := fresh(msgs, m, u.s.Number)
-	if err := s.Store.SetMark(next); err != nil {
+	if err := s.Store.SetMark(next, gen); err != nil {
 		return nil, ErrUnreachable // delivered nothing, so nothing twice
 	}
 	if missed && s.Missed != nil {

@@ -57,6 +57,10 @@ func smsFieldErr(err error) error {
 	return errInternal
 }
 
+// errSMSStale refuses a poll's mark from before the account was last set
+// up or removed.
+var errSMSStale = errors.New("texting account changed during the poll")
+
 // smsRecord is the settings entry and when setup ran (Unix seconds), from
 // which the first poll starts, so the provider's older history is never
 // handed to the agent.
@@ -122,6 +126,7 @@ func (c *custody) setSMS(s smsapi.Settings, token string) error {
 		return c.putErr(err)
 	}
 	c.smsFailSince, c.smsFail = time.Time{}, modelroute.TextsOK
+	c.smsGen++
 	if replacing {
 		c.notify(noteSMSReplaced)
 	}
@@ -145,6 +150,7 @@ func (c *custody) removeSMS() error {
 		removed = true
 	}
 	c.smsFailSince, c.smsFail = time.Time{}, modelroute.TextsOK
+	c.smsGen++
 	if removed {
 		c.notify(noteSMSRemoved)
 	}
@@ -282,31 +288,39 @@ func (s smsStore) AllowText(to string) error {
 	return s.c.allowSend(to, true)
 }
 
-func (s smsStore) Mark() (smsapi.Mark, error) {
+func (s smsStore) Mark() (smsapi.Mark, uint64, error) {
+	s.c.mu.Lock()
+	defer s.c.mu.Unlock()
+	gen := s.c.smsGen
 	raw, err := os.ReadFile(s.c.smsMarkPath())
 	if errors.Is(err, os.ErrNotExist) {
-		s.c.mu.Lock()
 		rec, _, err := s.c.smsAccount()
-		s.c.mu.Unlock()
 		if err != nil {
-			return smsapi.Mark{}, err
+			return smsapi.Mark{}, gen, err
 		}
-		return smsapi.Mark{Since: time.Unix(rec.SetAt, 0).UTC()}, nil
+		return smsapi.Mark{Since: time.Unix(rec.SetAt, 0).UTC()}, gen, nil
 	}
 	if err != nil {
-		return smsapi.Mark{}, err
+		return smsapi.Mark{}, gen, err
 	}
 	var m smsapi.Mark
 	if err := json.Unmarshal(raw, &m); err != nil {
-		return smsapi.Mark{}, err
+		return smsapi.Mark{}, gen, err
 	}
-	return m, nil
+	return m, gen, nil
 }
 
-func (s smsStore) SetMark(m smsapi.Mark) error {
+// SetMark keeps the mark unless the account was set up again or removed
+// since the poll read it (L3 on #159).
+func (s smsStore) SetMark(m smsapi.Mark, gen uint64) error {
 	raw, err := json.Marshal(m)
 	if err != nil {
 		return err
+	}
+	s.c.mu.Lock()
+	defer s.c.mu.Unlock()
+	if gen != s.c.smsGen {
+		return errSMSStale
 	}
 	return writeFileAtomic(s.c.smsMarkPath(), raw)
 }
@@ -322,7 +336,17 @@ func (s signStore) Allow(ch sipsign.Challenge) error {
 	if err != nil {
 		return err
 	}
-	switch c.allowSend(sipsign.Recipient(ch.URI, rec.NoPlus), ch.Method == "MESSAGE") {
+	to := sipsign.Recipient(ch.URI, rec.NoPlus)
+	if rec.NoPlus && sipsign.Recipient(ch.URI, false) == "" && to != "" {
+		// Dialed without the +: the provider may read it as a national
+		// or international-prefix number.
+		for _, n := range append(c.lineNumbers(), c.owner) {
+			if smsapi.SameNumber(to[1:], n) {
+				return sipsign.ErrRecipient
+			}
+		}
+	}
+	switch c.allowSend(to, ch.Method == "MESSAGE") {
 	case nil:
 		return nil
 	case smsapi.ErrLimited:

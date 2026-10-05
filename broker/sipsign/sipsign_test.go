@@ -373,6 +373,8 @@ func TestRecipientIsTheRequestURIsNumber(t *testing.T) {
 		{"tel:+15550000777", false, ""},
 		{"sip:+1555@voip.test", false, "+1555"},
 		{"sip:@voip.test", false, ""},
+		{"sip:+1555abc@voip.test", false, ""},
+		{"sip:1555 0000@voip.test", true, ""},
 	} {
 		if got := sipsign.Recipient(c.uri, c.noPlus); got != c.want {
 			t.Errorf("%q noPlus=%v: %q, want %q", c.uri, c.noPlus, got, c.want)
