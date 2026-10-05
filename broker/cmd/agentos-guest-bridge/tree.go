@@ -3,10 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -103,7 +106,11 @@ func syncOnce(ctx context.Context, broker *http.Client, dir, version string) (st
 	if err := json.Unmarshal([]byte(out.Result.Content[0].Text), &ans); err != nil {
 		return version, fmt.Errorf("broker answer: %v", err)
 	}
-	if ans.Unchanged && ans.Version == version {
+	if ans.Unchanged {
+		if ans.Version != version {
+			// Not ours: an unchanged answer never wipes the tree.
+			return version, errors.New("broker answer: unchanged, but not the version held")
+		}
 		return version, nil
 	}
 	if err := mirror(dir, ans.Files); err != nil {
@@ -114,8 +121,11 @@ func syncOnce(ctx context.Context, broker *http.Client, dir, version string) (st
 
 // mirror makes dir's tree namespaces hold exactly files. Every path is
 // checked before anything is written, so a bad answer changes nothing.
-// Each file is replaced whole (written aside, then renamed), so the skill
-// server never reads half of one.
+// New and changed files are written first, each written aside and
+// renamed, so the skill server never reads half of one; files gone from
+// the tree are removed last, so a failed write leaves the old tree's
+// files rather than fewer. Everything goes through an os.Root, so a
+// symlink in dir cannot send a write outside it.
 func mirror(dir string, files map[string][]byte) error {
 	for p := range files {
 		ns, _, _ := strings.Cut(p, "/")
@@ -123,47 +133,57 @@ func mirror(dir string, files map[string][]byte) error {
 			return fmt.Errorf("bad tree path %q", p)
 		}
 	}
-	for _, ns := range treeNamespaces {
-		root := filepath.Join(dir, ns)
-		err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-			if err != nil || d.IsDir() {
-				return nil
-			}
-			rel, _ := filepath.Rel(dir, path)
-			if _, keep := files[filepath.ToSlash(rel)]; !keep {
-				return os.Remove(path)
-			}
-			return nil
-		})
-		if err != nil {
-			return err
-		}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
 	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
 	for p, b := range files {
-		dst := filepath.Join(dir, filepath.FromSlash(p))
-		if old, err := os.ReadFile(dst); err == nil && bytes.Equal(old, b) {
+		if old, err := root.ReadFile(p); err == nil && bytes.Equal(old, b) {
 			continue
 		}
-		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		if err := root.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			return err
 		}
-		tmp, err := os.CreateTemp(filepath.Dir(dst), ".tree-*")
+		var n [8]byte
+		rand.Read(n[:])
+		tmp := filepath.Join(filepath.Dir(p), ".tree-"+hex.EncodeToString(n[:]))
+		f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 		if err != nil {
 			return err
 		}
-		_, err = tmp.Write(b)
-		if cerr := tmp.Close(); err == nil {
+		_, err = f.Write(b)
+		if cerr := f.Close(); err == nil {
 			err = cerr
 		}
 		if err == nil {
-			err = os.Chmod(tmp.Name(), 0o644)
+			err = root.Chmod(tmp, 0o644)
 		}
 		if err == nil {
-			err = os.Rename(tmp.Name(), dst)
+			err = root.Rename(tmp, p)
 		}
 		if err != nil {
-			os.Remove(tmp.Name())
+			root.Remove(tmp)
 			return err
+		}
+	}
+	for _, ns := range treeNamespaces {
+		var gone []string
+		fs.WalkDir(root.FS(), ns, func(path string, d fs.DirEntry, err error) error {
+			if err == nil && !d.IsDir() {
+				if _, keep := files[path]; !keep {
+					gone = append(gone, path)
+				}
+			}
+			return nil
+		})
+		for _, p := range gone {
+			if err := root.Remove(p); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

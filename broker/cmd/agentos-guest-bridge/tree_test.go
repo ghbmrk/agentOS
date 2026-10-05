@@ -116,10 +116,15 @@ func TestBridgeMirrorsTheManagedTree(t *testing.T) {
 // outside the tree's namespaces changes nothing.
 func TestBridgeKeepsItsTreeWhenTheBrokerDoesNotSendOne(t *testing.T) {
 	for name, f := range map[string]*fakeTree{
-		"public": {err: "the managed tree reaches only private machines"},
-		"replay": {rpc: true},
-		"escape": {ans: treeAnswer{Version: "v1", Files: map[string][]byte{"skills/a.json": []byte("a"), "../../etc/passwd": []byte("x")}}},
-		"grants": {ans: treeAnswer{Version: "v1", Files: map[string][]byte{"grants/g.json": []byte("g")}}},
+		"public":    {err: "the managed tree reaches only private machines"},
+		"replay":    {rpc: true},
+		"escape":    {ans: treeAnswer{Version: "v1", Files: map[string][]byte{"skills/a.json": []byte("a"), "../../etc/passwd": []byte("x")}}},
+		"grants":    {ans: treeAnswer{Version: "v1", Files: map[string][]byte{"grants/g.json": []byte("g")}}},
+		"dotdot":    {ans: treeAnswer{Version: "v1", Files: map[string][]byte{"skills/../../x": []byte("x")}}},
+		"absolute":  {ans: treeAnswer{Version: "v1", Files: map[string][]byte{"/skills/x.json": []byte("x")}}},
+		"oversize":  {ans: treeAnswer{Version: "v1", Files: map[string][]byte{"skills/big.json": make([]byte, maxTreeAnswer)}}},
+		"unchanged": {ans: treeAnswer{Version: "v9", Unchanged: true}},
+		"not ready": {err: "the managed tree is not ready; keep the one you have"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -133,5 +138,22 @@ func TestBridgeKeepsItsTreeWhenTheBrokerDoesNotSendOne(t *testing.T) {
 				t.Fatal("the tree changed")
 			}
 		})
+	}
+}
+
+// L3 on #120: a symlink in the tree directory cannot send a write, or a
+// removal, outside it.
+func TestBridgeMirrorStaysInsideTheTree(t *testing.T) {
+	dir, outside := t.TempDir(), t.TempDir()
+	os.WriteFile(filepath.Join(outside, "keep.json"), []byte("outside"), 0o644)
+	if err := os.Symlink(outside, filepath.Join(dir, "skills")); err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeTree{ans: treeAnswer{Version: "v1", Files: map[string][]byte{"skills/a.json": []byte("a")}}}
+	if _, err := syncOnce(context.Background(), f.serve(t), dir, ""); err == nil {
+		t.Fatal("wrote through a symlink")
+	}
+	if read(t, filepath.Join(outside, "a.json")) != "<none>" || read(t, filepath.Join(outside, "keep.json")) != "outside" {
+		t.Fatal("the mirror reached outside the tree")
 	}
 }

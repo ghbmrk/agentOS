@@ -104,6 +104,7 @@ func TestW4AdoptedTreeReachesTheAgent(t *testing.T) {
 // machine plane opens.
 func TestW4TreeReachesOnlyPrivateMachines(t *testing.T) {
 	lt := newLiveTree(t.Logf)
+	lt.markReady()
 	treeTarget{lt, "skills"}.Apply(change.Tree{"skills/a.json": []byte("a")})
 	if _, err := fetchTree(t, lt, "agent", ""); !errors.Is(err, errTreePublic) {
 		t.Fatalf("before the machine plane: %v", err)
@@ -127,6 +128,7 @@ func TestW4TreeReachesOnlyPrivateMachines(t *testing.T) {
 func TestW4OversizeTreeIsNotSent(t *testing.T) {
 	lt := newLiveTree(t.Logf)
 	lt.label = labels(map[string]vm.Label{"agent": vm.Private})
+	lt.markReady()
 	treeTarget{lt, "context"}.Apply(change.Tree{"context/big.md": make([]byte, maxTreeSend)})
 	if _, err := fetchTree(t, lt, "agent", ""); err == nil || !strings.Contains(err.Error(), "too large") {
 		t.Fatalf("oversize: %v", err)
@@ -138,6 +140,7 @@ func TestW4OversizeTreeIsNotSent(t *testing.T) {
 func TestToolSetServesEachSet(t *testing.T) {
 	lt := newLiveTree(t.Logf)
 	lt.label = labels(map[string]vm.Label{"agent": vm.Private})
+	lt.markReady()
 	q := &questions{}
 	set := toolSet{nil, q, lt}
 	names := map[string]bool{}
@@ -155,5 +158,40 @@ func TestToolSetServesEachSet(t *testing.T) {
 	}
 	if _, ok, _ := set.Call(context.Background(), "agent", "lin", "effect_request", nil); ok {
 		t.Fatal("handled a tool no set serves")
+	}
+}
+
+// L3 on #120: before the pipeline has opened and applied its state, and
+// with no learning plane at all, the copy is empty but is not the box's
+// tree, so it is not sent: a guest mirroring it would delete every skill
+// it holds.
+func TestW4TreeIsNotSentUntilThePipelineOpens(t *testing.T) {
+	lt := newLiveTree(t.Logf)
+	lt.label = labels(map[string]vm.Label{"agent": vm.Private})
+	if _, err := fetchTree(t, lt, "agent", ""); !errors.Is(err, errTreeNotReady) {
+		t.Fatalf("before the pipeline: %v", err)
+	}
+	dir := t.TempDir()
+	cfg := daemon.Config{
+		JournalPath: filepath.Join(dir, "journal.log"), SocketDir: filepath.Join(dir, "run"),
+		OwnerNumber: ownerNum, ModemUID: os.Getuid(), Admission: admission.Config{CapacityMB: 4500, HeadroomMB: 600},
+		OwnerState: filepath.Join(dir, "owner.json"),
+	}
+	if _, err := openLearning(learnPaths{Dir: dir, Spare: filepath.Join(dir, "spare.json"), Tree: lt}, false, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if a, err := fetchTree(t, lt, "agent", ""); err != nil || len(a.Files) != 0 || a.Version == "" {
+		t.Fatalf("a first start's empty tree: %+v %v", a, err)
+	}
+}
+
+// A target applies only its own namespace.
+func TestW4TargetRefusesOtherNamespaces(t *testing.T) {
+	lt := newLiveTree(t.Logf)
+	if err := (treeTarget{lt, "skills"}).Apply(change.Tree{"skills/a.json": nil, "grants/g.json": []byte("g")}); err == nil {
+		t.Fatal("a skills target applied a grants file")
+	}
+	if len(lt.files) != 0 {
+		t.Fatalf("partly applied: %v", lt.files)
 	}
 }

@@ -102,6 +102,9 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	}); err != nil {
 		return nil, err
 	}
+	if p.Tree != nil {
+		p.Tree.markReady() // the pipeline applied its state, if it had any
+	}
 	var router change.Router
 	if sync != nil {
 		sync.doneRestoring()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 
@@ -36,6 +37,12 @@ const maxTreeSend = 4 << 20
 type liveTree struct {
 	mu    sync.Mutex
 	files change.Tree
+	// version is files' hash, kept by Apply. ready is set once the
+	// pipeline has opened and applied its state: until then the copy is
+	// empty but not the box's tree, and a guest mirroring it would delete
+	// every skill it holds (L3 on #120).
+	version string
+	ready   bool
 	// label reports a machine's label; nil (no machine plane) refuses
 	// every machine.
 	label func(machine string) (vm.Label, error)
@@ -43,7 +50,16 @@ type liveTree struct {
 }
 
 func newLiveTree(logf func(string, ...any)) *liveTree {
-	return &liveTree{files: change.Tree{}, logf: logf}
+	return &liveTree{files: change.Tree{}, version: change.Tree{}.Hash(), logf: logf}
+}
+
+// markReady is called once the pipeline has opened with its targets
+// applied; before it, and with no learning plane at all, managed_tree
+// answers "not ready" and a guest keeps the tree it has.
+func (t *liveTree) markReady() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.ready = true
 }
 
 // targets are the pipeline's targets for agentNamespaces.
@@ -65,6 +81,11 @@ type treeTarget struct {
 func (g treeTarget) Current() (change.Tree, error) { return change.Tree{}, nil }
 
 func (g treeTarget) Apply(files change.Tree) error {
+	for p := range files {
+		if ns, _, _ := strings.Cut(p, "/"); ns != g.ns {
+			return fmt.Errorf("managed tree: %s is outside %s", p, g.ns)
+		}
+	}
 	g.t.mu.Lock()
 	defer g.t.mu.Unlock()
 	for p := range g.t.files {
@@ -75,6 +96,7 @@ func (g treeTarget) Apply(files change.Tree) error {
 	for p, b := range files {
 		g.t.files[p] = append([]byte(nil), b...)
 	}
+	g.t.version = g.t.files.Hash()
 	return nil
 }
 
@@ -86,7 +108,10 @@ type treeAnswer struct {
 	Files     map[string][]byte `json:"files,omitempty"`
 }
 
-var errTreePublic = errors.New("the managed tree reaches only private machines; this one has had no owner data")
+var (
+	errTreePublic   = errors.New("the managed tree reaches only private machines; this one has had no owner data")
+	errTreeNotReady = errors.New("the managed tree is not ready; keep the one you have")
+)
 
 func (t *liveTree) List() []map[string]any {
 	return []map[string]any{{
@@ -124,14 +149,18 @@ func (t *liveTree) Call(_ context.Context, machine, _, name string, args json.Ra
 		return "", true, errTreePublic
 	}
 	t.mu.Lock()
+	if !t.ready {
+		t.mu.Unlock()
+		return "", true, errTreeNotReady
+	}
 	files := change.Tree{}
 	size := 0
 	for p, b := range t.files {
 		files[p] = b
 		size += len(p) + len(b)
 	}
+	ans := treeAnswer{Version: t.version}
 	t.mu.Unlock()
-	ans := treeAnswer{Version: files.Hash()}
 	if ans.Version == a.Version {
 		ans.Unchanged = true
 	} else if size > maxTreeSend {
@@ -149,10 +178,7 @@ func (t *liveTree) Call(_ context.Context, machine, _, name string, args json.Ra
 func (t *liveTree) setMachines(m *vm.Manager) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.label = func(id string) (vm.Label, error) {
-		mc, err := m.Get(id)
-		return mc.Label, err
-	}
+	t.label = m.Label
 }
 
 // toolSet serves several broker tool sets on one guest socket (guest
