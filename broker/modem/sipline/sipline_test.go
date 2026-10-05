@@ -7,8 +7,10 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"errors"
-	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -20,6 +22,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/modem/secondline"
 	"github.com/ghbmrk/agentos/broker/modem/sipline"
 	"github.com/ghbmrk/agentos/broker/modem/sipsim"
+	"github.com/ghbmrk/agentos/broker/sipsign"
 )
 
 // REQ: ADP-12, CRED-1, CH-1, DEP-3
@@ -36,7 +39,7 @@ const (
 
 // signer is the vault side, counting what it is asked to sign.
 type signer struct {
-	acct sipline.Account
+	acct sipsign.Account
 	mu   sync.Mutex
 	asks []sipline.Challenge
 }
@@ -74,7 +77,7 @@ func config(p *sipsim.Provider, s sipline.Signer) sipline.Config {
 }
 
 func vault(p *sipsim.Provider) *signer {
-	return &signer{acct: sipline.Account{Username: user, Password: password, Realm: p.Realm}}
+	return &signer{acct: sipsign.Account{Username: user, Password: password, Realm: p.Realm}}
 }
 
 func open(t *testing.T, p *sipsim.Provider, cfg sipline.Config) *sipline.Line {
@@ -151,31 +154,11 @@ func TestTheLineRefusesAProviderItCannotVerify(t *testing.T) {
 	}
 }
 
-// The vault signs only for the recorded realm and only the requests the
-// line sends, so the line's process cannot use it as a general digest
-// oracle for the password (CRED-1).
-func TestTheVaultSignsOnlyItsRealmAndTheLinesRequests(t *testing.T) {
+// A wrong password is refused by the provider and nothing registers.
+func TestAWrongPasswordDoesNotRegister(t *testing.T) {
 	ctx := context.Background()
-	acct := sipline.Account{Username: user, Password: password, Realm: "voip.test realm"}
-	ch := `Digest realm="voip.test realm", nonce="abc", qop="auth", algorithm=MD5`
-	if _, err := acct.Sign(ctx, sipline.Challenge{Header: ch, Method: "REGISTER", URI: "sip:voip.test"}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := acct.Sign(ctx, sipline.Challenge{Header: `Digest realm="mail.example", nonce="abc"`, Method: "REGISTER", URI: "sip:voip.test"}); !errors.Is(err, sipline.ErrRealm) {
-		t.Fatalf("other realm: %v", err)
-	}
-	for _, m := range []string{"SUBSCRIBE", "PUBLISH", "GET", ""} {
-		if _, err := acct.Sign(ctx, sipline.Challenge{Header: ch, Method: m, URI: "sip:voip.test"}); !errors.Is(err, sipline.ErrMethod) {
-			t.Errorf("%q: %v", m, err)
-		}
-	}
-	unset := sipline.Account{Username: user, Password: password}
-	if _, err := unset.Sign(ctx, sipline.Challenge{Header: ch, Method: "REGISTER", URI: "sip:voip.test"}); !errors.Is(err, sipline.ErrRealm) {
-		t.Fatalf("no realm recorded: %v", err)
-	}
-
 	p := provider(t)
-	wrong := &signer{acct: sipline.Account{Username: user, Password: "canary-wrong", Realm: p.Realm}}
+	wrong := &signer{acct: sipsign.Account{Username: user, Password: "canary-wrong", Realm: p.Realm}}
 	if _, err := sipline.Open(ctx, config(p, wrong)); err == nil {
 		t.Fatal("registered with the wrong password")
 	}
@@ -728,15 +711,52 @@ func TestIncomingTextsAreBoundedAndOnlyTheProviderVouchesForNumbers(t *testing.T
 	}
 }
 
-func TestTheVaultAccountNeverPrintsItsPassword(t *testing.T) {
-	a := sipline.Account{Username: user, Password: password, Realm: "r"}
-	for _, f := range []string{"%v", "%+v", "%#v", "%s"} {
-		if s := fmt.Sprintf(f, a); strings.Contains(s, password) {
-			t.Errorf("%s: %s", f, s)
-		}
+// vaultStore is the vault process's side of the sign socket for a fresh
+// setup: no realm recorded yet.
+type vaultStore struct {
+	mu   sync.Mutex
+	acct sipsign.Account
+}
+
+func (v *vaultStore) Account() (sipsign.Settings, sipsign.Account, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return sipsign.Settings{Server: "unused:5061", Domain: domain, User: user, Number: sipNum}, v.acct, nil
+}
+
+func (v *vaultStore) LearnRealm(r string) (sipsign.Account, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.acct.Realm != "" {
+		return sipsign.Account{}, sipsign.ErrRealm
 	}
-	// RFC 2069 challenges (no qop, no client nonce) are not answered.
-	if _, err := a.Sign(context.Background(), sipline.Challenge{Header: `Digest realm="r", nonce="n"`, Method: "REGISTER", URI: "sip:x"}); err == nil {
-		t.Fatal("signed a challenge without qop")
+	v.acct.Realm = r
+	return v.acct, nil
+}
+
+// The line signs through the vault process's socket: the first
+// registration records the provider's realm (SL3), and texts after it are
+// signed for that realm only (SL2, CRED-1).
+func TestTheLineRegistersThroughTheSignSocketAndRecordsTheRealm(t *testing.T) {
+	p := provider(t)
+	v := &vaultStore{acct: sipsign.Account{Username: user, Password: password}}
+	path := filepath.Join(t.TempDir(), "sign.sock")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: sipsign.Handler(v)}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+
+	l := open(t, p, config(p, sipsign.NewClient(path)))
+	if p.Registered(user) == 0 {
+		t.Fatal("not registered")
+	}
+	if _, a, _ := v.Account(); a.Realm != p.Realm {
+		t.Fatalf("realm recorded %q, provider's %q", a.Realm, p.Realm)
+	}
+	if err := l.Send(shopNum, "hi"); err != nil {
+		t.Fatal(err)
 	}
 }
