@@ -12,7 +12,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/vm"
 )
 
-// REQ: RES-1, REV-5, LOOP-5
+// REQ: RES-1, REV-5
 
 // fakeMachines records what the keeper asked of the machine manager.
 type fakeMachines struct {
@@ -145,22 +145,6 @@ func TestAgentLaunchSpecReadsTheGuestRig(t *testing.T) {
 	if argv[0] != "/usr/local/bin/agentos-guest-bridge" || len(env) == 0 {
 		t.Fatalf("argv %q env %q", argv, env)
 	}
-}
-
-// Replay machines get the evaluator's services or none: an eval- machine
-// never reaches the live guest plane, which holds the journal, the
-// executors, and the owner (replay R7). Before either exists, machines
-// cannot start.
-func TestLOOP5ReplayMachinesNeverGetTheLivePlane(t *testing.T) {
-	var l lateServices
-	if _, err := l.Open(vm.EvalPrefix + "r"); err == nil || err.Error() != "replay evaluator not open" {
-		t.Fatalf("replay machine without an evaluator: %v", err)
-	}
-	if _, err := l.Open("agent"); err == nil || err.Error() != "guest plane not open" {
-		t.Fatalf("live machine without a plane: %v", err)
-	}
-	l.Close(vm.EvalPrefix + "r") // nothing open: no panic
-	l.Close("agent")
 }
 
 // STATUS names why the agent is not running in fixed words, never the raw

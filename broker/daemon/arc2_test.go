@@ -40,10 +40,8 @@ var controlPath = map[string][]string{
 	// (modelroute, P2-4) and journals the denials that come back, and
 	// gives the owner channel the vault process's verify operation
 	// (owner.Verifier, egress K7). It keeps the owner's agent machine
-	// running as foreground work (admission.Foreground, RES-1), and
-	// serves the learning process's evaluations as replays beside the
-	// machine manager (evalsock, replay; loops L16, replay R8).
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "evalsock", "replay"},
+	// running as foreground work (admission.Foreground, RES-1).
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies
@@ -82,9 +80,6 @@ var guestPlane = map[string]struct {
 	// Replay (LOOP-5) serves replay machines through a guest plane of its
 	// own: no journal writes, no executors, no network clients.
 	"replay": {[]string{"admission", "change", "guest", "journal", "meter", "vm"}, []string{"net", "os/exec", "plugin", "unsafe", "C"}},
-	// The evaluation socket carries the learning process's evaluations to
-	// replay; it holds no credential and starts no process.
-	"evalsock": {[]string{"change", "sockets"}, []string{"os/exec", "plugin", "unsafe", "C"}},
 }
 
 var forbiddenStd = []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "syscall", "unsafe", "C"}
