@@ -38,3 +38,9 @@ P1-4 follow-ups (from the #23 review), for P1-7 or the loop scheduler:
 - After a broker restart, accepted work resumes once the journal reconciles, and the boot text names the resumed tasks (UX).
 - Guest sockets follow the B8 per-machine identity rule when P1-7 mounts them (V15, Security). Done in P1-7: identity is the socket (G1).
 - On the N95, measure zram together with the 1/16 `memory.high` margin (Potency).
+
+## Phase 2: real hardware (cloud parts)
+
+| ID | Package | Needs | State |
+|---|---|---|---|
+| P2-7 | Provider adapters: model router (CAP-9) over two API routes, OpenAI and Anthropic, behind the one chat-completions guest interface; failover on exhaustion, grants and data labels checked before sending, measured routes and Loop 1 rule candidates ([assumptions](broker/route/ASSUMPTIONS.md)). A3's consumer route waits on S6. Wiring: serve `Router.Handler` behind the OP-8 meter in place of the raw proxy | P1-3, P1-7 | in review |
