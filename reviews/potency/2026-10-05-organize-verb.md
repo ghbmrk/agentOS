@@ -20,7 +20,7 @@ Mark decided (project chat, 2026-10-05): "Yes - reversible".
 
 - **Day-wide `UNDO`.** It restores only items whose current state still matches what the agent set, and reports the ones it skipped.
 - **Allowed targets.** Moves and labels go only to system states, folders the owner confirmed when granting, or `AgentOS/`. Trash, spam and folders with a retention policy are never targets. A shared or watched target counts as share, and reporting spam counts as delete-remote or share.
-- **Alert guard.** Alerts are recognised first by sender, not by wording: the provider's security senders and senders the owner holds an account with or marked as financial or identity, each after a DMARC pass. Phrase patterns are a second net, in the owner's languages.
+- **Alert guard.** Alerts are recognised first by sender, not by wording: the provider's security senders and senders the owner holds an account with or marked as financial or identity, each after a DMARC pass. Phrase patterns are a second net, in the owner's languages. The guard applies only to operations that hide a message (archive, move out of the inbox, mark read); labelling an alert still runs and is listed in the digest (arbitrator).
 - **Recommended items, adopted.**
   - Per-item undo through `MORE` and `UNDO <id> 3 7`.
   - The digest names the senders most affected and lists guard hits.
