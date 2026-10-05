@@ -24,6 +24,7 @@ type rig struct {
 	cErr    error
 	reads   int
 	texts   []string
+	gs      []*Guard
 }
 
 func newRig() *rig {
@@ -40,6 +41,19 @@ func (r *rig) advance(d time.Duration) {
 	if !r.carrier.IsZero() {
 		r.carrier = r.carrier.Add(d)
 	}
+}
+
+// sent is the owner texts so far, once every guard's queue is delivered.
+func (r *rig) sent() []string {
+	r.mu.Lock()
+	gs := append([]*Guard(nil), r.gs...)
+	r.mu.Unlock()
+	for _, g := range gs {
+		g.Flush()
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.texts...)
 }
 
 func (r *rig) readCount() int { r.mu.Lock(); defer r.mu.Unlock(); return r.reads }
@@ -74,6 +88,9 @@ func (r *rig) guard(t *testing.T, mod func(*Config)) *Guard {
 	if err != nil {
 		t.Fatal(err)
 	}
+	r.mu.Lock()
+	r.gs = append(r.gs, g)
+	r.mu.Unlock()
 	return g
 }
 
@@ -94,8 +111,8 @@ func TestTIM1NetworkAndCarrierAgree(t *testing.T) {
 	if err != nil || !now.Equal(r.wall) {
 		t.Fatalf("Now = %v, %v", now, err)
 	}
-	if len(r.texts) != 0 {
-		t.Fatalf("texts = %q", r.texts)
+	if len(r.sent()) != 0 {
+		t.Fatalf("texts = %q", r.sent())
 	}
 }
 
@@ -111,8 +128,8 @@ func TestTIM1LargeDisagreementRestricts(t *testing.T) {
 		if _, err := g.Now(bg); !errors.Is(err, ErrRestricted) {
 			t.Fatalf("skew %v: Now err = %v, want ErrRestricted", skew, err)
 		}
-		if len(r.texts) != 1 {
-			t.Fatalf("skew %v: texts = %q, want one", skew, r.texts)
+		if len(r.sent()) != 1 {
+			t.Fatalf("skew %v: texts = %q, want one", skew, r.sent())
 		}
 	}
 }
@@ -175,13 +192,13 @@ func TestTIM1RecoveryLiftsRestrictionAndTellsOwner(t *testing.T) {
 	if _, err := g.Now(bg); err != nil {
 		t.Fatal(err)
 	}
-	if len(r.texts) != 1 {
-		t.Fatalf("all-clear sent early: %q", r.texts)
+	if len(r.sent()) != 1 {
+		t.Fatalf("all-clear sent early: %q", r.sent())
 	}
 	r.advance(AgreeAfter)
 	g.Check(bg)
-	if len(r.texts) != 2 || r.texts[1] != AgreeText {
-		t.Fatalf("texts = %q", r.texts)
+	if len(r.sent()) != 2 || r.sent()[1] != AgreeText {
+		t.Fatalf("texts = %q", r.sent())
 	}
 }
 
@@ -197,19 +214,19 @@ func TestTIM1OwnerTextsAreBoundedUnderFlapping(t *testing.T) {
 	}
 	// Agreement never lasted AgreeAfter: one text, and the owner's last
 	// word is still the disagreement, never a stale all-clear.
-	if len(r.texts) != 1 {
-		t.Fatalf("texts = %d %q, want 1", len(r.texts), r.texts)
+	if len(r.sent()) != 1 {
+		t.Fatalf("texts = %d %q, want 1", len(r.sent()), r.sent())
 	}
 	r.advance(AgreeAfter)
 	g.Check(bg)
-	if len(r.texts) != 2 || r.texts[1] != AgreeText {
-		t.Fatalf("after steady agreement: texts = %q", r.texts)
+	if len(r.sent()) != 2 || r.sent()[1] != AgreeText {
+		t.Fatalf("after steady agreement: texts = %q", r.sent())
 	}
 	// A new disagreement after the all-clear is told again.
 	r.step(time.Hour)
 	g.Check(bg)
-	if len(r.texts) != 3 {
-		t.Fatalf("new disagreement: texts = %q", r.texts)
+	if len(r.sent()) != 3 {
+		t.Fatalf("new disagreement: texts = %q", r.sent())
 	}
 }
 
@@ -227,13 +244,13 @@ func TestTIM1FlapResetsAllClearWait(t *testing.T) {
 	g.Check(bg) // agree, wait restarts
 	r.advance(AgreeAfter - time.Minute)
 	g.Check(bg)
-	if len(r.texts) != 1 {
-		t.Fatalf("texts = %q, want only the disagreement", r.texts)
+	if len(r.sent()) != 1 {
+		t.Fatalf("texts = %q, want only the disagreement", r.sent())
 	}
 	r.advance(time.Minute)
 	g.Check(bg)
-	if len(r.texts) != 2 || r.texts[1] != AgreeText {
-		t.Fatalf("texts = %q", r.texts)
+	if len(r.sent()) != 2 || r.sent()[1] != AgreeText {
+		t.Fatalf("texts = %q", r.sent())
 	}
 }
 
@@ -315,7 +332,7 @@ func TestTIM1OwnerTextIsPlain(t *testing.T) {
 	r.carrier = r.carrier.Add(3*time.Hour + 4*time.Minute)
 	g := r.guard(t, nil)
 	g.Check(bg)
-	txt := r.texts[0]
+	txt := r.sent()[0]
 	// Two GSM-7 segments at most.
 	if !strings.Contains(txt, "about 3 hours") || !strings.Contains(txt, "Codes and STOP work as usual.") || len(txt) > 306 {
 		t.Fatalf("text = %q (%d chars)", txt, len(txt))
@@ -379,8 +396,8 @@ func TestTIM1LosingTheCarrierDoesNotLiftRestriction(t *testing.T) {
 	if _, err := g.Now(bg); !errors.Is(err, ErrRestricted) {
 		t.Fatalf("err = %v", err)
 	}
-	if len(r.texts) != 1 {
-		t.Fatalf("texts = %q", r.texts)
+	if len(r.sent()) != 1 {
+		t.Fatalf("texts = %q", r.sent())
 	}
 }
 
@@ -531,11 +548,15 @@ func TestTIM1OnChange(t *testing.T) {
 	var seen []State
 	g := r.guard(t, func(c *Config) { c.OnChange = func(s Status) { seen = append(seen, s.State) } })
 	g.Check(bg)
+	g.Flush() // each change is delivered unless a later one supersedes it
 	g.Check(bg)
+	g.Flush() // each change is delivered unless a later one supersedes it
 	r.step(time.Hour)
 	g.Check(bg)
+	g.Flush() // each change is delivered unless a later one supersedes it
 	r.step(-time.Hour)
 	g.Check(bg)
+	g.Flush() // each change is delivered unless a later one supersedes it
 	want := []State{Agreed, Disagree, Agreed}
 	if len(seen) != len(want) {
 		t.Fatalf("seen = %v", seen)

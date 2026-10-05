@@ -60,6 +60,7 @@ func TestTIM1ModemIsTheGuardsCarrier(t *testing.T) {
 		if _, err := g.Now(context.Background()); !errors.Is(err, clock.ErrRestricted) {
 			t.Fatalf("%s: err = %v", v.prof.Name, err)
 		}
+		g.Flush()
 		if len(texts) != 1 {
 			t.Fatalf("%s: texts = %q", v.prof.Name, texts)
 		}

@@ -45,8 +45,8 @@ func TestTIM1StepWithNoCarrierIsHeld(t *testing.T) {
 	if latest, _ := g.Latest(bg); !latest.Equal(t0.Add(time.Minute)) {
 		t.Fatalf("Latest = %v", latest)
 	}
-	if len(r.texts) != 1 || !strings.Contains(r.texts[0], "jumped by about 1 day") {
-		t.Fatalf("texts = %q", r.texts)
+	if len(r.sent()) != 1 || !strings.Contains(r.sent()[0], "jumped by about 1 day") {
+		t.Fatalf("texts = %q", r.sent())
 	}
 	if !strings.Contains(s.Line(time.UTC), "held since") {
 		t.Fatalf("line = %q", s.Line(time.UTC))
@@ -56,8 +56,8 @@ func TestTIM1StepWithNoCarrierIsHeld(t *testing.T) {
 	if now, _ := g.Now(bg); !now.Equal(t0.Add(61 * time.Minute)) {
 		t.Fatalf("Now = %v", now)
 	}
-	if len(r.texts) != 1 {
-		t.Fatalf("texts = %q", r.texts)
+	if len(r.sent()) != 1 {
+		t.Fatalf("texts = %q", r.sent())
 	}
 }
 
@@ -124,8 +124,8 @@ func TestTIM1AgreeingCarrierReanchors(t *testing.T) {
 	}
 	r.advance(AgreeAfter)
 	g.Check(bg)
-	if len(r.texts) != 2 || r.texts[1] != AgreeText {
-		t.Fatalf("texts = %q", r.texts)
+	if len(r.sent()) != 2 || r.sent()[1] != AgreeText {
+		t.Fatalf("texts = %q", r.sent())
 	}
 }
 
@@ -143,8 +143,8 @@ func TestTIM1HeldThenCarrierDisagreesEscalates(t *testing.T) {
 	if _, err := g.Now(bg); !errors.Is(err, ErrRestricted) {
 		t.Fatalf("err = %v", err)
 	}
-	if len(r.texts) != 2 || !strings.Contains(r.texts[1], "playing safe") {
-		t.Fatalf("texts = %q", r.texts)
+	if len(r.sent()) != 2 || !strings.Contains(r.sent()[1], "playing safe") {
+		t.Fatalf("texts = %q", r.sent())
 	}
 }
 
@@ -163,23 +163,26 @@ func TestTIM1OwnerTextsAreCappedAgainstAFakeCell(t *testing.T) {
 			case AgreeLastText:
 				kind = "last-clear"
 			}
+			r.mu.Lock()
 			log = append(log, fmt.Sprintf("%s@%v", kind, r.mono))
+			r.mu.Unlock()
 		}
 	})
-	g.Check(bg)
+	chk := func() { g.Check(bg); g.Flush() } // label each text with its check's time
+	chk()
 	for elapsed := time.Duration(0); elapsed < 25*time.Hour; elapsed += 3 * time.Hour {
 		r.mu.Lock()
 		r.carrier = r.wall.Add(3 * time.Hour)
 		r.mu.Unlock()
-		g.Check(bg)
+		chk()
 		r.advance(105 * time.Minute)
-		g.Check(bg)
+		chk()
 		r.mu.Lock()
 		r.carrier = r.wall
 		r.mu.Unlock()
-		g.Check(bg)
+		chk()
 		r.advance(75 * time.Minute)
-		g.Check(bg)
+		chk()
 	}
 	want := []string{"alert@0s", "clear@3h0m0s", "alert@3h0m0s", "last-clear@6h0m0s", "alert@24h0m0s", "clear@27h0m0s"}
 	if fmt.Sprint(log) != fmt.Sprint(want) {
@@ -204,8 +207,8 @@ func TestTIM1RestrictionSurvivesRestart(t *testing.T) {
 	if _, err := g.Now(bg); !errors.Is(err, ErrRestricted) {
 		t.Fatalf("after restart: %v", err)
 	}
-	if len(r.texts) != 1 {
-		t.Fatalf("texts = %q", r.texts)
+	if len(r.sent()) != 1 {
+		t.Fatalf("texts = %q", r.sent())
 	}
 	// Only agreeing carrier time lifts it.
 	r.mu.Lock()
@@ -366,22 +369,22 @@ func TestTIM1AlertCapSurvivesRestart(t *testing.T) {
 	g = r.guard(t, mod)
 	cycle() // the cap is used up: no alert, so no all-clear either
 	alerts := 0
-	for _, x := range r.texts {
+	for _, x := range r.sent() {
 		if x != AgreeText && x != AgreeLastText {
 			alerts++
 		}
 	}
-	if alerts != MaxAlertsPerDay || r.texts[len(r.texts)-1] != AgreeLastText {
-		t.Fatalf("texts = %q", r.texts)
+	if alerts != MaxAlertsPerDay || r.sent()[len(r.sent())-1] != AgreeLastText {
+		t.Fatalf("texts = %q", r.sent())
 	}
 	// After a reboot, the earlier boot's alerts still count by their age.
 	mod2 := func(c *Config) { c.StatePath = path; c.BootID = func() string { return "boot-b" } }
 	g = r.guard(t, mod2)
-	n := len(r.texts)
+	n := len(r.sent())
 	r.step(time.Hour)
 	g.Check(bg)
-	if len(r.texts) != n {
-		t.Fatalf("alert after reboot within the day: %q", r.texts[n:])
+	if len(r.sent()) != n {
+		t.Fatalf("alert after reboot within the day: %q", r.sent()[n:])
 	}
 }
 
@@ -452,7 +455,7 @@ func TestTIM1CrossBootAlertAges(t *testing.T) {
 	}
 	alarm()
 	alarm() // the cap is used
-	n := len(r.texts)
+	n := len(r.sent())
 	// Reboot: the boot clock starts again, and the box clock is set two
 	// days ahead. Neither frees the cap.
 	boot = "boot-b"
@@ -464,14 +467,14 @@ func TestTIM1CrossBootAlertAges(t *testing.T) {
 	g = r.guard(t, mod)
 	g.Check(bg)
 	alarm()
-	if len(r.texts) != n {
-		t.Fatalf("alert after reboot: %q", r.texts[n:])
+	if len(r.sent()) != n {
+		t.Fatalf("alert after reboot: %q", r.sent()[n:])
 	}
 	// After a day of uptime the earlier boot's alerts have aged out.
 	r.advance(24 * time.Hour)
 	g.Check(bg)
 	alarm()
-	if len(r.texts) == n {
+	if len(r.sent()) == n {
 		t.Fatal("cap never freed after a day of uptime")
 	}
 }
@@ -517,6 +520,7 @@ func TestTIM1TextsAreFIFOAndOnChangeSupersedes(t *testing.T) {
 	g.Check(bg)
 	close(block)
 	<-done
+	g.Flush()
 	mu.Lock()
 	defer mu.Unlock()
 	if len(got) != 1 || !strings.Contains(got[0], "playing safe") {
@@ -547,11 +551,11 @@ func TestTIM1HoldEscalatesEvenAtTheCap(t *testing.T) {
 		r.advance(AgreeAfter)
 		g.Check(bg)
 	}
-	n := len(r.texts)
+	n := len(r.sent())
 	r.step(time.Hour)
 	g.Check(bg) // a third hold: capped, no text
-	if len(r.texts) != n {
-		t.Fatalf("capped hold texted: %q", r.texts[n:])
+	if len(r.sent()) != n {
+		t.Fatalf("capped hold texted: %q", r.sent()[n:])
 	}
 	// A hold already texted escalates even with the cap full.
 	r2 := noCarrier()
@@ -567,8 +571,8 @@ func TestTIM1HoldEscalatesEvenAtTheCap(t *testing.T) {
 	r2.carrier = t0
 	r2.mu.Unlock()
 	g2.Check(bg)
-	if len(r2.texts) != 2 || !strings.Contains(r2.texts[1], "playing safe") {
-		t.Fatalf("escalation at cap: %q", r2.texts)
+	if len(r2.sent()) != 2 || !strings.Contains(r2.sent()[1], "playing safe") {
+		t.Fatalf("escalation at cap: %q", r2.sent())
 	}
 }
 
@@ -582,8 +586,8 @@ func TestTIM1HoldEndsWithoutCarrierGetsAllClear(t *testing.T) {
 	g.Check(bg)
 	r.advance(AgreeAfter)
 	g.Check(bg)
-	if len(r.texts) != 2 || r.texts[1] != HoldEndText {
-		t.Fatalf("texts = %q", r.texts)
+	if len(r.sent()) != 2 || r.sent()[1] != HoldEndText {
+		t.Fatalf("texts = %q", r.sent())
 	}
 }
 
@@ -599,8 +603,8 @@ func TestTIM1StateLostHasFixedText(t *testing.T) {
 		c.Logf = func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) }
 	})
 	g.Check(bg)
-	if len(r.texts) != 1 || r.texts[0] != StateLostText {
-		t.Fatalf("texts = %q", r.texts)
+	if len(r.sent()) != 1 || r.sent()[0] != StateLostText {
+		t.Fatalf("texts = %q", r.sent())
 	}
 	if line := g.Status().Line(time.UTC); strings.Contains(line, "about 0") {
 		t.Fatalf("line = %q", line)
@@ -657,5 +661,140 @@ func TestTIM1DriftFromAnchorChecksWithRunLive(t *testing.T) {
 	now, err := g.Now(bg)
 	if err != nil || !now.Equal(t0) {
 		t.Fatalf("Now = %v, %v; want held %v", now, err, t0)
+	}
+}
+
+func TestTIM1HonestRebootsAgeAlertsOut(t *testing.T) {
+	// Honest clocks, a reboot every 10 hours: alerts still age out a day
+	// after they were sent (L3 F1, round 3).
+	path := filepath.Join(t.TempDir(), "clock.json")
+	r := newRig()
+	boot := 0
+	mod := func(c *Config) {
+		c.StatePath = path
+		c.BootID = func() string { return fmt.Sprint("boot-", boot) }
+	}
+	g := r.guard(t, mod)
+	g.Check(bg)
+	alarm := func() {
+		r.step(time.Hour)
+		g.Check(bg)
+		r.step(-time.Hour)
+		g.Check(bg)
+		r.advance(AgreeAfter)
+		g.Check(bg)
+	}
+	alarm()
+	alarm() // cap used at about 2 h
+	n := len(r.sent())
+	reboot := func(down time.Duration) {
+		g.Flush()
+		boot++
+		r.mu.Lock()
+		r.wall = r.wall.Add(down)
+		r.carrier = r.wall
+		r.mono = 0
+		r.mu.Unlock()
+		g = r.guard(t, mod)
+		g.Check(bg)
+	}
+	for i := 0; i < 2; i++ { // 2 h + 2×(8 h up + 2 min down) ≈ 18 h
+		r.advance(8 * time.Hour)
+		g.Check(bg)
+		reboot(2 * time.Minute)
+	}
+	alarm()
+	if len(r.sent()) != n {
+		t.Fatalf("cap freed early: %q", r.sent()[n:])
+	}
+	r.advance(8 * time.Hour) // a day since the alerts
+	g.Check(bg)
+	alarm()
+	if len(r.sent()) == n {
+		t.Fatal("honest reboots kept the cap full past a day")
+	}
+}
+
+func TestTIM1QueuedTextsAreNeverSuperseded(t *testing.T) {
+	// A hold text stuck in Notify, then an escalation, then agreement: both
+	// alerts reach the owner (L3 F7, round 3).
+	r := noCarrier()
+	block := make(chan struct{})
+	var mu sync.Mutex
+	var got []string
+	g := r.guard(t, func(c *Config) {
+		c.Notify = func(x string) {
+			mu.Lock()
+			first := len(got) == 0
+			got = append(got, x)
+			mu.Unlock()
+			if first {
+				<-block
+			}
+		}
+	})
+	g.Check(bg)
+	t0 := r.wall
+	r.step(time.Hour)
+	g.Check(bg) // hold text, stuck
+	r.mu.Lock()
+	r.carrier = t0
+	r.mu.Unlock()
+	g.Check(bg) // escalation text, queued
+	r.step(-time.Hour)
+	g.Check(bg) // agreed: a state change after both
+	close(block)
+	g.Flush()
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 2 || !strings.Contains(got[0], "jumped") || !strings.Contains(got[1], "playing safe") {
+		t.Fatalf("texts = %q", got)
+	}
+}
+
+func TestTIM1HungNotifierHoldsNoCaller(t *testing.T) {
+	r := newRig()
+	r.carrier = r.carrier.Add(time.Hour)
+	hung := make(chan struct{})
+	defer close(hung)
+	g := r.guard(t, func(c *Config) { c.Notify = func(string) { <-hung } })
+	done := make(chan Status)
+	go func() { done <- g.Check(bg) }()
+	select {
+	case s := <-done:
+		if !s.Restricted() {
+			t.Fatalf("status = %+v", s)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the checking caller waited on a hung notifier")
+	}
+}
+
+func TestTIM1NotifierPanicIsContained(t *testing.T) {
+	r := newRig()
+	var logged []string
+	var lmu sync.Mutex
+	calls := 0
+	g := r.guard(t, func(c *Config) {
+		c.Notify = func(string) {
+			calls++
+			if calls == 1 {
+				panic("sms down")
+			}
+		}
+		c.Logf = func(f string, a ...any) { lmu.Lock(); logged = append(logged, fmt.Sprintf(f, a...)); lmu.Unlock() }
+	})
+	g.Check(bg)
+	r.step(time.Hour)
+	g.Check(bg) // panics in Notify
+	r.step(-time.Hour)
+	g.Check(bg)
+	r.advance(AgreeAfter)
+	g.Check(bg) // the all-clear still goes
+	g.Flush()
+	lmu.Lock()
+	defer lmu.Unlock()
+	if calls != 2 || len(logged) != 1 {
+		t.Fatalf("calls %d, logged %q", calls, logged)
 	}
 }

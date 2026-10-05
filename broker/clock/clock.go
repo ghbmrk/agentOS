@@ -290,6 +290,7 @@ type Guard struct {
 	lost     bool     // the state file was unreadable at start
 	queue    []notice // notices in check order, delivered after publish
 	draining bool
+	drains   sync.WaitGroup // drain goroutines running
 
 	// The last carrier reading and Elapsed when it was taken (Latest).
 	carrier     time.Time
@@ -381,11 +382,19 @@ func (g *Guard) Check(ctx context.Context) Status {
 	g.flight = nil
 	g.fmu.Unlock()
 	close(f.done)
-	// Tell the outside only after the result is published, so a slow text
-	// or a callback that checks again never holds joined callers (L3 D3).
-	g.drain()
+	// Tell the outside only after the result is published, and from a
+	// goroutine of its own, so a slow or hung text holds no caller, Run
+	// included, and a callback may check again (L3 D3, F2 on #68).
+	g.drains.Add(1)
+	go func() {
+		defer g.drains.Done()
+		g.drain()
+	}()
 	return f.s
 }
+
+// Flush waits until every notice queued so far has been delivered.
+func (g *Guard) Flush() { g.drains.Wait() }
 
 // drain delivers queued notices in check order, one caller at a time. A
 // caller that finds another draining leaves its notices to it, so Notify
@@ -397,6 +406,9 @@ func (g *Guard) drain() {
 		g.mu.Unlock()
 		return
 	}
+	// Notifier panics are recovered in call, so draining is always reset,
+	// and it is reset under the same lock as the last empty-queue check, so
+	// no notice queued meanwhile is stranded.
 	g.draining = true
 	for len(g.queue) > 0 {
 		n := g.queue[0]
@@ -407,15 +419,25 @@ func (g *Guard) drain() {
 		}
 		g.mu.Unlock()
 		if n.text != "" && g.cfg.Notify != nil {
-			g.cfg.Notify(n.text)
+			g.call(func() { g.cfg.Notify(n.text) })
 		}
 		if n.changed && !superseded && g.cfg.OnChange != nil {
-			g.cfg.OnChange(n.s)
+			g.call(func() { g.cfg.OnChange(n.s) })
 		}
 		g.mu.Lock()
 	}
 	g.draining = false
 	g.mu.Unlock()
+}
+
+// call runs a notifier, logging a panic instead of losing the queue.
+func (g *Guard) call(f func()) {
+	defer func() {
+		if p := recover(); p != nil {
+			g.cfg.Logf("clock: notifier panicked: %v", p)
+		}
+	}()
+	f()
 }
 
 // allowedLocked is how far the wall clock may move from the anchor, against
@@ -683,8 +705,12 @@ type saved struct {
 	Anchored   bool          `json:"anchored"`
 	AnchorWall time.Time     `json:"anchor_wall"`
 	AnchorMono time.Duration `json:"anchor_mono"`
-	// Alerts sent in the last day, counted toward MaxAlertsPerDay.
-	Alerts []stamp `json:"alerts"`
+	// Alerts sent in the last day, counted toward MaxAlertsPerDay, and the
+	// boot clock and latest credible time when the file was written, so a
+	// later boot trusts the ages measured within this one.
+	Alerts    []stamp       `json:"alerts"`
+	SavedMono time.Duration `json:"saved_mono"`
+	SavedWall time.Time     `json:"saved_wall"`
 }
 
 func (g *Guard) load() {
@@ -696,7 +722,10 @@ func (g *Guard) load() {
 		return
 	}
 	var v saved
-	if err != nil || json.Unmarshal(b, &v) != nil {
+	if err == nil {
+		err = json.Unmarshal(b, &v)
+	}
+	if err != nil {
 		// Fail closed: an unreadable record may have held a restriction.
 		g.cfg.Logf("clock: state file unreadable, restricting until carrier time agrees: %v", err)
 		g.status, g.lost = Status{State: Disagree}, true
@@ -711,14 +740,15 @@ func (g *Guard) load() {
 		g.anchored, g.anchorWall, g.anchorMono = true, v.AnchorWall, v.AnchorMono
 	}
 	// Alerts from an earlier boot are placed on this boot's clock by their
-	// age, which the box clock gives at both ends and so cannot be trusted:
-	// it is clamped to between zero and this boot's uptime, so no clock
-	// setting frees the cap before a day of uptime (L3 F1 on #68).
+	// age: the part within that boot comes from its boot clock and is
+	// trusted; only the downtime since, which the box clock gives at both
+	// ends, is clamped to between zero and this boot's uptime, so no clock
+	// setting frees the cap early (L3 F1 on #68).
 	mono, wall := g.cfg.Elapsed(), g.cfg.Now()
+	down := min(max(wall.Sub(v.SavedWall), 0), mono)
 	for _, a := range v.Alerts {
 		if !sameBoot {
-			age := min(max(wall.Sub(a.Wall), 0), mono)
-			a.Mono = mono - age
+			a.Mono = mono - (max(v.SavedMono-a.Mono, 0) + down)
 		}
 		g.alerts = append(g.alerts, a)
 	}
@@ -733,8 +763,9 @@ func (g *Guard) saveLocked() {
 	v := saved{
 		Restricted: g.status.Restricted(), Told: g.told,
 		Boot: g.cfg.BootID(), Anchored: g.anchored, AnchorWall: g.anchorWall, AnchorMono: g.anchorMono,
-		Alerts: g.alerts,
+		Alerts: g.alerts, SavedMono: g.cfg.Elapsed(),
 	}
+	v.SavedWall = g.latestLocked(g.cfg.Now(), v.SavedMono)
 	if v.Restricted {
 		v.Skew, v.Since = g.status.Skew, g.status.Since
 	}
