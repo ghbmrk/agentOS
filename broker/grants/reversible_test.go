@@ -239,6 +239,9 @@ func TestReleaseChecksTheStagedCopy(t *testing.T) {
 	r.exec.fail = map[string]bool{"agent/s2": true}
 	r.exec.mu.Unlock()
 	r.exec.evidence = map[string]string{"agent/s2": reversible.EvidenceGone}
+	r.own.mu.Lock()
+	before := len(r.own.notes)
+	r.own.mu.Unlock()
 	release()
 	if st := r.state("agent/s2"); st.State != journal.NotApplied {
 		t.Fatalf("gone: %s", st.State)
@@ -246,6 +249,11 @@ func TestReleaseChecksTheStagedCopy(t *testing.T) {
 	if _, err := r.g.Get(reversible.InverseID("agent/s2", 1)); err == nil {
 		t.Fatal("unstaged a deleted draft")
 	}
+	r.own.mu.Lock()
+	if len(r.own.notes) != before { // no line says who deleted it (security R2)
+		t.Fatalf("a deleted draft was reported: %q", r.own.notes[before:])
+	}
+	r.own.mu.Unlock()
 
 	// Any other not-applied result unstages (C2).
 	held("agent/s3")
@@ -446,6 +454,22 @@ func TestHoldsThatEndWithoutTheOwnerAreAskedAgain(t *testing.T) {
 	if _, err := r.g.Get(reversible.InverseID("agent/s1", 2)); err == nil {
 		t.Fatal("unstaged the copy that was sent")
 	}
+
+	// A hold its intent's request did not make closes the intent, and the
+	// owner is told it did not run.
+	r.effect("agent/s2", "invoice.send", map[string]any{"record": "inv-1042"}, "sam@example.com")
+	r.g.Flush()
+	req, items = r.own.last(t)
+	d := r.own.hold(req, 1, items[0])
+	d.Request = "R-other"
+	r.g.Decide(d)
+	r.g.Wait()
+	if st := r.state("agent/s2"); st.State == journal.Pending || r.exec.runs("agent/s2") != 0 {
+		t.Fatalf("mismatched hold: %s", st.State)
+	}
+	if n := r.own.notes; n[len(n)-1] != d.Hold+" did not run: its approval did not match its request. Ask your agent again if still needed." {
+		t.Fatalf("notes %q", n)
+	}
 }
 
 // TestStopBetweenReleaseAndDispatchStillSettlesTheCopy (L3 on #76): a
@@ -480,6 +504,20 @@ func TestStopBetweenReleaseAndDispatchStillSettlesTheCopy(t *testing.T) {
 	if n := r.own.notes; n[len(n)-1] != h[0]+" not sent: its draft changed after you approved it. Send it from your mail app if you still want it." {
 		t.Fatalf("notes %q", n)
 	}
+	// The release used up the approval: a retry is not sent on the old YES.
+	r.exec.fail, r.exec.evidence = map[string]bool{}, nil
+	retry := func(id string) {
+		t.Helper()
+		runs := r.exec.runs(id)
+		if st, err := r.g.Dispatch(context.Background(), id); err == nil || st.State == journal.Succeeded {
+			t.Fatalf("retry of %s after release: %s, %v", id, st.State, err)
+		}
+		r.g.Wait()
+		if r.exec.runs(id) != runs {
+			t.Fatalf("retry of %s ran", id)
+		}
+	}
+	retry("agent/s1")
 
 	// And a plain failure there unstages, found by Tick whoever ran it.
 	r.effect("agent/s2", "invoice.send", map[string]any{"record": "inv-1042"}, "sam@example.com")
@@ -497,4 +535,6 @@ func TestStopBetweenReleaseAndDispatchStillSettlesTheCopy(t *testing.T) {
 	if st := r.state(reversible.InverseID("agent/s2", 1)); st.State != journal.Succeeded {
 		t.Fatalf("not unstaged after a STOP-held failure: %s", st.State)
 	}
+	r.exec.fail = map[string]bool{}
+	retry("agent/s2")
 }

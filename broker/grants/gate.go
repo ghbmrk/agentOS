@@ -846,8 +846,21 @@ func (g *Gate) Submit(in journal.Intent) (journal.Status, error) {
 
 func (g *Gate) Dispatch(ctx context.Context, id string) (journal.Status, error) {
 	st, err := g.eng.Dispatch(ctx, id)
+	if err == nil && st.State != journal.Pending && st.State != journal.Authorized {
+		g.spend(id)
+	}
 	g.endHeld(id)
 	return st, err
+}
+
+// spend drops the owner's approval of an intent once its dispatch has
+// ended, whatever the result: a retry of an effect that did not apply is
+// asked again, never sent on the old YES (L3, Security on #76).
+func (g *Gate) spend(id string) {
+	g.mu.Lock()
+	delete(g.decided, id)
+	delete(g.confirmed, id)
+	g.mu.Unlock()
 }
 
 // endHeld settles the staged copy of released effects that STOP kept from
@@ -873,6 +886,7 @@ func (g *Gate) endHeld(ids ...string) {
 		if !ok {
 			continue
 		}
+		g.spend(id)
 		g.wg.Add(1)
 		go func() {
 			defer g.wg.Done()

@@ -775,7 +775,10 @@ func (c *Channel) resumeLocked(r reply, now time.Time) (out []string, accepted b
 		}
 	}
 	text := "Resumed."
-	if n > 0 {
+	switch {
+	case n == 1:
+		text = "Resumed. 1 stopped action may now run."
+	case n > 1:
 		text = fmt.Sprintf("Resumed. %d stopped actions may now run.", n)
 	}
 	return []string{text + c.rewindowLocked(now)}, true
