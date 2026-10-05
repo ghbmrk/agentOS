@@ -40,7 +40,13 @@ type SecondLineStatus struct {
 	// WaitingForRegistration: no realm yet, and the window after setup is
 	// still open.
 	WaitingForRegistration bool `json:"waiting_for_registration"`
+	// SetAt is when setup ran, in Unix seconds.
+	SetAt int64 `json:"set_at"`
 }
+
+// SlowRegistration is how long the page waits for the first registration
+// before saying what to check (UX-139-2).
+const SlowRegistration = 2 * time.Minute
 
 // SecondLineStatus implements SecondLine.
 func (u *UnlockClient) SecondLineStatus(ctx context.Context) (SecondLineStatus, error) {
@@ -128,9 +134,12 @@ type secondLineView struct {
 	Realm, RealmExact string
 	Matches           bool
 	// Form holds what the owner typed, never the password.
-	Form    sipsign.Settings
-	Err     string
-	Refresh string
+	Form sipsign.Settings
+	// Removing asks first (UX-139-1); Slow: the first registration has
+	// taken SlowRegistration or longer.
+	Removing, Slow bool
+	Err            string
+	Refresh        string
 }
 
 // secondLine serves the second line's page behind sign-in (CH-7): set up
@@ -170,19 +179,25 @@ func (s *Server) secondLine(w http.ResponseWriter, r *http.Request) {
 		case "confirm":
 			err = s.cfg.SecondLine.ConfirmRealm(ctx, r.PostForm.Get("realm"))
 		case "remove":
+			if r.PostForm.Get("confirm") != "1" {
+				v.Removing = true
+				break
+			}
 			err = s.cfg.SecondLine.RemoveSecondLine(ctx)
 		default:
 			http.Error(w, "Bad request", http.StatusBadRequest)
 			return
 		}
-		if err == nil {
+		if err == nil && !v.Removing {
 			http.Redirect(w, r, "/second-line/", http.StatusSeeOther)
 			return
 		}
-		v.Err = "That didn't go through. Try again."
-		var ve *VaultError
-		if errors.As(err, &ve) && ve.Status < http.StatusInternalServerError && ve.Msg != "" && ve.Msg != lockedMsg {
-			v.Err = ve.Msg // the vault process's fixed owner wording (UX-116-1)
+		if err != nil {
+			v.Err = "That didn't go through. Try again."
+			var ve *VaultError
+			if errors.As(err, &ve) && ve.Status < http.StatusInternalServerError && ve.Msg != "" && ve.Msg != lockedMsg {
+				v.Err = ve.Msg // the vault process's fixed owner wording (UX-116-1)
+			}
 		}
 	}
 	st, err := s.cfg.SecondLine.SecondLineStatus(ctx)
@@ -206,6 +221,10 @@ func (s *Server) secondLine(w http.ResponseWriter, r *http.Request) {
 	}
 	if st.WaitingForRegistration {
 		v.Refresh = "5"
+		v.Slow = !s.cfg.Now().Before(time.Unix(st.SetAt, 0).Add(SlowRegistration))
+	}
+	if v.Removing {
+		v.Refresh = ""
 	}
 	if v.Form == (sipsign.Settings{}) && st.Set {
 		v.Form = st.Settings

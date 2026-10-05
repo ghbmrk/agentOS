@@ -253,7 +253,7 @@ func TestSecondLinePageClientAgainstVaultProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	st, err := u.SecondLineStatus(ctx)
-	if err != nil || !st.Set || st.Settings != sipSettings || !st.WaitingForRegistration || st.RealmRecorded {
+	if err != nil || !st.Set || st.Settings != sipSettings || !st.WaitingForRegistration || st.RealmRecorded || st.SetAt != r.c.now().Unix() {
 		t.Fatalf("status after setup: %+v %v", st, err)
 	}
 	if _, err := (signStore{r.c}).LearnRealm(sipRealm); err != nil {

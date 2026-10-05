@@ -114,7 +114,10 @@ form { margin: .6em 0 1.2em; }
 {{else if .Locked}}<p>The box is locked, so it can't read or change the second line. <a href="/unlock/vault">Unlock the box</a>, then come back here.</p>
 {{else}}
 {{with .Err}}<p class="err">{{.}}</p>{{end}}
-{{if .St.Set}}
+{{if and .Removing .St.Set}}<p>Remove the second line? Texts and calls from {{.St.Settings.Number}} stop, and you'll need the provider's password to add it again.</p>
+<form method="post" action="/second-line/"><input type="hidden" name="step" value="remove"><input type="hidden" name="confirm" value="1"><button class="stop">Remove</button></form>
+<p><a href="/second-line/">Cancel</a></p>
+{{else if .St.Set}}
 {{if .St.RealmConfirmed}}<p class="ok">The second line is ready: {{.St.Settings.Number}} through {{.St.Settings.Domain}}.</p>
 {{else if .St.RealmRecorded}}<p>The box signed in to your provider, which calls itself <b class="mono">{{.Realm}}</b>.
 {{if .Matches}}This matches the domain you entered.{{else}}This differs from the domain you entered ({{.St.Settings.Domain}}). Some providers use another name here; check it on your provider's setup page.{{end}}</p>
@@ -122,6 +125,7 @@ form { margin: .6em 0 1.2em; }
 <form method="post" action="/second-line/"><input type="hidden" name="step" value="confirm"><input type="hidden" name="realm" value="{{.RealmExact}}"><button>It is my provider</button></form>
 <p class="muted">If it is not, remove the second line below and check the server name with your provider.</p>
 {{else if .St.WaitingForRegistration}}<p>Waiting for the box to sign in to your provider. This page reloads by itself.</p>
+{{if .Slow}}<p>Still trying. If this doesn't change in a few minutes, check the server name, port and password with your provider.</p>{{end}}
 {{else}}<p class="err">The box didn't reach your provider within 30 minutes of setup. Check the server name and password with your provider, then save the account again.</p>{{end}}
 <p class="muted">{{.St.Settings.User}} at {{.St.Settings.Server}}, number {{.St.Settings.Number}}.</p>
 <details{{if and (not .St.RealmRecorded) (not .St.WaitingForRegistration)}} open{{end}}><summary>Change the account</summary>{{template "lineform" .Form}}</details>

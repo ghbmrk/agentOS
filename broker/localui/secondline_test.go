@@ -35,6 +35,8 @@ type fakeLine struct {
 	waiting   bool
 	removed   int
 	calls     int
+	setAt     time.Time
+	now       func() time.Time
 	// failSet and failStatus, when set, are what SetSecondLine and
 	// SecondLineStatus return instead.
 	failSet, failStatus error
@@ -50,7 +52,7 @@ func (f *fakeLine) SecondLineStatus(ctx context.Context) (SecondLineStatus, erro
 		return SecondLineStatus{}, nil
 	}
 	return SecondLineStatus{Set: true, Settings: f.settings, RealmRecorded: f.realm != "", Realm: f.realm,
-		RealmConfirmed: f.confirmed, WaitingForRegistration: f.waiting && f.realm == ""}, nil
+		RealmConfirmed: f.confirmed, WaitingForRegistration: f.waiting && f.realm == "", SetAt: f.setAt.Unix()}, nil
 }
 
 func (f *fakeLine) SetSecondLine(ctx context.Context, s sipsign.Settings, password string) error {
@@ -68,6 +70,9 @@ func (f *fakeLine) SetSecondLine(ctx context.Context, s sipsign.Settings, passwo
 		return &VaultError{400, "Use the SIP password your provider generated, 12 to 256 characters. If it is shorter, have the provider generate a new one."}
 	}
 	f.set, f.settings, f.password, f.realm, f.confirmed, f.waiting = true, s, password, "", false, true
+	if f.now != nil {
+		f.setAt = f.now()
+	}
 	return nil
 }
 
@@ -104,7 +109,7 @@ func lineRig(t *testing.T) (*rig, *fakeVault, *fakeLine) {
 	r := newRig(t)
 	fv := newFakeVault(r.card.VaultPassphrase)
 	fv.state = "open"
-	fl := &fakeLine{}
+	fl := &fakeLine{now: r.clock}
 	s, err := New(Config{AP: testAP(), Hooks: r.hooks, SetupSecret: r.card.SetupSecret, Store: &MemStore{},
 		Defaults: "spend cap $20 a day; payments need approval.", Vault: fv, SecondLine: fl, Now: r.clock, Rand: rand.New(rand.NewSource(9))})
 	if err != nil {
@@ -280,7 +285,7 @@ func TestASilentProviderAndRemoval(t *testing.T) {
 	if !strings.Contains(p, `name="password"`) {
 		t.Fatal("no way to set it up again")
 	}
-	if w := r.post("/second-line/", url.Values{"step": {"remove"}}); w.Code != http.StatusSeeOther || fl.removed != 1 || fl.set {
+	if w := r.post("/second-line/", url.Values{"step": {"remove"}, "confirm": {"1"}}); w.Code != http.StatusSeeOther || fl.removed != 1 || fl.set {
 		t.Fatalf("remove: %d %s", w.Code, w.Body.String())
 	}
 	if p := r.get("/second-line/"); !strings.Contains(p, "turn off voicemail") {
@@ -394,5 +399,44 @@ func TestTheSecondLinePageHidesInternalReplies(t *testing.T) {
 	}
 	if w := r.do("GET", "/second-line/x", nil); w.Code != http.StatusNotFound {
 		t.Fatalf("unknown path: %d", w.Code)
+	}
+}
+
+// UX-139-1: removing the second line asks first, in fixed wording; a
+// single post without the confirmation removes nothing.
+func TestRemovingTheSecondLineAsksFirst(t *testing.T) {
+	r, _, fl := lineRig(t)
+	r.signIn()
+	r.post("/second-line/", lineForm("sip.example.net"))
+	w := r.post("/second-line/", url.Values{"step": {"remove"}})
+	b := html.UnescapeString(w.Body.String())
+	if w.Code != http.StatusOK || fl.removed != 0 || !fl.set {
+		t.Fatalf("removed without confirmation: %d, %d removals", w.Code, fl.removed)
+	}
+	for _, want := range []string{"Remove the second line? Texts and calls from +15550104477 stop, and you'll need the provider's password to add it again.",
+		`name="confirm" value="1"`, ">Remove</button>", `href="/second-line/">Cancel</a>`} {
+		if !strings.Contains(b, want) {
+			t.Fatalf("confirmation lacks %q:\n%s", want, b)
+		}
+	}
+	if w := r.post("/second-line/", url.Values{"step": {"remove"}, "confirm": {"1"}}); w.Code != http.StatusSeeOther || fl.removed != 1 {
+		t.Fatalf("confirmed removal: %d", w.Code)
+	}
+}
+
+// UX-139-2: after 2 minutes of waiting for the first registration the
+// page says what to check; the 30-minute line is unchanged.
+func TestASlowRegistrationSaysWhatToCheck(t *testing.T) {
+	r, _, _ := lineRig(t)
+	r.signIn()
+	r.post("/second-line/", lineForm("sip.example.net"))
+	const still = "Still trying. If this doesn't change in a few minutes, check the server name, port and password with your provider."
+	r.advance(119 * time.Second)
+	if p := html.UnescapeString(r.get("/second-line/")); strings.Contains(p, still) {
+		t.Fatal("the slow line before 2 minutes")
+	}
+	r.advance(time.Second)
+	if p := html.UnescapeString(r.get("/second-line/")); !strings.Contains(p, still) || !strings.Contains(p, "Waiting for the box to sign in") {
+		t.Fatalf("no slow line at 2 minutes:\n%s", p)
 	}
 }
