@@ -25,10 +25,13 @@ var controlPath = map[string][]string{
 	"admission": {},
 	"sockets":   {},
 	"cgroup":    {},
-	"daemon":    {"journal", "control", "admission", "sockets"},
+	"owner":     {"control", "journal", "modem"},
+	"modem":     {},
+	"daemon":    {"journal", "control", "admission", "sockets", "owner", "modem"},
 	// The composition root also opens the machine plane (below) and hands
-	// it to admission as a Preempter.
-	"cmd/agentosd": {"daemon", "cgroup", "vm", "vm/gvisor"},
+	// it to admission as a Preempter, and serves the guest plane (below)
+	// on each machine's socket.
+	"cmd/agentosd": {"daemon", "cgroup", "vm", "vm/gvisor", "guest", "meter"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies
@@ -47,6 +50,20 @@ var machinePlane = map[string]struct {
 	"vm":         {[]string{"admission", "cgroup", "vm/overlay"}, forbiddenStd},
 	"vm/overlay": {nil, []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}},
 	"vm/gvisor":  {[]string{"vm", "vm/overlay"}, []string{"net", "net/http", "net/rpc", "net/smtp", "plugin", "unsafe", "C"}},
+}
+
+// The guest plane serves each machine's ARC-6 socket (P1-7). STOP,
+// STATUS, and admission never import it (the control path's allowed lists
+// above). It holds no credential: model egress and the vault are other
+// packages it may not import, and the composition root may not link them
+// (TestDaemonLinksNoCredentialCustody).
+var guestPlane = map[string]struct {
+	allowed []string
+	forbid  []string
+}{
+	"guest": {[]string{"journal", "meter", "route"}, []string{"os/exec", "plugin", "unsafe", "C"}},
+	"meter": {nil, []string{"net", "os/exec", "plugin", "unsafe", "C"}},
+	"route": {nil, []string{"net", "os/exec", "plugin", "unsafe", "C"}},
 }
 
 var forbiddenStd = []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "syscall", "unsafe", "C"}
@@ -70,6 +87,24 @@ func TestARC2ControlPathCannotReachInference(t *testing.T) {
 	}
 	for pkg, rule := range machinePlane {
 		checkImports(t, pkg, rule.allowed, rule.forbid, nil)
+	}
+	for pkg, rule := range guestPlane {
+		checkImports(t, pkg, rule.allowed, rule.forbid, nil)
+	}
+}
+
+// TestDaemonLinksNoCredentialCustody: the daemon process, which serves the
+// guest sockets, links neither the vault nor the credentialed egress proxy
+// (vault V2, ARC-1). Model egress runs where the vault is unlocked (P2-4).
+func TestDaemonLinksNoCredentialCustody(t *testing.T) {
+	out, err := exec.Command("go", "list", "-C", "..", "-deps", "./"+compositionRoot).Output()
+	if err != nil {
+		t.Fatalf("go list: %v", err)
+	}
+	for _, dep := range strings.Fields(string(out)) {
+		if dep == module+"vault" || dep == module+"egress" {
+			t.Errorf("agentosd links %s", dep)
+		}
 	}
 }
 

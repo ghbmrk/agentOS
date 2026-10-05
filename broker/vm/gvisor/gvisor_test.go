@@ -3,13 +3,18 @@ package gvisor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -19,7 +24,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/vm"
 )
 
-// REQ: REV-1, REV-4, ARC-4, RES-1, RES-2
+// REQ: REV-1, REV-4, ARC-4, RES-1, RES-2, ARC-6
 
 // TestOnlyRunscIsExecuted: in the whole machine plane, the one process that
 // may be started is the configured runsc binary, from one call site (ARC-2
@@ -85,7 +90,9 @@ type late struct{ m **vm.Manager }
 
 func (l late) Preempt(id string) error { return (*l.m).Preempt(id) }
 
-func newRig(t *testing.T, capacityMB int64) *rig {
+func newRig(t *testing.T, capacityMB int64) *rig { return newRigWith(t, capacityMB, nil) }
+
+func newRigWith(t *testing.T, capacityMB int64, svc vm.Services) *rig {
 	t.Helper()
 	bin := os.Getenv("AGENTOS_RUNSC")
 	if bin == "" || os.Geteuid() != 0 {
@@ -114,6 +121,7 @@ func newRig(t *testing.T, capacityMB int64) *rig {
 		Images:   map[string]string{"base": img},
 		Runtime:  r.rt,
 		Admit:    r.adm,
+		Services: svc,
 	}
 	if p := os.Getenv("AGENTOS_CGROUP_PARENT"); p != "" {
 		g, err := cgroup.Open(p)
@@ -315,5 +323,142 @@ func TestIntegrationBudgetIsEnforced(t *testing.T) {
 	t.Logf("memory.current with guest running: %s", strings.TrimSpace(string(b)))
 	if _, err := g.Pressure(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// services is a test vm.Services: one directory and one HTTP socket per
+// machine, answering with the machine the socket belongs to.
+type services struct {
+	t    *testing.T
+	root string
+	mu   sync.Mutex
+	srv  map[string]*http.Server
+}
+
+func (s *services) Open(id string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	dir := filepath.Join(s.root, id)
+	if s.srv[id] != nil {
+		return dir, nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	l, err := net.Listen("unix", filepath.Join(dir, "broker.sock"))
+	if err != nil {
+		return "", err
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, "machine %s", id)
+	})}
+	go srv.Serve(l)
+	s.srv[id] = srv
+	return dir, nil
+}
+
+func (s *services) Close(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if srv := s.srv[id]; srv != nil {
+		srv.Close()
+		os.RemoveAll(filepath.Join(s.root, id))
+		delete(s.srv, id)
+	}
+}
+
+const svcSock = vm.ServicesMount + "/broker.sock"
+
+// TestIntegrationGuestReachesOnlyItsOwnServiceSocket: each machine, forks
+// included, reaches exactly its own broker socket, read-only, and nothing
+// else on the host (ARC-6, V15). Checkpoints and forks still work with the
+// mount in place.
+func TestIntegrationGuestReachesOnlyItsOwnServiceSocket(t *testing.T) {
+	svc := &services{t: t, root: t.TempDir(), srv: map[string]*http.Server{}}
+	r := newRigWith(t, 4096, svc)
+	ctx := context.Background()
+	r.create("m1", admission.Accepted)
+	r.create("m2", admission.Accepted)
+	for _, id := range []string{"m1", "m2"} {
+		if got := r.ask(id, "svc", svcSock, "/"); got != "200 OK machine "+id {
+			t.Fatalf("%s reached %q", id, got)
+		}
+	}
+	if got := r.ask("m1", "stat", filepath.Join(svc.root, "m2", "broker.sock")); got != "absent" {
+		t.Fatal("m1 can see m2's socket path")
+	}
+	if got := r.ask("m1", "write", vm.ServicesMount+"/x", "y"); !strings.HasPrefix(got, "ERR") {
+		t.Fatal("services directory is writable from the guest")
+	}
+	if _, err := r.m.Checkpoint(ctx, "m1"); err != nil {
+		t.Fatalf("checkpoint with the services mount: %v", err)
+	}
+	if _, err := r.m.Fork(ctx, "m1", []string{"f1"}); err != nil {
+		t.Fatalf("fork with the services mount: %v", err)
+	}
+	if got := r.ask("f1", "svc", svcSock, "/"); got != "200 OK machine f1" {
+		t.Fatalf("fork reached %q, want its own socket", got)
+	}
+	if got := r.ask("m1", "svc", svcSock, "/"); got != "200 OK machine m1" {
+		t.Fatalf("m1 after fork reached %q", got)
+	}
+	if err := r.m.Destroy(ctx, "f1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(svc.root, "f1")); !os.IsNotExist(err) {
+		t.Fatal("destroy did not close the fork's services")
+	}
+}
+
+// TestIntegrationForkDoesNotInheritServiceIdentity: a connection the guest
+// held open when it was checkpointed never speaks for the source machine
+// from inside a fork, so identity stays bound to the listener (ARC-6).
+// Checkpoint and fork-restore succeed with the connection open; the guest
+// must reconnect after either (observed: the held connection reads EOF).
+func TestIntegrationForkDoesNotInheritServiceIdentity(t *testing.T) {
+	svc := &services{t: t, root: t.TempDir(), srv: map[string]*http.Server{}}
+	r := newRigWith(t, 4096, svc)
+	ctx := context.Background()
+	r.create("m1", admission.Accepted)
+	if got := r.ask("m1", "hold", svcSock); got != "ok" {
+		t.Fatal(got)
+	}
+	if got := r.ask("m1", "heldget", "/"); got != "machine m1" {
+		t.Fatalf("held connection before checkpoint: %q", got)
+	}
+	if _, err := r.m.Fork(ctx, "m1", []string{"f1"}); err != nil {
+		t.Fatalf("fork with an open service connection: %v", err)
+	}
+	if got := r.ask("f1", "heldget", "/"); got == "machine m1" {
+		t.Fatal("fork speaks as its source over an inherited connection")
+	} else {
+		t.Logf("fork's inherited connection: %s", got)
+	}
+	t.Logf("source's connection after checkpoint: %s", r.ask("m1", "heldget", "/"))
+	if got := r.ask("f1", "svc", svcSock, "/"); got != "200 OK machine f1" {
+		t.Fatalf("fork reconnects to %q", got)
+	}
+}
+
+// TestIntegrationHostSocketInImageIsUnreachable: --host-uds=open applies to
+// the whole sandbox, so a host socket file anywhere in a machine's root
+// would be reachable. Only the services mount may lead to one: a socket
+// planted in the image is not a way out.
+func TestIntegrationHostSocketInImageIsUnreachable(t *testing.T) {
+	svc := &services{t: t, root: t.TempDir(), srv: map[string]*http.Server{}}
+	r := newRigWith(t, 4096, svc)
+	l, err := net.Listen("unix", filepath.Join(r.cfg.Images["base"], "planted.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	go http.Serve(l, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, "host") }))
+	r.create("m1", admission.Accepted)
+	if got := r.ask("m1", "stat", "/planted.sock"); got == "absent" {
+		t.Fatal("the planted socket is not in the guest's root: the test proves nothing")
+	}
+	out, _ := r.rt.cmd(context.Background(), "exec", cid("m1"), "/guest", "svc", "/planted.sock", "/").Output()
+	if got := strings.TrimSpace(string(out)); !strings.HasPrefix(got, "ERR") {
+		t.Fatalf("guest reached a host socket in its image: %q", got)
 	}
 }

@@ -1,5 +1,6 @@
 // Package daemon wires the broker skeleton together: the journal engine,
-// control words, admission, and the sockets (PLAN P1-2).
+// control words, admission, the owner channel (P1-5), and the sockets (PLAN
+// P1-2).
 //
 // It runs with no model, no guest runtime, no executor, and no network.
 // Those arrive in later packages through the sockets and the journal's
@@ -17,6 +18,8 @@ import (
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/control"
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/modem"
+	ownerch "github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
@@ -53,12 +56,27 @@ type Config struct {
 	// only foreground is admitted (RES-2). Nil disables the check.
 	Pressure    func() float64
 	MaxPressure float64
+	// OwnerState, when set, puts the owner channel (P1-5) in front of the
+	// control words: it becomes the Auth, and owns codes, approvals, and
+	// session unlock. Its state lives in this file.
+	OwnerState string
+	// OwnerSecrets are the high-tier verifiers from the vault (CRED-8).
+	// Empty until the vault can be unlocked (P2-4): the channel then
+	// refuses every high-tier code rather than accept a guessable one.
+	OwnerSecrets ownerch.Secrets
+	// Modem, when set, is served by the owner channel as well as the owner
+	// socket, and carries its outbound texts.
+	Modem modem.Modem
+	// Agent receives the owner's task chat: the guest plane's owner inbox
+	// for the agent's machine (ARC-6 (c)). Nil: no agent running.
+	Agent control.Agent
 }
 
 // Daemon is a running broker.
 type Daemon struct {
 	engine *journal.Engine
 	store  *journal.FileStore
+	owner  *ownerch.Channel
 	srv    *sockets.Server
 	adm    *admission.Controller
 	done   chan struct{}
@@ -127,7 +145,19 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 		store.Close()
 		return nil, err
 	}
-	h := &control.Handler{Engine: eng, Auth: cfg.Auth, Machines: adm.Summary}
+	h := &control.Handler{Engine: eng, Auth: cfg.Auth, Agent: cfg.Agent, Machines: adm.Summary}
+	handle := h.Handle
+	var ch *ownerch.Channel
+	if cfg.OwnerState != "" {
+		if ch, err = ownerch.New(ownerch.Config{
+			Owner: cfg.OwnerNumber, Modem: cfg.Modem, Engine: eng, Agent: cfg.Agent,
+			Machines: adm.Summary, Secrets: cfg.OwnerSecrets, Store: ownerch.FileStore{Path: cfg.OwnerState},
+		}); err != nil {
+			store.Close()
+			return nil, err
+		}
+		handle = ch.Handle
+	}
 
 	modem := cfg.ModemUID
 	eps := []sockets.Endpoint{{
@@ -142,7 +172,7 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 				if err := json.Unmarshal(args, &m); err != nil {
 					return nil, sockets.Code("bad message")
 				}
-				return map[string][]string{"replies": h.Handle(ctx, m.From, m.Text)}, nil
+				return map[string][]string{"replies": handle(ctx, m.From, m.Text)}, nil
 			},
 		},
 	}}
@@ -162,7 +192,10 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 		store.Close()
 		return nil, err
 	}
-	d := &Daemon{engine: eng, store: store, srv: srv, adm: adm, done: make(chan struct{})}
+	d := &Daemon{engine: eng, store: store, srv: srv, adm: adm, owner: ch, done: make(chan struct{})}
+	if ch != nil {
+		go serveOwner(ctx, ch, cfg.Modem != nil)
+	}
 	go func() {
 		srv.Wait()
 		store.Close()
@@ -182,6 +215,30 @@ func validID(id string) bool {
 	}
 	return true
 }
+
+// serveOwner runs the owner channel: on the modem when there is one (Run
+// reports what a restart dropped, then serves texts and ticks), otherwise
+// only the restart report and the minute tick that expires requests.
+func serveOwner(ctx context.Context, ch *ownerch.Channel, hasModem bool) {
+	if hasModem {
+		ch.Run(ctx)
+		return
+	}
+	ch.Boot()
+	t := time.NewTicker(time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			ch.Tick()
+		}
+	}
+}
+
+// Owner is the owner channel, or nil when OwnerState is unset.
+func (d *Daemon) Owner() *ownerch.Channel { return d.owner }
 
 // Engine is the daemon's journal engine.
 func (d *Daemon) Engine() *journal.Engine { return d.engine }
