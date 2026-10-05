@@ -17,8 +17,10 @@ package daemon
 // (only their socket-capable imports are checked); reflection; values
 // built from the allowed types and handed across packages (modelroute's
 // transport, once built, is only as good as the code that builds it, which
-// this test reads); and code generated or loaded at run time (plugin and
-// os/exec are refused outside their allow-lists, so none is expected).
+// this test reads); the address of a unix dial (only its network is
+// checked); _test.go files, which are not linked; and code generated or
+// loaded at run time (plugin, os/exec, and os.StartProcess are refused
+// outside their allow-lists, so none is expected).
 
 import (
 	"bufio"
@@ -271,7 +273,7 @@ func sourceUse(t *testing.T, path, name, rel string) []string {
 	var bad []string
 	for _, im := range f.Imports {
 		p, _ := strconv.Unquote(im.Path.Value)
-		if clients[p] == nil && !socketPkgs[p] {
+		if clients[p] == nil && !socketPkgs[p] && p != "os" {
 			continue
 		}
 		n := p[strings.LastIndex(p, "/")+1:]
@@ -300,6 +302,19 @@ func sourceUse(t *testing.T, path, name, rel string) []string {
 	}
 	literalType := map[ast.Expr]bool{} // client types built as checked literals
 	callee := map[ast.Expr]bool{}
+	// Identifiers bound by := to a checked &http.Transport{} literal, which
+	// a client's Transport may name.
+	transports := map[string]bool{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		if as, ok := n.(*ast.AssignStmt); ok && as.Tok == token.DEFINE && len(as.Lhs) == len(as.Rhs) {
+			for i, l := range as.Lhs {
+				if id, ok := l.(*ast.Ident); ok && transportLit(as.Rhs[i], sel) {
+					transports[id.Name] = true
+				}
+			}
+		}
+		return true
+	})
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch n := n.(type) {
 		case *ast.CompositeLit:
@@ -308,7 +323,7 @@ func sourceUse(t *testing.T, path, name, rel string) []string {
 			if !isClient {
 				return true
 			}
-			if key != "" && !setsNonNil(n, key) {
+			if key != "" && !setsChecked(n, key, sel, transports) {
 				at(n, full+" without its own "+key)
 			}
 			if rel == "modelroute" {
@@ -325,6 +340,11 @@ func sourceUse(t *testing.T, path, name, rel string) []string {
 			se, ok := n.Fun.(*ast.SelectorExpr)
 			if !ok {
 				return true
+			}
+			if strings.HasPrefix(sel(se), "syscall.Syscall") || strings.HasPrefix(sel(se), "syscall.RawSyscall") {
+				if len(n.Args) == 0 || sel(n.Args[0]) != "syscall.SYS_IOCTL" {
+					at(n, sel(se)+" other than SYS_IOCTL")
+				}
 			}
 			i, isDial := dials[se.Sel.Name]
 			if !isDial || len(n.Args) <= i {
@@ -343,6 +363,8 @@ func sourceUse(t *testing.T, path, name, rel string) []string {
 			}
 			pkg, id := full[:strings.LastIndex(full, ".")], n.Sel.Name
 			switch {
+			case full == "os.StartProcess" && escapeOK[rel]["os/exec"] == "":
+				at(n, "starts a process (os.StartProcess)")
 			case clients[pkg][id] && !literalType[n]:
 				at(n, "network client ("+full+")")
 			case socketPkgs[pkg] && !clients[pkg][id] && !uses[full]:
@@ -354,20 +376,41 @@ func sourceUse(t *testing.T, path, name, rel string) []string {
 	return bad
 }
 
-// setsNonNil reports that a composite literal sets field key to something
-// other than nil.
-func setsNonNil(c *ast.CompositeLit, key string) bool {
+// setsChecked reports that a client literal sets field key to a value the
+// test can see: DialContext to a function literal, and Transport to a
+// checked &http.Transport{} literal or an identifier bound to one.
+func setsChecked(c *ast.CompositeLit, key string, sel func(ast.Expr) string, transports map[string]bool) bool {
 	for _, e := range c.Elts {
 		kv, ok := e.(*ast.KeyValueExpr)
 		if !ok {
 			continue
 		}
-		if id, ok := kv.Key.(*ast.Ident); ok && id.Name == key {
-			v, isIdent := kv.Value.(*ast.Ident)
-			return !isIdent || v.Name != "nil"
+		if id, ok := kv.Key.(*ast.Ident); !ok || id.Name != key {
+			continue
+		}
+		switch key {
+		case "DialContext":
+			_, ok := kv.Value.(*ast.FuncLit)
+			return ok
+		case "Transport":
+			if id, ok := kv.Value.(*ast.Ident); ok {
+				return transports[id.Name]
+			}
+			return transportLit(kv.Value, sel)
 		}
 	}
 	return false
+}
+
+// transportLit reports &http.Transport{...}, which the inspection checks
+// as a literal of its own.
+func transportLit(e ast.Expr, sel func(ast.Expr) string) bool {
+	u, ok := e.(*ast.UnaryExpr)
+	if !ok || u.Op != token.AND {
+		return false
+	}
+	c, ok := u.X.(*ast.CompositeLit)
+	return ok && sel(c.Type) == "net/http.Transport"
 }
 
 // The checks themselves catch what they are for, including the probes L3
@@ -403,6 +446,12 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 		{"modelroute", src(`"net/http"`, `var r, _ = http.Get("http://x")`)},
 		{"modelroute", src(`"net"`, `var d net.Dialer; var f = d.DialContext`)},
 		{"modelroute", src(`"net"`, `func g() { d := &net.Dialer{}; f := d.DialContext; f(nil, "tcp", "x:443") }`)},
+		{"modelroute", src(`"net/http"`, `var rt http.RoundTripper; var c = &http.Client{Transport: rt}`)},
+		{"modelroute", src(`"net/http"; "net/http/httputil"`, `var rt http.RoundTripper; var p = httputil.ReverseProxy{Transport: rt}`)},
+		{"modelroute", src(`"net/http"`, `var c = &http.Client{Transport: http.RoundTripper(nil)}`)},
+		{"modelroute", src(`"net/http"`, `var none func(); var tr = &http.Transport{DialContext: none}`)},
+		{"vm/overlay", src(`"syscall"`, `var a, b, e = syscall.Syscall(41, 2, 1, 0)`)},
+		{"loops", src(`"os"`, `var p, _ = os.StartProcess("/bin/sh", nil, nil)`)},
 	} {
 		path := filepath.Join(t.TempDir(), "p.go")
 		if err := os.WriteFile(path, []byte(c.src), 0o600); err != nil {
@@ -412,7 +461,11 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 			t.Errorf("missed in %s:\n%s", c.rel, c.src)
 		}
 	}
-	ok := src(`"net"; "net/http"`, `var t = &http.Transport{DialContext: func() { (&net.Dialer{}).DialContext(nil, "unix", "s") }}`)
+	ok := src(`"net"; "net/http"; "net/http/httputil"`, `func g() {
+	tr := &http.Transport{DialContext: func() { (&net.Dialer{}).DialContext(nil, "unix", "s") }}
+	_ = &httputil.ReverseProxy{Transport: tr}
+	_ = &http.Client{Transport: &http.Transport{DialContext: func() {}}}
+}`)
 	path := filepath.Join(t.TempDir(), "ok.go")
 	if err := os.WriteFile(path, []byte(ok), 0o600); err != nil {
 		t.Fatal(err)
