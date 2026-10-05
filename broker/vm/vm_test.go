@@ -866,6 +866,27 @@ func TestLOOP5ReplayIDsAreReserved(t *testing.T) {
 	}
 }
 
+// Security R1 on #126: builder machine IDs (BuilderPrefix) are made only
+// by Create, for Loop 1's builder; no fork or merge makes or touches one, so
+// the vault's builder grants never reach an agent's fork.
+func TestBuilderIDsAreNeverForkedOrMerged(t *testing.T) {
+	e := newEnv(t, 4096)
+	e.create("src", admission.Accepted, 100)
+	if _, err := e.m.Fork(bg, "src", []string{BuilderPrefix + "y"}); err == nil {
+		t.Fatal("Fork made a builder id")
+	}
+	e.create(BuilderPrefix+"b", admission.Experiment, 100)
+	if _, err := e.m.Fork(bg, BuilderPrefix+"b", []string{"f"}); err == nil {
+		t.Fatal("a builder machine was forked")
+	}
+	if _, err := e.m.Merge(bg, "src", BuilderPrefix+"b"); err == nil {
+		t.Fatal("a builder machine was merged from")
+	}
+	if _, err := e.m.Merge(bg, BuilderPrefix+"b", "src"); err == nil {
+		t.Fatal("a builder machine was merged into")
+	}
+}
+
 // RES-4: a seed is admitted against the disk like any layer copy.
 func TestRES4SeedAdmittedOnTheDisk(t *testing.T) {
 	e := newEnv(t, 4096)

@@ -22,6 +22,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/cgroup"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/guest"
+	"github.com/ghbmrk/agentos/broker/loopbuild"
 	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/owner"
@@ -74,13 +75,18 @@ func (a machines) Lineage(id string) (string, error) {
 // Replay machines (vm.EvalPrefix) go only to the evaluator's plane, never
 // the live one with its journal, executors and owner (replay R7); every
 // other machine goes to the live guest plane.
-type lateServices struct{ live, eval atomic.Pointer[svc] }
+type lateServices struct{ live, eval, build atomic.Pointer[svc] }
 
 type svc struct{ vm.Services }
 
 func (l *lateServices) pick(id string) *svc {
-	if strings.HasPrefix(id, vm.EvalPrefix) {
+	switch {
+	case strings.HasPrefix(id, vm.EvalPrefix):
 		return l.eval.Load()
+	case strings.HasPrefix(id, loopbuild.Prefix):
+		// Loop 1's builder machines get the builder's socket or nothing,
+		// never the live plane with managed_tree (C-3c-2).
+		return l.build.Load()
 	}
 	return l.live.Load()
 }
@@ -134,7 +140,8 @@ func main() {
 	imgs := images{}
 	var stateDir, runsc, cgroupRoot, accelMode, meterPath, agentMachine, inboxPath, egressSocket, verifySocket string
 	var agentImage, agentLaunch string
-	var diskReserveMB, agentMemMB, replayMemMB int64
+	var diskReserveMB, agentMemMB, replayMemMB, builderMemMB int64
+	var builderImage, builderLaunch string
 	var learn learnPaths
 	var cgroupVouched bool
 	floor := budget.Floor()
@@ -167,6 +174,9 @@ func main() {
 	flag.StringVar(&learn.Dir, "learn", "/var/lib/agentos/learn", "change pipeline and loop scheduler state (W3)")
 	flag.StringVar(&learn.Spare, "spare-meter", "/var/lib/agentos/spare-meter.json", "spare-time model budget state (LOOP-2), apart from -meter")
 	flag.StringVar(&learn.Routing, "routing", "/run/agentos-egress/routing.sock", "the vault process's routing socket, through which routing changes are read and adopted (W3); empty holds routing changes")
+	flag.StringVar(&builderImage, "builder-image", "", "the minimal image Loop 1's builder machines run (W3-builder), registered with -image; empty runs no model-backed builder")
+	flag.StringVar(&builderLaunch, "builder-launch", "", "how a builder machine starts: argv and env; empty uses the image's own")
+	flag.Int64Var(&builderMemMB, "builder-mem-mb", loopbuild.DefaultMemMB, "a builder machine's memory budget, MB")
 	flag.Int64Var(&replayMemMB, "replay-mem-mb", defaultReplayMemMB, "a replay machine's memory budget, MB (LOOP-5); with -agent-mem-mb it must fit in -capacity-mb less -headroom-mb")
 	qcfg := defaultQuestionConfig("/var/lib/agentos")
 	flag.StringVar(&qcfg.Path, "questions", qcfg.Path, "agents' questions to the owner, kept across restarts (P3-8)")
@@ -177,6 +187,7 @@ func main() {
 	cfg.Admission = mem.Budget.Admission()
 	log.Printf("admission capacity: %d MB (%s); budget MB: host %d, inference %d, browser %d, headroom %d, machines %d",
 		mem.CapacityMB, mem.Why, mem.Budget.HostMB, mem.Budget.InferenceMB, mem.Budget.BrowserMB, mem.Budget.HeadroomMB, mem.Budget.PoolMB)
+	namedAgentImage := agentImage // the builder never runs it, agent or not
 	if mem.AgentOff != "" {
 		// The broker stays up, STOP and STATUS included; no agent machine
 		// is kept and no replay machine opened, and STATUS says why.
@@ -324,6 +335,10 @@ func main() {
 					}
 					if err != nil {
 						log.Printf("replay evaluation disabled: %v", err)
+					}
+					if builderImage != "" {
+						lp.startBuilder(m, imgs, services, buildConfig{Dir: filepath.Join(cfg.SocketDir, "build"), Image: builderImage, AgentImage: namedAgentImage,
+							Launch: builderLaunch, MemMB: builderMemMB, Egress: egressSocket})
 					}
 				}
 				spec, err := agentSpec(imgs, agentImage, agentLaunch, agentMemMB)
