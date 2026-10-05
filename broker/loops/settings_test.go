@@ -224,7 +224,8 @@ func TestRepliesSayWhatChanged(t *testing.T) {
 	cases := map[string]string{
 		"LOOPS OFF":          "Spare-time work is off: no learning, security tests or update checks until you reply LOOPS ON.",
 		"LOOPS ON":           "Spare-time work is back on. Reply LOOPS OFF if this wasn't you.",
-		"SECURITY TESTS OFF": "Security tests is off until you reply SECURITY TESTS ON.",
+		"SECURITY TESTS OFF": "Security tests are off until you reply SECURITY TESTS ON.",
+		"UPDATE CHECKS ON":   "Update checks are back on. Reply UPDATE CHECKS OFF if this wasn't you.",
 		"LEARNING ON":        "Learning is back on. Reply LEARNING OFF if this wasn't you.",
 		"SPARE BUDGET 40":    "Spare-time work may now use up to 40 AI calls a day.",
 		"HELP LOOPS":         HelpText,

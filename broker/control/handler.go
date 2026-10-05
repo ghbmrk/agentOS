@@ -60,6 +60,15 @@ type Handler struct {
 	Now      func() time.Time
 	// NewCode returns a fresh texted code; nil means 6 random digits.
 	NewCode func() string
+	// Settings, if set, answers an owner text that is a whole-message
+	// setting outside CH-11's control words (the loops' LOOPS OFF, SPARE
+	// BUDGET n, HELP LOOPS; loops.Scheduler.Text). ok false passes the
+	// message on to the agent. It is tried only in an unlocked session,
+	// after the control words, so it can neither shadow STOP nor act on a
+	// message that only proves the owner's number.
+	Settings func(ctx context.Context, msg string) (reply string, ok bool)
+	// HelpExtra, if set, is appended to HELP's reply (loops.HelpLine).
+	HelpExtra string
 
 	mu     sync.Mutex
 	resume *pendingCode
@@ -98,6 +107,9 @@ func (h *Handler) Handle(ctx context.Context, from, msg string) []string {
 		}
 	case WordHelp:
 		r = helpText
+		if h.HelpExtra != "" {
+			r += " " + h.HelpExtra
+		}
 	case WordYes, WordNo:
 		r = "No open requests."
 	case WordUndo, WordMore:
@@ -111,6 +123,8 @@ func (h *Handler) Handle(ctx context.Context, from, msg string) []string {
 		}
 		if !h.Auth.SessionUnlocked(h.now()) {
 			out = append(out, unlockText)
+		} else if reply, ok := h.setting(ctx, cmd); ok {
+			out = append(out, reply)
 		} else if !h.deliver(ctx, cmd) {
 			out = append(out, "Your agent is not running. STOP, RESUME, STATUS and HELP still work.")
 		}
@@ -141,6 +155,15 @@ func (h *Handler) takeHint() bool {
 	}
 	h.hintAt = now
 	return true
+}
+
+// setting tries the Settings hook on a whole message that is not marked
+// PUBLIC (a PUBLIC task is always task chat).
+func (h *Handler) setting(ctx context.Context, cmd Command) (string, bool) {
+	if h.Settings == nil || cmd.Public {
+		return "", false
+	}
+	return h.Settings(ctx, cmd.Text)
 }
 
 func (h *Handler) deliver(ctx context.Context, cmd Command) bool {
