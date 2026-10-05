@@ -81,7 +81,6 @@ type rig struct {
 	state    *change.MemStore
 	p        *proposer
 	online   bool
-	channel  string
 	atts     [][]byte
 	attestor ed25519.PrivateKey
 	allow    []ed25519.PublicKey
@@ -116,7 +115,7 @@ func newRig(t *testing.T) *rig {
 	kdir := filepath.Join(dir, "keys")
 	os.Mkdir(kdir, 0o700)
 	r := &rig{t: t, dir: dir, clk: &clock{t: time.Date(2026, 10, 5, 3, 0, 0, 0, time.UTC)},
-		state: &change.MemStore{}, p: &proposer{}, online: true, channel: update.ChannelStable}
+		state: &change.MemStore{}, p: &proposer{}, online: true}
 	root, rp := keys(t, kdir, "root", 3)
 	r.root = root
 	var tp, sp, tsp []ed25519.PublicKey
@@ -159,7 +158,6 @@ func (r *rig) newLoop() *Loop3 {
 		Store:   r.store,
 		Mirrors: func() []update.Source { return r.mirrors },
 		Online:  func() bool { return r.online },
-		Channel: func() string { return r.channel },
 		Attestations: func(context.Context, string) ([][]byte, error) {
 			return r.atts, nil
 		},
