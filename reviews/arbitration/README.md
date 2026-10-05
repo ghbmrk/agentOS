@@ -10,6 +10,7 @@ Reconciles the three lens loops so their proposals compound instead of trading o
 
 **Cadence:** weekly, Mondays after the lens loops (they run ~08:52 Eastern; this runs 10:41 Eastern). Each run reads what the lenses proposed or merged since the last arbitrated commit. It stays quiet when nothing conflicts.
 
+<<<<<<< HEAD
 ## Per-PR gate (Mark, 2026-10-04)
 
 Every AgentOS feature or addition goes through the three lenses and the arbitrator before it merges, not only the weekly run:
@@ -19,6 +20,8 @@ Every AgentOS feature or addition goes through the three lenses and the arbitrat
 
 This gate and the potency/UX/security tradeoff format apply only to OS work: the spec, design, and code. Other communication with Mark stays plain.
 
+=======
+>>>>>>> origin/main
 ## Method
 
 1. **Collect.** Every open lens proposal (PR or review file), plus merged spec changes since the last run.
@@ -28,7 +31,11 @@ This gate and the potency/UX/security tradeoff format apply only to OS work: the
    - make the effect reversible (REV-3) so it no longer needs a gate;
    - scope by verified data, not by time or by blanket prompts;
    - make the safe path the shortest path.
+<<<<<<< HEAD
 4. **Decide whenever no lens gets meaningfully worse** (Mark, 2026-10-04). Only a real tradeoff, where some lens loses, goes to Mark: one plain line, a recommendation, and the potency, UX, and security effects, sent to the project coordinator, which asks him in the project chat. Never ask him in a thread. Work continues on the recommendation while he decides.
+=======
+4. **Escalate only real forks.** When no design dominates and the choice changes Mark's goal or an output he will notice, ask one question answerable in one word, with a recommendation. Everything else is decided here with the reasoning written down.
+>>>>>>> origin/main
 
 ## Hard constraints (no trade may weaken)
 
@@ -47,6 +54,8 @@ Everything else, including defaults, tiers, and timeouts, is tradable when the t
 |---|---|---|---|
 | 0 | e841b78 | loop set up | — |
 | 1 | e841b78 | PRs #8, #9, #11, #12 | [2026-10-04](2026-10-04-arbitration.md) |
+| 2 | b4962e4 | Lens reviews 2 (security, UX, potency); per-PR gate since run 1 | [2026-10-05](2026-10-05-arbitration.md) |
+<<<<<<< HEAD
 
 ## Per-PR log
 
@@ -105,3 +114,5 @@ Everything else, including defaults, tiers, and timeouts, is tradable when the t
 | PE5 design (candidate-causable interruptions) | Potency #111: owner busy or STOP fails good candidates. Security F1 (#103): cap 2, every cause counts. Security re-check in parallel. | F1 vs PE5 | Accepted reading: exempt only causes proven non-candidate (STOP, accepted work without pressure, ErrNoRoom on declared budgets, non-pressure class revoke); everything else, unknown included, counts; cap stays 2. Conditions: ErrOwnerPreempt attached only by host-side code (scheduler, admission), never derived from anything the replay machine returns, with a test that guest-supplied error text cannot exempt; pressure wins ties. A cause Security shows a candidate can spoof moves back to counted | Auto-decided (no lens worse). Security P1–P5 adopted; P4 (park after ~6 exempt interruptions: no strike, yields the evaluator, Loop 3 releases never wait) supersedes my point-4 acceptance |
 | #126 (W3 step 3c: model-backed builder behind a socket) | Security: sign-off at 3f8cb96 (F1 implicit params out of the brief, R1–R3 fixed). Potency: sign-off, follow-ups on BOARD W3-builder-image. UX: nothing owner-facing. | None | Honours PW1 and the step 3 rulings (private machine, socket-only, separate builder share; F1 matches "count, not content") | Clear, subject to L3 and CI |
 | PE7 design (agent sleeps so learning runs on small boxes) | Lenses in parallel (pending). | Owner first-message latency (UX) vs learning off for good when agent and replay don't fit (Potency) | Preliminary: acceptable. Quiet hours only; pre-wake before window end; owner messages and STOP wake, non-owner inbound queues to window end unless owner-marked urgent; checkpoint hash-verified before restore, deleted after wake; host-driven resume is not REV-1 Rollback; ResumeFor 36 h in noRoom mode | Final (11:33): auto-decided. Potency support (C1, R1, R2), UX accept slightly worse not meaningfully (U1–U6), Security same or better (S1–S8). Combined conditions sent to B via coordinator |
+=======
+>>>>>>> origin/main

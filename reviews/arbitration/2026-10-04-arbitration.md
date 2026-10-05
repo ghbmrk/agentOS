@@ -17,7 +17,11 @@ Most of the 40-odd proposals don't conflict. Three questions are Mark's. Two are
 | 3 | Codes on calls (#8 CH-17 spoken vs #12 CH-5 keypad) | UX vs security | Keypad only for codes; speech stays for chat; a call ends with "I'll text you the batch" when hands are busy | Resolved (security) |
 | 4 | Seven-day unlock vs SIM-swap reads (#8 CH-14 vs #12 CH-19) | UX vs security | Keep 7 days. The unlock needs a code-generator code, and private content goes to the owner's evidence destination instead of SMS when one is set (#11 CH-18) | Resolved (all three gain) |
 | 5 | Context-scoped replies (#11 ADP-10) | Potency vs security | **Earned and native:** offered only after the owner has approved a run of unedited replies on that account, threads started by a verified contact, and sending via the provider's own scheduled send so undo lives in the owner's mail app | Existing card D2: **Yes, with alert**, under these conditions |
+<<<<<<< HEAD
 | 6 | The box's SIM as a tool (#11 ADP-11) | Potency vs availability, security | Third-party calls and texts **never on the owner-channel line**; they use a second line (dual-SIM or eSIM modem, or an owner-held calling account) | **Mark chose second line** (2026-10-04) |
+=======
+| 6 | The box's SIM as a tool (#11 ADP-11) | Potency vs availability, security | Third-party calls and texts **never on the owner-channel line**; they use a second line (dual-SIM or eSIM modem, or an owner-held calling account) | **[Fork] F2** |
+>>>>>>> origin/main
 | 7 | Wi-Fi passthrough vs local UI trust (#8 ONB-5, D3 vs #12 CH-7) | UX vs security | Both land: passthrough plus WPA3, client isolation, and a per-device code sign-in for anything beyond setup, unlock, and status | Resolved (compatible) |
 | 8 | Auto-adopted improvements (#11 CHG-6) vs stored injection (#12 CAP-3, ADP-10) | Potency vs security | Compatible once #12's enforced request shapes land: an auto-adopted skill can't send anything an adapter doesn't declare | Resolved (land after #12's ADP-10) |
 | 9 | MMS evidence (#11 CH-18) vs SIM swap (#12 CH-19) | Potency, UX vs security | MMS carries only what a text may carry; private evidence goes to the fixed destination or the local UI | Resolved |
@@ -69,6 +73,7 @@ Disclosure is bounded structurally (the composer sees only the thread and has no
 
 **Mark's card D2 (PR reviews thread)** offers "Not for MVP", "Yes, with alert", or "Yes, silent". This run recommends **Yes, with alert**, under the three conditions above. Until an account earns it, behavior is identical to "Not for MVP": every reply is prompted, and the prompts produce the evidence. After that, each reply texts an alert with `UNDO <id>` (#8 CH-16). The reviewer's example, a trusted correspondent asking "confirm you'll pay by Friday", now falls back to a prompt through the commitment filter. The residual is a commitment phrased in a way the patterns miss. The alert and undo window cover that case, and the pattern list grows through Loop 2 regressions (LOOP-10).
 
+<<<<<<< HEAD
 **Decided (Mark, 2026-10-04 23:55): calendar-fit acceptances.** Once a calendar is connected, an earned auto-reply may go out with the alert and undo window even though it names a date or time, but only when the owner is the one *accepting* ("yes, that works"), never proposing. The broker checks all of these deterministically (no inference, so ARC-2 holds):
 - the time in the reply equals a slot the counterpart proposed in the latest inbound message of the verified thread;
 - that slot is free on the connected calendar, as read by the broker;
@@ -81,6 +86,12 @@ Anything else, including a counter-proposal or a new time, still prompts. Routed
 Sharing the owner-channel line with third-party traffic risks carrier filtering of the only control path (DEP-1). It also publishes the owner channel's number to businesses, which turns it into an inbound injection surface. A second line removes both problems and keeps all of potency's reach: a dual-SIM or eSIM modem, or an owner-held calling account as an optional dependency (DEP-3). The cost is a second prepaid plan for owners who want this.
 
 **Decided (Mark, 2026-10-04): second line only.** It is specced now and built after S2. ADP-12 MUST NOT place third-party traffic on the owner-channel line. The second line is an optional dependency (DEP-3): without it, the tool is unavailable and the owner channel is unchanged.
+=======
+### 6. The box's SIM as a tool (ADP-11 in #11)
+Sharing the owner-channel line with third-party traffic risks carrier filtering of the only control path (DEP-1). It also publishes the owner channel's number to businesses, which turns it into an inbound injection surface. A second line removes both problems and keeps all of potency's reach: a dual-SIM or eSIM modem, or an owner-held calling account as an optional dependency (DEP-3). The cost is a second prepaid plan for owners who want this.
+
+**[Fork] F2:** (a) second line only, spec now, build after S2 (recommended); (b) share the owner line with strict rate limits (#11 as written); (c) post-MVP.
+>>>>>>> origin/main
 
 ### 7–10. Compatible as written
 - **7.** #8 ONB-5 passthrough and #12 CH-7 (WPA3, isolation, per-device sign-in) both land. #12's sign-in exempts the setup, unlock, and status pages, so onboarding is unchanged.
@@ -97,7 +108,11 @@ No lens loses on any of these, but each one lands in SPEC.md, so Mark's merge is
 - #8 D2, first PC trusted by default: yes. #12 finding 16 is the accepted residual.
 - #8 D3, passthrough: yes, with #12 CH-7 (resolution 7).
 - #11 D1 and #12 D4, data labels: yes, as resolution 1. Task text private, as on Mark's existing card.
+<<<<<<< HEAD
 - **Decided (Mark, 2026-10-04): yes.** #12 CH-19, the weekly unlock by code-generator code. This run recommends yes. The owner opens the code generator once a week instead of reading a texted code, and that one step is what makes a 7-day window safe against a SIM swap. It does change something he'll notice every week, so it is his call.
+=======
+- **Mark's call:** #12 CH-19, the weekly unlock by code-generator code. This run recommends yes. The owner opens the code generator once a week instead of reading a texted code, and that one step is what makes a 7-day window safe against a SIM swap. It does change something he'll notice every week, so it is his call.
+>>>>>>> origin/main
 
 ---
 

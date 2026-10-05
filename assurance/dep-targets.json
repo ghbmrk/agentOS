@@ -1,0 +1,17 @@
+{
+  "note": "Product scenarios only (boot, STOP/STATUS, recover; exit 0); each must expect pass. Controls are built into tools/depaudit.py and always run.",
+  "targets": [
+    {
+      "name": "broker-offline",
+      "cmd": [
+        "broker/test/a9-scenario.sh"
+      ]
+    },
+    {
+      "name": "recovery-offline",
+      "cmd": [
+        "broker/test/a9-recovery-scenario.sh"
+      ]
+    }
+  ]
+}

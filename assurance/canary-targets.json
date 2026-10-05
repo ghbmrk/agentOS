@@ -1,0 +1,17 @@
+{
+  "note": "Product targets only; each must expect clean. Deliberate-leak controls are built into tools/canary.py and always run.",
+  "targets": [
+    {
+      "name": "guest-socket-vault-egress",
+      "cmd": [
+        "broker/test/canary-target.sh"
+      ]
+    },
+    {
+      "name": "drive-at-rest-a8",
+      "cmd": [
+        "broker/test/a8-canary-target.sh"
+      ]
+    }
+  ]
+}

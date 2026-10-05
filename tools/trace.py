@@ -4,7 +4,7 @@
 Requirement IDs are bold tokens like **CRED-1** in SPEC.md.
 Tests claim coverage with a marker comment anywhere in a file:  REQ: CRED-1, CRED-4
 Usage:
-  tools/trace.py            write TRACE.md
+  tools/trace.py            write TRACE.md (PRs don't commit it; .github/workflows/trace.yml does, on main)
   tools/trace.py --check    fail if TRACE.md is stale or a marker cites an unknown ID
   tools/trace.py --gate A,B fail unless every listed ID has at least one covering file
 """
@@ -14,10 +14,10 @@ import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-ID_DEF = re.compile(r"\*\*([A-Z]{2,4}-\d+)\*\*")
-MARKER = re.compile(r"REQ:\s*([A-Z]{2,4}-\d+(?:\s*,\s*[A-Z]{2,4}-\d+)*)")
+ID_DEF = re.compile(r"\*\*([A-Z]{2,4}-\d+[a-z]?)\*\*")
+MARKER = re.compile(r"REQ:\s*([A-Z]{2,4}-\d+[a-z]?(?:\s*,\s*[A-Z]{2,4}-\d+[a-z]?)*)")
 SCAN_DIRS = ("tests", "spikes", "src", "broker")
-SKIP_SUFFIXES = {".png", ".jpg", ".img", ".iso", ".bin"}
+SKIP_SUFFIXES = {".png", ".jpg", ".img", ".iso", ".bin", ".pyc"}
 
 
 def spec_ids(spec_text):

@@ -1,0 +1,384 @@
+package update
+
+import (
+	"bytes"
+	"crypto/ed25519"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
+
+	"github.com/ghbmrk/agentos/broker/attest"
+)
+
+// Attestations (OSS-8): an installation that reproduced a release says
+// what happened, on what hardware, with what versions, and signs it. The
+// envelope is DSSE, the in-toto signing format, with the attestor's
+// Ed25519 public key inside the signed statement.
+//
+// Attestations are evidence, not authority (OSS-9). Their one hard use
+// here is UPD-8 with Mark's D6, as the arbitrator corrected it: a security
+// fix auto-stages only with its threshold signatures plus at least one
+// passing fast-channel attestation from an independent attestor. Anyone
+// can mint a key, a compromised signing quorum included, so independent
+// means on the box's allow-list (Options.Attestors: pinned in the image or
+// added by the owner), and still not a key any accepted root listed, not
+// maintainer-operated, and not the box's own. The list starts empty, so
+// until it has entries every security fix goes to the owner.
+//
+// A maintainer-run attestor (the project's test box) runs from day one:
+// its key is in the signed target AttestorsPath and its statements carry
+// Operator "maintainer". Its passes are shown as evidence
+// (MaintainerPasses). As an interim (Mark, 2026-10-05) it also counts as
+// the check while every allow-listed key is maintainer-operated, so it
+// must be both allow-listed and in the signed list; once an outside
+// attestor is listed it stops counting.
+
+// AttestationType is the DSSE payload type.
+const AttestationType = "application/vnd.agentos.attestation.v1+json"
+
+// AttestorsPath is the signed target listing maintainer-operated attestor
+// keys: {"keys": ["<base64 Ed25519 public key>", ...]}.
+const AttestorsPath = "attestors/maintainer.json"
+
+// OperatorMaintainer marks a statement from a maintainer-operated attestor.
+const OperatorMaintainer = "maintainer"
+
+type attestorList struct {
+	Keys []string `json:"keys"`
+}
+
+var attestorListFields = fields("keys")
+
+// attestorFingerprint is the seen-key fingerprint of a base64 Ed25519 key.
+func attestorFingerprint(b64 string) (string, error) {
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil || len(raw) != ed25519.PublicKeySize {
+		return "", errors.New("attestor is not an Ed25519 key")
+	}
+	der, err := x509.MarshalPKIXPublicKey(ed25519.PublicKey(raw))
+	if err != nil {
+		return "", err
+	}
+	return fingerprint(der), nil
+}
+
+// Attestation results.
+const (
+	ResultPass = "pass"
+	ResultFail = "fail"
+)
+
+// Statement is what an attestation says.
+type Statement struct {
+	// Manifest is the manifest target path, e.g. releases/12.json, and
+	// ManifestSHA256 its hash, so the statement names exact bytes.
+	Release        string `json:"release"`
+	ManifestSHA256 string `json:"manifest_sha256"`
+	Result         string `json:"result"`
+	// Channel the attesting installation follows.
+	Channel string `json:"channel"`
+	// Hardware and Versions are choices from the public attestation
+	// schema (OSS-4): no free text, serial number or timestamp.
+	Hardware attest.Hardware   `json:"hardware"`
+	Versions map[string]string `json:"versions,omitempty"`
+	// Attestor is the signer's Ed25519 public key, standard base64.
+	Attestor string `json:"attestor"`
+	// Operator is OperatorMaintainer for a maintainer-run attestor, else
+	// empty. A statement with any operator never counts as independent.
+	Operator string `json:"operator,omitempty"`
+}
+
+var (
+	statementFields = fields("release", "manifest_sha256", "result", "channel", "hardware", "versions", "attestor", "operator")
+	envelopeFields  = fields("payloadType", "payload", "signatures")
+	signatureFields = fields("keyid", "sig")
+)
+
+// ErrNeedsAttestation: a security fix lacks an independent attestation.
+var ErrNeedsAttestation = errors.New("security fix has no independent fast-channel attestation yet")
+
+// envelope is a DSSE envelope (github.com/secure-systems-lab/dsse, v1).
+// The format is small enough to write out here; go-securesystemslib's
+// dsse package would also vendor golang.org/x/crypto/ssh.
+type envelope struct {
+	PayloadType string         `json:"payloadType"`
+	Payload     string         `json:"payload"`
+	Signatures  []envSignature `json:"signatures"`
+}
+
+type envSignature struct {
+	KeyID string `json:"keyid"`
+	Sig   string `json:"sig"`
+}
+
+// pae is DSSE's pre-authentication encoding, what the signature covers.
+func pae(payloadType string, payload []byte) []byte {
+	return []byte(fmt.Sprintf("DSSEv1 %d %s %d %s", len(payloadType), payloadType, len(payload), payload))
+}
+
+var sha256RE = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// isReleasePath reports whether p is ReleasePath of some version >= 1,
+// in that exact spelling.
+func isReleasePath(p string) bool {
+	n, err := strconv.ParseInt(strings.TrimSuffix(strings.TrimPrefix(p, "releases/"), ".json"), 10, 64)
+	return err == nil && n >= 1 && ReleasePath(n) == p
+}
+
+// checkStatement reports the first field outside the closed form OSS-4
+// allows: identifiers of the signed release in their fixed shapes, and
+// every other field a value the public attestation schema lists. The
+// attestor key is checked where it is decoded.
+func checkStatement(st Statement) error {
+	if err := checkFixed(st); err != nil {
+		return err
+	}
+	s := attest.Default()
+	if err := s.CheckHardware(st.Hardware); err != nil {
+		return err
+	}
+	return s.CheckVersions(st.Versions)
+}
+
+// readStatement is checkStatement for a statement signed elsewhere,
+// perhaps under a newer schema than this box's: hardware and versions
+// need only the schema's token shape, and come back mapped onto this
+// box's schema, with what it does not list as attest.Unlisted (potency
+// PB1 on #73). Otherwise a box on release N would refuse every
+// attestation of N+1 that names N+1's new versions, and the security fix
+// would never auto-stage (D6).
+func readStatement(st Statement) (Statement, error) {
+	if err := checkFixed(st); err != nil {
+		return Statement{}, err
+	}
+	s := attest.Default()
+	var err error
+	if st.Hardware, err = s.ReadHardware(st.Hardware); err != nil {
+		return Statement{}, err
+	}
+	if st.Versions, err = s.ReadVersions(st.Versions); err != nil {
+		return Statement{}, err
+	}
+	return st, nil
+}
+
+// checkFixed checks the fields every schema version shares.
+func checkFixed(st Statement) error {
+	s := attest.Default()
+	if !isReleasePath(st.Release) || !sha256RE.MatchString(st.ManifestSHA256) {
+		return errors.New("statement does not name a release manifest")
+	}
+	if (st.Result != ResultPass && st.Result != ResultFail) || !s.Result(st.Result) {
+		return fmt.Errorf("result %q is not pass or fail", st.Result)
+	}
+	if (st.Channel != ChannelStable && st.Channel != ChannelFast) || !s.Channel(st.Channel) {
+		return fmt.Errorf("channel %q is not stable or fast", st.Channel)
+	}
+	if st.Operator != "" && st.Operator != OperatorMaintainer {
+		return fmt.Errorf("operator %q is not %q", st.Operator, OperatorMaintainer)
+	}
+	return nil
+}
+
+// Attest signs a statement for the release v names. Attestor and the
+// release fields are filled in from v and priv. Every other field must
+// be a choice the public attestation schema lists (OSS-4).
+func Attest(priv ed25519.PrivateKey, v *Verified, st Statement) ([]byte, error) {
+	if !v.ok() {
+		return nil, ErrNotChecked
+	}
+	st.Release = v.manifest.Path
+	st.ManifestSHA256 = v.manifest.SHA256
+	st.Attestor = base64.StdEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
+	if err := checkStatement(st); err != nil {
+		return nil, err
+	}
+	body, err := json.Marshal(st)
+	if err != nil {
+		return nil, err
+	}
+	id, err := KeyID(priv.Public())
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(envelope{
+		PayloadType: AttestationType,
+		Payload:     base64.StdEncoding.EncodeToString(body),
+		Signatures:  []envSignature{{KeyID: id, Sig: base64.StdEncoding.EncodeToString(ed25519.Sign(priv, pae(AttestationType, body)))}},
+	})
+}
+
+// MaxAttestationSize caps one attestation's bytes (review K-PB1b on #73),
+// as U8 caps manifests. A fetcher reads no more than this per attestation.
+const MaxAttestationSize = 16 << 10
+
+// ParseAttestation checks an envelope's signature and returns its
+// statement and the attestor key. Envelope, signatures and statement are
+// decoded strictly: no unknown, duplicate or case-variant key. The input
+// must also be canonical, exactly the bytes Attest would write for that
+// statement: one signature, its keyid the attestor's KeyID, the payload
+// json.Marshal of the statement, and the envelope json.Marshal of the
+// result, so whitespace, key order, escapes, base64 padding or line
+// breaks, and extra signatures cannot carry anything (OSS-4, security C1
+// on #73). Hardware and versions must have the schema's token shape;
+// values this box's schema does not list come back as attest.Unlisted
+// (readStatement).
+func ParseAttestation(b []byte) (Statement, ed25519.PublicKey, error) {
+	if len(b) > MaxAttestationSize {
+		return Statement{}, nil, fmt.Errorf("attestation is %d bytes, over %d", len(b), MaxAttestationSize)
+	}
+	var env struct {
+		PayloadType string            `json:"payloadType"`
+		Payload     string            `json:"payload"`
+		Signatures  []json.RawMessage `json:"signatures"`
+	}
+	if err := decodeStrict(b, &env, envelopeFields); err != nil {
+		return Statement{}, nil, fmt.Errorf("attestation envelope: %w", err)
+	}
+	if env.PayloadType != AttestationType {
+		return Statement{}, nil, fmt.Errorf("payload type %q", env.PayloadType)
+	}
+	if len(env.Signatures) != 1 {
+		return Statement{}, nil, fmt.Errorf("attestation has %d signatures, not one", len(env.Signatures))
+	}
+	var sig envSignature
+	if err := decodeStrict(env.Signatures[0], &sig, signatureFields); err != nil {
+		return Statement{}, nil, fmt.Errorf("attestation signature: %w", err)
+	}
+	body, err := base64.StdEncoding.DecodeString(env.Payload)
+	if err != nil {
+		return Statement{}, nil, err
+	}
+	var st Statement
+	if err := decodeStrict(body, &st, statementFields); err != nil {
+		return Statement{}, nil, fmt.Errorf("attestation statement: %w", err)
+	}
+	raw, err := base64.StdEncoding.DecodeString(st.Attestor)
+	if err != nil || len(raw) != ed25519.PublicKeySize || base64.StdEncoding.EncodeToString(raw) != st.Attestor {
+		return Statement{}, nil, errors.New("attestor is not a canonical Ed25519 key")
+	}
+	pub := ed25519.PublicKey(raw)
+	sigRaw, err := base64.StdEncoding.DecodeString(sig.Sig)
+	if err != nil || !ed25519.Verify(pub, pae(env.PayloadType, body), sigRaw) {
+		return Statement{}, nil, errors.New("attestation signature does not verify")
+	}
+	if id, err := KeyID(pub); err != nil || sig.KeyID != id {
+		return Statement{}, nil, errors.New("attestation keyid is not the attestor's")
+	}
+	canon, err := json.Marshal(st)
+	if err != nil || !bytes.Equal(canon, body) {
+		return Statement{}, nil, errors.New("attestation statement is not canonical")
+	}
+	want, err := json.Marshal(envelope{
+		PayloadType: AttestationType,
+		Payload:     base64.StdEncoding.EncodeToString(body),
+		Signatures:  []envSignature{{KeyID: sig.KeyID, Sig: base64.StdEncoding.EncodeToString(sigRaw)}},
+	})
+	if err != nil || !bytes.Equal(want, b) {
+		return Statement{}, nil, errors.New("attestation envelope is not canonical")
+	}
+	if st, err = readStatement(st); err != nil {
+		return Statement{}, nil, fmt.Errorf("attestation statement: %w", err)
+	}
+	return st, pub, nil
+}
+
+// passes calls f with the fingerprint and statement of each distinct
+// attestor with a valid, passing, fast-channel attestation for exactly
+// this release, other than own. Malformed or unrelated attestations are
+// skipped, not fatal: they arrive from anyone.
+func (v *Verified) passes(atts [][]byte, own ed25519.PublicKey, f func(fp string, st Statement)) {
+	done := map[string]bool{}
+	for _, b := range atts {
+		st, pub, err := ParseAttestation(b)
+		if err != nil || st.Release != v.manifest.Path || st.ManifestSHA256 != v.manifest.SHA256 ||
+			st.Result != ResultPass || st.Channel != ChannelFast {
+			continue
+		}
+		if own != nil && pub.Equal(own) {
+			continue
+		}
+		der, err := x509.MarshalPKIXPublicKey(pub)
+		if err != nil {
+			continue
+		}
+		fp := fingerprint(der)
+		if !done[fp] {
+			done[fp] = true
+			f(fp, st)
+		}
+	}
+}
+
+// IndependentPasses counts distinct allow-listed independent attestors
+// (see above)
+// with a valid, passing, fast-channel attestation for exactly this
+// release. own is this box's key and may be nil.
+func (v *Verified) IndependentPasses(atts [][]byte, own ed25519.PublicKey) int {
+	if !v.ok() {
+		return 0
+	}
+	n := 0
+	v.passes(atts, own, func(fp string, st Statement) {
+		if !v.allowed[fp] || v.maintainers[fp] {
+			return
+		}
+		if v.pinned[fp] {
+			// The project's test box: only the interim check.
+			if v.interim {
+				n++
+			}
+			return
+		}
+		if !v.operated[fp] && st.Operator == "" {
+			n++
+		}
+	})
+	return n
+}
+
+// MaintainerPasses counts passing attestations from maintainer-operated
+// attestors (listed in AttestorsPath or self-marked). They are evidence
+// for the owner's digest, labelled maintainer-operated, never authority.
+func (v *Verified) MaintainerPasses(atts [][]byte, own ed25519.PublicKey) int {
+	if !v.ok() {
+		return 0
+	}
+	n := 0
+	v.passes(atts, own, func(fp string, st Statement) {
+		if v.operated[fp] || v.pinned[fp] || st.Operator == OperatorMaintainer {
+			n++
+		}
+	})
+	return n
+}
+
+// SecurityAutoStage reports whether a security fix may stage without the
+// owner: threshold signatures (already checked to make v) plus at least
+// one independent fast-channel attestation of exactly v (UPD-8, D6). The
+// newest release counts as a security fix when it supersedes one
+// (Result.SecurityFix, security lens C2). Other releases
+// follow UPD-5's soak, which is not decided here.
+func (v *Verified) SecurityAutoStage(atts [][]byte, own ed25519.PublicKey) error {
+	if !v.ok() {
+		return ErrNotChecked
+	}
+	if !v.release.Security && !v.coversFix {
+		return errors.New("not a security fix")
+	}
+	if v.IndependentPasses(atts, own) < 1 {
+		return ErrNeedsAttestation
+	}
+	return nil
+}
+
+// InterimAttestation reports whether the box's allow-list holds only the
+// project's own test box (Options.InterimAttestors) and never held an
+// outside attestor, so the digest can say the fix was checked by the
+// project rather than an outside attestor.
+func (v *Verified) InterimAttestation() bool { return v.ok() && v.interim }

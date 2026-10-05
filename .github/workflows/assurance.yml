@@ -1,0 +1,82 @@
+name: assurance
+# Permanent gates for SPEC.md A5 (canary test) and A9 (dependency audit).
+# Each job runs deliberate-leak controls beside the real targets: a clean scan
+# counts only because the same scan, in the same run, caught every planted leak.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "23 7 * * *" # daily rerun with fresh canaries, even without new commits
+  workflow_dispatch:
+permissions:
+  contents: read
+# Builds never download a Go toolchain: setup-go installs the one go.mod's
+# toolchain line names (setup-go's go-version-file reads only the go line),
+# each job checks it, and an offline build fails rather than fetch one.
+env:
+  GOTOOLCHAIN: local
+# Both harnesses are stdlib-only, so they use the runner's system python3: no
+# setup action to pin or trust.
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      # Some canary targets build the broker, so they need go.mod's Go.
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        with:
+          go-version: "1.26.8" # = broker/go.mod's toolchain line; checked below
+          cache: false
+      - name: Go is the toolchain go.mod names
+        run: |
+          want=$(awk '$1 == "toolchain" {print $2}' "$GITHUB_WORKSPACE/broker/go.mod")
+          got=$(go version | awk '{print $3}')
+          [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }
+      - name: Canary scan (A5), fresh canaries every round
+        run: python3 tools/canary.py run --targets assurance/canary-targets.json --rounds 3 --report canary-report.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        if: always()
+        with:
+          name: canary-report
+          path: canary-report.json
+          if-no-files-found: ignore
+  dependency-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      # The offline scenario builds the broker with no network, so the Go
+      # toolchain go.mod names must already be installed (no download).
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        with:
+          go-version: "1.26.8" # = broker/go.mod's toolchain line; checked below
+          cache: false
+      - name: Go is the toolchain go.mod names
+        run: |
+          want=$(awk '$1 == "toolchain" {print $2}' "$GITHUB_WORKSPACE/broker/go.mod")
+          got=$(go version | awk '{print $3}')
+          [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }
+      - name: Sandbox prerequisites (user namespaces, io_uring off, strace)
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          # io_uring socket operations are invisible to strace; disable them outright.
+          sudo sysctl -w kernel.io_uring_disabled=2
+          command -v strace || { sudo apt-get update -q && sudo apt-get install -yq strace; }
+      - name: Static endpoint scan (DEP-2)
+        run: python3 tools/depaudit.py static
+      - name: Offline scenarios with all traffic logged (A9)
+        run: python3 tools/depaudit.py run --targets assurance/dep-targets.json --require-io-uring-disabled --report dep-report.json
+      - name: Harness self-tests inside the sandbox
+        run: python3 -m unittest tests.test_depaudit tests.test_canary -v
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        if: always()
+        with:
+          name: dependency-audit-report
+          path: dep-report.json
+          if-no-files-found: ignore

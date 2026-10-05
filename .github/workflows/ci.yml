@@ -5,15 +5,123 @@ on:
   pull_request:
 permissions:
   contents: read
+# Builds never download a Go toolchain: setup-go installs the one go.mod's
+# toolchain line names (setup-go's go-version-file reads only the go line),
+# each job checks it, and an offline build fails rather than fetch one.
+env:
+  GOTOOLCHAIN: local
 jobs:
   checks:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # base commit for the TRACE.md guard
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # The harness tests build the broker.
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        with:
+          go-version: "1.26.8" # = broker/go.mod's toolchain line; checked below
+          cache: false
+      - name: Go is the toolchain go.mod names
+        run: |
+          want=$(awk '$1 == "toolchain" {print $2}' "$GITHUB_WORKSPACE/broker/go.mod")
+          got=$(go version | awk '{print $3}')
+          [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }
       - name: Unit tests
         run: python -m unittest discover -s tests -v
-      - name: Traceability is current
-        run: python tools/trace.py --check
+      - name: Traceability (markers cite known IDs; checked on a regenerated TRACE.md)
+        run: python tools/trace.py && python tools/trace.py --check
+      - name: PR leaves TRACE.md to trace.yml
+        if: github.event_name == 'pull_request'
+        # HEAD is the PR's test merge (base^1, branch^2). Three dots compare the branch with
+        # its merge base, so TRACE.md updates it pulled in from main don't count.
+        run: |
+          git diff --quiet HEAD^1...HEAD^2 -- TRACE.md && exit 0
+          echo '::error file=TRACE.md::PRs must not change TRACE.md; trace.yml regenerates it on main after merge. Restore it with: git checkout $(git merge-base origin/main HEAD) -- TRACE.md'
+          exit 1
+  broker:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: broker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        with:
+          go-version: "1.26.8" # = broker/go.mod's toolchain line; checked below
+          cache: false
+      - name: Go is the toolchain go.mod names
+        run: |
+          want=$(awk '$1 == "toolchain" {print $2}' "$GITHUB_WORKSPACE/broker/go.mod")
+          got=$(go version | awk '{print $3}')
+          [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }
+      - name: Software TPM for the trusted-host slot (P2-4b)
+        run: sudo apt-get update -q && sudo apt-get install -yq swtpm
+      - name: Format
+        # Vendored third-party code keeps its upstream formatting.
+        run: f=$(find . -name '*.go' -not -path './vendor/*' -print0 | xargs -0 gofmt -l); test -z "$f" || { echo "$f"; exit 1; }
+      - name: Vet
+        run: go vet ./...
+      - name: Tests (race detector)
+        # The TPM tests fail rather than skip if swtpm is missing.
+        env:
+          AGENTOS_REQUIRE_SWTPM: "1"
+        run: go test -race -count=1 ./...
+  machines:
+    # Agent-machine lifecycle against the real kernel (P1-4): cgroup v2,
+    # overlayfs, and gVisor. Needs root, so it runs the root-only tests too.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        with:
+          go-version: "1.26.8" # = broker/go.mod's toolchain line; checked below
+          cache: false
+      - name: Go is the toolchain go.mod names
+        run: |
+          want=$(awk '$1 == "toolchain" {print $2}' "$GITHUB_WORKSPACE/broker/go.mod")
+          got=$(go version | awk '{print $3}')
+          [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }
+      - name: Install gVisor release-20260928.0 (checksum pinned)
+        run: |
+          B=https://storage.googleapis.com/gvisor/releases/release/20260928.0/x86_64
+          curl -fsSLo /tmp/gvisor.tar.bz2 "$B/gvisor.tar.bz2"
+          echo "c8d3a9fd4d4c4f5b8ff213caa4517356be128d18659ec4cde37828fe797f61a9725a602a846c81a8ed19c057a996515d31c081eba343ed4613a89951ba32ed59  /tmp/gvisor.tar.bz2" | sha512sum -c
+          mkdir /tmp/gv && tar -xjf /tmp/gvisor.tar.bz2 -C /tmp/gv
+          sudo install -m 0755 /tmp/gv/runsc /usr/local/bin/runsc
+          sudo mkdir -p /usr/local/bin/gvisor-bin
+          sudo install -m 0755 /tmp/gv/gvisor-bin/* /usr/local/bin/gvisor-bin/
+          runsc --version
+      - name: Machine tests as root
+        working-directory: broker
+        run: |
+          sudo mkdir /sys/fs/cgroup/agentos-ci
+          sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
+            AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \
+            go test -count=1 -v ./cgroup ./vm/... ./recovery ./cleanroom
+      - name: OpenClaw guest under gVisor (P1-7)
+        # Real OpenClaw, pinned by version and hash, as an agent machine with
+        # only its broker socket; a scripted model stands in for a provider.
+        run: |
+          sh guest/openclaw/build-rootfs.sh /tmp/ocroot
+          cd broker && sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
+            AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_OPENCLAW_ROOTFS=/tmp/ocroot \
+            go test -count=1 -v -run '^TestIntegrationOpenClawGuest$' ./e2e
+      - name: Loop 1 builder image under gVisor (W3-builder-image)
+        # The minimal builder image (brief client only) runs a builder job in
+        # a private lb- machine; a scripted model stands in for a provider.
+        run: |
+          sh guest/builder/build-rootfs.sh /tmp/lbroot
+          cd broker && sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
+            AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_BUILDER_ROOTFS=/tmp/lbroot \
+            go test -count=1 -v -run '^TestIntegrationBuilderImage$' ./e2e
+      - name: Floor box admission and preemption (P2-5)
+        # A 7680 MiB group stands in for the 8 GB N95 (HW-4); prints FLOOR-RESULT.
+        working-directory: broker
+        run: |
+          sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
+            AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \
+            go test -count=1 -v -timeout 20m ./floor
