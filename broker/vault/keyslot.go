@@ -390,13 +390,7 @@ func (v *Vault) Rekey(have, next Factor) error {
 		}
 	}
 	kf.Slots = append(out, s)
-	if err := v.replaceKeys(kf); err != nil {
-		return err
-	}
-	if next.Kind() == SlotPassphrase {
-		v.unfinished = false // changed again (P2-4g)
-	}
-	return nil
+	return v.replaceKeys(kf)
 }
 
 // proveSlotOfKind reports whether f opens one of its kind's slots to key.

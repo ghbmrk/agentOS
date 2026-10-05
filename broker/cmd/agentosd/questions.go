@@ -30,8 +30,15 @@ type questions struct {
 	run sync.WaitGroup
 }
 
-// wait returns once the loops open started have stopped.
-func (q *questions) wait() { q.run.Wait() }
+// wait returns once the loops open started have stopped (cancel their
+// ctx first) and the guard's queued notices are delivered. Flushing only
+// after the loops stop keeps Flush from racing the guard's own checks.
+func (q *questions) wait() {
+	q.run.Wait()
+	if g := q.g.Load(); g != nil {
+		g.Flush()
+	}
+}
 
 // Answer is the owner channel's answer hook (control.Handler.Answer).
 func (q *questions) Answer(ctx context.Context, msg string) (string, bool) {
@@ -87,10 +94,10 @@ type questionConfig struct {
 // sees the owner's words (REV-5). Questions and approval requests share
 // the gate's CH-15 budget, approval requests first (question Q3): the
 // gate reserves each question's text under its own lock.
-func (q *questions) open(ctx context.Context, d *daemon.Daemon, pre *preempter, cfg questionConfig) (*clock.Guard, error) {
+func (q *questions) open(ctx context.Context, d *daemon.Daemon, pre *preempter, cfg questionConfig) error {
 	ch := d.Owner()
 	if ch == nil {
-		return nil, errors.New("no owner channel")
+		return errors.New("no owner channel")
 	}
 	// No Notify yet: the guard's texts tell the owner that pre-allowances,
 	// request expiry and updates are playing safe, and those move onto the
@@ -102,7 +109,7 @@ func (q *questions) open(ctx context.Context, d *daemon.Daemon, pre *preempter, 
 		Logf:      log.Printf,
 	})
 	if err != nil {
-		return nil, err
+		return err
 	}
 	b, err := question.New(question.Config{
 		Send: ch.Notify,
@@ -121,14 +128,14 @@ func (q *questions) open(ctx context.Context, d *daemon.Daemon, pre *preempter, 
 		Logf:          log.Printf,
 	})
 	if err != nil {
-		return nil, err
+		return err
 	}
 	q.b.Store(b)
 	q.g.Store(guard)
 	q.run.Add(2)
 	go func() { defer q.run.Done(); guard.Run(ctx) }()
 	go func() { defer q.run.Done(); b.Run(ctx, 30*time.Second) }()
-	return guard, nil
+	return nil
 }
 
 // wire gives the daemon the answer hook and the STATUS clock line; call

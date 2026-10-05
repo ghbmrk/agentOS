@@ -888,3 +888,214 @@ func TestBuildersSeeOnlyTheHypothesisAndTheDevSplit(t *testing.T) {
 		t.Fatalf("Hypothesis fields %v", hf)
 	}
 }
+
+// REQ: LOOP-1, RES-1
+// PE1: a candidate whose evaluation is preempted is kept, so when Loop 1
+// is offered spare time again it re-proposes the same candidate without
+// another build (no second model spend), and the pipeline resumes its
+// evaluation from the completed pairs.
+func TestAPreemptedCandidateIsResumedNotRebuilt(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	b := &builder{files: map[string][]byte{"procedures/mail": []byte("v2")}}
+	l, err := NewLearn(LearnConfig{Pipeline: r.p, Journal: r.eng, Harvest: h, Builder: b, Now: r.clk.now})
+	must(t, err)
+	r.restart(l)
+	for n := 1; ; n++ {
+		ev, err := h.Evidence()
+		must(t, err)
+		if ev.HeldOut >= 6 && len(ev.Dev) > 0 {
+			break
+		}
+		r.corrected(h, n)
+	}
+	ev, _ := h.Evidence()
+	total := 2 * (ev.HeldOut + 1) // held-out cases plus the security fixture, both sides
+	var once sync.Once
+	r.ev.mu.Lock()
+	r.ev.hook = func(ctx context.Context, n int) {
+		if n == total-1 {
+			once.Do(func() { go r.s.Preempt() })
+			<-ctx.Done()
+		}
+	}
+	r.ev.mu.Unlock()
+	if ran, _ := r.s.Tick(context.Background()); !ran {
+		t.Fatal("Loop 1 did nothing")
+	}
+	if len(r.p.Adoptions()) != 0 {
+		t.Fatal("a preempted evaluation adopted")
+	}
+	first := r.ev.runs()
+	r.ev.mu.Lock()
+	r.ev.hook = nil
+	r.ev.mu.Unlock()
+	if ran, _ := r.s.Tick(context.Background()); !ran {
+		t.Fatal("the preempted candidate was not offered again")
+	}
+	if got := r.p.Files("procedures")["procedures/mail"]; string(got) != "v2" {
+		t.Fatalf("procedure is %q after the resumed candidate", got)
+	}
+	if n := len(b.got()); n != 1 {
+		t.Fatalf("%d builds, want 1: a preempted candidate was rebuilt", n)
+	}
+	if resumed := r.ev.runs() - first; resumed >= total {
+		t.Fatalf("resumed evaluation ran %d probes of %d: it started over", resumed, total)
+	}
+}
+
+// interruptingPipeline answers every proposal as preempted, and records
+// what it was given.
+type interruptingPipeline struct {
+	Pipeline
+	got []change.Candidate
+}
+
+func (p *interruptingPipeline) Propose(_ context.Context, c change.Candidate) (change.Report, error) {
+	p.got = append(p.got, c)
+	return change.Report{}, change.ErrInterrupted
+}
+
+func newKeepRig(t *testing.T) (*Learn, *interruptingPipeline, *builder, *clock) {
+	t.Helper()
+	pl := &interruptingPipeline{}
+	b := &builder{files: map[string][]byte{"procedures/mail": []byte("v2")}}
+	clk := &clock{t: time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)}
+	l, err := NewLearn(LearnConfig{Pipeline: pl, Journal: &journal.Engine{}, Harvest: &Harvester{}, Builder: b, Now: clk.now})
+	must(t, err)
+	return l, pl, b, clk
+}
+
+func hyp(key string, tasks ...string) Hypothesis {
+	h := Hypothesis{Signal: SignalCorrection, Class: change.ClassProcedure, Key: key, Tasks: tasks}
+	for _, task := range tasks {
+		h.Evidence = append(h.Evidence, journal.Status{Intent: journal.Intent{ID: task, Label: "private"}})
+	}
+	return h
+}
+
+// REQ: CHG-1, LOOP-1
+// L3 MUST-1 on #103: a kept candidate is reused only for the very brief it
+// was built from. The same number of tasks with one swapped, a task now
+// held out, or an expired candidate builds afresh.
+func TestAKeptCandidateNeedsTheSameBrief(t *testing.T) {
+	l, _, b, clk := newKeepRig(t)
+	ev := Evidence{}
+	h := hyp("k", "task-a", "task-b")
+	l.propose(context.Background(), h, ev)
+	l.propose(context.Background(), h, ev)
+	if n := len(b.got()); n != 1 {
+		t.Fatalf("%d builds for the same brief, want 1", n)
+	}
+
+	swapped := hyp("k", "task-a", "task-c") // same count, another task
+	l.propose(context.Background(), swapped, ev)
+	if n := len(b.got()); n != 2 {
+		t.Fatalf("%d builds after a task was swapped, want 2", n)
+	}
+
+	held := Evidence{heldTasks: map[string]bool{"task-a": true}}
+	l.propose(context.Background(), swapped, held)
+	if n := len(b.got()); n != 3 {
+		t.Fatalf("%d builds after a task was held out, want 3", n)
+	}
+
+	l.propose(context.Background(), swapped, ev) // kept, then reused once the hold lifts
+	if n := len(b.got()); n != 3 {
+		t.Fatalf("%d builds for an unchanged brief, want 3", n)
+	}
+	clk.mu.Lock()
+	clk.t = clk.t.Add(change.ResumeFor + time.Minute)
+	clk.mu.Unlock()
+	l.propose(context.Background(), swapped, ev)
+	if n := len(b.got()); n != 4 {
+		t.Fatalf("%d builds after the kept candidate expired, want 4", n)
+	}
+
+	dev := Evidence{Dev: []change.Case{{ID: "dev-1"}}}
+	l.propose(context.Background(), swapped, dev)
+	if n := len(b.got()); n != 5 {
+		t.Fatalf("%d builds after the dev split changed, want 5", n)
+	}
+}
+
+// REQ: LOOP-1
+// At most maxKeptCandidates candidates are kept, oldest dropped first.
+func TestKeptCandidatesAreBounded(t *testing.T) {
+	l, _, b, clk := newKeepRig(t)
+	for i := 0; i <= maxKeptCandidates; i++ {
+		clk.mu.Lock()
+		clk.t = clk.t.Add(time.Second)
+		clk.mu.Unlock()
+		l.propose(context.Background(), hyp(fmt.Sprintf("k%d", i), "t"), Evidence{})
+	}
+	l.mu.Lock()
+	n := len(l.built)
+	_, oldest := l.built["k0"]
+	l.mu.Unlock()
+	if n != maxKeptCandidates || oldest {
+		t.Fatalf("%d kept (oldest kept: %v), want %d without the oldest", n, oldest, maxKeptCandidates)
+	}
+	before := len(b.got())
+	l.propose(context.Background(), hyp(fmt.Sprintf("k%d", maxKeptCandidates), "t"), Evidence{})
+	if len(b.got()) != before {
+		t.Fatal("the newest kept candidate was rebuilt")
+	}
+}
+
+// REQ: RES-1, LOOP-1, LOOP-3
+// PE3: when admission refuses or preempts an evaluation machine with the
+// unit's context still live, the scheduler treats the unit as preempted:
+// it is not measured, the scheduler waits Retry before looking again
+// (no spin while the box has no room), and Loop 1 offers the same
+// candidate again without another build.
+func TestAnEvaluatorInterruptionIsAPreemption(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	b := &builder{files: map[string][]byte{"procedures/mail": []byte("v2")}}
+	l, err := NewLearn(LearnConfig{Pipeline: r.p, Journal: r.eng, Harvest: h, Builder: b, Now: r.clk.now})
+	must(t, err)
+	r.restart(l)
+	for n := 1; ; n++ {
+		ev, err := h.Evidence()
+		must(t, err)
+		if ev.HeldOut >= 6 && len(ev.Dev) > 0 {
+			break
+		}
+		r.corrected(h, n)
+	}
+	refused := fmt.Errorf("admission: no room: %w", change.ErrInterrupted)
+	r.ev.mu.Lock()
+	r.ev.refuse = func(n int) error {
+		if n == 3 {
+			return refused
+		}
+		return nil
+	}
+	r.ev.mu.Unlock()
+	ran, wait := r.s.Tick(context.Background())
+	if !ran || wait != time.Minute {
+		t.Fatalf("interrupted unit: ran %v, wait %v; want a Retry wait", ran, wait)
+	}
+	if len(r.p.Adoptions()) != 0 {
+		t.Fatal("an interrupted evaluation adopted")
+	}
+	r.s.mu.Lock()
+	runs := r.s.loops[Improve].runs
+	r.s.mu.Unlock()
+	if runs != 0 {
+		t.Fatalf("an interrupted unit was measured (%d runs)", runs)
+	}
+	r.ev.mu.Lock()
+	r.ev.refuse = nil
+	r.ev.mu.Unlock()
+	if ran, _ := r.s.Tick(context.Background()); !ran {
+		t.Fatal("the interrupted candidate was not offered again")
+	}
+	if got := r.p.Files("procedures")["procedures/mail"]; string(got) != "v2" {
+		t.Fatalf("procedure is %q after the resumed candidate", got)
+	}
+	if n := len(b.got()); n != 1 {
+		t.Fatalf("%d builds, want 1", n)
+	}
+}

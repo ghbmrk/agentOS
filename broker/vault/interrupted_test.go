@@ -125,3 +125,92 @@ func TestOtherSlotChangeIsNotAPassphraseChange(t *testing.T) {
 	}
 	w.Close()
 }
+
+// P2-4h (security R2 on #93): a re-encryption staged but never sealed
+// re-wraps every passphrase slot under a new key ID. That is no passphrase
+// change: a wrong passphrase gets the plain refusal, and the open reports
+// nothing unfinished.
+func TestInterruptedReencryptIsNotAPassphraseChange(t *testing.T) {
+	v, vp, kp := openWithPassphrase(t)
+	before, beforeVault := readBytes(t, kp), readBytes(t, vp)
+	crashAt(t, 1) // the first sealed step: both sets of slots
+	if _, err := v.Reencrypt(Passphrase(testPass)); err == nil {
+		t.Fatal("no crash")
+	}
+	staged := readBytes(t, kp+nextSuffix)
+	v.Close()
+	crashPoint = func(int) error { return nil }
+	// The drive as a crash before that seal leaves it.
+	putFile(t, vp, beforeVault)
+	putFile(t, kp, before)
+	putFile(t, kp+nextSuffix, staged)
+
+	if _, err := OpenSealed(vp, kp, Passphrase(newPass)); errors.Is(err, ErrChangeInterrupted) || !errors.Is(err, ErrNoSlotOpens) {
+		t.Fatalf("wrong passphrase beside a staged re-encryption: %v", err)
+	}
+	w, err := OpenSealed(vp, kp, Passphrase(testPass))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.ChangeUnfinished() {
+		t.Fatal("a re-encryption reported as a passphrase change")
+	}
+	w.Close()
+}
+
+// P2-4h (security R2 on #93): adding a passphrase slot keeps the old one,
+// so it is no passphrase change either.
+func TestAddedPassphraseSlotIsNotAPassphraseChange(t *testing.T) {
+	v, vp, kp := openWithPassphrase(t)
+	before, beforeVault := readBytes(t, kp), readBytes(t, vp)
+	if err := v.AddSlot(Passphrase(newPass), nil); err != nil {
+		t.Fatal(err)
+	}
+	after := readBytes(t, kp)
+	v.Close()
+	putFile(t, vp, beforeVault)
+	putFile(t, kp, before)
+	putFile(t, kp+nextSuffix, after)
+
+	if _, err := OpenSealed(vp, kp, Passphrase(newPass+"x")); errors.Is(err, ErrChangeInterrupted) || !errors.Is(err, ErrNoSlotOpens) {
+		t.Fatalf("wrong passphrase beside a staged added slot: %v", err)
+	}
+	w, err := OpenSealed(vp, kp, Passphrase(testPass))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.ChangeUnfinished() {
+		t.Fatal("an added passphrase slot reported as a passphrase change")
+	}
+	w.Close()
+}
+
+// P2-4h (security R2 on #93): any slot change that replaces the
+// passphrase clears the unfinished report, not only Rekey.
+func TestPassphraseReplacedByAddSlotClearsUnfinished(t *testing.T) {
+	v, vp, kp := openWithPassphrase(t)
+	before, beforeVault := readBytes(t, kp), readBytes(t, vp)
+	if err := v.Rekey(Passphrase(testPass), Passphrase(newPass)); err != nil {
+		t.Fatal(err)
+	}
+	after := readBytes(t, kp)
+	v.Close()
+	putFile(t, vp, beforeVault)
+	putFile(t, kp, before)
+	putFile(t, kp+nextSuffix, after)
+	w, err := OpenSealed(vp, kp, Passphrase(testPass))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	if !w.ChangeUnfinished() {
+		t.Fatal("not reported")
+	}
+	replaceAll := func(Slot) bool { return true }
+	if err := w.AddSlot(Passphrase(newPass), replaceAll); err != nil {
+		t.Fatal(err)
+	}
+	if w.ChangeUnfinished() {
+		t.Fatal("still reported after the passphrase was replaced")
+	}
+}

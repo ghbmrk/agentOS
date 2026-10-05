@@ -92,6 +92,7 @@ func (v *Vault) replaceKeys(kf *keyFile) error {
 	if err != nil {
 		return err
 	}
+	cur, cerr := readKeys(v.keysPath)
 	if err := writeAtomic(v.keysPath+nextSuffix, raw); err != nil {
 		return err
 	}
@@ -102,6 +103,11 @@ func (v *Vault) replaceKeys(kf *keyFile) error {
 		// A leftover copy is inert (stagedKeys, dropStaleStaged).
 		v.nextKeys = nil
 		return err
+	}
+	// Sealed, so decided: a change of the passphrase replaces any that
+	// never took effect (P2-4g).
+	if cerr == nil && passphraseChanged(cur, kf) {
+		v.unfinished = false
 	}
 	if err := crashPoint(crashKeysSealed); err != nil {
 		return err
@@ -205,25 +211,31 @@ func (v *Vault) checkKeys(raw []byte, kf *keyFile, want []byte, opened Slot) err
 	return nil
 }
 
-// passphraseChanged reports whether next holds other passphrase slots
-// than cur: the slot change between them is a passphrase change.
+// passphraseChanged reports whether the slot change from cur to next is a
+// passphrase change: both files wrap the same data key, and next drops a
+// passphrase slot of cur and adds one of its own. A re-encryption re-wraps
+// every slot under a new key ID, and an added passphrase slot keeps the
+// old one, so neither counts (security R2 on #93).
 func passphraseChanged(cur, next *keyFile) bool {
-	n := 0
-	for _, s := range next.Slots {
-		if s.Kind != SlotPassphrase {
-			continue
-		}
-		n++
-		if !cur.has(s) {
+	a, err := cur.keyID()
+	if err != nil {
+		return false
+	}
+	b, err := next.keyID()
+	if err != nil || !bytes.Equal(a, b) {
+		return false
+	}
+	return dropsPassphrase(cur, next) && dropsPassphrase(next, cur)
+}
+
+// dropsPassphrase reports whether from holds a passphrase slot to lacks.
+func dropsPassphrase(from, to *keyFile) bool {
+	for _, s := range from.Slots {
+		if s.Kind == SlotPassphrase && !to.has(s) {
 			return true
 		}
 	}
-	for _, s := range cur.Slots {
-		if s.Kind == SlotPassphrase {
-			n--
-		}
-	}
-	return n != 0
+	return false
 }
 
 // has reports whether the file holds slot s unchanged.

@@ -225,11 +225,11 @@ func main() {
 	}
 	// The owner channel failing to take questions must not take it down:
 	// the tools are then not offered and replies are task chat.
-	if guard, err := qs.open(ctx, d, pre, qcfg); err != nil {
+	if err := qs.open(ctx, d, pre, qcfg); err != nil {
 		log.Printf("owner questions disabled: %v", err)
-	} else {
-		defer guard.Flush()
 	}
+	// At exit the question loops stop before the guard's notices flush.
+	defer func() { stop(); qs.wait() }()
 	if runsc != "" {
 		services := &lateServices{}
 		m, err := vm.Open(ctx, vm.Config{
@@ -251,7 +251,11 @@ func main() {
 				log.Printf("agent machines disabled: %v", err)
 			} else {
 				services.live.Store(&svc{plane})
-				agent.a.Store(&guest.OwnerAgent{Plane: plane, Machine: agentMachine})
+				oa := &guest.OwnerAgent{Plane: plane, Machine: agentMachine}
+				if lp != nil {
+					oa.Delivered = lp.delivered
+				}
+				agent.a.Store(oa)
 				defer plane.Shutdown()
 				if lp != nil {
 					// Replay machines run the agent's image and launch.

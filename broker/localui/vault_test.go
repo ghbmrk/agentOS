@@ -111,7 +111,7 @@ func (f *fakeVault) Unlock(ctx context.Context, pass string) (VaultStatus, strin
 	}
 	// A new correct passphrase supersedes a pending unlock (P2-4f).
 	f.n++
-	f.state, f.ticket, f.expires = "pending", fmt.Sprintf("tkt-%016d", f.n), time.Date(2026, 10, 5, 9, 15, 0, 0, time.UTC)
+	f.state, f.ticket, f.expires = "pending", fmt.Sprintf("tkt-%016d", f.n), time.Date(2099, 10, 5, 9, 15, 0, 0, time.UTC) // far future: the unlock cookie carries this expiry, and the client drops expired cookies by the wall clock
 	return f.status(), f.ticket, nil
 }
 
@@ -936,7 +936,7 @@ func TestVaultInterruptedPassphraseChange(t *testing.T) {
 	}
 
 	fv.interrupted, fv.unfinished = false, true
-	const line = "Your passphrase change did not finish; change it again."
+	const line = "Your passphrase change did not finish, so your old passphrase still works. Change it again the same way you started it."
 	if page := r.get("/unlock/vault"); strings.Contains(page, line) {
 		t.Fatalf("shown while locked:\n%s", page)
 	}
