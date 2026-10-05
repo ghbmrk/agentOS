@@ -287,3 +287,52 @@ func TestWrongCodesFromOnePhoneAreBounded(t *testing.T) {
 		t.Fatalf("after a minute: %s", w.Body.String())
 	}
 }
+
+// L3 S-b on #165: parallel approvals cannot pass the per-phone bound
+// together. With one slot left, of several wrong codes posted at once only
+// one reaches the owner channel.
+func TestParallelPostsKeepThePerPhoneBound(t *testing.T) {
+	a := newApprovalRig(t)
+	for i := 0; i < PageWrongPerMinute-1; i++ {
+		if i%2 == 0 {
+			a.ch.RequestLocal(pageItem(fmt.Sprint("w", i)), 0)
+		}
+		open := a.ch.LocalRequests()
+		id := open[len(open)-1].ID
+		a.post("/approvals/", answer(a.form(id), "approve", fmt.Sprintf("%06d", i)))
+	}
+	id, _ := a.ch.RequestLocal(pageItem("p"), 0)
+	f := a.form(id)
+	// Each answer takes a while, so the posts overlap in the channel if
+	// the bound lets them through together.
+	a.srv.SetOwner(slowOwner{a.ch})
+	var mu sync.Mutex
+	var wrong, held int
+	var wg sync.WaitGroup
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			body := a.post("/approvals/", answer(f, "approve", fmt.Sprintf("1%05d", i))).Body.String()
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case strings.Contains(body, "Wrong code"):
+				wrong++
+			case strings.Contains(body, "Wait a minute"):
+				held++
+			}
+		}(i)
+	}
+	wg.Wait()
+	if wrong != 1 || held != 4 {
+		t.Fatalf("%d reached the channel as wrong, %d held back", wrong, held)
+	}
+}
+
+type slowOwner struct{ *owner.Channel }
+
+func (o slowOwner) LocalAnswer(id, sum string, approve bool, code string) (string, error) {
+	time.Sleep(50 * time.Millisecond)
+	return o.Channel.LocalAnswer(id, sum, approve, code)
+}

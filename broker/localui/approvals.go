@@ -102,16 +102,19 @@ func (s *Server) answer(o Owner, sess string, f map[string][]string) (msg, refus
 	if approve && code == "" {
 		return "", "Enter a code from your code generator to approve."
 	}
+	wrong := false
 	if approve {
-		// One approval at a time, so two posts cannot both pass mayTry
-		// before either records a wrong code (L3 on #165).
-		s.approveMu.Lock()
-		defer s.approveMu.Unlock()
-	}
-	if approve && !s.mayTry(sess) {
-		return "", "Too many wrong codes from this phone. Wait a minute, then try again."
+		// The attempt holds a slot until it is known not to be wrong, so
+		// parallel posts cannot pass the bound together, and nothing is
+		// held while the channel answers (L3 N3 on #165, and N1 after it).
+		release, ok := s.tryPage(sess)
+		if !ok {
+			return "", "Too many wrong codes from this phone. Wait a minute, then try again."
+		}
+		defer func() { release(wrong) }()
 	}
 	if strings.HasPrefix(code, owner.UnlockProofPrefix) {
+		wrong = true
 		return "", "That code did not work. Each code works once; wait for the next one."
 	}
 	out, err := o.LocalAnswer(id, sum, approve, code)
@@ -121,7 +124,7 @@ func (s *Server) answer(o Owner, sess string, f map[string][]string) (msg, refus
 	case errors.Is(err, owner.ErrTooMany):
 		return "", "Too many tries on the box's Wi-Fi in the last day, so approving here is paused for up to 24 hours. Deny still works here, and NO by text."
 	case errors.Is(err, owner.ErrWrongCode):
-		s.wrongTry(sess)
+		wrong = true
 		if out != "" {
 			return "", out // tries left, or void (UX A4)
 		}
@@ -139,7 +142,10 @@ const stalePage = "This page is out of date. Check the request below and answer 
 // (Security D5), on top of the channel's per-request and daily bounds.
 const PageWrongPerMinute = 5
 
-func (s *Server) mayTry(sess string) bool {
+// tryPage takes one of the phone's PageWrongPerMinute slots for an
+// approval attempt. release(true) keeps it as a wrong code for a minute;
+// release(false) gives it back.
+func (s *Server) tryPage(sess string) (release func(wrong bool), ok bool) {
 	now := s.cfg.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -151,20 +157,34 @@ func (s *Server) mayTry(sess string) bool {
 		}
 	}
 	if _, ok := s.pageWrong[sess]; !ok && len(s.pageWrong) >= MaxSessions*2 {
-		return false // full: fail closed (Security R2 on #165)
+		return nil, false // full: fail closed (Security R2 on #165)
 	}
-	return len(s.pageWrong[sess]) < PageWrongPerMinute
-}
-
-func (s *Server) wrongTry(sess string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if len(s.pageWrong[sess]) >= PageWrongPerMinute {
+		return nil, false
+	}
 	if s.pageWrong == nil {
 		s.pageWrong = map[string][]time.Time{}
 	}
-	if len(s.pageWrong) < MaxSessions*2 {
-		s.pageWrong[sess] = append(s.pageWrong[sess], s.cfg.Now())
-	}
+	s.pageWrong[sess] = append(s.pageWrong[sess], now)
+	return func(wrong bool) {
+		if wrong {
+			return
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		ts := s.pageWrong[sess]
+		for i := len(ts) - 1; i >= 0; i-- {
+			if ts[i].Equal(now) {
+				ts = append(ts[:i:i], ts[i+1:]...)
+				break
+			}
+		}
+		if len(ts) == 0 {
+			delete(s.pageWrong, sess)
+		} else {
+			s.pageWrong[sess] = ts
+		}
+	}, true
 }
 
 // since keeps the times after cut.

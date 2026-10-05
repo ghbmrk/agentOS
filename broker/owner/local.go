@@ -301,6 +301,7 @@ func (c *Channel) lockAlertsLocked(locked bool, now time.Time) []string {
 	}
 	if c.codes.justChallenged {
 		c.codes.justChallenged = false
+		c.floods.challenge++ // for the digest, as floodLocked counts it (L3 N2 on #165)
 		c.held = nil
 		c.alertAt = now
 		alerts = append(alerts, fmt.Sprintf("Too many wrong codes, the last on the box's Wi-Fi. Codes by text now need a challenge: reply UNLOCK %s and a code from your code generator within %s.",
@@ -455,6 +456,14 @@ func (c *Channel) LocalAnswer(id, sum string, approve bool, code string) (string
 		}
 		return "", ErrChanged
 	}
+	if approve && r.code != "" && eq(code, r.code) {
+		// The page takes a code-generator code; the texted one is refused
+		// here without counting, since a phone offers it from the text
+		// (L3 S-a on #165). Any other guess still counts.
+		c.mu.Unlock()
+		c.decide(decided)
+		return "", errors.New("That's the code I texted. Here, use a code from your code generator.")
+	}
 	if approve {
 		ok, err := c.takeLocalLocked(now)
 		if err != nil || !ok {
@@ -507,6 +516,8 @@ func (c *Channel) LocalAnswer(id, sum string, approve bool, code string) (string
 		}
 		if ran {
 			msg = "Approved. Your agent can go ahead." + strings.TrimPrefix(msg, "Approved "+id+".")
+		} else {
+			note += " (it did not run)" // L3 N3 on #165
 		}
 	default:
 		note, msg = "Denied "+id, "Denied."

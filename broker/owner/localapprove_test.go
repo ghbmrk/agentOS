@@ -342,8 +342,15 @@ func TestThePageApprovesTextedRequestsWithAStrongCode(t *testing.T) {
 	r := newRig(t, nil)
 	id, _ := r.ch.Request([]Item{lowItem("t1")}, 0)
 	texted := lowCodeRe.FindStringSubmatch(r.inbox())[2]
-	if _, err := r.ch.LocalAnswer(id, r.sum(id), true, texted); err != ErrWrongCode {
-		t.Fatalf("texted code on the page: %v", err)
+	// L3 S-a: the texted code is refused there with a hint, not counted.
+	used := r.ch.codes.st.LocalUsed
+	for i := 0; i < WrongPerRequest; i++ {
+		if _, err := r.ch.LocalAnswer(id, r.sum(id), true, texted); err == nil || err.Error() != "That's the code I texted. Here, use a code from your code generator." {
+			t.Fatalf("texted code on the page: %v", err)
+		}
+	}
+	if len(r.ch.codes.st.Wrong) != 0 || r.ch.codes.st.LocalUsed != used || len(r.ch.LocalRequests()) != 1 {
+		t.Fatal("the texted code counted")
 	}
 	msg, err := r.ch.LocalAnswer(id, r.sum(id), true, r.totp())
 	if err != nil || !strings.HasPrefix(msg, "Approved. Your agent can go ahead.") {
@@ -375,6 +382,10 @@ func TestThePageSaysWhenAnApprovedItemDidNotRun(t *testing.T) {
 	msg, err := r.ch.LocalAnswer(id, sum, true, code)
 	if err != nil || strings.Contains(msg, "go ahead") || !strings.Contains(msg, "did not run") {
 		t.Fatalf("approve: %q %v", msg, err)
+	}
+	// L3 N3: the owner's text says so too.
+	if got := r.inbox(); !strings.Contains(got, "(it did not run) on my Wi-Fi page") {
+		t.Fatalf("told %q", got)
 	}
 }
 
@@ -429,5 +440,39 @@ func TestTheSumCoversTheExpiry(t *testing.T) {
 	later.expires = r.expires.Add(time.Hour)
 	if requestSum(r) == requestSum(&later) {
 		t.Fatal("expiry not in the sum")
+	}
+}
+
+// L3 S-b on #165: many wrong page codes text the lock once and challenge
+// mode once, each when it happens, and challenge mode reaches the digest.
+func TestManyWrongPageCodesTellTheLockAndChallengeOnce(t *testing.T) {
+	r := newRig(t, nil)
+	n := WrongToChallenge + 2
+	for i := 0; i < n; i++ {
+		if i%WrongPerRequest == 0 {
+			r.ch.RequestLocal(localItem(fmt.Sprint("i", i)), 0)
+		}
+		open := r.ch.LocalRequests()
+		id := open[len(open)-1].ID
+		if _, err := r.ch.LocalAnswer(id, r.sum(id), true, fmt.Sprintf("%06d", i)); err != ErrWrongCode {
+			t.Fatalf("wrong %d: %v", i, err)
+		}
+	}
+	var locks, challenges int
+	for {
+		select {
+		case m := <-r.phone.Inbox():
+			locks += strings.Count(m.Text, "the session is locked")
+			challenges += strings.Count(m.Text, "need a challenge")
+			continue
+		default:
+		}
+		break
+	}
+	if locks != 1 || challenges != 1 {
+		t.Fatalf("%d lock texts, %d challenge texts", locks, challenges)
+	}
+	if notes := strings.Join(r.ch.TakeDigestNotes(), " "); !strings.Contains(notes, "challenge mode switched on 1 times") {
+		t.Fatalf("digest %q", notes)
 	}
 }

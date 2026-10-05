@@ -86,7 +86,6 @@ type Server struct {
 	// lists each phone's recent wrong approval codes (PageWrongPerMinute).
 	formKey   []byte
 	pageWrong map[string][]time.Time
-	approveMu sync.Mutex // serializes page approvals
 
 	mu       sync.Mutex
 	owner    Owner
