@@ -297,13 +297,18 @@ func (u Usage) openAI() map[string]any {
 
 // oaUsage is a chat-completions usage object as OpenAI reports it.
 type oaUsage struct {
-	PromptTokens        int64 `json:"prompt_tokens"`
-	CompletionTokens    int64 `json:"completion_tokens"`
+	PromptTokens        int64  `json:"prompt_tokens"`
+	CompletionTokens    *int64 `json:"completion_tokens"` // nil: not reported
 	PromptTokensDetails struct {
 		CachedTokens int64 `json:"cached_tokens"`
 	} `json:"prompt_tokens_details"`
 }
 
+// usage is reported only with an output count (see aUsage.usage).
 func (o oaUsage) usage() Usage {
-	return Usage{Input: o.PromptTokens - o.PromptTokensDetails.CachedTokens, Output: o.CompletionTokens, CacheRead: o.PromptTokensDetails.CachedTokens, Reported: true}
+	u := Usage{Input: o.PromptTokens - o.PromptTokensDetails.CachedTokens, CacheRead: o.PromptTokensDetails.CachedTokens, Reported: o.CompletionTokens != nil}
+	if o.CompletionTokens != nil {
+		u.Output = *o.CompletionTokens
+	}
+	return u
 }
