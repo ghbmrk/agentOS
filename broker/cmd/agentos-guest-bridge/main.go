@@ -8,6 +8,10 @@
 //     machine's broker socket (/run/agentos/broker.sock), because guests
 //     such as OpenClaw speak HTTP to a URL, not to a Unix socket. Model
 //     calls (/model/...) and broker tools (/mcp) go this way (ARC-6 (a), (b)).
+//   - Serve the tree's compiled skills and procedures as MCP tools on
+//     /skills/mcp (CAP-5, package skill). A skill runs here, in the guest,
+//     and sends each step to the broker as an ordinary effect_request, so
+//     it carries no authority the guest lacks.
 //   - Fetch owner messages from the broker (/owner/next), hand each to the
 //     guest's own inbound API (OpenAI-compatible chat completions on the
 //     gateway), and post the answer back (/owner/reply) (ARC-6 (c)).
@@ -35,6 +39,8 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/skill"
 )
 
 func main() {
@@ -42,6 +48,7 @@ func main() {
 	listen := flag.String("listen", "127.0.0.1:18080", "where the guest reaches the broker")
 	gateway := flag.String("gateway", "http://127.0.0.1:18789", "the guest's inbound API")
 	model := flag.String("inbound-model", "openclaw", "model name the inbound API expects")
+	tree := flag.String("tree", "/etc/agentos/tree", "the managed tree's skills and procedures (CAP-5)")
 	flag.Parse()
 
 	var b [24]byte
@@ -65,7 +72,11 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	go http.Serve(l, rp)
+	mux := http.NewServeMux()
+	mux.Handle("/", rp)
+	mux.Handle("/skills/mcp", &skill.Server{Dir: *tree,
+		Effects: &skill.MCPEffects{Client: broker, URL: "http://broker.localhost/mcp"}})
+	go http.Serve(l, mux)
 
 	var child *exec.Cmd
 	if args := flag.Args(); len(args) > 0 {
