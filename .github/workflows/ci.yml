@@ -61,3 +61,11 @@ jobs:
           sudo env "PATH=$PATH" HOME=/root GOCACHE=/tmp/gocache \
             AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \
             go test -count=1 -v ./cgroup ./vm/...
+      - name: OpenClaw guest under gVisor (P1-7)
+        # Real OpenClaw, pinned by version and hash, as an agent machine with
+        # only its broker socket; a scripted model stands in for a provider.
+        run: |
+          sh guest/openclaw/build-rootfs.sh /tmp/ocroot
+          cd broker && sudo env "PATH=$PATH" HOME=/root GOCACHE=/tmp/gocache \
+            AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_OPENCLAW_ROOTFS=/tmp/ocroot \
+            go test -count=1 -v -run '^TestIntegrationOpenClawGuest$' ./e2e

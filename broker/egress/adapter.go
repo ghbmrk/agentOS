@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/ghbmrk/agentos/broker/verb"
 )
 
 // Adapter declares one credentialed upstream: where it lives, which vault
@@ -31,15 +33,31 @@ type Injection struct {
 	Prefix string
 }
 
-// Operation is one declared request shape. Path is a template of literal
-// segments and {name} segments, each of which matches one non-empty
-// segment. Body, when set, requires a JSON object body and constrains it.
+// Operation is one declared request shape. Verb maps it to one verb of the
+// broker's closed list (ADP-2). Path is a template of literal segments and
+// {name} segments, each of which matches one non-empty segment. Body, when
+// set, requires a JSON object body and constrains it.
 type Operation struct {
 	Name   string
+	Verb   string
 	Method string
 	Path   string
 	Body   *BodyRule
 }
+
+// The broker's closed verb list (ADP-2), from package verb. An adapter maps
+// each operation to one of these; it cannot define its own.
+const (
+	VerbRead          = verb.Read
+	VerbDraft         = verb.Draft
+	VerbSend          = verb.Send
+	VerbPost          = verb.Post
+	VerbBuy           = verb.Buy
+	VerbShare         = verb.Share
+	VerbDeleteRemote  = verb.DeleteRemote
+	VerbChangeAccount = verb.ChangeAccount
+	VerbRevealSecret  = verb.RevealSecret
+)
 
 // BodyRule constrains a JSON request body (ADP-10). The proxy decodes the
 // body, checks it, applies Set, and forwards its own re-encoding, so the
@@ -61,6 +79,10 @@ type BodyRule struct {
 	ServerToolKeys []string
 	// Set forces top-level keys, e.g. store:false.
 	Set map[string]any
+	// StreamUsage forces stream_options.include_usage on a streamed
+	// OpenAI-style request, so the provider reports the usage the OP-8
+	// meter charges, hidden reasoning tokens included.
+	StreamUsage bool
 }
 
 // OpenAI is the OpenAI-compatible model relay: inference endpoints only
@@ -72,12 +94,13 @@ func OpenAI(credential string) Adapter {
 		Credential: credential,
 		Inject:     Injection{Header: "Authorization", Prefix: "Bearer "},
 		Operations: []Operation{{
-			Name: "chat.completions", Method: "POST", Path: "/v1/chat/completions",
+			Name: "chat.completions", Verb: VerbRead, Method: "POST", Path: "/v1/chat/completions",
 			Body: &BodyRule{
 				DenyKeys:       []string{"background"},
 				PublicMayFetch: true,
 				ServerToolKeys: []string{"web_search_options", "mcp_servers", "container"},
 				Set:            map[string]any{"store": false},
+				StreamUsage:    true,
 			},
 		}},
 	}
@@ -94,7 +117,7 @@ func Anthropic(credential string) Adapter {
 		Credential: credential,
 		Inject:     Injection{Header: "X-Api-Key"},
 		Operations: []Operation{{
-			Name: "messages", Method: "POST", Path: "/v1/messages",
+			Name: "messages", Verb: VerbRead, Method: "POST", Path: "/v1/messages",
 			Body: &BodyRule{
 				DenyKeys:       []string{"background"},
 				PublicMayFetch: true,
@@ -152,6 +175,9 @@ func (a Adapter) validate() error {
 	for _, op := range a.Operations {
 		if op.Name == "" || op.Method == "" || op.Method != strings.ToUpper(op.Method) {
 			return fmt.Errorf("adapter %s: bad operation %+v", a.Name, op)
+		}
+		if !verb.Valid(op.Verb) {
+			return fmt.Errorf("adapter %s: operation %s: verb %q is not on the broker's list (ADP-2)", a.Name, op.Name, op.Verb)
 		}
 		if _, err := splitPath(op.Path); err != nil {
 			return fmt.Errorf("adapter %s: operation %s: %v", a.Name, op.Name, err)

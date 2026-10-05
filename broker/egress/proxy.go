@@ -15,8 +15,10 @@
 // the vault redactor (CRED-7), streamed so token streams keep flowing.
 // Every decision is reported to the Auditor; anything else is denied.
 //
-// Not yet here (see ASSUMPTIONS.md): the ADP-10 verb-class and intent check
-// before forwarding, and OP-8 metering.
+// Each operation carries a verb from the broker's closed list (ADP-2).
+// Only reads are forwarded; any other verb needs an intent before it
+// reaches a service, and that path does not exist yet, so it is denied
+// (ASSUMPTIONS.md E9). OP-8 metering wraps the proxy in package guest.
 //
 // The proxy is not on the control path (ARC-2): STOP, STATUS, and
 // admission never import it.
@@ -274,6 +276,14 @@ func (p *Proxy) serve(machine string, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ev.Operation = op.Name
+	// ADP-10: apply the verb class before forwarding. Reads have no effect
+	// on the account. Every other verb needs an intent in the journal
+	// before it reaches the service, and the proxy has no intent path yet
+	// (E9), so it fails closed.
+	if op.Verb != VerbRead {
+		deny(http.StatusForbidden, "operation "+op.Verb+" needs an intent; none is wired for proxied effects")
+		return
+	}
 
 	if reason, ok := p.admit(machine); !ok {
 		deny(http.StatusTooManyRequests, reason)
@@ -419,6 +429,14 @@ func (b *BodyRule) apply(body []byte, public bool) ([]byte, error) {
 	}
 	for k, v := range b.Set {
 		obj[k] = v
+	}
+	if b.StreamUsage && obj["stream"] == true {
+		so, _ := obj["stream_options"].(map[string]any)
+		if so == nil {
+			so = map[string]any{}
+		}
+		so["include_usage"] = true
+		obj["stream_options"] = so
 	}
 	var out bytes.Buffer
 	enc := json.NewEncoder(&out)
