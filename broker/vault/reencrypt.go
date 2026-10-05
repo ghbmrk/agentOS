@@ -52,19 +52,6 @@ func fileKeyID(path string) ([]byte, error) {
 	return env.KeyID, nil
 }
 
-// finishReencrypt keeps only the slots for key ID want: the vault file is
-// sealed under that key, so the others open nothing current.
-func finishReencrypt(keysPath string, kf *keyFile, want []byte) error {
-	out := kf.Slots[:0:0]
-	for _, s := range kf.Slots {
-		if bytes.Equal(s.KeyID, want) {
-			out = append(out, s)
-		}
-	}
-	kf.Slots = out
-	return writeKeys(keysPath, kf)
-}
-
 // Reencrypt seals the open vault under a fresh data key and rewraps every
 // slot one of factors opens, each under its existing key-encryption key,
 // so no factor changes. A passphrase or recovery slot no factor opens
@@ -89,17 +76,8 @@ func (v *Vault) Reencrypt(factors ...Factor) (dropped int, err error) {
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if v.closed {
-		return 0, ErrClosed
-	}
-	if v.key == nil {
-		return 0, errors.New("vault: not opened through its key slots")
-	}
-	kf, err := readKeys(v.keysPath)
+	kf, err := v.slotsForChange()
 	if err != nil {
-		return 0, err
-	}
-	if _, err := kf.keyID(); err != nil {
 		return 0, err
 	}
 
@@ -132,20 +110,19 @@ func (v *Vault) Reencrypt(factors ...Factor) (dropped int, err error) {
 	}
 
 	// 1. Both sets of slots: a crash here leaves the vault under the old
-	// key with its old slots.
+	// key, and OpenSealed keeps the old slots.
 	both := &keyFile{Magic: kf.Magic, Version: kf.Version, Slots: append(append([]Slot(nil), kf.Slots...), fresh...)}
-	if err := writeKeys(v.keysPath, both); err != nil {
+	if err := v.replaceKeys(both); err != nil {
 		return 0, err
 	}
 	if err := crashPoint(1); err != nil {
 		return 0, err
 	}
-	// 2. The vault under the new key.
+	// 2. The vault under the new key; OpenSealed now keeps the new slots.
 	oldAEAD, oldID := v.aead, v.keyID
 	v.aead, v.keyID = aead, id
 	if err := v.save(); err != nil {
 		v.aead, v.keyID = oldAEAD, oldID
-		writeKeys(v.keysPath, kf)
 		return 0, err
 	}
 	wipe(v.key)
@@ -153,9 +130,10 @@ func (v *Vault) Reencrypt(factors ...Factor) (dropped int, err error) {
 	if err := crashPoint(2); err != nil {
 		return 0, err
 	}
-	// 3. Only the new slots. A failure here is finished by the next
-	// OpenSealed; the vault is already under the new key.
-	writeKeys(v.keysPath, &keyFile{Magic: kf.Magic, Version: kf.Version, Slots: fresh})
+	// 3. Only the new slots.
+	if err := v.replaceKeys(&keyFile{Magic: kf.Magic, Version: kf.Version, Slots: fresh}); err != nil {
+		return 0, err
+	}
 	return dropped, nil
 }
 

@@ -398,32 +398,63 @@ func TestInterruptedAnchoring(t *testing.T) {
 
 // A restore with the recovery key (REC-1) is a deliberate rollback: after
 // Rebase the restored vault opens on the PC that refused the old copy, and
-// it no longer matches that PC's old counter.
+// it no longer matches that PC's old counter. Rebase takes the recovery key
+// and drops every trusted-host slot with the anchors, so it cannot launder
+// an old copy into one this PC opens unattended (review of #45, F2).
 func TestRebaseAfterRestore(t *testing.T) {
-	d, pc := newDrive(t), newPC("alpha")
-	v := d.open()
+	v, vp, kp := openWithPassphrase(t)
+	rec := recoveryish{bytes.Repeat([]byte{9}, KeySize)}
+	if err := v.AddSlot(rec, func(s Slot) bool { return s.Kind == SlotRecovery }); err != nil {
+		t.Fatal(err)
+	}
+	alpha, pc := newHost("alpha"), newPC("alpha")
+	if err := v.AddSlot(alpha, sameHost(alpha)); err != nil {
+		t.Fatal(err)
+	}
 	if err := v.Anchor(pc); err != nil {
 		t.Fatal(err)
 	}
-	backup := d.copy()
-	mustPut(t, v, "openai", "sk-canary-after-backup")
+	backupVault, backupKeys := readBytes(t, vp), readBytes(t, kp)
+	mustPut(t, v, "anthropic", "sk-canary-after-backup")
 	oldID := append([]byte(nil), v.id...)
 	v.Close()
 
-	d.putBack(backup)
-	v = d.open()
+	for p, b := range map[string][]byte{vp: backupVault, kp: backupKeys} {
+		if err := os.WriteFile(p, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	v, err := OpenSealed(vp, kp, Passphrase(testPass))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := v.Bind(pc); !errors.Is(err, ErrRolledBack) {
 		t.Fatalf("backup before Rebase: %v", err)
 	}
-	if err := v.Rebase(); err != nil {
-		t.Fatal(err)
+	if _, err := v.Rebase(Passphrase(testPass)); err == nil {
+		t.Fatal("Rebase without the recovery key")
+	}
+	if _, err := v.Rebase(recoveryish{bytes.Repeat([]byte{8}, KeySize)}); !errors.Is(err, ErrNoSlotOpens) {
+		t.Fatalf("Rebase with a wrong recovery key: %v", err)
+	}
+	if n, err := v.Rebase(rec); err != nil || n != 1 {
+		t.Fatalf("Rebase: dropped %d, %v; want 1", n, err)
 	}
 	if bytes.Equal(v.id, oldID) || len(v.Anchors()) != 0 {
 		t.Fatal("Rebase kept the vault ID or its anchors")
 	}
 	v.Close()
 
-	v = d.open()
+	if _, err := OpenSealed(vp, kp, alpha); !errors.Is(err, ErrNoSlotOpens) {
+		t.Fatalf("trusted-host slot survived Rebase: %v", err)
+	}
+	if slots, _ := ReadSlots(kp); len(slots) != 2 {
+		t.Fatalf("%d slots after Rebase, want passphrase and recovery", len(slots))
+	}
+	v, err = OpenSealed(vp, kp, rec)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer v.Close()
 	if err := v.Bind(pc); err != nil {
 		t.Fatalf("rebased vault: %v", err)

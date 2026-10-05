@@ -37,7 +37,7 @@ func dataKey(t *testing.T, kp string, f Factor, vp string) []byte {
 	return k
 }
 
-func readFile(t *testing.T, p string) []byte {
+func readBytes(t *testing.T, p string) []byte {
 	t.Helper()
 	b, err := os.ReadFile(p)
 	if err != nil {
@@ -52,10 +52,10 @@ func readFile(t *testing.T, p string) []byte {
 // since, and the new passphrase opens everything.
 func TestReencryptShutsOutTheOldKey(t *testing.T) {
 	v, vp, kp := openWithPassphrase(t)
-	oldKeys := readFile(t, kp)
+	oldKeys := readBytes(t, kp)
 	oldKey := dataKey(t, kp, Passphrase(testPass), vp)
 
-	if err := Rekey(kp, Passphrase(testPass), Passphrase(newPass)); err != nil {
+	if err := v.Rekey(Passphrase(testPass), Passphrase(newPass)); err != nil {
 		t.Fatal(err)
 	}
 	mustPut(t, v, "anthropic", "sk-canary-after-rekey")
@@ -102,10 +102,10 @@ func TestReencryptShutsOutTheOldKey(t *testing.T) {
 func TestReencryptRewrapsProvenSlots(t *testing.T) {
 	v, vp, kp := openWithPassphrase(t)
 	rec := recoveryish{bytes.Repeat([]byte{9}, KeySize)}
-	if err := Rekey(kp, Passphrase(testPass), rec); err != nil {
+	if err := v.Rekey(Passphrase(testPass), rec); err != nil {
 		t.Fatal(err)
 	}
-	if err := Rekey(kp, rec, Passphrase(testPass)); err != nil {
+	if err := v.Rekey(rec, Passphrase(testPass)); err != nil {
 		t.Fatal(err)
 	}
 	alpha, beta := newHost("alpha"), newHost("beta")
@@ -138,10 +138,10 @@ func TestReencryptNeedsEveryOwnerSlot(t *testing.T) {
 	v, vp, kp := openWithPassphrase(t)
 	defer v.Close()
 	rec := recoveryish{bytes.Repeat([]byte{9}, KeySize)}
-	if err := Rekey(kp, Passphrase(testPass), rec); err != nil {
+	if err := v.Rekey(Passphrase(testPass), rec); err != nil {
 		t.Fatal(err)
 	}
-	keys, vault := readFile(t, kp), readFile(t, vp)
+	keys, vault := readBytes(t, kp), readBytes(t, vp)
 	for name, fs := range map[string][]Factor{
 		"recovery missing": {Passphrase(testPass)},
 		"wrong passphrase": {Passphrase(newPass), rec},
@@ -150,7 +150,7 @@ func TestReencryptNeedsEveryOwnerSlot(t *testing.T) {
 		if _, err := v.Reencrypt(fs...); !errors.Is(err, ErrSlotNotProven) {
 			t.Fatalf("%s: %v", name, err)
 		}
-		if !bytes.Equal(keys, readFile(t, kp)) || !bytes.Equal(vault, readFile(t, vp)) {
+		if !bytes.Equal(keys, readBytes(t, kp)) || !bytes.Equal(vault, readBytes(t, vp)) {
 			t.Fatalf("%s: files changed", name)
 		}
 	}
@@ -174,10 +174,10 @@ func TestReencryptCrashSafety(t *testing.T) {
 		if err == nil {
 			t.Fatal("no crash")
 		}
-		v.Close()
-		if err := Rekey(kp, Passphrase(testPass), Passphrase(newPass)); !errors.Is(err, ErrReencryptPending) {
+		if err := v.Rekey(Passphrase(testPass), Passphrase(newPass)); !errors.Is(err, ErrReencryptPending) {
 			t.Fatalf("step %d: Rekey with two keys' slots: %v", step, err)
 		}
+		v.Close()
 		w, err := OpenSealed(vp, kp, Passphrase(testPass))
 		if err != nil {
 			t.Fatalf("step %d: card no longer opens: %v", step, err)
@@ -185,14 +185,14 @@ func TestReencryptCrashSafety(t *testing.T) {
 		if _, ok := w.Secret("openai"); !ok {
 			t.Fatalf("step %d: entry lost", step)
 		}
-		w.Close()
 		slots, _ := ReadSlots(kp)
 		if len(slots) != 1 {
 			t.Fatalf("step %d: %d slots after recovery, want 1", step, len(slots))
 		}
-		if err := Rekey(kp, Passphrase(testPass), Passphrase(newPass)); err != nil {
+		if err := w.Rekey(Passphrase(testPass), Passphrase(newPass)); err != nil {
 			t.Fatalf("step %d: Rekey after recovery: %v", step, err)
 		}
+		w.Close()
 		w, err = OpenSealed(vp, kp, Passphrase(newPass))
 		if err != nil {
 			t.Fatalf("step %d: new passphrase: %v", step, err)

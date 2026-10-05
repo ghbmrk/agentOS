@@ -3,6 +3,7 @@ package vault
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 )
@@ -256,28 +257,57 @@ func (v *Vault) advance() error {
 	return nil
 }
 
-// Rebase gives the vault a new ID and counter authorization and drops
-// every anchor. A restore with the recovery key (REC-1) calls it: putting
-// back a backup is a deliberate rollback, and REC-2's restricted mode, not
-// the counter, keeps it from reviving revoked grants. The old counters are
-// left behind and match nothing.
-func (v *Vault) Rebase() error {
+// Rebase gives the vault a new ID and counter authorization, drops every
+// anchor and every trusted-host slot, and records the new keys file. A
+// restore with the recovery key (REC-1) calls it: putting back a backup is
+// a deliberate rollback, and REC-2's restricted mode, not the counter,
+// keeps it from reviving revoked grants. It takes the recovery key, which
+// must open the recovery slot, so nothing but the owner's restore can
+// reset the rollback binding; an import fence (imports_test.go) keeps it
+// to package recovery. Trusted-host slots go with it (security review of
+// #45, F2): left in place, they would open the rebased vault unattended on
+// a PC whose counter no longer applies, laundering an old copy there. The
+// owner trusts PCs again after a restore (CRED-9).
+//
+// The vault is written first, accepting only the new keys file, then the
+// keys file. A crash between leaves a pair OpenSealed refuses; the restore
+// writes into a fresh directory and starts over (recovery R3).
+func (v *Vault) Rebase(recovery Factor) (dropped int, err error) {
+	defer wipeFactor(recovery)
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if v.closed {
-		return ErrClosed
+	if recovery == nil || recovery.Kind() != SlotRecovery {
+		return 0, errors.New("vault: Rebase takes the recovery key")
 	}
-	id, auth, anchors := v.id, v.counterAuth, v.anchors
+	kf, err := v.slotsForChange()
+	if err != nil {
+		return 0, err
+	}
+	if !proveSlotOfKind(kf, v.key, recovery) {
+		return 0, ErrNoSlotOpens
+	}
+	var keep []Slot
+	for _, s := range kf.Slots {
+		if s.Kind != SlotTPM {
+			keep = append(keep, s)
+		}
+	}
+	raw, err := json.Marshal(&keyFile{Magic: kf.Magic, Version: kf.Version, Slots: keep})
+	if err != nil {
+		return 0, err
+	}
+	id, auth, anchors, counter, bound, keys := v.id, v.counterAuth, v.anchors, v.counter, v.bound, v.keysOK
 	v.id, v.counterAuth, v.anchors, v.counter, v.bound = nil, nil, nil, nil, -1
-	if err := v.ensureID(); err != nil {
-		v.id, v.counterAuth, v.anchors = id, auth, anchors
-		return err
+	v.keysOK = [][]byte{keysHash(raw)}
+	err = v.ensureID()
+	if err == nil {
+		err = v.write(nil)
 	}
-	if err := v.write(nil); err != nil {
-		v.id, v.counterAuth, v.anchors = id, auth, anchors
-		return err
+	if err != nil {
+		v.id, v.counterAuth, v.anchors, v.counter, v.bound, v.keysOK = id, auth, anchors, counter, bound, keys
+		return 0, err
 	}
-	return nil
+	return len(kf.Slots) - len(keep), writeAtomic(v.keysPath, raw)
 }
 
 // Anchors lists the vault's anchors.

@@ -63,6 +63,9 @@ type payload struct {
 	ID          []byte   `json:"id"`
 	CounterAuth []byte   `json:"counter_auth"`
 	Anchors     []Anchor `json:"anchors,omitempty"`
+	// Keys are the SHA-256 hashes of the keys files this vault goes with
+	// (keysbind.go): one, or two while a slot change is under way.
+	Keys [][]byte `json:"keys,omitempty"`
 }
 
 type envelope struct {
@@ -97,6 +100,8 @@ type Vault struct {
 	bound       int
 	// keyID is the envelope's KeyID (reencrypt.go).
 	keyID []byte
+	// keysOK are the keys files this vault accepts (keysbind.go).
+	keysOK [][]byte
 }
 
 // ErrClosed is returned by every method called after Close.
@@ -104,7 +109,10 @@ var ErrClosed = errors.New("vault: closed")
 
 // Create makes a new, empty vault at path. It refuses to replace an
 // existing file.
-func Create(path string, key []byte) (*Vault, error) {
+func Create(path string, key []byte) (*Vault, error) { return create(path, key, nil) }
+
+// create is Create recording the keys files the vault goes with.
+func create(path string, key []byte, keys [][]byte) (*Vault, error) {
 	aead, err := newAEAD(key)
 	if err != nil {
 		return nil, err
@@ -114,7 +122,7 @@ func Create(path string, key []byte) (*Vault, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	v := &Vault{path: path, aead: aead, entries: map[string]record{}, bound: -1}
+	v := &Vault{path: path, aead: aead, entries: map[string]record{}, bound: -1, keysOK: keys}
 	if err := v.save(); err != nil {
 		return nil, err
 	}
@@ -157,7 +165,7 @@ func Open(path string, key []byte) (*Vault, error) {
 		p.Entries = map[string]record{}
 	}
 	return &Vault{path: path, aead: aead, entries: p.Entries,
-		id: p.ID, counterAuth: p.CounterAuth, anchors: p.Anchors, bound: -1, keyID: env.KeyID}, nil
+		id: p.ID, counterAuth: p.CounterAuth, anchors: p.Anchors, bound: -1, keyID: env.KeyID, keysOK: p.Keys}, nil
 }
 
 // Put stores or replaces a secret and writes the vault before returning.
@@ -278,7 +286,7 @@ func (v *Vault) save() error {
 // write seals the entries with anchors and replaces the file. Caller holds
 // mu.
 func (v *Vault) write(anchors []Anchor) error {
-	plain, err := json.Marshal(payload{Entries: v.entries, ID: v.id, CounterAuth: v.counterAuth, Anchors: anchors})
+	plain, err := json.Marshal(payload{Entries: v.entries, ID: v.id, CounterAuth: v.counterAuth, Anchors: anchors, Keys: v.keysOK})
 	if err != nil {
 		return err
 	}
@@ -353,6 +361,8 @@ func aad(version int, keyID []byte) []byte {
 	}
 	return []byte(fmt.Sprintf("%s/v%d/%x", fileMagic, version, keyID))
 }
+
+func readFile(path string) ([]byte, error) { return os.ReadFile(path) }
 
 func wipe(b []byte) {
 	for i := range b {

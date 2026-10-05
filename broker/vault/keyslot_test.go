@@ -274,15 +274,16 @@ func TestRekeyReplacesThePassphrase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	v.Close()
 	old, _ := os.ReadFile(kp)
+	oldVault, _ := os.ReadFile(vp)
 	const next = "harbor violet canary signal maple cobalt fern"
-	if err := Rekey(kp, Passphrase("not-the-passphrase-at-all"), Passphrase(next)); !errors.Is(err, ErrNoSlotOpens) {
+	if err := v.Rekey(Passphrase("not-the-passphrase-at-all"), Passphrase(next)); !errors.Is(err, ErrNoSlotOpens) {
 		t.Fatalf("rekey without the old passphrase: %v", err)
 	}
-	if err := Rekey(kp, Passphrase(testPass), Passphrase(next)); err != nil {
+	if err := v.Rekey(Passphrase(testPass), Passphrase(next)); err != nil {
 		t.Fatal(err)
 	}
+	v.Close()
 	if _, err := OpenSealed(vp, kp, Passphrase(testPass)); !errors.Is(err, ErrNoSlotOpens) {
 		t.Fatalf("old passphrase still opens: %v", err)
 	}
@@ -295,13 +296,45 @@ func TestRekeyReplacesThePassphrase(t *testing.T) {
 	if len(kf.Slots) != 1 {
 		t.Fatalf("%d slots after rekey, want 1", len(kf.Slots))
 	}
+	// The earlier keys file beside the current vault is refused (F1);
+	// the earlier keys file with its own earlier vault, a whole earlier
+	// copy of the drive, still opens with the old passphrase.
 	copyPath := kp + ".copy"
 	os.WriteFile(copyPath, old, 0o600)
-	v, err = OpenSealed(vp, copyPath, Passphrase(testPass))
+	if _, err := OpenSealed(vp, copyPath, Passphrase(testPass)); !errors.Is(err, ErrRolledBack) {
+		t.Fatalf("earlier keys file beside the current vault: %v", err)
+	}
+	vaultCopy := vp + ".copy"
+	os.WriteFile(vaultCopy, oldVault, 0o600)
+	v, err = OpenSealed(vaultCopy, copyPath, Passphrase(testPass))
 	if err != nil {
-		t.Fatalf("earlier copy: %v", err)
+		t.Fatalf("earlier copy of both: %v", err)
 	}
 	v.Close()
+}
+
+func writeKeys(path string, kf *keyFile) error {
+	raw, err := json.Marshal(kf)
+	if err != nil {
+		return err
+	}
+	return writeAtomic(path, raw)
+}
+
+// forceKeys installs kf as the keys file and records it in the vault, as
+// a slot change would.
+func forceKeys(t *testing.T, vp, kp string, f Factor, kf *keyFile) {
+	t.Helper()
+	v, err := OpenSealed(vp, kp, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if err := v.replaceKeys(kf); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // The TPM (P2-4b) and recovery-key (REC-1) slots are known kinds that this
@@ -318,16 +351,16 @@ func TestOtherSlotKindsAreKeptAndUnknownKindsRefused(t *testing.T) {
 	v.Close()
 	kf, _ := readKeys(kp)
 	kf.Slots = append(kf.Slots, Slot{Kind: SlotTPM, Sealed: []byte("opaque tpm blob"), Nonce: make([]byte, 12), Wrapped: make([]byte, 48)})
-	writeKeys(kp, kf)
+	forceKeys(t, vp, kp, Passphrase(testPass), kf)
 	v, err = OpenSealed(vp, kp, Passphrase(testPass))
 	if err != nil {
 		t.Fatal(err)
 	}
-	v.Close()
 	const next = "harbor violet canary signal maple cobalt fern"
-	if err := Rekey(kp, Passphrase(testPass), Passphrase(next)); err != nil {
+	if err := v.Rekey(Passphrase(testPass), Passphrase(next)); err != nil {
 		t.Fatal(err)
 	}
+	v.Close()
 	kf, _ = readKeys(kp)
 	if len(kf.Slots) != 2 || kf.Slots[0].Kind != SlotTPM {
 		t.Fatalf("slots after rekey: %+v", kf.Slots)

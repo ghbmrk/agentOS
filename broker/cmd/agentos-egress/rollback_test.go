@@ -139,6 +139,37 @@ func TestUntrustedPCStillCatchesOldCopy(t *testing.T) {
 	}
 }
 
+// F1 in the vault process: the keys file from before the PC was removed,
+// put back beside the current vault, would bring its slot back. The vault
+// records the keys file it goes with, so the PC does not restart
+// unattended on it and the passphrase does not open it either.
+func TestOldKeysFileIsRefusedAfterUntrust(t *testing.T) {
+	r := newPCRig(t)
+	r.trusted(t)
+	oldKeys := r.copyFile(t, r.keys)
+	hosts, err := r.c.hosts()
+	if err != nil || len(hosts) != 1 {
+		t.Fatal(hosts, err)
+	}
+	if _, err := r.c.untrust(r.code(), hosts[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	r.putBack(t, r.keys, oldKeys)
+	bootGood(r.tpm)
+	r.notes = nil
+	r.start(t, r.tpm)
+	if r.phase() != locked || r.c.model() != nil {
+		t.Fatal("removed PC restarted unattended on the old keys file")
+	}
+	if !r.noted("older than this PC has seen") {
+		t.Fatalf("owner not told: %q", r.notes)
+	}
+	r.clk.add(MinAttemptGap)
+	if _, err := r.c.unlock(goodPass); err != errRolledBack {
+		t.Fatalf("passphrase with the old keys file: %v, want errRolledBack", err)
+	}
+}
+
 // Trusting a PC anchors the vault to its counter first; the anchor is
 // inside the sealed file.
 func TestTrustAnchorsTheVault(t *testing.T) {

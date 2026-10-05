@@ -190,6 +190,10 @@ func readKeys(path string) (*keyFile, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parseKeys(raw)
+}
+
+func parseKeys(raw []byte) (*keyFile, error) {
 	var kf keyFile
 	if err := json.Unmarshal(raw, &kf); err != nil || kf.Magic != keysMagic || kf.Version != keysVersion {
 		return nil, errors.New("vault: not a keys file this version can read")
@@ -202,14 +206,6 @@ func readKeys(path string) (*keyFile, error) {
 		}
 	}
 	return &kf, nil
-}
-
-func writeKeys(path string, kf *keyFile) error {
-	raw, err := json.Marshal(kf)
-	if err != nil {
-		return err
-	}
-	return writeAtomic(path, raw)
 }
 
 // unwrap returns the data key from the first slot of f's kind that opens,
@@ -304,17 +300,8 @@ func (v *Vault) AddSlot(f Factor, replace func(Slot) bool) error {
 	defer wipeFactor(f)
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if v.closed {
-		return ErrClosed
-	}
-	if v.key == nil {
-		return errors.New("vault: not opened through its key slots")
-	}
-	kf, err := readKeys(v.keysPath)
+	kf, err := v.slotsForChange()
 	if err != nil {
-		return err
-	}
-	if _, err := kf.keyID(); err != nil {
 		return err
 	}
 	s, err := wrap(f, v.key, v.keyID)
@@ -329,7 +316,7 @@ func (v *Vault) AddSlot(f Factor, replace func(Slot) bool) error {
 		out = append(out, old)
 	}
 	kf.Slots = append(out, s)
-	return writeKeys(v.keysPath, kf)
+	return v.replaceKeys(kf)
 }
 
 // RemoveSlots drops the trusted-host slots for which match returns true
@@ -342,13 +329,7 @@ func (v *Vault) RemoveSlots(kind string, match func(Slot) bool) (int, error) {
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if v.closed {
-		return 0, ErrClosed
-	}
-	if v.keysPath == "" {
-		return 0, errors.New("vault: not opened through its key slots")
-	}
-	kf, err := readKeys(v.keysPath)
+	kf, err := v.slotsForChange()
 	if err != nil {
 		return 0, err
 	}
@@ -364,7 +345,54 @@ func (v *Vault) RemoveSlots(kind string, match func(Slot) bool) (int, error) {
 		return 0, nil
 	}
 	kf.Slots = out
-	return n, writeKeys(v.keysPath, kf)
+	return n, v.replaceKeys(kf)
+}
+
+// Rekey proves have against the keys file, then replaces every slot of
+// next's kind with one new slot for next. Slots of other kinds stay. A
+// copy of the keys file taken earlier no longer opens the vault written
+// since (the keys file's hash is in the vault, keysbind.go), but a whole
+// earlier copy of the drive still opens with what it held (CRED-8:
+// replacement protects only against later copies; Reencrypt closes the
+// data key too).
+func (v *Vault) Rekey(have, next Factor) error {
+	defer wipeFactor(have)
+	defer wipeFactor(next)
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	kf, err := v.slotsForChange()
+	if err != nil {
+		return err
+	}
+	if proveSlotOfKind(kf, v.key, have) == false {
+		return ErrNoSlotOpens
+	}
+	s, err := wrap(next, v.key, v.keyID)
+	if err != nil {
+		return err
+	}
+	out := kf.Slots[:0:0]
+	for _, old := range kf.Slots {
+		if old.Kind != next.Kind() {
+			out = append(out, old)
+		}
+	}
+	kf.Slots = append(out, s)
+	return v.replaceKeys(kf)
+}
+
+// proveSlotOfKind reports whether f opens one of its kind's slots to key.
+func proveSlotOfKind(kf *keyFile, key []byte, f Factor) bool {
+	for _, s := range kf.Slots {
+		if s.Kind != f.Kind() {
+			continue
+		}
+		if kek := proveSlot(s, key, []Factor{f}); kek != nil {
+			wipe(kek)
+			return true
+		}
+	}
+	return false
 }
 
 // CreateSealed makes a new, empty vault at vaultPath under a fresh random
@@ -387,11 +415,15 @@ func CreateSealed(vaultPath, keysPath string, f Factor) (*Vault, error) {
 	if err != nil {
 		return nil, err
 	}
-	v, err := Create(vaultPath, key)
+	raw, err := json.Marshal(&keyFile{Magic: keysMagic, Version: keysVersion, Slots: []Slot{s}})
 	if err != nil {
 		return nil, err
 	}
-	if err := writeKeys(keysPath, &keyFile{Magic: keysMagic, Version: keysVersion, Slots: []Slot{s}}); err != nil {
+	v, err := create(vaultPath, key, [][]byte{keysHash(raw)})
+	if err != nil {
+		return nil, err
+	}
+	if err := writeAtomic(keysPath, raw); err != nil {
 		v.Close()
 		os.Remove(vaultPath)
 		return nil, err
@@ -400,14 +432,19 @@ func CreateSealed(vaultPath, keysPath string, f Factor) (*Vault, error) {
 	return v, nil
 }
 
-// OpenSealed unwraps the data key with f and opens the vault. The factor's
-// secret bytes and the unwrapped key are wiped before it returns; the open
-// vault keeps its cipher and one copy of the key for AddSlot, wiped by
-// Close. If a re-encryption was interrupted, it uses the slots for the key
-// the vault file is sealed under and drops the others (reencrypt.go).
+// OpenSealed unwraps the data key with f and opens the vault. The keys
+// file must be one the vault recorded (keysbind.go): an earlier keys file
+// beside a later vault is refused with ErrRolledBack. The factor's secret
+// bytes and the unwrapped key are wiped before it returns; the open vault
+// keeps its cipher and one copy of the key for AddSlot, wiped by Close. If
+// a slot change or re-encryption was interrupted, it finishes it.
 func OpenSealed(vaultPath, keysPath string, f Factor) (*Vault, error) {
 	defer wipeFactor(f)
-	kf, err := readKeys(keysPath)
+	raw, err := os.ReadFile(keysPath)
+	if err != nil {
+		return nil, err
+	}
+	kf, err := parseKeys(raw)
 	if err != nil {
 		return nil, err
 	}
@@ -424,46 +461,10 @@ func OpenSealed(vaultPath, keysPath string, f Factor) (*Vault, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := kf.keyID(); err != nil {
-		if err := finishReencrypt(keysPath, kf, want); err != nil {
-			v.Close()
-			return nil, err
-		}
-	}
 	v.sealedBy(keysPath, key)
+	if err := v.checkKeys(raw, kf, want); err != nil {
+		v.Close()
+		return nil, err
+	}
 	return v, nil
-}
-
-// Rekey proves have against the keys file, then replaces every slot of
-// next's kind with one new slot for next. Slots of other kinds stay. A
-// copy of the keys file taken earlier still opens with what it held
-// (CRED-8: replacement protects only against later copies).
-func Rekey(keysPath string, have, next Factor) error {
-	defer wipeFactor(have)
-	defer wipeFactor(next)
-	kf, err := readKeys(keysPath)
-	if err != nil {
-		return err
-	}
-	id, err := kf.keyID()
-	if err != nil {
-		return err
-	}
-	key, err := kf.unwrap(have, id)
-	if err != nil {
-		return err
-	}
-	defer wipe(key)
-	s, err := wrap(next, key, id)
-	if err != nil {
-		return err
-	}
-	out := kf.Slots[:0:0]
-	for _, old := range kf.Slots {
-		if old.Kind != next.Kind() {
-			out = append(out, old)
-		}
-	}
-	kf.Slots = append(out, s)
-	return writeKeys(keysPath, kf)
 }
