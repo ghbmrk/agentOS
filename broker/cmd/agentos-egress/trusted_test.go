@@ -317,7 +317,7 @@ func TestBootPIN(t *testing.T) {
 		t.Fatalf("PIN host after restart: phase %v, wants PIN %v", r.phase(), r.c.pinWanted())
 	}
 	// CH-12: the owner is pointed at the box's Wi-Fi page.
-	if !r.noted("trusted host with a boot PIN: enter the PIN on the box's Wi-Fi page") {
+	if !r.noted("This PC starts with a boot PIN: enter the PIN on the box's Wi-Fi page.") {
 		t.Fatalf("PIN note: %q", r.notes)
 	}
 	r.clk.add(MinAttemptGap)

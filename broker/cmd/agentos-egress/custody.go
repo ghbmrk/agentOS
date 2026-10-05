@@ -117,7 +117,7 @@ const noteTPMSilent = "This PC's security chip didn't respond, so the box stayed
 // noteKeepTrustedFailed is the owner's notice when "Keep this PC
 // trusted" could not approve the new boot path; the detail goes to the
 // log only (CH-12).
-const noteKeepTrustedFailed = "Couldn't keep this PC trusted: the box couldn't approve its new boot path with the PC's security chip. The box is unlocked; to restart without your card, trust this PC again on the box's Wi-Fi page."
+const noteKeepTrustedFailed = "Couldn't keep this PC trusted after its start-up changed. The box is unlocked; to restart without your card, trust this PC again on the box's Wi-Fi page."
 
 // noteRolledBack is the owner's notice for an old copy of the drive (V6).
 const noteRolledBack = "the vault on this drive is older than this PC has seen: it may be an old copy of the drive put back, so it stayed locked. If you did not restore it, the drive was out of your hands; restore from your backup with the recovery key."
@@ -927,7 +927,7 @@ func (c *custody) bootTrusted() {
 		c.noteChangeUnfinishedLocked()
 	case errors.Is(err, tpmseal.ErrNeedPIN):
 		c.needPIN = true
-		c.notify("trusted host with a boot PIN: enter the PIN on the box's Wi-Fi page")
+		c.notify("This PC starts with a boot PIN: enter the PIN on the box's Wi-Fi page.")
 	case errors.Is(err, vault.ErrRolledBack):
 		c.notify(noteRolledBack)
 	case errors.Is(err, vault.ErrCounterMissing):
