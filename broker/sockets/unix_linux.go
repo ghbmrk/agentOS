@@ -52,3 +52,8 @@ func lockDir(dir string) (func(), error) {
 	}
 	return func() { f.Close() }, nil
 }
+
+// PeerUID returns the uid of the process on the other end of a Unix
+// connection (SO_PEERCRED), for listeners outside Server that apply the
+// same peer rule.
+func PeerUID(c net.Conn) (int, bool) { return peerUID(c) }

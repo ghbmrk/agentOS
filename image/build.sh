@@ -24,9 +24,11 @@ GVISOR_SHA512=c8d3a9fd4d4c4f5b8ff213caa4517356be128d18659ec4cde37828fe797f61a972
 mkdir -p "$OUT"
 STAGE=$OUT/stage; rm -rf "$STAGE"; mkdir -p "$STAGE/usr/lib/agentos/images"
 
-# The broker, static and path-free.
-(cd "$REPO/broker" && CGO_ENABLED=0 go build -trimpath -ldflags=-buildid= \
-	-o "$STAGE/usr/lib/agentos/agentosd" ./cmd/agentosd)
+# The broker and the vault process, static and path-free.
+for cmd in agentosd agentos-egress; do
+	(cd "$REPO/broker" && CGO_ENABLED=0 go build -trimpath -ldflags=-buildid= \
+		-o "$STAGE/usr/lib/agentos/$cmd" "./cmd/$cmd")
+done
 
 # gVisor, the same release and hash as CI's machine tests.
 curl -fsSLo "$OUT/gvisor.tar.bz2" \
