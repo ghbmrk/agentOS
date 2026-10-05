@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/vault"
 )
 
@@ -156,9 +157,14 @@ type Pending struct {
 // owner keeps those parts of the old card.
 func (p *Pending) Card() Card { return p.next }
 
-// ErrLostCardParts is a lost-card rotation that keeps a factor the lost
-// card carries, or the grid, whose seed an earlier copy of the drive holds.
-var ErrLostCardParts = errors.New("recovery: without the current card, the passphrase, recovery key and grid are all replaced")
+// ErrLostCardParts is a lost-card rotation that keeps a factor or the
+// setup secret the lost card carries, or the grid, whose seed an earlier
+// copy of the drive holds.
+var ErrLostCardParts = errors.New("recovery: without the current card, the passphrase, recovery key, setup secret and grid are all replaced")
+
+// LostCardWiFiNote goes beside the Wi-Fi part on a lost-card rotation,
+// which the page ticks in advance but the owner may untick.
+const LostCardWiFiNote = "Whoever finds your card could join the box's Wi-Fi. Your devices will need the new password."
 
 // ErrNeedPassphrase is a recovery-key rotation, with the card in hand, on
 // a drive with a passphrase slot but no passphrase given: re-encryption
@@ -233,10 +239,10 @@ func BeginRotate(b *Box, parts []Part, auth Auth, proof Proof, gen Generator, r 
 		return nil, errors.New("recovery: replacing the passphrase or recovery key needs the current one from the card")
 	}
 	// No current card: the lost card may be in other hands, so both
-	// factors it carries are replaced, and the grid, which an earlier copy
-	// of the drive holds the seed of, as it does the code-generator seed
-	// that Commit replaces (R10a).
-	if proof.lost() && !(set[PartPassphrase] && set[PartRecovery] && set[PartGrid]) {
+	// factors it carries are replaced, and its setup secret (ID-1), and
+	// the grid, which an earlier copy of the drive holds the seed of, as
+	// it does the code-generator seed that Commit replaces (R10a).
+	if proof.lost() && !(set[PartPassphrase] && set[PartRecovery] && set[PartSetup] && set[PartGrid]) {
 		return nil, ErrLostCardParts
 	}
 	// A new recovery key re-encrypts, which rewraps the passphrase slot
@@ -344,10 +350,10 @@ func normalizeTyped(s string) string {
 // A new recovery key or a lost card re-encrypts (R10a; egress V7): once
 // the slots are replaced, the vault moves to a fresh data key with every
 // slot rewrapped (Box.Reencrypt) and gets a new backup MAC key, so the
-// old factors with an earlier copy open nothing written afterwards. A
-// lost card also replaces the code-generator seed, which an earlier copy
-// holds; the page shows Done.Enrollment, and the caller ends the owner
-// channel's session. A passphrase change with the card in hand does not
+// old factors with an earlier copy open nothing written afterwards. It
+// also replaces the code-generator seed, which an earlier copy holds; the
+// page shows Done.Enrollment until ConfirmEnrollment accepts a code from
+// it, and the caller ends the owner channel's session. A passphrase change with the card in hand does not
 // re-encrypt (arbitrator ruling on #45).
 func (p *Pending) Commit(b *Box, typed string, now time.Time) (Done, error) {
 	p.mu.Lock()
@@ -380,7 +386,6 @@ func (p *Pending) Commit(b *Box, typed string, now time.Time) (Done, error) {
 		return Done{}, err
 	}
 	proof := p.proof
-	lost := proof.lost()
 	var slots []Part
 	for _, q := range []Part{PartPassphrase, PartRecovery} {
 		if p.parts[q] {
@@ -436,7 +441,7 @@ func (p *Pending) Commit(b *Box, typed string, now time.Time) (Done, error) {
 		case len(proof.Passphrase) > 0:
 			owner = append(owner, vault.Passphrase(string(proof.Passphrase)))
 		}
-		r, err := refresh(b, owner, lost, nil)
+		r, err := refresh(b, owner, nil)
 		done.Refreshed = r
 		if err != nil {
 			return fail(err)
@@ -480,11 +485,12 @@ type Refreshed struct {
 }
 
 // refresh re-encrypts once the lost factors' slots are replaced, then
-// replaces the backup MAC key and, with seed, the code-generator seed:
-// values Reencrypt carries over and an earlier copy holds (egress V7).
-// owner must prove every passphrase and recovery slot. A failure part way
-// is safe to repeat: each step starts again from fresh values.
-func refresh(b *Box, owner []vault.Factor, seed bool, r io.Reader) (Refreshed, error) {
+// replaces the backup MAC key and the code-generator seed: values
+// Reencrypt carries over and an earlier copy holds (egress V7; security
+// C1 on #64). owner must prove every passphrase and recovery slot. A
+// failure part way is safe to repeat: each step starts again from fresh
+// values.
+func refresh(b *Box, owner []vault.Factor, r io.Reader) (Refreshed, error) {
 	var out Refreshed
 	n, err := b.reencrypt(owner...)
 	out.Retrust = n
@@ -494,13 +500,14 @@ func refresh(b *Box, owner []vault.Factor, seed bool, r io.Reader) (Refreshed, e
 	if err := rotateMACKey(b.V); err != nil {
 		return out, err
 	}
-	if seed {
-		e, err := newSeed(b, r)
-		if err != nil {
-			return out, err
-		}
-		out.Enrollment = &e
+	e, err := newSeed(b, r)
+	if err != nil {
+		return out, err
 	}
+	if err := b.V.Put(EnrollName, KindEnroll, []byte("agentos-enrollment-v1")); err != nil {
+		return out, err
+	}
+	out.Enrollment = &e
 	return out, nil
 }
 
@@ -527,7 +534,73 @@ func Refresh(b *Box, auth Auth, rk RecoveryKey, passphrase []byte, r io.Reader) 
 	if len(passphrase) > 0 {
 		owner = append(owner, vault.Passphrase(string(passphrase)))
 	}
-	return refresh(b, owner, true, r)
+	return refresh(b, owner, r)
+}
+
+// The enrollment marker: a vault entry that exists while a code-generator
+// seed that refresh replaced has not been confirmed with a code from it.
+const (
+	EnrollName = "recovery-enrollment-pending"
+	KindEnroll = "enrollment_pending"
+)
+
+// ErrNoEnrollment is ShowEnrollment with no unconfirmed seed.
+var ErrNoEnrollment = errors.New("recovery: the code generator is already confirmed")
+
+// ShowEnrollment shows the replaced seed again ("Show the code again")
+// until ConfirmEnrollment accepts a code from it (UX-64-1 on #64). Like
+// the first showing, it is for the box's own Wi-Fi page only.
+func ShowEnrollment(b *Box) (Enrollment, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if _, ok, err := reserved(b.V, EnrollName, KindEnroll); err != nil || !ok {
+		if err == nil {
+			err = ErrNoEnrollment
+		}
+		return Enrollment{}, err
+	}
+	seed, ok, err := reserved(b.V, SeedName, vault.KindTOTPSeed)
+	if err != nil || !ok {
+		return Enrollment{}, errors.New("recovery: no code-generator seed in the vault")
+	}
+	defer wipe(seed)
+	return Enrollment{URI: otpauth(seed)}, nil
+}
+
+// ConfirmEnrollment reports whether code is the new seed's code now (or
+// one 30-second step either side) and, when it is, ends the enrollment:
+// a rotation is final only then. It is not a sign-in and spends no code.
+func ConfirmEnrollment(b *Box, code string, now time.Time) (bool, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if _, ok, err := reserved(b.V, EnrollName, KindEnroll); err != nil || !ok {
+		if err == nil {
+			err = ErrNoEnrollment
+		}
+		return false, err
+	}
+	seed, ok, err := reserved(b.V, SeedName, vault.KindTOTPSeed)
+	if err != nil || !ok {
+		return false, errors.New("recovery: no code-generator seed in the vault")
+	}
+	defer wipe(seed)
+	match := false
+	for _, d := range []time.Duration{-30 * time.Second, 0, 30 * time.Second} {
+		if hmac.Equal([]byte(owner.TOTP(seed, now.Add(d))), []byte(code)) {
+			match = true
+		}
+	}
+	if !match {
+		return false, nil
+	}
+	return true, b.V.Delete(EnrollName)
+}
+
+// EnrollmentPending reports a replaced seed not yet confirmed, for the
+// page to keep showing it.
+func EnrollmentPending(b *Box) bool {
+	_, ok := entryKind(b.V, EnrollName)
+	return ok
 }
 
 // lapse wipes the typed passphrase this rotation held.
@@ -545,8 +618,10 @@ func DoneNotes(parts []Part, lost bool) []string {
 	var out []string
 	if lost {
 		out = append(out,
-			"Your lost card still opens backups and drive copies made before today, but nothing made from now on. Back up now, then delete the older backups.",
-			"Your code generator was reset. Scan the new code on this page; codes from the old one no longer work.")
+			"Your lost card still opens backups and drive copies made before today, but nothing made from now on. Back up now, then delete the older backups.")
+	}
+	if lost || containsPart(parts, PartRecovery) {
+		out = append(out, ResetNote)
 	}
 	for _, p := range parts {
 		switch p {
@@ -563,6 +638,43 @@ func DoneNotes(parts []Part, lost bool) []string {
 		}
 	}
 	return out
+}
+
+// ResetNote follows every rotation or Refresh that replaced the
+// code-generator seed.
+const ResetNote = "Your code generator was reset. Delete the old AgentOS entry from it, then scan the new code on this page; codes from the old one no longer work."
+
+// ExposedNote names the credentials an older copy of the drive still
+// holds, for the lost-card and Refresh done pages (security R1 on #64);
+// empty when the vault holds none.
+func ExposedNote(b *Box) string {
+	var names []string
+	for _, e := range b.V.List() {
+		if e.Kind == vault.KindAPIKey {
+			names = append(names, e.Name)
+		}
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	return "Credentials stored before today (" + strings.Join(names, ", ") + ") can still be read from older copies; replace those you can at their sites."
+}
+
+// RetrustNote is the done page's and digest's line for Done.Retrust
+// (UX-64-2 on #64): names are the PCs' names where the vault process has
+// them; n counts them all.
+func RetrustNote(n int, names []string) string {
+	if n <= 0 {
+		return ""
+	}
+	pcs := fmt.Sprintf("%d other PCs", n)
+	if n == 1 {
+		pcs = "1 other PC"
+	}
+	if len(names) > 0 {
+		pcs += " (" + strings.Join(names, ", ") + ")"
+	}
+	return pcs + " must be trusted again: on each, open the box page, unlock, and tick Keep this PC trusted."
 }
 
 // The rotation marker: a vault entry that exists while a rotation that

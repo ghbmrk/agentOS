@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/vault"
 )
@@ -49,10 +50,14 @@ func TestALostCardRotationReencrypts(t *testing.T) {
 	x := newBox(t)
 	old := x.snapshot()
 	tpm := Proof{Host: func() vault.Factor { return fakeTPM{[]byte("sealed-to-host-a-tpm")} }}
-	if _, err := BeginRotate(x.b, []Part{PartPassphrase, PartRecovery}, Auth{Code: true, Local: true}, tpm, testGen, nil, t0); !errors.Is(err, ErrLostCardParts) {
-		t.Fatalf("lost card kept the grid: %v", err)
+	lostParts := []Part{PartPassphrase, PartRecovery, PartSetup, PartGrid}
+	for i := 2; i < len(lostParts); i++ {
+		kept := append(append([]Part(nil), lostParts[:i]...), lostParts[i+1:]...)
+		if _, err := BeginRotate(x.b, kept, Auth{Code: true, Local: true}, tpm, testGen, nil, t0); !errors.Is(err, ErrLostCardParts) {
+			t.Fatalf("lost card kept %s: %v", lostParts[i], err)
+		}
 	}
-	done, err := x.rotate([]Part{PartPassphrase, PartRecovery, PartGrid}, Auth{Code: true, Local: true}, tpm)
+	done, err := x.rotate(lostParts, Auth{Code: true, Local: true}, tpm)
 	must(t, err)
 	if old.opensLater(x) {
 		t.Fatal("the old data key opens the vault written after a lost-card rotation")
@@ -84,8 +89,8 @@ func TestALostCardRotationReencrypts(t *testing.T) {
 	if _, _, err := x.restore(x.backup(), nk, t0); err != nil {
 		t.Fatal(err)
 	}
-	notes := strings.Join(DoneNotes([]Part{PartPassphrase, PartRecovery, PartGrid}, true), " ")
-	for _, want := range []string{"nothing made from now on", "code generator"} {
+	notes := strings.Join(DoneNotes(lostParts, true), " ")
+	for _, want := range []string{"nothing made from now on", "Delete the old AgentOS entry"} {
 		if !strings.Contains(notes, want) {
 			t.Fatalf("lost-card done notes miss %q: %s", want, notes)
 		}
@@ -93,7 +98,7 @@ func TestALostCardRotationReencrypts(t *testing.T) {
 }
 
 // A recovery-key change with the card in hand re-encrypts and replaces the
-// MAC key; the code generator is kept, so the owner's phone keeps working.
+// MAC key and the code-generator seed (security C1 on #64).
 func TestARecoveryKeyRotationReencrypts(t *testing.T) {
 	x := newBox(t)
 	old := x.snapshot()
@@ -105,8 +110,11 @@ func TestARecoveryKeyRotationReencrypts(t *testing.T) {
 	if bytes.Equal(x.secretNow(MACKeyName), old.mac) {
 		t.Fatal("backup MAC key kept")
 	}
-	if !bytes.Equal(x.secretNow(SeedName), old.seed) || done.Enrollment != nil {
-		t.Fatal("a rotation with the card in hand replaced the code generator")
+	if bytes.Equal(x.secretNow(SeedName), old.seed) || done.Enrollment == nil {
+		t.Fatal("a recovery-key rotation kept the code generator")
+	}
+	if !strings.Contains(strings.Join(DoneNotes([]Part{PartRecovery}, false), " "), ResetNote) {
+		t.Fatal("no reset note")
 	}
 }
 
@@ -215,4 +223,60 @@ func mustRK(t *testing.T, s string) RecoveryKey {
 	k, err := ParseRecoveryKey(s)
 	must(t, err)
 	return k
+}
+
+// The rotation is final only once a code from the new seed is confirmed:
+// until then the page can show the seed again (UX-64-1 on #64).
+func TestTheNewCodeGeneratorIsConfirmedWithACode(t *testing.T) {
+	x := newBox(t)
+	if _, err := ShowEnrollment(x.b); !errors.Is(err, ErrNoEnrollment) {
+		t.Fatalf("enrollment shown before any reset: %v", err)
+	}
+	done, err := x.rotate([]Part{PartRecovery}, Auth{Code: true, Local: true}, Proof{Recovery: x.rk})
+	must(t, err)
+	if !EnrollmentPending(x.b) {
+		t.Fatal("no pending enrollment after a reset")
+	}
+	again, err := ShowEnrollment(x.b)
+	must(t, err)
+	if again.URI != done.Enrollment.URI {
+		t.Fatal("shown again with another seed")
+	}
+	seed := x.secretNow(SeedName)
+	for _, code := range []string{totp(x.seed, t0), totp(seed, t0.Add(5*time.Minute)), "000000x"} {
+		if ok, err := ConfirmEnrollment(x.b, code, t0); ok || err != nil {
+			t.Fatalf("confirmed with %q: %v", code, err)
+		}
+	}
+	if ok, err := ConfirmEnrollment(x.b, totp(seed, t0.Add(-30*time.Second)), t0); !ok || err != nil {
+		t.Fatalf("a current code was refused: %v", err)
+	}
+	if EnrollmentPending(x.b) {
+		t.Fatal("still pending after the code matched")
+	}
+	if _, err := ShowEnrollment(x.b); !errors.Is(err, ErrNoEnrollment) {
+		t.Fatalf("seed shown after confirmation: %v", err)
+	}
+}
+
+// The done page names what an older copy still exposes and which PCs to
+// trust again (security R1, UX-64-2 on #64).
+func TestDonePageLines(t *testing.T) {
+	x := newBox(t)
+	if n := ExposedNote(x.b); !strings.Contains(n, "(openai)") || strings.Contains(n, SeedName) || strings.Contains(n, MACKeyName) {
+		t.Fatalf("exposed note: %q", n)
+	}
+	for _, c := range []struct {
+		n     int
+		names []string
+		want  string
+	}{
+		{0, nil, ""},
+		{1, []string{"study-pc"}, "1 other PC (study-pc) must be trusted again: on each, open the box page, unlock, and tick Keep this PC trusted."},
+		{3, nil, "3 other PCs must be trusted again: on each, open the box page, unlock, and tick Keep this PC trusted."},
+	} {
+		if got := RetrustNote(c.n, c.names); got != c.want {
+			t.Fatalf("retrust %d: %q", c.n, got)
+		}
+	}
 }

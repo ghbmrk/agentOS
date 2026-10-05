@@ -92,7 +92,7 @@ func TestReplacingAFactorNeedsAFactorThatOpensTheDrive(t *testing.T) {
 	if _, err := x.rotate([]Part{PartRecovery}, Auth{Code: true, Local: true}, tpm); !errors.Is(err, ErrLostCardParts) {
 		t.Fatalf("lost card kept the passphrase: %v", err)
 	}
-	nc, err := x.rotate([]Part{PartRecovery, PartPassphrase, PartGrid}, Auth{Code: true, Local: true}, tpm)
+	nc, err := x.rotate([]Part{PartRecovery, PartPassphrase, PartSetup, PartGrid}, Auth{Code: true, Local: true}, tpm)
 	must(t, err)
 	nk, _ := ParseRecoveryKey(nc.RecoveryKey)
 	if _, err := vault.OpenSealed(x.b.VaultPath, x.b.KeysPath, Factor(nk)); err != nil {
@@ -168,7 +168,7 @@ func (f failing) KEK(s vault.Slot) ([]byte, error) {
 func TestAPartialRotationReturnsWhatIsInEffect(t *testing.T) {
 	x := newBox(t)
 	orig, _ := os.ReadFile(x.b.KeysPath)
-	p, err := BeginRotate(x.b, []Part{PartPassphrase, PartRecovery, PartGrid, PartWiFi}, Auth{Code: true, Local: true},
+	p, err := BeginRotate(x.b, []Part{PartPassphrase, PartRecovery, PartSetup, PartGrid, PartWiFi}, Auth{Code: true, Local: true},
 		Proof{Host: func() vault.Factor { return failing{Factor(x.rk), x.b.KeysPath, orig} }}, testGen, nil, t0)
 	must(t, err)
 	nc, err := p.Commit(x.b, p.answer, t0)
@@ -240,7 +240,7 @@ func TestTheRotationMarkerPrecedesTheFirstSlotWrite(t *testing.T) {
 	x := newBox(t)
 	var armed, missing bool
 	proof := Proof{Host: func() vault.Factor { return markerCheck{Factor(x.rk), x.b, x.rk, &armed, &missing} }}
-	p, err := BeginRotate(x.b, []Part{PartPassphrase, PartRecovery, PartGrid}, Auth{Code: true, Local: true}, proof, testGen, nil, t0)
+	p, err := BeginRotate(x.b, []Part{PartPassphrase, PartRecovery, PartSetup, PartGrid}, Auth{Code: true, Local: true}, proof, testGen, nil, t0)
 	must(t, err)
 	armed = true
 	_, err = p.Commit(x.b, p.answer, t0)
@@ -312,7 +312,7 @@ func TestRotateEverythingWithTheRecoveryKey(t *testing.T) {
 			t.Fatalf("card formats a secret: %q", s)
 		}
 	}
-	if len(DoneNotes(AllParts, false)) != 4 || !strings.HasPrefix(DoneNotes(AllParts, true)[0], "Your lost card still opens backups") {
+	if len(DoneNotes(AllParts, false)) != 5 || !strings.HasPrefix(DoneNotes(AllParts, true)[0], "Your lost card still opens backups") {
 		t.Fatal("done page notes")
 	}
 }
