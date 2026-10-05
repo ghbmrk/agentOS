@@ -243,6 +243,77 @@ type Learn struct {
 	// the next digest says once that drafted skills are being tested
 	// (potency C1, UX-120-1 on #120).
 	nowTested bool
+	// gone are the goals forgotten since start (ForgetGoal).
+	gone map[string]bool
+	// triedGoals are the goals each tried hypothesis's evidence held, so
+	// forgetting one lets it be tried again on what remains (CAP-3). In
+	// memory only, like tried: a restart tries every hypothesis afresh.
+	triedGoals map[string][]string
+}
+
+// ForgetGoal drops every candidate Loop 1 keeps that was built from goal,
+// and keeps none built from it from now on (W3-tasks part 2, security C1
+// on #120). Only the broker's handling of an authenticated owner forget
+// calls it, with the pipeline's ForgetGoal (change C23); new hypotheses
+// never mine a forgotten goal, since the daemon's tombstone hides its
+// intents.
+func (l *Learn) ForgetGoal(goal string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.gone == nil {
+		l.gone = map[string]bool{}
+	}
+	l.gone[goal] = true
+	for k, kc := range l.built {
+		if l.goneLocked(kc.cand.Goals) {
+			delete(l.built, k)
+		}
+	}
+	// SPEC CAP-3: what was learned from a forgotten task is rebuilt from
+	// the remaining evidence, so a hypothesis tried with it is tried again
+	// at once, with one task fewer, rather than waiting for more (potency
+	// on #160).
+	for k, goals := range l.triedGoals {
+		if slices.Contains(goals, goal) {
+			delete(l.tried, k)
+			delete(l.notBefore, k)
+			delete(l.triedGoals, k)
+		}
+	}
+}
+
+// Forgot reports whether ForgetGoal was called for goal since start.
+func (l *Learn) Forgot(goal string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.gone[goal]
+}
+
+func (l *Learn) goneLocked(goals []string) bool {
+	for _, g := range goals {
+		if l.gone[g] {
+			return true
+		}
+	}
+	return false
+}
+
+// goalsRead are the goals of the owner tasks a builder's brief carries:
+// the hypothesis's evidence intents and the dev cases, sorted.
+func goalsRead(h Hypothesis, dev []change.Case) []string {
+	var out []string
+	for _, s := range h.Evidence {
+		if s.Intent.GoalID != "" {
+			out = append(out, s.Intent.GoalID)
+		}
+	}
+	for _, c := range dev {
+		if c.Goal != "" {
+			out = append(out, c.Goal)
+		}
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
 // Holds reports whether Loop 1 would build c but hold it unproposed,
@@ -423,7 +494,7 @@ func (l *Learn) Next(ctx context.Context, modelOK bool) (Job, bool) {
 		if l.tried[key] < ev.HeldOut && l.mayAskLocked(key) {
 			return Job{Name: "routing", UsesModel: true, Evaluates: true, Run: func(ctx context.Context) Result {
 				rep, ok, err := l.cfg.Pipeline.ProposeRouting(ctx, l.cfg.Router)
-				l.done(ctx, err, key, ev.HeldOut)
+				l.done(ctx, err, key, ev.HeldOut, nil)
 				l.asked(key, rep)
 				if !ok {
 					return Result{Err: err}
@@ -447,12 +518,13 @@ func (l *Learn) Next(ctx context.Context, modelOK bool) (Job, bool) {
 		}
 		if ready != nil && !ready.Ready(Brief{Hypothesis: h, Dev: ev.Dev}) {
 			l.tried[h.Key] = len(h.Tasks) // wait for more supporting tasks
+			l.triedGoalsLocked(h.Key, goalsRead(h, ev.Dev))
 			continue
 		}
 		h := h
 		return Job{Name: "candidate", UsesModel: true, Evaluates: true, Run: func(ctx context.Context) Result {
 			rep, err := l.propose(ctx, h, ev)
-			l.done(ctx, err, h.Key, len(h.Tasks))
+			l.done(ctx, err, h.Key, len(h.Tasks), goalsRead(h, ev.Dev))
 			if errors.Is(err, ErrUnseeded) {
 				return Result{}
 			}
@@ -530,13 +602,26 @@ func (l *Learn) asked(key string, rep change.Report) {
 
 // done marks a key tried, unless the work was preempted (ctx ended, or
 // the evaluator was interrupted, PE3): then it is offered again.
-func (l *Learn) done(ctx context.Context, err error, key string, n int) {
+func (l *Learn) done(ctx context.Context, err error, key string, n int, goals []string) {
 	if ctx.Err() != nil || errors.Is(err, change.ErrInterrupted) {
 		return
 	}
 	l.mu.Lock()
 	l.tried[key] = n
+	l.triedGoalsLocked(key, goals)
 	l.mu.Unlock()
+}
+
+// triedGoalsLocked records the goals key was tried with (ForgetGoal).
+func (l *Learn) triedGoalsLocked(key string, goals []string) {
+	if len(goals) == 0 {
+		delete(l.triedGoals, key)
+		return
+	}
+	if l.triedGoals == nil {
+		l.triedGoals = map[string][]string{}
+	}
+	l.triedGoals[key] = goals
 }
 
 // ErrOutOfClass: the builder wrote outside the namespace its hypothesis
@@ -571,6 +656,7 @@ func (l *Learn) propose(ctx context.Context, h Hypothesis, ev Evidence) (change.
 		// Source, origin, and the public mark are the broker's, from the
 		// REV-5 labels of every input; the builder asserts none of them.
 		cand.Source, cand.Origin, cand.Public = change.Local, "loop1", public(h, ev.Dev)
+		cand.Goals = goalsRead(h, ev.Dev)
 		if p, ok := l.cfg.Builder.(Private); ok && p.Private(br) {
 			cand.Public = false
 		}
@@ -598,11 +684,12 @@ func (l *Learn) propose(ctx context.Context, h Hypothesis, ev Evidence) (change.
 	rep, err := l.cfg.Pipeline.Propose(ctx, cand)
 	if errors.Is(err, change.ErrInterrupted) {
 		// Preempted mid-evaluation: keep the checked candidate for the
-		// next offer, so the pipeline can resume its pairs.
+		// next offer, so the pipeline can resume its pairs, unless its
+		// goal was forgotten or an intent erased meanwhile.
 		intents := briefIntents(h, ev.Dev)
 		l.mu.Lock()
-		if l.cfg.Harvest.erasedAny(intents) {
-			// Erased while it was evaluated (security F1 on #153).
+		if l.goneLocked(cand.Goals) || l.cfg.Harvest.erasedAny(intents) {
+			// Security F1 on #153; change C23.
 			l.mu.Unlock()
 			return rep, err
 		}

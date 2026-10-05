@@ -17,12 +17,12 @@ import (
 	"errors"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/modem"
+	"github.com/ghbmrk/agentos/broker/sendrules"
 )
 
 // Vault entry names and kinds for the HTTP account (egress K16).
@@ -140,11 +140,11 @@ var (
 	ErrLocked    = errors.New("smsapi: the vault is locked")
 	ErrNoAccount = errors.New("smsapi: no HTTP account is set up")
 	// ErrRecipient: not a number the second line may text (security C1).
-	ErrRecipient = errors.New("smsapi: recipient refused")
+	ErrRecipient = sendrules.ErrRecipient
 	// ErrTooLong: more than MaxParts segments (security C2).
 	ErrTooLong = errors.New("smsapi: text too long")
 	// ErrLimited: the second line's budget is spent (security Q2).
-	ErrLimited = errors.New("smsapi: the second line's sending limit is reached")
+	ErrLimited = sendrules.ErrLimited
 	// ErrRefused: the provider refused the text.
 	ErrRefused = errors.New("smsapi: the provider refused the text")
 	// ErrUnreachable: the provider did not answer, or answered 5xx.
@@ -171,80 +171,31 @@ func CheckText(text string) error {
 	return nil
 }
 
-// CheckRecipient applies security C1: an E.164 number of at least 8
-// digits (no short or premium codes), never the owner's number or the
-// line's own.
-func CheckRecipient(to, owner, own string) error {
-	if !e164Re.MatchString(to) || len(to)-1 < 8 || to == owner || to == own {
-		return ErrRecipient
-	}
-	return nil
-}
+// The recipient rules and budget live in sendrules, a leaf the modem
+// side can link without this package's provider client (L3 SHOULD-1 on
+// #164).
+type Budget = sendrules.Budget
 
-// SameNumber says dialed, the digits of a Request-URI on an account that
-// dials without the + (no +), may reach number (E.164): after any leading
-// zeros (a trunk or international prefix), one is the other or ends with
-// it. So a national form ("5550109999", "07700900123") or an
-// international-prefix form ("0115550109999") of the owner's number or the
-// line's own is caught, whatever the provider's country (L3 MUST-1 on
-// #159, security C1).
-func SameNumber(dialed, number string) bool {
-	d := strings.TrimLeft(dialed, "0")
-	n := strings.TrimPrefix(number, "+")
-	if len(d) < 7 || n == "" {
-		return false
-	}
-	return strings.HasSuffix(n, d) || strings.HasSuffix(d, n)
-}
-
-// Budget limits (security Q2): the whole second line, SIP MESSAGE and
-// HTTP texts together, and each recipient.
+// Budget limits (sendrules).
 const (
-	PerHour          = 30
-	PerDay           = 200
-	PerRecipientHour = 10
+	PerHour          = sendrules.PerHour
+	PerDay           = sendrules.PerDay
+	PerRecipientHour = sendrules.PerRecipientHour
+	CallsPerHour     = sendrules.CallsPerHour
+	CallsPerDay      = sendrules.CallsPerDay
 )
 
-// Budget is the second line's sending budget, held in the vault process
-// and shared by every way the line sends. It is in memory: a restart of
-// the vault process starts it again. That needs the owner's unlock unless
-// a trusted PC unlocks the box (bootTrusted), so a vault process that
-// restarts often could send past it (egress K16 residual).
-type Budget struct {
-	mu   sync.Mutex
-	sent []sent
-}
+// CheckRecipient is sendrules.CheckRecipient.
+func CheckRecipient(to, owner, own string) error { return sendrules.CheckRecipient(to, owner, own) }
 
-type sent struct {
-	at time.Time
-	to string
-}
+// Premium is sendrules.Premium.
+func Premium(number string) bool { return sendrules.Premium(number) }
 
-// Take spends one text to to at now, or refuses with ErrLimited.
-func (b *Budget) Take(to string, now time.Time) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	kept := b.sent[:0]
-	hour, toHour := 0, 0
-	for _, s := range b.sent {
-		if now.Sub(s.at) >= 24*time.Hour {
-			continue
-		}
-		kept = append(kept, s)
-		if now.Sub(s.at) < time.Hour {
-			hour++
-			if s.to == to {
-				toHour++
-			}
-		}
-	}
-	b.sent = kept
-	if len(kept) >= PerDay || hour >= PerHour || toHour >= PerRecipientHour {
-		return ErrLimited
-	}
-	b.sent = append(b.sent, sent{now, to})
-	return nil
-}
+// PremiumDialed is sendrules.PremiumDialed.
+func PremiumDialed(dialed, own string) bool { return sendrules.PremiumDialed(dialed, own) }
+
+// SameNumber is sendrules.SameNumber.
+func SameNumber(dialed, number string) bool { return sendrules.SameNumber(dialed, number) }
 
 // Inbound is one text the provider received for the line.
 type Inbound struct {
