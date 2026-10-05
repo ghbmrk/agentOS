@@ -81,7 +81,7 @@ type evidenceJob struct {
 
 // Fixed wording, in the box's first-person voice (UX U7).
 const (
-	keptLong         = "I kept the full reply on the box. Ask for it in shorter parts."
+	keptLong         = "Cut here. Ask me to send it in shorter parts."
 	capNote          = "I've emailed the most replies I send in a day, so I kept this one on the box."
 	failNote         = "I couldn't email the full reply, so I kept it on the box. Check that your mail account still signs in."
 	refusedNote      = "I couldn't email the full reply, so I kept it on the box. Send EMAIL REPLIES ON to set emailing up again."

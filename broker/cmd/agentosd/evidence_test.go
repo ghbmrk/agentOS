@@ -237,7 +237,8 @@ func noPage(t *testing.T, s string) {
 }
 
 // TestLongRepliesAreKept: with no destination, a reply too long for one
-// text is kept whole and the text says so (potency C1).
+// text is kept whole (potency C1) and the text says where it was cut and
+// what to ask (UX ruling on #148).
 func TestLongRepliesAreKept(t *testing.T) {
 	if maxText != control.MaxText {
 		t.Fatal("the owner channel's text limit changed")
