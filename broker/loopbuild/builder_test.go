@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -605,5 +606,50 @@ func TestASlowRequestIsCutOff(t *testing.T) {
 	b.Build(context.Background(), brief(change.ClassProcedure))
 	if err := <-cut; err != nil {
 		t.Fatalf("the slow request was not cut off: %v", err)
+	}
+}
+
+// Potency R1 on #126 (BOARD W3-builder-tune): every job leaves one
+// count-only log line, its outcome, tokens and time, so the first jobs'
+// numbers can retune the token cap and the timeout. It names no brief or
+// candidate content.
+func TestEveryJobLogsItsNumbers(t *testing.T) {
+	var mu sync.Mutex
+	var lines []string
+	logf := func(f string, a ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		lines = append(lines, fmt.Sprintf(f, a...))
+	}
+	jobs := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		var out []string
+		for _, l := range lines {
+			if strings.Contains(l, " job ") {
+				out = append(out, l)
+			}
+		}
+		return out
+	}
+	f := &machines{}
+	f.guest = func(id, dir string) {
+		call(guestClient(dir), "POST", "/candidate", Submission{Files: map[string]string{"procedures/mail": "CANARY-content"}})
+	}
+	b := newBuilder(t, f, func(c *Config) { c.Logf = logf })
+	if _, err := b.Build(context.Background(), brief(change.ClassProcedure)); err != nil {
+		t.Fatal(err)
+	}
+	f.guest = func(id, dir string) { call(guestClient(dir), "POST", "/done", nil) }
+	b.Build(context.Background(), brief(change.ClassProcedure))
+	got := jobs()
+	if len(got) != 2 || !strings.Contains(got[0], "outcome candidate") || !strings.Contains(got[1], "outcome no candidate") ||
+		!strings.Contains(got[0], "tokens 0") || !strings.Contains(got[0], "correction") {
+		t.Fatalf("job lines %q", got)
+	}
+	for _, l := range got {
+		if strings.Contains(l, "CANARY") || strings.Contains(l, "subject") {
+			t.Fatalf("a job line holds content: %q", l)
+		}
 	}
 }
