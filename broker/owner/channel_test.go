@@ -28,6 +28,7 @@ type fakeEngine struct {
 	mu      sync.Mutex
 	stopped bool
 	resumes int
+	list    []journal.Status
 }
 
 func (f *fakeEngine) Stop(context.Context) (journal.StopReport, error) {
@@ -46,7 +47,7 @@ func (f *fakeEngine) Resume() error {
 }
 
 func (f *fakeEngine) Stopped() bool          { f.mu.Lock(); defer f.mu.Unlock(); return f.stopped }
-func (f *fakeEngine) List() []journal.Status { return nil }
+func (f *fakeEngine) List() []journal.Status { f.mu.Lock(); defer f.mu.Unlock(); return f.list }
 
 type recAgent struct {
 	mu   sync.Mutex
@@ -676,11 +677,27 @@ func TestResumeNeedsATextedCodeAndStopVoidsIt(t *testing.T) {
 		t.Fatalf("code survived STOP: %q", got)
 	}
 	code = regexp.MustCompile(`RESUME ([0-9]{6})`).FindStringSubmatch(r.say("resume"))[1]
-	if got := r.say("Resume " + code + "."); got != "Resumed. 0 held actions may now run." || r.eng.Stopped() {
+	if got := r.say("Resume " + code + "."); got != "Resumed." || r.eng.Stopped() {
 		t.Fatalf("resume: %q", got)
 	}
 	if got := r.say("RESUME " + code); got != "Not stopped. Nothing to resume." {
 		t.Fatalf("reuse: %q", got)
+	}
+}
+
+// TestResumeCountsWhatStopKept: the reply counts the actions STOP kept
+// from running, in plain English (L3 on #76).
+func TestResumeCountsWhatStopKept(t *testing.T) {
+	for n, want := range map[int]string{1: "Resumed. 1 stopped action may now run.", 2: "Resumed. 2 stopped actions may now run."} {
+		r := newRig(t, nil)
+		for range n {
+			r.eng.list = append(r.eng.list, journal.Status{State: journal.Authorized})
+		}
+		r.say("STOP")
+		code := regexp.MustCompile(`RESUME ([0-9]{6})`).FindStringSubmatch(r.say("resume"))[1]
+		if got := r.say("RESUME " + code); got != want {
+			t.Fatalf("%d stopped: %q", n, got)
+		}
 	}
 }
 
@@ -728,7 +745,7 @@ func TestAutoReplyAlertUndoAndCommitmentFilter(t *testing.T) {
 	if due := r.ch.DueAutoReplies(); len(due) != 1 || due[0].Reply.Ref != "r2" {
 		t.Fatalf("due %+v", due)
 	}
-	if got := r.say("UNDO " + res.Queued.ID); !strings.HasPrefix(got, "Nothing to undo") {
+	if got := r.say("UNDO " + res.Queued.ID); got != res.Queued.ID+" is past its undo window; it was released." {
 		t.Fatalf("undo after send: %q", got)
 	}
 

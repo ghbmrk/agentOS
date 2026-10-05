@@ -295,16 +295,18 @@ func (c *Channel) LocalStop(ctx context.Context) error {
 // texted code CH-11 asks for, so no further code is needed. A texted RESUME
 // code issued earlier is voided.
 func (c *Channel) LocalResume() (string, error) {
+	// c.mu spans the resume and the fresh windows, so no release slips
+	// between them (L3 on #76), as on the text path.
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.resume = nil
-	c.mu.Unlock()
 	if !c.cfg.Engine.Stopped() {
 		return "Not stopped. Nothing to resume.", nil
 	}
 	if err := c.cfg.Engine.Resume(); err != nil {
 		return "", fmt.Errorf("owner: resume failed to record, still stopped: %w", err)
 	}
-	return "Resumed. Held actions may now run.", nil
+	return "Resumed. Stopped actions may now run." + c.rewindowLocked(c.cfg.Now()), nil
 }
 
 // alert texts the owner a broker template, if a modem is attached.

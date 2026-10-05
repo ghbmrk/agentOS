@@ -109,8 +109,14 @@ type Decision struct {
 	Approved bool
 	// Why: "owner", "expired", "void" (wrong codes), "not chosen" (left
 	// out of a partial YES), "restart" (dropped by a reboot), or "undo"
-	// (an auto-reply the owner cancelled).
+	// (an auto-reply or held effect the owner cancelled).
 	Why string
+	// Hold, on an approval, is the UNDO ID the effect is held under until
+	// Until (REV-3, CH-16): the caller keeps it from running until
+	// DueAutoReplies releases it, and a later decision on Hold (Why "undo"
+	// or "restart") cancels it.
+	Hold  string
+	Until time.Time
 }
 
 // Channel is the owner channel. It implements control.Auth.
@@ -122,6 +128,7 @@ type Channel struct {
 	codes       codes
 	open        map[string]*request
 	queued      map[string]*Queued
+	released    map[string]time.Time // queued IDs released, for UNDO's reply
 	resume      *resumeCode
 	resumeTexts []time.Time
 	held        *heldMsg
@@ -202,8 +209,8 @@ func New(cfg Config) (*Channel, error) {
 		cfg:    cfg,
 		codes:  codes{sec: cfg.Secrets, verify: cfg.Verifier, st: st, store: cfg.Store, rand: cfg.Rand},
 		open:   map[string]*request{},
-		queued: map[string]*Queued{},
-		boot:   &bootReport{pending: st.Pending, queued: st.Queued},
+		queued: map[string]*Queued{}, released: map[string]time.Time{},
+		boot: &bootReport{pending: st.Pending, queued: st.Queued},
 	}
 	c.ctrl = &control.Handler{Engine: cfg.Engine, Auth: c, Agent: cfg.Agent, Machines: cfg.Machines, Now: cfg.Now}
 	return c, nil
@@ -559,7 +566,7 @@ func (c *Channel) challengeLocked(text string, now time.Time) (route, bool) {
 			case err != nil:
 				return route{replies: []string{msg + " RESUME failed to record. Still stopped."}}, true
 			}
-			msg += " Resumed."
+			msg += " Resumed." + c.rewindowLocked(now)
 		}
 		return route{replies: []string{msg}}, true
 	}
@@ -767,7 +774,14 @@ func (c *Channel) resumeLocked(r reply, now time.Time) (out []string, accepted b
 			n++
 		}
 	}
-	return []string{fmt.Sprintf("Resumed. %d held actions may now run.", n)}, true
+	text := "Resumed."
+	switch {
+	case n == 1:
+		text = "Resumed. 1 stopped action may now run."
+	case n > 1:
+		text = fmt.Sprintf("Resumed. %d stopped actions may now run.", n)
+	}
+	return []string{text + c.rewindowLocked(now)}, true
 }
 
 // checkLocked checks a reply code against a texted code, or against the

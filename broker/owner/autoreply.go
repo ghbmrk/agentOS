@@ -3,6 +3,7 @@ package owner
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -22,11 +23,13 @@ type AutoReply struct {
 	Facts Facts
 }
 
-// Queued is a reply waiting out its undo window.
+// Queued is a reply, or an approved effect (Held), waiting out its undo
+// window. A held effect's Reply carries only its Ref.
 type Queued struct {
 	ID     string
 	SendAt time.Time
 	Reply  AutoReply
+	Held   bool
 }
 
 // QueueResult says what happened to a reply.
@@ -91,8 +94,8 @@ func (c *Channel) QueueAutoReply(ar AutoReply) (QueueResult, error) {
 	return QueueResult{Queued: &out}, nil
 }
 
-// DueAutoReplies returns and removes replies whose undo window has passed;
-// the caller sends them through the account's adapter. Nothing is released
+// DueAutoReplies returns and removes replies and held effects whose undo
+// window has passed; the caller runs them through the account's adapter. Nothing is released
 // while the broker is stopped (ADP-11: STOP applies).
 func (c *Channel) DueAutoReplies() []Queued {
 	if c.cfg.Engine.Stopped() {
@@ -107,25 +110,70 @@ func (c *Channel) DueAutoReplies() []Queued {
 			out = append(out, *q)
 			delete(c.queued, id)
 			c.retireLocked(id, now)
+			c.released[id] = now
+		}
+	}
+	for id, t := range c.released {
+		if now.Sub(t) >= RetireFor {
+			delete(c.released, id)
 		}
 	}
 	return out
 }
 
-// undoLocked cancels a queued reply inside its window (CH-16); the reply's
-// item is decided as denied with Why "undo".
+// ResumeWindow is the fresh undo window RESUME gives each held effect or
+// queued reply that STOP kept past, or close to, its release (UX-76-1).
+const ResumeWindow = 2 * time.Minute
+
+// undoLocked cancels a queued reply or held effect that has not been
+// released (CH-16), whatever the clock: one that STOP kept past its window
+// has still not run (UX-76-1). Its item is decided as denied with Why
+// "undo"; a held effect's decision names its Hold.
 func (c *Channel) undoLocked(id string, now time.Time, decided *[]Decision) string {
 	q := c.queued[id]
 	if q == nil {
+		if _, ok := c.released[id]; ok {
+			return fmt.Sprintf("%s is past its undo window; it was released.", id)
+		}
 		return fmt.Sprintf("Nothing to undo for %s.", id)
-	}
-	if !now.Before(q.SendAt) {
-		return fmt.Sprintf("%s is past its undo window.", id)
 	}
 	delete(c.queued, id)
 	c.retireLocked(id, now)
-	*decided = append(*decided, Decision{Request: id, Item: 1, Ref: q.Reply.Ref, Why: "undo"})
+	d := Decision{Request: id, Item: 1, Ref: q.Reply.Ref, Why: "undo"}
+	if q.Held {
+		d.Hold = id
+	}
+	*decided = append(*decided, d)
+	if q.Held {
+		return fmt.Sprintf("Cancelled %s. It did not run.", id)
+	}
 	return fmt.Sprintf("Cancelled %s. The reply was not sent.", id)
+}
+
+// rewindowLocked gives every queued reply and held effect due within
+// ResumeWindow a fresh ResumeWindow, after a RESUME, and returns the
+// sentence naming them (UX-76-1), or "" for none.
+func (c *Channel) rewindowLocked(now time.Time) string {
+	at := now.Add(ResumeWindow)
+	var ids []string
+	for id, q := range c.queued {
+		if q.SendAt.Before(at) {
+			q.SendAt = at
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	switch len(ids) {
+	case 0:
+		return ""
+	case 1:
+		return fmt.Sprintf(" %s runs at %s unless you reply UNDO %s.", ids[0], c.clock(at), ids[0])
+	}
+	s := fmt.Sprintf(" %s run at %s unless you reply UNDO and an ID.", strings.Join(ids, ", "), c.clock(at))
+	if !fits("Resumed. 999 stopped actions may now run." + s) {
+		s = fmt.Sprintf(" %d queued items run at %s unless you reply UNDO and an ID.", len(ids), c.clock(at))
+	}
+	return s
 }
 
 func firstLine(s string) string {

@@ -118,17 +118,33 @@ func (f *fakeOwner) count() int {
 	return len(f.order)
 }
 
-// fakeExec counts executions per intent.
+// fakeExec counts executions per intent and records the last params each
+// ran with. An intent in fail is not applied.
 type fakeExec struct {
-	mu  sync.Mutex
-	ran map[string]int
+	mu     sync.Mutex
+	ran    map[string]int
+	params map[string]map[string]any
+	fail   map[string]bool
+	// evidence overrides a failed intent's evidence.
+	evidence map[string]string
 }
 
 func (e *fakeExec) Execute(_ context.Context, in journal.Intent, _ int) journal.Outcome {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.ran[in.ID]++
-	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "sent"}
+	if e.params == nil {
+		e.params = map[string]map[string]any{}
+	}
+	e.params[in.ID] = in.Params
+	if e.fail[in.ID] {
+		ev := "changed since"
+		if x := e.evidence[in.ID]; x != "" {
+			ev = x
+		}
+		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: ev}
+	}
+	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "done:" + in.ID}
 }
 
 func (e *fakeExec) Reconcile(context.Context, journal.Intent, int) journal.Outcome {

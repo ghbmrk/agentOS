@@ -540,9 +540,14 @@ func TestLocalUnlockClearsChallengeModeAndResume(t *testing.T) {
 	if !r.eng.Stopped() {
 		t.Fatal("resumed with a wrong code")
 	}
-	r.post("/resume", url.Values{"code": {r.code()}})
+	w := r.post("/resume", url.Values{"code": {r.code()}})
 	if r.eng.Stopped() {
 		t.Fatal("RESUME with a right code did not resume")
+	}
+	// The page shows the channel's own reply, which names held actions
+	// and their UNDO IDs (CH-16).
+	if !strings.Contains(w.Body.String(), "Resumed. Stopped actions may now run.") {
+		t.Fatalf("RESUME page: %s", w.Body.String())
 	}
 	st := r.ch.LocalStatus()
 	if st.Challenged || st.LowLocked || !st.Unlocked {
