@@ -42,7 +42,7 @@ func (a *Adapter) Verify(ctx context.Context, in journal.Intent) (grants.Verifie
 	if o.Verb == verb.Send {
 		m, err = a.locate(ctx, p[ParamRecord])
 	} else {
-		m, err = a.place(ctx, p[ParamRecord], p[ParamFolder])
+		m, _, err = a.place(ctx, p[ParamRecord], p[ParamFolder])
 	}
 	if err != nil {
 		return grants.Verified{}, err

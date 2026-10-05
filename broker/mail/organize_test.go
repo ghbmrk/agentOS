@@ -525,14 +525,41 @@ func TestReasonsFitTheDetailCap(t *testing.T) {
 func TestOrganizeActsOnItsOwnCopy(t *testing.T) {
 	x := newH(t, nil)
 	thread(x)
-	x.deliver("INBOX", msg{id: "<t1@example.test>", from: "someone@x.example", to: me, subject: "New sign-in on your account", body: "x"})
+	x.deliver("INBOX", msg{id: "<t1@example.test>", from: "someone@x.example", to: me, subject: "New sign-in, code 482913", body: "x"})
 	e, err := x.a.Escalate(ctx, x.intent(mail.OpArchive, rec("<t1@example.test>")))
 	if err != nil || e.Verb != verb.ChangeAccount {
 		t.Fatalf("alert sharing a Sent ID: %+v %v", e, err)
 	}
 	v, err := x.a.Verify(ctx, x.intent(mail.OpArchive, rec("<t1@example.test>")))
-	if err != nil || !strings.Contains(v.Item.Object, "someone@x.example") {
+	if err != nil || !strings.Contains(v.Item.Object, `"New sign-in, code 482913" from someone@x.example`) {
 		t.Fatalf("line shows another copy: %+v %v", v.Item, err)
+	}
+	// With no folder named, the Sent copy alone is never acted on; naming
+	// Sent acts on it.
+	if _, err := x.a.Escalate(ctx, x.intent(mail.OpStar, rec("<t2@example.com>"))); err != nil {
+		t.Fatalf("inbox message: %v", err)
+	}
+	x.deliver("Sent", msg{id: "<solo@example.test>", from: me, to: "sam@example.com", subject: "Note", body: "x"})
+	if out := x.run(x.intent(mail.OpStar, rec("<solo@example.test>"))); out.Result != journal.ResultNotApplied {
+		t.Fatalf("Sent copy acted on without a hint: %+v", out)
+	}
+	x.mustRun(x.intent(mail.OpStar, map[string]any{mail.ParamRecord: "<solo@example.test>", mail.ParamFolder: "Sent"}))
+
+	// A benign twin cannot launder an alert: archiving the benign inbox
+	// copy still asks, since a same-ID copy elsewhere is an alert.
+	w := newH(t, nil)
+	w.deliver("INBOX", msg{id: "<tw@x.example>", from: "someone@x.example", to: me, subject: "Hello", body: "x"})
+	w.deliver("Receipts", msg{id: "<tw@x.example>", from: "someone@x.example", to: me, subject: "Password reset", body: "x"})
+	if e, err := w.a.Escalate(ctx, w.intent(mail.OpArchive, map[string]any{mail.ParamRecord: "<tw@x.example>", mail.ParamFolder: "INBOX"})); err != nil || e.Verb != verb.ChangeAccount {
+		t.Fatalf("laundered alert: %+v %v", e, err)
+	}
+	// A non-owner copy reusing the owner's ID, in the named folder, is
+	// organized as itself; the Sent copy is untouched.
+	w.deliver("Sent", msg{id: "<own@example.test>", from: me, to: "sam@example.com", subject: "Plan", body: "x"})
+	w.deliver("Receipts", msg{id: "<own@example.test>", from: "eve@evil.example", to: me, subject: "Plan", body: "y"})
+	w.mustRun(w.intent(mail.OpArchive, map[string]any{mail.ParamRecord: "<own@example.test>", mail.ParamFolder: "Receipts"}))
+	if len(w.srv.Messages("Sent")) != 1 || len(w.srv.Messages("Archive")) != 1 {
+		t.Fatal("organized the wrong copy")
 	}
 
 	y := newH(t, nil)

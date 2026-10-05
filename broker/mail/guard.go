@@ -152,30 +152,45 @@ func (a *Adapter) locate(ctx context.Context, record string) (Message, error) {
 	return Message{}, ErrAmbiguous
 }
 
-// place finds the copy an organize effect acts on, with its own fields:
-// the guards (alerts, targets) judge the message being moved, never a
-// twin elsewhere. With a hint it is the copy in that folder; without one
-// a copy outside Sent is preferred, so organizing never moves the owner's
-// Sent copy unless no other exists. Differing copies among those
-// considered are ambiguous. An owner-From message with no Sent copy (spam
-// spoofing the owner) can still be organized.
-func (a *Adapter) place(ctx context.Context, record, hint string) (Message, error) {
-	found, byRole, err := a.find(ctx, record, hint)
-	if err != nil {
-		return Message{}, err
+// place finds the copy an organize, trash or spam effect acts on, with
+// its own fields: the guards and the owner's line judge the message being
+// moved, never a twin elsewhere. With a hint it is the copy in that
+// folder; without one, the copies outside Sent, so the owner's Sent copy
+// is acted on only when a hint names Sent. Differing copies among those
+// are ambiguous, never silently picked. It never needs a Sent copy: spam
+// spoofing the owner can be organized. It also reports whether any
+// same-ID copy in the candidate folders is an alert, so a benign twin
+// cannot launder one (ADP-2).
+func (a *Adapter) place(ctx context.Context, record, hint string) (Message, bool, error) {
+	all, byRole, err := a.find(ctx, record, "")
+	if err != nil && !(errors.Is(err, ErrNotFound) && hint != "") {
+		return Message{}, false, err
 	}
-	if hint == "" && byRole[Sent] != "" {
-		var out []Message
-		for _, m := range found {
-			if m.Folder != byRole[Sent] {
-				out = append(out, m)
+	found := all
+	if hint != "" {
+		if found, _, err = a.find(ctx, record, hint); err != nil {
+			return Message{}, false, err
+		}
+	} else {
+		found = nil
+		for _, m := range all {
+			if byRole[Sent] == "" || m.Folder != byRole[Sent] {
+				found = append(found, m)
 			}
 		}
-		if len(out) > 0 {
-			found = out
+		if len(found) == 0 {
+			return Message{}, false, fmt.Errorf("mail: only the Sent copy holds this message; name the folder: %w", ErrNotFound)
 		}
 	}
-	return single(found)
+	m, err := single(found)
+	if err != nil {
+		return Message{}, false, err
+	}
+	alert := a.isAlert(m)
+	for _, x := range append(all, found...) {
+		alert = alert || a.isAlert(x)
+	}
+	return m, alert, nil
 }
 
 // single returns the one message the copies are, or ErrAmbiguous.
@@ -250,7 +265,7 @@ type plan struct {
 // planOrganize resolves an organize (or trash or spam) operation against
 // the source and its guards.
 func (a *Adapter) planOrganize(ctx context.Context, o Op, p map[string]string) (plan, error) {
-	m, err := a.place(ctx, p[ParamRecord], p[ParamFolder])
+	m, alert, err := a.place(ctx, p[ParamRecord], p[ParamFolder])
 	if err != nil {
 		return plan{}, err
 	}
@@ -335,7 +350,7 @@ func (a *Adapter) planOrganize(ctx context.Context, o Op, p map[string]string) (
 	if o.Verb == verb.Organize && !(o.Name == OpLabel && p[ParamLabel] == Keyword) && !has(m.Flags, Keyword) {
 		pl.add = append(pl.add, Keyword)
 	}
-	pl.alert = a.isAlert(m)
+	pl.alert = alert
 	return pl, nil
 }
 
