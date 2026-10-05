@@ -19,9 +19,9 @@ type escVerifier struct{ *fakeVerifier }
 func (v escVerifier) Escalate(_ context.Context, in journal.Intent) (Escalation, error) {
 	switch rec, _ := in.Params[ParamRecord].(string); rec {
 	case "alert":
-		return Escalation{Verb: "change-account"}, nil
+		return Escalation{Verb: "change-account", Reason: "hides an alert from bank.example"}, nil
 	case "over":
-		return Escalation{Ask: true}, nil
+		return Escalation{Ask: true, Reason: "past today's 200"}, nil
 	case "trash":
 		return Escalation{}, errors.New("not an allowed target")
 	}
@@ -54,11 +54,13 @@ func TestOrganizeEscalatesOnlyWhatTheAdapterFlags(t *testing.T) {
 	}
 	r.g.Flush()
 	_, items := r.own.last(t)
-	verbs := map[string]string{}
+	verbs, details := map[string]string{}, map[string]string{}
 	for _, it := range items {
-		verbs[it.Ref] = it.Facts.Verb
+		verbs[it.Ref], details[it.Ref] = it.Facts.Verb, it.Detail
 	}
-	if verbs["agent/a2"] != "change-account" || verbs["agent/a3"] != "organize" {
+	// Each ask says why, in the adapter's fixed words.
+	if verbs["agent/a2"] != "change-account" || verbs["agent/a3"] != "organize" ||
+		details["agent/a2"] != "hides an alert from bank.example" || details["agent/a3"] != "past today's 200" {
 		t.Fatalf("asked %+v", items)
 	}
 	if st := r.effect("agent/a4", "message.archive", map[string]any{"record": "trash"}); st.State != journal.Denied || !strings.Contains(st.Permission.Reason, "guard") {

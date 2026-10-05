@@ -306,17 +306,39 @@ func (a *Adapter) Escalate(ctx context.Context, in journal.Intent) (grants.Escal
 	if err != nil {
 		return grants.Escalation{}, err
 	}
+	// Reasons are fixed words over broker-held fields only: an
+	// owner-confirmed target name, the sender's domain, the bound. Never a
+	// subject or body (CH-19). The owner channel caps a detail at 40
+	// characters, so they are short.
 	var e grants.Escalation
-	if pl.verb != verb.Organize {
-		e.Verb = pl.verb
+	var why []string
+	if pl.verb == verb.Share {
+		e.Verb = verb.Share
+		if pl.to != "" {
+			why = append(why, "into shared folder "+pl.to)
+		} else {
+			why = append(why, "shared label "+p[ParamLabel])
+		}
 	}
 	if pl.hides && pl.alert {
 		e.Verb = verb.ChangeAccount
+		why = append(why, "hides an alert from "+clip(domainOf(pl.msg.From), 20))
 	}
 	if a.organizedToday(in.ID) >= a.cfg.DailyLimit {
 		e.Ask = true
+		why = append(why, fmt.Sprintf("past today's %d", a.cfg.DailyLimit))
 	}
+	e.Reason = strings.Join(why, "; ")
 	return e, nil
+}
+
+// clip shortens s to n characters, marking the cut.
+func clip(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n-1]) + "…"
 }
 
 // organizedToday counts the organize effects the journal authorized on

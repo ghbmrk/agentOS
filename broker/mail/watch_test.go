@@ -162,6 +162,9 @@ func TestBackfillIsBounded(t *testing.T) {
 	if !newest || oldest || p.ix.Len() != 2 {
 		t.Fatal("backfill took the wrong messages")
 	}
+	if n, total := w.Coverage(); n != 2 || total != 5 {
+		t.Fatalf("coverage %d of %d", n, total)
+	}
 	x.news(5)
 	if r := poll(t, w, p); r.Published != 1 {
 		t.Fatalf("after backfill %+v", r)

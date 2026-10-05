@@ -94,7 +94,8 @@ func (a *Adapter) undoOne(ctx context.Context, c Change) bool {
 }
 
 // Digest is the daily digest's organize line (ADP-2): counts by action,
-// the senders most affected, guard hits, and the UNDO that restores them.
+// the senders most affected (by domain, clipped, so the line fits a text),
+// guard hits, and the UNDO that restores them.
 type Digest struct {
 	ByAction   map[string]int
 	TopSenders []string
@@ -112,8 +113,8 @@ func Summarize(changes []Change) Digest {
 		}
 		d.Total++
 		d.ByAction[describe(c.Op)]++
-		if c.Sender != "" {
-			senders[c.Sender]++
+		if dom := domainOf(c.Sender); dom != "" {
+			senders[clip(dom, 24)]++
 		}
 		if c.Alert {
 			d.GuardHits++

@@ -120,6 +120,9 @@ func TestOrganizeTargetsAreGuarded(t *testing.T) {
 			t.Fatalf("move to %s: %q %v", to, v, err)
 		}
 	}
+	if e, _ := x.a.Escalate(ctx, x.intent(mail.OpMove, map[string]any{"record": id, "to": "Team"})); e.Reason != "into shared folder Team" {
+		t.Fatalf("share reason %q", e.Reason)
+	}
 	label := func(l string) (string, error) {
 		e, err := x.a.Escalate(ctx, x.intent(mail.OpLabel, map[string]any{"record": id, "label": l}))
 		return e.Verb, err
@@ -188,8 +191,12 @@ func TestAlertsAskBeforeTheyAreHidden(t *testing.T) {
 	for _, id := range alerts {
 		for _, op := range []string{mail.OpArchive, mail.OpMarkRead} {
 			e, err := x.a.Escalate(ctx, x.intent(op, rec(id)))
-			if err != nil || e.Verb != verb.ChangeAccount {
+			if err != nil || e.Verb != verb.ChangeAccount || !strings.HasPrefix(e.Reason, "hides an alert from ") {
 				t.Fatalf("%s %s: %+v %v", op, id, e, err)
+			}
+			// The reason names the sender's domain, never the subject.
+			if strings.Contains(e.Reason, "@") || len([]rune(e.Reason)) > 40 {
+				t.Fatalf("reason %q", e.Reason)
 			}
 		}
 		e, err := x.a.Escalate(ctx, x.intent(mail.OpMove, map[string]any{"record": id, "to": "Receipts"}))
@@ -253,7 +260,7 @@ func TestOrganizeBoundAsksPastTheDailyLimit(t *testing.T) {
 		t.Fatalf("counted since %v", since)
 	}
 	authorized = mail.DefaultDailyLimit
-	if e, _ := x.a.Escalate(ctx, in); !e.Ask || e.Verb != "" {
+	if e, _ := x.a.Escalate(ctx, in); !e.Ask || e.Verb != "" || e.Reason != "past today's 200" {
 		t.Fatalf("past the bound: %+v", e)
 	}
 	y := newH(t, func(c *mail.Config) { c.Authorized = nil })
@@ -303,9 +310,20 @@ func TestUndoRestoresOnlyWhatIsUnchanged(t *testing.T) {
 	}
 	d := mail.Summarize(changes)
 	line := d.Line("U7", x.now.Add(mail.UndoWindow))
-	if d.Total != 4 || d.GuardHits != 1 || d.TopSenders[0] != "deals@shop.example" ||
-		line != "Mail organized: 4 (1 star, 3 archive). Most from deals@shop.example, someone@x.example. 1 security alerts labelled but left in the inbox. UNDO U7 until Mon Oct 12. MORE U7 lists them." {
+	if d.Total != 4 || d.GuardHits != 1 || d.TopSenders[0] != "shop.example" ||
+		line != "Mail organized: 4 (1 star, 3 archive). Most from shop.example, x.example. 1 security alerts labelled but left in the inbox. UNDO U7 until Mon Oct 12. MORE U7 lists them." {
 		t.Fatalf("digest %+v %q", d, line)
+	}
+	// The longest line still fits CH-12's three text segments.
+	long := strings.Repeat("a", 60) + ".example"
+	var many []mail.Change
+	for i, op := range []string{mail.OpArchive, mail.OpUnarchive, mail.OpMove, mail.OpLabel, mail.OpUnlabel, mail.OpMarkRead, mail.OpMarkUnread, mail.OpStar, mail.OpUnstar} {
+		for j := 0; j < 1000; j++ {
+			many = append(many, mail.Change{Op: op, Record: "<r>", From: "INBOX", Sender: fmt.Sprintf("x@%d%s", i%4, long), Alert: true})
+		}
+	}
+	if l := mail.Summarize(many).Line("U12345678", x.now); len(l) > 3*153 {
+		t.Fatalf("digest line is %d characters: %q", len(l), l)
 	}
 }
 

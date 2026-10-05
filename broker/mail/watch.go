@@ -291,3 +291,21 @@ func (w *Watcher) save() error {
 	}
 	return w.cfg.State.Rewrite(append(b, '\n'))
 }
+
+// Coverage is how much of the watched mail is in recall: messages
+// published, and messages seen in all, as of the last poll. The owner
+// reads it as "Mail indexed: newest 10,000 of 48,200" when the first
+// backfill was bounded.
+func (w *Watcher) Coverage() (indexed, total int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, f := range w.st.Folders {
+		for _, id := range f.UIDs {
+			total++
+			if id != "" {
+				indexed++
+			}
+		}
+	}
+	return indexed, total
+}

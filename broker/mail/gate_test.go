@@ -218,6 +218,13 @@ func TestReplyRuleQueuesOnlyCommitmentFreeReplies(t *testing.T) {
 	if st := composer("Sounds good, thanks!"); st.State != journal.Pending || len(r.own.queued) != 1 {
 		t.Fatalf("plain reply: %s, queued %d", st.State, len(r.own.queued))
 	}
+	// Queued for the undo window: nothing reaches SMTP until the gate
+	// releases it after the window (grants GR11), so an UNDO in the
+	// window means it is never submitted.
+	r.g.Tick()
+	if len(r.srv.Submitted()) != 0 {
+		t.Fatal("a queued auto-reply was submitted inside its undo window")
+	}
 	before := len(r.own.order)
 	for _, body := range []string{"I confirm.", "See you Tuesday.", "We agree to the terms."} {
 		composer(body)

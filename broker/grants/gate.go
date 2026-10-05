@@ -117,6 +117,10 @@ type Escalation struct {
 	// Ask sends the effect to the owner at its verb, reversible or not
 	// (past a daily bound).
 	Ask bool
+	// Reason is why the effect is asked, in the adapter's fixed wording
+	// built only from broker-held fields (never a message's subject or
+	// body). It becomes the approval line's Detail.
+	Reason string
 }
 
 // Verified is what a Verifier read.
@@ -500,6 +504,9 @@ func (g *Gate) evaluate(ctx context.Context, phase journal.Phase, in journal.Int
 		}
 	}
 	item := approvalItem(in, v, cls, ver, verified)
+	if esc.Reason != "" {
+		item.Detail = esc.Reason
+	}
 	if cls == verb.Irreversible && verified {
 		sort.Slice(rules, func(i, j int) bool { return rules[i].ID < rules[j].ID })
 		for _, r := range rules {
