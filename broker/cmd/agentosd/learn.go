@@ -415,6 +415,60 @@ type syncedRouting struct {
 // urgent, so it waits for the digest (CH-15).
 const routingStandsInText = "Your AI model settings changed, so the box uses your order of models. It learns a new order over time while learning is on."
 
+// routingProjectedText replaces it when part of the learned order still
+// fits the owner's new rule, so Loop 1 proposes that part (W3-route-a,
+// potency PR1 on #108). One GSM-7 segment.
+const routingProjectedText = "Your AI model settings changed, so the box uses your order of models. While learning is on, it will check whether its learned order still helps."
+
+// project carries a learned order onto the owner's rule (W3-route-a): in
+// each of the owner's classes, routes the learned order had keep their
+// learned relative order, routes new to the owner's rule keep the owner's
+// places, and routes the owner's rule dropped are gone. The result is
+// always a reordering of owner, so the vault process can take it.
+func project(learned, owner routerule.Rule) routerule.Rule {
+	out := routerule.Rule{}
+	for c, rs := range owner {
+		has := map[routerule.Route]bool{}
+		for _, r := range rs {
+			has[r] = true
+		}
+		var kept []routerule.Route
+		inLearned := map[routerule.Route]bool{}
+		for _, r := range learned[c] {
+			if has[r] && !inLearned[r] {
+				kept = append(kept, r)
+				inLearned[r] = true
+			}
+		}
+		next := make([]routerule.Route, len(rs))
+		k := 0
+		for i, r := range rs {
+			if inLearned[r] {
+				next[i] = kept[k]
+				k++
+			} else {
+				next[i] = r
+			}
+		}
+		out[c] = next
+	}
+	return out
+}
+
+// projected is the projection Loop 1 proposes: only while the pipeline's
+// rule is the refused one (the owner's rule stands in for it), and only
+// when it differs from the owner's rule.
+func projected(active, refused, owner routerule.Rule) (routerule.Rule, bool) {
+	if refused == nil || len(owner) == 0 || !sameRule(active, refused) {
+		return nil, false
+	}
+	p := project(refused, owner)
+	if sameRule(p, owner) {
+		return nil, false
+	}
+	return p, true
+}
+
 func (s *syncedRouting) Current() (change.Tree, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -547,7 +601,17 @@ func (s *syncedRouting) tell() {
 	if owe == nil || note == nil {
 		return
 	}
-	if err := note("routing-refused:"+ruleText(owe), routingStandsInText); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	st, err := s.r.State(ctx)
+	cancel()
+	if err != nil {
+		return // the vault process is down: tried at the next check
+	}
+	text := routingStandsInText
+	if _, ok := projected(owe, owe, st.Owner); ok {
+		text = routingProjectedText
+	}
+	if err := note("routing-refused:"+ruleText(owe), text); err != nil {
 		s.logf("routing: the owner's digest line was not queued: %v", err)
 		return
 	}
@@ -584,9 +648,11 @@ func sameRule(a, b routerule.Rule) bool {
 }
 
 // routerOf is Loop 1's router (ADP-4): the vault process's measured
-// proposal. If the vault process cannot be reached, or proposes the rule
-// it already routes by, the proposal is the pipeline's own active rule,
-// so nothing is proposed.
+// proposal. While the owner's rule stands in for a refused learned rule
+// and the router has measured nothing new, the proposal is the learned
+// order projected onto the owner's rule (W3-route-a). If the vault
+// process cannot be reached, or proposes the rule it already routes by,
+// the proposal is the pipeline's own active rule, so nothing is proposed.
 type routerOf struct {
 	s    *syncedRouting
 	pipe *change.Pipeline
@@ -622,8 +688,24 @@ func (r routerOf) SetRule(rule routerule.Rule) error {
 }
 
 func (r routerOf) Candidate() routerule.Rule {
-	if st, err := r.state(); err == nil && len(st.Candidate) > 0 && !sameRule(st.Candidate, st.Rule) {
+	st, err := r.state()
+	if err != nil {
+		return r.active()
+	}
+	if len(st.Candidate) > 0 && !sameRule(st.Candidate, st.Rule) {
 		return st.Candidate
 	}
-	return r.active()
+	// Until the router measures the owner's new rule, a refused learned
+	// order is proposed as projected onto it (W3-route-a).
+	active := r.active()
+	if p, ok := projected(active, r.s.refusedRule(), st.Owner); ok {
+		return p
+	}
+	return active
+}
+
+func (s *syncedRouting) refusedRule() routerule.Rule {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.refused
 }
