@@ -48,9 +48,11 @@ var (
 // MaxExempt is how many exempt interruptions one candidate may take before
 // it is parked (security P4 on PE5): it is not struck and gets no verdict,
 // but its evaluation is refused with ErrParked unless the scheduler marks
-// the evaluator idle (WithIdle). The count is never reset, so a parked
-// candidate never takes the evaluator back from other work. It bounds the
-// spare compute an owner-busy box spends re-running one candidate.
+// the evaluator idle (WithIdle). Parking ends the pass for that candidate,
+// but the idle second pass may pick it again at once, so MaxExempt bounds
+// what one pass spends, not what one candidate spends. The count is per
+// process and resets on restart; a per-(candidate, case) bound that
+// survives restarts is PE5b.
 const MaxExempt = 6
 
 // ErrParked: the candidate was cut short for the owner MaxExempt times and
