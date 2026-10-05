@@ -43,3 +43,9 @@ P1-4 follow-ups (from the #23 review), for P1-7 or the loop scheduler:
 | ID | Package | Needs | State |
 |---|---|---|---|
 | P2-7 | Provider adapters: model router (CAP-9) over two API routes, OpenAI and Anthropic, behind the one chat-completions guest interface; failover on exhaustion, grants and data labels checked before sending, measured routes and Loop 1 rule candidates ([assumptions](broker/route/ASSUMPTIONS.md)). A3's consumer route waits on S6. Wiring: serve `Router.Handler` behind the OP-8 meter in place of the raw proxy | P1-3, P1-7 | in review |
+
+## Phase 3: compounding
+
+| ID | Package | Needs | State |
+|---|---|---|---|
+| P3-3 | Recall index and event bus: broker-owned index (full text, embeddings, facts) with provenance, label-raising search, untrusted rendering, owner-only preferences, credential scrubbing, propagating deletion; durable event bus with dedupe, timers, retries, and the irreversible-only interrupt rule (CAP-3, CAP-4) ([recall assumptions](broker/recall/ASSUMPTIONS.md), [bus assumptions](broker/events/ASSUMPTIONS.md)). Wiring: P1-7 exposes `Search`/`Render` as a broker tool with a `vm.Manager` labeler; adapters publish events | P1-1, P1-2 | in review |
