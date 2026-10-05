@@ -380,7 +380,8 @@ func TestSubstitutedSRKPublicRefused(t *testing.T) {
 
 // A PIN slot takes the TPM's lockout hierarchy, so the guess counter can't
 // be reset with the factory-empty lockout password; a lockout password
-// someone else set is refused rather than guessed.
+// someone else set is refused rather than guessed; turning the PIN off
+// gives the hierarchy back.
 func TestPINSlotTakesTheLockoutHierarchy(t *testing.T) {
 	s := swtpm.Start(t)
 	if err := s.ThiefLockReset(); err != nil {
@@ -393,15 +394,25 @@ func TestPINSlotTakesTheLockoutHierarchy(t *testing.T) {
 	if err := tpmseal.TakeLockout(s.TPM(), auth, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ThiefLockReset(); err == nil {
-		t.Fatal("empty-password reset still works after the box took the lockout hierarchy")
-	}
 	if err := tpmseal.TakeLockout(s.TPM(), auth, true); err != nil {
 		t.Fatalf("box's own lockout authorization: %v", err)
 	}
 	other, _ := tpmseal.NewLockoutAuth()
 	if err := tpmseal.TakeLockout(s.TPM(), other, false); !errors.Is(err, tpmseal.ErrLockoutOwned) {
 		t.Fatalf("lockout set by someone else: got %v, want ErrLockoutOwned", err)
+	}
+	// Turning the PIN off gives the lockout hierarchy back: empty again.
+	if err := tpmseal.ReleaseLockout(s.TPM(), auth); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ThiefLockReset(); err != nil {
+		t.Fatalf("lockout not back to empty after release: %v", err)
+	}
+	if err := tpmseal.TakeLockout(s.TPM(), auth, false); err != nil {
+		t.Fatalf("taking the released lockout again: %v", err)
+	}
+	if err := s.ThiefLockReset(); err == nil {
+		t.Fatal("empty-password reset still works after the box took the lockout hierarchy")
 	}
 }
 
@@ -444,5 +455,20 @@ func TestPINVariantsDoNotOpen(t *testing.T) {
 	}
 	if _, err := tpmseal.Unseal(s.TPM(), sealed, pols, "Zebra-4711"); err != nil {
 		t.Fatalf("exact PIN: %v", err)
+	}
+}
+
+// A vault that believes it holds the lockout authorization, but whose
+// value the TPM no longer has (a restored vault, a TPM re-keyed by other
+// software), is told so rather than trusted.
+func TestHeldLockoutIsProved(t *testing.T) {
+	s := swtpm.Start(t)
+	auth, _ := tpmseal.NewLockoutAuth()
+	if err := tpmseal.TakeLockout(s.TPM(), auth, false); err != nil {
+		t.Fatal(err)
+	}
+	stale, _ := tpmseal.NewLockoutAuth()
+	if err := tpmseal.TakeLockout(s.TPM(), stale, true); !errors.Is(err, tpmseal.ErrLockoutOwned) {
+		t.Fatalf("held but wrong: got %v, want ErrLockoutOwned", err)
 	}
 }

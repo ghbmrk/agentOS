@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -77,9 +79,12 @@ type trustedHost interface {
 	// touching any slot ("Keep this PC trusted" after a fallback unlock).
 	approve(v *vault.Vault) error
 	// updated reports whether this boot runs another release of the box
-	// than the last one this PC unlocked on. It reads files an attacker
-	// with the drive could write, so it only picks the owner's wording.
+	// than the last one this PC unlocked on, and secureBootChanged whether
+	// only the Secure Boot state (PCR 7) differs from the boot path last
+	// approved. Both read files an attacker with the drive could write,
+	// so they only pick the owner's wording.
 	updated() bool
+	secureBootChanged() bool
 }
 
 // tpmHost is trustedHost over the PC's TPM (package tpmseal). Approved
@@ -96,6 +101,8 @@ type tpmHost struct {
 	// release is the running image's version (os-release IMAGE_VERSION).
 	release func() string
 	now     func() time.Time
+	// notify tells the owner (as custody.notify).
+	notify func(string)
 
 	mu sync.Mutex // one TPM conversation at a time
 }
@@ -133,6 +140,9 @@ type policyFile struct {
 	// Release is the image version this PC last unlocked or was approved
 	// on: a hint for the owner's wording only (tpmHost.updated).
 	Release string `json:"release,omitempty"`
+	// Values are the PCR values (hex, by index) of the boot path approved
+	// last: a hint for the owner's wording only (secureBootChanged).
+	Values map[string]string `json:"values,omitempty"`
 }
 
 func (h *tpmHost) readFile() (policyFile, error) {
@@ -164,8 +174,8 @@ func (h *tpmHost) readPolicies() ([]tpmseal.Policy, error) {
 }
 
 // addPolicy keeps p among the approved boot paths, newest last, and
-// records the running release.
-func (h *tpmHost) addPolicy(p tpmseal.Policy) error {
+// records the running release and the PCR values p approves.
+func (h *tpmHost) addPolicy(p tpmseal.Policy, vals [][]byte) error {
 	pf, err := h.readFile()
 	if err != nil {
 		return err
@@ -181,6 +191,12 @@ func (h *tpmHost) addPolicy(p tpmseal.Policy) error {
 		out = out[len(out)-maxPolicies:]
 	}
 	pf.Policies, pf.Release = out, h.releaseNow()
+	pf.Values = map[string]string{}
+	for i, pcr := range p.PCRs {
+		if i < len(vals) {
+			pf.Values[strconv.Itoa(int(pcr))] = hex.EncodeToString(vals[i])
+		}
+	}
 	return h.writeFile(pf)
 }
 
@@ -198,6 +214,47 @@ func (h *tpmHost) noteRelease() {
 		pf.Release = rel
 		h.writeFile(pf)
 	}
+}
+
+// secureBootChanged reports whether, of the PCRs the last approved boot
+// path recorded, only PCR 7 (Secure Boot state: db, dbx) reads otherwise
+// now, as after a firmware update made outside the box.
+func (h *tpmHost) secureBootChanged() bool {
+	pf, err := h.readFile()
+	if err != nil || len(pf.Values) == 0 {
+		return false
+	}
+	var pcrs []uint
+	for k := range pf.Values {
+		n, err := strconv.Atoi(k)
+		if err != nil || n < 0 || n > 23 {
+			return false
+		}
+		pcrs = append(pcrs, uint(n))
+	}
+	sort.Slice(pcrs, func(i, j int) bool { return pcrs[i] < pcrs[j] })
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	t, err := h.openTPM()
+	if err != nil {
+		return false
+	}
+	defer t.Close()
+	now, err := tpmseal.ReadPCRs(t, pcrs)
+	if err != nil {
+		return false
+	}
+	sb := false
+	for i, pcr := range pcrs {
+		if hex.EncodeToString(now[i]) == pf.Values[strconv.Itoa(int(pcr))] {
+			continue
+		}
+		if pcr != 7 {
+			return false
+		}
+		sb = true
+	}
+	return sb
 }
 
 func (h *tpmHost) updated() bool {
@@ -312,6 +369,16 @@ func (h *tpmHost) open(pin string) (*vault.Vault, error) {
 		return nil, err
 	}
 	h.noteRelease()
+	// Opened without a PIN, so this PC's slot has none: give back a
+	// lockout hierarchy an earlier PIN-off could not (giveBack).
+	if pin == "" {
+		if t, err := h.openTPM(); err == nil {
+			if id, err := tpmseal.Identity(t); err == nil {
+				h.giveBack(v, t, id)
+			}
+			t.Close()
+		}
+	}
 	return v, nil
 }
 
@@ -465,7 +532,7 @@ func policyKey(v *vault.Vault) (*ecdsa.PrivateKey, error) {
 	return k, nil
 }
 
-func (h *tpmHost) enroll(v *vault.Vault, pin string) (string, error) {
+func (h *tpmHost) enroll(v *vault.Vault, pin string) (_ string, err error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	key, err := policyKey(v)
@@ -479,11 +546,15 @@ func (h *tpmHost) enroll(v *vault.Vault, pin string) (string, error) {
 	defer t.Close()
 	// Approve the boot path running now: the owner is making this PC
 	// trusted as it is (CRED-9).
-	p, err := tpmseal.SignCurrent(t, key, h.pcrs)
+	vals, err := tpmseal.ReadPCRs(t, h.pcrs)
 	if err != nil {
 		return "", err
 	}
-	if err := h.addPolicy(p); err != nil {
+	p, err := tpmseal.Sign(key, h.pcrs, vals)
+	if err != nil {
+		return "", err
+	}
+	if err := h.addPolicy(p, vals); err != nil {
 		return "", err
 	}
 	id, err := tpmseal.Identity(t)
@@ -495,6 +566,11 @@ func (h *tpmHost) enroll(v *vault.Vault, pin string) (string, error) {
 			return "", err
 		}
 	}
+	defer func() {
+		if pin == "" && err == nil {
+			h.giveBack(v, t, id)
+		}
+	}()
 	if err := v.AddSlot(&tpmFactor{t: t, pin: pin, pub: &key.PublicKey, name: h.name, now: h.clock()}, func(s vault.Slot) bool {
 		sealed, err := sealedOf(s)
 		return err == nil && bytes.Equal(sealed.SRKName, id)
@@ -546,7 +622,10 @@ func takeLockout(v *vault.Vault, t transport.TPM, id []byte) error {
 	}
 	err := tpmseal.TakeLockout(t, auth, held)
 	clear(auth)
-	if err != nil && !held {
+	// Forget a new entry only when the TPM certainly never took it: any
+	// other failure may have come after the change, and losing the value
+	// would lock the box out of the lockout hierarchy.
+	if errors.Is(err, tpmseal.ErrLockoutOwned) && !held {
 		v.Delete(name)
 	}
 	return err
@@ -584,11 +663,15 @@ func (h *tpmHost) approve(v *vault.Vault) error {
 		return err
 	}
 	defer t.Close()
-	p, err := tpmseal.SignCurrent(t, key, h.pcrs)
+	vals, err := tpmseal.ReadPCRs(t, h.pcrs)
 	if err != nil {
 		return err
 	}
-	return h.addPolicy(p)
+	p, err := tpmseal.Sign(key, h.pcrs, vals)
+	if err != nil {
+		return err
+	}
+	return h.addPolicy(p, vals)
 }
 
 func (h *tpmHost) remove(v *vault.Vault, id string) (int, error) {
@@ -596,10 +679,52 @@ func (h *tpmHost) remove(v *vault.Vault, id string) (int, error) {
 	if err != nil || len(want) == 0 {
 		return 0, errors.New("bad host id")
 	}
-	return v.RemoveSlots(vault.SlotTPM, func(s vault.Slot) bool {
+	n, err := v.RemoveSlots(vault.SlotTPM, func(s vault.Slot) bool {
 		sealed, err := sealedOf(s)
 		return err == nil && bytes.Equal(sealed.SRKName, want)
 	})
+	if err != nil || n == 0 {
+		return n, err
+	}
+	// This PC no longer trusted: give its lockout hierarchy back. Another
+	// PC's TPM is not reachable from here; its entry stays in the vault
+	// until that PC is trusted again without a PIN.
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if t, err := h.openTPM(); err == nil {
+		if me, err := tpmseal.Identity(t); err == nil && bytes.Equal(me, want) {
+			h.giveBack(v, t, me)
+		}
+		t.Close()
+	}
+	return n, nil
+}
+
+// giveBack returns the TPM's lockout hierarchy (tpmseal.ReleaseLockout)
+// once this PC has no PIN slot, and the vault forgets the authorization.
+// After a wrong lockout password the TPM refuses even the right one for a
+// day, so a failure keeps the authorization, tells the owner, and is
+// retried at each unattended start. Caller holds mu.
+func (h *tpmHost) giveBack(v *vault.Vault, t transport.TPM, id []byte) {
+	name := lockoutAuthName(id)
+	if !hasKind(v, name, vault.KindTPMLockoutAuth) {
+		return
+	}
+	s, _ := v.Secret(name)
+	auth := []byte(s.Reveal())
+	err := tpmseal.ReleaseLockout(t, auth)
+	clear(auth)
+	if err != nil {
+		h.say("couldn't give the TPM's lockout back to this PC yet; the box will try again at each restart")
+		return
+	}
+	v.Delete(name)
+}
+
+func (h *tpmHost) say(s string) {
+	if h.notify != nil {
+		h.notify(s)
+	}
 }
 
 func (h *tpmHost) list() ([]hostInfo, error) {
@@ -661,10 +786,11 @@ func newTPMHost(tpmPath, vaultPath, keysPath, policyPath string, pcrs []uint) tr
 		name:       productName(),
 		release:    imageVersion,
 		now:        time.Now,
+		notify:     func(s string) { log.Print(s) },
 	}
 }
 
-// parsePCRs reads a comma-separated PCR list such as "4,9,12".
+// parsePCRs reads a comma-separated PCR list such as "4,7,9,12".
 func parsePCRs(s string) ([]uint, error) {
 	var out []uint
 	for _, f := range strings.Split(s, ",") {

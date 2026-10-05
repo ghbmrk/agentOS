@@ -49,9 +49,10 @@ const (
 	defaultKeys  = "/var/lib/agentos-egress/vault.keys"
 	defaultTPM   = "/dev/tpmrm0"
 	// defaultPCRs measure the Type #1 boot path of S7's host stack: PCR 4
-	// the boot loader and kernel, 9 the initrd, 12 the kernel command
-	// line, which carries the /usr root hash (HW-5a).
-	defaultPCRs = "4,9,12"
+	// the boot loader and kernel, 7 the Secure Boot state (db, dbx;
+	// arbitrator, #42), 9 the initrd, 12 the kernel command line, which
+	// carries the /usr root hash (HW-5a).
+	defaultPCRs = "4,7,9,12"
 	defaultRun  = "/run/agentos-egress"
 )
 
@@ -447,15 +448,25 @@ func unlockCmd(args []string, in io.Reader, out io.Writer) error {
 	}
 	keep := false
 	if err == nil && st["boot_changed"] == true {
-		if st["updated"] == true {
+		if st["secure_boot"] == true {
+			fmt.Fprintln(out, "Secure Boot settings on this PC changed. If you updated firmware, unlock with your card to keep this PC trusted.")
+		} else if st["updated"] == true {
 			fmt.Fprintln(out, "Box updated. Unlock once with your passphrase and a code; this PC stays trusted after that.")
 		} else {
 			fmt.Fprintln(out, "This PC started the box in a way it hasn't before. If you didn't change anything, the drive may have been tampered with. Unlock only if you're sure.")
 		}
-		fmt.Fprint(out, "Keep this PC trusted? [Y/n] ")
+		// Ticked when the change has an innocent explanation; for an
+		// unexplained one the owner opts in (the hints are editable on
+		// the drive, so a tampered boot must not persist by default).
+		explained := st["updated"] == true || st["secure_boot"] == true
+		if explained {
+			fmt.Fprint(out, "Keep this PC trusted? [Y/n] ")
+		} else {
+			fmt.Fprint(out, "Keep this PC trusted? [y/N] ")
+		}
 		ans, _ := r.ReadString('\n')
 		ans = strings.ToLower(strings.TrimSpace(ans))
-		keep = ans == "" || ans == "y" || ans == "yes"
+		keep = ans == "y" || ans == "yes" || (explained && ans == "")
 	}
 	fmt.Fprint(out, "Vault passphrase: ")
 	pass, _ := r.ReadString('\n')
@@ -535,6 +546,7 @@ func trustCmd(args []string, in io.Reader, out io.Writer) error {
 	var pin string
 	if *withPIN {
 		fmt.Fprintln(out, "With a PIN, the box won't restart by itself after a power cut until you enter the PIN.")
+		fmt.Fprintln(out, "This also locks this PC's TPM reset to the box until you turn the PIN off.")
 		fmt.Fprint(out, "New boot PIN: ")
 		pin, _ = r.ReadString('\n')
 		pin = strings.TrimSpace(pin)

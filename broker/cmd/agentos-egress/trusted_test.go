@@ -33,11 +33,18 @@ func (cardFactor) Enroll() (vault.Slot, []byte, error) {
 func (cardFactor) KEK(vault.Slot) ([]byte, error) { return bytes.Repeat([]byte{7}, vault.KeySize), nil }
 
 // The trusted host's boot path, measured as S7's Type #1 boot does:
-// initrd into PCR 9, kernel command line (with the /usr root hash) into 12.
-var testPCRs = []uint{9, 12}
+// Secure Boot state into PCR 7, initrd into 9, kernel command line (with
+// the /usr root hash) into 12.
+var testPCRs = []uint{7, 9, 12}
 
-func bootPC(s *swtpm.TPM, initrd, cmdline string) {
+// secureBoot is the PC's Secure Boot state (db, dbx) as PCR 7 measures it.
+const secureBoot = "sb-db-2026"
+
+func bootPC(s *swtpm.TPM, initrd, cmdline string) { bootSB(s, secureBoot, initrd, cmdline) }
+
+func bootSB(s *swtpm.TPM, sb, initrd, cmdline string) {
 	s.Reboot()
+	s.Measure(7, sb)
 	s.Measure(9, initrd)
 	s.Measure(12, cmdline)
 }
@@ -101,6 +108,7 @@ func (r *pcRig) start(t *testing.T, pc *swtpm.TPM) {
 			name:       "Test PC",
 			release:    func() string { return r.release },
 			now:        r.clk.now,
+			notify:     func(s string) { r.notes = append(r.notes, s) },
 		}
 	}
 	c, err := newCustody(&custody{
@@ -290,11 +298,15 @@ func TestBootPIN(t *testing.T) {
 	if _, err := r.c.trust(r.code(), "12"); err != errBadPIN {
 		t.Fatalf("short PIN: %v", err)
 	}
-	// Characters, not bytes: three letters are too short in any script.
-	if _, err := r.c.trust(r.code(), "äöü"); err != errBadPIN {
-		t.Fatalf("three-character PIN: %v", err)
+	// Six characters at least (arbitrator), counted as characters: five
+	// letters are too short in any script.
+	if _, err := r.c.trust(r.code(), "äöüäö"); err != errBadPIN {
+		t.Fatalf("five-character PIN: %v", err)
 	}
-	if _, err := r.c.trust(r.code(), "2468"); err != nil {
+	if _, err := r.c.trust(r.code(), "12345"); err != errBadPIN {
+		t.Fatalf("five-digit PIN: %v", err)
+	}
+	if _, err := r.c.trust(r.code(), "246810"); err != nil {
 		t.Fatal(err)
 	}
 	bootGood(r.tpm)
@@ -303,17 +315,17 @@ func TestBootPIN(t *testing.T) {
 		t.Fatalf("PIN host after restart: phase %v, wants PIN %v", r.phase(), r.c.pinWanted())
 	}
 	r.clk.add(MinAttemptGap)
-	if err := r.c.unlockPIN("1357"); err != errWrongPIN {
+	if err := r.c.unlockPIN("135711"); err != errWrongPIN {
 		t.Fatalf("wrong PIN: %v", err)
 	}
 	if r.phase() != locked {
 		t.Fatal("wrong PIN opened the vault")
 	}
-	if err := r.c.unlockPIN("2468"); err != errTooSoon {
+	if err := r.c.unlockPIN("246810"); err != errTooSoon {
 		t.Fatalf("PIN tries not spaced: %v", err)
 	}
 	r.clk.add(MinAttemptGap)
-	if err := r.c.unlockPIN("2468"); err != nil {
+	if err := r.c.unlockPIN("246810"); err != nil {
 		t.Fatalf("right PIN: %v", err)
 	}
 	if r.phase() != open || r.c.pinWanted() {
@@ -422,7 +434,7 @@ func TestTrustedHostOverTheUnlockSocket(t *testing.T) {
 	if code, out := call("POST", "/trust", map[string]string{"code": "000000"}); code != http.StatusForbidden {
 		t.Fatalf("trust with a wrong code: %d %v", code, out)
 	}
-	if code, out := call("POST", "/trust", map[string]string{"code": r.code(), "pin": "8642"}); code != http.StatusOK || out["host"] != "Test PC" {
+	if code, out := call("POST", "/trust", map[string]string{"code": r.code(), "pin": "864213"}); code != http.StatusOK || out["host"] != "Test PC" {
 		t.Fatalf("trust: %d %v", code, out)
 	}
 	code, out := call("GET", "/hosts", nil)
@@ -437,7 +449,7 @@ func TestTrustedHostOverTheUnlockSocket(t *testing.T) {
 		t.Fatalf("status on a PIN host: %v", out)
 	}
 	r.clk.add(MinAttemptGap)
-	if code, out := call("POST", "/unlock-pin", map[string]string{"pin": "8642"}); code != http.StatusOK || out["state"] != "open" {
+	if code, out := call("POST", "/unlock-pin", map[string]string{"pin": "864213"}); code != http.StatusOK || out["state"] != "open" {
 		t.Fatalf("unlock-pin: %d %v", code, out)
 	}
 	id, _ := hosts[0].(map[string]any)["id"].(string)
@@ -448,22 +460,15 @@ func TestTrustedHostOverTheUnlockSocket(t *testing.T) {
 
 // CRED-8: a PIN slot takes the TPM's lockout hierarchy with an
 // authorization kept only in the vault, so a thief cannot reset the TPM's
-// guess counter with the factory-empty lockout password.
+// guess counter with the factory-empty lockout password. Turning the PIN
+// off gives the hierarchy back (arbitrator: reversible).
 func TestBootPINTakesTheLockoutHierarchy(t *testing.T) {
 	r := newPCRig(t)
 	r.unknownHostUnlock(t)
-	if _, err := r.c.trust(r.code(), "2468"); err != nil {
+	if _, err := r.c.trust(r.code(), "246810"); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.tpm.ThiefLockReset(); err == nil {
-		t.Fatal("empty lockout password still resets the PIN guess counter")
-	}
-	var name string
-	for _, e := range r.c.v.List() {
-		if e.Kind == vault.KindTPMLockoutAuth {
-			name = e.Name
-		}
-	}
+	name := r.lockoutEntry()
 	if name == "" {
 		t.Fatal("no lockout authorization in the vault")
 	}
@@ -477,9 +482,80 @@ func TestBootPINTakesTheLockoutHierarchy(t *testing.T) {
 		t.Fatalf("put under the reserved prefix: %v", err)
 	}
 	// Re-trusting the PC (say, to change the PIN) keeps the same one.
-	if _, err := r.c.trust(r.code(), "13579"); err != nil {
+	if _, err := r.c.trust(r.code(), "135799"); err != nil {
 		t.Fatalf("re-trust with a new PIN: %v", err)
 	}
+	if r.lockoutEntry() != name {
+		t.Fatal("changing the PIN replaced the lockout authorization")
+	}
+	// PIN off: the lockout password is empty again and the vault forgets it.
+	if _, err := r.c.trust(r.code(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if r.lockoutEntry() != "" {
+		t.Fatal("lockout authorization kept after the PIN was turned off")
+	}
+	if err := r.tpm.ThiefLockReset(); err != nil {
+		t.Fatalf("lockout not given back after the PIN was turned off: %v", err)
+	}
+	// PIN on again: a thief's empty-password reset fails.
+	if _, err := r.c.trust(r.code(), "246810"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.tpm.ThiefLockReset(); err == nil {
+		t.Fatal("empty lockout password still resets the PIN guess counter")
+	}
+}
+
+// Removing this PC from the trusted hosts gives the lockout hierarchy back.
+func TestUntrustGivesTheLockoutBack(t *testing.T) {
+	r := newPCRig(t)
+	r.unknownHostUnlock(t)
+	if _, err := r.c.trust(r.code(), "246810"); err != nil {
+		t.Fatal(err)
+	}
+	hosts, _ := r.c.hosts()
+	if _, err := r.c.untrust(r.code(), hosts[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if r.lockoutEntry() != "" {
+		t.Fatal("lockout authorization kept after untrust")
+	}
+	if err := r.tpm.ThiefLockReset(); err != nil {
+		t.Fatalf("lockout not given back after untrust: %v", err)
+	}
+}
+
+// After a wrong lockout password the TPM refuses the box's own for a day,
+// so turning the PIN off then cannot give the hierarchy back at once. The
+// vault keeps the authorization, the owner is told, and the box retries
+// at each unattended start.
+func TestLockoutReleaseRetried(t *testing.T) {
+	r := newPCRig(t)
+	r.unknownHostUnlock(t)
+	if _, err := r.c.trust(r.code(), "246810"); err != nil {
+		t.Fatal(err)
+	}
+	r.tpm.ThiefLockReset()
+	r.notes = nil
+	if _, err := r.c.trust(r.code(), ""); err != nil {
+		t.Fatalf("PIN off while the lockout hierarchy is locked: %v", err)
+	}
+	if r.lockoutEntry() == "" {
+		t.Fatal("lockout authorization dropped before it was given back")
+	}
+	if !r.noted("give the TPM's lockout back") {
+		t.Fatalf("owner not told: %q", r.notes)
+	}
+}
+
+func (r *pcRig) lockoutEntry() string {
+	for _, e := range r.c.v.List() {
+		if e.Kind == vault.KindTPMLockoutAuth {
+			return e.Name
+		}
+	}
+	return ""
 }
 
 // When other software already set the lockout password, the box cannot
@@ -492,16 +568,14 @@ func TestBootPINRefusedWhenLockoutIsOwned(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.unknownHostUnlock(t)
-	if _, err := r.c.trust(r.code(), "2468"); err != errLockoutOwned {
+	if _, err := r.c.trust(r.code(), "246810"); err != errLockoutOwned {
 		t.Fatalf("PIN with a foreign lockout password: %v", err)
 	}
 	if r.tpmSlots(t) != 0 {
 		t.Fatal("slot added anyway")
 	}
-	for _, e := range r.c.v.List() {
-		if e.Kind == vault.KindTPMLockoutAuth {
-			t.Fatal("unused lockout authorization left in the vault")
-		}
+	if r.lockoutEntry() != "" {
+		t.Fatal("unused lockout authorization left in the vault")
 	}
 	if _, err := r.c.trust(r.code(), ""); err != nil {
 		t.Fatalf("trust without a PIN: %v", err)
@@ -527,7 +601,7 @@ func TestBoxUpdateIsNotCalledTampering(t *testing.T) {
 	if !r.noted("Box updated. Unlock once with your passphrase and a code; this PC stays trusted after that.") || r.noted("tampered") {
 		t.Fatalf("update notes: %q", r.notes)
 	}
-	if ch, upd := r.c.bootChange(); !ch || !upd {
+	if ch, upd, _ := r.c.bootChange(); !ch || !upd {
 		t.Fatalf("boot change %v, update %v", ch, upd)
 	}
 }
@@ -538,7 +612,7 @@ func TestBoxUpdateIsNotCalledTampering(t *testing.T) {
 func TestKeepThisPCTrusted(t *testing.T) {
 	r := newPCRig(t)
 	r.unknownHostUnlock(t)
-	if _, err := r.c.trust(r.code(), "2468"); err != nil {
+	if _, err := r.c.trust(r.code(), "246810"); err != nil {
 		t.Fatal(err)
 	}
 	r.release = "2026.11.1"
@@ -546,7 +620,7 @@ func TestKeepThisPCTrusted(t *testing.T) {
 	newPath()
 	r.start(t, r.tpm)
 	r.clk.add(MinAttemptGap)
-	if err := r.c.unlockPIN("2468"); err != errBootChanged {
+	if err := r.c.unlockPIN("246810"); err != errBootChanged {
 		t.Fatalf("PIN on a changed boot path: %v", err)
 	}
 
@@ -568,10 +642,10 @@ func TestKeepThisPCTrusted(t *testing.T) {
 		t.Fatalf("kept PC: wants PIN %v, notes %q", r.c.pinWanted(), r.notes)
 	}
 	r.clk.add(MinAttemptGap)
-	if err := r.c.unlockPIN("2468"); err != nil {
+	if err := r.c.unlockPIN("246810"); err != nil {
 		t.Fatalf("PIN after keeping the PC trusted: %v", err)
 	}
-	if ch, _ := r.c.bootChange(); ch {
+	if ch, _, _ := r.c.bootChange(); ch {
 		t.Fatal("boot change still reported after unlocking")
 	}
 }
@@ -638,5 +712,35 @@ func TestKeepTrustedOverTheUnlockSocket(t *testing.T) {
 	}
 	if out := call("GET", "/status", nil); out["boot_changed"] != nil {
 		t.Fatalf("status once open: %v", out)
+	}
+}
+
+// PCR 7 (arbitrator): a Secure Boot change made outside the box (say, a
+// firmware update that changed db) stops the unattended unlock, and the
+// owner is told what changed rather than warned of tampering.
+func TestSecureBootChangeIsNamed(t *testing.T) {
+	r := newPCRig(t)
+	r.unknownHostUnlock(t)
+	if _, err := r.c.trust(r.code(), ""); err != nil {
+		t.Fatal(err)
+	}
+	bootSB(r.tpm, "sb-db-2027", "initrd-A", "usrhash=aaaa quiet")
+	r.notes = nil
+	r.start(t, r.tpm)
+	if r.phase() != locked {
+		t.Fatal("changed Secure Boot state unlocked unattended")
+	}
+	if !r.noted("Secure Boot settings on this PC changed. If you updated firmware, unlock with your card to keep this PC trusted.") || r.noted("tampered") {
+		t.Fatalf("Secure Boot notes: %q", r.notes)
+	}
+	if _, _, sb := r.c.bootChange(); !sb {
+		t.Fatal("status does not report the Secure Boot change")
+	}
+	// A change beyond PCR 7 is not called a Secure Boot change.
+	bootSB(r.tpm, "sb-db-2027", "initrd-evil", "usrhash=aaaa quiet")
+	r.notes = nil
+	r.start(t, r.tpm)
+	if r.noted("Secure Boot") || !r.noted("tampered") {
+		t.Fatalf("mixed change notes: %q", r.notes)
 	}
 }

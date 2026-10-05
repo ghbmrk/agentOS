@@ -79,17 +79,17 @@ var (
 
 	// Trusted hosts (CRED-8, CRED-9).
 	errNoTPM        = uerr(http.StatusConflict, "this PC has no TPM, so it cannot be a trusted host")
-	errBadPIN       = uerr(http.StatusBadRequest, "a boot PIN has 4 to 64 characters")
+	errBadPIN       = uerr(http.StatusBadRequest, "a boot PIN has 6 to 64 characters")
 	errWrongPIN     = uerr(http.StatusForbidden, "wrong PIN; this PC's TPM limits how many tries it allows")
 	errPINLockout   = uerr(http.StatusTooManyRequests, "Too many wrong PINs. Unlock with your passphrase and a code instead.")
 	errNotTrusted   = uerr(http.StatusConflict, "this PC is not a trusted host; unlock with the vault passphrase and a code")
 	errBootChanged  = uerr(http.StatusConflict, "This PC started the box in a way it hasn't before. Unlock with your passphrase and a code.")
 	errNoSuchHost   = uerr(http.StatusNotFound, "no trusted host with that id")
 	errHostNotSaved = uerr(http.StatusInternalServerError, "could not make this PC trusted; nothing was changed")
+	errLockoutOwned = uerr(http.StatusConflict, "Another system on this PC controls the TPM, so the box can't protect a boot PIN here. Trust this PC without a PIN instead.")
 
 	// Rollback (V6): the drive's vault is older than this PC's counter.
-	errRolledBack   = uerr(http.StatusConflict, "this drive's vault is older than this PC has seen, so it may be an old copy put back; nothing was unlocked. If you did not restore it, keep the drive and restore from your backup with the recovery key")
-	errLockoutOwned = uerr(http.StatusConflict, "other software already manages this PC's TPM, so the box can't limit guesses at a boot PIN here. Trust this PC without a PIN instead.")
+	errRolledBack = uerr(http.StatusConflict, "this drive's vault is older than this PC has seen, so it may be an old copy put back; nothing was unlocked. If you did not restore it, keep the drive and restore from your backup with the recovery key")
 )
 
 // noteRolledBack is the owner's notice for an old copy of the drive (V6).
@@ -185,6 +185,8 @@ type custody struct {
 	// approved; bootUpdated: and it runs another release than last time.
 	// The fallback unlock may then keep the PC trusted (confirmKeep).
 	bootChanged, bootUpdated bool
+	// bootSecure: only the Secure Boot state (PCR 7) changed.
+	bootSecure bool
 	// wrongCounted and wrongSilent are the wrong verifies per bucket.
 	wrongCounted []time.Time
 	wrongSilent  []time.Time
@@ -394,7 +396,7 @@ func (c *custody) serve(v *vault.Vault) error {
 		c.timer = nil
 	}
 	c.ph, c.v, c.proxy, c.expires, c.ticket, c.needPIN = open, v, p, time.Time{}, "", false
-	c.bootChanged, c.bootUpdated = false, false
+	c.bootChanged, c.bootUpdated, c.bootSecure = false, false, false
 	return nil
 }
 
@@ -686,6 +688,11 @@ func (c *custody) bootTrusted() {
 // picks the wording; both cases need the same full unlock. Caller holds mu.
 func (c *custody) markBootChanged() {
 	c.bootChanged, c.bootUpdated = true, c.host.updated()
+	c.bootSecure = c.host.secureBootChanged()
+	if c.bootSecure {
+		c.notify("Secure Boot settings on this PC changed. If you updated firmware, unlock with your card to keep this PC trusted.")
+		return
+	}
 	if c.bootUpdated {
 		c.notify("Box updated. Unlock once with your passphrase and a code; this PC stays trusted after that.")
 		return
@@ -694,14 +701,15 @@ func (c *custody) markBootChanged() {
 }
 
 // bootChange reports, while the vault is not open, whether this trusted
-// PC booted an unapproved path and whether that looks like an update.
-func (c *custody) bootChange() (changed, updated bool) {
+// PC booted an unapproved path, whether that looks like an update, and
+// whether only its Secure Boot state changed.
+func (c *custody) bootChange() (changed, updated, secureBoot bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.ph == open {
-		return false, false
+		return false, false, false
 	}
-	return c.bootChanged, c.bootUpdated
+	return c.bootChanged, c.bootUpdated, c.bootSecure
 }
 
 // pinWanted reports whether this trusted PC waits for its boot PIN.
@@ -793,10 +801,13 @@ func (c *custody) tier4(code string) (*vault.Vault, error) {
 	return c.v, nil
 }
 
+// MinPINLen is the shortest boot PIN, in characters (arbitrator, #42).
+const MinPINLen = 6
+
 // trust makes this PC a trusted host (CRED-9): its TPM slot opens the
 // vault on this boot path from now on, with the boot PIN if pin is set.
 func (c *custody) trust(code, pin string) (string, error) {
-	if n := utf8.RuneCountInString(pin); pin != "" && (n < 4 || n > 64) {
+	if n := utf8.RuneCountInString(pin); pin != "" && (n < MinPINLen || n > 64) {
 		return "", errBadPIN
 	}
 	v, err := c.tier4(code)
