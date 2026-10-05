@@ -1048,9 +1048,11 @@ func (t *Tools) del(ctx context.Context, c caller, raw json.RawMessage) (any, er
 	if errors.Is(err, vm.ErrHeld) {
 		return nil, errStopped
 	}
-	if err != nil && !errors.Is(err, vm.ErrLabel) && !errors.Is(err, vm.ErrUnknown) {
-		// The cause may name host paths; the broker logged it (L3 S1 on #166).
-		return nil, fmt.Errorf("worker %s: %s: the broker could not finish the deletion; ask again", a.Name, overlay.DeleteFailed)
+	var full *vm.WorkerFull
+	if err != nil && !errors.Is(err, vm.ErrLabel) && !errors.Is(err, vm.ErrUnknown) && !errors.As(err, &full) {
+		// The cause may name host paths; the broker logged it (security
+		// F3 on #166).
+		return nil, fmt.Errorf("worker %s: the deletion could not finish; try again, or roll back or destroy it", a.Name)
 	}
 	if err != nil {
 		return nil, workerErr(a.Name, err)

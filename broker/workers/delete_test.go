@@ -148,20 +148,21 @@ func TestCAP8cSTOPRefusesStartingWorkers(t *testing.T) {
 	r.must("agent", toolFork, m{"name": "w", "into": []string{"f"}}, nil)
 }
 
-// failDelete fails every deletion with a cause naming a host path.
+// failDelete fails every deletion as measuring the layer can: a
+// WalkDir error naming a host path.
 type failDelete struct{ *vm.Manager }
 
 func (failDelete) DeleteFiles(context.Context, string, vm.Deletion) (vm.DeleteReport, error) {
-	return vm.DeleteReport{}, &os.PathError{Op: "openat", Path: "/var/lib/agentos/machines/x/upper", Err: syscall.EIO}
+	return vm.DeleteReport{}, fmt.Errorf("vm: w: %w", &os.PathError{Op: "lstat", Path: "/var/lib/agentos/machines/x/upper/big0", Err: syscall.EIO})
 }
 
-// A broker failure answers delete_failed alone: no host path or errno
-// reaches the agent (L3 S1 on #166).
+// A broker failure, such as measuring the layer, answers a fixed text: no host path or errno
+// reaches the agent (security F3 on #166).
 func TestCAP8cDeleteFailureNamesNoHostPath(t *testing.T) {
 	r := fullWorker(t)
 	r.tools.M = failDelete{r.m}
 	err := r.call("agent", toolDelete, m{"name": "w", "paths": []string{"/small"}}, nil)
-	if err == nil || !strings.Contains(err.Error(), "delete_failed") || strings.Contains(err.Error(), "/") || strings.Contains(err.Error(), "input/output") {
+	if err == nil || err.Error() != "worker w: the deletion could not finish; try again, or roll back or destroy it" || strings.Contains(err.Error(), "/") || strings.Contains(err.Error(), "input/output") {
 		t.Fatalf("broker failure = %v", err)
 	}
 }
