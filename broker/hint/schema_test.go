@@ -38,8 +38,8 @@ func TestOSS5VulnHintsAreEmbargoed(t *testing.T) {
 }
 
 // TestOSS1SchemaRules: a schema that would let a hint carry a number, free
-// text, an identifier-shaped value, or more than MaxBitsPerHint bits is
-// refused at load, so it can never be shipped.
+// text, an identifier-shaped value, a sensitive life domain, or more than
+// MaxBitsPerHint bits is refused at load, so it can never be shipped.
 func TestOSS1SchemaRules(t *testing.T) {
 	ok := `{"version":1,"categories":["c"],"kinds":{"k":{"category":"c","fields":{"f":["aa","bb"]}}}}`
 	if _, err := Parse([]byte(ok)); err != nil {
@@ -71,6 +71,9 @@ func TestOSS1SchemaRules(t *testing.T) {
 		"duplicate category":   `{"version":1,"categories":["c","c"],"kinds":{"k":{"category":"c","fields":{"f":["aa","bb"]}}}}`,
 		"unused category":      `{"version":1,"categories":["c","d"],"kinds":{"k":{"category":"c","fields":{"f":["aa","bb"]}}}}`,
 		"duplicate kind (key)": `{"version":1,"categories":["c"],"kinds":{"k":{"category":"c","fields":{"f":["aa","bb"]}},"k":{"category":"c","fields":{"f":["aa","cc"]}}}}`,
+	}
+	for _, w := range []string{"medical", "health_portal", "legal", "religious_org", "benefits"} {
+		bad["sensitive "+w] = `{"version":1,"categories":["c"],"kinds":{"k":{"category":"c","fields":{"f":["aa","` + w + `"]}}}}`
 	}
 	for name, src := range bad {
 		if _, err := Parse([]byte(src)); err == nil {

@@ -7,15 +7,18 @@
 // free text, numbers, names, identifiers, or content, so what crosses is
 // bounded to a choice among publicly listed options. The schema's own rules
 // (Parse) keep it that way: values are short lower-case words with no
-// digits, every field has at least two values, and no kind carries more
-// than MaxBitsPerHint bits.
+// digits and no sensitive life domain, every field has at least two
+// values, and no kind carries more than MaxBitsPerHint bits.
 //
 // The Emitter is the bridge's single exit. It validates each hint, logs it
-// where the owner can read it, applies the owner's per-category policy
-// (automatic, ask each time, or never), bounds how many hints cross per
-// day, and hands the outbox only a canonical re-encoding built from the
-// validated values. Hint kinds the schema marks embargo (vuln) cross marked
-// for the embargoed private-report path.
+// where the owner can read it, and applies the owner's per-category policy
+// (automatic, ask each time, or never). Hints then cross only as one
+// batch a day, released at a fixed time on a later day, deduplicated,
+// capped, and sorted, so only the set crosses: not the order or time they
+// were emitted. The outbox gets only canonical re-encodings built from the
+// validated values. Hint kinds the schema marks embargo (vuln) have
+// reserved slots in each batch and cross marked for the embargoed
+// private-report path.
 //
 // The package holds no credential, reads no private store, and makes no
 // network call.
@@ -31,6 +34,7 @@ import (
 	"math"
 	"regexp"
 	"sort"
+	"strings"
 )
 
 // MaxBitsPerHint caps the information one hint of any kind can carry:
@@ -46,6 +50,31 @@ var publicSchema []byte
 // word is the only shape a category, kind, field, or value may take: lower
 // case letters and inner underscores, at most 32 characters, no digits.
 var word = regexp.MustCompile(`^[a-z](?:[a-z_]{0,30}[a-z])?$`)
+
+// sensitive lists words that may not appear as any underscore-separated
+// part of a category, kind, field, or value: even a bounded choice naming
+// one of these domains would say the owner deals with it (ASSUMPTIONS H3).
+// The list is a backstop; reviewers still check every schema diff.
+var sensitive = map[string]bool{
+	"health": true, "medical": true, "medicine": true, "doctor": true, "hospital": true,
+	"pharmacy": true, "prescription": true, "therapy": true, "clinic": true, "insurance": true,
+	"religion": true, "religious": true, "church": true, "mosque": true, "synagogue": true, "temple": true,
+	"legal": true, "lawyer": true, "court": true, "police": true, "immigration": true, "visa": true,
+	"benefits": true, "welfare": true, "unemployment": true, "tax": true, "debt": true,
+	"dating": true, "sexual": true, "political": true, "union": true, "ethnicity": true,
+}
+
+func allowedWord(w string) bool {
+	if !word.MatchString(w) {
+		return false
+	}
+	for _, part := range strings.Split(w, "_") {
+		if sensitive[part] {
+			return false
+		}
+	}
+	return true
+}
 
 // Schema is a parsed, checked public hint schema.
 type Schema struct {
@@ -100,13 +129,13 @@ func Parse(data []byte) (*Schema, error) {
 	used := map[string]bool{}
 	cats := map[string]bool{}
 	for _, c := range f.Categories {
-		if !word.MatchString(c) || cats[c] {
+		if !allowedWord(c) || cats[c] {
 			return nil, fmt.Errorf("%w: category %q", ErrInvalid, c)
 		}
 		cats[c] = true
 	}
 	for name, k := range f.Kinds {
-		if !word.MatchString(name) || k == nil {
+		if !allowedWord(name) || k == nil {
 			return nil, fmt.Errorf("%w: kind %q", ErrInvalid, name)
 		}
 		if !cats[k.Category] {
@@ -118,7 +147,7 @@ func Parse(data []byte) (*Schema, error) {
 		}
 		k.allowed = map[string]map[string]bool{}
 		for field, values := range k.Fields {
-			if !word.MatchString(field) {
+			if !allowedWord(field) {
 				return nil, fmt.Errorf("%w: kind %s: field %q", ErrInvalid, name, field)
 			}
 			if len(values) < 2 {
@@ -126,7 +155,7 @@ func Parse(data []byte) (*Schema, error) {
 			}
 			set := map[string]bool{}
 			for _, v := range values {
-				if !word.MatchString(v) || set[v] {
+				if !allowedWord(v) || set[v] {
 					return nil, fmt.Errorf("%w: kind %s: field %s: value %q", ErrInvalid, name, field, v)
 				}
 				set[v] = true

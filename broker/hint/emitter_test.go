@@ -2,54 +2,91 @@ package hint
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"testing"
 	"time"
 )
 
-// REQ: OSS-1, OSS-5, OSS-7
+// REQ: OSS-1, OSS-5, OSS-6, OSS-7
 
 type outbox struct {
-	mu   sync.Mutex
-	sent []string
-	fail error
+	mu      sync.Mutex
+	batches [][]string
+	fail    error
+	onSend  func()
 }
 
-func (o *outbox) Send(b []byte) error {
+func (o *outbox) Send(batch [][]byte) error {
+	if o.onSend != nil {
+		o.onSend()
+	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if o.fail != nil {
 		return o.fail
 	}
-	o.sent = append(o.sent, string(b))
+	var b []string
+	for _, h := range batch {
+		b = append(b, string(h))
+	}
+	o.batches = append(o.batches, b)
 	return nil
 }
 
-func (o *outbox) n() int { o.mu.Lock(); defer o.mu.Unlock(); return len(o.sent) }
+func (o *outbox) all() []string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	var all []string
+	for _, b := range o.batches {
+		all = append(all, b...)
+	}
+	return all
+}
 
 type rig struct {
+	t   *testing.T
+	cfg Config
 	e   *Emitter
 	out *outbox
 	log Log
 	now time.Time
 }
 
+var day0 = time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)
+
 func newRig(t *testing.T, cfg Config) *rig {
 	t.Helper()
-	r := &rig{out: &outbox{}, now: time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)}
+	r := &rig{t: t, out: &outbox{}, now: day0}
 	if cfg.Log == nil {
 		cfg.Log = &MemLog{}
 	}
 	r.log = cfg.Log
 	cfg.Outbox = r.out
 	cfg.Now = func() time.Time { return r.now }
-	e, err := New(cfg)
+	r.cfg = cfg
+	r.restart()
+	return r
+}
+
+// restart builds a fresh emitter over the same log, as after a reboot.
+func (r *rig) restart() {
+	r.t.Helper()
+	e, err := New(r.cfg)
 	if err != nil {
-		t.Fatal(err)
+		r.t.Fatal(err)
 	}
 	r.e = e
-	return r
+}
+
+// nextRelease moves the clock to the release time of the next day and
+// releases.
+func (r *rig) nextRelease() error {
+	d := time.Date(r.now.Year(), r.now.Month(), r.now.Day(), 0, 0, 0, 0, time.UTC)
+	r.now = d.Add(24*time.Hour + DefaultReleaseAt)
+	return r.e.Release()
 }
 
 func records(t *testing.T, l Log) []Record {
@@ -61,28 +98,94 @@ func records(t *testing.T, l Log) []Record {
 	return rs
 }
 
+func skill(domain string) Hint {
+	return Hint{Kind: "skill_gap", Fields: map[string]string{"domain": domain, "format": "ics", "failure": "timezone"}}
+}
+
 var vuln = Hint{Kind: "vuln", Fields: map[string]string{"class": "prompt_injection", "vector": "email_html"}}
 
-// TestOSS7DefaultIsAutomatic: with no policy set, a valid hint goes to the
-// outbox in canonical form, and the log records it.
+var allDomains = []string{"calendar", "email", "contacts", "documents", "spreadsheets", "files", "web_forms", "shopping", "travel", "finance", "messaging", "notes", "tasks", "media"}
+
+func canon(t *testing.T, h Hint) string {
+	t.Helper()
+	c, err := Default().Canonical(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(c)
+}
+
+func emit(t *testing.T, e *Emitter, h Hint) Result {
+	t.Helper()
+	res, err := e.Emit(h)
+	if err != nil {
+		t.Fatalf("emit %v: %v", h, err)
+	}
+	return res
+}
+
+// TestOSS7DefaultIsAutomatic: with no policy set, a valid hint is queued
+// for the next batch, logged, and crosses in canonical form at release.
 func TestOSS7DefaultIsAutomatic(t *testing.T) {
 	r := newRig(t, Config{})
-	res, err := r.e.Emit(good())
-	if err != nil || res.Outcome != Forwarded {
-		t.Fatalf("emit: %+v %v", res, err)
-	}
-	if r.out.n() != 1 || r.out.sent[0] != `{"schema":1,"kind":"skill_gap","embargo":false,"fields":{"domain":"calendar","failure":"timezone","format":"ics"}}` {
-		t.Fatalf("sent %q", r.out.sent)
+	if res := emit(t, r.e, good()); res.Outcome != Queued {
+		t.Fatalf("emit: %+v", res)
 	}
 	rs := records(t, r.log)
-	if len(rs) != 1 || rs[0].Outcome != Forwarded || rs[0].Kind != "skill_gap" || rs[0].Fields["failure"] != "timezone" || rs[0].Day != "2026-10-05" || rs[0].Category != "skills" {
+	if len(rs) != 1 || rs[0].Outcome != Queued || rs[0].Kind != "skill_gap" || rs[0].Fields["failure"] != "timezone" || rs[0].Day != "2026-10-05" || rs[0].Category != "skills" {
 		t.Fatalf("log %+v", rs)
+	}
+	if err := r.nextRelease(); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.out.all(); len(got) != 1 || got[0] != `{"schema":1,"kind":"skill_gap","embargo":false,"fields":{"domain":"calendar","failure":"timezone","format":"ics"}}` {
+		t.Fatalf("sent %q", got)
 	}
 }
 
-// TestOSS1EveryHintLogged: forwarded, withheld, asked, duplicate, and
-// refused hints all leave a record the owner can read. A refused hint's
-// record carries no content, since it failed the schema.
+// TestOSS6OnlyTheSetCrosses: hints cross only as one batch per day, at the
+// fixed release time on a later day, sorted by canonical form, so neither
+// the order nor the time they were emitted reaches the outbox.
+func TestOSS6OnlyTheSetCrosses(t *testing.T) {
+	r := newRig(t, Config{})
+	order := []string{"travel", "calendar", "notes", "email"}
+	for i, d := range order {
+		r.now = day0.Add(time.Duration(i) * 97 * time.Minute)
+		emit(t, r.e, skill(d))
+	}
+	emit(t, r.e, vuln)
+	// Same day: nothing crosses, whatever the hour.
+	r.now = day0.Add(14 * time.Hour)
+	if err := r.e.Release(); err != nil || len(r.out.batches) != 0 {
+		t.Fatalf("same-day release: %v %v", err, r.out.batches)
+	}
+	// Next day, before the release time: still nothing.
+	r.now = time.Date(2026, 10, 6, 0, 30, 0, 0, time.UTC)
+	if err := r.e.Release(); err != nil || len(r.out.batches) != 0 {
+		t.Fatalf("early release: %v %v", err, r.out.batches)
+	}
+	// At the release time: one batch, sorted.
+	r.now = time.Date(2026, 10, 6, 0, 0, 0, 0, time.UTC).Add(DefaultReleaseAt)
+	if err := r.e.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.out.batches) != 1 || len(r.out.batches[0]) != 5 {
+		t.Fatalf("batches %v", r.out.batches)
+	}
+	if !sort.StringsAreSorted(r.out.batches[0]) {
+		t.Fatalf("batch not sorted: %v", r.out.batches[0])
+	}
+	// A second call the same day sends nothing more.
+	r.now = r.now.Add(5 * time.Hour)
+	emit(t, r.e, skill("media"))
+	if err := r.e.Release(); err != nil || len(r.out.batches) != 1 {
+		t.Fatalf("second release: %v %v", err, r.out.batches)
+	}
+}
+
+// TestOSS1EveryHintLogged: queued, duplicate, withheld, asked, and refused
+// hints all leave a record the owner can read. A refused hint's record
+// carries no content, since it failed the schema.
 func TestOSS1EveryHintLogged(t *testing.T) {
 	r := newRig(t, Config{Policy: map[string]Mode{"security": Never, "adapters": Ask}})
 	r.e.Emit(good())
@@ -93,7 +196,7 @@ func TestOSS1EveryHintLogged(t *testing.T) {
 		t.Fatalf("invalid: %v", err)
 	}
 	rs := records(t, r.log)
-	want := []Outcome{Forwarded, Duplicate, Withheld, Asked, Refused}
+	want := []Outcome{Queued, Duplicate, Withheld, Asked, Refused}
 	if len(rs) != len(want) {
 		t.Fatalf("log %+v", rs)
 	}
@@ -105,193 +208,290 @@ func TestOSS1EveryHintLogged(t *testing.T) {
 	if last := rs[4]; last.Kind != "" || last.Fields != nil || last.Category != "" {
 		t.Fatalf("refused record carries content: %+v", last)
 	}
-	if r.out.n() != 1 {
-		t.Fatalf("sent %d", r.out.n())
-	}
 }
 
-// TestOSS7AskEachTime: under "ask", nothing crosses until the owner
-// approves; a declined hint never crosses; both are logged.
+// TestOSS7AskEachTime: under "ask", nothing is queued until the owner
+// approves; a declined hint never crosses; a repeat of a pending ask is a
+// duplicate, on any day; all of it is logged.
 func TestOSS7AskEachTime(t *testing.T) {
 	r := newRig(t, Config{Policy: map[string]Mode{"skills": Ask}})
-	res, err := r.e.Emit(good())
-	if err != nil || res.Outcome != Asked || res.ID == 0 {
-		t.Fatalf("emit %+v %v", res, err)
+	res := emit(t, r.e, good())
+	if res.Outcome != Asked || res.ID == 0 {
+		t.Fatalf("emit %+v", res)
 	}
 	if p := r.e.Pending(); len(p) != 1 || p[0].ID != res.ID || p[0].Kind != "skill_gap" {
 		t.Fatalf("pending %+v", p)
 	}
-	if r.out.n() != 0 {
-		t.Fatal("sent before approval")
+	r.now = day0.Add(48 * time.Hour)
+	if again := emit(t, r.e, good()); again.Outcome != Duplicate {
+		t.Fatalf("repeat of a pending ask: %s", again.Outcome)
+	}
+	if err := r.nextRelease(); err != nil || len(r.out.all()) != 0 {
+		t.Fatalf("released an unapproved hint: %v %v", err, r.out.all())
 	}
 	if err := r.e.Approve(res.ID); err != nil {
 		t.Fatal(err)
 	}
-	if r.out.n() != 1 || len(r.e.Pending()) != 0 {
-		t.Fatalf("after approve: sent %d pending %d", r.out.n(), len(r.e.Pending()))
+	if len(r.e.Pending()) != 0 {
+		t.Fatal("still pending after approve")
 	}
 	if err := r.e.Approve(res.ID); !errors.Is(err, ErrNoPending) {
 		t.Fatalf("second approve: %v", err)
 	}
-	h2 := Hint{Kind: "skill_gap", Fields: map[string]string{"domain": "email", "format": "html", "failure": "encoding"}}
-	res2, _ := r.e.Emit(h2)
+	res2 := emit(t, r.e, skill("email"))
 	if err := r.e.Decline(res2.ID); err != nil {
 		t.Fatal(err)
 	}
-	if r.out.n() != 1 {
-		t.Fatal("declined hint sent")
+	if err := r.nextRelease(); err != nil {
+		t.Fatal(err)
 	}
-	rs := records(t, r.log)
-	want := []Outcome{Asked, Approved, Asked, Declined}
-	for i, o := range want {
-		if rs[i].Outcome != o {
-			t.Fatalf("log %+v", rs)
-		}
+	if got := r.out.all(); len(got) != 1 || got[0] != canon(t, good()) {
+		t.Fatalf("sent %v", got)
 	}
 }
 
 // TestOSS7Never: under "never", the hint is logged and stays on the box.
 func TestOSS7Never(t *testing.T) {
 	r := newRig(t, Config{Policy: map[string]Mode{"skills": Never}})
-	res, err := r.e.Emit(good())
-	if err != nil || res.Outcome != Withheld || r.out.n() != 0 {
-		t.Fatalf("%+v %v sent %d", res, err, r.out.n())
+	if res := emit(t, r.e, good()); res.Outcome != Withheld {
+		t.Fatalf("%+v", res)
+	}
+	if err := r.nextRelease(); err != nil || len(r.out.all()) != 0 {
+		t.Fatalf("%v %v", err, r.out.all())
 	}
 }
 
 // TestOSS7PolicyKeysChecked: a policy naming a category the schema lacks is
-// a configuration error, not a silent automatic default.
+// a configuration error, not a silent automatic default; so are limits
+// that leave no room for routine or embargo kinds.
 func TestOSS7PolicyKeysChecked(t *testing.T) {
-	if _, err := New(Config{Outbox: &outbox{}, Log: &MemLog{}, Policy: map[string]Mode{"skill": Never}}); err == nil {
-		t.Fatal("unknown category accepted")
-	}
-	if _, err := New(Config{Outbox: &outbox{}, Log: &MemLog{}, Policy: map[string]Mode{"skills": Mode(9)}}); err == nil {
-		t.Fatal("unknown mode accepted")
-	}
-	if _, err := New(Config{Log: &MemLog{}}); err == nil {
-		t.Fatal("no outbox accepted")
-	}
-	if _, err := New(Config{Outbox: &outbox{}}); err == nil {
-		t.Fatal("no log accepted")
+	for name, cfg := range map[string]Config{
+		"unknown category": {Outbox: &outbox{}, Log: &MemLog{}, Policy: map[string]Mode{"skill": Never}},
+		"unknown mode":     {Outbox: &outbox{}, Log: &MemLog{}, Policy: map[string]Mode{"skills": Mode(9)}},
+		"no outbox":        {Log: &MemLog{}},
+		"no log":           {Outbox: &outbox{}},
+		"reserve = limit":  {Outbox: &outbox{}, Log: &MemLog{}, DailyLimit: 4, EmbargoReserve: 4},
+		"release at 25h":   {Outbox: &outbox{}, Log: &MemLog{}, ReleaseAt: 25 * time.Hour},
+	} {
+		if _, err := New(cfg); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
 	}
 }
 
-// TestOSS5VulnCrossesEmbargoed: a security hint reaches the outbox marked
-// for the embargoed path.
+// TestOSS5VulnCrossesEmbargoed: a security hint crosses marked for the
+// embargoed path.
 func TestOSS5VulnCrossesEmbargoed(t *testing.T) {
 	r := newRig(t, Config{})
-	res, err := r.e.Emit(vuln)
-	if err != nil || res.Outcome != Forwarded {
-		t.Fatal(res, err)
+	emit(t, r.e, vuln)
+	if err := r.nextRelease(); err != nil {
+		t.Fatal(err)
 	}
-	if r.out.sent[0] != `{"schema":1,"kind":"vuln","embargo":true,"fields":{"class":"prompt_injection","vector":"email_html"}}` {
-		t.Fatalf("sent %s", r.out.sent[0])
+	if got := r.out.all(); len(got) != 1 || got[0] != `{"schema":1,"kind":"vuln","embargo":true,"fields":{"class":"prompt_injection","vector":"email_html"}}` {
+		t.Fatalf("sent %v", got)
 	}
 }
 
-// TestOSS1DailyBound: at most DailyLimit hints cross (or are asked) per
-// day, and a repeat of a hint already sent today crosses once, which bounds
-// what a compromised private side can signal by choosing hints. The bound
-// survives a restart because counts are rebuilt from the log.
-func TestOSS1DailyBound(t *testing.T) {
-	log, err := OpenFileLog(filepath.Join(t.TempDir(), "hints.jsonl"))
-	if err != nil {
+// TestOSS5FloodDoesNotStarveVuln: routine hints cannot use the slots
+// reserved for embargo kinds, so a flood of them before a real finding
+// still lets the vuln hint cross in the next batch. Hints over the day's
+// cap wait for the next batch instead of being dropped.
+func TestOSS5FloodDoesNotStarveVuln(t *testing.T) {
+	r := newRig(t, Config{DailyLimit: 4, EmbargoReserve: 1})
+	for _, d := range allDomains[:10] {
+		if res := emit(t, r.e, skill(d)); res.Outcome != Queued {
+			t.Fatalf("%s: %s", d, res.Outcome)
+		}
+	}
+	emit(t, r.e, vuln)
+	if err := r.nextRelease(); err != nil {
 		t.Fatal(err)
 	}
-	r := newRig(t, Config{DailyLimit: 3, Log: log})
-	domains := []string{"calendar", "email", "contacts", "documents"}
+	b := r.out.batches[0]
+	if len(b) != 4 || !contains(b, canon(t, vuln)) {
+		t.Fatalf("first batch %v", b)
+	}
+	// The rest follow, oldest first, at most the cap per batch; with no
+	// embargo hint waiting, routine hints may use the reserved slot.
+	if err := r.nextRelease(); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.out.batches[1]) != 4 {
+		t.Fatalf("second batch %v", r.out.batches[1])
+	}
+	if err := r.nextRelease(); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.out.batches[2]) != 3 || len(r.out.all()) != 11 {
+		t.Fatalf("third batch %v", r.out.batches[2])
+	}
+	for _, d := range allDomains[:10] {
+		if !contains(r.out.all(), canon(t, skill(d))) {
+			t.Fatalf("%s never crossed", d)
+		}
+	}
+}
+
+// TestOSS5BacklogBounded: the waiting queue for routine hints is bounded
+// (over the bound a hint is logged over_limit and dropped), and a full
+// routine queue never blocks an embargo hint.
+func TestOSS5BacklogBounded(t *testing.T) {
+	r := newRig(t, Config{DailyLimit: 2, EmbargoReserve: 1, MaxBacklog: 3})
 	var got []Outcome
-	for _, d := range domains[:2] {
-		res, _ := r.e.Emit(Hint{Kind: "skill_gap", Fields: map[string]string{"domain": d, "format": "ics", "failure": "timezone"}})
-		got = append(got, res.Outcome)
+	for _, d := range allDomains[:5] {
+		got = append(got, emit(t, r.e, skill(d)).Outcome)
 	}
-	// Restart: a new emitter over the same log keeps today's counts.
-	log2, err := OpenFileLog(log.path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	r2 := newRig(t, Config{DailyLimit: 3, Log: log2})
-	r2.now = r.now.Add(time.Hour)
-	for _, d := range []string{"calendar", "contacts", "documents"} {
-		res, _ := r2.e.Emit(Hint{Kind: "skill_gap", Fields: map[string]string{"domain": d, "format": "ics", "failure": "timezone"}})
-		got = append(got, res.Outcome)
-	}
-	want := []Outcome{Forwarded, Forwarded, Duplicate, Forwarded, OverLimit}
+	want := []Outcome{Queued, Queued, Queued, OverLimit, OverLimit}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("outcomes %v, want %v", got, want)
 		}
 	}
-	// Next day: the bound resets.
-	r2.now = r2.now.Add(24 * time.Hour)
-	if res, _ := r2.e.Emit(Hint{Kind: "skill_gap", Fields: map[string]string{"domain": "documents", "format": "ics", "failure": "timezone"}}); res.Outcome != Forwarded {
-		t.Fatalf("next day %v", res.Outcome)
-	}
-	if n := len(records(t, log2)); n != 6 {
-		t.Fatalf("file log has %d records", n)
+	if res := emit(t, r.e, vuln); res.Outcome != Queued {
+		t.Fatalf("vuln behind a full routine queue: %s", res.Outcome)
 	}
 }
 
-// TestOSS1SendFailureLogged: an outbox failure is logged and returned; the
-// hint does not count as sent, so a later retry may cross.
-func TestOSS1SendFailureLogged(t *testing.T) {
-	r := newRig(t, Config{})
-	r.out.fail = errors.New("down")
-	if res, err := r.e.Emit(good()); err == nil || res.Outcome != SendFailed {
-		t.Fatalf("%+v %v", res, err)
+// TestOSS1ClockStepKeepsTheCap: stepping the clock back does not reopen an
+// earlier day, so stepping it back and forward again cannot reset the
+// day's dedupe or let more than the cap cross in one batch. The day only
+// moves forward.
+func TestOSS1ClockStepKeepsTheCap(t *testing.T) {
+	r := newRig(t, Config{DailyLimit: 2, EmbargoReserve: 1})
+	emit(t, r.e, skill("calendar"))
+	emit(t, r.e, skill("email"))
+	r.now = day0.Add(-24 * time.Hour)
+	if res := emit(t, r.e, skill("calendar")); res.Outcome != Duplicate {
+		t.Fatalf("after stepping back, repeat: %s", res.Outcome)
 	}
-	r.out.fail = nil
-	if res, err := r.e.Emit(good()); err != nil || res.Outcome != Forwarded {
-		t.Fatalf("retry %+v %v", res, err)
+	emit(t, r.e, skill("contacts"))
+	r.now = day0
+	emit(t, r.e, skill("documents"))
+	for _, rec := range records(t, r.log) {
+		if rec.Day != "2026-10-05" {
+			t.Fatalf("record on day %s", rec.Day)
+		}
+	}
+	if err := r.nextRelease(); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.out.batches) != 1 || len(r.out.batches[0]) != 2 {
+		t.Fatalf("first batch %v", r.out.batches)
+	}
+	// Stepping back after a release does not release that day again.
+	r.now = r.now.Add(-24 * time.Hour)
+	if err := r.e.Release(); err != nil || len(r.out.batches) != 1 {
+		t.Fatalf("release after stepping back: %v %v", err, r.out.batches)
+	}
+	// After a restart the latest day is rebuilt from the log.
+	r.restart()
+	if res := emit(t, r.e, skill("contacts")); res.Outcome != Duplicate {
+		t.Fatalf("after restart, a hint still waiting: %s", res.Outcome)
 	}
 }
 
-// TestOSS1LoggedBeforeSent: the record exists before the outbox sees the
-// hint, so nothing crosses unlogged; a failed approval leaves the hint
-// pending, also across a restart.
-func TestOSS1LoggedBeforeSent(t *testing.T) {
-	log := &MemLog{}
-	var at int
-	r := newRig(t, Config{Log: log, Policy: map[string]Mode{"security": Ask}})
-	r.out.fail = errors.New("down")
-	probe := &probeOutbox{inner: r.out, log: log, at: &at}
-	r.e.cfg.Outbox = probe
-	r.e.Emit(good())
-	if at != 1 {
-		t.Fatalf("log had %d records when the outbox was called", at)
-	}
-	res, _ := r.e.Emit(vuln)
-	if err := r.e.Approve(res.ID); err == nil {
-		t.Fatal("approve with failing outbox succeeded")
-	}
-	if len(r.e.Pending()) != 1 {
-		t.Fatal("failed approval dropped the pending hint")
-	}
-	e2, err := New(Config{Log: log, Outbox: r.out, Now: func() time.Time { return r.now }, Policy: map[string]Mode{"security": Ask}})
+// TestOSS1RestartKeepsState: the waiting batch, open asks, and today's
+// dedupe are rebuilt from the file log after a restart.
+func TestOSS1RestartKeepsState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hints.jsonl")
+	log, err := OpenFileLog(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p := e2.Pending(); len(p) != 1 || p[0].ID != res.ID {
-		t.Fatalf("pending after restart %+v", p)
-	}
-	r.out.fail = nil
-	if err := e2.Approve(res.ID); err != nil {
+	r := newRig(t, Config{Log: log, Policy: map[string]Mode{"security": Ask}})
+	emit(t, r.e, good())
+	ask := emit(t, r.e, vuln)
+	r.cfg.Log, err = OpenFileLog(path)
+	if err != nil {
 		t.Fatal(err)
 	}
-	// The failed skill_gap send did not count: it may cross again today.
-	if res, _ := e2.Emit(good()); res.Outcome != Forwarded {
-		t.Fatalf("retry after failed send: %s", res.Outcome)
+	r.restart()
+	if res := emit(t, r.e, good()); res.Outcome != Duplicate {
+		t.Fatalf("after restart: %s", res.Outcome)
+	}
+	if p := r.e.Pending(); len(p) != 1 || p[0].ID != ask.ID {
+		t.Fatalf("pending after restart %+v", p)
+	}
+	if err := r.nextRelease(); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.out.all(); len(got) != 1 || got[0] != canon(t, good()) {
+		t.Fatalf("sent %v", got)
 	}
 }
 
-type probeOutbox struct {
-	inner *outbox
-	log   Log
-	at    *int
+// TestOSS1LoggedBeforeSent: the batch's records exist before the outbox is
+// called, so nothing crosses unlogged; a failed send is logged, the hints
+// stay queued, and they cross at the next release, also after a restart.
+func TestOSS1LoggedBeforeSent(t *testing.T) {
+	r := newRig(t, Config{})
+	emit(t, r.e, good())
+	emit(t, r.e, vuln)
+	var forwarded int
+	r.out.onSend = func() {
+		forwarded = 0
+		for _, rec := range records(t, r.log) {
+			if rec.Outcome == Forwarded {
+				forwarded++
+			}
+		}
+	}
+	r.out.fail = errors.New("down")
+	if err := r.nextRelease(); err == nil {
+		t.Fatal("release with failing outbox succeeded")
+	}
+	if forwarded != 2 {
+		t.Fatalf("log had %d forwarded records when the outbox was called", forwarded)
+	}
+	r.out.fail = nil
+	r.restart()
+	r.now = r.now.Add(time.Hour)
+	if err := r.e.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.out.all()) != 2 {
+		t.Fatalf("retry sent %v", r.out.all())
+	}
 }
 
-func (p *probeOutbox) Send(b []byte) error {
-	rs, _ := p.log.List()
-	*p.at = len(rs)
-	return p.inner.Send(b)
+// TestOSS1TornLogTail: a log whose last line was cut off by a crash mid-write
+// opens with that line removed (nothing it described happened, since a
+// record is written before its effect) and a note of the repair.
+func TestOSS1TornLogTail(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hints.jsonl")
+	l, err := OpenFileLog(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.Append(Record{Seq: 1, Day: "2026-10-05", Outcome: Refused})
+	f, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	f.WriteString(`{"seq":2,"day":"2026-10-0`)
+	f.Close()
+	l2, err := OpenFileLog(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !l2.Repaired() {
+		t.Fatal("repair not reported")
+	}
+	if err := l2.Append(Record{Seq: 2, Day: "2026-10-05", Outcome: Refused}); err != nil {
+		t.Fatal(err)
+	}
+	if rs := records(t, l2); len(rs) != 2 || rs[1].Seq != 2 {
+		t.Fatalf("records %+v", rs)
+	}
+	// Damage before the last line is not a torn write; it still fails.
+	os.WriteFile(path, []byte("{bad\n{\"seq\":1}\n"), 0o600)
+	if _, err := OpenFileLog(path); err == nil {
+		t.Fatal("corrupt middle line accepted")
+	}
+}
+
+func contains(xs []string, x string) bool {
+	for _, y := range xs {
+		if y == x {
+			return true
+		}
+	}
+	return false
 }

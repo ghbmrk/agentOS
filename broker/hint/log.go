@@ -2,8 +2,10 @@ package hint
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 )
@@ -12,21 +14,21 @@ import (
 type Outcome string
 
 const (
-	Forwarded  Outcome = "forwarded"   // handed to the outbox
+	Queued     Outcome = "queued"      // waiting for the next daily batch
 	Asked      Outcome = "asked"       // waiting for the owner (policy "ask")
-	Approved   Outcome = "approved"    // the owner approved an asked hint; it was forwarded
-	Declined   Outcome = "declined"    // the owner declined an asked hint
+	Approved   Outcome = "approved"    // the owner approved asked hint Ref; it is queued
+	Declined   Outcome = "declined"    // the owner declined asked hint Ref
 	Withheld   Outcome = "withheld"    // policy "never"
-	Duplicate  Outcome = "duplicate"   // the same hint already crossed or was asked today
-	OverLimit  Outcome = "over_limit"  // today's DailyLimit was reached
+	Duplicate  Outcome = "duplicate"   // the same hint is waiting, or was queued or asked today
+	OverLimit  Outcome = "over_limit"  // that class's waiting queue was full; dropped
 	Refused    Outcome = "refused"     // failed the schema; no content recorded
-	SendFailed Outcome = "send_failed" // the send for record Ref failed; it did not cross
+	Forwarded  Outcome = "forwarded"   // queued hint Ref is in the batch being sent
+	SendFailed Outcome = "send_failed" // the send for Forwarded record Ref failed; it did not cross
 )
 
 // Record is one log line. Day is the UTC date; nothing finer is kept. A
-// Refused record carries no kind or fields. Ref names the Asked record an
-// Approved or Declined record settles, or the Forwarded or Approved record
-// whose send a SendFailed record reports.
+// Refused record carries no kind or fields. Ref links a record to the one
+// it acts on, as each Outcome says.
 type Record struct {
 	Seq      int               `json:"seq"`
 	Day      string            `json:"day"`
@@ -64,25 +66,43 @@ func (l *MemLog) List() ([]Record, error) {
 
 // FileLog appends one JSON line per record and syncs each write.
 type FileLog struct {
-	mu   sync.Mutex
-	path string
+	mu       sync.Mutex
+	path     string
+	repaired bool
 }
 
 // OpenFileLog opens or creates the log at path, readable by the owner only.
+// A last line cut off by a crash mid-write is removed, since a record is
+// written before what it describes, so nothing it described happened;
+// Repaired reports that. Damage anywhere else is an error.
 func OpenFileLog(path string) (*FileLog, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err
 	}
-	if err := f.Close(); err != nil {
+	defer f.Close()
+	data, err := io.ReadAll(f)
+	if err != nil {
 		return nil, err
 	}
 	l := &FileLog{path: path}
+	if n := len(data); n > 0 && data[n-1] != '\n' {
+		if err := f.Truncate(int64(bytes.LastIndexByte(data, '\n') + 1)); err != nil {
+			return nil, err
+		}
+		if err := f.Sync(); err != nil {
+			return nil, err
+		}
+		l.repaired = true
+	}
 	if _, err := l.List(); err != nil {
 		return nil, err
 	}
 	return l, nil
 }
+
+// Repaired reports whether opening removed a torn last line.
+func (l *FileLog) Repaired() bool { return l.repaired }
 
 func (l *FileLog) Append(r Record) error {
 	b, err := json.Marshal(r)
