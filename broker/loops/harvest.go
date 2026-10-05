@@ -95,6 +95,9 @@ func (h *Harvester) Harvest(o Outcome) error {
 		return err
 	}
 	taskKey := TaskKey(st.Intent)
+	// The journal's REV-5 label is authoritative: the caller's mark can
+	// only narrow it, since Public decides what may be shared (CHG-5).
+	c.Public = o.Public && st.Intent.Label == "public"
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if err := h.loadLocked(); err != nil {

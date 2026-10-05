@@ -171,7 +171,7 @@ func TestLoop1WaitsForEvidenceThenAdoptsThroughThePipeline(t *testing.T) {
 	if ran, _ := r.s.Tick(context.Background()); ran {
 		t.Fatal("Loop 1 proposed with 4 held-out cases")
 	}
-	if d := strings.Join(r.s.Digest(), "\n"); !strings.Contains(d, "waiting for more of your past tasks to test against (4/5)") {
+	if d := strings.Join(r.s.Digest(), "\n"); !strings.Contains(d, "waiting until there are 5 past tasks to test them on (4 so far)") {
 		t.Fatalf("digest does not say Loop 1 is waiting: %q", d)
 	}
 	if r.ev.runs() != 0 {
@@ -438,5 +438,32 @@ func TestBuildersAreChosenBySignal(t *testing.T) {
 	job.Run(context.Background())
 	if got := skills.got(); len(got) != 1 || got[0].Hypothesis.Signal != SignalRepeat {
 		t.Fatalf("briefs %+v", got)
+	}
+}
+
+// cases captures what Harvest adds.
+type cases struct{ got []change.Case }
+
+func (c *cases) AddTaskCase(x change.Case) error { c.got = append(c.got, x); return nil }
+func (c *cases) Dev(change.Class) []change.Case  { return nil }
+
+func TestHarvestNeverWidensTheJournalLabel(t *testing.T) {
+	r := newRig(t)
+	cs := &cases{}
+	h := &Harvester{J: r.eng, Pipeline: cs, Store: &change.MemStore{}}
+	r.task("priv", "gp", "mail", "send", "private")
+	r.task("pub", "gq", "mail", "send", "public")
+	r.task("pub2", "gr", "mail", "send", "public")
+	must(t, h.Harvest(Outcome{Intent: "priv", Action: Approved, Input: []byte("x"), Output: []byte("y"), Public: true}))
+	must(t, h.Harvest(Outcome{Intent: "pub", Action: Approved, Input: []byte("x"), Output: []byte("y"), Public: true}))
+	must(t, h.Harvest(Outcome{Intent: "pub2", Action: Approved, Input: []byte("x"), Output: []byte("y")}))
+	want := map[string]bool{"priv": false, "pub": true, "pub2": false}
+	for _, c := range cs.got {
+		if c.Public != want[c.ID] {
+			t.Fatalf("case %s public=%v", c.ID, c.Public)
+		}
+	}
+	if len(cs.got) != 3 {
+		t.Fatalf("%d cases", len(cs.got))
 	}
 }

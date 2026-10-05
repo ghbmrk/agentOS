@@ -377,8 +377,8 @@ func (l *Learn) Digest() []string {
 	if l.waiting == 0 || l.heldOut >= l.cfg.MinHeldOut {
 		return nil
 	}
-	return []string{fmt.Sprintf("Learning: %d ideas are waiting for more of your past tasks to test against (%d/%d).",
-		l.waiting, l.heldOut, l.cfg.MinHeldOut)}
+	return []string{fmt.Sprintf("Learning: %d ideas are waiting until there are %d past tasks to test them on (%d so far).",
+		l.waiting, l.cfg.MinHeldOut, l.heldOut)}
 }
 
 // TaskKey is the task an intent belongs to: its goal, or, for intents
