@@ -29,5 +29,6 @@
 | 2026-10-04 | Spec v0.12 folds S3, S4, S7 and HW-5a | Claude; P0 exit approval is Mark's |
 | 2026-10-04 | CH-11 adds `RUN` (confirms a message held before a code-only unlock) and `UNLOCK <challenge> <code>` (after 10 wrong codes in 24 h, only attempts carrying a one-time challenge texted to the owner count; arbitrator's O4 ruling, PR #22) | Claude, auto-decided: security better, UX and potency not worse |
 | 2026-10-04 | Pace: ~100% of the weekly limit used by each reset, spread evenly (~14%/day), with more parallel threads; replaces the 70% envelope ("faster and sooner, should be 100% at reset") | Mark, project chat |
+| 2026-10-05 | Change-pipeline intents: `meta.change.*` is the one vocabulary for adopting, reverting, and changing adoption policy (P3-1, #34); `meta.skill` and `meta.release` stay unused journal constants until the journal package retires them. `meta.change.revert` and `meta.change.policy.off` are authority-narrowing (journal A9), so UNDO and turning auto-adoption or sharing off work during STOP | Claude, auto-decided on the #34 review: no lens worse |
 | Proposed | External-drive-only (no internal install) | Not yet confirmed |
 | Pending | License | Before first public release (OSS-12) |
