@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -14,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/cgroup"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/guest"
@@ -84,6 +86,17 @@ func (l *lateServices) Close(id string) {
 	}
 }
 
+// lateStatus is STATUS's agent line: the keeper's once it runs, and "not
+// set up" before that or when no keeper could start.
+type lateStatus struct{ k atomic.Pointer[keeper] }
+
+func (l *lateStatus) Status() string {
+	if k := l.k.Load(); k != nil {
+		return k.Status()
+	}
+	return agentNotSet
+}
+
 // lateAgent hands owner chat to the guest plane once it exists.
 type lateAgent struct {
 	a atomic.Pointer[guest.OwnerAgent]
@@ -152,7 +165,8 @@ func main() {
 	var cfg daemon.Config
 	imgs := images{}
 	var stateDir, runsc, cgroupParent, meterPath, agentMachine, inboxPath, egressSocket, verifySocket, recallDir string
-	var diskReserveMB int64
+	var agentImage, agentLaunch string
+	var diskReserveMB, agentMemMB int64
 	flag.StringVar(&cfg.JournalPath, "journal", "/var/lib/agentos/journal.log", "journal file")
 	flag.StringVar(&cfg.SocketDir, "sockets", "/run/agentos", "socket directory (created 0700)")
 	flag.StringVar(&cfg.OwnerNumber, "owner", "", "owner's phone number, E.164")
@@ -168,6 +182,9 @@ func main() {
 	flag.StringVar(&meterPath, "meter", "/var/lib/agentos/meter.json", "model-spend meter state (OP-8)")
 	flag.StringVar(&cfg.OwnerState, "owner-state", "/var/lib/agentos/owner.json", "owner channel state (P1-5)")
 	flag.StringVar(&agentMachine, "agent-machine", "agent", "machine whose guest receives the owner's task chat")
+	flag.StringVar(&agentImage, "agent-image", "openclaw", "image the agent machine is created from on first start; empty keeps no agent machine")
+	flag.StringVar(&agentLaunch, "agent-launch", "/usr/lib/agentos/guest/launch.json", "how the agent machine starts: argv and env (guest/openclaw/launch.json)")
+	flag.Int64Var(&agentMemMB, "agent-mem-mb", 1536, "the agent machine's memory budget, MB")
 	flag.StringVar(&inboxPath, "guest-inbox", "/var/lib/agentos/guest-inbox.json", "unanswered owner messages to guests, kept across restarts")
 	flag.StringVar(&egressSocket, "egress", "/run/agentos-egress/model.sock", "the vault process's model socket (agentos-egress); empty serves no model route")
 	flag.StringVar(&recallDir, "recall", "/var/lib/agentos/recall", "recall index, event bus and provenance (created 0700); empty runs no recall")
@@ -199,6 +216,10 @@ func main() {
 	cfg.Preempter = pre
 	agent := &lateAgent{}
 	cfg.Agent = agent
+	// Until the keeper runs, STATUS says the agent is not set up; it says
+	// so for good if the machine plane or the agent's setup fails.
+	agentStatus := &lateStatus{}
+	cfg.AgentStatus = agentStatus.Status
 	// The code-generator seed lives in the vault, which only the vault
 	// process holds (P2-4a); the channel asks it to check high-tier codes
 	// (egress K7). While the vault is locked those checks fail and count
@@ -249,6 +270,14 @@ func main() {
 				svc.p.Store(plane)
 				agent.a.Store(&guest.OwnerAgent{Plane: plane, Machine: agentMachine})
 				defer plane.Shutdown()
+				spec, err := agentSpec(imgs, agentImage, agentLaunch, agentMemMB)
+				if err != nil {
+					log.Printf("no agent machine kept running: %v", err)
+				} else {
+					k := &keeper{m: m, id: agentMachine, spec: spec, every: 30 * time.Second, logf: log.Printf, status: agentWaiting}
+					agentStatus.k.Store(k)
+					go k.run(ctx)
+				}
 			}
 		}
 	}
@@ -259,6 +288,22 @@ func main() {
 	}
 	log.Printf("broker up; owner socket %s/%s", cfg.SocketDir, daemon.OwnerSocket)
 	d.Wait()
+}
+
+// agentSpec is how the owner's agent machine starts, from the image flags
+// and the guest rig's launch file.
+func agentSpec(imgs images, image, launch string, memMB int64) (vm.Spec, error) {
+	if image == "" {
+		return vm.Spec{}, errors.New("-agent-image is empty")
+	}
+	if _, ok := imgs[image]; !ok {
+		return vm.Spec{}, fmt.Errorf("image %q is not registered with -image", image)
+	}
+	argv, env, err := launchSpec(launch)
+	if err != nil {
+		return vm.Spec{}, err
+	}
+	return vm.Spec{Image: image, Class: admission.Foreground, MemMB: memMB, Argv: argv, Env: env, Label: vm.Public}, nil
 }
 
 func openCgroup(path string) (*cgroup.Group, error) {

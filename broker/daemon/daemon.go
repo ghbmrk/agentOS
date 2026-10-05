@@ -76,6 +76,10 @@ type Config struct {
 	// Agent receives the owner's task chat: the guest plane's owner inbox
 	// for the agent's machine (ARC-6 (c)). Nil: no agent running.
 	Agent control.Agent
+	// AgentStatus, when it returns a line, takes the place of the machine
+	// counts in STATUS: why the owner's agent machine is not running, in
+	// fixed plain words. Empty while it runs.
+	AgentStatus func() string
 	// Grants configures the approval policy: each executor's declared
 	// operations and verbs (Declared), adapter verifiers, the local
 	// confirmation page, reply composers, request pacing.
@@ -185,13 +189,22 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 		store.Close()
 		return nil, err
 	}
-	h := &control.Handler{Engine: eng, Auth: cfg.Auth, Agent: cfg.Agent, Machines: adm.Summary}
+	machines := adm.Summary
+	if cfg.AgentStatus != nil {
+		machines = func() string {
+			if l := cfg.AgentStatus(); l != "" {
+				return l
+			}
+			return adm.Summary()
+		}
+	}
+	h := &control.Handler{Engine: eng, Auth: cfg.Auth, Agent: cfg.Agent, Machines: machines}
 	handle := h.Handle
 	var ch *ownerch.Channel
 	if cfg.OwnerState != "" {
 		if ch, err = ownerch.New(ownerch.Config{
 			Owner: cfg.OwnerNumber, Modem: cfg.Modem, Engine: eng, Agent: cfg.Agent,
-			Machines: adm.Summary, Secrets: cfg.OwnerSecrets, Verifier: cfg.OwnerVerifier, Store: ownerch.FileStore{Path: cfg.OwnerState},
+			Machines: machines, Secrets: cfg.OwnerSecrets, Verifier: cfg.OwnerVerifier, Store: ownerch.FileStore{Path: cfg.OwnerState},
 			Decide: gate.Decide, Narrow: gate.Narrow, Reissue: gate.Reissue,
 		}); err != nil {
 			store.Close()
