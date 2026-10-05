@@ -220,7 +220,7 @@ func TestForgetRepliesOnlyAfterEverySave(t *testing.T) {
 	if out := r.f.Execute(context.Background(), in, 1); out.Result != journal.ResultSucceeded {
 		t.Fatalf("execute: %+v", out)
 	}
-	if want := []string{"Forgotten. I also undid 2 things I learned from it; I'll relearn what I can without it. Older backups still hold it."}; strings.Join(r.texts, "|") != want[0] {
+	if want := []string{"Forgotten. I also undid 2 things I learned from it; I'll relearn what I can without it. Older backups and your agent's own files may still hold it."}; strings.Join(r.texts, "|") != want[0] {
 		t.Fatalf("texts %q", r.texts)
 	}
 	r.texts = nil
@@ -243,7 +243,7 @@ func TestForgetRepliesOnlyAfterEverySave(t *testing.T) {
 	<-done
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	want := "Not forgotten yet: I couldn't save it. I keep trying and will text you when it's done.|Forgotten. Older backups still hold it."
+	want := "Not forgotten yet: I couldn't save it. I keep trying and will text you when it's done.|Forgotten. Older backups and your agent's own files may still hold it."
 	if strings.Join(r.texts, "|") != want || waited < 2*time.Minute {
 		t.Fatalf("texts %q after %v", r.texts, waited)
 	}
@@ -409,7 +409,7 @@ func TestForgetEndToEnd(t *testing.T) {
 	}
 	x.d.Gate().Wait()
 	for {
-		if got := x.text(); got == "Forgotten. Older backups still hold it." {
+		if got := x.text(); got == "Forgotten. Older backups and your agent's own files may still hold it." {
 			break
 		}
 	}

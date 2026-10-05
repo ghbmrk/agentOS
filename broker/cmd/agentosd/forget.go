@@ -313,10 +313,11 @@ func (f *ownerForget) retry(ctx context.Context, goal string, undone int) {
 	}
 }
 
-// forgetBackups is the done text's true half about backups (UX-182-1);
+// forgetBackups is the done text's true half about backups and the agent
+// machine's files, which part a does not reach (UX-182-1);
 // W3-forget-b, with the forget log's replay, adds that a restored backup
 // is forgotten again at once.
-const forgetBackups = " Older backups still hold it."
+const forgetBackups = " Older backups and your agent's own files may still hold it."
 
 func forgetDone(undone int) string {
 	if undone == 0 {
