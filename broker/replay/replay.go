@@ -108,7 +108,9 @@ var (
 	// ErrNotEvaluated: the tree changes what a replay cannot run (the
 	// image or the guest configuration), so it was not tested on this box.
 	// It is never a pass.
-	ErrNotEvaluated = errors.New("replay: not tested on this box (changes the image or configuration)")
+	// It wraps change.ErrNotEvaluated, which the pipeline counts as not
+	// evaluated (never a pass or a fail).
+	ErrNotEvaluated = fmt.Errorf("replay: changes the image or configuration: %w", change.ErrNotEvaluated)
 )
 
 // destroyTimeout bounds destroying a replay machine after its run.

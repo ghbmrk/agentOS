@@ -408,7 +408,7 @@ func TestCHG1UntestableChangesAreNotEvaluated(t *testing.T) {
 			cand[k] = v
 		}
 		cand[p] = []byte("changed")
-		if _, err := r.e.Run(bg, cand, change.Probe{ID: "p1", Input: []byte("go")}); !errors.Is(err, ErrNotEvaluated) {
+		if _, err := r.e.Run(bg, cand, change.Probe{ID: "p1", Input: []byte("go")}); !errors.Is(err, change.ErrNotEvaluated) {
 			t.Fatalf("%s change: %v", p, err)
 		}
 	}
