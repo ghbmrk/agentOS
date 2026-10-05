@@ -305,7 +305,8 @@ func main() {
 	qs := &questions{}
 	// STATUS notes read in wiring order: the time check, then spare-time
 	// work not running (learningOff, below), then recall's (an agent
-	// holding a deleted record, or memory not open). Keep the clock first.
+	// holding a deleted record, or memory not open), then the second
+	// line's. Keep the clock first.
 	qs.wire(&cfg)
 	agent := &lateAgent{}
 	cfg.Agent = agent
@@ -318,9 +319,13 @@ func main() {
 	// (egress K7). While the vault is locked those checks fail and count
 	// nothing.
 	var verifier *modelroute.Verifier
+	var line *secondLine
 	if verifySocket != "" {
 		verifier = modelroute.NewVerifier(verifySocket)
 		cfg.OwnerVerifier = ownerVerifier{verifier}
+		// The second line's STATUS line (potency R1 on #139); its digest
+		// line waits for the digest's sender.
+		line = &secondLine{get: verifier.SecondLine}
 	}
 	recallTools := &recalltool.Late{}
 	// Rollbacks the owner approves run here (recalltool W10).
@@ -328,6 +333,9 @@ func main() {
 	cfg.Recall = recallExec
 	cfg.Grants.Contained = recallExec.Contained
 	cfg.Notes = append(cfg.Notes, recallExec.Status)
+	if line != nil {
+		cfg.Notes = append(cfg.Notes, line.Note)
+	}
 	// No modem driver exists before P2-3, so texts arrive only through the
 	// owner socket and the channel's own outbound texts are not sent.
 
@@ -445,6 +453,9 @@ func main() {
 		go openRecall(ctx, verifier, recallCfg, recallTools, recallExec)
 	} else {
 		recallExec.Off()
+	}
+	if line != nil {
+		go line.run(ctx)
 	}
 	log.Printf("broker up; owner socket %s/%s", cfg.SocketDir, daemon.OwnerSocket)
 	d.Wait()
