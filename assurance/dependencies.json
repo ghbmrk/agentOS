@@ -1,5 +1,59 @@
 {
-  "note": "Every network endpoint AgentOS code may contact, classed per SPEC.md §2. Checked by tools/depaudit.py (A9). Adding an endpoint is a reviewed change: inherent and commodity endpoints must be justified against §2; optional ones must be removable (DEP-3). AgentOS-operated endpoints are forbidden (DEP-2) and cannot be declared.",
-  "forbidden_host_patterns": ["*agentos*"],
-  "endpoints": []
+  "note": "Every network endpoint AgentOS code may contact, classed per SPEC.md \u00a72. Checked by tools/depaudit.py (A9). Adding an endpoint is a reviewed change: inherent and commodity endpoints must be justified against \u00a72; optional ones must be removable (DEP-3). AgentOS-operated endpoints are forbidden (DEP-2) and cannot be declared. not_endpoints lists exact (path, host) pairs where a URL is text, not something the code contacts (vendored build scripts, error-message links); each is a reviewed change.",
+  "forbidden_host_patterns": [
+    "*agentos*"
+  ],
+  "endpoints": [],
+  "not_endpoints": [
+    {
+      "path": "broker/vendor/golang.org/x/sys/unix/mkall.sh",
+      "host": "cgit.freebsd.org",
+      "why": "golang.org/x/sys build script (generates syscall tables); not compiled into any binary"
+    },
+    {
+      "path": "broker/vendor/golang.org/x/sys/unix/mkall.sh",
+      "host": "cvsweb.netbsd.org",
+      "why": "golang.org/x/sys build script (generates syscall tables); not compiled into any binary"
+    },
+    {
+      "path": "broker/vendor/golang.org/x/sys/unix/mkall.sh",
+      "host": "gitweb.dragonflybsd.org",
+      "why": "golang.org/x/sys build script (generates syscall tables); not compiled into any binary"
+    },
+    {
+      "path": "broker/vendor/golang.org/x/sys/unix/syscall_solaris.go",
+      "host": "go.dev",
+      "why": "bug link inside a Solaris-only panic message; not compiled for Linux and never contacted"
+    },
+    {
+      "path": "broker/vendor/github.com/secure-systems-lab/go-securesystemslib/cjson/canonicaljson.go",
+      "host": "wiki.laptop.org",
+      "why": "spec link in doc comments continued from the line above; go-tuf canonical JSON (P4-3)"
+    },
+    {
+      "path": "broker/vendor/github.com/sigstore/sigstore/pkg/signature/options/rpcauth.go",
+      "host": "vault",
+      "why": "example address in a struct field comment; the KMS option is never used (P4-3)"
+    },
+    {
+      "path": "broker/vendor/github.com/theupdateframework/go-tuf/v2/metadata/keys.go",
+      "host": "theupdateframework.github.io",
+      "why": "TUF specification link in a trailing comment (P4-3)"
+    },
+    {
+      "path": "broker/vendor/golang.org/x/crypto/nacl/secretbox/secretbox.go",
+      "host": "nacl.cr.yp.to",
+      "why": "NaCl reference in the package doc comment (P4-3)"
+    },
+    {
+      "path": "broker/vendor/google.golang.org/protobuf/internal/errors/errors.go",
+      "host": "github.com",
+      "why": "issue link inside an error message string; never contacted (P4-3)"
+    },
+    {
+      "path": "broker/vendor/google.golang.org/protobuf/reflect/protoregistry/registry.go",
+      "host": "protobuf.dev",
+      "why": "FAQ link inside a conflict warning string; never contacted (P4-3)"
+    }
+  ]
 }

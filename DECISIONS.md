@@ -29,5 +29,6 @@
 | 2026-10-04 | Spec v0.12 folds S3, S4, S7 and HW-5a | Claude; P0 exit approval is Mark's |
 | 2026-10-04 | CH-11 adds `RUN` (confirms a message held before a code-only unlock) and `UNLOCK <challenge> <code>` (after 10 wrong codes in 24 h, only attempts carrying a one-time challenge texted to the owner count; arbitrator's O4 ruling, PR #22) | Claude, auto-decided: security better, UX and potency not worse |
 | 2026-10-04 | Pace: ~100% of the weekly limit used by each reset, spread evenly (~14%/day), with more parallel threads; replaces the 70% envelope ("faster and sooner, should be 100% at reset") | Mark, project chat |
+| 2026-10-05 | Broker Go module moves from go 1.22 to go 1.25 (toolchain go1.26.8) so update verification can use go-tuf ≥ 2.3.1, which fixes a threshold-0 signature bypass; Go 1.22 is out of support anyway (P4-3, U1) | Claude, auto-decided: security better, UX and potency not worse |
 | Proposed | External-drive-only (no internal install) | Not yet confirmed |
 | Pending | License | Before first public release (OSS-12) |

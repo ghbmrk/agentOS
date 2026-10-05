@@ -34,6 +34,12 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           persist-credentials: false
+      # The offline scenario builds the broker with no network, so the Go
+      # toolchain go.mod names must already be installed (no download).
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        with:
+          go-version-file: broker/go.mod
+          cache: false
       - name: Sandbox prerequisites (user namespaces, io_uring off, strace)
         run: |
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then

@@ -29,7 +29,10 @@ jobs:
           go-version-file: broker/go.mod
           cache: false
       - name: Format
-        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+        # Vendored code keeps its upstream formatting.
+        run: |
+          bad=$(find . -path ./vendor -prune -o -name '*.go' -print | xargs gofmt -l)
+          test -z "$bad" || { echo "$bad"; exit 1; }
       - name: Vet
         run: go vet ./...
       - name: Tests (race detector)
