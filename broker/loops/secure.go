@@ -1055,7 +1055,7 @@ func ownerLine(r Record) string {
 	line := findingText(f)
 	switch r.Contained {
 	case "paused":
-		line += " Paused " + label(f.Contain) + ". It stays paused until you resume it on the box page."
+		line += " Paused " + label(f.Contain) + ". It stays paused until you resume it; the box page will offer that in an update."
 	case "failed":
 		line += " Could not pause " + label(f.Contain) + ". STOP pauses everything."
 	case "capped":
