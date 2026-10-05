@@ -975,7 +975,7 @@ func (h *tpmHost) restoreDA(v *vault.Vault, t transport.TPM, id []byte) {
 	}
 	switch err := tpmseal.RestoreDA(t, p); {
 	case errors.Is(err, tpmseal.ErrLockoutSet):
-		h.say("Another system on this PC now controls its security chip's lockout, so I couldn't put back the chip's limit on wrong guesses.")
+		h.say("Another system on this PC, probably Windows, now controls its security chip's lockout, so I couldn't put back the chip's limit on wrong guesses. Nothing to do: your PIN is off and the box works as before.")
 	case err != nil:
 		return
 	}

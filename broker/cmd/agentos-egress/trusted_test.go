@@ -1005,7 +1005,7 @@ func TestDARestoreNeverProbesAForeignLockout(t *testing.T) {
 	if n, _ := r.daEntry(); n != "" {
 		t.Fatal("unrestorable entry kept for retries")
 	}
-	const msg = "Another system on this PC now controls its security chip's lockout, so I couldn't put back the chip's limit on wrong guesses."
+	const msg = "Another system on this PC, probably Windows, now controls its security chip's lockout, so I couldn't put back the chip's limit on wrong guesses. Nothing to do: your PIN is off and the box works as before."
 	told := 0
 	for _, n := range r.notes {
 		if strings.Contains(n, "security chip") {
