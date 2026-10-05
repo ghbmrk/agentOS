@@ -45,6 +45,12 @@ var classNS = map[change.Class]string{
 	change.ClassContext:   "context",
 }
 
+// supersedes is a namespace a class may also delete from: a compiled skill
+// replaces the procedure of its shape (CAP-5).
+var supersedes = map[change.Class]string{
+	change.ClassSkill: "procedures",
+}
+
 // Hypothesis is one thing Loop 1 might improve (LOOP-4). It names journal
 // identifiers (accounts and actions) and the tasks behind it, never a
 // held-out task.
@@ -325,21 +331,30 @@ func (l *Learn) propose(ctx context.Context, h Hypothesis, ev Evidence) (change.
 	if err != nil {
 		return change.Report{}, err
 	}
-	ns := classNS[h.Class]
-	for p := range cand.Files {
-		if first, _, _ := strings.Cut(p, "/"); first != ns {
-			return change.Report{}, fmt.Errorf("%w: %s", ErrOutOfClass, h.Class)
-		}
-	}
-	for _, p := range cand.Delete {
-		if first, _, _ := strings.Cut(p, "/"); first != ns {
-			return change.Report{}, fmt.Errorf("%w: %s", ErrOutOfClass, h.Class)
-		}
+	if err := inClass(h.Class, cand); err != nil {
+		return change.Report{}, err
 	}
 	// Source, origin, and the public mark are the broker's, from the
 	// REV-5 labels of every input; the builder asserts none of them.
 	cand.Source, cand.Origin, cand.Public = change.Local, "loop1", public(h, ev.Dev)
 	return l.cfg.Pipeline.Propose(ctx, cand)
+}
+
+// inClass checks that a candidate writes only its class's namespace, and
+// deletes only there or in the namespace the class supersedes.
+func inClass(class change.Class, cand change.Candidate) error {
+	ns := classNS[class]
+	for p := range cand.Files {
+		if first, _, _ := strings.Cut(p, "/"); first != ns {
+			return fmt.Errorf("%w: %s", ErrOutOfClass, class)
+		}
+	}
+	for _, p := range cand.Delete {
+		if first, _, _ := strings.Cut(p, "/"); first != ns && (supersedes[class] == "" || first != supersedes[class]) {
+			return fmt.Errorf("%w: %s", ErrOutOfClass, class)
+		}
+	}
+	return nil
 }
 
 // value is a proposal's measured return: its held-out gain over the

@@ -251,6 +251,27 @@ func TestCandidatesOutsideTheirClassNeverReachThePipeline(t *testing.T) {
 	}
 }
 
+// CAP-5: a skill candidate may delete the procedure it replaces, but may
+// not write there, and no other class may delete outside its namespace.
+func TestSkillMaySupersedeItsProcedure(t *testing.T) {
+	ok := change.Candidate{Files: map[string][]byte{"skills/k1.json": nil}, Delete: []string{"procedures/p1.json"}}
+	if err := inClass(change.ClassSkill, ok); err != nil {
+		t.Fatal(err)
+	}
+	for name, c := range map[string]struct {
+		class change.Class
+		cand  change.Candidate
+	}{
+		"skill writes procedures": {change.ClassSkill, change.Candidate{Files: map[string][]byte{"procedures/p1.json": nil}}},
+		"skill deletes budget":    {change.ClassSkill, change.Candidate{Delete: []string{"budget/spare.json"}}},
+		"procedure deletes skill": {change.ClassProcedure, change.Candidate{Delete: []string{"skills/k1.json"}}},
+	} {
+		if err := inClass(c.class, c.cand); !errors.Is(err, ErrOutOfClass) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
 // fakePipeline records what Loop 1 asks of the pipeline.
 type fakePipeline struct {
 	mu       sync.Mutex
