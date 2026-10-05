@@ -285,7 +285,7 @@ func TestOrganizeBoundAsksPastTheDailyLimit(t *testing.T) {
 	// That place counts at once, before the journal authorizes it, so the
 	// next effect is past the bound: the one ask.
 	first := x.intent(mail.OpArchive, rec(id))
-	if e, err := x.a.Escalate(ctx, first); err != nil || !e.Ask || e.Verb != "" || e.Reason != "past today's 200; YES allows 2000" {
+	if e, err := x.a.Escalate(ctx, first); err != nil || !e.Ask || e.Verb != "" || e.Reason != "past 200, YES allows 2000" {
 		t.Fatalf("past the bound: %+v %v", e, err)
 	}
 	// While it is open (or after a NO) the rest are held, not asked, with
@@ -314,7 +314,7 @@ func TestOrganizeBoundAsksPastTheDailyLimit(t *testing.T) {
 		t.Fatalf("alert after YES: %+v %v", e, err)
 	}
 	authorized = mail.DefaultDailyCeiling
-	if e, err := x.a.Escalate(ctx, x.intent(mail.OpArchive, rec(id))); err != nil || !e.Ask || e.Reason != "past today's 2000" {
+	if e, err := x.a.Escalate(ctx, x.intent(mail.OpArchive, rec(id))); err != nil || !e.Ask || e.Reason != "past 2000 today" {
 		t.Fatalf("past the ceiling: %+v %v", e, err)
 	}
 	if e, err := x.a.Escalate(ctx, x.intent(mail.OpArchive, rec(id))); err != nil || !e.Ask || e.Held {
@@ -323,7 +323,7 @@ func TestOrganizeBoundAsksPastTheDailyLimit(t *testing.T) {
 	// The lift lasts the day the ask was made.
 	x.now = x.now.Add(25 * time.Hour)
 	authorized, approved = mail.DefaultDailyLimit, nil
-	if e, err := x.a.Escalate(ctx, x.intent(mail.OpArchive, rec(id))); err != nil || e.Reason != "past today's 200; YES allows 2000" {
+	if e, err := x.a.Escalate(ctx, x.intent(mail.OpArchive, rec(id))); err != nil || e.Reason != "past 200, YES allows 2000" {
 		t.Fatalf("next day: %+v %v", e, err)
 	}
 	// The ceiling is the owner's to set.
@@ -339,11 +339,11 @@ func TestOrganizeBoundAsksPastTheDailyLimit(t *testing.T) {
 	})
 	id = z.news(1)
 	zin := z.intent(mail.OpArchive, rec(id))
-	if e, _ := z.a.Escalate(ctx, zin); !e.Ask || e.Reason != "past today's 2; YES allows 3" {
+	if e, _ := z.a.Escalate(ctx, zin); !e.Ask || e.Reason != "past 2, YES allows 3" {
 		t.Fatalf("owner's ceiling, ask: %+v", e)
 	}
 	zj = append(zj, journal.Intent{ID: zin.ID, Account: "mail"})
-	if e, _ := z.a.Escalate(ctx, z.intent(mail.OpArchive, rec(id))); !e.Ask || e.Reason != "past today's 3" {
+	if e, _ := z.a.Escalate(ctx, z.intent(mail.OpArchive, rec(id))); !e.Ask || e.Reason != "past 3 today" {
 		t.Fatalf("owner's ceiling: %+v", e)
 	}
 	y := newH(t, func(c *mail.Config) { c.Authorized = nil })
@@ -454,5 +454,141 @@ func TestUndoSkipsReconciledEvidence(t *testing.T) {
 	}
 	if folder, _, _ := x.srv.Find(id); folder != "Archive" {
 		t.Fatal("moved")
+	}
+}
+
+// TestReasonsFitTheDetailCap: every combination of share, alert and the
+// bound fits the owner channel's 40-character detail, the bound clause
+// comes first so a cut never loses it, and the cut uses ASCII (UX-69-3).
+func TestReasonsFitTheDetailCap(t *testing.T) {
+	const long = "Projects/Client-Accounts-Quarterly-Review"
+	for _, lim := range [][2]int{{1, 1}, {200, 2000}, {50000, 100000}} {
+		for _, bound := range []string{"", "once", "each"} {
+			for _, share := range []bool{false, true} {
+				for _, alert := range []bool{false, true} {
+					var journaled []journal.Intent
+					x := newH(t, func(c *mail.Config) {
+						c.Shared = append(c.Shared, long)
+						c.DailyLimit, c.DailyCeiling = lim[0], lim[1]
+						c.Authorized = func(action string, _ time.Time) []journal.Intent {
+							if action != mail.OpMove && action != mail.OpArchive {
+								return nil
+							}
+							return journaled
+						}
+					})
+					x.srv.AddFolder(long, "")
+					m := msg{id: "<m@notifications.security.verylongbank.example>", from: "alerts@notifications.security.verylongbank.example",
+						to: me, subject: "Hello", body: "Twenty percent off."}
+					if alert {
+						m.subject = "New sign-in on your account"
+					}
+					x.deliver("INBOX", m)
+					p := map[string]any{mail.ParamRecord: m.id, mail.ParamTo: "Receipts"}
+					if share {
+						p[mail.ParamTo] = long
+					}
+					earlier := func(n int) []journal.Intent {
+						out := make([]journal.Intent, n)
+						for i := range out {
+							out[i] = journal.Intent{ID: fmt.Sprint("earlier/", i), Account: "mail"}
+						}
+						return out
+					}
+					switch bound {
+					case "once":
+						journaled = earlier(lim[0])
+					case "each":
+						journaled = earlier(lim[0])
+						asked := x.intent(mail.OpMove, p)
+						x.a.Escalate(ctx, asked)
+						journaled = append(earlier(lim[1]), journal.Intent{ID: asked.ID, Account: "mail"})
+					}
+					e, err := x.a.Escalate(ctx, x.intent(mail.OpMove, p))
+					if err != nil {
+						t.Fatal(err)
+					}
+					name := fmt.Sprintf("bounds=%v bound=%s share=%v alert=%v", lim, bound, share, alert)
+					if n := len(e.Reason); n > 40 || strings.Contains(e.Reason, "…") || alert != strings.Contains(e.Reason, "alert") {
+						t.Fatalf("%s: %q (%d)", name, e.Reason, n)
+					}
+					if (bound == "once") != strings.HasPrefix(e.Reason, fmt.Sprintf("past %d, YES allows %d", lim[0], lim[1])) ||
+						(bound == "each") != strings.HasPrefix(e.Reason, fmt.Sprintf("past %d today", lim[1])) {
+						t.Fatalf("%s: bound clause not first: %q", name, e.Reason)
+					}
+					if (share || alert || bound != "") != (e.Reason != "") || share && !alert && !strings.Contains(e.Reason, "shared") {
+						t.Fatalf("%s: reason %q", name, e.Reason)
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestOrganizeActsOnItsOwnCopy: an organize effect judges and moves the
+// copy it acts on, never a Sent twin sharing its Message-ID: an inbox
+// alert reusing the ID of the owner's sent mail is still an alert; with
+// no folder named, the copy outside Sent moves and the thread still
+// resolves; and spam spoofing the owner, with no Sent copy, can be
+// archived or reported.
+func TestOrganizeActsOnItsOwnCopy(t *testing.T) {
+	x := newH(t, nil)
+	thread(x)
+	x.deliver("INBOX", msg{id: "<t1@example.test>", from: "someone@x.example", to: me, subject: "New sign-in, code 482913", body: "x"})
+	e, err := x.a.Escalate(ctx, x.intent(mail.OpArchive, rec("<t1@example.test>")))
+	if err != nil || e.Verb != verb.ChangeAccount {
+		t.Fatalf("alert sharing a Sent ID: %+v %v", e, err)
+	}
+	v, err := x.a.Verify(ctx, x.intent(mail.OpArchive, rec("<t1@example.test>")))
+	if err != nil || !strings.Contains(v.Item.Object, `"New sign-in, code 482913" from someone@x.example`) {
+		t.Fatalf("line shows another copy: %+v %v", v.Item, err)
+	}
+	// With no folder named, the Sent copy alone is never acted on; naming
+	// Sent acts on it.
+	if _, err := x.a.Escalate(ctx, x.intent(mail.OpStar, rec("<t2@example.com>"))); err != nil {
+		t.Fatalf("inbox message: %v", err)
+	}
+	x.deliver("Sent", msg{id: "<solo@example.test>", from: me, to: "sam@example.com", subject: "Note", body: "x"})
+	if out := x.run(x.intent(mail.OpStar, rec("<solo@example.test>"))); out.Result != journal.ResultNotApplied {
+		t.Fatalf("Sent copy acted on without a hint: %+v", out)
+	}
+	x.mustRun(x.intent(mail.OpStar, map[string]any{mail.ParamRecord: "<solo@example.test>", mail.ParamFolder: "Sent"}))
+
+	// A benign twin cannot launder an alert: archiving the benign inbox
+	// copy still asks, since a same-ID copy elsewhere is an alert.
+	w := newH(t, nil)
+	w.deliver("INBOX", msg{id: "<tw@x.example>", from: "someone@x.example", to: me, subject: "Hello", body: "x"})
+	w.deliver("Receipts", msg{id: "<tw@x.example>", from: "someone@x.example", to: me, subject: "Password reset", body: "x"})
+	if e, err := w.a.Escalate(ctx, w.intent(mail.OpArchive, map[string]any{mail.ParamRecord: "<tw@x.example>", mail.ParamFolder: "INBOX"})); err != nil || e.Verb != verb.ChangeAccount {
+		t.Fatalf("laundered alert: %+v %v", e, err)
+	}
+	// A non-owner copy reusing the owner's ID, in the named folder, is
+	// organized as itself; the Sent copy is untouched.
+	w.deliver("Sent", msg{id: "<own@example.test>", from: me, to: "sam@example.com", subject: "Plan", body: "x"})
+	w.deliver("Receipts", msg{id: "<own@example.test>", from: "eve@evil.example", to: me, subject: "Plan", body: "y"})
+	w.mustRun(w.intent(mail.OpArchive, map[string]any{mail.ParamRecord: "<own@example.test>", mail.ParamFolder: "Receipts"}))
+	if len(w.srv.Messages("Sent")) != 1 || len(w.srv.Messages("Archive")) != 1 {
+		t.Fatal("organized the wrong copy")
+	}
+
+	y := newH(t, nil)
+	thread(y)
+	y.deliver("INBOX", msg{id: "<t1@example.test>", from: me, to: "sam@example.com", subject: "Lunch",
+		body: "Lunch next week?\r\n--\r\nlist footer"})
+	y.mustRun(y.intent(mail.OpArchive, rec("<t1@example.test>")))
+	if n := len(y.srv.Messages("Sent")); n != 1 {
+		t.Fatalf("archive moved the Sent copy: %d left in Sent", n)
+	}
+	if v, err := y.a.Verify(ctx, y.intent(mail.OpReply, reply("<t2@example.com>", "ok"), "sam@example.com")); err != nil || !v.ThreadVerified {
+		t.Fatalf("thread after archive: %+v %v", v, err)
+	}
+
+	z := newH(t, nil)
+	z.deliver("INBOX", msg{id: "<spam1@example.test>", from: me, to: me, subject: "Win", body: "x"})
+	z.deliver("INBOX", msg{id: "<spam2@example.test>", from: me, to: me, subject: "Win", body: "x"})
+	z.mustRun(z.intent(mail.OpArchive, rec("<spam1@example.test>")))
+	z.mustRun(z.intent(mail.OpReportSpam, rec("<spam2@example.test>")))
+	if f, _, _ := z.srv.Find("<spam2@example.test>"); f != "Junk" {
+		t.Fatalf("spoofed spam reported to %q", f)
 	}
 }
