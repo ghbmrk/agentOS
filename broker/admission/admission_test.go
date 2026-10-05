@@ -387,3 +387,43 @@ func TestRevokeRecordsWhetherItWasForTheOwner(t *testing.T) {
 		})
 	}
 }
+
+// RoomFor is what Admit would find for a class, without admitting: free
+// budget, plus running experiments for a class that preempts them; under
+// pressure experiments get none and accepted work only what it preempts
+// (CAP-1, RES-1, RES-2).
+func TestRoomForMirrorsAdmit(t *testing.T) {
+	c := newCtl(&recPreempter{})
+	if _, err := c.Admit(Request{ID: "fg", Class: Foreground, MemMB: 1600}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Admit(Request{ID: "x", Class: Experiment, MemMB: 1000}); err != nil {
+		t.Fatal(err)
+	}
+	// 3900 - 2600 = 1300 free; 1000 more is preemptible.
+	for _, w := range []struct {
+		class Class
+		want  int64
+	}{{Experiment, 1300}, {Accepted, 2300}, {Foreground, 2300}} {
+		if got := c.RoomFor(w.class); got != w.want {
+			t.Errorf("RoomFor(%v) = %d, want %d", w.class, got, w.want)
+		}
+	}
+	c.Pressure, c.MaxPressure = func() float64 { return 50 }, 10
+	for _, w := range []struct {
+		class Class
+		want  int64
+	}{{Experiment, 0}, {Accepted, 1000}, {Foreground, 2300}} {
+		if got := c.RoomFor(w.class); got != w.want {
+			t.Errorf("under pressure RoomFor(%v) = %d, want %d", w.class, got, w.want)
+		}
+	}
+	// What RoomFor says fits does fit.
+	c.Pressure = nil
+	if _, err := c.Admit(Request{ID: "e2", Class: Experiment, MemMB: c.RoomFor(Experiment)}); err != nil {
+		t.Fatalf("RoomFor's room refused: %v", err)
+	}
+	if got := c.RoomFor(Experiment); got != 0 {
+		t.Fatalf("room after filling it = %d", got)
+	}
+}

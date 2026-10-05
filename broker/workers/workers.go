@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -77,6 +78,12 @@ type Tools struct {
 	// Stopped reports the owner's STOP: while it holds, no worker command
 	// starts (security R2 on #146). Nil is never stopped.
 	Stopped func() bool
+	// Free, if set, is admission's declared room for a class (RoomFor);
+	// Avail, if set, is measured free memory for new machines in MiB.
+	// How many workers fit is the smaller of the two (CAP-1); admission
+	// still decides each start.
+	Free  func(admission.Class) int64
+	Avail func() (int64, error)
 
 	// mu guards used and pending. Creating workers reserves their IDs in
 	// pending under it, so the per-lineage count cannot be raced past
@@ -135,6 +142,8 @@ const (
 	toolRollback = "worker_rollback"
 	toolDestroy  = "worker_destroy"
 	toolList     = "worker_list"
+	toolFit      = "worker_fit"
+	toolKeep     = "worker_keep"
 )
 
 func obj(props map[string]any, required ...string) map[string]any {
@@ -170,8 +179,13 @@ func (t *Tools) List() []map[string]any {
 				"content_base64": map[string]any{"type": "string", "description": "Binary content, base64; instead of content."}}, "name", "path")},
 		{"name": toolCkpt, "description": "Checkpoint a worker, memory included; returns the snapshot id to roll back to or diff.",
 			"inputSchema": obj(map[string]any{"name": pName}, "name")},
-		{"name": toolFork, "description": "Checkpoint a worker and start one new worker per name from it, memory included; each is admitted on its own budget, and either all start or none do.",
-			"inputSchema": obj(map[string]any{"name": pName, "into": strList}, "name", "into")},
+		{"name": toolFork, "description": "Checkpoint a worker and start one new worker per name from it, memory included; each is admitted on its own budget, and either all start or none do. With up_to_fit, only as many as fit now start (in the order named) and the rest come back as skipped.",
+			"inputSchema": obj(map[string]any{"name": pName, "into": strList,
+				"up_to_fit": map[string]any{"type": "boolean", "description": "Start only as many forks as fit (see worker_fit)."}}, "name", "into")},
+		{"name": toolFit, "description": "How many more workers of mem_mb fit now: the smaller of the box's free memory as measured and as budgeted for your class, and your worker cap. Use it to pick how many approaches to try in parallel; 0 means try them one at a time.",
+			"inputSchema": obj(map[string]any{"mem_mb": map[string]any{"type": "integer", "description": fmt.Sprintf("Memory per worker in MiB; default %d.", DefaultMemMB)}})},
+		{"name": toolKeep, "description": "Keep the winner of a fork: destroy every other worker forked from the same snapshot as this one. The worker it was forked from, and your other workers, stay.",
+			"inputSchema": obj(map[string]any{"name": pName}, "name")},
 		{"name": toolDiff, "description": "List the files that differ between two snapshots of your workers.",
 			"inputSchema": obj(map[string]any{"a": pSnap, "b": pSnap}, "a", "b")},
 		{"name": toolRollback, "description": "Restart a worker from one of its snapshots (or the one it was forked from). This also revives a stopped worker: the broker checkpoints and stops a worker no tool has named for an hour, or whose creator has stopped, and worker_list shows the snapshot to roll back to.",
@@ -243,6 +257,10 @@ func (t *Tools) Call(ctx context.Context, machine, lineage, name string, raw jso
 		out, err = t.destroy(ctx, c, raw)
 	case toolList:
 		out, err = t.list(c)
+	case toolFit:
+		out, err = t.fitTool(c, raw)
+	case toolKeep:
+		out, err = t.keep(ctx, c, raw)
 	default:
 		return "", true, fmt.Errorf("no tool %q", name)
 	}
@@ -565,8 +583,9 @@ func (t *Tools) checkpoint(ctx context.Context, c caller, raw json.RawMessage) (
 
 func (t *Tools) fork(ctx context.Context, c caller, raw json.RawMessage) (any, error) {
 	var a struct {
-		Name string   `json:"name"`
-		Into []string `json:"into"`
+		Name    string   `json:"name"`
+		Into    []string `json:"into"`
+		UpToFit bool     `json:"up_to_fit"`
 	}
 	if err := decode(raw, &a); err != nil {
 		return nil, err
@@ -579,11 +598,23 @@ func (t *Tools) fork(ctx context.Context, c caller, raw json.RawMessage) (any, e
 	if err := readable(c, w.Label); err != nil {
 		return nil, err
 	}
-	ids := make([]string, len(a.Into))
-	for i, n := range a.Into {
+	for _, n := range a.Into {
 		if !nameRE.MatchString(n) {
 			return nil, fmt.Errorf("into: bad name %q", n)
 		}
+	}
+	var skipped []string
+	if a.UpToFit && len(a.Into) > 0 {
+		f := t.fit(c, w.Spec.MemMB)
+		if f.Fit == 0 {
+			return nil, fmt.Errorf("no fork fits now: %s", f.Why)
+		}
+		if f.Fit < len(a.Into) {
+			a.Into, skipped = a.Into[:f.Fit], a.Into[f.Fit:]
+		}
+	}
+	ids := make([]string, len(a.Into))
+	for i, n := range a.Into {
 		ids[i] = workerID(c.lineage, n)
 	}
 	if len(ids) == 0 || !t.reserve(c.lineage, ids) {
@@ -594,7 +625,11 @@ func (t *Tools) fork(ctx context.Context, c caller, raw json.RawMessage) (any, e
 	if err != nil {
 		return nil, startErr(a.Name, err)
 	}
-	return map[string]any{"snapshot": s.ID, "workers": a.Into}, nil
+	out := map[string]any{"snapshot": s.ID, "workers": a.Into}
+	if a.UpToFit {
+		out["skipped"] = append([]string{}, skipped...)
+	}
+	return out, nil
 }
 
 // snapshot resolves a snapshot id to one of the lineage's workers' that the
@@ -755,4 +790,106 @@ func (t *Tools) list(c caller) (any, error) {
 		out = append(out, row{nameOf(c.lineage, id), string(w.State), w.Label.String(), w.Spec.MemMB, w.Last})
 	}
 	return map[string]any{"workers": out}, nil
+}
+
+// fitAnswer is how many more workers of MemMB fit now (CAP-1).
+type fitAnswer struct {
+	Fit         int    `json:"fit"`
+	MemMB       int64  `json:"mem_mb"`
+	FreeMB      int64  `json:"free_mb"`
+	WorkersLeft int    `json:"workers_left"`
+	Why         string `json:"why,omitempty"`
+}
+
+// fit counts the workers of memMB the caller could start now: the smaller
+// of admission's declared room for its class and measured free memory,
+// and what its worker cap leaves. Unreadable measurement falls back to the
+// declared budget, which admission enforces anyway. It is advice: each
+// start is still admitted on its own.
+func (t *Tools) fit(c caller, memMB int64) fitAnswer {
+	a := fitAnswer{MemMB: memMB, FreeMB: -1}
+	t.mu.Lock()
+	n := len(t.M.Workers(c.lineage))
+	for _, l := range t.pending {
+		if l == c.lineage {
+			n++
+		}
+	}
+	t.mu.Unlock()
+	a.WorkersLeft = max(MaxWorkers-n, 0)
+	var whys []string
+	if t.Free != nil {
+		a.FreeMB = t.Free(c.spec.Class)
+	}
+	if t.Avail != nil {
+		if m, err := t.Avail(); err != nil {
+			whys = append(whys, "free memory could not be measured, so this uses the declared budget")
+		} else if a.FreeMB < 0 || m < a.FreeMB {
+			a.FreeMB = max(m, 0)
+		}
+	}
+	a.Fit = a.WorkersLeft
+	if a.FreeMB >= 0 {
+		a.Fit = min(a.Fit, int(a.FreeMB/memMB))
+	}
+	switch {
+	case a.Fit > 0:
+	case a.WorkersLeft == 0:
+		whys = append(whys, fmt.Sprintf("you hold %d workers, the most at once; destroy one first", MaxWorkers))
+	default:
+		whys = append(whys, fmt.Sprintf("%d MB free is less than one %d MB worker; work sequentially in one worker, ask for less memory, or destroy a worker", a.FreeMB, memMB))
+	}
+	a.Why = strings.Join(whys, "; ")
+	return a
+}
+
+func (t *Tools) fitTool(c caller, raw json.RawMessage) (any, error) {
+	var a struct {
+		MemMB int64 `json:"mem_mb"`
+	}
+	if err := decode(raw, &a); err != nil {
+		return nil, err
+	}
+	if a.MemMB == 0 {
+		a.MemMB = DefaultMemMB
+	}
+	if a.MemMB < MinMemMB || a.MemMB > t.MaxMemMB {
+		return nil, fmt.Errorf("mem_mb must be between %d and %d", MinMemMB, t.MaxMemMB)
+	}
+	return t.fit(c, a.MemMB), nil
+}
+
+// keep destroys the winner's fork siblings: the caller's other workers
+// forked from the same snapshot (CAP-1).
+func (t *Tools) keep(ctx context.Context, c caller, raw json.RawMessage) (any, error) {
+	var a struct{ Name string }
+	if err := decode(raw, &a); err != nil {
+		return nil, err
+	}
+	w, err := t.worker(c, a.Name)
+	if err != nil {
+		return nil, err
+	}
+	if w.ForkBase == "" {
+		return nil, fmt.Errorf("worker %s is not a fork: nothing to discard", a.Name)
+	}
+	destroyed := []string{}
+	for _, id := range t.M.Workers(c.lineage) {
+		if id == w.ID {
+			continue
+		}
+		s, err := t.M.Get(id)
+		if err != nil || s.Lineage != c.lineage || s.ForkBase != w.ForkBase {
+			continue
+		}
+		if err := t.M.Destroy(ctx, id); err != nil {
+			return map[string]any{"kept": a.Name, "destroyed": destroyed}, workerErr(nameOf(c.lineage, id), err)
+		}
+		t.mu.Lock()
+		delete(t.used, id)
+		t.mu.Unlock()
+		destroyed = append(destroyed, nameOf(c.lineage, id))
+	}
+	sort.Strings(destroyed)
+	return map[string]any{"kept": a.Name, "destroyed": destroyed}, nil
 }

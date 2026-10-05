@@ -120,7 +120,13 @@ func (m Memory) Apply(root *cgroup.Group) (Groups, error) {
 }
 
 // MemTotalMB reads MemTotal from a meminfo file (/proc/meminfo), in MiB.
-func MemTotalMB(path string) (int64, error) {
+func MemTotalMB(path string) (int64, error) { return meminfoMB(path, "MemTotal") }
+
+// MemAvailableMB reads MemAvailable from a meminfo file, in MiB: the
+// kernel's measure of memory new work can use without swapping (CAP-1).
+func MemAvailableMB(path string) (int64, error) { return meminfoMB(path, "MemAvailable") }
+
+func meminfoMB(path, key string) (int64, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return 0, err
@@ -128,7 +134,7 @@ func MemTotalMB(path string) (int64, error) {
 	defer f.Close()
 	s := bufio.NewScanner(f)
 	for s.Scan() {
-		if v, ok := strings.CutPrefix(s.Text(), "MemTotal:"); ok {
+		if v, ok := strings.CutPrefix(s.Text(), key+":"); ok {
 			kb, err := strconv.ParseInt(strings.TrimSuffix(strings.TrimSpace(v), " kB"), 10, 64)
 			if err != nil {
 				return 0, fmt.Errorf("budget: %s: %w", path, err)
@@ -139,7 +145,7 @@ func MemTotalMB(path string) (int64, error) {
 	if err := s.Err(); err != nil {
 		return 0, err
 	}
-	return 0, fmt.Errorf("budget: no MemTotal in %s", filepath.Clean(path))
+	return 0, fmt.Errorf("budget: no %s in %s", key, filepath.Clean(path))
 }
 
 // Disk is the state disk's RES-4 reserve, MiB: what must stay free before

@@ -461,7 +461,11 @@ func main() {
 			go m.RunPruner(vm.PrunePolicy{LowWaterBytes: 1 << 30}, time.Minute, ctx.Done())
 			tree.setMachines(m)
 			tools := toolSet{qs.tools(), tree, recallTools}
-			wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB, d.Engine().Stopped)
+			wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB, workerGates{
+				stopped: d.Engine().Stopped,
+				room:    d.Admission().RoomFor,
+				avail:   measuredFree("/proc/meminfo", cfg.Admission.HeadroomMB),
+			})
 			if wt != nil {
 				tools = append(tools, wt)
 				go reapWorkers(ctx, wt, m, d.Engine().Stopped, 5*time.Second)
@@ -639,7 +643,7 @@ func replayFits(capacityMB, headroomMB, agentMB, replayMB int64) error {
 // workerTools serves the worker-machine tools (CAP-8) on the live guest
 // plane only: replay and builder machines never get them. Nil, offering
 // none, when no worker image is registered.
-func workerTools(m *vm.Manager, imgs images, image, argv string, maxMB int64, stopped func() bool) *workers.Tools {
+func workerTools(m *vm.Manager, imgs images, image, argv string, maxMB int64, g workerGates) *workers.Tools {
 	if image == "" {
 		return nil
 	}
@@ -647,7 +651,27 @@ func workerTools(m *vm.Manager, imgs images, image, argv string, maxMB int64, st
 		log.Printf("worker tools off: image %q is not registered with -image", image)
 		return nil
 	}
-	return &workers.Tools{M: m, Image: image, Argv: strings.Fields(argv), MaxMemMB: maxMB, Stopped: stopped}
+	return &workers.Tools{M: m, Image: image, Argv: strings.Fields(argv), MaxMemMB: maxMB, Stopped: g.stopped, Free: g.room, Avail: g.avail}
+}
+
+// workerGates are what the worker tools read of the box: the owner's
+// STOP, admission's room for a class, and measured free memory (CAP-1).
+type workerGates struct {
+	stopped func() bool
+	room    func(admission.Class) int64
+	avail   func() (int64, error)
+}
+
+// measuredFree is MemAvailable in meminfo less the headroom admission
+// never admits into, in MiB (CAP-1: N from measured free memory).
+func measuredFree(meminfo string, headroomMB int64) func() (int64, error) {
+	return func() (int64, error) {
+		mb, err := budget.MemAvailableMB(meminfo)
+		if err != nil {
+			return 0, err
+		}
+		return max(mb-headroomMB, 0), nil
+	}
 }
 
 // workerLayerBytes is -worker-layer-mb in bytes: 0 or less is no cap

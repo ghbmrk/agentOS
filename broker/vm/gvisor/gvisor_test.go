@@ -24,7 +24,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/vm"
 )
 
-// REQ: REV-1, REV-4, ARC-4, RES-1, RES-2, ARC-6
+// REQ: REV-1, REV-4, ARC-4, RES-1, RES-2, ARC-6, CAP-1, CAP-8, A15
 
 // TestOnlyRunscIsExecuted: in the whole machine plane, the one process that
 // may be started is the configured runsc binary, from one call site (ARC-2
@@ -587,5 +587,52 @@ func TestIntegrationForgetSinceDuringWorkerExec(t *testing.T) {
 		if got := r.ask("wk-1", "read", "/work/linger"); !strings.HasPrefix(got, "ERR") && r.lingering("wk-1") {
 			t.Fatal("the command survived erasure")
 		}
+	}
+}
+
+// CAP-1 and A15 under gVisor: on the floor's pool (4500 MB) beside a
+// 1600 MB agent, a worker forks into 8 workers that each run a command
+// with their memory intact, and the winner is kept; admission stays
+// within its budget throughout (RES-2).
+func TestIntegrationEightWorkersWithinRES2(t *testing.T) {
+	r := newRig(t, 4500)
+	ctx := context.Background()
+	if _, err := r.m.Create(ctx, "agent", vm.Spec{Image: "base", Class: admission.Foreground, MemMB: 1600, Argv: []string{"/guest", "serve"}}); err != nil {
+		t.Fatal(err)
+	}
+	a, err := r.m.Get("agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.m.CreateWorker(ctx, "wk-src", a.Lineage, vm.Spec{Image: "base", Class: admission.Foreground, MemMB: 256, Argv: []string{"/guest", "serve"}}); err != nil {
+		t.Fatal(err)
+	}
+	token := r.ask("wk-src", "token")
+	var ids []string
+	for i := range 8 {
+		ids = append(ids, fmt.Sprintf("wk-try%d", i))
+	}
+	timed(t, "fork(8)", func() error { _, err := r.m.Fork(ctx, "wk-src", ids); return err })
+	if free := r.adm.Snapshot().FreeMB; free < 0 {
+		t.Fatalf("admission over budget: %d MB free", free)
+	}
+	for i, id := range ids {
+		if got := r.ask(id, "token"); got != token {
+			t.Fatalf("%s lost the source's memory: %q", id, got)
+		}
+		res, err := r.m.Exec(ctx, id, vm.Command{Argv: []string{"/guest", "stdin", fmt.Sprint(i)}, Stdin: []byte(id)}, 20*time.Second)
+		if err != nil || res.ExitCode != i || string(res.Stdout) != id {
+			t.Fatalf("%s exec = %+v, %v", id, res, err)
+		}
+	}
+	for _, id := range ids {
+		if id != "wk-try5" {
+			if err := r.m.Destroy(ctx, id); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if n := len(r.adm.Snapshot().Running); n != 3 {
+		t.Fatalf("%d machines admitted after keeping the winner, want 3", n)
 	}
 }
