@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "results": ["pass", "fail"],
+  "channels": ["stable", "fast"],
+  "hardware": {
+    "geekom": {"air12_lite": []}
+  },
+  "versions": {
+    "openclaw": ["2026.9.8"],
+    "node": ["24.21.0"]
+  }
+}

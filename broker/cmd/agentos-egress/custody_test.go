@@ -763,3 +763,39 @@ func TestUnlockProofEndsWithTheUnlock(t *testing.T) {
 		t.Fatal("proof kept after lock")
 	}
 }
+
+// Wrong codes that reach the cap while a superseding passphrase is being
+// checked leave the box locked out; the new derivation is not installed
+// (#65 L3 follow-up 2).
+func TestLockoutDuringSupersedingDerivation(t *testing.T) {
+	r := newFastRig(t, true)
+	first := r.unlock(t)
+	release := make(chan struct{})
+	inner := r.c.open
+	r.c.open = func(p string) (*vault.Vault, error) { <-release; return inner(p) }
+	done := make(chan error)
+	r.clk.add(MinAttemptGap)
+	go func() { _, err := r.c.unlock(goodPass); done <- err }()
+	for {
+		r.c.mu.Lock()
+		d := r.c.deriving
+		r.c.mu.Unlock()
+		if d {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	for i := 0; i < MaxWrongCodes; i++ {
+		r.c.confirm(first, "000000")
+	}
+	notes := len(r.notes)
+	close(release)
+	if err := <-done; !strings.HasPrefix(msg(err), "Too many wrong codes.") || r.phase() != locked {
+		t.Fatalf("after the lockout: %v %v", err, r.phase())
+	}
+	for _, n := range r.notes[notes:] {
+		if strings.Contains(n, "accepted") || strings.Contains(n, "started over") {
+			t.Fatalf("installed after the lockout: %q", n)
+		}
+	}
+}

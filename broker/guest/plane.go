@@ -255,17 +255,32 @@ func (p *Plane) close(id string, forget bool) {
 	}
 }
 
-// Shutdown closes every machine's socket. Unanswered owner messages stay
-// in the store for the next start.
+// shutdownWait bounds how long Shutdown waits for requests in flight.
+const shutdownWait = 5 * time.Second
+
+// Shutdown closes every machine's socket, then waits up to shutdownWait
+// for requests already in flight to finish (a metered call settles the
+// meter as it ends). Unanswered owner messages stay in the store for the
+// next start. Stopping one machine (close) does not wait.
 func (p *Plane) Shutdown() {
 	p.mu.Lock()
-	ids := make([]string, 0, len(p.ms))
-	for id := range p.ms {
-		ids = append(ids, id)
+	ms := make([]*machine, 0, len(p.ms))
+	for _, m := range p.ms {
+		ms = append(ms, m)
 	}
 	p.mu.Unlock()
-	for _, id := range ids {
-		p.close(id, false)
+	for _, m := range ms {
+		p.close(m.id, false)
+	}
+	deadline := time.After(shutdownWait)
+	for _, m := range ms {
+		for i := 0; i < cap(m.slot); i++ {
+			select {
+			case m.slot <- struct{}{}:
+			case <-deadline:
+				return
+			}
+		}
 	}
 }
 

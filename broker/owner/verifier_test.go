@@ -371,3 +371,29 @@ func TestUnlockProofOnlySignsIn(t *testing.T) {
 		t.Fatalf("sign-in with the proof: %v", err)
 	}
 }
+
+// A refused unlock proof is not a wrong code: the vault process refuses
+// one it has no match for (a late redirect) and counts a wrong one itself
+// (#65 L3 follow-up 1).
+func TestRefusedUnlockProofIsNotCounted(t *testing.T) {
+	r, f := newVerifierRig(t)
+	if _, err := r.ch.LocalSignIn(UnlockProofPrefix + "0123456789abcdef0123456789abcdef"); err != ErrWrongCode {
+		t.Fatalf("refused proof: %v", err)
+	}
+	r.ch.mu.Lock()
+	wrong := len(r.ch.codes.st.Wrong)
+	r.ch.mu.Unlock()
+	if wrong != 0 {
+		t.Fatalf("refused proof counted: %d", wrong)
+	}
+	// The vault process counts it in its own bucket instead.
+	if f.calls() != 1 || !f.counted[0] {
+		t.Fatalf("vault process not asked to count it: %v", f.counted)
+	}
+	// And the owner, who just unlocked, gets no wrong-code text (#75 L3).
+	select {
+	case m := <-r.phone.Inbox():
+		t.Fatalf("owner texted: %q", m.Text)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
