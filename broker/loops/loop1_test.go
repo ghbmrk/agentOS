@@ -1296,15 +1296,15 @@ func TestAnEvaluatorInterruptionIsAPreemption(t *testing.T) {
 func TestAnUnseededCandidateIsNeverProposed(t *testing.T) {
 	l, pl, b, _ := newKeepRig(t)
 	l.cfg.Unseeded = func(c change.Candidate) bool { _, ok := c.Files["procedures/mail"]; return ok }
-	for _, k := range []string{"k1", "k2"} {
+	for _, k := range []string{"k1", "k2", "k1"} { // k1 rebuilt as its evidence grows (UX-119-1)
 		if _, err := l.propose(context.Background(), hyp(k, "task-"+k), Evidence{}); !errors.Is(err, ErrUnseeded) {
 			t.Fatalf("propose %s: %v", k, err)
 		}
 	}
-	if len(pl.got) != 0 || len(b.got()) != 2 {
+	if len(pl.got) != 0 || len(b.got()) != 3 {
 		t.Fatalf("%d proposed, %d built", len(pl.got), len(b.got()))
 	}
-	if d := strings.Join(l.Digest(), "\n"); d != "Learning: 2 new skills learned. They're kept until your agent can use them." {
+	if d := strings.Join(l.Digest(), "\n"); d != "Learning: 2 new skills drafted. They'll be tested once your agent can use them." {
 		t.Fatalf("digest %q", d)
 	}
 	l.cfg.Unseeded = func(change.Candidate) bool { return false } // W4 seeds them
@@ -1312,7 +1312,7 @@ func TestAnUnseededCandidateIsNeverProposed(t *testing.T) {
 	if len(pl.got) != 1 {
 		t.Fatal("not proposed once it can be used")
 	}
-	if d := strings.Join(l.Digest(), "\n"); d != "Learning: 1 new skill learned. It's kept until your agent can use it." {
+	if d := strings.Join(l.Digest(), "\n"); d != "Learning: 1 new skill drafted. It'll be tested once your agent can use it." {
 		t.Fatalf("digest for one %q", d)
 	}
 }

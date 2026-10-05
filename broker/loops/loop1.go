@@ -595,9 +595,9 @@ func (l *Learn) Digest() []string {
 	// (UX-S3-1).
 	switch n := len(l.unseeded); {
 	case n == 1:
-		out = append(out, "Learning: 1 new skill learned. It's kept until your agent can use it.")
+		out = append(out, "Learning: 1 new skill drafted. It'll be tested once your agent can use it.")
 	case n > 1:
-		out = append(out, fmt.Sprintf("Learning: %d new skills learned. They're kept until your agent can use them.", n))
+		out = append(out, fmt.Sprintf("Learning: %d new skills drafted. They'll be tested once your agent can use them.", n))
 	}
 	return out
 }
