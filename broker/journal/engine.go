@@ -633,6 +633,12 @@ func (e *Engine) validate(r Record) error {
 	if r.Type == RecStop {
 		return nil
 	}
+	if r.Type == RecEgress {
+		if r.Egress == nil || r.Egress.Machine == "" || r.ID != "" {
+			return fmt.Errorf("egress record without a machine")
+		}
+		return nil
+	}
 	if r.Type == RecResume {
 		if !e.stopped {
 			return fmt.Errorf("resume while not stopped")
@@ -712,6 +718,8 @@ func (e *Engine) apply(r Record) {
 		return
 	case RecResume:
 		e.stopped = false
+		return
+	case RecEgress:
 		return
 	case RecSubmitted:
 		in := *r.Intent
