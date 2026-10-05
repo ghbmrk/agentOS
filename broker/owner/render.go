@@ -1,6 +1,8 @@
 package owner
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"regexp"
 	"strings"
@@ -147,6 +149,35 @@ type Item struct {
 	// undone.
 	UndoWindow time.Duration
 	Facts      Facts
+	// Asked, when set, marks an item re-issued after a restart: its line
+	// ends "asked 14:02, re-sent after restart" with the time it was
+	// first asked. It is not part of ItemSum.
+	Asked time.Time
+}
+
+// ItemSum is a digest of everything an item shows the owner or is
+// classified on, without Ref or Asked. A restart keeps it, never the
+// item, so a re-issue can prove the item is unchanged (OP-3).
+func ItemSum(it Item) string {
+	f := it.Facts
+	since := ""
+	if !f.RecipientSince.IsZero() {
+		since = f.RecipientSince.UTC().Format(time.RFC3339Nano)
+	}
+	h := sha256.Sum256([]byte(fmt.Sprintf("%q|%q|%t|%q|%d|%d|%q|%t|%t|%t|%t|%q|%t|%t|%d",
+		it.Object, it.Recipient, it.Unverified, it.Amount, it.UndoWindow,
+		f.Kind, f.Verb, f.RecipientChecked, f.NoRecipient, f.RecipientExists, f.RecipientByOwner, since,
+		f.RecipientAutoAdded, f.HasAmount, f.Amount)))
+	return hex.EncodeToString(h[:])
+}
+
+// itemLine is an item's line as a text shows it, in the owner's time zone.
+func (c *Channel) itemLine(it Item) string {
+	s := it.line()
+	if !it.Asked.IsZero() {
+		s += ", asked " + it.Asked.In(c.cfg.Location).Format("15:04") + ", re-sent after restart"
+	}
+	return s
 }
 
 func (it Item) line() string {

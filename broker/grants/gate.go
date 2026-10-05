@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -43,6 +44,7 @@ const (
 // Owner is the owner channel (owner.Channel) as the gate uses it.
 type Owner interface {
 	Request(items []owner.Item, ttl time.Duration) (string, error)
+	RequestEach(items []owner.Item, ttls []time.Duration) ([]string, error)
 	Tier(owner.Facts) owner.Tier
 	Active(within time.Duration) bool
 	QueueAutoReply(owner.AutoReply) (owner.QueueResult, error)
@@ -129,7 +131,12 @@ type Gate struct {
 	decided   map[string]decision
 	confirmed map[string]bool
 	failed    map[string]string
-	wg        sync.WaitGroup
+	// carried holds the intents a restart left pending until the owner
+	// channel's Boot hands back what it can re-issue (Reissue); reissue
+	// is what waits for STOP to end before it is asked again.
+	carried map[string]bool
+	reissue []owner.Carried
+	wg      sync.WaitGroup
 }
 
 // wait is an intent waiting on the owner.
@@ -140,6 +147,7 @@ type wait struct {
 	request string // owner request ID, "" while batched
 	reply   string // queued auto-reply ID
 	sendAt  time.Time
+	expires time.Time // a re-issued item's original expiry; zero otherwise
 }
 
 // decision is the owner's answer on one intent.
@@ -172,17 +180,19 @@ func New(cfg Config) *Gate {
 		cfg.RequestsPerHour = DefaultRequestsPerHour
 	}
 	return &Gate{cfg: cfg, grants: map[string]*Grant{},
-		waiting: map[string]*wait{}, decided: map[string]decision{}, confirmed: map[string]bool{}, failed: map[string]string{}}
+		waiting: map[string]*wait{}, decided: map[string]decision{}, confirmed: map[string]bool{}, failed: map[string]string{},
+		carried: map[string]bool{}}
 }
 
 // Attach connects the engine and the owner channel (nil if there is
-// none), rebuilds grants from the journal, and closes every intent a
-// restart left pending. No approval request survives a restart (owner
-// O7), so an intent still pending has no live request; it is denied
-// with the reason, and the agent asks again under a new request_id.
-// Call it after journal.Open and before anything submits.
+// none) and rebuilds grants from the journal. Every intent a restart left
+// pending is held until the owner channel's Boot calls Reissue, so none is
+// asked twice or under a new expiry before then. Without an owner channel
+// nothing is held: nothing can be approved, and a retry asks again. Call
+// it after journal.Open and before anything submits.
 func (g *Gate) Attach(eng *journal.Engine, own Owner) {
 	g.mu.Lock()
+	defer g.mu.Unlock()
 	g.eng, g.own = eng, own
 	g.grants = map[string]*Grant{}
 	for _, r := range eng.Trail() {
@@ -195,22 +205,110 @@ func (g *Gate) Attach(eng *journal.Engine, own Owner) {
 			}
 		}
 	}
-	var stale []string
+	if own == nil {
+		return
+	}
 	for _, st := range eng.List() {
 		if st.State == journal.Pending {
-			stale = append(stale, st.Intent.ID)
-			g.decided[st.Intent.ID] = decision{why: "the box restarted before it was approved; ask again with a new request_id", at: g.cfg.Now()}
+			g.carried[st.Intent.ID] = true
 		}
 	}
-	g.mu.Unlock()
-	for _, id := range stale {
-		if _, err := eng.Authorize(context.Background(), id); err != nil {
-			g.cfg.Logf("grants: closing %s after restart: %v", id, err)
+}
+
+// Reissue takes what a restart left open (owner.Config Reissue; GR10).
+// Items of requests that were open and unexpired are asked again, each
+// with its own new code and its original expiry, once the OP-3 recheck
+// shows nothing changed; any other intent left pending was never shown to
+// the owner and is asked as new. Boot has already denied what it closed.
+// Nothing is re-issued while STOP holds; Tick resumes it.
+func (g *Gate) Reissue(cs []owner.Carried) {
+	g.mu.Lock()
+	for _, c := range cs {
+		if g.carried[c.Ref] {
+			g.reissue = append(g.reissue, c)
+			delete(g.carried, c.Ref)
 		}
+	}
+	rest := make([]string, 0, len(g.carried))
+	for id := range g.carried {
+		rest = append(rest, id)
+	}
+	sort.Strings(rest)
+	for _, id := range rest {
+		g.reissue = append(g.reissue, owner.Carried{Ref: id})
+	}
+	g.carried = map[string]bool{}
+	g.mu.Unlock()
+	g.reissueDue()
+}
+
+// reissueDue asks again what Reissue took, unless STOP holds.
+func (g *Gate) reissueDue() {
+	g.mu.Lock()
+	eng := g.eng
+	if len(g.reissue) == 0 || eng == nil || eng.Stopped() {
+		g.mu.Unlock()
+		return
+	}
+	cs := g.reissue
+	g.reissue = nil
+	g.mu.Unlock()
+	ctx := context.Background()
+	now := g.cfg.Now()
+	for _, c := range cs {
+		st, err := eng.Get(c.Ref)
 		g.mu.Lock()
-		delete(g.decided, id)
+		_, decided := g.decided[c.Ref]
+		g.mu.Unlock()
+		if err != nil || st.State != journal.Pending || decided {
+			continue
+		}
+		if c.Sum == "" {
+			// Never shown to the owner: an ordinary ask.
+			if _, err := g.Authorize(ctx, c.Ref); err != nil {
+				g.cfg.Logf("grants: asking %s after restart: %v", c.Ref, err)
+			}
+			continue
+		}
+		if !now.Before(c.Expires) {
+			g.closeIntent(c.Ref, "the approval request expired; ask again with a new request_id")
+			continue
+		}
+		v := g.evaluate(ctx, st.Intent)
+		if v.kind != ask || owner.ItemSum(v.item) != c.Sum {
+			// OP-3 at re-issue: what the owner was asked no longer
+			// holds, so it is not re-sent.
+			g.closeIntent(c.Ref, "the details changed while the box restarted; ask again with a new request_id")
+			continue
+		}
+		it := v.item
+		it.Asked = c.Asked
+		g.mu.Lock()
+		if g.waiting[c.Ref] == nil {
+			g.waiting[c.Ref] = &wait{item: it, local: v.local, expires: c.Expires}
+			if len(g.batch) == 0 {
+				g.first = now
+			}
+			g.last = now
+			g.batch = append(g.batch, c.Ref)
+		}
 		g.mu.Unlock()
 	}
+}
+
+// closeIntent denies a pending intent with a fixed reason.
+func (g *Gate) closeIntent(id, why string) {
+	g.mu.Lock()
+	delete(g.waiting, id)
+	g.decided[id] = decision{why: why, at: g.cfg.Now()}
+	eng := g.eng
+	g.mu.Unlock()
+	if _, err := eng.Authorize(context.Background(), id); err != nil {
+		g.cfg.Logf("grants: closing %s: %v", id, err)
+	}
+	g.mu.Lock()
+	delete(g.decided, id)
+	g.mu.Unlock()
 }
 
 // Route names the executor for a guest's effects on account: the live
@@ -525,9 +623,10 @@ func (g *Gate) Authorize(ctx context.Context, id string) (journal.Status, error)
 	d, decided := g.decided[id]
 	_, waiting := g.waiting[id]
 	held := decided && d.approved && d.local && !g.confirmed[id]
+	carried := g.carried[id] || g.reissuing(id)
 	g.mu.Unlock()
 	switch {
-	case held, waiting:
+	case held, waiting, carried:
 		g.annotate(&st)
 		return st, nil
 	case decided:
@@ -568,6 +667,16 @@ func (g *Gate) Authorize(ctx context.Context, id string) (journal.Status, error)
 	return st, nil
 }
 
+// reissuing reports whether id waits in the re-issue queue. g.mu is held.
+func (g *Gate) reissuing(id string) bool {
+	for _, c := range g.reissue {
+		if c.Ref == id {
+			return true
+		}
+	}
+	return false
+}
+
 // annotate explains a pending intent to the guest. It never names the
 // request or its code.
 func (g *Gate) annotate(st *journal.Status) {
@@ -577,7 +686,9 @@ func (g *Gate) annotate(st *journal.Status) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	id := st.Intent.ID
-	if d, ok := g.decided[id]; ok && d.approved && d.local && !g.confirmed[id] {
+	if g.carried[id] || g.reissuing(id) {
+		st.Permission.Reason = "the box restarted; the owner will be asked again"
+	} else if d, ok := g.decided[id]; ok && d.approved && d.local && !g.confirmed[id] {
 		st.Permission.Reason = "approved by code; waiting for the owner to confirm on the box's local page"
 	} else if w := g.waiting[id]; w != nil && w.onlyUI {
 		st.Permission.Reason = "waiting for the owner's approval on the box's local page"
@@ -661,13 +772,31 @@ func (g *Gate) flushDue() {
 // items each, so a high-risk item does not raise the code needed for
 // low-risk ones (CH-10). Each request text counts toward RequestsPerHour.
 func (g *Gate) Flush() {
+	now := g.cfg.Now()
 	g.mu.Lock()
 	ids, own := g.batch, g.own
+	stopped := g.eng != nil && g.eng.Stopped()
 	g.batch = nil
-	var low, high []owner.Item
+	var low, high, again []owner.Item
+	var ttls []time.Duration
+	var lapsed []string
 	for _, id := range ids {
 		w := g.waiting[id]
 		if w == nil {
+			continue
+		}
+		if !w.expires.IsZero() {
+			// Re-issued after a restart (GR10): one request and code per
+			// intent, under its original expiry, never while STOP holds.
+			switch {
+			case !now.Before(w.expires):
+				lapsed = append(lapsed, id)
+			case stopped:
+				g.batch = append(g.batch, id)
+			default:
+				again = append(again, w.item)
+				ttls = append(ttls, w.expires.Sub(now))
+			}
 			continue
 		}
 		if own != nil && own.Tier(w.item.Facts) == owner.Low {
@@ -677,6 +806,35 @@ func (g *Gate) Flush() {
 		}
 	}
 	g.mu.Unlock()
+	for _, id := range lapsed {
+		g.closeIntent(id, "the approval request expired; ask again with a new request_id")
+	}
+	if len(again) > 0 {
+		reqs := make([]string, len(again))
+		err := errors.New("no owner channel")
+		if own != nil {
+			reqs, err = own.RequestEach(again, ttls)
+		}
+		g.mu.Lock()
+		if slices.ContainsFunc(reqs, func(r string) bool { return r != "" }) {
+			g.sent = append(g.sent, g.cfg.Now())
+		}
+		for i, it := range again {
+			w := g.waiting[it.Ref]
+			switch {
+			case w == nil:
+			case i < len(reqs) && reqs[i] != "":
+				w.request = reqs[i]
+			default:
+				delete(g.waiting, it.Ref)
+				if err == nil {
+					err = errors.New("not sent")
+				}
+				g.failed[it.Ref] = err.Error()
+			}
+		}
+		g.mu.Unlock()
+	}
 	for _, items := range [][]owner.Item{low, high} {
 		for len(items) > 0 {
 			n := min(len(items), MaxBatch)
@@ -731,6 +889,7 @@ func (g *Gate) Decide(d owner.Decision) {
 		item, local = w.item, w.local
 	}
 	delete(g.waiting, d.Ref)
+	delete(g.carried, d.Ref)
 	why := d.Why
 	if why == "" {
 		why = "owner"
@@ -800,6 +959,7 @@ func (g *Gate) settle(id string) {
 // Tick sends batched requests and releases auto-replies whose undo window
 // has passed (ADP-11). The owner channel holds them while STOPped.
 func (g *Gate) Tick() {
+	g.reissueDue()
 	g.flushDue()
 	g.mu.Lock()
 	own := g.own

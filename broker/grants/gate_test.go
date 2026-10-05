@@ -196,25 +196,116 @@ func TestRecheckBeforeDispatch(t *testing.T) {
 
 // REQ: OP-4, CH-13
 
-// TestRestartClosesIntentsWaitingOnTheOwner: no approval request survives a
-// restart, so every intent left pending is denied with the reason, and a
-// decision the owner channel's Boot reports is harmless.
-func TestRestartClosesIntentsWaitingOnTheOwner(t *testing.T) {
+// TestRestartReissuesWhatTheOwnerWasAsked (GR10): an intent the owner
+// was asked about before a restart is asked again, alone under its own
+// new request and its original expiry, carrying when it was first asked.
+// One whose request expired, or whose details changed, is denied with the
+// reason instead. One never shown to the owner is asked as new. Nothing is
+// re-issued, even on a retry, while STOP holds.
+func TestRestartReissuesWhatTheOwnerWasAsked(t *testing.T) {
 	r := newRig(t, nil)
+	r.grant(mailGrant())
+	for _, rec := range []string{"inv-1", "inv-2", "inv-3", "inv-4"} {
+		x := sam()
+		x.Record = rec
+		r.ver.set(rec, x)
+		r.effect("agent/"+rec, "invoice.send", map[string]any{"record": rec}, "sam@example.com")
+		if rec == "inv-3" {
+			r.g.Flush() // inv-1..3 reach the owner; inv-4 is still batched
+		}
+	}
+	asked := r.now()
+	req, items := r.own.last(t)
+	var boot []owner.Carried
+	for _, it := range items {
+		exp := asked.Add(15 * time.Minute)
+		if it.Ref == "agent/inv-3" {
+			exp = asked.Add(time.Minute)
+		}
+		boot = append(boot, owner.Carried{Ref: it.Ref, Request: req, Asked: asked, Expires: exp, Sum: owner.ItemSum(it)})
+	}
+	x := sam()
+	x.Record, x.Item.Amount, x.Item.Facts.Amount = "inv-2", "$900.00", 90000
+	r.ver.set("inv-2", x) // changed while the box was down
+	if _, err := r.eng.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	r.advance(5 * time.Minute)
+	r.boot = boot
+	r.open() // restart, still STOPped
+
+	if st, _ := r.g.Authorize(context.Background(), "agent/inv-1"); st.State != journal.Pending || !strings.Contains(st.Permission.Reason, "asked again") {
+		t.Fatalf("held: %s %q", st.State, st.Permission.Reason)
+	}
+	r.g.Tick()
+	r.g.Flush()
+	if r.own.count() != 0 {
+		t.Fatal("re-issued while STOP holds")
+	}
+
+	r.eng.Resume()
+	r.g.Tick()
+	r.g.Flush()
+	for id, why := range map[string]string{"agent/inv-2": "details changed", "agent/inv-3": "expired"} {
+		if st := r.state(id); st.State != journal.Denied || !strings.Contains(st.Permission.Reason, why) {
+			t.Errorf("%s: %s %q", id, st.State, st.Permission.Reason)
+		}
+	}
+	if r.own.count() != 2 || len(r.own.each) != 1 {
+		t.Fatalf("requests %v, re-issued %v", r.own.order, r.own.each)
+	}
+	again := r.own.reqs[r.own.each[0]]
+	if len(again) != 1 || again[0].Ref != "agent/inv-1" || !again[0].Asked.Equal(asked) {
+		t.Fatalf("re-issued %+v", again)
+	}
+	var fresh []owner.Item
+	for _, id := range r.own.order {
+		if id != r.own.each[0] {
+			fresh = r.own.reqs[id]
+		}
+	}
+	if len(fresh) != 1 || fresh[0].Ref != "agent/inv-4" || !fresh[0].Asked.IsZero() {
+		t.Fatalf("never-asked intent %+v", fresh)
+	}
+
+	// The old request's answer no longer counts; the new one's does.
+	r.g.Decide(owner.Decision{Request: req, Item: 1, Ref: "agent/inv-1", Approved: true})
+	r.g.Wait()
+	if st := r.state("agent/inv-1"); st.State != journal.Pending {
+		t.Fatalf("old request settled it: %s", st.State)
+	}
+	r.g.Decide(owner.Decision{Request: r.own.each[0], Item: 1, Ref: "agent/inv-1", Approved: true})
+	r.g.Wait()
+	if st := r.state("agent/inv-1"); st.State != journal.Succeeded || r.exec.runs("agent/inv-1") != 1 {
+		t.Fatalf("re-issued approval: %s %q", st.State, st.Permission.Reason)
+	}
+	if _, ok := r.g.Route("mail"); !ok {
+		t.Fatal("the grant did not survive the restart")
+	}
+}
+
+// TestReissuedItemLapsesAtItsOriginalExpiry: a re-issued item still
+// waiting to be sent (quiet hours, say) when its original expiry passes is
+// denied rather than sent.
+func TestReissuedItemLapsesAtItsOriginalExpiry(t *testing.T) {
+	quiet := true
+	r := newRig(t, func(c *Config) { c.Quiet = func(time.Time) bool { return quiet } })
 	r.grant(mailGrant())
 	r.ver.set("inv-1042", sam())
 	r.effect("agent/s1", "invoice.send", map[string]any{"record": "inv-1042"}, "sam@example.com")
 	r.g.Flush()
-
-	r.open() // restart
-	st := r.state("agent/s1")
-	if st.State != journal.Denied || !strings.Contains(st.Permission.Reason, "restarted") || r.exec.runs("agent/s1") != 0 {
-		t.Fatalf("after restart: %s %q", st.State, st.Permission.Reason)
+	req, items := r.own.last(t)
+	r.boot = []owner.Carried{{Ref: "agent/s1", Request: req, Asked: r.now(), Expires: r.now().Add(10 * time.Minute), Sum: owner.ItemSum(items[0])}}
+	r.open()
+	r.advance(time.Hour)
+	r.g.Tick()
+	if r.own.count() != 0 {
+		t.Fatal("sent in quiet hours")
 	}
-	r.g.Decide(owner.Decision{Request: "R2", Item: 1, Ref: "agent/s1", Why: "restart"})
-	r.g.Wait()
-	if _, ok := r.g.Route("mail"); !ok {
-		t.Fatal("the grant did not survive the restart")
+	quiet = false
+	r.g.Tick()
+	if st := r.state("agent/s1"); st.State != journal.Denied || !strings.Contains(st.Permission.Reason, "expired") || r.own.count() != 0 {
+		t.Fatalf("lapsed: %s %q, %d requests", st.State, st.Permission.Reason, r.own.count())
 	}
 }
 

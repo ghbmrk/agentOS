@@ -82,6 +82,8 @@ type rig struct {
 	ch         *Channel
 	mu         sync.Mutex
 	decided    []Decision
+	// reissue, if set, is the next open channel's Config.Reissue.
+	reissue func([]Carried)
 }
 
 func newRig(t *testing.T, store Store) *rig {
@@ -108,7 +110,8 @@ func (r *rig) open() *Channel {
 		Limits:     Limits{Hold: 7 * 24 * time.Hour, AmountLimit: 10000},
 		ReplyLimit: r.replyLimit,
 		Location:   time.UTC, Now: r.clock,
-		Decide: func(d Decision) { r.mu.Lock(); r.decided = append(r.decided, d); r.mu.Unlock() },
+		Decide:  func(d Decision) { r.mu.Lock(); r.decided = append(r.decided, d); r.mu.Unlock() },
+		Reissue: r.reissue,
 	})
 	if err != nil {
 		r.t.Fatal(err)

@@ -23,9 +23,10 @@ type fakeOwner struct {
 	queued []owner.AutoReply
 	due    []owner.Queued
 	notes  []string
-	commit bool // QueueAutoReply turns replies into requests
-	down   bool // Request fails
-	active bool // the owner is texting
+	commit bool     // QueueAutoReply turns replies into requests
+	down   bool     // Request fails
+	active bool     // the owner is texting
+	each   []string // requests opened by RequestEach
 }
 
 func (f *fakeOwner) Request(items []owner.Item, _ time.Duration) (string, error) {
@@ -38,6 +39,22 @@ func (f *fakeOwner) Request(items []owner.Item, _ time.Duration) (string, error)
 	f.reqs[id] = append([]owner.Item(nil), items...)
 	f.order = append(f.order, id)
 	return id, nil
+}
+
+// RequestEach records one request per item, as the channel opens them.
+func (f *fakeOwner) RequestEach(items []owner.Item, ttls []time.Duration) ([]string, error) {
+	ids := make([]string, len(items))
+	for i, it := range items {
+		id, err := f.Request([]owner.Item{it}, ttls[i])
+		if err != nil {
+			return ids, err
+		}
+		ids[i] = id
+		f.mu.Lock()
+		f.each = append(f.each, id)
+		f.mu.Unlock()
+	}
+	return ids, nil
 }
 
 func (f *fakeOwner) Tier(fa owner.Facts) owner.Tier { return owner.Classify(fa, f.limits, f.now()) }
@@ -158,6 +175,9 @@ type rig struct {
 	ver   *fakeVerifier
 	clock time.Time
 	cmu   sync.Mutex
+	// boot is what the next open's owner channel hands back as carried
+	// over a restart (owner Boot calling Reissue).
+	boot []owner.Carried
 }
 
 func (r *rig) now() time.Time {
@@ -188,6 +208,15 @@ func newRig(t *testing.T, edit func(*Config)) *rig {
 func (r *rig) open() {
 	r.t.Helper()
 	r.own = &fakeOwner{limits: owner.Limits{AmountLimit: 50000}, now: r.now, reqs: map[string][]owner.Item{}}
+	r.openWith(func() Owner { return r.own })
+	r.g.Reissue(r.boot)
+	r.boot = nil
+}
+
+// openWith starts a gate and engine with the owner channel mk returns,
+// made after the gate exists so it can take the gate's hooks.
+func (r *rig) openWith(mk func() Owner) {
+	r.t.Helper()
 	r.g = New(r.cfg)
 	eng, err := journal.Open(r.store, r.g, map[string]journal.Executor{"mail": r.exec, ExecutorName: r.g},
 		func(s string) string { return s }, journal.WithClock(r.now))
@@ -195,7 +224,7 @@ func (r *rig) open() {
 		r.t.Fatal(err)
 	}
 	r.eng = eng
-	r.g.Attach(eng, r.own)
+	r.g.Attach(eng, mk())
 }
 
 // effect does what the guest plane does for effect_request.

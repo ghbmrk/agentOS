@@ -180,15 +180,16 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 		if ch, err = ownerch.New(ownerch.Config{
 			Owner: cfg.OwnerNumber, Modem: cfg.Modem, Engine: eng, Agent: cfg.Agent,
 			Machines: adm.Summary, Secrets: cfg.OwnerSecrets, Store: ownerch.FileStore{Path: cfg.OwnerState},
-			Decide: gate.Decide, Narrow: gate.Narrow,
+			Decide: gate.Decide, Narrow: gate.Narrow, Reissue: gate.Reissue,
 		}); err != nil {
 			store.Close()
 			return nil, err
 		}
 		handle = ch.Handle
 	}
-	// Attach before the owner channel boots: Boot's restart decisions and
-	// every guest effect go through the gate.
+	// Attach before the owner channel boots: Boot's restart decisions, its
+	// re-issue hand-over (grants GR10), and every guest effect go through
+	// the gate.
 	if ch != nil {
 		gate.Attach(eng, ch)
 	} else {

@@ -80,6 +80,21 @@ type Config struct {
 	// the owner's number (ADP-9). It runs outside the channel's lock. Nil
 	// answers that there are no grants.
 	Narrow func(word, id string) string
+	// Reissue, if set, takes over the items of requests a restart found
+	// open and not expired (Boot), to ask them again with new codes. Boot
+	// calls it once, with nil when there are none, after the restart text.
+	// Nil: they are cancelled.
+	Reissue func([]Carried)
+}
+
+// Carried is an item of a request open at the last shutdown, handed to
+// Config.Reissue. Its old code is dead; Request is the old request's ID.
+type Carried struct {
+	Ref     string
+	Request string
+	Asked   time.Time
+	Expires time.Time
+	Sum     string
 }
 
 // Decision is the outcome for one requested item.

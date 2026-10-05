@@ -41,22 +41,93 @@ type request struct {
 // ttl bounds how long it stays open (0: CodeTTL); a low-tier request never
 // outlives CodeTTL, since its texted code expires then (CH-10).
 func (c *Channel) Request(items []Item, ttl time.Duration) (string, error) {
-	if len(items) == 0 || len(items) > 20 {
-		return "", errors.New("owner: a request has 1 to 20 items")
-	}
 	if c.cfg.Modem == nil {
 		return "", errors.New("owner: no modem")
 	}
-	for _, it := range items {
-		if !SMSApprovable(it) {
-			return "", ErrLocalOnly
-		}
-	}
 	now := c.cfg.Now()
 	c.mu.Lock()
-	if len(c.open)+len(c.queued) >= MaxOpen {
+	r, err := c.openLocked(items, ttl, now)
+	if err != nil {
 		c.mu.Unlock()
-		return "", ErrFull
+		return "", err
+	}
+	text := c.renderLocked(r)
+	c.mu.Unlock()
+	if err := c.cfg.Modem.Send(c.cfg.Owner, text); err != nil {
+		c.dropOpen([]string{r.id}, now)
+		return "", err
+	}
+	return r.id, nil
+}
+
+// RequestEach opens one single-item request per item, each with its own
+// ID and code, and texts them together: as one text when they fit, else
+// as few as fit (GR10 re-issue after a restart: one approval per intent,
+// one text per batch). ttls[i] bounds item i's request as Request's ttl
+// does. ids[i] is "" for an item that was not asked; err is the first
+// failure.
+func (c *Channel) RequestEach(items []Item, ttls []time.Duration) (ids []string, err error) {
+	ids = make([]string, len(items))
+	if len(ttls) != len(items) {
+		return ids, errors.New("owner: one ttl per item")
+	}
+	if c.cfg.Modem == nil {
+		return ids, errors.New("owner: no modem")
+	}
+	now := c.cfg.Now()
+	type part struct {
+		idx  []int
+		text string
+	}
+	var parts []part
+	c.mu.Lock()
+	for i, it := range items {
+		r, e := c.openLocked([]Item{it}, ttls[i], now)
+		if e != nil {
+			if err == nil {
+				err = e
+			}
+			continue
+		}
+		ids[i] = r.id
+		t := c.renderLocked(r)
+		if n := len(parts); n > 0 && fits(parts[n-1].text+" "+t) {
+			parts[n-1].text += " " + t
+			parts[n-1].idx = append(parts[n-1].idx, i)
+			continue
+		}
+		parts = append(parts, part{idx: []int{i}, text: t})
+	}
+	c.mu.Unlock()
+	for _, p := range parts {
+		if e := c.cfg.Modem.Send(c.cfg.Owner, p.text); e != nil {
+			var drop []string
+			for _, i := range p.idx {
+				drop = append(drop, ids[i])
+				ids[i] = ""
+			}
+			c.dropOpen(drop, now)
+			if err == nil {
+				err = e
+			}
+		}
+	}
+	return ids, err
+}
+
+// openLocked validates items and opens a request for them, recorded for a
+// restart, without texting it.
+func (c *Channel) openLocked(items []Item, ttl time.Duration, now time.Time) (*request, error) {
+	if len(items) == 0 || len(items) > 20 {
+		return nil, errors.New("owner: a request has 1 to 20 items")
+	}
+	for _, it := range items {
+		if !SMSApprovable(it) {
+			return nil, ErrLocalOnly
+		}
+	}
+	if len(c.open)+len(c.queued) >= MaxOpen {
+		return nil, ErrFull
 	}
 	tier := Low
 	for _, it := range items {
@@ -75,33 +146,38 @@ func (c *Channel) Request(items []Item, ttl time.Duration) (string, error) {
 	}
 	id, err := c.newIDLocked(now)
 	if err != nil {
-		c.mu.Unlock()
-		return "", err
+		return nil, err
 	}
 	r := &request{id: id, items: append([]Item(nil), items...), tier: tier,
 		expires: now.Add(ttl), done: make([]bool, len(items))}
 	if tier == Low {
 		r.code = c.codes.textedCode()
 	}
-	refs := make([]string, len(items))
+	asked := now
+	if len(items) == 1 && !items[0].Asked.IsZero() {
+		// A re-issued item keeps the time it was first asked, through any
+		// number of restarts.
+		asked = items[0].Asked
+	}
+	ref := PendingRef{ID: id, Refs: make([]string, len(items)), Asked: asked, Expires: r.expires, Sums: make([]string, len(items))}
 	for i, it := range items {
-		refs[i] = it.Ref
+		ref.Refs[i], ref.Sums[i] = it.Ref, ItemSum(it)
 	}
-	if err := c.codes.commit(func(s *State) { s.Pending = append(s.Pending, PendingRef{ID: id, Refs: refs}) }); err != nil {
-		c.mu.Unlock()
-		return "", err
+	if err := c.codes.commit(func(s *State) { s.Pending = append(s.Pending, ref) }); err != nil {
+		return nil, err
 	}
-	text := c.renderLocked(r)
 	c.open[id] = r
-	c.mu.Unlock()
-	if err := c.cfg.Modem.Send(c.cfg.Owner, text); err != nil {
-		c.mu.Lock()
+	return r, nil
+}
+
+// dropOpen closes requests whose text was never sent.
+func (c *Channel) dropOpen(ids []string, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, id := range ids {
 		delete(c.open, id)
 		c.retireLocked(id, now)
-		c.mu.Unlock()
-		return "", err
 	}
-	return id, nil
 }
 
 // renderLocked is the approval text (CH-12): fixed wording from verified
@@ -121,13 +197,13 @@ func (c *Channel) renderLocked(r *request) string {
 		replies = fmt.Sprintf("Reply YES %s %s for all, YES %s 1 2 %s for some (the rest are denied), or NO %s.", r.id, r.code, r.id, r.code, r.id)
 	}
 	if len(r.items) == 1 {
-		return fmt.Sprintf("%s: %s. Expires %s. %s", r.id, r.items[0].line(), exp, replies)
+		return fmt.Sprintf("%s: %s. Expires %s. %s", r.id, c.itemLine(r.items[0]), exp, replies)
 	}
 	for shown := len(r.items); shown >= 0; shown-- {
 		var b strings.Builder
 		fmt.Fprintf(&b, "%s: %d items.", r.id, len(r.items))
 		for i := 0; i < shown; i++ {
-			fmt.Fprintf(&b, " %d %s.", i+1, r.items[i].line())
+			fmt.Fprintf(&b, " %d %s.", i+1, c.itemLine(r.items[i]))
 		}
 		if shown < len(r.items) {
 			fmt.Fprintf(&b, " Items %d-%d: MORE %s.", shown+1, len(r.items), r.id)
@@ -152,7 +228,7 @@ func (c *Channel) moreLocked(id string) string {
 		if r.done[i] {
 			continue
 		}
-		next := fmt.Sprintf(" %d %s.", i+1, it.line())
+		next := fmt.Sprintf(" %d %s.", i+1, c.itemLine(it))
 		if !fits(b.String() + next + " Rest on the box's Wi-Fi page.") {
 			b.WriteString(" Rest on the box's Wi-Fi page.")
 			break

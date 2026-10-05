@@ -122,6 +122,95 @@ func TestOwnerChannelEndToEnd(t *testing.T) {
 	}
 }
 
+// REQ: OP-3, OP-4, CH-10, CH-12, CH-13
+
+// TestRestartReissuesThroughTheChannel (GR10) runs a restart with the real
+// owner channel and its saved state: the boot text says the open request
+// will be re-sent; its old code no longer works; each intent comes back in
+// one text under its own request and code, with the original expiry and
+// the time first asked; one code approves one intent only.
+func TestRestartReissuesThroughTheChannel(t *testing.T) {
+	const ownerNum, boxNum = "+15550000001", "+15550000002"
+	seed := []byte("synthetic-totp-seed-0002") // synthetic canary, not a credential
+	r := newRig(t, nil)
+	carrier := modem.NewCarrier()
+	carrier.SetClock(r.now)
+	box, phone := carrier.Line(boxNum), carrier.Line(ownerNum)
+	state := &owner.MemStore{}
+	var ch *owner.Channel
+	open := func() {
+		r.openWith(func() Owner {
+			var err error
+			ch, err = owner.New(owner.Config{
+				Owner: ownerNum, Modem: box, Engine: r.eng, Secrets: owner.Secrets{TOTPSeed: seed}, Store: state,
+				Limits: owner.Limits{AmountLimit: 50000}, Location: time.UTC, Now: r.now,
+				Decide: r.g.Decide, Narrow: r.g.Narrow, Reissue: r.g.Reissue,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return ch
+		})
+		ch.Boot()
+	}
+	open()
+	ctx := context.Background()
+	text := func() string {
+		t.Helper()
+		select {
+		case m := <-phone.Inbox():
+			return m.Text
+		case <-time.After(2 * time.Second):
+			t.Fatal("no text to the owner")
+		}
+		return ""
+	}
+	say := func(msg string) string { return strings.Join(ch.Handle(ctx, ownerNum, msg), " | ") }
+	r.grant2(ch, text, say, seed, mailGrant())
+
+	for _, rec := range []string{"inv-1", "inv-2"} {
+		x := sam()
+		x.Record = rec
+		r.ver.set(rec, x)
+		r.effect("agent/"+rec, "invoice.send", map[string]any{"record": rec}, "sam@example.com")
+	}
+	r.g.Flush()
+	old := regexp.MustCompile(`Reply YES ([A-Z][0-9]{1,2}) ([0-9]{6}) for all`).FindStringSubmatch(text())
+	if old == nil {
+		t.Fatal("no batch request")
+	}
+
+	r.advance(2 * time.Minute)
+	open() // restart
+	if boot := text(); !strings.Contains(boot, old[1]+" will be re-sent with new codes") {
+		t.Fatalf("boot text %q", boot)
+	}
+	if got := say("YES " + old[1] + " " + old[2]); strings.HasPrefix(got, "Approved") {
+		t.Fatalf("an old code worked: %q", got)
+	}
+	r.advance(time.Minute) // the batch goes quiet
+	r.g.Tick()
+	again := text()
+	m := regexp.MustCompile(`([A-Z][0-9]{1,2}): send invoice .+?, asked 09:0[0-9], re-sent after restart\. Expires 09:1[0-9]\. Reply YES ([A-Z][0-9]{1,2}) ([0-9]{6})`).FindAllStringSubmatch(again, -1)
+	if len(m) != 2 || m[0][3] == m[1][3] {
+		t.Fatalf("re-sent text %q", again)
+	}
+	if got := say("YES " + m[1][1] + " " + m[0][3]); strings.HasPrefix(got, "Approved") {
+		t.Fatalf("one intent's code approved another: %q", got)
+	}
+	for _, x := range m {
+		if got := say("YES " + x[1] + " " + x[3]); !strings.HasPrefix(got, "Approved") {
+			t.Fatalf("re-sent approval %s: %q", x[1], got)
+		}
+	}
+	r.g.Wait()
+	for _, id := range []string{"agent/inv-1", "agent/inv-2"} {
+		if st := r.state(id); st.State != journal.Succeeded || r.exec.runs(id) != 1 {
+			t.Fatalf("%s: %s %q", id, st.State, st.Permission.Reason)
+		}
+	}
+}
+
 // grant2 creates a grant through the real channel.
 func (r *rig) grant2(ch *owner.Channel, text func() string, say func(string) string, seed []byte, s Spec) {
 	r.t.Helper()

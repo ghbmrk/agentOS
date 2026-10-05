@@ -71,8 +71,8 @@ Covered: 46 / 139 requirement IDs
 | ONB-8 | — |
 | OP-1 | `broker/e2e/openclaw_test.go`, `broker/guest/plane_test.go`, `broker/journal/engine_test.go`, `broker/journal/property_test.go`, `broker/journal/provenance_test.go` |
 | OP-2 | `broker/journal/engine_test.go`, `broker/journal/property_test.go`, `broker/journal/review_test.go` |
-| OP-3 | `broker/grants/gate_test.go`, `broker/journal/engine_test.go`, `broker/journal/property_test.go`, `broker/journal/review_test.go` |
-| OP-4 | `broker/grants/gate_test.go`, `broker/journal/engine_test.go`, `broker/journal/property_test.go`, `broker/journal/review_test.go`, `broker/owner/review_test.go` |
+| OP-3 | `broker/grants/channel_test.go`, `broker/grants/gate_test.go`, `broker/journal/engine_test.go`, `broker/journal/property_test.go`, `broker/journal/review_test.go`, `broker/owner/review_test.go` |
+| OP-4 | `broker/grants/channel_test.go`, `broker/grants/gate_test.go`, `broker/journal/engine_test.go`, `broker/journal/property_test.go`, `broker/journal/review_test.go`, `broker/owner/review_test.go` |
 | OP-5 | `broker/daemon/grants_wiring_test.go`, `broker/grants/grant_test.go`, `broker/guest/plane_test.go`, `broker/journal/engine_test.go`, `broker/journal/property_test.go` |
 | OP-6 | `broker/grants/grant_test.go`, `broker/journal/engine_test.go`, `broker/journal/property_test.go`, `broker/journal/review_test.go` |
 | OP-7 | `broker/journal/engine_test.go`, `broker/journal/property_test.go` |
