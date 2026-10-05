@@ -48,6 +48,11 @@ func TestParseTextTakesWholeMessagesOnly(t *testing.T) {
 		{"spare budget 40", true, Request{Kind: KindBudget, Calls: 40}},
 		{"stop sharing", true, Request{Kind: KindSharing}},
 		{"START SHARING", true, Request{Kind: KindSharing, On: true}},
+		{"learning off", true, Request{Kind: KindLoops, Loop: Improve}},
+		{"Security tests on", true, Request{Kind: KindLoops, Loop: Secure, On: true}},
+		{"UPDATE CHECKS OFF.", true, Request{Kind: KindLoops, Loop: Maintain}},
+		{"help loops", true, Request{Kind: KindHelp}},
+		{"learning off now", false, Request{}},
 		{"loop 4 off", false, Request{}},
 		{"loop 02 off", false, Request{}},
 		{"spare budget 999999", false, Request{}},
@@ -101,7 +106,7 @@ func TestOwnerTextChangesSettingsThroughTheJournal(t *testing.T) {
 	if r.s.Settings().On(Improve) {
 		t.Fatal("LOOP 1 OFF lost on restart")
 	}
-	if !strings.Contains(strings.Join(r.s.Digest(), "\n"), "Loop 1 (learning from your tasks) is off. Reply LOOP 1 ON") {
+	if !strings.Contains(strings.Join(r.s.Digest(), "\n"), "Learning is off. Reply LEARNING ON to restart it.") {
 		t.Fatalf("digest does not say loop 1 is off: %q", r.s.Digest())
 	}
 }
@@ -211,5 +216,34 @@ func TestZeroSpareBudgetAllowsNoModelCall(t *testing.T) {
 	// real call is one input and one output token.
 	if _, err := r.spare.Start("eval-x", 1, 1); err == nil {
 		t.Fatal("a model call fit under a zero spare budget")
+	}
+}
+
+func TestRepliesSayWhatChanged(t *testing.T) {
+	set := Settings{SpareCalls: 40}
+	cases := map[string]string{
+		"LOOPS OFF":          "Spare-time work is off: no learning, security tests or update checks until you reply LOOPS ON.",
+		"LOOPS ON":           "Spare-time work is back on. Reply LOOPS OFF if this wasn't you.",
+		"SECURITY TESTS OFF": "Security tests is off until you reply SECURITY TESTS ON.",
+		"LEARNING ON":        "Learning is back on. Reply LEARNING OFF if this wasn't you.",
+		"SPARE BUDGET 40":    "Spare-time work may now use up to 40 AI calls a day.",
+		"HELP LOOPS":         HelpText,
+	}
+	for msg, want := range cases {
+		r, ok := ParseText(msg)
+		if got := Confirm(r, set); !ok || got != want {
+			t.Errorf("%s: %q", msg, got)
+		}
+	}
+	if len(HelpText) > 153 {
+		t.Fatalf("HELP LOOPS is %d characters; keep it to one SMS segment", len(HelpText))
+	}
+}
+
+func TestBudgetRaiseAskComesFromBrokerState(t *testing.T) {
+	r := newRig(t)
+	got, err := r.s.BudgetAsk(journal.Intent{ID: "loops:n7:budget:400"})
+	if err != nil || got != "Raise spare-time AI use from 100 to 400 calls a day?" {
+		t.Fatalf("%q, %v", got, err)
 	}
 }

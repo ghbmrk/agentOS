@@ -1,0 +1,18 @@
+# Event bus: assumptions
+
+Built against SPEC v0.12 (CAP-4, CAP-3, REV-5, CRED-1, CH-13, CH-15) and
+DECISIONS D1. Revised after the #38 review.
+
+| # | Assumption | Spec basis | If it changes |
+|---|---|---|---|
+| E1 | Sources (mail, file, calendar and web watchers, adapters) publish events with a `ref` and a `version`; the bus delivers each (kind, account, ref, version) once. A web-change watcher publishes the page's content hash as the version, so only a change causes work. Watchers themselves come with their adapters (§10A). | CAP-4 | — |
+| E2 | Triggers are broker-side and registered at start. Delivery is at-least-once per (event, trigger), with a stable key for idempotent work. Before each Start, the bus re-checks under its lock that the delivery is still pending, so a deletion during `Pump` is not undone. Failures retry with backoff (2 s doubling, at most 1 h, in memory); after `MaxAttempts` (default 5) the delivery stops and the digest says so in owner terms. A trigger that panics counts as a failure. | CAP-4, OP-1 | — |
+| E3 | Labels use recall's shared allow-list (`recall.EffectiveLabel`, recall R2): mail, file, calendar, contact, credentialed, and any new or misspelt kind are private whatever is declared; `web` and `timer` are public only when declared exactly public; a timer's text is task text (D1). `owner` and `preference` are reserved for the owner channel and refused by `Publish` and `IndexInto`. The machine that receives an event's content gets its label; the trigger that starts the work binds that. | REV-5, D1 | — |
+| E4 | Missed timer firings during downtime coalesce into one event for the latest due time. A firing is published before it counts as fired, so a crash in between repeats the publish (absorbed by dedupe) rather than losing it. | CAP-4 | Fire each missed time instead. Small. |
+| E5 | Attention: work the owner asked for (`OwnerRequest`) answers in the conversation at once: decisions, results and failures alike. Background work (events, timers; the zero value) follows CAP-4: only an irreversible decision can interrupt, and only when the owner marked its class urgent; other irreversible decisions are batched (CH-13) with the digest; everything else is a digest line. Pacing and quiet hours (CH-15) stay with the owner channel downstream. | CAP-4, CH-13, CH-15 | — |
+| E6a | `Event.Received` is set by `Publish` (and `Tick`) from the broker's clock, whatever the caller passes, and `IndexInto` hands it to recall as the receipt time that decides staleness against deletions (recall R6). `Event.At` is the source's time, for display. | CAP-3 | — |
+| E6 | Identity: `Event.Source` is recall's keyed `SourceID` of the raw source and `Event.ID` a keyed hash of the raw (source, version), both taken before scrubbing, with the recall index's `Keyer`. `Forget(source)` (via `ForgetSource` on recall's `OnDelete`) drops every event about that source, pending deliveries included; the event IDs stay in the seen list, so the same version is not delivered again. | CAP-3 | — |
+| E7 | Storage: a log of live events, delivery progress and timer state, rewritten once 8 events have settled and on every `Forget` (cost proportional to live events), plus an append-only seen list of event IDs only. Unreadable lines are skipped. The seen list is unbounded for now. | CAP-3, RES-4 | Expire seen IDs by age. Small. |
+| E8 | Summaries, bodies and refs are scrubbed with the recall scrubber before storage (recall R4); bodies are then cut to 64 KiB. | CRED-1 | — |
+
+Recommended UX items from the review, left for the owner-channel wiring: aggregate digest lines by source within CH-12's three segments, an optional second batch time, and fixed-wording echoes of stored preferences and deletions.

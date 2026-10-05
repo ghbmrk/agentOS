@@ -68,6 +68,10 @@ type Vault struct {
 	mu      sync.RWMutex
 	entries map[string]record
 	closed  bool
+	// keysPath and key are set when the vault was opened through its key
+	// slots (keyslot.go), for AddSlot; Close wipes key.
+	keysPath string
+	key      []byte
 }
 
 // ErrClosed is returned by every method called after Close.
@@ -212,6 +216,7 @@ func (v *Vault) Close() error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.closed = true
+	wipe(v.key)
 	for n, r := range v.entries {
 		wipe(r.Value)
 		delete(v.entries, n)

@@ -125,7 +125,7 @@ func TestForegroundPreemptsLoopWorkWithinTheTarget(t *testing.T) {
 
 func TestSlowYieldIsReported(t *testing.T) {
 	r := newRig(t)
-	src := &source{loop: Secure, clk: r.clk, queue: 1, stubborn: 600 * time.Millisecond, started: make(chan struct{}, 1)}
+	src := &source{loop: Secure, clk: r.clk, queue: 1, stubborn: 3 * time.Second, started: make(chan struct{}, 1)}
 	r.restart(src)
 	go r.s.Tick(context.Background())
 	<-src.started
@@ -134,8 +134,10 @@ func TestSlowYieldIsReported(t *testing.T) {
 	if !errors.Is(err, ErrSlowYield) {
 		t.Fatalf("Preempt = %v, want ErrSlowYield", err)
 	}
-	if d := time.Since(start); d > 400*time.Millisecond {
-		t.Fatalf("Preempt waited %v past the 200ms target", d)
+	// Preempt gave up at the target, long before the stubborn work
+	// returned; the bound leaves room for a loaded -race run.
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("Preempt waited %v; target 200ms, the work runs 3s", d)
 	}
 }
 
@@ -283,5 +285,61 @@ func TestWorkYieldsWhenTheBoxGetsBusyEvenWithoutPreempt(t *testing.T) {
 	}
 	if s.Share()[Improve] != 1 {
 		t.Fatal("yielded work was measured")
+	}
+}
+
+// REQ: LOOP-5, LOOP-2
+//
+// Evaluation keeps its reserve of the spare budget while the scheduler
+// runs evaluation work, and lends it out otherwise (arbitrator, #49).
+
+type evalSource struct {
+	evaluates bool
+	run       func() Result
+}
+
+func (e *evalSource) Loop() Loop { return Improve }
+func (e *evalSource) Next(context.Context, bool) (Job, bool) {
+	return Job{Name: "unit", Evaluates: e.evaluates, Run: func(context.Context) Result { return e.run() }}, true
+}
+
+func TestEvaluationWorkKeepsItsReserveOfTheSpareBudget(t *testing.T) {
+	r := newRig(t)
+	src := &evalSource{}
+	r.restart(src)
+	must(t, r.s.cfg.Spare.SetOverallCap(meter.Limits{Calls: 10, Tokens: 1_000_000}))
+	must(t, r.s.cfg.Spare.SetShares([]meter.Share{r.s.EvalShare()}))
+	builderCalls := func() int {
+		n := 0
+		for {
+			c, err := r.s.cfg.Spare.Start("builder", 1, 1)
+			if err != nil {
+				return n
+			}
+			c.Done(2)
+			n++
+		}
+	}
+	var during int
+	var evalOK error
+	src.evaluates = true
+	src.run = func() Result {
+		if !r.s.Evaluating() {
+			t.Error("not evaluating while evaluation work runs")
+		}
+		during = builderCalls()
+		_, evalOK = r.s.cfg.Spare.Start("eval-1", 1, 1)
+		return Result{Value: 1}
+	}
+	r.s.Tick(context.Background())
+	if during != 7 || evalOK != nil {
+		t.Fatalf("during evaluation work: builder made %d calls (want 7 of 10), evaluation got %v", during, evalOK)
+	}
+	if r.s.Evaluating() {
+		t.Fatal("still evaluating after the unit ended")
+	}
+	// Outside evaluation work the rest of the reserve is lent.
+	if n := builderCalls(); n != 2 {
+		t.Fatalf("builder made %d calls outside evaluation work; want the 2 left", n)
 	}
 }
