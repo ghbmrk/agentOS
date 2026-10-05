@@ -162,11 +162,9 @@ func (p *Pipeline) ForgetGoal(goal string) ([]string, error) {
 		p.gone = map[string]bool{}
 	}
 	p.gone[goal] = true
-	next := p.st.copyCases()
 	var ids []string
-	for id, c := range next {
+	for id, c := range p.st.Cases {
 		if !c.Security && c.Goal == goal {
-			delete(next, id)
 			ids = append(ids, id)
 		}
 	}
@@ -174,6 +172,10 @@ func (p *Pipeline) ForgetGoal(goal string) ([]string, error) {
 	tree, ads, touched, changed := p.forgetAdoptionsLocked(goal)
 	if len(ids) == 0 && !changed {
 		return nil, nil
+	}
+	next := p.st.copyCases()
+	for _, id := range ids {
+		delete(next, id)
 	}
 	if err := p.activateLocked(p.st.Active, tree, touched); err != nil {
 		return nil, err

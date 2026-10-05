@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -48,5 +50,58 @@ func TestLearningForgetRunsTheCascade(t *testing.T) {
 	}
 	if _, err := lp.pipe.Propose(context.Background(), cand("owner:f2")); err != nil {
 		t.Fatalf("another task's candidate: %v", err)
+	}
+}
+
+// L3 MUST-2 on #160: a forget tombstones the goal, then writes the live
+// tree before it saves the pipeline. Here the box stopped between the two:
+// the tombstone holds the goal, while the saved pipeline still has an
+// adoption and a case from it. Opening the learning plane runs the cascade
+// again, before the agent can get the tree.
+func TestLearningOpenReplaysAnInterruptedForget(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "change.json")
+	if _, err := change.New(change.Config{Store: change.FileStore{Path: path}, Evaluator: noEval{},
+		Initial: change.Tree{"skills/greet.json": []byte("hi")}}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st map[string]any
+	must(t, json.Unmarshal(raw, &st))
+	canary := []byte("CANARY-f1")
+	st["active"].(map[string]any)["skills/note.json"] = canary
+	st["adoptions"] = []any{map[string]any{"id": "a1", "short": "A1", "source": "local", "goals": []string{"owner:f1"},
+		"edits": []any{map[string]any{"path": "skills/note.json", "after": canary}}}}
+	st["cases"] = map[string]any{"c1": map[string]any{"id": "c1", "class": "skill", "goal": "owner:f1", "input": canary}}
+	raw, err = json.Marshal(st)
+	must(t, err)
+	must(t, os.WriteFile(path, raw, 0o600))
+	must(t, os.WriteFile(filepath.Join(dir, "forgotten.json"), []byte(`{"owner:f1":"2026-10-05T09:00:00Z"}`), 0o600))
+
+	cfg := daemon.Config{
+		JournalPath: filepath.Join(dir, "journal.log"), SocketDir: filepath.Join(dir, "run"),
+		OwnerNumber: ownerNum, ModemUID: os.Getuid(), Admission: admission.Config{CapacityMB: 4500, HeadroomMB: 600},
+		OwnerState: filepath.Join(dir, "owner.json"),
+	}
+	lt := newLiveTree(t.Logf)
+	lp, err := openLearning(learnPaths{Dir: dir, Spare: filepath.Join(dir, "spare.json"), Tree: lt}, false, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lt.files["skills/note.json"] != nil || string(lt.files["skills/greet.json"]) != "hi" || !lt.ready {
+		t.Fatalf("live tree after the replay: %q, ready %v", lt.files, lt.ready)
+	}
+	if raw, _ := os.ReadFile(path); bytes.Contains(raw, []byte("Q0FOQVJZ")) { // base64 of "CANARY"
+		t.Fatal("the saved pipeline still holds the forgotten goal's files or case")
+	}
+	eng, err := journal.Open(&journal.MemStore{}, allowAll{}, map[string]journal.Executor{"task": succeeds{}, change.Executor: lp.pipe}, func(string) string { return daemon.Redacted })
+	must(t, err)
+	lp.pipe.Attach(eng)
+	cand := change.Candidate{Source: change.Local, Goals: []string{"owner:f1"}, Files: change.Tree{"skills/note.json": []byte("x")}}
+	if _, err := lp.pipe.Propose(context.Background(), cand); !errors.Is(err, change.ErrForgotten) {
+		t.Fatalf("a forgotten task's candidate after the restart: %v", err)
 	}
 }

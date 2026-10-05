@@ -521,6 +521,8 @@ func (p *Pipeline) More(ref string) ([]string, error) {
 		}
 		how := "changed"
 		switch {
+		case cleared(e):
+			how = "forgotten"
 		case e.Before == nil:
 			how = "new"
 		case e.After == nil:

@@ -102,6 +102,79 @@ func TestForgetGoalRewritesALaterAdoptionsUndo(t *testing.T) {
 	}
 }
 
+// L3 MUST-1 on #160: a later adoption's UNDO is rewritten only where it
+// built on the forgotten file, by succession, not where another adoption
+// wrote the same bytes. a (undone) and c both wrote v1; d built on c's.
+func TestForgetGoalFollowsSuccessionNotBytes(t *testing.T) {
+	e := newEnv(t, nil)
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	a := e.propose(Candidate{Source: Local, Goals: []string{"owner:g1"},
+		Files: Tree{"skills/greet": []byte("hello"), "skills/note": []byte("v1")}})
+	if a.State != StateAdopted {
+		t.Fatalf("setup: %+v", a)
+	}
+	if err := e.p.Revert(bg, a.ID, OriginOwner); err != nil {
+		t.Fatal(err)
+	}
+	c := e.propose(Candidate{Source: Local, Goals: []string{"owner:g2"},
+		Files: Tree{"skills/greet": []byte("hello"), "skills/note": []byte("v1")}})
+	d := e.propose(Candidate{Source: Local, Goals: []string{"owner:g3"}, Files: Tree{"skills/note": []byte("v3")}})
+	if c.State != StateAdopted || d.State != StateAdopted {
+		t.Fatalf("setup: %+v %+v", c, d)
+	}
+	if _, err := e.p.ForgetGoal("owner:g1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.p.Revert(bg, d.ID, OriginOwner); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(e.p.Files("skills")["skills/note"]); got != "v1" {
+		t.Fatalf("UNDO of d left %q, want c's v1", got)
+	}
+	if err := e.p.Revert(bg, c.ID, OriginOwner); err != nil {
+		t.Fatal(err)
+	}
+	if files := e.p.Files("skills"); files["skills/note"] != nil || string(files["skills/greet"]) != "hi" {
+		t.Fatalf("UNDO of c left %q", files)
+	}
+}
+
+// An undone later adoption kept the forgotten file as its own Before; it
+// goes too, and the next active one still goes back past it, though the
+// file it built on reached it through the undo.
+func TestForgetGoalPassesAnUndoneSuccessor(t *testing.T) {
+	e := newEnv(t, nil)
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	a := e.propose(Candidate{Source: Local, Goals: []string{"owner:g1"},
+		Files: Tree{"skills/greet": []byte("hello"), "skills/note": []byte("CANARY-g1")}})
+	b := e.propose(Candidate{Source: Local, Goals: []string{"owner:g2"}, Files: Tree{"skills/note": []byte("v2")}})
+	if a.State != StateAdopted || b.State != StateAdopted {
+		t.Fatalf("setup: %+v %+v", a, b)
+	}
+	if err := e.p.Revert(bg, b.ID, OriginOwner); err != nil {
+		t.Fatal(err)
+	}
+	c := e.propose(Candidate{Source: Local, Goals: []string{"owner:g3"}, Files: Tree{"skills/note": []byte("v3")}})
+	if c.State != StateAdopted {
+		t.Fatalf("setup: %+v", c)
+	}
+	if _, err := e.p.ForgetGoal("owner:g1"); err != nil {
+		t.Fatal(err)
+	}
+	if files := e.p.Files("skills"); string(files["skills/note"]) != "v3" || string(files["skills/greet"]) != "hi" {
+		t.Fatalf("active tree: %q", files)
+	}
+	if raw, _ := e.store.Load(); bytes.Contains(raw, []byte("Q0FOQVJZ")) {
+		t.Fatal("history still holds the forgotten file")
+	}
+	if err := e.p.Revert(bg, c.ID, OriginOwner); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := e.p.Files("skills")["skills/note"]; ok {
+		t.Fatal("UNDO of c did not go back past the forgotten file")
+	}
+}
+
 // An adoption the owner already undid still kept its files in history;
 // the forget removes them there too and leaves the active tree alone,
 // even where a later adoption wrote the same content.
@@ -228,5 +301,86 @@ func TestForgetGoalCascadeRetriesAFailedSave(t *testing.T) {
 	}
 	if e.p.Files("skills")["skills/note"] != nil {
 		t.Fatal("still active")
+	}
+}
+
+// downStore can neither save nor load.
+type downStore struct{}
+
+func (downStore) Load() ([]byte, error) { return nil, errors.New("disk gone") }
+func (downStore) Save([]byte) error     { return errors.New("disk gone") }
+
+// A forget whose save and reload both failed leaves the pipeline broken:
+// every later forget is refused, even once the disk is back, until a
+// restart reads the saved state again.
+func TestForgetGoalRefusedOnceBroken(t *testing.T) {
+	e := newEnv(t, nil)
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	if a := e.propose(Candidate{Source: Local, Goals: []string{"owner:g1"}, Files: Tree{"skills/greet": []byte("hello")}}); a.State != StateAdopted {
+		t.Fatalf("setup: %+v", a)
+	}
+	store := e.p.cfg.Store
+	e.p.cfg.Store = downStore{}
+	if _, err := e.p.ForgetGoal("owner:g1"); err == nil {
+		t.Fatal("forget reported done with no disk")
+	}
+	e.p.cfg.Store = store
+	if _, err := e.p.ForgetGoal("owner:g1"); err == nil || !strings.Contains(err.Error(), "restart needed") {
+		t.Fatalf("forget on a broken pipeline: %v", err)
+	}
+}
+
+// MORE on a forgotten adoption names its files as forgotten, not new.
+func TestMoreSaysForgotten(t *testing.T) {
+	e := newEnv(t, nil)
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	a := e.propose(Candidate{Source: Local, Goals: []string{"owner:g1"}, Files: Tree{"skills/greet": []byte("hello")}})
+	if a.State != StateAdopted {
+		t.Fatalf("setup: %+v", a)
+	}
+	if _, err := e.p.ForgetGoal("owner:g1"); err != nil {
+		t.Fatal(err)
+	}
+	lines, err := e.p.More(a.Short)
+	if err != nil || !strings.Contains(lines[0], "skills/greet (forgotten)") {
+		t.Fatalf("MORE: %q %v", lines, err)
+	}
+}
+
+// An empty file is a file: forgetting the adoption that created it as
+// empty removes it, rather than leaving it empty.
+func TestForgetGoalTellsAnEmptyFileFromNone(t *testing.T) {
+	e := newEnv(t, nil)
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	a := e.propose(Candidate{Source: Local, Goals: []string{"owner:g1"},
+		Files: Tree{"skills/greet": []byte("hello"), "skills/empty": {}}})
+	if a.State != StateAdopted {
+		t.Fatalf("setup: %+v", a)
+	}
+	if _, ok := e.p.Files("skills")["skills/empty"]; !ok {
+		t.Fatal("setup: the empty file was not adopted")
+	}
+	if _, err := e.p.ForgetGoal("owner:g1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := e.p.Files("skills")["skills/empty"]; ok {
+		t.Fatal("the forgotten adoption's empty file stayed")
+	}
+}
+
+// Only what Loop 1 builds carries goals: a candidate learned from owner
+// tasks that reaches past skills, procedures and context is rejected
+// before evaluation, so a forget never undoes a setting or an image.
+func TestALearnedCandidateStaysInLearnedClasses(t *testing.T) {
+	e := newEnv(t, nil)
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	rep := e.propose(Candidate{Source: Local, Goals: []string{"owner:g1"},
+		Files: Tree{"skills/greet": []byte("hello"), "config/x": []byte("1")}})
+	if rep.State != StateRejected || !strings.Contains(rep.Reason, "only skills, procedures and context") {
+		t.Fatalf("report: %+v", rep)
+	}
+	if ok := e.propose(Candidate{Source: Local, Goals: []string{"owner:g1"},
+		Files: Tree{"skills/greet": []byte("hello"), "context/agent.json": []byte(`{"select":[]}`)}}); ok.State == StateRejected && strings.Contains(ok.Reason, "only skills") {
+		t.Fatalf("context refused: %+v", ok)
 	}
 }

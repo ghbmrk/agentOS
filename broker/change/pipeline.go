@@ -600,6 +600,12 @@ func (p *Pipeline) proposeInner(ctx context.Context, c Candidate, security bool)
 		rep.State, rep.Reason = StateRejected, cl.forbidden
 		return rep, nil
 	}
+	if len(c.Goals) > 0 && slices.ContainsFunc(cl.classes, func(k Class) bool { return !learnedClass[k] }) {
+		// The forget cascade undoes only what Loop 1 builds (L3 on #160):
+		// an image, setting or authority is never learned from a task.
+		rep.State, rep.Reason = StateRejected, "learned from owner tasks, so it may change only skills, procedures and context"
+		return rep, nil
+	}
 	score, err := p.evaluate(ctx, base, next, set, strictFor(c.Source, cl.classes))
 	if err != nil {
 		// Preempted: not a verdict. The ID is spent; the next proposal

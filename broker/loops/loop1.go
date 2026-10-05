@@ -246,7 +246,8 @@ type Learn struct {
 	// gone are the goals forgotten since start (ForgetGoal).
 	gone map[string]bool
 	// triedGoals are the goals each tried hypothesis's evidence held, so
-	// forgetting one lets it be tried again on what remains (CAP-3).
+	// forgetting one lets it be tried again on what remains (CAP-3). In
+	// memory only, like tried: a restart tries every hypothesis afresh.
 	triedGoals map[string][]string
 }
 

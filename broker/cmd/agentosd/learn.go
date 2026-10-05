@@ -130,9 +130,6 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	}); err != nil {
 		return nil, err
 	}
-	if p.Tree != nil {
-		p.Tree.markReady() // the pipeline applied its state, if it had any
-	}
 	var router change.Router
 	if sync != nil {
 		sync.doneRestoring()
@@ -190,6 +187,12 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	}
 	l.harvest.Wake = l.sched.Wake
 	l.cases = l.harvest
+	if err := l.replayForgotten(); err != nil {
+		return nil, err
+	}
+	if p.Tree != nil {
+		p.Tree.markReady() // the pipeline applied its state, if it had any
+	}
 	// Evaluation keeps its reserve of the spare budget while Loop 1
 	// evaluates (loops L3); builder machines take at most their Max of it
 	// (C-3c-5). The clean room takes its Max here once it exists.
@@ -330,6 +333,24 @@ func (l *learning) forgetTask(goal string) error {
 	ids, cerr := l.pipe.ForgetGoal(goal)
 	herr := l.harvest.ForgetCases(ids)
 	return errors.Join(ferr, terr, verr, cerr, herr)
+}
+
+// replayForgotten runs the cascade again for every tombstoned goal when
+// the learning plane opens (L3 MUST-2 on #160). A forget writes the live
+// tree before it saves the pipeline, and the in-flight refusals are kept
+// in memory only, so a crash between the two would bring the forgotten
+// files back and let a candidate from the goal be adopted. Each step is
+// idempotent, and one that finds nothing saves nothing. It runs before the
+// tree is marked ready, so on a failure the agent never gets the tree and
+// learning stays off until a start succeeds.
+func (l *learning) replayForgotten() error {
+	var errs []error
+	for _, g := range l.forgotten.goals() {
+		l.learn.ForgetGoal(g)
+		ids, err := l.pipe.ForgetGoal(g)
+		errs = append(errs, err, l.harvest.ForgetCases(ids))
+	}
+	return errors.Join(errs...)
 }
 
 // ForgetTasks is recall's deletion reach into the learning plane

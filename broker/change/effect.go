@@ -560,6 +560,12 @@ func (p *Pipeline) Recheck(ctx context.Context) ([]string, error) {
 			continue
 		}
 		p.mu.Lock()
+		// a was read before the evaluation; a forget meanwhile replaces
+		// the history with copies (C23), so read it again.
+		if a = p.adoptionLocked(id); a == nil || a.Reverted != "" {
+			p.mu.Unlock()
+			continue
+		}
 		protected := a.protected()
 		if protected && a.Concern == "" {
 			a.Concern, a.ConcernScore = why, s
