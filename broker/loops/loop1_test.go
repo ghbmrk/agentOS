@@ -355,3 +355,88 @@ func TestRecheckRunsWhenNewEvidenceArrives(t *testing.T) {
 		t.Fatal("weekly recheck not offered")
 	}
 }
+
+// askPipeline answers every proposal with "waiting on the owner".
+type askPipeline struct {
+	fakePipeline
+	proposals int
+}
+
+func (a *askPipeline) Propose(context.Context, change.Candidate) (change.Report, error) {
+	a.mu.Lock()
+	a.proposals++
+	a.mu.Unlock()
+	return change.Report{State: change.StateAwaitingOwner}, nil
+}
+
+func TestALapsedOwnerRequestBacksOffThenStops(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	n := 0
+	more := func(k int) {
+		for i := 0; i < k; i++ {
+			n++
+			r.corrected(h, n)
+		}
+	}
+	more(12)
+	ap := &askPipeline{}
+	b := &builder{files: map[string][]byte{"procedures/mail": []byte("v2")}}
+	l, err := NewLearn(LearnConfig{Pipeline: ap, Journal: r.eng, Harvest: h, Builder: b, RecheckCases: 1000,
+		RecheckEvery: 365 * 24 * time.Hour, Now: r.clk.now})
+	must(t, err)
+	run := func() bool {
+		job, ok := l.Next(context.Background(), true)
+		if ok {
+			job.Run(context.Background())
+		}
+		return ok
+	}
+	if !run() || ap.proposals != 1 {
+		t.Fatal("first proposal not made")
+	}
+	// New evidence, but the owner was just asked: wait for the backoff.
+	more(4)
+	if run() {
+		t.Fatal("re-proposed inside the backoff")
+	}
+	r.clk.add(25 * time.Hour)
+	if !run() || ap.proposals != 2 {
+		t.Fatal("not re-proposed after the backoff")
+	}
+	// After two lapsed asks it is not proposed again, however long.
+	more(4)
+	r.clk.add(30 * 24 * time.Hour)
+	if run() {
+		t.Fatal("proposed a third time; it should wait in the digest")
+	}
+}
+
+func TestBuildersAreChosenBySignal(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	for i := 1; i <= 12; i++ {
+		r.corrected(h, i)
+	}
+	skills := &builder{files: map[string][]byte{"skills/x": []byte("y")}}
+	l, err := NewLearn(LearnConfig{Pipeline: &fakePipeline{}, Journal: r.eng, Harvest: h, RecheckCases: 1000,
+		Builder: BySignal{SignalRepeat: skills}})
+	must(t, err)
+	// Only correction hypotheses exist; the repeat-only builder gets none.
+	if job, ok := l.Next(context.Background(), true); ok {
+		t.Fatalf("offered %s with no builder for its signal", job.Name)
+	}
+	for i := 0; i < 3; i++ {
+		g := fmt.Sprintf("rep%d", i)
+		r.task(g+"-a", g, "mail", "search", "private")
+		r.task(g+"-b", g, "mail", "label", "private")
+	}
+	job, ok := l.Next(context.Background(), true)
+	if !ok {
+		t.Fatal("repeat hypothesis not offered to its builder")
+	}
+	job.Run(context.Background())
+	if got := skills.got(); len(got) != 1 || got[0].Hypothesis.Signal != SignalRepeat {
+		t.Fatalf("briefs %+v", got)
+	}
+}
