@@ -484,7 +484,7 @@ func (m *Meter) Wrap(machine string, next http.Handler) http.Handler {
 		in := Tokens(int64(len(body)))
 		body, reserve, err := m.limit(r.URL.Path, body)
 		if err != nil {
-			http.Error(w, "model request body must be one JSON object", http.StatusBadRequest)
+			http.Error(w, "model request refused: "+err.Error(), http.StatusBadRequest)
 			return
 		}
 		c, err := m.Start(machine, in, reserve)
@@ -523,7 +523,7 @@ func (m *Meter) Wrap(machine string, next http.Handler) http.Handler {
 // reservation is the largest limit forwarded, so a provider that honors
 // its limit cannot be charged past what Start reserved. An empty body
 // (a GET) passes unchanged; any other body that is not one JSON object
-// is refused.
+// is refused, as is a request for more than one choice (n).
 func (m *Meter) limit(path string, body []byte) ([]byte, int64, error) {
 	if len(bytes.TrimSpace(body)) == 0 {
 		return body, m.cfg.DefaultReserve, nil
@@ -536,6 +536,11 @@ func (m *Meter) limit(path string, body []byte) ([]byte, int64, error) {
 	}
 	if _, err := dec.Token(); err != io.EOF {
 		return nil, 0, errors.New("trailing data after JSON body")
+	}
+	// n asks for several choices, each up to the limit, so output could
+	// pass the reservation n times over. One choice only.
+	if v, ok := obj["n"]; ok && string(bytes.TrimSpace(v)) != "1" {
+		return nil, 0, errors.New("only one choice (n=1) per model call")
 	}
 	reserve := int64(0)
 	for _, k := range limitKeys {

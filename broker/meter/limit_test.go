@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -54,7 +55,9 @@ func TestOP8ForwardedOutputLimitIsTheReservation(t *testing.T) {
 			t.Errorf("%s: forwarded %d max_tokens keys", tc.body, n)
 		}
 	}
-	for _, body := range []string{"not json", `["max_tokens"]`, `{"a":1} {"max_tokens":1e9}`} {
+	// More than one choice per call would multiply output past the
+	// reservation (n=128 is 128 times the limit): refused.
+	for _, body := range []string{"not json", `["max_tokens"]`, `{"a":1} {"max_tokens":1e9}`, `{"n":128}`, `{"n":2,"max_tokens":10}`, `{"n":"2"}`, `{"n":0}`} {
 		got = nil
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, httptest.NewRequest("POST", "/openai/v1/chat/completions", strings.NewReader(body)))
@@ -81,15 +84,18 @@ func TestOP8ParallelLargeRequestsStayUnderTheCap(t *testing.T) {
 		fmt.Fprintf(w, `{"choices":[{"message":{"content":"x"}}],"usage":{"prompt_tokens":10,"completion_tokens":%d}}`, req.MaxTokens)
 	}))
 	var wg sync.WaitGroup
+	var done atomic.Int64 // calls answered
 	for i := 0; i < 20; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/openai/v1/chat/completions", strings.NewReader(`{"max_tokens":1000000}`)))
+			done.Add(1)
 		}()
 	}
-	// Let every call reach Start before any is answered.
-	for m.Usage("m1").Calls < 9 {
+	// Let every call reach Start before any is answered: nine are
+	// admitted and wait, eleven are refused and return.
+	for m.Usage("m1").Calls < 9 || done.Load() < 11 {
 		runtime.Gosched()
 	}
 	close(start)
@@ -115,6 +121,9 @@ func TestOP8CutOffStreamIsChargedItsContent(t *testing.T) {
 		{"cut-off", "text/event-stream", stream, 5 + 10_000, 1 << 30},
 		{"cut-off-mislabeled", "application/json", stream, 5 + 10_000, 1 << 30},
 		{"stop-reason", "text/event-stream", stopped, 5 + 42, 5 + 42},
+		// A normal end whose only usage is message_start's placeholder
+		// output count: the content counted sets the output.
+		{"stop-reason-no-usage", "text/event-stream", stream + "event: message_delta\n" + `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}` + "\n\nevent: message_stop\n" + `data: {"type":"message_stop"}` + "\n\n", 5 + 10_000, 5 + 10_000},
 	} {
 		m, _, _ := open(t, Config{MachineCap: Limits{Calls: 10, Tokens: 1 << 30}, OverallCap: big})
 		h := m.Wrap("m1", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

@@ -897,6 +897,15 @@ func TestUsageReachesTheCallersContext(t *testing.T) {
 	if want := fmt.Sprint("openai", Usage{Input: 9, Output: 2, CacheRead: 10, Reported: true, Complete: true, OutputChars: 2}); len(got) != 1 || got[0] != want {
 		t.Fatalf("reported %q, want [%s]", got, want)
 	}
+	// An answer the router cannot translate is reported by its size.
+	got = nil
+	junk := strings.Repeat("x", 4000)
+	r.up.set(hostOpenAI, serveFixture(200, "application/json", []byte(junk)))
+	req = httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(simpleChat)).WithContext(ctx)
+	r.router.Handler("m1").ServeHTTP(httptest.NewRecorder(), req)
+	if want := fmt.Sprint("openai", Usage{OutputChars: 4000}); len(got) != 1 || got[0] != want {
+		t.Fatalf("unusable answer reported %q, want [%s]", got, want)
+	}
 	// A denied call reports nothing.
 	got = nil
 	req = httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"nope","messages":[]}`)).WithContext(ctx)

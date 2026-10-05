@@ -596,21 +596,23 @@ func (r *Router) try(ctx context.Context, machine string, w http.ResponseWriter,
 	}
 	raw, err := io.ReadAll(body)
 	w.Header().Set("Content-Type", "application/json")
-	if err != nil {
+	// A provider answer the router cannot use may still be billed: its
+	// size is reported as unverified output, the meter's floor (OP-8).
+	unusable := func(msg string) *attempt {
+		a.usage = &Usage{OutputChars: body.n}
 		w.WriteHeader(http.StatusBadGateway)
-		w.Write(apiError("provider response unreadable", "server_error", ""))
+		w.Write(apiError(msg, "server_error", ""))
 		return a
 	}
+	if err != nil {
+		return unusable("provider response unreadable")
+	}
 	if body.n >= r.cfg.MaxResponse {
-		w.WriteHeader(http.StatusBadGateway)
-		w.Write(apiError("provider response too large", "server_error", ""))
-		return a
+		return unusable("provider response too large")
 	}
 	translated, u, err := p.Response(raw, chat.Model)
 	if err != nil {
-		w.WriteHeader(http.StatusBadGateway)
-		w.Write(apiError(err.Error(), "server_error", ""))
-		return a
+		return unusable(err.Error())
 	}
 	w.WriteHeader(resp.StatusCode)
 	w.Write(translated)
