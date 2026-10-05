@@ -30,6 +30,8 @@ type Limits struct {
 	// HighBytes is the throttle point (memory.high). Zero means MaxBytes
 	// minus 1/16, which keeps the machine out of the hard-limit stall.
 	HighBytes int64
+	// MinBytes is protected memory (memory.min), used by Component only.
+	MinBytes int64
 }
 
 // ErrNotV2 means the path is not a usable cgroup v2 group.
