@@ -146,6 +146,13 @@ func TestStaleCheckNotCurrent(t *testing.T) {
 	}
 }
 
+// REQ: UPD-4
+//
+// TR2: maintain's channels. Stable (the default) soaks, fast takes fast
+// releases, and pinned takes no automatic update but still surfaces
+// security notices (the tests from here to TestPinnedBoxSaysNothingOfOrdinaryReleases).
+// Changing the channel by text or the local UI is UPD-c.
+
 func TestStableReleaseSoaksBeforeProposal(t *testing.T) {
 	r := newRig(t)
 	r.release(2, nil)
