@@ -1,6 +1,7 @@
 package loops
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -97,5 +98,44 @@ func TestHarvesterRefusesErasedIntents(t *testing.T) {
 		if c.ID == held || c.ID == "draft-8" {
 			t.Fatalf("pipeline still holds %s", c.ID)
 		}
+	}
+}
+
+// Security F1 on #153 (CAP-3): recall's deletion reach, through the
+// harvester's ForgetIntents, also drops every candidate Loop 1 keeps whose
+// brief carried an erased intent, as an
+// evidence intent or as a dev case's task, so the next offer builds
+// afresh; other kept candidates stay.
+func TestErasedIntentsDropKeptCandidates(t *testing.T) {
+	l, _, b, _ := newKeepRig(t)
+	ctx := context.Background()
+	h1, h2, h3 := hyp("k1", "task-a", "task-b"), hyp("k2", "task-c"), hyp("k3", "task-d")
+	dev := Evidence{Dev: []change.Case{{ID: "d1", Task: "task-z"}}}
+	l.propose(ctx, h1, Evidence{})
+	l.propose(ctx, h2, dev)
+	l.propose(ctx, h3, Evidence{})
+	l.cfg.Harvest.Store = &change.MemStore{}
+	must(t, l.cfg.Harvest.ForgetIntents([]string{"task-b", "task-z"}))
+	l.mu.Lock()
+	_, k1 := l.built["k1"]
+	_, k2 := l.built["k2"]
+	_, k3 := l.built["k3"]
+	l.mu.Unlock()
+	if k1 || k2 || !k3 {
+		t.Fatalf("kept after the erase: k1 %v, k2 %v, k3 %v", k1, k2, k3)
+	}
+	l.propose(ctx, h1, Evidence{})
+	l.propose(ctx, h3, Evidence{})
+	if n := len(b.got()); n != 4 {
+		t.Fatalf("%d builds, want 4: only the erased brief builds afresh", n)
+	}
+	// The reach's second call, after the journal erase, drops one kept
+	// in between, though the harvester has nothing left to change.
+	must(t, l.cfg.Harvest.ForgetIntents([]string{"task-b", "task-z"}))
+	l.mu.Lock()
+	_, k1 = l.built["k1"]
+	l.mu.Unlock()
+	if k1 {
+		t.Fatal("a candidate kept between the reach's two calls stayed")
 	}
 }

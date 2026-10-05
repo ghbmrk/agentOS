@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/change"
@@ -88,6 +89,10 @@ type Harvester struct {
 	mu     sync.Mutex
 	loaded bool
 	st     harvested
+	// erased is Loop 1's ForgetIntents, set by NewLearn, so the reach
+	// that erases intents drops candidates built from them too (security
+	// F1 on #153).
+	erased atomic.Pointer[func([]string)]
 }
 
 // harvested is what the harvester persists. Tasks is written before a case
@@ -366,6 +371,11 @@ func (h *Harvester) ForgetCases(ids []string) error {
 func (h *Harvester) ForgetIntents(ids []string) error {
 	if len(ids) == 0 {
 		return nil
+	}
+	// Every call, whatever the harvester's own state: a candidate may have
+	// been kept since the last one.
+	if f := h.erased.Load(); f != nil {
+		(*f)(ids)
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
