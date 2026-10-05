@@ -228,13 +228,38 @@ func TestPublicIdentifiersKept(t *testing.T) {
 }
 
 // Lowering a label is possible only as an explicit owner action (D1 PUBLIC
-// opt-out or a local-UI relabel), recorded on the item (arbitrator on #38).
+// opt-out or a local-UI relabel) naming that item, each message once
+// (arbitrator and re-review on #38).
 func TestRelabelOnlyByOwner(t *testing.T) {
-	ix := open(t, &MemStore{}, WithOwnerAuth(ownerAuth("sms-public")))
-	task := mustIngest(t, ix, Item{Source: Source{Kind: "task", Ref: "t1"}, Text: "compare laptops"})
-	sum := mustIngest(t, ix, Item{Source: Source{Kind: "agent", Ref: "s", DerivedFrom: []string{task}}, Label: Public, Text: "laptop table"})
+	st := &MemStore{}
+	ix0 := open(t, st, WithKeyer(testKeyer(t)))
+	task := ix0.SourceID("task", "", "t1")
+	sumID := ix0.SourceID("agent", "", "s")
+	web := ix0.SourceID("web", "", "w")
+	mail := ix0.SourceID("mail", "", "m")
+	auth := ownerAuth(
+		"sms-public|recall.public|"+task,
+		"sms-public-2|recall.public|"+task,
+		"ui-sum|recall.public|"+sumID,
+		"ui-mail|recall.public|"+mail,
+		"sms-chat|chat|",
+	)
+	ix := open(t, st, WithKeyer(testKeyer(t)), WithOwnerAuth(auth))
+	mustIngest(t, ix, Item{Source: Source{Kind: "task", Ref: "t1"}, Text: "compare laptops"})
+	mustIngest(t, ix, Item{Source: Source{Kind: "agent", Ref: "s", DerivedFrom: []string{task}}, Label: Public, Text: "laptop table"})
+	mustIngest(t, ix, Item{Source: Source{Kind: "web", Ref: "w"}, Text: "page"})
+	mustIngest(t, ix, Item{Source: Source{Kind: "mail", Ref: "m"}, Text: "x"})
+
 	if err := ix.Relabel("mail-1", task, Public); !errors.Is(err, ErrNotOwner) {
 		t.Fatalf("unauthenticated relabel: %v", err)
+	}
+	// An ordinary owner message, or one naming another item, authorizes
+	// nothing here.
+	if err := ix.Relabel("sms-chat", task, Public); !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("unrelated owner message: %v", err)
+	}
+	if err := ix.Relabel("sms-public", web, Public); !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("message for another item: %v", err)
 	}
 	if err := ix.Relabel("sms-public", task, Public); err != nil {
 		t.Fatal(err)
@@ -248,20 +273,68 @@ func TestRelabelOnlyByOwner(t *testing.T) {
 	if it, _ := ix.Get(task); it.Label != Public {
 		t.Fatal("owner relabel lost on re-ingest")
 	}
-	// The derived item was private at ingest; it can be relabelled now that
-	// its parent is public.
-	if err := ix.Relabel("sms-public", sum, Public); err != nil {
+	if err := ix.Relabel("ui-sum", sumID, Public); err != nil {
 		t.Fatal(err)
 	}
-	// Mail can never be public; raising is always allowed and cascades.
-	m := mustIngest(t, ix, Item{Source: Source{Kind: "mail", Ref: "m"}, Text: "x"})
-	if err := ix.Relabel("sms-public", m, Public); !errors.Is(err, ErrNotRelabelable) {
+	// Mail can never be public.
+	if err := ix.Relabel("ui-mail", mail, Public); !errors.Is(err, ErrNotRelabelable) {
 		t.Fatalf("mail relabelled public: %v", err)
 	}
+	// Raising needs no message and cascades.
 	if err := ix.Relabel("", task, Private); err != nil {
 		t.Fatal(err)
 	}
-	if it, _ := ix.Get(sum); it.Label != Private {
+	if it, _ := ix.Get(sumID); it.Label != Private {
 		t.Fatal("raising a parent must raise derived items")
+	}
+	// Replay after the raise is refused, also after a restart; a fresh
+	// message for the same item works.
+	if err := ix.Relabel("sms-public", task, Public); !errors.Is(err, ErrUsedMessage) {
+		t.Fatalf("replay after raise: %v", err)
+	}
+	re := open(t, st, WithKeyer(testKeyer(t)), WithOwnerAuth(auth))
+	if err := re.Relabel("sms-public", task, Public); !errors.Is(err, ErrUsedMessage) {
+		t.Fatalf("replay after restart: %v", err)
+	}
+	if err := re.Relabel("sms-public-2", task, Public); err != nil {
+		t.Fatalf("fresh message: %v", err)
+	}
+}
+
+// Staleness is decided by broker receipt time, so a future-dated source
+// time cannot outlive a deletion, and a future receipt time is refused.
+func TestReceiptTimeDecidesStaleness(t *testing.T) {
+	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	ix := open(t, &MemStore{}, WithClock(func() time.Time { return now }))
+	received := now
+	now = now.Add(time.Minute)
+	if _, err := ix.DeleteSource("mail", "", "<f@x>"); err != nil {
+		t.Fatal(err)
+	}
+	for _, seen := range []time.Time{now.Add(48 * time.Hour), {}} {
+		_, err := ix.Ingest(Item{Source: Source{Kind: "mail", Ref: "<f@x>", Seen: seen}, Received: received, Text: "back?"})
+		if !errors.Is(err, ErrDeleted) {
+			t.Fatalf("seen %v: stale content accepted: %v", seen, err)
+		}
+	}
+	if _, err := ix.Ingest(Item{Source: Source{Kind: "mail", Ref: "<g@x>"}, Received: now.Add(time.Hour), Text: "x"}); !errors.Is(err, ErrFuture) {
+		t.Fatalf("future receipt: %v", err)
+	}
+}
+
+func TestPruneTombstones(t *testing.T) {
+	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	st := &MemStore{}
+	ix := open(t, st, WithClock(func() time.Time { return now }))
+	ix.DeleteSource("file", "", "/old")
+	now = now.Add(40 * 24 * time.Hour)
+	ix.DeleteSource("file", "", "/new")
+	if n, err := ix.PruneTombstones(30 * 24 * time.Hour); err != nil || n != 1 {
+		t.Fatalf("prune: %d %v", n, err)
+	}
+	var replayed []string
+	open(t, st).OnDelete(func(d Deleted) error { replayed = append(replayed, d.ID); return nil })
+	if len(replayed) != 1 || replayed[0] != ix.SourceID("file", "", "/new") {
+		t.Fatalf("after prune: %v", replayed)
 	}
 }

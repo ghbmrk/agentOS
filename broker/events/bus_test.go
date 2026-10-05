@@ -360,7 +360,8 @@ func TestDeletionBeforeAndDuringIndexing(t *testing.T) {
 	ix2, b2, done2 := indexedBus(t, t.TempDir(), deleter)
 	defer done2()
 	target = ix2
-	mustPublish(t, b2, Event{Kind: Mail, Account: "o", Ref: "<race@x>", Body: "race lemur"})
+	// Future-dated by its source: the date must not outrun the deletion.
+	mustPublish(t, b2, Event{Kind: Mail, Account: "o", Ref: "<race@x>", At: time.Now().Add(48 * time.Hour), Received: time.Now().Add(72 * time.Hour), Body: "race lemur"})
 	b2.Pump(ctx)
 	if ix2.Len() != 0 {
 		t.Fatal("a deletion during Pump was undone by a stale delivery")
@@ -368,7 +369,7 @@ func TestDeletionBeforeAndDuringIndexing(t *testing.T) {
 
 	// A stale IndexInto that already passed the bus re-check is refused by
 	// the recall tombstone.
-	old := Event{Kind: Mail, Account: "o", Ref: "<stale@x>", At: time.Now().Add(-time.Hour), Body: "stale"}
+	old := Event{Kind: Mail, Account: "o", Ref: "<stale@x>", At: time.Now().Add(48 * time.Hour), Received: time.Now().Add(-time.Hour), Body: "stale"}
 	old.Source = ix2.SourceID("mail", "o", "<stale@x>")
 	if _, err := ix2.DeleteSource("mail", "o", "<stale@x>"); err != nil {
 		t.Fatal(err)

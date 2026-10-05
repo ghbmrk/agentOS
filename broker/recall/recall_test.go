@@ -41,16 +41,20 @@ func (f *fakeLabels) Raise(m string) error {
 	return nil
 }
 
-func ownerAuth(ids ...string) OwnerAuth {
-	ok := map[string]bool{}
-	for _, id := range ids {
-		ok[id] = true
+// ownerAuth authenticates synthetic owner messages given as
+// "id|action|target".
+func ownerAuth(specs ...string) OwnerAuth {
+	msgs := map[string]OwnerMessage{}
+	for _, sp := range specs {
+		f := strings.SplitN(sp, "|", 3)
+		for len(f) < 3 {
+			f = append(f, "")
+		}
+		msgs[f[0]] = OwnerMessage{ID: f[0], Channel: "sms", At: time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC), Action: f[1], Target: f[2]}
 	}
 	return func(id string) (OwnerMessage, bool) {
-		if !ok[id] {
-			return OwnerMessage{}, false
-		}
-		return OwnerMessage{ID: id, Channel: "sms", At: time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)}, true
+		m, ok := msgs[id]
+		return m, ok
 	}
 }
 
@@ -234,7 +238,7 @@ func TestSearchRaisesMachineBeforePrivateResults(t *testing.T) {
 func TestPreferencesOnlyFromAuthenticatedOwner(t *testing.T) {
 	labels := newLabels()
 	st := &MemStore{}
-	ix := open(t, st, WithOwnerAuth(ownerAuth("sms-1", "sms-2", "ui-3")), WithLabeler(labels))
+	ix := open(t, st, WithOwnerAuth(ownerAuth("sms-1|preference.set|meeting_time", "sms-2|preference.delete|meeting_time", "ui-3|preference.set|meeting_time", "sms-other|preference.set|forward")), WithLabeler(labels))
 
 	// An email asserting a preference creates none (A14).
 	mustIngest(t, ix, Item{Source: Source{Kind: "mail", Ref: "evil"},
@@ -275,6 +279,16 @@ func TestPreferencesOnlyFromAuthenticatedOwner(t *testing.T) {
 	// Delivered to an agent only as owner data.
 	if _, err := ix.PreferencesFor("m-9"); err != nil || labels.Label("m-9") != Private {
 		t.Fatalf("preferences must raise the machine: %v", err)
+	}
+	// A message is bound to its action and target, and used once.
+	if err := ix.SetPreference("sms-other", "meeting_time", "midnight"); !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("message for another key accepted: %v", err)
+	}
+	if err := ix.SetPreference("sms-1", "meeting_time", "mornings again"); !errors.Is(err, ErrUsedMessage) {
+		t.Fatalf("message reused: %v", err)
+	}
+	if err := ix.DeletePreference("sms-1", "meeting_time"); !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("a set message authorized a delete: %v", err)
 	}
 	if err := ix.DeletePreference("mail-evil", "meeting_time"); !errors.Is(err, ErrNotOwner) {
 		t.Fatalf("unauthenticated delete: %v", err)

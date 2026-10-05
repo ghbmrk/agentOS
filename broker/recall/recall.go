@@ -77,18 +77,35 @@ type Item struct {
 	Facts  []Fact    `json:"facts,omitempty"`
 	Vector []float32 `json:"vec,omitempty"`
 	VecID  string    `json:"vec_id,omitempty"` // Embedder.ID of Vector
+	// Received is when the broker received this content, on the broker's
+	// clock (the event bus passes its publish time). It decides staleness
+	// against tombstones; Source.Seen is the source's own time and is for
+	// display only. Zero means now; a future time is refused.
+	Received time.Time `json:"received,omitempty"`
 	// LabelBy is the owner-channel message that lowered the label, if one
 	// did (Relabel). Empty for labels set at ingest.
 	LabelBy string `json:"label_by,omitempty"`
 }
 
 // OwnerMessage is an authenticated owner-channel message (owner text or
-// local UI action), the only provenance a preference may have.
+// local UI action), the only provenance a preference or a lowered label may
+// have. The owner channel parses the message into the action it asks for
+// and that action's target; a message authorizes exactly that action on
+// exactly that target, once.
 type OwnerMessage struct {
 	ID      string    `json:"id"`
 	Channel string    `json:"channel"` // "sms", "voice", "local-ui"
 	At      time.Time `json:"at"`
+	Action  string    `json:"action"`
+	Target  string    `json:"target"`
 }
+
+// Owner actions a message can authorize here.
+const (
+	ActionPublic     = "recall.public"     // target: item ID (D1 PUBLIC opt-out, local-UI relabel)
+	ActionPrefSet    = "preference.set"    // target: preference key
+	ActionPrefDelete = "preference.delete" // target: preference key
+)
 
 // OwnerAuth looks up a message the broker's owner channel authenticated.
 // It returns false for anything else: mail, agent output, unknown IDs.
@@ -154,8 +171,10 @@ type Deleted struct {
 var (
 	ErrNoSource     = errors.New("recall: item needs a source kind and ref")
 	ErrReservedKind = errors.New("recall: reserved source kind")
-	ErrDeleted      = errors.New("recall: source was deleted; refusing content seen before the deletion")
-	ErrNotOwner     = errors.New("recall: preferences are written only from an authenticated owner-channel message")
+	ErrDeleted      = errors.New("recall: source was deleted; refusing content received before the deletion")
+	ErrFuture       = errors.New("recall: receipt time is in the future")
+	ErrUsedMessage  = errors.New("recall: this owner message was already used")
+	ErrNotOwner     = errors.New("recall: needs an authenticated owner-channel message for this action and target")
 	ErrNoLabeler    = errors.New("recall: private results need a labeler to raise the caller (REV-5)")
 	ErrUnknownPref  = errors.New("recall: no such preference")
 )
@@ -181,6 +200,7 @@ type Index struct {
 	pub      *textIndex // public items only: public-only searches rank here
 	prefs    map[string]Preference
 	tombs    map[string]time.Time // deleted ID -> deletion time
+	used     map[string]bool      // owner message IDs already acted on
 	onDelete []func(Deleted) error
 	lines    int // records in the store
 	skipped  int
@@ -240,6 +260,7 @@ func Open(store Store, opts ...Option) (*Index, error) {
 		pub:   newTextIndex(),
 		prefs: map[string]Preference{},
 		tombs: map[string]time.Time{},
+		used:  map[string]bool{},
 	}
 	for _, o := range opts {
 		o(ix)
@@ -325,8 +346,15 @@ func (ix *Index) IngestKeyed(id string, it Item) (string, error) {
 	}
 	it.ID = id
 	it.Label = EffectiveLabel(it.Source.Kind, it.Label)
+	now := ix.now()
+	if it.Received.IsZero() {
+		it.Received = now
+	}
+	if it.Received.After(now) {
+		return "", ErrFuture
+	}
 	if it.Source.Seen.IsZero() {
-		it.Source.Seen = ix.now()
+		it.Source.Seen = it.Received
 	}
 	it.Source.Ref = ix.scrub.Scrub(it.Source.Ref)
 	it.Text = ix.scrub.Scrub(it.Text)
@@ -345,14 +373,10 @@ func (ix *Index) IngestKeyed(id string, it Item) (string, error) {
 
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
-	// Content seen before a deletion of this source never comes back (a
-	// stale delivery racing the deletion).
-	// A source clock ahead of the broker's cannot outrun a tombstone.
-	seen := it.Source.Seen
-	if now := ix.now(); seen.After(now) {
-		seen = now
-	}
-	if t, ok := ix.tombs[id]; ok && !seen.After(t) {
+	// Content the broker received before a deletion of this source never
+	// comes back (a stale delivery racing the deletion). Receipt time is the
+	// broker's own, so a source cannot date its way past a tombstone.
+	if t, ok := ix.tombs[id]; ok && !it.Received.After(t) {
 		return "", ErrDeleted
 	}
 	// A label never falls on re-ingest; only Relabel lowers one. An owner
@@ -578,21 +602,23 @@ func (ix *Index) Delete(ids ...string) (DeleteReport, error) {
 // ErrNotRelabelable means the item's kind or parents cannot be public.
 var ErrNotRelabelable = errors.New("recall: this item cannot be public")
 
-// Relabel changes an item's label. Raising to private is always allowed.
-// Lowering to public is the only path that lowers a label (REV-5): it needs
-// an authenticated owner-channel message (the D1 PUBLIC opt-out, or a
-// relabel on the local UI), which is recorded on the item as LabelBy, and
-// it is refused for kinds that can never be public and for items with a
-// private or unknown parent. The broker submits it as a journaled
-// broker-state intent (OP-5) before calling this.
+// Relabel changes an item's label. Raising to private is always allowed and
+// needs no message. Lowering to public is the only path that lowers a label
+// (REV-5): it needs an authenticated owner-channel message whose action is
+// ActionPublic and whose target is this item (the D1 PUBLIC opt-out for that
+// task, or a relabel of that item on the local UI). Each message is used at
+// most once, so it cannot be replayed after the owner raises the item again.
+// The message is recorded on the item as LabelBy. Lowering is refused for
+// kinds that can never be public and for items with a private or unknown
+// parent. The broker journals it as a broker-state intent (OP-5; a wiring
+// condition) before calling this.
 func (ix *Index) Relabel(messageID, id string, l Label) error {
-	var by string
+	var msg OwnerMessage
 	if l == Public {
-		msg, err := ix.ownerMessage(messageID)
-		if err != nil {
+		var err error
+		if msg, err = ix.ownerMessage(messageID, ActionPublic, id); err != nil {
 			return err
 		}
-		by = msg.ID
 	} else {
 		l = Private
 	}
@@ -603,6 +629,9 @@ func (ix *Index) Relabel(messageID, id string, l Label) error {
 		return fmt.Errorf("recall: no item %s", id)
 	}
 	if l == Public {
+		if ix.used[msg.ID] {
+			return ErrUsedMessage
+		}
 		if !publicKinds[cur.Source.Kind] {
 			return ErrNotRelabelable
 		}
@@ -611,7 +640,12 @@ func (ix *Index) Relabel(messageID, id string, l Label) error {
 				return ErrNotRelabelable
 			}
 		}
+		if err := ix.append(record{Op: "used", ID: msg.ID}); err != nil {
+			return err
+		}
+		ix.used[msg.ID] = true
 	}
+	by := msg.ID
 	up := *cur
 	up.Label, up.LabelBy = l, by
 	if err := ix.append(record{Op: "put", Item: &up}); err != nil {
@@ -647,21 +681,26 @@ func (ix *Index) Relabel(messageID, id string, l Label) error {
 // SetPreference stores or replaces an owner preference. messageID must name
 // a message the owner channel authenticated; it becomes the provenance.
 func (ix *Index) SetPreference(messageID, key, value string) error {
-	msg, err := ix.ownerMessage(messageID)
-	if err != nil {
-		return err
-	}
 	key = strings.TrimSpace(key)
 	if key == "" {
 		return errors.New("recall: preference key is empty")
 	}
+	msg, err := ix.ownerMessage(messageID, ActionPrefSet, key)
+	if err != nil {
+		return err
+	}
 	p := Preference{Key: key, Value: ix.scrub.Scrub(value), Provenance: msg}
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
+	if ix.used[msg.ID] {
+		return ErrUsedMessage
+	}
 	old, had := ix.prefs[key]
 	ix.prefs[key] = p
+	ix.used[msg.ID] = true
 	// Rewrite so an edited value leaves no earlier copy in the store.
 	if err := ix.compact(); err != nil {
+		delete(ix.used, msg.ID)
 		if had {
 			ix.prefs[key] = old
 		} else {
@@ -675,32 +714,69 @@ func (ix *Index) SetPreference(messageID, key, value string) error {
 // DeletePreference removes an owner preference, on an authenticated owner
 // message.
 func (ix *Index) DeletePreference(messageID, key string) error {
-	if _, err := ix.ownerMessage(messageID); err != nil {
+	msg, err := ix.ownerMessage(messageID, ActionPrefDelete, key)
+	if err != nil {
 		return err
 	}
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
+	if ix.used[msg.ID] {
+		return ErrUsedMessage
+	}
 	old, ok := ix.prefs[key]
 	if !ok {
 		return ErrUnknownPref
 	}
 	delete(ix.prefs, key)
+	ix.used[msg.ID] = true
 	if err := ix.compact(); err != nil {
+		delete(ix.used, msg.ID)
 		ix.prefs[key] = old
 		return err
 	}
 	return nil
 }
 
-func (ix *Index) ownerMessage(id string) (OwnerMessage, error) {
+// ownerMessage checks that id is an authenticated owner message asking for
+// exactly this action on exactly this target. Single use is checked by the
+// caller under the lock.
+func (ix *Index) ownerMessage(id, action, target string) (OwnerMessage, error) {
 	if ix.owner == nil || id == "" {
 		return OwnerMessage{}, ErrNotOwner
 	}
 	msg, ok := ix.owner(id)
-	if !ok || msg.ID != id {
+	if !ok || msg.ID != id || msg.Action != action || msg.Target != target {
 		return OwnerMessage{}, ErrNotOwner
 	}
 	return msg, nil
+}
+
+// PruneTombstones drops tombstones older than maxAge and returns how many.
+// A tombstone only has to outlive deliveries already in flight when the
+// deletion happened (the bus gives up after its tries, within minutes) and
+// the hooks' replay after a crash; the broker prunes with a margin of days
+// (default policy: 30 days).
+func (ix *Index) PruneTombstones(maxAge time.Duration) (int, error) {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	cut := ix.now().Add(-maxAge)
+	old := map[string]time.Time{}
+	for id, t := range ix.tombs {
+		if t.Before(cut) {
+			old[id] = t
+			delete(ix.tombs, id)
+		}
+	}
+	if len(old) == 0 {
+		return 0, nil
+	}
+	if err := ix.compact(); err != nil {
+		for id, t := range old {
+			ix.tombs[id] = t
+		}
+		return 0, err
+	}
+	return len(old), nil
 }
 
 // Preferences returns all preferences, sorted by key (broker side).
@@ -946,13 +1022,17 @@ func (ix *Index) apply(r record) {
 		if r.ID != "" {
 			ix.tombs[r.ID] = r.At
 		}
+	case "used":
+		if r.ID != "" {
+			ix.used[r.ID] = true
+		}
 	}
 }
 
 // maybeCompact rewrites the store once replaced items make up more than
 // half of it, so an overwritten version does not linger indefinitely.
 func (ix *Index) maybeCompact() error {
-	live := len(ix.items) + len(ix.prefs) + len(ix.tombs) + 1
+	live := len(ix.items) + len(ix.prefs) + len(ix.tombs) + len(ix.used) + 1
 	if ix.lines > 64 && ix.lines > 2*live {
 		return ix.compact()
 	}
@@ -1008,6 +1088,16 @@ func (ix *Index) compact() error {
 	sort.Strings(tids)
 	for _, id := range tids {
 		if err := put(record{Op: "tomb", ID: id, At: ix.tombs[id]}); err != nil {
+			return err
+		}
+	}
+	uids := make([]string, 0, len(ix.used))
+	for id := range ix.used {
+		uids = append(uids, id)
+	}
+	sort.Strings(uids)
+	for _, id := range uids {
+		if err := put(record{Op: "used", ID: id}); err != nil {
 			return err
 		}
 	}

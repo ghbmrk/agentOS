@@ -36,16 +36,20 @@ type Event struct {
 	// ID and Source are keyed identities computed from the raw ref and
 	// version before scrubbing (recall.Keyer). Source equals the recall
 	// item ID for the same source, so deletions match.
-	ID      string       `json:"id"`
-	Source  string       `json:"src"`
-	Kind    Kind         `json:"kind"`
-	Account string       `json:"account,omitempty"`
-	Ref     string       `json:"ref"` // scrubbed, for display
-	Version string       `json:"version,omitempty"`
-	At      time.Time    `json:"at"`
-	Label   recall.Label `json:"label"`
-	Summary string       `json:"summary,omitempty"`
-	Body    string       `json:"body,omitempty"`
+	ID      string    `json:"id"`
+	Source  string    `json:"src"`
+	Kind    Kind      `json:"kind"`
+	Account string    `json:"account,omitempty"`
+	Ref     string    `json:"ref"` // scrubbed, for display
+	Version string    `json:"version,omitempty"`
+	At      time.Time `json:"at"` // the source's time, for display
+	// Received is when the bus accepted the event, on the broker's clock.
+	// Publish sets it, whatever the caller passed; recall decides staleness
+	// against deletions by it.
+	Received time.Time    `json:"received"`
+	Label    recall.Label `json:"label"`
+	Summary  string       `json:"summary,omitempty"`
+	Body     string       `json:"body,omitempty"`
 }
 
 // Delivery is one event handed to one trigger. Key is stable across
@@ -290,8 +294,9 @@ func (b *Bus) Publish(e Event) (string, bool, error) {
 	e.Source = b.keyer.SourceID(string(e.Kind), e.Account, e.Ref)
 	e.ID = b.keyer.ID("evt", string(e.Kind), e.Account, e.Ref, e.Version)
 	e.Label = recall.EffectiveLabel(string(e.Kind), e.Label)
+	e.Received = b.now()
 	if e.At.IsZero() {
-		e.At = b.now()
+		e.At = e.Received
 	}
 	e.Ref = b.scrub.Scrub(e.Ref)
 	e.Version = b.scrub.Scrub(e.Version)
@@ -393,14 +398,15 @@ func (b *Bus) Tick(now time.Time) error {
 		}
 		dueText := due.UTC().Format(time.RFC3339Nano)
 		e := Event{
-			ID:      b.keyer.ID("evt", string(Timer), "", n, dueText),
-			Source:  src,
-			Kind:    Timer,
-			Ref:     b.scrub.Scrub(n),
-			Version: dueText,
-			At:      due,
-			Label:   recall.EffectiveLabel(string(Timer), s.Label),
-			Summary: b.scrub.Scrub(s.Summary),
+			ID:       b.keyer.ID("evt", string(Timer), "", n, dueText),
+			Source:   src,
+			Kind:     Timer,
+			Ref:      b.scrub.Scrub(n),
+			Version:  dueText,
+			At:       due,
+			Received: b.now(),
+			Label:    recall.EffectiveLabel(string(Timer), s.Label),
+			Summary:  b.scrub.Scrub(s.Summary),
 		}
 		if _, _, err := b.publishLocked(e); err != nil {
 			return err
@@ -713,9 +719,10 @@ func IndexInto(ix *recall.Index) Trigger {
 				text += e.Body
 			}
 			_, err := ix.IngestKeyed(e.Source, recall.Item{
-				Source: recall.Source{Kind: string(e.Kind), Account: e.Account, Ref: e.Ref, Seen: e.At},
-				Label:  e.Label,
-				Text:   text,
+				Source:   recall.Source{Kind: string(e.Kind), Account: e.Account, Ref: e.Ref, Seen: e.At},
+				Label:    e.Label,
+				Text:     text,
+				Received: e.Received,
 			})
 			if errors.Is(err, recall.ErrDeleted) {
 				return nil // deleted meanwhile: nothing to index
