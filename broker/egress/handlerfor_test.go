@@ -43,3 +43,38 @@ func TestHandlerForTakesLabelAndAuditPerRequest(t *testing.T) {
 		t.Fatalf("nil auditor: %d, provider saw %d", c, r.provider.count())
 	}
 }
+
+// REQ: LOOP-5
+
+// A replay machine's calls use the agent machine's adapter grants but are
+// admitted against the replay machine's own limits, so a burst of
+// evaluation never holds the live agent's slots or spends its cap (L3 R1
+// on #62).
+func TestLOOP5ReplayCallsCountAgainstTheReplayMachine(t *testing.T) {
+	r := newRig(t, nil)
+	p, err := New(Config{
+		Adapters: []Adapter{OpenAI("openai-key")}, Grants: map[string][]string{"agent": {"openai"}},
+		Vault: r.vault, Audit: r.audit, Transport: r.transport, Cap: Cap{Requests: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	do := func(h http.Handler) int {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, chat("/openai/v1/chat/completions"))
+		return w.Code
+	}
+	eval := p.HandlerWithGrantsOf("eval-0a1b", "agent", "private", r.audit)
+	if c := do(eval); c != 200 {
+		t.Fatalf("replay call under the agent's grants: %d", c)
+	}
+	if c := do(eval); c != http.StatusTooManyRequests {
+		t.Fatalf("replay machine over its own cap: %d", c)
+	}
+	if c := do(p.HandlerFor("agent", "private", r.audit)); c != 200 {
+		t.Fatalf("live agent after a replay burst: %d", c)
+	}
+	if c := do(p.HandlerWithGrantsOf("eval-0a1b", "nobody", "private", r.audit)); c != http.StatusForbidden {
+		t.Fatalf("grants of an ungranted machine: %d", c)
+	}
+}

@@ -44,6 +44,13 @@ func openModel(t *testing.T, rt *route.Router, provider http.HandlerFunc) (http.
 // returns the socket's path.
 func openModelSocket(t *testing.T, rt *route.Router, provider http.HandlerFunc) string {
 	t.Helper()
+	return serveModel(t, rt, nil, provider)
+}
+
+// serveModel is openModelSocket with replay machines' evaluation route ev.
+// The machine "agent" is granted OpenAI.
+func serveModel(t *testing.T, rt *route.Router, ev *evalRoute, provider http.HandlerFunc) string {
+	t.Helper()
 	prov := httptest.NewTLSServer(provider)
 	t.Cleanup(prov.Close)
 	tr := prov.Client().Transport.(*http.Transport).Clone()
@@ -66,7 +73,7 @@ func openModelSocket(t *testing.T, rt *route.Router, provider http.HandlerFunc) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := newServer(modelHandler(r.c, rt))
+	srv := newServer(modelHandler(r.c, rt, ev))
 	go srv.Serve(ln)
 	t.Cleanup(func() { srv.Close() })
 	return sock
@@ -137,7 +144,7 @@ func TestDefaultPrivateOKRefusesNonPublicLabels(t *testing.T) {
 		req.Header.Set(modelroute.HeaderMachine, "agent")
 		req.Header.Set(modelroute.HeaderLabel, label)
 		// Labels as the broker would send them on the socket.
-		modelHandler(r.c, rt).ServeHTTP(w, req)
+		modelHandler(r.c, rt, nil).ServeHTTP(w, req)
 		if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "no_route") {
 			t.Fatalf("label %q: %d %s", label, w.Code, w.Body)
 		}

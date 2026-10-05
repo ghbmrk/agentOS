@@ -49,7 +49,7 @@ func TestLocalPageClientAgainstVaultProcess(t *testing.T) {
 	}
 	defer c.lock()
 	run := filepath.Join(dir, "run")
-	srvs, err := serve(run, c, testRouter(t), os.Getuid(), os.Getuid())
+	srvs, err := serve(run, c, testRouter(t), nil, os.Getuid(), os.Getuid())
 	if err != nil {
 		t.Fatal(err)
 	}
