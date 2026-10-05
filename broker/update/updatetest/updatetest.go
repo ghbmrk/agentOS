@@ -17,8 +17,8 @@ import (
 
 // Release publishes release version with the given image files (paths
 // under host-image/ or guest-image/) in a 2-of-2 repository and returns
-// the box's check of it. A security release also gets one independent
-// passing attestation, so its Security() holds (UPD-8, D6).
+// the box's check of it. A security release also gets one passing
+// attestation from the box's allow-listed attestor, so its Security() holds (UPD-8, D6).
 func Release(t testing.TB, version int64, security bool, images map[string][]byte) *update.Verified {
 	t.Helper()
 	d := t.TempDir()
@@ -66,7 +66,8 @@ func Release(t testing.TB, version int64, security bool, images map[string][]byt
 	must(err)
 	st, err := update.InitStore(filepath.Join(d, "box"), root, 0)
 	must(err)
-	res, err := st.Check(update.DirSource(repo.Dir), update.Options{})
+	ap, ak := key() // the box's allow-listed attestor (D6)
+	res, err := st.Check(update.DirSource(repo.Dir), update.Options{Attestors: []ed25519.PublicKey{ap}})
 	must(err)
 	if res.Release == nil {
 		t.Fatal("updatetest: no release")
@@ -74,7 +75,6 @@ func Release(t testing.TB, version int64, security bool, images map[string][]byt
 	if !security {
 		return res.Release
 	}
-	_, ak := key()
 	att, err := update.Attest(ak, res.Release, update.Statement{Result: update.ResultPass, Channel: update.ChannelFast, HardwareClass: "test"})
 	must(err)
 	return res.Release.WithAttestations([][]byte{att}, nil)

@@ -77,10 +77,11 @@ func TestSecurityFixWaitsForOneIndependentAttestation(t *testing.T) {
 	s["sig"] = "AAAA" + s["sig"].(string)[4:]
 	tampered, _ = json.Marshal(env)
 	notCounted := [][]byte{
-		pass(t, own, v),           // this box itself
-		pass(t, f.tgt[2], v),      // a maintainer key
-		pass(t, f.ts, v),          // the online timestamp key
-		pass(t, newKey(t), other), // another release's bytes
+		pass(t, own, v),          // this box itself
+		pass(t, f.tgt[2], v),     // a maintainer key
+		pass(t, f.ts, v),         // the online timestamp key
+		pass(t, f.att[1], other), // another release's bytes
+		pass(t, newKey(t), v),    // a key not on the allow-list
 		stable, failed, tampered, []byte("{}"), []byte("not json"),
 	}
 	if err := v.SecurityAutoStage(notCounted, own.Public().(ed25519.PublicKey)); !errors.Is(err, ErrNeedsAttestation) {
@@ -89,7 +90,7 @@ func TestSecurityFixWaitsForOneIndependentAttestation(t *testing.T) {
 	if n := v.IndependentPasses(notCounted, own.Public().(ed25519.PublicKey)); n != 0 {
 		t.Fatalf("counted %d", n)
 	}
-	ok := pass(t, newKey(t), v)
+	ok := pass(t, f.att[0], v)
 	if err := v.SecurityAutoStage(append(notCounted, ok, ok), own.Public().(ed25519.PublicKey)); err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +113,7 @@ func TestOnlySecurityFixesUseTheAttestationRule(t *testing.T) {
 // version, signed image digests, and Security only for a security fix
 // with an independent attestation, never from the manifest flag alone.
 func TestCheckedReleaseFeedsThePipeline(t *testing.T) {
-	_, v := securityFix(t)
+	sf, v := securityFix(t)
 	if !v.OK() || v.Version() != "2" || v.Security() {
 		t.Fatalf("unattested: ok=%v version=%q security=%v", v.OK(), v.Version(), v.Security())
 	}
@@ -128,7 +129,7 @@ func TestCheckedReleaseFeedsThePipeline(t *testing.T) {
 	if v.WithAttestations(nil, nil).Security() {
 		t.Fatal("security fix with no attestation marked security")
 	}
-	att := v.WithAttestations([][]byte{pass(t, newKey(t), v)}, nil)
+	att := v.WithAttestations([][]byte{pass(t, sf.att[0], v)}, nil)
 	if !att.Security() || v.Security() {
 		t.Fatal("attested security fix not marked security, or the original changed")
 	}
@@ -136,7 +137,7 @@ func TestCheckedReleaseFeedsThePipeline(t *testing.T) {
 	f.release(2, nil)
 	f.publish(0, 1)
 	res, _ := f.check(Options{})
-	if res.Release.WithAttestations([][]byte{pass(t, newKey(t), res.Release)}, nil).Security() {
+	if res.Release.WithAttestations([][]byte{pass(t, f.att[0], res.Release)}, nil).Security() {
 		t.Fatal("an attested non-security release marked security")
 	}
 }
@@ -150,13 +151,13 @@ func TestMaintainerOperatedAttestorNeverIndependent(t *testing.T) {
 	f.must(f.repo.SetMaintainerAttestors([]ed25519.PublicKey{ci.Public().(ed25519.PublicKey)}))
 	f.release(2, func(r *Manifest) { r.Security = true })
 	f.publish(0, 1)
-	res, err := f.check(Options{})
+	res, err := f.check(Options{Attestors: f.attestors(ci)}) // even if allow-listed
 	if err != nil || res.Release == nil {
 		t.Fatal(res.Release, err)
 	}
 	v := res.Release
 	listed := pass(t, ci, v)
-	marked, err := Attest(newKey(t), v, Statement{Result: ResultPass, Channel: ChannelFast, Operator: OperatorMaintainer})
+	marked, err := Attest(f.att[1], v, Statement{Result: ResultPass, Channel: ChannelFast, Operator: OperatorMaintainer})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +174,7 @@ func TestMaintainerOperatedAttestorNeverIndependent(t *testing.T) {
 	if _, err := Attest(newKey(t), v, Statement{Result: ResultPass, Channel: ChannelFast, Operator: "ci"}); err == nil {
 		t.Fatal("unknown operator label")
 	}
-	ind := pass(t, newKey(t), v)
+	ind := pass(t, f.att[0], v)
 	if v.IndependentPasses(append(atts, ind), nil) != 1 || v.MaintainerPasses(append(atts, ind), nil) != 2 {
 		t.Fatal("independent attestor miscounted")
 	}
@@ -192,7 +193,7 @@ func TestRotatedOutKeyStillNotIndependent(t *testing.T) {
 	f.must(f.repo.Sign("root", f.root[1]))
 	f.release(2, func(r *Manifest) { r.Security = true })
 	f.publish(0, 1)
-	res, err := f.check(Options{})
+	res, err := f.check(Options{Attestors: f.attestors(old)}) // even if allow-listed
 	if err != nil || res.Release == nil || res.RootRotatedTo != 2 {
 		t.Fatalf("%+v %v", res, err)
 	}
@@ -216,8 +217,8 @@ func envelopeOf(k ed25519.PrivateKey, body string) []byte {
 // Attestations decode strictly: a signed statement with a duplicate or
 // case-variant key is refused, not resolved last-wins (#34's guarantee).
 func TestStrictAttestations(t *testing.T) {
-	_, v := securityFix(t)
-	k := newKey(t)
+	f, v := securityFix(t)
+	k := f.att[0]
 	m := mustV(v.ManifestFile())
 	pub := base64.StdEncoding.EncodeToString(k.Public().(ed25519.PublicKey))
 	head := `{"release":"` + m.Path + `","manifest_sha256":"` + m.SHA256 + `","channel":"fast","hardware_class":"x","attestor":"` + pub + `"`
@@ -253,5 +254,40 @@ func TestStrictAttestations(t *testing.T) {
 		if _, _, err := ParseAttestation([]byte(env)); err == nil {
 			t.Fatalf("accepted envelope %s", env)
 		}
+	}
+}
+
+// D6 as corrected: only allow-listed attestors count, so a key a
+// compromised signing quorum mints counts for nothing, and an empty list
+// sends every security fix to the owner.
+func TestOnlyAllowListedAttestorsCount(t *testing.T) {
+	f := newFixture(t)
+	f.release(2, func(r *Manifest) { r.Security = true })
+	f.publish(0, 1)
+	minted := newKey(t)
+	for _, c := range []struct {
+		name  string
+		allow []ed25519.PublicKey
+		want  int
+	}{
+		{"empty list", []ed25519.PublicKey{}, 0},
+		{"other keys listed", f.attestors(), 0},
+		{"minted key listed", f.attestors(minted), 1},
+		{"root key listed", []ed25519.PublicKey{f.root[0].Public().(ed25519.PublicKey)}, 0},
+	} {
+		res, err := f.check(Options{Attestors: c.allow})
+		if err != nil || res.Release == nil {
+			t.Fatal(c.name, err)
+		}
+		atts := [][]byte{pass(t, minted, res.Release), pass(t, f.root[0], res.Release)}
+		if n := res.Release.IndependentPasses(atts, nil); n != c.want {
+			t.Fatalf("%s: counted %d, want %d", c.name, n, c.want)
+		}
+		if got := res.Release.WithAttestations(atts, nil).Security(); got != (c.want == 1) {
+			t.Fatalf("%s: Security() = %v", c.name, got)
+		}
+	}
+	if _, err := f.check(Options{Attestors: []ed25519.PublicKey{ed25519.PublicKey("short")}}); err == nil {
+		t.Fatal("malformed allow-list key accepted")
 	}
 }
