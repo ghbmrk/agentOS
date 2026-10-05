@@ -2,6 +2,7 @@ package meter
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -132,7 +133,7 @@ func TestOP8CutOffStreamIsChargedItsContent(t *testing.T) {
 // request context, and the meter settles from it even when the guest's
 // response carries none. Cached input is weighted by provider.
 func TestOP8ServerReportedUsageSettlesTheCall(t *testing.T) {
-	if Report(t.Context(), Usage{Reported: true}) {
+	if Report(context.Background(), Usage{Reported: true}) {
 		t.Fatal("Report outside a metered call claimed to deliver")
 	}
 	body := `{"messages":[]}`
