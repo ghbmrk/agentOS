@@ -130,11 +130,17 @@ func (b *Builder) closeSocket(id string) {
 		return
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.srv != nil {
-		s.srv.Close()
-		os.RemoveAll(s.dir)
-		s.srv = nil
+	srv, dir := s.srv, s.dir
+	s.srv = nil
+	s.mu.Unlock()
+	if srv != nil {
+		// Let requests in flight finish (a handler may need s.mu), briefly.
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		if srv.Shutdown(ctx) != nil {
+			srv.Close()
+		}
+		cancel()
+		os.RemoveAll(dir)
 	}
 }
 
@@ -239,9 +245,9 @@ func (s *session) result(w http.ResponseWriter, r *http.Request) {
 	}, res.Files)
 	s.mu.Lock()
 	s.storing = false
-	if err == nil && !s.finished {
+	stored := err == nil && !s.finished
+	if stored {
 		s.finished, s.artifact = true, a.m.ID
-		close(s.done)
 	}
 	s.mu.Unlock()
 	if err != nil {
@@ -251,6 +257,13 @@ func (s *session) result(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"artifact": a.m.ID})
+	if stored {
+		// Answer first: ending the job destroys the machine and its socket.
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		close(s.done)
+	}
 }
 
 // artifactID is the one artifact a job can produce.
