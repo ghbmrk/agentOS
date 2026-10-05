@@ -55,6 +55,7 @@ type fakeHooks struct {
 	setUp     bool
 	finishes  int
 	onSave    func() // runs inside SaveCodeSeed, for races
+	finishErr error  // returned by Finish after the owner channel exists
 }
 
 func (f *fakeHooks) Progress() Progress { f.mu.Lock(); defer f.mu.Unlock(); return f.progress }
@@ -129,7 +130,7 @@ func (f *fakeHooks) Finish(n string) error {
 	f.finished = n
 	f.finishes++
 	f.setUp = true
-	return nil
+	return f.finishErr
 }
 
 type fakeEngine struct {
@@ -928,6 +929,39 @@ func TestFailedDoneSaveKeepsSetupClosed(t *testing.T) {
 	})
 	if r.srv.setup.st.Owner != ownerNum || r.hooks.finishes != 1 {
 		t.Fatalf("setup restarted or Finish re-run (%d)", r.hooks.finishes)
+	}
+}
+
+// A Finish that fails after the owner channel exists still closes setup,
+// and no setup step changes the state once setup is done, even one that
+// passed the handler's check first (fourth re-review on #32).
+func TestSetupClosesAfterLateFinishErrorAndStaysClosed(t *testing.T) {
+	r := newRig(t)
+	r.hooks.finishErr = errors.New("owner channel started, then a later step failed")
+	r.runSetup()
+	if !r.srv.setup.done() {
+		t.Fatal("setup open after Finish failed late")
+	}
+	req := httptest.NewRequest("POST", "/setup/restart", strings.NewReader("secret="+url.QueryEscape(r.card.SetupSecret)))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if err := r.srv.setup.restart(req, "other"); err == nil || r.srv.setup.st.Owner != ownerNum {
+		t.Fatalf("restart after done: %v", err)
+	}
+	r.srv.setup.mu.Lock()
+	err := r.srv.setup.save(func(s *SetupState) { s.Codes = false })
+	r.srv.setup.mu.Unlock()
+	if err != errSetupDone || !r.srv.setup.st.Codes {
+		t.Fatalf("step changed setup after done: %v", err)
+	}
+
+	// A restart while Finish runs is refused.
+	r = newRig(t)
+	r.runSetupToAI()
+	r.srv.setup.mu.Lock()
+	r.srv.setup.finishing = true
+	r.srv.setup.mu.Unlock()
+	if err := r.srv.setup.restart(req, "other"); err == nil || r.srv.setup.st.Owner != ownerNum {
+		t.Fatalf("restart during Finish: %v", err)
 	}
 }
 

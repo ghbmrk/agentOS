@@ -75,10 +75,14 @@ type Hooks interface {
 	// (CAP-9), as the owner answered at connection.
 	SetPrivateOK(id string, ok bool) error
 	// AlreadySetUp reports that setup finished before: Finish completed
-	// and the owner channel exists. An enrolled code seed alone does not
-	// count, since setup can stop or start over after enrollment. It is
-	// asked at start whenever setup is not done, so a lost state file or a
-	// failed save after Finish never reopens setup.
+	// and the owner channel exists. It must read a durable marker that
+	// Finish writes (such as the owner channel's own state), and return
+	// true when in doubt (an unreadable marker), since a false true only
+	// keeps setup closed while a false false reopens it on an owned box.
+	// An enrolled code seed alone does not count, since setup can stop or
+	// start over after enrollment. It is asked at start whenever setup is
+	// not done, and after a failed Finish, so neither a lost state file
+	// nor a failed save after Finish reopens setup.
 	AlreadySetUp() bool
 	// Finish is called once, when setup completes, with the owner's
 	// number. The caller starts the owner channel, attaches it with
@@ -274,7 +278,16 @@ func (u *setup) mayLocked(key string) bool {
 	return u.st.Owner == "" || (u.st.Device != "" && key == u.st.Device)
 }
 
+// errSetupDone refuses a step that raced setup closing.
+var errSetupDone = errors.New("Setup is already done.")
+
+// save applies f to the setup state and persists it. Once setup is done
+// nothing changes it, so a step that passed the handler's done check and
+// then raced Finish (or a restart racing it) is refused here, under u.mu.
 func (u *setup) save(f func(*SetupState)) error {
+	if u.st.Done {
+		return errSetupDone
+	}
 	next := u.st
 	f(&next)
 	if err := u.s.cfg.Store.Save(next); err != nil {
@@ -716,8 +729,14 @@ func (u *setup) restart(r *http.Request, key string) error {
 	now := u.s.cfg.Now()
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	if u.st.Done {
+		return errSetupDone
+	}
 	if u.st.Owner == "" {
 		return nil
+	}
+	if u.finishing {
+		return errors.New("Setup is finishing. Reload the page.")
 	}
 	if key != u.st.Device {
 		u.resets = recentTimes(u.resets, now, time.Hour)
@@ -918,12 +937,14 @@ func (u *setup) maybeFinish() {
 	if !connected {
 		return
 	}
-	if err := u.s.cfg.Hooks.Finish(who); err != nil {
+	if err := u.s.cfg.Hooks.Finish(who); err != nil && !u.s.cfg.Hooks.AlreadySetUp() {
 		u.mu.Lock()
 		u.err[u.st.Device] = "Could not finish setup. Try again."
 		u.mu.Unlock()
 		return
 	}
+	// Finish succeeded, or failed after the owner channel came to exist:
+	// either way setup is over.
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	if err := u.save(func(s *SetupState) { s.Done = true }); err != nil {

@@ -29,8 +29,10 @@ const SignInAlertEvery = time.Hour
 // State.LocalAlertAt), so neither a restart nor a failed send loses one.
 type localAlerts struct {
 	// sending is set while a sign-in text is out, so two callers never
-	// send the same sign-ins.
+	// send the same sign-ins; evicted counts sign-ins the maxSignIns cap
+	// pushed out meanwhile, so the send drops exactly what it listed.
 	sending bool
+	evicted int
 	// wrong lists wrong local codes for the digest; alerted is the
 	// bound window whose first wrong code was already texted.
 	wrong   []time.Time
@@ -43,29 +45,29 @@ const maxLocalNotes = 200
 // first, and the text still says how many there were.
 const maxSignIns = 64
 
-// signInTextLocked returns the text listing untold sign-ins and the newest
-// time it lists, or "" while the last such text is less than SignInAlertEvery old
+// signInTextLocked returns the text listing untold sign-ins and how many
+// it lists, or "" while the last such text is less than SignInAlertEvery old
 // or another is being sent. The caller passes both to sendSignIns.
-func (c *Channel) signInTextLocked(now time.Time) (string, time.Time) {
+func (c *Channel) signInTextLocked(now time.Time) (string, int) {
 	st := c.codes.st
 	if c.local.sending || len(st.LocalSignIns) == 0 ||
 		(!st.LocalAlertAt.IsZero() && now.Sub(st.LocalAlertAt) < SignInAlertEvery) {
-		return "", time.Time{}
+		return "", 0
 	}
-	c.local.sending = true
-	last := st.LocalSignIns[len(st.LocalSignIns)-1]
+	c.local.sending, c.local.evicted = true, 0
+	n := len(st.LocalSignIns)
 	times := c.clockList(st.LocalSignIns, 8)
-	if len(st.LocalSignIns) > 1 {
-		return "Phones signed in on the box's Wi-Fi at " + times + ". Not you? Text STOP.", last
+	if n > 1 {
+		return "Phones signed in on the box's Wi-Fi at " + times + ". Not you? Text STOP.", n
 	}
-	return "A phone signed in on the box's Wi-Fi at " + times + ". Not you? Text STOP.", last
+	return "A phone signed in on the box's Wi-Fi at " + times + ". Not you? Text STOP.", n
 }
 
 // sendSignIns texts a sign-in alert from signInTextLocked and, only once it
-// is sent, drops the sign-ins it listed: those up to last, so one recorded
-// during the send (even past maxSignIns) stays for the next text. A failed send keeps them for the
+// is sent, drops the n sign-ins it listed, less any the cap pushed out
+// meanwhile, so one recorded during the send stays for the next text. A failed send keeps them for the
 // next Tick. Called without c.mu.
-func (c *Channel) sendSignIns(text string, last, now time.Time) {
+func (c *Channel) sendSignIns(text string, n int, now time.Time) {
 	err := c.alert(text)
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -76,9 +78,9 @@ func (c *Channel) sendSignIns(text string, last, now time.Time) {
 	// If this save fails the sign-ins are texted again: a repeat beats a
 	// lost alert.
 	_ = c.codes.commit(func(s *State) {
-		i := 0
-		for i < len(s.LocalSignIns) && !s.LocalSignIns[i].After(last) {
-			i++
+		i := n - c.local.evicted
+		if i < 0 {
+			i = 0
 		}
 		s.LocalSignIns = append([]time.Time(nil), s.LocalSignIns[i:]...)
 		s.LocalAlertAt = now
@@ -111,10 +113,10 @@ func (c *Channel) wrongLocalLocked(now time.Time) []string {
 func (c *Channel) FlushLocal() {
 	now := c.cfg.Now()
 	c.mu.Lock()
-	t, last := c.signInTextLocked(now)
+	t, n := c.signInTextLocked(now)
 	c.mu.Unlock()
 	if t != "" {
-		c.sendSignIns(t, last, now)
+		c.sendSignIns(t, n, now)
 	}
 }
 
@@ -204,8 +206,7 @@ func (c *Channel) LocalSignIn(code string) (until time.Time, err error) {
 	}
 	res, locked, err := c.codes.checkStrong(code, now, strongOpts{unlock: c.cfg.UnlockFor, count: true})
 	var alerts []string
-	var signIn string
-	var signInLast time.Time
+	signIn, signIns := "", 0
 	if locked {
 		alerts = append(alerts, fmt.Sprintf("%d wrong codes, the last on the box's Wi-Fi. Texted codes are off and the session is locked until you send a code-generator code.", WrongToLock))
 	}
@@ -223,16 +224,19 @@ func (c *Channel) LocalSignIn(code string) (until time.Time, err error) {
 		// Every local sign-in is told to the owner, since it lifts locks
 		// and challenge mode without the owner's phone (L1), coalesced to
 		// one text an hour under CH-15 (arbitrator).
+		evicted := 0
 		if c.codes.commit(func(s *State) {
 			s.LocalSignIns = append(s.LocalSignIns, now)
 			if k := len(s.LocalSignIns) - maxSignIns; k > 0 {
 				s.LocalSignIns = append([]time.Time(nil), s.LocalSignIns[k:]...)
+				evicted = k
 			}
 		}) != nil {
 			// Not recorded, so not coalesced either: tell now.
 			alerts = append(alerts, "A phone signed in on the box's Wi-Fi at "+c.clock(now)+". Not you? Text STOP.")
 		}
-		signIn, signInLast = c.signInTextLocked(now)
+		c.local.evicted += evicted
+		signIn, signIns = c.signInTextLocked(now)
 	case err == nil:
 		alerts = append(alerts, c.wrongLocalLocked(now)...)
 	}
@@ -241,7 +245,7 @@ func (c *Channel) LocalSignIn(code string) (until time.Time, err error) {
 		c.alert(a)
 	}
 	if signIn != "" {
-		c.sendSignIns(signIn, signInLast, now)
+		c.sendSignIns(signIn, signIns, now)
 	}
 	switch {
 	case err != nil:
