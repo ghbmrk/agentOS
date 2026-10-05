@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -742,5 +743,89 @@ func TestSecureBootChangeIsNamed(t *testing.T) {
 	r.start(t, r.tpm)
 	if r.noted("Secure Boot") || !r.noted("tampered") {
 		t.Fatalf("mixed change notes: %q", r.notes)
+	}
+}
+
+// A lockout authorization the TPM has proved stale (say, other software
+// re-keyed it) is dropped rather than retried at every start, which would
+// re-arm the TPM's day-long lockout each time.
+func TestStaleLockoutEntryIsDropped(t *testing.T) {
+	r := newPCRig(t)
+	r.unknownHostUnlock(t)
+	if _, err := r.c.trust(r.code(), "246810"); err != nil {
+		t.Fatal(err)
+	}
+	sec, _ := r.c.v.Secret(r.lockoutEntry())
+	if err := tpmseal.ReleaseLockout(r.tpm.TPM(), []byte(sec.Reveal())); err != nil {
+		t.Fatal(err)
+	}
+	other, _ := tpmseal.NewLockoutAuth()
+	if err := tpmseal.TakeLockout(r.tpm.TPM(), other, false); err != nil {
+		t.Fatal(err)
+	}
+	r.notes = nil
+	if _, err := r.c.trust(r.code(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if r.lockoutEntry() != "" {
+		t.Fatal("stale lockout authorization kept for retries")
+	}
+	if !r.noted("Another system on this PC now controls the TPM") {
+		t.Fatalf("owner not told: %q", r.notes)
+	}
+}
+
+// The CLI's "Keep this PC trusted" prompt: an empty answer keeps the PC
+// trusted only after the box's own update; after a Secure Boot or an
+// unexplained change the owner must type y.
+func TestUnlockCLIKeepTrustedDefault(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		boot    func(r *pcRig)
+		prompt  string
+		kept    bool
+		release string
+	}{
+		{"update", func(r *pcRig) { bootPC(r.tpm, "initrd-B", "usrhash=bbbb quiet") }, "[Y/n]", true, "2026.11.1"},
+		{"secure boot", func(r *pcRig) { bootSB(r.tpm, "sb-db-2027", "initrd-A", "usrhash=aaaa quiet") }, "[y/N]", false, ""},
+		{"unexplained", func(r *pcRig) { bootPC(r.tpm, "initrd-A", "usrhash=aaaa init=/bin/sh") }, "[y/N]", false, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newPCRig(t)
+			r.unknownHostUnlock(t)
+			if _, err := r.c.trust(r.code(), ""); err != nil {
+				t.Fatal(err)
+			}
+			if tc.release != "" {
+				r.release = tc.release
+			}
+			tc.boot(r)
+			r.start(t, r.tpm)
+			run := filepath.Join(r.dir, "run")
+			os.Mkdir(run, 0o700)
+			ln, err := net.Listen("unix", filepath.Join(run, UnlockSocket))
+			if err != nil {
+				t.Fatal(err)
+			}
+			srv := &http.Server{Handler: unlockHandler(r.c)}
+			go srv.Serve(ln)
+			defer srv.Close()
+			r.clk.add(MinAttemptGap)
+			in := strings.NewReader("\n" + goodPass + "\n" + totp(r.seed, r.clk.now().Add(30*time.Second)) + "\n")
+			r.clk.add(30 * time.Second)
+			var out bytes.Buffer
+			if err := unlockCmd([]string{"-run", run}, in, &out); err != nil {
+				t.Fatalf("unlock: %v\n%s", err, out.String())
+			}
+			if !strings.Contains(out.String(), "Keep this PC trusted? "+tc.prompt) {
+				t.Fatalf("prompt: %s", out.String())
+			}
+			// Kept means the next restart on this boot path is unattended.
+			tc.boot(r)
+			r.start(t, r.tpm)
+			if got := r.phase() == open; got != tc.kept {
+				t.Fatalf("kept %v, want %v", got, tc.kept)
+			}
+		})
 	}
 }

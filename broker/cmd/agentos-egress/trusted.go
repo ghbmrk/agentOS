@@ -412,13 +412,18 @@ func (h *tpmHost) enroll(v *vault.Vault, pin string) (_ string, err error) {
 	if err != nil {
 		return "", err
 	}
+	tookNew := false
 	if pin != "" {
+		had := hasKind(v, lockoutAuthName(id), vault.KindTPMLockoutAuth)
 		if err := takeLockout(v, t, id); err != nil {
 			return "", err
 		}
+		tookNew = !had
 	}
 	defer func() {
-		if pin == "" && err == nil {
+		// PIN off gives the lockout back; so does a PIN slot that was
+		// never saved, when this call took the lockout.
+		if (pin == "" && err == nil) || (tookNew && err != nil) {
 			h.giveBack(v, t, id)
 		}
 	}()
@@ -552,11 +557,17 @@ func (h *tpmHost) giveBack(v *vault.Vault, t transport.TPM, id []byte) {
 	auth := []byte(s.Reveal())
 	err := tpmseal.ReleaseLockout(t, auth)
 	clear(auth)
-	if err != nil {
+	switch {
+	case errors.Is(err, tpmseal.ErrLockoutOwned):
+		// Proved stale: retrying would only re-arm the TPM's lockout.
+		h.say("Another system on this PC now controls the TPM's lockout, so the box has forgotten its own copy.")
+	case err != nil:
 		h.say("couldn't give the TPM's lockout back to this PC yet; the box will try again at each restart")
 		return
 	}
-	v.Delete(name)
+	if err := v.Delete(name); err != nil {
+		h.say("couldn't remove the box's copy of the TPM lockout from the vault: " + err.Error())
+	}
 }
 
 func (h *tpmHost) say(s string) {

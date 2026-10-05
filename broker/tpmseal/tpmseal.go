@@ -721,7 +721,10 @@ func TakeLockout(t transport.TPM, auth []byte, held bool) error {
 		// re-keyed, fails here (and the TPM then refuses lockout
 		// authorizations for LockoutRecoverySec).
 		if err := change(auth); err != nil {
-			return fmt.Errorf("%w: %w", ErrLockoutOwned, err)
+			if wrongAuth(err) {
+				return fmt.Errorf("%w: %w", ErrLockoutOwned, err)
+			}
+			return fmt.Errorf("tpmseal: lockout authorization: %w", err)
 		}
 		return nil
 	}
@@ -764,10 +767,17 @@ func daParameters(t transport.TPM) error {
 	return nil
 }
 
+// wrongAuth reports whether the TPM refused an authorization value as
+// wrong, as opposed to refusing all of them for now (lockout).
+func wrongAuth(err error) bool {
+	return errors.Is(err, tpm2.TPMRCAuthFail) || errors.Is(err, tpm2.TPMRCBadAuth)
+}
+
 // ReleaseLockout gives the lockout hierarchy back: it changes the lockout
 // authorization from auth, the box's, to empty, as it was before a PIN
 // slot took it (the PIN turned off, or the PC no longer trusted). It does
-// nothing when the authorization is already empty.
+// nothing when the authorization is already empty, and answers
+// ErrLockoutOwned when the TPM holds a value other than auth.
 func ReleaseLockout(t transport.TPM, auth []byte) error {
 	set, err := lockoutAuthSet(t)
 	if err != nil || !set {
@@ -790,7 +800,12 @@ func ReleaseLockout(t transport.TPM, auth []byte) error {
 		},
 	}.Execute
 	_, cerr := first(t)
-	if set, err := lockoutAuthSet(t); err != nil || set {
+	set, err = lockoutAuthSet(t)
+	if err == nil && set && wrongAuth(cerr) {
+		// The TPM holds another value: the box's copy is stale.
+		return fmt.Errorf("%w: %w", ErrLockoutOwned, cerr)
+	}
+	if err != nil || set {
 		return fmt.Errorf("tpmseal: release lockout authorization: %w", errors.Join(cerr, err))
 	}
 	return nil

@@ -455,10 +455,11 @@ func unlockCmd(args []string, in io.Reader, out io.Writer) error {
 		} else {
 			fmt.Fprintln(out, "This PC started the box in a way it hasn't before. If you didn't change anything, the drive may have been tampered with. Unlock only if you're sure.")
 		}
-		// Ticked when the change has an innocent explanation; for an
-		// unexplained one the owner opts in (the hints are editable on
-		// the drive, so a tampered boot must not persist by default).
-		explained := st["updated"] == true || st["secure_boot"] == true
+		// Ticked only after the box's own update; otherwise the owner
+		// opts in. The hints are editable on the drive (a modified
+		// initrd can make only PCR 7 look changed), so a tampered boot
+		// path must not become trusted by default.
+		explained := st["updated"] == true && st["secure_boot"] != true
 		if explained {
 			fmt.Fprint(out, "Keep this PC trusted? [Y/n] ")
 		} else {
