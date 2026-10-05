@@ -101,6 +101,11 @@ type Config struct {
 	LastTalk func() time.Time
 	// Quiet is how long after LastTalk the box waits. Default 10 minutes.
 	Quiet time.Duration
+	// TalkBound is the longest a security fix waits on talk, from when it
+	// became due; after it only a call, accepted work or excluded hours
+	// hold it, so an agent or a spoofed sender that keeps talking cannot
+	// hold a fix for ever (security ruling on UX-133-4). Default 2 hours.
+	TalkBound time.Duration
 	// Jitter is the most an ordinary release waits, at random, before its
 	// quiet moment (UPD-5). Security fixes do not wait. Default 6 hours.
 	Jitter time.Duration
@@ -127,6 +132,9 @@ type point struct {
 	ToUsr    string `json:"to_usr"`
 	Adoption string `json:"adoption"`
 	BootID   string `json:"boot_id"`
+	// TalkUntil: after it, talk no longer holds the restart (zero: no
+	// bound).
+	TalkUntil time.Time `json:"talk_until,omitzero"`
 	// Installed: the activator took the release. Unset, a later boot is
 	// not a fallback: nothing was handed over.
 	Installed bool `json:"installed"`
@@ -181,6 +189,9 @@ func New(cfg Config) (*Applier, error) {
 	}
 	if cfg.Quiet <= 0 {
 		cfg.Quiet = 10 * time.Minute
+	}
+	if cfg.TalkBound <= 0 {
+		cfg.TalkBound = 2 * time.Hour
 	}
 	if cfg.Jitter <= 0 {
 		cfg.Jitter = 6 * time.Hour
@@ -249,7 +260,18 @@ func (a *Applier) Schedule(v *update.Verified, adoption string) error {
 }
 
 // busy reports why the box is not free now, or "".
-func (a *Applier) busy(now time.Time) string {
+// talkUntil is when talk stops holding a pending release: a security fix
+// TalkBound after it became due; an ordinary release never (zero).
+func (a *Applier) talkUntil(p *pending) time.Time {
+	if p == nil || !p.Security {
+		return time.Time{}
+	}
+	return p.NotBefore.Add(a.cfg.TalkBound)
+}
+
+// busy reports why the box is not free now, or "". Talk holds only until
+// talkUntil, when that is set.
+func (a *Applier) busy(now, talkUntil time.Time) string {
 	switch {
 	case a.cfg.InCall():
 		return busyCall
@@ -257,7 +279,7 @@ func (a *Applier) busy(now time.Time) string {
 		return busyWork
 	case a.cfg.Excluded(now):
 		return busyExcluded
-	case now.Sub(a.cfg.LastTalk()) < a.cfg.Quiet:
+	case now.Sub(a.cfg.LastTalk()) < a.cfg.Quiet && (talkUntil.IsZero() || now.Before(talkUntil)):
 		return busyTalk
 	}
 	return ""
@@ -297,8 +319,9 @@ func (a *Applier) Tick(ctx context.Context) (ok bool, err error) {
 		a.mu.Unlock()
 		return false, nil
 	}
+	until := a.talkUntil(p)
 	a.mu.Unlock()
-	if a.busy(now) != "" {
+	if a.busy(now, until) != "" {
 		return false, nil
 	}
 	id := a.nextID(p.Version)
@@ -336,7 +359,7 @@ func (a *Applier) restartIfHandedOver(ctx context.Context) (bool, error) {
 	if err != nil || b.ID != pt.BootID {
 		return false, err // a new boot is Resume's to judge
 	}
-	if a.busy(a.cfg.Now()) != "" {
+	if a.busy(a.cfg.Now(), pt.TalkUntil) != "" {
 		return false, nil
 	}
 	return true, a.cfg.Activator.Restart(ctx)
@@ -398,11 +421,12 @@ func (a *Applier) Check(_ context.Context, _ journal.Phase, in journal.Intent) e
 	}
 	a.mu.Lock()
 	p, held, applying := a.st.Pending, a.rel != nil, a.st.Applying != nil
+	until := a.talkUntil(p)
 	a.mu.Unlock()
 	if p == nil || !held || p.Version != v || applying {
 		return errors.New("apply: no release is waiting for this activation")
 	}
-	if why := a.busy(a.cfg.Now()); why != "" {
+	if why := a.busy(a.cfg.Now(), until); why != "" {
 		return errors.New("apply: " + why)
 	}
 	return nil
@@ -430,6 +454,7 @@ func (a *Applier) Execute(ctx context.Context, in journal.Intent, _ int) journal
 	}
 	pt, err := a.pointLocked(ctx, in.ID, rel, p.Adoption)
 	if err == nil {
+		pt.TalkUntil = a.talkUntil(p)
 		a.st.Applying = pt
 		if err = a.saveLocked(); err != nil {
 			a.st.Applying = nil
@@ -564,7 +589,7 @@ func (a *Applier) Status() string {
 	case a.st.Pending != nil && a.rel != nil:
 		why := ""
 		if now := a.cfg.Now(); !now.Before(a.st.Pending.NotBefore) {
-			why = a.busy(now)
+			why = a.busy(now, a.talkUntil(a.st.Pending))
 		}
 		return fmt.Sprintf(waitLines[why], a.st.Pending.Version)
 	case a.st.Last == nil || a.st.Last.Kind == doneInstalled:

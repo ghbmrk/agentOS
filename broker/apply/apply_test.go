@@ -406,3 +406,32 @@ func TestBrokerStoppedBeforeTheRestartRestartsLater(t *testing.T) {
 		t.Fatalf("installed %+v", in)
 	}
 }
+
+// Security ruling on UX-133-4: talk holds a security fix for at most 2
+// hours from when it became due, so an agent replying every 5 minutes
+// cannot hold it for ever. An ordinary release has no such bound.
+func TestTalkHoldsASecurityFixForAtMostTwoHours(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	r.must(r.a.Schedule(r.release(1, true), "a1"))
+	for i := 0; i < 23; i++ { // 23 x 5 minutes: under 2 hours
+		r.talk = r.clk.now()
+		r.clk.add(5 * time.Minute)
+		if ok, _ := r.a.Tick(ctx); ok {
+			t.Fatalf("applied at %d minutes during talk", (i+1)*5)
+		}
+	}
+	r.talk = r.clk.now()
+	r.clk.add(5 * time.Minute) // 2 hours since it became due
+	if ok, err := r.a.Tick(ctx); !ok || err != nil {
+		t.Fatalf("held past 2 hours by talk: %v", err)
+	}
+	// A call still holds it.
+	r2 := newRig(t)
+	r2.must(r2.a.Schedule(r2.release(1, true), "a1"))
+	r2.clk.add(3 * time.Hour)
+	r2.inCall = true
+	if ok, _ := r2.a.Tick(ctx); ok {
+		t.Fatal("applied during a call after the talk bound")
+	}
+}
