@@ -782,6 +782,8 @@ func TestPremiumRateNumbersDialedWithoutThePlusAreRefused(t *testing.T) {
 		{"+34912345678", []string{"806123456", "34806123456", "0034806123456", "905123456"}, []string{"612345678", "912345678"}},
 		{"+447700900300", []string{"09098790123", "9098790123", "00449098790123", "0870123456"}, []string{"07700900123", "02079460123", "00919876543210", "00971501234567"}},
 		{"+61212345678", []string{"0011449098790123", "1900123456"}, []string{"0412345678"}},
+		// A whole-country-code entry has no national reading (L3 nit).
+		{"+870773100000", []string{"870773112345"}, []string{"447700900123", "5550200001"}},
 	} {
 		for _, d := range c.dialed {
 			if !PremiumDialed(d, c.own) {

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 	"unicode"
 
@@ -337,11 +338,17 @@ func (s signStore) Allow(ch sipsign.Challenge) error {
 		return err
 	}
 	to := sipsign.Recipient(ch.URI, rec.NoPlus)
-	if rec.NoPlus && sipsign.Recipient(ch.URI, false) == "" && to != "" {
-		// Dialed without the +: the provider may read it as a national
-		// or international-prefix number, so the owner's and the line's
-		// numbers, and premium-rate ranges, are checked in those forms
-		// too (security F1 on #164).
+	if rec.NoPlus && to != "" {
+		// The provider may read the digits, with or without a +, as a
+		// national or international-prefix number, so the owner's and
+		// the line's numbers, and premium-rate ranges, are checked in
+		// those forms too (security F1, L3 SHOULD-A on #164). A user-part
+		// parameter other than user=phone, such as phone-context, could
+		// move the number to another country, so it is refused (L3
+		// MUST-A).
+		if !plainUser(ch.URI) {
+			return sipsign.ErrRecipient
+		}
 		for _, n := range append(c.lineNumbers(), c.owner) {
 			if smsapi.SameNumber(to[1:], n) {
 				return sipsign.ErrRecipient
@@ -358,6 +365,20 @@ func (s signStore) Allow(ch sipsign.Challenge) error {
 		return sipsign.ErrLimited
 	}
 	return sipsign.ErrRecipient
+}
+
+// plainUser says the user part of a sip: or sips: URI carries no
+// parameter other than user=phone.
+func plainUser(uri string) bool {
+	_, rest, _ := strings.Cut(uri, ":")
+	user, _, _ := strings.Cut(rest, "@")
+	params := strings.Split(user, ";")[1:]
+	for _, p := range params {
+		if !strings.EqualFold(p, "user=phone") {
+			return false
+		}
+	}
+	return true
 }
 
 // serveSMS opens sms.sock in dir for the modem bridge's uid.
