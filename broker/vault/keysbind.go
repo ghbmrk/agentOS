@@ -97,8 +97,10 @@ func (v *Vault) replaceKeys(kf *keyFile) error {
 	}
 	v.nextKeys = raw
 	if err := v.save(); err != nil {
+		// The staged file stays: save can fail after the vault file
+		// landed (a failed directory sync), and then the drive needs it.
+		// A leftover copy is inert (stagedKeys, dropStaleStaged).
 		v.nextKeys = nil
-		os.Remove(v.keysPath + nextSuffix)
 		return err
 	}
 	if err := crashPoint(crashKeysSealed); err != nil {
@@ -133,7 +135,9 @@ func (v *Vault) finishKeys() error {
 
 // dropStaleStaged removes a staged next keys file left beside the keys
 // file once no slot change is under way. It opens nothing (stagedKeys),
-// so this is housekeeping and a failure is ignored. Caller does not
+// so this is housekeeping and a failure is ignored. It assumes one open
+// Vault per keys path, as the vault process keeps: a second Vault mid
+// change on the same path would lose its staged file. Caller does not
 // hold mu.
 func (v *Vault) dropStaleStaged() {
 	v.mu.Lock()

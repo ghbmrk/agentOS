@@ -395,3 +395,31 @@ func TestStaleStagedKeysFileRemovedOnOpen(t *testing.T) {
 		t.Fatalf("stale staged file kept: %v", err)
 	}
 }
+
+// L3 F1 on #63: save can fail after the vault file landed (the directory
+// sync failed). The staged file must survive that failure, or the drive
+// holds the sealed change, the file before, and nothing the new
+// passphrase opens.
+func TestRekeySaveFailsAfterRenameKeepsStagedFile(t *testing.T) {
+	v, vp, kp := openWithPassphrase(t)
+	afterRename = func(path string) error {
+		if path == vp {
+			return errors.New("dir sync failed")
+		}
+		return nil
+	}
+	t.Cleanup(func() { afterRename = func(string) error { return nil } })
+	if err := v.Rekey(Passphrase(testPass), Passphrase(newPass)); err == nil {
+		t.Fatal("no failure")
+	}
+	afterRename = func(string) error { return nil }
+	v.Close()
+	if _, err := os.Stat(kp + nextSuffix); err != nil {
+		t.Fatalf("staged file removed: %v", err)
+	}
+	w, err := OpenSealed(vp, kp, Passphrase(newPass))
+	if err != nil {
+		t.Fatalf("new passphrase: %v", err)
+	}
+	w.Close()
+}

@@ -305,6 +305,10 @@ func (v *Vault) write(anchors []Anchor) error {
 	return writeAtomic(v.path, raw)
 }
 
+// afterRename lets tests fail writeAtomic after the new file is in place,
+// as a failed directory sync would.
+var afterRename = func(path string) error { return nil }
+
 // writeAtomic replaces path with raw, mode 0600: a crash leaves either the
 // old file or the new one.
 func writeAtomic(path string, raw []byte) error {
@@ -330,6 +334,9 @@ func writeAtomic(path string, raw []byte) error {
 		return err
 	}
 	if err := os.Rename(tmp.Name(), path); err != nil {
+		return err
+	}
+	if err := afterRename(path); err != nil {
 		return err
 	}
 	d, err := os.Open(dir)
