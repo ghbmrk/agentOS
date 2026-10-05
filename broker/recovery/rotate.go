@@ -157,8 +157,13 @@ type Pending struct {
 func (p *Pending) Card() Card { return p.next }
 
 // ErrLostCardParts is a lost-card rotation that keeps a factor the lost
-// card carries.
-var ErrLostCardParts = errors.New("recovery: without the current card, the passphrase and recovery key are both replaced")
+// card carries, or the grid, whose seed an earlier copy of the drive holds.
+var ErrLostCardParts = errors.New("recovery: without the current card, the passphrase, recovery key and grid are all replaced")
+
+// ErrNeedPassphrase is a recovery-key rotation, with the card in hand, on
+// a drive with a passphrase slot but no passphrase given: re-encryption
+// rewraps that slot, so it must be proved too.
+var ErrNeedPassphrase = errors.New("recovery: replacing the recovery key also needs the vault passphrase from the card")
 
 // ErrPendingLapsed is a rotation that expired, was used, or was answered
 // wrong three times. Nothing changed; start again.
@@ -228,9 +233,16 @@ func BeginRotate(b *Box, parts []Part, auth Auth, proof Proof, gen Generator, r 
 		return nil, errors.New("recovery: replacing the passphrase or recovery key needs the current one from the card")
 	}
 	// No current card: the lost card may be in other hands, so both
-	// factors it carries are replaced.
-	if proof.lost() && !(set[PartPassphrase] && set[PartRecovery]) {
+	// factors it carries are replaced, and the grid, which an earlier copy
+	// of the drive holds the seed of, as it does the code-generator seed
+	// that Commit replaces (R10a).
+	if proof.lost() && !(set[PartPassphrase] && set[PartRecovery] && set[PartGrid]) {
 		return nil, ErrLostCardParts
+	}
+	// A new recovery key re-encrypts, which rewraps the passphrase slot
+	// too: it needs the passphrase, typed or replaced here.
+	if set[PartRecovery] && !set[PartPassphrase] && len(proof.Passphrase) == 0 && hasSlot(b, vault.SlotPassphrase) {
+		return nil, ErrNeedPassphrase
 	}
 	cur, err := b.LoadCard()
 	if err != nil {
@@ -283,6 +295,21 @@ func BeginRotate(b *Box, parts []Part, auth Auth, proof Proof, gen Generator, r 
 	return p, nil
 }
 
+// hasSlot reports whether the drive has a slot of kind; an unreadable
+// keys file counts as having one, so the check fails closed.
+func hasSlot(b *Box, kind string) bool {
+	slots, err := vault.ReadSlots(b.KeysPath)
+	if err != nil {
+		return true
+	}
+	for _, s := range slots {
+		if s.Kind == kind {
+			return true
+		}
+	}
+	return false
+}
+
 // GridCheck is a four-symbol code the card prints under a grid (P2-2), so
 // a grid-only rotation can be confirmed from the saved card.
 func GridCheck(seed []byte) string {
@@ -313,19 +340,28 @@ func normalizeTyped(s string) string {
 // ErrCardNotStored. Rotation protects only against copies made
 // afterwards: a drive copy or backup taken earlier still opens with the
 // old passphrase or recovery key (CRED-8).
-func (p *Pending) Commit(b *Box, typed string, now time.Time) (Card, error) {
+//
+// A new recovery key or a lost card re-encrypts (R10a; egress V7): once
+// the slots are replaced, the vault moves to a fresh data key with every
+// slot rewrapped (Box.Reencrypt) and gets a new backup MAC key, so the
+// old factors with an earlier copy open nothing written afterwards. A
+// lost card also replaces the code-generator seed, which an earlier copy
+// holds; the page shows Done.Enrollment, and the caller ends the owner
+// channel's session. A passphrase change with the card in hand does not
+// re-encrypt (arbitrator ruling on #45).
+func (p *Pending) Commit(b *Box, typed string, now time.Time) (Done, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.done || p.wrong >= 3 || now.After(p.expires) {
 		p.lapse()
-		return Card{}, ErrPendingLapsed
+		return Done{}, ErrPendingLapsed
 	}
 	if !hmac.Equal([]byte(normalizeTyped(typed)), []byte(normalizeTyped(p.answer))) {
 		p.wrong++
 		if p.wrong >= 3 {
 			p.lapse()
 		}
-		return Card{}, ErrConfirm
+		return Done{}, ErrConfirm
 	}
 	p.done = true
 	defer p.lapse()
@@ -333,17 +369,18 @@ func (p *Pending) Commit(b *Box, typed string, now time.Time) (Card, error) {
 	defer b.mu.Unlock()
 	cur, err := b.LoadCard()
 	if err != nil {
-		return Card{}, err
+		return Done{}, err
 	}
 	in := Card{WiFiName: cur.WiFiName}
 	wrote := false
-	fail := func(err error) (Card, error) {
+	fail := func(err error) (Done, error) {
 		if wrote {
-			return in, errors.Join(ErrCardNotStored, err)
+			return Done{Card: in}, errors.Join(ErrCardNotStored, err)
 		}
-		return Card{}, err
+		return Done{}, err
 	}
 	proof := p.proof
+	lost := proof.lost()
 	var slots []Part
 	for _, q := range []Part{PartPassphrase, PartRecovery} {
 		if p.parts[q] {
@@ -356,7 +393,7 @@ func (p *Pending) Commit(b *Box, typed string, now time.Time) (Card, error) {
 		// between the writes is not silent: Backup refuses meanwhile and
 		// the page asks to rotate again.
 		if err := markRotation(b, slots, now); err != nil {
-			return Card{}, err
+			return Done{}, err
 		}
 	}
 	if p.parts[PartPassphrase] {
@@ -370,6 +407,7 @@ func (p *Pending) Commit(b *Box, typed string, now time.Time) (Card, error) {
 			defer wipe(proof.Passphrase)
 		}
 	}
+	var done Done
 	if p.parts[PartRecovery] {
 		nk, err := ParseRecoveryKey(p.next.RecoveryKey)
 		if err != nil {
@@ -386,6 +424,21 @@ func (p *Pending) Commit(b *Box, typed string, now time.Time) (Card, error) {
 			return fail(err)
 		}
 		if err := keyChanged(b, now); err != nil {
+			return fail(err)
+		}
+		// BeginRotate saw to it that the owner factors prove every
+		// passphrase and recovery slot: a lost card replaced both, and
+		// otherwise the passphrase was replaced, typed, or has no slot.
+		owner := []vault.Factor{Factor(nk)}
+		switch {
+		case p.parts[PartPassphrase]:
+			owner = append(owner, vault.Passphrase(p.next.VaultPassphrase))
+		case len(proof.Passphrase) > 0:
+			owner = append(owner, vault.Passphrase(string(proof.Passphrase)))
+		}
+		r, err := refresh(b, owner, lost, nil)
+		done.Refreshed = r
+		if err != nil {
 			return fail(err)
 		}
 	}
@@ -406,7 +459,75 @@ func (p *Pending) Commit(b *Box, typed string, now time.Time) (Card, error) {
 		return fail(err)
 	}
 	in.WiFiPassword, in.SetupSecret, in.SetupCode, in.GridSeed = p.next.WiFiPassword, p.next.SetupSecret, p.next.SetupCode, p.next.GridSeed
-	return in, nil
+	done.Card = in
+	return done, nil
+}
+
+// Done is a committed rotation: the new card (only the rotated parts) and
+// what a re-encrypting rotation also changed.
+type Done struct {
+	Card
+	Refreshed
+}
+
+// Refreshed is what a re-encryption changed besides the data key.
+type Refreshed struct {
+	// Enrollment is the new code-generator seed for the local page to
+	// show, when the seed was replaced.
+	Enrollment *Enrollment
+	// Retrust counts the trusted PCs the owner must trust again (CRED-9).
+	Retrust int
+}
+
+// refresh re-encrypts once the lost factors' slots are replaced, then
+// replaces the backup MAC key and, with seed, the code-generator seed:
+// values Reencrypt carries over and an earlier copy holds (egress V7).
+// owner must prove every passphrase and recovery slot. A failure part way
+// is safe to repeat: each step starts again from fresh values.
+func refresh(b *Box, owner []vault.Factor, seed bool, r io.Reader) (Refreshed, error) {
+	var out Refreshed
+	n, err := b.reencrypt(owner...)
+	out.Retrust = n
+	if err != nil {
+		return out, err
+	}
+	if err := rotateMACKey(b.V); err != nil {
+		return out, err
+	}
+	if seed {
+		e, err := newSeed(b, r)
+		if err != nil {
+			return out, err
+		}
+		out.Enrollment = &e
+	}
+	return out, nil
+}
+
+// Refresh re-encrypts after a trusted PC is removed (CRED-9; egress V7):
+// whoever holds that PC may hold its slot's key-encryption key, and so,
+// with an earlier copy of the drive, the data key, which would also open
+// later copies. It is part of the same tier-4 action as the removal, and
+// takes the card's recovery key and, when the drive has a passphrase
+// slot, its passphrase, since re-encryption rewraps both slots. It moves
+// the vault to a fresh data key and replaces the backup MAC key and the
+// code-generator seed; the page shows the enrollment, and the caller ends
+// the owner channel's session. The grid's seed is not replaced here: the
+// page offers a grid rotation (REC-4) alongside.
+func Refresh(b *Box, auth Auth, rk RecoveryKey, passphrase []byte, r io.Reader) (Refreshed, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if err := auth.check(b); err != nil {
+		return Refreshed{}, err
+	}
+	if !rk.Valid() {
+		return Refreshed{}, errors.New("recovery: re-encryption needs the recovery key from the card")
+	}
+	owner := []vault.Factor{Factor(rk)}
+	if len(passphrase) > 0 {
+		owner = append(owner, vault.Passphrase(string(passphrase)))
+	}
+	return refresh(b, owner, true, r)
 }
 
 // lapse wipes the typed passphrase this rotation held.
@@ -423,7 +544,9 @@ func (p *Pending) Lost() bool { return p.proof.lost() }
 func DoneNotes(parts []Part, lost bool) []string {
 	var out []string
 	if lost {
-		out = append(out, "Your lost card opens every backup made before today. Back up now, then delete them.")
+		out = append(out,
+			"Your lost card still opens backups and drive copies made before today, but nothing made from now on. Back up now, then delete the older backups.",
+			"Your code generator was reset. Scan the new code on this page; codes from the old one no longer work.")
 	}
 	for _, p := range parts {
 		switch p {

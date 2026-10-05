@@ -97,8 +97,10 @@ func parseKeys(raw []byte) (*keysFile, error) {
 	return &kf, nil
 }
 
-// recoverySlotID identifies the drive's recovery slot: a hash of its salt
-// and wrapped key, which change whenever the slot is rewritten.
+// recoverySlotID identifies the drive's recovery slot by a hash of its
+// salt: Rekey draws a new salt, while a re-encryption (vault.Reencrypt)
+// rewraps the slot under the same salt and key-encryption key, so the
+// backup key stays bound to it.
 func recoverySlotID(path string) ([]byte, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -111,9 +113,8 @@ func recoverySlotID(path string) ([]byte, error) {
 	for _, s := range kf.Slots {
 		if s.Kind == vault.SlotRecovery {
 			h := sha256.New()
-			for _, f := range [][]byte{s.Sealed, s.Nonce, s.Wrapped} {
-				h.Write(f)
-			}
+			h.Write([]byte("agentos-recovery-slot-id/v2\x00"))
+			h.Write(s.Sealed)
 			return h.Sum(nil), nil
 		}
 	}
