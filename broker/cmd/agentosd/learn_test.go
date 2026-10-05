@@ -125,4 +125,9 @@ func TestLearningOffIsSaid(t *testing.T) {
 	if cfg.HelpExtra != learningOffText {
 		t.Fatalf("HELP: %q", cfg.HelpExtra)
 	}
+	// One GSM-7 segment, no longer than the loops' own HELP line is allowed
+	// to be, so HELP stays within three (UX-49-1, UX-92-1).
+	if len(learningOffText) > 153 {
+		t.Fatalf("learning-off line is %d characters", len(learningOffText))
+	}
 }

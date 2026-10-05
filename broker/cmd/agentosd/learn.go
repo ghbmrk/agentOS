@@ -107,8 +107,9 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 }
 
 // learningOffText answers loop settings and ends HELP when the learning
-// plane could not start (L3 S3 on #90).
-const learningOffText = "Spare-time learning is not running on this box."
+// plane could not start (L3 S3 on #90). It names everything the loop texts
+// cover, and a restart retries opening the plane (UX-92-1).
+const learningOffText = "Spare-time work (learning, self-tests, update checks) is not running on this box. Restarting the box may fix it."
 
 // learningOff wires the owner's loop settings when the learning plane
 // could not start: they are answered by the box, locked or not, never sent
