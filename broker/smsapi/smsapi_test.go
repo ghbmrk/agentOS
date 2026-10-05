@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -86,7 +87,20 @@ func (p *provider) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.queries = append(p.queries, r.URL.RawQuery)
-	json.NewEncoder(w).Encode(map[string]any{"messages": p.inbox})
+	// Pages as the API serves them: Page and a PageToken after the
+	// first, and next_page_uri while more remain.
+	q := r.URL.Query()
+	n, _ := strconv.Atoi(q.Get("Page"))
+	if n > 0 && q.Get("PageToken") != "PT"+strconv.Itoa(n) {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	lo, hi := min(n*PageSize, len(p.inbox)), min((n+1)*PageSize, len(p.inbox))
+	page := map[string]any{"messages": p.inbox[lo:hi]}
+	if hi < len(p.inbox) {
+		page["next_page_uri"] = fmt.Sprintf("%s?To=x&PageSize=%d&Page=%d&PageToken=PT%d", r.URL.Path, PageSize, n+1, n+1)
+	}
+	json.NewEncoder(w).Encode(page)
 }
 
 func (p *provider) receive(sid, from, to, body string, at time.Time, dir string) {
@@ -457,5 +471,66 @@ func TestPollOutcomesAreReported(t *testing.T) {
 	defer mu.Unlock()
 	if len(heard) != 3 || heard[0] != nil || heard[1] != ErrRefused || heard[2] != ErrUnreachable {
 		t.Fatalf("heard %v", heard)
+	}
+}
+
+// Security F1 on #159: a burst of texts between polls is read page by
+// page on the fixed path, each delivered once, oldest first; a full page
+// of the longest texts fits the reply cap; past MaxPages the older texts
+// are passed over and the owner is told.
+func TestABurstOfTextsIsReadPageByPage(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	var missed int
+	r.svc.Missed = func() { missed++ }
+	t0 := r.at
+	for i := 0; i < 120; i++ {
+		r.p.receive(fmt.Sprintf("SM%03d", i), shopNum, lineNum, fmt.Sprintf("t%03d", i), t0.Add(time.Duration(i)*time.Second), "inbound")
+	}
+	got, err := r.cl.Poll(ctx)
+	if err != nil || len(got) != 120 {
+		t.Fatalf("burst: %d %v", len(got), err)
+	}
+	for i, in := range got {
+		if in.Text != fmt.Sprintf("t%03d", i) {
+			t.Fatalf("order at %d: %q", i, in.Text)
+		}
+	}
+	r.advance(MinPollGap)
+	if again, err := r.cl.Poll(ctx); err != nil || len(again) != 0 {
+		t.Fatalf("delivered twice: %d %v", len(again), err)
+	}
+	for _, q := range r.p.queries {
+		if strings.Contains(q, "elsewhere") || strings.Contains(q, "To=x") {
+			t.Fatalf("followed the provider's URI: %q", q)
+		}
+	}
+
+	// A full page of the longest texts, every byte escaped in the JSON
+	// ("<" is sent as \u003c), far past the old 64 KiB cap.
+	r = newRig(t)
+	long := strings.Repeat("<", MaxText)
+	for i := 0; i < PageSize; i++ {
+		r.p.receive(fmt.Sprintf("SL%03d", i), shopNum, lineNum, long, t0.Add(time.Duration(i)*time.Second), "inbound")
+	}
+	if got, err := r.cl.Poll(ctx); err != nil || len(got) != PageSize {
+		t.Fatalf("long page: %d %v", len(got), err)
+	}
+
+	// More than MaxPages pages: the newest are delivered, the mark moves
+	// past them, and the owner is told some may be missed.
+	r = newRig(t)
+	r.svc.Missed = func() { missed++ }
+	total := (MaxPages + 1) * PageSize
+	for i := 0; i < total; i++ {
+		r.p.receive(fmt.Sprintf("SB%04d", i), shopNum, lineNum, fmt.Sprintf("b%04d", i), t0.Add(time.Duration(i)*time.Second), "inbound")
+	}
+	got, err = r.cl.Poll(ctx)
+	if err != nil || len(got) != MaxPages*PageSize || missed != 1 || got[len(got)-1].Text != fmt.Sprintf("b%04d", total-1) {
+		t.Fatalf("past the bound: %d %v missed=%d", len(got), err, missed)
+	}
+	r.advance(MinPollGap)
+	if again, err := r.cl.Poll(ctx); err != nil || len(again) != 0 || missed != 1 {
+		t.Fatalf("after the bound: %d %v missed=%d", len(again), err, missed)
 	}
 }

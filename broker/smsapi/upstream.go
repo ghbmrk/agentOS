@@ -9,17 +9,24 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 )
 
 // MaxResponse bounds a provider's reply; a longer one is refused unread
-// (security on the #142 design read).
-const MaxResponse = 64 << 10
+// (security on the #142 design read). It holds a full page of the longest
+// texts, each escaped character by character, with the rest of each
+// message resource (security F1 on #159).
+const MaxResponse = 1 << 20
 
-// PageSize is how many messages one poll asks for.
+// PageSize is how many messages one page asks for.
 const PageSize = 50
+
+// MaxPages bounds the pages one poll reads; texts older than the last
+// page read are passed over, and the owner is told (security F1 on #159).
+const MaxPages = 10
 
 // NewHTTPClient is the vault process's client for the provider: TLS 1.2
 // or later against the system's roots (no RootCAs override), no proxy, no
@@ -104,25 +111,77 @@ type apiMessage struct {
 	DateCreated string `json:"date_created"`
 }
 
-// list fetches the newest page of messages to the line sent on or after
-// since's day (UTC).
-func (u upstream) list(ctx context.Context, since time.Time) ([]apiMessage, error) {
-	q := url.Values{"To": {u.s.Number}, "DateSent>": {since.UTC().Format("2006-01-02")}, "PageSize": {"50"}}
+// list fetches the messages to the line sent on or after since's day
+// (UTC), newest first, page by page on the fixed path until a page ends
+// before since, the provider has no more, or MaxPages are read. missed
+// says MaxPages ran out with more to read.
+//
+// The next page is asked for with the API's Page and PageToken query
+// parameters on the same path; the provider's next_page_uri is never
+// followed, only those two values taken from it and checked.
+func (u upstream) list(ctx context.Context, since time.Time) (msgs []apiMessage, missed bool, err error) {
+	base := url.Values{"To": {u.s.Number}, "DateSent>": {since.UTC().Format("2006-01-02")}, "PageSize": {strconv.Itoa(PageSize)}}
 	// "DateSent>" with a date is the API's on-or-after filter.
-	raw, err := u.do(ctx, http.MethodGet, q.Encode(), nil)
+	q := base
+	for n := 0; ; n++ {
+		raw, err := u.do(ctx, http.MethodGet, q.Encode(), nil)
+		if err != nil {
+			return nil, false, err
+		}
+		var page struct {
+			Messages []apiMessage `json:"messages"`
+			Next     string       `json:"next_page_uri"`
+		}
+		if json.Unmarshal(raw, &page) != nil {
+			return nil, false, ErrUnreachable
+		}
+		if len(page.Messages) > PageSize {
+			page.Messages = page.Messages[:PageSize]
+		}
+		msgs = append(msgs, page.Messages...)
+		token, ok := nextPage(page.Next, n+1)
+		if !ok || len(page.Messages) < PageSize || endsBefore(page.Messages, since) {
+			return msgs, false, nil
+		}
+		if n+1 == MaxPages {
+			return msgs, true, nil
+		}
+		q = url.Values{}
+		for k, v := range base {
+			q[k] = v
+		}
+		q.Set("Page", strconv.Itoa(n+1))
+		q.Set("PageToken", token)
+	}
+}
+
+// nextPage takes the page token from a provider's next_page_uri, which
+// must name page want; anything else ends the listing.
+func nextPage(uri string, want int) (string, bool) {
+	if uri == "" || len(uri) > 2048 {
+		return "", false
+	}
+	nu, err := url.Parse(uri)
 	if err != nil {
-		return nil, err
+		return "", false
 	}
-	var page struct {
-		Messages []apiMessage `json:"messages"`
+	v := nu.Query()
+	tok := v.Get("PageToken")
+	if v.Get("Page") != strconv.Itoa(want) || tok == "" || len(tok) > 128 || !printableASCII(tok) {
+		return "", false
 	}
-	if json.Unmarshal(raw, &page) != nil {
-		return nil, ErrUnreachable
+	return tok, true
+}
+
+// endsBefore says the page's oldest message was sent before since, so
+// later pages hold nothing new.
+func endsBefore(page []apiMessage, since time.Time) bool {
+	a := page[len(page)-1]
+	at, err := time.Parse(time.RFC1123Z, a.DateSent)
+	if a.DateSent == "" || err != nil {
+		at, err = time.Parse(time.RFC1123Z, a.DateCreated)
 	}
-	if len(page.Messages) > PageSize {
-		page.Messages = page.Messages[:PageSize]
-	}
-	return page.Messages, nil
+	return err == nil && at.Before(since)
 }
 
 // Mark is the poll's high-water mark: the newest delivered message's time
@@ -146,6 +205,7 @@ func fresh(msgs []apiMessage, m Mark, own string) ([]Inbound, Mark) {
 		seen[id] = true
 	}
 	var cs []cand
+	listed := map[string]bool{}
 	// The API lists newest first; walking it backwards keeps arrival
 	// order among texts stamped the same second.
 	for i := len(msgs) - 1; i >= 0; i-- {
@@ -158,9 +218,10 @@ func fresh(msgs []apiMessage, m Mark, own string) ([]Inbound, Mark) {
 			continue
 		}
 		at = at.UTC()
-		if at.Before(m.Since) || at.Equal(m.Since) && seen[a.SID] {
+		if at.Before(m.Since) || at.Equal(m.Since) && seen[a.SID] || listed[a.SID] {
 			continue
 		}
+		listed[a.SID] = true // a message on two pages is one message
 		c := cand{in: Inbound{ID: a.SID, At: at}}
 		from, named, okFrom := checkSender(a.From)
 		c.ok = okFrom && a.Direction == "inbound" && a.To == own && a.Body != "" &&

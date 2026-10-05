@@ -38,6 +38,9 @@ var (
 const (
 	noteSMSReplaced = "The second line's texting account was replaced on the box's Wi-Fi page."
 	noteSMSRemoved  = "The second line's texting account was removed on the box's Wi-Fi page."
+	// noteSMSMissed: a poll read smsapi.MaxPages with more to read, so
+	// older texts were passed over (security F1 on #159).
+	noteSMSMissed = "Some texts to your second line may have been missed."
 )
 
 func smsFieldErr(err error) error {
@@ -319,7 +322,8 @@ func serveSMS(dir string, c *custody, modemUID int) (*http.Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	srv := newServer(smsapi.Handler(&smsapi.Service{Store: smsStore{c}, HTTP: c.smsHTTP, Now: c.now, Polled: c.smsPolled}))
+	srv := newServer(smsapi.Handler(&smsapi.Service{Store: smsStore{c}, HTTP: c.smsHTTP, Now: c.now, Polled: c.smsPolled,
+		Missed: func() { c.notify(noteSMSMissed) }}))
 	srv.ReadTimeout = 10 * time.Second
 	go srv.Serve(ln)
 	return srv, nil

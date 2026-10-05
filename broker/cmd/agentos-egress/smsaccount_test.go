@@ -12,7 +12,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -383,5 +385,49 @@ func TestAgentosdLearnsWhenTextsStopArriving(t *testing.T) {
 	r.c.lock()
 	if _, err := v.SecondLineTexts(ctx); err != modelroute.ErrVaultLocked {
 		t.Fatalf("while locked: %v", err)
+	}
+}
+
+// endlessPages answers every listing with a full page of new texts and a
+// next page, so a poll reads smsapi.MaxPages and stops.
+type endlessPages struct{ at time.Time }
+
+func (e endlessPages) RoundTrip(r *http.Request) (*http.Response, error) {
+	n, _ := strconv.Atoi(r.URL.Query().Get("Page"))
+	var msgs []map[string]string
+	for i := 0; i < smsapi.PageSize; i++ {
+		msgs = append(msgs, map[string]string{"sid": fmt.Sprintf("SM%d-%d", n, i), "from": "+15550200001", "to": smsSettings.Number,
+			"body": "hi", "direction": "inbound", "date_sent": e.at.UTC().Format(time.RFC1123Z)})
+	}
+	b, _ := json.Marshal(map[string]any{"messages": msgs, "next_page_uri": fmt.Sprintf("/x?Page=%d&PageToken=PT%d", n+1, n+1)})
+	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(b)), Header: http.Header{}, Request: r}, nil
+}
+
+// Security F1 on #159: when a poll stops at its page bound with more to
+// read, the owner is told some texts may have been missed.
+func TestTheOwnerIsToldWhenTextsMayBeMissed(t *testing.T) {
+	r := openRig(t)
+	r.c.owner = ownerNumber
+	r.c.smsHTTP = &http.Client{Transport: endlessPages{r.clk.now().Add(time.Minute)}}
+	var mu sync.Mutex
+	var notes []string
+	r.c.notify = func(s string) { mu.Lock(); notes = append(notes, s); mu.Unlock() }
+	if err := r.c.setSMS(smsSettings, synthetic(t, "canary-sms-")); err != nil {
+		t.Fatal(err)
+	}
+	run := filepath.Join(t.TempDir(), "run")
+	sms, err := serveSMS(run, r.c, os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sms.Close() })
+	got, err := smsapi.NewClient(filepath.Join(run, SMSSocket)).Poll(context.Background())
+	if err != nil || len(got) != smsapi.MaxPages*smsapi.PageSize {
+		t.Fatalf("poll: %d %v", len(got), err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(notes) != 1 || notes[0] != noteSMSMissed {
+		t.Fatalf("owner told %q", notes)
 	}
 }

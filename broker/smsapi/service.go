@@ -41,6 +41,9 @@ type Service struct {
 	// ErrRefused, ErrLimited or ErrUnreachable. Polls that never reach
 	// the provider (locked, no account, too soon) are not reported.
 	Polled func(error)
+	// Missed, if set, is called when a poll read MaxPages with more to
+	// read, so older texts were passed over (security F1 on #159).
+	Missed func()
 
 	mu       sync.Mutex
 	lastPoll time.Time
@@ -106,7 +109,7 @@ func (s *Service) Poll(ctx context.Context) ([]Inbound, error) {
 	if err != nil {
 		return nil, ErrUnreachable
 	}
-	msgs, err := u.list(ctx, m.Since)
+	msgs, missed, err := u.list(ctx, m.Since)
 	if s.Polled != nil {
 		s.Polled(err)
 	}
@@ -116,6 +119,9 @@ func (s *Service) Poll(ctx context.Context) ([]Inbound, error) {
 	out, next := fresh(msgs, m, u.s.Number)
 	if err := s.Store.SetMark(next); err != nil {
 		return nil, ErrUnreachable // delivered nothing, so nothing twice
+	}
+	if missed && s.Missed != nil {
+		s.Missed()
 	}
 	return out, nil
 }
