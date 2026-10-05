@@ -72,6 +72,10 @@ type Config struct {
 	// confirmation. Empty: no attestor yet, so security fixes go to the
 	// owner (CH-3) and ordinary releases rest on their soak.
 	Attestors []ed25519.PublicKey
+	// InterimAttestors are the project's own test box keys pinned in the
+	// image (D6 interim, Mark 2026-10-05), passed to update as
+	// Options.InterimAttestors; update decides when they count.
+	InterimAttestors []ed25519.PublicKey
 	// AttestWait is how long a security fix waits for a listed attestor
 	// before it goes to the owner instead. Default 24 hours.
 	AttestWait time.Duration
@@ -315,7 +319,7 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 		return loops.Result{Err: err}
 	}
 	channel := l.cfg.Channel()
-	opts := update.Options{Channel: channel, Now: l.cfg.Now, Attestors: l.cfg.Attestors}
+	opts := update.Options{Channel: channel, Now: l.cfg.Now, Attestors: l.cfg.Attestors, InterimAttestors: l.cfg.InterimAttestors}
 	if channel == ChannelPinned {
 		// Checked as stable, for security notices only (UPD-4).
 		opts.Channel = update.ChannelStable

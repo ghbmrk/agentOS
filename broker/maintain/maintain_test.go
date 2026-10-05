@@ -693,7 +693,7 @@ func TestDigestSaysWhoTestedAnAutoStagedSecurityFix(t *testing.T) {
 	// fix was tested by the project, not an independent tester, for as
 	// long as it waits to install.
 	for name, c := range map[string]struct {
-		maintainer bool
+		interim bool
 		want       string
 	}{
 		"interim":     {true, "Security update 2 is ready and installs at the next quiet time. It was tested by the AgentOS project's own test box, not an independent tester."},
@@ -701,8 +701,9 @@ func TestDigestSaysWhoTestedAnAutoStagedSecurityFix(t *testing.T) {
 	} {
 		r := newRig(t)
 		r.p.state = change.StateAdopted
-		if c.maintainer {
-			r.must(r.repo.SetMaintainerAttestors([]ed25519.PublicKey{r.attestor.Public().(ed25519.PublicKey)}))
+		if c.interim {
+			r.interim = r.allow // the test box key, pinned in the image
+			r.l = r.newLoop()
 		}
 		r.release(2, func(m *update.Manifest) { m.Security = true })
 		r.attest()

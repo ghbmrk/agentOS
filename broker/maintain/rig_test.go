@@ -84,6 +84,7 @@ type rig struct {
 	atts     [][]byte
 	attestor ed25519.PrivateKey
 	allow    []ed25519.PublicKey
+	interim  []ed25519.PublicKey
 	own      ed25519.PrivateKey
 	mirrors  []update.Source
 	settings loops.Settings
@@ -161,12 +162,13 @@ func (r *rig) newLoop() *Loop3 {
 		Attestations: func(context.Context, string) ([][]byte, error) {
 			return r.atts, nil
 		},
-		OwnKey:    r.own.Public().(ed25519.PublicKey),
-		Attestors: r.allow,
-		Pipeline:  r.p,
-		Settings:  func() loops.Settings { return r.settings },
-		State:     r.state,
-		Now:       r.clk.now,
+		OwnKey:           r.own.Public().(ed25519.PublicKey),
+		Attestors:        r.allow,
+		InterimAttestors: r.interim,
+		Pipeline:         r.p,
+		Settings:         func() loops.Settings { return r.settings },
+		State:            r.state,
+		Now:              r.clk.now,
 	})
 	if err != nil {
 		r.t.Fatal(err)
