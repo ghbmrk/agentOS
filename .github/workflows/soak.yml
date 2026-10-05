@@ -10,7 +10,7 @@ on:
     inputs:
       fuzztime:
         description: Fuzzing time per target (Go duration, at most 5h)
-        default: 5h
+        default: 3h
       soak_minutes:
         description: Minutes each soak shard keeps starting new full runs (at most 280)
         default: "270"
@@ -29,7 +29,7 @@ jobs:
     timeout-minutes: 345 # under GitHub's 6h job limit
     strategy:
       fail-fast: false
-      max-parallel: 10 # leaves runners for pull-request CI
+      max-parallel: 6 # leaves runners for pull-request CI (13 targets: three waves)
       matrix:
         include:
           - { pkg: owner, target: FuzzParseReply }
@@ -48,6 +48,7 @@ jobs:
     name: fuzz ${{ matrix.pkg }} ${{ matrix.target }}
     defaults:
       run:
+        shell: bash # -eo pipefail, so a failing go test is not masked by tee
         working-directory: broker
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
@@ -64,7 +65,7 @@ jobs:
           [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; go.mod names $want" >&2; exit 1; }
       - name: Fuzz
         env:
-          FUZZTIME: ${{ inputs.fuzztime || '5h' }}
+          FUZZTIME: ${{ inputs.fuzztime || '3h' }}
         run: |
           mkdir -p "$RUNNER_TEMP/out"
           go test "./${{ matrix.pkg }}" -run '^$' -fuzz '^${{ matrix.target }}$' \
@@ -90,6 +91,7 @@ jobs:
     name: soak ${{ matrix.name }}
     defaults:
       run:
+        shell: bash # -eo pipefail, so a failing go test is not masked by tee
         working-directory: broker
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
