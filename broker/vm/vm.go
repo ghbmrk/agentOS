@@ -193,7 +193,10 @@ var (
 	ErrConflict = errors.New("vm: merge conflict")
 	ErrImage    = errors.New("vm: snapshots are of different images")
 	ErrRevoked  = errors.New("vm: admission was withdrawn before the machine started")
-	ErrQuota    = errors.New("vm: disk budget exceeded: snapshot refused; free space in the machine (delete files) or roll back, then retry")
+	// ErrPreempted: the machine was preempted while an operation held it,
+	// and what it was writing is discarded.
+	ErrPreempted = errors.New("vm: machine was preempted during the operation")
+	ErrQuota     = errors.New("vm: disk budget exceeded: snapshot refused; free space in the machine (delete files) or roll back, then retry")
 	// ErrSeedLabel refuses a seed for a machine not labelled private: seeds
 	// are derived from owner data until their files carry a public mark
 	// (REV-5, compile K7).
@@ -719,6 +722,15 @@ func (m *Manager) capture(ctx context.Context, mc *machine, t Tier) (Snapshot, e
 		if err := m.cfg.Runtime.Checkpoint(ctx, mc.ID, mem); err != nil {
 			return fail(err)
 		}
+	}
+	// A preemption that began before the copy or checkpoint returned may
+	// have killed the sandbox under it, and a runtime need not report that
+	// as an error: the image may be cut short. Such a snapshot is never
+	// published (Security R2 on #124). Preempt marks the machine before it
+	// kills, so a mark not seen here means the kill came after the image
+	// was whole.
+	if mc.preempting.Load() {
+		return fail(fmt.Errorf("%w: %s: snapshot discarded", ErrPreempted, mc.ID))
 	}
 	if err := writeJSON(filepath.Join(dir, "meta.json"), s); err != nil {
 		return fail(err)

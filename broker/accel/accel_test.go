@@ -149,3 +149,36 @@ func TestRES3KindFilterAndDisabledPoolBehaveIdentically(t *testing.T) {
 		t.Fatalf("summary = %q", got)
 	}
 }
+
+// An evaluation machine (spare-time work, the experiment class) that loses
+// its device to foreground carries on on the CPU: its lease turns into a
+// CPU lease, asking again while foreground holds the device gives a CPU
+// lease at once rather than blocking or taking it back, and the device
+// returns to it once foreground lets go (Potency on #124).
+func TestRES1RES3EvaluationFallsBackToCPUAndContinues(t *testing.T) {
+	npu := Device{Kind: NPU, Node: "/dev/accel/accel0"}
+	p := NewPool([]Device{npu})
+	eval := p.Acquire("eval", admission.Experiment, Any)
+	if eval.CPU() {
+		t.Fatal("idle device not lent to the evaluation")
+	}
+	call := p.Acquire("asr", admission.Foreground, Any)
+	<-eval.Lost()
+	if !eval.CPU() || eval.Device() != (Device{}) {
+		t.Fatalf("lost lease still names a device: %+v", eval.Device())
+	}
+	next := p.Acquire("eval", admission.Experiment, Any)
+	if !next.CPU() {
+		t.Fatal("evaluation took the device back from foreground")
+	}
+	select {
+	case <-call.Lost():
+		t.Fatal("foreground lost its device to an evaluation")
+	default:
+	}
+	next.Release()
+	call.Release()
+	if again := p.Acquire("eval", admission.Experiment, Any); again.CPU() || again.Device() != npu {
+		t.Fatal("device not lent again once foreground released it")
+	}
+}
