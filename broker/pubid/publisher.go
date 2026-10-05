@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -28,14 +29,17 @@ const (
 	MaxQueue = 256
 	// MaxPayload bounds one item's bytes before signing.
 	MaxPayload = 1 << 20
-	// maxSkewDays: a published day more than this far ahead of the clock
-	// came from a clock that was wrong, not one stepped back a little, so
-	// it no longer holds publication back (L3 on #163).
-	maxSkewDays = 28
+	// maxDays is how many published days the outbox remembers, so no day
+	// is published twice even after a wrong clock is corrected.
+	maxDays = 64
 )
 
 // ErrFull means MaxQueue items are already waiting.
 var ErrFull = errors.New("pubid: publication queue full")
+
+// ErrClock means the clock is before the public reference or too far
+// ahead to trust, so nothing is queued (plausible).
+var ErrClock = errors.New("pubid: the clock is not plausible")
 
 // Signer signs one payload of its kind with the epoch's key, returning
 // the bytes to publish.
@@ -75,9 +79,10 @@ type formed struct {
 }
 
 type outbox struct {
-	Items   []item  `json:"items"`
-	Last    string  `json:"last"`              // newest day a batch was published for
-	Pending *formed `json:"pending,omitempty"` // formed, not confirmed sent
+	Items []item `json:"items"`
+	// Days are the days batches were published for, newest maxDays.
+	Days    []string `json:"days"`
+	Pending *formed  `json:"pending,omitempty"` // formed, not confirmed sent
 }
 
 // Publisher holds public output until its day and publishes each day's
@@ -120,6 +125,9 @@ func NewPublisher(cfg Config) (*Publisher, error) {
 		cfg.Rand = rand.Reader
 	}
 	p := &Publisher{cfg: cfg}
+	if err := sweepTemp(filepath.Dir(cfg.Path)); err != nil {
+		return nil, err
+	}
 	b, err := os.ReadFile(cfg.Path)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
@@ -135,7 +143,11 @@ func NewPublisher(cfg Config) (*Publisher, error) {
 		if err != nil {
 			return nil, fmt.Errorf("pubid: outbox %s: %w", cfg.Path, err)
 		}
-		if dropped {
+		redrawn, err := p.redraw(cfg.Now().UTC())
+		if err != nil {
+			return nil, err
+		}
+		if dropped || redrawn {
 			if err := p.save(); err != nil {
 				return nil, err
 			}
@@ -151,8 +163,13 @@ func (p *Publisher) validate() (bool, error) {
 	if len(p.st.Items) > MaxQueue {
 		return false, fmt.Errorf("%d items", len(p.st.Items))
 	}
-	if p.st.Last != "" && !isDay(p.st.Last) {
-		return false, errors.New("bad last day")
+	if len(p.st.Days) > maxDays {
+		return false, fmt.Errorf("%d days", len(p.st.Days))
+	}
+	for _, d := range p.st.Days {
+		if !isDay(d) {
+			return false, errors.New("bad published day")
+		}
 	}
 	if f := p.st.Pending; f != nil && (!isDay(f.Day) || len(f.Batch) == 0) {
 		return false, errors.New("bad pending batch")
@@ -176,6 +193,84 @@ func isDay(s string) bool {
 	return err == nil && day(t) == s
 }
 
+// plausible: the clock is on or after the public reference, and a full
+// delay from now still has a four-digit year. A clock outside that (unset
+// before NTP, or set absurdly far ahead) neither queues nor publishes
+// (L3 round 2 on #163).
+func (p *Publisher) plausible(now time.Time) bool {
+	return !now.Before(Reference) && now.AddDate(0, 0, p.cfg.MaxDelayDays+1).Year() <= 9999
+}
+
+// last is the newest published day no further ahead of today than an item
+// can wait: a later one came from a clock that was wrong, and holding
+// publication back for it would freeze the outbox (L3 MUST 1 on #163).
+func (p *Publisher) last(today time.Time) string {
+	limit := day(today.AddDate(0, 0, p.cfg.MaxDelayDays+1))
+	l := ""
+	for _, d := range p.st.Days {
+		if d > l && d <= limit {
+			l = d
+		}
+	}
+	return l
+}
+
+// draw picks an item's leaving day: 1 to MaxDelayDays days after the
+// later of today and the last published day, so a clock behind the last
+// batch cannot shorten the delay.
+func (p *Publisher) draw(now time.Time) (string, error) {
+	var r [1]byte
+	if _, err := io.ReadFull(p.cfg.Rand, r[:]); err != nil {
+		return "", err
+	}
+	base := now.UTC()
+	if l := p.last(base); l > day(base) {
+		base, _ = time.Parse("2006-01-02", l)
+	}
+	return day(base.AddDate(0, 0, 1+int(r[0])%p.cfg.MaxDelayDays)), nil
+}
+
+// redraw gives a new leaving day to every item due further ahead than an
+// item can wait, as one queued under a clock that was wrong would be;
+// otherwise it would never leave, or fill the queue for good (L3 round 2
+// on #163). It reports whether it changed any.
+func (p *Publisher) redraw(now time.Time) (bool, error) {
+	if !p.plausible(now) {
+		return false, nil
+	}
+	limit := day(now.AddDate(0, 0, p.cfg.MaxDelayDays))
+	if l := p.last(now); l > day(now) {
+		t, _ := time.Parse("2006-01-02", l)
+		limit = day(t.AddDate(0, 0, p.cfg.MaxDelayDays))
+	}
+	changed := false
+	for i := range p.st.Items {
+		if p.st.Items[i].Due <= limit {
+			continue
+		}
+		d, err := p.draw(now)
+		if err != nil {
+			return changed, err
+		}
+		p.st.Items[i].Due, changed = d, true
+	}
+	return changed, nil
+}
+
+// sweepTemp removes temporary files a crash left in dir.
+func sweepTemp(dir string) error {
+	names, err := filepath.Glob(filepath.Join(dir, ".pubid-*"))
+	if err != nil {
+		return err
+	}
+	for _, n := range names {
+		if err := os.Remove(n); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
 func day(t time.Time) string { return t.UTC().Format("2006-01-02") }
 
 // Queue holds payload for publication as kind. It leaves in the batch of
@@ -188,17 +283,19 @@ func (p *Publisher) Queue(kind string, payload []byte) error {
 	if len(payload) == 0 || len(payload) > MaxPayload {
 		return fmt.Errorf("pubid: payload of %d bytes", len(payload))
 	}
-	var r [1]byte
-	if _, err := io.ReadFull(p.cfg.Rand, r[:]); err != nil {
-		return err
-	}
-	delay := 1 + int(r[0])%p.cfg.MaxDelayDays
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	now := p.cfg.Now().UTC()
+	if !p.plausible(now) {
+		return ErrClock
+	}
 	if len(p.st.Items) >= MaxQueue {
 		return ErrFull
 	}
-	due := day(p.cfg.Now().UTC().AddDate(0, 0, delay))
+	due, err := p.draw(now)
+	if err != nil {
+		return err
+	}
 	p.st.Items = append(p.st.Items, item{Kind: kind, Payload: append([]byte(nil), payload...), Due: due})
 	if err := p.save(); err != nil {
 		p.st.Items = p.st.Items[:len(p.st.Items)-1]
@@ -237,9 +334,10 @@ func (p *Publisher) Len() int {
 
 // Release publishes today's batch once the release time has passed: every
 // due item, signed now with the epoch's key, sorted by its signed bytes.
-// At most one batch a day, and none while the clock is behind the last
-// published day, unless that day is over maxSkewDays ahead (a clock that
-// was wrong). An item that fails to sign is dropped, so it cannot hold the
+// At most one batch a day: none on or behind the last plausible published
+// day, so no day is published twice. Items due
+// further ahead than an item can wait are redrawn first. A clock that is
+// not plausible publishes nothing. An item that fails to sign is dropped, so it cannot hold the
 // others back; the error says how many. A batch formed earlier and not
 // confirmed is resent unchanged, for its own day, and no new batch is
 // formed in that call. Only a fixed broker timer may call it: when it runs
@@ -249,12 +347,18 @@ func (p *Publisher) Release() error {
 	defer p.mu.Unlock()
 	now := p.cfg.Now().UTC()
 	today := day(now)
-	if now.Sub(now.Truncate(24*time.Hour)) < p.cfg.ReleaseAt ||
-		(today <= p.st.Last && p.st.Last <= day(now.AddDate(0, 0, maxSkewDays))) {
+	if now.Sub(now.Truncate(24*time.Hour)) < p.cfg.ReleaseAt || !p.plausible(now) {
 		return nil
 	}
 	if p.st.Pending != nil {
 		return p.send()
+	}
+	if today <= p.last(now) {
+		return nil
+	}
+	// Saved with the batch below; if none forms, a restart redraws again.
+	if _, err := p.redraw(now); err != nil {
+		return err
 	}
 	var due, rest []item
 	for _, it := range p.st.Items {
@@ -310,8 +414,12 @@ func (p *Publisher) send() error {
 	if err := p.cfg.Sender.Publish(f.Day, f.Batch); err != nil {
 		return fmt.Errorf("pubid: publishing %s: %w", f.Day, err)
 	}
-	// A pending batch was formed on or after the last published day.
-	p.st.Pending, p.st.Last = nil, f.Day
+	days := append(p.st.Days, f.Day)
+	sort.Strings(days)
+	if len(days) > maxDays {
+		days = days[len(days)-maxDays:]
+	}
+	p.st.Pending, p.st.Days = nil, days
 	return p.save()
 }
 
