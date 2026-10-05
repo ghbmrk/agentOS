@@ -83,4 +83,5 @@ Step 6 (replace):
 - **Mark's additions (22:00Z):** pools per product are general across providers, not only Codex/ChatGPT (RES-5); onboarding impact (§8.1 step 6, ONB-9).
 - **Mark's addition (22:01Z, S8 thread):** the guest must coordinate resources and information across all of these and whatever else it has access to (CAP-12).
 - **Account isolation (suggested to Mark 22:13Z):** a dedicated provider account for the box limits a theft or suspension to that plan; whether the provider allows a second account needs checking.
-- **Open for Mark:** whether to ask Anthropic if a self-hosted owner box running unmodified Claude Code counts under "a platform hosting Claude Code", and the default reserve (Mark set 0%, 22:22Z). Per-pool concurrency: default 2, auto-decided by the coordinator (DECISIONS.md, 2026-10-05).
+- **Open for Mark:** whether to ask Anthropic if a self-hosted owner box running unmodified Claude Code counts under "a platform hosting Claude Code".
+- **Decided:** default reserve 0% (Mark, 22:22Z); per-pool concurrency default 2 (auto-decided by the coordinator, DECISIONS.md).
