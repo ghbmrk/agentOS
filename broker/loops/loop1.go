@@ -387,8 +387,11 @@ func TaskKey(in journal.Intent) string {
 	if in.GoalID != "" {
 		return "goal:" + in.GoalID
 	}
-	return "origin:" + in.Origin
+	return originKey(in)
 }
+
+// originKey is the task key of in's origin's intents that carry no goal.
+func originKey(in journal.Intent) string { return "origin:" + in.Origin }
 
 // mine turns the journal into hypotheses (LOOP-4). A task with a held-out
 // case is never mined, so nothing from the held-out suite reaches a

@@ -72,8 +72,11 @@ func (p *Plane) goal(lineage string) string {
 	}
 	p.mu.Unlock()
 	var open []string
+	// Only cached lineages are read: a machine whose guest was handed a
+	// message has one (handedOut), and asking the manager for the rest
+	// would make one machine's cold start stall every other's calls.
 	for _, m := range all {
-		if p.lineageOf(m) == lineage {
+		if l := m.lineage.Load(); l != nil && *l == lineage {
 			open = append(open, m.box.handed()...)
 		}
 	}

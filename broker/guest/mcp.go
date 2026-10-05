@@ -191,8 +191,8 @@ const (
 // collide with it. The origin therefore names the lineage, not the fork.
 // Errors the guest sees are fixed strings; broker detail goes to Logf.
 func (p *Plane) callTool(ctx context.Context, m *machine, name string, raw json.RawMessage) (effectState, bool, error) {
-	lineage, err := p.cfg.Machines.Lineage(m.id)
-	if err != nil {
+	lineage := p.lineageOf(m)
+	if lineage == "" {
 		return effectState{}, false, errors.New("broker: unknown machine")
 	}
 	switch name {

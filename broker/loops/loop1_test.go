@@ -521,3 +521,34 @@ func TestACrashMidHarvestStillKeepsTheTaskFromTheBuilder(t *testing.T) {
 		t.Fatalf("after retry: held out %d", ev.HeldOut)
 	}
 }
+
+// TestAHeldOutGoalAlsoHoldsItsOriginsUnstampedWork: a guest's intents with
+// no goal (two messages open, none fetched yet, or after the quiet window;
+// guest G14) fall into its origin bucket, which may carry a held-out
+// task's own effects. So a held-out case on a goal holds that origin's
+// bucket too (#55 review B2).
+func TestAHeldOutGoalAlsoHoldsItsOriginsUnstampedWork(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	var id string
+	for i := 0; ; i++ {
+		id = fmt.Sprintf("held-%d", i)
+		r.task(id, "owner:m"+id, "mail", "draft", "private")
+		must(t, h.Harvest(Outcome{Intent: id, Action: Edited, Input: []byte("procedures/mail"), Output: []byte("v1"), Correction: []byte("v2")}))
+		dev := false
+		for _, c := range r.p.Dev(change.ClassTask) {
+			dev = dev || c.ID == id
+		}
+		if !dev {
+			break
+		}
+	}
+	ev, err := h.Evidence()
+	must(t, err)
+	if !ev.Held("goal:owner:m"+id) || !ev.Held("origin:guest:mail-agent") {
+		t.Fatal("a held-out goal's origin bucket is still mined")
+	}
+	if ev.Held("origin:guest:other") {
+		t.Fatal("another origin was held")
+	}
+}
