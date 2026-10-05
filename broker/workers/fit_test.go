@@ -510,6 +510,11 @@ func TestCAP1PreemptedCommandSaysRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := <-done
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		if w, _ := r.m.Get(workerID(ag.Lineage, "w")); w.State == vm.Preempted {
+			break // the preemption has finished writing its record
+		}
+	}
 	if err == nil || !strings.HasPrefix(err.Error(), "preempted, retry: worker w ") || !strings.Contains(err.Error(), "did not fail") || !strings.Contains(err.Error(), "destroy and recreate it") {
 		t.Fatalf("preempted exec = %v", err)
 	}

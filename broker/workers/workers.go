@@ -49,6 +49,7 @@ type Machines interface {
 	Destroy(ctx context.Context, id string) error
 	RaiseLabel(id string, l vm.Label) error
 	Park(ctx context.Context, id string) (vm.Snapshot, error)
+	DeleteFiles(ctx context.Context, id string, d vm.Deletion) (vm.DeleteReport, error)
 }
 
 // Limits bound what one lineage may ask for.
@@ -147,6 +148,7 @@ const (
 	toolList     = "worker_list"
 	toolFit      = "worker_fit"
 	toolKeep     = "worker_keep"
+	toolDelete   = "worker_delete"
 )
 
 func obj(props map[string]any, required ...string) map[string]any {
@@ -182,6 +184,10 @@ func (t *Tools) List() []map[string]any {
 				"content_base64": map[string]any{"type": "string", "description": "Binary content, base64; instead of content."}}, "name", "path")},
 		{"name": toolCkpt, "description": "Checkpoint a worker, memory included; returns the snapshot id to roll back to or diff.",
 			"inputSchema": obj(map[string]any{"name": pName}, "name")},
+		{"name": toolDelete, "description": fmt.Sprintf("Delete files from a worker without running anything in it: the way to shrink a worker over its file cap. The broker stops the worker, removes the paths from what it wrote (a symlink is removed itself, never followed), and starts it again once it is under its cap; files that came with the base image cannot be deleted and free nothing. Up to %d absolute paths; a directory needs recursive.", vm.MaxDeletePaths),
+			"inputSchema": obj(map[string]any{"name": pName,
+				"paths":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": vm.MaxDeletePaths, "description": "Absolute paths inside the worker."},
+				"recursive": map[string]any{"type": "boolean", "description": "Also delete directories and everything in them."}}, "name", "paths")},
 		{"name": toolFork, "description": "Checkpoint a worker and start one new worker per name from it, memory included; each is admitted on its own budget, and either all start or none do. With up_to_fit, only as many as fit now start (in the order named) and the rest come back as skipped.",
 			"inputSchema": obj(map[string]any{"name": pName, "into": strList,
 				"up_to_fit": map[string]any{"type": "boolean", "description": "Start only as many forks as fit (see worker_fit)."}}, "name", "into")},
@@ -239,6 +245,9 @@ func (t *Tools) Call(ctx context.Context, machine, lineage, name string, raw jso
 	t.called(machine, 1)
 	defer t.called(machine, -1)
 	var out any
+	if (name == toolCreate || name == toolFork || name == toolRollback) && t.Stopped != nil && t.Stopped() {
+		return "", true, errStartStopped
+	}
 	switch name {
 	case toolCreate:
 		out, err = t.create(ctx, c, raw)
@@ -264,6 +273,8 @@ func (t *Tools) Call(ctx context.Context, machine, lineage, name string, raw jso
 		out, err = t.fitTool(c, raw)
 	case toolKeep:
 		out, err = t.keep(ctx, c, raw)
+	case toolDelete:
+		out, err = t.del(ctx, c, raw)
 	default:
 		return "", true, fmt.Errorf("no tool %q", name)
 	}
@@ -426,6 +437,10 @@ type execOut struct {
 }
 
 var errStopped = errors.New("the owner sent STOP: worker commands wait until RESUME")
+
+// errStartStopped refuses starting workers while STOP holds (security R1
+// on #150, CAP-8c).
+var errStartStopped = errors.New("the owner sent STOP: no worker starts until RESUME")
 
 func (t *Tools) run(ctx context.Context, c caller, name string, cmd vm.Command, timeout time.Duration) (vm.ExecResult, error) {
 	if t.Stopped != nil && t.Stopped() {
@@ -737,12 +752,12 @@ func startErr(name string, err error) error {
 }
 
 // workerErr names the worker in err. Over its layer cap every command is
-// refused, deletions included, so the way out it names is a rollback or
-// destroy (UX-150-1).
+// refused, so the ways out it names are worker_delete, a rollback or
+// destroy (UX-150-1, CAP-8c).
 func workerErr(name string, err error) error {
 	var full *vm.WorkerFull
 	if errors.As(err, &full) {
-		return fmt.Errorf("worker %s holds more files than its %d MB cap; roll it back to a snapshot or destroy it", name, (full.Cap+1<<20-1)>>20)
+		return fmt.Errorf("worker %s holds more files than its %d MB cap; delete files with worker_delete, roll it back to a snapshot, or destroy it", name, (full.Cap+1<<20-1)>>20)
 	}
 	return fmt.Errorf("worker %s: %w", name, err)
 }
@@ -1004,4 +1019,51 @@ func (t *Tools) keep(ctx context.Context, c caller, raw json.RawMessage) (any, e
 		destroyed = append(destroyed, nameOf(c.lineage, sid))
 	}
 	return map[string]any{"kept": a.Name, "destroyed": destroyed}, nil
+}
+
+// del removes files from a worker without running its code (CAP-8c,
+// security R-DEL1 to R-DEL6). The answer holds fixed codes and counts,
+// and names no path beyond those asked.
+func (t *Tools) del(ctx context.Context, c caller, raw json.RawMessage) (any, error) {
+	var a struct {
+		Name      string   `json:"name"`
+		Paths     []string `json:"paths"`
+		Recursive bool     `json:"recursive"`
+	}
+	if err := decode(raw, &a); err != nil {
+		return nil, err
+	}
+	if len(a.Paths) == 0 || len(a.Paths) > vm.MaxDeletePaths {
+		return nil, fmt.Errorf("paths: 1 to %d absolute paths", vm.MaxDeletePaths)
+	}
+	if t.Stopped != nil && t.Stopped() {
+		return nil, errStopped
+	}
+	id, err := t.owned(c, a.Name)
+	if err != nil {
+		return nil, err
+	}
+	t.touch(id)
+	rep, err := t.M.DeleteFiles(ctx, id, vm.Deletion{Paths: a.Paths, Recursive: a.Recursive, As: c.label, Hold: t.Stopped})
+	if errors.Is(err, vm.ErrHeld) {
+		return nil, errStopped
+	}
+	if err != nil {
+		return nil, workerErr(a.Name, err)
+	}
+	type row struct {
+		Path   string `json:"path"`
+		Result string `json:"result"`
+	}
+	rows := make([]row, len(a.Paths))
+	for i, p := range a.Paths {
+		rows[i] = row{p, rep.Codes[i]}
+	}
+	state := "running"
+	if !rep.Restarted {
+		w, _ := t.M.TryGet(id)
+		state = string(w.State)
+	}
+	return map[string]any{"results": rows, "removed": rep.Files, "freed_bytes": rep.Bytes,
+		"over_cap": rep.Over, "more_remains": rep.More, "state": state}, nil
 }

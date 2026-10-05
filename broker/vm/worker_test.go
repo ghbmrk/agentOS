@@ -531,3 +531,88 @@ func TestCAP1ForkSiblingsReadsForkBaseUnderTheTableLock(t *testing.T) {
 		t.Fatalf("fork base %q survived erasure", base)
 	}
 }
+
+// DeleteFiles shrinks a worker over its cap without running its code:
+// it stops the worker, deletes, measures again, and starts it again only
+// under the cap; commands stay refused until then (security R-DEL1,
+// R-DEL6 on CAP-8c).
+func TestCAP8cDeleteFilesStopsDeletesAndRestartsUnderTheCap(t *testing.T) {
+	e := newEnv(t, 4096)
+	e.cfg.WorkerLayerBytes = 16 << 10
+	e.open()
+	agent := e.create("agent", admission.Experiment, 500)
+	_, err := e.m.CreateWorker(bg, "wk-a", agent.Lineage, workerSpec(Public))
+	must(t, err)
+	for _, f := range []string{"a", "b"} {
+		_, err = e.m.Exec(bg, "wk-a", Command{Argv: []string{"write", f}, Stdin: make([]byte, 12<<10)}, time.Second)
+		must(t, err)
+	}
+	if _, err := e.m.Exec(bg, "wk-a", Command{Argv: []string{"echo"}}, time.Second); !errors.Is(err, ErrQuota) {
+		t.Fatalf("command over the cap: %v", err)
+	}
+	kills := e.rt.kills
+	rep, err := e.m.DeleteFiles(bg, "wk-a", Deletion{Paths: []string{"/nothing"}})
+	must(t, err)
+	if !rep.Over || rep.Restarted || e.rt.kills == kills {
+		t.Fatalf("still over = %+v (kills %d -> %d)", rep, kills, e.rt.kills)
+	}
+	if w, _ := e.m.Get("wk-a"); w.State != Stopped {
+		t.Fatalf("a worker still over its cap is %s", w.State)
+	}
+	if _, ok := e.m.cfg.Admit.(*admission.Controller).Snapshot().Running["wk-a"]; ok {
+		t.Fatal("a stopped worker still holds its admission")
+	}
+	rep, err = e.m.DeleteFiles(bg, "wk-a", Deletion{Paths: []string{"/a"}})
+	must(t, err)
+	if rep.Over || !rep.Restarted || rep.Codes[0] != "removed" {
+		t.Fatalf("under the cap = %+v", rep)
+	}
+	if _, err := e.m.Exec(bg, "wk-a", Command{Argv: []string{"cat", "b"}}, time.Second); err != nil {
+		t.Fatalf("command after shrinking: %v", err)
+	}
+	// A running worker under its cap starts again at once.
+	rep, err = e.m.DeleteFiles(bg, "wk-a", Deletion{Paths: []string{"/b"}})
+	must(t, err)
+	if !rep.Restarted {
+		t.Fatalf("running worker = %+v", rep)
+	}
+	if w, _ := e.m.Get("wk-a"); w.State != Running {
+		t.Fatalf("worker is %s", w.State)
+	}
+}
+
+// The same label rule and STOP hold as Exec, the path cap, and the entry
+// budget (R-DEL2, R-DEL4, R-DEL7).
+func TestCAP8cDeleteFilesGuards(t *testing.T) {
+	e := newEnv(t, 4096)
+	agent := e.create("agent", admission.Experiment, 500)
+	_, err := e.m.CreateWorker(bg, "wk-p", agent.Lineage, workerSpec(Private))
+	must(t, err)
+	if _, err := e.m.DeleteFiles(bg, "wk-p", Deletion{Paths: []string{"/x"}, As: Public}); !errors.Is(err, ErrLabel) {
+		t.Fatalf("public delete in a private worker: %v", err)
+	}
+	if _, err := e.m.DeleteFiles(bg, "wk-p", Deletion{Paths: []string{"/x"}, As: Private, Hold: func() bool { return true }}); !errors.Is(err, ErrHeld) {
+		t.Fatalf("delete under STOP: %v", err)
+	}
+	if w, _ := e.m.Get("wk-p"); w.State != Running {
+		t.Fatalf("a refused delete left the worker %s", w.State)
+	}
+	if _, err := e.m.DeleteFiles(bg, "wk-p", Deletion{Paths: make([]string, MaxDeletePaths+1), As: Private}); err == nil {
+		t.Fatal("too many paths accepted")
+	}
+	if _, err := e.m.DeleteFiles(bg, "agent", Deletion{Paths: []string{"/x"}}); err == nil {
+		t.Fatal("deleted in an agent machine")
+	}
+	for i := range 5 {
+		_, err := e.m.Exec(bg, "wk-p", Command{Argv: []string{"write", fmt.Sprintf("d/f%d", i)}, As: Private}, time.Second)
+		must(t, err)
+	}
+	old := deleteEntries
+	deleteEntries = 3
+	defer func() { deleteEntries = old }()
+	rep, err := e.m.DeleteFiles(bg, "wk-p", Deletion{Paths: []string{"/d"}, Recursive: true, As: Private})
+	must(t, err)
+	if !rep.More || rep.Files != 3 || rep.Codes[0] != "more_remains" || !rep.Restarted {
+		t.Fatalf("over the entry budget = %+v", rep)
+	}
+}

@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/vm/overlay"
 )
 
 // WorkerPrefix starts the IDs of worker machines (CAP-8): machines with no
@@ -322,4 +324,106 @@ func (m *Manager) EndCommands() int {
 		}
 	}
 	return n
+}
+
+// Deletion asks for files to be removed from a worker's layer (CAP-8c):
+// the one change allowed while a worker is over its layer cap, and it
+// runs no code from the worker.
+type Deletion struct {
+	Paths     []string // absolute guest paths, at most MaxDeletePaths
+	Recursive bool
+	As        Label       // the caller's label, as for Command.As
+	Hold      func() bool // the owner's STOP, as for Command.Hold
+}
+
+// DeleteReport is what DeleteFiles did.
+type DeleteReport struct {
+	overlay.DeleteResult
+	Over      bool // the layer is still over the worker's cap
+	Restarted bool // the worker was running, and runs again
+}
+
+// MaxDeletePaths bounds one Deletion's paths (security R-DEL1).
+const MaxDeletePaths = 64
+
+// deleteEntries bounds the entries one Deletion removes (security
+// R-DEL2); tests lower it.
+var deleteEntries = 100_000
+
+// DeleteFiles removes paths from worker id's upper layer with the worker
+// stopped, under its lock, with the same label rule and STOP hold as
+// Exec (security R-DEL2, R-DEL4 on CAP-8c). It then measures the layer
+// again: under its cap, the worker starts again on the same layer, spec
+// and label (one that was stopped is admitted afresh, as by Resume);
+// still over it, it stays stopped with its memory released (R-DEL6).
+func (m *Manager) DeleteFiles(ctx context.Context, id string, d Deletion) (DeleteReport, error) {
+	if !strings.HasPrefix(id, WorkerPrefix) {
+		return DeleteReport{}, fmt.Errorf("vm: %s is not a worker", id)
+	}
+	if len(d.Paths) == 0 || len(d.Paths) > MaxDeletePaths {
+		return DeleteReport{}, fmt.Errorf("vm: a deletion takes 1 to %d paths", MaxDeletePaths)
+	}
+	mc, err := m.get(id)
+	if err != nil {
+		return DeleteReport{}, err
+	}
+	mc.mu.Lock()
+	was := mc.State
+	rep, stopped, err := m.deleteLocked(ctx, mc, d)
+	mc.mu.Unlock()
+	if stopped {
+		m.cfg.Admit.Release(id)
+	}
+	if err == nil && !rep.Over && was != Running {
+		// Admission may have no room now; the worker then stays stopped
+		// and the deletion still stands.
+		rep.Restarted = m.Resume(ctx, id) == nil
+	}
+	return rep, err
+}
+
+// deleteLocked is DeleteFiles under mc's lock; stopped says it stopped a
+// running worker and left it stopped.
+func (m *Manager) deleteLocked(ctx context.Context, mc *machine, d Deletion) (DeleteReport, bool, error) {
+	if d.As > mc.Label {
+		mc.Label = d.As
+		if err := m.saveMachine(mc); err != nil {
+			return DeleteReport{}, false, err
+		}
+	}
+	if mc.Label > d.As {
+		return DeleteReport{}, false, ErrLabel
+	}
+	if d.Hold != nil && d.Hold() {
+		return DeleteReport{}, false, ErrHeld
+	}
+	running := mc.State == Running
+	if running {
+		if err := m.stopRuntime(ctx, mc); err != nil {
+			return DeleteReport{}, false, err
+		}
+		if err := m.saveMachine(mc); err != nil {
+			return DeleteReport{}, true, err
+		}
+	}
+	l := m.launch(mc)
+	var rep DeleteReport
+	var err error
+	rep.DeleteResult, err = overlay.Delete(l.Upper, l.Lower, d.Paths, d.Recursive, deleteEntries)
+	if err != nil {
+		return rep, running, fmt.Errorf("%s: %w", mc.ID, err)
+	}
+	if _, cerr := m.checkCaps(mc.ID, l.Upper); errors.Is(cerr, ErrQuota) {
+		rep.Over = true
+	} else if cerr != nil {
+		return rep, running, cerr
+	}
+	if !running || rep.Over {
+		return rep, running, nil
+	}
+	if err := m.restartLocked(ctx, mc, keepLayer); err != nil {
+		return rep, true, fmt.Errorf("%s: starting again: %w", mc.ID, err)
+	}
+	rep.Restarted = true
+	return rep, false, nil
 }
