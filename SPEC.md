@@ -383,7 +383,7 @@ The system improves and defends itself in otherwise-wasted time. Three loops sha
 
 ### Loop 1: self-improvement
 - **LOOP-4** Mines the journal for failures, owner corrections, slow or expensive steps, and repeated trajectories, and turns each into a hypothesis and then a candidate (procedure, compiled skill, routing rule, context rule, configuration).
-- **LOOP-5** **Counterfactual replay:** candidates are tested by replaying past tasks inside agent machines against recorded external responses, in shadow mode. No live external effects; any unrecorded call fails closed.
+- **LOOP-5** **Counterfactual replay:** candidates are tested by replaying past tasks inside agent machines against recorded external responses, in shadow mode. No live external effects; any unrecorded effect fails closed. Model calls are not effects: a replay may call the model live, through the same router and egress as the guest under the candidate's routing, metered (OP-8) against a separate capped evaluation budget that Loop 1 cannot change (CHG-2).
 - **LOOP-6** Candidates are adopted only through §11 (held-out suite from real owner outcomes, CHG-1). Loop 1 cannot edit the suite, the graders, or its own budget (CHG-2).
 
 ### Loop 2: self-securing
@@ -533,6 +533,7 @@ Before any qualification run, freeze revisions, hardware profile, accounts, work
 | 2026-10-04 | Calendar acceptance in context-scoped replies (ADP-11, Mark's decision): an earned reply may accept a slot the counterpart proposed, when it is free on the owner's calendar and the counterpart is a known contact; it never proposes a time. |
 | 2026-10-05 | Organize verb (ADP-2, Mark's decision): archive, label, move, and mark read run as reversible actions inside the owner's account, journaled and in the digest; security alerts and anything that cannot be undone still ask. |
 | 2026-10-05 | Unknown-host unlock (CRED-8, arbitrator for P2-4a): the unlocked key is discarded when code attempts are exhausted or no valid code arrives in time, rather than on the first failed code. |
+| 2026-10-05 | Live model calls in replay (LOOP-5, Mark's decision): effects stay recorded and fail closed; model calls may run live under the candidate's routing, metered against a separate capped evaluation budget, so Loop 1 can evaluate prompt, context, procedure, and routing candidates. |
 | Proposed | External-drive-only (no internal install). This spec assumes it; the owner has not formally confirmed. |
 
 ## 17. Open risks
