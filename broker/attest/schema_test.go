@@ -5,6 +5,7 @@ package attest
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -237,5 +238,39 @@ func TestOSS4OlderSchemaReadsNewerStatements(t *testing.T) {
 		if _, err := s.ReadVersions(in); !errors.Is(err, ErrInvalid) {
 			t.Errorf("%v read (%v)", in, err)
 		}
+	}
+}
+
+// TestOSS4HardwareRefusesRepeatedKeys (review N1 on #73): the type itself
+// refuses a repeated key rather than resolving it last-wins, whatever
+// decoder calls it.
+func TestOSS4HardwareRefusesRepeatedKeys(t *testing.T) {
+	for _, b := range []string{
+		`{"vendor":"acme","vendor":"other","model":"box_1","firmware":"v7"}`,
+		`{"vendor":"acme","model":"box_1","firmware":"v7","firmware":"v8"}`,
+		`{"vendor":"acme","model":"box_1","model":"box_1"}`,
+	} {
+		var h Hardware
+		if err := json.Unmarshal([]byte(b), &h); err == nil {
+			t.Errorf("%s decoded as %+v", b, h)
+		}
+	}
+}
+
+// TestOSS4ReadVersionsCapsComponents (review K-PB1b on #73): a statement
+// from a newer schema may name components this box does not know, but
+// not without bound.
+func TestOSS4ReadVersionsCapsComponents(t *testing.T) {
+	s := Default()
+	vs := map[string]string{}
+	for i := 0; i < MaxComponents; i++ {
+		vs[fmt.Sprintf("c%d", i)] = "1.0"
+	}
+	if _, err := s.ReadVersions(vs); err != nil {
+		t.Fatal(err)
+	}
+	vs["one_more"] = "1.0"
+	if _, err := s.ReadVersions(vs); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("%d components read (%v)", len(vs), err)
 	}
 }

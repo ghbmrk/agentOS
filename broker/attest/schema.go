@@ -55,26 +55,30 @@ type Hardware struct {
 	Firmware string `json:"firmware"`
 }
 
-// UnmarshalJSON takes exactly the keys vendor, model and firmware, each a
-// string, spelled exactly so. encoding/json alone would match "Vendor"
-// and skip unknown keys.
+// UnmarshalJSON takes exactly the keys vendor, model and firmware, once
+// each, each a string, spelled exactly so. encoding/json alone would match
+// "Vendor", skip unknown keys, and take the last of a repeated key.
 func (h *Hardware) UnmarshalJSON(b []byte) error {
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(b, &m); err != nil || m == nil {
+	d := json.NewDecoder(bytes.NewReader(b))
+	if t, err := d.Token(); err != nil || t != json.Delim('{') {
 		return fmt.Errorf("%w: hardware is not an object", ErrInvalid)
 	}
-	if len(m) != 3 {
-		return fmt.Errorf("%w: hardware holds exactly vendor, model and firmware", ErrInvalid)
-	}
 	var out Hardware
-	for k, dst := range map[string]*string{"vendor": &out.Vendor, "model": &out.Model, "firmware": &out.Firmware} {
-		raw, ok := m[k]
-		if !ok {
-			return fmt.Errorf("%w: hardware lacks %s", ErrInvalid, k)
+	dst := map[string]*string{"vendor": &out.Vendor, "model": &out.Model, "firmware": &out.Firmware}
+	seen := map[string]bool{}
+	for d.More() {
+		t, err := d.Token()
+		k, ok := t.(string)
+		if err != nil || !ok || dst[k] == nil || seen[k] {
+			return fmt.Errorf("%w: hardware holds exactly vendor, model and firmware, once each", ErrInvalid)
 		}
-		if err := json.Unmarshal(raw, dst); err != nil {
+		seen[k] = true
+		if err := d.Decode(dst[k]); err != nil {
 			return fmt.Errorf("%w: hardware %s is not a string", ErrInvalid, k)
 		}
+	}
+	if t, err := d.Token(); err != nil || t != json.Delim('}') || len(seen) != 3 {
+		return fmt.Errorf("%w: hardware holds exactly vendor, model and firmware", ErrInvalid)
 	}
 	*h = out
 	return nil
@@ -286,13 +290,21 @@ func (s *Schema) ReadHardware(h Hardware) (Hardware, error) {
 	return h, nil
 }
 
+// MaxComponents caps the components a statement read under any schema
+// version may name (review K-PB1b on #73). The shipped schema lists far
+// fewer.
+const MaxComponents = 64
+
 // ReadVersions maps versions from a statement signed under any version of
 // the schema onto this one: a version this schema does not list becomes
 // Unlisted, and a component it does not list is dropped. A key or value
-// that is not a token is refused.
+// that is not a token, or more than MaxComponents components, is refused.
 func (s *Schema) ReadVersions(vs map[string]string) (map[string]string, error) {
 	if vs == nil {
 		return nil, nil
+	}
+	if len(vs) > MaxComponents {
+		return nil, fmt.Errorf("%w: %d version components, over %d", ErrInvalid, len(vs), MaxComponents)
 	}
 	out := map[string]string{}
 	for c, v := range vs {
