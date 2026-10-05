@@ -577,7 +577,7 @@ class HostUntouchedImageTest(unittest.TestCase):
             self.assertNotIn(p, pk)
         rm = c["RemoveFiles"].split()
         for f in ("/usr/lib/systemd/systemd-timedated", "/usr/lib/systemd/system/systemd-timedated.service",
-                  "/usr/lib/udev/rules.d/85-hwclock.rules"):
+                  "/usr/lib/udev/rules.d/85-hwclock.rules", "/usr/bin/mokutil"):
             self.assertIn(f, rm)
         preset = (MK / "mkosi.extra/usr/lib/systemd/system-preset/50-agentos.preset").read_text()
         self.assertIn("enable chrony.service", preset)
