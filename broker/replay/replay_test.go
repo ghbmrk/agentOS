@@ -590,6 +590,7 @@ func TestCHG1RouteOverThePriceCeilingIsNotEvaluated(t *testing.T) {
 			t.Fatalf("run %d over the ceiling: %v", i, err)
 		}
 	}
+	settled(t, mtr, r.ms.created)
 	r.e.OverPriceCeiling("eval-none") // no run: ignored
 }
 
@@ -619,6 +620,7 @@ func TestCHG1RouteOverThePriceCeilingEndsASilentRun(t *testing.T) {
 	if !errors.Is(err, ErrOverPriceCeiling) || errors.Is(err, ErrNoReply) || time.Since(start) > 10*time.Second {
 		t.Fatalf("silent guest over the ceiling: %v after %v", err, time.Since(start))
 	}
+	settled(t, mtr, r.ms.created)
 }
 
 // The link from the vault process's ceiling refusal to the evaluator is
@@ -651,5 +653,24 @@ func TestCHG1CeilingDenialFromTheVaultProcessEndsTheRun(t *testing.T) {
 	ev = r.e
 	if _, err := r.e.Run(bg, tree, change.Probe{ID: "p1", Input: []byte("go")}); !errors.Is(err, ErrOverPriceCeiling) {
 		t.Fatalf("ceiling denial: %v", err)
+	}
+	settled(t, mtr, r.ms.created)
+}
+
+// settled waits until the meter has settled each machine's model call. A
+// run over the price ceiling ends as soon as the refusal is recorded,
+// while the metered call is still settling and saving the meter's state
+// in the test's directory. Settling refunds the call's output reservation
+// (route.DefaultMaxOutputTokens), so a settled machine shows less.
+func settled(t *testing.T, mtr *meter.Meter, ids []string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for _, id := range ids {
+		for mtr.Usage(id).Tokens >= 32000 {
+			if time.Now().After(deadline) {
+				t.Fatalf("model call of %s never settled: %+v", id, mtr.Usage(id))
+			}
+			time.Sleep(time.Millisecond)
+		}
 	}
 }

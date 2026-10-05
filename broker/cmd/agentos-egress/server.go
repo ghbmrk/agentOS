@@ -103,14 +103,16 @@ type price struct {
 // prices is this process's price table, keyed "provider/model" (-prices).
 type prices map[string]price
 
-// within reports whether every route in rule on a provider in granted is
+// within reports whether every route in rule on a usable provider is
 // priced, and no dearer in input or in output than one priced route of
-// active on a granted provider (security C1; L3 F2 on #62). Routes on other
-// providers are never called, since the router refuses them.
-func (ps prices) within(rule, active route.Rule, granted []string) bool {
+// active on a usable provider (security C1; L3 F2 on #62). A usable
+// provider is granted and allowed private data, since evaluation calls are
+// always private; the router refuses every other, so those routes are
+// never called.
+func (ps prices) within(rule, active route.Rule, granted []string, privateOK map[string]bool) bool {
 	ok := map[string]bool{}
 	for _, g := range granted {
-		ok[g] = true
+		ok[g] = privateOK[g]
 	}
 	var ceil []price
 	for _, routes := range active {
@@ -151,7 +153,7 @@ func (ev *evalRoute) serve(c *custody, machine string, w http.ResponseWriter, r 
 			"message": "the routing rule under evaluation is not usable", "type": "invalid_request_error"}})
 		return
 	}
-	if !ev.Prices.within(rule, ev.Active, ev.Grants) {
+	if !ev.Prices.within(rule, ev.Active, ev.Grants, ev.PrivateOK) {
 		b, _ := json.Marshal(modelroute.Denial{Adapter: "router", Method: r.Method, Status: http.StatusForbidden, Reason: modelroute.ReasonEvalCeiling})
 		w.Header().Set(modelroute.HeaderDenial, string(b))
 		http.Error(w, modelroute.ReasonEvalCeiling, http.StatusForbidden)

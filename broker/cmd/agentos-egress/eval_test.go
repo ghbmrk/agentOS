@@ -138,7 +138,7 @@ func TestLOOP5EvaluationRoutesStayUnderTheActivePriceCeiling(t *testing.T) {
 		t.Fatalf("a provider saw %d refused calls", calls)
 	}
 	mu.Unlock()
-	if len(denied) != 3 || denied[0].Reason != modelroute.ReasonEvalCeiling || denied[2].Reason != modelroute.ReasonEvalCeiling {
+	if len(denied) != 3 || denied[0].Reason != modelroute.ReasonEvalCeiling || denied[1].Reason != modelroute.ReasonEvalCeiling || denied[2].Reason != modelroute.ReasonEvalCeiling {
 		t.Fatalf("denials %+v", denied)
 	}
 
