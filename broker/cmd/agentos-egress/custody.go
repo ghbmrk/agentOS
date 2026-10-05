@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -87,7 +88,22 @@ var (
 	errNoSuchHost   = uerr(http.StatusNotFound, "no trusted host with that id")
 	errHostNotSaved = uerr(http.StatusInternalServerError, "could not make this PC trusted; nothing was changed")
 	errLockoutOwned = uerr(http.StatusConflict, "Another system on this PC controls the TPM, so the box can't protect a boot PIN here. Trust this PC without a PIN instead.")
+
+	// Rollback (V6): the drive's vault is older than this PC's counter.
+	errRolledBack = uerr(http.StatusConflict, "this drive's vault is older than this PC has seen, so it may be an old copy put back; nothing was unlocked. If you did not restore it, keep the drive and restore from your backup with the recovery key")
 )
+
+// noteCounterReset is the owner's notice, once, when this PC's rollback
+// counter for the vault is gone (vault.ErrCounterMissing; arbitrator
+// ruling on #45, B3). Wording fixed by that ruling.
+const noteCounterReset = "This PC's copy check was reset. If you cleared this PC's security chip, that's expected: unlock with your card to trust it again. If you didn't, an older copy of your drive may have been opened."
+
+// noteTPMSilent is the owner's notice when this PC's TPM does not answer
+// the rollback check; the detail goes to the log only (UX-45-3).
+const noteTPMSilent = "This PC's security chip didn't respond, so the box stayed locked. Restart the PC. If it happens again, move the drive to another PC and unlock there with your passphrase and a code."
+
+// noteRolledBack is the owner's notice for an old copy of the drive (V6).
+const noteRolledBack = "the vault on this drive is older than this PC has seen: it may be an old copy of the drive put back, so it stayed locked. If you did not restore it, the drive was out of your hands; restore from your backup with the recovery key."
 
 func errWrongCode(left int) error {
 	if left == 1 {
@@ -175,6 +191,9 @@ type custody struct {
 	lastAttempt time.Time
 	// needPIN: this PC is trusted with a boot PIN and waits for it.
 	needPIN bool
+	// counterReset: the owner was told this PC's rollback counter is
+	// gone (noteCounterReset); cleared when the PC is trusted again.
+	counterReset bool
 	// bootChanged: this PC is trusted but booted a path the box never
 	// approved; bootUpdated: and it runs another release than last time.
 	// The fallback unlock may then keep the PC trusted (confirmKeep).
@@ -262,6 +281,25 @@ func (c *custody) unlock(passphrase string) (string, error) {
 	c.mu.Unlock()
 
 	v, err := c.open(passphrase)
+	if err == nil && c.host != nil {
+		// V6: before the seed in it is trusted for the code check.
+		err = c.host.bind(v)
+		switch {
+		case err == nil:
+		case errors.Is(err, vault.ErrCounterMissing):
+			// Nothing here can tell whether the file is current; the
+			// owner unlocks in person (passphrase and code), warned.
+			err = nil
+			c.noteCounterReset()
+		default:
+			v.Close()
+			v = nil
+			if !errors.Is(err, vault.ErrRolledBack) {
+				log.Printf("rollback check on unlock: %v", err)
+				c.notify(noteTPMSilent)
+			}
+		}
+	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -276,6 +314,10 @@ func (c *custody) unlock(passphrase string) (string, error) {
 		if errors.Is(err, vault.ErrNoSlotOpens) {
 			c.noteWrongPassLocked(now)
 			return "", errWrongPassphrase
+		}
+		if errors.Is(err, vault.ErrRolledBack) {
+			c.notify(noteRolledBack)
+			return "", errRolledBack
 		}
 		return "", errInternal
 	}
@@ -406,6 +448,7 @@ func (c *custody) serve(v *vault.Vault) error {
 		c.timer.Stop()
 		c.timer = nil
 	}
+	v.OnWarn(c.notify)
 	c.ph, c.v, c.proxy, c.expires, c.ticket, c.needPIN = open, v, p, time.Time{}, "", false
 	c.bootChanged, c.bootUpdated, c.bootSecure = false, false, false
 	return nil
@@ -568,6 +611,10 @@ func (c *custody) put(name string, value []byte) error {
 		return errBadCredential
 	}
 	if err := c.v.Put(name, vault.KindAPIKey, value); err != nil {
+		if errors.Is(err, vault.ErrRolledBack) {
+			c.notify(noteRolledBack)
+			return errRolledBack
+		}
 		return errBadCredential
 	}
 	return nil
@@ -692,6 +739,13 @@ func (c *custody) bootTrusted() {
 	case errors.Is(err, tpmseal.ErrNeedPIN):
 		c.needPIN = true
 		c.notify("trusted host with a boot PIN: enter the PIN on the local page")
+	case errors.Is(err, vault.ErrRolledBack):
+		c.notify(noteRolledBack)
+	case errors.Is(err, vault.ErrCounterMissing):
+		c.noteCounterResetLocked()
+	case errors.Is(err, errRollbackCheck):
+		log.Printf("trusted-host unlock: %v", err)
+		c.notify(noteTPMSilent)
 	case errors.Is(err, vault.ErrNoSlotOpens):
 		c.notify("unknown host: unlock with the vault passphrase and a code")
 	case errors.Is(err, tpmseal.ErrNoPolicy), errors.Is(err, tpmseal.ErrPolicy):
@@ -699,7 +753,23 @@ func (c *custody) bootTrusted() {
 		// not approve or a tampered drive; the owner decides.
 		c.markBootChanged()
 	default:
-		c.notify("trusted-host unlock failed (" + err.Error() + "); unlock with the vault passphrase and a code")
+		log.Printf("trusted-host unlock: %v", err)
+		c.notify("This PC couldn't unlock the box by itself. Unlock with your passphrase and a code.")
+	}
+}
+
+// noteCounterReset tells the owner, once, that this PC's rollback counter
+// is gone. noteCounterResetLocked is the same with mu held.
+func (c *custody) noteCounterReset() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.noteCounterResetLocked()
+}
+
+func (c *custody) noteCounterResetLocked() {
+	if !c.counterReset {
+		c.counterReset = true
+		c.notify(noteCounterReset)
 	}
 }
 
@@ -787,6 +857,16 @@ func (c *custody) unlockPIN(pin string) error {
 	case errors.Is(err, tpmseal.ErrNoPolicy), errors.Is(err, tpmseal.ErrPolicy):
 		c.markBootChanged()
 		return errBootChanged
+	case errors.Is(err, vault.ErrRolledBack):
+		c.notify(noteRolledBack)
+		return errRolledBack
+	case errors.Is(err, vault.ErrCounterMissing):
+		c.noteCounterResetLocked()
+		return errNotTrusted
+	case errors.Is(err, errRollbackCheck):
+		log.Printf("trusted-host unlock: %v", err)
+		c.notify(noteTPMSilent)
+		return errInternal
 	default:
 		return errInternal
 	}
@@ -832,6 +912,17 @@ func (c *custody) trust(code, pin string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// The counter first: a PC is never trusted without it (V6). A PC
+	// whose counter went (ErrCounterMissing) gets a new one here.
+	if err := c.host.anchor(v); err != nil {
+		if errors.Is(err, vault.ErrRolledBack) {
+			return "", errRolledBack
+		}
+		return "", errHostNotSaved
+	}
+	c.mu.Lock()
+	c.counterReset = false
+	c.mu.Unlock()
 	name, err := c.host.enroll(v, pin)
 	if errors.Is(err, tpmseal.ErrLockoutOwned) {
 		return "", errLockoutOwned
@@ -861,6 +952,43 @@ func (c *custody) untrust(code, id string) (int, error) {
 		return 0, errNoSuchHost
 	}
 	c.notify("a trusted host was removed")
+	return n, nil
+}
+
+// reencrypt moves the open vault to a fresh data key (vault.Reencrypt,
+// recovery R10a) and, on a PC with a TPM, to a new policy key with a fresh
+// slot for this PC (with pin if it has one) and for every other trusted PC
+// that can be sealed while away (trustedHost.reencrypt). owner must prove
+// every passphrase and recovery slot. PCs that could not be resealed are
+// counted, and the owner is told to trust them again (CRED-9). The caller
+// has already checked the tier-4 approval the rotation needs; P2-8's
+// lost-card and removed-host commits call this (arbitrator ruling on #45).
+func (c *custody) reencrypt(pin string, owner ...vault.Factor) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ph != open {
+		return 0, errLocked
+	}
+	var n int
+	var err error
+	if c.host != nil {
+		n, err = c.host.reencrypt(c.v, pin, owner)
+	} else {
+		n, err = c.v.Reencrypt(owner...)
+	}
+	switch {
+	case err == nil:
+	case errors.Is(err, vault.ErrRolledBack):
+		c.notify(noteRolledBack)
+		return 0, errRolledBack
+	case errors.Is(err, errWrongPINReencrypt):
+		return 0, errWrongPIN
+	default:
+		return n, err
+	}
+	if n > 0 {
+		c.notify(fmt.Sprintf("the vault has a new key; %d other trusted PC(s) must be trusted again", n))
+	}
 	return n, nil
 }
 
