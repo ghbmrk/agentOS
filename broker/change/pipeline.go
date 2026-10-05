@@ -269,6 +269,16 @@ type state struct {
 	Cases      map[string]Case `json:"cases"`
 	// Applied lists intents whose effect took place, for Reconcile.
 	Applied map[string]bool `json:"applied"`
+	// Notices are broker notices for the digest, kept once per key
+	// (Notice).
+	Notices []notice `json:"notices,omitempty"`
+}
+
+// notice is one broker digest line; Seen once the digest listed it.
+type notice struct {
+	Key  string `json:"key"`
+	Line string `json:"line"`
+	Seen bool   `json:"seen,omitempty"`
 }
 
 func (s *state) copyCases() map[string]Case {
