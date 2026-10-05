@@ -55,6 +55,23 @@ func (f *forgotten) has(goal string) bool {
 	return ok
 }
 
+// goals lists the tombstoned goals, oldest first.
+func (f *forgotten) goals() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, 0, len(f.st))
+	for g := range f.st {
+		out = append(out, g)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !f.st[out[i]].Equal(f.st[out[j]]) {
+			return f.st[out[i]].Before(f.st[out[j]])
+		}
+		return out[i] < out[j]
+	})
+	return out
+}
+
 // add tombstones goal and saves. On a failed save the goal stays
 // tombstoned in memory, and the next add saves it again.
 func (f *forgotten) add(goal string) error {
