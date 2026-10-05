@@ -36,7 +36,9 @@ var controlPath = map[string][]string{
 	// The composition root also opens the machine plane (below) and hands
 	// it to admission as a Preempter, and serves the guest plane (below)
 	// on each machine's socket.
-	"cmd/agentosd": {"daemon", "cgroup", "vm", "vm/gvisor", "guest", "meter"},
+	// It forwards each machine's model route to the vault process
+	// (modelroute, P2-4) and journals the denials that come back.
+	"cmd/agentosd": {"daemon", "cgroup", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies
@@ -68,7 +70,10 @@ var guestPlane = map[string]struct {
 }{
 	"guest": {[]string{"journal", "meter", "route"}, []string{"os/exec", "plugin", "unsafe", "C"}},
 	"meter": {nil, []string{"net", "os/exec", "plugin", "unsafe", "C"}},
-	"route": {nil, []string{"net", "os/exec", "plugin", "unsafe", "C"}},
+	// modelroute forwards to the vault process over its Unix socket and
+	// reports usage to the meter; never the vault or the proxy.
+	"modelroute": {[]string{"meter"}, []string{"os/exec", "plugin", "unsafe", "C"}},
+	"route":      {nil, []string{"net", "os/exec", "plugin", "unsafe", "C"}},
 	// Replay (LOOP-5) serves replay machines through a guest plane of its
 	// own: no journal writes, no executors, no network clients.
 	"replay": {[]string{"admission", "change", "guest", "journal", "meter", "vm"}, []string{"net", "os/exec", "plugin", "unsafe", "C"}},

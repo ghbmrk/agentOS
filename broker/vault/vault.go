@@ -7,9 +7,10 @@
 // imports this one. A Secret formats as a placeholder, so a value printed or
 // serialized by mistake shows nothing.
 //
-// The data key is supplied by the caller. Wrapping it under the TPM,
-// passphrase, and recovery-key slots is CRED-8 (P2-4); this package only
-// uses it.
+// The data key is wrapped under key slots in a keys file beside the vault
+// (keyslot.go, CRED-8): CreateSealed and OpenSealed never let it reach the
+// drive. Create and Open take a raw key and are for tests and for the slot
+// code itself.
 package vault
 
 import (
@@ -237,7 +238,13 @@ func (v *Vault) save() error {
 	if err != nil {
 		return err
 	}
-	dir := filepath.Dir(v.path)
+	return writeAtomic(v.path, raw)
+}
+
+// writeAtomic replaces path with raw, mode 0600: a crash leaves either the
+// old file or the new one.
+func writeAtomic(path string, raw []byte) error {
+	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".vault-*")
 	if err != nil {
 		return err
@@ -258,7 +265,7 @@ func (v *Vault) save() error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp.Name(), v.path); err != nil {
+	if err := os.Rename(tmp.Name(), path); err != nil {
 		return err
 	}
 	d, err := os.Open(dir)
