@@ -692,19 +692,44 @@ func (m *Manager) take(ctx context.Context, id string, t Tier) (Snapshot, error)
 }
 
 // takeLocked pauses the machine so the layer copy is consistent with memory,
-// copies it, checkpoints memory for Full, and resumes.
-func (m *Manager) takeLocked(ctx context.Context, mc *machine, t Tier) (s Snapshot, err error) {
+// copies it, checkpoints memory for Full, and resumes. A snapshot is
+// published only when the whole operation succeeds: if the resume fails
+// (a preemption that killed the sandbox after the image was whole, or any
+// other cause), the snapshot just taken is withdrawn, so an error never
+// leaves one behind (Security R2 on #124).
+func (m *Manager) takeLocked(ctx context.Context, mc *machine, t Tier) (Snapshot, error) {
 	if err := m.cfg.Runtime.Pause(ctx, mc.ID); err != nil {
 		return Snapshot{}, err
 	}
-	defer func() {
-		// Resume even if the caller gave up, or the guest stays paused while
-		// recorded as running.
-		if rerr := m.cfg.Runtime.Resume(context.WithoutCancel(ctx), mc.ID); rerr != nil && err == nil {
-			err = rerr
+	prev := mc.Last
+	s, err := m.capture(ctx, mc, t)
+	// Resume even if the caller gave up, or the guest stays paused while
+	// recorded as running.
+	rerr := m.cfg.Runtime.Resume(context.WithoutCancel(ctx), mc.ID)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	if rerr != nil {
+		m.withdrawLocked(mc, s.ID, prev)
+		return Snapshot{}, rerr
+	}
+	return s, nil
+}
+
+// withdrawLocked unpublishes snapshot id, just taken of mc, and deletes it;
+// mc.mu is held. Like a prune, the record goes first, then meta.json, so a
+// crash leaves a directory that load drops.
+func (m *Manager) withdrawLocked(mc *machine, id, prev string) {
+	if err := m.unpublishSnapshot(id); err != nil {
+		log.Printf("vm: %s: withdrawing snapshot %s: %v", mc.ID, id, err)
+	}
+	os.RemoveAll(m.snapDir(id))
+	if mc.Last == id {
+		mc.Last = prev
+		if err := m.saveMachine(mc); err != nil {
+			log.Printf("vm: %s: %v", mc.ID, err)
 		}
-	}()
-	return m.capture(ctx, mc, t)
+	}
 }
 
 // capture writes a snapshot of a paused (or stopped) machine.
