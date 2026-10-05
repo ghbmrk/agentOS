@@ -211,7 +211,11 @@ type file struct {
 	Questions []*entry `json:"questions"`
 	Digest    []string `json:"digest"`
 	Refused   int      `json:"refused,omitempty"`
-	Sends     []send   `json:"sends,omitempty"`
+	// NotAskedLines and NotAskedMore count not-asked digest lines pending
+	// and those past maxNotAskedLines, which the digest only counts.
+	NotAskedLines int    `json:"not_asked_lines,omitempty"`
+	NotAskedMore  int    `json:"not_asked_more,omitempty"`
+	Sends         []send `json:"sends,omitempty"`
 }
 
 // send is one owner text, kept an hour for pacing (CH-15). Others are
@@ -233,7 +237,10 @@ type Book struct {
 	// refused counts answers refused as code- or key-shaped since the last
 	// digest: a guard hit the owner should see (security R1 on #71).
 	refused int
-	sends   []send
+	// notAskedLines are the not-asked lines pending in digest; past
+	// maxNotAskedLines, notAskedMore counts the rest.
+	notAskedLines, notAskedMore int
+	sends                       []send
 	// loaded is set when questions came from disk; grace, set at the first
 	// trusted tick after that, is when lapsing resumes, so owner replies
 	// the carrier queued while the box was down arrive first.
@@ -280,7 +287,10 @@ func New(cfg Config) (*Book, error) {
 	// texts an hour carry at most MaxPerText questions each, so keeping
 	// them for less than tags/(SendsPerHour*MaxPerText) hours means a tag
 	// is always free for an asker under its open cap (P3-8 Q5).
-	if maxKeep := time.Duration((numTags-1)/(cfg.SendsPerHour*MaxPerText)) * time.Hour; cfg.Keep > maxKeep {
+	// Open questions hold tags too, and a question texted in the hour
+	// before the oldest kept one closes inside the window, hence the
+	// margins (S1 on #117).
+	if maxKeep := time.Duration((numTags-2*cfg.MaxOpen)/(cfg.SendsPerHour*MaxPerText)-1) * time.Hour; cfg.Keep > maxKeep {
 		cfg.Keep = maxKeep
 	}
 	b := &Book{cfg: cfg}
@@ -298,6 +308,7 @@ func New(cfg Config) (*Book, error) {
 			return nil, fmt.Errorf("question: %s: %v", cfg.Path, err)
 		}
 		b.qs, b.next, b.digest, b.sends, b.refused = f.Questions, f.Next, f.Digest, f.Sends, f.Refused
+		b.notAskedLines, b.notAskedMore = f.NotAskedLines, f.NotAskedMore
 		b.loaded = len(b.qs) > 0
 	}
 	return b, nil
@@ -308,7 +319,8 @@ func (b *Book) persist() error {
 	if b.cfg.Path == "" {
 		return nil
 	}
-	raw, err := json.Marshal(file{Next: b.next, Questions: b.qs, Digest: b.digest, Sends: b.sends, Refused: b.refused})
+	raw, err := json.Marshal(file{Next: b.next, Questions: b.qs, Digest: b.digest, Sends: b.sends, Refused: b.refused,
+		NotAskedLines: b.notAskedLines, NotAskedMore: b.notAskedMore})
 	if err != nil {
 		return err
 	}
@@ -412,6 +424,9 @@ func (b *Book) normalize(s Spec) (Spec, error) {
 		if codeShaped(t) {
 			return out, errors.New("question: no 6 to 8 digit numbers; they read as codes")
 		}
+		if tagShape.MatchString(t) {
+			return out, errors.New("question: no question tags (like Q104); the owner's answer to one question must never be steered to another")
+		}
 		if replyShape.MatchString(t) {
 			return out, errors.New("question: no owner-channel replies (YES, NO, UNDO, RESUME... and an ID or code)")
 		}
@@ -509,6 +524,11 @@ var controlWords = map[string]bool{
 	"STOP": true, "STATUS": true, "HELP": true, "YES": true, "NO": true, "UNDO": true, "MORE": true,
 	"PUBLIC": true, "RUN": true, "RESUME": true, "UNLOCK": true, "PAUSE": true, "REVOKE": true,
 }
+
+// tagShape is a question tag. Questions from several lineages can share a
+// text (PQ1), so a question naming a tag could steer the owner's answer
+// to another lineage's question (security F1 on #117, CH-12, Q1).
+var tagShape = regexp.MustCompile(`(?i)\bq[1-9][0-9]{2}\b`)
 
 // replyShape is an owner-channel reply word with an ID or code after it:
 // a question must not hand the owner a reply to copy (CH-12).
@@ -904,12 +924,25 @@ func (b *Book) lapseLocked(e *entry, now time.Time) {
 		e.ID, clip(e.Text, 60), b.clock(now, e.Deadline), e.Default))
 }
 
+// maxNotAsked is how many not-asked questions are kept for status reads;
+// older ones are dropped (S2 on #117). Their digest lines are bounded by
+// maxNotAskedLines, past which the digest counts them.
+const (
+	maxNotAsked      = 32
+	maxNotAskedLines = 8
+)
+
 // notAskedLocked closes e, never texted, past its ask-by (PQ2), and
 // queues its digest line. The owner never saw its tag, so the line has
 // none.
 func (b *Book) notAskedLocked(e *entry, now time.Time) {
 	e.State, e.Closed = NotAsked, now
-	b.digest = append(b.digest, fmt.Sprintf(`Not asked: the agent's question "%s" was held (texts paced, or quiet hours) past %s, so it went on without it.`,
+	if b.notAskedLines >= maxNotAskedLines {
+		b.notAskedMore++
+		return
+	}
+	b.notAskedLines++
+	b.digest = append(b.digest, fmt.Sprintf(`Not asked: the agent's question "%s" was held past %s (texts paced or quiet hours), so the agent went ahead without asking.`,
 		clip(e.Text, 60), b.clock(now, e.Asked.Add(e.AskWithin))))
 }
 
@@ -956,6 +989,17 @@ func (b *Book) Tick(ctx context.Context) {
 		keep = append(keep, e)
 	}
 	b.qs = keep
+	// Not-asked questions hold no tag, so the tag bound does not limit
+	// them; keep only the newest maxNotAsked (S2 on #117).
+	for n, i := 0, len(b.qs)-1; i >= 0; i-- {
+		if b.qs[i].State != NotAsked {
+			continue
+		}
+		if n++; n > maxNotAsked {
+			b.qs = append(b.qs[:i], b.qs[i+1:]...)
+			changed = true
+		}
+	}
 	if changed {
 		b.wakeLocked()
 		b.save("tick")
@@ -990,14 +1034,17 @@ func (b *Book) TakeDigest() []string {
 		}
 		out = append(out, n+" to the agent's questions held a code or key and were not passed on. If that was not you, reply STOP.")
 	}
+	if b.notAskedMore > 0 {
+		out = append(out, fmt.Sprintf("Not asked: %d more of the agent's questions were held (texts paced or quiet hours), so the agent went ahead without asking.", b.notAskedMore))
+	}
 	if len(out) == 0 {
 		return nil
 	}
-	digest, refused := b.digest, b.refused
-	b.digest, b.refused = nil, 0
+	digest, refused, lines, more := b.digest, b.refused, b.notAskedLines, b.notAskedMore
+	b.digest, b.refused, b.notAskedLines, b.notAskedMore = nil, 0, 0, 0
 	if err := b.persist(); err != nil {
 		// Keep them for the next digest rather than lose them on restart.
-		b.digest, b.refused = digest, refused
+		b.digest, b.refused, b.notAskedLines, b.notAskedMore = digest, refused, lines, more
 	}
 	return out
 }
@@ -1055,6 +1102,15 @@ func (b *Book) Answer(ctx context.Context, text string) (reply string, ok bool) 
 		ans = flatten(text)
 	} else {
 		return "", false
+	}
+	for _, w := range strings.Fields(ans) {
+		if m := tagRE.FindStringSubmatch(w); m != nil {
+			if o := b.byIDLocked("Q" + m[1]); o != nil && o != e {
+				// One answer per text, so the owner's words for one
+				// question never land in another (UX-117-1).
+				return fmt.Sprintf("Send one answer per question, like %s %s.", e.ID, e.Default), true
+			}
+		}
 	}
 	switch {
 	case ans == "":

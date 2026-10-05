@@ -675,7 +675,9 @@ func TestPacingIsFairAndSurvivesARestart(t *testing.T) {
 // keeping them under tags/SendsPerHour hours leaves a tag free.
 func TestKeepNeverExhaustsTags(t *testing.T) {
 	r := newRig(t, func(c *Config) { c.SendsPerHour = 60; c.Keep = 30 * 24 * time.Hour })
-	if got := r.b.cfg.Keep; time.Duration(r.b.cfg.SendsPerHour*MaxPerText)*got/time.Hour >= numTags {
+	// Closes in Keep plus the hour before it, plus every open question,
+	// must leave a tag free (S1 on #117).
+	if got := r.b.cfg.Keep; r.b.cfg.SendsPerHour*MaxPerText*(int(got/time.Hour)+1)+r.b.cfg.MaxOpen >= numTags {
 		t.Fatalf("keep %v with %d sends an hour can hold every tag", got, r.b.cfg.SendsPerHour)
 	}
 }

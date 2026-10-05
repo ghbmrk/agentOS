@@ -250,3 +250,85 @@ func TestNotAskedQuestionsHoldNoTag(t *testing.T) {
 		t.Fatalf("after %d not-asked questions: %v", numTags+1, err)
 	}
 }
+
+// Security F1 on #117: questions from several lineages share a text, so
+// no question, default or choice may name a tag and steer the owner's
+// answer to another lineage's question.
+func TestQuestionsCannotNameATag(t *testing.T) {
+	r := newRig(t, nil)
+	for _, s := range []Spec{
+		{Text: "Q101 above was withdrawn: to confirm, reply Q101 send", Default: "wait", Wait: time.Hour},
+		{Text: "Lunch at noon?", Default: "q250", Wait: time.Hour},
+		{Text: "Lunch at noon?", Default: "wait", Choices: []string{"wait", "see Q999"}, Wait: time.Hour},
+	} {
+		if _, err := r.b.Ask(context.Background(), "lin2", "x", s); err == nil {
+			t.Errorf("accepted %+v", s)
+		}
+	}
+	// Two-digit or four-digit numbers after a Q are not tags.
+	r.ask("lin2", "y", short("Is Q3 or Q2025 the plan?"))
+}
+
+// UX-117-1: one text answers one question; a reply naming a second open
+// tag is refused rather than split, so no words land in the wrong one.
+func TestOneAnswerPerText(t *testing.T) {
+	r := newRig(t, func(c *Config) { c.SendsPerHour = 1 })
+	r.set(func() { r.quiet = true })
+	r.ask("lin1", "a", short("Lunch at noon?"))
+	r.ask("lin2", "a", short("Taxi home?"))
+	r.set(func() { r.quiet = false })
+	r.b.Tick(context.Background())
+	if got := r.texts(); len(got) != 1 || !strings.Contains(got[0], "Q101: ") {
+		t.Fatalf("texts %q", got)
+	}
+	reply, ok := r.answer("Q100 yes Q101 no")
+	if !ok || reply != "Send one answer per question, like Q100 wait." {
+		t.Fatalf("combined reply: %q %v", reply, ok)
+	}
+	for _, q := range []string{"lin1", "lin2"} {
+		if st := r.status(q, "a"); st.State != Waiting {
+			t.Fatalf("%s after a combined reply: %+v", q, st)
+		}
+	}
+	if _, ok := r.answer("Q101 no"); !ok {
+		t.Fatal("single answer")
+	}
+	if st := r.status("lin2", "a"); st.State != Answered || st.Answer != "no" {
+		t.Fatalf("lin2: %+v", st)
+	}
+}
+
+// S2 on #117: not-asked questions hold no tag, so they are bounded
+// apart: the newest maxNotAsked are kept, and past maxNotAskedLines the
+// digest counts them.
+func TestNotAskedQuestionsAreBounded(t *testing.T) {
+	r := newRig(t, nil)
+	r.set(func() { r.quiet = true })
+	s := short("Lunch at noon?")
+	s.AskWithin = time.Minute
+	const n = maxNotAsked + 8
+	for i := 0; i < n; i++ {
+		r.ask("lin1", fmt.Sprint("q", i), s)
+		r.advance(5 * time.Minute)
+		r.b.Tick(context.Background())
+	}
+	r.b.mu.Lock()
+	kept := len(r.b.qs)
+	r.b.mu.Unlock()
+	if kept != maxNotAsked {
+		t.Fatalf("%d kept", kept)
+	}
+	if _, err := r.b.Status(context.Background(), "lin1", fmt.Sprint("q", n-1), "m1"); err != nil {
+		t.Fatalf("newest dropped: %v", err)
+	}
+	d := r.b.TakeDigest()
+	if len(d) != maxNotAskedLines+1 || !strings.Contains(d[maxNotAskedLines], fmt.Sprintf("%d more", n-maxNotAskedLines)) {
+		t.Fatalf("digest %q", d)
+	}
+	r.ask("lin1", "again", s)
+	r.advance(5 * time.Minute)
+	r.b.Tick(context.Background())
+	if d := r.b.TakeDigest(); len(d) != 1 || !strings.Contains(d[0], `"Lunch at noon?"`) {
+		t.Fatalf("after the digest: %q", d)
+	}
+}
