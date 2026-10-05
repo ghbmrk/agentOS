@@ -36,6 +36,14 @@ func (q *questions) pending() bool {
 	return b != nil && b.Open()
 }
 
+// restricted reports whether the box clock check restricts time-sensitive
+// checks (TIM-1): the sleeper's hours and its longest sleep read the box
+// clock, so the agent does not sleep then (security R1 on #149).
+func (q *questions) restricted() bool {
+	g := q.g.Load()
+	return g != nil && g.Status().Restricted()
+}
+
 // wait returns once the loops open started have stopped (cancel their
 // ctx first) and the guard's queued notices are delivered. Flushing only
 // after the loops stop keeps Flush from racing the guard's own checks.

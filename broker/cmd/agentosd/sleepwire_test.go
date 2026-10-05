@@ -197,3 +197,20 @@ func TestParseSleepHours(t *testing.T) {
 		}
 	}
 }
+
+// PE7 (UX nit on #149): the owner's quiet hours, where set, are the
+// agent's sleep hours; -sleep-hours applies otherwise.
+func TestOwnerQuietHoursAreTheSleepHours(t *testing.T) {
+	never := func(time.Time) bool { return false }
+	always := func(time.Time) bool { return true }
+	if ownerOr(never, always)(time.Now()) {
+		t.Fatal("the flag's hours won over the owner's")
+	}
+	if !ownerOr(nil, always)(time.Now()) {
+		t.Fatal("no owner hours: the flag's did not apply")
+	}
+	var q questions
+	if q.restricted() {
+		t.Fatal("no clock check yet: restricted")
+	}
+}

@@ -124,6 +124,7 @@ func openSleeper(ctx context.Context, deps sleepDeps) *sleeper {
 			"gate":     d.Gate().Holding,
 			"question": deps.qs.pending,
 			"handed":   func() bool { return deps.plane.OwnerPending(deps.id) },
+			"clock":    deps.qs.restricted,
 		},
 		Stopped: d.Engine().Stopped,
 		Journal: d.Engine().RecordSleep,
@@ -188,4 +189,19 @@ func (s *sleeper) whileAwake(f func() error) error {
 		return nil
 	}
 	return f()
+}
+
+// recoverSleep wakes an agent left on a sleep checkpoint on a box that no
+// longer sleeps it, or deletes the checkpoint (security R2 on #149).
+func recoverSleep(ctx context.Context, m sleepMachines, d *daemon.Daemon, id string) {
+	newSleeper(sleepConfig{Machines: m, ID: id, Journal: d.Engine().RecordSleep}).recover(ctx)
+}
+
+// ownerOr is the owner's quiet hours where set, else hours (UX nit on
+// #149): the agent sleeps when the owner asked not to be reached.
+func ownerOr(owner, hours func(time.Time) bool) func(time.Time) bool {
+	if owner != nil {
+		return owner
+	}
+	return hours
 }

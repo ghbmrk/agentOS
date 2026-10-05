@@ -455,7 +455,7 @@ func main() {
 						if err = replayFits(cfg.Admission.CapacityMB, cfg.Admission.HeadroomMB, agentMemMB, replayMemMB); err != nil {
 							lp.noRoom.Store(true) // STATUS and LEARNING ON say so
 							// The agent sleeps while the box evaluates (PE7).
-							sl := openSleeper(ctx, sleepDeps{d: d, m: m, plane: plane, qs: qs, agent: agent, id: agentMachine, hours: sleepHours})
+							sl := openSleeper(ctx, sleepDeps{d: d, m: m, plane: plane, qs: qs, agent: agent, id: agentMachine, hours: ownerOr(cfg.Grants.Quiet, sleepHours)})
 							lp.sleep.Store(sl)
 							agent.sleep.Store(sl)
 							if nerr := lp.pipe.Notice("pe7:sleep-mode", sleepDigest); nerr != nil {
@@ -480,6 +480,12 @@ func main() {
 				if err != nil {
 					log.Printf("no agent machine kept running: %v", err)
 				} else {
+					if agent.sleep.Load() == nil {
+						// A box that no longer sleeps its agent may still
+						// hold a sleep checkpoint from before (security R2
+						// on #149).
+						recoverSleep(ctx, m, d, agentMachine)
+					}
 					k := &keeper{m: m, id: agentMachine, spec: spec, every: 30 * time.Second, logf: log.Printf, status: agentWaiting, sleep: agent.sleep.Load()}
 					agentStatus.k.Store(k)
 					go k.run(ctx)

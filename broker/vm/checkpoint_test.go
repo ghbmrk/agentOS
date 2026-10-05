@@ -238,3 +238,96 @@ func TestPE7SleepFailingToStopLeavesNoCheckpoint(t *testing.T) {
 		t.Fatalf("Last %q after a failed stop", mc.Last)
 	}
 }
+
+// PE7 (L3 on #147): no snapshot can be taken of a sleeping machine, so
+// nothing newer can displace its checkpoint while it sleeps, and the wake
+// still restores it.
+func TestPE7SleepingMachineTakesNoSnapshot(t *testing.T) {
+	e := newEnv(t, 4096)
+	e.create("agent", admission.Foreground, 1600)
+	e.rt.work("agent", 7)
+	cp := sleep(t, e, "agent")
+	if _, err := e.m.Checkpoint(bg, "agent"); !errors.Is(err, ErrState) {
+		t.Fatalf("checkpoint of a sleeping machine: %v", err)
+	}
+	if _, err := e.m.Step(bg, "agent"); !errors.Is(err, ErrState) {
+		t.Fatalf("step of a sleeping machine: %v", err)
+	}
+	w, err := e.m.ResumeFromCheckpoint(bg, "agent", cp.ID)
+	if err != nil || !w.Restored {
+		t.Fatalf("wake: %+v %v", w, err)
+	}
+}
+
+// PE7 (L3 on #147): another machine's sleep checkpoint is neither
+// restored into this one nor deleted; its own machine still wakes from it.
+func TestPE7AnotherMachinesSleepCheckpointIsLeftAlone(t *testing.T) {
+	e := newEnv(t, 4096)
+	e.create("agent", admission.Foreground, 1600)
+	e.create("other", admission.Accepted, 500)
+	e.rt.work("other", 5)
+	sleep(t, e, "agent")
+	ocp := sleep(t, e, "other")
+	w, err := e.m.ResumeFromCheckpoint(bg, "agent", ocp.ID)
+	if err != nil || w.Restored || w.Cold != ColdNotSleep {
+		t.Fatalf("agent from other's checkpoint: %+v %v", w, err)
+	}
+	if _, err := e.m.Snapshot(ocp.ID); err != nil {
+		t.Fatal("another machine's sleep checkpoint was deleted")
+	}
+	w, err = e.m.ResumeFromCheckpoint(bg, "other", ocp.ID)
+	if err != nil || !w.Restored {
+		t.Fatalf("other's own wake: %+v %v", w, err)
+	}
+	if mem, _ := e.rt.memOf("other"); mem != 5 {
+		t.Fatalf("other's memory %d, want 5", mem)
+	}
+}
+
+// PE7 (L3 on #147): a replay machine that exists is still never put to
+// sleep, and keeps running.
+func TestPE7ReplayMachineNeverSleeps(t *testing.T) {
+	e := newEnv(t, 4096)
+	id := EvalPrefix + "r1"
+	_, err := e.m.CreateSeeded(bg, id, Spec{Image: "base", Class: admission.Experiment, MemMB: 100}, nil)
+	must(t, err)
+	if mc, _ := e.m.Get(id); mc.State != Running {
+		must(t, e.m.Resume(bg, id))
+	}
+	if _, err := e.m.CheckpointAndStop(bg, id); err == nil {
+		t.Fatal("a replay machine was put to sleep")
+	}
+	if mc, _ := e.m.Get(id); mc.State != Running {
+		t.Fatalf("replay machine %s after a refused sleep", mc.State)
+	}
+	if got := e.m.Snapshots(id); len(got) != 0 {
+		t.Fatalf("snapshots %v left by a refused sleep", ids(got))
+	}
+}
+
+// PE7 (L3 on #147): a file's mode is part of the checkpoint's hash, so a
+// changed mode is a changed checkpoint: the wake is cold.
+func TestPE7ModeChangeFailsTheHash(t *testing.T) {
+	e := newEnv(t, 4096)
+	e.create("agent", admission.Foreground, 1600)
+	e.rt.work("agent", 7)
+	e.guestWrite("agent", "notes", "kept")
+	cp := sleep(t, e, "agent")
+	var f string
+	must(t, filepath.WalkDir(filepath.Join(e.m.snapDir(cp.ID), "fs"), func(p string, d os.DirEntry, err error) error {
+		if err == nil && d.Type().IsRegular() && f == "" {
+			f = p
+		}
+		return err
+	}))
+	if f == "" {
+		t.Fatal("no file in the checkpoint")
+	}
+	fi, err := os.Stat(f)
+	must(t, err)
+	must(t, os.Chmod(f, fi.Mode().Perm()^0o001))
+	w, err := e.m.ResumeFromCheckpoint(bg, "agent", cp.ID)
+	if err != nil || w.Restored || w.Cold != ColdChanged {
+		t.Fatalf("woke %+v, %v: want cold (%s)", w, err, ColdChanged)
+	}
+}
