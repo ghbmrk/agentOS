@@ -664,31 +664,75 @@ func TestLoopBuilder(t *testing.T) {
 	}
 }
 
-// W3 step 3a: in the box the journal may keep no values at all (the
-// daemon's default redactor stores a mark for every free text). With the
-// mark reported as redacted, no skill or procedure is compiled from such
-// runs, so a placeholder never becomes a literal.
-func TestAFullyRedactedJournalCompilesNothing(t *testing.T) {
-	r := &rig{t: t, now: time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC), dev: map[string]bool{}}
-	eng, err := journal.Open(&journal.MemStore{}, r, map[string]journal.Executor{"task": ok{}},
-		func(s string) string {
-			if s == "" {
-				return ""
+// W3 step 3a (security C-3a-1, C-3a-2): in the box the journal may keep
+// no values: the daemon's redactor stores a mark for every free text, the
+// vault's redactor its placeholder for a secret, and the journal clips
+// long text. Runs holding any of them compile into no skill or procedure,
+// and the loop builder offers no job for them, so nothing is proposed.
+func TestARedactedJournalCompilesNothing(t *testing.T) {
+	redacted := func(s string) bool { return strings.Contains(s, "[redacted]") || strings.Contains(s, "[REDACTED]") }
+	for name, red := range map[string]func(string) string{
+		"daemon mark":       func(string) string { return "[redacted]" },
+		"vault placeholder": func(s string) string { return strings.ReplaceAll(s, "@", "[REDACTED]@") },
+		"clip mark":         func(s string) string { return s + "…[cut 9 bytes, sha256 00]" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := &rig{t: t, now: time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC), dev: map[string]bool{}}
+			eng, err := journal.Open(&journal.MemStore{}, r, map[string]journal.Executor{"task": ok{}},
+				func(s string) string {
+					if s == "" {
+						return ""
+					}
+					return red(s)
+				}, journal.WithClock(func() time.Time { return r.now }))
+			if err != nil {
+				t.Fatal(err)
 			}
-			return "[redacted]"
-		}, journal.WithClock(func() time.Time { return r.now }))
-	if err != nil {
-		t.Fatal(err)
+			r.eng = eng
+			for i, to := range []string{"ann@example.test", "bo@example.test", "cy@example.test", "dee@example.test"} {
+				r.accepted(fmt.Sprint("g", i), to, 40+i)
+			}
+			c, err := New(Config{Journal: r.eng, Cases: r, Redacted: redacted})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cs := c.Candidates(change.Tree{}); len(cs) != 0 {
+				t.Fatalf("compiled from redacted runs: %+v", cs)
+			}
+			br := loops.Brief{Hypothesis: loops.Hypothesis{Signal: loops.SignalRepeat, Evidence: r.eng.List()}}
+			if (LoopBuilder{c}).Ready(br) {
+				t.Fatal("a job would run on redacted runs")
+			}
+		})
 	}
-	r.eng = eng
-	for i, to := range []string{"ann@example.test", "bo@example.test", "cy@example.test", "dee@example.test"} {
+}
+
+// The in-process builder reads bounded evidence only, and stops on a
+// done context (arbitrator on W3 step 3a).
+func TestTheLoopBuilderIsBounded(t *testing.T) {
+	r := newRig(t)
+	for i, to := range []string{"ann@example.test", "bo@example.test", "cy@example.test"} {
 		r.accepted(fmt.Sprint("g", i), to, 40+i)
 	}
-	c, err := New(Config{Journal: r.eng, Cases: r, Redacted: func(s string) bool { return strings.Contains(s, "[redacted]") }})
-	if err != nil {
-		t.Fatal(err)
+	b := LoopBuilder{r.compiler()}
+	br := loops.Brief{Hypothesis: loops.Hypothesis{Signal: loops.SignalRepeat, Evidence: r.eng.List()}}
+	if !b.Ready(br) {
+		t.Fatal("bounded evidence is not ready")
 	}
-	if cs := c.Candidates(change.Tree{}); len(cs) != 0 {
-		t.Fatalf("compiled from redacted runs: %+v", cs)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := b.Build(ctx, br); !errors.Is(err, context.Canceled) {
+		t.Fatalf("build on a done context: %v", err)
+	}
+	big := br
+	big.Hypothesis.Evidence = make([]journal.Status, 0, MaxEvidence+1)
+	for len(big.Hypothesis.Evidence) <= MaxEvidence {
+		big.Hypothesis.Evidence = append(big.Hypothesis.Evidence, br.Hypothesis.Evidence...)
+	}
+	if b.Ready(big) {
+		t.Fatal("evidence over MaxEvidence is ready")
+	}
+	if _, err := b.Build(context.Background(), big); !errors.Is(err, ErrNoSkill) {
+		t.Fatalf("build over MaxEvidence: %v", err)
 	}
 }

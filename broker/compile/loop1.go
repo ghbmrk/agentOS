@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/ghbmrk/agentos/broker/change"
+	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/loops"
 )
 
@@ -13,8 +14,41 @@ import (
 // sets the candidate's source, origin, and public mark itself.
 type LoopBuilder struct{ C *Compiler }
 
-func (b LoopBuilder) Build(_ context.Context, br loops.Brief) (change.Candidate, error) {
+func (b LoopBuilder) Build(ctx context.Context, br loops.Brief) (change.Candidate, error) {
+	if err := ctx.Err(); err != nil {
+		return change.Candidate{}, err
+	}
+	if !bounded(br.Hypothesis.Evidence) {
+		return change.Candidate{}, ErrNoSkill
+	}
 	return b.C.BuildSkill(br.Hypothesis.Evidence)
+}
+
+// Bounds on the evidence the in-process builder reads, so a pathological
+// journal cannot stall the daemon (arbitrator on W3 step 3a): a hypothesis
+// with more is not compiled.
+const (
+	MaxEvidence      = 256
+	MaxEvidenceBytes = 1 << 20
+)
+
+// bounded reports evidence within MaxEvidence statuses and
+// MaxEvidenceBytes of params and recipients.
+func bounded(ev []journal.Status) bool {
+	if len(ev) > MaxEvidence {
+		return false
+	}
+	n := 0
+	for _, s := range ev {
+		anyString(s.Intent.Params, s.Intent.Recipients, func(v string) bool {
+			n += len(v)
+			return false
+		})
+		if n > MaxEvidenceBytes {
+			return false
+		}
+	}
+	return true
 }
 
 var _ loops.Builder = LoopBuilder{}
@@ -23,6 +57,9 @@ var _ loops.Builder = LoopBuilder{}
 // one shape to compile (no model calls); until then Loop 1 waits for more
 // supporting tasks instead of running a job that would yield ErrNoSkill.
 func (b LoopBuilder) Ready(br loops.Brief) bool {
+	if !bounded(br.Hypothesis.Evidence) {
+		return false
+	}
 	_, err := b.C.BuildSkill(br.Hypothesis.Evidence)
 	return err == nil
 }

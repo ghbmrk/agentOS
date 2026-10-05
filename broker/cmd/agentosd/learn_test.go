@@ -21,6 +21,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/loops"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/routerule"
+	"github.com/ghbmrk/agentos/broker/vault"
 )
 
 // REQ: LOOP-0, LOOP-1, LOOP-2, LOOP-6, CHG-2, ADP-4
@@ -442,7 +443,10 @@ func TestLoop1BuildsCompiledSkillsOnly(t *testing.T) {
 	if !lp.builder.Handles(loops.SignalRepeat) {
 		t.Fatal("no skill compiler")
 	}
-	if !journalRedacted("to "+daemon.Redacted) || journalRedacted("ann@example.test") {
+	if vaultPlaceholder != vault.Placeholder {
+		t.Fatalf("the vault's placeholder is %q", vault.Placeholder)
+	}
+	if !journalRedacted("to "+daemon.Redacted) || !journalRedacted("key "+vault.Placeholder) || journalRedacted("ann@example.test") {
 		t.Fatal("the daemon's redaction mark is not read as redacted")
 	}
 }

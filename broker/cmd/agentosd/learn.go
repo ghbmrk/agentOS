@@ -166,8 +166,16 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	return l, nil
 }
 
-// journalRedacted reports a journal value the daemon's redactor wrote.
-func journalRedacted(v string) bool { return strings.Contains(v, daemon.Redacted) }
+// vaultPlaceholder is the vault redactor's mark for a secret
+// (vault.Placeholder; agentosd does not link the vault).
+const vaultPlaceholder = "[REDACTED]"
+
+// journalRedacted reports a journal value a redactor wrote: the daemon's
+// mark for any free text or the vault's for a secret (security C-3a-1;
+// compile reads the journal's clip mark itself).
+func journalRedacted(v string) bool {
+	return strings.Contains(v, daemon.Redacted) || strings.Contains(v, vaultPlaceholder)
+}
 
 // learningOffText answers loop settings and ends HELP when the learning
 // plane could not start (L3 S3 on #90). It names everything the loop texts
