@@ -894,6 +894,9 @@ func (c *Channel) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case m := <-c.cfg.Modem.Inbox():
+			if m.Alphanumeric {
+				continue // a sender ID, not a number: never the owner
+			}
 			if out, ok := c.stopNow(ctx, m.From, m.Text); ok {
 				send(m.From, out)
 				continue
