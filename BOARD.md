@@ -43,3 +43,9 @@ P1-4 follow-ups (from the #23 review), for P1-7 or the loop scheduler:
 | ID | Package | Needs | State |
 |---|---|---|---|
 | P2-7 | Provider adapters: model router (CAP-9) over two API routes, OpenAI and Anthropic, behind the one chat-completions guest interface; failover on exhaustion, grants and data labels checked before sending, measured routes and Loop 1 rule candidates ([assumptions](broker/route/ASSUMPTIONS.md)). A3's consumer route waits on S6. Wiring: serve `Router.Handler` behind the OP-8 meter in place of the raw proxy | P1-3, P1-7 | in review |
+
+## Phase 3: compounding
+
+| ID | Package | Needs | State |
+|---|---|---|---|
+| P3-1 | Change pipeline: held-out suites from owner outcomes, frozen evaluation, adoption intents with fallback and rollback points, CHG-6 auto-adoption of authority-neutral changes, sharing and re-qualification, router rule candidates (CHG-1–6, ADP-4) ([assumptions](broker/change/ASSUMPTIONS.md)). Wiring: the grants gate delegates `meta.change.*` to `Pipeline.Check`; the VM layer supplies the replay `Evaluator` | P1-1, P2-7 | in review |
