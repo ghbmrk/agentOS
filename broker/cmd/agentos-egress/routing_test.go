@@ -1,8 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -97,5 +102,60 @@ func TestRoutingAdoptionsOnlyReorderTheOwnersRoutes(t *testing.T) {
 	}
 	if r, err := startRule(base, path); err != nil || r["chat"][0] != ra {
 		t.Fatalf("restart after reset: %v %v", r, err)
+	}
+}
+
+// L3 M1 and S2 on #96: only a rule that is not a reordering is refused
+// (409, which the broker reads as permanent). A failed save is the vault
+// process's own error (500): it applies nothing and is not a refusal, so
+// the broker retries it rather than giving up on the rule. A body over
+// 16 KiB is 413. GET also names the owner's rule, which the broker checks
+// the router against (L3 S1).
+func TestRoutingErrorsAreNotRefusals(t *testing.T) {
+	base := route.Rule{"chat": {ra, rb}}
+	rt, err := newRouter(base, map[string][]string{"agent": {"openai", "anthropic"}}, map[string]bool{"openai": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := &evalRoute{From: "agent", Active: base}
+	ro := &routing{base: base, rt: rt, ev: ev, path: filepath.Join(t.TempDir(), "gone", "routing.json")}
+	run := filepath.Join(t.TempDir(), "run")
+	srvs, err := serve(run, &custody{notify: func(string) {}}, rt, ev, ro, os.Getuid(), os.Getuid()+1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		for _, s := range srvs {
+			s.Close()
+		}
+	}()
+	cl := modelroute.NewRouting(filepath.Join(run, RoutingSocket))
+	ctx := context.Background()
+	if st, err := cl.State(ctx); err != nil || st.Owner["chat"][0] != ra {
+		t.Fatalf("state %+v %v", st, err)
+	}
+	err = cl.Set(ctx, route.Rule{"chat": {rb, ra}})
+	if err == nil || errors.Is(err, modelroute.ErrRoutingRefused) {
+		t.Fatalf("a failed save: %v", err)
+	}
+	if rt.Rule()["chat"][0] != ra || ev.active()["chat"][0] != ra {
+		t.Fatal("a rule that was not saved was applied")
+	}
+	big := route.Rule{"chat": {ra, rb}}
+	for i := 0; len(big) < 600; i++ {
+		big[fmt.Sprintf("class-%03d", i)] = []route.Route{ra, rb}
+	}
+	req, _ := json.Marshal(big)
+	c := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", filepath.Join(run, RoutingSocket))
+	}}}
+	put, _ := http.NewRequest(http.MethodPut, "http://x"+modelroute.RoutingPath, bytes.NewReader(req))
+	resp, err := c.Do(put)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(req) <= modelroute.MaxRule || resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("a %d-byte rule: %d", len(req), resp.StatusCode)
 	}
 }

@@ -20,14 +20,17 @@ import (
 const RoutingPath = "/routing"
 
 // ErrRoutingRefused is a rule the vault process will not take: not a
-// reordering of the owner's -rule. Retrying it cannot succeed.
+// reordering of the owner's -rule. Retrying it cannot succeed. Any other
+// error (unreachable, a failed save) may pass.
 var ErrRoutingRefused = errors.New("routing: vault process refused the rule")
 
-// RoutingState is the vault process's active routing rule and its router's
-// measured proposal (route.Router.Candidate).
+// RoutingState is the vault process's active routing rule, its router's
+// measured proposal (route.Router.Candidate), and the owner's configured
+// rule (-rule), of which every adopted rule is a reordering.
 type RoutingState struct {
 	Rule      routerule.Rule `json:"rule"`
 	Candidate routerule.Rule `json:"candidate"`
+	Owner     routerule.Rule `json:"owner"`
 }
 
 // Routing reads and sets the vault process's active routing rule over its
@@ -66,7 +69,7 @@ func (r *Routing) State(ctx context.Context) (RoutingState, error) {
 		return RoutingState{}, fmt.Errorf("routing: vault process answered %d", resp.StatusCode)
 	}
 	var st RoutingState
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 2*MaxRule+64)).Decode(&st); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 3*MaxRule+64)).Decode(&st); err != nil {
 		return RoutingState{}, err
 	}
 	if len(st.Rule) == 0 {

@@ -83,6 +83,8 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	var router change.Router
 	if sync != nil {
 		sync.doneRestoring()
+		pipe := l.pipe
+		sync.active = func() routerule.Rule { return routerOf{pipe: pipe}.active() }
 		l.routing = sync
 		router = routerOf{sync, l.pipe}
 	}
@@ -322,30 +324,36 @@ type routingClient interface {
 // (potency PW6). Apply adopts a rule there, which the vault process takes
 // only as a reordering of the owner's -rule. While the pipeline restores
 // its state at start, a rule the vault process cannot take yet is kept
-// and pushed by run; one it refuses (the owner changed -rule since) stands
-// for the owner's -rule from then on, so a later revert to it is not
-// refused (security R1 on PW4). After start, an adoption the vault process
-// does not take fails, so nothing is recorded as adopted that the router
-// does not route by.
+// and pushed by run. After start, an adoption the vault process does not
+// take fails, so nothing is recorded as adopted that the router does not
+// route by. run also keeps the router on the pipeline's active rule when
+// the vault process restarts or loses it (L3 S1 on #96). A rule the vault
+// process refuses there (the owner changed -rule) gives way to the owner's
+// rule and stands for it from then on, so a later revert to it is not
+// refused (security R1 on PW4).
 type syncedRouting struct {
-	r    routingClient
-	logf func(string, ...any)
+	r      routingClient
+	logf   func(string, ...any)
+	active func() routerule.Rule // the pipeline's active rule; nil until it exists
 
+	// mu is held across each call to the vault process, so a delayed push
+	// never lands after a newer adoption (L3 M2 on #96).
 	mu        sync.Mutex
 	restoring bool
 	pending   *routerule.Rule // to push once the vault process is up; empty: -rule
-	refused   routerule.Rule  // a restored rule the vault process refused
+	refused   routerule.Rule  // a rule the vault process refused at restore or check
+	applied   int             // Applies so far, so a check never pushes a rule read before one
 }
 
 func (s *syncedRouting) Current() (change.Tree, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	st, err := s.r.State(ctx)
 	if err != nil {
 		s.logf("routing: vault process not reachable at first start; recording the owner's rule")
-		s.mu.Lock()
 		s.pending = &routerule.Rule{}
-		s.mu.Unlock()
 		return change.Tree{}, nil
 	}
 	b, err := json.Marshal(st.Rule)
@@ -367,15 +375,12 @@ func (s *syncedRouting) Apply(t change.Tree) error {
 		}
 	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.applied++
 	if s.refused != nil && sameRule(rule, s.refused) {
 		rule = nil
 	}
-	s.mu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	err := s.r.Set(ctx, rule)
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	err := s.set(context.Background(), rule)
 	switch {
 	case err == nil:
 		s.pending = nil
@@ -386,46 +391,76 @@ func (s *syncedRouting) Apply(t change.Tree) error {
 	return err
 }
 
+func (s *syncedRouting) set(ctx context.Context, rule routerule.Rule) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return s.r.Set(ctx, rule)
+}
+
 func (s *syncedRouting) doneRestoring() {
 	s.mu.Lock()
 	s.restoring = false
 	s.mu.Unlock()
 }
 
-// push sends a rule kept from the start, if any; it reports whether none
-// is left. A refused one is replaced by the owner's -rule.
+// push sends a rule kept from the start, if any; otherwise it checks that
+// the vault process routes by the pipeline's active rule, and sets it if
+// not. It reports whether the vault process has the rule.
 func (s *syncedRouting) push(ctx context.Context) bool {
+	// The pipeline's rule is read before mu: the pipeline holds its own
+	// lock while it calls Apply.
 	s.mu.Lock()
-	p := s.pending
+	gen := s.applied
 	s.mu.Unlock()
-	if p == nil {
-		return true
+	var want routerule.Rule
+	if s.active != nil {
+		want = s.active()
 	}
-	rule := *p
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	err := s.r.Set(ctx, rule)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.pending != p { // a later Apply replaced it
-		return s.pending == nil
+	if s.pending != nil {
+		want = *s.pending
+	} else {
+		if s.applied != gen || s.active == nil {
+			return true // an Apply since: the next check reads its rule
+		}
+		ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		st, err := s.r.State(ctx)
+		cancel()
+		if err != nil {
+			return false
+		}
+		if len(want) == 0 || (s.refused != nil && sameRule(want, s.refused)) {
+			want = st.Owner
+		}
+		if sameRule(st.Rule, want) {
+			return true
+		}
+		s.logf("routing: the vault process was not routing by the adopted rule; setting it")
 	}
+	err := s.set(ctx, want)
 	switch {
 	case err == nil:
 		s.pending = nil
-	case errors.Is(err, modelroute.ErrRoutingRefused) && len(rule) != 0:
-		s.logf("routing: the restored rule no longer reorders the owner's rule; using the owner's rule")
-		s.refused = rule
+		return true
+	case errors.Is(err, modelroute.ErrRoutingRefused) && len(want) != 0:
+		s.logf("routing: the adopted rule no longer reorders the owner's rule; using the owner's rule")
+		s.refused = want
 		s.pending = &routerule.Rule{}
 	default:
-		s.logf("routing: vault process not reachable yet")
+		s.logf("routing: vault process not reachable or did not keep the rule")
+		if s.pending == nil {
+			s.pending = &want
+		}
 	}
-	return s.pending == nil
+	return false
 }
 
-// run pushes the rule kept from the start until the vault process has it.
+// run keeps the vault process on the pipeline's rule: it pushes the rule
+// kept from the start, then checks every period.
 func (s *syncedRouting) run(ctx context.Context, every time.Duration) {
-	for !s.push(ctx) {
+	for {
+		s.push(ctx)
 		select {
 		case <-ctx.Done():
 			return
@@ -441,8 +476,9 @@ func sameRule(a, b routerule.Rule) bool {
 }
 
 // routerOf is Loop 1's router (ADP-4): the vault process's measured
-// proposal. If the vault process cannot be reached, the proposal is the
-// pipeline's own active rule, so nothing is proposed.
+// proposal. If the vault process cannot be reached, or proposes the rule
+// it already routes by, the proposal is the pipeline's own active rule,
+// so nothing is proposed.
 type routerOf struct {
 	s    *syncedRouting
 	pipe *change.Pipeline
@@ -467,14 +503,18 @@ func (r routerOf) Rule() routerule.Rule {
 	return r.active()
 }
 
+// SetRule goes through the routing target, as the pipeline's own
+// adoptions do.
 func (r routerOf) SetRule(rule routerule.Rule) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	return r.s.r.Set(ctx, rule)
+	b, err := json.Marshal(rule)
+	if err != nil {
+		return err
+	}
+	return r.s.Apply(change.Tree{change.RoutingPath: b})
 }
 
 func (r routerOf) Candidate() routerule.Rule {
-	if st, err := r.state(); err == nil && len(st.Candidate) > 0 {
+	if st, err := r.state(); err == nil && len(st.Candidate) > 0 && !sameRule(st.Candidate, st.Rule) {
 		return st.Candidate
 	}
 	return r.active()

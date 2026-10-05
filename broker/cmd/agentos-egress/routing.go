@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"slices"
 	"sync"
 
@@ -39,12 +39,20 @@ func startRule(base route.Rule, path string) (route.Rule, error) {
 	if path == "" {
 		return base, nil
 	}
-	raw, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return base, nil
 	}
 	if err != nil {
 		return base, err
+	}
+	defer f.Close()
+	raw, err := io.ReadAll(io.LimitReader(f, modelroute.MaxRule+1))
+	if err != nil {
+		return base, err
+	}
+	if len(raw) > modelroute.MaxRule {
+		return base, fmt.Errorf("adopted rule %s: over %d bytes", path, modelroute.MaxRule)
 	}
 	var r route.Rule
 	if err := json.Unmarshal(raw, &r); err != nil {
@@ -57,7 +65,7 @@ func startRule(base route.Rule, path string) (route.Rule, error) {
 }
 
 // reorders reports nil when next has exactly base's classes, each with
-// exactly base's routes in some order.
+// exactly base's routes in some order. Its errors are refusals.
 func reorders(base, next route.Rule) error {
 	if len(next) != len(base) {
 		return errors.New("a routing change may only reorder the configured routes: classes differ")
@@ -67,14 +75,11 @@ func reorders(base, next route.Rule) error {
 		if !ok || len(got) != len(routes) {
 			return fmt.Errorf("a routing change may only reorder the configured routes: class %q differs", class)
 		}
+		// Same length and every base route present: with no repeats in
+		// base (route.New refuses them), got repeats none either.
 		for _, r := range routes {
 			if !slices.Contains(got, r) {
 				return fmt.Errorf("a routing change may only reorder the configured routes: class %q lacks %s", class, r)
-			}
-		}
-		for i, r := range got {
-			if slices.Contains(got[i+1:], r) {
-				return fmt.Errorf("class %q repeats %s", class, r)
 			}
 		}
 	}
@@ -91,10 +96,14 @@ func (ro *routing) set(next route.Rule) error {
 		next = ro.base
 	}
 	if err := reorders(ro.base, next); err != nil {
-		return err
+		return refusal{err}
 	}
 	if ro.path != "" {
-		if err := saveRule(ro.path, next); err != nil {
+		b, err := json.Marshal(next)
+		if err != nil {
+			return err
+		}
+		if err := writeFileAtomic(ro.path, b); err != nil {
 			return err
 		}
 	}
@@ -107,39 +116,8 @@ func (ro *routing) set(next route.Rule) error {
 	return nil
 }
 
-func saveRule(path string, r route.Rule) error {
-	b, err := json.Marshal(r)
-	if err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".routing-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(b); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		return err
-	}
-	// The rename survives a power loss only once its directory is synced
-	// (security R2 on PW4).
-	d, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
-}
+// refusal is a rule set refuses: not a reordering of the owner's rule.
+type refusal struct{ error }
 
 // handler serves GET (the active rule and the router's proposal) and PUT
 // (adopt a rule) on the routing socket, which admits agentosd's uid only.
@@ -152,7 +130,7 @@ func (ro *routing) handler() http.Handler {
 		switch r.Method {
 		case http.MethodGet:
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(modelroute.RoutingState{Rule: ro.rt.Rule(), Candidate: ro.rt.Candidate()})
+			json.NewEncoder(w).Encode(modelroute.RoutingState{Rule: ro.rt.Rule(), Candidate: ro.rt.Candidate(), Owner: ro.base})
 		case http.MethodPut:
 			b, err := io.ReadAll(io.LimitReader(r.Body, modelroute.MaxRule+1))
 			if err != nil || len(b) > modelroute.MaxRule {
@@ -165,7 +143,14 @@ func (ro *routing) handler() http.Handler {
 				return
 			}
 			if err := ro.set(next); err != nil {
-				http.Error(w, err.Error(), http.StatusConflict)
+				var no refusal
+				if errors.As(err, &no) {
+					http.Error(w, err.Error(), http.StatusConflict)
+					return
+				}
+				// Not a refusal: the broker may retry (L3 M1 on #96).
+				log.Printf("routing: adopting a rule: %v", err)
+				http.Error(w, "the rule could not be kept", http.StatusInternalServerError)
 				return
 			}
 			w.WriteHeader(http.StatusNoContent)
