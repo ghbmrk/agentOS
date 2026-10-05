@@ -78,9 +78,11 @@ type Item struct {
 	Vector []float32 `json:"vec,omitempty"`
 	VecID  string    `json:"vec_id,omitempty"` // Embedder.ID of Vector
 	// Received is when the broker received this content, on the broker's
-	// clock (the event bus passes its publish time). It decides staleness
-	// against tombstones; Source.Seen is the source's own time and is for
-	// display only. Zero means now; a future time is refused.
+	// clock (the event bus passes its publish time; a direct caller passes
+	// when it fetched the content). It decides staleness against
+	// tombstones; Source.Seen is the source's own time and is for display
+	// only. Zero means unknown: stored as now, but refused for a deleted
+	// source. A future time is refused.
 	Received time.Time `json:"received,omitempty"`
 	// LabelBy is the owner-channel message that lowered the label, if one
 	// did (Relabel). Empty for labels set at ingest.
@@ -347,7 +349,8 @@ func (ix *Index) IngestKeyed(id string, it Item) (string, error) {
 	it.ID = id
 	it.Label = EffectiveLabel(it.Source.Kind, it.Label)
 	now := ix.now()
-	if it.Received.IsZero() {
+	unknownReceipt := it.Received.IsZero()
+	if unknownReceipt {
 		it.Received = now
 	}
 	if it.Received.After(now) {
@@ -376,7 +379,8 @@ func (ix *Index) IngestKeyed(id string, it Item) (string, error) {
 	// Content the broker received before a deletion of this source never
 	// comes back (a stale delivery racing the deletion). Receipt time is the
 	// broker's own, so a source cannot date its way past a tombstone.
-	if t, ok := ix.tombs[id]; ok && !it.Received.After(t) {
+	// An unknown receipt time counts as stale against a tombstone.
+	if t, ok := ix.tombs[id]; ok && (unknownReceipt || !it.Received.After(t)) {
 		return "", ErrDeleted
 	}
 	// A label never falls on re-ingest; only Relabel lowers one. An owner
@@ -751,12 +755,18 @@ func (ix *Index) ownerMessage(id, action, target string) (OwnerMessage, error) {
 	return msg, nil
 }
 
+// MinTombstoneAge is the floor for PruneTombstones.
+const MinTombstoneAge = 24 * time.Hour
+
 // PruneTombstones drops tombstones older than maxAge and returns how many.
 // A tombstone only has to outlive deliveries already in flight when the
 // deletion happened (the bus gives up after its tries, within minutes) and
 // the hooks' replay after a crash; the broker prunes with a margin of days
 // (default policy: 30 days).
 func (ix *Index) PruneTombstones(maxAge time.Duration) (int, error) {
+	if maxAge < MinTombstoneAge {
+		return 0, fmt.Errorf("recall: tombstones must be kept at least %v", MinTombstoneAge)
+	}
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
 	cut := ix.now().Add(-maxAge)

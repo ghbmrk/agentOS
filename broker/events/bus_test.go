@@ -377,6 +377,11 @@ func TestDeletionBeforeAndDuringIndexing(t *testing.T) {
 	if err := IndexInto(ix2).Start(ctx, Delivery{Event: old}); err != nil || ix2.Len() != 0 {
 		t.Fatalf("stale ingest after deletion: %v, %d items", err, ix2.Len())
 	}
+	// An event with no receipt time is refused rather than taken as new.
+	old.Received = time.Time{}
+	if err := IndexInto(ix2).Start(ctx, Delivery{Event: old}); err == nil || ix2.Len() != 0 {
+		t.Fatalf("zero receipt time accepted: %v, %d items", err, ix2.Len())
+	}
 }
 
 // Tombstones replay to the bus on restart, so a deletion a crash cut off

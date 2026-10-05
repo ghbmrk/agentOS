@@ -711,6 +711,9 @@ func IndexInto(ix *recall.Index) Trigger {
 			if recall.ReservedKinds[string(e.Kind)] {
 				return fmt.Errorf("%w: %s", ErrReservedKind, e.Kind)
 			}
+			if e.Received.IsZero() {
+				return errors.New("events: event without a receipt time")
+			}
 			text := e.Summary
 			if e.Body != "" {
 				if text != "" {

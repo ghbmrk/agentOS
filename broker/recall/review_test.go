@@ -122,7 +122,10 @@ func TestDeletionBeforeIndexingAndTombstones(t *testing.T) {
 	}
 	// New content at the same source after the deletion is accepted.
 	now = now.Add(time.Minute)
-	if _, err := ix.Ingest(Item{Source: Source{Kind: "mail", Account: "o", Ref: "<late@x>"}, Text: "new"}); err != nil {
+	if _, err := ix.Ingest(Item{Source: Source{Kind: "mail", Account: "o", Ref: "<late@x>"}, Text: "unknown receipt"}); !errors.Is(err, ErrDeleted) {
+		t.Fatalf("unknown receipt time for a deleted source: %v", err)
+	}
+	if _, err := ix.Ingest(Item{Source: Source{Kind: "mail", Account: "o", Ref: "<late@x>"}, Received: now, Text: "new"}); err != nil {
 		t.Fatalf("new content after delete: %v", err)
 	}
 	// Tombstones are durable and replayed to hooks registered later, so a
@@ -329,6 +332,12 @@ func TestPruneTombstones(t *testing.T) {
 	ix.DeleteSource("file", "", "/old")
 	now = now.Add(40 * 24 * time.Hour)
 	ix.DeleteSource("file", "", "/new")
+	if _, err := ix.PruneTombstones(-time.Hour); err == nil {
+		t.Fatal("a prune below the floor was accepted")
+	}
+	if _, err := ix.PruneTombstones(time.Hour); err == nil {
+		t.Fatal("a prune below the floor was accepted")
+	}
 	if n, err := ix.PruneTombstones(30 * 24 * time.Hour); err != nil || n != 1 {
 		t.Fatalf("prune: %d %v", n, err)
 	}

@@ -22,6 +22,8 @@ reading a later spec version could change. Revised after the #38 review.
 - **K3.** Credentialed reads are ingested as kind `credentialed`, set by the executor, never by the caller.
 - **K4.** Kind `agent` is public whenever the caller declares it public, so the broker sets that label from the source machine's REV-5 label, never from the guest.
 - **K5.** Wiring passes the vault-held identity key with `WithKeyer`. The generated key kept in plaintext in the store header is for tests and development only.
-- **K6.** A `Relabel` to public is a broker-state change: the broker submits it as a journaled intent (OP-5) before calling `Relabel`. The owner channel parses the message into its action and target (`OwnerMessage.Action`, `.Target`; for D1 the target is the task's recall item ID).
+- **K6.** A `Relabel` to public is a broker-state change: the broker submits it as a journaled intent (OP-5) before calling `Relabel`. The owner channel parses the message into its action and target (`OwnerMessage.Action`, `.Target`; for D1 the target is the task's recall item ID). Broker code derives the target from the owner's reply context; an agent never sets it.
 - **K7.** The recall broker tool defaults public machines to `PublicOnly`, so a search does not raise them unless the agent asks for owner data.
+- **K8.** The broker prunes tombstones only with the 30-day policy; `PruneTombstones` refuses anything under `MinTombstoneAge` (24 h).
+- **K9.** Direct `Ingest` callers pass `Received` as the time they fetched the content. A zero receipt time is stored as now but refused for a deleted source, and `IndexInto` refuses an event without one.
 - **Public items' metadata.** Considered and left: public web items keep `Account` and `Ref`, since a public item's URL is its content. If watched-URL lists turn out to be sensitive, the watcher should label those events private.
