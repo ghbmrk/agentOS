@@ -411,9 +411,43 @@ func TestRegressingSecurityReleaseAsks(t *testing.T) {
 		}
 		return ev.Run(ctx, t, pr)
 	})
+	e.p.Attach(holdJournal{e.eng})
 	r := e.release(release(t, "3.0", true, map[string][]byte{"host-image/release": []byte("h")}))
-	if r.Basis != BasisOwner || r.Regressions == 0 || !e.owner.wasAsked(adoptID(r.ID)) {
+	if r.Basis != BasisOwner || r.Regressions == 0 || r.State != StateAwaitingOwner {
 		t.Fatalf("regressing security release: %+v", r)
+	}
+	ask, err := e.p.Ask(r.ID)
+	want := "Security update 3.0 fixes a security issue. It did worse on " + itoa(r.Regressions) + " of " + itoa(r.HeldOut) +
+		" past tasks, for example a skill task from "
+	if err != nil || !strings.HasPrefix(ask, want) || !strings.HasSuffix(ask, ". Approve or decline?") {
+		t.Fatalf("ask: %q %v", ask, err)
+	}
+	// The owner declines: recorded, and repeated in every digest.
+	e.eng.Authorize(bg, adoptID(r.ID))
+	if r, _ := e.p.Settle(bg, r.ID); r.State != StateRejected {
+		t.Fatal(r)
+	}
+	declined := "You declined security update 3.0; the box is still on the previous version until a newer update is installed."
+	for i := 0; i < 2; i++ {
+		if d := e.p.Digest(); len(d) != 1 || d[0] != declined {
+			t.Fatalf("digest %d: %q", i, d)
+		}
+	}
+	// A later release that is adopted supersedes it.
+	e.p.cfg.Evaluator = ev
+	e.owner.approve = true
+	r2 := e.release(release(t, "3.1", true, map[string][]byte{"host-image/release": []byte("h2")}))
+	if r2.State == StateAwaitingOwner {
+		e.eng.Authorize(bg, adoptID(r2.ID))
+		r2, _ = e.p.Settle(bg, r2.ID)
+	}
+	if r2.State != StateAdopted {
+		t.Fatal(r2)
+	}
+	for _, l := range e.p.Digest() {
+		if l == declined {
+			t.Fatal("declined release still listed after a newer one")
+		}
 	}
 }
 

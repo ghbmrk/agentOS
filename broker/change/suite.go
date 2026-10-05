@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/journal"
 )
@@ -36,6 +37,8 @@ type Case struct {
 	// count toward evidence in a shared package (CHG-4).
 	Public   bool `json:"public,omitempty"`
 	Security bool `json:"security,omitempty"`
+	// At is when the case was added, for owner-facing examples.
+	At time.Time `json:"at,omitempty"`
 }
 
 // split is which side of the held-out boundary a case is on.
@@ -86,6 +89,7 @@ func (p *Pipeline) AddTaskCase(c Case) error {
 	default:
 		return fmt.Errorf("%w: outcome %q does not match verdict %q", ErrProvenance, c.Outcome, q.Verdict)
 	}
+	c.At = p.cfg.Now()
 	return p.addCase(c)
 }
 

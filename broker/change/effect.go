@@ -226,6 +226,9 @@ func (p *Pipeline) adoptLocked(id, basis string) error {
 		staged = staged || c == ClassGuestImage || c == ClassHostImage
 	}
 	p.st.Active = pr.next
+	if pr.cand.Source == Upstream {
+		p.st.Declined = nil // a later release supersedes declined ones
+	}
 	p.st.Adoptions = append(p.st.Adoptions, &Adoption{ID: id, Short: short, Source: pr.cand.Source,
 		Classes: pr.classes, Basis: basis, Edits: pr.edits, Score: pr.report.Score, Public: pr.cand.Public,
 		Staged: staged, Origin: pr.cand.Origin, At: p.cfg.Now()})

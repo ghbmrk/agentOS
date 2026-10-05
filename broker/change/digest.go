@@ -1,9 +1,12 @@
 package change
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/ghbmrk/agentos/broker/route"
 )
 
 // idLetters avoids I and O, as the owner channel's IDs do.
@@ -69,8 +72,9 @@ func safe(s string) string {
 
 // what says in plain words what an adoption changed, from fields the
 // broker knows: classes, owner-configured task class names, machine names,
-// and the signed release version. Never from candidate text.
-func (a *Adoption) what() string {
+// provider names, and the signed release version. Never from candidate
+// text.
+func (p *Pipeline) what(a *Adoption) string {
 	has := map[Class]bool{}
 	for _, c := range a.Classes {
 		has[c] = true
@@ -88,6 +92,9 @@ func (a *Adoption) what() string {
 		var classes []string
 		for _, e := range a.Edits {
 			if e.Path == RoutingPath {
+				if line := p.primaryChange(e.Before, e.After); line != "" {
+					return line
+				}
 				for c := range routingClasses(e.Before) {
 					classes = append(classes, safe(c))
 				}
@@ -112,6 +119,52 @@ func (a *Adoption) what() string {
 	return "Improved how a task is done"
 }
 
+// primaryChange names, per task class, a change of first route provider or
+// a dropped local fallback (arbitrator R1); "" when there is none.
+func (p *Pipeline) primaryChange(before, after []byte) string {
+	var b, n route.Rule
+	if json.Unmarshal(before, &b) != nil || json.Unmarshal(after, &n) != nil {
+		return ""
+	}
+	local := func(rs []route.Route) bool {
+		for _, r := range rs {
+			if p.cfg.LocalProvider != nil && p.cfg.LocalProvider(r.Provider) {
+				return true
+			}
+		}
+		return false
+	}
+	classes := make([]string, 0, len(n))
+	for c := range n {
+		classes = append(classes, c)
+	}
+	sort.Strings(classes)
+	var parts []string
+	for _, c := range classes {
+		old, now := b[c], n[c]
+		if len(old) == 0 || len(now) == 0 {
+			continue
+		}
+		var s string
+		if old[0].Provider != now[0].Provider {
+			s = fmt.Sprintf("%s tasks now go first to %s instead of %s", safe(c), safe(now[0].Provider), safe(old[0].Provider))
+		}
+		if local(old) && !local(now) {
+			if s == "" {
+				s = safe(c) + " tasks"
+			}
+			s += " no longer fall back to the local model"
+		}
+		if s != "" {
+			parts = append(parts, s)
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "Changed AI routing: " + strings.Join(parts, "; ")
+}
+
 func routingClasses(b []byte) map[string]bool {
 	var r map[string]any
 	_ = decodeStrict(b, &r)
@@ -130,7 +183,7 @@ func (p *Pipeline) Digest() []string {
 	var out []string
 	for _, a := range p.st.Adoptions {
 		if !a.Listed {
-			line := a.what() + "."
+			line := p.what(a) + "."
 			if a.Score.HeldOut > 0 {
 				line += fmt.Sprintf(" Tested on %d of your past tasks, none worse.", a.Score.HeldOut)
 			} else {
@@ -159,10 +212,49 @@ func (p *Pipeline) Digest() []string {
 			a.RevertSeen = true
 		}
 	}
+	for _, v := range p.st.Declined {
+		out = append(out, "You declined security update "+safe(v)+"; the box is still on the previous version until a newer update is installed.")
+	}
 	if len(out) > 0 {
 		_ = p.saveLocked()
 	}
 	return out
+}
+
+// Ask is the one plain line the owner gets for a proposal that waits on
+// them, sent through CH-15 coalescing by the wiring. For a security
+// release it says what it fixes, how many past tasks did worse with one
+// example, and asks to approve or decline (arbitrator R2).
+func (p *Pipeline) Ask(id string) (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	pr := p.props[id]
+	if pr == nil {
+		return "", fmt.Errorf("change: no open proposal %s", id)
+	}
+	s := pr.report.Score
+	if pr.security {
+		line := "Security update " + safe(strings.TrimPrefix(pr.cand.Origin, "update:")) + " fixes a security issue."
+		if s.Regressions > 0 {
+			line += fmt.Sprintf(" It did worse on %d of %d past tasks", s.Regressions, s.HeldOut)
+			if c := s.example; c != nil {
+				line += ", for example a " + string(c.Class) + " task"
+				if !c.At.IsZero() {
+					line += " from " + c.At.Format("Jan 2")
+				}
+			}
+			line += "."
+		}
+		return line + " Approve or decline?", nil
+	}
+	a := &Adoption{Classes: pr.classes, Edits: pr.edits, Origin: pr.cand.Origin, Staged: true}
+	line := p.what(a) + "."
+	if s.HeldOut > 0 {
+		line += fmt.Sprintf(" Tested on %d of your past tasks, none worse.", s.HeldOut)
+	} else {
+		line += " No past tasks to test it on yet."
+	}
+	return line + " Approve or decline?", nil
 }
 
 // More answers MORE <id>: the files an adoption changed and its counts.

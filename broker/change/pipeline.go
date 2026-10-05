@@ -122,6 +122,9 @@ type Config struct {
 	// RouteGranted reports whether the owner granted a provider; a routing
 	// candidate naming one that is not granted fails (ADP-4, CAP-9).
 	RouteGranted func(provider string) bool
+	// LocalProvider reports a provider that is a local model, so the
+	// digest can say when a reorder drops the local fallback. Nil: none.
+	LocalProvider func(provider string) bool
 	// Receives lists the data sources a machine already receives; a
 	// context rule may only select among them (CHG-6). Nil: none.
 	Receives func(machine string) []string
@@ -187,12 +190,13 @@ type Report struct {
 
 // Score is the evaluation evidence: counts only, no case content.
 type Score struct {
-	HeldOut        int `json:"held_out"`
-	Passed         int `json:"passed"`
-	BaselinePassed int `json:"baseline_passed"`
-	Regressions    int `json:"regressions"`
-	Security       int `json:"security"`
-	SecurityPassed int `json:"security_passed"`
+	HeldOut        int   `json:"held_out"`
+	Passed         int   `json:"passed"`
+	BaselinePassed int   `json:"baseline_passed"`
+	Regressions    int   `json:"regressions"`
+	Security       int   `json:"security"`
+	SecurityPassed int   `json:"security_passed"`
+	example        *Case // first regressed case, for the owner's line
 }
 
 // Adoption is a change that took effect and its rollback point.
@@ -219,13 +223,16 @@ type Adoption struct {
 
 // state is everything the pipeline persists.
 type state struct {
-	Seq       int             `json:"seq"`
-	SplitKey  []byte          `json:"split_key"`
-	Active    Tree            `json:"active"`
-	Adoptions []*Adoption     `json:"adoptions"`
-	AutoAdopt bool            `json:"auto_adopt"`
-	Sharing   bool            `json:"sharing"`
-	Cases     map[string]Case `json:"cases"`
+	Seq       int         `json:"seq"`
+	SplitKey  []byte      `json:"split_key"`
+	Active    Tree        `json:"active"`
+	Adoptions []*Adoption `json:"adoptions"`
+	AutoAdopt bool        `json:"auto_adopt"`
+	Sharing   bool        `json:"sharing"`
+	// Declined lists security releases the owner declined; the digest
+	// repeats them until a later release is adopted (arbitrator R2).
+	Declined []string        `json:"declined,omitempty"`
+	Cases    map[string]Case `json:"cases"`
 	// Applied lists intents whose effect took place, for Reconcile.
 	Applied map[string]bool `json:"applied"`
 }
@@ -240,12 +247,13 @@ func (s *state) copyCases() map[string]Case {
 
 // proposal is a qualified candidate waiting for its adoption intent.
 type proposal struct {
-	cand    Candidate
-	base    string // hash of the tree it was evaluated against
-	next    Tree
-	edits   []Edit
-	report  Report
-	classes []Class
+	cand     Candidate
+	base     string // hash of the tree it was evaluated against
+	next     Tree
+	edits    []Edit
+	report   Report
+	classes  []Class
+	security bool // a verified, attested security release
 }
 
 // Pipeline is the one change pipeline (§11). It is safe for concurrent use.
@@ -506,7 +514,8 @@ func (p *Pipeline) propose(ctx context.Context, c Candidate, security bool) (Rep
 	}
 
 	p.mu.Lock()
-	p.props[id] = &proposal{cand: c, base: base.Hash(), next: next, edits: edits, report: rep, classes: cl.classes}
+	p.props[id] = &proposal{cand: c, base: base.Hash(), next: next, edits: edits, report: rep, classes: cl.classes,
+		security: security && cl.imagesOnly()}
 	p.mu.Unlock()
 
 	in := journal.Intent{
@@ -550,6 +559,12 @@ func (p *Pipeline) drive(ctx context.Context, id string, rep Report, authorize b
 		return rep, nil
 	case journal.Denied:
 		rep.State, rep.Reason = StateRejected, st.Permission.Reason
+		p.mu.Lock()
+		if pr := p.props[id]; pr != nil && pr.security {
+			p.st.Declined = append(p.st.Declined, strings.TrimPrefix(pr.cand.Origin, "update:"))
+			_ = p.saveLocked()
+		}
+		p.mu.Unlock()
 		p.drop(id)
 		return rep, nil
 	case journal.Authorized:
@@ -599,6 +614,10 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen) Sc
 		}
 		if b && !n {
 			s.Regressions++
+			if s.example == nil {
+				cc := c
+				s.example = &cc
+			}
 		}
 	}
 	for _, c := range set.security {
