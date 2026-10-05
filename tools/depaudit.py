@@ -51,7 +51,7 @@ DOC_NAMES = ("example.com", "example.net", "example.org", "*.example.com", "*.ex
              "*.example.org", "*.example", "*.test", "*.invalid")
 
 Event = collections.namedtuple("Event", "pid syscall family addr port")
-Manifest = collections.namedtuple("Manifest", "forbidden endpoints")
+Manifest = collections.namedtuple("Manifest", "forbidden endpoints not_endpoints")
 
 _LINE = re.compile(r"^(?:(\d+)\s+)?(\w+)\(")
 _SOCKADDR = re.compile(r"\{sa_family=AF_(\w+)([^{}]*)\}")
@@ -138,7 +138,17 @@ def load_manifest(data):
         if _match(e["host"], forbidden):
             raise ValueError("endpoint %s matches a forbidden pattern (DEP-2)" % e["host"])
         endpoints.append(e)
-    return Manifest(forbidden, tuple(endpoints))
+    # Exact (path, host) pairs where a URL is text, not an endpoint the code
+    # contacts (a vendored build script, a link in an error message). Each
+    # names its reason; the same host anywhere else is still checked, and a
+    # forbidden host is never excused.
+    not_endpoints = set()
+    for x in data.get("not_endpoints", ()):
+        for k in ("path", "host", "why"):
+            if not x.get(k):
+                raise ValueError("not_endpoints entry missing %r: %r" % (k, x))
+        not_endpoints.add((x["path"], x["host"].lower()))
+    return Manifest(forbidden, tuple(endpoints), frozenset(not_endpoints))
 
 
 def _allowed(host, manifest, profile):
@@ -251,7 +261,7 @@ def static_scan(root, manifest, dirs=SHIPPING_DIRS):
                     loc = "%s:%d" % (rel.as_posix(), n)
                     if _match(host, manifest.forbidden):
                         out.append({"kind": "forbidden", "target": host, "location": loc})
-                    elif _match(host, DOC_NAMES):
+                    elif _match(host, DOC_NAMES) or (rel.as_posix(), host.lower()) in manifest.not_endpoints:
                         continue
                     elif not _allowed(host, manifest, "full"):
                         out.append({"kind": "undeclared", "target": host, "location": loc})

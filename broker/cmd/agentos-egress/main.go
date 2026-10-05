@@ -6,7 +6,11 @@
 //	agentos-egress init     create a sealed vault: passphrase slot and code-generator seed
 //	agentos-egress serve    hold the vault; serve the model and unlock sockets
 //	agentos-egress unlock   unknown-host unlock from a terminal: passphrase, then code
+//	                        (or the boot PIN, on a trusted host that has one)
 //	agentos-egress put      store a provider API key in the open vault
+//	agentos-egress trust    make this PC a trusted host (code; optional boot PIN)
+//	agentos-egress untrust  remove a trusted host (code)
+//	agentos-egress hosts    list the trusted hosts
 //
 // It runs as its own uid. The vault and keys files are readable by it only;
 // the model socket admits the broker's uid only, and the unlock socket the
@@ -44,13 +48,19 @@ const (
 	defaultVault = "/var/lib/agentos-egress/vault"
 	defaultKeys  = "/var/lib/agentos-egress/vault.keys"
 	defaultState = "/var/lib/agentos-egress/unlock.json"
-	defaultRun   = "/run/agentos-egress"
+	defaultPol   = "/var/lib/agentos-egress/vault.pcrpolicy"
+	defaultTPM   = "/dev/tpmrm0"
+	// defaultPCRs measure the Type #1 boot path of S7's host stack: PCR 4
+	// the boot loader and kernel, 9 the initrd, 12 the kernel command
+	// line, which carries the /usr root hash (HW-5a).
+	defaultPCRs = "4,9,12"
+	defaultRun  = "/run/agentos-egress"
 )
 
 func main() {
 	log.SetFlags(0)
 	if len(os.Args) < 2 {
-		log.Fatal("usage: agentos-egress init|serve|unlock|put [flags]")
+		log.Fatal("usage: agentos-egress init|serve|unlock|put|trust|untrust|hosts [flags]")
 	}
 	cmd, args := os.Args[1], os.Args[2:]
 	var err error
@@ -63,6 +73,12 @@ func main() {
 		err = unlockCmd(args, os.Stdin, os.Stdout)
 	case "put":
 		err = putCmd(args, os.Stdin)
+	case "trust":
+		err = trustCmd(args, os.Stdin, os.Stdout)
+	case "untrust":
+		err = untrustCmd(args, os.Stdin)
+	case "hosts":
+		err = hostsCmd(args, os.Stdout)
 	default:
 		err = fmt.Errorf("unknown command %q", cmd)
 	}
@@ -171,7 +187,14 @@ func serveCmd(args []string) error {
 	fs.Var(g, "grant", "machine=adapter[,adapter] (repeatable)")
 	rulePath := fs.String("rule", "", "routing rule: JSON task class -> routes (P2-7)")
 	privateOK := fs.String("private-ok", "", "providers the owner allowed for private data, comma-separated (CAP-9)")
+	tpmPath := fs.String("tpm", defaultTPM, "this PC's TPM (trusted host, CRED-8); absent means every boot is an unknown host")
+	polPath := fs.String("pcr-policy", defaultPol, "approved boot paths: signed PCR policies (HW-5a)")
+	pcrList := fs.String("pcrs", defaultPCRs, "PCRs a trusted host's boot path is measured into (SHA-256 bank)")
 	fs.Parse(args)
+	pcrs, err := parsePCRs(*pcrList)
+	if err != nil {
+		return err
+	}
 	rule, err := readRule(*rulePath)
 	if err != nil {
 		return err
@@ -202,6 +225,7 @@ func serveCmd(args []string) error {
 		now:       time.Now,
 		notify:    func(s string) { log.Print(s) },
 		statePath: *statePath,
+		host:      newTPMHost(*tpmPath, *vaultPath, *keysPath, *polPath, pcrs),
 	})
 	if err != nil {
 		return err
@@ -216,7 +240,9 @@ func serveCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	log.Printf("vault process up, vault locked; sockets in %s", *run)
+	c.bootTrusted()
+	ph, _ := c.status()
+	log.Printf("vault process up, vault %s; sockets in %s", ph, *run)
 	<-ctx.Done()
 	for _, s := range srvs {
 		s.Close()
@@ -368,6 +394,19 @@ func unlockCmd(args []string, in io.Reader, out io.Writer) error {
 	fs.Parse(args)
 	c := unixClient(filepath.Join(*run, UnlockSocket))
 	r := bufio.NewReader(in)
+	if st, _, err := get(c, "/status"); err == nil && st["pin"] == true {
+		fmt.Fprint(out, "Boot PIN for this trusted PC: ")
+		pin, _ := r.ReadString('\n')
+		res, code, err := post(c, "/unlock-pin", map[string]string{"pin": strings.TrimSpace(pin)})
+		if err != nil {
+			return err
+		}
+		if code != http.StatusOK {
+			return fmt.Errorf("unlock: %v", res["error"])
+		}
+		fmt.Fprintln(out, "Vault unlocked.")
+		return nil
+	}
 	fmt.Fprint(out, "Vault passphrase: ")
 	pass, _ := r.ReadString('\n')
 	res, code, err := post(c, "/unlock", map[string]string{"passphrase": strings.TrimSpace(pass)})
@@ -414,6 +453,96 @@ func putCmd(args []string, in io.Reader) error {
 	}
 	if code != http.StatusNoContent {
 		return fmt.Errorf("put: %v", res["error"])
+	}
+	return nil
+}
+
+func get(c *http.Client, path string) (map[string]any, int, error) {
+	u := url.URL{Scheme: "http", Host: "agentos-egress", Path: path}
+	resp, err := c.Get(u.String())
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	out := map[string]any{}
+	json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&out)
+	return out, resp.StatusCode, nil
+}
+
+// trustCmd makes this PC a trusted host (CRED-9): it reads a
+// code-generator code and, with -pin, then the boot PIN, from in.
+func trustCmd(args []string, in io.Reader, out io.Writer) error {
+	fs := flag.NewFlagSet("trust", flag.ExitOnError)
+	run := fs.String("run", defaultRun, "socket directory")
+	withPIN := fs.Bool("pin", false, "also require a boot PIN on this PC (no unattended restart)")
+	fs.Parse(args)
+	r := bufio.NewReader(io.LimitReader(in, maxUnlockBody))
+	fmt.Fprint(out, "Code-generator code: ")
+	code, _ := r.ReadString('\n')
+	var pin string
+	if *withPIN {
+		fmt.Fprint(out, "New boot PIN: ")
+		pin, _ = r.ReadString('\n')
+		pin = strings.TrimSpace(pin)
+		if pin == "" {
+			return errors.New("trust: -pin needs a PIN")
+		}
+	}
+	res, status, err := post(unixClient(filepath.Join(*run, UnlockSocket)), "/trust", map[string]string{"code": strings.TrimSpace(code), "pin": pin})
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK {
+		return fmt.Errorf("trust: %v", res["error"])
+	}
+	fmt.Fprintf(out, "%v is now a trusted host.\n", res["host"])
+	return nil
+}
+
+// untrustCmd removes the trusted host -id (from hosts), reading a
+// code-generator code from in.
+func untrustCmd(args []string, in io.Reader) error {
+	fs := flag.NewFlagSet("untrust", flag.ExitOnError)
+	run := fs.String("run", defaultRun, "socket directory")
+	id := fs.String("id", "", "host id, as hosts prints it")
+	fs.Parse(args)
+	code, _ := bufio.NewReader(io.LimitReader(in, maxUnlockBody)).ReadString('\n')
+	res, status, err := post(unixClient(filepath.Join(*run, UnlockSocket)), "/untrust", map[string]string{"code": strings.TrimSpace(code), "id": *id})
+	if err != nil {
+		return err
+	}
+	if status != http.StatusNoContent {
+		return fmt.Errorf("untrust: %v", res["error"])
+	}
+	return nil
+}
+
+// hostsCmd lists the trusted hosts.
+func hostsCmd(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("hosts", flag.ExitOnError)
+	run := fs.String("run", defaultRun, "socket directory")
+	fs.Parse(args)
+	res, status, err := get(unixClient(filepath.Join(*run, UnlockSocket)), "/hosts")
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK {
+		return fmt.Errorf("hosts: %v", res["error"])
+	}
+	hosts, _ := res["hosts"].([]any)
+	if len(hosts) == 0 {
+		fmt.Fprintln(out, "No trusted hosts: every boot needs the vault passphrase and a code.")
+	}
+	for _, h := range hosts {
+		m, _ := h.(map[string]any)
+		line := fmt.Sprintf("%v  %v", m["id"], m["host"])
+		if m["this"] == true {
+			line += "  (this PC)"
+		}
+		if m["pin"] == true {
+			line += "  (boot PIN)"
+		}
+		fmt.Fprintln(out, line)
 	}
 	return nil
 }

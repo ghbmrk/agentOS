@@ -173,6 +173,9 @@ func unlockHandler(c *custody) http.Handler {
 		if ph == pending {
 			out["expires"] = exp.UTC().Format(time.RFC3339)
 		}
+		if c.pinWanted() {
+			out["pin"] = true
+		}
 		reply(w, http.StatusOK, out)
 	}
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) { status(w) })
@@ -204,6 +207,58 @@ func unlockHandler(c *custody) http.Handler {
 			return
 		}
 		status(w)
+	})
+	// Trusted hosts (CRED-8, CRED-9). The local UI's socket is the local
+	// confirmation; the code is the approval.
+	mux.HandleFunc("/unlock-pin", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			PIN string `json:"pin"`
+		}
+		if !read(w, r, &req) {
+			return
+		}
+		if err := c.unlockPIN(req.PIN); err != nil {
+			fail(w, err)
+			return
+		}
+		status(w)
+	})
+	mux.HandleFunc("/hosts", func(w http.ResponseWriter, r *http.Request) {
+		h, err := c.hosts()
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		reply(w, http.StatusOK, map[string]any{"hosts": h})
+	})
+	mux.HandleFunc("/trust", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Code string `json:"code"`
+			PIN  string `json:"pin"`
+		}
+		if !read(w, r, &req) {
+			return
+		}
+		name, err := c.trust(req.Code, req.PIN)
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		reply(w, http.StatusOK, map[string]any{"host": name})
+	})
+	mux.HandleFunc("/untrust", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Code string `json:"code"`
+			ID   string `json:"id"`
+		}
+		if !read(w, r, &req) {
+			return
+		}
+		if _, err := c.untrust(req.Code, req.ID); err != nil {
+			fail(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("/lock", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

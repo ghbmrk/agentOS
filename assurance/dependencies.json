@@ -1,5 +1,29 @@
 {
-  "note": "Every network endpoint AgentOS code may contact, classed per SPEC.md §2. Checked by tools/depaudit.py (A9). Adding an endpoint is a reviewed change: inherent and commodity endpoints must be justified against §2; optional ones must be removable (DEP-3). AgentOS-operated endpoints are forbidden (DEP-2) and cannot be declared.",
-  "forbidden_host_patterns": ["*agentos*"],
-  "endpoints": []
+  "note": "Every network endpoint AgentOS code may contact, classed per SPEC.md §2. Checked by tools/depaudit.py (A9). Adding an endpoint is a reviewed change: inherent and commodity endpoints must be justified against §2; optional ones must be removable (DEP-3). AgentOS-operated endpoints are forbidden (DEP-2) and cannot be declared. not_endpoints lists exact (path, host) pairs where a URL is text, not something the code contacts (vendored build scripts, error-message links); each is a reviewed change.",
+  "forbidden_host_patterns": [
+    "*agentos*"
+  ],
+  "endpoints": [],
+  "not_endpoints": [
+    {
+      "path": "broker/vendor/golang.org/x/sys/unix/mkall.sh",
+      "host": "cgit.freebsd.org",
+      "why": "golang.org/x/sys build script (generates syscall tables); not compiled into any binary"
+    },
+    {
+      "path": "broker/vendor/golang.org/x/sys/unix/mkall.sh",
+      "host": "cvsweb.netbsd.org",
+      "why": "golang.org/x/sys build script (generates syscall tables); not compiled into any binary"
+    },
+    {
+      "path": "broker/vendor/golang.org/x/sys/unix/mkall.sh",
+      "host": "gitweb.dragonflybsd.org",
+      "why": "golang.org/x/sys build script (generates syscall tables); not compiled into any binary"
+    },
+    {
+      "path": "broker/vendor/golang.org/x/sys/unix/syscall_solaris.go",
+      "host": "go.dev",
+      "why": "bug link inside a Solaris-only panic message; not compiled for Linux and never contacted"
+    }
+  ]
 }
