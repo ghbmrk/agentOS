@@ -299,21 +299,34 @@ func TestOP8HangingUpDoesNotStopTheCharge(t *testing.T) {
 	}
 }
 
-// TestOP8RecordedStreamsAreChargedByReportedUsage: the provider's usage is
-// charged, not the stream's framing. OpenAI reports it in a last chunk
-// (the egress proxy forces include_usage); Anthropic in message_start and
-// message_delta, with cache tokens counted as input.
+// TestOP8RecordedStreamsAreChargedByReportedUsage: a stream that completed
+// is charged the provider's usage, not its framing. OpenAI reports it in a
+// last chunk (the egress proxy forces include_usage); Anthropic in
+// message_start and message_delta. Cached input counts at the provider's
+// cached weight. A stream cut off before its end is charged at least the
+// content the broker counted.
 func TestOP8RecordedStreamsAreChargedByReportedUsage(t *testing.T) {
 	openai := strings.Repeat(`data: {"id":"c","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"tok"},"finish_reason":null}]}`+"\n\n", 1000) +
 		`data: {"id":"c","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":321,"completion_tokens":1000,"completion_tokens_details":{"reasoning_tokens":600}}}` + "\n\ndata: [DONE]\n\n"
 	anthropic := "event: message_start\n" +
 		`data: {"type":"message_start","message":{"usage":{"input_tokens":50,"cache_read_input_tokens":200,"cache_creation_input_tokens":10,"output_tokens":1}}}` + "\n\n" +
 		strings.Repeat("event: content_block_delta\n"+`data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}`+"\n\n", 500) +
-		"event: message_delta\n" + `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":777}}` + "\n\n"
+		"event: message_delta\n" + `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":777}}` + "\n\n" +
+		"event: message_stop\n" + `data: {"type":"message_stop"}` + "\n\n"
 	for _, tc := range []struct {
 		name, stream string
 		want         int64
-	}{{"openai", openai, 1321}, {"anthropic", anthropic, 260 + 777}} {
+	}{
+		{"openai", openai, 1321},
+		// Cached input at Anthropic's weights: 50 + 200*0.1 + 10*1.25 = 82.5.
+		{"anthropic", anthropic, 83 + 777},
+		// OpenAI cached tokens at half weight: 1000 - 800*0.5 = 600.
+		{"openai-cached", strings.Replace(openai, `"prompt_tokens":321`, `"prompt_tokens":1000,"prompt_tokens_details":{"cached_tokens":800}`, 1), 600 + 1000},
+		// Cut off before its end: the content the broker counted (3000
+		// chars, 750 tokens) is the least output charged, whatever usage
+		// came before the cut.
+		{"cut-off", `data: {"choices":[{"delta":{"content":"` + strings.Repeat("y", 3000) + `"}}],"usage":{"prompt_tokens":5,"completion_tokens":10}}` + "\n\n", 5 + 750},
+	} {
 		m, _, _ := open(t, Config{MachineCap: Limits{Calls: 10, Tokens: 1 << 30}, OverallCap: big})
 		h := m.Wrap("m1", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "text/event-stream")

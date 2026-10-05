@@ -10,10 +10,11 @@
 // A call is charged in two steps. Start charges one call, the request's
 // input estimated from its size, and a reservation for its output sized
 // from the request's own output limit (clamped), so parallel calls cannot
-// pass a limit together. Done settles the charge to what the provider
-// reported it used (Wrap reads the usage the provider returns, hidden
-// reasoning tokens included); when a response carries no usage, output is
-// estimated from its content strings. Wrap runs the call to the end even
+// pass a limit together. Done settles the charge: a response that
+// completed and carries the provider's usage is charged that usage (hidden
+// reasoning included, cached input at the provider's cached weight);
+// otherwise the content strings the broker counted set the output charge,
+// and on a stream cut off early they are the least output charged. Wrap runs the call to the end even
 // if the guest hangs up, so hanging up does not stop the charge.
 //
 // On exhaustion further calls are refused and the owner is told once

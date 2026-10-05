@@ -3,6 +3,7 @@ package meter
 import (
 	"bytes"
 	"encoding/json"
+	"math"
 	"net/http"
 	"strings"
 )
@@ -31,6 +32,7 @@ type usage struct {
 	sawIn, sawOut bool
 	chars         int64 // content and argument characters seen
 	unread        int64 // bytes that could not be examined
+	done          bool  // the stream reached its end marker
 }
 
 func (u *usageWriter) Header() http.Header { return u.w.Header() }
@@ -114,85 +116,120 @@ func (u *usageWriter) line(l []byte) {
 	if !ok {
 		return
 	}
-	u.u.doc(bytes.TrimSpace(d))
+	d = bytes.TrimSpace(d)
+	if bytes.Equal(d, []byte("[DONE]")) {
+		u.u.done = true // OpenAI's end of stream
+		return
+	}
+	u.u.doc(d)
 }
 
-// used is the call's total use: reported usage where the provider gave it,
-// otherwise in (the request estimate) for input and the content estimate
-// for output. A body too large to read is charged by its size.
+// used is the call's total use (OP-8, arbitrator's rule). A response that
+// completed normally and carries provider-reported usage is charged that
+// usage. Otherwise output is the content the broker counted itself, and on
+// a stream cut off before its end that count is also the least output
+// charged, whatever usage arrived before the cut. Input without reported
+// usage is in, the request estimate. A body too large to read is charged
+// by its size.
 func (u *usageWriter) used(in int64) int64 {
-	if u.mode == 1 {
+	complete := false
+	switch u.mode {
+	case 1:
 		if u.over {
 			u.u.unread += u.n
 		} else {
-			u.u.doc(u.buf.Bytes())
+			complete = u.u.doc(u.buf.Bytes())
 		}
-	} else if u.mode == 2 && u.buf.Len() > 0 && !u.skip {
-		u.u.doc(u.buf.Bytes()) // a last line with no newline
+	case 2:
+		if u.buf.Len() > 0 && !u.skip {
+			u.line(u.buf.Bytes()) // a last line with no newline
+		}
+		complete = u.u.done
 	}
 	if u.u.sawIn {
 		in = u.u.in
 	}
-	out := Tokens(u.u.chars + u.u.unread)
-	if u.u.sawOut {
+	counted := Tokens(u.u.chars + u.u.unread)
+	out := counted
+	if u.u.sawOut && complete {
 		out = u.u.out
+	} else if u.u.sawOut {
+		out = max(u.u.out, counted)
 	}
 	return in + out
 }
 
 // doc reads one JSON document: an OpenAI or Anthropic response, or one
-// stream event of either.
-func (u *usage) doc(b []byte) {
+// stream event of either. It reports whether the document parsed.
+func (u *usage) doc(b []byte) bool {
 	if len(b) == 0 || b[0] != '{' {
-		return
+		return false
 	}
 	var d map[string]any
 	if json.Unmarshal(b, &d) != nil {
 		u.unread += int64(len(b))
-		return
+		return false
 	}
 	u.report(d["usage"])
 	if msg, ok := d["message"].(map[string]any); ok {
 		u.report(msg["usage"]) // Anthropic message_start
 	}
+	if d["type"] == "message_stop" {
+		u.done = true // Anthropic's end of stream
+	}
 	u.chars += content(d, "", 0)
+	return true
 }
 
-// report reads a usage object. OpenAI: prompt_tokens, completion_tokens
-// (which include reasoning tokens). Anthropic: input_tokens plus cache
-// reads and writes, output_tokens (cumulative in a stream).
+// Cached input is charged at the provider's cached weight. Anthropic:
+// cache reads 0.1, cache writes 1.25 of base input. OpenAI's discount
+// varies by model (50 to 90 percent off); the smallest, 50, is used.
+const (
+	anthropicCacheRead  = 0.1
+	anthropicCacheWrite = 1.25
+	openAICached        = 0.5
+)
+
+// report reads a usage object. OpenAI: prompt_tokens (cached_tokens among
+// them), completion_tokens (reasoning included). Anthropic: input_tokens
+// plus cache reads and writes, output_tokens (cumulative in a stream).
 func (u *usage) report(v any) {
 	m, ok := v.(map[string]any)
 	if !ok {
 		return
 	}
-	num := func(k string) (int64, bool) {
+	num := func(m map[string]any, k string) (float64, bool) {
 		f, ok := m[k].(float64)
 		if !ok || f < 0 || f > 1e12 {
 			return 0, false
 		}
-		return int64(f), true
+		return f, true
 	}
-	in, okIn := num("prompt_tokens")
-	if !okIn {
-		if a, ok := num("input_tokens"); ok {
-			in, okIn = a, true
-			for _, k := range []string{"cache_creation_input_tokens", "cache_read_input_tokens"} {
-				if c, ok := num(k); ok {
-					in += c
-				}
+	in, okIn := num(m, "prompt_tokens")
+	if okIn {
+		if d, ok := m["prompt_tokens_details"].(map[string]any); ok {
+			if c, ok := num(d, "cached_tokens"); ok && c <= in {
+				in -= c * (1 - openAICached)
 			}
+		}
+	} else if a, ok := num(m, "input_tokens"); ok {
+		in, okIn = a, true
+		if c, ok := num(m, "cache_read_input_tokens"); ok {
+			in += c * anthropicCacheRead
+		}
+		if c, ok := num(m, "cache_creation_input_tokens"); ok {
+			in += c * anthropicCacheWrite
 		}
 	}
 	if okIn {
-		u.in, u.sawIn = max(u.in, in), true
+		u.in, u.sawIn = max(u.in, int64(math.Ceil(in))), true
 	}
-	out, okOut := num("completion_tokens")
+	out, okOut := num(m, "completion_tokens")
 	if !okOut {
-		out, okOut = num("output_tokens")
+		out, okOut = num(m, "output_tokens")
 	}
 	if okOut {
-		u.out, u.sawOut = max(u.out, out), true
+		u.out, u.sawOut = max(u.out, int64(out)), true
 	}
 }
 
