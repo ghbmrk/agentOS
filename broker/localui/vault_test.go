@@ -3,8 +3,11 @@ package localui
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"hash/crc32"
 	"image"
 	"image/color"
@@ -20,6 +23,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -378,8 +382,8 @@ func TestVaultUnlockByPhotoThenCode(t *testing.T) {
 		if strings.Contains(b, r.card.VaultPassphrase) {
 			t.Fatal("a page showed the passphrase")
 		}
-		if strings.Contains(strings.ToLower(b), "<script") {
-			t.Fatal("a page carries script (ONB-1)")
+		if strings.Count(strings.ToLower(b), "<script") > strings.Count(b, "<script>"+shrinkJS+"</script>") {
+			t.Fatal("a page carries script other than the photo shrink (ONB-1)")
 		}
 	}
 }
@@ -698,5 +702,64 @@ func TestVaultPhotoSpendsAnAttempt(t *testing.T) {
 	}
 	if body := send(); !strings.Contains(body, "Wait a few seconds") {
 		t.Fatalf("second photo inside the gap was scanned:\n%s", body)
+	}
+}
+
+// The vault page's one script shrinks a large photo on the phone (#50
+// arbitrator). The CSP allows it by hash and nothing else; it reaches
+// nothing outside the page; the form works without it; and no other page
+// may run script.
+func TestVaultShrinkScript(t *testing.T) {
+	if MaxProgressivePixels != 12e6 {
+		t.Fatal("shrinkJS's max must equal MaxProgressivePixels")
+	}
+	r, _ := vaultRig(t)
+	w := r.do("GET", "/unlock/vault", nil)
+	page := w.Body.String()
+	m := regexp.MustCompile(`(?s)<script>(.*?)</script>`).FindAllStringSubmatch(page, -1)
+	if len(m) != 1 {
+		t.Fatalf("scripts: %d\n%s", len(m), page)
+	}
+	h := sha256.Sum256([]byte(m[0][1]))
+	csp := w.Header().Get("Content-Security-Policy")
+	if !strings.HasSuffix(csp, "; script-src 'sha256-"+base64.StdEncoding.EncodeToString(h[:])+"'") || !strings.HasPrefix(csp, pageCSP) {
+		t.Fatalf("CSP %q does not allow exactly the page's script", csp)
+	}
+	for _, bad := range []string{"fetch", "XMLHttpRequest", "http", "src", "eval", "Function(", "submit", "innerHTML", "cookie"} {
+		if strings.Contains(m[0][1], bad) {
+			t.Fatalf("shrink script uses %q", bad)
+		}
+	}
+	if !strings.Contains(page, `<form method="post" action="/unlock/vault" enctype="multipart/form-data">`) || !strings.Contains(page, `<input type="file" name="photo" id="photo" accept="image/*">`) {
+		t.Fatal("photo form needs the script")
+	}
+	if csp := r.do("GET", "/status", nil).Header().Get("Content-Security-Policy"); csp != pageCSP || strings.Contains(csp, "script-src") {
+		t.Fatalf("status CSP %q", csp)
+	}
+}
+
+// A phone holding the pending unlock's cookie is exempt from the
+// Wi-Fi-wide budget (#50 arbitrator); its own limits still apply.
+func TestVaultBudgetExemptsThePendingPhone(t *testing.T) {
+	r, fv := vaultRig(t)
+	r.upload(nil, r.card.VaultPassphrase)
+	if fv.state != "pending" {
+		t.Fatalf("state %q", fv.state)
+	}
+	// Other addresses use up the Wi-Fi-wide budget.
+	for i := 0; i < VaultTriesAllPerHour; i++ {
+		o := &rig{t: t, srv: r.srv, ip: fmt.Sprintf("10.42.0.%d:40000", 100+i), now: r.clock()}
+		o.jar, _ = cookiejar.New(nil)
+		o.post("/unlock/vault", url.Values{"step": {"pin"}, "pin": {"0000"}})
+	}
+	o := &rig{t: t, srv: r.srv, ip: "10.42.0.250:5000"}
+	o.jar, _ = cookiejar.New(nil)
+	if b := o.post("/unlock/vault", url.Values{"step": {"pin"}, "pin": {"0000"}}).Body.String(); !strings.Contains(b, "Too many tries on the box") {
+		t.Fatalf("budget not spent:\n%s", b)
+	}
+	// The owner's phone, holding the cookie, still gets a try.
+	r.advance(VaultTryGap)
+	if b := r.post("/unlock/vault", url.Values{"step": {"pin"}, "pin": {"0000"}}).Body.String(); strings.Contains(b, "Too many tries") {
+		t.Fatalf("pending phone starved:\n%s", b)
 	}
 }

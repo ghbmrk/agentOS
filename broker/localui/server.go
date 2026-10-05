@@ -172,6 +172,10 @@ func (s *Server) routes() {
 	s.setup.routes(s.mux)
 }
 
+// pageCSP allows no script, no framing and no outside source (L6). The
+// vault page adds one hashed script (vaultCSP).
+const pageCSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+
 // ServeHTTP applies the CH-9 and CH-7 guards to every request, then routes.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// CH-9: only clients on the access point's subnet. The listener is
@@ -183,7 +187,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h := w.Header()
-	h.Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+	h.Set("Content-Security-Policy", pageCSP)
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("X-Frame-Options", "DENY")
 	h.Set("Referrer-Policy", "no-referrer")

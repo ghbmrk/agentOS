@@ -3,6 +3,8 @@ package localui
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -183,12 +185,18 @@ const (
 	VaultTriesAllPerHour = 120
 )
 
-// vaultTry spends one attempt for the phone at addr, or returns the
-// owner-facing refusal.
-func (s *Server) vaultTry(addr string) string {
+// vaultTry spends one attempt for the phone that sent r, or returns the
+// owner-facing refusal. A phone holding the pending unlock's cookie (it
+// has already given the passphrase) or signed in (it has given a code) is
+// exempt from the Wi-Fi-wide bucket, so phones rotating addresses cannot
+// starve the owner's PIN and code steps (#50 arbitrator); its own
+// per-phone limits still apply.
+func (s *Server) vaultTry(r *http.Request) string {
 	now := s.cfg.Now()
-	ip := addr
-	if ap, err := netip.ParseAddrPort(addr); err == nil {
+	signedIn := s.isSignedIn(r)
+	key := vaultKey(r)
+	ip := r.RemoteAddr
+	if ap, err := netip.ParseAddrPort(ip); err == nil {
 		ip = ap.Addr().Unmap().String()
 	}
 	hour := now.Add(-time.Hour)
@@ -204,6 +212,7 @@ func (s *Server) vaultTry(addr string) string {
 		}
 	}
 	s.vaultAll = all
+	exempt := signedIn || (s.vaultPend != nil && s.vaultPend.key == key)
 	for k, ts := range s.vaultTries {
 		if len(ts) == 0 || !ts[len(ts)-1].After(hour) {
 			delete(s.vaultTries, k)
@@ -221,13 +230,57 @@ func (s *Server) vaultTry(addr string) string {
 		return "Wait a few seconds, then try again."
 	case len(mine) >= VaultTriesPerHour:
 		return "Too many tries from this phone. Try again after " + at(mine[0].Add(time.Hour)) + "."
-	case len(all) >= VaultTriesAllPerHour:
+	case !exempt && len(all) >= VaultTriesAllPerHour:
 		return "Too many tries on the box's Wi-Fi. Try again after " + at(all[0].Add(time.Hour)) + "."
 	}
 	s.vaultTries[ip] = append(mine, now)
-	s.vaultAll = append(s.vaultAll, now)
+	if !exempt {
+		s.vaultAll = append(s.vaultAll, now)
+	}
 	return ""
 }
+
+// shrinkJS is the vault page's one script (#50 arbitrator): when the
+// owner picks a photo larger than MaxProgressivePixels, the phone redraws
+// it as a baseline JPEG of at most that size before the form is sent, so a
+// 48 MP camera photo just works. Without it (an old browser, script off,
+// a decode error) the form sends the photo unchanged and the box's own
+// bounds apply (scan.go). The button is disabled while the photo is
+// redrawn, so the form cannot post the original meanwhile.
+const shrinkJS = `(function () {
+  var f = document.getElementById("photo");
+  if (!f || !window.createImageBitmap || !window.DataTransfer) return;
+  f.addEventListener("change", async function () {
+    var file = f.files[0], btn = f.form.querySelector("button");
+    if (!file) return;
+    btn.disabled = true;
+    try {
+      var b = await createImageBitmap(file), px = b.width * b.height, max = 12e6;
+      if (px > max) {
+        var k = Math.sqrt(max / px), c = document.createElement("canvas");
+        c.width = Math.floor(b.width * k);
+        c.height = Math.floor(b.height * k);
+        c.getContext("2d").drawImage(b, 0, 0, c.width, c.height);
+        var blob = await new Promise(function (ok) { c.toBlob(ok, "image/jpeg", 0.92); });
+        if (blob) {
+          var d = new DataTransfer();
+          d.items.add(new File([blob], "card.jpg", { type: "image/jpeg" }));
+          f.files = d.files;
+        }
+      }
+      b.close();
+    } catch (e) {
+    } finally {
+      btn.disabled = false;
+    }
+  });
+})();`
+
+// vaultCSP is pageCSP plus the hash of shrinkJS, the only script it runs.
+var vaultCSP = func() string {
+	h := sha256.Sum256([]byte(shrinkJS))
+	return pageCSP + "; script-src 'sha256-" + base64.StdEncoding.EncodeToString(h[:]) + "'"
+}()
 
 // uploadWindow bounds how long one upload may take to arrive.
 const uploadWindow = 60 * time.Second
@@ -277,6 +330,7 @@ func (s *Server) vaultUnlock(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) vaultPage(w http.ResponseWriter, r *http.Request, errText string) {
+	w.Header().Set("Content-Security-Policy", vaultCSP)
 	v := vaultView{Err: errText}
 	st, err := s.cfg.Vault.Status(r.Context())
 	if err != nil {
@@ -343,7 +397,7 @@ func (s *Server) vaultPost(w http.ResponseWriter, r *http.Request) {
 func (s *Server) vaultPassphrase(w http.ResponseWriter, r *http.Request) {
 	// Every passphrase post spends an attempt before its body is read,
 	// photo or not, so scans are budgeted too (#50 L3 F2).
-	if msg := s.vaultTry(r.RemoteAddr); msg != "" {
+	if msg := s.vaultTry(r); msg != "" {
 		s.vaultPage(w, r, msg)
 		return
 	}
@@ -448,7 +502,7 @@ func (s *Server) vaultCode(w http.ResponseWriter, r *http.Request, code string, 
 }
 
 func (s *Server) vaultPIN(w http.ResponseWriter, r *http.Request, pin string) {
-	if msg := s.vaultTry(r.RemoteAddr); msg != "" {
+	if msg := s.vaultTry(r); msg != "" {
 		s.vaultPage(w, r, msg)
 		return
 	}
@@ -488,7 +542,7 @@ func scanText(err error) string {
 	case errors.Is(err, ErrManyQR):
 		return "That photo holds more than one passphrase-like code. Take a photo of the vault passphrase code alone."
 	case errors.Is(err, ErrPhotoSize):
-		return "That photo is too large for the box. Take a smaller one, or type the words."
+		return "That photo is too large for the box. Type the passphrase words, or use a lower-resolution photo."
 	case errors.Is(err, ErrScanBusy):
 		return "The box is reading another photo. Try again in a moment."
 	}

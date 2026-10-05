@@ -8,7 +8,7 @@ import (
 
 // Pages carry no script and load nothing from outside the box (ONB-1).
 // Live progress refreshes with a meta refresh (ONB-4).
-var tmpl = template.Must(template.New("layout").Funcs(template.FuncMap{"phase": phaseText, "boxhost": func() string { return "" }}).Parse(`{{define "head"}}<!doctype html>
+var tmpl = template.Must(template.New("layout").Funcs(template.FuncMap{"phase": phaseText, "boxhost": func() string { return "" }, "shrinkjs": func() template.JS { return template.JS(shrinkJS) }}).Parse(`{{define "head"}}<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 {{if .}}<meta http-equiv="refresh" content="{{.}}">{{end}}
@@ -89,11 +89,12 @@ form { margin: .6em 0 1.2em; }
 <h2>Or use your Owner Card</h2>{{end}}
 <form method="post" action="/unlock/vault" enctype="multipart/form-data"><input type="hidden" name="step" value="passphrase">
 <label>Photo of the vault passphrase QR code on your card
-<input type="file" name="photo" accept="image/*"></label>
+<input type="file" name="photo" id="photo" accept="image/*"></label>
 <p class="muted">Or type the passphrase words.</p>
 <input type="text" name="passphrase" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" aria-label="Passphrase words">
 <button>Next</button></form>
 <p class="muted">Next, the box asks for a code from your code generator. The passphrase alone does not unlock it.</p>
+<script>{{shrinkjs}}</script>
 {{end}}
 <p><a href="/status">Status</a></p>
 {{template "foot"}}{{end}}
