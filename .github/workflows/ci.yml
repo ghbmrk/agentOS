@@ -101,7 +101,7 @@ jobs:
           sudo mkdir /sys/fs/cgroup/agentos-ci
           sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
             AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \
-            go test -count=1 -v ./cgroup ./vm/... ./recovery
+            go test -count=1 -v ./cgroup ./vm/... ./recovery ./cleanroom
       - name: OpenClaw guest under gVisor (P1-7)
         # Real OpenClaw, pinned by version and hash, as an agent machine with
         # only its broker socket; a scripted model stands in for a provider.
