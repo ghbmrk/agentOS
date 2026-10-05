@@ -226,3 +226,42 @@ func TestPublicIdentifiersKept(t *testing.T) {
 		t.Fatalf("over-scrubbed: %q", out)
 	}
 }
+
+// Lowering a label is possible only as an explicit owner action (D1 PUBLIC
+// opt-out or a local-UI relabel), recorded on the item (arbitrator on #38).
+func TestRelabelOnlyByOwner(t *testing.T) {
+	ix := open(t, &MemStore{}, WithOwnerAuth(ownerAuth("sms-public")))
+	task := mustIngest(t, ix, Item{Source: Source{Kind: "task", Ref: "t1"}, Text: "compare laptops"})
+	sum := mustIngest(t, ix, Item{Source: Source{Kind: "agent", Ref: "s", DerivedFrom: []string{task}}, Label: Public, Text: "laptop table"})
+	if err := ix.Relabel("mail-1", task, Public); !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("unauthenticated relabel: %v", err)
+	}
+	if err := ix.Relabel("sms-public", task, Public); err != nil {
+		t.Fatal(err)
+	}
+	if it, _ := ix.Get(task); it.Label != Public || it.LabelBy != "sms-public" {
+		t.Fatalf("relabel: %+v", it)
+	}
+	// Re-ingest keeps the owner's public label while the caller still says
+	// public, and never lowers on its own.
+	mustIngest(t, ix, Item{Source: Source{Kind: "task", Ref: "t1"}, Label: Public, Text: "compare laptops v2"})
+	if it, _ := ix.Get(task); it.Label != Public {
+		t.Fatal("owner relabel lost on re-ingest")
+	}
+	// The derived item was private at ingest; it can be relabelled now that
+	// its parent is public.
+	if err := ix.Relabel("sms-public", sum, Public); err != nil {
+		t.Fatal(err)
+	}
+	// Mail can never be public; raising is always allowed and cascades.
+	m := mustIngest(t, ix, Item{Source: Source{Kind: "mail", Ref: "m"}, Text: "x"})
+	if err := ix.Relabel("sms-public", m, Public); !errors.Is(err, ErrNotRelabelable) {
+		t.Fatalf("mail relabelled public: %v", err)
+	}
+	if err := ix.Relabel("", task, Private); err != nil {
+		t.Fatal(err)
+	}
+	if it, _ := ix.Get(sum); it.Label != Private {
+		t.Fatal("raising a parent must raise derived items")
+	}
+}

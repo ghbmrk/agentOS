@@ -77,6 +77,9 @@ type Item struct {
 	Facts  []Fact    `json:"facts,omitempty"`
 	Vector []float32 `json:"vec,omitempty"`
 	VecID  string    `json:"vec_id,omitempty"` // Embedder.ID of Vector
+	// LabelBy is the owner-channel message that lowered the label, if one
+	// did (Relabel). Empty for labels set at ingest.
+	LabelBy string `json:"label_by,omitempty"`
 }
 
 // OwnerMessage is an authenticated owner-channel message (owner text or
@@ -352,9 +355,15 @@ func (ix *Index) IngestKeyed(id string, it Item) (string, error) {
 	if t, ok := ix.tombs[id]; ok && !seen.After(t) {
 		return "", ErrDeleted
 	}
-	// A label never falls on re-ingest.
-	if old := ix.items[id]; old != nil && old.Label == Private {
-		it.Label = Private
+	// A label never falls on re-ingest; only Relabel lowers one. An owner
+	// relabel to public carries over while the caller still declares public.
+	if old := ix.items[id]; old != nil {
+		switch {
+		case old.Label == Private:
+			it.Label = Private
+		case old.LabelBy != "" && it.Label == Public:
+			it.LabelBy = old.LabelBy
+		}
 	}
 	// A derived item is at least as private as its parents, and private if
 	// any parent is unknown here.
@@ -564,6 +573,75 @@ func (ix *Index) Delete(ids ...string) (DeleteReport, error) {
 		}
 	}
 	return rep, errors.Join(errs...)
+}
+
+// ErrNotRelabelable means the item's kind or parents cannot be public.
+var ErrNotRelabelable = errors.New("recall: this item cannot be public")
+
+// Relabel changes an item's label. Raising to private is always allowed.
+// Lowering to public is the only path that lowers a label (REV-5): it needs
+// an authenticated owner-channel message (the D1 PUBLIC opt-out, or a
+// relabel on the local UI), which is recorded on the item as LabelBy, and
+// it is refused for kinds that can never be public and for items with a
+// private or unknown parent. The broker submits it as a journaled
+// broker-state intent (OP-5) before calling this.
+func (ix *Index) Relabel(messageID, id string, l Label) error {
+	var by string
+	if l == Public {
+		msg, err := ix.ownerMessage(messageID)
+		if err != nil {
+			return err
+		}
+		by = msg.ID
+	} else {
+		l = Private
+	}
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	cur := ix.items[id]
+	if cur == nil {
+		return fmt.Errorf("recall: no item %s", id)
+	}
+	if l == Public {
+		if !publicKinds[cur.Source.Kind] {
+			return ErrNotRelabelable
+		}
+		for _, p := range cur.Source.DerivedFrom {
+			if pi := ix.items[p]; pi == nil || pi.Label != Public {
+				return ErrNotRelabelable
+			}
+		}
+	}
+	up := *cur
+	up.Label, up.LabelBy = l, by
+	if err := ix.append(record{Op: "put", Item: &up}); err != nil {
+		return err
+	}
+	ix.apply(record{Op: "put", Item: &up})
+	if l == Private {
+		// Raise everything derived from it too, transitively.
+		for changed := true; changed; {
+			changed = false
+			for _, it := range ix.items {
+				if it.Label != Public {
+					continue
+				}
+				for _, p := range it.Source.DerivedFrom {
+					if pi := ix.items[p]; pi == nil || pi.Label != Public {
+						d := *it
+						d.Label, d.LabelBy = Private, ""
+						if err := ix.append(record{Op: "put", Item: &d}); err != nil {
+							return err
+						}
+						ix.apply(record{Op: "put", Item: &d})
+						changed = true
+						break
+					}
+				}
+			}
+		}
+	}
+	return ix.maybeCompact()
 }
 
 // SetPreference stores or replaces an owner preference. messageID must name
