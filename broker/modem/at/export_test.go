@@ -29,3 +29,28 @@ func DeliverPID(from string, pid byte, text string) string {
 	p, _ := encodeDeliver(oa, pid, text, 1)
 	return p[0]
 }
+
+// DeliverAlphaPart encodes part 1 of a long SMS-DELIVER from an
+// alphanumeric sender ID.
+func DeliverAlphaPart(name, text string, ref byte) string {
+	var septets []byte
+	for _, r := range name {
+		septets = append(septets, gsm7Code[r])
+	}
+	oa := append([]byte{byte((len(septets)*7 + 3) / 4), 0xD0}, pack7(septets, 0, nil)...)
+	p, _ := encodeDeliver(oa, 0x00, text, ref)
+	return p[0]
+}
+
+// PendingFrom counts the texts from addr being reassembled.
+func (m *Modem) PendingFrom(addr string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, a := range m.parts {
+		if a.from == addr {
+			n++
+		}
+	}
+	return n
+}
