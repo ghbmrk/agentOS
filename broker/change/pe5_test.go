@@ -66,7 +66,13 @@ func TestOnlyCandidateCausableCutsCount(t *testing.T) {
 			// is failed without running, so nothing cuts that pass.
 			var rep Report
 			finished := false
-			for i := 0; i < MaxInterruptions+2 && !finished; i++ {
+			// An owner's cuts are exempt MaxExemptPerCase times per case
+			// (PE5b, pe5b_test.go has the rest).
+			passes := MaxInterruptions + 2
+			if !tc.struck {
+				passes = MaxExemptPerCase
+			}
+			for i := 0; i < passes && !finished; i++ {
 				r, err := e.p.Propose(arm(), greet)
 				switch {
 				case err == nil:
@@ -115,20 +121,9 @@ func TestOnlyCandidateCausableCutsCount(t *testing.T) {
 // cannot take the evaluator back from other work. Another candidate is
 // unaffected.
 func TestOwnerCutCandidateIsParked(t *testing.T) {
-	fixture := func(t Tree, pr Probe) bool {
-		return string(pr.Input) == exfilProbe && string(t["skills/greet"]) == "hello"
-	}
 	e, pe := newPreemptEnv(t, func(c *Config) { c.MinHeldOut = 100 })
 	e.cases(12, ClassSkill, "skills/greet", "hello")
-	for i := 0; i < MaxExempt; i++ {
-		ctx := pe.arm(0)
-		pe.mu.Lock()
-		pe.cut, pe.cause = func(_ context.Context, t Tree, pr Probe) bool { return fixture(t, pr) }, ErrOwnerWork
-		pe.mu.Unlock()
-		if _, err := e.p.Propose(ctx, greet); !errors.Is(err, ErrInterrupted) || errors.Is(err, ErrParked) {
-			t.Fatalf("cut %d: %v", i, err)
-		}
-	}
+	park(t, e, pe, greet)
 	pe.arm(0)
 	e.p.mu.Lock()
 	seq := e.p.st.Seq
@@ -149,6 +144,7 @@ func TestOwnerCutCandidateIsParked(t *testing.T) {
 	if _, err := e.p.Propose(context.Background(), other); errors.Is(err, ErrParked) {
 		t.Fatal("another candidate was parked")
 	}
+	pe.arm(0)
 	rep, err := e.p.Propose(WithIdle(context.Background()), greet)
 	if err != nil {
 		t.Fatalf("idle evaluator: %v", err)
@@ -158,5 +154,34 @@ func TestOwnerCutCandidateIsParked(t *testing.T) {
 	}
 	if _, err := e.p.Propose(context.Background(), greet); !errors.Is(err, ErrParked) {
 		t.Fatalf("exempt count reset by a finished pass: %v", err)
+	}
+}
+
+// park cuts c short for the owner MaxExempt times, each time on the
+// candidate side of a case not cut before, so no case passes its own
+// exempt limit (PE5b), and c is parked.
+func park(t *testing.T, e *env, pe *preempting, c Candidate) {
+	t.Helper()
+	seen := map[string]bool{}
+	for i := 0; i < MaxExempt; i++ {
+		ctx := pe.arm(0)
+		cutOne := false
+		pe.mu.Lock()
+		pe.cut = func(_ context.Context, tr Tree, pr Probe) bool {
+			key, ok := e.p.ProbeTask(pr.ID)
+			if !ok {
+				key = string(pr.Input)
+			}
+			if cutOne || string(tr["skills/greet"]) != string(c.Files["skills/greet"]) || seen[key] {
+				return false
+			}
+			cutOne, seen[key] = true, true
+			return true
+		}
+		pe.cause = ErrOwnerWork
+		pe.mu.Unlock()
+		if _, err := e.p.Propose(ctx, c); !errors.Is(err, ErrInterrupted) || errors.Is(err, ErrParked) {
+			t.Fatalf("cut %d: %v", i, err)
+		}
 	}
 }

@@ -32,6 +32,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/replay"
 	"github.com/ghbmrk/agentos/broker/vm"
 	"github.com/ghbmrk/agentos/broker/vm/gvisor"
+	"github.com/ghbmrk/agentos/broker/workers"
 )
 
 // images collects -image name=dir flags.
@@ -241,6 +242,11 @@ func main() {
 	flag.StringVar(&builderImage, "builder-image", "", "the minimal image Loop 1's builder machines run (W3-builder), registered with -image; empty runs no model-backed builder")
 	flag.StringVar(&builderLaunch, "builder-launch", "", "how a builder machine starts: argv and env; empty uses the image's own")
 	flag.Int64Var(&builderMemMB, "builder-mem-mb", loopbuild.DefaultMemMB, "a builder machine's memory budget, MB")
+	var workerImage, workerArgv string
+	var workerMaxMB int64
+	flag.StringVar(&workerImage, "worker-image", "", "the base image worker machines are built from (CAP-8), registered with -image; empty offers guests no worker tools")
+	flag.StringVar(&workerArgv, "worker-argv", "sleep infinity", "what a worker machine runs while the guest drives it, space-separated")
+	flag.Int64Var(&workerMaxMB, "worker-max-mb", 2048, "the largest memory budget one worker may ask for, MB; admission still decides (RES-2)")
 	flag.Int64Var(&replayMemMB, "replay-mem-mb", defaultReplayMemMB, "a replay machine's memory budget, MB (LOOP-5); with -agent-mem-mb it must fit in -capacity-mb less -headroom-mb")
 	qcfg := defaultQuestionConfig("/var/lib/agentos")
 	flag.StringVar(&qcfg.Path, "questions", qcfg.Path, "agents' questions to the owner, kept across restarts (P3-8)")
@@ -405,7 +411,12 @@ func main() {
 			recallCfg.Labeler, recallCfg.Machines = recallLabels{m}, recallMachines{m}
 			go m.RunPruner(vm.PrunePolicy{LowWaterBytes: 1 << 30}, time.Minute, ctx.Done())
 			tree.setMachines(m)
-			if plane, err := openGuestPlane(m, d, cfg.SocketDir, meterPath, inboxPath, egressSocket, toolSet{qs.tools(), tree, recallTools}); err != nil {
+			tools := toolSet{qs.tools(), tree, recallTools}
+			if wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB); wt != nil {
+				tools = append(tools, wt)
+				go reapWorkers(ctx, wt)
+			}
+			if plane, err := openGuestPlane(m, d, cfg.SocketDir, meterPath, inboxPath, egressSocket, tools); err != nil {
 				// Machines cannot start without their guest sockets.
 				log.Printf("agent machines disabled: %v", err)
 			} else {
@@ -564,6 +575,36 @@ func replayFits(capacityMB, headroomMB, agentMB, replayMB int64) error {
 		return fmt.Errorf("the agent machine (%d MB) and one replay machine (%d MB) do not fit in the %d MB pool (-capacity-mb less -headroom-mb)", agentMB, replayMB, pool)
 	}
 	return nil
+}
+
+// workerTools serves the worker-machine tools (CAP-8) on the live guest
+// plane only: replay and builder machines never get them. Nil, offering
+// none, when no worker image is registered.
+func workerTools(m *vm.Manager, imgs images, image, argv string, maxMB int64) *workers.Tools {
+	if image == "" {
+		return nil
+	}
+	if _, ok := imgs[image]; !ok {
+		log.Printf("worker tools off: image %q is not registered with -image", image)
+		return nil
+	}
+	return &workers.Tools{M: m, Image: image, Argv: strings.Fields(argv), MaxMemMB: maxMB}
+}
+
+// reapWorkers parks idle and orphaned workers every minute (UX-146-1).
+func reapWorkers(ctx context.Context, wt *workers.Tools) {
+	t := time.NewTicker(time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if parked := wt.Reap(ctx); len(parked) > 0 {
+				log.Printf("workers parked: %v", parked)
+			}
+		}
+	}
 }
 
 // agentSpec is how the owner's agent machine starts, from the image flags

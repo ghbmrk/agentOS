@@ -97,6 +97,9 @@ type Machine struct {
 	// lineage as one requester for idempotency (OP-1).
 	Lineage string
 	Last    string // newest snapshot of this machine
+	// Starts counts the machine's starts (every startFrom), so a sleep
+	// checkpoint taken at one start is refused after another (PE7).
+	Starts uint64 `json:",omitempty"`
 }
 
 // Snapshot is a broker-held snapshot's record.
@@ -111,6 +114,13 @@ type Snapshot struct {
 	// its machine's destroy still traceable (ForgetSince). Empty on
 	// snapshots taken before it was recorded.
 	Lineage string `json:",omitempty"`
+	// Sleep marks CheckpointAndStop's checkpoint, the only kind
+	// ResumeFromCheckpoint restores (PE7). Starts is the machine's start
+	// count when it was taken, and Hash the SHA-256 over its files and
+	// memory image (treeHash), checked before the restore.
+	Sleep  bool   `json:",omitempty"`
+	Starts uint64 `json:",omitempty"`
+	Hash   string `json:",omitempty"`
 }
 
 // Launch is what a Runtime needs to run a machine.
@@ -228,6 +238,20 @@ type machine struct {
 	// preempting is set, without the lock, while a preemption is under way
 	// (see Preempt); startFrom refuses to start the machine meanwhile.
 	preempting atomic.Bool
+	// execCancel ends a worker's command in flight (Exec), so erasure,
+	// rollback and destroy never wait behind it for the lock.
+	execCancel atomic.Pointer[context.CancelFunc]
+}
+
+// lockEndingExec takes mc's lock, ending any worker command that holds or
+// takes it meanwhile, so the caller never waits behind one.
+func (mc *machine) lockEndingExec() {
+	for !mc.mu.TryLock() {
+		if c := mc.execCancel.Load(); c != nil {
+			(*c)()
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 // Manager is safe for concurrent use.
@@ -304,7 +328,10 @@ func (m *Manager) Create(ctx context.Context, id string, s Spec) (Machine, error
 	if strings.HasPrefix(id, EvalPrefix) {
 		return Machine{}, fmt.Errorf("vm: machine ids starting %q are kept for replay", EvalPrefix)
 	}
-	return m.create(ctx, id, s, nil)
+	if strings.HasPrefix(id, WorkerPrefix) {
+		return Machine{}, fmt.Errorf("vm: machine ids starting %q are kept for workers", WorkerPrefix)
+	}
+	return m.create(ctx, id, s, nil, "")
 }
 
 // EvalPrefix starts the IDs of replay machines (LOOP-5), whose guest
@@ -343,17 +370,20 @@ func (m *Manager) CreateSeeded(ctx context.Context, id string, s Spec, seed map[
 	if m.cfg.MaxLayerBytes > 0 && size > m.cfg.MaxLayerBytes {
 		return Machine{}, fmt.Errorf("%w (seed %d bytes, cap %d)", ErrQuota, size, m.cfg.MaxLayerBytes)
 	}
-	return m.create(ctx, id, s, seed)
+	if strings.HasPrefix(id, WorkerPrefix) {
+		return Machine{}, fmt.Errorf("vm: machine ids starting %q are kept for workers", WorkerPrefix)
+	}
+	return m.create(ctx, id, s, seed, "")
 }
 
-func (m *Manager) create(ctx context.Context, id string, s Spec, seed map[string][]byte) (Machine, error) {
+func (m *Manager) create(ctx context.Context, id string, s Spec, seed map[string][]byte, lineage string) (Machine, error) {
 	if !idRE.MatchString(id) {
 		return Machine{}, fmt.Errorf("vm: bad machine id %q", id)
 	}
 	if _, ok := m.cfg.Images[s.Image]; !ok {
 		return Machine{}, fmt.Errorf("%w: image %q", ErrUnknown, s.Image)
 	}
-	mc, err := m.reserve(id, s, s.Label, "", "")
+	mc, err := m.reserve(id, s, s.Label, "", lineage)
 	if err != nil {
 		return Machine{}, err
 	}
@@ -479,7 +509,9 @@ func (m *Manager) startFrom(ctx context.Context, mc *machine, s *Snapshot) error
 	if mc.preempting.Load() {
 		return fmt.Errorf("%w: %s", ErrRevoked, mc.ID)
 	}
-	if m.cfg.Services != nil {
+	// Workers run no agent: no broker socket, so no tools, owner channel
+	// or model egress (CAP-8).
+	if m.cfg.Services != nil && !strings.HasPrefix(mc.ID, WorkerPrefix) {
 		dir, err := m.cfg.Services.Open(mc.ID)
 		if err != nil {
 			return err
@@ -500,6 +532,7 @@ func (m *Manager) startFrom(ctx context.Context, mc *machine, s *Snapshot) error
 		return fmt.Errorf("%w: %s", ErrRevoked, mc.ID)
 	}
 	mc.State = Running
+	mc.Starts++
 	return m.saveMachine(mc)
 }
 
@@ -740,6 +773,12 @@ func (m *Manager) withdrawLocked(mc *machine, id, prev string) {
 
 // capture writes a snapshot of a paused (or stopped) machine.
 func (m *Manager) capture(ctx context.Context, mc *machine, t Tier) (Snapshot, error) {
+	return m.captureAs(ctx, mc, t, false)
+}
+
+// captureAs is capture; sleep marks a sleep checkpoint, with the
+// machine's start count and the hash of what was written.
+func (m *Manager) captureAs(ctx context.Context, mc *machine, t Tier, sleep bool) (Snapshot, error) {
 	u, err := m.checkCaps(m.launch(mc).Upper)
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("%s: %w", mc.ID, err)
@@ -788,6 +827,13 @@ func (m *Manager) capture(ctx context.Context, mc *machine, t Tier) (Snapshot, e
 	// while it was being copied may be in it, so the snapshot must not
 	// read as taken before that (CAP-3 restore points, V26).
 	s.Taken = time.Now().UTC()
+	if sleep {
+		h, err := treeHash(dir)
+		if err != nil {
+			return fail(err)
+		}
+		s.Sleep, s.Starts, s.Hash = true, mc.Starts, h
+	}
 	if err := writeJSON(filepath.Join(dir, "meta.json"), s); err != nil {
 		return fail(err)
 	}
@@ -904,7 +950,7 @@ func (m *Manager) Rollback(ctx context.Context, id, snapID string) error {
 	if err != nil {
 		return err
 	}
-	mc.mu.Lock()
+	mc.lockEndingExec()
 	if !inLineage(mc, s) {
 		mc.mu.Unlock()
 		return fmt.Errorf("%w: %s, %s", ErrLineage, id, snapID)
@@ -1019,7 +1065,14 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 	if m.contained(src) {
 		return Snapshot{}, fmt.Errorf("%w (%s)", ErrContained, id)
 	}
+	worker := strings.HasPrefix(id, WorkerPrefix)
 	for _, f := range ids {
+		// A worker forks into workers only, and nothing else forks into
+		// one: a worker's memory never runs with an agent's services, and
+		// an agent's never runs without them (CAP-8).
+		if strings.HasPrefix(f, WorkerPrefix) != worker {
+			return Snapshot{}, fmt.Errorf("vm: a worker forks into workers only, and only a worker into ids starting %q", WorkerPrefix)
+		}
 		if strings.HasPrefix(f, EvalPrefix) {
 			return Snapshot{}, fmt.Errorf("vm: machine ids starting %q are kept for replay", EvalPrefix)
 		}
@@ -1181,6 +1234,9 @@ func (m *Manager) Merge(ctx context.Context, dst, src string) (Snapshot, error) 
 	}
 	if strings.HasPrefix(dst, BuilderPrefix) || strings.HasPrefix(src, BuilderPrefix) {
 		return Snapshot{}, errors.New("vm: builder machines are not merged")
+	}
+	if strings.HasPrefix(dst, WorkerPrefix) || strings.HasPrefix(src, WorkerPrefix) {
+		return Snapshot{}, errors.New("vm: worker machines are not merged")
 	}
 	sm, err := m.get(src)
 	if err != nil {
@@ -1378,7 +1434,7 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	mc.mu.Lock()
+	mc.lockEndingExec()
 	err = m.stopRuntime(ctx, mc)
 	if err == nil {
 		err = os.RemoveAll(m.machineDir(id))
