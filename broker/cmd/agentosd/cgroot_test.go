@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -145,9 +146,33 @@ func TestRES2DelegatedRootWithoutPidsOpensNoPool(t *testing.T) {
 	}
 }
 
-func TestRES2NoMemoryControlsSaysSoInStatus(t *testing.T) {
-	if s := (&lateStatus{off: agentNoMemControls}).Status(); s != "Agent: off, the box's memory controls are not set up; it needs an update." {
-		t.Fatalf("status = %q", s)
+// Whichever controller is missing, the owner reads one line that names
+// none of them, and the log lists every missing one (UX ruling on #155).
+func TestRES2MissingControllerSaysSoInStatus(t *testing.T) {
+	const want = "Agent: off, the box can't yet keep the agent within its limits; it needs an update."
+	mem, err := budget.ForHost(7680, 4, budget.Floor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, missing := range [][]string{{"cpu"}, {"io"}, {"memory"}, {"pids"}, {"cpu", "pids"}} {
+		h, own := fakeCgroupfs(t, true)
+		var have []string
+		for _, c := range []string{"cpu", "io", "memory", "pids"} {
+			if !slices.Contains(missing, c) {
+				have = append(have, c)
+			}
+		}
+		os.WriteFile(filepath.Join(own, "cgroup.controllers"), []byte(strings.Join(have, " ")), 0o644)
+		_, err := openMachines(h, "", false, mem)
+		if err == nil || !strings.Contains(err.Error(), "lacks "+strings.Join(missing, ", ")) {
+			t.Errorf("missing %v: log error %v, want it to list them", missing, err)
+		}
+		if s := (&lateStatus{off: agentNoLimits}).Status(); s != want {
+			t.Errorf("missing %v: status %q", missing, s)
+		}
+	}
+	if strings.Contains(agentNoLimits, "memory") || strings.Contains(agentNoLimits, "cgroup") {
+		t.Errorf("owner text names a mechanism: %q", agentNoLimits)
 	}
 }
 

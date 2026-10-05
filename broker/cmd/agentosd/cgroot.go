@@ -12,9 +12,11 @@ import (
 	"github.com/ghbmrk/agentos/broker/cgroup"
 )
 
-// agentNoMemControls is STATUS's agent line when the broker may not manage
-// the box's cgroups, so no machine may start (RES-2: none runs unbudgeted).
-const agentNoMemControls = "Agent: off, the box's memory controls are not set up; it needs an update."
+// agentNoLimits is STATUS's agent line when the broker may not manage the
+// box's cgroups or they lack a controller, so no machine may start (RES-2:
+// none runs unbudgeted). It names no controller (UX ruling on #155); the
+// log line lists the missing ones.
+const agentNoLimits = "Agent: off, the box can't yet keep the agent within its limits; it needs an update."
 
 // cgroupHost is where the broker reads its cgroup facts; tests point it at
 // a fake cgroupfs.

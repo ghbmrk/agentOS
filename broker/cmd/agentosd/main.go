@@ -332,7 +332,7 @@ func main() {
 			log.Printf("agent machines disabled: %v", err)
 			runsc = ""
 			if agentOff == "" {
-				agentOff = agentNoMemControls
+				agentOff = agentNoLimits
 			}
 		} else {
 			cg, psiPath = g, filepath.Join(g.Path, "memory.pressure")

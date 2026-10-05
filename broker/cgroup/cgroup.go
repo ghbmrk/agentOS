@@ -57,10 +57,14 @@ func Open(path string) (*Group, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s", ErrNotV2, path)
 	}
+	var missing []string
 	for _, c := range Controllers {
 		if !hasWord(string(ctl), c) {
-			return nil, fmt.Errorf("%w: %s lacks %s", ErrNotV2, path, c)
+			missing = append(missing, c)
 		}
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("%w: %s lacks %s", ErrNotV2, path, strings.Join(missing, ", "))
 	}
 	g := &Group{Path: path}
 	sub, err := os.ReadFile(filepath.Join(path, "cgroup.subtree_control"))
