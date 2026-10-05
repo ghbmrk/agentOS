@@ -589,6 +589,14 @@ type Ring struct {
 	Tag string
 	// Addr is the offered audio address; default the loopback listener.
 	Addr string
+	// Silent sends no audio, as a forged offer naming someone else's
+	// address would never produce from that address.
+	Silent bool
+	// NoAck never acknowledges the line's answer.
+	NoAck bool
+	// Elsewhere sends the caller's audio from another port than the one
+	// offered, as a third party would if an offer named its address.
+	Elsewhere bool
 }
 
 // LineCall is a call the provider placed to a line.
@@ -632,6 +640,7 @@ func (p *Provider) RingLine(ctx context.Context, from, user string, o Ring) (*Li
 	if o.Addr == "" {
 		o.Addr = "127.0.0.1"
 	}
+	var key []byte
 	var pts []string
 	for _, pt := range o.PTs {
 		pts = append(pts, fmt.Sprint(pt))
@@ -640,9 +649,9 @@ func (p *Provider) RingLine(ctx context.Context, from, user string, o Ring) (*Li
 	if o.Plain {
 		proto = "RTP/AVP"
 	} else {
-		k := make([]byte, 30)
-		_, _ = rand.Read(k)
-		crypto = fmt.Sprintf("a=crypto:%s %s inline:%s\r\n", o.Tag, sipline.Suite, base64.StdEncoding.EncodeToString(k))
+		key = make([]byte, 30)
+		_, _ = rand.Read(key)
+		crypto = fmt.Sprintf("a=crypto:%s %s inline:%s\r\n", o.Tag, sipline.Suite, base64.StdEncoding.EncodeToString(key))
 	}
 	body := fmt.Sprintf("v=0\r\no=- 0 0 IN IP4 %s\r\ns=-\r\nc=IN IP4 %s\r\nt=0 0\r\nm=audio %d %s %s\r\n%s",
 		o.Addr, o.Addr, conn.LocalAddr().(*net.UDPAddr).Port, proto, strings.Join(pts, " "), crypto)
@@ -673,15 +682,27 @@ func (p *Provider) RingLine(ctx context.Context, from, user string, o Ring) (*Li
 		return nil, err
 	}
 	c.Status, c.Answer = c.d.InviteResponse.StatusCode, append([]byte(nil), c.d.InviteResponse.Body()...)
-	if err := c.d.Ack(ctx); err != nil {
-		c.end()
-		return nil, err
+	if !o.NoAck {
+		if err := c.d.Ack(ctx); err != nil {
+			c.end()
+			return nil, err
+		}
 	}
-	key, err := sipline.OfferKey(c.Answer)
+	if !o.Silent && key != nil {
+		from := conn
+		if o.Elsewhere {
+			if from, err = net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)}); err != nil {
+				return c, nil
+			}
+			go func() { <-c.done; _ = from.Close() }()
+		}
+		go c.speak(key, from)
+	}
+	lineKey, err := sipline.OfferKey(c.Answer)
 	if err != nil {
 		return c, nil // no key: nothing can be heard
 	}
-	rx, err := sipline.Context(key)
+	rx, err := sipline.Context(lineKey)
 	if err != nil {
 		return c, nil
 	}
@@ -711,6 +732,48 @@ func (p *Provider) RingLine(ctx context.Context, from, user string, o Ring) (*Li
 		}
 	}()
 	return c, nil
+}
+
+// speak sends the caller's own SRTP audio (silence) to the line's answer
+// address from the offered address, every 20 ms until the call ends.
+func (c *LineCall) speak(key []byte, from *net.UDPConn) {
+	to := answerAddr(c.Answer)
+	tx, err := sipline.Context(key)
+	if to == nil || err != nil {
+		return
+	}
+	tick := time.NewTicker(20 * time.Millisecond)
+	defer tick.Stop()
+	for seq := uint16(1); ; seq++ {
+		p := rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: sipline.PCMU, SequenceNumber: seq, Timestamp: uint32(seq) * 160, SSRC: 0x5157}, Payload: make([]byte, 160)}
+		raw, _ := p.Marshal()
+		if sealed, err := tx.EncryptRTP(nil, raw, nil); err == nil {
+			_, _ = from.WriteToUDP(sealed, to)
+		}
+		select {
+		case <-c.done:
+			return
+		case <-tick.C:
+		}
+	}
+}
+
+// answerAddr reads the audio address from an SDP answer.
+func answerAddr(sdp []byte) *net.UDPAddr {
+	var ip net.IP
+	port := 0
+	for _, line := range strings.Split(string(sdp), "\r\n") {
+		if a, ok := strings.CutPrefix(line, "c=IN IP4 "); ok {
+			ip = net.ParseIP(strings.TrimSpace(a))
+		}
+		if m, ok := strings.CutPrefix(line, "m=audio "); ok {
+			fmt.Sscanf(m, "%d", &port)
+		}
+	}
+	if ip == nil || port == 0 {
+		return nil
+	}
+	return &net.UDPAddr{IP: ip, Port: port}
 }
 
 func (c *LineCall) end() {

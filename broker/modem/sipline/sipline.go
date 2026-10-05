@@ -70,7 +70,7 @@ type Config struct {
 
 // NoCallsText is what a caller to the second line hears (NoCallsClip):
 // the line answers only texts until a call handler exists (at M13).
-const NoCallsText = "This number can't take calls. Please text it."
+const NoCallsText = "This number can't take calls. Please text this number instead."
 
 // Errors.
 var (
@@ -84,6 +84,9 @@ var (
 	// ErrUnreachable wraps a failure to reach or register with the
 	// provider.
 	ErrUnreachable = errors.New("sipline: provider unreachable")
+	// ErrCallFailed wraps a call the far end or provider refused, or that
+	// was not answered. Calls are not retried.
+	ErrCallFailed = errors.New("sipline: call not connected")
 )
 
 // OwnerText words err for the owner: what happened and what to do, never
@@ -97,22 +100,28 @@ func OwnerText(err error) string {
 		return "That isn't a phone number the second line can call or text."
 	case errors.Is(err, ErrBusy):
 		return "The second line is already on a call. Try again when it ends."
-	case errors.Is(err, ErrClosed), errors.Is(err, ErrConfig), errors.Is(err, ErrInsecure):
+	case errors.Is(err, ErrConfig):
+		return "The second line isn't set up. Set it up on the box's local page."
+	case errors.Is(err, ErrInsecure):
+		return "The second line couldn't connect securely to its provider. Check the server name on the box's local page."
+	case errors.Is(err, ErrClosed):
 		return "The second line isn't connected right now."
 	case errors.Is(err, ErrNoSRTP):
-		return "The call was ended before anything was said: the provider didn't offer an encrypted call."
+		return "The box ended the call before it connected: the provider didn't offer an encrypted call. Turn on encrypted calls (SRTP) in the provider's settings."
 	case errors.Is(err, ErrMediaAddress):
-		return "The call was ended before anything was said: the provider sent its audio somewhere the box won't send to."
+		return "The box ended the call before it connected: the provider's call audio isn't on a safe address. Check the provider's settings."
+	case errors.Is(err, ErrCallFailed):
+		return "The call didn't connect: it was busy, refused or not answered. The box doesn't call again on its own."
 	case errors.Is(err, ErrTextRefused):
 		return "The second line's provider didn't accept that text. Check the number, or try again later."
 	case errors.Is(err, sipsign.ErrLocked):
-		return "The second line can't sign in while the box is locked. Unlock it on the local page."
+		return "The second line can't sign in while the box is locked. Unlock it on the box's local page."
 	case errors.Is(err, sipsign.ErrNoAccount):
 		return "The second line's calling account isn't set up. Set it up on the box's local page."
 	case errors.Is(err, sipsign.ErrRefused):
 		return "The second line's sign-in needs confirming. Check the provider name on the box's local page."
 	}
-	return "The second line couldn't reach its provider. It will keep trying."
+	return "The second line couldn't reach its provider, so that didn't go through. It will keep trying to reconnect."
 }
 
 // quiet discards everything the SIP stack would log. sipgo logs a whole
@@ -146,7 +155,11 @@ type Line struct {
 	contact  sip.ContactHeader
 	provider net.IP // the provider's address on the signaling connection
 	call     *call
+	clips    []time.Time          // clips played in the last hour
+	lastClip map[string]time.Time // by caller, within callerGap
 }
+
+var errClipLimit = errors.New("sipline: no-calls clip limit reached")
 
 var _ secondline.Account = (*Line)(nil)
 
@@ -506,12 +519,27 @@ func phone(s string) bool {
 	return true
 }
 
+// Limits on calls to the line (security F1, F2 on #132). Each clip is an
+// answered call, which providers bill, so they are capped; and the clip is
+// played only to a caller that acknowledged the answer and sent audio that
+// authenticates under its own key from the address it offered, so a
+// forged offer cannot aim the line's packets at a third party.
+var (
+	ackWait      = 4 * time.Second  // for the ACK of the line's 200
+	latchWait    = 3 * time.Second  // for the caller's first authenticated packet
+	callerGap    = 10 * time.Minute // between clips to one caller
+	clipsPerHour = 20               // on the line
+	now          = time.Now
+)
+
 // onInvite answers a call to the line with NoCallsClip over SRTP and hangs
 // up: answering third-party calls is a later package (at M13). It declines
-// (603) whenever the clip cannot be played safely: no clip, a call already
-// in progress, or an offer without SRTP, a G.711 codec or a public unicast
-// audio address (the rules of an answer, SL7). It never answers in the
-// clear.
+// (603) whenever the clip cannot be played safely or affordably: no clip, a
+// call already in progress, an offer without SRTP, a G.711 codec or a
+// public unicast audio address (the rules of an answer, SL7), or a caller
+// or the line over its clip limit. It never answers in the clear, and it
+// hangs up without a word if the caller does not acknowledge the answer
+// within ackWait or send authenticated audio within latchWait.
 func (l *Line) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 	decline := func() { _ = tx.Respond(sip.NewResponseFromRequest(req, sip.StatusGlobalDecline, "Decline", nil)) }
 	if len(l.cfg.NoCallsClip) == 0 {
@@ -526,7 +554,14 @@ func (l *Line) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 		decline()
 		return
 	}
-	c, ours, err := l.claim(req, tx, contact)
+	srtpRx, err := Context(theirs.key)
+	clear(theirs.key)
+	if err != nil {
+		decline()
+		return
+	}
+	caller, _ := l.sender(req)
+	c, ours, err := l.claim(req, tx, contact, caller)
 	if err != nil {
 		decline()
 		return
@@ -534,17 +569,17 @@ func (l *Line) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 	defer c.end(nil)
 	srtpTx, err := Context(ours.key)
 	if err != nil {
+		clear(ours.key)
 		_ = c.sdlg.Respond(sip.StatusGlobalDecline, "Decline", nil)
 		return
 	}
+	answer := []byte(ours.answerSDP(theirs.pt, theirs.tag))
+	clear(ours.key)
 	c.mu.Lock()
-	c.ans, c.tx = theirs, srtpTx
+	c.ans, c.tx, c.rx = theirs, srtpTx, srtpRx
 	c.mu.Unlock()
-	if err := c.sdlg.RespondSDP([]byte(ours.answerSDP(theirs.pt, theirs.tag))); err != nil {
-		return
-	}
-	close(c.active)
 	go c.drain()
+	go func() { _ = c.sdlg.RespondSDP(answer) }()
 	go func() {
 		select {
 		case <-c.sdlg.Context().Done():
@@ -552,19 +587,72 @@ func (l *Line) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 		case <-c.ended:
 		}
 	}()
+	hangup := func() {
+		// The line is free at once; the BYE follows the answer's ACK or
+		// its transaction's timeout (RFC 3261 section 15).
+		c.end(nil)
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 64*sip.T1+5*time.Second)
+			defer cancel()
+			_ = c.sdlg.Bye(ctx)
+		}()
+	}
+	for _, wait := range []struct {
+		ch <-chan struct{}
+		d  time.Duration
+	}{{c.acked, ackWait}, {c.latched, latchWait}} {
+		t := time.NewTimer(wait.d)
+		select {
+		case <-wait.ch:
+			t.Stop()
+		case <-t.C:
+			hangup()
+			return
+		case <-c.ended:
+			t.Stop()
+			return
+		}
+	}
+	close(c.active)
 	if err := c.Say(c.ctx, l.cfg.NoCallsClip); err != nil {
 		return // the caller hung up
 	}
-	// The line is free once the clip is out, before the BYE is answered.
-	c.end(nil)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_ = c.sdlg.Bye(ctx)
+	hangup()
+}
+
+// allowClip counts a clip against the caller's and the line's limits, or
+// refuses it. Caller holds l.mu.
+func (l *Line) allowClip(caller string) bool {
+	t := now()
+	kept := l.clips[:0]
+	for _, c := range l.clips {
+		if t.Sub(c) < time.Hour {
+			kept = append(kept, c)
+		}
+	}
+	l.clips = kept
+	for k, last := range l.lastClip {
+		if t.Sub(last) >= callerGap {
+			delete(l.lastClip, k)
+		}
+	}
+	if len(l.clips) >= clipsPerHour {
+		return false
+	}
+	if _, recent := l.lastClip[caller]; recent {
+		return false
+	}
+	if l.lastClip == nil {
+		l.lastClip = map[string]time.Time{}
+	}
+	l.clips = append(l.clips, t)
+	l.lastClip[caller] = t
+	return true
 }
 
 // claim makes the incoming call the line's one call, with its audio socket
 // and the line's key, or fails if a call is in progress.
-func (l *Line) claim(req *sip.Request, tx sip.ServerTransaction, contact sip.ContactHeader) (*call, offer, error) {
+func (l *Line) claim(req *sip.Request, tx sip.ServerTransaction, contact sip.ContactHeader, caller string) (*call, offer, error) {
 	ip := l.cfg.MediaIP
 	if ip == nil {
 		ip = net.ParseIP(contact.Address.Host)
@@ -580,6 +668,9 @@ func (l *Line) claim(req *sip.Request, tx sip.ServerTransaction, contact sip.Con
 		default:
 			return nil, offer{}, ErrBusy
 		}
+	}
+	if !l.allowClip(caller) {
+		return nil, offer{}, errClipLimit
 	}
 	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: ip})
 	if err != nil {
@@ -610,8 +701,8 @@ func (l *Line) onAck(req *sip.Request, tx sip.ServerTransaction) {
 	if c == nil || c.sdlg == nil {
 		return
 	}
-	if id, err := sip.DialogIDFromRequestUAS(req); err == nil && id == c.sdlg.ID {
-		_ = c.sdlg.ReadAck(req, tx)
+	if id, err := sip.DialogIDFromRequestUAS(req); err == nil && id == c.sdlg.ID && c.sdlg.ReadAck(req, tx) == nil {
+		c.ackOnce.Do(func() { close(c.acked) })
 	}
 }
 
