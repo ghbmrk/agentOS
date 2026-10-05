@@ -49,6 +49,8 @@ type Device struct {
 	muteCMTI bool
 	store    map[int]string
 	nextIdx  int
+	capacity int      // most texts stored; 0: no limit
+	smsc     []string // texts the network holds while memory is full
 	outParts map[string]map[int]string
 	call     *Far
 	nextCall int
@@ -83,6 +85,22 @@ func New(p *at.Profile, model string, line *modem.Line, tick time.Duration) *Dev
 	return d
 }
 
+// Reopen is the same modem after its port was closed and opened again:
+// a new port, with the SIM and the stored texts kept.
+func (d *Device) Reopen() *Device {
+	n := New(d.prof, d.model, d.line, d.tick)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for i, p := range d.store {
+		n.store[i] = p
+	}
+	n.nextIdx, n.iccid, n.sim, n.uac, n.capacity = d.nextIdx, d.iccid, d.sim, d.uac, d.capacity
+	n.smsc = append([]string(nil), d.smsc...)
+	return n
+}
+
 // Port is the driver's end of the AT port.
 func (d *Device) Port() io.ReadWriteCloser { return d.host }
 
@@ -105,17 +123,38 @@ func (d *Device) MuteCMTI(on bool) { d.mu.Lock(); d.muteCMTI = on; d.mu.Unlock()
 // Stored returns how many texts are in the modem's memory.
 func (d *Device) Stored() int { d.mu.Lock(); defer d.mu.Unlock(); return len(d.store) }
 
-// StorePDU puts a raw SMS-DELIVER PDU in memory and announces it.
+// SetCapacity limits how many texts memory holds. Past it, the network
+// holds new texts and delivers each when a delete frees a slot, as an
+// SMSC retrying to a full phone does.
+func (d *Device) SetCapacity(n int) { d.mu.Lock(); d.capacity = n; d.mu.Unlock() }
+
+// Held returns how many texts the network holds for want of memory.
+func (d *Device) Held() int { d.mu.Lock(); defer d.mu.Unlock(); return len(d.smsc) }
+
+// StorePDU puts a raw SMS-DELIVER PDU in memory and announces it, or
+// leaves it with the network while memory is full.
 func (d *Device) StorePDU(pdu string) {
 	d.mu.Lock()
-	i := d.nextIdx
-	d.nextIdx++
-	d.store[i] = pdu
-	notify := d.cnmi && !d.muteCMTI
+	if d.capacity > 0 && len(d.store) >= d.capacity {
+		d.smsc = append(d.smsc, pdu)
+		d.mu.Unlock()
+		return
+	}
+	i, notify := d.storeLocked(pdu)
 	d.mu.Unlock()
 	if notify {
 		d.urc(fmt.Sprintf(`+CMTI: "ME",%d`, i))
 	}
+}
+
+// Renotify announces stored text i again, as a repeated +CMTI does.
+func (d *Device) Renotify(i int) { d.urc(fmt.Sprintf(`+CMTI: "ME",%d`, i)) }
+
+func (d *Device) storeLocked(pdu string) (int, bool) {
+	i := d.nextIdx
+	d.nextIdx++
+	d.store[i] = pdu
+	return i, d.cnmi && !d.muteCMTI
 }
 
 // Unplug closes the port, as when the modem is pulled or restarts.
@@ -294,6 +333,13 @@ func (d *Device) handle(cmd string) []string {
 	case strings.HasPrefix(cmd, "AT+CMGD="):
 		i, _ := strconv.Atoi(strings.TrimPrefix(cmd, "AT+CMGD="))
 		delete(d.store, i)
+		if len(d.smsc) > 0 && (d.capacity == 0 || len(d.store) < d.capacity) {
+			pdu := d.smsc[0]
+			d.smsc = d.smsc[1:]
+			if j, notify := d.storeLocked(pdu); notify {
+				go d.urc(fmt.Sprintf(`+CMTI: "ME",%d`, j))
+			}
+		}
 		return []string{"OK"}
 	case cmd == "AT+CMGL=4":
 		var idx []int

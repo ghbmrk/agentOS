@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/owner"
 )
 
@@ -25,6 +26,7 @@ type fakeOwner struct {
 	notes    []string
 	commit   bool            // QueueAutoReply turns replies into requests
 	down     bool            // Request fails
+	lineDown bool            // Request fails: the owner's line is down
 	active   bool            // the owner is texting
 	each     []string        // requests opened by RequestEach
 	local    []string        // requests opened by RequestLocal
@@ -36,6 +38,9 @@ func (f *fakeOwner) Request(items []owner.Item, _ time.Duration) (string, error)
 	defer f.mu.Unlock()
 	if f.down {
 		return "", fmt.Errorf("owner: no modem")
+	}
+	if f.lineDown {
+		return "", modem.ErrDown
 	}
 	for _, it := range items {
 		if !owner.SMSApprovable(it) {

@@ -110,3 +110,66 @@ func TestACandidateCannotTouchLoop2Fixtures(t *testing.T) {
 		}
 	}
 }
+
+// L3 S2 on #169 (mutant M6b): only the active tree's pass sets the mark.
+// A candidate that passes the fixture but is rejected leaves it open, so
+// later candidates that leave the finding as it is still adopt.
+func TestARejectedCandidatesPassLeavesTheFixtureOpen(t *testing.T) {
+	e := newEnv(t, nil)
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	if err := e.p.AddSecurityCase(Case{ID: "loop2/f1", Class: ClassSkill, Input: []byte("skills/fix"), Expect: []byte("yes")}); err != nil {
+		t.Fatal(err)
+	}
+	bad := e.propose(Candidate{Source: Local, Files: Tree{"skills/fix": []byte("yes"), "skills/greet": []byte("bye")}})
+	if bad.State != StateRejected {
+		t.Fatalf("a fix that regresses held-out cases: %+v", bad)
+	}
+	if r := e.propose(Candidate{Source: Local, Files: Tree{"skills/greet": []byte("hello"), "skills/note": []byte("a")}}); r.State != StateAdopted {
+		t.Fatalf("the open fixture was marked by a rejected candidate: %+v", r)
+	}
+}
+
+// L3 S2 on #169 (mutant M19): Recheck runs with the adopted tree as the
+// candidate side, so its pass there sets the mark, and an UNDO right
+// after keeps the fixture must-pass.
+func TestRecheckMarksTheActiveTreesPass(t *testing.T) {
+	e := newEnv(t, nil)
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	if err := e.p.AddSecurityCase(Case{ID: "loop2/f1", Class: ClassSkill, Input: []byte("skills/fix"), Expect: []byte("yes")}); err != nil {
+		t.Fatal(err)
+	}
+	fix := e.propose(Candidate{Source: Local, Files: Tree{"skills/greet": []byte("hello"), "skills/fix": []byte("yes")}})
+	if fix.State != StateAdopted {
+		t.Fatalf("the fix: %+v", fix)
+	}
+	if _, err := e.p.Recheck(bg); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.p.Revert(bg, fix.ID, OriginOwner); err != nil {
+		t.Fatal(err)
+	}
+	if r := e.propose(Candidate{Source: Local, Files: Tree{"skills/greet": []byte("hello"), "skills/note": []byte("a")}}); r.State != StateRejected || r.Reason != "fails the security suite" {
+		t.Fatalf("after Recheck and UNDO: %+v", r)
+	}
+}
+
+// L3 S2 on #169: an UNDO before any evaluation ran with the fix active
+// leaves the fixture open. The active tree never passed it in an
+// evaluation, so it only must not regress, and learning goes on.
+func TestAnUndoBeforeAnyRunLeavesTheFixtureOpen(t *testing.T) {
+	e := newEnv(t, nil)
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	if err := e.p.AddSecurityCase(Case{ID: "loop2/f1", Class: ClassSkill, Input: []byte("skills/fix"), Expect: []byte("yes")}); err != nil {
+		t.Fatal(err)
+	}
+	fix := e.propose(Candidate{Source: Local, Files: Tree{"skills/greet": []byte("hello"), "skills/fix": []byte("yes")}})
+	if fix.State != StateAdopted {
+		t.Fatalf("the fix: %+v", fix)
+	}
+	if err := e.p.Revert(bg, fix.ID, OriginOwner); err != nil {
+		t.Fatal(err)
+	}
+	if r := e.propose(Candidate{Source: Local, Files: Tree{"skills/greet": []byte("hello"), "skills/note": []byte("a")}}); r.State != StateAdopted {
+		t.Fatalf("after an UNDO before any run: %+v", r)
+	}
+}

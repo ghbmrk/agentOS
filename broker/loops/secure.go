@@ -729,6 +729,25 @@ func (s *Guard) Resumed(t Target) error {
 	return s.saveLocked()
 }
 
+// Reconcile drops every listed pause whose target held no longer reports
+// paused: one that ended while the guard could not hear it, such as a
+// crash between the gate's resume and the guard's save (L3 S1 on #169).
+// The wiring calls it at start, once the gate has replayed its journal.
+func (s *Guard) Reconcile(held func(Target) bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := len(s.st.Paused)
+	for k, r := range s.st.Paused {
+		if r.Finding.Contain == nil || !held(*r.Finding.Contain) {
+			delete(s.st.Paused, k)
+		}
+	}
+	if len(s.st.Paused) == n {
+		return nil
+	}
+	return s.saveLocked()
+}
+
 func (s *Guard) saveLocked() error {
 	b, err := json.Marshal(s.st)
 	if err != nil {
@@ -1070,7 +1089,7 @@ func ownerLine(r Record) string {
 }
 
 func clearedLine(r Record) string {
-	return fmt.Sprintf("Cleared: %s. %s is still paused; ask your agent to turn it back on.",
+	return fmt.Sprintf("Cleared: %s. %s stays paused until you resume it; the box page will offer that in an update.",
 		safeName(r.Finding.Subject), capFirst(label(r.Finding.Contain)))
 }
 
