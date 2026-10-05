@@ -762,7 +762,7 @@ func TestCAP8OverTheCapSaysRollBackOrDestroy(t *testing.T) {
 	for i := range 2 { // the second starts under the cap and ends over it
 		r.must("agent", toolWrite, m{"name": "w", "path": fmt.Sprintf("/big%d", i), "content": big}, nil)
 	}
-	want := "worker w holds more files than its 1 MB cap; roll it back to a snapshot or destroy it"
+	want := "worker w holds more files than its 1 MB cap; delete files with worker_delete, roll it back to a snapshot, or destroy it"
 	for _, c := range []struct {
 		tool string
 		args m
