@@ -34,8 +34,11 @@ type Decision struct {
 	Action  string
 	// Verb is the action's verb under the account's adapter grant.
 	Verb string
-	// Approved is the owner's YES; false is NO, an expiry, or an UNDO.
+	// Approved is the owner's YES; false is a NO or an UNDO.
 	Approved bool
+	// Expired: the request lapsed unanswered. Silence is not a judgment,
+	// so it neither counts nor resets (potency PA1).
+	Expired bool
 	// Edited: the owner changed the item before it went out, or later
 	// judged it wrong (OP-7). It resets the run like a NO.
 	Edited bool
@@ -164,7 +167,7 @@ func eligible(v string) bool {
 
 // Observe records one owner decision.
 func (o *Optimizer) Observe(d Decision) error {
-	if !eligible(d.Verb) || !d.Verified {
+	if !eligible(d.Verb) || !d.Verified || d.Expired {
 		return nil
 	}
 	_, reply := d.Params[Body]

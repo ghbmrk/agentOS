@@ -87,7 +87,7 @@ func TestSuggestsAfterRunOfApprovals(t *testing.T) {
 	}
 }
 
-// CAP-6: a NO, an expiry, an UNDO, or an edit resets the run; approvals of
+// CAP-6: a NO, an UNDO, or an edit resets the run; an expiry does not; approvals of
 // different recipients leave the recipients to the source record; an
 // amount sets the cap and a hold.
 func TestRunResetsAndShapesRule(t *testing.T) {
@@ -151,11 +151,14 @@ func TestExclusions(t *testing.T) {
 			d := invoice(99)
 			d.Verified, d.Approved = false, false
 			observe(t, o, d)
+			e := invoice(98)
+			e.Expired, e.Approved = true, false
+			observe(t, o, e)
 		}
 		observe(t, o, invoice(i))
 	}
 	if len(suggestions(t, o)) != 1 {
-		t.Fatal("an unverified item must not reset the run")
+		t.Fatal("an unverified or expired item must not reset the run")
 	}
 }
 
