@@ -111,6 +111,10 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 // cover, and a restart retries opening the plane (UX-92-1).
 const learningOffText = "Spare-time work (learning, self-tests, update checks) is not running on this box. Restarting the box may fix it."
 
+// learningOffNote is STATUS's line for it, so the owner learns it without
+// sending a loop setting (UX R1 on #92).
+const learningOffNote = "Spare-time work: not running."
+
 // learningOff wires the owner's loop settings when the learning plane
 // could not start: they are answered by the box, locked or not, never sent
 // to the agent as chat, and change nothing.
@@ -126,6 +130,7 @@ func learningOff(cfg *daemon.Config) {
 		return ok
 	}
 	cfg.HelpExtra = learningOffText
+	cfg.Notes = append(cfg.Notes, func() string { return learningOffNote })
 }
 
 // attach binds the running daemon's engine and admission and starts the

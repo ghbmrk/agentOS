@@ -70,7 +70,7 @@ func TestApprovalsOpen(t *testing.T) {
 func TestStatusCarriesTheClockLine(t *testing.T) {
 	r := newRig(t, nil)
 	r.edit = func(c *Config) {
-		c.Clock = func() string { return "Time check: box and phone network agree." }
+		c.Notes = []func() string{func() string { return "Time check: box and phone network agree." }}
 	}
 	r.ch = r.open()
 	r.unlock()

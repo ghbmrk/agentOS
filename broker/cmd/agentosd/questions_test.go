@@ -30,6 +30,9 @@ func TestQuestionsRunInAgentosd(t *testing.T) {
 		OwnerState: filepath.Join(dir, "owner.json"),
 	}
 	qs.wire(&cfg) // as main does
+	if len(cfg.Notes) != 1 {
+		t.Fatalf("wired %d STATUS notes, want the clock line", len(cfg.Notes))
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer qs.wait() // the loops write into dir until they stop
 	defer cancel()
@@ -43,7 +46,7 @@ func TestQuestionsRunInAgentosd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if l := cfg.Clock(); l != "" {
+	if l := qs.Clock(); l != "" {
 		t.Fatalf("clock line before the guard opened: %q", l)
 	}
 	guard, err := qs.open(ctx, d, &preempter{}, defaultQuestionConfig(dir))
@@ -52,7 +55,7 @@ func TestQuestionsRunInAgentosd(t *testing.T) {
 	}
 	defer guard.Flush()
 	// STATUS carries the guard's time check (W9a, UX R3 on #95).
-	if l := cfg.Clock(); !strings.HasPrefix(l, "Time check: ") {
+	if l := qs.Clock(); !strings.HasPrefix(l, "Time check: ") {
 		t.Fatalf("STATUS clock line: %q", l)
 	}
 	if qs.tools() == nil {
@@ -140,7 +143,7 @@ func TestStatusShowsAnUnreadableClockRestriction(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer guard.Flush()
-	if l := cfg.Clock(); !strings.HasPrefix(l, "Time check: restricted since") || !strings.Contains(l, "saved check unreadable") {
+	if l := qs.Clock(); !strings.HasPrefix(l, "Time check: restricted since") || !strings.Contains(l, "saved check unreadable") {
 		t.Fatalf("STATUS clock line: %q", l)
 	}
 }

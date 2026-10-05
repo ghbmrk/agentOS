@@ -167,9 +167,9 @@ func TestCH2StatusCarriesTheClockLine(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 	cancel, d := startWith(t, dir, func(c *Config) {
-		c.Clock = func() string {
+		c.Notes = []func() string{func() string {
 			return "Time check: box clock held since 09:05 (it jumped by about 3 hours, unconfirmed)."
-		}
+		}}
 	})
 	defer func() { cancel(); d.Wait() }()
 	if r := text(t, dir, owner, "STATUS"); !strings.HasSuffix(r[0], " Time check: box clock held since 09:05 (it jumped by about 3 hours, unconfirmed).") {
