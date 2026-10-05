@@ -34,7 +34,7 @@ func TestSR23sFailedStepTellsTheAgent(t *testing.T) {
 		{"no room", fmt.Errorf("vm: m1: %w (layer at %s)", ErrStepNoRoom, host),
 			"The rollback point after your last effect request was not saved: there is no room for it. Delete files you no longer need; until a rollback point is saved, your steps since then can't be rolled back."},
 		{"too deep", fmt.Errorf("vm: m1: %w (at %s)", ErrStepTooDeep, host),
-			"The rollback point after your last effect request was not saved: folders in your machine nest more than 256 deep. Flatten or delete them; until a rollback point is saved, your steps since then can't be rolled back."},
+			"The rollback point after your last effect request was not saved: folders in your machine nest too deep, or a path in it is too long. Flatten or delete them; until a rollback point is saved, your steps since then can't be rolled back."},
 		{"other", fmt.Errorf("pause %s: %w", host, errors.New("input/output error")),
 			"The rollback point after your last effect request was not saved. The broker tries again after your next effect request; until then your steps since then can't be rolled back."},
 	} {
@@ -110,5 +110,45 @@ func TestSR23sStatusWhileStepsKeepFailing(t *testing.T) {
 		if n, shown := r.p.StepLine(); n != "" || !shown.IsZero() {
 			t.Fatalf("line after a success = %q (shown %v)", n, shown)
 		}
+	}
+}
+
+// A step that succeeds after a failed one leaves no stale note: the note
+// a trailing failure left untold is dropped once a rollback point is
+// saved (L3 MUST on #179).
+func TestSR23sSavedStepDropsTheUntoldNote(t *testing.T) {
+	r := newRig(t, func(c *Config) { c.StepInterval = 50 * time.Millisecond })
+	r.tool("m1", "effect_request", send("r1")) // snapshots at once, and succeeds
+	r.ms.failSteps(fmt.Errorf("vm: %w", ErrStepNoRoom))
+	r.tool("m1", "effect_request", send("r2")) // inside the interval: trails
+	r.stepsSettle("m1")                        // the trailing snapshot fails, untold
+	r.ms.failSteps(nil)
+	if got := r.notes("m1", "effect_request", send("r3")); len(got) != 0 {
+		t.Fatalf("a saved step still carried %q", got)
+	}
+}
+
+// With no rollback point saved this run, the line's since-time is the
+// first failure's (L3 on #179).
+func TestSR23sSinceTheFirstFailureWhenNoneSaved(t *testing.T) {
+	r := newRig(t, func(c *Config) { c.StepInterval = time.Millisecond })
+	r.ms.failSteps(fmt.Errorf("vm: %w", ErrStepNoRoom))
+	r.tool("m1", "effect_request", send("r1"))
+	st := &r.p.get("m1").steps
+	st.mu.Lock()
+	first := st.last
+	st.mu.Unlock()
+	r.stepsSettle("m1")
+	time.Sleep(5 * time.Millisecond)
+	r.tool("m1", "effect_request", send("r2"))
+	st.mu.Lock()
+	saved, fails := st.saved, st.fails
+	st.mu.Unlock()
+	if fails != 2 || !saved.Equal(first) {
+		t.Fatalf("fails %d, since %v, want 2 since the first failure %v", fails, saved, first)
+	}
+	want := fmt.Sprintf(statusNoRoom, first.Local().Format("15:04"))
+	if n, _ := r.p.StepLine(); n != want {
+		t.Fatalf("line = %q, want %q", n, want)
 	}
 }

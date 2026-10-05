@@ -83,9 +83,33 @@ func stepErr(err error) error {
 	return err
 }
 
+// stepSource is the guest plane's view of failing step snapshots.
+type stepSource interface {
+	StepNote() string
+	StepLine() (string, time.Time)
+}
+
+type stepSrc struct{ stepSource }
+
 // stepNotes is STATUS's line while the agent's step snapshots keep
 // failing, once the guest plane is open (SR2-3s).
-type stepNotes struct{ p atomic.Pointer[guest.Plane] }
+type stepNotes struct{ p atomic.Pointer[stepSrc] }
+
+// newStepNotes adds the line to STATUS's notes; it stays empty until open.
+func newStepNotes(notes *[]func() string) *stepNotes {
+	n := &stepNotes{}
+	*notes = append(*notes, n.Note)
+	return n
+}
+
+// open points the line at src and, with a digest to tell, starts telling
+// it there.
+func (n *stepNotes) open(ctx context.Context, src stepSource, notice func(key, line string) error) {
+	n.p.Store(&stepSrc{src})
+	if notice != nil {
+		go n.digest(ctx, notice)
+	}
+}
 
 func (n *stepNotes) Note() string {
 	if p := n.p.Load(); p != nil {
@@ -490,8 +514,7 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	steps := &stepNotes{}
-	cfg.Notes = append(cfg.Notes, steps.Note)
+	steps := newStepNotes(&cfg.Notes)
 	d, err := daemon.Run(ctx, cfg)
 	if err != nil {
 		log.Fatal(err)
@@ -561,10 +584,11 @@ func main() {
 				log.Printf("agent machines disabled: %v", err)
 			} else {
 				services.live.Store(&svc{plane})
-				steps.p.Store(plane)
+				var notice func(key, line string) error
 				if lp != nil {
-					go steps.digest(ctx, lp.pipe.Notice)
+					notice = lp.pipe.Notice
 				}
+				steps.open(ctx, plane, notice)
 				oa := &guest.OwnerAgent{Plane: plane, Machine: agentMachine}
 				if lp != nil {
 					oa.Delivered = lp.delivered

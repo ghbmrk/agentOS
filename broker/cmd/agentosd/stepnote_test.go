@@ -70,3 +70,23 @@ func TestSR23sDigestCadence(t *testing.T) {
 		t.Fatal("a new since-time kept the old key")
 	}
 }
+
+type fakeSteps struct{ line string }
+
+func (f fakeSteps) StepNote() string              { return f.line }
+func (f fakeSteps) StepLine() (string, time.Time) { return f.line, time.Time{} }
+
+// STATUS carries the plane's Rollback line: newStepNotes adds it to the
+// notes main hands the daemon, empty until the plane opens (L3 on #179).
+func TestSR23sStatusNotesCarryTheLine(t *testing.T) {
+	var notes []func() string
+	steps := newStepNotes(&notes)
+	if len(notes) != 1 || notes[0]() != "" {
+		t.Fatalf("notes %d before the plane opens", len(notes))
+	}
+	line := "Rollback: the agent's files since 08:59 can't be rolled back yet; they're full. It has been told to free space. UNDO still works. Nothing to do unless this lasts."
+	steps.open(t.Context(), fakeSteps{line}, nil)
+	if got := notes[0](); got != line {
+		t.Fatalf("STATUS note = %q", got)
+	}
+}

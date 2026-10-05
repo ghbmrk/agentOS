@@ -403,7 +403,7 @@ const (
 // other machines.
 const (
 	stepNoteNoRoom  = "The rollback point after your last effect request was not saved: there is no room for it. Delete files you no longer need; until a rollback point is saved, your steps since then can't be rolled back."
-	stepNoteTooDeep = "The rollback point after your last effect request was not saved: folders in your machine nest more than 256 deep. Flatten or delete them; until a rollback point is saved, your steps since then can't be rolled back."
+	stepNoteTooDeep = "The rollback point after your last effect request was not saved: folders in your machine nest too deep, or a path in it is too long. Flatten or delete them; until a rollback point is saved, your steps since then can't be rolled back."
 	stepNoteOther   = "The rollback point after your last effect request was not saved. The broker tries again after your next effect request; until then your steps since then can't be rolled back."
 	// The owner's STATUS lines take the time of the last saved rollback
 	// point, in the box's local time (UX-SR23s-1, CH-12): rollback, not UNDO, which still works.
@@ -532,7 +532,7 @@ func (p *Plane) snapshot(m *machine) {
 		s.reason = stepReason(err)
 		s.note = stepNotes[s.reason]
 	} else {
-		s.fails, s.saved, s.shown = 0, s.last, time.Time{}
+		s.fails, s.saved, s.shown, s.note = 0, s.last, time.Time{}, ""
 	}
 	if s.pending && !s.stopped && s.timer == nil {
 		s.timer = time.AfterFunc(p.cfg.StepInterval, func() { p.trailing(m) })
