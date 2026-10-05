@@ -204,7 +204,7 @@ func (c *Channel) LocalSignIn(code string) (until time.Time, err error) {
 		}
 		return time.Time{}, err
 	}
-	res, locked, err := c.codes.checkStrong(code, now, strongOpts{unlock: c.cfg.UnlockFor, count: true})
+	res, locked, err := c.codes.checkStrong(code, now, strongOpts{unlock: c.cfg.UnlockFor, count: true, proof: true})
 	var alerts []string
 	signIn, signIns := "", 0
 	if locked {
