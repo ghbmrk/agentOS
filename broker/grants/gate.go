@@ -872,10 +872,10 @@ func (g *Gate) evaluateBroker(ctx context.Context, phase journal.Phase, in journ
 }
 
 // evaluateEvidence decides a change to the evidence destination (CH-20).
-// It is the owner's alone and high risk either way (CH-10): setting it
-// chooses where private content goes, and clearing it sends that content
-// by text again. Like a grant it needs the code and the local page, so a
-// SIM swapper holding the phone cannot move or clear it.
+// It is the owner's alone. Setting it chooses where private content goes,
+// so it is high risk (CH-10) and, like a grant, needs the code and the
+// local page: a SIM swapper holding the phone cannot move it. Clearing it
+// needs neither.
 func (g *Gate) evaluateEvidence(in journal.Intent) verdict {
 	if in.Origin != OriginOwner && in.Origin != originLocal {
 		return verdict{kind: deny, why: "only the owner sets where private replies go"}
@@ -884,20 +884,21 @@ func (g *Gate) evaluateEvidence(in journal.Intent) verdict {
 	if err != nil {
 		return verdict{kind: deny, why: err.Error()}
 	}
+	if d.Address == "" {
+		// Clearing needs no code (security C3 on #148): the broker tells
+		// the old destination, so the owner sees it if it wasn't them.
+		return verdict{kind: allow}
+	}
 	if !g.cfg.LocalUI {
 		return verdict{kind: deny, why: "changing where private replies go needs confirmation on the box's local page, which this build does not have yet (CH-20)"}
 	}
-	obj := "send private replies by text again"
-	if d.Address != "" {
-		if g.cfg.Destination == nil {
-			return verdict{kind: deny, why: "no connected account can deliver private replies"}
-		}
-		if acct, ok := g.cfg.Destination(d.Address); !ok || acct != d.Account {
-			return verdict{kind: deny, why: "the destination must be the connected mail account's own address (CH-20)"}
-		}
-		obj = "send private replies to " + d.Address
+	if g.cfg.Destination == nil {
+		return verdict{kind: deny, why: "no connected account can deliver private replies"}
 	}
-	return verdict{kind: ask, local: true, item: owner.Item{Ref: in.ID, Object: obj,
+	if acct, ok := g.cfg.Destination(d.Address); !ok || acct != d.Account {
+		return verdict{kind: deny, why: "the destination must be the connected mail account's own address (CH-20)"}
+	}
+	return verdict{kind: ask, local: true, item: owner.Item{Ref: in.ID, Object: "send private replies to " + d.Address,
 		Facts: owner.Facts{Kind: owner.GrantChange, Verb: "share", NoRecipient: true}}}
 }
 
@@ -922,8 +923,19 @@ func (g *Gate) evaluateDelivery(in journal.Intent) verdict {
 	case len(in.Recipients) != 1 || in.Recipients[0] != d.Address:
 		return verdict{kind: deny, why: "delivery goes only to the owner's destination"}
 	}
-	if b, ok := in.Params[ParamBody].(string); !ok || b == "" || len(in.Params) != 1 {
-		return verdict{kind: deny, why: "a delivery carries only its body"}
+	b, _ := in.Params[ParamBody].(string)
+	from, _ := in.Params[ParamFrom].(string)
+	if b == "" || (from != DeliverFromAgent && from != DeliverFromBox) || len(in.Params) != 2 {
+		return verdict{kind: deny, why: "a delivery carries only its body and author"}
+	}
+	n := 0
+	for _, x := range g.eng.AuthorizedSince(in.Account, in.Action, g.cfg.Now().Add(-24*time.Hour)) {
+		if x.Origin == OriginEvidence && x.ID != in.ID {
+			n++
+		}
+	}
+	if n >= DeliveryCap {
+		return verdict{kind: deny, why: DeliveryCapReason}
 	}
 	if g.cfg.Destination == nil {
 		return verdict{kind: deny, why: "the destination is no longer the account's own address"}

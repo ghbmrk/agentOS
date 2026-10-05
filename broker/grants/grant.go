@@ -46,6 +46,22 @@ const (
 // a Config.Delivery operation from, and only for that.
 const OriginEvidence = "broker:evidence"
 
+// A delivery's params: the body and who wrote it, the agent or the box
+// itself (a notice), so the adapter can label it (security C4 on #148).
+const (
+	ParamFrom        = "from"
+	DeliverFromAgent = "agent"
+	DeliverFromBox   = "box"
+)
+
+// DeliveryCap bounds deliveries to the evidence destination in any 24
+// hours (security C5 on #148); past it a delivery is denied with
+// DeliveryCapReason and the broker keeps the reply instead.
+const (
+	DeliveryCap       = 30
+	DeliveryCapReason = "today's emailed replies are used up"
+)
+
 // originLocal is the local page's origin.
 const originLocal = "local"
 

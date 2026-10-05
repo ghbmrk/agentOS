@@ -251,13 +251,21 @@ func (a *Adapter) deliver(ctx context.Context, in journal.Intent, attempt int, p
 		return notApplied(errors.New("mail: only the broker delivers evidence"))
 	}
 	to, err := canonAll(in.Recipients)
-	if err != nil || len(to) != 1 || !a.isSelf(to[0]) {
+	if err != nil || len(to) != 1 || !a.Owns(to[0]) {
 		return notApplied(errors.New("mail: evidence goes only to the owner's own address"))
 	}
 	body := p[ParamBody]
 	if a.cfg.Redact != nil {
 		body = a.cfg.Redact(body)
 	}
+	switch p[ParamFrom] {
+	case FromAgent:
+		body = AgentFirstLine + "\n\n" + body
+	case FromBox:
+	default:
+		return notApplied(errors.New("mail: a delivery is from the agent or the box"))
+	}
+	body += "\n\n-- \n" + DeliverFooter
 	id := a.messageID(in.ID, attempt)
 	return a.submit(ctx, OpDeliver, id, to, a.build(header{}, to, nil, DeliverSubject, body, id))
 }

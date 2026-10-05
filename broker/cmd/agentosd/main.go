@@ -367,9 +367,9 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	ev.attach(d)
-	// Deletions reach the journal's guest intents (CAP-3) and, when
-	// learning runs, what it keeps of them (change C19, learning.ForgetTasks).
+	ev.attach(ctx, d)
+	// Deletions reach the journal's guest intents (CAP-3), when learning
+	// runs what it keeps of them (change C19, learning.ForgetTasks),
 	recallCfg := recalltool.ServiceConfig{Dir: recallDir, Journal: d.Engine(), Ask: d.Gate(), Location: time.Local,
 		Notify: func(text string) error {
 			if ch := d.Owner(); ch != nil {
@@ -377,9 +377,12 @@ func main() {
 			}
 			return errors.New("no owner channel")
 		}}
+	// and every reply kept on the box (CH-20).
+	fan := forgetFan{kept: ev.kept}
 	if lp != nil {
-		recallCfg.Cases = lp
+		fan.cases = lp
 	}
+	recallCfg.Cases = fan
 	if lp != nil {
 		lp.attach(ctx, d)
 	}
@@ -658,8 +661,8 @@ func openGuestPlane(m *vm.Manager, d *daemon.Daemon, ev *evidence, socketDir, me
 		Meter:   mtr,
 		// A private machine's reply goes to the owner's evidence
 		// destination when one is set (CH-20).
-		OwnerReply: func(machine, _, text string) {
-			ev.reply(machine, label(machine) != "public", text)
+		OwnerReply: func(machine string, rep guest.Reply) {
+			ev.enqueue(machine, label(machine) != "public", rep.Text, rep.Summary)
 		},
 		// Further broker tools: the owner-question tools (W9) and the
 		// managed tree (W4).

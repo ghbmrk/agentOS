@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/verb"
 )
 
@@ -40,18 +41,27 @@ const (
 	OpDeliver = "mail.deliver"
 )
 
-// DeliverSubject is the fixed subject of an OpDeliver message: nothing
-// the agent writes is in it.
-const DeliverSubject = "Your agent's reply"
+// An OpDeliver message is plain text with a fixed subject, so nothing the
+// agent writes is in its headers. A reply opens with AgentFirstLine; a
+// notice from the box itself (ParamFrom FromBox) does not. Both end with
+// DeliverFooter (security C4, UX U6 on #148).
+const (
+	DeliverSubject = "Your agent's reply"
+	AgentFirstLine = "Written by your AgentOS agent. Links in it were not checked by the box."
+	DeliverFooter  = "Replies to this email are not read."
+	FromAgent      = grants.DeliverFromAgent
+	FromBox        = grants.DeliverFromBox
+)
 
 // Params.
 const (
-	ParamRecord  = "record"  // the source message's Message-ID
-	ParamFolder  = "folder"  // where the record is, if not the inbox or archive
-	ParamTo      = "to"      // a move's target folder
-	ParamLabel   = "label"   // a label's name
-	ParamSubject = "subject" // a new message's subject
-	ParamBody    = "body"    // plain text
+	ParamRecord  = "record"         // the source message's Message-ID
+	ParamFolder  = "folder"         // where the record is, if not the inbox or archive
+	ParamTo      = "to"             // a move's target folder
+	ParamLabel   = "label"          // a label's name
+	ParamSubject = "subject"        // a new message's subject
+	ParamBody    = "body"           // plain text
+	ParamFrom    = grants.ParamFrom // a delivery's author: FromAgent or FromBox
 )
 
 // Op is one declared operation: its verb from the broker's list (ADP-2),
@@ -68,7 +78,7 @@ type Op struct {
 }
 
 var ops = []Op{
-	{Name: OpDeliver, Verb: verb.Share, Required: []string{ParamBody}},
+	{Name: OpDeliver, Verb: verb.Share, Required: []string{ParamBody, ParamFrom}},
 	{Name: OpDraft, Verb: verb.Draft, Required: []string{ParamBody}, Optional: []string{ParamSubject, ParamRecord}},
 	{Name: OpSend, Verb: verb.Send, Required: []string{ParamSubject, ParamBody}},
 	// A reply carries exactly record and body, so an ADP-11 reply rule can

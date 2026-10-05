@@ -107,10 +107,14 @@ type Config struct {
 	Account  string
 	Executor string
 	// Address is the owner's address on this account; Aliases are other
-	// addresses that are the owner's. They are never a reply's recipient.
+	// addresses that are the owner's, read from the provider's verified
+	// send-as list, never typed in. They are never a reply's recipient.
 	Address string
 	Aliases []string
-	Store   Store
+	// Box marks the box's own mailbox (ADP-13), not the owner's: no
+	// address on it is the owner's evidence destination (CH-20).
+	Box   bool
+	Store Store
 
 	// Organize targets (ADP-2). Folders and Labels are the ones the owner
 	// confirmed when granting; the inbox, the archive and the AgentOS/
@@ -246,8 +250,11 @@ func (a *Adapter) isSelf(addr string) bool {
 // account: the evidence destination must be (CH-20).
 func (a *Adapter) Owns(addr string) bool {
 	c, ok := canon(addr)
-	return ok && a.isSelf(c)
+	return ok && !a.cfg.Box && a.isSelf(c)
 }
+
+// Address is the owner's main address on this account.
+func (a *Adapter) Address() string { return a.cfg.Address }
 
 // selfKey is addr with a +tag removed and, for Gmail's domains, the dots
 // in the local part removed: the forms that reach the same mailbox.

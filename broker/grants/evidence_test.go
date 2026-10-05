@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/owner"
@@ -68,7 +69,7 @@ func (r *rig) deliver(id, origin string, params map[string]any, recips ...string
 		Params: params, Recipients: recips, Executor: "mail", Machine: "agent", Label: "private"})
 }
 
-func body(s string) map[string]any { return map[string]any{ParamBody: s} }
+func body(s string) map[string]any { return map[string]any{ParamBody: s, ParamFrom: DeliverFromAgent} }
 
 // TestEvidenceDestinationIsAHighRiskLocalChange: setting or clearing the
 // destination is the owner's alone, high tier with a code and the local
@@ -105,11 +106,15 @@ func TestEvidenceDestinationIsAHighRiskLocalChange(t *testing.T) {
 	if a, _ := r.g.Evidence(); a != ownAddr {
 		t.Fatalf("after restart %q", a)
 	}
-	// Clearing it sends private replies by text again: as high risk.
-	if st := r.setEvidence(OriginOwner, "", false); st.State != journal.Pending {
-		t.Fatalf("clear ran without asking: %s", st.State)
+	// Clearing it needs no code (security C3 on #148): the owner's text
+	// or the local page, never an agent or the broker's own routes.
+	for _, origin := range []string{"guest:agent", OriginEvidence} {
+		if st := r.setEvidence(origin, "", false); st.State != journal.Denied {
+			t.Fatalf("%s cleared it: %s", origin, st.State)
+		}
 	}
-	if st := r.setEvidence(OriginOwner, "", true); st.State != journal.Succeeded {
+	n = len(r.own.order)
+	if st := r.setEvidence(OriginOwner, "", false); st.State != journal.Succeeded || len(r.own.order) != n {
 		t.Fatalf("clear: %s", st.State)
 	}
 	if a, _ := r.g.Evidence(); a != "" {
@@ -154,7 +159,10 @@ func TestDeliveryIsPreAllowedOnlyToTheDestination(t *testing.T) {
 		{OriginEvidence, body("x"), []string{"eve@example.net"}},
 		{OriginEvidence, body("x"), []string{ownAddr, "eve@example.net"}},
 		{OriginEvidence, body("x"), []string{"alias@example.test"}},
-		{OriginEvidence, map[string]any{ParamBody: "x", "subject": "s"}, []string{ownAddr}},
+		{OriginEvidence, map[string]any{ParamBody: "x", ParamFrom: DeliverFromAgent, "subject": "s"}, []string{ownAddr}},
+		{OriginEvidence, map[string]any{ParamBody: "x"}, []string{ownAddr}},
+		{OriginEvidence, map[string]any{ParamBody: "x", ParamFrom: "bank"}, []string{ownAddr}},
+		{OriginEvidence, map[string]any{ParamBody: "", ParamFrom: DeliverFromAgent}, []string{ownAddr}},
 		{OriginEvidence, nil, []string{ownAddr}},
 	} {
 		if st := r.deliver(fmt.Sprintf("ev/bad/%d", i), c.origin, c.params, c.recips...); st.State != journal.Denied {
@@ -227,5 +235,26 @@ func TestEvidenceDestinationIsOneBareAddress(t *testing.T) {
 	}
 	if st := r.setEvidence(OriginOwner, ownAddr, false); st.State != journal.Pending {
 		t.Fatalf("bare address: %s", st.State)
+	}
+}
+
+// TestDeliveryIsCappedADay: at most DeliveryCap deliveries in any 24
+// hours (security C5 on #148); past it the broker keeps the reply.
+func TestDeliveryIsCappedADay(t *testing.T) {
+	r, _ := evidenceRig(t, nil)
+	r.setEvidence(OriginOwner, ownAddr, true)
+	for i := 0; i < DeliveryCap; i++ {
+		if st := r.deliver(fmt.Sprintf("ev/%d", i), OriginEvidence, body("x"), ownAddr); st.State != journal.Succeeded {
+			t.Fatalf("delivery %d: %s %q", i, st.State, st.Permission.Reason)
+		}
+		r.advance(time.Minute)
+	}
+	st := r.deliver("ev/over", OriginEvidence, body("x"), ownAddr)
+	if st.State != journal.Denied || st.Permission.Reason != DeliveryCapReason {
+		t.Fatalf("past the cap: %s %q", st.State, st.Permission.Reason)
+	}
+	r.advance(24*time.Hour - time.Duration(DeliveryCap)*time.Minute + time.Second)
+	if st := r.deliver("ev/next", OriginEvidence, body("x"), ownAddr); st.State != journal.Succeeded {
+		t.Fatalf("after a day: %s %q", st.State, st.Permission.Reason)
 	}
 }

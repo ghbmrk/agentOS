@@ -13,7 +13,7 @@ import (
 )
 
 func deliverIntent(x *h, body string, recips ...string) journal.Intent {
-	in := x.intent(mail.OpDeliver, map[string]any{mail.ParamBody: body}, recips...)
+	in := x.intent(mail.OpDeliver, map[string]any{mail.ParamBody: body, mail.ParamFrom: mail.FromAgent}, recips...)
 	in.Origin = "broker:evidence"
 	return in
 }
@@ -33,10 +33,18 @@ func TestDeliverSendsTheReplyToTheOwnersOwnAddress(t *testing.T) {
 		t.Fatalf("submitted %+v", subs)
 	}
 	raw := string(subs[0].Raw)
-	for _, want := range []string{"To: " + me + "\r\n", "Subject: " + mail.DeliverSubject + "\r\n", "The full reply.\r\nSecond line."} {
+	for _, want := range []string{"To: " + me + "\r\n", "Subject: " + mail.DeliverSubject + "\r\n", "Content-Type: text/plain; charset=utf-8\r\n",
+		"\r\n\r\n" + mail.AgentFirstLine + "\r\n\r\nThe full reply.\r\nSecond line.\r\n\r\n--=20\r\n" + mail.DeliverFooter} {
 		if !strings.Contains(raw, want) {
 			t.Fatalf("message lacks %q:\n%s", want, raw)
 		}
+	}
+	// The box's own notices carry no agent line.
+	notice := deliverIntent(x, "Notice.", me)
+	notice.Params[mail.ParamFrom] = mail.FromBox
+	x.mustRun(notice)
+	if raw := string(x.srv.Submitted()[1].Raw); strings.Contains(raw, mail.AgentFirstLine) || !strings.Contains(raw, "\r\n\r\nNotice.\r\n\r\n--=20\r\n") {
+		t.Fatalf("notice:\n%s", raw)
 	}
 	if o.Op != mail.OpDeliver || o.Folder != "Sent" {
 		t.Fatalf("evidence %+v", o)
@@ -67,10 +75,18 @@ func TestDeliverGoesToNoOneElse(t *testing.T) {
 	if out := x.run(in); out.Result != journal.ResultNotApplied {
 		t.Fatalf("subject taken: %+v", out)
 	}
+	in = deliverIntent(x, "b", me)
+	in.Params[mail.ParamFrom] = "bank"
+	if out := x.run(in); out.Result != journal.ResultNotApplied {
+		t.Fatalf("unknown sender taken: %+v", out)
+	}
 	if n := len(x.srv.Submitted()); n != 0 {
 		t.Fatalf("submitted %d", n)
 	}
 	x.mustRun(deliverIntent(x, "b", "alias@example.test"))
+	if x.a.Address() != me {
+		t.Fatalf("address %q", x.a.Address())
+	}
 	if !x.a.Owns(me) || !x.a.Owns("ALIAS@example.test") || x.a.Owns("sam@example.com") || x.a.Owns("not an address") {
 		t.Fatal("Owns")
 	}
@@ -87,5 +103,17 @@ func TestDeliverRedactsVaultValues(t *testing.T) {
 	raw := string(x.srv.Submitted()[0].Raw)
 	if strings.Contains(raw, canary) || !strings.Contains(raw, "The key is [REDACTED].") {
 		t.Fatalf("not redacted:\n%s", raw)
+	}
+}
+
+// TestTheBoxMailboxIsNeverTheDestination: the box's own mailbox (ADP-13)
+// is not the owner's, so evidence never goes there (security C2 on #148).
+func TestTheBoxMailboxIsNeverTheDestination(t *testing.T) {
+	x := newH(t, func(c *mail.Config) { c.Box = true })
+	if x.a.Owns(me) {
+		t.Fatal("the box's mailbox reads as the owner's")
+	}
+	if out := x.run(deliverIntent(x, "b", me)); out.Result != journal.ResultNotApplied || len(x.srv.Submitted()) != 0 {
+		t.Fatalf("delivered to the box's mailbox: %+v", out)
 	}
 }
