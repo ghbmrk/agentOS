@@ -3,6 +3,8 @@ package vm
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -142,5 +144,59 @@ func waitState(t *testing.T, e *env, id string, want State) {
 			t.Fatalf("%s is %s, want %s", id, mc.State, want)
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// REQ: RES-1, REV-4
+
+// cutShortRuntime's checkpoint blocks, then reports success even though the
+// sandbox was killed under it, leaving a truncated image: a runtime need
+// not report the kill as an error.
+type cutShortRuntime struct {
+	*slowRuntime
+}
+
+func (c *cutShortRuntime) Checkpoint(_ context.Context, id, image string) error {
+	c.wait("checkpoint")
+	return os.WriteFile(filepath.Join(image, "mem"), []byte("trunc"), 0o600)
+}
+
+// A checkpoint cut short by the lock-free preemption publishes no snapshot,
+// even when the runtime reports success (Security R2 on #124): a later
+// rollback must never restore a truncated image.
+func TestRES1CheckpointCutShortByPreemptionPublishesNoSnapshot(t *testing.T) {
+	e := newEnv(t, 2000)
+	s := &slowRuntime{fakeRuntime: e.rt, block: make(chan struct{}), entered: make(chan string, 1), what: "checkpoint"}
+	e.cfg.Runtime = &cutShortRuntime{s}
+	e.open()
+	e.create("exp", admission.Experiment, 1500)
+	before := len(e.m.Snapshots("exp"))
+	ckpt := make(chan error, 1)
+	go func() { _, err := e.m.Checkpoint(bg, "exp"); ckpt <- err }()
+	<-s.entered
+
+	_, err := e.m.Create(bg, "call", Spec{Image: "base", Class: admission.Foreground, MemMB: 1000})
+	if err != nil {
+		close(s.block)
+		t.Fatal(err)
+	}
+	close(s.block)
+	if err := <-ckpt; !errors.Is(err, ErrPreempted) {
+		t.Fatalf("checkpoint cut short: %v, want ErrPreempted", err)
+	}
+	if got := e.m.Snapshots("exp"); len(got) != before {
+		t.Fatalf("snapshots %v published by a checkpoint cut short", ids(got))
+	}
+	entries, err := os.ReadDir(filepath.Join(e.cfg.StateDir, "snapshots"))
+	must(t, err)
+	if len(entries) != before {
+		t.Fatalf("%d snapshot directories on disk, want %d", len(entries), before)
+	}
+	waitState(t, e, "exp", Preempted)
+	// Nothing survives a restart either.
+	must(t, e.m.Destroy(bg, "call"))
+	e.open()
+	if got := e.m.Snapshots("exp"); len(got) != before {
+		t.Fatalf("after restart: %v", ids(got))
 	}
 }
