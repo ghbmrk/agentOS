@@ -313,11 +313,16 @@ func (f *ownerForget) retry(ctx context.Context, goal string, undone int) {
 	}
 }
 
+// forgetBackups is the done text's true half about backups (UX-182-1);
+// W3-forget-b, with the forget log's replay, adds that a restored backup
+// is forgotten again at once.
+const forgetBackups = " Older backups still hold it."
+
 func forgetDone(undone int) string {
 	if undone == 0 {
-		return "Forgotten."
+		return "Forgotten." + forgetBackups
 	}
-	return "Forgotten. I also undid " + things(undone) + " from it; I'll relearn what I can without it."
+	return "Forgotten. I also undid " + things(undone) + " from it; I'll relearn what I can without it." + forgetBackups
 }
 
 // Reconcile: a forget interrupted by a restart is finished by the

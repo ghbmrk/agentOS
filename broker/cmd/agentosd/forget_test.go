@@ -49,8 +49,11 @@ type forgetRig struct {
 	mu      sync.Mutex
 	texts   []string
 	learned map[string]int
-	fail    int // forgets that fail before one succeeds
-	forgot  []string
+	// fail is the forgets that fail before one succeeds; while it is odd
+	// after the count, the tombstone itself fails (UX-182-3: within the
+	// retry the owner never hears "Not forgotten" after "not yet").
+	fail   int
+	forgot []string
 }
 
 func newForgetRig(t *testing.T) *forgetRig {
@@ -69,6 +72,9 @@ func newForgetRig(t *testing.T) *forgetRig {
 			defer r.mu.Unlock()
 			if r.fail > 0 {
 				r.fail--
+				if r.fail%2 == 1 {
+					return fmt.Errorf("%w: disk full", errNotTombstoned)
+				}
 				return errors.New("disk full")
 			}
 			r.forgot = append(r.forgot, g)
@@ -214,7 +220,7 @@ func TestForgetRepliesOnlyAfterEverySave(t *testing.T) {
 	if out := r.f.Execute(context.Background(), in, 1); out.Result != journal.ResultSucceeded {
 		t.Fatalf("execute: %+v", out)
 	}
-	if want := []string{"Forgotten. I also undid 2 things I learned from it; I'll relearn what I can without it."}; strings.Join(r.texts, "|") != want[0] {
+	if want := []string{"Forgotten. I also undid 2 things I learned from it; I'll relearn what I can without it. Older backups still hold it."}; strings.Join(r.texts, "|") != want[0] {
 		t.Fatalf("texts %q", r.texts)
 	}
 	r.texts = nil
@@ -237,7 +243,7 @@ func TestForgetRepliesOnlyAfterEverySave(t *testing.T) {
 	<-done
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	want := "Not forgotten yet: I couldn't save it. I keep trying and will text you when it's done.|Forgotten."
+	want := "Not forgotten yet: I couldn't save it. I keep trying and will text you when it's done.|Forgotten. Older backups still hold it."
 	if strings.Join(r.texts, "|") != want || waited < 2*time.Minute {
 		t.Fatalf("texts %q after %v", r.texts, waited)
 	}
@@ -403,7 +409,7 @@ func TestForgetEndToEnd(t *testing.T) {
 	}
 	x.d.Gate().Wait()
 	for {
-		if got := x.text(); got == "Forgotten." {
+		if got := x.text(); got == "Forgotten. Older backups still hold it." {
 			break
 		}
 	}
@@ -435,7 +441,7 @@ func TestAnUnsavedForgetIsNotDone(t *testing.T) {
 	x.d.Gate().Wait()
 	for {
 		got := x.text()
-		if got == "Forgotten." {
+		if strings.HasPrefix(got, "Forgotten.") {
 			t.Fatal("told forgotten with the tombstone unsaved")
 		}
 		if got == forgetNotDone {
