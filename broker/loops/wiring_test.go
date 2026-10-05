@@ -66,29 +66,29 @@ func TestABudgetRaiseIsALowTierLineFromBrokerState(t *testing.T) {
 func TestOwnerTextChangesSettingsAndLeavesTaskChatAlone(t *testing.T) {
 	r := newRig(t)
 	ctx := context.Background()
-	if _, ok := r.s.Text(ctx, "learning is off, right?"); ok {
+	if _, ok := r.s.Text(ctx, "learning is off, right?", true); ok {
 		t.Fatal("task chat taken as a setting")
 	}
-	if got, ok := r.s.Text(ctx, "learning off"); !ok || got != "Learning is off until you reply LEARNING ON." {
+	if got, ok := r.s.Text(ctx, "learning off", true); !ok || got != "Learning is off until you reply LEARNING ON." {
 		t.Fatalf("%q %v", got, ok)
 	}
 	if !r.s.Settings().Paused[Improve] {
 		t.Fatal("LEARNING OFF did not pause Loop 1")
 	}
 	// The rig's policy refuses a raise outright; the reply says so.
-	if got, ok := r.s.Text(ctx, "SPARE BUDGET 400"); !ok || got != "That setting did not take effect. Reply HELP LOOPS for the settings." {
+	if got, ok := r.s.Text(ctx, "SPARE BUDGET 400", true); !ok || got != "Not allowed: needs the owner's approval." {
 		t.Fatalf("%q %v", got, ok)
 	}
 	// The gate leaves it pending for the owner's approval instead.
 	r.s.Attach(pending{r.eng})
-	if got, ok := r.s.Text(ctx, "SPARE BUDGET 400"); !ok || got != "Raising spare-time AI use needs your approval; a request follows." {
+	if got, ok := r.s.Text(ctx, "SPARE BUDGET 400", true); !ok || got != "Raising spare-time AI use needs your approval; a request follows." {
 		t.Fatalf("%q %v", got, ok)
 	}
 	r.s.Attach(r.eng)
 	if r.s.Settings().SpareCalls != DefaultSpareCalls {
 		t.Fatal("a raise took effect without approval")
 	}
-	if got, ok := r.s.Text(ctx, "help loops"); !ok || got != HelpText {
+	if got, ok := r.s.Text(ctx, "help loops", true); !ok || got != HelpText {
 		t.Fatalf("%q %v", got, ok)
 	}
 }
@@ -183,7 +183,7 @@ func TestACrashBeforeTheCaseIsAddedIsRetried(t *testing.T) {
 func TestPluralLoopNamesReadAsPlural(t *testing.T) {
 	r := newRig(t)
 	ctx := context.Background()
-	r.s.Text(ctx, "SECURITY TESTS OFF")
+	r.s.Text(ctx, "SECURITY TESTS OFF", true)
 	found := false
 	for _, l := range r.s.Digest() {
 		found = found || l == "Security tests are off. Reply SECURITY TESTS ON to restart them."
@@ -203,4 +203,45 @@ func (pending) Submit(in journal.Intent) (journal.Status, error) {
 
 func (pending) Authorize(_ context.Context, id string) (journal.Status, error) {
 	return journal.Status{State: journal.Pending}, nil
+}
+
+// UX-57-1: a locked session takes only settings whose worst case is a
+// pause; turning work on and raising the budget wait for the unlock.
+func TestALockedSessionTakesOnlyPauses(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	if got, ok := r.s.Text(ctx, "LEARNING OFF", false); !ok || got != "Learning is off until you reply LEARNING ON." {
+		t.Fatalf("%q %v", got, ok)
+	}
+	if got, ok := r.s.Text(ctx, "spare budget 50", false); !ok || r.s.Settings().SpareCalls != 50 {
+		t.Fatalf("lowering while locked: %q %v", got, ok)
+	}
+	for _, msg := range []string{"LEARNING ON", "LOOPS ON", "SPARE BUDGET 60", "START SHARING"} {
+		if _, ok := r.s.Text(ctx, msg, false); ok {
+			t.Fatalf("%s taken in a locked session", msg)
+		}
+	}
+	if !r.s.Settings().Paused[Improve] || r.s.Settings().SpareCalls != 50 {
+		t.Fatalf("%+v", r.s.Settings())
+	}
+	if got, ok := r.s.Text(ctx, "HELP LOOPS", false); !ok || got != HelpText {
+		t.Fatalf("%q %v", got, ok)
+	}
+}
+
+// UX-57-2: a failed setting says why when the box knows.
+func TestAFailedSettingSaysWhy(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	if got, _ := r.s.Text(ctx, "SPARE BUDGET 6000", true); got != "The most is 5000 calls a day." {
+		t.Fatalf("%q", got)
+	}
+	r.s.cfg.Sharing = nil
+	if got, _ := r.s.Text(ctx, "STOP SHARING", true); got != "Sharing is not available yet." {
+		t.Fatalf("%q", got)
+	}
+	r.s.cfg.Journal = nil
+	if got, _ := r.s.Text(ctx, "LOOPS OFF", true); got != "The box could not save that setting. Try again later." {
+		t.Fatalf("%q", got)
+	}
 }

@@ -42,14 +42,14 @@ func loopsRig(t *testing.T) (*rig, *loops.Scheduler) {
 func TestLoopSettingsGoThroughTheScheduler(t *testing.T) {
 	r, s := loopsRig(t)
 	ctx := context.Background()
-	if got, ok := s.Text(ctx, "LOOPS OFF"); !ok || !strings.HasPrefix(got, "Spare-time work is off") || !s.Settings().Off {
+	if got, ok := s.Text(ctx, "LOOPS OFF", true); !ok || !strings.HasPrefix(got, "Spare-time work is off") || !s.Settings().Off {
 		t.Fatalf("%q %v %+v", got, ok, s.Settings())
 	}
-	if got, ok := s.Text(ctx, "spare budget 40"); !ok || s.Settings().SpareCalls != 40 {
+	if got, ok := s.Text(ctx, "spare budget 40", true); !ok || s.Settings().SpareCalls != 40 {
 		t.Fatalf("lowering the budget: %q %v", got, ok)
 	}
 	n := r.own.count()
-	if got, ok := s.Text(ctx, "SPARE BUDGET 80"); !ok || !strings.Contains(got, "needs your approval") {
+	if got, ok := s.Text(ctx, "SPARE BUDGET 80", true); !ok || !strings.Contains(got, "needs your approval") {
 		t.Fatalf("%q %v", got, ok)
 	}
 	r.g.Flush()
@@ -68,7 +68,7 @@ func TestLoopSettingsGoThroughTheScheduler(t *testing.T) {
 	}
 	// A large raise spends real provider money: it needs the code
 	// generator, not a texted code (security B1 on #57).
-	if _, ok := s.Text(ctx, "SPARE BUDGET 5000"); !ok {
+	if _, ok := s.Text(ctx, "SPARE BUDGET 5000", true); !ok {
 		t.Fatal("not a setting")
 	}
 	r.g.Flush()
@@ -102,7 +102,7 @@ func TestLoopSettingsDeniedWithoutScheduler(t *testing.T) {
 // An unanswered raise closes as lapsed, not declined (arbitrator Q3 on #48).
 func TestAnUnansweredRaiseLapses(t *testing.T) {
 	r, s := loopsRig(t)
-	if _, ok := s.Text(context.Background(), "SPARE BUDGET 400"); !ok {
+	if _, ok := s.Text(context.Background(), "SPARE BUDGET 400", true); !ok {
 		t.Fatal("not a setting")
 	}
 	r.g.Flush()

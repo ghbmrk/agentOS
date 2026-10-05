@@ -55,8 +55,8 @@ func TestParseTextTakesWholeMessagesOnly(t *testing.T) {
 		{"learning off now", false, Request{}},
 		{"loop 4 off", false, Request{}},
 		{"loop 02 off", false, Request{}},
-		{"spare budget 999999", false, Request{}},
-		{"spare budget -3", true, Request{Kind: KindBudget, Calls: 3}}, // punctuation is ignored (CH-11)
+		{"spare budget 999999", true, Request{Kind: KindBudget, Calls: MaxSpareCalls + 1}}, // answered with the limit (UX-57-2)
+		{"spare budget -3", true, Request{Kind: KindBudget, Calls: 3}},                     // punctuation is ignored (CH-11)
 		{"turn the loops off please", false, Request{}},
 		{"loops off and book a table", false, Request{}},
 	}

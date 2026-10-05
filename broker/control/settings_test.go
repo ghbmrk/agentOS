@@ -16,7 +16,7 @@ func TestSettingsAreAnsweredBeforeTheAgent(t *testing.T) {
 	agent := &recAgent{}
 	h, _ := newHandler(t, &fakeEngine{}, fakeAuth{unlocked: true}, agent)
 	var seen []string
-	h.Settings = func(_ context.Context, msg string) (string, bool) {
+	h.Settings = func(_ context.Context, msg string, _ bool) (string, bool) {
 		seen = append(seen, msg)
 		if strings.EqualFold(msg, "loops off") {
 			return "Spare-time work is off.", true
@@ -38,13 +38,23 @@ func TestSettingsAreAnsweredBeforeTheAgent(t *testing.T) {
 	}
 }
 
-func TestSettingsNeedAnUnlockedSession(t *testing.T) {
+// UX-57-1, CH-11: a locked session still takes a pause-only setting; the
+// rest get the unlock prompt and never reach the agent.
+func TestALockedSessionTakesOnlyPauses(t *testing.T) {
 	h, _ := newHandler(t, &fakeEngine{}, fakeAuth{unlocked: false}, forbiddenAgent{t})
-	h.Settings = func(context.Context, string) (string, bool) {
-		t.Fatal("a setting was tried in a locked session")
+	h.Settings = func(_ context.Context, msg string, unlocked bool) (string, bool) {
+		if unlocked {
+			t.Fatal("told unlocked in a locked session")
+		}
+		if msg == "LOOPS OFF" {
+			return "Spare-time work is off.", true
+		}
 		return "", false
 	}
-	if got := one(t, h.Handle(context.Background(), owner, "LOOPS OFF")); got != unlockText {
+	if got := one(t, h.Handle(context.Background(), owner, "LOOPS OFF")); got != "Spare-time work is off." {
+		t.Fatalf("%q", got)
+	}
+	if got := one(t, h.Handle(context.Background(), owner, "LOOPS ON")); got != unlockText {
 		t.Fatalf("%q", got)
 	}
 }

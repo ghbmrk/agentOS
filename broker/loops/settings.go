@@ -133,9 +133,14 @@ func ParseText(msg string) (Request, bool) {
 			return Request{Kind: KindLoops, Loop: All[n-1], On: on}, true
 		}
 	case len(f) == 3 && f[0] == "SPARE" && f[1] == "BUDGET":
+		// Any whole number is a budget request; one over MaxSpareCalls is
+		// answered with the limit rather than passed to the agent (UX-57-2).
 		n, err := strconv.ParseInt(f[2], 10, 64)
-		if err == nil && n >= 0 && n <= MaxSpareCalls && f[2] == strconv.FormatInt(n, 10) {
-			return Request{Kind: KindBudget, Calls: n}, true
+		if errors.Is(err, strconv.ErrRange) && strings.Trim(f[2], "0123456789") == "" {
+			n, err = MaxSpareCalls+1, nil
+		}
+		if err == nil && n >= 0 && (n > MaxSpareCalls || f[2] == strconv.FormatInt(n, 10)) {
+			return Request{Kind: KindBudget, Calls: min(n, MaxSpareCalls+1)}, true
 		}
 	case len(f) == 2 && f[1] == "SHARING" && (f[0] == "STOP" || f[0] == "START"):
 		return Request{Kind: KindSharing, On: f[0] == "START"}, true
@@ -254,21 +259,66 @@ func (s *Scheduler) Line(in journal.Intent) (owner.Item, error) {
 // Text answers an owner text that is a loop setting (the owner channel's
 // settings hook): ok is false for any other message, which goes on to the
 // agent. The owner channel calls it only for messages from the owner's
-// number in an unlocked session, after its own control words.
-func (s *Scheduler) Text(ctx context.Context, msg string) (reply string, ok bool) {
+// number, after its own control words. In a locked session (unlocked
+// false) only narrowing settings are taken: anything OFF, STOP SHARING, a
+// budget no higher than the current one, and HELP LOOPS, whose worst case
+// is a pause, as for CH-11's pause words (UX-57-1). Turning work on and
+// raising the budget return ok false there, so the owner channel asks for
+// the unlock.
+func (s *Scheduler) Text(ctx context.Context, msg string, unlocked bool) (reply string, ok bool) {
 	r, ok := ParseText(msg)
 	if !ok {
 		return "", false
 	}
-	switch err := s.Set(ctx, r); {
+	if !unlocked && !s.narrowing(r) {
+		return "", false
+	}
+	if r.Kind == KindBudget && r.Calls > MaxSpareCalls {
+		return fmt.Sprintf("The most is %d calls a day.", MaxSpareCalls), true
+	}
+	err := s.Set(ctx, r)
+	var no refused
+	switch {
 	case err == nil:
 		return Confirm(r, s.Settings()), true
 	case errors.Is(err, ErrPending):
 		return "Raising spare-time AI use needs your approval; a request follows.", true
+	case errors.Is(err, errNoSharing):
+		return "Sharing is not available yet.", true
+	case errors.As(err, &no):
+		return fit1("Not allowed: " + no.reason + "."), true
 	default:
-		return "That setting did not take effect. Reply HELP LOOPS for the settings.", true
+		return "The box could not save that setting. Try again later.", true
 	}
 }
+
+// narrowing reports a request whose worst case is a pause.
+func (s *Scheduler) narrowing(r Request) bool {
+	switch r.Kind {
+	case KindHelp:
+		return true
+	case KindLoops, KindSharing:
+		return !r.On
+	case KindBudget:
+		return r.Calls <= s.Settings().SpareCalls
+	}
+	return false
+}
+
+// fit1 cuts a reply to one SMS segment (153 characters).
+func fit1(s string) string {
+	if len(s) <= 153 {
+		return s
+	}
+	return s[:150] + "..."
+}
+
+// refused is a setting the broker's policy denied, with its reason.
+type refused struct{ reason string }
+
+func (r refused) Error() string { return "loops: refused: " + r.reason }
+
+var errNoSharing = errors.New("loops: sharing is not wired")
 
 // DefaultsLine is onboarding's one line on the loop defaults (LOOP-0).
 func DefaultsLine(calls int64) string {
@@ -377,7 +427,7 @@ func (s *Scheduler) Set(ctx context.Context, r Request) error {
 	}
 	if r.Kind == KindSharing {
 		if s.cfg.Sharing == nil {
-			return errors.New("loops: sharing is not wired")
+			return errNoSharing
 		}
 		return s.cfg.Sharing(ctx, r.On)
 	}
@@ -428,7 +478,7 @@ func runIntent(ctx context.Context, j Journal, in journal.Intent) error {
 	case journal.Pending:
 		return ErrPending
 	case journal.Denied:
-		return errors.New("loops: refused: " + st.Permission.Reason)
+		return refused{strings.TrimPrefix(st.Permission.Reason, "loops: ")}
 	case journal.Authorized:
 		if st, err = j.Dispatch(ctx, in.ID); err != nil {
 			return err
