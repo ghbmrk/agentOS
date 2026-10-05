@@ -284,6 +284,38 @@ func TestRestartReissuesWhatTheOwnerWasAsked(t *testing.T) {
 	}
 }
 
+// TestReissueThatCannotBeSentWaitsForARetry: if the re-issued request
+// cannot be texted, the intent stays pending with the reason, as any ask
+// the owner cannot receive (GR9), and a retry of the request_id asks
+// again as a new request: the agent re-asking, as after an expiry.
+func TestReissueThatCannotBeSentWaitsForARetry(t *testing.T) {
+	r := newRig(t, nil)
+	r.grant(mailGrant())
+	r.ver.set("inv-1042", sam())
+	r.effect("agent/s1", "invoice.send", map[string]any{"record": "inv-1042"}, "sam@example.com")
+	r.g.Flush()
+	req, items := r.own.last(t)
+	r.boot = []owner.Carried{{Ref: "agent/s1", Request: req, Asked: r.now(), Expires: r.now().Add(10 * time.Minute), Sum: owner.ItemSum(items[0])}}
+	r.open()
+	r.own.down = true
+	r.g.Flush()
+	if st := r.state("agent/s1"); st.State != journal.Pending || !strings.Contains(st.Permission.Reason, "could not ask the owner") || r.own.count() != 0 {
+		t.Fatalf("unsent re-issue: %s %q", st.State, st.Permission.Reason)
+	}
+	r.own.down = false
+	if st, _ := r.g.Authorize(context.Background(), "agent/s1"); st.State != journal.Pending {
+		t.Fatalf("retry: %s", st.State)
+	}
+	r.g.Flush()
+	if _, again := r.own.last(t); len(again) != 1 || again[0].Ref != "agent/s1" || !again[0].Asked.IsZero() || len(r.own.each) != 0 {
+		t.Fatalf("retry asked %+v", again)
+	}
+	r.decide(true, "owner")
+	if st := r.state("agent/s1"); st.State != journal.Succeeded || r.exec.runs("agent/s1") != 1 {
+		t.Fatalf("after retry: %s", st.State)
+	}
+}
+
 // TestReissuedItemLapsesAtItsOriginalExpiry: a re-issued item still
 // waiting to be sent (quiet hours, say) when its original expiry passes is
 // denied rather than sent.

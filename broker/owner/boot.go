@@ -39,7 +39,13 @@ func (c *Channel) Boot() {
 	var carried []Carried
 	var resent, reqs, expired, replies []string
 	for _, p := range b.pending {
-		keep := c.cfg.Reissue != nil && !p.Expires.IsZero() && len(p.Sums) == len(p.Refs)
+		// A record is carried only if it is whole and sane: asked in the
+		// past, and its expiry no later than MaxTTL after that.
+		keep := c.cfg.Reissue != nil && !p.Expires.IsZero() && len(p.Sums) == len(p.Refs) &&
+			!p.Asked.IsZero() && !p.Asked.After(now)
+		if keep && p.Expires.After(p.Asked.Add(MaxTTL)) {
+			p.Expires = p.Asked.Add(MaxTTL)
+		}
 		switch {
 		case keep && now.Before(p.Expires):
 			resent = append(resent, p.ID)

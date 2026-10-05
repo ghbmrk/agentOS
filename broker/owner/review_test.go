@@ -386,7 +386,14 @@ func TestRestartHandsOpenRequestsToReissue(t *testing.T) {
 	r.inbox()
 	b, _ := r.ch.Request([]Item{lowItem("c")}, 2*time.Minute)
 	r.inbox()
-	if err := r.ch.codes.commit(func(s *State) { s.Pending = append(s.Pending, PendingRef{ID: "Z9", Refs: []string{"z"}}) }); err != nil {
+	// Records that cannot be trusted are cancelled, not carried: one from
+	// an older build without its expiry, and one asked in the future. One
+	// whose expiry is past MaxTTL is capped.
+	if err := r.ch.codes.commit(func(s *State) {
+		s.Pending = append(s.Pending, PendingRef{ID: "Z9", Refs: []string{"z"}},
+			PendingRef{ID: "Y9", Refs: []string{"y"}, Asked: t0.Add(time.Hour), Expires: t0.Add(2 * time.Hour), Sums: []string{"s"}},
+			PendingRef{ID: "X9", Refs: []string{"x"}, Asked: t0, Expires: t0.Add(30 * 24 * time.Hour), Sums: []string{"s"}})
+	}); err != nil {
 		t.Fatal(err)
 	}
 	var got [][]Carried
@@ -395,25 +402,25 @@ func TestRestartHandsOpenRequestsToReissue(t *testing.T) {
 	r.ch = r.open() // reboot
 	r.ch.Boot()
 	text := r.inbox()
-	for _, want := range []string{a + " will be re-sent with new codes", "Cancelled requests: Z9.", "Expired: " + b + "."} {
+	for _, want := range []string{a + ", X9 will be re-sent with new codes", "Cancelled requests: Z9, Y9.", "Expired: " + b + "."} {
 		if !strings.Contains(text, want) {
 			t.Errorf("boot text %q lacks %q", text, want)
 		}
 	}
-	if len(got) != 1 || len(got[0]) != 2 {
+	if len(got) != 1 || len(got[0]) != 3 || got[0][2].Ref != "x" || !got[0][2].Expires.Equal(t0.Add(MaxTTL)) {
 		t.Fatalf("handed over %+v", got)
 	}
-	for i, c := range got[0] {
+	for i, c := range got[0][:2] {
 		ref := []string{"a", "b"}[i]
 		if c.Ref != ref || c.Request != a || !c.Asked.Equal(t0) || !c.Expires.Equal(t0.Add(DefaultCodeTTL)) || c.Sum != ItemSum(lowItem(ref)) {
 			t.Errorf("carried %+v", c)
 		}
 	}
 	ds := r.decisions()
-	if len(ds) != 2 || ds[0].Ref != "c" || ds[0].Why != "expired" || ds[1].Ref != "z" || ds[1].Why != "restart" {
+	if len(ds) != 3 || ds[0].Ref != "c" || ds[0].Why != "expired" || ds[1].Ref != "z" || ds[1].Why != "restart" || ds[2].Ref != "y" {
 		t.Fatalf("decisions %+v", ds)
 	}
-	for _, id := range []string{a, b, "Z9"} {
+	for _, id := range []string{a, b, "Z9", "Y9", "X9"} {
 		if _, ok := r.ch.codes.st.Retired[id]; !ok {
 			t.Errorf("%s not retired", id)
 		}

@@ -13,6 +13,9 @@ import (
 const (
 	// MaxOpen caps open requests plus queued auto-replies.
 	MaxOpen = 50
+	// MaxTTL caps how long any request stays open, so a restart record
+	// can never carry an item forward for longer.
+	MaxTTL = 24 * time.Hour
 	// MaxExpired caps the digest list; older entries are counted, not kept.
 	MaxExpired = 200
 	// RetireFor keeps a closed ID from being reused, so a late reply
@@ -140,6 +143,9 @@ func (c *Channel) openLocked(items []Item, ttl time.Duration, now time.Time) (*r
 	}
 	if ttl <= 0 {
 		ttl = c.cfg.CodeTTL
+	}
+	if ttl > MaxTTL {
+		ttl = MaxTTL
 	}
 	if tier == Low && ttl > c.cfg.CodeTTL {
 		ttl = c.cfg.CodeTTL
