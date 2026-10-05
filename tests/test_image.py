@@ -70,7 +70,8 @@ class TreeCheckTest(unittest.TestCase):
                     "usr/lib/systemd/systemd-timedated", "usr/sbin/lvm", "usr/sbin/mdadm",
                     "usr/lib/udev/rules.d/69-lvm.rules", "usr/lib/udev/rules.d/63-md-raid-arrays.rules",
                     "usr/lib/udev/rules.d/80-udisks2.rules", "usr/lib/udev/rules.d/69-bcache.rules",
-                    "usr/lib/udev/rules.d/60-zfs.rules", "usr/lib/udev/rules.d/64-md-raid-assembly.rules"):
+                    "usr/lib/udev/rules.d/60-zfs.rules", "usr/lib/udev/rules.d/64-md-raid-assembly.rules",
+                    "usr/bin/mokutil", "usr/sbin/mokutil"):
             with self.subTest(rel):
                 f = write(self.root, rel, "x")
                 v = check.violations(self.root)
@@ -206,7 +207,7 @@ class ReleaseTest(unittest.TestCase):
 
     def test_esp_allowlist(self):
         name, text = finish.counted_entry(ENTRY % H, "7", tries=3)
-        clean = ["EFI/BOOT/BOOTX64.EFI", "EFI/BOOT/grubx64.efi", "EFI/BOOT/mmx64.efi",
+        clean = ["EFI/BOOT/BOOTX64.EFI", "EFI/BOOT/grubx64.efi", "EFI/BOOT/mmx64.efi.signed",
                  "EFI/systemd/systemd-bootx64.efi", "loader/loader.conf", "loader/entries.srel",
                  "loader/entries/" + name, "debian/6.12.48+deb13-amd64/linux", "debian/6.12.48+deb13-amd64/initrd"]
         self.assertEqual(finish.esp_violations(clean, text), [])
@@ -215,6 +216,17 @@ class ReleaseTest(unittest.TestCase):
         self.assertEqual(finish.esp_violations(planted, text),
                          ["debian/other/initrd", "loader/credentials/agentos.cred",
                           "loader/entries/debian-6.12.conf", "loader/random-seed"])
+
+    def test_esp_has_no_shim_fallback(self):
+        # Security carry on #175: shim's fallback (fbx64.efi reading BOOT.CSV) would rewrite the
+        # host's BootOrder (HW-8), so neither may ship, under any name case or directory; nor
+        # MokManager where shim would launch it (no MOK enrollment).
+        name, text = finish.counted_entry(ENTRY % H, "7", tries=3)
+        base = ["EFI/BOOT/BOOTX64.EFI", "loader/entries/" + name]
+        for extra in ("EFI/BOOT/fbx64.efi", "EFI/BOOT/FBX64.EFI", "EFI/BOOT/BOOTX64.CSV", "EFI/debian/BOOT.CSV",
+                      "EFI/BOOT/boot.csv", "EFI/systemd/fbx64.efi", "EFI/BOOT/mmx64.efi", "EFI/BOOT/MMX64.EFI"):
+            with self.subTest(extra):
+                self.assertEqual(finish.esp_violations(base + [extra], text), [extra])
 
     def test_verify_usr_fails_when_veritysetup_refuses(self):
         with tempfile.TemporaryDirectory() as t:
@@ -621,6 +633,9 @@ class HostUntouchedImageTest(unittest.TestCase):
             self.assertNotIn(p, c["Packages"].split())
         self.assertTrue(any("lvm" in g for g in c["RemoveFiles"].split()))
         self.assertTrue(any("md-raid" in g for g in c["RemoveFiles"].split()))
+        # RemovePackages alone left lvm2's tools in the first built initrd: they go by path too.
+        for path in ("/etc/lvm", "/usr/sbin/lvm", "/usr/sbin/mdadm"):
+            self.assertIn(path, c["RemoveFiles"].split())
 
     def test_initrd_listing_check(self):
         good = ["usr/lib/agentos/drive-ids", "usr/lib/systemd/system/agentos-drive-ids.service",

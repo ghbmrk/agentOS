@@ -29,6 +29,10 @@ LOADER_CONF = "timeout 0\neditor no\nsecure-boot-enroll off\n"
 # loader/random-seed, a system token) would ship identical on every drive (HW-1).
 ESP_ALLOWED = (r"EFI/BOOT/[^/]+", r"EFI/systemd/[^/]+", r"loader/loader\.conf", r"loader/entries\.srel",
                r"loader/entries/agentos_[^/]+\.conf")
+# Never shim's fallback: fbx64.efi reads BOOT*.CSV and rewrites the host's BootOrder; never
+# MokManager where shim launches it, so no MOK enrollment writes MokList (HW-8, security carry on
+# #175). Refused under any directory or name case, even where allowed above.
+ESP_FORBIDDEN = r"(?i)(^|/)(fb[^/]*\.efi|boot[^/]*\.csv|mm[^/]*\.efi)$"
 
 
 # The initrd must carry the drive ID check (mkosi.initrd/) and nothing that assembles LVM or
@@ -94,7 +98,8 @@ def esp_violations(paths, entry):
     """ESP files outside the allowlist (HW-1). paths: every file on the ESP, relative."""
     allowed = set(boot_files(entry))
     return sorted(p for p in paths
-                  if p not in allowed and not any(re.fullmatch(a, p) for a in ESP_ALLOWED))
+                  if re.search(ESP_FORBIDDEN, p)
+                  or p not in allowed and not any(re.fullmatch(a, p) for a in ESP_ALLOWED))
 
 
 def initrd_names(data):

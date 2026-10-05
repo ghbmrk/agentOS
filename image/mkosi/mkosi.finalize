@@ -33,7 +33,9 @@ HOST_TOUCHING = ("usr/sbin/hwclock", "usr/lib/udev/rules.d/*hwclock*", "usr/lib/
                  "usr/lib/systemd/system/systemd-timedated.service", "usr/sbin/lvm", "usr/sbin/mdadm",
                  "usr/lib/udev/rules.d/*lvm*", "usr/lib/udev/rules.d/*md-raid*", "usr/libexec/udisks2",
                  "usr/lib/udev/rules.d/*udisks*", "usr/lib/udev/rules.d/*bcache*", "usr/lib/udev/rules.d/*zfs*",
-                 "usr/lib/udev/rules.d/*dmraid*", "usr/lib/udev/rules.d/*mdadm*")
+                 "usr/lib/udev/rules.d/*dmraid*", "usr/lib/udev/rules.d/*mdadm*",
+                 # Nothing that queues a MOK enrollment for shim (security carry on #175).
+                 "usr/bin/mokutil", "usr/sbin/mokutil")
 RTC_DIRECTIVES = ("rtcsync", "rtcfile", "hwclockfile", "rtconutc", "rtcautotrim", "rtcdevice")
 
 
