@@ -5,21 +5,23 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
 
-// REQ: OSS-1, OSS-5, OSS-6, OSS-7
+// REQ: OSS-1, OSS-5, OSS-7
 
 type outbox struct {
 	mu      sync.Mutex
 	batches [][]string
+	days    []string
 	fail    error
 	onSend  func()
 }
 
-func (o *outbox) Send(batch [][]byte) error {
+func (o *outbox) Send(day string, batch [][]byte) error {
 	if o.onSend != nil {
 		o.onSend()
 	}
@@ -33,6 +35,7 @@ func (o *outbox) Send(batch [][]byte) error {
 		b = append(b, string(h))
 	}
 	o.batches = append(o.batches, b)
+	o.days = append(o.days, day)
 	return nil
 }
 
@@ -143,10 +146,12 @@ func TestOSS7DefaultIsAutomatic(t *testing.T) {
 	}
 }
 
-// TestOSS6OnlyTheSetCrosses: hints cross only as one batch per day, at the
+// TestOSS1OnlyTheSetCrosses: hints cross only as one batch per day, at the
 // fixed release time on a later day, sorted by canonical form, so neither
-// the order nor the time they were emitted reaches the outbox.
-func TestOSS6OnlyTheSetCrosses(t *testing.T) {
+// the order nor the time they were emitted reaches the outbox. (This is
+// OSS-6's batching and delay; its pseudonymous key and rotation are the
+// publication package's.)
+func TestOSS1OnlyTheSetCrosses(t *testing.T) {
 	r := newRig(t, Config{})
 	order := []string{"travel", "calendar", "notes", "email"}
 	for i, d := range order {
@@ -420,19 +425,20 @@ func TestOSS1RestartKeepsState(t *testing.T) {
 	}
 }
 
-// TestOSS1LoggedBeforeSent: the batch's records exist before the outbox is
-// called, so nothing crosses unlogged; a failed send is logged, the hints
-// stay queued, and they cross at the next release, also after a restart.
+// TestOSS1LoggedBeforeSent: the batch's Forwarded record exists before
+// the outbox is called, so nothing crosses unlogged. A failed send is
+// logged and the same set is resent for the same day at the next release,
+// also after a restart, ahead of hints queued since.
 func TestOSS1LoggedBeforeSent(t *testing.T) {
 	r := newRig(t, Config{})
 	emit(t, r.e, good())
 	emit(t, r.e, vuln)
-	var forwarded int
+	var refs int
 	r.out.onSend = func() {
-		forwarded = 0
+		refs = 0
 		for _, rec := range records(t, r.log) {
 			if rec.Outcome == Forwarded {
-				forwarded++
+				refs += len(rec.Refs)
 			}
 		}
 	}
@@ -440,17 +446,99 @@ func TestOSS1LoggedBeforeSent(t *testing.T) {
 	if err := r.nextRelease(); err == nil {
 		t.Fatal("release with failing outbox succeeded")
 	}
-	if forwarded != 2 {
-		t.Fatalf("log had %d forwarded records when the outbox was called", forwarded)
+	if refs != 2 {
+		t.Fatalf("log had %d forwarded hints when the outbox was called", refs)
 	}
+	emit(t, r.e, skill("email")) // queued after the failed batch
 	r.out.fail = nil
 	r.restart()
+	r.now = r.now.Add(24 * time.Hour)
+	if err := r.e.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.out.batches) != 1 || len(r.out.batches[0]) != 2 || contains(r.out.batches[0], canon(t, skill("email"))) || r.out.days[0] != "2026-10-06" {
+		t.Fatalf("retry sent %v for %v", r.out.batches, r.out.days)
+	}
+}
+
+// failSent is a Log that fails to write Sent records: the box crashed
+// after the outbox took the batch but before the commit.
+type failSent struct{ MemLog }
+
+func (l *failSent) Append(r Record) error {
+	if r.Outcome == Sent {
+		return errors.New("crash")
+	}
+	return l.MemLog.Append(r)
+}
+
+// TestOSS5CrashBetweenSendAndCommit: a batch the outbox took but whose Sent
+// record was never written is resent after a restart, the same set for the
+// same day, so the outbox's idempotent Send can drop the repeat; a vuln
+// hint in it is never lost. Then normal batches resume.
+func TestOSS5CrashBetweenSendAndCommit(t *testing.T) {
+	log := &failSent{}
+	r := newRig(t, Config{Log: log})
+	emit(t, r.e, vuln)
+	emit(t, r.e, good())
+	if err := r.nextRelease(); err == nil {
+		t.Fatal("commit failure not reported")
+	}
+	r.cfg.Log = &log.MemLog // the restarted box writes normally
+	r.restart()
+	emit(t, r.e, skill("email"))
 	r.now = r.now.Add(time.Hour)
 	if err := r.e.Release(); err != nil {
 		t.Fatal(err)
 	}
-	if len(r.out.all()) != 2 {
-		t.Fatalf("retry sent %v", r.out.all())
+	if len(r.out.batches) != 2 || r.out.days[0] != r.out.days[1] || strings.Join(r.out.batches[0], "|") != strings.Join(r.out.batches[1], "|") {
+		t.Fatalf("resend %v for %v", r.out.batches, r.out.days)
+	}
+	if err := r.nextRelease(); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.out.batches) != 3 || r.out.batches[2][0] != canon(t, skill("email")) {
+		t.Fatalf("next batch %v", r.out.batches)
+	}
+	var sent int
+	for _, rec := range records(t, r.log) {
+		if rec.Outcome == Sent {
+			sent++
+		}
+	}
+	if sent != 2 {
+		t.Fatalf("%d Sent records", sent)
+	}
+}
+
+// TestOSS7AsksBoundedAndExpire: open asks are bounded, and an ask the
+// owner has not answered within DedupeDays expires as declined.
+func TestOSS7AsksBoundedAndExpire(t *testing.T) {
+	r := newRig(t, Config{Policy: map[string]Mode{"skills": Ask}, MaxPending: 2})
+	emit(t, r.e, skill("calendar"))
+	emit(t, r.e, skill("email"))
+	if res := emit(t, r.e, skill("notes")); res.Outcome != OverLimit {
+		t.Fatalf("third ask: %s", res.Outcome)
+	}
+	r.now = day0.Add(7 * 24 * time.Hour)
+	if res := emit(t, r.e, skill("notes")); res.Outcome != Asked {
+		t.Fatalf("after expiry: %s", res.Outcome)
+	}
+	if p := r.e.Pending(); len(p) != 1 {
+		t.Fatalf("pending %+v", p)
+	}
+	var expired int
+	for _, rec := range records(t, r.log) {
+		if rec.Outcome == Expired {
+			expired++
+		}
+	}
+	if expired != 2 {
+		t.Fatalf("%d expired", expired)
+	}
+	r.restart()
+	if p := r.e.Pending(); len(p) != 1 {
+		t.Fatalf("pending after restart %+v", p)
 	}
 }
 

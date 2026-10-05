@@ -36,9 +36,12 @@ const (
 var ErrNoPending = errors.New("hint: no such pending hint")
 
 // Outbox receives each day's batch of canonical hints for the clean-room
-// builder, sorted.
+// builder, sorted, with the day the batch belongs to. Send must be
+// idempotent by day and set: after a crash, or an error that came after
+// delivery, the emitter sends the same set for the same day again, and
+// the outbox delivers it at most once.
 type Outbox interface {
-	Send(batch [][]byte) error
+	Send(day string, batch [][]byte) error
 }
 
 // Config sets up an Emitter.
@@ -57,7 +60,10 @@ type Config struct {
 	DedupeDays int
 	// MaxBacklog bounds the hints of each class waiting to cross (0 means
 	// 7 × DailyLimit). Over it, a hint is logged OverLimit and dropped.
+	// MaxPending bounds the asks waiting for the owner the same way.
+	// Asks unanswered for DedupeDays expire as Expired (declined).
 	MaxBacklog int
+	MaxPending int
 	// ReleaseAt is the UTC time of day after which the previous days'
 	// hints are released (0 means DefaultReleaseAt).
 	ReleaseAt time.Duration
@@ -89,6 +95,14 @@ type queued struct {
 	canon   string
 }
 
+// batch is a Forwarded record whose send has not been committed by a Sent
+// record.
+type batch struct {
+	seq   int // the Forwarded record
+	day   string
+	items []queued
+}
+
 // Emitter is the private side's single exit to the bridge.
 //
 // Emit never sends. It queues a hint (or asks the owner about it), and
@@ -97,7 +111,13 @@ type queued struct {
 // canonical order. Only the set of hints crosses: not their order, not
 // when they were emitted. The day only moves forward: a clock stepped
 // back keeps the latest day seen, so it cannot shorten the dedupe window
-// or reopen an earlier day's release.
+// or reopen an earlier day's release. The host clock is trusted: each step
+// forward to a new day allows one more batch.
+//
+// A batch is one Forwarded record, written before the send, and a Sent
+// record after the outbox accepts it. A batch without Sent (a failed send,
+// or a crash in between) is resent, exactly the same set for the same
+// day, before any new batch.
 type Emitter struct {
 	cfg Config
 
@@ -107,12 +127,14 @@ type Emitter struct {
 	seen        map[string]string // canonical form -> latest day queued or asked
 	backlog     []queued          // waiting to cross, oldest first
 	pending     map[int]Pending   // asks waiting for the owner
-	lastRelease string            // day of the last successful batch
+	inflight    *batch            // forwarded, not yet committed Sent
+	lastRelease string            // day of the latest batch formed
 }
 
 // New builds an Emitter and rebuilds the latest day, the dedupe window, the
-// waiting batch, and the open asks from the log, so a restart neither
-// reopens a day nor loses a hint or a question to the owner.
+// waiting hints, any batch forwarded but not committed Sent, and the open
+// asks from the log, so a restart neither reopens a day nor loses a hint,
+// a batch, or a question to the owner.
 func New(cfg Config) (*Emitter, error) {
 	if cfg.Schema == nil {
 		cfg.Schema = Default()
@@ -143,6 +165,9 @@ func New(cfg Config) (*Emitter, error) {
 	if cfg.MaxBacklog <= 0 {
 		cfg.MaxBacklog = 7 * cfg.DailyLimit
 	}
+	if cfg.MaxPending <= 0 {
+		cfg.MaxPending = 7 * cfg.DailyLimit
+	}
 	if cfg.ReleaseAt <= 0 {
 		cfg.ReleaseAt = DefaultReleaseAt
 	}
@@ -157,10 +182,10 @@ func New(cfg Config) (*Emitter, error) {
 	if err != nil {
 		return nil, err
 	}
-	failed := map[int]bool{} // Forwarded records whose send failed
+	sent := map[int]bool{} // Forwarded records committed by a Sent record
 	for _, r := range rs {
-		if r.Outcome == SendFailed {
-			failed[r.Ref] = true
+		if r.Outcome == Sent {
+			sent[r.Ref] = true
 		}
 		if r.Day > e.day {
 			e.day = r.Day
@@ -170,21 +195,29 @@ func New(cfg Config) (*Emitter, error) {
 		}
 	}
 	e.roll()
-	crossed := map[int]bool{} // Queued or Approved records that crossed
-	for _, r := range rs {
-		if r.Outcome == Forwarded && !failed[r.Seq] {
-			crossed[r.Ref] = true
-			if r.Day > e.lastRelease {
-				e.lastRelease = r.Day
-			}
+	inBatch := map[int]bool{} // Queued or Approved records in any batch
+	var open *Record          // the latest Forwarded record not committed
+	for i, r := range rs {
+		if r.Outcome != Forwarded {
+			continue
+		}
+		for _, ref := range r.Refs {
+			inBatch[ref] = true
+		}
+		if r.Day > e.lastRelease {
+			e.lastRelease = r.Day
+		}
+		if !sent[r.Seq] {
+			open = &rs[i]
 		}
 	}
+	items := map[int]queued{}
 	for _, r := range rs {
 		h := Hint{Kind: r.Kind, Fields: r.Fields}
 		switch r.Outcome {
 		case Asked:
 			e.pending[r.Seq] = Pending{ID: r.Seq, Day: r.Day, Kind: r.Kind, Fields: r.Fields}
-		case Approved, Declined, OverLimit:
+		case Approved, Declined, Expired, OverLimit:
 			delete(e.pending, r.Ref) // an OverLimit with no Ref settles nothing
 		}
 		if r.Outcome != Queued && r.Outcome != Approved && r.Outcome != Asked {
@@ -198,9 +231,23 @@ func New(cfg Config) (*Emitter, error) {
 		if r.Day > e.seen[string(c)] {
 			e.seen[string(c)] = r.Day
 		}
-		if r.Outcome != Asked && !crossed[r.Seq] {
-			e.backlog = append(e.backlog, queued{seq: r.Seq, day: r.Day, embargo: k.Embargo, canon: string(c)})
+		if r.Outcome == Asked {
+			continue
 		}
+		q := queued{seq: r.Seq, day: r.Day, embargo: k.Embargo, canon: string(c)}
+		items[r.Seq] = q
+		if !inBatch[r.Seq] {
+			e.backlog = append(e.backlog, q)
+		}
+	}
+	if open != nil {
+		b := &batch{seq: open.Seq, day: open.Day}
+		for _, ref := range open.Refs {
+			if q, ok := items[ref]; ok {
+				b.items = append(b.items, q)
+			}
+		}
+		e.inflight = b
 	}
 	return e, nil
 }
@@ -243,12 +290,39 @@ func (e *Emitter) waiting(canon string) bool {
 			return true
 		}
 	}
+	if e.inflight != nil {
+		for _, q := range e.inflight.items {
+			if q.canon == canon {
+				return true
+			}
+		}
+	}
 	for _, p := range e.pending {
 		if c, err := e.cfg.Schema.Canonical(Hint{Kind: p.Kind, Fields: p.Fields}); err == nil && string(c) == canon {
 			return true
 		}
 	}
 	return false
+}
+
+// expire settles asks unanswered for DedupeDays as Expired (UX 3: an
+// unanswered ask counts as declined).
+func (e *Emitter) expire() error {
+	ids := make([]int, 0, len(e.pending))
+	for id, p := range e.pending {
+		if !e.recent(p.Day) {
+			ids = append(ids, id)
+		}
+	}
+	sort.Ints(ids)
+	for _, id := range ids {
+		p := e.pending[id]
+		if err := e.record(Record{Outcome: Expired, Ref: id, Kind: p.Kind, Fields: copyFields(p.Fields)}); err != nil {
+			return err
+		}
+		delete(e.pending, id)
+	}
+	return nil
 }
 
 func (e *Emitter) backlogFull(embargo bool) bool {
@@ -270,6 +344,9 @@ func (e *Emitter) Emit(h Hint) (Result, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.roll()
+	if err := e.expire(); err != nil {
+		return Result{}, err
+	}
 	k, err := e.cfg.Schema.check(h)
 	if err != nil {
 		if lerr := e.record(Record{Outcome: Refused}); lerr != nil {
@@ -289,6 +366,8 @@ func (e *Emitter) Emit(h Hint) (Result, error) {
 		return out(Withheld)
 	case e.waiting(string(canon)):
 		return out(Duplicate)
+	case mode == Ask && len(e.pending) >= e.cfg.MaxPending:
+		return out(OverLimit)
 	case mode == Ask:
 		res, err := out(Asked)
 		if err != nil {
@@ -312,19 +391,32 @@ func (e *Emitter) Emit(h Hint) (Result, error) {
 
 // Release sends the hints queued on days before today as one sorted batch,
 // at most DailyLimit of them, once today's release time has passed and no
-// batch has gone today. Embargo kinds get EmbargoReserve slots first,
-// routine kinds the rest; either class takes slots the other leaves
-// unused; within a class the oldest go first and the rest wait. Each
-// hint's Forwarded record is written before the send; if the send fails,
-// that is logged, the hints stay queued, and a later call retries.
+// batch has been formed today. Embargo kinds get EmbargoReserve slots
+// first, routine kinds the rest; either class takes slots the other leaves
+// unused; within a class the oldest go first and the rest wait. The batch's
+// Forwarded record is written before the send and a Sent record after it.
+// If a batch is still uncommitted (the send failed, or the box crashed
+// before Sent was written), Release resends exactly that set, for its day,
+// at the release time, and forms no new batch in the same call. Only a
+// fixed broker timer may call Release (ASSUMPTIONS K3): the call time is
+// the send time.
 func (e *Emitter) Release() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.roll()
+	if err := e.expire(); err != nil {
+		return err
+	}
 	now := e.cfg.Now().UTC()
 	// A clock behind the latest day waits until it catches up, so a batch
 	// still goes only at the release time.
-	if e.lastRelease >= e.day || now.Format("2006-01-02") != e.day || now.Sub(now.Truncate(24*time.Hour)) < e.cfg.ReleaseAt {
+	if now.Format("2006-01-02") != e.day || now.Sub(now.Truncate(24*time.Hour)) < e.cfg.ReleaseAt {
+		return nil
+	}
+	if e.inflight != nil {
+		return e.send()
+	}
+	if e.lastRelease >= e.day {
 		return nil
 	}
 	var emb, rout []queued
@@ -341,49 +433,54 @@ func (e *Emitter) Release() error {
 	nEmb := min(len(emb), e.cfg.EmbargoReserve)
 	nRout := min(len(rout), e.cfg.DailyLimit-nEmb)
 	nEmb = min(len(emb), e.cfg.DailyLimit-nRout)
-	batch := append(append([]queued(nil), emb[:nEmb]...), rout[:nRout]...)
-	if len(batch) == 0 {
+	items := append(append([]queued(nil), emb[:nEmb]...), rout[:nRout]...)
+	if len(items) == 0 {
 		return nil
 	}
-	sort.Slice(batch, func(i, j int) bool { return batch[i].canon < batch[j].canon })
-	var fwd []int
-	for _, q := range batch {
-		if err := e.record(Record{Outcome: Forwarded, Ref: q.seq}); err != nil {
-			return e.failed(fwd, err)
-		}
-		fwd = append(fwd, e.seq)
+	sort.Slice(items, func(i, j int) bool { return items[i].canon < items[j].canon })
+	refs := make([]int, len(items))
+	for i, q := range items {
+		refs[i] = q.seq
 	}
-	out := make([][]byte, len(batch))
-	for i, q := range batch {
-		out[i] = []byte(q.canon)
+	if err := e.record(Record{Outcome: Forwarded, Refs: refs}); err != nil {
+		return err
 	}
-	if err := e.cfg.Outbox.Send(out); err != nil {
-		return e.failed(fwd, fmt.Errorf("hint: outbox: %w", err))
-	}
-	sent := map[int]bool{}
-	for _, q := range batch {
-		sent[q.seq] = true
+	e.inflight = &batch{seq: e.seq, day: e.day, items: items}
+	e.lastRelease = e.day
+	in := map[int]bool{}
+	for _, r := range refs {
+		in[r] = true
 	}
 	kept := e.backlog[:0]
 	for _, q := range e.backlog {
-		if !sent[q.seq] {
+		if !in[q.seq] {
 			kept = append(kept, q)
 		}
 	}
 	e.backlog = kept
-	e.lastRelease = e.day
-	return nil
+	return e.send()
 }
 
-// failed logs a SendFailed record for each Forwarded record written for a
-// batch that did not go, and returns err.
-func (e *Emitter) failed(fwd []int, err error) error {
-	for _, s := range fwd {
-		if lerr := e.record(Record{Outcome: SendFailed, Ref: s}); lerr != nil {
+// send offers the uncommitted batch to the outbox and commits it with a
+// Sent record. A failure is logged; the batch stays for the next Release.
+func (e *Emitter) send() error {
+	b := e.inflight
+	out := make([][]byte, len(b.items))
+	for i, q := range b.items {
+		out[i] = []byte(q.canon)
+	}
+	if err := e.cfg.Outbox.Send(b.day, out); err != nil {
+		err = fmt.Errorf("hint: outbox: %w", err)
+		if lerr := e.record(Record{Outcome: SendFailed, Ref: b.seq}); lerr != nil {
 			return errors.Join(err, lerr)
 		}
+		return err
 	}
-	return err
+	if err := e.record(Record{Outcome: Sent, Ref: b.seq}); err != nil {
+		return err // resent, idempotently, at the next Release
+	}
+	e.inflight = nil
+	return nil
 }
 
 // Pending lists the hints waiting for the owner, oldest first.
@@ -410,6 +507,9 @@ func (e *Emitter) settle(id int, approve bool) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.roll()
+	if err := e.expire(); err != nil {
+		return err
+	}
 	p, ok := e.pending[id]
 	if !ok {
 		return ErrNoPending
