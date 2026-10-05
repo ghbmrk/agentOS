@@ -122,9 +122,10 @@ type Plane struct {
 type machine struct {
 	id  string
 	dir string
-	// lineage is the machine's fork lineage, read when it opens: the
-	// machine manager forgets a destroyed machine before Close.
-	lineage string
+	// lineage caches the machine's fork lineage once first read (never
+	// in Open: the manager calls Open holding its own lock). It outlives
+	// the manager's record, which is gone before Close.
+	lineage atomic.Pointer[string]
 	srv     *http.Server
 	ln      *limitListener
 	slot    chan struct{}
@@ -211,7 +212,6 @@ func (p *Plane) Open(id string) (string, error) {
 		return "", err
 	}
 	m := &machine{id: id, dir: dir, slot: make(chan struct{}, p.cfg.MaxConns), box: newInbox(id, p.store)}
-	m.lineage, _ = p.cfg.Machines.Lineage(id)
 	m.rate = bucket{tokens: float64(p.cfg.SubmitBurst), last: time.Now()}
 	m.ln = newLimitListener(l, p.cfg.MaxOpenConns)
 	m.srv = &http.Server{
@@ -250,8 +250,8 @@ func (p *Plane) close(id string, forget bool) {
 	m.box.close(forget)
 	m.srv.Close()
 	os.RemoveAll(m.dir)
-	if forget && m.lineage != "" && !p.lineageOpen(m.lineage) {
-		p.store.setGoal(m.lineage, "", time.Time{}) // the lineage is gone; so is its goal
+	if l := m.lineage.Load(); forget && l != nil && !p.lineageOpen(*l) {
+		p.store.setGoal(*l, "", time.Time{}) // the lineage is gone; so is its goal
 	}
 }
 

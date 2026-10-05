@@ -19,20 +19,27 @@ const DefaultGoalQuiet = 30 * time.Minute
 func GoalID(msgID string) string { return "owner:" + msgID }
 
 // lineageOf is machine m's fork lineage, or "" if the manager cannot say.
+// It must not be called from Open (the manager holds its lock there).
 func (p *Plane) lineageOf(m *machine) string {
-	if m.lineage != "" {
-		return m.lineage
+	if l := m.lineage.Load(); l != nil {
+		return *l
 	}
-	l, _ := p.cfg.Machines.Lineage(m.id)
+	l, err := p.cfg.Machines.Lineage(m.id)
+	if err != nil || l == "" {
+		return ""
+	}
+	m.lineage.Store(&l)
 	return l
 }
 
-// lineageOpen reports whether any open machine is in lineage.
+// lineageOpen reports whether any open machine is in lineage, as far as
+// the cached lineages tell (Close runs after the manager forgot the
+// machine, so it cannot ask).
 func (p *Plane) lineageOpen(lineage string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for _, m := range p.ms {
-		if m.lineage == lineage {
+		if l := m.lineage.Load(); l != nil && *l == lineage {
 			return true
 		}
 	}
@@ -59,16 +66,16 @@ func (p *Plane) goal(lineage string) string {
 		return ""
 	}
 	p.mu.Lock()
-	ms := make([]*machine, 0, len(p.ms))
+	all := make([]*machine, 0, len(p.ms))
 	for _, m := range p.ms {
-		if m.lineage == lineage {
-			ms = append(ms, m)
-		}
+		all = append(all, m)
 	}
 	p.mu.Unlock()
 	var open []string
-	for _, m := range ms {
-		open = append(open, m.box.handed()...)
+	for _, m := range all {
+		if p.lineageOf(m) == lineage {
+			open = append(open, m.box.handed()...)
+		}
 	}
 	now := p.cfg.Now()
 	switch len(open) {

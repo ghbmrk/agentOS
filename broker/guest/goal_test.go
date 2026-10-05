@@ -222,3 +222,23 @@ func TestOP1GuestCannotNameAGoal(t *testing.T) {
 		t.Fatalf("goal %q, want the broker's %q", g, GoalID(a))
 	}
 }
+
+// TestOpenDoesNotCallBackIntoTheManager: the machine manager calls Open
+// holding its own lock, so Open must not ask it for the lineage (that
+// deadlocked the OpenClaw integration run).
+func TestOpenDoesNotCallBackIntoTheManager(t *testing.T) {
+	r := newRig(t, nil)
+	r.ms.mu.Lock()
+	r.ms.locked = true
+	r.ms.mu.Unlock()
+	if _, err := r.p.Open("m1"); err != nil {
+		t.Fatal(err)
+	}
+	r.ms.mu.Lock()
+	r.ms.locked = false
+	n := r.ms.misuse
+	r.ms.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("Open asked the manager for a lineage %d times", n)
+	}
+}

@@ -26,6 +26,10 @@ type fakeMachines struct {
 	private map[string]bool
 	lineage map[string]string
 	events  []string
+	// locked mimics the manager holding its lock while it calls Open;
+	// a Lineage call then would deadlock on the box.
+	locked bool
+	misuse int
 }
 
 func newMachines() *fakeMachines {
@@ -51,6 +55,9 @@ func (f *fakeMachines) RaisePrivate(id string) error {
 func (f *fakeMachines) Lineage(id string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.locked {
+		f.misuse++
+	}
 	if l := f.lineage[id]; l != "" {
 		return l, nil
 	}
