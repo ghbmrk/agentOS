@@ -149,7 +149,11 @@ func (r *Reach) Status() string {
 		return ""
 	}
 	sort.Strings(names)
-	return strings.Join(names, ", ") + " still holds a record you deleted"
+	verb := " still holds"
+	if len(names) > 1 {
+		verb = " still hold"
+	}
+	return strings.Join(names, ", ") + verb + " a record you deleted"
 }
 
 func (r *Reach) set(m *map[string]bool, lineage string, on bool) {
@@ -423,6 +427,11 @@ func (r *Reach) Execute(ctx context.Context, in journal.Intent, _ int) journal.O
 	// holds, so the intent closes as done, with nothing reset, rather
 	// than staying open as not applied.
 	if _, first := r.heldBy(lineage); first.IsZero() || first.After(since) {
+		if r.Notify != nil {
+			if err := r.Notify("Nothing more to do: " + agentName(lineage) + " had already forgotten what you deleted."); err != nil && r.Logf != nil {
+				r.Logf("recall: stale rollback of %s; owner not told: %v", lineage, err)
+			}
+		}
 		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: staleEvidence}
 	}
 	// The owner's YES is the effect: once approved, the rollback is

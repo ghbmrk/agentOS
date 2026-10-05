@@ -357,7 +357,7 @@ func TestCAP3StaleApprovalUndoesNothing(t *testing.T) {
 	x.clock = x.clock.Add(time.Minute)
 	x.j.submitted["new"] = x.clock
 	x.ask.settle(first, "yes")
-	if st := x.ask.st[first]; st.Attempts[0].Evidence != staleEvidence || resets() != 1 || x.j.erased["new"] || len(x.told) != 1 {
+	if st := x.ask.st[first]; st.Attempts[0].Evidence != staleEvidence || resets() != 1 || x.j.erased["new"] || len(x.told) != 2 || !strings.HasPrefix(x.told[1], "Nothing more to do: root") {
 		t.Fatalf("stale approval: %s, resets %v, erased %v", st.State, x.vm.calls, x.j.erased)
 	}
 }
