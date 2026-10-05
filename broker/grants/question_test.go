@@ -49,7 +49,7 @@ func TestAQuestionCarriesNoAuthority(t *testing.T) {
 		t.Fatalf("question %+v", st)
 	}
 	// The guest cites the defaulted answer in its effect request.
-	send := map[string]any{"record": "inv-1042", "template": "invoice", "question": "Q1", "answer": "yes"}
+	send := map[string]any{"record": "inv-1042", "template": "invoice", "question": "Q100", "answer": "yes"}
 	st := r.effect("agent/s1", "invoice.send", send, "sam@example.com")
 	if st.State != journal.Pending || st.Permission.Reason != "waiting for the owner's approval" || r.exec.runs("agent/s1") != 0 {
 		t.Fatalf("a defaulted answer authorized the send: %s %q", st.State, st.Permission.Reason)
@@ -69,10 +69,10 @@ func TestAQuestionCarriesNoAuthority(t *testing.T) {
 	// 2. The owner answers a second question "yes" by text. An answer is
 	// chat, not an approval code, so it does not authorize either.
 	ask("ok-to-send-2")
-	if _, ok := book.Answer(ctx, "Q2 yes"); !ok {
+	if _, ok := book.Answer(ctx, "Q101 yes"); !ok {
 		t.Fatal("answer not matched")
 	}
-	st = r.effect("agent/s2", "invoice.send", map[string]any{"record": "inv-1042", "template": "invoice", "question": "Q2"}, "sam@example.com")
+	st = r.effect("agent/s2", "invoice.send", map[string]any{"record": "inv-1042", "template": "invoice", "question": "Q101"}, "sam@example.com")
 	if st.State != journal.Pending || r.exec.runs("agent/s2") != 0 {
 		t.Fatalf("an owner's text answer authorized the send: %s", st.State)
 	}

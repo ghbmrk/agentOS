@@ -35,11 +35,16 @@ const (
 	DefaultRestartGrace = 2 * time.Minute
 	DefaultKeep         = 7 * 24 * time.Hour
 
-	MaxText    = 200 // runes
-	MaxDefault = 80
-	MaxChoices = 4
-	MaxChoice  = 40
-	MaxAnswer  = 480
+	MaxText = 200 // runes
+	// MaxRendered is the longest owner text a question may render to, in
+	// bytes: control.MaxText (459) less owner.AgentPrefix ("Agent: "),
+	// which Notify adds, so Fit never cuts off the default or the
+	// deadline (owner/question_test.go pins both).
+	MaxRendered = 452
+	MaxDefault  = 80
+	MaxChoices  = 4
+	MaxChoice   = 40
+	MaxAnswer   = 480
 )
 
 // ErrTooMany: the asker, or the box, has as many open questions as allowed.
@@ -116,6 +121,13 @@ type Config struct {
 	Path string
 	// Location renders times in texts; nil means time.Local.
 	Location *time.Location
+	// Hidden reports whether Send would withhold the text as secret-shaped
+	// (owner.SecretShaped). Such a question is refused at Ask, since the
+	// owner would see only a pointer and it would still default. Nil:
+	// nothing is.
+	Hidden func(string) bool
+	// Logf records store failures. Nil: discarded.
+	Logf func(format string, args ...any)
 
 	MinWait, MaxWait  time.Duration
 	PerAsker, MaxOpen int
@@ -148,6 +160,13 @@ type file struct {
 	Next      int      `json:"next"`
 	Questions []*entry `json:"questions"`
 	Digest    []string `json:"digest"`
+	Sends     []send   `json:"sends,omitempty"`
+}
+
+// send is one question text, kept an hour for pacing (CH-15).
+type send struct {
+	At    time.Time `json:"at"`
+	Asker string    `json:"asker"`
 }
 
 // Book holds the box's questions.
@@ -158,7 +177,7 @@ type Book struct {
 	qs     []*entry
 	next   int
 	digest []string
-	sends  []time.Time
+	sends  []send
 	// loaded is set when questions came from disk; grace, set at the first
 	// trusted tick after that, is when lapsing resumes, so owner replies
 	// the carrier queued while the box was down arrive first.
@@ -191,6 +210,16 @@ func New(cfg Config) (*Book, error) {
 	if cfg.Location == nil {
 		cfg.Location = time.Local
 	}
+	if cfg.Logf == nil {
+		cfg.Logf = func(string, ...any) {}
+	}
+	// Tags are held while their question is kept. Questions close only
+	// after a text, so at most SendsPerHour an hour close; keeping them
+	// for less than tags/SendsPerHour hours means a tag is always free
+	// for an asker under its open cap (P3-8 Q5).
+	if maxKeep := time.Duration((numTags-1)/cfg.SendsPerHour) * time.Hour; cfg.Keep > maxKeep {
+		cfg.Keep = maxKeep
+	}
 	b := &Book{cfg: cfg}
 	if cfg.Path == "" {
 		return b, nil
@@ -205,7 +234,7 @@ func New(cfg Config) (*Book, error) {
 		if err := json.Unmarshal(raw, &f); err != nil {
 			return nil, fmt.Errorf("question: %s: %v", cfg.Path, err)
 		}
-		b.qs, b.next, b.digest = f.Questions, f.Next, f.Digest
+		b.qs, b.next, b.digest, b.sends = f.Questions, f.Next, f.Digest, f.Sends
 		b.loaded = len(b.qs) > 0
 	}
 	return b, nil
@@ -216,7 +245,7 @@ func (b *Book) persist() error {
 	if b.cfg.Path == "" {
 		return nil
 	}
-	raw, err := json.Marshal(file{Next: b.next, Questions: b.qs, Digest: b.digest})
+	raw, err := json.Marshal(file{Next: b.next, Questions: b.qs, Digest: b.digest, Sends: b.sends})
 	if err != nil {
 		return err
 	}
@@ -236,7 +265,23 @@ func (b *Book) persist() error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), b.cfg.Path)
+	if err := os.Rename(tmp.Name(), b.cfg.Path); err != nil {
+		return err
+	}
+	d, err := os.Open(filepath.Dir(b.cfg.Path))
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
+}
+
+// save persists after a change that has already taken effect (a text
+// sent, a lapse): a failure is logged, and a restart may repeat it.
+func (b *Book) save(what string) {
+	if err := b.persist(); err != nil {
+		b.cfg.Logf("question: save after %s: %v", what, err)
+	}
 }
 
 // flatten makes guest or owner text one line of printable characters, so
@@ -291,7 +336,57 @@ func (b *Book) normalize(s Spec) (Spec, error) {
 	if !found {
 		return out, errors.New("question: the default must be one of the choices")
 	}
+	for _, t := range append([]string{out.Text, out.Default}, out.Choices...) {
+		if codeShaped(t) {
+			return out, errors.New("question: no 6 to 8 digit numbers; they read as codes")
+		}
+		if replyShape.MatchString(t) {
+			return out, errors.New("question: no owner-channel replies (YES, NO, UNDO, RESUME... and an ID or code)")
+		}
+	}
+	text := b.renderBy(&entry{ID: "Q999", Text: out.Text, Default: out.Default, Choices: out.Choices}, "Mon 15:04")
+	if len(text) > MaxRendered {
+		return out, fmt.Errorf("question: the question, choices and default are too long for one text (%d bytes, at most %d)", len(text), MaxRendered)
+	}
+	if b.cfg.Hidden != nil && b.cfg.Hidden(text) {
+		return out, errors.New("question: it reads as carrying a secret, so the owner would not see it")
+	}
 	return out, nil
+}
+
+// replyShape is an owner-channel reply word with an ID or code after it:
+// a question must not hand the owner a reply to copy (CH-12).
+var replyShape = regexp.MustCompile(`(?i)\b(yes|no|undo|more|resume|unlock|pause|revoke|run)\b[^a-z0-9]*([a-z][0-9]{1,4}|[0-9]{4,})\b`)
+
+// codeShaped reports a run of 6 to 8 digits, after folding Unicode digits
+// to ASCII and joining digit groups split by spaces, dots or dashes
+// ("482 913", "4-8-2-9-1-3"), as owner.SecretShaped does.
+func codeShaped(s string) bool {
+	var runs []int
+	n, gap := 0, false
+	for _, r := range s {
+		switch {
+		case unicode.IsDigit(r):
+			n++
+			gap = false
+		case n > 0 && !gap && (r == ' ' || r == '.' || r == '-' || r == '\u00a0'):
+			gap = true // a single separator may join two groups
+		default:
+			if n > 0 {
+				runs = append(runs, n)
+			}
+			n, gap = 0, false
+		}
+	}
+	if n > 0 {
+		runs = append(runs, n)
+	}
+	for _, k := range runs {
+		if k >= 6 && k <= 8 {
+			return true
+		}
+	}
+	return false
 }
 
 func same(e *entry, s Spec) bool {
@@ -355,15 +450,26 @@ func (b *Book) Ask(ctx context.Context, asker, req string, s Spec) (Status, erro
 	return b.Status(ctx, asker, req, "")
 }
 
-// allocLocked returns the next free tag, Q1 to Q99, skipping any still
-// known (open, or closed within Keep), or "" when none is free.
+// Tags are Q100 to Q999: four characters, so never an approval request
+// ID, which is a letter and one or two digits (owner newIDLocked, CH-12);
+// "YES Q104" is not an approval reply and "Q104 yes" is not a channel word.
+const (
+	firstTag = 100
+	numTags  = 900
+)
+
+// allocLocked returns the next free tag, skipping any still known (open,
+// or closed within Keep), or "" when none is free.
 func (b *Book) allocLocked() string {
 	used := map[string]bool{}
 	for _, e := range b.qs {
 		used[e.ID] = true
 	}
-	for i := 0; i < 99; i++ {
-		b.next = b.next%99 + 1
+	if b.next < firstTag {
+		b.next = firstTag - 1
+	}
+	for i := 0; i < numTags; i++ {
+		b.next = firstTag + (b.next-firstTag+1+numTags)%numTags
 		if id := "Q" + strconv.Itoa(b.next); !used[id] {
 			return id
 		}
@@ -444,18 +550,21 @@ func (b *Book) sendDue(ctx context.Context) {
 		}
 		b.mu.Lock()
 		keep := b.sends[:0]
+		recent := map[string]bool{}
 		for _, t := range b.sends {
-			if now.Sub(t) < time.Hour {
+			if now.Sub(t.At) < time.Hour {
 				keep = append(keep, t)
+				recent[t.Asker] = true
 			}
 		}
 		b.sends = keep
+		// Oldest first, but an asker texted in the last hour waits behind
+		// one that was not, so one lineage cannot take the whole budget.
 		var e *entry
 		if len(b.sends) < b.cfg.SendsPerHour {
 			for _, q := range b.qs {
-				if q.State == Held && q.Sent.IsZero() {
+				if q.State == Held && q.Sent.IsZero() && (e == nil || recent[e.Asker] && !recent[q.Asker]) {
 					e = q
-					break
 				}
 			}
 		}
@@ -470,13 +579,13 @@ func (b *Book) sendDue(ctx context.Context) {
 			return
 		}
 		b.mu.Lock()
-		b.sends = append(b.sends, now)
+		b.sends = append(b.sends, send{At: now, Asker: e.Asker})
 		if e.State == Held { // the owner may have answered meanwhile
 			e.State, e.Sent, e.Deadline = Waiting, now, deadline
 		} else {
 			e.Sent = now
 		}
-		_ = b.persist()
+		b.save("send")
 		b.mu.Unlock()
 	}
 }
@@ -492,6 +601,10 @@ func (b *Book) clock(now, t time.Time) string {
 // render is the owner's text for a question. It is sent through Notify,
 // which marks it as agent text.
 func (b *Book) render(e *entry, now, deadline time.Time) string {
+	return b.renderBy(e, b.clock(now, deadline))
+}
+
+func (b *Book) renderBy(e *entry, by string) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%s: %s", e.ID, e.Text)
 	if len(e.Choices) > 0 {
@@ -501,7 +614,7 @@ func (b *Book) render(e *entry, now, deadline time.Time) string {
 		}
 		sb.WriteString(".")
 	}
-	fmt.Fprintf(&sb, ` Reply "%s" and your answer by %s. With no reply it goes ahead with "%s".`, e.ID, b.clock(now, deadline), e.Default)
+	fmt.Fprintf(&sb, ` Reply "%s" and your answer by %s. With no reply it goes ahead with "%s".`, e.ID, by, e.Default)
 	return sb.String()
 }
 
@@ -520,6 +633,14 @@ func (b *Book) lapseLocked(e *entry, now time.Time) {
 		e.ID, clip(e.Text, 60), b.clock(now, e.Deadline), e.Default))
 }
 
+// startGraceLocked starts the restart grace at the first trusted time
+// after questions were loaded from disk.
+func (b *Book) startGraceLocked(now time.Time) {
+	if b.loaded && b.grace.IsZero() {
+		b.grace = now.Add(b.cfg.RestartGrace)
+	}
+}
+
 // Tick lapses questions past their deadline, drops old closed ones, and
 // texts held ones. With the clock restricted it does nothing.
 func (b *Book) Tick(ctx context.Context) {
@@ -528,9 +649,7 @@ func (b *Book) Tick(ctx context.Context) {
 		return
 	}
 	b.mu.Lock()
-	if b.loaded && b.grace.IsZero() {
-		b.grace = now.Add(b.cfg.RestartGrace)
-	}
+	b.startGraceLocked(now)
 	changed := false
 	keep := b.qs[:0]
 	for _, e := range b.qs {
@@ -549,7 +668,7 @@ func (b *Book) Tick(ctx context.Context) {
 	}
 	b.qs = keep
 	if changed {
-		_ = b.persist()
+		b.save("tick")
 	}
 	b.mu.Unlock()
 	b.sendDue(ctx)
@@ -586,8 +705,7 @@ func (b *Book) TakeDigest() []string {
 }
 
 var (
-	tagRE  = regexp.MustCompile(`^[Qq]([1-9][0-9]?)[:.,]?$`)
-	codeRE = regexp.MustCompile(`(^|[^0-9])[0-9]{6}([^0-9]|$)`)
+	tagRE = regexp.MustCompile(`^[Qq]([1-9][0-9]{2})[:.,]?$`)
 )
 
 // Answer takes an owner text that starts with a question's tag ("Q4 yes")
@@ -614,10 +732,13 @@ func (b *Book) Answer(ctx context.Context, text string) (reply string, ok bool) 
 		return fmt.Sprintf("Add your answer after %s, like: %s %s", e.ID, e.ID, e.Default), true
 	case utf8.RuneCountInString(ans) > MaxAnswer:
 		return fmt.Sprintf("That answer is too long for %s. Keep it under %d characters.", e.ID, MaxAnswer), true
-	case codeRE.MatchString(ans):
-		return "Answers can't include a 6-digit number, since codes are only for the box. Write it another way.", true
+	case codeShaped(ans):
+		return "Answers can't include a 6 to 8 digit number, since codes are only for the box. Write it another way.", true
 	}
-	if e.State == Waiting && clockErr == nil && !now.Before(e.Deadline) {
+	if clockErr == nil {
+		b.startGraceLocked(now)
+	}
+	if e.State == Waiting && clockErr == nil && !now.Before(e.Deadline) && !now.Before(b.grace) {
 		b.lapseLocked(e, now) // the deadline passed before the timer ran
 	}
 	switch e.State {
@@ -626,7 +747,7 @@ func (b *Book) Answer(ctx context.Context, text string) (reply string, ok bool) 
 	case Defaulted:
 		if e.Late == "" {
 			e.Late = ans
-			_ = b.persist()
+			b.save("late answer")
 		}
 		return fmt.Sprintf("%s already went ahead with \"%s\" at %s, since there was no reply by then. Your answer is passed to the agent.",
 			e.ID, e.Default, b.clock(now, e.Closed)), true

@@ -129,20 +129,20 @@ func slot() Spec {
 func TestQuestionIsTextedWithItsDefaultAndDeadline(t *testing.T) {
 	r := newRig(t, nil)
 	st := r.ask("lin1", "q1", slot())
-	if st.State != Waiting || st.ID != "Q1" || !st.Deadline.Equal(r.clock.Add(30*time.Minute)) {
+	if st.State != Waiting || st.ID != "Q100" || !st.Deadline.Equal(r.clock.Add(30*time.Minute)) {
 		t.Fatalf("status %+v", st)
 	}
 	got := r.texts()
 	if len(got) != 1 {
 		t.Fatalf("texts %q", got)
 	}
-	for _, want := range []string{"Q1", "Book the 9:00 or the 9:30 dentist slot?", `"9:30"`, "13:30", `Reply "Q1"`} {
+	for _, want := range []string{"Q100", "Book the 9:00 or the 9:30 dentist slot?", `"9:30"`, "13:30", `Reply "Q100"`} {
 		if !strings.Contains(got[0], want) {
 			t.Errorf("text %q lacks %q", got[0], want)
 		}
 	}
 	// A retry with the same request ID is the same question, texted once.
-	if again := r.ask("lin1", "q1", slot()); again.ID != "Q1" || len(r.texts()) != 1 {
+	if again := r.ask("lin1", "q1", slot()); again.ID != "Q100" || len(r.texts()) != 1 {
 		t.Fatalf("retry %+v, texts %d", again, len(r.texts()))
 	}
 	// The same request ID with other content is refused, not a new question.
@@ -152,7 +152,7 @@ func TestQuestionIsTextedWithItsDefaultAndDeadline(t *testing.T) {
 		t.Fatal("a reused request ID with a different question was accepted")
 	}
 	// Another lineage's request ID is its own namespace.
-	if st := r.ask("lin2", "q1", slot()); st.ID == "Q1" {
+	if st := r.ask("lin2", "q1", slot()); st.ID == "Q100" {
 		t.Fatal("two lineages share a question")
 	}
 }
@@ -166,11 +166,11 @@ func TestOwnerReplyIsMatchedBack(t *testing.T) {
 	if _, ok := r.answer("sounds good"); ok {
 		t.Fatal("an untagged text was taken as an answer")
 	}
-	if _, ok := r.answer("Q9 yes"); ok {
+	if _, ok := r.answer("Q909 yes"); ok {
 		t.Fatal("a reply to no open question was taken")
 	}
-	reply, ok := r.answer("q2: yes, two bags")
-	if !ok || !strings.Contains(reply, "Q2") {
+	reply, ok := r.answer("q101: yes, two bags")
+	if !ok || !strings.Contains(reply, "Q101") {
 		t.Fatalf("reply %q %v", reply, ok)
 	}
 	st := r.status("lin1", "b")
@@ -184,7 +184,7 @@ func TestOwnerReplyIsMatchedBack(t *testing.T) {
 		t.Fatalf("other question %+v", st)
 	}
 	// An answer is final: a second reply is told so and changes nothing.
-	reply, ok = r.answer("Q2 no")
+	reply, ok = r.answer("Q101 no")
 	if !ok || r.status("lin1", "b").Answer != "yes, two bags" || !strings.Contains(reply, "already") {
 		t.Fatalf("second answer %q %v", reply, ok)
 	}
@@ -212,10 +212,10 @@ func TestChoicesBoundTheAnswer(t *testing.T) {
 	if !strings.Contains(r.texts()[0], "1) 9:00") {
 		t.Fatalf("choices not rendered: %q", r.texts()[0])
 	}
-	if reply, ok := r.answer("Q1 10:00"); !ok || !strings.Contains(reply, "9:00") || r.status("lin1", "c").State != Waiting {
+	if reply, ok := r.answer("Q100 10:00"); !ok || !strings.Contains(reply, "9:00") || r.status("lin1", "c").State != Waiting {
 		t.Fatalf("off-list answer %q %v", reply, ok)
 	}
-	r.answer("Q1 1")
+	r.answer("Q100 1")
 	if st := r.status("lin1", "c"); st.State != Answered || st.Answer != "9:00" {
 		t.Fatalf("numbered answer %+v", st)
 	}
@@ -241,14 +241,14 @@ func TestNoReplyByTheDeadlineTakesTheDefault(t *testing.T) {
 		t.Fatal("a default (agent text) raised the label")
 	}
 	d := r.b.TakeDigest()
-	if len(d) != 1 || !strings.Contains(d[0], "Q1") || !strings.Contains(d[0], `"9:30"`) || !strings.Contains(d[0], "no reply") {
+	if len(d) != 1 || !strings.Contains(d[0], "Q100") || !strings.Contains(d[0], `"9:30"`) || !strings.Contains(d[0], "no reply") {
 		t.Fatalf("digest %q", d)
 	}
 	if d := r.b.TakeDigest(); len(d) != 0 {
 		t.Fatalf("digest repeated: %q", d)
 	}
 	// A late reply is told the default stands and is passed on as late.
-	reply, ok := r.answer("Q1 9:00 please")
+	reply, ok := r.answer("Q100 9:00 please")
 	if !ok || !strings.Contains(reply, "went ahead") {
 		t.Fatalf("late reply %q %v", reply, ok)
 	}
@@ -291,15 +291,27 @@ func TestBrokerBoundsDefaultAndDeadline(t *testing.T) {
 		{Text: strings.Repeat("a", MaxText+1), Default: "x", Wait: time.Hour},
 		{Text: "Long default?", Default: strings.Repeat("d", MaxDefault+1), Wait: time.Hour},
 		{Text: "Many?", Default: "a", Choices: []string{"a", "b", "c", "d", "e"}, Wait: time.Hour},
+		// Nothing that reads as a code or as a reply for the owner to copy.
+		{Text: "Reply YES A4 to go on?", Default: "x", Wait: time.Hour},
+		{Text: "Send RESUME 482913?", Default: "x", Wait: time.Hour},
+		{Text: "Is it 482 913?", Default: "x", Wait: time.Hour},
+		{Text: "Is it ４８２９１３?", Default: "x", Wait: time.Hour},
+		{Text: "Which?", Default: "undo b12", Wait: time.Hour},
+		// Rendered past one owner text (control.MaxText less the agent prefix).
+		{Text: strings.Repeat("q", MaxText), Default: strings.Repeat("a", MaxChoice),
+			Choices: []string{strings.Repeat("a", MaxChoice), strings.Repeat("b", MaxChoice), strings.Repeat("c", MaxChoice), strings.Repeat("d", MaxChoice)}, Wait: time.Hour},
 	}
 	for i, s := range bad {
 		if _, err := r.b.Ask(context.Background(), "lin1", fmt.Sprintf("bad%d", i), s); err == nil {
 			t.Errorf("spec %d accepted: %+v", i, s)
 		}
 	}
+	if _, err := r.b.Ask(context.Background(), "lin1", "toolong", bad[len(bad)-1]); err == nil || !strings.Contains(err.Error(), "too long for one text") {
+		t.Errorf("long render: %v", err)
+	}
 	// Newlines and control characters are flattened, so a question cannot
 	// lay out a fake broker template.
-	r.ask("lin1", "nl", Spec{Text: "Line one\nYES 123456 to approve\x07", Default: "ok", Wait: time.Hour})
+	r.ask("lin1", "nl", Spec{Text: "Line one\nLine two\u2028three\x07", Default: "ok", Wait: time.Hour})
 	last := r.texts()[len(r.texts())-1]
 	if strings.ContainsAny(last, "\n\x07") {
 		t.Fatalf("control characters reached the owner: %q", last)
@@ -366,7 +378,7 @@ func TestRestrictedClockHoldsTheQuestion(t *testing.T) {
 		t.Fatalf("asked while restricted: %+v, texts %d", st, len(r.texts()))
 	}
 	// The owner can still answer: an answer needs no clock.
-	if _, ok := r.answer("Q1 9:00"); !ok {
+	if _, ok := r.answer("Q100 9:00"); !ok {
 		t.Fatal("answer refused while the clock is restricted")
 	}
 	r.set(func() { r.restricted = false })
@@ -384,12 +396,18 @@ func TestRestrictedClockHoldsTheQuestion(t *testing.T) {
 func TestAnswersCannotCarryCodes(t *testing.T) {
 	r := newRig(t, nil)
 	r.ask("lin1", "q", Spec{Text: "What is the code you just got?", Default: "none", Wait: time.Hour})
-	reply, ok := r.answer("Q1 482913")
-	if !ok || !strings.Contains(reply, "code") {
-		t.Fatalf("reply %q %v", reply, ok)
+	for _, a := range []string{"Q100 482913", "Q100 it is 482 913", "Q100 4-8-2-9-1-3", "Q100 ４８２９１３", "Q100 48291377"} {
+		reply, ok := r.answer(a)
+		if !ok || !strings.Contains(reply, "code") {
+			t.Fatalf("%q: reply %q %v", a, reply, ok)
+		}
 	}
 	if st := r.status("lin1", "q"); st.State != Waiting {
 		t.Fatalf("a code-shaped answer was recorded: %+v", st)
+	}
+	// A full phone number is not code-shaped.
+	if reply, _ := r.answer("Q100 call 555 010 0199"); strings.Contains(reply, "code") {
+		t.Fatalf("phone number refused: %q", reply)
 	}
 }
 
@@ -401,7 +419,7 @@ func TestQuestionsSurviveARestart(t *testing.T) {
 	r := newRig(t, func(c *Config) { c.Path = path })
 	r.ask("lin1", "a", slot())
 	r.ask("lin1", "b", Spec{Text: "Coffee?", Default: "no", Wait: time.Hour})
-	r.answer("Q2 yes")
+	r.answer("Q101 yes")
 	r.advance(45 * time.Minute) // a's deadline passed while the broker was down
 	r.open()
 	r.b.Tick(context.Background())
@@ -424,8 +442,8 @@ func TestQuestionsSurviveARestart(t *testing.T) {
 	if d := r.b.TakeDigest(); len(d) != 0 {
 		t.Fatalf("taken digest came back: %q", d)
 	}
-	// IDs do not restart at Q1 while Q1 and Q2 are still known.
-	if st := r.ask("lin1", "c", slot()); st.ID == "Q1" || st.ID == "Q2" {
+	// IDs do not restart at Q100 while Q100 and Q101 are still known.
+	if st := r.ask("lin1", "c", slot()); st.ID == "Q100" || st.ID == "Q101" {
 		t.Fatalf("reused ID %s", st.ID)
 	}
 }
@@ -442,15 +460,15 @@ func TestToolCalls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.State != string(Waiting) || out.Question != "Q1" || out.Default != "9:30" || out.Deadline == "" {
+	if out.State != string(Waiting) || out.Question != "Q100" || out.Default != "9:30" || out.Deadline == "" {
 		t.Fatalf("ask %+v", out)
 	}
-	r.answer("Q1 2")
+	r.answer("Q100 2")
 	out, err = r.b.Call(context.Background(), "lin1", "m1", ToolStatus, []byte(`{"request_id":"q1"}`))
 	if err != nil || out.State != string(Answered) || out.Answer != "9:30" || out.AnsweredBy != "owner" {
 		t.Fatalf("status %+v %v", out, err)
 	}
-	for _, raw := range []string{`[]`, `{"request_id":"bad id!","question":"x","default":"y","wait_minutes":5}`, `{"request_id":"q2","question":"x","default":"y"}`} {
+	for _, raw := range []string{`[]`, `{"request_id":"bad id!","question":"x","default":"y","wait_minutes":5}`, `{"request_id":"q101","question":"x","default":"y"}`} {
 		if _, err := r.b.Call(context.Background(), "lin1", "m1", ToolAsk, []byte(raw)); err == nil {
 			t.Errorf("accepted %s", raw)
 		}
@@ -466,7 +484,7 @@ func TestAReplyAfterTheDeadlineIsLate(t *testing.T) {
 	r := newRig(t, nil)
 	r.ask("lin1", "q", slot())
 	r.advance(31 * time.Minute)
-	if reply, ok := r.answer("Q1 9:00"); !ok || !strings.Contains(reply, "went ahead") {
+	if reply, ok := r.answer("Q100 9:00"); !ok || !strings.Contains(reply, "went ahead") {
 		t.Fatalf("reply %q %v", reply, ok)
 	}
 	if st := r.status("lin1", "q"); st.State != Defaulted || st.Answer != "9:30" || st.Late != "9:00" {
@@ -474,5 +492,86 @@ func TestAReplyAfterTheDeadlineIsLate(t *testing.T) {
 	}
 	if d := r.b.TakeDigest(); len(d) != 1 {
 		t.Fatalf("digest %q", d)
+	}
+}
+
+// TestTagsAreNeverApprovalIDs: tags are four characters (Q100-Q999), so
+// none is an approval request ID (a letter and at most two digits); a
+// short tag is not taken as an answer.
+func TestTagsAreNeverApprovalIDs(t *testing.T) {
+	r := newRig(t, func(c *Config) { c.PerAsker = 8 })
+	for i := 0; i < 8; i++ {
+		st := r.ask("lin1", fmt.Sprintf("q%d", i), slot())
+		if !tagRE.MatchString(st.ID) || len(st.ID) != 4 {
+			t.Fatalf("tag %q", st.ID)
+		}
+	}
+	if _, ok := r.answer("Q1 yes"); ok {
+		t.Fatal("a 2-character tag was taken")
+	}
+	b := &Book{next: firstTag + numTags - 1}
+	if id := b.allocLocked(); id != "Q100" {
+		t.Fatalf("wrap: %s", id)
+	}
+}
+
+// TestAnswerInsideTheRestartGraceIsOnTime: right after a restart, a reply
+// the carrier queued counts as an answer even though the deadline passed.
+func TestAnswerInsideTheRestartGraceIsOnTime(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "questions.json")
+	r := newRig(t, func(c *Config) { c.Path = path })
+	r.ask("lin1", "a", slot())
+	r.advance(45 * time.Minute)
+	r.open()
+	if reply, ok := r.answer("Q100 9:00"); !ok || !strings.Contains(reply, "Got it") {
+		t.Fatalf("reply %q %v", reply, ok)
+	}
+	if st := r.status("lin1", "a"); st.State != Answered {
+		t.Fatalf("status %+v", st)
+	}
+}
+
+// TestHiddenQuestionIsRefused: a question the channel would withhold as
+// secret-shaped is refused rather than left to default unseen.
+func TestHiddenQuestionIsRefused(t *testing.T) {
+	r := newRig(t, func(c *Config) { c.Hidden = func(s string) bool { return strings.Contains(s, "password") } })
+	if _, err := r.b.Ask(context.Background(), "lin1", "h", Spec{Text: "Is the password hunter2?", Default: "yes", Wait: time.Hour}); err == nil {
+		t.Fatal("hidden question accepted")
+	}
+	if len(r.texts()) != 0 {
+		t.Fatal("hidden question texted")
+	}
+}
+
+// TestPacingIsFairAndSurvivesARestart: an asker texted in the last hour
+// waits behind one that was not, and the hour's sends are on disk.
+func TestPacingIsFairAndSurvivesARestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "questions.json")
+	r := newRig(t, func(c *Config) { c.Path = path; c.SendsPerHour = 2 })
+	r.ask("lin1", "a", slot())
+	r.set(func() { r.quiet = true })
+	r.ask("lin1", "b", slot())
+	r.ask("lin2", "a", slot())
+	r.set(func() { r.quiet = false })
+	r.b.Tick(context.Background())
+	if st := r.status("lin1", "b"); st.State != Held {
+		t.Fatalf("lin1 took the budget: %+v", st)
+	}
+	if st, _ := r.b.Status(context.Background(), "lin2", "a", "m2"); st.State != Waiting {
+		t.Fatalf("lin2 waited: %+v", st)
+	}
+	r.open()
+	r.b.Tick(context.Background())
+	if st := r.status("lin1", "b"); st.State != Held || len(r.texts()) != 2 {
+		t.Fatalf("restart reset pacing: %+v, texts %d", st, len(r.texts()))
+	}
+}
+
+// TestKeepNeverExhaustsTags: questions close only after a text, so
+// keeping them under tags/SendsPerHour hours leaves a tag free.
+func TestKeepNeverExhaustsTags(t *testing.T) {
+	r := newRig(t, func(c *Config) { c.SendsPerHour = 60; c.Keep = 30 * 24 * time.Hour })
+	if got := r.b.cfg.Keep; time.Duration(r.b.cfg.SendsPerHour)*got/time.Hour >= numTags {
+		t.Fatalf("keep %v with %d sends an hour can hold every tag", got, r.b.cfg.SendsPerHour)
 	}
 }
