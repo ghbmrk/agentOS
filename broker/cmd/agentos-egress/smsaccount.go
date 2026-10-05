@@ -337,18 +337,15 @@ func (s signStore) Allow(ch sipsign.Challenge) error {
 	if err != nil {
 		return err
 	}
+	if !pinnedURI(ch.URI, rec.Domain) {
+		return sipsign.ErrRecipient
+	}
 	to := sipsign.Recipient(ch.URI, rec.NoPlus)
 	if rec.NoPlus && to != "" {
 		// The provider may read the digits, with or without a +, as a
 		// national or international-prefix number, so the owner's and
 		// the line's numbers, and premium-rate ranges, are checked in
-		// those forms too (security F1, L3 SHOULD-A on #164). A user-part
-		// parameter other than user=phone, such as phone-context, could
-		// move the number to another country, so it is refused (L3
-		// MUST-A).
-		if !plainUser(ch.URI) {
-			return sipsign.ErrRecipient
-		}
+		// those forms too (security F1, L3 SHOULD-A on #164).
 		for _, n := range append(c.lineNumbers(), c.owner) {
 			if smsapi.SameNumber(to[1:], n) {
 				return sipsign.ErrRecipient
@@ -367,13 +364,23 @@ func (s signStore) Allow(ch sipsign.Challenge) error {
 	return sipsign.ErrRecipient
 }
 
-// plainUser says the user part of a sip: or sips: URI carries no
-// parameter other than user=phone.
-func plainUser(uri string) bool {
-	_, rest, _ := strings.Cut(uri, ":")
-	user, _, _ := strings.Cut(rest, "@")
-	params := strings.Split(user, ";")[1:]
-	for _, p := range params {
+// pinnedURI says uri is sip: or sips:, a user part with no parameter but
+// user=phone, one @, and the account's domain as the whole host part: no
+// port, parameter or header (L3 SHOULD-1, nits 1-2 and security R4 on
+// #164). sipline dials only that form, and anything else could make the
+// provider dial another number than the one checked.
+func pinnedURI(uri, domain string) bool {
+	rest, ok := strings.CutPrefix(uri, "sip:")
+	if !ok {
+		if rest, ok = strings.CutPrefix(uri, "sips:"); !ok {
+			return false
+		}
+	}
+	user, host, ok := strings.Cut(rest, "@")
+	if !ok || !strings.EqualFold(host, domain) {
+		return false
+	}
+	for _, p := range strings.Split(user, ";")[1:] {
 		if !strings.EqualFold(p, "user=phone") {
 			return false
 		}
