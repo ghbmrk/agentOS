@@ -406,46 +406,58 @@ func (a *Adapter) Escalate(ctx context.Context, in journal.Intent) (grants.Escal
 	}
 	// Reasons are fixed words over broker-held fields only: an
 	// owner-confirmed target name, the sender's domain, the bound. Never a
-	// subject or body (CH-19). The owner channel caps a detail at 40
-	// characters, so they are short.
+	// subject or body (CH-19). The owner channel caps a detail at
+	// maxDetail characters, so the bound clause, which the owner's YES
+	// answers, comes first and the rest is shortened to fit (UX-69-3).
 	var e grants.Escalation
 	var why []string
+	switch a.reserve(in.ID) {
+	case askOnce:
+		e.Ask = true
+		why = append(why, fmt.Sprintf("past %d, YES allows %d", a.cfg.DailyLimit, a.cfg.DailyCeiling))
+	case askEach:
+		e.Ask = true
+		why = append(why, fmt.Sprintf("past %d today", a.cfg.DailyCeiling))
+	case held:
+		return grants.Escalation{Held: true, Reason: fmt.Sprintf("held past today's %d", a.cfg.DailyLimit)}, nil
+	}
+	short := len(why) > 0
 	if pl.verb == verb.Share {
 		e.Verb = verb.Share
 		switch {
+		case short:
+			why = append(why, "shared")
 		case contains(a.cfg.Shared, pl.msg.Folder):
-			why = append(why, "in shared folder "+pl.msg.Folder)
+			why = append(why, "in shared folder "+clip(pl.msg.Folder, 20))
 		case pl.to != "":
-			why = append(why, "into shared folder "+pl.to)
+			why = append(why, "into shared folder "+clip(pl.to, 20))
 		default:
-			why = append(why, "shared label "+p[ParamLabel])
+			why = append(why, "shared label "+clip(p[ParamLabel], 20))
 		}
 	}
 	if pl.hides && pl.alert {
 		e.Verb = verb.ChangeAccount
-		why = append(why, "hides an alert from "+clip(domainOf(pl.msg.From), 20))
+		if short || len(why) > 0 {
+			why = append(why, "alert hidden")
+		} else {
+			why = append(why, "hides an alert from "+clip(domainOf(pl.msg.From), 20))
+		}
 	}
-	switch a.reserve(in.ID) {
-	case askOnce:
-		e.Ask = true
-		why = append(why, fmt.Sprintf("past today's %d; YES allows %d", a.cfg.DailyLimit, a.cfg.DailyCeiling))
-	case askEach:
-		e.Ask = true
-		why = append(why, fmt.Sprintf("past today's %d", a.cfg.DailyCeiling))
-	case held:
-		return grants.Escalation{Held: true, Reason: fmt.Sprintf("held past today's %d", a.cfg.DailyLimit)}, nil
-	}
-	e.Reason = strings.Join(why, "; ")
+	e.Reason = clip(strings.Join(why, "; "), maxDetail)
 	return e, nil
 }
 
-// clip shortens s to n characters, marking the cut.
+// maxDetail is the owner channel's cap on an approval line's detail.
+const maxDetail = 40
+
+// clip shortens s to n characters, marking the cut with "..." (ASCII:
+// the owner channel drops characters outside its field set).
 func clip(s string, n int) string {
 	r := []rune(s)
 	if len(r) <= n {
 		return s
 	}
-	return string(r[:n-1]) + "…"
+	return string(r[:n-3]) + "..."
 }
 
 // place is what the day's organize bound says of one effect.

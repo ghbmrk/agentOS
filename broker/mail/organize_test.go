@@ -285,7 +285,7 @@ func TestOrganizeBoundAsksPastTheDailyLimit(t *testing.T) {
 	// That place counts at once, before the journal authorizes it, so the
 	// next effect is past the bound: the one ask.
 	first := x.intent(mail.OpArchive, rec(id))
-	if e, err := x.a.Escalate(ctx, first); err != nil || !e.Ask || e.Verb != "" || e.Reason != "past today's 200; YES allows 2000" {
+	if e, err := x.a.Escalate(ctx, first); err != nil || !e.Ask || e.Verb != "" || e.Reason != "past 200, YES allows 2000" {
 		t.Fatalf("past the bound: %+v %v", e, err)
 	}
 	// While it is open (or after a NO) the rest are held, not asked, with
@@ -314,7 +314,7 @@ func TestOrganizeBoundAsksPastTheDailyLimit(t *testing.T) {
 		t.Fatalf("alert after YES: %+v %v", e, err)
 	}
 	authorized = mail.DefaultDailyCeiling
-	if e, err := x.a.Escalate(ctx, x.intent(mail.OpArchive, rec(id))); err != nil || !e.Ask || e.Reason != "past today's 2000" {
+	if e, err := x.a.Escalate(ctx, x.intent(mail.OpArchive, rec(id))); err != nil || !e.Ask || e.Reason != "past 2000 today" {
 		t.Fatalf("past the ceiling: %+v %v", e, err)
 	}
 	if e, err := x.a.Escalate(ctx, x.intent(mail.OpArchive, rec(id))); err != nil || !e.Ask || e.Held {
@@ -323,7 +323,7 @@ func TestOrganizeBoundAsksPastTheDailyLimit(t *testing.T) {
 	// The lift lasts the day the ask was made.
 	x.now = x.now.Add(25 * time.Hour)
 	authorized, approved = mail.DefaultDailyLimit, nil
-	if e, err := x.a.Escalate(ctx, x.intent(mail.OpArchive, rec(id))); err != nil || e.Reason != "past today's 200; YES allows 2000" {
+	if e, err := x.a.Escalate(ctx, x.intent(mail.OpArchive, rec(id))); err != nil || e.Reason != "past 200, YES allows 2000" {
 		t.Fatalf("next day: %+v %v", e, err)
 	}
 	// The ceiling is the owner's to set.
@@ -339,11 +339,11 @@ func TestOrganizeBoundAsksPastTheDailyLimit(t *testing.T) {
 	})
 	id = z.news(1)
 	zin := z.intent(mail.OpArchive, rec(id))
-	if e, _ := z.a.Escalate(ctx, zin); !e.Ask || e.Reason != "past today's 2; YES allows 3" {
+	if e, _ := z.a.Escalate(ctx, zin); !e.Ask || e.Reason != "past 2, YES allows 3" {
 		t.Fatalf("owner's ceiling, ask: %+v", e)
 	}
 	zj = append(zj, journal.Intent{ID: zin.ID, Account: "mail"})
-	if e, _ := z.a.Escalate(ctx, z.intent(mail.OpArchive, rec(id))); !e.Ask || e.Reason != "past today's 3" {
+	if e, _ := z.a.Escalate(ctx, z.intent(mail.OpArchive, rec(id))); !e.Ask || e.Reason != "past 3 today" {
 		t.Fatalf("owner's ceiling: %+v", e)
 	}
 	y := newH(t, func(c *mail.Config) { c.Authorized = nil })
@@ -454,5 +454,64 @@ func TestUndoSkipsReconciledEvidence(t *testing.T) {
 	}
 	if folder, _, _ := x.srv.Find(id); folder != "Archive" {
 		t.Fatal("moved")
+	}
+}
+
+// TestReasonsFitTheDetailCap: every combination of share, alert and the
+// bound fits the owner channel's 40-character detail, the bound clause
+// comes first so a cut never loses it, and the cut uses ASCII (UX-69-3).
+func TestReasonsFitTheDetailCap(t *testing.T) {
+	const long = "Projects/Client-Accounts-Quarterly-Review"
+	for _, bound := range []string{"", "once", "each"} {
+		for _, share := range []bool{false, true} {
+			for _, alert := range []bool{false, true} {
+				var journaled []journal.Intent
+				x := newH(t, func(c *mail.Config) {
+					c.Shared = append(c.Shared, long)
+					c.DailyLimit, c.DailyCeiling = 1, 1
+					c.Authorized = func(action string, _ time.Time) []journal.Intent {
+						if action != mail.OpMove && action != mail.OpArchive {
+							return nil
+						}
+						return journaled
+					}
+				})
+				x.srv.AddFolder(long, "")
+				m := msg{id: "<m@notifications.security.verylongbank.example>", from: "alerts@notifications.security.verylongbank.example",
+					to: me, subject: "Hello", body: "Twenty percent off."}
+				if alert {
+					m.subject = "New sign-in on your account"
+				}
+				x.deliver("INBOX", m)
+				p := map[string]any{mail.ParamRecord: m.id, mail.ParamTo: "Receipts"}
+				if share {
+					p[mail.ParamTo] = long
+				}
+				switch bound {
+				case "once":
+					journaled = []journal.Intent{{ID: "earlier", Account: "mail"}}
+				case "each":
+					journaled = []journal.Intent{{ID: "earlier", Account: "mail"}}
+					asked := x.intent(mail.OpMove, p)
+					x.a.Escalate(ctx, asked)
+					journaled = append(journaled, journal.Intent{ID: asked.ID, Account: "mail"})
+				}
+				e, err := x.a.Escalate(ctx, x.intent(mail.OpMove, p))
+				if err != nil {
+					t.Fatal(err)
+				}
+				name := fmt.Sprintf("bound=%s share=%v alert=%v", bound, share, alert)
+				if n := len([]rune(e.Reason)); n > 40 || strings.Contains(e.Reason, "…") {
+					t.Fatalf("%s: %q (%d)", name, e.Reason, n)
+				}
+				if (bound == "once") != strings.HasPrefix(e.Reason, "past 1, YES allows 1") ||
+					(bound == "each") != strings.HasPrefix(e.Reason, "past 1 today") {
+					t.Fatalf("%s: bound clause not first: %q", name, e.Reason)
+				}
+				if (share || alert || bound != "") != (e.Reason != "") {
+					t.Fatalf("%s: reason %q", name, e.Reason)
+				}
+			}
+		}
 	}
 }
