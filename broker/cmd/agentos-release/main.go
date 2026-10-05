@@ -260,9 +260,16 @@ func run(args []string, out io.Writer) error {
 			fmt.Fprintln(out, "verified; no release newer than", installed)
 			return nil
 		}
-		rel := res.Release.Manifest()
+		rel, err := res.Release.Manifest()
+		if err != nil {
+			return err
+		}
+		files, err := res.Release.Files()
+		if err != nil {
+			return err
+		}
 		fmt.Fprintf(out, "verified release %d (%s, security=%v) usr root hash %s\n", rel.Version, rel.Channel, rel.Security, rel.UsrRootHash)
-		for _, f := range res.Release.Files() {
+		for _, f := range files {
 			fmt.Fprintf(out, "  %s %d sha256:%s\n", f.Path, f.Length, f.SHA256)
 		}
 		return nil

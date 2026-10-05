@@ -44,7 +44,7 @@ func TestAttestationRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !pub.Equal(k.Public()) || st.Release != "releases/2.json" || st.ManifestSHA256 != v.ManifestFile().SHA256 ||
+	if !pub.Equal(k.Public()) || st.Release != "releases/2.json" || st.ManifestSHA256 != mustV(v.ManifestFile()).SHA256 ||
 		st.HardwareClass != "n95-8g" || st.Versions["openclaw"] != "1.2.3" {
 		t.Fatalf("%+v", st)
 	}
@@ -62,7 +62,7 @@ func TestSecurityFixWaitsForOneIndependentAttestation(t *testing.T) {
 	g.publish(0, 1)
 	gres, _ := g.check(Options{})
 	other := gres.Release
-	if other.ManifestFile().SHA256 == v.ManifestFile().SHA256 {
+	if mustV(other.ManifestFile()).SHA256 == mustV(v.ManifestFile()).SHA256 {
 		t.Fatal("fixture: the two releases have the same bytes")
 	}
 	stable, _ := Attest(newKey(t), v, Statement{Result: ResultPass, Channel: ChannelStable})
@@ -119,7 +119,7 @@ func TestCheckedReleaseBecomesPipelineVerified(t *testing.T) {
 	if len(imgs) != 3 {
 		t.Fatalf("images %v", imgs)
 	}
-	for _, f := range c.Files() {
+	for _, f := range mustV(c.Files()) {
 		if imgs[f.Path] != f.SHA256 {
 			t.Fatalf("%s: %q, signed %q", f.Path, imgs[f.Path], f.SHA256)
 		}

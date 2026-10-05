@@ -163,8 +163,10 @@ type File struct {
 // Checked is a release whose metadata passed every check. Only Check
 // makes one, so code that must act only on a verified release (A/B
 // activation, UPD-1; signing a PCR policy for the new boot path, HW-5a)
-// takes a *Checked.
+// takes a *Checked. A Checked built anywhere else (a zero value) is
+// refused by every method: only load sets sealed.
 type Checked struct {
+	sealed      bool
 	release     Manifest
 	manifest    File
 	files       map[string]File
@@ -172,31 +174,50 @@ type Checked struct {
 	maintainers map[string]bool
 }
 
+// ErrNotChecked: a Checked that Store.Check did not make.
+var ErrNotChecked = errors.New("update: release was not made by Store.Check")
+
+func (v *Checked) ok() bool { return v != nil && v.sealed }
+
 // Manifest is the verified manifest.
-func (v *Checked) Manifest() Manifest {
+func (v *Checked) Manifest() (Manifest, error) {
+	if !v.ok() {
+		return Manifest{}, ErrNotChecked
+	}
 	r := v.release
 	r.Files = append([]string(nil), r.Files...)
-	return r
+	return r, nil
 }
 
-// Fresh is false when the check ran offline (UPD-8).
-func (v *Checked) Fresh() bool { return v.fresh }
+// Fresh is false when the check ran offline (UPD-8), or v is not sealed.
+func (v *Checked) Fresh() bool { return v.ok() && v.fresh }
 
 // ManifestFile is the release manifest target itself.
-func (v *Checked) ManifestFile() File { return v.manifest }
+func (v *Checked) ManifestFile() (File, error) {
+	if !v.ok() {
+		return File{}, ErrNotChecked
+	}
+	return v.manifest, nil
+}
 
 // Files lists the release's files with their signed lengths and hashes.
-func (v *Checked) Files() []File {
+func (v *Checked) Files() ([]File, error) {
+	if !v.ok() {
+		return nil, ErrNotChecked
+	}
 	out := make([]File, 0, len(v.files))
 	for _, p := range v.release.Files {
 		out = append(out, v.files[p])
 	}
-	return out
+	return out, nil
 }
 
 // Fetch copies one of the release's files from src to dst, which appears
 // only if the bytes match the signed length and hash.
 func (v *Checked) Fetch(src Source, targetPath, dst string) error {
+	if !v.ok() {
+		return ErrNotChecked
+	}
 	f, ok := v.files[targetPath]
 	if !ok {
 		return fmt.Errorf("%q is not a file of release %d", targetPath, v.release.Version)
@@ -284,6 +305,11 @@ func (s *Store) Check(src Source, o Options) (Result, error) {
 		tm.RefTime = o.Now().UTC()
 	}
 
+	// Every root in the chain meets the floor, not only the last: a weak
+	// intermediate root could otherwise vouch for the next with one key.
+	if err := floor(tm.Root, o.MinThreshold); err != nil {
+		return Result{}, err
+	}
 	// Root rotations, each signed by the previous root and itself.
 	rotated := false
 	for i := 0; i < MaxRootRotations; i++ {
@@ -298,12 +324,10 @@ func (s *Store) Check(src Source, o Options) (Result, error) {
 		if _, err := tm.UpdateRoot(b); err != nil {
 			return Result{}, classify(err)
 		}
-		rootBytes, rotated = b, true
-	}
-	for _, r := range []string{metadata.ROOT, metadata.TARGETS} {
-		if t := tm.Root.Signed.Roles[r].Threshold; t < o.MinThreshold {
-			return Result{}, fmt.Errorf("%w: %s needs %d, floor is %d", ErrWeakThreshold, r, t, o.MinThreshold)
+		if err := floor(tm.Root, o.MinThreshold); err != nil {
+			return Result{}, err
 		}
+		rootBytes, rotated = b, true
 	}
 	if rotated {
 		if err := writeAtomic(s.p("root.json"), rootBytes, 0o600); err != nil {
@@ -400,6 +424,20 @@ func (s *Store) Check(src Source, o Options) (Result, error) {
 	return res, nil
 }
 
+func floor(root *metadata.Metadata[metadata.RootType], min int) error {
+	for _, r := range []string{metadata.ROOT, metadata.TARGETS} {
+		role := root.Signed.Roles[r]
+		if role == nil || role.Threshold < min {
+			t := 0
+			if role != nil {
+				t = role.Threshold
+			}
+			return fmt.Errorf("%w: root v%d %s needs %d, floor is %d", ErrWeakThreshold, root.Signed.Version, r, t, min)
+		}
+	}
+	return nil
+}
+
 func fileOf(p string, tf *metadata.TargetFiles) (File, error) {
 	sum, ok := tf.Hashes["sha256"]
 	if !ok || len(sum) != sha256.Size || tf.Length < 0 {
@@ -431,7 +469,7 @@ func (s *Store) load(src Source, root *metadata.Metadata[metadata.RootType], tar
 	if rel.Version != n {
 		return nil, fmt.Errorf("%w: %s holds version %d", ErrBadRepository, p, rel.Version)
 	}
-	v := &Checked{release: rel, manifest: man, files: map[string]File{}, maintainers: map[string]bool{}}
+	v := &Checked{sealed: true, release: rel, manifest: man, files: map[string]File{}, maintainers: map[string]bool{}}
 	for _, f := range rel.Files {
 		tf, ok := targets.Signed.Targets[f]
 		if !ok {
@@ -464,6 +502,9 @@ func fingerprint(der []byte) string {
 // health check (UPD-1). An offline release leaves the freshness check
 // pending, and the owner sees OfflineNotice.
 func (s *Store) Commit(v *Checked) error {
+	if !v.ok() {
+		return ErrNotChecked
+	}
 	in, err := s.Installed()
 	if err != nil {
 		return err

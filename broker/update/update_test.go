@@ -140,13 +140,13 @@ func TestThresholdSignedReleaseVerifies(t *testing.T) {
 	if res.Release == nil {
 		t.Fatal("no release offered")
 	}
-	got := res.Release.Manifest()
+	got := mustV(res.Release.Manifest())
 	if got.Version != 2 || got.UsrRootHash != rel.UsrRootHash || !res.Release.Fresh() {
 		t.Fatalf("got %+v fresh=%v", got, res.Release.Fresh())
 	}
 	// UPD-1a: the root hash and every boot file come as one verified unit.
-	if len(res.Release.Files()) != 3 {
-		t.Fatalf("files %v", res.Release.Files())
+	if len(mustV(res.Release.Files())) != 3 {
+		t.Fatalf("files %v", mustV(res.Release.Files()))
 	}
 	dst := filepath.Join(t.TempDir(), "entry.conf")
 	if err := res.Release.Fetch(DirSource(f.repo.Dir), "host-image/2/entry.conf", dst); err != nil {
@@ -175,7 +175,7 @@ func TestTamperedTargetFileIsNotFetched(t *testing.T) {
 		t.Fatal(res, err)
 	}
 	var kernel File
-	for _, fl := range res.Release.Files() {
+	for _, fl := range mustV(res.Release.Files()) {
 		if fl.Path == "host-image/2/vmlinuz" {
 			kernel = fl
 		}
@@ -384,7 +384,7 @@ func TestKeyRotationAndRevocationWithoutReinstall(t *testing.T) {
 	f.tgt = append(f.tgt, newTgt[0])
 	f.publish(1, 3)
 	res, err := f.check(Options{})
-	if err != nil || res.Release == nil || res.Release.Manifest().Version != 4 {
+	if err != nil || res.Release == nil || mustV(res.Release.Manifest()).Version != 4 {
 		t.Fatalf("after rotation: %v %v", res.Release, err)
 	}
 	b, _ := os.ReadFile(filepath.Join(f.store.Dir, "root.json"))
@@ -465,11 +465,11 @@ func TestFastReleasesOnlyOnFastChannel(t *testing.T) {
 	f.release(3, func(r *Manifest) { r.Channel = ChannelFast })
 	f.publish(0, 1)
 	res, err := f.check(Options{})
-	if err != nil || res.Release.Manifest().Version != 2 {
+	if err != nil || mustV(res.Release.Manifest()).Version != 2 {
 		t.Fatalf("stable box: %v %v", res.Release, err)
 	}
 	res, err = f.check(Options{Channel: ChannelFast})
-	if err != nil || res.Release.Manifest().Version != 3 {
+	if err != nil || mustV(res.Release.Manifest()).Version != 3 {
 		t.Fatalf("fast box: %v %v", res.Release, err)
 	}
 	if _, err := f.check(Options{Channel: "pinned"}); err == nil {
@@ -493,5 +493,70 @@ func TestDirSourceRefusesEscapes(t *testing.T) {
 		if _, err := DirSource(t.TempDir()).Open(n); err == nil || os.IsNotExist(err) {
 			t.Fatalf("%q: %v", n, err)
 		}
+	}
+}
+
+// mustV unwraps a sealed Checked's accessor in tests.
+func mustV[T any](v T, err error) T {
+	if err != nil {
+		panic(err)
+	}
+	return v
+}
+
+// Every method refuses a Checked that Check did not make.
+func TestUnsealedCheckedIsRefused(t *testing.T) {
+	f := newFixture(t)
+	for _, c := range []*Checked{{}, nil, {release: Manifest{Version: 9}, files: map[string]File{"host-image/x": {Path: "host-image/x"}}}} {
+		if _, err := c.Manifest(); !errors.Is(err, ErrNotChecked) {
+			t.Fatalf("Manifest: %v", err)
+		}
+		if _, err := c.ManifestFile(); !errors.Is(err, ErrNotChecked) {
+			t.Fatalf("ManifestFile: %v", err)
+		}
+		if _, err := c.Files(); !errors.Is(err, ErrNotChecked) {
+			t.Fatalf("Files: %v", err)
+		}
+		if err := c.Fetch(DirSource(f.repo.Dir), "host-image/x", filepath.Join(t.TempDir(), "x")); !errors.Is(err, ErrNotChecked) {
+			t.Fatalf("Fetch: %v", err)
+		}
+		if err := c.SecurityAutoStage(nil, nil); !errors.Is(err, ErrNotChecked) {
+			t.Fatalf("SecurityAutoStage: %v", err)
+		}
+		if _, err := Attest(newKey(t), c, Statement{Result: ResultPass}); !errors.Is(err, ErrNotChecked) {
+			t.Fatalf("Attest: %v", err)
+		}
+		if err := f.store.Commit(c); !errors.Is(err, ErrNotChecked) {
+			t.Fatalf("Commit: %v", err)
+		}
+		if c.Fresh() || c.IndependentPasses(nil, nil) != 0 || c.Verified(nil, nil).OK() {
+			t.Fatal("unsealed release reported fresh, attested or verified")
+		}
+	}
+	if in, _ := f.store.Installed(); in.Version != 1 {
+		t.Fatalf("installed moved to %d", in.Version)
+	}
+}
+
+// Every root in a rotation chain meets the floor, not only the last.
+func TestWeakIntermediateRootRefused(t *testing.T) {
+	f := newFixture(t)
+	f.must(f.repo.Rotate("targets", nil, nil, 1)) // root v2: targets threshold 1
+	f.must(f.repo.Sign("root", f.root[0]))
+	f.must(f.repo.Sign("root", f.root[1]))
+	f.must(f.repo.Publish(f.snap, f.ts))
+	f.must(f.repo.Rotate("targets", nil, nil, 2)) // root v3 restores 2
+	f.must(f.repo.Sign("root", f.root[0]))
+	f.must(f.repo.Sign("root", f.root[1]))
+	f.release(2, nil)
+	f.publish(0, 1)
+	for _, off := range []bool{false, true} {
+		if _, err := f.check(Options{Offline: off}); !errors.Is(err, ErrWeakThreshold) {
+			t.Fatalf("offline=%v: root v2 with threshold 1 accepted: %v", off, err)
+		}
+	}
+	b, _ := os.ReadFile(filepath.Join(f.store.Dir, "root.json"))
+	if r, _ := metadata.Root().FromBytes(b); r.Signed.Version != 1 {
+		t.Fatalf("box saved root v%d past a weak one", r.Signed.Version)
 	}
 }
