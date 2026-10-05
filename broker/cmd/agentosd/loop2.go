@@ -62,7 +62,9 @@ func (c *loop2Contain) Contain(ctx context.Context, t loops.Target, finding stri
 	st, err := b.g.Submit(journal.Intent{ID: id, Origin: grants.OriginLoop2, Account: journal.BrokerAccount,
 		Action: journal.ActionGrantPause, GrantRef: t.Name, Executor: grants.ExecutorName,
 		// The check and finding behind the pause, for its record
-		// (security L2 on W5a).
+		// (security L2 on W5a). The journal's redactor stores the
+		// param as "[redacted]"; the full record, with this same
+		// "<check>:<finding>", is the guard's evidence in loop2.json.
 		Params: map[string]any{"finding": finding}})
 	if err == nil && st.State == journal.Pending {
 		st, err = b.g.Authorize(ctx, id)

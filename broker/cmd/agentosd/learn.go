@@ -407,6 +407,15 @@ func (l *learning) attach(ctx context.Context, d *daemon.Daemon) {
 	l.sched.Attach(eng)
 	if g := d.Gate(); g != nil {
 		l.contain.gate.Store(&pauseGateBox{g})
+		// The gate has replayed its journal: Loop 2 drops any pause that
+		// ended while it could not hear it (L3 S1 on #169).
+		held := map[string]bool{}
+		for _, gr := range g.Grants() {
+			held[gr.ID] = gr.Paused
+		}
+		if err := l.guard.Reconcile(func(t loops.Target) bool { return t.Kind == "grant" && held[t.Name] }); err != nil {
+			log.Printf("loop2: an ended pause stays listed: %v", err)
+		}
 	}
 	l.notify.ch.Store(d.Owner())
 	l.eng.Store(eng)

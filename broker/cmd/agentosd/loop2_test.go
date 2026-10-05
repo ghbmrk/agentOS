@@ -105,3 +105,39 @@ func attachForTest(t *testing.T, lp *learning, ctx context.Context, cancel conte
 		lp.running.Wait()
 	})
 }
+
+// L3 S1 on #169: at start, Loop 2 drops every pause the gate no longer
+// holds (a crash between the gate's resume and Loop 2's save, or a grant
+// revoked with its connection), so the digest does not list a grant that
+// is gone and a new pause of it is texted.
+func TestAttachReconcilesLoop2Pauses(t *testing.T) {
+	dir := t.TempDir()
+	// Loop 2 listed G9 as paused when the box went down; the gate has no G9.
+	rec := `{"finding":{"id":"advisory-1","check":"advisory","subject":"a","detail":"ADV-1","severity":"low",` +
+		`"contain":{"kind":"grant","name":"G9"}},"contained":"paused","texted":true}`
+	if err := os.WriteFile(filepath.Join(dir, "loop2.json"), []byte(`{"paused":{"grant/G9":`+rec+`}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := daemon.Config{
+		JournalPath: filepath.Join(dir, "journal.log"), SocketDir: filepath.Join(dir, "run"),
+		OwnerNumber: ownerNum, ModemUID: os.Getuid(), Admission: admission.Config{CapacityMB: 4500, HeadroomMB: 600},
+		OwnerState: filepath.Join(dir, "owner.json"),
+	}
+	lp, err := openLearning(learnPaths{Dir: dir, Spare: filepath.Join(dir, "spare.json")}, false, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := strings.Join(lp.guard.Digest(), " "); !strings.Contains(d, "Cleared: a.") {
+		t.Fatalf("the seeded pause is not listed before attach: %q", d)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	d, err := daemon.Run(ctx, cfg)
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	attachForTest(t, lp, ctx, cancel, d)
+	if dg := strings.Join(lp.guard.Digest(), " "); strings.Contains(dg, "Cleared: a.") {
+		t.Fatalf("a pause the gate does not hold is still listed: %q", dg)
+	}
+}

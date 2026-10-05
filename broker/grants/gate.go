@@ -2391,13 +2391,29 @@ func (g *Gate) Narrow(word, id string) string {
 // Execute runs a grant intent: it is the engine executor for ExecutorName.
 func (g *Gate) Execute(_ context.Context, in journal.Intent, _ int) journal.Outcome {
 	g.mu.Lock()
+	before := make([]string, 0, len(g.grants))
+	for k := range g.grants {
+		before = append(before, k)
+	}
 	id, err := g.applyLocked(in)
+	// Every grant the intent ended: the one named, and the pre-allowances
+	// a revoked connection takes with it (L3 S1 on #169).
+	var ended []string
+	if err == nil && unpauses(in) {
+		ended = append(ended, id)
+		for _, k := range before {
+			if _, live := g.grants[k]; !live && k != id {
+				ended = append(ended, k)
+			}
+		}
+		sort.Strings(ended[1:])
+	}
 	g.mu.Unlock()
 	if err != nil {
 		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: err.Error()}
 	}
-	if unpauses(in) {
-		g.unpaused(id)
+	for _, k := range ended {
+		g.unpaused(k)
 	}
 	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: id}
 }
