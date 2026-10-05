@@ -10,13 +10,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # base commit for the TRACE.md guard
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - name: Unit tests
         run: python -m unittest discover -s tests -v
-      - name: Traceability is current
-        run: python tools/trace.py --check
+      - name: Traceability (markers cite known IDs; checked on a regenerated TRACE.md)
+        run: python tools/trace.py && python tools/trace.py --check
+      - name: PR leaves TRACE.md to trace.yml
+        if: github.event_name == 'pull_request'
+        # HEAD is the PR's test merge (base^1, branch^2). Three dots compare the branch with
+        # its merge base, so TRACE.md updates it pulled in from main don't count.
+        run: |
+          git diff --quiet HEAD^1...HEAD^2 -- TRACE.md && exit 0
+          echo '::error file=TRACE.md::PRs must not change TRACE.md; trace.yml regenerates it on main after merge. Restore it with: git checkout $(git merge-base origin/main HEAD) -- TRACE.md'
+          exit 1
   broker:
     runs-on: ubuntu-latest
     defaults:

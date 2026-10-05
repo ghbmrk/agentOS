@@ -439,6 +439,7 @@ func (c *Channel) Tick() {
 	d := c.expireLocked(c.cfg.Now())
 	c.mu.Unlock()
 	c.decide(d)
+	c.FlushLocal()
 }
 
 // TakeExpired returns and clears the items that expired or were dropped by
