@@ -160,6 +160,12 @@ type LearnConfig struct {
 	// Builder may be nil: Loop 1 then proposes only routing rules and
 	// rechecks adoptions.
 	Builder Builder
+	// Unseeded reports a candidate nothing could use yet: it writes only
+	// namespaces no machine is seeded from (skills and procedures before
+	// W4). Loop 1 does not propose it, so the owner is never asked about
+	// a change with no effect (UX-S3-1), and the digest counts it. Nil:
+	// none.
+	Unseeded func(change.Candidate) bool
 	// Router may be nil: no routing candidates.
 	Router change.Router
 	// ModelWired reports that replay has model access (replay.RuleModel). Without
@@ -213,7 +219,18 @@ type Learn struct {
 	// hypothesis key, so it is proposed again without another build and
 	// the pipeline resumes its evaluation (PE1). In memory only.
 	built map[string]keptCandidate
+	// unseeded are the hypotheses whose candidate was not proposed
+	// because nothing could use it yet (UX-S3-1), at most maxUnseeded.
+	unseeded map[string]time.Time
 }
+
+// maxUnseeded bounds the hypotheses the digest counts as kept until the
+// agent can use them.
+const maxUnseeded = 256
+
+// ErrUnseeded: the candidate was built but not proposed, since nothing
+// could use it yet (LearnConfig.Unseeded).
+var ErrUnseeded = errors.New("loops: candidate kept until a machine can use it")
 
 // keptCandidate is a built candidate and the brief it was built from.
 type keptCandidate struct {
@@ -278,7 +295,7 @@ func NewLearn(cfg LearnConfig) (*Learn, error) {
 		cfg.Now = time.Now
 	}
 	return &Learn{cfg: cfg, tried: map[string]int{}, asks: map[string]int{}, notBefore: map[string]time.Time{},
-		needsExplicit: map[string]string{}, lastRecheck: cfg.Now(), built: map[string]keptCandidate{}}, nil
+		needsExplicit: map[string]string{}, lastRecheck: cfg.Now(), built: map[string]keptCandidate{}, unseeded: map[string]time.Time{}}, nil
 }
 
 func (l *Learn) Loop() Loop { return Improve }
@@ -365,6 +382,9 @@ func (l *Learn) Next(ctx context.Context, modelOK bool) (Job, bool) {
 		return Job{Name: "candidate", UsesModel: true, Evaluates: true, Run: func(ctx context.Context) Result {
 			rep, err := l.propose(ctx, h, ev)
 			l.done(ctx, err, h.Key, len(h.Tasks))
+			if errors.Is(err, ErrUnseeded) {
+				return Result{}
+			}
 			l.asked(h.Key, rep)
 			return Result{Value: value(rep), Err: err}
 		}}, true
@@ -438,6 +458,23 @@ func (l *Learn) propose(ctx context.Context, h Hypothesis, ev Evidence) (change.
 		// REV-5 labels of every input; the builder asserts none of them.
 		cand.Source, cand.Origin, cand.Public = change.Local, "loop1", public(h, ev.Dev)
 	}
+	l.mu.Lock()
+	if l.cfg.Unseeded != nil && l.cfg.Unseeded(cand) {
+		l.unseeded[h.Key] = l.cfg.Now()
+		for len(l.unseeded) > maxUnseeded {
+			oldest := ""
+			for k, at := range l.unseeded {
+				if oldest == "" || at.Before(l.unseeded[oldest]) || at.Equal(l.unseeded[oldest]) && k < oldest {
+					oldest = k
+				}
+			}
+			delete(l.unseeded, oldest)
+		}
+		l.mu.Unlock()
+		return change.Report{}, ErrUnseeded
+	}
+	delete(l.unseeded, h.Key)
+	l.mu.Unlock()
 	rep, err := l.cfg.Pipeline.Propose(ctx, cand)
 	if errors.Is(err, change.ErrInterrupted) {
 		// Preempted mid-evaluation: keep the checked candidate for the
@@ -553,6 +590,14 @@ func (l *Learn) Digest() []string {
 		out = append(out, "Learning: 1 idea is waiting for your approval instead of taking effect on its own, because it wasn't tested on a task you said YES to.")
 	case n > 1:
 		out = append(out, fmt.Sprintf("Learning: %d ideas are waiting for your approval instead of taking effect on their own, because none was tested on a task you said YES to.", n))
+	}
+	// Built but not proposed, since the agent cannot use them yet
+	// (UX-S3-1).
+	switch n := len(l.unseeded); {
+	case n == 1:
+		out = append(out, "Learning: 1 new skill learned. It's kept until your agent can use it.")
+	case n > 1:
+		out = append(out, fmt.Sprintf("Learning: %d new skills learned. They're kept until your agent can use them.", n))
 	}
 	return out
 }

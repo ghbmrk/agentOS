@@ -130,6 +130,7 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		Journal:    l.mining,
 		Harvest:    l.harvest,
 		Builder:    l.builder,
+		Unseeded:   unseeded,
 		Router:     router,
 		ModelWired: modelWired,
 	})
@@ -192,6 +193,22 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		}
 	}
 	return l, nil
+}
+
+// unseeded reports a candidate that writes only skills and procedures
+// (format.SkillsNS, format.ProceduresNS):
+// nothing seeds the agent machine from them until W4, so Loop 1 holds it
+// instead of asking the owner about a change with no effect (UX-S3-1).
+func unseeded(c change.Candidate) bool {
+	if len(c.Files) == 0 {
+		return false
+	}
+	for p := range c.Files {
+		if ns, _, _ := strings.Cut(p, "/"); ns != "skills" && ns != "procedures" {
+			return false
+		}
+	}
+	return true
 }
 
 // vaultPlaceholder is the vault redactor's mark for a secret
