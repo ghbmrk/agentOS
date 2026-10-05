@@ -861,7 +861,10 @@ func (g *Gate) evaluateBroker(ctx context.Context, phase journal.Phase, in journ
 	case journal.ActionEvidence:
 		return g.evaluateEvidence(in)
 	case journal.ActionGrantPause, journal.ActionGrantRevoke:
-		if in.Origin != OriginOwner {
+		// Loop 2 may pause on a finding (loops K-S2): pausing only
+		// narrows, and revoking stays the owner's.
+		loop2Pause := in.Origin == OriginLoop2 && in.Action == journal.ActionGrantPause
+		if in.Origin != OriginOwner && !loop2Pause {
 			return verdict{kind: deny, why: "only the owner pauses or revokes a grant"}
 		}
 		g.mu.Lock()
