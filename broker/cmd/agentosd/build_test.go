@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"os"
 	"path/filepath"
 	"testing"
@@ -223,5 +224,25 @@ func TestTheBuilderDefaultsFailClosed(t *testing.T) {
 	}
 	if l.build.Ready(loops.Brief{}) {
 		t.Fatal("a builder was attached without its launch file")
+	}
+}
+
+// L3 SHOULD on #154: only an image the operator did not name is the
+// default one; a named image that is missing is a fault STATUS reports.
+func TestOnlyAnUnnamedBuilderImageIsTheDefault(t *testing.T) {
+	fs := flag.NewFlagSet("agentosd", flag.ContinueOnError)
+	image := fs.String("builder-image", defaultBuilderImage, "")
+	launch := fs.String("builder-launch", defaultBuilderLaunch, "")
+	if err := fs.Parse(nil); err != nil {
+		t.Fatal(err)
+	}
+	if c := builderFlags(fs, *image, *launch); !c.ImageDefault || c.Image != defaultBuilderImage || c.Launch != defaultBuilderLaunch {
+		t.Fatalf("unset: %+v", c)
+	}
+	if err := fs.Parse([]string{"-builder-image", "mine"}); err != nil {
+		t.Fatal(err)
+	}
+	if c := builderFlags(fs, *image, *launch); c.ImageDefault || c.Image != "mine" {
+		t.Fatalf("named: %+v", c)
 	}
 }

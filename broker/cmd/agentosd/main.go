@@ -503,9 +503,9 @@ func main() {
 					if err != nil {
 						log.Printf("replay evaluation disabled: %v", err)
 					}
-					lp.startBuilder(m, imgs, services, buildConfig{Dir: filepath.Join(cfg.SocketDir, "build"), Image: builderImage,
-						ImageDefault: !flagSet(flag.CommandLine, "builder-image"), AgentImage: namedAgentImage,
-						Launch: builderLaunch, MemMB: builderMemMB, Egress: egressSocket})
+					bc := builderFlags(flag.CommandLine, builderImage, builderLaunch)
+					bc.Dir, bc.AgentImage, bc.MemMB, bc.Egress = filepath.Join(cfg.SocketDir, "build"), namedAgentImage, builderMemMB, egressSocket
+					lp.startBuilder(m, imgs, services, bc)
 				}
 				spec, err := agentSpec(imgs, agentImage, agentLaunch, agentMemMB)
 				if err != nil {

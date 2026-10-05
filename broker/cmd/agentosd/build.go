@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"strings"
@@ -137,6 +138,12 @@ const (
 	defaultBuilderImage  = "builder"
 	defaultBuilderLaunch = "/usr/lib/agentos/builder/launch.json"
 )
+
+// builderFlags is the builder's image and launch as fs set them, the image
+// marked default when -builder-image was not given.
+func builderFlags(fs *flag.FlagSet, image, launch string) buildConfig {
+	return buildConfig{Image: image, ImageDefault: !flagSet(fs, "builder-image"), Launch: launch}
+}
 
 // startBuilder opens the builder, and on failure logs it and keeps the
 // STATUS note on. With no image it opens nothing and says so; so it does
