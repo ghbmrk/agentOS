@@ -176,6 +176,84 @@ class RenderTest(unittest.TestCase):
         self.assertIn("1/3", row(again))
 
 
+class FreezeTest(unittest.TestCase):
+    def test_closed_week_keeps_recorded_api_cells_but_to_date_rows_recompute(self):
+        raw = raw_fixture()
+        first = metrics.render(metrics.compute(raw), raw)
+        row = lambda md, wk: next(l for l in md.splitlines() if l.startswith(f"| {wk}"))
+        # Late data for closed week 2026-10-04 (an extra flake) does not rewrite it.
+        raw["runs"].append({"workflow": "ci", "sha": "e", "at": "2026-10-06T10:00:00Z", "conclusions": ["failure", "success"]})
+        later = metrics.render(metrics.compute(raw), raw, first)
+        self.assertIn("1/3", row(later, "2026-10-04"))
+        # The current week was recorded "(to date)", so it still recomputes.
+        raw["runs"].append({"workflow": "ci", "sha": "f", "at": "2026-10-11T14:00:00Z", "conclusions": ["failure", "success"]})
+        later = metrics.render(metrics.compute(raw), raw, first)
+        self.assertIn("50% (1/2)", row(later, "2026-10-11"))
+
+
+class CollectTest(unittest.TestCase):
+    def test_runs_listing_is_unfiltered_paged_and_skips_unfinished_runs(self):
+        calls = []
+        runs = [{"id": i, "name": "ci", "head_sha": f"s{i}", "created_at": "2026-10-05T00:00:00Z",
+                 "status": "completed", "conclusion": "success", "run_attempt": 1} for i in range(150)]
+        runs[0]["status"], runs[0]["conclusion"] = "in_progress", None
+        runs[1]["run_attempt"] = 2
+
+        def api(repo, path, token):
+            calls.append(path)
+            if path.startswith("pulls?"):
+                return [{"number": 7, "merged_at": "2026-10-05T01:00:00Z", "body": ""},
+                        {"number": 6, "merged_at": "2026-09-01T01:00:00Z", "body": ""}] if "page=1&" in path + "&" else []
+            if path.startswith("pulls/7/reviews"):
+                return [{"body": "## Lens review: fix-list", "submitted_at": "1"},
+                        {"body": "**L3 review. Verdict: accept.**", "submitted_at": "2"}]
+            if path.startswith("pulls/6/reviews"):
+                return []
+            if path.startswith("actions/runs?"):
+                page = int(path.rsplit("page=", 1)[1])
+                return {"workflow_runs": runs[(page - 1) * 100: page * 100]}
+            if path == "actions/runs/1/attempts/1":
+                return {"conclusion": "failure"}
+            raise AssertionError(path)
+
+        orig = metrics._api
+        metrics._api = api
+        try:
+            pulls, got = metrics.collect_github("o/r", None)
+            calls_all = list(calls)
+            calls.clear()
+            # Since a cutoff: older runs end the paging and old PRs' reviews are not fetched.
+            for i, r in enumerate(runs):
+                r["created_at"] = "2026-10-05T00:00:00Z" if i < 50 else "2026-09-01T00:00:00Z"
+            pulls2, got2 = metrics.collect_github("o/r", None, since="2026-10-04T10:00:00Z")
+        finally:
+            metrics._api = orig
+        self.assertEqual(len(got2), 49)
+        self.assertNotIn("pulls/6/reviews?per_page=100&page=1", calls)
+        self.assertEqual(sorted(p["number"] for p in pulls2 if p["verdicts"] is None), [6])
+        self.assertEqual([c for c in calls if c.startswith("actions/runs?")], ["actions/runs?per_page=100&page=1"])
+        calls = calls_all
+        listing = [c for c in calls if c.startswith("actions/runs?")]
+        # GitHub caps filtered listings at 1,000 results, so no filter may be passed.
+        self.assertEqual(listing, ["actions/runs?per_page=100&page=1", "actions/runs?per_page=100&page=2"])
+        self.assertEqual(len(got), 149)
+        self.assertEqual(next(r for r in got if r["sha"] == "s1")["conclusions"], ["failure", "success"])
+        # Only the L3 review counts as a verdict.
+        self.assertEqual(next(p for p in pulls if p["number"] == 7)["verdicts"], ["accept"])
+
+
+class SinceTest(unittest.TestCase):
+    def test_cutoff_follows_the_last_closed_recorded_week(self):
+        raw = raw_fixture()
+        md = metrics.render(metrics.compute(raw), raw)
+        # 2026-10-04 is the last closed week; 2026-10-11 is "(to date)". 10-11 06:00 UTC-4 = 10:00Z.
+        self.assertEqual(metrics._since(md, TZ), "2026-10-11T10:00:00Z")
+        self.assertIsNone(metrics._since(None, TZ))
+        # Old PRs (verdicts not collected) are not reported as missing a verdict.
+        raw["pulls"][2]["verdicts"] = None
+        self.assertEqual(sum((w["no_verdict"] for w in metrics.compute(raw)), []), [])
+
+
 class GitHistoryTest(unittest.TestCase):
     def test_reads_trace_and_board_from_first_parent_history(self):
         with tempfile.TemporaryDirectory() as d:

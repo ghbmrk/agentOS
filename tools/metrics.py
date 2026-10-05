@@ -22,6 +22,8 @@ import pathlib
 import re
 import subprocess
 import sys
+import time
+import urllib.error
 import urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -49,6 +51,11 @@ def verdict(body):
     first = next((l for l in body.splitlines() if l.strip()), "")
     m = re.search(r"\b" + VERDICTS + r"\b", first, re.I)
     return m.group(1).lower() if m else None
+
+
+def is_l3(body):
+    """Only L3 reviews carry the verdict; lens, correction or bot reviews do not count."""
+    return bool(body) and re.search(r"\bL3\b", body) is not None
 
 
 def defects(body):
@@ -138,8 +145,26 @@ def _api(repo, path, token):
         f"https://api.github.com/repos/{repo}/{path}",
         headers={"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28",
                  **({"Authorization": f"Bearer {token}"} if token else {})})
-    with urllib.request.urlopen(req, timeout=60) as r:
-        return json.load(r)
+    for attempt in range(4):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            if e.code not in (403, 429) and e.code < 500 or attempt == 3:
+                raise
+        except urllib.error.URLError:
+            if attempt == 3:
+                raise
+        time.sleep(2 ** attempt * 5)
+
+
+def _since(previous_md, tz):
+    """UTC start of the week after the last closed week METRICS.md already records."""
+    closed = [k for k, cells in _previous(previous_md).items() if "(to date)" not in cells[0]]
+    if not closed:
+        return None
+    start = dt.datetime.strptime(max(closed), "%Y-%m-%d").replace(hour=6, tzinfo=tz) + dt.timedelta(days=7)
+    return start.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _pages(repo, path, token, key=None):
@@ -154,17 +179,28 @@ def _pages(repo, path, token, key=None):
         page += 1
 
 
-def collect_github(repo, token):
+def collect_github(repo, token, since=None):
+    """PRs and Actions runs. With `since` (an ISO time), skip what only frozen weeks use:
+    reviews of PRs merged earlier (verdicts None = not collected) and older runs. That keeps
+    the call count inside GITHUB_TOKEN's hourly limit as history grows."""
     pulls = []
     for p in _pages(repo, "pulls?state=all", token):
-        reviews = list(_pages(repo, f"pulls/{p['number']}/reviews", token))
-        reviews.sort(key=lambda r: r.get("submitted_at") or "")
-        pulls.append({
-            "number": p["number"], "merged_at": p.get("merged_at"), "body": p.get("body") or "",
-            "verdicts": [v for v in (verdict(r.get("body")) for r in reviews) if v],
-        })
+        verdicts = None
+        if p.get("merged_at") and (since is None or p["merged_at"] >= since):
+            reviews = list(_pages(repo, f"pulls/{p['number']}/reviews", token))
+            reviews.sort(key=lambda r: r.get("submitted_at") or "")
+            verdicts = [v for v in (verdict(r.get("body")) for r in reviews if is_l3(r.get("body"))) if v]
+        pulls.append({"number": p["number"], "merged_at": p.get("merged_at"),
+                      "body": p.get("body") or "", "verdicts": verdicts})
     runs = []
-    for r in _pages(repo, "actions/runs?status=completed", token, "workflow_runs"):
+    # No query filter: GitHub caps any filtered runs listing (status, created, ...) at 1,000
+    # results, which this repo passes in days. The listing is newest first, so paging stops
+    # at `since`; unfinished runs are skipped here.
+    for r in _pages(repo, "actions/runs", token, "workflow_runs"):
+        if since is not None and r["created_at"] < since:
+            break
+        if r.get("status") != "completed":
+            continue
         conclusions = [r["conclusion"]]
         for n in range(1, r.get("run_attempt", 1)):
             conclusions.insert(n - 1, _api(repo, f"actions/runs/{r['id']}/attempts/{n}", token)["conclusion"])
@@ -217,7 +253,7 @@ def compute(raw):
             pace = 100 * (_when(last["at"], tz) - start).total_seconds() / (7 * 86400)
 
         merged = [p for p in raw["pulls"] if p.get("merged_at") and inside(p["merged_at"])]
-        judged = [p for p in merged if p["verdicts"]]
+        judged = [p for p in merged if p["verdicts"]]  # None: not collected (frozen week)
 
         ever_esc, ever_rev = set(), set()
         for snap in raw["board"]:
@@ -247,7 +283,7 @@ def compute(raw):
             "usage_per_req": usage_all / reqs if usage_all is not None and reqs > 0 else None,
             "first_pass_ok": sum(p["verdicts"][0] == "accept" for p in judged),
             "first_pass_n": len(judged),
-            "no_verdict": [p["number"] for p in merged if not p["verdicts"]],
+            "no_verdict": [p["number"] for p in merged if p["verdicts"] == []],
             "merged": len(merged),
             "escalated": len(ever_esc),
             "reviewed": len(ever_rev),
@@ -260,6 +296,9 @@ def compute(raw):
 
 # ---------- rendering ----------
 
+# Columns sourced from the GitHub API: frozen once a closed week has been recorded, so
+# later edits, deleted reviews or expired runs cannot rewrite a finished week.
+FROZEN = (5, 7, 8)
 COLUMNS = [
     "Week starting", "Usage all / Fable", "On-pace mark", "Reqs newly covered", "Usage per req",
     "First-pass L3 accept", "Escalation rate (cum.)", "Defects after merge", "CI flake rate",
@@ -308,7 +347,9 @@ def render(weeks, raw, previous_md=None):
         cells = _cells(w)
         prev = old.get(w["week"])
         if prev and len(prev) == len(cells):
-            cells = [o if c == NONE and o != NONE else c for c, o in zip(cells, prev)]
+            closed = not w["current"] and "(to date)" not in prev[0]
+            cells = [o if (c == NONE and o != NONE) or (closed and i in FROZEN) else c
+                     for i, (c, o) in enumerate(zip(cells, prev))]
         lines.append("| " + " | ".join(cells) + " |")
     unjudged = sorted(n for w in weeks for n in w["no_verdict"])
     lines += [
@@ -317,19 +358,22 @@ def render(weeks, raw, previous_md=None):
         "",
         "- **Week**: a plan week, Sunday 06:00 to Sunday 06:00 Mark's local time (UTC-4 assumed).",
         "- **Usage**: the highest weekly-limit reading in LEDGER.md that week, all models / Fable only. "
-        "Model usage is not metered per package; Mark's usage screen is the source (LEDGER B-6).",
+        "Model usage is not metered per package; Mark's usage screen is the source (LEDGER B-6). "
+        "Spend by model tier is approximated by this all-models / Fable-only split.",
         "- **On-pace mark**: the share of the week elapsed at that reading. Usage at the mark is on pace for ~100% at reset.",
         "- **Reqs newly covered**: growth of TRACE.md's covered count on main that week.",
         "- **Usage per req**: weekly-limit points per newly covered requirement ID. "
         "Stands in for tokens per merged requirement until tokens are metered.",
         "- **First-pass L3 accept**: PRs merged that week whose first review with a verdict "
-        "(`Verdict: accept|fix-list|reject`, or the verdict on its first line) was accept.",
+        "(an L3 review stating `Verdict: accept|fix-list|reject`, or the verdict on its first line) was accept.",
         "- **Escalation rate**: packages ever `escalated` on BOARD.md over packages that ever reached "
         "`in review`, `merged` or `escalated`, up to that week.",
         "- **Defects after merge**: `Defect: <package ID>` lines in the bodies of PRs merged that week "
         "(a fix to code already merged; see the PR template).",
         "- **CI flake rate**: commits that, within one workflow, had both a failed and a passed run or "
         "attempt, over commits with any finished run; counted in the week of the first run.",
+        "- **Closed weeks**: once a finished week is recorded, its L3, defect and flake cells are kept as "
+        "recorded; the other columns are recomputed from git and LEDGER.md each run.",
         "",
         "## Spend by phase (copied from LEDGER.md)",
         "",
@@ -360,12 +404,15 @@ def main(argv=None):
     args = ap.parse_args(argv)
     root = pathlib.Path(args.root)
 
+    out = root / "METRICS.md"
+    previous = out.read_text() if out.exists() else None
     if args.raw:
         raw = json.loads(pathlib.Path(args.raw).read_text())
     else:
         trace, board = git_history(root, args.ref)
         ledger = (root / "LEDGER.md").read_text()
-        pulls, runs = collect_github(args.repo, os.environ.get("GITHUB_TOKEN"))
+        tz = dt.timezone(dt.timedelta(hours=TZ_HOURS))
+        pulls, runs = collect_github(args.repo, os.environ.get("GITHUB_TOKEN"), _since(previous, tz))
         raw = {
             "now": args.now or dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
             "tz_hours": TZ_HOURS, "trace": trace, "board": board,
@@ -375,8 +422,6 @@ def main(argv=None):
         if args.raw_out:
             pathlib.Path(args.raw_out).write_text(json.dumps(raw, indent=1, sort_keys=True))
 
-    out = root / "METRICS.md"
-    previous = out.read_text() if out.exists() else None
     out.write_text(render(compute(raw), raw, previous))
     return 0
 
