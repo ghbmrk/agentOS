@@ -1,10 +1,6 @@
 package skill
 
-import (
-	"regexp"
-
-	"github.com/ghbmrk/agentos/broker/skill/format"
-)
+import "github.com/ghbmrk/agentos/broker/skill/format"
 
 // The file format lives in skill/format, which imports no network code,
 // so the broker's checks can decode skills without linking this bridge
@@ -40,5 +36,3 @@ var (
 	Decode     = format.Decode
 	DecodeFile = format.DecodeFile
 )
-
-var runIDRE = regexp.MustCompile(`^[A-Za-z0-9_]{1,32}$`)

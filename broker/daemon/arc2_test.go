@@ -48,11 +48,13 @@ var controlPath = map[string][]string{
 	// scheduler, and the replay evaluator, whose transitive imports
 	// TestAgentosdLinksNoInference holds free of inference. It names the
 	// grants gate's types to harvest the owner's verdicts (PW3 on #90).
+	// Loop 1's skill compiler (compile) is its one in-process builder: it
+	// calls no model and imports only the skill file format (W3 step 3a).
 	// It runs the owner-question book (W9) on the box clock (P2-9).
 	// clock imports golang.org/x/sys/unix (adjtimex), so it has no entry
 	// below, whose rules refuse third-party imports; TestAgentosdLinks-
 	// NoInference holds it instead, through netOK.
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants"},
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies

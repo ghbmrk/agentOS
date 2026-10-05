@@ -3,8 +3,6 @@ package skill
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"strings"
 
 	"github.com/ghbmrk/agentos/broker/skill/format"
 )
@@ -34,40 +32,16 @@ type State struct {
 // Succeeded is the one state that lets a skill go on.
 const Succeeded = "succeeded"
 
-// RequestPrefix starts the request ID of every step a skill runs, so the
-// broker can tell skill runs from model-planned ones when it measures them
-// (compile.Measure, A10).
-const RequestPrefix = "skill-"
+// Request IDs live in skill/format, so the broker's measurement can parse
+// them without linking this bridge (ARC-2).
+const RequestPrefix = format.RequestPrefix
 
-// RequestID is step i's (0-based) request ID in run runID: stable, so a
-// retried run with the same run ID repeats each request and the broker
-// runs each effect at most once (OP-1).
-func RequestID(skillID, runID string, i int) string {
-	return fmt.Sprintf("%s%s-%s-%d", RequestPrefix, skillID, runID, i+1)
-}
+// RequestID is step i's (0-based) request ID in run runID (format.RequestID).
+func RequestID(skillID, runID string, i int) string { return format.RequestID(skillID, runID, i) }
 
-// ParseRequestID splits a skill step's request ID into skill ID, run ID,
-// and 1-based step; ok is false for any other request ID.
+// ParseRequestID splits a skill step's request ID (format.ParseRequestID).
 func ParseRequestID(reqID string) (skillID, runID string, step int, ok bool) {
-	rest, found := strings.CutPrefix(reqID, RequestPrefix)
-	if !found {
-		return "", "", 0, false
-	}
-	parts := strings.Split(rest, "-")
-	if len(parts) != 3 || !format.ValidID(parts[0]) || !runIDRE.MatchString(parts[1]) {
-		return "", "", 0, false
-	}
-	n := 0
-	for _, c := range parts[2] {
-		if c < '0' || c > '9' || n > MaxSteps {
-			return "", "", 0, false
-		}
-		n = n*10 + int(c-'0')
-	}
-	if n < 1 || n > MaxSteps {
-		return "", "", 0, false
-	}
-	return parts[0], parts[1], n, true
+	return format.ParseRequestID(reqID)
 }
 
 // Result is a run's outcome, written for the model that called it.
@@ -103,7 +77,7 @@ type Stopped struct {
 // retries, skips, or reorders a step.
 func Run(ctx context.Context, s *Skill, runID string, args map[string]json.RawMessage, fx Effects) Result {
 	res := Result{Skill: s.ID, RunID: runID, Status: "stopped"}
-	if !runIDRE.MatchString(runID) {
+	if !format.ValidRunID(runID) {
 		res.Stopped = &Stopped{Why: "run_id must be 1 to 32 letters, digits, or _"}
 		return res
 	}

@@ -13,6 +13,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/change"
+	"github.com/ghbmrk/agentos/broker/compile"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
@@ -42,6 +43,9 @@ type learning struct {
 	adm     atomic.Pointer[admission.Controller]
 	routing *syncedRouting // nil: routing held
 	tasks   *taskTexts     // the owner's task texts, for harvesting
+	// builder is Loop 1's: the skill compiler for repeated trajectories,
+	// in-process since it calls no model (W3 step 3a).
+	builder loops.BySignal
 	// verdicts queues the gate's owner verdicts for harvesting, so a slow
 	// learning plane never holds the gate (security A2 on PW3).
 	verdicts chan grants.OwnerOutcome
@@ -102,10 +106,20 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	if l.tasks, err = openTaskTexts(change.FileStore{Path: filepath.Join(p.Dir, "tasks.json")}, time.Now, log.Printf); err != nil {
 		return nil, err
 	}
+	// The compiler reads values from the journal, which keeps none while
+	// the daemon redacts all free text: a trajectory holding the mark is
+	// never compiled, so it builds nothing until the journal keeps values
+	// (W3 step 3b).
+	comp, err := compile.New(compile.Config{Journal: lateReader{&l.eng}, Cases: l.pipe, Redacted: journalRedacted})
+	if err != nil {
+		return nil, err
+	}
+	l.builder = loops.BySignal{loops.SignalRepeat: compile.LoopBuilder{C: comp}}
 	learn, err := loops.NewLearn(loops.LearnConfig{
 		Pipeline:   l.pipe,
 		Journal:    lateReader{&l.eng},
 		Harvest:    l.harvest,
+		Builder:    l.builder,
 		Router:     router,
 		ModelWired: modelWired,
 	})
@@ -154,6 +168,17 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		}
 	}
 	return l, nil
+}
+
+// vaultPlaceholder is the vault redactor's mark for a secret
+// (vault.Placeholder; agentosd does not link the vault).
+const vaultPlaceholder = "[REDACTED]"
+
+// journalRedacted reports a journal value a redactor wrote: the daemon's
+// mark for any free text or the vault's for a secret (security C-3a-1;
+// compile reads the journal's clip mark itself).
+func journalRedacted(v string) bool {
+	return strings.Contains(v, daemon.Redacted) || strings.Contains(v, vaultPlaceholder)
 }
 
 // noRoomNote is STATUS's line when replay evaluation was not opened for

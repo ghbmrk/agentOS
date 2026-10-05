@@ -21,6 +21,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/loops"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/routerule"
+	"github.com/ghbmrk/agentos/broker/vault"
 )
 
 // REQ: LOOP-0, LOOP-1, LOOP-2, LOOP-6, CHG-2, ADP-4
@@ -419,5 +420,33 @@ func TestTheVaultProcessIsKeptOnTheActiveRule(t *testing.T) {
 	}
 	if rule, _ := vault.now(); !sameRule(rule, changed) {
 		t.Fatalf("after -rule changed the vault process routes by %v", rule)
+	}
+}
+
+// REQ: LOOP-4, CAP-5
+//
+// W3 step 3a: Loop 1's one builder is the skill compiler, for repeated
+// trajectories only, and it reads the daemon's redaction mark as no value,
+// so a journal that keeps none compiles nothing.
+func TestLoop1BuildsCompiledSkillsOnly(t *testing.T) {
+	dir := t.TempDir()
+	cfg := daemon.Config{JournalPath: filepath.Join(dir, "journal.log")}
+	lp, err := openLearning(learnPaths{Dir: dir, Spare: filepath.Join(dir, "spare.json")}, false, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []loops.Signal{loops.SignalFailure, loops.SignalCorrection, loops.SignalSlow, loops.SignalExpensive} {
+		if lp.builder.Handles(s) {
+			t.Fatalf("a builder for %s runs in agentosd", s)
+		}
+	}
+	if !lp.builder.Handles(loops.SignalRepeat) {
+		t.Fatal("no skill compiler")
+	}
+	if vaultPlaceholder != vault.Placeholder {
+		t.Fatalf("the vault's placeholder is %q", vault.Placeholder)
+	}
+	if !journalRedacted("to "+daemon.Redacted) || !journalRedacted("key "+vault.Placeholder) || journalRedacted("ann@example.test") {
+		t.Fatal("the daemon's redaction mark is not read as redacted")
 	}
 }

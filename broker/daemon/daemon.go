@@ -126,8 +126,13 @@ func redactAll(s string) string {
 	if s == "" {
 		return ""
 	}
-	return "[redacted]"
+	return Redacted
 }
+
+// Redacted is what the default redactor stores for any free text, so a
+// reader of the journal (the skill compiler) can tell a value it never
+// kept from a real one.
+const Redacted = "[redacted]"
 
 // ownerOnly is the default Auth.
 type ownerOnly struct{ number string }

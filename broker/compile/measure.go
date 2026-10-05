@@ -7,7 +7,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/journal"
-	"github.com/ghbmrk/agentos/broker/skill"
+	skill "github.com/ghbmrk/agentos/broker/skill/format"
 )
 
 // Speedup is A10's second-run measure for one active skill: how long the
