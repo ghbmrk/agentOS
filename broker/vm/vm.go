@@ -97,6 +97,9 @@ type Machine struct {
 	// lineage as one requester for idempotency (OP-1).
 	Lineage string
 	Last    string // newest snapshot of this machine
+	// Starts counts the machine's starts (every startFrom), so a sleep
+	// checkpoint taken at one start is refused after another (PE7).
+	Starts uint64 `json:",omitempty"`
 }
 
 // Snapshot is a broker-held snapshot's record.
@@ -111,6 +114,13 @@ type Snapshot struct {
 	// its machine's destroy still traceable (ForgetSince). Empty on
 	// snapshots taken before it was recorded.
 	Lineage string `json:",omitempty"`
+	// Sleep marks CheckpointAndStop's checkpoint, the only kind
+	// ResumeFromCheckpoint restores (PE7). Starts is the machine's start
+	// count when it was taken, and Hash the SHA-256 over its files and
+	// memory image (treeHash), checked before the restore.
+	Sleep  bool   `json:",omitempty"`
+	Starts uint64 `json:",omitempty"`
+	Hash   string `json:",omitempty"`
 }
 
 // Launch is what a Runtime needs to run a machine.
@@ -500,6 +510,7 @@ func (m *Manager) startFrom(ctx context.Context, mc *machine, s *Snapshot) error
 		return fmt.Errorf("%w: %s", ErrRevoked, mc.ID)
 	}
 	mc.State = Running
+	mc.Starts++
 	return m.saveMachine(mc)
 }
 
@@ -740,6 +751,12 @@ func (m *Manager) withdrawLocked(mc *machine, id, prev string) {
 
 // capture writes a snapshot of a paused (or stopped) machine.
 func (m *Manager) capture(ctx context.Context, mc *machine, t Tier) (Snapshot, error) {
+	return m.captureAs(ctx, mc, t, false)
+}
+
+// captureAs is capture; sleep marks a sleep checkpoint, with the
+// machine's start count and the hash of what was written.
+func (m *Manager) captureAs(ctx context.Context, mc *machine, t Tier, sleep bool) (Snapshot, error) {
 	u, err := m.checkCaps(m.launch(mc).Upper)
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("%s: %w", mc.ID, err)
@@ -788,6 +805,13 @@ func (m *Manager) capture(ctx context.Context, mc *machine, t Tier) (Snapshot, e
 	// while it was being copied may be in it, so the snapshot must not
 	// read as taken before that (CAP-3 restore points, V26).
 	s.Taken = time.Now().UTC()
+	if sleep {
+		h, err := treeHash(dir)
+		if err != nil {
+			return fail(err)
+		}
+		s.Sleep, s.Starts, s.Hash = true, mc.Starts, h
+	}
 	if err := writeJSON(filepath.Join(dir, "meta.json"), s); err != nil {
 		return fail(err)
 	}
