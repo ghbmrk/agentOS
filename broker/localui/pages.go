@@ -27,6 +27,7 @@ button.plain { background: none; color: var(--accent); padding: .4em 0; }
 .qr { width: 220px; height: 220px; display: block; margin: .6em 0; }
 .mono { font-family: ui-monospace, Menlo, Consolas, monospace; word-break: break-all; }
 form { margin: .6em 0 1.2em; }
+.card { border-top: 1px solid var(--line); padding-top: .4em; }
 </style></head><body>{{end}}
 {{define "foot"}}<p class="muted">Box page: <span class="mono">http://{{boxhost}}/</span></p></body></html>{{end}}
 
@@ -167,9 +168,27 @@ form { margin: .6em 0 1.2em; }
 <label>Auth token from the provider's console<input type="password" name="token" autocomplete="off" required></label>
 <button>Save</button></form>{{end}}
 
+{{define "approvals"}}{{template "head" ""}}
+<h1>Approvals</h1>
+{{with .Msg}}<p class="ok">{{.}}</p>{{end}}{{with .Err}}<p class="err">{{.}}</p>{{end}}
+{{range .Requests}}<section class="card"><h2>{{.ID}}{{with .Expires}} <span class="muted">Answer before {{.}}</span>{{end}}</h2>
+{{if .Local}}<p class="muted">Can't be shown in a text, so it is asked only here.</p>{{end}}
+{{range .Items}}<p>{{if .Unverified}}<b>Unverified:</b> the box could not read these details from the source. {{end}}<b>{{.Verb}}</b> {{.Object}}{{with .Detail}}, {{.}}{{end}}{{with .Amount}}, <b>{{.}}</b>{{end}}</p>
+{{with .Recipients}}<p>To {{len .}} recipient{{if ne (len .) 1}}s{{end}}, exactly as the action uses them:</p><ul>{{range .}}<li class="mono">{{.}}</li>{{end}}</ul>{{end}}
+{{if .Odd}}<p class="err">Has an unusual character, shown as [U+…]. Letters from other alphabets can look like plain ones; deny if you didn't expect it.</p>{{end}}
+<p class="muted">{{.Undo}}</p>{{end}}
+<form method="post" action="/approvals/"><input type="hidden" name="id" value="{{.ID}}"><input type="hidden" name="tok" value="{{.Tok}}"><input type="hidden" name="sum" value="{{.Sum}}">
+<label>Code from your code generator, to approve<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code"></label>
+<button name="answer" value="approve">Approve</button> <button name="answer" value="deny" class="stop">Deny</button></form></section>
+{{else}}<p>Nothing is waiting for you.</p>{{end}}
+<p class="muted">Each answer here is texted to you.</p>
+<p><a href="/home">More</a> · <a href="/status">Status</a></p>
+{{template "foot"}}{{end}}
+
 {{define "home"}}{{template "head" ""}}
 <h1>AgentOS</h1>
-<ul>{{range .}}<li><a href="{{.Path}}">{{.Title}}</a></li>{{else}}<li class="muted">Nothing else to show here yet.</li>{{end}}</ul>
+{{with .Waiting}}<p class="ok"><a href="/approvals/">{{.}} waiting for you</a></p>{{end}}
+<ul>{{range .Mounts}}<li><a href="{{.Path}}">{{.Title}}</a></li>{{else}}<li class="muted">Nothing else to show here yet.</li>{{end}}</ul>
 <p><a href="/status">Status, STOP and RESUME</a></p>
 {{template "foot"}}{{end}}
 

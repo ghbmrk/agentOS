@@ -558,3 +558,56 @@ func TestCallsHaveTheirOwnCap(t *testing.T) {
 		t.Fatalf("a text under the shared cap: %v", err)
 	}
 }
+
+// L3 SHOULD-1, nits 1-2 and security R4 on #164: a MESSAGE or INVITE is
+// signed only for a Request-URI of the form sip:<number>@<the account's
+// domain>, with no parameter but user=phone, on accounts with and without
+// the +, so no second @, postd, phone-context, maddr, port or other host
+// can make the provider dial another number than the one checked.
+func TestSignedRequestURIsArePinnedToTheAccount(t *testing.T) {
+	for _, noPlus := range []bool{false, true} {
+		r, _, sign, _ := smsRig(t)
+		ctx := context.Background()
+		set := sipSettings
+		set.NoPlus = noPlus
+		if err := r.c.setSIP(set, synthetic(t, "canary-sip-")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := (signStore{r.c}).LearnRealm(sipRealm); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.c.confirmRealm(sipRealm); err != nil {
+			t.Fatal(err)
+		}
+		n := "+15550200001"
+		if noPlus {
+			n = "15550200001"
+		}
+		ch := func(method, uri string) sipsign.Challenge {
+			c := sipChallenge(sipRealm)
+			c.Method, c.URI = method, uri
+			return c
+		}
+		for _, uri := range []string{
+			"sip:" + n + ";postd=pp9005551234@voip.test",
+			"sip:" + n + "@x;phone-context=+44@voip.test",
+			"sip:" + n + "@other.test",
+			"sip:" + n + "@voip.test;maddr=192.0.2.1",
+			"sip:" + n + "@voip.test;phone-context=+44",
+			"sip:" + n + "@voip.test:5070",
+			"sip:" + n + "@voip.test?Route=%3Csip:other.test%3E",
+			"tel:" + n,
+		} {
+			for _, m := range []string{"MESSAGE", "INVITE"} {
+				if _, err := sign.Sign(ctx, ch(m, uri)); !errors.Is(err, sipsign.ErrRecipient) {
+					t.Errorf("no plus %v: %s to %s: %v", noPlus, m, uri, err)
+				}
+			}
+		}
+		for _, uri := range []string{"sip:" + n + "@voip.test", "sip:" + n + ";user=phone@voip.test", "sip:" + n + "@VOIP.test", "sips:" + n + "@voip.test"} {
+			if _, err := sign.Sign(ctx, ch("MESSAGE", uri)); err != nil {
+				t.Errorf("no plus %v: MESSAGE to %s: %v", noPlus, uri, err)
+			}
+		}
+	}
+}

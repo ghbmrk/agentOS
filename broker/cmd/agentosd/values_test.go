@@ -340,7 +340,7 @@ func TestTaskValuesReachOnlyTheCompiler(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lp.attach(ctx, d)
+	attachForTest(t, lp, ctx, cancel, d)
 	if got := d.Owner().Handle(ctx, ownerNum, "LEARNING OFF"); len(got) != 1 || lp.sched.Settings().On(loops.Improve) {
 		t.Fatalf("LEARNING OFF: %q", got)
 	}

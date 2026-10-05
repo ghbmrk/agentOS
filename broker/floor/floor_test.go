@@ -126,6 +126,7 @@ func newFloor(t *testing.T) *floorRig {
 		Images:   map[string]string{"base": img},
 		Runtime:  r.rt,
 		Admit:    r.adm,
+		NoQuota:  true,
 		Cgroups:  gs.Machines,
 	})
 	must(t, err)

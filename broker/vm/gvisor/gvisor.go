@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -26,12 +27,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/quota"
 	"github.com/ghbmrk/agentos/broker/vm"
 	"github.com/ghbmrk/agentos/broker/vm/overlay"
 )
 
-// maxConsoleLog is the size at which a machine's console log is rotated.
-const maxConsoleLog = 4 << 20
+// maxConsoleLog is the size at which a machine's console log is rotated:
+// it and the one old log kept stay within vm.ConsoleMaxBytes (RES-4).
+const maxConsoleLog = vm.ConsoleMaxBytes / 2
 
 // guestCaps is the capability set of root inside the sandbox: the usual
 // container default, enough to install packages and run services (REV-1).
@@ -102,8 +105,14 @@ func (r *Runtime) launch(ctx context.Context, l vm.Launch, args ...string) error
 	// mounts under it out of other mount namespaces; the mount itself still
 	// reaches peers of a shared parent, so agentosd runs in its own mount
 	// namespace (ASSUMPTIONS V18).
+	//
+	// The mount is made without CAP_SYS_RESOURCE: overlayfs writes to the
+	// upper layer with its mounter's credentials, and ext4 lets that
+	// capability past the machine's disk quota (RES-4).
 	opts := overlay.MountOptions(l.Lower, l.Upper, l.Work)
-	if err := syscall.Mount("overlay", l.Root, "overlay", syscall.MS_NOSUID|syscall.MS_NODEV, opts); err != nil {
+	if err := quota.Enforced(func() error {
+		return syscall.Mount("overlay", l.Root, "overlay", syscall.MS_NOSUID|syscall.MS_NODEV, opts)
+	}); err != nil {
 		return fmt.Errorf("mount %s: %w", l.Root, err)
 	}
 	if err := syscall.Mount("", l.Root, "", syscall.MS_PRIVATE, ""); err != nil {
@@ -111,17 +120,17 @@ func (r *Runtime) launch(ctx context.Context, l vm.Launch, args ...string) error
 		return fmt.Errorf("mount %s private: %w", l.Root, err)
 	}
 	c := r.cmd(ctx, args...)
-	logPath := filepath.Join(l.Dir, "console.log")
-	if fi, err := os.Stat(logPath); err == nil && fi.Size() > maxConsoleLog {
-		os.Rename(logPath, logPath+".1") // keep one old log; bounded disk use
-	}
-	log, err := os.OpenFile(logPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	// The guest's console reaches the log through the broker, which caps
+	// it: given the file itself, a guest printing without end would fill
+	// the disk (RES-4).
+	pr, pw, err := os.Pipe()
 	if err != nil {
 		syscall.Unmount(l.Root, syscall.MNT_DETACH)
 		return err
 	}
-	defer log.Close()
-	c.Stdout, c.Stderr = log, log
+	go keepConsole(pr, filepath.Join(l.Dir, "console.log"), maxConsoleLog)
+	defer pw.Close() // the sandbox holds its own copy
+	c.Stdout, c.Stderr = pw, pw
 	if l.Cgroup != "" {
 		fd, err := syscall.Open(l.Cgroup, syscall.O_DIRECTORY|syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
 		if err != nil {
@@ -138,6 +147,59 @@ func (r *Runtime) launch(ctx context.Context, l vm.Launch, args ...string) error
 		return fmt.Errorf("runsc %s %s: %w (see %s)", args[0], l.ID, err, filepath.Join(l.Dir, "console.log"))
 	}
 	return nil
+}
+
+// keepConsole copies a machine's console from r to the log at path until
+// r ends, keeping each log within limit bytes: when the log is full it
+// becomes path.1, replacing the older one, and a new log starts.
+func keepConsole(r io.ReadCloser, path string, limit int64) {
+	defer r.Close()
+	var f *os.File
+	var size int64
+	open := func() bool {
+		var err error
+		if f, err = os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600); err != nil {
+			return false
+		}
+		fi, err := f.Stat()
+		if err != nil {
+			f.Close()
+			return false
+		}
+		size = fi.Size()
+		return true
+	}
+	if !open() {
+		io.Copy(io.Discard, r) // never block the guest on its console
+		return
+	}
+	buf := make([]byte, 32<<10)
+	for {
+		n, err := r.Read(buf)
+		for b := buf[:n]; len(b) > 0; {
+			if size >= limit {
+				f.Close()
+				os.Rename(path, path+".1")
+				if !open() {
+					io.Copy(io.Discard, r)
+					return
+				}
+				if size >= limit { // could not be rotated away
+					f.Close()
+					io.Copy(io.Discard, r)
+					return
+				}
+			}
+			k := min(int64(len(b)), limit-size)
+			f.Write(b[:k])
+			size += k
+			b = b[k:]
+		}
+		if err != nil {
+			f.Close()
+			return
+		}
+	}
 }
 
 // Pause stops every task in the sandbox.

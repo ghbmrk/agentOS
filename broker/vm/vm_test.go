@@ -58,7 +58,7 @@ func TestREV1StepSnapshotsFilesAndCannotBeReachedByTheGuest(t *testing.T) {
 		}
 	}
 	// A guest that empties its own file system leaves its snapshots intact.
-	must(t, os.RemoveAll(filepath.Join(e.cfg.StateDir, "machines", "m1", "upper", "work")))
+	must(t, os.RemoveAll(filepath.Join(e.cfg.StateDir, "machines", "m1", "disk", "upper", "work")))
 	if got := readSnap(t, e, s2.ID, "work/notes"); got != "step two" {
 		t.Fatal("snapshot lost when the guest deleted its files")
 	}

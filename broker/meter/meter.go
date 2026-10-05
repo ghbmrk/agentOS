@@ -40,6 +40,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -119,6 +120,10 @@ type Config struct {
 	CallTimeout time.Duration
 	Notify      func(Exhausted)
 	Now         func() time.Time
+	// SaveError hears of a settled charge that could not be saved (a full
+	// disk, RES-4); the charge holds in memory meanwhile. It is called
+	// without the meter's lock. Default: the error is logged.
+	SaveError func(error)
 }
 
 // slots is how many buckets a window is split into.
@@ -196,6 +201,9 @@ func Open(cfg Config) (*Meter, error) {
 	}
 	if cfg.Notify == nil {
 		cfg.Notify = func(Exhausted) {}
+	}
+	if cfg.SaveError == nil {
+		cfg.SaveError = func(err error) { log.Print(err) }
 	}
 	m := &Meter{cfg: cfg, slot: int64(cfg.Window/time.Second) / slots}
 	if m.slot < 1 {
@@ -446,13 +454,20 @@ func (m *Meter) GoalUsage(goal string) Limits {
 // output). More than was charged at Start is added now; less is refunded
 // from the bucket Start charged, if it is still in the window. A call may
 // pass its limit by its own output; the next call is then refused. If the
-// state cannot be written, the charge still holds in memory and goes to
-// disk with the next successful save. Only the first Done counts.
+// state cannot be written, the charge still holds in memory, goes to disk
+// with the next successful save, and Config.SaveError hears of it. Only
+// the first Done counts.
 func (c *Call) Done(used int64) {
 	c.once.Do(func() { c.m.settle(c, used) })
 }
 
 func (m *Meter) settle(c *Call, used int64) {
+	if err := m.settleLocked(c, used); err != nil {
+		m.cfg.SaveError(fmt.Errorf("meter: saving %s's settled call: %w", c.machine, err))
+	}
+}
+
+func (m *Meter) settleLocked(c *Call, used int64) error {
 	if used < 0 {
 		used = 0
 	}
@@ -474,9 +489,9 @@ func (m *Meter) settle(c *Call, used int64) {
 			u.Used.Tokens = max(0, u.Used.Tokens+d)
 		}
 	default:
-		return
+		return nil
 	}
-	_ = m.save()
+	return m.save()
 }
 
 // refund takes up to n tokens back from the bucket starting at at.

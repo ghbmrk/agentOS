@@ -282,7 +282,8 @@ func (l *Learn) ForgetGoal(goal string) {
 	}
 }
 
-// Forgot reports whether ForgetGoal was called for goal since start.
+// Forgot reports whether ForgetGoal was called for goal since start. It
+// is for tests: nothing decides on it.
 func (l *Learn) Forgot(goal string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
