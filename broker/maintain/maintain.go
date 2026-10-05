@@ -298,7 +298,7 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 		return loops.Result{Err: err}
 	}
 	channel := l.cfg.Channel()
-	opts := update.Options{Channel: channel, Now: l.cfg.Now}
+	opts := update.Options{Channel: channel, Now: l.cfg.Now, Attestors: l.cfg.Attestors}
 	if channel == ChannelPinned {
 		// Checked as stable, for security notices only (UPD-4).
 		opts.Channel = update.ChannelStable
@@ -520,8 +520,8 @@ func (l *Loop3) decide(ctx context.Context, rel *update.Verified, m update.Manif
 	if err != nil {
 		return outcome{wait: &pending{Version: m.Version, Security: security, Why: waitPropose}, err: err}
 	}
-	all, aerr := l.attestations(ctx, mf.Path)
-	atts := l.listed(all)
+	// update counts only reports from the allow-list (Options.Attestors).
+	atts, aerr := l.attestations(ctx, mf.Path)
 	if security {
 		// UPD-8, D6: a security fix auto-stages only with a passing report
 		// from a listed attestor. Without one it waits a day for one, then
@@ -562,26 +562,6 @@ func (l *Loop3) decide(ctx context.Context, rel *update.Verified, m update.Manif
 		o.value = valueRelease
 	}
 	return o
-}
-
-// listed keeps the attestations signed by an allow-listed attestor. What
-// they say is still judged by update (release, result, channel, and never
-// this box's own key).
-func (l *Loop3) listed(atts [][]byte) [][]byte {
-	var out [][]byte
-	for _, b := range atts {
-		_, pub, err := update.ParseAttestation(b)
-		if err != nil {
-			continue
-		}
-		for _, k := range l.cfg.Attestors {
-			if pub.Equal(k) {
-				out = append(out, b)
-				break
-			}
-		}
-	}
-	return out
 }
 
 func (l *Loop3) attestations(ctx context.Context, release string) ([][]byte, error) {
