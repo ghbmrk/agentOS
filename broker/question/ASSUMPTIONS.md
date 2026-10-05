@@ -1,0 +1,25 @@
+# Questions with defaults: assumptions
+
+Built for P3-8 against SPEC v0.12 (CAP-10, REV-2, REV-5, CH-15, TIM-1).
+Each row is a reading of the spec, or a gap left for a later package,
+that a reviewer may want to change.
+
+| # | Assumption | Spec basis | If it changes |
+|---|---|---|---|
+| Q1 | A guest asks through two broker tools, `owner_question` and `owner_question_status` (`Tools`, `Book.Call`). The asker is the guest's lineage (guest G4) and questions are keyed by its own `request_id`, so a retry or a fork repeating its source's call is the same question, texted once; the same `request_id` with a different question is refused. Another lineage cannot read a question. | CAP-10, OP-1 | — |
+| Q2 | The question carries a default and a wait. The broker bounds both: the default is required, one line, at most 80 characters, and one of the choices when choices are given (at most 4, each at most 40); the question is one line of at most 200 characters; the wait is required and clamped to 5 min .. 24 h. Control, format and line-separator characters become spaces, so a question cannot lay out what looks like a broker template. | CAP-10 | `Default*`/`Max*` constants. |
+| Q3 | At most 3 open questions per lineage and 8 on the box. Texts are paced at 3 an hour (CH-15's default for unsolicited texts) and held in quiet hours; a held question has no deadline yet. **The deadline starts when the owner is texted**, not when the guest asks, so pacing, quiet hours or a modem outage never turn into a silent default. | CAP-10, CH-15 | Share the owner channel's pacing counter in the wiring, so questions and approval requests draw on one budget. |
+| Q4 | The text is `Q4: <question> Choices: 1) .. Reply "Q4" and your answer by 14:30. With no reply it goes ahead with "<default>".` It goes out through `owner.Channel.Notify`, so the whole text is behind the agent prefix and secret-shaped content is withheld (CH-19): the question is agent-written. | CAP-10, CH-19 | — |
+| Q5 | A reply is matched by its leading tag (`Q4 yes`, `q4: yes`), tags Q1-Q99, never reused while a question is known. An untagged text is chat, as today. With choices, the answer must be one of them, by text or number. The first answer is final; a later one is told so. **Answers can't carry a 6-digit number**: codes go only to the box, so a question cannot phish an approval code for the guest. | CAP-10, CH-4 | Allow untagged replies when exactly one question is open (UX). |
+| Q6 | The broker's timer decides the lapse (`Tick`), and an answer arriving after the deadline but before the tick counts as late, never as on time. Nothing the guest sends moves a question. A late reply is passed to the guest as `late_owner_reply` and the owner is told the default already went ahead. | CAP-10 | — |
+| Q7 | Every defaulted question is a digest line (`TakeDigest`, persisted until taken): `Q4 "<question>": no reply by 14:30, so the agent went ahead with "<default>".` | CAP-10, CH-12 | — |
+| Q8 | **A default carries no authority, and neither does an answer.** An answer is chat, not an approval code. The package imports nothing that can approve (journal, grants, owner, control, vault, egress; `boundary_test.go`), and `grants/question_test.go` proves that a send the guest asked about, with a "yes" default or a "yes" text answer cited in its params, still waits for its own approval request and runs only on that decision. | CAP-10, REV-2 | — |
+| Q9 | Time comes from `Config.Now(ctx) (time.Time, error)`, the signature of `clock.Guard.Now` (P2-9, #68). While it errors (restricted), nothing is texted and nothing lapses; `owner_question_status` reports `held` with a clock reason. The owner can still answer, since an answer needs no clock. Until #68 merges the wiring passes a function over the wall clock. | TIM-1 | — |
+| Q10 | An owner answer is owner data, so `owner_question_status` raises the reading machine to private (`Config.Reveal`, wired to `vm.Manager.RaisePrivate`) before returning it; a failed raise returns nothing. A default is agent text and raises nothing. | REV-5 | — |
+| Q11 | Questions, answers and pending digest lines persist to `Config.Path` (0600, written through, atomic rename). After a restart, lapsing waits a 2 min grace from the first trusted tick, so replies the carrier queued while the box was down arrive first. Closed questions are kept 7 days for status, then dropped. | CAP-10, OP-4 | — |
+
+## Wiring (W-row on BOARD, not in this package)
+
+- Guest plane: list `question.Tools` next to `effect_request`, and route the two names to `Book.Call(ctx, lineage, machine, name, args)`.
+- Owner channel: call `Book.Answer` for text the channel would pass to the agent, after the unlock check and code stripping (CH-3, CH-14), before delegating; if it returns `ok`, send its reply instead.
+- `agentosd`: `Send` = `Channel.Notify`, `Now` = `clock.Guard.Now`, `Reveal` = `vm.Manager.RaisePrivate`, `Quiet` = the owner's quiet hours, `Path` under the broker's state directory, `Run` on a 30 s ticker, and `TakeDigest` into the daily digest.
