@@ -17,8 +17,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/meter"
 )
 
-// REQ: REV-1, REV-5, OP-1, ADP-10, CRED-1, ARC-3
-// SPEC v0.12 IDs (PR #15; move into REQ when it merges): ARC-6, ARC-7, OP-8
+// REQ: REV-1, REV-5, OP-1, ADP-10, CRED-1, ARC-3, ARC-6, ARC-7, OP-8
 
 // fakeMachines records steps and label changes.
 type fakeMachines struct {
@@ -147,9 +146,12 @@ func newRig(t *testing.T, mod func(*Config)) *rig {
 // client talks to machine id's socket as its guest would.
 func (r *rig) client(id string) *http.Client {
 	r.t.Helper()
-	dir, err := r.p.Open(id)
-	if err != nil {
-		r.t.Fatal(err)
+	dir := filepath.Join(r.p.cfg.Dir, id)
+	if r.p.get(id) == nil {
+		var err error
+		if dir, err = r.p.Open(id); err != nil {
+			r.t.Fatal(err)
+		}
 	}
 	sock := filepath.Join(dir, Socket)
 	return &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -329,15 +331,163 @@ func TestADP10NoAdapterNoIntent(t *testing.T) {
 	}
 }
 
-// TestREV1StepAfterEveryToolCall: each broker tool call is a step, so the
-// machine's files are snapshotted after it (vm V3).
-func TestREV1StepAfterEveryToolCall(t *testing.T) {
-	r := newRig(t, nil)
+// TestREV1StepAfterEveryEffectRequest: an effect request the journal took
+// is a step, so the machine's files are snapshotted after it (vm V3).
+// Status reads, refusals, and malformed calls are not steps, and a burst
+// of requests shares one trailing snapshot, so a looping guest cannot
+// flood the snapshot store (RES-4).
+func TestREV1StepAfterEveryEffectRequest(t *testing.T) {
+	r := newRig(t, func(c *Config) { c.StepInterval = 300 * time.Millisecond })
 	r.tool("m1", "effect_request", send("r1"))
+	if n := r.ms.stepsOf("m1"); n != 1 {
+		t.Fatalf("%d steps after one effect request", n)
+	}
 	r.tool("m1", "effect_status", map[string]any{"request_id": "r1"})
 	r.tool("m1", "effect_request", map[string]any{})
+	bank := send("r9")
+	bank["account"] = "bank"
+	r.tool("m1", "effect_request", bank)
+	for i := 2; i < 12; i++ {
+		r.tool("m1", "effect_request", send(fmt.Sprintf("r%d", i)))
+	}
+	if n := r.ms.stepsOf("m1"); n != 1 {
+		t.Fatalf("%d steps inside the interval, want the first only", n)
+	}
+	time.Sleep(700 * time.Millisecond)
+	if n := r.ms.stepsOf("m1"); n != 2 {
+		t.Fatalf("%d steps after the burst, want one trailing snapshot", n)
+	}
+	r.tool("m1", "effect_request", send("r20"))
 	if n := r.ms.stepsOf("m1"); n != 3 {
-		t.Fatalf("%d steps for 3 tool calls", n)
+		t.Fatalf("%d steps: a request after the interval snapshots at once", n)
+	}
+}
+
+// TestOP5GuestCannotRequestBrokerState: broker-state intents (account
+// "broker", meta.* actions) are the owner's and the broker's. Some narrow
+// and so pass STOP; a guest's request for one is refused before routing
+// and nothing is journaled.
+func TestOP5GuestCannotRequestBrokerState(t *testing.T) {
+	r := newRig(t, func(c *Config) {
+		c.Route = func(string) (string, bool) { return "mail", true } // every account routes
+	})
+	for _, a := range []map[string]any{
+		{"request_id": "b1", "account": "broker", "action": "meta.budget.lower"},
+		{"request_id": "b2", "account": "Broker", "action": "anything"},
+		{"request_id": "b3", "account": "owner-mail", "action": "META.grant.add"},
+	} {
+		st, e := r.tool("m1", "effect_request", a)
+		if st.State != "refused" || e != "" {
+			t.Fatalf("%v: %+v %s", a, st, e)
+		}
+	}
+	if n := len(r.eng.List()); n != 0 || r.ms.stepsOf("m1") != 0 {
+		t.Fatalf("%d intents journaled, %d steps", n, r.ms.stepsOf("m1"))
+	}
+}
+
+// TestCH2EffectRequestsAreBoundedAndRateLimited: one request's params and
+// recipients are bounded, and one machine's requests are rate-limited;
+// excess is refused and not journaled.
+func TestCH2EffectRequestsAreBoundedAndRateLimited(t *testing.T) {
+	r := newRig(t, func(c *Config) { c.SubmitBurst, c.SubmitEvery = 3, time.Hour })
+	huge := send("h1")
+	huge["params"] = map[string]any{"text": strings.Repeat("x", 17<<10)}
+	many := send("h2")
+	rs := make([]string, 51)
+	for i := range rs {
+		rs[i] = fmt.Sprintf("r%d@example.test", i)
+	}
+	many["recipients"] = rs
+	long := send("h3")
+	long["recipients"] = []string{strings.Repeat("a", 400)}
+	for _, a := range []map[string]any{huge, many, long} {
+		if _, e := r.tool("m1", "effect_request", a); e == "" {
+			t.Fatalf("accepted %s", a["request_id"])
+		}
+	}
+	for i := 0; i < 3; i++ {
+		if st, e := r.tool("m1", "effect_request", send(fmt.Sprintf("ok%d", i))); st.State != "succeeded" {
+			t.Fatalf("request %d: %+v %s", i, st, e)
+		}
+	}
+	if _, e := r.tool("m1", "effect_request", send("ok3")); !strings.Contains(e, "too many") {
+		t.Fatalf("burst not limited: %q", e)
+	}
+	if st, _ := r.tool("m2", "effect_request", send("ok0")); st.State != "succeeded" {
+		t.Fatal("another machine was limited")
+	}
+	if n := len(r.eng.List()); n != 4 {
+		t.Fatalf("%d intents journaled, want 4", n)
+	}
+}
+
+// TestCH2GuestCannotExhaustBrokerConnections: a guest that opens thousands
+// of connections holds at most MaxOpenConns of the broker's; the rest wait
+// in the kernel, and another machine is still served.
+func TestCH2GuestCannotExhaustBrokerConnections(t *testing.T) {
+	r := newRig(t, func(c *Config) { c.MaxOpenConns = 16 })
+	dir, _ := r.p.Open("m1")
+	r.client("m2")
+	var conns []net.Conn
+	for i := 0; i < 2000; i++ {
+		c, err := net.DialTimeout("unix", filepath.Join(dir, Socket), 50*time.Millisecond)
+		if err != nil {
+			continue // the kernel queue is full: also fine
+		}
+		conns = append(conns, c)
+	}
+	defer func() {
+		for _, c := range conns {
+			c.Close()
+		}
+	}()
+	time.Sleep(100 * time.Millisecond)
+	if n := r.p.get("m1").conns.Load(); n > 16 || n < 1 {
+		t.Fatalf("broker holds %d of m1's connections, cap 16", n)
+	}
+	if code, _ := r.do("m2", "POST", "/mcp", `{"jsonrpc":"2.0","id":1,"method":"ping"}`); code != 200 {
+		t.Fatalf("m2 starved: %d", code)
+	}
+}
+
+// TestG5OwnerMessagesSurviveABrokerRestart: unanswered owner messages are
+// kept on disk and handed to the guest again after the broker restarts;
+// a destroyed machine's are dropped.
+func TestG5OwnerMessagesSurviveABrokerRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inbox.json")
+	r := newRig(t, func(c *Config) { c.InboxPath = path })
+	r.client("m1")
+	r.client("m2")
+	id, err := r.p.DeliverOwner("m1", "book the dentist", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.p.DeliverOwner("m2", "to be dropped", false)
+	r.do("m1", "GET", "/owner/next", "") // fetched, never answered
+	r.p.Close("m2")                      // destroyed
+	r.p.Shutdown()
+
+	r2 := newRig(t, func(c *Config) { c.InboxPath = path; c.Dir = r.p.cfg.Dir })
+	r2.client("m1")
+	code, body := r2.do("m1", "GET", "/owner/next", "")
+	if code != 200 || !strings.Contains(body, id) || !strings.Contains(body, "book the dentist") {
+		t.Fatalf("after restart: %d %s", code, body)
+	}
+	if code, _ := r2.do("m1", "POST", "/owner/reply", fmt.Sprintf(`{"id":%q,"text":"done"}`, id)); code != 204 {
+		t.Fatal("reply after restart")
+	}
+	pollWait = 100 * time.Millisecond
+	t.Cleanup(func() { pollWait = 25 * time.Second })
+	r2.client("m2")
+	if code, body := r2.do("m2", "GET", "/owner/next", ""); code != 204 {
+		t.Fatalf("a destroyed machine's message came back: %s", body)
+	}
+	r2.p.Shutdown()
+	r3 := newRig(t, func(c *Config) { c.InboxPath = path; c.Dir = r.p.cfg.Dir })
+	r3.client("m1")
+	if code, body := r3.do("m1", "GET", "/owner/next", ""); code != 204 {
+		t.Fatalf("an answered message came back: %s", body)
 	}
 }
 
@@ -403,15 +553,22 @@ func TestREV5OwnerMessageRaisesLabelFirst(t *testing.T) {
 		t.Fatal("answered twice")
 	}
 
-	// At least once: an unanswered message comes back after its lease.
-	lease = 0
-	t.Cleanup(func() { lease = 15 * time.Minute })
+	// A slow guest is not handed the message twice; a restart of the
+	// machine (the vm manager opens its services again) is.
+	pollWait = 100 * time.Millisecond
+	t.Cleanup(func() { pollWait = 25 * time.Second })
 	id2, _ := r.p.DeliverOwner("m1", "second", false)
-	for i := 0; i < 2; i++ {
-		_, body := r.do("m1", "GET", "/owner/next", "")
-		if !strings.Contains(body, id2) {
-			t.Fatalf("delivery %d: %s", i, body)
-		}
+	if _, body := r.do("m1", "GET", "/owner/next", ""); !strings.Contains(body, id2) {
+		t.Fatalf("first delivery: %s", body)
+	}
+	if code, body := r.do("m1", "GET", "/owner/next", ""); code != 204 {
+		t.Fatalf("handed out again to the same incarnation: %d %s", code, body)
+	}
+	if _, err := r.p.Open("m1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, body := r.do("m1", "GET", "/owner/next", ""); !strings.Contains(body, id2) {
+		t.Fatalf("not redelivered after a restart: %s", body)
 	}
 	if _, err := r.p.DeliverOwner("nope", "x", false); err == nil {
 		t.Fatal("delivered to a machine with no socket")

@@ -447,6 +447,14 @@ func (b *BodyRule) apply(body []byte, public bool) ([]byte, error) {
 	for k, v := range b.Set {
 		obj[k] = v
 	}
+	if b.StreamUsage && obj["stream"] == true {
+		so, _ := obj["stream_options"].(map[string]any)
+		if so == nil {
+			so = map[string]any{}
+		}
+		so["include_usage"] = true
+		obj["stream_options"] = so
+	}
 	var out bytes.Buffer
 	enc := json.NewEncoder(&out)
 	enc.SetEscapeHTML(false)

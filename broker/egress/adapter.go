@@ -82,6 +82,10 @@ type BodyRule struct {
 	ServerToolKeys []string
 	// Set forces top-level keys, e.g. store:false.
 	Set map[string]any
+	// StreamUsage forces stream_options.include_usage on a streamed
+	// OpenAI-style request, so the provider reports the usage the OP-8
+	// meter charges, hidden reasoning tokens included.
+	StreamUsage bool
 }
 
 // OpenAI is the OpenAI-compatible model relay: inference endpoints only
@@ -99,6 +103,7 @@ func OpenAI(credential string) Adapter {
 				PublicMayFetch: true,
 				ServerToolKeys: []string{"web_search_options", "mcp_servers", "container"},
 				Set:            map[string]any{"store": false},
+				StreamUsage:    true,
 			},
 		}},
 	}

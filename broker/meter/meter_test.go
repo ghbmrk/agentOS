@@ -1,8 +1,10 @@
 package meter
 
 import (
+	"context"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -12,8 +14,7 @@ import (
 	"time"
 )
 
-// REQ: CRED-1
-// SPEC v0.12 IDs (PR #15; move into REQ when it merges): OP-8, ARC-7
+// REQ: CRED-1, OP-8, ARC-7
 
 type clock struct {
 	mu sync.Mutex
@@ -51,11 +52,11 @@ func open(t *testing.T, cfg Config) (*Meter, *clock, *notes) {
 }
 
 func call(m *Meter, machine string, in, out int64) error {
-	c, err := m.Start(machine, in)
+	c, err := m.Start(machine, in, 0)
 	if err != nil {
 		return err
 	}
-	c.Done(out)
+	c.Done(in + out)
 	return nil
 }
 
@@ -206,7 +207,7 @@ func TestOP8OpenRefusesMissingLimits(t *testing.T) {
 
 // TestOP8WrapMetersByListenerIdentity: the HTTP wrapper charges the machine
 // it was built for, whatever the request claims (no guest-presented token,
-// CRED-1, ARC-7), counts request and response bytes it saw, and on
+// CRED-1, ARC-7), charges the usage the provider reported, and on
 // exhaustion answers 429 without calling the model egress.
 func TestOP8WrapMetersByListenerIdentity(t *testing.T) {
 	m, _, _ := open(t, Config{MachineCap: Limits{Calls: 2, Tokens: 1 << 20}, OverallCap: big})
@@ -217,8 +218,8 @@ func TestOP8WrapMetersByListenerIdentity(t *testing.T) {
 		if string(b) != `{"messages":["hi"]}` {
 			t.Errorf("body changed on the way: %q", b)
 		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		io.WriteString(w, strings.Repeat("data: x\n\n", 100))
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"choices":[{"message":{"content":"hello"}}],"usage":{"prompt_tokens":7,"completion_tokens":40}}`)
 	})
 	h := m.Wrap("m1", next)
 	req := func() *http.Request {
@@ -230,12 +231,12 @@ func TestOP8WrapMetersByListenerIdentity(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req())
-		if w.Code != 200 {
-			t.Fatalf("call %d: %d", i, w.Code)
+		if w.Code != 200 || !strings.Contains(w.Body.String(), "hello") {
+			t.Fatalf("call %d: %d %s", i, w.Code, w.Body)
 		}
 	}
-	if u := m.Usage("m1"); u.Calls != 2 || u.Tokens < 2*(900/4) {
-		t.Fatalf("m1 usage %+v", u)
+	if u := m.Usage("m1"); u.Calls != 2 || u.Tokens != 2*47 {
+		t.Fatalf("m1 usage %+v, want 2 calls and the reported 94 tokens", u)
 	}
 	if u := m.Usage("m2"); u.Calls != 0 {
 		t.Fatalf("m2 charged by a header: %+v", u)
@@ -250,6 +251,177 @@ func TestOP8WrapMetersByListenerIdentity(t *testing.T) {
 	}
 }
 
+// TestOP8HangingUpDoesNotStopTheCharge: a guest that hangs up mid-stream
+// does not cancel the call. The model egress keeps reading the provider's
+// answer to the end, and the usage it reports is charged in full.
+func TestOP8HangingUpDoesNotStopTheCharge(t *testing.T) {
+	m, _, _ := open(t, Config{MachineCap: Limits{Calls: 10, Tokens: 1 << 30}, OverallCap: big})
+	finished := make(chan error, 1)
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, `data: {"choices":[{"delta":{"content":"a"}}]}`+"\n\n")
+		w.(http.Flusher).Flush()
+		time.Sleep(300 * time.Millisecond) // the guest hangs up meanwhile
+		for i := 0; i < 200; i++ {
+			if _, err := io.WriteString(w, `data: {"choices":[{"delta":{"content":"`+strings.Repeat("x", 4000)+`"}}]}`+"\n\n"); err != nil {
+				finished <- err
+				return
+			}
+		}
+		io.WriteString(w, `data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":200000}}`+"\n\ndata: [DONE]\n\n")
+		finished <- r.Context().Err()
+	})
+	srv := httptest.NewServer(m.Wrap("m1", next))
+	defer srv.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	req, _ := http.NewRequestWithContext(ctx, "POST", srv.URL, strings.NewReader(`{"stream":true}`))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Read(make([]byte, 64))
+	cancel()
+	resp.Body.Close()
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatalf("the call was cut short after the guest hung up: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("model egress never finished")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for m.Usage("m1").Tokens != 200012 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if u := m.Usage("m1"); u.Tokens != 200012 {
+		t.Fatalf("charged %+v, want the reported 200012 tokens", u)
+	}
+}
+
+// TestOP8RecordedStreamsAreChargedByReportedUsage: a stream that completed
+// is charged the provider's usage, not its framing. OpenAI reports it in a
+// last chunk (the egress proxy forces include_usage); Anthropic in
+// message_start and message_delta. Cached input counts at the provider's
+// cached weight. A stream cut off before its end is charged at least the
+// content the broker counted.
+func TestOP8RecordedStreamsAreChargedByReportedUsage(t *testing.T) {
+	openai := strings.Repeat(`data: {"id":"c","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"tok"},"finish_reason":null}]}`+"\n\n", 1000) +
+		`data: {"id":"c","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":321,"completion_tokens":1000,"completion_tokens_details":{"reasoning_tokens":600}}}` + "\n\ndata: [DONE]\n\n"
+	anthropic := "event: message_start\n" +
+		`data: {"type":"message_start","message":{"usage":{"input_tokens":50,"cache_read_input_tokens":200,"cache_creation_input_tokens":10,"output_tokens":1}}}` + "\n\n" +
+		strings.Repeat("event: content_block_delta\n"+`data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}`+"\n\n", 500) +
+		"event: message_delta\n" + `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":777}}` + "\n\n" +
+		"event: message_stop\n" + `data: {"type":"message_stop"}` + "\n\n"
+	for _, tc := range []struct {
+		name, stream string
+		want         int64
+	}{
+		{"openai", openai, 1321},
+		// Cached input at Anthropic's weights: 50 + 200*0.1 + 10*1.25 = 82.5.
+		{"anthropic", anthropic, 83 + 777},
+		// OpenAI cached tokens at half weight: 1000 - 800*0.5 = 600.
+		{"openai-cached", strings.Replace(openai, `"prompt_tokens":321`, `"prompt_tokens":1000,"prompt_tokens_details":{"cached_tokens":800}`, 1), 600 + 1000},
+		// Cut off before its end: the content the broker counted (3000
+		// chars, 750 tokens) is the least output charged, whatever usage
+		// came before the cut.
+		{"cut-off", `data: {"choices":[{"delta":{"content":"` + strings.Repeat("y", 3000) + `"}}],"usage":{"prompt_tokens":5,"completion_tokens":10}}` + "\n\n", 5 + 750},
+	} {
+		m, _, _ := open(t, Config{MachineCap: Limits{Calls: 10, Tokens: 1 << 30}, OverallCap: big})
+		h := m.Wrap("m1", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			for s := tc.stream; len(s) > 0; s = s[min(len(s), 97):] {
+				io.WriteString(w, s[:min(len(s), 97)]) // split mid-line
+			}
+		}))
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest("POST", "/", strings.NewReader(`{"stream":true,"max_tokens":4096}`)))
+		if w.Body.String() != tc.stream {
+			t.Fatalf("%s: the guest got a different stream", tc.name)
+		}
+		if u := m.Usage("m1"); u.Tokens != tc.want {
+			t.Fatalf("%s: charged %d tokens, want %d", tc.name, u.Tokens, tc.want)
+		}
+	}
+}
+
+// TestOP8NoUsageIsEstimatedFromContent: a response without usage is
+// charged its content and tool-argument characters, not its framing.
+func TestOP8NoUsageIsEstimatedFromContent(t *testing.T) {
+	m, _, _ := open(t, Config{MachineCap: Limits{Calls: 10, Tokens: 1 << 30}, OverallCap: big})
+	h := m.Wrap("m1", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"id":"`+strings.Repeat("i", 5000)+`","choices":[{"message":{"content":"`+strings.Repeat("c", 400)+
+			`","tool_calls":[{"function":{"name":"f","arguments":"`+strings.Repeat("a", 400)+`"}}]}}]}`)
+	}))
+	body := `{"messages":[]}`
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/", strings.NewReader(body)))
+	if u, want := m.Usage("m1"), Tokens(int64(len(body)))+200; u.Tokens != want {
+		t.Fatalf("charged %d tokens, want %d (input estimate + 800 content chars)", u.Tokens, want)
+	}
+}
+
+// TestOP8OutputIsReservedAtStart: a call reserves its output limit when it
+// starts, so a call that could pass the cap is refused up front and
+// parallel calls cannot overshoot together; the reservation is settled to
+// actual use afterwards.
+func TestOP8OutputIsReservedAtStart(t *testing.T) {
+	m, _, _ := open(t, Config{MachineCap: Limits{Calls: 100, Tokens: 10_000}, OverallCap: big, MaxReserve: 6000})
+	if m.reserve([]byte(`{"max_tokens":1e9}`)) != 6000 || m.reserve([]byte(`{"max_completion_tokens":300}`)) != 300 ||
+		m.reserve([]byte(`{}`)) != 6000 || m.reserve([]byte(`not json`)) != 6000 {
+		t.Fatal("reservation sizing")
+	}
+	c1, err := m.Start("m1", 100, 6000)
+	must(t, err)
+	if _, err := m.Start("m1", 100, 6000); !errors.Is(err, ErrExhausted) {
+		t.Fatalf("a second call that could pass the cap started: %v", err)
+	}
+	c1.Done(500)
+	c1.Done(9999) // only the first settles
+	if u := m.Usage("m1"); u.Tokens != 500 {
+		t.Fatalf("after settling: %+v", u)
+	}
+	if _, err := m.Start("m1", 100, 6000); err != nil {
+		t.Fatalf("the refund did not free the cap: %v", err)
+	}
+}
+
+// TestOP8ExtendCannotOverflowTheCeiling: an extension too large to add is
+// refused, and the day's total never goes negative.
+func TestOP8ExtendCannotOverflowTheCeiling(t *testing.T) {
+	m, _, _ := open(t, Config{MachineCap: big, OverallCap: big, DailyExtension: Limits{Calls: 10, Tokens: 100}})
+	must(t, m.Bind("m1", "t1", Limits{Calls: 1, Tokens: 1}))
+	if err := m.Extend("t1", Limits{Calls: math.MaxInt64, Tokens: math.MaxInt64}); !errors.Is(err, ErrCeiling) {
+		t.Fatalf("huge extension: %v", err)
+	}
+	must(t, m.Extend("t1", Limits{Calls: 10, Tokens: 100}))
+	if err := m.Extend("t1", Limits{Calls: math.MaxInt64}); !errors.Is(err, ErrCeiling) {
+		t.Fatalf("overflowing extension: %v", err)
+	}
+}
+
+// TestOP8TaskNoticeOncePerTask: the owner is asked about an exhausted task
+// once, until they extend it.
+func TestOP8TaskNoticeOncePerTask(t *testing.T) {
+	m, _, n := open(t, Config{MachineCap: big, OverallCap: big, DailyExtension: big})
+	must(t, m.Bind("m1", "t1", Limits{Calls: 1, Tokens: 1 << 20}))
+	must(t, m.Bind("m2", "t1", Limits{Calls: 1, Tokens: 1 << 20}))
+	must(t, call(m, "m1", 1, 1))
+	for i := 0; i < 5; i++ {
+		call(m, "m1", 1, 1)
+		call(m, "m2", 1, 1)
+	}
+	if n.count() != 1 {
+		t.Fatalf("owner asked %d times", n.count())
+	}
+	must(t, m.Extend("t1", Limits{Calls: 1}))
+	must(t, call(m, "m1", 1, 1))
+	call(m, "m1", 1, 1)
+	if n.count() != 2 {
+		t.Fatalf("after an extension the owner was asked %d times, want 2", n.count())
+	}
+}
+
 // TestOP8ConcurrentStartsCannotOvershootCalls: calls are counted at Start,
 // so parallel requests cannot pass the call cap together.
 func TestOP8ConcurrentStartsCannotOvershootCalls(t *testing.T) {
@@ -261,7 +433,7 @@ func TestOP8ConcurrentStartsCannotOvershootCalls(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if c, err := m.Start("m1", 1); err == nil {
+			if c, err := m.Start("m1", 1, 0); err == nil {
 				mu.Lock()
 				ok++
 				mu.Unlock()

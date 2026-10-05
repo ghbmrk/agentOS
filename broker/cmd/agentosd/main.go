@@ -57,15 +57,6 @@ func (a machines) Step(ctx context.Context, id string) error {
 
 func (a machines) RaisePrivate(id string) error { return a.m.RaiseLabel(id, vm.Private) }
 
-// label is the machine's REV-5 label now; unknown machines are private.
-func (a machines) label(id string) string {
-	mc, err := a.m.Get(id)
-	if err != nil {
-		return vm.Private.String()
-	}
-	return mc.Label.String()
-}
-
 func (a machines) Lineage(id string) (string, error) {
 	mc, err := a.m.Get(id)
 	return mc.Lineage, err
@@ -105,7 +96,7 @@ func (l *lateAgent) Deliver(ctx context.Context, text string, public bool) error
 func main() {
 	var cfg daemon.Config
 	imgs := images{}
-	var stateDir, runsc, cgroupParent, meterPath, agentMachine, egressSocket string
+	var stateDir, runsc, cgroupParent, meterPath, agentMachine, inboxPath, egressSocket string
 	var diskReserveMB int64
 	flag.StringVar(&cfg.JournalPath, "journal", "/var/lib/agentos/journal.log", "journal file")
 	flag.StringVar(&cfg.SocketDir, "sockets", "/run/agentos", "socket directory (created 0700)")
@@ -122,6 +113,7 @@ func main() {
 	flag.StringVar(&meterPath, "meter", "/var/lib/agentos/meter.json", "model-spend meter state (OP-8)")
 	flag.StringVar(&cfg.OwnerState, "owner-state", "/var/lib/agentos/owner.json", "owner channel state (P1-5)")
 	flag.StringVar(&agentMachine, "agent-machine", "agent", "machine whose guest receives the owner's task chat")
+	flag.StringVar(&inboxPath, "guest-inbox", "/var/lib/agentos/guest-inbox.json", "unanswered owner messages to guests, kept across restarts")
 	flag.StringVar(&egressSocket, "egress", "/run/agentos-egress/model.sock", "the vault process's model socket (agentos-egress); empty serves no model route")
 	flag.Parse()
 	if cfg.ModemUID < 0 || cfg.ModemUID == os.Getuid() {
@@ -178,7 +170,7 @@ func main() {
 			log.Printf("agent machines disabled: %v", err)
 		} else {
 			pre.m.Store(m)
-			if plane, err := openGuestPlane(m, d, cfg.SocketDir, meterPath, egressSocket); err != nil {
+			if plane, err := openGuestPlane(m, d, cfg.SocketDir, meterPath, inboxPath, egressSocket); err != nil {
 				// Machines cannot start without their guest sockets.
 				log.Printf("agent machines disabled: %v", err)
 			} else {
@@ -201,7 +193,7 @@ func openCgroup(path string) (*cgroup.Group, error) {
 
 // openGuestPlane opens the OP-8 meter and the guest plane (ARC-6) over the
 // machine manager. Without them no agent machine can start.
-func openGuestPlane(m *vm.Manager, d *daemon.Daemon, socketDir, meterPath, egressSocket string) (*guest.Plane, error) {
+func openGuestPlane(m *vm.Manager, d *daemon.Daemon, socketDir, meterPath, inboxPath, egressSocket string) (*guest.Plane, error) {
 	eng := d.Engine()
 	mtr, err := meter.Open(meter.Config{
 		Path:           meterPath,
@@ -220,14 +212,17 @@ func openGuestPlane(m *vm.Manager, d *daemon.Daemon, socketDir, meterPath, egres
 		return nil, err
 	}
 	// ARC-6: each machine gets its own guest socket. Its model route is
-	// metered here, then forwarded to the vault process (P2-4), which
-	// holds the vault and runs the egress proxy; this process links
-	// neither. Until the owner unlocks the vault, model calls answer 503.
+	// metered here, then forwarded to the vault process (P2-4a), which
+	// holds the vault and runs the router and egress proxy; this process
+	// links neither. Labels come from m.DataLabel, which reads private
+	// for any machine it cannot vouch for (REV-5, E10). Until the owner
+	// unlocks the vault, model calls answer 503.
 	gcfg := guest.Config{
-		Dir:      filepath.Join(socketDir, "guests"),
-		Machines: machines{m},
-		Effects:  eng,
-		Meter:    mtr,
+		Dir:       filepath.Join(socketDir, "guests"),
+		InboxPath: inboxPath,
+		Machines:  machines{m},
+		Effects:   eng,
+		Meter:     mtr,
 		OwnerReply: func(machine, _, text string) {
 			ch := d.Owner()
 			if ch == nil {
@@ -243,7 +238,7 @@ func openGuestPlane(m *vm.Manager, d *daemon.Daemon, socketDir, meterPath, egres
 	if egressSocket != "" {
 		gcfg.Model = modelroute.Forward(modelroute.Config{
 			Socket: egressSocket,
-			Label:  machines{m}.label,
+			Label:  m.DataLabel,
 			Denied: func(machine string, x modelroute.Denial) {
 				n := journal.EgressNote{Machine: machine, Adapter: x.Adapter, Operation: x.Operation, Method: x.Method, Status: x.Status, Reason: x.Reason}
 				if n.Reason == "" {

@@ -688,3 +688,36 @@ func TestContentHeadersAreTheProxys(t *testing.T) {
 		t.Error("identity treated as encoded")
 	}
 }
+
+// OP-8: a streamed OpenAI call always asks the provider for its usage, so
+// the meter charges what the provider counted, reasoning tokens included;
+// the guest cannot turn it off.
+func TestStreamedCallsAlwaysReportUsage(t *testing.T) {
+	r := newRig(t, nil)
+	for _, body := range []string{
+		`{"model":"m","stream":true,"messages":[]}`,
+		`{"model":"m","stream":true,"stream_options":{"include_usage":false},"messages":[]}`,
+		`{"model":"m","stream":true,"stream_options":"x","messages":[]}`,
+	} {
+		req := httptest.NewRequest("POST", "/openai/v1/chat/completions", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		if w := r.do(t, "m1", req); w.Code != 200 {
+			t.Fatalf("%s: %d", body, w.Code)
+		}
+	}
+	for _, b := range r.provider.body {
+		var sent struct {
+			StreamOptions struct {
+				IncludeUsage bool `json:"include_usage"`
+			} `json:"stream_options"`
+		}
+		if err := json.Unmarshal(b, &sent); err != nil || !sent.StreamOptions.IncludeUsage {
+			t.Fatalf("forwarded %s", b)
+		}
+	}
+	req := chat("/openai/v1/chat/completions")
+	r.do(t, "m1", req)
+	if last := r.provider.body[len(r.provider.body)-1]; strings.Contains(string(last), "stream_options") {
+		t.Fatalf("non-streamed call got stream options: %s", last)
+	}
+}
