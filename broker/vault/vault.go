@@ -68,6 +68,10 @@ type payload struct {
 type envelope struct {
 	Magic   string `json:"magic"`
 	Version int    `json:"version"`
+	// KeyID names the data key this file is sealed under once the vault
+	// has been re-encrypted (reencrypt.go), so the key slots for it can be
+	// told from the ones for the key before. Empty until then.
+	KeyID []byte `json:"key_id,omitempty"`
 	Nonce   []byte `json:"nonce"`
 	Sealed  []byte `json:"sealed"`
 }
@@ -91,6 +95,8 @@ type Vault struct {
 	anchors     []Anchor
 	counter     Counter
 	bound       int
+	// keyID is the envelope's KeyID (reencrypt.go).
+	keyID []byte
 }
 
 // ErrClosed is returned by every method called after Close.
@@ -130,7 +136,10 @@ func Open(path string, key []byte) (*Vault, error) {
 	if err := json.Unmarshal(raw, &env); err != nil || env.Magic != fileMagic || (env.Version != 1 && env.Version != fileVersion) || len(env.Nonce) != aead.NonceSize() {
 		return nil, errors.New("vault: not a vault file this version can read")
 	}
-	plain, err := aead.Open(nil, env.Nonce, env.Sealed, aad(env.Version))
+	if env.Version == 1 && len(env.KeyID) != 0 {
+		return nil, errors.New("vault: not a vault file this version can read")
+	}
+	plain, err := aead.Open(nil, env.Nonce, env.Sealed, aad(env.Version, env.KeyID))
 	if err != nil {
 		return nil, errors.New("vault: cannot decrypt (wrong key or modified file)")
 	}
@@ -148,7 +157,7 @@ func Open(path string, key []byte) (*Vault, error) {
 		p.Entries = map[string]record{}
 	}
 	return &Vault{path: path, aead: aead, entries: p.Entries,
-		id: p.ID, counterAuth: p.CounterAuth, anchors: p.Anchors, bound: -1}, nil
+		id: p.ID, counterAuth: p.CounterAuth, anchors: p.Anchors, bound: -1, keyID: env.KeyID}, nil
 }
 
 // Put stores or replaces a secret and writes the vault before returning.
@@ -279,8 +288,8 @@ func (v *Vault) write(anchors []Anchor) error {
 		return err
 	}
 	raw, err := json.Marshal(envelope{
-		Magic: fileMagic, Version: fileVersion, Nonce: nonce,
-		Sealed: v.aead.Seal(nil, nonce, plain, aad(fileVersion)),
+		Magic: fileMagic, Version: fileVersion, KeyID: v.keyID, Nonce: nonce,
+		Sealed: v.aead.Seal(nil, nonce, plain, aad(fileVersion, v.keyID)),
 	})
 	if err != nil {
 		return err
@@ -337,7 +346,13 @@ func newAEAD(key []byte) (cipher.AEAD, error) {
 	return cipher.NewGCM(block)
 }
 
-func aad(version int) []byte { return []byte(fmt.Sprintf("%s/v%d", fileMagic, version)) }
+// aad binds the format version and, once re-encrypted, the key ID.
+func aad(version int, keyID []byte) []byte {
+	if len(keyID) == 0 {
+		return []byte(fmt.Sprintf("%s/v%d", fileMagic, version))
+	}
+	return []byte(fmt.Sprintf("%s/v%d/%x", fileMagic, version, keyID))
+}
 
 func wipe(b []byte) {
 	for i := range b {

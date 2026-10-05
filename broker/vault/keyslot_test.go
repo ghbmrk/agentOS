@@ -101,7 +101,7 @@ func TestDriveHoldsNoKeyMaterial(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	key, err := kf.unwrap(Passphrase(testPass))
+	key, err := kf.unwrap(Passphrase(testPass), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

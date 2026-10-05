@@ -492,7 +492,7 @@ func writeV1(t *testing.T, path string, key []byte, entries map[string]record) {
 	}
 	nonce := make([]byte, aead.NonceSize())
 	raw, err := json.Marshal(envelope{Magic: fileMagic, Version: 1, Nonce: nonce,
-		Sealed: aead.Seal(nil, nonce, plain, aad(1))})
+		Sealed: aead.Seal(nil, nonce, plain, aad(1, nil))})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"testing"
 
@@ -160,4 +161,66 @@ func TestTrustAnchorsTheVault(t *testing.T) {
 	if err := r.c.v.Bind(&tpmCounter{openTPM: other.Open, srk: srk}); err != nil {
 		t.Fatalf("PC without a counter: %v", err)
 	}
+}
+
+// R10a in the vault process: re-encryption rewraps this PC's TPM slot
+// through the TPM, so the PC still restarts unattended on the new key; the
+// owner slot is proven by its factor; the rollback counter keeps binding.
+func TestReencryptKeepsThisTrustedPC(t *testing.T) {
+	r := newPCRig(t)
+	r.trusted(t)
+	before := r.copyFile(t, r.vault)
+	if n, err := r.c.reencrypt("", cardFactor{}); err != nil || n != 0 {
+		t.Fatalf("reencrypt: dropped %d, %v", n, err)
+	}
+	after := r.copyFile(t, r.vault)
+	if keyIDOf(t, before) == keyIDOf(t, after) {
+		t.Fatal("the data key did not change")
+	}
+	bootGood(r.tpm)
+	r.start(t, r.tpm)
+	if r.phase() != open {
+		t.Fatalf("trusted PC after re-encryption: phase %v, notes %q", r.phase(), r.notes)
+	}
+	r.unknownHostUnlockAfterLock(t)
+}
+
+// Another trusted PC's slot cannot be proven here; it is dropped and the
+// owner is told.
+func TestReencryptDropsOtherPCs(t *testing.T) {
+	r := newPCRig(t)
+	r.trusted(t)
+	other := swtpm.Start(t)
+	bootGood(other)
+	r.start(t, other)
+	r.trusted(t)
+	if n, err := r.c.reencrypt("", cardFactor{}); err != nil || n != 1 {
+		t.Fatalf("reencrypt: dropped %d, %v; want 1", n, err)
+	}
+	if !r.noted("must be trusted again") {
+		t.Fatalf("owner not told: %q", r.notes)
+	}
+	bootGood(r.tpm)
+	r.start(t, r.tpm)
+	if r.phase() != locked {
+		t.Fatal("dropped PC still restarts unattended")
+	}
+}
+
+func keyIDOf(t *testing.T, raw []byte) string {
+	t.Helper()
+	var env struct {
+		KeyID []byte `json:"key_id"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatal(err)
+	}
+	return string(env.KeyID)
+}
+
+// unknownHostUnlockAfterLock checks the card still opens the vault.
+func (r *pcRig) unknownHostUnlockAfterLock(t *testing.T) {
+	t.Helper()
+	r.c.lock()
+	r.unknownHostUnlock(t)
 }

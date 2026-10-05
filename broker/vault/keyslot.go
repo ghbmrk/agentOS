@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
@@ -78,6 +79,9 @@ type Slot struct {
 	KDF *KDF `json:"kdf,omitempty"`
 	// Sealed is opaque factor data, such as a TPM-sealed blob (P2-4b).
 	Sealed  []byte `json:"sealed,omitempty"`
+	// KeyID names the data key the slot wraps, once the vault has been
+	// re-encrypted (reencrypt.go); empty before. It is bound into the wrap.
+	KeyID   []byte `json:"key_id,omitempty"`
 	Nonce   []byte `json:"nonce"`
 	Wrapped []byte `json:"wrapped"`
 }
@@ -90,7 +94,8 @@ func (s Slot) aad() []byte {
 		Kind    string `json:"kind"`
 		KDF     *KDF   `json:"kdf,omitempty"`
 		Sealed  []byte `json:"sealed,omitempty"`
-	}{keysMagic, keysVersion, s.Kind, s.KDF, s.Sealed})
+		KeyID   []byte `json:"key_id,omitempty"`
+	}{keysMagic, keysVersion, s.Kind, s.KDF, s.Sealed, s.KeyID})
 	return b
 }
 
@@ -202,10 +207,11 @@ func writeKeys(path string, kf *keyFile) error {
 	return writeAtomic(path, raw)
 }
 
-// unwrap returns the data key from the first slot of f's kind that opens.
-func (kf *keyFile) unwrap(f Factor) ([]byte, error) {
+// unwrap returns the data key from the first slot of f's kind that opens,
+// among the slots for key ID want.
+func (kf *keyFile) unwrap(f Factor, want []byte) ([]byte, error) {
 	for _, s := range kf.Slots {
-		if s.Kind != f.Kind() {
+		if s.Kind != f.Kind() || !bytes.Equal(s.KeyID, want) {
 			continue
 		}
 		kek, err := f.KEK(s)
@@ -230,12 +236,27 @@ func (kf *keyFile) unwrap(f Factor) ([]byte, error) {
 	return nil, ErrNoSlotOpens
 }
 
-// wrap makes a slot for f holding key.
-func wrap(f Factor, key []byte) (Slot, error) {
+// keyID returns the one key ID every slot in the file shares, or
+// ErrReencryptPending if a re-encryption was interrupted and the file holds
+// slots for two keys (OpenSealed finishes it).
+func (kf *keyFile) keyID() ([]byte, error) {
+	var id []byte
+	for i, s := range kf.Slots {
+		if i > 0 && !bytes.Equal(s.KeyID, id) {
+			return nil, ErrReencryptPending
+		}
+		id = s.KeyID
+	}
+	return id, nil
+}
+
+// wrap makes a slot for f holding key, whose ID is keyID.
+func wrap(f Factor, key, keyID []byte) (Slot, error) {
 	s, kek, err := f.Enroll()
 	if err != nil {
 		return Slot{}, err
 	}
+	s.KeyID = keyID
 	aead, err := newAEAD(kek)
 	wipe(kek)
 	if err != nil {
@@ -288,7 +309,10 @@ func (v *Vault) AddSlot(f Factor, replace func(Slot) bool) error {
 	if err != nil {
 		return err
 	}
-	s, err := wrap(f, v.key)
+	if _, err := kf.keyID(); err != nil {
+		return err
+	}
+	s, err := wrap(f, v.key, v.keyID)
 	if err != nil {
 		return err
 	}
@@ -354,7 +378,7 @@ func CreateSealed(vaultPath, keysPath string, f Factor) (*Vault, error) {
 	if _, err := rand.Read(key); err != nil {
 		return nil, err
 	}
-	s, err := wrap(f, key)
+	s, err := wrap(f, key, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -374,14 +398,19 @@ func CreateSealed(vaultPath, keysPath string, f Factor) (*Vault, error) {
 // OpenSealed unwraps the data key with f and opens the vault. The factor's
 // secret bytes and the unwrapped key are wiped before it returns; the open
 // vault keeps its cipher and one copy of the key for AddSlot, wiped by
-// Close.
+// Close. If a re-encryption was interrupted, it uses the slots for the key
+// the vault file is sealed under and drops the others (reencrypt.go).
 func OpenSealed(vaultPath, keysPath string, f Factor) (*Vault, error) {
 	defer wipeFactor(f)
 	kf, err := readKeys(keysPath)
 	if err != nil {
 		return nil, err
 	}
-	key, err := kf.unwrap(f)
+	want, err := fileKeyID(vaultPath)
+	if err != nil {
+		return nil, err
+	}
+	key, err := kf.unwrap(f, want)
 	if err != nil {
 		return nil, err
 	}
@@ -389,6 +418,12 @@ func OpenSealed(vaultPath, keysPath string, f Factor) (*Vault, error) {
 	v, err := Open(vaultPath, key)
 	if err != nil {
 		return nil, err
+	}
+	if _, err := kf.keyID(); err != nil {
+		if err := finishReencrypt(keysPath, kf, want); err != nil {
+			v.Close()
+			return nil, err
+		}
 	}
 	v.sealedBy(keysPath, key)
 	return v, nil
@@ -405,12 +440,16 @@ func Rekey(keysPath string, have, next Factor) error {
 	if err != nil {
 		return err
 	}
-	key, err := kf.unwrap(have)
+	id, err := kf.keyID()
+	if err != nil {
+		return err
+	}
+	key, err := kf.unwrap(have, id)
 	if err != nil {
 		return err
 	}
 	defer wipe(key)
-	s, err := wrap(next, key)
+	s, err := wrap(next, key, id)
 	if err != nil {
 		return err
 	}

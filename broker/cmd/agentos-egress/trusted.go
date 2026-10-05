@@ -57,6 +57,9 @@ type trustedHost interface {
 	// anchor binds the open vault to this PC's rollback counter, making
 	// the counter if needed (V6); trust calls it before enroll.
 	anchor(v *vault.Vault) error
+	// prover proves this PC's slot for vault.Reencrypt; pin is the boot
+	// PIN when the slot has one.
+	prover(pin string) (vault.Factor, error)
 	// bind checks an open vault against this PC's rollback counter and
 	// binds it, so every later write advances the counter (V6). It
 	// returns vault.ErrRolledBack for an old copy of the drive.
@@ -288,6 +291,42 @@ func (c *tpmCounter) Increment(ref, auth []byte) error {
 		return err
 	}
 	return c.with(func(t transport.TPM) error { return tpmseal.IncrementCounter(t, c.srk, r, auth) })
+}
+
+// provingFactor is this PC's trusted-host slot as a factor that only
+// proves an existing slot, for vault.Reencrypt. It opens the TPM for each
+// KEK and closes it again, so no connection is held while the vault is
+// written and the rollback counter opens its own.
+type provingFactor struct {
+	openTPM  func() (transport.TPMCloser, error)
+	pin      string
+	policies []tpmseal.Policy
+}
+
+func (*provingFactor) Kind() string { return vault.SlotTPM }
+
+func (*provingFactor) Enroll() (vault.Slot, []byte, error) {
+	return vault.Slot{}, nil, errors.New("proving factor cannot enroll")
+}
+
+func (f *provingFactor) KEK(s vault.Slot) ([]byte, error) {
+	t, err := f.openTPM()
+	if err != nil {
+		return nil, err
+	}
+	defer t.Close()
+	return (&tpmFactor{t: t, pin: f.pin, policies: f.policies}).KEK(s)
+}
+
+// prover returns this PC's slot as a proving factor.
+func (h *tpmHost) prover(pin string) (vault.Factor, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	pols, err := h.readPolicies()
+	if err != nil {
+		return nil, err
+	}
+	return &provingFactor{openTPM: h.openTPM, pin: pin, policies: pols}, nil
 }
 
 // counter returns this PC's TPM as a rollback counter. Caller holds mu.

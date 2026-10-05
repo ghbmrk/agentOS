@@ -717,6 +717,42 @@ func (c *custody) untrust(code, id string) (int, error) {
 	return n, nil
 }
 
+// reencrypt moves the open vault to a fresh data key (vault.Reencrypt,
+// recovery R10a), rewrapping the owner slots that owner proves and this
+// PC's trusted-host slot (with pin if it has one). Other PCs' slots are
+// dropped and counted, and the owner is told to trust them again
+// (CRED-9). The caller has already checked the tier-4 approval that the
+// rotation needs (REC-4); P2-8's commits call this after replacing the
+// lost factors.
+func (c *custody) reencrypt(pin string, owner ...vault.Factor) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ph != open {
+		return 0, errLocked
+	}
+	factors := owner
+	if c.host != nil {
+		f, err := c.host.prover(pin)
+		if err != nil {
+			return 0, errInternal
+		}
+		factors = append(factors, f)
+	}
+	n, err := c.v.Reencrypt(factors...)
+	switch {
+	case err == nil:
+	case errors.Is(err, vault.ErrRolledBack):
+		c.notify(noteRolledBack)
+		return 0, errRolledBack
+	default:
+		return 0, err
+	}
+	if n > 0 {
+		c.notify(fmt.Sprintf("the vault has a new key; %d other trusted PC(s) must be trusted again", n))
+	}
+	return n, nil
+}
+
 // hosts lists the trusted PCs. It needs no approval: names and flags only.
 func (c *custody) hosts() ([]hostInfo, error) {
 	if c.host == nil {
