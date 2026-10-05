@@ -648,16 +648,25 @@ func TestPacingIsFairAndSurvivesARestart(t *testing.T) {
 	r.ask("lin1", "b", slot())
 	r.ask("lin2", "a", slot())
 	r.set(func() { r.quiet = false })
+	r.set(func() { r.quiet = true })
+	r.ask("lin1", "c", slot())
+	r.set(func() { r.quiet = false })
 	r.b.Tick(context.Background())
-	if st := r.status("lin1", "b"); st.State != Held {
-		t.Fatalf("lin1 took the budget: %+v", st)
+	// lin2 leads the text; lin1's questions only share it (PQ1), so
+	// lin1 takes no more of the budget.
+	if got := r.texts(); len(got) != 2 || !strings.HasPrefix(got[1], "Q102: ") || !strings.Contains(got[1], " Q101: ") {
+		t.Fatalf("texts %q", got)
 	}
 	if st, _ := r.b.Status(context.Background(), "lin2", "a", "m2"); st.State != Waiting {
 		t.Fatalf("lin2 waited: %+v", st)
 	}
+	// The budget is spent; a restart does not reset it.
+	r.set(func() { r.quiet = true })
+	r.ask("lin2", "b", slot())
+	r.set(func() { r.quiet = false })
 	r.open()
 	r.b.Tick(context.Background())
-	if st := r.status("lin1", "b"); st.State != Held || len(r.texts()) != 2 {
+	if st := r.status("lin2", "b"); st.State != Held || len(r.texts()) != 2 {
 		t.Fatalf("restart reset pacing: %+v, texts %d", st, len(r.texts()))
 	}
 }
@@ -666,7 +675,9 @@ func TestPacingIsFairAndSurvivesARestart(t *testing.T) {
 // keeping them under tags/SendsPerHour hours leaves a tag free.
 func TestKeepNeverExhaustsTags(t *testing.T) {
 	r := newRig(t, func(c *Config) { c.SendsPerHour = 60; c.Keep = 30 * 24 * time.Hour })
-	if got := r.b.cfg.Keep; time.Duration(r.b.cfg.SendsPerHour)*got/time.Hour >= numTags {
+	// Closes in Keep plus the hour before it, plus every open question,
+	// must leave a tag free (S1 on #117).
+	if got := r.b.cfg.Keep; r.b.cfg.SendsPerHour*MaxPerText*(int(got/time.Hour)+1)+r.b.cfg.MaxOpen >= numTags {
 		t.Fatalf("keep %v with %d sends an hour can hold every tag", got, r.b.cfg.SendsPerHour)
 	}
 }
