@@ -79,6 +79,7 @@ const (
 	KindLoops   Kind = "loops"   // turn all loops, or one, off or on
 	KindBudget  Kind = "budget"  // set the spare budget
 	KindSharing Kind = "sharing" // the change pipeline's sharing setting
+	KindHelp    Kind = "help"    // HELP LOOPS: the full list, changes nothing
 )
 
 // Request is one parsed owner setting.
@@ -96,7 +97,9 @@ type Request struct {
 //	LOOPS OFF | LOOPS ON
 //	LOOP 1 OFF | LOOP 2 ON | ...
 //	SPARE BUDGET 200          (model calls a day for the loops)
+//	LEARNING, SECURITY TESTS, UPDATE CHECKS + OFF | ON (one loop by name)
 //	STOP SHARING | START SHARING
+//	HELP LOOPS
 //
 // Anything else is not a loop setting and goes on to the agent.
 func ParseText(msg string) (Request, bool) {
@@ -133,14 +136,82 @@ func ParseText(msg string) (Request, bool) {
 		}
 	case len(f) == 2 && f[1] == "SHARING" && (f[0] == "STOP" || f[0] == "START"):
 		return Request{Kind: KindSharing, On: f[0] == "START"}, true
+	case len(f) == 2 && f[0] == "HELP" && f[1] == "LOOPS":
+		return Request{Kind: KindHelp}, true
+	case len(f) >= 2:
+		// Word names for each loop (UX-49-2): LEARNING OFF, SECURITY
+		// TESTS OFF, UPDATE CHECKS ON.
+		on, ok := onOff(f[len(f)-1])
+		name := strings.Join(f[:len(f)-1], " ")
+		for l, w := range loopAliases {
+			if ok && name == w {
+				return Request{Kind: KindLoops, Loop: l, On: on}, true
+			}
+		}
 	}
 	return Request{}, false
 }
 
-// HelpText lists the loop settings for HELP, in one line.
-const HelpText = "LOOPS OFF or LOOPS ON pauses or restarts spare-time work (LOOP 1 learns from your tasks, " +
-	"LOOP 2 tests security, LOOP 3 checks updates; e.g. LOOP 2 OFF). SPARE BUDGET 100 sets its AI calls a day. " +
-	"STOP SHARING keeps learned skills on this box."
+// loopAliases are the loops' names in owner texts.
+var loopAliases = map[Loop]string{
+	Improve:  "LEARNING",
+	Secure:   "SECURITY TESTS",
+	Maintain: "UPDATE CHECKS",
+}
+
+// HelpLine is the one line HELP carries for the loops; HELP LOOPS gives
+// HelpText. HELP as a whole must fit CH-12's three segments (UX-49-1).
+const HelpLine = "LOOPS OFF/ON: spare-time learning and self-tests. HELP LOOPS for more."
+
+// HelpText is the reply to HELP LOOPS.
+const HelpText = "LOOPS OFF/ON: all spare-time work. LEARNING, SECURITY TESTS or UPDATE CHECKS OFF/ON: one part. " +
+	"SPARE BUDGET 100: AI calls a day. STOP SHARING."
+
+// Confirm is the owner's one-line reply once a request took effect
+// (UX-49-3; security C1 for turning work back on).
+func Confirm(r Request, set Settings) string {
+	switch r.Kind {
+	case KindHelp:
+		return HelpText
+	case KindBudget:
+		return fmt.Sprintf("Spare-time work may now use up to %d AI calls a day.", set.SpareCalls)
+	case KindSharing:
+		if r.On {
+			return "Sharing is on: learned skills built from public data may be shared. Reply STOP SHARING to stop."
+		}
+		return "Sharing is off: nothing learned leaves this box."
+	}
+	if r.Loop == "" {
+		if r.On {
+			return "Spare-time work is back on. Reply LOOPS OFF if this wasn't you."
+		}
+		return "Spare-time work is off: no learning, security tests or update checks until you reply LOOPS ON."
+	}
+	w := strings.ToLower(loopAliases[r.Loop])
+	if r.On {
+		return fmt.Sprintf("%s is back on. Reply %s OFF if this wasn't you.", capitalize(w), loopAliases[r.Loop])
+	}
+	return fmt.Sprintf("%s is off until you reply %s ON.", capitalize(w), loopAliases[r.Loop])
+}
+
+func capitalize(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
+}
+
+// BudgetAsk is the broker-rendered approval text for raising the spare
+// budget, old and new from broker state, never from the request's text
+// (security C2).
+func (s *Scheduler) BudgetAsk(in journal.Intent) (string, error) {
+	r, ok := parseSetting(in.ID)
+	if !ok || r.Kind != KindBudget {
+		return "", errors.New("loops: not a budget intent")
+	}
+	cur := s.Settings().SpareCalls
+	return fmt.Sprintf("Raise spare-time AI use from %d to %d calls a day?", cur, r.Calls), nil
+}
 
 // DefaultsLine is onboarding's one line on the loop defaults (LOOP-0).
 func DefaultsLine(calls int64) string {
@@ -234,6 +305,9 @@ func parseSetting(id string) (Request, bool) {
 // whose origin the broker authenticated. It returns ErrPending when the
 // setting waits for the owner's approval (raising the budget).
 func (s *Scheduler) Set(ctx context.Context, r Request) error {
+	if r.Kind == KindHelp {
+		return nil
+	}
 	if r.Kind == KindSharing {
 		if s.cfg.Sharing == nil {
 			return errors.New("loops: sharing is not wired")
@@ -373,6 +447,10 @@ func (s *Scheduler) Execute(_ context.Context, in journal.Intent, _ int) journal
 			next.Paused[r.Loop] = true
 		}
 	case KindBudget:
+		if in.Action == ActionBudgetLower && r.Calls > prev.SpareCalls {
+			// Check allowed it as narrowing; the budget changed since.
+			return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "not a lower budget"}
+		}
 		next.SpareCalls = r.Calls
 	}
 	if r.Kind == KindBudget && s.cfg.Spare != nil {
@@ -382,6 +460,7 @@ func (s *Scheduler) Execute(_ context.Context, in journal.Intent, _ int) journal
 	}
 	s.st.Settings = next
 	s.st.Applied[in.ID] = true
+	s.pruneLocked()
 	if err := s.saveLocked(); err != nil {
 		s.st.Settings = prev
 		delete(s.st.Applied, in.ID)
@@ -427,4 +506,21 @@ func (s *Scheduler) saveLocked() error {
 		return err
 	}
 	return s.cfg.Store.Save(b)
+}
+
+// keepApplied is how many recent settings Reconcile can answer for; older
+// ones settled long ago (security R2).
+const keepApplied = 256
+
+func (s *Scheduler) pruneLocked() {
+	for id := range s.st.Applied {
+		p := strings.Split(id, ":")
+		if len(p) < 2 {
+			delete(s.st.Applied, id)
+			continue
+		}
+		if n, err := strconv.Atoi(strings.TrimPrefix(p[1], "n")); err != nil || n < s.st.Seq-keepApplied {
+			delete(s.st.Applied, id)
+		}
+	}
 }

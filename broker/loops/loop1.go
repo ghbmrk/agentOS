@@ -74,6 +74,27 @@ type Builder interface {
 	Build(ctx context.Context, b Brief) (change.Candidate, error)
 }
 
+// Handler is a builder that builds only for some signals; Loop 1 offers it
+// only those hypotheses.
+type Handler interface {
+	Handles(Signal) bool
+}
+
+// BySignal routes each hypothesis to the builder for its signal, such as
+// the skill compiler for repeated trajectories (CAP-5) and a model-backed
+// agent for the rest.
+type BySignal map[Signal]Builder
+
+func (b BySignal) Handles(s Signal) bool { return b[s] != nil }
+
+func (b BySignal) Build(ctx context.Context, br Brief) (change.Candidate, error) {
+	x := b[br.Hypothesis.Signal]
+	if x == nil {
+		return change.Candidate{}, fmt.Errorf("loops: no builder for %s", br.Hypothesis.Signal)
+	}
+	return x.Build(ctx, br)
+}
+
 // Pipeline is the part of the change pipeline Loop 1 drives. Proposing is
 // Loop 1's only way to change anything (LOOP-6).
 type Pipeline interface {
@@ -121,7 +142,13 @@ type LearnConfig struct {
 	// Defaults 5 and 7 days.
 	RecheckCases int
 	RecheckEvery time.Duration
-	Now          func() time.Time
+	// Backoff is how long after a proposal that waited on the owner the
+	// same hypothesis may be proposed again; it doubles each time, and
+	// after MaxAsks it is not proposed again: the owner's digest lists it
+	// (change C14 (g), arbitrator PL1). Defaults 24 hours and 2.
+	Backoff time.Duration
+	MaxAsks int
+	Now     func() time.Time
 }
 
 // Learn is Loop 1's Source.
@@ -130,7 +157,9 @@ type Learn struct {
 
 	mu          sync.Mutex
 	tried       map[string]int // hypothesis or routing key -> evidence when tried
-	waiting     int            // hypotheses held for evidence
+	asks        map[string]int // key -> proposals that waited on the owner
+	notBefore   map[string]time.Time
+	waiting     int // hypotheses held for evidence
 	heldOut     int
 	lastRecheck time.Time
 	recheckedAt int // held-out count at the last recheck
@@ -159,10 +188,17 @@ func NewLearn(cfg LearnConfig) (*Learn, error) {
 	if cfg.RecheckEvery <= 0 {
 		cfg.RecheckEvery = 7 * 24 * time.Hour
 	}
+	if cfg.Backoff <= 0 {
+		cfg.Backoff = 24 * time.Hour
+	}
+	if cfg.MaxAsks <= 0 {
+		cfg.MaxAsks = 2
+	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Learn{cfg: cfg, tried: map[string]int{}, lastRecheck: cfg.Now()}, nil
+	return &Learn{cfg: cfg, tried: map[string]int{}, asks: map[string]int{}, notBefore: map[string]time.Time{},
+		lastRecheck: cfg.Now()}, nil
 }
 
 func (l *Learn) Loop() Loop { return Improve }
@@ -217,10 +253,11 @@ func (l *Learn) Next(ctx context.Context, modelOK bool) (Job, bool) {
 	l.waiting = 0
 	if l.cfg.Router != nil && l.cfg.ModelWired {
 		key := "routing:" + digest(fmt.Sprint(l.cfg.Router.Candidate()))
-		if l.tried[key] < ev.HeldOut {
+		if l.tried[key] < ev.HeldOut && l.mayAskLocked(key) {
 			return Job{Name: "routing", UsesModel: true, Run: func(ctx context.Context) Result {
 				rep, ok, err := l.cfg.Pipeline.ProposeRouting(ctx, l.cfg.Router)
 				l.done(ctx, key, ev.HeldOut)
+				l.asked(key, rep)
 				if !ok {
 					return Result{Err: err}
 				}
@@ -231,18 +268,41 @@ func (l *Learn) Next(ctx context.Context, modelOK bool) (Job, bool) {
 	if l.cfg.Builder == nil {
 		return Job{}, false
 	}
+	sel, _ := l.cfg.Builder.(Handler)
 	for _, h := range hyps {
-		if l.tried[h.Key] >= len(h.Tasks) {
-			continue // tried with this much evidence already
+		if l.tried[h.Key] >= len(h.Tasks) || !l.mayAskLocked(h.Key) {
+			continue // tried with this much evidence already, or the owner was asked lately
+		}
+		if sel != nil && !sel.Handles(h.Signal) {
+			continue
 		}
 		h := h
 		return Job{Name: "candidate", UsesModel: true, Run: func(ctx context.Context) Result {
-			v, err := l.propose(ctx, h, ev)
+			rep, err := l.propose(ctx, h, ev)
 			l.done(ctx, h.Key, len(h.Tasks))
-			return Result{Value: v, Err: err}
+			l.asked(h.Key, rep)
+			return Result{Value: value(rep), Err: err}
 		}}, true
 	}
 	return Job{}, false
+}
+
+// mayAskLocked reports whether key may be proposed now: not while its
+// backoff runs, and never after MaxAsks proposals waited on the owner.
+func (l *Learn) mayAskLocked(key string) bool {
+	return l.asks[key] < l.cfg.MaxAsks && !l.cfg.Now().Before(l.notBefore[key])
+}
+
+// asked starts key's backoff when its proposal waited on the owner, so an
+// owner who lets a request lapse is not asked again every cycle.
+func (l *Learn) asked(key string, rep change.Report) {
+	if rep.State != change.StateAwaitingOwner {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.asks[key]++
+	l.notBefore[key] = l.cfg.Now().Add(l.cfg.Backoff << (l.asks[key] - 1))
 }
 
 // done marks a key tried, unless the work was preempted: then it is
@@ -260,30 +320,26 @@ func (l *Learn) done(ctx context.Context, key string, n int) {
 // is for. The candidate is dropped, not proposed.
 var ErrOutOfClass = errors.New("loops: candidate writes outside its hypothesis's namespace")
 
-func (l *Learn) propose(ctx context.Context, h Hypothesis, ev Evidence) (float64, error) {
+func (l *Learn) propose(ctx context.Context, h Hypothesis, ev Evidence) (change.Report, error) {
 	cand, err := l.cfg.Builder.Build(ctx, Brief{Hypothesis: h, Dev: ev.Dev})
 	if err != nil {
-		return 0, err
+		return change.Report{}, err
 	}
 	ns := classNS[h.Class]
 	for p := range cand.Files {
 		if first, _, _ := strings.Cut(p, "/"); first != ns {
-			return 0, fmt.Errorf("%w: %s", ErrOutOfClass, h.Class)
+			return change.Report{}, fmt.Errorf("%w: %s", ErrOutOfClass, h.Class)
 		}
 	}
 	for _, p := range cand.Delete {
 		if first, _, _ := strings.Cut(p, "/"); first != ns {
-			return 0, fmt.Errorf("%w: %s", ErrOutOfClass, h.Class)
+			return change.Report{}, fmt.Errorf("%w: %s", ErrOutOfClass, h.Class)
 		}
 	}
 	// Source, origin, and the public mark are the broker's, from the
 	// REV-5 labels of every input; the builder asserts none of them.
 	cand.Source, cand.Origin, cand.Public = change.Local, "loop1", public(h, ev.Dev)
-	rep, err := l.cfg.Pipeline.Propose(ctx, cand)
-	if err != nil {
-		return 0, err
-	}
-	return value(rep), nil
+	return l.cfg.Pipeline.Propose(ctx, cand)
 }
 
 // value is a proposal's measured return: its held-out gain over the
@@ -321,8 +377,8 @@ func (l *Learn) Digest() []string {
 	if l.waiting == 0 || l.heldOut >= l.cfg.MinHeldOut {
 		return nil
 	}
-	return []string{fmt.Sprintf("Learning: %d ideas are waiting for more of your past tasks to test against (%d/%d).",
-		l.waiting, l.heldOut, l.cfg.MinHeldOut)}
+	return []string{fmt.Sprintf("Learning: %d ideas are waiting until there are %d past tasks to test them on (%d so far).",
+		l.waiting, l.cfg.MinHeldOut, l.heldOut)}
 }
 
 // TaskKey is the task an intent belongs to: its goal, or, for intents

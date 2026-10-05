@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -483,12 +484,6 @@ func (s *Scheduler) Share() map[Loop]float64 {
 	return out
 }
 
-var loopWords = map[Loop]string{
-	Improve:  "learning from your tasks",
-	Secure:   "security tests",
-	Maintain: "update checks",
-}
-
 // Digest is the scheduler's lines for the owner's digest, in fixed
 // wording: what is off, and the spare budget's use (LOOP-2), then each
 // source's own lines.
@@ -500,12 +495,12 @@ func (s *Scheduler) Digest() []string {
 	} else {
 		for _, l := range All {
 			if set.Paused[l] {
-				out = append(out, fmt.Sprintf("Loop %d (%s) is off. Reply LOOP %d ON to restart it.", l.number(), loopWords[l], l.number()))
+				out = append(out, fmt.Sprintf("%s is off. Reply %s ON to restart it.", capitalize(strings.ToLower(loopAliases[l])), loopAliases[l]))
 			}
 		}
 	}
 	used, _ := s.cfg.Spare.Overall()
-	if used.Calls > 0 || !set.Off {
+	if used.Calls > 0 {
 		out = append(out, fmt.Sprintf("Spare-time AI use, last 24 hours: %d of %d calls (self-tests and learning).", used.Calls, set.SpareCalls))
 	}
 	for _, src := range s.cfg.Sources {

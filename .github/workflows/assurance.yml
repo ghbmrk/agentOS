@@ -24,6 +24,12 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           persist-credentials: false
+      # Canary targets build the broker, so the toolchain go.mod names must
+      # be installed (GOTOOLCHAIN=local never downloads one).
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        with:
+          go-version-file: broker/go.mod
+          cache: false
       - name: Canary scan (A5), fresh canaries every round
         run: python3 tools/canary.py run --targets assurance/canary-targets.json --rounds 3 --report canary-report.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2

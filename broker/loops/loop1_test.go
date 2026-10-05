@@ -171,7 +171,7 @@ func TestLoop1WaitsForEvidenceThenAdoptsThroughThePipeline(t *testing.T) {
 	if ran, _ := r.s.Tick(context.Background()); ran {
 		t.Fatal("Loop 1 proposed with 4 held-out cases")
 	}
-	if d := strings.Join(r.s.Digest(), "\n"); !strings.Contains(d, "waiting for more of your past tasks to test against (4/5)") {
+	if d := strings.Join(r.s.Digest(), "\n"); !strings.Contains(d, "waiting until there are 5 past tasks to test them on (4 so far)") {
 		t.Fatalf("digest does not say Loop 1 is waiting: %q", d)
 	}
 	if r.ev.runs() != 0 {
@@ -353,5 +353,171 @@ func TestRecheckRunsWhenNewEvidenceArrives(t *testing.T) {
 	r.clk.add(8 * 24 * time.Hour)
 	if job, ok := l.Next(context.Background(), true); !ok || job.Name != "recheck" {
 		t.Fatal("weekly recheck not offered")
+	}
+}
+
+// askPipeline answers every proposal with "waiting on the owner".
+type askPipeline struct {
+	fakePipeline
+	proposals int
+}
+
+func (a *askPipeline) Propose(context.Context, change.Candidate) (change.Report, error) {
+	a.mu.Lock()
+	a.proposals++
+	a.mu.Unlock()
+	return change.Report{State: change.StateAwaitingOwner}, nil
+}
+
+func TestALapsedOwnerRequestBacksOffThenStops(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	n := 0
+	more := func(k int) {
+		for i := 0; i < k; i++ {
+			n++
+			r.corrected(h, n)
+		}
+	}
+	more(12)
+	ap := &askPipeline{}
+	b := &builder{files: map[string][]byte{"procedures/mail": []byte("v2")}}
+	l, err := NewLearn(LearnConfig{Pipeline: ap, Journal: r.eng, Harvest: h, Builder: b, RecheckCases: 1000,
+		RecheckEvery: 365 * 24 * time.Hour, Now: r.clk.now})
+	must(t, err)
+	run := func() bool {
+		job, ok := l.Next(context.Background(), true)
+		if ok {
+			job.Run(context.Background())
+		}
+		return ok
+	}
+	if !run() || ap.proposals != 1 {
+		t.Fatal("first proposal not made")
+	}
+	// New evidence, but the owner was just asked: wait for the backoff.
+	more(4)
+	if run() {
+		t.Fatal("re-proposed inside the backoff")
+	}
+	r.clk.add(25 * time.Hour)
+	if !run() || ap.proposals != 2 {
+		t.Fatal("not re-proposed after the backoff")
+	}
+	// After two lapsed asks it is not proposed again, however long.
+	more(4)
+	r.clk.add(30 * 24 * time.Hour)
+	if run() {
+		t.Fatal("proposed a third time; it should wait in the digest")
+	}
+}
+
+func TestBuildersAreChosenBySignal(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	for i := 1; i <= 12; i++ {
+		r.corrected(h, i)
+	}
+	skills := &builder{files: map[string][]byte{"skills/x": []byte("y")}}
+	l, err := NewLearn(LearnConfig{Pipeline: &fakePipeline{}, Journal: r.eng, Harvest: h, RecheckCases: 1000,
+		Builder: BySignal{SignalRepeat: skills}})
+	must(t, err)
+	// Only correction hypotheses exist; the repeat-only builder gets none.
+	if job, ok := l.Next(context.Background(), true); ok {
+		t.Fatalf("offered %s with no builder for its signal", job.Name)
+	}
+	for i := 0; i < 3; i++ {
+		g := fmt.Sprintf("rep%d", i)
+		r.task(g+"-a", g, "mail", "search", "private")
+		r.task(g+"-b", g, "mail", "label", "private")
+	}
+	job, ok := l.Next(context.Background(), true)
+	if !ok {
+		t.Fatal("repeat hypothesis not offered to its builder")
+	}
+	job.Run(context.Background())
+	if got := skills.got(); len(got) != 1 || got[0].Hypothesis.Signal != SignalRepeat {
+		t.Fatalf("briefs %+v", got)
+	}
+}
+
+// cases captures what Harvest adds.
+type cases struct{ got []change.Case }
+
+func (c *cases) AddTaskCase(x change.Case) error { c.got = append(c.got, x); return nil }
+func (c *cases) Dev(change.Class) []change.Case  { return nil }
+
+func TestHarvestNeverWidensTheJournalLabel(t *testing.T) {
+	r := newRig(t)
+	cs := &cases{}
+	h := &Harvester{J: r.eng, Pipeline: cs, Store: &change.MemStore{}}
+	r.task("priv", "gp", "mail", "send", "private")
+	r.task("pub", "gq", "mail", "send", "public")
+	r.task("pub2", "gr", "mail", "send", "public")
+	must(t, h.Harvest(Outcome{Intent: "priv", Action: Approved, Input: []byte("x"), Output: []byte("y"), Public: true}))
+	must(t, h.Harvest(Outcome{Intent: "pub", Action: Approved, Input: []byte("x"), Output: []byte("y"), Public: true}))
+	must(t, h.Harvest(Outcome{Intent: "pub2", Action: Approved, Input: []byte("x"), Output: []byte("y")}))
+	want := map[string]bool{"priv": false, "pub": true, "pub2": false}
+	for _, c := range cs.got {
+		if c.Public != want[c.ID] {
+			t.Fatalf("case %s public=%v", c.ID, c.Public)
+		}
+	}
+	if len(cs.got) != 3 {
+		t.Fatalf("%d cases", len(cs.got))
+	}
+}
+
+// failSecond saves once, then fails: a crash between the harvester's two
+// writes.
+type failSecond struct {
+	change.MemStore
+	n int
+}
+
+func (f *failSecond) Save(b []byte) error {
+	f.n++
+	if f.n > 1 {
+		return errors.New("disk gone")
+	}
+	return f.MemStore.Save(b)
+}
+
+func TestACrashMidHarvestStillKeepsTheTaskFromTheBuilder(t *testing.T) {
+	r := newRig(t)
+	st := &failSecond{}
+	h := &Harvester{J: r.eng, Pipeline: r.p, Store: st}
+	// Find a task whose case lands held out, so it must never be mined.
+	var id string
+	for i := 0; ; i++ {
+		id = fmt.Sprintf("crash-%d", i)
+		r.task(id, "gc"+id, "mail", "draft", "private")
+		st.n = 0
+		err := h.Harvest(Outcome{Intent: id, Action: Edited, Input: []byte("procedures/mail"), Output: []byte("v1"), Correction: []byte("v2")})
+		if err == nil {
+			t.Fatal("second save did not fail")
+		}
+		dev := false
+		for _, c := range r.p.Dev(change.ClassTask) {
+			dev = dev || c.ID == id
+		}
+		if !dev {
+			break
+		}
+	}
+	// The box restarts: a fresh harvester over what was saved.
+	h2 := &Harvester{J: r.eng, Pipeline: r.p, Store: &st.MemStore}
+	ev, err := h2.Evidence()
+	must(t, err)
+	if !ev.Held("goal:gc" + id) {
+		t.Fatal("a held-out task the pipeline holds is not excluded from mining after a crash")
+	}
+	if ev.HeldOut != 0 {
+		t.Fatalf("an unconfirmed case counted as evidence: %d", ev.HeldOut)
+	}
+	// Retrying the harvest completes it.
+	must(t, h2.Harvest(Outcome{Intent: id, Action: Edited, Input: []byte("procedures/mail"), Output: []byte("v1"), Correction: []byte("v2")}))
+	if ev, _ := h2.Evidence(); ev.HeldOut != 1 {
+		t.Fatalf("after retry: held out %d", ev.HeldOut)
 	}
 }

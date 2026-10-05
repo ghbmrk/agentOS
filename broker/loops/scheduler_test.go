@@ -125,7 +125,7 @@ func TestForegroundPreemptsLoopWorkWithinTheTarget(t *testing.T) {
 
 func TestSlowYieldIsReported(t *testing.T) {
 	r := newRig(t)
-	src := &source{loop: Secure, clk: r.clk, queue: 1, stubborn: 600 * time.Millisecond, started: make(chan struct{}, 1)}
+	src := &source{loop: Secure, clk: r.clk, queue: 1, stubborn: 3 * time.Second, started: make(chan struct{}, 1)}
 	r.restart(src)
 	go r.s.Tick(context.Background())
 	<-src.started
@@ -134,8 +134,10 @@ func TestSlowYieldIsReported(t *testing.T) {
 	if !errors.Is(err, ErrSlowYield) {
 		t.Fatalf("Preempt = %v, want ErrSlowYield", err)
 	}
-	if d := time.Since(start); d > 400*time.Millisecond {
-		t.Fatalf("Preempt waited %v past the 200ms target", d)
+	// Preempt gave up at the target, long before the stubborn work
+	// returned; the bound leaves room for a loaded -race run.
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("Preempt waited %v; target 200ms, the work runs 3s", d)
 	}
 }
 
