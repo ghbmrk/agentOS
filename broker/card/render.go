@@ -152,7 +152,8 @@ If the Wi-Fi never appears, the PC did not start from the drive. Turn it off, th
 {{.PassQR}}
 <div><p class="mono big">{{.VaultPassphrase}}</p>
 <p class="note">Only for starting the box on a PC it does not know: type it on the box page, or scan this code with your phone's camera, tap Copy, and paste it there. Never send it by text or say it on a call.
-If this drive was out of your hands, unlock it only on your trusted PC.</p></div>
+If this drive was out of your hands, unlock it only on your trusted PC.
+The box cannot print this again; keep the card.</p></div>
 </div>
 </div>
 </section>
@@ -168,7 +169,7 @@ If this drive was out of your hands, unlock it only on your trusted PC.</p></div
 
 <section class="sheet">
 <h1>Recovery key</h1>
-<p class="note">Tear off and store somewhere safe, apart from the drive and the grid. It restores your box onto new hardware and replaces a lost phone or number. You will rarely need it.</p>
+<p class="note">Tear off and store somewhere safe, apart from the drive and the grid. It restores your box onto new hardware and replaces a lost phone or number. You will rarely need it. The box cannot print this again, so keep this sheet.</p>
 <p class="mono big">{{.RecoveryKey}}</p>
 <h2>Reset secret</h2>
 <p class="note">Only for re-running setup after a reset.</p>

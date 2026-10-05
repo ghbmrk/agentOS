@@ -162,7 +162,8 @@ func TestRenderedCardIsTheManual(t *testing.T) {
 	for _, want := range []string{"Nothing happened?", c.WiFiName, htmlEsc(c.WiFiPassword), c.SetupCode, c.SetupSecret,
 		c.VaultPassphrase, c.RecoveryKey, "Dell", "HP", "Lenovo", "ASUS", "Acer",
 		"minutes", "apart from the drive", "<svg", "Box page: <span class=\"mono\">" + BoxPage, "Wi-Fi joined but no page?",
-		"apart from the box and from this card", "Reset secret", "tap Copy"} {
+		"apart from the box and from this card", "Reset secret", "tap Copy",
+		"The box cannot print this again, so keep this sheet.", "The box cannot print this again; keep the card."} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("card lacks %q", want)
 		}
