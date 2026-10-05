@@ -863,6 +863,24 @@ func (c *Channel) Active(d time.Duration) bool {
 	return !c.active.IsZero() && c.cfg.Now().Sub(c.active) < d
 }
 
+// LastActive is when the owner last sent a message the control handler
+// ran (task chat, STATUS, a setting); zero if never. The sleeper reads it
+// for the agent's idle time (PE7).
+func (c *Channel) LastActive() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.active
+}
+
+// UndoOpen reports a queued auto-reply or an approved effect held for its
+// undo window (or kept past it by STOP): the sleeper does not stop the
+// agent then (PE7 condition 2).
+func (c *Channel) UndoOpen() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.queued) > 0
+}
+
 // AgentPrefix starts every text Notify sends, so agent-written text can
 // never pass for one of the broker's own templates (an approval request,
 // a code prompt).

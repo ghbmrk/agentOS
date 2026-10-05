@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -517,6 +518,21 @@ func (e *Engine) Resume() error {
 		return fmt.Errorf("%w: not stopped", ErrState)
 	}
 	return e.commit(Record{Type: RecResume})
+}
+
+// GuestActive reports an intent the agent submitted (origin "guest:")
+// that is authorized but not yet dispatched, or in flight: work the agent
+// has in hand, so the sleeper does not stop it (PE7 condition 2).
+func (e *Engine) GuestActive() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, id := range e.order {
+		en := e.intents[id]
+		if strings.HasPrefix(en.intent.Origin, "guest:") && (en.state == Authorized || en.state == InFlight) {
+			return true
+		}
+	}
+	return false
 }
 
 // Stopped reports whether STOP is in force.

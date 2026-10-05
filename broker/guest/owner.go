@@ -206,6 +206,19 @@ func (p *Plane) DeliverOwner(machine, text string, public bool) (string, error) 
 	return msg.ID, nil
 }
 
+// OwnerPending reports an owner message to machine that is queued or
+// handed out and not yet answered: the agent has work in hand, so the
+// sleeper does not stop it (PE7 condition 2).
+func (p *Plane) OwnerPending(machine string) bool {
+	m := p.get(machine)
+	if m == nil {
+		return false
+	}
+	m.box.mu.Lock()
+	defer m.box.mu.Unlock()
+	return len(m.box.msgs) > 0
+}
+
 func (p *Plane) ownerNext(m *machine, w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "GET only", http.StatusMethodNotAllowed)

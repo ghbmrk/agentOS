@@ -2111,6 +2111,49 @@ func (g *Gate) Run(ctx context.Context, every time.Duration) {
 // Wait returns when no decision is being settled.
 func (g *Gate) Wait() { g.wg.Wait() }
 
+// Holding reports an effect the agent asked for (origin "guest:") that
+// the gate holds: batched or waiting on the owner, approved but waiting
+// for the local page, held for its undo window, carried over a restart,
+// or released but kept from running by STOP. The sleeper does not stop
+// the agent then (PE7 condition 2).
+func (g *Gate) Holding() bool {
+	g.mu.Lock()
+	var ids []string
+	for id := range g.waiting {
+		ids = append(ids, id)
+	}
+	ids = append(ids, g.batch...)
+	for id := range g.carried {
+		ids = append(ids, id)
+	}
+	for _, c := range g.reissue {
+		ids = append(ids, c.Ref)
+	}
+	for id := range g.after {
+		ids = append(ids, id)
+	}
+	for id := range g.sending {
+		ids = append(ids, id)
+	}
+	for id, d := range g.decided {
+		if d.approved && d.local && !g.confirmed[id] {
+			ids = append(ids, id)
+		}
+	}
+	eng := g.eng
+	g.mu.Unlock()
+	if eng == nil {
+		return false
+	}
+	for _, id := range ids {
+		// The engine is read without g.mu: its policy calls take g.mu.
+		if st, err := eng.Get(id); err == nil && strings.HasPrefix(st.Intent.Origin, "guest:") {
+			return true
+		}
+	}
+	return false
+}
+
 // Narrow pauses or revokes a grant on the owner's text (owner.Config
 // Narrow; ADP-9: only the owner's number, like STOP). Narrowing intents
 // are exempt from STOP holds and restart fences (journal A9).
