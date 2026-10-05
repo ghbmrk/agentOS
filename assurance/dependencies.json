@@ -13,22 +13,52 @@
     {
       "file": "broker/vendor/golang.org/x/sys/unix/mkall.sh",
       "host": "cgit.freebsd.org",
-      "why": "golang.org/x/sys build script (generates syscall tables); not compiled into any binary (P2-4b, go-tpm dependency)."
+      "why": "golang.org/x/sys build script (generates syscall tables); not compiled into any binary (P2-4b, P4-3)"
     },
     {
       "file": "broker/vendor/golang.org/x/sys/unix/mkall.sh",
       "host": "cvsweb.netbsd.org",
-      "why": "golang.org/x/sys build script (generates syscall tables); not compiled into any binary (P2-4b, go-tpm dependency)."
+      "why": "golang.org/x/sys build script (generates syscall tables); not compiled into any binary (P2-4b, P4-3)"
     },
     {
       "file": "broker/vendor/golang.org/x/sys/unix/mkall.sh",
       "host": "gitweb.dragonflybsd.org",
-      "why": "golang.org/x/sys build script (generates syscall tables); not compiled into any binary (P2-4b, go-tpm dependency)."
+      "why": "golang.org/x/sys build script (generates syscall tables); not compiled into any binary (P2-4b, P4-3)"
     },
     {
       "file": "broker/vendor/golang.org/x/sys/unix/syscall_solaris.go",
       "host": "go.dev",
-      "why": "bug link inside a Solaris-only panic message; not compiled for Linux and never contacted (P2-4b, go-tpm dependency)."
+      "why": "bug link inside a Solaris-only panic message; not compiled for Linux and never contacted (P2-4b, P4-3)"
+    },
+    {
+      "file": "broker/vendor/github.com/secure-systems-lab/go-securesystemslib/cjson/canonicaljson.go",
+      "host": "wiki.laptop.org",
+      "why": "spec link in doc comments continued from the line above; go-tuf canonical JSON (P4-3)"
+    },
+    {
+      "file": "broker/vendor/github.com/sigstore/sigstore/pkg/signature/options/rpcauth.go",
+      "host": "vault",
+      "why": "example address in a struct field comment; the KMS option is never used (P4-3)"
+    },
+    {
+      "file": "broker/vendor/github.com/theupdateframework/go-tuf/v2/metadata/keys.go",
+      "host": "theupdateframework.github.io",
+      "why": "TUF specification link in a trailing comment (P4-3)"
+    },
+    {
+      "file": "broker/vendor/golang.org/x/crypto/nacl/secretbox/secretbox.go",
+      "host": "nacl.cr.yp.to",
+      "why": "NaCl reference in the package doc comment (P4-3)"
+    },
+    {
+      "file": "broker/vendor/google.golang.org/protobuf/internal/errors/errors.go",
+      "host": "github.com",
+      "why": "issue link inside an error message string; never contacted (P4-3)"
+    },
+    {
+      "file": "broker/vendor/google.golang.org/protobuf/reflect/protoregistry/registry.go",
+      "host": "protobuf.dev",
+      "why": "FAQ link inside a conflict warning string; never contacted (P4-3)"
     },
     {
       "file": "broker/vendor/github.com/emersion/go-imap/.build.yml",
