@@ -444,3 +444,84 @@ func TestDeleteFreedBytesSkipHardlinks(t *testing.T) {
 		t.Fatalf("the last link freed %d bytes", out.Bytes)
 	}
 }
+
+// The layer a path shows from decides its code, one case per rule of
+// the overlay (L3 on #166: N3, N5, N6, N7, N13). Whiteouts and opaque
+// markers need root.
+func TestDeleteLayerCodes(t *testing.T) {
+	whiteout := func(r *delRig, rel string) {
+		r.t.Helper()
+		p := filepath.Join(r.upper, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			r.t.Fatal(err)
+		}
+		if err := syscall.Mknod(p, syscall.S_IFCHR, 0); err != nil {
+			r.t.Skipf("no whiteouts here (mknod: %v)", err)
+		}
+	}
+	opaque := func(r *delRig, rel string) {
+		r.t.Helper()
+		if err := syscall.Setxattr(filepath.Join(r.upper, rel), opaqueXattr, []byte("y"), 0); err != nil {
+			r.t.Skipf("trusted xattrs need root: %v", err)
+		}
+	}
+	for _, tc := range []struct {
+		name, path, want string
+		set              func(r *delRig)
+	}{
+		{"upper only", "/a", Removed, func(r *delRig) { r.file(r.upper, "a", "1") }},
+		{"upper over lower", "/a", RemovedBase, func(r *delRig) { r.file(r.upper, "a", "1"); r.file(r.lower, "a", "0") }},
+		{"lower only", "/a", BaseImage, func(r *delRig) { r.file(r.lower, "a", "0") }},
+		{"neither", "/a", NotFound, func(r *delRig) {}},
+		{"whited out", "/a", NotFound, func(r *delRig) { r.file(r.lower, "a", "0"); whiteout(r, "a") }},
+		{"parent whited out", "/d/a", NotFound, func(r *delRig) { r.file(r.lower, "d/a", "0"); whiteout(r, "d") }},
+		{"upper file above", "/d/a", NotFound, func(r *delRig) { r.file(r.upper, "d", "1"); r.file(r.lower, "d/a", "0") }},
+		{"lower under an upper directory", "/d/a", BaseImage, func(r *delRig) { r.file(r.upper, "d/b", "1"); r.file(r.lower, "d/a", "0") }},
+		{"opaque directory hides lower", "/d/a", NotFound, func(r *delRig) {
+			r.file(r.upper, "d/b", "1")
+			r.file(r.lower, "d/a", "0")
+			opaque(r, "d")
+		}},
+		{"opaque grandparent hides lower", "/d/e/a", NotFound, func(r *delRig) {
+			r.file(r.upper, "d/e/b", "1")
+			r.file(r.lower, "d/e/a", "0")
+			opaque(r, "d")
+		}},
+		{"opaque directory itself", "/d", RemovedBase, func(r *delRig) {
+			r.file(r.upper, "d/b", "1")
+			r.file(r.lower, "d/a", "0")
+			opaque(r, "d")
+		}},
+		{"lower file above", "/d/a", NotFound, func(r *delRig) { r.file(r.lower, "d", "0") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newDelRig(t)
+			tc.set(r)
+			if out := r.del(true, 100, tc.path); out.Codes[0] != tc.want {
+				t.Fatalf("%s = %s, want %s", tc.path, out.Codes[0], tc.want)
+			}
+		})
+	}
+}
+
+// Resolution follows no symlink on either layer: a dangling symlink in
+// upper is removed itself, and a symlinked prefix in lower hides what is
+// behind it, so a host path's existence never shows (L3 N1 on #166).
+func TestDeleteResolveFollowsNoSymlink(t *testing.T) {
+	r := newDelRig(t)
+	host := t.TempDir()
+	r.file(host, "secret", "canary")
+	if err := os.Symlink(filepath.Join(host, "missing"), filepath.Join(r.upper, "dangling")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(host, filepath.Join(r.lower, "etc")); err != nil {
+		t.Fatal(err)
+	}
+	out := r.del(false, 100, "/dangling", "/etc/secret")
+	if fmt.Sprint(out.Codes) != fmt.Sprint([]string{Removed, NotFound}) {
+		t.Fatalf("codes = %v", out.Codes)
+	}
+	if exists(filepath.Join(r.upper, "dangling")) || !exists(filepath.Join(host, "secret")) {
+		t.Fatal("the symlink stayed, or its target went")
+	}
+}
