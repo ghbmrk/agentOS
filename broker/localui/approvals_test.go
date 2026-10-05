@@ -336,3 +336,34 @@ func (o slowOwner) LocalAnswer(id, sum string, approve bool, code string) (strin
 	time.Sleep(50 * time.Millisecond)
 	return o.Channel.LocalAnswer(id, sum, approve, code)
 }
+
+// Security F1 on #171: the texted code offered on the page gets its hint
+// and counts against the phone's page bound, so the page is no uncounted
+// oracle for it; the channel's own bounds still do not count it.
+func TestTheTextedCodeOnThePageCountsForThePhone(t *testing.T) {
+	a := newApprovalRig(t)
+	id, err := a.ch.Request([]owner.Item{pageItemText("t1")}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var texted string
+	for _, m := range a.carrier.Log() {
+		if s := regexp.MustCompile(`Reply YES ` + id + ` (\d+) `).FindStringSubmatch(m.Text); s != nil {
+			texted = s[1]
+		}
+	}
+	if texted == "" {
+		t.Fatal("no texted code")
+	}
+	for i := 0; i < PageWrongPerMinute; i++ {
+		if w := a.post("/approvals/", answer(a.form(id), "approve", texted)); !strings.Contains(w.Body.String(), "That&#39;s the code I texted.") {
+			t.Fatalf("try %d: %s", i, w.Body.String())
+		}
+	}
+	if w := a.post("/approvals/", answer(a.form(id), "approve", texted)); !strings.Contains(w.Body.String(), "Too many wrong codes from this phone.") {
+		t.Fatalf("sixth: %s", w.Body.String())
+	}
+	if len(a.decided()) != 0 || len(a.ch.LocalRequests()) != 1 {
+		t.Fatal("decided or voided")
+	}
+}

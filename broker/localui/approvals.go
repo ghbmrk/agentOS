@@ -129,6 +129,11 @@ func (s *Server) answer(o Owner, sess string, f map[string][]string) (msg, refus
 			return "", out // tries left, or void (UX A4)
 		}
 		return "", "That code did not work. Each code works once; wait for the next one."
+	case errors.Is(err, owner.ErrTextedCode):
+		// Uncounted by the channel, but counted for this phone, or the
+		// page would test texted codes without limit (Security F1 on #171).
+		wrong = true
+		return "", err.Error()
 	case errors.Is(err, owner.ErrNoRequest), errors.Is(err, owner.ErrChanged):
 		return "", stalePage
 	}

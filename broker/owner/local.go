@@ -174,6 +174,10 @@ func (c *Channel) takeLocalNotesLocked() []string {
 var (
 	ErrWrongCode = errors.New("owner: wrong code")
 	ErrTooMany   = errors.New("owner: too many local attempts; try again later")
+	// ErrTextedCode: the page was given the request's texted code. The
+	// channel does not count it (L3 S-a on #165); the page counts it for
+	// the phone (Security F1 on #171).
+	ErrTextedCode = errors.New("That's the code I texted. Here, use a code from your code generator.")
 )
 
 // LocalStatus is what the local status page may show without sign-in.
@@ -462,7 +466,7 @@ func (c *Channel) LocalAnswer(id, sum string, approve bool, code string) (string
 		// (L3 S-a on #165). Any other guess still counts.
 		c.mu.Unlock()
 		c.decide(decided)
-		return "", errors.New("That's the code I texted. Here, use a code from your code generator.")
+		return "", ErrTextedCode
 	}
 	if approve {
 		ok, err := c.takeLocalLocked(now)
