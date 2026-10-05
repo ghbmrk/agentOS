@@ -460,7 +460,10 @@ func takeLockout(v *vault.Vault, t transport.TPM, id []byte) error {
 	}
 	err := tpmseal.TakeLockout(t, auth, held)
 	clear(auth)
-	if err != nil && !held {
+	// Forget a new entry only when the TPM certainly never took it: any
+	// other failure may have come after the change, and losing the value
+	// would lock the box out of the lockout hierarchy.
+	if errors.Is(err, tpmseal.ErrLockoutOwned) && !held {
 		v.Delete(name)
 	}
 	return err

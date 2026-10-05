@@ -457,3 +457,18 @@ func TestPINVariantsDoNotOpen(t *testing.T) {
 		t.Fatalf("exact PIN: %v", err)
 	}
 }
+
+// A vault that believes it holds the lockout authorization, but whose
+// value the TPM no longer has (a restored vault, a TPM re-keyed by other
+// software), is told so rather than trusted.
+func TestHeldLockoutIsProved(t *testing.T) {
+	s := swtpm.Start(t)
+	auth, _ := tpmseal.NewLockoutAuth()
+	if err := tpmseal.TakeLockout(s.TPM(), auth, false); err != nil {
+		t.Fatal(err)
+	}
+	stale, _ := tpmseal.NewLockoutAuth()
+	if err := tpmseal.TakeLockout(s.TPM(), stale, true); !errors.Is(err, tpmseal.ErrLockoutOwned) {
+		t.Fatalf("held but wrong: got %v, want ErrLockoutOwned", err)
+	}
+}
