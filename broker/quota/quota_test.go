@@ -56,9 +56,8 @@ func projectStopsAtItsHardLimit(t *testing.T, root string) {
 	if !overLimit(werr) {
 		t.Fatalf("wrote 4 MiB under a 1 MiB quota: %v", werr)
 	}
-	u, err := q.Usage(4242)
-	must(t, err)
-	if u.LimitBytes != 1<<20 || u.LimitInodes != 100 || u.Bytes > 1<<20 || u.Bytes == 0 {
+	u := atLimit(t, q, 4242, 1<<20)
+	if u.LimitInodes != 100 {
 		t.Fatalf("usage %+v", u)
 	}
 	// An untagged sibling is not limited by it.
@@ -113,21 +112,55 @@ func TestTagTakesInATreeWrittenUntagged(t *testing.T) {
 		if !overLimit(werr) {
 			t.Fatalf("wrote 2 MiB more under a 1 MiB quota holding 512 KiB: %v", werr)
 		}
-		if u, err := q.Usage(4250); err != nil || u.Bytes > 1<<20 {
-			t.Fatalf("usage %+v (%v) past the limit", u, err)
-		}
+		atLimit(t, q, 4250, 1<<20)
 		if err := q.Tag(d, 0); err == nil {
 			t.Fatal("tagged a tree with project 0")
 		}
 	})
 }
 
+// TestAFullFileSystemIsNotAQuotaStop: XFS refuses a write past a project
+// quota with ENOSPC, the errno of a full file system, so the errno alone
+// cannot tell the two apart; the project's usage can. A project with room
+// left on a full file system is refused with its use below its limit.
+func TestAFullFileSystemIsNotAQuotaStop(t *testing.T) {
+	eachFS(t, 64, func(t *testing.T, root string) {
+		q, err := Open(root)
+		must(t, err)
+		d := filepath.Join(root, "m1")
+		must(t, os.Mkdir(d, 0o700))
+		must(t, q.Limit(d, 4260, 1<<40, 1000))
+		werr := Enforced(func() error { return fill(filepath.Join(d, "big"), 1<<30) })
+		if !errors.Is(werr, syscall.ENOSPC) {
+			t.Fatalf("filled the file system: %v", werr)
+		}
+		u, err := q.Usage(4260)
+		must(t, err)
+		if u.Bytes == 0 || u.Bytes >= u.LimitBytes {
+			t.Fatalf("usage %+v on a full file system", u)
+		}
+	})
+}
+
 // overLimit reports whether err is a write refused at a project's limit:
 // EDQUOT on ext4, ENOSPC on XFS, which reports a project (directory tree)
-// quota as a full file system. Each file system here is far larger than
-// the limits, so ENOSPC is the limit, and the usage checks pin it.
+// quota as a full file system. ENOSPC also means a full file system, so
+// each test pairs it with atLimit.
 func overLimit(err error) bool {
 	return errors.Is(err, syscall.EDQUOT) || errors.Is(err, syscall.ENOSPC)
+}
+
+// atLimit checks that project id's use, after a refused write, is at its
+// byte limit: within it, and short of it by less than the write refused
+// (64 KiB) plus a little allocation slack.
+func atLimit(t *testing.T, q *FS, id uint32, limit int64) Usage {
+	t.Helper()
+	u, err := q.Usage(id)
+	must(t, err)
+	if u.LimitBytes != limit || u.Bytes > limit || u.Bytes+256<<10 < limit {
+		t.Fatalf("project %d after a refused write: usage %+v, want at its %d-byte limit", id, u, limit)
+	}
+	return u
 }
 
 // fill writes n bytes to path, synced as it goes so blocks are allocated.
