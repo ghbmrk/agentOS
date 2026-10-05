@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -57,6 +56,8 @@ type Artifact struct {
 type Package struct {
 	Name    string
 	Version string
+	// Scheme is how versions order: SchemeDeb (default) or SchemeSemver.
+	Scheme  string
 	Contain *Target
 }
 
@@ -152,6 +153,9 @@ type GuardConfig struct {
 	// feed cannot pause everything; the owner is texted about the rest.
 	// Default 3.
 	MaxPauses int
+	// ReText is how long a finding that clears and comes back stays
+	// untexted. Default 24 hours.
+	ReText time.Duration
 	// Every is how often the passive checks run. Default 6 hours.
 	Every time.Duration
 	// Warn is how far ahead an expiry is reported. Default 14 days.
@@ -177,8 +181,15 @@ type secureState struct {
 	Last time.Time `json:"last"`
 	// Open are findings still observed, by ID.
 	Open map[string]Record `json:"open"`
-	// Evidence is every finding ever recorded; it only grows.
+	// Evidence is every distinct finding ever recorded, one record per
+	// finding digest; it only grows.
 	Evidence []Record `json:"evidence"`
+	// Paused are containments still in force, by target, kept after their
+	// finding clears until the owner resumes the target.
+	Paused map[string]Record `json:"paused,omitempty"`
+	// Texted is when each finding was last texted, so a flapping finding
+	// is not texted again within ReText.
+	Texted map[string]time.Time `json:"texted,omitempty"`
 }
 
 // Record is a finding's preserved evidence (LOOP-9).
@@ -190,6 +201,9 @@ type Record struct {
 	Fix       string    `json:"fix,omitempty"` // pipeline state of the fix, if any
 	FixReason string    `json:"fix_reason,omitempty"`
 	Digest    string    `json:"digest"` // sha256 of the finding, for tamper evidence
+	// Seen counts the times the finding appeared; Last is the latest.
+	Seen int       `json:"seen"`
+	Last time.Time `json:"last"`
 }
 
 // NewGuard loads Loop 2's state.
@@ -199,6 +213,9 @@ func NewGuard(cfg GuardConfig) (*Guard, error) {
 	}
 	if cfg.MaxPauses <= 0 {
 		cfg.MaxPauses = 3
+	}
+	if cfg.ReText <= 0 {
+		cfg.ReText = 24 * time.Hour
 	}
 	if cfg.Every <= 0 {
 		cfg.Every = 6 * time.Hour
@@ -227,6 +244,12 @@ func NewGuard(cfg GuardConfig) (*Guard, error) {
 	}
 	if s.st.Open == nil {
 		s.st.Open = map[string]Record{}
+	}
+	if s.st.Paused == nil {
+		s.st.Paused = map[string]Record{}
+	}
+	if s.st.Texted == nil {
+		s.st.Texted = map[string]time.Time{}
 	}
 	return s, nil
 }
@@ -317,7 +340,10 @@ func (s *Guard) handle(ctx context.Context, f Finding, pause bool) error {
 	// Evidence is saved before anything slower runs.
 	s.mu.Lock()
 	s.st.Open[f.ID] = rec
-	s.st.Evidence = append(s.st.Evidence, rec)
+	if rec.Contained == "paused" {
+		s.st.Paused[targetKey(*f.Contain)] = rec
+	}
+	ev := s.evidenceLocked(rec)
 	err := s.saveLocked()
 	s.mu.Unlock()
 	if err != nil {
@@ -347,12 +373,46 @@ func (s *Guard) handle(ctx context.Context, f Finding, pause bool) error {
 	}
 	s.mu.Lock()
 	s.st.Open[f.ID] = rec
-	s.st.Evidence[len(s.st.Evidence)-1] = rec
+	e := &s.st.Evidence[ev]
+	e.Fixture, e.Fix, e.FixReason = rec.Fixture, rec.Fix, rec.FixReason
+	text := f.Severity == High || rec.Contained == "capped"
+	if t, ok := s.st.Texted[f.ID]; text && ok && rec.Contained != "paused" && rec.At.Sub(t) < s.cfg.ReText {
+		text = false // flapping: it was texted recently and nothing new was paused
+	}
+	if text {
+		s.st.Texted[f.ID] = rec.At
+	}
 	s.mu.Unlock()
-	if f.Severity == High || rec.Contained == "capped" {
+	if text {
 		s.cfg.Notify(ownerLine(rec))
 	}
 	return errors.Join(errs...)
+}
+
+// evidenceLocked records a finding's evidence, once per digest, and
+// returns its index.
+func (s *Guard) evidenceLocked(rec Record) int {
+	for i := range s.st.Evidence {
+		if e := &s.st.Evidence[i]; e.Digest == rec.Digest {
+			e.Seen++
+			e.Last = rec.At
+			return i
+		}
+	}
+	rec.Seen, rec.Last = 1, rec.At
+	s.st.Evidence = append(s.st.Evidence, rec)
+	return len(s.st.Evidence) - 1
+}
+
+func targetKey(t Target) string { return t.Kind + "/" + t.Name }
+
+// Resumed tells Loop 2 the owner resumed a paused target, so the digest
+// stops listing it. The wiring calls it when the grant or executor resumes.
+func (s *Guard) Resumed(t Target) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.st.Paused, targetKey(t))
+	return s.saveLocked()
 }
 
 func (s *Guard) saveLocked() error {
@@ -403,8 +463,11 @@ func (s *Guard) check() (found []Finding, notes []string, stale string) {
 				case merr != nil:
 					add(CheckHash, a.Name, "could not be measured", High, a.Contain, nil)
 				case got != want:
-					add(CheckHash, a.Name, "differs from the signed release", High, a.Contain,
-						fixtureInput(FixtureRule{Check: CheckHash, Subject: a.Name, Digest: want}))
+					// No fixture: a fixture pinned to today's digest would fail
+					// every later release that changes this artifact, and a
+					// candidate cannot reintroduce tampering (UPD-8 checks
+					// signatures on every release).
+					add(CheckHash, a.Name, "differs from the signed release", High, a.Contain, nil)
 				}
 			}
 		}
@@ -423,7 +486,7 @@ func (s *Guard) check() (found []Finding, notes []string, stale string) {
 			}
 			for _, p := range pkgs {
 				for _, a := range snap.Advisories {
-					if a.Package != p.Name || !versionBelow(p.Version, a.Fixed) {
+					if a.Package != p.Name || !versionBelow(p.Scheme, p.Version, a.Fixed) {
 						continue
 					}
 					sev := Low
@@ -431,7 +494,7 @@ func (s *Guard) check() (found []Finding, notes []string, stale string) {
 						sev = High
 					}
 					add(CheckAdvisory, p.Name, a.ID, sev, p.Contain,
-						fixtureInput(FixtureRule{Check: CheckAdvisory, Subject: p.Name, Fixed: a.Fixed}))
+						fixtureInput(FixtureRule{Check: CheckAdvisory, Subject: p.Name, Fixed: a.Fixed, Scheme: p.Scheme}))
 				}
 			}
 		}
@@ -506,53 +569,14 @@ func staleLine(fetched, now time.Time) string {
 	return fmt.Sprintf("Security advisories were last fetched %d days ago, so known-vulnerability checks are not current.", days)
 }
 
-// versionBelow reports v < fixed, comparing dot-separated numbers. A
-// version either side that does not parse counts as below: fail closed.
-func versionBelow(v, fixed string) bool {
-	a, ok1 := parseVersion(v)
-	b, ok2 := parseVersion(fixed)
-	if !ok1 || !ok2 {
-		return true
-	}
-	for i := 0; i < max(len(a), len(b)); i++ {
-		x, y := 0, 0
-		if i < len(a) {
-			x = a[i]
-		}
-		if i < len(b) {
-			y = b[i]
-		}
-		if x != y {
-			return x < y
-		}
-	}
-	return false
-}
-
-func parseVersion(v string) ([]int, bool) {
-	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
-	if v == "" {
-		return nil, false
-	}
-	var out []int
-	for _, p := range strings.Split(v, ".") {
-		n, err := strconv.Atoi(p)
-		if err != nil || n < 0 {
-			return nil, false
-		}
-		out = append(out, n)
-	}
-	return out, true
-}
-
 // FixtureRule is a Loop 2 regression fixture's input: the condition a
 // change must not break again. It is the minimized case for a passive
 // finding: one subject, one condition.
 type FixtureRule struct {
 	Check   Check  `json:"check"`
 	Subject string `json:"subject"`
-	Digest  string `json:"digest,omitempty"` // CheckHash: the signed digest
-	Fixed   string `json:"fixed,omitempty"`  // CheckAdvisory: the first fixed version
+	Fixed   string `json:"fixed,omitempty"` // CheckAdvisory: the first fixed version
+	Scheme  string `json:"scheme,omitempty"`
 }
 
 // FixtureOK is what a passing fixture answers.
@@ -563,10 +587,9 @@ func fixtureInput(r FixtureRule) []byte {
 	return b
 }
 
-// Facts are what a candidate tree would install: digests and package
-// versions. The evaluator builds them for the tree under test.
+// Facts are what a candidate tree would install: package versions. The
+// evaluator builds them for the tree under test.
 type Facts struct {
-	Digests  map[string]string
 	Versions map[string]string
 }
 
@@ -578,13 +601,9 @@ func AnswerFixture(input []byte, f Facts) []byte {
 	if err := json.Unmarshal(input, &r); err != nil {
 		return []byte("unreadable")
 	}
-	switch r.Check {
-	case CheckHash:
-		if d, ok := f.Digests[r.Subject]; ok && d == r.Digest {
-			return []byte(FixtureOK)
-		}
-	case CheckAdvisory:
-		if v, ok := f.Versions[r.Subject]; ok && !versionBelow(v, r.Fixed) {
+	if r.Check == CheckAdvisory {
+		// A tree without the package is not vulnerable to it.
+		if v, ok := f.Versions[r.Subject]; !ok || !versionBelow(r.Scheme, v, r.Fixed) {
 			return []byte(FixtureOK)
 		}
 	}
@@ -645,6 +664,18 @@ func (s *Guard) Digest() []string {
 	sort.Strings(ids)
 	for _, id := range ids {
 		out = append(out, ownerLine(s.st.Open[id]))
+	}
+	keys := make([]string, 0, len(s.st.Paused))
+	for k := range s.st.Paused {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		r := s.st.Paused[k]
+		if _, open := s.st.Open[r.Finding.ID]; !open {
+			out = append(out, fmt.Sprintf("%s %s is still paused after a security finding that has since cleared.",
+				strings.ToUpper(r.Finding.Contain.Kind[:1])+r.Finding.Contain.Kind[1:], safeName(r.Finding.Contain.Name)))
+		}
 	}
 	if len(s.notes) > 0 {
 		out = append(out, "Security checks not run: "+strings.Join(s.notes, ", ")+".")

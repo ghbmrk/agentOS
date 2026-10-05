@@ -226,13 +226,22 @@ func TestPassiveChecks(t *testing.T) {
 		t.Errorf("stale snapshot not reported: %s", d)
 	}
 
-	// Version comparison, including unparseable versions (fail closed).
+	// Version ordering: dpkg for Debian (epoch, revision, ~), semver
+	// where named; anything unparseable is below (fail closed).
 	for _, c := range []struct {
-		v, fixed string
-		below    bool
-	}{{"1.2.3", "1.2.4", true}, {"1.10", "1.9", false}, {"2", "2.0.0", false}, {"1.2", "1.2.1", true}, {"1.2-rc1", "1.2", true}} {
-		if versionBelow(c.v, c.fixed) != c.below {
-			t.Errorf("versionBelow(%s, %s) != %v", c.v, c.fixed, c.below)
+		scheme, v, fixed string
+		below            bool
+	}{
+		{"", "1.2.3", "1.2.4", true}, {"", "1.10", "1.9", false}, {"", "1.2", "1.2.1", true},
+		{"", "3.0.15-1~deb12u1", "3.0.15-1", true}, {"", "3.0.15-1+deb12u1", "3.0.15-1", false},
+		{"", "1:1.0", "2.0", false}, {"", "1.0~rc1", "1.0", true}, {"", "1.0a", "1.0", false},
+		{"", "2.36-9+deb12u7", "2.36-9+deb12u8", true}, {"", "garbage", "1.0", true},
+		{SchemeSemver, "1.2.0-rc.1", "1.2.0", true}, {SchemeSemver, "v1.2.0", "1.2.0", false},
+		{SchemeSemver, "1.2.0-alpha", "1.2.0-alpha.1", true}, {SchemeSemver, "1.2.0-2", "1.2.0-10", true},
+		{SchemeSemver, "1.10.0", "1.9.9", false}, {SchemeSemver, "1.x", "1.0", true},
+	} {
+		if versionBelow(c.scheme, c.v, c.fixed) != c.below {
+			t.Errorf("versionBelow(%q, %s, %s) != %v", c.scheme, c.v, c.fixed, c.below)
 		}
 	}
 
@@ -303,8 +312,18 @@ func TestFindingHandling(t *testing.T) {
 	if n := r.pass(t); n != 1 || len(r.c.got) != 2 {
 		t.Fatalf("reappearance: n=%d contained=%d", n, len(r.c.got))
 	}
-	if got := checks(r.g.Evidence())[CheckAdvisory]; got != 2 {
-		t.Fatalf("advisory evidence records = %d, want 2", got)
+	// Evidence keeps one record per finding digest, counting appearances.
+	if got := checks(r.g.Evidence())[CheckAdvisory]; got != 1 {
+		t.Fatalf("advisory evidence records = %d, want 1", got)
+	}
+	for _, e := range r.g.Evidence() {
+		if e.Finding.Check == CheckAdvisory && e.Seen != 2 {
+			t.Fatalf("seen %d, want 2", e.Seen)
+		}
+	}
+	// It was paused again, so it was texted again.
+	if len(r.texts) != 2 {
+		t.Fatalf("texts after reappearance: %q", r.texts)
 	}
 
 	// Containment that fails is recorded and said, never silent.
@@ -345,6 +364,88 @@ func TestPauseCap(t *testing.T) {
 	}
 	if capped != 2 || len(r.texts) != 2 {
 		t.Fatalf("texts %q", r.texts)
+	}
+}
+
+// LOOP-9 fixtures never block a legitimate later release (security lens
+// B1): a hash finding adds no fixture, and an advisory fixture passes on a
+// tree that no longer has the package.
+func TestFixturesAllowLaterReleases(t *testing.T) {
+	b := cleanBox()
+	b.measured["guest-image/openclaw"] = "tampered"
+	r := newGuardRig(t, b)
+	r.pass(t)
+	for _, e := range r.g.Evidence() {
+		if e.Finding.Check == CheckHash && (e.Fixture != "" || e.Finding.Rule != nil) {
+			t.Fatalf("hash finding made a fixture: %+v", e)
+		}
+	}
+	// The next signed release changes the artifact; nothing in the suite
+	// pins the old digest, so the box takes it.
+	b.signed["guest-image/openclaw"], b.measured["guest-image/openclaw"] = "cc", "cc"
+	if n := r.pass(t); n != 0 {
+		t.Fatalf("after new release: %d findings", n)
+	}
+
+	in := fixtureInput(FixtureRule{Check: CheckAdvisory, Subject: "openssl", Fixed: "3.0.14"})
+	for _, c := range []struct {
+		facts Facts
+		want  string
+	}{
+		{Facts{Versions: map[string]string{"openssl": "3.0.13"}}, "fails"},
+		{Facts{Versions: map[string]string{"openssl": "3.0.14-1"}}, FixtureOK},
+		{Facts{Versions: map[string]string{}}, FixtureOK}, // package dropped
+		{Facts{}, FixtureOK},
+	} {
+		if got := string(AnswerFixture(in, c.facts)); got != c.want {
+			t.Errorf("%+v: %s, want %s", c.facts, got, c.want)
+		}
+	}
+	if got := string(AnswerFixture([]byte(`{"check":"hash","subject":"x"}`), Facts{})); got == FixtureOK {
+		t.Error("an unknown fixture kind passed")
+	}
+}
+
+// LOOP-9 for the owner: a pause outlives its cleared finding in the digest
+// until resumed, and a flapping finding is not re-texted within a day
+// unless something new was paused.
+func TestPausedAndFlapping(t *testing.T) {
+	b := cleanBox()
+	b.pkgs[0].Version = "3.0.13"
+	r := newGuardRig(t, b)
+	r.pass(t)
+	b.pkgs[0].Version = "3.0.14"
+	r.pass(t)
+	d := strings.Join(r.g.Digest(), "\n")
+	if !strings.Contains(d, "Executor egress is still paused after a security finding that has since cleared.") {
+		t.Fatalf("digest: %s", d)
+	}
+	must(t, r.g.Resumed(Target{Kind: "executor", Name: "egress"}))
+	if d := strings.Join(r.g.Digest(), "\n"); strings.Contains(d, "still paused") {
+		t.Fatalf("after resume: %s", d)
+	}
+
+	// A High finding with nothing to pause flaps: texted once a day.
+	b2 := cleanBox()
+	b2.live["config/quiet.json"] = "edited"
+	r2 := newGuardRig(t, b2)
+	r2.pass(t)
+	for i := 0; i < 3; i++ {
+		b2.live["config/quiet.json"] = "c1"
+		r2.pass(t)
+		b2.live["config/quiet.json"] = "edited"
+		r2.pass(t)
+	}
+	if len(r2.texts) != 1 {
+		t.Fatalf("flapping texts %d, want 1", len(r2.texts))
+	}
+	r2.now = r2.now.Add(25 * time.Hour)
+	b2.live["config/quiet.json"] = "c1"
+	r2.pass(t)
+	b2.live["config/quiet.json"] = "edited"
+	r2.pass(t)
+	if len(r2.texts) != 2 {
+		t.Fatalf("texts after a day %d, want 2", len(r2.texts))
 	}
 }
 
