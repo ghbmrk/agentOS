@@ -139,8 +139,13 @@ type Config struct {
 	// never clash with open requests; taken reports IDs the pipeline still
 	// uses. Nil: the pipeline's own letter-and-digits sequence.
 	ShortID func(taken func(string) bool) (string, error)
-	Now     func() time.Time
-	Rand    io.Reader
+	// EvaluatorID names the evaluator's current configuration (image,
+	// model route, price ceiling). A preempted evaluation's kept pairs
+	// resume only under the same ID (PE1, security R1 on #103). Nil: the
+	// evaluator is fixed for the pipeline's life.
+	EvaluatorID func() string
+	Now         func() time.Time
+	Rand        io.Reader
 }
 
 // Bases: why an adoption may run.
@@ -714,9 +719,10 @@ func (p *Pipeline) drop(id string) {
 //
 // If ctx ends part way (preemption), evaluate stops at once and returns
 // ErrInterrupted instead of a score; the run in flight is discarded, and
-// the cases that completed on both sides are kept, so the next evaluation
-// of the same trees runs only the rest (PE1). A finished evaluation uses
-// up its kept pairs.
+// every side that finished is kept, so the next evaluation of the same
+// trees runs only the rest (PE1). A candidate side cut short
+// MaxInterruptions times fails. A finished evaluation uses up what was
+// kept.
 func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st strictness) (Score, error) {
 	type run struct {
 		c     Case
@@ -725,28 +731,42 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 		ok    bool
 		ev    bool
 		done  bool
+		// struck: failed without running (MaxInterruptions).
+		struck bool
 	}
 	nonce := make([]byte, 16)
 	_, _ = rand.Read(nonce)
 	keys := map[string]string{}
-	resumed := map[string]pairResult{}
+	res := map[string]pairResult{} // kept sides, then this evaluation's
 	var runs []*run
 	p.mu.Lock()
 	for _, cs := range [][]Case{set.heldOut, set.security} {
 		for _, c := range cs {
-			k := resumeKey(base, next, c)
+			k := p.resumeKey(base, next, c)
 			keys[c.ID] = k
-			if r, ok := p.keptLocked(k); ok {
-				resumed[c.ID] = r
-				continue
+			r, _ := p.keptLocked(k)
+			res[c.ID] = r
+			if !r.baseDone {
+				runs = append(runs, &run{c: c, probe: p.probeID(nonce, c.ID)})
 			}
-			runs = append(runs, &run{c: c, probe: p.probeID(nonce, c.ID)}, &run{c: c, cand: true, probe: p.probeID(nonce, c.ID)})
+			switch {
+			case r.nextDone:
+			case r.interrupted >= MaxInterruptions:
+				// Cut short too often on this case: failed without
+				// another run (security F1 on #103).
+				runs = append(runs, &run{c: c, cand: true, ev: true, done: true, struck: true})
+			default:
+				runs = append(runs, &run{c: c, cand: true, probe: p.probeID(nonce, c.ID)})
+			}
 		}
 	}
 	p.mu.Unlock()
 	mrand.Shuffle(len(runs), func(i, j int) { runs[i], runs[j] = runs[j], runs[i] })
 	p.mu.Lock()
 	for _, r := range runs {
+		if r.struck {
+			continue
+		}
 		p.probes[r.probe]++
 		if !r.c.Security {
 			p.probeTask[r.probe] = r.c.Task
@@ -756,6 +776,9 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 	defer func() {
 		p.mu.Lock()
 		for _, r := range runs {
+			if r.struck {
+				continue
+			}
 			if p.probes[r.probe]--; p.probes[r.probe] <= 0 {
 				delete(p.probes, r.probe)
 				delete(p.probeTask, r.probe)
@@ -763,7 +786,11 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 		}
 		p.mu.Unlock()
 	}()
+	var cut *run // the run in flight when ctx ended
 	for _, r := range runs {
+		if r.struck {
+			continue
+		}
 		if ctx.Err() != nil {
 			break
 		}
@@ -775,27 +802,33 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 		// A run that returns after the preemption may have failed
 		// because of it: it is discarded, never counted or kept.
 		r.done = ctx.Err() == nil
+		if !r.done {
+			cut = r
+		}
 	}
-	res := map[string]pairResult{}
-	sides := map[string]int{}
 	for _, r := range runs {
 		if !r.done {
 			continue
 		}
 		pr := res[r.c.ID]
 		if r.cand {
-			pr.NextOK, pr.NextEv = r.ok, r.ev
-			sides[r.c.ID] |= 2
+			pr.NextOK, pr.NextEv, pr.nextDone = r.ok, r.ev, true
 		} else {
-			pr.BaseOK, pr.BaseEv = r.ok, r.ev
-			sides[r.c.ID] |= 1
+			pr.BaseOK, pr.BaseEv, pr.baseDone = r.ok, r.ev, true
 		}
 		res[r.c.ID] = pr
 	}
 	if err := ctx.Err(); err != nil {
 		p.mu.Lock()
+		// Every side that finished is kept, so a result once seen is
+		// never run again. The candidate side cut short is counted, so
+		// a candidate that forces preemptions cannot re-roll a case
+		// without limit.
 		for id, pr := range res {
-			if sides[id] == 3 {
+			if cut != nil && cut.cand && cut.c.ID == id {
+				pr.interrupted++
+			}
+			if pr.baseDone || pr.nextDone || pr.interrupted > 0 {
 				p.keepLocked(keys[id], pr)
 			}
 		}
@@ -803,9 +836,8 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 		return Score{}, fmt.Errorf("%w: %w", ErrInterrupted, err)
 	}
 	p.mu.Lock()
-	for id, pr := range resumed {
-		res[id] = pr
-		delete(p.kept, keys[id])
+	for _, k := range keys {
+		delete(p.kept, k) // kept sides and interruption counts are used up
 	}
 	p.mu.Unlock()
 	cases := map[string]Case{}

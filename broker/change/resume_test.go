@@ -21,7 +21,10 @@ type preempting struct {
 	at     int
 	calls  int
 	cancel context.CancelFunc
-	done   map[string]int // case -> sides completed before the cancel (bit 1 base, bit 2 candidate)
+	// cut, if it returns true for a run, cancels the evaluation during
+	// that run (a candidate forcing a preemption).
+	cut  func(context.Context, Tree, Probe) bool
+	done map[string]int // case -> sides completed before the cancel (bit 1 base, bit 2 candidate)
 }
 
 func (p *preempting) Run(ctx context.Context, t Tree, pr Probe) ([]byte, error) {
@@ -37,7 +40,7 @@ func (p *preempting) Run(ctx context.Context, t Tree, pr Probe) ([]byte, error) 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.calls++
-	if p.calls == p.at && p.cancel != nil {
+	if (p.calls == p.at || p.cut != nil && p.cut(ctx, t, pr)) && p.cancel != nil {
 		p.cancel()
 	}
 	if ctx.Err() == nil {
@@ -58,10 +61,21 @@ func (p *preempting) pairs() int {
 	return n
 }
 
+// sides counts the sides that completed before the cancel.
+func (p *preempting) sides() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := 0
+	for _, s := range p.done {
+		n += s&1 + s>>1
+	}
+	return n
+}
+
 func (p *preempting) arm(at int) context.Context {
 	ctx, cancel := context.WithCancel(context.Background())
 	p.mu.Lock()
-	p.at, p.calls, p.cancel, p.done = at, 0, cancel, map[string]int{}
+	p.at, p.calls, p.cancel, p.done, p.cut = at, 0, cancel, map[string]int{}, nil
 	p.mu.Unlock()
 	return ctx
 }
@@ -134,9 +148,9 @@ func TestResumeRunsOnlyRemainingPairs(t *testing.T) {
 	if _, err := e.p.Propose(lateArm(e, pe), greet); !errors.Is(err, ErrInterrupted) {
 		t.Fatal(err)
 	}
-	kept := pe.pairs()
-	if kept == 0 || e.p.keptPairs() != kept {
-		t.Fatalf("pairs completed before the preemption: %d, kept: %d", kept, e.p.keptPairs())
+	kept := pe.sides()
+	if pe.pairs() == 0 || e.p.keptPairs() != pe.pairs() || e.p.keptSides() != kept {
+		t.Fatalf("completed before the preemption: %d pairs, %d sides; kept %d pairs, %d sides", pe.pairs(), kept, e.p.keptPairs(), e.p.keptSides())
 	}
 	pe.arm(0)
 	got, err := e.p.Propose(context.Background(), greet)
@@ -144,8 +158,8 @@ func TestResumeRunsOnlyRemainingPairs(t *testing.T) {
 		t.Fatal(err)
 	}
 	total := got.HeldOut + got.Security + got.NotEvaluated
-	if pe.runs() != 2*(total-kept) {
-		t.Fatalf("resumed evaluation ran %d probes, want %d (%d of %d pairs kept)", pe.runs(), 2*(total-kept), kept, total)
+	if pe.runs() != 2*total-kept {
+		t.Fatalf("resumed evaluation ran %d probes, want %d (%d of %d sides kept)", pe.runs(), 2*total-kept, kept, 2*total)
 	}
 	want, err := e.p.Propose(context.Background(), greet)
 	if err != nil {
@@ -183,7 +197,7 @@ func TestFinishedEvaluationKeepsNoPairs(t *testing.T) {
 	}
 }
 
-// CHG-1: a pair is kept for its exact trees and case. Another base or
+// CHG-1: a result is kept for its exact trees, case, and evaluator. Another base or
 // another candidate runs everything; a case added since runs on both
 // sides, and the kept pairs still count.
 func TestKeptPairsAreBoundToTreesAndCases(t *testing.T) {
@@ -192,7 +206,7 @@ func TestKeptPairsAreBoundToTreesAndCases(t *testing.T) {
 	if _, err := e.p.Propose(lateArm(e, pe), greet); !errors.Is(err, ErrInterrupted) {
 		t.Fatal(err)
 	}
-	kept := pe.pairs()
+	kept := pe.sides()
 
 	other := Candidate{Source: Local, Files: Tree{"skills/greet": []byte("hello"), "skills/extra": []byte("x")}}
 	pe.arm(0)
@@ -213,8 +227,8 @@ func TestKeptPairsAreBoundToTreesAndCases(t *testing.T) {
 		t.Fatal(err)
 	}
 	total = rep.HeldOut + rep.Security + rep.NotEvaluated
-	if pe.runs() != 2*(total-kept) {
-		t.Fatalf("with new cases: %d probes, want %d", pe.runs(), 2*(total-kept))
+	if pe.runs() != 2*total-kept {
+		t.Fatalf("with new cases: %d probes, want %d", pe.runs(), 2*total-kept)
 	}
 }
 
@@ -270,7 +284,7 @@ func TestKeptPairsExpireAndAreBounded(t *testing.T) {
 
 	e.p.mu.Lock()
 	for i := 0; i < MaxKeptPairs+50; i++ {
-		e.p.keepLocked(resumeKey(Tree{}, Tree{"a": []byte(itoa(i))}, Case{ID: "x"}), pairResult{})
+		e.p.keepLocked(resumeKey("", Tree{}, Tree{"a": []byte(itoa(i))}, Case{ID: "x"}), pairResult{})
 	}
 	n := len(e.p.kept)
 	e.p.mu.Unlock()
@@ -310,5 +324,73 @@ func TestPreemptedRecheckBlamesNothing(t *testing.T) {
 	out, err = e.p.Recheck(context.Background())
 	if err != nil || len(out) != 1 {
 		t.Fatalf("resumed recheck: %v %v", out, err)
+	}
+}
+
+// CHG-1, LOOP-10 (security F1 on #103): a candidate that can force a
+// preemption whenever a case is going badly cannot re-roll that case
+// without limit. After MaxInterruptions cut-short runs of its side of one
+// case, the candidate fails that case without another run.
+func TestForcedPreemptionsCannotReRollACase(t *testing.T) {
+	e, pe := newPreemptEnv(t, func(c *Config) { c.MinHeldOut = 100 })
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	ranCand := 0
+	thrash := func(ctx context.Context, t Tree, pr Probe) bool {
+		if string(pr.Input) == exfilProbe && string(t["skills/greet"]) == "hello" {
+			ranCand++
+			return true
+		}
+		return false
+	}
+	for i := 0; i < MaxInterruptions; i++ {
+		ctx := pe.arm(0)
+		pe.mu.Lock()
+		pe.cut = thrash
+		pe.mu.Unlock()
+		if _, err := e.p.Propose(ctx, greet); !errors.Is(err, ErrInterrupted) {
+			t.Fatalf("pass %d: %v", i, err)
+		}
+	}
+	if ranCand != MaxInterruptions {
+		t.Fatalf("candidate side of the fixture ran %d times, want %d", ranCand, MaxInterruptions)
+	}
+	ctx := pe.arm(0)
+	pe.mu.Lock()
+	pe.cut = thrash
+	pe.mu.Unlock()
+	rep, err := e.p.Propose(ctx, greet)
+	if err != nil {
+		t.Fatalf("third pass was cut again: %v", err)
+	}
+	if ranCand != MaxInterruptions {
+		t.Fatal("the candidate side ran again after its limit")
+	}
+	if rep.State != StateRejected || rep.SecurityPassed == rep.Security {
+		t.Fatalf("a candidate that forced preemptions passed: %+v", rep)
+	}
+}
+
+// R1 on #103: kept results resume only under the same evaluator identity.
+func TestKeptResultsNeedTheSameEvaluator(t *testing.T) {
+	var mu sync.Mutex
+	id := "v1"
+	e, pe := newPreemptEnv(t, func(c *Config) {
+		c.MinHeldOut = 100
+		c.EvaluatorID = func() string { mu.Lock(); defer mu.Unlock(); return id }
+	})
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	if _, err := e.p.Propose(lateArm(e, pe), greet); !errors.Is(err, ErrInterrupted) {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	id = "v2"
+	mu.Unlock()
+	pe.arm(0)
+	rep, err := e.p.Propose(context.Background(), greet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total := rep.HeldOut + rep.Security + rep.NotEvaluated; pe.runs() != 2*total {
+		t.Fatalf("another evaluator reused kept results: %d probes, want %d", pe.runs(), 2*total)
 	}
 }

@@ -23,18 +23,41 @@ const (
 	MaxKeptPairs = 4096
 )
 
-// pairResult is one case's outcome on both trees of an evaluation:
-// booleans only, never case content or output.
+// MaxInterruptions is how many times a candidate-side run of one case may
+// be cut short before the candidate is failed on that case without
+// another run (security F1 on #103). A candidate can drive host memory
+// pressure, and so the scheduler's preemption, by thrashing in its own
+// machine; without a limit it could re-roll a case it is failing until it
+// passes. An owner's preemption seldom lands on the same pair twice.
+const MaxInterruptions = 2
+
+// pairResult is one case's outcome on the two trees of an evaluation:
+// booleans only, never case content or output. baseDone and nextDone say
+// which sides finished; interrupted counts candidate-side runs cut short.
 type pairResult struct {
 	BaseOK, BaseEv, NextOK, NextEv bool
+	baseDone, nextDone             bool
+	interrupted                    int
 	at                             time.Time
 }
 
-// resumeKey binds a pair to the exact base tree, candidate tree, and case
-// (its full content, so a case changed since is run afresh).
-func resumeKey(base, next Tree, c Case) string {
+// resumeKey binds a pair to the exact base tree, candidate tree, case
+// (its full content, so a case changed since is run afresh), and the
+// evaluator's identity (Config.EvaluatorID), so results from two
+// evaluator configurations never mix (security R1 on #103).
+func (p *Pipeline) resumeKey(base, next Tree, c Case) string {
+	id := ""
+	if p.cfg.EvaluatorID != nil {
+		id = p.cfg.EvaluatorID()
+	}
+	return resumeKey(id, base, next, c)
+}
+
+func resumeKey(evaluator string, base, next Tree, c Case) string {
 	cb, _ := json.Marshal(c)
 	h := sha256.New()
+	h.Write([]byte(evaluator))
+	h.Write([]byte{0})
 	h.Write([]byte(base.Hash()))
 	h.Write([]byte{0})
 	h.Write([]byte(next.Hash()))
@@ -56,9 +79,13 @@ func (p *Pipeline) keptLocked(key string) (pairResult, bool) {
 	return r, true
 }
 
-// keepLocked keeps a completed pair, dropping expired pairs and then the
-// oldest while over MaxKeptPairs.
+// keepLocked keeps what finished of a pair, dropping expired entries and
+// then the oldest while over MaxKeptPairs.
 func (p *Pipeline) keepLocked(key string, r pairResult) {
+	p.putLocked(key, r)
+}
+
+func (p *Pipeline) putLocked(key string, r pairResult) {
 	now := p.cfg.Now()
 	r.at = now
 	p.kept[key] = r
@@ -81,9 +108,31 @@ func (p *Pipeline) keepLocked(key string, r pairResult) {
 	}
 }
 
-// keptPairs counts the pairs kept for resuming.
+// keptPairs counts the pairs kept with both sides finished.
 func (p *Pipeline) keptPairs() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return len(p.kept)
+	n := 0
+	for _, r := range p.kept {
+		if r.baseDone && r.nextDone {
+			n++
+		}
+	}
+	return n
+}
+
+// keptSides counts the finished sides kept.
+func (p *Pipeline) keptSides() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := 0
+	for _, r := range p.kept {
+		if r.baseDone {
+			n++
+		}
+		if r.nextDone {
+			n++
+		}
+	}
+	return n
 }
