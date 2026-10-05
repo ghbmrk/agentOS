@@ -370,7 +370,12 @@ func TestSkillMaySupersedeItsProcedure(t *testing.T) {
 		"skill with an empty obj":  {change.ClassSkill, change.Candidate{Files: map[string][]byte{k(s1): emptyObj}, Delete: []string{p(s1)}}},
 		"skill with duplicate key": {change.ClassSkill, change.Candidate{Files: map[string][]byte{k(s1): dup}, Delete: []string{p(s1)}}},
 		"skill with trailing }":    {change.ClassSkill, change.Candidate{Files: map[string][]byte{k(s1): append(bytes.Clone(b1), '}')}, Delete: []string{p(s1)}}},
-		"skill not canonical":      {change.ClassSkill, change.Candidate{Files: map[string][]byte{k(s1): append([]byte(" "), b1...)}, Delete: []string{p(s1)}}},
+		// Not skill-file names: a free-form file is never superseded, and
+		// on a case-insensitive disk pABC… could alias the real pabc…
+		// (L3 and security R1 on #89).
+		"free-form names":     {change.ClassSkill, change.Candidate{Files: map[string][]byte{"skills/kABCDEF012345.json": []byte("x")}, Delete: []string{"procedures/pABCDEF012345.json"}}},
+		"free-form shape":     {change.ClassSkill, change.Candidate{Files: map[string][]byte{"skills/kx.json": []byte("x")}, Delete: []string{"procedures/px.json"}}},
+		"skill not canonical": {change.ClassSkill, change.Candidate{Files: map[string][]byte{k(s1): append([]byte(" "), b1...)}, Delete: []string{p(s1)}}},
 	} {
 		if err := inClass(c.class, c.cand); !errors.Is(err, ErrOutOfClass) {
 			t.Errorf("%s: %v", name, err)
