@@ -1315,4 +1315,17 @@ func TestAnUnseededCandidateIsNeverProposed(t *testing.T) {
 	if d := strings.Join(l.Digest(), "\n"); d != "Learning: 1 new skill drafted. It'll be tested once your agent can use it." {
 		t.Fatalf("digest for one %q", d)
 	}
+	// Once none is held, the next digest says once that they are being
+	// tested (potency C1, UX-120-1 on #120).
+	l.propose(context.Background(), hyp("k2", "task-k2"), Evidence{})
+	if d := strings.Join(l.Digest(), "\n"); d != "Learning: drafted skills are now being tested." {
+		t.Fatalf("digest once proposed %q", d)
+	}
+	if d := l.Digest(); len(d) != 0 {
+		t.Fatalf("said twice: %q", d)
+	}
+	l.propose(context.Background(), hyp("k3", "task-k3"), Evidence{})
+	if d := l.Digest(); len(d) != 0 {
+		t.Fatalf("a candidate never held is announced: %q", d)
+	}
 }

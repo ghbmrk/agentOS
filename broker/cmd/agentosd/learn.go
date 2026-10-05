@@ -45,6 +45,7 @@ type learning struct {
 	// builder is Loop 1's: the skill compiler for repeated trajectories,
 	// in-process since it calls no model (W3 step 3a).
 	builder loops.BySignal
+	learn   *loops.Learn
 	// values are the guest's task values, for the compiler only
 	// (W3-values); mining is the journal everything else in Loop 1 reads,
 	// which keeps none (security V3).
@@ -139,13 +140,13 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		Journal:    l.mining,
 		Harvest:    l.harvest,
 		Builder:    l.builder,
-		Unseeded:   unseeded,
 		Router:     router,
 		ModelWired: modelWired,
 	})
 	if err != nil {
 		return nil, err
 	}
+	l.learn = learn
 	if l.sched, err = loops.New(loops.Config{
 		Store:   change.FileStore{Path: filepath.Join(p.Dir, "loops.json")},
 		Spare:   spare,
@@ -202,22 +203,6 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		}
 	}
 	return l, nil
-}
-
-// unseeded reports a candidate that writes only skills and procedures
-// (format.SkillsNS, format.ProceduresNS):
-// nothing seeds the agent machine from them until W4, so Loop 1 holds it
-// instead of asking the owner about a change with no effect (UX-S3-1).
-func unseeded(c change.Candidate) bool {
-	if len(c.Files) == 0 {
-		return false
-	}
-	for p := range c.Files {
-		if ns, _, _ := strings.Cut(p, "/"); ns != "skills" && ns != "procedures" {
-			return false
-		}
-	}
-	return true
 }
 
 // vaultPlaceholder is the vault redactor's mark for a secret

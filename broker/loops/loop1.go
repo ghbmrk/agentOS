@@ -222,6 +222,16 @@ type Learn struct {
 	// unseeded are the hypotheses whose candidate was not proposed
 	// because nothing could use it yet (UX-S3-1), at most maxUnseeded.
 	unseeded map[string]time.Time
+	// nowTested is set when a held hypothesis is proposed after all, so
+	// the next digest says once that drafted skills are being tested
+	// (potency C1, UX-120-1 on #120).
+	nowTested bool
+}
+
+// Holds reports whether Loop 1 would build c but hold it unproposed,
+// because nothing could use it yet (LearnConfig.Unseeded, L21).
+func (l *Learn) Holds(c change.Candidate) bool {
+	return l.cfg.Unseeded != nil && l.cfg.Unseeded(c)
 }
 
 // maxUnseeded bounds the hypotheses the digest counts as kept until the
@@ -459,7 +469,7 @@ func (l *Learn) propose(ctx context.Context, h Hypothesis, ev Evidence) (change.
 		cand.Source, cand.Origin, cand.Public = change.Local, "loop1", public(h, ev.Dev)
 	}
 	l.mu.Lock()
-	if l.cfg.Unseeded != nil && l.cfg.Unseeded(cand) {
+	if l.Holds(cand) {
 		l.unseeded[h.Key] = l.cfg.Now()
 		for len(l.unseeded) > maxUnseeded {
 			oldest := ""
@@ -473,7 +483,10 @@ func (l *Learn) propose(ctx context.Context, h Hypothesis, ev Evidence) (change.
 		l.mu.Unlock()
 		return change.Report{}, ErrUnseeded
 	}
-	delete(l.unseeded, h.Key)
+	if _, held := l.unseeded[h.Key]; held {
+		delete(l.unseeded, h.Key)
+		l.nowTested = true
+	}
 	l.mu.Unlock()
 	rep, err := l.cfg.Pipeline.Propose(ctx, cand)
 	if errors.Is(err, change.ErrInterrupted) {
@@ -598,6 +611,10 @@ func (l *Learn) Digest() []string {
 		out = append(out, "Learning: 1 new skill drafted. It'll be tested once your agent can use it.")
 	case n > 1:
 		out = append(out, fmt.Sprintf("Learning: %d new skills drafted. They'll be tested once your agent can use them.", n))
+	case l.nowTested:
+		// Once, when the agent can use them after all.
+		out = append(out, "Learning: drafted skills are now being tested.")
+		l.nowTested = false
 	}
 	return out
 }
