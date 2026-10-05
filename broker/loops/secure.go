@@ -16,9 +16,9 @@ import (
 	"github.com/ghbmrk/agentos/broker/change"
 )
 
-// Loop 2, self-securing (LOOP-8 to LOOP-10). This file holds the passive
-// checks and what happens to a finding. Active testing from inside the
-// sandbox (LOOP-7) is not built here (S1).
+// Loop 2, self-securing (LOOP-7 to LOOP-10). This file holds the passive
+// checks and what happens to a finding; attack.go, fuzz.go and hunt.go hold
+// active testing from inside the sandbox (LOOP-7).
 
 // Severity decides how the owner hears about a finding (LOOP-9).
 type Severity string
@@ -155,6 +155,13 @@ type GuardConfig struct {
 	// Stale is the advisory snapshot age past which the digest says the
 	// checks are not current. Default 7 days.
 	Stale time.Duration
+	// Probes are the active self-tests (LOOP-7); none means no active
+	// testing, and the digest says so.
+	Probes []Probe
+	// ActiveEvery is how often the probes run. Default 1 hour.
+	ActiveEvery time.Duration
+	// Rounds caps each probe's attempts per run. Default 2000.
+	Rounds int
 	Now   func() time.Time
 }
 
@@ -167,10 +174,15 @@ type Guard struct {
 	force bool
 	notes []string // checks that could not run on the last pass
 	stale string
+
+	forceActive bool
+	probeNotes  []string // probes that could not run on the last active run
 }
 
 type secureState struct {
 	Last time.Time `json:"last"`
+	// LastActive is when the probes last ran to the end.
+	LastActive time.Time `json:"last_active"`
 	// Open are findings still observed, by ID.
 	Open map[string]Record `json:"open"`
 	// Evidence is every finding ever recorded; it only grows.
@@ -202,13 +214,19 @@ func NewGuard(cfg GuardConfig) (*Guard, error) {
 	if cfg.Stale <= 0 {
 		cfg.Stale = 7 * 24 * time.Hour
 	}
+	if cfg.ActiveEvery <= 0 {
+		cfg.ActiveEvery = time.Hour
+	}
+	if cfg.Rounds <= 0 {
+		cfg.Rounds = 2000
+	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
 	if cfg.Notify == nil {
 		cfg.Notify = func(string) {}
 	}
-	s := &Guard{cfg: cfg, force: true}
+	s := &Guard{cfg: cfg, force: true, forceActive: true}
 	b, err := cfg.Store.Load()
 	if err != nil {
 		return nil, err
@@ -230,23 +248,31 @@ func (s *Guard) Loop() Loop { return Secure }
 // advisory snapshot); pair it with Scheduler.Wake.
 func (s *Guard) Trigger() {
 	s.mu.Lock()
-	s.force = true
+	s.force, s.forceActive = true, true
 	s.mu.Unlock()
 }
 
-// Next offers one pass of the passive checks when one is due. It makes no
-// model calls.
+// Next offers one pass of the passive checks when one is due, else one run
+// of the probes when that is due. Neither makes model calls.
 func (s *Guard) Next(_ context.Context, _ bool) (Job, bool) {
 	s.mu.Lock()
-	due := s.force || s.cfg.Now().Sub(s.st.Last) >= s.cfg.Every
+	now := s.cfg.Now()
+	due := s.force || now.Sub(s.st.Last) >= s.cfg.Every
+	active := len(s.cfg.Probes) > 0 && (s.forceActive || now.Sub(s.st.LastActive) >= s.cfg.ActiveEvery)
 	s.mu.Unlock()
-	if !due {
-		return Job{}, false
+	switch {
+	case due:
+		return Job{Name: "passive", Run: func(ctx context.Context) Result {
+			n, err := s.Pass(ctx)
+			return Result{Value: float64(n), Err: err}
+		}}, true
+	case active:
+		return Job{Name: "active", Run: func(ctx context.Context) Result {
+			n, err := s.Active(ctx)
+			return Result{Value: float64(n), Err: err}
+		}}, true
 	}
-	return Job{Name: "passive", Run: func(ctx context.Context) Result {
-		n, err := s.Pass(ctx)
-		return Result{Value: float64(n), Err: err}
-	}}, true
+	return Job{}, false
 }
 
 // Pass runs every passive check and handles each new finding. It returns
@@ -256,19 +282,7 @@ func (s *Guard) Pass(ctx context.Context) (int, error) {
 	s.mu.Lock()
 	s.notes, s.stale, s.force = notes, stale, false
 	s.st.Last = s.cfg.Now()
-	seen := map[string]bool{}
-	var fresh []Finding
-	for _, f := range found {
-		seen[f.ID] = true
-		if _, open := s.st.Open[f.ID]; !open {
-			fresh = append(fresh, f)
-		}
-	}
-	for id := range s.st.Open {
-		if !seen[id] {
-			delete(s.st.Open, id) // no longer observed; its evidence stays
-		}
-	}
+	fresh := s.observeLocked(found, func(f Finding) bool { return f.Check != CheckActive })
 	s.mu.Unlock()
 	var errs []error
 	for _, f := range fresh {
@@ -536,9 +550,19 @@ func parseVersion(v string) ([]int, bool) {
 // finding: one subject, one condition.
 type FixtureRule struct {
 	Check   Check  `json:"check"`
-	Subject string `json:"subject"`
+	Subject string `json:"subject"`          // CheckActive: the probe's name
 	Digest  string `json:"digest,omitempty"` // CheckHash: the signed digest
 	Fixed   string `json:"fixed,omitempty"`  // CheckAdvisory: the first fixed version
+	// CheckActive: the hit's subject, oracle, and minimized reproducer.
+	Target string `json:"target,omitempty"`
+	Oracle string `json:"oracle,omitempty"`
+	Input  []byte `json:"input,omitempty"`
+}
+
+func readRule(b []byte) (FixtureRule, error) {
+	var r FixtureRule
+	err := json.Unmarshal(b, &r)
+	return r, err
 }
 
 // FixtureOK is what a passing fixture answers.
@@ -554,6 +578,10 @@ func fixtureInput(r FixtureRule) []byte {
 type Facts struct {
 	Digests  map[string]string
 	Versions map[string]string
+	// Replay runs an active reproducer against the tree under test, in a
+	// fresh experiment machine, with the named probe (wiring K-S3). Nil
+	// fails every active fixture: fail closed.
+	Replay func(probe string, h Hit) (oracle string, err error) `json:"-"`
 }
 
 // AnswerFixture is how an evaluator answers a Loop 2 fixture against the
@@ -573,6 +601,14 @@ func AnswerFixture(input []byte, f Facts) []byte {
 		if v, ok := f.Versions[r.Subject]; ok && !versionBelow(v, r.Fixed) {
 			return []byte(FixtureOK)
 		}
+	case CheckActive:
+		// Nothing may fire on the reproducer, not even another oracle.
+		if f.Replay != nil {
+			o, err := f.Replay(r.Subject, Hit{Subject: r.Target, Oracle: r.Oracle, Input: r.Input})
+			if err == nil && o == "" {
+				return []byte(FixtureOK)
+			}
+		}
 	}
 	return []byte("fails")
 }
@@ -582,6 +618,7 @@ var checkWords = map[Check]string{
 	CheckAdvisory: "a known vulnerability",
 	CheckDrift:    "a setting changed outside the box's change process",
 	CheckExpiry:   "a credential that expires",
+	CheckActive:   "a weakness in the box's own code",
 }
 
 // safe keeps owner-facing names to a fixed alphabet.
@@ -630,6 +667,12 @@ func (s *Guard) Digest() []string {
 	}
 	if s.stale != "" {
 		out = append(out, s.stale)
+	}
+	switch {
+	case len(s.cfg.Probes) == 0:
+		out = append(out, "Security self-tests not run: none set up.")
+	case len(s.probeNotes) > 0:
+		out = append(out, "Security self-tests not run: "+strings.Join(s.probeNotes, ", ")+".")
 	}
 	return out
 }
