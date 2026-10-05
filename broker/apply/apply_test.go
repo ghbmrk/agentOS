@@ -113,7 +113,8 @@ func TestNeverAppliesDuringACallWorkOrExcludedHours(t *testing.T) {
 	}
 	// A call that starts between the check and dispatch stops it.
 	id := r.a.nextID(1)
-	in := r.a.intent(id)
+	in, err := r.a.intent(ctx, id)
+	r.must(err)
 	if _, err := r.eng.Submit(in); err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +210,7 @@ func TestFallbackRevertsTheAdoptionAndRewindsNothing(t *testing.T) {
 	}
 	// UX-133-2: in STATUS until the next update installs, and once in
 	// the digest.
-	want := "Update 1 did not start cleanly, so the box went back to the version it had. Nothing is needed from you. It won't be tried again."
+	want := "Update 1 did not start cleanly, so the box went back to the version it had. Nothing is needed from you. It won't be tried again; a later update will replace it."
 	if got := r.a.Status(); got != want {
 		t.Fatalf("status: %q", got)
 	}
@@ -251,7 +252,8 @@ func TestResumeBeforeTheRestartJudgesNothing(t *testing.T) {
 	r.must(r.a.Schedule(r.release(1, true), "a1"))
 	r.act.installErr = nil
 	id := r.a.nextID(1)
-	in := r.a.intent(id)
+	in, err := r.a.intent(ctx, id)
+	r.must(err)
 	if _, err := r.eng.Submit(in); err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +295,8 @@ func TestCheckAllowsOnlyTheScheduledRelease(t *testing.T) {
 	r := newRig(t)
 	ctx := context.Background()
 	r.must(r.a.Schedule(r.release(1, true), "a1"))
-	good := r.a.intent(r.a.nextID(1))
+	good, err := r.a.intent(ctx, r.a.nextID(1))
+	r.must(err)
 	if err := r.a.Check(ctx, journal.PhaseAuthorize, good); err != nil {
 		t.Fatal(err)
 	}
@@ -380,7 +383,8 @@ func TestBrokerStoppedBeforeTheRestartRestartsLater(t *testing.T) {
 	ctx := context.Background()
 	r.must(r.a.Schedule(r.release(1, true), "a1"))
 	id := r.a.nextID(1)
-	in := r.a.intent(id)
+	in, err := r.a.intent(ctx, id)
+	r.must(err)
 	if _, err := r.eng.Submit(in); err != nil {
 		t.Fatal(err)
 	}
@@ -433,5 +437,74 @@ func TestTalkHoldsASecurityFixForAtMostTwoHours(t *testing.T) {
 	r2.inCall = true
 	if ok, _ := r2.a.Tick(ctx); ok {
 		t.Fatal("applied during a call after the talk bound")
+	}
+}
+
+// L3 MUST 1 on #133: STOP holds the handover and the restart. STOP during
+// the slot write keeps the release installed and the box running; a later
+// tick after RESUME restarts.
+func TestStopHoldsTheRestart(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	rel := r.release(1, true)
+	r.act0 = slowActivator{r.act, func() { r.stopped = true }}
+	r.restart()
+	r.must(r.a.Schedule(rel, "a1"))
+	if ok, _ := r.a.Tick(ctx); ok || r.act.restarts != 0 || len(r.act.installed) != 1 {
+		t.Fatal("restarted after STOP during the slot write")
+	}
+	r.restart() // and the broker restarts while STOP holds
+	r.must(r.a.Resume(ctx))
+	if ok, _ := r.a.Tick(ctx); ok || r.act.restarts != 0 {
+		t.Fatal("restarted while STOP holds")
+	}
+	r.stopped = false
+	if ok, err := r.a.Tick(ctx); !ok || err != nil || r.act.restarts != 1 {
+		t.Fatalf("not restarted after RESUME: %v", err)
+	}
+}
+
+func TestStopHoldsTheHandover(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	r.must(r.a.Schedule(r.release(1, true), "a1"))
+	r.stopped = true
+	if ok, _ := r.a.Tick(ctx); ok || len(r.act.installed) != 0 {
+		t.Fatal("handed over during STOP")
+	}
+	if got := r.a.Status(); got != "Update 1 is on hold while actions are stopped; it installs after RESUME." {
+		t.Fatalf("status: %q", got)
+	}
+}
+
+// Reconcile answers a replayed activation from saved state.
+func TestReconcileAfterReplay(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	r.must(r.a.Schedule(r.release(1, true), "a1"))
+	if ok, _ := r.a.Tick(ctx); !ok {
+		t.Fatal("not applied")
+	}
+	id := r.intents()[0].Intent.ID
+	r.restart()
+	if o := r.a.Reconcile(ctx, journal.Intent{ID: id}, 1); o.Result != journal.ResultSucceeded {
+		t.Fatalf("%s: %+v", id, o)
+	}
+	if o := r.a.Reconcile(ctx, journal.Intent{ID: "upd:apply:1:n99"}, 1); o.Result != journal.ResultNotApplied {
+		t.Fatalf("unknown attempt: %+v", o)
+	}
+	if !strings.Contains(r.a.Status(), "installing") {
+		t.Fatalf("same boot after a broker restart: %q", r.a.Status())
+	}
+}
+
+func TestCryptoRandStaysInRange(t *testing.T) {
+	for _, n := range []int64{-1, 0, 1, 7, int64(6 * time.Hour)} {
+		for i := 0; i < 50; i++ {
+			v := cryptoRand(n)
+			if n <= 0 && v != 0 || n > 0 && (v < 0 || v >= n) {
+				t.Fatalf("cryptoRand(%d) = %d", n, v)
+			}
+		}
 	}
 }

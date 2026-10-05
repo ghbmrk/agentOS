@@ -226,6 +226,11 @@ type Verified struct {
 	// security fix is among those it supersedes (Result.SecurityFix).
 	coversFix bool
 	security  bool // set only by WithAttestations
+	// The store that checked it, and the root and targets versions it
+	// trusted then: Stage refuses it once either moved (L3 on #133).
+	storeDir       string
+	rootVersion    int64
+	targetsVersion int64
 }
 
 // ErrNotChecked: a Verified that Store.Check did not make.
@@ -587,6 +592,7 @@ func (s *Store) check(src Source, o Options) (Result, error) {
 	proto.maintainers, proto.operated = seen, attestors
 
 	var versions []int64
+	proto.storeDir, proto.rootVersion, proto.targetsVersion = s.Dir, tm.Root.Signed.Version, targets.Signed.Version
 	for p := range targets.Signed.Targets {
 		if n, ok := releaseVersion(p); ok && n > installed.Version {
 			versions = append(versions, n)
@@ -882,6 +888,12 @@ func (s *Store) Stage(v *Verified) error {
 		return err
 	}
 	defer unlock()
+	if v.storeDir != s.Dir {
+		return errors.New("update: release was checked by another store")
+	}
+	if err := s.trustUnchanged(v); err != nil {
+		return err
+	}
 	in, err := s.Installed()
 	if err != nil {
 		return err
@@ -948,6 +960,37 @@ func (s *Store) DropStaged() error {
 	defer unlock()
 	if err := os.Remove(s.p("staged.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
+	}
+	return nil
+}
+
+// ErrTrustMoved: the store's trusted root or targets changed since the
+// release was checked; check again before staging it.
+var ErrTrustMoved = errors.New("update: trusted metadata changed since the release was checked")
+
+// trustUnchanged refuses v when the store's root or targets version moved
+// since its check: a key rotation or revocation, or newer targets, may no
+// longer vouch for it (L3 on #133).
+func (s *Store) trustUnchanged(v *Verified) error {
+	rb, err := os.ReadFile(s.p("root.json"))
+	if err != nil {
+		return err
+	}
+	root, err := metadata.Root().FromBytes(rb)
+	if err != nil {
+		return classify(err)
+	}
+	sb, err := os.ReadFile(s.p("snapshot.json"))
+	if err != nil {
+		return err
+	}
+	snap, err := metadata.Snapshot().FromBytes(sb)
+	if err != nil {
+		return classify(err)
+	}
+	tm, ok := snap.Signed.Meta["targets.json"]
+	if !ok || root.Signed.Version != v.rootVersion || tm.Version != v.targetsVersion {
+		return ErrTrustMoved
 	}
 	return nil
 }

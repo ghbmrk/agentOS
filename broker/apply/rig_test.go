@@ -128,6 +128,7 @@ type rig struct {
 	working  bool
 	excluded func(time.Time) bool
 	talk     time.Time
+	stopped  bool
 	a        *Applier
 }
 
@@ -170,6 +171,7 @@ func (r *rig) restart() {
 		InCall: func() bool { return r.inCall }, Working: func() bool { return r.working },
 		Excluded: func(t time.Time) bool { return r.excluded != nil && r.excluded(t) },
 		LastTalk: func() time.Time { return r.talk },
+		Stopped:  func() bool { return r.stopped },
 		Jitter:   6 * time.Hour, Rand: func(n int64) int64 { return n / 2 }, Now: r.clk.now})
 	if err != nil {
 		r.t.Fatal(err)

@@ -87,3 +87,44 @@ func TestDropStagedKeepsInstalledAndRoot(t *testing.T) {
 		t.Fatal("committed a dropped release")
 	}
 }
+
+// L3 on #133: a release is staged only by the store that checked it, and
+// only while the root and targets it was checked under still stand. A key
+// rotation or newer targets after the check means checking again.
+func TestStageRefusesStaleOrForeignChecks(t *testing.T) {
+	f := newFixture(t)
+	f.release(2, nil)
+	f.publish(0, 1)
+	res, err := f.check(Options{})
+	f.must(err)
+
+	other := newFixture(t)
+	if err := other.store.Stage(res.Release); err == nil {
+		t.Fatal("staged a release another store checked")
+	}
+
+	// Newer targets.
+	f.release(3, nil)
+	f.publish(0, 1)
+	_, err = f.check(Options{})
+	f.must(err)
+	if err := f.store.Stage(res.Release); !errors.Is(err, ErrTrustMoved) {
+		t.Fatalf("after new targets: %v", err)
+	}
+
+	// A root rotation.
+	res3, err := f.check(Options{})
+	f.must(err)
+	kdir := t.TempDir()
+	_, newRootPub := genKeys(t, kdir, "root-new", 1)
+	f.must(f.repo.Rotate("root", newRootPub, nil, 0))
+	f.must(f.repo.Sign("root", f.root[0]))
+	f.must(f.repo.Sign("root", f.root[1]))
+	f.must(f.repo.Publish(f.snap, f.ts))
+	if _, err := f.check(Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.Stage(res3.Release); !errors.Is(err, ErrTrustMoved) {
+		t.Fatalf("after a root rotation: %v", err)
+	}
+}

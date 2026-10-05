@@ -38,7 +38,11 @@ const (
 type Activator interface {
 	// Install writes the release's /usr image, its verity data and its
 	// boot entry to the inactive slot together (UPD-1a) and makes that
-	// entry the next boot, with counted tries. It does not restart.
+	// entry the next boot, with counted tries. It does not restart. It
+	// reads each file only through v.Fetch, which checks the signed length
+	// and hash, never follows a symlink in the slot it writes, and verifies
+	// the written slot against the manifest's /usr root hash before it
+	// makes the entry the next boot (security C2 on #133).
 	Install(ctx context.Context, v *update.Verified) error
 	// Abandon undoes an Install the box did not restart into: the
 	// inactive slot is no longer the next boot. It is safe to call when
@@ -95,6 +99,10 @@ type Config struct {
 	// Excluded reports hours the owner excluded from updates (UPD-6).
 	// Nil: none.
 	Excluded func(time.Time) bool
+	// Stopped reports STOP in force (CH-11): nothing is handed over and no
+	// restart happens while it holds. Nil: the Journal's own Stopped, which
+	// *journal.Engine has; New refuses a journal without one.
+	Stopped func() bool
 	// LastTalk is when the owner was last delivered a message or the
 	// agent last replied. Within Quiet of it the box is not free, so a
 	// restart never cuts a conversation off (UX-133-4). Nil: never.
@@ -183,6 +191,13 @@ func New(cfg Config) (*Applier, error) {
 	}
 	if cfg.Excluded == nil {
 		cfg.Excluded = func(time.Time) bool { return false }
+	}
+	if cfg.Stopped == nil {
+		j, ok := cfg.Journal.(interface{ Stopped() bool })
+		if !ok {
+			return nil, errors.New("apply: Stopped is required")
+		}
+		cfg.Stopped = j.Stopped
 	}
 	if cfg.LastTalk == nil {
 		cfg.LastTalk = func() time.Time { return time.Time{} }
@@ -273,6 +288,8 @@ func (a *Applier) talkUntil(p *pending) time.Time {
 // talkUntil, when that is set.
 func (a *Applier) busy(now, talkUntil time.Time) string {
 	switch {
+	case a.cfg.Stopped():
+		return busyStop
 	case a.cfg.InCall():
 		return busyCall
 	case a.cfg.Working():
@@ -287,6 +304,7 @@ func (a *Applier) busy(now, talkUntil time.Time) string {
 
 // Why the box is not free (UPD-6; UX-133-4).
 const (
+	busyStop     = "STOP is in force"
 	busyCall     = "a call is in progress"
 	busyWork     = "accepted work is in progress"
 	busyExcluded = "the owner excluded these hours from updates"
@@ -295,6 +313,7 @@ const (
 
 // waitLines say why an update waits (UX-133-3).
 var waitLines = map[string]string{
+	busyStop:     "Update %d is on hold while actions are stopped; it installs after RESUME.",
 	busyCall:     "Update %d will install after the current call.",
 	busyWork:     "Update %d will install once the agent's current task is done.",
 	busyExcluded: "Update %d will install after your update-free hours.",
@@ -325,7 +344,11 @@ func (a *Applier) Tick(ctx context.Context) (ok bool, err error) {
 		return false, nil
 	}
 	id := a.nextID(p.Version)
-	st, err := a.cfg.Journal.Submit(a.intent(id))
+	in, err := a.intent(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	st, err := a.cfg.Journal.Submit(in)
 	if err != nil {
 		return false, err
 	}
@@ -375,19 +398,28 @@ func (a *Applier) nextID(version int64) string {
 
 // intent is the activation intent for id, with the rollback point in its
 // params: the release it replaces and the one it activates.
-func (a *Applier) intent(id string) journal.Intent {
+func (a *Applier) intent(ctx context.Context, id string) (journal.Intent, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	params := map[string]any{}
-	if p := a.st.Pending; p != nil && a.rel != nil {
-		m, _ := a.rel.Manifest()
-		in, _ := a.cfg.Store.Installed()
-		b, _ := a.cfg.Activator.Booted(context.Background())
-		params = map[string]any{"from": in.Version, "from_usr": b.UsrRootHash, "to": m.Version, "to_usr": m.UsrRootHash,
-			"adoption": p.Adoption, "security": p.Security}
+	p := a.st.Pending
+	if p == nil || a.rel == nil {
+		return journal.Intent{}, errors.New("apply: no release is waiting")
 	}
-	return journal.Intent{ID: id, Origin: Origin, Account: journal.BrokerAccount, Action: Action,
-		Executor: Executor, Params: params}
+	m, err := a.rel.Manifest()
+	if err != nil {
+		return journal.Intent{}, err
+	}
+	in, err := a.cfg.Store.Installed()
+	if err != nil {
+		return journal.Intent{}, err
+	}
+	b, err := a.cfg.Activator.Booted(ctx)
+	if err != nil {
+		return journal.Intent{}, err
+	}
+	return journal.Intent{ID: id, Origin: Origin, Account: journal.BrokerAccount, Action: Action, Executor: Executor,
+		Params: map[string]any{"from": in.Version, "from_usr": b.UsrRootHash, "to": m.Version, "to_usr": m.UsrRootHash,
+			"adoption": p.Adoption, "security": p.Security}}, nil
 }
 
 func parseID(id string) (int64, bool) {
@@ -621,7 +653,7 @@ func (a *Applier) Digest() []string {
 // (security C3 on #133), so it is not tried again.
 func fellBackLine(v int64) string {
 	return fmt.Sprintf("Update %d did not start cleanly, so the box went back to the version it had. "+
-		"Nothing is needed from you. It won't be tried again.", v)
+		"Nothing is needed from you. It won't be tried again; a later update will replace it.", v)
 }
 
 func (a *Applier) saveLocked() error {
