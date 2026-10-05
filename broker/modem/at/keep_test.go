@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,10 +15,14 @@ import (
 
 // REQ: CH-1, CH-2
 
-func openKeep(t *testing.T, dev *atsim.Device, check func(string) error) (*at.Modem, error) {
+func openKeep(t *testing.T, dev *atsim.Device, check func(string) error, now ...func() time.Time) (*at.Modem, error) {
 	t.Helper()
-	m, err := at.Open(context.Background(), at.Config{Profile: at.SIMCom, Port: dev.Port(), Number: boxNum, CountryCode: "1",
-		Owner: ownerNum, KeepUntilAck: true, CheckSIM: check, Sweep: 20 * time.Millisecond})
+	cfg := at.Config{Profile: at.SIMCom, Port: dev.Port(), Number: boxNum, CountryCode: "1",
+		Owner: ownerNum, KeepUntilAck: true, CheckSIM: check, Sweep: 20 * time.Millisecond}
+	if len(now) > 0 {
+		cfg.Now = now[0]
+	}
+	m, err := at.Open(context.Background(), cfg)
 	if err == nil {
 		t.Cleanup(func() { m.Close() })
 	}
@@ -126,5 +131,77 @@ func TestCheckSIMRunsBeforeAnyTextIsRead(t *testing.T) {
 	}
 	if dev.Stored() != 1 {
 		t.Fatalf("%d stored, want 1", dev.Stored())
+	}
+}
+
+// L3 on #170 (MUST-2): only the owner's texts are kept until acked;
+// anyone else's, whole or a part of a longer text, are deleted as they are
+// read, so they cannot fill the modem's memory.
+func TestOnlyTheOwnersTextsAreKept(t *testing.T) {
+	dev := atsim.New(at.SIMCom, "SIMCOM_SIM7600G-H", modem.NewCarrier().Line(boxNum), time.Millisecond)
+	store(t, dev, shopNum, "hello", 1)
+	for ref := byte(2); ref < 6; ref++ {
+		pdus, _ := at.EncodeDeliver(shopNum, strings.Repeat("part of a long text ", 12), ref)
+		dev.StorePDU(pdus[0]) // never completed
+	}
+	m, err := openKeep(t, dev, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := next(t, m); s.Ref != "" || s.Text != "hello" {
+		t.Fatalf("a stranger's text was kept: %+v", s)
+	}
+	waitStored(t, dev, 0)
+}
+
+// L3 on #170 (N7, N11): a repeated +CMTI for a held text neither deletes
+// nor delivers it again, and a second stored copy of a text is deleted.
+func TestAHeldTextIsLeftAloneAndCopiesAreDeleted(t *testing.T) {
+	dev := atsim.New(at.SIMCom, "SIMCOM_SIM7600G-H", modem.NewCarrier().Line(boxNum), time.Millisecond)
+	pdus, _ := at.EncodeDeliver(ownerNum, "STOP", 1)
+	dev.StorePDU(pdus[0])
+	m, err := openKeep(t, dev, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := next(t, m)
+	dev.Renotify(0)
+	dev.StorePDU(pdus[0]) // the same text again: a delete that did not happen
+	time.Sleep(150 * time.Millisecond)
+	select {
+	case again := <-m.Inbox():
+		t.Fatalf("delivered again: %+v", again)
+	default:
+	}
+	waitStored(t, dev, 1) // the held one; the copy is gone
+	if err := m.Ack(s.Ref); err != nil {
+		t.Fatal(err)
+	}
+	waitStored(t, dev, 0)
+}
+
+// L3 on #170 (N12): a long text's Ref covers every part: two texts that
+// share a first part have different Refs.
+func TestARefCoversEveryPart(t *testing.T) {
+	var mu sync.Mutex
+	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	dev := atsim.New(at.SIMCom, "SIMCOM_SIM7600G-H", modem.NewCarrier().Line(boxNum), time.Millisecond)
+	head := strings.Repeat("a", 153)
+	store(t, dev, ownerNum, head+"first ending", 7)
+	m, err := openKeep(t, dev, nil, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := next(t, m)
+	m.Ack(a.Ref)
+	waitStored(t, dev, 0)
+	mu.Lock()
+	now = now.Add(time.Hour) // past the driver's memory of the first part
+	mu.Unlock()
+	store(t, dev, ownerNum, head+"other ending", 7)
+	b := next(t, m)
+	if b.Text == a.Text || b.Ref == a.Ref {
+		t.Fatalf("two texts sharing a first part: %q %q, Refs %q %q", a.Text, b.Text, a.Ref, b.Ref)
 	}
 }

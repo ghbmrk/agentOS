@@ -201,9 +201,7 @@ func (b *runner) report(ctx context.Context) {
 	}
 }
 
-// serve carries texts while the modem answers. agentosd hears the line is
-// ok before any text is read, so the first texts (those stored while the
-// bridge was away) do not meet a line agentosd still reads as down.
+// serve carries texts while the modem answers.
 //
 // The modem keeps each text stored until agentosd has taken it
 // (at.Config.KeepUntilAck), so a text is never lost to the bridge, the
@@ -219,9 +217,6 @@ func (b *runner) serve(runCtx context.Context, m Owner) {
 		case <-ctx.Done():
 		}
 	}()
-	if !b.reportOK(ctx) {
-		return
-	}
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -254,11 +249,15 @@ func (b *runner) reportOK(ctx context.Context) bool {
 	}
 }
 
-// inbound offers one text to agentosd while the modem answers, again while
-// the refusal can pass, and has the modem delete it once agentosd has it
-// or can never take it. Before each new offer agentosd is told again that
-// the line is ok: a paused refusal or a lost connection may mean agentosd
-// restarted and reads the line as down.
+// inbound offers one text to agentosd. A text the modem keeps (the
+// owner's: it has a Ref) is offered while the modem answers, again while
+// the refusal can pass, and deleted once agentosd has it or can never take
+// it; before each new offer agentosd is told again that the line is ok,
+// since a paused refusal or a lost connection may mean agentosd restarted
+// and reads the line as down. Anyone else's text was deleted as it was
+// read and is offered once, so it can never hold up the owner's (L3 on
+// #170). A text agentosd would refuse as malformed (too long, a bad
+// sender) is never offered: its request could exceed what agentosd reads.
 func (b *runner) inbound(ctx context.Context, m Owner, sms modem.SMS) {
 	id := sms.Ref
 	if id == "" {
@@ -267,12 +266,19 @@ func (b *runner) inbound(ctx context.Context, m Owner, sms modem.SMS) {
 		id = hex.EncodeToString(r[:])
 	}
 	in := bridgeproto.Inbound{Line: bridgeproto.LineOwner, From: sms.From, Text: sms.Text, Named: sms.Alphanumeric, ID: id}
+	if !in.Valid() {
+		b.cfg.Logf("bridge: a malformed text was dropped")
+		if sms.Ref != "" && m.Ack(sms.Ref) != nil {
+			b.cfg.Logf("bridge: a dropped text was not deleted")
+		}
+		return
+	}
 	for wait := b.cfg.InboundRetry; ; wait = min(2*wait, b.cfg.Retry) {
 		err := b.cfg.Agentosd.Call(ctx, bridgeproto.OpInbound, in, nil)
 		if ctx.Err() != nil {
 			return // still stored: read again at the next open
 		}
-		if err == nil || !bridgeproto.Retryable(err) {
+		if err == nil || !bridgeproto.Retryable(err) || sms.Ref == "" {
 			if err != nil {
 				b.cfg.Logf("bridge: an inbound text was refused")
 			}

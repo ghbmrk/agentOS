@@ -3,6 +3,7 @@ package bridge_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -45,12 +46,14 @@ type rig struct {
 	// refuse is how many more inbound offers fail with refusal.
 	refuse  int
 	refusal string
-	cancel  context.CancelFunc
-	done    chan error
-	dir     string
-	srv     *sockets.Server
-	srvStop context.CancelFunc
-	last    *atsim.Device
+	// refuseFrom, if set, refuses every offer from that sender.
+	refuseFrom string
+	cancel     context.CancelFunc
+	done       chan error
+	dir        string
+	srv        *sockets.Server
+	srvStop    context.CancelFunc
+	last       *atsim.Device
 }
 
 // startAgentosd serves owner.sock with a fresh Link, as agentosd does when
@@ -137,6 +140,9 @@ func (f *flaky) Call(ctx context.Context, op string, args, out any) error {
 	if op == bridgeproto.OpInbound && f.r.refuse > 0 {
 		f.r.refuse--
 		refused = f.r.refusal
+	}
+	if in, ok := args.(bridgeproto.Inbound); ok && f.r.refuseFrom != "" && in.From == f.r.refuseFrom {
+		refused = bridgeproto.RefusedPaused
 	}
 	f.r.mu.Unlock()
 	if fail {
@@ -431,4 +437,114 @@ func TestATextInHandWhenTheModemDropsIsDeliveredAfterReopen(t *testing.T) {
 		t.Fatalf("delivered twice: %+v", m)
 	case <-time.After(200 * time.Millisecond):
 	}
+}
+
+// L3 on #170 (MUST-1): a text agentosd could not even read (a long text,
+// escaped past agentosd's request size, here with the owner's number) or
+// would refuse as malformed (past MaxText) is dropped, not offered for
+// ever, so the owner's STOP behind it arrives.
+func TestAnUnreadableTextDoesNotHoldUpTheOwner(t *testing.T) {
+	r := newRigWith(t, recorded, func(d *atsim.Device) {
+		store := func(from, text string, ref byte) {
+			pdus, err := at.EncodeDeliver(from, text, ref)
+			if err != nil {
+				panic(err)
+			}
+			for _, p := range pdus {
+				d.StorePDU(p)
+			}
+		}
+		// 72 parts, past what EncodeDeliver makes: part 1 of a 2-part
+		// text, renumbered (UDH 05 00 03 ref total seq).
+		two, err := at.EncodeDeliver(ownerNum, strings.Repeat("<", 2*153), 1)
+		if err != nil || !strings.Contains(two[0], "0500030102") {
+			panic(fmt.Sprint("template: ", err))
+		}
+		for seq := 1; seq <= 72; seq++ {
+			d.StorePDU(strings.Replace(two[0], "050003010201", fmt.Sprintf("0500030148%02X", seq), 1))
+		}
+		store(ownerNum, strings.Repeat("é", bridgeproto.MaxText/2+1), 2) // 2 bytes each
+		store(ownerNum, "STOP", 3)
+	})
+	r.gets("STOP")
+	for deadline := time.Now().Add(5 * time.Second); r.stored() != 0; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d texts left on the modem", r.stored())
+		}
+	}
+}
+
+// L3 on #170 (MUST-2): with the modem's memory full of a stranger's
+// unfinished long texts, the owner's STOP still gets in: no one else's
+// text is kept, so memory frees as it is read.
+func TestAStrangerCannotFillTheModemsMemory(t *testing.T) {
+	r := newRigWith(t, recorded, func(d *atsim.Device) {
+		d.SetCapacity(4)
+		for ref := byte(1); ref <= 8; ref++ {
+			pdus, _ := at.EncodeDeliver("+15550000123", strings.Repeat("part of a long text ", 12), ref)
+			d.StorePDU(pdus[0]) // never completed
+		}
+		pdus, _ := at.EncodeDeliver(ownerNum, "STOP", 9)
+		d.StorePDU(pdus[0])
+	})
+	r.gets("STOP")
+}
+
+// L3 on #170 (N9): a state report agentosd did not hear is sent again
+// soon, not at the next StateEvery (an hour here).
+func TestAMissedStateReportIsSentAgain(t *testing.T) {
+	r := newRigWith(t, recorded, nil, bridgeproto.OpState)
+	r.waitNote(func(n string) bool { return n == "" })
+}
+
+// L3 on #170 (A10'): a text in hand is offered only while its modem
+// answers: when the modem drops, the bridge reopens at once, though
+// agentosd still refuses the text.
+func TestTheBridgeReopensWhileATextIsRefused(t *testing.T) {
+	r := newRig(t, recorded)
+	r.waitNote(func(n string) bool { return n == "" })
+	r.mu.Lock()
+	r.refuse, r.refusal = 1<<30, "connection reset"
+	opened := len(r.devs)
+	dev := r.last
+	r.mu.Unlock()
+	if err := r.phone.Send(boxNum, "STOP"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	dev.Unplug()
+	for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		r.mu.Lock()
+		n := len(r.devs)
+		r.mu.Unlock()
+		if n > opened {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the bridge did not reopen while a text was refused")
+		}
+	}
+	r.mu.Lock()
+	r.refuse = 0
+	r.mu.Unlock()
+	r.gets("STOP")
+}
+
+// L3 on #170 (MUST-1): anyone else's text is deleted as it is read and
+// offered once, so a refusal of it, however long it lasts, never holds up
+// the owner's STOP.
+func TestAStrangersTextIsOfferedOnce(t *testing.T) {
+	r := newRig(t, recorded)
+	r.waitNote(func(n string) bool { return n == "" })
+	r.mu.Lock()
+	r.refuseFrom = "+15550000123"
+	r.mu.Unlock()
+	if err := r.carrier.Line("+15550000123").Send(boxNum, "hello"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if err := r.phone.Send(boxNum, "STOP"); err != nil {
+		t.Fatal(err)
+	}
+	r.gets("STOP")
 }

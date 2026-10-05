@@ -121,6 +121,7 @@ type Modem struct {
 	inbox      chan modem.SMS
 	incoming   chan *Call
 	smsKick    chan int
+	ackKick    chan string
 	callKick   chan struct{}
 	statusKick chan struct{}
 	stop       chan struct{}
@@ -181,7 +182,7 @@ func Open(ctx context.Context, cfg Config) (*Modem, error) {
 	m := &Modem{
 		cfg: cfg, e: NewEngine(cfg.Port, urcs), number: cfg.Number,
 		inbox: make(chan modem.SMS, 64), incoming: make(chan *Call, 4),
-		smsKick: make(chan int, 64), callKick: make(chan struct{}, 1), statusKick: make(chan struct{}, 1),
+		smsKick: make(chan int, 64), ackKick: make(chan string, 64), callKick: make(chan struct{}, 1), statusKick: make(chan struct{}, 1),
 		stop: make(chan struct{}), calls: map[int]*Call{}, parts: map[string]*assembly{}, seen: map[string]time.Time{},
 		held: map[int]bool{}, pending: map[string][]int{},
 	}
@@ -398,6 +399,8 @@ func (m *Modem) smsLoop() {
 				}
 			}
 			m.flushTrash(ctx)
+		case ref := <-m.ackKick:
+			m.ack(ctx, ref)
 		case <-m.statusKick:
 			m.readStatus(ctx, 0)
 		case <-t.C:
@@ -444,7 +447,22 @@ func (m *Modem) receive(ctx context.Context, idx int, header, pdu string) {
 		return
 	}
 	d, err := DecodeDeliver(pdu)
-	keep := m.cfg.KeepUntilAck && err == nil && !d.Silent()
+	alpha, fromOwner := false, false
+	if err == nil {
+		alpha = d.TON == 5
+		if alpha {
+			// A sender ID can spell any number; it never reads as one.
+			d.Addr = "alpha:" + d.Addr
+		} else {
+			d.Addr = E164(d.Addr, d.TON, m.cfg.CountryCode)
+		}
+		fromOwner = !alpha && m.cfg.Owner != "" && SameNumber(d.Addr, m.cfg.Owner, m.cfg.CountryCode)
+	}
+	// Only the owner's texts are kept until acked, and at most maxHeld
+	// stored indices at once: anyone else's are deleted as they are read,
+	// so no one else can fill the modem's memory and keep the owner's
+	// STOP out (L3 on #170).
+	keep := m.cfg.KeepUntilAck && err == nil && !d.Silent() && fromOwner && m.heldCount() < maxHeld
 	if !keep {
 		if _, derr := m.e.Do(ctx, "AT+CMGD="+strconv.Itoa(idx), cmdTimeout); derr != nil && !errors.Is(derr, modem.ErrDown) {
 			// Left stored; the next sweep tries again.
@@ -471,19 +489,13 @@ func (m *Modem) receive(ctx context.Context, idx int, header, pdu string) {
 		m.mu.Unlock()
 		return
 	}
+	keptIdx := -1 // the index to delete later; -1: deleted as read
 	if keep {
 		m.held[idx] = true
+		keptIdx = idx
 	}
 	m.mu.Unlock()
-	alpha := d.TON == 5
-	if alpha {
-		// A sender ID can spell any number; it never reads as one.
-		d.Addr = "alpha:" + d.Addr
-	} else {
-		d.Addr = E164(d.Addr, d.TON, m.cfg.CountryCode)
-	}
-	fromOwner := !alpha && m.cfg.Owner != "" && SameNumber(d.Addr, m.cfg.Owner, m.cfg.CountryCode)
-	text, ok, conflict, idxs, ref := m.assemble(d, fromOwner, idx, key)
+	text, ok, conflict, idxs, ref := m.assemble(d, fromOwner, keptIdx, key)
 	if conflict && fromOwner {
 		m.mu.Lock()
 		due := m.garbled.IsZero() || now.Sub(m.garbled) >= time.Hour
@@ -499,16 +511,37 @@ func (m *Modem) receive(ctx context.Context, idx int, header, pdu string) {
 		return
 	}
 	sms := modem.SMS{From: d.Addr, To: m.number, Text: text, At: now, Segments: segments(text), Alphanumeric: alpha}
-	if keep {
+	if kept := heldOf(idxs); len(kept) > 0 {
+		// Kept until Ack; parts already deleted as read (past maxHeld)
+		// need no ack.
 		sms.Ref = ref
 		m.mu.Lock()
-		m.pending[ref] = append(m.pending[ref], idxs...)
+		m.pending[ref] = append(m.pending[ref], kept...)
 		m.mu.Unlock()
 	}
 	select {
 	case m.inbox <- sms:
 	case <-m.stop:
 	}
+}
+
+// maxHeld bounds the stored indices kept until acked.
+const maxHeld = 32
+
+func heldOf(idxs []int) []int {
+	var out []int
+	for _, i := range idxs {
+		if i >= 0 {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+func (m *Modem) heldCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.held)
 }
 
 func (m *Modem) isHeld(idx int) bool {
@@ -518,22 +551,33 @@ func (m *Modem) isHeld(idx int) bool {
 }
 
 // Ack deletes a delivered text kept with KeepUntilAck: its taker has it.
-// A delete that fails leaves the text stored; it is not delivered again
-// while this Modem remembers it (dupTTL), and is deleted when read again.
+// The delete runs on the text loop, between reads, so an index it frees
+// is never mistaken by a read in flight (L3 on #170). A delete that fails
+// leaves the text stored; it is not delivered again while this Modem
+// remembers it (dupTTL), and is deleted when read again.
 func (m *Modem) Ack(ref string) error {
+	select {
+	case m.ackKick <- ref:
+		return nil
+	case <-m.stop:
+		return modem.ErrDown
+	}
+}
+
+// ack deletes ref's indices, then forgets them. smsLoop only.
+func (m *Modem) ack(ctx context.Context, ref string) {
 	m.mu.Lock()
 	idxs := m.pending[ref]
 	delete(m.pending, ref)
+	m.mu.Unlock()
+	for _, i := range idxs {
+		m.e.Do(ctx, "AT+CMGD="+strconv.Itoa(i), cmdTimeout)
+	}
+	m.mu.Lock()
 	for _, i := range idxs {
 		delete(m.held, i)
 	}
 	m.mu.Unlock()
-	for _, i := range idxs {
-		if _, err := m.e.Do(context.Background(), "AT+CMGD="+strconv.Itoa(i), cmdTimeout); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // flushTrash deletes kept texts that will never be delivered.
@@ -541,13 +585,15 @@ func (m *Modem) flushTrash(ctx context.Context) {
 	m.mu.Lock()
 	trash := m.trash
 	m.trash = nil
-	for _, i := range trash {
-		delete(m.held, i)
-	}
 	m.mu.Unlock()
 	for _, i := range trash {
 		m.e.Do(ctx, "AT+CMGD="+strconv.Itoa(i), cmdTimeout)
 	}
+	m.mu.Lock()
+	for _, i := range trash {
+		delete(m.held, i)
+	}
+	m.mu.Unlock()
 }
 
 // textRef names a text by its PDUs, in part order: the same on every read.
@@ -620,10 +666,10 @@ func (m *Modem) assemble(d Deliver, owner bool, idx int, pdu string) (text strin
 	return sb.String(), true, false, idxs, textRef(pdus...)
 }
 
-// discardLocked marks a kept index for deletion; without KeepUntilAck it
-// was deleted as it was read. Caller holds mu.
+// discardLocked marks a kept index for deletion; -1 (or without
+// KeepUntilAck) it was deleted as it was read. Caller holds mu.
 func (m *Modem) discardLocked(idx int) {
-	if m.cfg.KeepUntilAck {
+	if m.cfg.KeepUntilAck && idx >= 0 {
 		m.trash = append(m.trash, idx)
 	}
 }

@@ -529,3 +529,21 @@ func TestSendWaitRunsFromHandOff(t *testing.T) {
 		t.Fatalf("a text sent within SendWait of hand-off: %v", err)
 	}
 }
+
+// L3 on #170 (N8): a text offered again five minutes later (a bridge
+// restart) is still taken once.
+func TestATextOfferedAgainMinutesLaterIsTakenOnce(t *testing.T) {
+	l, clk := rig(t)
+	in := bridgeproto.Inbound{Line: bridgeproto.LineOwner, From: ownerNum, Text: "YES 123456", ID: "t1"}
+	call(t, l, bridgeproto.OpInbound, in, nil)
+	<-l.Inbox()
+	clk.add(5 * time.Minute)
+	if err := call(t, l, bridgeproto.OpInbound, in, nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case m := <-l.Inbox():
+		t.Fatalf("taken twice: %+v", m)
+	default:
+	}
+}
