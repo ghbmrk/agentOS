@@ -20,13 +20,11 @@ import (
 
 // REQ: OP-8, CAP-9, REV-5, CRED-7
 
-// openModel opens a fastRig's vault through the code and serves its model
-// socket with rt, reaching provider for every provider host. It returns
-// the broker side: the forwarder behind a meter, and the denials it
-// journaled.
+// openModel serves a model socket (openModelSocket) and returns the broker
+// side: the forwarder behind a meter, and the denials it journaled.
 func openModel(t *testing.T, rt *route.Router, provider http.HandlerFunc) (http.Handler, *meter.Meter, *[]modelroute.Denial) {
 	t.Helper()
-	sock := serveModel(t, rt, nil, provider)
+	sock := openModelSocket(t, rt, provider)
 	var denied []modelroute.Denial
 	fwd := modelroute.Forward(modelroute.Config{
 		Socket: sock,
@@ -41,9 +39,16 @@ func openModel(t *testing.T, rt *route.Router, provider http.HandlerFunc) (http.
 	return m.Wrap("agent", fwd("agent")), m, &denied
 }
 
-// serveModel opens a fastRig's vault through the code and serves its model
-// socket with rt and ev, reaching provider for every provider host. The
-// machine "agent" is granted OpenAI.
+// openModelSocket opens a fastRig's vault through the code and serves its
+// model socket with rt, reaching provider for every provider host. It
+// returns the socket's path.
+func openModelSocket(t *testing.T, rt *route.Router, provider http.HandlerFunc) string {
+	t.Helper()
+	return serveModel(t, rt, nil, provider)
+}
+
+// serveModel is openModelSocket with replay machines' evaluation route ev.
+// The machine "agent" is granted OpenAI.
 func serveModel(t *testing.T, rt *route.Router, ev *evalRoute, provider http.HandlerFunc) string {
 	t.Helper()
 	prov := httptest.NewTLSServer(provider)

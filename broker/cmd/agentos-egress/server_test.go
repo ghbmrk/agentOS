@@ -345,13 +345,13 @@ func TestUsageTrailerNamesProvider(t *testing.T) {
 		{"openai/gpt-test", route.Usage{OutputChars: 40}, `{"provider":"openai","input":0,"output":0,"cache_read":0,"cache_write":0,"reported":false,"complete":false,"output_chars":40}`},
 	} {
 		var a callAudit
-		a.decide(httptest.NewRecorder())(route.Decision{Outcome: route.Served, Route: c.route, Usage: &c.u})
+		a.decide(httptest.NewRecorder(), "POST")(route.Decision{Outcome: route.Served, Route: c.route, Usage: &c.u})
 		if got := a.usage(); got != c.want {
 			t.Fatalf("%s: %s, want %s", c.route, got, c.want)
 		}
 	}
 	var none callAudit
-	none.decide(httptest.NewRecorder())(route.Decision{Outcome: route.Denied, Status: 400})
+	none.decide(httptest.NewRecorder(), "POST")(route.Decision{Outcome: route.Denied, Status: 400})
 	if got := none.usage(); got != "" {
 		t.Fatalf("usage for a refused call: %s", got)
 	}

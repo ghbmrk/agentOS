@@ -68,7 +68,8 @@ form { margin: .6em 0 1.2em; }
 <h1>Unlock the box</h1>
 {{if .Down}}<p>The box is still starting. This page reloads by itself.</p>
 {{else if eq .State "open"}}<p class="ok">The box is unlocked.{{if .Kept}} This PC stays trusted.{{end}}</p>
-<p>To approve by text again, <a href="/unlock">sign in</a> with your next code.</p>
+{{if .SignedIn}}<p>This phone is signed in, and chat by text is unlocked.</p>
+{{else}}<p>To approve by text again, <a href="/unlock">sign in</a> with your next code.</p>{{end}}
 {{else if eq .State "opening"}}<p>Checking the passphrase. This page reloads by itself.</p>
 {{else if eq .State "pending"}}{{if .Mine}}<p class="ok">Passphrase accepted.</p>
 <form method="post" action="/unlock/vault"><input type="hidden" name="step" value="code">
@@ -78,7 +79,10 @@ form { margin: .6em 0 1.2em; }
 {{with .Err}}<p class="err">{{.}}</p>{{end}}
 <button>Unlock</button></form>
 {{else}}{{with .Err}}<p class="err">{{.}}</p>{{end}}
-<p>An unlock is waiting for a code on another phone or a closed page. It ends by itself at {{.Expires}}.</p>{{end}}
+<p>An unlock is waiting for a code on another phone or a closed page. It ends by itself at {{.Expires}}.</p>
+<h2>Start over on this phone</h2>
+<p class="muted">This cancels the unlock waiting on the other phone.</p>
+{{template "vaultcard"}}{{end}}
 {{else}}
 <p><b>If this drive was out of your hands, unlock it only on your trusted PC.</b></p>
 {{with .Boot}}<p class="err">{{.}}</p>{{end}}
@@ -88,17 +92,19 @@ form { margin: .6em 0 1.2em; }
 <input type="password" name="pin" inputmode="numeric" autocomplete="off" required></label>
 <button>Unlock</button></form>
 <h2>Or use your Owner Card</h2>{{end}}
-<form method="post" action="/unlock/vault" enctype="multipart/form-data"><input type="hidden" name="step" value="passphrase">
+{{template "vaultcard"}}
+{{end}}
+<p><a href="/status">Status</a></p>
+{{template "foot"}}{{end}}
+
+{{define "vaultcard"}}<form method="post" action="/unlock/vault" enctype="multipart/form-data"><input type="hidden" name="step" value="passphrase">
 <label>Photo of the vault passphrase QR code on your card
 <input type="file" name="photo" id="photo" accept="image/*"></label>
 <p class="muted">Or type the passphrase words.</p>
 <input type="text" name="passphrase" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" aria-label="Passphrase words">
 <button>Next</button></form>
 <p class="muted">Next, the box asks for a code from your code generator. The passphrase alone does not unlock it.</p>
-<script>{{shrinkjs}}</script>
-{{end}}
-<p><a href="/status">Status</a></p>
-{{template "foot"}}{{end}}
+<script>{{shrinkjs}}</script>{{end}}
 
 {{define "home"}}{{template "head" ""}}
 <h1>AgentOS</h1>

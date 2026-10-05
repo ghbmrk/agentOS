@@ -396,7 +396,9 @@ func TestALapsedOwnerRequestBacksOffThenStops(t *testing.T) {
 		t.Fatal("first proposal not made")
 	}
 	// New evidence, but the owner was just asked: wait for the backoff.
-	more(4)
+	// (Thirteen tasks, so one lands in dev outside the next goal of a
+	// held-out task, which mining also skips; the split is deterministic.)
+	more(13)
 	if run() {
 		t.Fatal("re-proposed inside the backoff")
 	}
@@ -404,8 +406,27 @@ func TestALapsedOwnerRequestBacksOffThenStops(t *testing.T) {
 	if !run() || ap.proposals != 2 {
 		t.Fatal("not re-proposed after the backoff")
 	}
-	// After two lapsed asks it is not proposed again, however long.
-	more(4)
+	// After two lapsed asks it is not proposed again, however long, even
+	// with new mined evidence (so the stop, not a lack of evidence, holds
+	// it back).
+	mined := func() int {
+		ev, err := h.Evidence()
+		must(t, err)
+		n := 0
+		for _, hy := range l.mine(ev) {
+			if hy.Key == "correction:mail/draft" {
+				n = len(hy.Tasks)
+			}
+		}
+		return n
+	}
+	before := mined()
+	for i := 0; i < 40 && mined() <= before; i++ {
+		more(1)
+	}
+	if mined() <= before {
+		t.Fatal("no new mined evidence for the third round")
+	}
 	r.clk.add(30 * 24 * time.Hour)
 	if run() {
 		t.Fatal("proposed a third time; it should wait in the digest")
@@ -519,5 +540,197 @@ func TestACrashMidHarvestStillKeepsTheTaskFromTheBuilder(t *testing.T) {
 	must(t, h2.Harvest(Outcome{Intent: id, Action: Edited, Input: []byte("procedures/mail"), Output: []byte("v1"), Correction: []byte("v2")}))
 	if ev, _ := h2.Evidence(); ev.HeldOut != 1 {
 		t.Fatalf("after retry: held out %d", ev.HeldOut)
+	}
+}
+
+// TestAHeldOutGoalsWorkIsNotMinedWhereverItLanded: a held-out task's work
+// can land unstamped (the origin bucket), under a goal that ran while it
+// was active, or under the goal that came after it (guest G14). None is
+// mined; a goal that starts later is, so one held-out case does not stop
+// Loop 1 on a one-guest box (#55 B2, arbitrator).
+func TestAHeldOutGoalsWorkIsNotMinedWhereverItLanded(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	var id string
+	for i := 0; ; i++ {
+		id = fmt.Sprintf("held-%d", i)
+		r.task(id, "owner:m"+id, "mail", "draft", "private")
+		must(t, h.Harvest(Outcome{Intent: id, Action: Edited, Input: []byte("procedures/mail"), Output: []byte("v1"), Correction: []byte("v2")}))
+		dev := false
+		for _, c := range r.p.Dev(change.ClassTask) {
+			dev = dev || c.ID == id
+		}
+		if !dev {
+			break
+		}
+	}
+	for _, x := range []struct{ id, goal, action string }{
+		{"loose", "", "refund"},             // unstamped: the origin bucket
+		{"during", "owner:mC", "send"},      // C runs inside A's span
+		{"a-again", "owner:m" + id, "file"}, // A is still active
+		{"trail", "owner:mB", "pay"},        // the goal after A: may be A's trailing work
+		{"later", "owner:mD", "move"},       // starts after A's span and the goal after it
+	} {
+		r.tasks.out[x.id] = journal.ResultNotApplied
+		r.task(x.id, x.goal, "bank", x.action, "private")
+	}
+	l, err := NewLearn(LearnConfig{Pipeline: r.p, Journal: r.eng, Harvest: h})
+	must(t, err)
+	ev, err := h.Evidence()
+	must(t, err)
+	got := map[string]bool{}
+	for _, hy := range l.mine(ev) {
+		got[hy.Key] = true
+	}
+	if got["failure:bank/refund"] || got["failure:bank/pay"] || got["failure:bank/send"] || got["failure:bank/file"] {
+		t.Fatalf("held-out work was mined: %v", got)
+	}
+	if !got["failure:bank/move"] {
+		t.Fatalf("a later task of the lineage was not mined: %v", got)
+	}
+}
+
+// heldCase journals intents of goal(i) until one lands held out and
+// returns its ID.
+func heldCase(t *testing.T, r *rig, h *Harvester, prefix string, goal func(i int) string) string {
+	t.Helper()
+	for i := 0; ; i++ {
+		id := fmt.Sprintf("%s-%d", prefix, i)
+		r.task(id, goal(i), "mail", "draft", "private")
+		must(t, h.Harvest(Outcome{Intent: id, Action: Edited, Input: []byte("procedures/mail"), Output: []byte("v1"), Correction: []byte("v2")}))
+		dev := false
+		for _, c := range r.p.Dev(change.ClassTask) {
+			dev = dev || c.ID == id
+		}
+		if !dev {
+			return id
+		}
+	}
+}
+
+// failing journals a failed intent, so mining reports it if it is mined.
+func (r *rig) failing(id, goal, action string) {
+	r.tasks.out[id] = journal.ResultNotApplied
+	r.task(id, goal, "bank", action, "private")
+}
+
+func minedKeys(t *testing.T, r *rig, h *Harvester) map[string]bool {
+	t.Helper()
+	l, err := NewLearn(LearnConfig{Pipeline: r.p, Journal: r.eng, Harvest: h})
+	must(t, err)
+	ev, err := h.Evidence()
+	must(t, err)
+	got := map[string]bool{}
+	for _, hy := range l.mine(ev) {
+		got[hy.Key] = true
+	}
+	return got
+}
+
+// TestAHeldOutUnstampedCaseHoldsTheGoalsAroundIt: a held case with no goal
+// (the guest held two messages open) may be the work of the goal stamped
+// just before it or of the one stamped just after it (#55 L3 round 2).
+func TestAHeldOutUnstampedCaseHoldsTheGoalsAroundIt(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	r.failing("x", "owner:mX", "refund")
+	heldCase(t, r, h, "none", func(int) string { return "" })
+	r.failing("y", "owner:mY", "pay")
+	r.failing("z", "owner:mZ", "move")
+	got := minedKeys(t, r, h)
+	if got["failure:bank/refund"] || got["failure:bank/pay"] {
+		t.Fatalf("a goal around a held unstamped case was mined: %v", got)
+	}
+	if !got["failure:bank/move"] {
+		t.Fatalf("a later goal was not mined: %v", got)
+	}
+}
+
+// TestAHeldGoalHoldsItsNeighboursInEveryLineageItReached: a goal's work
+// can land in another lineage (a CAP-8 worker stamped with its creator's
+// goal); the goal after it there is held too (#55 L3 round 3).
+func TestAHeldGoalHoldsItsNeighboursInEveryLineageItReached(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	g := heldCase(t, r, h, "g", func(i int) string { return fmt.Sprintf("owner:mG%d", i) })
+	goal := "owner:mG" + g[len("g-"):]
+	for _, x := range []struct{ id, goal, action string }{
+		{"w-g", goal, "label"},          // the held goal's work in the worker
+		{"w-n", "owner:mN", "pay"},      // the worker's next goal: held
+		{"w-later", "owner:mL", "move"}, // clear of it: mined
+	} {
+		r.tasks.out[x.id] = journal.ResultNotApplied
+		in := journal.Intent{ID: x.id, GoalID: x.goal, Origin: "guest:worker", Account: "bank", Action: x.action,
+			Executor: "task", Machine: "worker", Label: "private"}
+		if _, err := r.eng.Submit(in); err != nil {
+			t.Fatal(err)
+		}
+		r.eng.Authorize(context.Background(), x.id)
+		r.eng.Dispatch(context.Background(), x.id)
+	}
+	got := minedKeys(t, r, h)
+	if got["failure:bank/pay"] || got["failure:bank/label"] {
+		t.Fatalf("the held goal's neighbour in the worker was mined: %v", got)
+	}
+	if !got["failure:bank/move"] {
+		t.Fatalf("a later worker goal was not mined: %v", got)
+	}
+}
+
+// TestSeveralHeldGoalsEachHoldTheirNeighbours: with two held goals and
+// interleaved work, each holds the goals in its span and the first after
+// it; goals clear of both are mined.
+func TestSeveralHeldGoalsEachHoldTheirNeighbours(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	heldCase(t, r, h, "a", func(i int) string { return fmt.Sprintf("owner:mA%d", i) })
+	r.failing("p", "owner:mP", "send") // first goal after A: held
+	r.failing("q", "owner:mQ", "file") // clear of A: mined
+	b := heldCase(t, r, h, "b", func(i int) string { return fmt.Sprintf("owner:mB%d", i) })
+	r.failing("s", "owner:mS", "post") // inside B's span: held
+	r.task(b+"-again", "owner:mB"+b[len("b-"):], "mail", "label", "private")
+	r.failing("u", "owner:mU", "pay")  // first goal after B: held
+	r.failing("v", "owner:mV", "move") // clear of B: mined
+	got := minedKeys(t, r, h)
+	for _, k := range []string{"failure:bank/send", "failure:bank/post", "failure:bank/pay"} {
+		if got[k] {
+			t.Errorf("%s mined: %v", k, got)
+		}
+	}
+	for _, k := range []string{"failure:bank/file", "failure:bank/move"} {
+		if !got[k] {
+			t.Errorf("%s not mined: %v", k, got)
+		}
+	}
+}
+
+// TestAHeldOutGoalAlsoHoldsItsOriginsUnstampedWork: a guest's intents with
+// no goal (two messages open, none fetched yet, or after the quiet window;
+// guest G14) fall into its origin bucket, which may carry a held-out
+// task's own effects. So a held-out case on a goal holds that origin's
+// bucket too (#55 review B2).
+func TestAHeldOutGoalAlsoHoldsItsOriginsUnstampedWork(t *testing.T) {
+	r := newRig(t)
+	h := r.harvester()
+	var id string
+	for i := 0; ; i++ {
+		id = fmt.Sprintf("held-%d", i)
+		r.task(id, "owner:m"+id, "mail", "draft", "private")
+		must(t, h.Harvest(Outcome{Intent: id, Action: Edited, Input: []byte("procedures/mail"), Output: []byte("v1"), Correction: []byte("v2")}))
+		dev := false
+		for _, c := range r.p.Dev(change.ClassTask) {
+			dev = dev || c.ID == id
+		}
+		if !dev {
+			break
+		}
+	}
+	ev, err := h.Evidence()
+	must(t, err)
+	if !ev.Held("goal:owner:m"+id) || !ev.Held("origin:guest:mail-agent") {
+		t.Fatal("a held-out goal's origin bucket is still mined")
+	}
+	if ev.Held("origin:guest:other") {
+		t.Fatal("another origin was held")
 	}
 }

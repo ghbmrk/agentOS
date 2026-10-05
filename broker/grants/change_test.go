@@ -6,9 +6,6 @@ package grants
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
-	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -17,6 +14,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/update"
+	"github.com/ghbmrk/agentos/broker/update/updatetest"
 )
 
 // The pipeline is what the gate expects.
@@ -45,29 +43,8 @@ func changeRig(t *testing.T) (*rig, *change.Pipeline) {
 	return r, p
 }
 
-func signed(t *testing.T, version string, images map[string][]byte) update.Verified {
-	t.Helper()
-	root := update.Root{Keys: map[string]ed25519.PublicKey{}, Threshold: 2}
-	var pks []ed25519.PrivateKey
-	for _, id := range []string{"k1", "k2"} {
-		pub, pk, err := ed25519.GenerateKey(rand.Reader)
-		if err != nil {
-			t.Fatal(err)
-		}
-		root.Keys[id] = pub
-		pks = append(pks, pk)
-	}
-	dg := map[string]string{}
-	for p, b := range images {
-		dg[p] = update.Digest(b)
-	}
-	meta, _ := json.Marshal(update.Release{Version: version, Security: true, Images: dg})
-	v, err := update.Verify(root, meta, []update.Signature{{KeyID: "k1", Sig: ed25519.Sign(pks[0], meta)},
-		{KeyID: "k2", Sig: ed25519.Sign(pks[1], meta)}}, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return v
+func signed(t *testing.T, version int64, images map[string][]byte) *update.Verified {
+	return updatetest.Release(t, version, true, images)
 }
 
 // C8: a change only the owner may allow becomes a high-tier owner request
@@ -150,13 +127,13 @@ func TestChangeIntentsDeniedWithoutPipeline(t *testing.T) {
 func TestUnansweredChangeIsNotADecline(t *testing.T) {
 	r, p := changeRig(t)
 	ctx := context.Background()
-	rep, err := p.ProposeRelease(ctx, signed(t, "3.0", map[string][]byte{"host-image/release": []byte("h")}))
+	rep, err := p.ProposeRelease(ctx, signed(t, 30, map[string][]byte{"host-image/release": []byte("h")}))
 	if err != nil || rep.State != change.StateAwaitingOwner {
 		t.Fatalf("%+v %v", rep, err)
 	}
 	id := "chg:" + rep.ID + ":adopt"
 	r.g.Flush()
-	if _, items := r.own.last(t); items[0].Object != "security update 3.0" || items[0].Facts.Verb != "install" || items[0].UndoBy != "" {
+	if _, items := r.own.last(t); items[0].Object != "security update 30" || items[0].Facts.Verb != "install" || items[0].UndoBy != "" {
 		t.Fatalf("%+v", items[0])
 	}
 	r.decide(false, "expired")
@@ -168,7 +145,7 @@ func TestUnansweredChangeIsNotADecline(t *testing.T) {
 	}
 	// A restart's drop of an intent this run never asked about is not a
 	// decline either.
-	rep2, err := p.ProposeRelease(ctx, signed(t, "3.0.1", map[string][]byte{"host-image/release": []byte("g")}))
+	rep2, err := p.ProposeRelease(ctx, signed(t, 301, map[string][]byte{"host-image/release": []byte("g")}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +159,7 @@ func TestUnansweredChangeIsNotADecline(t *testing.T) {
 		t.Fatalf("a restart drop reads as a decline: %q", d)
 	}
 
-	rep, err = p.ProposeRelease(ctx, signed(t, "3.1", map[string][]byte{"host-image/release": []byte("i")}))
+	rep, err = p.ProposeRelease(ctx, signed(t, 31, map[string][]byte{"host-image/release": []byte("i")}))
 	if err != nil || rep.State != change.StateAwaitingOwner {
 		t.Fatalf("%+v %v", rep, err)
 	}
@@ -191,7 +168,7 @@ func TestUnansweredChangeIsNotADecline(t *testing.T) {
 	if st := r.state("chg:" + rep.ID + ":adopt"); st.State != journal.Denied {
 		t.Fatal(st.State)
 	}
-	if d := p.Digest(); len(d) != 1 || !strings.HasPrefix(d[0], "You declined security update 3.1;") {
+	if d := p.Digest(); len(d) != 1 || !strings.HasPrefix(d[0], "You declined security update 31;") {
 		t.Fatalf("%q", d)
 	}
 }
@@ -281,7 +258,7 @@ func TestTestedLearnedChangeIsLowTier(t *testing.T) {
 func TestReleaseNeedsTheLocalPage(t *testing.T) {
 	r, p := changeRig(t)
 	ctx := context.Background()
-	rep, err := p.ProposeRelease(ctx, signed(t, "4.0", map[string][]byte{"host-image/release": []byte("h")}))
+	rep, err := p.ProposeRelease(ctx, signed(t, 40, map[string][]byte{"host-image/release": []byte("h")}))
 	if err != nil || rep.State != change.StateAwaitingOwner {
 		t.Fatalf("%+v %v", rep, err)
 	}
@@ -301,7 +278,7 @@ func TestReleaseNeedsTheLocalPage(t *testing.T) {
 
 	noUI, q := changeRig(t)
 	noUI.g.cfg.LocalUI = false
-	rep, err = q.ProposeRelease(ctx, signed(t, "4.1", map[string][]byte{"host-image/release": []byte("i")}))
+	rep, err = q.ProposeRelease(ctx, signed(t, 41, map[string][]byte{"host-image/release": []byte("i")}))
 	if err != nil || rep.State != change.StateAwaitingOwner {
 		t.Fatalf("%+v %v", rep, err)
 	}
@@ -323,7 +300,7 @@ func TestReleaseNeedsTheLocalPage(t *testing.T) {
 func TestStaleApprovalIsNotADecline(t *testing.T) {
 	r, p := changeRig(t)
 	ctx := context.Background()
-	rep, err := p.ProposeRelease(ctx, signed(t, "5.0", map[string][]byte{"host-image/release": []byte("h")}))
+	rep, err := p.ProposeRelease(ctx, signed(t, 50, map[string][]byte{"host-image/release": []byte("h")}))
 	if err != nil {
 		t.Fatal(err)
 	}

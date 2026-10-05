@@ -5,6 +5,7 @@ package change
 
 import (
 	"context"
+	"math"
 	"strings"
 	"testing"
 
@@ -95,7 +96,7 @@ func TestOwnerLine(t *testing.T) {
 		}
 		return ev.Run(ctx, tr, pr)
 	})
-	long := "2026.10.05-security-hotfix-build-1234567"
+	long := int64(math.MaxInt64)
 	r = e.release(release(t, long, true, map[string][]byte{"host-image/release": []byte("h")}))
 	got := item(r)
 	if r.Regressions == 0 || got.Detail != "worse on "+itoa(r.Regressions)+" of "+itoa(r.HeldOut)+" past tasks" ||
@@ -126,7 +127,7 @@ func TestOwnerLine(t *testing.T) {
 func TestDecidedDropsUnansweredWithoutDecline(t *testing.T) {
 	e := newEnv(t, nil)
 	e.p.Attach(holdJournal{e.eng})
-	r := e.release(release(t, "3.0", true, map[string][]byte{"host-image/release": []byte("h")}))
+	r := e.release(release(t, 30, true, map[string][]byte{"host-image/release": []byte("h")}))
 	if r.State != StateAwaitingOwner {
 		t.Fatal(r)
 	}
@@ -142,14 +143,14 @@ func TestDecidedDropsUnansweredWithoutDecline(t *testing.T) {
 		t.Fatalf("a dropped proposal's intent is still approvable: %v", err)
 	}
 
-	r = e.release(release(t, "3.1", true, map[string][]byte{"host-image/release": []byte("i")}))
+	r = e.release(release(t, 31, true, map[string][]byte{"host-image/release": []byte("i")}))
 	e.eng.Authorize(bg, adoptID(r.ID)) // the owner says no
 	st, _ = e.eng.Get(adoptID(r.ID))
 	if st.State != journal.Denied {
 		t.Fatal(st.State)
 	}
 	e.p.Decided(bg, st.Intent, true)
-	if d := e.p.Digest(); len(d) != 1 || !strings.HasPrefix(d[0], "You declined security update 3.1;") {
+	if d := e.p.Digest(); len(d) != 1 || !strings.HasPrefix(d[0], "You declined security update 31;") {
 		t.Fatalf("%q", d)
 	}
 }

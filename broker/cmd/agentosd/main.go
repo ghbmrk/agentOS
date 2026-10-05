@@ -19,7 +19,6 @@ import (
 	"github.com/ghbmrk/agentos/broker/cgroup"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/guest"
-	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/owner"
@@ -312,16 +311,8 @@ func openGuestPlane(m *vm.Manager, d *daemon.Daemon, socketDir, meterPath, inbox
 		gcfg.Model = modelroute.Forward(modelroute.Config{
 			Socket: egressSocket,
 			Label:  m.DataLabel,
-			Denied: func(machine string, x modelroute.Denial) {
-				n := journal.EgressNote{Machine: machine, Adapter: x.Adapter, Operation: x.Operation, Method: x.Method, Status: x.Status, Reason: x.Reason}
-				if n.Reason == "" {
-					n.Reason = "denied"
-				}
-				if err := eng.RecordEgress(n); err != nil {
-					log.Printf("journal egress denial for %s: %v", machine, err)
-				}
-			},
-			Logf: log.Printf,
+			Denied: modelroute.Journal(eng, log.Printf),
+			Logf:   log.Printf,
 		})
 	}
 	return guest.New(gcfg)

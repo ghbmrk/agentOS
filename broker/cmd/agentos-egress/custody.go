@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
@@ -200,10 +201,23 @@ type custody struct {
 	bootChanged, bootUpdated bool
 	// bootSecure: only the Secure Boot state (PCR 7) changed.
 	bootSecure bool
+	// deriving: an Argon2id derivation is running. With phase opening it
+	// is a first unlock; with phase pending, a new passphrase that will
+	// supersede the pending unlock if it opens the vault.
+	deriving bool
+	// proof is the hash of the ticket of the last confirmed unlock and the
+	// step its code spent, redeemable once on the verify socket until
+	// proofUntil, so the phone that unlocked signs in (P2-4f).
+	proof      [32]byte
+	proofStep  int64
+	proofUntil time.Time
 	// wrongPassAt is when the owner was last told of a wrong passphrase;
 	// wrongPassQuiet counts those since, untold (WrongPassNoteEvery).
 	wrongPassAt    time.Time
 	wrongPassQuiet int
+	// supersedeAt and supersedeQuiet do the same for restarted unlocks.
+	supersedeAt    time.Time
+	supersedeQuiet int
 	// wrongCounted and wrongSilent are the wrong verifies per bucket.
 	wrongCounted []time.Time
 	wrongSilent  []time.Time
@@ -235,15 +249,26 @@ func (c *custody) status() (phase, time.Time) {
 	return c.ph, c.expires
 }
 
-// unlock checks the passphrase and, if it opens the vault, returns the
-// ticket its confirm must carry. A passphrase alone never opens the model
-// route. One derivation runs at a time: the phase stays opening until it
-// returns, even if lock cancels it meanwhile.
 // WrongPassNoteEvery bounds how often the owner is told of wrong vault
 // passphrases. They are not counted toward any lockout (nobody without the
 // card can lock the owner out), but repeated ones may be someone on the
 // box's Wi-Fi starving the owner's unlock, so the owner hears of them.
 const WrongPassNoteEvery = 10 * time.Minute
+
+// times words a count for the owner: "once", "twice", "3 times".
+func times(n int) string {
+	switch n {
+	case 1:
+		return "once"
+	case 2:
+		return "twice"
+	}
+	return fmt.Sprintf("%d times", n)
+}
+
+// ProofTTL is how long the proof of a confirmed unlock can sign the
+// unlocking phone in (P2-4f).
+const ProofTTL = time.Minute
 
 // noteWrongPassLocked tells the owner of a wrong passphrase, at most once
 // per WrongPassNoteEvery, with the count of those not told.
@@ -260,9 +285,35 @@ func (c *custody) noteWrongPassLocked(now time.Time) {
 	c.notify(msg)
 }
 
+// noteSupersedeLocked tells the owner that a pending unlock was started
+// over, at most once per WrongPassNoteEvery with the count of those not
+// told, so someone on the Wi-Fi holding the card cannot turn restarts into
+// a stream of texts (#65 security R1).
+func (c *custody) noteSupersedeLocked(now time.Time) {
+	if !c.supersedeAt.IsZero() && now.Sub(c.supersedeAt) < WrongPassNoteEvery {
+		c.supersedeQuiet++
+		return
+	}
+	msg := "The box unlock was started over with your card; the earlier one was cancelled."
+	if c.supersedeQuiet > 0 {
+		msg += " It was started over " + times(c.supersedeQuiet) + " more since the last notice."
+	}
+	c.supersedeAt, c.supersedeQuiet = now, 0
+	c.notify(msg)
+}
+
+// unlock checks the passphrase and, if it opens the vault, returns the
+// ticket its confirm must carry. A passphrase alone never opens the model
+// route. One derivation runs at a time: the phase stays opening until it
+// returns, even if lock cancels it meanwhile.
 func (c *custody) unlock(passphrase string) (string, error) {
 	c.mu.Lock()
-	if c.ph != locked {
+	// A pending unlock can be superseded by a new correct passphrase, so a
+	// phone that lost its ticket (a closed page, a local UI restart) does
+	// not wait out the expiry. The pending unlock stays answerable while
+	// the new passphrase is checked; this is atomic here, so it cannot
+	// race a confirm (#50 potency PU1).
+	if c.ph == open || c.ph == opening || c.deriving {
 		c.mu.Unlock()
 		return "", errBusy
 	}
@@ -276,7 +327,10 @@ func (c *custody) unlock(passphrase string) (string, error) {
 		return "", errTooSoon
 	}
 	c.lastAttempt = now
-	c.ph = opening
+	c.deriving = true
+	if c.ph == locked {
+		c.ph = opening
+	}
 	gen := c.gen
 	c.mu.Unlock()
 
@@ -303,12 +357,19 @@ func (c *custody) unlock(passphrase string) (string, error) {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.ph = locked
-	if c.gen != gen {
+	c.deriving = false
+	if c.ph == opening {
+		c.ph = locked
+	}
+	if c.gen != gen || c.ph == open {
+		// Locked meanwhile, or the pending unlock was confirmed.
 		if v != nil {
 			v.Close()
 		}
-		return "", errUnlockCancelled
+		if c.gen != gen {
+			return "", errUnlockCancelled
+		}
+		return "", errBusy
 	}
 	if err != nil {
 		if errors.Is(err, vault.ErrNoSlotOpens) {
@@ -321,6 +382,12 @@ func (c *custody) unlock(passphrase string) (string, error) {
 		}
 		return "", errInternal
 	}
+	if until, out := c.lockedOut(c.now()); out {
+		// Wrong codes on the pending unlock reached the cap during the
+		// derivation (#65 L3 follow-up 2).
+		v.Close()
+		return "", errLockedOut(until)
+	}
 	if !hasKind(v, SeedName, vault.KindTOTPSeed) {
 		v.Close()
 		return "", errNoCodeGenerator
@@ -330,6 +397,12 @@ func (c *custody) unlock(passphrase string) (string, error) {
 		v.Close()
 		return "", errInternal
 	}
+	superseded := c.ph == pending
+	if superseded {
+		c.timer.Stop()
+		c.v.Close()
+		c.noteSupersedeLocked(now)
+	}
 	c.ph, c.v, c.ticket = pending, v, hex.EncodeToString(b)
 	c.expires = now.Add(c.ttl)
 	c.timer = time.AfterFunc(c.ttl, c.expire)
@@ -338,7 +411,9 @@ func (c *custody) unlock(passphrase string) (string, error) {
 		c.notify(fmt.Sprintf("%d more wrong vault passphrases were tried on the box's Wi-Fi since the last notice", c.wrongPassQuiet))
 		c.wrongPassQuiet = 0
 	}
-	c.notify("vault passphrase accepted; waiting for a code-generator code")
+	if !superseded {
+		c.notify("vault passphrase accepted; waiting for a code-generator code")
+	}
 	return c.ticket, nil
 }
 
@@ -381,9 +456,15 @@ func (c *custody) confirmKeep(ticket, code string, keep bool) (bool, error) {
 		return false, err
 	}
 	keep = keep && c.bootChanged && c.host != nil
+	c.proof, c.proofStep, c.proofUntil = sha256.Sum256([]byte(ticket)), c.st.LastStep, now.Add(ProofTTL)
 	if err := c.serve(c.v); err != nil {
 		c.discard()
 		return false, err
+	}
+	if c.supersedeQuiet > 0 {
+		// Restarts that stopped still report their total.
+		c.notify("The box unlock was started over " + times(c.supersedeQuiet) + " more before it was unlocked.")
+		c.supersedeQuiet = 0
 	}
 	c.notify("vault unlocked")
 	if !keep {
@@ -506,6 +587,15 @@ func (c *custody) verify(code string, after int64, counted bool) (int64, bool, e
 	if len(*bucket) >= limit {
 		return 0, false, &pausedError{until: (*bucket)[0].Add(VerifyWindow)}
 	}
+	if t, isProof := strings.CutPrefix(code, owner.UnlockProofPrefix); isProof {
+		sum := sha256.Sum256([]byte(t))
+		if now.Before(c.proofUntil) && c.proofStep > after && subtle.ConstantTimeCompare(sum[:], c.proof[:]) == 1 {
+			c.proof, c.proofUntil = [32]byte{}, time.Time{} // once
+			return c.proofStep, true, nil
+		}
+		*bucket = append(*bucket, now)
+		return 0, false, nil
+	}
 	seed, ok := c.v.Secret(SeedName)
 	if !ok {
 		return 0, false, errInternal
@@ -588,6 +678,8 @@ func (c *custody) discard() {
 		c.v.Close()
 	}
 	c.v, c.proxy, c.ph, c.expires, c.ticket = nil, nil, locked, time.Time{}, ""
+	// The sign-in proof is for this unlock only (#65 security R2).
+	c.proof, c.proofUntil = [32]byte{}, time.Time{}
 }
 
 // model returns the proxy while the vault is open, else nil.

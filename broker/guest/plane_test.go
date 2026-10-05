@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,6 +28,10 @@ type fakeMachines struct {
 	private map[string]bool
 	lineage map[string]string
 	events  []string
+	// locked mimics the manager holding its lock while it calls Open;
+	// a Lineage call then would deadlock on the box.
+	locked bool
+	misuse int
 }
 
 func newMachines() *fakeMachines {
@@ -52,6 +57,9 @@ func (f *fakeMachines) RaisePrivate(id string) error {
 func (f *fakeMachines) Lineage(id string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.locked {
+		f.misuse++
+	}
 	if l := f.lineage[id]; l != "" {
 		return l, nil
 	}
@@ -123,7 +131,7 @@ func newRig(t *testing.T, mod func(*Config)) *rig {
 				r.mu.Lock()
 				r.model++
 				r.mu.Unlock()
-				fmt.Fprintf(w, `{"machine":%q,"path":%q}`, machine, req.URL.Path)
+				fmt.Fprintf(w, `{"machine":%q,"path":%q,"raw":%q}`, machine, req.URL.Path, req.URL.EscapedPath())
 			})
 		},
 		Meter: m,
@@ -222,7 +230,7 @@ func TestARC6SocketServesOnlyTheGuestInterface(t *testing.T) {
 		{"GET", "/"}, {"GET", "/admin"}, {"POST", "/v1/chat/completions"}, {"GET", "/owner"},
 		{"POST", "/sockets/owner"}, {"GET", "/../etc/passwd"},
 	} {
-		if code, _ := r.do("m1", c.method, c.path, ""); code != 404 && code != 405 && code != 301 {
+		if code, _ := r.do("m1", c.method, c.path, ""); code != 404 && code != 405 {
 			t.Errorf("%s %s answered %d", c.method, c.path, code)
 		}
 	}
@@ -232,6 +240,66 @@ func TestARC6SocketServesOnlyTheGuestInterface(t *testing.T) {
 	r2 := newRig(t, func(c *Config) { c.Model, c.Meter = nil, nil })
 	if code, _ := r2.do("m1", "POST", "/model/openai/v1/chat/completions", "{}"); code != 503 {
 		t.Errorf("model without egress: %d", code)
+	}
+}
+
+// TestADP10SocketNeverNormalizesAPath: the socket routes on the path the
+// guest sent, byte for byte. A dot segment, an escaped separator, or an
+// empty segment is never cleaned or redirected into a declared shape: on a
+// model path it reaches the model chain as sent, whose shape check denies
+// it (egress E1), and anywhere else it is 404. Go 1.26's ServeMux answers
+// an unclean path with a 307 that keeps the method and body, so a guest
+// that follows it lands on the clean path (security, ADP-10).
+func TestADP10SocketNeverNormalizesAPath(t *testing.T) {
+	r := newRig(t, nil)
+	noFollow := func(id string) *http.Client {
+		c := r.client(id)
+		c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		return c
+	}
+	send := func(id, method, path string) (int, string) {
+		t.Helper()
+		req, _ := http.NewRequest(method, "http://broker"+path, strings.NewReader("{}"))
+		resp, err := noFollow(id).Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(b)
+	}
+	// Model paths reach the model chain unchanged, one machine each so
+	// the meter's per-machine cap does not interfere.
+	for i, p := range []string{
+		"/model/openai/v1/../v1/chat/completions",
+		"/model/openai/v1/chat%2Fcompletions",
+		"/model/openai%2Fv1/chat/completions",
+		"/model/openai/v1/%2e%2e/v1/chat/completions",
+		"/model/openai/v1/./chat/completions",
+		"/model/openai//v1/chat/completions",
+		"/model/openai/v1/chat/completions/..",
+		"/model/../model/openai/v1/chat/completions",
+	} {
+		id := fmt.Sprintf("n%d", i)
+		code, body := send(id, "POST", p)
+		want := fmt.Sprintf(`"raw":%q`, strings.TrimPrefix(p, "/model"))
+		if code != 200 || !strings.Contains(body, want) {
+			t.Errorf("POST %s: %d %s; want the model chain to see %s", p, code, body, want)
+		}
+	}
+	// Everything else unclean is 404, never a redirect.
+	for _, c := range []struct{ method, path string }{
+		{"POST", "/mcp/../mcp"}, {"POST", "/./mcp"}, {"POST", "//mcp"}, {"POST", "/mcp/"},
+		{"GET", "/owner%2Fnext"}, {"GET", "/owner/./next"}, {"POST", "/owner//reply"},
+		{"GET", "/owner/next/.."}, {"POST", "/x/../model/openai/v1/chat/completions"},
+		{"POST", "//model/openai/v1/chat/completions"}, {"POST", "/model"}, {"POST", "/%6dcp"},
+	} {
+		if code, body := send("m1", c.method, c.path); code != 404 {
+			t.Errorf("%s %s answered %d %s; want 404", c.method, c.path, code, body)
+		}
+	}
+	if r.model != 8 {
+		t.Errorf("model chain saw %d calls, want 8", r.model)
 	}
 }
 
@@ -817,5 +885,34 @@ func TestLabelsPartitionRequests(t *testing.T) {
 	}
 	if s, _ := r.eng.Get("m1/q1"); s.Intent.Label != "public" {
 		t.Fatalf("label %q", s.Intent.Label)
+	}
+}
+
+// REQ: OP-8
+//
+// TestShutdownWaitsForCallsInFlight: a model call whose response the guest
+// already has may still be settling the meter; Shutdown returns only once
+// it has ended, so nothing writes the broker's files after shutdown.
+func TestShutdownWaitsForCallsInFlight(t *testing.T) {
+	var ended atomic.Bool
+	r := newRig(t, func(c *Config) {
+		c.Model = func(string) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				io.WriteString(w, `{}`)
+				w.(http.Flusher).Flush()
+				time.Sleep(200 * time.Millisecond)
+				ended.Store(true)
+			})
+		}
+	})
+	resp, err := r.client("m1").Post("http://broker/model/openai/v1/chat/completions", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.ReadAll(io.LimitReader(resp.Body, 2))
+	resp.Body.Close()
+	r.p.Shutdown()
+	if !ended.Load() {
+		t.Fatal("Shutdown returned with a call still in flight")
 	}
 }

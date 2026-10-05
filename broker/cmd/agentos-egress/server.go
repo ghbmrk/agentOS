@@ -66,7 +66,7 @@ func modelHandler(c *custody, rt *route.Router, ev *evalRoute) http.Handler {
 		}
 		var ca callAudit
 		w.Header().Set("Trailer", modelroute.HeaderUsage)
-		rt.HandlerFor(machine, label, p.HandlerFor(machine, label, &ca), ca.decide(w)).ServeHTTP(w, r)
+		rt.HandlerFor(machine, label, p.HandlerFor(machine, label, &ca), ca.decide(w, r.Method)).ServeHTTP(w, r)
 		if u := ca.usage(); u != "" {
 			w.Header().Set(modelroute.HeaderUsage, u)
 		}
@@ -166,7 +166,7 @@ func (ev *evalRoute) serve(c *custody, machine string, w http.ResponseWriter, r 
 	}
 	var ca callAudit
 	w.Header().Set("Trailer", modelroute.HeaderUsage)
-	rt.HandlerFor(machine, "private", p.HandlerWithGrantsOf(machine, ev.From, "private", &ca), ca.decide(w)).ServeHTTP(w, r)
+	rt.HandlerFor(machine, "private", p.HandlerWithGrantsOf(machine, ev.From, "private", &ca), ca.decide(w, r.Method)).ServeHTTP(w, r)
 	if u := ca.usage(); u != "" {
 		w.Header().Set(modelroute.HeaderUsage, u)
 	}
@@ -209,10 +209,13 @@ func (a *callAudit) Egress(ev egress.Event) {
 
 // decide takes the router's decisions. The router audits a denial before
 // writing its status line, so the header always goes out with it. A call
-// the proxy refused reports the proxy's denial; the router's own refusal
-// for want of a granted route allowed for the label is reported too, since
-// an ungranted provider never reaches the proxy.
-func (a *callAudit) decide(w http.ResponseWriter) func(route.Decision) {
+// the proxy refused reports the proxy's denial. Every refusal of the
+// router's own is reported too (ADP-10): an undeclared or unclean path, an
+// unknown class, a body it does not accept, no granted route allowed for
+// the label, or every route exhausted; none of these reaches the proxy.
+// method is the guest's; the operation is named only once the body parsed
+// as a chat completion.
+func (a *callAudit) decide(w http.ResponseWriter, method string) func(route.Decision) {
 	return func(d route.Decision) {
 		a.mu.Lock()
 		defer a.mu.Unlock()
@@ -222,16 +225,34 @@ func (a *callAudit) decide(w http.ResponseWriter) func(route.Decision) {
 			a.served = &d
 		case d.Outcome == route.Denied && a.denial != nil:
 			den = a.denial
-		case d.Outcome == route.Denied && d.Status == http.StatusForbidden:
-			den = &modelroute.Denial{Adapter: "router", Operation: "chat_completions", Method: http.MethodPost, Status: d.Status, Reason: d.Reason}
+		case d.Outcome == route.Denied:
+			den = &modelroute.Denial{Adapter: "router", Method: method, Status: d.Status, Reason: d.Reason}
+			if d.Class != "" {
+				den.Operation = "chat_completions"
+			}
 		}
 		if den == nil {
 			return
 		}
-		if b, err := json.Marshal(den); err == nil {
+		out := *den
+		out.Reason = clipReason(out.Reason)
+		if b, err := json.Marshal(out); err == nil {
 			w.Header().Set(modelroute.HeaderDenial, string(b))
 		}
 	}
+}
+
+// maxDenialReason bounds a reported denial reason, which can quote guest
+// input: the reason's class comes before any quote, so clipping keeps it,
+// and the denial header stays far below the broker's header limit.
+const maxDenialReason = 1 << 10
+
+// clipReason cuts r to maxDenialReason bytes on a rune boundary.
+func clipReason(r string) string {
+	if len(r) <= maxDenialReason {
+		return r
+	}
+	return strings.ToValidUTF8(r[:maxDenialReason], "") + "…[clipped]"
 }
 
 // usage renders a served call's usage as the HeaderUsage trailer, with the

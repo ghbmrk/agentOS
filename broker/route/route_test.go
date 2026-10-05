@@ -464,6 +464,13 @@ func TestUnknownClassAndBadRequests(t *testing.T) {
 		{"POST", "/v1/responses", simpleChat, 404},
 		{"GET", "/v1/chat/completions", "", 404},
 		{"POST", "/v1/chat/completions?x=1", simpleChat, 404},
+		// Escapes are refused, not decoded into the served path (ADP-10).
+		{"POST", "/v1/chat%2Fcompletions", simpleChat, 404},
+		{"POST", "/openai%2Fv1/chat/completions", simpleChat, 404},
+		{"POST", "/%761/chat/completions", simpleChat, 404},
+		// Dot segments are not cleaned into the served path.
+		{"POST", "/v1/../v1/chat/completions", simpleChat, 404},
+		{"POST", "/openai/v1/./chat/completions", simpleChat, 404},
 	} {
 		req := httptest.NewRequest(c.method, c.path, strings.NewReader(c.body))
 		w := httptest.NewRecorder()
@@ -914,5 +921,52 @@ func TestUsageReachesTheCallersContext(t *testing.T) {
 	r.router.Handler("m1").ServeHTTP(httptest.NewRecorder(), req)
 	if len(got) != 0 {
 		t.Fatalf("a denied call reported %q", got)
+	}
+}
+
+// REQ: ADP-10
+//
+// TestADP10DenialReasonClassIsFixed: a refusal's reason carries guest
+// content only inside a quoted part, so the journal's coalescing key (the
+// reason up to the first quote, egress E6) is fixed text whatever the
+// guest sends: numbers and syntax characters that encoding/json puts
+// outside quotes included.
+func TestADP10DenialReasonClassIsFixed(t *testing.T) {
+	r := newRig(t, rigOpts{grants: map[string][]string{"m1": {"openai"}, "m2": {"anthropic"}}, labels: map[string]string{"m1": LabelPublic, "m2": LabelPublic}})
+	class := func(machine, body string) string {
+		t.Helper()
+		if w := r.do(t, machine, body); w.Code != http.StatusBadRequest {
+			t.Fatalf("%s: %d", body, w.Code)
+		}
+		d := r.lastDecision()
+		if d.Outcome != Denied {
+			t.Fatalf("%s: %+v", body, d)
+		}
+		c, _, _ := strings.Cut(d.Reason, `"`)
+		return c
+	}
+	for _, group := range [][]string{
+		{
+			"m1",
+			`{"model":"default","messages":[{"role":"user","content":"hi"}],"max_tokens":123456789012345678901}`,
+			`{"model":"default","messages":[{"role":"user","content":"hi"}],"max_tokens":987654321098765432109}`,
+			`{"model":"default","messages":[{"role":"user","content":"hi"}]}q`,
+			`{"model":"default","messages":[{"role":"user","content":"hi"}] x}`,
+			`{"model":"default","messages":[{"role":"wizard","content":"hi"}]}`,
+		},
+		{
+			// No permitted route supports the request: m2's only route
+			// is Anthropic, which takes one choice and text system content.
+			"m2",
+			`{"model":"default","n":7,"messages":[{"role":"user","content":"hi"}]}`,
+			`{"model":"default","messages":[{"role":"system","content":[{"type":"image_url","image_url":{"url":"https://x.example/a"}}]},{"role":"user","content":"hi"}]}`,
+		},
+	} {
+		want := class(group[0], group[1])
+		for _, b := range group[2:] {
+			if got := class(group[0], b); got != want {
+				t.Errorf("reason class %q, want %q: guest content outside quotes", got, want)
+			}
+		}
 	}
 }
