@@ -171,7 +171,14 @@ const (
 
 // ErrNeedsOwner is returned by Check for a change only the owner may
 // approve. The broker's policy turns it into an approval request.
-var ErrNeedsOwner = errors.New("change: needs the owner's approval")
+// It reports NeedsOwner, which is how the grants gate tells it apart
+// without importing this package (ARC-2).
+var ErrNeedsOwner error = needsOwner{}
+
+type needsOwner struct{}
+
+func (needsOwner) Error() string    { return "change: needs the owner's approval" }
+func (needsOwner) NeedsOwner() bool { return true }
 
 // State is where a proposal ended up.
 type State string
@@ -581,6 +588,29 @@ func (p *Pipeline) Settle(ctx context.Context, id string) (Report, error) {
 	return rep, err
 }
 
+// Decided is the wiring's call once the owner's request for a change
+// intent closes (C7). declined is true only when the owner said NO; then
+// the adoption settles as Settle does, so a declined security release is
+// recorded. One still pending was never answered (the request expired,
+// was voided, or was dropped by a restart), and one denied for any other
+// reason (an approval gone stale before dispatch) is not the owner's no:
+// both drop the proposal and record nothing, so only the owner's NO reads
+// as a decline. Loop 1 proposes again.
+func (p *Pipeline) Decided(ctx context.Context, in journal.Intent, declined bool) {
+	parts := parseID(in.ID)
+	if in.Action != ActionAdopt || parts == nil || in.ID != adoptID(parts[1]) || p.prop(parts[1]) == nil {
+		return
+	}
+	st, err := p.j.Get(in.ID)
+	switch {
+	case err != nil:
+	case st.State == journal.Pending, st.State == journal.Denied && !declined:
+		p.drop(parts[1])
+	case st.State == journal.Denied || st.State == journal.Succeeded || st.State == journal.NotApplied:
+		_, _ = p.Settle(ctx, parts[1])
+	}
+}
+
 func (p *Pipeline) drive(ctx context.Context, id string, rep Report, authorize bool) (Report, error) {
 	st, err := p.j.Get(adoptID(id))
 	if err != nil {
@@ -788,7 +818,9 @@ type strictness struct{ heldOut, security bool }
 // routing (while replay has no model) may go untested on held-out cases. A
 // shared package is always tested in full (C5, LOOP-10).
 func strictFor(src Source, classes []Class) strictness {
-	st := strictness{heldOut: src == Shared, security: src != Upstream}
+	// No class names nothing the evaluator legitimately cannot test, so
+	// strict is the default.
+	st := strictness{heldOut: src == Shared || len(classes) == 0, security: src != Upstream}
 	for _, c := range classes {
 		switch c {
 		case ClassGuestImage, ClassHostImage, ClassConfig, ClassRouting:

@@ -231,7 +231,7 @@ func (l *Learn) Next(ctx context.Context, modelOK bool) (Job, bool) {
 		ev.HeldOut > l.recheckedAt && l.cfg.Now().Sub(l.lastRecheck) >= l.cfg.RecheckEvery
 	l.mu.Unlock()
 	if due {
-		return Job{Name: "recheck", UsesModel: evalModel, Run: func(ctx context.Context) Result {
+		return Job{Name: "recheck", UsesModel: evalModel, Evaluates: true, Run: func(ctx context.Context) Result {
 			reverted, err := l.cfg.Pipeline.Recheck(ctx)
 			if ctx.Err() == nil {
 				l.mu.Lock()
@@ -254,7 +254,7 @@ func (l *Learn) Next(ctx context.Context, modelOK bool) (Job, bool) {
 	if l.cfg.Router != nil && l.cfg.ModelWired {
 		key := "routing:" + digest(fmt.Sprint(l.cfg.Router.Candidate()))
 		if l.tried[key] < ev.HeldOut && l.mayAskLocked(key) {
-			return Job{Name: "routing", UsesModel: true, Run: func(ctx context.Context) Result {
+			return Job{Name: "routing", UsesModel: true, Evaluates: true, Run: func(ctx context.Context) Result {
 				rep, ok, err := l.cfg.Pipeline.ProposeRouting(ctx, l.cfg.Router)
 				l.done(ctx, key, ev.HeldOut)
 				l.asked(key, rep)
@@ -277,7 +277,7 @@ func (l *Learn) Next(ctx context.Context, modelOK bool) (Job, bool) {
 			continue
 		}
 		h := h
-		return Job{Name: "candidate", UsesModel: true, Run: func(ctx context.Context) Result {
+		return Job{Name: "candidate", UsesModel: true, Evaluates: true, Run: func(ctx context.Context) Result {
 			rep, err := l.propose(ctx, h, ev)
 			l.done(ctx, h.Key, len(h.Tasks))
 			l.asked(h.Key, rep)
