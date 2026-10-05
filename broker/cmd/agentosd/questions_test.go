@@ -34,7 +34,7 @@ func TestQuestionsRunInAgentosd(t *testing.T) {
 		t.Fatalf("wired %d STATUS notes, want the clock line", len(cfg.Notes))
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer qs.wait() // the loops write into dir until they stop
+	defer qs.wait() // after cancel: the loops write into dir until they stop
 	defer cancel()
 	if _, ok := qs.Answer(ctx, "Q100 yes"); ok {
 		t.Fatal("answered before the book opened")
@@ -49,11 +49,9 @@ func TestQuestionsRunInAgentosd(t *testing.T) {
 	if l := qs.Clock(); l != "" {
 		t.Fatalf("clock line before the guard opened: %q", l)
 	}
-	guard, err := qs.open(ctx, d, &preempter{}, defaultQuestionConfig(dir))
-	if err != nil {
+	if err := qs.open(ctx, d, &preempter{}, defaultQuestionConfig(dir)); err != nil {
 		t.Fatal(err)
 	}
-	defer guard.Flush()
 	// STATUS carries the guard's time check (W9a, UX R3 on #95).
 	if l := qs.Clock(); !strings.HasPrefix(l, "Time check: ") {
 		t.Fatalf("STATUS clock line: %q", l)
@@ -108,7 +106,7 @@ func TestQuestionsRunInAgentosd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := (&questions{}).open(ctx, d2, &preempter{}, defaultQuestionConfig(t.TempDir())); err == nil {
+	if err := (&questions{}).open(ctx, d2, &preempter{}, defaultQuestionConfig(t.TempDir())); err == nil {
 		t.Fatal("opened with no owner channel")
 	}
 }
@@ -128,7 +126,7 @@ func TestStatusShowsAnUnreadableClockRestriction(t *testing.T) {
 	}
 	qs.wire(&cfg)
 	ctx, cancel := context.WithCancel(context.Background())
-	defer qs.wait() // the loops write into dir until they stop
+	defer qs.wait() // after cancel: the loops write into dir until they stop
 	defer cancel()
 	d, err := daemon.Run(ctx, cfg)
 	if err != nil {
@@ -138,11 +136,9 @@ func TestStatusShowsAnUnreadableClockRestriction(t *testing.T) {
 	if err := os.WriteFile(qc.ClockPath, []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	guard, err := qs.open(ctx, d, &preempter{}, qc)
-	if err != nil {
+	if err := qs.open(ctx, d, &preempter{}, qc); err != nil {
 		t.Fatal(err)
 	}
-	defer guard.Flush()
 	if l := qs.Clock(); !strings.HasPrefix(l, "Time check: restricted since") || !strings.Contains(l, "saved check unreadable") {
 		t.Fatalf("STATUS clock line: %q", l)
 	}

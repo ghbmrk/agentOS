@@ -225,11 +225,11 @@ func main() {
 	}
 	// The owner channel failing to take questions must not take it down:
 	// the tools are then not offered and replies are task chat.
-	if guard, err := qs.open(ctx, d, pre, qcfg); err != nil {
+	if err := qs.open(ctx, d, pre, qcfg); err != nil {
 		log.Printf("owner questions disabled: %v", err)
-	} else {
-		defer guard.Flush()
 	}
+	// At exit the question loops stop before the guard's notices flush.
+	defer func() { stop(); qs.wait() }()
 	if runsc != "" {
 		services := &lateServices{}
 		m, err := vm.Open(ctx, vm.Config{
