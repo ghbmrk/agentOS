@@ -1,0 +1,80 @@
+#!/bin/bash
+# AgentOS drive IDs, run in the initrd before root is mounted (agentos-drive-ids.service).
+#
+# Every drive is flashed from the same reproducible image, so it starts with the same partition
+# and file-system IDs (mkosi.conf Seed=). The initrd finds root through the ESP the loader booted
+# from (LoaderDevicePartUUID), so a second drive with the same IDs (a second AgentOS drive, or a
+# stick flashed from the public image) could hand it another drive's root. /usr is never chosen by
+# ID: the entry's usrhash= names it, and dm-verity refuses any other content.
+#
+# 1. The ESP the loader booted from must be the only partition with its ID, the root partition
+#    found for mounting must be on that ESP's disk, and no other disk may carry an ID of this
+#    disk's writable partitions. Otherwise: FAIL, and the unit powers the box off.
+# 2. A fresh drive (root partition labelled agentos-root-new) gets random IDs of its own: the disk
+#    GUID, the PARTUUIDs of every partition except the active /usr release (labelled agentos_*,
+#    whose IDs derive from its root hash), the root ext4 UUID and the ESP's volume ID. The root
+#    label changes last, so an interrupted run repeats. The loader still reports the old ESP ID
+#    for this boot, so the box restarts once.
+#
+# AGENTOS_DRIVE_ROOT and AGENTOS_DRIVE_HOLD exist for tests/test_image.py.
+set -u
+R=${AGENTOS_DRIVE_ROOT:-}
+FRESH=agentos-root-new
+DONE=agentos-root
+
+say() { echo "agentos-drive: $*"; }
+fail() { say "FAIL $*"; exit 1; }
+lower() { tr 'A-F' 'a-f'; }
+newuuid() { cat /proc/sys/kernel/random/uuid; }
+
+var=$R/sys/firmware/efi/efivars/LoaderDevicePartUUID-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
+[ -r "$var" ] || fail "the boot loader did not say which partition it booted from"
+esp=$(tail -c +5 "$var" | tr -d '\000' | lower)
+[ -n "$esp" ] || fail "the boot loader's partition ID is empty"
+
+udevadm settle --timeout=60 >/dev/null 2>&1 || true
+
+# One line per partition: device, parent disk, PARTUUID, label.
+parts=$(lsblk -rnpo NAME,TYPE,PKNAME,PARTUUID,PARTLABEL | awk '$2 == "part" { print $1, $3, tolower($4), $5 }')
+
+espdevs=$(printf '%s\n' "$parts" | awk -v u="$esp" '$3 == u { print $1 }')
+n=$(printf '%s\n' "$espdevs" | grep -c .)
+[ "$n" -ge 1 ] || fail "no partition carries the ID the boot loader booted from"
+[ "$n" -eq 1 ] || fail "$n drives carry this drive's IDs; unplug the other AgentOS drive and start again"
+espdev=$espdevs
+disk=$(printf '%s\n' "$parts" | awk -v d="$espdev" '$1 == d { print $2 }')
+
+what=$(systemctl show -P What sysroot.mount 2>/dev/null)
+rootdev=$(readlink -f "$what" 2>/dev/null)
+[ -n "$what" ] && [ -n "$rootdev" ] || fail "no root device to check"
+rootdisk=$(printf '%s\n' "$parts" | awk -v d="$rootdev" '$1 == d { print $2 }')
+[ "$rootdisk" = "$disk" ] || fail "root ($rootdev) is not on the drive the loader booted from ($disk)"
+
+# This disk's writable partitions: everything but the active /usr release.
+own=$(printf '%s\n' "$parts" | awk -v d="$disk" '$2 == d && $4 !~ /^agentos_/')
+others=$(printf '%s\n' "$parts" | awk -v d="$disk" '$2 != d { print $3 }')
+for u in $(printf '%s\n' "$own" | awk '{ print $3 }'); do
+	printf '%s\n' "$others" | grep -qxF "$u" && fail "another drive carries partition ID $u of this drive; unplug it and start again"
+done
+
+label=$(printf '%s\n' "$parts" | awk -v d="$rootdev" '$1 == d { print $4 }')
+if [ "$label" != "$FRESH" ]; then
+	say "ok disk=$disk"
+	exit 0
+fi
+
+say "fresh drive: giving $disk its own IDs"
+num() { cat "$R/sys/class/block/${1##*/}/partition"; }
+sfdisk -q --no-reread --no-tell-kernel --disk-id "$disk" "$(newuuid)" || fail "could not set the disk ID"
+for p in $(printf '%s\n' "$own" | awk '{ print $1 }'); do
+	sfdisk -q --no-reread --no-tell-kernel --part-uuid "$disk" "$(num "$p")" "$(newuuid)" ||
+		fail "could not set the ID of $p"
+done
+e2fsck -fp "$rootdev" >/dev/null; [ $? -lt 4 ] || fail "root file system check failed"
+tune2fs -U random "$rootdev" >/dev/null || fail "could not set the root file system's ID"
+fatlabel -i "$espdev" "$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')" >/dev/null || fail "could not set the ESP's volume ID"
+sfdisk -q --no-reread --no-tell-kernel --part-label "$disk" "$(num "$rootdev")" "$DONE" || fail "could not relabel root"
+sync
+say "done; restarting once"
+systemctl --no-block reboot
+exec sleep "${AGENTOS_DRIVE_HOLD:-infinity}"

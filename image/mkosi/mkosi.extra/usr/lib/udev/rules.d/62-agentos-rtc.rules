@@ -1,0 +1,3 @@
+# The hardware clock belongs to the host PC (HW-8, HOST-1b): only root may open it, and every root
+# unit runs with DevicePolicy=closed or PrivateDevices=yes (image/device-policy.txt).
+SUBSYSTEM=="rtc", OWNER:="root", GROUP:="root", MODE:="0600", TAG-="uaccess"

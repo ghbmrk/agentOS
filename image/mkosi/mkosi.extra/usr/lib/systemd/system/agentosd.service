@@ -15,6 +15,11 @@ Delegate=yes
 ExecStart=/usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER} -modem-uid ${AGENTOS_MODEM_UID} \
         -runsc /usr/lib/agentos/runsc -image openclaw=/usr/lib/agentos/images/openclaw
 Restart=on-failure
+# No device but the NPU or GPU render nodes it may hand to a model (broker/accel); the modem is
+# the modem bridge's, gVisor runs on systrap. Host disks stay closed even to root (HW-8).
+DevicePolicy=closed
+DeviceAllow=char-accel rw
+DeviceAllow=char-drm rw
 
 [Install]
 WantedBy=multi-user.target

@@ -5,6 +5,7 @@ After=systemd-bless-boot.service boot-complete.target
 [Service]
 Type=oneshot
 ExecStart=/usr/lib/agentos/boot-report
+DevicePolicy=closed
 StandardOutput=journal+console
 
 [Install]

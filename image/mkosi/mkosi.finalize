@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Refuse an image tree that carries per-install state (HW-1) or socket files (V15).
+"""Refuse an image tree that carries per-install state (HW-1) or socket files (V15), or anything
+that would write the host PC's hardware clock or assemble its disks (HW-8).
 
 mkosi runs this as the last step before it writes the partitions, with the tree in $BUILDROOT.
 Every drive gets the same image, so anything generated during the build (a machine ID, a random
@@ -23,6 +24,14 @@ KEY_MARKERS = (b"PRIVATE KEY-----", b"PGP PRIVATE KEY BLOCK", b"AGE-SECRET-KEY-"
 # Larger files are not content-scanned (key files are small); the OpenClaw guest under /usr is
 # package content from pinned sources and is covered only by the socket check.
 SCAN_MAX = 1 << 20
+# HW-8 (HOST-1a H11, HOST-1b K14): nothing that writes the host's hardware clock (hwclock, its udev
+# rule, timesyncd, timedated) or assembles or automounts its disks (LVM, MD-RAID, udisks).
+HOST_TOUCHING = ("usr/sbin/hwclock", "usr/lib/udev/rules.d/*hwclock*", "usr/lib/systemd/systemd-timesyncd",
+                 "usr/lib/systemd/systemd-timedated", "usr/lib/systemd/system/systemd-timesyncd.service",
+                 "usr/lib/systemd/system/systemd-timedated.service", "usr/sbin/lvm", "usr/sbin/mdadm",
+                 "usr/lib/udev/rules.d/*lvm*", "usr/lib/udev/rules.d/*md-raid*", "usr/libexec/udisks2",
+                 "usr/lib/udev/rules.d/*udisks*")
+RTC_DIRECTIVES = ("rtcsync", "rtcfile", "hwclockfile", "rtconutc", "rtcautotrim", "rtcdevice")
 
 
 def violations(root):
@@ -41,6 +50,17 @@ def violations(root):
             out.append("etc/agentos: owner configuration; written at onboarding only")
         elif d == "var/lib/agentos" and p.is_dir() and any(p.iterdir()):
             out.append("var/lib/agentos: broker state; must be empty")
+    for pat in HOST_TOUCHING:
+        for f in sorted(root.glob(pat)):
+            out.append("%s: could write or assemble the host's clock or disks (HW-8)" % f.relative_to(root))
+    chrony = root / "etc/chrony/chrony.conf"
+    if (root / "usr/sbin/chronyd").exists() and not chrony.is_file():
+        out.append("etc/chrony/chrony.conf: missing; Debian's default writes the hardware clock (HW-8)")
+    elif chrony.is_file():
+        for line in chrony.read_text().splitlines():
+            words = line.split()
+            if words and words[0] in RTC_DIRECTIVES:
+                out.append("etc/chrony/chrony.conf: %s would write the host's hardware clock (HW-8)" % words[0])
     for dirpath, dirnames, filenames in os.walk(root):
         for n in dirnames + filenames:
             p = os.path.join(dirpath, n)

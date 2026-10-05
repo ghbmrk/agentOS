@@ -1,7 +1,7 @@
 # Tests for the device image build (P2-1): the build-time tree check, the release manifest,
 # the counted boot entry, the boot health check, and the image's static configuration.
 # The image itself is built and booted under Secure Boot by .github/workflows/image.yml.
-# REQ: HW-1, HW-5, UPD-1, UPD-1a
+# REQ: HW-1, HW-5, HW-8, UPD-1, UPD-1a
 import configparser
 import importlib.machinery
 import importlib.util
@@ -62,6 +62,30 @@ class TreeCheckTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_clean_tree_passes(self):
+        self.assertEqual(check.violations(self.root), [])
+
+    def test_host_clock_and_disk_tools_must_not_ship(self):
+        # HW-8: hwclock, timesyncd, timedated, LVM, MD-RAID and udisks.
+        for rel in ("usr/sbin/hwclock", "usr/lib/udev/rules.d/85-hwclock.rules", "usr/lib/systemd/systemd-timesyncd",
+                    "usr/lib/systemd/systemd-timedated", "usr/sbin/lvm", "usr/sbin/mdadm",
+                    "usr/lib/udev/rules.d/69-lvm.rules", "usr/lib/udev/rules.d/63-md-raid-arrays.rules",
+                    "usr/lib/udev/rules.d/80-udisks2.rules"):
+            with self.subTest(rel):
+                f = write(self.root, rel, "x")
+                v = check.violations(self.root)
+                self.assertEqual(len(v), 1, v)
+                self.assertIn("HW-8", v[0])
+                f.unlink()
+
+    def test_chrony_must_not_write_the_rtc(self):
+        write(self.root, "usr/sbin/chronyd", "\x7fELF", 0o755)
+        self.assertIn("missing", " ".join(check.violations(self.root)))
+        write(self.root, "etc/chrony/chrony.conf", "server a iburst nts\n")
+        self.assertEqual(check.violations(self.root), [])
+        write(self.root, "etc/chrony/chrony.conf", "server a iburst nts\nrtcsync\n")
+        self.assertIn("rtcsync", " ".join(check.violations(self.root)))
+        shipped = (MK / "mkosi.extra/etc/chrony/chrony.conf").read_text()
+        write(self.root, "etc/chrony/chrony.conf", shipped)
         self.assertEqual(check.violations(self.root), [])
 
     def test_empty_machine_id_passes(self):
@@ -346,6 +370,243 @@ class ConfigTest(unittest.TestCase):
         u = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")
         self.assertEqual(u["Unit"]["ConditionPathExists"], "/etc/agentos/agentosd.env")
         self.assertIn("/usr/lib/agentos/agentosd", u["Service"]["ExecStart"])
+
+
+INITRD = MK / "mkosi.initrd"
+LOADER_VAR = "sys/firmware/efi/efivars/LoaderDevicePartUUID-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"
+ESP_A, ROOT_A, ESP_B = ("11111111-0000-4000-8000-%012d" % i for i in (1, 2, 3))
+RELEASE = "a1a1a1a1-0000-4000-8000-000000000001"
+
+
+class DriveIDsTest(unittest.TestCase):
+    """Security MUST on #41: every drive starts with the same IDs (Seed=), so the initrd refuses a
+    boot that another drive's IDs could steer, and gives a fresh drive IDs of its own."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        t = pathlib.Path(self.tmp.name)
+        self.bin, self.root, self.log = t / "bin", t / "root", t / "log"
+        self.log.write_text("")
+        self.loader(ESP_A)
+        # vda: the boot drive (ESP, /usr release, empty slot, root); vdb: another disk.
+        self.parts = [("/dev/vda1", "/dev/vda", ESP_A, "esp"),
+                      ("/dev/vda2", "/dev/vda", RELEASE, "agentos_7"),
+                      ("/dev/vda4", "/dev/vda", "22222222-0000-4000-8000-000000000004", "_empty"),
+                      ("/dev/vda6", "/dev/vda", ROOT_A, "agentos-root"),
+                      ("/dev/vdb1", "/dev/vdb", ESP_B, "esp"),
+                      ("/dev/vdb2", "/dev/vdb", RELEASE, "agentos_7")]
+        for n in range(1, 7):
+            write(self.root, "sys/class/block/vda%d/partition" % n, "%d\n" % n)
+        self.rootdev = "/dev/vda6"
+        for tool in ("sfdisk", "e2fsck", "tune2fs", "fatlabel"):
+            stub(self.bin, tool, 'echo "%s $*" >> %s' % (tool, self.log))
+        stub(self.bin, "udevadm", "exit 0")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def loader(self, uuid):
+        f = self.root / LOADER_VAR
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(b"\x06\x00\x00\x00" + uuid.upper().encode("utf-16-le") + b"\x00\x00")
+
+    def run_ids(self):
+        table = "\n".join("%s part %s %s %s" % p for p in self.parts)
+        stub(self.bin, "lsblk", "cat <<'T'\n/dev/vda disk  \n%s\nT" % table)
+        stub(self.bin, "systemctl", 'case "$1" in show) echo "%s" ;; *) echo "systemctl $*" >> %s ;; esac'
+             % (self.rootdev, self.log))
+        env = dict(os.environ, PATH="%s:%s" % (self.bin, os.environ["PATH"]),
+                   AGENTOS_DRIVE_ROOT=str(self.root), AGENTOS_DRIVE_HOLD="0")
+        r = subprocess.run(["bash", str(INITRD / "mkosi.extra/usr/lib/agentos/drive-ids")], env=env,
+                           capture_output=True, text=True)
+        return r, self.log.read_text()
+
+    def test_unique_drive_boots_unchanged(self):
+        r, log = self.run_ids()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("agentos-drive: ok disk=/dev/vda", r.stdout)
+        self.assertEqual(log, "")
+
+    def test_two_drives_with_the_boot_esp_id_are_refused(self):
+        self.parts[4] = ("/dev/vdb1", "/dev/vdb", ESP_A, "esp")
+        r, log = self.run_ids()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("agentos-drive: FAIL 2 drives carry this drive's IDs", r.stdout)
+        self.assertEqual(log, "")
+
+    def test_another_drive_with_this_drives_root_id_is_refused(self):
+        self.parts.append(("/dev/vdb6", "/dev/vdb", ROOT_A, "agentos-root"))
+        r, _ = self.run_ids()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("another drive carries partition ID %s" % ROOT_A, r.stdout)
+
+    def test_the_same_release_on_another_drive_is_fine(self):
+        # /usr is chosen by usrhash= and checked by dm-verity, not by ID: equal IDs are expected.
+        r, _ = self.run_ids()
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_root_on_another_drive_is_refused(self):
+        self.parts.append(("/dev/vdb6", "/dev/vdb", "33333333-0000-4000-8000-000000000006", "agentos-root"))
+        self.rootdev = "/dev/vdb6"
+        r, _ = self.run_ids()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("is not on the drive the loader booted from", r.stdout)
+
+    def test_no_loader_variable_or_no_matching_partition_is_refused(self):
+        self.loader("99999999-0000-4000-8000-000000000009")
+        r, _ = self.run_ids()
+        self.assertEqual(r.returncode, 1)
+        (self.root / LOADER_VAR).unlink()
+        r, _ = self.run_ids()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("agentos-drive: FAIL", r.stdout)
+
+    def test_fresh_drive_gets_its_own_ids_then_restarts(self):
+        self.parts[3] = ("/dev/vda6", "/dev/vda", ROOT_A, "agentos-root-new")
+        r, log = self.run_ids()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        lines = log.splitlines()
+        self.assertRegex(lines[0], r"^sfdisk .*--disk-id /dev/vda [0-9a-f-]{36}$")
+        changed = sorted(re.findall(r"--part-uuid /dev/vda (\d) ", log))
+        self.assertEqual(changed, ["1", "4", "6"])  # not the release's own partition (2)
+        self.assertIn("e2fsck -fp /dev/vda6", log)
+        self.assertIn("tune2fs -U random /dev/vda6", log)
+        self.assertRegex(log, r"fatlabel -i /dev/vda1 [0-9a-f]{8}\n")
+        # Relabelled last, so an interrupted run starts over; then one restart.
+        self.assertRegex(lines[-2], r"--part-label /dev/vda 6 agentos-root$")
+        self.assertEqual(lines[-1], "systemctl --no-block reboot")
+        for l in lines:
+            if l.startswith("sfdisk"):
+                self.assertIn("--no-reread", l)
+
+    def test_fresh_drive_beside_a_copy_is_refused_before_any_change(self):
+        self.parts[3] = ("/dev/vda6", "/dev/vda", ROOT_A, "agentos-root-new")
+        self.parts[4] = ("/dev/vdb1", "/dev/vdb", ESP_A, "esp")
+        r, log = self.run_ids()
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(log, "")
+
+    def test_root_never_mounts_without_the_check(self):
+        u = ini(INITRD / "mkosi.extra/usr/lib/systemd/system/agentos-drive-ids.service")
+        self.assertEqual(u["Unit"]["FailureAction"], "poweroff")
+        self.assertIn("sysroot.mount", u["Unit"]["Before"])
+        self.assertIn("initrd-root-device.target", u["Unit"]["After"])
+        d = ini(INITRD / "mkosi.extra/usr/lib/systemd/system/sysroot.mount.d/agentos-drive-ids.conf")
+        self.assertEqual(d["Unit"]["Requires"], "agentos-drive-ids.service")
+        self.assertEqual(d["Unit"]["After"], "agentos-drive-ids.service")
+        self.assertTrue(os.access(INITRD / "mkosi.extra/usr/lib/agentos/drive-ids", os.X_OK))
+
+    def test_fresh_label_and_initrd_tools(self):
+        root = ini(MK / "mkosi.repart/30-root.conf")["Partition"]
+        self.assertEqual(root["Label"], "agentos-root-new")
+        c = ini(INITRD / "mkosi.conf")["Content"]
+        for p in ("fdisk", "dosfstools"):
+            self.assertIn(p, c["Packages"].split())
+        self.assertEqual(ini(MK / "mkosi.conf")["Config"]["InitrdInclude"], "mkosi.initrd/")
+
+    def test_usr_is_chosen_by_root_hash_only(self):
+        cmdline = ini(MK / "mkosi.conf")["Content"]["KernelCommandLine"]
+        for opt in ("root=", "mount.usr", "usr=", "systemd.verity_usr", "PARTUUID", "UUID="):
+            self.assertNotIn(opt, cmdline)
+        with self.assertRaises(ValueError):
+            finish.counted_entry(ENTRY.replace("quiet", "quiet root=PARTUUID=%s" % ROOT_A) % H, "7")
+        with self.assertRaises(ValueError):
+            finish.counted_entry(ENTRY.replace("quiet", "quiet mount.usr=/dev/sda2") % H, "7")
+
+
+class HostUntouchedImageTest(unittest.TestCase):
+    """HW-8 (HOST-1b, HOST-1a H11): the image never writes the host's hardware clock, root units
+    get no device access they do not need, and nothing assembles a host's LVM or MD array."""
+
+    def test_chrony_replaces_timesyncd(self):
+        c = ini(MK / "mkosi.conf")["Content"]
+        pk = c["Packages"].split()
+        self.assertIn("chrony", pk)
+        for p in ("systemd-timesyncd", "util-linux-extra", "lvm2", "mdadm", "udisks2", "ntpsec", "openntpd"):
+            self.assertNotIn(p, pk)
+        rm = c["RemoveFiles"].split()
+        for f in ("/usr/lib/systemd/systemd-timedated", "/usr/lib/systemd/system/systemd-timedated.service",
+                  "/usr/lib/udev/rules.d/85-hwclock.rules"):
+            self.assertIn(f, rm)
+        preset = (MK / "mkosi.extra/usr/lib/systemd/system-preset/50-agentos.preset").read_text()
+        self.assertIn("enable chrony.service", preset)
+        self.assertNotIn("timesyncd", preset)
+
+    def test_chrony_config_never_touches_the_rtc(self):
+        conf = (MK / "mkosi.extra/etc/chrony/chrony.conf").read_text()
+        directives = [l.split()[0] for l in conf.splitlines() if l.strip() and not l.startswith("#")]
+        for d in ("rtcsync", "rtcfile", "hwclockfile", "rtconutc", "rtcautotrim", "rtcdevice",
+                  "sourcedir", "confdir", "include"):
+            self.assertNotIn(d, directives)
+        self.assertIn("server", directives)
+        # HOST-1b owns the file once it lands on main; the image must ship the same one.
+        broker = ROOT / "broker/clock/chrony/chrony.conf"
+        if broker.exists():
+            self.assertEqual(conf, broker.read_text())
+
+    def test_rtc_is_root_only(self):
+        rule = (MK / "mkosi.extra/usr/lib/udev/rules.d/62-agentos-rtc.rules").read_text()
+        self.assertIn('SUBSYSTEM=="rtc", OWNER:="root", GROUP:="root", MODE:="0600"', rule)
+        d = ini(MK / "mkosi.extra/usr/lib/systemd/system/chrony.service.d/50-agentos.conf")["Service"]
+        self.assertEqual(d["DevicePolicy"], "closed")
+        self.assertEqual(d["DeviceAllow"], "")
+
+    def test_agentos_units_have_closed_device_policy(self):
+        # H11 ruling (c) on #172: root can open a 0600 host-disk node, so root units are fenced.
+        units = sorted((MK / "mkosi.extra/usr/lib/systemd/system").glob("*.service"))
+        units += sorted((INITRD / "mkosi.extra/usr/lib/systemd/system").glob("*.service"))
+        self.assertGreaterEqual(len(units), 4)
+        for f in units:
+            with self.subTest(f.name):
+                s = ini(f)["Service"]
+                self.assertTrue(s.get("DevicePolicy") == "closed" or s.get("PrivateDevices") == "yes"
+                                or f.name == "agentos-drive-ids.service", f.name)
+                for line in f.read_text().splitlines():
+                    if line.startswith("DeviceAllow="):
+                        self.assertNotRegex(line, r"block-|char-rtc|/dev/(sd|nvme|vd|mmc|rtc)", f.name)
+
+    def test_device_policy_allowlist_is_well_formed(self):
+        # The CI boot fails on a root service with open device access that this file does not
+        # list; each entry carries its reason.
+        lines = [l for l in (IMG / "device-policy.txt").read_text().splitlines() if l and not l.startswith("#")]
+        for l in lines:
+            unit, _, reason = l.partition(" ")
+            self.assertRegex(unit, r"^[\w@.-]+\.service$")
+            self.assertGreater(len(reason.strip()), 10, unit)
+            self.assertFalse(unit.startswith("agentos"), unit)
+
+    def test_initrd_assembles_no_lvm_or_md(self):
+        c = ini(INITRD / "mkosi.conf")["Content"]
+        for p in ("lvm2", "mdadm"):
+            self.assertIn(p, c["RemovePackages"].split())
+            self.assertNotIn(p, c["Packages"].split())
+        self.assertTrue(any("lvm" in g for g in c["RemoveFiles"].split()))
+        self.assertTrue(any("md-raid" in g for g in c["RemoveFiles"].split()))
+
+    def test_initrd_listing_check(self):
+        good = ["usr/lib/agentos/drive-ids", "usr/lib/systemd/system/agentos-drive-ids.service",
+                "usr/lib/systemd/system/sysroot.mount.d/agentos-drive-ids.conf", "usr/bin/sfdisk"]
+        self.assertEqual(finish.initrd_violations(good), [])
+        bad = good[1:] + ["usr/lib/udev/rules.d/69-lvm.rules", "usr/sbin/mdadm", "usr/sbin/pvscan"]
+        v = finish.initrd_violations(bad)
+        self.assertEqual(len(v), 4, v)
+
+    def test_initrd_names_reads_concatenated_cpio(self):
+        def newc(names):
+            out = b""
+            for n in names + ["TRAILER!!!"]:
+                nb = n.encode() + b"\0"
+                hdr = b"070701" + b"".join(b"%08X" % v for v in (0, 0o100644, 0, 0, 1, 0, 0, 0, 0, 0, 0, len(nb), 0))
+                out += hdr + nb
+                out += b"\0" * (-len(out) % 4)
+            return out
+        data = newc(["early/a"]) + b"\0" * 512 + newc(["usr/lib/agentos/drive-ids", "etc/x"])
+        self.assertEqual(finish.initrd_names(data), ["early/a", "usr/lib/agentos/drive-ids", "etc/x"])
+        try:
+            z = subprocess.run(["zstd", "-q", "-c"], input=newc(["usr/bin/sfdisk"]), capture_output=True, check=True).stdout
+        except (OSError, subprocess.CalledProcessError):
+            self.skipTest("zstd not installed")
+        self.assertEqual(finish.initrd_names(newc(["early/a"]) + z), ["early/a", "usr/bin/sfdisk"])
 
 
 if __name__ == "__main__":

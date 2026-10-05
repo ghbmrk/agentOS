@@ -7,6 +7,9 @@ Before=boot-complete.target
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/lib/agentos/health
+# veritysetup status asks device-mapper through its control node; nothing else.
+DevicePolicy=closed
+DeviceAllow=/dev/mapper/control rw
 StandardOutput=journal+console
 
 [Install]

@@ -1,0 +1,10 @@
+# Root services that may open devices without DevicePolicy=closed or PrivateDevices=yes (HW-8;
+# HOST-1a H11, security ruling (c) on #172). The CI boot (ci_boot.sh) lists every service unit's
+# device policy and fails on a root service with open device access that is not listed here.
+# One line per unit: the unit, then why it needs devices. AgentOS's own units are never listed.
+systemd-udevd.service creates and labels device nodes, and runs the HOST-1a rule that hides host disks
+systemd-udev-trigger.service replays kernel device events to udev at boot
+systemd-repart.service grows the drive's own root partition on first boot (repart.d/50-root.conf)
+systemd-fsck-root.service checks the drive's own root file system before it is mounted read-write
+emergency.service console login on boot failure; the root account is locked, so it offers no shell
+rescue.service console login on request; the root account is locked, so it offers no shell

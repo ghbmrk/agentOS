@@ -1,0 +1,18 @@
+# Runs in the initrd once the root device is found and before it is mounted. Pulled in by
+# sysroot.mount.d/agentos-drive-ids.conf, so root is never mounted unless this check passes.
+[Unit]
+Description=AgentOS drive ID check
+Documentation=file:/usr/lib/agentos/drive-ids
+DefaultDependencies=no
+ConditionPathExists=/etc/initrd-release
+After=initrd-root-device.target systemd-udev-trigger.service
+Before=sysroot.mount
+# Two drives with this drive's IDs: power off rather than guess which one to trust.
+FailureAction=poweroff
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/agentos/drive-ids
+StandardOutput=journal+console
+TimeoutStartSec=180

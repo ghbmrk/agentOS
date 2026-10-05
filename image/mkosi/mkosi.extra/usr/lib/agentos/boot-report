@@ -1,5 +1,22 @@
 #!/bin/sh
-# One console line after the boot is blessed (or not): what CI's boot test reads.
+# Console lines after the boot is blessed (or not): what CI's boot test reads.
+#   agentos-mount: one per partition under a mounted file system (dm devices through their
+#     slaves): partition, its disk's serial, PARTUUID. CI checks they are all on the boot drive.
+#   agentos-unit: one per service unit file: who it runs as and its device policy. CI fails on a
+#     root service with open device access that image/device-policy.txt does not list (HW-8).
+#   agentos-boot: the bless state and root's size; printed last.
+for src in $(findmnt -rnvo SOURCE | grep '^/dev/' | sort -u); do
+	lsblk -snrpo NAME,TYPE "$src" 2>/dev/null | awk '$2 == "part" { print $1 }'
+done | sort -u | while read -r p; do
+	echo "agentos-mount: $p serial=$(lsblk -dno SERIAL "$(lsblk -dnpo PKNAME "$p")") partuuid=$(lsblk -dno PARTUUID "$p")"
+done
+systemctl list-unit-files --type=service --no-legend --plain | awk '$2 != "masked" && $2 != "alias" { print $1 }' | grep -v '@\.service$' |
+while read -r u; do
+	systemctl show -p User,DynamicUser,DevicePolicy,PrivateDevices "$u" 2>/dev/null |
+		awk -v u="$u" -F= '{ v[$1] = $2 }
+		END { user = v["User"] == "" ? "root" : v["User"]; if (v["DynamicUser"] == "yes") user = "dynamic"
+		      print "agentos-unit: " u " user=" user " devices=" v["DevicePolicy"] " private=" v["PrivateDevices"] }'
+done
 st=$(/usr/lib/systemd/systemd-bless-boot status 2>&1)
 root=$(findmnt -bno SIZE /)
 echo "agentos-boot: bless=$st root_bytes=$root"
