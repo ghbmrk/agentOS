@@ -7,9 +7,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/ghbmrk/agentos/broker/meter"
 )
 
 // REQ: ARC-1, CRED-1, REV-5, ADP-10, ARC-6
@@ -170,5 +173,118 @@ func TestTrailersAreScrubbed(t *testing.T) {
 	resp.Body.Close()
 	if resp.Trailer.Get(HeaderDenial) != "" || resp.Trailer.Get("X-Other") != "kept" {
 		t.Fatalf("trailers %v", resp.Trailer)
+	}
+}
+
+// A served call's usage trailer reaches the meter once, on the metered
+// call, and never the guest.
+func TestUsageTrailerReachesMeterNotGuest(t *testing.T) {
+	trailer := `{"provider":"anthropic","input":12,"cache_read":100,"output":7,"reported":true,"complete":true,"output_chars":40}`
+	for _, c := range []struct {
+		name, value string
+		want        int64 // tokens charged
+	}{
+		// 12 + 100*0.1 input, 7 output.
+		{"reported", trailer, 29},
+		// No usable report: the meter's own count (Tokens of the
+		// request bytes and the 2 content characters it saw).
+		{"absent", "", -1},
+		{"malformed", `{"provider":`, -1},
+		{"negative", strings.Replace(trailer, `"output":7`, `"output":-7`, 1), -1},
+		{"oversized", `{"provider":"` + strings.Repeat("a", maxUsage) + `"}`, -1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			fe := &fakeEgress{h: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Trailer", HeaderUsage)
+				w.Header().Set("Content-Type", "text/event-stream")
+				io.WriteString(w, `data: {"choices":[{"delta":{"content":"hi"}}]}`+"\n\n")
+				w.(http.Flusher).Flush()
+				io.WriteString(w, "data: [DONE]\n\n")
+				if c.value != "" {
+					w.Header().Set(HeaderUsage, c.value)
+				}
+			}}
+			sock := serveUnix(t, fe)
+			fwd := Forward(Config{Socket: sock, Label: func(string) string { return "public" }, Denied: func(string, Denial) {}})
+			m, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "meter.json"), MachineCap: meter.Limits{Calls: 10, Tokens: 1 << 30}, OverallCap: meter.Limits{Calls: 10, Tokens: 1 << 30}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			srv := httptest.NewServer(m.Wrap("m1", fwd("m1")))
+			defer srv.Close()
+			const body = `{"model":"default","max_tokens":100}`
+			resp, err := http.Post(srv.URL+"/v1/chat/completions", "application/json", strings.NewReader(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if !strings.HasSuffix(string(got), "[DONE]\n\n") {
+				t.Fatalf("body %q", got)
+			}
+			for k := range resp.Trailer {
+				if strings.HasPrefix(k, headerPrefix) {
+					t.Fatalf("guest got trailer %s", k)
+				}
+			}
+			if strings.Contains(resp.Header.Get("Trailer"), HeaderUsage) {
+				t.Fatalf("guest was told of the usage trailer: %q", resp.Header.Get("Trailer"))
+			}
+			want := c.want
+			if want < 0 {
+				want = meter.Tokens(int64(len(body))) + meter.Tokens(2)
+			}
+			if u := m.Usage("m1"); u.Tokens != want {
+				t.Fatalf("charged %d tokens, want %d", u.Tokens, want)
+			}
+		})
+	}
+}
+
+// The proxy's own denial mark never reaches the guest.
+func TestEgressDeniedMarkIsScrubbed(t *testing.T) {
+	fe := &fakeEgress{h: func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Agentos-Egress-Denied", "1")
+		http.Error(w, "egress denied: test", http.StatusForbidden)
+	}}
+	sock := serveUnix(t, fe)
+	fwd := Forward(Config{Socket: sock, Label: func(string) string { return "public" }, Denied: func(string, Denial) {}})
+	srv := httptest.NewServer(fwd("m1"))
+	defer srv.Close()
+	resp, err := http.Post(srv.URL+"/v1/chat/completions", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 403 || resp.Header.Get("X-Agentos-Egress-Denied") != "" {
+		t.Fatalf("%d %v", resp.StatusCode, resp.Header)
+	}
+}
+
+// A body cut off before its end reports no usage, even with a trailer
+// declared: the meter keeps its own count of what the guest got.
+func TestTruncatedBodyReportsNoUsage(t *testing.T) {
+	fe := &fakeEgress{h: func(w http.ResponseWriter, r *http.Request) {
+		conn, buf, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			return
+		}
+		chunk := `data: {"choices":[{"delta":{"content":"hi"}}]}` + "\n\n"
+		buf.WriteString("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTrailer: Agentos-Usage\r\nTransfer-Encoding: chunked\r\n\r\n")
+		buf.WriteString(strconv.FormatInt(int64(len(chunk)), 16) + "\r\n" + chunk + "\r\n")
+		buf.Flush()
+		conn.Close() // no last chunk, so no trailer
+	}}
+	sock := serveUnix(t, fe)
+	fwd := Forward(Config{Socket: sock, Label: func(string) string { return "public" }, Denied: func(string, Denial) {}})
+	m, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "meter.json"), MachineCap: meter.Limits{Calls: 10, Tokens: 1 << 30}, OverallCap: meter.Limits{Calls: 10, Tokens: 1 << 30}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const body = `{"model":"default","max_tokens":100}`
+	w := httptest.NewRecorder()
+	m.Wrap("m1", fwd("m1")).ServeHTTP(w, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
+	if want := meter.Tokens(int64(len(body))) + meter.Tokens(2); m.Usage("m1").Tokens != want {
+		t.Fatalf("charged %d tokens, want the counted floor %d", m.Usage("m1").Tokens, want)
 	}
 }

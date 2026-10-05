@@ -350,10 +350,12 @@ func TestRestartCancelsAndReportsWhatItDropped(t *testing.T) {
 		t.Fatalf("boot text: %q", got)
 	}
 	ds := r.decisions()
-	if len(ds) != 2 || ds[0].Ref != "a" || ds[0].Why != "restart" || ds[0].Approved {
+	// The queued auto-reply is decided too, so its intent is closed
+	// rather than left waiting for a release that never comes.
+	if len(ds) != 3 || ds[0].Ref != "a" || ds[0].Why != "restart" || ds[0].Approved || ds[2].Ref != "r1" || ds[2].Why != "restart" {
 		t.Fatalf("decisions %+v", ds)
 	}
-	if ex, _ := r.ch.TakeExpired(); len(ex) != 2 {
+	if ex, _ := r.ch.TakeExpired(); len(ex) != 3 {
 		t.Fatalf("digest %+v", ex)
 	}
 	// Nothing is reported twice, and the IDs stay retired.
@@ -367,6 +369,108 @@ func TestRestartCancelsAndReportsWhatItDropped(t *testing.T) {
 	}
 	if _, ok := r.ch.codes.st.Retired[id]; !ok {
 		t.Fatal("ID not retired")
+	}
+}
+
+// REQ: CH-13, OP-3, OP-4
+
+// TestRestartHandsOpenRequestsToReissue (grants GR10): with Reissue set,
+// Boot retires every old ID, hands over the items of unexpired requests
+// with their first-asked time, expiry, and item digest, denies those that
+// expired meanwhile, cancels a record saved without its expiry, and says
+// so in the boot text. It hands over once.
+func TestRestartHandsOpenRequestsToReissue(t *testing.T) {
+	store := FileStore{Path: filepath.Join(t.TempDir(), "owner.json")}
+	r := newRig(t, store)
+	t0 := r.clock()
+	a, _ := r.ch.Request([]Item{lowItem("a"), lowItem("b")}, 0)
+	r.inbox()
+	b, _ := r.ch.Request([]Item{lowItem("c")}, 2*time.Minute)
+	r.inbox()
+	// Records that cannot be trusted are cancelled, not carried: one from
+	// an older build without its expiry, and one asked in the future. One
+	// whose expiry is past MaxTTL is capped.
+	if err := r.ch.codes.commit(func(s *State) {
+		s.Pending = append(s.Pending, PendingRef{ID: "Z9", Refs: []string{"z"}},
+			PendingRef{ID: "Y9", Refs: []string{"y"}, Asked: t0.Add(time.Hour), Expires: t0.Add(2 * time.Hour), Sums: []string{"s"}},
+			PendingRef{ID: "X9", Refs: []string{"x"}, Asked: t0, Expires: t0.Add(30 * 24 * time.Hour), Sums: []string{"s"}})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var got [][]Carried
+	r.reissue = func(cs []Carried) { got = append(got, cs) }
+	r.advance(5 * time.Minute)
+	r.ch = r.open() // reboot
+	r.ch.Boot()
+	text := r.inbox()
+	for _, want := range []string{a + ", X9 will be re-sent with new codes", "Cancelled requests: Z9, Y9.", "Expired: " + b + "."} {
+		if !strings.Contains(text, want) {
+			t.Errorf("boot text %q lacks %q", text, want)
+		}
+	}
+	if len(got) != 1 || len(got[0]) != 3 || got[0][2].Ref != "x" || !got[0][2].Expires.Equal(t0.Add(MaxTTL)) {
+		t.Fatalf("handed over %+v", got)
+	}
+	for i, c := range got[0][:2] {
+		ref := []string{"a", "b"}[i]
+		if c.Ref != ref || c.Request != a || !c.Asked.Equal(t0) || !c.Expires.Equal(t0.Add(DefaultCodeTTL)) || c.Sum != ItemSum(lowItem(ref)) {
+			t.Errorf("carried %+v", c)
+		}
+	}
+	ds := r.decisions()
+	if len(ds) != 3 || ds[0].Ref != "c" || ds[0].Why != "expired" || ds[1].Ref != "z" || ds[1].Why != "restart" || ds[2].Ref != "y" {
+		t.Fatalf("decisions %+v", ds)
+	}
+	for _, id := range []string{a, b, "Z9", "Y9", "X9"} {
+		if _, ok := r.ch.codes.st.Retired[id]; !ok {
+			t.Errorf("%s not retired", id)
+		}
+	}
+	r.ch.Boot()
+	if len(got) != 1 {
+		t.Fatal("handed over twice")
+	}
+}
+
+// TestRequestEachGivesEveryItemItsOwnCode (grants GR10): re-issued items
+// share one text but not one approval. Each has its own request and code,
+// a re-issued line shows when it was first asked, and that time survives
+// in the restart record.
+func TestRequestEachGivesEveryItemItsOwnCode(t *testing.T) {
+	r := newRig(t, nil)
+	first := r.clock().Add(-10 * time.Minute)
+	a := lowItem("a")
+	a.Asked = first
+	ids, err := r.ch.RequestEach([]Item{a, lowItem("b")}, []time.Duration{5 * time.Minute, 5 * time.Minute})
+	if err != nil || ids[0] == "" || ids[1] == "" || ids[0] == ids[1] {
+		t.Fatalf("ids %v: %v", ids, err)
+	}
+	text := r.inbox()
+	m := regexp.MustCompile(`Reply YES ([A-Z][0-9]{1,2}) ([0-9]{6})`).FindAllStringSubmatch(text, -1)
+	if len(m) != 2 || m[0][2] == m[1][2] || strings.Count(text, "re-sent after restart") != 1 || !strings.Contains(text, "asked 11:50, re-sent after restart") || !strings.Contains(text, "Expires 12:05") {
+		t.Fatalf("text %q", text)
+	}
+	select {
+	case x := <-r.phone.Inbox():
+		t.Fatalf("a second text %q", x.Text)
+	default:
+	}
+	if got := r.say("YES " + ids[1] + " " + m[0][2]); strings.HasPrefix(got, "Approved") {
+		t.Fatalf("a's code approved b: %q", got)
+	}
+	if got := r.say("YES " + ids[0] + " " + m[0][2]); !strings.HasPrefix(got, "Approved") {
+		t.Fatalf("a: %q", got)
+	}
+	if ds := r.decisions(); len(ds) != 1 || ds[0].Ref != "a" || !ds[0].Approved {
+		t.Fatalf("decisions %+v", ds)
+	}
+	for _, p := range r.ch.codes.st.Pending {
+		if p.ID == ids[1] && !p.Asked.Equal(r.clock()) {
+			t.Errorf("b's first ask %v", p.Asked)
+		}
+	}
+	if _, err := r.ch.RequestEach([]Item{a}, nil); err == nil {
+		t.Fatal("ttls must match items")
 	}
 }
 

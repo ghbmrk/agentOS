@@ -23,10 +23,10 @@ import (
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/vault"
+	"github.com/ghbmrk/agentos/broker/vm"
 )
 
-// REQ: CRED-1, CRED-5, CRED-7, ADP-10, REV-5
-// SPEC v0.12 IDs (PR #15; move into REQ when it merges): ARC-6, ARC-7, OP-8
+// REQ: CRED-1, CRED-5, CRED-7, ADP-10, REV-5, ARC-6, ARC-7, OP-8
 //
 // TestA14CanaryThroughTheGuestSocket is the canary target registered in
 // assurance/canary-targets.json (A5) and the A14 end-to-end proof that P1-3
@@ -102,13 +102,20 @@ func (m *machines) RaisePrivate(id string) error {
 	return nil
 }
 func (m *machines) Lineage(id string) (string, error) { return id, nil }
+
+// The box's model egress takes its labels from the machine manager, which
+// fails closed; this checks the shapes match (E10).
+var _ egress.Config = egress.Config{Label: (*vm.Manager)(nil).DataLabel}
+
+// label has vm.Manager.DataLabel's contract: "public" only for a known
+// machine labelled public; unknown machines read private.
 func (m *machines) label(id string) string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.private[id] {
-		return "private"
+	if (id == "m1" || id == "m2") && !m.private[id] {
+		return "public"
 	}
-	return "public"
+	return "private"
 }
 
 type denyAll struct{}
@@ -176,11 +183,12 @@ func TestA14CanaryThroughTheGuestSocket(t *testing.T) {
 		t.Fatal(err)
 	}
 	ms := &machines{private: map[string]bool{}}
+	tee := &teeAuditor{next: &egress.JournalAuditor{Journal: eng}, reasons: map[[2]string]bool{}}
 	proxy, err := egress.New(egress.Config{
 		Adapters:  []egress.Adapter{egress.OpenAI("provider-key"), egress.Anthropic("provider-key")},
 		Grants:    map[string][]string{"m1": {"openai", "anthropic"}, "m2": {"openai"}},
 		Vault:     v,
-		Audit:     egress.JournalAuditor{Journal: eng},
+		Audit:     tee,
 		Transport: tr,
 		Label:     ms.label,
 	})
@@ -315,14 +323,21 @@ func TestA14CanaryThroughTheGuestSocket(t *testing.T) {
 			t.Error("a forwarded request did not carry the broker-injected key")
 		}
 	}
-	denials := 0
+	// Denials are coalesced per machine and reason (E6): each distinct
+	// one is journaled.
+	journaled := map[[2]string]bool{}
 	for _, r := range eng.Trail() {
-		if r.Type == journal.RecEgress {
-			denials++
+		if r.Type == journal.RecEgress && r.Egress.Status == 403 {
+			journaled[[2]string{r.Egress.Machine, r.Egress.Reason}] = true
 		}
 	}
-	if denials < 8 {
-		t.Errorf("%d egress denials journaled; every undeclared request must be (ADP-10)", denials)
+	if len(tee.reasons) < 4 {
+		t.Fatalf("only %d distinct denials: the adversary was not exercised", len(tee.reasons))
+	}
+	for k := range tee.reasons {
+		if !journaled[k] {
+			t.Errorf("denial %q for %s was not journaled (ADP-10)", k[1], k[0])
+		}
 	}
 	if !harness {
 		filepath.Walk(surface, func(p string, info os.FileInfo, err error) error {
@@ -338,4 +353,21 @@ func TestA14CanaryThroughTheGuestSocket(t *testing.T) {
 			return nil
 		})
 	}
+}
+
+// teeAuditor records each distinct denial the proxy reports, then passes
+// it on to the journal.
+type teeAuditor struct {
+	next    egress.Auditor
+	mu      sync.Mutex
+	reasons map[[2]string]bool
+}
+
+func (a *teeAuditor) Egress(ev egress.Event) {
+	if !ev.Allowed && ev.Status == 403 {
+		a.mu.Lock()
+		a.reasons[[2]string{ev.Machine, ev.Reason}] = true
+		a.mu.Unlock()
+	}
+	a.next.Egress(ev)
 }

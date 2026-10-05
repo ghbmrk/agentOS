@@ -17,36 +17,53 @@ import (
 // next message from its socket (GET /owner/next, held open up to a poll
 // interval), hands it to the guest's inbound endpoint, and posts the guest's
 // answer back (POST /owner/reply). Delivery is at least once: a message
-// stays pending until it is answered, and is handed out again if its lease
-// runs out (the bridge died, or the machine was rolled back).
+// stays pending until it is answered. It is handed to the guest once per
+// incarnation of the machine, and again after the machine restarts (from
+// a preemption, a rebuild, a rollback, or a broker restart), never just
+// because the guest is slow (G5). Unanswered messages are kept on disk
+// (Config.InboxPath), so a broker restart does not drop them.
 
 const (
 	inboxSize    = 32
 	maxReplyBody = 64 << 10
 )
 
-var (
-	pollWait = 25 * time.Second
-	lease    = 15 * time.Minute
-)
+var pollWait = 25 * time.Second
 
 // ErrInboxFull: the machine has too many unanswered owner messages.
 var ErrInboxFull = errors.New("guest: owner inbox full")
 
 type ownerMsg struct {
-	ID   string    `json:"id"`
-	Text string    `json:"text"`
-	out  time.Time // when last handed out; zero if never
+	ID   string `json:"id"`
+	Text string `json:"text"`
+	out  bool   // handed to this incarnation of the guest
 }
 
 type inbox struct {
-	mu     sync.Mutex
-	msgs   []*ownerMsg
-	wake   chan struct{}
-	closed bool
+	machine string
+	store   *store
+	mu      sync.Mutex
+	msgs    []*ownerMsg
+	wake    chan struct{}
+	closed  bool
 }
 
-func newInbox() *inbox { return &inbox{wake: make(chan struct{})} }
+func newInbox(machine string, st *store) *inbox {
+	b := &inbox{machine: machine, store: st, wake: make(chan struct{})}
+	for _, m := range st.load(machine) {
+		b.msgs = append(b.msgs, &ownerMsg{ID: m.ID, Text: m.Text})
+	}
+	return b
+}
+
+// persist writes the inbox through to the store. Called with mu held.
+func (b *inbox) persist(msgs []*ownerMsg) error {
+	out := make([]storedMsg, len(msgs))
+	for i, m := range msgs {
+		out[i] = storedMsg{ID: m.ID, Text: m.Text}
+	}
+	return b.store.set(b.machine, out)
+}
 
 func (b *inbox) put(m *ownerMsg) error {
 	b.mu.Lock()
@@ -57,20 +74,27 @@ func (b *inbox) put(m *ownerMsg) error {
 	if len(b.msgs) >= inboxSize {
 		return ErrInboxFull
 	}
-	b.msgs = append(b.msgs, m)
+	next := append(append([]*ownerMsg(nil), b.msgs...), m)
+	if err := b.persist(next); err != nil {
+		return err
+	}
+	b.msgs = next
 	close(b.wake)
 	b.wake = make(chan struct{})
 	return nil
 }
 
-// next returns the oldest message not currently leased, or the channel to
-// wait on for a new one.
-func (b *inbox) next(now time.Time) (*ownerMsg, <-chan struct{}) {
+// next returns the oldest message not yet handed to this incarnation, or
+// the channel to wait on for a new one.
+func (b *inbox) next() (*ownerMsg, <-chan struct{}) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.closed {
+		return nil, nil
+	}
 	for _, m := range b.msgs {
-		if m.out.IsZero() || now.Sub(m.out) > lease {
-			m.out = now
+		if !m.out {
+			m.out = true
 			return m, nil
 		}
 	}
@@ -81,20 +105,42 @@ func (b *inbox) answer(id string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for i, m := range b.msgs {
-		if m.ID == id && !m.out.IsZero() {
-			b.msgs = append(b.msgs[:i], b.msgs[i+1:]...)
+		if m.ID == id {
+			next := append(append([]*ownerMsg(nil), b.msgs[:i]...), b.msgs[i+1:]...)
+			// The answer goes out even if the store cannot be written;
+			// the message may then be handed out again after a restart.
+			_ = b.persist(next)
+			b.msgs = next
 			return true
 		}
 	}
 	return false
 }
 
-func (b *inbox) close() {
+// requeue hands every unanswered message out again: the machine restarted,
+// so its guest no longer holds them.
+func (b *inbox) requeue() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if !b.closed {
-		b.closed = true
-		close(b.wake)
+	for _, m := range b.msgs {
+		m.out = false
+	}
+	close(b.wake)
+	b.wake = make(chan struct{})
+}
+
+// close ends the inbox. forget drops its stored messages (the machine was
+// destroyed); otherwise they stay for the next start.
+func (b *inbox) close(forget bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return
+	}
+	b.closed = true
+	close(b.wake)
+	if forget {
+		_ = b.store.set(b.machine, nil)
 	}
 }
 
@@ -129,7 +175,11 @@ func (p *Plane) ownerNext(m *machine, w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), pollWait)
 	defer cancel()
 	for {
-		msg, wait := m.box.next(time.Now())
+		msg, wait := m.box.next()
+		if msg == nil && wait == nil {
+			http.Error(w, "machine closed", http.StatusServiceUnavailable)
+			return
+		}
 		if msg != nil {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(msg)

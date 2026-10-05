@@ -309,10 +309,47 @@ func (r *Router) stat(route string) *Stats {
 
 // Handler serves one agent machine's model calls. Identity comes from
 // which handler the request arrived on, never from the request.
-// Handler serves one agent machine's model calls. Identity comes from
-// which handler the request arrived on, never from the request.
 func (r *Router) Handler(machine string) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) { r.serve(machine, w, req) })
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		private := r.cfg.Label == nil || r.cfg.Label(machine) != LabelPublic
+		r.serve(caller{machine, private, r.cfg.Upstream(machine), nil}, w, req)
+	})
+}
+
+// HandlerFor serves one call for a machine whose label and egress handler
+// the caller supplies per request, as the vault process does for the
+// broker that forwards to it (egress K9). audit, if not nil, receives
+// this call's decisions after Config.Audit. Only exactly LabelPublic is
+// public.
+func (r *Router) HandlerFor(machine, label string, upstream http.Handler, audit func(Decision)) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		r.serve(caller{machine, label != LabelPublic, upstream, audit}, w, req)
+	})
+}
+
+// caller is who one call is served for.
+type caller struct {
+	machine  string
+	private  bool
+	upstream http.Handler
+	audit    func(Decision)
+}
+
+func (r *Router) audit(c caller, d Decision) {
+	r.cfg.Audit(d)
+	if c.audit != nil {
+		c.audit(d)
+	}
+}
+
+type usageKey struct{}
+
+// WithUsage returns ctx carrying f, which the router calls with the
+// provider and its usage for each call it serves on ctx, whether or not
+// the guest asked for usage. The guest plane uses it to settle the OP-8
+// meter from what the provider reported.
+func WithUsage(ctx context.Context, f func(provider string, u Usage)) context.Context {
+	return context.WithValue(ctx, usageKey{}, f)
 }
 
 // paths the router serves: the OpenAI base URL at the root, or under the
@@ -371,11 +408,12 @@ func clamp(chat *chatRequest, ceiling int) *chatRequest {
 	return &out
 }
 
-func (r *Router) serve(machine string, w http.ResponseWriter, req *http.Request) {
+func (r *Router) serve(c caller, w http.ResponseWriter, req *http.Request) {
+	machine := c.machine
 	d := Decision{At: r.cfg.Now(), Machine: machine}
 	fail := func(status int, typ, code, reason string) {
 		d.Outcome, d.Status, d.Reason = Denied, status, reason
-		r.cfg.Audit(d)
+		r.audit(c, d)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		w.Write(apiError(reason, typ, code))
@@ -403,7 +441,7 @@ func (r *Router) serve(machine string, w http.ResponseWriter, req *http.Request)
 		fail(http.StatusNotFound, "invalid_request_error", "model_not_found", "no such model class")
 		return
 	}
-	private := r.cfg.Label == nil || r.cfg.Label(machine) != LabelPublic
+	private := c.private
 
 	var (
 		eligible, exhausted int
@@ -434,13 +472,13 @@ func (r *Router) serve(machine string, w http.ResponseWriter, req *http.Request)
 			continue
 		}
 		d.Route = key
-		a := r.try(req.Context(), machine, w, p, key, chat, out)
+		a := r.try(req.Context(), c.upstream, w, p, key, chat, out)
 		switch {
 		case a.denied:
 			// The proxy's own answer (a grant, shape, body-rule, or
 			// per-machine limit): this machine's, not the route's.
 			d.Outcome, d.Status, d.Reason = Denied, a.status, "egress denied"
-			r.cfg.Audit(d)
+			r.audit(c, d)
 			r.writeError(w, a.status, a.header, nil, a.body)
 			return
 		case a.failover:
@@ -460,14 +498,17 @@ func (r *Router) serve(machine string, w http.ResponseWriter, req *http.Request)
 				soonest = a.until
 			}
 			d.Outcome, d.Status, d.Reason = Failover, a.status, "route exhausted or unavailable"
-			r.cfg.Audit(d)
+			r.audit(c, d)
 			exhausted++
 			last = a
 			last.provider = p
 			continue
 		}
 		d.Outcome, d.Status, d.Usage = Served, a.status, a.usage
-		r.cfg.Audit(d)
+		r.audit(c, d)
+		if f, ok := req.Context().Value(usageKey{}).(func(string, Usage)); ok && a.usage != nil {
+			f(rt.Provider, *a.usage)
+		}
 		return
 	}
 	d.Route = ""
@@ -481,7 +522,7 @@ func (r *Router) serve(machine string, w http.ResponseWriter, req *http.Request)
 		fail(http.StatusForbidden, "permission_error", "no_route", "no route for this class is granted and allowed for this machine's data label")
 	case exhausted > 0 && last != nil:
 		d.Outcome, d.Status, d.Reason = Denied, last.status, "every permitted route is exhausted or unavailable"
-		r.cfg.Audit(d)
+		r.audit(c, d)
 		r.writeError(w, last.status, nil, last.provider, last.body)
 	case exhausted > 0:
 		fail(http.StatusTooManyRequests, "rate_limit_error", "routes_exhausted", "every permitted route is exhausted; try again later")
@@ -504,11 +545,11 @@ type attempt struct {
 
 // try sends one call and, unless it fails over or the proxy denied it,
 // delivers the answer to the guest.
-func (r *Router) try(ctx context.Context, machine string, w http.ResponseWriter, p Provider, key string, chat *chatRequest, out []byte) *attempt {
+func (r *Router) try(ctx context.Context, upstream http.Handler, w http.ResponseWriter, p Provider, key string, chat *chatRequest, out []byte) *attempt {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	start := r.cfg.Now()
-	resp := call(ctx, r.cfg.Upstream(machine), p, out)
+	resp := call(ctx, upstream, p, out)
 	defer resp.Body.Close()
 	elapsed := r.cfg.Now().Sub(start)
 	a := &attempt{status: resp.StatusCode, header: resp.Header}
@@ -583,21 +624,23 @@ func (r *Router) try(ctx context.Context, machine string, w http.ResponseWriter,
 	}
 	raw, err := io.ReadAll(body)
 	w.Header().Set("Content-Type", "application/json")
-	if err != nil {
+	// A provider answer the router cannot use may still be billed: its
+	// size is reported as unverified output, the meter's floor (OP-8).
+	unusable := func(msg string) *attempt {
+		a.usage = &Usage{OutputChars: body.n}
 		w.WriteHeader(http.StatusBadGateway)
-		w.Write(apiError("provider response unreadable", "server_error", ""))
+		w.Write(apiError(msg, "server_error", ""))
 		return a
 	}
+	if err != nil {
+		return unusable("provider response unreadable")
+	}
 	if body.n >= r.cfg.MaxResponse {
-		w.WriteHeader(http.StatusBadGateway)
-		w.Write(apiError("provider response too large", "server_error", ""))
-		return a
+		return unusable("provider response too large")
 	}
 	translated, u, err := p.Response(raw, chat.Model)
 	if err != nil {
-		w.WriteHeader(http.StatusBadGateway)
-		w.Write(apiError(err.Error(), "server_error", ""))
-		return a
+		return unusable(err.Error())
 	}
 	w.WriteHeader(resp.StatusCode)
 	w.Write(translated)

@@ -132,6 +132,9 @@ func loadState(path string) (unlockState, error) {
 // the vault is held but nothing is served. No right code within ttl, or a
 // lock, discards the key. Only an open vault serves the model route.
 type custody struct {
+	// keysPath, if set, is the keys file; while it exists the state file
+	// must too.
+	keysPath string
 	// open decrypts the vault with a passphrase (vault.OpenSealed).
 	open func(passphrase string) (*vault.Vault, error)
 	// build makes the egress proxy over an open vault.
@@ -161,6 +164,15 @@ type custody struct {
 
 // newCustody loads the durable unlock state into c.
 func newCustody(c *custody) (*custody, error) {
+	if c.keysPath != "" {
+		if _, err := os.Lstat(c.keysPath); err == nil {
+			if _, err := os.Lstat(c.statePath); errors.Is(err, os.ErrNotExist) {
+				// init writes the state with the keys; losing it would
+				// reset the wrong-code cap and allow a code replay.
+				return nil, fmt.Errorf("unlock state %s is missing although %s exists; refusing to start (restore it from the same backup as the keys)", c.statePath, c.keysPath)
+			}
+		}
+	}
 	st, err := loadState(c.statePath)
 	if err != nil {
 		return nil, err
@@ -250,7 +262,14 @@ func (c *custody) confirm(ticket, code string) error {
 	}
 	sec, _ := c.v.Secret(SeedName)
 	seed := []byte(sec.Reveal())
-	if step, ok := owner.MatchTOTP(seed, code, now, c.st.LastStep); ok {
+	step, ok := owner.MatchTOTP(seed, code, now, c.st.LastStep)
+	var skew int64
+	near := false
+	if !ok {
+		skew, near = c.nearMatch(seed, code, now)
+	}
+	clear(seed)
+	if ok {
 		next := c.st
 		next.LastStep = step
 		if err := c.persist(next); err != nil {
@@ -267,7 +286,7 @@ func (c *custody) confirm(ticket, code string) error {
 		c.notify("vault unlocked")
 		return nil
 	}
-	if skew, ok := c.nearMatch(seed, code, now); ok {
+	if near {
 		return errClockSkew(skew)
 	}
 	next := c.st

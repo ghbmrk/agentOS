@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/ghbmrk/agentos/broker/verb"
 )
 
 // Adapter declares one credentialed upstream: where it lives, which vault
@@ -43,24 +45,19 @@ type Operation struct {
 	Body   *BodyRule
 }
 
-// The broker's closed verb list (ADP-2). An adapter maps each operation to
-// one of these; it cannot define its own.
+// The broker's closed verb list (ADP-2), from package verb. An adapter maps
+// each operation to one of these; it cannot define its own.
 const (
-	VerbRead          = "read"
-	VerbDraft         = "draft"
-	VerbSend          = "send"
-	VerbPost          = "post"
-	VerbBuy           = "buy"
-	VerbShare         = "share"
-	VerbDeleteRemote  = "delete-remote"
-	VerbChangeAccount = "change-account"
-	VerbRevealSecret  = "reveal-or-create-secret"
+	VerbRead          = verb.Read
+	VerbDraft         = verb.Draft
+	VerbSend          = verb.Send
+	VerbPost          = verb.Post
+	VerbBuy           = verb.Buy
+	VerbShare         = verb.Share
+	VerbDeleteRemote  = verb.DeleteRemote
+	VerbChangeAccount = verb.ChangeAccount
+	VerbRevealSecret  = verb.RevealSecret
 )
-
-var verbs = map[string]bool{
-	VerbRead: true, VerbDraft: true, VerbSend: true, VerbPost: true, VerbBuy: true,
-	VerbShare: true, VerbDeleteRemote: true, VerbChangeAccount: true, VerbRevealSecret: true,
-}
 
 // BodyRule constrains a JSON request body (ADP-10). The proxy decodes the
 // body, checks it, applies Set, and forwards its own re-encoding, so the
@@ -82,6 +79,10 @@ type BodyRule struct {
 	ServerToolKeys []string
 	// Set forces top-level keys, e.g. store:false.
 	Set map[string]any
+	// StreamUsage forces stream_options.include_usage on a streamed
+	// OpenAI-style request, so the provider reports the usage the OP-8
+	// meter charges, hidden reasoning tokens included.
+	StreamUsage bool
 }
 
 // OpenAI is the OpenAI-compatible model relay: inference endpoints only
@@ -99,6 +100,7 @@ func OpenAI(credential string) Adapter {
 				PublicMayFetch: true,
 				ServerToolKeys: []string{"web_search_options", "mcp_servers", "container"},
 				Set:            map[string]any{"store": false},
+				StreamUsage:    true,
 			},
 		}},
 	}
@@ -174,7 +176,7 @@ func (a Adapter) validate() error {
 		if op.Name == "" || op.Method == "" || op.Method != strings.ToUpper(op.Method) {
 			return fmt.Errorf("adapter %s: bad operation %+v", a.Name, op)
 		}
-		if !verbs[op.Verb] {
+		if !verb.Valid(op.Verb) {
 			return fmt.Errorf("adapter %s: operation %s: verb %q is not on the broker's list (ADP-2)", a.Name, op.Name, op.Verb)
 		}
 		if _, err := splitPath(op.Path); err != nil {

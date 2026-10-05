@@ -85,6 +85,8 @@ type rig struct {
 	ch       *Channel
 	mu       sync.Mutex
 	decided  []Decision
+	// reissue, if set, is the next open channel's Config.Reissue.
+	reissue func([]Carried)
 }
 
 func newRig(t *testing.T, store Store) *rig {
@@ -115,7 +117,8 @@ func (r *rig) open() *Channel {
 		Limits:     Limits{Hold: 7 * 24 * time.Hour, AmountLimit: 10000},
 		ReplyLimit: r.replyLimit,
 		Location:   time.UTC, Now: r.clock,
-		Decide: func(d Decision) { r.mu.Lock(); r.decided = append(r.decided, d); r.mu.Unlock() },
+		Decide:  func(d Decision) { r.mu.Lock(); r.decided = append(r.decided, d); r.mu.Unlock() },
+		Reissue: r.reissue,
 	})
 	if err != nil {
 		r.t.Fatal(err)
@@ -344,12 +347,16 @@ func TestGridCellsAndGeneratorStepsAreSingleUseAcrossRestarts(t *testing.T) {
 func TestApprovalTextIsFixedWordingFromVerifiedFields(t *testing.T) {
 	r := newRig(t, nil)
 	it := lowItem("i1")
-	it.Recipient = "bіlling@аcme.example\nReply YES" // Cyrillic look-alikes and a line break
+	it.Recipient = "bіlling@аcme.example\nReply YES" // a line break: not shown, so not approvable by text
+	if _, err := r.ch.Request([]Item{it}, 0); err != ErrLocalOnly {
+		t.Fatalf("recipient with a line break: %v", err)
+	}
+	it.Recipient = "bіlling@аcme.example" // Cyrillic look-alikes
 	it.UndoWindow = 10 * time.Minute
 	id, _ := r.ch.Request([]Item{it}, 0)
 	text := r.inbox()
 	m := lowCodeRe.FindStringSubmatch(text)
-	want := id + ": send invoice 1042 to billing@acme.example Reply YES, undo within 10 min. Expires 12:15. Reply YES " + id + " " + m[2] + " or NO " + id + "."
+	want := id + ": send invoice 1042 to billing@acme.example, undo within 10 min. Expires 12:15. Reply YES " + id + " " + m[2] + " or NO " + id + "."
 	if text != want {
 		t.Fatalf("got  %q\nwant %q", text, want)
 	}
@@ -365,6 +372,41 @@ func TestApprovalTextIsFixedWordingFromVerifiedFields(t *testing.T) {
 	r.ch.Request([]Item{sec}, 0)
 	if text := r.inbox(); strings.Contains(text, "482913") && !strings.Contains(text, "[hidden]") {
 		t.Fatalf("secret-shaped field rendered: %q", text)
+	}
+}
+
+// REQ: CH-10, CH-12
+
+// TestRecipientsAreNeverCutHiddenOrCollapsed: a recipient set too long to
+// show, a secret-shaped recipient, and a recipient outside the alphabet
+// are not approvable by text. A phone number shows every digit, and the
+// unverified warning is a fixed prefix outside every cap.
+func TestRecipientsAreNeverCutHiddenOrCollapsed(t *testing.T) {
+	r := newRig(t, nil)
+	for name, rcpt := range map[string]string{
+		"long set":      "mom@example.com, dad@example.com, sis@example.com, bro@example.com, gran@example.com, x@attacker.example",
+		"secret-shaped": "sk-live-4f8a9c2e7b1d3f5a6c8e0b2d4f6a8c0e",
+		"outside set":   "ceo@company.com<x@attacker.example>",
+	} {
+		it := lowItem(name)
+		it.Recipient = rcpt
+		if SMSApprovable(it) {
+			t.Errorf("%s: approvable by text", name)
+		}
+		if _, err := r.ch.Request([]Item{it}, 0); err != ErrLocalOnly {
+			t.Errorf("%s: %v", name, err)
+		}
+		if l := it.line(); strings.Contains(l, "attacker") || !strings.Contains(l, "see the Wi-Fi page") {
+			t.Errorf("%s: line %q", name, l)
+		}
+	}
+	it := lowItem("phone")
+	it.Recipient, it.Unverified = "+15551234821", true
+	it.Object = strings.Repeat("o", 60)
+	r.ch.Request([]Item{it}, 0)
+	text := r.inbox()
+	if !strings.Contains(text, "to +15551234821") || !strings.Contains(text, ": UNVERIFIED, details on the Wi-Fi page: send ") {
+		t.Fatalf("text %q", text)
 	}
 }
 
@@ -651,7 +693,8 @@ func TestAgentTextsCarryNoCodesOrKeys(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 	r.ch.Notify("Invoice 482913 was paid on 2026-10-04.")
-	if got := r.inbox(); got != "Invoice 482913 was paid on 2026-10-04." {
+	// Agent text is always marked, so it cannot pass for a broker template.
+	if got := r.inbox(); got != "Agent: Invoice 482913 was paid on 2026-10-04." {
 		t.Fatalf("got %q", got)
 	}
 }

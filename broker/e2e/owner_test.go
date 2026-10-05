@@ -22,8 +22,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/owner"
 )
 
-// REQ: CH-1, CH-14, CH-19, REV-5
-// SPEC v0.12 IDs (PR #15; move into REQ when it merges): ARC-6
+// REQ: CH-1, CH-14, CH-19, REV-5, ARC-6
 //
 // TestARC6OwnerChatReachesTheGuestAndBack: the owner texts the box; the
 // owner channel (P1-5) checks the code and hands the chat to the agent's

@@ -79,6 +79,26 @@ type Config struct {
 	// channel's lock is released. A decision for an item the caller has
 	// already settled (possible after a restart) should be ignored.
 	Decide func(Decision)
+	// Narrow pauses or revokes a grant or pre-allowance ("PAUSE" or
+	// "REVOKE", and its ID) and returns the reply. Like STOP it needs only
+	// the owner's number (ADP-9). It runs outside the channel's lock. Nil
+	// answers that there are no grants.
+	Narrow func(word, id string) string
+	// Reissue, if set, takes over the items of requests a restart found
+	// open and not expired (Boot), to ask them again with new codes. Boot
+	// calls it once, with nil when there are none, after the restart text.
+	// Nil: they are cancelled.
+	Reissue func([]Carried)
+}
+
+// Carried is an item of a request open at the last shutdown, handed to
+// Config.Reissue. Its old code is dead; Request is the old request's ID.
+type Carried struct {
+	Ref     string
+	Request string
+	Asked   time.Time
+	Expires time.Time
+	Sum     string
 }
 
 // Decision is the outcome for one requested item.
@@ -88,7 +108,8 @@ type Decision struct {
 	Ref      string
 	Approved bool
 	// Why: "owner", "expired", "void" (wrong codes), "not chosen" (left
-	// out of a partial YES), or "restart" (dropped by a reboot).
+	// out of a partial YES), "restart" (dropped by a reboot), or "undo"
+	// (an auto-reply the owner cancelled).
 	Why string
 }
 
@@ -105,6 +126,7 @@ type Channel struct {
 	resumeTexts []time.Time
 	held        *heldMsg
 	limited     []time.Time
+	active      time.Time // last owner message the control handler ran
 	alertAt     time.Time
 	// floodAlertAt is the last flood alert; floods counts the events for
 	// the digest by kind.
@@ -209,6 +231,7 @@ type route struct {
 	replies  []string
 	delegate string // text for the control handler
 	run      bool   // delegate goes to the control handler
+	narrow   *reply // PAUSE or REVOKE, run outside the lock
 	// limited: the replies count against ReplyLimit (CH-15).
 	limited bool
 	// alerts have their own limit (one per AlertEvery) and are not counted
@@ -297,7 +320,17 @@ func (c *Channel) route(from, text string) (route, bool) {
 func (c *Channel) finish(ctx context.Context, from string, rt route) []string {
 	replies := rt.replies
 	if rt.run {
+		c.mu.Lock()
+		c.active = rt.at
+		c.mu.Unlock()
 		replies = append(replies, c.ctrl.Handle(ctx, from, rt.delegate)...)
+	}
+	if rt.narrow != nil {
+		if c.cfg.Narrow == nil {
+			replies = append(replies, "There are no grants to "+strings.ToLower(rt.narrow.word)+".")
+		} else {
+			replies = append(replies, c.cfg.Narrow(rt.narrow.word, rt.narrow.id))
+		}
 	}
 	var out []string
 	for _, r := range replies {
@@ -351,7 +384,9 @@ func (c *Channel) routeLocked(text string, now time.Time, decided *[]Decision) r
 			out, accepted := c.resumeLocked(r, now)
 			return route{replies: out, limited: !accepted}
 		case "UNDO":
-			return route{replies: []string{c.undoLocked(r.id, now)}, limited: !unlocked}
+			return route{replies: []string{c.undoLocked(r.id, now, decided)}, limited: !unlocked}
+		case "PAUSE", "REVOKE":
+			return route{narrow: &r, limited: !unlocked}
 		case "MORE":
 			return route{replies: []string{c.moreLocked(r.id)}, limited: !unlocked}
 		case "UNLOCK":
@@ -766,10 +801,38 @@ func since(ts []time.Time, cut time.Time) []time.Time {
 	return out
 }
 
+// Active reports whether the owner sent a message the control handler
+// ran (task chat, STATUS) within the last d: the owner is at their phone,
+// so an approval request need not wait for its batch (CH-15).
+func (c *Channel) Active(d time.Duration) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return !c.active.IsZero() && c.cfg.Now().Sub(c.active) < d
+}
+
+// AgentPrefix starts every text Notify sends, so agent-written text can
+// never pass for one of the broker's own templates (an approval request,
+// a code prompt).
+const AgentPrefix = "Agent: "
+
 // Notify texts the owner content that did not come from the broker's own
-// templates, such as an agent's answer. Secret-shaped content becomes a
-// pointer to the local UI (CH-19).
+// templates, such as an agent's answer, behind AgentPrefix. Secret-shaped
+// content becomes a pointer to the local UI (CH-19).
 func (c *Channel) Notify(text string) error {
+	if c.cfg.Modem == nil {
+		return errors.New("owner: no modem")
+	}
+	if text = Disclose(text); text != Hidden {
+		text = AgentPrefix + text
+	}
+	return c.cfg.Modem.Send(c.cfg.Owner, control.Fit(text))
+}
+
+// Inform texts the owner one of the broker's own fixed-wording notices
+// (a grant added, an action waiting on the local page). Callers never
+// pass agent text: that goes through Notify. Secret-shaped content still
+// becomes a pointer (CH-19).
+func (c *Channel) Inform(text string) error {
 	if c.cfg.Modem == nil {
 		return errors.New("owner: no modem")
 	}

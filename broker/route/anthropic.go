@@ -279,15 +279,20 @@ type aResponse struct {
 }
 
 type aUsage struct {
-	InputTokens              int64 `json:"input_tokens"`
-	OutputTokens             int64 `json:"output_tokens"`
-	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
-	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+	InputTokens              int64  `json:"input_tokens"`
+	OutputTokens             *int64 `json:"output_tokens"` // nil: not reported
+	CacheReadInputTokens     int64  `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int64  `json:"cache_creation_input_tokens"`
 }
 
+// usage is reported only with an output count: without one the meter
+// would charge no output, so it counts content instead.
 func (u aUsage) usage() Usage {
-	return Usage{Input: u.InputTokens, Output: u.OutputTokens, CacheRead: u.CacheReadInputTokens, CacheWrite: u.CacheCreationInputTokens,
-		Reported: u.InputTokens+u.OutputTokens+u.CacheReadInputTokens+u.CacheCreationInputTokens > 0}
+	out := Usage{Input: u.InputTokens, CacheRead: u.CacheReadInputTokens, CacheWrite: u.CacheCreationInputTokens, Reported: u.OutputTokens != nil}
+	if u.OutputTokens != nil {
+		out.Output = *u.OutputTokens
+	}
+	return out
 }
 
 // merge takes the nonzero counts of a later usage report (message_delta
@@ -297,12 +302,16 @@ func (u *aUsage) merge(o aUsage) {
 		dst *int64
 		src int64
 	}{
-		{&u.InputTokens, o.InputTokens}, {&u.OutputTokens, o.OutputTokens},
+		{&u.InputTokens, o.InputTokens},
 		{&u.CacheReadInputTokens, o.CacheReadInputTokens}, {&u.CacheCreationInputTokens, o.CacheCreationInputTokens},
 	} {
 		if f.src != 0 {
 			*f.dst = f.src
 		}
+	}
+	if o.OutputTokens != nil && (u.OutputTokens == nil || *o.OutputTokens != 0) {
+		n := *o.OutputTokens
+		u.OutputTokens = &n
 	}
 }
 
@@ -428,10 +437,13 @@ func (anthropic) Stream(dst io.Writer, flush func(), src io.Reader, class string
 		chars   int64           // content and tool-argument characters seen
 		tools   = map[int]int{} // Messages block index -> chat tool call index
 	)
-	complete := false
+	// complete: the stream ended normally and message_delta reported the
+	// final output count (message_start's is a placeholder), so the
+	// usage is authoritative for the meter.
+	complete, final := false, false
 	result := func() Usage {
 		u := usage.usage()
-		u.OutputChars, u.Complete = chars, complete
+		u.OutputChars, u.Complete = chars, complete && final
 		return u
 	}
 	send := func(v any) error {
@@ -502,6 +514,7 @@ func (anthropic) Stream(dst io.Writer, flush func(), src io.Reader, class string
 		case "message_delta":
 			if ev.Usage != nil {
 				usage.merge(*ev.Usage)
+				final = final || (ev.Usage.OutputTokens != nil && *ev.Usage.OutputTokens > 0)
 			}
 			if ev.Delta != nil && ev.Delta.StopReason != "" {
 				err = chunk(map[string]any{}, finishReason(ev.Delta.StopReason))
