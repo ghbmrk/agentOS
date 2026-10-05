@@ -356,6 +356,11 @@ func TestEgressDeniedMarkIsScrubbed(t *testing.T) {
 // declared: the meter keeps its own count of what the guest got.
 func TestTruncatedBodyReportsNoUsage(t *testing.T) {
 	fe := &fakeEgress{h: func(w http.ResponseWriter, r *http.Request) {
+		// Read the request first: closing a socket with unread data
+		// resets it, and a reset can reach the broker before the
+		// response does, which turns the call into a 503 with no
+		// stream to cut.
+		io.Copy(io.Discard, r.Body)
 		conn, buf, err := w.(http.Hijacker).Hijack()
 		if err != nil {
 			return
