@@ -694,7 +694,7 @@ func TestDigestSaysWhoTestedAnAutoStagedSecurityFix(t *testing.T) {
 	// long as it waits to install.
 	for name, c := range map[string]struct {
 		interim bool
-		want       string
+		want    string
 	}{
 		"interim":     {true, "Security update 2 is ready and installs at the next quiet time. It was tested by the AgentOS project's own test box, not an independent tester."},
 		"independent": {false, "Security update 2 is ready and installs at the next quiet time. An independent tester's report passed."},
@@ -769,5 +769,29 @@ func TestListedReportHeldForOwnerNotCalledUntested(t *testing.T) {
 	if strings.Contains(st.Line, "no trusted independent test report") ||
 		!strings.Contains(st.Line, "Security update 2 has been waiting for your approval since") {
 		t.Fatalf("line %q", st.Line)
+	}
+}
+
+func TestBackOnlineStaysDueUntilACheckRuns(t *testing.T) {
+	// #53 L3 round 3: an offer the scheduler does not run (the box turned
+	// busy) must not use up the check owed for coming back online.
+	r := newRig(t)
+	r.tick()
+	r.online = false
+	r.l.Next(context.Background(), true)
+	r.online = true
+	r.clk.add(time.Hour)
+	if _, ok := r.l.Next(context.Background(), true); !ok {
+		t.Fatal("not due on coming back online")
+	}
+	if _, ok := r.l.Next(context.Background(), true); !ok {
+		t.Fatal("an offer that never ran used up the check")
+	}
+	if !r.l.Urgent() {
+		t.Fatal("not urgent before the check ran")
+	}
+	r.tick()
+	if _, ok := r.l.Next(context.Background(), true); ok {
+		t.Fatal("still due after the check ran")
 	}
 }

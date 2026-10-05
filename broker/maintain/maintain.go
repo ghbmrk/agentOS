@@ -172,10 +172,10 @@ type state struct {
 	// RootRotatedTo: a check accepted new signing keys; the digest says
 	// so once (security R3 on #46).
 	RootRotatedTo int64 `json:"root_rotated_to,omitempty"`
-	// TestedBy says whose report let the newest security fix stage on its
-	// own: testedProject (D6 interim, the project's own test box) or
-	// testedIndependent; empty when the owner approves it.
-	TestedBy string `json:"tested_by,omitempty"`
+	// TestedBy says, per proposed version, whose report let a security fix
+	// stage on its own: testedProject (D6 interim, the project's own test
+	// box) or testedIndependent; absent when the owner approves it.
+	TestedBy map[int64]string `json:"tested_by,omitempty"`
 }
 
 // Loop3 is the maintenance loop's scheduler source.
@@ -240,6 +240,7 @@ func New(cfg Config) (*Loop3, error) {
 		if s == change.StateAwaitingOwner {
 			delete(l.st.Proposed, v)
 			delete(l.st.ProposedAt, v)
+			delete(l.st.TestedBy, v)
 			l.st.Next = time.Time{}
 		}
 	}
@@ -284,13 +285,11 @@ func (l *Loop3) Next(_ context.Context, _ bool) (loops.Job, bool) {
 		l.noteOfflineLocked()
 		return loops.Job{}, false
 	}
-	if !l.st.OfflineSince.IsZero() {
-		l.st.OfflineSince, l.st.Next = time.Time{}, time.Time{}
-		l.saveLocked()
-	}
-	// A clock that went back behind the last attempt is not trusted to
-	// say a check is not due.
-	if !l.st.LastAttempt.IsZero() && now.Before(l.st.Next) && !now.Before(l.st.LastAttempt) {
+	// Back online: due at once until a check runs, which clears
+	// OfflineSince, so a box that turns busy first does not lose it. A
+	// clock that went back behind the last attempt is not trusted to say
+	// a check is not due.
+	if l.st.OfflineSince.IsZero() && !l.st.LastAttempt.IsZero() && now.Before(l.st.Next) && !now.Before(l.st.LastAttempt) {
 		return loops.Job{}, false
 	}
 	return loops.Job{Name: "update-check", Run: l.check}, true
@@ -362,7 +361,7 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 	now := l.cfg.Now()
 
 	l.mu.Lock()
-	l.st.LastAttempt = now
+	l.st.LastAttempt, l.st.OfflineSince = now, time.Time{}
 	if failure != "" {
 		l.st.Failure = failure
 		l.st.Next = now.Add(l.cfg.Retry)
@@ -395,6 +394,7 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 		if v <= installed.Version {
 			delete(l.st.Proposed, v)
 			delete(l.st.ProposedAt, v)
+			delete(l.st.TestedBy, v)
 		}
 	}
 	l.st.Newest, l.st.NewestSecurity, l.st.Pending = 0, false, nil
@@ -442,7 +442,12 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 			l.st.ProposedAt = map[int64]time.Time{}
 		}
 		l.st.ProposedAt[v] = now
-		l.st.TestedBy = o.tested
+		if o.tested != "" {
+			if l.st.TestedBy == nil {
+				l.st.TestedBy = map[int64]string{}
+			}
+			l.st.TestedBy[v] = o.tested
+		}
 	case o.wait == nil:
 		// Preempted before proposing: offered again.
 		l.st.Pending = &pending{Version: v, Security: security, Why: waitPreempted}
@@ -685,14 +690,14 @@ func (l *Loop3) statusLocked(online bool, set loops.Settings, in update.Installe
 		case change.StateAdopted:
 			ready := fmt.Sprintf("update %d is ready and installs at the next quiet time.", st.Newest)
 			switch {
-			case st.NewestSecurity && st.TestedBy == testedProject:
+			case st.NewestSecurity && st.TestedBy[st.Newest] == testedProject:
 				return Status{Line: "Security " + ready + " It was tested by the AgentOS project's own test box, not an independent tester."}
-			case st.NewestSecurity && st.TestedBy == testedIndependent:
+			case st.NewestSecurity && st.TestedBy[st.Newest] == testedIndependent:
 				return Status{Line: "Security " + ready + " An independent tester's report passed."}
 			}
 			return Status{Line: "U" + ready[1:]}
 		}
-		if at, ok := st.ProposedAt[st.Newest]; ok && st.NewestSecurity && st.TestedBy != "" {
+		if at, ok := st.ProposedAt[st.Newest]; ok && st.NewestSecurity && st.TestedBy[st.Newest] != "" {
 			return Status{Line: fmt.Sprintf("Security update %d has been waiting for your approval since %s.", st.Newest, at.Format("Mon 2 Jan"))}
 		}
 		if at, ok := st.ProposedAt[st.Newest]; ok && st.NewestSecurity {
