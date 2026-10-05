@@ -1,8 +1,9 @@
 package change
 
-// REQ: CHG-1, LOOP-5
+// REQ: CHG-1
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 
@@ -35,7 +36,7 @@ func (e *env) stored(id string) Case {
 	return e.p.st.Cases[id]
 }
 
-// CHG-1, LOOP-5: every case of one goal lands on the same side of the
+// CHG-1: every case of one goal lands on the same side of the
 // split, in both the builder's dev view and the frozen held-out set, so a
 // candidate is never scored on a goal whose sibling cases it was built from.
 func TestSplitKeepsGoalTogether(t *testing.T) {
@@ -87,9 +88,15 @@ func TestSplitIgnoresCallerGoal(t *testing.T) {
 	if got := e.stored(id).Goal; got != "" {
 		t.Fatalf("goal-less task stored caller goal %q", got)
 	}
+	// A case ID shaped like a goal key would share that goal's side.
+	e.mustTask("t-shaped")
+	e.eng.RecordQuality("t-shaped", journal.Quality{Verdict: journal.VerdictGood, Source: "owner"})
+	if err := e.p.AddTaskCase(Case{ID: "goal:owner:real", Class: ClassSkill, Task: "t-shaped", Outcome: Accepted}); !errors.Is(err, ErrProvenance) {
+		t.Fatalf("case id shaped like a goal key: %v", err)
+	}
 }
 
-// LOOP-5: a persisted suite never reshuffles. A case with no goal, whether
+// CHG-1: a persisted suite never reshuffles. A case with no goal, whether
 // from before goals were stamped or from a task with none, keeps the side
 // its bare ID hashes to.
 func TestSplitKeepsLegacySide(t *testing.T) {

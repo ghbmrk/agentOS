@@ -113,7 +113,7 @@ Covered: 105 / 144 requirement IDs
 | LOOP-2 | `broker/loops/model_test.go`, `broker/loops/scheduler_test.go`, `broker/loops/settings_test.go`, `broker/meter/share_test.go`, `broker/meter/spare_test.go` |
 | LOOP-3 | `broker/loops/scheduler_test.go` |
 | LOOP-4 | `broker/loops/loop1_test.go` |
-| LOOP-5 | `broker/change/split_test.go`, `broker/loops/model_test.go`, `broker/loops/scheduler_test.go`, `broker/meter/share_test.go`, `broker/replay/replay_test.go`, `broker/vm/vm_test.go` |
+| LOOP-5 | `broker/loops/model_test.go`, `broker/loops/scheduler_test.go`, `broker/meter/share_test.go`, `broker/replay/replay_test.go`, `broker/vm/vm_test.go` |
 | LOOP-6 | `broker/grants/loops_test.go`, `broker/loops/loop1_test.go`, `broker/loops/settings_test.go` |
 | LOOP-7 | — |
 | LOOP-8 | `broker/loops/secure_test.go` |
