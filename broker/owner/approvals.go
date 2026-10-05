@@ -76,6 +76,17 @@ func (c *Channel) Request(items []Item, ttl time.Duration) (string, error) {
 // does. ids[i] is "" for an item that was not asked; err is the first
 // failure.
 func (c *Channel) RequestEach(items []Item, ttls []time.Duration) (ids []string, err error) {
+	return c.requestEach(items, ttls, false)
+}
+
+// RequestLocalEach opens one local request per item, as RequestLocal
+// does, and texts their notices together as RequestEach does (Potency R2
+// on P2-2a: one flush, as few texts as fit).
+func (c *Channel) RequestLocalEach(items []Item, ttls []time.Duration) (ids []string, err error) {
+	return c.requestEach(items, ttls, true)
+}
+
+func (c *Channel) requestEach(items []Item, ttls []time.Duration, local bool) (ids []string, err error) {
 	ids = make([]string, len(items))
 	if len(ttls) != len(items) {
 		return ids, errors.New("owner: one ttl per item")
@@ -91,7 +102,7 @@ func (c *Channel) RequestEach(items []Item, ttls []time.Duration) (ids []string,
 	var parts []part
 	c.mu.Lock()
 	for i, it := range items {
-		r, e := c.openLocked([]Item{it}, ttls[i], now, false)
+		r, e := c.openLocked([]Item{it}, ttls[i], now, local)
 		if e != nil {
 			if err == nil {
 				err = e
@@ -238,6 +249,12 @@ func (c *Channel) renderLocked(r *request) string {
 		if it.Unverified {
 			pre = "UNVERIFIED: "
 		}
+		if SMSApprovable(it) {
+			// A change that needs the page's confirmation (CH-3,
+			// Security Q1 on P2-2a part 2): only NO by text.
+			return fmt.Sprintf("%s: %syour agent wants to %s \"%s\". Approve or deny on my Wi-Fi page before %s, or reply NO %s.",
+				r.id, pre, field(it.Facts.Verb, 12), field(it.Object, 40), exp, r.id)
+		}
 		return fmt.Sprintf("%s: %syour agent wants to %s \"%s\" to %d recipient%s I can't show in a text. Approve or deny on my Wi-Fi page before %s, or reply NO %s.",
 			r.id, pre, field(it.Facts.Verb, 12), field(it.Object, 40), n, map[bool]string{true: "s"}[n != 1], exp, r.id)
 	}
@@ -319,6 +336,10 @@ func (c *Channel) answerLocked(rp reply, now time.Time, decided *[]Decision, pag
 		if rp.code != "" {
 			_, _, _ = c.codes.checkStrong(rp.code, now, strongOpts{silent: true})
 		}
+		if SMSApprovable(r.items[0]) {
+			// A change that needs the page's confirmation (CH-3).
+			return []string{fmt.Sprintf("Approve %s on my Wi-Fi page. Or reply NO %s.", r.id, r.id)}, false, false
+		}
 		return []string{fmt.Sprintf("Approve %s on my Wi-Fi page: it shows where this goes. Or reply NO %s.", r.id, r.id)}, false, false
 	}
 	for _, n := range rp.items {
@@ -371,7 +392,15 @@ func (c *Channel) answerLocked(rp reply, now time.Time, decided *[]Decision, pag
 		}
 	}
 	n := len(*decided)
+	before := len(*decided)
 	c.closeLocked(r, func(i int) (bool, bool) { return true, all || chosen[i] }, "", now, decided)
+	if page {
+		for i := before; i < len(*decided); i++ {
+			if d := &(*decided)[i]; d.Approved {
+				d.Page, d.Sum = true, ItemSum(r.items[d.Item-1])
+			}
+		}
+	}
 	s := "Approved " + r.id + "."
 	if !all {
 		s = fmt.Sprintf("Approved %s item %s.", r.id, list(rp.items))

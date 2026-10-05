@@ -523,7 +523,7 @@ func (c *Channel) LocalAnswer(id, sum string, approve bool, code string) (string
 			some = some || d.Approved
 		}
 		if ran {
-			msg = "Approved. Your agent can go ahead." + strings.TrimPrefix(msg, "Approved "+id+".")
+			msg = "Approved " + id + ". Your agent can go ahead." + strings.TrimPrefix(msg, "Approved "+id+".")
 		} else {
 			note += " (it did not run)" // L3 N3 on #165
 			if some {
@@ -531,7 +531,7 @@ func (c *Channel) LocalAnswer(id, sum string, approve bool, code string) (string
 			}
 		}
 	default:
-		note, msg = "Denied "+id, "Denied."
+		note, msg = "Denied "+id, "Denied "+id+"." // with its ID (UX U-2A-2)
 	}
 	var text string
 	var ns, na int

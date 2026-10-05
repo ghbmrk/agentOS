@@ -42,8 +42,16 @@ func (o *ownerFake) RequestEach(items []owner.Item, _ []time.Duration) ([]string
 	return ids, nil
 }
 
-func (o *ownerFake) RequestLocal(it owner.Item, _ time.Duration) (string, error) {
-	return o.Request([]owner.Item{it}, 0)
+func (o *ownerFake) RequestLocalEach(items []owner.Item, _ []time.Duration) ([]string, error) {
+	ids := make([]string, len(items))
+	for i, it := range items {
+		id, err := o.Request([]owner.Item{it}, 0)
+		if err != nil {
+			return ids, err
+		}
+		ids[i] = id
+	}
+	return ids, nil
 }
 
 func (o *ownerFake) Tier(f owner.Facts) owner.Tier {

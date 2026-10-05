@@ -237,3 +237,50 @@ func TestPauseAndRevokeNeedOnlyTheOwner(t *testing.T) {
 		t.Fatalf("revoking the connection left %+v", r.g.Grants())
 	}
 }
+
+// Security Q1 and P1 on P2-2a part 2: with the page, a change that needs
+// the owner's confirmation is asked only there (never YES by text), and
+// the one answer the page approves with a fresh code also confirms it,
+// if the item is as the page showed it. A texted approval does not.
+func TestAChangeThatNeedsThePageIsConfirmedByItsPageAnswer(t *testing.T) {
+	r := newRig(t, nil)
+	sub := func(id string) {
+		spec := mailGrant()
+		if id == "local/p1" {
+			spec = Spec{Account: "cal", Executor: "cal", Ops: map[string]string{"event.add": "draft"}}
+		}
+		r.submit(journal.Intent{ID: id, Origin: "local", Account: journal.BrokerAccount, Action: journal.ActionGrantChange,
+			Params: specParams(spec), Executor: ExecutorName})
+	}
+	sub("local/p1")
+	r.g.Flush()
+	r.own.mu.Lock()
+	calls, local := r.own.localCalls, len(r.own.local)
+	r.own.mu.Unlock()
+	if calls != 1 || local != 1 {
+		t.Fatalf("%d page calls, %d page requests", calls, local)
+	}
+	if st := r.state("local/p1"); st.State != journal.Pending || st.Permission.Reason != "waiting for the owner's approval on the box's Wi-Fi page" {
+		t.Fatalf("waiting: %s %q", st.State, st.Permission.Reason)
+	}
+	r.pageDecide("")
+	if st := r.state("local/p1"); st.State != journal.Succeeded {
+		t.Fatalf("page answer: %s %q", st.State, st.Permission.Reason)
+	}
+
+	// Changed since the page showed it: refused as stale.
+	sub("local/p2")
+	r.g.Flush()
+	r.pageDecide(strings.Repeat("0", 64))
+	if st := r.state("local/p2"); st.State != journal.Denied || !strings.Contains(st.Permission.Reason, "changed since the page showed it") {
+		t.Fatalf("stale: %s %q", st.State, st.Permission.Reason)
+	}
+
+	// An approval that did not come from the page confirms nothing.
+	sub("local/p3")
+	r.g.Flush()
+	r.decide(true, "owner")
+	if st := r.state("local/p3"); st.State != journal.Pending {
+		t.Fatalf("texted approval: %s %q", st.State, st.Permission.Reason)
+	}
+}
