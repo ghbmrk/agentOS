@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/digestnotes"
 )
 
 // The local web UI (CH-7, PLAN P2-2) reaches the channel through these
@@ -117,7 +119,9 @@ func (c *Channel) sendSignIns(text string, n, m int, now time.Time) {
 // one when the bound is used up (arbitrator ruling on #32).
 func (c *Channel) wrongLocalLocked(now time.Time) []string {
 	l := &c.local
-	if len(l.wrong) < maxLocalNotes {
+	if c.cfg.DigestNotes != nil {
+		_ = c.cfg.DigestNotes.Record(digestnotes.Event{WrongAt: now})
+	} else if len(l.wrong) < maxLocalNotes {
 		l.wrong = append(l.wrong, now)
 	}
 	var out []string
@@ -331,7 +335,11 @@ func (c *Channel) lockAlertsLocked(locked bool, now time.Time) []string {
 	}
 	if c.codes.justChallenged {
 		c.codes.justChallenged = false
-		c.floods.challenge++ // for the digest, as floodLocked counts it (L3 N2 on #165)
+		if c.cfg.DigestNotes != nil {
+			_ = c.cfg.DigestNotes.Record(digestnotes.Event{Challenge: true})
+		} else {
+			c.floods.challenge++ // for the digest, as floodLocked counts it (L3 N2 on #165)
+		}
 		c.held = nil
 		c.alertAt = now
 		alerts = append(alerts, fmt.Sprintf("Too many wrong codes, the last on the box's Wi-Fi. Codes by text now need a challenge: reply UNLOCK %s and a code from your code generator within %s.",
