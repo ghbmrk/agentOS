@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/control"
+	"github.com/ghbmrk/agentos/broker/digestnotes"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/modem"
 )
@@ -62,7 +63,10 @@ type Config struct {
 	// Secrets.TOTPSeed, which is then ignored (egress K7).
 	Verifier Verifier
 	Store    Store
-	Limits   Limits
+	// DigestNotes optionally records guard notices in a separate durable source.
+	// No default is created. Failure must not change code/STOP authority.
+	DigestNotes *digestnotes.Source
+	Limits      Limits
 	// Commitments is the owner's phrase list for ADP-11.
 	Commitments Commitments
 	// UnlockFor is CH-14's N (default 7 days).
@@ -243,7 +247,7 @@ func New(cfg Config) (*Channel, error) {
 	if cfg.Modem != nil {
 		c.cfg.Modem = watchedLine{Modem: cfg.Modem, c: c}
 	}
-	c.ctrl = &control.Handler{Engine: cfg.Engine, Auth: c, Agent: cfg.Agent, Machines: cfg.Machines, Notes: append(cfg.Notes[:len(cfg.Notes):len(cfg.Notes)], c.LocalWaiting), Now: cfg.Now,
+	c.ctrl = &control.Handler{Engine: cfg.Engine, Auth: c, Agent: cfg.Agent, Machines: cfg.Machines, Notes: append(cfg.Notes[:len(cfg.Notes):len(cfg.Notes)], c.LocalWaiting, c.OwnerDigestStatus), Now: cfg.Now,
 		Settings: cfg.Settings, HelpExtra: cfg.HelpExtra, Answer: cfg.Answer}
 	return c, nil
 }
@@ -639,7 +643,11 @@ func (c *Channel) challengeText(now time.Time, text string) route {
 
 // dropLocked ignores a code-bearing message in challenge mode.
 func (c *Channel) dropLocked(now time.Time) route {
-	c.dropped++
+	if c.cfg.DigestNotes != nil {
+		_ = c.cfg.DigestNotes.Record(digestnotes.Event{Dropped: true})
+	} else {
+		c.dropped++
+	}
 	if !c.alertAt.IsZero() && now.Sub(c.alertAt) < AlertEvery {
 		return route{}
 	}
@@ -664,14 +672,18 @@ func (c *Channel) floodLocked(now time.Time) string {
 	if !k.pausedSilent && !k.pausedCounted && !k.justChallenged {
 		return ""
 	}
-	if k.pausedSilent {
-		c.floods.silent++
-	}
-	if k.pausedCounted {
-		c.floods.counted++
-	}
-	if k.justChallenged {
-		c.floods.challenge++
+	if c.cfg.DigestNotes != nil {
+		_ = c.cfg.DigestNotes.Record(digestnotes.Event{Silent: k.pausedSilent, Counted: k.pausedCounted, Challenge: k.justChallenged})
+	} else {
+		if k.pausedSilent {
+			c.floods.silent++
+		}
+		if k.pausedCounted {
+			c.floods.counted++
+		}
+		if k.justChallenged {
+			c.floods.challenge++
+		}
 	}
 	silent, until := k.pausedSilent, k.pausedUntil
 	k.pausedSilent, k.pausedCounted = false, false
@@ -689,6 +701,11 @@ func (c *Channel) floodLocked(now time.Time) string {
 // TakeDigestNotes returns and clears owner-channel lines for the next
 // digest (O4).
 func (c *Channel) TakeDigestNotes() []string {
+	// An explicitly configured durable source has the sole consuming reader.
+	// Never fall back to destructive ephemeral reads when that source fails.
+	if c.cfg.DigestNotes != nil {
+		return nil
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	var out []string
@@ -711,6 +728,15 @@ func (c *Channel) TakeDigestNotes() []string {
 		c.floods = floodCounts{}
 	}
 	return append(out, c.takeLocalNotesLocked()...)
+}
+
+// OwnerDigestStatus reports notification-source recovery separately from
+// owner authority. It is fixed broker wording, not the store error text.
+func (c *Channel) OwnerDigestStatus() string {
+	if c.cfg.DigestNotes != nil && c.cfg.DigestNotes.Health() != nil {
+		return "Owner digest notes paused: storage needs recovery. STOP is still available."
+	}
+	return ""
 }
 
 const stateErr = "Could not save the code check, so it did not count. Try again."
