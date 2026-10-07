@@ -76,6 +76,10 @@ type Config struct {
 	// which holds the seed (egress K7); it takes the place of
 	// OwnerSecrets.TOTPSeed.
 	OwnerVerifier ownerch.Verifier
+	// OwnerReserved reports owner-facing IDs the change pipeline still
+	// answers to (change.Pipeline.ShortInUse), so no approval request
+	// takes one (owner.Config.Reserved, change C11). Nil: none.
+	OwnerReserved func(id string) bool
 	// Modem, when set, is served by the owner channel as well as the owner
 	// socket, and carries its outbound texts.
 	Modem modem.Modem
@@ -273,7 +277,7 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 		if ch, err = ownerch.New(ownerch.Config{
 			Owner: cfg.OwnerNumber, Modem: cfg.Modem, Engine: eng, Agent: cfg.Agent,
 			Machines: machines, Notes: cfg.Notes, Secrets: cfg.OwnerSecrets, Verifier: cfg.OwnerVerifier, Store: ownerch.FileStore{Path: cfg.OwnerState},
-			Decide: gate.Decide, Narrow: gate.Narrow, Reissue: gate.Reissue,
+			Decide: gate.Decide, Narrow: gate.Narrow, Reissue: gate.Reissue, Reserved: cfg.OwnerReserved,
 			Settings: cfg.Settings, HelpExtra: cfg.HelpExtra, Narrows: cfg.Narrows, Answer: cfg.Answer,
 		}); err != nil {
 			store.Close()
