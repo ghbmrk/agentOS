@@ -59,15 +59,17 @@ type Snapshot struct {
 	Overflow   uint64      `json:"overflow"`
 }
 type state struct {
-	Schema   int         `json:"schema"`
-	Zone     string      `json:"zone"`
-	Key      []byte      `json:"key"`
-	Seq      uint64      `json:"seq"`
-	Acked    uint64      `json:"acked"`
-	Counts   Counts      `json:"counts"`
-	Wrong    []time.Time `json:"wrong,omitempty"`
-	Overflow uint64      `json:"overflow"`
-	Pending  *Snapshot   `json:"pending,omitempty"`
+	Schema     int         `json:"schema"`
+	Zone       string      `json:"zone"`
+	Key        []byte      `json:"key"`
+	Seq        uint64      `json:"seq"`
+	Acked      uint64      `json:"acked"`
+	Counts     Counts      `json:"counts"`
+	Wrong      []time.Time `json:"wrong,omitempty"`
+	Overflow   uint64      `json:"overflow"`
+	Pending    *Snapshot   `json:"pending,omitempty"`
+	RecordSeq  uint64      `json:"record_seq,omitempty"`
+	RecordHash string      `json:"record_hash,omitempty"`
 }
 type Source struct {
 	mu       sync.Mutex
@@ -137,6 +139,16 @@ func prefix(full, part []time.Time) bool {
 func valid(st state) bool {
 	if st.Schema != 1 || st.Zone == "" || len(st.Key) != 32 || st.Acked > st.Seq || len(st.Wrong) > MaxWrong {
 		return false
+	}
+	if st.RecordSeq == 0 {
+		if st.RecordHash != "" {
+			return false
+		}
+	} else {
+		raw, err := hex.DecodeString(st.RecordHash)
+		if err != nil || len(raw) != sha256.Size || len(st.RecordHash) != 64 {
+			return false
+		}
 	}
 	for _, at := range st.Wrong {
 		if at.IsZero() || at.Year() < 1 || at.Year() > 9999 {
@@ -215,10 +227,58 @@ func (s *Source) Record(e Event) error {
 	if s.broken != nil {
 		return s.broken
 	}
-	if e == (Event{}) || (!e.WrongAt.IsZero() && (e.WrongAt.Year() < 1 || e.WrongAt.Year() > 9999)) {
+	if s.st.RecordSeq != 0 || !validEvent(e) {
 		return ErrInvalid
 	}
+	return s.recordLocked(e, 0, "")
+}
+
+func validEvent(e Event) bool {
+	return e != (Event{}) && (e.WrongAt.IsZero() || (e.WrongAt.Year() >= 1 && e.WrongAt.Year() <= 9999))
+}
+
+// RecordOnce admits one ordered, single-producer event. Only the latest ID
+// can be replayed, with identical normalized content; older IDs and gaps are
+// rejected. The producer must durably retire each outbox entry before issuing
+// the next. IDs are ingestion receipts, never owner or transport authority.
+func (s *Source) RecordOnce(id uint64, e Event) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.broken != nil {
+		return s.broken
+	}
+	if id == 0 || !validEvent(e) {
+		return ErrInvalid
+	}
+	if !e.WrongAt.IsZero() {
+		e.WrongAt = e.WrongAt.Round(0).UTC()
+	}
+	raw, err := json.Marshal(e)
+	if err != nil {
+		return ErrInvalid
+	}
+	sum := sha256.Sum256(append([]byte("agentos/owner/record/v1\x00"), raw...))
+	hash := hex.EncodeToString(sum[:])
+	if id == s.st.RecordSeq {
+		if hash != s.st.RecordHash {
+			return ErrInvalid
+		}
+		return s.commit(cloneState(s.st))
+	}
+	if s.st.RecordSeq == math.MaxUint64 || id != s.st.RecordSeq+1 {
+		return ErrInvalid
+	}
+	if s.st.RecordSeq == 0 && (s.st.Seq != 0 || s.st.Acked != 0 || s.st.Pending != nil || s.st.Counts != (Counts{}) || len(s.st.Wrong) != 0 || s.st.Overflow != 0) {
+		return ErrInvalid
+	}
+	return s.recordLocked(e, id, hash)
+}
+
+func (s *Source) recordLocked(e Event, id uint64, hash string) error {
 	next := cloneState(s.st)
+	if id != 0 {
+		next.RecordSeq, next.RecordHash = id, hash
+	}
 	for _, entry := range []struct {
 		enabled bool
 		count   *uint64

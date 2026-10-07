@@ -46,3 +46,44 @@ transport payload. Do not expose Event/receipt methods to guests. No end-to-end
 forget, encrypted-volume, power-cut, containment or carrier qualification is
 claimed. External strongest-tier broker/security review and threat check remain
 required before integrating or enabling this source.
+
+## Ordered producer receipts (W5-D17)
+
+`RecordOnce(id, event)` is an opt-in single-producer ingestion protocol on a
+fresh source. IDs start at 1 and advance exactly by 1. The source atomically
+persists the count/timestamp change with the ID and a domain-separated SHA-256
+hash of the normalized typed event. Wrong-code timestamps normalize to UTC,
+without a monotonic component; code values and message bodies remain absent.
+
+Only the latest ID may be retried. Equal ID and equal event re-save durable
+state and return success without adding a count. Equal ID with different
+content, stale IDs, gaps, zero IDs and empty events are refused without changing
+state. A source's persisted producer high-water survives digest acknowledgment
+and reopen. One ID and one fixed-size hash bound replay storage. They convey
+no owner authorization, send permission or carrier receipt. Sequence wrap is
+refused. Concurrent calls serialize through the existing source mutex.
+
+Anonymous `Record` cannot be mixed with ordered ingestion. An existing source
+that contains or has snapshotted anonymous events cannot silently migrate into
+the ordered protocol, even after acknowledgment. Empty, unsnapshotted state is
+eligible. Older schema-1 files with absent producer fields still reopen in
+anonymous mode; both producer fields must be valid together when present.
+The prior implementation will reject new producer fields, so downgrade requires
+an explicitly reviewed migration, rather than stripping replay protection.
+
+Any save uncertainty quarantines the instance. Reopen re-saves observed state
+before use; retrying the exact latest event adds it once if the prior replacement
+did not happen, or adds nothing if it did. This also holds after its digest has
+already been acknowledged. Tests cover before/after actual file replacement,
+independent file/source objects, pending receipt preservation, acknowledgment,
+changed parameters, legacy mixing and concurrent equivalent retries. File
+replacement tests model caller uncertainty, not power-loss/media qualification.
+
+A future authority outbox must commit a typed event and this ID in the **same
+owner-authority transaction** as the relevant guard decision, retry it through
+`RecordOnce`, and durably retire it before advancing to the next ID. Restoring
+source and producer backups at different points, resetting IDs, multiple
+producers, key rotation, missing retained outbox events and storage deadlines
+require an explicit recovery contract. This candidate does not implement that
+outbox or close W5-D15's authority-to-note capture gap. No owner integration,
+daemon registration, sender or runtime qualification is enabled here.
