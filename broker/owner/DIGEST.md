@@ -95,3 +95,29 @@ counts once across retirement uncertainty. These are caller-error cuts around
 real atomic FileStores, not power loss, media fault or hardware qualification.
 No code verifier, model, modem, sender, scheduler, queue consumer or carrier runs.
 Strongest independent broker review and an explicit threat check are required.
+
+## W5-D21 composition and capture-error visibility
+
+Existing Channel handlers are anonymous producers. New refuses a known ordered
+DigestNotes source, including an empty claimed source, and refuses any State with
+transactional DigestOutbox metadata. The latter prevents an unintegrated channel
+from booting on a file whose authority changes must pass through the coordinator.
+Refusal changes no stored state and invokes no engine authority. This is a
+composition check, not a replacement handler, startup STOP service or writer lock.
+Do not migrate the daemon's active store to outbox mode before reviewed handler
+integration, downgrade rules and control-path availability are implemented.
+
+An anonymous source outage still permits the existing owner channel to start;
+valid code checks and immediate text/local STOP remain independent of notification
+storage. UsesOrderedProducer reports last confirmed mode, not successful recovery
+of an uncertain claim. Source Health continues to flag that uncertainty.
+
+All anonymous Record errors now latch a capture-failure flag on the channel,
+including mode/input refusals that leave Source.Health healthy. A late external
+claim after construction is therefore visible in the same fixed digest-status
+wording, cannot fall back to destructive notes, and does not change code counters
+or STOP. The flag clears only with channel reconstruction after the composition
+and recovery checks; later successful records cannot silently erase evidence of a
+missed event. It is not durable event retention, does not reconstruct that missed
+event after a crash, and does not close the anonymous producer's transaction gap.
+Source registration and lifecycle remain trusted single-writer composition.

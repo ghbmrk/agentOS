@@ -174,6 +174,9 @@ type Channel struct {
 	// stops counts STOPs; a RESUME code issued before the latest STOP is
 	// void (taken on the fast path, outside mu).
 	stops atomic.Int64
+	// noteCaptureFailed also covers input/mode refusals that do not quarantine
+	// the source itself. It is latched until the channel is reconstructed.
+	noteCaptureFailed atomic.Bool
 	// stopMu orders a fast-path STOP against a RESUME: stopNow holds it
 	// across counting and applying the STOP, and resumeUnlessStopped
 	// across its re-check and Resume, so a STOP that arrives while a
@@ -207,6 +210,8 @@ type heldMsg struct {
 	ready   bool
 }
 
+var ErrDigestComposition = errors.New("owner: digest outbox requires its reviewed handler integration")
+
 // New returns a Channel, loading its durable state.
 func New(cfg Config) (*Channel, error) {
 	if cfg.Owner == "" || cfg.Engine == nil || cfg.Store == nil {
@@ -233,9 +238,15 @@ func New(cfg Config) (*Channel, error) {
 	if cfg.Rand == nil {
 		cfg.Rand = rand.Reader
 	}
+	if cfg.DigestNotes != nil && cfg.DigestNotes.UsesOrderedProducer() {
+		return nil, ErrDigestComposition
+	}
 	st, err := cfg.Store.Load()
 	if err != nil {
 		return nil, err
+	}
+	if st.DigestOutbox != nil {
+		return nil, ErrDigestComposition
 	}
 	c := &Channel{
 		cfg:    cfg,
@@ -644,7 +655,7 @@ func (c *Channel) challengeText(now time.Time, text string) route {
 // dropLocked ignores a code-bearing message in challenge mode.
 func (c *Channel) dropLocked(now time.Time) route {
 	if c.cfg.DigestNotes != nil {
-		_ = c.cfg.DigestNotes.Record(digestnotes.Event{Dropped: true})
+		c.recordDigestNoteLocked(digestnotes.Event{Dropped: true})
 	} else {
 		c.dropped++
 	}
@@ -673,7 +684,7 @@ func (c *Channel) floodLocked(now time.Time) string {
 		return ""
 	}
 	if c.cfg.DigestNotes != nil {
-		_ = c.cfg.DigestNotes.Record(digestnotes.Event{Silent: k.pausedSilent, Counted: k.pausedCounted, Challenge: k.justChallenged})
+		c.recordDigestNoteLocked(digestnotes.Event{Silent: k.pausedSilent, Counted: k.pausedCounted, Challenge: k.justChallenged})
 	} else {
 		if k.pausedSilent {
 			c.floods.silent++
@@ -730,10 +741,16 @@ func (c *Channel) TakeDigestNotes() []string {
 	return append(out, c.takeLocalNotesLocked()...)
 }
 
+func (c *Channel) recordDigestNoteLocked(event digestnotes.Event) {
+	if err := c.cfg.DigestNotes.Record(event); err != nil {
+		c.noteCaptureFailed.Store(true)
+	}
+}
+
 // OwnerDigestStatus reports notification-source recovery separately from
 // owner authority. It is fixed broker wording, not the store error text.
 func (c *Channel) OwnerDigestStatus() string {
-	if c.cfg.DigestNotes != nil && c.cfg.DigestNotes.Health() != nil {
+	if c.cfg.DigestNotes != nil && (c.noteCaptureFailed.Load() || c.cfg.DigestNotes.Health() != nil) {
 		return "Owner digest notes paused: storage needs recovery. STOP is still available."
 	}
 	return ""
