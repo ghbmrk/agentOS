@@ -171,7 +171,7 @@ func (p *Pipeline) ForgetGoal(goal string) ([]string, error) {
 	}
 	sort.Strings(ids)
 	tree, ads, touched, changed := p.forgetAdoptionsLocked(goal)
-	if len(ids) == 0 && !changed {
+	if len(ids) == 0 && !changed && !(p.st.DigestPending != nil && slices.Contains(p.st.DigestPending.References, goal)) {
 		return nil, nil
 	}
 	next := p.st.copyCases()
@@ -182,6 +182,7 @@ func (p *Pipeline) ForgetGoal(goal string) ([]string, error) {
 		return nil, err
 	}
 	p.st.Cases, p.st.Adoptions, p.st.Active = next, ads, tree
+	p.invalidateDigestGoalLocked(goal)
 	p.dropOldBasesLocked(tree.Hash())
 	if err := p.saveLocked(); err != nil {
 		if rerr := p.reloadLocked(); rerr != nil {

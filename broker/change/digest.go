@@ -179,78 +179,20 @@ func routingClasses(b []byte) map[string]bool {
 	return out
 }
 
-// Digest returns one fixed-template line per adoption or revert not yet
-// listed, and marks them listed. No line carries a candidate's own text.
+// Digest is the destructive compatibility reader. Once PeekDigest opts into
+// durable snapshot delivery it returns no lines, so mixed consumers cannot erase
+// pending generations. New sender wiring must use PeekDigest/AckDigest instead.
 func (p *Pipeline) Digest() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.broken != nil || p.st.DigestSeq != 0 {
+		return nil
+	}
+	entries := p.digestEntriesLocked()
 	var out []string
-	for _, a := range p.st.Adoptions {
-		if !a.Listed {
-			line := p.what(a) + "."
-			line += testedText(a.Score)
-			switch a.Basis {
-			case BasisOwner:
-				line += " You approved it."
-			case BasisSecurity:
-				line += " Security update, under your standing policy."
-			}
-			switch {
-			case a.Reverted != "":
-			case p.undoableLocked(a):
-				line += fmt.Sprintf(" UNDO %s / MORE %s", a.Short, a.Short)
-			default:
-				line += fmt.Sprintf(" MORE %s", a.Short)
-			}
-			out = append(out, line)
-			a.Listed = true
-		}
-		if a.Reverted != "" && !a.RevertSeen {
-			why := map[string]string{
-				WhyOwner:      " as you asked.",
-				WhyRegression: ": it did worse on newer tasks.",
-				WhySecurity:   ": it failed a security check.",
-				WhyFallback:   ": the update did not start cleanly, so the box kept the previous one.",
-				WhyForgotten:  ": it was learned from a task you asked the box to forget.",
-			}[a.Reverted]
-			out = append(out, "Undid "+a.Short+why)
-			a.RevertSeen = true
-		}
-	}
-	seen := map[string]bool{}
-	for _, d := range p.st.Declined {
-		if !seen[d.Version] {
-			seen[d.Version] = true
-			out = append(out, "You declined security update "+safe(d.Version)+"; the box is still on the previous version until a newer update is installed.")
-		}
-	}
-	for _, a := range p.st.Adoptions {
-		if a.Concern != "" && !a.ConcernSeen && a.Reverted == "" {
-			s := a.ConcernScore
-			line := p.what(&Adoption{Classes: a.Classes, Origin: a.Origin}) + " now"
-			if a.Concern == WhySecurity {
-				line += " fails a newer security check"
-			} else {
-				line += fmt.Sprintf(" does worse on %d of %d newer tasks", max(s.Regressions, s.BaselinePassed-s.Passed), s.HeldOut)
-			}
-			if p.undoableLocked(a) {
-				line += ". Reply UNDO " + a.Short + " to go back to the previous version, or nothing to keep it."
-			} else {
-				line += ". It is the only version on the box, so it stays until a newer update is installed."
-			}
-			out = append(out, line)
-			a.ConcernSeen = true
-		}
-	}
-	for i := range p.st.Notices {
-		if n := &p.st.Notices[i]; !n.Seen {
-			out = append(out, n.Line)
-			n.Seen = true
-		}
-	}
-	if p.st.Outages >= OutageAlert && !p.st.OutageSeen {
-		out = append(out, fmt.Sprintf("The box could not re-test its learned changes the last %d times it tried; they stay as they are until it can.", p.st.Outages))
-		p.st.OutageSeen = true
+	for _, entry := range entries {
+		out = append(out, entry.line)
+		p.applyDigestMarkLocked(entry.mark)
 	}
 	if len(out) > 0 {
 		_ = p.saveLocked()

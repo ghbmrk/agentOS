@@ -288,6 +288,12 @@ type Adoption struct {
 
 // state is everything the pipeline persists.
 type state struct {
+	// Digest state is opt-in; existing files lacking it retain legacy delivery.
+	DigestSeq     uint64          `json:"digest_seq,omitempty"`
+	DigestAcked   uint64          `json:"digest_acked,omitempty"`
+	DigestFloor   uint64          `json:"digest_floor,omitempty"`
+	DigestPending *DigestSnapshot `json:"digest_pending,omitempty"`
+
 	Seq       int         `json:"seq"`
 	SplitKey  []byte      `json:"split_key"`
 	Active    Tree        `json:"active"`
@@ -411,6 +417,9 @@ func New(cfg Config) (*Pipeline, error) {
 		if len(p.st.SplitKey) != 32 {
 			return nil, errors.New("change: corrupt state: bad split key")
 		}
+		if err := p.checkDigestStateLocked(); err != nil {
+			return nil, err
+		}
 		for path := range p.st.Active {
 			if err := cleanPath(path); err != nil {
 				return nil, fmt.Errorf("change: corrupt state: %w", err)
@@ -454,6 +463,9 @@ func New(cfg Config) (*Pipeline, error) {
 	}
 	if p.st.Applied == nil {
 		p.st.Applied = map[string]bool{}
+	}
+	if err := p.checkDigestStateLocked(); err != nil {
+		return nil, err
 	}
 	p.key = append([]byte(nil), p.st.SplitKey...)
 	return p, nil
