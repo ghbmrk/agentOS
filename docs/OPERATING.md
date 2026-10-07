@@ -88,6 +88,8 @@ Extra capacity (a second subscription, a teammate's agent, or another vendor's c
 
 **One merge authority.** Only the primary coordinator merges to main, after the stages its tier needs (§3, §4). Other teams open PRs; they do not merge, and they never push to another team's branch. Branch stems carry the team: `pkg/<team>-<id>-<slug>`.
 
+**Each team reviews its own PRs; the primary team gates.** A team runs the fresh L3 review (§4 stage 3) on its own PRs, on its own subscription, and marks a PR ready only after an accept, linking the verdict in the PR. The primary team then runs the batched lens screen on tier A and B PRs and spot-checks tier C before merging. Bundles from all teams go through that screen at least daily, so PRs don't drift from main.
+
 **GitHub is the bus.** PRs and issues carry everything between teams: claims, interface requests, blockers, review verdicts. No team needs access to another team's chat, sessions or memory.
 
 **Hand-off to a new team** is one onboarding PR from the primary team that: adds the team's row to the Lanes table; lists the BOARD rows in its lane with their state; and links the interfaces it may call. The new team's first session reads only that PR plus the files listed above.
