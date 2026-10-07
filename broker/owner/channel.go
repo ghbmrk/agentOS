@@ -917,6 +917,27 @@ func (c *Channel) Inform(text string) error {
 	return c.cfg.Modem.Send(c.cfg.Owner, control.Fit(Disclose(text)))
 }
 
+// InformContext is Inform with a cancellable transport wait. It accepts only
+// broker-owned fixed wording, applies the same disclosure and size filters,
+// and refuses a modem without context support rather than invoking Send.
+// It does not provide complete multi-line digest delivery: Fit may truncate.
+func (c *Channel) InformContext(ctx context.Context, text string) error {
+	if ctx == nil {
+		return ErrContextSendRequired
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if c.cfg.Modem == nil {
+		return errors.New("owner: no modem")
+	}
+	sender, ok := c.cfg.Modem.(ContextSender)
+	if !ok {
+		return ErrContextSendUnsupported
+	}
+	return sender.SendContext(ctx, c.cfg.Owner, control.Fit(Disclose(text)))
+}
+
 // Run serves the modem until ctx is done. It first reports what a restart
 // dropped (Boot). STOP is applied as soon as it is read, ahead of anything
 // queued (stopNow). The channel's other decisions run in arrival order on

@@ -1,6 +1,7 @@
 package owner
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sort"
@@ -54,6 +55,27 @@ type watchedLine struct {
 
 func (w watchedLine) Send(to, text string) error {
 	err := w.Modem.Send(to, text)
+	if err != nil {
+		w.c.lineFailed.Store(w.c.cfg.Now().UnixNano())
+	}
+	return err
+}
+
+// ContextSender can cancel a local send wait. Cancellation does not establish
+// remote non-delivery; callers must inspect the transport's evidence.
+type ContextSender interface {
+	SendContext(context.Context, string, string) error
+}
+
+var ErrContextSendUnsupported = errors.New("owner: modem does not support context send")
+var ErrContextSendRequired = errors.New("owner: send context is required")
+
+func (w watchedLine) SendContext(ctx context.Context, to, text string) error {
+	sender, ok := w.Modem.(ContextSender)
+	if !ok {
+		return ErrContextSendUnsupported
+	}
+	err := sender.SendContext(ctx, to, text)
 	if err != nil {
 		w.c.lineFailed.Store(w.c.cfg.Now().UnixNano())
 	}
