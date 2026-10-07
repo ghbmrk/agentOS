@@ -14,10 +14,14 @@
 // kernel's clock unsynchronised, so nothing is copied into the hardware
 // clock. It never fails the boot. The image (P2-1) runs it as a oneshot
 // ordered Before=chronyd.service, After=local-fs.target.
+//
+// HOST-1b O1: the state path is opened once with O_NOFOLLOW; ownership and
+// mode are checked on that fd, and only that fd is read.
 package main
 
 import (
 	"flag"
+	"io"
 	"log"
 	"os"
 	"time"
@@ -34,6 +38,14 @@ type bootEnv struct {
 	now    func() time.Time
 	set    func(time.Time) error
 	logf   func(string, ...any)
+	// openState opens the state path; tests substitute a memory file.
+	openState func(path string) (file, error)
+}
+
+// file is the subset of *os.File used after a safe open.
+type file interface {
+	io.ReadCloser
+	Fd() uintptr
 }
 
 func main() {
@@ -48,8 +60,17 @@ func main() {
 			tv := unix.NsecToTimeval(t.UnixNano())
 			return unix.Settimeofday(&tv)
 		},
-		logf: log.Printf,
+		logf:      log.Printf,
+		openState: openStateNOFOLLOW,
 	}))
+}
+
+func openStateNOFOLLOW(path string) (file, error) {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), path), nil
 }
 
 func run(state string, e bootEnv) int {
@@ -58,12 +79,31 @@ func run(state string, e bootEnv) int {
 		e.logf("agentos-clock-boot: hardware clock unreadable, clock left as is: %v", err)
 		return 0
 	}
+	open := e.openState
+	if open == nil {
+		open = openStateNOFOLLOW
+	}
+	f, err := open(state)
+	if err != nil {
+		e.logf("agentos-clock-boot: no offset learned yet, clock left as the hardware clock set it")
+		return 0
+	}
+	defer f.Close()
 	var st unix.Stat_t
-	if err := unix.Stat(state, &st); err == nil && (st.Uid != e.owner || st.Mode&0o077 != 0) {
+	if err := unix.Fstat(int(f.Fd()), &st); err != nil {
+		e.logf("agentos-clock-boot: state file unreadable, clock left as is: %v", err)
+		return 0
+	}
+	if st.Uid != e.owner || st.Mode&0o077 != 0 {
 		e.logf("agentos-clock-boot: state file not owned by root with mode 0600, clock left as is")
 		return 0
 	}
-	est, ok := clock.BootEstimate(state, rtc, e.hostID())
+	b, err := io.ReadAll(f)
+	if err != nil {
+		e.logf("agentos-clock-boot: state file unreadable, clock left as is: %v", err)
+		return 0
+	}
+	est, ok := clock.BootEstimateBytes(b, rtc, e.hostID())
 	if !ok {
 		e.logf("agentos-clock-boot: no offset learned yet, clock left as the hardware clock set it")
 		return 0
