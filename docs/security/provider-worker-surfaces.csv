@@ -1,0 +1,12 @@
+surface,authority_required,observed_evidence,qualification_needed,status
+Bash or exec subprocess,workspace files only,S8 Claude parent environ leak,hide credential path and CLI proc and inherited descriptors across enforced UID PID mount boundary,blocked by demonstrated default leak
+Built-in Read Glob Grep,approved workspace only,S8 lists file tools but execution identity not established,prove managed deny policy and filesystem seam with direct indirect and encoded reads,not established
+Built-in Edit Write apply_patch,approved workspace only,tool presence differs per provider version,deny credentials and immutable config hooks binary paths plus symlink escape,not established
+Plugins MCP hooks,declared and fixed tools only,S8 Codex side traffic includes MCP plugin endpoints,disable unmanaged hooks plugins MCP and prove immutable policies,not established
+WebFetch WebSearch remote tools,no unauthorized disclosure,S8 provider-side tool names and side traffic,disable server-side fetch search remote sessions; tool network structurally absent,not established
+Parent proc ptrace memory fd,none,S8 same-user parent environ read succeeded,all tool paths denied process entries memory and login descriptors,not established
+Provider inference tunnel,declared inference endpoints only,S8 stubs and published endpoint observations,broker-resolved CONNECT SNI binding foreign Host refused no attacker key upload,live qualification required
+Credential login volume,CLI login only,SPEC CRED-5 W2,Writes limited schema fixed other config comes from immutable image; no snapshot or worker artifacts,not established
+Cross-job persistence,none outside approved artifacts,SPEC CRED-5 W2 W5,clean sign-in separate brief; cancel destroys job and clears handles; later job cannot load config memory hooks,not established
+Snapshot recall log result,no credentials,S8 synthetic probes and A14 controls,prove no credentials in stored or agent-readable output rather than scan-only argument,not established
+Quota refresh label,one permitted provider pool and label,S8 stubs only,real-account refresh and quota terms tests per pinned CLI version; advisory versus hard bounds explicit,live qualification required
