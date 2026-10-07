@@ -6,7 +6,6 @@ import (
 	"errors"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/ghbmrk/agentos/broker/owner"
 )
@@ -122,22 +121,6 @@ func (c BackupChoice) valid() error {
 		return ErrBadBackupChoice
 	}
 	return validName(c.Destination)
-}
-
-// validName checks a destination's form: 1 to 200 characters of letters,
-// digits, spaces and plain punctuation. No ':', '@', '?', '#', '%' or '\\',
-// so no URL, share path, user info or query can carry a sign-in, in any
-// spelling (L3 on #80).
-func validName(d string) error {
-	if d == "" || len(d) > 200 || strings.TrimSpace(d) != d {
-		return ErrBadBackupChoice
-	}
-	for _, r := range d {
-		if !(unicode.IsLetter(r) || unicode.IsDigit(r) || r == ' ' || strings.ContainsRune("-_.,()'/+&", r)) {
-			return ErrBadBackupChoice
-		}
-	}
-	return nil
 }
 
 // checkDestination is validName plus what the box knows of secrets: the
