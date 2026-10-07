@@ -217,3 +217,21 @@ is enabled. Caller-owned single-writer exclusion, bounded storage latency, priva
 encrypted storage, paired backups/rollback and independent broker threat review
 remain mandatory deployment work. These local tests do not qualify power loss,
 unobserved external verifier receipts or complete platform acceptance.
+
+## W5-D25 public recovery replies
+
+Transactional backend holds take precedence over ambiguous local code results.
+LocalSignIn and LocalAnswer expose fixed ErrDigestRecovery/ErrDigestFull classes,
+never wrapped owner-store errors. Mapping happens under the worker lock before
+returning public responses. Strong/texted code replies describe recovery or full
+backlog instead of recommending another attempt that cannot clear the hold.
+Legacy code errors and healthy-backend verifier failure classes retain behavior.
+
+A successful proof whose later durable sign-in notice save fails does not return
+a new local sign-in expiry; its already durably spent code is still spent. The
+held backend denies session authority. This response does not claim an already
+accepted approval/effect was rolled back: decisions still follow their existing
+contract. Recovery wording only describes current control availability. Tests cut
+before/after actual owner replacement at attempt, wrong-code and sign-in-notice
+writes, check later attempts invoke neither verifier nor writes, and preserve STOP.
+No default enablement, automatic recovery or independent qualification is asserted.

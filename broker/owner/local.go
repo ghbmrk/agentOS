@@ -259,6 +259,7 @@ func (c *Channel) LocalSignIn(code string) (until time.Time, err error) {
 	c.mu.Lock()
 	ok, err := c.takeLocalLocked(now)
 	if err != nil || !ok {
+		err = c.publicCodeError(err)
 		c.mu.Unlock()
 		if err == nil {
 			err = ErrTooMany
@@ -297,6 +298,7 @@ func (c *Channel) LocalSignIn(code string) (until time.Time, err error) {
 	case err == nil && !proof:
 		alerts = append(alerts, c.wrongLocalLocked(now)...)
 	}
+	err = c.publicCodeError(err)
 	c.mu.Unlock()
 	for _, a := range alerts {
 		c.alert(a)
@@ -516,6 +518,7 @@ func (c *Channel) LocalAnswer(id, sum string, approve bool, code string) (string
 	if approve {
 		ok, err := c.takeLocalLocked(now)
 		if err != nil || !ok {
+			err = c.publicCodeError(err)
 			c.mu.Unlock()
 			c.decide(decided)
 			if err == nil {
@@ -603,6 +606,10 @@ func (c *Channel) LocalAnswer(id, sum string, approve bool, code string) (string
 			c.local.evictedAns += evicted
 		}
 		text, ns, na = c.signInTextLocked(now)
+	}
+	err = c.publicCodeError(err)
+	if err == ErrDigestRecovery || err == ErrDigestFull {
+		msg = c.codeErr(err)
 	}
 	c.mu.Unlock()
 	c.decide(decided)

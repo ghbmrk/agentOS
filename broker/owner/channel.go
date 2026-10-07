@@ -864,7 +864,28 @@ const stateErr = "Could not save the code check, so it did not count. Try again.
 // codeErr is the reply when a code could not be checked or saved. Each
 // vault-process failure gets its own fixed wording, since retrying helps
 // only in some of them (CH-18).
+// publicCodeError is called under c.mu before a local response leaves the worker.
+// A latched backend hold takes precedence over an ambiguous code result.
+func (c *Channel) publicCodeError(err error) error {
+	if c.codes.outboxBlocked == nil {
+		return err
+	}
+	if errors.Is(c.codes.outboxBlocked, ErrDigestFull) {
+		return ErrDigestFull
+	}
+	return ErrDigestRecovery
+}
+
+const ownerBacklogStatus = "Owner digest backlog is full. Code checks and resume are paused. STOP is still available."
+
 func (c *Channel) codeErr(err error) string {
+	if c.codes.outboxBlocked != nil {
+		if errors.Is(c.codes.outboxBlocked, ErrDigestFull) {
+			return ownerBacklogStatus
+		}
+		return ownerRecoveryStatus
+	}
+
 	var ve *VerifyError
 	if !errors.As(err, &ve) {
 		return stateErr
@@ -983,8 +1004,8 @@ func (c *Channel) checkLocked(texted, got string, now time.Time) (ok, locked boo
 }
 
 func (c *Channel) checkOriginLocked(texted, got string, now time.Time, local bool) (ok, locked bool, msg string) {
-	if c.codes.backendReady() != nil {
-		return false, false, stateErr
+	if err := c.codes.backendReady(); err != nil {
+		return false, false, c.codeErr(err)
 	}
 	if texted == "" || c.codes.st.LowLocked {
 		res, locked, err := c.codes.checkStrong(got, now, strongOpts{unlock: c.cfg.UnlockFor, count: true, local: local})
@@ -999,7 +1020,7 @@ func (c *Channel) checkOriginLocked(texted, got string, now time.Time, local boo
 	}
 	locked, err := c.codes.wrongOrigin(now, local)
 	if err != nil {
-		return false, locked, stateErr
+		return false, locked, c.codeErr(err)
 	}
 	return false, locked, ""
 }
