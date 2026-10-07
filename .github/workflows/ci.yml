@@ -43,6 +43,10 @@ jobs:
           git diff --quiet HEAD^1...HEAD^2 -- TRACE.md && exit 0
           echo '::error file=TRACE.md::PRs must not change TRACE.md; trace.yml regenerates it on main after merge. Restore it with: git checkout $(git merge-base origin/main HEAD) -- TRACE.md'
           exit 1
+      - name: Trace table matches REQ markers
+        if: github.event_name == 'pull_request'
+        # Same parents as the TRACE.md guard: HEAD^1 is the base, HEAD^2 the branch.
+        run: python tools/preflight.py --event "$GITHUB_EVENT_PATH" --diff-base HEAD^1 --diff-head HEAD^2
   broker:
     runs-on: ubuntu-latest
     defaults:

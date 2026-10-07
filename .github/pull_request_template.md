@@ -7,6 +7,7 @@ Before:
 After:
 
 ## Trace
+<!-- Each ID must be a SPEC.md requirement. It needs a REQ marker in a file this PR changes, unless TRACE.md on main already covers it. An empty table is fine for tooling and docs. -->
 | Requirement ID | Test | Result |
 |---|---|---|
 |  |  |  |
