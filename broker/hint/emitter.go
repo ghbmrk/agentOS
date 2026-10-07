@@ -383,6 +383,9 @@ func (e *Emitter) Emit(h Hint) (Result, error) {
 		rec.Outcome = o
 		return Result{Outcome: o}, e.record(rec)
 	}
+	if holdAdapterGapPC1(h) {
+		return out(Withheld)
+	}
 	mode := e.cfg.Policy[k.Category]
 	switch {
 	case mode == Never:
