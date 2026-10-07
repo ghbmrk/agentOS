@@ -199,9 +199,12 @@ func (s *Source) ready(ctx context.Context) error {
 	}
 	return nil
 }
-func (s *Source) clock() (time.Time, string, error) {
+func (s *Source) clock(ctx context.Context) (time.Time, string, error) {
 	t, err := s.cfg.Clock()
-	if err != nil || t.Year() < 1 || t.Year() > 9999 || t.UTC().Year() < 1 || t.UTC().Year() > 9999 {
+	if err := ctx.Err(); err != nil {
+		return time.Time{}, "", err
+	}
+	if err != nil || t.IsZero() || t.Year() < 1 || t.Year() > 9999 || t.UTC().Year() < 1 || t.UTC().Year() > 9999 {
 		return time.Time{}, "", ErrClock
 	}
 	local := t.In(s.zone)
@@ -224,7 +227,7 @@ func (s *Source) Plan(ctx context.Context) error {
 	if err := s.ready(ctx); err != nil {
 		return err
 	}
-	local, day, err := s.clock()
+	local, day, err := s.clock(ctx)
 	if err != nil {
 		return err
 	}
@@ -258,7 +261,7 @@ func (s *Source) Peek(ctx context.Context) (*digestqueue.Snapshot, error) {
 	if err := s.ready(ctx); err != nil {
 		return nil, err
 	}
-	_, day, err := s.clock()
+	_, day, err := s.clock(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -310,7 +313,7 @@ func (s *Source) Validate(ctx context.Context, snap digestqueue.Snapshot) error 
 	if err != nil || r.Generation > s.st.Seq {
 		return ErrInvalid
 	}
-	_, day, err := s.clock()
+	_, day, err := s.clock(ctx)
 	if err != nil {
 		return err
 	}

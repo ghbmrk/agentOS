@@ -53,3 +53,13 @@ clock/quiet-hours/STOP/shared pacing and resource checks, the containment contro
 transport classification, privacy/retention/forget rules, encrypted storage and
 single-writer ownership remain composition gates. Strongest independent broker/
 security threat review is required; no deployment or complete CH-15 claim is made.
+
+## W5-D31 clock observation boundaries
+
+A zero/uninitialized time observation refuses even when the provider returned no
+error; it cannot manufacture an alive receipt at the zero-time epoch. Plan, Peek
+and Validate recheck context after the trusted Clock callback, before staging or
+publishing eligibility. Cancellation during that callback therefore preserves
+stored bytes and cannot produce a newly admitted heartbeat or successful validation.
+Clock callbacks still require bounded latency: cancellation does not interrupt a
+provider that never returns, or an already-entered synchronous Store.Save.
