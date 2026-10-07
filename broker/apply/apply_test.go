@@ -3,6 +3,7 @@ package apply
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -287,6 +288,26 @@ func TestInstallFailureStagesNothingAndRetries(t *testing.T) {
 	r.act.installErr = nil
 	if ok, err := r.a.Tick(ctx); !ok || err != nil {
 		t.Fatalf("retry: %v %v", ok, err)
+	}
+}
+
+// A failed install's error can name a host path. The journal evidence must not.
+func TestAFailedInstallRecordsNoHostPath(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	r.must(r.a.Schedule(r.release(1, true), "a1"))
+	canary := "/var/lib/agentos/slots/b"
+	r.act.installErr = errors.New("write " + canary + ": permission denied")
+	if ok, _ := r.a.Tick(ctx); ok {
+		t.Fatal("installed")
+	}
+	its := r.intents()
+	if len(its) != 1 || len(its[0].Attempts) == 0 {
+		t.Fatalf("intents %+v", its)
+	}
+	ev := its[0].Attempts[len(its[0].Attempts)-1].Evidence
+	if strings.Contains(ev, canary) || strings.Contains(ev, "/var/") {
+		t.Fatalf("evidence %q", ev)
 	}
 }
 

@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"sync"
@@ -494,7 +495,7 @@ func (a *Applier) Execute(ctx context.Context, in journal.Intent, _ int) journal
 	}
 	if err != nil {
 		a.mu.Unlock()
-		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "rollback point not saved: " + err.Error()}
+		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "rollback point not saved: " + noted(err)}
 	}
 	a.executing = true
 	a.mu.Unlock()
@@ -512,7 +513,7 @@ func (a *Applier) Execute(ctx context.Context, in journal.Intent, _ int) journal
 		_ = a.cfg.Store.DropStaged()
 		a.st.Applying = nil
 		_ = a.saveLocked()
-		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: err.Error()}
+		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: noted(err)}
 	}
 	a.st.Applying.Installed = true
 	if a.st.Pending == p {
@@ -525,6 +526,17 @@ func (a *Applier) Execute(ctx context.Context, in journal.Intent, _ int) journal
 		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "state not saved"}
 	}
 	return journal.Outcome{Result: journal.ResultSucceeded}
+}
+
+// noted is err's text for the journal. A path stays in the log, not the
+// evidence, because a later owner text can be built from the evidence.
+func noted(err error) string {
+	msg := err.Error()
+	if strings.Contains(msg, "/") || strings.Contains(msg, `\`) {
+		log.Printf("apply: %v", err)
+		return "not applied"
+	}
+	return msg
 }
 
 // pointLocked is the rollback point for handing rel over now.
