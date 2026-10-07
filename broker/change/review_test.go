@@ -193,6 +193,32 @@ func TestFailStop(t *testing.T) {
 	}
 }
 
+type pathTarget struct{}
+
+func (pathTarget) Current() (Tree, error) { return nil, nil }
+func (pathTarget) Apply(Tree) error {
+	return errors.New("open /var/lib/agentos/skills: permission denied")
+}
+
+// An activation failure can name a host path. The journal evidence does not.
+func TestActivationErrorNamesNoHostPath(t *testing.T) {
+	e := newEnv(t, func(c *Config) {
+		c.Targets = map[string]Target{"skills": pathTarget{}}
+	})
+	e.p.mu.Lock()
+	e.p.props["cX"] = &proposal{
+		base:   e.p.st.Active.Hash(),
+		next:   e.p.st.Active.clone(),
+		edits:  []Edit{{Path: "skills/greet"}},
+		report: Report{Basis: BasisStanding},
+	}
+	e.p.mu.Unlock()
+	o := e.p.Execute(bg, journal.Intent{ID: "chg:cX:adopt", Action: ActionAdopt, GrantRef: BasisStanding}, 1)
+	if o.Result != journal.ResultNotApplied || o.Evidence != "not applied" || strings.Contains(o.Evidence, "/var/") {
+		t.Fatal(o)
+	}
+}
+
 type flakyStore struct {
 	*MemStore
 	failSave, failLoad bool

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/ghbmrk/agentos/broker/journal"
 )
@@ -162,7 +163,14 @@ func (p *Pipeline) Execute(_ context.Context, in journal.Intent, _ int) journal.
 		err = errors.New("unknown change action")
 	}
 	if err != nil {
-		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: err.Error()}
+		ev := err.Error()
+		if strings.Contains(ev, "/") || strings.Contains(ev, `\`) {
+			if p.cfg.Logf != nil {
+				p.cfg.Logf("change: %s not applied: %v", in.ID, err)
+			}
+			ev = "not applied"
+		}
+		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: ev}
 	}
 	p.st.Applied[in.ID] = true
 	if err := p.saveLocked(); err != nil {
