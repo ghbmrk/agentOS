@@ -24,14 +24,15 @@ import sys
 # or sign and apply updates. Keep in step with docs/OPERATING.md §3.
 TIER_A_BROKER = {
     "apply", "attest", "bridgeclient", "bridgeproto", "card", "cgroup", "change",
-    "cleanroom", "clock", "control", "egress", "grants", "guest", "hint",
+    "cleanroom", "clock", "cmd", "control", "daemon", "egress", "grants", "guest", "hint",
     "hostchange", "hostdisk", "journal", "localapi", "localsrv", "localui",
-    "modelroute", "modem", "modemlink", "owner", "pubid", "recovery", "replay",
+    "mail", "modelroute", "modem", "modemlink", "owner", "pubid", "recovery", "replay",
     "reversible", "sendrules", "sipsign", "smsapi", "sockets", "tpmseal",
     "update", "vault", "vendor", "verb", "vm", "workers",
 }
 TIER_A_FILES = {"broker/go.mod", "broker/go.sum"}
-TIER_A_PREFIXES = ("assurance/", "tools/canary", "tools/depaudit")
+# risk_tier itself is A: CI runs the PR's own copy, so an edit to it decides its own tier.
+TIER_A_PREFIXES = ("assurance/", "tools/canary", "tools/depaudit", "tools/risk_tier")
 TIER_B_FILES = {"SPEC.md"}
 TIER_B_PREFIXES = ("broker/", "guest/")
 
