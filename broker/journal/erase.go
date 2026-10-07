@@ -12,6 +12,10 @@ import (
 // in memory and on disk. What stays is the audit trail OP-5 needs: who
 // asked, the account, action, recipients, executor, decisions and results.
 //
+// Decision reasons (Permission.Reason) other than ErasedReason and quality
+// notes go too, since either may quote the parameters; a quality note
+// recorded after the erase is not kept (#59 L3).
+//
 // Only a finished intent is erased. One still pending is denied first, and
 // one authorized but not yet run fails its recheck first, so nothing runs
 // on erased parameters. One in flight or with an unknown outcome is
@@ -19,6 +23,11 @@ import (
 
 // ErasedReason is the decision recorded on an intent stopped by an erase.
 const ErasedReason = "a source it was built from was deleted"
+
+// ErasedDetail replaces an erased intent's decision reason: a policy's
+// error text may quote the intent's parameters (#59 L3). The decision and
+// its phase stay.
+const ErasedDetail = "[erased]"
 
 // Since lists the intents submitted with origin at or after since, oldest
 // first.
@@ -95,10 +104,36 @@ func carries(r Record) bool {
 	switch r.Type {
 	case RecSubmitted:
 		return r.Intent != nil && (r.Intent.Params != nil || r.Intent.Preconditions != nil)
-	case RecObserved, RecCancel:
+	case RecObserved, RecCancel, RecQuality:
 		return r.Evidence != ""
+	case RecDenied, RecRecheckFailed:
+		return keepsReason(r.Reason)
 	}
 	return false
+}
+
+// keepsReason reports whether a decision reason on an erased intent is
+// content to remove: anything but the erase's own fixed wording.
+func keepsReason(reason string) bool {
+	return reason != "" && reason != ErasedReason && reason != ErasedDetail
+}
+
+// scrub returns r with the content of an erased intent removed.
+func scrub(r Record) Record {
+	if r.Intent != nil {
+		in := *r.Intent
+		in.Params, in.Preconditions = nil, nil
+		r.Intent = &in
+	}
+	switch r.Type {
+	case RecObserved, RecCancel, RecQuality:
+		r.Evidence = ""
+	case RecDenied, RecRecheckFailed:
+		if keepsReason(r.Reason) {
+			r.Reason = ErasedDetail
+		}
+	}
+	return r
 }
 
 // rewriteErased rewrites the journal with erased intents' content removed
@@ -110,14 +145,7 @@ func (e *Engine) rewriteErased() error {
 	recs := make([]Record, len(e.records))
 	for i, r := range e.records {
 		if en := e.intents[r.ID]; en != nil && en.erased && carries(r) {
-			if r.Intent != nil {
-				in := *r.Intent
-				in.Params, in.Preconditions = nil, nil
-				r.Intent = &in
-			}
-			if r.Type == RecObserved || r.Type == RecCancel {
-				r.Evidence = ""
-			}
+			r = scrub(r)
 		}
 		line, err := encodeRecord(r)
 		if err != nil {

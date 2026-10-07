@@ -557,6 +557,9 @@ func (e *Engine) RecordQuality(id string, q Quality) (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
+	if en.erased {
+		q.Note = "" // the note may quote what the erase removed (#59 L3)
+	}
 	if err := e.commit(Record{Type: RecQuality, ID: id, Verdict: q.Verdict, Source: q.Source, Evidence: q.Note}); err != nil {
 		return Status{}, err
 	}
@@ -813,9 +816,16 @@ func (e *Engine) apply(r Record) {
 		a.Cancels = append(a.Cancels, Cancel{Accepted: r.Accepted, Detail: r.Evidence})
 	case RecQuality:
 		en.quality = Quality{Verdict: r.Verdict, Source: r.Source, Note: r.Evidence}
+		if en.erased {
+			en.quality.Note = ""
+		}
 	case RecErased:
 		en.erased = true
 		en.intent.Params, en.intent.Preconditions = nil, nil
+		en.quality.Note = ""
+		if keepsReason(en.permission.Reason) {
+			en.permission.Reason = ErasedDetail
+		}
 		for i := range en.attempts {
 			en.attempts[i].Evidence = ""
 			for j := range en.attempts[i].Cancels {
