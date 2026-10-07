@@ -36,7 +36,7 @@ type Command struct {
 
 // Parse applies CH-11: a control word counts only when it, with its
 // arguments, is the whole message, ignoring case and punctuation. Anything
-else is task chat and keeps its original text.
+// else is task chat and keeps its original text.
 func Parse(msg string) Command {
 	f := words(msg)
 	if len(f) > 0 {
