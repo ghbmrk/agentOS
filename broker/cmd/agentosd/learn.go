@@ -60,6 +60,9 @@ type learning struct {
 	running sync.WaitGroup
 	contain loop2Contain
 	notify  loop2Notify
+	// ids lends the change pipeline the owner channel's IDs once the
+	// daemon attaches (W5, change C11).
+	ids lateShortIDs
 	// forgetOwner is the owner's FORGET (W3-forget, forget.go).
 	forgetOwner *ownerForget
 	// values are the guest's task values, for the compiler only
@@ -136,10 +139,14 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		Evaluator: &l.eval,
 		Targets:   targets,
 		ResumeFor: p.ResumeFor,
+		ShortID:   l.ids.ShortID,
 		Logf:      log.Printf,
 	}); err != nil {
 		return nil, err
 	}
+	// The owner channel's requests skip every ID an adoption still
+	// answers to; the pipeline takes its IDs from the channel (C11).
+	cfg.OwnerReserved = l.pipe.ShortInUse
 	var router change.Router
 	if sync != nil {
 		sync.doneRestoring()
@@ -443,6 +450,7 @@ func (l *learning) attach(ctx context.Context, d *daemon.Daemon) {
 		}
 	}
 	l.notify.ch.Store(d.Owner())
+	l.ids.ch.Store(d.Owner())
 	l.eng.Store(eng)
 	l.adm.Store(d.Admission())
 	if l.routing != nil {
