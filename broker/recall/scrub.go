@@ -37,6 +37,14 @@ var (
 	nonSecretID = regexp.MustCompile(`^1Z[0-9A-Z]{16}$`)
 	// Grouped codes such as XXXXX-XXXXX-XXXXX (recovery and backup codes).
 	groupedCode = regexp.MustCompile(`\b[A-Za-z0-9]{4,8}(?:-[A-Za-z0-9]{4,8}){2,}\b`)
+	// Shapes a page or a tool result can carry that are credentials even
+	// when they are not high-entropy (CRED-10; the S5 spike's token list).
+	knownTokens = regexp.MustCompile(`` +
+		`eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}` +
+		`|\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{20,}` +
+		`|\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}` +
+		`|\bAKIA[0-9A-Z]{16}\b` +
+		`|\bxox[abprs]-[A-Za-z0-9-]{10,}`)
 )
 
 // tokenParam reports whether a URL query key names a credential (REV-5's
@@ -64,6 +72,7 @@ func (sc *Scrubber) Scrub(s string) string {
 	s = authHeader.ReplaceAllString(s, "${1} "+Removed)
 	s = authScheme.ReplaceAllString(s, "${1} "+Removed)
 	s = secretKV.ReplaceAllString(s, "${1}"+Removed)
+	s = knownTokens.ReplaceAllString(s, Removed)
 	s = urlRe.ReplaceAllStringFunc(s, scrubURL)
 	s = groupedCode.ReplaceAllStringFunc(s, func(m string) string {
 		if hasDigit(m) && hasLetter(m) {
