@@ -183,3 +183,37 @@ verify text and local STOP bypass that lock. Synchronous stores still need bound
 latency. Constructor selection, startup recovery control availability, exclusive
 writer ownership, paired backup/downgrade and complete independent threat review
 remain prerequisites; this is not runtime or acceptance qualification.
+
+## W5-D24 explicit channel constructor and startup recovery
+
+NewTransactional(cfg, source) explicitly composes the coordinator and delegated
+handlers. No daemon or legacy New caller selects it. Anonymous cfg.DigestNotes is
+mutually exclusive and refused before claiming the source. Every state write goes
+through the coordinator; the code backend has no independent Store writer. Valid
+paired reopen preserves wrong counters, local bounds, replay state and source floor.
+Legacy New continues refusing an outbox-bearing Store rather than downgrading it.
+
+Invalid composition/configuration returns nil/error. **Storage, source or pairing
+failure returns a recovery-only Channel with nil error**, so callers retain STOP
+service. OwnerStateHealth must be checked before admitting normal work; it exposes
+only fixed ErrDigestRecovery/ErrDigestFull classes. This deliberately differs from
+ordinary constructor failure. No failed opening's authority view is loaded into
+live codes; all writes, verifier calls, session unlock and local RESUME refuse.
+Boot has no restart/reissue report in this held mode and cannot resurrect work.
+The engine is not claimed stopped or automatically changed by construction.
+
+The already checked owner number can ask STATUS for fixed recovery diagnostics
+while held. This exposes no normal session-protected status, internal store errors,
+paths or retained requests; strangers remain ignored. Text/local STOP still work.
+Normal STATUS's session-proof behavior remains unchanged outside recovery. Source
+outages after healthy startup retain entries and do not themselves change valid
+code authority while capacity remains. A fresh healthy verified composition is
+required to clear a hold; draining a bound backlog may proceed without clearing it.
+
+Actual file replacement tests cover before/after uncertain opening saves, file
+reopen, unread owner State, wrong source binding and source outage with retained
+notes. No automatic reset, migration, default path, maintenance loop or delivery
+is enabled. Caller-owned single-writer exclusion, bounded storage latency, private
+encrypted storage, paired backups/rollback and independent broker threat review
+remain mandatory deployment work. These local tests do not qualify power loss,
+unobserved external verifier receipts or complete platform acceptance.

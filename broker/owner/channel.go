@@ -213,7 +213,26 @@ type heldMsg struct {
 var ErrDigestComposition = errors.New("owner: digest outbox requires its reviewed handler integration")
 
 // New returns a Channel, loading its durable state.
-func New(cfg Config) (*Channel, error) {
+func New(cfg Config) (*Channel, error) { return newChannel(cfg, nil) }
+
+// NewTransactional explicitly selects the durable owner-note coordinator.
+// Configuration errors return nil/error. Storage or pairing failures return a
+// usable recovery-only channel with nil error: STOP and fixed recovery STATUS
+// remain available, while code/session authority and writes are held. Inspect
+// OwnerStateHealth before admitting normal work. Recovery requires fresh objects.
+// The caller owns exclusive access to Store/Source and bounded storage latency.
+// No daemon, maintenance worker or sender is started.
+func NewTransactional(cfg Config, source *digestnotes.Source) (*Channel, error) {
+	if source == nil {
+		return nil, ErrDigestInvalid
+	}
+	if cfg.DigestNotes != nil {
+		return nil, ErrDigestComposition
+	}
+	return newChannel(cfg, source)
+}
+
+func newChannel(cfg Config, source *digestnotes.Source) (*Channel, error) {
 	if cfg.Owner == "" || cfg.Engine == nil || cfg.Store == nil {
 		return nil, errors.New("owner: owner number, engine and store are required")
 	}
@@ -241,19 +260,47 @@ func New(cfg Config) (*Channel, error) {
 	if cfg.DigestNotes != nil && cfg.DigestNotes.UsesOrderedProducer() {
 		return nil, ErrDigestComposition
 	}
-	st, err := cfg.Store.Load()
-	if err != nil {
-		return nil, err
-	}
-	if st.DigestOutbox != nil {
-		return nil, ErrDigestComposition
+	var st State
+	var out *DigestOutbox
+	var recovery bool
+	if source == nil {
+		var err error
+		st, err = cfg.Store.Load()
+		if err != nil {
+			return nil, err
+		}
+		if st.DigestOutbox != nil {
+			return nil, ErrDigestComposition
+		}
+	} else {
+		var err error
+		out, err = NewDigestOutbox(DigestOutboxConfig{Store: cfg.Store, Source: source})
+		if err == nil {
+			st, err = out.State()
+		}
+		if err != nil {
+			// Do not invent, downgrade, overwrite or grant from an unconfirmed view.
+			// Only the control address/engine and fixed diagnostics are needed to STOP.
+			out, recovery = nil, true
+		}
 	}
 	c := &Channel{
 		cfg:    cfg,
-		codes:  codes{sec: cfg.Secrets, verify: cfg.Verifier, st: st, store: cfg.Store, rand: cfg.Rand},
+		codes:  codes{sec: cfg.Secrets, verify: cfg.Verifier, rand: cfg.Rand},
 		open:   map[string]*request{},
 		queued: map[string]*Queued{}, released: map[string]time.Time{}, lateUndo: map[string]bool{},
-		boot: &bootReport{pending: st.Pending, queued: st.Queued},
+	}
+	if out != nil {
+		if err := c.codes.bindDigestOutbox(out); err != nil {
+			return nil, err
+		}
+	} else if recovery {
+		c.codes.outboxBlocked = ErrDigestRecovery
+	} else {
+		c.codes.st, c.codes.store = st, cfg.Store
+	}
+	if !recovery {
+		c.boot = &bootReport{pending: st.Pending, queued: st.Queued}
 	}
 	if cfg.Modem != nil {
 		c.cfg.Modem = watchedLine{Modem: cfg.Modem, c: c}
@@ -437,6 +484,11 @@ func (c *Channel) limit(out []string, now time.Time) []string {
 // routeLocked answers the channel's own words and decides what reaches the
 // control handler.
 func (c *Channel) routeLocked(text string, now time.Time, decided *[]Decision) route {
+	// Ordinary STATUS still needs its normal session proof. During recovery,
+	// expose only fixed control diagnostics to the already checked owner number.
+	if c.codes.outboxBlocked != nil && control.Parse(text).Word == control.WordStatus {
+		return route{replies: []string{ownerRecoveryStatus}}
+	}
 	if c.codes.st.Challenged {
 		if rt, ok := c.challengeLocked(text, now); ok {
 			return rt
@@ -721,7 +773,7 @@ func (c *Channel) TakeDigestNotes() []string {
 	// Never fall back to destructive ephemeral reads when that source fails.
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.codes.outbox != nil || c.cfg.DigestNotes != nil {
+	if c.codes.outbox != nil || c.codes.outboxBlocked != nil || c.cfg.DigestNotes != nil {
 		return nil
 	}
 	var out []string
@@ -760,9 +812,29 @@ func (c *Channel) recordDigestNoteLocked(event digestnotes.Event) {
 
 // OwnerDigestStatus reports notification-source recovery separately from
 // owner authority. It is fixed broker wording, not the store error text.
+// OwnerStateHealth reports fixed authority-backend error classes. A notification
+// source outage alone is separate and reported by OwnerDigestStatus.
+func (c *Channel) OwnerStateHealth() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	err := c.codes.backendReady()
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, ErrDigestFull) {
+		return ErrDigestFull
+	}
+	return ErrDigestRecovery
+}
+
+const ownerRecoveryStatus = "Owner state needs recovery. Code checks and resume are paused. STOP is still available."
+
 func (c *Channel) OwnerDigestStatus() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.codes.outboxBlocked != nil {
+		return ownerRecoveryStatus
+	}
 	if c.codes.outbox != nil && (c.noteCaptureFailed.Load() || c.codes.outboxBlocked != nil || c.codes.outbox.Health() != nil) {
 		return "Owner digest notes paused: storage needs recovery. STOP is still available."
 	}
@@ -779,6 +851,9 @@ func (c *Channel) FlushDigestNotes(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.codes.outbox == nil {
+		if c.codes.outboxBlocked != nil {
+			return ErrDigestRecovery
+		}
 		return ErrDigestComposition
 	}
 	return c.codes.outbox.Flush(ctx)
