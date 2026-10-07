@@ -19,22 +19,21 @@ const idLetters = "ABCDEFGHJKLMNPQRSTUVWXYZ"
 // shortLocked allocates an owner-facing ID not used by an active adoption
 // or by any of the last 200 adoptions.
 func (p *Pipeline) shortLocked() (string, error) {
-	recent := map[string]bool{}
-	for i, a := range p.st.Adoptions {
-		if a.Reverted == "" || i >= len(p.st.Adoptions)-200 {
-			recent[a.Short] = true
-		}
-	}
+	recent := p.recentShortsLocked()
 	taken := func(id string) bool { return recent[id] }
 	if p.cfg.ShortID != nil {
 		id, err := p.cfg.ShortID(taken)
 		if err != nil {
 			return "", err
 		}
-		if taken(id) || !shortOK(id) {
-			return "", fmt.Errorf("change: owner ID %q is in use or malformed", id)
+		if id != "" {
+			if taken(id) || !shortOK(id) {
+				return "", fmt.Errorf("change: owner ID %q is in use or malformed", id)
+			}
+			return id, nil
 		}
-		return id, nil
+		// "": the allocator has nothing to give yet (the owner channel
+		// is not up); the pipeline's own sequence stands in.
 	}
 	n := len(idLetters) * 98
 	for i := 0; i < n; i++ {
@@ -45,6 +44,35 @@ func (p *Pipeline) shortLocked() (string, error) {
 		}
 	}
 	return "", fmt.Errorf("change: no free owner ID")
+}
+
+// recentShortsLocked is every owner-facing ID the pipeline still answers
+// to: active adoptions and the last 200. Caller holds mu.
+func (p *Pipeline) recentShortsLocked() map[string]bool {
+	recent := map[string]bool{}
+	for i, a := range p.st.Adoptions {
+		if a.Reverted == "" || i >= len(p.st.Adoptions)-200 {
+			recent[a.Short] = true
+		}
+	}
+	return recent
+}
+
+// refreshShortsLocked publishes recentShortsLocked for ShortInUse. Caller
+// holds mu.
+func (p *Pipeline) refreshShortsLocked() {
+	m := p.recentShortsLocked()
+	p.shorts.Store(&m)
+}
+
+// ShortInUse reports whether the pipeline still answers to owner-facing ID
+// id (an UNDO or MORE in a digest line). It takes no lock, so the owner
+// channel may call it while allocating its own request IDs under its lock
+// (Config.ShortID runs the other way, under the pipeline's lock), and its
+// requests never take an ID an adoption uses (C11).
+func (p *Pipeline) ShortInUse(id string) bool {
+	m := p.shorts.Load()
+	return id != "" && m != nil && (*m)[id]
 }
 
 func shortOK(id string) bool {
