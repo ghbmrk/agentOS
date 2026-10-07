@@ -44,3 +44,21 @@ entire scope. Trusted source invalidation, shared pacing reservations and actual
 transport cancellation must all compose through it before daemon activation.
 Independent strongest broker/security threat review and actual carrier/resource
 qualification remain required. No default configuration, timer or sender is wired.
+
+## W5-D28 actual owner/bridge and file-persistence composition
+
+The fixture captures a real LocalSignIn wrong-code event through the transactional
+owner channel, flushes it to the typed owner-note source, and admits/acknowledges
+it through the real adapter/collector. The same source, three actual FileStores,
+controller-wrapped Engine, transactional channel and bridge handlers then dispatch
+that exact private receipt's public lines. No source receipt is texted.
+
+Text and local STOP both finish while queue Begin persistence is blocked, cancel
+the scope and prevent an owner/bridge call. After actual bridge handoff, both STOP
+paths persist Unknown across independent queue reopen; a late successful bridge
+receipt becomes stray and cannot settle/retry that batch. Another cut blocks the
+actual finish save after affirmative bridge acceptance: owner STOP remains prompt,
+invalidation times out without running, and a later quiescent callback observes
+the completed durable state. An affirmative receipt is not retroactively revoked
+by STOP or recast as owner visibility. These tests use local handlers only, not a
+carrier, power loss, delivery qualification or complete forget/authority policy.
