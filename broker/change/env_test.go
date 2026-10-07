@@ -1,6 +1,7 @@
 package change
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -122,6 +123,9 @@ func newEnv(t *testing.T, mod func(*Config)) *env {
 	t.Helper()
 	e := &env{t: t, store: &MemStore{}, ev: &evaluator{ran: map[string]bool{}, tasks: map[string]bool{}}}
 	cfg := Config{
+		// Synthetic entropy only for repeatable fixture splits. Production New
+		// still defaults to crypto/rand; mod can override this reader.
+		Rand:        bytes.NewReader(bytes.Repeat([]byte{0}, 32)),
 		Store:       e.store,
 		Evaluator:   e.ev,
 		Initial:     Tree{"skills/greet": []byte("hi"), "procedures/file": []byte("v1")},
