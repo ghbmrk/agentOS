@@ -31,3 +31,27 @@ Counts/timestamps remain private. Only a reviewed guarded sender may consume lin
 under STOP, quiet hours, shared pacing, priority, resources and complete disclosure
 checks. Source/queue acknowledgments never imply owner/carrier visibility or
 acceptance. Strongest independent broker/security review and threat check required.
+
+## W5-D26 transactional producer recovery composition
+
+The new fixture uses public owner.NewTransactional and actual LocalSignIn wrong
+checks, the real typed adapter/collector, and three independent owner/source/queue
+FileStores. It verifies both sides of owner retirement replacement after the
+source event has already been admitted and consumed by the collector. Reopening
+all objects and replaying the producer floor must not resurrect consumed counts,
+change the exact queued receipt or erase later code-attempt authority/events.
+
+A second before/after replacement matrix cuts the queue acknowledgment bitmap
+after source Ack. A later real owner check is flushed through the reconstructed
+producer before collector recovery. Replaying the old source acknowledgment must
+preserve that later generation for its own exact batch. Assertions distinguish
+source ingestion sequence, source snapshot generation, owner retirement floor and
+queue bitmap; no one cursor substitutes for the others.
+
+This is composition verification, not new production behavior: the older anonymous
+constructor still has its documented two-store capture gap. Every tested batch
+remains Ready with zero attempts and no transport evidence. No modem, sender,
+daemon defaults, acceptance/visibility inference or hardware qualification runs.
+These are caller-error cuts around actual file replacements, not physical power
+loss. Private storage, writer exclusion, retention/forget, latency and complete
+independent broker/security threat review remain deployment prerequisites.
