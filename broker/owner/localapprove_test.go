@@ -132,6 +132,44 @@ func TestThePageDeniesAndListsEveryOpenRequest(t *testing.T) {
 	}
 }
 
+// L3 SHOULD on #178: the page can already have said "Approved" by the time
+// the gate refuses, because the item changed since the page showed it.
+// The owner is told it did not run, and a fresh sum still can.
+func TestAChangedPageApprovalIsToldAndDoesNotRun(t *testing.T) {
+	r := newRig(t, nil)
+	textID, _ := r.ch.Request([]Item{lowItem("t1"), highItem("t2")}, 0)
+	r.inbox()
+	shown := r.sum(textID)
+	if got := r.say("NO " + textID + " 2"); !strings.Contains(got, "Denied") {
+		t.Fatalf("deny item 2: %q", got)
+	}
+	if _, err := r.ch.LocalAnswer(textID, shown, true, r.totp()); err != ErrChanged {
+		t.Fatalf("stale approve: %v", err)
+	}
+	if d := r.decisions(); len(d) != 1 || d[0].Approved {
+		t.Fatalf("ran anyway: %+v", d)
+	}
+	told := false
+	for _, a := range r.ch.codes.st.LocalAnswers {
+		if strings.Contains(a.Text, textID+" not approved: it changed since this page showed it") {
+			told = true
+		}
+	}
+	select {
+	case m := <-r.phone.Inbox():
+		if strings.Contains(m.Text, "not approved: it changed") {
+			told = true
+		}
+	default:
+	}
+	if !told {
+		t.Fatal("owner was not told the approval did not run")
+	}
+	if msg, err := r.ch.LocalAnswer(textID, r.sum(textID), true, r.totp()); err != nil || !strings.Contains(msg, "Approved") {
+		t.Fatalf("fresh sum: %q %v", msg, err)
+	}
+}
+
 // sum is the LocalRequest.Sum the page would show for id.
 func (r *rig) sum(id string) string {
 	for _, rq := range r.ch.LocalRequests() {

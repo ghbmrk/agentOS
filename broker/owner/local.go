@@ -483,8 +483,37 @@ func (c *Channel) LocalAnswer(id, sum string, approve bool, code string) (string
 	decided := c.expireLocked(now)
 	r := c.open[id]
 	if r == nil || requestSum(r) != sum {
+		// An approval the page already called approved did not run: the
+		// fields changed since the page showed them (L3 SHOULD on #178).
+		// Record it the same way as any other page answer, so the owner
+		// is told. A stale deny is only a refusal.
+		var text string
+		var ns, na int
+		if r != nil && approve {
+			note := id + " not approved: it changed since this page showed it"
+			evicted := 0
+			if c.codes.commit(func(s *State) {
+				s.LocalAnswers = append(s.LocalAnswers, LocalNote{At: now, Text: note})
+				if k := len(s.LocalAnswers) - maxSignIns; k > 0 {
+					s.LocalAnswers = append([]LocalNote(nil), s.LocalAnswers[k:]...)
+					evicted = k
+				}
+			}) != nil {
+				text = note + " on my Wi-Fi page at " + c.clock(now) + ". Not you? Text STOP."
+			} else {
+				c.local.evictedAns += evicted
+				text, ns, na = c.signInTextLocked(now)
+			}
+		}
 		c.mu.Unlock()
 		c.decide(decided)
+		if text != "" {
+			if ns+na > 0 {
+				c.sendSignIns(text, ns, na, now)
+			} else {
+				_ = c.alert(text)
+			}
+		}
 		if r == nil {
 			return "", ErrNoRequest
 		}
