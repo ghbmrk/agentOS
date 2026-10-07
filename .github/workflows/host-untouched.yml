@@ -1,0 +1,47 @@
+# HOST-1e follow-up: run the host-untouched harness tests in CI.
+# Full QEMU/OVMF/swtpm boot with a second disk is still S1 / image work;
+# this job keeps the allow-list unit tests green on every PR that touches them.
+name: host-untouched
+on:
+  pull_request:
+    paths:
+      - "broker/hostuntouched/**"
+      - ".github/workflows/host-untouched.yml"
+  push:
+    branches: [main]
+    paths:
+      - "broker/hostuntouched/**"
+      - ".github/workflows/host-untouched.yml"
+  workflow_dispatch:
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: broker
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: broker/go.mod
+          cache-dependency-path: broker/go.sum
+      - name: hostuntouched unit tests
+        run: go test ./hostuntouched/ -count=1
+  # QEMU acceptance (A1) needs OVMF + swtpm + a Windows-like second disk.
+  # Manual until the image job (#41/#175) ships the drive under test.
+  qemu:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: install qemu stack
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 ovmf swtpm swtpm-tools
+      - name: note
+        run: |
+          echo "QEMU host-untouched boot is gated on the P2-1 image; unit tests cover the allow-list."
