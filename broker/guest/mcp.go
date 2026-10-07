@@ -67,6 +67,15 @@ var tools = []map[string]any{
 			"required":   []string{"request_id"},
 		},
 	},
+	{
+		"name":        "result_read",
+		"description": "Read the full text of a tool result that was too long to return inline. Pass the id from that result. Only this machine can read it.",
+		"inputSchema": map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"id": map[string]any{"type": "string"}},
+			"required":   []string{"id"},
+		},
+	},
 }
 
 var requestIDRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
@@ -137,6 +146,24 @@ func (p *Plane) mcp(m *machine, w http.ResponseWriter, r *http.Request) {
 			writeRPC(w, req.ID, nil, &rpcError{-32602, "bad params"})
 			return
 		}
+		if call.Name == "result_read" {
+			var args struct {
+				ID string `json:"id"`
+			}
+			_ = json.Unmarshal(call.Arguments, &args)
+			body, ok := m.folds.Read(m.id, args.ID)
+			if !ok {
+				writeRPC(w, req.ID, m.result("no such result", true), nil)
+				return
+			}
+			// The full text, not folded again: this is how the guest reads what was held back.
+			res := toolResult(body, false)
+			if n := m.takeNote(); n != "" {
+				res["content"] = append(res["content"].([]map[string]string), map[string]string{"type": "text", "text": n})
+			}
+			writeRPC(w, req.ID, res, nil)
+			return
+		}
 		if call.Name != "effect_request" && call.Name != "effect_status" && p.cfg.Tools != nil {
 			lineage, err := p.cfg.Machines.Lineage(m.id)
 			if err != nil {
@@ -172,6 +199,9 @@ func (p *Plane) mcp(m *machine, w http.ResponseWriter, r *http.Request) {
 // note about a failed step snapshot as its own content item, so a JSON
 // result stays whole (SR2-3s).
 func (m *machine) result(text string, isErr bool) map[string]any {
+	if !isErr && m.folds != nil {
+		text = m.folds.Hand(m.id, text)
+	}
 	res := toolResult(text, isErr)
 	if n := m.takeNote(); n != "" {
 		res["content"] = append(res["content"].([]map[string]string), map[string]string{"type": "text", "text": n})
