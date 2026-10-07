@@ -129,6 +129,7 @@ type rig struct {
 	excluded func(time.Time) bool
 	talk     time.Time
 	stopped  bool
+	held     time.Time // when the last effect in its undo window is released
 	a        *Applier
 }
 
@@ -172,6 +173,7 @@ func (r *rig) restart() {
 		Excluded: func(t time.Time) bool { return r.excluded != nil && r.excluded(t) },
 		LastTalk: func() time.Time { return r.talk },
 		Stopped:  func() bool { return r.stopped },
+		Held:     func() time.Time { return r.held },
 		Jitter:   6 * time.Hour, Rand: func(n int64) int64 { return n / 2 }, Now: r.clk.now})
 	if err != nil {
 		r.t.Fatal(err)
