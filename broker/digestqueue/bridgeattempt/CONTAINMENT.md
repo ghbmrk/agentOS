@@ -62,3 +62,26 @@ invalidation times out without running, and a later quiescent callback observes
 the completed durable state. An affirmative receipt is not retroactively revoked
 by STOP or recast as owner visibility. These tests use local handlers only, not a
 carrier, power loss, delivery qualification or complete forget/authority policy.
+
+## W5-D30 final read-only eligibility before the owner call
+
+Source validators run both before the policy gate and after successful durable
+Begin, immediately before the owner call. They must be read-only and repeatable;
+a validator must never reserve pacing, consume a source or execute authority.
+The policy/reservation Gate is still called exactly once. Batch expiry and context
+are checked again after potentially stalled Begin persistence as well.
+
+If the final source check or expiry refuses before an owner call, the exact
+attempt settles NotSent with a private local observation reference. That permits
+only the queue's existing bounded retry policy; it does not refund shared pacing,
+reissue a source generation or grant dispatch. A failed finish write quarantines
+the queue; actual before/after replacement tests show conservative Unknown on an
+unconfirmed persisted Sending state and Ready only after observed NotSent state
+is durably reconfirmed by reopen. No transport was called in either case.
+
+The real heartbeat fixture crosses a local-day boundary during the actual Begin
+save and proves an authentic yesterday-alive line is refused today. Policy-time
+source refusal and exact expiry at Begin are also covered. This narrows the gap;
+it does not make time observation and physical carrier handoff atomic, replace
+the containment controller, qualify other validators' forget reach or complete
+fresh quiet/pacing/resource policy. No daemon default is enabled.

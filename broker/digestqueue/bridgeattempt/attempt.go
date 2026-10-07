@@ -26,6 +26,8 @@ type Owner interface {
 }
 
 // Validator checks current source receipt eligibility, not owner authority.
+// It must be read-only and repeatable: Send checks before policy and again after
+// durable Begin, immediately before the owner call. Never reserve pacing here.
 type Validator func(context.Context, digestqueue.Snapshot) error
 
 type Config struct {
@@ -87,6 +89,20 @@ func render(b digestqueue.Batch) (string, error) {
 	return text, nil
 }
 
+func (a *Attempt) validateSources(ctx context.Context, b digestqueue.Batch) error {
+	for _, s := range b.Snapshots {
+		validate, ok := a.cfg.Sources[s.Source]
+		if !ok {
+			return ErrConfig
+		}
+		isolated := copyBatch(digestqueue.Batch{Snapshots: []digestqueue.Snapshot{s}}).Snapshots[0]
+		if err := validate(ctx, isolated); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Send makes at most one transport call. Source acknowledgments are checked by
 // Queue.Begin; callbacks must not acknowledge or consume sources. Durable begin
 // precedes the call. Any uncertain transport/save result remains quarantined.
@@ -119,15 +135,8 @@ func (a *Attempt) Send(ctx context.Context, id uint64) error {
 	if err != nil {
 		return err
 	}
-	for _, s := range b.Snapshots {
-		validate, ok := a.cfg.Sources[s.Source]
-		if !ok {
-			return ErrConfig
-		}
-		isolated := copyBatch(digestqueue.Batch{Snapshots: []digestqueue.Snapshot{s}}).Snapshots[0]
-		if err = validate(ctx, isolated); err != nil {
-			return err
-		}
+	if err = a.validateSources(ctx, b); err != nil {
+		return err
 	}
 	// Dispatch policy is checked after source checks and immediately before
 	// durable begin. External serialized containment remains an integration gate.
@@ -143,6 +152,20 @@ func (a *Attempt) Send(ctx context.Context, id uint64) error {
 	}
 	// Cancellation during synchronous Begin persistence is proven local
 	// non-delivery: the owner/transport boundary has not been called yet.
+	if err := ctx.Err(); err != nil {
+		evidence := fmt.Sprintf("digest:%d:attempt:%d:cancel-before-call", b.ID, b.Attempts)
+		return errors.Join(err, a.cfg.Queue.Finish(b.ID, b.Attempts, digestqueue.NotSent, evidence))
+	}
+	// Sources and expiry may change while synchronous Begin persistence stalls.
+	// Recheck read-only eligibility, without invoking the reservation gate twice.
+	if !a.cfg.Now().Before(b.Expires) {
+		evidence := fmt.Sprintf("digest:%d:attempt:%d:expired-before-call", b.ID, b.Attempts)
+		return errors.Join(digestqueue.ErrExpired, a.cfg.Queue.Finish(b.ID, b.Attempts, digestqueue.NotSent, evidence))
+	}
+	if err := a.validateSources(ctx, b); err != nil {
+		evidence := fmt.Sprintf("digest:%d:attempt:%d:source-refused-before-call", b.ID, b.Attempts)
+		return errors.Join(err, a.cfg.Queue.Finish(b.ID, b.Attempts, digestqueue.NotSent, evidence))
+	}
 	if err := ctx.Err(); err != nil {
 		evidence := fmt.Sprintf("digest:%d:attempt:%d:cancel-before-call", b.ID, b.Attempts)
 		return errors.Join(err, a.cfg.Queue.Finish(b.ID, b.Attempts, digestqueue.NotSent, evidence))
