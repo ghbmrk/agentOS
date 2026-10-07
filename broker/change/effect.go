@@ -136,7 +136,7 @@ func (p *Pipeline) Execute(_ context.Context, in journal.Intent, _ int) journal.
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.broken != nil {
-		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: p.broken.Error()}
+		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "state cannot be saved; restart needed"}
 	}
 	if p.st.Applied[in.ID] {
 		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "already applied"}
@@ -171,7 +171,7 @@ func (p *Pipeline) Execute(_ context.Context, in journal.Intent, _ int) journal.
 		// a host path, so the journal gets a fixed sentence and the
 		// detail stays in the log.
 		if rerr := p.reloadLocked(); rerr != nil {
-			p.broken = fmt.Errorf("change: state cannot be saved (%v) or reloaded (%v); restart needed", err, rerr)
+			p.markBroken(err, rerr)
 		}
 		if p.cfg.Logf != nil {
 			p.cfg.Logf("change: state not saved: %v", err)

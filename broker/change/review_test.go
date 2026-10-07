@@ -185,6 +185,9 @@ func TestFailStop(t *testing.T) {
 	if o := e.p.Execute(bg, journal.Intent{ID: "chg:cX:adopt", Action: ActionAdopt, GrantRef: BasisStanding}, 1); o.Result != journal.ResultNotApplied || o.Evidence != "state not saved" || strings.Contains(o.Evidence, "/var/") {
 		t.Fatal(o)
 	}
+	if o := e.p.Execute(bg, journal.Intent{ID: "chg:cX:adopt", Action: ActionAdopt, GrantRef: BasisStanding}, 1); o.Evidence != "state cannot be saved; restart needed" || strings.Contains(o.Evidence, "/var/") {
+		t.Fatalf("later evidence %q", o.Evidence)
+	}
 	if err := e.p.healthy(); err == nil {
 		t.Fatal("not broken after save and reload failed")
 	}
