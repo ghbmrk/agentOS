@@ -43,6 +43,9 @@ jobs:
           git diff --quiet HEAD^1...HEAD^2 -- TRACE.md && exit 0
           echo '::error file=TRACE.md::PRs must not change TRACE.md; trace.yml regenerates it on main after merge. Restore it with: git checkout $(git merge-base origin/main HEAD) -- TRACE.md'
           exit 1
+      - name: Risk tier (docs/OPERATING.md §3)
+        if: github.event_name == 'pull_request'
+        run: python tools/risk_tier.py --markdown --git HEAD^1 HEAD^2 >> "$GITHUB_STEP_SUMMARY"
   broker:
     runs-on: ubuntu-latest
     defaults:
