@@ -642,9 +642,19 @@ const idLetters = "ABCDEFGHJKLMNPQRSTUVWXYZ"
 // restart record, and IDs retired in the last RetireFor: a letter and a
 // digit, or a letter and two digits when those run out (CH-12: at most 3
 // characters). It gives up after a bounded search.
-func (c *Channel) newIDLocked(now time.Time) (string, error) {
+func (c *Channel) newIDLocked(now time.Time) (string, error) { return c.allocLocked(now, nil) }
+
+// allocLocked is newIDLocked, also skipping IDs Config.Reserved reports
+// and, if set, those also reports.
+func (c *Channel) allocLocked(now time.Time, also func(string) bool) (string, error) {
 	taken := func(id string) bool {
 		if c.open[id] != nil || c.queued[id] != nil {
+			return true
+		}
+		if c.cfg.Reserved != nil && c.cfg.Reserved(id) {
+			return true
+		}
+		if also != nil && also(id) {
 			return true
 		}
 		if t, ok := c.codes.st.Retired[id]; ok && now.Sub(t) < RetireFor {
@@ -678,6 +688,32 @@ func (c *Channel) newIDLocked(now time.Time) (string, error) {
 		}
 	}
 	return "", errors.New("owner: no free request ID")
+}
+
+// ShortID lends another part of the box an owner-facing ID from the
+// channel's allocator (change C11: adoption IDs in digest lines, answered
+// by UNDO and MORE): clear of open requests, queued replies, recently
+// retired IDs, Config.Reserved, and those taken reports. The ID is retired
+// at once and saved, so no request takes it for RetireFor even before the
+// borrower records it; after that Config.Reserved keeps it. taken runs
+// under the channel's lock and must not call back into the channel.
+func (c *Channel) ShortID(taken func(string) bool) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := c.cfg.Now()
+	id, err := c.allocLocked(now, taken)
+	if err != nil {
+		return "", err
+	}
+	if err := c.codes.commit(func(s *State) {
+		if s.Retired == nil {
+			s.Retired = map[string]time.Time{}
+		}
+		s.Retired[id] = now
+	}); err != nil {
+		return "", err
+	}
+	return id, nil
 }
 
 func list(ns []int) string {

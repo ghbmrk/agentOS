@@ -204,6 +204,7 @@ func (p *Pipeline) reloadLocked() error {
 		st.Applied = map[string]bool{}
 	}
 	p.st = st
+	p.refreshShortsLocked()
 	p.dropOldBasesLocked(p.st.Active.Hash())
 	for ns, tg := range p.cfg.Targets {
 		if err := tg.Apply(p.st.Active.under(ns)); err != nil {
