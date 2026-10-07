@@ -393,18 +393,25 @@ func (l *Link) inbound(_ context.Context, _ sockets.Peer, args json.RawMessage) 
 		}
 	}
 	l.inboundTime = kept
-	if len(kept) >= InboundPerMinute {
-		l.dropped = true
-		return nil, errLimited
-	}
 	m := modem.SMS{From: in.From, To: l.cfg.Owner, Text: in.Text, At: now, Alphanumeric: in.Named}
-	select {
-	case l.inbox <- m:
-	default:
-		l.dropped = true
-		return nil, errLimited
+	if ownerStop(in.Text) {
+		// The owner's exact STOP skips the rate limit, is not counted
+		// against it, and goes ahead of the inbox (security R1 at
+		// bc36b57), so texts from the owner's number cannot hold it back.
+		l.putFirstLocked(m)
+	} else {
+		if len(kept) >= InboundPerMinute {
+			l.dropped = true
+			return nil, errLimited
+		}
+		select {
+		case l.inbox <- m:
+		default:
+			l.dropped = true
+			return nil, errLimited
+		}
+		l.inboundTime = append(l.inboundTime, now)
 	}
-	l.inboundTime = append(l.inboundTime, now)
 	if in.ID != "" {
 		if l.inboundIDs == nil {
 			l.inboundIDs = map[string]time.Time{}
