@@ -14,6 +14,8 @@ package gvisor
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -240,7 +242,10 @@ func (r *Runtime) Exec(ctx context.Context, id string, c vm.Command) (vm.ExecRes
 	pidFile := pf.Name()
 	pf.Close()
 	defer os.Remove(pidFile)
-	cmd := r.cmd(ctx, append([]string{"exec", "--cwd", "/", "--user", "0:0", "--internal-pid-file", pidFile, cid(id)}, c.Argv...)...)
+	// runsc's own diagnostics go to a broker-only log, not the guest
+	// (SR2-3h). A failure before the guest process starts is a ref.
+	logPath := filepath.Join(r.StateDir, "exec.log")
+	cmd := r.cmd(ctx, append([]string{"--debug-log=" + logPath, "exec", "--cwd", "/", "--user", "0:0", "--internal-pid-file", pidFile, cid(id)}, c.Argv...)...)
 	cmd.Stdin = bytes.NewReader(c.Stdin)
 	stdout, stderr := &capped{max: c.MaxOutput}, &capped{max: c.MaxOutput}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
@@ -252,13 +257,55 @@ func (r *Runtime) Exec(ctx context.Context, id string, c vm.Command) (vm.ExecRes
 		return cmd.Process.Kill()
 	}
 	err = cmd.Run()
+	started := pidStarted(pidFile)
 	res := vm.ExecResult{Stdout: stdout.bytes(), Stderr: stderr.bytes(), Truncated: stdout.truncated() || stderr.truncated()}
+	if !started {
+		// The guest never ran. stderr is runsc's, which can name a host path.
+		ref := r.noteExec(res.Stderr)
+		res.Stdout, res.Stderr, res.Truncated = nil, nil, false
+		if err != nil && ctx.Err() == nil {
+			return vm.ExecResult{}, fmt.Errorf("gvisor: exec failed (ref %s)", ref)
+		}
+		return res, err
+	}
 	var exit *exec.ExitError
 	if errors.As(err, &exit) && ctx.Err() == nil {
 		res.ExitCode = exit.ExitCode()
 		return res, nil
 	}
 	return res, err
+}
+
+func pidStarted(path string) bool {
+	b, err := os.ReadFile(path)
+	return err == nil && strings.TrimSpace(string(b)) != ""
+}
+
+// noteExec appends a runsc diagnostic to the broker-only exec log and
+// returns a ref the guest may see. The log stays mode 0600 and rotates
+// once, so it cannot grow without bound.
+func (r *Runtime) noteExec(p []byte) string {
+	var b [4]byte
+	ref := "00000000"
+	if _, err := rand.Read(b[:]); err == nil {
+		ref = hex.EncodeToString(b[:])
+	}
+	path := filepath.Join(r.StateDir, "exec.log")
+	if fi, err := os.Stat(path); err == nil && fi.Size() >= int64(maxConsoleLog) {
+		os.Remove(path + ".1")
+		os.Rename(path, path+".1")
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return ref
+	}
+	defer f.Close()
+	if len(p) == 0 {
+		p = []byte("runsc exec failed with no diagnostic")
+	}
+	fmt.Fprintf(f, "%s ref %s\n%s\n", time.Now().UTC().Format(time.RFC3339), ref, p)
+	f.Chmod(0o600)
+	return ref
 }
 
 // killExec kills the command an Exec started inside the sandbox, by the
