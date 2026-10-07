@@ -86,6 +86,11 @@ type Config struct {
 	// the owner's number (ADP-9). It runs outside the channel's lock. Nil
 	// answers that there are no grants.
 	Narrow func(word, id string) string
+	// Reserved, if set, reports owner-facing IDs another part of the box
+	// still answers to (the change pipeline's ShortInUse, change C11), so
+	// no request takes one. It runs under the channel's lock and must not
+	// take a lock held while calling into the channel.
+	Reserved func(id string) bool
 	// Reissue, if set, takes over the items of requests a restart found
 	// open and not expired (Boot), to ask them again with new codes. Boot
 	// calls it once, with nil when there are none, after the restart text.
