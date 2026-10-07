@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -80,6 +81,10 @@ type Config struct {
 	// Mono is monotonic time since some fixed point; nil means
 	// CLOCK_BOOTTIME, which counts suspend (Go's monotonic clock off Linux).
 	Mono func() time.Duration
+	// BootID names the boot. Nil reads /proc/sys/kernel/random/boot_id.
+	// Empty means unknown: a stored floor is ignored, because a reading
+	// from another boot is not comparable.
+	BootID func() string
 }
 
 type item struct {
@@ -102,16 +107,20 @@ type formed struct {
 // days it still waits. A release with a plausible clock, after the release
 // time, counts its day once it steps: it moves on from the day the last
 // release saw by one to maxStep days. It counts only if that last release
-// had itself stepped, the day was never counted, and, within this process,
-// at least minCountGap of monotonic time has passed since the last count.
-// A step back or a larger move is a jump, and the release after a jump
-// never counts. A batch forms only on a counted day. Hence:
+// had itself stepped, the day was never counted, and at least minCountGap
+// of monotonic time has passed since the last count on this boot. The
+// outbox stores that reading and the boot id, so a broker restart on the
+// same boot keeps the floor (OSS-6e). A stored reading ahead of the clock
+// is corrupt and counts no day. Another boot id is ignored. A step back or
+// a larger move is a jump, and the release after a jump never counts. A
+// batch forms only on a counted day. Hence:
 //
-//   - G1: within one process an item with delay k leaves no sooner than
+//   - G1: within one boot an item with delay k leaves no sooner than
 //     (k-1)*20h after it was queued, whatever the clock does; with a right
 //     clock, no sooner than k-1 days and the release time.
-//   - G2: each restart can let one day count without real time passing,
-//     if someone controls the clock, so (k-1-r)*20h for r restarts.
+//   - G2: a new boot ignores the stored reading, so each boot can let one
+//     day count without real time passing, if someone controls the clock:
+//     (k-1-r)*20h for r boots. A broker restart on the same boot cannot.
 //   - G3: off days only lengthen waits. A box off for up to maxStep-1 days
 //     in a row keeps counting; after longer, the first two days it sees
 //     do not count.
@@ -128,6 +137,11 @@ type outbox struct {
 	// saw, by one to maxStep days.
 	Stepped bool    `json:"stepped,omitempty"`
 	Pending *formed `json:"pending,omitempty"` // formed, not confirmed sent
+	// Counted is set once a day has been counted on Boot. CountAt is that
+	// reading of Mono (CLOCK_BOOTTIME in production), in nanoseconds.
+	Counted bool   `json:"counted,omitempty"`
+	CountAt int64  `json:"count_at,omitempty"`
+	Boot    string `json:"boot,omitempty"`
 }
 
 // Publisher holds public output until its day and publishes each day's
@@ -136,10 +150,12 @@ type Publisher struct {
 	cfg Config
 	mu  sync.Mutex
 	st  outbox
-	// counted is the monotonic time of the last day counted in this
-	// process, if any.
+	// counted is the monotonic time of the last day counted on this boot.
 	counted    time.Duration
 	hasCounted bool
+	// floorCorrupt: the stored reading is ahead of the clock. No day counts
+	// until the clock passes it.
+	floorCorrupt bool
 }
 
 // NewPublisher opens the outbox at cfg.Path.
@@ -176,6 +192,9 @@ func NewPublisher(cfg Config) (*Publisher, error) {
 	if cfg.Mono == nil {
 		cfg.Mono = monoClock()
 	}
+	if cfg.BootID == nil {
+		cfg.BootID = readBootID
+	}
 	p := &Publisher{cfg: cfg}
 	// Others who can write the directory could swap in items for the box
 	// to sign (L3 round 3 on #163).
@@ -206,7 +225,52 @@ func NewPublisher(cfg Config) (*Publisher, error) {
 			}
 		}
 	}
+	p.restoreFloor()
 	return p, nil
+}
+
+// restoreFloor keeps the 20h floor across a broker restart on the same
+// boot. A different boot id is not comparable and is ignored. A stored
+// reading ahead of the clock counts no day until the clock passes it.
+func (p *Publisher) restoreFloor() {
+	if !p.st.Counted {
+		return
+	}
+	boot := p.cfg.BootID()
+	if boot == "" || boot != p.st.Boot {
+		return
+	}
+	stored := time.Duration(p.st.CountAt)
+	if stored > p.cfg.Mono() {
+		p.floorCorrupt = true
+		return
+	}
+	p.counted, p.hasCounted = stored, true
+}
+
+// floorShut reports that this release must not count a day.
+func (p *Publisher) floorShut() bool {
+	now := p.cfg.Mono()
+	if p.floorCorrupt {
+		if now < time.Duration(p.st.CountAt) {
+			return true
+		}
+		p.floorCorrupt = false
+		p.counted, p.hasCounted = time.Duration(p.st.CountAt), true
+	}
+	return p.hasCounted && now-p.counted < minCountGap
+}
+
+func readBootID() string {
+	b, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		return ""
+	}
+	s := strings.TrimSpace(string(b))
+	if s == "" || len(s) > 64 || strings.ContainsAny(s, "\n\r") {
+		return ""
+	}
+	return s
 }
 
 // validate checks a loaded outbox and drops items of a kind with no signer
@@ -406,9 +470,9 @@ func (p *Publisher) Release() error {
 	old := p.st
 	step := p.step(today)
 	if step && p.st.Stepped && !slices.Contains(p.st.Days, today) {
-		// Today counts, once enough monotonic time has passed in this
-		// process; until then it is not seen, so a later tick can count it.
-		if p.hasCounted && p.cfg.Mono()-p.counted < minCountGap {
+		// Today counts, once enough monotonic time has passed on this boot;
+		// until then it is not seen, so a later tick can count it.
+		if p.floorShut() {
 			return nil
 		}
 	} else {
@@ -455,11 +519,14 @@ func (p *Publisher) Release() error {
 	if len(batch) > 0 {
 		p.st.Pending = &formed{Day: today, Batch: batch}
 	}
+	mono := p.cfg.Mono()
+	p.st.Counted, p.st.CountAt, p.st.Boot = true, int64(mono), p.cfg.BootID()
 	if err := p.save(); err != nil {
 		p.st = old
 		return err
 	}
-	p.counted, p.hasCounted = p.cfg.Mono(), true
+	p.counted, p.hasCounted = mono, true
+	p.floorCorrupt = false
 	if len(batch) == 0 {
 		return ferr
 	}

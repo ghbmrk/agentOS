@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -51,6 +52,11 @@ type rig struct {
 	// mono is the publisher's monotonic clock. By default each reading is
 	// a day after the last, so only the tests of the floor meet it.
 	mono func() time.Duration
+	// boot names the boot. reopen changes it unless sameBoot is set, so a
+	// test that resets the monotonic clock is a new boot (OSS-6e).
+	boot     string
+	bootN    int
+	sameBoot bool
 }
 
 func newRig(t *testing.T, r fixedRand) *rig {
@@ -79,10 +85,15 @@ func (g *rig) warm(t *testing.T, p *Publisher) {
 
 func (g *rig) reopen(t *testing.T) {
 	t.Helper()
+	if !g.sameBoot {
+		g.bootN++
+		g.boot = fmt.Sprintf("b%d", g.bootN)
+	}
 	var err error
 	g.p, err = NewPublisher(Config{
 		Path: filepath.Join(g.dir, "outbox.json"), Identity: g.id, Sender: g.out, Now: g.c.now,
 		Signers: map[string]Signer{"artifact": signer, "attestation": signer}, Rand: g.rand, Mono: g.mono,
+		BootID: func() string { return g.boot },
 	})
 	must(t, err)
 }

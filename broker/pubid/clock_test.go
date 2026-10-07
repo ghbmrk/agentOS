@@ -260,3 +260,70 @@ func TestOSS6FloorDefersTheDayUnseen(t *testing.T) {
 		t.Fatalf("the deferred day did not count at the floor: seen %s, %d days", g.p.st.Seen, len(g.p.st.Days))
 	}
 }
+
+// A broker restart on the same boot keeps the 20h floor (OSS-6e).
+func TestOSS6FloorHoldsAcrossARestartOnTheSameBoot(t *testing.T) {
+	g := newRig(t, 0)
+	var m time.Duration
+	g.mono = func() time.Duration { return m }
+	g.sameBoot = true
+	g.boot = "same"
+	g.reopen(t)
+	g.day(1, 5*time.Hour)
+	must(t, g.p.Release())
+	g.reopen(t)
+	g.day(2, 5*time.Hour)
+	must(t, g.p.Release())
+	if slices.Contains(g.p.st.Days, day(g.c.t)) {
+		t.Fatal("a restart on the same boot counted a day inside the floor")
+	}
+	m = 20 * time.Hour
+	must(t, g.p.Release())
+	if !slices.Contains(g.p.st.Days, day(g.c.t)) {
+		t.Fatal("the day did not count once 20h of the same boot had passed")
+	}
+}
+
+// A stored reading ahead of the clock counts no day. Once the clock
+// passes it, the floor is that reading.
+func TestOSS6AFloorAheadOfTheClockCountsNoDay(t *testing.T) {
+	g := newRig(t, 0)
+	var m time.Duration = 30 * time.Hour
+	g.mono = func() time.Duration { return m }
+	g.sameBoot = true
+	g.boot = "same"
+	g.reopen(t)
+	g.day(1, 5*time.Hour)
+	must(t, g.p.Release())
+	m = time.Hour
+	g.reopen(t)
+	g.day(2, 5*time.Hour)
+	must(t, g.p.Release())
+	if slices.Contains(g.p.st.Days, day(g.c.t)) {
+		t.Fatal("a stored floor ahead of the clock counted a day")
+	}
+	m = 50 * time.Hour
+	must(t, g.p.Release())
+	if !slices.Contains(g.p.st.Days, day(g.c.t)) {
+		t.Fatal("the day did not count once the clock had passed the stored reading by 20h")
+	}
+}
+
+// A different boot id is not comparable, so the stored floor is ignored.
+func TestOSS6AnotherBootIgnoresTheStoredFloor(t *testing.T) {
+	g := newRig(t, 0)
+	var m time.Duration
+	g.mono = func() time.Duration { return m }
+	g.sameBoot = true
+	g.boot = "one"
+	g.reopen(t)
+	g.day(1, 5*time.Hour)
+	must(t, g.p.Release())
+	g.boot = "two"
+	g.reopen(t)
+	g.day(2, 5*time.Hour)
+	must(t, g.p.Release())
+	if !slices.Contains(g.p.st.Days, day(g.c.t)) {
+		t.Fatal("a new boot kept the previous boot's floor")
+	}
+}
