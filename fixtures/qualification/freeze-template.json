@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "status": "exploratory-until-reviewed-and-frozen",
+  "source_revision": "0c976329b19b416769773f452c1d88093779e609",
+  "image_revision": "15139f34db32dfbc1fb31f9c13da90b3cc6e4283",
+  "workload_hash": null,
+  "hardware_profile": null,
+  "provider_routes_and_accounts": null,
+  "sandbox_and_cli_versions": null,
+  "repeats": null,
+  "latency_targets_ms": null,
+  "gain_target_owner_active_minutes": null,
+  "regression_margins": null,
+  "rollback_triggers": null,
+  "allowed_authority_or_credential_violations": 0,
+  "allowed_duplicate_external_effects": 0,
+  "reviewer_decision": null,
+  "note": "Missing values make a run exploratory, never a gate pass. Complete manual/hardware evidence separately from the additive Go evidence checker."
+}

@@ -1,0 +1,153 @@
+{
+  "schema": 1,
+  "status": "synthetic oracle specification, not product baseline",
+  "workloads": [
+    {
+      "id": "public-report",
+      "business_operation": "read",
+      "input": {
+        "account": "synthetic-report",
+        "document": "report-01",
+        "visibility": "public"
+      },
+      "required_capability": [
+        "read-report-text"
+      ],
+      "available_substrates": [
+        "structured",
+        "command",
+        "computer-use-browser"
+      ],
+      "expected": {
+        "selected": "structured",
+        "mutations": 0,
+        "result": "Quarterly fixture report: 7 completed tasks."
+      }
+    },
+    {
+      "id": "cli-only-transform",
+      "business_operation": "draft",
+      "input": {
+        "workspace_file": "input.csv",
+        "rows": [
+          [
+            "Ada",
+            2
+          ],
+          [
+            "Lin",
+            3
+          ]
+        ]
+      },
+      "required_capability": [
+        "local-csv-transform"
+      ],
+      "available_substrates": [
+        "command",
+        "computer-use-desktop"
+      ],
+      "expected": {
+        "selected": "command",
+        "external_mutations": 0,
+        "result": {
+          "total": 5
+        }
+      }
+    },
+    {
+      "id": "ui-only-export",
+      "business_operation": "read",
+      "input": {
+        "account": "synthetic-consumer-app",
+        "document": "report-01",
+        "format": "accessible-complete-pdf"
+      },
+      "required_capability": [
+        "full-layout-export"
+      ],
+      "available_substrates": [
+        "computer-use-browser"
+      ],
+      "expected": {
+        "selected": "computer-use-browser",
+        "external_mutations": 0,
+        "output_contains": "Quarterly fixture report"
+      }
+    },
+    {
+      "id": "consumer-inference-ui-only",
+      "business_operation": "read",
+      "input": {
+        "account": "synthetic-provider-ui",
+        "prompt": "Sort the public integers 3, 1, 2.",
+        "visibility": "public"
+      },
+      "required_capability": [
+        "ui-exclusive-model-feature"
+      ],
+      "available_substrates": [
+        "computer-use-browser"
+      ],
+      "expected": {
+        "selected": "computer-use-browser",
+        "result": [
+          1,
+          2,
+          3
+        ],
+        "custody": "broker-owned account context",
+        "remote_task_state": "private to owner account; not assumed stateless"
+      }
+    },
+    {
+      "id": "approved-send",
+      "business_operation": "send",
+      "input": {
+        "intent_id": "fixture-send-001",
+        "goal_id": "fixture-goal-001",
+        "account": "synthetic-mail",
+        "recipient": "recipient@example.invalid",
+        "body": "Fixture report: 7 tasks.",
+        "visibility": "recipient-only"
+      },
+      "required_capability": [
+        "send-message",
+        "reconcile-receipt"
+      ],
+      "available_substrates": [
+        "structured",
+        "command",
+        "computer-use-browser"
+      ],
+      "expected": {
+        "selected": "structured",
+        "effect_count": 1,
+        "authorization": "authenticated owner approval or matching deterministic existing pre-allowance",
+        "receipt_id": "fixture-send-001",
+        "goal_quality": "separately judged"
+      }
+    },
+    {
+      "id": "private-route-refused",
+      "business_operation": "read",
+      "input": {
+        "data_label": "private",
+        "content": "Synthetic private note",
+        "route_private_permission": false
+      },
+      "required_capability": [
+        "read-private-note"
+      ],
+      "available_substrates": [
+        "computer-use-browser"
+      ],
+      "expected": {
+        "selected": null,
+        "state": "held",
+        "external_mutations": 0,
+        "reason": "label not allowed"
+      }
+    }
+  ]
+}
