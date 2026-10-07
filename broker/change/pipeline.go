@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/journal"
@@ -142,7 +143,8 @@ type Config struct {
 	// ShortID gives the owner-facing ID for an adoption (CH-12: at most 3
 	// characters). The wiring passes the owner channel's allocator so IDs
 	// never clash with open requests; taken reports IDs the pipeline still
-	// uses. Nil: the pipeline's own letter-and-digits sequence.
+	// uses. Nil, or an empty ID with no error: the pipeline's own
+	// letter-and-digits sequence. ShortInUse answers the other way.
 	ShortID func(taken func(string) bool) (string, error)
 	// EvaluatorID names the evaluator's current configuration (image,
 	// model route, price ceiling). A preempted evaluation's kept pairs
@@ -351,8 +353,11 @@ type Pipeline struct {
 	j   Journal
 	key []byte // split and probe key, fixed after New
 
-	mu     sync.Mutex
-	st     state
+	mu sync.Mutex
+	st state
+	// shorts is recentShortsLocked as of the last save or load, read
+	// without mu by ShortInUse.
+	shorts atomic.Pointer[map[string]bool]
 	props  map[string]*proposal
 	broken error // set when state could neither be saved nor reloaded
 	// probes of running evaluations: use count and task intent.
@@ -456,6 +461,7 @@ func New(cfg Config) (*Pipeline, error) {
 		p.st.Applied = map[string]bool{}
 	}
 	p.key = append([]byte(nil), p.st.SplitKey...)
+	p.refreshShortsLocked()
 	return p, nil
 }
 
@@ -473,6 +479,7 @@ func (p *Pipeline) healthy() error {
 func (p *Pipeline) Attach(j Journal) { p.j = j }
 
 func (p *Pipeline) saveLocked() error {
+	p.refreshShortsLocked()
 	if p.broken != nil {
 		return p.broken
 	}
