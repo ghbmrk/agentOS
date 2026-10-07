@@ -120,13 +120,14 @@ type Groups struct {
 }
 
 // Apply creates one group per component under root, each with its CPU and
-// I/O weight, and caps the pool's tasks below the root's (PoolPids). Inference, the browser and the pool get hard limits; the broker gets its budget as protected
+// I/O weight, and caps the pool's tasks below the root's effective cap,
+// its own or a capped ancestor slice's (PoolPids, SR2-4i). Inference, the browser and the pool get hard limits; the broker gets its budget as protected
 // memory and no hard limit, so it is never OOM-killed by its own group and
 // its pages are not reclaimed for others. With every other component capped
 // and the headroom left over, the host's own OOM killer has nothing to do.
 func (m Memory) Apply(root *cgroup.Group) (Groups, error) {
 	var g Groups
-	rootPids, err := root.PidsMax()
+	rootPids, err := root.EffectivePidsMax()
 	if err != nil {
 		return Groups{}, err
 	}
