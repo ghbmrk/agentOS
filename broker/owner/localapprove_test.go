@@ -127,7 +127,9 @@ func TestThePageDeniesAndListsEveryOpenRequest(t *testing.T) {
 	if msg, err := r.ch.LocalAnswer(textID, r.sum(textID), false, ""); err != nil || !strings.Contains(msg, "Denied") {
 		t.Fatalf("deny the rest: %q %v", msg, err)
 	}
-	if _, err := r.ch.LocalAnswer("Z9", "", false, ""); err != ErrNoRequest {
+	// Z9 is a legal request id (a letter and a digit), so a run that
+	// minted it would treat this as a stale answer, not an unknown one.
+	if _, err := r.ch.LocalAnswer("no-such", "", false, ""); err != ErrNoRequest {
 		t.Fatalf("unknown: %v", err)
 	}
 }
