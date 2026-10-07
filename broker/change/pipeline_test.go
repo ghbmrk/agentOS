@@ -126,6 +126,40 @@ func TestGoodAdoptsBadRejected(t *testing.T) {
 	}
 }
 
+// P3-6d: a skill that removes a procedure says the step-by-step version
+// comes back on undo. A skill that removes nothing does not.
+func TestASkillThatRemovesAProcedureSaysUndoBringsItBack(t *testing.T) {
+	e := newEnv(t, nil)
+	e.p.st.Active = Tree{"skills/greet": []byte("hello")}
+	e.p.st.Adoptions = []*Adoption{{
+		Short:   "A1",
+		Classes: []Class{ClassSkill},
+		Basis:   BasisStanding,
+		Edits: []Edit{
+			{Path: "procedures/file", Before: []byte("step by step")},
+			{Path: "skills/greet", After: []byte("hello")},
+		},
+		Score: Score{HeldOut: 4, Passed: 4, BaselinePassed: 4},
+	}}
+	d := e.p.Digest()
+	want := "Learned a new way to do a task (replaces the step-by-step version; undo brings it back). Tested on 4 of your past tasks, none worse. UNDO A1 / MORE A1"
+	if len(d) != 1 || d[0] != want {
+		t.Fatalf("digest: %q", d)
+	}
+	e.p.st.Adoptions = []*Adoption{{
+		Short:   "A2",
+		Classes: []Class{ClassSkill},
+		Basis:   BasisStanding,
+		Edits:   []Edit{{Path: "skills/greet", Before: []byte("hello"), After: []byte("hello!")}},
+		Score:   Score{HeldOut: 4, Passed: 4, BaselinePassed: 4},
+	}}
+	e.p.st.Active = Tree{"skills/greet": []byte("hello!")}
+	d = e.p.Digest()
+	if len(d) != 1 || strings.Contains(d[0], "replaces the step-by-step") {
+		t.Fatalf("no procedure removed: %q", d)
+	}
+}
+
 // CHG-1: with too few held-out cases a candidate is not auto-adopted; it
 // goes to the owner with its evidence.
 func TestTooFewCasesAsks(t *testing.T) {

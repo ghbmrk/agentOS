@@ -123,6 +123,27 @@ func (p *Pipeline) what(a *Adoption) string {
 	return "Improved how a task is done"
 }
 
+// replacesProcedure reports a skill adoption that removed a procedure file.
+// A forgotten file is not that replacement.
+func (p *Pipeline) replacesProcedure(a *Adoption) bool {
+	skill := false
+	for _, c := range a.Classes {
+		if c == ClassSkill {
+			skill = true
+		}
+	}
+	if !skill {
+		return false
+	}
+	for _, e := range a.Edits {
+		if e.Forgotten || namespace(e.Path) != "procedures" || e.After != nil || len(e.Before) == 0 {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 // primaryChange names, per task class, a change of first route provider or
 // a dropped local fallback (arbitrator R1); "" when there is none.
 func (p *Pipeline) primaryChange(before, after []byte) string {
@@ -187,7 +208,14 @@ func (p *Pipeline) Digest() []string {
 	var out []string
 	for _, a := range p.st.Adoptions {
 		if !a.Listed {
-			line := p.what(a) + "."
+			line := p.what(a)
+			// A skill that removes a procedure replaces the step-by-step
+			// version; say so only when UNDO can bring that version back
+			// (UX on #74, P3-6d).
+			if p.replacesProcedure(a) && p.undoableLocked(a) {
+				line += " (replaces the step-by-step version; undo brings it back)"
+			}
+			line += "."
 			line += testedText(a.Score)
 			switch a.Basis {
 			case BasisOwner:
