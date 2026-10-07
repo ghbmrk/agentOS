@@ -68,6 +68,7 @@ type state struct {
 	Wrong      []time.Time `json:"wrong,omitempty"`
 	Overflow   uint64      `json:"overflow"`
 	Pending    *Snapshot   `json:"pending,omitempty"`
+	Ordered    bool        `json:"ordered,omitempty"`
 	RecordSeq  uint64      `json:"record_seq,omitempty"`
 	RecordHash string      `json:"record_hash,omitempty"`
 }
@@ -227,14 +228,14 @@ func (s *Source) Record(e Event) error {
 	if s.broken != nil {
 		return s.broken
 	}
-	if s.st.RecordSeq != 0 || !validEvent(e) {
+	if s.st.Ordered || s.st.RecordSeq != 0 || !validEvent(e) {
 		return ErrInvalid
 	}
 	return s.recordLocked(e, 0, "")
 }
 
 func validEvent(e Event) bool {
-	if e == (Event{}) {
+	if !e.Dropped && !e.Silent && !e.Counted && !e.Challenge && e.WrongAt.IsZero() {
 		return false
 	}
 	if e.WrongAt.IsZero() {
@@ -243,6 +244,75 @@ func validEvent(e Event) bool {
 	// Local year bounds alone are insufficient: an offset can move the UTC
 	// instant across the persisted representation boundary.
 	return e.WrongAt.Year() >= 1 && e.WrongAt.Year() <= 9999 && e.WrongAt.UTC().Year() >= 1 && e.WrongAt.UTC().Year() <= 9999
+}
+
+// ProducerCheckpoint is private broker pairing/recovery data, not authority
+// or transport evidence. Binding is derived from the private ledger key.
+type ProducerCheckpoint struct {
+	Binding  string `json:"binding"`
+	Sequence uint64 `json:"sequence"`
+	Hash     string `json:"hash"`
+}
+
+func normalizeEvent(e Event) Event {
+	if e.WrongAt.IsZero() {
+		e.WrongAt = time.Time{}
+	} else {
+		e.WrongAt = e.WrongAt.Round(0).UTC()
+	}
+	return e
+}
+
+// EventHash binds canonical typed event content for private outbox recovery.
+// Hash equality is never a substitute for owner authorization or source binding.
+func EventHash(e Event) (string, error) {
+	if !validEvent(e) {
+		return "", ErrInvalid
+	}
+	raw, err := json.Marshal(normalizeEvent(e))
+	if err != nil {
+		return "", ErrInvalid
+	}
+	sum := sha256.Sum256(append([]byte("agentos/owner/record/v1\x00"), raw...))
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func (s *Source) checkpointLocked() ProducerCheckpoint {
+	m := hmac.New(sha256.New, s.st.Key)
+	m.Write([]byte("agentos/owner/producer/v1\x00"))
+	return ProducerCheckpoint{Binding: hex.EncodeToString(m.Sum(nil)), Sequence: s.st.RecordSeq, Hash: s.st.RecordHash}
+}
+
+// ClaimProducer durably excludes anonymous Record before an authority outbox
+// pairs with this source. Only virgin or already ordered state may be claimed.
+func (s *Source) ClaimProducer() (ProducerCheckpoint, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.broken != nil {
+		return ProducerCheckpoint{}, s.broken
+	}
+	if !s.st.Ordered && s.st.RecordSeq == 0 && (s.st.Seq != 0 || s.st.Acked != 0 || s.st.Pending != nil || s.st.Counts != (Counts{}) || len(s.st.Wrong) != 0 || s.st.Overflow != 0) {
+		return ProducerCheckpoint{}, ErrInvalid
+	}
+	next := cloneState(s.st)
+	next.Ordered = true
+	if err := s.commit(next); err != nil {
+		return ProducerCheckpoint{}, err
+	}
+	return s.checkpointLocked(), nil
+}
+
+// ProducerCheckpoint observes a confirmed ordered source without mutating it.
+func (s *Source) ProducerCheckpoint() (ProducerCheckpoint, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.broken != nil {
+		return ProducerCheckpoint{}, s.broken
+	}
+	if !s.st.Ordered && s.st.RecordSeq == 0 {
+		return ProducerCheckpoint{}, ErrInvalid
+	}
+	return s.checkpointLocked(), nil
 }
 
 // RecordOnce admits one ordered, single-producer event. Only the latest ID
@@ -258,15 +328,11 @@ func (s *Source) RecordOnce(id uint64, e Event) error {
 	if id == 0 || !validEvent(e) {
 		return ErrInvalid
 	}
-	if !e.WrongAt.IsZero() {
-		e.WrongAt = e.WrongAt.Round(0).UTC()
-	}
-	raw, err := json.Marshal(e)
+	e = normalizeEvent(e)
+	hash, err := EventHash(e)
 	if err != nil {
-		return ErrInvalid
+		return err
 	}
-	sum := sha256.Sum256(append([]byte("agentos/owner/record/v1\x00"), raw...))
-	hash := hex.EncodeToString(sum[:])
 	if id == s.st.RecordSeq {
 		if hash != s.st.RecordHash {
 			return ErrInvalid
@@ -285,6 +351,7 @@ func (s *Source) RecordOnce(id uint64, e Event) error {
 func (s *Source) recordLocked(e Event, id uint64, hash string) error {
 	next := cloneState(s.st)
 	if id != 0 {
+		next.Ordered = true
 		next.RecordSeq, next.RecordHash = id, hash
 	}
 	for _, entry := range []struct {

@@ -87,3 +87,40 @@ producers, key rotation, missing retained outbox events and storage deadlines
 require an explicit recovery contract. This candidate does not implement that
 outbox or close W5-D15's authority-to-note capture gap. No owner integration,
 daemon registration, sender or runtime qualification is enabled here.
+
+## Source pairing before an authority outbox (W5-D19)
+
+`ClaimProducer` durably selects ordered ingestion before the first event. The
+claim excludes anonymous Record even at sequence zero and survives reopen.
+A virgin source or an already ordered source may be claimed; anonymous history,
+including acknowledged digest generations, requires an explicit migration.
+Pre-D19 ordered state remains readable because a positive ingestion sequence
+already implies ordered mode. Older binaries reject the new optional mode field.
+
+`ProducerCheckpoint` is broker-private pairing/recovery data: a stable
+HMAC-derived binding to the ledger key, the latest ingestion ID and its event
+hash. It contains no key, code, message body or owner authority. A reset ledger
+with a new key has a different binding; digest acknowledgment never resets its
+producer checkpoint. Bindings deliberately link private source and outbox state;
+do not expose them as guest tools, owner messages or public telemetry. Source
+and authority storage must stay single-writer and privately composed.
+
+An authority outbox must persist that binding, its acknowledged producer floor
+and last event hash, plus all unretired typed events in the same transaction as
+the guard state change. At recovery the source must match the binding and either
+the floor/hash or exactly its next retained event/hash. A source behind the floor,
+more than one event ahead, reset IDs, missing outbox entries or another producer
+must hold for explicit recovery. No constructor may silently pair historical
+notes with a fresh empty outbox. Claim uncertainty quarantines the source until
+reopen and durable confirmation; an unpaired claim creates no event or authority.
+
+`EventHash` canonicalizes a typed event for private checkpoint matching. Equal
+instants use UTC, monotonic components disappear, and a zero-time instant in any
+location means absent WrongAt. A differently represented Go zero time cannot
+turn an otherwise empty event into a valid notification. Hash equality never
+replaces source binding, owner authorization or transport evidence.
+
+No owner-state outbox, producer routing, transport or daemon registration is
+implemented by this source-lifecycle candidate. In particular W5-D15's anonymous
+producer must not receive a claimed source. Its authority-to-note crash gap
+remains until separately reviewed transactional capture and recovery are wired.
