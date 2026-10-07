@@ -160,3 +160,26 @@ rollback recovery, bounded synchronous storage latency and external verifier
 receipts remain integration requirements. The source outbox cannot claim atomic
 capture of a vault action whose response was never observed. Full independent
 broker/threat review is required before an active handler selects this backend.
+
+## W5-D23 delegated handler routing
+
+Handlers with a privately bound backend propagate local sign-in and page-approval
+origin to the wrong-code transaction. That transaction stages the local timestamp
+and any challenge activation together with counters and lockout authority. The
+later urgent-alert path retains its wording but skips duplicate event recording.
+Text-origin checks do not acquire local timestamps. Legacy anonymous and ephemeral
+handlers retain their routes. No production constructor selects this mode yet.
+
+Challenge drops and observed silent/counted vault-limit flags commit through the
+same backend. Challenge activation is not counted again by flood/lock alert code.
+These observed flags cannot recover an external verifier action whose response
+was never received. Capture failures latch fixed recovery visibility and preserve
+backend holds. Transactional mode never consumes ephemeral TakeDigestNotes lines.
+
+FlushDigestNotes is explicit caller-driven maintenance under the channel worker
+lock: it drains ordered entries but does not deliver, consume source snapshots,
+start a scheduler, or clear conservative holds. Actual blocked source-store tests
+verify text and local STOP bypass that lock. Synchronous stores still need bounded
+latency. Constructor selection, startup recovery control availability, exclusive
+writer ownership, paired backup/downgrade and complete independent threat review
+remain prerequisites; this is not runtime or acceptance qualification.
