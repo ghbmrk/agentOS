@@ -234,7 +234,15 @@ func (s *Source) Record(e Event) error {
 }
 
 func validEvent(e Event) bool {
-	return e != (Event{}) && (e.WrongAt.IsZero() || (e.WrongAt.Year() >= 1 && e.WrongAt.Year() <= 9999))
+	if e == (Event{}) {
+		return false
+	}
+	if e.WrongAt.IsZero() {
+		return true
+	}
+	// Local year bounds alone are insufficient: an offset can move the UTC
+	// instant across the persisted representation boundary.
+	return e.WrongAt.Year() >= 1 && e.WrongAt.Year() <= 9999 && e.WrongAt.UTC().Year() >= 1 && e.WrongAt.UTC().Year() <= 9999
 }
 
 // RecordOnce admits one ordered, single-producer event. Only the latest ID
