@@ -20,6 +20,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/owner"
+	"github.com/ghbmrk/agentos/broker/recovery"
 	"github.com/ghbmrk/agentos/broker/smsapi"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 	"github.com/ghbmrk/agentos/broker/vault"
@@ -1135,13 +1136,15 @@ func (c *custody) untrust(code, id string) (int, error) {
 		return 0, err
 	}
 	n, err := c.host.remove(v, id)
-	if err != nil {
+	if err != nil || n == 0 {
 		return 0, errNoSuchHost
 	}
-	if n == 0 {
-		return 0, errNoSuchHost
+	// The slot is gone. Refresh, which needs the card, stays owed so a
+	// copy of the drive from before the removal cannot stay current (P2-8b).
+	if err := recovery.OweRefresh(&recovery.Box{V: v}, c.now()); err != nil {
+		return n, err
 	}
-	c.notify("a trusted host was removed")
+	c.notify("a trusted host was removed. Finish securing the box on my Wi-Fi page; it needs the card.")
 	return n, nil
 }
 

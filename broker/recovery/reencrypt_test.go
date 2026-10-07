@@ -394,3 +394,29 @@ func TestAFailedCommitKeepsWhatTheRefreshChanged(t *testing.T) {
 		t.Fatalf("what is in effect: %q %d", done.RecoveryKey, done.Retrust)
 	}
 }
+
+// P2-8b: removing a trusted PC owes Refresh until the card is scanned.
+// The digest says so, and Refresh clears it.
+func TestRemovingAHostOwesRefreshUntilTheCard(t *testing.T) {
+	x := newBox(t)
+	if got := RefreshDigestLine(x.b); got != "" {
+		t.Fatalf("before: %q", got)
+	}
+	if err := OweRefresh(x.b, t0); err != nil {
+		t.Fatal(err)
+	}
+	parts, ok := RotationUnfinished(x.b)
+	if !ok || fmt.Sprint(parts) != "[refresh]" {
+		t.Fatalf("owed: %v %v", parts, ok)
+	}
+	want := "A trusted PC was removed. Finish securing the box on my Wi-Fi page; it needs the card."
+	if got := RefreshDigestLine(x.b); got != want {
+		t.Fatalf("digest: %q", got)
+	}
+	if _, err := Refresh(x.b, Auth{Code: true, Local: true}, x.rk, nil, nil, t0); err != nil {
+		t.Fatal(err)
+	}
+	if got := RefreshDigestLine(x.b); got != "" {
+		t.Fatalf("after Refresh: %q", got)
+	}
+}

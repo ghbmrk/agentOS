@@ -925,3 +925,26 @@ func RotationUnfinished(b *Box) ([]Part, bool) {
 	}
 	return m.Parts, ok
 }
+
+// OweRefresh records that a trusted PC's slot is gone and Refresh has not
+// run (P2-8b). The slot is removed at once; backups stay refused and the
+// page offers Finish securing the box until the owner scans the card and
+// Refresh completes.
+func OweRefresh(b *Box, now time.Time) error {
+	if b == nil || b.V == nil {
+		return errors.New("recovery: no vault")
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return markRotation(b, []Part{PartRefresh}, false, now)
+}
+
+// RefreshDigestLine is the digest line while a removed PC's Refresh is
+// still owed, or "" once it is not.
+func RefreshDigestLine(b *Box) string {
+	parts, ok := RotationUnfinished(b)
+	if !ok || !containsPart(parts, PartRefresh) {
+		return ""
+	}
+	return "A trusted PC was removed. Finish securing the box on my Wi-Fi page; it needs the card."
+}

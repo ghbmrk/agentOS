@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/egress"
+	"github.com/ghbmrk/agentos/broker/recovery"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 	"github.com/ghbmrk/agentos/broker/tpmseal/swtpm"
 	"github.com/ghbmrk/agentos/broker/vault"
@@ -362,6 +363,13 @@ func TestRemoveTrustedHost(t *testing.T) {
 	}
 	if r.tpmSlots(t) != 0 {
 		t.Fatal("slot left after untrust")
+	}
+	parts, ok := recovery.RotationUnfinished(&recovery.Box{V: r.c.v})
+	if !ok || len(parts) != 1 || parts[0] != recovery.PartRefresh {
+		t.Fatalf("refresh not owed: %v %v", parts, ok)
+	}
+	if got := recovery.RefreshDigestLine(&recovery.Box{V: r.c.v}); !strings.Contains(got, "needs the card") {
+		t.Fatalf("digest: %q", got)
 	}
 	bootGood(r.tpm)
 	r.start(t, r.tpm)
