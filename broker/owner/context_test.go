@@ -86,3 +86,28 @@ func TestNilContextInformRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// REQ: REV-5
+func TestNestedContextCapabilityRefusalDoesNotManufactureLineFailure(t *testing.T) {
+	r := newRig(t, nil)
+	// New wraps this legacy-only modem in watchedLine. A second wrapper can
+	// delegate the optional interface and receive the inner refusal.
+	r.ch.cfg.Modem = watchedLine{Modem: r.ch.cfg.Modem, c: r.ch}
+	if err := r.ch.InformContext(context.Background(), "Fixed notice."); err != ErrContextSendUnsupported {
+		t.Fatal(err)
+	}
+	if r.ch.lineFailed.Load() != 0 {
+		t.Fatal("capability refusal recorded as transport attempt")
+	}
+}
+func TestJoinedContextErrorStillRecordsPossibleLineFailure(t *testing.T) {
+	r := newRig(t, nil)
+	line := &contextLine{Modem: r.ch.cfg.Modem, err: errors.Join(ErrContextSendUnsupported, modem.ErrDown)}
+	r.ch.cfg.Modem = watchedLine{Modem: line, c: r.ch}
+	if err := r.ch.InformContext(context.Background(), "Fixed notice."); !errors.Is(err, modem.ErrDown) {
+		t.Fatal(err)
+	}
+	if r.ch.lineFailed.Load() != r.ch.cfg.Now().UnixNano() {
+		t.Fatal("ambiguous transport failure lost provenance")
+	}
+}

@@ -76,7 +76,10 @@ func (w watchedLine) SendContext(ctx context.Context, to, text string) error {
 		return ErrContextSendUnsupported
 	}
 	err := sender.SendContext(ctx, to, text)
-	if err != nil {
+	// A nested watched modem may expose ContextSender but refuse before any
+	// transport call. Only that exact sentinel is non-attempt evidence:
+	// joined/wrapped errors may still include an actual line failure.
+	if err != nil && err != ErrContextSendUnsupported {
 		w.c.lineFailed.Store(w.c.cfg.Now().UnixNano())
 	}
 	return err
