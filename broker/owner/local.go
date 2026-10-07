@@ -343,9 +343,11 @@ func (c *Channel) lockAlertsLocked(locked bool, now time.Time) []string {
 // LocalStop is STOP from the local UI. Like STOP by text it needs no code,
 // since its worst case is a pause (CH-3).
 func (c *Channel) LocalStop(ctx context.Context) error {
-	c.mu.Lock()
-	c.resume = nil
-	c.mu.Unlock()
+	// Share text STOP's containment order and generation barrier. Do not
+	// wait for c.mu: a code verifier or notification store may be stalled.
+	c.stopMu.Lock()
+	defer c.stopMu.Unlock()
+	c.stops.Add(1)
 	_, err := c.cfg.Engine.Stop(ctx)
 	if err != nil && !c.cfg.Engine.Stopped() {
 		return err
@@ -358,6 +360,9 @@ func (c *Channel) LocalStop(ctx context.Context) error {
 // texted code CH-11 asks for, so no further code is needed. A texted RESUME
 // code issued earlier is voided.
 func (c *Channel) LocalResume() (string, error) {
+	// A local request waiting behind owner-state work is older than a STOP
+	// that arrived meanwhile, just like an in-flight coded RESUME.
+	gen := c.stops.Load()
 	// c.mu spans the resume and the fresh windows, so no release slips
 	// between them (L3 on #76), as on the text path.
 	c.mu.Lock()
@@ -366,7 +371,7 @@ func (c *Channel) LocalResume() (string, error) {
 	if !c.cfg.Engine.Stopped() {
 		return "Not stopped. Nothing to resume.", nil
 	}
-	if err := c.cfg.Engine.Resume(); err != nil {
+	if err := c.resumeUnlessStopped(gen); err != nil {
 		return "", fmt.Errorf("owner: resume failed to record, still stopped: %w", err)
 	}
 	return "Resumed. Stopped actions may now run." + c.rewindowLocked(c.cfg.Now()), nil
