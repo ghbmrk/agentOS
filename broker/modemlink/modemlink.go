@@ -86,6 +86,11 @@ type item struct {
 	bridgeproto.Item
 	result chan string   // nil: nobody waits (the recovery text)
 	handed chan struct{} // closed when a poll takes it; nil with result
+	// bump hears each SendFirst that went ahead of it while queued, so
+	// its wait grows by one SendWait; nil with result.
+	bump chan struct{}
+	// first: queued by SendFirst; later replies queue behind it.
+	first bool
 }
 
 // Link is agentosd's end of the modem bridge.
@@ -215,19 +220,23 @@ func newID() string {
 // or modem.ErrDown when the owner line is down, swapped or unbound, the
 // bridge is silent or full, or the text did not go. A text that could not
 // go while the line was unusable is counted for the recovery text.
-func (l *Link) Send(to, text string) error { return l.send(to, text, false) }
+func (l *Link) Send(to, text string) error { return l.send(to, text, false, false) }
 
 // SendRequest is Send for an approval request (owner.RequestSender), so
 // the recovery text can count requests apart.
-func (l *Link) SendRequest(to, text string) error { return l.send(to, text, true) }
+func (l *Link) SendRequest(to, text string) error { return l.send(to, text, true, false) }
 
-func (l *Link) send(to, text string, request bool) error {
+func (l *Link) send(to, text string, request, first bool) error {
 	if to != l.cfg.Owner {
 		return ErrRecipient
 	}
 	now := l.cfg.Now()
 	l.mu.Lock()
-	if !l.usableLocked(now) || len(l.queue)+len(l.out) >= MaxQueued {
+	limit := MaxQueued
+	if first {
+		limit += FirstSlack
+	}
+	if !l.usableLocked(now) || len(l.queue)+len(l.out) >= limit {
 		if l.outage != nil {
 			l.outage.Missed++
 			if request {
@@ -238,25 +247,39 @@ func (l *Link) send(to, text string, request bool) error {
 		return modem.ErrDown
 	}
 	it := &item{Item: bridgeproto.Item{ID: newID(), Line: bridgeproto.LineOwner, To: l.cfg.Owner, Text: text},
-		result: make(chan string, 1), handed: make(chan struct{})}
+		result: make(chan string, 1), handed: make(chan struct{}), bump: make(chan struct{}, MaxQueued+FirstSlack)}
 	ahead := len(l.queue) + len(l.out)
-	l.queue = append(l.queue, it)
+	if first {
+		ahead = len(l.out)
+		l.aheadLocked(it)
+	} else {
+		l.queue = append(l.queue, it)
+	}
 	l.wakeLocked()
 	l.mu.Unlock()
 	// SendWait runs from when the bridge takes the text: the bridge sends
 	// one at a time, so the texts ahead may each take up to SendWait (L3
-	// on #170).
-	t := time.NewTimer(time.Duration(ahead+1) * l.cfg.SendWait)
+	// on #170). A reply that went ahead adds one more.
+	deadline := time.Now().Add(time.Duration(ahead+1) * l.cfg.SendWait)
+	t := time.NewTimer(time.Until(deadline))
 	defer t.Stop()
-	select {
-	case <-it.handed:
-		t.Reset(l.cfg.SendWait)
-	case <-t.C:
-		l.mu.Lock()
-		l.dropLocked(it)
-		l.timedOut++
-		l.mu.Unlock()
-		return modem.ErrDown
+wait:
+	for {
+		select {
+		case <-it.handed:
+			t.Reset(l.cfg.SendWait)
+			break wait
+		case <-it.bump:
+			// Go 1.23+ timers: Reset drops any expiry not yet received.
+			deadline = deadline.Add(l.cfg.SendWait)
+			t.Reset(time.Until(deadline))
+		case <-t.C:
+			l.mu.Lock()
+			l.dropLocked(it)
+			l.timedOut++
+			l.mu.Unlock()
+			return modem.ErrDown
+		}
 	}
 	select {
 	case code := <-it.result:
