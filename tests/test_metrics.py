@@ -146,6 +146,10 @@ class ComputeTest(unittest.TestCase):
         self.assertEqual((w1["first_pass_ok"], w1["first_pass_n"]), (1, 2))
         self.assertEqual(w1["no_verdict"], [3])
 
+    def test_review_rounds_count_every_verdict_on_judged_prs(self):
+        # #1 took fix-list then accept, #2 accept; #3 has no verdict and is left out.
+        self.assertEqual(self.weeks["2026-10-04"]["rounds"], 3)
+
     def test_escalation_rate_is_cumulative_and_counts_past_escalations(self):
         self.assertEqual((self.weeks["2026-10-04"]["escalated"], self.weeks["2026-10-04"]["reviewed"]), (1, 2))
         # B left escalated, but it was escalated once; C and D reached merged.
