@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(/var/lib/agentos/provider-login/**)",
+      "Edit(/var/lib/agentos/provider-login/**)",
+      "Write(/var/lib/agentos/provider-login/**)",
+      "Bash(cat /var/lib/agentos/provider-login/*)",
+      "Bash(cat /proc/*/environ)",
+      "Bash(head /proc/*/environ)",
+      "Bash(xxd /proc/*/environ)",
+      "Bash(od /proc/*/environ)",
+      "Bash(strings /proc/*/environ)",
+      "Bash(curl *)",
+      "Bash(wget *)",
+      "Bash(nc *)",
+      "Bash(python -c *socket*)",
+      "WebFetch",
+      "WebSearch"
+    ]
+  }
+}
