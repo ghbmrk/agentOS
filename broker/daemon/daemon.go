@@ -289,6 +289,9 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 	} else {
 		gate.Attach(eng, nil)
 	}
+	// Settle staged copies a restart left behind before Boot cancels the
+	// holds it dropped (grants Sweep, reversible RV11).
+	gate.Sweep()
 
 	var modemUID *int
 	if cfg.ModemUID >= 0 {
