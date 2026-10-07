@@ -221,12 +221,70 @@ func (l *Link) Send(to, text string) error { return l.send(to, text, false) }
 // the recovery text can count requests apart.
 func (l *Link) SendRequest(to, text string) error { return l.send(to, text, true) }
 
+// ErrSendContext marks an absent caller cancellation context.
+var ErrSendContext = errors.New("modemlink: send context is required")
+
+// SendCanceledError retains whether the bridge ever took this local item.
+// Handed means possibly sent, never proof of delivery or owner visibility.
+// ItemID is local correlation, not send/approval authority.
+type SendCanceledError struct {
+	Cause  error
+	ItemID string
+	Handed bool
+}
+
+func (e *SendCanceledError) Error() string { return "modemlink: send canceled: " + e.Cause.Error() }
+func (e *SendCanceledError) Unwrap() error { return e.Cause }
+
+// SendContext is Send with cooperative cancellation. Canceling drops the local
+// item; it cannot undo a text already handed to the bridge.
+func (l *Link) SendContext(ctx context.Context, to, text string) error {
+	return l.sendContext(ctx, to, text, false)
+}
+
+// SendRequestContext retains request counting and the fixed owner restriction.
+func (l *Link) SendRequestContext(ctx context.Context, to, text string) error {
+	return l.sendContext(ctx, to, text, true)
+}
+func (l *Link) cancelSend(cause error, it *item) error {
+	err := &SendCanceledError{Cause: cause}
+	if it == nil {
+		return err
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	err.ItemID = it.ID
+	// The closed handed channel is permanent evidence, unlike membership in out
+	// which can disappear after a result or cancellation.
+	select {
+	case <-it.handed:
+		err.Handed = true
+	default:
+	}
+	l.dropLocked(it)
+	return err
+}
 func (l *Link) send(to, text string, request bool) error {
+	return l.sendContext(context.Background(), to, text, request)
+}
+
+func (l *Link) sendContext(ctx context.Context, to, text string, request bool) error {
+	if ctx == nil {
+		return ErrSendContext
+	}
+
 	if to != l.cfg.Owner {
 		return ErrRecipient
 	}
+	if err := ctx.Err(); err != nil {
+		return l.cancelSend(err, nil)
+	}
 	now := l.cfg.Now()
 	l.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		l.mu.Unlock()
+		return l.cancelSend(err, nil)
+	}
 	if !l.usableLocked(now) || len(l.queue)+len(l.out) >= MaxQueued {
 		if l.outage != nil {
 			l.outage.Missed++
@@ -249,6 +307,8 @@ func (l *Link) send(to, text string, request bool) error {
 	t := time.NewTimer(time.Duration(ahead+1) * l.cfg.SendWait)
 	defer t.Stop()
 	select {
+	case <-ctx.Done():
+		return l.cancelSend(ctx.Err(), it)
 	case <-it.handed:
 		t.Reset(l.cfg.SendWait)
 	case <-t.C:
@@ -259,6 +319,8 @@ func (l *Link) send(to, text string, request bool) error {
 		return modem.ErrDown
 	}
 	select {
+	case <-ctx.Done():
+		return l.cancelSend(ctx.Err(), it)
 	case code := <-it.result:
 		if code == bridgeproto.CodeOK {
 			return nil
