@@ -288,7 +288,15 @@ func (p *Pipeline) digestEntriesLocked() []digestEntry {
 	}
 	for _, a := range p.st.Adoptions {
 		if !a.Listed {
-			line := p.what(a) + "." + testedText(a.Score)
+			line := p.what(a)
+			// A skill that removes a procedure replaces the step-by-step
+			// version; say so only when UNDO can bring that version back
+			// (UX on #74, P3-6d). Both the legacy reader and PeekDigest
+			// use this renderer.
+			if p.replacesProcedure(a) && p.undoableLocked(a) {
+				line += " (replaces the step-by-step version; undo brings it back)"
+			}
+			line += "." + testedText(a.Score)
 			switch a.Basis {
 			case BasisOwner:
 				line += " You approved it."

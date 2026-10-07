@@ -194,6 +194,55 @@ func TestSnapshotRendererMatchesLegacyDigest(t *testing.T) {
 	}
 }
 
+// P3-6d: the shared renderer, not only the old Digest loop, says a skill
+// that removes a procedure can be undone. The legacy reader and the
+// nonconsuming snapshot both show it, and a second peek still does.
+func TestProcedureReplacementIsInBothDigestReaders(t *testing.T) {
+	phrase := "(replaces the step-by-step version; undo brings it back)"
+	adoption := func() []*Adoption {
+		return []*Adoption{{
+			Short:   "A1",
+			Classes: []Class{ClassSkill},
+			Basis:   BasisStanding,
+			Edits: []Edit{
+				{Path: "procedures/file", Before: []byte("step by step")},
+				{Path: "skills/greet", After: []byte("hello")},
+			},
+			Score: Score{HeldOut: 4, Passed: 4, BaselinePassed: 4},
+		}}
+	}
+	legacy := newEnv(t, nil)
+	legacy.p.st.Active = Tree{"skills/greet": []byte("hello")}
+	legacy.p.st.Adoptions = adoption()
+	d := legacy.p.Digest()
+	if len(d) != 1 || !strings.Contains(d[0], phrase) || !strings.Contains(d[0], "UNDO A1") {
+		t.Fatalf("legacy: %q", d)
+	}
+	snap := newEnv(t, nil)
+	snap.p.st.Active = Tree{"skills/greet": []byte("hello")}
+	snap.p.st.Adoptions = adoption()
+	s, err := snap.p.PeekDigest()
+	if err != nil || s == nil || len(s.Lines) != 1 || !strings.Contains(s.Lines[0], phrase) {
+		t.Fatalf("snapshot: %v %v", s, err)
+	}
+	again, err := snap.p.PeekDigest()
+	if err != nil || again == nil || len(again.Lines) != 1 || !strings.Contains(again.Lines[0], phrase) {
+		t.Fatalf("second peek consumed it: %v %v", again, err)
+	}
+	plain := newEnv(t, nil)
+	plain.p.st.Active = Tree{"skills/greet": []byte("hello!")}
+	plain.p.st.Adoptions = []*Adoption{{
+		Short:   "A2",
+		Classes: []Class{ClassSkill},
+		Basis:   BasisStanding,
+		Edits:   []Edit{{Path: "skills/greet", Before: []byte("hello"), After: []byte("hello!")}},
+		Score:   Score{HeldOut: 4, Passed: 4, BaselinePassed: 4},
+	}}
+	if lines := plain.p.Digest(); len(lines) != 1 || strings.Contains(lines[0], phrase) {
+		t.Fatalf("no procedure removed: %q", lines)
+	}
+}
+
 // REQ: CAP-3
 func TestForgetInvalidatesPendingGoalSnapshot(t *testing.T) {
 	e := newEnv(t, nil)

@@ -123,6 +123,27 @@ func (p *Pipeline) what(a *Adoption) string {
 	return "Improved how a task is done"
 }
 
+// replacesProcedure reports a skill adoption that removed a procedure file.
+// A forgotten file is not that replacement (P3-6d, upstream #194).
+func (p *Pipeline) replacesProcedure(a *Adoption) bool {
+	skill := false
+	for _, c := range a.Classes {
+		if c == ClassSkill {
+			skill = true
+		}
+	}
+	if !skill {
+		return false
+	}
+	for _, e := range a.Edits {
+		if e.Forgotten || namespace(e.Path) != "procedures" || e.After != nil || len(e.Before) == 0 {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 // primaryChange names, per task class, a change of first route provider or
 // a dropped local fallback (arbitrator R1); "" when there is none.
 func (p *Pipeline) primaryChange(before, after []byte) string {
