@@ -37,3 +37,61 @@ carrier/owner evidence and acceptance. No queue adapter, sender, timer or daemon
 is enabled here. Full STOP/forget/pacing/quiet policy and complete text rendering
 remain integration gates. Strongest independent broker/security review and an
 explicit threat check are required before wiring this opt-in configuration.
+
+## W5-D20 transactional owner-state outbox foundation
+
+`NewDigestOutbox` is a standalone, explicitly composed single-writer coordinator
+for the owner Store. It embeds at most 128 typed unretired events, a private source
+binding and a producer floor/hash inside State. `Commit(event, mutate)` saves a
+copy containing **both** the authority mutation and its outbox event through one
+owner Store.Save. `Update(mutate)` saves an authority-only mutation while retaining
+all outbox metadata. Neither callback may have external side effects or rewrite
+outbox fields. State and MemStore copy the complete nested metadata and entries;
+caller-owned arrays and callbacks cannot change a confirmed stored transaction.
+
+This coordinator is not used by existing Channel handlers or agentosd. Do not run
+it concurrently with Channel, another coordinator or another writer to the same
+Store. A future handler integration must delegate **every** authority mutation to
+one coordinator, classify the guard event at the actual code-state transition,
+and preserve code replay limits, lockouts, urgent alerts and immediate STOP.
+Calling Commit from after an existing authority save would reintroduce the gap.
+Current W5-D15 anonymous recording remains unchanged and retains its original gap.
+There is no claim of retroactive event capture before this coordinator is opened.
+
+Opening validates the retained outbox, durably claims ordered source mode, verifies
+the source binding and checkpoint, and re-saves observed owner State before use.
+An empty outbox may pair only with source sequence zero. A retained outbox accepts
+its exact acknowledged floor/hash, or exactly its first pending ID/hash already
+saved by that source. Source reset, another key, a source behind the floor, more
+than one event ahead, a changed pending event or missing retained metadata holds
+for explicit recovery. Do not reset IDs, discard backlog, edit hashes or invent a
+new binding to force open. Backup skew and downgrade need a reviewed migration.
+Older owner binaries ignore unknown State fields and can erase this outbox; no
+rollback/deployment is qualified. Restoring the source key can restore its binding,
+so the floor/hash checks remain necessary alongside binding equality.
+
+Flush processes retained IDs in order: source RecordOnce confirmation → owner
+retirement save → next event. A source digest may be acknowledged before an
+uncertain retirement is recovered; replay still retires the exact producer ID
+without restoring its consumed counts. Source failures retain all authority-side
+entries and permit later transactions until the bounded backlog is full. Source
+health is inspectable separately. Full capacity and producer wrap refuse a guard
+transaction **before its callback**; no entry is evicted or silently coalesced.
+How capacity refusal maps to conservative code/lockout policy is an integration
+review decision, not a new automatic handler behavior here.
+
+Any owner Store.Save error quarantines the coordinator: State, Commit, Update and
+Flush refuse until fresh owner/source objects are reopened and observed state is
+confirmed. A source mismatch also quarantines it. A source save error quarantines
+that source, and cannot itself erase retained authority entries. Flush checks
+cancellation between synchronous store calls; it does not interrupt a hung store.
+Bounded storage latency, private encrypted storage, one-writer exclusion, resource
+admission, retention/forget and STOP/dispatch integration remain prerequisites.
+
+The actual-file fault tests inject errors before and after owner transaction save,
+source ingestion and owner retirement. Independent objects verify that authority
+and pending events cannot tear across one owner replacement, and source replay
+counts once across retirement uncertainty. These are caller-error cuts around
+real atomic FileStores, not power loss, media fault or hardware qualification.
+No code verifier, model, modem, sender, scheduler, queue consumer or carrier runs.
+Strongest independent broker review and an explicit threat check are required.

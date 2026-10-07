@@ -13,6 +13,9 @@ import (
 // reboot cannot reopen a used grid cell, replay a used code-generator step,
 // forget recent wrong codes, or drop a lockout (CH-18).
 type State struct {
+	// DigestOutbox is opt-in private guard-notification transaction metadata.
+	// Existing Channel handlers do not create or route through it.
+	DigestOutbox *DigestOutboxState `json:"digest_outbox,omitempty"`
 	// UnlockedUntil ends the current session unlock (CH-3, CH-14).
 	UnlockedUntil time.Time `json:"unlocked_until"`
 	// Locks counts session locks. Anything signed in under an earlier
@@ -101,6 +104,7 @@ func (m *MemStore) Save(s State) error {
 }
 
 func copyState(s State) State {
+	s.DigestOutbox = copyDigestOutbox(s.DigestOutbox)
 	s.GridUsed = append([]string(nil), s.GridUsed...)
 	s.Wrong = append([]time.Time(nil), s.Wrong...)
 	s.LocalSignIns = append([]time.Time(nil), s.LocalSignIns...)
