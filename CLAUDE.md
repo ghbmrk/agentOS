@@ -23,6 +23,10 @@ Read SPEC.md for what to build and PLAN.md for how. This file is the working con
 - The only hard limit is the subscription (usage credits off). Target: ~100% of the weekly limit used by each reset, paced evenly at ~14% a day so it never runs out early (Mark, 2026-10-04); these are targets: spend where the next unit of work has clear value, don't idle to stay on pace, and don't spend just because budget remains.
 - Near a session-window limit, finish the current step cleanly; start heavy new work after the reset.
 - Keep contexts small: brief + touched files. Summarize CI logs instead of pasting them.
+- Context size is the main cost: every call rereads the whole context, and cache reads were 54% of the 2026-10-04 week's spend (COST-1). `.claude/settings.json` compacts at 200k tokens; don't raise it.
+- One package or one review per session. Start a fresh session with a handoff of 20k tokens or less (task, failing check and its output, the files that matter, what was tried) rather than reviving a session over ~150k that sat idle more than an hour: its whole context is rewritten to cache on wake.
+- Mechanical subagent work (search, log triage, wording sweeps, test scaffolding) passes `model: "haiku"` and stays under 100k tokens, above which Haiku costs 5x; use `"sonnet"` when it needs judgment. Reviews of security-critical paths keep the session's model.
+- Read tool output narrowly (grep, tail, `go test -run`), never whole CI logs or large files. Send cross-session messages for decisions, blockers and hand-offs only; progress goes in the status checklist.
 
 ## Repository conventions
 - Branch per package: `pkg/<id>-<slug>-<suffix>`. The coordinator sets the `pkg/<id>-<slug>` stem when it starts a thread; the server appends a session-unique suffix. Threads started without a stem keep their assigned `claude/…` branch, and the PR title starts with the package ID (DECISIONS.md). PRs use the template's trace table.
