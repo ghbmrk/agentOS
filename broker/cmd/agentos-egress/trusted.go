@@ -952,7 +952,7 @@ func (h *tpmHost) giveBack(v *vault.Vault, t transport.TPM, id []byte) {
 			return
 		}
 		if err := v.Delete(name); err != nil {
-			h.say("couldn't remove the box's copy of the TPM lockout from the vault: " + err.Error())
+			h.sayErr("couldn't remove the box's copy of the TPM lockout from the vault; I'll try again at the next restart", err)
 			return
 		}
 	}
@@ -986,7 +986,7 @@ func (h *tpmHost) restoreDA(v *vault.Vault, t transport.TPM, id []byte) {
 		return
 	}
 	if err := v.Delete(name); err != nil {
-		h.say("couldn't remove the box's copy of this PC's security chip settings from the vault: " + err.Error())
+		h.sayErr("couldn't remove the box's copy of this PC's security chip settings from the vault; I'll try again at the next restart", err)
 	}
 }
 
@@ -1003,6 +1003,13 @@ func (h *tpmHost) say(s string) {
 	if h.notify != nil {
 		h.notify(s)
 	}
+}
+
+// sayErr tells the owner a fixed sentence. The error can name a vault
+// path, so it goes to the log and not into the text (CH-12).
+func (h *tpmHost) sayErr(sentence string, err error) {
+	log.Printf("custody: %s: %v", sentence, err)
+	h.say(sentence)
 }
 
 func (h *tpmHost) list() ([]hostInfo, error) {
