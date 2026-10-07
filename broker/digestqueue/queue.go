@@ -63,6 +63,8 @@ type Snapshot struct {
 	Hash       string   `json:"hash"`
 	Lines      []string `json:"lines"`
 	References []string `json:"references,omitempty"`
+	// Receipt is bounded broker-private source recovery metadata; never text it.
+	Receipt string `json:"receipt,omitempty"`
 }
 
 var name = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
@@ -75,7 +77,27 @@ func NewSnapshot(source string, generation uint64, lines, refs []string) (Snapsh
 	s.Hash = s.hash()
 	return s, nil
 }
+
+// NewSnapshotWithReceipt binds bounded source recovery metadata to the same
+// source/generation/lines/references. Only that trusted source can validate its
+// receipt. It must not contain credentials or be sent as owner-facing text.
+func NewSnapshotWithReceipt(source string, generation uint64, lines, refs []string, receipt string) (Snapshot, error) {
+	s, err := NewSnapshot(source, generation, lines, refs)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	s.Receipt = receipt
+	if receipt == "" || !s.validContent() {
+		return Snapshot{}, ErrInvalid
+	}
+	s.Hash = s.hash()
+	return s, nil
+}
+
 func (s Snapshot) validContent() bool {
+	if len(s.Receipt) > 128<<10 || !utf8.ValidString(s.Receipt) {
+		return false
+	}
 	if !name.MatchString(s.Source) || s.Generation == 0 || len(s.Lines) == 0 || len(s.Lines) > 64 || len(s.References) > 64 {
 		return false
 	}

@@ -603,3 +603,27 @@ func TestExistingFileStoreRestartsWithPrivateState(t *testing.T) {
 		t.Fatal(info.Mode())
 	}
 }
+
+func TestPrivateSourceReceiptIsBoundedAndBoundToPayload(t *testing.T) {
+	s, err := NewSnapshotWithReceipt("change", 1, []string{"Notice."}, nil, `{"source":"synthetic"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q, _ := queue(t)
+	b, err := q.Enqueue([]Snapshot{s}, at, at.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := q.Get(b.ID)
+	if err != nil || got.Snapshots[0].Receipt != s.Receipt {
+		t.Fatal(got, err)
+	}
+	s.Receipt = "changed"
+	if _, err = q.Enqueue([]Snapshot{s}, at, at.Add(time.Hour)); !errors.Is(err, ErrInvalid) {
+		t.Fatal("changed receipt accepted", err)
+	}
+	huge := string(make([]byte, (128<<10)+1))
+	if _, err = NewSnapshotWithReceipt("change", 2, []string{"Notice."}, nil, huge); !errors.Is(err, ErrInvalid) {
+		t.Fatal("oversized receipt accepted", err)
+	}
+}
