@@ -268,10 +268,11 @@ func (e *entry) pastAskBy(now time.Time) bool {
 func (e *entry) tagged() bool { return e.open() || e.texted() }
 
 type file struct {
-	Next      int      `json:"next"`
-	Questions []*entry `json:"questions"`
-	Digest    []string `json:"digest"`
-	Refused   int      `json:"refused,omitempty"`
+	DigestSource *digestState `json:"digest_source,omitempty"`
+	Next         int          `json:"next"`
+	Questions    []*entry     `json:"questions"`
+	Digest       []string     `json:"digest"`
+	Refused      int          `json:"refused,omitempty"`
 	// NotAskedLines and NotAskedMore count not-asked digest lines pending
 	// and those past maxNotAskedLines, which the digest only counts.
 	NotAskedLines int    `json:"not_asked_lines,omitempty"`
@@ -293,12 +294,14 @@ type send struct {
 
 // Book holds the box's questions.
 type Book struct {
-	cfg    Config
-	sendMu sync.Mutex // one sender at a time, so no question is texted twice
-	mu     sync.Mutex
-	qs     []*entry
-	next   int
-	digest []string
+	digestSource digestState
+	digestBroken error
+	cfg          Config
+	sendMu       sync.Mutex // one sender at a time, so no question is texted twice
+	mu           sync.Mutex
+	qs           []*entry
+	next         int
+	digest       []string
 	// refused counts answers refused as code- or key-shaped since the last
 	// digest: a guard hit the owner should see (security R1 on #71).
 	refused int
@@ -379,6 +382,12 @@ func New(cfg Config) (*Book, error) {
 		}
 		b.qs, b.next, b.digest, b.sends, b.refused = f.Questions, f.Next, f.Digest, f.Sends, f.Refused
 		b.notAskedLines, b.notAskedMore = f.NotAskedLines, f.NotAskedMore
+		if f.DigestSource != nil {
+			b.digestSource = *f.DigestSource
+		}
+		if err := b.checkDigestSource(); err != nil {
+			return nil, err
+		}
 		b.loaded = len(b.qs) > 0
 		m := cfg.Mono()
 		for _, e := range b.qs {
@@ -402,7 +411,7 @@ func (b *Book) persist() error {
 		return nil
 	}
 	raw, err := json.Marshal(file{Next: b.next, Questions: b.qs, Digest: b.digest, Sends: b.sends, Refused: b.refused,
-		NotAskedLines: b.notAskedLines, NotAskedMore: b.notAskedMore})
+		NotAskedLines: b.notAskedLines, NotAskedMore: b.notAskedMore, DigestSource: b.digestDiskState()})
 	if err != nil {
 		return err
 	}
@@ -1252,17 +1261,10 @@ func (b *Book) Run(ctx context.Context, every time.Duration) {
 func (b *Book) TakeDigest() []string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	out := append([]string(nil), b.digest...)
-	if b.refused > 0 {
-		n := fmt.Sprintf("%d answers", b.refused)
-		if b.refused == 1 {
-			n = "1 answer"
-		}
-		out = append(out, n+" to the agent's questions held a code or key and were not passed on. If that was not you, reply STOP.")
+	if b.digestSource.Seq != 0 || b.digestBroken != nil {
+		return nil
 	}
-	if b.notAskedMore > 0 {
-		out = append(out, fmt.Sprintf("Not asked: %d more of the agent's questions were held (texts paced or quiet hours), so the agent went ahead without asking.", b.notAskedMore))
-	}
+	out := renderDigest(b.digest, b.refused, b.notAskedMore)
 	if len(out) == 0 {
 		return nil
 	}
