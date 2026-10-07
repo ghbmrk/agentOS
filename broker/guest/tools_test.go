@@ -8,6 +8,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/ghbmrk/agentos/broker/compact"
 )
 
 type fakeTools struct{ calls []string }
@@ -78,4 +80,36 @@ func TestFurtherToolsCannotShadowTheEffectTools(t *testing.T) {
 	if strings.Join(names, ",") != "effect_request,effect_status,recall_search" {
 		t.Fatalf("tools %v", names)
 	}
+}
+
+// A JSON tool result loses insignificant whitespace and nothing else.
+func TestAJSONToolResultLosesOnlyWhitespace(t *testing.T) {
+	r := newRig(t, func(c *Config) { c.Tools = prettyTools{} })
+	res := r.rpc("m1", "tools/call", map[string]any{"name": "pretty", "arguments": map[string]any{}})
+	text, _ := res["content"].([]any)[0].(map[string]any)["text"].(string)
+	if text != `{"note":"keep  spaces","n":1}` && text != `{"n":1,"note":"keep  spaces"}` {
+		// key order is the tool's order, only spaces go
+		if compact.JSON(prettyBody) != text {
+			t.Fatalf("result %q", text)
+		}
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(text), &got); err != nil || got["note"] != "keep  spaces" {
+		t.Fatalf("value %q %v", text, err)
+	}
+	if res["isError"] == true {
+		t.Fatal("error")
+	}
+}
+
+const prettyBody = "{\n  \"n\": 1,\n  \"note\": \"keep  spaces\"\n}\n"
+
+type prettyTools struct{}
+
+func (prettyTools) List() []map[string]any {
+	return []map[string]any{{"name": "pretty", "inputSchema": map[string]any{"type": "object"}}}
+}
+
+func (prettyTools) Call(context.Context, string, string, string, json.RawMessage) (string, bool, error) {
+	return prettyBody, true, nil
 }

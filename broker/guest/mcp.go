@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/compact"
 	"github.com/ghbmrk/agentos/broker/journal"
 )
 
@@ -172,6 +173,10 @@ func (p *Plane) mcp(m *machine, w http.ResponseWriter, r *http.Request) {
 // note about a failed step snapshot as its own content item, so a JSON
 // result stays whole (SR2-3s).
 func (m *machine) result(text string, isErr bool) map[string]any {
+	if !isErr {
+		// Insignificant whitespace only. Strings, keys, and number text stay.
+		text = compact.JSON(text)
+	}
 	res := toolResult(text, isErr)
 	if n := m.takeNote(); n != "" {
 		res["content"] = append(res["content"].([]map[string]string), map[string]string{"type": "text", "text": n})
