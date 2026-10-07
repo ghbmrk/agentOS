@@ -229,3 +229,4 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | ID | Package and scope | Depends on | State |
 |---|---|---|---|
 | H4 | Context packet prototype; scope: `tools/review_context.py`, `tests/test_review_context.py`, `docs/development/context-packets.md`, this brief. Fresh reviewer input, bounded explicit sources, planned new-file briefs and stale-worktree detection; no model or gate policy changes. | H0 | draft, external review pending |
+| H5 | Named test-evidence prototype; scope: `tools/gate_evidence.py`, `tests/test_gate_evidence.py`, `docs/development-review-tools.md`, this brief. Checks named outcomes and hashes separately from marker claims; never approves a gate. | H4 | draft, external review pending |
