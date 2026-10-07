@@ -375,6 +375,12 @@ func (c *Channel) LocalResume() (string, error) {
 	// between them (L3 on #76), as on the text path.
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if err := c.codes.backendReady(); err != nil {
+		if errors.Is(err, ErrDigestFull) {
+			return "Owner state needs recovery. Nothing resumed.", ErrDigestFull
+		}
+		return "Owner state needs recovery. Nothing resumed.", ErrDigestRecovery
+	}
 	c.resume = nil
 	if !c.cfg.Engine.Stopped() {
 		return "Not stopped. Nothing to resume.", nil

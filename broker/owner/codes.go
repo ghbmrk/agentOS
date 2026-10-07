@@ -4,8 +4,11 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"errors"
+	"github.com/ghbmrk/agentos/broker/digestnotes"
 	"io"
+	"math"
 	"math/big"
+	"reflect"
 	"strings"
 	"time"
 )
@@ -41,7 +44,10 @@ const (
 // failed save never leaves a step, a cell, or an unlock live in memory that
 // a restart would forget (CH-18).
 type codes struct {
-	sec Secrets
+	// Assigned only by explicit private backend composition; no Config enables it.
+	outbox        *DigestOutbox
+	outboxBlocked error
+	sec           Secrets
 	// verify, when set, checks code-generator codes where the seed is
 	// held; sec.TOTPSeed is then not used.
 	verify Verifier
@@ -69,9 +75,67 @@ type codes struct {
 	pausedUntil                 time.Time
 }
 
+// bindDigestOutbox is only valid on a fresh code-state backend. The caller
+// must serialize all code work and outbox maintenance with one owner worker.
+func (c *codes) bindDigestOutbox(out *DigestOutbox) error {
+	if out == nil {
+		return ErrDigestInvalid
+	}
+	if c.outbox != nil || !reflect.DeepEqual(c.st, State{}) || c.challenge != "" || c.unlockCh != "" || !c.verifyOffUntil.IsZero() {
+		return ErrDigestComposition
+	}
+	st, err := out.State()
+	if err != nil {
+		return err
+	}
+	c.outbox, c.st, c.store = out, st, nil
+	return nil
+}
+func (c *codes) backendReady() error {
+	if c.outbox == nil {
+		return nil
+	}
+	if c.outboxBlocked != nil {
+		return c.outboxBlocked
+	}
+	st, err := c.outbox.State()
+	if err == nil && (len(st.DigestOutbox.Pending) >= MaxDigestOutbox || st.DigestOutbox.Produced == math.MaxUint64) {
+		err = ErrDigestFull
+	}
+	if err != nil {
+		c.outboxBlocked = err
+	}
+	return err
+}
+func (c *codes) commitOutbox(event *digestnotes.Event, f func(*State)) error {
+	if err := c.backendReady(); err != nil {
+		return err
+	}
+	var err error
+	if event == nil {
+		err = c.outbox.Update(f)
+	} else {
+		err = c.outbox.Commit(*event, f)
+	}
+	if err != nil {
+		c.outboxBlocked = err
+		return err
+	}
+	next, err := c.outbox.State()
+	if err != nil {
+		c.outboxBlocked = err
+		return err
+	}
+	c.st = next
+	return nil
+}
+
 // commit applies f to a copy of the state, saves it, and keeps it only if
 // the save succeeded.
 func (c *codes) commit(f func(*State)) error {
+	if c.outbox != nil {
+		return c.commitOutbox(nil, f)
+	}
 	next := copyState(c.st)
 	f(&next)
 	if err := c.store.Save(next); err != nil {
@@ -91,6 +155,9 @@ const (
 
 // strongOpts says what a successful strong code does besides being spent.
 type strongOpts struct {
+	// local identifies a wrong check originating on the local UI. Handler
+	// propagation is a separate integration; only the explicit backend uses it.
+	local bool
 	// unlock extends the session unlock to now+unlock (0: no change).
 	unlock time.Duration
 	// count records a failure as a wrong code.
@@ -158,6 +225,9 @@ func (c *codes) matchStrong(got string, now time.Time, silent bool) (ok bool, st
 // neither is counted. locked reports that this wrong code crossed
 // WrongToLock.
 func (c *codes) checkStrong(got string, now time.Time, o strongOpts) (res strongResult, locked bool, err error) {
+	if err := c.backendReady(); err != nil {
+		return strongWrong, false, err
+	}
 	if !o.proof && strings.HasPrefix(got, UnlockProofPrefix) {
 		// Refused before the vault process sees it, and not counted.
 		return strongWrong, false, nil
@@ -170,7 +240,7 @@ func (c *codes) checkStrong(got string, now time.Time, o strongOpts) (res strong
 		if !o.count {
 			return strongWrong, false, nil
 		}
-		locked, err = c.wrong(now)
+		locked, err = c.wrongOrigin(now, o.local)
 		return strongWrong, locked, err
 	}
 	err = c.commit(func(s *State) {
@@ -201,34 +271,50 @@ func (c *codes) checkStrong(got string, now time.Time, o strongOpts) (res strong
 // crossed WrongToLock: the low tier is off and the session is locked. The
 // in-memory state takes the stricter values even if the save fails.
 func (c *codes) wrong(now time.Time) (locked bool, err error) {
-	err = c.commit(func(s *State) {
-		s.Wrong = append(recent(s.Wrong, now), now)
-		since := 0
-		for _, t := range s.Wrong {
-			if t.After(s.ClearedAt) {
-				since++
-			}
+	return c.wrongOrigin(now, false)
+}
+func (c *codes) wrongOrigin(now time.Time, local bool) (locked bool, err error) {
+	next := copyState(c.st)
+	next.Wrong = append(recent(next.Wrong, now), now)
+	since := 0
+	for _, at := range next.Wrong {
+		if at.After(next.ClearedAt) {
+			since++
 		}
-		if since >= WrongToLock && !s.LowLocked {
-			s.LowLocked = true
-			s.UnlockedUntil = time.Time{}
-			s.Locks++
-			locked = true
-		}
-		if since >= WrongToChallenge && !s.Challenged {
-			s.Challenged = true
-			c.justChallenged = true
-		}
-	})
+	}
+	if since >= WrongToLock && !next.LowLocked {
+		next.LowLocked = true
+		next.UnlockedUntil = time.Time{}
+		next.Locks++
+		locked = true
+	}
+	challenged := since >= WrongToChallenge && !next.Challenged
+	if challenged {
+		next.Challenged = true
+	}
+	// The mutation writes only authority fields, preserving any newer outbox
+	// floor established by maintenance. Component flags change after the save.
+	mutate := func(st *State) {
+		st.Wrong = append([]time.Time(nil), next.Wrong...)
+		st.LowLocked, st.UnlockedUntil, st.Locks = next.LowLocked, next.UnlockedUntil, next.Locks
+		st.Challenged = next.Challenged
+	}
+	event := digestnotes.Event{Challenge: challenged}
+	if local {
+		event.WrongAt = now
+	}
+	if c.outbox != nil && (challenged || local) {
+		err = c.commitOutbox(&event, mutate)
+	} else {
+		err = c.commit(mutate)
+	}
+	if challenged {
+		c.justChallenged = true
+	}
 	if err != nil {
-		c.st.Wrong = append(recent(c.st.Wrong, now), now)
-		if locked {
-			c.st.LowLocked, c.st.UnlockedUntil = true, time.Time{}
-			c.st.Locks++
-		}
-		if c.justChallenged {
-			c.st.Challenged = true
-		}
+		// Rejections, capacity refusal and uncertain saves cannot weaken live
+		// containment. The explicit backend additionally holds all new authority.
+		mutate(&c.st)
 	}
 	return locked, err
 }
@@ -316,7 +402,9 @@ func (c *codes) gridUsed(label string) bool {
 	return false
 }
 
-func (c *codes) unlocked(now time.Time) bool { return now.Before(c.st.UnlockedUntil) }
+func (c *codes) unlocked(now time.Time) bool {
+	return c.backendReady() == nil && now.Before(c.st.UnlockedUntil)
+}
 
 // lock ends the session unlock (boot on an unknown host, CH-14). Memory is
 // locked even if the save fails.

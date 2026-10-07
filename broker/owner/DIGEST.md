@@ -121,3 +121,42 @@ and recovery checks; later successful records cannot silently erase evidence of 
 missed event. It is not durable event retention, does not reconstruct that missed
 event after a crash, and does not close the anonymous producer's transaction gap.
 Source registration and lifecycle remain trusted single-writer composition.
+
+## W5-D22 code-state backend delegation
+
+A fresh private codes backend can explicitly bind one DigestOutbox coordinator.
+Every codes.commit then delegates through that coordinator, and its confirmed
+State refreshes the backend view. A newer outbox acknowledgment made by serialized
+maintenance is preserved, rather than overwritten by stale copied metadata.
+Binding a live/nonempty backend or rebinding an existing one is refused.
+No Config field, constructor route or daemon enables this private binding here.
+
+The actual wrong-code transition computes its stricter state without mutating
+component flags inside the transaction callback. Challenge activation is staged
+with that same wrong-counter/lockout transaction. A local-origin strong check
+also stages WrongAt in that transaction. Existing local/page handlers do not yet
+propagate that origin bit into an enabled backend, and their anonymous post-check
+recording remains unchanged. Complete handler integration must propagate origin,
+stage drop/vault-limit events once, and remove duplicate recording only in the
+explicitly selected transactional mode.
+
+Uncertain owner saves, full/wrapped backlog and backend errors latch a conservative
+hold. Strong checks refuse before calling the verifier; texted-code matching,
+session unlock checks and signed-in local RESUME refuse too. Failed wrong-code
+writes retain the stricter in-memory counters/locks/challenge state. Draining the
+outbox does not silently clear a held backend: fresh verified composition/recovery
+is required. Note-source failure alone does not hold otherwise healthy authority
+transactions while backlog remains available. Successful generator use survives
+reopen and remains single-use; uncertain strong success never grants from heap.
+Local RESUME returns fixed error classes and says "Nothing resumed", without
+leaking private store paths or claiming that a running engine is already stopped.
+Immediate local STOP bypasses backend state, as before.
+
+These are actual code-state-backend tests, including both sides of an owner-file
+replacement, rather than a complete running-channel deployment. Startup STOP and
+STATUS availability when coordinator opening fails, single-writer serialization,
+handler transition classification, duplicate-source exclusion, paired backup and
+rollback recovery, bounded synchronous storage latency and external verifier
+receipts remain integration requirements. The source outbox cannot claim atomic
+capture of a vault action whose response was never observed. Full independent
+broker/threat review is required before an active handler selects this backend.
