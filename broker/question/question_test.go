@@ -764,3 +764,20 @@ func TestOneRefusedAnswerReadsSingular(t *testing.T) {
 		t.Fatalf("digest %q", d)
 	}
 }
+
+// A failed store must not hand the guest the path (os errors name it).
+func TestAStoreFailureDoesNotNameThePath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "missing", "questions.json")
+	r := newRig(t, func(c *Config) { c.Path = path })
+	_, err := r.b.Ask(context.Background(), "lin1", "q", slot())
+	if err == nil || strings.Contains(err.Error(), dir) || strings.Contains(err.Error(), "missing") || strings.Contains(err.Error(), "/") {
+		t.Fatalf("path leaked: %v", err)
+	}
+	if err.Error() != "the broker could not store that question; retry" {
+		t.Fatalf("err %v", err)
+	}
+	if _, err := r.b.Status(context.Background(), "lin1", "q", "m1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a failed store kept the question: %v", err)
+	}
+}

@@ -776,7 +776,9 @@ func (b *Book) Ask(ctx context.Context, asker, req string, s Spec) (Status, erro
 	if err := b.persist(); err != nil {
 		b.qs = b.qs[:len(b.qs)-1]
 		b.mu.Unlock()
-		return Status{}, err
+		// The os error names the store path. The guest must not see it.
+		b.cfg.Logf("question: persist: %v", err)
+		return Status{}, errors.New("the broker could not store that question; retry")
 	}
 	b.mu.Unlock()
 	b.sendDue(ctx)
