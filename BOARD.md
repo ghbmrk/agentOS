@@ -229,3 +229,5 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | ID | Package and scope | Depends on | State |
 |---|---|---|---|
 | W5-D1 | Durable digest-only delivery design; scope: `docs/learning/digest-delivery-contract.md`, this brief. Source generations, atomic durable batches, idempotent ack, ambiguous delivery, forget/compaction and crash oracles; no generic replay of stale approvals or automatic acceptance. | W5 design review, existing owner visibility contracts | draft design, external review pending |
+
+| W5-D2 | Durable digest queue foundation; scope: `broker/digestqueue/`, this brief. OP-1/OP-2 persistence and notification recovery; explicit capacities, source acknowledgment barrier, unknown-send quarantine, expiry/redaction/compaction. Reuses the Store boundary; no sender/daemon wiring, source implementations, code replay or owner-visibility inference. | W5-D1 | draft implementation, external security review pending |
