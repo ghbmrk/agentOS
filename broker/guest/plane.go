@@ -117,8 +117,9 @@ type Config struct {
 
 // Tools serves broker tools beyond effects. Identity is the machine the
 // socket belongs to and its fork lineage, never anything the guest sends.
-// Call reports handled=false for a name it does not serve. Its text and
-// error strings go to the guest as they are.
+// Call reports handled=false for a name it does not serve. Its text goes
+// to the guest as it is. An error is passed through ScrubToolError first,
+// so a host path in it does not (SR2-3g).
 type Tools interface {
 	List() []map[string]any
 	Call(ctx context.Context, machine, lineage, name string, args json.RawMessage) (text string, handled bool, err error)

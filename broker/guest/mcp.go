@@ -146,7 +146,7 @@ func (p *Plane) mcp(m *machine, w http.ResponseWriter, r *http.Request) {
 			text, handled, err := p.cfg.Tools.Call(r.Context(), m.id, lineage, call.Name, call.Arguments)
 			if handled {
 				if err != nil {
-					writeRPC(w, req.ID, m.result(err.Error(), true), nil)
+					writeRPC(w, req.ID, m.result(ScrubToolError(call.Name, err).Error(), true), nil)
 				} else {
 					writeRPC(w, req.ID, m.result(text, false), nil)
 				}
@@ -158,7 +158,7 @@ func (p *Plane) mcp(m *machine, w http.ResponseWriter, r *http.Request) {
 			p.step(m) // REV-1: after every effect request the journal took
 		}
 		if err != nil {
-			writeRPC(w, req.ID, m.result(err.Error(), true), nil)
+			writeRPC(w, req.ID, m.result(ScrubToolError(call.Name, err).Error(), true), nil)
 			return
 		}
 		b, _ := json.Marshal(res)

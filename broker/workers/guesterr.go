@@ -22,6 +22,11 @@ type said struct{ s string }
 
 func (e said) Error() string { return e.s }
 
+// GuestVisible marks text this package built for the guest. The tool
+// exit passes it through, including a path the guest itself typed
+// (SR2-3g). A host path never gets here: guestErr already replaced it.
+func (said) GuestVisible() {}
+
 // sayArg is a value say may put in a guest's error text. Only these types
 // implement it, and TestWorkerErrorsAreBuiltOnlyFromSafeText checks that
 // no conversion to them takes an error or a host value (security F1 on
