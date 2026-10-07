@@ -522,9 +522,15 @@ func (r *Reach) Execute(ctx context.Context, in journal.Intent, _ int) journal.O
 	case err == nil:
 		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "rolled back"}
 	case len(r.Prov.Resets(lineage)) > 0:
-		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "machines reset; finishing: " + err.Error()}
+		if r.Logf != nil {
+			r.Logf("recall: rollback of %s still finishing: %v", lineage, err)
+		}
+		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "machines reset; finishing"}
 	}
-	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: approvedOnly + err.Error()}
+	if r.Logf != nil {
+		r.Logf("recall: rollback of %s did not reset: %v", lineage, err)
+	}
+	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: approvedOnly + "the reset did not finish"}
 }
 
 // tell sends the owner a text about lineage's rollback.
