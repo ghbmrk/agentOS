@@ -1,1 +1,3 @@
-LOAD_FROM_FILE:/tmp/qw/FOR_MCP_CONTENT.txt
+package hint
+
+// Tests live in emitter_part*_test.go.
