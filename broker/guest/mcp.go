@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/compact"
 	"github.com/ghbmrk/agentos/broker/journal"
 )
 
@@ -175,7 +174,7 @@ func (p *Plane) mcp(m *machine, w http.ResponseWriter, r *http.Request) {
 func (m *machine) result(text string, isErr bool) map[string]any {
 	if !isErr {
 		// Insignificant whitespace only. Strings, keys, and number text stay.
-		text = compact.JSON(text)
+		text = compactJSON(text)
 	}
 	res := toolResult(text, isErr)
 	if n := m.takeNote(); n != "" {

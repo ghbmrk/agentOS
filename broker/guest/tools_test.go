@@ -8,8 +8,6 @@ import (
 	"errors"
 	"strings"
 	"testing"
-
-	"github.com/ghbmrk/agentos/broker/compact"
 )
 
 type fakeTools struct{ calls []string }
@@ -89,7 +87,7 @@ func TestAJSONToolResultLosesOnlyWhitespace(t *testing.T) {
 	text, _ := res["content"].([]any)[0].(map[string]any)["text"].(string)
 	if text != `{"note":"keep  spaces","n":1}` && text != `{"n":1,"note":"keep  spaces"}` {
 		// key order is the tool's order, only spaces go
-		if compact.JSON(prettyBody) != text {
+		if compactJSON(prettyBody) != text {
 			t.Fatalf("result %q", text)
 		}
 	}
