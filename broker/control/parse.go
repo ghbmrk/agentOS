@@ -22,6 +22,7 @@ const (
 	// digits but fits no grammar. It may hold a code, so it never goes to
 	// the agent (CH-10: the agent never sees a code).
 	WordUnclear Word = "?"
+	WordName    Word = "NAME"
 )
 
 // Command is a parsed owner message. For task chat, Word is WordNone and
@@ -35,7 +36,7 @@ type Command struct {
 
 // Parse applies CH-11: a control word counts only when it, with its
 // arguments, is the whole message, ignoring case and punctuation. Anything
-// else is task chat and keeps its original text.
+else is task chat and keeps its original text.
 func Parse(msg string) Command {
 	f := words(msg)
 	if len(f) > 0 {
@@ -88,6 +89,9 @@ func argsFit(w Word, args []string) bool {
 		return allDigits(args)
 	case WordUndo, WordMore:
 		return len(args) == 1 && len(args[0]) <= 3 && alnum(args[0])
+	case WordName:
+		// NAME alone reports the current name; NAME <words...> renames (CH-21).
+		return true
 	}
 	return false
 }
