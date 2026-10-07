@@ -299,6 +299,7 @@ def compute(raw):
             "usage_per_req": usage_all / reqs if usage_all is not None and reqs > 0 else None,
             "first_pass_ok": sum(p["verdicts"][0] == "accept" for p in judged),
             "first_pass_n": len(judged),
+            "rounds": sum(len(p["verdicts"]) for p in judged),
             "no_verdict": [p["number"] for p in merged if p["verdicts"] == []],
             "merged": len(merged),
             "escalated": len(ever_esc),
@@ -314,10 +315,11 @@ def compute(raw):
 
 # Columns sourced from the GitHub API: frozen once a closed week has been recorded, so
 # later edits, deleted reviews or expired runs cannot rewrite a finished week.
-FROZEN = (5, 7, 8)
+FROZEN = (5, 7, 8, 9)
 COLUMNS = [
     "Week starting", "Usage all / Fable", "On-pace mark", "Reqs newly covered", "Usage per req",
     "First-pass L3 accept", "Escalation rate (cum.)", "Defects after merge", "CI flake rate",
+    "L3 rounds per merged PR", "Usage per merged PR",
 ]
 
 
@@ -336,6 +338,8 @@ def _cells(w):
         _ratio(w["escalated"], w["reviewed"]),
         f"{len(w['defects'])} ({', '.join(w['defects'])})" if w["defects"] else ("0" if w["merged"] else NONE),
         _ratio(w["flaky"], w["runs"]),
+        f"{w['rounds'] / w['first_pass_n']:.1f}" if w["first_pass_n"] else NONE,
+        f"{w['usage_all'] / w['merged']:.2f} pts" if w["usage_all"] is not None and w["merged"] else NONE,
     ]
 
 
@@ -388,6 +392,10 @@ def render(weeks, raw, previous_md=None):
         "(a fix to code already merged; see the PR template).",
         "- **CI flake rate**: commits that, within one workflow, had both a failed and a passed run or "
         "attempt, over commits with any finished run; counted in the week of the first run.",
+        "- **L3 rounds per merged PR**: L3 reviews with a verdict, averaged over the PRs merged that week "
+        "that had one. 1.0 means every PR was accepted on its first review (COST-1: rework is the main cost).",
+        "- **Usage per merged PR**: weekly-limit points per PR merged that week; the cost-per-package "
+        "figure the operating model steers by (docs/OPERATING.md §6).",
         "- **Closed weeks**: once a finished week is recorded, its L3, defect and flake cells are kept as "
         "recorded; the other columns are recomputed from git and LEDGER.md each run.",
         "",
