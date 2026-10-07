@@ -15,6 +15,9 @@
 //	agentos-release publish -repo D -snapshot-key s.key -timestamp-key t.key
 //	agentos-release refresh -repo D -snapshot-key s.key -timestamp-key t.key
 //	agentos-release verify -repo D -root 1.root.json -installed N [-offline] [-channel fast]
+//	agentos-release status -repo D   versions, signatures against thresholds, expiry;
+//	    exits non-zero on a warning (root or targets within 60 days of expiry,
+//	    snapshot or timestamp past half their life), so CI can run it
 //
 // The repository directory is what mirrors and drives carry (DEP-4).
 package main
@@ -61,7 +64,7 @@ func pubs(list string) ([]ed25519.PublicKey, error) {
 
 func run(args []string, out io.Writer) error {
 	if len(args) < 1 {
-		return errors.New("usage: agentos-release keygen|init|add-release|rotate|sign|attestors|publish|refresh|verify [flags]")
+		return errors.New("usage: agentos-release keygen|init|add-release|rotate|sign|attestors|publish|refresh|verify|status [flags]")
 	}
 	cmd, args := args[0], args[1:]
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
@@ -244,6 +247,38 @@ func run(args []string, out io.Writer) error {
 			return err
 		}
 		fmt.Fprintf(out, "%sed\n", cmd)
+		return nil
+
+	case "status":
+		if err := fs.Parse(args); err != nil {
+			return err
+		}
+		if err := needRepo(); err != nil {
+			return err
+		}
+		st, err := r().Status()
+		if err != nil {
+			return err
+		}
+		for _, x := range st.Roles {
+			if x.Version == 0 {
+				fmt.Fprintf(out, "%-9s not published\n", x.Role)
+			} else {
+				fmt.Fprintf(out, "%-9s v%d  %d of %d signatures  expires %s\n", x.Role, x.Version, x.Signatures, x.Threshold, x.Expires.UTC().Format("2006-01-02 15:04Z"))
+			}
+		}
+		if len(st.Releases) > 0 {
+			fmt.Fprintf(out, "releases  %v\n", st.Releases)
+		}
+		for _, n := range st.Notes {
+			fmt.Fprintln(out, "note:", n)
+		}
+		for _, w := range st.Warnings {
+			fmt.Fprintln(out, "WARNING:", w)
+		}
+		if len(st.Warnings) > 0 {
+			return fmt.Errorf("status: %d warnings", len(st.Warnings))
+		}
 		return nil
 
 	case "verify":
