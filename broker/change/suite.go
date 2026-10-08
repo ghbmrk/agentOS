@@ -33,6 +33,9 @@ type Case struct {
 	// candidate must not reproduce.
 	Expect  []byte  `json:"expect"`
 	Outcome Outcome `json:"outcome,omitempty"`
+	// ResultFormat selects a versioned broker-observed result contract. Empty
+	// is legacy text evidence, never upgraded by interpreting its bytes.
+	ResultFormat string `json:"result_format,omitempty"`
 	// Task is the journal intent the owner's outcome was recorded on.
 	Task string `json:"task,omitempty"`
 	// Goal is the goal ID the journal stamped on that intent, never the

@@ -81,6 +81,9 @@ type Grader func(c Case, out []byte) bool
 // owner's correction), and for a rejected outcome any output other than the
 // one the owner rejected.
 func DefaultGrader(c Case, out []byte) bool {
+	if c.ResultFormat != "" {
+		return false // versioned evidence requires its broker-observed path
+	}
 	if c.Outcome == Rejected {
 		return !bytes.Equal(out, c.Expect)
 	}
@@ -114,6 +117,9 @@ type Config struct {
 	// state.
 	Initial Tree
 	Graders map[Class]Grader
+	// RequireObservedTasks refuses legacy task evidence in production replay.
+	// Security fixtures keep their existing deterministic grading path.
+	RequireObservedTasks bool
 	// OwnerSource is the quality-verdict source that marks the owner's own
 	// outcome (OP-7). Default "owner".
 	OwnerSource string
@@ -1179,12 +1185,27 @@ var ErrNotEvaluated = errors.New("change: not evaluated on this box")
 // pass reports whether the case passed on t, and whether it was evaluated
 // at all. Any other evaluator error is a fail.
 func (p *Pipeline) pass(ctx context.Context, t Tree, c Case, probe string) (ok, evaluated bool, err error) {
-	out, err := p.cfg.Evaluator.Run(ctx, t.clone(), Probe{ID: probe, Input: append([]byte(nil), c.Input...)})
+	run := p.cfg.Evaluator.Run
+	observed := !c.Security && c.ResultFormat != ""
+	if !c.Security && p.cfg.RequireObservedTasks && (c.Task != "" || c.Class == ClassTask) && !observed {
+		return false, true, nil // old JSON/prose comparisons can never pass
+	}
+	if observed {
+		e, ok := p.cfg.Evaluator.(ObservedEvaluator)
+		if !ok || !SupportedEffectCase(c) {
+			return false, true, nil
+		}
+		run = e.RunObserved
+	}
+	out, err := run(ctx, t.clone(), Probe{ID: probe, Input: append([]byte(nil), c.Input...)})
 	if errors.Is(err, ErrNotEvaluated) {
 		return false, false, nil
 	}
 	if err != nil {
 		return false, true, err
+	}
+	if observed {
+		return ObservedEffectGrader(c, out), true, nil
 	}
 	g := p.cfg.Graders[c.Class]
 	if g == nil {

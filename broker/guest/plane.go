@@ -70,6 +70,15 @@ type Config struct {
 	Dir      string
 	Machines Machines
 	Effects  Effects
+	// ObserveMCP optionally observes the authenticated machine's MCP request
+	// before HTTP admission and while it is classified. The returned callback runs once: false when it
+	// is known not to be effect_request (before any read/lookup runs), or when
+	// an effect request finishes without refusal; true for an effect refusal
+	// or protocol uncertainty. No arguments or guest identity fields reach it.
+	// This is passive replay evidence, never an authorization decision. Live
+	// planes leave it nil. The callback completes before a successful effect
+	// response is written, so its subsequent owner reply cannot race itself.
+	ObserveMCP func(machine string) func(refused bool)
 	// Route picks the executor for an effect on account; false means no
 	// adapter is connected for it and the request is refused.
 	Route func(account string) (executor string, ok bool)
@@ -317,6 +326,15 @@ func (p *Plane) get(id string) *machine {
 func (p *Plane) handler(m *machine) http.Handler {
 	model := p.model(m)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var observed *mcpObservation
+		if r.URL.Path == "/mcp" && p.cfg.ObserveMCP != nil {
+			if done := p.cfg.ObserveMCP(m.id); done != nil {
+				observed = &mcpObservation{done: done}
+			}
+		}
+		// Observe before MaxConns and escaped-path refusal: neither may
+		// erase an attempted MCP request from a replay's completion trace.
+		defer observed.finish(true)
 		select {
 		case m.slot <- struct{}{}:
 			defer func() { <-m.slot }()
@@ -337,7 +355,7 @@ func (p *Plane) handler(m *machine) http.Handler {
 		}
 		switch r.URL.Path {
 		case "/mcp":
-			p.mcp(m, w, r)
+			p.mcp(m, w, r, observed)
 		case "/owner/next":
 			p.ownerNext(m, w, r)
 		case "/owner/reply":

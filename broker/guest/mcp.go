@@ -76,7 +76,19 @@ var requestIDRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 // name in the checks below, in routing, or in the journal.
 var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 
-func (p *Plane) mcp(m *machine, w http.ResponseWriter, r *http.Request) {
+// mcpObservation spans HTTP admission through effect classification and
+// completion. It is owned by one handler goroutine; nil means unobserved.
+type mcpObservation struct{ done func(bool) }
+
+func (o *mcpObservation) finish(refused bool) {
+	if o != nil && o.done != nil {
+		done := o.done
+		o.done = nil
+		done(refused)
+	}
+}
+
+func (p *Plane) mcp(m *machine, w http.ResponseWriter, r *http.Request, observed *mcpObservation) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", "POST")
 		http.Error(w, "this server sends no stream; POST only", http.StatusMethodNotAllowed)
@@ -92,6 +104,20 @@ func (p *Plane) mcp(m *machine, w http.ResponseWriter, r *http.Request) {
 	if err := dec.Decode(&req); err != nil || req.JSONRPC != "2.0" || req.Method == "" {
 		writeRPC(w, nil, nil, &rpcError{-32600, "invalid request (batches are not supported)"})
 		return
+	}
+	if observed != nil {
+		if req.Method != "tools/call" {
+			observed.finish(false)
+		} else {
+			var kind struct {
+				Name string `json:"name"`
+			}
+			if json.Unmarshal(req.Params, &kind) == nil && kind.Name != "effect_request" {
+				// Normal read/lookup refusals and tool fallbacks are not effect
+				// attempts. Stop observing them before their handlers run.
+				observed.finish(false)
+			}
+		}
 	}
 	if len(req.ID) == 0 || string(req.ID) == "null" {
 		w.WriteHeader(http.StatusAccepted) // a notification: nothing to answer
@@ -154,6 +180,7 @@ func (p *Plane) mcp(m *machine, w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		res, submitted, err := p.callTool(r.Context(), m, call.Name, call.Arguments)
+		observed.finish(err != nil || res.State == "refused")
 		if submitted {
 			p.step(m) // REV-1: after every effect request the journal took
 		}

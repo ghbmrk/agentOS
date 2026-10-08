@@ -132,11 +132,14 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		}
 	}
 	if l.pipe, err = change.New(change.Config{
-		Store:     change.FileStore{Path: filepath.Join(p.Dir, "change.json")},
-		Evaluator: &l.eval,
-		Targets:   targets,
-		ResumeFor: p.ResumeFor,
-		Logf:      log.Printf,
+		Store:                change.FileStore{Path: filepath.Join(p.Dir, "change.json")},
+		Evaluator:            &l.eval,
+		RequireObservedTasks: true,
+		// Retained pairs from the old prose grader must never resume here.
+		EvaluatorID: func() string { return change.ObservedResultV1 + "/" + change.MailSendResultV1 },
+		Targets:     targets,
+		ResumeFor:   p.ResumeFor,
+		Logf:        log.Printf,
 	}); err != nil {
 		return nil, err
 	}
@@ -642,6 +645,14 @@ type lateEvaluator struct {
 }
 
 func (l *lateEvaluator) Run(ctx context.Context, t change.Tree, p change.Probe) ([]byte, error) {
+	return l.run(ctx, t, p, false)
+}
+
+func (l *lateEvaluator) RunObserved(ctx context.Context, t change.Tree, p change.Probe) ([]byte, error) {
+	return l.run(ctx, t, p, true)
+}
+
+func (l *lateEvaluator) run(ctx context.Context, t change.Tree, p change.Probe, observed bool) ([]byte, error) {
 	e := l.e.Load()
 	if e == nil {
 		return nil, change.ErrNotEvaluated
@@ -650,7 +661,12 @@ func (l *lateEvaluator) Run(ctx context.Context, t change.Tree, p change.Probe) 
 	if l.sleep != nil {
 		sl = l.sleep.Load()
 	}
-	return sleepGuard(ctx, sl, func(ctx context.Context) ([]byte, error) { return e.Run(ctx, t, p) })
+	return sleepGuard(ctx, sl, func(ctx context.Context) ([]byte, error) {
+		if observed {
+			return e.RunObserved(ctx, t, p)
+		}
+		return e.Run(ctx, t, p)
+	})
 }
 
 // lateReader is Loop 1's journal reader, empty until the engine runs.

@@ -129,8 +129,6 @@ type Config struct {
 }
 
 var (
-	// ErrUnrecorded: the guest asked for an effect the task did not record.
-	ErrUnrecorded = errors.New("replay: unrecorded effect; replay fails closed")
 	// ErrNoReply: the guest did not answer within the run's time.
 	ErrNoReply = errors.New("replay: no reply from the guest")
 	// ErrNotEvaluated: the tree changes what a replay cannot run (the
@@ -187,6 +185,7 @@ func New(cfg Config) (*Evaluator, error) {
 		Dir:        cfg.Dir,
 		Machines:   planeMachines{},
 		Effects:    effects{e},
+		ObserveMCP: e.observeMCP,
 		Route:      func(string) (string, bool) { return "replay", true },
 		OwnerReply: e.reply,
 		Logf:       cfg.Logf,
@@ -222,14 +221,15 @@ func New(cfg Config) (*Evaluator, error) {
 
 // run is one replay in progress.
 type run struct {
-	id    string
-	model http.Handler
-	fx    *recorded
-	mu    sync.Mutex
-	msg   string // the owner message the case input went in as
-	out   chan []byte
-	fail  chan error
-	once  sync.Once
+	observed bool
+	id       string
+	model    http.Handler
+	fx       *recorded
+	mu       sync.Mutex
+	msg      string // the owner message the case input went in as
+	out      chan []byte
+	fail     chan error
+	once     sync.Once
 }
 
 func (r *run) failed(err error) {
@@ -238,6 +238,16 @@ func (r *run) failed(err error) {
 
 // Run replays probe c on tree t and returns the guest's reply.
 func (e *Evaluator) Run(ctx context.Context, t change.Tree, c change.Probe) ([]byte, error) {
+	return e.run(ctx, t, c, false)
+}
+
+// RunObserved uses the same isolated replay but returns broker observations
+// separately from display prose. No expected output or owner verdict enters it.
+func (e *Evaluator) RunObserved(ctx context.Context, t change.Tree, c change.Probe) ([]byte, error) {
+	return e.run(ctx, t, c, true)
+}
+
+func (e *Evaluator) run(ctx context.Context, t change.Tree, c change.Probe, observed bool) ([]byte, error) {
 	for _, ns := range e.untestedNamespaces() {
 		if !sameFiles(inNamespace(t, ns), e.cfg.Active(ns)) {
 			return nil, fmt.Errorf("%w: %s", ErrNotEvaluated, ns)
@@ -251,7 +261,7 @@ func (e *Evaluator) Run(ctx context.Context, t change.Tree, c change.Probe) ([]b
 	if _, err := rand.Read(b[:]); err != nil {
 		return nil, err
 	}
-	r := &run{id: Prefix + hex.EncodeToString(b[:]), fx: newRecorded(recs), out: make(chan []byte, 1), fail: make(chan error, 1)}
+	r := &run{id: Prefix + hex.EncodeToString(b[:]), observed: observed, fx: newRecorded(recs), out: make(chan []byte, 1), fail: make(chan error, 1)}
 	r.fx.onMiss = r.failed
 	if e.cfg.Model != nil {
 		r.model = e.cfg.Model(r.id, t)
@@ -304,6 +314,9 @@ func (e *Evaluator) Run(ctx context.Context, t change.Tree, c change.Probe) ([]b
 			case err := <-r.fail:
 				return nil, fmt.Errorf("replay %s: %w", c.ID, err)
 			default:
+			}
+			if observed {
+				return r.fx.result(out)
 			}
 			return out, nil
 		case err := <-r.fail:
@@ -407,6 +420,14 @@ func (e *Evaluator) get(id string) *run {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.runs[id]
+}
+
+// observeMCP enables passive boundary evidence only for observed-result runs.
+func (e *Evaluator) observeMCP(machine string) func(bool) {
+	if r := e.get(machine); r != nil && r.observed {
+		return r.fx.observeMCP()
+	}
+	return nil // ordinary/security replay preserves the plain evaluator path
 }
 
 // reply receives the guest's answer. Only the answer to the case's own

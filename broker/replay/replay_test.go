@@ -28,6 +28,7 @@ import (
 )
 
 var _ change.Evaluator = (*Evaluator)(nil)
+var _ change.ObservedEvaluator = (*Evaluator)(nil)
 
 var bg = context.Background()
 
@@ -257,6 +258,60 @@ func TestLOOP5ReplayAnswersEffectsFromTheRecording(t *testing.T) {
 	seed := r.ms.seeds[id]
 	if string(seed[TreeDir+"/procedures/send.md"]) != "send the reply" || len(seed) != 1 {
 		t.Fatalf("seed = %v", seed)
+	}
+}
+
+// REQ: CHG-1, OP-7
+func TestRunObservedCollectsBrokerEffectsSeparatelyFromReply(t *testing.T) {
+	record := journal.Status{Intent: resultIntent("original"), State: journal.Succeeded}
+	expect, _ := change.MailSendExpectation(record.Intent)
+	c := change.Case{Class: change.ClassTask, Task: "original", ResultFormat: change.MailSendResultV1, Outcome: change.Accepted, Expect: expect}
+	// The socket helper has no recipients argument; an effect with recipients
+	// is sent through the actual MCP endpoint below.
+	for _, perform := range []bool{true, false} {
+		r := newRig(t, recs{record}, func(g *client, _ string) string {
+			if perform {
+				_, _, _ = g.do("POST", "/mcp", map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": "effect_request", "arguments": map[string]any{"request_id": "send", "account": record.Intent.Account, "action": record.Intent.Action, "params": record.Intent.Params, "recipients": record.Intent.Recipients}}})
+			}
+			return "Done"
+		}, nil)
+		out, err := r.e.RunObserved(bg, tree, change.Probe{ID: "p", Input: []byte("send this")})
+		if err != nil || change.ObservedEffectGrader(c, out) != perform {
+			t.Fatalf("perform=%v output=%s err=%v", perform, out, err)
+		}
+	}
+}
+
+// REQ: CHG-1, LOOP-5, OP-7
+func TestRunObservedRejectsEffectsRefusedBeforeSubmit(t *testing.T) {
+	for _, outcome := range []change.Outcome{change.Accepted, change.Rejected} {
+		for _, arguments := range []any{
+			map[string]any{"request_id": "forbidden", "account": "broker", "action": "meta.canary"},
+			"not-an-object",
+		} {
+			r := newRig(t, recs{{Intent: resultIntent("original"), State: journal.Succeeded}}, func(g *client, _ string) string {
+				call := func(args any) {
+					_, _, _ = g.do("POST", "/mcp", map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": "effect_request", "arguments": args}})
+				}
+				if outcome == change.Accepted {
+					call(boundarySend())
+				}
+				call(arguments)
+				return "Done"
+			}, nil)
+			out, err := r.e.RunObserved(bg, tree, change.Probe{ID: "p", Input: []byte("send this")})
+			if !errors.Is(err, ErrUnrecorded) || change.ObservedEffectGrader(boundaryCase(outcome), out) {
+				t.Fatalf("outcome=%s out=%s err=%v", outcome, out, err)
+			}
+		}
+	}
+	// The ordinary/security evaluator retains its existing plain reply path.
+	r := newRig(t, nil, func(g *client, _ string) string {
+		g.effect("forbidden", "broker", "meta.canary", nil)
+		return "Done"
+	}, nil)
+	if out, err := r.e.Run(bg, tree, change.Probe{ID: "p", Input: []byte("fixture")}); err != nil || string(out) != "Done" {
+		t.Fatalf("plain evaluation changed: %s %v", out, err)
 	}
 }
 

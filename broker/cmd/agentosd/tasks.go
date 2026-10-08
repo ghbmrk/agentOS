@@ -203,13 +203,19 @@ func harvestOutcome(h harvester, tasks *taskTexts, o grants.OwnerOutcome, logf f
 		logf("learning: owner verdict not harvested: no task text for its goal")
 		return
 	}
-	out, err := json.Marshal(o.Intent.Params)
-	if err != nil {
-		return
+	// Unsupported classes still record the quality signal in Harvest, but
+	// cannot become text-comparison evidence in the production suite.
+	var out []byte
+	// OwnerOutcome carries a journal snapshot, which may already be
+	// scrubbed. A guessed redaction marker must never become success evidence.
+	if raw, err := json.Marshal(o.Intent); err == nil && !journalRedacted(string(raw)) {
+		out, _ = change.MailSendExpectation(o.Intent)
 	}
-	switch err := h.Harvest(loops.Outcome{Intent: o.Intent.ID, Action: a, Input: []byte(task.Text), Output: out, Public: task.Public}); {
+	switch err := h.Harvest(loops.Outcome{Intent: o.Intent.ID, Action: a, Input: []byte(task.Text), Output: out, ResultFormat: change.MailSendResultV1, Public: task.Public}); {
 	case errors.Is(err, loops.ErrImplicitCap):
 		logf("learning: owner verdict not harvested: daily cap on implicit acceptances")
+	case errors.Is(err, change.ErrUnsupportedResult):
+		logf("learning: owner verdict not harvested: unsupported result contract")
 	case err != nil:
 		logf("learning: owner verdict not harvested: refused") // the error may quote the case
 	}

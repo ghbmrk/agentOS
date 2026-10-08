@@ -60,6 +60,8 @@ type Outcome struct {
 	// Input is the owner's task message the item answered; Output is the
 	// item as the agent made it; Correction is the owner's edit (Edited).
 	Input, Output, Correction []byte
+	// ResultFormat is set only by the broker's production outcome hook.
+	ResultFormat string
 	// Public marks a task whose every input was labelled public (REV-5).
 	Public bool
 }
@@ -133,7 +135,7 @@ var ErrForgotten = errors.New("loops: the intent was erased by a deletion")
 // the reference; NO and UNDO are wrong, and a candidate must not
 // reproduce the rejected output.
 func (h *Harvester) Harvest(o Outcome) error {
-	c := change.Case{ID: o.Intent, Class: change.ClassTask, Input: o.Input, Task: o.Intent, Public: o.Public}
+	c := change.Case{ID: o.Intent, Class: change.ClassTask, Input: o.Input, Task: o.Intent, Public: o.Public, ResultFormat: o.ResultFormat}
 	q := journal.Quality{Source: h.source(), Note: "owner " + string(o.Action)}
 	switch o.Action {
 	case Approved:
@@ -183,6 +185,16 @@ func (h *Harvester) Harvest(o Outcome) error {
 	st, err := h.J.RecordQuality(o.Intent, q)
 	if err != nil {
 		return err
+	}
+	if o.ResultFormat != "" {
+		// Permission and a positive owner signal do not prove execution.
+		// Record quality above, but withhold unsupported evaluation evidence.
+		if !change.SupportedEffectCase(c) || st.Intent.Action != "mail.send" ||
+			(c.Outcome == change.Accepted && st.State != journal.Succeeded) ||
+			(c.Outcome == change.Rejected && st.State != journal.Denied && st.State != journal.Succeeded) ||
+			(c.Outcome != change.Accepted && c.Outcome != change.Rejected) {
+			return change.ErrUnsupportedResult
+		}
 	}
 	taskKey := TaskKey(st.Intent)
 	// The journal's REV-5 label is authoritative: the caller's mark can

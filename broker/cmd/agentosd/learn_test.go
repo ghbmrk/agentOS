@@ -57,6 +57,9 @@ func TestLearningPlaneRunsInAgentosd(t *testing.T) {
 	if _, err := lp.eval.Run(context.Background(), change.Tree{}, change.Probe{ID: "p"}); !errors.Is(err, change.ErrNotEvaluated) {
 		t.Fatalf("evaluation with no evaluator: %v", err)
 	}
+	if _, err := lp.eval.RunObserved(context.Background(), change.Tree{}, change.Probe{ID: "p"}); !errors.Is(err, change.ErrNotEvaluated) {
+		t.Fatalf("observed evaluation with no evaluator: %v", err)
+	}
 	if _, limit := lp.spare.Overall(); limit != loops.SpareLimits(loops.DefaultSpareCalls) {
 		t.Fatalf("spare cap %+v", limit)
 	}

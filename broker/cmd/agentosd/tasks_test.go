@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -31,7 +32,7 @@ func (f *fakeHarvest) Harvest(o loops.Outcome) error {
 
 // W3 (potency PW3 on #90): the owner's final verdict on an agent's effect
 // becomes a Loop 1 case whose input is the owner's task text, kept by goal
-// ID; the item is the effect's parameters, and the case is public only if
+// ID; the item is a versioned effect fingerprint, and the case is public only if
 // the owner marked the task PUBLIC (the harvester narrows it further by
 // the journal's label). Implicit acceptance is not harvested yet (PK2),
 // nor a verdict whose task text is not kept. Logs never carry either text.
@@ -47,7 +48,7 @@ func TestOwnerVerdictsBecomeCases(t *testing.T) {
 	tasks.put("owner:a2", "please refuse CANARY-task", false, viaSMS)
 	h := &fakeHarvest{}
 	effect := func(id, goal string) journal.Intent {
-		return journal.Intent{ID: id, GoalID: goal, Origin: "guest:agent", Params: map[string]any{"record": "inv-1042"}}
+		return journal.Intent{ID: id, GoalID: goal, Origin: "guest:agent", Account: "mail", Action: "mail.send", Params: map[string]any{"subject": "invoice", "body": "synthetic invoice"}, Recipients: []string{"sam@example.invalid"}}
 	}
 	harvestOutcome(h, tasks, grants.OwnerOutcome{Intent: effect("agent/1", "owner:a1"), Verdict: grants.OwnerAccepted}, logf)
 	harvestOutcome(h, tasks, grants.OwnerOutcome{Intent: effect("agent/2", "owner:a1"), Verdict: grants.OwnerAcceptedImplicitly}, logf)
@@ -67,8 +68,9 @@ func TestOwnerVerdictsBecomeCases(t *testing.T) {
 		t.Fatalf("cap logged %q", l)
 	}
 	logged = logged[:len(logged)-1]
+	expect, _ := change.MailSendExpectation(effect("agent/1", "owner:a1"))
 	if o := h.got[0]; o.Intent != "agent/1" || o.Action != loops.Approved || string(o.Input) != "send Sam the invoice CANARY-task" ||
-		string(o.Output) != `{"record":"inv-1042"}` || !o.Public {
+		!bytes.Equal(o.Output, expect) || o.ResultFormat != change.MailSendResultV1 || !o.Public {
 		t.Fatalf("accepted: %+v", o)
 	}
 	if o := h.got[1]; o.Action != loops.Undone || o.Public {
@@ -76,6 +78,23 @@ func TestOwnerVerdictsBecomeCases(t *testing.T) {
 	}
 	if len(logged) != 2 || strings.Contains(strings.Join(logged, " "), "CANARY") {
 		t.Fatalf("logged %q", logged)
+	}
+}
+
+// REQ: CHG-1, OP-7
+func TestRedactedOutcomesNeverBecomeEffectEvidence(t *testing.T) {
+	tasks, err := openTaskTexts(&change.MemStore{}, time.Now, t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks.put("owner:a", "send the synthetic message", false, viaSMS)
+	for _, marker := range []string{"[redacted]", "[REDACTED]"} {
+		h := &fakeHarvest{}
+		in := journal.Intent{ID: "guest/1", GoalID: "owner:a", Account: "mail", Action: "mail.send", Params: map[string]any{"subject": "hello", "body": marker}, Recipients: []string{"sam@example.invalid"}}
+		harvestOutcome(h, tasks, grants.OwnerOutcome{Intent: in, Verdict: grants.OwnerAccepted}, t.Logf)
+		if len(h.got) != 1 || len(h.got[0].Output) != 0 || h.got[0].ResultFormat != change.MailSendResultV1 {
+			t.Fatal("redacted value became a fingerprint")
+		}
 	}
 }
 
