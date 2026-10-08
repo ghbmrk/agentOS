@@ -114,6 +114,8 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | OSS-10w f1 | UX on #323: the alert wording "Switch back there" reads oddly after a switch back to the project |
 | OSS-10w-r | WF1 after a project root-key rotation: switching back compares against the image's shipped root keys and so fails closed once the project rotates them; a chain walk from the shipped root would admit it. Meanwhile the owner's only route back is a named follow (beside U13 limit (b)). No release has rotated root keys; a new image ships the new root |
 | W3-forget-b2b f1 | Security 327-1: race between `worked()` and `takeBack(approved=false)` in `agentBackWithoutAsking`; re-check under `r.run` |
+| W3-forget-b2c l1 | UX: the recall-off owed take-back text names no owner step, because STATUS has no line when recall is Off (`LateExecutor.Status`); a config only a dev box has |
+| W3-forget-b2c l2 | An owed take-back enters the forget log only once done, so a backup restored while it is owed does not carry it |
 | DOC-3 f1 | L3 on #356: the SHAs on rows inferred as merged name the last commit touching the package, not its merge; relabel as "last touched" or cite the PR |
 | DOC-3 f2 | L3 on #356: D-041 (license) has date `Pending`, not ISO; set it when the license is chosen |
 | DOC-2 f1 | L3 on #357: doclint does not check DECISIONS cells ≤300 characters or that `decisions/D-NNN.md` links resolve (D-056) |
