@@ -92,11 +92,11 @@ func (c *codes) bindDigestOutbox(out *DigestOutbox) error {
 	return nil
 }
 func (c *codes) backendReady() error {
-	if c.outbox == nil {
-		return nil
-	}
 	if c.outboxBlocked != nil {
 		return c.outboxBlocked
+	}
+	if c.outbox == nil {
+		return nil
 	}
 	st, err := c.outbox.State()
 	if err == nil && (len(st.DigestOutbox.Pending) >= MaxDigestOutbox || st.DigestOutbox.Produced == math.MaxUint64) {
@@ -133,6 +133,9 @@ func (c *codes) commitOutbox(event *digestnotes.Event, f func(*State)) error {
 // commit applies f to a copy of the state, saves it, and keeps it only if
 // the save succeeded.
 func (c *codes) commit(f func(*State)) error {
+	if c.outboxBlocked != nil {
+		return c.outboxBlocked
+	}
 	if c.outbox != nil {
 		return c.commitOutbox(nil, f)
 	}
