@@ -14,3 +14,4 @@ A recurring review of the owner-facing experience (onboarding and everyday use) 
 |---|---|---|
 | 1 | 3176f2d | [2026-10-04](2026-10-04-ux-review.md) |
 | 2 | 044b83b | [2026-10-05](2026-10-05-ux-review.md) |
+| 4 | be5a80c | [2026-10-08 lens bundle b](2026-10-08-lens-bundle-b.md): #320, #321, #322, #324, #329 (run 3 is bundle a, #339) |
