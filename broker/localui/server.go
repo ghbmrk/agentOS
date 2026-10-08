@@ -187,6 +187,7 @@ func (s *Server) routes() {
 		s.mux.HandleFunc("/unlock/vault", s.vaultUnlock)
 	}
 	s.Mount("/approvals", "Approvals", http.HandlerFunc(s.approvals))
+	s.Mount("/follow", "Update source", http.HandlerFunc(s.follow))
 	if s.cfg.SecondLine != nil {
 		s.Mount("/second-line", "Second line", http.HandlerFunc(s.secondLine))
 	}
