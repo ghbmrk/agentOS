@@ -158,7 +158,14 @@ func TestSecondServerOnTheSameDirectoryIsRefused(t *testing.T) {
 func TestSymlinkedSocketDirectoryIsRefused(t *testing.T) {
 	base := t.TempDir()
 	real := filepath.Join(base, "real")
-	os.Mkdir(real, 0o755)
+	if err := os.Mkdir(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// mkdir is masked by the runner's umask; establish the mode this
+	// regression deliberately checks before testing refusal of the link.
+	if err := os.Chmod(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	link := filepath.Join(base, "run")
 	if err := os.Symlink(real, link); err != nil {
 		t.Fatal(err)
