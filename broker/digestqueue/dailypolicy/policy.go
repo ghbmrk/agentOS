@@ -12,6 +12,17 @@ import (
 	"time"
 )
 
+var ErrRecovery = errors.New("dailypolicy: shared accounting needs recovery")
+
+// Health separates accounting recovery from ordinary allowance exhaustion.
+// It never changes the counter or reveals underlying store errors.
+func (p *Policy) Health() error {
+	if p.cfg.Budget.PacingHealth() != nil {
+		return ErrRecovery
+	}
+	return nil
+}
+
 var ErrConfig = errors.New("dailypolicy: complete trusted policy configuration required")
 var ErrStopped = errors.New("dailypolicy: engine stopped")
 var ErrClock = errors.New("dailypolicy: trusted time unavailable or moved backwards")
@@ -54,6 +65,9 @@ func (p *Policy) window(ctx context.Context, b dq.Batch) (time.Time, error) {
 	if err := ctx.Err(); err != nil {
 		return time.Time{}, err
 	}
+	if err := p.Health(); err != nil {
+		return time.Time{}, err
+	}
 	if p.cfg.Engine.Stopped() {
 		return time.Time{}, ErrStopped
 	}
@@ -74,6 +88,9 @@ func (p *Policy) window(ctx context.Context, b dq.Batch) (time.Time, error) {
 		return time.Time{}, ErrQuiet
 	}
 	if err := ctx.Err(); err != nil {
+		return time.Time{}, err
+	}
+	if err := p.Health(); err != nil {
 		return time.Time{}, err
 	}
 	return now, nil
@@ -104,6 +121,9 @@ func (p *Policy) Check(ctx context.Context, b dq.Batch) error {
 		return err
 	}
 	if !p.cfg.Budget.Reserve(now.Sub(b.Created) >= p.cfg.AgedAfter) {
+		if err := p.Health(); err != nil {
+			return err
+		}
 		return ErrPaced
 	}
 	return ctx.Err()

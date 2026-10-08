@@ -29,10 +29,25 @@ fails, STOP cancels the attempt or pre-call policy becomes ineligible. Recheck
 never refunds or reserves. Host/controller containment is required; calling
 Recheck alone cannot authorize a send or bypass source validation/forget.
 
-This adapter inherits the existing grants gate's in-process pacing state and
-restart behavior. It does not add a durable reservation ledger or qualify budget
-continuity on restore/restart. Deployment must address that inherited policy
-requirement and its clock assumptions explicitly. Daily progress can still be
+This adapter uses the actual Gate's accounting mode. Nil PacingStore retains
+legacy volatile pacing. Configuring the Gate's optional durable store preserves
+shared reservations and aged priority across ordinary reopen, as described in
+broker/grants/PACING.md; there is still no separate digest ledger. Restore,
+deleted-state continuity, protected single-writer custody, clocks and storage-
+fault urgent/reissue availability require independent qualification.
+
+Health returns fixed ErrRecovery when the common Gate is quarantined, while
+ordinary exhaustion returns ErrPaced from Check and leaves Health healthy.
+Check distinguishes a failed reservation from exhaustion. Both Check and
+read-only Recheck observe accounting recovery before and after callback work,
+so a failed question reservation during durable Begin prevents the subsequent
+digest handoff. Recheck consumes no slot and cannot repair the Gate. Bind
+Policy.Health as dailyhost.Config.PolicyHealth as well as Check/Recheck: the
+host then refuses activation/step on accounting failure and displays fixed
+recovery status without leaking store paths or callback errors. Host health is
+optional for existing callers; omitting the binding is not qualified durable
+host integration. Health does no storage I/O itself but can wait for the Gate
+mutex while an existing synchronous reservation save finishes. Daily progress can still be
 held by quiet hours, urgent traffic, exhaustion or authority/resource failures;
 this is not an unconditional-delivery assertion or an urgent bypass.
 
@@ -42,3 +57,8 @@ and an actual FileStore Begin replacement crossing into quiet hours. Transport
 is not called on that refusal; reopened queue retains the exact Ready attempt
 and the spent slot is not refunded. No grants or daemon default, urgent-class,
 hardware/carrier/owner-visibility or migration qualification is changed.
+
+Additional tests reopen the real shared FileStore with actual question Books,
+cut a question reservation before/after persistence during real queue Begin,
+and verify zero owner calls, proven-NotSent Ready state, unchanged attempt ID,
+spent digest slot and the exact persisted question debt on recovery.
