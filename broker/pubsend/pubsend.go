@@ -20,6 +20,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -71,6 +72,7 @@ type ledger struct {
 // Sender is a pubid.Sender over a Transport.
 type Sender struct {
 	cfg Config
+	mu  sync.Mutex // guards st and the ledger file
 	st  ledger
 }
 
@@ -178,6 +180,8 @@ func (s *Sender) Publish(day string, batch []byte) error {
 	if _, err := check(day, batch); err != nil {
 		return err
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	k := entry{Day: day, Hash: hashOf(batch)}
 	known := false
 	for _, l := range [][]entry{s.st.Confirmed, s.st.Waiting} {
@@ -208,13 +212,19 @@ func (s *Sender) Publish(day string, batch []byte) error {
 			s.cfg.Log(fmt.Sprintf("pubsend: dropped the unsent publication for %s: the transport was unreachable for more than %d publications", d, MaxWaiting))
 		}
 	}
-	_ = s.Flush()
+	_ = s.flush()
 	return nil
 }
 
 // Flush sends what waits, oldest first, and stops at the first transport
 // error, which it returns. Each frame sent is recorded as confirmed.
 func (s *Sender) Flush() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.flush()
+}
+
+func (s *Sender) flush() error {
 	for len(s.st.Waiting) > 0 {
 		e := s.st.Waiting[0]
 		f, err := frame(e)

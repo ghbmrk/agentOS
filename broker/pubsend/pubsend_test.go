@@ -272,6 +272,33 @@ func TestOSS6sA6FailedSaveIsRetried(t *testing.T) {
 	}
 }
 
+// OSS-6s-a4 and a6 with a timer's Flush beside Publish: the ledger is
+// shared, so under -race the two must not touch it at once, and every
+// batch is still sent exactly once (Security lens on #411, B2).
+func TestOSS6sA4ConcurrentFlushAndPublish(t *testing.T) {
+	g := newRig(t)
+	const days = 20
+	var batches [][]byte
+	for n := range days {
+		batches = append(batches, g.batch(t, dayN(n)))
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 200 {
+			_ = g.s.Flush()
+		}
+	}()
+	for n, b := range batches {
+		must(t, g.s.Publish(dayN(n), b))
+	}
+	<-done
+	must(t, g.s.Flush())
+	if len(g.w.frames) != days {
+		t.Fatalf("%d frames for %d days", len(g.w.frames), days)
+	}
+}
+
 // OSS-6s-a7: the frame is the signed batch followed by padding; padding
 // is a keyed stream over a fresh random seed, so two frames of the same
 // batch differ only in padding and the padding carries no structure. The

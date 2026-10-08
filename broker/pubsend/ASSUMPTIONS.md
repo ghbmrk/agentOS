@@ -13,4 +13,5 @@ Package OSS-6s-a. The sender behind `pubid.Sender`: one constant frame a day, an
 
 ## Conditions for wiring
 
-- **SW1:** the broker calls `Flush` on a timer as well as at release, so a backlog leaves when the transport comes back rather than on the next day's batch. Carried to OSS-6s-b.
+- **SW1:** the broker calls `Flush` on a timer as well as at release, so a backlog leaves when the transport comes back rather than on the next day's batch. `Publish` and `Flush` share one mutex, so the timer may run beside release. Carried to OSS-6s-b.
+- **SW2:** `pubid.Publisher.Clear` does not reach frames waiting in the pubsend ledger (pubid P6(b)); OSS-6s-b adds a `Sender.Clear` and wires it to the same owner action.
