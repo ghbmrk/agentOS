@@ -17,7 +17,7 @@ REV-5 left `public` machines' uncredentialed egress "open", which on a home netw
 
 - One small address policy (`broker/netguard`) that every outbound dialer uses as its `net.Dialer.Control` hook, so the check runs on the address actually connected, after resolution, and again on each redirect and CONNECT.
 - Deny: non-global addresses per the IANA IPv4 and IPv6 special-purpose registries (Go's `netip` predicates cover only part; table-test each registry entry), IPv4-mapped and NAT64-embedded (64:ff9b::/96) forms, the uplink's and the access point's prefixes (global IPv6 widened to the enclosing /56), the learned gateway, and the router's external address where NAT-PMP, PCP, or UPnP reports it. Learned prefixes refresh on address and route changes.
-- Allow exactly two exceptions, each bound to a pinned endpoint: a compute host's declared endpoint through the egress proxy (CAP-13), and a device executor's own devices (DEV-1; none exist yet, so only the hook).
+- Allow exactly four exceptions, each bound to a pinned endpoint (DEV-2): the broker's resolver to the network-assigned resolver (DHCP or RDNSS), DNS only, answers still checked at connect time; a compute host's declared endpoint through the egress proxy (CAP-13); and, as hooks only, a device executor's own devices (DEV-1; none exist yet) and an owner-pinned backup target or private hosted route (BAK-1, CAP-9). The host's own DHCP and router/neighbour discovery are not connections under the rule.
 - Wire it into the egress proxy (`broker/egress/proxy.go`, which today dials unchecked).
 - Add a CI check that fails on a dialer outside `vendor/` that doesn't set the hook, with an explicit allowlist of the dialers DEV-net-b wires, which that package empties.
 
@@ -28,7 +28,7 @@ Do not edit SPEC.md. If the cited contract cannot decide a design choice, raise 
 1. A resolver stub that answers a public address and then a private one (rebinding) is refused on the second answer.
 2. Every registry range, a v4-mapped and a NAT64-embedded private address, and a global IPv6 address inside the uplink /56 are refused.
 3. A redirect or CONNECT to a private address through the egress proxy is refused.
-4. The two allowed exceptions pass only for their pinned endpoints.
+4. The four allowed exceptions pass only for their pinned endpoints; an agent machine reaches neither the assigned resolver nor a pinned backup or hosted endpoint.
 5. The CI check fails on a new unhooked dialer.
 
 Synthetic addresses only. Run affected Go packages and race tests on Linux, a fresh strongest-model L3 with an explicit threat check, and the tier-A lens screen.
