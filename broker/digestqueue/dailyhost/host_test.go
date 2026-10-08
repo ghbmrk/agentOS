@@ -82,7 +82,7 @@ func setup(t *testing.T) *rig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.cfg = Config{Owner: owner.Config{Owner: "+15550000999", Store: owner.FileStore{Path: filepath.Join(dir, "owner")}, Engine: r.e, Modem: r.m, Now: func() time.Time { return r.now }, Location: time.UTC}, Notes: n, Daily: daily.Config{Queue: q, Heartbeat: hb, Clock: clock, TTL: time.Hour, Gate: func(context.Context, dq.Batch) error { return nil }}, OwnerNotesEligible: func(context.Context, dq.Snapshot) error { return nil }, PollInterval: time.Minute, StepTimeout: time.Second}
+	r.cfg = Config{Owner: owner.Config{Owner: "+15550000999", Store: owner.FileStore{Path: filepath.Join(dir, "owner")}, Engine: r.e, Modem: r.m, Now: func() time.Time { return r.now }, Location: time.UTC}, Notes: n, Daily: daily.Config{Queue: q, Heartbeat: hb, Clock: clock, TTL: time.Hour, Gate: func(context.Context, dq.Batch) error { return nil }}, OwnerNotesEligible: func(context.Context, dq.Snapshot) error { return nil }, RetentionDays: 1, PollInterval: time.Minute, StepTimeout: time.Second}
 	r.h, err = New(r.cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -166,7 +166,7 @@ func TestHostRecoveryStartupKeepsControlAndFixedStatus(t *testing.T) {
 	}
 }
 func TestHostCannotReplaceTheOwnedSenderOrProducer(t *testing.T) {
-	for _, which := range []string{"sender", "flush", "notes", "retention", "poll", "timeout"} {
+	for _, which := range []string{"sender", "flush", "notes", "retention", "poll", "timeout", "history"} {
 		t.Run(which, func(t *testing.T) {
 			r := setup(t)
 			switch which {
@@ -180,6 +180,8 @@ func TestHostCannotReplaceTheOwnedSenderOrProducer(t *testing.T) {
 				r.cfg.OwnerNotesEligible = nil
 			case "poll":
 				r.cfg.PollInterval = 0
+			case "history":
+				r.cfg.RetentionDays = 0
 			case "timeout":
 				r.cfg.StepTimeout = 0
 			}
@@ -214,5 +216,24 @@ func TestHostPolicyAndRetentionRefusalRemainPendingAndPrivate(t *testing.T) {
 				t.Fatal(h.Status())
 			}
 		})
+	}
+}
+
+// REQ: CH-15, OP-1, OP-2
+func TestHostExplicitRetentionKeepsDailyProgressBounded(t *testing.T) {
+	r := setup(t)
+	r.h.Activate()
+	for i := 0; i < 40; i++ {
+		if i > 0 {
+			r.now = r.now.Add(24 * time.Hour)
+		}
+		id, err := r.h.Step(t.Context())
+		if err != nil || id != uint64(i+1) {
+			t.Fatal(i, id, err)
+		}
+	}
+	batches, err := r.cfg.Daily.Queue.List()
+	if err != nil || len(batches) != 1 || r.m.count() != 40 {
+		t.Fatal(len(batches), err, r.m.count())
 	}
 }

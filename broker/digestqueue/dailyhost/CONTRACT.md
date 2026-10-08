@@ -61,3 +61,29 @@ ambiguous outcomes and quiescent invalidation. Synthetic transports are local
 observations, not carrier evidence. Independent strongest broker/security review,
 upstream reconciliation, encrypted state, full reach/restore and deployment
 qualification remain required. Nothing merged or enabled by daemon defaults.
+
+## Explicit accepted-history retention (W5-D34)
+
+`RetentionDays` is required, from 1 through 3650, and includes today. Each host
+step runs serialized maintenance before normal collection/dispatch. Maintenance
+repairs incomplete source acknowledgments first and selects only fully
+acknowledged, non-redacted transport-accepted daily batches whose authentic
+heartbeat age reaches that many local calendar days. UTC date arithmetic counts
+calendar days across DST rather than treating every local day as 24 hours.
+
+Current-day association is never retired, including after heartbeat Ack. No
+unknown, sending, Ready, expired, cancelled or exhausted outcome is automatically
+hidden, regardless of age or capacity pressure. Such records can still fill the
+queue and require visible recovery. Retention must leave enough capacity for the
+window and unresolved records; the host does not silently shorten it. Never call
+the blanket Queue.Compact behind the workflow: it can remove current-day identity
+and leave the heartbeat's acknowledged receipt without an association.
+
+Selected compaction checks the whole set before saving, requires terminal/full
+acknowledgment and retains private source high-water identities and monotone
+batch IDs. Save errors quarantine the queue; verified reopen observes either
+retained or retired history without recreating daily IDs. These changes remove
+payload/history, not high-water metadata, backup copies or evidence retained
+elsewhere; they do not establish complete forget or owner/carrier visibility.
+A retention change is an explicit trusted configuration decision, not guest data.
+No timer is enabled through daemon defaults.

@@ -35,8 +35,11 @@ type Config struct {
 	// OwnerNotesEligible is the current retention/forget eligibility check,
 	// additional to the adapter's issuance validation. It must be read-only.
 	OwnerNotesEligible daily.Validator
-	PollInterval       time.Duration
-	StepTimeout        time.Duration
+	// RetentionDays keeps this many local days of accepted daily history,
+	// including today. Unknown and undelivered outcomes are never retired.
+	RetentionDays int
+	PollInterval  time.Duration
+	StepTimeout   time.Duration
 }
 type Code string
 
@@ -104,7 +107,7 @@ type Host struct {
 }
 
 func New(cfg Config) (*Host, error) {
-	if cfg.Notes == nil || cfg.Owner.Engine == nil || cfg.Owner.Store == nil || cfg.Owner.Now == nil || cfg.Owner.DigestNotes != nil || cfg.Daily.Owner != nil || cfg.Daily.Flush != nil || cfg.Daily.Gate == nil || cfg.OwnerNotesEligible == nil || cfg.PollInterval < time.Millisecond || cfg.PollInterval > 24*time.Hour || cfg.StepTimeout < time.Millisecond || cfg.StepTimeout > 5*time.Minute || cfg.StepTimeout > cfg.PollInterval {
+	if cfg.Notes == nil || cfg.Owner.Engine == nil || cfg.Owner.Store == nil || cfg.Owner.Now == nil || cfg.Owner.DigestNotes != nil || cfg.Daily.Owner != nil || cfg.Daily.Flush != nil || cfg.Daily.Gate == nil || cfg.OwnerNotesEligible == nil || cfg.RetentionDays < 1 || cfg.RetentionDays > 3650 || cfg.PollInterval < time.Millisecond || cfg.PollInterval > 24*time.Hour || cfg.StepTimeout < time.Millisecond || cfg.StepTimeout > 5*time.Minute || cfg.StepTimeout > cfg.PollInterval {
 		return nil, ErrConfig
 	}
 	if _, ok := cfg.Daily.Sources[ownersource.ID]; ok {
@@ -257,7 +260,7 @@ func (h *Host) record(id uint64, err error) {
 		h.st.Code = Cancelled
 	case errors.Is(err, ErrPolicy), errors.Is(err, ErrRetention):
 		h.st.Code = Deferred
-	case errors.Is(err, daily.ErrAssociation), errors.Is(err, dq.ErrRecovery), errors.Is(err, owner.ErrDigestRecovery), errors.Is(err, owner.ErrDigestFull), errors.Is(err, heartbeat.ErrRecovery), errors.Is(err, heartbeat.ErrStale):
+	case errors.Is(err, daily.ErrAssociation), errors.Is(err, dq.ErrRecovery), errors.Is(err, dq.ErrFull), errors.Is(err, owner.ErrDigestRecovery), errors.Is(err, owner.ErrDigestFull), errors.Is(err, heartbeat.ErrRecovery), errors.Is(err, heartbeat.ErrStale):
 		h.st.Code = Recovery
 	default:
 		h.st.Code = Refused
@@ -282,7 +285,10 @@ func (h *Host) Step(ctx context.Context) (uint64, error) {
 		err = h.Health()
 	}
 	if err == nil {
-		id, err = h.workflow.Step(ctx)
+		_, err = h.workflow.Maintain(ctx, h.cfg.RetentionDays)
+		if err == nil {
+			id, err = h.workflow.Step(ctx)
+		}
 	}
 	h.record(id, err)
 	return id, err
