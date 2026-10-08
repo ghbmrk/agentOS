@@ -72,8 +72,9 @@ var controlPath = map[string][]string{
 	// It serves the worker-machine tools (workers, CAP-8) on the live guest
 	// plane. It opens the machines' disk quotas (quota, RES-4); quota
 	// imports golang.org/x/sys/unix, so like clock it is held by
-	// TestAgentosdLinksNoInference through netOK.
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool", "workers", "quota", "modemlink", "guesterr"},
+	// TestAgentosdLinksNoInference through netOK. It hands the modem
+	// link's state to the page's socket as a localapi.Line (P2-2w d2a).
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool", "workers", "quota", "modemlink", "guesterr", "localapi"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies
