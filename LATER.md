@@ -63,9 +63,6 @@ No security-fix row (SR2-*) is classed Later. P2-1 (host image, PR #41) has no b
 | PE3 | Potency follow-up on replay-interruption counting |
 | W3-off-a | STATUS wording goes dynamic; polish |
 | W3-implicit | Potency C2 outcome label; refinement of attention optimizer |
-| W3-forget-b2 dup ask | L3 on #321: a forget after a proposal reached the owner requeues the rebuild, which may ask again; rare, owner can decline |
-| W3-forget-b2 pre-start | L3 re-review on #321: a build cancelled before it starts still calls propose with a cancelled ctx; return early |
-| W3-forget-b2 post-build test | L3 re-review on #321: no test kills the post-build forget check; add one with the next Learn test hook |
 | W8 | Owner builds; no brief, no A-test names it |
 | ADP-14-get | GET links with side effects reached by `navigate` on recipe sites; recipe gate covers state-changing methods first |
 | ADP-14-undo-fail | A failed `UNDO` reply gives site, reference and deadline and opens a task; UNDO success path is enough for A13 |
@@ -74,6 +71,7 @@ No security-fix row (SR2-*) is classed Later. P2-1 (host image, PR #41) has no b
 | ADP-14-origins | Which origins the credentialed context may reach on a site with no recipe; every state-changing request there is already held |
 | ADP-16-acct2 | A second account signed in inside a suite executor's app; ADP-16 kiosk already limits to one account's adapters |
 | OSS-6e f1 | Security 319-1 (L3 asked for this line; lands before #319 merges): a missing or unreadable `boot_id` fails open, so each restart can count one day of the 20h floor again |
+| W3-forget-b2 f1 | L3 on #321: a forget after a proposal reached the owner requeues the rebuild, which may ask again; rare, owner can decline |
 | W3-forget-b2 f2 | L3 on #321: a self-cancelled job still calls propose/Build with a cancelled ctx |
 | W3-forget-b2 f3 | L3 on #321: no mutation test covers the post-build disjunct |
 | P2-2w d f4 | L3 N1 on #322: OSS-10 is missing from the REQ marker in `pagewording_test.go` |
