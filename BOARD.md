@@ -169,18 +169,20 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | P2-2a | [Local-page approvals](briefs/P2-2a.md) | P2-2 | merged (6239bd4; #178 part 2) |
 | P2-2w | [Local UI process and owner socket](briefs/P2-2w.md) | P2-2a | building (in sub-rows a, b, d, c (P3-2 thread)) |
 | P2-2a f1 | [Page result after a changed item](briefs/P2-2a-f1.md) | P2-2a | merged (#329) |
-| P2-2a f2 | [Page result for a changed release adoption](briefs/P2-2a-f2.md) | P2-2a f1 | queued (after #329) |
+| P2-2a f2 | [Page result for a changed release adoption](briefs/P2-2a-f2.md) | P2-2a f1 | in review (#363) |
 | P2-2a f3 | [Re-offer an awaiting-owner release the pipeline dropped](briefs/P2-2a-f3.md) | P2-2a f2 | queued (after #363; release finding from L3 on #363) |
 | P2-2w a | [`localui.sock` in agentosd](briefs/P2-2w-a.md) | P2-2a | merged (b00db30; #184) |
 | P2-2w b | [`agentos-localui` command under its own uid](briefs/P2-2w-b.md) | P2-2w a | merged (0302131; #189) |
 | P2-2w d | [LocalUI on (part 1)](briefs/P2-2w-d.md) | P2-2w b | merged (#322; split 2026-10-08; part 2 is d2) |
-| P2-2w d2 | [Home page shows `Link.OwnerLineNote` and `Link.LastOutage`](briefs/P2-2w-d2.md) | P2-2w d | queued |
+| P2-2w d2 | [Home page shows `Link.OwnerLineNote` and `Link.LastOutage`](briefs/P2-2w-d2.md) | P2-2w d | building (split into d2a, d2b) |
+| P2-2w d2a | [Home page shows the owner line's note, last outage and counts](briefs/P2-2w-d2a.md) | P2-2w d | in review (#378) |
+| P2-2w d2b | [Page control to confirm a SIM swap and set up the owner number](briefs/P2-2w-d2b.md) | P2-2w d2a | queued (A) |
 | P2-2w c | [Setup moves into agentosd](briefs/P2-2w-c.md) | P2-2w b | building (split into c1-c3, each under one session) |
 | P2-2w c1 | [Code seed made in the vault process and handed out once](briefs/P2-2w-c1.md) | P2-2w b | merged (#320) |
 | P2-2w c2 | [Pairing and finish in agentosd](briefs/P2-2w-c2.md) | P2-2w c1 | in review |
 | P2-2w c3 | [`agentos-netjoin`](briefs/P2-2w-c3.md) | P2-2w c2 | queued |
-| P2-2w c4 | Setup's remaining hooks in agentosd (networks, box number, host trust, texts, providers, real progress) and `agentos-localui` given `AgentosdSetup` (release finding on P2-2w c2; localui L27) | P2-2w c2 | queued |
-| P2-2w c2 r1 | Setup on a vault whose enrollment is closed: the vault answers "never opened" apart from "sealed", and the page says the box cannot finish setup instead of "already set up" with a Continue that finish refuses (release finding, L3 on #367; localui L27). Also: if the seal succeeds but the setup record is lost and the owner resets setup before retrying, every finish is refused; the vault answering "sealed by setup" apart from "never opened" lets agentosd accept the former at finish (release, L3 re-review on #367) | P2-2w c2 | queued |
+| P2-2w c4 | Setup's remaining hooks in agentosd (networks, box number, host trust, texts, providers, real progress) and `agentos-localui` given `AgentosdSetup` (release finding on P2-2w c2; localui L28) | P2-2w c2 | queued |
+| P2-2w c2 r1 | Setup on a vault whose enrollment is closed: the vault answers "never opened" apart from "sealed", and the page says the box cannot finish setup instead of "already set up" with a Continue that finish refuses (release finding, L3 on #367; localui L28). Also: if the seal succeeds but the setup record is lost and the owner resets setup before retrying, every finish is refused; the vault answering "sealed by setup" apart from "never opened" lets agentosd accept the former at finish (release, L3 re-review on #367) | P2-2w c2 | queued |
 | SR2-2 | [Restore refuses symlink chains that escape the root](briefs/SR2-2.md) | — | merged (#151) |
 | SR2-3 | [Disk quotas for machines and an enforced reserve](briefs/SR2-3.md) | #143 (RES-4 text) | merged (a10b5fe) |
 | SR2-3i | [Image side of SR2-3](briefs/SR2-3i.md) | SR2-3, P2-1 | merged (d40fb31; #174) |
