@@ -23,7 +23,7 @@ import sys
 # broker/ packages that hold credentials, enforce isolation, gate effects,
 # or sign and apply updates. Keep in step with docs/OPERATING.md §3.
 TIER_A_BROKER = {
-    "apply", "attest", "bridgeclient", "bridgeproto", "card", "cgroup", "change",
+    "apply", "attest", "bridgeclient", "bridgeproto", "browser", "card", "cgroup", "change",
     "cleanroom", "clock", "cmd", "control", "daemon", "egress", "grants", "guest", "hint",
     "hostchange", "hostdisk", "journal", "localapi", "localsrv", "localui",
     "mail", "modelroute", "modem", "modemlink", "owner", "pubid", "recovery", "replay",

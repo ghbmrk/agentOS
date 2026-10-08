@@ -40,8 +40,9 @@ var controlPath = map[string][]string{
 	"localsrv": {"localapi", "owner", "sockets"},
 	// The approval policy (grants) runs inside the engine's checks, so it
 	// is on the control path too; adapters reach it only through its
-	// Verifier interface.
-	"grants": {"journal", "owner", "reversible", "verb"},
+	// Verifier interface. Its refusals' guest text is guesterr's (SR2-3j),
+	// which imports nothing beyond the standard library.
+	"grants": {"guesterr", "journal", "owner", "reversible", "verb"},
 	"verb":   {},
 	// Reversible forms (REV-3) are declarations the gate validates: pure
 	// data, held to the control path's rules.
@@ -72,8 +73,12 @@ var controlPath = map[string][]string{
 	// It serves the worker-machine tools (workers, CAP-8) on the live guest
 	// plane. It opens the machines' disk quotas (quota, RES-4); quota
 	// imports golang.org/x/sys/unix, so like clock it is held by
-	// TestAgentosdLinksNoInference through netOK.
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool", "workers", "quota", "modemlink"},
+	// TestAgentosdLinksNoInference through netOK. It hands the modem
+	// link's state to the page's socket as a localapi.Line (P2-2w d2a).
+	// It changes where updates come from (follow, OSS-10): the follow
+	// executor over the update store, already linked through change, and
+	// the page's root summary (localapi) the daemon serves.
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies
@@ -103,7 +108,7 @@ var guestPlane = map[string]struct {
 	allowed []string
 	forbid  []string
 }{
-	"guest": {[]string{"journal", "meter"}, []string{"os/exec", "plugin", "unsafe", "C"}},
+	"guest": {[]string{"guesterr", "journal", "meter"}, []string{"os/exec", "plugin", "unsafe", "C"}},
 	"meter": {nil, []string{"net", "os/exec", "plugin", "unsafe", "C"}},
 	// modelroute forwards to the vault process over its Unix socket and
 	// reports usage to the meter; never the vault or the proxy. It
@@ -122,7 +127,7 @@ var guestPlane = map[string]struct {
 	// beyond the in-process hashing embedder (DEP-1).
 	"recall":     {nil, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
 	"events":     {[]string{"recall"}, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
-	"recalltool": {[]string{"recall", "events", "journal"}, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
+	"recalltool": {[]string{"recall", "events", "journal", "guesterr"}, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
 	// Loop 1's model-backed builder (W3-builder) serves each builder
 	// machine its own socket, as replay does: the brief, one candidate,
 	// and the metered model route; no executors, no network clients.
@@ -130,10 +135,13 @@ var guestPlane = map[string]struct {
 	// Worker machines (CAP-8): served to guests as tools over the machine
 	// manager; no journal, no executors, no network clients, no processes
 	// (commands run through vm/gvisor's runsc exec).
-	"workers": {[]string{"admission", "vm", "vm/overlay"}, forbiddenStd},
+	"workers": {[]string{"admission", "vm", "vm/overlay", "guesterr"}, forbiddenStd},
 	// Agents' questions to the owner (P3-8, W9): served to guests and
 	// answered from the owner channel, through hooks the wiring passes.
-	"question": {nil, forbiddenStd},
+	"question": {[]string{"guesterr"}, forbiddenStd},
+	// The one filter on what a tool's error shows the guest (SR2-3g):
+	// fixed text passes, anything else is a ref and a broker-log line.
+	"guesterr": {nil, forbiddenStd},
 }
 
 // The learning plane (W3; arbitrator, adopting potency PW1 on #56): the

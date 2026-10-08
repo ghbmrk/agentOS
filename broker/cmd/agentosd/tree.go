@@ -3,14 +3,15 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"sync"
 
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/guest"
+	"github.com/ghbmrk/agentos/broker/guesterr"
 	"github.com/ghbmrk/agentos/broker/vm"
+	"github.com/ghbmrk/agentos/broker/workers"
 )
 
 // agentNamespaces are the managed tree's namespaces a guest reads (replay
@@ -109,8 +110,8 @@ type treeAnswer struct {
 }
 
 var (
-	errTreePublic   = errors.New("the managed tree reaches only private machines; this one has had no owner data")
-	errTreeNotReady = errors.New("the managed tree is not ready; keep the one you have")
+	errTreePublic   error = guesterr.New("the managed tree reaches only private machines; this one has had no owner data")
+	errTreeNotReady error = guesterr.New("the managed tree is not ready; keep the one you have")
 )
 
 func (t *liveTree) List() []map[string]any {
@@ -134,7 +135,7 @@ func (t *liveTree) Call(_ context.Context, machine, _, name string, args json.Ra
 	}
 	if len(args) > 0 {
 		if err := json.Unmarshal(args, &a); err != nil {
-			return "", true, errors.New("arguments must be an object")
+			return "", true, guesterr.New("arguments must be an object")
 		}
 	}
 	t.mu.Lock()
@@ -165,7 +166,7 @@ func (t *liveTree) Call(_ context.Context, machine, _, name string, args json.Ra
 		ans.Unchanged = true
 	} else if size > maxTreeSend {
 		t.logf("managed tree not sent to %s: %d bytes, over %d", machine, size, maxTreeSend)
-		return "", true, errors.New("the managed tree is too large to send")
+		return "", true, guesterr.New("the managed tree is too large to send")
 	} else {
 		ans.Files = files
 	}
@@ -179,6 +180,19 @@ func (t *liveTree) setMachines(m *vm.Manager) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.label = m.Label
+}
+
+// registeredTools is every broker tool set agentosd serves on a guest
+// socket beside the effect tools: the question tools, managed_tree, the
+// recall tools, and the worker tools when an image is registered (wt not
+// nil). Their errors reach the guest only through the guest plane's
+// filter (guesterr, SR2-3g).
+func registeredTools(qs *questions, tree *liveTree, recall guest.Tools, wt *workers.Tools) toolSet {
+	tools := toolSet{qs.tools(), tree, recall}
+	if wt != nil {
+		tools = append(tools, wt)
+	}
+	return tools
 }
 
 // toolSet serves several broker tool sets on one guest socket (guest

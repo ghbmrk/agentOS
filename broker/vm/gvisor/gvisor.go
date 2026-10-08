@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -50,6 +51,8 @@ type Runtime struct {
 	Bin      string // runsc binary
 	StateDir string // runsc --root; broker-held
 	Platform string // "systrap" (no KVM needed) or "kvm"
+
+	logMu sync.Mutex // the exec log's appends and rotation
 }
 
 var _ vm.Runtime = (*Runtime)(nil)
@@ -240,10 +243,24 @@ func (r *Runtime) Exec(ctx context.Context, id string, c vm.Command) (vm.ExecRes
 	pidFile := pf.Name()
 	pf.Close()
 	defer os.Remove(pidFile)
-	cmd := r.cmd(ctx, append([]string{"exec", "--cwd", "/", "--user", "0:0", "--internal-pid-file", pidFile, cid(id)}, c.Argv...)...)
+	// runsc's own messages: its errors, as JSON lines, and its info lines,
+	// each to a file of this exec's (0600, from CreateTemp).
+	var logs [2]string
+	for i, pattern := range []string{"exec-*.err", "exec-*.debug"} {
+		f, err := os.CreateTemp(r.StateDir, pattern)
+		if err != nil {
+			return vm.ExecResult{}, err
+		}
+		logs[i] = f.Name()
+		f.Close()
+		defer os.Remove(logs[i])
+	}
+	cmd := r.cmd(ctx, append([]string{"--log=" + logs[0], "--debug-log=" + logs[1], "exec", "--cwd", "/", "--user", "0:0", "--internal-pid-file", pidFile, cid(id)}, c.Argv...)...)
 	cmd.Stdin = bytes.NewReader(c.Stdin)
 	stdout, stderr := &capped{max: c.MaxOutput}, &capped{max: c.MaxOutput}
-	cmd.Stdout, cmd.Stderr = stdout, stderr
+	// The watch sees each write before the cap does, and all of them.
+	watch := &panicWatch{}
+	cmd.Stdout, cmd.Stderr = stdout, io.MultiWriter(watch, stderr)
 	cmd.WaitDelay = ExecWaitDelay
 	cmd.Cancel = func() error {
 		// Read the pid now: the deferred Remove may run before the kill.
@@ -252,13 +269,82 @@ func (r *Runtime) Exec(ctx context.Context, id string, c vm.Command) (vm.ExecRes
 		return cmd.Process.Kill()
 	}
 	err = cmd.Run()
-	res := vm.ExecResult{Stdout: stdout.bytes(), Stderr: stderr.bytes(), Truncated: stdout.truncated() || stderr.truncated()}
+	// runsc writes each of its errors to stderr as well as to its log, and
+	// stderr is the guest command's too. So when runsc reports an error, or
+	// the command never started (runsc writes the pid once it has), nothing
+	// on either stream is known to be the guest's: Exec answers no output,
+	// and runsc's messages go only to the broker's exec log (SR2-3h). A Go
+	// runtime panic in runsc after the command started writes no --log
+	// line, only its trace to stderr, and exits 2 (SR2-3m), whether or not
+	// the context has since ended (Security S1 on #391). The error is a
+	// bare vm sentinel, naming no path (SR2-3j): a panic after the command
+	// started is ErrExecFailed, since the command may have run.
 	var exit *exec.ExitError
+	panicked := errors.As(err, &exit) && exit.ExitCode() == 2 && watch.found()
+	pid, _ := os.ReadFile(pidFile)
+	if started := len(bytes.TrimSpace(pid)) > 0; !started || size(logs[0]) > 0 || panicked {
+		msgs := stderr.bytes()
+		if panicked {
+			msgs = watch.trailer()
+		}
+		r.logExec(id, err, logs, msgs)
+		if ctx.Err() != nil {
+			return vm.ExecResult{}, err
+		}
+		if !started {
+			return vm.ExecResult{}, vm.ErrExecNotStarted
+		}
+		return vm.ExecResult{}, vm.ErrExecFailed
+	}
+	res := vm.ExecResult{Stdout: stdout.bytes(), Stderr: stderr.bytes(), Truncated: stdout.truncated() || stderr.truncated()}
 	if errors.As(err, &exit) && ctx.Err() == nil {
 		res.ExitCode = exit.ExitCode()
 		return res, nil
 	}
 	return res, err
+}
+
+// execLogMax is the size at which the broker's exec log is rotated: it and
+// the one old log kept stay within twice this (RES-4). A var so tests can
+// shorten it.
+var execLogMax int64 = 1 << 20
+
+// runscMsgMax bounds each of runsc's messages a failed exec adds to the log.
+const runscMsgMax = 16 << 10
+
+func (r *Runtime) execLog() string { return filepath.Join(r.StateDir, "exec.log") }
+
+// logExec appends a failed exec's runsc messages, its error log, debug
+// log and stderr, each clipped to runscMsgMax, to the exec log: 0600 in
+// the broker-held state directory, which no machine can read.
+func (r *Runtime) logExec(id string, err error, logs [2]string, stderr []byte) {
+	var b bytes.Buffer
+	fmt.Fprintf(&b, "%s %s: runsc exec failed (%v)\n", time.Now().UTC().Format(time.RFC3339), id, err)
+	for i, part := range [][]byte{clipped(logs[0]), clipped(logs[1]), stderr[:min(len(stderr), runscMsgMax)]} {
+		fmt.Fprintf(&b, "-- %s\n%s\n", [...]string{"error log", "debug log", "stderr"}[i], bytes.TrimSpace(part))
+	}
+	r.logMu.Lock()
+	defer r.logMu.Unlock()
+	keepConsole(io.NopCloser(&b), r.execLog(), execLogMax)
+}
+
+// clipped is the first runscMsgMax bytes of the file at path.
+func clipped(path string) []byte {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	b, _ := io.ReadAll(io.LimitReader(f, runscMsgMax))
+	return b
+}
+
+func size(path string) int64 {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return fi.Size()
 }
 
 // killExec kills the command an Exec started inside the sandbox, by the
@@ -274,6 +360,66 @@ func (r *Runtime) killExec(id, pid string) {
 	if err := r.run(ctx, "kill", "--pid", pid, cid(id), "KILL"); err != nil {
 		log.Printf("gvisor: %s: killing cancelled command %s: %v", id, pid, err)
 	}
+}
+
+// panicWatch watches all of an exec's stderr, past its cap, for the trace
+// a Go runtime panic or fatal error writes: a "panic: " or "fatal error: "
+// marker and, after it, a goroutine header (SR2-3m). Neither need start a
+// line, since the guest shares the stream and may leave a partial line
+// before runsc's trace. It keeps the trace from the first marker, clipped
+// to runscMsgMax, for the exec log. A guest that writes the same and
+// exits 2 loses only its own output.
+type panicWatch struct {
+	mu    sync.Mutex
+	carry []byte // the end of what was searched: a match may span writes
+	text  []byte // from the first marker on, clipped
+	hdr   bool
+}
+
+var (
+	panicMarker = regexp.MustCompile(`panic: |fatal error: `)
+	// "goroutine 1 [running]:", or Go 1.23's at traceback system and
+	// above (runsc's default): "goroutine 1 gp=0xc0... m=0 mp=0x... [".
+	goroutineHeader = regexp.MustCompile(`goroutine [0-9]+ [^\[\n]{0,96}\[`)
+)
+
+// watchCarry exceeds the longest marker or header.
+const watchCarry = 256
+
+func (w *panicWatch) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.text != nil {
+		w.text = append(w.text, p[:min(len(p), runscMsgMax-len(w.text))]...)
+	}
+	if w.hdr {
+		return len(p), nil
+	}
+	buf := append(w.carry, p...)
+	if w.text == nil {
+		loc := panicMarker.FindIndex(buf)
+		if loc == nil {
+			w.carry = bytes.Clone(buf[max(len(buf)-watchCarry, 0):])
+			return len(p), nil
+		}
+		buf = buf[loc[0]:]
+		w.text = bytes.Clone(buf[:min(len(buf), runscMsgMax)])
+	}
+	w.hdr = goroutineHeader.Match(buf)
+	w.carry = bytes.Clone(buf[max(len(buf)-watchCarry, 0):])
+	return len(p), nil
+}
+
+func (w *panicWatch) found() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.hdr
+}
+
+func (w *panicWatch) trailer() []byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return bytes.Clone(w.text)
 }
 
 // capped keeps the first max bytes written (all of them when max is 0).

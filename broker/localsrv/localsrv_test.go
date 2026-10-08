@@ -86,17 +86,39 @@ func (f *fakeOwner) LocalAnswer(id, sum string, approve bool, code string) (stri
 }
 
 type rig struct {
-	t   *testing.T
-	now time.Time
-	own *fakeOwner
-	srv *Server
-	ops map[string]sockets.Handler
+	t       *testing.T
+	now     time.Time
+	own     *fakeOwner
+	srv     *Server
+	ops     map[string]sockets.Handler
+	follows []string
+	asks    []string
 }
 
 func newRig(t *testing.T) *rig {
 	r := &rig{t: t, now: time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)}
 	r.own = &fakeOwner{now: &r.now, left: 24}
-	r.srv = New(Config{Owner: r.own, LineNote: func() string { return "I can't reach my phone modem." }, Now: func() time.Time { return r.now }})
+	r.srv = New(Config{Owner: r.own, Line: func() localapi.Line { return testLine }, Now: func() time.Time { return r.now },
+		DescribeRoot: func(_ context.Context, root []byte) (localapi.RootSummary, error) {
+			if string(root) != "root" {
+				return localapi.RootSummary{}, errors.New("bad root")
+			}
+			return localapi.RootSummary{Version: 1, Digest: digest}, nil
+		},
+		Follow: func(_ context.Context, name, d string) (string, error) {
+			r.follows = append(r.follows, name+"@"+d)
+			return "Asked: K8", nil
+		},
+		Paused: func() []localapi.PausedGrant {
+			return []localapi.PausedGrant{{ID: "G2", What: "Read mail.", By: "Loop 2", Pause: "loop2/pause/G2/1"}}
+		},
+		AskResume: func(_ context.Context, grant, pause string) (string, error) {
+			r.asks = append(r.asks, grant+"@"+pause)
+			if pause != "loop2/pause/G2/1" {
+				return "", errors.New("grants: /var/lib/x")
+			}
+			return "Asked.", nil
+		}})
 	r.ops = r.srv.Ops()
 	return r
 }
@@ -149,13 +171,18 @@ func code(err error) string {
 // tokenOps are the ops that need a token, with args carrying tok.
 func tokenOps(tok string) map[string]any {
 	return map[string]any{
-		localapi.OpSignOut:  localapi.Auth{Token: tok},
-		localapi.OpSession:  localapi.Auth{Token: tok},
-		localapi.OpLines:    localapi.Auth{Token: tok},
-		localapi.OpResume:   localapi.Resume{Token: tok},
-		localapi.OpRequests: localapi.Auth{Token: tok},
-		localapi.OpWaiting:  localapi.Auth{Token: tok},
-		localapi.OpAnswer:   localapi.Answer{Token: tok, ID: "K7", Sum: "s1", Approve: false},
+		localapi.OpSignOut:    localapi.Auth{Token: tok},
+		localapi.OpSession:    localapi.Auth{Token: tok},
+		localapi.OpLines:      localapi.Auth{Token: tok},
+		localapi.OpLine:       localapi.Auth{Token: tok},
+		localapi.OpResume:     localapi.Resume{Token: tok},
+		localapi.OpRequests:   localapi.Auth{Token: tok},
+		localapi.OpWaiting:    localapi.Auth{Token: tok},
+		localapi.OpAnswer:     localapi.Answer{Token: tok, ID: "K7", Sum: "s1", Approve: false},
+		localapi.OpFollowRoot: localapi.FollowRoot{Token: tok, Root: []byte("root")},
+		localapi.OpFollow:     localapi.Follow{Token: tok, Name: "Acme", Digest: digest},
+		localapi.OpPaused:     localapi.Auth{Token: tok},
+		localapi.OpAskResume:  localapi.AskResume{Token: tok, Grant: "G2", Pause: "loop2/pause/G2/1"},
 	}
 }
 
@@ -185,8 +212,8 @@ func TestEveryOpButTheOpenOnesNeedsAToken(t *testing.T) {
 			t.Errorf("%s with no args: %v", op, err)
 		}
 	}
-	if len(r.own.answers) != 0 {
-		t.Fatalf("answers reached the channel: %v", r.own.answers)
+	if len(r.own.answers) != 0 || len(r.follows) != 0 {
+		t.Fatalf("reached the channel: %v %v", r.own.answers, r.follows)
 	}
 	for op := range open {
 		var args any = struct{}{}
@@ -659,5 +686,48 @@ func TestAWrongSignInTellsNoTriesLeft(t *testing.T) {
 			t.Fatalf("status before sign-in tells the tries: %s", b)
 		}
 		r.now = r.now.Add(time.Minute)
+	}
+}
+
+// W5a-resume: a signed-in page lists the paused grants and asks to resume
+// one from the pause it showed; the ask's own failures are fixed codes,
+// and a bad ask never reaches the gate.
+func TestAPausedGrantIsAskedToResumeFromASession(t *testing.T) {
+	r := newRig(t)
+	tok := r.signIn()
+	out, err := r.call(localapi.OpPaused, localapi.Auth{Token: tok})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := out.(localapi.Paused); len(p.Grants) != 1 || p.Grants[0].ID != "G2" || p.Grants[0].Pause != "loop2/pause/G2/1" {
+		t.Fatalf("paused %+v", p)
+	}
+	out, err = r.call(localapi.OpAskResume, localapi.AskResume{Token: tok, Grant: "G2", Pause: "loop2/pause/G2/1"})
+	if err != nil || out.(localapi.Text).Text != "Asked." {
+		t.Fatalf("ask: %v %v", out, err)
+	}
+	if _, err := r.call(localapi.OpAskResume, localapi.AskResume{Token: tok, Grant: "G2", Pause: "loop2/pause/G2/0"}); code(err) != localapi.ErrFailed {
+		t.Fatalf("stale pause: %v", err)
+	}
+	long := func(n int) string { return strings.Repeat("a", n+1) }
+	for _, in := range []localapi.AskResume{
+		{Token: tok, Pause: "p"}, {Token: tok, Grant: "G2"},
+		{Token: tok, Grant: long(localapi.MaxID), Pause: "p"}, {Token: tok, Grant: "G2", Pause: long(localapi.MaxPause)},
+	} {
+		if _, err := r.call(localapi.OpAskResume, in); code(err) != localapi.ErrBadArgs {
+			t.Errorf("%+v: %v", in, err)
+		}
+	}
+	if len(r.asks) != 2 {
+		t.Fatalf("asks reaching the gate %v", r.asks)
+	}
+	r.srv.cfg.Paused, r.srv.cfg.AskResume = nil, nil
+	for op, args := range map[string]any{
+		localapi.OpPaused:    localapi.Auth{Token: tok},
+		localapi.OpAskResume: localapi.AskResume{Token: tok, Grant: "G2", Pause: "loop2/pause/G2/1"},
+	} {
+		if _, err := r.call(op, args); code(err) != localapi.ErrFailed {
+			t.Errorf("%s with no hook: %v", op, err)
+		}
 	}
 }
