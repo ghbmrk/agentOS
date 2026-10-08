@@ -36,4 +36,5 @@ Weekly runs over all of `main` until 2026-10-07, when the batched lens screen re
 | 8 | 22e4b5f | [2026-10-08 #378](2026-10-08-pr378.md): P2-2w d2a; [#379](2026-10-08-pr379.md): UPD-b |
 | 9 | 6b40ddc (PR head) | [2026-10-08 #393](2026-10-08-lens-393.md): SR2-3s flake fix |
 | 10 | d81a971 (PR head) | [2026-10-08 #386](2026-10-08-lens-386.md) |
+| 11 | 7b753eb | [2026-10-08 deep potency review](2026-10-08-potency-review.md): Mark-requested system-wide review; ten proposals and synthetic boundary probes; advisory, no spec/runtime changes |
 | 12 | cbbf80e (PR head) | [2026-10-08 #391](2026-10-08-lens-391.md): SR2-3m |

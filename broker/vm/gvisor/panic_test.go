@@ -29,6 +29,11 @@ func TestRunscPanicAfterStartAnswersNoOutput(t *testing.T) {
 		if strings.Contains(err.Error(), "canary") {
 			t.Fatalf("%s: error carries runsc's text: %v", mode, err)
 		}
+		// The command started, so it may have run; the error is the bare
+		// sentinel that says so, naming no path (SR2-3j, L3 on #396).
+		if err != vm.ErrExecFailed {
+			t.Fatalf("%s: error %v, want %v", mode, err, vm.ErrExecFailed)
+		}
 		if len(res.Stdout) > 0 || len(res.Stderr) > 0 || res.ExitCode != 0 {
 			t.Fatalf("%s: runsc's panic answered output: %+v", mode, res)
 		}

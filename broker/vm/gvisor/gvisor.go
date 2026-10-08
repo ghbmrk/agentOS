@@ -276,10 +276,13 @@ func (r *Runtime) Exec(ctx context.Context, id string, c vm.Command) (vm.ExecRes
 	// and runsc's messages go only to the broker's exec log (SR2-3h). A Go
 	// runtime panic in runsc after the command started writes no --log
 	// line, only its trace to stderr, and exits 2 (SR2-3m), whether or not
-	// the context has since ended (Security S1 on #391).
+	// the context has since ended (Security S1 on #391). The error is a
+	// bare vm sentinel, naming no path (SR2-3j): a panic after the command
+	// started is ErrExecFailed, since the command may have run.
 	var exit *exec.ExitError
 	panicked := errors.As(err, &exit) && exit.ExitCode() == 2 && watch.found()
-	if pid, _ := os.ReadFile(pidFile); len(bytes.TrimSpace(pid)) == 0 || size(logs[0]) > 0 || panicked {
+	pid, _ := os.ReadFile(pidFile)
+	if started := len(bytes.TrimSpace(pid)) > 0; !started || size(logs[0]) > 0 || panicked {
 		msgs := stderr.bytes()
 		if panicked {
 			msgs = watch.trailer()
@@ -288,7 +291,10 @@ func (r *Runtime) Exec(ctx context.Context, id string, c vm.Command) (vm.ExecRes
 		if ctx.Err() != nil {
 			return vm.ExecResult{}, err
 		}
-		return vm.ExecResult{}, fmt.Errorf("runsc exec %s failed (%v); its messages are in %s", id, err, r.execLog())
+		if !started {
+			return vm.ExecResult{}, vm.ErrExecNotStarted
+		}
+		return vm.ExecResult{}, vm.ErrExecFailed
 	}
 	res := vm.ExecResult{Stdout: stdout.bytes(), Stderr: stderr.bytes(), Truncated: stdout.truncated() || stderr.truncated()}
 	if errors.As(err, &exit) && ctx.Err() == nil {

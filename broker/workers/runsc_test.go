@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/vm"
@@ -26,8 +25,10 @@ func (r runscExec) Exec(ctx context.Context, id string, c vm.Command) (vm.ExecRe
 
 // SR2-3h: a runsc that writes a host path to its stderr, failing before
 // the guest's command starts, after it started, or in a panic before or
-// after the command started (SR2-3m), shows the guest neither the path nor any of runsc's text, in worker_exec's
-// answer or its error; a command that runs answers its own output.
+// after the command started (SR2-3m), shows the guest neither the path
+// nor any of runsc's text, in worker_exec's answer or its error; a
+// command that runs answers its own output. The error says only whether
+// the command may have run (SR2-3j).
 func TestRunscMessagesNeverReachTheGuest(t *testing.T) {
 	bin, err := filepath.Abs("../vm/gvisor/testdata/fakerunsc.sh")
 	if err != nil {
@@ -51,8 +52,15 @@ func TestRunscMessagesNeverReachTheGuest(t *testing.T) {
 		}
 		noLeak(t, mode+" error", err.Error())
 		noLeak(t, mode+" answer", text)
-		if !strings.Contains(err.Error(), "(ref ") || strings.Contains(err.Error(), "guest") {
-			t.Fatalf("%s: want a ref and nothing of the command's output: %v", mode, err)
+		// Fixed text that says whether the command may have run
+		// (SR2-3j, release finding 362-2).
+		want := "worker w: the command did not start; retry it"
+		// A panic after the start may have run too (SR2-3m, L3 on #396).
+		if mode == "wait" || mode == "latepanic" || mode == "fullpanic" {
+			want = "worker w: the runtime failed after the command started, so it may have run; check what it changed before running it again"
+		}
+		if err.Error() != want {
+			t.Fatalf("%s: %q, want %q", mode, err, want)
 		}
 	}
 	text, err := call("ok")

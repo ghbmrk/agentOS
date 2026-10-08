@@ -18,6 +18,8 @@ Usage:
 """
 import argparse
 import collections
+import contextlib
+import errno
 import fnmatch
 import ipaddress
 import json
@@ -25,11 +27,13 @@ import os
 import pathlib
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.parse
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -277,7 +281,10 @@ def static_scan(root, manifest, dirs=SHIPPING_DIRS):
 # ---- offline sandbox ----------------------------------------------------------------
 
 def _unshare_flags():
-    return ["-n", "-m"] if os.geteuid() == 0 else ["-r", "-n", "-m"]
+    # A PID namespace: when its first process exits or is killed, the kernel kills every
+    # process in it, including one that left the process group (setsid) or strace let go of.
+    pid = ["--pid", "--fork", "--kill-child", "--mount-proc"]
+    return (["-n", "-m"] if os.geteuid() == 0 else ["-r", "-n", "-m"]) + pid
 
 
 _SANDBOX = None
@@ -407,36 +414,104 @@ def _inner(work, timeout, cmd, extra_keep=()):
     return 0
 
 
-def run_target(target, manifest, timeout=600):
+# strace's own failure, as opposed to a scenario that failed: strace prints e.g.
+# "strace: ptrace(PTRACE_LISTEN,pid:42,sig:0): Input/output error", lets its tracees go on
+# untraced, and its exit status may still be the main tracee's 0, so the trace is partial.
+# Unanchored: tracees share strace's stderr, so the message can follow a partial line.
+STRACE_FAULT = re.compile(rb"strace: .*(?:Input/output error|PTRACE_)")
+STRACE_ATTEMPTS = 3
+
+
+@contextlib.contextmanager
+def _scratch_dir(prefix, tries=50, pause=0.2):
+    """TemporaryDirectory whose removal outlasts a straggler still writing into it
+    (a go-build dir 'not empty' as rmtree reaches it). Only ENOTEMPTY is retried, and
+    a directory that never empties still raises. run_target kills the sandbox before
+    this runs, so the retry covers only writes already in flight, not a live process."""
+    path = tempfile.mkdtemp(prefix=prefix)
+    try:
+        yield path
+    finally:
+        for left in range(tries, 0, -1):
+            try:
+                shutil.rmtree(path)
+                break
+            except OSError as e:
+                if e.errno != errno.ENOTEMPTY or left == 1:
+                    raise
+                time.sleep(pause)
+
+
+def _run_sandboxed(cmd, env, timeout):
+    """Runs the sandbox in its own process group and kills what is left of it; killing
+    unshare also ends its PID namespace (--kill-child), so nothing outlives the run."""
+    proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    finally:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        proc.wait()
+    return proc.returncode, out, err
+
+
+def _attempt(target, manifest, timeout):
+    """One sandboxed run in a fresh work directory: (result, whether strace faulted)."""
     profile = target.get("profile", "offline")
-    if profile != "offline":
-        raise ValueError("%s: only offline scenarios run in the sandbox" % target["name"])
-    with tempfile.TemporaryDirectory(prefix="depaudit-") as work:
+    with _scratch_dir("depaudit-") as work:
         os.chmod(work, 0o755)
         cmd = ["unshare"] + _unshare_flags() + ["--", sys.executable, str(pathlib.Path(__file__).resolve()),
                                                 "_inner", "--work", work, "--timeout", str(timeout)]
         cmd += sum((["--keep", k] for k in target.get("keep", ())), []) + ["--"]
         env = dict(os.environ, **target.get("env", {}))
-        p = subprocess.run(cmd + list(target["cmd"]), env=env, capture_output=True, timeout=timeout + 60)
+        rc, _, stderr = _run_sandboxed(cmd + list(target["cmd"]), env, timeout + 60)
         res_file = pathlib.Path(work, "result.json")
-        if p.returncode != 0 or not res_file.exists():
+        if rc != 0 or not res_file.exists():
             return {"name": target["name"], "outcome": "error", "violations": [],
                     "detail": "sandbox exit %s, %s\n%s" % (
-                        p.returncode, "result present" if res_file.exists() else "no result",
-                        p.stderr.decode(errors="replace")[-2000:])}
+                        rc, "result present" if res_file.exists() else "no result",
+                        stderr.decode(errors="replace")[-2000:])}, False
         res = json.loads(res_file.read_text())
         trace = pathlib.Path(work, "net.strace")
         events = parse_strace(trace.read_text(errors="replace") if trace.exists() else "")
         violations = evaluate(events, res["dns"], manifest, profile, work, res["realpaths"])
+        err = pathlib.Path(work, "stderr").read_bytes()
         out = {"name": target["name"], "profile": profile, "exit": res["rc"], "events": len(events),
                "logged": sorted({"%s %s" % (e.family, e.addr) for e in events}),
                "violations": violations, "masked": res["masked"], "io_uring_disabled": res["io_uring_disabled"]}
-        if res["rc"] != 0:
+        fault = STRACE_FAULT.search(err) is not None
+        if fault:
+            out["outcome"] = "error"
+            out["detail"] = "strace failed itself (not a scenario result):\n" + err[-2000:].decode(errors="replace")
+        elif res["rc"] != 0:
             out["outcome"] = "scenario-failed"
-            out["stderr_tail"] = pathlib.Path(work, "stderr").read_bytes()[-2000:].decode(errors="replace")
+            out["stderr_tail"] = err[-2000:].decode(errors="replace")
         else:
             out["outcome"] = "violation" if violations else "pass"
+        return out, fault
+
+
+def run_target(target, manifest, timeout=600):
+    """Reruns a scenario strace faulted on, up to STRACE_ATTEMPTS; what a faulted attempt
+    saw is kept, so a fault can hide neither a leak nor (all faulting) pass."""
+    if target.get("profile", "offline") != "offline":
+        raise ValueError("%s: only offline scenarios run in the sandbox" % target["name"])
+    carried = []  # violations from attempts strace itself cut short
+    for attempt in range(1, STRACE_ATTEMPTS + 1):
+        out, fault = _attempt(target, manifest, timeout)
+        if not fault:
+            break
+        carried += out["violations"]
+    else:
+        out["detail"] = "on all %d attempts: %s" % (STRACE_ATTEMPTS, out["detail"])
+        out["violations"] = carried
         return out
+    out["violations"] = carried + out["violations"]
+    if out["outcome"] == "pass" and carried:
+        out["outcome"] = "violation"
+    return out
 
 
 # ---- controls and CLI -------------------------------------------------------------------
