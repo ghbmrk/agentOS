@@ -523,12 +523,12 @@ func verifyHandler(c *custody) http.Handler {
 			}
 			return
 		}
-		if r.Method == http.MethodPost && (r.URL.Path == "/enroll" || r.URL.Path == "/enroll/confirm") {
+		if r.Method == http.MethodPost && (r.URL.Path == "/enroll" || r.URL.Path == "/enroll/confirm" || r.URL.Path == "/enroll/seal") {
 			enrollHandler(c, w, r)
 			return
 		}
 		if r.Method != http.MethodPost || r.URL.Path != "/verify" {
-			http.Error(w, "POST /verify, /recall-key, /enroll or /enroll/confirm, or GET /second-line or /second-line/texts, only", http.StatusMethodNotAllowed)
+			http.Error(w, "POST /verify, /recall-key, /enroll, /enroll/confirm or /enroll/seal, or GET /second-line or /second-line/texts, only", http.StatusMethodNotAllowed)
 			return
 		}
 		var req modelroute.VerifyRequest
@@ -558,15 +558,19 @@ func verifyHandler(c *custody) http.Handler {
 
 // enrollHandler serves setup's enrollment (enroll.go) to agentosd: POST
 // /enroll answers the new seed's link once, POST /enroll/confirm only
-// whether the code matched.
+// whether the code matched, POST /enroll/seal nothing.
 func enrollHandler(c *custody, w http.ResponseWriter, r *http.Request) {
 	var res any
 	var err error
-	if r.URL.Path == "/enroll" {
+	switch r.URL.Path {
+	case "/enroll":
 		var uri string
 		uri, err = c.enroll()
 		res = modelroute.EnrollResult{URI: uri}
-	} else {
+	case "/enroll/seal":
+		err = c.sealEnroll()
+		res = struct{}{}
+	default:
 		var req modelroute.EnrollConfirmRequest
 		if derr := json.NewDecoder(io.LimitReader(r.Body, 1<<10)).Decode(&req); derr != nil {
 			http.Error(w, "malformed request", http.StatusBadRequest)
@@ -582,7 +586,7 @@ func enrollHandler(c *custody, w http.ResponseWriter, r *http.Request) {
 	case err == errLocked:
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
-	case err == errEnrolled, err == errNoEnrollment:
+	case err == errEnrolled, err == errNoEnrollment, err == errNotConfirmed:
 		http.Error(w, err.Error(), err.(*unlockErr).status)
 		return
 	case errors.As(err, &paused):

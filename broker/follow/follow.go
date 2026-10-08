@@ -218,7 +218,7 @@ func (x *Executor) Reconcile(ctx context.Context, in journal.Intent, _ int) jour
 	}
 	src, err := x.cfg.Store.Following()
 	if err != nil || d != digest || src.Name != name {
-		return journal.Outcome{Result: journal.ResultUnknown, Evidence: "the box does not trust that root under that name"}
+		return journal.Outcome{Result: journal.ResultUnknown, Evidence: "I do not trust that root under that name"}
 	}
 	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "now following root " + digest + x.alert(ctx, name, x.latest(ctx))}
 }
