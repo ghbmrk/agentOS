@@ -22,6 +22,7 @@ type StartupSlot struct {
 	mu       sync.Mutex // state only: never waits for constructor/user/I/O work
 	current  *Startup
 	draining *slotDrain
+	recovery RecoveryState
 }
 
 type slotDrain struct {
@@ -39,7 +40,7 @@ func (s *StartupSlot) Start(path string, cfg grants.Config) (*Startup, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.current != nil {
+	if s.current != nil || s.recovery != RecoveryIdle {
 		return nil, ErrStartupOccupied
 	}
 	p, err := StartSession(path, cfg)
@@ -65,6 +66,10 @@ func (s *StartupSlot) Drain(ctx context.Context) error {
 		return ErrSessionConfig
 	}
 	s.mu.Lock()
+	if s.recovery != RecoveryIdle {
+		s.mu.Unlock()
+		return ErrStartupOccupied
+	}
 	if s.current == nil {
 		s.mu.Unlock()
 		return nil

@@ -388,3 +388,22 @@ unlink/sync/close is uncertain cleanup; retain recovery controls and do not rest
 until trusted determination, no automatic retry or repair. Any synchronous operation
 may hang without a deadline. No refund, revocation, restore/rollback/config-integrity
 or hostile-name safety claimed; D37 fault availability hold remains.
+
+`StartupSlot.RecoverDuplicate` admits the explicit D54 action through the same
+owner resource as `Start`/manifest startup. A current startup, incomplete consumer
+drain or admitted recovery refuses competing work before another operation. Its
+synchronous action runs without holding the state mutex: fixed `RecoveryState`
+wording and independent owner controls remain available. No worker is created.
+The method owns only actual D54 duplicate removal, not a public supplied callback.
+Successful sync/close releases admission only for a future explicit Start. Failure
+or panic returns fixed ErrStorage, latches RecoveryHeld, and refuses all future
+Start/recovery/Drain; no reset/retry API or private exception text. Invalid zero
+pin/nil slot refuses without occupying an available slot.
+
+This extends cooperating in-memory admission, not persistent/global quota or
+revocation. Another slot/direct helper/reboot/escaped work bypasses it; approved
+actual daemon/operator routing must reuse one owner slot. An operation may hang
+forever with occupancy retained. On failure independent trusted custody/persistence
+recovery is required; resource availability must not silently bypass the hold.
+W5-D55-Q and all prior Q/security/base qualifications remain external. A state
+line is not permission, actual media/latency freshness or accounting qualification.
