@@ -211,7 +211,7 @@ class StaticScanTest(unittest.TestCase):
 
 
 class ScratchDirTest(unittest.TestCase):
-    # REQ: HK-1a
+    # HK-1a (briefs/HK-1.md; a local ID with no SPEC row, so no REQ marker)
     def test_cleanup_retries_when_a_late_writer_fills_the_directory(self):
         real, calls = shutil.rmtree, []
 
@@ -296,7 +296,7 @@ class OfflineRunTest(unittest.TestCase):
         self.assertEqual(res["outcome"], "violation", res)
         self.assertIn("/tmp", res["masked"])
 
-    # REQ: HK-1a
+    # HK-1a (briefs/HK-1.md; a local ID with no SPEC row, so no REQ marker)
     def test_a_process_that_escaped_strace_and_its_group_is_killed_with_the_run(self):
         # strace letting go of a tracee that had called setsid(): killing the process group
         # misses it, and it would write into the work directory while it is being removed.
@@ -366,7 +366,7 @@ class StraceFaultTest(unittest.TestCase):
                                       depaudit.load_manifest(MANIFEST))
             return res, int(pathlib.Path(d, "count").read_text())
 
-    # REQ: HK-1b
+    # HK-1b (briefs/HK-1.md; a local ID with no SPEC row, so no REQ marker)
     def test_one_strace_fault_is_rerun_and_the_scenario_judged_on_the_rerun(self):
         res, runs = self.run_with("clean", faults=1)
         self.assertEqual((res["outcome"], res["violations"], runs), ("pass", [], 2), res)
@@ -383,7 +383,7 @@ class StraceFaultTest(unittest.TestCase):
                                   msg="strace: ptrace(PTRACE_LISTEN,pid:42,sig:0): Input/output error")
         self.assertEqual((res["outcome"], runs), ("error", depaudit.STRACE_ATTEMPTS), res)
 
-    # REQ: HK-1c
+    # HK-1c (briefs/HK-1.md; a local ID with no SPEC row, so no REQ marker)
     def test_a_leak_seen_before_a_strace_fault_is_not_forgotten(self):
         res, runs = self.run_with("phones-home", faults=1, later_cmd=["true"])
         self.assertEqual(runs, 2)
@@ -411,7 +411,7 @@ class CarryTest(unittest.TestCase):
             res = depaudit.run_target({"name": "t", "cmd": ["true"]}, depaudit.load_manifest(MANIFEST))
         return res, m.call_count
 
-    # REQ: HK-1c
+    # HK-1c (briefs/HK-1.md; a local ID with no SPEC row, so no REQ marker)
     def test_a_leak_before_a_fault_survives_a_later_sandbox_error(self):
         res, n = self.run_attempts(({"name": "t", "outcome": "error", "violations": [self.LEAK]}, True),
                                    ({"name": "t", "outcome": "error", "violations": [], "detail": "sandbox exit 1"},
