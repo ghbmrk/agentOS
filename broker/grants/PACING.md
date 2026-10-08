@@ -83,9 +83,47 @@ failure.
 
 Persistence currently serializes under the Gate's existing mutex. This avoids
 another counter, conflicting writers or a save/permission race; a slow store
-can delay other Gate policy work and health reads. No timeout worker that
+can delay other Gate policy work. Health reads no longer acquire that mutex. No timeout worker that
 could outlive the operation is created. Store latency/availability qualification
 and cancellation-aware scheduling remain integration work.
+
+`PacingMaxStoreLatency` optionally sets a trusted per-Load/Save observation
+threshold, greater than zero and at most five minutes. Zero keeps prior store
+semantics. Negative/over-range settings or a positive threshold with no Store
+latch fixed recovery before any store operation; they cannot silently select
+volatile accounting. The threshold uses process monotonic time (`time.Now`),
+independently of the accounting wall-clock callback. It requires trusted
+configuration and a qualified runtime clock; it is not a deployment default.
+
+PacingHealth reads atomic fault/deadline state without acquiring the Gate mutex
+or performing I/O. During a still-running store call it returns the existing
+fixed recovery error once the configured threshold has elapsed, latching the
+object. Policy.Health and the explicitly bound host health can then report the
+hold while that save remains blocked. The Store call itself stays synchronous
+on its original caller: there is no goroutine, timeout writer, competing save,
+retry, fallback, interruption or early successful permission. A call observed
+to finish late is refused even if no health observer ran. Constructor Load
+finishing late is refused before initialization/confirmation Save. Late Save
+may already have replaced the image; its debt remains conservatively spent and
+only a fresh strict Gate against that same image can recover after quiescence.
+
+This bounds the work of the pacing health observation, not the duration of Load,
+Save, construction, reservation or runner shutdown. A permanently hung call can
+still block startup/admission/quiescence; the host may independently wait on its
+other store health checks. No hardware/process scheduling deadline is qualified.
+The observed completion includes the callback return boundary and scheduling
+delay. Trusted assembly must bind policy health, preserve require-existing mode
+and qualify actual filesystem latency/custody before activation. The existing
+urgent/reissue storage-fault availability hold applies equally to overdue I/O.
+No authenticated restore, anti-rollback, exclusive-writer or config-integrity
+qualification is supplied.
+
+New tests first exposed blocking health, late initialization and invalid-setting
+fallback. Actual FileStore calls stalled before and after replacement exercise
+concurrent recovery observation, late-success refusal and strict debt reopen.
+Additional checks cover late completion without an observer, completed-deadline
+clearing, zero-option compatibility and reissue/STOP containment. These are
+local behavior checks, not an accepted deployment latency threshold.
 
 Tests use actual FileStores, reopen and before/after-write cuts; mixed request/
 question reservations, aged priority, staggered urgent debt, exact expiry,

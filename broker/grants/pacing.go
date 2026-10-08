@@ -34,13 +34,16 @@ type pacingState struct {
 	Texts   []time.Time `json:"texts"`
 }
 
-// PacingHealth reports a latched accounting failure. It performs no store I/O.
+// PacingHealth reports a latched accounting failure without admission locking
+// or store I/O, including a still-running store call beyond its configured threshold.
 // A failed object cannot be repaired in place: quiesce it and construct a new
 // gate against the same durable store after trusted recovery.
 func (g *Gate) PacingHealth() error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.pacingFault {
+	deadline := g.pacingDeadline.Load()
+	if deadline != nil && !time.Now().Before(*deadline) && g.pacingDeadline.CompareAndSwap(deadline, nil) {
+		g.pacingFault.Store(true)
+	}
+	if g.pacingFault.Load() {
 		return ErrPacingRecovery
 	}
 	return nil
@@ -51,14 +54,14 @@ func pacingTime(t time.Time) bool { return !t.IsZero() && t.Year() >= 1 && t.Yea
 // Called under mu for reservations. Read the clock inside the lock so concurrent
 // callers cannot compare an older sampled time with a later committed one.
 func (g *Gate) pacingClockLocked(now time.Time) bool {
-	if g.pacingFault {
+	if g.pacingFault.Load() {
 		return false
 	}
 	if g.cfg.PacingStore == nil {
 		return true
 	}
-	if g.pacingFault || !pacingTime(now) || now.Before(g.pacingLast) {
-		g.pacingFault = true
+	if g.pacingFault.Load() || !pacingTime(now) || now.Before(g.pacingLast) {
+		g.pacingFault.Store(true)
 		return false
 	}
 	g.pacingLast = now.Round(0).UTC()
@@ -66,18 +69,26 @@ func (g *Gate) pacingClockLocked(now time.Time) bool {
 }
 
 func (g *Gate) openPacing() {
+	if g.cfg.PacingMaxStoreLatency < 0 || g.cfg.PacingMaxStoreLatency > 5*time.Minute || g.cfg.PacingMaxStoreLatency > 0 && g.cfg.PacingStore == nil {
+		g.pacingFault.Store(true)
+		return
+	}
 	if g.cfg.PacingStore == nil {
-		g.pacingFault = g.cfg.PacingRequireExisting
+		g.pacingFault.Store(g.cfg.PacingRequireExisting)
 		return
 	}
 	now := g.cfg.Now().Round(0).UTC()
 	if g.cfg.RequestsPerHour > maxPacingLimit || !pacingTime(now) {
-		g.pacingFault = true
+		g.pacingFault.Store(true)
 		return
 	}
-	b, err := g.cfg.PacingStore.Load()
+	var b []byte
+	err := g.pacingStoreCall(func() (err error) {
+		b, err = g.cfg.PacingStore.Load()
+		return err
+	})
 	if err != nil || len(b) > maxPacingBytes || g.cfg.PacingRequireExisting && b == nil {
-		g.pacingFault = true
+		g.pacingFault.Store(true)
 		return
 	}
 	if b != nil {
@@ -87,12 +98,12 @@ func (g *Gate) openPacing() {
 		err = json.Unmarshal(b, &st)
 		canonical, e := json.Marshal(st)
 		if err != nil || e != nil || !bytes.Equal(b, canonical) || st.Version != 1 || st.Limit != g.cfg.RequestsPerHour || !pacingTime(st.Last) || now.Before(st.Last) || len(st.Texts) > st.Limit || (!st.Aged.IsZero() && (!pacingTime(st.Aged) || st.Aged.After(st.Last))) {
-			g.pacingFault = true
+			g.pacingFault.Store(true)
 			return
 		}
 		for i, t := range st.Texts {
 			if !pacingTime(t) || t.After(st.Last) || i > 0 && t.Before(st.Texts[i-1]) {
-				g.pacingFault = true
+				g.pacingFault.Store(true)
 				return
 			}
 		}
@@ -114,7 +125,7 @@ func (g *Gate) commitPacingLocked(now time.Time, n int, aged time.Time) bool {
 	if g.cfg.PacingStore == nil {
 		return true
 	}
-	if g.pacingFault {
+	if g.pacingFault.Load() {
 		return false
 	}
 	texts := append([]time.Time(nil), g.sent...)
@@ -130,15 +141,38 @@ func (g *Gate) commitPacingLocked(now time.Time, n int, aged time.Time) bool {
 	st := pacingState{Version: 1, Limit: g.cfg.RequestsPerHour, Last: g.pacingLast, Aged: aged.Round(0).UTC(), Texts: texts}
 	b, err := json.Marshal(st)
 	if err != nil || len(b) > maxPacingBytes {
-		g.pacingFault = true
+		g.pacingFault.Store(true)
 		return false
 	}
-	if err = g.cfg.PacingStore.Save(b); err != nil {
-		g.pacingFault = true
+	if err = g.pacingStoreCall(func() error { return g.cfg.PacingStore.Save(b) }); err != nil {
+		g.pacingFault.Store(true)
 		return false
 	}
 	g.sent = texts
 	g.asked = nil
 	g.agedAt = aged
 	return true
+}
+
+// The admission mutex serializes store calls. Publish only their monotonic
+// deadline for health observers; no worker, timer, retry or alternate writer is
+// created. A late callback may already have committed: never grant permission
+// or refund that uncertain/spent debt. Returning from this function is the
+// observed completion boundary, not a guarantee about kernel I/O timing.
+func (g *Gate) pacingStoreCall(call func() error) error {
+	var deadline *time.Time
+	if g.cfg.PacingMaxStoreLatency > 0 {
+		end := time.Now().Add(g.cfg.PacingMaxStoreLatency)
+		deadline = &end
+		g.pacingDeadline.Store(deadline)
+	}
+	err := call()
+	g.pacingDeadline.Store(nil)
+	if err != nil || deadline != nil && !time.Now().Before(*deadline) {
+		g.pacingFault.Store(true)
+	}
+	if g.pacingFault.Load() {
+		return ErrPacingRecovery
+	}
+	return nil
 }
