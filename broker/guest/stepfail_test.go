@@ -21,6 +21,35 @@ func (r *rig) notes(id, name string, args map[string]any) []string {
 	return out
 }
 
+// intervalPasses makes machine id's StepInterval pass without waiting
+// for it: the trailing snapshot it owes, if any, runs now in place of its
+// timer, and the next effect request snapshots at once. With a long
+// interval, a request is inside it however slow the runner is, which a
+// short wall-clock interval can't promise under -race.
+func (r *rig) intervalPasses(id string) {
+	r.t.Helper()
+	m := r.p.get(id)
+	s := &m.steps
+	s.mu.Lock()
+	timer, running := s.timer, s.running
+	s.mu.Unlock()
+	if running {
+		r.t.Fatalf("stepper of %s is mid-snapshot", id)
+	}
+	if timer != nil {
+		if !timer.Stop() {
+			r.t.Fatalf("trailing timer of %s fired on its own", id)
+		}
+		r.p.trailing(m)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pending || s.timer != nil {
+		r.t.Fatalf("stepper of %s still owes a snapshot", id)
+	}
+	s.last = s.last.Add(-r.p.cfg.StepInterval)
+}
+
 // A failed step snapshot is not silent: the call whose step failed, or
 // the next one when the step trailed, carries one fixed note naming the
 // reason and no host path, once (SR2-3s; security R1 on #174).
@@ -62,13 +91,13 @@ func TestSR23sFailedStepTellsTheAgent(t *testing.T) {
 // A trailing step that fails is told in the machine's next tool result,
 // whatever the tool.
 func TestSR23sTrailingStepFailureComesWithTheNextResult(t *testing.T) {
-	r := newRig(t, func(c *Config) { c.StepInterval = 50 * time.Millisecond })
+	r := newRig(t, func(c *Config) { c.StepInterval = time.Hour })
 	r.tool("m1", "effect_request", send("r1")) // snapshots at once, and succeeds
 	r.ms.failSteps(fmt.Errorf("vm: %w", ErrStepNoRoom))
 	if got := r.notes("m1", "effect_request", send("r2")); len(got) != 0 {
 		t.Fatalf("a step inside the interval reported early: %q", got)
 	}
-	r.stepsSettle("m1") // the trailing snapshot runs, and fails
+	r.intervalPasses("m1") // the trailing snapshot runs, and fails
 	if got := r.notes("m1", "effect_status", map[string]any{"request_id": "r2"}); len(got) != 1 || got[0] != stepNoteNoRoom {
 		t.Fatalf("next result's notes = %q", got)
 	}
@@ -117,11 +146,11 @@ func TestSR23sStatusWhileStepsKeepFailing(t *testing.T) {
 // a trailing failure left untold is dropped once a rollback point is
 // saved (L3 MUST on #179).
 func TestSR23sSavedStepDropsTheUntoldNote(t *testing.T) {
-	r := newRig(t, func(c *Config) { c.StepInterval = 50 * time.Millisecond })
+	r := newRig(t, func(c *Config) { c.StepInterval = time.Hour })
 	r.tool("m1", "effect_request", send("r1")) // snapshots at once, and succeeds
 	r.ms.failSteps(fmt.Errorf("vm: %w", ErrStepNoRoom))
 	r.tool("m1", "effect_request", send("r2")) // inside the interval: trails
-	r.stepsSettle("m1")                        // the trailing snapshot fails, untold
+	r.intervalPasses("m1")                     // the trailing snapshot fails, untold
 	r.ms.failSteps(nil)
 	if got := r.notes("m1", "effect_request", send("r3")); len(got) != 0 {
 		t.Fatalf("a saved step still carried %q", got)

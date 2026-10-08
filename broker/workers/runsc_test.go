@@ -25,8 +25,8 @@ func (r runscExec) Exec(ctx context.Context, id string, c vm.Command) (vm.ExecRe
 }
 
 // SR2-3h: a runsc that writes a host path to its stderr, failing before
-// the guest's command starts, after it started, or in a panic, shows the
-// guest neither the path nor any of runsc's text, in worker_exec's
+// the guest's command starts, after it started, or in a panic before or
+// after the command started (SR2-3m), shows the guest neither the path nor any of runsc's text, in worker_exec's
 // answer or its error; a command that runs answers its own output.
 func TestRunscMessagesNeverReachTheGuest(t *testing.T) {
 	bin, err := filepath.Abs("../vm/gvisor/testdata/fakerunsc.sh")
@@ -44,7 +44,7 @@ func TestRunscMessagesNeverReachTheGuest(t *testing.T) {
 		text, _, err := r.tools.Call(context.Background(), "agent", mc.Lineage, toolExec, b)
 		return text, err
 	}
-	for _, mode := range []string{"prestart", "panic", "wait"} {
+	for _, mode := range []string{"prestart", "panic", "wait", "latepanic", "fullpanic"} {
 		text, err := call(mode)
 		if err == nil {
 			t.Fatalf("%s: runsc's failure answered %s", mode, text)
