@@ -160,11 +160,11 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | OSS-6s-a | [Constant daily batch, idempotent ledger, cover send](briefs/OSS-6s-a.md) | OSS-6 | merged (6790cf4; #411) |
 | OSS-6s-b | [Tor transport to Nostr relays, and the pull job](briefs/OSS-6s-b.md) | OSS-6s-a, OSS-6p, OSS-6i, OSS-6j | queued |
 | OSS-6m | [Measure the daily publication batch constant](briefs/OSS-6m.md) | OSS-6s-a | queued (optional, non-blocking) |
-| OSS-6j | [Spec: what the repository's pull job is](briefs/OSS-6j.md) | #330 | in review (#N) |
-| OSS-6i | [Fresh Tor circuit per batch and signing key](briefs/OSS-6i.md) | #330 | in review (#N) |
-| OSS-6p | [Relay count, delivery rule, queue bound, relay list source](briefs/OSS-6p.md) | #330 | in review (#N) |
-| OSS-6a | [Spec: where ask-each-time prompts appear](briefs/OSS-6a.md) | #330 | in review (#N) |
-| OSS-5t | [Spec: transport for the embargoed security report](briefs/OSS-5t.md) | #330 | in review (#N) |
+| OSS-6j | [Spec: what the repository's pull job is](briefs/OSS-6j.md) | #330 | in review (#418) |
+| OSS-6i | [Fresh Tor circuit per batch and signing key](briefs/OSS-6i.md) | #330 | in review (#418) |
+| OSS-6p | [Relay count, delivery rule, queue bound, relay list source](briefs/OSS-6p.md) | #330 | in review (#418) |
+| OSS-6a | [Spec: where ask-each-time prompts appear](briefs/OSS-6a.md) | #330 | in review (#418) |
+| OSS-5t | [Spec: transport for the embargoed security report](briefs/OSS-5t.md) | #330 | in review (#418) |
 | OSS-9 | [Attestations as evidence and following forks](briefs/OSS-9.md) | P4-3, P4-4 | merged (4329b1d; #180) |
 | OSS-6c | [Publication clock hardening](briefs/OSS-6c.md) | OSS-6 | merged (4329b1d; #180) |
 | OSS-6e | [Floor across restarts](briefs/OSS-6e.md) | OSS-6c | in review (A) |
