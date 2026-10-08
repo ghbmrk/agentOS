@@ -648,12 +648,12 @@ type Status struct {
 const when = "Mon 2 Jan 15:04"
 
 var failText = map[string]string{
-	failExpired:   "the update source's data has expired, or this box's clock is wrong, so newer updates may be hidden",
+	failExpired:   "the update source's data has expired, or my clock is wrong, so newer updates may be hidden",
 	failSigned:    "the update data was not properly signed",
-	failRollback:  "the update source offered older data than this box already has",
+	failRollback:  "the update source offered older data than I already have",
 	failReach:     "the update source could not be reached",
 	failNoMirrors: "no update source is set up",
-	failState:     "this box's update record could not be read",
+	failState:     "my update record could not be read",
 	failRelease:   "the newest release could not be read",
 }
 
@@ -698,11 +698,11 @@ func (l *Loop3) baseStatusLocked(online bool, set loops.Settings, in update.Inst
 	}
 	switch {
 	case ierr != nil:
-		return Status{Line: "Updates: could not read this box's update state."}
+		return Status{Line: "Updates: I could not read my update state."}
 	case !online && st.LastOnline.IsZero():
-		return Status{Line: "Updates: not checked yet, because the box is offline." + drive}
+		return Status{Line: "Updates: not checked yet, because I am offline." + drive}
 	case !online:
-		return Status{Line: fmt.Sprintf("Updates: not checked since %s, because the box is offline.", last) + drive}
+		return Status{Line: fmt.Sprintf("Updates: not checked since %s, because I am offline.", last) + drive}
 	case set.Off:
 		return Status{Line: fmt.Sprintf("Updates: last checked %s, but update checks are off. Reply LOOPS ON to restart them.", last) + drive}
 	case !set.On(loops.Maintain):
@@ -712,7 +712,7 @@ func (l *Loop3) baseStatusLocked(online bool, set loops.Settings, in update.Inst
 	case st.LastOnline.IsZero():
 		return Status{Line: "Updates: not checked yet." + drive}
 	case now.Before(st.LastOnline):
-		return Status{Line: fmt.Sprintf("Updates: this box's clock is behind its last check (%s), so it will check again.", last)}
+		return Status{Line: fmt.Sprintf("Updates: my clock is behind my last check (%s), so I will check again.", last)}
 	case in.UnconfirmedFreshness && st.FreshFailed:
 		return Status{Line: update.NotConfirmedNotice}
 	case in.UnconfirmedFreshness:
@@ -720,7 +720,7 @@ func (l *Loop3) baseStatusLocked(online bool, set loops.Settings, in update.Inst
 	case now.Sub(st.LastOnline) > 2*l.cfg.Interval:
 		// Loop 3 runs only in spare time (LOOP-1), and makes no model
 		// calls, so a busy box is the only other reason.
-		return Status{Line: fmt.Sprintf("Updates: last checked %s. The box has been busy and will check again soon.", last)}
+		return Status{Line: fmt.Sprintf("Updates: last checked %s. I have been busy and will check again soon.", last)}
 	}
 	if p := st.Pending; p != nil {
 		return Status{Line: pendingLine(p)}
@@ -728,7 +728,7 @@ func (l *Loop3) baseStatusLocked(online bool, set loops.Settings, in update.Inst
 	if st.Newest > in.Version {
 		switch st.Proposed[st.Newest] {
 		case change.StateRejected:
-			return Status{Line: fmt.Sprintf("Update %d did worse on this box's tests and was not installed.", st.Newest)}
+			return Status{Line: fmt.Sprintf("Update %d did worse on my tests and was not installed.", st.Newest)}
 		case change.StateAdopted:
 			ready := fmt.Sprintf("update %d is ready and installs at the next quiet time.", st.Newest)
 			switch {
@@ -767,17 +767,17 @@ func (l *Loop3) baseStatusLocked(online bool, set loops.Settings, in update.Inst
 func pendingLine(p *pending) string {
 	switch {
 	case p.Why == waitPinned && p.Security:
-		return fmt.Sprintf("Security update %d is out. This box is pinned, so it won't install it. Reply UPDATES STABLE to take it and later tested releases.", p.Version)
+		return fmt.Sprintf("Security update %d is out. I am pinned, so I won't install it. Reply UPDATES STABLE to take it and later tested releases.", p.Version)
 	case p.Why == waitPinned:
-		return "Updates: this box is pinned, so it does not install updates on its own. Reply UPDATES STABLE to take them and later tested releases."
+		return "Updates: I am pinned, so I do not install updates on my own. Reply UPDATES STABLE to take them and later tested releases."
 	case p.Why == waitAttestation:
 		return fmt.Sprintf("Security update %d is waiting for an independent test report before it installs.", p.Version)
 	case p.Why == waitSoak:
 		return fmt.Sprintf("Update %d is out. The box will offer it after %s, once other boxes have tested it.", p.Version, p.Until.Format("Mon 2 Jan"))
 	case p.Why == waitPreempted:
-		return fmt.Sprintf("Update %d was found. The box will look at it again soon.", p.Version)
+		return fmt.Sprintf("Update %d was found. I will look at it again soon.", p.Version)
 	case p.Security:
-		return fmt.Sprintf("Security update %d was found but could not be tested yet. The box will try again within the hour.", p.Version)
+		return fmt.Sprintf("Security update %d was found but could not be tested yet. I will try again within the hour.", p.Version)
 	}
 	return fmt.Sprintf("Update %d was found but could not be tested yet.", p.Version)
 }
