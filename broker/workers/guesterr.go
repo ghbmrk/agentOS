@@ -104,6 +104,10 @@ func sentinel(err error) (said, bool) {
 		return said{"the worker is busy with another command; retry when it returns"}, true
 	case errors.Is(err, vm.ErrHeld):
 		return errStopped, true
+	case errors.Is(err, vm.ErrExecNotStarted):
+		return said{"the command did not start; retry it"}, true
+	case errors.Is(err, vm.ErrExecFailed):
+		return said{"the runtime failed after the command started, so it may have run; check what it changed before running it again"}, true
 	case errors.Is(err, vm.ErrPreempted):
 		return said{"preempted, retry: the worker was stopped for higher-priority work; roll it back with worker_rollback, or destroy and recreate it"}, true
 	case errors.Is(err, vm.ErrState):

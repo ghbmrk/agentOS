@@ -1074,7 +1074,7 @@ func ownerLine(r Record) string {
 	line := findingText(f)
 	switch r.Contained {
 	case "paused":
-		line += " Paused " + label(f.Contain) + ". It stays paused until you resume it; my Wi-Fi page will offer that in an update."
+		line += " Paused " + label(f.Contain) + ". It stays paused until you resume it on my Wi-Fi page."
 	case "failed":
 		line += " Could not pause " + label(f.Contain) + ". STOP pauses everything."
 	case "capped":
@@ -1089,7 +1089,7 @@ func ownerLine(r Record) string {
 }
 
 func clearedLine(r Record) string {
-	return fmt.Sprintf("Cleared: %s. %s stays paused until you resume it; my Wi-Fi page will offer that in an update.",
+	return fmt.Sprintf("Cleared: %s. %s stays paused until you resume it on my Wi-Fi page.",
 		safeName(r.Finding.Subject), capFirst(label(r.Finding.Contain)))
 }
 

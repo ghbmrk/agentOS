@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/ghbmrk/agentos/broker/guesterr"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/reversible"
@@ -259,6 +260,8 @@ type Gate struct {
 	eng    *journal.Engine
 	own    Owner
 	grants map[string]*Grant
+	// resumes is the page's latest resume ask per grant (AskResume).
+	resumes map[string]resumeAsk
 	// evidence is the owner's evidence destination, if set (CH-20).
 	evidence destination
 	waiting  map[string]*wait
@@ -342,7 +345,10 @@ type afterRef struct {
 // decision is the owner's answer on one intent.
 type decision struct {
 	approved bool
-	why      string
+	// why is the owner's reason or a broker code ("owner", "undo"); guest,
+	// when set, is a fixed reason the guest may see (SR2-3j).
+	why   string
+	guest guesterr.Literal
 	// asked is set when the decision answered a waiting request, and
 	// implicit when it released an auto-reply the owner never answered.
 	asked, implicit bool
@@ -552,10 +558,10 @@ func (g *Gate) onPage(w *wait) bool {
 }
 
 // closeIntent denies a pending intent with a fixed reason.
-func (g *Gate) closeIntent(id, why string) {
+func (g *Gate) closeIntent(id string, why guesterr.Literal) {
 	g.mu.Lock()
 	delete(g.waiting, id)
-	g.decided[id] = decision{why: why, at: g.cfg.Now()}
+	g.decided[id] = decision{why: string(why), guest: why, at: g.cfg.Now()}
 	eng := g.eng
 	g.mu.Unlock()
 	if _, err := eng.Authorize(context.Background(), id); err != nil {
@@ -614,13 +620,33 @@ const (
 
 // verdict is what an intent needs now.
 type verdict struct {
-	kind  kind
-	why   string
+	kind kind
+	// why is a denial's fixed text, which the guest sees; cause, when
+	// set, is the error behind it, which only the owner and the log see.
+	why   guesterr.Literal
+	cause error
 	item  owner.Item
 	local bool
 	hold  bool // waits for the local page without texting the owner
 	reply *owner.AutoReply
 }
+
+// refusal is the gate's answer to an intent it refuses (SR2-3j): Error is
+// the owner's text, journaled as the reason, which may echo a parse error,
+// a pipeline's refusal or the owner's own words; GuestText, fixed words
+// only, is all the guest is shown.
+type refusal struct {
+	why   string
+	guest guesterr.Literal
+}
+
+func (r refusal) Error() string { return r.why }
+
+// GuestText is the refusal's text for the guest.
+func (r refusal) GuestText() string { return string(r.guest) }
+
+// refuse is a refusal whose text is the same for owner and guest.
+func refuse(why guesterr.Literal) refusal { return refusal{string(why), why} }
 
 // evaluate decides what in needs. Only structural faults deny: no grant,
 // an undeclared operation, a malformed grant, or narrowing from anyone
@@ -884,18 +910,31 @@ func (g *Gate) evaluateBroker(ctx context.Context, phase journal.Phase, in journ
 	case journal.ActionGrantChange:
 		s, err := parseSpec(in)
 		if err != nil {
-			return verdict{kind: deny, why: err.Error()}
+			return verdict{kind: deny, why: "the grant change is malformed", cause: err}
 		}
 		if !g.cfg.LocalUI {
 			return verdict{kind: deny, why: NoPageGrant}
 		}
+		if s.Resume != "" && (in.Origin != originLocal || s.Pause == "") {
+			// W5a-resume: only the page resumes, naming the pause it
+			// showed (Security R2 on #169).
+			return verdict{kind: deny, why: "a paused grant is resumed only on the box's Wi-Fi page"}
+		}
 		g.mu.Lock()
 		err = g.validateLocked(s)
+		detail := ""
+		if err == nil && s.Resume != "" {
+			// The page shows what resuming lets run and which pause it
+			// ends; the item's sum covers both, so the page code is bound
+			// to this grant and this pause (owner.ItemSum).
+			gr := g.grants[s.Resume]
+			detail = fmt.Sprintf("%s Paused by %s (%s).", Describe(gr.Spec), pausedBy(gr.PausedBy), gr.Pause)
+		}
 		g.mu.Unlock()
 		if err != nil {
-			return verdict{kind: deny, why: err.Error()}
+			return verdict{kind: deny, why: "the grant change is not valid", cause: err}
 		}
-		return verdict{kind: ask, local: true, item: owner.Item{Ref: in.ID, Object: short(s),
+		return verdict{kind: ask, local: true, item: owner.Item{Ref: in.ID, Object: short(s), Detail: detail,
 			Facts: owner.Facts{Kind: owner.GrantChange, Verb: "grant", NoRecipient: true}}}
 	case journal.ActionRecallRollback:
 		// Recall's deletion reach asks before taking back agent work
@@ -970,7 +1009,7 @@ func (g *Gate) evaluateEvidence(in journal.Intent) verdict {
 	}
 	d, err := parseDestination(in)
 	if err != nil {
-		return verdict{kind: deny, why: err.Error()}
+		return verdict{kind: deny, why: "malformed request to change where private replies go", cause: err}
 	}
 	if d.Address == "" {
 		// Clearing needs no code (security C3 on #148): the broker tells
@@ -1178,11 +1217,11 @@ func (g *Gate) evaluateChange(ctx context.Context, phase journal.Phase, in journ
 	case err == nil:
 		return verdict{kind: allow}
 	case !ok || !no.NeedsOwner():
-		return verdict{kind: deny, why: err.Error()}
+		return verdict{kind: deny, why: "the change pipeline refused it", cause: err}
 	}
 	l, err := g.cfg.Changes.Line(in)
 	if err != nil {
-		return verdict{kind: deny, why: err.Error()}
+		return verdict{kind: deny, why: "the change pipeline refused it", cause: err}
 	}
 	local := sharingOn(in)
 	if local && !g.cfg.LocalUI {
@@ -1218,11 +1257,11 @@ func (g *Gate) evaluateLoops(ctx context.Context, phase journal.Phase, in journa
 	case err == nil:
 		return verdict{kind: allow}
 	case !ok || !no.NeedsOwner():
-		return verdict{kind: deny, why: err.Error()}
+		return verdict{kind: deny, why: "the loop scheduler refused it", cause: err}
 	}
 	l, err := g.cfg.Loops.Line(in)
 	if err != nil {
-		return verdict{kind: deny, why: err.Error()}
+		return verdict{kind: deny, why: "the loop scheduler refused it", cause: err}
 	}
 	return verdict{kind: ask, item: owner.Item{Ref: in.ID, Object: l.Object, Detail: l.Detail, UndoBy: l.UndoBy,
 		Facts: owner.Facts{Kind: l.Facts.Kind, Verb: l.Facts.Verb, NoRecipient: true}}}
@@ -1269,29 +1308,36 @@ func (g *Gate) check(ctx context.Context, phase journal.Phase, in journal.Intent
 	ready := g.eng != nil
 	g.mu.Unlock()
 	if !ready {
-		return errors.New("grants are not loaded")
+		return refuse("grants are not loaded")
 	}
 	if decided && !d.approved {
-		return errors.New("not approved: " + d.why)
+		var guest guesterr.Literal = "not approved by the owner"
+		if d.guest != "" {
+			guest = "not approved: " + d.guest
+		}
+		return refusal{"not approved: " + d.why, guest}
 	}
 	v := g.evaluate(ctx, phase, in)
 	switch v.kind {
 	case deny:
-		return errors.New(v.why)
+		if v.cause != nil {
+			return refusal{v.cause.Error(), v.why}
+		}
+		return refuse(v.why)
 	case allow:
 		return nil
 	}
 	if !decided {
-		return errors.New("needs the owner's approval")
+		return refuse("needs the owner's approval")
 	}
 	if v.local && !g.isConfirmed(in.ID) {
-		return errors.New("needs confirmation on the box's Wi-Fi page")
+		return refuse("needs confirmation on the box's Wi-Fi page")
 	}
 	if !sameItem(d.item, v.item) {
-		return errors.New("the details changed after the owner approved; ask again")
+		return refuse("the details changed after the owner approved; ask again")
 	}
 	if phase == journal.PhaseDispatch && g.cfg.Now().Sub(d.at) > g.cfg.Fresh {
-		return fmt.Errorf("the approval is older than %s; ask again", g.cfg.Fresh)
+		return refusal{fmt.Sprintf("the approval is older than %s; ask again", g.cfg.Fresh), "the approval is too old; ask again"}
 	}
 	// The engine commits the dispatch only if nothing was journaled since
 	// this check, so an attempt started by a concurrent Dispatch, before
@@ -1299,10 +1345,10 @@ func (g *Gate) check(ctx context.Context, phase journal.Phase, in journal.Intent
 	if phase == journal.PhaseDispatch {
 		n, err := g.tries(in.ID)
 		if err != nil {
-			return fmt.Errorf("cannot read the intent's attempts: %w", err)
+			return refusal{"cannot read the intent's attempts: " + err.Error(), "the broker could not check the approval; ask again"}
 		}
 		if n != d.tries {
-			return errors.New("the owner's approval was used by an earlier attempt; ask again")
+			return refuse("the owner's approval was used by an earlier attempt; ask again")
 		}
 	}
 	return nil
@@ -1549,6 +1595,11 @@ func (g *Gate) annotate(st *journal.Status) {
 		st.Permission.Reason = LineDown
 	} else if f != "" {
 		st.Permission.Reason = "could not ask the owner (" + f + "); retry later"
+		// The channel's error is the owner's (SR2-3j).
+		st.Permission.GuestReason = "could not ask the owner; retry later"
+	}
+	if st.Permission.GuestReason == "" {
+		st.Permission.GuestReason = st.Permission.Reason
 	}
 }
 
@@ -1920,6 +1971,19 @@ func (g *Gate) Decide(d owner.Decision) {
 		why = "owner"
 	}
 	changed := false
+	var guest guesterr.Literal
+	if !d.Approved {
+		// Denials the owner did not give name their own cause (release
+		// item 1, lens on #396); "owner" and "not chosen" keep the default.
+		switch d.Why {
+		case "expired":
+			guest = "the owner did not answer in time"
+		case "void":
+			guest = "a wrong code was given too many times"
+		case "restart":
+			guest = "the broker restarted before the owner answered"
+		}
+	}
 	if d.Approved && local && d.Page {
 		// Approved on the page with a fresh code: that answer confirms
 		// it, if the item is the one the page showed (Security P1).
@@ -1927,6 +1991,7 @@ func (g *Gate) Decide(d owner.Decision) {
 			g.confirmed[d.Ref] = true
 		} else {
 			d.Approved, why, changed = false, "it changed since the page showed it", true
+			guest = "it changed since the page showed it"
 		}
 	}
 	hold, attempt := "", 0
@@ -1942,12 +2007,13 @@ func (g *Gate) Decide(d owner.Decision) {
 			// Released without its staged copy: the owner approved it as
 			// staged, so it is not sent (arbitrator on #76).
 			d.Approved, why = false, "its staged copy could not be made"
+			guest = "its staged copy could not be made"
 		}
 	}
 	unheld := d.Approved && (w == nil || !w.held)
 	implicit := unheld && d.Why == whyReleased
 	late := unheld && d.Why == whyReleasedLate
-	g.decided[d.Ref] = decision{approved: d.Approved, why: why, asked: w != nil, implicit: implicit, late: late,
+	g.decided[d.Ref] = decision{approved: d.Approved, why: why, guest: guest, asked: w != nil, implicit: implicit, late: late,
 		req: d.Request, at: g.cfg.Now(), item: item, local: local, hold: hold, attempt: attempt, tries: tries}
 	wait := d.Approved && local && !g.confirmed[d.Ref]
 	own, eng := g.own, g.eng
@@ -2348,7 +2414,11 @@ func (g *Gate) settle(id string) {
 		}
 		if st.State == journal.Succeeded && st.Intent.Executor == ExecutorName && own != nil && len(st.Attempts) > 0 {
 			if gid := st.Attempts[len(st.Attempts)-1].Evidence; gid != "" {
-				_ = own.Inform(fmt.Sprintf("Added %s. Text PAUSE %s or REVOKE %s to stop it.", gid, gid, gid))
+				done := "Added"
+				if sp, err := parseSpec(st.Intent); err == nil && sp.Resume != "" {
+					done = "Resumed"
+				}
+				_ = own.Inform(fmt.Sprintf("%s %s. Text PAUSE %s or REVOKE %s to stop it.", done, gid, gid, gid))
 			}
 		}
 	}()
@@ -2693,7 +2763,8 @@ func (g *Gate) applyLocked(in journal.Intent) (string, error) {
 			return "", err
 		}
 		if s.Resume != "" {
-			g.grants[s.Resume].Paused = false
+			gr := g.grants[s.Resume]
+			gr.Paused, gr.Pause, gr.PausedBy = false, "", ""
 			return s.Resume, nil
 		}
 		id := g.grantIDLocked(in.ID)
@@ -2705,7 +2776,9 @@ func (g *Gate) applyLocked(in journal.Intent) (string, error) {
 			return "", errors.New("no grant " + clip(in.GrantRef))
 		}
 		if in.Action == journal.ActionGrantPause {
-			gr.Paused = true
+			// A second pause replaces the first: a resume asked before
+			// it no longer applies (W5a-resume).
+			gr.Paused, gr.Pause, gr.PausedBy = true, in.ID, in.Origin
 			return gr.ID, nil
 		}
 		delete(g.grants, gr.ID)
