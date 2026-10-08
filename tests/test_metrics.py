@@ -205,6 +205,16 @@ class RenderTest(unittest.TestCase):
         self.assertTrue(row.endswith("| — |"))
 
 
+    def test_rows_recorded_with_fewer_columns_keep_their_frozen_cells(self):
+        # METRICS.md on main predates the last three columns.
+        raw = raw_fixture()
+        first = metrics.render(metrics.compute(raw), raw)
+        old = "\n".join(l.rsplit(" |", 4)[0] + " |" if l.startswith("| 2026-") else l for l in first.splitlines())
+        raw["runs"].append({"workflow": "ci", "sha": "e", "at": "2026-10-06T10:00:00Z", "conclusions": ["failure", "success"]})
+        later = metrics.render(metrics.compute(raw), raw, old)
+        row = next(l for l in later.splitlines() if l.startswith("| 2026-10-04 |"))
+        self.assertIn("1/3", row)
+
 class FreezeTest(unittest.TestCase):
     def test_closed_week_keeps_recorded_api_cells_but_to_date_rows_recompute(self):
         raw = raw_fixture()

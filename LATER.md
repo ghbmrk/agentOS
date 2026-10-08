@@ -79,6 +79,9 @@ No security-fix row (SR2-*) is classed Later. P2-1 (host image, PR #41) has no b
 | SR2-3g f7 | L3 R1 on #324: the `guesterr` import sits in the stdlib import group in `question_test.go`; style only |
 | OSS-10w f1 | UX on #323: the alert wording "Switch back there" reads oddly after a switch back to the project |
 | W3-forget-b2b f1 | Security 327-1: race between `worked()` and `takeBack(approved=false)` in `agentBackWithoutAsking`; re-check under `r.run` |
+| DOC-3 f1 | L3 on #356: the SHAs on rows inferred as merged name the last commit touching the package, not its merge; relabel as "last touched" or cite the PR |
+| DOC-3 f2 | L3 on #356: D-041 (license) has date `Pending`, not ISO; set it when the license is chosen |
+| DOC-2 f1 | L3 on #357: doclint does not check DECISIONS cells ≤300 characters or that `decisions/D-NNN.md` links resolve (D-056) |
 
 ## Reuse candidates
 | ID | Component | Why |

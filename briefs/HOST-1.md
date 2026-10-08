@@ -2,7 +2,7 @@
 
 Board section: Backlog refill (2026-10-05).
 
-Spec: the host PC is left as it was (HW-8, HW-8a; ONB-2, ONB-7, A1; DECISIONS 2026-10-05). This PR
+Spec: the host PC is left as it was (HW-8, HW-8a; ONB-2, ONB-7, A1; DECISIONS D-044). This PR
 
 **Needs:** —
 

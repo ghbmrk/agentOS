@@ -383,8 +383,8 @@ def render(weeks, raw, previous_md=None):
     for w in weeks:
         cells = _cells(w)
         prev = old.get(w["week"])
-        if prev and len(prev) == len(cells) - 1:
-            prev = prev + [NONE]  # a row recorded before the L3 causes column existed
+        if prev and len(prev) < len(cells):
+            prev = prev + [NONE] * (len(cells) - len(prev))  # recorded before later columns were appended
         if prev and len(prev) == len(cells):
             closed = not w["current"] and "(to date)" not in prev[0]
             cells = [o if (c == NONE and o != NONE) or (closed and i in FROZEN) else c
