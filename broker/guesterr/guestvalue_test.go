@@ -24,3 +24,17 @@ func TestOnlyIDShapedGuestValuesAreShown(t *testing.T) {
 		}
 	}
 }
+
+// embedsGuest embeds Guest, so it is an Arg by the promoted method; its
+// value is still checked (release 1, L3 on #398).
+type embedsGuest struct{ Guest }
+
+func TestAnEmbeddedGuestValueIsCheckedToo(t *testing.T) {
+	got := Newf("no request %s", embedsGuest{Guest(canary)}).GuestText()
+	if strings.Contains(got, canary) || got != "no request "+unshown {
+		t.Fatalf("embedded path shown as %q", got)
+	}
+	if got := Newf("no request %s", embedsGuest{Guest("r1")}).GuestText(); got != "no request r1" {
+		t.Fatalf("embedded ID shown as %q", got)
+	}
+}
