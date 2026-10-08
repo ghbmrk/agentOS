@@ -3,6 +3,7 @@
 # Makes no coverage claim for DEP-1–4: those are claimed by the packages whose
 # scenarios pass this harness (broker P1-2 onward).
 import errno
+import io
 import json
 import os
 import pathlib
@@ -20,6 +21,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 import depaudit  # noqa: E402
 
 CONTROLS = [sys.executable, str(ROOT / "tools" / "depaudit_controls.py")]
+HARNESS_CONTROLS = [sys.executable, str(ROOT / "tools" / "depaudit.py"), "_control"]
 
 STRACE = """\
 101 connect(3, {sa_family=AF_INET, sin_port=htons(443), sin_addr=inet_addr("192.0.2.10")}, 16) = -1 ENETUNREACH (Network is unreachable)
@@ -153,7 +155,8 @@ class JudgeTest(unittest.TestCase):
             reg = pathlib.Path(d, "t.json")
             for t in ({"name": "x", "cmd": ["true"], "keep": ["/"]},
                       {"name": "x", "cmd": ["true"], "env": {"A": "1"}},
-                      {"name": "x", "cmd": ["true"], "must_log": []}):
+                      {"name": "x", "cmd": ["true"], "must_log": []},
+                      {"name": "x", "cmd": ["true"], "writes": ["/"]}):
                 reg.write_text(json.dumps({"targets": [t]}))
                 with self.assertRaises(ValueError):
                     depaudit.load_registry(reg)
@@ -220,12 +223,15 @@ class ScratchDirTest(unittest.TestCase):
             if len(calls) < 3:
                 raise OSError(errno.ENOTEMPTY, "Directory not empty", "go-build1")
             return real(path, *a, **kw)
+        stats = {"cleanup_retries": 0}
         with mock.patch.object(depaudit.shutil, "rmtree", flaky), \
                 mock.patch.object(depaudit.time, "sleep"):
-            with depaudit._scratch_dir("depaudit-test-") as d:
+            with depaudit._scratch_dir("depaudit-test-", stats=stats) as d:
                 pathlib.Path(d, "f").write_text("x")
         self.assertEqual(len(calls), 3)
         self.assertFalse(os.path.exists(d))
+        # DEP-2c (briefs/DEP-2.md; a local ID with no SPEC row, so no REQ marker)
+        self.assertEqual(stats["cleanup_retries"], 2)
 
     def test_cleanup_outlasts_a_real_straggler_writing_into_it(self):
         with depaudit._scratch_dir("depaudit-test-") as d:
@@ -310,7 +316,7 @@ class OfflineRunTest(unittest.TestCase):
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 """) % (sys.executable, d))
             script.chmod(0o755)
-            res = depaudit.run_target({"name": "escape", "cmd": ["true"], "keep": [d],
+            res = depaudit.run_target({"name": "escape", "cmd": ["true"], "writes": [d],
                                        "env": {"PATH": d + os.pathsep + os.environ["PATH"]}},
                                       depaudit.load_manifest(MANIFEST))
             time.sleep(2)
@@ -361,7 +367,7 @@ class StraceFaultTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir="/tmp") as d:
             os.chmod(d, 0o755)
             self.fake_strace(d, faults, later_cmd, **fault)
-            res = depaudit.run_target({"name": mode, "cmd": CONTROLS + [mode], "profile": "offline", "keep": [d],
+            res = depaudit.run_target({"name": mode, "cmd": CONTROLS + [mode], "profile": "offline", "writes": [d],
                                        "env": {"PATH": d + os.pathsep + os.environ["PATH"]}},
                                       depaudit.load_manifest(MANIFEST))
             return res, int(pathlib.Path(d, "count").read_text())
@@ -408,6 +414,59 @@ class StraceFaultTest(unittest.TestCase):
         self.assertEqual((res["outcome"], runs), ("scenario-failed", 1), res)
 
 
+@unittest.skipUnless(depaudit.sandbox_available(), "needs user+net namespaces and strace")
+class EvidenceTest(unittest.TestCase):
+    """The verdict's inputs are out of the tracee's reach (DEP-2)."""
+
+    # DEP-2a (briefs/DEP-2.md; a local ID with no SPEC row, so no REQ marker)
+    def test_rewriting_the_evidence_after_a_connect_still_ends_violation(self):
+        res = depaudit.run_target({"name": "tamper", "cmd": HARNESS_CONTROLS + ["tamper-evidence"]},
+                                  depaudit.load_manifest(MANIFEST))
+        self.assertEqual(res["outcome"], "violation", res)
+        self.assertEqual([(v["kind"], v["target"]) for v in res["violations"]], [("ipv4", "192.0.2.10:443")], res)
+
+    def test_a_tracee_cannot_erase_strace_fault_message(self):
+        # strace reports a fault, then the scenario truncates the stderr it shares with strace.
+        with tempfile.TemporaryDirectory(dir="/tmp") as d:
+            os.chmod(d, 0o755)
+            script = pathlib.Path(d, "strace")
+            script.write_text(textwrap.dedent("""\
+                #!%s
+                import os, sys
+                sys.stderr.write("strace: ptrace(PTRACE_LISTEN,pid:42,sig:0): Input/output error\\n")
+                sys.stderr.flush()
+                argv = sys.argv[1:]
+                argv = argv[:argv.index("--") + 1] + ["sh", "-c", ': > "$TMPDIR/../stderr"']
+                os.execv(%r, [%r] + argv)
+                """) % (sys.executable, shutil.which("strace"), shutil.which("strace")))
+            script.chmod(0o755)
+            res = depaudit.run_target({"name": "erase", "cmd": ["true"], "keep": [d],
+                                       "env": {"PATH": d + os.pathsep + os.environ["PATH"]}},
+                                      depaudit.load_manifest(MANIFEST))
+        self.assertEqual((res["outcome"], res["attempts"], res["faults"]), ("error", 3, 3), res)
+
+    def test_a_forged_result_is_not_taken(self):
+        # A sandbox whose output is more than the one result line is an error, not a verdict.
+        with mock.patch.object(depaudit, "_run_sandboxed", return_value=(0, b'{"rc": 0}\n{"rc": 0}\n', b"")):
+            res = depaudit.run_target({"name": "forged", "cmd": ["true"]}, depaudit.load_manifest(MANIFEST))
+        self.assertEqual(res["outcome"], "error", res)
+
+    # DEP-2b (briefs/DEP-2.md; a local ID with no SPEC row, so no REQ marker)
+    def test_kept_paths_are_read_only_unless_declared(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as ro, tempfile.TemporaryDirectory(dir="/tmp") as rw:
+            os.chmod(ro, 0o755)
+            os.chmod(rw, 0o755)
+            res = depaudit.run_target({"name": "writes", "cmd": HARNESS_CONTROLS + ["write-kept"], "keep": [ro],
+                                       "writes": [rw], "env": {"DEPAUDIT_KEEP_RO": ro, "DEPAUDIT_KEEP_RW": rw}},
+                                      depaudit.load_manifest(MANIFEST))
+            self.assertEqual(os.listdir(ro), [])
+        self.assertEqual(res["outcome"], "pass", res)
+
+    def test_the_built_in_controls_include_the_evidence_and_write_controls(self):
+        names = {t["name"] for t in depaudit.control_targets("/tmp/a/p", "/tmp/b/p", "/tmp/c")}
+        self.assertLessEqual({"control-evidence-tamper", "control-kept-read-only"}, names)
+
+
 class CarryTest(unittest.TestCase):
     """run_target's merge of attempts, without a sandbox."""
     LEAK = {"kind": "forbidden", "target": "x.agentos.example", "count": 1, "first": "connect"}
@@ -428,6 +487,28 @@ class CarryTest(unittest.TestCase):
         res, n = self.run_attempts(({"name": "t", "outcome": "error", "violations": [self.LEAK]}, True),
                                    ({"name": "t", "outcome": "pass", "violations": []}, False))
         self.assertEqual((res["outcome"], res["violations"], n), ("violation", [self.LEAK], 2), res)
+
+    # DEP-2c (briefs/DEP-2.md; a local ID with no SPEC row, so no REQ marker)
+    def test_the_result_counts_attempts_and_faults(self):
+        res, _ = self.run_attempts(({"name": "t", "outcome": "error", "violations": []}, True),
+                                   ({"name": "t", "outcome": "pass", "violations": []}, False))
+        self.assertEqual((res["attempts"], res["faults"], res["cleanup_retries"]), (2, 1, 0), res)
+
+    def test_the_run_line_shows_attempts_faults_and_cleanup_retries(self):
+        res = {"name": "c", "outcome": "pass", "violations": [], "events": 0,
+               "attempts": 2, "faults": 1, "cleanup_retries": 3}
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(depaudit, "sandbox_available", return_value=True), \
+                mock.patch.object(depaudit, "control_targets", return_value=[{"name": "c", "cmd": ["true"]}]), \
+                mock.patch.object(depaudit, "run_target", return_value=res), \
+                mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            reg = pathlib.Path(d, "t.json")
+            reg.write_text(json.dumps({"targets": []}))
+            depaudit.main(["run", "--targets", str(reg), "--report", str(pathlib.Path(d, "r.json"))])
+            report = json.loads(pathlib.Path(d, "r.json").read_text())
+        self.assertIn("2 attempt(s), 1 strace fault(s), 3 cleanup retr(ies)", out.getvalue())
+        self.assertEqual({k: report["targets"][0][k] for k in ("attempts", "faults", "cleanup_retries")},
+                         {"attempts": 2, "faults": 1, "cleanup_retries": 3})
 
 
 class RepoTest(unittest.TestCase):
