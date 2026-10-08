@@ -523,12 +523,12 @@ func main() {
 	// The modem bridge (agentos-modem, P2-3w) hands owner texts in and
 	// pulls the channel's own texts from the owner socket; until it
 	// reports the owner line, sends fail as down and are counted for the
-	// recovery text. Its line note is for the box's local page (U-B1).
+	// recovery text. Its note, last outage and counts are for the box's local page (U-B1).
 	if modemBridge {
 		link := modemlink.New(modemlink.Config{Owner: cfg.OwnerNumber})
 		cfg.Modem, cfg.OwnerOps = link, link.Ops()
 		if cfg.PageSocket != nil {
-			cfg.PageSocket.LineNote = link.OwnerLineNote
+			cfg.PageSocket.Line = pageLine(link)
 		}
 		cfg.BridgeOnly = !ownerMessage
 	}

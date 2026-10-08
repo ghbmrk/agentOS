@@ -1,9 +1,11 @@
 package grants
 
 import (
+	"context"
 	"strings"
 	"testing"
 
+	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/journal"
 )
 
@@ -71,7 +73,7 @@ func TestAPageApprovalOfAChangedItemTellsTheOwnerItDidNotRun(t *testing.T) {
 // broker action (their other actions can be asked on the page, but are not
 // page-confirmed). So the notice must not send the owner back to their
 // agent. (A release adoption the pipeline proposes is also page-confirmed;
-// its notice is BOARD row P2-2a f2.)
+// its notice is the next test.)
 func TestAPageChangeNoticeNamesAStepEachOriginCanTake(t *testing.T) {
 	agent := func(in journal.Intent) journal.Intent { in.Origin = "guest:agent"; return in }
 	digest := strings.Repeat("a", 64)
@@ -132,5 +134,47 @@ func TestAPageChangeNoticeNamesAStepEachOriginCanTake(t *testing.T) {
 				t.Fatalf("notice is %d characters, over one segment", len(got[0]))
 			}
 		})
+	}
+}
+
+// UX lens on #329 (P2-2a f2): a release adoption the pipeline proposed
+// (meta.change.adopt, Origin change) that changed after the page showed it
+// gets no "Make the request again": the owner made no request. Nor may it
+// promise to ask again: the pipeline drops the proposal, but the update
+// check (maintain Loop 3) keeps the version as proposed and offers it again
+// only after a restart or a newer release (L3 on #363). The owner need do
+// nothing, so the notice says so (CH-12).
+func TestAPageChangeNoticeForAReleaseAdoptionSaysNothingIsNeeded(t *testing.T) {
+	r, p := changeRig(t)
+	rep, err := p.ProposeRelease(context.Background(), signed(t, 40, map[string][]byte{"host-image/release": []byte("h")}))
+	if err != nil || rep.State != change.StateAwaitingOwner {
+		t.Fatalf("%+v %v", rep, err)
+	}
+	id := "chg:" + rep.ID + ":adopt"
+	r.g.Flush()
+	if st := r.state(id); st.Intent.Origin != change.OriginPipeline {
+		t.Fatalf("origin %q", st.Intent.Origin)
+	}
+	req, _ := r.own.last(t)
+	r.own.mu.Lock()
+	before := len(r.own.notes)
+	r.own.mu.Unlock()
+	r.pageDecide(strings.Repeat("0", 64))
+	if st := r.state(id); st.State != journal.Denied {
+		t.Fatalf("changed adoption: %s %q", st.State, st.Permission.Reason)
+	}
+	r.own.mu.Lock()
+	got := append([]string(nil), r.own.notes[before:]...)
+	r.own.mu.Unlock()
+	want := req + " did not run: it changed after my Wi-Fi page showed it. Nothing is needed."
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("notices %q, want %q", got, want)
+	}
+	if strings.Contains(strings.ToLower(got[0]), "again") || len(got[0]) > 160 {
+		t.Fatalf("notice promises an offer or request the box will not make, or is over one segment: %q", got[0])
+	}
+	// It is no decline: the digest does not say the owner declined it.
+	if d := p.Digest(); len(d) != 0 {
+		t.Fatalf("a changed adoption reads as a decline: %q", d)
 	}
 }

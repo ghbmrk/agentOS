@@ -44,11 +44,12 @@ type Owner interface {
 // Config configures a Server.
 type Config struct {
 	Owner Owner
-	// LineNote is the owner line's note (modemlink.Link.OwnerLineNote);
-	// nil when there is no modem bridge.
-	LineNote func() string
-	Now      func() time.Time
-	Rand     io.Reader
+	// Line is the owner line's note, last outage and counts (the modem
+	// link's); nil when there is no modem bridge. Status carries only its
+	// note (Security D1).
+	Line func() localapi.Line
+	Now  func() time.Time
+	Rand io.Reader
 	// DescribeRoot verifies a root to follow and holds it for approval
 	// (follow.Executor.Describe); Follow submits the owner's request to
 	// follow a held root (grants.FollowIntent) and returns the channel's
@@ -104,6 +105,7 @@ func (s *Server) Ops() map[string]sockets.Handler {
 		localapi.OpSignOut:  s.signOut,
 		localapi.OpSession:  s.session,
 		localapi.OpLines:    s.authed(s.lines),
+		localapi.OpLine:     s.authed(s.line),
 		localapi.OpResume:   s.resume,
 		localapi.OpRequests: s.authed(s.requests),
 		localapi.OpWaiting:  s.authed(s.waiting),
@@ -138,8 +140,8 @@ func (s *Server) status(context.Context, sockets.Peer, json.RawMessage) (any, er
 	st := s.cfg.Owner.LocalStatus()
 	out := localapi.Status{Stopped: st.Stopped, Unlocked: st.Unlocked, UnlockedUntil: st.UnlockedUntil,
 		LowLocked: st.LowLocked, Challenged: st.Challenged, UnlockDays: int(s.cfg.Owner.UnlockPeriod() / (24 * time.Hour))}
-	if s.cfg.LineNote != nil {
-		out.LineNote = s.cfg.LineNote()
+	if s.cfg.Line != nil {
+		out.LineNote = s.cfg.Line().Note
 	}
 	return out, nil
 }
@@ -224,6 +226,14 @@ func (s *Server) authed(op func(context.Context) (any, error)) sockets.Handler {
 
 func (s *Server) lines(context.Context) (any, error) {
 	return localapi.Lines{Status: s.cfg.Owner.LocalStatusLines()}, nil
+}
+
+// line is the owner line's counts, for a signed-in page only (Security D1).
+func (s *Server) line(context.Context) (any, error) {
+	if s.cfg.Line == nil {
+		return localapi.Line{}, nil
+	}
+	return s.cfg.Line(), nil
 }
 
 func (s *Server) resume(_ context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
