@@ -145,6 +145,10 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | P2-2w d2a-2 | `pageLine` takes five separate locks, so one page can mix states; display only, fixed on reload (#378 L3) |
 | P2-2w d2a-3 | `plural` lives in both `localui/line.go` and modemlink's recovery text; wording can drift (#378 L3) |
 | broker/owner review_test.go IDs | L3 on #386: `TestRestartHandsOpenRequestsToReissue` seeds the restart record with hard-coded IDs `Z9`, `Y9`, `X9`, which `newIDLocked` can issue, so a request opened earlier in the test can collide with one (0 of 600 runs failed; assertions tolerate it today); use IDs outside the generator's range (e.g. `Z1`, `Y1`, `X1`) when a package next touches review_test.go |
+| W3-forget-b3 rr1 | L3 on #425: `retry` and `finishOwed` log a forget with a zero `Since` though the time is known, so the forget log loses the task's time; restore reads `Since` only for agent entries |
+| W3-forget-b3 rr2 | L3 on #425: fold `forget-owed.json` (W3-forget-b3) and the owed take-backs (W3-forget-b2c) into one store or one start-up step; rename `forget_owed_test.go`/`forgetowed_test.go` then |
+| W3-forget-b3 rr3 | L3 on #425: `tellLater` and `retry` run on `context.WithoutCancel`, so their shutdown branch never runs; behaviour is right (exit leaves it owed), the comment misleads |
+| W3-forget-b3 rr4 | L3 on #425: `TestAGarbageOwedFileFailsSafe` does not assert the rewritten owed file is valid JSON or that a later forget is told |
 | HK-1 f1 | Lens screen on #401: the sandbox-unavailable message in `tools/depaudit.py` names neither the PID namespace nor the `/proc` mount it now needs; the probe already fails loudly |
 | HK-1 f2 | Lens screen on #401: violations carried from faulted attempts are not de-duplicated, so the same leak seen twice is listed twice; the outcome is unchanged |
 | HK-1 f3 | Lens screen on #401: `_scratch_dir` drops `TemporaryDirectory`'s chmod-and-retry cleanup of read-only entries; removal still raises rather than passing |
