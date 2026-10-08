@@ -165,3 +165,42 @@ keep their original scope. Local engine/cadence/bridge fixtures do not qualify
 real daemon startup, carrier/device delivery, callback latency, arbitrary
 restore/deletion, protected path custody or multiple writers. D37's urgent/
 reissue storage-fault availability hold and independent security review remain.
+
+## Opt-in provisioned shared-policy assembly
+
+`NewProvisioned(hostConfig, policyConfig)` reuses the existing host and
+`dailypolicy.New`, binding Check/Recheck/Health together to one provided actual
+shared Gate and `hostConfig.Owner.Engine`. Leave Daily.Gate, Daily.Recheck,
+PolicyHealth and policyConfig.Engine unset; conflicting bindings are refused
+with fixed ErrConfig before host construction. Explicit trusted Clock, Quiet,
+Eligible and AgedAfter remain required. These checks do not authorize activation.
+
+The Gate's `ProvisionedPacingConfigured` method examines only immutable
+constructor options: non-nil Store, PacingRequireExisting=true and positive
+PacingMaxStoreLatency no greater than five minutes. It performs no I/O, changes
+no counter and certifies neither the durable bytes nor storage custody. No
+provisioning or alternative counter is created by this assembly. Valid options
+with a missing, malformed, faulted or overdue ledger produce a held recovery
+host, whose Channel preserves owner controls. Bound policy health refuses
+activation/steps and supplies fixed recovery wording without private errors.
+Synchronous store calls remain uninterruptible; a Gate stuck during construction
+never reaches this constructor, so an independent startup control/recovery path
+is still required. Invalid assembly options yield no Host. Do not use those
+errors to silently downgrade to volatile accounting or reset the installation.
+
+Caller custody must supply the same Gate to approvals, question.Config.Reserve
+and this policy. This constructor prevents conflicting host policy callbacks;
+it cannot inspect every external consumer or prove deployment identity. Trusted
+persistent required-mode/threshold configuration, provisioning authority,
+exclusive protected store paths/writers, bounded reads and actual latency must
+be independently reviewed before wiring. Missing-image detection under required
+mode is not authenticated anti-deletion/rollback/restore/config-integrity proof.
+The D37 urgent/reissue storage/time-fault availability hold is unchanged and
+applies to overdue I/O. No daemon default, runner, timer or route is activated.
+
+Tests-first behavior exposed permissive generic policy assembly and ambiguous
+callbacks/engines. New tests cover incomplete configurations, missing-image
+held recovery/STOP, actual question Book plus exactly-once digest reservation
+and strict FileStore debt reopen, failure propagation and a still-blocked ledger
+with host recovery/STOP. Local results are not deployment qualification, CI
+green or independent broker/security acceptance.

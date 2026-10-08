@@ -176,3 +176,11 @@ func (g *Gate) pacingStoreCall(call func() error) error {
 	}
 	return nil
 }
+
+// ProvisionedPacingConfigured inspects only immutable constructor options. It
+// does not read/write storage, reserve, repair, or assert store health/custody.
+// Assembly still binds PacingHealth, including held missing/faulted-state startup.
+func (g *Gate) ProvisionedPacingConfigured() bool {
+	return g != nil && g.cfg.PacingStore != nil && g.cfg.PacingRequireExisting &&
+		g.cfg.PacingMaxStoreLatency > 0 && g.cfg.PacingMaxStoreLatency <= 5*time.Minute
+}
