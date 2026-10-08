@@ -1,5 +1,7 @@
 # Deep potency review — 2026-10-08
 
+Record: PR none · package POTENCY · head 7b753eb
+
 **Purpose:** unlock more accepted work, reach, parallelism and compounding without weakening security or increasing the owner's routine burden.
 
 **Scope:** main at 7b753eb87f606ea2268ca536d429d47989dba196, plus selected pending work inspected on 2026-10-08. This is a separate advisory review from the security review and [#380](https://github.com/ghbmrk/agentOS/pull/380). It proposes priorities and bounded experiments; it changes no specification, authority, runtime, defaults, lane ownership or existing package state. Recommendations are not implementation acceptance.
