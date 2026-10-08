@@ -47,3 +47,6 @@
 | #323 UX release: WF1 at describe time in OSS-10w2 | neutral (the executor keeps WF1; the page check only moves it earlier) | neutral | improves (no code spent on a doomed request) | passes |
 
 No proposal costs any lens and no hard constraint is touched, so nothing goes to Mark.
+
+## Delta note 2026-10-08 (re-check)
+Potency accept for #327 at 14ee01c: queueing an approved item 2 until recall opens and fixing its count at ask time add capability and cap none; REV-2 and Invariant C untouched; nothing goes to Mark.

@@ -60,3 +60,17 @@
 
 ## Recurring kind
 "A problem text names a step that cannot work" has now appeared on #124, #126, #132, #133 (UX run 2) and #327. CH-12 states the rule, but no check enforces it. Per CLAUDE.md, the next package that touches owner texts should add a test or lint that flags any text ending "Send X to …" whose command's precondition the failing path has already removed. It can start as a table test over the forget texts. Noted in README.
+
+---
+
+## Re-check 2026-10-08 at 14ee01c (#327 W3-forget-b2b)
+Verdict: accept
+
+Read: `git diff fc62903 db120d6` (non-merge content; SPEC/TRACE/DECISIONS changes in that range come from main merges, not the PR) and `14ee01c^1..14ee01c` (BOARD/LATER only). Files: `forget.go`, `main.go`, `grants/gate.go`, `grants/grant.go`, `recalltool/{reach,provenance,service}.go`. [Fact] = in the diff.
+- **Blocker 1 (CAP-3) resolved.** [Fact] Item 2's detail is now "N actions so far stay done" (`ForgetAgentActions`, from the count `Reach.Actions` takes when the ask is made; fixed in params so a re-issue asks what was asked, "no actions yet" at 0, nothing named if unknown). The notice reads "item 2 takes it back to before the task; actions it took stay done." and `TakenBack` reads "…no longer holds it. Actions it took stay done." The full-undo claim and "undone" are gone.
+  - **later (one LATER.md line):** the done text says actions stay done but not how many; the count is in the ask, which is what CAP-3 requires.
+- **Blocker 2 (CH-12) resolved as asked.** [Fact] No text sent after item 1 has run says "Send FORGET to ask again" (only `forgetAgentAlone`, where item 1 was not approved, keeps it). The not-saved and not-open texts say what remains true ("Your agent's own files may still hold that task").
+  - **later (fold into the existing contradicting-texts / carried-take-back release row):** [Inference] those two texts and `forgetAgentNoAgent` ("it holds nothing new. Nothing is needed.") don't agree on whether the agent's files hold the task, and the first two give neither a step nor "nothing needed". The carried take-back row removes the cause.
+- **New owner text in the later deltas:** `forgetAgentWhenOpen` ("Not taken back yet: memory is not open. I will do it when it opens and text you.") states the wait and what happens next; `forgetAgentNotYet` likewise. Both are CH-12-compliant, and scope is intact. [Fact] Approved items 2 queue until recall opens and run once (serialized, `Handled` check), so the owner is not texted twice.
+- **Release rows** on the PR's Findings line stand; no new row from this re-check.
+- **Potency:** the deltas add capability (item 2 waits for recall rather than failing); nothing is capped.
