@@ -168,6 +168,8 @@ type state struct {
 	Applying *point          `json:"applying,omitempty"`
 	Applied  map[string]bool `json:"applied"`
 	Last     *last           `json:"last,omitempty"`
+	// FellBack: releases whose boot fell back, by decimal version.
+	FellBack map[string]bool `json:"fell_back,omitempty"`
 }
 
 // Applier applies staged releases.
@@ -239,6 +241,41 @@ func New(cfg Config) (*Applier, error) {
 // once; an ordinary release after a random jitter (UPD-5). A newer
 // schedule replaces an older one.
 func (a *Applier) Schedule(v *update.Verified, adoption string) error {
+	if adoption == "" {
+		return errors.New("apply: no adoption")
+	}
+	return a.schedule(v, adoption, false)
+}
+
+// ErrApplying: a release is being applied now; schedule after it settles.
+var ErrApplying = errors.New("apply: a release is being applied")
+
+// ErrFellBack: the release already fell back on this box.
+var ErrFellBack = errors.New("apply: this release fell back before")
+
+// ScheduleFirstBoot queues the newest stable release first boot found
+// (UPD-3). It is due at once, with no jitter, and has no change-pipeline
+// adoption: the box has no owner, tasks or held-out cases yet, so after
+// the restart the release is committed or dropped in the update store
+// only. The free-moment rules still hold. A release that fell back before
+// is refused, so the box never boots into it again.
+func (a *Applier) ScheduleFirstBoot(v *update.Verified) error {
+	if v.OK() {
+		if m, err := v.Manifest(); err == nil && a.FellBack(m.Version) {
+			return fmt.Errorf("%w: release %d", ErrFellBack, m.Version)
+		}
+	}
+	return a.schedule(v, "", true)
+}
+
+// FellBack reports whether release version fell back on this box.
+func (a *Applier) FellBack(version int64) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.st.FellBack[strconv.FormatInt(version, 10)]
+}
+
+func (a *Applier) schedule(v *update.Verified, adoption string, now bool) error {
 	if !v.OK() {
 		return update.ErrNotChecked
 	}
@@ -253,17 +290,14 @@ func (a *Applier) Schedule(v *update.Verified, adoption string) error {
 	if m.Version <= in.Version {
 		return fmt.Errorf("%w: release %d is not newer than installed %d", update.ErrRollback, m.Version, in.Version)
 	}
-	if adoption == "" {
-		return errors.New("apply: no adoption")
-	}
 	nb := a.cfg.Now()
-	if !v.Security() {
+	if !v.Security() && !now {
 		nb = nb.Add(time.Duration(a.cfg.Rand(int64(a.cfg.Jitter))))
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.st.Applying != nil {
-		return errors.New("apply: a release is being applied")
+		return ErrApplying
 	}
 	if p := a.st.Pending; p != nil && p.Version == m.Version && p.Adoption == adoption {
 		a.rel = v // the same release again: keep its moment
@@ -592,17 +626,25 @@ func (a *Applier) Resume(ctx context.Context) error {
 		if err := a.cfg.Store.CommitStaged(pt.To); err != nil {
 			return err
 		}
-		if err := a.cfg.Pipeline.ConfirmStaged(pt.Adoption); err != nil {
-			return err
+		if pt.Adoption != "" {
+			if err := a.cfg.Pipeline.ConfirmStaged(pt.Adoption); err != nil {
+				return err
+			}
 		}
 		a.st.Last = &last{Version: pt.To, Kind: doneInstalled}
 	default:
 		if err := a.cfg.Store.DropStaged(); err != nil {
 			return err
 		}
-		if err := a.cfg.Pipeline.StageFailed(ctx, pt.Adoption); err != nil {
-			return err
+		if pt.Adoption != "" {
+			if err := a.cfg.Pipeline.StageFailed(ctx, pt.Adoption); err != nil {
+				return err
+			}
 		}
+		if a.st.FellBack == nil {
+			a.st.FellBack = map[string]bool{}
+		}
+		a.st.FellBack[strconv.FormatInt(pt.To, 10)] = true
 		a.st.Last = &last{Version: pt.To, Kind: doneFellBack}
 	}
 	a.st.Applying = nil

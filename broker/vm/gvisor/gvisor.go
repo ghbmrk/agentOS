@@ -50,6 +50,8 @@ type Runtime struct {
 	Bin      string // runsc binary
 	StateDir string // runsc --root; broker-held
 	Platform string // "systrap" (no KVM needed) or "kvm"
+
+	logMu sync.Mutex // the exec log's appends and rotation
 }
 
 var _ vm.Runtime = (*Runtime)(nil)
@@ -240,7 +242,19 @@ func (r *Runtime) Exec(ctx context.Context, id string, c vm.Command) (vm.ExecRes
 	pidFile := pf.Name()
 	pf.Close()
 	defer os.Remove(pidFile)
-	cmd := r.cmd(ctx, append([]string{"exec", "--cwd", "/", "--user", "0:0", "--internal-pid-file", pidFile, cid(id)}, c.Argv...)...)
+	// runsc's own messages: its errors, as JSON lines, and its info lines,
+	// each to a file of this exec's (0600, from CreateTemp).
+	var logs [2]string
+	for i, pattern := range []string{"exec-*.err", "exec-*.debug"} {
+		f, err := os.CreateTemp(r.StateDir, pattern)
+		if err != nil {
+			return vm.ExecResult{}, err
+		}
+		logs[i] = f.Name()
+		f.Close()
+		defer os.Remove(logs[i])
+	}
+	cmd := r.cmd(ctx, append([]string{"--log=" + logs[0], "--debug-log=" + logs[1], "exec", "--cwd", "/", "--user", "0:0", "--internal-pid-file", pidFile, cid(id)}, c.Argv...)...)
 	cmd.Stdin = bytes.NewReader(c.Stdin)
 	stdout, stderr := &capped{max: c.MaxOutput}, &capped{max: c.MaxOutput}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
@@ -252,6 +266,18 @@ func (r *Runtime) Exec(ctx context.Context, id string, c vm.Command) (vm.ExecRes
 		return cmd.Process.Kill()
 	}
 	err = cmd.Run()
+	// runsc writes each of its errors to stderr as well as to its log, and
+	// stderr is the guest command's too. So when runsc reports an error, or
+	// the command never started (runsc writes the pid once it has), nothing
+	// on either stream is known to be the guest's: Exec answers no output,
+	// and runsc's messages go only to the broker's exec log (SR2-3h).
+	if pid, _ := os.ReadFile(pidFile); len(bytes.TrimSpace(pid)) == 0 || size(logs[0]) > 0 {
+		r.logExec(id, err, logs, stderr.bytes())
+		if ctx.Err() != nil {
+			return vm.ExecResult{}, err
+		}
+		return vm.ExecResult{}, fmt.Errorf("runsc exec %s failed (%v); its messages are in %s", id, err, r.execLog())
+	}
 	res := vm.ExecResult{Stdout: stdout.bytes(), Stderr: stderr.bytes(), Truncated: stdout.truncated() || stderr.truncated()}
 	var exit *exec.ExitError
 	if errors.As(err, &exit) && ctx.Err() == nil {
@@ -259,6 +285,49 @@ func (r *Runtime) Exec(ctx context.Context, id string, c vm.Command) (vm.ExecRes
 		return res, nil
 	}
 	return res, err
+}
+
+// execLogMax is the size at which the broker's exec log is rotated: it and
+// the one old log kept stay within twice this (RES-4). A var so tests can
+// shorten it.
+var execLogMax int64 = 1 << 20
+
+// runscMsgMax bounds each of runsc's messages a failed exec adds to the log.
+const runscMsgMax = 16 << 10
+
+func (r *Runtime) execLog() string { return filepath.Join(r.StateDir, "exec.log") }
+
+// logExec appends a failed exec's runsc messages, its error log, debug
+// log and stderr, each clipped to runscMsgMax, to the exec log: 0600 in
+// the broker-held state directory, which no machine can read.
+func (r *Runtime) logExec(id string, err error, logs [2]string, stderr []byte) {
+	var b bytes.Buffer
+	fmt.Fprintf(&b, "%s %s: runsc exec failed (%v)\n", time.Now().UTC().Format(time.RFC3339), id, err)
+	for i, part := range [][]byte{clipped(logs[0]), clipped(logs[1]), stderr[:min(len(stderr), runscMsgMax)]} {
+		fmt.Fprintf(&b, "-- %s\n%s\n", [...]string{"error log", "debug log", "stderr"}[i], bytes.TrimSpace(part))
+	}
+	r.logMu.Lock()
+	defer r.logMu.Unlock()
+	keepConsole(io.NopCloser(&b), r.execLog(), execLogMax)
+}
+
+// clipped is the first runscMsgMax bytes of the file at path.
+func clipped(path string) []byte {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	b, _ := io.ReadAll(io.LimitReader(f, runscMsgMax))
+	return b
+}
+
+func size(path string) int64 {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return fi.Size()
 }
 
 // killExec kills the command an Exec started inside the sandbox, by the
