@@ -25,3 +25,4 @@ After:
 
 ## Budget
 <!-- Brief's usage estimate; usage at the checkpoint and at ready; if over the estimate, why work continued (CLAUDE.md: the estimate is a checkpoint, not a ceiling) -->
+Builder model: <!-- sonnet-5.5 | strongest -->

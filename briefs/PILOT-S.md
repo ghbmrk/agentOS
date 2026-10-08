@@ -1,9 +1,11 @@
 # PILOT-S: Sonnet builder pilot
 
-Pilot: tier B and C builder packages run on Sonnet 5.5 for the week from the 2026-10-11 reset (DECISIONS 2026-10-07, COST-1; docs/OPERATING.md §5).
+Pilot: tier B and C builder sessions run on Sonnet 5.5 from 2026-10-08 through the 2026-10-18 reset; tier A stays on the strongest model (DECISIONS D-048, D-060; docs/OPERATING.md §5 has the procedure).
 
-**Measures:** first-pass accept, L3 rounds and their causes, defects, and usage per merged PR, compared with the week before (METRICS.md).
+**Measures:** first-pass L3 accept, L3 rounds per merged PR and `Defect:` lines within 7 days of merge, for PRs merged in the pilot against those merged the week before 2026-10-08, counted by hand from each PR's `Builder model:` line; usage per merged PR from METRICS.md, the 2026-10-11 week against the 2026-10-04 week.
 
-**Done:** a DECISIONS row adopting, extending or ending the pilot, with the METRICS figures.
+**Decision rule:** keep Sonnet for tier B/C if no measure is worse; otherwise revert.
 
-**Needs:** 2026-10-11 reset
+**Done:** a DECISIONS row keeping or reverting, with the figures.
+
+**Needs:** the 2026-10-18 reset
