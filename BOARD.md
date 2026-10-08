@@ -11,6 +11,26 @@ Index of work packages, one line each. Each row links its brief in `briefs/<ID>.
 | DOC-3 | [BOARD index and briefs; DECISIONS format](briefs/DOC-3.md) | DOC-1 | merged (#356) |
 | DOC-2 | [doclint and cause metrics](briefs/DOC-2.md) | DOC-3 | merged (#357) |
 | SR3 | [Register the security and architecture review](briefs/SR3.md) | DOC-3 | in review (Codex proposal to primary; documentation only) |
+| POT | [Stage potency implementation slices](briefs/POT.md) | review #384 | in review (Codex draft proposal to primary) |
+
+## Potency implementation proposals (2026-10-08)
+
+Primary lane; proposed intake and draft implementations, not merged claims. Scope and dependency gates are in [POT](briefs/POT.md). Existing work stays with its owner.
+
+| ID | Package | Needs | State |
+|---|---|---|---|
+| POT-P1 | [Qualify a complete recurring workflow](briefs/POT-P1.md) | INT-A, H6, W7-A, POT-P2/P3 | queued (release; reconcile existing PRs) |
+| POT-P2 | [Bind durable tasks and native draft revisions](briefs/POT-P2.md) | W3-goal, W5, L1 task design | queued (release; design gate) |
+| POT-P3 | [Grade a broker-observed effect](briefs/POT-P3.md) | POT; CHG-2 activation gate | in review (Codex draft; first outcome class only) |
+| POT-P3b | [Revise authenticated outcomes and qualify graders](briefs/POT-P3b.md) | POT-P2/P3, W7-A | queued (release) |
+| POT-P4 | [Bound and progressively fetch scoped recall](briefs/POT-P4.md) | measured A10 bottleneck | queued (later) |
+| POT-P5 | [Separate bounded approval-template cohorts](briefs/POT-P5.md) | POT; SR3-2/3 before release reliance | in review (Codex draft; proposer only) |
+| POT-P6 | [Separate route evidence by task class](briefs/POT-P6.md) | POT | in review (Codex draft; transport evidence only) |
+| POT-P6b | [Route by accepted-task outcomes and total cost](briefs/POT-P6b.md) | POT-P2/P3/P3b/P6 | queued (release) |
+| POT-P7 | [Complete resource-aware plan delegation](briefs/POT-P7.md) | #220/#221, custody qualification | queued (release; reconcile existing PRs) |
+| POT-P8 | [Qualify one local leverage pipeline](briefs/POT-P8.md) | SR3-7, POT-P1/P3/P6b | queued (release; measured class only) |
+| POT-P9 | [Carry typed prior results through skills](briefs/POT-P9.md) | workload evidence, L1 format design | queued (later) |
+| POT-P10 | [Qualify economical fork, test and keep](briefs/POT-P10.md) | CAP-1/8, POT-P1, floor host | queued (release; artifact extension later) |
 
 ## Security and architecture review (2026-10-08)
 

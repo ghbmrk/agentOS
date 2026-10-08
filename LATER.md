@@ -2,12 +2,23 @@
 Generated 2026-10-07 by the COST thread's audit; the coordinator updates it. Rows marked LATER are not started until the first release ships (DECISIONS D-048). Promote a row by moving it to "Release" with the acceptance test it now blocks.
 
 ## Summary
-Non-merged rows audited: 129; the 67 stale rows it found were reconciled into BOARD.md on 2026-10-08 (DOC-3), and rows since merged were removed from the tables below. Open now: Release 49 (6 marked unsure), Later 51 (table counts refreshed with SR3 intake; no existing row reclassified).
+Non-merged rows audited: 129; the 67 stale rows it found were reconciled into BOARD.md on 2026-10-08 (DOC-3), and rows since merged were removed from the tables below. Open now: Release 63 (6 marked unsure), Later 55 (table counts refreshed with proposed POT intake; no existing row reclassified).
 No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41) has no board row but blocks IMG-1, HOST-1a/1b/1c part 2 and W3-builder-ship.
 
 ## Release (needed for A1–A15 or an invariant)
 | ID | Needed for | Note |
 |---|---|---|
+| POT | A10, A11, A15 | Proposed potency intake; draft implementations are bounded and do not close the full review |
+| POT-P1 | A3, A10, A11, A15 | One production-equivalent recurring workflow; reuse INT-A/H6/W7-A |
+| POT-P2 | A3, A10, A15 | Durable task/result binding and native draft revision; L1 design first |
+| POT-P3 | A7, A10, A11 (CHG-1/2, OP-7) | First deterministic broker-observed effect grader; independent activation approval |
+| POT-P3b | A7, A10, A11 (CHG-1/2, OP-7) | Authenticated outcome revision and additional qualified result contracts |
+| POT-P5 | A10, A15 (CAP-6, ADP-9/11) | Bounded template cohorts; grant authority and reply policy preserved |
+| POT-P6 | A10, A15 (CAP-9) | Prevent wrong-class transport evidence from reordering candidates |
+| POT-P6b | A10, A15 (CAP-9, OP-7/8) | Trusted acceptance, total cost and qualified-version evidence |
+| POT-P7 | A3, A15 (CAP-11/12, RES-5) | Compose existing resource/quota work only after custody qualification |
+| POT-P8 | A10 (CAP-13) | Qualify one class-specific local pipeline under D-051; no default expansion |
+| POT-P10 | A15 (CAP-1/8, RES-2) | Existing fork/test/keep on the floor host; artifact extension remains later |
 | SR3 | A4, A7, A12–A15 | Documentation intake for eight release findings; remediation stays open after intake merges |
 | SR3-1 | A4, A6, A14 (CH-7, localui L25) | Lock during sign-in/refresh cannot mint a live token; stale sessions cannot RESUME |
 | SR3-2 | A4, A13 (ADP-9, OP-3) | STOP-aged queues and concurrent dispatch obey current daily/per-record bounds |
@@ -64,6 +75,8 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 ## Later (backlog; do not start before first release)
 | ID | Why it can wait |
 |---|---|
+| POT-P4 | Scoped recall/progressive fetch waits for a measured A10 blocker; reuse #196/#199 |
+| POT-P9 | Typed prior-result skill handles wait for workload evidence and L1 format acceptance |
 | P2-8b | Deferred re-encrypt after trusted-PC removal; slot removal already covers CRED-9 |
 | P3-6d | Digest wording for deleted procedures; no A-test needs it |
 | CH-20p | Page view of kept replies; A15 needs delivery, not this view |
