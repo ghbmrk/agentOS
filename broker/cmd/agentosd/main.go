@@ -617,10 +617,9 @@ func main() {
 			recallCfg.Labeler, recallCfg.Machines = recallLabels{m}, recallMachines{m}
 			go m.RunPruner(vm.PrunePolicy{LowWaterBytes: 1 << 30}, time.Minute, ctx.Done())
 			tree.setMachines(m)
-			tools := toolSet{qs.tools(), tree, recallTools}
 			wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB, boxGates(d, "/proc/meminfo", cfg.Admission.HeadroomMB))
+			tools := registeredTools(qs, tree, recallTools, wt)
 			if wt != nil {
-				tools = append(tools, wt)
 				go reapWorkers(ctx, wt, m, d.Engine().Stopped, 5*time.Second)
 			}
 			if plane, err := openGuestPlane(m, d, ev, cfg.SocketDir, meterPath, inboxPath, egressSocket, tools); err != nil {
