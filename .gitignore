@@ -5,3 +5,7 @@ __pycache__/
 /broker/cmd/agentos-egress/agentos-egress
 /broker/cmd/agentosd/agentosd
 *.test
+*.safetensors
+*.gguf
+*.onnx
+spikes/S9-local-embedder/vectors*.json
