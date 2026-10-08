@@ -1,4 +1,4 @@
-# Leased accounting I/O assumptions (D50–D51)
+# Leased accounting I/O assumptions (D50–D54)
 
 | # | Assumption | Spec basis | If it changes |
 | --- | --- | --- | --- |
@@ -10,3 +10,4 @@
 | 6 | Config pins, clock, strict state, backup/restore and all-user quiescence remain externally trusted. | CH-15, OP-1 | Refuse unsafe composition; descriptor anchoring is not anti-rollback/restore/config authentication or permission revocation. |
 | 7 | Synchronous filesystem I/O may block forever; D41 observes latency without cancellation. | OP-8 | Keep independent owner controls/owned startup resource admission; do not start replacement writers after timeout. |
 | 8 | Paths within 4095 bytes and 64 parent components without symbolic ancestors are sufficient for the reviewed opt-in deployment. | OP-8, OP-1 | Review compatibility; never silently follow links/canonicalize or relax the bounds. Namespace and ancestor permission custody remain externally qualified. |
+| 9 | **Explicit duplicate-only recovery.** The caller authenticates the expected ledger pin/source and proves complete registered/downstream quiescence before invoking DiscardDuplicateTemporary on a fresh cooperating lease. Stable private names/lock/ancestor custody are independently qualified: metadata observations cannot prevent same-UID check-to-unlink replacement. Only exact duplicate bytes are removed; schema/freshness/restore/permissions are not repaired. Any error, including after unlink/sync/close, retains trusted recovery hold until persistence/custody determination. | CH-15, OP-1 | Keep W5-D54-Q/W5-D47-Q/W5-D50-Q/W5-D51-Q and strongest independent review before release; no default/startup/Save invocation, automatic cleanup/retry or activation. |

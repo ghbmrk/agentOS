@@ -365,3 +365,26 @@ remain release holds. Bounded traversal count is not bounded synchronous I/O tim
 Open/Openat/Fstat/Close or storage can stall and retain the startup slot/worker.
 W5-D51-Q/W5-D50-Q/W5-D47-Q and D37 availability holds remain. No recovery cleanup,
 refund, retry, revocation, default activation, deployment or security acceptance.
+
+`DiscardDuplicateTemporary(path, trustedLedgerSHA256)` is a separate explicitly
+invoked recovery action after complete registered and downstream quiescence. A
+nonzero caller-trusted pin precedes acquisition of a new cooperating lease. Both
+current ledger and temporary must exist, be nonempty bounded private regular
+single-link files, and have byte-identical descriptor-read images matching that
+ledger pin. Observed descriptor/named identity and metadata must remain stable
+across reads and before descriptor-relative Unlinkat of the temp. Only temp is
+removed; ledger/lock are never written, renamed, removed or substituted. Held
+directory sync and explicit lease close must succeed. Ordinary Save/startup do
+not call it; nonduplicate/partial/missing/unsafe/oversized residue stays held.
+
+This data-only action neither validates nor repairs accounting schema, authenticates
+or proves freshness of the supplied pin, provisions state nor activates a Gate.
+Tests preserve actual spent debt on strict reopen; malformed identical bytes still
+hold normal/urgent admission after cleanup. Same-UID name replacement can race
+observation and unlink; all-user quiescence, trusted pin/source/operator, root/
+ancestor/mount/lock custody and actual media/sync/close/latency require strongest
+independent release qualification (W5-D54-Q and existing Q rows). An error after
+unlink/sync/close is uncertain cleanup; retain recovery controls and do not restart
+until trusted determination, no automatic retry or repair. Any synchronous operation
+may hang without a deadline. No refund, revocation, restore/rollback/config-integrity
+or hostile-name safety claimed; D37 fault availability hold remains.
