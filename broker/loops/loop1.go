@@ -249,7 +249,22 @@ type Learn struct {
 	// forgetting one lets it be tried again on what remains (CAP-3). In
 	// memory only, like tried: a restart tries every hypothesis afresh.
 	triedGoals map[string][]string
+	// building is the build running now, if any (ForgetGoal).
+	building *running
 }
+
+// running is a candidate build in flight: the goals its brief read, and
+// how to take it back.
+type running struct {
+	goals  []string
+	cancel context.CancelCauseFunc
+}
+
+// ErrRequeued ends a unit of loop work that was taken back to run again
+// at once: a candidate build whose brief read a task the owner forgot
+// meanwhile (W3-forget-b2, potency C1). The scheduler neither measures it
+// nor waits before the next unit.
+var ErrRequeued = errors.New("loops: build taken back: a task it read was forgotten")
 
 // ForgetGoal drops every candidate Loop 1 keeps that was built from goal,
 // and keeps none built from it from now on (W3-tasks part 2, security C1
@@ -279,6 +294,13 @@ func (l *Learn) ForgetGoal(goal string) {
 			delete(l.notBefore, k)
 			delete(l.triedGoals, k)
 		}
+	}
+	// A build in flight that read it is taken back: its builder machine
+	// is destroyed as its job ends, and the hypothesis is built again at
+	// once from what remains, with no backoff. A build that did not read
+	// it goes on (potency C1 on W3-forget).
+	if b := l.building; b != nil && slices.Contains(b.goals, goal) {
+		b.cancel(ErrRequeued)
 	}
 }
 
@@ -524,8 +546,24 @@ func (l *Learn) Next(ctx context.Context, modelOK bool) (Job, bool) {
 		}
 		h := h
 		return Job{Name: "candidate", UsesModel: true, Evaluates: true, Run: func(ctx context.Context) Result {
-			rep, err := l.propose(ctx, h, ev)
-			l.done(ctx, err, h.Key, len(h.Tasks), goalsRead(h, ev.Dev))
+			goals := goalsRead(h, ev.Dev)
+			bctx, cancel := context.WithCancelCause(ctx)
+			defer cancel(nil)
+			b := &running{goals: goals, cancel: cancel}
+			l.mu.Lock()
+			l.building = b
+			l.mu.Unlock()
+			rep, err := l.propose(bctx, h, ev)
+			l.mu.Lock()
+			l.building = nil
+			l.mu.Unlock()
+			if errors.Is(context.Cause(bctx), ErrRequeued) {
+				// Not tried and not asked: what it built from the
+				// forgotten task is not proposed or kept (propose drops
+				// a candidate whose goal is gone).
+				return Result{Err: ErrRequeued}
+			}
+			l.done(ctx, err, h.Key, len(h.Tasks), goals)
 			if errors.Is(err, ErrUnseeded) {
 				return Result{}
 			}
