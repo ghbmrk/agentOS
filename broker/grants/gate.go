@@ -213,9 +213,10 @@ type Config struct {
 	// forget is denied.
 	ForgetItem func(goal string) (object, detail string, ok bool)
 	// ForgetAgentItem gives the line for item 2 of a forget request
-	// (W3-forget-b2b): the agent's work since the task, taken back. ok
-	// false: nothing to take back, and item 2 is denied. Nil: every item 2
-	// is denied.
+	// (W3-forget-b2b): the agent's work since the task, taken back; its
+	// detail is from the intent's "actions" param (ForgetAgentActions),
+	// fixed when asked, not this one. ok false: nothing to take back, and item 2 is denied. Nil:
+	// every item 2 is denied.
 	ForgetAgentItem func(goal string) (object, detail string, ok bool)
 	// Unpaused is told the ID of a grant whose pause the owner ended by
 	// resuming or revoking it, so Loop 2 stops listing it as paused (loops
@@ -900,9 +901,9 @@ func (g *Gate) evaluateBroker(ctx context.Context, phase journal.Phase, in journ
 		// Item 2 of the same request, the agent's work since the task
 		// taken back (W3-forget-b2b), is asked the same way with its own
 		// line from ForgetAgentItem.
-		goal, lookup := ForgetGoal(in.ID), g.cfg.ForgetItem
+		goal, lookup, agent := ForgetGoal(in.ID), g.cfg.ForgetItem, false
 		if goal == "" {
-			goal, lookup = ForgetAgentGoal(in.ID), g.cfg.ForgetAgentItem
+			goal, lookup, agent = ForgetAgentGoal(in.ID), g.cfg.ForgetAgentItem, true
 		}
 		if in.Origin != OriginForget || in.Executor != ForgetExecutor || goal == "" {
 			return verdict{kind: deny, why: "a forget comes only from the owner's FORGET"}
@@ -913,6 +914,11 @@ func (g *Gate) evaluateBroker(ctx context.Context, phase journal.Phase, in journ
 		obj, detail, ok := lookup(goal)
 		if !ok || obj == "" {
 			return verdict{kind: deny, why: "no such task"}
+		}
+		if agent {
+			// The work so far, fixed when asked, so a re-issue asks what
+			// was asked (OP-3; #327 L3 B-1).
+			detail = ForgetAgentActions(in.Params)
 		}
 		return verdict{kind: ask, item: owner.Item{Ref: in.ID, Object: obj, Detail: detail,
 			Facts: owner.Facts{Kind: owner.Ordinary, Verb: "forget", NoRecipient: true}}}

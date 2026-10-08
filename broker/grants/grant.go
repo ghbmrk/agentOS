@@ -85,6 +85,34 @@ func ForgetAgentGoal(id string) string {
 	return goal
 }
 
+// ForgetAgentActions is item 2's detail from its "actions" param: the
+// agent's actions so far, counted when asked, which stay done (CAP-3;
+// DECISIONS 2026-10-05), in a recall rollback's words. A count, not text,
+// so the journal's redactor leaves it; none or a bad one names nothing.
+func ForgetAgentActions(params map[string]any) string {
+	var n int64
+	switch v := params["actions"].(type) {
+	case int:
+		n = int64(v)
+	case json.Number:
+		var err error
+		if n, err = v.Int64(); err != nil {
+			return ""
+		}
+	default:
+		return ""
+	}
+	switch {
+	case n < 0:
+		return ""
+	case n == 0:
+		return "no actions yet"
+	case n == 1:
+		return "1 action so far stays done"
+	}
+	return fmt.Sprintf("%d actions so far stay done", n)
+}
+
 // ForgetSibling is the other item of the request id belongs to: the
 // take-back for a forget, the forget for a take-back; "" if malformed.
 func ForgetSibling(id string) string {

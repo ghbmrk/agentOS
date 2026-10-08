@@ -27,12 +27,13 @@ type fakeWork struct {
 	backs   []time.Time
 	asked   []bool // approved, per take-back
 	actions int
+	noCount bool // the count is not known
 }
 
-func (w *fakeWork) Actions(lineage string, since time.Time) int {
+func (w *fakeWork) Actions(lineage string, since time.Time) (int, bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.actions
+	return w.actions, !w.noCount
 }
 
 func (w *fakeWork) Work(lineage string, since time.Time) (bool, bool) {
@@ -94,14 +95,14 @@ func TestForgetAsksItem2OnlyWhenTheAgentWorked(t *testing.T) {
 			t.Fatalf("%s: intents %v", c.name, ids)
 		}
 		in := r.gate.got[1]
-		if in.Origin != grants.OriginForget || in.Executor != grants.ForgetExecutor || in.Action != journal.ActionLearnForget || len(in.Params) != 1 || in.Params["agent"] != true {
+		if in.Origin != grants.OriginForget || in.Executor != grants.ForgetExecutor || in.Action != journal.ActionLearnForget || in.Params["agent"] != true || len(in.Params) != 2 || in.Params["actions"] != 0 {
 			t.Fatalf("%s: item 2 %+v", c.name, in)
 		}
 		if strings.Join(r.gate.authorized, " ") != strings.Join(ids, " ") {
 			t.Fatalf("%s: authorized %v", c.name, r.gate.authorized)
 		}
 		if len(r.texts) != 1 || r.texts[0] != forgetAgentNotice ||
-			!strings.Contains(r.texts[0], "Approve only item 1 to keep that work; your agent then still holds the task until that work is undone.") {
+			!strings.Contains(r.texts[0], "Approve only item 1 to keep that work; your agent then still holds the task.") {
 			t.Fatalf("%s: notice %q", c.name, r.texts)
 		}
 		if since, ok := forgetSince(ids[1]); !ok || !since.Equal(at) {
@@ -334,17 +335,34 @@ func TestForgetItem2EndToEnd(t *testing.T) {
 
 // #327 UX lens B1 (CAP-3, DECISIONS 2026-10-05): item 2 names the work so
 // far, and that actions taken stay done; no text claims they are undone.
+// The count is fixed when asked, in item 2's params, so a re-issue asks
+// what was asked (#327 L3 B-1); one not known is not named.
 func TestForgetItem2NamesTheActionsThatStayDone(t *testing.T) {
 	at := time.Date(2026, 10, 5, 13, 2, 0, 0, time.UTC)
-	for n, want := range map[int]string{0: "no actions yet", 1: "1 action so far stays done", 3: "3 actions so far stay done"} {
+	for _, c := range []struct {
+		n       int
+		noCount bool
+		want    any
+	}{
+		{0, false, "no actions yet"},
+		{1, false, "1 action so far stays done"},
+		{3, false, "3 actions so far stay done"},
+		{0, true, ""},
+	} {
 		r := newForgetRig(t)
-		r.withAgent(&fakeWork{worked: true, ok: true, actions: n})
+		w := &fakeWork{worked: true, ok: true, actions: c.n, noCount: c.noCount}
+		r.withAgent(w)
 		r.task("owner:a", "pay the gas bill", at, viaSMS)
-		if _, d, ok := r.f.AgentItem("owner:a"); !ok || d != want {
-			t.Fatalf("%d actions: detail %q", n, d)
+		r.say("FORGET LAST")
+		if len(r.gate.got) != 2 || grants.ForgetAgentActions(r.gate.got[1].Params) != c.want {
+			t.Fatalf("%+v: item 2 %+v", c, r.gate.got)
+		}
+		w.actions, w.noCount = 7, false // the agent acts while the owner reads
+		if _, d, ok := r.f.AgentItem("owner:a"); !ok || d != "" {
+			t.Fatalf("%+v: live detail %q", c, d)
 		}
 	}
-	for _, s := range []string{strings.Replace(forgetAgentNotice, "until that work is undone", "", 1), forgetAgentDone, forgetAgentNotYet} {
+	for _, s := range []string{forgetAgentNotice, forgetAgentDone, forgetAgentNotYet} {
 		if strings.Contains(s, "undone") || !strings.Contains(s, "stay done") && s != forgetAgentNotYet {
 			t.Fatalf("claims the work is undone, or not that actions stay done: %q", s)
 		}
@@ -354,9 +372,43 @@ func TestForgetItem2NamesTheActionsThatStayDone(t *testing.T) {
 // #327 UX lens B2 (CH-12): item 1 has forgotten the task, so a text about
 // item 2 never offers FORGET again, a step that cannot fix it.
 func TestForgetItem2NeverOffersAFruitlessForget(t *testing.T) {
-	for _, s := range []string{forgetAgentNoAgent, forgetAgentNotTaken, forgetAgentNotOpen} {
+	for _, s := range []string{forgetAgentNoAgent, forgetAgentNotTaken, forgetAgentNotOpen, forgetAgentWhenOpen} {
 		if strings.Contains(s, "FORGET") {
 			t.Fatalf("offers FORGET again: %q", s)
+		}
+	}
+}
+
+// #327 L3 B-3 (CH-12): an approved item 2 that finds memory not open yet
+// (a request re-issued after a restart, answered before the vault is
+// unlocked) is taken back once recall opens, and the owner is told so;
+// with recall off it cannot be, and the owner is told that.
+func TestForgetItem2WaitsForMemoryToOpen(t *testing.T) {
+	for _, off := range []bool{false, true} {
+		r := newForgetRig(t)
+		w := &fakeWork{worked: true, ok: true, err: recalltool.ErrNotOpen}
+		r.withAgent(w)
+		opens := 0
+		if !off {
+			r.f.whenOpen = func() { opens++ }
+		}
+		r.task("owner:a", "pay the gas bill", r.now.Add(-time.Hour), viaSMS)
+		r.say("FORGET LAST")
+		r.gate.st = map[string]journal.State{r.gate.got[0].ID: journal.Succeeded}
+		r.texts = nil
+		out := r.f.Execute(context.Background(), r.gate.got[1], 1)
+		want, res := forgetAgentWhenOpen, journal.ResultSucceeded
+		if off {
+			want, res = forgetAgentNotOpen, journal.ResultNotApplied
+		}
+		if out.Result != res || len(r.texts) != 1 || r.texts[0] != want || opens != map[bool]int{false: 1, true: 0}[off] {
+			t.Fatalf("off %v: %+v %q, %d opens", off, out, r.texts, opens)
+		}
+		w.err = nil
+		r.texts = nil
+		r.f.resumeAgent(context.Background())
+		if wantBacks := map[bool]int{false: 1, true: 0}[off]; len(w.backs) != wantBacks || wantBacks == 1 && (len(r.texts) != 1 || r.texts[0] != forgetAgentDone) {
+			t.Fatalf("off %v: once open, took back %v, told %q", off, w.backs, r.texts)
 		}
 	}
 }

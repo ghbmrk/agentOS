@@ -559,6 +559,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	steps := newStepNotes(&cfg.Notes)
+	if lp != nil && recallDir != "" && verifier != nil {
+		// An approved item 2 that finds recall not open yet waits for it
+		// (#327 L3 B-3); set before the daemon serves the owner.
+		lp.forgetOwner.whenOpen = func() {
+			recallExec.OnOpen(func() { go lp.forgetOwner.resumeAgent(ctx) })
+		}
+	}
 	d, err := daemon.Run(ctx, cfg)
 	if err != nil {
 		log.Fatal(err)

@@ -248,8 +248,11 @@ func (r *Reach) Work(lineage string, since time.Time) (worked, ok bool) {
 
 // Actions counts the actions lineage took since since, which a take-back
 // leaves done: the count a rollback's line names (#327 UX lens B1).
-func (r *Reach) Actions(lineage string, since time.Time) int {
-	return r.actions(lineage, since, time.Time{})
+func (r *Reach) Actions(lineage string, since time.Time) (n int, ok bool) {
+	if r.Journal == nil {
+		return 0, false // not known: no journal to count from
+	}
+	return r.actions(lineage, since, time.Time{}), true
 }
 
 // TakenBack tells the owner an approved take-back, carried by Retry, is

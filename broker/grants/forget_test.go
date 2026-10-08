@@ -4,8 +4,10 @@ package grants
 
 import (
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/owner"
 )
 
 // W3-forget: the owner's forget of a task is asked of the owner with the
@@ -101,5 +103,52 @@ func TestAForgetsAgentTakeBackIsItem2OfTheSameRequest(t *testing.T) {
 	if len(items) != 2 || items[0].Ref != in1.ID || items[1].Ref != ForgetAgentID("n1", "g1") ||
 		items[1].Object != "your agent's work since today 13:02" || items[1].Facts != items[0].Facts {
 		t.Fatalf("one request, forget then take-back: %+v", items)
+	}
+}
+
+// #327 L3 B-1 (OP-3 at re-issue, CAP-3): item 2's detail, the actions so
+// far, is the one fixed when it was asked, carried in the intent; the live
+// count moving (the agent acting while the owner reads, or not known after
+// a restart) neither changes the line nor closes item 2 at re-issue,
+// which would leave item 1 asked alone.
+func TestAForgetsTakeBackDetailIsFixedWhenAsked(t *testing.T) {
+	live := "1 action so far stays done"
+	ex := &recordExec{}
+	r := newRigExecs(t, func(c *Config) {
+		c.ForgetItem = func(goal string) (string, string, bool) { return `"pay the gas bill"`, "", goal == "g1" }
+		c.ForgetAgentItem = func(goal string) (string, string, bool) {
+			return "your agent's work since today 13:02", live, goal == "g1"
+		}
+	}, map[string]journal.Executor{ForgetExecutor: ex})
+	in1 := journal.Intent{ID: ForgetID("n1", "g1"), Origin: OriginForget, Account: journal.BrokerAccount,
+		Action: journal.ActionLearnForget, Executor: ForgetExecutor}
+	in2 := journal.Intent{ID: ForgetAgentID("n1", "g1"), Origin: OriginForget, Account: journal.BrokerAccount,
+		Action: journal.ActionLearnForget, Executor: ForgetExecutor,
+		Params: map[string]any{"agent": true, "actions": 2}}
+	for _, in := range []journal.Intent{in1, in2} {
+		if st := r.submit(in); st.State != journal.Pending {
+			t.Fatalf("%s: %s %q", in.ID, st.State, st.Permission.Reason)
+		}
+	}
+	r.g.Flush()
+	req, items := r.own.last(t)
+	if len(items) != 2 || items[1].Detail != "2 actions so far stay done" {
+		t.Fatalf("item 2's line: %+v", items)
+	}
+	asked := r.now()
+	var boot []owner.Carried
+	for _, it := range items {
+		boot = append(boot, owner.Carried{Ref: it.Ref, Request: req, Asked: asked, Expires: asked.Add(15 * time.Minute), Sum: owner.ItemSum(it)})
+	}
+	live = "no actions yet" // the count after a restart, recall not open yet
+	r.advance(time.Minute)
+	r.boot = boot
+	r.open()
+	r.g.Tick()
+	r.g.Flush()
+	for _, id := range []string{in1.ID, in2.ID} {
+		if st := r.state(id); st.State != journal.Pending {
+			t.Fatalf("%s at re-issue: %s %q", id, st.State, st.Permission.Reason)
+		}
 	}
 }

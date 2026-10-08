@@ -197,15 +197,22 @@ func TestCAP3ATakeBackIsNotRepeatedWhenItsMarksCannotBeWritten(t *testing.T) {
 }
 
 // #327 UX lens B1: Actions is the work so far that item 2 names, the
-// count a recall rollback's line uses.
+// count a recall rollback's line uses; one not known says so (#327 L3
+// B-1), never 0.
 func TestCAP3ActionsCountsTheWorkSoFar(t *testing.T) {
 	x, read := newReachRig(t)
-	if n := x.reach.Actions("root", read); n != 0 {
-		t.Fatalf("no actions since: %d", n)
+	if n, ok := x.reach.Actions("root", read); n != 0 || !ok {
+		t.Fatalf("no actions since: %d %v", n, ok)
 	}
 	x.j.submitted["late"] = read.Add(time.Second)
 	x.j.submitted["later"] = read.Add(2 * time.Second)
-	if n := x.reach.Actions("root", read); n != 2 {
-		t.Fatalf("actions since: %d", n)
+	if n, ok := x.reach.Actions("root", read); n != 2 || !ok {
+		t.Fatalf("actions since: %d %v", n, ok)
+	}
+	if _, ok := (&Reach{}).Actions("root", read); ok {
+		t.Fatal("no journal: count claimed known")
+	}
+	if _, ok := (&LateExecutor{}).Actions("root", read); ok {
+		t.Fatal("recall not open: count claimed known")
 	}
 }
