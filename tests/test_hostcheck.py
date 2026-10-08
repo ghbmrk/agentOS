@@ -147,15 +147,19 @@ class DiffTest(unittest.TestCase):
         self.assertFalse(r["pass"])
         self.assertEqual(flagged(r), {("rtc", "task", "written")})
 
-    def test_rtc_writes_after_the_firmwares_own_in_each_post_are_the_guests(self):
-        # OVMF sets the clock's registers on every power-on self-test, before
-        # anything else runs; the harness counts them on firmware-only boots.
-        rtc = lambda o: {"event": "RTC_CHANGE", "data": {"offset": o}}
-        events = [rtc(0), rtc(-1), {"event": "RESET"}, rtc(0), rtc(0), rtc(5), {"event": "SHUTDOWN"}]
-        posts = hostcheck.rtc_by_post(events)
-        self.assertEqual([len(p) for p in posts], [2, 3])
-        self.assertEqual(hostcheck.guest_rtc_writes(posts, 2), [rtc(5)])
-        self.assertEqual(hostcheck.guest_rtc_writes(posts, 3), [])
+    def test_rtc_writes_after_the_os_starts_in_each_post_are_the_guests(self):
+        # OVMF sets the clock's registers on every power-on self-test, and
+        # QEMU throttles RTC_CHANGE to one event a second, so how many events
+        # the firmware's writes make varies (CI saw 1 and 2). A write is the
+        # guest's when it comes after the OS started on the console and
+        # before the next reset.
+        ev = lambda t, name, **d: {"event": name, "timestamp": {"seconds": t, "microseconds": 0}, "data": d}
+        events = [ev(1, "RTC_CHANGE", offset=0), ev(2, "RTC_CHANGE", offset=-1), ev(6, "RESET"),
+                  ev(7, "RTC_CHANGE", offset=0), ev(12, "RTC_CHANGE", offset=0), ev(20, "SHUTDOWN")]
+        self.assertEqual(hostcheck.guest_rtc_writes(events, [3.0, 8.0]), [events[4]])
+        self.assertEqual(hostcheck.guest_rtc_writes(events, [3.0, 13.0]), [])
+        self.assertEqual(hostcheck.guest_rtc_writes(events, []), [])
+        self.assertEqual(hostcheck.guest_rtc_writes(events, [0.5]), [events[0], events[1]])
 
     def test_firmware_noise_excluded_for_uefi_only(self):
         noisy = f"eb704011-1402-11d3-8e77-00a0c969723b:MTC"

@@ -214,6 +214,7 @@ class Qemu:
     def __init__(self, args, work, label, boot=None):
         self.work, self.label = work, label
         self.events, self.console = [], bytearray()
+        self.chunks, self.os_starts = [], []  # (console offset, arrival time); OS start times
         sock_dir = tempfile.mkdtemp(prefix="hc", dir="/tmp")  # unix socket paths stay short
         self.sock_dir = sock_dir
         tpm_sock = os.path.join(sock_dir, "tpm")
@@ -268,6 +269,7 @@ class Qemu:
         with open(self.work / f"console-{self.label}.log", "ab") as log:
             try:
                 while b := self.serial.recv(4096):
+                    self.chunks.append((len(self.console), time.time()))
                     self.console += b
                     log.write(b)
                     log.flush()
@@ -276,7 +278,9 @@ class Qemu:
 
     def drive(self, steps, deadline):
         """Steps are (regex, action): wait for the regex on the console after
-        the previous match, then send `serial:TEXT` or `qmp:COMMAND`."""
+        the previous match, then send `serial:TEXT` or `qmp:COMMAND`, or for
+        `os` note the time the OS started: RTC writes from then until the
+        next reset are the guest's. Its regex is the OS's first output."""
         pos = 0
         for pattern, action in steps:
             rx = re.compile(pattern.encode())
@@ -289,6 +293,8 @@ class Qemu:
             pos = m.end()
             if action and action.startswith("serial:"):
                 self.serial.sendall(action[7:].encode())
+            elif action == "os":
+                self.os_starts.append(max(t for off, t in self.chunks if off <= m.start()))
             elif action:
                 self._qmp_send({"execute": action[4:]})
 
@@ -304,7 +310,7 @@ class Qemu:
         (self.work / f"events-{self.label}.json").write_text(json.dumps(self.events, indent=1))
         if self.proc.returncode:
             raise HostcheckError(f"{self.label}: QEMU exited {self.proc.returncode}")
-        return rtc_by_post(self.events)
+        return guest_rtc_writes(self.events, self.os_starts)
 
 
 def _wait_path(path, timeout=30):
@@ -329,22 +335,23 @@ def _connect(path, proc, timeout=60):
             time.sleep(0.05)
 
 
-def rtc_by_post(events):
-    """RTC_CHANGE events split at each guest reset: one list per power-on
-    self-test, since the firmware sets the clock's registers on every one."""
-    posts = [[]]
-    for e in events:
-        if e["event"] == "RESET":
-            posts.append([])
-        elif e["event"] == "RTC_CHANGE":
-            posts[-1].append(e)
-    return posts
-
-
-def guest_rtc_writes(posts, firmware_writes):
-    """The writes after the firmware's own in each POST. The firmware writes
-    first, so a guest write cannot hide among them."""
-    return [e for post in posts for e in post[firmware_writes:]]
+def guest_rtc_writes(events, os_starts):
+    """The RTC_CHANGE events after an OS start and before the next reset. The
+    firmware sets the clock's registers on every power-on self-test, before
+    the OS starts. QEMU throttles the event to one a second but keeps the
+    last write's timestamp, so a guest write is never dated before it."""
+    stamp = lambda e: e["timestamp"]["seconds"] + e["timestamp"]["microseconds"] / 1e6
+    timeline = sorted([(t, 0, None) for t in os_starts] + [(stamp(e), 1, e) for e in events],
+                      key=lambda x: x[:2])
+    out, guest = [], False
+    for _, kind, e in timeline:
+        if kind == 0:
+            guest = True
+        elif e["event"] == "RESET":
+            guest = False
+        elif e["event"] == "RTC_CHANGE" and guest:
+            out.append(e)
+    return out
 
 
 def qemu_tpm(work):
@@ -382,10 +389,12 @@ FIRMWARE_ONLY = [(r"Shell> |No bootable option or device was found", "qmp:quit")
 
 
 def standin_phases(plant):
+    os_start = ("Linux version", "os")  # the kernel's first line
     return {
-        "task": [("HOSTCHECK-READY", f"serial:task {plant or '-'}\n"), ("HOSTCHECK-DONE", None),
+        "task": [os_start, ("HOSTCHECK-READY", f"serial:task {plant or '-'}\n"), ("HOSTCHECK-DONE", None),
                  ("HOSTCHECK-READY", "serial:poweroff\n")],
-        "restart": [("HOSTCHECK-READY", "serial:reboot\n"), ("HOSTCHECK-READY", "serial:poweroff\n")],
+        "restart": [os_start, ("HOSTCHECK-READY", "serial:reboot\n"),
+                    os_start, ("HOSTCHECK-READY", "serial:poweroff\n")],
     }
 
 
@@ -416,7 +425,7 @@ def cmd_qemu(args):
     shutil.copyfile(args.ovmf_vars, work / "vars.fd")
     seed_tpm(work)
     if args.kernel:
-        boot = ["-kernel", args.kernel, "-initrd", args.initrd, "-append", "console=ttyS0 rdinit=/init quiet"]
+        boot = ["-kernel", args.kernel, "-initrd", args.initrd, "-append", "console=ttyS0 rdinit=/init"]
         phases = standin_phases(args.plant)
     else:
         boot = ["-drive", f"if=none,id=agentos,format=raw,file={args.image}",
@@ -434,25 +443,24 @@ def cmd_qemu(args):
             q.proc.kill()
             raise
 
-    snaps, fw_rtc = {}, set()
+    snaps = {}
     for label in ("firmware-1", "firmware-2"):
-        fw_rtc.add(len(boot_once(label, FIRMWARE_ONLY, False)[0]))
+        boot_once(label, FIRMWARE_ONLY, False)
         snaps[label] = qemu_snapshot(args, work)
-    if len(fw_rtc) != 1:
-        raise HostcheckError(f"the firmware writes the RTC a different number of times on each boot: {sorted(fw_rtc)}")
-    firmware_writes = fw_rtc.pop()
     noise = {(f["kind"], f["key"]) for f in diff(snaps["firmware-1"], snaps["firmware-2"])}
     unstable = sorted(k for k in noise if k[0] != "uefi")
     if unstable:
         raise HostcheckError(f"host state changes on firmware-only boots: {unstable}")
     baseline = snaps["firmware-2"]
     report = {"baseline": baseline, "firmware_noise": sorted(k for _, k in noise),
-              "firmware_rtc_writes_per_post": firmware_writes, "phases": []}
+              "phases": []}
     for phase in args.phases.split(","):
         if phase not in phases:
             raise HostcheckError(f"unknown phase {phase!r}")
+        if not any(action == "os" for _, action in phases[phase]):
+            raise HostcheckError(f"phase {phase!r} has no os step, so guest RTC writes could not be told apart")
         rtc = [{"phase": phase, "offset": e["data"]["offset"]}
-               for e in guest_rtc_writes(boot_once(phase, phases[phase], True), firmware_writes)]
+               for e in boot_once(phase, phases[phase], True)]
         after = qemu_snapshot(args, work)
         r = evaluate(baseline, after, load_allow(), flags=args.flag, noise=noise, rtc_writes=rtc)
         report["phases"].append(dict(r, phase=phase, rtc_writes=rtc, snapshot=after))
@@ -503,7 +511,8 @@ def main(argv=None):
     src.add_argument("--kernel", help="stand-in guest kernel (with --initrd)")
     src.add_argument("--image", help="a raw AgentOS drive image, attached as a USB disk (with --phases-file)")
     q.add_argument("--initrd")
-    q.add_argument("--phases-file", help="JSON: phase -> [[regex, action], ...]")
+    q.add_argument("--phases-file", help="JSON: phase -> [[regex, action], ...]; "
+                   "action os marks the OS's first output in each boot")
     q.add_argument("--host-disk", action="append", required=True, metavar="NAME=PATH[,bus=nvme|virtio|ahci]")
     q.add_argument("--phases", default="task,restart")
     q.add_argument("--plant", default="", help="stand-in only: disk,uefi,nv,rtc (negative test)")
