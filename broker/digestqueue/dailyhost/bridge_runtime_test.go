@@ -32,6 +32,7 @@ type bridgeFixture struct {
 	link   *modemlink.Link
 	eng    *engine
 	budget *grants.Gate
+	pacing grants.PacingStore
 }
 
 var bridgeLimits = dq.Limits{MaxBatches: 8, MaxSources: 4, MaxAttempts: 3, MaxBytes: 65536}
@@ -115,15 +116,19 @@ func (f *bridgeFixture) open(t *testing.T, st dq.Store, seed bool) {
 		f.link = modemlink.New(modemlink.Config{Owner: oc.Owner, Now: oc.Now, Location: time.UTC, SendWait: time.Second, PollWait: 5 * time.Millisecond})
 	}
 	bridgeOp(t, f.link, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateOK}, nil)
-	if f.budget == nil {
-		f.budget = grants.New(grants.Config{Now: oc.Now, RequestsPerHour: 3})
+	if f.pacing != nil || f.budget == nil {
+		f.budget = grants.New(grants.Config{Now: oc.Now, RequestsPerHour: 3, PacingStore: f.pacing})
 	}
 	policy, err := dailypolicy.New(dailypolicy.Config{Budget: f.budget, Engine: f.eng, Clock: func(context.Context) (time.Time, error) { return f.now, nil }, Quiet: func(time.Time) bool { return false }, Eligible: func(context.Context, dq.Batch) error { return nil }, AgedAfter: 30 * time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}
+	var policyHealth func() error
+	if f.pacing != nil {
+		policyHealth = policy.Health
+	}
 	oc.Modem = f.link
-	f.h, err = New(Config{Owner: oc, Notes: f.n, Daily: daily.Config{Queue: f.q, Heartbeat: hb, Clock: clock, TTL: time.Hour, Gate: policy.Check, Recheck: policy.Recheck}, OwnerNotesEligible: func(context.Context, dq.Snapshot) error { return nil }, RetentionDays: 1, PollInterval: time.Minute, StepTimeout: time.Second})
+	f.h, err = New(Config{PolicyHealth: policyHealth, Owner: oc, Notes: f.n, Daily: daily.Config{Queue: f.q, Heartbeat: hb, Clock: clock, TTL: time.Hour, Gate: policy.Check, Recheck: policy.Recheck}, OwnerNotesEligible: func(context.Context, dq.Snapshot) error { return nil }, RetentionDays: 1, PollInterval: time.Minute, StepTimeout: time.Second})
 	if err != nil || f.h.Health() != nil {
 		t.Fatal(err, f.h.Status())
 	}
