@@ -485,7 +485,7 @@ func settleForgetLog(v *vault.Vault, rk RecoveryKey, tmp string, lay Layout, opt
 			return "", err
 		}
 		if Confirmable(pending) {
-			f, err := newQuestion(pending, l, has, now, opt.Newer, created, opt.rand)
+			f, err := newQuestion(pending, l, has, now, opt.Newer, created, decoyStream(rk, l, has))
 			if err != nil {
 				return "", err
 			}

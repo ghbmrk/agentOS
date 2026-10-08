@@ -328,8 +328,6 @@ type Options struct {
 	// at hand; a held restore offers the owner the newest verified one
 	// made after the restored backup (Question.Newer).
 	Newer []BackupEntry
-
-	rand io.Reader // the question's decoys; nil is crypto/rand
 }
 
 // Restore reads a backup with the recovery key into dst, a path that must

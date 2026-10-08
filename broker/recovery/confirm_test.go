@@ -199,9 +199,76 @@ func TestDecoysAreFarApartAndOnBothSides(t *testing.T) {
 	recent := forgetLog{Entries: []ForgetEntry{{At: now.Add(-24 * time.Hour)}}}
 	f, err := newQuestion(PendingUnanchored, recent, true, now, nil, now, nil)
 	must(t, err)
-	if q, _ := f.question(); f.Answer != 3 || q.Dates[3].After(civil(now)) {
+	q, err := f.question()
+	must(t, err)
+	if f.Answer != 3 || q.Dates[3].After(civil(now)) {
 		t.Fatalf("recent: %v answer %d", q.Dates, f.Answer)
 	}
+	// D-071: "later" and "never" are still the last two choices.
+	if q.Later() != 4 || q.Never() != 5 || q.Choices() != 6 {
+		t.Fatalf("recent: later %d never %d of %d", q.Later(), q.Never(), q.Choices())
+	}
+}
+
+// L3 on #436: a wrong answer sends the owner to restore again, so every
+// restore of a backup asks the same question, on any later day; else the
+// one date two questions share is the answer. A later backup with the
+// same last forget asks it too.
+func TestEveryRestoreOfABackupAsksTheSameQuestion(t *testing.T) {
+	restoreAt := func(bk []byte, rk RecoveryKey, now time.Time) confirmFile {
+		t.Helper()
+		dst := filepath.Join(t.TempDir(), "new-drive")
+		_, err := Restore(bytes.NewReader(bk), rk, dst, lay, Options{}, now)
+		must(t, err)
+		_, f := loadQ(t, filepath.Join(dst, lay.ForgetLog))
+		return f
+	}
+	later := func(x *box, at time.Time) []byte {
+		t.Helper()
+		var buf bytes.Buffer
+		must(t, Backup(x.b, x.roots(), &buf, at))
+		return buf.Bytes()
+	}
+	day := 24 * time.Hour
+	x := newBox(t)
+	pc := newPCCounter("host-a")
+	forget(t, x, pc, "synthetic-goal-canary-a", t0.Add(-500*day))
+	forget(t, x, pc, "synthetic-goal-canary-b", t0.Add(-300*day))
+	first := restoreAt(x.backup(), x.rk, t0.Add(2*day))
+	for _, f := range []confirmFile{
+		restoreAt(x.backup(), x.rk, t0.Add(2*day)),
+		restoreAt(x.backup(), x.rk, t0.Add(200*day)),
+		restoreAt(later(x, t0.Add(30*day)), x.rk, t0.Add(40*day)),
+	} {
+		if !equalStrings(f.Dates, first.Dates) || f.Answer != first.Answer {
+			t.Fatalf("asked %v (answer %d), then %v (answer %d)", first.Dates, first.Answer, f.Dates, f.Answer)
+		}
+	}
+	// With no forget, the stand-in date holds still too.
+	y := newBox(t)
+	bk := y.backup()
+	a, b := restoreAt(bk, y.rk, t0.Add(2*day)), restoreAt(bk, y.rk, t0.Add(100*day))
+	if !equalStrings(a.Dates, b.Dates) || a.Answer != b.Answer || a.Answer != len(a.Dates)+1 {
+		t.Fatalf("never forgot: %v then %v", a.Dates, b.Dates)
+	}
+	// Another recovery key draws other decoys around the same date.
+	z := newBox(t)
+	forget(t, z, newPCCounter("host-a"), "synthetic-goal-canary-a", t0.Add(-300*day))
+	if f := restoreAt(z.backup(), z.rk, t0.Add(2*day)); equalStrings(f.Dates, first.Dates) {
+		t.Fatalf("two keys drew the same decoys: %v", f.Dates)
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // The dates are the owner's calendar days: the box's zone, not UTC.

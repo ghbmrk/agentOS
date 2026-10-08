@@ -226,9 +226,13 @@ func answerHeld(dir, msg string) (string, bool, error) {
 			return "", false, err
 		}
 	}
-	// The marker goes first: a crash after it leaves a question that
-	// loadHeld no longer reads.
+	// The marker goes once the log is on disk (writeSynced), and before
+	// the question: a crash after it leaves a question that loadHeld no
+	// longer reads.
 	if err := os.Remove(path + ".pending"); err != nil {
+		return "", false, err
+	}
+	if err := syncDir(dir); err != nil {
 		return "", false, err
 	}
 	if err := os.Remove(path + confirmSuffix); err != nil && !os.IsNotExist(err) {
@@ -238,7 +242,8 @@ func answerHeld(dir, msg string) (string, bool, error) {
 }
 
 // writeSynced replaces path with raw through a synced temporary file, so a
-// crash leaves the old file or the new one.
+// crash leaves the old file or the new one, and syncs the directory so
+// the new one stays.
 func writeSynced(path string, raw []byte) error {
 	f, err := os.CreateTemp(filepath.Dir(path), ".restore-*")
 	if err != nil {
@@ -256,5 +261,22 @@ func writeSynced(path string, raw []byte) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return os.Rename(f.Name(), path)
+	if err := os.Rename(f.Name(), path); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(path))
+}
+
+// syncDir makes dir's entries durable, as recovery's writeAtomic does; a
+// variable so a test can watch the order.
+var syncDir = func(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	serr := d.Sync()
+	if err := d.Close(); serr == nil {
+		serr = err
+	}
+	return serr
 }

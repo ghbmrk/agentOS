@@ -1,6 +1,8 @@
 package recovery
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -28,7 +30,11 @@ const (
 	decoys = 3
 	// decoyGap is the least number of days between two dates shown.
 	decoyGap = 45
-	dateFmt  = "2006-01-02"
+	// fakeWindow is the days within which backups with no forget share
+	// their stand-in date.
+	fakeWindow = 90
+	dateFmt    = "2006-01-02"
+	decoyInfo  = "agentos-restore-confirm-v1"
 )
 
 var errBadQuestion = errors.New("recovery: the restore's question does not read")
@@ -91,9 +97,12 @@ func day(t time.Time, loc *time.Location) time.Time {
 // newQuestion builds the question for a restore held for reason. has
 // says the restored vault holds log; its last entry's date is the answer,
 // or "never" with none. The decoys sit decoyGap to twice that apart, on
-// both sides of the real date as far as now allows, so the real date is
-// at any place in the list; with no real date, a past day takes its
-// place as one more decoy. now's zone is the box's.
+// both sides of the real date as far as the backup's date (created)
+// allows, so the real date is at any place in the list; with no real
+// date, a past day takes its place as one more decoy. now gives only the
+// box's zone: r (decoyStream) and created fix the question, so every
+// restore of one backup asks the same one and comparing two shows no
+// date in common but the answer.
 func newQuestion(reason string, l forgetLog, has bool, now time.Time, newer []BackupEntry, created time.Time, r io.Reader) (confirmFile, error) {
 	rnd := func(lo, hi int) (int, error) { // in [lo, hi)
 		b, err := random(r, 8)
@@ -103,7 +112,7 @@ func newQuestion(reason string, l forgetLog, has bool, now time.Time, newer []Ba
 		return lo + int(binary.BigEndian.Uint64(b)%uint64(hi-lo)), nil
 	}
 	f := confirmFile{Format: confirmFmt, Reason: reason}
-	today := day(now, now.Location())
+	bound := day(created, now.Location())
 	pivot, answer := time.Time{}, -1
 	if has && len(l.Entries) > 0 {
 		pivot = day(l.Entries[len(l.Entries)-1].At, now.Location())
@@ -113,10 +122,13 @@ func newQuestion(reason string, l forgetLog, has bool, now time.Time, newer []Ba
 		if err != nil {
 			return f, err
 		}
-		pivot = today.AddDate(0, 0, -n)
+		// From the start of bound's window, so backups made weeks apart
+		// still ask alike.
+		start := bound.AddDate(0, 0, -int(bound.Unix()/86400%fakeWindow))
+		pivot = start.AddDate(0, 0, -n)
 	}
-	room := 0 // decoys that fit between the pivot and today
-	for room < decoys && !pivot.AddDate(0, 0, (room+1)*decoyGap).After(today) {
+	room := 0 // decoys that fit between the pivot and bound
+	for room < decoys && !pivot.AddDate(0, 0, (room+1)*decoyGap).After(bound) {
 		room++
 	}
 	after, err := rnd(0, room+1)
@@ -130,7 +142,7 @@ func newQuestion(reason string, l forgetLog, has bool, now time.Time, newer []Ba
 			return f, err
 		}
 		// Leave room for the decoys still to come.
-		if lim := int(today.Sub(d).Hours()/24) - (after-i-1)*decoyGap; g > lim {
+		if lim := int(bound.Sub(d).Hours()/24) - (after-i-1)*decoyGap; g > lim {
 			g = lim
 		}
 		d = d.AddDate(0, 0, g)
@@ -168,6 +180,40 @@ func newQuestion(reason string, l forgetLog, has bool, now time.Time, newer []Ba
 	}
 	sort.SliceStable(f.Newer, func(i, j int) bool { return f.Newer[i].Created.After(f.Newer[j].Created) })
 	return f, nil
+}
+
+// decoyStream is the bytes newQuestion draws the decoys from: an
+// HMAC-SHA256 counter stream under a key derived from rk, over the
+// restored log's last entry (its ID with none, a fixed label with no
+// log). Every restore of a backup, and of any backup with the same last
+// forget, draws the same bytes, which no one without rk can predict.
+func decoyStream(rk RecoveryKey, l forgetLog, has bool) io.Reader {
+	in := []byte("no-log")
+	if has && len(l.Entries) > 0 {
+		in = append([]byte("entry\x00"), l.Entries[len(l.Entries)-1].MAC...)
+	} else if has {
+		in = append([]byte("log\x00"), l.ID...)
+	}
+	return &prfStream{key: hkdf(rk.b[:], nil, decoyInfo, 32), in: in}
+}
+
+type prfStream struct {
+	key, in, buf []byte
+	n            uint64
+}
+
+func (s *prfStream) Read(p []byte) (int, error) {
+	for len(s.buf) < len(p) {
+		m := hmac.New(sha256.New, s.key)
+		m.Write(s.in)
+		var c [8]byte
+		binary.BigEndian.PutUint64(c[:], s.n)
+		m.Write(c[:])
+		s.buf, s.n = m.Sum(s.buf), s.n+1
+	}
+	n := copy(p, s.buf)
+	s.buf = s.buf[n:]
+	return n, nil
 }
 
 // writeQuestion leaves f beside the marker of the restore held at path

@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -76,17 +77,21 @@ func writeHeld(t *testing.T, dir, reason string, answer int, newer []recovery.Ba
 	}
 }
 
-func heldCases() []struct{ name, reason string } {
-	return []struct{ name, reason string }{{"unanchored", recovery.PendingUnanchored}, {"missing", recovery.PendingMissing}}
-}
-
-// answerFor is the right answer's index in each case: the restored log's
-// last forget, or "never" with no log.
-func answerFor(reason string) int {
-	if reason == recovery.PendingMissing {
-		return len(heldDates) + 1
+// heldCases are the cases a restore asks in, each with the right
+// answer's index: the restored log's last forget, also as the latest date
+// shown (D-071), or "never" with no log.
+func heldCases() []struct {
+	name, reason string
+	answer       int
+} {
+	return []struct {
+		name, reason string
+		answer       int
+	}{
+		{"unanchored", recovery.PendingUnanchored, 2},
+		{"unanchored-latest", recovery.PendingUnanchored, len(heldDates) - 1},
+		{"missing", recovery.PendingMissing, len(heldDates) + 1},
 	}
-	return 2
 }
 
 func mustHeldText(t *testing.T, dir string) string {
@@ -117,7 +122,7 @@ func TestHeldRestoreHeaderNamesItsCase(t *testing.T) {
 	heads := map[string]string{}
 	for _, c := range heldCases() {
 		dir := t.TempDir()
-		writeHeld(t, dir, c.reason, answerFor(c.reason), nil)
+		writeHeld(t, dir, c.reason, c.answer, nil)
 		text := mustHeldText(t, dir)
 		checkOwnerText(t, text)
 		head, _, _ := strings.Cut(text, "\n")
@@ -139,8 +144,8 @@ func TestHeldRestoreHeaderNamesItsCase(t *testing.T) {
 // whether or not they can be right.
 func TestHeldRestoreListsDatesThenLaterThenNever(t *testing.T) {
 	for _, c := range heldCases() {
-		for _, answer := range []int{0, 3, answerFor(c.reason)} {
-			if c.reason == recovery.PendingMissing && answer != answerFor(c.reason) {
+		for _, answer := range []int{0, 3, c.answer} {
+			if c.reason == recovery.PendingMissing && answer != c.answer {
 				continue // a missing log's answer is always "never"
 			}
 			dir := t.TempDir()
@@ -171,7 +176,7 @@ func TestLaterIsOfferedAndKeepsTheHold(t *testing.T) {
 	for _, c := range heldCases() {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
-			writeHeld(t, dir, c.reason, answerFor(c.reason), nil)
+			writeHeld(t, dir, c.reason, c.answer, nil)
 			if !strings.Contains(mustHeldText(t, dir), "\nE Later than all of these\n") {
 				t.Fatal("no later option")
 			}
@@ -193,7 +198,7 @@ func TestNeverIsOfferedRightOnlyWithNoLog(t *testing.T) {
 	for _, c := range heldCases() {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
-			writeHeld(t, dir, c.reason, answerFor(c.reason), nil)
+			writeHeld(t, dir, c.reason, c.answer, nil)
 			if !strings.Contains(mustHeldText(t, dir), "\nF Never\n") {
 				t.Fatal("no never option")
 			}
@@ -216,7 +221,7 @@ func TestAWrongReplyKeepsTheHoldAndOffersANewerBackup(t *testing.T) {
 	for _, c := range heldCases() {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
-			writeHeld(t, dir, c.reason, answerFor(c.reason), newer)
+			writeHeld(t, dir, c.reason, c.answer, newer)
 			reply, released, err := answerHeld(dir, "  a. ")
 			if err != nil || released || restoreHold(dir) == nil {
 				t.Fatalf("a wrong date released it: %v %v", released, err)
@@ -226,7 +231,7 @@ func TestAWrongReplyKeepsTheHoldAndOffersANewerBackup(t *testing.T) {
 				!strings.Contains(reply, newer[0].Created.Local().Format("2 Jan 2006")) {
 				t.Fatalf("reply: %q", reply)
 			}
-			right := string(rune('A' + answerFor(c.reason)))
+			right := string(rune('A' + c.answer))
 			if _, released, err := answerHeld(dir, right); err != nil || released || restoreHold(dir) == nil {
 				t.Fatalf("a second guess released it: %v %v", released, err)
 			}
@@ -263,8 +268,8 @@ func TestTheRightReplyLiftsTheHold(t *testing.T) {
 	for _, c := range heldCases() {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
-			writeHeld(t, dir, c.reason, answerFor(c.reason), nil)
-			reply, released, err := answerHeld(dir, "Reply "+string(rune('a'+answerFor(c.reason))))
+			writeHeld(t, dir, c.reason, c.answer, nil)
+			reply, released, err := answerHeld(dir, "Reply "+string(rune('a'+c.answer)))
 			if err != nil || !released || restoreHold(dir) != nil {
 				t.Fatalf("released %v err %v hold %v", released, err, restoreHold(dir))
 			}
@@ -343,4 +348,60 @@ func TestAnUnreadableQuestionKeepsTheHold(t *testing.T) {
 			}
 		}
 	}
+}
+
+// L3 on #436: an answer is durable before answerHeld returns. The
+// restored log's rename reaches the disk before the marker's removal,
+// and that before the release; a closed question reaches it too. A sync
+// that fails keeps the hold.
+func TestAnAnswerIsDurableBeforeItReturns(t *testing.T) {
+	type seen struct{ log, marker bool }
+	record := func(t *testing.T, dir string, fail int) *[]seen {
+		var got []seen
+		real := syncDir
+		t.Cleanup(func() { syncDir = real })
+		syncDir = func(d string) error {
+			if d != dir {
+				t.Fatalf("synced %s, not the state dir", d)
+			}
+			_, lerr := os.Stat(filepath.Join(dir, forgetLogFile))
+			_, merr := os.Stat(filepath.Join(dir, forgetLogFile+recovery.PendingSuffix))
+			got = append(got, seen{lerr == nil, merr == nil})
+			if len(got) == fail {
+				return errors.New("synthetic sync failure")
+			}
+			return real(d)
+		}
+		return &got
+	}
+	t.Run("right", func(t *testing.T) {
+		dir := t.TempDir()
+		writeHeld(t, dir, recovery.PendingUnanchored, 2, nil)
+		got := record(t, dir, 0)
+		if _, released, err := answerHeld(dir, "C"); err != nil || !released {
+			t.Fatalf("released %v: %v", released, err)
+		}
+		if len(*got) < 2 || (*got)[0] != (seen{true, true}) || (*got)[len(*got)-1].marker {
+			t.Fatalf("syncs saw %+v", *got)
+		}
+	})
+	t.Run("wrong", func(t *testing.T) {
+		dir := t.TempDir()
+		writeHeld(t, dir, recovery.PendingUnanchored, 2, nil)
+		got := record(t, dir, 0)
+		if _, released, err := answerHeld(dir, "A"); err != nil || released {
+			t.Fatalf("released %v: %v", released, err)
+		}
+		if len(*got) != 1 {
+			t.Fatalf("syncs saw %+v", *got)
+		}
+	})
+	t.Run("failed sync", func(t *testing.T) {
+		dir := t.TempDir()
+		writeHeld(t, dir, recovery.PendingUnanchored, 2, nil)
+		record(t, dir, 1)
+		if _, released, err := answerHeld(dir, "C"); err == nil || released || restoreHold(dir) == nil {
+			t.Fatalf("released %v on a failed sync: %v", released, err)
+		}
+	})
 }
