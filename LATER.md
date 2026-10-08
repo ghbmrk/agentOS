@@ -62,7 +62,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | W5a-resume | A14 (security) | Per-grant resume needs a fresh bound code; Security R2 |
 | W5b | A7, A11 | Loop 3 update checks as a scheduler source |
 | W5c | A12 | Clean-room builder in the scheduler |
-| DEV-net | A14 (DEV-2, REV-5) | Home-network boundary on every outbound path; latent until ARC-6 (d) is served, and a precondition for serving it (D-069) |
+| DEV-net-a, DEV-net-b | A14 (DEV-2, REV-5) | Home-network boundary on every outbound path; latent until ARC-6 (d) is served, and a precondition for serving it (D-069) |
 | W6 | A8 (REC-1–3) | Recovery into vault process and local UI |
 | W7 | A10, A15 (CAP-4–6) | Compiled skills live; attention optimizer; blocked |
 
