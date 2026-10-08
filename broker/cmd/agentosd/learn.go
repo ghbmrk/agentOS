@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -106,6 +107,10 @@ type learnPaths struct {
 // configuration: the gate's Changes and Loops policies, their executors,
 // and the owner's settings texts.
 func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning, error) {
+	restored, err := readRestoredForgets(p.Dir)
+	if err != nil {
+		return nil, err
+	}
 	l := &learning{}
 	l.eval.sleep = &l.sleep
 	spare, err := meter.Open(meter.Config{
@@ -162,6 +167,13 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	}
 	if l.forgotten, err = openForgotten(change.FileStore{Path: filepath.Join(p.Dir, "forgotten.json")}, time.Now); err != nil {
 		return nil, err
+	}
+	for _, e := range restored {
+		if !l.forgotten.has(e.Goal) {
+			if err := l.forgotten.add(e.Goal); err != nil {
+				return nil, err
+			}
+		}
 	}
 	l.mining = lateReader{&l.eng, l.forgotten}
 	if l.builder, err = skillBuilder(l.mining, l.values, l.pipe); err != nil {
@@ -228,6 +240,11 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	cfg.BrokerExecutors[loops.Executor] = l.sched
 	l.forgetOwner = &ownerForget{tasks: l.tasks, learned: l.pipe.LearnedFrom, forget: l.forgetTask, forgotten: l.forgotten.has,
 		inform: func(s string) { l.notify.send(s, false) }, now: time.Now, loc: time.Local, sleep: sleepCtx}
+	for _, e := range restored {
+		if e.Agent {
+			l.forgetOwner.restored = append(l.forgetOwner.restored, e.Since)
+		}
+	}
 	cfg.BrokerExecutors[grants.ForgetExecutor] = l.forgetOwner
 	cfg.Grants.ForgetItem = l.forgetOwner.Item
 	cfg.Grants.ForgetAgentItem = l.forgetOwner.AgentItem
@@ -409,6 +426,69 @@ func (l *learning) replayForgotten() error {
 		errs = append(errs, l.forgetStores(g))
 	}
 	return errors.Join(errs...)
+}
+
+// forgetLogFile is the restored copy of the forget log in the learning
+// plane's directory, which broker/recovery writes once the log's check
+// passes (Layout.ForgetLog); its PendingSuffix marker says the check held
+// the restore (W3-forget-b1; security C3).
+const forgetLogFile = "forget-log.json"
+
+// restoredForget is the part of a forget log entry the replay needs; the
+// log was authenticated by the restore, which holds the vault key.
+type restoredForget struct {
+	Goal  string    `json:"goal"`
+	Since time.Time `json:"since"`
+	Agent bool      `json:"agent"`
+}
+
+// restoreHold refuses agentosd's start while dir holds the marker of a
+// restore the forget log's check held: its error carries the owner's
+// notice (recovery.PendingNotice, the marker's second line) and the
+// reason. A marker that does not read holds the start too.
+func restoreHold(dir string) error {
+	b, err := os.ReadFile(filepath.Join(dir, forgetLogFile+".pending"))
+	if os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("agentosd: restore on hold: %v", err)
+	}
+	reason, notice, _ := strings.Cut(strings.TrimSpace(string(b)), "\n")
+	if notice == "" {
+		notice = "Restore on hold."
+	}
+	return fmt.Errorf("agentosd: not starting: %s (%s)", strings.TrimSpace(notice), strings.TrimSpace(reason))
+}
+
+// readRestoredForgets reads the restored forget log in dir, if any. A
+// restore the log's check held, or a copy that does not read, keeps the
+// learning plane closed (CAP-3 across a restore); restoreHold keeps
+// agentosd from starting at all on the held one.
+func readRestoredForgets(dir string) ([]restoredForget, error) {
+	path := filepath.Join(dir, forgetLogFile)
+	if b, err := os.ReadFile(path + ".pending"); err == nil {
+		return nil, fmt.Errorf("learning: restore pending: %s", strings.TrimSpace(string(b)))
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("learning: restore pending: %v", err)
+	}
+	b, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil, nil
+	} else if err != nil {
+		return nil, fmt.Errorf("learning: forget log: %v", err)
+	}
+	var fl struct {
+		Entries []restoredForget `json:"entries"`
+	}
+	if err := json.Unmarshal(b, &fl); err != nil {
+		return nil, fmt.Errorf("learning: forget log: %v", err)
+	}
+	for _, e := range fl.Entries {
+		if e.Goal == "" {
+			return nil, errors.New("learning: forget log: an entry has no goal")
+		}
+	}
+	return fl.Entries, nil
 }
 
 // ForgetTasks is recall's deletion reach into the learning plane

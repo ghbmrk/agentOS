@@ -400,6 +400,11 @@ func main() {
 	flag.StringVar(&qcfg.Path, "questions", qcfg.Path, "agents' questions to the owner, kept across restarts (P3-8)")
 	flag.StringVar(&qcfg.ClockPath, "clock-state", qcfg.ClockPath, "the box clock check's state (P2-9)")
 	flag.Parse()
+	// A restore the forget log's check held opens nothing on the restored
+	// tree: no recall, no agent machines (W3-forget-b1; security C3).
+	if err := restoreHold(learn.Dir); err != nil {
+		log.Fatal(err)
+	}
 	sleepHours, err := parseSleepHours(sleepHoursFlag)
 	if err != nil {
 		log.Fatal(err)

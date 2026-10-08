@@ -75,6 +75,10 @@ type Layout struct {
 	// symlinks, and whiteouts restored; elsewhere a symlink must stay
 	// inside its own root.
 	Layers []string
+	// ForgetLog is the state dir's copy of the forget log, which a restore
+	// replaces with the checked log, or with a marker beside it
+	// (PendingSuffix) while the log is unchecked. Empty: none.
+	ForgetLog string
 }
 
 func (l Layout) vaultRoot() (string, error) {
@@ -298,6 +302,11 @@ type Report struct {
 	Created time.Time
 	// Source is "backup" or "drive".
 	Source string
+	// Pending says why the forget log could not be checked (Pending*):
+	// the state dir's marker then keeps agentosd from starting until the
+	// owner confirms it (PendingNotice). Empty when the log was checked
+	// and carried on.
+	Pending string
 }
 
 // Options tune a restore.
@@ -307,6 +316,14 @@ type Options struct {
 	// gives the vault root to the vault's user. Off, files belong to the
 	// restoring user and no setuid or setgid bit is restored.
 	KeepOwners bool
+	// ForgetLogs are the forget log copies read from the backup
+	// destinations at hand (ExportForgetLog). The restored state dir's own
+	// copy is read too.
+	ForgetLogs [][]byte
+	// Counter is this PC's counter store (its TPM), which anchors the
+	// forget log; nil when the PC has none. Without it the restore stays
+	// pending (Report.Pending).
+	Counter vault.Counter
 }
 
 // Restore reads a backup with the recovery key into dst, a path that must
@@ -411,9 +428,13 @@ func restore(r io.Reader, rk RecoveryKey, dst string, lay Layout, opt Options, n
 		err = x.verify(b.V, drive)
 	}
 	if err == nil {
+		// Forgets are for good, across restores too (CAP-3).
+		rep.Pending, err = settleForgetLog(b.V, rk, tmp, lay, opt)
+	}
+	if err == nil {
 		// Declines are for good, across restores too.
 		prev := LoadState(b.V)
-		err = saveState(b.V, State{Restricted: true, RestoredAt: now.UTC(), Source: rep.Source, Unverified: drive, Declined: prev.Declined})
+		err = saveState(b.V, State{Restricted: true, RestoredAt: now.UTC(), Source: rep.Source, Unverified: drive, Declined: prev.Declined, Pending: rep.Pending})
 	}
 	b.V.Close()
 	if err != nil {
