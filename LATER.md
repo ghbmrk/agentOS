@@ -2,7 +2,7 @@
 Generated 2026-10-07 by the COST thread's audit; the coordinator updates it. Rows marked LATER are not started until the first release ships (DECISIONS D-048). Promote a row by moving it to "Release" with the acceptance test it now blocks.
 
 ## Summary
-Non-merged rows audited: 129; the 67 stale rows it found were reconciled into BOARD.md on 2026-10-08 (DOC-3), and rows since merged were removed from the tables below. Open now: Release 56 (6 marked unsure), Later 57 (table counts refreshed with SR3 intake; no existing row reclassified).
+Non-merged rows audited: 129; the 67 stale rows it found were reconciled into BOARD.md on 2026-10-08 (DOC-3), and rows since merged were removed from the tables below. Open now: Release 57 (6 marked unsure), Later 67 (table counts recounted with D-064 intake; no existing row reclassified).
 No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41) has no board row but blocks IMG-1, HOST-1a/1b/1c part 2 and W3-builder-ship.
 
 ## Release (needed for A1–A15 or an invariant)
@@ -62,12 +62,17 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | W5a-resume | A14 (security) | Per-grant resume needs a fresh bound code; Security R2 |
 | W5b | A7, A11 | Loop 3 update checks as a scheduler source |
 | W5c | A12 | Clean-room builder in the scheduler |
+| DEV-net | A14 (DEV-2, REV-5) | Home-network boundary on every outbound path; latent until ARC-6 (d) is served, and a precondition for serving it (D-064) |
 | W6 | A8 (REC-1–3) | Recovery into vault process and local UI |
 | W7 | A10, A15 (CAP-4–6) | Compiled skills live; attention optimizer; blocked |
 
 ## Later (backlog; do not start before first release)
 | ID | Why it can wait |
 |---|---|
+| DEV-p1 | A16 (D-064): read-only devices first: sensors and hub state (`read`), NAS and self-hosted storage (DEV-11), printers and displays by audience (DEV-6); no device executor beyond a hub or IPP/SMB client |
+| DEV-p2 | A16 (D-064): device executor per credential domain with the Matter controller (DEV-1, DEV-3, DEV-10) and device events (DEV-8) |
+| DEV-p3 | A16 (D-064): `actuate` and `actuate-physical` (DEV-5), capture (DEV-7), and cloud-visible devices (DEV-9); needs DEV-p2 |
+| DEV-mem | A16, risk 19 (D-064): spike measuring a Matter controller and hub client against RES-2 at the HW-4 floor before DEV-p2 sizes its executor |
 | APPLY-dup | `broker/apply/ASSUMPTIONS.md` repeats rows A3–A7 (found on UPD-b); text only, no behaviour |
 | FIRSTBOOT-text | `broker/firstboot` wording (L3 on #379, points 3–5): an unexpected `ScheduleFirstBoot` error still reads "updating to version N"; with several mirrors failing, STATUS names only the last mirror's failure; `Hold()` in `fell_back` says "when the update finishes" where `Status()` says it waits for a newer release. Text only; the gate stays held in each case |
 | P2-8b | Deferred re-encrypt after trusted-PC removal; slot removal already covers CRED-9 |

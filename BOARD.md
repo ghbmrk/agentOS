@@ -27,6 +27,14 @@ Primary lane; remediation is unclaimed. [Review record](reviews/security/2026-10
 | SR3-7 | [Use one validated request for model reservation and routing](briefs/SR3-7.md) | P2-7, P1-7 | queued (P2; release) |
 | SR3-8 | [Commit clean-room output durably before recording completion](briefs/SR3-8.md) | P4-2 | queued (P2; release) |
 
+## Local devices (D-064)
+
+The home-network boundary is release work (A14); device features follow the first release (LATER.md, A16).
+
+| ID | Package | Needs | State |
+|---|---|---|---|
+| DEV-net | [Home-network boundary on every outbound path](briefs/DEV-net.md) | P1-3, D-064 spec diff merged | queued (release; tier A) |
+
 ## Phase 0: harness and risk spikes
 
 | ID | Package | Needs | State |
