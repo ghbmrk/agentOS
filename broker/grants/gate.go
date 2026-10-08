@@ -259,6 +259,8 @@ type Gate struct {
 	eng    *journal.Engine
 	own    Owner
 	grants map[string]*Grant
+	// resumes is the page's latest resume ask per grant (AskResume).
+	resumes map[string]resumeAsk
 	// evidence is the owner's evidence destination, if set (CH-20).
 	evidence destination
 	waiting  map[string]*wait
@@ -889,13 +891,26 @@ func (g *Gate) evaluateBroker(ctx context.Context, phase journal.Phase, in journ
 		if !g.cfg.LocalUI {
 			return verdict{kind: deny, why: NoPageGrant}
 		}
+		if s.Resume != "" && (in.Origin != originLocal || s.Pause == "") {
+			// W5a-resume: only the page resumes, naming the pause it
+			// showed (Security R2 on #169).
+			return verdict{kind: deny, why: "a paused grant is resumed only on the box's Wi-Fi page"}
+		}
 		g.mu.Lock()
 		err = g.validateLocked(s)
+		detail := ""
+		if err == nil && s.Resume != "" {
+			// The page shows what resuming lets run and which pause it
+			// ends; the item's sum covers both, so the page code is bound
+			// to this grant and this pause (owner.ItemSum).
+			gr := g.grants[s.Resume]
+			detail = fmt.Sprintf("%s Paused by %s (%s).", Describe(gr.Spec), pausedBy(gr.PausedBy), gr.Pause)
+		}
 		g.mu.Unlock()
 		if err != nil {
 			return verdict{kind: deny, why: err.Error()}
 		}
-		return verdict{kind: ask, local: true, item: owner.Item{Ref: in.ID, Object: short(s),
+		return verdict{kind: ask, local: true, item: owner.Item{Ref: in.ID, Object: short(s), Detail: detail,
 			Facts: owner.Facts{Kind: owner.GrantChange, Verb: "grant", NoRecipient: true}}}
 	case journal.ActionRecallRollback:
 		// Recall's deletion reach asks before taking back agent work
@@ -2308,7 +2323,11 @@ func (g *Gate) settle(id string) {
 		}
 		if st.State == journal.Succeeded && st.Intent.Executor == ExecutorName && own != nil && len(st.Attempts) > 0 {
 			if gid := st.Attempts[len(st.Attempts)-1].Evidence; gid != "" {
-				_ = own.Inform(fmt.Sprintf("Added %s. Text PAUSE %s or REVOKE %s to stop it.", gid, gid, gid))
+				done := "Added"
+				if sp, err := parseSpec(st.Intent); err == nil && sp.Resume != "" {
+					done = "Resumed"
+				}
+				_ = own.Inform(fmt.Sprintf("%s %s. Text PAUSE %s or REVOKE %s to stop it.", done, gid, gid, gid))
 			}
 		}
 	}()
@@ -2653,7 +2672,8 @@ func (g *Gate) applyLocked(in journal.Intent) (string, error) {
 			return "", err
 		}
 		if s.Resume != "" {
-			g.grants[s.Resume].Paused = false
+			gr := g.grants[s.Resume]
+			gr.Paused, gr.Pause, gr.PausedBy = false, "", ""
 			return s.Resume, nil
 		}
 		id := g.grantIDLocked(in.ID)
@@ -2665,7 +2685,9 @@ func (g *Gate) applyLocked(in journal.Intent) (string, error) {
 			return "", errors.New("no grant " + clip(in.GrantRef))
 		}
 		if in.Action == journal.ActionGrantPause {
-			gr.Paused = true
+			// A second pause replaces the first: a resume asked before
+			// it no longer applies (W5a-resume).
+			gr.Paused, gr.Pause, gr.PausedBy = true, in.ID, in.Origin
 			return gr.ID, nil
 		}
 		delete(g.grants, gr.ID)

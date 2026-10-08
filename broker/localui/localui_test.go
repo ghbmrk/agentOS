@@ -160,6 +160,8 @@ type rig struct {
 	ch    *owner.Channel
 	// served is the channel behind the in-process socket (page).
 	served *swapOwner
+	// paused are the gate's paused grants behind the socket (page).
+	paused fakePaused
 	jar    http.CookieJar
 	ip     string   // the phone's address on the box's Wi-Fi
 	seen   []string // every page body served, for the ONB-1 scan

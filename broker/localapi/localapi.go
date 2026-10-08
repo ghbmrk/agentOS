@@ -43,10 +43,15 @@ const (
 	// (OSS-10, WF3); the owner then approves it with a code like any
 	// tier-4 request.
 	OpFollow = "page_follow"
+	// OpPaused lists the paused grants; OpAskResume asks to resume one
+	// from the pause the page showed, and the owner then approves it with
+	// a code like any grant (W5a-resume).
+	OpPaused    = "page_paused"
+	OpAskResume = "page_ask_resume"
 )
 
 // Ops lists every op, for the disjointness test.
-var Ops = []string{OpStatus, OpStop, OpGridCell, OpSignIn, OpSignOut, OpSession, OpLines, OpResume, OpRequests, OpAnswer, OpWaiting, OpFollowRoot, OpFollow}
+var Ops = []string{OpStatus, OpStop, OpGridCell, OpSignIn, OpSignOut, OpSession, OpLines, OpResume, OpRequests, OpAnswer, OpWaiting, OpFollowRoot, OpFollow, OpPaused, OpAskResume}
 
 // Fixed refusals, sent as sockets codes.
 const (
@@ -69,6 +74,8 @@ const (
 	MaxFollowName = 160
 	// DigestLen is a shown root's digest: SHA-256, lowercase hex.
 	DigestLen = 64
+	// MaxPause bounds a pause's intent ID (grants.Grant.Pause).
+	MaxPause = 128
 )
 
 // Status is the box's state as the page shows it before sign-in: fixed
@@ -194,4 +201,26 @@ type Follow struct {
 	Token  string `json:"token"`
 	Name   string `json:"name"`
 	Digest string `json:"digest"`
+}
+
+// PausedGrant is a paused grant as the page shows it (grants.PausedGrant):
+// what resuming lets run again, who paused it, and the pause a resume
+// names.
+type PausedGrant struct {
+	ID    string `json:"id"`
+	What  string `json:"what"`
+	By    string `json:"by"`
+	Pause string `json:"pause"`
+}
+
+// Paused are the paused grants, by ID.
+type Paused struct {
+	Grants []PausedGrant `json:"grants"`
+}
+
+// AskResume asks to resume Grant from Pause, as the page showed it.
+type AskResume struct {
+	Token string `json:"token"`
+	Grant string `json:"grant"`
+	Pause string `json:"pause"`
 }

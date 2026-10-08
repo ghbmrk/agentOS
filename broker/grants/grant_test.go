@@ -225,7 +225,7 @@ func TestPauseAndRevokeNeedOnlyTheOwner(t *testing.T) {
 		t.Fatalf("pause lost on restart: %s", st.State)
 	}
 
-	r.grant(Spec{Resume: rule})
+	r.resume(rule)
 	if st := r.effect("agent/s3", "invoice.send", tpl("inv-3"), "sam@example.com"); st.State != journal.Succeeded {
 		t.Fatalf("resumed rule: %s %q", st.State, st.Permission.Reason)
 	}

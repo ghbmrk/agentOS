@@ -55,6 +55,12 @@ type Config struct {
 	// reply. Either nil refuses its op.
 	DescribeRoot func(ctx context.Context, root []byte) (localapi.RootSummary, error)
 	Follow       func(ctx context.Context, name, digest string) (string, error)
+	// Paused lists the paused grants (grants.Gate.Paused); AskResume asks
+	// the owner, on the page, to resume one from the pause the page
+	// showed (grants.Gate.AskResume) and returns the reply to show
+	// (W5a-resume). Either nil refuses its op.
+	Paused    func() []localapi.PausedGrant
+	AskResume func(ctx context.Context, grant, pause string) (string, error)
 }
 
 // WrongPerMinute bounds wrong codes on the socket in any minute, tries in
@@ -111,6 +117,9 @@ func (s *Server) Ops() map[string]sockets.Handler {
 		// Changing where updates come from needs a session (WF3).
 		localapi.OpFollowRoot: s.followRoot,
 		localapi.OpFollow:     s.follow,
+		// Resuming a paused grant needs a session, then a code (W5a-resume).
+		localapi.OpPaused:    s.authed(s.paused),
+		localapi.OpAskResume: s.askResume,
 	}
 }
 
@@ -343,6 +352,32 @@ func (s *Server) follow(ctx context.Context, _ sockets.Peer, args json.RawMessag
 		return nil, errFailed
 	}
 	t, err := s.cfg.Follow(ctx, in.Name, in.Digest)
+	if err != nil {
+		return nil, errFailed
+	}
+	return localapi.Text{Text: t}, nil
+}
+
+func (s *Server) paused(context.Context) (any, error) {
+	if s.cfg.Paused == nil {
+		return nil, errFailed
+	}
+	return localapi.Paused{Grants: s.cfg.Paused()}, nil
+}
+
+func (s *Server) askResume(ctx context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
+	var in localapi.AskResume
+	err := decode(args, &in)
+	if !s.valid(in.Token) {
+		return nil, errUnauthorized
+	}
+	if err != nil || in.Grant == "" || in.Pause == "" || len(in.Grant) > localapi.MaxID || len(in.Pause) > localapi.MaxPause {
+		return nil, errBadArgs
+	}
+	if s.cfg.AskResume == nil {
+		return nil, errFailed
+	}
+	t, err := s.cfg.AskResume(ctx, in.Grant, in.Pause)
 	if err != nil {
 		return nil, errFailed
 	}
