@@ -934,7 +934,7 @@ func (g *Gate) evaluateBroker(ctx context.Context, phase journal.Phase, in journ
 		if err != nil {
 			return verdict{kind: deny, why: "the grant change is not valid", cause: err}
 		}
-		return verdict{kind: ask, local: true, item: owner.Item{Ref: in.ID, Object: short(s), Detail: detail,
+		return verdict{kind: ask, local: true, item: owner.Item{Ref: in.ID, Object: short(s), Detail: detail, Terms: owner.NewTerms(Terms(s)),
 			Facts: owner.Facts{Kind: owner.GrantChange, Verb: "grant", NoRecipient: true}}}
 	case journal.ActionRecallRollback:
 		// Recall's deletion reach asks before taking back agent work

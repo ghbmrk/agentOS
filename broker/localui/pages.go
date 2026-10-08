@@ -174,6 +174,7 @@ form { margin: .6em 0 1.2em; }
 {{range .Requests}}<section class="card"><h2>{{.ID}}{{with .Expires}} <span class="muted">Answer before {{.}}</span>{{end}}</h2>
 {{if .Local}}<p class="muted">Can't be shown in a text, so it is asked only here.</p>{{end}}
 {{range .Items}}<p>{{if .Unverified}}<b>Unverified:</b> the box could not read these details from the source. {{end}}<b>{{.Verb}}</b> {{.Object}}{{with .Detail}}, {{.}}{{end}}{{with .Amount}}, <b>{{.}}</b>{{end}}</p>
+{{with .Terms}}<ul>{{range .}}<li><b>{{.Label}}:</b> {{.Value}}</li>{{end}}</ul>{{end}}
 {{with .Recipients}}<p>To {{len .}} recipient{{if ne (len .) 1}}s{{end}}, exactly as the action uses them:</p><ul>{{range .}}<li class="mono">{{.}}</li>{{end}}</ul>{{end}}
 {{if .Odd}}<p class="err">Has an unusual character, shown as [U+…]. Letters from other alphabets can look like plain ones; deny if you didn't expect it.</p>{{end}}
 <p class="muted">{{.Undo}}</p>{{end}}
