@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -64,6 +65,11 @@ type Config struct {
 	// (W5a-resume). Either nil refuses its op.
 	Paused    func() []localapi.PausedGrant
 	AskResume func(ctx context.Context, grant, pause string) (string, error)
+	// AdoptSIM records the SIM the page showed under a tag as the owner
+	// line's (modemlink.Link.Adopt), once the owner's code is checked; it
+	// returns ErrStaleSIM when that SIM is no longer offered. Nil refuses
+	// the op.
+	AdoptSIM func(tag string) error
 }
 
 // WrongPerMinute bounds wrong codes on the socket in any minute, tries in
@@ -124,6 +130,8 @@ func (s *Server) Ops() map[string]sockets.Handler {
 		// Resuming a paused grant needs a session, then a code (W5a-resume).
 		localapi.OpPaused:    s.authed(s.paused),
 		localapi.OpAskResume: s.askResume,
+		// Adopting a SIM needs a session, then always a code (CH-19).
+		localapi.OpSIM: s.adoptSIM,
 	}
 }
 
@@ -279,6 +287,56 @@ func (s *Server) resume(_ context.Context, _ sockets.Peer, args json.RawMessage)
 		return nil, errFailed
 	}
 	return localapi.Answered{Text: t}, nil
+}
+
+// ErrStaleSIM is AdoptSIM's refusal of a SIM no longer offered. localsrv
+// stays off the modem link's package (ARC-2's control path), so agentosd
+// maps modemlink.ErrStale to it.
+var ErrStaleSIM = errors.New("localsrv: not the SIM the page showed")
+
+// SIMAdopted is the reply to an adopted SIM.
+const SIMAdopted = "Done. I'll use that SIM for my number. Texts with you start again within a minute."
+
+// adoptSIM adopts the SIM the page showed as the owner line's (P2-2w d2b).
+// Unlike RESUME, a fresh session is not enough: adopting re-opens the
+// owner channel on another SIM's line, so it always takes a code-generator
+// code or the asked grid cell, checked as a sign-in (CH-19). The vault
+// unlock's proof is refused: it is not a code in the owner's hand.
+func (s *Server) adoptSIM(_ context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
+	var in localapi.AdoptSIM
+	err := decode(args, &in)
+	if !s.valid(in.Token) {
+		return nil, errUnauthorized
+	}
+	if err != nil || !lowerHex(in.SIM, localapi.SIMLen) || len(in.Code) > localapi.MaxCode || strings.HasPrefix(in.Code, owner.UnlockProofPrefix) {
+		return nil, errBadArgs
+	}
+	if in.Code == "" {
+		return localapi.Answered{Refusal: localapi.RefusedCodeNeeded}, nil
+	}
+	if s.cfg.AdoptSIM == nil {
+		return nil, errFailed
+	}
+	if !s.takeTry() {
+		return nil, errLimited
+	}
+	_, err = s.cfg.Owner.LocalSignIn(in.Code)
+	s.endTry(err != nil && !errors.Is(err, owner.ErrTooMany))
+	switch {
+	case errors.Is(err, owner.ErrWrongCode), errors.Is(err, owner.ErrTooMany):
+		r, t := s.triesLeft(err)
+		return localapi.Answered{Refusal: r, Text: t}, nil
+	case err != nil:
+		return nil, errFailed
+	}
+	s.refresh(in.Token)
+	switch err := s.cfg.AdoptSIM(in.SIM); {
+	case errors.Is(err, ErrStaleSIM):
+		return localapi.Answered{Refusal: localapi.RefusedChanged}, nil
+	case err != nil:
+		return nil, errFailed
+	}
+	return localapi.Answered{Text: SIMAdopted}, nil
 }
 
 func (s *Server) requests(context.Context) (any, error) {

@@ -228,7 +228,15 @@ form { margin: .6em 0 1.2em; }
 {{define "home"}}{{template "head" ""}}
 <h1>AgentOS</h1>
 {{with .Waiting}}<p class="ok"><a href="/approvals/">{{.}} waiting for you</a></p>{{end}}
+{{with .Msg}}<p class="ok">{{.}}</p>{{end}}
 {{with .LineNote}}<p class="err">{{.}}</p>{{end}}
+{{if .SIM}}<section class="card"><form method="post" action="/line/sim"><input type="hidden" name="sim" value="{{.SIM}}">
+<p>Do this only if you put this SIM in my phone modem yourself. Whoever has my number's SIM gets your texts with me.</p>
+<label>Code from your code generator{{with .Cell}}, or grid cell <b>{{.}}</b> from your card{{end}}
+<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required></label>
+{{with .Err}}<p class="err">{{.}}</p>{{end}}
+<button>Use the SIM ending in {{.SIMEnds}} for my number</button></form></section>
+{{else}}{{with .Err}}<p class="err">{{.}}</p>{{end}}{{end}}
 {{with .LineTexts}}<h2>Texts with you</h2><ul>{{range .}}<li>{{.}}</li>{{end}}</ul>{{end}}
 <ul>{{range .Mounts}}<li><a href="{{.Path}}">{{.Title}}</a></li>{{else}}<li class="muted">Nothing else to show here yet.</li>{{end}}</ul>
 <p><a href="/status">Status, STOP and RESUME</a></p>

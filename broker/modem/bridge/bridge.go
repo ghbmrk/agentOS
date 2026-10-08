@@ -79,12 +79,12 @@ func Run(ctx context.Context, cfg Config) error {
 	b := &runner{cfg: cfg, state: bridgeproto.StateDown}
 	go b.report(ctx)
 	for ctx.Err() == nil {
-		m, st := b.open(ctx)
-		b.set(st)
+		m, st, iccid := b.open(ctx)
+		b.set(st, iccid)
 		if m != nil {
 			b.serve(ctx, m)
 			m.Close()
-			b.set(bridgeproto.StateDown)
+			b.set(bridgeproto.StateDown, "")
 		}
 		select {
 		case <-ctx.Done():
@@ -98,6 +98,7 @@ type runner struct {
 	cfg     Config
 	mu      sync.Mutex
 	state   string
+	iccid   string // the SIM seen while swapped or unbound
 	changed chan struct{}
 }
 
@@ -106,10 +107,15 @@ var (
 	errSwapped = errors.New("bridge: not the owner line's recorded SIM")
 )
 
-// open opens the modem and checks its SIM: the modem only when ok.
-func (b *runner) open(ctx context.Context) (Owner, string) {
+// open opens the modem and checks its SIM: the modem only when ok, and the
+// SIM's serial when swapped or unbound, for agentosd to offer the owner
+// (P2-2w d2b). The bridge never records it: agentosd does, once the owner
+// confirms it with a code, and the bridge reads it at its next open.
+func (b *runner) open(ctx context.Context) (Owner, string, string) {
 	want := b.cfg.OwnerICCID()
+	seen := ""
 	m, err := b.cfg.OpenOwner(ctx, func(iccid string) error {
+		seen = serial(iccid)
 		switch {
 		case want == "":
 			return errUnbound
@@ -120,44 +126,39 @@ func (b *runner) open(ctx context.Context) (Owner, string) {
 	})
 	var simErr *at.SIMError
 	switch {
-	case errors.As(err, &simErr), errors.Is(err, errUnbound):
-		return nil, bridgeproto.StateUnbound
+	case errors.As(err, &simErr):
+		return nil, bridgeproto.StateUnbound, ""
+	case errors.Is(err, errUnbound):
+		return nil, bridgeproto.StateUnbound, seen
 	case errors.Is(err, errSwapped):
-		return nil, bridgeproto.StateSwapped
+		return nil, bridgeproto.StateSwapped, seen
 	case err != nil:
 		b.cfg.Logf("bridge: owner modem not open")
-		return nil, bridgeproto.StateDown
+		return nil, bridgeproto.StateDown, ""
 	case want == "":
 		m.Close()
-		return nil, bridgeproto.StateUnbound
+		return nil, bridgeproto.StateUnbound, serial(m.ICCID())
 	case m.ICCID() == "" || !sameICCID(m.ICCID(), want):
 		m.Close()
-		return nil, bridgeproto.StateSwapped
+		return nil, bridgeproto.StateSwapped, serial(m.ICCID())
 	}
-	return m, bridgeproto.StateOK
+	return m, bridgeproto.StateOK, ""
 }
 
-func sameICCID(a, b string) bool {
-	norm := func(s string) string {
-		out := make([]byte, 0, len(s))
-		for i := 0; i < len(s); i++ {
-			c := s[i]
-			if c >= 'a' && c <= 'z' {
-				c -= 'a' - 'A'
-			}
-			if c != ' ' {
-				out = append(out, c)
-			}
-		}
-		return string(out)
+func sameICCID(a, b string) bool { return bridgeproto.NormICCID(a) == bridgeproto.NormICCID(b) }
+
+// serial is a SIM's serial as reported, "" when it is not one.
+func serial(iccid string) string {
+	if s := bridgeproto.NormICCID(iccid); bridgeproto.ValidICCID(s) {
+		return s
 	}
-	return norm(a) == norm(b)
+	return ""
 }
 
-func (b *runner) set(st string) {
+func (b *runner) set(st, iccid string) {
 	b.mu.Lock()
-	changed := b.state != st
-	b.state = st
+	changed := b.state != st || b.iccid != iccid
+	b.state, b.iccid = st, iccid
 	ch := b.changed
 	b.mu.Unlock()
 	if changed {
@@ -181,13 +182,13 @@ func (b *runner) report(ctx context.Context) {
 	defer t.Stop()
 	for {
 		b.mu.Lock()
-		st := b.state
+		st := bridgeproto.State{OwnerLine: b.state, ICCID: b.iccid}
 		b.mu.Unlock()
 		// A report agentosd did not hear is sent again soon, not at the
 		// next StateEvery: agentosd may have restarted and read the line
 		// as down meanwhile.
 		var again <-chan time.Time
-		if err := b.cfg.Agentosd.Call(ctx, bridgeproto.OpState, bridgeproto.State{OwnerLine: st}, nil); err != nil && ctx.Err() == nil {
+		if err := b.cfg.Agentosd.Call(ctx, bridgeproto.OpState, st, nil); err != nil && ctx.Err() == nil {
 			b.cfg.Logf("bridge: state not reported")
 			again = time.After(min(b.cfg.Retry, b.cfg.StateEvery))
 		}
