@@ -169,9 +169,10 @@ type Config struct {
 	// gets unverified approval items, which are always high risk, and no
 	// pre-allowance can match on it.
 	Verifiers map[string]Verifier
-	// LocalUI says a local confirmation page exists (P2-2). New or wider
-	// grants need it (CH-3); without it they are refused outright rather
-	// than asking the owner for a code that could not complete them.
+	// LocalUI says the box's Wi-Fi page is served (P2-2; agentosd sets it
+	// when it serves localui.sock, P2-2w). New or wider grants need it
+	// (CH-3); without it they are refused outright rather than asking the
+	// owner for a code that could not complete them.
 	LocalUI bool
 	// Isolated reports whether machine is a reply-composer machine built
 	// as ADP-11 requires (fresh, thread messages only, no recall, no
@@ -522,6 +523,18 @@ const RecipientsNotTextable = "can't be approved by text: each recipient must be
 // (Potency R1 on P2-2a).
 const WaitingOnThePage = "waiting for the owner's approval on the box's Wi-Fi page; to ask by text instead, each recipient must be a plain email address, a full +country number or acct ...1234, at most 100 characters in all, in a new request_id"
 
+// NoPage* are the gate's reasons for a change that needs the owner's
+// confirmation on the box's Wi-Fi page while agentosd does not serve it
+// (LocalUI off): asked there, it could never be answered. They name the
+// page as the owner does (CH-12). No caller matches them: the journal
+// redacts reasons, so a caller decides from its own page flag (P2-2w d).
+const (
+	NoPageGrant    = "a new or wider grant needs confirmation on the box's Wi-Fi page, which is not running (CH-3)"
+	NoPageEvidence = "changing where private replies go needs confirmation on the box's Wi-Fi page, which is not running (CH-20)"
+	NoPageFollow   = "changing where updates come from needs confirmation on the box's Wi-Fi page, which is not running (OSS-10)"
+	NoPageSharing  = "turning sharing on needs confirmation on the box's Wi-Fi page, which is not running (CHG-4)"
+)
+
 // onPage reports whether a waiting intent is asked on the local page:
 // its recipients cannot be texted, or it needs the owner's confirmation
 // there (CH-3), which the page's one answer gives (Security Q1 on P2-2a
@@ -866,7 +879,7 @@ func (g *Gate) evaluateBroker(ctx context.Context, phase journal.Phase, in journ
 			return verdict{kind: deny, why: err.Error()}
 		}
 		if !g.cfg.LocalUI {
-			return verdict{kind: deny, why: "a new or wider grant needs confirmation on the box's local page, which this build does not have yet (CH-3)"}
+			return verdict{kind: deny, why: NoPageGrant}
 		}
 		g.mu.Lock()
 		err = g.validateLocked(s)
@@ -946,7 +959,7 @@ func (g *Gate) evaluateEvidence(in journal.Intent) verdict {
 		return verdict{kind: allow}
 	}
 	if !g.cfg.LocalUI {
-		return verdict{kind: deny, why: "changing where private replies go needs confirmation on the box's local page, which this build does not have yet (CH-20)"}
+		return verdict{kind: deny, why: NoPageEvidence}
 	}
 	if g.cfg.Destination == nil {
 		return verdict{kind: deny, why: "no connected account can deliver private replies"}
@@ -967,7 +980,7 @@ func (g *Gate) evaluateEvidence(in journal.Intent) verdict {
 // approval buys one switch.
 func (g *Gate) evaluateFollow(in journal.Intent) verdict {
 	if in.Origin != originLocal {
-		return verdict{kind: deny, why: "only the owner, on the box's local page, changes where updates come from"}
+		return verdict{kind: deny, why: "only the owner, on the box's Wi-Fi page, changes where updates come from"}
 	}
 	digest, name, ok := FollowOf(in.ID)
 	if !ok || len(in.Params) != 0 || in.Executor != FollowExecutor || !hexDigest(digest) || (name != "" && !followName(name)) {
@@ -980,7 +993,7 @@ func (g *Gate) evaluateFollow(in journal.Intent) verdict {
 		object = "get updates from the AgentOS project again"
 	}
 	if !g.cfg.LocalUI {
-		return verdict{kind: deny, why: "changing where updates come from needs confirmation on the box's local page, which this build does not have yet (OSS-10)"}
+		return verdict{kind: deny, why: NoPageFollow}
 	}
 	return verdict{kind: ask, local: true, item: owner.Item{Ref: in.ID, Object: object,
 		Facts: owner.Facts{Kind: owner.GrantChange, Verb: "follow", NoRecipient: true}}}
@@ -1127,7 +1140,7 @@ func (g *Gate) evaluateChange(ctx context.Context, phase journal.Phase, in journ
 	}
 	local := sharingOn(in)
 	if local && !g.cfg.LocalUI {
-		return verdict{kind: deny, why: "turning sharing on needs confirmation on the box's local page, which this build does not have yet (CHG-4)"}
+		return verdict{kind: deny, why: NoPageSharing}
 	}
 	hold := false
 	if l.Facts.Verb == "install" {
@@ -1226,7 +1239,7 @@ func (g *Gate) check(ctx context.Context, phase journal.Phase, in journal.Intent
 		return errors.New("needs the owner's approval")
 	}
 	if v.local && !g.isConfirmed(in.ID) {
-		return errors.New("needs confirmation on the box's local page")
+		return errors.New("needs confirmation on the box's Wi-Fi page")
 	}
 	if !sameItem(d.item, v.item) {
 		return errors.New("the details changed after the owner approved; ask again")
@@ -1460,9 +1473,9 @@ func (g *Gate) annotate(st *journal.Status) {
 	if g.carried[id] || g.reissuing(id) {
 		st.Permission.Reason = "the box restarted; the owner will be asked again"
 	} else if d, ok := g.decided[id]; ok && d.approved && d.local && !g.confirmed[id] {
-		st.Permission.Reason = "approved by code; waiting for the owner to confirm on the box's local page"
+		st.Permission.Reason = "approved by code; waiting for the owner to confirm on the box's Wi-Fi page"
 	} else if w := g.waiting[id]; w != nil && w.onlyUI {
-		st.Permission.Reason = "waiting for the owner's approval on the box's local page"
+		st.Permission.Reason = "waiting for the owner's approval on the box's Wi-Fi page"
 	} else if w != nil && w.held {
 		st.Permission.Reason = "approved; held for the owner's undo window until " + w.sendAt.UTC().Format("15:04") + " UTC"
 	} else if w != nil && w.reply != "" {
