@@ -73,7 +73,7 @@ var controlPath = map[string][]string{
 	// plane. It opens the machines' disk quotas (quota, RES-4); quota
 	// imports golang.org/x/sys/unix, so like clock it is held by
 	// TestAgentosdLinksNoInference through netOK.
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool", "workers", "quota", "modemlink", "guesterr"},
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies
