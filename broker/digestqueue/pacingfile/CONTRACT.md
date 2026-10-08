@@ -128,3 +128,38 @@ A generic blocked-Save test and actual leased-store/host STOP test supplement it
 Protected ancestor/same-UID/lock-inode continuity, one Gate/all cooperating writers,
 restore/config integrity and startup control before Gate construction remain
 external deployment/security qualifications. No daemon/default activation.
+
+## Owned scoped session (W5-D46, opt-in review candidate)
+
+`OpenSession(path, grants.Config)` rejects a supplied store, non-strict startup
+and absent/out-of-range latency observation before acquiring custody. It opens
+one ExclusiveStore and constructs exactly one Gate with the session's retirement
+health adapter. Missing/faulted accounting remains held recovery rather than
+provisioning a replacement image. Construction can block in Gate.New; independent
+startup controls and trusted persistent configuration/provisioning remain required.
+
+`Use(func(*grants.Gate) error)` shares that Gate and registers the entire callback
+lifetime. Construct the question/approval consumers and NewProvisioned Host within
+registered scopes, and keep each scope alive through all downstream work. Bound
+methods, the Gate pointer, consumers, permissions and spawned goroutines must not
+escape their registration. This is a trusted cooperating API, not a capability
+sandbox. In particular, callback return is a caller assertion of quiescence, not
+an inspection or revocation of permissions/handoffs. Drain asynchronous send work;
+STOP and Host.Quiesce alone do not drain question/approval users. Never synchronously
+await Session.Close inside Use, since that callback is itself a registered user.
+
+`Close(ctx)` permanently retires admission and backend health before waiting.
+It refuses new scopes, causes observed Gate/host recovery, and retains the lease
+until all registered callbacks return. Cancellation during an incomplete drain
+returns ctx.Err without releasing custody; retry Close after draining. Final lease
+Close is serialized/idempotent and synchronous, and may block after drain despite
+ctx. Context is not an I/O interruption, shutdown deadline or permission revoker.
+Do not copy Session or reuse its Gate after retirement. Callback panic propagates
+but unregisters the scope; that does not prove the callback's downstream work ended.
+
+Local tests use actual exclusive leases, strict spent-debt reopen, missing-image
+no-initialization, cancelled drain with cooperating-open refusal, and real question
+Book plus Host STOP/Quiesce. They qualify those synthetic scopes only. Escaped users,
+uncooperating writers, same-UID/ancestor/lock replacement, restore/config integrity,
+real deployment latency and the storage-fault urgent/reissue availability tradeoff
+remain external release/security holds. No daemon/default wiring or activation.
