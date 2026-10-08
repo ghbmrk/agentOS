@@ -21,22 +21,39 @@ import (
 // A synthetic enrollment link: not a seed anyone holds.
 const setupCanary = "otpauth://totp/AgentOS:AgentOS?secret=CANARYCANARYCANARY22&issuer=AgentOS"
 
-type setupVault struct{ pending, sealed bool }
+// setupVault seals at finish what was confirmed since the last enroll
+// (egress K17).
+type setupVault struct{ pending, confirmed, sealed bool }
 
 func (v *setupVault) Enroll() (string, error) {
 	if v.sealed {
 		return "", localsrv.EnrollClosed
 	}
-	v.pending = true
+	v.pending, v.confirmed = true, false
 	return setupCanary, nil
 }
 
 func (v *setupVault) ConfirmEnroll(code string) (bool, error) {
+	if v.sealed {
+		return false, localsrv.EnrollClosed
+	}
 	if !v.pending {
 		return false, localsrv.EnrollNone
 	}
-	v.sealed = code == "123456"
-	return v.sealed, nil
+	v.confirmed = code == "123456"
+	v.pending = !v.confirmed
+	return v.confirmed, nil
+}
+
+func (v *setupVault) SealEnroll() error {
+	if v.sealed {
+		return localsrv.EnrollClosed
+	}
+	if !v.confirmed || v.pending {
+		return localsrv.EnrollNone
+	}
+	v.sealed = true
+	return nil
 }
 
 func newSetupMode(t *testing.T) setupMode {

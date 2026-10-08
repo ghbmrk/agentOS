@@ -2,6 +2,7 @@ package localui
 
 import (
 	"context"
+	crand "crypto/rand"
 	"encoding/base32"
 	"errors"
 	"html"
@@ -11,6 +12,7 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -121,6 +123,16 @@ func (v vaultEnroller) ConfirmEnroll(code string) (bool, error) {
 	return ok, vaultSentinel(err)
 }
 
+// SealEnroll: the fake vault seals at confirm, so only its seal counts.
+func (v vaultEnroller) SealEnroll() error {
+	v.f.mu.Lock()
+	defer v.f.mu.Unlock()
+	if v.f.seed == nil {
+		return localsrv.EnrollNone
+	}
+	return nil
+}
+
 func vaultSentinel(err error) error {
 	switch {
 	case errors.Is(err, ErrCodesEnrolled):
@@ -191,6 +203,117 @@ func TestSetupFinishesThroughAgentosdAndClosesForGood(t *testing.T) {
 		if loc := r.do("GET", "/setup", nil).Header().Get("Location"); loc != "/status" {
 			t.Errorf("%s: a page with no state reopened setup", s.name)
 		}
+	}
+}
+
+// k17Vault is the vault's enrollment as egress K17 runs it since L3 on
+// #367: a confirmation waits for finish's seal, and a new seed voids it.
+type k17Vault struct {
+	mu                       sync.Mutex
+	now                      func() time.Time
+	pending, confirmed, seed []byte
+}
+
+func (v *k17Vault) Enroll() (string, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.seed != nil {
+		return "", localsrv.EnrollClosed
+	}
+	v.pending, v.confirmed = make([]byte, 20), nil
+	if _, err := crand.Read(v.pending); err != nil {
+		return "", err
+	}
+	return "otpauth://totp/AgentOS:AgentOS?secret=" + secretOf(v.pending) + "&issuer=AgentOS&algorithm=SHA1&digits=6&period=30", nil
+}
+
+func (v *k17Vault) ConfirmEnroll(code string) (bool, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	switch {
+	case v.seed != nil:
+		return false, localsrv.EnrollClosed
+	case v.pending == nil:
+		return false, localsrv.EnrollNone
+	case code != owner.TOTP(v.pending, v.now()):
+		return false, nil
+	}
+	v.confirmed, v.pending = v.pending, nil
+	return true, nil
+}
+
+func (v *k17Vault) SealEnroll() error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	switch {
+	case v.seed != nil:
+		return localsrv.EnrollClosed
+	case v.confirmed == nil || v.pending != nil:
+		return localsrv.EnrollNone
+	}
+	v.seed = v.confirmed
+	return nil
+}
+
+// L3 on #367, CRED-8, ONB-6: a phone that paired and confirmed, then lost
+// setup to a restart with the card's secret, does not keep the code
+// generator: the restarted pairing's seed is the one finish seals, and
+// finish waits for it to be confirmed.
+func TestARestartedSetupSealsTheNewPairingsSeed(t *testing.T) {
+	r := newRig(t)
+	vault := &k17Vault{now: r.clock}
+	sock := InProcess(localsrv.NewSetup(localsrv.SetupConfig{Record: localsrv.FileRecord{Path: filepath.Join(t.TempDir(), "setup.json")},
+		Enroll: vault, Now: r.clock}).Ops())
+	agentosd := AgentosdSetup{sock}
+	r.via = viaAgentosd{r.hooks, agentosd}
+	r.srv = r.open(&MemStore{})
+	pair := func(num string) []byte {
+		code := regexp.MustCompile(`PAIR%20([A-Z2-9]{8})`).FindStringSubmatch(html.UnescapeString(r.get("/setup")))[1]
+		r.srv.OfferText(num, "PAIR "+code)
+		m := secretRe.FindStringSubmatch(html.UnescapeString(r.get("/setup")))
+		if m == nil {
+			t.Fatalf("%s: no key", num)
+		}
+		return decodeSecret(t, m[1])
+	}
+	r.hooks.mu.Lock()
+	r.hooks.progress.Online = true
+	r.hooks.mu.Unlock()
+	seedA := pair(ownerNum)
+	r.post("/setup/codes", url.Values{"code": {owner.TOTP(seedA, r.clock())}})
+	if !r.srv.setup.st.Codes || vault.seed != nil {
+		t.Fatalf("A's confirmation: codes %v, sealed %v", r.srv.setup.st.Codes, vault.seed != nil)
+	}
+	r.asOther(func() {
+		r.get("/setup")
+		r.post("/setup/restart", url.Values{"secret": {r.card.SetupSecret}})
+	})
+	if r.srv.setup.st.Owner != "" || r.srv.setup.st.Codes {
+		t.Fatal("restart refused")
+	}
+	const numB = "+15550000002"
+	seedB := pair(numB)
+	if string(seedB) == string(seedA) {
+		t.Fatal("the restarted pairing was shown A's key")
+	}
+	if err := agentosd.Finish(numB); !refused(err, localapi.ErrNotEnrolled) {
+		t.Fatalf("finish before B confirmed: %v", err)
+	}
+	r.post("/setup/codes", url.Values{"code": {owner.TOTP(seedB, r.clock())}})
+	r.post("/setup/recovery", url.Values{"stored": {"1"}})
+	r.post("/setup/host", url.Values{})
+	r.hooks.mu.Lock()
+	r.hooks.progress = Progress{Phase: "ready", Updated: true, Online: true}
+	r.hooks.mu.Unlock()
+	r.post("/setup/ai-key", url.Values{"provider": {"anthropic"}, "key": {apiCanary}, "private": {"1"}})
+	if !r.srv.setup.done() || r.hooks.finished != numB {
+		t.Fatalf("done %v, finished %q", r.srv.setup.done(), r.hooks.finished)
+	}
+	if string(vault.seed) != string(seedB) {
+		t.Fatal("the box holds a generator other than B's")
+	}
+	if owner.TOTP(seedA, r.clock()) == owner.TOTP(vault.seed, r.clock()) {
+		t.Fatal("A's code verifies against the sealed seed")
 	}
 }
 

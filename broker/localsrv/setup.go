@@ -22,7 +22,8 @@ import (
 // Setup itself refuses every op once its record says finished, or when
 // the record cannot be read, so a restart, a second instance or a lost
 // race cannot reopen it. The code generator's seed is made in the vault
-// process (egress K17): Setup relays its link and never keeps it.
+// process (egress K17): Setup relays its link and never keeps it, and
+// finish has the vault seal the seed the finishing pairing confirmed.
 type Setup struct {
 	cfg SetupConfig
 
@@ -51,11 +52,15 @@ type SetupConfig struct {
 type Enroller interface {
 	Enroll() (uri string, err error)
 	ConfirmEnroll(code string) (bool, error)
+	// SealEnroll closes enrollment for good. EnrollNone: no seed was
+	// confirmed since the last Enroll.
+	SealEnroll() error
 }
 
 // The vault's refusals, as an Enroller reports them.
 var (
 	// EnrollClosed: enrollment is sealed, or was never opened (410).
+	// Setup never counts it as enrolled: only a confirmation it saw does.
 	EnrollClosed = errors.New("enrollment closed")
 	// EnrollNone: no seed waits for confirmation (409).
 	EnrollNone = errors.New("no enrollment waiting")
@@ -68,8 +73,9 @@ const EnrollsPerMinute = 6
 
 // SetupRecord is setup's durable record. It holds no secret.
 type SetupRecord struct {
-	// Enrolled: agentosd saw the vault confirm a code from a new seed, or
-	// refuse enrollment as sealed.
+	// Enrolled: agentosd saw the vault confirm a code from a new seed and
+	// has asked for no seed since. The vault's seal at finish is what
+	// decides; this only spares it a call.
 	Enrolled bool   `json:"enrolled"`
 	Finished bool   `json:"finished"`
 	Owner    string `json:"owner,omitempty"`
@@ -217,6 +223,11 @@ func (s *Setup) enroll(_ context.Context, _ sockets.Peer, args json.RawMessage) 
 	}
 	s.enrolls = append(s.enrolls, now)
 	s.mu.Unlock()
+	// A new seed is for a pairing that has yet to confirm (L3 on #367):
+	// forget the confirmation before the vault replaces what it covers.
+	if err := s.setEnrolled(false); err != nil {
+		return nil, err
+	}
 	uri, err := s.cfg.Enroll.Enroll()
 	if err != nil {
 		return nil, s.vaultErr(err)
@@ -240,21 +251,17 @@ func (s *Setup) confirm(_ context.Context, _ sockets.Peer, args json.RawMessage)
 		return nil, s.vaultErr(err)
 	}
 	if ok {
-		if err := s.markEnrolled(); err != nil {
+		if err := s.setEnrolled(true); err != nil {
 			return nil, err
 		}
 	}
 	return localapi.Confirmed{OK: ok}, nil
 }
 
-// vaultErr maps the vault's refusal to a fixed code. A closed enrollment
-// is recorded: the vault holds a seed someone already has.
+// vaultErr maps the vault's refusal to a fixed code.
 func (s *Setup) vaultErr(err error) error {
 	switch {
 	case errors.Is(err, EnrollClosed):
-		if err := s.markEnrolled(); err != nil {
-			return err
-		}
 		return errEnrolled
 	case errors.Is(err, EnrollNone):
 		return errNoEnrollment
@@ -264,17 +271,21 @@ func (s *Setup) vaultErr(err error) error {
 	return errFailed
 }
 
-func (s *Setup) markEnrolled() error {
+func (s *Setup) setEnrolled(v bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.setEnrolledLocked(v)
+}
+
+func (s *Setup) setEnrolledLocked(v bool) error {
 	if s.closed {
 		return errSetupClosed
 	}
-	if s.rec.Enrolled {
+	if s.rec.Enrolled == v {
 		return nil
 	}
 	next := s.rec
-	next.Enrolled = true
+	next.Enrolled = v
 	if s.cfg.Record.Save(next) != nil {
 		return errFailed
 	}
@@ -298,6 +309,22 @@ func (s *Setup) finish(_ context.Context, _ sockets.Peer, args json.RawMessage) 
 	if !s.rec.Enrolled {
 		s.mu.Unlock()
 		return nil, errNotEnrolled
+	}
+	// The vault seals only a confirmation made since its last enroll. A
+	// closed vault after a confirmation with no enroll since is this
+	// Setup's own seal whose record was lost: nothing else seals.
+	switch err := s.cfg.Enroll.SealEnroll(); {
+	case err == nil, errors.Is(err, EnrollClosed):
+	case errors.Is(err, EnrollNone):
+		err := s.setEnrolledLocked(false)
+		s.mu.Unlock()
+		if err != nil {
+			return nil, err
+		}
+		return nil, errNotEnrolled
+	default:
+		s.mu.Unlock()
+		return nil, errFailed
 	}
 	next := s.rec
 	next.Finished, next.Owner = true, a.Owner

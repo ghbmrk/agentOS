@@ -152,7 +152,8 @@ type EnrollConfirmRequest struct {
 }
 
 // ErrEnrolled means enrollment is sealed: a new seed needs the recovery
-// key (REC-3). ErrNoEnrollment means no seed waits for confirmation.
+// key (REC-3). ErrNoEnrollment means no seed waits for confirmation (or,
+// from SealEnroll, none was confirmed since the last Enroll).
 var (
 	ErrEnrolled     = errors.New("code generator already enrolled")
 	ErrNoEnrollment = errors.New("no enrollment waiting for confirmation")
@@ -171,8 +172,8 @@ func (v *Verifier) Enroll() (string, error) {
 	return res.URI, nil
 }
 
-// ConfirmEnroll checks one code from the new seed; a match seals the
-// enrollment and makes the seed the owner channel's. A *VerifyError with
+// ConfirmEnroll checks one code from the new seed; a match makes the seed
+// the owner channel's, for SealEnroll to seal. A *VerifyError with
 // VerifyPaused means too many wrong codes.
 func (v *Verifier) ConfirmEnroll(code string) (bool, error) {
 	body, _ := json.Marshal(EnrollConfirmRequest{Code: code})
@@ -181,6 +182,14 @@ func (v *Verifier) ConfirmEnroll(code string) (bool, error) {
 		return false, err
 	}
 	return res.OK, nil
+}
+
+// SealEnroll closes enrollment for good at setup's finish (L3 on #367).
+// ErrNoEnrollment means no seed was confirmed since the last Enroll;
+// ErrEnrolled that enrollment is already closed.
+func (v *Verifier) SealEnroll() error {
+	var res struct{}
+	return v.enrollCall("/enroll/seal", nil, &res)
 }
 
 func (v *Verifier) enrollCall(path string, body []byte, res any) error {

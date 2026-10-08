@@ -20,12 +20,17 @@ import (
 const canaryLink = "otpauth://totp/AgentOS:AgentOS?secret=CANARYCANARYCANARY22&issuer=AgentOS"
 
 // fakeVault stands in for the vault process's enroll ops (egress K17).
+// Seeds are numbered by the enroll that made them; channel is the seed
+// the owner channel verifies with.
 type fakeVault struct {
-	sealed   bool
-	pending  bool
-	enrolls  int
-	confirms int
-	err      error
+	sealed    bool
+	pending   int // the seed waiting for confirmation, 0 for none
+	confirmed bool
+	channel   int
+	enrolls   int
+	confirms  int
+	seals     int
+	err       error
 }
 
 func (v *fakeVault) Enroll() (string, error) {
@@ -36,7 +41,7 @@ func (v *fakeVault) Enroll() (string, error) {
 	if v.sealed {
 		return "", EnrollClosed
 	}
-	v.pending = true
+	v.pending, v.confirmed = v.enrolls, false
 	return canaryLink, nil
 }
 
@@ -48,13 +53,28 @@ func (v *fakeVault) ConfirmEnroll(code string) (bool, error) {
 	switch {
 	case v.sealed:
 		return false, EnrollClosed
-	case !v.pending:
+	case v.pending == 0:
 		return false, EnrollNone
 	case code != good:
 		return false, nil
 	}
-	v.sealed, v.pending = true, false
+	v.channel, v.pending, v.confirmed = v.pending, 0, true
 	return true, nil
+}
+
+func (v *fakeVault) SealEnroll() error {
+	v.seals++
+	if v.err != nil {
+		return v.err
+	}
+	switch {
+	case v.sealed:
+		return EnrollClosed
+	case v.pending != 0 || !v.confirmed:
+		return EnrollNone
+	}
+	v.sealed, v.confirmed = true, false
+	return nil
 }
 
 type setupRig struct {
@@ -230,17 +250,78 @@ func TestFinishNeedsAConfirmedEnrollmentAndANumber(t *testing.T) {
 	}
 }
 
-// K17: a vault whose enrollment is closed (sealed, or never opened by
-// init -setup) shows no seed; setup then counts the code generator as set
-// up, since someone already holds the vault's seed.
-func TestASealedVaultCountsAsEnrolled(t *testing.T) {
+// L3 on #367 (CRED-8, ONB-6): a confirmation does not outlive the
+// pairing it was made under. Phone A pairs and confirms; the owner starts
+// setup over with the reset secret, which agentosd does not see; phone B
+// pairs and its step enrolls. Finish then waits for B's confirmation, and
+// the seed it seals is B's: A's is not the channel's.
+func TestARestartedSetupFinishesOnlyWithTheNewPairingsSeed(t *testing.T) {
+	r := newSetupRig(t)
+	r.enrollAndConfirm() // phone A
+	seedA := r.vault.channel
+
+	// Setup starts over; B's codes step asks for a new seed.
+	if err := r.call(localapi.OpSetupEnroll, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	seedB := r.vault.pending
+	if err := r.call(localapi.OpSetupFinish, localapi.Finish{Owner: "+15550100100"}, nil); code(err) != localapi.ErrNotEnrolled {
+		t.Fatalf("finish before B confirmed: %v", err)
+	}
+	r.start() // and across an agentosd restart
+	if err := r.call(localapi.OpSetupFinish, localapi.Finish{Owner: "+15550100100"}, nil); code(err) != localapi.ErrNotEnrolled {
+		t.Fatalf("finish before B confirmed, after a restart: %v", err)
+	}
+	if r.vault.sealed || len(r.finished) != 0 {
+		t.Fatal("sealed or finished on A's confirmation")
+	}
+	var c localapi.Confirmed
+	if err := r.call(localapi.OpSetupConfirm, localapi.Confirm{Code: good}, &c); err != nil || !c.OK {
+		t.Fatalf("B confirms: %v %v", err, c)
+	}
+	if err := r.call(localapi.OpSetupFinish, localapi.Finish{Owner: "+15550100100"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !r.vault.sealed || r.vault.channel != seedB || seedB == seedA {
+		t.Fatalf("sealed %v, channel seed %d, A %d, B %d", r.vault.sealed, r.vault.channel, seedA, seedB)
+	}
+}
+
+// Finish records only after the vault seals. If agentosd stopped between
+// the seal and the record, the next finish finds the vault sealed after a
+// confirmation it saw with no enroll since, which only its own seal
+// explains, and records.
+func TestFinishAfterASealWhoseRecordWasLost(t *testing.T) {
+	r := newSetupRig(t)
+	r.enrollAndConfirm()
+	r.vault.sealed = true
+	r.start()
+	if err := r.call(localapi.OpSetupFinish, localapi.Finish{Owner: "+15550100100"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := r.s.Owner(); !ok || got != "+15550100100" {
+		t.Fatalf("owner %q %v", got, ok)
+	}
+}
+
+// The release finding on #367: a vault whose enrollment is closed to
+// setup (sealed, or never opened by init -setup) shows no seed, and setup
+// no longer counts that as enrolled: finish needs a confirmation agentosd
+// saw, so a box nobody holds a code generator for does not finish.
+func TestAClosedVaultDoesNotCountAsEnrolled(t *testing.T) {
 	r := newSetupRig(t)
 	r.vault.sealed = true
 	if err := r.call(localapi.OpSetupEnroll, nil, nil); code(err) != localapi.ErrEnrolled {
 		t.Fatalf("enroll %v", err)
 	}
-	if err := r.call(localapi.OpSetupFinish, localapi.Finish{Owner: "+15550100100"}, nil); err != nil {
-		t.Fatal(err)
+	if err := r.call(localapi.OpSetupConfirm, localapi.Confirm{Code: good}, nil); code(err) != localapi.ErrEnrolled {
+		t.Fatalf("confirm %v", err)
+	}
+	if err := r.call(localapi.OpSetupFinish, localapi.Finish{Owner: "+15550100100"}, nil); code(err) != localapi.ErrNotEnrolled {
+		t.Fatalf("finish %v", err)
+	}
+	if r.vault.seals != 0 || len(r.finished) != 0 {
+		t.Fatal("finish reached the vault without a confirmation")
 	}
 }
 

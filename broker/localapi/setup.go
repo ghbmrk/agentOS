@@ -14,10 +14,11 @@ const (
 	// OpSetupEnroll asks the vault process for a new code-generator seed
 	// and answers its otpauth link, once.
 	OpSetupEnroll = "page_setup_enroll"
-	// OpSetupConfirm checks one code from the newest seed; a match seals
-	// enrollment.
+	// OpSetupConfirm checks one code from the newest seed; a match is
+	// sealed only by finish, and a new seed voids it.
 	OpSetupConfirm = "page_setup_confirm"
-	// OpSetupFinish records the owner's number and closes setup for good.
+	// OpSetupFinish has the vault seal the confirmed seed, records the
+	// owner's number and closes setup for good.
 	OpSetupFinish = "page_setup_finish"
 )
 
@@ -34,7 +35,8 @@ const (
 	ErrEnrolled = "enrolled"
 	// ErrNoEnrollment: no seed waits for confirmation; show a new link.
 	ErrNoEnrollment = "no enrollment"
-	// ErrNotEnrolled: Finish before any enrollment was confirmed.
+	// ErrNotEnrolled: Finish with no seed confirmed since the last new
+	// one, or on a vault whose enrollment is closed.
 	ErrNotEnrolled = "not enrolled"
 )
 

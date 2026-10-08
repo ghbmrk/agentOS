@@ -94,6 +94,10 @@ func (e enroller) ConfirmEnroll(code string) (bool, error) {
 	return ok, enrollErr(err)
 }
 
+func (e enroller) SealEnroll() error {
+	return enrollErr(e.v.SealEnroll())
+}
+
 func enrollErr(err error) error {
 	var ve *modelroute.VerifyError
 	switch {
