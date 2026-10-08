@@ -8,7 +8,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/route"
 	"github.com/ghbmrk/agentos/broker/routerule"
@@ -31,6 +33,7 @@ func newRouter(t *testing.T) *route.Router {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(ok)
 	})
+	var ticks atomic.Int64
 	r, err := route.New(route.Config{
 		Providers: []route.Provider{route.OpenAI(), route.Anthropic()},
 		Rule:      route.Rule{"chat": {{Provider: "openai", Model: "m1"}, {Provider: "anthropic", Model: "m2"}}},
@@ -38,6 +41,10 @@ func newRouter(t *testing.T) *route.Router {
 		Label:     func(string) string { return route.LabelPublic },
 		Upstream:  func(string) http.Handler { return up },
 		Audit:     func(route.Decision) {},
+		// A deterministic nanosecond clock and matching fixture cooldown let
+		// every attempt contribute evidence without sleeps or large latencies.
+		Cooldown: time.Nanosecond,
+		Now:      func() time.Time { return time.Unix(0, ticks.Add(1)) },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -79,6 +86,10 @@ func TestRouterCandidateAdoptsThroughPipeline(t *testing.T) {
 		t.Fatal("no measurements, yet a candidate")
 	}
 	callRouter(t, r, 3)
+	if _, changed, _ := e.p.ProposeRouting(bg, r); changed {
+		t.Fatal("sparse transport evidence entered the pipeline")
+	}
+	callRouter(t, r, 7) // 10 observations per route in this class
 	if got := r.Rule()["chat"][0].Provider; got != "openai" {
 		t.Fatal("the router reordered itself:", got)
 	}
@@ -146,7 +157,7 @@ func TestRoutingRollsBackOnRegression(t *testing.T) {
 		c.RouteGranted = func(string) bool { return true }
 	})
 	ruleCase(e, reordered, 12)
-	callRouter(t, r, 2)
+	callRouter(t, r, 10)
 	rep, _, _ := e.p.ProposeRouting(bg, r)
 	if rep.State != StateAdopted {
 		t.Fatal(rep)

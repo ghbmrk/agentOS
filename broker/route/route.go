@@ -19,8 +19,9 @@
 // override them (CAP-9, REV-5). Output tokens are capped at an owner
 // ceiling so spend per call is bounded up front, and every served call's
 // provider-reported usage is in its Decision. The router measures every
-// route (success, latency, failover, bytes) but never reorders a Rule on
-// its own: a better order is a Loop 1 candidate (Candidate) adopted
+// route and task class (transport success, header latency, failover, bytes)
+// but never reorders a Rule on its own: a better order is a Loop 1
+// candidate (Candidate) adopted
 // through §11 (SetRule), per ADP-4.
 //
 // The router holds no credential and opens no connection: everything it
@@ -157,8 +158,9 @@ type Config struct {
 	Now         func() time.Time
 }
 
-// Stats are a route's measurements since the router started. They count
-// only outcomes the provider is responsible for: served calls and
+// Stats are transport measurements since the router started, not completed-task
+// acceptance or full task latency. They count only outcomes the provider is
+// responsible for: served calls and
 // failovers, not requests the provider or the proxy refused as invalid.
 type Stats struct {
 	Calls     int64         `json:"calls"`
@@ -168,16 +170,28 @@ type Stats struct {
 	Bytes     int64         `json:"bytes"`
 }
 
+// evidenceKey keeps class, provider and model identity separate; display strings
+// are not unique identity encodings. There is no reported model-version input.
+type evidenceKey struct {
+	class string
+	route Route
+}
+
+// minCandidateCalls is a proposal noise guard, not a qualification or adoption
+// threshold. Every route in a class needs this much evidence before reordering.
+const minCandidateCalls = 10
+
 // Router is safe for concurrent use.
 type Router struct {
 	cfg       Config
 	providers map[string]Provider
 
-	mu    sync.Mutex
-	rule  Rule
-	until map[string]time.Time // route -> exhausted until
-	told  map[string]time.Time // provider -> last CredentialRejected
-	stats map[string]*Stats
+	mu       sync.Mutex
+	rule     Rule
+	until    map[string]time.Time   // route -> exhausted until
+	told     map[string]time.Time   // provider -> last CredentialRejected
+	stats    map[string]*Stats      // aggregate diagnostics; not used for candidates
+	evidence map[evidenceKey]*Stats // active class/routes only
 }
 
 // New validates the configuration and returns a router.
@@ -243,7 +257,21 @@ func (r *Router) SetRule(rule Rule) error {
 		cp[class] = append([]Route(nil), routes...)
 	}
 	r.mu.Lock()
-	r.rule = cp
+	// Keep evidence across pure reorders, but discard removed class/routes. An
+	// in-flight call retains its old pointer and cannot repopulate a new entry
+	// if an identity is removed and later reintroduced.
+	evidence := make(map[evidenceKey]*Stats)
+	for class, routes := range cp {
+		for _, rt := range routes {
+			key := evidenceKey{class, rt}
+			st := r.evidence[key]
+			if st == nil {
+				st = &Stats{}
+			}
+			evidence[key] = st
+		}
+	}
+	r.rule, r.evidence = cp, evidence
 	r.mu.Unlock()
 	return nil
 }
@@ -270,22 +298,33 @@ func (r *Router) Stats() map[string]Stats {
 	return out
 }
 
-// Candidate proposes a rule from the measurements: within each class,
-// measured routes are ordered by success rate, then mean latency; routes
-// with no calls keep their place after them. It only proposes. The
-// proposal is a Loop 1 candidate and takes effect only if §11 adopts it
-// (ADP-4); it never adds a route the active rule lacks.
+// Candidate proposes a rule from class-specific transport measurements. A class
+// keeps its full order until every active route has minCandidateCalls samples;
+// then routes are ordered by transport success rate and mean header latency,
+// preserving ties. These are not accepted-task or full-latency measurements.
+// It only proposes: §11 adoption (ADP-4) is still required, and the candidate
+// contains exactly the active routes. Grants, private-data filters, metering,
+// price ceilings and adoption policy are unchanged.
 func (r *Router) Candidate() Rule {
-	rule, stats := r.Rule(), r.Stats()
-	for _, routes := range rule {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	// Rule and evidence must describe the same configuration snapshot.
+	rule := Rule{}
+	for class, active := range r.rule {
+		routes := append([]Route(nil), active...)
+		rule[class] = routes
+		enough := true
+		for _, rt := range routes {
+			if r.evidence[evidenceKey{class, rt}].Calls < minCandidateCalls {
+				enough = false
+				break
+			}
+		}
+		if !enough {
+			continue
+		}
 		sort.SliceStable(routes, func(i, j int) bool {
-			a, b := stats[routes[i].String()], stats[routes[j].String()]
-			if (a.Calls > 0) != (b.Calls > 0) {
-				return a.Calls > 0
-			}
-			if a.Calls == 0 {
-				return false
-			}
+			a, b := r.evidence[evidenceKey{class, routes[i]}], r.evidence[evidenceKey{class, routes[j]}]
 			ra, rb := float64(a.OK)/float64(a.Calls), float64(b.OK)/float64(b.Calls)
 			if ra != rb {
 				return ra > rb
@@ -437,6 +476,10 @@ func (r *Router) serve(c caller, w http.ResponseWriter, req *http.Request) {
 	chat = clamp(chat, r.cfg.MaxOutputTokens)
 	r.mu.Lock()
 	routes := append([]Route(nil), r.rule[chat.Model]...)
+	evidence := make([]*Stats, len(routes))
+	for i, rt := range routes {
+		evidence[i] = r.evidence[evidenceKey{chat.Model, rt}]
+	}
 	r.mu.Unlock()
 	if len(routes) == 0 {
 		fail(http.StatusNotFound, "invalid_request_error", "model_not_found", "no such model class")
@@ -450,7 +493,7 @@ func (r *Router) serve(c caller, w http.ResponseWriter, req *http.Request) {
 		last                *attempt  // the last failover, if any
 		unsupportedWhy      string
 	)
-	for _, rt := range routes {
+	for i, rt := range routes {
 		p := r.providers[rt.Provider]
 		if !r.cfg.Granted(machine, rt.Provider) || (private && !r.cfg.PrivateOK[rt.Provider]) {
 			continue
@@ -473,7 +516,7 @@ func (r *Router) serve(c caller, w http.ResponseWriter, req *http.Request) {
 			continue
 		}
 		d.Route = key
-		a := r.try(req.Context(), c.upstream, w, p, key, chat, out)
+		a := r.try(req.Context(), c.upstream, w, p, key, evidence[i], chat, out)
 		switch {
 		case a.denied:
 			// The proxy's own answer (a grant, shape, body-rule, or
@@ -546,7 +589,7 @@ type attempt struct {
 
 // try sends one call and, unless it fails over or the proxy denied it,
 // delivers the answer to the guest.
-func (r *Router) try(ctx context.Context, upstream http.Handler, w http.ResponseWriter, p Provider, key string, chat *chatRequest, out []byte) *attempt {
+func (r *Router) try(ctx context.Context, upstream http.Handler, w http.ResponseWriter, p Provider, key string, evidence *Stats, chat *chatRequest, out []byte) *attempt {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	start := r.cfg.Now()
@@ -559,15 +602,16 @@ func (r *Router) try(ctx context.Context, upstream http.Handler, w http.Response
 	// record counts an outcome the provider is responsible for.
 	record := func(ok, failed bool) {
 		r.mu.Lock()
-		st := r.stat(key)
-		st.Calls++
-		st.Latency += elapsed
-		st.Bytes += body.n
-		if ok {
-			st.OK++
-		}
-		if failed {
-			st.Failovers++
+		for _, st := range []*Stats{r.stat(key), evidence} {
+			st.Calls++
+			st.Latency += elapsed
+			st.Bytes += body.n
+			if ok {
+				st.OK++
+			}
+			if failed {
+				st.Failovers++
+			}
 		}
 		r.mu.Unlock()
 	}

@@ -534,7 +534,10 @@ func TestCandidateProposesButDoesNotAdopt(t *testing.T) {
 	r := newRig(t, rigOpts{})
 	r.up.set(hostAnthropic, serveFixture(503, "application/json", []byte(`{}`)))
 	r.up.set(hostOpenAI, serveFixture(200, "application/json", fixture(t, "openai_completion.json")))
-	r.do(t, "m1", simpleChat)
+	for i := 0; i < minCandidateCalls; i++ {
+		r.do(t, "m1", simpleChat)
+		r.advance(2 * DefaultCooldown)
+	}
 
 	cand := r.router.Candidate()
 	if cand["default"][0].Provider != "openai" || len(cand["default"]) != 2 {
@@ -548,7 +551,7 @@ func TestCandidateProposesButDoesNotAdopt(t *testing.T) {
 	}
 	r.advance(2 * DefaultCooldown)
 	r.do(t, "m1", simpleChat)
-	if r.up.count(hostAnthropic) != 1 || r.up.count(hostOpenAI) != 2 {
+	if r.up.count(hostAnthropic) != minCandidateCalls || r.up.count(hostOpenAI) != minCandidateCalls+1 {
 		t.Fatalf("adopted rule not followed: anthropic=%d openai=%d", r.up.count(hostAnthropic), r.up.count(hostOpenAI))
 	}
 
