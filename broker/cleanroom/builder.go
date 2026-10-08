@@ -141,11 +141,59 @@ func New(cfg Config) (*Builder, error) {
 			os.RemoveAll(d)
 		}
 	}
-	st, err := openStore(filepath.Join(cfg.Dir, "artifacts"))
+	st, damaged, err := openStore(filepath.Join(cfg.Dir, "artifacts"))
 	if err != nil {
 		return nil, err
 	}
-	return &Builder{cfg: cfg, store: st, wake: make(chan struct{}, 1), sessions: map[string]*session{}}, nil
+	b := &Builder{cfg: cfg, store: st, wake: make(chan struct{}, 1), sessions: map[string]*session{}}
+	for _, m := range damaged {
+		if err := b.rebuild(m); err != nil {
+			return nil, err
+		}
+		cfg.Logf("cleanroom: %s lost output; quarantined and queued to build again", m.ID)
+	}
+	return b, nil
+}
+
+// maxRepairs bounds how often one job is built again after its output was
+// lost, so storage that keeps losing it cannot run clean rooms without end.
+const maxRepairs = 2
+
+// rebuild queues again the job of an artifact quarantined at open: its
+// queue entry if a crash left it, else a new entry with the same job ID, so
+// it rebuilds the same artifact ID and its hint coalesces into the job.
+func (b *Builder) rebuild(m Manifest) error {
+	if !segment.MatchString(m.Job) || m.ID != "a-"+m.Job {
+		return nil
+	}
+	jobs, err := b.queued()
+	if err != nil {
+		return err
+	}
+	for _, j := range jobs {
+		if j.ID == m.Job {
+			return b.renew(j)
+		}
+	}
+	dir := filepath.Join(b.queueDir(), "repair-"+m.Job)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	j := &job{ID: m.Job, Hint: string(m.Hint), Day: m.Day, path: filepath.Join(dir, "0000-"+m.Job+".json")}
+	if err := b.renew(j); err != nil {
+		return err
+	}
+	return syncDir(b.queueDir())
+}
+
+// renew gives a job whose output was lost fresh attempts, up to maxRepairs
+// times, and stores it.
+func (b *Builder) renew(j *job) error {
+	if j.Repairs < maxRepairs {
+		j.Repairs++
+		j.Attempts = 0
+	}
+	return writeJSON(j.path, j)
 }
 
 // Store is where artifacts are kept.
@@ -258,7 +306,8 @@ func (b *Builder) runJob(ctx context.Context, j *job) error {
 		return b.finish(j, "", Outcome{Result: "failed", Reason: "hint no longer matches the schema"})
 	}
 	if _, err := b.store.Get(artifactID(j)); err == nil {
-		// Stored before a crash took the queue entry with it.
+		// Stored before a crash took the queue entry with it. finish
+		// checks its output first; damaged output is built again.
 		return b.finish(j, h.Kind, Outcome{Result: "built", Artifact: artifactID(j)})
 	}
 	if j.Attempts >= b.cfg.Attempts {
@@ -375,8 +424,20 @@ func (b *Builder) destroy(id string) {
 	}
 }
 
-// finish logs a job's outcome and takes it off the queue.
+// finish logs a job's outcome and takes it off the queue. A built job's
+// artifact must first be durable and match its manifest: until then the
+// job stays queued, and Run retries it (SR3-8).
 func (b *Builder) finish(j *job, kind string, o Outcome) error {
+	if o.Result == "built" {
+		if err := b.store.settle(o.Artifact); err != nil {
+			if errors.Is(err, errDamaged) {
+				if rerr := b.renew(j); rerr != nil {
+					return rerr
+				}
+			}
+			return err
+		}
+	}
 	o.Job, o.Day, o.Kind = j.ID, j.Day, kind
 	if err := b.logOutcome(o); err != nil {
 		return err
