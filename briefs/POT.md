@@ -16,7 +16,7 @@ The implementation PRs are stacked on this planning branch so every draft has a 
 |---|---|---|
 | P1 | [POT-P1](POT-P1.md) | Extend INT-A/H6/W7-A with one complete recurring workflow |
 | P2 | [POT-P2](POT-P2.md) | Task binding and native edit pickup; design before guest protocol changes |
-| P3 | [POT-P3](POT-P3.md), [POT-P3b](POT-P3b.md) | First deterministic observed-effect contract; then authenticated outcome revisions |
+| P3 | [POT-P3](POT-P3.md), [POT-P3a](POT-P3a.md), [POT-P3b](POT-P3b.md) | First observed-effect contract; qualified private capture blocks activation; then outcome revisions |
 | P4 | [POT-P4](POT-P4.md) | Later; scoped recall and progressive fetch only after a workload bottleneck |
 | P5 | [POT-P5](POT-P5.md) | Bounded templated approval cohorts; no additional authority |
 | P6 | [POT-P6](POT-P6.md), [POT-P6b](POT-P6b.md) | First isolate transport evidence by class; then trusted task outcomes and full cost |
@@ -28,7 +28,7 @@ The implementation PRs are stacked on this planning branch so every draft has a 
 ## Acceptance and rollout
 
 1. Each proposal maps to a scoped brief with requirements, dependencies, tests, and a completion boundary. The first three implementation drafts make no claim to implement the whole review.
-2. POT-P3 and POT-P6 are deliberately split: neither the first outcome contract nor transport statistics complete task quality measurement. Their `b` rows remain release work after those drafts merge.
+2. POT-P3 and POT-P6 are deliberately split: neither the first outcome contract nor transport statistics complete task quality measurement. POT-P3 stays blocked on POT-P3a private capture qualification: default journal redaction currently leaves no usable mail.send cases. Do not activate its new production grader or merge wiring that enables it until this gate and CHG-2 approval pass. Their `b` rows remain release work after the initial slices qualify.
 3. SR3-2 and SR3-3 precede release reliance on unattended effects and approval-rule presentation. SR3-7 precedes compound inference pipelines. Existing security work is not replaced by potency work.
 4. Each runtime PR gets tests first, applicable Go/race/Linux checks, fresh L3, and the required lens/security passes. CHG-2 activation is independently approved. A passing component test is not a production workflow qualification.
 5. For benefit claims, reuse H6's matched-trial collector and the review's protocol: equal tools/data/accounts/host; AgentOS, unmodified OpenClaw and direct provider CLI; first and repeat use separate; all setup/review/correction/recovery time and all retries/branches included. Predeclare acceptance and owner-effort targets. Do not claim a speedup without measurements.

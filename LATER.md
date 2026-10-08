@@ -2,7 +2,7 @@
 Generated 2026-10-07 by the COST thread's audit; the coordinator updates it. Rows marked LATER are not started until the first release ships (DECISIONS D-048). Promote a row by moving it to "Release" with the acceptance test it now blocks.
 
 ## Summary
-Non-merged rows audited: 129; the 67 stale rows it found were reconciled into BOARD.md on 2026-10-08 (DOC-3), and rows since merged were removed from the tables below. Open now: Release 63 (6 marked unsure), Later 55 (table counts refreshed with proposed POT intake; no existing row reclassified).
+Non-merged rows audited: 129; the 67 stale rows it found were reconciled into BOARD.md on 2026-10-08 (DOC-3), and rows since merged were removed from the tables below. Open now: Release 64 (6 marked unsure), Later 55 (table counts refreshed with proposed POT intake; no existing row reclassified).
 No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41) has no board row but blocks IMG-1, HOST-1a/1b/1c part 2 and W3-builder-ship.
 
 ## Release (needed for A1–A15 or an invariant)
@@ -12,6 +12,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | POT-P1 | A3, A10, A11, A15 | One production-equivalent recurring workflow; reuse INT-A/H6/W7-A |
 | POT-P2 | A3, A10, A15 | Durable task/result binding and native draft revision; L1 design first |
 | POT-P3 | A7, A10, A11 (CHG-1/2, OP-7) | First deterministic broker-observed effect grader; independent activation approval |
+| POT-P3a | A7, A10, A11 (CHG-1/2, CRED-7, CAP-3) | Private broker-keyed capture/matching qualification blocks P3 activation under default journal redaction |
 | POT-P3b | A7, A10, A11 (CHG-1/2, OP-7) | Authenticated outcome revision and additional qualified result contracts |
 | POT-P5 | A10, A15 (CAP-6, ADP-9/11) | Bounded template cohorts; grant authority and reply policy preserved |
 | POT-P6 | A10, A15 (CAP-9) | Prevent wrong-class transport evidence from reordering candidates |

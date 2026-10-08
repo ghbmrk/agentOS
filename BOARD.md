@@ -21,8 +21,9 @@ Primary lane; proposed intake and draft implementations, not merged claims. Scop
 |---|---|---|---|
 | POT-P1 | [Qualify a complete recurring workflow](briefs/POT-P1.md) | INT-A, H6, W7-A, POT-P2/P3 | queued (release; reconcile existing PRs) |
 | POT-P2 | [Bind durable tasks and native draft revisions](briefs/POT-P2.md) | W3-goal, W5, L1 task design | queued (release; design gate) |
-| POT-P3 | [Grade a broker-observed effect](briefs/POT-P3.md) | POT; CHG-2 activation gate | in review (Codex draft; first outcome class only) |
-| POT-P3b | [Revise authenticated outcomes and qualify graders](briefs/POT-P3b.md) | POT-P2/P3, W7-A | queued (release) |
+| POT-P3 | [Grade a broker-observed effect](briefs/POT-P3.md) | POT-P3a; CHG-2 activation gate | in review (Codex draft; blocked on qualified capture) |
+| POT-P3a | [Qualify private replay capture and effect matching](briefs/POT-P3a.md) | POT-P3 contract review; L1/CHG-2 approval | queued (release; blocks P3 activation) |
+| POT-P3b | [Revise authenticated outcomes and qualify graders](briefs/POT-P3b.md) | POT-P2/P3/P3a, W7-A | queued (release) |
 | POT-P4 | [Bound and progressively fetch scoped recall](briefs/POT-P4.md) | measured A10 bottleneck | queued (later) |
 | POT-P5 | [Separate bounded approval-template cohorts](briefs/POT-P5.md) | POT; SR3-2/3 before release reliance | in review (Codex draft; proposer only) |
 | POT-P6 | [Separate route evidence by task class](briefs/POT-P6.md) | POT | in review (Codex draft; transport evidence only) |
