@@ -13,15 +13,15 @@ Board section: Integration: wiring merged packages into the box. Part of W3-forg
 2. **Key:** HMAC keyed from the recovery key.
 3. **Anchor:** hash-chained entries, anchored to the V6 TPM NV counter (`broker/vault/rollback.go`) where one exists.
 
-**Restore with no anchor** (any restore to a different machine): this part fails closed. The restore stays pending, and the owner is told that the forget log could not be checked on this machine. The owner's confirmation path is W3-forget-b1-4, which waits on a ruling.
+**Restore with no anchor** (any restore to a different machine): this part fails closed. The restore stays pending, and the owner is told that the forget log could not be checked on this machine. The owner's confirmation path is W3-forget-b1-4 (ruled, D-065).
 
-**F4 done text (proposed; needs UX lens sign-off before merge, since no source fixes the wording).** These replace `forgetBackups` and `forgetBackupsOnly`:
-- **Agent not taken back:** " Your agent's own files may still hold it. If an older backup is restored, I'll forget it again before your agent starts."
-- **Agent taken back:** " If an older backup is restored, I'll forget it again before your agent starts."
+**F4 done text (the UX lens's replacement on #317, comment 6067693566, verbatim).** These replace `forgetBackups` and `forgetBackupsOnly`; they keep the older-backups fact, hold on the fail-closed path, and keep the taken-back text within one SMS segment (CH-12):
+- **Agent not taken back:** `" Your agent's own files may still hold it. Older backups do too, but restoring one won't bring it back."`
+- **Agent taken back:** `" Older backups may still hold it, but restoring one won't bring it back."`
 
 **Needs:** W3-forget-a
 
-**Gate:** tier A: strongest model, explicit threat check (log rollback by restoring an older destination copy, truncation, a forged or replayed entry, key derivation), then the lens screen with its Security section; the UX lens signs off the F4 sentences.
+**Gate:** tier A: strongest model, explicit threat check (log rollback by restoring an older destination copy, truncation, a forged or replayed entry, key derivation), then the lens screen with its Security section; the UX lens signs off the F4 sentences and the fail-closed text, which needs a CH-12 step: it names what still works (for example, restoring on the original PC) or says nothing can be done until an update (release point, #317).
 
 **Scope:**
 - `broker/recovery/`: `backuplog.go` and a new forget-log file, the restore path in `bundle.go`, plus a pending state between extraction and start.
