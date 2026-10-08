@@ -142,7 +142,8 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | SR2-1 | [Approval texts show only canonical recipients](briefs/SR2-1.md) | — | merged (#144) |
 | P2-2a | [Local-page approvals](briefs/P2-2a.md) | P2-2 | merged (6239bd4; #178 part 2) |
 | P2-2w | [Local UI process and owner socket](briefs/P2-2w.md) | P2-2a | building (in sub-rows a, b, d, c (P3-2 thread)) |
-| P2-2a f1 | [Page result after a changed item](briefs/P2-2a-f1.md) | P2-2a | queued |
+| P2-2a f1 | [Page result after a changed item](briefs/P2-2a-f1.md) | P2-2a | in review |
+| P2-2a f2 | [Page result for a changed release adoption](briefs/P2-2a-f2.md) | P2-2a f1 | queued (after #329) |
 | P2-2w a | [`localui.sock` in agentosd](briefs/P2-2w-a.md) | P2-2a | merged (b00db30; #184) |
 | P2-2w b | [`agentos-localui` command under its own uid](briefs/P2-2w-b.md) | P2-2w a | merged (0302131; #189) |
 | P2-2w d | [LocalUI on, with UX's turn-on list](briefs/P2-2w-d.md) | P2-2w b | queued |

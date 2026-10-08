@@ -1851,13 +1851,14 @@ func (g *Gate) Decide(d owner.Decision) {
 	if why == "" {
 		why = "owner"
 	}
+	changed := false
 	if d.Approved && local && d.Page {
 		// Approved on the page with a fresh code: that answer confirms
 		// it, if the item is the one the page showed (Security P1).
 		if d.Sum == owner.ItemSum(item) {
 			g.confirmed[d.Ref] = true
 		} else {
-			d.Approved, why = false, "it changed since the page showed it"
+			d.Approved, why, changed = false, "it changed since the page showed it", true
 		}
 	}
 	hold, attempt := "", 0
@@ -1885,6 +1886,15 @@ func (g *Gate) Decide(d owner.Decision) {
 	g.mu.Unlock()
 	if unstaged && hold != "" && own != nil {
 		_ = own.Inform(fmt.Sprintf("%s was not sent: its draft or staged copy could not be made. Ask your agent again if still needed.", clip(hold)))
+	}
+	if changed && own != nil {
+		// The page has already said "Approved" (L3 SHOULD on #178, CH-12).
+		// Agent and guest origins never get a page-confirmed item: only
+		// broker actions set it, and evaluateBroker denies them every
+		// broker action (UX lens and L3 on #329). Their other actions can
+		// still be asked on the page (onPage), but are not page-confirmed,
+		// so the step names no agent.
+		_ = own.Inform(fmt.Sprintf("%s did not run: it changed after my Wi-Fi page showed it. Make the request again if still needed.", clip(d.Request)))
 	}
 	if !wait {
 		g.settle(d.Ref)
