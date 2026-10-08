@@ -171,6 +171,12 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | W3-forget-b1 f4 | Security on #409 L2: `readRestoredForgets` trusts `forget-log.json` without authentication at every start; low risk, only agentosd's uid can write it |
 | W3-forget-b1 f5 | Security on #409 L3: the test "copy holds its key" looks for the key's hex but JSON stores `[]byte` as base64, and the copy has no key field, so the assertion is vacuous |
 | W3-forget-b1 f6 | UX on #409 U4 and P4: the taken-back text reaches 161 chars at 100+ things undone; and the BOARD row should say "not live until b1-5/6/7" |
+| CRED-5f l1 | Combined lens on #420: a withdrawn route's decline says "not granted" (403 `no_route`); CAP-9 wants the reason. The owner already learns it from the withdrawal notice, so only the agent-facing text is vague |
+| CRED-5f l2 | Combined lens on #420 (L3 later point): `CredentialRejected`'s 24 h re-notice compares wall-clock times, so a clock step back can delay it; the new withdrawal notice is once per withdrawal and is unaffected |
+| CRED-5f l3 | Combined lens on #420: if CRED-5w's owner pause reuses `Config.Withdrawn`, the owner gets a withdrawal notice for their own pause; give the pause its own reason |
+| W3-forget-b2c l1 | UX on #427: with no agent, "when it runs again" means the next boot (the agent machine opens only at boot); STATUS's agent line should name that step |
+| W3-forget-b2c l2 | UX on #427: an owed take-back is journaled `succeeded` with evidence `owed: …`; once the digest renders journal outcomes it must not read as done |
+| SR3-2 l1 | UX/Potency on #428 (L3 later point): an authorized intent that never dispatches (held, no executor, fenced) holds its bound place with no age-out; note it in GR31 and let STATUS show it |
 
 ## Reuse candidates
 | ID | Component | Why |
