@@ -2,7 +2,7 @@
 Generated 2026-10-07 by the COST thread's audit; the coordinator updates it. Rows marked LATER are not started until the first release ships (DECISIONS D-048). Promote a row by moving it to "Release" with the acceptance test it now blocks.
 
 ## Summary
-Non-merged rows audited: 129. Release: 48 (11 marked unsure). Later: 14. The 67 stale rows it found were reconciled into BOARD.md on 2026-10-08 (DOC-3).
+Non-merged rows audited: 129; the 67 stale rows it found were reconciled into BOARD.md on 2026-10-08 (DOC-3), and rows since merged were removed from the tables below. Open now: Release 40 (6 marked unsure), Later 12.
 No security-fix row (SR2-*) is classed Later. P2-1 (host image, PR #41) has no board row but blocks IMG-1, HOST-1a/1b/1c part 2 and W3-builder-ship.
 
 ## Release (needed for A1–A15 or an invariant)
@@ -16,7 +16,6 @@ No security-fix row (SR2-*) is classed Later. P2-1 (host image, PR #41) has no b
 | S2 | A1, A3 | Modem SMS and voice; waits on Mark's modems |
 | P2-4-hw | A8 | Real-TPM trusted-host run; risk 14 |
 | P3-4b | A11 (unsure) | Loop 2 active testing; Mark deferred 10-05, A11 loop-2 part stays open |
-| P3-6e | A11, CHG invariant (unsure) | Security R1 condition before the model-backed builder is wired |
 | UPD-b | A1, A14 (UPD-3) (unsure) | Update before accounts connect |
 | CH-20w | A15 (CH-20) | Evidence delivery through the vault-held mail adapter |
 | CRED-4b | A5, A13 | Credentialed browser executor; sessions only in the vault process |
@@ -37,15 +36,9 @@ No security-fix row (SR2-*) is classed Later. P2-1 (host image, PR #41) has no b
 | HOST-1b | A1 (HW-8) | Part 2 needs P2-2w live page |
 | HOST-1c | A1 (HW-8, ONB-7) | Part 2 needs P2-2 |
 | HOST-1e | A1 | Host-untouched hash harness |
-| W2 | A12 leakage audit (unsure) | Recall as guest tool with vault-held key |
-| PE4 | A11 (unsure) | Preempted Loop 2 fix never retried; #112 predates shallow history |
 | PE7-bus | A11, A2 (unsure) | Condition on the events-bus package; floor host |
 | PE7-call | A11, A2 (unsure) | Condition on the inbound-call package |
 | W3 | A11 | Learning process; steps 3a, 3c open |
-| W3-goal | A10, A11 (unsure) | Goal IDs for compiled skills |
-| W4 | A11, A15 | Managed tree to the agent machine |
-| W3-values | A10 | Param values for compiled skills |
-| W3-values-mix | A10 (unsure) | Leak-guard follow-up to W3-values |
 | W3-builder-ship | A11 | Builder defaults; P2-1 side queued |
 | W3-forget | A14 (CAP-3) | Owner FORGET; split a, b |
 | W3-forget-b | A14 (CAP-3) | Authenticated forget log over restores; Security C3 |
@@ -55,14 +48,12 @@ No security-fix row (SR2-*) is classed Later. P2-1 (host image, PR #41) has no b
 | W5c | A12 | Clean-room builder in the scheduler |
 | W6 | A8 (REC-1–3) | Recovery into vault process and local UI |
 | W7 | A10, A15 (CAP-4–6) | Compiled skills live; attention optimizer; blocked |
-| W9 | A15 | Default-on-timeout questions live |
 
 ## Later (backlog; do not start before first release)
 | ID | Why it can wait |
 |---|---|
 | P2-8b | Deferred re-encrypt after trusted-PC removal; slot removal already covers CRED-9 |
 | P3-6d | Digest wording for deleted procedures; no A-test needs it |
-| P3-8b | Question batching and ask_by; A15 needs only default-on-timeout |
 | CH-20p | Page view of kept replies; A15 needs delivery, not this view |
 | CH-20a | Attachments conflict with security C4; needs review; not in A15 |
 | CH-20m | MORE command for redirected replies; convenience |
@@ -73,7 +64,6 @@ No security-fix row (SR2-*) is classed Later. P2-1 (host image, PR #41) has no b
 | W3-off-a | STATUS wording goes dynamic; polish |
 | W3-implicit | Potency C2 outcome label; refinement of attention optimizer |
 | W8 | Owner builds; no brief, no A-test names it |
-| W9a | Question follow-ups from the #95 lens gate; no A-test needs them |
 | ADP-14-get | GET links with side effects reached by `navigate` on recipe sites; recipe gate covers state-changing methods first |
 | ADP-14-undo-fail | A failed `UNDO` reply gives site, reference and deadline and opens a task; UNDO success path is enough for A13 |
 | ADP-14-offer | After repeated approved submits on one unknown site, offer its private-derived draft for adoption; cuts approvals, not needed for A13 |
