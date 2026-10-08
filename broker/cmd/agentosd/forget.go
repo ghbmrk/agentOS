@@ -145,14 +145,21 @@ type ownerForget struct {
 	// OnOpen together, and each run must see the take-backs the one
 	// before it did (Handled), so none is taken back or told twice.
 	resuming sync.Mutex
+	// forgetLog, if set, is the authenticated forget log a restore replays
+	// (W3-forget-b1; security C3); nil until the vault process serves it,
+	// and the done text then keeps part a's caveat.
+	forgetLog forgetLogger
 
 	mu sync.Mutex
 	// interrupted: approved item 2s a restart interrupted, by ID, taken
 	// back by resumeAgent once recall opens.
 	interrupted []string
-	list        []string // goals, as last listed
-	listAt      time.Time
-	seq         int
+	// restored: the take-backs a restored forget log holds, by where the
+	// agent went back to, taken back by resumeAgent once recall opens.
+	restored []time.Time
+	list     []string // goals, as last listed
+	listAt   time.Time
+	seq      int
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) bool {
@@ -448,7 +455,9 @@ func (f *ownerForget) Execute(ctx context.Context, in journal.Intent, _ int) jou
 	err := f.forget(goal)
 	switch {
 	case err == nil:
-		f.inform(forgetDone(undone, f.agentBackWithoutAsking(ctx, in.ID)))
+		since, _ := forgetSince(in.ID)
+		back := f.agentBackWithoutAsking(ctx, in.ID)
+		f.inform(forgetDone(undone, back, f.logForget(goal, since, back)))
 		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "forgotten"}
 	case errors.Is(err, errNotTombstoned):
 		// Nothing was deleted and a restart would not finish it, so it
@@ -476,7 +485,7 @@ func (f *ownerForget) retry(ctx context.Context, goal string, undone int) {
 		}
 		err := f.forget(goal)
 		if err == nil {
-			f.inform(forgetDone(undone, false))
+			f.inform(forgetDone(undone, false, f.logForget(goal, time.Time{}, false)))
 			return
 		}
 		log.Printf("forget: not saved yet: %v", err)
@@ -489,23 +498,55 @@ func (f *ownerForget) retry(ctx context.Context, goal string, undone int) {
 }
 
 // forgetBackups is the done text's true half about backups and the agent
-// machine's files, which part a does not reach (UX-182-1);
-// W3-forget-b, with the forget log's replay, adds that a restored backup
-// is forgotten again at once.
+// machine's files, which part a does not reach (UX-182-1); it stays when
+// the forget is not in the forget log.
 const forgetBackups = " Older backups and your agent's own files may still hold it."
 
 // forgetBackupsOnly is forgetBackups once the agent is taken back.
 const forgetBackupsOnly = " Older backups may still hold it."
 
-func forgetDone(undone int, agentBack bool) string {
+// forgetLogged and forgetLoggedOnly replace them once the forget is in the
+// forget log, which a restore replays or holds on (UX F4 on #317,
+// verbatim).
+const (
+	forgetLogged     = " Your agent's own files may still hold it. Older backups do too, but restoring one won't bring it back."
+	forgetLoggedOnly = " Older backups may still hold it, but restoring one won't bring it back."
+)
+
+func forgetDone(undone int, agentBack, logged bool) string {
 	tail := forgetBackups
-	if agentBack {
+	switch {
+	case logged && agentBack:
+		tail = forgetLoggedOnly
+	case logged:
+		tail = forgetLogged
+	case agentBack:
 		tail = forgetBackupsOnly
 	}
 	if undone == 0 {
 		return "Forgotten." + tail
 	}
 	return "Forgotten. I also undid " + things(undone) + " from it; I'll relearn what I can without it." + tail
+}
+
+// forgetLogger appends a forget to the authenticated forget log
+// (broker/recovery AppendForget); since is where the agent went back to,
+// when agent.
+type forgetLogger interface {
+	Append(goal string, at, since time.Time, agent bool) error
+}
+
+// logForget appends a done forget to the forget log, reporting whether it
+// holds; a failure leaves the done text's caveat.
+func (f *ownerForget) logForget(goal string, since time.Time, agent bool) bool {
+	if f.forgetLog == nil {
+		return false
+	}
+	if err := f.forgetLog.Append(goal, f.now(), since, agent); err != nil {
+		log.Printf("forget: forget log: %v", err)
+		return false
+	}
+	return true
 }
 
 // agentBackWithoutAsking takes the agent back to before a forgotten task
@@ -566,10 +607,12 @@ func (f *ownerForget) agentBack(ctx context.Context, id string, since time.Time)
 	err := a.takeBack(ctx, since, true)
 	switch {
 	case err == nil:
+		f.logForget(grants.ForgetAgentGoal(id), since, true)
 		f.inform(forgetAgentDone)
 		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "taken back"}
 	case errors.Is(err, recalltool.ErrCarried):
 		log.Printf("forget: agent take-back: %v", err)
+		f.logForget(grants.ForgetAgentGoal(id), since, true) // recall owes it
 		f.inform(forgetAgentNotYet)
 		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "taking back; recall retries"}
 	case errors.Is(err, recalltool.ErrNotOpen) && f.whenOpen != nil:
@@ -643,6 +686,38 @@ func (f *ownerForget) resumeAgent(ctx context.Context) {
 		out := f.agentBack(ctx, id, since)
 		log.Printf("forget: item 2 resumed: %s", out.Evidence)
 	}
+	f.resumeRestored(ctx, a)
+}
+
+// resumeRestored takes the agent back for each take-back a restored forget
+// log holds that recall has not recorded; the owner approved each before
+// the backup, so it is not asked or told again. One that fails stays
+// queued for recall's next open.
+func (f *ownerForget) resumeRestored(ctx context.Context, a *forgetAgent) {
+	f.mu.Lock()
+	sinces := f.restored
+	f.restored = nil
+	f.mu.Unlock()
+	var left []time.Time
+	for _, since := range sinces {
+		if a == nil {
+			left = append(left, since)
+			continue
+		}
+		if handled, known := a.work.Handled(since); handled {
+			continue
+		} else if !known {
+			left = append(left, since)
+			continue
+		}
+		if err := a.takeBack(ctx, since, true); err != nil && !errors.Is(err, recalltool.ErrCarried) {
+			log.Printf("forget: restored take-back: %v", err)
+			left = append(left, since)
+		}
+	}
+	f.mu.Lock()
+	f.restored = append(left, f.restored...)
+	f.mu.Unlock()
 }
 
 // siblingApproved waits for the owner's decision on item 1, which the
