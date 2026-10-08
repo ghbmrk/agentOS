@@ -97,3 +97,24 @@ trusted clock, quiet hours, STOP and a mandatory resource/authority callback.
 Host wrappers add owner/source health and real engine STOP checks to both phases.
 Neither a final refusal nor affirmative non-send refunds the original slot.
 Callbacks must be repeatable; policy health is not owner authentication.
+
+## Assembled bridge fixture (W5-D36)
+
+The runtime fixture now composes real transactional owner events, separately
+reopened owner/notes/heartbeat/queue files, the host runner, the shared grants
+policy and actual modemlink bridge operation handlers. It verifies due-time
+aggregation, bridge acceptance, no same-day resend, four-file reopen without
+notice resurrection and next-day retirement/monotone identity. Text and local
+STOP are tested during actual Begin persistence and after bridge handoff; only
+proven pre-call cancellation is retried, and late results remain stray while
+Unknown persists across reopen. Quiescence waits for actual accepted Finish
+persistence while owner STOP remains prompt.
+
+Cadence triggers and the engine are controlled local fixtures. The initial
+wrong-code event is recorded by a quiescent public transactional channel before
+installing a modem, avoiding an unrelated urgent alert send in these cases.
+Reconstruction never operates duplicate store writers concurrently. Bridge
+operations are invoked locally, not through production sockets or a carrier.
+Trusted fixture engine release is not owner authentication. These tests strengthen
+composition evidence without qualifying real devices, line priority (#254),
+startup Boot/reissue, durable pacing restart behavior or independent acceptance.
