@@ -461,13 +461,13 @@ func (b *Book) normalize(s Spec) (Spec, error) {
 	case n == 0:
 		return out, guesterr.New("question: the question is empty")
 	case n > MaxText:
-		return out, fmt.Errorf("question: the question is longer than %d characters", MaxText)
+		return out, guesterr.Newf("question: the question is longer than %d characters", guesterr.Num(MaxText))
 	}
 	switch n := utf8.RuneCountInString(out.Default); {
 	case n == 0:
 		return out, guesterr.New("question: a default is required")
 	case n > MaxDefault:
-		return out, fmt.Errorf("question: the default is longer than %d characters", MaxDefault)
+		return out, guesterr.Newf("question: the default is longer than %d characters", guesterr.Num(MaxDefault))
 	}
 	if out.Wait <= 0 {
 		return out, guesterr.New("question: a wait is required")
@@ -480,7 +480,7 @@ func (b *Book) normalize(s Spec) (Spec, error) {
 		out.AskWithin = min(max(out.AskWithin, b.cfg.MinWait), b.cfg.MaxWait)
 	}
 	if len(s.Choices) > MaxChoices {
-		return out, fmt.Errorf("question: more than %d choices", MaxChoices)
+		return out, guesterr.Newf("question: more than %d choices", guesterr.Num(MaxChoices))
 	}
 	found := len(s.Choices) == 0
 	for _, c := range s.Choices {
@@ -489,7 +489,7 @@ func (b *Book) normalize(s Spec) (Spec, error) {
 			return out, guesterr.New("question: a choice cannot be an owner-channel word (STOP, YES, NO, RUN...), since the channel takes it when sent alone; use words like \"go ahead\" or \"wait\"")
 		}
 		if c == "" || utf8.RuneCountInString(c) > MaxChoice {
-			return out, fmt.Errorf("question: each choice must be 1 to %d characters", MaxChoice)
+			return out, guesterr.Newf("question: each choice must be 1 to %d characters", guesterr.Num(MaxChoice))
 		}
 		for _, o := range out.Choices {
 			if strings.EqualFold(o, c) {
@@ -524,7 +524,7 @@ func (b *Book) normalize(s Spec) (Spec, error) {
 		text = t
 	}
 	if len(text) > MaxRendered {
-		return out, fmt.Errorf("question: the question, choices and default are too long for one text (%d bytes, at most %d)", len(text), MaxRendered)
+		return out, guesterr.Newf("question: the question, choices and default are too long for one text (%d bytes, at most %d)", guesterr.Num(len(text)), guesterr.Num(MaxRendered))
 	}
 	if b.cfg.Hidden != nil && b.cfg.Hidden(text) {
 		return out, guesterr.New("question: it reads as carrying a secret, so the owner would not see it")

@@ -115,61 +115,99 @@ func TestToolErrorsAreBuiltOnlyFromSafeText(t *testing.T) {
 		if file.Name.Name == "guesterr" {
 			return
 		}
-		ast.Inspect(file, func(n ast.Node) bool {
-			switch n := n.(type) {
-			case *ast.CallExpr:
-				if sel, ok := n.Fun.(*ast.SelectorExpr); ok && isGuesterr(sel.X) {
-					switch sel.Sel.Name {
-					case "Literal", "Text":
-						t.Errorf("%s: guesterr.%s conversion", fset.Position(n.Pos()), sel.Sel.Name)
-					case "Guest", "Num":
-						if bad := errorIn(n.Args[0]); bad != "" {
-							t.Errorf("%s: guesterr.%s takes %s", fset.Position(n.Pos()), sel.Sel.Name, bad)
-						}
-					}
-				}
-			case *ast.CompositeLit:
-				if sel, ok := n.Type.(*ast.SelectorExpr); ok && isGuesterr(sel.X) && sel.Sel.Name == "Text" {
-					t.Errorf("%s: guesterr.Text literal", fset.Position(n.Pos()))
-				}
-			}
-			return true
-		})
+		for _, v := range unsafeText(file) {
+			t.Errorf("%s: guesterr %s: %s", fset.Position(v.pos), v.what, v.why)
+		}
 	})
 }
 
-// The guard sees an error passed as guest text.
-func TestTheGuardCatchesAnErrorPassedAsText(t *testing.T) {
-	src := `package x
-func f(err error) { _ = guesterr.Newf("%s", guesterr.Guest(err.Error())); _ = guesterr.Literal(s); _ = guesterr.Text{} }`
-	file, err := parser.ParseFile(token.NewFileSet(), "x.go", src, 0)
-	if err != nil {
-		t.Fatal(err)
+const importPath = "github.com/ghbmrk/agentos/broker/guesterr"
+
+type violation struct {
+	pos       token.Pos
+	what, why string
+}
+
+// unsafeText is each place file builds guest text unsafely, under
+// whatever name it imports this package by. A dot-import hides the
+// package's calls from the guard, so it is a violation itself.
+func unsafeText(file *ast.File) []violation {
+	var out []violation
+	name := ""
+	for _, im := range file.Imports {
+		if strings.Trim(im.Path.Value, "`\"") != importPath {
+			continue
+		}
+		switch {
+		case im.Name == nil:
+			name = "guesterr"
+		case im.Name.Name == ".":
+			out = append(out, violation{im.Pos(), "dot-import", "hides its calls from this guard"})
+		case im.Name.Name != "_":
+			name = im.Name.Name
+		}
 	}
-	var hits []string
+	if name == "" {
+		return out
+	}
+	ours := func(e ast.Expr) bool {
+		id, ok := e.(*ast.Ident)
+		return ok && id.Name == name
+	}
 	ast.Inspect(file, func(n ast.Node) bool {
-		if c, ok := n.(*ast.CallExpr); ok {
-			if sel, ok := c.Fun.(*ast.SelectorExpr); ok && isGuesterr(sel.X) {
+		switch n := n.(type) {
+		case *ast.CallExpr:
+			if sel, ok := n.Fun.(*ast.SelectorExpr); ok && ours(sel.X) {
 				switch sel.Sel.Name {
-				case "Literal":
-					hits = append(hits, "Literal")
-				case "Guest":
-					if errorIn(c.Args[0]) != "" {
-						hits = append(hits, "Guest")
+				case "Literal", "Text":
+					out = append(out, violation{n.Pos(), sel.Sel.Name, "conversion"})
+				case "Guest", "Num":
+					if len(n.Args) > 0 {
+						if bad := errorIn(n.Args[0]); bad != "" {
+							out = append(out, violation{n.Pos(), sel.Sel.Name, "takes " + bad})
+						}
 					}
 				}
+			}
+		case *ast.CompositeLit:
+			if sel, ok := n.Type.(*ast.SelectorExpr); ok && ours(sel.X) && sel.Sel.Name == "Text" {
+				out = append(out, violation{n.Pos(), "Text{}", "literal"})
 			}
 		}
 		return true
 	})
-	if strings.Join(hits, ",") != "Guest,Literal" {
-		t.Fatalf("guard saw %v", hits)
-	}
+	return out
 }
 
-func isGuesterr(e ast.Expr) bool {
-	id, ok := e.(*ast.Ident)
-	return ok && id.Name == "guesterr"
+// The guard sees an error passed as guest text, under the package's own
+// name, an alias, or a dot-import.
+func TestTheGuardCatchesAnErrorPassedAsText(t *testing.T) {
+	for _, c := range []struct{ src, want string }{
+		{`package x
+import "github.com/ghbmrk/agentos/broker/guesterr"
+func f(err error) { _ = guesterr.Newf("%s", guesterr.Guest(err.Error())); _ = guesterr.Literal(s); _ = guesterr.Text{} }`, "Guest,Literal,Text{}"},
+		{`package x
+import ge "github.com/ghbmrk/agentos/broker/guesterr"
+func f(err error) { _ = ge.New(ge.Literal(err.Error())); _ = ge.Newf("%s", ge.Guest(err.Error())); _ = ge.Text{} }`, "Literal,Guest,Text{}"},
+		{`package x
+import . "github.com/ghbmrk/agentos/broker/guesterr"
+func f(err error) { _ = New(Literal(err.Error())) }`, "dot-import"},
+		{`package x
+import guesterr "fmt"
+func f(err error) { _ = guesterr.Errorf("%w", err) }`, ""},
+	} {
+		file, err := parser.ParseFile(token.NewFileSet(), "x.go", c.src, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var hits []string
+		for _, v := range unsafeText(file) {
+			hits = append(hits, v.what)
+		}
+		if got := strings.Join(hits, ","); got != c.want {
+			t.Errorf("guard saw %q, want %q in\n%s", got, c.want, c.src)
+		}
+	}
 }
 
 // errorIn names what in e may be an error or its text.

@@ -15,12 +15,14 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/guest"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/question"
+	"github.com/ghbmrk/agentos/broker/recall"
 	"github.com/ghbmrk/agentos/broker/recalltool"
 	"github.com/ghbmrk/agentos/broker/vm"
 	"github.com/ghbmrk/agentos/broker/vm/overlay"
@@ -101,6 +103,57 @@ func (c canaryEffects) Dispatch(context.Context, string) (journal.Status, error)
 }
 func (c canaryEffects) Get(string) (journal.Status, error) { return journal.Status{}, c.err() }
 
+// canaryDir is a recall directory that works until broken, then fails
+// every write with an error naming its file.
+type canaryDir struct {
+	*recall.MemDir
+	dir    string
+	broken *atomic.Bool
+}
+
+func (c canaryDir) err(op string) error {
+	return fmt.Errorf("recall: %s %s/recall/seg-00000001.jsonl: input/output error", op, c.dir)
+}
+func (c canaryDir) Meta() recall.Store { return canaryStore{c.MemDir.Meta(), c} }
+func (c canaryDir) Append(n uint32, b []byte) (int64, error) {
+	if c.broken.Load() {
+		return 0, c.err("append")
+	}
+	return c.MemDir.Append(n, b)
+}
+func (c canaryDir) Rewrite(n uint32, b []byte) error {
+	if c.broken.Load() {
+		return c.err("rewrite")
+	}
+	return c.MemDir.Rewrite(n, b)
+}
+
+type canaryStore struct {
+	recall.Store
+	c canaryDir
+}
+
+func (s canaryStore) Append(b []byte) error {
+	if s.c.broken.Load() {
+		return s.c.err("append meta")
+	}
+	return s.Store.Append(b)
+}
+func (s canaryStore) Rewrite(b []byte) error {
+	if s.c.broken.Load() {
+		return s.c.err("rewrite meta")
+	}
+	return s.Store.Rewrite(b)
+}
+
+// canaryLabels keeps every machine public and fails each raise.
+type canaryLabels struct{ dir string }
+
+func (canaryLabels) Label(string) recall.Label { return recall.Public }
+func (c canaryLabels) Raise(m string) error {
+	return fmt.Errorf("label %s/labels/%s: input/output error", c.dir, m)
+}
+
 type oneLineage struct{}
 
 func (oneLineage) Step(context.Context, string) error { return nil }
@@ -152,7 +205,30 @@ func TestToolErrorsNameNoHostPath(t *testing.T) {
 	tree.markReady()
 
 	wt := &workers.Tools{M: canaryMachines{dir: dir}, Image: "base", Argv: []string{"/sbin/init"}, MaxMemMB: 512}
-	tools := registeredTools(qs, tree, &recalltool.Late{}, wt)
+	// Recall opens with one public item, then its storage and label
+	// raises fail, so each recall tool reaches a failing backend.
+	var broken atomic.Bool
+	rdir := canaryDir{recall.NewMemDir(), dir, &broken}
+	ix, err := recall.Open(rdir, recall.WithLabeler(canaryLabels{dir}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ix.Ingest(recall.Item{Source: recall.Source{Kind: "web", Ref: "https://example.com/draft", Seen: time.Now()},
+		Label: recall.Public, Text: "draft schedule", Received: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	prov, err := recalltool.OpenProvenance(canaryStore{recall.NewMemDir().Meta(), rdir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, err := recalltool.New(recalltool.Config{Index: ix, Prov: prov, Label: func(string) string { return "public" }, Logf: log.Printf})
+	if err != nil {
+		t.Fatal(err)
+	}
+	broken.Store(true)
+	recallTools := &recalltool.Late{}
+	recallTools.Set(rt)
+	tools := registeredTools(qs, tree, recallTools, wt)
 
 	plane, err := guest.New(guest.Config{
 		Dir:      filepath.Join(work, "g"),
@@ -212,7 +288,7 @@ func TestToolErrorsNameNoHostPath(t *testing.T) {
 
 	refRE := regexp.MustCompile(`failed \(ref [0-9a-f]{8}\); the broker's log has the detail`)
 	refs := 0
-	check := func(name string, args any) {
+	check := func(name string, args any) string {
 		t.Helper()
 		body := rpc("tools/call", map[string]any{"name": name, "arguments": args})
 		if strings.Contains(body, canaryToken) || strings.Contains(body, work) {
@@ -221,6 +297,7 @@ func TestToolErrorsNameNoHostPath(t *testing.T) {
 		if refRE.MatchString(body) {
 			refs++
 		}
+		return body
 	}
 	wait := 5.0
 	for _, tl := range list.Result.Tools {
@@ -232,9 +309,32 @@ func TestToolErrorsNameNoHostPath(t *testing.T) {
 	// backend.
 	check(question.ToolAsk, map[string]any{"request_id": "q1", "question": "Ship the draft today?", "default": "wait", "choices": []string{"go ahead", "wait"}, "wait_minutes": wait})
 	check(question.ToolStatus, map[string]any{"request_id": "q1"})
+	// A question past a limit is told the limit, so it can be corrected.
+	long := strings.Repeat("a", question.MaxText+1)
+	if body := rpc("tools/call", map[string]any{"name": question.ToolAsk, "arguments": map[string]any{"request_id": "q2", "question": long, "default": "wait", "wait_minutes": wait}}); !strings.Contains(body, fmt.Sprintf("longer than %d characters", question.MaxText)) {
+		t.Errorf("over-long question: %s", body)
+	}
 	check("effect_request", map[string]any{"request_id": "r1", "account": "owner-mail", "action": "send", "params": map[string]any{"to": "a@example.com"}})
 	check("effect_status", map[string]any{"request_id": "r1"})
 	check("worker_create", map[string]any{"name": "w1"})
+	// Each recall tool past its argument checks: provenance, the label
+	// raise, and the note store fail.
+	for _, c := range []struct {
+		name string
+		args map[string]any
+		want string
+	}{
+		{"recall_search", map[string]any{"query": "draft", "scope": "public"}, "broker could not serve recall now"},
+		{"recall_search", map[string]any{"query": "draft", "scope": "owner"}, "the owner's records are unavailable"},
+		{"owner_preferences", map[string]any{}, "the owner's preferences are unavailable"},
+		{"recall_note", map[string]any{"key": "n1", "text": "a finding"}, "broker could not store the note"},
+	} {
+		logged := strings.Count(logBuf.String(), canaryToken)
+		body := check(c.name, c.args)
+		if !strings.Contains(body, c.want) || strings.Count(logBuf.String(), canaryToken) == logged {
+			t.Errorf("%s(%v) did not reach its failing backend: %s", c.name, c.args, body)
+		}
+	}
 	check("worker_exec", map[string]any{"worker": "w1", "argv": []string{"true"}})
 
 	// The failures were real: the canary reached the broker's log, under
