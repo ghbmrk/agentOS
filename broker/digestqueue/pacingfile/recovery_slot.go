@@ -38,13 +38,23 @@ func (s *StartupSlot) RecoveryState() RecoveryState {
 // recovery, new startup or Drain may bypass admitted/failed recovery occupancy.
 // Success only releases admission for a future explicit Start; nothing activates.
 //
+// One optional pinned settings validates exact ledger binding and copies its
+// protected v2 policy BEFORE admission. The operation captures only that copy,
+// never the caller settings. v1/default remains legacy; invalid policy refuses.
+//
 // Failure/panic is a fixed latched hold with no retry/reset API. Caller owns this
 // synchronous invocation; it may hang forever. State/owner controls remain separate.
 // Another slot, direct DiscardDuplicateTemporary/StartSession, process restart or
 // escaped work bypasses this cooperating in-memory bound. Trusted persistent
 // operator/config/custody/all-user quiescence remains external qualification.
-func (s *StartupSlot) RecoverDuplicate(path string, expected [32]byte) error {
-	return s.recoverDuplicate(path, expected, DiscardDuplicateTemporary)
+func (s *StartupSlot) RecoverDuplicate(path string, expected [32]byte, settings ...*ManifestSettings) error {
+	owners, err := manifestRecoveryOwners(path, settings)
+	if err != nil {
+		return ErrSessionConfig
+	}
+	return s.recoverDuplicate(path, expected, func(path string, expected [32]byte) error {
+		return discardDuplicateTemporary(path, expected, owners)
+	})
 }
 
 // The operation hook is private, solely for deterministic blocked/fault models.

@@ -107,3 +107,20 @@ func (m *ManifestSettings) bindConfig(cfg grants.Config) grants.Config {
 	cfg.PacingMaxStoreLatency = time.Duration(m.manifest.MaxStoreLatencyMillis) * time.Millisecond
 	return cfg
 }
+
+// Recovery binds optional decoded policy to this exact ledger, before admission
+// or I/O. Nil policy means explicitly legacy; invalid v2 never becomes nil policy.
+// Callers retain independent custody of the expected LEDGER digest.
+func manifestRecoveryOwners(path string, settings []*ManifestSettings) ([]uint32, error) {
+	if len(settings) == 0 {
+		return nil, nil
+	}
+	if len(settings) != 1 || settings[0] == nil {
+		return nil, ErrManifest
+	}
+	m := settings[0]
+	if !m.valid || !validManifest(m.manifest) || m.manifest.Ledger != path {
+		return nil, ErrManifest
+	}
+	return append([]uint32(nil), m.manifest.TrustedOwners...), nil
+}

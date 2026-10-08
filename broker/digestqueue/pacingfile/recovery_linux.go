@@ -19,16 +19,29 @@ import (
 // renames or removes ledger/lock. Pin equality does not authenticate or attest
 // freshness/schema. A matching older image is replayable.
 //
+// One optional pinned settings binds this exact ledger; v2 uses protected
+// acquisition/later custody checks, v1/default remains legacy. Never downgrade
+// malformed policy. Existing call syntax remains; function-value signatures change.
+//
 // Named metadata checks are observations: hostile same-UID replacement can race
 // the final check and Unlinkat. Release requires independently qualified custody.
 // Any error (including after unlink/sync/close) is uncertain recovery: do not
 // restart until trusted recovery determines persistence/custody. All I/O is
 // synchronous and can hang; there is no activation, refund, retry or deadline.
-func DiscardDuplicateTemporary(path string, expectedLedger [32]byte) (err error) {
+func DiscardDuplicateTemporary(path string, expectedLedger [32]byte, settings ...*ManifestSettings) error {
+	owners, err := manifestRecoveryOwners(path, settings)
+	if err != nil {
+		return ErrStorage
+	}
+	return discardDuplicateTemporary(path, expectedLedger, owners)
+}
+
+// The owner policy was copied before admission; do not reread caller settings.
+func discardDuplicateTemporary(path string, expectedLedger [32]byte, owners []uint32) (err error) {
 	if expectedLedger == ([32]byte{}) {
 		return ErrStorage
 	}
-	s, e := OpenExclusive(path)
+	s, e := openExclusive(path, owners)
 	if e != nil {
 		return ErrStorage
 	}

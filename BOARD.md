@@ -373,3 +373,6 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 
 | W5-D66 | [Uncertain constructor cleanup admission hold](briefs/W5-D66.md) | OP-1, CH-15 | additive proposal; tests-first WIP | Codex GPT-6 |
 | W5-D66-Q | [Constructor cleanup/recovery qualification](briefs/W5-D66.md#release-qualifications) | OP-1, CH-15 | external release hold | independent review |
+
+| W5-D67 | [Explicit protected manifest recovery](briefs/W5-D67.md) | OP-1, CH-15 | additive proposal; tests-first WIP | Codex GPT-6 |
+| W5-D67-Q | [Pinned recovery/operator custody qualification](briefs/W5-D67.md#release-qualifications) | OP-1, CH-15 | external release hold | independent review |

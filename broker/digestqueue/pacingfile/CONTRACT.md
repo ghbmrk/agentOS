@@ -501,3 +501,17 @@ slot Drain and retain cooperating admission. No new worker/API/hook or raw panic
 is published. Existing direct/predecoded/reader entries share this boundary.
 Successful observed cleanup still permits explicit complete Drain. Uncertain
 cleanup never authorizes restart or proves retained/released OS custody.
+
+## W5-D67 explicit manifest recovery policy
+
+InspectTemporary, DiscardDuplicateTemporary and StartupSlot.RecoverDuplicate accept
+at most one optional already pin-validated ManifestSettings. Before I/O/admission,
+reject nil/invalid/extra settings or a different Ledger binding; copy the policy.
+Version2 uses that copy in the SAME protected acquisition/later custody checks,
+without ordinary fallback. Version1/default calls retain ordinary behavior. The
+expected LEDGER digest remains separately trusted, never config/observed temp trust.
+The slot captures copied owners, not the supplied settings, for its actual existing
+owned action and failure/panic latch. No new public wrapper/worker/schema or startup
+cleanup. Invalid settings do not occupy the slot. Actual action failure stays held.
+Existing calls remain valid; typed function-value signatures change and need review.
+Unsupported platforms refuse with fixed error/zero report; no recovery fallback.

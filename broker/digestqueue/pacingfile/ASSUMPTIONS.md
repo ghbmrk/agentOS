@@ -102,3 +102,24 @@ No new callback/hook/worker, retry/reset/repair/replacement writer, revocation,
 activation or deadline. Synchronous construction/cleanup may hang forever. Trusted
 external recovery and full consumer/root/config/pin/operator/media/current-base/
 strongest independent security holds remain; D37 fault availability not bypassed.
+
+## W5-D67 recovery policy adoption
+
+Optional settings are explicit broker/operator authority from independently pinned
+configuration; equality to a caller digest does not authenticate freshness/source.
+Ledger authority is separate from the manifest or temporary digest. Matching old
+settings/bytes replay. Omitting settings/v1/direct calls/other slots/reboot bypass
+this opt-in policy. Copied owners avoid rereading caller settings after admission;
+caller still owns trusted config/operator/full downstream quiescence and all writers.
+UID/mode/name/version observations are not atomic root/ACL/mount/same-UID/lock/media
+custody. Duplicate check-to-unlink races remain; failed unlink/sync/Close requires
+trusted external determination before restart, no reset/retry/repair/activation.
+Diagnosis never grants cleanup/restart; nonduplicate/unsafe/missing/partial/oversized
+input stays held, malformed duplicate cleanup does not repair accounting schema.
+New variadic signatures change function-value types: source/API adoption requires
+explicit independent review. Synchronous acquisition/read/action/drain/Close can
+hang forever with custody retained, no interruption/deadline/refund/revocation/
+global or persistent quota/anti-delete/rollback/restore/config-integrity claim.
+W5-D67-Q/inherited current-base/consumer/pin/root/media/security/latency qualifications
+remain, preserving D37 ordinary/urgent/reissue fault availability hold. Tests use
+owned synthetic roots/files/pins only, no shared-root chmod/hidden skips/fallback.

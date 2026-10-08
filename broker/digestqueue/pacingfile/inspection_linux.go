@@ -17,11 +17,18 @@ import (
 // cleanup, refund, repair, activation or restart. Names/metadata are observations,
 // not atomic hostile-same-UID/lock/restore custody. All I/O/Close may hang forever.
 // Any read/custody/Close fault returns fixed ErrStorage and ZERO report.
-func InspectTemporary(path string, expectedLedger [32]byte) (report TemporaryReport, err error) {
+// One optional pinned settings binds the exact ledger and copies its v2 protected
+// policy before I/O; v1/default remains legacy. Invalid policy never downgrades.
+// Existing call syntax remains; function-value signatures change.
+func InspectTemporary(path string, expectedLedger [32]byte, settings ...*ManifestSettings) (report TemporaryReport, err error) {
+	owners, e := manifestRecoveryOwners(path, settings)
+	if e != nil {
+		return TemporaryReport{}, ErrStorage
+	}
 	if expectedLedger == ([32]byte{}) {
 		return TemporaryReport{}, ErrStorage
 	}
-	s, e := OpenExclusive(path)
+	s, e := openExclusive(path, owners)
 	if e != nil {
 		return TemporaryReport{}, ErrStorage
 	}
