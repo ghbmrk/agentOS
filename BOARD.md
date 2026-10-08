@@ -269,3 +269,23 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | W9 | [Questions in the guest plane](briefs/W9.md) | P3-8 merged, #68 merged | — | merged (f38aeed8) |
 | W9a | [Questions follow-ups (#95)](briefs/W9a.md) | W9 | Next build item A (part 2) | merged (#125 (part 2; part 1 #98)) |
 | CH-20w | [Evidence delivery](briefs/CH-20w.md) | CH-20 merged; P2-6m wired into the vault process | — | queued (blocked on mail wiring) |
+
+## Deep UX review (2026-10-08)
+
+Primary lane; advisory proposals, remediation unclaimed. [Review](reviews/ux/2026-10-08-deep-ux-review.md). Existing packages retain implementation ownership; acceptance extensions do not create competing claims.
+
+| ID | Package | Needs | State |
+|---|---|---|---|
+| UX3 | [Separate deep UX review and work-item intake](briefs/UX3.md) | DOC-3 | in review (Codex proposal to primary; documentation only) |
+| UX3-1 | [Visible provider sign-in and bounded retry](briefs/UX3-1.md) | P2-2w c4 | queued (P1; proposed release; unclaimed) |
+| UX3-2 | [Repair home networking after pairing](briefs/UX3-2.md) | P2-2w c3/c4 | queued (P2; proposed release; unclaimed) |
+| UX3-3 | [Explain verified-update waits during setup](briefs/UX3-3.md) | UPD-b2; P2-2w c4 | queued (P2; proposed release; unclaimed) |
+| UX3-4 | [Qualify setup routes and the first useful task](briefs/UX3-4.md) | D-051 route work; S8; P2-2w c4; INT-A/H6 evidence | queued (P1; proposed release; unclaimed) |
+| UX3-5 | [Preserve task composition across authentication](briefs/UX3-5.md) | L1 resolution of O5 versus CH-14; W5 | queued (P2; proposed release; unclaimed) |
+| UX3-6 | [Inspect every approval item over the owner channel](briefs/UX3-6.md) | L1 read-only command grammar; existing batch gate | queued (P2; proposed release; unclaimed) |
+| UX3-7 | [Make withheld-result retrieval truthful and bounded](briefs/UX3-7.md) | Primary acceptance of minimum CH-20p release split; CH-20w delivery wiring | queued (P2; proposed release; unclaimed) |
+| UX3-8 | [Show complete status and working next steps](briefs/UX3-8.md) | Existing authenticated OpLines; W5 coordination | queued (P2; proposed release; unclaimed) |
+| UX3-9 | [Preserve the consequences of STOP on the local page](briefs/UX3-9.md) | Existing journal StopReport; preserve SR3-1/SR3-2 fixes | queued (P2; proposed release; unclaimed) |
+| UX3-10 | [Identify the learned changes affected by FORGET](briefs/UX3-10.md) | W3-forget-a/b; L1 only if take-back policy changes | queued (P2; proposed release; unclaimed) |
+| UX3-11 | [Keep critical controls readable on small phones](briefs/UX3-11.md) | Localui; preserve SR3-3 complete approval fields | queued (P2; proposed release; unclaimed) |
+| UX3-12 | [Add owner-completable recovery drills to W6](briefs/UX3-12.md) | W6; BAK-1 wiring; W3-forget-b restore replay | queued (P2; proposed release; unclaimed) |

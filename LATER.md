@@ -2,7 +2,7 @@
 Generated 2026-10-07 by the COST thread's audit; the coordinator updates it. Rows marked LATER are not started until the first release ships (DECISIONS D-048). Promote a row by moving it to "Release" with the acceptance test it now blocks.
 
 ## Summary
-Non-merged rows audited: 129; the 67 stale rows it found were reconciled into BOARD.md on 2026-10-08 (DOC-3), and rows since merged were removed from the tables below. Open now: Release 56 (6 marked unsure), Later 57 (table counts refreshed with SR3 intake; no existing row reclassified).
+Non-merged rows audited: 129; the 67 stale rows it found were reconciled into BOARD.md on 2026-10-08 (DOC-3), and rows since merged were removed from the tables below. Open at that audit: Release 56 (6 marked unsure), Later 57 (table counts refreshed with SR3 intake; no existing row reclassified).
 No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41) has no board row but blocks IMG-1, HOST-1a/1b/1c part 2 and W3-builder-ship.
 
 ## Release (needed for A1–A15 or an invariant)
@@ -72,7 +72,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | FIRSTBOOT-text | `broker/firstboot` wording (L3 on #379, points 3–5): an unexpected `ScheduleFirstBoot` error still reads "updating to version N"; with several mirrors failing, STATUS names only the last mirror's failure; `Hold()` in `fell_back` says "when the update finishes" where `Status()` says it waits for a newer release. Text only; the gate stays held in each case |
 | P2-8b | Deferred re-encrypt after trusted-PC removal; slot removal already covers CRED-9 |
 | P3-6d | Digest wording for deleted procedures; no A-test needs it |
-| CH-20p | Page view of kept replies; A15 needs delivery, not this view |
+| CH-20p | Broad page view remains later; UX3-7 below proposes splitting minimum truthful withheld-result retrieval into release (CH-12/20, A15); primary acceptance pending |
 | CH-20a | Attachments conflict with security C4; needs review; not in A15 |
 | CH-20m | MORE command for redirected replies; convenience |
 | P2-2a f1 | L3 SHOULD on page wording after a changed item |
@@ -145,3 +145,26 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | HOST-1d | cryptsetup / LUKS2 | Vault-keyed disk encryption without custom crypto |
 | SR2-4i | systemd resource control (IOWeight=, CPUWeight=) | Sets io.weight and cpu.weight per slice; add iocost QoS on the image |
 | UPD-b | systemd-sysupdate (S7 stack) | First-boot update-before-trust already fits the chosen image stack |
+
+## Deep UX review intake (2026-10-08)
+
+Additional advisory intake, excluded from the earlier audit counts: UX3 registers twelve proposed release remedies/acceptance extensions and three later proposals. Primary must accept the intake and assign implementation work; no existing package is claimed or completed. CH-20p changes classification only for the minimum scope if primary accepts UX3-7.
+
+| ID | Class | Acceptance basis / overlap |
+|---|---|---|
+| UX3 | release | Documentation intake; remedies remain open |
+| [UX3-1](briefs/UX3-1.md) | release (proposed) | ONB-3, ONB-4, ONB-5, ONB-8; A1; reuse P2-2w c4 |
+| [UX3-2](briefs/UX3-2.md) | release (proposed) | ONB-4, ONB-8, CH-7, CH-12; A1; reuse P2-2w c3/c4 |
+| [UX3-3](briefs/UX3-3.md) | release (proposed) | ONB-4, CH-12, UPD-3; A1, A7; reuse UPD-b2; P2-2w c4 |
+| [UX3-4](briefs/UX3-4.md) | release (proposed) | ONB-3, ONB-8, CAP-9, CAP-13; A1, A10; reuse D-051 route work; S8; P2-2w c4; INT-A/H6 evidence |
+| [UX3-5](briefs/UX3-5.md) | release (proposed) | CH-11, CH-14, CH-7; A3, A14; reuse L1 resolution of O5 versus CH-14; W5 |
+| [UX3-6](briefs/UX3-6.md) | release (proposed) | CH-8, CH-10, CH-12, CH-13, CH-18, OP-3; A3, A14; reuse L1 read-only command grammar; existing batch gate |
+| [UX3-7](briefs/UX3-7.md) | release (proposed) | CH-12, CH-19, CH-20, CH-21, CRED-1; A14, A15; reuse Primary acceptance of minimum CH-20p release split; CH-20w delivery wiring |
+| [UX3-8](briefs/UX3-8.md) | release (proposed) | CH-7, CH-12, OP-9; A11, A14; reuse Existing authenticated OpLines; W5 coordination |
+| [UX3-9](briefs/UX3-9.md) | release (proposed) | OP-6, CH-2, CH-7, CH-12, CH-16; A4, A14; reuse Existing journal StopReport; preserve SR3-1/SR3-2 fixes |
+| [UX3-10](briefs/UX3-10.md) | release (proposed) | CAP-3, CH-12, CH-7; A14; reuse W3-forget-a/b; L1 only if take-back policy changes |
+| [UX3-11](briefs/UX3-11.md) | release (proposed) | CH-12, CH-7, CH-3; A1, A14; reuse Localui; preserve SR3-3 complete approval fields |
+| [UX3-12](briefs/UX3-12.md) | release (proposed) | REC-1, REC-4, BAK-1, CH-7; A8; reuse W6; BAK-1 wiring; W3-forget-b restore replay |
+| UX3-L1 | later | Distinguish learned-change receipts by trusted task class, stable adoption ID and measured benefit; extend W5/P3-6d without delaying required digest delivery or inventing agent-authored success claims |
+| UX3-L2 | later | Authenticated selection/search for older FORGET records; the current newest-five cap was deliberate W3-forget-a scope, not a new release defect |
+| UX3-L3 | later | Concrete BAK-1 follow-up for backup date/age, scheduled backups and stale-backup alerts; preserve current-key compatibility and optional onboarding backup choice |
