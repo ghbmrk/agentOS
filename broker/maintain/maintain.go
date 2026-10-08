@@ -773,7 +773,7 @@ func pendingLine(p *pending) string {
 	case p.Why == waitAttestation:
 		return fmt.Sprintf("Security update %d is waiting for an independent test report before it installs.", p.Version)
 	case p.Why == waitSoak:
-		return fmt.Sprintf("Update %d is out. The box will offer it after %s, once other boxes have tested it.", p.Version, p.Until.Format("Mon 2 Jan"))
+		return fmt.Sprintf("Update %d is out. I will offer it after %s, once other boxes have tested it.", p.Version, p.Until.Format("Mon 2 Jan"))
 	case p.Why == waitPreempted:
 		return fmt.Sprintf("Update %d was found. I will look at it again soon.", p.Version)
 	case p.Security:

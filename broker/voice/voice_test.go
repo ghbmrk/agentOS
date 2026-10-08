@@ -31,7 +31,7 @@ var pending = map[string]string{
 }
 
 // literals returns the string literals of every non-test Go file under
-// root (relative to the broker module), keyed by "dir/file.go:line".
+// root (relative to the broker module), keyed by "dir/file.go:line:col".
 func literals(t *testing.T, root string) map[string]string {
 	t.Helper()
 	out := map[string]string{}
@@ -49,25 +49,61 @@ func literals(t *testing.T, root string) map[string]string {
 		if !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
 			return nil
 		}
-		fset := token.NewFileSet()
-		f, err := parser.ParseFile(fset, p, nil, 0)
+		lits, err := fileLiterals(p, nil)
 		if err != nil {
 			return err
 		}
-		ast.Inspect(f, func(n ast.Node) bool {
-			if bl, ok := n.(*ast.BasicLit); ok && bl.Kind == token.STRING {
-				if s, err := strconv.Unquote(bl.Value); err == nil {
-					out[p+":"+strconv.Itoa(fset.Position(bl.Pos()).Line)] = s
-				}
-			}
-			return true
-		})
+		for k, v := range lits {
+			out[k] = v
+		}
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return out
+}
+
+// fileLiterals returns one file's string literals keyed by
+// "name:line:col", so two literals on one line stay distinct. src nil
+// reads name from disk.
+func fileLiterals(name string, src any) (map[string]string, error) {
+	out := map[string]string{}
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, name, src, 0)
+	if err != nil {
+		return nil, err
+	}
+	ast.Inspect(f, func(n ast.Node) bool {
+		if bl, ok := n.(*ast.BasicLit); ok && bl.Kind == token.STRING {
+			if s, err := strconv.Unquote(bl.Value); err == nil {
+				pos := fset.Position(bl.Pos())
+				out[name+":"+strconv.Itoa(pos.Line)+":"+strconv.Itoa(pos.Column)] = s
+			}
+		}
+		return true
+	})
+	return out, nil
+}
+
+// Two literals on one line must both be reported (CH-21 review 1).
+func TestTwoLiteralsOnOneLineBothChecked(t *testing.T) {
+	lits, err := fileLiterals("x.go", "package x\nvar _ = f(\"the box will\", \"Mon 2 Jan\")\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lits) != 2 {
+		t.Fatalf("want both literals, got %v", lits)
+	}
+	hit := 0
+	for _, s := range lits {
+		if thirdPerson.MatchString(s) {
+			hit++
+		}
+	}
+	if hit != 1 {
+		t.Fatalf("the third-person literal was hidden: %v", lits)
+	}
 }
 
 func TestNoThirdPersonSelfReference(t *testing.T) {
