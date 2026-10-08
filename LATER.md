@@ -103,6 +103,8 @@ No security-fix row (SR2-*) is classed Later. P2-1 (host image, PR #41) has no b
 | CRED-4b f8 | L3 on #300 (1960aed re-review #4): camelCase false positives (`hotKey 2024-10-08-release-notes`, `useToken 2024-…`, `?sortKey=created_at_2024_desc`); fail closed, part-2 negative corpus |
 | CRED-4b f9 | L3 on #300 (e000ecc re-review): an initialism or capitalised word before a label word is redacted (`USBKey 2024-10-08-firmware-notes`, `PGPKey: 2024-…`, `MyKey: 2024-…`); fail closed, part-2 negative corpus |
 | CRED-4b f10 | L3 on #300 (f135e43 re-review): the label rule's value charset misses passwords with other punctuation (`password: Abc123@xyz789#Qq`) |
+| SR2-3h s1 | Security on #362 (362-1): a runsc Go panic after the guest started reaches the guest as its stderr; fail closed on exit 2 with Go's panic trailer. Needs a runsc bug |
+| SR2-3h s2 | Security on #362 (362-2): `gvisor.Exec`'s error names the exec log's host path, safe only while workers refs it; return a pathless `vm` sentinel (V32's follow-up) |
 
 ## Reuse candidates
 | ID | Component | Why |
