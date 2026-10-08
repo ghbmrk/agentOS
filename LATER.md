@@ -2,7 +2,7 @@
 Generated 2026-10-07 by the COST thread's audit; the coordinator updates it. Rows marked LATER are not started until the first release ships (DECISIONS D-048). Promote a row by moving it to "Release" with the acceptance test it now blocks.
 
 ## Summary
-Non-merged rows audited: 129; the 67 stale rows it found were reconciled into BOARD.md on 2026-10-08 (DOC-3), and rows since merged were removed from the tables below. Open now: Release 56 (2 marked unsure), Later 58 (table counts refreshed with SR3 intake; no existing row reclassified).
+Non-merged rows audited: 129; the 67 stale rows it found were reconciled into BOARD.md on 2026-10-08 (DOC-3), and rows since merged were removed from the tables below. Row counts are not kept here, because every PR that touches a table made them stale; count the table rows (a line starting `| ` under each heading) when a number is needed.
 No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41) has no board row but blocks IMG-1, HOST-1a/1b/1c part 2 and W3-builder-ship.
 
 ## Release (needed for A1–A15 or an invariant)
@@ -141,6 +141,13 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | HK-1 f3 | Lens screen on #401: `_scratch_dir` drops `TemporaryDirectory`'s chmod-and-retry cleanup of read-only entries; removal still raises rather than passing |
 | W5a-resume-pace | A page resume ask waits for the gate's CH-15 batch before it shows under Approvals; the page says it shows shortly |
 | W5a-resume-dedupe | Two concurrent asks for one pause can file two requests; approving one resumes and the other then fails at apply, so nothing widens twice |
+| DOC-4 f1 | L3 on #400: a no-PR record must still write `head <sha>` for a `main` commit and invent a package (`POTENCY`); accept `PR none · package none · main <sha>` in the Record check |
+| DOC-4 f2 | L3 on #400: the Record check skips lens files without a `YYYY-MM-DD-` name (e.g. `reviews/ux/pr500.md`); require dated names for non-README files in lens directories |
+| DOC-4 f3 | L3 on #400: the Record check accepts the line anywhere in the file, not only under the title as OPERATING §4 step 3 says; harmless today |
+| DOC-4 f4 | L3 on #400: U15 sits between U10 and U13 in `broker/update/ASSUMPTIONS.md`; cosmetic reorder |
+| DOC-4 f5 | Lens screen on #400: the Mark-requested SR3 and deep-potency reviews are indexed only by filename, beside per-PR records; keep a one-line "Requested reviews" pointer list (regex part is DOC-4 f1) |
+| DOC-4 f6 | Lens screen on #400: OPERATING §4 step 1 could give the run index in one command, `grep -H -e '^Record:' -e '^Verdict' reviews/<lens>/*.md` |
+| DOC-4 f7 | Lens screen on #400: `RECORD_DIRS` is hard-coded, so a new lens directory goes unchecked, and `records()` globs the disk, so an untracked scratch record fails a local run |
 
 ## Reuse candidates
 | ID | Component | Why |

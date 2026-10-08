@@ -28,19 +28,7 @@ Weekly runs over all of `main` until 2026-10-07, when the batched lens screen re
 |---|---|---|
 | 1 | e841b78 | [2026-10-04](2026-10-04-security-review.md) |
 | 2 | 76ac0b9 | [2026-10-05](2026-10-05-security-review.md) |
-| Lens 2026-10-08a (#300 #319 #323 #327) | be5a80c | [2026-10-08](2026-10-08-lens-bundle-a.md) |
-| Lens 2026-10-08b (#320 #322 #324 #329 #321) | be5a80c | [2026-10-08](2026-10-08-lens-bundle-b.md) |
-| Lens 2026-10-08d (#362) | 32c6e67 | [2026-10-08](2026-10-08-pr362.md) |
-| Lens 2026-10-08 (#363) | b75d319 (re-signed 196e703) | [2026-10-08](2026-10-08-sec-363.md) |
-| Lens 2026-10-08f (#372) | 7b753eb | [2026-10-08](../combined/2026-10-08-pr372.md) |
-| Lens 2026-10-08e (#378, #379) | 22e4b5f | [#378](2026-10-08-pr378.md), [#379](2026-10-08-pr379.md) |
-| Lens 2026-10-08e (#367 at 9bef9df) | 7b753eb | [2026-10-08](2026-10-08-pr367.md) |
-| Lens 2026-10-08e (#370 at 5c21fc2) | 7b753eb | [2026-10-08](2026-10-08-pr370.md) |
-| Lens 2026-10-08g (#393) | 6b40ddc (PR head) | [2026-10-08](2026-10-08-sec-393.md) |
-| Lens 2026-10-08h (#391) | cbbf80e (PR head) | [2026-10-08](2026-10-08-sec-391.md) |
 
-## Requested architecture reviews
+## Records
 
-| Run | main at | Review |
-|---|---|---|
-| SR3: Mark-requested security and architecture review; eight release work items, not an implementation sign-off | 7b753eb | [2026-10-08](2026-10-08-architecture-review.md) |
+Per-PR and per-bundle records are the files `YYYY-MM-DD-*.md` in this directory (tier-B combined passes are in `../combined/`), in filename order, so there is no run number to pick. Each opens with a `Record:` line giving PR, package and head SHA; `tools/doclint.py` checks it on files dated 2026-10-09 or later. No run rows are appended to this README, so open PRs do not conflict on it; recurring kinds and the checks that replaced them still are (DOC-4, docs/OPERATING.md §4).
