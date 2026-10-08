@@ -29,12 +29,18 @@ var (
 		regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`),                                       // AWS
 		regexp.MustCompile(`\bxox[abprs]-[A-Za-z0-9-]{10,}`),                             // Slack
 	}
-	// labelled: a run of 16 or more token characters right after a secret
-	// label ("api key: 9f86...", "token 9f86...", "secret: wJal.../K7..."),
-	// which the entropy rule misses for hex and for values with '/'. The value
-	// must hold a digit, so labelled prose ("token-based-auth") is left alone.
+	// labelled: a run of 16 or more token characters after a secret label
+	// ("api key: 9f86...", "token 9f86...", "secret: wJal.../K7..."), which
+	// the entropy rule misses for hex and for values with '/'. The label must
+	// stand alone ('_' counts as a break, for "aws_secret_access_key") and be
+	// followed by a separator: whitespace, ':' or '=', or quotes and short
+	// snapshot attribute groups ("[active] [ref=e5] [cursor=pointer]"). So
+	// paths and file names such as "keyboard-shortcuts-v2", "turkey/..." or
+	// "api_key_rotation_2026.pdf" stay intact. The value must hold a digit,
+	// so labelled prose ("token-based-auth") is left alone too.
 	// Stricter than S5's protocol.py, which has no such rule.
-	labelled    = regexp.MustCompile(`(?i)(api[\s_-]?key|key|token|secret|password|passwd)s?["']?(?:\s*\[ref=(?:f[0-9]+)?e[0-9]+\])?\s*(?:[:=]\s*)?["']?([A-Za-z0-9+/=_.-]{16,})`)
+	labelled = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(?:api[\s_-]?key|key|token|secret|password|passwd)s?` +
+		`(?:["']|\s*\[[^\]\n]{1,40}\])*(?:\s*[:=]\s*|\s+)["']?([A-Za-z0-9+/=_.-]{16,})`)
 	secretParam = regexp.MustCompile(`(?i)(token|code|key|sig|auth|session|password|secret)`)
 	candidate   = regexp.MustCompile(`[A-Za-z0-9+_=-]{24,}`)
 	urlInText   = regexp.MustCompile(`https?://[^\s"'<>]+|/url: \S+`)
@@ -74,7 +80,7 @@ func redactLabelled(text string, n *int) string {
 	var b strings.Builder
 	last := 0
 	for _, m := range labelled.FindAllStringSubmatchIndex(text, -1) {
-		v0, v1 := m[4], m[5]
+		v0, v1 := m[2], m[3]
 		if !digit.MatchString(text[v0:v1]) {
 			continue
 		}

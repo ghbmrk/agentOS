@@ -104,6 +104,12 @@ func TestDetectorRedactsLabelledValues(t *testing.T) {
 		"access_token: " + hex32:                 hex32,
 		"- text: Key " + hex32:                   hex32,
 		`- textbox "API key" [ref=e5]: ` + hex32: hex32,
+		// Playwright puts state attributes before the ref and some after it.
+		`- textbox "API key" [active] [ref=e5]: ` + hex32:                  hex32,
+		`- textbox "API key" [disabled] [ref=e5]: ` + hex32:                hex32,
+		`- textbox "API key" [ref=e5] [cursor=pointer]: ` + hex32:          hex32,
+		`- textbox "Token" [active] [ref=f1e5] [cursor=pointer]: ` + hex64: hex64,
+		"aws_secret_access_key = " + aws:                                   aws,
 	} {
 		out, n := Detect(in)
 		if strings.Contains(out, secret) || n == 0 {
@@ -120,6 +126,14 @@ func TestDetectorLabelRuleLeavesOrdinaryTextAlone(t *testing.T) {
 		"- link \"token-based-authentication-guide\" [ref=e7]",
 		"secret: santa-gift-exchange-list",
 		"key 2024-10-08",
+		// The label must stand alone and be followed by a separator, so
+		// paths and file names that merely contain one keep working.
+		"- link \"Shortcuts\" [ref=e8]:\n  - /url: /docs/keyboard-shortcuts-v2",
+		"/url: /recipes/turkey/roast-2024-edition",
+		"/url: /blog/monkeys/2024-10-08-zoo-visit",
+		"/url: https://example.com/settings/api-keys/rotation-guide-2024",
+		"api_key_rotation_2026.pdf",
+		"secret_santa_2024_participants.csv",
 	} {
 		if out, n := Detect(in); n != 0 || out != in {
 			t.Errorf("%q changed to %q (n=%d)", in, out, n)
