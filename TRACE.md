@@ -138,7 +138,7 @@ Covered: 131 / 159 requirement IDs
 | OSS-3 | `broker/cleanroom/cleanroom_test.go`, `broker/cleanroom/integration_test.go` |
 | OSS-4 | `broker/attest/schema_test.go`, `broker/update/attest_test.go` |
 | OSS-5 | `broker/cleanroom/cleanroom_test.go`, `broker/hint/emitter_test.go`, `broker/hint/hint_test.go`, `broker/hint/schema_test.go` |
-| OSS-6 | `broker/pubid/clock_test.go`, `broker/pubid/identity_test.go`, `broker/pubid/imports_test.go`, `broker/pubid/mono_linux_test.go`, `broker/pubid/publisher_test.go`, `broker/pubid/restart_test.go`, `broker/pubid/review_test.go` |
+| OSS-6 | `broker/pubid/batch_test.go`, `broker/pubid/carry_test.go`, `broker/pubid/clock_test.go`, `broker/pubid/identity_test.go`, `broker/pubid/imports_test.go`, `broker/pubid/mono_linux_test.go`, `broker/pubid/publisher_test.go`, `broker/pubid/restart_test.go`, `broker/pubid/review_test.go`, `broker/pubsend/pubsend_test.go` |
 | OSS-7 | `broker/hint/emitter_test.go` |
 | OSS-8 | `broker/update/attest_test.go` |
 | OSS-9 | `broker/follow/follow_test.go`, `broker/grants/follow_test.go`, `broker/maintain/follow_test.go`, `broker/maintain/maintain_test.go`, `broker/update/follow_test.go`, `broker/update/oss9_test.go` |
