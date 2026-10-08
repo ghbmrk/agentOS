@@ -6,7 +6,7 @@
 
 ## Scope and coordination
 
-This PR adds BOARD/LATER entries and `briefs/POT*.md`, and records the independent lens verdicts for #388 and #390 under `reviews/security/` and `reviews/combined/` as required by OPERATING §4. The first implementation drafts are POT-P3, POT-P5 and POT-P6. They are explicit, bounded cross-lane proposals to primary under AGENTS item 5; they do not establish a standing Codex lane, a merged claim, or permission to merge. The remaining rows are unclaimed. Primary accepts the package split and assignments before promotion to ready. No SPEC, DECISIONS, lane ownership, production configuration, or previously queued work changes here.
+This PR adds BOARD/LATER entries and `briefs/POT*.md`, and records the independent lens verdicts for #388, #390 and #399 under `reviews/security/` and `reviews/combined/` as required by OPERATING §4. The first implementation drafts are POT-P3, POT-P5 and POT-P6. They are explicit, bounded cross-lane proposals to primary under AGENTS item 5; they do not establish a standing Codex lane, a merged claim, or permission to merge. The remaining rows are unclaimed. Primary accepts the package split and assignments before promotion to ready. No SPEC, DECISIONS, lane ownership, production configuration, or previously queued work changes here.
 
 The implementation PRs are stacked on this planning branch so every draft has a brief and the same dependency record. They remain drafts even after local checks or an independent review. Primary retargets/rebases them after accepting the intake. The author's request authorizes drafting implementations; it does not itself settle CHG-2 grader activation, L1 task semantics, custody qualification, live account trials, or deferred scope.
 
