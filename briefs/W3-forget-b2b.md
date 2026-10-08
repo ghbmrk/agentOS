@@ -7,5 +7,3 @@ FORGET takes the agent machine's work on the task back on the ask-first deletion
 **Precondition:** W3-forget-b2
 
 **Owner:** Next build item B
-
-**State:** merged (#327)

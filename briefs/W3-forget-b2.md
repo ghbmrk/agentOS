@@ -7,5 +7,3 @@ Part b2 of W3-forget-b: builder-lineage rollback keeps other goals' work and req
 **Precondition:** W3-forget-a
 
 **Owner:** Next build item B
-
-**State:** merged (#321)

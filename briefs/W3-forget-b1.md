@@ -1,21 +1,34 @@
 # W3-forget-b1: Authenticated forget log checked on restore
 
-Board section: Integration: wiring merged packages into the box.
+Board section: Integration: wiring merged packages into the box. Part of W3-forget-b (briefs/W3-forget-b.md); SPEC CAP-3, A8.
 
-Part b1 of W3-forget-b: the authenticated forget log replayed over restored backups and machine snapshots, truncation and appends detected; a failed check keeps the restore pending and tells the owner (security C3); then the done text gains its detected backups sentence, replacing part a's "Older backups and your agent's own files may still hold it" (UX F4).
+**Requirement IDs:**
+- **CAP-3** (SPEC): "Deletion requests propagate: the record and everything derived from it leave recall at once." A forget must survive a restore: a backup or machine snapshot made before the forget must not bring the task back.
+- **Acceptance:** none of A1–A15 names a forget across a restore. The restore path is A8 (portability and recovery: restore onto a new drive with the recovery key), and the new tests trace to CAP-3 and A8.
+- **Security C3:** the lens condition carried on the W3-forget-b row since the split, extending security C2 on #160 (briefs/W3-forget.md: "its reach also covers backups made before the forget and machine snapshots"). It requires an authenticated forget log that is replayed over every restored backup and machine snapshot, with truncation and appended entries detected. A failed check keeps the restore pending and tells the owner.
+- **UX F4:** once the replay exists, the done text says what happens to a restored backup in place of part a's caveat (`forgetBackups` in `broker/cmd/agentosd/forget.go`, whose comment records the intent: "a restored backup is forgotten again at once").
 
-**Design (Mark's ruling on #317, 2026-10-08, accepting the builder's proposal with one change):**
-1. Location: a copy of the log at every backup destination (`recovery.backupLog`) plus one in the state dir.
-2. Key: HMAC keyed from the recovery key.
-3. Anchor: hash-chained entries, anchored to the V6 TPM NV counter (`vault/rollback.go`) where one exists.
-4. No anchor (any restore to a different machine): the restore stays pending until the owner confirms by a multiple-choice text of last-forget dates, spaced far apart, exactly one correct; only dates are shown, never forgotten content.
+**Design (Mark's ruling on #317, 2026-10-08, items 1–3):**
+1. **Location:** a copy of the log at every backup destination (`recovery.backupLog`) plus one in the state dir.
+2. **Key:** HMAC keyed from the recovery key.
+3. **Anchor:** hash-chained entries, anchored to the V6 TPM NV counter (`broker/vault/rollback.go`) where one exists.
 
-**Open point, not yet ruled (raised on #317):** for a stale backup the owner's real last forget is not among the options, so the text also needs a "more recent than all of these" choice (and "no forgets" where the log is empty); any answer other than the restored date keeps the restore pending. Confirm the ruling's DECISIONS.md row (decision-queue PR) before building item 4.
+**Restore with no anchor** (any restore to a different machine): this part fails closed. The restore stays pending, and the owner is told that the forget log could not be checked on this machine. The owner's confirmation path is W3-forget-b1-4, which waits on a ruling.
 
-Out of scope: the backup-delete pointer (waits on P2-2w d).
+**F4 done text (proposed; needs UX lens sign-off before merge, since no source fixes the wording).** These replace `forgetBackups` and `forgetBackupsOnly`:
+- **Agent not taken back:** " Your agent's own files may still hold it. If an older backup is restored, I'll forget it again before your agent starts."
+- **Agent taken back:** " If an older backup is restored, I'll forget it again before your agent starts."
 
-**Precondition:** W3-forget-a
+**Needs:** W3-forget-a
 
-**Owner:** Next build item B
+**Gate:** tier A: strongest model, explicit threat check (log rollback by restoring an older destination copy, truncation, a forged or replayed entry, key derivation), then the lens screen with its Security section; the UX lens signs off the F4 sentences.
 
-**State:** queued
+**Scope:**
+- `broker/recovery/`: `backuplog.go` and a new forget-log file, the restore path in `bundle.go`, plus a pending state between extraction and start.
+- `broker/vault/rollback.go`: the anchor's counter use.
+- `broker/cmd/agentosd/learn.go`: `replayForgotten` and the replay over a restored state.
+- `broker/cmd/agentosd/forget.go`: appending to the log on forget, and the F4 text.
+- `broker/vm/forget.go`: `restoreTarget`, the snapshots.
+- The tests for these files, and the packages' ASSUMPTIONS.md.
+
+**Estimate:** under 150k tokens, strongest model (tier A: recovery-key and vault paths). If the anchor work alone passes ~100k, stop and split it out.
