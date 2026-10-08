@@ -1,6 +1,6 @@
 package main
 
-// REQ: CH-20, CH-19, CH-10, CAP-3
+// REQ: CH-20, CH-19, CH-10, CAP-3, CH-3
 
 import (
 	"context"
@@ -128,6 +128,7 @@ func newEvRig(t *testing.T, addr string) *evRig {
 		now:    func() time.Time { return r.now },
 		sleep:  func(d time.Duration) { r.slept = append(r.slept, d) },
 		logf:   t.Logf,
+		page:   true,
 	}
 	r.ev.gate.Store(&evidenceGateBox{r.gate})
 	return r
@@ -392,9 +393,21 @@ func TestEvidenceSetting(t *testing.T) {
 	if got, ok := r.ev.settings(ctx, "Email replies to bob@corp.example", true); ok || len(r.gate.subs) != 2 {
 		t.Fatalf("taken from the agent: %q", got)
 	}
+	// Without the Wi-Fi page, ON is refused before it reaches the gate
+	// (P2-2w d): the journal redacts the gate's reasons, so none is
+	// matched here; OFF needs no page.
+	r.ev.page = false
+	before := len(r.gate.subs)
+	if got, _ := r.ev.settings(ctx, "EVIDENCE ON", true); got != evidenceNoPage || len(r.gate.subs) != before {
+		t.Fatalf("no page: %q, %d intents", got, len(r.gate.subs)-before)
+	}
+	if strings.Contains(evidenceNoPage, "does not have yet") || !strings.Contains(evidenceNoPage, "my Wi-Fi page") {
+		t.Fatalf("wording: %q", evidenceNoPage)
+	}
+	r.ev.page = true
 	// Gate reasons are not texted verbatim.
-	r.gate.state, r.gate.reason = journal.Denied, "needs confirmation on the box's local page, which this build does not have yet (CH-20)"
-	if got, _ := r.ev.settings(ctx, "EVIDENCE ON", true); got != evidenceNoPage {
+	r.gate.state, r.gate.reason = journal.Denied, grants.NoPageEvidence
+	if got, _ := r.ev.settings(ctx, "EVIDENCE ON", true); got != evidenceFailed {
 		t.Fatalf("denied: %q", got)
 	}
 	r.gate.reason = "the destination must be the connected mail account's own address (CH-20)"

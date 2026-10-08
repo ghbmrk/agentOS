@@ -59,6 +59,9 @@ type evidence struct {
 	now   func() time.Time
 	sleep func(time.Duration)
 	logf  func(string, ...any)
+	// page says agentosd serves the box's Wi-Fi page (-localui-uid), where
+	// setting a destination is confirmed (CH-20); the gate's LocalUI.
+	page bool
 
 	q chan evidenceJob
 
@@ -91,7 +94,7 @@ const (
 	evidenceNone     = "Private replies already come by text."
 	evidenceStarting = "I'm still starting. Try again in a minute."
 	evidenceFailed   = "I couldn't save that setting. Try again later."
-	evidenceNoPage   = "Not changed: turning this on needs my Wi-Fi page, which this build does not have yet."
+	evidenceNoPage   = "Not changed: turning this on needs my Wi-Fi page, which isn't running."
 	// offNotice goes to the old destination when it is cleared by text
 	// (security C3 on #148, its wording).
 	offNotice = "Emailing private replies was turned off by text at %s. If that wasn't you, send EMAIL REPLIES ON, then confirm on my Wi-Fi page."
@@ -126,9 +129,10 @@ const (
 )
 
 // newEvidence keeps undelivered replies at keptPath.
-func newEvidence(keptPath string, logf func(string, ...any)) *evidence {
+// page says the box's Wi-Fi page is served.
+func newEvidence(keptPath string, page bool, logf func(string, ...any)) *evidence {
 	return &evidence{kept: &keptReplies{store: change.FileStore{Path: keptPath}, now: time.Now, logf: logf},
-		now: time.Now, sleep: time.Sleep, logf: logf}
+		now: time.Now, sleep: time.Sleep, logf: logf, page: page}
 }
 
 func (e *evidence) g() evidenceGate {
@@ -406,6 +410,11 @@ func (e *evidence) settings(ctx context.Context, msg string, unlocked bool) (str
 	if !on {
 		return e.off(ctx, g), true
 	}
+	if !e.page {
+		// Known here, not matched in the gate's reason: the journal
+		// redacts reasons, so a matcher on them never fired (P2-2w d).
+		return evidenceNoPage, true
+	}
 	main, mainAcct := e.mail.Main()
 	acct := mainAcct
 	if addr == "" {
@@ -429,10 +438,8 @@ func (e *evidence) settings(ctx context.Context, msg string, unlocked bool) (str
 	case err != nil:
 		e.logf("evidence setting: %v", err)
 		return evidenceFailed, true
-	case st.State == journal.Denied && strings.Contains(st.Permission.Reason, "local page"):
-		// Gate reasons are not texted verbatim (L3 SHOULD 3 on #148).
-		return evidenceNoPage, true
 	case st.State == journal.Denied:
+		// Gate reasons are not texted verbatim (L3 SHOULD 3 on #148).
 		e.logf("evidence setting refused: %s", st.Permission.Reason)
 		return evidenceFailed, true
 	}

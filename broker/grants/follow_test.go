@@ -60,7 +60,7 @@ func TestOSS10FollowIsATier4PageAct(t *testing.T) {
 		t.Fatalf("request %+v", it)
 	}
 	r.decide(true, "owner")
-	if st := r.state("f/1"); st.State != journal.Pending || !strings.Contains(st.Permission.Reason, "local page") {
+	if st := r.state("f/1"); st.State != journal.Pending || !strings.Contains(st.Permission.Reason, "Wi-Fi page") {
 		t.Fatalf("switched on the code alone: %s %q", st.State, st.Permission.Reason)
 	}
 	if err := r.g.ConfirmLocal("f/1"); err != nil {
@@ -72,7 +72,7 @@ func TestOSS10FollowIsATier4PageAct(t *testing.T) {
 	}
 
 	noUI := newRigExecs(t, func(c *Config) { c.LocalUI = false }, map[string]journal.Executor{FollowExecutor: exec})
-	if st := noUI.submit(FollowIntent("f/2", "Acme", rootDigest)); st.State != journal.Denied || !strings.Contains(st.Permission.Reason, "local page") {
+	if st := noUI.submit(FollowIntent("f/2", "Acme", rootDigest)); st.State != journal.Denied || st.Permission.Reason != NoPageFollow {
 		t.Fatalf("without the local page: %s %q", st.State, st.Permission.Reason)
 	}
 }

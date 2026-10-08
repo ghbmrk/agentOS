@@ -553,7 +553,7 @@ func main() {
 	// Evidence delivery (CH-20): with a destination set, private replies
 	// are emailed to it. No mail account is connected in this process
 	// yet, so none can be set (owns is nil) and replies go by text.
-	ev := newEvidence(keptPath, log.Printf)
+	ev := newEvidence(keptPath, cfg.PageSocket != nil, log.Printf)
 	ev.wire(&cfg)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
