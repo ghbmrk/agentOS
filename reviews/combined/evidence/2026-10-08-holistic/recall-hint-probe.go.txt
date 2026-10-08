@@ -1,0 +1,32 @@
+package main
+
+import (
+	"fmt"
+	"sort"
+	"time"
+	"reflect"
+	"github.com/ghbmrk/agentos/broker/recall"
+	"github.com/ghbmrk/agentos/broker/hint"
+)
+
+type labels struct { value recall.Label }
+func (l *labels) Label(string) recall.Label { return l.value }
+func (l *labels) Raise(string) error { l.value = recall.Private; return nil }
+
+func main() {
+	l := &labels{recall.Public}
+	ix, err := recall.Open(recall.NewMemDir(), recall.WithLabeler(l), recall.WithEmbedder(nil))
+	if err != nil { panic(err) }
+	for _, account := range []string{"synthetic-client-A", "synthetic-personal-B"} {
+		_, err = ix.Ingest(recall.Item{Source: recall.Source{Kind:"mail", Account:account, Ref:"synthetic-message"}, Label:recall.Private, Text:"synthetic meeting record", Received:time.Unix(0,0)})
+		if err != nil { panic(err) }
+	}
+	results, err := ix.Search("synthetic-public-worker", recall.Query{Text:"meeting"})
+	if err != nil { panic(err) }
+	accounts := []string{}
+	for _, result := range results { accounts = append(accounts, result.Source.Account) }
+	sort.Strings(accounts)
+	if l.value != recall.Private || !reflect.DeepEqual(accounts, []string{"synthetic-client-A", "synthetic-personal-B"}) { panic("unexpected recall scope or label") }
+	fmt.Printf("owner-scope recall: label=%s accounts=%v\n", l.value, accounts)
+	fmt.Printf("largest hint-kind value-space bits: %.6f\n", hint.Default().MaxBits())
+}

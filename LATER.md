@@ -185,3 +185,17 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | HOST-1d | cryptsetup / LUKS2 | Vault-keyed disk encryption without custom crypto |
 | SR2-4i | systemd resource control (IOWeight=, CPUWeight=) | Sets io.weight and cpu.weight per slice; add iocost QoS on the image |
 | UPD-b | systemd-sysupdate (S7 stack) | First-boot update-before-trust already fits the chosen image stack |
+
+
+## Holistic architecture intake (2026-10-08)
+
+Separate advisory intake, excluded from earlier audit totals. Existing findings/owners retain their scopes; this does not impose new release requirements for stronger policies not adopted by L1. [Review](reviews/combined/2026-10-08-holistic-architecture.md).
+
+| ID | Class | Acceptance / disposition |
+|---|---|---|
+| ARCH1 | release intake | Register review and scoped extensions; no runtime completion claim |
+| ARCH1-1 | release | A5/A12/A14 claim/qualification contract; L1 resolves trust and disclosure wording; no silent policy change |
+| ARCH1-2 | release | A4/A13 conformance extension to existing adapters/journal, not a new transaction framework |
+| ARCH1-3 | release | A1/A2/A4/A5/A7/A8/A9/A10/A14 composed-profile evidence; extend existing integration/trial owners |
+| ARCH1-L1 | later | Source/task/project-scoped data authority beyond current broad owner-private domain. L1 must adopt the stronger contract and qualification criterion before promotion; reuse POT-P2 and ADP-11, measure lost context and owner friction. |
+| ARCH1-L2 | later | Source provenance through active/history learning artifacts and their consumers for transitive source deletion. Today's limits are clarified by ARCH1-1; stronger erasure/requalification semantics need L1 before promotion. Preserve existing whole-task FORGET work. |

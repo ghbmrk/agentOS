@@ -1,0 +1,10 @@
+ok  	github.com/ghbmrk/agentos/broker/vault	10.170s
+ok  	github.com/ghbmrk/agentos/broker/journal	5.863s
+ok  	github.com/ghbmrk/agentos/broker/browser	1.631s
+ok  	github.com/ghbmrk/agentos/broker/egress	2.089s
+ok  	github.com/ghbmrk/agentos/broker/recall	3.251s
+ok  	github.com/ghbmrk/agentos/broker/hint	0.536s
+ok  	github.com/ghbmrk/agentos/broker/change	9.420s
+ok  	github.com/ghbmrk/agentos/broker/reversible	0.684s
+ok  	github.com/ghbmrk/agentos/broker/skill	0.966s
+ok  	github.com/ghbmrk/agentos/broker/recalltool	0.766s
