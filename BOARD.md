@@ -263,7 +263,12 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | W3-tasks | [Learn-side forget primitive](briefs/W3-tasks.md) | W3 PW3 | Next build item B | merged (538d180; #160 part 2; wiring waits for forget action) |
 | W3-forget | [Owner-facing forget command](briefs/W3-forget.md) | W3-tasks part 2, W5 | Next build item B | building (split into sub-rows) |
 | W3-forget-a | [FORGET by text in an unlocked session](briefs/W3-forget-a.md) | W3-forget | Next build item B | merged (05913d0; #182) |
-| W3-forget-b | [Authenticated forget log replayed over backups](briefs/W3-forget-b.md) | W3-forget-a | Next build item B | queued |
+| W3-forget-b | [Authenticated forget log replayed over backups](briefs/W3-forget-b.md) | W3-forget-a | Next build item B | building (split into sub-rows) |
+| W3-forget-b1 | [Authenticated forget log checked on restore](briefs/W3-forget-b1.md) | W3-forget-a | Next build item B | queued (items 1–3 ruled by Mark on #317, 2026-10-08) |
+| W3-forget-b1-4 | [Owner confirms a restore with no anchor](briefs/W3-forget-b1-4.md) | W3-forget-b1, D-065 (#406) | Next build item B | queued (stale-backup option ruled, D-065; must land before A8/G3) |
+| W3-forget-b2 | [Builder-lineage rollback with A/B](briefs/W3-forget-b2.md) | W3-forget-a | Next build item B | merged (#321) |
+| W3-forget-b2b | [Agent machine's work taken back as item 2](briefs/W3-forget-b2b.md) | W3-forget-b2 | Next build item B | merged (#327) |
+| W3-forget-b3 | [Promised done text survives a restart](briefs/W3-forget-b3.md) | W3-forget-b1 | Next build item B | queued |
 | W3-forget-b2c | [Owed take-backs for W3-forget-b2b](briefs/W3-forget-b2c.md) | W3-forget-b2b | Next build item B | queued |
 | W3-implicit | [Report accepted-implicitly guest effects](briefs/W3-implicit.md) | W3 PW3 | — | queued |
 | W5 | [Owner channel](briefs/W5.md) | W3 | loops thread | queued |
