@@ -113,12 +113,12 @@ func EvidenceIntent(id, origin, address, account string) journal.Intent {
 		Params: map[string]any{ParamEvidenceAddress: address, ParamEvidenceAccount: account}, Executor: ExecutorName}
 }
 
-// Params of a journal.ActionUpdateFollow intent: the name the owner gave
-// the source, and the digest of the root summary the page showed
-// (update.RootSummary.Digest), which the updater follows and nothing else.
+// A journal.ActionUpdateFollow intent carries no params: the journal
+// redacts params (journal.Redactor) and keeps identifiers as they are, so
+// the name the owner gave the source and the digest of the root summary
+// the page showed (update.RootSummary.Digest) ride in its ID (FollowID),
+// as a forget's goal does. The updater follows that root and nothing else.
 const (
-	ParamFollowName   = "name"
-	ParamFollowDigest = "digest"
 	// FollowExecutor is the updater, which runs the switch.
 	FollowExecutor = "update"
 	// MaxFollowName bounds the owner-typed name, in characters.
@@ -128,11 +128,37 @@ const (
 	MaxFollowDigits = 4
 )
 
+// FollowID is the ID of a follow intent: nonce is unique per ask and holds
+// no "/"; the digest comes before the name, which may hold anything the
+// gate's name check allows. An empty name switches back to the project.
+func FollowID(nonce, digest, name string) string {
+	return "follow/" + nonce + "/" + digest + "/" + name
+}
+
+// FollowOf is the digest and name a follow intent's ID names; ok is false
+// if the ID is not FollowID's shape. The gate checks the values.
+func FollowOf(id string) (digest, name string, ok bool) {
+	rest, ok := strings.CutPrefix(id, "follow/")
+	if !ok {
+		return "", "", false
+	}
+	nonce, rest, ok := strings.Cut(rest, "/")
+	if !ok || nonce == "" {
+		return "", "", false
+	}
+	digest, name, ok = strings.Cut(rest, "/")
+	if !ok || digest == "" {
+		return "", "", false
+	}
+	return digest, name, true
+}
+
 // FollowIntent is the local page's request to follow the root whose
-// summary has digest, under the owner's name for it.
-func FollowIntent(id, name, digest string) journal.Intent {
-	return journal.Intent{ID: id, Origin: originLocal, Account: journal.BrokerAccount, Action: journal.ActionUpdateFollow,
-		Params: map[string]any{ParamFollowName: name, ParamFollowDigest: digest}, Executor: FollowExecutor}
+// summary has digest, under the owner's name for it ("" to switch back to
+// the project's own root).
+func FollowIntent(nonce, name, digest string) journal.Intent {
+	return journal.Intent{ID: FollowID(nonce, digest, name), Origin: originLocal, Account: journal.BrokerAccount,
+		Action: journal.ActionUpdateFollow, Executor: FollowExecutor}
 }
 
 // Params keys a pre-allowed intent may carry besides the rule's fixed

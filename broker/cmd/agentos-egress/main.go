@@ -443,6 +443,7 @@ func initCmd(args []string, out io.Writer) error {
 	vaultPath := fs.String("vault", defaultVault, "sealed vault file to create")
 	keysPath := fs.String("keys", defaultKeys, "key slots file to create")
 	statePath := fs.String("state", "", "unlock state to create; default unlock.json beside the keys")
+	setup := fs.Bool("setup", false, "setup mode: open code-generator enrollment once and leave the seed hand-out to setup (image boxes)")
 	fs.Parse(args)
 	if *statePath == "" {
 		*statePath = statePathFor(*keysPath)
@@ -466,11 +467,15 @@ func initCmd(args []string, out io.Writer) error {
 	if err := writeFileAtomic(*statePath, []byte("{}")); err != nil {
 		return err
 	}
-	if err := sealNew(*vaultPath, *keysPath, pass, seed); err != nil {
+	if err := sealNew(*vaultPath, *keysPath, pass, seed, *setup); err != nil {
 		return err
 	}
-	secret := b32().EncodeToString(seed)
 	fmt.Fprintf(out, "Vault passphrase: %s\n", pass)
+	if *setup {
+		fmt.Fprintln(out, "Setup shows the code generator. Keep the passphrase offline. It is shown once.")
+		return nil
+	}
+	secret := b32().EncodeToString(seed)
 	fmt.Fprintf(out, "Code generator:   otpauth://totp/AgentOS?secret=%s&issuer=AgentOS\n", secret)
 	fmt.Fprintln(out, "Keep both offline. They are shown once.")
 	return nil
@@ -481,12 +486,13 @@ func statePathFor(keysPath string) string {
 	return filepath.Join(filepath.Dir(keysPath), "unlock.json")
 }
 
-// sealNew builds the vault and keys under temporary names, stores the seed,
+// sealNew builds the vault and keys under temporary names, stores the seed
+// (and, in setup mode, the entry that opens enrollment once, K17),
 // and only then renames them into place, keys last: the keys file is what
 // makes a vault openable, so a crash leaves either nothing usable or a
 // complete vault. A vault file without its keys file can never be opened,
 // so init reports it for removal rather than leaving the owner stuck.
-func sealNew(vaultPath, keysPath, pass string, seed []byte) error {
+func sealNew(vaultPath, keysPath, pass string, seed []byte, setup bool) error {
 	if _, err := os.Lstat(keysPath); err == nil {
 		return fmt.Errorf("%s already exists; this box already has a vault", keysPath)
 	}
@@ -501,6 +507,12 @@ func sealNew(vaultPath, keysPath, pass string, seed []byte) error {
 		return err
 	}
 	err = v.Put(SeedName, vault.KindTOTPSeed, seed)
+	if err == nil && setup {
+		open := make([]byte, 16)
+		if _, err = rand.Read(open); err == nil {
+			err = v.Put(SetupOpenName, KindSetupOpen, open)
+		}
+	}
 	v.Close()
 	if err == nil {
 		err = os.Rename(vt, vaultPath)

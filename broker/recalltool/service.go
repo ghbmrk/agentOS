@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/events"
+	"github.com/ghbmrk/agentos/broker/guesterr"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/recall"
 )
@@ -181,7 +182,7 @@ func (l *Late) Call(ctx context.Context, machine, lineage, name string, args jso
 	}
 	for _, d := range list {
 		if d["name"] == name {
-			return "", true, errors.New("recall opens once the owner unlocks the box's vault")
+			return "", true, guesterr.New("recall opens once the owner unlocks the box's vault")
 		}
 	}
 	return "", false, nil
