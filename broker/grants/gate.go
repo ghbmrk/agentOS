@@ -1938,12 +1938,15 @@ func (g *Gate) Decide(d owner.Decision) {
 		//
 		// A release adoption the pipeline proposed (Origin change, the
 		// pipeline's own origin) is page-confirmed too, but the owner made
-		// no request. The change is no decline (Decided is told so), the
-		// proposal drops and the next update check proposes it again, so
-		// the step is to wait for that offer (P2-2a f2).
+		// no request. The change is no decline (Decided is told so) and the
+		// proposal drops, but the update check does not offer that version
+		// again until a restart or a newer release, so the notice promises
+		// no new offer: nothing is needed (P2-2a f2; L3 on #363). The
+		// literal "change" is change.OriginPipeline, pinned by
+		// TestAPageChangeNoticeForAReleaseAdoptionSaysNothingIsNeeded.
 		step := "Make the request again if still needed."
 		if st, err := eng.Get(d.Ref); err == nil && changeAction(st.Intent.Action) && st.Intent.Origin == "change" {
-			step = "I will ask again if it is still needed."
+			step = "Nothing is needed."
 		}
 		_ = own.Inform(fmt.Sprintf("%s did not run: it changed after my Wi-Fi page showed it. %s", clip(d.Request), step))
 	}

@@ -139,10 +139,12 @@ func TestAPageChangeNoticeNamesAStepEachOriginCanTake(t *testing.T) {
 
 // UX lens on #329 (P2-2a f2): a release adoption the pipeline proposed
 // (meta.change.adopt, Origin change) that changed after the page showed it
-// gets no "Make the request again": the owner made no request. The change
-// is no decline, so the pipeline drops it and the update check proposes it
-// again (change.Decided); the notice says the box will ask again.
-func TestAPageChangeNoticeForAReleaseAdoptionSaysTheBoxAsksAgain(t *testing.T) {
+// gets no "Make the request again": the owner made no request. Nor may it
+// promise to ask again: the pipeline drops the proposal, but the update
+// check (maintain Loop 3) keeps the version as proposed and offers it again
+// only after a restart or a newer release (L3 on #363). The owner need do
+// nothing, so the notice says so (CH-12).
+func TestAPageChangeNoticeForAReleaseAdoptionSaysNothingIsNeeded(t *testing.T) {
 	r, p := changeRig(t)
 	rep, err := p.ProposeRelease(context.Background(), signed(t, 40, map[string][]byte{"host-image/release": []byte("h")}))
 	if err != nil || rep.State != change.StateAwaitingOwner {
@@ -164,12 +166,12 @@ func TestAPageChangeNoticeForAReleaseAdoptionSaysTheBoxAsksAgain(t *testing.T) {
 	r.own.mu.Lock()
 	got := append([]string(nil), r.own.notes[before:]...)
 	r.own.mu.Unlock()
-	want := req + " did not run: it changed after my Wi-Fi page showed it. I will ask again if it is still needed."
+	want := req + " did not run: it changed after my Wi-Fi page showed it. Nothing is needed."
 	if len(got) != 1 || got[0] != want {
 		t.Fatalf("notices %q, want %q", got, want)
 	}
-	if strings.Contains(got[0], "request") && strings.Contains(got[0], "Make the") || len(got[0]) > 160 {
-		t.Fatalf("notice sends the owner to a request they never made, or is over one segment: %q", got[0])
+	if strings.Contains(strings.ToLower(got[0]), "again") || len(got[0]) > 160 {
+		t.Fatalf("notice promises an offer or request the box will not make, or is over one segment: %q", got[0])
 	}
 	// It is no decline: the digest does not say the owner declined it.
 	if d := p.Digest(); len(d) != 0 {
