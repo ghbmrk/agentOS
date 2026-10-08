@@ -336,14 +336,16 @@ func (f *ownerForget) Item(goal string) (object, detail string, ok bool) {
 	return obj, detail, true
 }
 
-// AgentItem is the gate's line for item 2 (grants Config.ForgetAgentItem);
-// its detail is fixed in item 2's params when asked, so none here.
-func (f *ownerForget) AgentItem(goal string) (object, detail string, ok bool) {
-	t, ok := f.tasks.get(goal)
-	if !ok {
+// AgentItem is the gate's line for item 2, by its ID (grants
+// Config.ForgetAgentItem); its detail is fixed in item 2's params when
+// asked, so none here. The time is the ID's, not the task's: approving
+// both items may forget the task before item 2 is authorized.
+func (f *ownerForget) AgentItem(id string) (object, detail string, ok bool) {
+	since, ok := forgetSince(id)
+	if !ok || grants.ForgetAgentGoal(id) == "" {
 		return "", "", false
 	}
-	return "your agent's work since " + f.date(t.At), "", true
+	return "your agent's work since " + f.date(since), "", true
 }
 
 // agentActions counts the agent's actions since at, which item 2 leaves

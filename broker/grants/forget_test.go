@@ -68,8 +68,8 @@ func TestAForgetsAgentTakeBackIsItem2OfTheSameRequest(t *testing.T) {
 	ex := &recordExec{}
 	r := newRigExecs(t, func(c *Config) {
 		c.ForgetItem = func(goal string) (string, string, bool) { return `"pay the gas bill"`, "", goal == "g1" }
-		c.ForgetAgentItem = func(goal string) (string, string, bool) {
-			return "your agent's work since today 13:02", "", goal == "g1"
+		c.ForgetAgentItem = func(id string) (string, string, bool) {
+			return "your agent's work since today 13:02", "", ForgetAgentGoal(id) == "g1"
 		}
 	}, map[string]journal.Executor{ForgetExecutor: ex})
 	agent := func(nonce, origin, goal string) journal.Intent {
@@ -116,8 +116,8 @@ func TestAForgetsTakeBackDetailIsFixedWhenAsked(t *testing.T) {
 	ex := &recordExec{}
 	r := newRigExecs(t, func(c *Config) {
 		c.ForgetItem = func(goal string) (string, string, bool) { return `"pay the gas bill"`, "", goal == "g1" }
-		c.ForgetAgentItem = func(goal string) (string, string, bool) {
-			return "your agent's work since today 13:02", live, goal == "g1"
+		c.ForgetAgentItem = func(id string) (string, string, bool) {
+			return "your agent's work since today 13:02", live, ForgetAgentGoal(id) == "g1"
 		}
 	}, map[string]journal.Executor{ForgetExecutor: ex})
 	in1 := journal.Intent{ID: ForgetID("n1", "g1"), Origin: OriginForget, Account: journal.BrokerAccount,

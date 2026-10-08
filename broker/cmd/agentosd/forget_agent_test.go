@@ -125,7 +125,7 @@ func TestForgetAsksItem2OnlyWhenTheAgentWorked(t *testing.T) {
 		if since, ok := forgetSince(ids[1]); !ok || !since.Equal(at) {
 			t.Fatalf("%s: since %v", c.name, since)
 		}
-		if obj, _, ok := r.f.AgentItem("owner:a"); !ok || obj != "your agent's work since Mon 5 Oct 13:02" {
+		if obj, _, ok := r.f.AgentItem(ids[1]); !ok || obj != "your agent's work since Mon 5 Oct 13:02" {
 			t.Fatalf("%s: item 2 line %q", c.name, obj)
 		}
 	}
@@ -375,7 +375,7 @@ func TestForgetItem2NamesTheActionsThatStayDone(t *testing.T) {
 			t.Fatalf("%+v: item 2 %+v", c, r.gate.got)
 		}
 		w.actions, w.noCount = 7, false // the agent acts while the owner reads
-		if _, d, ok := r.f.AgentItem("owner:a"); !ok || d != "" {
+		if _, d, ok := r.f.AgentItem(r.gate.got[1].ID); !ok || d != "" {
 			t.Fatalf("%+v: live detail %q", c, d)
 		}
 	}
@@ -430,6 +430,35 @@ func TestForgetItem2WaitsForMemoryToOpen(t *testing.T) {
 	}
 }
 
+// REQ: CAP-3, OP-5
+// YES for both items settles them concurrently: item 1 may forget the
+// task before item 2 is authorized, and item 2's line must still stand,
+// from its own ID, or the take-back is denied unasked (#327 CI on c61b293).
+func TestForgetItem2LineOutlivesItem1(t *testing.T) {
+	r := newForgetRig(t)
+	at := r.now.Add(-time.Hour)
+	r.withAgent(&fakeWork{worked: true, ok: true})
+	r.task("owner:a", "pay the gas bill", at, viaSMS)
+	r.say("FORGET LAST")
+	if len(r.gate.got) != 2 {
+		t.Fatalf("intents %+v", r.gate.got)
+	}
+	id := r.gate.got[1].ID
+	before, _, ok := r.f.AgentItem(id)
+	if !ok || before != "your agent's work since "+r.f.date(at) {
+		t.Fatalf("line %q", before)
+	}
+	if ok, err := r.tasks.forget("owner:a"); !ok || err != nil {
+		t.Fatalf("forget: %v %v", ok, err)
+	}
+	if after, _, ok := r.f.AgentItem(id); !ok || after != before {
+		t.Fatalf("after item 1: %q %v", after, ok)
+	}
+	if _, _, ok := r.f.AgentItem(grants.ForgetSibling(id)); ok {
+		t.Fatal("item 1's ID gave an item 2 line")
+	}
+}
+
 // REQ: CAP-3, OP-3
 // The request's lines name the task's time as a date, not "today": a
 // re-issue after midnight keeps both items' lines, so item 2 is never
@@ -437,12 +466,14 @@ func TestForgetItem2WaitsForMemoryToOpen(t *testing.T) {
 func TestForgetItemLinesHoldAcrossMidnight(t *testing.T) {
 	for _, via := range []string{viaSMS, "loop"} {
 		r := newForgetRig(t)
-		r.task("owner:a", "pay the gas bill", r.now.Add(-time.Hour), via)
+		at := r.now.Add(-time.Hour)
+		r.task("owner:a", "pay the gas bill", at, via)
+		id2 := grants.ForgetAgentID(fmt.Sprintf("1.1.%d", at.UnixNano()), "owner:a")
 		o1, d1, _ := r.f.Item("owner:a")
-		o2, d2, _ := r.f.AgentItem("owner:a")
+		o2, d2, _ := r.f.AgentItem(id2)
 		r.now = r.now.Add(12 * time.Hour) // past midnight
 		n1, e1, _ := r.f.Item("owner:a")
-		n2, e2, _ := r.f.AgentItem("owner:a")
+		n2, e2, _ := r.f.AgentItem(id2)
 		if o1 != n1 || d1 != e1 || o2 != n2 || d2 != e2 {
 			t.Fatalf("via %s: %q %q / %q %q became %q %q / %q %q", via, o1, d1, o2, d2, n1, e1, n2, e2)
 		}
