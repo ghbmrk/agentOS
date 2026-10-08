@@ -163,3 +163,51 @@ Book plus Host STOP/Quiesce. They qualify those synthetic scopes only. Escaped u
 uncooperating writers, same-UID/ancestor/lock replacement, restore/config integrity,
 real deployment latency and the storage-fault urgent/reissue availability tradeoff
 remain external release/security holds. No daemon/default wiring or activation.
+
+## Owned constructor and independent controls (W5-D47 review candidate)
+
+`StartSession(path, cfg)` validates strict immutable options synchronously, then
+returns a handle owning exactly one constructor worker and its eventual Session.
+No retry, deadline replacement writer, boot, activation or daemon default is
+created. `State().Line()` uses fixed owner operational wording. State/Use/retirement
+use short state locks and do not wait for construction/admission I/O. Construct
+independent owner controls first and keep their routing available; this handle is
+neither an owner service nor an auth alternative. Actual daemon routing and its
+resource/custody budget remain W5-D47-Q release qualification.
+
+Before completion, Use returns ErrSessionOpening without invoking the consumer.
+Constructor failure/panic yields fixed recovery and no Gate; a completed but
+faulted/missing-ledger Gate remains available inside scopes to construct held
+recovery/STOP controls. Ready only means constructor completion and cached healthy
+accounting, never activation, filesystem freshness or qualified deployment.
+OpenSession now unwinds its lease on constructor panic; StartSession contains
+that constructor boundary without exposing the panic or private error details.
+Trusted callbacks still cannot be assumed bounded or safe merely by containment.
+
+Close permanently retires publication and shares an atomic retirement signal with
+the constructor's backend adapter. The adapter checks it before Load/Save; a
+constructor blocked at its clock cannot subsequently write after observing
+retirement. Already-running synchronous operations are not interrupted or
+refunded, and retirement can race a final observation. A late retired result is
+closed by its owned worker before completion is published; no consumer can use it.
+After readiness, Close preserves D46's registered-user drain contract. Known
+cleanup errors remain fixed ErrStorage on subsequent Close rather than being
+erased by idempotent lease Close. No recovery/reset/lease-release qualification
+is inferred from either nil Close or a fixed error.
+
+Cancellation bounds an incomplete constructor/user wait only. It does not detach
+the worker, release an in-flight lease, start another writer or guarantee shutdown.
+Retain the handle and its resources until Close actually completes. A constructor
+or cleanup operation may remain stuck forever, occupying one worker/lease; admission
+of startup handles and trusted callbacks belongs to reviewed daemon resource
+composition. Do not synchronously await Close inside a Use callback. Escaped users,
+callback return/panic, outstanding permissions and downstream handoffs retain D46's
+trusted-quiescence limitations. Protected path/restore/config custody and actual
+latency remain external qualification; urgent/reissue faults remain held.
+
+Tests deliberately block the trusted clock inside actual Gate.New after real lease
+acquisition. They prove independent held owner LocalStop, status/retirement,
+cancelled-wait custody, late no-write/no-publication cleanup and strict debt reopen.
+They model blocked construction, not a qualified blocked filesystem or deployment
+latency. Synthetic descriptor corruption proves known cleanup-error retention.
+No duplicate live owner service or default daemon assembly is supplied.
