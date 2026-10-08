@@ -30,3 +30,27 @@ zero the report and require external recovery; synchronous work can hang forever
 W5-D62-Q/prior Q/current-base/security/pin/media/latency holds remain. No automatic
 repair/retry/activation/refund/revocation/globalquota/anti-restore/config integrity/
 hostile-path or deployment latency qualification; D37 urgent/reissue hold preserved.
+
+## W5-D63 trusted ancestor policy
+
+OpenExclusiveProtected observes explicit permitted owner IDs and write modes for
+every root/component in descriptor acquisition and later custody walks. Owners
+must be separately trusted and persistently configured; ID membership does not
+attest authenticity or authority. Root need not be UID0; never infer trustees from
+the same checked path. Copied policy prevents caller slice mutation from silently
+relaxing an existing lease. Incompatible writable/readability/ownership ancestry
+is refused, without /tmp/sticky exception or automatic permission changes.
+
+Same-UID/privileged actors, ACLs, mount/namespace replacement, lock splitting and
+noncooperators remain unqualified. Metadata checks are observations, not atomic
+path/name custody or media freshness. Legacy constructors/direct other slots/old
+image restore can bypass this opt-in composition. No startup/Session/manifest or
+agentosd/default adoption. W5-D63-Q and prior security/current-base/config/pin/root/
+operator/full consumer/media/latency holds remain. D37 ordinary/urgent/reissue
+storage/time/overdue/invalid-input hold is not bypassed. No revocation/deadline/
+interruption/refund/anti-delete/rollback/restore/config-integrity claim.
+
+Positive tests use AGENTOS_PROTECTED_TEST_ROOT or UserHomeDir, explicitly configured
+synthetic UID trustees and failure on unsafe/unwritable ancestry; no hidden skip or
+security fallback. Fresh replay explicitly uses the private review-stack root,
+not world-writable /tmp. Test-root compatibility is not deployment qualification.

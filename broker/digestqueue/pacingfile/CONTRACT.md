@@ -449,3 +449,18 @@ authorizes cleanup, recovery, refund, activation or restart. TemporaryDigest is
 review evidence, never a ledger trust anchor. Nonduplicate residue remains held
 for ordinary and urgent requests. Trusted external recovery determination and
 qualified custody remain required. No automatic diagnosis/startup/recovery hook.
+
+## W5-D63 opt-in protected ancestors
+
+OpenExclusiveProtected(path, trustedOwners) validates a nonempty/max16/unique
+owner UID list and copies it before I/O. The SAME bounded nofollow acquisition
+walk checks every opened root/component descriptor: directory, permitted UID,
+no group/other write bits (sticky world-write is refused). Final dedicated
+parent still requires euid/private0700. Later named custody walks use the copied
+policy; observed failure latches backend health and Gate recovery/ordinary+urgent
+refusal. Legacy OpenExclusive is unchanged; unsupported platform refuses.
+
+Policy is caller-trusted, not discovered from filesystem ownership. This is not
+root/namespace/mount/ACL/same-UID/lock/restore qualification or an atomic whole-
+path snapshot. Synchronous walks/I/O may hang. No fallback, mode repair, provisioning,
+activation or auto-retry; Session/startup/manifest/daemon adoption remains separate.

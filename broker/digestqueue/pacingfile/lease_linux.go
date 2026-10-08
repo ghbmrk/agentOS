@@ -16,6 +16,7 @@ type ExclusiveStore struct {
 	store         Store
 	dir, lock     *os.File
 	dirID, lockID syscall.Stat_t
+	trustedOwners []uint32 // nil retains legacy ancestry behavior; copied on acquisition
 	closed        bool
 	unavailable   atomic.Bool
 }
@@ -23,13 +24,35 @@ type ExclusiveStore struct {
 // OpenExclusive neither provisions nor loads the ledger. The dedicated parent
 // must be owner-private 0700; lock/ledger/temp files must be owner-private 0600,
 // regular, single-link objects. Ancestor/same-UID custody remains external.
-func OpenExclusive(path string) (*ExclusiveStore, error) {
-	dir, err := openLeaseParent(path)
+func OpenExclusive(path string) (*ExclusiveStore, error) { return openExclusive(path, nil) }
+
+// OpenExclusiveProtected additionally observes every root/ancestor UID and write
+// mode during the same nofollow acquisition and later custody walks. Supply a
+// separately trusted owner policy; no UID/root discovery establishes trust.
+// Empty/duplicate/overbound sets refuse before I/O. Ordinary OpenExclusive is
+// unchanged. This is not atomic hostile-path/root/mount/ACL/restore qualification,
+// Session/manifest/daemon adoption, cancellation, activation or a deadline.
+func OpenExclusiveProtected(path string, trustedOwners []uint32) (*ExclusiveStore, error) {
+	if len(trustedOwners) == 0 || len(trustedOwners) > 16 {
+		return nil, ErrStorage
+	}
+	copied := append([]uint32(nil), trustedOwners...)
+	for i, uid := range copied {
+		for _, earlier := range copied[:i] {
+			if uid == earlier {
+				return nil, ErrStorage
+			}
+		}
+	}
+	return openExclusive(path, copied)
+}
+func openExclusive(path string, owners []uint32) (*ExclusiveStore, error) {
+	dir, err := openLeaseParentProtected(path, owners)
 	if err != nil {
 		return nil, ErrStorage
 	}
 	fd := int(dir.Fd())
-	s := &ExclusiveStore{store: Store{Path: path}, dir: dir}
+	s := &ExclusiveStore{store: Store{Path: path}, dir: dir, trustedOwners: owners}
 	fail := func() (*ExclusiveStore, error) { s.Close(); return nil, ErrStorage }
 	if syscall.Fstat(fd, &s.dirID) != nil || !privateDir(&s.dirID) {
 		return fail()
@@ -77,7 +100,7 @@ func (s *ExclusiveStore) verifyLocked() error {
 	if s.closed || s.unavailable.Load() || s.dir == nil || s.lock == nil {
 		return ErrStorage
 	}
-	named, err := openLeaseParent(s.store.Path)
+	named, err := openLeaseParentProtected(s.store.Path, s.trustedOwners)
 	if err != nil {
 		s.unavailable.Store(true)
 		return ErrStorage

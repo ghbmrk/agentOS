@@ -11,3 +11,5 @@ func (*ExclusiveStore) Save([]byte) error           { return ErrStorage }
 func (*ExclusiveStore) Close() error                { return nil }
 
 func (*ExclusiveStore) PacingHealth() error { return ErrStorage }
+
+func OpenExclusiveProtected(string, []uint32) (*ExclusiveStore, error) { return nil, ErrStorage }

@@ -361,3 +361,6 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 
 | W5-D62 | [Bounded accounting residue inspection](briefs/W5-D62.md) | OP-1, CH-15 | additive review draft; tests-first | Codex GPT-6 |
 | W5-D62-Q | [Residue diagnosis/operator custody qualification](briefs/W5-D62.md#release-qualifications) | OP-1, CH-15 | external release hold | independent review |
+
+| W5-D63 | [Opt-in protected accounting ancestors](briefs/W5-D63.md) | OP-1, CH-15 | additive proposal; tests-first WIP | Codex GPT-6 |
+| W5-D63-Q | [Protected-root/config/actual adoption qualification](briefs/W5-D63.md#release-qualifications) | OP-1, CH-15 | external release hold | independent review |
