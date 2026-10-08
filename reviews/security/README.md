@@ -23,7 +23,7 @@ Finding kinds CI now catches; the screen no longer looks for them by hand (OPERA
 
 ## Spec-wide runs
 
-Weekly runs over all of `main` until 2026-10-07, when the batched lens screen replaced them (DECISIONS, COST-1).
+Weekly runs over all of `main` until 2026-10-07, when the batched lens screen replaced them (DECISIONS D-048).
 
 | Run | main at | Review |
 |---|---|---|

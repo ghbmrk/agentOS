@@ -69,9 +69,9 @@ Review depth follows risk, decided mechanically from the paths a change touches.
 
 A new broker package that holds credentials or gates effects is added to `TIER_A_BROKER` in the same PR that creates it. A renamed tier-A package fails `tests/test_risk_tier.py` until the list is updated.
 
-**Security re-sign (mechanical).** After Security has signed a tier-A PR, any later delta for which `python3 tools/risk_tier.py --git <signed commit> HEAD` prints tier A needs a re-sign. The Security session may sign a test-only or comment-only delta in one line. This over-triggers on harmless deltas and never misses one; on tier A that is the right trade (DECISIONS 2026-10-08).
+**Security re-sign (mechanical).** After Security has signed a tier-A PR, any later delta for which `python3 tools/risk_tier.py --git <signed commit> HEAD` prints tier A needs a re-sign. The Security session may sign a test-only or comment-only delta in one line. This over-triggers on harmless deltas and never misses one; on tier A that is the right trade (DECISIONS D-054).
 
-**Every PR gets an L3 review.** Tier C skips only the lens screen, never the review (DECISIONS 2026-10-08).
+**Every PR gets an L3 review.** Tier C skips only the lens screen, never the review (DECISIONS D-055).
 
 ## 4. Review pipeline
 
