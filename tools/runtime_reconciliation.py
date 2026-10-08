@@ -9,6 +9,7 @@ checkout, index update, conflict resolution, commit or publication occurs.
 import argparse
 import hashlib
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -79,9 +80,15 @@ def parse_rehearsal(output, returncode):
 
 
 def git(repo, *args, allowed=(0,)):
+    # Native Git may lazily fetch promisor objects even without an explicit
+    # fetch command. Disable that and deny ALL transports (including helpers),
+    # overriding inherited allowlists. Missing local objects must fail closed.
+    # The transport guard also covers Git versions lacking the lazy-fetch knob.
+    env = dict(os.environ, GIT_NO_LAZY_FETCH='1', GIT_ALLOW_PROTOCOL='',
+               GIT_TERMINAL_PROMPT='0')
     r = subprocess.run(['git', '--no-replace-objects', '-C', str(repo), '-c', 'core.hooksPath=/dev/null',
                         '-c', 'core.attributesFile=/dev/null', *args],
-                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
     if r.returncode not in allowed:
         raise ValueError('native Git command failed; no compatibility claimed')
     return r

@@ -1,5 +1,7 @@
 import importlib.util
 import pathlib
+import os
+from unittest import mock
 import subprocess
 import tempfile
 import unittest
@@ -161,3 +163,60 @@ class NativeRehearsalTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class OfflineRehearsalTests(unittest.TestCase):
+    setUp = NativeRehearsalTests.setUp
+    git = NativeRehearsalTests.git
+    commit = NativeRehearsalTests.commit
+    def helper_environment(self):
+        helper_dir = self.repo / 'synthetic-helpers'
+        helper_dir.mkdir()
+        marker = self.repo / 'helper-invoked'
+        helper = helper_dir / 'git-remote-audit'
+        helper.write_text('#!/bin/sh\nprintf synthetic > "$AUDIT_MARKER"\nexit 1\n')
+        helper.chmod(0o700)
+        self.git('config', 'remote.origin.promisor', 'true')
+        self.git('config', 'remote.origin.partialclonefilter', 'blob:none')
+        self.git('config', 'remote.origin.url', 'audit::synthetic')
+        self.git('config', 'extensions.partialClone', 'origin')
+        return marker, dict(PATH=str(helper_dir) + os.pathsep + os.environ['PATH'],
+                           AUDIT_MARKER=str(marker), GIT_ALLOW_PROTOCOL='audit',
+                           GIT_NO_LAZY_FETCH='0')
+
+    # REQ: OP-8 — missing local objects must not execute remote helpers.
+    def test_missing_commit_refuses_without_remote_helper(self):
+        marker, env = self.helper_environment()
+        with mock.patch.dict(os.environ, env):
+            with self.assertRaises(ValueError):
+                runtime.rehearse(self.repo, 'f' * 40, self.public)
+        self.assertFalse(marker.exists(), 'offline audit invoked a remote helper')
+
+    def test_missing_conflict_blob_refuses_without_remote_helper(self):
+        oid = self.git('rev-parse', self.source + ':' + self.name)
+        obj = self.repo / '.git/objects' / oid[:2] / oid[2:]
+        self.assertTrue(obj.is_file())
+        obj.unlink()
+        marker, env = self.helper_environment()
+        with mock.patch.dict(os.environ, env):
+            with self.assertRaises(ValueError):
+                runtime.rehearse(self.repo, self.source, self.public)
+        self.assertFalse(marker.exists(), 'offline merge invoked a remote helper')
+
+    def test_complete_promisor_history_needs_no_helper(self):
+        expected = runtime.rehearse(self.repo, self.source, self.public)
+        marker, env = self.helper_environment()
+        # Keep helper fixture artifacts outside the tracked tree and preserve refs.
+        before = self.git('show-ref')
+        with mock.patch.dict(os.environ, env):
+            result = runtime.rehearse(self.repo, self.source, self.public)
+        self.assertEqual(result, expected)
+        self.assertEqual(self.git('show-ref'), before)
+        self.assertFalse(marker.exists())
+
+    def test_transport_denial_independent_of_lazy_fetch_support(self):
+        marker, env = self.helper_environment()
+        with mock.patch.dict(os.environ, env):
+            with self.assertRaises(ValueError):
+                runtime.git(self.repo, 'fetch', 'origin')
+        self.assertFalse(marker.exists(), 'transport guard invoked a remote helper')
