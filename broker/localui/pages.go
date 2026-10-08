@@ -187,7 +187,7 @@ form { margin: .6em 0 1.2em; }
 {{template "foot"}}{{end}}
 
 {{define "paused"}}{{template "head" ""}}
-<h1>Paused grants</h1>
+<h1>Paused</h1>
 {{with .Msg}}<p class="ok">{{.}}</p>{{end}}{{with .Err}}<p class="err">{{.}}</p>{{end}}
 {{range .Grants}}<section class="card"><h2>{{.ID}}</h2>
 <p>Resuming lets this run again: {{.What}}</p><p class="muted">Paused by {{.By}}.</p>
