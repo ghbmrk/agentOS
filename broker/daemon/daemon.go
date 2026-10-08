@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
@@ -357,12 +358,25 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 		return nil, err
 	}
 	d := &Daemon{engine: eng, gate: gate, store: store, srv: srv, adm: adm, owner: ch, done: make(chan struct{})}
+	var workers sync.WaitGroup
 	if ch != nil {
-		go serveOwner(ctx, ch, cfg.Modem != nil)
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			serveOwner(ctx, ch, cfg.Modem != nil)
+		}()
 	}
-	go gate.Run(ctx, 0)
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		gate.Run(ctx, 0)
+	}()
 	go func() {
 		srv.Wait()
+		// Stop all owned producers before waiting for settlements: they may
+		// add Gate work until they return. Keep journal custody throughout.
+		workers.Wait()
+		gate.Wait()
 		store.Close()
 		close(d.done)
 	}()
@@ -415,5 +429,9 @@ func (d *Daemon) Engine() *journal.Engine { return d.engine }
 // manager to admit and release machines through.
 func (d *Daemon) Admission() *admission.Controller { return d.adm }
 
-// Wait returns after ctx is done and every socket and the journal are closed.
+// Wait joins sockets, owned owner/Gate loops and outstanding Gate settlements
+// before closing the journal. Synchronous callbacks/I/O can hold it indefinitely;
+// cancellation does not interrupt them or impose a deadline. External callers
+// must stop using escaped Gate/Owner/Engine handles and drain downstream work;
+// this join does not enforce their lifetime or revoke returned permissions.
 func (d *Daemon) Wait() { <-d.done }

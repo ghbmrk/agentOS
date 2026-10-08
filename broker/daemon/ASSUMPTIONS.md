@@ -30,3 +30,21 @@ that a reviewer may want to change.
 - One CH-15 rate limit over every reply to a message that proves only the owner's number (the unlock prompt, "agent not running", "not understood", the STOP hint and RESUME texts). The skeleton caps the STOP hint at one per hour and RESUME texts at 3 per hour; the other fixed replies are not capped yet.
 - "Resumed." should report how many held items were released; a held item whose approval went stale goes back to needs-approval.
 - YES/NO grammar: request IDs are letters, item numbers digits, codes 6 digits, so `YES <id> <code>` is never ambiguous. A bare "yes" while requests are open gets the fixed usage reply.
+
+## W5-D58 shutdown custody
+
+Daemon.Wait now joins the owned owner loop (including its existing modem Run
+join), Gate.Run and outstanding Gate settlements after socket Wait, then closes
+the journal and publishes completion. Owned producers return before Gate.Wait,
+so their later settlement admission cannot escape the join. An owner restart
+send or settlement callback may remain stuck forever, retaining journal custody;
+cancellation is not I/O interruption or a shutdown deadline. This truthful
+availability tradeoff is intentional, not a timeout/replacement writer policy.
+
+Caller-owned Gate/Owner/Engine handles, spawned work, executor subwork and other
+consumers must independently cease admission and complete downstream handoff.
+The daemon does not enforce those scopes, revoke permissions, guarantee all-user
+quiescence or qualify current-main/runtime/custody/media/latency. Joining while
+an owned callback awaits Daemon.Wait deadlocks; callbacks must not do that.
+The existing close error is still not reported by Wait; media qualification is
+external. No activation/default/config/policy/reset/authority change supplied.
