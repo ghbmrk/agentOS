@@ -10,6 +10,22 @@ Index of work packages, one line each. Each row links its brief in `briefs/<ID>.
 | DOC-1 | [One home per fact; review pipeline; per-PR lens records](briefs/DOC-1.md) | — | merged (#355) |
 | DOC-3 | [BOARD index and briefs; DECISIONS format](briefs/DOC-3.md) | DOC-1 | merged (#356) |
 | DOC-2 | [doclint and cause metrics](briefs/DOC-2.md) | DOC-3 | merged (#357) |
+| SR3 | [Register the security and architecture review](briefs/SR3.md) | DOC-3 | in review (Codex proposal to primary; documentation only) |
+
+## Security and architecture review (2026-10-08)
+
+Primary lane; remediation is unclaimed. [Review record](reviews/security/2026-10-08-architecture-review.md).
+
+| ID | Package | Needs | State |
+|---|---|---|---|
+| SR3-1 | [Bind local sign-in to the authenticated lock generation](briefs/SR3-1.md) | P2-2w a, P2-2w b | queued (P1; release) |
+| SR3-2 | [Enforce pre-allowance rate limits at dispatch](briefs/SR3-2.md) | P2-grants, P2-gr8 | queued (P2; release) |
+| SR3-3 | [Show and bind the complete pre-allowance rule at approval](briefs/SR3-3.md) | P2-grants, P2-2a | queued (P2; release) |
+| SR3-4 | [Make update finalization durable and idempotent](briefs/SR3-4.md) | UPD-a, P4-3, P3-1 | queued (P2; release) |
+| SR3-5 | [Preserve IMAP message identity through mutations and undo](briefs/SR3-5.md) | P2-6m | queued (P2; release) |
+| SR3-6 | [Invalidate verified updates when attestation policy narrows](briefs/SR3-6.md) | P4-3, P3-1 | queued (P2; release) |
+| SR3-7 | [Use one validated request for model reservation and routing](briefs/SR3-7.md) | P2-7, P1-7 | queued (P2; release) |
+| SR3-8 | [Commit clean-room output durably before recording completion](briefs/SR3-8.md) | P4-2 | queued (P2; release) |
 
 ## Phase 0: harness and risk spikes
 
@@ -26,7 +42,10 @@ Index of work packages, one line each. Each row links its brief in `briefs/<ID>.
 | S8 | [Provider agents as workers](briefs/S8.md) | Cloud first (stubs), then Mark's accounts | merged (03641d1; #186 cloud part and spec diff) |
 | S8-W1 | [Image fix for worker-held custody](briefs/S8-W1.md) | S8, #186 | queued |
 | S8-live | [S8 live part](briefs/S8-live.md) | see brief | queued |
-| S8-codex-terms | [Read OpenAI's current terms on a proxy holding ChatGPT-managed…](briefs/S8-codex-terms.md) | openai.com reachable | queued |
+| S8-codex-terms | [Read OpenAI's current terms on a proxy holding ChatGPT-managed…](briefs/S8-codex-terms.md) | openai.com reachable | in review (decided: broker-held, unconfirmed route, #328; [note](spikes/S8-provider-workers/CODEX-TERMS.md)) |
+| CRED-5f | [CRED-5 fallback when no API key is granted](briefs/CRED-5f.md) | #328 | queued |
+| CRED-5t | [Broker-held route failure triggers and fail-closed refresh test](briefs/CRED-5t.md) | #328 | queued |
+| CRED-5w | [Owner pause and withdrawal notice for broker-held routes](briefs/CRED-5w.md) | #328 | queued |
 | S1 | [Screenless USB4-SSD boot on ≥3 unmodified PCs](briefs/S1.md) | Mark: hardware + hands | queued (test kit ready; waiting on hardware) |
 | S2 | [USB LTE modem](briefs/S2.md) | Mark: 2 modems + SIM | queued (test kit ready; waiting on hardware) |
 | P0X | [Spec v0.12](briefs/P0X.md) | — | merged (cada7c1; SPEC.md v0.12) |
@@ -122,7 +141,9 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | CAP-8c | [Worker follow-ups (#150): layer cap, delete-only commands](briefs/CAP-8c.md) | CAP-8b merged | merged (c4c2366; #166) |
 | CAP-1 | [Speculative parallelism](briefs/CAP-1.md) | CAP-8 | merged (49cc421; commit on main; item D merged via #166) |
 | UPD-a | [Update apply, broker side](briefs/UPD-a.md) | P3-5, W5b; P2-1 for real activation | merged (#133) |
-| UPD-b | [First boot updates before trust](briefs/UPD-b.md) | UPD-a | queued (blocked on UPD-a) |
+| UPD-b | [First boot updates before trust](briefs/UPD-b.md) | UPD-a | in review (broker side: `broker/firstboot`, applier first-boot path, local page wording; wiring UPD-b2 and image side UPD-b3 queued) |
+| UPD-b2 | Wire the first-boot gate into agentosd (UPD-3; conditions in broker/firstboot/ASSUMPTIONS.md F7, including the clock-guard condition and a test that no connect path skips `Hold()`; brief to write) | UPD-b, W5b, UPD-a wiring (apply A7) | queued |
+| UPD-b3 | First-boot update, image side: preloaded root metadata and mirror list, real activator (UPD-3; broker/firstboot/ASSUMPTIONS.md F8; brief to write) | UPD-b, P2-1 (#41) | queued (blocked on P2-1) |
 | UPD-c | [Update channel and cadence as owner settings](briefs/UPD-c.md) | P3-5; W5b to reach the live box | merged (#130; carry: local page, quiet-window jitter (UPD-a), standing grant for…) |
 | CH-20 | [Evidence delivery](briefs/CH-20.md) | P2-6m; P2-3 for MMS | merged (#148: destination path; MMS waits on P2-3) |
 | CH-20p | [Kept replies on the local page](briefs/CH-20p.md) | CH-20, P2-2 | queued (blocked on P2-2) |
@@ -133,24 +154,30 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | ADP-5 | [Desktop-app executor, Linux](briefs/ADP-5.md) | CRED-4b | queued (blocked on CRED-4b; lane claude2) |
 | OSS-6 | [Publication identity](briefs/OSS-6.md) | P4-1, P4-4 | merged (#163, 8a67351) |
 | OSS-6s | [Publication sender](briefs/OSS-6s.md) | OSS-6 | queued |
+| OSS-6j | [Spec: what the repository's pull job is](briefs/OSS-6j.md) | #330 | queued (L1 spec diff) |
+| OSS-6i | [Fresh Tor circuit per batch and signing key](briefs/OSS-6i.md) | #330 | queued (L1 clause, then test in OSS-6s) |
+| OSS-6p | [Relay count, delivery rule, queue bound, relay list source](briefs/OSS-6p.md) | #330 | queued |
+| OSS-6a | [Spec: where ask-each-time prompts appear](briefs/OSS-6a.md) | #330 | queued (L1 spec diff) |
+| OSS-5t | [Spec: transport for the embargoed security report](briefs/OSS-5t.md) | #330 | queued (L1 spec diff) |
 | OSS-9 | [Attestations as evidence and following forks](briefs/OSS-9.md) | P4-3, P4-4 | merged (4329b1d; #180) |
 | OSS-6c | [Publication clock hardening](briefs/OSS-6c.md) | OSS-6 | merged (4329b1d; #180) |
-| OSS-6e | [Floor across restarts](briefs/OSS-6e.md) | OSS-6c | queued (A, after #180) |
-| OSS-10w | [Follow-fork executor wiring](briefs/OSS-10w.md) | OSS-9, HOST-1b, P2-2w | in review (A) |
-| OSS-10w2 | [Follow-fork wiring part 2](briefs/OSS-10w2.md) | OSS-10w, P2-2w b, P2-2w d | building (A) |
+| OSS-6e | [Floor across restarts](briefs/OSS-6e.md) | OSS-6c | in review (A) |
+| OSS-10w | [Follow-fork executor wiring](briefs/OSS-10w.md) | OSS-9, HOST-1b, P2-2w | merged (#323) (A) |
+| OSS-10w2 | [Follow-fork wiring part 2](briefs/OSS-10w2.md) | OSS-10w, P2-2w b, P2-2w d | in review (A) |
 | OSS-10w2u | Follow page wording: UX lens picks between the page's text and `maintain.FollowPrompt`/`FollowCheckHeading`, and the page names the current source (L3 R3 on #370) | OSS-10w2 | queued (needs brief) |
 | IMG-1 | [Image checks for P2-1](briefs/IMG-1.md) | P2-1 (#41, draft since 01:07Z) | queued (blocked on P2-1) |
 | SR2-1 | [Approval texts show only canonical recipients](briefs/SR2-1.md) | — | merged (#144) |
 | P2-2a | [Local-page approvals](briefs/P2-2a.md) | P2-2 | merged (6239bd4; #178 part 2) |
 | P2-2w | [Local UI process and owner socket](briefs/P2-2w.md) | P2-2a | building (in sub-rows a, b, d, c (P3-2 thread)) |
-| P2-2a f1 | [Page result after a changed item](briefs/P2-2a-f1.md) | P2-2a | in review |
+| P2-2a f1 | [Page result after a changed item](briefs/P2-2a-f1.md) | P2-2a | merged (#329) |
 | P2-2a f2 | [Page result for a changed release adoption](briefs/P2-2a-f2.md) | P2-2a f1 | queued (after #329) |
+| P2-2a f3 | [Re-offer an awaiting-owner release the pipeline dropped](briefs/P2-2a-f3.md) | P2-2a f2 | queued (after #363; release finding from L3 on #363) |
 | P2-2w a | [`localui.sock` in agentosd](briefs/P2-2w-a.md) | P2-2a | merged (b00db30; #184) |
 | P2-2w b | [`agentos-localui` command under its own uid](briefs/P2-2w-b.md) | P2-2w a | merged (0302131; #189) |
-| P2-2w d | [LocalUI on (part 1)](briefs/P2-2w-d.md) | P2-2w b | in review (split 2026-10-08; part 2 is d2) |
+| P2-2w d | [LocalUI on (part 1)](briefs/P2-2w-d.md) | P2-2w b | merged (#322; split 2026-10-08; part 2 is d2) |
 | P2-2w d2 | [Home page shows `Link.OwnerLineNote` and `Link.LastOutage`](briefs/P2-2w-d2.md) | P2-2w d | queued |
 | P2-2w c | [Setup moves into agentosd](briefs/P2-2w-c.md) | P2-2w b | building (split into c1-c3, each under one session) |
-| P2-2w c1 | [Code seed made in the vault process and handed out once](briefs/P2-2w-c1.md) | P2-2w b | in review |
+| P2-2w c1 | [Code seed made in the vault process and handed out once](briefs/P2-2w-c1.md) | P2-2w b | merged (#320) |
 | P2-2w c2 | [Pairing and finish in agentosd](briefs/P2-2w-c2.md) | P2-2w c1 | queued |
 | P2-2w c3 | [`agentos-netjoin`](briefs/P2-2w-c3.md) | P2-2w c2 | queued |
 | SR2-2 | [Restore refuses symlink chains that escape the root](briefs/SR2-2.md) | — | merged (#151) |
@@ -159,9 +186,10 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | SR2-3s | [Step snapshots that fail are not silent](briefs/SR2-3s.md) | SR2-3i | merged (847ea23; #179) |
 | SR2-3d | [A too-deep worker can be flattened](briefs/SR2-3d.md) | SR2-3i, CAP-8c | merged (d40fb31; #174) |
 | SR2-3f | [Worker tools answer no raw vm error](briefs/SR2-3f.md) | CAP-8c | merged (f19f97c; #181, commit fcdce51) |
-| SR2-3g | [Agent-visible tool errors name no host path](briefs/SR2-3g.md) | RES-4, CAP-8 | in review (recall thread) |
-| SR2-3h | [runsc's own messages never reach the guest](briefs/SR2-3h.md) | RES-4, CAP-8 | queued (recall thread, after SR2-3g) |
+| SR2-3g | [Agent-visible tool errors name no host path](briefs/SR2-3g.md) | RES-4, CAP-8 | merged (#324; recall thread) |
+| SR2-3h | [runsc's own messages never reach the guest](briefs/SR2-3h.md) | RES-4, CAP-8 | merged (#362) |
 | SR2-3j | [Effect denial reasons reach the guest only as fixed text](briefs/SR2-3j.md) | SR2-3g | queued (recall thread, after SR2-3h) |
+| SR2-3m | [A runsc panic after the guest starts reaches no guest output](briefs/SR2-3m.md) | RES-4, CAP-8, SR2-3h | queued (release finding 362-1, Security on #362) |
 | SR2-3k | [guesterr.Guest values checked at run time](briefs/SR2-3k.md) | SR2-3g | queued (recall thread, after SR2-3h) |
 | SR2-4 | [cgroup cpu, io and pids controllers](briefs/SR2-4.md) | #143 (RES-2 text) | merged (#155) |
 | SR2-4i | [Host side of SR2-4](briefs/SR2-4i.md) | SR2-4 merged; host image | queued (blocked on the host image) |
@@ -177,7 +205,7 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | HOST-1b | [No hardware-clock writes](briefs/HOST-1b.md) | P2-1 image | queued (part 2; part 1 merged (#177); part 2 queued on P2-2w (R1 needs the live page)) |
 | HOST-1c | [Firmware-change disclosure and BitLocker prevention](briefs/HOST-1c.md) | HOST-1a, P2-2 | queued (part 2; part 1 merged (#183); part 2 queued (needs P2-2)) |
 | HOST-1d | [Internal-disk opt-in](briefs/HOST-1d.md) | HOST-1a, P2-2, P2-4 | queued |
-| HOST-1e | [Host-untouched acceptance check](briefs/HOST-1e.md) | HOST-1a, HOST-1b | in review (part 1); part 2 (HOST-1e2) queued on P2-1 |
+| HOST-1e | [Host-untouched acceptance check](briefs/HOST-1e.md) | HOST-1a, HOST-1b | merged (part 1, #326); part 2 (HOST-1e2) queued on P2-1 |
 | HOST-1f | [Give the TPM's dictionary-attack settings back as they were](briefs/HOST-1f.md) | P2-4b (tpmseal, boot PIN #42) | merged (de01c80; #188) |
 | CI-SOAK | [Unattended soak workflow](briefs/CI-SOAK.md) | — | merged (8bab3fe; #187) |
 
