@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/reversible"
 	"github.com/ghbmrk/agentos/broker/update"
 )
 
@@ -82,8 +83,8 @@ type Store interface {
 	Save([]byte) error
 }
 
-// Config configures New. Every function field but Excluded, Rand and Now
-// is required.
+// Config configures New. Every function field but Excluded, Held, Rand
+// and Now is required.
 type Config struct {
 	Journal   Journal
 	Activator Activator
@@ -109,6 +110,15 @@ type Config struct {
 	LastTalk func() time.Time
 	// Quiet is how long after LastTalk the box waits. Default 10 minutes.
 	Quiet time.Duration
+	// Held is when the last effect the owner approved under an undo
+	// window is released (grants.Gate.HeldUntil); zero when none is held.
+	// A restart cancels every held effect (reversible RV6), so until then
+	// the box is not free (UX-76-2). Nil: nothing is ever held.
+	Held func() time.Time
+	// HeldBound is the longest held effects hold an update, from when it
+	// became due, so approvals that keep arriving cannot hold it for ever.
+	// Default DefaultHeldBound.
+	HeldBound time.Duration
 	// TalkBound is the longest a security fix waits on talk, from when it
 	// became due; after it only a call, accepted work or excluded hours
 	// hold it, so an agent or a spoofed sender that keeps talking cannot
@@ -143,6 +153,9 @@ type point struct {
 	// TalkUntil: after it, talk no longer holds the restart (zero: no
 	// bound).
 	TalkUntil time.Time `json:"talk_until,omitzero"`
+	// HeldUntil: after it, held effects no longer hold the restart (zero:
+	// they never do).
+	HeldUntil time.Time `json:"held_until,omitzero"`
 	// Installed: the activator took the release. Unset, a later boot is
 	// not a fallback: nothing was handed over.
 	Installed bool `json:"installed"`
@@ -204,6 +217,12 @@ func New(cfg Config) (*Applier, error) {
 	}
 	if cfg.Quiet <= 0 {
 		cfg.Quiet = 10 * time.Minute
+	}
+	if cfg.Held == nil {
+		cfg.Held = func() time.Time { return time.Time{} }
+	}
+	if cfg.HeldBound <= 0 {
+		cfg.HeldBound = DefaultHeldBound
 	}
 	if cfg.TalkBound <= 0 {
 		cfg.TalkBound = 2 * time.Hour
@@ -274,7 +293,11 @@ func (a *Applier) Schedule(v *update.Verified, adoption string) error {
 	return a.saveLocked()
 }
 
-// busy reports why the box is not free now, or "".
+// DefaultHeldBound is the longest undo window a reversible form may
+// declare: held effects never hold an update longer than one of them
+// could last (UX-76-2).
+const DefaultHeldBound = reversible.MaxWindow
+
 // talkUntil is when talk stops holding a pending release: a security fix
 // TalkBound after it became due; an ordinary release never (zero).
 func (a *Applier) talkUntil(p *pending) time.Time {
@@ -284,9 +307,18 @@ func (a *Applier) talkUntil(p *pending) time.Time {
 	return p.NotBefore.Add(a.cfg.TalkBound)
 }
 
+// heldUntil is when held effects stop holding a pending release:
+// HeldBound after it became due.
+func (a *Applier) heldUntil(p *pending) time.Time {
+	if p == nil {
+		return time.Time{}
+	}
+	return p.NotBefore.Add(a.cfg.HeldBound)
+}
+
 // busy reports why the box is not free now, or "". Talk holds only until
-// talkUntil, when that is set.
-func (a *Applier) busy(now, talkUntil time.Time) string {
+// talkUntil, when that is set; held effects only until heldUntil.
+func (a *Applier) busy(now, talkUntil, heldUntil time.Time) string {
 	switch {
 	case a.cfg.Stopped():
 		return busyStop
@@ -296,6 +328,8 @@ func (a *Applier) busy(now, talkUntil time.Time) string {
 		return busyWork
 	case a.cfg.Excluded(now):
 		return busyExcluded
+	case now.Before(a.cfg.Held()) && now.Before(heldUntil):
+		return busyHeld
 	case now.Sub(a.cfg.LastTalk()) < a.cfg.Quiet && (talkUntil.IsZero() || now.Before(talkUntil)):
 		return busyTalk
 	}
@@ -308,6 +342,7 @@ const (
 	busyCall     = "a call is in progress"
 	busyWork     = "accepted work is in progress"
 	busyExcluded = "the owner excluded these hours from updates"
+	busyHeld     = "an approved action is in its undo window"
 	busyTalk     = "the owner and the agent are talking"
 )
 
@@ -317,6 +352,7 @@ var waitLines = map[string]string{
 	busyCall:     "Update %d will install after the current call.",
 	busyWork:     "Update %d will install once the agent's current task is done.",
 	busyExcluded: "Update %d will install after your update-free hours.",
+	busyHeld:     "Update %d will install once the actions you can still undo have run.",
 	busyTalk:     "Update %d will install once your conversation pauses.",
 	"":           "Update %d will install soon. Nothing is needed from you.",
 }
@@ -338,9 +374,9 @@ func (a *Applier) Tick(ctx context.Context) (ok bool, err error) {
 		a.mu.Unlock()
 		return false, nil
 	}
-	until := a.talkUntil(p)
+	until, held := a.talkUntil(p), a.heldUntil(p)
 	a.mu.Unlock()
-	if a.busy(now, until) != "" {
+	if a.busy(now, until, held) != "" {
 		return false, nil
 	}
 	id := a.nextID(p.Version)
@@ -382,7 +418,7 @@ func (a *Applier) restartIfHandedOver(ctx context.Context) (bool, error) {
 	if err != nil || b.ID != pt.BootID {
 		return false, err // a new boot is Resume's to judge
 	}
-	if a.busy(a.cfg.Now(), pt.TalkUntil) != "" {
+	if a.busy(a.cfg.Now(), pt.TalkUntil, pt.HeldUntil) != "" {
 		return false, nil
 	}
 	return true, a.cfg.Activator.Restart(ctx)
@@ -453,12 +489,12 @@ func (a *Applier) Check(_ context.Context, _ journal.Phase, in journal.Intent) e
 	}
 	a.mu.Lock()
 	p, held, applying := a.st.Pending, a.rel != nil, a.st.Applying != nil
-	until := a.talkUntil(p)
+	until, heldUntil := a.talkUntil(p), a.heldUntil(p)
 	a.mu.Unlock()
 	if p == nil || !held || p.Version != v || applying {
 		return errors.New("apply: no release is waiting for this activation")
 	}
-	if why := a.busy(a.cfg.Now(), until); why != "" {
+	if why := a.busy(a.cfg.Now(), until, heldUntil); why != "" {
 		return errors.New("apply: " + why)
 	}
 	return nil
@@ -487,6 +523,7 @@ func (a *Applier) Execute(ctx context.Context, in journal.Intent, _ int) journal
 	pt, err := a.pointLocked(ctx, in.ID, rel, p.Adoption)
 	if err == nil {
 		pt.TalkUntil = a.talkUntil(p)
+		pt.HeldUntil = a.heldUntil(p)
 		a.st.Applying = pt
 		if err = a.saveLocked(); err != nil {
 			a.st.Applying = nil
@@ -621,7 +658,7 @@ func (a *Applier) Status() string {
 	case a.st.Pending != nil && a.rel != nil:
 		why := ""
 		if now := a.cfg.Now(); !now.Before(a.st.Pending.NotBefore) {
-			why = a.busy(now, a.talkUntil(a.st.Pending))
+			why = a.busy(now, a.talkUntil(a.st.Pending), a.heldUntil(a.st.Pending))
 		}
 		return fmt.Sprintf(waitLines[why], a.st.Pending.Version)
 	case a.st.Last == nil || a.st.Last.Kind == doneInstalled:
