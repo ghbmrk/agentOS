@@ -690,10 +690,18 @@ func main() {
 	}
 	// The recall identity key is vault-held (recall K5): recall opens once
 	// the vault process can hand it over.
+	// FORGET's item 2s a restart interrupted resume once recall opens;
+	// with recall off they cannot, and the owner is told so.
 	if recallDir != "" && verifier != nil {
+		if lp != nil {
+			recallExec.OnOpen(func() { go lp.forgetOwner.resumeAgent(ctx) })
+		}
 		go openRecall(ctx, verifier, recallCfg, recallTools, recallExec)
 	} else {
 		recallExec.Off()
+		if lp != nil {
+			go lp.forgetOwner.resumeAgent(ctx)
+		}
 	}
 	if line != nil {
 		go line.run(ctx)

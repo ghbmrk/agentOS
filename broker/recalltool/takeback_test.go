@@ -31,7 +31,7 @@ func TestCAP3ForgetTakesTheAgentBackOnTheAskFirstRule(t *testing.T) {
 	if worked, _ := x.reach.Work("root", read); !worked {
 		t.Fatal("an action since is work")
 	}
-	if err := x.reach.TakeBack(context.Background(), "root", read); err != nil {
+	if err := x.reach.TakeBack(context.Background(), "root", read, true); err != nil {
 		t.Fatal(err)
 	}
 	if len(x.vm.calls) != 1 || x.vm.calls[0] != "root" || !x.vm.since[0].Equal(read) {
@@ -43,9 +43,9 @@ func TestCAP3ForgetTakesTheAgentBackOnTheAskFirstRule(t *testing.T) {
 	if len(x.r.prov.Resets("root")) != 0 || len(x.r.prov.Of("bystander")) == 0 {
 		t.Fatal("reset left open, or another lineage touched")
 	}
-	// Again (a retry): it resets from the same point, and nothing was
-	// done since, so nothing more is lost.
-	if err := x.reach.TakeBack(context.Background(), "root", read); err != nil || len(x.vm.calls) != 2 {
+	// Again (a retry): done once, it is not repeated (vm.ForgetSince: a
+	// repeat rolls back later work too).
+	if err := x.reach.TakeBack(context.Background(), "root", read, true); err != nil || len(x.vm.calls) != 1 {
 		t.Fatalf("second take-back: %v %v", err, x.vm.calls)
 	}
 	if _, ok := (&Reach{Prov: x.r.prov}).Work("root", read); ok {
@@ -66,5 +66,94 @@ func TestCAP3RetryFinishesAnInterruptedTakeBack(t *testing.T) {
 	}
 	if !x.j.erased["late"] || len(x.r.prov.Resets("root")) != 0 || len(x.vm.calls) != 0 {
 		t.Fatalf("erased %v resets %v machines %v", x.j.erased, x.r.prov.Resets("root"), x.vm.calls)
+	}
+}
+
+// #327 L3 blocker 1: a take-back whose machines went back but whose reach
+// did not finish (an intent still in flight) is not repeated, by a retry
+// or after a restart: Retry finishes it, and the machines go back once.
+func TestCAP3ATakeBackIsNeverRepeatedOnceItsResetIsRecorded(t *testing.T) {
+	x, read := newReachRig(t)
+	x.j.submitted["late"] = read.Add(time.Second)
+	x.j.inFlight["late"] = true
+	if err := x.reach.TakeBack(context.Background(), "root", read, true); err != nil {
+		t.Fatalf("machines back, reach left to Retry: %v", err)
+	}
+	if err := x.reach.TakeBack(context.Background(), "root", read, true); err != nil || len(x.vm.calls) != 1 {
+		t.Fatalf("retried: %v, machines %v", err, x.vm.calls)
+	}
+	if !x.reach.Owed() {
+		t.Fatal("an unfinished reach must keep Retry running")
+	}
+	x.j.inFlight["late"] = false
+	if err := x.reach.Retry(context.Background()); err != nil || !x.j.erased["late"] || len(x.vm.calls) != 1 {
+		t.Fatalf("Retry: %v erased %v machines %v", err, x.j.erased, x.vm.calls)
+	}
+	again, err := OpenProvenance(x.r.prst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	x.reach.Prov = again
+	if err := x.reach.TakeBack(context.Background(), "root", read, true); err != nil || len(x.vm.calls) != 1 || x.reach.Owed() {
+		t.Fatalf("after a restart: %v, machines %v", err, x.vm.calls)
+	}
+}
+
+// #327 L3 blocker 2: an approved take-back that fails is recorded first,
+// so recall's Retry carries it through, across a restart too, and tells
+// the owner when it is done. One not approved (no work to lose, so no
+// ask) is tried once and never later, when the agent may have worked.
+func TestCAP3AnApprovedTakeBackIsCarriedThroughByRetry(t *testing.T) {
+	x, read := newReachRig(t)
+	x.vm.fail = errors.New("machine busy")
+	if err := x.reach.TakeBack(context.Background(), "root", read, false); err == nil || errors.Is(err, ErrCarried) {
+		t.Fatalf("a failed take-back not approved: %v", err)
+	}
+	if x.reach.Owed() {
+		t.Fatal("a take-back not approved must not be carried later")
+	}
+	if err := x.reach.TakeBack(context.Background(), "root", read, true); !errors.Is(err, ErrCarried) {
+		t.Fatalf("an approved take-back not carried: %v", err)
+	}
+	again, err := OpenProvenance(x.r.prst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	x.reach.Prov = again
+	if !x.reach.Owed() {
+		t.Fatal("an approved take-back lost by a restart")
+	}
+	x.vm.fail = nil
+	if err := x.reach.Retry(context.Background()); err != nil || len(x.vm.calls) != 1 {
+		t.Fatalf("Retry: %v machines %v", err, x.vm.calls)
+	}
+	if len(x.told) != 1 || x.told[0] != TakenBack || x.reach.Owed() {
+		t.Fatalf("told %v owed %v", x.told, x.reach.Owed())
+	}
+	if err := x.reach.Retry(context.Background()); err != nil || len(x.vm.calls) != 1 || len(x.told) != 1 {
+		t.Fatalf("Retry again: %v machines %v told %v", err, x.vm.calls, x.told)
+	}
+}
+
+// Before recall opens a take-back records nothing and says so; what waits
+// on the open runs once it does (FORGET's interrupted item 2s).
+func TestCAP3LateTakeBackWaitsForRecallToOpen(t *testing.T) {
+	x, read := newReachRig(t)
+	var l LateExecutor
+	if err := l.TakeBack(context.Background(), "root", read, true); !errors.Is(err, ErrNotOpen) || errors.Is(err, ErrCarried) {
+		t.Fatalf("before open: %v", err)
+	}
+	ran := 0
+	l.OnOpen(func() { ran++ })
+	if ran != 0 {
+		t.Fatal("ran before open")
+	}
+	l.Set(x.reach)
+	l.OnOpen(func() { ran++ })
+	if ran != 2 || x.reach.Owed() {
+		t.Fatalf("ran %d, owed %v", ran, x.reach.Owed())
+	}
+	if err := l.TakeBack(context.Background(), "root", read, true); err != nil || len(x.vm.calls) != 1 {
+		t.Fatalf("after open: %v %v", err, x.vm.calls)
 	}
 }

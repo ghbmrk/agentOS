@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"sync"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/recalltool"
 )
 
 // REQ: CAP-3, OP-5
@@ -23,6 +25,7 @@ type fakeWork struct {
 	err     error
 	lineage []string
 	backs   []time.Time
+	asked   []bool // approved, per take-back
 }
 
 func (w *fakeWork) Work(lineage string, since time.Time) (bool, bool) {
@@ -31,13 +34,14 @@ func (w *fakeWork) Work(lineage string, since time.Time) (bool, bool) {
 	return w.worked, w.ok
 }
 
-func (w *fakeWork) TakeBack(_ context.Context, lineage string, since time.Time) error {
+func (w *fakeWork) TakeBack(_ context.Context, lineage string, since time.Time, approved bool) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.err != nil {
 		return w.err
 	}
 	w.lineage, w.backs = append(w.lineage, lineage), append(w.backs, since)
+	w.asked = append(w.asked, approved)
 	return nil
 }
 
@@ -131,7 +135,7 @@ func TestForgetItem2RunsOnlyWithItem1(t *testing.T) {
 		{"with item 1", journal.Succeeded, journal.ResultSucceeded, forgetAgentDone},
 		{"item 1 not chosen", journal.Denied, journal.ResultNotApplied, forgetAgentAlone},
 		{"item 1 approved, not run yet", journal.Authorized, journal.ResultSucceeded, forgetAgentDone},
-		{"item 1 approved, not saved", journal.NotApplied, journal.ResultSucceeded, forgetAgentDone},
+		{"item 1 approved, not saved", journal.NotApplied, journal.ResultNotApplied, forgetAgentAlone},
 		{"item 1 never settles", journal.Pending, journal.ResultNotApplied, forgetAgentAlone},
 		{"no item 1", "", journal.ResultNotApplied, forgetAgentAlone},
 	} {
@@ -150,7 +154,7 @@ func TestForgetItem2RunsOnlyWithItem1(t *testing.T) {
 			t.Fatalf("%s: %+v %q", c.name, out, r.texts)
 		}
 		if c.want == journal.ResultSucceeded {
-			if len(w.backs) != 1 || !w.backs[0].Equal(at) || w.lineage[0] != "agent.l1" {
+			if len(w.backs) != 1 || !w.backs[0].Equal(at) || w.lineage[0] != "agent.l1" || !w.asked[0] {
 				t.Fatalf("%s: took back %v %v", c.name, w.lineage, w.backs)
 			}
 		} else if len(w.backs) != 0 {
@@ -162,37 +166,66 @@ func TestForgetItem2RunsOnlyWithItem1(t *testing.T) {
 	}
 }
 
-// A take-back that fails is retried until it holds, and the owner hears
-// it is done only then; a restart reports the approved item 2 as recall
-// reports its own rollbacks.
-func TestForgetItem2RetriesItsTakeBack(t *testing.T) {
-	r := newForgetRig(t)
-	w := &fakeWork{worked: true, ok: true, err: errors.New("machine busy")}
-	r.withAgent(w)
-	r.task("owner:a", "pay the gas bill", r.now.Add(-time.Hour), viaSMS)
-	r.say("FORGET LAST")
-	r.gate.st = map[string]journal.State{r.gate.got[0].ID: journal.Succeeded}
-	r.texts = nil
-	done := make(chan struct{})
-	r.f.retried = func() { close(done) }
-	tries := 0
-	r.f.sleep = func(context.Context, time.Duration) bool {
-		w.mu.Lock()
-		defer w.mu.Unlock()
-		if tries++; tries == 3 {
-			w.err = nil
+// #327 L3 1, 2: item 2 never repeats its take-back. One that fails after
+// recall recorded it owed is left to recall's Retry, which tells the owner
+// when it is done; one that fails before, nothing carries, so the owner
+// is told plainly.
+func TestForgetItem2LeavesAFailedTakeBackToRecall(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		err  error
+		want journal.Result
+		text string
+	}{
+		{"owed", fmt.Errorf("%w: machine busy", recalltool.ErrCarried), journal.ResultSucceeded, forgetAgentNotYet},
+		{"not recorded", errors.New("disk full"), journal.ResultNotApplied, forgetAgentNotTaken},
+		{"recall not open", recalltool.ErrNotOpen, journal.ResultNotApplied, forgetAgentNotOpen},
+	} {
+		r := newForgetRig(t)
+		w := &fakeWork{worked: true, ok: true, err: c.err}
+		r.withAgent(w)
+		r.task("owner:a", "pay the gas bill", r.now.Add(-time.Hour), viaSMS)
+		r.say("FORGET LAST")
+		r.gate.st = map[string]journal.State{r.gate.got[0].ID: journal.Succeeded}
+		r.texts = nil
+		r.f.sleep = func(context.Context, time.Duration) bool { t.Fatalf("%s: retried", c.name); return false }
+		if out := r.f.Execute(context.Background(), r.gate.got[1], 1); out.Result != c.want || len(r.texts) != 1 || r.texts[0] != c.text {
+			t.Fatalf("%s: %+v %q", c.name, out, r.texts)
 		}
-		return true
 	}
-	if out := r.f.Execute(context.Background(), r.gate.got[1], 1); out.Result != journal.ResultSucceeded {
-		t.Fatal(out)
-	}
-	<-done
-	if len(w.backs) != 1 || len(r.texts) != 1 || r.texts[0] != forgetAgentDone {
-		t.Fatalf("retry: %v %q", w.backs, r.texts)
-	}
-	if out := r.f.Reconcile(context.Background(), r.gate.got[1], 1); out.Result != journal.ResultSucceeded {
-		t.Fatal(out)
+}
+
+// #327 L3 2: an approved item 2 interrupted by a restart is taken back
+// once recall opens (recall does not repeat one already done), and only
+// with item 1 approved.
+func TestForgetItem2ResumesAfterARestart(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		item1 journal.State
+		text  string
+		backs int
+	}{
+		{"with item 1", journal.Succeeded, forgetAgentDone, 1},
+		{"item 1 not chosen", journal.Denied, forgetAgentAlone, 0},
+	} {
+		r := newForgetRig(t)
+		w := &fakeWork{worked: true, ok: true}
+		r.withAgent(w)
+		r.task("owner:a", "pay the gas bill", r.now.Add(-time.Hour), viaSMS)
+		r.say("FORGET LAST")
+		r.gate.st = map[string]journal.State{r.gate.got[0].ID: c.item1}
+		r.texts = nil
+		if out := r.f.Reconcile(context.Background(), r.gate.got[1], 1); out.Result != journal.ResultSucceeded {
+			t.Fatalf("%s: %+v", c.name, out)
+		}
+		if len(w.backs) != 0 || len(r.texts) != 0 {
+			t.Fatalf("%s: taken back before recall opened", c.name)
+		}
+		r.f.resumeAgent(context.Background())
+		r.f.resumeAgent(context.Background()) // once only
+		if len(w.backs) != c.backs || len(r.texts) != 1 || r.texts[0] != c.text || (c.backs > 0 && !w.asked[0]) {
+			t.Fatalf("%s: took back %v asked %v, told %q", c.name, w.backs, w.asked, r.texts)
+		}
 	}
 }
 

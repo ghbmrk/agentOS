@@ -212,8 +212,16 @@ func (r *Reach) Retry(ctx context.Context) error {
 		}
 	}
 	// A reset no pending deletion revisits (a take-back, or one whose
-	// deletion was reached since) is finished here.
+	// deletion was reached since) is finished here, after any approved
+	// take-back still owed is run.
 	r.run.Lock()
+	for _, tb := range r.Prov.TakeBacksOwed() {
+		if err := r.takeBack(ctx, tb.Lineage, tb.Since, true); err != nil {
+			errs = append(errs, fmt.Errorf("take-back of %s: %w", tb.Lineage, err))
+			continue
+		}
+		r.tell(tb.Lineage, TakenBack)
+	}
 	for _, l := range r.Prov.ResetLineages() {
 		for _, rs := range r.Prov.Resets(l) {
 			if err := r.finish(l, rs); err != nil {
@@ -238,17 +246,95 @@ func (r *Reach) Work(lineage string, since time.Time) (worked, ok bool) {
 	return err != nil || plan.Changes > 0 || r.actions(lineage, since, time.Time{}) > 0, true
 }
 
+// TakenBack tells the owner an approved take-back, carried by Retry, is
+// done.
+const TakenBack = "Your agent's work since that task is undone; it no longer holds the task."
+
+// ErrCarried wraps the failure of an approved take-back that is recorded
+// owed: Retry carries it through and tells the owner TakenBack. Any other
+// failure leaves nothing to carry it.
+var ErrCarried = errors.New("recall: take-back owed; Retry carries it")
+
+// errUnrecorded: the machines went back but the reset was not recorded.
+var errUnrecorded = errors.New("reset not recorded")
+
 // TakeBack takes lineage back to before since by the reset a recall
 // rollback runs (reset, finish), for a caller that settled the ask-first
 // rule itself: the owner's forget of a task (W3-forget-b2b). It tells the
-// owner nothing. A reset recorded and not finished is finished by Retry.
-func (r *Reach) TakeBack(ctx context.Context, lineage string, since time.Time) error {
+// owner nothing. nil means the machines are back; their reach, if not
+// finished, is finished by Retry. Once done it is never repeated, since a
+// repeat would roll back later work too (#327 L3 1). An approved one is
+// recorded first, so that on failure Retry carries it through, across a
+// restart too, and tells the owner TakenBack (#327 L3 2); one not
+// approved (no work to lose) is tried once.
+func (r *Reach) TakeBack(ctx context.Context, lineage string, since time.Time, approved bool) error {
 	if r.Machines == nil {
 		return errors.New("recall: machines not wired")
 	}
 	r.run.Lock()
 	defer r.run.Unlock()
-	return r.reset(ctx, lineage, since, false)
+	recorded, done := r.Prov.TakeBack(lineage, since)
+	if done || r.resetFrom(lineage, since) {
+		return nil
+	}
+	if approved && !recorded {
+		if err := r.Prov.MarkTakeBack(lineage, since, false); err != nil {
+			return err
+		}
+	}
+	if err := r.takeBack(ctx, lineage, since, approved); err != nil {
+		if approved {
+			return fmt.Errorf("%w: %w", ErrCarried, err)
+		}
+		return err
+	}
+	return nil
+}
+
+// takeBack runs the reset once; a reset recorded since means the machines
+// are back. Called with run held.
+func (r *Reach) takeBack(ctx context.Context, lineage string, since time.Time, approved bool) error {
+	err := r.reset(ctx, lineage, since, false)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, errUnrecorded) {
+		// Back but unrecorded: only the take-back's own mark keeps it from
+		// being repeated; its reach is left undone (logged).
+		r.logf("recall: take-back of %s: %v", lineage, err)
+		if approved {
+			if merr := r.Prov.MarkTakeBack(lineage, since, true); merr != nil {
+				r.logf("recall: take-back of %s not marked done: %v", lineage, merr)
+			}
+		}
+		return nil
+	}
+	if r.resetFrom(lineage, since) {
+		return nil
+	}
+	return err
+}
+
+// resetFrom reports an unfinished reset of lineage from since.
+func (r *Reach) resetFrom(lineage string, since time.Time) bool {
+	for _, rs := range r.Prov.Resets(lineage) {
+		if rs.Since.Equal(since) {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *Reach) logf(format string, args ...any) {
+	if r.Logf != nil {
+		r.Logf(format, args...)
+	}
+}
+
+// Owed reports work Retry carries that Pending does not count: an owed
+// take-back or an unfinished reset.
+func (r *Reach) Owed() bool {
+	return len(r.Prov.TakeBacksOwed()) > 0 || len(r.Prov.ResetLineages()) > 0
 }
 
 // Pending reports how many deletions are not yet fully reached.
@@ -607,7 +693,7 @@ func (r *Reach) reset(ctx context.Context, lineage string, since time.Time, appr
 	// (#59 L3 re-review 5).
 	rs := Reset{Since: since, At: at, Until: r.now()}
 	if err := r.Prov.MarkReset(lineage, rs); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", errUnrecorded, err)
 	}
 	if approved {
 		to := plan.To

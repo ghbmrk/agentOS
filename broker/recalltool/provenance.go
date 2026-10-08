@@ -23,7 +23,10 @@ type Provenance struct {
 	// resets: lineages whose machines went back to before since, whose
 	// reach is not finished (Reach), by since in UnixNano.
 	resets map[string]map[int64]Reset
-	lines  int
+	// takeBacks: approved take-backs of a lineage from since (UnixNano),
+	// true once its machines went back (W3-forget-b2b, #327 L3).
+	takeBacks map[string]map[int64]bool
+	lines     int
 }
 
 type provRecord struct {
@@ -37,12 +40,15 @@ type provRecord struct {
 	Reset time.Time `json:"reset,omitempty"`
 	// Until, with Reset: when the machines were all back.
 	Until time.Time `json:"until,omitempty"`
+	// TakeBack, with At: a take-back of the lineage from At is owed; with
+	// Forget, done. A reset from At also marks an owed one done.
+	TakeBack bool `json:"tb,omitempty"`
 }
 
 // OpenProvenance loads the record from store (a recall.FileStore in the
 // broker's state directory; unreadable lines are skipped).
 func OpenProvenance(store recall.Store) (*Provenance, error) {
-	p := &Provenance{store: store, sets: map[string]map[string]time.Time{}, resets: map[string]map[int64]Reset{}}
+	p := &Provenance{store: store, sets: map[string]map[string]time.Time{}, resets: map[string]map[int64]Reset{}, takeBacks: map[string]map[int64]bool{}}
 	data, err := store.ReadAll()
 	if err != nil {
 		return nil, err
@@ -67,6 +73,16 @@ func (p *Provenance) apply(r provRecord) {
 	if r.Lineage == "" {
 		return
 	}
+	if r.TakeBack {
+		since := r.At.UnixNano()
+		if p.takeBacks[r.Lineage] == nil {
+			p.takeBacks[r.Lineage] = map[int64]bool{}
+		}
+		if done, ok := p.takeBacks[r.Lineage][since]; !ok || !done {
+			p.takeBacks[r.Lineage][since] = r.Forget
+		}
+		return
+	}
 	if !r.Reset.IsZero() {
 		since := r.At.UnixNano()
 		if r.Forget {
@@ -78,6 +94,9 @@ func (p *Provenance) apply(r provRecord) {
 				delete(p.resets, r.Lineage)
 			}
 			return
+		}
+		if _, ok := p.takeBacks[r.Lineage][since]; ok {
+			p.takeBacks[r.Lineage][since] = true
 		}
 		if p.resets[r.Lineage] == nil {
 			p.resets[r.Lineage] = map[int64]Reset{}
@@ -228,6 +247,16 @@ func (p *Provenance) compact() error {
 			n++
 		}
 	}
+	for _, l := range sortedKeys(p.takeBacks) {
+		for since, done := range p.takeBacks[l] {
+			b, err := json.Marshal(provRecord{Lineage: l, At: time.Unix(0, since).UTC(), TakeBack: true, Forget: done})
+			if err != nil {
+				return err
+			}
+			buf = append(append(buf, b...), '\n')
+			n++
+		}
+	}
 	if err := p.store.Rewrite(buf); err != nil {
 		return err
 	}
@@ -277,6 +306,50 @@ func (p *Provenance) ResetLineages() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return sortedKeys(p.resets)
+}
+
+// MarkTakeBack records, durably, an approved take-back of lineage from
+// since: owed until done, so a restart does not lose it, and done once its
+// machines went back, so it is never repeated (vm.ForgetSince).
+func (p *Provenance) MarkTakeBack(lineage string, since time.Time, done bool) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.write(provRecord{Lineage: lineage, At: since.UTC(), TakeBack: true, Forget: done})
+}
+
+// TakeBack reports whether a take-back of lineage from since is recorded,
+// and whether it is done.
+func (p *Provenance) TakeBack(lineage string, since time.Time) (recorded, done bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	done, recorded = p.takeBacks[lineage][since.UTC().UnixNano()]
+	return recorded, done
+}
+
+// OwedTakeBack is an approved take-back not yet done.
+type OwedTakeBack struct {
+	Lineage string
+	Since   time.Time
+}
+
+// TakeBacksOwed lists the take-backs not yet done, by lineage and since.
+func (p *Provenance) TakeBacksOwed() []OwedTakeBack {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var out []OwedTakeBack
+	for _, l := range sortedKeys(p.takeBacks) {
+		var ss []int64
+		for since, done := range p.takeBacks[l] {
+			if !done {
+				ss = append(ss, since)
+			}
+		}
+		sort.Slice(ss, func(i, j int) bool { return ss[i] < ss[j] })
+		for _, since := range ss {
+			out = append(out, OwedTakeBack{Lineage: l, Since: time.Unix(0, since).UTC()})
+		}
+	}
+	return out
 }
 
 // Finish ends the reach of a reset: what lineage was given from r.Since
