@@ -452,28 +452,137 @@ func TestRestoredJobValidatesOutputBeforeCompleting(t *testing.T) {
 	}
 }
 
-// Rebuilds after damage are bounded: past maxRepairs a job keeps its spent
-// attempts, so storage that keeps losing output cannot run clean rooms
-// without end.
-func TestRepairsAreBounded(t *testing.T) {
+// quarantineFails fails every rename into the quarantine: a crash after the
+// job was queued again and before its artifact was moved aside.
+func quarantineFails(op, path string) error {
+	if op == "rename" && strings.Contains(path, ".quarantine") {
+		return errors.New("injected crash")
+	}
+	return nil
+}
+
+func quarantined(r *rig, id string) []string {
+	q, _ := filepath.Glob(filepath.Join(r.b.store.dir, ".quarantine", id+"-*"))
+	return q
+}
+
+// rebuildOnce runs the builder until one more outcome is logged.
+func rebuildOnce(t *testing.T, r *rig) Outcome {
+	t.Helper()
+	n := len(r.outcomes())
+	ctx, stop := ctxRun(r)
+	waitFor(t, "outcome", func() bool { return len(r.outcomes()) > n })
+	stop()
+	<-ctx
+	r.f.wg.Wait()
+	o := r.outcomes()
+	return o[len(o)-1]
+}
+
+// Damage found at open queues the job again before the artifact is
+// quarantined: a crash between the two leaves the job queued, and the next
+// open quarantines and rebuilds it once.
+func TestQuarantineCrashAtOpenKeepsJob(t *testing.T) {
 	r := newRig(t, nil)
-	if err := r.b.Send(nextDay(), [][]byte{skillHint(t)}); err != nil {
+	a := buildOne(t, r, skillHint(t))
+	id := a.m.ID
+	if err := os.Remove(filepath.Join(a.dir, "files", "skill", "lib", "tz", "zones.py")); err != nil {
+		t.Fatal(err)
+	}
+	cfg := r.cfg
+	cfg.fault = quarantineFails
+	if _, err := New(cfg); err == nil {
+		t.Fatal("open succeeded with quarantine failing")
+	}
+	jobs, _ := queuedOf(&Builder{cfg: r.cfg})
+	if len(jobs) != 1 || artifactID(jobs[0]) != id || jobs[0].Attempts != 0 {
+		t.Fatalf("queued at the crash: %+v", jobs)
+	}
+	reopen(t, r)
+	if jobs, _ := r.queued(); len(jobs) != 1 || artifactID(jobs[0]) != id {
+		t.Fatalf("queued after reopen: %+v", jobs)
+	}
+	if q := quarantined(r, id); len(q) != 1 {
+		t.Fatalf("quarantine %v", q)
+	}
+	if o := rebuildOnce(t, r); o.Result != "built" || o.Artifact != id {
+		t.Fatalf("outcome %+v", o)
+	}
+}
+
+// Damage found at completion renews the job's attempts before the artifact
+// is quarantined: a crash between the two cannot leave the job with spent
+// attempts, logged failed instead of rebuilt.
+func TestQuarantineCrashInFinishKeepsJob(t *testing.T) {
+	r := newRig(t, nil)
+	h := skillHint(t)
+	if err := r.b.Send(nextDay(), [][]byte{h}); err != nil {
 		t.Fatal(err)
 	}
 	jobs, _ := r.queued()
 	j := jobs[0]
-	for i := 0; i < maxRepairs+2; i++ {
-		j.Attempts = 2
-		if err := r.b.renew(j); err != nil {
-			t.Fatal(err)
-		}
-		if want := i < maxRepairs; (j.Attempts == 0) != want {
-			t.Fatalf("repair %d: attempts %d", i, j.Attempts)
-		}
+	j.Attempts = r.b.cfg.Attempts // built on its last attempt
+	if err := writeJSON(j.path, j); err != nil {
+		t.Fatal(err)
+	}
+	a, err := r.b.store.put(Manifest{ID: artifactID(j), Job: j.ID, Hint: json.RawMessage(h), Day: j.Day}, nestedFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(filepath.Join(a.dir, "files", "skill", "SKILL.md"), 1); err != nil {
+		t.Fatal(err)
+	}
+	r.b.store.fault = quarantineFails
+	if err := r.b.finish(j, "skill_gap", Outcome{Result: "built", Artifact: artifactID(j)}); err == nil {
+		t.Fatal("finish succeeded with quarantine failing")
 	}
 	var got job
-	if err := readJSON(j.path, &got); err != nil || got.Repairs != maxRepairs {
-		t.Fatalf("stored %+v %v", got, err)
+	if err := readJSON(j.path, &got); err != nil || got.Attempts != 0 || len(r.outcomes()) != 0 {
+		t.Fatalf("at the crash: entry %+v %v, outcomes %+v", got, err, r.outcomes())
+	}
+	reopen(t, r)
+	r.f.guest = func(id, dir string) { call(client(dir), "POST", "/cleanroom/result", nestedResult()) }
+	if o := rebuildOnce(t, r); o.Result != "built" || len(r.f.creates()) != 1 {
+		t.Fatalf("outcome %+v, %d machines", o, len(r.f.creates()))
+	}
+}
+
+// Rebuilds after lost output are bounded across restarts, by the
+// artifact's quarantined copies: after maxRepairs rebuilds, output lost
+// again is logged failed with no machine started, and nothing is queued.
+func TestRepairsAreBounded(t *testing.T) {
+	r := newRig(t, nil)
+	id := buildOne(t, r, skillHint(t)).m.ID
+	machines := len(r.f.creates())
+	for i := 0; i <= maxRepairs; i++ {
+		a, err := r.b.store.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(filepath.Join(a.dir, "files", "skill", "lib", "tz", "zones.py")); err != nil {
+			t.Fatal(err)
+		}
+		reopen(t, r)
+		o := rebuildOnce(t, r)
+		if i < maxRepairs {
+			if o.Result != "built" || len(r.f.creates()) != machines+i+1 {
+				t.Fatalf("loss %d: outcome %+v, %d machines", i+1, o, len(r.f.creates()))
+			}
+			continue
+		}
+		if o.Result != "failed" || len(r.f.creates()) != machines+maxRepairs {
+			t.Fatalf("loss %d: outcome %+v, %d machines", i+1, o, len(r.f.creates()))
+		}
+	}
+	if q := quarantined(r, id); len(q) != maxRepairs+1 {
+		t.Fatalf("quarantine %v", q)
+	}
+	reopen(t, r)
+	if jobs, _ := r.queued(); len(jobs) != 0 {
+		t.Fatalf("queued after the bound: %+v", jobs)
+	}
+	if _, err := r.b.store.Get(id); !errors.Is(err, ErrNoArtifact) {
+		t.Fatalf("artifact after the bound: %v", err)
 	}
 }
 

@@ -32,8 +32,8 @@ var errCommittedUnsynced = errors.New("cleanroom: committed; directory sync fail
 // ErrNoArtifact is returned when an ID names no stored artifact.
 var ErrNoArtifact = errors.New("cleanroom: no such artifact")
 
-// errDamaged: a committed artifact's files do not match its manifest. It
-// has been quarantined, and its job must be built again.
+// errDamaged: a committed artifact's files do not match its manifest. Its
+// job must be queued again and the artifact quarantined.
 var errDamaged = errors.New("cleanroom: artifact output damaged")
 
 var segment = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._-]*$`)
@@ -175,10 +175,11 @@ type Store struct {
 	fault faultFn // tests only: sees, and may fail, each file operation
 }
 
-// openStore opens the store and checks every committed artifact: one whose
-// manifest does not parse, or whose files are missing or do not match it
-// (output a crash lost), is quarantined. It returns the manifests of those
-// it could read, so their jobs can be built again.
+// openStore opens the store and checks every committed artifact. It returns
+// those whose manifest does not parse, or whose files are missing or do not
+// match it (output a crash lost), still in place: the caller queues their
+// jobs again and only then quarantines them, so a crash between the two
+// cannot lose a job. An unreadable manifest is returned with only its ID.
 func openStore(dir string) (*Store, []Manifest, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, nil, err
@@ -200,27 +201,31 @@ func openStore(dir string) (*Store, []Manifest, error) {
 			continue
 		}
 		a, err := s.get(e.Name())
-		if err == nil {
-			if err = a.verify(); err == nil {
-				continue
-			}
-			damaged = append(damaged, a.m)
+		if err != nil {
+			damaged = append(damaged, Manifest{ID: e.Name()})
+			continue
 		}
-		if err := s.quarantine(e.Name()); err != nil {
-			return nil, nil, err
+		if err := a.verify(); err != nil {
+			damaged = append(damaged, a.m)
 		}
 	}
 	return s, damaged, nil
 }
 
 // quarantine moves an artifact out of every listing and Get, kept aside
-// for diagnosis.
+// for diagnosis. Its job must already be queued again (SR3-8).
 func (s *Store) quarantine(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	q := filepath.Join(s.dir, ".quarantine")
 	if err := os.MkdirAll(q, 0o700); err != nil {
 		return err
 	}
-	if err := os.Rename(filepath.Join(s.dir, id), filepath.Join(q, id+"-"+newID())); err != nil {
+	dst := filepath.Join(q, id+"-"+newID())
+	if err := s.fault.hit("rename", dst); err != nil {
+		return err
+	}
+	if err := os.Rename(filepath.Join(s.dir, id), dst); err != nil {
 		return err
 	}
 	if err := syncDir(q); err != nil {
@@ -229,9 +234,33 @@ func (s *Store) quarantine(id string) error {
 	return syncDir(s.dir)
 }
 
+// losses counts the quarantined copies of an artifact: how often its output
+// was found damaged, across restarts.
+func (s *Store) losses(id string) (int, error) {
+	ents, err := os.ReadDir(filepath.Join(s.dir, ".quarantine"))
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, e := range ents {
+		rest, ok := strings.CutPrefix(e.Name(), id+"-")
+		if ok && quarantineSuffix.MatchString(rest) {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// quarantineSuffix is the random part quarantine appends (newID).
+var quarantineSuffix = regexp.MustCompile(`^[0-9a-f]{12}$`)
+
 // settle establishes that a committed artifact is durable before its job
 // is recorded complete: its files match the manifest, and the rename that
-// committed it is synced. Damaged output is quarantined (errDamaged).
+// committed it is synced. Damaged output is left in place (errDamaged):
+// the caller queues its job again, then quarantines it.
 func (s *Store) settle(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -240,9 +269,6 @@ func (s *Store) settle(id string) error {
 		return err
 	}
 	if err := a.verify(); err != nil {
-		if qerr := s.quarantine(id); qerr != nil {
-			return qerr
-		}
 		return fmt.Errorf("%w: %s: %v", errDamaged, id, err)
 	}
 	if err := s.fault.hit("syncdir", s.dir); err != nil {

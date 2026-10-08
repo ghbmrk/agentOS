@@ -30,7 +30,6 @@ type job struct {
 	Hint     string `json:"hint"` // canonical form, as received
 	Day      string `json:"day"`  // UTC day received
 	Attempts int    `json:"attempts"`
-	Repairs  int    `json:"repairs,omitempty"` // rebuilds after its output was lost (SR3-8)
 
 	path string
 }

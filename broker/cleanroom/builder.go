@@ -75,6 +75,8 @@ type Config struct {
 	MaxQueue int           // jobs waiting; 0 means 64
 	Logf     func(format string, args ...any)
 	Now      func() time.Time
+
+	fault faultFn // tests only: the store's file-operation hook
 }
 
 // Builder runs clean rooms. It implements hint.Outbox.
@@ -145,23 +147,32 @@ func New(cfg Config) (*Builder, error) {
 	if err != nil {
 		return nil, err
 	}
+	st.fault = cfg.fault
 	b := &Builder{cfg: cfg, store: st, wake: make(chan struct{}, 1), sessions: map[string]*session{}}
+	// The job is queued again before its artifact is quarantined, so a
+	// crash between the two leaves the job queued (SR3-8).
 	for _, m := range damaged {
 		if err := b.rebuild(m); err != nil {
 			return nil, err
 		}
-		cfg.Logf("cleanroom: %s lost output; quarantined and queued to build again", m.ID)
+		if err := st.quarantine(m.ID); err != nil {
+			return nil, err
+		}
+		cfg.Logf("cleanroom: %s lost output; quarantined and its job queued again", m.ID)
 	}
 	return b, nil
 }
 
-// maxRepairs bounds how often one job is built again after its output was
-// lost, so storage that keeps losing it cannot run clean rooms without end.
+// maxRepairs bounds how often one artifact is built again after its output
+// was lost, counted by its quarantined copies so the bound holds across
+// restarts: storage that keeps losing it cannot run clean rooms without end.
 const maxRepairs = 2
 
-// rebuild queues again the job of an artifact quarantined at open: its
-// queue entry if a crash left it, else a new entry with the same job ID, so
-// it rebuilds the same artifact ID and its hint coalesces into the job.
+// rebuild queues again the job of a damaged artifact found at open, before
+// it is quarantined: its queue entry if a crash left it, else a new entry
+// with the same job ID, so it rebuilds the same artifact ID and its hint
+// coalesces into the job. A manifest that names no valid job (or could not
+// be read) has nothing to queue.
 func (b *Builder) rebuild(m Manifest) error {
 	if !segment.MatchString(m.Job) || m.ID != "a-"+m.Job {
 		return nil
@@ -186,12 +197,20 @@ func (b *Builder) rebuild(m Manifest) error {
 	return syncDir(b.queueDir())
 }
 
-// renew gives a job whose output was lost fresh attempts, up to maxRepairs
-// times, and stores it.
+// renew stores the queue entry of a job whose output was lost, before the
+// artifact is quarantined: with fresh attempts while it has been lost fewer
+// than maxRepairs times, else with its attempts spent, so it is logged
+// failed rather than built again.
 func (b *Builder) renew(j *job) error {
-	if j.Repairs < maxRepairs {
-		j.Repairs++
+	n, err := b.store.losses(artifactID(j))
+	if err != nil {
+		return err
+	}
+	if n < maxRepairs {
 		j.Attempts = 0
+	} else {
+		j.Attempts = b.cfg.Attempts
+		b.cfg.Logf("cleanroom: %s lost its output %d times; not built again", artifactID(j), n+1)
 	}
 	return writeJSON(j.path, j)
 }
@@ -431,8 +450,12 @@ func (b *Builder) finish(j *job, kind string, o Outcome) error {
 	if o.Result == "built" {
 		if err := b.store.settle(o.Artifact); err != nil {
 			if errors.Is(err, errDamaged) {
+				// Queued again first, so a crash cannot lose the job.
 				if rerr := b.renew(j); rerr != nil {
 					return rerr
+				}
+				if qerr := b.store.quarantine(o.Artifact); qerr != nil {
+					return qerr
 				}
 			}
 			return err
