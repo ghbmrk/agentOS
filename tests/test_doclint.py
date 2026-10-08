@@ -69,7 +69,7 @@ class LintTest(unittest.TestCase):
 
     def test_new_record_without_a_record_line(self):
         got = self.lint(**{"reviews/ux/2026-10-09-pr400.md": "# UX\n\nVerdict: accept\n"})
-        self.assertEqual(got, ["reviews/ux/2026-10-09-pr400.md: no `Record: PR #N · package ID · head SHA` line"])
+        self.assertEqual(got, ["reviews/ux/2026-10-09-pr400.md: no complete `Record:` line; needs `PR #N` or `PR none`, `package <ID>`, `head <7–40 hex>`, e.g. `Record: PR #400 · package DOC-4 · head a74ee45`"])
 
     def test_record_line_with_a_missing_field(self):
         for line in ("Record: PR #400 · package CH-1", "Record: package CH-1 · head abc1234",

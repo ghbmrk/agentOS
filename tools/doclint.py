@@ -89,7 +89,7 @@ def records(root):
                 continue
             lines = [l for l in path.read_text().splitlines() if l.startswith("Record:")]
             if not any(all(f.search(l) for f in RECORD_FIELDS) for l in lines):
-                yield f"reviews/{lens}/{path.name}: no `Record: PR #N · package ID · head SHA` line"
+                yield f"reviews/{lens}/{path.name}: no complete `Record:` line; needs `PR #N` or `PR none`, `package <ID>`, `head <7–40 hex>`, e.g. `Record: PR #400 · package DOC-4 · head a74ee45`"
 
 
 def assumption_ids(root, files):
