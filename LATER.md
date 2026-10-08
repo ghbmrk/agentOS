@@ -75,6 +75,12 @@ No security-fix row (SR2-*) is classed Later. P2-1 (host image, PR #41) has no b
 | W8 | Owner builds; no brief, no A-test names it |
 | W9a | Question follow-ups from the #95 lens gate; no A-test needs them |
 | OSS-10w-r | WF1 after a project root-key rotation: switching back compares against the image's shipped root keys and so fails closed once the project rotates them; a chain walk from the shipped root would admit it. Meanwhile the owner's only route back is a named follow (beside U13 limit (b)). No release has rotated root keys; a new image ships the new root |
+| ADP-14-get | GET links with side effects reached by `navigate` on recipe sites; recipe gate covers state-changing methods first |
+| ADP-14-undo-fail | A failed `UNDO` reply gives site, reference and deadline and opens a task; UNDO success path is enough for A13 |
+| ADP-14-offer | After repeated approved submits on one unknown site, offer its private-derived draft for adoption; cuts approvals, not needed for A13 |
+| ADP-14-cred6 | Recipes declare their site's CRED-6 screens, undeclared ones trigger ADP-7 repair; CRED-6 already applies without a recipe |
+| ADP-14-origins | Which origins the credentialed context may reach on a site with no recipe; every state-changing request there is already held |
+| ADP-16-acct2 | A second account signed in inside a suite executor's app; ADP-16 kiosk already limits to one account's adapters |
 
 ## Stale board rows (merged per git log)
 Rows marked "(shallow)" show only code on origin/main plus the last commit touching it: this clone is shallow, so older merge commits are not visible. Verify those before editing the board.
