@@ -26,15 +26,10 @@ Weekly runs over all of `main` until 2026-10-07, when the batched lens screen re
 |---|---|---|
 | 1 | 3176f2d | [2026-10-04](2026-10-04-ux-review.md) |
 | 2 | 044b83b | [2026-10-05](2026-10-05-ux-review.md) |
-| 3 | be5a80c | [2026-10-08 lens bundle a](2026-10-08-lens-bundle-a.md): #300, #319, #323, #327 |
-| 4 | be5a80c | [2026-10-08 lens bundle b](2026-10-08-lens-bundle-b.md): #320, #321, #322, #324, #329 (run 3 is bundle a, #339) |
-| 5 | 32c6e67 | [2026-10-08 #362](2026-10-08-pr362.md): SR2-3h |
-| 6 | b75d319 (PR head; re-checked 196e703) | [2026-10-08 #363](2026-10-08-lens-363.md): P2-2a f2 |
-| 7 | 7b753eb | [2026-10-08 #372](../combined/2026-10-08-pr372.md): CH-21a (combined, tier B) |
-| 8 | 22e4b5f | [2026-10-08 #378](2026-10-08-pr378.md): P2-2w d2a; [#379](2026-10-08-pr379.md): UPD-b |
-| 9 | 6b40ddc (PR head) | [2026-10-08 #393](2026-10-08-lens-393.md): SR2-3s flake fix |
-| 10 | d81a971 (PR head) | [2026-10-08 #386](2026-10-08-lens-386.md) |
-| 12 | cbbf80e (PR head) | [2026-10-08 #391](2026-10-08-lens-391.md): SR2-3m |
+
+## Records
+
+Per-PR and per-bundle records are the files `YYYY-MM-DD-*.md` in this directory (tier-B combined passes are in `../combined/`), in filename order, so there is no run number to pick. Each opens with a `Record:` line giving PR, package and head SHA; `tools/doclint.py` checks it on files dated 2026-10-09 or later. No run rows are appended to this README, so open PRs do not conflict on it; recurring kinds and the checks that replaced them still are (DOC-4, docs/OPERATING.md §4).
 
 ## Recurring kinds (to become checks)
 

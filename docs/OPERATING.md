@@ -101,7 +101,7 @@ Each fix-list point cites a requirement ID or a concrete defect and carries its 
 
 1. Read the bundle's diffs, the IDs they cite, the active DECISIONS rows and each lens README (`reviews/security/`, `reviews/potency/`, `reviews/ux/`). Not whole files, not transcripts.
 2. For each PR, apply each lens's question and method. Tier B gets one combined pass; tier A gets UX and Potency here and Security in its own session (stage 4a).
-3. Write one verdict per lens per PR to `reviews/<lens>/YYYY-MM-DD-pr<N>.md` (for a tier-B combined pass, `reviews/combined/YYYY-MM-DD-pr<N>.md`), in the L3 format above, and link it from the PR.
+3. Write one verdict per lens per PR to `reviews/<lens>/YYYY-MM-DD-pr<N>.md` (for a tier-B combined pass, `reviews/combined/YYYY-MM-DD-pr<N>.md`), in the L3 format above, and link it from the PR. Under the title put one line, `Record: PR #N · package <ID> · head <SHA>`, where `PR`, `package` and `head` are literal, e.g. `Record: PR #400 · package DOC-4 · head a74ee45` (a bundle lists several; `PR none` if there is no PR); `tools/doclint.py` requires it from 2026-10-09. The record files, in filename order, are the run index: no lens README keeps a run table, so no PR edits one.
 4. Settle tensions between lenses in the same session under `reviews/arbitration/README.md`; write any resolution to `reviews/arbitration/YYYY-MM-DD-pr<N>.md`. Only a real fork goes to Mark: one question answerable in one word, with a recommendation.
 5. Skip any finding kind a lens README lists under "Checks that replaced findings": CI already catches it.
 
