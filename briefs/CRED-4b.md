@@ -9,3 +9,7 @@ Credentialed browser executor in the broker (plan P2 item 6; CRED-4, CRED-6): S5
 **Gate:** lenses (security: executor)
 
 **State on the board before the 2026-10-08 index split:** queued, unblocked (fixtures); lane claude2
+
+**Part 1 (PR #300):** the broker gate (`broker/browser`: closed v0 protocol, declared origins, CRED-10 output filter outside the driver) on `pkg/claude2-CRED-4b-browser-gate`.
+
+**Part 2:** the driver in its own broker-owned sandbox, vault-held and A5 canary sessions, CRED-6 intents, and a CI job running the real driver ([assumptions](../broker/browser/ASSUMPTIONS.md) K1-K13).
