@@ -16,3 +16,4 @@ A recurring review of what AgentOS can do for its owner: leverage, reach, autono
 |---|---|---|
 | 1 | e841b78 | [2026-10-04](2026-10-04-potency-review.md) |
 | 2 | f797b7d | [2026-10-05](2026-10-05-potency-review.md) (spec edits committed after Mark's yes) |
+| 3 | be5a80c | [2026-10-08 lens bundle a](2026-10-08-lens-bundle-a.md): #300, #319, #323, #327 |
