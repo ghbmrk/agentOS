@@ -117,6 +117,7 @@ type rig struct {
 	store   *update.Store
 	clk     *fakeClock
 	alerts  []string
+	pending string
 	x       *Executor
 }
 
@@ -129,7 +130,8 @@ func newRig(t *testing.T) *rig {
 		t.Fatal(err)
 	}
 	r.store = st
-	x, err := New(Config{Store: st, Shipped: r.shipped, Clock: r.clk,
+	r.pending = filepath.Join(st.Dir, "follow-alert")
+	x, err := New(Config{Store: st, Shipped: r.shipped, Clock: r.clk, Pending: r.pending,
 		Alert: func(_ context.Context, text string) error { r.alerts = append(r.alerts, text); return nil }})
 	if err != nil {
 		t.Fatal(err)
@@ -355,7 +357,7 @@ func signerOf(k ed25519.PrivateKey) signature.Signer {
 // restarted over the same store holds nothing the old one described.
 func (r *rig) with(st Store) *Executor {
 	r.t.Helper()
-	x, err := New(Config{Store: st, Shipped: r.shipped, Clock: r.clk,
+	x, err := New(Config{Store: st, Shipped: r.shipped, Clock: r.clk, Pending: r.pending,
 		Alert: func(_ context.Context, text string) error { r.alerts = append(r.alerts, text); return nil }})
 	if err != nil {
 		r.t.Fatal(err)
@@ -484,5 +486,48 @@ func TestOSS10w2UnsentAlertIsRetriedAndShown(t *testing.T) {
 	}
 	if r.x.Note() != "" || r.x.RetryAlert(ctx) || len(r.alerts) != 1 {
 		t.Fatalf("still pending after delivery: %q", r.alerts)
+	}
+}
+
+// OSS-10w2 L3 blocker: an alert queued but not yet sent survives a
+// restart. The executor run after it reports it on STATUS and its retry
+// delivers it exactly once; once sent, no later run owes it.
+func TestOSS10w2UnsentAlertSurvivesARestart(t *testing.T) {
+	r := newRig(t)
+	r.x.cfg.Alert = func(context.Context, string) error { return errors.New("no line") }
+	if out := r.run(grants.FollowIntent("a1", "Acme", r.describe(r.fork))); out.Result != journal.ResultSucceeded {
+		t.Fatalf("%+v", out)
+	}
+	want := maintain.FollowAlert("Acme", r.clk.at)
+
+	// Restart: a new executor over the same store and pending file.
+	x := r.with(r.store)
+	if n := x.Note(); n != UnsentPrefix+want {
+		t.Fatalf("note after restart %q", n)
+	}
+	ctx := context.Background()
+	if !x.RetryAlert(ctx) || len(r.alerts) != 1 || r.alerts[0] != want {
+		t.Fatalf("retry after restart sent %q", r.alerts)
+	}
+	if x.Note() != "" || x.RetryAlert(ctx) {
+		t.Fatal("still pending after delivery")
+	}
+	if x := r.with(r.store); x.Note() != "" || x.RetryAlert(ctx) || len(r.alerts) != 1 {
+		t.Fatalf("owed again after a second restart: %q", r.alerts)
+	}
+}
+
+// The pending file is part of the executor: without it, or with one that
+// cannot be read, there is no executor (fails closed, not memory-only).
+func TestOSS10w2PendingIsRequired(t *testing.T) {
+	r := newRig(t)
+	c := r.x.cfg
+	c.Pending = ""
+	if _, err := New(c); err == nil {
+		t.Fatal("an executor without a pending file")
+	}
+	c.Pending = t.TempDir() // a directory cannot be read as the file
+	if _, err := New(c); err == nil {
+		t.Fatal("an executor over an unreadable pending file")
 	}
 }

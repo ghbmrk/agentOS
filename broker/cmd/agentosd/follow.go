@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync/atomic"
 	"time"
 
@@ -29,6 +30,10 @@ type followSetting struct {
 	owner atomic.Pointer[ownerch.Channel]
 }
 
+// pendingAlert names the file in the update store dir that holds a follow
+// alert not yet sent, so a restart still owes it (OSS-10w2 L3).
+const pendingAlert = "follow-alert-pending"
+
 // alertRetry is how often an alert that could not be sent is tried again.
 const alertRetry = time.Minute
 
@@ -52,7 +57,8 @@ func newFollowSetting(storeDir, shippedPath string, guard func() *clock.Guard) (
 		return nil, fmt.Errorf("update store %s: %v", storeDir, err)
 	}
 	s := &followSetting{guard: guard}
-	s.x, err = follow.New(follow.Config{Store: st, Shipped: shipped, Clock: guardClock{guard}, Alert: s.alert})
+	s.x, err = follow.New(follow.Config{Store: st, Shipped: shipped, Clock: guardClock{guard}, Alert: s.alert,
+		Pending: filepath.Join(storeDir, pendingAlert)})
 	if err != nil {
 		return nil, err
 	}

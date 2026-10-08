@@ -15,6 +15,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/clock"
 	"github.com/ghbmrk/agentos/broker/daemon"
+	"github.com/ghbmrk/agentos/broker/follow"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/update"
@@ -136,5 +137,67 @@ func TestOSS10w2PageSummaryReason(t *testing.T) {
 	sum, err := pageSummary(update.RootSummary{Version: 3, Keys: map[string][]string{"root": {"k1", "k2"}}, Thresholds: map[string]int{"root": 2}, Expires: exp, Digest: "d"}, nil)
 	if err != nil || sum.Version != 3 || len(sum.Keys["root"]) != 2 || sum.Thresholds["root"] != 2 || !sum.Expires.Equal(exp) || sum.Digest != "d" || sum.Reason != "" {
 		t.Fatalf("%+v %v", sum, err)
+	}
+}
+
+// OSS-10w2 L3 blocker: the executor's pending alert lives in the update
+// store dir, so an alert a previous run left unsent shows on STATUS after
+// a restart.
+func TestOSS10w2PendingAlertSurvivesARestart(t *testing.T) {
+	shipped := filepath.Join(t.TempDir(), "root.json")
+	b := followRoot(t)
+	if err := os.WriteFile(shipped, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(t.TempDir(), "box")
+	if _, err := update.InitStore(dir, b, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, pendingAlert), []byte("switched"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := newFollowSetting(dir, shipped, noGuard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := s.x.Note(); n != follow.UnsentPrefix+"switched" {
+		t.Fatalf("note %q", n)
+	}
+}
+
+// L3 R2 (WF1 wiring): describe reports Project from the executor's check,
+// true for the shipped root and false for any other.
+func TestOSS10w2DescribeProject(t *testing.T) {
+	shipped := filepath.Join(t.TempDir(), "root.json")
+	b := followRoot(t)
+	if err := os.WriteFile(shipped, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(t.TempDir(), "box")
+	if _, err := update.InitStore(dir, b, 0); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	g, err := clock.New(clock.Config{
+		Synced:  func() (bool, error) { return true, nil },
+		Carrier: func(context.Context) (time.Time, error) { return now, nil },
+		Now:     func() time.Time { return now },
+		Elapsed: func() time.Duration { return time.Hour },
+		BootID:  func() string { return "boot" },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.Check(context.Background())
+	s, err := newFollowSetting(dir, shipped, func() *clock.Guard { return g })
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if sum, err := s.describe(ctx, b); err != nil || !sum.Project {
+		t.Fatalf("shipped root: %+v %v", sum, err)
+	}
+	if sum, err := s.describe(ctx, followRoot(t)); err != nil || sum.Project || sum.Digest == "" {
+		t.Fatalf("fork root: %+v %v", sum, err)
 	}
 }
