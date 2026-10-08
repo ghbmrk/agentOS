@@ -700,16 +700,21 @@ func (p *Pipeline) Settle(ctx context.Context, id string) (Report, error) {
 }
 
 // Decided is the wiring's call once the owner's request for a change
-// intent closes (C7). declined is true only when the owner said NO; then
-// the adoption settles as Settle does, so a declined security release is
-// recorded. One still pending was never answered (the request expired,
-// was voided, or was dropped by a restart), and one denied for any other
-// reason (an approval gone stale before dispatch) is not the owner's no:
-// both drop the proposal and record nothing, so only the owner's NO reads
-// as a decline. A release dropped this way is reported once by Lapsed, so
-// the next update check (UPD-5, maintain Loop 3) offers it again; a local
-// change is proposed again only if Loop 1 produces it again.
-func (p *Pipeline) Decided(ctx context.Context, in journal.Intent, declined bool) {
+// intent closes (C7). why is the request's denial cause: "owner" when the
+// owner said NO, "not chosen" when it was left out of a partial YES, and
+// anything else ("expired", "void", "restart", or "") when it closed
+// without an answer or was approved.
+// On the owner's NO the adoption settles as Settle does, so a declined
+// security release is recorded. One still pending was never answered (the
+// request expired, was voided, or was dropped by a restart), and one denied
+// for any other reason (an approval gone stale before dispatch) is not the
+// owner's no: both drop the proposal and record nothing, so only the
+// owner's NO reads as a decline. A release dropped this way is reported
+// once by Lapsed, so the next update check (UPD-5, maintain Loop 3) offers
+// it again (C25); one left out of a partial YES is dropped without a
+// decline and is not reported, so it is not re-asked. A local change is
+// proposed again only if Loop 1 produces it again.
+func (p *Pipeline) Decided(ctx context.Context, in journal.Intent, why string) {
 	parts := parseID(in.ID)
 	if in.Action != ActionAdopt || parts == nil || in.ID != adoptID(parts[1]) || p.prop(parts[1]) == nil {
 		return
@@ -717,7 +722,9 @@ func (p *Pipeline) Decided(ctx context.Context, in journal.Intent, declined bool
 	st, err := p.j.Get(in.ID)
 	switch {
 	case err != nil:
-	case st.State == journal.Pending, st.State == journal.Denied && !declined:
+	case why == "not chosen" && (st.State == journal.Pending || st.State == journal.Denied):
+		p.drop(parts[1])
+	case st.State == journal.Pending, st.State == journal.Denied && why != "owner":
 		p.lapse(parts[1])
 	case st.State == journal.Denied || st.State == journal.Succeeded || st.State == journal.NotApplied:
 		_, _ = p.Settle(ctx, parts[1])

@@ -168,7 +168,6 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | W3-forget-b1 f4 | Security on #409 L2: `readRestoredForgets` trusts `forget-log.json` without authentication at every start; low risk, only agentosd's uid can write it |
 | W3-forget-b1 f5 | Security on #409 L3: the test "copy holds its key" looks for the key's hex but JSON stores `[]byte` as base64, and the copy has no key field, so the assertion is vacuous |
 | W3-forget-b1 f6 | UX on #409 U4 and P4: the taken-back text reaches 161 chars at 100+ things undone; and the BOARD row should say "not live until b1-5/6/7" |
-| P2-2a f4 | From P2-2a f3: after a release request lapses, STATUS still says it waits for approval until the next daily check re-offers it; a release whose dispatch fails after the owner's YES is dropped without a re-offer; whether GR27's notice should now say the release will be offered again is the UX lens's call |
 
 ## Reuse candidates
 | ID | Component | Why |
