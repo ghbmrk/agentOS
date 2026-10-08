@@ -27,19 +27,24 @@ type fakeWork struct {
 	backs   []time.Time
 	asked   []bool // approved, per take-back
 	actions int
-	noCount bool // the count is not known
-	closed  bool // recall is not open: Handled is not known
+	noCount bool          // the count is not known
+	closed  bool          // recall is not open: Handled is not known
+	slow    time.Duration // Handled answers after this long
 }
 
+// Handled answers, then waits slow before returning, so runs that overlap
+// all read the answer before any of them takes back.
 func (w *fakeWork) Handled(since time.Time) (bool, bool) {
 	w.mu.Lock()
-	defer w.mu.Unlock()
+	handled, ok, slow := false, !w.closed, w.slow
 	for _, b := range w.backs {
 		if b.Equal(since) {
-			return true, !w.closed
+			handled = true
 		}
 	}
-	return false, !w.closed
+	w.mu.Unlock()
+	time.Sleep(slow)
+	return handled, ok
 }
 
 func (w *fakeWork) Actions(lineage string, since time.Time) (int, bool) {
@@ -485,5 +490,32 @@ func TestForgetItem2QueuedOutlivesARestart(t *testing.T) {
 				t.Fatalf("off %v, open %d: told %q", off, i, r.texts)
 			}
 		}
+	}
+}
+
+// REQ: CAP-3, OP-5
+// Recall's open runs every resume registered for it at once (the one at
+// start and one per queued item 2): the journal's item 2 is taken back
+// once and the owner told once (#327 L3 round 4 B1).
+func TestForgetItem2ResumesOnceWhenRunsOverlap(t *testing.T) {
+	r := newForgetRig(t)
+	w := &fakeWork{worked: true, ok: true}
+	r.withAgent(w)
+	r.f.whenOpen = func() {}
+	r.task("owner:a", "pay the gas bill", r.now.Add(-time.Hour), viaSMS)
+	r.say("FORGET LAST")
+	r.gate.st = map[string]journal.State{r.gate.got[0].ID: journal.Succeeded, r.gate.got[1].ID: journal.Succeeded}
+	w.slow = 20 * time.Millisecond
+	r.texts = nil
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); r.f.resumeAgent(context.Background()) }()
+	}
+	wg.Wait()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(w.backs) != 1 || len(r.texts) != 1 || r.texts[0] != forgetAgentDone {
+		t.Fatalf("took back %v, told %q", w.backs, r.texts)
 	}
 }

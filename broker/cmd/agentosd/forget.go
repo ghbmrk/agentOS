@@ -141,6 +141,10 @@ type ownerForget struct {
 	// whenOpen, if set, runs resumeAgent once recall opens
 	// (LateExecutor.OnOpen); nil when recall is off.
 	whenOpen func()
+	// resuming serializes resumeAgent: recall's open runs every queued
+	// OnOpen together, and each run must see the take-backs the one
+	// before it did (Handled), so none is taken back or told twice.
+	resuming sync.Mutex
 
 	mu sync.Mutex
 	// interrupted: approved item 2s a restart interrupted, by ID, taken
@@ -591,6 +595,8 @@ func (f *ownerForget) agentBack(ctx context.Context, id string, since time.Time)
 // where recall never opened, is run too (#327 L3 re-review 2); one recall
 // recorded, owed or done, is not run again.
 func (f *ownerForget) resumeAgent(ctx context.Context) {
+	f.resuming.Lock()
+	defer f.resuming.Unlock()
 	f.mu.Lock()
 	ids := f.interrupted
 	f.interrupted = nil
