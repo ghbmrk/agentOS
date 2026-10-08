@@ -120,7 +120,7 @@ func (c *Channel) sendSignIns(text string, n, m int, now time.Time) {
 func (c *Channel) wrongLocalLocked(now time.Time) []string {
 	l := &c.local
 	if c.cfg.DigestNotes != nil {
-		_ = c.cfg.DigestNotes.Record(digestnotes.Event{WrongAt: now})
+		c.recordDigestNoteLocked(digestnotes.Event{WrongAt: now})
 	} else if len(l.wrong) < maxLocalNotes {
 		l.wrong = append(l.wrong, now)
 	}
@@ -336,7 +336,7 @@ func (c *Channel) lockAlertsLocked(locked bool, now time.Time) []string {
 	if c.codes.justChallenged {
 		c.codes.justChallenged = false
 		if c.cfg.DigestNotes != nil {
-			_ = c.cfg.DigestNotes.Record(digestnotes.Event{Challenge: true})
+			c.recordDigestNoteLocked(digestnotes.Event{Challenge: true})
 		} else {
 			c.floods.challenge++ // for the digest, as floodLocked counts it (L3 N2 on #165)
 		}

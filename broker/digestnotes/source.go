@@ -283,6 +283,14 @@ func (s *Source) checkpointLocked() ProducerCheckpoint {
 	return ProducerCheckpoint{Binding: hex.EncodeToString(m.Sum(nil)), Sequence: s.st.RecordSeq, Hash: s.st.RecordHash}
 }
 
+// UsesOrderedProducer reports the last confirmed ingestion mode. A false
+// result does not resolve an uncertain claim; Health still requires recovery.
+func (s *Source) UsesOrderedProducer() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.st.Ordered || s.st.RecordSeq != 0
+}
+
 // ClaimProducer durably excludes anonymous Record before an authority outbox
 // pairs with this source. Only virgin or already ordered state may be claimed.
 func (s *Source) ClaimProducer() (ProducerCheckpoint, error) {
