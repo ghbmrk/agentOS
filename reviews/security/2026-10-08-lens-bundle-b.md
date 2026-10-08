@@ -1,5 +1,7 @@
 # Security section, lens bundle 2026-10-08b: #320, #322, #324, #329, #321 (main @ be5a80c)
 
+Record: PRs #320 #321 #322 #324 #329 · packages P2-2w c1, W3-forget-b2, P2-2w d, SR2-3g, P2-2a f1 · heads 35febcd, 24f3d9d, 11fa1f2, cee016a, 3a79399 · main be5a80c
+
 **Scope.** The tier A PRs in the bundle, plus a brief check of one tier B PR, each with an L3 accept on the head reviewed here. Every head matched the commit named in the bundle; none had moved.
 
 | PR | Package | Head | Verdict |

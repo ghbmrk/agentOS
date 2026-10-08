@@ -7,6 +7,8 @@
                 file it links exists
   rule files    no /mnt paths (local paths of one machine, unreadable by other agents)
   all *.md      `OPERATING §N` references name a section docs/OPERATING.md has
+  reviews/      each record dated RECORD_FROM or later has a `Record:` line (PR, package, head SHA)
+  ASSUMPTIONS   no row ID appears twice in one ASSUMPTIONS.md
   briefs/       each brief within the 20k-token cap (CLAUDE.md, Budget), as characters / 4
 
 Usage: python3 tools/doclint.py [repo root]. Prints one line per problem; exits 1 if any.
@@ -22,6 +24,11 @@ from metrics import STATES, _rows  # noqa: E402
 RULE_FILES = ("CLAUDE.md", "AGENTS.md", "README.md", "BOARD.md", "docs/OPERATING.md", "docs/LANES.md")
 BRIEF_TOKENS = 20_000
 OPERATING_REF = re.compile(r"OPERATING(?:\.md)?\s*§\s*(\d+)(?:\s*[–-]\s*(\d+))?")
+RECORD_FROM = "2026-10-09"
+RECORD_DIRS = ("ux", "potency", "security", "combined", "arbitration")
+RECORD_FILE = re.compile(r"(\d{4}-\d\d-\d\d)-.+\.md$")
+RECORD_FIELDS = (re.compile(r"\bPRs? (?:#\d+|none)\b"), re.compile(r"\bpackages? \S"),
+                 re.compile(r"\bheads? [0-9a-f]{7,40}\b"))
 LINK = re.compile(r"\]\(([^)#\s]+)")
 
 
@@ -74,6 +81,35 @@ def briefs(root):
             yield f"briefs/{path.name}: ~{tokens} tokens, over the {BRIEF_TOKENS} cap; split the package"
 
 
+def records(root):
+    for lens in RECORD_DIRS:
+        for path in sorted((root / "reviews" / lens).glob("*.md")):
+            m = RECORD_FILE.match(path.name)
+            if not m or m.group(1) < RECORD_FROM:
+                continue
+            lines = [l for l in path.read_text().splitlines() if l.startswith("Record:")]
+            if not any(all(f.search(l) for f in RECORD_FIELDS) for l in lines):
+                yield f"reviews/{lens}/{path.name}: no `Record: PR #N · package ID · head SHA` line"
+
+
+def assumption_ids(root, files):
+    for name in files:
+        if pathlib.PurePosixPath(name).name != "ASSUMPTIONS.md":
+            continue
+        seen, in_table = {}, False
+        for n, line in enumerate((root / name).read_text().splitlines(), 1):
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if not line.startswith("|"):
+                in_table = False
+            elif cells[0] in ("ID", "#"):
+                in_table = True
+            elif in_table and not set(cells[0]) <= set("-: "):
+                if cells[0] in seen:
+                    yield f"{name}:{n}: duplicate ID {cells[0]} (first on line {seen[cells[0]]})"
+                else:
+                    seen[cells[0]] = n
+
+
 def markdown_files(root):
     try:
         out = subprocess.run(["git", "ls-files", "*.md"], cwd=root, capture_output=True, text=True, check=True).stdout
@@ -84,8 +120,9 @@ def markdown_files(root):
 
 def lint(root):
     root = pathlib.Path(root)
-    return [*board(root), *readme(root), *rule_files(root),
-            *operating_refs(root, markdown_files(root)), *briefs(root)]
+    files = markdown_files(root)
+    return [*board(root), *readme(root), *rule_files(root), *operating_refs(root, files),
+            *briefs(root), *records(root), *assumption_ids(root, files)]
 
 
 def main(argv):

@@ -65,6 +65,43 @@ class LintTest(unittest.TestCase):
         got = self.lint(**{"briefs/A-1.md": "x" * (4 * doclint.BRIEF_TOKENS + 4)})
         self.assertEqual(got, ["briefs/A-1.md: ~20001 tokens, over the 20000 cap; split the package"])
 
+    # DOC-4: per-file review records and unique assumption IDs
+
+    def test_new_record_without_a_record_line(self):
+        got = self.lint(**{"reviews/ux/2026-10-09-pr400.md": "# UX\n\nVerdict: accept\n"})
+        self.assertEqual(got, ["reviews/ux/2026-10-09-pr400.md: no `Record: PR #N · package ID · head SHA` line"])
+
+    def test_record_line_with_a_missing_field(self):
+        for line in ("Record: PR #400 · package CH-1", "Record: package CH-1 · head abc1234",
+                     "Record: PR #400 · head abc1234", "Record: PR #400 · package CH-1 · head xyz"):
+            got = self.lint(**{"reviews/security/2026-10-09-pr400.md": f"# S\n\n{line}\n"})
+            self.assertEqual(len(got), 1, line)
+
+    def test_complete_records_pass(self):
+        files = {"reviews/ux/2026-10-09-pr400.md": "# UX\n\nRecord: PR #400 · package CH-1 · head abc1234\n",
+                 "reviews/combined/2026-10-10-bundle.md":
+                     "# C\n\nRecord: PRs #1 #2 · packages A-1, B-2 · heads abc1234, def5678 · main 0123456\n",
+                 "reviews/security/2026-10-11-review.md": "# S\n\nRecord: PR none · package SR3 · head 7b753eb\n"}
+        self.assertEqual(self.lint(**files), [])
+
+    def test_older_files_readmes_and_other_directories_are_exempt(self):
+        files = {"reviews/ux/2026-10-08-pr1.md": "# old\n", "reviews/ux/README.md": "# lens\n",
+                 "reviews/ux/notes.md": "x", "notes/2026-10-09-note.md": "x"}
+        self.assertEqual(self.lint(**files), [])
+
+    def test_duplicate_assumption_id(self):
+        text = "# A\n\n| ID | Assumption |\n|---|---|\n| U1 | a |\n| U2 | b |\n| U1 | c |\n"
+        self.assertEqual(self.lint(**{"broker/x/ASSUMPTIONS.md": text}),
+                         ["broker/x/ASSUMPTIONS.md:7: duplicate ID U1 (first on line 5)"])
+
+    def test_distinct_assumption_ids_pass(self):
+        text = "| ID | Assumption |\n|---|---|\n| U1 | a |\n| U2 | b |\n"
+        self.assertEqual(self.lint(**{"broker/x/ASSUMPTIONS.md": text}), [])
+
+    def test_hash_header_tables_and_other_tables_are_checked_only_by_id(self):
+        text = "| # | A |\n|---|---|\n| 1 | a |\n| 1 | b |\n\n| Item | Size |\n|---|---|\n| x | 1 |\n| x | 2 |\n"
+        self.assertEqual(self.lint(**{"broker/x/ASSUMPTIONS.md": text}),
+                         ["broker/x/ASSUMPTIONS.md:4: duplicate ID 1 (first on line 3)"])
 
 if __name__ == "__main__":
     unittest.main()
