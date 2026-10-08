@@ -1,8 +1,8 @@
 # LATER: first-release critical path and backlog
-Generated 2026-10-07 by the COST thread's audit; the coordinator updates it. Rows marked LATER are not started until the first release ships (DECISIONS.md, 2026-10-07). Promote a row by moving it to "Release" with the acceptance test it now blocks.
+Generated 2026-10-07 by the COST thread's audit; the coordinator updates it. Rows marked LATER are not started until the first release ships (DECISIONS D-048). Promote a row by moving it to "Release" with the acceptance test it now blocks.
 
 ## Summary
-Non-merged rows audited: 129. Release: 48 (11 marked unsure). Later: 14. Stale: 67, of which 33 are inferred from code on origin/main because the clone is shallow.
+Non-merged rows audited: 129. Release: 48 (11 marked unsure). Later: 14. The 67 stale rows it found were reconciled into BOARD.md on 2026-10-08 (DOC-3).
 No security-fix row (SR2-*) is classed Later. P2-1 (host image, PR #41) has no board row but blocks IMG-1, HOST-1a/1b/1c part 2 and W3-builder-ship.
 
 ## Release (needed for A1–A15 or an invariant)
@@ -89,78 +89,6 @@ No security-fix row (SR2-*) is classed Later. P2-1 (host image, PR #41) has no b
 | SR2-3g f7 | L3 R1 on #324: the `guesterr` import sits in the stdlib import group in `question_test.go`; style only |
 | OSS-10w f1 | UX on #323: the alert wording "Switch back there" reads oddly after a switch back to the project |
 | W3-forget-b2b f1 | Security 327-1: race between `worked()` and `takeBack(approved=false)` in `agentBackWithoutAsking`; re-check under `r.run` |
-
-## Stale board rows (merged per git log)
-Rows marked "(shallow)" show only code on origin/main plus the last commit touching it: this clone is shallow, so older merge commits are not visible. Verify those before editing the board.
-| ID | Commit |
-|---|---|
-| H1 | 00c298d (shallow, tools/metrics.py) |
-| P0X | cada7c1 (shallow, SPEC.md v0.12) |
-| S8 | 03641d1 (#186 cloud part and spec diff) |
-| P1-1 | 05913d0 (shallow, broker/journal) |
-| P1-2 | 7ff7417 (shallow, broker/daemon) |
-| P1-4 | f19f97c (shallow, broker/vm) |
-| P1-7 | 847ea23 (shallow, broker/guest) |
-| P2-grants | a390f03 (shallow, broker/grants) |
-| P2-rev3 | 04be62e (shallow, broker/reversible) |
-| P2-gr8 | a390f03 (shallow, broker/grants) |
-| P2-2 | a0bb643 (shallow, broker/localui; LocalUI still off) |
-| P2-7 | e7c419b (shallow, broker/modelroute) |
-| P2-3 | 46e3885 (shallow, broker/modem) |
-| P2-3b | 27f6fe9 (shallow, broker/sipsign) |
-| P2-3c | 0a6c2c7 (#159 part 5) |
-| P2-3w | 65b48ef (#170 part 1; later parts not on board) |
-| P2-6m | c5feca1 (shallow, broker/mail) |
-| P2-4a | ad55ae2 (shallow, broker/vault) |
-| P2-4b | 6303190 (shallow, broker/tpmseal) |
-| P2-4c | ad55ae2 (shallow, broker/vault) |
-| P2-4d | ad55ae2 (shallow, broker/vault) |
-| P2-4g | ad55ae2 (shallow, broker/vault) |
-| P2-4h | ad55ae2 (shallow, broker/vault) |
-| P2-2a | 6239bd4 (#178 part 2) |
-| P2-2w a | b00db30 (#184) |
-| P2-2w b | 0302131 (#189) |
-| P3-1 | cff139d (shallow, broker/change) |
-| P3-1a | 30d601c (shallow, broker/replay) |
-| P3-1b | cff139d (shallow, broker/change) |
-| P3-2 | 0302131 (#189; shallow, broker/loops) |
-| P3-3 | 5980098 (shallow, broker/recall) |
-| P3-3b | 44975b6 (2/2, #59; wired in #152 469c644) |
-| P3-4 | c5feca1 (shallow, broker/loops Guard) |
-| P3-5 | 4672fe8 (shallow, broker/maintain) |
-| P3-6 | 04be62e (shallow, broker/compile, skill) |
-| P3-6b | 04be62e (shallow, broker/attention) |
-| P3-7 | 847ea23 (shallow, broker/guest goal.go) |
-| P3-8 | 2b1bd8a (shallow, broker/question) |
-| P4-2 | d6a5046 (shallow, broker/cleanroom) |
-| P4-3 | 8bab3fe (shallow, broker/update) |
-| RES-2c | 9fa31bc (#140) |
-| CAP-8b | 244974b (#150) |
-| CAP-8c | c4c2366 (#166) |
-| CAP-1 | 49cc421 (commit on main; item D merged via #166) |
-| OSS-9 | 4329b1d (#180) |
-| OSS-6c | 4329b1d (#180) |
-| SR2-3 | a10b5fe |
-| SR2-3i | d40fb31 (#174) |
-| SR2-3d | d40fb31 (#174) |
-| SR2-3f | f19f97c (#181, commit fcdce51) |
-| SR2-3s | 847ea23 (#179) |
-| SR2-5 | 2e85d06 |
-| SR2-7 | 5cddc94 |
-| SR2-8 | 64220e9 (#162) |
-| SR2-9 | 64220e9 (#162) |
-| CH-12s | a390f03 (#185) |
-| HOST-1 | fa52b76 |
-| HOST-1f | de01c80 (#188) |
-| CI-SOAK | 8bab3fe (#187) |
-| PE5 | 04be62e (#127) |
-| PE5b | 273b2c5 (#145) |
-| PE7 | 135c0c0 (#153 part 3) |
-| W5a | 3d2daab (#169) |
-| W3-tasks | 538d180 (#160 part 2; wiring waits for forget action) |
-| W3-forget-a | 05913d0 (#182) |
-| W3-builder-image | 4b0d00e |
-| W3-builder-tune | 61cfd90 |
 
 ## Reuse candidates
 | ID | Component | Why |
