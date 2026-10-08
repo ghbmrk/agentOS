@@ -306,7 +306,7 @@ func TestRunObservedRejectsEffectsRefusedBeforeSubmit(t *testing.T) {
 		}
 	}
 	// The ordinary/security evaluator retains its existing plain reply path.
-	r := newRig(t, nil, func(g *client, _ string) string {
+	r := newRig(t, recs{}, func(g *client, _ string) string {
 		g.effect("forbidden", "broker", "meta.canary", nil)
 		return "Done"
 	}, nil)
