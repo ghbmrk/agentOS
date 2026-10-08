@@ -10,6 +10,22 @@ Index of work packages, one line each. Each row links its brief in `briefs/<ID>.
 | DOC-1 | [One home per fact; review pipeline; per-PR lens records](briefs/DOC-1.md) | — | merged (#355) |
 | DOC-3 | [BOARD index and briefs; DECISIONS format](briefs/DOC-3.md) | DOC-1 | merged (#356) |
 | DOC-2 | [doclint and cause metrics](briefs/DOC-2.md) | DOC-3 | merged (#357) |
+| SR3 | [Register the security and architecture review](briefs/SR3.md) | DOC-3 | in review (Codex proposal to primary; documentation only) |
+
+## Security and architecture review (2026-10-08)
+
+Primary lane; remediation is unclaimed. [Review record](reviews/security/2026-10-08-architecture-review.md).
+
+| ID | Package | Needs | State |
+|---|---|---|---|
+| SR3-1 | [Bind local sign-in to the authenticated lock generation](briefs/SR3-1.md) | P2-2w a, P2-2w b | queued (P1; release) |
+| SR3-2 | [Enforce pre-allowance rate limits at dispatch](briefs/SR3-2.md) | P2-grants, P2-gr8 | queued (P2; release) |
+| SR3-3 | [Show and bind the complete pre-allowance rule at approval](briefs/SR3-3.md) | P2-grants, P2-2a | queued (P2; release) |
+| SR3-4 | [Make update finalization durable and idempotent](briefs/SR3-4.md) | UPD-a, P4-3, P3-1 | queued (P2; release) |
+| SR3-5 | [Preserve IMAP message identity through mutations and undo](briefs/SR3-5.md) | P2-6m | queued (P2; release) |
+| SR3-6 | [Invalidate verified updates when attestation policy narrows](briefs/SR3-6.md) | P4-3, P3-1 | queued (P2; release) |
+| SR3-7 | [Use one validated request for model reservation and routing](briefs/SR3-7.md) | P2-7, P1-7 | queued (P2; release) |
+| SR3-8 | [Commit clean-room output durably before recording completion](briefs/SR3-8.md) | P4-2 | queued (P2; release) |
 
 ## Phase 0: harness and risk spikes
 
@@ -27,6 +43,9 @@ Index of work packages, one line each. Each row links its brief in `briefs/<ID>.
 | S8-W1 | [Image fix for worker-held custody](briefs/S8-W1.md) | S8, #186 | queued |
 | S8-live | [S8 live part](briefs/S8-live.md) | see brief | queued |
 | S8-codex-terms | [Read OpenAI's current terms on a proxy holding ChatGPT-managed…](briefs/S8-codex-terms.md) | openai.com reachable | queued |
+| CRED-5f | [CRED-5 fallback when no API key is granted](briefs/CRED-5f.md) | #328 | queued |
+| CRED-5t | [Broker-held route failure triggers and fail-closed refresh test](briefs/CRED-5t.md) | #328 | queued |
+| CRED-5w | [Owner pause and withdrawal notice for broker-held routes](briefs/CRED-5w.md) | #328 | queued |
 | S1 | [Screenless USB4-SSD boot on ≥3 unmodified PCs](briefs/S1.md) | Mark: hardware + hands | queued (test kit ready; waiting on hardware) |
 | S2 | [USB LTE modem](briefs/S2.md) | Mark: 2 modems + SIM | queued (test kit ready; waiting on hardware) |
 | P0X | [Spec v0.12](briefs/P0X.md) | — | merged (cada7c1; SPEC.md v0.12) |
@@ -135,7 +154,7 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | OSS-6s | [Publication sender](briefs/OSS-6s.md) | OSS-6 | queued |
 | OSS-9 | [Attestations as evidence and following forks](briefs/OSS-9.md) | P4-3, P4-4 | merged (4329b1d; #180) |
 | OSS-6c | [Publication clock hardening](briefs/OSS-6c.md) | OSS-6 | merged (4329b1d; #180) |
-| OSS-6e | [Floor across restarts](briefs/OSS-6e.md) | OSS-6c | queued (A, after #180) |
+| OSS-6e | [Floor across restarts](briefs/OSS-6e.md) | OSS-6c | in review (A) |
 | OSS-10w | [Follow-fork executor wiring](briefs/OSS-10w.md) | OSS-9, HOST-1b, P2-2w | in review (A) |
 | OSS-10w2 | [Follow-fork wiring part 2](briefs/OSS-10w2.md) | OSS-10w, P2-2w b, P2-2w d | queued (A) |
 | IMG-1 | [Image checks for P2-1](briefs/IMG-1.md) | P2-1 (#41, draft since 01:07Z) | queued (blocked on P2-1) |
@@ -144,6 +163,7 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | P2-2w | [Local UI process and owner socket](briefs/P2-2w.md) | P2-2a | building (in sub-rows a, b, d, c (P3-2 thread)) |
 | P2-2a f1 | [Page result after a changed item](briefs/P2-2a-f1.md) | P2-2a | in review |
 | P2-2a f2 | [Page result for a changed release adoption](briefs/P2-2a-f2.md) | P2-2a f1 | queued (after #329) |
+| P2-2a f3 | [Re-offer an awaiting-owner release the pipeline dropped](briefs/P2-2a-f3.md) | P2-2a f2 | queued (after #363; release finding from L3 on #363) |
 | P2-2w a | [`localui.sock` in agentosd](briefs/P2-2w-a.md) | P2-2a | merged (b00db30; #184) |
 | P2-2w b | [`agentos-localui` command under its own uid](briefs/P2-2w-b.md) | P2-2w a | merged (0302131; #189) |
 | P2-2w d | [LocalUI on (part 1)](briefs/P2-2w-d.md) | P2-2w b | in review (split 2026-10-08; part 2 is d2) |
