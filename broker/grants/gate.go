@@ -1884,8 +1884,9 @@ func (g *Gate) Decide(d owner.Decision) {
 	}
 	if changed && own != nil {
 		// The page has already said "Approved" (L3 SHOULD on #178, CH-12).
-		// Only the owner asks for page-confirmed items, never the agent
-		// (UX lens on #329), so the step names no agent.
+		// Agent and guest origins never reach the page: evaluateBroker
+		// denies them every broker action (UX lens on #329), so the step
+		// names no agent.
 		_ = own.Inform(fmt.Sprintf("%s did not run: it changed after my Wi-Fi page showed it. Make the request again if still needed.", clip(d.Request)))
 	}
 	if !wait {
