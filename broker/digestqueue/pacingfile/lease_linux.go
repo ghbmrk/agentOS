@@ -3,7 +3,6 @@ package pacingfile
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -25,14 +24,12 @@ type ExclusiveStore struct {
 // must be owner-private 0700; lock/ledger/temp files must be owner-private 0600,
 // regular, single-link objects. Ancestor/same-UID custody remains external.
 func OpenExclusive(path string) (*ExclusiveStore, error) {
-	if !filepath.IsAbs(path) || filepath.Clean(path) != path || path == "/" || strings.HasSuffix(path, ".lock") || strings.HasSuffix(path, ".tmp") {
-		return nil, ErrStorage
-	}
-	fd, err := syscall.Open(filepath.Dir(path), syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	dir, err := openLeaseParent(path)
 	if err != nil {
 		return nil, ErrStorage
 	}
-	s := &ExclusiveStore{store: Store{Path: path}, dir: os.NewFile(uintptr(fd), filepath.Dir(path))}
+	fd := int(dir.Fd())
+	s := &ExclusiveStore{store: Store{Path: path}, dir: dir}
 	fail := func() (*ExclusiveStore, error) { s.Close(); return nil, ErrStorage }
 	if syscall.Fstat(fd, &s.dirID) != nil || !privateDir(&s.dirID) {
 		return fail()
@@ -80,15 +77,15 @@ func (s *ExclusiveStore) verifyLocked() error {
 	if s.closed || s.unavailable.Load() || s.dir == nil || s.lock == nil {
 		return ErrStorage
 	}
-	fd, err := syscall.Open(filepath.Dir(s.store.Path), syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	named, err := openLeaseParent(s.store.Path)
 	if err != nil {
 		s.unavailable.Store(true)
 		return ErrStorage
 	}
 	var st syscall.Stat_t
-	e := syscall.Fstat(fd, &st)
-	syscall.Close(fd)
-	if e != nil || !privateDir(&st) || !sameID(&st, &s.dirID) {
+	e := syscall.Fstat(int(named.Fd()), &st)
+	closed := named.Close()
+	if e != nil || closed != nil || !privateDir(&st) || !sameID(&st, &s.dirID) {
 		s.unavailable.Store(true)
 		return ErrStorage
 	}

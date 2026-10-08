@@ -56,7 +56,8 @@ qualification. Strongest independent broker/security review remains required.
 `OpenExclusive(absoluteLedgerPath)` acquires a Linux per-ledger nonblocking
 `flock` on a retained `.lock` inode before constructing the Gate. It does not
 load/provision the ledger. The dedicated parent must be owned by the effective
-UID, mode 0700 and opened as a final non-symlink directory. Lock, ledger and
+UID, mode 0700; all parent components are opened as non-symlink directories
+using D51’s bounded descriptor walk. Lock, ledger and
 existing `.tmp` descriptors must be regular, owned by that UID, mode 0600 and
 single-link. The path must be clean/absolute and cannot end in `.lock`/`.tmp`,
 which are reserved cooperating-file names. No directory is created or chmodded;
@@ -319,10 +320,48 @@ The deterministic displacement test models a path replacement BETWEEN the outer
 check and I/O: actual read/write/rename stay in the acquired directory, leaving
 replacement directory and a synthetic symlink target untouched. The next outer
 observation latches displaced custody. This does not prove atomic custody checks:
-parent acquisition/verification still traverse ancestors, a same-UID actor can
+parent acquisition/verification still traverse ancestors (D51 rejects symbolic
+components but does not qualify ancestor permissions/mounts), a same-UID actor can
 race temporary/ledger/lock names, lock replacement can split advisory exclusion,
 and old valid images replay. Permissions already handed out are not revoked.
 Synchronous descriptor I/O and Close can still hang forever. W5-D50-Q holds trusted
 residue cleanup after total drain and actual protected-path/media/latency/restore/
 config and current-main integration qualifications. Strongest independent security
 and external batch review remain; D37 urgent/reissue fault hold is preserved.
+
+## Bounded nofollow parent resolution (D51)
+
+ExclusiveStore acquisition and named-parent custody observation resolve each
+parent component from an opened `/` directory using openat with O_DIRECTORY,
+O_NOFOLLOW and O_CLOEXEC. Each step retains its predecessor until the next opens,
+then closes the predecessor; only two traversal descriptors coexist. A symbolic
+ancestor is refused even if it points to the already held final parent inode.
+Initial refusal occurs before lock creation; observed later refusal latches the
+existing backend/Gate recovery hold with no ledger write or urgent bypass.
+
+Validate before opening: clean absolute non-root ledger path, no NUL, no reserved
+`.lock`/`.tmp` suffix, at most 4095 bytes including the ledger basename, and at
+most 64 parent components excluding `/` and the ledger basename. Both acquisition
+and custody re-observation apply the same limits. These opt-in compatibility
+restrictions need external adoption review; no implicit symlink resolution,
+canonicalization, shorter-path fallback, mkdir/chmod or provisioning is supplied.
+A digest-accepted manifest may still name a path the lease rejects: startup holds,
+never replaces its configuration or initializes a different image.
+
+Tests reproduce D50’s symbolic-ancestor acceptance and link-back-to-same-inode
+acceptance before implementation. Exact/over depth and byte bounds are exercised
+with real directories, including descriptor-relative I/O when full `.lock` paths
+would exceed PATH_MAX. Failed lookups release traversal fds; actual Gate urgent
+hold and strict reopen preserve spent debt after trusted path restoration/drain.
+
+This walk is not atomic whole-path identity, ancestor permission/ownership
+attestation, mount/root namespace continuity or hostile same-UID/name custody.
+Directory names can still change between steps; final parent identity is observed
+and ledger operations remain pinned to the acquired descriptor. Acquisition may
+still encounter an untrusted real directory; the existing final-parent privacy
+checks do not qualify every ancestor. Root/ancestor mounts, lock replacement,
+advisory noncooperators, old valid restore/config replay and escaped permissions
+remain release holds. Bounded traversal count is not bounded synchronous I/O time:
+Open/Openat/Fstat/Close or storage can stall and retain the startup slot/worker.
+W5-D51-Q/W5-D50-Q/W5-D47-Q and D37 availability holds remain. No recovery cleanup,
+refund, retry, revocation, default activation, deployment or security acceptance.
