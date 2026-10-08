@@ -213,9 +213,9 @@ func TestOSS10w2FollowNotAskedIsAnError(t *testing.T) {
 	f := newFollowRig(t)
 	form := f.askForm(f.upload([]byte("root")))
 	f.mu.Lock()
-	f.reply = "Not asked: the box refused this request."
+	f.reply = "Not asked: I refused this request."
 	f.mu.Unlock()
-	if p := f.ask(with(form, "name", "Acme")); !strings.Contains(p, `class="err">Not asked: the box refused this request.`) || strings.Contains(p, approvalsButton) {
+	if p := f.ask(with(form, "name", "Acme")); !strings.Contains(p, `class="err">Not asked: I refused this request.`) || strings.Contains(p, approvalsButton) {
 		t.Fatalf("%s", p)
 	}
 }

@@ -159,7 +159,7 @@ type PageSocket struct {
 // shown (L3 SHOULD 3 on #148).
 const (
 	FollowAsked   = "Asked. Approve it on the Approvals page with a code from your code generator; nothing changes until you do."
-	FollowRefused = "Not asked: the box refused this request."
+	FollowRefused = "Not asked: I refused this request."
 )
 
 // FollowRefusedName is the reply to a name the gate does not admit.
