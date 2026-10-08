@@ -19,7 +19,7 @@ var t0 = time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)
 
 func newOpt(t *testing.T, st Store, mod func(*Config)) *Optimizer {
 	t.Helper()
-	cfg := Config{Store: st, UserContent: func(string) bool { return false }}
+	cfg := Config{Store: st, Now: func() time.Time { return t0 }, UserContent: func(string) bool { return false }}
 	if mod != nil {
 		mod(&cfg)
 	}
@@ -79,7 +79,7 @@ func TestSuggestsAfterRunOfApprovals(t *testing.T) {
 		t.Fatalf("rule %+v", r)
 	}
 	if s[0].Short != "S1" || s[0].Approved != 10 || s[0].Detail != grants.Describe(s[0].Spec) || !strings.Contains(s[0].Text, "up to 3 a day, no money.") ||
-		!strings.Contains(s[0].Text, "10 times in a row since Oct 5") || !strings.HasSuffix(s[0].Text, "Reply NO S1 to stop suggesting it.") {
+		!strings.Contains(s[0].Text, "10 times unchanged since Oct 5") || !strings.HasSuffix(s[0].Text, "Reply NO S1 to stop suggesting it.") {
 		t.Fatalf("text %q", s[0].Text)
 	}
 	if again := suggestions(t, o); again[0].Short != "S1" {
@@ -121,7 +121,7 @@ func TestRunResetsAndShapesRule(t *testing.T) {
 
 // CAP-6, ADP-9: never suggested: CRED-6 (reveal-or-create-secret), a
 // reversible verb (needs no rule), a user-content service, a class whose
-// fixed params changed or were not plain strings (no templated content).
+// fixed params never repeated enough or were not plain strings.
 // An unverified approval does not count; an expired item neither counts
 // nor resets.
 func TestExclusions(t *testing.T) {
@@ -418,7 +418,7 @@ func TestPerDayIsMedian(t *testing.T) {
 func TestShortIDsAreBounded(t *testing.T) {
 	o := newOpt(t, &change.MemStore{}, nil)
 	for i := 0; i < MaxShort; i++ {
-		o.st.Classes[strconv.Itoa(i)] = &class{Short: "taken"}
+		o.st.Classes[strconv.Itoa(i)] = &class{Reply: true, Short: "taken"}
 		s, err := o.shortLocked()
 		if err != nil || len(s) > 3 {
 			t.Fatalf("%q %v", s, err)
