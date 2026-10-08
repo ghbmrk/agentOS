@@ -275,9 +275,10 @@ func (r *Runtime) Exec(ctx context.Context, id string, c vm.Command) (vm.ExecRes
 	// on either stream is known to be the guest's: Exec answers no output,
 	// and runsc's messages go only to the broker's exec log (SR2-3h). A Go
 	// runtime panic in runsc after the command started writes no --log
-	// line, only its trace to stderr, and exits 2 (SR2-3m).
+	// line, only its trace to stderr, and exits 2 (SR2-3m), whether or not
+	// the context has since ended (Security S1 on #391).
 	var exit *exec.ExitError
-	panicked := errors.As(err, &exit) && exit.ExitCode() == 2 && ctx.Err() == nil && watch.found()
+	panicked := errors.As(err, &exit) && exit.ExitCode() == 2 && watch.found()
 	if pid, _ := os.ReadFile(pidFile); len(bytes.TrimSpace(pid)) == 0 || size(logs[0]) > 0 || panicked {
 		msgs := stderr.bytes()
 		if panicked {

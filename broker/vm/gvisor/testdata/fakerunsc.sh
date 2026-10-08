@@ -12,7 +12,9 @@
 # Go 1.23's at runsc's default traceback (system). fullpanic is a
 # runtime fatal error, with the plain header, after the guest's stderr
 # filled the cap. exit2 is a guest that exits 2 with a goroutine header
-# but no panic line.
+# but no panic line. deadpanic is latepanic at the deadline: runsc exits
+# 2 at once, but a process it left holds stderr open past the context's
+# end, so Exec returns after its deadline (Security S1 on #391).
 log= dlog= pid= cmd=
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -38,6 +40,13 @@ latepanic)
 	echo "guest out"
 	printf 'guest err' >&2
 	printf 'panic: open %s: permission denied\n\ngoroutine 1 gp=0xc000002380 m=0 mp=0x1f2e3c0 [running]:\nmain.main()\n\t%s/runsc/main.go:42 +0x1d\n' "$c" "$c" >&2
+	exit 2
+	;;
+deadpanic)
+	echo 7 >"$pid"
+	echo "guest out"
+	printf 'panic: open %s: permission denied\n\ngoroutine 1 [running]:\nmain.main()\n' "$c" >&2
+	sleep 0.5 >&2 &
 	exit 2
 	;;
 fullpanic)

@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/vm"
 )
@@ -41,6 +42,24 @@ func TestRunscPanicAfterStartAnswersNoOutput(t *testing.T) {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("exec log lacks %q:\n%s", want, b)
 		}
+	}
+}
+
+// A panic at the deadline, read only after the context ended, still
+// answers no output (Security S1 on #391).
+func TestRunscPanicAtTheDeadlineAnswersNoOutput(t *testing.T) {
+	r := fakeRunsc(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	res, err := r.Exec(ctx, "wk-1", vm.Command{Argv: []string{"deadpanic"}, MaxOutput: 4096})
+	if ctx.Err() == nil {
+		t.Fatal("Exec returned before the deadline; the case is not exercised")
+	}
+	if err == nil {
+		t.Fatalf("runsc's panic read as a result: %+v", res)
+	}
+	if len(res.Stdout) > 0 || len(res.Stderr) > 0 || res.ExitCode != 0 {
+		t.Fatalf("runsc's panic answered output: %+v", res)
 	}
 }
 
