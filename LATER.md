@@ -1,8 +1,8 @@
 # LATER: first-release critical path and backlog
-Generated 2026-10-07 by the COST thread's audit; the coordinator updates it. Rows marked LATER are not started until the first release ships (DECISIONS.md, 2026-10-07). Promote a row by moving it to "Release" with the acceptance test it now blocks.
+Generated 2026-10-07 by the COST thread's audit; the coordinator updates it. Rows marked LATER are not started until the first release ships (DECISIONS D-048). Promote a row by moving it to "Release" with the acceptance test it now blocks.
 
 ## Summary
-Non-merged rows audited: 129. Release: 48 (11 marked unsure). Later: 14. Stale: 67, of which 33 are inferred from code on origin/main because the clone is shallow.
+Non-merged rows audited: 129; the 67 stale rows it found were reconciled into BOARD.md on 2026-10-08 (DOC-3), and rows since merged were removed from the tables below. Open now: Release 40 (6 marked unsure), Later 12.
 No security-fix row (SR2-*) is classed Later. P2-1 (host image, PR #41) has no board row but blocks IMG-1, HOST-1a/1b/1c part 2 and W3-builder-ship.
 
 ## Release (needed for A1–A15 or an invariant)
@@ -16,7 +16,6 @@ No security-fix row (SR2-*) is classed Later. P2-1 (host image, PR #41) has no b
 | S2 | A1, A3 | Modem SMS and voice; waits on Mark's modems |
 | P2-4-hw | A8 | Real-TPM trusted-host run; risk 14 |
 | P3-4b | A11 (unsure) | Loop 2 active testing; Mark deferred 10-05, A11 loop-2 part stays open |
-| P3-6e | A11, CHG invariant (unsure) | Security R1 condition before the model-backed builder is wired |
 | UPD-b | A1, A14 (UPD-3) (unsure) | Update before accounts connect |
 | CH-20w | A15 (CH-20) | Evidence delivery through the vault-held mail adapter |
 | CRED-4b | A5, A13 | Credentialed browser executor; sessions only in the vault process |
@@ -37,15 +36,9 @@ No security-fix row (SR2-*) is classed Later. P2-1 (host image, PR #41) has no b
 | HOST-1b | A1 (HW-8) | Part 2 needs P2-2w live page |
 | HOST-1c | A1 (HW-8, ONB-7) | Part 2 needs P2-2 |
 | HOST-1e | A1 | Host-untouched hash harness |
-| W2 | A12 leakage audit (unsure) | Recall as guest tool with vault-held key |
-| PE4 | A11 (unsure) | Preempted Loop 2 fix never retried; #112 predates shallow history |
 | PE7-bus | A11, A2 (unsure) | Condition on the events-bus package; floor host |
 | PE7-call | A11, A2 (unsure) | Condition on the inbound-call package |
 | W3 | A11 | Learning process; steps 3a, 3c open |
-| W3-goal | A10, A11 (unsure) | Goal IDs for compiled skills |
-| W4 | A11, A15 | Managed tree to the agent machine |
-| W3-values | A10 | Param values for compiled skills |
-| W3-values-mix | A10 (unsure) | Leak-guard follow-up to W3-values |
 | W3-builder-ship | A11 | Builder defaults; P2-1 side queued |
 | W3-forget | A14 (CAP-3) | Owner FORGET; split a, b |
 | W3-forget-b | A14 (CAP-3) | Authenticated forget log over restores; Security C3 |
@@ -55,14 +48,12 @@ No security-fix row (SR2-*) is classed Later. P2-1 (host image, PR #41) has no b
 | W5c | A12 | Clean-room builder in the scheduler |
 | W6 | A8 (REC-1–3) | Recovery into vault process and local UI |
 | W7 | A10, A15 (CAP-4–6) | Compiled skills live; attention optimizer; blocked |
-| W9 | A15 | Default-on-timeout questions live |
 
 ## Later (backlog; do not start before first release)
 | ID | Why it can wait |
 |---|---|
 | P2-8b | Deferred re-encrypt after trusted-PC removal; slot removal already covers CRED-9 |
 | P3-6d | Digest wording for deleted procedures; no A-test needs it |
-| P3-8b | Question batching and ask_by; A15 needs only default-on-timeout |
 | CH-20p | Page view of kept replies; A15 needs delivery, not this view |
 | CH-20a | Attachments conflict with security C4; needs review; not in A15 |
 | CH-20m | MORE command for redirected replies; convenience |
@@ -76,79 +67,34 @@ No security-fix row (SR2-*) is classed Later. P2-1 (host image, PR #41) has no b
 | W3-forget-b2 pre-start | L3 re-review on #321: a build cancelled before it starts still calls propose with a cancelled ctx; return early |
 | W3-forget-b2 post-build test | L3 re-review on #321: no test kills the post-build forget check; add one with the next Learn test hook |
 | W8 | Owner builds; no brief, no A-test names it |
-| W9a | Question follow-ups from the #95 lens gate; no A-test needs them |
-
-## Stale board rows (merged per git log)
-Rows marked "(shallow)" show only code on origin/main plus the last commit touching it: this clone is shallow, so older merge commits are not visible. Verify those before editing the board.
-| ID | Commit |
-|---|---|
-| H1 | 00c298d (shallow, tools/metrics.py) |
-| P0X | cada7c1 (shallow, SPEC.md v0.12) |
-| S8 | 03641d1 (#186 cloud part and spec diff) |
-| P1-1 | 05913d0 (shallow, broker/journal) |
-| P1-2 | 7ff7417 (shallow, broker/daemon) |
-| P1-4 | f19f97c (shallow, broker/vm) |
-| P1-7 | 847ea23 (shallow, broker/guest) |
-| P2-grants | a390f03 (shallow, broker/grants) |
-| P2-rev3 | 04be62e (shallow, broker/reversible) |
-| P2-gr8 | a390f03 (shallow, broker/grants) |
-| P2-2 | a0bb643 (shallow, broker/localui; LocalUI still off) |
-| P2-7 | e7c419b (shallow, broker/modelroute) |
-| P2-3 | 46e3885 (shallow, broker/modem) |
-| P2-3b | 27f6fe9 (shallow, broker/sipsign) |
-| P2-3c | 0a6c2c7 (#159 part 5) |
-| P2-3w | 65b48ef (#170 part 1; later parts not on board) |
-| P2-6m | c5feca1 (shallow, broker/mail) |
-| P2-4a | ad55ae2 (shallow, broker/vault) |
-| P2-4b | 6303190 (shallow, broker/tpmseal) |
-| P2-4c | ad55ae2 (shallow, broker/vault) |
-| P2-4d | ad55ae2 (shallow, broker/vault) |
-| P2-4g | ad55ae2 (shallow, broker/vault) |
-| P2-4h | ad55ae2 (shallow, broker/vault) |
-| P2-2a | 6239bd4 (#178 part 2) |
-| P2-2w a | b00db30 (#184) |
-| P2-2w b | 0302131 (#189) |
-| P3-1 | cff139d (shallow, broker/change) |
-| P3-1a | 30d601c (shallow, broker/replay) |
-| P3-1b | cff139d (shallow, broker/change) |
-| P3-2 | 0302131 (#189; shallow, broker/loops) |
-| P3-3 | 5980098 (shallow, broker/recall) |
-| P3-3b | 44975b6 (2/2, #59; wired in #152 469c644) |
-| P3-4 | c5feca1 (shallow, broker/loops Guard) |
-| P3-5 | 4672fe8 (shallow, broker/maintain) |
-| P3-6 | 04be62e (shallow, broker/compile, skill) |
-| P3-6b | 04be62e (shallow, broker/attention) |
-| P3-7 | 847ea23 (shallow, broker/guest goal.go) |
-| P3-8 | 2b1bd8a (shallow, broker/question) |
-| P4-2 | d6a5046 (shallow, broker/cleanroom) |
-| P4-3 | 8bab3fe (shallow, broker/update) |
-| RES-2c | 9fa31bc (#140) |
-| CAP-8b | 244974b (#150) |
-| CAP-8c | c4c2366 (#166) |
-| CAP-1 | 49cc421 (commit on main; item D merged via #166) |
-| OSS-9 | 4329b1d (#180) |
-| OSS-6c | 4329b1d (#180) |
-| SR2-3 | a10b5fe |
-| SR2-3i | d40fb31 (#174) |
-| SR2-3d | d40fb31 (#174) |
-| SR2-3f | f19f97c (#181, commit fcdce51) |
-| SR2-3s | 847ea23 (#179) |
-| SR2-5 | 2e85d06 |
-| SR2-7 | 5cddc94 |
-| SR2-8 | 64220e9 (#162) |
-| SR2-9 | 64220e9 (#162) |
-| CH-12s | a390f03 (#185) |
-| HOST-1 | fa52b76 |
-| HOST-1f | de01c80 (#188) |
-| CI-SOAK | 8bab3fe (#187) |
-| PE5 | 04be62e (#127) |
-| PE5b | 273b2c5 (#145) |
-| PE7 | 135c0c0 (#153 part 3) |
-| W5a | 3d2daab (#169) |
-| W3-tasks | 538d180 (#160 part 2; wiring waits for forget action) |
-| W3-forget-a | 05913d0 (#182) |
-| W3-builder-image | 4b0d00e |
-| W3-builder-tune | 61cfd90 |
+| ADP-14-get | GET links with side effects reached by `navigate` on recipe sites; recipe gate covers state-changing methods first |
+| ADP-14-undo-fail | A failed `UNDO` reply gives site, reference and deadline and opens a task; UNDO success path is enough for A13 |
+| ADP-14-offer | After repeated approved submits on one unknown site, offer its private-derived draft for adoption; cuts approvals, not needed for A13 |
+| ADP-14-cred6 | Recipes declare their site's CRED-6 screens, undeclared ones trigger ADP-7 repair; CRED-6 already applies without a recipe |
+| ADP-14-origins | Which origins the credentialed context may reach on a site with no recipe; every state-changing request there is already held |
+| ADP-16-acct2 | A second account signed in inside a suite executor's app; ADP-16 kiosk already limits to one account's adapters |
+| OSS-6e f1 | Security 319-1 (L3 asked for this line; lands before #319 merges): a missing or unreadable `boot_id` fails open, so each restart can count one day of the 20h floor again |
+| W3-forget-b2 f2 | L3 on #321: a self-cancelled job still calls propose/Build with a cancelled ctx |
+| W3-forget-b2 f3 | L3 on #321: no mutation test covers the post-build disjunct |
+| P2-2w d f4 | L3 N1 on #322: OSS-10 is missing from the REQ marker in `pagewording_test.go` |
+| P2-2w c1 f4 | L3 L1 on #320: `ReEnroll` does not delete the `owner-totp-setup-open` vault entry |
+| P2-2w c1 f5 | L3 L2 on #320: no test covers a setup-open entry of the wrong kind |
+| SR2-3g f7 | L3 R1 on #324: the `guesterr` import sits in the stdlib import group in `question_test.go`; style only |
+| OSS-10w f1 | UX on #323: the alert wording "Switch back there" reads oddly after a switch back to the project |
+| W3-forget-b2b f1 | Security 327-1: race between `worked()` and `takeBack(approved=false)` in `agentBackWithoutAsking`; re-check under `r.run` |
+| DOC-3 f1 | L3 on #356: the SHAs on rows inferred as merged name the last commit touching the package, not its merge; relabel as "last touched" or cite the PR |
+| DOC-3 f2 | L3 on #356: D-041 (license) has date `Pending`, not ISO; set it when the license is chosen |
+| DOC-2 f1 | L3 on #357: doclint does not check DECISIONS cells ≤300 characters or that `decisions/D-NNN.md` links resolve (D-056) |
+| CRED-4b f1 | L3 on #300 (#9): the browser gate passes the raw `cfg.Origins` to the driver, not the canonical keys (`gate.go:99`) |
+| CRED-4b f2 | L3 on #300 (re-review #7): `exec.CommandContext` kills only the driver's group leader on ctx cancel; set `cmd.Cancel` to kill the process group (`gate.go:100`) |
+| CRED-4b f3 | L3 on #300 (re-review #6): no test isolates the Lstat and O_NOFOLLOW symlink layers |
+| CRED-4b f4 | L3 on #300 (K6): images in output files are not inspected |
+| CRED-4b f5 | L3 on #300 (1960aed re-review #3): the label rule misses `accessTOKEN:` and suffixed labels (`accessTokenValue:`, `access_token_value:`); add to K11's part-2 corpus |
+| CRED-4b f6 | L3 on #300 (e000ecc re-review): keep both `myApiKey=<hex>` and `myApiKey: <hex>` in the part-2 corpus |
+| CRED-4b f7 | L3 on #300 (f135e43 re-review): the label rule redacts prose such as `See the secret 2024-holiday-party-photos album`; fails closed, noted next to K12 |
+| CRED-4b f8 | L3 on #300 (1960aed re-review #4): camelCase false positives (`hotKey 2024-10-08-release-notes`, `useToken 2024-…`, `?sortKey=created_at_2024_desc`); fail closed, part-2 negative corpus |
+| CRED-4b f9 | L3 on #300 (e000ecc re-review): an initialism or capitalised word before a label word is redacted (`USBKey 2024-10-08-firmware-notes`, `PGPKey: 2024-…`, `MyKey: 2024-…`); fail closed, part-2 negative corpus |
+| CRED-4b f10 | L3 on #300 (f135e43 re-review): the label rule's value charset misses passwords with other punctuation (`password: Abc123@xyz789#Qq`) |
 
 ## Reuse candidates
 | ID | Component | Why |

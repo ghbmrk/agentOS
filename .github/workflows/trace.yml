@@ -1,5 +1,5 @@
 name: trace
-# Only this workflow writes TRACE.md (PLAN.md §5 artifacts table). Package PRs never
+# Only this workflow writes TRACE.md (README.md Documents table). Package PRs never
 # commit it, so it stops conflicting on every merge; ci.yml checks markers on a tree it
 # regenerates itself, and this job commits the regenerated file to main after a merge.
 # Same split as metrics.yml: generation runs with a read-only token; only the commit
