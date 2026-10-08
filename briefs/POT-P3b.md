@@ -2,7 +2,7 @@
 
 **Owner:** primary, unclaimed. **Class:** release, A7/A10/A11. **Tier:** A.
 **Requirements:** CHG-1/2, LOOP-5/6, OP-7, CAP-3/5.
-**Needs:** POT-P3, POT-P2 for durable result identity; reconcile W7-A [#264](https://github.com/ghbmrk/agentOS/pull/264) and existing W3 forget work.
+**Needs:** POT-P3 and POT-P3a private capture qualification, POT-P2 for durable result identity; reconcile W7-A [#264](https://github.com/ghbmrk/agentOS/pull/264) and existing W3 forget work.
 
 POT-P3's first observed-effect contract does not establish artifact quality, multi-effect correctness, owner feedback revision, or a workload acceptance measure. Keep these explicit gaps open after that draft merges.
 

@@ -206,11 +206,14 @@ func TestDroppedLocalFallbackSaysSo(t *testing.T) {
 // refusingRouting is agentosd's routing target until agentos-egress
 // follows adoptions (cmd/agentosd heldRouting): empty, and refusing any
 // non-empty tree.
-type refusingRouting struct{}
+type refusingRouting struct{ onRefuse func() }
 
 func (refusingRouting) Current() (Tree, error) { return Tree{}, nil }
-func (refusingRouting) Apply(t Tree) error {
+func (r refusingRouting) Apply(t Tree) error {
 	if len(t) != 0 {
+		if r.onRefuse != nil {
+			r.onRefuse()
+		}
 		return errRefused
 	}
 	return nil
@@ -226,16 +229,21 @@ func (e errorString) Error() string { return string(e) }
 // routing target refuses it, and the active tree is unchanged.
 func TestRoutingAdoptionRefusedByTheTargetLeavesActiveUnchanged(t *testing.T) {
 	r := newRouter(t)
+	refusals := 0
 	e := newEnv(t, func(c *Config) {
-		c.Targets = map[string]Target{"routing": refusingRouting{}}
+		c.Targets = map[string]Target{"routing": refusingRouting{onRefuse: func() { refusals++ }}}
 		c.RouteGranted = func(p string) bool { return p == "openai" || p == "anthropic" }
 	})
+	e.owner.approve = true // the empty target makes this an owner-authorized addition
 	ruleCase(e, reordered, 12)
-	callRouter(t, r, 3)
+	callRouter(t, r, 10)
 	before := e.p.Files("routing")
 	rep, changed, _ := e.p.ProposeRouting(bg, r)
 	if !changed {
 		t.Fatal("no routing candidate: the test proves nothing")
+	}
+	if refusals != 1 {
+		t.Fatalf("target refused %d times; candidate stopped before target: %+v", refusals, rep)
 	}
 	if rep.State == StateAdopted {
 		t.Fatalf("adopted through a refusing target: %+v", rep)

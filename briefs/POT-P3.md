@@ -42,8 +42,12 @@ harvesting, cache identity and no new replay effect authority.
 
 This draft does not qualify a whole workflow or demonstrate owner benefit.
 POT-P3b covers authenticated feedback revisions, stale expectation invalidation,
-and further result classes. Pre-redaction keyed matching/read cassettes remain
-separate work: redacted recordings can refuse matching and reduce coverage.
+and further result classes. **POT-P3a is a blocking release prerequisite:** default
+production journal redaction currently leaves no usable mail.send cases. Do not
+activate the new production grader or merge wiring that enables it until private
+broker-keyed capture/matching qualification and independent CHG-2 approval pass.
+Preserve redaction; no unredacted production logging is authorized. The draft
+tests establish the narrow protocol, not a useful live learning loop.
 Linux replay/daemon execution, assembled W3/W7-A qualification, CHG-2 approval,
 and matched workload trials remain required. Exact test results are recorded
 in the PR/handoff; a cross-compile is not a runtime test.
