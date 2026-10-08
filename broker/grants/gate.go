@@ -526,8 +526,8 @@ const WaitingOnThePage = "waiting for the owner's approval on the box's Wi-Fi pa
 // NoPage* are the gate's reasons for a change that needs the owner's
 // confirmation on the box's Wi-Fi page while agentosd does not serve it
 // (LocalUI off): asked there, it could never be answered. They name the
-// page as the owner does (CH-12), and callers match them exactly
-// (cmd/agentosd's evidence setting).
+// page as the owner does (CH-12). No caller matches them: the journal
+// redacts reasons, so a caller decides from its own page flag (P2-2w d).
 const (
 	NoPageGrant    = "a new or wider grant needs confirmation on the box's Wi-Fi page, which is not running (CH-3)"
 	NoPageEvidence = "changing where private replies go needs confirmation on the box's Wi-Fi page, which is not running (CH-20)"

@@ -74,6 +74,7 @@ No security-fix row (SR2-*) is classed Later. P2-1 (host image, PR #41) has no b
 | W3-implicit | Potency C2 outcome label; refinement of attention optimizer |
 | W8 | Owner builds; no brief, no A-test names it |
 | W9a | Question follow-ups from the #95 lens gate; no A-test needs them |
+| P2-2w d f3 | L3 F3 on #322: LocalUI tracks localui.sock, not the page process; a readiness signal would stop page-asked changes waiting while the page is down; liveness only, nothing approves |
 
 ## Stale board rows (merged per git log)
 Rows marked "(shallow)" show only code on origin/main plus the last commit touching it: this clone is shallow, so older merge commits are not visible. Verify those before editing the board.

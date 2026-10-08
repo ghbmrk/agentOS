@@ -646,8 +646,13 @@ func TestOnlyTheServedPageTurnsLocalUIOn(t *testing.T) {
 		t.Fatalf("wording changed: %q", RecipientsNotTextable)
 	}
 	const want = "gcfg.LocalUI = cfg.PageSocket != nil"
-	for _, dir := range []string{"../cmd", "../daemon"} {
+	// Every package but grants itself (L3 F2 on #322): a setter in any
+	// other main or library package fails too.
+	for _, dir := range []string{".."} {
 		err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+			if err == nil && d.IsDir() && p == filepath.Join("..", "grants") {
+				return fs.SkipDir
+			}
 			if err != nil || d.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
 				return err
 			}
