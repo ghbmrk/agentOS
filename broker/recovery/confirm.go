@@ -16,8 +16,8 @@ import (
 // decoys, then "later than all of these", then "never". The right answer
 // releases the restore and hands its log on for the replay; any other
 // keeps it held and closes the question. agentosd asks and answers it
-// (writeQuestion). The question holds dates only,
-// never what was forgotten.
+// (writeQuestion). The question holds dates only, never what was
+// forgotten.
 const ConfirmSuffix = ".confirm"
 
 const confirmFmt = "agentos-restore-confirm-v1"
@@ -31,12 +31,7 @@ const (
 	dateFmt  = "2006-01-02"
 )
 
-var (
-	// ErrNoQuestion is an answer to a restore that is not held, or held
-	// for a reason the owner cannot confirm.
-	ErrNoQuestion  = errors.New("recovery: no restore is waiting for the owner's answer")
-	errBadQuestion = errors.New("recovery: the restore's question does not read")
-)
+var errBadQuestion = errors.New("recovery: the restore's question does not read")
 
 // Confirmable reports whether a restore held for reason waits on the
 // owner's answer; the others stay held (PendingNotice).
