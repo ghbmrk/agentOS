@@ -497,6 +497,15 @@ func TestIntegrationWorkerExec(t *testing.T) {
 	if res.ExitCode != 3 || string(res.Stdout) != "hello" || !res.Truncated {
 		t.Fatalf("exec = code %d, stdout %q, truncated %v; want 3, %q, true", res.ExitCode, res.Stdout, res.Truncated, "hello")
 	}
+	// A command that cannot start is runsc's own failure: an error and no
+	// output, runsc's text only in the broker's exec log (SR2-3h).
+	res, err = r.m.Exec(ctx, "wk-1", vm.Command{Argv: []string{"/no-such-program"}}, 20*time.Second)
+	if err == nil || len(res.Stdout)+len(res.Stderr) > 0 {
+		t.Fatalf("exec of a missing program = %+v, %v; want an error and no output", res, err)
+	}
+	if b, err := os.ReadFile(r.rt.execLog()); err != nil || !strings.Contains(string(b), "no-such-program") {
+		t.Fatalf("exec log lacks runsc's message: %v\n%s", err, b)
+	}
 }
 
 func TestCappedKeepsTheFirstBytes(t *testing.T) {

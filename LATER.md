@@ -2,7 +2,7 @@
 Generated 2026-10-07 by the COST thread's audit; the coordinator updates it. Rows marked LATER are not started until the first release ships (DECISIONS D-048). Promote a row by moving it to "Release" with the acceptance test it now blocks.
 
 ## Summary
-Non-merged rows audited: 129; the 67 stale rows it found were reconciled into BOARD.md on 2026-10-08 (DOC-3), and rows since merged were removed from the tables below. Open now: Release 49 (6 marked unsure), Later 51 (table counts refreshed with SR3 intake; no existing row reclassified).
+Non-merged rows audited: 129; the 67 stale rows it found were reconciled into BOARD.md on 2026-10-08 (DOC-3), and rows since merged were removed from the tables below. Open now: Release 57 (6 marked unsure), Later 51 (table counts refreshed with SR3 intake; no existing row reclassified).
 No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41) has no board row but blocks IMG-1, HOST-1a/1b/1c part 2 and W3-builder-ship.
 
 ## Release (needed for A1–A15 or an invariant)
@@ -34,6 +34,11 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | ADP-8 | A13 (ADP-8) | Mislabelled-draft check blocks adoption |
 | ADP-5 | A13 | Desktop executor and kiosk-escape test; blocked on CRED-4b |
 | OSS-6s | A12 | Publication sender, idempotent by day and batch |
+| OSS-6j | A12 (OSS-6, DEP-2) | L3 on #330: the pull job is repository automation, not a service |
+| OSS-6i | A12 (OSS-6) | L3 on #330: rotation is void if batches share a circuit |
+| OSS-6p | A12 (OSS-6) | L3 on #330: OSS-6 values the sender needs |
+| OSS-6a | A12 (OSS-6, OSS-7) | L3 on #330: silence vs ask-each-time |
+| OSS-5t | A12 (OSS-5) | L3 on #330: embargoed report over Tor or not |
 | OSS-6e | A12, clean-room invariant | Security ruling on #180: floor holds across restarts |
 | OSS-10w | A12 (unsure) | Follow-fork wiring; OSS-1–13 are in A12's requirements |
 | IMG-1 | A1 | CI scan for per-owner secrets in the image; blocked on P2-1 |
