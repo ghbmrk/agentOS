@@ -233,11 +233,14 @@ type Config struct {
 	Coalesce        time.Duration
 	CoalesceIdle    time.Duration
 	RequestsPerHour int
-	Urgent          func(owner.Item) bool
-	Quiet           func(time.Time) bool
-	Fresh           time.Duration
-	Now             func() time.Time
-	Logf            func(format string, args ...any)
+	// PacingStore optionally persists the shared request/question/digest counter.
+	// Nil keeps legacy volatile pacing. See PACING.md before deployment.
+	PacingStore PacingStore
+	Urgent      func(owner.Item) bool
+	Quiet       func(time.Time) bool
+	Fresh       time.Duration
+	Now         func() time.Time
+	Logf        func(format string, args ...any)
 }
 
 // Gate is the approval policy. It is the engine's journal.Policy, the
@@ -251,12 +254,14 @@ type Gate struct {
 	own    Owner
 	grants map[string]*Grant
 	// evidence is the owner's evidence destination, if set (CH-20).
-	evidence destination
-	waiting  map[string]*wait
-	batch    []string
-	first    time.Time // when the batch's first item arrived
-	last     time.Time // when its latest item arrived
-	sent     []time.Time
+	evidence    destination
+	waiting     map[string]*wait
+	batch       []string
+	first       time.Time // when the batch's first item arrived
+	last        time.Time // when its latest item arrived
+	pacingLast  time.Time
+	pacingFault bool
+	sent        []time.Time
 	// asked are owner-question texts reserved on the same budget
 	// (Reserve, W9).
 	asked []time.Time
@@ -375,10 +380,12 @@ func New(cfg Config) *Gate {
 	if cfg.RequestsPerHour <= 0 {
 		cfg.RequestsPerHour = DefaultRequestsPerHour
 	}
-	return &Gate{cfg: cfg, grants: map[string]*Grant{},
+	g := &Gate{cfg: cfg, grants: map[string]*Grant{},
 		waiting: map[string]*wait{}, decided: map[string]decision{}, confirmed: map[string]bool{}, failed: map[string]string{},
 		carried: map[string]bool{}, forms: checkForms(cfg), derived: map[string]bool{}, staging: map[string]chan struct{}{},
 		retry: map[string]string{}, after: map[string]afterRef{}, sending: map[string]pending{}, reported: map[string]bool{}}
+	g.openPacing()
+	return g
 }
 
 // checkForms keeps the forms reversible.Check accepts against each
@@ -1589,35 +1596,60 @@ func (g *Gate) textsLocked(now time.Time) int {
 // reservation counts at once, sent or not, so the check and the count are
 // one step. Time is the gate's own clock, as for request texts.
 func (g *Gate) Reserve(aged bool) bool {
-	now := g.cfg.Now()
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.textsLocked(now) >= g.cfg.RequestsPerHour {
+	now := g.cfg.Now()
+	if !g.pacingClockLocked(now) || g.textsLocked(now) >= g.cfg.RequestsPerHour {
 		return false
 	}
+	agedAt := g.agedAt
 	if len(g.batch) > 0 {
-		if !aged || !g.agedAt.IsZero() && now.Sub(g.agedAt) < time.Hour {
+		if !aged || !agedAt.IsZero() && now.Sub(agedAt) < time.Hour {
 			return false
 		}
-		g.agedAt = now
+		agedAt = now
 	}
-	g.asked = append(g.asked, now)
+	if !g.commitPacingLocked(now, 1, agedAt) {
+		return false
+	}
+	if g.cfg.PacingStore == nil {
+		g.agedAt = agedAt
+		g.asked = append(g.asked, now)
+	}
 	return true
 }
 
 // take counts n request texts about to be sent and returns how many may
-// go. Paced, it grants only what the budget has left; unpaced (an urgent
+// go. A configured durable store must commit before either kind may go.
+// Paced, it grants only what the budget has left; unpaced (an urgent
 // item, an owner active in chat) it grants all. Counted before sending,
 // so no question is reserved in between.
 func (g *Gate) take(paced bool, n int) int {
-	now := g.cfg.Now()
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if paced {
-		n = max(0, min(n, g.cfg.RequestsPerHour-g.textsLocked(now)))
+	if n <= 0 {
+		return 0
 	}
-	for range n {
-		g.sent = append(g.sent, now)
+	now := g.cfg.Now()
+	if !g.pacingClockLocked(now) {
+		return 0
+	}
+	used := g.textsLocked(now)
+	if paced {
+		n = max(0, min(n, g.cfg.RequestsPerHour-used))
+	}
+	if n == 0 || !g.commitPacingLocked(now, n, g.agedAt) {
+		return 0
+	}
+	// Persistence may have stalled across STOP. Keep the spent reservation,
+	// but hand off nothing and let flush requeue the waiting request.
+	if g.cfg.PacingStore != nil && g.eng != nil && g.eng.Stopped() {
+		return 0
+	}
+	if g.cfg.PacingStore == nil {
+		for range n {
+			g.sent = append(g.sent, now)
+		}
 	}
 	return n
 }
@@ -1696,7 +1728,12 @@ func (g *Gate) flush(paced bool) {
 	}
 	// Each re-issued intent is its own request text: counted, but never
 	// paced, so none lapses unseen behind a spent budget (security R3).
-	g.take(false, len(again))
+	// Optional durable-accounting failure holds them for trusted recovery;
+	// this availability tradeoff is explicit in PACING.md.
+	if len(again) > 0 && g.take(false, len(again)) == 0 {
+		g.requeue(again)
+		again = nil
+	}
 	if len(again) > 0 {
 		reqs := make([]string, len(again))
 		err := errors.New("no owner channel")
@@ -1729,8 +1766,9 @@ func (g *Gate) flush(paced bool) {
 			g.requeue([]owner.Item{it})
 			continue
 		}
-		if pageTTLs[i] != 0 {
-			g.take(false, 1)
+		if pageTTLs[i] != 0 && g.take(false, 1) == 0 {
+			g.requeue([]owner.Item{it})
+			continue
 		}
 		ask, askTTLs = append(ask, it), append(askTTLs, pageTTLs[i])
 	}
