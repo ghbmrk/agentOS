@@ -74,7 +74,7 @@ No security-fix row (SR2-*) is classed Later. P2-1 (host image, PR #41) has no b
 | W3-implicit | Potency C2 outcome label; refinement of attention optimizer |
 | W8 | Owner builds; no brief, no A-test names it |
 | W9a | Question follow-ups from the #95 lens gate; no A-test needs them |
-| OSS-10w-r | WF1 after a project root-key rotation: switching back compares against the image's shipped root keys and so fails closed once the project rotates them; a chain walk from the shipped root would admit it. No release has rotated root keys; a new image ships the new root |
+| OSS-10w-r | WF1 after a project root-key rotation: switching back compares against the image's shipped root keys and so fails closed once the project rotates them; a chain walk from the shipped root would admit it. Meanwhile the owner's only route back is a named follow (beside U13 limit (b)). No release has rotated root keys; a new image ships the new root |
 
 ## Stale board rows (merged per git log)
 Rows marked "(shallow)" show only code on origin/main plus the last commit touching it: this clone is shallow, so older merge commits are not visible. Verify those before editing the board.

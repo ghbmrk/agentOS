@@ -335,3 +335,99 @@ func signerOf(k ed25519.PrivateKey) signature.Signer {
 	}
 	return s
 }
+
+// with is an executor over st sharing the rig's clock and alerts: a daemon
+// restarted over the same store holds nothing the old one described.
+func (r *rig) with(st Store) *Executor {
+	r.t.Helper()
+	x, err := New(Config{Store: st, Shipped: r.shipped, Clock: r.clk,
+		Alert: func(_ context.Context, text string) error { r.alerts = append(r.alerts, text); return nil }})
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	return x
+}
+
+// L3 blocker 1 (GR26 "alerts again, at least once"): Reconcile runs after a
+// crash, when nothing is held; it reads the box's own trusted root.
+func TestOSS10wReconcileAfterARestart(t *testing.T) {
+	r := newRig(t)
+	in := grants.FollowIntent("n1", "Acme Fork", r.describe(r.fork))
+	if out := r.run(in); out.Result != journal.ResultSucceeded {
+		t.Fatalf("%+v", out)
+	}
+	fresh := r.with(r.store)
+	r.alerts = nil
+	if out := fresh.Reconcile(context.Background(), in, 2); out.Result != journal.ResultSucceeded {
+		t.Fatalf("reconcile %+v", out)
+	}
+	if len(r.alerts) != 1 || r.alerts[0] != maintain.FollowAlert("Acme Fork", r.clk.at) {
+		t.Fatalf("alerts %q", r.alerts)
+	}
+	digest, _, _ := grants.FollowOf(in.ID)
+	for _, other := range []journal.Intent{
+		grants.FollowIntent("n2", "Other Name", digest),
+		grants.FollowIntent("n3", "Acme Fork", r.describe(rootOf(t, newKey(t), newKey(t)))),
+		grants.FollowIntent("n4", "", r.describe(r.shipped)),
+	} {
+		r.alerts = nil
+		if out := fresh.Reconcile(context.Background(), other, 2); out.Result != journal.ResultUnknown || len(r.alerts) != 0 {
+			t.Fatalf("%s: %+v %q", other.ID, out, r.alerts)
+		}
+	}
+}
+
+// failingStore fails FollowRoot after (written) or instead of the real
+// switch, and can fail reading the trusted root.
+type failingStore struct {
+	*update.Store
+	written, unreadable bool
+}
+
+func (s failingStore) FollowRoot(root []byte, approved, name string, o update.Options) error {
+	if s.written {
+		if err := s.Store.FollowRoot(root, approved, name, o); err != nil {
+			return err
+		}
+	}
+	return errors.New("synthetic store failure")
+}
+
+func (s failingStore) TrustedRoot() ([]byte, error) {
+	if s.unreadable {
+		return nil, errors.New("synthetic read failure")
+	}
+	return s.Store.TrustedRoot()
+}
+
+// L3 blocker 2: a store failure with the root in place, or with the store
+// unreadable, is Unknown (Reconcile decides), never "not applied"; only a
+// failure that left the old root is NotApplied.
+func TestOSS10wStoreFailureIsUnknownUnlessTheOldRootStands(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		st   failingStore
+		want journal.Result
+	}{
+		{"root written", failingStore{written: true}, journal.ResultUnknown},
+		{"unreadable", failingStore{unreadable: true}, journal.ResultUnknown},
+		{"old root stands", failingStore{}, journal.ResultNotApplied},
+	} {
+		r := newRig(t)
+		c.st.Store = r.store
+		x := r.with(c.st)
+		sum, err := x.Describe(context.Background(), r.fork)
+		if err != nil {
+			t.Fatal(err)
+		}
+		in := grants.FollowIntent("n1", "Acme Fork", sum.Digest)
+		if out := x.Execute(context.Background(), in, 1); out.Result != c.want || len(r.alerts) != 0 {
+			t.Fatalf("%s: %+v %q", c.name, out, r.alerts)
+		}
+		if c.name == "root written" {
+			if out := r.x.Reconcile(context.Background(), in, 2); out.Result != journal.ResultSucceeded || len(r.alerts) != 1 {
+				t.Fatalf("reconcile %+v %q", out, r.alerts)
+			}
+		}
+	}
+}

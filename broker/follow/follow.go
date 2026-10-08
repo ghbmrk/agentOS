@@ -145,23 +145,17 @@ func (x *Executor) Describe(ctx context.Context, root []byte) (update.RootSummar
 	return sum, nil
 }
 
-// request reads what an intent asks for: the digest, the name, and the
-// held root. why is set when the intent is not a follow the page holds.
-func (x *Executor) request(in journal.Intent) (digest, name string, root []byte, why string) {
+// parse reads what an intent asks for: the digest and the name. why is set
+// when the intent is not a well-formed follow.
+func parse(in journal.Intent) (digest, name, why string) {
 	if in.Action != journal.ActionUpdateFollow {
-		return "", "", nil, "not a request to change where updates come from"
+		return "", "", "not a request to change where updates come from"
 	}
 	digest, name, ok := grants.FollowOf(in.ID)
 	if !ok {
-		return "", "", nil, "malformed request to change where updates come from"
+		return "", "", "malformed request to change where updates come from"
 	}
-	x.mu.Lock()
-	root = x.held[digest]
-	x.mu.Unlock()
-	if root == nil {
-		return "", "", nil, "the page no longer holds the root that was approved; show it again"
-	}
-	return digest, name, root, ""
+	return digest, name, ""
 }
 
 func (x *Executor) alert(ctx context.Context, name string, at time.Time) string {
@@ -176,9 +170,15 @@ func (x *Executor) alert(ctx context.Context, name string, at time.Time) string 
 
 // Execute switches to the held root the intent's digest names.
 func (x *Executor) Execute(ctx context.Context, in journal.Intent, _ int) journal.Outcome {
-	digest, name, root, why := x.request(in)
+	digest, name, why := parse(in)
 	if why != "" {
 		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: why}
+	}
+	x.mu.Lock()
+	root := x.held[digest]
+	x.mu.Unlock()
+	if root == nil {
+		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "the page no longer holds the root that was approved; show it again"}
 	}
 	if name == "" {
 		keys, err := rootKeys(root)
@@ -199,11 +199,12 @@ func (x *Executor) Execute(ctx context.Context, in journal.Intent, _ int) journa
 	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "now following root " + digest + x.alert(ctx, name, now)}
 }
 
-// Reconcile reports a switch done when the box trusts the held root under
-// the intent's name, and alerts again (at least once). Without the held
-// root it cannot tell.
+// Reconcile reports a switch done when the box trusts the root the intent
+// approved, under the intent's name, and alerts again (at least once). It
+// reads the box's own trusted root, not the held one: after a restart
+// nothing is held.
 func (x *Executor) Reconcile(ctx context.Context, in journal.Intent, _ int) journal.Outcome {
-	digest, name, root, why := x.request(in)
+	digest, name, why := parse(in)
 	if why != "" {
 		return journal.Outcome{Result: journal.ResultUnknown, Evidence: why}
 	}
@@ -211,8 +212,12 @@ func (x *Executor) Reconcile(ctx context.Context, in journal.Intent, _ int) jour
 	if err != nil {
 		return journal.Outcome{Result: journal.ResultUnknown, Evidence: err.Error()}
 	}
+	d, err := update.RootDigest(cur)
+	if err != nil {
+		return journal.Outcome{Result: journal.ResultUnknown, Evidence: err.Error()}
+	}
 	src, err := x.cfg.Store.Following()
-	if err != nil || !bytes.Equal(cur, root) || src.Name != name {
+	if err != nil || d != digest || src.Name != name {
 		return journal.Outcome{Result: journal.ResultUnknown, Evidence: "the box does not trust that root under that name"}
 	}
 	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "now following root " + digest + x.alert(ctx, name, x.latest(ctx))}
