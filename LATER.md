@@ -72,6 +72,7 @@ No security-fix row (SR2-*) is classed Later. P2-1 (host image, PR #41) has no b
 | PE3 | Potency follow-up on replay-interruption counting |
 | W3-off-a | STATUS wording goes dynamic; polish |
 | W3-implicit | Potency C2 outcome label; refinement of attention optimizer |
+| W3-forget-b2 dup ask | L3 on #321: a forget after a proposal reached the owner requeues the rebuild, which may ask again; rare, owner can decline |
 | W8 | Owner builds; no brief, no A-test names it |
 | W9a | Question follow-ups from the #95 lens gate; no A-test needs them |
 
