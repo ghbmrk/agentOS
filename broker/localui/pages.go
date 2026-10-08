@@ -208,6 +208,19 @@ form { margin: .6em 0 1.2em; }
 <p><a href="/home">More</a> · <a href="/approvals/">Approvals</a> · <a href="/status">Status</a></p>
 {{template "foot"}}{{end}}
 
+{{define "paused"}}{{template "head" ""}}
+<h1>Paused</h1>
+{{with .Msg}}<p class="ok">{{.}}</p>{{end}}{{with .Err}}<p class="err">{{.}}</p>{{end}}
+{{range .Grants}}<section class="card"><h2>{{.ID}}</h2>
+<p>Resuming lets this run again: {{.What}}</p><p class="muted">Paused by {{.By}}.</p>
+{{if .Odd}}<p class="err">Has an unusual character, shown as [U+…]. Don't resume it if you didn't expect it.</p>{{end}}
+<form method="post" action="/paused/"><input type="hidden" name="grant" value="{{.ID}}"><input type="hidden" name="pause" value="{{.Pause}}"><input type="hidden" name="tok" value="{{.Tok}}">
+<button>Ask to resume</button></form></section>
+{{else}}<p>Nothing is paused.</p>{{end}}
+<p class="muted">Asking puts the resume under Approvals; you approve it there with a code from your code generator. Each answer is texted to you.</p>
+<p><a href="/approvals/">Approvals</a> · <a href="/home">More</a> · <a href="/status">Status</a></p>
+{{template "foot"}}{{end}}
+
 {{define "notready"}}{{template "head" "30"}}
 <h1>AgentOS</h1>
 <p>This box isn't ready yet. This page reloads by itself. If it stays like this for more than a few minutes, turn the PC off and on again.</p>
