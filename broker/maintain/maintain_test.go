@@ -264,6 +264,44 @@ func TestAwaitingOwnerReproposedAfterRestart(t *testing.T) {
 	}
 }
 
+// The real pipeline is what Loop 3 asks.
+var _ Proposer = (*change.Pipeline)(nil)
+
+// REQ: UPD-5
+// A release the pipeline dropped because the owner's request closed
+// unanswered (change.Decided) is offered again at the next check, without
+// a restart (P2-2a f3, L3 on #363). One still waiting, or answered, is not.
+func TestDroppedAwaitingOwnerReofferedAtNextCheck(t *testing.T) {
+	r := newRig(t)
+	r.settings.Updates.Channel = update.ChannelFast
+	r.release(2, func(m *update.Manifest) { m.Channel = update.ChannelFast })
+	r.tick()
+	r.clk.add(24 * time.Hour)
+	r.refresh()
+	r.tick()
+	if n := len(r.p.proposed()); n != 1 {
+		t.Fatalf("still waiting, proposed %d times", n)
+	}
+	r.p.lapse("c1") // the request expired; the pipeline dropped c1
+	r.clk.add(24 * time.Hour)
+	r.refresh()
+	r.tick()
+	if n := len(r.p.proposed()); n != 2 {
+		t.Fatalf("dropped release proposed %d times", n)
+	}
+	if st := r.l.Status(); !strings.Contains(st.Line, "Update 2 has been waiting for your approval since "+r.clk.now().Format("Mon 2 Jan")) {
+		t.Fatalf("status after the new offer: %+v", st)
+	}
+	// The new offer is c2; a stale report for c1 changes nothing.
+	r.p.lapse("c1")
+	r.clk.add(24 * time.Hour)
+	r.refresh()
+	r.tick()
+	if n := len(r.p.proposed()); n != 2 {
+		t.Fatalf("a stale lapse re-offered: proposed %d times", n)
+	}
+}
+
 func TestOfflineInstallNotCurrentUntilCheckedOnline(t *testing.T) {
 	r := newRig(t)
 	r.release(2, nil)

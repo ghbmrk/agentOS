@@ -351,9 +351,13 @@ type Pipeline struct {
 	j   Journal
 	key []byte // split and probe key, fixed after New
 
-	mu     sync.Mutex
-	st     state
-	props  map[string]*proposal
+	mu    sync.Mutex
+	st    state
+	props map[string]*proposal
+	// lapsed holds release proposals dropped because the owner's request
+	// closed unanswered, until Loop 3 asks (Lapsed). Memory only, like
+	// props: a restart drops both, and Loop 3 re-asks after one anyway.
+	lapsed map[string]bool
 	broken error // set when state could neither be saved nor reloaded
 	// probes of running evaluations: use count and task intent.
 	probes    map[string]int
@@ -702,7 +706,9 @@ func (p *Pipeline) Settle(ctx context.Context, id string) (Report, error) {
 // was voided, or was dropped by a restart), and one denied for any other
 // reason (an approval gone stale before dispatch) is not the owner's no:
 // both drop the proposal and record nothing, so only the owner's NO reads
-// as a decline. Loop 1 proposes again.
+// as a decline. A release dropped this way is reported once by Lapsed, so
+// the next update check (UPD-5, maintain Loop 3) offers it again; a local
+// change is proposed again only if Loop 1 produces it again.
 func (p *Pipeline) Decided(ctx context.Context, in journal.Intent, declined bool) {
 	parts := parseID(in.ID)
 	if in.Action != ActionAdopt || parts == nil || in.ID != adoptID(parts[1]) || p.prop(parts[1]) == nil {
@@ -712,7 +718,7 @@ func (p *Pipeline) Decided(ctx context.Context, in journal.Intent, declined bool
 	switch {
 	case err != nil:
 	case st.State == journal.Pending, st.State == journal.Denied && !declined:
-		p.drop(parts[1])
+		p.lapse(parts[1])
 	case st.State == journal.Denied || st.State == journal.Succeeded || st.State == journal.NotApplied:
 		_, _ = p.Settle(ctx, parts[1])
 	}
@@ -800,6 +806,32 @@ func (p *Pipeline) prop(id string) *proposal {
 // Waiting reports whether proposal id still waits on the owner: it is
 // dropped once adopted, declined, refused or lapsed.
 func (p *Pipeline) Waiting(id string) bool { return p.prop(id) != nil }
+
+// Lapsed reports, once, whether release proposal id was dropped because
+// the owner's request closed without the owner's answer (Decided), so Loop
+// 3 offers the release again. It is false for one still waiting, adopted,
+// declined or refused, and after it has been reported.
+func (p *Pipeline) Lapsed(id string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	ok := p.lapsed[id]
+	delete(p.lapsed, id)
+	return ok
+}
+
+// lapse drops proposal id unanswered and, for a release, keeps that for
+// Lapsed.
+func (p *Pipeline) lapse(id string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if pr := p.props[id]; pr != nil && pr.cand.Source == Upstream {
+		if p.lapsed == nil {
+			p.lapsed = map[string]bool{}
+		}
+		p.lapsed[id] = true
+	}
+	delete(p.props, id)
+}
 
 func (p *Pipeline) drop(id string) {
 	p.mu.Lock()

@@ -154,3 +154,35 @@ func TestDecidedDropsUnansweredWithoutDecline(t *testing.T) {
 		t.Fatalf("%q", d)
 	}
 }
+
+// UPD-5 (P2-2a f3): a release dropped because its request closed without
+// the owner's answer is reported to Loop 3 once, so the next update check
+// offers it again; one the owner declined is not.
+func TestDecidedLapsedReleaseReportedOnce(t *testing.T) {
+	// REQ: UPD-5
+	e := newEnv(t, nil)
+	e.p.Attach(holdJournal{e.eng})
+	r := e.release(release(t, 30, true, map[string][]byte{"host-image/release": []byte("h")}))
+	if r.State != StateAwaitingOwner || e.p.Lapsed(r.ID) {
+		t.Fatalf("lapsed before the request closed: %+v", r)
+	}
+	st, _ := e.eng.Get(adoptID(r.ID))
+	e.p.Decided(bg, st.Intent, false) // the request expired unanswered
+	if !e.p.Lapsed(r.ID) {
+		t.Fatal("a lapsed release is not reported")
+	}
+	if e.p.Lapsed(r.ID) {
+		t.Fatal("a lapsed release is reported twice")
+	}
+
+	r = e.release(release(t, 31, true, map[string][]byte{"host-image/release": []byte("i")}))
+	e.eng.Authorize(bg, adoptID(r.ID)) // the owner says no
+	st, _ = e.eng.Get(adoptID(r.ID))
+	e.p.Decided(bg, st.Intent, true)
+	if e.p.Waiting(r.ID) || e.p.Lapsed(r.ID) {
+		t.Fatal("the owner's no reads as a lapse")
+	}
+	if e.p.Lapsed("c999") {
+		t.Fatal("an unknown proposal reads as lapsed")
+	}
+}
