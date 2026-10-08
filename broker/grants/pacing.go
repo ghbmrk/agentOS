@@ -11,7 +11,8 @@ import (
 // PacingStore is a broker-private, exclusive single-writer store. Save must
 // durably and atomically replace the state; any error has an uncertain outcome.
 // change.FileStore satisfies this interface. Use a separate file from other
-// components. Missing state is accepted only for trusted first provisioning.
+// components. Missing state is accepted only for trusted first provisioning;
+// PacingRequireExisting must be true for a provisioned installation.
 type PacingStore interface {
 	Load() ([]byte, error)
 	Save([]byte) error
@@ -50,6 +51,9 @@ func pacingTime(t time.Time) bool { return !t.IsZero() && t.Year() >= 1 && t.Yea
 // Called under mu for reservations. Read the clock inside the lock so concurrent
 // callers cannot compare an older sampled time with a later committed one.
 func (g *Gate) pacingClockLocked(now time.Time) bool {
+	if g.pacingFault {
+		return false
+	}
 	if g.cfg.PacingStore == nil {
 		return true
 	}
@@ -63,6 +67,7 @@ func (g *Gate) pacingClockLocked(now time.Time) bool {
 
 func (g *Gate) openPacing() {
 	if g.cfg.PacingStore == nil {
+		g.pacingFault = g.cfg.PacingRequireExisting
 		return
 	}
 	now := g.cfg.Now().Round(0).UTC()
@@ -71,7 +76,7 @@ func (g *Gate) openPacing() {
 		return
 	}
 	b, err := g.cfg.PacingStore.Load()
-	if err != nil || len(b) > maxPacingBytes {
+	if err != nil || len(b) > maxPacingBytes || g.cfg.PacingRequireExisting && b == nil {
 		g.pacingFault = true
 		return
 	}

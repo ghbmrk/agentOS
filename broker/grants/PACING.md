@@ -20,11 +20,26 @@ ordered timestamps and trusted time, prunes expired reservations, and confirms
 the image durably before admitting requests. The limit is 1–4096 for this
 optional mode (zero/negative take the Gate's existing default). A policy-limit
 change requires a separate reviewed migration; it cannot reset an allowance.
-Missing state is treated as **trusted first provisioning**. This component does
-not distinguish first provisioning from deletion, old backups or snapshots.
-Deployment must enforce existing state continuity externally; authenticated
-anti-rollback/anti-deletion storage and multi-writer locking are not supplied.
-It must never be described as qualified across arbitrary restore.
+Missing state is treated as **trusted first provisioning** only when the trusted
+configuration leaves `PacingRequireExisting` false. Set it **true** for every
+provisioned installation/restart. In required mode an absent Store or a Load
+returning nil state latches recovery before any initialization Save; no file is
+created and no request/question/digest reservation is granted. An existing
+canonical empty allowance is valid state, unlike an empty file. The storage
+schema and accounting algorithm are unchanged.
+
+Provisioning must happen under reviewed authority with exclusive store custody,
+then the installation's trusted persistent configuration must require existing
+state before runtime starts. This component does not persist that deployment
+setting, infer installation history or authorize switching back to provisioning.
+Nil Store plus the required flag is a configuration error represented by the
+same fixed recovery hold, so it cannot silently select volatile behavior.
+Default false preserves legacy opt-in callers, and is not a qualified restart
+configuration. Deletion is refused when required mode is retained, but a valid
+older file/backup may still pass. Authenticated anti-rollback/anti-deletion
+custody, trusted configuration integrity, multi-writer locking and restore
+freshness remain external qualification requirements; this flag alone is not
+such proof.
 
 Every Reserve and request take commits before returning permission. Requests,
 questions and digests consume the same allowance. A reservation is spent even
@@ -77,3 +92,10 @@ question reservations, aged priority, staggered urgent debt, exact expiry,
 concurrency, malformed state and clock rollback are covered. A blocked real
 save exercises prompt engine STOP and refusal of post-STOP reissue handoff.
 They are local evidence, not carrier/device qualification or CI acceptance.
+
+
+Required-mode tests first exposed missing/deleted-state resets and a nil-store
+fallback. Actual FileStore checks now prove refusal leaves missing/empty paths
+unchanged, provisioned spent debt survives strict reopen, and normal hour expiry
+still permits the intended allowance. These establish the explicit configuration
+behavior, not successful provisioning authorization or anti-restore acceptance.

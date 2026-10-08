@@ -236,11 +236,15 @@ type Config struct {
 	// PacingStore optionally persists the shared request/question/digest counter.
 	// Nil keeps legacy volatile pacing. See PACING.md before deployment.
 	PacingStore PacingStore
-	Urgent      func(owner.Item) bool
-	Quiet       func(time.Time) bool
-	Fresh       time.Duration
-	Now         func() time.Time
-	Logf        func(format string, args ...any)
+	// PacingRequireExisting distinguishes reviewed restart from provisioning.
+	// See PACING.md for external configuration/continuity requirements.
+	PacingRequireExisting bool
+
+	Urgent func(owner.Item) bool
+	Quiet  func(time.Time) bool
+	Fresh  time.Duration
+	Now    func() time.Time
+	Logf   func(format string, args ...any)
 }
 
 // Gate is the approval policy. It is the engine's journal.Policy, the
