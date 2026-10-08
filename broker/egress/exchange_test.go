@@ -26,11 +26,12 @@ import (
 // stores them only on commit. fail faults staging; badField gives that
 // field a placeholder carrying its credential.
 type fakeSwapper struct {
-	mu       sync.Mutex
-	got      map[string]string
-	commits  int
-	fail     error
-	badField string
+	mu         sync.Mutex
+	got        map[string]string
+	commits    int
+	fail       error
+	badField   string
+	commitFail error
 }
 
 func (s *fakeSwapper) Swap(adapter string, creds map[string]string) (map[string]string, func() error, error) {
@@ -48,6 +49,9 @@ func (s *fakeSwapper) Swap(adapter string, creds map[string]string) (map[string]
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		s.commits++
+		if s.commitFail != nil {
+			return s.commitFail
+		}
 		if s.got == nil {
 			s.got = map[string]string{}
 		}
@@ -281,6 +285,25 @@ func TestFailedSwapFailsClosed(t *testing.T) {
 	}
 	if got := r.fails.list(); len(got) != 1 || got[0] != "plan: "+ReasonUnswappable {
 		t.Fatalf("owner told %v", got)
+	}
+}
+
+// A commit the vault side cannot complete drops the response too: the CLI
+// never gets placeholders for credentials the vault does not hold.
+func TestFailedCommitFailsClosed(t *testing.T) {
+	r := newPlanRig(t)
+	r.swap.commitFail = errors.New("vault write failed")
+	canary := synthetic(t, "canary-")
+	r.answer(200, "application/json", `{"access_token":"`+canary+`","refresh_token":"`+canary+`r","expires_in":1,"token_type":"Bearer"}`)
+	w := r.do(t, "w1", refresh())
+	if w.Code != http.StatusBadGateway || w.Header().Get(DeniedHeader) != "1" || leaked(w, canary) || strings.Contains(w.Body.String(), "placeholder-") {
+		t.Fatalf("got %d %q", w.Code, w.Body)
+	}
+	if r.swap.commits != 1 || r.swap.calls() != 0 {
+		t.Fatalf("commits %d, stored %v", r.swap.commits, r.swap.got)
+	}
+	if ev := r.audit.last(t); ev.Allowed || ev.Reason != ReasonUnswappable {
+		t.Fatalf("journaled %+v", ev)
 	}
 }
 
