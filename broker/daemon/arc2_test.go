@@ -77,7 +77,7 @@ var controlPath = map[string][]string{
 	// It changes where updates come from (follow, OSS-10): the follow
 	// executor over the update store, already linked through change, and
 	// the page's root summary (localapi) the daemon serves.
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool", "workers", "quota", "modemlink", "guesterr", "localapi", "follow", "update"},
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies

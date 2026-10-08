@@ -24,6 +24,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/cgroup"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/guest"
+	"github.com/ghbmrk/agentos/broker/localsrv"
 	"github.com/ghbmrk/agentos/broker/loopbuild"
 	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/modelroute"
@@ -339,7 +340,7 @@ func main() {
 	var agentImage, agentLaunch string
 	var diskReserveMB, machineDiskMB, agentMemMB, replayMemMB, builderMemMB int64
 	var diskQuota, sleepHoursFlag string
-	var builderImage, builderLaunch, keptPath string
+	var builderImage, builderLaunch, keptPath, setupRecord string
 	var learn learnPaths
 	var cgroupVouched, modemBridge, ownerMessage bool
 	localUIUID := -1
@@ -371,6 +372,7 @@ func main() {
 	flag.Var(imgs, "image", "agent-machine image, name=dir (repeatable)")
 	flag.StringVar(&meterPath, "meter", "/var/lib/agentos/meter.json", "model-spend meter state (OP-8)")
 	flag.StringVar(&cfg.OwnerState, "owner-state", "/var/lib/agentos/owner.json", "owner channel state (P1-5)")
+	flag.StringVar(&setupRecord, "setup-record", "/var/lib/agentos/setup.json", "setup's record (P2-2w c2): with -owner unset, the local UI's setup is served on localui.sock until it records the owner's number here, then never again")
 	flag.StringVar(&agentMachine, "agent-machine", "agent", "machine whose guest receives the owner's task chat")
 	flag.StringVar(&agentImage, "agent-image", "openclaw", "image the agent machine is created from on first start; empty keeps no agent machine")
 	flag.StringVar(&agentLaunch, "agent-launch", "/usr/lib/agentos/guest/launch.json", "how the agent machine starts: argv and env (guest/openclaw/launch.json)")
@@ -443,6 +445,26 @@ func main() {
 			log.Fatalf("-localui-uid %d: group %q: %v", localUIUID, u.Gid, err)
 		}
 		cfg.PageSocket = &daemon.PageSocket{UID: localUIUID, GID: &gid}
+	}
+	// A box with no -owner is set up by the local UI (P2-2w c2): only
+	// setup's ops are served until its finish is recorded, and the owner's
+	// number then comes from the record, on this start and every later one.
+	if cfg.OwnerNumber == "" {
+		m := setupMode{Dir: cfg.SocketDir, Page: cfg.PageSocket, Record: localsrv.FileRecord{Path: setupRecord},
+			OwnerState: cfg.OwnerState, Progress: setupProgress}
+		if verifySocket != "" {
+			m.Enroll = enroller{modelroute.NewVerifier(verifySocket)}
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		owner, err := m.run(ctx)
+		stop()
+		if errors.Is(err, context.Canceled) {
+			return
+		}
+		if err != nil {
+			log.Fatal(err)
+		}
+		cfg.OwnerNumber = owner
 	}
 
 	// RES-3: nothing below depends on what is found here. No local
