@@ -30,3 +30,4 @@ Weekly runs over all of `main` until 2026-10-07, when the batched lens screen re
 | 2 | f797b7d | [2026-10-05](2026-10-05-potency-review.md) (spec edits committed after Mark's yes) |
 | 3 | be5a80c | [2026-10-08 lens bundle a](2026-10-08-lens-bundle-a.md): #300, #319, #323, #327 |
 | 4 | be5a80c | [2026-10-08 lens bundle b](2026-10-08-lens-bundle-b.md): #320, #321, #322, #324, #329 (run 3 is bundle a, #339) |
+| 5 | 7b753eb | [2026-10-08 deep potency review](2026-10-08-potency-review.md): Mark-requested system-wide review; ten proposals and synthetic boundary probes; advisory, no spec/runtime changes |
