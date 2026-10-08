@@ -146,3 +146,22 @@ change.FileStore remains unchanged and still loads the complete file. See
 `digestqueue/pacingfile/CONTRACT.md`: final-file checks do not qualify parent
 paths, `.tmp` custody, hard links or exclusive writers; synchronous I/O and
 anti-restore/config integrity remain unresolved deployment requirements.
+
+An optional `PacingStoreHealth` backend now reports observed retirement/failure
+through a bounded, nonblocking, I/O-free concurrent `PacingHealth` callback. It
+must not call back into Gate or acquire its admission mutex. Gate latches any
+backend error into fixed ErrPacingRecovery, including before constructor I/O,
+before admission/commit and after store completion. Callback repair cannot
+clear that live Gate fault. Backends without the interface retain prior behavior.
+This is an opt-in lifecycle signal, not filesystem health/freshness attestation.
+
+pacingfile.ExclusiveStore implements that callback with atomic lifecycle state.
+Close publishes unavailable before waiting for its I/O mutex, and observed
+custody/I/O errors use the same signal. Consequently the shared policy/explicit
+host binding can refuse stale activation and show fixed recovery without another
+Save. A concurrent successful Save observed to retire remains spent and cannot
+return permission. Already returned/racing permissions still need all-user
+STOP/quiescence; no health observation atomically orders Close against every
+possible handoff. The callback contract and deployment composition need strongest
+independent security review. Synchronous I/O and Close can still hang, and the
+urgent/reissue accounting-fault availability hold is unchanged.

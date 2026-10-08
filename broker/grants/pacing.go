@@ -18,6 +18,12 @@ type PacingStore interface {
 	Save([]byte) error
 }
 
+// PacingStoreHealth is an optional trusted backend lifecycle signal. The
+// callback must be bounded, nonblocking, I/O-free and safe for concurrent reads.
+// It must not call back into Gate or acquire its admission mutex. It reports
+// observed retirement/failure, not permission revocation or store freshness.
+type PacingStoreHealth interface{ PacingHealth() error }
+
 // ErrPacingRecovery deliberately discloses no storage path or underlying error.
 var ErrPacingRecovery = errors.New("grants: pacing recovery required")
 
@@ -41,6 +47,12 @@ type pacingState struct {
 // A failed object cannot be repaired in place: quiesce it and construct a new
 // gate against the same durable store after trusted recovery.
 func (g *Gate) PacingHealth() error {
+	if g.pacingFault.Load() {
+		return ErrPacingRecovery
+	}
+	if s, ok := g.cfg.PacingStore.(PacingStoreHealth); ok && s.PacingHealth() != nil {
+		g.pacingFault.Store(true)
+	}
 	deadline := g.pacingDeadline.Load()
 	if deadline != nil && !time.Now().Before(*deadline) && g.pacingDeadline.CompareAndSwap(deadline, nil) {
 		g.pacingFault.Store(true)
@@ -56,7 +68,7 @@ func pacingTime(t time.Time) bool { return !t.IsZero() && t.Year() >= 1 && t.Yea
 // Called under mu for reservations. Read the clock inside the lock so concurrent
 // callers cannot compare an older sampled time with a later committed one.
 func (g *Gate) pacingClockLocked(now time.Time) bool {
-	if g.pacingFault.Load() {
+	if g.PacingHealth() != nil {
 		return false
 	}
 	if g.cfg.PacingStore == nil {
@@ -71,6 +83,9 @@ func (g *Gate) pacingClockLocked(now time.Time) bool {
 }
 
 func (g *Gate) openPacing() {
+	if g.PacingHealth() != nil {
+		return
+	}
 	if g.cfg.PacingMaxStoreLatency < 0 || g.cfg.PacingMaxStoreLatency > 5*time.Minute || g.cfg.PacingMaxStoreLatency > 0 && g.cfg.PacingStore == nil {
 		g.pacingFault.Store(true)
 		return
@@ -127,7 +142,7 @@ func (g *Gate) commitPacingLocked(now time.Time, n int, aged time.Time) bool {
 	if g.cfg.PacingStore == nil {
 		return true
 	}
-	if g.pacingFault.Load() {
+	if g.PacingHealth() != nil {
 		return false
 	}
 	texts := append([]time.Time(nil), g.sent...)
@@ -173,7 +188,7 @@ func (g *Gate) pacingStoreCall(call func() error) error {
 	if err != nil || deadline != nil && !time.Now().Before(*deadline) {
 		g.pacingFault.Store(true)
 	}
-	if g.pacingFault.Load() {
+	if g.PacingHealth() != nil {
 		return ErrPacingRecovery
 	}
 	return nil

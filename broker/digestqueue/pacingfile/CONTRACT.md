@@ -105,3 +105,26 @@ closed-store refusal and strict spent-debt reopen pass locally. The subprocess
 probe is skipped in the ordinary suite and invoked explicitly by its parent
 test. These are component checks, not independent security or deployment
 qualification. No daemon/default binding or activation is included.
+
+## Retirement observation before lease release
+
+ExclusiveStore.PacingHealth now exposes only immutable handle presence and an
+atomic unavailable flag, with no I/O or I/O mutex acquisition. Close publishes
+retirement **before** waiting for that mutex; any operation already running stays
+serialized until it returns and the lease is actually released. Existing observed
+custody/I/O failures publish the same flag. There is no live clear. Gate's optional
+PacingStoreHealth integration now latches this signal before startup/admission,
+after store completion, and in shared policy/host health reads. This closes the
+D44 cached-health gap for this registered backend; other backends may still lack
+a lifecycle signal. It does not inspect current path metadata during health.
+
+Observed retirement prevents new Gate permission and host activation in the
+covered checks. Retirement racing after a final observation, already-returned
+permissions and other consumers still need reviewed STOP/all-user quiescence.
+Close does not become authority revocation or a proof of drain. Synchronous
+operations/Close still cannot be interrupted; the I/O-mutex test explicitly
+models another operation holding the mutex, not qualified filesystem latency.
+A generic blocked-Save test and actual leased-store/host STOP test supplement it.
+Protected ancestor/same-UID/lock-inode continuity, one Gate/all cooperating writers,
+restore/config integrity and startup control before Gate construction remain
+external deployment/security qualifications. No daemon/default activation.

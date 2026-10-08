@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 )
 
@@ -12,11 +13,12 @@ import (
 // one instance for multiple Gates. Quiesce its sole Gate before Close; releasing
 // a filesystem lease does not revoke already returned permissions.
 type ExclusiveStore struct {
-	mu             sync.Mutex
-	store          Store
-	dir, lock      *os.File
-	dirID, lockID  syscall.Stat_t
-	closed, failed bool
+	mu            sync.Mutex
+	store         Store
+	dir, lock     *os.File
+	dirID, lockID syscall.Stat_t
+	closed        bool
+	unavailable   atomic.Bool
 }
 
 // OpenExclusive neither provisions nor loads the ledger. The dedicated parent
@@ -75,31 +77,31 @@ func privateAt(dir int, name string, optional bool) (*syscall.Stat_t, error) {
 // same UID's private paths. They detect displaced custody and fail closed, not
 // qualify adversarial path safety or an authenticated restore history.
 func (s *ExclusiveStore) verifyLocked() error {
-	if s.closed || s.failed || s.dir == nil || s.lock == nil {
+	if s.closed || s.unavailable.Load() || s.dir == nil || s.lock == nil {
 		return ErrStorage
 	}
 	fd, err := syscall.Open(filepath.Dir(s.store.Path), syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 	if err != nil {
-		s.failed = true
+		s.unavailable.Store(true)
 		return ErrStorage
 	}
 	var st syscall.Stat_t
 	e := syscall.Fstat(fd, &st)
 	syscall.Close(fd)
 	if e != nil || !privateDir(&st) || !sameID(&st, &s.dirID) {
-		s.failed = true
+		s.unavailable.Store(true)
 		return ErrStorage
 	}
 	root := int(s.dir.Fd())
 	name := filepath.Base(s.store.Path)
 	lock, err := privateAt(root, name+".lock", false)
 	if err != nil || !sameID(lock, &s.lockID) {
-		s.failed = true
+		s.unavailable.Store(true)
 		return ErrStorage
 	}
 	for _, n := range []string{name, name + ".tmp"} {
 		if _, err = privateAt(root, n, true); err != nil {
-			s.failed = true
+			s.unavailable.Store(true)
 			return ErrStorage
 		}
 	}
@@ -116,7 +118,7 @@ func (s *ExclusiveStore) Load() ([]byte, error) {
 	}
 	b, err := s.store.Load()
 	if err != nil {
-		s.failed = true
+		s.unavailable.Store(true)
 		return nil, ErrStorage
 	}
 	if s.verifyLocked() != nil {
@@ -134,7 +136,7 @@ func (s *ExclusiveStore) Save(b []byte) error {
 		return ErrStorage
 	}
 	if s.store.Save(b) != nil {
-		s.failed = true
+		s.unavailable.Store(true)
 		return ErrStorage
 	}
 	return s.verifyLocked()
@@ -147,6 +149,7 @@ func (s *ExclusiveStore) Close() error {
 	if s == nil {
 		return nil
 	}
+	s.unavailable.Store(true) // Publish retirement before waiting for synchronous I/O.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -166,6 +169,15 @@ func (s *ExclusiveStore) Close() error {
 		failed = true
 	}
 	if failed {
+		return ErrStorage
+	}
+	return nil
+}
+
+// PacingHealth reads only immutable handles and atomic lifecycle state, never
+// the I/O mutex or filesystem. It is an observation, not path/restore validation.
+func (s *ExclusiveStore) PacingHealth() error {
+	if s == nil || s.dir == nil || s.lock == nil || s.unavailable.Load() {
 		return ErrStorage
 	}
 	return nil
