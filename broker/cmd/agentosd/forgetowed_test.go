@@ -417,3 +417,59 @@ func TestAGarbageOwedFileFailsSafe(t *testing.T) {
 		t.Fatalf("texts %q", r.texts)
 	}
 }
+
+// UX-182-3 with W3-forget-b2c's owed take-backs: a FORGET whose item 1 and
+// item 2 were both still retrying at shutdown is told each done text once
+// after the restart, item 1's at attach and item 2's when recall opens.
+func TestBothOwedForgetTextsComeAfterARestart(t *testing.T) {
+	w := &fakeWork{worked: true, ok: true, err: errors.New("disk full")}
+	r, in2 := owedRig(t, w)
+	in1 := r.gate.got[0]
+	store := &change.MemStore{}
+	owed, err := openForgetOwed(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.f.owed = owed
+	ended := make(chan struct{}, 2)
+	r.f.sleep = func(context.Context, time.Duration) bool { return false } // shutdown
+	r.f.retried = func() { ended <- struct{}{} }
+	r.fail = 1 // item 1's save fails, then its retry is cut off
+	r.f.Execute(context.Background(), in1, 1)
+	out := r.f.Execute(context.Background(), in2, 1)
+	<-ended
+	<-ended
+	r.mu.Lock()
+	for _, s := range r.texts {
+		if strings.Contains(s, "orgotten") || s == forgetAgentDone {
+			t.Errorf("told before done: %q", s)
+		}
+	}
+	r.mu.Unlock()
+	w.mu.Lock()
+	w.err = nil
+	w.mu.Unlock()
+	// The restart: the replay finished item 1, the owner channel attaches,
+	// then recall opens.
+	r.texts = nil
+	r.f.forgotten = func(g string) bool { return g == "owner:a" }
+	r.f.owedAtStart = r.f.owed.goals()
+	r.f.finishOwed(context.Background())
+	if len(r.texts) != 1 || !strings.HasPrefix(r.texts[0], "Your task from ") ||
+		!strings.HasSuffix(r.texts[0], " is forgotten now. Older backups and your agent's own files may still hold it.") {
+		t.Fatalf("item 1 told %q", r.texts)
+	}
+	r.nextBoot(in2, out) // recall opens: item 2 is taken back
+	// Each once: a later attach and open of recall tell nothing more.
+	r.f.owedAtStart = r.f.owed.goals()
+	r.f.finishOwed(context.Background())
+	r.f.resumeAgent(context.Background())
+	if len(w.backs) != 1 {
+		t.Fatalf("took back %v", w.backs)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.texts) != 1 || r.texts[0] != forgetAgentDone {
+		t.Fatalf("item 2 told %q", r.texts)
+	}
+}
