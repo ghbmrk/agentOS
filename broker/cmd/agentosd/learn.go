@@ -442,9 +442,28 @@ type restoredForget struct {
 	Agent bool      `json:"agent"`
 }
 
+// restoreHold refuses agentosd's start while dir holds the marker of a
+// restore the forget log's check held: its error carries the owner's
+// notice (recovery.PendingNotice, the marker's second line) and the
+// reason. A marker that does not read holds the start too.
+func restoreHold(dir string) error {
+	b, err := os.ReadFile(filepath.Join(dir, forgetLogFile+".pending"))
+	if os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("agentosd: restore on hold: %v", err)
+	}
+	reason, notice, _ := strings.Cut(strings.TrimSpace(string(b)), "\n")
+	if notice == "" {
+		notice = "Restore on hold."
+	}
+	return fmt.Errorf("agentosd: not starting: %s (%s)", strings.TrimSpace(notice), strings.TrimSpace(reason))
+}
+
 // readRestoredForgets reads the restored forget log in dir, if any. A
-// restore the log's check held, or a copy that does not read, opens
-// nothing: the tree is never ready (CAP-3 across a restore).
+// restore the log's check held, or a copy that does not read, keeps the
+// learning plane closed (CAP-3 across a restore); restoreHold keeps
+// agentosd from starting at all on the held one.
 func readRestoredForgets(dir string) ([]restoredForget, error) {
 	path := filepath.Join(dir, forgetLogFile)
 	if b, err := os.ReadFile(path + ".pending"); err == nil {

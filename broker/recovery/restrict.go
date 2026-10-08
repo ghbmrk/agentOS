@@ -41,8 +41,9 @@ type State struct {
 	// budgets fresh instead of treating them as spent.
 	FreshBudgets bool `json:"fresh_budgets,omitempty"`
 	// Pending says why the restore's forget log was not checked (Pending*
-	// in forgetlog.go): the box does not start until the owner confirms
-	// it (W3-forget-b1-4). Re-confirming grants does not clear it.
+	// in forgetlog.go), recorded beside the state dir's marker, which
+	// keeps agentosd from starting until the owner confirms it
+	// (W3-forget-b1-4). Re-confirming grants does not clear it.
 	Pending string `json:"pending,omitempty"`
 }
 

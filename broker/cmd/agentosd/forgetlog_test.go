@@ -1,6 +1,6 @@
 package main
 
-// REQ: CAP-3, REC-2
+// REQ: CAP-3, REC-2, A8
 
 import (
 	"context"
@@ -14,6 +14,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/recovery"
 )
 
 // fakeForgetLog records the forget log's appends; err fails them.
@@ -188,9 +189,28 @@ func TestRestoredForgetLogIsReplayed(t *testing.T) {
 	}
 }
 
-// A restore the forget log's check held (broker/recovery's marker), or a
-// state-dir copy that does not read, never opens the learning plane: the
-// tree is never ready.
+// S1/U2 on #409: a restore the forget log's check held (broker/recovery's
+// marker) stops agentosd at start, before recall or any agent machine
+// opens, with the owner's notice and not the learning-off texts.
+func TestPendingRestoreHoldsTheStart(t *testing.T) {
+	dir := t.TempDir()
+	if err := restoreHold(dir); err != nil {
+		t.Fatalf("no marker: %v", err)
+	}
+	reason := recovery.PendingUnanchored
+	body := reason + "\n" + recovery.PendingNotice(reason) + "\n"
+	if err := os.WriteFile(filepath.Join(dir, forgetLogFile+recovery.PendingSuffix), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := restoreHold(dir)
+	if err == nil || !strings.Contains(err.Error(), recovery.PendingNotice(reason)) || !strings.Contains(err.Error(), reason) ||
+		strings.Contains(err.Error(), learningOffText) || strings.Contains(err.Error(), forgetOffText) {
+		t.Fatalf("%v", err)
+	}
+}
+
+// A held restore, or a state-dir copy that does not read, never opens the
+// learning plane either.
 func TestPendingRestoreHoldsLearning(t *testing.T) {
 	for _, c := range []struct {
 		name, file, body string

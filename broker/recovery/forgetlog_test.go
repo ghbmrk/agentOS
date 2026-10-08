@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// REQ: CAP-3, REC-1, REC-2
+// REQ: CAP-3, REC-1, REC-2, A8
 // Acceptance: A8 (a restore onto a new drive with the recovery key does
 // not bring back what the owner had the agent forget).
 
@@ -164,6 +164,27 @@ func TestRestoreReplaysTheForgetLogOnTheSamePC(t *testing.T) {
 	}
 }
 
+// U1 on #409: a box that never forgot anything restores clean on its own
+// PC, because its log is anchored when it is made; the empty log is then
+// held to the counter like any other, so a later forget rolls it back.
+func TestRestoreOfANeverForgotBoxOnItsOwnPC(t *testing.T) {
+	pc := newPCCounter("host-a")
+	x := newBoxOn(t, pc)
+	bk := x.backup()
+	rep, dst := restoreWith(t, bk, x.rk, Options{Counter: pc})
+	if rep.Pending != "" {
+		t.Fatalf("pending %q", rep.Pending)
+	}
+	if gs := restoredGoals(t, x.rk, dst); len(gs) != 0 {
+		t.Fatalf("restored goals: %v", gs)
+	}
+	// Another PC still cannot check it.
+	pendingRestore(t, bk, x.rk, Options{Counter: newPCCounter("host-b")}, PendingUnanchored)
+	// After a forget, the empty log in the old backup is behind the counter.
+	forget(t, x, pc, "goal-1", t0)
+	pendingRestore(t, bk, x.rk, Options{Counter: pc}, PendingRolledBack)
+}
+
 func pendingRestore(t *testing.T, bk []byte, rk RecoveryKey, opt Options, want string) string {
 	t.Helper()
 	rep, dst := restoreWith(t, bk, rk, opt)
@@ -174,8 +195,9 @@ func pendingRestore(t *testing.T, bk []byte, rk RecoveryKey, opt Options, want s
 	if st := LoadState(nb.V); st.Pending != want || !st.Restricted {
 		t.Fatalf("state: %+v", st)
 	}
-	if _, err := os.Stat(filepath.Join(dst, lay.ForgetLog+PendingSuffix)); err != nil {
-		t.Fatalf("no pending marker: %v", err)
+	// The marker gives agentosd the reason and the owner's notice.
+	if b, err := os.ReadFile(filepath.Join(dst, lay.ForgetLog+PendingSuffix)); err != nil || string(b) != want+"\n"+PendingNotice(want)+"\n" {
+		t.Fatalf("pending marker: %q %v", b, err)
 	}
 	if _, err := os.Stat(filepath.Join(dst, lay.ForgetLog)); !os.IsNotExist(err) {
 		t.Fatalf("an unchecked log was handed on: %v", err)

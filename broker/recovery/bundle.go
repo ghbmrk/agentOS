@@ -303,8 +303,9 @@ type Report struct {
 	// Source is "backup" or "drive".
 	Source string
 	// Pending says why the forget log could not be checked (Pending*):
-	// the restored box must not start until the owner confirms it
-	// (PendingNotice). Empty when the log was checked and carried on.
+	// the state dir's marker then keeps agentosd from starting until the
+	// owner confirms it (PendingNotice). Empty when the log was checked
+	// and carried on.
 	Pending string
 }
 

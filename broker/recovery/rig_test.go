@@ -88,6 +88,12 @@ var lay = Layout{Vault: "egress/vault", Keys: "egress/vault.keys", Owner: "broke
 
 func newBox(t *testing.T) *box {
 	t.Helper()
+	return newBoxOn(t, nil)
+}
+
+// newBoxOn is newBox provisioned on a PC whose counter store is pc.
+func newBoxOn(t *testing.T, pc vault.Counter) *box {
+	t.Helper()
 	x := &box{t: t, dir: t.TempDir()}
 	eg := filepath.Join(x.dir, "egress")
 	must(t, os.Mkdir(eg, 0o700))
@@ -96,7 +102,7 @@ func newBox(t *testing.T) *box {
 	x.card = *c
 	x.rk, err = ParseRecoveryKey(c.RecoveryKey)
 	must(t, err)
-	x.b = &Box{VaultPath: filepath.Join(eg, "vault"), KeysPath: filepath.Join(eg, "vault.keys")}
+	x.b = &Box{VaultPath: filepath.Join(eg, "vault"), KeysPath: filepath.Join(eg, "vault.keys"), Counter: pc}
 	// The passphrase slot costs a full Argon2id run, so the rig's vault
 	// starts from the recovery slot; tests that need the passphrase slot
 	// add it (withPassphrase).

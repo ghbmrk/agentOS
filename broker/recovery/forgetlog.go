@@ -38,8 +38,9 @@ const (
 	forgetKeyFmt = "agentos-forget-key-v1"
 )
 
-// Why a restore is pending: the restored box does not start until the
-// owner confirms it (W3-forget-b1-4).
+// Why a restore is pending: agentosd refuses to start on the restored
+// state dir while its marker is there, until the owner confirms the
+// restore (W3-forget-b1-4).
 const (
 	// PendingUnanchored: no counter for the log on this PC, so an older
 	// copy cannot be told from the newest.
@@ -55,7 +56,8 @@ const (
 )
 
 // PendingSuffix names the marker a pending restore leaves beside
-// Layout.ForgetLog; agentosd does not open a state dir that has one.
+// Layout.ForgetLog: the reason, then the owner's notice (PendingNotice),
+// one per line. agentosd refuses to start while it is there.
 const PendingSuffix = ".pending"
 
 // ErrNoForgetLog is an append to a vault that has no log yet: one made
@@ -231,8 +233,10 @@ func saveForgetLog(v *vault.Vault, l forgetLog) error {
 // ensureForgetLog stores the log key derived from rk and makes the log if
 // there is none; after a rotation it re-keys the log. The vault's own
 // copy is authenticated by the vault, so it is re-signed as it stands.
-// The counter's authorization is random and kept across rotations.
-func ensureForgetLog(v *vault.Vault, rk RecoveryKey) error {
+// The counter's authorization is random and kept across rotations. With
+// c, this PC's counter, a log not anchored here is anchored at once, so a
+// box that never forgets still restores on its own PC.
+func ensureForgetLog(v *vault.Vault, rk RecoveryKey, c vault.Counter) error {
 	kv, ok, err := loadForgetKey(v)
 	if err != nil {
 		return err
@@ -264,7 +268,13 @@ func ensureForgetLog(v *vault.Vault, rk RecoveryKey) error {
 	if err := v.Put(ForgetKeyName, KindForgetKey, enc); err != nil {
 		return err
 	}
-	return saveForgetLog(v, l)
+	if err := saveForgetLog(v, l); err != nil {
+		return err
+	}
+	if c != nil && l.Host != c.Host() {
+		_, err = anchorForgetLog(v, &l, kv, c)
+	}
+	return err
 }
 
 // AppendForget adds a forget to the log and returns the copy to write to
@@ -469,7 +479,7 @@ func settleForgetLog(v *vault.Vault, rk RecoveryKey, tmp string, lay Layout, opt
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return "", err
 		}
-		return pending, writeAtomic(path+PendingSuffix, []byte(pending+"\n"))
+		return pending, writeAtomic(path+PendingSuffix, []byte(pending+"\n"+PendingNotice(pending)+"\n"))
 	}
 	if err := os.Remove(path + PendingSuffix); err != nil && !os.IsNotExist(err) {
 		return "", err
@@ -488,7 +498,7 @@ func PendingNotice(reason string) string {
 	case PendingUnanchored:
 		return "Restore on hold: this PC cannot check the list of things you had your agent forget. Restoring on your original PC still works."
 	case PendingRolledBack:
-		return "Restore on hold: the list of things you had your agent forget is older than this PC's record. Connect the drive of your newest backup and restore again."
+		return "Restore on hold: the forget list in this backup is older than this PC's record. Restore again with every backup destination connected, or wait for an update."
 	case PendingMissing:
 		return "Restore on hold: this backup has no list of things you had your agent forget. Nothing can be done until an update."
 	}
