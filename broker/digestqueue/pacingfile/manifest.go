@@ -74,11 +74,18 @@ func validManifest(m ProvisionedManifest) bool {
 // their qualification and common approval/question/host identity remain external.
 // Missing/mismatched ledger yields held recovery, never initialization or refund.
 func (m *ManifestSettings) Start(slot *StartupSlot, cfg grants.Config) (*Startup, error) {
-	if m == nil || !m.valid || slot == nil || cfg.Now == nil || cfg.RequestsPerHour != 0 || cfg.PacingStore != nil || cfg.PacingRequireExisting || cfg.PacingMaxStoreLatency != 0 {
+	if m == nil || !m.valid || slot == nil || !manifestConfigValid(cfg) {
 		return nil, ErrManifest
 	}
+	return slot.Start(m.manifest.Ledger, m.bindConfig(cfg))
+}
+
+func manifestConfigValid(cfg grants.Config) bool {
+	return cfg.Now != nil && cfg.RequestsPerHour == 0 && cfg.PacingStore == nil && !cfg.PacingRequireExisting && cfg.PacingMaxStoreLatency == 0
+}
+func (m *ManifestSettings) bindConfig(cfg grants.Config) grants.Config {
 	cfg.RequestsPerHour = m.manifest.RequestsPerHour
 	cfg.PacingRequireExisting = true
 	cfg.PacingMaxStoreLatency = time.Duration(m.manifest.MaxStoreLatencyMillis) * time.Millisecond
-	return slot.Start(m.manifest.Ledger, cfg)
+	return cfg
 }

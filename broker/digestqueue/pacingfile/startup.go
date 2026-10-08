@@ -78,6 +78,12 @@ func constructSession(path string, cfg grants.Config, retired *atomic.Bool) (s *
 }
 func (p *Startup) open(path string, cfg grants.Config) {
 	s, err := constructSession(path, cfg, &p.retirement)
+	p.complete(s, err)
+}
+
+// complete preserves one publication/late-retirement cleanup boundary for both
+// direct and manifest-owned construction. It performs no constructor work.
+func (p *Startup) complete(s *Session, err error) {
 	p.mu.Lock()
 	if p.retired {
 		if s != nil {

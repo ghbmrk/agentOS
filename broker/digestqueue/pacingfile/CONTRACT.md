@@ -407,3 +407,27 @@ forever with occupancy retained. On failure independent trusted custody/persiste
 recovery is required; resource availability must not silently bypass the hold.
 W5-D55-Q and all prior Q/security/base qualifications remain external. A state
 line is not permission, actual media/latency freshness or accounting qualification.
+
+`StartupSlot.StartManifest(reader, expectedPin, cfg)` admits one owned attempt
+before reading configuration. It reuses the bounded canonical D49 image and
+separately trusted nonzero pin/clock, rejects competing pacing options, then
+constructs one strict Gate/lease inside that SAME worker. No second StartSession
+worker is launched. Both startup modes use the original shared completion/late
+cleanup path, preserving known cleanup faults. Reader failure/panic exposes no
+consumer and uses fixed recovery state, with slot occupancy until complete Drain.
+
+State/Use never wait for reader I/O. Cancellation retires publication and keeps
+worker/reader/slot custody. Retirement observed before/after the read skips lease
+acquisition and Gate construction; later racing retirement uses the existing
+backend checks and late cleanup, never publishing consumers. This is observation,
+not interruption or atomic cancellation of every syscall. The caller must retain
+reader ownership through complete Drain (retired status alone is insufficient);
+reader/clock callbacks must not synchronously await their own Drain. Synchronous
+reading/construction/cleanup may hang indefinitely with one worker retained.
+
+Direct reads/StartSession/another slot escape the cooperating bound. Pin/source/
+clock/authentication/persistence/config/provisioning, complete consumer handoffs
+and actual daemon/operator resource routing remain external release qualifications.
+No HTTP client, pin discovery, reader-closing policy, fresh allowance, provisioning,
+default activation, deadline, replacement worker or custody/media qualification.
+D37 availability and existing Q/current-main/#268 holds remain unchanged.
