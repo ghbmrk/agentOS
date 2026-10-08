@@ -213,6 +213,14 @@ type Config struct {
 	// text. ok false: no such task, and the forget is denied. Nil: every
 	// forget is denied.
 	ForgetItem func(goal string) (object, detail string, ok bool)
+	// ForgetAgentItem gives the line for item 2 of a forget request
+	// (W3-forget-b2b), by item 2's ID: the agent's work since the task,
+	// taken back; its detail is from the intent's "actions" param
+	// (ForgetAgentActions), fixed when asked, not this one. By ID, not
+	// goal, so the line stands after item 1 forgot the task. ok false:
+	// nothing to take back, and item 2 is denied. Nil: every item 2 is
+	// denied.
+	ForgetAgentItem func(id string) (object, detail string, ok bool)
 	// Unpaused is told the ID of a grant whose pause the owner ended by
 	// resuming or revoking it, so Loop 2 stops listing it as paused (loops
 	// S4, W5a). Called outside the gate's lock, never on replay; it must
@@ -905,16 +913,27 @@ func (g *Gate) evaluateBroker(ctx context.Context, phase journal.Phase, in journ
 		// submits it, on the owner's FORGET; the line is the box's own,
 		// from the goal, and the owner's YES with the request's code is
 		// what runs it (security C1).
-		goal := ForgetGoal(in.ID)
+		// Item 2 of the same request, the agent's work since the task
+		// taken back (W3-forget-b2b), is asked the same way with its own
+		// line from ForgetAgentItem.
+		goal, key, lookup, agent := ForgetGoal(in.ID), ForgetGoal(in.ID), g.cfg.ForgetItem, false
+		if goal == "" {
+			goal, key, lookup, agent = ForgetAgentGoal(in.ID), in.ID, g.cfg.ForgetAgentItem, true
+		}
 		if in.Origin != OriginForget || in.Executor != ForgetExecutor || goal == "" {
 			return verdict{kind: deny, why: "a forget comes only from the owner's FORGET"}
 		}
-		if g.cfg.ForgetItem == nil {
+		if lookup == nil {
 			return verdict{kind: deny, why: "forgetting is not available"}
 		}
-		obj, detail, ok := g.cfg.ForgetItem(goal)
+		obj, detail, ok := lookup(key)
 		if !ok || obj == "" {
 			return verdict{kind: deny, why: "no such task"}
+		}
+		if agent {
+			// The work so far, fixed when asked, so a re-issue asks what
+			// was asked (OP-3; #327 L3 B-1).
+			detail = ForgetAgentActions(in.Params)
 		}
 		return verdict{kind: ask, item: owner.Item{Ref: in.ID, Object: obj, Detail: detail,
 			Facts: owner.Facts{Kind: owner.Ordinary, Verb: "forget", NoRecipient: true}}}
@@ -1378,6 +1397,15 @@ func (g *Gate) Withdraw(id string) error {
 	}
 	g.closeIntent(id, "superseded")
 	return nil
+}
+
+// List returns every intent the journal holds, in submission order.
+func (g *Gate) List() []journal.Status {
+	out := g.eng.List()
+	for i := range out {
+		g.annotate(&out[i])
+	}
+	return out
 }
 
 func (g *Gate) Get(id string) (journal.Status, error) {
