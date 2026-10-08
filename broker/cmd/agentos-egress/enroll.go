@@ -26,22 +26,34 @@ const (
 	// KindEnrolled is EnrolledName's kind; its value is random, so the
 	// redactor (CRED-7) matches nothing a person would write.
 	KindEnrolled = "totp_enrolled"
+	// SetupOpenName opens enrollment. Only `init -setup` writes it (the
+	// image's setup path); the confirmation that writes EnrolledName
+	// deletes it. A vault without it is closed, so boxes made by plain
+	// init, by REC-3's re-enroll or before c1 cannot have their seed
+	// swapped by agentosd.
+	SetupOpenName = "owner-totp-setup-open"
+	// KindSetupOpen is SetupOpenName's kind; its value is random.
+	KindSetupOpen = "totp_setup_open"
 )
+
+const noteEnrolled = "A new code generator was enrolled at setup; codes from any earlier one no longer work."
 
 var (
 	errEnrolled     = uerr(http.StatusGone, "the code generator is already enrolled; a new one needs the recovery key")
 	errNoEnrollment = uerr(http.StatusConflict, "no code generator is waiting for confirmation")
 )
 
-// enrolledLocked reports whether enrollment is sealed, failing closed on an
-// entry of the wrong kind. Caller holds mu with the vault open.
+// enrolledLocked reports whether enrollment is closed: sealed, never opened
+// by setup mode, or holding an entry of the wrong kind. Caller holds mu
+// with the vault open.
 func (c *custody) enrolledLocked() bool {
 	for _, e := range c.v.List() {
 		if e.Name == EnrolledName {
 			return true
 		}
 	}
-	return hasOtherKind(c.v, PendingSeedName, vault.KindTOTPSeed)
+	return !hasKind(c.v, SetupOpenName, KindSetupOpen) ||
+		hasOtherKind(c.v, PendingSeedName, vault.KindTOTPSeed)
 }
 
 // enroll makes a fresh seed in the vault, replacing any pending one, and
@@ -117,9 +129,10 @@ func (c *custody) confirmEnroll(code string) (bool, error) {
 	if err := c.v.Put(EnrolledName, KindEnrolled, mark); err != nil {
 		return false, c.putErr(err)
 	}
-	if err := c.v.Delete(PendingSeedName); err != nil {
+	if c.v.Delete(SetupOpenName) != nil || c.v.Delete(PendingSeedName) != nil {
 		return false, errInternal
 	}
+	c.notify(noteEnrolled)
 	return true, nil
 }
 

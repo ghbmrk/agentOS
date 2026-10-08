@@ -18,6 +18,23 @@ import (
 
 // REQ: CRED-8, ONB-3, ONB-6, CH-6
 
+// newSetupRig is a box whose vault was made in setup mode (`init -setup`):
+// the setup-open entry is in the vault, so enrollment is open until one
+// confirmation seals it.
+func newSetupRig(t *testing.T) *fastRig {
+	t.Helper()
+	r := newFastRig(t, true)
+	v, err := vault.Open(r.path, r.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+	if err := v.Put(SetupOpenName, KindSetupOpen, []byte(synthetic(t, "open-"))); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
 // enrolledSeed reads the seed back out of an otpauth:// link, as the
 // owner's phone does when it scans it.
 func enrolledSeed(t *testing.T, uri string) []byte {
@@ -42,7 +59,7 @@ func enrolledSeed(t *testing.T, uri string) []byte {
 // new seed, so no seed is ever handed out twice, and the one shown before
 // no longer confirms. The confirmed seed is untouched until confirmation.
 func TestEnrollMakesTheSeedInTheVaultAndHandsItOutOnce(t *testing.T) {
-	r := newFastRig(t, true)
+	r := newSetupRig(t)
 	if _, err := r.c.enroll(); err != errLocked {
 		t.Fatalf("locked vault: %v", err)
 	}
@@ -81,7 +98,7 @@ func TestEnrollMakesTheSeedInTheVaultAndHandsItOutOnce(t *testing.T) {
 // enrollment is sealed for good, across a restart: no later call makes or
 // hands out a seed (re-enrollment is REC-3's, with the recovery key).
 func TestOneCodeConfirmsTheEnrollmentAndSealsIt(t *testing.T) {
-	r := newFastRig(t, true)
+	r := newSetupRig(t)
 	if _, err := r.c.confirmEnroll("000000"); err != errLocked {
 		t.Fatalf("locked vault: %v", err)
 	}
@@ -104,6 +121,12 @@ func TestOneCodeConfirmsTheEnrollmentAndSealsIt(t *testing.T) {
 	}
 	if _, ok := r.c.v.Secret(PendingSeedName); ok {
 		t.Fatal("pending seed kept after confirmation")
+	}
+	if _, ok := r.c.v.Secret(SetupOpenName); ok {
+		t.Fatal("setup-open entry kept after confirmation")
+	}
+	if n := r.notes[len(r.notes)-1]; n != noteEnrolled {
+		t.Fatalf("owner not told of the new code generator: %q", n)
 	}
 	// The confirming code is spent; the next one from the new seed works
 	// for the channel, and the old seed's does not.
@@ -136,10 +159,11 @@ func TestOneCodeConfirmsTheEnrollmentAndSealsIt(t *testing.T) {
 	}
 }
 
-// A taken-over agentosd cannot grind the pending seed: wrong confirmations
-// count in the same bucket as the channel's counted codes.
+// Wrong confirmations count in the same bucket as the channel's counted
+// codes, so a confirm route cannot be used to grind codes past the cap.
 func TestWrongConfirmationsAreBounded(t *testing.T) {
-	r := openRig(t)
+	r := newSetupRig(t)
+	r.c.confirm(r.unlock(t), r.code())
 	uri, err := r.c.enroll()
 	if err != nil {
 		t.Fatal(err)
@@ -164,7 +188,7 @@ func TestWrongConfirmationsAreBounded(t *testing.T) {
 // confirmation; agentosd's client reads the link once and the
 // confirmation's answer carries no seed.
 func TestEnrollOverTheVerifySocket(t *testing.T) {
-	r := newFastRig(t, true)
+	r := newSetupRig(t)
 	run := filepath.Join(t.TempDir(), "run")
 	srvs, err := serve(run, r.c, testRouter(t), nil, nil, os.Getuid(), os.Getuid())
 	if err != nil {
@@ -206,6 +230,56 @@ func TestEnrollOverTheVerifySocket(t *testing.T) {
 		verifyHandler(r.c).ServeHTTP(w, httptest.NewRequest("GET", p, nil))
 		if w.Code != http.StatusMethodNotAllowed {
 			t.Fatalf("GET %s: %d", p, w.Code)
+		}
+	}
+}
+
+// Enrollment is closed unless the vault was made in setup mode: a vault
+// from plain `init`, from REC-3's re-enroll or from before c1 has no
+// setup-open entry, so a taken-over agentosd cannot swap the owner's seed
+// for one it holds (CRED-8, CH-6).
+func TestEnrollIsClosedOutsideSetupMode(t *testing.T) {
+	r := openRig(t)
+	if _, err := r.c.enroll(); err != errEnrolled {
+		t.Fatalf("enroll without setup mode: %v", err)
+	}
+	if _, err := r.c.confirmEnroll(r.code()); err != errEnrolled {
+		t.Fatalf("confirm without setup mode: %v", err)
+	}
+	if _, ok := r.c.v.Secret(PendingSeedName); ok {
+		t.Fatal("a pending seed was written")
+	}
+	r.clk.add(30 * time.Second)
+	if _, ok, err := r.c.verify(r.code(), 0, true); !ok || err != nil {
+		t.Fatalf("the owner's seed changed: %v %v", ok, err)
+	}
+
+	// init writes the setup-open entry only with -setup, and then leaves
+	// the seed hand-out to setup.
+	for _, setup := range []bool{false, true} {
+		dir := t.TempDir()
+		vp, kp := filepath.Join(dir, "vault"), filepath.Join(dir, "vault.keys")
+		args := []string{"-vault", vp, "-keys", kp}
+		if setup {
+			args = append(args, "-setup")
+		}
+		var out strings.Builder
+		if err := initCmd(args, &out); err != nil {
+			t.Fatal(err)
+		}
+		_, rest, _ := strings.Cut(out.String(), "Vault passphrase: ")
+		pass, _, _ := strings.Cut(rest, "\n")
+		v, err := vault.OpenSealed(vp, kp, vault.Passphrase(pass))
+		if err != nil {
+			t.Fatal(err)
+		}
+		open := hasKind(v, SetupOpenName, KindSetupOpen)
+		v.Close()
+		if open != setup {
+			t.Fatalf("init -setup=%v: setup-open entry %v", setup, open)
+		}
+		if printed := strings.Contains(out.String(), "otpauth://"); printed == setup {
+			t.Fatalf("init -setup=%v: seed printed %v", setup, printed)
 		}
 	}
 }
