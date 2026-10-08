@@ -211,3 +211,41 @@ cancelled-wait custody, late no-write/no-publication cleanup and strict debt reo
 They model blocked construction, not a qualified blocked filesystem or deployment
 latency. Synthetic descriptor corruption proves known cleanup-error retention.
 No duplicate live owner service or default daemon assembly is supplied.
+
+## Explicit startup admission slot (W5-D48 review candidate)
+
+D47 owns one worker per handle but does not limit repeated StartSession calls.
+A consistently reused `StartupSlot` now admits one owned startup across paths.
+Its zero value is usable; do not copy it. Start refuses occupied admission before
+another constructor, even for a different ledger or an already completed, failed
+or retired handle. Invalid configuration on an empty slot leaves it empty.
+Constructor completion and handle Close alone never automatically free the slot.
+
+`Drain(ctx)` retires the owned handle through D47 Close and releases admission
+only after successful constructor completion, registered-user drain and cleanup.
+An incomplete cancelled wait or known cleanup fault leaves occupancy held; explicit
+retry does not erase the fault. Concurrent drains join one owned close attempt,
+without a new drain worker; a joiner's cancellation changes only its wait. A joined
+caller receives the initiating attempt's result, which can include that caller's
+context cancellation, and may explicitly retry later. State locks never surround
+constructor/user wait or cleanup I/O. Completion is tied to the captured handle,
+so an old result cannot clear a subsequent owner. A successful drain permits a
+new explicit Start; it does not activate, auto-retry or reactivate the old Gate.
+
+Use returned handles for State and scoped consumers. While managed, do not call
+handle Close concurrently outside Drain: that bypasses the slot's single-close
+composition. Retain the same slot and handle through cancellation/fault/shutdown.
+Never await Drain inside an owned Use callback, which is itself a drain participant.
+Creating another slot, calling StartSession directly or escaping scope/permissions
+bypasses the cooperating resource bound. Actual daemon owner identity/routing and
+startup admission remain W5-D47-Q; this is an opt-in primitive, not a global quota
+or enforced authority boundary. No default wiring or activation is supplied.
+
+Local tests cover different-path refusal before another clock/constructor, 32
+concurrent starts admitting one actual constructor, cancelled blocked startup and
+retained real lease, actual question Book send plus concurrent drain wait and
+strict spent-debt reopen, known descriptor cleanup faults, invalid configuration
+and stale retired handles. These synthetic scopes do not qualify malicious writers,
+path/restore/config continuity, downstream escaped work, deployment I/O latency
+or shutdown deadlines. Synchronous work can still hang forever, holding occupancy.
+The urgent/reissue storage/time/overdue/invalid-input availability hold is unchanged.
