@@ -51,14 +51,16 @@ const (
 	// W3-forget-b2b: the notice before a request whose item 2 takes the
 	// agent's work back, the reply when item 2 is approved without item
 	// 1, and the done text for item 2.
-	forgetAgentNotice = "Your agent has worked since that task, so item 2 takes that work back. " +
+	forgetAgentNotice = "Your agent has worked since that task, so item 2 takes it back to before the task; actions it took stay done. " +
 		"Approve only item 1 to keep that work; your agent then still holds the task until that work is undone."
-	forgetAgentAlone    = "Nothing taken back: item 2 goes only with item 1. Send FORGET to ask again."
-	forgetAgentDone     = recalltool.TakenBack
-	forgetAgentNotYet   = "Your agent's work since that task is not undone yet. I keep trying and will text you when it's done."
-	forgetAgentNoAgent  = "Nothing taken back: your agent is not running. Send FORGET to ask again."
-	forgetAgentNotTaken = "Nothing taken back: I couldn't save the request. Send FORGET to ask again."
-	forgetAgentNotOpen  = "Nothing taken back: memory is not open yet. Send FORGET to ask again once it is."
+	forgetAgentAlone  = "Nothing taken back: item 2 goes only with item 1. Send FORGET to ask again."
+	forgetAgentDone   = recalltool.TakenBack
+	forgetAgentNotYet = "Your agent is not back to before that task yet. I keep trying and will text you when it is."
+	// Item 1 has forgotten the task, so these never offer FORGET again
+	// (CH-12); carrying them as owed take-backs is a release row.
+	forgetAgentNoAgent  = "Nothing taken back: your agent is not running, so it holds nothing new. Nothing is needed."
+	forgetAgentNotTaken = "Not taken back: I couldn't save the request. Your agent's own files may still hold that task."
+	forgetAgentNotOpen  = "Not taken back: memory was not open yet. Your agent's own files may still hold that task."
 	// forgetSiblingWait bounds how long item 2 waits for item 1's outcome;
 	// the gate settles the items of one answer together.
 	forgetSiblingWait = 30 * time.Second
@@ -70,6 +72,7 @@ const (
 type forgetAgent struct {
 	work interface {
 		Work(lineage string, since time.Time) (worked, ok bool)
+		Actions(lineage string, since time.Time) int
 		TakeBack(ctx context.Context, lineage string, since time.Time, approved bool) error
 	}
 	lineage func() (string, error)
@@ -316,7 +319,33 @@ func (f *ownerForget) AgentItem(goal string) (object, detail string, ok bool) {
 	if !ok {
 		return "", "", false
 	}
-	return "your agent's work since " + f.when(t.At), "", true
+	return "your agent's work since " + f.when(t.At), actionsStayDone(f.agentActions(t.At)), true
+}
+
+// agentActions counts the agent's actions since at, which item 2 leaves
+// done; 0 when not known.
+func (f *ownerForget) agentActions(at time.Time) int {
+	a := f.agent.Load()
+	if a == nil {
+		return 0
+	}
+	l, err := a.lineage()
+	if err != nil {
+		return 0
+	}
+	return a.work.Actions(l, at)
+}
+
+// actionsStayDone is item 2's detail: the work so far, which stays done
+// (CAP-3; DECISIONS 2026-10-05), in a recall rollback's words.
+func actionsStayDone(n int) string {
+	switch n {
+	case 0:
+		return "no actions yet"
+	case 1:
+		return "1 action so far stays done"
+	}
+	return fmt.Sprintf("%d actions so far stay done", n)
 }
 
 // shown is a task as a text may show it: a task the owner texted by its

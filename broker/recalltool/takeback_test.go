@@ -195,3 +195,17 @@ func TestCAP3ATakeBackIsNotRepeatedWhenItsMarksCannotBeWritten(t *testing.T) {
 		t.Fatalf("again: %v machines %v", err, x.vm.calls)
 	}
 }
+
+// #327 UX lens B1: Actions is the work so far that item 2 names, the
+// count a recall rollback's line uses.
+func TestCAP3ActionsCountsTheWorkSoFar(t *testing.T) {
+	x, read := newReachRig(t)
+	if n := x.reach.Actions("root", read); n != 0 {
+		t.Fatalf("no actions since: %d", n)
+	}
+	x.j.submitted["late"] = read.Add(time.Second)
+	x.j.submitted["later"] = read.Add(2 * time.Second)
+	if n := x.reach.Actions("root", read); n != 2 {
+		t.Fatalf("actions since: %d", n)
+	}
+}

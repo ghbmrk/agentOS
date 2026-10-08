@@ -26,6 +26,13 @@ type fakeWork struct {
 	lineage []string
 	backs   []time.Time
 	asked   []bool // approved, per take-back
+	actions int
+}
+
+func (w *fakeWork) Actions(lineage string, since time.Time) int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.actions
 }
 
 func (w *fakeWork) Work(lineage string, since time.Time) (bool, bool) {
@@ -294,7 +301,7 @@ func TestForgetItem2EndToEnd(t *testing.T) {
 		}
 		x.d.Gate().Flush()
 		req := x.text()
-		m := regexp.MustCompile(`^([A-Z][0-9]{1,2}): 2 items\. 1 forget 'pay the gas bill', cannot be undone\. 2 forget your agent's work since today [0-9]{2}:[0-9]{2}, cannot be undone\. Expires [0-9]{2}:[0-9]{2}\. Reply YES ([A-Z][0-9]{1,2}) ([0-9]{6,8}) for all`).FindStringSubmatch(req)
+		m := regexp.MustCompile(`^([A-Z][0-9]{1,2}): 2 items\. 1 forget 'pay the gas bill', cannot be undone\. 2 forget your agent's work since today [0-9]{2}:[0-9]{2}, no actions yet, cannot be undone\. Expires [0-9]{2}:[0-9]{2}\. Reply YES ([A-Z][0-9]{1,2}) ([0-9]{6,8}) for all`).FindStringSubmatch(req)
 		if m == nil || m[1] != m[2] {
 			t.Fatalf("request: %q", req)
 		}
@@ -322,5 +329,34 @@ func TestForgetItem2EndToEnd(t *testing.T) {
 	}
 	if _, ok := x.lp.tasks.get("owner:a"); ok || len(w.backs) != 1 {
 		t.Fatalf("after YES: took back %v", w.backs)
+	}
+}
+
+// #327 UX lens B1 (CAP-3, DECISIONS 2026-10-05): item 2 names the work so
+// far, and that actions taken stay done; no text claims they are undone.
+func TestForgetItem2NamesTheActionsThatStayDone(t *testing.T) {
+	at := time.Date(2026, 10, 5, 13, 2, 0, 0, time.UTC)
+	for n, want := range map[int]string{0: "no actions yet", 1: "1 action so far stays done", 3: "3 actions so far stay done"} {
+		r := newForgetRig(t)
+		r.withAgent(&fakeWork{worked: true, ok: true, actions: n})
+		r.task("owner:a", "pay the gas bill", at, viaSMS)
+		if _, d, ok := r.f.AgentItem("owner:a"); !ok || d != want {
+			t.Fatalf("%d actions: detail %q", n, d)
+		}
+	}
+	for _, s := range []string{strings.Replace(forgetAgentNotice, "until that work is undone", "", 1), forgetAgentDone, forgetAgentNotYet} {
+		if strings.Contains(s, "undone") || !strings.Contains(s, "stay done") && s != forgetAgentNotYet {
+			t.Fatalf("claims the work is undone, or not that actions stay done: %q", s)
+		}
+	}
+}
+
+// #327 UX lens B2 (CH-12): item 1 has forgotten the task, so a text about
+// item 2 never offers FORGET again, a step that cannot fix it.
+func TestForgetItem2NeverOffersAFruitlessForget(t *testing.T) {
+	for _, s := range []string{forgetAgentNoAgent, forgetAgentNotTaken, forgetAgentNotOpen} {
+		if strings.Contains(s, "FORGET") {
+			t.Fatalf("offers FORGET again: %q", s)
+		}
 	}
 }

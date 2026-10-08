@@ -246,9 +246,15 @@ func (r *Reach) Work(lineage string, since time.Time) (worked, ok bool) {
 	return err != nil || plan.Changes > 0 || r.actions(lineage, since, time.Time{}) > 0, true
 }
 
+// Actions counts the actions lineage took since since, which a take-back
+// leaves done: the count a rollback's line names (#327 UX lens B1).
+func (r *Reach) Actions(lineage string, since time.Time) int {
+	return r.actions(lineage, since, time.Time{})
+}
+
 // TakenBack tells the owner an approved take-back, carried by Retry, is
-// done.
-const TakenBack = "Your agent's work since that task is undone; it no longer holds the task."
+// done; actions taken stay done (CAP-3).
+const TakenBack = "Your agent is back to before that task and no longer holds it. Actions it took stay done."
 
 // ErrCarried wraps the failure of an approved take-back that is recorded
 // owed: Retry carries it through and tells the owner TakenBack. Any other
