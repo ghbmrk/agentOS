@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from unittest import mock
 
@@ -295,6 +296,26 @@ class OfflineRunTest(unittest.TestCase):
         self.assertEqual(res["outcome"], "violation", res)
         self.assertIn("/tmp", res["masked"])
 
+    # REQ: HK-1a
+    def test_a_process_that_escaped_strace_and_its_group_is_killed_with_the_run(self):
+        # strace letting go of a tracee that had called setsid(): killing the process group
+        # misses it, and it would write into the work directory while it is being removed.
+        with tempfile.TemporaryDirectory(dir="/tmp") as d:
+            os.chmod(d, 0o755)
+            script = pathlib.Path(d, "strace")
+            script.write_text(textwrap.dedent("""\
+                #!%s
+                import subprocess, sys
+                subprocess.Popen(["sh", "-c", 'sleep 1; touch "$0/late"', %r], start_new_session=True,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                """) % (sys.executable, d))
+            script.chmod(0o755)
+            res = depaudit.run_target({"name": "escape", "cmd": ["true"], "keep": [d],
+                                       "env": {"PATH": d + os.pathsep + os.environ["PATH"]}},
+                                      depaudit.load_manifest(MANIFEST))
+            time.sleep(2)
+            self.assertFalse(os.path.exists(os.path.join(d, "late")), res)
+
     def test_shipped_registry_passes(self):
         self.assertEqual(depaudit.main(["run", "--targets", str(ROOT / "assurance" / "dep-targets.json")]), 0)
 
@@ -312,9 +333,9 @@ class StraceFaultTest(unittest.TestCase):
     """A strace of its own accord failing (PTRACE_LISTEN EIO in the recovery-offline
     scenario) is the harness's fault, not the scenario's: rerun it, never relax it."""
 
-    def fake_strace(self, d, faults, later_cmd=None):
+    def fake_strace(self, d, faults, later_cmd=None, rc=1, msg="strace: PTRACE_LISTEN: Input/output error"):
         """A strace that runs the real one and then fails like one hit by EIO, `faults`
-        times; later_cmd (if given) replaces the traced command after the fault."""
+        times, exiting rc; later_cmd (if given) replaces the traced command after the fault."""
         script = pathlib.Path(d, "strace")
         script.write_text(textwrap.dedent("""\
             #!%(py)s
@@ -329,17 +350,17 @@ class StraceFaultTest(unittest.TestCase):
             if n > 0 and %(later)r:
                 argv = argv[:i + 1] + %(later)r
             os.spawnv(os.P_WAIT, real, [real] + argv)
-            sys.stderr.write("strace: PTRACE_LISTEN: Input/output error\\n")
-            sys.exit(1)
+            sys.stderr.write(%(msg)r + "\\n")
+            sys.exit(%(rc)d)
             """) % {"py": sys.executable, "d": d, "real": shutil.which("strace"), "faults": faults,
-                    "later": later_cmd})
+                    "later": later_cmd, "rc": rc, "msg": msg})
         script.chmod(0o755)
         return d
 
-    def run_with(self, mode, faults, later_cmd=None):
+    def run_with(self, mode, faults, later_cmd=None, **fault):
         with tempfile.TemporaryDirectory(dir="/tmp") as d:
             os.chmod(d, 0o755)
-            self.fake_strace(d, faults, later_cmd)
+            self.fake_strace(d, faults, later_cmd, **fault)
             res = depaudit.run_target({"name": mode, "cmd": CONTROLS + [mode], "profile": "offline", "keep": [d],
                                        "env": {"PATH": d + os.pathsep + os.environ["PATH"]}},
                                       depaudit.load_manifest(MANIFEST))
@@ -355,6 +376,13 @@ class StraceFaultTest(unittest.TestCase):
         self.assertEqual(res["outcome"], "error", res)
         self.assertEqual(runs, depaudit.STRACE_ATTEMPTS)
 
+    def test_strace_fault_is_a_fault_even_when_strace_exits_zero(self):
+        # strace's exit status is the main tracee's: a fault on a child it then let go of
+        # can end 0 with a partial trace (message format as strace's ptrace_restart prints it).
+        res, runs = self.run_with("clean", faults=99, rc=0,
+                                  msg="strace: ptrace(PTRACE_LISTEN,pid:42,sig:0): Input/output error")
+        self.assertEqual((res["outcome"], runs), ("error", depaudit.STRACE_ATTEMPTS), res)
+
     # REQ: HK-1c
     def test_a_leak_seen_before_a_strace_fault_is_not_forgotten(self):
         res, runs = self.run_with("phones-home", faults=1, later_cmd=["true"])
@@ -362,9 +390,38 @@ class StraceFaultTest(unittest.TestCase):
         self.assertEqual(res["outcome"], "violation", res)
         self.assertLessEqual({"dns", "forbidden", "ipv4", "host-socket"}, {v["kind"] for v in res["violations"]}, res)
 
+    def test_a_leak_from_a_last_faulting_attempt_is_counted_once(self):
+        res, runs = self.run_with("phones-home", faults=99)
+        self.assertEqual(res["outcome"], "error", res)
+        keys = [(v["kind"], v["target"]) for v in res["violations"]]
+        self.assertIn("forbidden", {k for k, _ in keys}, res)
+        self.assertEqual(len(keys), len(set(keys)) * depaudit.STRACE_ATTEMPTS, res)
+
     def test_a_scenario_that_fails_on_its_own_is_not_rerun(self):
         res, runs = self.run_with("needs-network", faults=0)
         self.assertEqual((res["outcome"], runs), ("scenario-failed", 1), res)
+
+
+class CarryTest(unittest.TestCase):
+    """run_target's merge of attempts, without a sandbox."""
+    LEAK = {"kind": "forbidden", "target": "x.agentos.example", "count": 1, "first": "connect"}
+
+    def run_attempts(self, *attempts):
+        with mock.patch.object(depaudit, "_attempt", side_effect=list(attempts)) as m:
+            res = depaudit.run_target({"name": "t", "cmd": ["true"]}, depaudit.load_manifest(MANIFEST))
+        return res, m.call_count
+
+    # REQ: HK-1c
+    def test_a_leak_before_a_fault_survives_a_later_sandbox_error(self):
+        res, n = self.run_attempts(({"name": "t", "outcome": "error", "violations": [self.LEAK]}, True),
+                                   ({"name": "t", "outcome": "error", "violations": [], "detail": "sandbox exit 1"},
+                                    False))
+        self.assertEqual((res["outcome"], res["violations"], n), ("error", [self.LEAK], 2), res)
+
+    def test_a_leak_before_a_fault_turns_a_clean_rerun_into_a_violation(self):
+        res, n = self.run_attempts(({"name": "t", "outcome": "error", "violations": [self.LEAK]}, True),
+                                   ({"name": "t", "outcome": "pass", "violations": []}, False))
+        self.assertEqual((res["outcome"], res["violations"], n), ("violation", [self.LEAK], 2), res)
 
 
 class RepoTest(unittest.TestCase):
