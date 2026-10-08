@@ -99,6 +99,11 @@ func newRig(t *testing.T, capacityMB int64) *rig { return newRigLayer(t, capacit
 
 // newRigLayer caps each worker's files at layerBytes (zero: no cap).
 func newRigLayer(t *testing.T, capacityMB, layerBytes int64) *rig {
+	return newRigOn(t, capacityMB, layerBytes, &runtime{running: map[string]vm.Launch{}})
+}
+
+// newRigOn runs the rig's machines on rt.
+func newRigOn(t *testing.T, capacityMB, layerBytes int64, rt vm.Runtime) *rig {
 	r := &rig{t: t}
 	adm, err := admission.New(admission.Config{CapacityMB: capacityMB}, late{&r.m})
 	if err != nil {
@@ -108,7 +113,7 @@ func newRigLayer(t *testing.T, capacityMB, layerBytes int64) *rig {
 	img := t.TempDir()
 	r.m, err = vm.Open(context.Background(), vm.Config{
 		StateDir: filepath.Join(t.TempDir(), "state"), Images: map[string]string{"base": img},
-		Runtime: &runtime{running: map[string]vm.Launch{}}, Admit: adm, NoCgroups: true, NoQuota: true,
+		Runtime: rt, Admit: adm, NoCgroups: true, NoQuota: true,
 		FreeBytes:        func(string) (int64, error) { return 1 << 50, nil },
 		WorkerLayerBytes: layerBytes,
 	})
