@@ -10,8 +10,9 @@ import (
 )
 
 var (
-	ErrSessionOpening  = errors.New("accounting session still opening")
-	ErrSessionRecovery = errors.New("accounting session startup needs recovery")
+	ErrSessionOpening     = errors.New("accounting session still opening")
+	ErrSessionRecovery    = errors.New("accounting session startup needs recovery")
+	errConstructorCleanup = errors.New("accounting constructor cleanup unavailable")
 )
 
 type StartupState string
@@ -75,6 +76,7 @@ func constructSession(path string, cfg grants.Config, retired *atomic.Bool) (*Se
 	return constructSessionWithOwners(path, cfg, retired, nil)
 }
 func constructSessionWithOwners(path string, cfg grants.Config, retired *atomic.Bool, owners []uint32) (s *Session, err error) {
+	cleanupFault := false
 	// OpenSession unwinds its actual lease on panic. Contain only this owned
 	// constructor boundary and never disclose the panic or callback error.
 	defer func() {
@@ -82,8 +84,12 @@ func constructSessionWithOwners(path string, cfg grants.Config, retired *atomic.
 			s = nil
 			err = ErrSessionRecovery
 		}
+		if cleanupFault {
+			s = nil
+			err = errConstructorCleanup
+		}
 	}()
-	return openSessionWithOwners(path, cfg, retired, owners)
+	return openSessionWithOwners(path, cfg, retired, owners, &cleanupFault)
 }
 func (p *Startup) open(path string, cfg grants.Config, owners []uint32) {
 	s, err := constructSessionWithOwners(path, cfg, &p.retirement, owners)
@@ -94,6 +100,8 @@ func (p *Startup) open(path string, cfg grants.Config, owners []uint32) {
 // direct and manifest-owned construction. It performs no constructor work.
 func (p *Startup) complete(s *Session, err error) {
 	p.mu.Lock()
+	// Publish known unwind uncertainty before completion, including retirement.
+	p.cleanupFault = p.cleanupFault || err == errConstructorCleanup
 	if p.retired {
 		if s != nil {
 			_, _ = s.retire()

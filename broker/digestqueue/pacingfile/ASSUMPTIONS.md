@@ -88,3 +88,17 @@ Constructor-time panic/unwind error propagation is separate and not fixed here.
 All full-consumer/current-base/config/root/pin/media/latency/independent security
 holds remain; D37 ordinary/urgent/reissue faults are never bypassed. No revocation,
 interruption/deadline/refund/anti-delete/rollback/restore/config-integrity claim.
+
+## W5-D66 unwind failure propagation
+
+Private constructor unwind status is owned by the synchronous constructor worker,
+then latched under Startup's publication mutex. It is not storage freshness or
+persistent recovery state. Another slot/direct constructors/reboot can bypass the
+cooperating in-memory hold. Actual faulted post-acquisition handoffs and separate
+completion/admission models test propagation components; no whole-startup hostile
+fault injector, disk/media or retained/released lock proof is claimed. Acquisition-
+time cleanup failures remain separate from Gate assembly unwind qualification.
+No new callback/hook/worker, retry/reset/repair/replacement writer, revocation,
+activation or deadline. Synchronous construction/cleanup may hang forever. Trusted
+external recovery and full consumer/root/config/pin/operator/media/current-base/
+strongest independent security holds remain; D37 fault availability not bypassed.

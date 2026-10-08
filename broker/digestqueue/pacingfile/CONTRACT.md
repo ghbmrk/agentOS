@@ -489,3 +489,15 @@ without another unlock, descriptor close, worker, retry or reset. Direct Session
 close retries therefore retain the actual backend failure. No raw diagnostics
 or paths are returned. A failed outcome is uncertain recovery, never permission
 to restart or proof that the lease remained held or was fully released.
+
+## W5-D66 constructor unwind uncertainty
+
+Actual acquired-lease Gate assembly closes its lease once if construction panics.
+Direct OpenSession still propagates that panic. The existing owned constructor
+contains it and retains a private fixed cleanup failure when unwind Close faults;
+completion latches that uncertainty before publishing done, including retirement.
+Known unwind faults expose no Session, return fixed ErrStorage on complete Close/
+slot Drain and retain cooperating admission. No new worker/API/hook or raw panic
+is published. Existing direct/predecoded/reader entries share this boundary.
+Successful observed cleanup still permits explicit complete Drain. Uncertain
+cleanup never authorizes restart or proves retained/released OS custody.

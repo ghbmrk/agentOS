@@ -38,9 +38,9 @@ func OpenSession(path string, cfg grants.Config) (*Session, error) {
 }
 
 func openSession(path string, cfg grants.Config, startupRetired *atomic.Bool) (*Session, error) {
-	return openSessionWithOwners(path, cfg, startupRetired, nil)
+	return openSessionWithOwners(path, cfg, startupRetired, nil, nil)
 }
-func openSessionWithOwners(path string, cfg grants.Config, startupRetired *atomic.Bool, owners []uint32) (*Session, error) {
+func openSessionWithOwners(path string, cfg grants.Config, startupRetired *atomic.Bool, owners []uint32, cleanupFault *bool) (*Session, error) {
 	if !sessionConfigValid(cfg) {
 		return nil, ErrSessionConfig
 	}
@@ -54,17 +54,25 @@ func openSessionWithOwners(path string, cfg grants.Config, startupRetired *atomi
 	if err != nil {
 		return nil, err
 	}
+	return assembleSession(lease, cfg, startupRetired, cleanupFault), nil
+}
+
+// The acquired lease belongs to this assembly, including panic unwind. A private
+// status reaches the owned constructor; direct OpenSession retains panic behavior.
+func assembleSession(lease *ExclusiveStore, cfg grants.Config, startupRetired *atomic.Bool, cleanupFault *bool) *Session {
 	constructed := false
 	defer func() {
 		if !constructed {
-			_ = lease.Close()
+			if lease.Close() != nil && cleanupFault != nil {
+				*cleanupFault = true
+			}
 		}
 	}()
 	s := &Session{lease: lease, drained: make(chan struct{})}
 	cfg.PacingStore = &sessionStore{lease: lease, retired: &s.retired, startupRetired: startupRetired}
 	s.gate = grants.New(cfg)
 	constructed = true
-	return s, nil
+	return s
 }
 
 func sessionConfigValid(cfg grants.Config) bool {
