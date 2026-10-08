@@ -119,7 +119,9 @@ func (c *Channel) sendSignIns(text string, n, m int, now time.Time) {
 // one when the bound is used up (arbitrator ruling on #32).
 func (c *Channel) wrongLocalLocked(now time.Time) []string {
 	l := &c.local
-	if c.cfg.DigestNotes != nil {
+	if c.codes.outbox != nil {
+		// The timestamp was captured by the actual wrong-code transaction.
+	} else if c.cfg.DigestNotes != nil {
 		c.recordDigestNoteLocked(digestnotes.Event{WrongAt: now})
 	} else if len(l.wrong) < maxLocalNotes {
 		l.wrong = append(l.wrong, now)
@@ -268,7 +270,7 @@ func (c *Channel) LocalSignIn(code string) (until time.Time, err error) {
 	// and the vault process counts a wrong one itself (#65 L3 follow-up 1);
 	// nor is the owner, who just unlocked, texted about it (#75 L3).
 	proof := strings.HasPrefix(code, UnlockProofPrefix)
-	res, locked, err := c.codes.checkStrong(code, now, strongOpts{unlock: c.cfg.UnlockFor, count: !proof, proof: true})
+	res, locked, err := c.codes.checkStrong(code, now, strongOpts{unlock: c.cfg.UnlockFor, count: !proof, proof: true, local: true})
 	alerts := c.lockAlertsLocked(locked, now)
 	signIn, signIns, answers := "", 0, 0
 	switch {
@@ -335,7 +337,9 @@ func (c *Channel) lockAlertsLocked(locked bool, now time.Time) []string {
 	}
 	if c.codes.justChallenged {
 		c.codes.justChallenged = false
-		if c.cfg.DigestNotes != nil {
+		if c.codes.outbox != nil {
+			// Challenge activation is already part of the authority transaction.
+		} else if c.cfg.DigestNotes != nil {
 			c.recordDigestNoteLocked(digestnotes.Event{Challenge: true})
 		} else {
 			c.floods.challenge++ // for the digest, as floodLocked counts it (L3 N2 on #165)

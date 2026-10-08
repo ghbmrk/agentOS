@@ -320,7 +320,7 @@ func (c *Channel) answerLocked(rp reply, now time.Time, decided *[]Decision, pag
 		if rp.word == "YES" && rp.code != "" && rp.id == "" {
 			// A code that names no request is a wrong code, or texted
 			// codes could be guessed without limit (CH-18).
-			locked, err := c.codes.wrong(now)
+			locked, err := c.codes.wrongOrigin(now, page)
 			if err != nil {
 				return []string{stateErr}, false, true
 			}
@@ -373,7 +373,7 @@ func (c *Channel) answerLocked(rp reply, now time.Time, decided *[]Decision, pag
 		// asks; the texted code is only in the text (L3 M1 on #165).
 		texted = ""
 	}
-	ok, locked, emsg := c.checkLocked(texted, rp.code, now)
+	ok, locked, emsg := c.checkOriginLocked(texted, rp.code, now, page)
 	if emsg != "" {
 		return []string{emsg}, false, true
 	}

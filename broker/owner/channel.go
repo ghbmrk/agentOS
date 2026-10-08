@@ -654,7 +654,7 @@ func (c *Channel) challengeText(now time.Time, text string) route {
 
 // dropLocked ignores a code-bearing message in challenge mode.
 func (c *Channel) dropLocked(now time.Time) route {
-	if c.cfg.DigestNotes != nil {
+	if c.codes.outbox != nil || c.cfg.DigestNotes != nil {
 		c.recordDigestNoteLocked(digestnotes.Event{Dropped: true})
 	} else {
 		c.dropped++
@@ -683,7 +683,12 @@ func (c *Channel) floodLocked(now time.Time) string {
 	if !k.pausedSilent && !k.pausedCounted && !k.justChallenged {
 		return ""
 	}
-	if c.cfg.DigestNotes != nil {
+	if c.codes.outbox != nil {
+		// Challenge activation was captured with the wrong-code transaction.
+		if k.pausedSilent || k.pausedCounted {
+			c.recordDigestNoteLocked(digestnotes.Event{Silent: k.pausedSilent, Counted: k.pausedCounted})
+		}
+	} else if c.cfg.DigestNotes != nil {
 		c.recordDigestNoteLocked(digestnotes.Event{Silent: k.pausedSilent, Counted: k.pausedCounted, Challenge: k.justChallenged})
 	} else {
 		if k.pausedSilent {
@@ -714,11 +719,11 @@ func (c *Channel) floodLocked(now time.Time) string {
 func (c *Channel) TakeDigestNotes() []string {
 	// An explicitly configured durable source has the sole consuming reader.
 	// Never fall back to destructive ephemeral reads when that source fails.
-	if c.cfg.DigestNotes != nil {
-		return nil
-	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.codes.outbox != nil || c.cfg.DigestNotes != nil {
+		return nil
+	}
 	var out []string
 	if c.dropped > 0 {
 		out = append(out, fmt.Sprintf("%d code messages without the current challenge were ignored.", c.dropped))
@@ -742,7 +747,13 @@ func (c *Channel) TakeDigestNotes() []string {
 }
 
 func (c *Channel) recordDigestNoteLocked(event digestnotes.Event) {
-	if err := c.cfg.DigestNotes.Record(event); err != nil {
+	var err error
+	if c.codes.outbox != nil {
+		err = c.codes.commitOutbox(&event, nil)
+	} else {
+		err = c.cfg.DigestNotes.Record(event)
+	}
+	if err != nil {
 		c.noteCaptureFailed.Store(true)
 	}
 }
@@ -750,10 +761,27 @@ func (c *Channel) recordDigestNoteLocked(event digestnotes.Event) {
 // OwnerDigestStatus reports notification-source recovery separately from
 // owner authority. It is fixed broker wording, not the store error text.
 func (c *Channel) OwnerDigestStatus() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.codes.outbox != nil && (c.noteCaptureFailed.Load() || c.codes.outboxBlocked != nil || c.codes.outbox.Health() != nil) {
+		return "Owner digest notes paused: storage needs recovery. STOP is still available."
+	}
 	if c.cfg.DigestNotes != nil && (c.noteCaptureFailed.Load() || c.cfg.DigestNotes.Health() != nil) {
 		return "Owner digest notes paused: storage needs recovery. STOP is still available."
 	}
 	return ""
+}
+
+// FlushDigestNotes explicitly drains an already-bound transactional backend.
+// It does not send, consume snapshots, schedule work or clear recovery holds.
+// The caller must bound synchronous storage latency; STOP bypasses this lock.
+func (c *Channel) FlushDigestNotes(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.codes.outbox == nil {
+		return ErrDigestComposition
+	}
+	return c.codes.outbox.Flush(ctx)
 }
 
 const stateErr = "Could not save the code check, so it did not count. Try again."
@@ -876,11 +904,15 @@ func (c *Channel) resumeLocked(r reply, now time.Time) (out []string, accepted b
 // strong code also extends the session unlock. msg is set when no check
 // could run.
 func (c *Channel) checkLocked(texted, got string, now time.Time) (ok, locked bool, msg string) {
+	return c.checkOriginLocked(texted, got, now, false)
+}
+
+func (c *Channel) checkOriginLocked(texted, got string, now time.Time, local bool) (ok, locked bool, msg string) {
 	if c.codes.backendReady() != nil {
 		return false, false, stateErr
 	}
 	if texted == "" || c.codes.st.LowLocked {
-		res, locked, err := c.codes.checkStrong(got, now, strongOpts{unlock: c.cfg.UnlockFor, count: true})
+		res, locked, err := c.codes.checkStrong(got, now, strongOpts{unlock: c.cfg.UnlockFor, count: true, local: local})
 		switch {
 		case err != nil:
 			return false, false, c.codeErr(err)
@@ -890,7 +922,7 @@ func (c *Channel) checkLocked(texted, got string, now time.Time) (ok, locked boo
 	if eq(got, texted) {
 		return true, false, ""
 	}
-	locked, err := c.codes.wrong(now)
+	locked, err := c.codes.wrongOrigin(now, local)
 	if err != nil {
 		return false, locked, stateErr
 	}
