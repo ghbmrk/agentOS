@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -91,6 +92,11 @@ func TestOSS6LoadedOutboxIsValidated(t *testing.T) {
 		t.Fatalf("%+v", g.out.got)
 	}
 	good := `"kind":"artifact","payload":"eA==","wait":2`
+	priv, _, err := g.id.Key()
+	must(t, err)
+	raw, err := SealBatch(priv, "2026-01-07", [][]byte{[]byte("x")})
+	must(t, err)
+	sealed := base64.StdEncoding.EncodeToString(raw)
 	for name, body := range map[string]string{
 		"unknown field": `{"items":[],"extra":1}`,
 		"no wait":       `{"items":[{` + strings.Replace(good, `"wait":2`, `"wait":0`, 1) + `}]}`,
@@ -98,8 +104,10 @@ func TestOSS6LoadedOutboxIsValidated(t *testing.T) {
 		"bad seen":      `{"items":[],"seen":"today"}`,
 		"empty payload": `{"items":[{` + strings.Replace(good, "eA==", "", 1) + `}]}`,
 		"bad day":       `{"items":[],"days":["2026-1-8"]}`,
-		"bad pending":   `{"items":[],"pending":{"day":"8 Jan","batch":["eA=="]}}`,
-		"empty pending": `{"items":[],"pending":{"day":"2026-01-08","batch":[]}}`,
+		"bad pending":   `{"items":[],"pending":{"day":"8 Jan","batch":"` + sealed + `"}}`,
+		"other day":     `{"items":[],"pending":{"day":"2026-01-08","batch":"` + sealed + `"}}`,
+		"unsealed":      `{"items":[],"pending":{"day":"2026-01-07","batch":"eA=="}}`,
+		"empty pending": `{"items":[],"pending":{"day":"2026-01-08","batch":""}}`,
 		"too many":      `{"items":[` + strings.TrimSuffix(strings.Repeat("{"+good+"},", MaxQueue+1), ",") + `]}`,
 	} {
 		must(t, os.WriteFile(path, []byte(body), 0o600))
@@ -113,7 +121,7 @@ func TestOSS6LoadedOutboxIsValidated(t *testing.T) {
 	if _, err := NewPublisher(Config{Path: path, Identity: g.id, Sender: g.out, Signers: map[string]Signer{"artifact": signer}}); err == nil {
 		t.Error("an oversized payload was accepted")
 	}
-	must(t, os.WriteFile(path, []byte(`{"items":[{`+good+`}],"days":["2026-01-07"],"pending":{"day":"2026-01-07","batch":["eA=="]}}`), 0o600))
+	must(t, os.WriteFile(path, []byte(`{"items":[{`+good+`}],"days":["2026-01-07"],"pending":{"day":"2026-01-07","batch":"`+sealed+`"}}`), 0o600))
 	if _, err := NewPublisher(Config{Path: path, Identity: g.id, Sender: g.out, Signers: map[string]Signer{"artifact": signer}}); err != nil {
 		t.Fatalf("a well-formed outbox: %v", err)
 	}
@@ -207,13 +215,23 @@ func TestOSS6FarAheadQueueDrains(t *testing.T) {
 	g.reopen(t)
 	must(t, g.p.Release()) // a jump back counts nothing
 	// Queued under a clock no release counted, each waits a day more, and
-	// the first day after the jump only rebuilds the chain.
+	// the first day after the jump only rebuilds the chain. Each item takes
+	// a slot, so the full queue then leaves UsableSlots a day, carried in
+	// cohort order (OSS-6s-a3).
 	for d := 1; d <= 3; d++ {
 		g.day(d, 12*time.Hour)
 		must(t, g.p.Release())
 	}
-	if len(g.out.got) != 1 || len(g.out.got[0].batch) != MaxQueue || g.p.Len() != 0 {
+	if len(g.out.got) != 1 || len(g.out.got[0].batch) != UsableSlots {
 		t.Fatalf("after the clock was corrected: %d batches, %d left", len(g.out.got), g.p.Len())
+	}
+	days := (MaxQueue + UsableSlots - 1) / UsableSlots
+	for d := 4; d < 3+days; d++ {
+		g.day(d, 12*time.Hour)
+		must(t, g.p.Release())
+	}
+	if len(g.out.got) != days || g.p.Len() != 0 {
+		t.Fatalf("drained in %d batches, %d left", len(g.out.got), g.p.Len())
 	}
 }
 
