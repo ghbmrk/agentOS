@@ -99,6 +99,13 @@ type Config struct {
 	// than LabelPublic, is treated as private: provider-side tools denied.
 	Label func(machine string) string
 	Now   func() time.Time
+	// Swapper holds the credentials a credential exchange issues; required
+	// when any operation declares a Response.
+	Swapper Swapper
+	// RouteFailed tells the owner that an adapter's route stopped, and
+	// why (a Reason constant); required when any operation declares a
+	// Response or Refused statuses. It is called once per stop.
+	RouteFailed func(adapter, reason string)
 }
 
 // LabelPublic is the REV-5 label under which a machine may use
@@ -117,9 +124,11 @@ type Proxy struct {
 	maxConc  int
 	cap      Cap
 	now      func() time.Time
+	xch      exchangeHooks
 
 	mu    sync.Mutex
 	usage map[string]*machineUsage
+	stops map[string]string // adapter -> why its route stopped (CRED-5t)
 }
 
 type machineUsage struct {
@@ -148,10 +157,30 @@ func New(cfg Config) (*Proxy, error) {
 		now:      cfg.Now,
 		usage:    map[string]*machineUsage{},
 		labelOf:  cfg.Label,
+		xch:      exchangeHooks{swapper: cfg.Swapper, routeFailed: cfg.RouteFailed},
+		stops:    map[string]string{},
 	}
 	for _, a := range cfg.Adapters {
 		if err := a.validate(); err != nil {
 			return nil, fmt.Errorf("egress: %v", err)
+		}
+		// Compile response rules on copies, so the caller's declaration
+		// is never written.
+		a.Operations = append([]Operation(nil), a.Operations...)
+		for i, op := range a.Operations {
+			if op.Response != nil {
+				rule := ResponseRule{Fields: append([]Field(nil), op.Response.Fields...)}
+				if err := rule.compile(); err != nil {
+					return nil, fmt.Errorf("egress: adapter %s: operation %s: %v", a.Name, op.Name, err)
+				}
+				if p.xch.swapper == nil {
+					return nil, fmt.Errorf("egress: adapter %s: operation %s exchanges credentials and no swapper is set", a.Name, op.Name)
+				}
+				a.Operations[i].Response = &rule
+			}
+			if (op.Response != nil || len(op.Refused) > 0) && p.xch.routeFailed == nil {
+				return nil, fmt.Errorf("egress: adapter %s: operation %s can stop its route and nobody would be told", a.Name, op.Name)
+			}
 		}
 		if _, dup := p.adapters[a.Name]; dup {
 			return nil, fmt.Errorf("egress: adapter %s declared twice", a.Name)
@@ -307,6 +336,12 @@ func (p *Proxy) serve(machine, grantsOf string, labelOf func() string, audit Aud
 		return
 	}
 	ev.Operation = op.Name
+	// CRED-5t: a stopped route's requests never reach the provider, so a
+	// CLI's retries cannot worsen an account restriction.
+	if why, stopped := p.stopped(a.Name); stopped {
+		deny(http.StatusServiceUnavailable, "route stopped: "+why)
+		return
+	}
 	// ADP-10: apply the verb class before forwarding. Reads have no effect
 	// on the account. Every other verb needs an intent in the journal
 	// before it reaches the service, and the proxy has no intent path yet
@@ -377,6 +412,46 @@ func (p *Proxy) serve(machine, grantsOf string, labelOf func() string, audit Aud
 		ev.Allowed, ev.Status, ev.Reason = true, http.StatusBadGateway, "encoded response refused"
 		audit.Egress(ev)
 		http.Error(w, "egress: encoded response refused", http.StatusBadGateway)
+		return
+	}
+
+	// CRED-5t: neither a refusal of the login nor an exchange's response
+	// reaches the guest unless it is in its declared, swapped shape.
+	if op.refused(resp.StatusCode) {
+		p.stop(a.Name, ReasonLoginRefused)
+		ev.Status = resp.StatusCode
+		ev.Reason = ReasonLoginRefused
+		audit.Egress(ev)
+		w.Header().Set(DeniedHeader, "1")
+		http.Error(w, "egress denied: route stopped: "+ReasonLoginRefused, http.StatusServiceUnavailable)
+		return
+	}
+	if op.Response != nil {
+		out, err := op.Response.swap(resp, a.Name, p.xch.swapper)
+		if err != nil {
+			ev.Status = resp.StatusCode
+			ev.Reason = ReasonUnswappable
+			// An error status is the provider failing, not answering in
+			// another shape; anything else may carry credentials the
+			// proxy cannot find.
+			if resp.StatusCode < 400 {
+				p.stop(a.Name, ReasonUnswappable)
+			} else {
+				ev.Reason = "credential exchange answered with an error; dropped"
+			}
+			audit.Egress(ev)
+			w.Header().Set(DeniedHeader, "1")
+			http.Error(w, "egress denied: "+ev.Reason, http.StatusBadGateway)
+			return
+		}
+		p.charge(machine, 0, int64(len(out)))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		ev.Allowed, ev.Status = true, http.StatusOK
+		audit.Egress(ev)
+		rw := red.Writer(w)
+		rw.Write(out)
+		rw.Close()
 		return
 	}
 
