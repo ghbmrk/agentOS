@@ -49,7 +49,8 @@ Primary lane; remediation is unclaimed. [Review record](reviews/security/2026-10
 | CRED-5f | [CRED-5 fallback when no API key is granted](briefs/CRED-5f.md) | #328 | in review (#421) |
 | CRED-5t | [Broker-held route failure triggers and fail-closed refresh test](briefs/CRED-5t.md) | #328 | in review (#421) |
 | CRED-5w | [Owner pause and withdrawal notice for broker-held routes](briefs/CRED-5w.md) | #328 | in review (#421) |
-| CRED-5b | [Build and test broker-held route failure, fallback and owner pause](briefs/CRED-5b.md) | CRED-5f/t/w spec-diff, CAP-11 plan-route code (S8) | queued |
+| CRED-5b | [Build and test broker-held route failure, fallback and owner pause](briefs/CRED-5b.md) | #421, CRED-5c, CAP-11 plan-route code (S8) | queued (release; checks #420 provider-keyed withdrawal and notice cadence, takes #426 relay findings) |
+| CRED-5c | [Consent ask placement and wording for unconfirmed broker-held routes](briefs/CRED-5c.md) | #421 | queued (release; #328 S1/U1/U2, #421 L3 point 5) |
 | S1 | [Screenless USB4-SSD boot on ≥3 unmodified PCs](briefs/S1.md) | Mark: hardware + hands | queued (test kit ready; waiting on hardware) |
 | S2 | [USB LTE modem](briefs/S2.md) | Mark: 2 modems + SIM | queued (test kit ready; waiting on hardware) |
 | P0X | [Spec v0.12](briefs/P0X.md) | — | merged (cada7c1; SPEC.md v0.12) |
