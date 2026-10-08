@@ -92,6 +92,7 @@ type rig struct {
 	srv     *Server
 	ops     map[string]sockets.Handler
 	follows []string
+	asks    []string
 }
 
 func newRig(t *testing.T) *rig {
@@ -107,6 +108,16 @@ func newRig(t *testing.T) *rig {
 		Follow: func(_ context.Context, name, d string) (string, error) {
 			r.follows = append(r.follows, name+"@"+d)
 			return "Asked: K8", nil
+		},
+		Paused: func() []localapi.PausedGrant {
+			return []localapi.PausedGrant{{ID: "G2", What: "Read mail.", By: "Loop 2", Pause: "loop2/pause/G2/1"}}
+		},
+		AskResume: func(_ context.Context, grant, pause string) (string, error) {
+			r.asks = append(r.asks, grant+"@"+pause)
+			if pause != "loop2/pause/G2/1" {
+				return "", errors.New("grants: /var/lib/x")
+			}
+			return "Asked.", nil
 		}})
 	r.ops = r.srv.Ops()
 	return r
@@ -170,6 +181,8 @@ func tokenOps(tok string) map[string]any {
 		localapi.OpAnswer:     localapi.Answer{Token: tok, ID: "K7", Sum: "s1", Approve: false},
 		localapi.OpFollowRoot: localapi.FollowRoot{Token: tok, Root: []byte("root")},
 		localapi.OpFollow:     localapi.Follow{Token: tok, Name: "Acme", Digest: digest},
+		localapi.OpPaused:     localapi.Auth{Token: tok},
+		localapi.OpAskResume:  localapi.AskResume{Token: tok, Grant: "G2", Pause: "loop2/pause/G2/1"},
 	}
 }
 
@@ -673,5 +686,48 @@ func TestAWrongSignInTellsNoTriesLeft(t *testing.T) {
 			t.Fatalf("status before sign-in tells the tries: %s", b)
 		}
 		r.now = r.now.Add(time.Minute)
+	}
+}
+
+// W5a-resume: a signed-in page lists the paused grants and asks to resume
+// one from the pause it showed; the ask's own failures are fixed codes,
+// and a bad ask never reaches the gate.
+func TestAPausedGrantIsAskedToResumeFromASession(t *testing.T) {
+	r := newRig(t)
+	tok := r.signIn()
+	out, err := r.call(localapi.OpPaused, localapi.Auth{Token: tok})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := out.(localapi.Paused); len(p.Grants) != 1 || p.Grants[0].ID != "G2" || p.Grants[0].Pause != "loop2/pause/G2/1" {
+		t.Fatalf("paused %+v", p)
+	}
+	out, err = r.call(localapi.OpAskResume, localapi.AskResume{Token: tok, Grant: "G2", Pause: "loop2/pause/G2/1"})
+	if err != nil || out.(localapi.Text).Text != "Asked." {
+		t.Fatalf("ask: %v %v", out, err)
+	}
+	if _, err := r.call(localapi.OpAskResume, localapi.AskResume{Token: tok, Grant: "G2", Pause: "loop2/pause/G2/0"}); code(err) != localapi.ErrFailed {
+		t.Fatalf("stale pause: %v", err)
+	}
+	long := func(n int) string { return strings.Repeat("a", n+1) }
+	for _, in := range []localapi.AskResume{
+		{Token: tok, Pause: "p"}, {Token: tok, Grant: "G2"},
+		{Token: tok, Grant: long(localapi.MaxID), Pause: "p"}, {Token: tok, Grant: "G2", Pause: long(localapi.MaxPause)},
+	} {
+		if _, err := r.call(localapi.OpAskResume, in); code(err) != localapi.ErrBadArgs {
+			t.Errorf("%+v: %v", in, err)
+		}
+	}
+	if len(r.asks) != 2 {
+		t.Fatalf("asks reaching the gate %v", r.asks)
+	}
+	r.srv.cfg.Paused, r.srv.cfg.AskResume = nil, nil
+	for op, args := range map[string]any{
+		localapi.OpPaused:    localapi.Auth{Token: tok},
+		localapi.OpAskResume: localapi.AskResume{Token: tok, Grant: "G2", Pause: "loop2/pause/G2/1"},
+	} {
+		if _, err := r.call(op, args); code(err) != localapi.ErrFailed {
+			t.Errorf("%s with no hook: %v", op, err)
+		}
 	}
 }

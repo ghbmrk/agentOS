@@ -6,6 +6,6 @@ Per-grant resume on the local page (Security R2 on #169): the page shows the pau
 
 **Precondition:** W5a, local page
 
-**Owner:** —
+**Owner:** builder (session_014jQE43g7uFA46BsQJD3VGh)
 
 **State on the board before the 2026-10-08 index split:** open
