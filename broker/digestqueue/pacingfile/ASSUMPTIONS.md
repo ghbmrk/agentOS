@@ -1,4 +1,4 @@
-# W5-D50 assumptions
+# Leased accounting I/O assumptions (D50–D51)
 
 | # | Assumption | Spec basis | If it changes |
 | --- | --- | --- | --- |
@@ -9,5 +9,4 @@
 | 5 | File write/fsync/rename/directory-sync success is only the configured filesystem's contract. | OP-1 | Qualify actual crash/media behavior independently; any error is a latched hold, not a refund. |
 | 6 | Config pins, clock, strict state, backup/restore and all-user quiescence remain externally trusted. | CH-15, OP-1 | Refuse unsafe composition; descriptor anchoring is not anti-rollback/restore/config authentication or permission revocation. |
 | 7 | Synchronous filesystem I/O may block forever; D41 observes latency without cancellation. | OP-8 | Keep independent owner controls/owned startup resource admission; do not start replacement writers after timeout. |
-
 | 8 | Paths within 4095 bytes and 64 parent components without symbolic ancestors are sufficient for the reviewed opt-in deployment. | OP-8, OP-1 | Review compatibility; never silently follow links/canonicalize or relax the bounds. Namespace and ancestor permission custody remain externally qualified. |
