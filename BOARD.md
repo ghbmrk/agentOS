@@ -179,7 +179,7 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | ID | Wiring | Precondition | Owner | State |
 |---|---|---|---|---|
 | W1 | [Agent machine kept running by `agentosd`](briefs/W1.md) | — | this package (`pkg/wire-agentosd`) | merged (#56, #60, #62) |
-| W2 | [Recall as a broker tool on the guest socket, `vm.Manager` labeler,…](briefs/W2.md) | P3-3b segmented store | recall thread (P3-3b) | building |
+| W2 | [Recall as a broker tool on the guest socket, `vm.Manager` labeler,…](briefs/W2.md) | P3-3b segmented store | recall thread (P3-3b) | merged (recalltool wired into agentosd by P3-3b: #152, #174, #181) |
 | W3a | [Evaluation route](briefs/W3a.md) | W1 | this thread | merged (#62) |
 | PE1 | [Resume a preempted evaluation from completed probe pairs](briefs/PE1.md) | W3 | Next build item D | merged (#103) |
 | PE2 | [Set the replay machine's `MemMB` deliberately](briefs/PE2.md) | W3, S1 | Next build item D | merged (#114) |
@@ -192,7 +192,7 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | PE7-bus | [PE7 condition 4, bound to the package that wires the events bus to…](briefs/PE7-bus.md) | PE7, events bus wiring |  | queued (waits on the events-bus package) |
 | PE7-call | [PE7 condition 5, bound to the package that answers inbound calls](briefs/PE7-call.md) | PE7, inbound calls |  | queued (waits on the inbound-call package) |
 | W3 | [Learning process](briefs/W3.md) | W3a, W3-goal | loops thread (P3-2) | building (step 1 merged (#83: `routerule` split, import-graph test…) |
-| W3-goal | [Goal-ID plane](briefs/W3-goal.md) | #55 merged | goal-ID thread (P3-7) | in review |
+| W3-goal | [Goal-ID plane](briefs/W3-goal.md) | #55 merged | goal-ID thread (P3-7) | merged (#55) |
 | W4 | [Managed tree to the live agent machine](briefs/W4.md) | W3, P3-6 merged | Next build item A | merged (68948e90) |
 | W3-off | [Say when the learning plane could not start](briefs/W3-off.md) | W3 | Next build item B | merged (#99) |
 | W3-off-a | [Learning plane can start late](briefs/W3-off-a.md) | W3-off, PW6 | — | queued |
@@ -203,7 +203,7 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | W3-builder | [W3 step 3c: model-backed Loop 1 builder](briefs/W3-builder.md) | W3 step 3a | loops thread (P3-2) | merged (#126) |
 | W3-builder-image | [The minimal builder image for W3-builder](briefs/W3-builder-image.md) | W3-builder | loops thread (P3-2) | merged (4b0d00e) |
 | W3-builder-tune | [Builder per-job counters (#126)](briefs/W3-builder-tune.md) | W3-builder-image | loops thread (P3-2) | merged (61cfd90) |
-| W3-builder-ship | [Ship the builder so owners never see the repeats-only line](briefs/W3-builder-ship.md) | W3-builder-image, P2-1 | this package (P3-2) | building (agentosd side in progress; P2-1 side queued) |
+| W3-builder-ship | [Ship the builder so owners never see the repeats-only line](briefs/W3-builder-ship.md) | W3-builder-image, P2-1 | this package (P3-2) | queued (agentosd side merged, bb7c40d in #154; the P2-1 side waits on P2-1) |
 | W3-tasks | [Learn-side forget primitive](briefs/W3-tasks.md) | W3 PW3 | Next build item B | merged (538d180; #160 part 2; wiring waits for forget action) |
 | W3-forget | [Owner-facing forget command](briefs/W3-forget.md) | W3-tasks part 2, W5 | Next build item B | building (split into sub-rows) |
 | W3-forget-a | [FORGET by text in an unlocked session](briefs/W3-forget-a.md) | W3-forget | Next build item B | merged (05913d0; #182) |
