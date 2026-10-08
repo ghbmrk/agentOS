@@ -1,0 +1,200 @@
+{
+  "version": 1,
+  "checkpoints": [
+    {
+      "source": {
+        "commit": "cb042fe71fad5600c3f4ed51f4cba355b6e59801",
+        "tree": "ff1900b8e46f7810b90dd6c4011c6f5cece3748b",
+        "inventory_sha256": "59e191ed67a7f0f6ba9f3a1675f97211472604c6a331e7b0c30aa99cbe008f54"
+      },
+      "public": {
+        "commit": "32c6e6729c7cc08f9f7918cc350bae9cf571d803",
+        "tree": "51592f7d986fd4b74540eb897b92a1338f35aebd",
+        "inventory_sha256": "8ba0fe67edaef9ebad4dad45a654073e9af69ce278b5dc7ea60b7ba14a29f94d"
+      },
+      "git_version": "git version 2.52.0",
+      "merge_base": "0c976329b19b416769773f452c1d88093779e609",
+      "source_files": 2245,
+      "public_files": 2360,
+      "shared_changed_paths": [
+        "BOARD.md",
+        "broker/daemon/arc2_test.go",
+        "broker/grants/gate.go",
+        "broker/question/question.go"
+      ],
+      "rehearsal": {
+        "tree": "bf61f86d38565a7699f1c38d2a714734529f3294",
+        "stages": [
+          {
+            "mode": "100644",
+            "object": "eda36392c22658567fcd3abab3449014101efc8b",
+            "stage": 1,
+            "path": "BOARD.md"
+          },
+          {
+            "mode": "100644",
+            "object": "19e105e4015718ca585d23df434b8a975eb02a4d",
+            "stage": 2,
+            "path": "BOARD.md"
+          },
+          {
+            "mode": "100644",
+            "object": "2f6a1c8062389c88a3b756ec888207ab99fd469f",
+            "stage": 3,
+            "path": "BOARD.md"
+          }
+        ],
+        "messages": [
+          {
+            "paths": [
+              "BOARD.md"
+            ],
+            "type": "Auto-merging",
+            "message": "Auto-merging BOARD.md\n"
+          },
+          {
+            "paths": [
+              "BOARD.md"
+            ],
+            "type": "CONFLICT (contents)",
+            "message": "CONFLICT (content): Merge conflict in BOARD.md\n"
+          },
+          {
+            "paths": [
+              "broker/daemon/arc2_test.go"
+            ],
+            "type": "Auto-merging",
+            "message": "Auto-merging broker/daemon/arc2_test.go\n"
+          },
+          {
+            "paths": [
+              "broker/grants/gate.go"
+            ],
+            "type": "Auto-merging",
+            "message": "Auto-merging broker/grants/gate.go\n"
+          },
+          {
+            "paths": [
+              "broker/question/question.go"
+            ],
+            "type": "Auto-merging",
+            "message": "Auto-merging broker/question/question.go\n"
+          }
+        ],
+        "text_merge_clean": false,
+        "semantic_accepted": false,
+        "native_output_sha256": "93c2ce94fdc7a4af54547b1acd5d85b0a90d65b2d07fb1712bce24593a34c1a6"
+      },
+      "semantic_accepted": false
+    },
+    {
+      "source": {
+        "commit": "cb042fe71fad5600c3f4ed51f4cba355b6e59801",
+        "tree": "ff1900b8e46f7810b90dd6c4011c6f5cece3748b",
+        "inventory_sha256": "59e191ed67a7f0f6ba9f3a1675f97211472604c6a331e7b0c30aa99cbe008f54"
+      },
+      "public": {
+        "commit": "7b753eb87f606ea2268ca536d429d47989dba196",
+        "tree": "98d32ed2c44b73a712708808a0ccdf9b0c99e9ff",
+        "inventory_sha256": "e0d2aa62592490c644af944b968ff244991d642c1c10a113b2cb240b277bb079"
+      },
+      "git_version": "git version 2.52.0",
+      "merge_base": "0c976329b19b416769773f452c1d88093779e609",
+      "source_files": 2245,
+      "public_files": 2365,
+      "shared_changed_paths": [
+        "BOARD.md",
+        "broker/daemon/arc2_test.go",
+        "broker/grants/gate.go",
+        "broker/question/question.go"
+      ],
+      "rehearsal": {
+        "tree": "c6b020e70f0ebae9659d484fda7c0e1394a59013",
+        "stages": [
+          {
+            "mode": "100644",
+            "object": "eda36392c22658567fcd3abab3449014101efc8b",
+            "stage": 1,
+            "path": "BOARD.md"
+          },
+          {
+            "mode": "100644",
+            "object": "19e105e4015718ca585d23df434b8a975eb02a4d",
+            "stage": 2,
+            "path": "BOARD.md"
+          },
+          {
+            "mode": "100644",
+            "object": "2f6a1c8062389c88a3b756ec888207ab99fd469f",
+            "stage": 3,
+            "path": "BOARD.md"
+          }
+        ],
+        "messages": [
+          {
+            "paths": [
+              "BOARD.md"
+            ],
+            "type": "Auto-merging",
+            "message": "Auto-merging BOARD.md\n"
+          },
+          {
+            "paths": [
+              "BOARD.md"
+            ],
+            "type": "CONFLICT (contents)",
+            "message": "CONFLICT (content): Merge conflict in BOARD.md\n"
+          },
+          {
+            "paths": [
+              "broker/daemon/arc2_test.go"
+            ],
+            "type": "Auto-merging",
+            "message": "Auto-merging broker/daemon/arc2_test.go\n"
+          },
+          {
+            "paths": [
+              "broker/grants/gate.go"
+            ],
+            "type": "Auto-merging",
+            "message": "Auto-merging broker/grants/gate.go\n"
+          },
+          {
+            "paths": [
+              "broker/question/question.go"
+            ],
+            "type": "Auto-merging",
+            "message": "Auto-merging broker/question/question.go\n"
+          }
+        ],
+        "text_merge_clean": false,
+        "semantic_accepted": false,
+        "native_output_sha256": "c5147f91687667f2fe9304070323bb68f342a2c1b4b39bbe3f4269e925c1dce8"
+      },
+      "semantic_accepted": false
+    }
+  ],
+  "runtime_diagnostic": {
+    "test_passes": 777,
+    "test_skips": 1,
+    "packages": 14,
+    "rehearsal_tree": "bf61f86d38565a7699f1c38d2a714734529f3294",
+    "candidate_evidence": false,
+    "semantic_accepted": false
+  },
+  "latest_broker_inventory_identical": true,
+  "ref_updates": "none from native rehearsals; only new local review-input preservation refs created separately",
+  "candidate_runtime_run": "none; Go source unchanged",
+  "external_pr268_advance": {
+    "pr": 268,
+    "expected": "e368329d194cda1d33d0003e862dd3cdc0ffa081",
+    "observed": "5212653c1378021a26756330a09c46389fa734fd",
+    "files": [
+      "broker/change/digest.go",
+      "broker/change/digest_snapshot.go",
+      "broker/change/digest_snapshot_test.go"
+    ],
+    "omitted_patches": []
+  },
+  "qualification": "No semantic/security/integration/release acceptance. Exact external independent review required."
+}
