@@ -28,6 +28,8 @@ type activator struct {
 	pending    bool // the new slot booted, health check not run yet
 	installErr error
 	abandoned  int
+	onInstall  func() // runs after a successful Install
+	abandonErr error
 }
 
 func (a *activator) Install(_ context.Context, v *update.Verified) error {
@@ -42,12 +44,18 @@ func (a *activator) Install(_ context.Context, v *update.Verified) error {
 	}
 	a.installed = append(a.installed, m.Version)
 	a.next = m.UsrRootHash
+	if a.onInstall != nil {
+		a.onInstall()
+	}
 	return nil
 }
 
 func (a *activator) Abandon(context.Context) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.abandonErr != nil {
+		return a.abandonErr
+	}
 	a.abandoned++
 	a.next = a.boot.UsrRootHash
 	return nil

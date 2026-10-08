@@ -375,6 +375,9 @@ func TestRevertNeverEmptiesTarget(t *testing.T) {
 	if d := e.p.Digest(); len(d) != 1 || strings.Contains(d[0], "UNDO") || !strings.HasSuffix(d[0], " MORE "+r.Short) {
 		t.Fatalf("offered an undo that cannot work: %q", d)
 	}
+	if err := e.p.ConfirmStaged(r.ID); err != nil {
+		t.Fatal(err)
+	}
 	if err := e.p.Revert(bg, r.Short, OriginOwner); err == nil || !strings.Contains(err.Error(), "nothing to boot") {
 		t.Fatalf("emptied the image slot: %v", err)
 	}

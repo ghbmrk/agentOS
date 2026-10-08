@@ -174,3 +174,36 @@ func TestStageFailedIsIdempotentByExactID(t *testing.T) {
 		t.Fatal("a fallen-back image confirmed")
 	}
 }
+
+// Until the update code settles a staged image, only it can: an owner's
+// UNDO, or the pipeline's own revert, would leave the image installed
+// with its adoption undone, and the applier could never confirm it.
+func TestStagedImageIsNotUndoneBeforeItSettles(t *testing.T) {
+	e, r1 := stagedEnv(t)
+	if err := e.p.ConfirmStaged(r1.ID); err != nil {
+		t.Fatal(err)
+	}
+	r := e.release(release(t, 41, false, map[string][]byte{"host-image/release": []byte("b")}))
+	if d := e.p.Digest(); len(d) == 0 || !strings.HasSuffix(d[len(d)-1], " MORE "+r.Short) || strings.Contains(d[len(d)-1], "UNDO") {
+		t.Fatalf("offered an undo of a staged image: %q", d)
+	}
+	err := e.p.Revert(bg, r.Short, OriginOwner)
+	if err == nil || err.Error() != "Update 41 starts at the next restart; undo it after." {
+		t.Fatalf("owner undo of a staged image: %v", err)
+	}
+	if err := e.p.revert(bg, r.ID, OriginPipeline, WhyRegression); err == nil {
+		t.Fatal("the pipeline undid a staged image")
+	}
+	if a := e.adoption(r.ID); a.Reverted != "" || !a.Staged || e.reverts() != 0 {
+		t.Fatalf("adoption %+v, reverts %d", a, e.reverts())
+	}
+	if err := e.p.ConfirmStaged(r.ID); err != nil {
+		t.Fatal(err)
+	}
+	if d := e.p.Digest(); len(d) != 1 || !strings.Contains(d[0], "UNDO "+r.Short) {
+		t.Fatalf("no undo offered once it started: %q", d)
+	}
+	if err := e.p.Revert(bg, r.Short, OriginOwner); err != nil {
+		t.Fatal("undo after the image started:", err)
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/update"
 )
 
@@ -239,4 +240,102 @@ func TestFallbackStateSaveFailureKeepsTheObligation(t *testing.T) {
 		r.must(r.a.Resume(ctx))
 		r.settledFellBack(rel)
 	}
+}
+
+// Review blocker 2a: the activator took the release but the save that
+// records it failed. The apply is not reported as succeeded: the slot is
+// abandoned and the release stays pending, so a restart in the same boot
+// cannot undo an activation the journal calls done.
+func TestHandoverSaveFailureIsNotSuccess(t *testing.T) {
+	r := newRig(t)
+	rel := r.release(1, true)
+	r.must(r.a.Schedule(rel, "a1"))
+	r.act.onInstall = func() { r.state.Fail = errIO }
+	if ok, err := r.a.Tick(context.Background()); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	if in := r.intents(); len(in) != 1 || in[0].State == journal.Succeeded {
+		t.Fatalf("journal: %+v", in)
+	}
+	if r.act.abandoned != 1 || r.act.restarts != 0 {
+		t.Fatalf("activator: %+v", r.act)
+	}
+	if _, ok, _ := r.store.Staged(); ok {
+		t.Fatal("still staged")
+	}
+	if r.a.st.Applying != nil || r.a.st.Pending == nil {
+		t.Fatalf("state: %+v", r.a.st)
+	}
+	r.state.Fail, r.act.onInstall = nil, nil
+	if ok, err := r.a.Tick(context.Background()); !ok || err != nil {
+		t.Fatalf("retry: %v %v", ok, err)
+	}
+	r.restart()
+	r.must(r.a.Resume(context.Background()))
+	if in, _ := r.store.Installed(); in.Version != 1 || len(r.pipe.confirmed) != 1 || len(r.pipe.failed) != 0 {
+		t.Fatalf("installed %+v, pipeline %+v", in, r.pipe)
+	}
+}
+
+// If the activator cannot abandon the unrecorded handover either, the
+// rollback point stays, and the next Tick in the same boot abandons it
+// before it applies the release again.
+func TestUnabandonedHandoverIsAbandonedByTheNextTick(t *testing.T) {
+	r := newRig(t)
+	rel := r.release(1, true)
+	r.must(r.a.Schedule(rel, "a1"))
+	r.act.onInstall = func() { r.state.Fail, r.act.abandonErr = errIO, errIO }
+	if ok, err := r.a.Tick(context.Background()); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	if r.a.st.Applying == nil || r.a.st.Applying.Installed {
+		t.Fatalf("in memory: %+v", r.a.st.Applying)
+	}
+	r.state.Fail, r.act.abandonErr, r.act.onInstall = nil, nil, nil
+	if ok, err := r.a.Tick(context.Background()); !ok || err != nil {
+		t.Fatalf("retry: %v %v", ok, err)
+	}
+	if r.act.abandoned != 1 || len(r.act.installed) != 2 {
+		t.Fatalf("activator: %+v", r.act)
+	}
+	r.restart()
+	r.must(r.a.Resume(context.Background()))
+	if in, _ := r.store.Installed(); in.Version != 1 || len(r.pipe.confirmed) != 1 || len(r.pipe.failed) != 0 {
+		t.Fatalf("installed %+v, pipeline %+v", in, r.pipe)
+	}
+}
+
+// Review blocker 2b: a rollback point that never durably recorded the
+// handover, then a new boot on the old root (a power cut mid-handover),
+// is not a fallback. The stage is dropped, the adoption is left alone and
+// nothing is marked as fallen back, so the release is tried again.
+func TestUnrecordedHandoverThenPowerCutIsNotAFallback(t *testing.T) {
+	r := newRig(t)
+	rel := r.release(1, true)
+	r.must(r.a.Schedule(rel, "a1"))
+	r.act.onInstall = func() { r.state.Fail, r.act.abandonErr = errIO, errIO }
+	if ok, err := r.a.Tick(context.Background()); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	if pt := r.saved().Applying; pt == nil || pt.Installed {
+		t.Fatalf("saved point %+v", pt)
+	}
+	// Power cut: counted tries on the new slot run out and the old root
+	// boots.
+	r.state.Fail, r.act.abandonErr, r.act.onInstall = nil, nil, nil
+	r.act.failBoot = true
+	r.must(r.act.Restart(context.Background()))
+	r.restart()
+	r.must(r.a.Resume(context.Background()))
+	r.must(r.a.Resume(context.Background()))
+	if len(r.pipe.failed) != 0 || len(r.pipe.confirmed) != 0 || r.a.FellBack(1) {
+		t.Fatalf("judged a fallback: pipeline %+v", r.pipe)
+	}
+	if _, ok, _ := r.store.Staged(); ok {
+		t.Fatal("still staged")
+	}
+	if r.saved().Applying != nil || strings.Contains(r.a.Status(), "did not start") {
+		t.Fatalf("status %q", r.a.Status())
+	}
+	r.admitsNext(rel)
 }

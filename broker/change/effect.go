@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/ghbmrk/agentos/broker/journal"
 )
@@ -330,6 +331,9 @@ func (p *Pipeline) revertLocked(id, why string) error {
 	if a == nil || a.Reverted != "" {
 		return errors.New("no active adoption " + id)
 	}
+	if err := unsettled(a, why); err != nil {
+		return err
+	}
 	next, err := p.undoTreeLocked(a)
 	if err != nil {
 		return err
@@ -366,6 +370,10 @@ func (p *Pipeline) revert(ctx context.Context, ref, origin, why string) error {
 		return fmt.Errorf("change: %s is not an active adoption", ref)
 	}
 	id := a.ID
+	if err := unsettled(a, why); err != nil {
+		p.mu.Unlock()
+		return err
+	}
 	if _, err := p.undoTreeLocked(a); err != nil {
 		p.mu.Unlock()
 		return err
@@ -382,6 +390,18 @@ func (p *Pipeline) revert(ctx context.Context, ref, origin, why string) error {
 	return p.run(ctx, journal.Intent{ID: fmt.Sprintf("chg:%s:revert:%s:%s", id, n, why), Origin: origin,
 		Account: journal.BrokerAccount, Action: action, Executor: Executor,
 		Params: map[string]any{"adoption": id, "why": why}})
+}
+
+// unsettled refuses to undo a staged image for any reason but its own
+// fallback: until the update code settles it, the image may already be
+// installed, and an adoption undone under it could never be confirmed, so
+// the applier would wait forever (SR3-4). The owner can undo it once it
+// has started.
+func unsettled(a *Adoption, why string) error {
+	if !a.Staged || why == WhyFallback {
+		return nil
+	}
+	return errors.New("Update " + safe(strings.TrimPrefix(a.Origin, "update:")) + " starts at the next restart; undo it after.")
 }
 
 // ConfirmStaged records that a staged image booted and passed its health

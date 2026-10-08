@@ -243,7 +243,8 @@ func New(cfg Config) (*Applier, error) {
 }
 
 // Schedule queues a verified release the change pipeline adopted as
-// staged (adoption is the pipeline's reference). A security fix is due at
+// staged. adoption is the adoption's exact ID (change.Report.ID, never
+// its short ID), the only form that settles it (SR3-4). A security fix is due at
 // once; an ordinary release after a random jitter (UPD-5). A newer
 // schedule replaces an older one.
 func (a *Applier) Schedule(v *update.Verified, adoption string) error {
@@ -370,6 +371,15 @@ var waitLines = map[string]string{
 func (a *Applier) Tick(ctx context.Context) (ok bool, err error) {
 	if ok, err := a.restartIfHandedOver(ctx); ok || err != nil {
 		return ok, err
+	}
+	a.mu.Lock()
+	unhanded := a.st.Applying != nil && !a.st.Applying.Installed && !a.executing
+	a.mu.Unlock()
+	if unhanded {
+		// A handover Execute could not undo; Resume abandons it.
+		if err := a.Resume(ctx); err != nil {
+			return false, err
+		}
 	}
 	now := a.cfg.Now()
 	a.mu.Lock()
@@ -507,8 +517,9 @@ func (a *Applier) Check(_ context.Context, _ journal.Phase, in journal.Intent) e
 // Execute hands the release to the activator. The rollback point is saved
 // first, then the release is staged in the update store and installed in
 // the inactive slot, without holding the lock, so STATUS answers during
-// the slot write. A failed install is abandoned and drops the stage, and
-// the release stays pending.
+// the slot write. A failed install, or a handover whose record could not
+// be saved, is abandoned and drops the stage, and the release stays
+// pending: Execute succeeds only once the handover is durable (SR3-4).
 func (a *Applier) Execute(ctx context.Context, in journal.Intent, _ int) journal.Outcome {
 	v, ok := parseID(in.ID)
 	if !ok {
@@ -548,23 +559,39 @@ func (a *Applier) Execute(ctx context.Context, in journal.Intent, _ int) journal
 	defer a.mu.Unlock()
 	a.executing = false
 	if err != nil {
-		_ = a.cfg.Activator.Abandon(ctx)
-		_ = a.cfg.Store.DropStaged()
-		a.st.Applying = nil
-		_ = a.saveLocked()
+		a.abandonLocked(ctx)
 		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: err.Error()}
 	}
-	a.st.Applying.Installed = true
-	if a.st.Pending == p {
-		a.st.Pending, a.rel = nil, nil
+	next := a.st
+	pt2 := *a.st.Applying
+	pt2.Installed = true
+	next.Applying = &pt2
+	if next.Pending == p {
+		next.Pending = nil
 	}
-	a.st.Applied = map[string]bool{in.ID: true} // only the latest is ever reconciled
-	if err := a.saveLocked(); err != nil {
-		// The slot holds the release; Resume judges it by the boot that
-		// follows, whatever the saved state says.
-		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "state not saved"}
+	next.Applied = map[string]bool{in.ID: true} // only the latest is ever reconciled
+	if err := a.save(next); err != nil {
+		// Unrecorded, the handover is undone, so the activation is never
+		// called done while a restart in this boot would abandon it.
+		a.abandonLocked(ctx)
+		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "handover not saved: " + err.Error()}
+	}
+	a.st = next
+	if a.st.Pending == nil {
+		a.rel = nil
 	}
 	return journal.Outcome{Result: journal.ResultSucceeded}
+}
+
+// abandonLocked undoes a handover that did not complete; the release
+// stays pending. If the activator or the update store fails, the rollback
+// point stays, unrecorded as installed, for Resume to abandon (SR3-4).
+func (a *Applier) abandonLocked(ctx context.Context) {
+	if a.cfg.Activator.Abandon(ctx) != nil || a.cfg.Store.DropStaged() != nil {
+		return
+	}
+	a.st.Applying = nil
+	_ = a.saveLocked()
 }
 
 // pointLocked is the rollback point for handing rel over now.
@@ -602,8 +629,12 @@ func (a *Applier) Reconcile(_ context.Context, in journal.Intent, _ int) journal
 // adoption); any other release means boot counting fell back, so the
 // stage is dropped and the adoption reverted with no owner action
 // (UPD-1). A boot of the new release whose health check has not passed
-// yet waits. In the same boot, an apply the activator never took (the
-// broker stopped mid-handover) is abandoned.
+// yet waits. An apply whose handover was never recorded (the broker
+// stopped or a save failed mid-handover) is abandoned, in the same boot
+// or after a reboot that kept the old root: with nothing recorded, the
+// old root does not prove the release fell back, so it is not marked as
+// one and can be tried again (SR3-4). Booting the new root, it is judged
+// like any other apply.
 //
 // Settling spans three stores, written in this order (SR3-4):
 //
@@ -632,7 +663,7 @@ func (a *Applier) Resume(ctx context.Context) error {
 	switch {
 	case b.ID == pt.BootID && pt.Installed:
 		return nil // not restarted yet
-	case b.ID == pt.BootID:
+	case !pt.Installed && (b.ID == pt.BootID || b.UsrRootHash != pt.ToUsr):
 		if err := a.cfg.Activator.Abandon(ctx); err != nil {
 			return err
 		}
