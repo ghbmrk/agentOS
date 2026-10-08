@@ -417,7 +417,8 @@ def _inner(work, timeout, cmd, extra_keep=()):
 # strace's own failure, as opposed to a scenario that failed: strace prints e.g.
 # "strace: ptrace(PTRACE_LISTEN,pid:42,sig:0): Input/output error", lets its tracees go on
 # untraced, and its exit status may still be the main tracee's 0, so the trace is partial.
-STRACE_FAULT = re.compile(rb"^strace: .*Input/output error|^strace: .*PTRACE_", re.M)
+# Unanchored: tracees share strace's stderr, so the message can follow a partial line.
+STRACE_FAULT = re.compile(rb"strace: .*(?:Input/output error|PTRACE_)")
 STRACE_ATTEMPTS = 3
 
 

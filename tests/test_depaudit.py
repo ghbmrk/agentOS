@@ -383,6 +383,12 @@ class StraceFaultTest(unittest.TestCase):
                                   msg="strace: ptrace(PTRACE_LISTEN,pid:42,sig:0): Input/output error")
         self.assertEqual((res["outcome"], runs), ("error", depaudit.STRACE_ATTEMPTS), res)
 
+    def test_strace_fault_after_a_partial_stderr_line_is_a_fault(self):
+        # The tracee shares strace's stderr: its unterminated output can sit before the message.
+        res, runs = self.run_with("clean", faults=99, rc=0,
+                                  msg="partial line strace: ptrace(PTRACE_LISTEN,pid:42,sig:0): Input/output error")
+        self.assertEqual((res["outcome"], runs), ("error", depaudit.STRACE_ATTEMPTS), res)
+
     # HK-1c (briefs/HK-1.md; a local ID with no SPEC row, so no REQ marker)
     def test_a_leak_seen_before_a_strace_fault_is_not_forgotten(self):
         res, runs = self.run_with("phones-home", faults=1, later_cmd=["true"])

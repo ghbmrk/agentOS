@@ -131,6 +131,9 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | P2-2w d2a-2 | `pageLine` takes five separate locks, so one page can mix states; display only, fixed on reload (#378 L3) |
 | P2-2w d2a-3 | `plural` lives in both `localui/line.go` and modemlink's recovery text; wording can drift (#378 L3) |
 | broker/owner review_test.go IDs | L3 on #386: `TestRestartHandsOpenRequestsToReissue` seeds the restart record with hard-coded IDs `Z9`, `Y9`, `X9`, which `newIDLocked` can issue, so a request opened earlier in the test can collide with one (0 of 600 runs failed; assertions tolerate it today); use IDs outside the generator's range (e.g. `Z1`, `Y1`, `X1`) when a package next touches review_test.go |
+| HK-1 f1 | Lens screen on #401: the sandbox-unavailable message in `tools/depaudit.py` names neither the PID namespace nor the `/proc` mount it now needs; the probe already fails loudly |
+| HK-1 f2 | Lens screen on #401: violations carried from faulted attempts are not de-duplicated, so the same leak seen twice is listed twice; the outcome is unchanged |
+| HK-1 f3 | Lens screen on #401: `_scratch_dir` drops `TemporaryDirectory`'s chmod-and-retry cleanup of read-only entries; removal still raises rather than passing |
 
 ## Reuse candidates
 | ID | Component | Why |
