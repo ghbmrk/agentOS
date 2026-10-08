@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"regexp"
 )
 
 // Literal is a string constant: an untyped constant converts to it, a
@@ -42,7 +43,9 @@ func (e Text) GuestText() string { return e.s }
 type Arg interface{ guestArg() }
 
 // Num is a count, size or bound; Guest is text the guest itself sent (a
-// request ID, a tool name), clipped by the caller.
+// request ID, a tool name). Newf shows a Guest value only when it is
+// ID-shaped (guestRE), so a host path passed as one cannot reach the
+// guest (SR2-3k); any other is shown as unshown.
 type (
 	Num   int64
 	Guest string
@@ -51,6 +54,11 @@ type (
 func (Num) guestArg()   {}
 func (Guest) guestArg() {}
 
+var guestRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+
+// unshown stands in for a Guest value that is not ID-shaped.
+const unshown = "(not shown)"
+
 // New is fixed error text for the guest.
 func New(s Literal) Text { return Text{string(s)} }
 
@@ -58,6 +66,9 @@ func New(s Literal) Text { return Text{string(s)} }
 func Newf(format Literal, args ...Arg) Text {
 	vs := make([]any, len(args))
 	for i, a := range args {
+		if g, ok := a.(Guest); ok && !guestRE.MatchString(string(g)) {
+			a = Guest(unshown)
+		}
 		vs[i] = a
 	}
 	return Text{fmt.Sprintf(string(format), vs...)}
