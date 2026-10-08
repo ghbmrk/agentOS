@@ -95,12 +95,15 @@ type Config struct {
 // class is an account/action evidence group. ADP-9 groups hold bounded
 // canonical Cohorts; ADP-11 retains its existing single reply history.
 type class struct {
-	Cohorts map[string]*class `json:"cohorts,omitempty"`
-	Last    time.Time         `json:"last,omitempty"`
-	Account string            `json:"account"`
-	Action  string            `json:"action"`
-	Verb    string            `json:"verb"`
-	Reply   bool              `json:"reply,omitempty"`
+	// Declined preserves the account/action decline floor even after a
+	// reply group consumes its countdown and the other kind is still absent.
+	Declined bool              `json:"declined,omitempty"`
+	Cohorts  map[string]*class `json:"cohorts,omitempty"`
+	Last     time.Time         `json:"last,omitempty"`
+	Account  string            `json:"account"`
+	Action   string            `json:"action"`
+	Verb     string            `json:"verb"`
+	Reply    bool              `json:"reply,omitempty"`
 	// Run is the current run of unedited, verified approvals; the fields
 	// after it describe that run.
 	Run        int               `json:"run"`
@@ -262,6 +265,10 @@ func (o *Optimizer) Observe(d Decision) error {
 			return o.save()
 		}
 		group = &class{Account: d.Account, Action: d.Action, Verb: d.Verb, Reply: reply, Last: o.st.Latest}
+		if sibling := o.st.Classes[key(d.Account, d.Action, !reply)]; sibling != nil && sibling.Declined {
+			group.Declined = true
+			group.Snooze = 2 * o.threshold(group)
+		}
 		o.st.Classes[k] = group
 	}
 	group.Last = o.st.Latest

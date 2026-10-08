@@ -2,24 +2,12 @@
 Generated 2026-10-07 by the COST thread's audit; the coordinator updates it. Rows marked LATER are not started until the first release ships (DECISIONS D-048). Promote a row by moving it to "Release" with the acceptance test it now blocks.
 
 ## Summary
-Non-merged rows audited: 129; the 67 stale rows it found were reconciled into BOARD.md on 2026-10-08 (DOC-3), and rows since merged were removed from the tables below. Open now: Release 64 (6 marked unsure), Later 55 (table counts refreshed with proposed POT intake; no existing row reclassified).
+Non-merged rows audited: 129; the 67 stale rows it found were reconciled into BOARD.md on 2026-10-08 (DOC-3), and rows since merged were removed from the tables below. Open now: Release 56 (6 marked unsure), Later 54 (table counts refreshed with SR3 intake; no existing row reclassified).
 No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41) has no board row but blocks IMG-1, HOST-1a/1b/1c part 2 and W3-builder-ship.
 
 ## Release (needed for A1–A15 or an invariant)
 | ID | Needed for | Note |
 |---|---|---|
-| POT | A10, A11, A15 | Proposed potency intake; draft implementations are bounded and do not close the full review |
-| POT-P1 | A3, A10, A11, A15 | One production-equivalent recurring workflow; reuse INT-A/H6/W7-A |
-| POT-P2 | A3, A10, A15 | Durable task/result binding and native draft revision; L1 design first |
-| POT-P3 | A7, A10, A11 (CHG-1/2, OP-7) | First deterministic broker-observed effect grader; independent activation approval |
-| POT-P3a | A7, A10, A11 (CHG-1/2, CRED-7, CAP-3) | Private broker-keyed capture/matching qualification blocks P3 activation under default journal redaction |
-| POT-P3b | A7, A10, A11 (CHG-1/2, OP-7) | Authenticated outcome revision and additional qualified result contracts |
-| POT-P5 | A10, A15 (CAP-6, ADP-9/11) | Bounded template cohorts; grant authority and reply policy preserved |
-| POT-P6 | A10, A15 (CAP-9) | Prevent wrong-class transport evidence from reordering candidates |
-| POT-P6b | A10, A15 (CAP-9, OP-7/8) | Trusted acceptance, total cost and qualified-version evidence |
-| POT-P7 | A3, A15 (CAP-11/12, RES-5) | Compose existing resource/quota work only after custody qualification |
-| POT-P8 | A10 (CAP-13) | Qualify one class-specific local pipeline under D-051; no default expansion |
-| POT-P10 | A15 (CAP-1/8, RES-2) | Existing fork/test/keep on the floor host; artifact extension remains later |
 | SR3 | A4, A7, A12–A15 | Documentation intake for eight release findings; remediation stays open after intake merges |
 | SR3-1 | A4, A6, A14 (CH-7, localui L25) | Lock during sign-in/refresh cannot mint a live token; stale sessions cannot RESUME |
 | SR3-2 | A4, A13 (ADP-9, OP-3) | STOP-aged queues and concurrent dispatch obey current daily/per-record bounds |
@@ -46,6 +34,11 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | ADP-8 | A13 (ADP-8) | Mislabelled-draft check blocks adoption |
 | ADP-5 | A13 | Desktop executor and kiosk-escape test; blocked on CRED-4b |
 | OSS-6s | A12 | Publication sender, idempotent by day and batch |
+| OSS-6j | A12 (OSS-6, DEP-2) | L3 on #330: the pull job is repository automation, not a service |
+| OSS-6i | A12 (OSS-6) | L3 on #330: rotation is void if batches share a circuit |
+| OSS-6p | A12 (OSS-6) | L3 on #330: OSS-6 values the sender needs |
+| OSS-6a | A12 (OSS-6, OSS-7) | L3 on #330: silence vs ask-each-time |
+| OSS-5t | A12 (OSS-5) | L3 on #330: embargoed report over Tor or not |
 | OSS-6e | A12, clean-room invariant | Security ruling on #180: floor holds across restarts |
 | OSS-10w | A12 (unsure) | Follow-fork wiring; OSS-1–13 are in A12's requirements |
 | IMG-1 | A1 | CI scan for per-owner secrets in the image; blocked on P2-1 |
@@ -53,7 +46,6 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | P2-2w c | A1, A14 | Setup into agentosd; Security L6, L7 MUST |
 | P2-2w d | A1, A3, A14 | Turns LocalUI on; unblocks approvals and CH-20p |
 | SR2-3g | A5, A6 (security) | No host path in agent-visible tool errors |
-| SR2-3h | A5, A6 (security) | runsc messages never reach the guest |
 | SR2-4i | A2 (RES-2) | Host image enables iocost; blocked on host image |
 | CH-21 | A14 (CH-21) | Name, first-person voice, spoofed NAME refused |
 | HOST-1a | A1 (HW-8) | Part 2 needs P2-1 image |
@@ -76,8 +68,8 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 ## Later (backlog; do not start before first release)
 | ID | Why it can wait |
 |---|---|
-| POT-P4 | Scoped recall/progressive fetch waits for a measured A10 blocker; reuse #196/#199 |
-| POT-P9 | Typed prior-result skill handles wait for workload evidence and L1 format acceptance |
+| APPLY-dup | `broker/apply/ASSUMPTIONS.md` repeats rows A3–A7 (found on UPD-b); text only, no behaviour |
+| FIRSTBOOT-text | `broker/firstboot` wording (L3 on #379, points 3–5): an unexpected `ScheduleFirstBoot` error still reads "updating to version N"; with several mirrors failing, STATUS names only the last mirror's failure; `Hold()` in `fell_back` says "when the update finishes" where `Status()` says it waits for a newer release. Text only; the gate stays held in each case |
 | P2-8b | Deferred re-encrypt after trusted-PC removal; slot removal already covers CRED-9 |
 | P3-6d | Digest wording for deleted procedures; no A-test needs it |
 | CH-20p | Page view of kept replies; A15 needs delivery, not this view |
@@ -131,6 +123,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | CRED-4b f8 | L3 on #300 (1960aed re-review #4): camelCase false positives (`hotKey 2024-10-08-release-notes`, `useToken 2024-…`, `?sortKey=created_at_2024_desc`); fail closed, part-2 negative corpus |
 | CRED-4b f9 | L3 on #300 (e000ecc re-review): an initialism or capitalised word before a label word is redacted (`USBKey 2024-10-08-firmware-notes`, `PGPKey: 2024-…`, `MyKey: 2024-…`); fail closed, part-2 negative corpus |
 | CRED-4b f10 | L3 on #300 (f135e43 re-review): the label rule's value charset misses passwords with other punctuation (`password: Abc123@xyz789#Qq`) |
+| broker/owner review_test.go IDs | L3 on #386: `TestRestartHandsOpenRequestsToReissue` seeds the restart record with hard-coded IDs `Z9`, `Y9`, `X9`, which `newIDLocked` can issue, so a request opened earlier in the test can collide with one (0 of 600 runs failed; assertions tolerate it today); use IDs outside the generator's range (e.g. `Z1`, `Y1`, `X1`) when a package next touches review_test.go |
 
 ## Reuse candidates
 | ID | Component | Why |
@@ -140,3 +133,31 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | HOST-1d | cryptsetup / LUKS2 | Vault-keyed disk encryption without custom crypto |
 | SR2-4i | systemd resource control (IOWeight=, CPUWeight=) | Sets io.weight and cpu.weight per slice; add iocost QoS on the image |
 | UPD-b | systemd-sysupdate (S7 stack) | First-boot update-before-trust already fits the chosen image stack |
+
+## Proposed potency intake (2026-10-08)
+
+These additional entries belong to the draft [POT intake](briefs/POT.md). The inherited summary above does not count this proposal: it adds 12 release entries and 2 later entries. Existing classifications and assignments are unchanged. Primary reconciles the intake before implementation readiness.
+
+### Release
+
+| ID | Needed for | Note |
+|---|---|---|
+| POT | A10, A11, A15 | Proposed potency intake; draft implementations are bounded and do not close the full review |
+| POT-P1 | A3, A10, A11, A15 | One production-equivalent recurring workflow; reuse INT-A/H6/W7-A |
+| POT-P2 | A3, A10, A15 | Durable task/result binding and native draft revision; L1 design first |
+| POT-P3 | A7, A10, A11 (CHG-1/2, OP-7) | First deterministic broker-observed effect grader; independent activation approval |
+| POT-P3a | A7, A10, A11 (CHG-1/2, CRED-7, CAP-3) | Private broker-keyed capture/matching qualification blocks P3 activation under default journal redaction |
+| POT-P3b | A7, A10, A11 (CHG-1/2, OP-7) | Authenticated outcome revision and additional qualified result contracts |
+| POT-P5 | A10, A15 (CAP-6, ADP-9/11) | Bounded template cohorts; grant authority and reply policy preserved |
+| POT-P6 | A10, A15 (CAP-9) | Prevent wrong-class transport evidence from reordering candidates |
+| POT-P6b | A10, A15 (CAP-9, OP-7/8) | Trusted acceptance, total cost and qualified-version evidence |
+| POT-P7 | A3, A15 (CAP-11/12, RES-5) | Compose existing resource/quota work only after custody qualification |
+| POT-P8 | A10 (CAP-13) | Qualify one class-specific local pipeline under D-051; no default expansion |
+| POT-P10 | A15 (CAP-1/8, RES-2) | Existing fork/test/keep on the floor host; artifact extension remains later |
+
+### Later
+
+| ID | Why it can wait |
+|---|---|
+| POT-P4 | Scoped recall/progressive fetch waits for a measured A10 blocker; reuse #196/#199 |
+| POT-P9 | Typed prior-result skill handles wait for workload evidence and L1 format acceptance |

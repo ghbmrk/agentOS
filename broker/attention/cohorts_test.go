@@ -489,3 +489,102 @@ func TestInvalidUTF8CannotCollideWithCanonicalTemplate(t *testing.T) {
 		t.Fatalf("lossy JSON conversion poisoned a canonical cohort: %+v", s)
 	}
 }
+
+func TestDeclineFloorFollowsNewReplyKindAfterReload(t *testing.T) {
+	for _, firstReply := range []bool{false, true} {
+		for _, reearnFirst := range []bool{false, true} {
+			t.Run(fmt.Sprintf("first_reply=%v/reearned=%v", firstReply, reearnFirst), func(t *testing.T) {
+				st := &change.MemStore{}
+				o := newOpt(t, st, nil)
+				firstThreshold, nextThreshold := 10, 20
+				if firstReply {
+					firstThreshold, nextThreshold = 20, 10
+				}
+				seq := 0
+				approve := func(asReply bool) {
+					d := invoice(seq)
+					if asReply {
+						d = reply(seq, false)
+					}
+					d.Account, d.Action = "synthetic", "same.send"
+					d.At = t0.Add(time.Duration(seq) * time.Hour)
+					observe(t, o, d)
+					seq++
+				}
+				for i := 0; i < firstThreshold; i++ {
+					approve(firstReply)
+				}
+				if err := o.Decline(suggestions(t, o)[0].Short); err != nil {
+					t.Fatal(err)
+				}
+				if reearnFirst {
+					for i := 0; i < 2*firstThreshold; i++ {
+						approve(firstReply)
+					}
+				}
+				o = newOpt(t, st, nil)
+				for i := 0; i < 2*nextThreshold-1; i++ {
+					approve(!firstReply)
+				}
+				for _, s := range suggestions(t, o) {
+					if s.Spec.Rule.Reply != firstReply {
+						t.Fatalf("new reply kind bypassed doubled threshold: %+v", s)
+					}
+				}
+				approve(!firstReply)
+				found := false
+				for _, s := range suggestions(t, o) {
+					if s.Spec.Rule.Reply != firstReply {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatal("new reply kind failed to earn after doubled threshold")
+				}
+			})
+		}
+	}
+}
+
+func TestNonzeroCohortWithoutDailyEvidenceIsRejected(t *testing.T) {
+	for _, days := range []map[string]int{nil, {}} {
+		st := &change.MemStore{}
+		o := newOpt(t, st, nil)
+		for i := 0; i < 10; i++ {
+			observe(t, o, invoice(i))
+		}
+		for _, c := range o.candidatesLocked() {
+			c.Days = days
+		}
+		raw, err := json.Marshal(o.st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := st.Save(raw); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := New(o.cfg); err == nil {
+			t.Fatal("accepted nonzero ADP-9 evidence without daily counts")
+		}
+	}
+}
+
+func TestAgedReplyHistoryCanObserveAfterReload(t *testing.T) {
+	st := &change.MemStore{}
+	now := t0
+	o := newOpt(t, st, func(c *Config) { c.Now = func() time.Time { return now } })
+	for i := 0; i < 20; i++ {
+		observe(t, o, reply(i, false))
+	}
+	now = t0.Add(EvidenceWindow + 48*time.Hour)
+	if s := suggestions(t, o); len(s) != 1 || s[0].Approved != 20 {
+		t.Fatalf("aging changed reply count: %+v", s)
+	}
+	o = newOpt(t, st, func(c *Config) { c.Now = func() time.Time { return now } })
+	d := reply(21, false)
+	d.At = now
+	observe(t, o, d)
+	if s := suggestions(t, o); len(s) != 1 || s[0].Approved != 21 {
+		t.Fatalf("reload lost reply history: %+v", s)
+	}
+}

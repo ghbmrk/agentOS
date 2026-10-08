@@ -99,6 +99,7 @@ func (o *Optimizer) resetActionLocked(account, action string, decline bool) {
 
 func (o *Optimizer) resetGroupLocked(g *class, decline bool) {
 	if decline {
+		g.Declined = true
 		g.Snooze = 2 * o.threshold(g)
 	}
 	g.reset()
@@ -131,7 +132,7 @@ func (o *Optimizer) advanceLocked(now time.Time) {
 					delete(g.Cohorts, shape)
 				}
 			}
-			if len(g.Cohorts) == 0 && g.Snooze == 0 && !g.Last.After(cutoff) {
+			if len(g.Cohorts) == 0 && !g.Declined && g.Snooze == 0 && !g.Last.After(cutoff) {
 				delete(o.st.Classes, k)
 				continue
 			}
@@ -170,6 +171,9 @@ func (o *Optimizer) loadState() error {
 		if g == nil || k != key(g.Account, g.Action, g.Reply) || len(g.Account) > 64 || len(g.Action) > 64 || strings.ContainsAny(g.Account+g.Action, "\x00") || g.Snooze < 0 || !eligible(g.Verb) {
 			return errors.New("attention: invalid saved class")
 		}
+		// Existing v0/v2 countdowns predate the persistent decline marker.
+		// Preserve their account/action floor for a future opposite kind.
+		g.Declined = g.Declined || g.Snooze > 0
 		if legacy {
 			if g.Offered.After(o.st.AccountOffers[g.Account]) {
 				o.st.AccountOffers[g.Account] = g.Offered
@@ -214,6 +218,14 @@ func (o *Optimizer) loadState() error {
 	for _, c := range o.candidatesLocked() {
 		if !boundedRecipients(c.Recipients) || c.Run < 0 || c.Snooze < 0 || len(c.Recent) > EditWindow || len(c.Days) > 91 || c.MaxAmount < 0 || c.Offers < 0 || c.Offers > MaxOffers {
 			return errors.New("attention: invalid saved evidence")
+		}
+		if c.Run > 0 && !c.Reply && len(c.Days) == 0 {
+			return errors.New("attention: saved cohort has no daily evidence")
+		}
+		// Reply approval counts outlive daily buckets. JSON omitempty drops
+		// an aged-out empty map, so reconstruct it before the next Observe.
+		if c.Reply && c.Days == nil {
+			c.Days = map[string]int{}
 		}
 		for day, count := range c.Days {
 			if _, err := time.Parse("2006-01-02", day); err != nil || count < 1 {
