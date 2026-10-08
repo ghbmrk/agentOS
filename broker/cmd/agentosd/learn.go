@@ -202,6 +202,8 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		NotRun:    loop2NotRun,
 		Notify:    l.notify.send,
 		ResumeFor: p.ResumeFor,
+		// Seeded findings' fixtures are live (loop2.go).
+		FixturesLiveFor: loop2Live,
 	}); err != nil {
 		return nil, err
 	}

@@ -467,7 +467,7 @@ var errNoSharing = errors.New("loops: sharing is not wired")
 
 // DefaultsLine is onboarding's one line on the loop defaults (LOOP-0).
 func DefaultsLine(calls int64) string {
-	return fmt.Sprintf("In spare time I learn from your tasks, test my own security and check for updates, "+
+	return fmt.Sprintf("In spare time I learn from your tasks, check this box against known problems and repair what I can, and check for updates, "+
 		"using up to %d AI calls a day; reply LOOPS OFF to stop that.", calls)
 }
 

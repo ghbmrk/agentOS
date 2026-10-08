@@ -168,6 +168,9 @@ type GuardConfig struct {
 	// both. Off, each fixture is recorded as "deferred"; detection,
 	// containment, evidence, and notice still run.
 	FixturesLive bool
+	// FixturesLiveFor turns fixtures on for single checks whose fixtures
+	// replay answers already, such as CheckSeeded's tree rules (P3-4b).
+	FixturesLiveFor map[Check]bool
 	// UncomparedAlert is how long a version may stay uncomparable before
 	// the owner is texted once. Default 7 days.
 	UncomparedAlert time.Duration
@@ -210,6 +213,11 @@ type Guard struct {
 	// held are fix candidates whose evaluation was preempted, by finding
 	// ID, offered again without another fixer call (PE4); memory only.
 	held map[string]heldFix
+	// contained is set once a finding is paused since start: Loop 2's
+	// return is measured from then on (LOOP-3); memory only.
+	contained bool
+	// reportMu serializes Report.
+	reportMu sync.Mutex
 }
 
 // heldFix is a checked fix candidate kept after a preempted evaluation,
@@ -274,6 +282,12 @@ type Record struct {
 	// Seen counts the times the finding appeared; Last is the latest.
 	Seen int       `json:"seen"`
 	Last time.Time `json:"last"`
+	// Reported marks a finding handed in through Report: it stays open
+	// until a fix for it is adopted, not until a pass stops seeing it.
+	Reported bool `json:"reported,omitempty"`
+	// Regression is the minimized test added to the suite for a reported
+	// finding.
+	Regression []byte `json:"regression,omitempty"`
 }
 
 // NewGuard loads Loop 2's state.
@@ -384,7 +398,7 @@ func (s *Guard) Pass(ctx context.Context) (int, error) {
 	urgent := false
 	for _, id := range sortedKeys(s.st.Open) {
 		rec := s.st.Open[id]
-		if seen[id] {
+		if seen[id] || rec.Reported {
 			continue
 		}
 		// No longer observed; its evidence stays. A pause it caused stays
@@ -439,7 +453,7 @@ func (s *Guard) Pass(ctx context.Context) (int, error) {
 			s.st.Pauses++
 		}
 		s.mu.Unlock()
-		rec, err := s.handle(ctx, f, pause)
+		rec, err := s.handle(ctx, f, pause, false)
 		if err != nil {
 			errs = append(errs, err)
 		}
@@ -517,8 +531,8 @@ func sortedKeys[V any](m map[string]V) []string {
 // handle is LOOP-9: contain, preserve evidence, add the regression
 // fixture, and mark a fix pending. It decides whether the owner is texted;
 // Pass sends the text, then proposes the fix.
-func (s *Guard) handle(ctx context.Context, f Finding, pause bool) (Record, error) {
-	rec := Record{Finding: f, At: s.cfg.Now(), Contained: "none", Digest: digestOf(f)}
+func (s *Guard) handle(ctx context.Context, f Finding, pause, reported bool) (Record, error) {
+	rec := Record{Finding: f, At: s.cfg.Now(), Contained: "none", Digest: digestOf(f), Reported: reported}
 	var errs []error
 	if f.Contain != nil {
 		if !pause {
@@ -533,6 +547,9 @@ func (s *Guard) handle(ctx context.Context, f Finding, pause bool) (Record, erro
 		}
 	}
 	s.mu.Lock()
+	if rec.Contained == "paused" {
+		s.contained = true
+	}
 	if t, ok := s.st.Cleared[f.ID]; ok && rec.At.Sub(t) < s.cfg.ReText {
 		rec.Again = true // back too soon: the digest says so instead
 	}
@@ -556,10 +573,16 @@ func (s *Guard) handle(ctx context.Context, f Finding, pause bool) (Record, erro
 	if err != nil {
 		errs = append(errs, err)
 	}
-	if f.Rule != nil && !s.cfg.FixturesLive {
+	if f.Rule != nil && !s.cfg.FixturesLive && !s.cfg.FixturesLiveFor[f.Check] {
 		rec.Fixture = "deferred"
 	} else if f.Rule != nil {
 		c := change.Case{ID: change.Loop2Fixture + f.ID, Class: change.ClassConfig, Input: f.Rule, Expect: []byte(FixtureOK)}
+		if reported {
+			// The minimized test, linked to its finding: a fix for it must
+			// pass every case linked to it (LOOP-10).
+			rec.Regression = s.regression(f)
+			c.Input, c.Expect, c.Finding = rec.Regression, []byte(change.TreeRuleOK), f.ID
+		}
 		switch err := s.cfg.Pipeline.AddSecurityCase(c); {
 		case err == nil, errors.Is(err, change.ErrDuplicate):
 			rec.Fixture = c.ID
@@ -567,13 +590,16 @@ func (s *Guard) handle(ctx context.Context, f Finding, pause bool) (Record, erro
 			errs = append(errs, fmt.Errorf("fixture %s: %w", f.ID, err))
 		}
 	}
-	if s.cfg.Fixer != nil && f.Rule != nil {
-		rec.Fix = FixPending // Pass proposes it once every finding is contained
+	if (s.cfg.Fixer != nil || reported) && f.Rule != nil {
+		// Pass proposes it once every finding is contained. A reported
+		// finding's request is recorded even with no fixer, so STATUS and
+		// the digest can say it waits and why.
+		rec.Fix = FixPending
 	}
 	s.mu.Lock()
 	s.st.Open[f.ID] = rec
 	e := &s.st.Evidence[ev]
-	e.Fixture, e.Fix, e.FixReason = rec.Fixture, rec.Fix, rec.FixReason
+	e.Fixture, e.Fix, e.FixReason, e.Regression = rec.Fixture, rec.Fix, rec.FixReason, rec.Regression
 	s.mu.Unlock()
 	return rec, errors.Join(errs...)
 }
@@ -605,7 +631,7 @@ func (s *Guard) fix(ctx context.Context, rec *Record) error {
 			return fmt.Errorf("fix %s: %w", f.ID, err)
 		}
 		// Loop 2 sets these, never the fixer.
-		cand.Source, cand.Origin, cand.Public = change.Local, "loop2", false
+		cand.Source, cand.Origin, cand.Public, cand.Finding = change.Local, "loop2", false, f.ID
 		base = s.bases(cand)
 	}
 	rep, err := s.cfg.Pipeline.Propose(ctx, cand)
@@ -662,7 +688,9 @@ func (s *Guard) keep(id string, h heldFix) {
 
 // fixPending proposes every open finding's pending or preempted fix:
 // those left from earlier passes first, oldest finding ID order, then this
-// pass's new findings in the order given.
+// pass's new findings in the order given. A reported finding's request
+// stays open until a fix is adopted, so a failed or rejected one is asked
+// again, once per pass; an adopted fix closes the finding.
 func (s *Guard) fixPending(ctx context.Context, fresh []string) error {
 	if s.cfg.Fixer == nil {
 		return nil
@@ -670,7 +698,7 @@ func (s *Guard) fixPending(ctx context.Context, fresh []string) error {
 	s.mu.Lock()
 	var ids []string
 	for _, id := range sortedKeys(s.st.Open) {
-		if fx := s.st.Open[id].Fix; (fx == FixPending || fx == FixPreempted) && !slices.Contains(fresh, id) {
+		if retry(s.st.Open[id]) && !slices.Contains(fresh, id) {
 			ids = append(ids, id)
 		}
 	}
@@ -683,7 +711,7 @@ func (s *Guard) fixPending(ctx context.Context, fresh []string) error {
 		s.mu.Lock()
 		rec, ok := s.st.Open[id]
 		s.mu.Unlock()
-		if !ok || (rec.Fix != FixPending && rec.Fix != FixPreempted) {
+		if !ok || !retry(rec) {
 			continue
 		}
 		if err := s.fix(ctx, &rec); err != nil {
@@ -697,10 +725,28 @@ func (s *Guard) fixPending(ctx context.Context, fresh []string) error {
 					e.Fix, e.FixReason = rec.Fix, rec.FixReason
 				}
 			}
+			if rec.Reported && rec.Fix == string(change.StateAdopted) {
+				// Fixed: the finding closes; a pause it caused stays until
+				// the owner resumes the target, and the digest says so.
+				delete(s.st.Open, id)
+				delete(s.held, id)
+				s.st.Cleared[id] = s.cfg.Now()
+			}
 		}
 		s.mu.Unlock()
 	}
 	return errors.Join(errs...)
+}
+
+// retry reports a fix request still to be proposed.
+func retry(r Record) bool {
+	switch r.Fix {
+	case FixPending, FixPreempted:
+		return true
+	case FixFailed, string(change.StateRejected):
+		return r.Reported
+	}
+	return false
 }
 
 // evidenceLocked records a finding's evidence, once per digest, and
@@ -1064,6 +1110,8 @@ func findingText(f Finding) string {
 			return "Credential " + sub + " has expired. Replace it on my Wi-Fi page."
 		}
 		return "Credential " + sub + " " + safeName(f.Detail) + ". Replace it on my Wi-Fi page."
+	case CheckSeeded:
+		return "Security test " + sub + " fails on this box."
 	}
 	return "Security finding on " + sub + "."
 }
@@ -1118,6 +1166,9 @@ func (s *Guard) Digest() []string {
 		line := ownerLine(r)
 		if r.Again {
 			line = "Again: " + line
+		}
+		if why := s.waitingLocked(r); why != "" {
+			line += " It " + waitForAFixOf + why + "."
 		}
 		items = append(items, item{r.Finding.Severity == High, line})
 	}
@@ -1209,15 +1260,19 @@ func (s *Guard) partialLocked() string {
 func (s *Guard) Status() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	var line string
 	switch now := s.cfg.Now(); {
 	case s.st.Last.IsZero():
-		return "Loop 2: not run yet."
+		line = "Loop 2: not run yet."
 	case s.overdueLocked(now):
-		return "Loop 2: checks haven't run since " + s.st.Last.Format("Mon 2 Jan") + "."
+		line = "Loop 2: checks haven't run since " + s.st.Last.Format("Mon 2 Jan") + "."
 	case len(s.st.NotRun)+len(s.st.Failed) > 0:
-		return s.partialLocked()
+		line = s.partialLocked()
 	}
-	return ""
+	if wait := s.waitStatusLocked(); wait != "" {
+		return strings.TrimSpace(line + " " + wait)
+	}
+	return line
 }
 
 // Evidence returns every recorded finding, oldest first.
