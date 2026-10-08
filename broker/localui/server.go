@@ -573,12 +573,20 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	ms := append([]mount(nil), s.mounts...)
 	s.mu.Unlock()
 	v := struct {
-		Mounts  []mount
-		Waiting int
+		Mounts    []mount
+		Waiting   int
+		LineNote  string
+		LineTexts []string
 	}{Mounts: ms}
+	auth := localapi.Auth{Token: cookieToken(r)}
 	var rq localapi.Requests
-	if s.call(r.Context(), localapi.OpRequests, localapi.Auth{Token: cookieToken(r)}, &rq) == nil {
+	if s.call(r.Context(), localapi.OpRequests, auth, &rq) == nil {
 		v.Waiting = len(rq.Requests)
+	}
+	// The owner line's counts come only over the tokened op (Security D1).
+	var line localapi.Line
+	if s.call(r.Context(), localapi.OpLine, auth, &line) == nil {
+		v.LineNote, v.LineTexts = line.Note, lineTexts(line, time.Local)
 	}
 	s.render(w, "home", v)
 }

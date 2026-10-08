@@ -1950,7 +1950,7 @@ func (g *Gate) Decide(d owner.Decision) {
 	g.decided[d.Ref] = decision{approved: d.Approved, why: why, asked: w != nil, implicit: implicit, late: late,
 		req: d.Request, at: g.cfg.Now(), item: item, local: local, hold: hold, attempt: attempt, tries: tries}
 	wait := d.Approved && local && !g.confirmed[d.Ref]
-	own := g.own
+	own, eng := g.own, g.eng
 	g.mu.Unlock()
 	if unstaged && hold != "" && own != nil {
 		_ = own.Inform(fmt.Sprintf("%s was not sent: its draft or staged copy could not be made. Ask your agent again if still needed.", clip(hold)))
@@ -1962,7 +1962,20 @@ func (g *Gate) Decide(d owner.Decision) {
 		// broker action (UX lens and L3 on #329). Their other actions can
 		// still be asked on the page (onPage), but are not page-confirmed,
 		// so the step names no agent.
-		_ = own.Inform(fmt.Sprintf("%s did not run: it changed after my Wi-Fi page showed it. Make the request again if still needed.", clip(d.Request)))
+		//
+		// A release adoption the pipeline proposed (Origin change, the
+		// pipeline's own origin) is page-confirmed too, but the owner made
+		// no request. The change is no decline (Decided is told so) and the
+		// proposal drops, but the update check does not offer that version
+		// again until a restart or a newer release, so the notice promises
+		// no new offer: nothing is needed (P2-2a f2; L3 on #363). The
+		// literal "change" is change.OriginPipeline, pinned by
+		// TestAPageChangeNoticeForAReleaseAdoptionSaysNothingIsNeeded.
+		step := "Make the request again if still needed."
+		if st, err := eng.Get(d.Ref); err == nil && changeAction(st.Intent.Action) && st.Intent.Origin == "change" {
+			step = "Nothing is needed."
+		}
+		_ = own.Inform(fmt.Sprintf("%s did not run: it changed after my Wi-Fi page showed it. %s", clip(d.Request), step))
 	}
 	if !wait {
 		g.settle(d.Ref)

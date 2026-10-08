@@ -215,6 +215,8 @@ form { margin: .6em 0 1.2em; }
 {{define "home"}}{{template "head" ""}}
 <h1>AgentOS</h1>
 {{with .Waiting}}<p class="ok"><a href="/approvals/">{{.}} waiting for you</a></p>{{end}}
+{{with .LineNote}}<p class="err">{{.}}</p>{{end}}
+{{with .LineTexts}}<h2>Texts with you</h2><ul>{{range .}}<li>{{.}}</li>{{end}}</ul>{{end}}
 <ul>{{range .Mounts}}<li><a href="{{.Path}}">{{.Title}}</a></li>{{else}}<li class="muted">Nothing else to show here yet.</li>{{end}}</ul>
 <p><a href="/status">Status, STOP and RESUME</a></p>
 {{template "foot"}}{{end}}
