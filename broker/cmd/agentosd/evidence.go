@@ -95,6 +95,9 @@ const (
 	evidenceStarting = "I'm still starting. Try again in a minute."
 	evidenceFailed   = "I couldn't save that setting. Try again later."
 	evidenceNoPage   = "Not changed: turning this on needs my Wi-Fi page, which this box isn't serving. Private replies still come by text."
+	// evidenceNoPageSet is the same refusal while replies already go to
+	// an address (%s, masked).
+	evidenceNoPageSet = "Not changed: this needs my Wi-Fi page, which this box isn't serving. Private replies still go to %s."
 	// offNotice goes to the old destination when it is cleared by text
 	// (security C3 on #148, its wording).
 	offNotice = "Emailing private replies was turned off by text at %s. If that wasn't you, send EMAIL REPLIES ON, then confirm on my Wi-Fi page."
@@ -410,26 +413,29 @@ func (e *evidence) settings(ctx context.Context, msg string, unlocked bool) (str
 	if !on {
 		return e.off(ctx, g), true
 	}
-	main, mainAcct := e.mail.Main()
-	acct := mainAcct
+	main, acct := e.mail.Main()
+	owned := true
 	if addr == "" {
 		addr = main
-	} else {
-		var ok bool
-		if acct, ok = e.mail.Owns(addr); !ok && alias {
-			// "Email replies to bob@corp.example" is a task for the
-			// agent, not this setting (L3 SHOULD 4 on #148).
-			return "", false
-		} else if !ok {
-			return "Not changed: I can email replies only to your mail account's own address, " + maskAddress(main) + ". Send EMAIL REPLIES ON to use it.", true
-		}
+	} else if acct, owned = e.mail.Owns(addr); !owned && alias {
+		// "Email replies to bob@corp.example" is a task for the agent,
+		// not this setting (L3 SHOULD 4 on #148).
+		return "", false
 	}
 	if !e.page {
 		// Known here, not matched in the gate's reason: the journal
 		// redacts reasons, so a matcher on them never fired (P2-2w d).
-		// After the address check, so a task for the agent still reaches
-		// it (UX B1 on #322).
+		// After the agent's case (UX B1 on #322), before the address
+		// step, which would then fail here (L3 F2 on #322). Set earlier,
+		// replies still go by email: Attach replays it without the page
+		// (L3 F1 on #322).
+		if cur, _ := g.Evidence(); cur != "" {
+			return strings.Replace(evidenceNoPageSet, "%s", maskAddress(cur), 1), true
+		}
 		return evidenceNoPage, true
+	}
+	if !owned {
+		return "Not changed: I can email replies only to your mail account's own address, " + maskAddress(main) + ". Send EMAIL REPLIES ON to use it.", true
 	}
 	id := "owner/evidence/" + randHex(6)
 	st, err := g.Submit(grants.EvidenceIntent(id, grants.OriginOwner, addr, acct))

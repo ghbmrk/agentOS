@@ -406,6 +406,18 @@ func TestEvidenceSetting(t *testing.T) {
 	if got, ok := r.ev.settings(ctx, "Email replies to bob@corp.example", true); ok || len(r.gate.subs) != before {
 		t.Fatalf("no page, taken from the agent: %q", got)
 	}
+	// Another address in the EVIDENCE form gets the no-page refusal, not a
+	// step that would then fail on it (L3 F2 on #322, CH-12).
+	if got, _ := r.ev.settings(ctx, "evidence to eve@example.net", true); got != evidenceNoPage || len(r.gate.subs) != before {
+		t.Fatalf("no page, other address: %q", got)
+	}
+	// Set earlier, replies still go by email (Attach replays it without
+	// the page), so the refusal says so (L3 F1 on #322, CH-12).
+	r.gate.addr, r.gate.acct = "owner@example.test", "main"
+	if got, _ := r.ev.settings(ctx, "EVIDENCE ON", true); !strings.Contains(got, "my Wi-Fi page") || !strings.Contains(got, "o***@example.test") || strings.Contains(got, "by text") || len(r.gate.subs) != before {
+		t.Fatalf("no page, set earlier: %q", got)
+	}
+	r.gate.addr, r.gate.acct = "", ""
 	// The refusal names a step that works, not a restart (UX B2, CH-12).
 	if strings.Contains(evidenceNoPage, "isn't running") || !strings.Contains(evidenceNoPage, "my Wi-Fi page") || !strings.Contains(evidenceNoPage, "come by text") {
 		t.Fatalf("wording: %q", evidenceNoPage)
