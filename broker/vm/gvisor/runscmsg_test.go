@@ -40,6 +40,15 @@ func TestRunscFailureAnswersNoOutputAndNoRunscText(t *testing.T) {
 		if strings.Contains(err.Error(), "canary") {
 			t.Fatalf("%s: error carries runsc's text: %v", mode, err)
 		}
+		// The error is a bare vm sentinel: no host path, not even the
+		// exec log's (SR2-3j, release finding 362-2).
+		want := vm.ErrExecNotStarted
+		if mode == "wait" {
+			want = vm.ErrExecFailed
+		}
+		if err != want {
+			t.Fatalf("%s: error %v, want %v", mode, err, want)
+		}
 		if len(res.Stdout) > 0 || len(res.Stderr) > 0 || res.ExitCode != 0 {
 			t.Fatalf("%s: runsc's failure answered output: %+v", mode, res)
 		}

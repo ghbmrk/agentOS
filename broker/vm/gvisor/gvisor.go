@@ -271,12 +271,17 @@ func (r *Runtime) Exec(ctx context.Context, id string, c vm.Command) (vm.ExecRes
 	// the command never started (runsc writes the pid once it has), nothing
 	// on either stream is known to be the guest's: Exec answers no output,
 	// and runsc's messages go only to the broker's exec log (SR2-3h).
-	if pid, _ := os.ReadFile(pidFile); len(bytes.TrimSpace(pid)) == 0 || size(logs[0]) > 0 {
+	// The error is a bare vm sentinel, naming no path (SR2-3j).
+	pid, _ := os.ReadFile(pidFile)
+	if started := len(bytes.TrimSpace(pid)) > 0; !started || size(logs[0]) > 0 {
 		r.logExec(id, err, logs, stderr.bytes())
 		if ctx.Err() != nil {
 			return vm.ExecResult{}, err
 		}
-		return vm.ExecResult{}, fmt.Errorf("runsc exec %s failed (%v); its messages are in %s", id, err, r.execLog())
+		if !started {
+			return vm.ExecResult{}, vm.ErrExecNotStarted
+		}
+		return vm.ExecResult{}, vm.ErrExecFailed
 	}
 	res := vm.ExecResult{Stdout: stdout.bytes(), Stderr: stderr.bytes(), Truncated: stdout.truncated() || stderr.truncated()}
 	var exit *exec.ExitError

@@ -40,8 +40,9 @@ var controlPath = map[string][]string{
 	"localsrv": {"localapi", "owner", "sockets"},
 	// The approval policy (grants) runs inside the engine's checks, so it
 	// is on the control path too; adapters reach it only through its
-	// Verifier interface.
-	"grants": {"journal", "owner", "reversible", "verb"},
+	// Verifier interface. Its refusals' guest text is guesterr's (SR2-3j),
+	// which imports nothing beyond the standard library.
+	"grants": {"guesterr", "journal", "owner", "reversible", "verb"},
 	"verb":   {},
 	// Reversible forms (REV-3) are declarations the gate validates: pure
 	// data, held to the control path's rules.

@@ -194,6 +194,7 @@ type Record struct {
 	Source   string      `json:"source,omitempty"`
 	Evidence string      `json:"evidence,omitempty"`
 	Reason   string      `json:"reason,omitempty"`
+	Guest    string      `json:"guest,omitempty"`
 	Accepted bool        `json:"accepted,omitempty"`
 	Verdict  Verdict     `json:"verdict,omitempty"`
 	Egress   *EgressNote `json:"egress,omitempty"`
