@@ -28,6 +28,7 @@ Weekly runs over all of `main` until 2026-10-07, when the batched lens screen re
 | 2 | 044b83b | [2026-10-05](2026-10-05-ux-review.md) |
 | 3 | be5a80c | [2026-10-08 lens bundle a](2026-10-08-lens-bundle-a.md): #300, #319, #323, #327 |
 | 4 | be5a80c | [2026-10-08 lens bundle b](2026-10-08-lens-bundle-b.md): #320, #321, #322, #324, #329 (run 3 is bundle a, #339) |
+| 5 | d81a971 (PR head) | [2026-10-08 #386](2026-10-08-lens-386.md) |
 
 ## Recurring kinds (to become checks)
 
