@@ -31,3 +31,4 @@ Weekly runs over all of `main` until 2026-10-07, when the batched lens screen re
 | 3 | be5a80c | [2026-10-08 lens bundle a](2026-10-08-lens-bundle-a.md): #300, #319, #323, #327 |
 | 4 | be5a80c | [2026-10-08 lens bundle b](2026-10-08-lens-bundle-b.md): #320, #321, #322, #324, #329 (run 3 is bundle a, #339) |
 | 5 | 32c6e67 | [2026-10-08 #362](2026-10-08-pr362.md): SR2-3h |
+| 7 | cbbf80e (PR head) | [2026-10-08 #391](2026-10-08-lens-391.md): SR2-3m (run 6 is held by open #386 and lens 2026-10-08e) |
