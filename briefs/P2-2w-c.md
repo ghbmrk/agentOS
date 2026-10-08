@@ -9,3 +9,5 @@ Setup moves into agentosd: pairing and finish in agentosd (Security L6), the cod
 **Gate:** lenses (security: strongest tier)
 
 **State on the board before the 2026-10-08 index split:** queued
+
+Split into c1-c3 (P2-2w-c1.md, P2-2w-c2.md, P2-2w-c3.md), each under one session.

@@ -28,4 +28,5 @@ Weekly runs over all of `main` until 2026-10-07, when the batched lens screen re
 |---|---|---|
 | 1 | e841b78 | [2026-10-04](2026-10-04-security-review.md) |
 | 2 | 76ac0b9 | [2026-10-05](2026-10-05-security-review.md) |
+| Lens 2026-10-08a (#300 #319 #323 #327) | be5a80c | [2026-10-08](2026-10-08-lens-bundle-a.md) |
 | Lens 2026-10-08b (#320 #322 #324 #329 #321) | be5a80c | [2026-10-08](2026-10-08-lens-bundle-b.md) |
