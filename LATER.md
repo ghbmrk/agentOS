@@ -71,6 +71,7 @@ No security-fix row (SR2-*) is classed Later. P2-1 (host image, PR #41) has no b
 | ADP-14-origins | Which origins the credentialed context may reach on a site with no recipe; every state-changing request there is already held |
 | ADP-16-acct2 | A second account signed in inside a suite executor's app; ADP-16 kiosk already limits to one account's adapters |
 | OSS-6e f1 | Security 319-1 (L3 asked for this line; lands before #319 merges): a missing or unreadable `boot_id` fails open, so each restart can count one day of the 20h floor again |
+| W3-forget-b2 f1 | L3 on #321: a forget after a proposal reached the owner requeues the rebuild, which may ask again; rare, owner can decline |
 | W3-forget-b2 f2 | L3 on #321: a self-cancelled job still calls propose/Build with a cancelled ctx |
 | W3-forget-b2 f3 | L3 on #321: no mutation test covers the post-build disjunct |
 | P2-2w d f4 | L3 N1 on #322: OSS-10 is missing from the REQ marker in `pagewording_test.go` |
