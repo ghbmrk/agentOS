@@ -84,7 +84,7 @@ type box struct {
 const ownerNum = "+15550000001"
 
 var lay = Layout{Vault: "egress/vault", Keys: "egress/vault.keys", Owner: "broker/owner.json",
-	Layers: []string{"broker/machines/m1/upper"}}
+	Layers: []string{"broker/machines/m1/upper"}, ForgetLog: "broker/forget-log.json"}
 
 func newBox(t *testing.T) *box {
 	t.Helper()

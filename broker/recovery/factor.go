@@ -152,7 +152,11 @@ func storeBackupKey(b *Box, rk RecoveryKey) error {
 	if err != nil {
 		return err
 	}
-	return b.V.Put(BackupKeyName, KindBackupKey, enc)
+	if err := b.V.Put(BackupKeyName, KindBackupKey, enc); err != nil {
+		return err
+	}
+	// The forget log's key comes from the recovery key too (CAP-3).
+	return ensureForgetLog(b.V, rk)
 }
 
 // backupKey returns the public key to seal backups to. It fails closed
