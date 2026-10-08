@@ -272,7 +272,7 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | W3-forget-b1-7 | Text the owner the held restore's PendingNotice (CH-12) from the marker agentosd refuses to start on (#409 U2; brief to write). Also (#409 UX U6, release): add the CH-12 recurring-kind check ("a step that cannot work") for owner texts, per reviews/ux/README.md | W3-forget-b1, W3-forget-b1-4 | Next build item B | queued (needs brief) |
 | W3-forget-b2 | [Builder-lineage rollback with A/B](briefs/W3-forget-b2.md) | W3-forget-a | Next build item B | merged (#321) |
 | W3-forget-b2b | [Agent machine's work taken back as item 2](briefs/W3-forget-b2b.md) | W3-forget-b2 | Next build item B | merged (#327) |
-| W3-forget-b3 | [Promised done text survives a restart](briefs/W3-forget-b3.md) | W3-forget-b1 | Next build item B | queued |
+| W3-forget-b3 | [Promised done text survives a restart](briefs/W3-forget-b3.md) | W3-forget-b1 | Next build item B | in review (#425) |
 | W3-forget-b2c | [Owed take-backs for W3-forget-b2b](briefs/W3-forget-b2c.md) | W3-forget-b2b | Next build item B | queued |
 | W3-implicit | [Report accepted-implicitly guest effects](briefs/W3-implicit.md) | W3 PW3 | — | queued |
 | W5 | [Owner channel](briefs/W5.md) | W3 | loops thread | queued |
