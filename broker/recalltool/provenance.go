@@ -310,11 +310,18 @@ func (p *Provenance) ResetLineages() []string {
 
 // MarkTakeBack records, durably, an approved take-back of lineage from
 // since: owed until done, so a restart does not lose it, and done once its
-// machines went back, so it is never repeated (vm.ForgetSince).
+// machines went back, so it is never repeated (vm.ForgetSince). Done is
+// kept in memory even when it cannot be written, so this run never repeats
+// it (#327 L3 re-review); only a restart before a write lands can.
 func (p *Provenance) MarkTakeBack(lineage string, since time.Time, done bool) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.write(provRecord{Lineage: lineage, At: since.UTC(), TakeBack: true, Forget: done})
+	r := provRecord{Lineage: lineage, At: since.UTC(), TakeBack: true, Forget: done}
+	err := p.write(r)
+	if err != nil && done {
+		p.apply(r)
+	}
+	return err
 }
 
 // TakeBack reports whether a take-back of lineage from since is recorded,

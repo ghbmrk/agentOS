@@ -7,6 +7,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/recall"
 )
 
 // W3-forget-b2b: the owner's forget of a task takes the agent machine's
@@ -155,5 +157,41 @@ func TestCAP3LateTakeBackWaitsForRecallToOpen(t *testing.T) {
 	}
 	if err := l.TakeBack(context.Background(), "root", read, true); err != nil || len(x.vm.calls) != 1 {
 		t.Fatalf("after open: %v %v", err, x.vm.calls)
+	}
+}
+
+// failAfter accepts n appends, then fails every one (a full disk).
+type failAfter struct {
+	*recall.MemStore
+	n int
+}
+
+func (s *failAfter) Append(line []byte) error {
+	if s.n <= 0 {
+		return errors.New("disk full")
+	}
+	s.n--
+	return s.MemStore.Append(line)
+}
+
+// #327 L3 re-review blocker: with provenance writes failing after the owed
+// mark, a take-back whose machines went back is still never repeated, and
+// the owner is not told it again and again.
+func TestCAP3ATakeBackIsNotRepeatedWhenItsMarksCannotBeWritten(t *testing.T) {
+	x, read := newReachRig(t)
+	x.r.prov.store = &failAfter{MemStore: x.r.prst, n: 1}
+	if err := x.reach.TakeBack(context.Background(), "root", read, true); err != nil || len(x.vm.calls) != 1 {
+		t.Fatalf("take-back: %v machines %v", err, x.vm.calls)
+	}
+	for i := 0; i < 3; i++ {
+		if err := x.reach.Retry(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(x.vm.calls) != 1 || len(x.told) > 1 || x.reach.Owed() {
+		t.Fatalf("repeated: machines %v told %v owed %v", x.vm.calls, x.told, x.reach.Owed())
+	}
+	if err := x.reach.TakeBack(context.Background(), "root", read, true); err != nil || len(x.vm.calls) != 1 {
+		t.Fatalf("again: %v machines %v", err, x.vm.calls)
 	}
 }
