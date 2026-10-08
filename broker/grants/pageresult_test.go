@@ -66,10 +66,12 @@ func TestAPageApprovalOfAChangedItemTellsTheOwnerItDidNotRun(t *testing.T) {
 }
 
 // UX lens on #329 (CH-12): the notice names a step the item's origin can
-// take. Only page-confirmed items get it, and agent and guest origins are
-// denied every broker action, so the notice must not send the owner back
-// to their agent. (A release adoption the pipeline proposes is also
-// page-confirmed; its notice is BOARD row P2-2a f2.)
+// take. Only page-confirmed items get it, and agent and guest origins never
+// get one: only broker actions set it, and evaluateBroker denies them every
+// broker action (their other actions can be asked on the page, but are not
+// page-confirmed). So the notice must not send the owner back to their
+// agent. (A release adoption the pipeline proposes is also page-confirmed;
+// its notice is BOARD row P2-2a f2.)
 func TestAPageChangeNoticeNamesAStepEachOriginCanTake(t *testing.T) {
 	agent := func(in journal.Intent) journal.Intent { in.Origin = "guest:agent"; return in }
 	digest := strings.Repeat("a", 64)
