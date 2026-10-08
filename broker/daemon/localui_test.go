@@ -84,7 +84,7 @@ func TestTheLocalUISocketServesThePageOps(t *testing.T) {
 		strings.Contains(string(r.Result), "missed") || strings.Contains(string(r.Result), "others") {
 		t.Fatalf("status: %+v", r)
 	}
-	for _, op := range []string{localapi.OpLine, localapi.OpLines, localapi.OpRequests, localapi.OpResume, localapi.OpWaiting, localapi.OpAnswer, localapi.OpSignOut} {
+	for _, op := range []string{localapi.OpLine, localapi.OpLines, localapi.OpRequests, localapi.OpResume, localapi.OpWaiting, localapi.OpAnswer, localapi.OpSignOut, localapi.OpPaused, localapi.OpAskResume} {
 		if r := send(t, sock, op, struct{}{}); r.OK || r.Error != localapi.ErrUnauthorized {
 			t.Errorf("%s without a token: %+v", op, r)
 		}
@@ -161,5 +161,23 @@ func TestTheLocalUISocketCapsConnections(t *testing.T) {
 		if time.Now().After(deadline) || len(held) > 64 {
 			t.Fatalf("%d connections held, last answered %q", len(held), line)
 		}
+	}
+}
+
+// W5a-resume: the page's resume ask reaches the gate, and an ask for a
+// grant not paused as the page showed it gets fixed words, not an error.
+func TestThePageAsksTheGateToResume(t *testing.T) {
+	dir := t.TempDir()
+	cancel, d := startWith(t, dir, func(c *Config) {
+		c.Auth, c.OwnerState = nil, filepath.Join(dir, "owner.json")
+		c.PageSocket = &PageSocket{UID: os.Getuid()}
+	})
+	defer cancel()
+	if p := pausedGrants(d.Gate()); len(p) != 0 {
+		t.Fatalf("paused %+v", p)
+	}
+	txt, err := askResume(t.Context(), d.Gate(), "G1", "loop2/pause/G1/1")
+	if err != nil || !strings.Contains(txt, "no longer paused") {
+		t.Fatalf("%q %v", txt, err)
 	}
 }

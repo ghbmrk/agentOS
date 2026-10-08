@@ -378,7 +378,7 @@ func TestFindingHandling(t *testing.T) {
 	// Only the High finding is texted; the Low one is in the digest.
 	if len(r.texts) != 1 || !r.urgent[0] ||
 		!strings.Contains(r.texts[0], "Known vulnerability in openssl (ADV-1), fixed in 3.0.14.") ||
-		!strings.Contains(r.texts[0], "Paused the network gateway. It stays paused until you resume it; my Wi-Fi page will offer that in an update.") ||
+		!strings.Contains(r.texts[0], "Paused the network gateway. It stays paused until you resume it on my Wi-Fi page.") ||
 		strings.Contains(r.texts[0], "executor") || strings.Contains(r.texts[0], "grant") {
 		t.Fatalf("texts %q", r.texts)
 	}
@@ -396,7 +396,7 @@ func TestFindingHandling(t *testing.T) {
 	// and that the pause stays.
 	b.pkgs[0].Version = "3.0.14"
 	r.pass(t)
-	if len(r.texts) != 2 || !strings.Contains(r.texts[1], "Cleared: openssl. The network gateway stays paused until you resume it; my Wi-Fi page will offer that in an update.") {
+	if len(r.texts) != 2 || !strings.Contains(r.texts[1], "Cleared: openssl. The network gateway stays paused until you resume it on my Wi-Fi page.") {
 		t.Fatalf("cleared text %q", r.texts)
 	}
 	// Back within a day: handled again (contained, evidence), but not
@@ -580,7 +580,7 @@ func TestPausedAndFlapping(t *testing.T) {
 	b.pkgs[0].Version = "3.0.14"
 	r.pass(t)
 	d := strings.Join(r.g.Digest(), "\n")
-	if !strings.Contains(d, "Cleared: openssl. The network gateway stays paused until you resume it; my Wi-Fi page will offer that in an update.") {
+	if !strings.Contains(d, "Cleared: openssl. The network gateway stays paused until you resume it on my Wi-Fi page.") {
 		t.Fatalf("digest: %s", d)
 	}
 	must(t, r.g.Resumed(Target{Kind: "executor", Name: "egress", Label: "the network gateway"}))

@@ -304,7 +304,7 @@ func (p *Plane) callTool(ctx context.Context, m *machine, name string, raw json.
 			// A private machine repeating a request its lineage made while
 			// public sees it but does not drive it, so nothing a private
 			// machine does changes what a public one can observe (REV-5).
-			return state(a.RequestID, st), false, nil
+			return state(m.id, name, a.RequestID, st), false, nil
 		}
 		if st.State == journal.Pending {
 			s2, err := p.cfg.Effects.Authorize(ctx, id)
@@ -325,7 +325,7 @@ func (p *Plane) callTool(ctx context.Context, m *machine, name string, raw json.
 			}
 			held = err
 		}
-		out := state(a.RequestID, st)
+		out := state(m.id, name, a.RequestID, st)
 		if held != nil && out.Reason == "" {
 			p.cfg.Logf("guest %s: dispatch %s: %v", m.id, id, held)
 			out.Reason = "held by the broker; ask again later with effect_status"
@@ -349,7 +349,7 @@ func (p *Plane) callTool(ctx context.Context, m *machine, name string, raw json.
 		if err != nil {
 			return effectState{}, false, guesterr.Newf("no request %s", guesterr.Guest(a.RequestID))
 		}
-		return state(a.RequestID, st), false, nil
+		return state(m.id, name, a.RequestID, st), false, nil
 	}
 	return effectState{}, false, guesterr.Newf("no tool %q", guesterr.Guest(clip(name, 64)))
 }
@@ -391,6 +391,13 @@ func (p *Plane) intentID(lineage, reqID, label string) (id string, readOnly bool
 
 func privateID(lineage, reqID string) string { return lineage + "/private/" + reqID }
 
-func state(reqID string, st journal.Status) effectState {
-	return effectState{RequestID: reqID, State: string(st.State), Reason: st.Permission.Reason}
+// state is what the guest sees of st. A reason reaches it only as the
+// policy's guest text (SR2-3j); any other, which may name host paths or
+// internal IDs, is a ref, its detail only in the broker's log.
+func state(machine, tool, reqID string, st journal.Status) effectState {
+	why := st.Permission.GuestReason
+	if why == "" && st.Permission.Reason != "" {
+		why = tool + " " + guesterr.Logged("guest", machine, tool, errors.New(st.Permission.Reason))
+	}
+	return effectState{RequestID: reqID, State: string(st.State), Reason: why}
 }
