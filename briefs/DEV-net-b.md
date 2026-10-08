@@ -16,7 +16,7 @@ DEV-net-a adds the address policy and wires the egress proxy. The other broker-s
 `broker/browser`, `broker/modelroute`, `broker/mail/imapsmtp`, `broker/smsapi`, `broker/sipsign`, `broker/bridgeclient`, the host firewall rule set, the DEV-net-a CI allowlist, tests, and ASSUMPTIONS.md.
 
 - Set the `broker/netguard` hook on each dialer above (the browser executor's network path, the model router, and the adapters' declared hosts), and empty the CI allowlist DEV-net-a left for them.
-- Inbound: a host firewall rule set (nftables, a mature component) that drops connections initiated from the uplink to any box port; CH-9's existing rules stay.
+- Inbound: a host firewall rule set (nftables, a mature component) that drops connections initiated from the uplink to any box port; CH-9's existing rules stay and established replies pass. Leave a per-device allow hook for a connected device's pinned address (DEV-2 In) and the passive-discovery listener ports (mDNS, SSDP, Matter) for DEV-1, both empty at release.
 
 Do not edit SPEC.md. If the cited contract cannot decide a design choice, raise an L1 spec-diff proposal before implementation.
 
