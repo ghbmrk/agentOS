@@ -168,6 +168,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | W3-forget-b1 f4 | Security on #409 L2: `readRestoredForgets` trusts `forget-log.json` without authentication at every start; low risk, only agentosd's uid can write it |
 | W3-forget-b1 f5 | Security on #409 L3: the test "copy holds its key" looks for the key's hex but JSON stores `[]byte` as base64, and the copy has no key field, so the assertion is vacuous |
 | W3-forget-b1 f6 | UX on #409 U4 and P4: the taken-back text reaches 161 chars at 100+ things undone; and the BOARD row should say "not live until b1-5/6/7" |
+| SR3-5 f1 | Builder on SR3-5: between the gate's recheck and Execute, Execute re-resolves by Message-ID and reruns only target guards, not alert escalation; reaching an alert needs the alert to carry the recorded message's Message-ID after a reset. Also: SetFlags+Move in one checked session, and CONDSTORE for the M9 flag race |
 
 ## Reuse candidates
 | ID | Component | Why |
