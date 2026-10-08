@@ -85,3 +85,12 @@ source refusal and exact expiry at Begin are also covered. This narrows the gap;
 it does not make time observation and physical carrier handoff atomic, replace
 the containment controller, qualify other validators' forget reach or complete
 fresh quiet/pacing/resource policy. No daemon default is enabled.
+
+W5-D35 separates a reservation Gate from optional read-only Recheck. Recheck
+runs after durable Begin and source eligibility checks, just before the owner
+call. It must not reserve or consume anything. A pre-call policy refusal settles
+the exact attempt as proven NotSent; uncertain settlement still quarantines.
+Expiry/cancellation is checked again after Recheck. Legacy fixtures may omit this
+phase, but dailyhost requires it: use dailypolicy.Check/Recheck together with the
+same approval/question grants gate and reviewed resource policy. This avoids
+both stale quiet-hours policy across Begin persistence and double reservation.

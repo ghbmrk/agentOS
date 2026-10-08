@@ -87,3 +87,13 @@ payload/history, not high-water metadata, backup copies or evidence retained
 elsewhere; they do not establish complete forget or owner/carrier visibility.
 A retention change is an explicit trusted configuration decision, not guest data.
 No timer is enabled through daemon defaults.
+
+## Two-phase notification policy (W5-D35)
+
+Daily.Gate and Daily.Recheck are both required. The former reserves once;
+the latter is read-only and repeats current policy after durable Begin, before
+transport. `dailypolicy.Check` / `Recheck` use the existing shared grants budget,
+trusted clock, quiet hours, STOP and a mandatory resource/authority callback.
+Host wrappers add owner/source health and real engine STOP checks to both phases.
+Neither a final refusal nor affirmative non-send refunds the original slot.
+Callbacks must be repeatable; policy health is not owner authentication.

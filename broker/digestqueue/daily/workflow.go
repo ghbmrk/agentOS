@@ -37,6 +37,8 @@ type Config struct {
 	// Gate enforces current STOP, quiet hours, shared pacing, priority and resource
 	// authority. Activation is not a substitute for this per-attempt policy.
 	Gate func(context.Context, dq.Batch) error
+	// Recheck is the read-only policy phase immediately before transport.
+	Recheck func(context.Context, dq.Batch) error
 }
 type Workflow struct {
 	cfg       Config
@@ -74,7 +76,7 @@ func New(cfg Config) (*Workflow, error) {
 			return time.Time{}
 		}
 		return t
-	}, Sources: validators, Gate: func(ctx context.Context, b dq.Batch) error {
+	}, Sources: validators, Recheck: cfg.Recheck, Gate: func(ctx context.Context, b dq.Batch) error {
 		t, err := cfg.Clock()
 		if err != nil {
 			return err

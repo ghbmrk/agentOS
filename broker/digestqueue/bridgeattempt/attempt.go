@@ -39,6 +39,9 @@ type Config struct {
 	// with this entire Send scope and cancel any in-flight transport on STOP.
 	// A callback alone does not provide that serialization or qualification.
 	Gate func(context.Context, digestqueue.Batch) error
+	// Recheck is read-only final dispatch policy after Begin; it must not
+	// reserve pacing. Optional for legacy infrastructure, required by dailyhost.
+	Recheck func(context.Context, digestqueue.Batch) error
 	// Sources is a closed trusted source allowlist. Validators must check
 	// current eligibility; hash/issuance checks alone do not implement forget.
 	Sources map[string]Validator
@@ -165,6 +168,24 @@ func (a *Attempt) Send(ctx context.Context, id uint64) error {
 	if err := a.validateSources(ctx, b); err != nil {
 		evidence := fmt.Sprintf("digest:%d:attempt:%d:source-refused-before-call", b.ID, b.Attempts)
 		return errors.Join(err, a.cfg.Queue.Finish(b.ID, b.Attempts, digestqueue.NotSent, evidence))
+	}
+	if err := ctx.Err(); err != nil {
+		evidence := fmt.Sprintf("digest:%d:attempt:%d:cancel-before-call", b.ID, b.Attempts)
+		return errors.Join(err, a.cfg.Queue.Finish(b.ID, b.Attempts, digestqueue.NotSent, evidence))
+	}
+	if a.cfg.Recheck != nil {
+		if err := a.cfg.Recheck(ctx, copyBatch(b)); err != nil {
+			evidence := fmt.Sprintf("digest:%d:attempt:%d:policy-refused-before-call", b.ID, b.Attempts)
+			return errors.Join(err, a.cfg.Queue.Finish(b.ID, b.Attempts, digestqueue.NotSent, evidence))
+		}
+		if err := ctx.Err(); err != nil {
+			evidence := fmt.Sprintf("digest:%d:attempt:%d:cancel-before-call", b.ID, b.Attempts)
+			return errors.Join(err, a.cfg.Queue.Finish(b.ID, b.Attempts, digestqueue.NotSent, evidence))
+		}
+		if !a.cfg.Now().Before(b.Expires) {
+			evidence := fmt.Sprintf("digest:%d:attempt:%d:expired-before-call", b.ID, b.Attempts)
+			return errors.Join(digestqueue.ErrExpired, a.cfg.Queue.Finish(b.ID, b.Attempts, digestqueue.NotSent, evidence))
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		evidence := fmt.Sprintf("digest:%d:attempt:%d:cancel-before-call", b.ID, b.Attempts)

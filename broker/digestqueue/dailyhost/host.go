@@ -107,7 +107,7 @@ type Host struct {
 }
 
 func New(cfg Config) (*Host, error) {
-	if cfg.Notes == nil || cfg.Owner.Engine == nil || cfg.Owner.Store == nil || cfg.Owner.Now == nil || cfg.Owner.DigestNotes != nil || cfg.Daily.Owner != nil || cfg.Daily.Flush != nil || cfg.Daily.Gate == nil || cfg.OwnerNotesEligible == nil || cfg.RetentionDays < 1 || cfg.RetentionDays > 3650 || cfg.PollInterval < time.Millisecond || cfg.PollInterval > 24*time.Hour || cfg.StepTimeout < time.Millisecond || cfg.StepTimeout > 5*time.Minute || cfg.StepTimeout > cfg.PollInterval {
+	if cfg.Notes == nil || cfg.Owner.Engine == nil || cfg.Owner.Store == nil || cfg.Owner.Now == nil || cfg.Owner.DigestNotes != nil || cfg.Daily.Owner != nil || cfg.Daily.Flush != nil || cfg.Daily.Gate == nil || cfg.Daily.Recheck == nil || cfg.OwnerNotesEligible == nil || cfg.RetentionDays < 1 || cfg.RetentionDays > 3650 || cfg.PollInterval < time.Millisecond || cfg.PollInterval > 24*time.Hour || cfg.StepTimeout < time.Millisecond || cfg.StepTimeout > 5*time.Minute || cfg.StepTimeout > cfg.PollInterval {
 		return nil, ErrConfig
 	}
 	if _, ok := cfg.Daily.Sources[ownersource.ID]; ok {
@@ -159,6 +159,22 @@ func New(cfg Config) (*Host, error) {
 			return err
 		}
 		if err := cfg.Daily.Gate(ctx, b); err != nil {
+			return errors.Join(ErrPolicy, err)
+		}
+		return ctx.Err()
+	}
+	dc.Recheck = func(ctx context.Context, b dq.Batch) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if cfg.Owner.Engine.Stopped() {
+			h.Hold()
+			return daily.ErrHeld
+		}
+		if err := h.Health(); err != nil {
+			return err
+		}
+		if err := cfg.Daily.Recheck(ctx, b); err != nil {
 			return errors.Join(ErrPolicy, err)
 		}
 		return ctx.Err()
