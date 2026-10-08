@@ -106,7 +106,7 @@ Started before spec v0.12 on parts unlikely to change; each package lists its sp
 | P3-1a | [Replay evaluator](briefs/P3-1a.md) | P3-1, P1-7 | merged (30d601c; broker/replay) |
 | P3-2 | [Loop scheduler and Loop 1](briefs/P3-2.md) | P3-1, P3-1a | merged (0302131; #189; broker/loops) |
 | P3-4 | [Loop 2, self-securing, defensive part, as a scheduler Source](briefs/P3-4.md) | P3-2 | merged (c5feca1; broker/loops Guard) |
-| P3-4b | [Loop 2 active testing from inside the sandbox](briefs/P3-4b.md) | P3-4 | queued (reshaped to off-the-shelf tools, D-067) |
+| P3-4b | [Loop 2 active testing from inside the sandbox](briefs/P3-4b.md) | P3-4 | escalated (2026-10-08: stopped a third time by an automated safety check while the builder was expanding the brief; D-067's A11 spec-diff fallback is with Mark) |
 | P3-5 | [Loop 3, maintenance, as a scheduler Source](briefs/P3-5.md) | P3-2, P4-3 | merged (4672fe8; broker/maintain) |
 | P3-3 | [Recall index and event bus](briefs/P3-3.md) | P1-1, P1-2 | merged (5980098; broker/recall) |
 | P3-7 | [Goal IDs on guest intents](briefs/P3-7.md) | P1-7 | merged (847ea23; broker/guest goal.go) |
@@ -131,7 +131,7 @@ Started before spec v0.12 on parts unlikely to change; each package lists its sp
 
 ## Backlog refill (2026-10-05)
 
-Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRACE.md (31 of 144 IDs uncovered at a0feaa7) and the open PRs. **Unblocked** rows can start now in the cloud. Rows are in suggested order. P2-1 (plan P2 item 1) has a draft PR, #41, but no row of its own; IMG-1 adds its missing checks. Not listed: hardware-only IDs (HW-3 to HW-7, the N95 halves of HW-4 and A2), OSS-12 (Mark chooses the license), LOOP-7 (P3-4b, waiting on Mark), CRED-2 (a scope statement, not testable), and CAP-7 (guest behavior, which the spec says is not infrastructure).
+Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRACE.md (31 of 144 IDs uncovered at a0feaa7) and the open PRs. **Unblocked** rows can start now in the cloud. Rows are in suggested order. P2-1 (plan P2 item 1) has a draft PR, #41, but no row of its own; IMG-1 adds its missing checks. Not listed: hardware-only IDs (HW-3 to HW-7, the N95 halves of HW-4 and A2), OSS-12 (Mark chooses the license), LOOP-7 (P3-4b, stopped a third time by an automated safety check on 2026-10-08; D-067's A11 spec-diff fallback is with Mark), CRED-2 (a scope statement, not testable), and CAP-7 (guest behavior, which the spec says is not infrastructure).
 
 | ID | Package | Needs | State |
 |---|---|---|---|
@@ -204,6 +204,7 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | SR2-3n | [No runsc crash trace reaches the guest, and the guest cannot pick the logged part](briefs/SR2-3n.md) | SR2-3m | queued (release findings S2, S3, S4, Security on #391) |
 | SR2-3o | [Malformed-request refusals keep a field-level hint for the guest](briefs/SR2-3o.md) | SR2-3j | queued (release item 2, lens on #396) |
 | SR2-3p | [A command that cannot start is not told to retry](briefs/SR2-3p.md) | SR2-3j | queued (release item 3, lens on #396) |
+| SR2-3q | [A runsc failure after the command may have started is not told it did not start](briefs/SR2-3q.md) | SR2-3j | queued (release, Security on #396 delta) |
 | SR2-4 | [cgroup cpu, io and pids controllers](briefs/SR2-4.md) | #143 (RES-2 text) | merged (#155) |
 | SR2-4i | [Host side of SR2-4](briefs/SR2-4i.md) | SR2-4 merged; host image | queued (blocked on the host image) |
 | SR2-5 | [Second-line sends](briefs/SR2-5.md) | #143 (ADP-12 text) | merged (2e85d06) |
