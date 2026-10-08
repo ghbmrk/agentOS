@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -239,6 +240,9 @@ type Config struct {
 	// PacingRequireExisting distinguishes reviewed restart from provisioning.
 	// See PACING.md for external configuration/continuity requirements.
 	PacingRequireExisting bool
+	// PacingMaxStoreLatency is an optional monotonic Load/Save threshold.
+	// Zero disables latency observation; it does not interrupt synchronous I/O.
+	PacingMaxStoreLatency time.Duration
 
 	Urgent func(owner.Item) bool
 	Quiet  func(time.Time) bool
@@ -258,14 +262,15 @@ type Gate struct {
 	own    Owner
 	grants map[string]*Grant
 	// evidence is the owner's evidence destination, if set (CH-20).
-	evidence    destination
-	waiting     map[string]*wait
-	batch       []string
-	first       time.Time // when the batch's first item arrived
-	last        time.Time // when its latest item arrived
-	pacingLast  time.Time
-	pacingFault bool
-	sent        []time.Time
+	evidence       destination
+	waiting        map[string]*wait
+	batch          []string
+	first          time.Time // when the batch's first item arrived
+	last           time.Time // when its latest item arrived
+	pacingLast     time.Time
+	pacingFault    atomic.Bool
+	pacingDeadline atomic.Pointer[time.Time]
+	sent           []time.Time
 	// asked are owner-question texts reserved on the same budget
 	// (Reserve, W9).
 	asked []time.Time
