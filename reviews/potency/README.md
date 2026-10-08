@@ -30,3 +30,5 @@ Weekly runs over all of `main` until 2026-10-07, when the batched lens screen re
 | 2 | f797b7d | [2026-10-05](2026-10-05-potency-review.md) (spec edits committed after Mark's yes) |
 | 3 | be5a80c | [2026-10-08 lens bundle a](2026-10-08-lens-bundle-a.md): #300, #319, #323, #327 |
 | 4 | be5a80c | [2026-10-08 lens bundle b](2026-10-08-lens-bundle-b.md): #320, #321, #322, #324, #329 (run 3 is bundle a, #339) |
+| 5 | 32c6e67 | [2026-10-08 #362](2026-10-08-pr362.md): SR2-3h |
+| 6 | b75d319 (PR head; re-checked 196e703) | [2026-10-08 #363](2026-10-08-lens-363.md): P2-2a f2 |
