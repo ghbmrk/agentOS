@@ -349,6 +349,9 @@ func main() {
 	flag.StringVar(&cfg.OwnerNumber, "owner", "", "owner's phone number, E.164")
 	flag.IntVar(&cfg.ModemUID, "modem-uid", -1, "uid of the modem bridge, the only peer allowed on the owner socket")
 	flag.IntVar(&localUIUID, "localui-uid", -1, "uid of the local UI (agentos-localui), the only peer allowed on localui.sock; unset, the socket is not served (P2-2w)")
+	var updateStore, shippedRoot string
+	flag.StringVar(&updateStore, "update-store", "", "the box's update store, already trusting a root; with -shipped-root and the local page, the owner can change where updates come from (OSS-10)")
+	flag.StringVar(&shippedRoot, "shipped-root", "", "the root of trust this image ships (switching back needs its keys, WF1)")
 	flag.BoolVar(&modemBridge, "modem-bridge", true, "serve the modem bridge's ops on the owner socket and send the owner channel's texts through it")
 	flag.BoolVar(&ownerMessage, "owner-message", false, "also serve the raw \"message\" op on the owner socket with the bridge on (simulator and test builds only; it skips the bridge's checks)")
 	flag.Int64Var(&cfg.Admission.CapacityMB, "capacity-mb", defaultCapacityMB, "memory for agent machines, MB; unset, MemTotal less the floor budget outside the pool, at most 4500 or one OpenClaw machine per two cores, whichever is more (PE6, RES-2c)")
@@ -555,6 +558,15 @@ func main() {
 	// yet, so none can be set (owns is nil) and replies go by text.
 	ev := newEvidence(keptPath, cfg.PageSocket != nil, log.Printf)
 	ev.wire(&cfg)
+	// Changing where updates come from (OSS-10): on the clock guard's
+	// Latest, which questions.open starts; until then nothing is followed.
+	fs, err := newFollowSetting(updateStore, shippedRoot, qs.g.Load)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if fs != nil && !fs.wire(&cfg) {
+		log.Print("-update-store is set but the local page is not served (-localui-uid): updates keep their source")
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -571,6 +583,7 @@ func main() {
 		log.Fatal(err)
 	}
 	ev.attach(ctx, d)
+	fs.attach(ctx, d)
 	// Deletions reach the journal's guest intents (CAP-3), when learning
 	// runs what it keeps of them (change C19, learning.ForgetTasks),
 	recallCfg := recalltool.ServiceConfig{Dir: recallDir, Journal: d.Engine(), Ask: d.Gate(), Location: time.Local,

@@ -10,6 +10,8 @@ package daemon
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -146,7 +148,23 @@ type PageSocket struct {
 	// LineNote is the owner line's note (modemlink.Link.OwnerLineNote);
 	// nil without the modem bridge.
 	LineNote func() string
+	// DescribeRoot, when set, serves changing where updates come from on
+	// the page (OSS-10, follow.Executor.Describe): the page's request is
+	// then submitted to the gate as a follow intent, which the broker
+	// executor named grants.FollowExecutor must run. Nil refuses both ops.
+	DescribeRoot func(ctx context.Context, root []byte) (localapi.RootSummary, error)
 }
+
+// The page's fixed replies to a follow request: the gate's reason is not
+// shown (L3 SHOULD 3 on #148).
+const (
+	FollowAsked   = "Asked. Approve it on the Approvals page with a code from your code generator; nothing changes until you do."
+	FollowRefused = "Not asked: the box refused this request."
+)
+
+// FollowRefusedName is the reply to a name the gate does not admit.
+var FollowRefusedName = fmt.Sprintf("Not asked: use a name of at most %d characters and %d digits, with no spaces at either end, that doesn't start %q.",
+	grants.MaxFollowName, grants.MaxFollowDigits, grants.ReservedFollowName)
 
 // Daemon is a running broker.
 type Daemon struct {
@@ -194,6 +212,9 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 	}
 	if cfg.Auth == nil {
 		cfg.Auth = ownerOnly{cfg.OwnerNumber}
+	}
+	if cfg.PageSocket != nil && cfg.PageSocket.DescribeRoot != nil && cfg.BrokerExecutors[grants.FollowExecutor] == nil {
+		return nil, fmt.Errorf("daemon: following a root on the page needs the broker executor %q", grants.FollowExecutor)
 	}
 	seen := map[string]bool{}
 	for _, id := range cfg.Machines {
@@ -343,7 +364,11 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 			store.Close()
 			return nil, errors.New("daemon: the local UI's socket needs the owner channel (OwnerState)")
 		}
-		ui := localsrv.New(localsrv.Config{Owner: ch, LineNote: cfg.PageSocket.LineNote})
+		lcfg := localsrv.Config{Owner: ch, LineNote: cfg.PageSocket.LineNote}
+		if cfg.PageSocket.DescribeRoot != nil {
+			lcfg.DescribeRoot, lcfg.Follow = cfg.PageSocket.DescribeRoot, pageFollow(gate)
+		}
+		ui := localsrv.New(lcfg)
 		uid := cfg.PageSocket.UID
 		eps = append(eps, sockets.Endpoint{
 			Name:        localapi.Socket,
@@ -421,3 +446,35 @@ func (d *Daemon) Admission() *admission.Controller { return d.adm }
 
 // Wait returns after ctx is done and every socket and the journal are closed.
 func (d *Daemon) Wait() { <-d.done }
+
+// pageFollow submits the page's request to follow a held root: a follow
+// intent under a fresh nonce, which the gate asks of the owner on the page
+// at the high tier (GR26).
+func pageFollow(g *grants.Gate) func(ctx context.Context, name, digest string) (string, error) {
+	return func(ctx context.Context, name, digest string) (string, error) {
+		in := grants.FollowIntent(followNonce(), name, digest)
+		st, err := g.Submit(in)
+		if err == nil && st.State == journal.Pending {
+			st, err = g.Authorize(ctx, in.ID)
+		}
+		switch {
+		case err != nil:
+			return "", err
+		case st.State == journal.Pending:
+			return FollowAsked, nil
+		case st.State == journal.Denied && name != "" && !grants.FollowNameOK(name):
+			return FollowRefusedName, nil
+		case st.State == journal.Denied:
+			return FollowRefused, nil
+		}
+		return "", errors.New("daemon: follow request " + string(st.State))
+	}
+}
+
+// followNonce is 16 random bytes in lower-case hex, the form
+// grants.FollowID admits (OSS-10w L3).
+func followNonce() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b) // crypto/rand.Read never fails (Go 1.24)
+	return hex.EncodeToString(b)
+}

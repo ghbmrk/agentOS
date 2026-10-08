@@ -87,7 +87,7 @@ func TestAPageChangeNoticeNamesAStepEachOriginCanTake(t *testing.T) {
 			EvidenceIntent("local/e1", originLocal, ownAddr, "mail")},
 		{"follow", func(t *testing.T) *rig {
 			return newRigExecs(t, nil, map[string]journal.Executor{FollowExecutor: &fakeExec{ran: map[string]int{}}})
-		}, FollowIntent("local-f1", "Acme", digest)},
+		}, FollowIntent("f17", "Acme", digest)},
 	} {
 		t.Run(tc.origin, func(t *testing.T) {
 			r := tc.rig(t)
@@ -98,7 +98,7 @@ func TestAPageChangeNoticeNamesAStepEachOriginCanTake(t *testing.T) {
 					agent(journal.Intent{ID: "guest/c1", Account: journal.BrokerAccount, Action: journal.ActionGrantChange,
 						Params: specParams(mailGrant()), Executor: ExecutorName}),
 					agent(EvidenceIntent("guest/e1", "", ownAddr, "mail")),
-					agent(FollowIntent("guest-f1", "Acme", digest)),
+					agent(FollowIntent("f18", "Acme", digest)),
 				} {
 					if st := r.submit(in); st.State != journal.Denied {
 						t.Fatalf("agent's %s: %s", in.Action, st.State)

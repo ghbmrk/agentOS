@@ -50,9 +50,11 @@ type Config struct {
 	Now      func() time.Time
 	Rand     io.Reader
 	// DescribeRoot verifies a root to follow and holds it for approval
-	// (follow.Executor.Describe); Follow submits the owner's request to
-	// follow a held root (grants.FollowIntent) and returns the channel's
-	// reply. Either nil refuses its op.
+	// (follow.Executor.Describe); on an error, only the summary's Reason
+	// is kept, and only if it is a coarse cause the page words. Follow
+	// submits the owner's request to follow a held root
+	// (grants.FollowIntent) and returns the channel's reply. Either nil
+	// refuses its op.
 	DescribeRoot func(ctx context.Context, root []byte) (localapi.RootSummary, error)
 	Follow       func(ctx context.Context, name, digest string) (string, error)
 }
@@ -324,10 +326,20 @@ func (s *Server) followRoot(ctx context.Context, _ sockets.Peer, args json.RawMe
 	}
 	sum, err := s.cfg.DescribeRoot(ctx, in.Root)
 	if err != nil {
-		return localapi.RootSummary{Refusal: localapi.RefusedRoot}, nil
+		return localapi.RootSummary{Refusal: localapi.RefusedRoot, Reason: rootReason(sum.Reason)}, nil
 	}
-	sum.Refusal = ""
+	sum.Refusal, sum.Reason = "", ""
 	return sum, nil
+}
+
+// rootReason keeps a refused root's coarse cause only if it is one the
+// page words, never other text (agentosd maps the updater's errors).
+func rootReason(r string) string {
+	switch r {
+	case localapi.RootExpired, localapi.RootSignatures, localapi.RootThreshold:
+		return r
+	}
+	return ""
 }
 
 func (s *Server) follow(ctx context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
