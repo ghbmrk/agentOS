@@ -77,6 +77,12 @@ No security-fix row (SR2-*) is classed Later. P2-1 (host image, PR #41) has no b
 | P2-2w c1 f1 | Record the Security L6-L8 conditions from the P2-2w plan review in DECISIONS.md or reviews/security/; c1 worked from the BOARD row and P4 |
 | P2-2w c1 f2 | A crash between the enrollment seal and deleting `owner-totp-pending` leaves that copy of the channel seed in the vault (and backups); unreadable once sealed. Fix: delete a leftover pending entry when a sealed vault opens |
 | P2-2w c1 f3 | No negative test for a peer uid on the `/enroll` routes; the `verify.sock` SO_PEERCRED listener is unchanged and already tested |
+| ADP-14-get | GET links with side effects reached by `navigate` on recipe sites; recipe gate covers state-changing methods first |
+| ADP-14-undo-fail | A failed `UNDO` reply gives site, reference and deadline and opens a task; UNDO success path is enough for A13 |
+| ADP-14-offer | After repeated approved submits on one unknown site, offer its private-derived draft for adoption; cuts approvals, not needed for A13 |
+| ADP-14-cred6 | Recipes declare their site's CRED-6 screens, undeclared ones trigger ADP-7 repair; CRED-6 already applies without a recipe |
+| ADP-14-origins | Which origins the credentialed context may reach on a site with no recipe; every state-changing request there is already held |
+| ADP-16-acct2 | A second account signed in inside a suite executor's app; ADP-16 kiosk already limits to one account's adapters |
 
 ## Stale board rows (merged per git log)
 Rows marked "(shallow)" show only code on origin/main plus the last commit touching it: this clone is shallow, so older merge commits are not visible. Verify those before editing the board.
