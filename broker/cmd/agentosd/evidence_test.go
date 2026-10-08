@@ -401,7 +401,13 @@ func TestEvidenceSetting(t *testing.T) {
 	if got, _ := r.ev.settings(ctx, "EVIDENCE ON", true); got != evidenceNoPage || len(r.gate.subs) != before {
 		t.Fatalf("no page: %q, %d intents", got, len(r.gate.subs)-before)
 	}
-	if strings.Contains(evidenceNoPage, "does not have yet") || !strings.Contains(evidenceNoPage, "my Wi-Fi page") {
+	// With the page off, another address in the EMAIL REPLIES form still
+	// goes to the agent (UX B1 on #322).
+	if got, ok := r.ev.settings(ctx, "Email replies to bob@corp.example", true); ok || len(r.gate.subs) != before {
+		t.Fatalf("no page, taken from the agent: %q", got)
+	}
+	// The refusal names a step that works, not a restart (UX B2, CH-12).
+	if strings.Contains(evidenceNoPage, "isn't running") || !strings.Contains(evidenceNoPage, "my Wi-Fi page") || !strings.Contains(evidenceNoPage, "come by text") {
 		t.Fatalf("wording: %q", evidenceNoPage)
 	}
 	r.ev.page = true
