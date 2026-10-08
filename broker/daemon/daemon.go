@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 	"time"
 
@@ -195,6 +196,31 @@ func (noPreempt) Preempt(id string) error {
 // Run opens the journal (replaying it, OP-4), starts the sockets, and serves
 // until ctx is done.
 func Run(ctx context.Context, cfg Config) (*Daemon, error) {
+	return run(ctx, cfg, nil)
+}
+
+// ErrProvisionedGate is fixed refusal for competing or unqualified Gate wiring.
+var ErrProvisionedGate = errors.New("daemon provisioned Gate configuration refused")
+
+// RunProvisioned uses the supplied strict shared Gate as the actual journal
+// policy/executor and owner callbacks. Leave cfg.Grants ZERO; options and adapter
+// declarations belong to the supplied Gate. Missing/faulted accounting remains
+// held with owner controls. It never constructs another allowance or initializes
+// accounting. Legacy Run is unchanged.
+//
+// The caller owns its session scope through WaitError and ALL downstream work;
+// do not return/escape a daemon or Gate while it runs. One supplied Gate must be
+// unbound, and attachment is attempted once. After any post-attachment failure,
+// retire/drain that session; never reuse/reactivate its Gate. This is not startup
+// control routing, pin/config trust, enforced quiescence, activation or a deadline.
+func RunProvisioned(ctx context.Context, cfg Config, gate *grants.Gate) (*Daemon, error) {
+	if ctx == nil || !gate.ProvisionedPacingConfigured() || !reflect.ValueOf(cfg.Grants).IsZero() {
+		return nil, ErrProvisionedGate
+	}
+	return run(ctx, cfg, gate)
+}
+
+func run(ctx context.Context, cfg Config, supplied *grants.Gate) (*Daemon, error) {
 	if cfg.OwnerNumber == "" && cfg.Auth == nil {
 		return nil, errors.New("daemon: owner number required")
 	}
@@ -231,7 +257,11 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 			store.Close()
 			return nil, fmt.Errorf("daemon: executor name %q is reserved", name)
 		}
-		if gcfg.Declared[name] == nil {
+		declared := gcfg.Declared[name] != nil
+		if supplied != nil {
+			declared = supplied.HasExecutorDeclaration(name)
+		}
+		if !declared {
 			store.Close()
 			return nil, fmt.Errorf("daemon: executor %q declares no operations (ADP-2)", name)
 		}
@@ -248,7 +278,10 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 		}
 		execs[name] = ex
 	}
-	gate := grants.New(gcfg)
+	gate := supplied
+	if gate == nil {
+		gate = grants.New(gcfg)
+	}
 	execs[grants.ExecutorName] = gate
 	if cfg.Recall != nil {
 		execs[grants.RecallExecutor] = cfg.Recall
@@ -290,10 +323,17 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 	// Attach before the owner channel boots: Boot's restart decisions, its
 	// re-issue hand-over (grants GR10), and every guest effect go through
 	// the gate.
+	var own grants.Owner
 	if ch != nil {
-		gate.Attach(eng, ch)
+		own = ch
+	}
+	if supplied != nil {
+		if !gate.AttachUnbound(eng, own) {
+			store.Close()
+			return nil, ErrProvisionedGate
+		}
 	} else {
-		gate.Attach(eng, nil)
+		gate.Attach(eng, own)
 	}
 
 	var modemUID *int

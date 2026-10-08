@@ -61,3 +61,27 @@ before reuse, not proof of retained/released lock, an enforced/persistent restar
 hold, all-user quiescence, media durability or revocation of escaped permissions.
 Synchronous producer/settlement/close work may hang forever. Callback code must
 not await its own daemon shutdown. No automatic repair/retry/default activation.
+
+## W5-D60 strict shared policy
+
+RunProvisioned is opt-in and uses the supplied strict existing-state/positive
+latency Gate as actual journal policy/executor and owner callbacks, with ZERO
+cfg.Grants. Declared adapter executors come from that Gate. Faulted/missing state
+remains held and preserves owner STOP; no fresh allowance or accounting image
+is constructed here. Legacy Run retains its own Gate/configuration behavior.
+Attachment refuses an already bound Gate; loser cleanup never redirects the
+original engine/owner. Constructor failure after attachment keeps it bound:
+retire/drain the owning session, never reuse/reactivate that Gate. Constructor
+journal close failures remain an external uncertain recovery qualification.
+
+Caller owns its registered Session/Startup.Use through WaitError and every
+external question/host/approval handoff. Returning a running daemon, callback,
+Book, permission or spawned work escapes that trust boundary. This constructor
+does not prove or enforce full quiescence, consistently route a startup slot,
+provide independent startup controls, authenticate config/pins, activate a host
+or wire agentosd. Another host must not redirect the shared Gate to a second
+engine/channel. Complete actual common-owner/host adoption remains W5-D60-Q and
+W5-D47-Q plus prior external release/security/current-base qualifications.
+Synchronous construction/attachment/read/admission/shutdown can hang indefinitely.
+Legacy Attach/direct constructors/other slots/noncooperators bypass composition.
+No default activation/refund/deadline/revocation/anti-restore/custody/media claim.

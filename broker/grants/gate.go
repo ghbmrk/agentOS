@@ -426,6 +426,33 @@ func checkForms(cfg Config) map[string]map[string]reversible.Form {
 func (g *Gate) Attach(eng *journal.Engine, own Owner) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.attachLocked(eng, own)
+}
+
+// HasExecutorDeclaration reads a constructor option, not live permission or
+// authority. Callers must preserve immutable configuration/map custody.
+func (g *Gate) HasExecutorDeclaration(name string) bool {
+	return g != nil && g.cfg.Declared[name] != nil
+}
+
+// AttachUnbound atomically binds an unbound Gate once. Already bound/nil
+// inputs refuse without changing the prior engine or owner. Legacy Attach can
+// still redirect it: callers must not use that escape concurrently or afterward.
+// Like Attach, replay is synchronous and can block on trusted callbacks/I/O.
+func (g *Gate) AttachUnbound(eng *journal.Engine, own Owner) bool {
+	if g == nil || eng == nil {
+		return false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.eng != nil {
+		return false
+	}
+	g.attachLocked(eng, own)
+	return true
+}
+
+func (g *Gate) attachLocked(eng *journal.Engine, own Owner) {
 	g.eng, g.own = eng, own
 	g.grants = map[string]*Grant{}
 	for _, r := range eng.Trail() {
