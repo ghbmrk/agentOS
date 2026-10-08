@@ -74,6 +74,9 @@ No security-fix row (SR2-*) is classed Later. P2-1 (host image, PR #41) has no b
 | W3-forget-b2 f2 | L3 on #321: a self-cancelled job still calls propose/Build with a cancelled ctx |
 | W3-forget-b2 f3 | L3 on #321: no mutation test covers the post-build disjunct |
 | P2-2w d f4 | L3 N1 on #322: OSS-10 is missing from the REQ marker in `pagewording_test.go` |
+| P2-2w c1 f1 | Record the Security L6-L8 conditions from the P2-2w plan review in DECISIONS.md or reviews/security/; c1 worked from the BOARD row and P4 |
+| P2-2w c1 f2 | A crash between the enrollment seal and deleting `owner-totp-pending` leaves that copy of the channel seed in the vault (and backups); unreadable once sealed. Fix: delete a leftover pending entry when a sealed vault opens |
+| P2-2w c1 f3 | No negative test for a peer uid on the `/enroll` routes; the `verify.sock` SO_PEERCRED listener is unchanged and already tested |
 | P2-2w c1 f4 | L3 L1 on #320: `ReEnroll` does not delete the `owner-totp-setup-open` vault entry |
 | P2-2w c1 f5 | L3 L2 on #320: no test covers a setup-open entry of the wrong kind |
 | SR2-3g f6 | `guesterr.New` takes any untyped string constant, a host-path constant included; needs deliberate misuse (L3 on #324) |
