@@ -1,10 +1,27 @@
 # Operating model
 
-How AgentOS is built for the most progress per weekly limit at the same quality. CLAUDE.md holds the short rules; this file holds the reasons and the procedures. Any agent, from any subscription or vendor, works from this file, CLAUDE.md, SPEC.md, PLAN.md, BOARD.md, LATER.md and DECISIONS.md. Nothing it needs lives anywhere else. Decided by Mark on 2026-10-07 (DECISIONS.md, COST-1).
+How AgentOS is built for the most progress per weekly limit at the same quality. CLAUDE.md holds the rules, one line each; this file holds the procedures and the reasons behind them. Decided by Mark on 2026-10-07 (DECISIONS.md, COST-1).
+
+**Where facts live.** Each fact has one home, chosen by its kind; other files point to it and never restate it. README.md has the full document map and a reading order per role.
+
+| Kind | Home |
+|---|---|
+| What to build | SPEC.md (requirement IDs are normative) |
+| How it is phased | PLAN.md |
+| Rules | CLAUDE.md |
+| Procedures and reasons | this file |
+| Live state | BOARD.md (index), LATER.md (release vs later), docs/LANES.md (team lanes) |
+| One package's work | `briefs/<ID>.md`, linked from its BOARD row |
+| Records | DECISIONS.md, `reviews/`, each package's `ASSUMPTIONS.md` |
+| Generated | TRACE.md, METRICS.md |
+
+Any agent, from any subscription or vendor, works from these files. Nothing a builder or reviewer needs lives anywhere else.
+
+**Terms.** L0–L4 are the nested loops of PLAN.md §2: L0 Mark, L1 program (coordinator), L2 builder, L3 reviewer, L4 meta. Tiers are §3; lanes are §7.
 
 ## 1. What limits progress
 
-The only hard limit is the weekly subscription allowance. Measured over the week of 2026-10-04 (COST-1, PR #294), list-equivalent spend split into:
+The only hard limit is the weekly subscription allowance. Baseline, measured over the week of 2026-10-04 (COST-1, PR #294); current figures are in METRICS.md. List-equivalent spend split into:
 
 | Part | Share |
 |---|---|
@@ -18,11 +35,13 @@ Cost per merged package = (calls × context per call × read price + writes + ou
 
 Levers in order of effect:
 
-1. **Cut rework.** Raise the first-pass rate and build only what the first release needs (§2, §4).
-2. **Shrink context per call.** Small briefs, compaction at 200k, fresh sessions instead of revived ones (§5).
+1. **Cut rework.** Raise the first-pass rate and build only what the first release needs (§2, §4). L3 cause codes (§4) say which part of the pipeline the rework comes from.
+2. **Shrink context per call.** Small briefs, a short BOARD index, compaction at 200k, fresh sessions instead of revived ones (§5).
 3. **Fewer calls per package.** One package per session; batch reviews (§4).
 4. **Route by model price.** Use the cheapest model that keeps quality, and check with tests rather than with a more expensive model (§5).
 5. **Fill capped time with free CI.** Fuzzing, race soak and mutation run on Actions while the allowance resets.
+
+The budget rules themselves are CLAUDE.md §Budget; PLAN.md §4A–4B hold the calibration history behind them.
 
 ## 2. Finding triage: blocker, release, later
 
@@ -42,75 +61,93 @@ LATER.md also holds the critical-path audit of BOARD.md: each open row is marked
 
 Review depth follows risk, decided mechanically from the paths a change touches. `python3 tools/risk_tier.py --git origin/main HEAD` prints the tier; CI writes it to the PR's step summary. A change takes the highest tier of any path it touches.
 
-| Tier | Paths (tools/risk_tier.py is authoritative) | Review |
+| Tier | Paths (tools/risk_tier.py is authoritative) | Review (stages in §4) |
 |---|---|---|
-| **A** | broker packages holding credentials, isolation, effects, owner auth, update and supply chain (vault, tpmseal, egress, grants, verb, journal, reversible, sockets, guest, vm, workers, cgroup, owner, control, card, modem*, localapi/localsrv/localui, cleanroom, hint, pubid, attest, update, apply, change, replay, sipsign, smsapi, sendrules, clock, recovery, hostdisk, hostchange, vendor, mail, plus the wiring in daemon and cmd), `broker/go.mod`, `broker/go.sum`, `assurance/`, `tools/canary*`, `tools/depaudit*`, `tools/risk_tier*` | Fresh L3 on the session's strongest model with an explicit threat check, then the batched lens screen with a separate Security section. A later delta that changes security-relevant semantics needs a Security re-sign. |
-| **B** | other `broker/` packages, `guest/`, SPEC.md (which also needs Mark through an L1 spec-diff PR) | Fresh L3, then one combined UX/Security/Potency pass in the batched screen. |
-| **C** | docs, tooling, CI, spikes, tests outside tier-A packages, BOARD/LATER/DECISIONS | Fresh L3 and CI only. |
+| **A** | broker packages holding credentials, isolation, effects, owner auth, update and supply chain (vault, tpmseal, egress, grants, verb, journal, reversible, sockets, guest, vm, workers, cgroup, owner, control, card, modem*, localapi/localsrv/localui, cleanroom, hint, pubid, attest, update, apply, change, replay, sipsign, smsapi, sendrules, clock, recovery, hostdisk, hostchange, vendor, mail, plus the wiring in daemon and cmd), `broker/go.mod`, `broker/go.sum`, `assurance/`, `tools/canary*`, `tools/depaudit*`, `tools/risk_tier*` | CI, L3 on the strongest model with a threat check, lens screen with a separate Security section, Security re-sign on later deltas |
+| **B** | other `broker/` packages, `guest/`, SPEC.md (which also needs Mark through an L1 spec-diff PR) | CI, L3, one combined lens pass |
+| **C** | docs, tooling, CI, spikes, tests outside tier-A packages, BOARD/LATER/DECISIONS | CI, L3; no lens screen |
 
 A new broker package that holds credentials or gates effects is added to `TIER_A_BROKER` in the same PR that creates it. A renamed tier-A package fails `tests/test_risk_tier.py` until the list is updated.
 
-## 4. Verification waterfall
+**Security re-sign (mechanical).** After Security has signed a tier-A PR, any later delta for which `python3 tools/risk_tier.py --git <signed commit> HEAD` prints tier A needs a re-sign. The Security session may sign a test-only or comment-only delta in one line. This over-triggers on harmless deltas and never misses one; on tier A that is the right trade (DECISIONS 2026-10-08).
 
-Checks run cheapest first, and each stage only sees what passed the one before:
+**Every PR gets an L3 review.** Tier C skips only the lens screen, never the review (DECISIONS 2026-10-08).
 
-1. **CI**: unit tests, trace check, fuzz, race, the tier summary.
-2. **Mechanical checks** by a Haiku subagent under 100k tokens where useful: wording rules, marker coverage, log triage.
-3. **Fresh L3 review**: a new session per PR (or a small batch of tier-C PRs), from the diff plus the cited requirement IDs. Never a standing reviewer session; the one long-lived reviewer cost 27% of the first week.
-4. **Batched lens screen** for tier A and B PRs that passed L3: the coordinator starts one fresh session per bundle of ready PRs (a bundle is whatever is ready when the screen starts; at least daily while any PR waits). The session reads the diffs, the cited IDs, DECISIONS.md and `reviews/<lens>/README.md`, and writes one verdict per lens per PR to `reviews/<lens>/`. Tier A PRs get their Security section in a separate fresh session on the strongest model. Lens tensions are settled in the same screen under `reviews/arbitration/README.md`; only a real tradeoff goes to Mark.
-5. **Merge** once the stages the tier needs have passed.
+## 4. Review pipeline
+
+Checks run cheapest first; each stage sees only what passed the one before. A PR merges once every stage its tier needs has passed.
+
+| Stage | Tiers | Who and model | Reads | Writes | Passes when |
+|---|---|---|---|---|---|
+| 1. CI | all | GitHub Actions | the PR | checks; tier in the step summary | green |
+| 2. Mechanical checks | where useful | Haiku subagent, under 100k tokens | diff, markers, logs | notes in the PR | nothing flagged |
+| 3. L3 review | all | fresh session per PR (or per small batch of tier-C PRs); strongest model for tier A | diff, cited IDs, the brief | verdict in the PR (format below) | accept |
+| 4. Lens screen | A, B | fresh session per bundle | §4 checklist below | `reviews/<lens>/` | no blocker open |
+| 4a. Security section | A | separate fresh session, strongest model | the same | `reviews/security/` | signed |
+| 5. Merge | all | primary coordinator only (§7) | — | — | stages above passed |
+
+Never a standing reviewer session: the one long-lived reviewer cost 27% of the first week.
+
+**L3 verdict format.** First line `Verdict: accept|fix-list|reject`. Every verdict except accept adds a line `Cause: spec-gap|brief-gap|defect|scope` naming the main cause of the rework:
+
+- `spec-gap`: SPEC.md is ambiguous or silent on what the PR had to decide.
+- `brief-gap`: the brief left out something the package needed.
+- `defect`: the code breaks a cited requirement or an invariant.
+- `scope`: the review asks for something outside the cited IDs; such points are `release` or `later` (§2), not blockers, and the verdict should normally have been accept.
+
+Each fix-list point cites a requirement ID or a concrete defect and carries its class (§2). METRICS counts causes per week, so L4 can tell whether to fix the spec, the briefs, the builders or the reviewers.
+
+**Lens screen checklist.** The coordinator starts one fresh session per bundle: the tier A and B PRs that passed L3 when the screen starts, at least daily while any PR waits, from every team.
+
+1. Read the bundle's diffs, the IDs they cite, the active DECISIONS rows and each lens README (`reviews/security/`, `reviews/potency/`, `reviews/ux/`). Not whole files, not transcripts.
+2. For each PR, apply each lens's question and method. Tier B gets one combined pass; tier A gets UX and Potency here and Security in its own session (stage 4a).
+3. Write one verdict per lens per PR to `reviews/<lens>/YYYY-MM-DD-pr<N>.md` (for a tier-B combined pass, `reviews/combined/YYYY-MM-DD-pr<N>.md`), in the L3 format above, and link it from the PR.
+4. Settle tensions between lenses in the same session under `reviews/arbitration/README.md`; write any resolution to `reviews/arbitration/YYYY-MM-DD-pr<N>.md`. Only a real fork goes to Mark: one question answerable in one word, with a recommendation.
+5. Skip any finding kind a lens README lists under "Checks that replaced findings": CI already catches it.
+
+**Recurring findings become checks.** When the same kind of finding appears on a second PR, the next package that touches the area adds a lint rule, test or CI check that catches it, and the lens README lists it under "Checks that replaced findings". Reviewers then stop looking for it by hand.
 
 Lens memory lives in DECISIONS.md and the lens READMEs, not in a session. There are no standing lens, reviewer or builder sessions.
 
-**Recurring findings become checks.** When the same kind of finding appears on a second PR, the next package that touches the area adds a lint rule, test or CI check that catches it, and the lens README notes the rule. Reviewers then stop looking for it by hand.
-
 ## 5. Sessions, sizing and models
 
-- **One package or one review per session.** A package brief is 20k tokens or less and is sized to finish under 150k tokens of context. A package that cannot is split before it starts.
-- **Hand-off packet** when a session must continue elsewhere (≤20k tokens): the task and its BOARD ID; the failing check and its output, trimmed; the files that matter, with paths; what was tried and why it failed; the next step. Never a transcript.
-- Compaction is at 200k (`.claude/settings.json`); don't raise it.
-- **Models.** Tier-A authoring and tier-A reviews use the strongest model. Mechanical subagent work uses Haiku under 100k tokens (it costs 5x above). Judgement subagent work uses Sonnet.
-- **Sonnet pilot (from the 2026-10-11 reset, one week):** tier B and C builder packages run on Sonnet 5.5; tier A stays on the strongest model. Compare against the week before on first-pass L3 accept, L3 rounds per merged PR, `Defect:` lines within 7 days of merge, and usage per merged PR. Keep Sonnet for B/C if none is worse; otherwise revert. The result is recorded in DECISIONS.md.
+The rules are in CLAUDE.md §Budget; the reasons and procedures are here.
+
+- **Why one package or one review per session:** every call rereads the whole context (§1), so a session that carries a finished package into the next one pays for it on every later call. A brief of 20k tokens or less, done under 150k, keeps the reread small; a package that cannot fit is split before it starts.
+- **Why fresh sessions instead of revived ones:** a session idle more than an hour has dropped out of cache, and waking it rewrites its whole context to cache (the 29% of §1).
+- **Hand-off packet** when a session must continue elsewhere (20k tokens or less): the task and its BOARD ID; the failing check and its output, trimmed; the files that matter, with paths; what was tried and why it failed; the next step. Never a transcript.
+- **Models.** Tier-A authoring and tier-A reviews use the strongest model. Mechanical subagent work uses Haiku under 100k tokens (it costs 5x above). Judgement subagent work uses Sonnet. Where PLAN.md §4's initial routing table differs, this line wins.
+- **Pilots** of a cheaper route run as a BOARD row with the measures that judge them, and the result goes to DECISIONS.md. Current: the Sonnet builder pilot for tier B and C packages, from the 2026-10-11 reset for one week (DECISIONS 2026-10-07, COST-1).
+
+**Package records.**
+
+- **Brief** (`briefs/<ID>.md`): what the builder reads. Goal, requirement IDs, declared file scope, dependencies, the usage estimate, and anything the coordinator learned that the builder needs. 20k tokens or less. The BOARD row links it and stays one line.
+- **Assumptions** (`<package>/ASSUMPTIONS.md`): what the package's code rests on, one table row each: `# | Assumption | Spec basis | If it changes`. The builder writes it; reviewers check the code against it. When an assumption is settled, it becomes a SPEC.md change or a DECISIONS row and its line is struck through with the pointer. Keep it under about 3k words; past that, the package is probably two.
 
 ## 6. Weekly measures
 
-METRICS.md (generated weekly by `.github/workflows/metrics.yml`) carries first-pass L3 accept, L3 rounds per merged PR, usage per merged PR, defects after merge and CI flakes. Session-level spend (cache-write share, spend by role) is measured from session usage by the weekly cost routine and written to `/mnt/project-files/cost/weekly.md`. Targets: first-pass accept rising toward 50%; L3 rounds per merged PR falling toward 1.5; cache-write share under 20%.
+METRICS.md (generated weekly by `.github/workflows/metrics.yml`) carries first-pass L3 accept, L3 rounds and causes per merged PR, usage per merged PR, defects after merge and CI flakes. Usage comes from the manual readings in LEDGER.md, the only hand-kept input. Session-level spend (cache-write share, spend by role) is measured by the weekly cost routine outside the repository; any figure from it that drives a decision is copied into LEDGER.md with its date before anyone relies on it. Targets: first-pass accept rising toward 50%; L3 rounds per merged PR falling toward 1.5; cache-write share under 20%.
 
 ## 7. Working in parallel: a second subscription or another coding agent
 
 Extra capacity (a second subscription, a teammate's agent, or another vendor's coding agent) multiplies progress only if the teams never build the same thing and never disagree about what is true. The design:
 
-**One source of truth: the repository.** Everything an agent needs is in this repo: this file, CLAUDE.md (AGENTS.md points other vendors' agents to it), SPEC.md, PLAN.md, BOARD.md, LATER.md, DECISIONS.md and `reviews/*/README.md`. Chat history and any team's private memory are not sources of truth; a decision that matters is written to DECISIONS.md before anyone relies on it.
+**One source of truth: the repository.** Chat history and any team's private memory are not sources of truth; a decision that matters is written to DECISIONS.md before anyone relies on it.
 
-**Disjoint lanes.** Each team owns whole subsystems behind stable interfaces, listed in the Lanes table below. A team changes files only inside its lane. A change that must cross a lane boundary is an interface change: it goes as a PR to the owning team, or as an issue labelled `lane:<name>` if it needs their design.
+**Disjoint lanes.** Each team owns whole subsystems behind stable interfaces, listed in docs/LANES.md. A team changes files only inside its lane. A change that must cross a lane boundary is an interface change: it goes as a PR to the owning team, or as an issue labelled `lane:<name>` if it needs their design.
 
 **Claims on BOARD.md.** A team claims a row by a PR or commit to main that sets the row's state to `building` and its owner to the team name, before any work. A row with an owner belongs to that team until its state changes. Two claims on one row: the earlier merged one wins and the other stops.
 
 **One merge authority.** Only the primary coordinator merges to main, after the stages its tier needs (§3, §4). Other teams open PRs; they do not merge, and they never push to another team's branch. Branch stems carry the team: `pkg/<team>-<id>-<slug>`.
 
-**Each team reviews its own PRs; the primary team gates.** A team runs the fresh L3 review (§4 stage 3) on its own PRs, on its own subscription, and marks a PR ready only after an accept, linking the verdict in the PR. The primary team then runs the batched lens screen on tier A and B PRs and spot-checks tier C before merging. Bundles from all teams go through that screen at least daily, so PRs don't drift from main.
+**Each team reviews its own PRs; the primary team gates.** A team runs the L3 review (§4 stage 3) on its own PRs, on its own subscription, and marks a PR ready only after an accept, linking the verdict in the PR. The primary team then runs the lens screen on tier A and B PRs before merging; a tier C PR merges on the team's L3 accept and green CI (§4 stages 4–5).
 
 **GitHub is the bus.** PRs and issues carry everything between teams: claims, interface requests, blockers, review verdicts. No team needs access to another team's chat, sessions or memory.
 
-**Hand-off to a new team** is one onboarding PR from the primary team that: adds the team's row to the Lanes table; lists the BOARD rows in its lane with their state; and links the interfaces it may call. The new team's first session reads only that PR plus the files listed above.
+**Hand-off to a new team** is one onboarding PR from the primary team that adds the team's lane and an onboarding section to docs/LANES.md: the BOARD rows in its lane with their state, and the interfaces it may call. The new team's first session reads only that PR plus README.md's reading order for its role.
 
 **Credentials stay with their owner.** No team shares a subscription login, token or key with another, in the repo or anywhere else. Each team runs on its own account.
 
 **Terms.** Anthropic subscriptions may be used only through Claude Code and claude.ai; a second Claude subscription for the same person needs its terms checked before purchase. OpenAI's Codex CLI on a ChatGPT plan is OpenAI's own tool and fine on its own account. AGENTS.md is the entry point Codex reads.
 
-### Lanes
-
-| Lane | Team | Paths |
-|---|---|---|
-| executors and adoption (A13) | claude2 (Claude Code, second subscription) | `broker/browser/`, `broker/desktop/`, `broker/adopt/` (new packages), `spikes/S5-browser-actions/`, and only the BOARD.md rows CRED-4b, ADP-5, ADP-8 (and S5's live run if its network policy allows) |
-| everything else | primary (Claude, Mark's subscription) | all other paths |
-
-Rows are added by the onboarding PR for each new team; the primary team's lane shrinks to match.
-
-### Onboarding: claude2 (2026-10-07)
-
-- **Rows:** CRED-4b (credentialed browser executor; unblocked on the S5 fixture suite), ADP-8 (adapter mismatch check; unblocked), ADP-5 (desktop-app executor; blocked on CRED-4b). These rows are pre-assigned to claude2 on BOARD.md, so no claim PR is needed for them; set a row to `building` in the first PR for it. Every other row needs a claim.
-- **Start with** CRED-4b or ADP-8. Both are release-critical for A13 (LATER.md).
-- **Interfaces you may call, not change:** `broker/vault` (sessions are held by the vault process, CRED-4), `broker/verb` (fixed verb list), `broker/journal`, `broker/egress`, `broker/grants`, `broker/change` (the change pipeline, for ADP-8's agent-drafted adapters), `broker/modelroute`. A change any of them needs goes as a PR or a `lane:primary` issue.
-- **Tiers:** the browser and desktop executors hold credentials and gate effects, so they are tier A. The PR that creates `broker/browser/` or `broker/desktop/` adds that name to `TIER_A_BROKER` in `tools/risk_tier.py`; that one edit is inside your lane.
-- **Access:** your session needs its own linked GitHub account. Work from a fork of the repo (it is public) and open PRs from the fork; never use another team's login.
+Lanes, and each team's onboarding record, are in docs/LANES.md.

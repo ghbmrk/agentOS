@@ -24,4 +24,4 @@ After:
 <!-- Components reused; for anything new, why reuse didn't fit -->
 
 ## Budget
-<!-- Estimated model usage for this package vs its cap -->
+<!-- Brief's usage estimate; usage at the checkpoint and at ready; if over the estimate, why work continued (CLAUDE.md: the estimate is a checkpoint, not a ceiling) -->
