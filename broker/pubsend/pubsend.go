@@ -191,6 +191,9 @@ func (s *Sender) Publish(day string, batch []byte) error {
 			return fmt.Errorf("pubsend: padding seed: %w", err)
 		}
 		k.Batch, k.Seed = append([]byte(nil), batch...), seed
+		// A failed save leaves the ledger as it was, so a retry writes it
+		// again rather than finding the key only in memory.
+		prev := s.st
 		s.st.Waiting = append(s.st.Waiting, k)
 		var dropped []string
 		for len(s.st.Waiting) > MaxWaiting {
@@ -198,6 +201,7 @@ func (s *Sender) Publish(day string, batch []byte) error {
 			s.st.Waiting = s.st.Waiting[1:]
 		}
 		if err := s.save(); err != nil {
+			s.st = prev
 			return err
 		}
 		for _, d := range dropped {

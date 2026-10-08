@@ -250,6 +250,28 @@ func TestOSS6sA6CrashBeforeTheLedgerRecords(t *testing.T) {
 	}
 }
 
+// OSS-6s-a6, a ledger write that fails: Publish reports it and keeps
+// nothing in memory, so the caller's retry writes the ledger and the
+// batch survives a restart (L3 on #411, B1).
+func TestOSS6sA6FailedSaveIsRetried(t *testing.T) {
+	g := newRig(t)
+	g.w.down = true
+	moved := g.dir + ".moved"
+	must(t, os.Rename(g.dir, moved))
+	a := g.batch(t, dayN(0), "a")
+	if err := g.s.Publish(dayN(0), a); err == nil {
+		t.Fatal("a failed ledger write was not reported")
+	}
+	must(t, os.Rename(moved, g.dir))
+	must(t, g.s.Publish(dayN(0), a))
+	g.reopen(t)
+	g.w.down = false
+	must(t, g.s.Flush())
+	if len(g.w.frames) != 1 || !bytes.Equal(g.w.frames[0][:len(a)], a) {
+		t.Fatalf("%d frames after the restart, want the retried batch", len(g.w.frames))
+	}
+}
+
 // OSS-6s-a7: the frame is the signed batch followed by padding; padding
 // is a keyed stream over a fresh random seed, so two frames of the same
 // batch differ only in padding and the padding carries no structure. The
