@@ -123,6 +123,8 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | CRED-4b f7 | L3 on #300 (f135e43 re-review): the label rule redacts prose such as `See the secret 2024-holiday-party-photos album`; fails closed, noted next to K12 |
 | CRED-4b f8 | L3 on #300 (1960aed re-review #4): camelCase false positives (`hotKey 2024-10-08-release-notes`, `useToken 2024-…`, `?sortKey=created_at_2024_desc`); fail closed, part-2 negative corpus |
 | CRED-4b f9 | L3 on #300 (e000ecc re-review): an initialism or capitalised word before a label word is redacted (`USBKey 2024-10-08-firmware-notes`, `PGPKey: 2024-…`, `MyKey: 2024-…`); fail closed, part-2 negative corpus |
+| OSS-10w2 f4 | L3 on #370 (23bc810): the follow page's reserved-name check folds case only, so look-alikes (Cyrillic А in "the АgentOS project again") pass; the name is the owner's own and the card shows the fingerprint. Fold look-alikes as CH-10 does |
+| OSS-10w2 f5 | L3 on #370 (23bc810): localui's `reservedName` and `followPrint` duplicate `grants.ReservedFollowName` and `grants.FollowPrint`; move both into localapi so page and card cannot drift |
 | CRED-4b f10 | L3 on #300 (f135e43 re-review): the label rule's value charset misses passwords with other punctuation (`password: Abc123@xyz789#Qq`) |
 | CH-21a f1 | `change` `TestForgetGoalRewritesALaterAdoptionsUndo` failed once in a full `go test ./...` run (setup: candidates rejected) and passed on four reruns and alone; look for a load-dependent timing in its setup
 | P2-2w d2a-1 | `localsrv.status` reads the whole `Line()` (five modem-link locks) for `.Note`; a note-only accessor would show the D1 split in the types (#378 L3) |

@@ -97,3 +97,37 @@ func TestOSS10wFollowUnwiredFailsClosed(t *testing.T) {
 		t.Fatalf("a failed submit: %v", err)
 	}
 }
+
+// OSS-10w L3 decision: a refused root carries a coarse reason the page
+// words (expired by the box's clock, too few valid signatures, a
+// threshold below the box's floor), which agentosd maps from the
+// updater's error; any other text is dropped, as is the rest of the
+// summary.
+func TestOSS10w2RefusedRootHasACoarseReason(t *testing.T) {
+	r := newRig(t)
+	tok := r.signIn()
+	for _, tc := range []struct{ reason, want string }{
+		{localapi.RootExpired, localapi.RootExpired},
+		{localapi.RootSignatures, localapi.RootSignatures},
+		{localapi.RootThreshold, localapi.RootThreshold},
+		{"tuf: root v3 expired 2026-01-01 by key 0f3a", ""},
+		{"", ""},
+	} {
+		r.srv.cfg.DescribeRoot = func(context.Context, []byte) (localapi.RootSummary, error) {
+			return localapi.RootSummary{Version: 3, Digest: digest, Reason: tc.reason}, errFailed
+		}
+		out, err := r.call(localapi.OpFollowRoot, localapi.FollowRoot{Token: tok, Root: []byte("root")})
+		sum, ok := out.(localapi.RootSummary)
+		if err != nil || !ok || sum.Refusal != localapi.RefusedRoot || sum.Reason != tc.want || sum.Digest != "" || sum.Version != 0 {
+			t.Fatalf("%q: %+v %v", tc.reason, out, err)
+		}
+	}
+	// A root that verifies carries no reason.
+	r.srv.cfg.DescribeRoot = func(context.Context, []byte) (localapi.RootSummary, error) {
+		return localapi.RootSummary{Version: 3, Digest: digest, Reason: localapi.RootExpired, Refusal: "x", Project: true}, nil
+	}
+	out, err := r.call(localapi.OpFollowRoot, localapi.FollowRoot{Token: tok, Root: []byte("root")})
+	if sum, ok := out.(localapi.RootSummary); err != nil || !ok || sum.Reason != "" || sum.Refusal != "" || sum.Digest != digest || !sum.Project {
+		t.Fatalf("%+v %v", out, err)
+	}
+}

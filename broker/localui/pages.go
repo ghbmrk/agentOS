@@ -186,6 +186,28 @@ form { margin: .6em 0 1.2em; }
 <p><a href="/home">More</a> · <a href="/status">Status</a></p>
 {{template "foot"}}{{end}}
 
+{{define "follow"}}{{template "head" ""}}
+<h1>Update source</h1>
+{{with .Msg}}<p class="ok">{{.}}</p><p><a class="button" href="/approvals/">Go to Approvals</a></p>{{end}}{{with .Err}}<p class="err">{{.}}</p>{{end}}
+{{with .Sum}}<section class="card"><h2>What following this source means</h2>
+<p>Its root file is version {{.Version}}{{with .Expires}}, good until {{.}} by this box's clock{{end}}.</p>
+<ul>{{range .Roles}}<li>{{.Does}}: {{.Need}} of {{.Have}} keys must agree.</li>{{end}}</ul>
+<details><summary>Its root keys</summary><ul>{{range .RootIDs}}<li class="mono">{{.}}</li>{{end}}</ul></details>
+{{if .Odd}}<p class="err">A key has an unusual character, shown as [U+…]. Don't follow a source you didn't expect this from.</p>{{end}}
+<p>Fingerprint: <span class="mono">{{.Print}}</span>, the same as on the approval.<br><span class="muted">In full: <span class="mono">{{.Digest}}</span>. Check it matches the one the source publishes.</span></p>
+{{if .Project}}<p>These are the AgentOS project's own keys, as this box shipped with them.</p>
+<form method="post" action="/follow/"><input type="hidden" name="digest" value="{{.Digest}}"><input type="hidden" name="tok" value="{{$.Tok}}"><input type="hidden" name="project" value="1">
+<button name="step" value="ask">Switch back to the AgentOS project</button></form></section>
+{{else}}<p class="err">Whoever holds these keys can change any software on this box. Follow only a source you trust.</p>
+<form method="post" action="/follow/"><input type="hidden" name="digest" value="{{.Digest}}"><input type="hidden" name="tok" value="{{$.Tok}}">
+<label>Your name for this source<input type="text" name="name" maxlength="{{$.MaxName}}" autocomplete="off" spellcheck="false" required></label>
+<button name="step" value="ask">Ask to follow it</button></form></section>{{end}}
+{{else}}{{if not $.Msg}}<p>This box gets its software updates from the AgentOS project. To get them from another source you trust, such as a fork, choose that source's root file (root.json). Nothing changes until you approve it with a code.</p>
+<form method="post" action="/follow/" enctype="multipart/form-data"><label>Root file<br><input type="file" name="root" accept=".json,application/json" required></label><br>
+<button name="step" value="show">Show what it means</button></form>{{end}}{{end}}
+<p><a href="/home">More</a> · <a href="/approvals/">Approvals</a> · <a href="/status">Status</a></p>
+{{template "foot"}}{{end}}
+
 {{define "notready"}}{{template "head" "30"}}
 <h1>AgentOS</h1>
 <p>This box isn't ready yet. This page reloads by itself. If it stays like this for more than a few minutes, turn the PC off and on again.</p>
