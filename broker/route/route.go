@@ -147,6 +147,14 @@ type Config struct {
 	// credential (401), at most once per provider a day, so the owner can
 	// be texted once; the call itself fails over silently.
 	CredentialRejected func(provider string)
+	// Withdrawn reports whether a release has withdrawn provider's route
+	// (CRED-5). A withdrawn route is skipped even where granted, and the
+	// call goes on to the next granted route (CAP-9). Nil withdraws none.
+	Withdrawn func(provider string) bool
+	// RouteWithdrawn is told when a call skips a withdrawn route it could
+	// otherwise have used, at most once per provider a day, so the owner
+	// can be texted once (CRED-5).
+	RouteWithdrawn func(provider string)
 	// Cooldown is how long an exhausted route is skipped when the provider
 	// gives no Retry-After; zero means DefaultCooldown.
 	Cooldown time.Duration
@@ -177,6 +185,7 @@ type Router struct {
 	rule  Rule
 	until map[string]time.Time // route -> exhausted until
 	told  map[string]time.Time // provider -> last CredentialRejected
+	gone  map[string]time.Time // provider -> last RouteWithdrawn
 	stats map[string]*Stats
 }
 
@@ -185,7 +194,7 @@ func New(cfg Config) (*Router, error) {
 	if cfg.Granted == nil || cfg.Upstream == nil || cfg.Audit == nil {
 		return nil, errors.New("route: Granted, Upstream, and Audit are required")
 	}
-	r := &Router{cfg: cfg, providers: map[string]Provider{}, until: map[string]time.Time{}, told: map[string]time.Time{}, stats: map[string]*Stats{}}
+	r := &Router{cfg: cfg, providers: map[string]Provider{}, until: map[string]time.Time{}, told: map[string]time.Time{}, gone: map[string]time.Time{}, stats: map[string]*Stats{}}
 	for _, p := range cfg.Providers {
 		if _, dup := r.providers[p.Name()]; dup {
 			return nil, fmt.Errorf("route: provider %s declared twice", p.Name())
@@ -455,6 +464,10 @@ func (r *Router) serve(c caller, w http.ResponseWriter, req *http.Request) {
 		if !r.cfg.Granted(machine, rt.Provider) || (private && !r.cfg.PrivateOK[rt.Provider]) {
 			continue
 		}
+		if r.cfg.Withdrawn != nil && r.cfg.Withdrawn(rt.Provider) {
+			r.withdrawn(rt.Provider)
+			continue
+		}
 		eligible++
 		key := rt.String()
 		r.mu.Lock()
@@ -529,6 +542,23 @@ func (r *Router) serve(c caller, w http.ResponseWriter, req *http.Request) {
 		fail(http.StatusTooManyRequests, "rate_limit_error", "routes_exhausted", "every permitted route is exhausted; try again later")
 	default:
 		fail(http.StatusBadRequest, "invalid_request_error", "unsupported", fmt.Sprintf("no permitted route can serve this request: %q", unsupportedWhy))
+	}
+}
+
+// withdrawn tells RouteWithdrawn about provider at most once a day.
+func (r *Router) withdrawn(provider string) {
+	if r.cfg.RouteWithdrawn == nil {
+		return
+	}
+	r.mu.Lock()
+	last, ok := r.gone[provider]
+	tell := !ok || r.cfg.Now().Sub(last) >= 24*time.Hour
+	if tell {
+		r.gone[provider] = r.cfg.Now()
+	}
+	r.mu.Unlock()
+	if tell {
+		r.cfg.RouteWithdrawn(provider)
 	}
 }
 
