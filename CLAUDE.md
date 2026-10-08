@@ -30,6 +30,7 @@ Read SPEC.md for what to build and PLAN.md for how. This file is the working con
 - Size each package so its brief is 20k tokens or less and it finishes under 150k; split it before starting otherwise.
 - One package or one review per session. Start a fresh session with a handoff of 20k tokens or less (task, failing check and its output, the files that matter, what was tried) rather than reviving a session over ~150k that sat idle more than an hour: its whole context is rewritten to cache on wake.
 - Mechanical subagent work (search, log triage, wording sweeps, test scaffolding) passes `model: "haiku"` and stays under 100k tokens, above which Haiku costs 5x; use `"sonnet"` when it needs judgment. Reviews of security-critical paths keep the session's model.
+- Sonnet pilot (OPERATING §5, 2026-10-08 to the 2026-10-18 reset): tier B and C builder sessions run on Sonnet 5.5, tier A builders and all L3 reviews on the strongest model. Name the builder model in the PR's Budget section.
 - Read tool output narrowly (grep, tail, `go test -run`), never whole CI logs or large files. Send cross-session messages for decisions, blockers and hand-offs only; progress goes in the status checklist.
 
 ## Repository conventions
