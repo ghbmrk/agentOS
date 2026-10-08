@@ -36,10 +36,14 @@ var (
 	// followed by a separator: whitespace, ':' or '=', or quotes and short
 	// snapshot attribute groups ("[active] [ref=e5] [cursor=pointer]"). So
 	// paths and file names such as "keyboard-shortcuts-v2", "turkey/..." or
-	// "api_key_rotation_2026.pdf" stay intact. The value must hold a digit,
+	// "api_key_rotation_2026.pdf" stay intact. A second, case-sensitive branch
+	// takes a capitalised label after a lowercase letter or digit, for
+	// camelCase keys ("accessToken", "clientSecret", "myApiKey"), while
+	// all-caps words ("TURKEY", "MONKEYS") stay intact. The value must hold a digit,
 	// so labelled prose ("token-based-auth") is left alone too.
 	// Stricter than S5's protocol.py, which has no such rule.
-	labelled = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(?:api[\s_-]?key|key|token|secret|password|passwd)s?` +
+	labelled = regexp.MustCompile(`(?i)(?:(?:^|[^a-z0-9])(?:api[\s_-]?key|key|token|secret|password|passwd)` +
+		`|(?-i:[a-z0-9](?:Api[\s_-]?[Kk]ey|Key|Token|Secret|Password|Passwd)))s?` +
 		`(?:["']|\s*\[[^\]\n]{1,40}\])*(?:\s*[:=]\s*|\s+)["']?([A-Za-z0-9+/=_.-]{16,})`)
 	secretParam = regexp.MustCompile(`(?i)(token|code|key|sig|auth|session|password|secret)`)
 	candidate   = regexp.MustCompile(`[A-Za-z0-9+_=-]{24,}`)

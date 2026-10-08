@@ -109,7 +109,14 @@ func TestDetectorRedactsLabelledValues(t *testing.T) {
 		`- textbox "API key" [disabled] [ref=e5]: ` + hex32:                hex32,
 		`- textbox "API key" [ref=e5] [cursor=pointer]: ` + hex32:          hex32,
 		`- textbox "Token" [active] [ref=f1e5] [cursor=pointer]: ` + hex64: hex64,
-		"aws_secret_access_key = " + aws:                                   aws,
+		// camelCase labels in JSON and config text (L3 re-review at f135e43).
+		`{"accessToken": "` + hex32 + `"}`: hex32,
+		"authToken: " + hex32:              hex32,
+		"clientSecret: " + hex32:           hex32,
+		"privateKey: " + hex32:             hex32,
+		"refreshToken " + hex32:            hex32,
+		"myApiKey=" + hex32:                hex32,
+		"aws_secret_access_key = " + aws:   aws,
 	} {
 		out, n := Detect(in)
 		if strings.Contains(out, secret) || n == 0 {
@@ -134,6 +141,8 @@ func TestDetectorLabelRuleLeavesOrdinaryTextAlone(t *testing.T) {
 		"/url: https://example.com/settings/api-keys/rotation-guide-2024",
 		"api_key_rotation_2026.pdf",
 		"secret_santa_2024_participants.csv",
+		"/url: /recipes/TURKEY/roast-2024-edition",
+		"/url: /blog/MONKEYS 2024-10-08-zoo-visit",
 	} {
 		if out, n := Detect(in); n != 0 || out != in {
 			t.Errorf("%q changed to %q (n=%d)", in, out, n)
