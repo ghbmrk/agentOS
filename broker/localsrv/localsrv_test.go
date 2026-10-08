@@ -86,17 +86,28 @@ func (f *fakeOwner) LocalAnswer(id, sum string, approve bool, code string) (stri
 }
 
 type rig struct {
-	t   *testing.T
-	now time.Time
-	own *fakeOwner
-	srv *Server
-	ops map[string]sockets.Handler
+	t       *testing.T
+	now     time.Time
+	own     *fakeOwner
+	srv     *Server
+	ops     map[string]sockets.Handler
+	follows []string
 }
 
 func newRig(t *testing.T) *rig {
 	r := &rig{t: t, now: time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)}
 	r.own = &fakeOwner{now: &r.now, left: 24}
-	r.srv = New(Config{Owner: r.own, LineNote: func() string { return "I can't reach my phone modem." }, Now: func() time.Time { return r.now }})
+	r.srv = New(Config{Owner: r.own, LineNote: func() string { return "I can't reach my phone modem." }, Now: func() time.Time { return r.now },
+		DescribeRoot: func(_ context.Context, root []byte) (localapi.RootSummary, error) {
+			if string(root) != "root" {
+				return localapi.RootSummary{}, errors.New("bad root")
+			}
+			return localapi.RootSummary{Version: 1, Digest: digest}, nil
+		},
+		Follow: func(_ context.Context, name, d string) (string, error) {
+			r.follows = append(r.follows, name+"@"+d)
+			return "Asked: K8", nil
+		}})
 	r.ops = r.srv.Ops()
 	return r
 }
@@ -149,13 +160,15 @@ func code(err error) string {
 // tokenOps are the ops that need a token, with args carrying tok.
 func tokenOps(tok string) map[string]any {
 	return map[string]any{
-		localapi.OpSignOut:  localapi.Auth{Token: tok},
-		localapi.OpSession:  localapi.Auth{Token: tok},
-		localapi.OpLines:    localapi.Auth{Token: tok},
-		localapi.OpResume:   localapi.Resume{Token: tok},
-		localapi.OpRequests: localapi.Auth{Token: tok},
-		localapi.OpWaiting:  localapi.Auth{Token: tok},
-		localapi.OpAnswer:   localapi.Answer{Token: tok, ID: "K7", Sum: "s1", Approve: false},
+		localapi.OpSignOut:    localapi.Auth{Token: tok},
+		localapi.OpSession:    localapi.Auth{Token: tok},
+		localapi.OpLines:      localapi.Auth{Token: tok},
+		localapi.OpResume:     localapi.Resume{Token: tok},
+		localapi.OpRequests:   localapi.Auth{Token: tok},
+		localapi.OpWaiting:    localapi.Auth{Token: tok},
+		localapi.OpAnswer:     localapi.Answer{Token: tok, ID: "K7", Sum: "s1", Approve: false},
+		localapi.OpFollowRoot: localapi.FollowRoot{Token: tok, Root: []byte("root")},
+		localapi.OpFollow:     localapi.Follow{Token: tok, Name: "Acme", Digest: digest},
 	}
 }
 
@@ -185,8 +198,8 @@ func TestEveryOpButTheOpenOnesNeedsAToken(t *testing.T) {
 			t.Errorf("%s with no args: %v", op, err)
 		}
 	}
-	if len(r.own.answers) != 0 {
-		t.Fatalf("answers reached the channel: %v", r.own.answers)
+	if len(r.own.answers) != 0 || len(r.follows) != 0 {
+		t.Fatalf("reached the channel: %v %v", r.own.answers, r.follows)
 	}
 	for op := range open {
 		var args any = struct{}{}

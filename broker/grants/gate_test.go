@@ -1,7 +1,6 @@
 package grants
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io/fs"
@@ -638,23 +637,36 @@ func TestAHeldPageItemSaysHeld(t *testing.T) {
 	}
 }
 
-// Security D6 on P2-2a: until the daemon serves the Approvals page (part
-// 2), no binary turns LocalUI on, so #144's refusal and its wording stay
-// what every build shows.
-func TestNoBinaryAsksOnThePageYet(t *testing.T) {
+// Security D6 on P2-2a, as P2-2w d turns the page on: LocalUI is set in
+// one place, the daemon, and only from whether it serves the page
+// (localui.sock), so no binary asks on a page nobody serves; #144's
+// refusal and its wording stay what a box without the page shows.
+func TestOnlyTheServedPageTurnsLocalUIOn(t *testing.T) {
 	if RecipientsNotTextable != "can't be approved by text: each recipient must be a plain email address, a full +country number or acct ...1234, at most 100 characters in all; ask again with a new request_id" {
 		t.Fatalf("wording changed: %q", RecipientsNotTextable)
 	}
-	for _, dir := range []string{"../cmd", "../daemon"} {
+	const want = "gcfg.LocalUI = cfg.PageSocket != nil"
+	// Every package but grants itself (L3 F2 on #322): a setter in any
+	// other main or library package fails too.
+	for _, dir := range []string{".."} {
 		err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+			if err == nil && d.IsDir() && p == filepath.Join("..", "grants") {
+				return fs.SkipDir
+			}
 			if err != nil || d.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
 				return err
 			}
 			b, err := os.ReadFile(p)
-			if err == nil && bytes.Contains(b, []byte("LocalUI")) {
-				t.Errorf("%s sets LocalUI", p)
+			if err != nil {
+				return err
 			}
-			return err
+			for _, line := range strings.Split(string(b), "\n") {
+				if strings.Contains(line, "LocalUI") && !strings.HasPrefix(strings.TrimSpace(line), "//") &&
+					(p != filepath.Join("..", "daemon", "daemon.go") || strings.TrimSpace(line) != want) {
+					t.Errorf("%s: %s", p, strings.TrimSpace(line))
+				}
+			}
+			return nil
 		})
 		if err != nil {
 			t.Fatal(err)

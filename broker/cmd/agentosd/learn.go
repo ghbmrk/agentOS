@@ -230,6 +230,7 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		inform: func(s string) { l.notify.send(s, false) }, now: time.Now, loc: time.Local, sleep: sleepCtx}
 	cfg.BrokerExecutors[grants.ForgetExecutor] = l.forgetOwner
 	cfg.Grants.ForgetItem = l.forgetOwner.Item
+	cfg.Grants.ForgetAgentItem = l.forgetOwner.AgentItem
 	cfg.Settings = l.settings
 	cfg.Notes = append(cfg.Notes, l.note, l.builderNote, l.guard.Status)
 	cfg.Narrows = l.sched.Narrows

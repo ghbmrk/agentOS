@@ -49,6 +49,12 @@ type Config struct {
 	LineNote func() string
 	Now      func() time.Time
 	Rand     io.Reader
+	// DescribeRoot verifies a root to follow and holds it for approval
+	// (follow.Executor.Describe); Follow submits the owner's request to
+	// follow a held root (grants.FollowIntent) and returns the channel's
+	// reply. Either nil refuses its op.
+	DescribeRoot func(ctx context.Context, root []byte) (localapi.RootSummary, error)
+	Follow       func(ctx context.Context, name, digest string) (string, error)
 }
 
 // WrongPerMinute bounds wrong codes on the socket in any minute, tries in
@@ -102,6 +108,9 @@ func (s *Server) Ops() map[string]sockets.Handler {
 		localapi.OpRequests: s.authed(s.requests),
 		localapi.OpWaiting:  s.authed(s.waiting),
 		localapi.OpAnswer:   s.answer,
+		// Changing where updates come from needs a session (WF3).
+		localapi.OpFollowRoot: s.followRoot,
+		localapi.OpFollow:     s.follow,
 	}
 }
 
@@ -299,6 +308,57 @@ func (s *Server) answer(_ context.Context, _ sockets.Peer, args json.RawMessage)
 		return localapi.Answered{Text: msg, Refusal: localapi.RefusedNotSettled}, nil
 	}
 	return nil, errFailed
+}
+
+func (s *Server) followRoot(ctx context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
+	var in localapi.FollowRoot
+	err := decode(args, &in)
+	if !s.valid(in.Token) {
+		return nil, errUnauthorized
+	}
+	if err != nil || len(in.Root) == 0 || len(in.Root) > localapi.MaxRoot {
+		return nil, errBadArgs
+	}
+	if s.cfg.DescribeRoot == nil {
+		return nil, errFailed
+	}
+	sum, err := s.cfg.DescribeRoot(ctx, in.Root)
+	if err != nil {
+		return localapi.RootSummary{Refusal: localapi.RefusedRoot}, nil
+	}
+	sum.Refusal = ""
+	return sum, nil
+}
+
+func (s *Server) follow(ctx context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
+	var in localapi.Follow
+	err := decode(args, &in)
+	if !s.valid(in.Token) {
+		return nil, errUnauthorized
+	}
+	if err != nil || len(in.Name) > localapi.MaxFollowName || !lowerHex(in.Digest, localapi.DigestLen) {
+		return nil, errBadArgs
+	}
+	if s.cfg.Follow == nil {
+		return nil, errFailed
+	}
+	t, err := s.cfg.Follow(ctx, in.Name, in.Digest)
+	if err != nil {
+		return nil, errFailed
+	}
+	return localapi.Text{Text: t}, nil
+}
+
+func lowerHex(v string, n int) bool {
+	if len(v) != n {
+		return false
+	}
+	for _, c := range v {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // triesLeft is the refusal of a wrong or unchecked code and what the day's

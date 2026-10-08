@@ -53,7 +53,7 @@ func TestGrantsAreIntentsWithCodeAndLocalConfirmation(t *testing.T) {
 		Params: specParams(Spec{Account: "cal", Executor: "cal", Ops: map[string]string{"event.add": "draft"}}), Executor: ExecutorName})
 	r.g.Flush()
 	r.decide(true, "owner")
-	if st := r.state("local/g3"); st.State != journal.Pending || !strings.Contains(st.Permission.Reason, "local page") {
+	if st := r.state("local/g3"); st.State != journal.Pending || !strings.Contains(st.Permission.Reason, "Wi-Fi page") {
 		t.Fatalf("g3 without confirmation: %s %q", st.State, st.Permission.Reason)
 	}
 
@@ -91,8 +91,8 @@ func TestGrantsAreIntentsWithCodeAndLocalConfirmation(t *testing.T) {
 	noUI := newRig(t, func(c *Config) { c.LocalUI = false })
 	st := noUI.submit(journal.Intent{ID: "local/g1", Origin: "local", Account: journal.BrokerAccount, Action: journal.ActionGrantChange,
 		Params: specParams(mailGrant()), Executor: ExecutorName})
-	if st.State != journal.Denied || noUI.own.count() != 0 {
-		t.Fatalf("without a local page: %s, %d requests", st.State, noUI.own.count())
+	if st.State != journal.Denied || st.Permission.Reason != NoPageGrant || noUI.own.count() != 0 {
+		t.Fatalf("without a local page: %s %q, %d requests", st.State, st.Permission.Reason, noUI.own.count())
 	}
 }
 

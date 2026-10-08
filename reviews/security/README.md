@@ -4,15 +4,29 @@ A recurring adversarial review of the spec, spike results, and (once it exists) 
 
 It is one of three lenses (security, potency, UX). An arbitrator loop weighs their proposals against each other, so **every proposal states its cost to UX and to potency**.
 
-**Cadence:** weekly. Each run reads what changed on `main` since the last reviewed commit (SPEC.md, merged PRs, spike results, code) and stays quiet when nothing security-relevant changed.
-
 **Method:** a fixed threat model (assets and adversaries, see run 1) applied to each change: follow every path from each adversary to each asset, and record whether a requirement stops it structurally, only procedurally, or not at all. Security-critical code paths (broker, vault, executors, clean room, update signing) get an explicit threat check (CLAUDE.md).
 
-**Output per run:** `YYYY-MM-DD-security-review.md` with findings (severity, adversary, proposal, UX cost, potency cost), a decisions list, and, when warranted, SPEC.md edits in the same PR.
+**Output of a spec-wide run** (only when Mark or L1 asks for one): `YYYY-MM-DD-security-review.md` with findings (severity, adversary, proposal, UX cost, potency cost), a decisions list, and, when warranted, SPEC.md edits in the same PR.
 
-## Last reviewed
+## In the lens screen
+
+Tier A PRs get a Security section in its own fresh session on the strongest model; tier B PRs get Security as part of the combined pass. Each run applies the method below to the PR's diff, not to all of `main`. Verdicts go to `reviews/security/YYYY-MM-DD-pr<N>.md` (combined passes to `reviews/combined/`), in the L3 format of docs/OPERATING.md §4. A later delta on a signed tier-A PR needs a re-sign by the mechanical rule in OPERATING §3.
+
+## Checks that replaced findings
+
+Finding kinds CI now catches; the screen no longer looks for them by hand (OPERATING §4).
+
+| Finding kind | Check | Since |
+|---|---|---|
+| — | none recorded yet | — |
+
+## Spec-wide runs
+
+Weekly runs over all of `main` until 2026-10-07, when the batched lens screen replaced them (DECISIONS D-048).
 
 | Run | main at | Review |
 |---|---|---|
 | 1 | e841b78 | [2026-10-04](2026-10-04-security-review.md) |
 | 2 | 76ac0b9 | [2026-10-05](2026-10-05-security-review.md) |
+| Lens 2026-10-08a (#300 #319 #323 #327) | be5a80c | [2026-10-08](2026-10-08-lens-bundle-a.md) |
+| Lens 2026-10-08b (#320 #322 #324 #329 #321) | be5a80c | [2026-10-08](2026-10-08-lens-bundle-b.md) |
