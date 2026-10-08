@@ -147,6 +147,8 @@ Held back and spent only by L1 with a recorded reason. Unspent reserve rolls int
 
 ## 4. Model-tier routing (initial; L4 rebalances)
 
+*The current routing and budget rules are CLAUDE.md §Budget and docs/OPERATING.md §5; where they differ from this section, they win. §4–4B stay as the calibration record behind them.*
+
 | Work | Tier | Why |
 |---|---|---|
 | L1 planning, gate judgment, spec diffs, hard design choices | Top tier (Opus-class) | Low volume, high consequence |
@@ -249,16 +251,7 @@ This totals roughly **3–5 months** of calendar time at this plan level. That f
 
 ## 5. Artifacts the harness maintains (in the repo)
 
-| File | Purpose | Updated by |
-|---|---|---|
-| `SPEC.md` | Current spec (v0.12+) | L1 (Mark approves) |
-| `PLAN.md` | Phases, packages, dependencies | L1 |
-| `BOARD.md` | Package states: queued, building, in review, merged, escalated | L1/L2 |
-| `LEDGER.md` | Budget allocated, spent, and remaining per phase and tier | L1, automated from usage logs |
-| `TRACE.md` | Requirement ID → tests → status (generated) | CI |
-| `DECISIONS.md` | Every decision with date and evidence | L1 / Mark |
-| `METRICS.md` | L4 inputs and history | CI + L4 |
-| `CLAUDE.md` | Builder and reviewer rules | L4 proposes, L1 adopts |
+README.md's document table lists every file the harness maintains, its kind, and who changes it.
 
 ---
 

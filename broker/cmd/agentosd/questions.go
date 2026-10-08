@@ -13,6 +13,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/clock"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/guest"
+	"github.com/ghbmrk/agentos/broker/guesterr"
 	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/question"
 	"github.com/ghbmrk/agentos/broker/vm"
@@ -90,7 +91,7 @@ func (q *questions) Call(ctx context.Context, machine, lineage, name string, arg
 	b := q.b.Load()
 	if b == nil {
 		if name == question.ToolAsk || name == question.ToolStatus {
-			return "", true, errors.New("the broker cannot text the owner now")
+			return "", true, guesterr.New("the broker cannot text the owner now")
 		}
 		return "", false, nil
 	}

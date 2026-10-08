@@ -1,6 +1,6 @@
 # S8-codex-terms: OpenAI terms on broker-held Codex tokens
 
-**Status: in review (2026-10-08).** The source that would settle the question, OpenAI's Terms of Use, could not be read from this environment (see Sources). The recommendation below rests on CRED-5's own default (broker-held needs terms that *permit* it), not on a finding that OpenAI forbids it.
+**Status: decided (Mark, 2026-10-08): broker-held for Codex**, as an unconfirmed route under #328 ([decision](https://github.com/ghbmrk/agentOS/pull/318#issuecomment-6050634132)). The findings and sources below are the evidence. OpenAI's Terms of Use could not be read from this environment (see Sources), so the decision rests on Mark's own reading of the terms, not on a source in this note.
 
 ## Question
 CRED-5 picks a custody mode per provider from its published terms. For Codex CLI signed in with a ChatGPT plan, do OpenAI's terms permit a broker process to hold and refresh the ChatGPT-managed tokens and inject them at egress (broker-held)? Or must the login stay in the Codex CLI's own process (worker-held)?
@@ -29,16 +29,9 @@ CRED-5 picks a custody mode per provider from its published terms. For Codex CLI
 - `ChatgptAuthTokens` (finding 4) suggests OpenAI expects some host processes to give Codex its tokens. Its intended users and terms are not documented in what was read.
 - Worker-held custody also runs into CRED-5 W3. A Codex ChatGPT login is a full account login: RESULT.md §2 saw it call `wham/accounts/check`, `wham/settings/user`, plugin and MCP endpoints. It is not inference-scoped. The only inference-scoped plan token found (SIWC's `chatgpt.tokens.use.direct`) is issued to a registered app, not to the Codex CLI.
 
-## Recommendation for CRED-5
-**Recommendation, not a decision.** Record Codex as having **no qualified plan custody mode yet**:
-- **Broker-held:** not qualified. CRED-5 allows it "only where the provider's terms permit a proxy to hold the login", and no permission was found. Silence is not permission.
-- **Worker-held:** not qualified either, because W3 (inference-only scope) fails for a full ChatGPT login.
-- **Interim route:** Codex runs with an OpenAI API key, broker-held as for any adapter, injected into declared inference endpoints only (ADP-10; CRED-1 unchanged). Plan use for Codex waits on the questions below. Claude stays worker-held per RESULT.md §2.
-
-If Mark reads the ToU and it is silent on proxies too, the two choices are: (a) treat silence plus SIWC's "locally hosted" carve-out as enough for broker-held, which accepts some terms risk; or (b) ask OpenAI. The SIWC interest form or support are the only channels found.
-
-## Open questions for Mark
-1. Can you read https://openai.com/policies/terms-of-use/ in a browser (the challenge blocks agents) and paste the account-sharing, automated-access and circumvention clauses into #318? Or allow `learn.chatgpt.com` and `help.openai.com` in the environment, since the Codex auth page and Help Center now live there.
-2. If the ToU is silent: broker-held on the "locally hosted" reading (a), or no Codex plan route until OpenAI confirms (b)?
-3. Should W3 allow an exception for a provider with no inference-scoped CLI login, or does Codex plan use simply wait?
-4. Is SIWC plan usage (AgentOS as a registered open-source, locally hosted app) worth a separate BOARD row? It does not fit CAP-11/CRED-5 today, which require the provider's official CLI.
+## Decision
+**Decided by Mark, 2026-10-08 ([comment](https://github.com/ghbmrk/agentOS/pull/318#issuecomment-6050634132)): broker-held for Codex.** His assessment of the terms: proxy custody is conditional, not explicitly authorized; unattended `codex exec` is generally supported; "Sign in with ChatGPT" is not necessarily the only allowed route; use is subject to fair use.
+- Because the terms neither permit nor prohibit proxy custody, #328 amends CRED-5 to allow an **unconfirmed** broker-held route. It runs only with one-time owner consent to the account risk, and a release withdraws it, with API-key fallback, if OpenAI prohibits it.
+- Open questions 1–3 of the earlier draft are answered by this decision. Question 4 (SIWC plan usage as its own BOARD row) is not pursued.
+- Worker-held stays unavailable for Codex: a full ChatGPT login fails CRED-5 W3 (last inference bullet under Findings). That reasoning is independent of the decision.
+- Claude stays worker-held per RESULT.md §2.
