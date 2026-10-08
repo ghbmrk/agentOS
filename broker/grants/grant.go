@@ -67,6 +67,36 @@ func ForgetGoal(id string) string {
 	return goal
 }
 
+// ForgetAgentID is the ID of item 2 of the owner's forget request
+// (W3-forget-b2b): taking back the agent's work since the task. It shares
+// item 1's nonce, so each item can name the other (ForgetSibling).
+func ForgetAgentID(nonce, goal string) string { return "forget-agent/" + nonce + "/" + goal }
+
+// ForgetAgentGoal is the goal a take-back intent's ID names; "" if malformed.
+func ForgetAgentGoal(id string) string {
+	rest, ok := strings.CutPrefix(id, "forget-agent/")
+	if !ok {
+		return ""
+	}
+	nonce, goal, ok := strings.Cut(rest, "/")
+	if !ok || nonce == "" {
+		return ""
+	}
+	return goal
+}
+
+// ForgetSibling is the other item of the request id belongs to: the
+// take-back for a forget, the forget for a take-back; "" if malformed.
+func ForgetSibling(id string) string {
+	if rest, ok := strings.CutPrefix(id, "forget/"); ok && ForgetGoal(id) != "" {
+		return "forget-agent/" + rest
+	}
+	if rest, ok := strings.CutPrefix(id, "forget-agent/"); ok && ForgetAgentGoal(id) != "" {
+		return "forget/" + rest
+	}
+	return ""
+}
+
 // OriginLoop2 marks Loop 2's containment (loops S8, K-S2): a pause of a
 // grant on a finding, and nothing else. Only the broker submits it; guest
 // intents carry "guest:<lineage>".

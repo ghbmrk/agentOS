@@ -212,6 +212,11 @@ type Config struct {
 	// text. ok false: no such task, and the forget is denied. Nil: every
 	// forget is denied.
 	ForgetItem func(goal string) (object, detail string, ok bool)
+	// ForgetAgentItem gives the line for item 2 of a forget request
+	// (W3-forget-b2b): the agent's work since the task, taken back. ok
+	// false: nothing to take back, and item 2 is denied. Nil: every item 2
+	// is denied.
+	ForgetAgentItem func(goal string) (object, detail string, ok bool)
 	// Unpaused is told the ID of a grant whose pause the owner ended by
 	// resuming or revoking it, so Loop 2 stops listing it as paused (loops
 	// S4, W5a). Called outside the gate's lock, never on replay; it must
@@ -892,14 +897,20 @@ func (g *Gate) evaluateBroker(ctx context.Context, phase journal.Phase, in journ
 		// submits it, on the owner's FORGET; the line is the box's own,
 		// from the goal, and the owner's YES with the request's code is
 		// what runs it (security C1).
-		goal := ForgetGoal(in.ID)
+		// Item 2 of the same request, the agent's work since the task
+		// taken back (W3-forget-b2b), is asked the same way with its own
+		// line from ForgetAgentItem.
+		goal, lookup := ForgetGoal(in.ID), g.cfg.ForgetItem
+		if goal == "" {
+			goal, lookup = ForgetAgentGoal(in.ID), g.cfg.ForgetAgentItem
+		}
 		if in.Origin != OriginForget || in.Executor != ForgetExecutor || goal == "" {
 			return verdict{kind: deny, why: "a forget comes only from the owner's FORGET"}
 		}
-		if g.cfg.ForgetItem == nil {
+		if lookup == nil {
 			return verdict{kind: deny, why: "forgetting is not available"}
 		}
-		obj, detail, ok := g.cfg.ForgetItem(goal)
+		obj, detail, ok := lookup(goal)
 		if !ok || obj == "" {
 			return verdict{kind: deny, why: "no such task"}
 		}

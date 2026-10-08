@@ -47,7 +47,59 @@ const (
 	forgetRefused  = "I couldn't ask to forget that task. Try again."
 	forgetNotSaved = "Not forgotten yet: I couldn't save it. I keep trying and will text you when it's done."
 	forgetNotDone  = "Not forgotten: I couldn't save it. Send FORGET to try again."
+	// W3-forget-b2b: the notice before a request whose item 2 takes the
+	// agent's work back, the reply when item 2 is approved without item
+	// 1, and the done text for item 2.
+	forgetAgentNotice = "Your agent has worked since that task, so item 2 takes that work back. " +
+		"Approve only item 1 to keep that work; your agent then still holds the task until that work is undone."
+	forgetAgentAlone   = "Nothing taken back: item 2 goes only with item 1. Send FORGET to ask again."
+	forgetAgentDone    = "Your agent's work since that task is undone; it no longer holds the task."
+	forgetAgentNotYet  = "Your agent's work since that task is not undone yet. I keep trying and will text you when it's done."
+	forgetAgentNoAgent = "Nothing taken back: your agent is not running. Send FORGET to ask again."
+	// forgetSiblingWait bounds how long item 2 waits for item 1's outcome;
+	// the gate settles the items of one answer together.
+	forgetSiblingWait = 30 * time.Second
 )
+
+// forgetAgent takes the agent machine's work since a task back on the
+// ask-first deletion-rollback rule (W3-forget-b2b): recall's Reach, with
+// the agent machine's lineage.
+type forgetAgent struct {
+	work interface {
+		Work(lineage string, since time.Time) (worked, ok bool)
+		TakeBack(ctx context.Context, lineage string, since time.Time) error
+	}
+	lineage func() (string, error)
+}
+
+// worked reports whether the agent worked since at; ok false: not known
+// (no agent machine or recall not open), and nothing is taken back.
+func (a *forgetAgent) worked(at time.Time) (worked, ok bool) {
+	if a == nil {
+		return false, false
+	}
+	l, err := a.lineage()
+	if err != nil {
+		return false, false
+	}
+	return a.work.Work(l, at)
+}
+
+func (a *forgetAgent) takeBack(ctx context.Context, since time.Time) error {
+	if a == nil {
+		return errors.New("forget: no agent machine")
+	}
+	l, err := a.lineage()
+	if err != nil {
+		return err
+	}
+	return a.work.TakeBack(ctx, l, since)
+}
+
+// statusGetter is the gate's Get, which item 2 reads item 1's outcome by.
+type statusGetter interface {
+	Get(id string) (journal.Status, error)
+}
 
 type ownerForget struct {
 	tasks *taskTexts
@@ -59,9 +111,11 @@ type ownerForget struct {
 	// forgotten reports a goal's tombstone (forgotten.has).
 	forgotten func(goal string) bool
 	gate      atomic.Pointer[pauseGateBox]
-	inform    func(string)
-	now       func() time.Time
-	loc       *time.Location
+	// agent is the agent machine's take-back, once machines are open.
+	agent  atomic.Pointer[forgetAgent]
+	inform func(string)
+	now    func() time.Time
+	loc    *time.Location
 	// sleep waits between retries; false stops them (shutdown).
 	sleep func(context.Context, time.Duration) bool
 	// retried, if set, is called when a retry loop ends (tests).
@@ -155,7 +209,7 @@ func (f *ownerForget) Text(ctx context.Context, msg string, unlocked bool) (stri
 	if _, ok := f.tasks.get(goal); !ok {
 		return forgetStale, true
 	}
-	if !f.ask(ctx, goal) {
+	if !f.ask(ctx, goal, f.now()) {
 		return forgetRefused, true
 	}
 	// No reply of its own (UX U-F8): the request names the task and what
@@ -165,26 +219,71 @@ func (f *ownerForget) Text(ctx context.Context, msg string, unlocked bool) (stri
 	return "", true
 }
 
-// ask submits the forget intent; the gate asks the owner.
-func (f *ownerForget) ask(ctx context.Context, goal string) bool {
+// ask submits the forget intent; the gate asks the owner. When the agent
+// worked since the task, the same request's item 2 takes that work back,
+// after a notice of what approving only item 1 keeps (W3-forget-b2b):
+// with no work, item 1 alone takes the agent back without asking, on the
+// ask-first rule.
+func (f *ownerForget) ask(ctx context.Context, goal string, now time.Time) bool {
 	box := f.gate.Load()
-	if box == nil {
+	t, ok := f.tasks.get(goal)
+	if box == nil || !ok {
 		return false
 	}
 	f.seq++
 	// The goal ID only, in the intent's ID: the task's text never
-	// enters the journal.
-	id := grants.ForgetID(fmt.Sprintf("%d.%d", f.now().UnixNano(), f.seq), goal)
+	// enters the journal. The task's time rides in the nonce, which item 2
+	// takes the agent back to after item 1 has deleted the task.
+	nonce := fmt.Sprintf("%d.%d.%d", now.UnixNano(), f.seq, t.At.UnixNano())
+	id := grants.ForgetID(nonce, goal)
 	st, err := box.g.Submit(journal.Intent{ID: id, Origin: grants.OriginForget, Account: journal.BrokerAccount,
 		Action: journal.ActionLearnForget, Executor: grants.ForgetExecutor})
-	if err == nil && st.State == journal.Pending {
-		st, err = box.g.Authorize(ctx, id)
+	if err != nil || st.State != journal.Pending {
+		if err != nil {
+			log.Printf("forget: ask: %v", err)
+		}
+		return false
+	}
+	var id2 string
+	if worked, ok := f.agent.Load().worked(t.At); ok && worked {
+		id2 = grants.ForgetAgentID(nonce, goal)
+		// Its own effect, so the journal does not hold item 1 behind it
+		// as a duplicate (its effect fingerprint leaves out the ID).
+		st2, err := box.g.Submit(journal.Intent{ID: id2, Origin: grants.OriginForget, Account: journal.BrokerAccount,
+			Action: journal.ActionLearnForget, Executor: grants.ForgetExecutor, Params: map[string]any{"agent": true}})
+		if err != nil || st2.State != journal.Pending {
+			log.Printf("forget: ask item 2: %v %s", err, st2.State)
+			id2 = ""
+		}
+	}
+	if id2 != "" {
+		// Before the request, which the gate sends at its next tick.
+		f.inform(forgetAgentNotice)
+	}
+	st, err = box.g.Authorize(ctx, id)
+	if err == nil && id2 != "" && st.State == journal.Pending {
+		// Never item 2 without item 1 on the request.
+		_, err = box.g.Authorize(ctx, id2)
 	}
 	if err != nil {
 		log.Printf("forget: ask: %v", err)
 		return false
 	}
 	return st.State == journal.Pending
+}
+
+// forgetSince is the task's time a forget or take-back ID carries.
+func forgetSince(id string) (time.Time, bool) {
+	parts := strings.Split(id, "/")
+	if len(parts) < 3 {
+		return time.Time{}, false
+	}
+	n := strings.Split(parts[1], ".")
+	v, err := strconv.ParseInt(n[len(n)-1], 10, 64)
+	if len(n) != 3 || err != nil {
+		return time.Time{}, false
+	}
+	return time.Unix(0, v), true
 }
 
 // Item is the gate's approval line for a forget (grants Config.ForgetItem):
@@ -201,6 +300,15 @@ func (f *ownerForget) Item(goal string) (object, detail string, ok bool) {
 	// clipped task still reads as clipped.
 	obj := strings.NewReplacer(`"`, "'", "…", "..").Replace(f.shown(t, false))
 	return obj, detail, true
+}
+
+// AgentItem is the gate's line for item 2 (grants Config.ForgetAgentItem).
+func (f *ownerForget) AgentItem(goal string) (object, detail string, ok bool) {
+	t, ok := f.tasks.get(goal)
+	if !ok {
+		return "", "", false
+	}
+	return "your agent's work since " + f.when(t.At), "", true
 }
 
 // shown is a task as a text may show it: a task the owner texted by its
@@ -265,15 +373,21 @@ func things(n int) string {
 // tombstone holds nothing is learned from the task again, and the rest is
 // retried until every save holds; the owner hears it is done only then.
 func (f *ownerForget) Execute(ctx context.Context, in journal.Intent, _ int) journal.Outcome {
+	if in.Action != journal.ActionLearnForget || in.Origin != grants.OriginForget || in.Account != journal.BrokerAccount {
+		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "malformed forget"}
+	}
+	if grants.ForgetAgentGoal(in.ID) != "" {
+		return f.executeAgent(ctx, in)
+	}
 	goal := grants.ForgetGoal(in.ID)
-	if in.Action != journal.ActionLearnForget || in.Origin != grants.OriginForget || in.Account != journal.BrokerAccount || goal == "" {
+	if goal == "" {
 		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "malformed forget"}
 	}
 	undone := f.learned(goal)
 	err := f.forget(goal)
 	switch {
 	case err == nil:
-		f.inform(forgetDone(undone))
+		f.inform(forgetDone(undone, f.agentBackWithoutAsking(ctx, in.ID)))
 		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "forgotten"}
 	case errors.Is(err, errNotTombstoned):
 		// Nothing was deleted and a restart would not finish it, so it
@@ -301,7 +415,7 @@ func (f *ownerForget) retry(ctx context.Context, goal string, undone int) {
 		}
 		err := f.forget(goal)
 		if err == nil {
-			f.inform(forgetDone(undone))
+			f.inform(forgetDone(undone, false))
 			return
 		}
 		log.Printf("forget: not saved yet: %v", err)
@@ -319,17 +433,139 @@ func (f *ownerForget) retry(ctx context.Context, goal string, undone int) {
 // is forgotten again at once.
 const forgetBackups = " Older backups and your agent's own files may still hold it."
 
-func forgetDone(undone int) string {
-	if undone == 0 {
-		return "Forgotten." + forgetBackups
+// forgetBackupsOnly is forgetBackups once the agent is taken back.
+const forgetBackupsOnly = " Older backups may still hold it."
+
+func forgetDone(undone int, agentBack bool) string {
+	tail := forgetBackups
+	if agentBack {
+		tail = forgetBackupsOnly
 	}
-	return "Forgotten. I also undid " + things(undone) + " from it; I'll relearn what I can without it." + forgetBackups
+	if undone == 0 {
+		return "Forgotten." + tail
+	}
+	return "Forgotten. I also undid " + things(undone) + " from it; I'll relearn what I can without it." + tail
+}
+
+// agentBackWithoutAsking takes the agent back to before a forgotten task
+// when the request had no item 2 and the agent still has not worked
+// since: on the ask-first rule that loses nothing, so it needs no ask.
+// Work since the ask is kept, and the done text says the agent may hold
+// the task.
+func (f *ownerForget) agentBackWithoutAsking(ctx context.Context, id string) bool {
+	since, ok := forgetSince(id)
+	a := f.agent.Load()
+	if !ok || a == nil {
+		return false
+	}
+	if box := f.gate.Load(); box != nil {
+		g, ok := box.g.(statusGetter)
+		if !ok {
+			return false
+		}
+		if _, err := g.Get(grants.ForgetSibling(id)); err == nil {
+			return false // item 2 takes the agent back, if approved
+		}
+	}
+	if worked, ok := a.worked(since); !ok || worked {
+		return false
+	}
+	if err := a.takeBack(ctx, since); err != nil {
+		log.Printf("forget: agent take-back: %v", err)
+		return false
+	}
+	return true
+}
+
+// executeAgent runs an approved item 2: approved with item 1, the
+// agent's work since the task is taken back, retried until it holds;
+// approved without item 1, nothing is, and the owner is told so plainly.
+func (f *ownerForget) executeAgent(ctx context.Context, in journal.Intent) journal.Outcome {
+	since, ok := forgetSince(in.ID)
+	if !ok {
+		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "malformed take-back"}
+	}
+	if !f.siblingApproved(ctx, grants.ForgetSibling(in.ID)) {
+		f.inform(forgetAgentAlone)
+		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "item 1 not approved"}
+	}
+	a := f.agent.Load()
+	if a == nil {
+		f.inform(forgetAgentNoAgent)
+		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "no agent machine"}
+	}
+	if err := a.takeBack(ctx, since); err != nil {
+		log.Printf("forget: agent take-back: %v", err)
+		go f.retryAgent(context.WithoutCancel(ctx), a, since)
+		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "taking back; retrying"}
+	}
+	f.inform(forgetAgentDone)
+	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "taken back"}
+}
+
+// siblingApproved waits for the owner's decision on item 1, which the
+// channel settles before item 2's, for at most forgetSiblingWait. It
+// does not wait for item 1 to run: the journal runs one broker intent at
+// a time, so item 1 runs after this one.
+func (f *ownerForget) siblingApproved(ctx context.Context, id string) bool {
+	box := f.gate.Load()
+	if box == nil {
+		return false
+	}
+	g, ok := box.g.(statusGetter)
+	if !ok {
+		return false
+	}
+	const step = 100 * time.Millisecond
+	for waited := time.Duration(0); ; waited += step {
+		st, err := g.Get(id)
+		if err != nil || st.State == journal.Denied {
+			return false
+		}
+		if st.State != journal.Pending {
+			return true
+		}
+		if waited >= forgetSiblingWait || !f.sleep(ctx, step) {
+			return false
+		}
+	}
+}
+
+// retryAgent takes the agent back again with backoff until it holds,
+// saying once that it is not done yet when that takes forgetNotYet.
+func (f *ownerForget) retryAgent(ctx context.Context, a *forgetAgent, since time.Time) {
+	if f.retried != nil {
+		defer f.retried()
+	}
+	start, wait, said := f.now(), 2*time.Second, false
+	for {
+		if !f.sleep(ctx, wait) {
+			return
+		}
+		err := a.takeBack(ctx, since)
+		if err == nil {
+			f.inform(forgetAgentDone)
+			return
+		}
+		log.Printf("forget: agent not taken back yet: %v", err)
+		if !said && f.now().Sub(start) >= forgetNotYet {
+			said = true
+			f.inform(forgetAgentNotYet)
+		}
+		wait = min(2*wait, forgetRetryMax)
+	}
 }
 
 // Reconcile: a forget interrupted by a restart is finished by the
 // tombstone's replay at start (learning.replayForgotten) once the
 // tombstone holds; otherwise it did not happen.
 func (f *ownerForget) Reconcile(_ context.Context, in journal.Intent, _ int) journal.Outcome {
+	if grants.ForgetAgentGoal(in.ID) != "" {
+		// An approved item 2 interrupted by a restart, as recall reports
+		// its own rollbacks: a reset it recorded is finished by recall's
+		// Retry at open (W3-forget-b2b).
+		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "approved; interrupted by a restart"}
+	}
 	if goal := grants.ForgetGoal(in.ID); goal != "" && f.forgotten != nil && f.forgotten(goal) {
 		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "tombstoned; finished at start"}
 	}

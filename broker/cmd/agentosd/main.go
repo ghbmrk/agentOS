@@ -614,6 +614,12 @@ func main() {
 			log.Printf("agent machines disabled: %v", err)
 		} else {
 			pre.m.Store(m)
+			if lp != nil {
+				// FORGET's item 2 (W3-forget-b2b): the agent machine's
+				// work since a task, taken back by recall's Reach.
+				lp.forgetOwner.agent.Store(&forgetAgent{work: recallExec,
+					lineage: func() (string, error) { return machines{m}.Lineage(agentMachine) }})
+			}
 			recallCfg.Labeler, recallCfg.Machines = recallLabels{m}, recallMachines{m}
 			go m.RunPruner(vm.PrunePolicy{LowWaterBytes: 1 << 30}, time.Minute, ctx.Done())
 			tree.setMachines(m)

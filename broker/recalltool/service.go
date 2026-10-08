@@ -241,6 +241,22 @@ func (l *LateExecutor) Status() string {
 	return ""
 }
 
+// Work is Reach.Work once recall is open; ok false before.
+func (l *LateExecutor) Work(lineage string, since time.Time) (worked, ok bool) {
+	if r := l.r.Load(); r != nil {
+		return r.Work(lineage, since)
+	}
+	return false, false
+}
+
+// TakeBack is Reach.TakeBack once recall is open; an error before.
+func (l *LateExecutor) TakeBack(ctx context.Context, lineage string, since time.Time) error {
+	if r := l.r.Load(); r != nil {
+		return r.TakeBack(ctx, lineage, since)
+	}
+	return errors.New("recall: not open yet")
+}
+
 // Reconcile reports an interrupted rollback as approved, to be finished.
 func (l *LateExecutor) Reconcile(ctx context.Context, in journal.Intent, n int) journal.Outcome {
 	return (&Reach{}).Reconcile(ctx, in, n)

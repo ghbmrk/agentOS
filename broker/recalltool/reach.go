@@ -211,7 +211,44 @@ func (r *Reach) Retry(ctx context.Context) error {
 			errs = append(errs, err)
 		}
 	}
+	// A reset no pending deletion revisits (a take-back, or one whose
+	// deletion was reached since) is finished here.
+	r.run.Lock()
+	for _, l := range r.Prov.ResetLineages() {
+		for _, rs := range r.Prov.Resets(l) {
+			if err := r.finish(l, rs); err != nil {
+				errs = append(errs, fmt.Errorf("deletion reach into %s: %w", l, err))
+			}
+		}
+	}
+	r.run.Unlock()
 	return errors.Join(errs...)
+}
+
+// Work reports whether taking lineage back to before since would lose
+// work, by the ask-first rule's measure (settle): an action that took
+// effect, or a file changed since the restore point; unmeasured counts as
+// work. ok is false when the machines are not wired, so nothing can be
+// taken back.
+func (r *Reach) Work(lineage string, since time.Time) (worked, ok bool) {
+	if r.Machines == nil {
+		return false, false
+	}
+	plan, err := r.Machines.Plan(lineage, since)
+	return err != nil || plan.Changes > 0 || r.actions(lineage, since, time.Time{}) > 0, true
+}
+
+// TakeBack takes lineage back to before since by the reset a recall
+// rollback runs (reset, finish), for a caller that settled the ask-first
+// rule itself: the owner's forget of a task (W3-forget-b2b). It tells the
+// owner nothing. A reset recorded and not finished is finished by Retry.
+func (r *Reach) TakeBack(ctx context.Context, lineage string, since time.Time) error {
+	if r.Machines == nil {
+		return errors.New("recall: machines not wired")
+	}
+	r.run.Lock()
+	defer r.run.Unlock()
+	return r.reset(ctx, lineage, since, false)
 }
 
 // Pending reports how many deletions are not yet fully reached.

@@ -272,6 +272,13 @@ func (p *Provenance) Resets(lineage string) []Reset {
 	return out
 }
 
+// ResetLineages lists the lineages with an unfinished reset.
+func (p *Provenance) ResetLineages() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return sortedKeys(p.resets)
+}
+
 // Finish ends the reach of a reset: what lineage was given from r.Since
 // until r.At is dropped (its machines went back to before then); what it
 // was given after the reset stays (#59 L3 2). The mark goes with it.

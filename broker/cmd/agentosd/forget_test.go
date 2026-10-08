@@ -26,13 +26,28 @@ import (
 type askRec struct {
 	got   []journal.Intent
 	state journal.State
+	// authorized is the IDs Authorize was called for, in order; st is
+	// what Get reports, by ID.
+	authorized []string
+	mu         sync.Mutex
+	st         map[string]journal.State
+}
+
+func (g *askRec) Get(id string) (journal.Status, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if s, ok := g.st[id]; ok {
+		return journal.Status{State: s}, nil
+	}
+	return journal.Status{}, errors.New("no such intent")
 }
 
 func (g *askRec) Submit(in journal.Intent) (journal.Status, error) {
 	g.got = append(g.got, in)
 	return journal.Status{Intent: in, State: journal.Pending}, nil
 }
-func (g *askRec) Authorize(context.Context, string) (journal.Status, error) {
+func (g *askRec) Authorize(_ context.Context, id string) (journal.Status, error) {
+	g.authorized = append(g.authorized, id)
 	return journal.Status{State: g.state}, nil
 }
 func (g *askRec) Dispatch(context.Context, string) (journal.Status, error) {

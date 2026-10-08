@@ -58,3 +58,48 @@ func TestAForgetIsAskedWithTheBoxsLineAndRunsOnlyOnYes(t *testing.T) {
 		t.Fatalf("after NO: ran %v, %s", ex.ran, r.state(ForgetID("f-2", "g1")).State)
 	}
 }
+
+// W3-forget-b2b: taking back the agent's work since a forgotten task is
+// the same request's item 2, on the same tier and verb, with the box's
+// own line for it; only the broker's forget origin may submit it.
+func TestAForgetsAgentTakeBackIsItem2OfTheSameRequest(t *testing.T) {
+	ex := &recordExec{}
+	r := newRigExecs(t, func(c *Config) {
+		c.ForgetItem = func(goal string) (string, string, bool) { return `"pay the gas bill"`, "", goal == "g1" }
+		c.ForgetAgentItem = func(goal string) (string, string, bool) {
+			return "your agent's work since today 13:02", "", goal == "g1"
+		}
+	}, map[string]journal.Executor{ForgetExecutor: ex})
+	agent := func(nonce, origin, goal string) journal.Intent {
+		return journal.Intent{ID: ForgetAgentID(nonce, goal), Origin: origin, Account: journal.BrokerAccount,
+			Action: journal.ActionLearnForget, Executor: ForgetExecutor}
+	}
+	if ForgetGoal(ForgetAgentID("n", "g1")) != "" || ForgetAgentGoal(ForgetID("n", "g1")) != "" || ForgetAgentGoal(ForgetAgentID("n", "g1")) != "g1" {
+		t.Fatal("item 1 and item 2 IDs must not parse as each other")
+	}
+	if ForgetSibling(ForgetAgentID("n", "g1")) != ForgetID("n", "g1") || ForgetSibling(ForgetID("n", "g1")) != ForgetAgentID("n", "g1") {
+		t.Fatal("siblings")
+	}
+	for _, origin := range []string{"guest:agent.x", OriginOwner, OriginRecall} {
+		if st := r.submit(agent("a-"+origin, origin, "g1")); st.State != journal.Denied {
+			t.Fatalf("take-back from %s: %s", origin, st.State)
+		}
+	}
+	if st := r.submit(agent("a-none", OriginForget, "g9")); st.State != journal.Denied {
+		t.Fatalf("take-back for an unknown task: %s", st.State)
+	}
+	in1 := journal.Intent{ID: ForgetID("n1", "g1"), Origin: OriginForget, Account: journal.BrokerAccount,
+		Action: journal.ActionLearnForget, Executor: ForgetExecutor}
+	if st := r.submit(in1); st.State != journal.Pending {
+		t.Fatal(st.State)
+	}
+	if st := r.submit(agent("n1", OriginForget, "g1")); st.State != journal.Pending {
+		t.Fatalf("take-back not asked: %s %q", st.State, st.Permission.Reason)
+	}
+	r.g.Flush()
+	_, items := r.own.last(t)
+	if len(items) != 2 || items[0].Ref != in1.ID || items[1].Ref != ForgetAgentID("n1", "g1") ||
+		items[1].Object != "your agent's work since today 13:02" || items[1].Facts != items[0].Facts {
+		t.Fatalf("one request, forget then take-back: %+v", items)
+	}
+}
