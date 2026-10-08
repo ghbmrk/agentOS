@@ -105,7 +105,7 @@ Started before spec v0.12 on parts unlikely to change; each package lists its sp
 | P3-1a | [Replay evaluator](briefs/P3-1a.md) | P3-1, P1-7 | merged (30d601c; broker/replay) |
 | P3-2 | [Loop scheduler and Loop 1](briefs/P3-2.md) | P3-1, P3-1a | merged (0302131; #189; broker/loops) |
 | P3-4 | [Loop 2, self-securing, defensive part, as a scheduler Source](briefs/P3-4.md) | P3-2 | merged (c5feca1; broker/loops Guard) |
-| P3-4b | [Loop 2 active testing from inside the sandbox](briefs/P3-4b.md) | P3-4 | queued (deferred by Mark 2026-10-05 (LATER.md)) |
+| P3-4b | [Loop 2 active testing from inside the sandbox](briefs/P3-4b.md) | P3-4 | queued (reshaped to off-the-shelf tools, D-067) |
 | P3-5 | [Loop 3, maintenance, as a scheduler Source](briefs/P3-5.md) | P3-2, P4-3 | merged (4672fe8; broker/maintain) |
 | P3-3 | [Recall index and event bus](briefs/P3-3.md) | P1-1, P1-2 | merged (5980098; broker/recall) |
 | P3-7 | [Goal IDs on guest intents](briefs/P3-7.md) | P1-7 | merged (847ea23; broker/guest goal.go) |
