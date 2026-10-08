@@ -249,3 +249,47 @@ and stale retired handles. These synthetic scopes do not qualify malicious write
 path/restore/config continuity, downstream escaped work, deployment I/O latency
 or shutdown deadlines. Synchronous work can still hang forever, holding occupancy.
 The urgent/reissue storage/time/overdue/invalid-input availability hold is unchanged.
+
+## Digest-checked provisioned manifest (W5-D49 review candidate)
+
+`ReadProvisionedManifest(reader, expectedSHA256)` requires a nonzero caller-trusted
+pin before any read, consumes at most 16 KiB plus one overflow byte, and refuses
+reader errors, overflow, digest mismatch and noncanonical/invalid v1 JSON. Canonical
+bytes are encoding/json of ProvisionedManifest in its declared field order with
+no trailing newline. Fields are `version`, `ledger`, `requests_per_hour` and
+`max_store_latency_ms`. Version is 1; ledger is clean absolute/non-root/non-NUL,
+without reserved .lock/.tmp suffix; allowance is 1..4096 and threshold 1..300000 ms.
+No defaults, disable flag, volatile mode, first-provision option or policy callbacks
+are read from the image. Digest-matched malformed/unknown/duplicate/reordered JSON
+still fails. The immutable decoded value retains no reader/file/wire pointer.
+
+ManifestSettings.Start requires the existing owner StartupSlot and a trusted clock
+in grants.Config. Leave RequestsPerHour and all Pacing fields unset; competing
+bindings are refused even when equal. The decoded settings bind the explicit limit,
+PacingRequireExisting=true and positive threshold, retaining every other supplied
+Gate field. Other authority/quiet/urgent callbacks, common approval/question/host
+identity and their downstream scopes remain caller composition/review obligations.
+Slot errors retain their fixed existing meaning. Missing or allowance-mismatched
+state returns a faulted held Gate; no image initialization, counter reset or refund.
+
+A deployment may serialize the documented wire struct and store those bytes, then
+supply an independently trusted expected digest when reading. This API never
+writes/provisions/discovers/persists/approves that pin or configuration file. Do not
+compute the expected digest from the same untrusted bytes being checked. Digest
+equality alone is not provenance, authenticity, freshness, anti-rollback/restore,
+protected-file custody or trusted persistent configuration qualification. Updating
+approved configuration and its external pin is an authorized deployment task,
+not this decoder's authority. Replay of matching old bytes is not detected here.
+File reads are synchronous and can block indefinitely; owner controls must already
+exist before config loading. No config-source symlink/ancestor/same-UID protection
+or filesystem latency claim is added. The exact-byte format is deliberately strict;
+format/schema policy needs independent review before any deployment adoption.
+
+Local tests cover exact byte/policy boundaries, over-cap consumption, zero/wrong
+pin and private reader errors, unknown/duplicate/noncanonical JSON, invalid settings,
+competing callback ownership and zero settings. Actual synthetic config-file read/
+replacement and immutable decoded values, actual slot/lease/Gate strict debt reopen,
+missing-image no-initialization and allowance-mismatch no-overwrite are tested.
+Actual daemon configuration custody/routing/provisioning remains W5-D47-Q; inherited
+base/security and urgent/reissue fault availability holds remain. No default daemon
+wiring, activation, migration, pin provisioning or external acceptance claimed.
