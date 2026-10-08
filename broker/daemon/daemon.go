@@ -159,7 +159,7 @@ type PageSocket struct {
 // shown (L3 SHOULD 3 on #148).
 const (
 	FollowAsked   = "Asked. Approve it on the Approvals page with a code from your code generator; nothing changes until you do."
-	FollowRefused = "Not asked: the box refused this request."
+	FollowRefused = "Not asked: I refused this request."
 )
 
 // FollowRefusedName is the reply to a name the gate does not admit.
@@ -364,7 +364,10 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 			store.Close()
 			return nil, errors.New("daemon: the local UI's socket needs the owner channel (OwnerState)")
 		}
-		lcfg := localsrv.Config{Owner: ch, Line: cfg.PageSocket.Line}
+		lcfg := localsrv.Config{Owner: ch, Line: cfg.PageSocket.Line,
+			Paused: func() []localapi.PausedGrant { return pausedGrants(gate) }, AskResume: func(ctx context.Context, id, pause string) (string, error) {
+				return askResume(ctx, gate, id, pause)
+			}}
 		if cfg.PageSocket.DescribeRoot != nil {
 			lcfg.DescribeRoot, lcfg.Follow = cfg.PageSocket.DescribeRoot, pageFollow(gate)
 		}
@@ -446,6 +449,28 @@ func (d *Daemon) Admission() *admission.Controller { return d.adm }
 
 // Wait returns after ctx is done and every socket and the journal are closed.
 func (d *Daemon) Wait() { <-d.done }
+
+// pausedGrants are the gate's paused grants as the page shows them
+// (W5a-resume).
+func pausedGrants(g *grants.Gate) []localapi.PausedGrant {
+	var out []localapi.PausedGrant
+	for _, p := range g.Paused() {
+		out = append(out, localapi.PausedGrant{ID: p.ID, What: p.What, By: p.By, Pause: p.Pause})
+	}
+	return out
+}
+
+// askResume asks to resume a paused grant from the page and says where the
+// owner approves it. A grant no longer paused as the page showed it is
+// told in fixed words; any other failure stays the socket's fixed code.
+func askResume(ctx context.Context, g *grants.Gate, id, pause string) (string, error) {
+	if _, err := g.AskResume(ctx, id, pause); errors.Is(err, grants.ErrPauseChanged) {
+		return "That grant is no longer paused as this page showed it. Reload the page.", nil
+	} else if err != nil {
+		return "", err
+	}
+	return "Asked to resume " + id + ". It shows under Approvals shortly; approve it there with a code from your code generator.", nil
+}
 
 // pageFollow submits the page's request to follow a held root: a follow
 // intent under a fresh nonce, which the gate asks of the owner on the page

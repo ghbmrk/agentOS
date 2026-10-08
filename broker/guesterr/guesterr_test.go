@@ -76,8 +76,9 @@ func TestAnEmbeddingTypeShowsOnlyTheEmbeddedText(t *testing.T) {
 // allowlist names, per tool family, the one type whose text passes the
 // guest plane's filter as it is.
 var allowlist = map[string]string{
-	"guesterr": "Text", // the question, recall, managed-tree and effect tools
-	"workers":  "said", // the worker tools (SR2-3f)
+	"guesterr": "Text",    // the question, recall, managed-tree and effect tools
+	"workers":  "said",    // the worker tools (SR2-3f)
+	"grants":   "refusal", // effect denials, via the journal (SR2-3j)
 }
 
 // TestOnlyAllowlistedTypesAreSafe fails CI on any other type in the broker

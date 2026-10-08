@@ -255,7 +255,9 @@ const (
 //     owner accepts and the verb each maps to (ADP-1, ADP-2). An operation
 //     not listed does not exist for agents.
 //   - a pre-allowance: Account and Rule (ADP-9, ADP-11).
-//   - Resume: the ID of a paused grant to restore.
+//   - Resume: the ID of a paused grant to restore, and Pause, the ID of
+//     the pause intent it ends (Grant.Pause), so an ask made before the
+//     grant was paused again cannot end the later pause (W5a-resume).
 //
 // Every shape is a new or wider grant: high-tier code plus local
 // confirmation (CH-3, CH-10).
@@ -265,6 +267,7 @@ type Spec struct {
 	Ops      map[string]string `json:"ops,omitempty"`
 	Rule     *Rule             `json:"rule,omitempty"`
 	Resume   string            `json:"resume,omitempty"`
+	Pause    string            `json:"pause,omitempty"`
 }
 
 // Rule is an owner pre-allowance (ADP-9): a deterministic predicate the
@@ -302,6 +305,9 @@ type Grant struct {
 	ID     string
 	Spec   Spec
 	Paused bool
+	// Pause is the intent that paused it, and PausedBy that intent's
+	// origin; both are empty while it runs.
+	Pause, PausedBy string
 }
 
 // parseSpec reads a grant intent's spec strictly: unknown fields are an
@@ -335,10 +341,18 @@ func (g *Gate) validateLocked(s Spec) error {
 	if shapes != 1 {
 		return errors.New("a grant is exactly one of: an adapter grant, a pre-allowance, or a resume")
 	}
+	if s.Pause != "" && s.Resume == "" {
+		return errors.New("only a resume names a pause")
+	}
 	if s.Resume != "" {
 		gr := g.grants[s.Resume]
 		if gr == nil || !gr.Paused || s.Account != "" {
 			return fmt.Errorf("no paused grant %s", clip(s.Resume))
+		}
+		// A resume recorded before W5a-resume names no pause; the gate
+		// asks for one on every new resume (evaluateBroker).
+		if s.Pause != "" && s.Pause != gr.Pause {
+			return fmt.Errorf("grant %s was paused again since", clip(s.Resume))
 		}
 		return nil
 	}

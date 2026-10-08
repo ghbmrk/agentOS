@@ -272,6 +272,7 @@ func newRigExecs(t *testing.T, edit func(*Config), execs map[string]journal.Exec
 		edit(&r.cfg)
 	}
 	r.open()
+	t.Cleanup(func() { r.checkGuestReasons(t) })
 	return r
 }
 

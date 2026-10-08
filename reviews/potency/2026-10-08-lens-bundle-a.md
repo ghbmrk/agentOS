@@ -1,5 +1,7 @@
 # Potency lens screen: bundle 2026-10-08a (#300, #319, #323, #327)
 
+Record: PRs #300 #319 #323 #327 · packages CRED-4b, OSS-6e, OSS-10w, W3-forget-b2b · heads e000ecc, abe4598, 72a8693, fc62903 · main be5a80c
+
 **Stage:** OPERATING §4 stage 4, batched lens screen, Potency section. All four PRs are tier A and have an L3 accept on the head named below. Security is a separate session; UX is in [`../ux/2026-10-08-lens-bundle-a.md`](../ux/2026-10-08-lens-bundle-a.md).
 **Question (README):** does the change cap capability without buying matching security or UX, and what is the cheapest structural lift?
 **Labels:** [Fact] checked in the diff or spec · [Inference] reasoned, untested.

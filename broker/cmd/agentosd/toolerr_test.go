@@ -86,22 +86,58 @@ func (c canaryMachines) DeleteFiles(_ context.Context, id string, _ vm.Deletion)
 }
 
 // canaryEffects is a journal whose every answer is an error naming its
-// file.
-type canaryEffects struct{ dir string }
+// file, but for request ID "denied", which a real journal answers under
+// canaryPolicy (SR2-3j).
+type canaryEffects struct {
+	dir    string
+	denied *journal.Engine
+}
 
 func (c canaryEffects) err() error {
 	return fmt.Errorf("journal: write %s/journal.log: no space left on device", c.dir)
 }
-func (c canaryEffects) Submit(journal.Intent) (journal.Status, error) {
+func (c canaryEffects) Submit(in journal.Intent) (journal.Status, error) {
+	if strings.HasSuffix(in.ID, "/denied") {
+		return c.denied.Submit(in)
+	}
 	return journal.Status{}, c.err()
 }
-func (c canaryEffects) Authorize(context.Context, string) (journal.Status, error) {
+func (c canaryEffects) Authorize(ctx context.Context, id string) (journal.Status, error) {
+	if strings.HasSuffix(id, "/denied") {
+		return c.denied.Authorize(ctx, id)
+	}
 	return journal.Status{}, c.err()
 }
-func (c canaryEffects) Dispatch(context.Context, string) (journal.Status, error) {
+func (c canaryEffects) Dispatch(ctx context.Context, id string) (journal.Status, error) {
+	if strings.HasSuffix(id, "/denied") {
+		return c.denied.Dispatch(ctx, id)
+	}
 	return journal.Status{}, c.err()
 }
-func (c canaryEffects) Get(string) (journal.Status, error) { return journal.Status{}, c.err() }
+func (c canaryEffects) Get(id string) (journal.Status, error) {
+	if strings.HasSuffix(id, "/denied") {
+		return c.denied.Get(id)
+	}
+	return journal.Status{}, c.err()
+}
+
+// canaryPolicy refuses every intent with an error naming its file, as a
+// policy that cannot read its state might.
+type canaryPolicy struct{ dir string }
+
+func (c canaryPolicy) Check(context.Context, journal.Phase, journal.Intent) error {
+	return fmt.Errorf("grants: open %s/grants.json: permission denied", c.dir)
+}
+
+// noExec is an executor that is never reached: canaryPolicy refuses first.
+type noExec struct{}
+
+func (noExec) Execute(context.Context, journal.Intent, int) journal.Outcome {
+	return journal.Outcome{Result: journal.ResultNotApplied}
+}
+func (noExec) Reconcile(context.Context, journal.Intent, int) journal.Outcome {
+	return journal.Outcome{Result: journal.ResultNotApplied}
+}
 
 // canaryDir is a recall directory that works until broken, then fails
 // every write with an error naming its file.
@@ -230,10 +266,14 @@ func TestToolErrorsNameNoHostPath(t *testing.T) {
 	recallTools.Set(rt)
 	tools := registeredTools(qs, tree, recallTools, wt)
 
+	denied, err := journal.Open(&journal.MemStore{}, canaryPolicy{dir: dir}, map[string]journal.Executor{"mail": noExec{}}, func(s string) string { return s })
+	if err != nil {
+		t.Fatal(err)
+	}
 	plane, err := guest.New(guest.Config{
 		Dir:      filepath.Join(work, "g"),
 		Machines: oneLineage{},
-		Effects:  canaryEffects{dir: dir},
+		Effects:  canaryEffects{dir: dir, denied: denied},
 		Route:    func(string) (string, bool) { return "mail", true },
 		Tools:    tools,
 	})
@@ -316,6 +356,19 @@ func TestToolErrorsNameNoHostPath(t *testing.T) {
 	}
 	check("effect_request", map[string]any{"request_id": "r1", "account": "owner-mail", "action": "send", "params": map[string]any{"to": "a@example.com"}})
 	check("effect_status", map[string]any{"request_id": "r1"})
+	// A policy's refusal naming a host path is a denial the guest sees
+	// with a ref (SR2-3j).
+	for _, call := range []struct {
+		name string
+		args map[string]any
+	}{
+		{"effect_request", map[string]any{"request_id": "denied", "account": "owner-mail", "action": "send", "params": map[string]any{"to": "a@example.com"}}},
+		{"effect_status", map[string]any{"request_id": "denied"}},
+	} {
+		if body := check(call.name, call.args); !strings.Contains(body, `\"state\":\"denied\"`) || !refRE.MatchString(body) {
+			t.Errorf("%s: the policy's refusal is not a denial with a ref: %s", call.name, body)
+		}
+	}
 	check("worker_create", map[string]any{"name": "w1"})
 	// Each recall tool past its argument checks: provenance, the label
 	// raise, and the note store fail.

@@ -2,7 +2,7 @@
 
 Board section: Security and architecture review (2026-10-08).
 
-Source: L1 spec diff for local devices (D-064). REV-5 left `public` machines' uncredentialed egress "open", which on a home network includes the router's admin page, printers, NAS shares, cameras, and any LAN service without authentication. DEV-2 closes it for every component. Nothing serves ARC-6 (d) yet (`broker/guest/plane.go`, ASSUMPTIONS G6), so the hole is latent; this package must land before anything serves (d) or adds a dialer.
+Source: L1 spec diff for local devices (D-069). REV-5 left `public` machines' uncredentialed egress "open", which on a home network includes the router's admin page, printers, NAS shares, cameras, and any LAN service without authentication. DEV-2 closes it for every component. Nothing serves ARC-6 (d) yet (`broker/guest/plane.go`, ASSUMPTIONS G6), so the hole is latent; this package must land before anything serves (d) or adds a dialer.
 
 - One small address policy (e.g. `broker/netguard`) that every outbound dialer uses as its `net.Dialer.Control` hook, so the check runs on the address actually connected, after resolution, and again on each redirect and CONNECT.
 - Deny: non-global addresses per the IANA IPv4 and IPv6 special-purpose registries (Go's `netip` predicates cover only part; table-test each registry entry), IPv4-mapped and NAT64-embedded (64:ff9b::/96) forms, the uplink's and the access point's prefixes (global IPv6 widened to the enclosing /56), the learned gateway, and the router's external address where NAT-PMP, PCP, or UPnP reports it. Learned prefixes refresh on address and route changes.
@@ -15,4 +15,4 @@ Tier A (egress).
 
 **Requirements:** DEV-2, REV-5, ARC-6, CAP-2, CAP-13
 
-**Needs:** P1-3 merged, the L1 spec diff for D-064 merged
+**Needs:** P1-3 merged, the L1 spec diff for D-069 merged

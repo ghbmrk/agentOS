@@ -1,5 +1,7 @@
 # UX lens screen: bundle 2026-10-08a (#300, #319, #323, #327)
 
+Record: PRs #300 #319 #323 #327 · packages CRED-4b, OSS-6e, OSS-10w, W3-forget-b2b · heads e000ecc, abe4598, 72a8693, fc62903 · main be5a80c
+
 **Stage:** OPERATING §4 stage 4, batched lens screen, UX section. All four PRs are tier A and have an L3 accept on the head named below. Security is a separate session (`reviews/security/`); Potency is in [`../potency/2026-10-08-lens-bundle-a.md`](../potency/2026-10-08-lens-bundle-a.md).
 **Read:** each diff against `origin/main` (owner-facing strings, notices, owner flows), the cited IDs in SPEC.md, the L3 accept comments (findings only), DECISIONS.md (CAP-3 deletion reach, 2026-10-05; OSS-6 clock), and CH-12 (SPEC.md:178).
 **Labels:** [Fact] checked in the diff or spec · [Inference] reasoned, untested.

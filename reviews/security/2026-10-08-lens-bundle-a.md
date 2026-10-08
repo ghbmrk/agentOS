@@ -1,5 +1,7 @@
 # Security section, lens bundle 2026-10-08a: #300, #319, #323, #327 (main @ be5a80c)
 
+Record: PRs #300 #319 #323 #327 · packages CRED-4b, OSS-6e, OSS-10w, W3-forget-b2b · heads e000ecc, abe4598, 72a8693, fc62903 · main be5a80c
+
 **Scope.** The tier A PRs in the bundle, each with an L3 accept on the head reviewed here:
 
 | PR | Package | Head | Verdict |

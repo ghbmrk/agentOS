@@ -1,5 +1,7 @@
 # Security and architecture review — 2026-10-08
 
+Record: PR none · package SR3 · head 7b753eb
+
 Requested by Mark; conducted against main `7b753eb87f606ea2268ca536d429d47989dba196`. This is a findings and intake record, not an implementation acceptance or tier-A lens sign-off. [SR3](../../briefs/SR3.md) covers registration only.
 
 The review examined owner authentication/approvals, effect accounting, model routing, update verification/finalization, mail identity and clean-room persistence. Six findings used synthetic local probes; two are source-only. No live provider billing, production mailbox mutation, hardware boot or power-cut qualification was performed. Local proofs used real package code with synthetic adapters/clocks/keys; the local-session probe called handlers directly and did not exercise Linux socket peer credentials. Those limits are preserved in the briefs.

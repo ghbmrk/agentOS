@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"regexp"
 )
 
 // Literal is a string constant: an untyped constant converts to it, a
@@ -39,17 +40,33 @@ func (e Text) Error() string { return e.s }
 func (e Text) GuestText() string { return e.s }
 
 // Arg is a value Newf may put in a guest's error text.
-type Arg interface{ guestArg() }
+type Arg interface{ guestArg() any }
 
 // Num is a count, size or bound; Guest is text the guest itself sent (a
-// request ID, a tool name), clipped by the caller.
+// request ID, a tool name). Newf shows a Guest value only when it is
+// ID-shaped (guestRE), so a host path passed as one cannot reach the
+// guest (SR2-3k); any other is shown as unshown.
 type (
 	Num   int64
 	Guest string
 )
 
-func (Num) guestArg()   {}
-func (Guest) guestArg() {}
+func (n Num) guestArg() any { return int64(n) }
+
+// guestArg checks the value here, not in Newf, so a type embedding Guest
+// is checked too: it is an Arg only by this promoted method (release 1,
+// L3 on #398).
+func (g Guest) guestArg() any {
+	if !guestRE.MatchString(string(g)) {
+		return unshown
+	}
+	return string(g)
+}
+
+var guestRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+
+// unshown stands in for a Guest value that is not ID-shaped.
+const unshown = "(not shown)"
 
 // New is fixed error text for the guest.
 func New(s Literal) Text { return Text{string(s)} }
@@ -58,7 +75,7 @@ func New(s Literal) Text { return Text{string(s)} }
 func Newf(format Literal, args ...Arg) Text {
 	vs := make([]any, len(args))
 	for i, a := range args {
-		vs[i] = a
+		vs[i] = a.guestArg()
 	}
 	return Text{fmt.Sprintf(string(format), vs...)}
 }
