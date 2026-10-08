@@ -55,6 +55,12 @@ type Candidate struct {
 	// them in broker code; the builder never asserts them. Forgetting one
 	// undoes the adoption (ForgetGoal, C23).
 	Goals []string
+	// Finding is the finding this candidate is proposed to fix, set by
+	// Loop 2 in broker code, never by its fixer. It qualifies only if
+	// every security case linked to that finding passes on it; for those
+	// cases PS1's no-regression grading does not apply (P3-4b). It can
+	// only make qualification stricter.
+	Finding string
 }
 
 // Probe is what the evaluator sees of a case: its ID and input. The
@@ -252,6 +258,10 @@ type Score struct {
 	EndorsedPassed int `json:"endorsed_passed,omitempty"`
 	// Security fixtures on the baseline, so Recheck blames an adoption
 	// only for a fixture the state without it passes.
+	// Linked and LinkedPassed count the security cases linked to the
+	// candidate's finding, and those it passes; each must pass (P3-4b).
+	Linked                 int   `json:"linked,omitempty"`
+	LinkedPassed           int   `json:"linked_passed,omitempty"`
 	BaselineSecurityPassed int   `json:"baseline_security_passed"`
 	SecurityRegressions    int   `json:"security_regressions"`
 	example                *Case // first regressed case, for the owner's line
@@ -610,7 +620,7 @@ func (p *Pipeline) proposeInner(ctx context.Context, c Candidate, security bool)
 		rep.State, rep.Reason = StateRejected, "learned from owner tasks, so it may change only skills, procedures and context"
 		return rep, nil
 	}
-	score, err := p.evaluate(ctx, base, next, set, strictFor(c.Source, cl.classes))
+	score, err := p.evaluate(ctx, base, next, set, strictFor(c.Source, cl.classes), c.Finding)
 	if err != nil {
 		// Preempted: not a verdict. The ID is spent; the next proposal
 		// of the same candidate resumes from the kept pairs.
@@ -620,6 +630,9 @@ func (p *Pipeline) proposeInner(ctx context.Context, c Candidate, security bool)
 	images := cl.imagesOnly()
 	regressed := rep.Regressions > 0 || rep.Passed < rep.BaselinePassed
 	switch {
+	case rep.LinkedPassed < rep.Linked:
+		rep.State, rep.Reason = StateRejected, ReasonLinked
+		return rep, nil
 	case regressed && !(security && images):
 		rep.State, rep.Reason = StateRejected, "regresses on the held-out suite"
 		return rep, nil
@@ -819,7 +832,10 @@ func (p *Pipeline) drop(id string) {
 // trees runs only the rest (PE1). A candidate side cut short
 // MaxInterruptions times fails. A finished evaluation uses up what was
 // kept.
-func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st strictness) (Score, error) {
+//
+// finding is the finding the candidate fixes, if any: every security case
+// linked to it must pass on next, evaluated or not (P3-4b).
+func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st strictness, finding string) (Score, error) {
 	type run struct {
 		c     Case
 		cand  bool
@@ -1011,10 +1027,15 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 		delete(p.kept, k)    // kept sides are used up
 		delete(p.st.Cuts, k) // and so are the cut counts; saved with the verdict
 	}
-	// Loop 2 fixtures the active tree has never passed (PS1).
-	open := map[string]bool{}
+	// Loop 2 fixtures, and cases linked to a finding, the active tree
+	// has never passed (PS1); a case linked to the candidate's own
+	// finding is never open: it must pass (P3-4b).
+	open, must := map[string]bool{}, map[string]bool{}
 	for _, c := range set.security {
-		if strings.HasPrefix(c.ID, Loop2Fixture) && !p.st.Loop2Passed[loop2Key(c)] {
+		switch {
+		case finding != "" && c.Finding == finding:
+			must[c.ID] = true
+		case (strings.HasPrefix(c.ID, Loop2Fixture) || c.Finding != "") && !p.st.Loop2Passed[loop2Key(c)]:
 			open[c.ID] = true
 		}
 	}
@@ -1053,6 +1074,17 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 	var s Score
 	for _, id := range order {
 		c, pr := cases[id], res[id]
+		if must[id] && !pr.NextEv {
+			// Untestable on the fix is a fail: a fix cannot qualify by
+			// making its finding's cases unevaluable (6(f)).
+			pr.NextEv, pr.NextOK = true, false
+		}
+		if must[id] {
+			s.Linked++
+			if pr.NextOK {
+				s.LinkedPassed++
+			}
+		}
 		if !pr.BaseEv {
 			s.NotEvaluated++
 			continue
@@ -1119,6 +1151,10 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 	}
 	return s, nil
 }
+
+// ReasonLinked rejects a fix that fails a case linked to its finding: the
+// visible regression or a held-back one (P3-4b, LOOP-10 6(g)).
+const ReasonLinked = "fails a security case linked to the finding it fixes"
 
 // OutageAlert is how many failed Recheck passes in a row the digest
 // reports.

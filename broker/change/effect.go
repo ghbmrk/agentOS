@@ -540,7 +540,7 @@ func (p *Pipeline) Recheck(ctx context.Context) ([]string, error) {
 		cur, set := p.st.Active.clone(), p.freezeLocked(a.Classes)
 		p.mu.Unlock()
 
-		s, err := p.evaluate(ctx, prev, cur, set, strictFor(a.Source, a.Classes))
+		s, err := p.evaluate(ctx, prev, cur, set, strictFor(a.Source, a.Classes), "")
 		if err != nil {
 			// Preempted: blame nothing, and leave the outage count as it
 			// was. The next pass resumes from the kept pairs.
