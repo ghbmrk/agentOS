@@ -32,6 +32,9 @@ Weekly runs over all of `main` until 2026-10-07, when the batched lens screen re
 | Lens 2026-10-08b (#320 #322 #324 #329 #321) | be5a80c | [2026-10-08](2026-10-08-lens-bundle-b.md) |
 | Lens 2026-10-08d (#362) | 32c6e67 | [2026-10-08](2026-10-08-pr362.md) |
 | Lens 2026-10-08 (#363) | b75d319 (re-signed 196e703) | [2026-10-08](2026-10-08-sec-363.md) |
+| Lens 2026-10-08f (#372) | 7b753eb | [2026-10-08](../combined/2026-10-08-pr372.md) |
+| Lens 2026-10-08e (#378, #379) | 22e4b5f | [#378](2026-10-08-pr378.md), [#379](2026-10-08-pr379.md) |
+| Lens 2026-10-08g (#393) | 6b40ddc (PR head) | [2026-10-08](2026-10-08-sec-393.md) |
 
 ## Requested architecture reviews
 

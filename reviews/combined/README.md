@@ -7,3 +7,4 @@ Tier B PRs get one combined Security, Potency and UX pass in the batched lens sc
 | Bundle | PRs (head) | Verdicts |
 |---|---|---|
 | 2026-10-08e | #328 (918731a), #330 (cc81fd9) | [pr328](2026-10-08-pr328.md) accept; [pr330](2026-10-08-pr330.md) accept, [arbitration](../arbitration/2026-10-08-pr330.md) |
+| 2026-10-08f | #372 (824ffa1) | [pr372](2026-10-08-pr372.md) accept |
