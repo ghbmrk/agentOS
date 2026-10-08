@@ -137,3 +137,31 @@ Synchronous health/store callbacks still require latency bounds and can delay
 other policy work; no orphanable timeout worker or background repair is added.
 Reopening must retire the old writer and preserve the exact same store. A fresh
 store, restore or deletion cannot be used as recovery for a spent allowance.
+
+Five-store integration evidence (D39): the local bridge fixture can opt into a
+separate change.FileStore for the actual shared Gate, reconstruct that Gate on
+reopen, and bind Policy.Health in the new Host. Reopen quiesces the old entire
+scope and reconstructs owner, notes, heartbeat, queue and Gate from unchanged
+paths; startup remains held. Actual question Books reserve on that same Gate
+and send through owner.Channel.Notify and the real local modemlink operations.
+The fixture's Book has no persistence path: these tests establish notification
+debt continuity, not durable custody or replay semantics of question prompts.
+
+Accepted and unknown outcomes keep exact batch/attempt identity across all five
+stores, shared question debt survives, and late bridge acceptance stays stray.
+Paced Ready work survives reopen without a send attempt and sends the same
+batch only when older debt expires before its TTL. Before/after ledger-save
+cuts refuse bridge handoff, expose fixed host recovery, and recover precisely
+the committed debt before retry. Clearing a store fault cannot clear the live
+quarantined Gate. LocalStop while ledger persistence is blocked remains prompt,
+spends that reservation and allows no bridge call; explicit fresh activation
+and the same stores are needed for later retry, without refund.
+
+These are characterization tests of existing constructors and policies, not a
+new production pathway or a fabricated failing implementation. The first test
+trial used incorrect alive-line wording; it was corrected to heartbeat.Line,
+and the trial is retained. Existing four-store fixtures remain volatile and
+keep their original scope. Local engine/cadence/bridge fixtures do not qualify
+real daemon startup, carrier/device delivery, callback latency, arbitrary
+restore/deletion, protected path custody or multiple writers. D37's urgent/
+reissue storage-fault availability hold and independent security review remain.
