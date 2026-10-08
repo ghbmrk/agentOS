@@ -2,6 +2,7 @@ package localui
 
 import (
 	"context"
+	crand "crypto/rand"
 	"encoding/base32"
 	"encoding/json"
 	"errors"
@@ -46,7 +47,10 @@ type fakeHooks struct {
 	progress  Progress
 	joined    string
 	sent      []modem.SMS
-	seed      []byte
+	now       func() time.Time
+	seed      []byte // the vault's sealed code-generator seed
+	pending   []byte // the newest seed waiting for a code
+	enrolls   int
 	trusted   *bool
 	keys      map[string]string
 	finished  string
@@ -55,7 +59,7 @@ type fakeHooks struct {
 	private   map[string]bool
 	setUp     bool
 	finishes  int
-	onSave    func() // runs inside SaveCodeSeed, for races
+	onConfirm func() // runs inside ConfirmCode, for races
 	finishErr error  // returned by Finish after the owner channel exists
 }
 
@@ -76,14 +80,43 @@ func (f *fakeHooks) Send(to, text string) error {
 	f.sent = append(f.sent, modem.SMS{To: to, Text: text})
 	return nil
 }
-func (f *fakeHooks) SaveCodeSeed(s []byte) error {
-	if f.onSave != nil {
-		f.onSave()
+
+// EnrollCode and ConfirmCode act as the vault process does (egress K17):
+// each enroll makes a new seed, only the newest confirms, and a confirmed
+// seed is sealed.
+func (f *fakeHooks) EnrollCode() (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.enrolls++
+	if f.seed != nil {
+		return "", ErrCodesEnrolled
+	}
+	f.pending = make([]byte, 20)
+	if _, err := crand.Read(f.pending); err != nil {
+		return "", err
+	}
+	secret := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(f.pending)
+	return "otpauth://totp/AgentOS:AgentOS?secret=" + secret + "&issuer=AgentOS&algorithm=SHA1&digits=6&period=30", nil
+}
+func (f *fakeHooks) ConfirmCode(code string) (bool, error) {
+	if f.onConfirm != nil {
+		f.onConfirm()
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.seed = append([]byte(nil), s...)
-	return nil
+	switch {
+	case f.seed != nil:
+		return false, ErrCodesEnrolled
+	case f.pending == nil:
+		return false, ErrNoCodeEnrollment
+	}
+	for _, d := range []time.Duration{-30 * time.Second, 0, 30 * time.Second} {
+		if code == owner.TOTP(f.pending, f.now().Add(d)) {
+			f.seed, f.pending = f.pending, nil
+			return true, nil
+		}
+	}
+	return false, nil
 }
 func (f *fakeHooks) TrustHost(t bool) error {
 	f.mu.Lock()
@@ -165,6 +198,8 @@ type rig struct {
 	jar    http.CookieJar
 	ip     string   // the phone's address on the box's Wi-Fi
 	seen   []string // every page body served, for the ONB-1 scan
+	// via, when set, replaces hooks as the server's Hooks.
+	via Hooks
 }
 
 func newRig(t *testing.T) *rig {
@@ -175,6 +210,7 @@ func newRig(t *testing.T) *rig {
 	}
 	r := &rig{t: t, now: time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC), card: c, eng: &fakeEngine{},
 		hooks: &fakeHooks{progress: Progress{Phase: "updating"}}}
+	r.hooks.now = r.clock
 	r.srv = r.open(&MemStore{})
 	r.jar, _ = cookiejar.New(nil)
 	r.ip = phoneIP
@@ -182,7 +218,11 @@ func newRig(t *testing.T) *rig {
 }
 
 func (r *rig) open(st SetupStore) *Server {
-	s, err := New(Config{AP: testAP(), Hooks: r.hooks, SetupSecret: r.card.SetupSecret, Store: st,
+	var h Hooks = r.hooks
+	if r.via != nil {
+		h = r.via
+	}
+	s, err := New(Config{AP: testAP(), Hooks: h, SetupSecret: r.card.SetupSecret, Store: st,
 		Defaults: "spend cap $20 a day; payments need approval.", Now: r.clock, Rand: rand.New(rand.NewSource(9))})
 	if err != nil {
 		r.t.Fatal(err)
@@ -303,7 +343,7 @@ func (r *rig) runSetupToAI() {
 	}
 	// Approval codes: the otpauth link, then one entered code.
 	page = html.UnescapeString(r.get("/setup"))
-	m = regexp.MustCompile(`href="otpauth://totp/AgentOS:AgentOS-7K3M\?secret=([A-Z2-7]+)&issuer=AgentOS`).FindStringSubmatch(page)
+	m = regexp.MustCompile(`href="otpauth://totp/AgentOS:AgentOS\?secret=([A-Z2-7]+)&issuer=AgentOS`).FindStringSubmatch(page)
 	if m == nil || !strings.Contains(page, "<svg") {
 		t.Fatalf("no otpauth link or QR: %s", page)
 	}
@@ -317,7 +357,7 @@ func (r *rig) runSetupToAI() {
 	}
 	r.post("/setup/codes", url.Values{"code": {owner.TOTP(seed, r.clock())}})
 	if string(r.hooks.seed) != string(seed) {
-		t.Fatal("seed not handed to the vault")
+		t.Fatal("the vault did not seal the seed the page showed")
 	}
 	if strings.Contains(r.get("/setup"), m[1]) {
 		t.Fatal("seed shown again after enrollment")
@@ -365,8 +405,9 @@ func TestSetupMinimumPath(t *testing.T) {
 	if loc := r.do("GET", "/setup", nil).Header().Get("Location"); loc != "/status" {
 		t.Fatalf("setup still open: %q", loc)
 	}
-	r.post("/setup/codes", url.Values{"code": {"123456"}})
-	if string(r.hooks.seed) == "" || r.srv.setup.seed != nil {
+	n := r.hooks.enrolls
+	r.post("/setup/codes", url.Values{"code": {"123456"}, "enrolled": {"1"}})
+	if string(r.hooks.seed) == "" || r.hooks.pending != nil || n != r.hooks.enrolls {
 		t.Fatal("enrollment reopened after setup")
 	}
 	// The API key never comes back in any page.
@@ -913,8 +954,8 @@ func TestSetupHousekeeping(t *testing.T) {
 	r.srv.OfferText(ownerNum, "PAIR "+pairCode())
 	m := regexp.MustCompile(`secret=([A-Z2-7]+)&`).FindStringSubmatch(html.UnescapeString(r.get("/setup")))
 	seed, _ := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(m[1])
-	r.hooks.onSave = func() {
-		r.hooks.onSave = nil
+	r.hooks.onConfirm = func() {
+		r.hooks.onConfirm = nil
 		r.asOther(func() {
 			r.get("/setup")
 			r.post("/setup/restart", url.Values{"secret": {r.card.SetupSecret}})

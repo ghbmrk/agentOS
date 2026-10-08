@@ -184,13 +184,33 @@ const (
 	// MaxFollowDigits bounds the digits in that name, so it can carry a
 	// year but never a code.
 	MaxFollowDigits = 4
+	// MaxFollowNonce bounds a follow intent's nonce, in hex characters.
+	MaxFollowNonce = 64
 )
 
-// FollowID is the ID of a follow intent: nonce is unique per ask and holds
-// no "/"; the digest comes before the name, which may hold anything the
-// gate's name check allows. An empty name switches back to the project.
+// FollowID is the ID of a follow intent: nonce is unique per ask and is 1
+// to MaxFollowNonce lower-case hex characters; the digest comes before the
+// name, which may hold anything the gate's name check allows. An empty
+// name switches back to the project. Any other nonce (one holding "/"
+// would shift the parse, OSS-10w L3) gives an ID FollowOf refuses, so the
+// gate denies it as malformed.
 func FollowID(nonce, digest, name string) string {
+	if !followNonce(nonce) {
+		nonce = ""
+	}
 	return "follow/" + nonce + "/" + digest + "/" + name
+}
+
+func followNonce(s string) bool {
+	if len(s) == 0 || len(s) > MaxFollowNonce {
+		return false
+	}
+	for _, c := range s {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // FollowOf is the digest and name a follow intent's ID names; ok is false
@@ -201,7 +221,7 @@ func FollowOf(id string) (digest, name string, ok bool) {
 		return "", "", false
 	}
 	nonce, rest, ok := strings.Cut(rest, "/")
-	if !ok || nonce == "" {
+	if !ok || !followNonce(nonce) {
 		return "", "", false
 	}
 	digest, name, ok = strings.Cut(rest, "/")

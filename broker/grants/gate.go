@@ -1009,7 +1009,8 @@ func (g *Gate) evaluateEvidence(in journal.Intent) verdict {
 // changes who decides what software the box installs, so it is a tier-4
 // act: the owner's code-generator code plus confirmation on the local
 // page, and it comes only from that page (Security C6). The request names
-// only the owner's own name for the source; the page shows the keys,
+// the owner's own name for the source, and the card the root's short
+// fingerprint; the page shows the keys,
 // thresholds and expiry the digest binds. One intent runs once, so one
 // approval buys one switch.
 func (g *Gate) evaluateFollow(in journal.Intent) verdict {
@@ -1024,13 +1025,27 @@ func (g *Gate) evaluateFollow(in journal.Intent) verdict {
 	if name == "" {
 		// Switching back: the updater admits it only for the project's
 		// own root keys (WF1).
-		object = "get updates from the AgentOS project again"
+		object = "get updates from " + ReservedFollowName + " again"
 	}
 	if !g.cfg.LocalUI {
 		return verdict{kind: deny, why: NoPageFollow}
 	}
+	// The card names the root as the page showed it, so two roots never
+	// make the same card (security 323-1).
 	return verdict{kind: ask, local: true, item: owner.Item{Ref: in.ID, Object: object,
-		Facts: owner.Facts{Kind: owner.GrantChange, Verb: "follow", NoRecipient: true}}}
+		Detail: "root fingerprint " + FollowPrint(digest),
+		Facts:  owner.Facts{Kind: owner.GrantChange, Verb: "follow", NoRecipient: true}}}
+}
+
+// FollowPrint is the root's short fingerprint as the card and the page
+// show it: the digest's first 8 hex characters in two groups of 4, so
+// the card never carries a run of digits that reads as a code, however
+// the digest falls (security R1 on #180; codes are 6 digits).
+func FollowPrint(digest string) string {
+	if len(digest) < 8 {
+		return ""
+	}
+	return digest[:4] + "-" + digest[4:8]
 }
 
 // hexDigest is 64 lower-case hex characters.
@@ -1046,13 +1061,25 @@ func hexDigest(s string) bool {
 	return true
 }
 
+// FollowNameOK reports whether the gate admits name for a follow request,
+// so the page can say why one was not asked.
+func FollowNameOK(name string) bool { return followName(name) }
+
+// ReservedFollowName starts the switch-back's line; no name may.
+const ReservedFollowName = "the AgentOS project"
+
 // followName is the owner's name for a source: 1 to MaxFollowName
 // printable characters on one line (no control or bidi formatting
 // characters), with no leading or trailing space, and at most
 // MaxFollowDigits digits in all. The name reaches the owner in
 // broker-voiced texts, so it must never carry a code, even spaced out
-// (security R1 on #180; codes are 6 digits).
+// (security R1 on #180; codes are 6 digits). Nor may it start like the
+// project's own line (ReservedFollowName, any case), so a named follow
+// never reads as switching back (security 323-1).
 func followName(s string) bool {
+	if strings.HasPrefix(strings.ToLower(s), strings.ToLower(ReservedFollowName)) {
+		return false
+	}
 	n, digits := 0, 0
 	for _, c := range s {
 		if !unicode.IsPrint(c) {
@@ -1938,7 +1965,7 @@ func (g *Gate) Decide(d owner.Decision) {
 	g.decided[d.Ref] = decision{approved: d.Approved, why: why, asked: w != nil, implicit: implicit, late: late,
 		req: d.Request, at: g.cfg.Now(), item: item, local: local, hold: hold, attempt: attempt, tries: tries}
 	wait := d.Approved && local && !g.confirmed[d.Ref]
-	own := g.own
+	own, eng := g.own, g.eng
 	g.mu.Unlock()
 	if unstaged && hold != "" && own != nil {
 		_ = own.Inform(fmt.Sprintf("%s was not sent: its draft or staged copy could not be made. Ask your agent again if still needed.", clip(hold)))
@@ -1950,7 +1977,20 @@ func (g *Gate) Decide(d owner.Decision) {
 		// broker action (UX lens and L3 on #329). Their other actions can
 		// still be asked on the page (onPage), but are not page-confirmed,
 		// so the step names no agent.
-		_ = own.Inform(fmt.Sprintf("%s did not run: it changed after my Wi-Fi page showed it. Make the request again if still needed.", clip(d.Request)))
+		//
+		// A release adoption the pipeline proposed (Origin change, the
+		// pipeline's own origin) is page-confirmed too, but the owner made
+		// no request. The change is no decline (Decided is told so) and the
+		// proposal drops, but the update check does not offer that version
+		// again until a restart or a newer release, so the notice promises
+		// no new offer: nothing is needed (P2-2a f2; L3 on #363). The
+		// literal "change" is change.OriginPipeline, pinned by
+		// TestAPageChangeNoticeForAReleaseAdoptionSaysNothingIsNeeded.
+		step := "Make the request again if still needed."
+		if st, err := eng.Get(d.Ref); err == nil && changeAction(st.Intent.Action) && st.Intent.Origin == "change" {
+			step = "Nothing is needed."
+		}
+		_ = own.Inform(fmt.Sprintf("%s did not run: it changed after my Wi-Fi page showed it. %s", clip(d.Request), step))
 	}
 	if !wait {
 		g.settle(d.Ref)

@@ -186,6 +186,28 @@ form { margin: .6em 0 1.2em; }
 <p><a href="/home">More</a> · <a href="/status">Status</a></p>
 {{template "foot"}}{{end}}
 
+{{define "follow"}}{{template "head" ""}}
+<h1>Update source</h1>
+{{with .Msg}}<p class="ok">{{.}}</p><p><a class="button" href="/approvals/">Go to Approvals</a></p>{{end}}{{with .Err}}<p class="err">{{.}}</p>{{end}}
+{{with .Sum}}<section class="card"><h2>What following this source means</h2>
+<p>Its root file is version {{.Version}}{{with .Expires}}, good until {{.}} by this box's clock{{end}}.</p>
+<ul>{{range .Roles}}<li>{{.Does}}: {{.Need}} of {{.Have}} keys must agree.</li>{{end}}</ul>
+<details><summary>Its root keys</summary><ul>{{range .RootIDs}}<li class="mono">{{.}}</li>{{end}}</ul></details>
+{{if .Odd}}<p class="err">A key has an unusual character, shown as [U+…]. Don't follow a source you didn't expect this from.</p>{{end}}
+<p>Fingerprint: <span class="mono">{{.Print}}</span>, the same as on the approval.<br><span class="muted">In full: <span class="mono">{{.Digest}}</span>. Check it matches the one the source publishes.</span></p>
+{{if .Project}}<p>These are the AgentOS project's own keys, as this box shipped with them.</p>
+<form method="post" action="/follow/"><input type="hidden" name="digest" value="{{.Digest}}"><input type="hidden" name="tok" value="{{$.Tok}}"><input type="hidden" name="project" value="1">
+<button name="step" value="ask">Switch back to the AgentOS project</button></form></section>
+{{else}}<p class="err">Whoever holds these keys can change any software on this box. Follow only a source you trust.</p>
+<form method="post" action="/follow/"><input type="hidden" name="digest" value="{{.Digest}}"><input type="hidden" name="tok" value="{{$.Tok}}">
+<label>Your name for this source<input type="text" name="name" maxlength="{{$.MaxName}}" autocomplete="off" spellcheck="false" required></label>
+<button name="step" value="ask">Ask to follow it</button></form></section>{{end}}
+{{else}}{{if not $.Msg}}<p>This box gets its software updates from the AgentOS project. To get them from another source you trust, such as a fork, choose that source's root file (root.json). Nothing changes until you approve it with a code.</p>
+<form method="post" action="/follow/" enctype="multipart/form-data"><label>Root file<br><input type="file" name="root" accept=".json,application/json" required></label><br>
+<button name="step" value="show">Show what it means</button></form>{{end}}{{end}}
+<p><a href="/home">More</a> · <a href="/approvals/">Approvals</a> · <a href="/status">Status</a></p>
+{{template "foot"}}{{end}}
+
 {{define "paused"}}{{template "head" ""}}
 <h1>Paused</h1>
 {{with .Msg}}<p class="ok">{{.}}</p>{{end}}{{with .Err}}<p class="err">{{.}}</p>{{end}}
@@ -206,6 +228,8 @@ form { margin: .6em 0 1.2em; }
 {{define "home"}}{{template "head" ""}}
 <h1>AgentOS</h1>
 {{with .Waiting}}<p class="ok"><a href="/approvals/">{{.}} waiting for you</a></p>{{end}}
+{{with .LineNote}}<p class="err">{{.}}</p>{{end}}
+{{with .LineTexts}}<h2>Texts with you</h2><ul>{{range .}}<li>{{.}}</li>{{end}}</ul>{{end}}
 <ul>{{range .Mounts}}<li><a href="{{.Path}}">{{.Title}}</a></li>{{else}}<li class="muted">Nothing else to show here yet.</li>{{end}}</ul>
 <p><a href="/status">Status, STOP and RESUME</a></p>
 {{template "foot"}}{{end}}
@@ -256,12 +280,16 @@ form { margin: .6em 0 1.2em; }
 {{else if eq .Step "codes"}}
 <p class="muted">Paired with your number {{.Paired}}.</p>{{template "restart" false}}
 <h2>3. Add approval codes</h2>
-<p><a class="button" href="{{.OTPLink}}">Add approval codes</a></p>
-<p class="muted">Your phone's code generator opens (on iPhone, the Passwords app). If it does not, scan this with another device, or type the key.</p>
+{{if .CodesEnrolled}}<p>Approval codes are already set up for this box. If you no longer have the code generator, replace it with your recovery key after setup.</p>
+<form method="post" action="/setup/codes"><input type="hidden" name="enrolled" value="1"><button>Continue</button></form>
+{{else if .CodesShown}}<form method="post" action="/setup/codes"><label>Type the 6-digit code your code generator shows for AgentOS<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required></label><button>Confirm</button></form>
+<form method="post" action="/setup/codes"><input type="hidden" name="new" value="1"><button>Show a new key</button></form>
+{{else if .OTPLink}}<p><a class="button" href="{{.OTPLink}}">Add approval codes</a></p>
+<p class="muted">Your phone's code generator opens (on iPhone, the Passwords app). If it does not, scan this with another device, or type the key. Only the newest key works.</p>
 {{.OTPQR}}
 <p class="mono">{{.OTPSecret}}</p>
 <form method="post" action="/setup/codes"><label>Type the 6-digit code it shows<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required></label><button>Confirm</button></form>
-
+{{end}}
 {{else if eq .Step "recovery"}}
 <h2>4. Recovery sheet</h2>
 <p>Tear the recovery key sheet off your card and store it somewhere safe, apart from the drive. You will rarely need it.</p>
@@ -275,7 +303,8 @@ form { margin: .6em 0 1.2em; }
 
 {{else if eq .Step "ai"}}
 <h2>6. Connect AI</h2>
-{{if not .Progress.Updated}}<p>The box is still updating. This step opens when it finishes.</p>
+{{if not .Progress.Updated}}{{if eq .Progress.Phase "offline"}}<p>The box is offline, so it is running the version it shipped with. It updates when it is next online, and this step opens after that.</p>
+{{else}}<p>The box is updating to the latest version first. This step opens when it finishes.</p>{{end}}
 {{else}}<p class="muted">One is enough. You can add more later.</p>
 {{range .Providers}}<h3>{{.Name}}{{if .Connected}}: connected{{end}}</h3>
 {{if not .Connected}}
@@ -292,6 +321,8 @@ func phaseText(p string) string {
 		return "ready"
 	case "updating":
 		return "updating (setup can continue)"
+	case "offline":
+		return "offline (setup can continue)"
 	}
 	return "starting"
 }

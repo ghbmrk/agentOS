@@ -640,7 +640,7 @@ func TestOwnerText(t *testing.T) {
 	b2.pkgs[0].Version = "3.0.15" // no advisory
 	r2 := newGuardRig(t, b2)
 	r2.pass(t)
-	if len(r2.texts) != 1 || r2.urgent[0] || !strings.Contains(r2.texts[0], "Credential old-token has expired. Replace it on the box page.") {
+	if len(r2.texts) != 1 || r2.urgent[0] || !strings.Contains(r2.texts[0], "Credential old-token has expired. Replace it on my Wi-Fi page.") {
 		t.Fatalf("expiry text %q urgent %v", r2.texts, r2.urgent)
 	}
 
@@ -666,7 +666,7 @@ func TestUncomparedAndWording(t *testing.T) {
 	if len(ev) != 1 || ev[0].Contained != "none" || ev[0].Fixture != "" || ev[0].Finding.Severity != Low || len(r.c.got) != 0 || len(r.texts) != 0 {
 		t.Fatalf("uncompared: %+v paused %d texts %q", ev, len(r.c.got), r.texts)
 	}
-	want := "Security check: Could not check openssl version build-42 against known vulnerabilities. Check it on the box page."
+	want := "Security check: Could not check openssl version build-42 against known vulnerabilities. Check it on my Wi-Fi page."
 	if d := r.g.Digest(); len(d) != 1 || d[0] != want {
 		t.Fatalf("digest %q\nwant %q", d, want)
 	}
@@ -690,9 +690,9 @@ func TestUncomparedAndWording(t *testing.T) {
 	}{
 		{Finding{Check: CheckHash, Subject: "guest-image/openclaw", Detail: "differs from the signed release"}, "File guest-image/openclaw does not match the signed release."},
 		{Finding{Check: CheckHash, Subject: "dep/libfoo", Detail: "could not be measured"}, "File dep/libfoo could not be checked."},
-		{Finding{Check: CheckDrift, Subject: "config/quiet.json", Detail: "changed outside the change pipeline"}, "Setting file config/quiet.json changed outside the box's change process."},
-		{Finding{Check: CheckExpiry, Subject: "cal-cert", Detail: "expires 2026-10-08"}, "Credential cal-cert expires 2026-10-08. Replace it on the box page."},
-		{Finding{Check: CheckAdvisory, Subject: "openssl", Detail: "ADV-1", Fixed: "3.0.14"}, "Known vulnerability in openssl (ADV-1), fixed in 3.0.14. The box takes the fix when an update has it."},
+		{Finding{Check: CheckDrift, Subject: "config/quiet.json", Detail: "changed outside the change pipeline"}, "Setting file config/quiet.json changed outside my change process."},
+		{Finding{Check: CheckExpiry, Subject: "cal-cert", Detail: "expires 2026-10-08"}, "Credential cal-cert expires 2026-10-08. Replace it on my Wi-Fi page."},
+		{Finding{Check: CheckAdvisory, Subject: "openssl", Detail: "ADV-1", Fixed: "3.0.14"}, "Known vulnerability in openssl (ADV-1), fixed in 3.0.14. I take the fix when an update has it."},
 	} {
 		if got := findingText(c.f); got != c.want {
 			t.Errorf("got  %q\nwant %q", got, c.want)
@@ -753,7 +753,7 @@ func TestSeverityOrder(t *testing.T) {
 	}
 
 	f := Finding{Check: CheckAdvisory, Subject: "openssl", Detail: "DSA-1", Fixed: "1:3.0.14-1~deb12u1+b1"}
-	if got, want := findingText(f), "Known vulnerability in openssl (DSA-1), fixed in 1:3.0.14-1~deb12u1+b1. The box takes the fix when an update has it."; got != want {
+	if got, want := findingText(f), "Known vulnerability in openssl (DSA-1), fixed in 1:3.0.14-1~deb12u1+b1. I take the fix when an update has it."; got != want {
 		t.Errorf("got  %q\nwant %q", got, want)
 	}
 
@@ -761,7 +761,7 @@ func TestSeverityOrder(t *testing.T) {
 	b3.snap.Advisories[0].Fixed = "not-a-version!"
 	r3 := newGuardRig(t, b3)
 	r3.pass(t)
-	want := "Security check: Could not read the fixed version in advisory ADV-1 for openssl. Check it on the box page."
+	want := "Security check: Could not read the fixed version in advisory ADV-1 for openssl. Check it on my Wi-Fi page."
 	if d := r3.g.Digest(); len(d) != 1 || d[0] != want || len(r3.c.got) != 0 {
 		t.Fatalf("digest %q\nwant %q", d, want)
 	}
