@@ -358,3 +358,6 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 
 | W5-D61 | [Provisioned daemon common owner assembly](briefs/W5-D61.md); scope: linked brief, this row, `broker/daemon/daemon.go`, `owner_assembly_test.go`, daemon `ASSUMPTIONS.md`. CH-15/OP-5/CH-2: opt-in trusted one-channel assembly, fixed construction failure/custody, actual shared host/daemon/question lifetime and STOP. | W5-D60 | started, strongest independent review pending |
 | W5-D61-Q | [Common owner release qualifications](briefs/W5-D61.md#release-qualifications): trusted factory/pin/config/clock, failure downstream custody, full registered handoff, actual operator/daemon adoption and exact current-base/security review. | W5-D61 and prior Q rows | external release qualification pending |
+
+| W5-D62 | [Bounded accounting residue inspection](briefs/W5-D62.md) | OP-1, CH-15 | additive review draft; tests-first | Codex GPT-6 |
+| W5-D62-Q | [Residue diagnosis/operator custody qualification](briefs/W5-D62.md#release-qualifications) | OP-1, CH-15 | external release hold | independent review |

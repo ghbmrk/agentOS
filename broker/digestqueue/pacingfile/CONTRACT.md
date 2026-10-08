@@ -431,3 +431,21 @@ and actual daemon/operator resource routing remain external release qualificatio
 No HTTP client, pin discovery, reader-closing policy, fresh allowance, provisioning,
 default activation, deadline, replacement worker or custody/media qualification.
 D37 availability and existing Q/current-main/#268 holds remain unchanged.
+
+## W5-D62 explicit residue review
+
+InspectTemporary(path, separatelyTrustedLedgerPin) is a synchronous trusted review
+operation after TOTAL consumer drain. It acquires a fresh cooperating lease,
+verifies nonzero ledger pin before I/O, uses existing bounded private nofollow
+stable descriptor reads and name observations, and returns only immutable value
+sizes/digests plus absent/duplicate/different status. It never writes/unlinks ledger
+or temporary; acquisition may create the stable lock inode. Empty/unsafe/oversize
+images, pin/read/custody/close faults return fixed ErrStorage and zero report.
+Unsupported platforms refuse. No bytes/paths/underlying errors are returned.
+
+Report equality describes bytes, not schema, freshness, age, allowance lineage,
+authenticity or persistence. Matching old/malformed bytes can compare; no report
+authorizes cleanup, recovery, refund, activation or restart. TemporaryDigest is
+review evidence, never a ledger trust anchor. Nonduplicate residue remains held
+for ordinary and urgent requests. Trusted external recovery determination and
+qualified custody remain required. No automatic diagnosis/startup/recovery hook.

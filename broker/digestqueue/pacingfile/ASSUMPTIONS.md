@@ -13,3 +13,20 @@
 | 9 | **Explicit duplicate-only recovery.** The caller authenticates the expected ledger pin/source and proves complete registered/downstream quiescence before invoking DiscardDuplicateTemporary on a fresh cooperating lease. Stable private names/lock/ancestor custody are independently qualified: metadata observations cannot prevent same-UID check-to-unlink replacement. Only exact duplicate bytes are removed; schema/freshness/restore/permissions are not repaired. Any error, including after unlink/sync/close, retains trusted recovery hold until persistence/custody determination. | CH-15, OP-1 | Keep W5-D54-Q/W5-D47-Q/W5-D50-Q/W5-D51-Q and strongest independent review before release; no default/startup/Save invocation, automatic cleanup/retry or activation. |
 | 10 | One consistently reused StartupSlot owns startup AND explicit recovery for this owner. The caller owns synchronous recovery lifetime. Failure/panic holds admission without a reset/retry API until independently trusted custody/persistence determination. Another slot/direct helper/reboot or escaped work is outside this composition's enforcement. | CH-15, OP-8, CH-2 | Preserve W5-D55-Q and existing Q rows before actual daemon/operator adoption. Fixed status/STOP remain independent; no persistent/global quota, worker interruption, authority activation or silent hold bypass. |
 | 11 | Configuration reading is admitted through one consistently reused StartupSlot.StartManifest and one owned worker. Reader and clock are trusted synchronous callbacks; keep reader ownership through complete Drain, never await that drain inside those callbacks. Another slot/direct read bypasses this cooperative admission. | OP-8, CH-15 | Preserve independent owner controls and W5-D47-Q/W5-D55-Q plus all trusted pin/config/custody qualifications. Reader may hang forever; no cancellation, replacement worker or global/persistent quota. |
+
+## W5-D62 diagnosis custody
+
+InspectTemporary is trusted broker/operator review, not an agent/plugin tool.
+Caller must completely drain ALL registered and escaped downstream work, retain
+separately trusted ledger pin/source, and stabilize names/custody. The function's
+fresh advisory lease refuses cooperating live/incomplete-drain sessions but cannot
+prove full drain, stop noncooperators or bind another slot/reboot. Observed digest/
+metadata/status is not an atomic hostile same-UID/name/ancestor/mount/lock snapshot.
+Do not bootstrap expected ledger pin from the checked image or use temporary hash
+as ledger authority. Old/malformed bytes replay. A report never authorizes restart
+or deletion; nonduplicate residue remains held. Ledger/temp are read-only, while
+lease acquisition may create the stable lock inode. Read/verification/close errors
+zero the report and require external recovery; synchronous work can hang forever.
+W5-D62-Q/prior Q/current-base/security/pin/media/latency holds remain. No automatic
+repair/retry/activation/refund/revocation/globalquota/anti-restore/config integrity/
+hostile-path or deployment latency qualification; D37 urgent/reissue hold preserved.
