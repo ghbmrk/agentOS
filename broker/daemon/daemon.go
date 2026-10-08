@@ -149,15 +149,20 @@ type PageSocket struct {
 	LineNote func() string
 }
 
+// ErrShutdownRecovery is fixed operational wording for a failed journal Close.
+// The underlying error/path is never returned through WaitError.
+var ErrShutdownRecovery = errors.New("daemon shutdown needs recovery")
+
 // Daemon is a running broker.
 type Daemon struct {
-	engine *journal.Engine
-	gate   *grants.Gate
-	store  *journal.FileStore
-	owner  *ownerch.Channel
-	srv    *sockets.Server
-	adm    *admission.Controller
-	done   chan struct{}
+	engine   *journal.Engine
+	gate     *grants.Gate
+	store    *journal.FileStore
+	owner    *ownerch.Channel
+	srv      *sockets.Server
+	adm      *admission.Controller
+	done     chan struct{}
+	closeErr error // immutable once done closes; published by that boundary
 }
 
 // redactAll journals no free text at all until the vault (P1-3) supplies a
@@ -377,7 +382,9 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 		// add Gate work until they return. Keep journal custody throughout.
 		workers.Wait()
 		gate.Wait()
-		store.Close()
+		if store.Close() != nil {
+			d.closeErr = ErrShutdownRecovery
+		}
 		close(d.done)
 	}()
 	return d, nil
@@ -435,3 +442,14 @@ func (d *Daemon) Admission() *admission.Controller { return d.adm }
 // must stop using escaped Gate/Owner/Engine handles and drain downstream work;
 // this join does not enforce their lifetime or revoke returned permissions.
 func (d *Daemon) Wait() { <-d.done }
+
+// WaitError joins the same completed shutdown as Wait and reports its observed
+// journal Close result. Observers never close again or retry. A fixed failure
+// needs independent trusted recovery determination before reuse; nil does not
+// qualify media durability, custody, permission revocation or all-user drain.
+// It can wait forever on synchronous work; callbacks must not await their own
+// shutdown. Existing Wait callers retain their signature and discard this result.
+func (d *Daemon) WaitError() error {
+	<-d.done
+	return d.closeErr
+}

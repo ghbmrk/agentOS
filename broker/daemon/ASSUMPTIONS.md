@@ -48,3 +48,16 @@ quiescence or qualify current-main/runtime/custody/media/latency. Joining while
 an owned callback awaits Daemon.Wait deadlocks; callbacks must not do that.
 The existing close error is still not reported by Wait; media qualification is
 external. No activation/default/config/policy/reset/authority change supplied.
+
+## W5-D59 journal close outcome
+
+WaitError joins the same shutdown/done as Wait and returns one immutable fixed
+ErrShutdownRecovery if the actual journal Close failed, nil on its observed
+success. Assignment precedes done publication; observers never repeat Close or
+launch a new operation. The raw error/path is withheld. Existing Wait callers
+still discard the result; command/daemon startup routing must adopt it separately.
+A failed result is uncertain recovery requiring trusted external determination
+before reuse, not proof of retained/released lock, an enforced/persistent restart
+hold, all-user quiescence, media durability or revocation of escaped permissions.
+Synchronous producer/settlement/close work may hang forever. Callback code must
+not await its own daemon shutdown. No automatic repair/retry/default activation.
