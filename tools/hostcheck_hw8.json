@@ -1,0 +1,19 @@
+{
+  "_comment": "HW-8's disclosed host changes as rules for tools/hostcheck.py. `change` is the broker/hostchange ID the owner's guide carries; a difference no rule matches fails the check. `key` is a regex on the finding key (UEFI: guid:name, TPM: handle); `changes` lists the allowed kinds of difference; `requires` names a run flag the operator sets.",
+  "rules": [
+    {"change": "boot-order", "kind": "uefi", "key": "^8be4df61-93ca-11d2-aa0d-00e098032b8c:(BootOrder|Boot[0-9A-F]{4})$",
+     "changes": ["added", "changed", "removed"], "requires": "owner-boot-order",
+     "why": "HW-6: only if the owner changes the boot order; the one-time boot key leaves it alone"},
+    {"change": "loader-system-token", "kind": "uefi", "key": "^4a67b082-0a4c-41cf-b6c7-440b29bb8c4f:LoaderSystemToken$",
+     "changes": ["added", "changed"], "why": "systemd-boot's token, unless the image turns it off (P2-1)"},
+    {"change": "sbat-level", "kind": "uefi", "key": "^605dab50-e046-4300-abb6-3dd810dd8b23:SbatLevel$",
+     "changes": ["added", "changed"], "why": "shim's SBAT revocation level"},
+    {"change": "tpm-srk", "kind": "tpm-persistent", "key": "^0x81000001$",
+     "changes": ["added"], "why": "a persistent SRK at the standard handle, only if the TPM held none"},
+    {"change": "tpm-vault-counter", "kind": "tpm-nv", "range": ["0x01800000", "0x01bfffff"],
+     "changes": ["added"], "attributes": "0x02040014", "size": 8,
+     "why": "V6 rollback counter as broker/tpmseal/counter.go defines it: owner range, counter, authread|authwrite|no_da, 8 bytes"},
+    {"change": "tpm-lockout", "kind": "tpm-setting", "key": "^(lockoutAuthSet|TPM2_PT_MAX_AUTH_FAIL|TPM2_PT_LOCKOUT_INTERVAL|TPM2_PT_LOCKOUT_RECOVERY)$",
+     "changes": ["changed"], "why": "D7: lockout authorization and dictionary-attack settings while a boot PIN is on"}
+  ]
+}
