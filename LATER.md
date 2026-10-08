@@ -99,13 +99,13 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | P2-2w d f3 | L3 F3 on #322: LocalUI tracks localui.sock, not the page process; a readiness signal would stop page-asked changes waiting while the page is down; liveness only, nothing approves |
 | P2-2w d f3b | L3 F3 on #322 delta: gate.go `NoPage*` reasons say "which is not running"; agent-facing, never texted to the owner (the journal redacts them) |
 | P2-2w d f4 | L3 N1 on #322: OSS-10 is missing from the REQ marker in `pagewording_test.go` |
-| P2-2w c1 f1 | Record the Security L6-L8 conditions from the P2-2w plan review in DECISIONS.md or reviews/security/; c1 worked from the BOARD row and P4 |
 | P2-2w c1 f2 | A crash between the enrollment seal and deleting `owner-totp-pending` leaves that copy of the channel seed in the vault (and backups); unreadable once sealed. Fix: delete a leftover pending entry when a sealed vault opens |
 | P2-2w c1 f3 | No negative test for a peer uid on the `/enroll` routes; the `verify.sock` SO_PEERCRED listener is unchanged and already tested |
 | P2-2w c1 f4 | L3 L1 on #320: `ReEnroll` does not delete the `owner-totp-setup-open` vault entry |
 | P2-2w c2 f2 | Security lens 367-1 on #367 (9bef9df): the seal's pending-seed check and the vault enroll's confirmed-mark delete each stop a restarted pairing alone, and only removing both fails a test; add one vault test per guard when P2-2w c4 touches enroll.go, and read f1 as "either guard" |
 | P2-2w c1 f5 | L3 L2 on #320: no test covers a setup-open entry of the wrong kind |
 | P2-2w c2 f1 | L3 re-review on #367: the confirm-mark deletion in the vault's enroll and `setEnrolled(false)` in `localsrv` enroll are defence in depth, not load-bearing; the seal's pending-seed check alone gates a restarted pairing |
+| P2-2w c3 f1 | Change the home Wi-Fi after setup: `agentos-netjoin` is served only in setup mode (Security L8.7, [note](reviews/security/2026-10-08-p2-2w-l6-l8.md)); a later change needs its own owner authentication on the page (a fresh code) and a non-setup op; until then a box that moves networks uses Ethernet or a reset |
 | SR2-3g f6 | `guesterr.New` takes any untyped string constant, a host-path constant included; needs deliberate misuse (L3 on #324). Same kind, from Security on #398: `guesterr.Guest` checks shape, not provenance, so a host value that happens to be ID-shaped shows if a caller mislabels it `Guest`, and an embedded nil `*Guest` panics in `Newf` |
 | SR2-3g f7 | L3 R1 on #324: the `guesterr` import sits in the stdlib import group in `question_test.go`; style only |
 | SR2-3k f1 | The ID pattern `^[A-Za-z0-9._-]{1,64}$` is written out in `guesterr`, `guest/mcp.go`, `question/tool.go` and `recalltool/tools.go`; one exported pattern would keep them from drifting (later 2, L3 on #398) |
