@@ -13,7 +13,7 @@ Index of work packages, one line each. Each row links its brief in `briefs/<ID>.
 | DOC-4 | [Per-file review records; no shared run tables](briefs/DOC-4.md) | DOC-1, DOC-2 | building |
 | SR3 | [Register the security and architecture review](briefs/SR3.md) | DOC-3 | in review (Codex proposal to primary; documentation only) |
 | HK-1 | [depaudit self-test flake fix](briefs/HK-1.md) | — | in review |
-| DEP-2 | [depaudit evidence out of the tracee's reach](briefs/DEP-2.md) | HK-1 | queued (release; #401 L3 R1 and lens) |
+| DEP-2 | [depaudit evidence out of the tracee's reach](briefs/DEP-2.md) | HK-1 | in review (#437) |
 
 ## Security and architecture review (2026-10-08)
 
