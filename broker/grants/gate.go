@@ -1930,6 +1930,18 @@ func (g *Gate) Decide(d owner.Decision) {
 	}
 	changed := false
 	var guest guesterr.Literal
+	if !d.Approved {
+		// Denials the owner did not give name their own cause (release
+		// item 1, lens on #396); "owner" and "not chosen" keep the default.
+		switch d.Why {
+		case "expired":
+			guest = "the owner did not answer in time"
+		case "void":
+			guest = "a wrong code was given too many times"
+		case "restart":
+			guest = "the broker restarted before the owner answered"
+		}
+	}
 	if d.Approved && local && d.Page {
 		// Approved on the page with a fresh code: that answer confirms
 		// it, if the item is the one the page showed (Security P1).

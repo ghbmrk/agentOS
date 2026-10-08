@@ -81,3 +81,29 @@ func TestTheOwnersWordsAndChannelErrorsStayOffTheGuest(t *testing.T) {
 		t.Fatalf("channel error shown to the guest as %q", g)
 	}
 }
+
+// A denial the owner did not give says so (release item 1, lens on #396):
+// an expired, voided or restart-dropped ask names its own cause.
+func TestEachDenialCodeTellsTheGuestItsOwnCause(t *testing.T) {
+	for why, want := range map[string]string{
+		"owner":      "not approved by the owner",
+		"not chosen": "not approved by the owner",
+		"expired":    "not approved: the owner did not answer in time",
+		"void":       "not approved: a wrong code was given too many times",
+		"restart":    "not approved: the broker restarted before the owner answered",
+	} {
+		r := newRig(t, nil)
+		r.grant(mailGrant())
+		r.ver.set("inv-1042", sam())
+		r.effect("agent/s1", "invoice.send", map[string]any{"record": "inv-1042"}, "sam@example.com")
+		r.g.Flush()
+		r.decide(false, why)
+		st := r.state("agent/s1")
+		if st.State != journal.Denied || st.Permission.Reason != "not approved: "+why {
+			t.Fatalf("%s: %s %q", why, st.State, st.Permission.Reason)
+		}
+		if g := st.Permission.GuestReason; g != want {
+			t.Errorf("%s: guest told %q, want %q", why, g, want)
+		}
+	}
+}
