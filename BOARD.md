@@ -52,7 +52,7 @@ Primary lane; remediation is unclaimed. [Review record](reviews/security/2026-10
 | S1 | [Screenless USB4-SSD boot on ≥3 unmodified PCs](briefs/S1.md) | Mark: hardware + hands | queued (test kit ready; waiting on hardware) |
 | S2 | [USB LTE modem](briefs/S2.md) | Mark: 2 modems + SIM | queued (test kit ready; waiting on hardware) |
 | P0X | [Spec v0.12](briefs/P0X.md) | — | merged (cada7c1; SPEC.md v0.12) |
-| S10 | [Personal-agent protocols (PACT, PAP)](briefs/S10.md) | — | building |
+| S10 | [Personal-agent protocols (PACT, PAP)](briefs/S10.md) | — | in review (not adoptable as specified; stopped after spike) |
 
 Exit of P0: spike results → spec v0.12 diff → Mark approves → budget re-estimate.
 
