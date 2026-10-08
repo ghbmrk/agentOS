@@ -178,12 +178,24 @@ func (e *Engine) Authorize(ctx context.Context, id string) (Status, error) {
 	}
 	r := Record{Type: RecAuthorized, ID: id}
 	if perr != nil {
-		r = Record{Type: RecDenied, ID: id, Reason: perr.Error()}
+		r = Record{Type: RecDenied, ID: id, Reason: perr.Error(), Guest: guestText(perr)}
 	}
 	if err := e.commit(r); err != nil {
 		return Status{}, err
 	}
 	return en.status(), nil
+}
+
+// guestText is a refusal's text for the guest: GuestText when err is
+// guesterr.Safe by its own method set, so a Safe error wrapped with other
+// text is not; otherwise none, and the guest is given a ref (SR2-3j). The
+// interface is matched structurally, keeping journal free of broker
+// imports (ARC-2); guesterr's allowlist test bounds which types have it.
+func guestText(err error) string {
+	if s, ok := err.(interface{ GuestText() string }); ok {
+		return s.GuestText()
+	}
+	return ""
 }
 
 // Dispatch runs one attempt of an authorized intent, or a new attempt of one
@@ -227,7 +239,7 @@ func (e *Engine) Dispatch(ctx context.Context, id string) (Status, error) {
 			continue
 		}
 		if perr != nil {
-			err := e.commit(Record{Type: RecRecheckFailed, ID: id, Reason: perr.Error()})
+			err := e.commit(Record{Type: RecRecheckFailed, ID: id, Reason: perr.Error(), Guest: guestText(perr)})
 			st := en.status()
 			e.mu.Unlock()
 			if err != nil {
@@ -790,10 +802,10 @@ func (e *Engine) apply(r Record) {
 		en.permission = Permission{Decision: "allowed", Phase: PhaseAuthorize}
 	case RecDenied:
 		en.state = Denied
-		en.permission = Permission{Decision: "denied", Phase: PhaseAuthorize, Reason: r.Reason}
+		en.permission = Permission{Decision: "denied", Phase: PhaseAuthorize, Reason: r.Reason, GuestReason: r.Guest}
 	case RecRecheckFailed:
 		en.state = Denied
-		en.permission = Permission{Decision: "denied", Phase: PhaseDispatch, Reason: r.Reason}
+		en.permission = Permission{Decision: "denied", Phase: PhaseDispatch, Reason: r.Reason, GuestReason: r.Guest}
 	case RecDispatched:
 		en.state = InFlight
 		en.attempts = append(en.attempts, Attempt{N: r.Attempt, Result: ResultInFlight})
