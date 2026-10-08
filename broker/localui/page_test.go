@@ -13,3 +13,10 @@ func (r *rig) page(o localsrv.Owner) Owner {
 // swapOwner is the owner channel behind the in-process socket. Set its
 // field only while no call is in flight.
 type swapOwner struct{ localsrv.Owner }
+
+// pageWith is page with the follow ops wired as c's (OSS-10).
+func (r *rig) pageWith(o localsrv.Owner, c localsrv.Config) Owner {
+	r.served = &swapOwner{o}
+	c.Owner, c.Now = r.served, r.clock
+	return InProcess(localsrv.New(c).Ops())
+}
