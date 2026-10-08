@@ -18,27 +18,44 @@ import (
 // is dropped, never forwarded to the CLI (trigger a). A response the
 // declaration names as the provider refusing the login stops the route
 // (trigger b). Either way the route stays stopped, so the CLI's retries
-// never reach the provider, and the owner is told once.
+// never reach the provider, and the owner is told once. Only a refused
+// login reopens on the owner's Resume.
 
-// fakeSwapper stands in for the vault side of the swap. It records the
-// credentials it was given and returns a fixed placeholder per field.
+// fakeSwapper stands in for the vault side of the swap. It stages a
+// response's credentials, returns a fixed placeholder per field, and
+// stores them only on commit. fail faults staging; badField gives that
+// field a placeholder carrying its credential.
 type fakeSwapper struct {
-	mu   sync.Mutex
-	got  map[string]string
-	fail error
+	mu       sync.Mutex
+	got      map[string]string
+	commits  int
+	fail     error
+	badField string
 }
 
-func (s *fakeSwapper) Swap(adapter, field, value string) (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *fakeSwapper) Swap(adapter string, creds map[string]string) (map[string]string, func() error, error) {
 	if s.fail != nil {
-		return "", s.fail
+		return nil, nil, s.fail
 	}
-	if s.got == nil {
-		s.got = map[string]string{}
+	phs := map[string]string{}
+	for k, v := range creds {
+		phs[k] = "placeholder-" + k
+		if k == s.badField {
+			phs[k] = "ph-" + v
+		}
 	}
-	s.got[adapter+"/"+field] = value
-	return "placeholder-" + field, nil
+	return phs, func() error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.commits++
+		if s.got == nil {
+			s.got = map[string]string{}
+		}
+		for k, v := range creds {
+			s.got[adapter+"/"+k] = v
+		}
+		return nil
+	}, nil
 }
 
 func (s *fakeSwapper) calls() int {
@@ -267,29 +284,114 @@ func TestFailedSwapFailsClosed(t *testing.T) {
 	}
 }
 
-// A placeholder that carries the credential is no placeholder.
-func TestPlaceholderMayNotCarryTheCredential(t *testing.T) {
+// An unswappable response keeps the route fallen back until a release
+// requalifies the declaration: the owner's Resume does not reopen it, and
+// a Proxy built again from the declaration (the release) does.
+func TestUnswappableStopIsNotResumed(t *testing.T) {
 	r := newPlanRig(t)
 	canary := synthetic(t, "canary-")
+	r.answer(200, "application/json", `{"access_token":"`+canary+`","refresh_token":"`+canary+`r","id_token":"`+canary+`i","expires_in":1,"token_type":"Bearer"}`)
+	if w := r.do(t, "w1", refresh()); w.Code != http.StatusBadGateway {
+		t.Fatalf("got %d", w.Code)
+	}
+	if err := r.proxy.Resume("plan"); !errors.Is(err, ErrRequalify) {
+		t.Fatalf("Resume = %v, want ErrRequalify", err)
+	}
+	r.answer(200, "application/json", `{"content":[]}`)
+	if w := r.do(t, "w1", chat("/plan/v1/messages")); w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("after Resume got %d", w.Code)
+	}
+	if r.provider.count() != 1 {
+		t.Fatalf("provider reached %d times", r.provider.count())
+	}
 	p, err := New(Config{
 		Adapters: []Adapter{planAdapter()}, Grants: map[string][]string{"w1": {"plan"}},
 		Vault: r.vault, Transport: r.transport, Audit: r.audit, RouteFailed: r.fails.told,
-		Swapper: echoSwapper{},
+		Swapper: r.swap,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	r.proxy = p
-	r.answer(200, "application/json", `{"access_token":"`+canary+`","refresh_token":"`+canary+`r","expires_in":1,"token_type":"Bearer"}`)
-	w := r.do(t, "w1", refresh())
-	if w.Code != http.StatusBadGateway || leaked(w, canary) {
-		t.Fatalf("got %d %q", w.Code, w.Body)
+	if w := r.do(t, "w1", chat("/plan/v1/messages")); w.Code != 200 {
+		t.Fatalf("after requalifying got %d %q", w.Code, w.Body)
 	}
 }
 
-type echoSwapper struct{}
+// A placeholder that carries a credential is no placeholder, and since the
+// proxy checks every placeholder before it commits, a bad one on any field
+// leaves nothing stored: a refresh is never held in part.
+func TestPlaceholderMayNotCarryTheCredential(t *testing.T) {
+	for _, field := range []string{"access_token", "refresh_token"} {
+		t.Run(field, func(t *testing.T) {
+			r := newPlanRig(t)
+			r.swap.badField = field
+			canary := synthetic(t, "canary-")
+			r.answer(200, "application/json", `{"access_token":"`+canary+`","refresh_token":"`+canary+`r","expires_in":1,"token_type":"Bearer"}`)
+			w := r.do(t, "w1", refresh())
+			if w.Code != http.StatusBadGateway || leaked(w, canary) {
+				t.Fatalf("got %d %q", w.Code, w.Body)
+			}
+			if r.swap.commits != 0 || r.swap.calls() != 0 {
+				t.Fatalf("stored %v after a bad placeholder", r.swap.got)
+			}
+		})
+	}
+}
 
-func (echoSwapper) Swap(_, _, value string) (string, error) { return "ph-" + value, nil }
+// The vault side gets one response's credentials in one call and commits
+// them together, so a fault on any one stores none of them.
+func TestPartialSwapStoresNothing(t *testing.T) {
+	r := newPlanRig(t)
+	rec := &recordingSwapper{faultOn: "refresh_token"}
+	p, err := New(Config{
+		Adapters: []Adapter{planAdapter()}, Grants: map[string][]string{"w1": {"plan"}},
+		Vault: r.vault, Transport: r.transport, Audit: r.audit, RouteFailed: r.fails.told,
+		Swapper: rec,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.proxy = p
+	access, refreshTok := synthetic(t, "canary-access-"), synthetic(t, "canary-refresh-")
+	r.answer(200, "application/json", `{"access_token":"`+access+`","refresh_token":"`+refreshTok+`","expires_in":1,"token_type":"Bearer"}`)
+	w := r.do(t, "w1", refresh())
+	if w.Code != http.StatusBadGateway || leaked(w, access) || leaked(w, refreshTok) {
+		t.Fatalf("got %d %q", w.Code, w.Body)
+	}
+	if rec.calls != 1 || len(rec.seen) != 2 {
+		t.Fatalf("swapper called %d times with %d fields; want one call with both", rec.calls, len(rec.seen))
+	}
+	if len(rec.stored) != 0 {
+		t.Fatalf("stored %v after a fault", rec.stored)
+	}
+}
+
+// recordingSwapper stages field by field, as a vault transaction would,
+// and faults on faultOn; it stores only on commit.
+type recordingSwapper struct {
+	faultOn string
+	calls   int
+	seen    []string
+	stored  map[string]string
+}
+
+func (s *recordingSwapper) Swap(_ string, creds map[string]string) (map[string]string, func() error, error) {
+	s.calls++
+	staged, phs := map[string]string{}, map[string]string{}
+	for _, k := range []string{"access_token", "refresh_token"} {
+		v, ok := creds[k]
+		if !ok {
+			continue
+		}
+		s.seen = append(s.seen, k)
+		if k == s.faultOn {
+			return nil, nil, errors.New("vault fault")
+		}
+		staged[k], phs[k] = v, "placeholder-"+k
+	}
+	return phs, func() error { s.stored = staged; return nil }, nil
+}
 
 // Trigger (b): a status the declaration names as the provider refusing the
 // login stops the route. Its body is not forwarded, the owner is told once,
@@ -327,7 +429,9 @@ func TestRefusedLoginStopsRetrying(t *testing.T) {
 				t.Fatalf("owner told %v", got)
 			}
 
-			r.proxy.Resume("plan")
+			if err := r.proxy.Resume("plan"); err != nil {
+				t.Fatal(err)
+			}
 			r.answer(200, "application/json", `{"content":[]}`)
 			if w := r.do(t, "w1", chat("/plan/v1/messages")); w.Code != 200 {
 				t.Fatalf("after Resume got %d %q", w.Code, w.Body)

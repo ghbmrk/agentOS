@@ -21,7 +21,9 @@ import (
 // (CRED-5t trigger a). A response the declaration names as the provider
 // refusing the login (trigger b) is not forwarded either. Both stop the
 // route: further requests on the adapter are denied without reaching the
-// provider until Resume, and the owner is told once (Config.RouteFailed).
+// provider, and the owner is told once (Config.RouteFailed). A refused
+// login reopens when the owner resumes it (Resume); an unswappable one
+// stays fallen back until a release requalifies the declaration.
 
 // MaxExchangeResponse caps a credential exchange's response, in bytes.
 const MaxExchangeResponse = 64 << 10
@@ -46,11 +48,14 @@ type exchangeHooks struct {
 }
 
 // Swapper holds credentials a provider issues through a broker-held route
-// (CRED-5). Swap stores value as the adapter's credential named field and
-// returns the placeholder the CLI holds in its place. An error drops the
-// response.
+// (CRED-5). Swap receives every credential of one response, keyed by field,
+// and stores none of them: it returns the placeholder the CLI holds in
+// place of each, and a commit that stores them all or none. The proxy
+// checks the placeholders before it commits, so a refresh is never stored
+// in part (a new access token beside an old refresh token). An error from
+// either drops the response.
 type Swapper interface {
-	Swap(adapter, field, value string) (placeholder string, err error)
+	Swap(adapter string, creds map[string]string) (placeholders map[string]string, commit func() error, err error)
 }
 
 // ResponseRule declares the exact response of a credential exchange: a
@@ -122,66 +127,76 @@ func (r *ResponseRule) compile() error {
 }
 
 // swap checks resp against the rule and returns the body to forward, with
-// every credential swapped. Nothing is swapped unless the whole response
-// matches.
-func (r *ResponseRule) swap(resp *http.Response, adapter string, sw Swapper) ([]byte, error) {
+// every credential swapped, and the commit that stores them. Nothing is
+// staged unless the whole response matches, and nothing is stored until
+// the caller commits.
+func (r *ResponseRule) swap(resp *http.Response, adapter string, sw Swapper) ([]byte, func() error, error) {
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("status %d", resp.StatusCode)
+		return nil, nil, fmt.Errorf("status %d", resp.StatusCode)
 	}
 	if mt, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type")); err != nil || mt != "application/json" {
-		return nil, errors.New("not JSON")
+		return nil, nil, errors.New("not JSON")
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxExchangeResponse+1))
 	if err != nil || len(body) > MaxExchangeResponse {
-		return nil, errors.New("unreadable or too large")
+		return nil, nil, errors.New("unreadable or too large")
 	}
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
 	var obj map[string]any
 	if err := dec.Decode(&obj); err != nil || obj == nil {
-		return nil, errors.New("not a JSON object")
+		return nil, nil, errors.New("not a JSON object")
 	}
 	if _, err := dec.Token(); err != io.EOF {
-		return nil, errors.New("trailing data")
+		return nil, nil, errors.New("trailing data")
 	}
 	declared := map[string]*Field{}
 	for i := range r.Fields {
 		f := &r.Fields[i]
 		declared[f.Name] = f
 		if _, ok := obj[f.Name]; !ok && !f.Optional {
-			return nil, errors.New("declared field missing")
+			return nil, nil, errors.New("declared field missing")
 		}
 	}
+	creds := map[string]string{}
 	for k, v := range obj {
 		f, ok := declared[k]
 		if !ok {
-			return nil, errors.New("undeclared field")
+			return nil, nil, errors.New("undeclared field")
 		}
 		if !f.admits(v) {
-			return nil, errors.New("field out of shape")
+			return nil, nil, errors.New("field out of shape")
+		}
+		if f.Kind == FieldCredential {
+			creds[k] = v.(string)
 		}
 	}
-	for _, f := range r.Fields {
-		v, ok := obj[f.Name].(string)
-		if f.Kind != FieldCredential || !ok {
-			continue
+	if len(creds) == 0 {
+		return nil, nil, errors.New("no credential issued")
+	}
+	phs, commit, err := sw.Swap(adapter, creds)
+	if err != nil || commit == nil || len(phs) != len(creds) {
+		return nil, nil, errors.New("swap failed")
+	}
+	for k := range creds {
+		ph := phs[k]
+		if ph == "" {
+			return nil, nil, errors.New("no placeholder")
 		}
-		ph, err := sw.Swap(adapter, f.Name, v)
-		if err != nil {
-			return nil, errors.New("swap failed")
+		for _, v := range creds {
+			if strings.Contains(ph, v) {
+				return nil, nil, errors.New("placeholder carries a credential")
+			}
 		}
-		if ph == "" || strings.Contains(ph, v) {
-			return nil, errors.New("placeholder carries the credential")
-		}
-		obj[f.Name] = ph
+		obj[k] = ph
 	}
 	var out bytes.Buffer
 	enc := json.NewEncoder(&out)
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(obj); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return out.Bytes(), nil
+	return out.Bytes(), commit, nil
 }
 
 func (f *Field) admits(v any) bool {
@@ -234,11 +249,21 @@ func (p *Proxy) stop(adapter, reason string) {
 	}
 }
 
-// Resume reopens a route stopped by an unswappable or refused response,
-// once the owner has fixed it (signed in again, or a release requalified
-// the CLI).
-func (p *Proxy) Resume(adapter string) {
+// ErrRequalify is Resume's answer for a route stopped by an unswappable
+// response: only a release that requalifies the declaration reopens it,
+// by building a new Proxy.
+var ErrRequalify = errors.New("egress: route stays fallen back until a release requalifies it")
+
+// Resume is the owner's path back to a route the provider refused the login
+// on, once the owner has signed in again. Its caller authenticates the
+// owner (CH-10). It does not reopen a route stopped by an unswappable
+// response (ErrRequalify).
+func (p *Proxy) Resume(adapter string) error {
 	p.mu.Lock()
+	defer p.mu.Unlock()
+	if r, ok := p.stops[adapter]; ok && r != ReasonLoginRefused {
+		return ErrRequalify
+	}
 	delete(p.stops, adapter)
-	p.mu.Unlock()
+	return nil
 }

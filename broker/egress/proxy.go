@@ -427,7 +427,10 @@ func (p *Proxy) serve(machine, grantsOf string, labelOf func() string, audit Aud
 		return
 	}
 	if op.Response != nil {
-		out, err := op.Response.swap(resp, a.Name, p.xch.swapper)
+		out, commit, err := op.Response.swap(resp, a.Name, p.xch.swapper)
+		if err == nil {
+			err = commit()
+		}
 		if err != nil {
 			ev.Status = resp.StatusCode
 			ev.Reason = ReasonUnswappable
