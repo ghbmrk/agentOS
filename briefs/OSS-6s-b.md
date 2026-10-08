@@ -6,6 +6,8 @@ Part b of the publication sender. It implements OSS-6s-a's `Transport` over Tor,
 
 **Frame to events (release point from the #325 L3):** a 1 MiB frame is larger than common Nostr relay event-size limits. Part b maps one frame to a fixed number of equal-size events under the smallest limit among the listed relays, so every day still shows the same count and size, and the pull job reassembles a frame and verifies it whole. The mapping and the per-relay limit go in its ASSUMPTIONS, with values from OSS-6p.
 
+**Tor client isolation (release point S1 from the #330 L3):** the Tor client runs as its own uncredentialed component. It has no access to the vault, the owner channel or broker credentials, and it receives only frames that pubid has already signed, so a compromised Tor client can learn nothing beyond what the relays already see.
+
 **Needs:** OSS-6s-a, OSS-6p, OSS-6i (clause), OSS-6j
 
 **Gate:** lenses (security, privacy); tier A
