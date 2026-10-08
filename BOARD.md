@@ -286,3 +286,18 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | W9 | [Questions in the guest plane](briefs/W9.md) | P3-8 merged, #68 merged | — | merged (f38aeed8) |
 | W9a | [Questions follow-ups (#95)](briefs/W9a.md) | W9 | Next build item A (part 2) | merged (#125 (part 2; part 1 #98)) |
 | CH-20w | [Evidence delivery](briefs/CH-20w.md) | CH-20 merged; P2-6m wired into the vault process | — | queued (blocked on mail wiring) |
+
+
+## Onboarding UX review (2026-10-08)
+
+Mark-requested advisory intake at `e19274c`; separate from the broader [UX3 proposal, #405](https://github.com/ghbmrk/agentOS/pull/405). Existing owners remain unchanged. Child rows are proposed release work, unclaimed; integration/spec decisions go through primary. Intake does not mean owner-ready or remediation complete.
+
+| ID | Package | Needs | Owner | State |
+|---|---|---|---|---|
+| UX4 | [Onboarding review and evidence intake](briefs/UX4.md) | UX3 proposal, existing setup work | Codex advisory proposal to primary | in review (C; documentation only) |
+| UX4-1 | [Preserve explicit choices on failed setup retries](briefs/UX4-1.md) | P2-2w c4; UX3-4 | primary routes; unclaimed | queued (release; P1) |
+| UX4-2 | [Visible phone fallback and actionable errors](briefs/UX4-2.md) | P2-2w c4; UX3-11 | primary routes; unclaimed | queued (release) |
+| UX4-3 | [Stable browser/app handoffs](briefs/UX4-3.md) | P2-2w c4/c2 r1; L1 before new transfer | primary routes; unclaimed | queued (release acceptance/design gate) |
+| UX4-4 | [Boot-to-page help and reachable compatibility](briefs/UX4-4.md) | P2-1/card/S1; HOST-1c; L1 if policy changes | primary routes; unclaimed | queued (release acceptance/design gate) |
+| UX4-5 | [Factor replacement and recovery instructions](briefs/UX4-5.md) | P2-2w c4/c2 r1; HOST-1b; UX3-1 | primary routes; unclaimed | queued (release) |
+| UX4-6 | [Onboarding through first accepted result](briefs/UX4-6.md) | P2-1/c4; H6/INT-A; UX3/UX4 fixes | primary routes; unclaimed | queued (release acceptance extension) |

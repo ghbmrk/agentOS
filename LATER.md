@@ -177,3 +177,19 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | HOST-1d | cryptsetup / LUKS2 | Vault-keyed disk encryption without custom crypto |
 | SR2-4i | systemd resource control (IOWeight=, CPUWeight=) | Sets io.weight and cpu.weight per slice; add iocost QoS on the image |
 | UPD-b | systemd-sysupdate (S7 stack) | First-boot update-before-trust already fits the chosen image stack |
+
+
+## Onboarding UX review intake (2026-10-08)
+
+Separate user-requested advisory intake; these additions are not included in the earlier critical-path audit counts. No earlier classification or owner changes. [Review](reviews/ux/2026-10-08-onboarding-review.md); [parent brief](briefs/UX4.md). UX4 intake merging leaves all six remediation/acceptance rows open.
+
+| ID | Class | Acceptance basis / destination |
+|---|---|---|
+| UX4 | release intake | Register bounded onboarding evidence/work; no runtime completion claim |
+| UX4-1 | release | A1/A14; preserve trust/privacy opt-outs and selected network on failure; BOARD/brief |
+| UX4-2 | release | A1, ONB-6/CH-12; fallback code visibility and viable errors; BOARD/brief |
+| UX4-3 | release | A1/A14; qualify app/browser continuity without widening session authority; L1 for new transfer; BOARD/brief |
+| UX4-4 | release | A1/A6; truthful arrival help and qualified pre-join compatibility; conditional L1; BOARD/brief |
+| UX4-5 | release | A1/A14; replacement consequence, factor source and meaningful recovery acknowledgment; BOARD/brief |
+| UX4-6 | release | A1/A3/A4/A10; assembled novice/device/first-result protocol; extends H6/INT-A; BOARD/brief |
+| UX4-L1 | later | Hidden-network/manual-SSID support beyond the first-release supported network contract; promote only if that frozen contract requires it. No implementation package started. |
