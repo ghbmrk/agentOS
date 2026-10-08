@@ -115,8 +115,13 @@ func TestDetectorRedactsLabelledValues(t *testing.T) {
 		"clientSecret: " + hex32:           hex32,
 		"privateKey: " + hex32:             hex32,
 		"refreshToken " + hex32:            hex32,
-		"myApiKey=" + hex32:                hex32,
-		"aws_secret_access_key = " + aws:   aws,
+		"myApiKey: " + hex32:               hex32,
+		// Initialisms before the label word (L3 re-review at 1960aed).
+		"googleAPIKey: " + hex32:         hex32,
+		"myAPIKey: " + hex32:             hex32,
+		"openAIKey: " + hex32:            hex32,
+		"AWSSecret: " + hex32:            hex32,
+		"aws_secret_access_key = " + aws: aws,
 	} {
 		out, n := Detect(in)
 		if strings.Contains(out, secret) || n == 0 {
