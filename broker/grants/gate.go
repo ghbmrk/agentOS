@@ -169,9 +169,10 @@ type Config struct {
 	// gets unverified approval items, which are always high risk, and no
 	// pre-allowance can match on it.
 	Verifiers map[string]Verifier
-	// LocalUI says a local confirmation page exists (P2-2). New or wider
-	// grants need it (CH-3); without it they are refused outright rather
-	// than asking the owner for a code that could not complete them.
+	// LocalUI says the box's Wi-Fi page is served (P2-2; agentosd sets it
+	// when it serves localui.sock, P2-2w). New or wider grants need it
+	// (CH-3); without it they are refused outright rather than asking the
+	// owner for a code that could not complete them.
 	LocalUI bool
 	// Isolated reports whether machine is a reply-composer machine built
 	// as ADP-11 requires (fresh, thread messages only, no recall, no
@@ -212,6 +213,14 @@ type Config struct {
 	// text. ok false: no such task, and the forget is denied. Nil: every
 	// forget is denied.
 	ForgetItem func(goal string) (object, detail string, ok bool)
+	// ForgetAgentItem gives the line for item 2 of a forget request
+	// (W3-forget-b2b), by item 2's ID: the agent's work since the task,
+	// taken back; its detail is from the intent's "actions" param
+	// (ForgetAgentActions), fixed when asked, not this one. By ID, not
+	// goal, so the line stands after item 1 forgot the task. ok false:
+	// nothing to take back, and item 2 is denied. Nil: every item 2 is
+	// denied.
+	ForgetAgentItem func(id string) (object, detail string, ok bool)
 	// Unpaused is told the ID of a grant whose pause the owner ended by
 	// resuming or revoking it, so Loop 2 stops listing it as paused (loops
 	// S4, W5a). Called outside the gate's lock, never on replay; it must
@@ -521,6 +530,18 @@ const RecipientsNotTextable = "can't be approved by text: each recipient must be
 // the owner on the Wi-Fi page; it says how to ask by text instead
 // (Potency R1 on P2-2a).
 const WaitingOnThePage = "waiting for the owner's approval on the box's Wi-Fi page; to ask by text instead, each recipient must be a plain email address, a full +country number or acct ...1234, at most 100 characters in all, in a new request_id"
+
+// NoPage* are the gate's reasons for a change that needs the owner's
+// confirmation on the box's Wi-Fi page while agentosd does not serve it
+// (LocalUI off): asked there, it could never be answered. They name the
+// page as the owner does (CH-12). No caller matches them: the journal
+// redacts reasons, so a caller decides from its own page flag (P2-2w d).
+const (
+	NoPageGrant    = "a new or wider grant needs confirmation on the box's Wi-Fi page, which is not running (CH-3)"
+	NoPageEvidence = "changing where private replies go needs confirmation on the box's Wi-Fi page, which is not running (CH-20)"
+	NoPageFollow   = "changing where updates come from needs confirmation on the box's Wi-Fi page, which is not running (OSS-10)"
+	NoPageSharing  = "turning sharing on needs confirmation on the box's Wi-Fi page, which is not running (CHG-4)"
+)
 
 // onPage reports whether a waiting intent is asked on the local page:
 // its recipients cannot be texted, or it needs the owner's confirmation
@@ -866,7 +887,7 @@ func (g *Gate) evaluateBroker(ctx context.Context, phase journal.Phase, in journ
 			return verdict{kind: deny, why: err.Error()}
 		}
 		if !g.cfg.LocalUI {
-			return verdict{kind: deny, why: "a new or wider grant needs confirmation on the box's local page, which this build does not have yet (CH-3)"}
+			return verdict{kind: deny, why: NoPageGrant}
 		}
 		g.mu.Lock()
 		err = g.validateLocked(s)
@@ -892,16 +913,27 @@ func (g *Gate) evaluateBroker(ctx context.Context, phase journal.Phase, in journ
 		// submits it, on the owner's FORGET; the line is the box's own,
 		// from the goal, and the owner's YES with the request's code is
 		// what runs it (security C1).
-		goal := ForgetGoal(in.ID)
+		// Item 2 of the same request, the agent's work since the task
+		// taken back (W3-forget-b2b), is asked the same way with its own
+		// line from ForgetAgentItem.
+		goal, key, lookup, agent := ForgetGoal(in.ID), ForgetGoal(in.ID), g.cfg.ForgetItem, false
+		if goal == "" {
+			goal, key, lookup, agent = ForgetAgentGoal(in.ID), in.ID, g.cfg.ForgetAgentItem, true
+		}
 		if in.Origin != OriginForget || in.Executor != ForgetExecutor || goal == "" {
 			return verdict{kind: deny, why: "a forget comes only from the owner's FORGET"}
 		}
-		if g.cfg.ForgetItem == nil {
+		if lookup == nil {
 			return verdict{kind: deny, why: "forgetting is not available"}
 		}
-		obj, detail, ok := g.cfg.ForgetItem(goal)
+		obj, detail, ok := lookup(key)
 		if !ok || obj == "" {
 			return verdict{kind: deny, why: "no such task"}
+		}
+		if agent {
+			// The work so far, fixed when asked, so a re-issue asks what
+			// was asked (OP-3; #327 L3 B-1).
+			detail = ForgetAgentActions(in.Params)
 		}
 		return verdict{kind: ask, item: owner.Item{Ref: in.ID, Object: obj, Detail: detail,
 			Facts: owner.Facts{Kind: owner.Ordinary, Verb: "forget", NoRecipient: true}}}
@@ -946,7 +978,7 @@ func (g *Gate) evaluateEvidence(in journal.Intent) verdict {
 		return verdict{kind: allow}
 	}
 	if !g.cfg.LocalUI {
-		return verdict{kind: deny, why: "changing where private replies go needs confirmation on the box's local page, which this build does not have yet (CH-20)"}
+		return verdict{kind: deny, why: NoPageEvidence}
 	}
 	if g.cfg.Destination == nil {
 		return verdict{kind: deny, why: "no connected account can deliver private replies"}
@@ -967,7 +999,7 @@ func (g *Gate) evaluateEvidence(in journal.Intent) verdict {
 // approval buys one switch.
 func (g *Gate) evaluateFollow(in journal.Intent) verdict {
 	if in.Origin != originLocal {
-		return verdict{kind: deny, why: "only the owner, on the box's local page, changes where updates come from"}
+		return verdict{kind: deny, why: "only the owner, on the box's Wi-Fi page, changes where updates come from"}
 	}
 	digest, name, ok := FollowOf(in.ID)
 	if !ok || len(in.Params) != 0 || in.Executor != FollowExecutor || !hexDigest(digest) || (name != "" && !followName(name)) {
@@ -980,7 +1012,7 @@ func (g *Gate) evaluateFollow(in journal.Intent) verdict {
 		object = "get updates from the AgentOS project again"
 	}
 	if !g.cfg.LocalUI {
-		return verdict{kind: deny, why: "changing where updates come from needs confirmation on the box's local page, which this build does not have yet (OSS-10)"}
+		return verdict{kind: deny, why: NoPageFollow}
 	}
 	return verdict{kind: ask, local: true, item: owner.Item{Ref: in.ID, Object: object,
 		Facts: owner.Facts{Kind: owner.GrantChange, Verb: "follow", NoRecipient: true}}}
@@ -1127,7 +1159,7 @@ func (g *Gate) evaluateChange(ctx context.Context, phase journal.Phase, in journ
 	}
 	local := sharingOn(in)
 	if local && !g.cfg.LocalUI {
-		return verdict{kind: deny, why: "turning sharing on needs confirmation on the box's local page, which this build does not have yet (CHG-4)"}
+		return verdict{kind: deny, why: NoPageSharing}
 	}
 	hold := false
 	if l.Facts.Verb == "install" {
@@ -1226,7 +1258,7 @@ func (g *Gate) check(ctx context.Context, phase journal.Phase, in journal.Intent
 		return errors.New("needs the owner's approval")
 	}
 	if v.local && !g.isConfirmed(in.ID) {
-		return errors.New("needs confirmation on the box's local page")
+		return errors.New("needs confirmation on the box's Wi-Fi page")
 	}
 	if !sameItem(d.item, v.item) {
 		return errors.New("the details changed after the owner approved; ask again")
@@ -1367,6 +1399,15 @@ func (g *Gate) Withdraw(id string) error {
 	return nil
 }
 
+// List returns every intent the journal holds, in submission order.
+func (g *Gate) List() []journal.Status {
+	out := g.eng.List()
+	for i := range out {
+		g.annotate(&out[i])
+	}
+	return out
+}
+
 func (g *Gate) Get(id string) (journal.Status, error) {
 	st, err := g.eng.Get(id)
 	if err == nil {
@@ -1460,9 +1501,9 @@ func (g *Gate) annotate(st *journal.Status) {
 	if g.carried[id] || g.reissuing(id) {
 		st.Permission.Reason = "the box restarted; the owner will be asked again"
 	} else if d, ok := g.decided[id]; ok && d.approved && d.local && !g.confirmed[id] {
-		st.Permission.Reason = "approved by code; waiting for the owner to confirm on the box's local page"
+		st.Permission.Reason = "approved by code; waiting for the owner to confirm on the box's Wi-Fi page"
 	} else if w := g.waiting[id]; w != nil && w.onlyUI {
-		st.Permission.Reason = "waiting for the owner's approval on the box's local page"
+		st.Permission.Reason = "waiting for the owner's approval on the box's Wi-Fi page"
 	} else if w != nil && w.held {
 		st.Permission.Reason = "approved; held for the owner's undo window until " + w.sendAt.UTC().Format("15:04") + " UTC"
 	} else if w != nil && w.reply != "" {
@@ -1851,13 +1892,14 @@ func (g *Gate) Decide(d owner.Decision) {
 	if why == "" {
 		why = "owner"
 	}
+	changed := false
 	if d.Approved && local && d.Page {
 		// Approved on the page with a fresh code: that answer confirms
 		// it, if the item is the one the page showed (Security P1).
 		if d.Sum == owner.ItemSum(item) {
 			g.confirmed[d.Ref] = true
 		} else {
-			d.Approved, why = false, "it changed since the page showed it"
+			d.Approved, why, changed = false, "it changed since the page showed it", true
 		}
 	}
 	hold, attempt := "", 0
@@ -1885,6 +1927,15 @@ func (g *Gate) Decide(d owner.Decision) {
 	g.mu.Unlock()
 	if unstaged && hold != "" && own != nil {
 		_ = own.Inform(fmt.Sprintf("%s was not sent: its draft or staged copy could not be made. Ask your agent again if still needed.", clip(hold)))
+	}
+	if changed && own != nil {
+		// The page has already said "Approved" (L3 SHOULD on #178, CH-12).
+		// Agent and guest origins never get a page-confirmed item: only
+		// broker actions set it, and evaluateBroker denies them every
+		// broker action (UX lens and L3 on #329). Their other actions can
+		// still be asked on the page (onPage), but are not page-confirmed,
+		// so the step names no agent.
+		_ = own.Inform(fmt.Sprintf("%s did not run: it changed after my Wi-Fi page showed it. Make the request again if still needed.", clip(d.Request)))
 	}
 	if !wait {
 		g.settle(d.Ref)

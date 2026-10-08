@@ -9,10 +9,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/grants"
+	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/localapi"
 )
 
-// REQ: CH-7, CH-10, ARC-2
+// REQ: CH-7, CH-10, ARC-2, CH-3, CH-20, CHG-4
 
 func startLocalUI(t *testing.T, dir string, ui *PageSocket) {
 	t.Helper()
@@ -22,6 +24,41 @@ func startLocalUI(t *testing.T, dir string, ui *PageSocket) {
 		c.PageSocket = ui
 	})
 	t.Cleanup(cancel)
+}
+
+// evidenceReason is the gate's reason for the owner asking to email
+// private replies, which needs the box's Wi-Fi page (CH-20).
+func evidenceReason(t *testing.T, d *Daemon) string {
+	t.Helper()
+	st, err := d.Gate().Submit(grants.EvidenceIntent("owner/evidence/t", grants.OriginOwner, "owner@example.test", "mail"))
+	if err == nil && st.State == journal.Pending {
+		st, err = d.Gate().Authorize(t.Context(), st.Intent.ID)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st.Permission.Reason
+}
+
+// P2-2w d: the gate asks on the box's Wi-Fi page exactly when agentosd
+// serves it (LocalUI on); without the page, such a change is refused
+// with the reason that names it (CH-3, CH-20, CHG-4).
+func TestServingThePageTurnsLocalUIOn(t *testing.T) {
+	keep := func(s string) string { return s } // reasons kept, to tell them apart
+	dir := t.TempDir()
+	cancel, d := startWith(t, dir, func(c *Config) {
+		c.Auth, c.OwnerState, c.Redactor = nil, filepath.Join(dir, "owner.json"), keep
+		c.PageSocket = &PageSocket{UID: os.Getuid()}
+	})
+	defer cancel()
+	if r := evidenceReason(t, d); r == grants.NoPageEvidence || r == Redacted {
+		t.Fatalf("page served: %q", r)
+	}
+	cancel2, off := startWith(t, t.TempDir(), func(c *Config) { c.Redactor = keep })
+	defer cancel2()
+	if r := evidenceReason(t, off); r != grants.NoPageEvidence {
+		t.Fatalf("no page: %q", r)
+	}
 }
 
 // P2-2w a: agentosd serves the page's ops on localui.sock, given to the

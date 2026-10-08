@@ -553,12 +553,19 @@ func main() {
 	// Evidence delivery (CH-20): with a destination set, private replies
 	// are emailed to it. No mail account is connected in this process
 	// yet, so none can be set (owns is nil) and replies go by text.
-	ev := newEvidence(keptPath, log.Printf)
+	ev := newEvidence(keptPath, cfg.PageSocket != nil, log.Printf)
 	ev.wire(&cfg)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	steps := newStepNotes(&cfg.Notes)
+	if lp != nil && recallDir != "" && verifier != nil {
+		// An approved item 2 that finds recall not open yet waits for it
+		// (#327 L3 B-3); set before the daemon serves the owner.
+		lp.forgetOwner.whenOpen = func() {
+			recallExec.OnOpen(func() { go lp.forgetOwner.resumeAgent(ctx) })
+		}
+	}
 	d, err := daemon.Run(ctx, cfg)
 	if err != nil {
 		log.Fatal(err)
@@ -614,6 +621,12 @@ func main() {
 			log.Printf("agent machines disabled: %v", err)
 		} else {
 			pre.m.Store(m)
+			if lp != nil {
+				// FORGET's item 2 (W3-forget-b2b): the agent machine's
+				// work since a task, taken back by recall's Reach.
+				lp.forgetOwner.agent.Store(&forgetAgent{work: recallExec,
+					lineage: func() (string, error) { return machines{m}.Lineage(agentMachine) }})
+			}
 			recallCfg.Labeler, recallCfg.Machines = recallLabels{m}, recallMachines{m}
 			go m.RunPruner(vm.PrunePolicy{LowWaterBytes: 1 << 30}, time.Minute, ctx.Done())
 			tree.setMachines(m)
@@ -683,10 +696,18 @@ func main() {
 	}
 	// The recall identity key is vault-held (recall K5): recall opens once
 	// the vault process can hand it over.
+	// FORGET's item 2s a restart interrupted resume once recall opens;
+	// with recall off they cannot, and the owner is told so.
 	if recallDir != "" && verifier != nil {
+		if lp != nil {
+			recallExec.OnOpen(func() { go lp.forgetOwner.resumeAgent(ctx) })
+		}
 		go openRecall(ctx, verifier, recallCfg, recallTools, recallExec)
 	} else {
 		recallExec.Off()
+		if lp != nil {
+			go lp.forgetOwner.resumeAgent(ctx)
+		}
 	}
 	if line != nil {
 		go line.run(ctx)

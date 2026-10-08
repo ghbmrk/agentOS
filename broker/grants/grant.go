@@ -67,6 +67,64 @@ func ForgetGoal(id string) string {
 	return goal
 }
 
+// ForgetAgentID is the ID of item 2 of the owner's forget request
+// (W3-forget-b2b): taking back the agent's work since the task. It shares
+// item 1's nonce, so each item can name the other (ForgetSibling).
+func ForgetAgentID(nonce, goal string) string { return "forget-agent/" + nonce + "/" + goal }
+
+// ForgetAgentGoal is the goal a take-back intent's ID names; "" if malformed.
+func ForgetAgentGoal(id string) string {
+	rest, ok := strings.CutPrefix(id, "forget-agent/")
+	if !ok {
+		return ""
+	}
+	nonce, goal, ok := strings.Cut(rest, "/")
+	if !ok || nonce == "" {
+		return ""
+	}
+	return goal
+}
+
+// ForgetAgentActions is item 2's detail from its "actions" param: the
+// agent's actions so far, counted when asked, which stay done (CAP-3;
+// DECISIONS 2026-10-05), in a recall rollback's words. A count, not text,
+// so the journal's redactor leaves it; none or a bad one names nothing.
+func ForgetAgentActions(params map[string]any) string {
+	var n int64
+	switch v := params["actions"].(type) {
+	case int:
+		n = int64(v)
+	case json.Number:
+		var err error
+		if n, err = v.Int64(); err != nil {
+			return ""
+		}
+	default:
+		return ""
+	}
+	switch {
+	case n < 0:
+		return ""
+	case n == 0:
+		return "no actions yet"
+	case n == 1:
+		return "1 action so far stays done"
+	}
+	return fmt.Sprintf("%d actions so far stay done", n)
+}
+
+// ForgetSibling is the other item of the request id belongs to: the
+// take-back for a forget, the forget for a take-back; "" if malformed.
+func ForgetSibling(id string) string {
+	if rest, ok := strings.CutPrefix(id, "forget/"); ok && ForgetGoal(id) != "" {
+		return "forget-agent/" + rest
+	}
+	if rest, ok := strings.CutPrefix(id, "forget-agent/"); ok && ForgetAgentGoal(id) != "" {
+		return "forget/" + rest
+	}
+	return ""
+}
+
 // OriginLoop2 marks Loop 2's containment (loops S8, K-S2): a pause of a
 // grant on a finding, and nothing else. Only the broker submits it; guest
 // intents carry "guest:<lineage>".

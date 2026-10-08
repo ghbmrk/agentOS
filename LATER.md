@@ -2,16 +2,28 @@
 Generated 2026-10-07 by the COST thread's audit; the coordinator updates it. Rows marked LATER are not started until the first release ships (DECISIONS D-048). Promote a row by moving it to "Release" with the acceptance test it now blocks.
 
 ## Summary
-Non-merged rows audited: 129; the 67 stale rows it found were reconciled into BOARD.md on 2026-10-08 (DOC-3), and rows since merged were removed from the tables below. Open now: Release 40 (6 marked unsure), Later 12.
-No security-fix row (SR2-*) is classed Later. P2-1 (host image, PR #41) has no board row but blocks IMG-1, HOST-1a/1b/1c part 2 and W3-builder-ship.
+Non-merged rows audited: 129; the 67 stale rows it found were reconciled into BOARD.md on 2026-10-08 (DOC-3), and rows since merged were removed from the tables below. Open now: Release 49 (6 marked unsure), Later 51 (table counts refreshed with SR3 intake; no existing row reclassified).
+No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41) has no board row but blocks IMG-1, HOST-1a/1b/1c part 2 and W3-builder-ship.
 
 ## Release (needed for A1–A15 or an invariant)
 | ID | Needed for | Note |
 |---|---|---|
+| SR3 | A4, A7, A12–A15 | Documentation intake for eight release findings; remediation stays open after intake merges |
+| SR3-1 | A4, A6, A14 (CH-7, localui L25) | Lock during sign-in/refresh cannot mint a live token; stale sessions cannot RESUME |
+| SR3-2 | A4, A13 (ADP-9, OP-3) | STOP-aged queues and concurrent dispatch obey current daily/per-record bounds |
+| SR3-3 | A13, A14 (ADP-9, CH-3, CH-12) | Final approval shows and binds every authority-bearing grant field |
+| SR3-4 | A7 (UPD-1, OP-4/5) | Interrupted update settlement converges after reopen; subsequent updates work |
+| SR3-5 | A4, A13, A15 (ADP-2, OP-3, REV-2) | Mailbox epoch changes cannot redirect a guarded mutation or undo to another message |
+| SR3-6 | A7, A14 (UPD-8) | Retiring interim trust invalidates pending automatic update authorization |
+| SR3-7 | A4 (OP-8, ARC-7) | Meter-to-provider composition enforces one canonical, reserved request; source-only finding |
+| SR3-8 | A12 (OSS-2) | Crash cuts cannot leave a completed clean-room job with unrecoverable output; source-only finding |
 | S5 | A5, A13 | CRED-4 action protocol; live run blocked on network policy |
 | S8-W1 | A14, CRED-5 | Blocks every worker-held route; credential invariant |
 | S8-live | A3 (CAP-11) | Needs Mark's Claude and ChatGPT plans |
 | S8-codex-terms | A3, CRED-5 (unsure) | Decides Codex custody; a Claude plan route may already satisfy A3 |
+| CRED-5f | A3 (CAP-9), CRED-5 | Plan route withdrawn with no API key granted must still route or tell the owner |
+| CRED-5t | CRED-1 invariant | Unswappable refresh response must fail closed; stop retrying on account restriction |
+| CRED-5w | CRED-5 | Owner can pause a broker-held route before a withdrawing release |
 | S1 | A1 (G1) | Test kit ready; waits on Mark's hardware |
 | S2 | A1, A3 | Modem SMS and voice; waits on Mark's modems |
 | P2-4-hw | A8 | Real-TPM trusted-host run; risk 14 |
@@ -70,10 +82,15 @@ No security-fix row (SR2-*) is classed Later. P2-1 (host image, PR #41) has no b
 | ADP-14-cred6 | Recipes declare their site's CRED-6 screens, undeclared ones trigger ADP-7 repair; CRED-6 already applies without a recipe |
 | ADP-14-origins | Which origins the credentialed context may reach on a site with no recipe; every state-changing request there is already held |
 | ADP-16-acct2 | A second account signed in inside a suite executor's app; ADP-16 kiosk already limits to one account's adapters |
+| W3-forget-b2b q | A queued item 2 run long after its YES also takes back work done since; the notice names only the count at the ask (#327 L3 L1) |
+| W3-forget-b2b w | A failed owed `MarkTakeBack` write in one `resumeAgent` run lets a later run in the same open try again and text the owner again; fold into the not-saved release row (#327 L3 r5 #2) |
+| W3-forget-b2b e | `Reach.TakeBack` returns early on an unfinished reset from the same time without a take-back mark, so a later boot could take back again; no known producer (#327 L3 r5 #3) |
 | OSS-6e f1 | Security 319-1 (L3 asked for this line; lands before #319 merges): a missing or unreadable `boot_id` fails open, so each restart can count one day of the 20h floor again |
 | W3-forget-b2 f1 | L3 on #321: a forget after a proposal reached the owner requeues the rebuild, which may ask again; rare, owner can decline |
 | W3-forget-b2 f2 | L3 on #321: a self-cancelled job still calls propose/Build with a cancelled ctx |
 | W3-forget-b2 f3 | L3 on #321: no mutation test covers the post-build disjunct |
+| P2-2w d f3 | L3 F3 on #322: LocalUI tracks localui.sock, not the page process; a readiness signal would stop page-asked changes waiting while the page is down; liveness only, nothing approves |
+| P2-2w d f3b | L3 F3 on #322 delta: gate.go `NoPage*` reasons say "which is not running"; agent-facing, never texted to the owner (the journal redacts them) |
 | P2-2w d f4 | L3 N1 on #322: OSS-10 is missing from the REQ marker in `pagewording_test.go` |
 | P2-2w c1 f1 | Record the Security L6-L8 conditions from the P2-2w plan review in DECISIONS.md or reviews/security/; c1 worked from the BOARD row and P4 |
 | P2-2w c1 f2 | A crash between the enrollment seal and deleting `owner-totp-pending` leaves that copy of the channel seed in the vault (and backups); unreadable once sealed. Fix: delete a leftover pending entry when a sealed vault opens |
@@ -88,6 +105,8 @@ No security-fix row (SR2-*) is classed Later. P2-1 (host image, PR #41) has no b
 | DOC-3 f1 | L3 on #356: the SHAs on rows inferred as merged name the last commit touching the package, not its merge; relabel as "last touched" or cite the PR |
 | DOC-3 f2 | L3 on #356: D-041 (license) has date `Pending`, not ISO; set it when the license is chosen |
 | DOC-2 f1 | L3 on #357: doclint does not check DECISIONS cells ≤300 characters or that `decisions/D-NNN.md` links resolve (D-056) |
+| CRED-5 f5 | L3 point 5 on #328: restore "only" in the broker-held use set so it is closed on its own; state precedence between unconfirmed broker-held and worker-held when terms are silent on proxies but require the provider's sign-in flow |
+| CRED-5 f6 | L3 point 6 on #328: D-061 was numbered at merge time; if another PR also claims D-061, the coordinator renumbers whichever merges second |
 | CRED-4b f1 | L3 on #300 (#9): the browser gate passes the raw `cfg.Origins` to the driver, not the canonical keys (`gate.go:99`) |
 | CRED-4b f2 | L3 on #300 (re-review #7): `exec.CommandContext` kills only the driver's group leader on ctx cancel; set `cmd.Cancel` to kill the process group (`gate.go:100`) |
 | CRED-4b f3 | L3 on #300 (re-review #6): no test isolates the Lstat and O_NOFOLLOW symlink layers |
