@@ -9,3 +9,5 @@ Publication sender (OSS-6 P9, security W3 on #163): the `pubid.Sender` that publ
 **Gate:** lenses (security, privacy)
 
 **State on the board before the 2026-10-08 index split:** queued
+
+**Split on #325 (2026-10-08):** OSS-6s-a (constant batch, ledger, cover send) and OSS-6s-b (Tor transport, pull job); OSS-6m measures the batch constant.

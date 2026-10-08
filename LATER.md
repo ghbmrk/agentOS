@@ -141,6 +141,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | HK-1 f3 | Lens screen on #401: `_scratch_dir` drops `TemporaryDirectory`'s chmod-and-retry cleanup of read-only entries; removal still raises rather than passing |
 | W5a-resume-pace | A page resume ask waits for the gate's CH-15 batch before it shows under Approvals; the page says it shows shortly |
 | W5a-resume-dedupe | Two concurrent asks for one pause can file two requests; approving one resumes and the other then fails at apply, so nothing widens twice |
+| OSS-6s-a age bound | L3 on #325: the loader's carried-item age bound `MaxQueue` × m depends on m; if an update lowers `MaxPayload` (OSS-6m), an item aged between the new and old bound would refuse the whole outbox (needs years of age); extend a3 residual (ii) to the age bound or use the largest m ever shipped |
 | W3-forget-b f1 | L3 on #317: a brief that stores its own state (`**State:**`) can drift from BOARD, which is authoritative; drop the line from new briefs and have doclint flag it |
 | DOC-4 f1 | L3 on #400: a no-PR record must still write `head <sha>` for a `main` commit and invent a package (`POTENCY`); accept `PR none · package none · main <sha>` in the Record check |
 | DOC-4 f2 | L3 on #400: the Record check skips lens files without a `YYYY-MM-DD-` name (e.g. `reviews/ux/pr500.md`); require dated names for non-README files in lens directories |

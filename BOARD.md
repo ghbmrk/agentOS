@@ -156,7 +156,10 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | ADP-8 | [Adapter mismatch check and the §11 adapter path](briefs/ADP-8.md) | P3-1, P2-7 | queued (unblocked; lane claude2) |
 | ADP-5 | [Desktop-app executor, Linux](briefs/ADP-5.md) | CRED-4b | queued (blocked on CRED-4b; lane claude2) |
 | OSS-6 | [Publication identity](briefs/OSS-6.md) | P4-1, P4-4 | merged (#163, 8a67351) |
-| OSS-6s | [Publication sender](briefs/OSS-6s.md) | OSS-6 | queued |
+| OSS-6s | [Publication sender](briefs/OSS-6s.md) | OSS-6 | dropped (split into OSS-6s-a and OSS-6s-b on #325) |
+| OSS-6s-a | [Constant daily batch, idempotent ledger, cover send](briefs/OSS-6s-a.md) | OSS-6 | queued |
+| OSS-6s-b | [Tor transport to Nostr relays, and the pull job](briefs/OSS-6s-b.md) | OSS-6s-a, OSS-6p, OSS-6i, OSS-6j | queued |
+| OSS-6m | [Measure the daily publication batch constant](briefs/OSS-6m.md) | OSS-6s-a | queued (optional, non-blocking) |
 | OSS-6j | [Spec: what the repository's pull job is](briefs/OSS-6j.md) | #330 | queued (L1 spec diff) |
 | OSS-6i | [Fresh Tor circuit per batch and signing key](briefs/OSS-6i.md) | #330 | queued (L1 clause, then test in OSS-6s) |
 | OSS-6p | [Relay count, delivery rule, queue bound, relay list source](briefs/OSS-6p.md) | #330 | queued |
