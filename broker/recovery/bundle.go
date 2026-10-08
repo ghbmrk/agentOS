@@ -324,6 +324,12 @@ type Options struct {
 	// forget log; nil when the PC has none. Without it the restore stays
 	// pending (Report.Pending).
 	Counter vault.Counter
+	// Newer are the backups the restore command found at the destinations
+	// at hand; a held restore offers the owner the newest verified one
+	// made after the restored backup (Question.Newer).
+	Newer []BackupEntry
+
+	rand io.Reader // the question's decoys; nil is crypto/rand
 }
 
 // Restore reads a backup with the recovery key into dst, a path that must
@@ -429,7 +435,7 @@ func restore(r io.Reader, rk RecoveryKey, dst string, lay Layout, opt Options, n
 	}
 	if err == nil {
 		// Forgets are for good, across restores too (CAP-3).
-		rep.Pending, err = settleForgetLog(b.V, rk, tmp, lay, opt)
+		rep.Pending, err = settleForgetLog(b.V, rk, tmp, lay, opt, rep.Created, now)
 	}
 	if err == nil {
 		// Declines are for good, across restores too.
