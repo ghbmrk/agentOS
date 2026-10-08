@@ -28,7 +28,7 @@ import (
 
 // ErrUpdating is what Hold returns while setup steps that connect an AI
 // or personal account must wait.
-var ErrUpdating = errors.New("firstboot: the box is updating first")
+var ErrUpdating = errors.New("firstboot: I am updating first")
 
 // Scheduler is the applier's first-boot side (apply.Applier).
 type Scheduler interface {
@@ -202,7 +202,7 @@ func (g *Gate) Hold() error {
 		return nil
 	}
 	if g.st.Kind == kindOffline {
-		return fmt.Errorf("%w: the box is offline and has not updated yet; AI and accounts can be connected once it is online and updated", ErrUpdating)
+		return fmt.Errorf("%w: I am offline and have not updated yet; AI and accounts can be connected once I am online and updated", ErrUpdating)
 	}
 	return fmt.Errorf("%w: AI and accounts can be connected when the update finishes", ErrUpdating)
 }
@@ -231,15 +231,15 @@ func (g *Gate) Status() string {
 	const wait = " AI and accounts can be connected after that."
 	switch g.st.Kind {
 	case kindOffline:
-		return "First start: the box is offline, so it runs the version it shipped with. It updates when it is next online." + wait
+		return "First start: I am offline, so I run the version I shipped with. I will update when I am next online." + wait
 	case kindUnreached:
-		return "First start: the box could not reach the update server. It will try again." + wait
+		return "First start: I could not reach the update server. I will try again." + wait
 	case kindUnverified:
-		return "First start: the update server's answer could not be verified, so the box cannot tell it is current. It will try again." + wait
+		return "First start: the update server's answer could not be verified, so I cannot tell I am current. I will try again." + wait
 	case kindInstalling:
-		return fmt.Sprintf("First start: updating to version %d. The box will restart once.", g.st.Version) + wait
+		return fmt.Sprintf("First start: updating to version %d. I will restart once.", g.st.Version) + wait
 	case kindFellBack:
-		return fmt.Sprintf("First start: update %d did not start cleanly, so the box went back to the version it shipped with. AI and accounts stay closed until a newer update is out.", g.st.Version)
+		return fmt.Sprintf("First start: update %d did not start cleanly, so I went back to the version I shipped with. AI and accounts stay closed until a newer update is out.", g.st.Version)
 	}
 	return "First start: checking for updates before AI and accounts can be connected."
 }

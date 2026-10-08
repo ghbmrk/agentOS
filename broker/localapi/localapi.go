@@ -209,11 +209,24 @@ type RootSummary struct {
 	Expires    time.Time           `json:"expires,omitempty"`
 	Digest     string              `json:"digest,omitempty"`
 	Refusal    string              `json:"refusal,omitempty"`
+	Reason     string              `json:"reason,omitempty"`
+	// Project: the root has the project's own root keys, as the image
+	// ships them, so the page may offer switching back (WF1).
+	Project bool `json:"project,omitempty"`
 }
 
 // RefusedRoot: the root does not verify (signatures, thresholds, expiry by
 // the box's clock guard) or is not one to follow.
 const RefusedRoot = "not a root to follow"
+
+// The coarse causes of a RefusedRoot (OSS-10w L3). Each reveals only what
+// the owner's own root file and the box's clock already say; anything else
+// carries no reason.
+const (
+	RootExpired    = "expired"    // past its expiry by the box's clock
+	RootSignatures = "signatures" // too few valid signatures for its threshold
+	RootThreshold  = "threshold"  // a threshold below the box's floor
+)
 
 // Follow asks to follow the shown root with this digest. An empty Name
 // switches back to the project, which agentosd admits only for the

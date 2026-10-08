@@ -187,6 +187,7 @@ func (s *Server) routes() {
 		s.mux.HandleFunc("/unlock/vault", s.vaultUnlock)
 	}
 	s.Mount("/approvals", "Approvals", http.HandlerFunc(s.approvals))
+	s.Mount("/follow", "Update source", http.HandlerFunc(s.follow))
 	if s.cfg.SecondLine != nil {
 		s.Mount("/second-line", "Second line", http.HandlerFunc(s.secondLine))
 	}
@@ -219,7 +220,9 @@ func (s *Server) setupDone(r *http.Request) bool {
 // progress is the box's boot progress (ONB-4); without setup hooks it is
 // ready once agentosd answers.
 func (s *Server) progress(r *http.Request) Progress {
-	if s.cfg.Hooks != nil {
+	// Setup's hooks answer only until setup is done (agentosd refuses
+	// them after finish); then progress is the owner channel's.
+	if s.cfg.Hooks != nil && s.setup != nil && !s.setup.done() {
 		return s.cfg.Hooks.Progress()
 	}
 	if _, ok := s.ownerStatus(r.Context()); ok {
