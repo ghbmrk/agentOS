@@ -6,11 +6,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/change"
+	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
 )
@@ -65,7 +69,7 @@ func TestARetryingForgetTextsItsDoneTextAfterARestart(t *testing.T) {
 		t.Fatalf("texted before done: %q", r.texts)
 	}
 	again := restart(t, store, map[string]bool{"owner:a": true})
-	again.f.finishOwed()
+	again.f.finishOwed(context.Background())
 	want := "Your task from Mon 5 Oct 13:02 is forgotten now. I also undid 2 things I learned from it; I'll relearn what I can without it." +
 		" Older backups and your agent's own files may still hold it."
 	if strings.Join(again.texts, "|") != want {
@@ -73,7 +77,7 @@ func TestARetryingForgetTextsItsDoneTextAfterARestart(t *testing.T) {
 	}
 	// Told once: a second start owes nothing.
 	third := restart(t, store, map[string]bool{"owner:a": true})
-	third.f.finishOwed()
+	third.f.finishOwed(context.Background())
 	if len(third.texts) != 0 {
 		t.Fatalf("told twice: %q", third.texts)
 	}
@@ -94,7 +98,7 @@ func TestADoneForgetOwesNothing(t *testing.T) {
 		t.Fatalf("texts %q", r.texts)
 	}
 	again := restart(t, store, map[string]bool{"owner:a": true, "owner:b": true})
-	again.f.finishOwed()
+	again.f.finishOwed(context.Background())
 	if len(again.texts) != 0 {
 		t.Fatalf("texts after restart %q", again.texts)
 	}
@@ -115,7 +119,7 @@ func TestANotForgottenTaskForgottenAtStartIsTold(t *testing.T) {
 			t.Fatalf("texts %q", r.texts)
 		}
 		again := restart(t, store, map[string]bool{"owner:a": held})
-		again.f.finishOwed()
+		again.f.finishOwed(context.Background())
 		want := ""
 		if held {
 			want = "Your task from Sun 4 Oct 09:30 is forgotten now. Older backups and your agent's own files may still hold it."
@@ -124,7 +128,7 @@ func TestANotForgottenTaskForgottenAtStartIsTold(t *testing.T) {
 			t.Fatalf("held %v: texts %q", held, again.texts)
 		}
 		third := restart(t, store, map[string]bool{"owner:a": held})
-		third.f.finishOwed()
+		third.f.finishOwed(context.Background())
 		if len(third.texts) != 0 {
 			t.Fatalf("held %v: told twice: %q", held, third.texts)
 		}
@@ -142,7 +146,7 @@ func TestTheOwedDoneTextIsLogged(t *testing.T) {
 	again := restart(t, store, map[string]bool{"owner:a": true})
 	fl := &fakeForgetLog{}
 	again.f.forgetLog = fl
-	again.f.finishOwed()
+	again.f.finishOwed(context.Background())
 	want := "A task you asked me to forget is forgotten now." + forgetLogged
 	if strings.Join(again.texts, "|") != want || strings.Join(fl.got, ",") != "owner:a" {
 		t.Fatalf("texts %q, logged %v", again.texts, fl.got)
@@ -169,7 +173,7 @@ func TestOwedIsKeptBeforeTheTombstone(t *testing.T) {
 	<-done
 	<-done
 	again := restart(t, store, map[string]bool{"owner:a": true, "owner:b": true})
-	again.f.finishOwed()
+	again.f.finishOwed(context.Background())
 	if len(again.texts) != 2 {
 		t.Fatalf("texts %q", again.texts)
 	}
@@ -194,12 +198,12 @@ func TestOwedHoldsNoTaskText(t *testing.T) {
 func TestNoForgetTextPointsAtDeletingBackups(t *testing.T) {
 	r := newForgetRig(t)
 	texts := []string{forgetNone, forgetStale, forgetRefused, forgetNotSaved, forgetNotDone, forgetAgentNotice, forgetAgentAlone,
-		forgetAgentDone, forgetAgentNotYet, forgetAgentNoAgent, forgetAgentNotTaken, forgetAgentNotOpen, forgetAgentWhenOpen}
+		forgetAgentDone, forgetAgentNotYet, forgetAgentNoAgent, forgetAgentNotTaken, forgetAgentNotOpen, forgetAgentWhenOpen, forgetOwedLost}
 	for _, logged := range []bool{false, true} {
 		for _, back := range []bool{false, true} {
 			texts = append(texts, forgetDone(3, back, logged))
 		}
-		texts = append(texts, r.f.doneLater(3, r.now, logged), r.f.doneLater(0, time.Time{}, logged))
+		texts = append(texts, r.f.doneLater(3, r.now, true, logged), r.f.doneLater(0, time.Time{}, false, logged))
 	}
 	for _, s := range texts {
 		l := strings.ToLower(s)
@@ -267,5 +271,149 @@ func TestARetryingForgetIsToldAfterARealRestart(t *testing.T) {
 			strings.HasPrefix(got, "Your task from ") {
 			break
 		}
+	}
+}
+
+// downTell is an owner channel whose sends fail (modemlink's ErrDown) until
+// up is set; it records what it sent.
+type downTell struct {
+	mu   sync.Mutex
+	up   bool
+	sent []string
+}
+
+func (d *downTell) tell(s string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if !d.up {
+		return errors.New("modem down")
+	}
+	d.sent = append(d.sent, s)
+	return nil
+}
+
+func (d *downTell) setUp() { d.mu.Lock(); d.up = true; d.mu.Unlock() }
+
+func (d *downTell) got() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]string(nil), d.sent...)
+}
+
+// L3 B1 on #425: a done text owed across a restart whose send fails (the
+// modem is down just after boot) stays owed and is sent once it can be,
+// in this boot or, after a shutdown, the next.
+func TestAnOwedTextWhoseSendFailsStaysOwed(t *testing.T) {
+	store := &change.MemStore{}
+	r := restartRig(t, store)
+	r.fail = 2 // not tombstoned: owed until a start finds it tombstoned
+	r.f.Execute(context.Background(), forgetIntent("1", "owner:a"), 1)
+	held := map[string]bool{"owner:a": true}
+
+	// Down through this boot's shutdown: still owed after it.
+	again := restart(t, store, held)
+	d := &downTell{}
+	again.f.tell = d.tell
+	ended := make(chan struct{})
+	again.f.sleep = func(context.Context, time.Duration) bool { return false }
+	again.f.toldLater = func() { close(ended) }
+	again.f.finishOwed(context.Background())
+	<-ended
+	if len(d.got()) != 0 || len(again.f.owed.goals()) != 1 {
+		t.Fatalf("sent %q, owed %v", d.got(), again.f.owed.goals())
+	}
+
+	// Down at attach, up a moment later: sent once, then no longer owed.
+	third := restart(t, store, held)
+	d = &downTell{}
+	third.f.tell = d.tell
+	ended = make(chan struct{})
+	var waits []time.Duration
+	third.f.sleep = func(_ context.Context, w time.Duration) bool {
+		waits = append(waits, w)
+		if len(waits) == 2 {
+			d.setUp()
+		}
+		return true
+	}
+	third.f.toldLater = func() { close(ended) }
+	third.f.finishOwed(context.Background())
+	<-ended
+	if strings.Join(d.got(), "|") != "A task you asked me to forget is forgotten now. Older backups and your agent's own files may still hold it." ||
+		len(third.f.owed.goals()) != 0 || len(waits) != 2 || waits[1] <= waits[0] {
+		t.Fatalf("sent %q, owed %v, waits %v", d.got(), third.f.owed.goals(), waits)
+	}
+	fourth := restart(t, store, held)
+	d = &downTell{up: true}
+	fourth.f.tell = d.tell
+	fourth.f.finishOwed(context.Background())
+	if len(d.got()) != 0 {
+		t.Fatalf("told twice: %q", d.got())
+	}
+}
+
+// L3 B1 on #425: a forget done in this boot whose done text does not send
+// stays owed, so the next start tells it, logged once and with the tail
+// it had.
+func TestADoneTextNotSentIsToldAfterARestart(t *testing.T) {
+	store := &change.MemStore{}
+	r := restartRig(t, store)
+	fl := &fakeForgetLog{}
+	r.f.forgetLog = fl
+	d := &downTell{}
+	r.f.tell = d.tell
+	ended := make(chan struct{})
+	r.f.sleep = func(context.Context, time.Duration) bool { return false } // shutdown
+	r.f.toldLater = func() { close(ended) }
+	since := time.Date(2026, 10, 5, 13, 2, 0, 0, time.UTC)
+	r.f.Execute(context.Background(), forgetIntent(fmt.Sprintf("1.1.%d", since.UnixNano()), "owner:a"), 1)
+	<-ended
+	if len(d.got()) != 0 || len(r.f.owed.goals()) != 1 {
+		t.Fatalf("sent %q, owed %v", d.got(), r.f.owed.goals())
+	}
+	again := restart(t, store, map[string]bool{"owner:a": true})
+	again.f.forgetLog = fl
+	d = &downTell{up: true}
+	again.f.tell = d.tell
+	again.f.finishOwed(context.Background())
+	if strings.Join(d.got(), "|") != "Your task from Mon 5 Oct 13:02 is forgotten now."+forgetLogged || strings.Join(fl.got, ",") != "owner:a" {
+		t.Fatalf("sent %q, logged %v", d.got(), fl.got)
+	}
+}
+
+// L3 B2 on #425: an owed file that does not read, or holds entries no
+// forget wrote, fails safe: learning opens, nothing panics, the owner is
+// told the owed texts were lost rather than nothing, the unreadable file
+// is kept aside, and no text carries the file's own words.
+func TestAGarbageOwedFileFailsSafe(t *testing.T) {
+	for _, body := range []string{"{", "\x00\xff garbage", `{"owner:a":"CANARY-owed"}`, `[1,2]`} {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "forget-owed.json")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		lp, err := openLearning(learnPaths{Dir: dir, Spare: filepath.Join(dir, "spare.json")}, false, &daemon.Config{
+			JournalPath: filepath.Join(dir, "journal.log"), SocketDir: filepath.Join(dir, "run"), OwnerNumber: ownerNum})
+		if err != nil {
+			t.Fatalf("%q: learning did not open: %v", body, err)
+		}
+		if b, err := os.ReadFile(path + ".bad"); err != nil || string(b) != body {
+			t.Fatalf("%q: not kept aside: %q %v", body, b, err)
+		}
+		d := &downTell{up: true}
+		lp.forgetOwner.tell = d.tell
+		lp.forgetOwner.finishOwed(context.Background())
+		if strings.Join(d.got(), "|") != forgetOwedLost {
+			t.Fatalf("%q: sent %q", body, d.got())
+		}
+	}
+	// Injected entries: a goal no tombstone holds is dropped untold, and
+	// a count or time no forget writes is not repeated to the owner.
+	store := &change.MemStore{}
+	_ = store.Save([]byte(`{"owner:x":{"undone":5},"owner:a":{"since":"2099-01-01T00:00:00Z","undone":-3}}`))
+	r := restart(t, store, map[string]bool{"owner:a": true})
+	r.f.finishOwed(context.Background())
+	if strings.Join(r.texts, "|") != "A task you asked me to forget is forgotten now. Older backups and your agent's own files may still hold it." {
+		t.Fatalf("texts %q", r.texts)
 	}
 }
