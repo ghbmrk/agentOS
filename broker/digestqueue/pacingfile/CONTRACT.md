@@ -50,3 +50,58 @@ overflow, symlink/dangling-symlink/directory/FIFO refusal, real writer/strict Ga
 reopen/expiry, oversized-state no-overwrite/no-temp recovery and sanitized errors.
 They establish these component behaviors, not hostile filesystem or deployment
 qualification. Strongest independent broker/security review remains required.
+
+## Opt-in cooperating store lease
+
+`OpenExclusive(absoluteLedgerPath)` acquires a Linux per-ledger nonblocking
+`flock` on a retained `.lock` inode before constructing the Gate. It does not
+load/provision the ledger. The dedicated parent must be owned by the effective
+UID, mode 0700 and opened as a final non-symlink directory. Lock, ledger and
+existing `.tmp` descriptors must be regular, owned by that UID, mode 0600 and
+single-link. The path must be clean/absolute and cannot end in `.lock`/`.tmp`,
+which are reserved cooperating-file names. No directory is created or chmodded;
+reject a bad deployment rather than silently weakening its custody settings.
+A missing lock is created at 0600. Unsupported platforms refuse this API without
+an unleased fallback. Load/Save continue to use the bounded reader/FileStore
+writer; no second accounting counter or persistence algorithm is introduced.
+
+The returned pointer implements PacingStore. Construct exactly one actual Gate
+against it and share that Gate with approval/question/digest consumers. Never
+copy the ExclusiveStore or create two Gates from the same lease; a per-file
+kernel lease excludes independent cooperating opens/processes, not duplicate
+in-memory counters created by one caller. Ordinary Store/FileStore callers can
+ignore the advisory lease, so trusted composition must exclude them too.
+
+Every Load/Save serializes on this instance and observes current parent/lock
+identity plus private ledger/temp metadata before and after I/O. Parent/lock
+displacement, metadata refusal or I/O failure latches fixed storage refusal;
+there is no live repair. Private error/path details are not returned. A bad
+temporary symlink/hard link is refused before FileStore truncation in the tests.
+These are observation boundaries, not an atomic defense against an actor who
+can mutate the same UID's paths during the operation. Ancestor traversal and
+same-UID rename/link races still need protected deployment custody. Neither
+advisory exclusion nor metadata checks qualify hostile filesystem safety,
+authenticated anti-delete/rollback/restore/config integrity, encrypted storage
+or physical media durability. An authentic older image can still be reopened.
+
+Before Close, use reviewed STOP/host quiescence and drain **all** old Gate users
+and outstanding permissions. Close waits for this instance's synchronous I/O,
+marks it closed, releases/closes the kernel lease and leaves the lock inode in
+place. It is idempotent and closed instances refuse reads/writes. Never unlink
+or replace `.lock` while any holder/contender can exist: a new inode can split
+advisory custody. Close does not itself revoke already returned permissions,
+stop the Gate/host, resume a scope or prove completion of forget. Fresh recovery
+requires a new exclusive open and Gate against the same durable image, retaining
+PacingRequireExisting and the configured latency observation. Gate.New/Load/
+Save/Close may still block on synchronous filesystem I/O; no timeout worker or
+qualified startup/STOP/runner-shutdown deadline is supplied. Preserve the
+existing urgent/reissue storage/time/overdue-I/O availability review hold.
+
+Tests first exposed duplicate opens, unsafe metadata/temp writes, replaced
+custody and reuse after Close. Actual Linux independent open and child-process
+exclusion, reserved/private path refusal, final lock/directory symlinks and
+hard links, before-write temp refusal, displaced parent/lock quarantine,
+closed-store refusal and strict spent-debt reopen pass locally. The subprocess
+probe is skipped in the ordinary suite and invoked explicitly by its parent
+test. These are component checks, not independent security or deployment
+qualification. No daemon/default binding or activation is included.
