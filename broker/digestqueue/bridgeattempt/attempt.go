@@ -141,6 +141,12 @@ func (a *Attempt) Send(ctx context.Context, id uint64) error {
 	if err != nil {
 		return err
 	}
+	// Cancellation during synchronous Begin persistence is proven local
+	// non-delivery: the owner/transport boundary has not been called yet.
+	if err := ctx.Err(); err != nil {
+		evidence := fmt.Sprintf("digest:%d:attempt:%d:cancel-before-call", b.ID, b.Attempts)
+		return errors.Join(err, a.cfg.Queue.Finish(b.ID, b.Attempts, digestqueue.NotSent, evidence))
+	}
 	sendErr := a.cfg.Owner.InformContext(ctx, text)
 	outcome := digestqueue.OutcomeUnknown
 	suffix := "ambiguous"
