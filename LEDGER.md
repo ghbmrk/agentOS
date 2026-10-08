@@ -1,7 +1,7 @@
 # LEDGER
 
-Budget: $200 Claude plan, usage credits **off** (hard cap). See PLAN.md §4A.
-Unit: WAU = one week's plan allowance. Target: ~100% of the weekly limit used by each reset, ~14%/day (Mark, 2026-10-04; PLAN.md §4B), replacing the 70% envelope; only the subscription is a hard limit.
+Manual usage readings from Mark's usage screen: the only hand-kept input to METRICS.md (`tools/metrics.py` reads the tables below; keep their headers). Figures from the outside cost routine that drive a decision are copied here with a date. The budget rules themselves are CLAUDE.md §Budget, with reasons in docs/OPERATING.md §1 and §5.
+Unit: WAU = one week's plan allowance.
 
 ## Calibration readings (from Mark's usage screen)
 
