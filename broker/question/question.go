@@ -515,7 +515,7 @@ func (b *Book) normalize(s Spec) (Spec, error) {
 			return out, guesterr.New("question: no owner-channel replies (YES, NO, UNDO, RESUME... and an ID or code)")
 		}
 		if credWords.MatchString(t) || credWords.MatchString(squeeze(t)) {
-			return out, guesterr.New("question: no questions about codes, PINs, passwords, keys or the Owner Card; the agent never needs them")
+			return out, guesterr.New("question: no questions about codes, PINs, passwords, keys or the Owner Card; they are never needed")
 		}
 	}
 	q := &entry{ID: "Q999", Text: out.Text, Default: out.Default, Choices: out.Choices}
@@ -862,10 +862,10 @@ func (b *Book) Status(ctx context.Context, asker, req, machine string) (Status, 
 	b.mu.Unlock()
 	switch {
 	case clockErr != nil && counting:
-		st.Reason = "the box clock is being checked; the wait the owner was given still runs"
+		st.Reason = "the clock is being checked; the wait the owner was given still runs"
 	case clockErr != nil && (st.State == Held || st.State == Waiting):
 		st.State, st.Deadline = Held, time.Time{}
-		st.Reason = "the box clock is being checked; the default waits until it is"
+		st.Reason = "the clock is being checked; the default waits until it is"
 	}
 	if st.FromOwner || st.Late != "" {
 		if machine == "" {
@@ -1096,7 +1096,7 @@ func (b *Book) lapseLocked(e *entry, now time.Time) {
 	if !e.Deadline.IsZero() {
 		by = "by " + b.clock(now, e.Deadline)
 	}
-	b.digest = append(b.digest, fmt.Sprintf(`%s "%s": no reply %s, so the agent went ahead with "%s".`,
+	b.digest = append(b.digest, fmt.Sprintf(`%s "%s": no reply %s, so I went ahead with "%s".`,
 		e.ID, clip(e.Text, 60), by, e.Default))
 }
 
@@ -1122,7 +1122,7 @@ func (b *Book) notAskedLocked(e *entry, now time.Time) {
 	if !now.IsZero() && !e.Asked.IsZero() {
 		by = b.clock(now, e.Asked.Add(e.AskWithin))
 	}
-	b.digest = append(b.digest, fmt.Sprintf(`Not asked: the agent's question "%s" was held past %s (texts paced or quiet hours), so the agent went ahead without asking.`,
+	b.digest = append(b.digest, fmt.Sprintf(`Not asked: my question "%s" was held past %s (texts paced or quiet hours), so I went ahead without asking.`,
 		clip(e.Text, 60), by))
 }
 
@@ -1260,10 +1260,10 @@ func (b *Book) TakeDigest() []string {
 		if b.refused == 1 {
 			n = "1 answer"
 		}
-		out = append(out, n+" to the agent's questions held a code or key and were not passed on. If that was not you, reply STOP.")
+		out = append(out, n+" to my questions held a code or key and were not passed on. If that was not you, reply STOP.")
 	}
 	if b.notAskedMore > 0 {
-		out = append(out, fmt.Sprintf("Not asked: %d more of the agent's questions were held (texts paced or quiet hours), so the agent went ahead without asking.", b.notAskedMore))
+		out = append(out, fmt.Sprintf("Not asked: %d more of my questions were held (texts paced or quiet hours), so I went ahead without asking.", b.notAskedMore))
 	}
 	if len(out) == 0 {
 		return nil
@@ -1348,7 +1348,7 @@ func (b *Book) Answer(ctx context.Context, text string) (reply string, ok bool) 
 	case codeShaped(ans) || keyShaped(ans) || b.cfg.Hidden != nil && b.cfg.Hidden(ans):
 		b.refused++
 		b.save("refused answer")
-		return "Codes and keys are only for the box, so that answer was not passed on. Write it another way, without codes or keys.", true
+		return "Codes and keys are only for me, so that answer was not passed on. Write it another way, without codes or keys.", true
 	}
 	if clockErr == nil {
 		b.startGraceLocked(now)
@@ -1360,7 +1360,7 @@ func (b *Book) Answer(ctx context.Context, text string) (reply string, ok bool) 
 	}
 	switch e.State {
 	case Answered:
-		return fmt.Sprintf("%s was already answered: \"%s\". To change course, tell the agent.", e.ID, clip(e.Answer, 60)), true
+		return fmt.Sprintf("%s was already answered: \"%s\". To change course, tell me.", e.ID, clip(e.Answer, 60)), true
 	case Defaulted:
 		if e.Late == "" {
 			e.Late = ans
@@ -1371,7 +1371,7 @@ func (b *Book) Answer(ctx context.Context, text string) (reply string, ok bool) 
 		if !e.Closed.IsZero() {
 			at = " at " + b.clock(now, e.Closed)
 		}
-		return fmt.Sprintf("Too late for %s: the agent went ahead with \"%s\"%s. Your answer is passed to it.",
+		return fmt.Sprintf("Too late for %s: I went ahead with \"%s\"%s. Your answer is passed on.",
 			e.ID, e.Default, at), true
 	}
 	if len(e.Choices) > 0 {

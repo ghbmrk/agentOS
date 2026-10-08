@@ -183,7 +183,7 @@ func (l *Late) Call(ctx context.Context, machine, lineage, name string, args jso
 	}
 	for _, d := range list {
 		if d["name"] == name {
-			return "", true, guesterr.New("recall opens once the owner unlocks the box's vault")
+			return "", true, guesterr.New("recall opens once the owner unlocks the vault")
 		}
 	}
 	return "", false, nil
