@@ -25,4 +25,4 @@ After:
 
 ## Budget
 <!-- Estimated model usage for this package vs its cap -->
-Builder model:
+Builder model: <!-- sonnet-5.5 | strongest -->
