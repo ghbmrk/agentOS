@@ -44,11 +44,26 @@ type Owner interface {
 // Config configures a Server.
 type Config struct {
 	Owner Owner
-	// LineNote is the owner line's note (modemlink.Link.OwnerLineNote);
-	// nil when there is no modem bridge.
-	LineNote func() string
-	Now      func() time.Time
-	Rand     io.Reader
+	// Line is the owner line's note, last outage and counts (the modem
+	// link's); nil when there is no modem bridge. Status carries only its
+	// note (Security D1).
+	Line func() localapi.Line
+	Now  func() time.Time
+	Rand io.Reader
+	// DescribeRoot verifies a root to follow and holds it for approval
+	// (follow.Executor.Describe); on an error, only the summary's Reason
+	// is kept, and only if it is a coarse cause the page words. Follow
+	// submits the owner's request to follow a held root
+	// (grants.FollowIntent) and returns the channel's reply. Either nil
+	// refuses its op.
+	DescribeRoot func(ctx context.Context, root []byte) (localapi.RootSummary, error)
+	Follow       func(ctx context.Context, name, digest string) (string, error)
+	// Paused lists the paused grants (grants.Gate.Paused); AskResume asks
+	// the owner, on the page, to resume one from the pause the page
+	// showed (grants.Gate.AskResume) and returns the reply to show
+	// (W5a-resume). Either nil refuses its op.
+	Paused    func() []localapi.PausedGrant
+	AskResume func(ctx context.Context, grant, pause string) (string, error)
 }
 
 // WrongPerMinute bounds wrong codes on the socket in any minute, tries in
@@ -98,10 +113,17 @@ func (s *Server) Ops() map[string]sockets.Handler {
 		localapi.OpSignOut:  s.signOut,
 		localapi.OpSession:  s.session,
 		localapi.OpLines:    s.authed(s.lines),
+		localapi.OpLine:     s.authed(s.line),
 		localapi.OpResume:   s.resume,
 		localapi.OpRequests: s.authed(s.requests),
 		localapi.OpWaiting:  s.authed(s.waiting),
 		localapi.OpAnswer:   s.answer,
+		// Changing where updates come from needs a session (WF3).
+		localapi.OpFollowRoot: s.followRoot,
+		localapi.OpFollow:     s.follow,
+		// Resuming a paused grant needs a session, then a code (W5a-resume).
+		localapi.OpPaused:    s.authed(s.paused),
+		localapi.OpAskResume: s.askResume,
 	}
 }
 
@@ -129,8 +151,8 @@ func (s *Server) status(context.Context, sockets.Peer, json.RawMessage) (any, er
 	st := s.cfg.Owner.LocalStatus()
 	out := localapi.Status{Stopped: st.Stopped, Unlocked: st.Unlocked, UnlockedUntil: st.UnlockedUntil,
 		LowLocked: st.LowLocked, Challenged: st.Challenged, UnlockDays: int(s.cfg.Owner.UnlockPeriod() / (24 * time.Hour))}
-	if s.cfg.LineNote != nil {
-		out.LineNote = s.cfg.LineNote()
+	if s.cfg.Line != nil {
+		out.LineNote = s.cfg.Line().Note
 	}
 	return out, nil
 }
@@ -217,6 +239,14 @@ func (s *Server) lines(context.Context) (any, error) {
 	return localapi.Lines{Status: s.cfg.Owner.LocalStatusLines()}, nil
 }
 
+// line is the owner line's counts, for a signed-in page only (Security D1).
+func (s *Server) line(context.Context) (any, error) {
+	if s.cfg.Line == nil {
+		return localapi.Line{}, nil
+	}
+	return s.cfg.Line(), nil
+}
+
 func (s *Server) resume(_ context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
 	var in localapi.Resume
 	err := decode(args, &in)
@@ -299,6 +329,93 @@ func (s *Server) answer(_ context.Context, _ sockets.Peer, args json.RawMessage)
 		return localapi.Answered{Text: msg, Refusal: localapi.RefusedNotSettled}, nil
 	}
 	return nil, errFailed
+}
+
+func (s *Server) followRoot(ctx context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
+	var in localapi.FollowRoot
+	err := decode(args, &in)
+	if !s.valid(in.Token) {
+		return nil, errUnauthorized
+	}
+	if err != nil || len(in.Root) == 0 || len(in.Root) > localapi.MaxRoot {
+		return nil, errBadArgs
+	}
+	if s.cfg.DescribeRoot == nil {
+		return nil, errFailed
+	}
+	sum, err := s.cfg.DescribeRoot(ctx, in.Root)
+	if err != nil {
+		return localapi.RootSummary{Refusal: localapi.RefusedRoot, Reason: rootReason(sum.Reason)}, nil
+	}
+	sum.Refusal, sum.Reason = "", ""
+	return sum, nil
+}
+
+// rootReason keeps a refused root's coarse cause only if it is one the
+// page words, never other text (agentosd maps the updater's errors).
+func rootReason(r string) string {
+	switch r {
+	case localapi.RootExpired, localapi.RootSignatures, localapi.RootThreshold:
+		return r
+	}
+	return ""
+}
+
+func (s *Server) follow(ctx context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
+	var in localapi.Follow
+	err := decode(args, &in)
+	if !s.valid(in.Token) {
+		return nil, errUnauthorized
+	}
+	if err != nil || len(in.Name) > localapi.MaxFollowName || !lowerHex(in.Digest, localapi.DigestLen) {
+		return nil, errBadArgs
+	}
+	if s.cfg.Follow == nil {
+		return nil, errFailed
+	}
+	t, err := s.cfg.Follow(ctx, in.Name, in.Digest)
+	if err != nil {
+		return nil, errFailed
+	}
+	return localapi.Text{Text: t}, nil
+}
+
+func (s *Server) paused(context.Context) (any, error) {
+	if s.cfg.Paused == nil {
+		return nil, errFailed
+	}
+	return localapi.Paused{Grants: s.cfg.Paused()}, nil
+}
+
+func (s *Server) askResume(ctx context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
+	var in localapi.AskResume
+	err := decode(args, &in)
+	if !s.valid(in.Token) {
+		return nil, errUnauthorized
+	}
+	if err != nil || in.Grant == "" || in.Pause == "" || len(in.Grant) > localapi.MaxID || len(in.Pause) > localapi.MaxPause {
+		return nil, errBadArgs
+	}
+	if s.cfg.AskResume == nil {
+		return nil, errFailed
+	}
+	t, err := s.cfg.AskResume(ctx, in.Grant, in.Pause)
+	if err != nil {
+		return nil, errFailed
+	}
+	return localapi.Text{Text: t}, nil
+}
+
+func lowerHex(v string, n int) bool {
+	if len(v) != n {
+		return false
+	}
+	for _, c := range v {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // triesLeft is the refusal of a wrong or unchecked code and what the day's

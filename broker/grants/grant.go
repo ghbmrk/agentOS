@@ -67,6 +67,64 @@ func ForgetGoal(id string) string {
 	return goal
 }
 
+// ForgetAgentID is the ID of item 2 of the owner's forget request
+// (W3-forget-b2b): taking back the agent's work since the task. It shares
+// item 1's nonce, so each item can name the other (ForgetSibling).
+func ForgetAgentID(nonce, goal string) string { return "forget-agent/" + nonce + "/" + goal }
+
+// ForgetAgentGoal is the goal a take-back intent's ID names; "" if malformed.
+func ForgetAgentGoal(id string) string {
+	rest, ok := strings.CutPrefix(id, "forget-agent/")
+	if !ok {
+		return ""
+	}
+	nonce, goal, ok := strings.Cut(rest, "/")
+	if !ok || nonce == "" {
+		return ""
+	}
+	return goal
+}
+
+// ForgetAgentActions is item 2's detail from its "actions" param: the
+// agent's actions so far, counted when asked, which stay done (CAP-3;
+// DECISIONS 2026-10-05), in a recall rollback's words. A count, not text,
+// so the journal's redactor leaves it; none or a bad one names nothing.
+func ForgetAgentActions(params map[string]any) string {
+	var n int64
+	switch v := params["actions"].(type) {
+	case int:
+		n = int64(v)
+	case json.Number:
+		var err error
+		if n, err = v.Int64(); err != nil {
+			return ""
+		}
+	default:
+		return ""
+	}
+	switch {
+	case n < 0:
+		return ""
+	case n == 0:
+		return "no actions yet"
+	case n == 1:
+		return "1 action so far stays done"
+	}
+	return fmt.Sprintf("%d actions so far stay done", n)
+}
+
+// ForgetSibling is the other item of the request id belongs to: the
+// take-back for a forget, the forget for a take-back; "" if malformed.
+func ForgetSibling(id string) string {
+	if rest, ok := strings.CutPrefix(id, "forget/"); ok && ForgetGoal(id) != "" {
+		return "forget-agent/" + rest
+	}
+	if rest, ok := strings.CutPrefix(id, "forget-agent/"); ok && ForgetAgentGoal(id) != "" {
+		return "forget/" + rest
+	}
+	return ""
+}
+
 // OriginLoop2 marks Loop 2's containment (loops S8, K-S2): a pause of a
 // grant on a finding, and nothing else. Only the broker submits it; guest
 // intents carry "guest:<lineage>".
@@ -113,12 +171,12 @@ func EvidenceIntent(id, origin, address, account string) journal.Intent {
 		Params: map[string]any{ParamEvidenceAddress: address, ParamEvidenceAccount: account}, Executor: ExecutorName}
 }
 
-// Params of a journal.ActionUpdateFollow intent: the name the owner gave
-// the source, and the digest of the root summary the page showed
-// (update.RootSummary.Digest), which the updater follows and nothing else.
+// A journal.ActionUpdateFollow intent carries no params: the journal
+// redacts params (journal.Redactor) and keeps identifiers as they are, so
+// the name the owner gave the source and the digest of the root summary
+// the page showed (update.RootSummary.Digest) ride in its ID (FollowID),
+// as a forget's goal does. The updater follows that root and nothing else.
 const (
-	ParamFollowName   = "name"
-	ParamFollowDigest = "digest"
 	// FollowExecutor is the updater, which runs the switch.
 	FollowExecutor = "update"
 	// MaxFollowName bounds the owner-typed name, in characters.
@@ -126,13 +184,59 @@ const (
 	// MaxFollowDigits bounds the digits in that name, so it can carry a
 	// year but never a code.
 	MaxFollowDigits = 4
+	// MaxFollowNonce bounds a follow intent's nonce, in hex characters.
+	MaxFollowNonce = 64
 )
 
+// FollowID is the ID of a follow intent: nonce is unique per ask and is 1
+// to MaxFollowNonce lower-case hex characters; the digest comes before the
+// name, which may hold anything the gate's name check allows. An empty
+// name switches back to the project. Any other nonce (one holding "/"
+// would shift the parse, OSS-10w L3) gives an ID FollowOf refuses, so the
+// gate denies it as malformed.
+func FollowID(nonce, digest, name string) string {
+	if !followNonce(nonce) {
+		nonce = ""
+	}
+	return "follow/" + nonce + "/" + digest + "/" + name
+}
+
+func followNonce(s string) bool {
+	if len(s) == 0 || len(s) > MaxFollowNonce {
+		return false
+	}
+	for _, c := range s {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// FollowOf is the digest and name a follow intent's ID names; ok is false
+// if the ID is not FollowID's shape. The gate checks the values.
+func FollowOf(id string) (digest, name string, ok bool) {
+	rest, ok := strings.CutPrefix(id, "follow/")
+	if !ok {
+		return "", "", false
+	}
+	nonce, rest, ok := strings.Cut(rest, "/")
+	if !ok || !followNonce(nonce) {
+		return "", "", false
+	}
+	digest, name, ok = strings.Cut(rest, "/")
+	if !ok || digest == "" {
+		return "", "", false
+	}
+	return digest, name, true
+}
+
 // FollowIntent is the local page's request to follow the root whose
-// summary has digest, under the owner's name for it.
-func FollowIntent(id, name, digest string) journal.Intent {
-	return journal.Intent{ID: id, Origin: originLocal, Account: journal.BrokerAccount, Action: journal.ActionUpdateFollow,
-		Params: map[string]any{ParamFollowName: name, ParamFollowDigest: digest}, Executor: FollowExecutor}
+// summary has digest, under the owner's name for it ("" to switch back to
+// the project's own root).
+func FollowIntent(nonce, name, digest string) journal.Intent {
+	return journal.Intent{ID: FollowID(nonce, digest, name), Origin: originLocal, Account: journal.BrokerAccount,
+		Action: journal.ActionUpdateFollow, Executor: FollowExecutor}
 }
 
 // Params keys a pre-allowed intent may carry besides the rule's fixed
@@ -151,7 +255,9 @@ const (
 //     owner accepts and the verb each maps to (ADP-1, ADP-2). An operation
 //     not listed does not exist for agents.
 //   - a pre-allowance: Account and Rule (ADP-9, ADP-11).
-//   - Resume: the ID of a paused grant to restore.
+//   - Resume: the ID of a paused grant to restore, and Pause, the ID of
+//     the pause intent it ends (Grant.Pause), so an ask made before the
+//     grant was paused again cannot end the later pause (W5a-resume).
 //
 // Every shape is a new or wider grant: high-tier code plus local
 // confirmation (CH-3, CH-10).
@@ -161,6 +267,7 @@ type Spec struct {
 	Ops      map[string]string `json:"ops,omitempty"`
 	Rule     *Rule             `json:"rule,omitempty"`
 	Resume   string            `json:"resume,omitempty"`
+	Pause    string            `json:"pause,omitempty"`
 }
 
 // Rule is an owner pre-allowance (ADP-9): a deterministic predicate the
@@ -198,6 +305,9 @@ type Grant struct {
 	ID     string
 	Spec   Spec
 	Paused bool
+	// Pause is the intent that paused it, and PausedBy that intent's
+	// origin; both are empty while it runs.
+	Pause, PausedBy string
 }
 
 // parseSpec reads a grant intent's spec strictly: unknown fields are an
@@ -231,10 +341,18 @@ func (g *Gate) validateLocked(s Spec) error {
 	if shapes != 1 {
 		return errors.New("a grant is exactly one of: an adapter grant, a pre-allowance, or a resume")
 	}
+	if s.Pause != "" && s.Resume == "" {
+		return errors.New("only a resume names a pause")
+	}
 	if s.Resume != "" {
 		gr := g.grants[s.Resume]
 		if gr == nil || !gr.Paused || s.Account != "" {
 			return fmt.Errorf("no paused grant %s", clip(s.Resume))
+		}
+		// A resume recorded before W5a-resume names no pause; the gate
+		// asks for one on every new resume (evaluateBroker).
+		if s.Pause != "" && s.Pause != gr.Pause {
+			return fmt.Errorf("grant %s was paused again since", clip(s.Resume))
 		}
 		return nil
 	}

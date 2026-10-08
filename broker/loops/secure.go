@@ -1042,28 +1042,28 @@ func findingText(f Finding) string {
 		return "File " + sub + " does not match the signed release."
 	case CheckAdvisory:
 		if v, ok := strings.CutPrefix(f.Detail, uncompared); ok {
-			return fmt.Sprintf("Could not check %s version %s against known vulnerabilities. Check it on the box page.",
+			return fmt.Sprintf("Could not check %s version %s against known vulnerabilities. Check it on my Wi-Fi page.",
 				sub, safeVersion(v))
 		}
 		if id, ok := strings.CutPrefix(f.Detail, unreadable); ok {
-			return fmt.Sprintf("Could not read the fixed version in advisory %s for %s. Check it on the box page.",
+			return fmt.Sprintf("Could not read the fixed version in advisory %s for %s. Check it on my Wi-Fi page.",
 				safeName(id), sub)
 		}
-		return fmt.Sprintf("Known vulnerability in %s (%s), fixed in %s. The box takes the fix when an update has it.",
+		return fmt.Sprintf("Known vulnerability in %s (%s), fixed in %s. I take the fix when an update has it.",
 			sub, safeName(f.Detail), safeVersion(f.Fixed))
 	case CheckDrift:
 		switch f.Detail {
 		case "missing":
 			return "Setting file " + sub + " is missing."
 		case "not adopted":
-			return "Setting file " + sub + " appeared outside the box's change process."
+			return "Setting file " + sub + " appeared outside my change process."
 		}
-		return "Setting file " + sub + " changed outside the box's change process."
+		return "Setting file " + sub + " changed outside my change process."
 	case CheckExpiry:
 		if f.Detail == "expired" {
-			return "Credential " + sub + " has expired. Replace it on the box page."
+			return "Credential " + sub + " has expired. Replace it on my Wi-Fi page."
 		}
-		return "Credential " + sub + " " + safeName(f.Detail) + ". Replace it on the box page."
+		return "Credential " + sub + " " + safeName(f.Detail) + ". Replace it on my Wi-Fi page."
 	}
 	return "Security finding on " + sub + "."
 }
@@ -1074,7 +1074,7 @@ func ownerLine(r Record) string {
 	line := findingText(f)
 	switch r.Contained {
 	case "paused":
-		line += " Paused " + label(f.Contain) + ". It stays paused until you resume it; the box page will offer that in an update."
+		line += " Paused " + label(f.Contain) + ". It stays paused until you resume it on my Wi-Fi page."
 	case "failed":
 		line += " Could not pause " + label(f.Contain) + ". STOP pauses everything."
 	case "capped":
@@ -1089,7 +1089,7 @@ func ownerLine(r Record) string {
 }
 
 func clearedLine(r Record) string {
-	return fmt.Sprintf("Cleared: %s. %s stays paused until you resume it; the box page will offer that in an update.",
+	return fmt.Sprintf("Cleared: %s. %s stays paused until you resume it on my Wi-Fi page.",
 		safeName(r.Finding.Subject), capFirst(label(r.Finding.Contain)))
 }
 
@@ -1142,7 +1142,7 @@ func (s *Guard) Digest() []string {
 				fixed = r.Finding.Fixed
 			}
 		}
-		items = append(items, item{high, fmt.Sprintf("Known vulnerabilities in %s (%s), all fixed in %s. The box takes the fix when an update has it.",
+		items = append(items, item{high, fmt.Sprintf("Known vulnerabilities in %s (%s), all fixed in %s. I take the fix when an update has it.",
 			safeName(name), strings.Join(ids, ", "), safeVersion(fixed))})
 	}
 	sort.SliceStable(items, func(i, j int) bool { return items[i].high && !items[j].high })

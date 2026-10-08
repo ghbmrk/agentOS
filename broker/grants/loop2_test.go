@@ -69,7 +69,7 @@ func TestEndingAPauseIsReported(t *testing.T) {
 	if len(got) != 0 {
 		t.Fatalf("a pause reported as ended: %v", got)
 	}
-	r.grant(Spec{Resume: rule})
+	r.resume(rule)
 	if len(got) != 1 || got[0] != rule {
 		t.Fatalf("after RESUME: %v", got)
 	}

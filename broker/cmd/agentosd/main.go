@@ -24,6 +24,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/cgroup"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/guest"
+	"github.com/ghbmrk/agentos/broker/localsrv"
 	"github.com/ghbmrk/agentos/broker/loopbuild"
 	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/modelroute"
@@ -339,7 +340,7 @@ func main() {
 	var agentImage, agentLaunch string
 	var diskReserveMB, machineDiskMB, agentMemMB, replayMemMB, builderMemMB int64
 	var diskQuota, sleepHoursFlag string
-	var builderImage, builderLaunch, keptPath string
+	var builderImage, builderLaunch, keptPath, setupRecord string
 	var learn learnPaths
 	var cgroupVouched, modemBridge, ownerMessage bool
 	localUIUID := -1
@@ -349,6 +350,9 @@ func main() {
 	flag.StringVar(&cfg.OwnerNumber, "owner", "", "owner's phone number, E.164")
 	flag.IntVar(&cfg.ModemUID, "modem-uid", -1, "uid of the modem bridge, the only peer allowed on the owner socket")
 	flag.IntVar(&localUIUID, "localui-uid", -1, "uid of the local UI (agentos-localui), the only peer allowed on localui.sock; unset, the socket is not served (P2-2w)")
+	var updateStore, shippedRoot string
+	flag.StringVar(&updateStore, "update-store", "", "the box's update store, already trusting a root; with -shipped-root and the local page, the owner can change where updates come from (OSS-10)")
+	flag.StringVar(&shippedRoot, "shipped-root", "", "the root of trust this image ships (switching back needs its keys, WF1)")
 	flag.BoolVar(&modemBridge, "modem-bridge", true, "serve the modem bridge's ops on the owner socket and send the owner channel's texts through it")
 	flag.BoolVar(&ownerMessage, "owner-message", false, "also serve the raw \"message\" op on the owner socket with the bridge on (simulator and test builds only; it skips the bridge's checks)")
 	flag.Int64Var(&cfg.Admission.CapacityMB, "capacity-mb", defaultCapacityMB, "memory for agent machines, MB; unset, MemTotal less the floor budget outside the pool, at most 4500 or one OpenClaw machine per two cores, whichever is more (PE6, RES-2c)")
@@ -368,6 +372,7 @@ func main() {
 	flag.Var(imgs, "image", "agent-machine image, name=dir (repeatable)")
 	flag.StringVar(&meterPath, "meter", "/var/lib/agentos/meter.json", "model-spend meter state (OP-8)")
 	flag.StringVar(&cfg.OwnerState, "owner-state", "/var/lib/agentos/owner.json", "owner channel state (P1-5)")
+	flag.StringVar(&setupRecord, "setup-record", "/var/lib/agentos/setup.json", "setup's record (P2-2w c2): with -owner unset, the local UI's setup is served on localui.sock until it records the owner's number here, then never again")
 	flag.StringVar(&agentMachine, "agent-machine", "agent", "machine whose guest receives the owner's task chat")
 	flag.StringVar(&agentImage, "agent-image", "openclaw", "image the agent machine is created from on first start; empty keeps no agent machine")
 	flag.StringVar(&agentLaunch, "agent-launch", "/usr/lib/agentos/guest/launch.json", "how the agent machine starts: argv and env (guest/openclaw/launch.json)")
@@ -440,6 +445,26 @@ func main() {
 			log.Fatalf("-localui-uid %d: group %q: %v", localUIUID, u.Gid, err)
 		}
 		cfg.PageSocket = &daemon.PageSocket{UID: localUIUID, GID: &gid}
+	}
+	// A box with no -owner is set up by the local UI (P2-2w c2): only
+	// setup's ops are served until its finish is recorded, and the owner's
+	// number then comes from the record, on this start and every later one.
+	if cfg.OwnerNumber == "" {
+		m := setupMode{Dir: cfg.SocketDir, Page: cfg.PageSocket, Record: localsrv.FileRecord{Path: setupRecord},
+			OwnerState: cfg.OwnerState, Progress: setupProgress}
+		if verifySocket != "" {
+			m.Enroll = enroller{modelroute.NewVerifier(verifySocket)}
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		owner, err := m.run(ctx)
+		stop()
+		if errors.Is(err, context.Canceled) {
+			return
+		}
+		if err != nil {
+			log.Fatal(err)
+		}
+		cfg.OwnerNumber = owner
 	}
 
 	// RES-3: nothing below depends on what is found here. No local
@@ -523,12 +548,12 @@ func main() {
 	// The modem bridge (agentos-modem, P2-3w) hands owner texts in and
 	// pulls the channel's own texts from the owner socket; until it
 	// reports the owner line, sends fail as down and are counted for the
-	// recovery text. Its line note is for the box's local page (U-B1).
+	// recovery text. Its note, last outage and counts are for the box's local page (U-B1).
 	if modemBridge {
 		link := modemlink.New(modemlink.Config{Owner: cfg.OwnerNumber})
 		cfg.Modem, cfg.OwnerOps = link, link.Ops()
 		if cfg.PageSocket != nil {
-			cfg.PageSocket.LineNote = link.OwnerLineNote
+			cfg.PageSocket.Line = pageLine(link)
 		}
 		cfg.BridgeOnly = !ownerMessage
 	}
@@ -553,17 +578,34 @@ func main() {
 	// Evidence delivery (CH-20): with a destination set, private replies
 	// are emailed to it. No mail account is connected in this process
 	// yet, so none can be set (owns is nil) and replies go by text.
-	ev := newEvidence(keptPath, log.Printf)
+	ev := newEvidence(keptPath, cfg.PageSocket != nil, log.Printf)
 	ev.wire(&cfg)
+	// Changing where updates come from (OSS-10): on the clock guard's
+	// Latest, which questions.open starts; until then nothing is followed.
+	fs, err := newFollowSetting(updateStore, shippedRoot, qs.g.Load)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if fs != nil && !fs.wire(&cfg) {
+		log.Print("-update-store is set but the local page is not served (-localui-uid): updates keep their source")
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	steps := newStepNotes(&cfg.Notes)
+	if lp != nil && recallDir != "" && verifier != nil {
+		// An approved item 2 that finds recall not open yet waits for it
+		// (#327 L3 B-3); set before the daemon serves the owner.
+		lp.forgetOwner.whenOpen = func() {
+			recallExec.OnOpen(func() { go lp.forgetOwner.resumeAgent(ctx) })
+		}
+	}
 	d, err := daemon.Run(ctx, cfg)
 	if err != nil {
 		log.Fatal(err)
 	}
 	ev.attach(ctx, d)
+	fs.attach(ctx, d)
 	// Deletions reach the journal's guest intents (CAP-3), when learning
 	// runs what it keeps of them (change C19, learning.ForgetTasks),
 	recallCfg := recalltool.ServiceConfig{Dir: recallDir, Journal: d.Engine(), Ask: d.Gate(), Location: time.Local,
@@ -614,13 +656,18 @@ func main() {
 			log.Printf("agent machines disabled: %v", err)
 		} else {
 			pre.m.Store(m)
+			if lp != nil {
+				// FORGET's item 2 (W3-forget-b2b): the agent machine's
+				// work since a task, taken back by recall's Reach.
+				lp.forgetOwner.agent.Store(&forgetAgent{work: recallExec,
+					lineage: func() (string, error) { return machines{m}.Lineage(agentMachine) }})
+			}
 			recallCfg.Labeler, recallCfg.Machines = recallLabels{m}, recallMachines{m}
 			go m.RunPruner(vm.PrunePolicy{LowWaterBytes: 1 << 30}, time.Minute, ctx.Done())
 			tree.setMachines(m)
-			tools := toolSet{qs.tools(), tree, recallTools}
 			wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB, boxGates(d, "/proc/meminfo", cfg.Admission.HeadroomMB))
+			tools := registeredTools(qs, tree, recallTools, wt)
 			if wt != nil {
-				tools = append(tools, wt)
 				go reapWorkers(ctx, wt, m, d.Engine().Stopped, 5*time.Second)
 			}
 			if plane, err := openGuestPlane(m, d, ev, cfg.SocketDir, meterPath, inboxPath, egressSocket, tools); err != nil {
@@ -684,10 +731,18 @@ func main() {
 	}
 	// The recall identity key is vault-held (recall K5): recall opens once
 	// the vault process can hand it over.
+	// FORGET's item 2s a restart interrupted resume once recall opens;
+	// with recall off they cannot, and the owner is told so.
 	if recallDir != "" && verifier != nil {
+		if lp != nil {
+			recallExec.OnOpen(func() { go lp.forgetOwner.resumeAgent(ctx) })
+		}
 		go openRecall(ctx, verifier, recallCfg, recallTools, recallExec)
 	} else {
 		recallExec.Off()
+		if lp != nil {
+			go lp.forgetOwner.resumeAgent(ctx)
+		}
 	}
 	if line != nil {
 		go line.run(ctx)
