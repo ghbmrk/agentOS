@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -13,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/recalltool"
@@ -149,6 +152,11 @@ type ownerForget struct {
 	// (W3-forget-b1; security C3); nil until the vault process serves it,
 	// and the done text then keeps part a's caveat.
 	forgetLog forgetLogger
+	// owed holds the done texts promised across a restart (W3-forget-b3);
+	// owedAtStart is its goals as the last boot left them, which
+	// finishOwed texts once the start-up replay has finished them.
+	owed        *forgetOwed
+	owedAtStart []string
 
 	mu sync.Mutex
 	// interrupted: approved item 2s a restart interrupted, by ID, taken
@@ -452,16 +460,27 @@ func (f *ownerForget) Execute(ctx context.Context, in journal.Intent, _ int) jou
 		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "malformed forget"}
 	}
 	undone := f.learned(goal)
+	since, _ := forgetSince(in.ID)
+	// Owed before the tombstone, so a tombstone that holds always has its
+	// done text owed across a restart (UX-182-3). A failed write does not
+	// stop the forget; the next write carries it.
+	if err := f.owed.owe(goal, owedForget{Since: since, Undone: undone}); err != nil {
+		log.Printf("forget: done text not kept for a restart: %v", err)
+	}
 	err := f.forget(goal)
 	switch {
 	case err == nil:
-		since, _ := forgetSince(in.ID)
 		back := f.agentBackWithoutAsking(ctx, in.ID)
 		f.inform(forgetDone(undone, back, f.logForget(goal, since, back)))
+		f.paid(goal)
 		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "forgotten"}
 	case errors.Is(err, errNotTombstoned):
 		// Nothing was deleted and a restart would not finish it, so it
 		// is not done and the owner is told now (security R1 on #182).
+		// It stays owed: the goal stays tombstoned in memory, so a later
+		// forget's save may write it, and the next start's replay then
+		// forgets the task, which the owner is told (SHOULD 4 of L3 on
+		// #182).
 		log.Printf("forget: %v", err)
 		f.inform(forgetNotDone)
 		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "not saved"}
@@ -481,11 +500,14 @@ func (f *ownerForget) retry(ctx context.Context, goal string, undone int) {
 	start, wait, said := f.now(), 2*time.Second, false
 	for {
 		if !f.sleep(ctx, wait) {
-			return // shutdown: the tombstone's replay at start finishes it
+			// Shutdown: the tombstone's replay at start finishes it, and
+			// finishOwed then texts the done text.
+			return
 		}
 		err := f.forget(goal)
 		if err == nil {
 			f.inform(forgetDone(undone, false, f.logForget(goal, time.Time{}, false)))
+			f.paid(goal)
 			return
 		}
 		log.Printf("forget: not saved yet: %v", err)
@@ -514,6 +536,11 @@ const (
 )
 
 func forgetDone(undone int, agentBack, logged bool) string {
+	return "Forgotten." + forgetDoneRest(undone, agentBack, logged)
+}
+
+// forgetDoneRest is a done text after its first sentence.
+func forgetDoneRest(undone int, agentBack, logged bool) string {
 	tail := forgetBackups
 	switch {
 	case logged && agentBack:
@@ -524,9 +551,20 @@ func forgetDone(undone int, agentBack, logged bool) string {
 		tail = forgetBackupsOnly
 	}
 	if undone == 0 {
-		return "Forgotten." + tail
+		return tail
 	}
-	return "Forgotten. I also undid " + things(undone) + " from it; I'll relearn what I can without it." + tail
+	return " I also undid " + things(undone) + " from it; I'll relearn what I can without it." + tail
+}
+
+// doneLater is the done text of a forget the start-up replay finished: the
+// owner may have texted since, or was told it was not forgotten, so it
+// names the task by its time (never its text, security C2).
+func (f *ownerForget) doneLater(undone int, since time.Time, logged bool) string {
+	first := "A task you asked me to forget is forgotten now."
+	if !since.IsZero() {
+		first = "Your task from " + f.date(since) + " is forgotten now."
+	}
+	return first + forgetDoneRest(undone, false, logged)
 }
 
 // forgetLogger appends a forget to the authenticated forget log
@@ -772,4 +810,128 @@ func (f *ownerForget) Reconcile(_ context.Context, in journal.Intent, _ int) jou
 		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "tombstoned; finished at start"}
 	}
 	return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "no tombstone"}
+}
+
+// owedForget is a forget whose done text is owed: when the task was from
+// (its ID's time) and what the forget undid, counted before it ran.
+type owedForget struct {
+	Since  time.Time `json:"since,omitzero"`
+	Undone int       `json:"undone,omitempty"`
+}
+
+// forgetOwed keeps, by goal ID, the approved forgets whose done text is
+// still owed (W3-forget-b3): written before the tombstone, dropped once
+// the owner is told. It holds goal IDs, times and counts, never a task's
+// text. A nil forgetOwed keeps nothing.
+type forgetOwed struct {
+	store change.Store
+
+	mu sync.Mutex
+	st map[string]owedForget
+}
+
+func openForgetOwed(store change.Store) (*forgetOwed, error) {
+	o := &forgetOwed{store: store, st: map[string]owedForget{}}
+	b, err := store.Load()
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > 0 {
+		if err := json.Unmarshal(b, &o.st); err != nil {
+			return nil, fmt.Errorf("forget: owed done texts: %v", err)
+		}
+	}
+	return o, nil
+}
+
+// owe records goal's done text as owed and saves. On a failed save it
+// stays owed in memory, and the next save writes it.
+func (o *forgetOwed) owe(goal string, e owedForget) error {
+	if o == nil {
+		return nil
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.st[goal] = e
+	return o.save()
+}
+
+// get reports goal's owed entry.
+func (o *forgetOwed) get(goal string) (owedForget, bool) {
+	if o == nil {
+		return owedForget{}, false
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	e, ok := o.st[goal]
+	return e, ok
+}
+
+// drop records goal's done text as told, or no longer owed.
+func (o *forgetOwed) drop(goal string) error {
+	if o == nil {
+		return nil
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if _, ok := o.st[goal]; !ok {
+		return nil
+	}
+	delete(o.st, goal)
+	return o.save()
+}
+
+// goals lists the owed goals, sorted.
+func (o *forgetOwed) goals() []string {
+	if o == nil {
+		return nil
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	out := make([]string, 0, len(o.st))
+	for g := range o.st {
+		out = append(out, g)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (o *forgetOwed) save() error {
+	b, err := json.Marshal(o.st)
+	if err != nil {
+		return err
+	}
+	return o.store.Save(b)
+}
+
+// paid drops goal's owed done text once the owner was told. A failed save
+// leaves it on disk, so a restart may tell it again: a repeated done text
+// is the lesser harm next to a missing one.
+func (f *ownerForget) paid(goal string) {
+	if err := f.owed.drop(goal); err != nil {
+		log.Printf("forget: told done text not cleared: %v", err)
+	}
+}
+
+// finishOwed texts the done text of each forget the last boot owed, once
+// the start-up replay (learning.replayForgotten, which runs before the
+// learning plane opens) has finished it: a forget still retrying at
+// shutdown (UX-182-3), cut off by a crash after its tombstone, or told
+// "Not forgotten" whose tombstone a later save wrote (SHOULD 4 of L3 on
+// #182). Like any done forget it is appended to the forget log. One whose
+// tombstone never held was not forgotten, and is dropped untold. It runs
+// once the owner channel is attached.
+func (f *ownerForget) finishOwed() {
+	goals := f.owedAtStart
+	f.owedAtStart = nil
+	for _, g := range goals {
+		e, ok := f.owed.get(g)
+		if !ok {
+			continue
+		}
+		if f.forgotten != nil && f.forgotten(g) {
+			f.inform(f.doneLater(e.Undone, e.Since, f.logForget(g, time.Time{}, false)))
+		}
+		f.paid(g)
+	}
 }

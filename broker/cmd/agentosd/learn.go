@@ -240,6 +240,18 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	cfg.BrokerExecutors[loops.Executor] = l.sched
 	l.forgetOwner = &ownerForget{tasks: l.tasks, learned: l.pipe.LearnedFrom, forget: l.forgetTask, forgotten: l.forgotten.has,
 		inform: func(s string) { l.notify.send(s, false) }, now: time.Now, loc: time.Local, sleep: sleepCtx}
+	// The done texts the last boot owed (W3-forget-b3): the replay above
+	// has finished each tombstoned one, and attach texts them once the
+	// owner channel is up. An owed file that does not read is started
+	// afresh; its texts are lost, not its forgets.
+	owedStore := change.FileStore{Path: filepath.Join(p.Dir, "forget-owed.json")}
+	owed, err := openForgetOwed(owedStore)
+	if err != nil {
+		log.Printf("forget: owed done texts dropped: %v", err)
+		owed = &forgetOwed{store: owedStore, st: map[string]owedForget{}}
+	}
+	l.forgetOwner.owed = owed
+	l.forgetOwner.owedAtStart = owed.goals()
 	for _, e := range restored {
 		if e.Agent {
 			l.forgetOwner.restored = append(l.forgetOwner.restored, e.Since)
@@ -524,6 +536,7 @@ func (l *learning) attach(ctx context.Context, d *daemon.Daemon) {
 		}
 	}
 	l.notify.ch.Store(d.Owner())
+	l.forgetOwner.finishOwed()
 	l.eng.Store(eng)
 	l.adm.Store(d.Admission())
 	if l.routing != nil {
