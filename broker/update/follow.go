@@ -187,6 +187,21 @@ func (s *Store) Following() (Followed, error) {
 	return src, json.Unmarshal(b, &src)
 }
 
+// TrustedRoot returns the root the box trusts now, after completing or
+// forgetting any switch a crash interrupted, so a caller can tell whether
+// a switch took effect.
+func (s *Store) TrustedRoot() ([]byte, error) {
+	unlock, err := s.lock()
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	if err := s.settle(); err != nil {
+		return nil, err
+	}
+	return os.ReadFile(s.p("root.json"))
+}
+
 // followFault, set only by tests, fails the switch before a step, as a
 // crash there would.
 var followFault func(step string) error
