@@ -116,7 +116,7 @@ func (s *ExclusiveStore) Load() ([]byte, error) {
 	if s.verifyLocked() != nil {
 		return nil, ErrStorage
 	}
-	b, err := s.store.Load()
+	b, err := s.loadAnchored()
 	if err != nil {
 		s.unavailable.Store(true)
 		return nil, ErrStorage
@@ -135,7 +135,7 @@ func (s *ExclusiveStore) Save(b []byte) error {
 	if s.verifyLocked() != nil {
 		return ErrStorage
 	}
-	if s.store.Save(b) != nil {
+	if s.saveAnchored(b) != nil {
 		s.unavailable.Store(true)
 		return ErrStorage
 	}

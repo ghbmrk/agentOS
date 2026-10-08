@@ -62,8 +62,10 @@ single-link. The path must be clean/absolute and cannot end in `.lock`/`.tmp`,
 which are reserved cooperating-file names. No directory is created or chmodded;
 reject a bad deployment rather than silently weakening its custody settings.
 A missing lock is created at 0600. Unsupported platforms refuse this API without
-an unleased fallback. Load/Save continue to use the bounded reader/FileStore
-writer; no second accounting counter or persistence algorithm is introduced.
+an unleased fallback. ExclusiveStore Load/Save use the held parent descriptor
+for ledger reads, exclusive temporary creation, rename and directory sync (D50).
+The bounded read and write/fsync/rename/sync protocol are retained; no second
+accounting counter is introduced. Ordinary Store still delegates FileStore.
 
 The returned pointer implements PacingStore. Construct exactly one actual Gate
 against it and share that Gate with approval/question/digest consumers. Never
@@ -76,7 +78,8 @@ Every Load/Save serializes on this instance and observes current parent/lock
 identity plus private ledger/temp metadata before and after I/O. Parent/lock
 displacement, metadata refusal or I/O failure latches fixed storage refusal;
 there is no live repair. Private error/path details are not returned. A bad
-temporary symlink/hard link is refused before FileStore truncation in the tests.
+temporary symlink/hard link is refused before I/O in the tests. D50 additionally
+refuses every pre-existing temporary file without truncating or adopting it.
 These are observation boundaries, not an atomic defense against an actor who
 can mutate the same UID's paths during the operation. Ancestor traversal and
 same-UID rename/link races still need protected deployment custody. Neither
@@ -293,3 +296,33 @@ missing-image no-initialization and allowance-mismatch no-overwrite are tested.
 Actual daemon configuration custody/routing/provisioning remains W5-D47-Q; inherited
 base/security and urgent/reissue fault availability holds remain. No default daemon
 wiring, activation, migration, pin provisioning or external acceptance claimed.
+
+## Descriptor-anchored lease I/O (D50)
+
+After parent acquisition, ExclusiveStore uses openat for bounded ledger Load and
+exclusive O_CREAT|O_EXCL|O_NOFOLLOW temporary creation, Renameat within the held
+directory and fsync on that directory descriptor. Ledger metadata is validated
+from the actual opened descriptor, including private ownership/mode/single-link
+and the shared byte cap plus overflow probe. Missing versus empty stays distinct.
+Read/write/short-write/sync/close/rename failures return fixed storage refusal and
+latch through the existing wrapper. FileStore/ordinary Store behavior is unchanged.
+
+A safe regular existing `.tmp` is now refused too. It is never truncated/adopted.
+A failed new write leaves its temporary image as unresolved recovery residue;
+there is no automatic unlink, repair, retry or partial-write refund. Before rename,
+observe the named temporary's private metadata and exact created inode and check
+retirement; after rename require directory sync and the outer custody observation.
+A late sync/outer-check failure may already have replaced state: no permission is
+returned, and conservative strict reopen uses actual persisted bytes.
+
+The deterministic displacement test models a path replacement BETWEEN the outer
+check and I/O: actual read/write/rename stay in the acquired directory, leaving
+replacement directory and a synthetic symlink target untouched. The next outer
+observation latches displaced custody. This does not prove atomic custody checks:
+parent acquisition/verification still traverse ancestors, a same-UID actor can
+race temporary/ledger/lock names, lock replacement can split advisory exclusion,
+and old valid images replay. Permissions already handed out are not revoked.
+Synchronous descriptor I/O and Close can still hang forever. W5-D50-Q holds trusted
+residue cleanup after total drain and actual protected-path/media/latency/restore/
+config and current-main integration qualifications. Strongest independent security
+and external batch review remain; D37 urgent/reissue fault hold is preserved.
