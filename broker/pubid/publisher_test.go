@@ -51,6 +51,9 @@ type rig struct {
 	// mono is the publisher's monotonic clock. By default each reading is
 	// a day after the last, so only the tests of the floor meet it.
 	mono func() time.Duration
+	// boot names the boot mono counts from; nil means none, so the floor
+	// is not carried across a reopen.
+	boot func() string
 }
 
 func newRig(t *testing.T, r fixedRand) *rig {
@@ -83,6 +86,7 @@ func (g *rig) reopen(t *testing.T) {
 	g.p, err = NewPublisher(Config{
 		Path: filepath.Join(g.dir, "outbox.json"), Identity: g.id, Sender: g.out, Now: g.c.now,
 		Signers: map[string]Signer{"artifact": signer, "attestation": signer}, Rand: g.rand, Mono: g.mono,
+		BootID: g.boot,
 	})
 	must(t, err)
 }
