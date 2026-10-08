@@ -18,6 +18,8 @@ import (
 	"time"
 )
 
+var ErrPolicyRecovery = errors.New("dailyhost: notification policy needs recovery")
+
 var ErrConfig = errors.New("dailyhost: complete exclusive host configuration required")
 var ErrPolicy = errors.New("dailyhost: dispatch policy deferred")
 var ErrRetention = errors.New("dailyhost: owner notes currently ineligible")
@@ -26,8 +28,11 @@ var ErrRunning = errors.New("dailyhost: runner already active")
 var ErrTicker = errors.New("dailyhost: cadence source stopped")
 
 type Config struct {
-	Owner owner.Config
-	Notes *digestnotes.Source
+	// PolicyHealth is an optional read-only bounded accounting health check.
+	// Bind dailypolicy.Policy.Health when using durable shared pacing.
+	PolicyHealth func() error
+	Owner        owner.Config
+	Notes        *digestnotes.Source
 	// Daily.Owner/Flush and the owner-notes registry entry are owned here; leave
 	// them unset. Daily.Gate remains mandatory and implements shared pacing,
 	// quiet hours, priority and remaining resource/authority policy.
@@ -209,7 +214,13 @@ func (h *Host) Health() error {
 	if h.cfg.Notes.Health() != nil {
 		return owner.ErrDigestRecovery
 	}
-	return h.cfg.Daily.Heartbeat.Health()
+	if err := h.cfg.Daily.Heartbeat.Health(); err != nil {
+		return err
+	}
+	if h.cfg.PolicyHealth != nil && h.cfg.PolicyHealth() != nil {
+		return ErrPolicyRecovery
+	}
+	return nil
 }
 func (h *Host) Status() Status { h.mu.Lock(); defer h.mu.Unlock(); return h.st }
 
@@ -274,6 +285,8 @@ func (h *Host) record(id uint64, err error) {
 		h.st.Code = Deadline
 	case errors.Is(err, context.Canceled):
 		h.st.Code = Cancelled
+	case errors.Is(err, ErrPolicyRecovery):
+		h.st.Code = Recovery
 	case errors.Is(err, ErrPolicy), errors.Is(err, ErrRetention):
 		h.st.Code = Deferred
 	case errors.Is(err, daily.ErrAssociation), errors.Is(err, dq.ErrRecovery), errors.Is(err, dq.ErrFull), errors.Is(err, owner.ErrDigestRecovery), errors.Is(err, owner.ErrDigestFull), errors.Is(err, heartbeat.ErrRecovery), errors.Is(err, heartbeat.ErrStale):

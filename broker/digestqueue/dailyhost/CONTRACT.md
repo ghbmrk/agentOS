@@ -118,3 +118,22 @@ operations are invoked locally, not through production sockets or a carrier.
 Trusted fixture engine release is not owner authentication. These tests strengthen
 composition evidence without qualifying real devices, line priority (#254),
 startup Boot/reissue, durable pacing restart behavior or independent acceptance.
+
+
+Optional accounting health: when the common Gate has a PacingStore, bind
+`Config.PolicyHealth = policy.Health` alongside Daily.Gate/Check and
+Daily.Recheck/Recheck. This read-only, bounded callback runs outside the host
+mutex in constructor Health, Activate, Step and the existing dispatch health wrappers.
+Any callback error becomes fixed ErrPolicyRecovery; Step reports Recovery
+without recording its private details, collecting or invoking transport.
+Allowance exhaustion is healthy and retains the ordinary policy-deferred path.
+The option remains nil for older callers; caller completeness must be reviewed,
+not inferred from opaque policy callback identities. This is not daemon wiring.
+
+A blocked accounting-health callback cannot hold the host admission mutex:
+LocalStop invalidates activation before delegating physical STOP. Physical
+resume alone cannot revive the stale activation when health eventually returns.
+Synchronous health/store callbacks still require latency bounds and can delay
+other policy work; no orphanable timeout worker or background repair is added.
+Reopening must retire the old writer and preserve the exact same store. A fresh
+store, restore or deletion cannot be used as recovery for a spent allowance.
