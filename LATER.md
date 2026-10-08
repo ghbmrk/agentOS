@@ -52,6 +52,7 @@ No security-fix row (SR2-*) is classed Later. P2-1 (host image, PR #41) has no b
 ## Later (backlog; do not start before first release)
 | ID | Why it can wait |
 |---|---|
+| APPLY-dup | `broker/apply/ASSUMPTIONS.md` repeats rows A3–A7 (found on UPD-b); text only, no behaviour |
 | P2-8b | Deferred re-encrypt after trusted-PC removal; slot removal already covers CRED-9 |
 | P3-6d | Digest wording for deleted procedures; no A-test needs it |
 | CH-20p | Page view of kept replies; A15 needs delivery, not this view |
