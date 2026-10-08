@@ -65,7 +65,13 @@ func TestParseRefusesMalformedRequests(t *testing.T) {
 		`{"v":0,"verb":"navigate","url":"https://user:pw@example.test/"}`,
 		`{"v":0,"verb":"navigate","url":"https:///nohost"}`,
 		`{"v":0,"verb":"select","ref":"e1","option":"a","ref2":"e2"}`,
-		`{"v":0,"verb":"snapshot"} {"v":0,"verb":"evaluate"}`, // trailing value
+		`{"v":0,"verb":"snapshot"} {"v":0,"verb":"evaluate"}`,                 // trailing value
+		`{"v":0,"verb":"snapshot"}}`,                                          // trailing brace (L3 #5)
+		`{"v":0,"verb":"snapshot"} x`,                                         // trailing garbage (L3 #5)
+		`{"v":0,"verb":"snapshot"}` + "\x00",                                  // trailing NUL
+		`{"v":0,"verb":"click","ref":"e` + strings.Repeat("1", MaxRef) + `"}`, // ref too long (L3 #6)
+		`{"v":0,"verb":"select","ref":"e1","option":"` + strings.Repeat("o", MaxOption+1) + `"}`,     // option too long
+		`{"v":0,"verb":"navigate","url":"https://example.test/` + strings.Repeat("a", MaxURL) + `"}`, // url too long
 	} {
 		if _, err := Parse([]byte(raw)); !isProtocol(err) {
 			t.Errorf("%s: want protocol error, got %v", raw, err)
@@ -83,6 +89,13 @@ func TestParseRefusesDuplicateKeys(t *testing.T) {
 		if _, err := Parse([]byte(raw)); !isProtocol(err) {
 			t.Errorf("%s: want protocol error, got %v", raw, err)
 		}
+	}
+}
+
+// A trailing newline (the line terminator) is not trailing data.
+func TestParseAcceptsATrailingNewline(t *testing.T) {
+	if _, err := Parse([]byte("{\"v\":0,\"verb\":\"snapshot\"}\r\n")); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -127,6 +140,40 @@ func TestOnDeclaredOrigin(t *testing.T) {
 	}
 	if _, err := NewOrigins([]string{"file:///tmp"}); err == nil {
 		t.Error("a non-http origin must be refused")
+	}
+}
+
+// CRED-10 (L3 #1): Go lowercases U+0130 to "i", but a browser's IDNA (UTS46)
+// maps it to "i" + U+0307, a different host. Non-ASCII hosts are refused rather
+// than mapped, so the gate and the browser can never disagree on a host.
+func TestNonASCIIHostsAreRefused(t *testing.T) {
+	o, err := NewOrigins([]string{"https://github.com", "https://xn--bcher-kva.example"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for url, want := range map[string]bool{
+		"https://g\u0130thub.com/":       false, // U+0130, capital I with dot
+		"https://g\u0131thub.com/":       false, // U+0131, dotless i
+		"https://\u212Aey.github.com/":   false, // Kelvin sign lowercases to k
+		"https://github.com/":            true,
+		"https://GITHUB.com/":            true,
+		"https://xn--gthub-n4a.com/":     false, // punycode of another host
+		"https://xn--bcher-kva.example/": true,  // declared in punycode
+		"https://XN--BCHER-KVA.example/": true,
+		"https://b\u00fccher.example/":   false, // Unicode form is refused, not mapped
+		"https://g%C4%B0thub.com/":       false, // percent-encoded U+0130
+	} {
+		if got := o.Declared(url); got != want {
+			t.Errorf("%q: got %v, want %v", url, got, want)
+		}
+	}
+	for _, s := range []string{"https://g\u0130thub.com", "https://b\u00fccher.example"} {
+		if _, err := NewOrigins([]string{s}); err == nil {
+			t.Errorf("NewOrigins(%q) accepted a non-ASCII host", s)
+		}
+	}
+	if _, err := Parse([]byte(`{"v":0,"verb":"navigate","url":"https://g\u0130thub.com/"}`)); !isProtocol(err) {
+		t.Errorf("navigate to a non-ASCII host: want protocol error, got %v", err)
 	}
 }
 

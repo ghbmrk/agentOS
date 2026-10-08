@@ -3,12 +3,12 @@
 Part 1 is the broker-side gate in front of S5's driver: the closed v0 action protocol (CRED-4), declared-origin checks, and the CRED-10 output filter, all applied outside the driver, which is treated as untrusted because it renders pages written by strangers.
 
 ## What the gate guarantees
-- **G1** Only the seven v0 verbs exist. Requests with unknown verbs or arguments, wrong JSON types, duplicate keys or trailing data are refused and never reach the driver. The driver receives a canonical re-encoding, never the agent's bytes, so the two sides cannot parse one line differently.
-- **G2** `navigate` to an undeclared origin is refused at the gate, in addition to the driver's own routing checks.
-- **G3** Every string the driver returns passes the vault's exact-value redactor first, then the CRED-10 detector (ported from S5 `protocol.py`). Fields outside `Result` are dropped.
-- **G4** A reply whose page URL is off the declared origins means confinement failed. The gate stops the executor (kills its process group) and relays nothing from that page.
-- **G5** Before a screenshot, the gate snapshots the page itself; any match from the driver or the gate withholds the screenshot without taking it.
-- **G6** A download whose text carries a vault value or a detector match is removed from the workspace and withheld. Output files must be flat names of regular files in the workspace.
+- **G1** Only the seven v0 verbs exist. Requests with unknown verbs or arguments, wrong JSON types, duplicate keys, oversized fields (`url` 4096, `ref` 32, `option` 1024, `text` 2000 bytes) or anything but whitespace after the object are refused and never reach the driver. The driver receives a canonical re-encoding, never the agent's bytes, so the two sides cannot parse one line differently.
+- **G2** `navigate` to an undeclared origin is refused at the gate, in addition to the driver's own routing checks. Hosts must be ASCII: a Unicode host is refused, not mapped, in requests, replies and declared origins alike, because Go's lowercasing and the browser's IDNA (UTS46) can name different hosts (`gİthub.com`). Declare IDN origins in punycode (`xn--`).
+- **G3** Every string the driver returns passes the vault's exact-value redactor first, then the CRED-10 detector (ported from S5 `protocol.py`). The gate's detector also redacts a value of 16 or more token characters with a digit after a secret label (key, token, secret, password, api key), which makes it stricter than S5's `protocol.py`. Output file names are filtered too; a match withholds and removes the file. Fields outside `Result` are dropped.
+- **G4** A reply whose page URL is off the declared origins, or an `ok` reply with no page URL, means confinement failed. The driver puts `page.url` on every reply. The gate stops the executor (kills its process group) and relays nothing from that page.
+- **G5** Before a screenshot, the gate snapshots the page itself; any match from the driver or the gate withholds the screenshot without taking it. After the shot it scans the file's bytes and snapshots again; a match in either removes the file and withholds it.
+- **G6** A download whose text carries a vault value or a detector match is removed from the workspace and withheld. Only screenshot and download may name an output file, and it must be a flat name of a regular, singly linked file in the workspace (no symlinks, no hard links); the gate reads it through an `O_NOFOLLOW` descriptor.
 - **G7** The driver starts with a fixed environment (PATH, HOME=workspace, LANG, plus `Config.Env`), never the broker's. A missed reply deadline, malformed output or driver exit stops the executor.
 
 ## Known limits (carried to part 2)
@@ -19,3 +19,6 @@ Part 1 is the broker-side gate in front of S5's driver: the closed v0 action pro
 - **K5 CRED-6.** Actions that reveal or create secrets are not yet classed as irreversible intents. That needs the adapter's operation map (verb, grants); part 2 or ADP-8.
 - **K6 Images.** Screenshots and binary downloads are not inspected as images. A secret drawn in a canvas or image is not detected (same limit as S5).
 - **K7 Restart.** After a stop, the caller decides whether to start a fresh executor. The gate never restarts itself.
+- **K8 Stuck-driver write** (L3 #6). `stdin.Write` runs before the reply timer, so a driver that stops reading can block `Do` while it holds the lock. Request fields are now bounded (G1), so one request fits the pipe buffer, but part 2 puts the write under the same deadline.
+- **K9 Request/reply id** (L3 #7). Replies are not matched to requests; a stray driver line answers the next request. Part 2 adds an id the driver echoes.
+- **K10 Containers and scan TOCTOU** (L3 #8, widens K6). Compressed containers (zip, gzip, PDF streams) are not inspected, and the driver can rewrite a file after the gate's scan. Part 2 moves the scanned bytes out of the driver's reach (copy to a gate-owned file) and unpacks known containers or withholds them.

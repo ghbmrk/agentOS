@@ -205,8 +205,23 @@ func (g *Gate) Do(ctx context.Context, raw []byte) Result {
 	if !ok || !res.OK {
 		return res
 	}
-	if req.Verb == "download" && res.Path != "" {
-		return g.scanDownload(res)
+	switch req.Verb {
+	case "download":
+		return g.scanFile(res, "downloaded file")
+	case "screenshot":
+		if res = g.scanFile(res, "screenshot"); !res.OK {
+			return res
+		}
+		// The page may have changed between the first look and the shot.
+		snap, ok := g.roundtrip(ctx, Request{Verb: "snapshot"})
+		if !ok || !snap.OK || snap.Redactions > 0 {
+			_ = os.Remove(filepath.Join(g.ws, res.Path))
+			if !ok {
+				return snap
+			}
+			return Result{Error: "withheld", Detail: "page showed a value the detector matched during the screenshot (CRED-10)",
+				RefusedNavigations: append(res.RefusedNavigations, snap.RefusedNavigations...)}
+		}
 	}
 	return res
 }
@@ -240,16 +255,17 @@ func (g *Gate) roundtrip(ctx context.Context, req Request) (Result, bool) {
 		g.stop()
 		return Result{Error: "driver", Detail: "malformed executor reply; executor stopped"}, false
 	}
-	return g.post(res)
+	return g.post(req.Verb, res)
 }
 
 var errCode = regexp.MustCompile(`^[A-Za-z_]{1,40}$`)
 
 // post filters one driver reply (CRED-10) and enforces confinement.
-func (g *Gate) post(res Result) (Result, bool) {
-	if res.URL != "" && res.URL != "about:blank" && !g.origins.Declared(res.URL) {
+func (g *Gate) post(verb string, res Result) (Result, bool) {
+	if (res.OK && res.URL == "") || (res.URL != "" && res.URL != "about:blank" && !g.origins.Declared(res.URL)) {
 		// The driver should never end a verb off its origins; if it did,
-		// confinement failed and nothing from that page is relayed.
+		// confinement failed and nothing from that page is relayed. An ok
+		// reply must name its page, or confinement cannot be checked.
 		g.stop()
 		return Result{Error: "confinement", Detail: "the executor left its declared origins and was stopped"}, false
 	}
@@ -280,6 +296,18 @@ func (g *Gate) post(res Result) (Result, bool) {
 		res.Truncated = true
 	}
 	if res.Path != "" {
+		p := filepath.Join(g.ws, filepath.Base(res.Path))
+		if verb != "screenshot" && verb != "download" {
+			return Result{Error: "driver", Detail: "executor named an output file for " + verb}, true
+		}
+		// A site names its downloads, so the name is output like any other.
+		if _, k := g.filter.text(res.Path); k > 0 {
+			if res.Path == filepath.Base(res.Path) {
+				_ = os.Remove(p)
+			}
+			return Result{Error: "withheld", Detail: "output file name contains a value the detector matched (CRED-10)",
+				URL: res.URL, Title: res.Title, RefusedNavigations: res.RefusedNavigations}, true
+		}
 		size, err := g.checkPath(res.Path)
 		if err != nil {
 			return Result{Error: "driver", Detail: "executor named an invalid output file"}, true
@@ -291,37 +319,60 @@ func (g *Gate) post(res Result) (Result, bool) {
 	return res, true
 }
 
-// checkPath accepts only a flat name of a regular file directly in the
-// workspace.
+// checkPath accepts only a flat name of a regular, singly linked file
+// directly in the workspace.
 func (g *Gate) checkPath(name string) (int64, error) {
 	if name != filepath.Base(name) || strings.ContainsAny(name, `/\`) || strings.HasPrefix(name, ".") || len(name) > 128 {
 		return 0, fmt.Errorf("bad name")
 	}
 	fi, err := os.Lstat(filepath.Join(g.ws, name))
-	if err != nil || !fi.Mode().IsRegular() {
+	if err != nil || !singleRegular(fi) {
 		return 0, fmt.Errorf("not a regular file")
 	}
 	return fi.Size(), nil
 }
 
-// scanDownload withholds and removes a downloaded file whose text carries a
-// vault value or a detector match. Binary formats are scanned as bytes only.
-func (g *Gate) scanDownload(res Result) Result {
+// singleRegular refuses symlinks and hard links: a hard link can name a file
+// outside the workspace.
+func singleRegular(fi os.FileInfo) bool {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	return fi.Mode().IsRegular() && ok && st.Nlink == 1
+}
+
+// scanFile withholds and removes an output file (screenshot or download) whose
+// bytes carry a vault value or a detector match. Images and binary formats are
+// scanned as bytes only (K6).
+func (g *Gate) scanFile(res Result, what string) Result {
 	p := filepath.Join(g.ws, res.Path)
 	withhold := func(why string) Result {
 		_ = os.Remove(p)
-		return Result{Error: "withheld", Detail: why, URL: res.URL, Title: res.Title,
+		return Result{Error: "withheld", Detail: what + " " + why, URL: res.URL, Title: res.Title,
 			RefusedNavigations: res.RefusedNavigations}
 	}
+	if res.Path == "" {
+		return withhold("missing")
+	}
 	if res.Bytes > MaxDownloadScan {
-		return withhold("downloaded file too large to scan")
+		return withhold("too large to scan")
 	}
-	b, err := os.ReadFile(p)
+	// Read through a descriptor that cannot follow a symlink swapped in since
+	// checkPath, and check that descriptor's file again.
+	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return withhold("downloaded file unreadable")
+		return withhold("unreadable")
 	}
-	if _, k := g.filter.text(strings.ToValidUTF8(string(b), "�")); k > 0 {
-		return withhold("downloaded file contains a value the detector matched (CRED-10)")
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil || !singleRegular(fi) || fi.Size() > MaxDownloadScan {
+		return withhold("unreadable")
 	}
+	b, err := io.ReadAll(io.LimitReader(f, MaxDownloadScan+1))
+	if err != nil || len(b) > MaxDownloadScan {
+		return withhold("unreadable")
+	}
+	if _, k := g.filter.text(strings.ToValidUTF8(string(b), "\uFFFD")); k > 0 {
+		return withhold("contains a value the detector matched (CRED-10)")
+	}
+	res.Bytes = int64(len(b))
 	return res
 }

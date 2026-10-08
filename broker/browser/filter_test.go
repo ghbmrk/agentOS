@@ -83,3 +83,49 @@ func (f fakeScrubber) Redact(b []byte) []byte {
 	}
 	return []byte(s)
 }
+
+// CRED-10 (L3 #4): a value of 16 or more token characters next to a label
+// such as "api key", "token", "secret" or "password" is redacted even when it
+// is low-entropy hex or carries '/'. Synthetic canaries only.
+func TestDetectorRedactsLabelledValues(t *testing.T) {
+	const (
+		hex32 = "9f86d081884c7d659a2feaa0c55ad015"
+		hex64 = "9f86d081884c7d659a2feaa0c55ad0159f86d081884c7d659a2feaa0c55ad015"
+		aws   = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+	)
+	for in, secret := range map[string]string{
+		"api key: " + hex32:                      hex32,
+		"API_KEY=" + hex32:                       hex32,
+		"token " + hex64:                         hex64,
+		"Bearer token: " + hex64:                 hex64,
+		"secret: " + aws:                         aws,
+		`"client_secret": "` + aws + `"`:         aws,
+		"password = 4fj29dk3ls02kd93jf02":        "4fj29dk3ls02kd93jf02",
+		"access_token: " + hex32:                 hex32,
+		"- text: Key " + hex32:                   hex32,
+		`- textbox "API key" [ref=e5]: ` + hex32: hex32,
+	} {
+		out, n := Detect(in)
+		if strings.Contains(out, secret) || n == 0 {
+			t.Errorf("%q survived: %q (n=%d)", in, out, n)
+		}
+	}
+}
+
+// The label rule keeps the label and stays off ordinary labelled prose.
+func TestDetectorLabelRuleLeavesOrdinaryTextAlone(t *testing.T) {
+	for _, in := range []string{
+		"Your token expires in 10 minutes",
+		"Forgot password? Reset it here",
+		"- link \"token-based-authentication-guide\" [ref=e7]",
+		"secret: santa-gift-exchange-list",
+		"key 2024-10-08",
+	} {
+		if out, n := Detect(in); n != 0 || out != in {
+			t.Errorf("%q changed to %q (n=%d)", in, out, n)
+		}
+	}
+	if out, _ := Detect("api key: 9f86d081884c7d659a2feaa0c55ad015"); out != "api key: "+Redacted {
+		t.Errorf("label not kept: %q", out)
+	}
+}

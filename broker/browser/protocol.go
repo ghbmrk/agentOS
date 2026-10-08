@@ -25,6 +25,14 @@ const Version = 0
 // MaxText bounds the text of one type request.
 const MaxText = 2000
 
+// Bounds on the other request fields, so no request is large enough to block
+// the gate while it writes to the driver (L3 #6).
+const (
+	MaxURL    = 4096
+	MaxRef    = 32
+	MaxOption = 1024
+)
+
 var refRE = regexp.MustCompile(`^(?:f[0-9]+)?e[0-9]+$`)
 
 // verbs is the closed list (CRED-4): verb -> its arguments. Nothing else
@@ -126,8 +134,8 @@ func Parse(raw []byte) (Request, error) {
 			return Request{}, err
 		}
 	}
-	if len(r.Text) > MaxText {
-		return Request{}, perr("text too long")
+	if len(r.Text) > MaxText || len(r.URL) > MaxURL || len(r.Ref) > MaxRef || len(r.Option) > MaxOption {
+		return Request{}, perr("%s argument too long", r.Verb)
 	}
 	return r, nil
 }
@@ -206,7 +214,8 @@ func strictObject(raw []byte) (map[string]json.RawMessage, error) {
 	if _, err := dec.Token(); err != nil {
 		return nil, perr("not JSON")
 	}
-	if _, err := dec.Token(); err == nil {
+	// Only JSON whitespace (the line terminator) may follow the object.
+	if len(bytes.Trim(raw[dec.InputOffset():], " \t\r\n")) != 0 {
 		return nil, perr("trailing data after the request")
 	}
 	return out, nil
@@ -219,6 +228,14 @@ func checkURL(s string) (*url.URL, error) {
 	}
 	if u.User != nil {
 		return nil, perr("URLs with userinfo are refused")
+	}
+	// CRED-10: a browser maps a non-ASCII host through IDNA (UTS46) and Go's
+	// lowercasing does not, so the two could name different hosts (U+0130).
+	// Non-ASCII hosts are refused rather than mapped; punycode is plain ASCII.
+	for i := 0; i < len(u.Host); i++ {
+		if u.Host[i] >= 0x80 || u.Host[i] == '%' {
+			return nil, perr("non-ASCII hosts are refused; use the punycode (xn--) form")
+		}
 	}
 	return u, nil
 }

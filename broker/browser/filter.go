@@ -29,6 +29,12 @@ var (
 		regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`),                                       // AWS
 		regexp.MustCompile(`\bxox[abprs]-[A-Za-z0-9-]{10,}`),                             // Slack
 	}
+	// labelled: a run of 16 or more token characters right after a secret
+	// label ("api key: 9f86...", "token 9f86...", "secret: wJal.../K7..."),
+	// which the entropy rule misses for hex and for values with '/'. The value
+	// must hold a digit, so labelled prose ("token-based-auth") is left alone.
+	// Stricter than S5's protocol.py, which has no such rule.
+	labelled    = regexp.MustCompile(`(?i)(api[\s_-]?key|key|token|secret|password|passwd)s?["']?(?:\s*\[ref=(?:f[0-9]+)?e[0-9]+\])?\s*(?:[:=]\s*)?["']?([A-Za-z0-9+/=_.-]{16,})`)
 	secretParam = regexp.MustCompile(`(?i)(token|code|key|sig|auth|session|password|secret)`)
 	candidate   = regexp.MustCompile(`[A-Za-z0-9+_=-]{24,}`)
 	urlInText   = regexp.MustCompile(`https?://[^\s"'<>]+|/url: \S+`)
@@ -50,6 +56,7 @@ func Detect(text string) (string, int) {
 		n += k
 		return prefix + out
 	})
+	text = redactLabelled(text, &n)
 	for _, p := range tokenPatterns {
 		text = p.ReplaceAllStringFunc(text, func(string) string { n++; return Redacted })
 	}
@@ -61,6 +68,25 @@ func Detect(text string) (string, int) {
 		return m
 	})
 	return text, n
+}
+
+func redactLabelled(text string, n *int) string {
+	var b strings.Builder
+	last := 0
+	for _, m := range labelled.FindAllStringSubmatchIndex(text, -1) {
+		v0, v1 := m[4], m[5]
+		if !digit.MatchString(text[v0:v1]) {
+			continue
+		}
+		b.WriteString(text[last:v0])
+		b.WriteString(Redacted)
+		last = v1
+		*n++
+	}
+	if last == 0 {
+		return text
+	}
+	return b.String() + text[last:]
 }
 
 // redactURL drops the values of secret-named query and fragment parameters,
