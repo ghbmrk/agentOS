@@ -183,6 +183,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | W3-forget-b2c l1 | UX on #427: with no agent, "when it runs again" means the next boot (the agent machine opens only at boot); STATUS's agent line should name that step |
 | W3-forget-b2c l2 | UX on #427: an owed take-back is journaled `succeeded` with evidence `owed: …`; once the digest renders journal outcomes it must not read as done |
 | SR3-2 l1 | UX/Potency on #428 (L3 later point): an authorized intent that never dispatches (held, no executor, fenced) holds its bound place with no age-out; note it in GR31 and let STATUS show it |
+| S9 | Neural embedder for recall (EmbeddingGemma-class): spike harness and baseline exist, the model comparison is not run (weights unreachable from the build sandbox); not release-critical, owner-requested 2026-10-08; potency P4 puts metadata filters and byte budgets first |
 
 ## Reuse candidates
 | ID | Component | Why |
