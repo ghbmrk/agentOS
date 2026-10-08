@@ -69,6 +69,12 @@ type Config struct {
 	// control words: it becomes the Auth, and owns codes, approvals, and
 	// session unlock. Its state lives in this file.
 	OwnerState string
+	// OwnerFactory is optional trusted broker construction, only in RunProvisioned
+	// with OwnerState. Preserve supplied identity, credentials, policy callbacks and
+	// engine semantics; return no active consumers on failure. The returned channel
+	// is the actual owner everywhere. Construction may block; never await its own
+	// daemon shutdown. Caller owns all assembled consumers through full quiescence.
+	OwnerFactory func(ownerch.Config) (*ownerch.Channel, error)
 	// OwnerSecrets are the high-tier verifiers from the vault (CRED-8).
 	// agentosd leaves them empty: the seeds stay in the vault process
 	// (egress K7). With no verifier the channel refuses every high-tier
@@ -220,7 +226,27 @@ func RunProvisioned(ctx context.Context, cfg Config, gate *grants.Gate) (*Daemon
 	return run(ctx, cfg, gate)
 }
 
+// ErrOwnerAssembly is fixed refusal for unsupported or failed trusted assembly.
+var ErrOwnerAssembly = errors.New("daemon owner assembly refused")
+
+func assembleOwner(factory func(ownerch.Config) (*ownerch.Channel, error), cfg ownerch.Config) (ch *ownerch.Channel, err error) {
+	defer func() {
+		if recover() != nil {
+			ch = nil
+			err = ErrOwnerAssembly
+		}
+	}()
+	ch, err = factory(cfg)
+	if err != nil || ch == nil {
+		return nil, ErrOwnerAssembly
+	}
+	return ch, nil
+}
+
 func run(ctx context.Context, cfg Config, supplied *grants.Gate) (*Daemon, error) {
+	if cfg.OwnerFactory != nil && (supplied == nil || cfg.OwnerState == "") {
+		return nil, ErrOwnerAssembly
+	}
 	if cfg.OwnerNumber == "" && cfg.Auth == nil {
 		return nil, errors.New("daemon: owner number required")
 	}
@@ -309,12 +335,18 @@ func run(ctx context.Context, cfg Config, supplied *grants.Gate) (*Daemon, error
 	handle := h.Handle
 	var ch *ownerch.Channel
 	if cfg.OwnerState != "" {
-		if ch, err = ownerch.New(ownerch.Config{
+		oc := ownerch.Config{
 			Owner: cfg.OwnerNumber, Modem: cfg.Modem, Engine: eng, Agent: cfg.Agent,
 			Machines: machines, Notes: cfg.Notes, Secrets: cfg.OwnerSecrets, Verifier: cfg.OwnerVerifier, Store: ownerch.FileStore{Path: cfg.OwnerState},
 			Decide: gate.Decide, Narrow: gate.Narrow, Reissue: gate.Reissue,
 			Settings: cfg.Settings, HelpExtra: cfg.HelpExtra, Narrows: cfg.Narrows, Answer: cfg.Answer,
-		}); err != nil {
+		}
+		if cfg.OwnerFactory != nil {
+			ch, err = assembleOwner(cfg.OwnerFactory, oc)
+		} else {
+			ch, err = ownerch.New(oc)
+		}
+		if err != nil {
 			store.Close()
 			return nil, err
 		}

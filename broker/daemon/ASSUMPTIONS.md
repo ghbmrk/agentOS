@@ -85,3 +85,30 @@ W5-D47-Q plus prior external release/security/current-base qualifications.
 Synchronous construction/attachment/read/admission/shutdown can hang indefinitely.
 Legacy Attach/direct constructors/other slots/noncooperators bypass composition.
 No default activation/refund/deadline/revocation/anti-restore/custody/media claim.
+
+## W5-D61 trusted common owner assembly
+
+OwnerFactory is optional trusted broker construction ONLY in RunProvisioned with
+OwnerState. It receives the actual journal engine and owner identity/credentials/
+policy callbacks after journal open, before attachment/workers/sockets. Its one
+returned channel is the actual owner for all daemon routes, including local page,
+Gate callbacks and owned owner worker. A dailyhost.NewProvisioned assembly can
+return its transactional channel/contained STOP against this same raw engine and
+Gate. Default nil uses existing owner.New. Unsupported/error/nil/panic cases use
+fixed ErrOwnerAssembly; construction failure closes the actual journal, never
+publishes a daemon or attaches the Gate. A failed Close is uncertain recovery;
+fixed assembly refusal is not proof of cleanup/media custody or restart safety.
+
+Factory is NOT agent/plugin/provider code. It must preserve supplied identity,
+credentials, policy callbacks and engine semantics, supply the same trusted clock
+when composing a host, and leave no spawned consumers on failure. A malicious or
+misconfigured factory can substitute all of these; this interface enforces none
+of that trust. Construction can block forever. No extra constructor worker,
+interruption/retry/default activation/agentosd adoption is introduced. Caller owns
+all consumers through registered Use, answered questions, host quiescence and
+daemon WaitError before outer slot Drain; escaped work/permissions remain possible.
+Never await own shutdown or Drain inside an owned scope. Actual synthetic shared
+slot/host/question/daemon STOP and strict spent-debt reopen tests are composition
+evidence, not production config/operator routing or enforced full-user custody.
+W5-D61-Q and inherited W5-D60-Q/W5-D47-Q/security/base holds remain. D37 urgent/
+reissue storage/time/overdue/invalid-input availability hold is unchanged.
