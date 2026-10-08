@@ -4,7 +4,6 @@ A recurring review of what AgentOS can do for its owner: leverage, reach, autono
 
 **One of three lenses.** Security, potency, and UX each run their own loop; an arbitrator loop reconciles them toward win-win-win. So every proposal here states its **cost to security** and its **cost to UX**, and flags where the lenses conflict. A proposal that weakens an invariant (Invariant C, REV-2, ARC-1/2, DEP-2) is not made; it is listed under "considered, not proposed" with the reason.
 
-
 **Question asked each run:** where does the spec cap capability without buying matching security or UX, and what is the cheapest structural change that lifts the cap?
 
 **Output of a spec-wide run** (only when Mark or L1 asks for one): `YYYY-MM-DD-potency-review.md` with findings (potency gain, security cost, UX cost, proposal), decisions for Mark, and, when warranted, SPEC.md edits in the same PR.
