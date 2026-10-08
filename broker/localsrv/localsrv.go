@@ -29,9 +29,12 @@ import (
 type Owner interface {
 	LocalStatus() owner.LocalStatus
 	LocalGridCell() string
-	LocalSignIn(code string) (time.Time, error)
+	// LocalSignIn returns the sign-in's end and the session-lock count
+	// it authenticated under; LocalResume refuses once the count moved
+	// (owner.ErrLocked), so a lock is checked where RESUME commits.
+	LocalSignIn(code string) (until time.Time, locks uint64, err error)
 	LocalStop(ctx context.Context) error
-	LocalResume() (string, error)
+	LocalResume(locks uint64) (string, error)
 	LocalRequests() []owner.LocalRequest
 	LocalAnswer(id, sum string, approve bool, code string) (string, error)
 	LocalWaiting() string
@@ -176,7 +179,7 @@ func (s *Server) signIn(_ context.Context, _ sockets.Peer, args json.RawMessage)
 	if !s.takeTry() {
 		return nil, errLimited
 	}
-	until, err := s.cfg.Owner.LocalSignIn(in.Code)
+	until, locks, err := s.cfg.Owner.LocalSignIn(in.Code)
 	// Every refused sign-in counts, a refused unlock proof included, which
 	// the channel leaves to the vault process (Security S1 on step a);
 	// only the day's spent bound does not, since nothing was tried.
@@ -190,7 +193,9 @@ func (s *Server) signIn(_ context.Context, _ sockets.Peer, args json.RawMessage)
 	case err != nil:
 		return nil, errFailed
 	}
-	tok := s.mint(until, s.cfg.Owner.LocalStatus().Locks)
+	// Bound to the count the code was accepted under, never one read
+	// after: a lock while the sign-in was texted kills the token (SR3-1).
+	tok := s.mint(until, locks)
 	if tok == "" {
 		return nil, errFailed
 	}
@@ -205,10 +210,15 @@ func (s *Server) signOut(_ context.Context, _ sockets.Peer, args json.RawMessage
 	if !s.valid(in.Token) {
 		return nil, errUnauthorized
 	}
-	s.mu.Lock()
-	delete(s.sessions, sha256.Sum256([]byte(in.Token)))
-	s.mu.Unlock()
+	s.drop(in.Token)
 	return localapi.Text{}, nil
+}
+
+// drop ends tok's session.
+func (s *Server) drop(tok string) {
+	s.mu.Lock()
+	delete(s.sessions, sha256.Sum256([]byte(tok)))
+	s.mu.Unlock()
 }
 
 // session reports a live token's session; a dead one is unauthorized.
@@ -250,7 +260,8 @@ func (s *Server) line(context.Context) (any, error) {
 func (s *Server) resume(_ context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
 	var in localapi.Resume
 	err := decode(args, &in)
-	if !s.valid(in.Token) {
+	ses, ok := s.live(in.Token)
+	if !ok {
 		return nil, errUnauthorized
 	}
 	if err != nil || len(in.Code) > localapi.MaxCode {
@@ -263,7 +274,7 @@ func (s *Server) resume(_ context.Context, _ sockets.Peer, args json.RawMessage)
 		if !s.takeTry() {
 			return nil, errLimited
 		}
-		_, err := s.cfg.Owner.LocalSignIn(in.Code)
+		_, locks, err := s.cfg.Owner.LocalSignIn(in.Code)
 		s.endTry(err != nil && !errors.Is(err, owner.ErrTooMany))
 		switch {
 		case errors.Is(err, owner.ErrWrongCode), errors.Is(err, owner.ErrTooMany):
@@ -271,11 +282,20 @@ func (s *Server) resume(_ context.Context, _ sockets.Peer, args json.RawMessage)
 			return localapi.Answered{Refusal: r, Text: t}, nil
 		case err != nil:
 			return nil, errFailed
+		case locks != ses.locks:
+			// A lock came between the token check and the code: the
+			// session is dead, and the code alone does not revive it.
+			s.drop(in.Token)
+			return nil, errUnauthorized
 		}
 		s.refresh(in.Token)
 	}
-	t, err := s.cfg.Owner.LocalResume()
-	if err != nil {
+	t, err := s.cfg.Owner.LocalResume(ses.locks)
+	switch {
+	case errors.Is(err, owner.ErrLocked):
+		s.drop(in.Token)
+		return nil, errUnauthorized
+	case err != nil:
 		return nil, errFailed
 	}
 	return localapi.Answered{Text: t}, nil
