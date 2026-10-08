@@ -73,6 +73,8 @@ No security-fix row (SR2-*) is classed Later. P2-1 (host image, PR #41) has no b
 | W3-off-a | STATUS wording goes dynamic; polish |
 | W3-implicit | Potency C2 outcome label; refinement of attention optimizer |
 | W3-forget-b2 dup ask | L3 on #321: a forget after a proposal reached the owner requeues the rebuild, which may ask again; rare, owner can decline |
+| W3-forget-b2 pre-start | L3 re-review on #321: a build cancelled before it starts still calls propose with a cancelled ctx; return early |
+| W3-forget-b2 post-build test | L3 re-review on #321: no test kills the post-build forget check; add one with the next Learn test hook |
 | W8 | Owner builds; no brief, no A-test names it |
 | W9a | Question follow-ups from the #95 lens gate; no A-test needs them |
 
