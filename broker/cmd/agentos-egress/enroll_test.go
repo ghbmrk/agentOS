@@ -93,10 +93,11 @@ func TestEnrollMakesTheSeedInTheVaultAndHandsItOutOnce(t *testing.T) {
 	}
 }
 
-// ONB-3, P2-2w P4: one entered code from the new seed confirms it; the
-// seed then becomes the channel's, the old one stops working, and the
-// enrollment is sealed for good, across a restart: no later call makes or
-// hands out a seed (re-enrollment is REC-3's, with the recovery key).
+// ONB-3, P2-2w P4: one entered code from the new seed confirms it and
+// the seed becomes the channel's, the old one stops working; setup's
+// finish then seals the enrollment for good, across a restart: no later
+// call makes or hands out a seed (re-enrollment is REC-3's, with the
+// recovery key).
 func TestOneCodeConfirmsTheEnrollmentAndSealsIt(t *testing.T) {
 	r := newSetupRig(t)
 	if _, err := r.c.confirmEnroll("000000"); err != errLocked {
@@ -122,8 +123,14 @@ func TestOneCodeConfirmsTheEnrollmentAndSealsIt(t *testing.T) {
 	if _, ok := r.c.v.Secret(PendingSeedName); ok {
 		t.Fatal("pending seed kept after confirmation")
 	}
+	if err := r.c.sealEnroll(); err != nil {
+		t.Fatal(err)
+	}
 	if _, ok := r.c.v.Secret(SetupOpenName); ok {
-		t.Fatal("setup-open entry kept after confirmation")
+		t.Fatal("setup-open entry kept after the seal")
+	}
+	if _, ok := r.c.v.Secret(ConfirmedName); ok {
+		t.Fatal("confirmed marker kept after the seal")
 	}
 	if n := r.notes[len(r.notes)-1]; n != noteEnrolled {
 		t.Fatalf("owner not told of the new code generator: %q", n)
@@ -147,6 +154,9 @@ func TestOneCodeConfirmsTheEnrollmentAndSealsIt(t *testing.T) {
 	if _, err := r.c.confirmEnroll("000000"); err != errEnrolled {
 		t.Fatalf("confirm after confirmation: %v", err)
 	}
+	if err := r.c.sealEnroll(); err != errEnrolled {
+		t.Fatalf("seal after the seal: %v", err)
+	}
 	r.c.lock()
 	r.build(t)
 	r.seed = seed
@@ -156,6 +166,65 @@ func TestOneCodeConfirmsTheEnrollmentAndSealsIt(t *testing.T) {
 	}
 	if _, err := r.c.enroll(); err != errEnrolled {
 		t.Fatalf("enroll after a restart: %v", err)
+	}
+}
+
+// L3 on #367 (CRED-8, ONB-6): a confirmation does not outlive the pairing
+// it was made under. Phone A confirms, setup starts over and phone B
+// enrolls: B's enroll replaces A's confirmed seed as the one setup waits
+// on, the seal refuses until B confirms, and once sealed only B's seed
+// works. A seal with nothing confirmed seals nothing.
+func TestARestartedSetupsSeedReplacesAnEarlierConfirmation(t *testing.T) {
+	r := newSetupRig(t)
+	if err := r.c.sealEnroll(); err != errLocked {
+		t.Fatalf("locked vault: %v", err)
+	}
+	r.c.confirm(r.unlock(t), r.code())
+	if err := r.c.sealEnroll(); err != errNotConfirmed {
+		t.Fatalf("seal with nothing confirmed: %v", err)
+	}
+
+	uriA, err := r.c.enroll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedA := enrolledSeed(t, uriA)
+	r.clk.add(30 * time.Second)
+	if ok, err := r.c.confirmEnroll(totp(seedA, r.clk.now())); !ok || err != nil {
+		t.Fatalf("A confirms: %v %v", ok, err)
+	}
+	if hasKind(r.c.v, EnrolledName, KindEnrolled) || !hasKind(r.c.v, SetupOpenName, KindSetupOpen) {
+		t.Fatal("a confirmation sealed the enrollment before finish")
+	}
+
+	// Setup starts over; B's step asks for a new seed.
+	uriB, err := r.c.enroll()
+	if err != nil {
+		t.Fatalf("enroll after an unsealed confirmation: %v", err)
+	}
+	seedB := enrolledSeed(t, uriB)
+	if err := r.c.sealEnroll(); err != errNotConfirmed {
+		t.Fatalf("seal with B's seed unconfirmed: %v", err)
+	}
+	r.clk.add(30 * time.Second)
+	if ok, err := r.c.confirmEnroll(totp(seedB, r.clk.now())); !ok || err != nil {
+		t.Fatalf("B confirms: %v %v", ok, err)
+	}
+	if err := r.c.sealEnroll(); err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	if n := r.notes[len(r.notes)-1]; n != noteEnrolled {
+		t.Fatalf("owner not told of the new code generator: %q", n)
+	}
+	r.clk.add(30 * time.Second)
+	if _, ok, _ := r.c.verify(totp(seedA, r.clk.now()), 0, true); ok {
+		t.Fatal("A's codes still verify")
+	}
+	if _, ok, err := r.c.verify(totp(seedB, r.clk.now()), 0, true); !ok || err != nil {
+		t.Fatalf("B's codes: %v %v", ok, err)
+	}
+	if _, err := r.c.enroll(); err != errEnrolled {
+		t.Fatalf("enroll after the seal: %v", err)
 	}
 }
 
@@ -216,6 +285,12 @@ func TestEnrollOverTheVerifySocket(t *testing.T) {
 	if ok, err := v.ConfirmEnroll(totp(seed, r.clk.now())); !ok || err != nil {
 		t.Fatalf("right: %v %v", ok, err)
 	}
+	if err := v.SealEnroll(); err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	if err := v.SealEnroll(); err != modelroute.ErrEnrolled {
+		t.Fatalf("seal twice: %v", err)
+	}
 	if _, err := v.Enroll(); err != modelroute.ErrEnrolled {
 		t.Fatalf("sealed: %v", err)
 	}
@@ -225,7 +300,7 @@ func TestEnrollOverTheVerifySocket(t *testing.T) {
 	if b := w.Body.String(); strings.Contains(b, "secret") || strings.Contains(b, "otpauth") {
 		t.Fatalf("confirm answer: %s", b)
 	}
-	for _, p := range []string{"/enroll", "/enroll/confirm"} {
+	for _, p := range []string{"/enroll", "/enroll/confirm", "/enroll/seal"} {
 		w = httptest.NewRecorder()
 		verifyHandler(r.c).ServeHTTP(w, httptest.NewRequest("GET", p, nil))
 		if w.Code != http.StatusMethodNotAllowed {
@@ -245,6 +320,9 @@ func TestEnrollIsClosedOutsideSetupMode(t *testing.T) {
 	}
 	if _, err := r.c.confirmEnroll(r.code()); err != errEnrolled {
 		t.Fatalf("confirm without setup mode: %v", err)
+	}
+	if err := r.c.sealEnroll(); err != errEnrolled {
+		t.Fatalf("seal without setup mode: %v", err)
 	}
 	if _, ok := r.c.v.Secret(PendingSeedName); ok {
 		t.Fatal("a pending seed was written")
