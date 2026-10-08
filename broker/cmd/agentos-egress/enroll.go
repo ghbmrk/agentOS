@@ -14,9 +14,12 @@ import (
 // the P2-2w plan): the seed is made here, inside the vault, and handed out
 // once, in the answer that made it, for the Wi-Fi page to show as an
 // otpauth:// link and QR code. One entered code from it confirms it: the
-// seed then becomes the channel's (SeedName) and the enrollment is sealed
-// for good. A later change of seed is REC-3's re-enrollment, which needs
-// the recovery key (recovery.ReEnroll).
+// seed then becomes the channel's (SeedName). Setup's finish seals the
+// enrollment for good, and only a confirmation made since the last
+// enroll seals: a setup that starts over (reset secret) enrolls again,
+// so a phone that confirmed before the restart cannot leave its seed
+// sealed (L3 on #367). A later change of seed is REC-3's re-enrollment,
+// which needs the recovery key (recovery.ReEnroll).
 const (
 	// PendingSeedName holds the seed handed out and not yet confirmed.
 	PendingSeedName = "owner-totp-pending"
@@ -26,9 +29,13 @@ const (
 	// KindEnrolled is EnrolledName's kind; its value is random, so the
 	// redactor (CRED-7) matches nothing a person would write.
 	KindEnrolled = "totp_enrolled"
+	// ConfirmedName marks that the seed now in SeedName was confirmed
+	// since the last enroll; the seal needs it. Enroll deletes it.
+	ConfirmedName = "owner-totp-confirmed"
+	// KindConfirmed is ConfirmedName's kind; its value is random.
+	KindConfirmed = "totp_confirmed"
 	// SetupOpenName opens enrollment. Only `init -setup` writes it (the
-	// image's setup path); the confirmation that writes EnrolledName
-	// deletes it. A vault without it is closed, so boxes made by plain
+	// image's setup path); the seal that writes EnrolledName deletes it. A vault without it is closed, so boxes made by plain
 	// init, by REC-3's re-enroll or before c1 cannot have their seed
 	// swapped by agentosd.
 	SetupOpenName = "owner-totp-setup-open"
@@ -41,6 +48,7 @@ const noteEnrolled = "A new code generator was enrolled at setup; codes from any
 var (
 	errEnrolled     = uerr(http.StatusGone, "the code generator is already enrolled; a new one needs the recovery key")
 	errNoEnrollment = uerr(http.StatusConflict, "no code generator is waiting for confirmation")
+	errNotConfirmed = uerr(http.StatusConflict, "no code generator was confirmed since the last enrollment")
 )
 
 // enrolledLocked reports whether enrollment is closed: sealed, never opened
@@ -76,12 +84,17 @@ func (c *custody) enroll() (string, error) {
 	if err := c.v.Put(PendingSeedName, vault.KindTOTPSeed, seed); err != nil {
 		return "", c.putErr(err)
 	}
+	// A confirmation made before this enroll no longer seals: the setup
+	// that asked for this seed waits on its own confirmation.
+	if c.v.Delete(ConfirmedName) != nil {
+		return "", errInternal
+	}
 	return otpauthURI(seed), nil
 }
 
 // confirmEnroll checks code against the pending seed. A match spends the
-// step (as verify does), makes the pending seed the channel's, and seals
-// enrollment. Wrong codes count with the channel's counted codes, so a
+// step (as verify does), makes the pending seed the channel's, and marks
+// it confirmed for sealEnroll. Wrong codes count with the channel's counted codes, so a
 // taken-over agentosd cannot grind the pending seed faster than the channel.
 func (c *custody) confirmEnroll(code string) (bool, error) {
 	c.mu.Lock()
@@ -113,27 +126,62 @@ func (c *custody) confirmEnroll(code string) (bool, error) {
 	if err := c.persist(next); err != nil {
 		return false, errInternal
 	}
-	// Seed first, then the seal, then the pending copy: a crash between
+	// Seed first, then the mark, then the pending copy: a crash between
 	// any two leaves a state the next confirmation or enroll finishes or
-	// refuses, never a sealed vault with the old seed.
+	// refuses, never a confirmed mark over the old seed.
 	if hasOtherKind(c.v, SeedName, vault.KindTOTPSeed) {
 		return false, errInternal
 	}
 	if err := c.v.Put(SeedName, vault.KindTOTPSeed, seed); err != nil {
 		return false, c.putErr(err)
 	}
-	mark := make([]byte, 16)
-	if _, err := rand.Read(mark); err != nil {
+	if err := c.putMark(ConfirmedName, KindConfirmed); err != nil {
+		return false, err
+	}
+	if c.v.Delete(PendingSeedName) != nil {
 		return false, errInternal
 	}
-	if err := c.v.Put(EnrolledName, KindEnrolled, mark); err != nil {
-		return false, c.putErr(err)
+	return true, nil
+}
+
+// sealEnroll closes enrollment for good, at setup's finish. It needs a
+// confirmation made since the last enroll, and no newer seed waiting, so
+// the seed it seals is the one the finishing setup's phone confirmed.
+func (c *custody) sealEnroll() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ph != open {
+		return errLocked
 	}
-	if c.v.Delete(SetupOpenName) != nil || c.v.Delete(PendingSeedName) != nil {
-		return false, errInternal
+	if c.enrolledLocked() {
+		return errEnrolled
+	}
+	if _, ok := c.v.Secret(PendingSeedName); ok || !hasKind(c.v, ConfirmedName, KindConfirmed) {
+		return errNotConfirmed
+	}
+	// The seal first: once it is written enrollment is closed, whatever
+	// a crash leaves of the entries after it.
+	if err := c.putMark(EnrolledName, KindEnrolled); err != nil {
+		return err
+	}
+	if c.v.Delete(SetupOpenName) != nil || c.v.Delete(ConfirmedName) != nil {
+		return errInternal
 	}
 	c.notify(noteEnrolled)
-	return true, nil
+	return nil
+}
+
+// putMark writes a marker entry with a random value, so the redactor
+// (CRED-7) matches nothing a person would write.
+func (c *custody) putMark(name, kind string) error {
+	mark := make([]byte, 16)
+	if _, err := rand.Read(mark); err != nil {
+		return errInternal
+	}
+	if err := c.v.Put(name, kind, mark); err != nil {
+		return c.putErr(err)
+	}
+	return nil
 }
 
 // otpauthURI is the link the owner's code generator scans (ONB-6): SHA-1,
