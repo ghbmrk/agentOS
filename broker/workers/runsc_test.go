@@ -55,7 +55,8 @@ func TestRunscMessagesNeverReachTheGuest(t *testing.T) {
 		// Fixed text that says whether the command may have run
 		// (SR2-3j, release finding 362-2).
 		want := "worker w: the command did not start; retry it"
-		if mode == "wait" {
+		// A panic after the start may have run too (SR2-3m, L3 on #396).
+		if mode == "wait" || mode == "latepanic" || mode == "fullpanic" {
 			want = "worker w: the runtime failed after the command started, so it may have run; check what it changed before running it again"
 		}
 		if err.Error() != want {
