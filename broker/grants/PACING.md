@@ -137,3 +137,12 @@ fallback. Actual FileStore checks now prove refusal leaves missing/empty paths
 unchanged, provisioned spent debt survives strict reopen, and normal hour expiry
 still permits the intended allowance. These establish the explicit configuration
 behavior, not successful provisioning authorization or anti-restore acceptance.
+
+An opt-in `digestqueue/pacingfile.Store` now provides a byte-bounded accounting
+reader and delegates this existing FileStore writer. Its Linux reader refuses
+final symlinks/non-regular descriptors and consumes at most the exported
+MaxPacingStateBytes plus one overflow probe before Gate decoding. Ordinary
+change.FileStore remains unchanged and still loads the complete file. See
+`digestqueue/pacingfile/CONTRACT.md`: final-file checks do not qualify parent
+paths, `.tmp` custody, hard links or exclusive writers; synchronous I/O and
+anti-restore/config integrity remain unresolved deployment requirements.

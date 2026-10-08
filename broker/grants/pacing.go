@@ -23,7 +23,9 @@ var ErrPacingRecovery = errors.New("grants: pacing recovery required")
 
 const (
 	maxPacingLimit = 4096
-	maxPacingBytes = 512 * 1024
+	// MaxPacingStateBytes bounds serialized accounting state and bounded readers.
+	MaxPacingStateBytes = 512 * 1024
+	maxPacingBytes      = MaxPacingStateBytes
 )
 
 type pacingState struct {
