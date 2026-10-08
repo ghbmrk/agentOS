@@ -245,6 +245,11 @@ type Learn struct {
 	nowTested bool
 	// gone are the goals forgotten since start (ForgetGoal).
 	gone map[string]bool
+	// forgets counts ForgetGoal calls; forgotAt is the count at which
+	// each goal was forgotten, so a build can tell a forget that landed
+	// after it was offered from one its evidence already left out.
+	forgets  int
+	forgotAt map[string]int
 	// triedGoals are the goals each tried hypothesis's evidence held, so
 	// forgetting one lets it be tried again on what remains (CAP-3). In
 	// memory only, like tried: a restart tries every hypothesis afresh.
@@ -279,6 +284,11 @@ func (l *Learn) ForgetGoal(goal string) {
 		l.gone = map[string]bool{}
 	}
 	l.gone[goal] = true
+	l.forgets++
+	if l.forgotAt == nil {
+		l.forgotAt = map[string]int{}
+	}
+	l.forgotAt[goal] = l.forgets
 	for k, kc := range l.built {
 		if l.goneLocked(kc.cand.Goals) {
 			delete(l.built, k)
@@ -315,6 +325,17 @@ func (l *Learn) Forgot(goal string) bool {
 func (l *Learn) goneLocked(goals []string) bool {
 	for _, g := range goals {
 		if l.gone[g] {
+			return true
+		}
+	}
+	return false
+}
+
+// goneSinceLocked reports whether a goal in goals was forgotten after
+// the forgets count was at.
+func (l *Learn) goneSinceLocked(goals []string, at int) bool {
+	for _, g := range goals {
+		if l.forgotAt[g] > at {
 			return true
 		}
 	}
@@ -544,30 +565,39 @@ func (l *Learn) Next(ctx context.Context, modelOK bool) (Job, bool) {
 			l.triedGoalsLocked(h.Key, goalsRead(h, ev.Dev))
 			continue
 		}
-		h := h
+		h, at := h, l.forgets
 		return Job{Name: "candidate", UsesModel: true, Evaluates: true, Run: func(ctx context.Context) Result {
 			goals := goalsRead(h, ev.Dev)
 			bctx, cancel := context.WithCancelCause(ctx)
 			defer cancel(nil)
-			b := &running{goals: goals, cancel: cancel}
 			l.mu.Lock()
-			l.building = b
+			l.building = &running{goals: goals, cancel: cancel}
+			if l.goneSinceLocked(goals, at) {
+				// Forgotten after this job was offered, before it began.
+				cancel(ErrRequeued)
+			}
 			l.mu.Unlock()
 			rep, err := l.propose(bctx, h, ev)
+			// One critical section, so no forget lands between the check
+			// and the marks it would have cleared.
 			l.mu.Lock()
 			l.building = nil
-			l.mu.Unlock()
-			if errors.Is(context.Cause(bctx), ErrRequeued) {
+			if errors.Is(context.Cause(bctx), ErrRequeued) || l.goneSinceLocked(goals, at) {
 				// Not tried and not asked: what it built from the
 				// forgotten task is not proposed or kept (propose drops
 				// a candidate whose goal is gone).
+				l.mu.Unlock()
 				return Result{Err: ErrRequeued}
 			}
-			l.done(ctx, err, h.Key, len(h.Tasks), goals)
-			if errors.Is(err, ErrUnseeded) {
+			l.doneLocked(ctx, err, h.Key, len(h.Tasks), goals)
+			unseeded := errors.Is(err, ErrUnseeded)
+			if !unseeded {
+				l.askedLocked(h.Key, rep)
+			}
+			l.mu.Unlock()
+			if unseeded {
 				return Result{}
 			}
-			l.asked(h.Key, rep)
 			return Result{Value: value(rep), Err: err}
 		}}, true
 	}
@@ -627,6 +657,10 @@ func (l *Learn) mayAskLocked(key string) bool {
 func (l *Learn) asked(key string, rep change.Report) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.askedLocked(key, rep)
+}
+
+func (l *Learn) askedLocked(key string, rep change.Report) {
 	if rep.NeedsExplicit && rep.State == change.StateAwaitingOwner {
 		l.needsExplicit[key] = rep.ID
 	} else {
@@ -642,13 +676,17 @@ func (l *Learn) asked(key string, rep change.Report) {
 // done marks a key tried, unless the work was preempted (ctx ended, or
 // the evaluator was interrupted, PE3): then it is offered again.
 func (l *Learn) done(ctx context.Context, err error, key string, n int, goals []string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.doneLocked(ctx, err, key, n, goals)
+}
+
+func (l *Learn) doneLocked(ctx context.Context, err error, key string, n int, goals []string) {
 	if ctx.Err() != nil || errors.Is(err, change.ErrInterrupted) {
 		return
 	}
-	l.mu.Lock()
 	l.tried[key] = n
 	l.triedGoalsLocked(key, goals)
-	l.mu.Unlock()
 }
 
 // triedGoalsLocked records the goals key was tried with (ForgetGoal).

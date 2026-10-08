@@ -137,3 +137,41 @@ func TestARequeuedUnitRunsAgainAtOnceUnmeasured(t *testing.T) {
 		t.Fatalf("a requeued unit was measured (%d runs)", runs)
 	}
 }
+
+// A forget that lands between Next and the build starting is not missed:
+// the build is taken back as if it had landed mid-build (L3 on #321).
+func TestAForgetBeforeTheBuildStartsRequeuesIt(t *testing.T) {
+	// Where the refund build falls in the (deterministic) order.
+	l, b := requeueRig(t)
+	at := -1
+	for i := range 5 {
+		job, built := nextBuild(t, l, b)
+		if job.Run(context.Background()); built() == refundKey {
+			at = i
+			break
+		}
+	}
+	if at < 0 {
+		t.Fatal("the refund build never came")
+	}
+	l, b = requeueRig(t)
+	for range at {
+		job, _ := nextBuild(t, l, b)
+		job.Run(context.Background())
+	}
+	job, _ := nextBuild(t, l, b)
+	l.ForgetGoal("owner:mX1")
+	if res := job.Run(context.Background()); !errors.Is(res.Err, ErrRequeued) {
+		t.Fatalf("a forget before the build began: %v; want ErrRequeued", res.Err)
+	}
+	l.mu.Lock()
+	tried, waits := l.tried[refundKey], !l.notBefore[refundKey].IsZero()
+	l.mu.Unlock()
+	if tried != 0 || waits {
+		t.Fatalf("left tried=%d, backoff %v", tried, waits)
+	}
+	job, built := nextBuild(t, l, b)
+	if job.Run(context.Background()); built() != refundKey {
+		t.Fatal("the requeued build is not offered again at once")
+	}
+}
