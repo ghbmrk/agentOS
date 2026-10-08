@@ -80,6 +80,11 @@ type Config struct {
 	// Mono is monotonic time since some fixed point; nil means
 	// CLOCK_BOOTTIME, which counts suspend (Go's monotonic clock off Linux).
 	Mono func() time.Duration
+	// BootID names the boot whose start is Mono's zero, so the last count
+	// is kept across a broker restart on that boot; "" names none. nil
+	// means the kernel's boot_id when Mono is nil and CLOCK_BOOTTIME works,
+	// else none. Set only with Mono (OSS-6e).
+	BootID func() string
 }
 
 type item struct {
@@ -110,8 +115,11 @@ type formed struct {
 //   - G1: within one process an item with delay k leaves no sooner than
 //     (k-1)*20h after it was queued, whatever the clock does; with a right
 //     clock, no sooner than k-1 days and the release time.
-//   - G2: each restart can let one day count without real time passing,
-//     if someone controls the clock, so (k-1-r)*20h for r restarts.
+//   - G2: the last count's monotonic time and boot are kept, so G1 holds
+//     across broker restarts on one boot (OSS-6e). Each reboot can let
+//     one day count without real time passing, if someone controls the
+//     clock, so (k-1-r)*20h for r reboots (r restarts where the floor
+//     clock is not CLOCK_BOOTTIME or the boot has no boot_id).
 //   - G3: off days only lengthen waits. A box off for up to maxStep-1 days
 //     in a row keeps counting; after longer, the first two days it sees
 //     do not count.
@@ -128,6 +136,10 @@ type outbox struct {
 	// saw, by one to maxStep days.
 	Stepped bool    `json:"stepped,omitempty"`
 	Pending *formed `json:"pending,omitempty"` // formed, not confirmed sent
+	// Counted is the monotonic time of the last count on Boot, so the
+	// floor holds across a restart on that boot (OSS-6e).
+	Counted time.Duration `json:"counted,omitempty"`
+	Boot    string        `json:"boot,omitempty"`
 }
 
 // Publisher holds public output until its day and publishes each day's
@@ -137,7 +149,7 @@ type Publisher struct {
 	mu  sync.Mutex
 	st  outbox
 	// counted is the monotonic time of the last day counted in this
-	// process, if any.
+	// process or, on the same boot, by an earlier one, if any.
 	counted    time.Duration
 	hasCounted bool
 }
@@ -174,7 +186,15 @@ func NewPublisher(cfg Config) (*Publisher, error) {
 		cfg.Rand = rand.Reader
 	}
 	if cfg.Mono == nil {
-		cfg.Mono = monoClock()
+		if cfg.BootID != nil {
+			return nil, errors.New("pubid: a boot id needs its monotonic clock")
+		}
+		var boot string
+		cfg.Mono, boot = systemClock()
+		cfg.BootID = func() string { return boot }
+	}
+	if cfg.BootID == nil {
+		cfg.BootID = func() string { return "" }
 	}
 	p := &Publisher{cfg: cfg}
 	// Others who can write the directory could swap in items for the box
@@ -206,7 +226,23 @@ func NewPublisher(cfg Config) (*Publisher, error) {
 			}
 		}
 	}
+	p.restoreCount()
 	return p, nil
+}
+
+// restoreCount carries the last count over from an earlier process on this
+// boot, so a restart does not reopen the floor (Security on #180). A count
+// from another boot, or with no boot named, is ignored: CLOCK_BOOTTIME
+// starts again at each boot. One ahead of the clock now is corrupt and
+// counts no day: the floor runs from now, so a bad file can neither open
+// it nor freeze the outbox.
+func (p *Publisher) restoreCount() {
+	boot := p.cfg.BootID()
+	if boot == "" || p.st.Boot != boot {
+		return
+	}
+	now := p.cfg.Mono()
+	p.counted, p.hasCounted = min(p.st.Counted, now), true
 }
 
 // validate checks a loaded outbox and drops items of a kind with no signer
@@ -229,6 +265,9 @@ func (p *Publisher) validate() (bool, error) {
 	}
 	if f := p.st.Pending; f != nil && (!isDay(f.Day) || len(f.Batch) == 0) {
 		return false, errors.New("bad pending batch")
+	}
+	if p.st.Counted < 0 || len(p.st.Boot) > maxBootID || (p.st.Boot == "" && p.st.Counted != 0) {
+		return false, errors.New("bad last count")
 	}
 	var keep []item
 	for _, it := range p.st.Items {
@@ -255,6 +294,9 @@ func isDay(s string) bool {
 func plausible(now time.Time) bool {
 	return !now.Before(Reference) && now.Year() <= 9999
 }
+
+// maxBootID bounds a stored boot id (the kernel's is a 36-byte UUID).
+const maxBootID = 64
 
 // maxWait bounds an item's wait: the largest delay, plus the day it came.
 const maxWait = 256
@@ -450,7 +492,12 @@ func (p *Publisher) Release() error {
 		ferr = fmt.Errorf("pubid: %d items could not be signed and were dropped", failed)
 	}
 	sort.Slice(batch, func(i, j int) bool { return bytes.Compare(batch[i], batch[j]) < 0 })
+	m, boot := p.cfg.Mono(), p.cfg.BootID()
 	p.st.Items, p.st.Seen, p.st.Stepped = rest, today, true
+	p.st.Counted, p.st.Boot = 0, ""
+	if boot != "" && len(boot) <= maxBootID && m >= 0 {
+		p.st.Counted, p.st.Boot = m, boot
+	}
 	p.st.Days = trim(append(slices.Clone(p.st.Days), today))
 	if len(batch) > 0 {
 		p.st.Pending = &formed{Day: today, Batch: batch}
@@ -459,7 +506,7 @@ func (p *Publisher) Release() error {
 		p.st = old
 		return err
 	}
-	p.counted, p.hasCounted = p.cfg.Mono(), true
+	p.counted, p.hasCounted = m, true
 	if len(batch) == 0 {
 		return ferr
 	}
