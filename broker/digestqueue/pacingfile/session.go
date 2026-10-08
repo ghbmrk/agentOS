@@ -34,28 +34,54 @@ type Session struct {
 // Construction is synchronous and can block: independent startup controls are
 // still required. This does not provision, activate or start anything.
 func OpenSession(path string, cfg grants.Config) (*Session, error) {
-	if cfg.PacingStore != nil || !cfg.PacingRequireExisting || cfg.PacingMaxStoreLatency <= 0 || cfg.PacingMaxStoreLatency > 5*time.Minute {
+	return openSession(path, cfg, nil)
+}
+
+func openSession(path string, cfg grants.Config, startupRetired *atomic.Bool) (*Session, error) {
+	if !sessionConfigValid(cfg) {
 		return nil, ErrSessionConfig
 	}
 	lease, err := OpenExclusive(path)
 	if err != nil {
 		return nil, err
 	}
+	constructed := false
+	defer func() {
+		if !constructed {
+			_ = lease.Close()
+		}
+	}()
 	s := &Session{lease: lease, drained: make(chan struct{})}
-	cfg.PacingStore = &sessionStore{lease: lease, retired: &s.retired}
+	cfg.PacingStore = &sessionStore{lease: lease, retired: &s.retired, startupRetired: startupRetired}
 	s.gate = grants.New(cfg)
+	constructed = true
 	return s, nil
 }
 
-type sessionStore struct {
-	lease   *ExclusiveStore
-	retired *atomic.Bool
+func sessionConfigValid(cfg grants.Config) bool {
+	return cfg.PacingStore == nil && cfg.PacingRequireExisting && cfg.PacingMaxStoreLatency > 0 && cfg.PacingMaxStoreLatency <= 5*time.Minute
 }
 
-func (s *sessionStore) Load() ([]byte, error) { return s.lease.Load() }
-func (s *sessionStore) Save(b []byte) error   { return s.lease.Save(b) }
+type sessionStore struct {
+	lease          *ExclusiveStore
+	retired        *atomic.Bool
+	startupRetired *atomic.Bool
+}
+
+func (s *sessionStore) Load() ([]byte, error) {
+	if s.PacingHealth() != nil {
+		return nil, ErrStorage
+	}
+	return s.lease.Load()
+}
+func (s *sessionStore) Save(b []byte) error {
+	if s.PacingHealth() != nil {
+		return ErrStorage
+	}
+	return s.lease.Save(b)
+}
 func (s *sessionStore) PacingHealth() error {
-	if s.retired.Load() {
+	if s.retired.Load() || s.startupRetired != nil && s.startupRetired.Load() {
 		return ErrStorage
 	}
 	return s.lease.PacingHealth()
@@ -102,16 +128,10 @@ func (s *Session) Close(ctx context.Context) error {
 	if s == nil || ctx == nil {
 		return ErrSessionConfig
 	}
-	s.mu.Lock()
-	if s.lease == nil || s.drained == nil {
-		s.mu.Unlock()
-		return ErrSessionConfig
+	drained, err := s.retire()
+	if err != nil {
+		return err
 	}
-	if !s.retired.Swap(true) && s.active == 0 {
-		close(s.drained)
-	}
-	drained := s.drained
-	s.mu.Unlock()
 	select {
 	case <-drained:
 		return s.lease.Close()
@@ -123,4 +143,21 @@ func (s *Session) Close(ctx context.Context) error {
 	case <-drained:
 		return s.lease.Close()
 	}
+}
+
+// retire uses only the registration mutex and atomic state; no callback/I/O.
+// Startup uses it under its own short mutex so publication and retirement order.
+func (s *Session) retire() (<-chan struct{}, error) {
+	if s == nil {
+		return nil, ErrSessionConfig
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lease == nil || s.drained == nil {
+		return nil, ErrSessionConfig
+	}
+	if !s.retired.Swap(true) && s.active == 0 {
+		close(s.drained)
+	}
+	return s.drained, nil
 }
