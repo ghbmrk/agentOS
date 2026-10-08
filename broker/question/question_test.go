@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/ghbmrk/agentos/broker/guesterr"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -348,13 +349,20 @@ func TestBrokerBoundsDefaultAndDeadline(t *testing.T) {
 		{Text: "Is it 482 913?", Default: "x", Wait: time.Hour},
 		{Text: "Is it ４８２９１３?", Default: "x", Wait: time.Hour},
 		{Text: "Which?", Default: "undo b12", Wait: time.Hour},
+		{Text: "Long choice?", Default: "a", Choices: []string{"a", strings.Repeat("c", MaxChoice+1)}, Wait: time.Hour},
 		// Rendered past one owner text (control.MaxText less the agent prefix).
 		{Text: strings.Repeat("q", MaxText), Default: strings.Repeat("a", MaxChoice),
 			Choices: []string{strings.Repeat("a", MaxChoice), strings.Repeat("b", MaxChoice), strings.Repeat("c", MaxChoice), strings.Repeat("d", MaxChoice)}, Wait: time.Hour},
 	}
 	for i, s := range bad {
-		if _, err := r.b.Ask(context.Background(), "lin1", fmt.Sprintf("bad%d", i), s); err == nil {
+		_, err := r.b.Ask(context.Background(), "lin1", fmt.Sprintf("bad%d", i), s)
+		if err == nil {
 			t.Errorf("spec %d accepted: %+v", i, s)
+		}
+		// The reason is guidance the guest sees, so it can correct the
+		// question, not a ref (SR2-3g, CAP-10).
+		if _, ok := err.(guesterr.Safe); !ok {
+			t.Errorf("spec %d: %q is not guest text", i, err)
 		}
 	}
 	if _, err := r.b.Ask(context.Background(), "lin1", "toolong", bad[len(bad)-1]); err == nil || !strings.Contains(err.Error(), "too long for one text") {

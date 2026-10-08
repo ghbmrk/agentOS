@@ -6,10 +6,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/events"
+	"github.com/ghbmrk/agentos/broker/guesterr"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/recall"
 )
@@ -147,7 +149,7 @@ func (s *Service) Run(ctx context.Context, logf func(string, ...any)) {
 		case <-ctx.Done():
 			return
 		case <-retry.C:
-			if s.Reach.Pending() > 0 {
+			if s.Reach.Pending() > 0 || s.Reach.Owed() {
 				s.Reach.Retry(ctx) // failures are logged by Reach
 			}
 		}
@@ -181,7 +183,7 @@ func (l *Late) Call(ctx context.Context, machine, lineage, name string, args jso
 	}
 	for _, d := range list {
 		if d["name"] == name {
-			return "", true, errors.New("recall opens once the owner unlocks the box's vault")
+			return "", true, guesterr.New("recall opens once the owner unlocks the box's vault")
 		}
 	}
 	return "", false, nil
@@ -195,6 +197,8 @@ type LateExecutor struct {
 	r      atomic.Pointer[Reach]
 	off    atomic.Bool
 	failed atomic.Bool
+	mu     sync.Mutex
+	onOpen []func()
 }
 
 // Off records that recall is not configured: there is no index, so no
@@ -208,7 +212,29 @@ func (l *LateExecutor) Off() { l.off.Store(true) }
 func (l *LateExecutor) Failed() { l.failed.Store(true) }
 
 // Set makes r the executor.
-func (l *LateExecutor) Set(r *Reach) { l.r.Store(r) }
+func (l *LateExecutor) Set(r *Reach) {
+	l.mu.Lock()
+	l.r.Store(r)
+	fs := l.onOpen
+	l.onOpen = nil
+	l.mu.Unlock()
+	for _, f := range fs {
+		f()
+	}
+}
+
+// OnOpen runs f once recall is open: now if it is, else when Set is
+// called (in Set's goroutine).
+func (l *LateExecutor) OnOpen(f func()) {
+	l.mu.Lock()
+	if l.r.Load() == nil {
+		l.onOpen = append(l.onOpen, f)
+		l.mu.Unlock()
+		return
+	}
+	l.mu.Unlock()
+	f()
+}
 
 // Execute runs an approved rollback.
 func (l *LateExecutor) Execute(ctx context.Context, in journal.Intent, n int) journal.Outcome {
@@ -240,6 +266,42 @@ func (l *LateExecutor) Status() string {
 	}
 	return ""
 }
+
+// Work is Reach.Work once recall is open; ok false before.
+func (l *LateExecutor) Work(lineage string, since time.Time) (worked, ok bool) {
+	if r := l.r.Load(); r != nil {
+		return r.Work(lineage, since)
+	}
+	return false, false
+}
+
+// Actions is Reach.Actions once recall is open; ok false before.
+func (l *LateExecutor) Actions(lineage string, since time.Time) (n int, ok bool) {
+	if r := l.r.Load(); r != nil {
+		return r.Actions(lineage, since)
+	}
+	return 0, false
+}
+
+// Handled is Reach.Handled once recall is open; ok false before.
+func (l *LateExecutor) Handled(since time.Time) (handled, ok bool) {
+	if r := l.r.Load(); r != nil {
+		return r.Handled(since)
+	}
+	return false, false
+}
+
+// TakeBack is Reach.TakeBack once recall is open; before, ErrNotOpen,
+// and nothing is recorded.
+func (l *LateExecutor) TakeBack(ctx context.Context, lineage string, since time.Time, approved bool) error {
+	if r := l.r.Load(); r != nil {
+		return r.TakeBack(ctx, lineage, since, approved)
+	}
+	return ErrNotOpen
+}
+
+// ErrNotOpen: recall is not open yet, so nothing can be taken back.
+var ErrNotOpen = errors.New("recall: not open yet")
 
 // Reconcile reports an interrupted rollback as approved, to be finished.
 func (l *LateExecutor) Reconcile(ctx context.Context, in journal.Intent, n int) journal.Outcome {

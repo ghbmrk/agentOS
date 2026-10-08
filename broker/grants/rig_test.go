@@ -234,12 +234,14 @@ type rig struct {
 	store *journal.MemStore
 	cfg   Config
 	eng   *journal.Engine
-	g     *Gate
-	own   *fakeOwner
-	exec  *fakeExec
-	ver   *fakeVerifier
-	clock time.Time
-	cmu   sync.Mutex
+	// redact is the journal's redactor; nil keeps text as it is.
+	redact journal.Redactor
+	g      *Gate
+	own    *fakeOwner
+	exec   *fakeExec
+	ver    *fakeVerifier
+	clock  time.Time
+	cmu    sync.Mutex
 	// boot is what the next open's owner channel hands back as carried
 	// over a restart (owner Boot calling Reissue).
 	boot []owner.Carried
@@ -292,7 +294,11 @@ func (r *rig) openWith(mk func() Owner) {
 	for k, x := range r.execs {
 		execs[k] = x
 	}
-	eng, err := journal.Open(r.store, r.g, execs, func(s string) string { return s }, journal.WithClock(r.now))
+	red := r.redact
+	if red == nil {
+		red = func(s string) string { return s }
+	}
+	eng, err := journal.Open(r.store, r.g, execs, red, journal.WithClock(r.now))
 	if err != nil {
 		r.t.Fatal(err)
 	}

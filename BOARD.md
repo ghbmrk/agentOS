@@ -136,24 +136,32 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | OSS-9 | [Attestations as evidence and following forks](briefs/OSS-9.md) | P4-3, P4-4 | merged (4329b1d; #180) |
 | OSS-6c | [Publication clock hardening](briefs/OSS-6c.md) | OSS-6 | merged (4329b1d; #180) |
 | OSS-6e | [Floor across restarts](briefs/OSS-6e.md) | OSS-6c | queued (A, after #180) |
-| OSS-10w | [Follow-fork executor wiring](briefs/OSS-10w.md) | OSS-9, HOST-1b, P2-2w | queued (A, after #180) |
+| OSS-10w | [Follow-fork executor wiring](briefs/OSS-10w.md) | OSS-9, HOST-1b, P2-2w | in review (A) |
+| OSS-10w2 | [Follow-fork wiring part 2](briefs/OSS-10w2.md) | OSS-10w, P2-2w b, P2-2w d | queued (A) |
 | IMG-1 | [Image checks for P2-1](briefs/IMG-1.md) | P2-1 (#41, draft since 01:07Z) | queued (blocked on P2-1) |
 | SR2-1 | [Approval texts show only canonical recipients](briefs/SR2-1.md) | — | merged (#144) |
 | P2-2a | [Local-page approvals](briefs/P2-2a.md) | P2-2 | merged (6239bd4; #178 part 2) |
 | P2-2w | [Local UI process and owner socket](briefs/P2-2w.md) | P2-2a | building (in sub-rows a, b, d, c (P3-2 thread)) |
-| P2-2a f1 | [Page result after a changed item](briefs/P2-2a-f1.md) | P2-2a | queued |
+| P2-2a f1 | [Page result after a changed item](briefs/P2-2a-f1.md) | P2-2a | in review |
+| P2-2a f2 | [Page result for a changed release adoption](briefs/P2-2a-f2.md) | P2-2a f1 | queued (after #329) |
 | P2-2w a | [`localui.sock` in agentosd](briefs/P2-2w-a.md) | P2-2a | merged (b00db30; #184) |
 | P2-2w b | [`agentos-localui` command under its own uid](briefs/P2-2w-b.md) | P2-2w a | merged (0302131; #189) |
-| P2-2w d | [LocalUI on, with UX's turn-on list](briefs/P2-2w-d.md) | P2-2w b | queued |
-| P2-2w c | [Setup moves into agentosd](briefs/P2-2w-c.md) | P2-2w b | queued |
+| P2-2w d | [LocalUI on (part 1)](briefs/P2-2w-d.md) | P2-2w b | in review (split 2026-10-08; part 2 is d2) |
+| P2-2w d2 | [Home page shows `Link.OwnerLineNote` and `Link.LastOutage`](briefs/P2-2w-d2.md) | P2-2w d | queued |
+| P2-2w c | [Setup moves into agentosd](briefs/P2-2w-c.md) | P2-2w b | building (split into c1-c3, each under one session) |
+| P2-2w c1 | [Code seed made in the vault process and handed out once](briefs/P2-2w-c1.md) | P2-2w b | in review |
+| P2-2w c2 | [Pairing and finish in agentosd](briefs/P2-2w-c2.md) | P2-2w c1 | queued |
+| P2-2w c3 | [`agentos-netjoin`](briefs/P2-2w-c3.md) | P2-2w c2 | queued |
 | SR2-2 | [Restore refuses symlink chains that escape the root](briefs/SR2-2.md) | — | merged (#151) |
 | SR2-3 | [Disk quotas for machines and an enforced reserve](briefs/SR2-3.md) | #143 (RES-4 text) | merged (a10b5fe) |
 | SR2-3i | [Image side of SR2-3](briefs/SR2-3i.md) | SR2-3, P2-1 | merged (d40fb31; #174) |
 | SR2-3s | [Step snapshots that fail are not silent](briefs/SR2-3s.md) | SR2-3i | merged (847ea23; #179) |
 | SR2-3d | [A too-deep worker can be flattened](briefs/SR2-3d.md) | SR2-3i, CAP-8c | merged (d40fb31; #174) |
 | SR2-3f | [Worker tools answer no raw vm error](briefs/SR2-3f.md) | CAP-8c | merged (f19f97c; #181, commit fcdce51) |
-| SR2-3g | [Agent-visible tool errors name no host path](briefs/SR2-3g.md) | RES-4, CAP-8 | queued (recall thread, after SR2-3f) |
+| SR2-3g | [Agent-visible tool errors name no host path](briefs/SR2-3g.md) | RES-4, CAP-8 | in review (recall thread) |
 | SR2-3h | [runsc's own messages never reach the guest](briefs/SR2-3h.md) | RES-4, CAP-8 | queued (recall thread, after SR2-3g) |
+| SR2-3j | [Effect denial reasons reach the guest only as fixed text](briefs/SR2-3j.md) | SR2-3g | queued (recall thread, after SR2-3h) |
+| SR2-3k | [guesterr.Guest values checked at run time](briefs/SR2-3k.md) | SR2-3g | queued (recall thread, after SR2-3h) |
 | SR2-4 | [cgroup cpu, io and pids controllers](briefs/SR2-4.md) | #143 (RES-2 text) | merged (#155) |
 | SR2-4i | [Host side of SR2-4](briefs/SR2-4i.md) | SR2-4 merged; host image | queued (blocked on the host image) |
 | SR2-5 | [Second-line sends](briefs/SR2-5.md) | #143 (ADP-12 text) | merged (2e85d06) |
