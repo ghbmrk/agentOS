@@ -32,6 +32,7 @@ const (
 	OpSignOut  = "page_sign_out"
 	OpSession  = "page_session" // a token's session: is it live, until when
 	OpLines    = "page_lines"   // STATUS's full lines
+	OpLine     = "page_line"    // the owner line's last outage and counts
 	OpResume   = "page_resume"
 	OpRequests = "page_requests"
 	OpAnswer   = "page_answer"
@@ -46,7 +47,7 @@ const (
 )
 
 // Ops lists every op, for the disjointness test.
-var Ops = []string{OpStatus, OpStop, OpGridCell, OpSignIn, OpSignOut, OpSession, OpLines, OpResume, OpRequests, OpAnswer, OpWaiting, OpFollowRoot, OpFollow}
+var Ops = []string{OpStatus, OpStop, OpGridCell, OpSignIn, OpSignOut, OpSession, OpLines, OpLine, OpResume, OpRequests, OpAnswer, OpWaiting, OpFollowRoot, OpFollow}
 
 // Fixed refusals, sent as sockets codes.
 const (
@@ -111,6 +112,33 @@ type Auth struct {
 // Lines are STATUS's own lines, OP-9 causes included (Potency R3).
 type Lines struct {
 	Status string `json:"status"`
+}
+
+// Line is the owner line as the signed-in home page shows it (UX U-B1):
+// its note, the last outage it recovered from with what did not reach the
+// owner, and the bridge's counts since agentosd started. The counts go
+// only over the tokened OpLine (Security D1); Status keeps the note alone.
+type Line struct {
+	Note string `json:"note,omitempty"`
+	// Outage is nil until an outage has ended.
+	Outage *Outage `json:"outage,omitempty"`
+	// Others counts texts on the owner line from anyone but the owner, set
+	// aside unread; TimedOut, texts to the owner the bridge never
+	// confirmed; Dropped, that inbound texts were dropped past the rate
+	// limit.
+	Others   int  `json:"others,omitempty"`
+	TimedOut int  `json:"timed_out,omitempty"`
+	Dropped  bool `json:"dropped,omitempty"`
+}
+
+// Outage is a stretch when the owner line could not be used: Missed
+// counts the texts to the owner that could not go, Requests the approval
+// requests among them (modemlink.Outage).
+type Outage struct {
+	From     time.Time `json:"from"`
+	To       time.Time `json:"to"`
+	Missed   int       `json:"missed,omitempty"`
+	Requests int       `json:"requests,omitempty"`
 }
 
 // Resume is RESUME from a signed-in page. Within FreshFor of the

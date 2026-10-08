@@ -143,9 +143,9 @@ type PageSocket struct {
 	// GID, if set, is the local UI's group: the socket is given it, mode
 	// 0660. Unset, the socket is 0600 (same-uid tests only).
 	GID *int
-	// LineNote is the owner line's note (modemlink.Link.OwnerLineNote);
-	// nil without the modem bridge.
-	LineNote func() string
+	// Line is the owner line's note, last outage and counts (from the
+	// modem link); nil without the modem bridge.
+	Line func() localapi.Line
 }
 
 // Daemon is a running broker.
@@ -343,7 +343,7 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 			store.Close()
 			return nil, errors.New("daemon: the local UI's socket needs the owner channel (OwnerState)")
 		}
-		ui := localsrv.New(localsrv.Config{Owner: ch, LineNote: cfg.PageSocket.LineNote})
+		ui := localsrv.New(localsrv.Config{Owner: ch, Line: cfg.PageSocket.Line})
 		uid := cfg.PageSocket.UID
 		eps = append(eps, sockets.Endpoint{
 			Name:        localapi.Socket,

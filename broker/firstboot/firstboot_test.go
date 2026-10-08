@@ -144,7 +144,7 @@ func TestOfflineFirstBootRunsShippedImageSaysSoAndContactsNoMirror(t *testing.T)
 	if phase, _ := r.g.Progress(); phase != "offline" {
 		t.Fatalf("phase %q", phase)
 	}
-	if s := r.g.Status(); !strings.Contains(s, "offline") || !strings.Contains(s, "version it shipped with") || !strings.Contains(s, "next online") {
+	if s := r.g.Status(); !strings.Contains(s, "offline") || !strings.Contains(s, "version I shipped with") || !strings.Contains(s, "next online") {
 		t.Fatalf("status %q", s)
 	}
 	if err := r.g.Hold(); !strings.Contains(err.Error(), "offline") {
