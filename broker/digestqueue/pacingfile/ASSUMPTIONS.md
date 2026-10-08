@@ -75,3 +75,16 @@ operator default/schema adoption, refund/permission revocation/replacement write
 anti-delete/rollback/restore/config-integrity/globalquota claim; D37 ordinary/urgent/
 reissue storage/time/overdue/invalid-input hold preserved. External batch/strongest
 security/current-base/SUB3/full consumer/pin/media/latency qualifications remain.
+
+## W5-D65 cleanup uncertainty
+
+An observed close/unlock failure may occur after partial resource release. Fixed
+repeated failure is not forced lock retention, persistent admission state, media
+qualification or restart authorization. Trusted external determination is required
+before reuse; no automatic retry/repair/reset or second cleanup worker. Health is
+retired before mutex wait, which may hang indefinitely with synchronous I/O.
+Owned os.File preclose tests model OS faults safely, not disk failures or custody.
+Constructor-time panic/unwind error propagation is separate and not fixed here.
+All full-consumer/current-base/config/root/pin/media/latency/independent security
+holds remain; D37 ordinary/urgent/reissue faults are never bypassed. No revocation,
+interruption/deadline/refund/anti-delete/rollback/restore/config-integrity claim.

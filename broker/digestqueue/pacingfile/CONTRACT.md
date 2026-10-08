@@ -479,3 +479,13 @@ boundaries remain. No new public constructor wrappers/workers or grants config f
 Retirement observed after read acquires no lease or clock; later races retain existing
 backend retirement. All other Gate options/strict existing-state/latency binding stay.
 No provisioning, activation, daemon defaults, schema adoption or cleanup occurs.
+
+## W5-D65 final lease close outcome
+
+Close publishes unavailable health before waiting for the existing I/O mutex.
+After acquiring that mutex it performs cleanup once and records its fixed final
+outcome: nil or ErrStorage. Repeated/concurrent Close calls join that outcome,
+without another unlock, descriptor close, worker, retry or reset. Direct Session
+close retries therefore retain the actual backend failure. No raw diagnostics
+or paths are returned. A failed outcome is uncertain recovery, never permission
+to restart or proof that the lease remained held or was fully released.

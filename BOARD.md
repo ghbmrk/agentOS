@@ -367,3 +367,6 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 
 | W5-D64 | [Pinned protected-manifest startup](briefs/W5-D64.md) | OP-1, CH-15 | additive proposal; tests-first WIP | Codex GPT-6 |
 | W5-D64-Q | [Wire policy/trusted config/actual adoption qualification](briefs/W5-D64.md#release-qualifications) | OP-1, CH-15 | external release hold | independent review |
+
+| W5-D65 | [Immutable accounting lease close result](briefs/W5-D65.md) | OP-1, CH-15 | additive proposal; tests-first WIP | Codex GPT-6 |
+| W5-D65-Q | [Close-fault external recovery qualification](briefs/W5-D65.md#release-qualifications) | OP-1, CH-15 | external release hold | independent review |

@@ -18,6 +18,7 @@ type ExclusiveStore struct {
 	dirID, lockID syscall.Stat_t
 	trustedOwners []uint32 // nil retains legacy ancestry behavior; copied on acquisition
 	closed        bool
+	closeErr      error // immutable final outcome under mu; never retry cleanup
 	unavailable   atomic.Bool
 }
 
@@ -173,7 +174,7 @@ func (s *ExclusiveStore) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return nil
+		return s.closeErr
 	}
 	s.closed = true
 	failed := false
@@ -189,9 +190,9 @@ func (s *ExclusiveStore) Close() error {
 		failed = true
 	}
 	if failed {
-		return ErrStorage
+		s.closeErr = ErrStorage
 	}
-	return nil
+	return s.closeErr
 }
 
 // PacingHealth reads only immutable handles and atomic lifecycle state, never
