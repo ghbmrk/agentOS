@@ -282,6 +282,14 @@ func (l *LateExecutor) Actions(lineage string, since time.Time) (n int, ok bool)
 	return 0, false
 }
 
+// Handled is Reach.Handled once recall is open; ok false before.
+func (l *LateExecutor) Handled(since time.Time) (handled, ok bool) {
+	if r := l.r.Load(); r != nil {
+		return r.Handled(since)
+	}
+	return false, false
+}
+
 // TakeBack is Reach.TakeBack once recall is open; before, ErrNotOpen,
 // and nothing is recorded.
 func (l *LateExecutor) TakeBack(ctx context.Context, lineage string, since time.Time, approved bool) error {

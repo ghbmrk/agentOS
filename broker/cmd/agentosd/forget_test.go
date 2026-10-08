@@ -42,6 +42,18 @@ func (g *askRec) Get(id string) (journal.Status, error) {
 	return journal.Status{}, errors.New("no such intent")
 }
 
+func (g *askRec) List() []journal.Status {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	var out []journal.Status
+	for _, in := range g.got {
+		if s, ok := g.st[in.ID]; ok {
+			out = append(out, journal.Status{Intent: in, State: s})
+		}
+	}
+	return out
+}
+
 func (g *askRec) Submit(in journal.Intent) (journal.Status, error) {
 	g.got = append(g.got, in)
 	return journal.Status{Intent: in, State: journal.Pending}, nil

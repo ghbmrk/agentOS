@@ -333,6 +333,26 @@ func (p *Provenance) TakeBack(lineage string, since time.Time) (recorded, done b
 	return recorded, done
 }
 
+// TakenBackFrom reports whether a take-back from since, owed or done,
+// or a reset from since is recorded on any lineage: a task's time names
+// one take-back, whichever lineage the agent machine has now.
+func (p *Provenance) TakenBackFrom(since time.Time) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	at := since.UTC().UnixNano()
+	for _, m := range p.takeBacks {
+		if _, ok := m[at]; ok {
+			return true
+		}
+	}
+	for _, m := range p.resets {
+		if _, ok := m[at]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // OwedTakeBack is an approved take-back not yet done.
 type OwedTakeBack struct {
 	Lineage string

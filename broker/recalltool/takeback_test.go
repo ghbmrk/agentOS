@@ -216,3 +216,41 @@ func TestCAP3ActionsCountsTheWorkSoFar(t *testing.T) {
 		t.Fatal("recall not open: count claimed known")
 	}
 }
+
+// An approved take-back from a task's time is handled once it is
+// recorded, owed or done, on any lineage, across a restart: FORGET's item
+// 2 that the journal holds as approved runs again only while it is not
+// (#327 L3 re-review 2). Before recall opens, it is not known.
+func TestCAP3HandledSeesARecordedTakeBack(t *testing.T) {
+	x, read := newReachRig(t)
+	var l LateExecutor
+	if _, ok := l.Handled(read); ok {
+		t.Fatal("known before open")
+	}
+	l.Set(x.reach)
+	if handled, ok := l.Handled(read); !ok || handled {
+		t.Fatalf("before the take-back: %v %v", handled, ok)
+	}
+	x.vm.fail = errors.New("machine busy")
+	if err := l.TakeBack(context.Background(), "root", read, true); !errors.Is(err, ErrCarried) {
+		t.Fatalf("take-back: %v", err)
+	}
+	again, err := OpenProvenance(x.r.prst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	x.reach.Prov = again
+	if handled, ok := l.Handled(read); !ok || !handled {
+		t.Fatalf("owed, after a restart: %v %v", handled, ok)
+	}
+	if handled, _ := l.Handled(read.Add(time.Nanosecond)); handled {
+		t.Fatal("another task's time reads as handled")
+	}
+	x.vm.fail = nil
+	if err := x.reach.Retry(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if handled, ok := l.Handled(read); !ok || !handled {
+		t.Fatalf("done: %v %v", handled, ok)
+	}
+}

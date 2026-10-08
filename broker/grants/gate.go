@@ -1379,6 +1379,15 @@ func (g *Gate) Withdraw(id string) error {
 	return nil
 }
 
+// List returns every intent the journal holds, in submission order.
+func (g *Gate) List() []journal.Status {
+	out := g.eng.List()
+	for i := range out {
+		g.annotate(&out[i])
+	}
+	return out
+}
+
 func (g *Gate) Get(id string) (journal.Status, error) {
 	st, err := g.eng.Get(id)
 	if err == nil {

@@ -28,6 +28,18 @@ type fakeWork struct {
 	asked   []bool // approved, per take-back
 	actions int
 	noCount bool // the count is not known
+	closed  bool // recall is not open: Handled is not known
+}
+
+func (w *fakeWork) Handled(since time.Time) (bool, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, b := range w.backs {
+		if b.Equal(since) {
+			return true, !w.closed
+		}
+	}
+	return false, !w.closed
 }
 
 func (w *fakeWork) Actions(lineage string, since time.Time) (int, bool) {
@@ -108,7 +120,7 @@ func TestForgetAsksItem2OnlyWhenTheAgentWorked(t *testing.T) {
 		if since, ok := forgetSince(ids[1]); !ok || !since.Equal(at) {
 			t.Fatalf("%s: since %v", c.name, since)
 		}
-		if obj, _, ok := r.f.AgentItem("owner:a"); !ok || obj != "your agent's work since today 13:02" {
+		if obj, _, ok := r.f.AgentItem("owner:a"); !ok || obj != "your agent's work since Mon 5 Oct 13:02" {
 			t.Fatalf("%s: item 2 line %q", c.name, obj)
 		}
 	}
@@ -302,7 +314,7 @@ func TestForgetItem2EndToEnd(t *testing.T) {
 		}
 		x.d.Gate().Flush()
 		req := x.text()
-		m := regexp.MustCompile(`^([A-Z][0-9]{1,2}): 2 items\. 1 forget 'pay the gas bill', cannot be undone\. 2 forget your agent's work since today [0-9]{2}:[0-9]{2}, no actions yet, cannot be undone\. Expires [0-9]{2}:[0-9]{2}\. Reply YES ([A-Z][0-9]{1,2}) ([0-9]{6,8}) for all`).FindStringSubmatch(req)
+		m := regexp.MustCompile(`^([A-Z][0-9]{1,2}): 2 items\. 1 forget 'pay the gas bill', cannot be undone\. 2 forget your agent's work since [A-Z][a-z]{2} [0-9]{1,2} [A-Z][a-z]{2} [0-9]{2}:[0-9]{2}, no actions yet, cannot be undone\. Expires [0-9]{2}:[0-9]{2}\. Reply YES ([A-Z][0-9]{1,2}) ([0-9]{6,8}) for all`).FindStringSubmatch(req)
 		if m == nil || m[1] != m[2] {
 			t.Fatalf("request: %q", req)
 		}
@@ -409,6 +421,69 @@ func TestForgetItem2WaitsForMemoryToOpen(t *testing.T) {
 		r.f.resumeAgent(context.Background())
 		if wantBacks := map[bool]int{false: 1, true: 0}[off]; len(w.backs) != wantBacks || wantBacks == 1 && (len(r.texts) != 1 || r.texts[0] != forgetAgentDone) {
 			t.Fatalf("off %v: once open, took back %v, told %q", off, w.backs, r.texts)
+		}
+	}
+}
+
+// REQ: CAP-3, OP-3
+// The request's lines name the task's time as a date, not "today": a
+// re-issue after midnight keeps both items' lines, so item 2 is never
+// closed while item 1 is asked again alone (#327 L3 re-review 1).
+func TestForgetItemLinesHoldAcrossMidnight(t *testing.T) {
+	for _, via := range []string{viaSMS, "loop"} {
+		r := newForgetRig(t)
+		r.task("owner:a", "pay the gas bill", r.now.Add(-time.Hour), via)
+		o1, d1, _ := r.f.Item("owner:a")
+		o2, d2, _ := r.f.AgentItem("owner:a")
+		r.now = r.now.Add(12 * time.Hour) // past midnight
+		n1, e1, _ := r.f.Item("owner:a")
+		n2, e2, _ := r.f.AgentItem("owner:a")
+		if o1 != n1 || d1 != e1 || o2 != n2 || d2 != e2 {
+			t.Fatalf("via %s: %q %q / %q %q became %q %q / %q %q", via, o1, d1, o2, d2, n1, e1, n2, e2)
+		}
+		if strings.Contains(o1+o2, "today") || !strings.Contains(o2, "Mon 5 Oct 13:02") {
+			t.Fatalf("via %s: lines %q, %q", via, o1, o2)
+		}
+	}
+}
+
+// REQ: CAP-3, OP-5
+// An approved item 2 queued until memory opens is kept by the journal,
+// not only in memory: after a restart, or when memory did not open in
+// the boot that queued it, it is taken back once memory opens, once
+// (#327 L3 re-review 2). With recall off, the journal's item 2s are left
+// alone: nothing can take them back.
+func TestForgetItem2QueuedOutlivesARestart(t *testing.T) {
+	for _, off := range []bool{false, true} {
+		r := newForgetRig(t)
+		w := &fakeWork{worked: true, ok: true, err: recalltool.ErrNotOpen}
+		r.withAgent(w)
+		r.f.whenOpen = func() {}
+		r.task("owner:a", "pay the gas bill", r.now.Add(-time.Hour), viaSMS)
+		r.say("FORGET LAST")
+		r.gate.st = map[string]journal.State{r.gate.got[0].ID: journal.Succeeded}
+		if out := r.f.Execute(context.Background(), r.gate.got[1], 1); out.Result != journal.ResultSucceeded {
+			t.Fatalf("queued: %+v", out)
+		}
+		r.gate.st[r.gate.got[1].ID] = journal.Succeeded
+		// A restart: the queue in memory is gone, the journal holds item 2.
+		r.f.mu.Lock()
+		r.f.interrupted = nil
+		r.f.mu.Unlock()
+		w.err, w.closed = nil, off
+		if off {
+			r.f.whenOpen = nil
+		}
+		for i := 0; i < 2; i++ {
+			r.texts = nil
+			r.f.resumeAgent(context.Background())
+			want := map[bool]int{false: 1, true: 0}[off]
+			if len(w.backs) != want {
+				t.Fatalf("off %v, open %d: took back %v", off, i, w.backs)
+			}
+			if told := i == 0 && !off; told && (len(r.texts) != 1 || r.texts[0] != forgetAgentDone) || !told && len(r.texts) != 0 {
+				t.Fatalf("off %v, open %d: told %q", off, i, r.texts)
+			}
 		}
 	}
 }

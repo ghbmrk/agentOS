@@ -255,6 +255,15 @@ func (r *Reach) Actions(lineage string, since time.Time) (n int, ok bool) {
 	return r.actions(lineage, since, time.Time{}), true
 }
 
+// Handled reports whether a take-back from since is recorded, owed or
+// done, on any lineage: one the owner approved while recall was not open
+// is run once it opens only while it is not (#327 L3 re-review 2).
+func (r *Reach) Handled(since time.Time) (handled, ok bool) {
+	r.run.Lock()
+	defer r.run.Unlock()
+	return r.Prov.TakenBackFrom(since), true
+}
+
 // TakenBack tells the owner an approved take-back, carried by Retry, is
 // done; actions taken stay done (CAP-3).
 const TakenBack = "Your agent is back to before that task and no longer holds it. Actions it took stay done."

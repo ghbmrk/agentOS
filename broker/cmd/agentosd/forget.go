@@ -77,6 +77,7 @@ type forgetAgent struct {
 		Work(lineage string, since time.Time) (worked, ok bool)
 		Actions(lineage string, since time.Time) (n int, ok bool)
 		TakeBack(ctx context.Context, lineage string, since time.Time, approved bool) error
+		Handled(since time.Time) (handled, ok bool)
 	}
 	lineage func() (string, error)
 }
@@ -105,6 +106,12 @@ func (a *forgetAgent) takeBack(ctx context.Context, since time.Time, approved bo
 		return err
 	}
 	return a.work.TakeBack(ctx, l, since, approved)
+}
+
+// lister is the gate's List: the journal's intents, which hold every
+// approved item 2 across restarts.
+type lister interface {
+	List() []journal.Status
 }
 
 // statusGetter is the gate's Get, which item 2 reads item 1's outcome by.
@@ -332,7 +339,7 @@ func (f *ownerForget) AgentItem(goal string) (object, detail string, ok bool) {
 	if !ok {
 		return "", "", false
 	}
-	return "your agent's work since " + f.when(t.At), "", true
+	return "your agent's work since " + f.date(t.At), "", true
 }
 
 // agentActions counts the agent's actions since at, which item 2 leaves
@@ -354,6 +361,9 @@ func (f *ownerForget) agentActions(at time.Time) (n int, ok bool) {
 // time when listed.
 func (f *ownerForget) shown(t taskText, when bool) string {
 	at := f.when(t.At)
+	if !when {
+		at = f.date(t.At) // a request line (Item)
+	}
 	if t.Via != viaSMS {
 		return "(a task, " + at + ")"
 	}
@@ -376,6 +386,13 @@ func (f *ownerForget) when(at time.Time) string {
 		return "yesterday " + t.Format("15:04")
 	}
 	return t.Format("Mon 2 Jan 15:04")
+}
+
+// date is a task's time in a request's line: fixed, not "today", so a
+// re-issue after midnight keeps the line, and the request (OP-3, #327 L3
+// re-review 1).
+func (f *ownerForget) date(at time.Time) string {
+	return at.In(f.loc).Format("Mon 2 Jan 15:04")
 }
 
 // clipTask keeps the first n characters of s on one line, marking a cut.
@@ -568,17 +585,51 @@ func (f *ownerForget) agentBack(ctx context.Context, id string, since time.Time)
 	}
 }
 
-// resumeAgent runs the approved item 2s a restart interrupted, once
-// recall is open (LateExecutor.OnOpen): one already done is not repeated.
+// resumeAgent runs the approved item 2s a restart interrupted or that
+// found recall not open, once recall is open (LateExecutor.OnOpen). The
+// journal holds them, so one queued in a boot before a restart, or in one
+// where recall never opened, is run too (#327 L3 re-review 2); one recall
+// recorded, owed or done, is not run again.
 func (f *ownerForget) resumeAgent(ctx context.Context) {
 	f.mu.Lock()
 	ids := f.interrupted
 	f.interrupted = nil
 	f.mu.Unlock()
+	queued := map[string]bool{}
 	for _, id := range ids {
-		since, _ := forgetSince(id)
+		queued[id] = true
+	}
+	if box := f.gate.Load(); box != nil {
+		if g, ok := box.g.(lister); ok {
+			for _, st := range g.List() {
+				if id := st.Intent.ID; st.State == journal.Succeeded && grants.ForgetAgentGoal(id) != "" && !queued[id] {
+					ids = append(ids, id)
+				}
+			}
+		}
+	}
+	a := f.agent.Load()
+	seen := map[string]bool{}
+	for _, id := range ids {
+		since, ok := forgetSince(id)
+		if seen[id] || !ok {
+			continue
+		}
+		seen[id] = true
+		if a != nil {
+			handled, known := a.work.Handled(since)
+			if handled || !known && !queued[id] {
+				// Recorded: recall carries it. Not known (recall off): only
+				// one interrupted in this boot is told it cannot be done.
+				continue
+			}
+		} else if !queued[id] {
+			continue
+		}
 		if !f.siblingApproved(ctx, grants.ForgetSibling(id)) {
-			f.inform(forgetAgentAlone)
+			if queued[id] {
+				f.inform(forgetAgentAlone)
+			} // else it was told when it ran, item 1 since not applied
 			continue
 		}
 		out := f.agentBack(ctx, id, since)
