@@ -14,6 +14,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/ghbmrk/agentos/broker/guesterr"
 )
 
 // A guest asks the owner a question with a default and a wait (CAP-10).
@@ -62,13 +64,13 @@ const (
 )
 
 // ErrTooMany: the asker, or the box, has as many open questions as allowed.
-var ErrTooMany = errors.New("question: too many open questions; wait for one to be answered or to lapse")
+var ErrTooMany error = guesterr.New("question: too many open questions; wait for one to be answered or to lapse")
 
 // ErrNotFound: no question by that request ID for this asker.
-var ErrNotFound = errors.New("question: no such question")
+var ErrNotFound error = guesterr.New("question: no such question")
 
 // ErrConflict: the request ID was already used for another question.
-var ErrConflict = errors.New("question: request ID already used for a different question")
+var ErrConflict error = guesterr.New("question: request ID already used for a different question")
 
 // State is where a question stands.
 type State string
@@ -457,41 +459,41 @@ func (b *Book) normalize(s Spec) (Spec, error) {
 	out := Spec{Text: flatten(s.Text), Default: flatten(s.Default), Wait: s.Wait, AskWithin: s.AskWithin}
 	switch n := utf8.RuneCountInString(out.Text); {
 	case n == 0:
-		return out, errors.New("question: the question is empty")
+		return out, guesterr.New("question: the question is empty")
 	case n > MaxText:
-		return out, fmt.Errorf("question: the question is longer than %d characters", MaxText)
+		return out, guesterr.Newf("question: the question is longer than %d characters", guesterr.Num(MaxText))
 	}
 	switch n := utf8.RuneCountInString(out.Default); {
 	case n == 0:
-		return out, errors.New("question: a default is required")
+		return out, guesterr.New("question: a default is required")
 	case n > MaxDefault:
-		return out, fmt.Errorf("question: the default is longer than %d characters", MaxDefault)
+		return out, guesterr.Newf("question: the default is longer than %d characters", guesterr.Num(MaxDefault))
 	}
 	if out.Wait <= 0 {
-		return out, errors.New("question: a wait is required")
+		return out, guesterr.New("question: a wait is required")
 	}
 	out.Wait = min(max(out.Wait, b.cfg.MinWait), b.cfg.MaxWait)
 	if out.AskWithin < 0 {
-		return out, errors.New("question: ask-by must be positive")
+		return out, guesterr.New("question: ask-by must be positive")
 	}
 	if out.AskWithin > 0 {
 		out.AskWithin = min(max(out.AskWithin, b.cfg.MinWait), b.cfg.MaxWait)
 	}
 	if len(s.Choices) > MaxChoices {
-		return out, fmt.Errorf("question: more than %d choices", MaxChoices)
+		return out, guesterr.Newf("question: more than %d choices", guesterr.Num(MaxChoices))
 	}
 	found := len(s.Choices) == 0
 	for _, c := range s.Choices {
 		c = flatten(c)
 		if w := strings.Fields(squeezeAll(c)); len(w) > 0 && controlWords[strings.ToUpper(w[0])] {
-			return out, errors.New("question: a choice cannot be an owner-channel word (STOP, YES, NO, RUN...), since the channel takes it when sent alone; use words like \"go ahead\" or \"wait\"")
+			return out, guesterr.New("question: a choice cannot be an owner-channel word (STOP, YES, NO, RUN...), since the channel takes it when sent alone; use words like \"go ahead\" or \"wait\"")
 		}
 		if c == "" || utf8.RuneCountInString(c) > MaxChoice {
-			return out, fmt.Errorf("question: each choice must be 1 to %d characters", MaxChoice)
+			return out, guesterr.Newf("question: each choice must be 1 to %d characters", guesterr.Num(MaxChoice))
 		}
 		for _, o := range out.Choices {
 			if strings.EqualFold(o, c) {
-				return out, errors.New("question: choices repeat")
+				return out, guesterr.New("question: choices repeat")
 			}
 		}
 		if strings.EqualFold(c, out.Default) {
@@ -500,20 +502,20 @@ func (b *Book) normalize(s Spec) (Spec, error) {
 		out.Choices = append(out.Choices, c)
 	}
 	if !found {
-		return out, errors.New("question: the default must be one of the choices")
+		return out, guesterr.New("question: the default must be one of the choices")
 	}
 	for _, t := range append([]string{out.Text, out.Default}, out.Choices...) {
 		if codeShaped(t) {
-			return out, errors.New("question: no 6 to 8 digit numbers; they read as codes")
+			return out, guesterr.New("question: no 6 to 8 digit numbers; they read as codes")
 		}
 		if tagShape.MatchString(t) {
-			return out, errors.New("question: no question tags (like Q104); the owner's answer to one question must never be steered to another")
+			return out, guesterr.New("question: no question tags (like Q104); the owner's answer to one question must never be steered to another")
 		}
 		if replyShape.MatchString(t) {
-			return out, errors.New("question: no owner-channel replies (YES, NO, UNDO, RESUME... and an ID or code)")
+			return out, guesterr.New("question: no owner-channel replies (YES, NO, UNDO, RESUME... and an ID or code)")
 		}
 		if credWords.MatchString(t) || credWords.MatchString(squeeze(t)) {
-			return out, errors.New("question: no questions about codes, PINs, passwords, keys or the Owner Card; the agent never needs them")
+			return out, guesterr.New("question: no questions about codes, PINs, passwords, keys or the Owner Card; the agent never needs them")
 		}
 	}
 	q := &entry{ID: "Q999", Text: out.Text, Default: out.Default, Choices: out.Choices}
@@ -522,10 +524,10 @@ func (b *Book) normalize(s Spec) (Spec, error) {
 		text = t
 	}
 	if len(text) > MaxRendered {
-		return out, fmt.Errorf("question: the question, choices and default are too long for one text (%d bytes, at most %d)", len(text), MaxRendered)
+		return out, guesterr.Newf("question: the question, choices and default are too long for one text (%d bytes, at most %d)", guesterr.Num(len(text)), guesterr.Num(MaxRendered))
 	}
 	if b.cfg.Hidden != nil && b.cfg.Hidden(text) {
-		return out, errors.New("question: it reads as carrying a secret, so the owner would not see it")
+		return out, guesterr.New("question: it reads as carrying a secret, so the owner would not see it")
 	}
 	return out, nil
 }
@@ -733,7 +735,7 @@ func same(e *entry, s Spec) bool {
 // request ID and question returns the same question.
 func (b *Book) Ask(ctx context.Context, asker, req string, s Spec) (Status, error) {
 	if asker == "" || req == "" {
-		return Status{}, errors.New("question: asker and request ID are required")
+		return Status{}, guesterr.New("question: asker and request ID are required")
 	}
 	s, err := b.normalize(s)
 	if err != nil {
@@ -873,7 +875,7 @@ func (b *Book) Status(ctx context.Context, asker, req, machine string) (Status, 
 				st.Reason = "answered; read it with the status tool"
 			}
 		} else if b.cfg.Reveal == nil {
-			return Status{}, errors.New("question: cannot reveal the owner's answer")
+			return Status{}, guesterr.New("question: cannot reveal the owner's answer")
 		} else if err := b.cfg.Reveal(machine); err != nil {
 			return Status{}, fmt.Errorf("question: machine label: %w", err)
 		}

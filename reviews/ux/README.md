@@ -26,3 +26,9 @@ Weekly runs over all of `main` until 2026-10-07, when the batched lens screen re
 |---|---|---|
 | 1 | 3176f2d | [2026-10-04](2026-10-04-ux-review.md) |
 | 2 | 044b83b | [2026-10-05](2026-10-05-ux-review.md) |
+| 3 | be5a80c | [2026-10-08 lens bundle a](2026-10-08-lens-bundle-a.md): #300, #319, #323, #327 |
+| 4 | be5a80c | [2026-10-08 lens bundle b](2026-10-08-lens-bundle-b.md): #320, #321, #322, #324, #329 (run 3 is bundle a, #339) |
+
+## Recurring kinds (to become checks)
+
+- **A problem text names a step that cannot work** (CH-12): UX run 2 (#124, #126, #132, #133) and #327. The next package touching owner texts adds a test that flags it ([2026-10-08](2026-10-08-lens-bundle-a.md#recurring-kind)).

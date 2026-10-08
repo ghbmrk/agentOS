@@ -219,6 +219,10 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 	// effect is refused, and every irreversible effect a grant allows is
 	// asked of the owner unless a pre-allowance covers it.
 	gcfg := cfg.Grants
+	// The gate asks on the box's Wi-Fi page exactly when agentosd serves
+	// it (P2-2w): asked there with no page, a change could never be
+	// answered, so it is refused with the reason that says so.
+	gcfg.LocalUI = cfg.PageSocket != nil
 	execs := map[string]journal.Executor{}
 	for name, ex := range cfg.Executors {
 		if name == grants.ExecutorName || name == grants.RecallExecutor {
