@@ -204,3 +204,16 @@ held recovery/STOP, actual question Book plus exactly-once digest reservation
 and strict FileStore debt reopen, failure propagation and a still-blocked ledger
 with host recovery/STOP. Local results are not deployment qualification, CI
 green or independent broker/security acceptance.
+
+D52 characterizes complete registered approval/question/host handoffs with one
+StartupSlot/session/Gate, actual transactional Channel and journal Engine. Owner
+STOP and host workflow quiescence remain available while a synchronous approval
+notice and question send are blocked. Each remaining scope independently keeps
+the lease and startup slot occupied; only complete external Drain permits strict
+reopen, with all three reservations still spent. The fixture owns its journal
+medium until all handoffs return; no background runner, approved grant executor,
+future Book callback or escaped permission exists. A pending request is retained
+state, not continuing work. This test does not supply the actual daemon routing,
+consumer registration enforcement, permission revocation, provisioning, trusted
+config persistence or filesystem/latency qualifications held in W5-D47-Q and
+W5-D50-Q/W5-D51-Q. Never await Close/Drain within a registered Use callback.
