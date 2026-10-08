@@ -266,7 +266,8 @@ form { margin: .6em 0 1.2em; }
 
 {{else if eq .Step "ai"}}
 <h2>6. Connect AI</h2>
-{{if not .Progress.Updated}}<p>The box is still updating. This step opens when it finishes.</p>
+{{if not .Progress.Updated}}{{if eq .Progress.Phase "offline"}}<p>The box is offline, so it is running the version it shipped with. It updates when it is next online, and this step opens after that.</p>
+{{else}}<p>The box is updating to the latest version first. This step opens when it finishes.</p>{{end}}
 {{else}}<p class="muted">One is enough. You can add more later.</p>
 {{range .Providers}}<h3>{{.Name}}{{if .Connected}}: connected{{end}}</h3>
 {{if not .Connected}}
@@ -283,6 +284,8 @@ func phaseText(p string) string {
 		return "ready"
 	case "updating":
 		return "updating (setup can continue)"
+	case "offline":
+		return "offline (setup can continue)"
 	}
 	return "starting"
 }

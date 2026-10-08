@@ -22,7 +22,9 @@ import (
 
 // Progress is the box's boot state for the status and setup pages (ONB-4).
 type Progress struct {
-	// Phase is "booting", "updating" or "ready".
+	// Phase is "booting", "updating", "offline" or "ready". "offline"
+	// means a first boot with no uplink: the box runs the image it
+	// shipped with and updates when next online (UPD-3).
 	Phase string
 	// Updated is true once the first-boot update (UPD-3) has finished or
 	// was not needed. Only AI and account connection wait for it.
@@ -899,7 +901,10 @@ func (u *setup) aiReady() error {
 	if !ready {
 		return errors.New("Finish the earlier steps first.")
 	}
-	if !u.s.cfg.Hooks.Progress().Updated {
+	if p := u.s.cfg.Hooks.Progress(); !p.Updated {
+		if p.Phase == "offline" {
+			return errors.New("The box is offline and has not updated yet. AI can be connected once it is online and updated.")
+		}
 		return errors.New("The box is still updating. AI can be connected when it finishes.")
 	}
 	return nil
