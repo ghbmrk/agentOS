@@ -141,18 +141,17 @@ func TestForgetItem2NotSavedOutlivesARestart(t *testing.T) {
 	}
 }
 
-// CH-12: each owed text says what remains and that it will be done, names
-// a step that can show why where one exists, never ends in "Nothing taken
-// back" and fits one GSM-7 segment.
+// CH-12: each owed text says what remains and that it will be done, never
+// ends in "Nothing taken back" and fits one GSM-7 segment. The no-agent
+// one names STATUS, whose agent line says why; recall off has no STATUS
+// line (LateExecutor.Status), so that one names no step.
 func TestForgetItem2OwedTextsSayWhatRemains(t *testing.T) {
 	for _, s := range []string{forgetAgentNoAgent, forgetAgentNotOpen, forgetAgentNotTaken} {
 		if !strings.HasPrefix(s, "Not taken back yet:") || !strings.Contains(s, "text you") || len(s) > 160 || !gsm7(s) {
 			t.Fatalf("%d %q", len(s), s)
 		}
 	}
-	for _, s := range []string{forgetAgentNoAgent, forgetAgentNotOpen} {
-		if !strings.HasSuffix(s, "Send STATUS to see why.") {
-			t.Fatalf("no step: %q", s)
-		}
+	if !strings.HasSuffix(forgetAgentNoAgent, "Send STATUS to see why.") || strings.Contains(forgetAgentNotOpen, "STATUS") {
+		t.Fatalf("steps: %q, %q", forgetAgentNoAgent, forgetAgentNotOpen)
 	}
 }
