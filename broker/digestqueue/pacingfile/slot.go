@@ -35,6 +35,9 @@ type slotDrain struct {
 // is released only by successful explicit Drain. Invalid configuration does not
 // occupy an empty slot. Nothing activates or retries automatically.
 func (s *StartupSlot) Start(path string, cfg grants.Config) (*Startup, error) {
+	return s.startWithOwners(path, cfg, nil)
+}
+func (s *StartupSlot) startWithOwners(path string, cfg grants.Config, owners []uint32) (*Startup, error) {
 	if s == nil {
 		return nil, ErrSessionConfig
 	}
@@ -43,7 +46,7 @@ func (s *StartupSlot) Start(path string, cfg grants.Config) (*Startup, error) {
 	if s.current != nil || s.recovery != RecoveryIdle {
 		return nil, ErrStartupOccupied
 	}
-	p, err := StartSession(path, cfg)
+	p, err := startSessionWithOwners(path, cfg, owners)
 	if err != nil {
 		return nil, err
 	}

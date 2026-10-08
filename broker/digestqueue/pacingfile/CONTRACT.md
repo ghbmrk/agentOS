@@ -464,3 +464,18 @@ Policy is caller-trusted, not discovered from filesystem ownership. This is not
 root/namespace/mount/ACL/same-UID/lock/restore qualification or an atomic whole-
 path snapshot. Synchronous walks/I/O may hang. No fallback, mode repair, provisioning,
 activation or auto-retry; Session/startup/manifest/daemon adoption remains separate.
+
+## W5-D64 pinned protected startup
+
+Canonical manifest version2 appends trusted_owners after v1 fields and requires a
+nonempty/max16/unique uint32 array covered by the separately supplied expected pin.
+Version1 bytes/behavior remain unchanged and cannot carry owners. Invalid/missing/
+noncanonical/pin-mismatched policy refuses without downgrade to ordinary acquisition.
+
+Both ManifestSettings.Start and StartupSlot.StartManifest carry copied validated
+owners through SAME owned worker/private construction to actual protected lease and
+strict Gate. Existing admission, panic/unwind, retirement/late cleanup and completion
+boundaries remain. No new public constructor wrappers/workers or grants config fields.
+Retirement observed after read acquires no lease or clock; later races retain existing
+backend retirement. All other Gate options/strict existing-state/latency binding stay.
+No provisioning, activation, daemon defaults, schema adoption or cleanup occurs.

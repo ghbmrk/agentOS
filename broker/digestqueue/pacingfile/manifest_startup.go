@@ -60,5 +60,5 @@ func constructManifestSession(reader io.Reader, expected [32]byte, cfg grants.Co
 	if retired.Load() {
 		return nil, ErrSessionRetired
 	}
-	return constructSession(settings.manifest.Ledger, settings.bindConfig(cfg), retired)
+	return constructSessionWithOwners(settings.manifest.Ledger, settings.bindConfig(cfg), retired, settings.manifest.TrustedOwners)
 }

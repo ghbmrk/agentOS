@@ -54,3 +54,24 @@ Positive tests use AGENTOS_PROTECTED_TEST_ROOT or UserHomeDir, explicitly config
 synthetic UID trustees and failure on unsafe/unwritable ancestry; no hidden skip or
 security fallback. Fresh replay explicitly uses the private review-stack root,
 not world-writable /tmp. Test-root compatibility is not deployment qualification.
+
+## W5-D64 versioned policy custody
+
+Version2 trusted-owner policy is explicit and pin-covered, not discovered root
+trust. Decoded settings own reader-independent arrays; predecoded startup copies
+policy before its constructor worker and actual protected lease retains a copy.
+Version1/default/direct/other-slot paths can bypass this opt-in composition. Matching
+old config/state/policies replay; expected pin/source/provenance/persistence/schema
+adoption/provisioning/root namespaces remain external W5-D64-Q and prior Q holds.
+Never bootstrap expected pin from checked bytes. UID/mode metadata observations
+are not atomic whole-path/ACL/mount/same-UID/lock/media custody qualification.
+
+Reader/config/constructor/I/O/drain can hang indefinitely holding one worker/slot/
+lease; caller owns reader through total drain, independent owner controls before
+config load, and ALL downstream consumers. Retired late bytes observed before
+construction publish no Gate/clock/lease/write; no I/O interruption or deadline is
+implied. Existing panic/unwind/cleanup-fault hold behavior remains. No agentosd or
+operator default/schema adoption, refund/permission revocation/replacement writer/
+anti-delete/rollback/restore/config-integrity/globalquota claim; D37 ordinary/urgent/
+reissue storage/time/overdue/invalid-input hold preserved. External batch/strongest
+security/current-base/SUB3/full consumer/pin/media/latency qualifications remain.

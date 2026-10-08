@@ -57,15 +57,24 @@ type Startup struct {
 // published; it is never exposed to Use. Caller must hold resources and this
 // handle through shutdown, including after a cancelled Close wait.
 func StartSession(path string, cfg grants.Config) (*Startup, error) {
+	return startSessionWithOwners(path, cfg, nil)
+}
+
+// Internal policy originates only from validated pinned settings; copy before
+// starting the ONE owned constructor, sharing its completion/retirement boundary.
+func startSessionWithOwners(path string, cfg grants.Config, owners []uint32) (*Startup, error) {
 	if !sessionConfigValid(cfg) {
 		return nil, ErrSessionConfig
 	}
 	p := &Startup{opening: true, done: make(chan struct{})}
-	go p.open(path, cfg)
+	go p.open(path, cfg, append([]uint32(nil), owners...))
 	return p, nil
 }
 
-func constructSession(path string, cfg grants.Config, retired *atomic.Bool) (s *Session, err error) {
+func constructSession(path string, cfg grants.Config, retired *atomic.Bool) (*Session, error) {
+	return constructSessionWithOwners(path, cfg, retired, nil)
+}
+func constructSessionWithOwners(path string, cfg grants.Config, retired *atomic.Bool, owners []uint32) (s *Session, err error) {
 	// OpenSession unwinds its actual lease on panic. Contain only this owned
 	// constructor boundary and never disclose the panic or callback error.
 	defer func() {
@@ -74,10 +83,10 @@ func constructSession(path string, cfg grants.Config, retired *atomic.Bool) (s *
 			err = ErrSessionRecovery
 		}
 	}()
-	return openSession(path, cfg, retired)
+	return openSessionWithOwners(path, cfg, retired, owners)
 }
-func (p *Startup) open(path string, cfg grants.Config) {
-	s, err := constructSession(path, cfg, &p.retirement)
+func (p *Startup) open(path string, cfg grants.Config, owners []uint32) {
+	s, err := constructSessionWithOwners(path, cfg, &p.retirement, owners)
 	p.complete(s, err)
 }
 

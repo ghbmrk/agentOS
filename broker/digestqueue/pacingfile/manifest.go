@@ -17,15 +17,16 @@ const MaxManifestBytes = 16 * 1024
 
 var ErrManifest = errors.New("provisioned accounting configuration unavailable")
 
-// ProvisionedManifest is the explicit version-one wire image, serialized by
+// ProvisionedManifest is the explicit wire image (v1 legacy, v2 protected), serialized by
 // encoding/json in this field order without trailing whitespace. No option can
 // enable volatile accounting, first provisioning or disabled latency observation.
 // The 1..4096 allowance matches the current durable pacing schema's limit.
 type ProvisionedManifest struct {
-	Version               int    `json:"version"`
-	Ledger                string `json:"ledger"`
-	RequestsPerHour       int    `json:"requests_per_hour"`
-	MaxStoreLatencyMillis int64  `json:"max_store_latency_ms"`
+	Version               int      `json:"version"`
+	Ledger                string   `json:"ledger"`
+	RequestsPerHour       int      `json:"requests_per_hour"`
+	MaxStoreLatencyMillis int64    `json:"max_store_latency_ms"`
+	TrustedOwners         []uint32 `json:"trusted_owners,omitempty"`
 }
 
 // ManifestSettings can be constructed publicly only by validating an image
@@ -62,9 +63,26 @@ func ReadProvisionedManifest(r io.Reader, expected [32]byte) (*ManifestSettings,
 }
 
 func validManifest(m ProvisionedManifest) bool {
-	return m.Version == 1 && filepath.IsAbs(m.Ledger) && filepath.Clean(m.Ledger) == m.Ledger && m.Ledger != "/" &&
+	return validManifestOwners(m) && filepath.IsAbs(m.Ledger) && filepath.Clean(m.Ledger) == m.Ledger && m.Ledger != "/" &&
 		!strings.ContainsRune(m.Ledger, 0) && !strings.HasSuffix(m.Ledger, ".lock") && !strings.HasSuffix(m.Ledger, ".tmp") &&
 		m.RequestsPerHour >= 1 && m.RequestsPerHour <= 4096 && m.MaxStoreLatencyMillis >= 1 && m.MaxStoreLatencyMillis <= 300000
+}
+
+func validManifestOwners(m ProvisionedManifest) bool {
+	if m.Version == 1 {
+		return len(m.TrustedOwners) == 0
+	}
+	if m.Version != 2 || len(m.TrustedOwners) == 0 || len(m.TrustedOwners) > 16 {
+		return false
+	}
+	for i, uid := range m.TrustedOwners {
+		for _, previous := range m.TrustedOwners[:i] {
+			if uid == previous {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // Start applies exactly these pacing options to one supplied owner slot, requiring
@@ -77,7 +95,7 @@ func (m *ManifestSettings) Start(slot *StartupSlot, cfg grants.Config) (*Startup
 	if m == nil || !m.valid || slot == nil || !manifestConfigValid(cfg) {
 		return nil, ErrManifest
 	}
-	return slot.Start(m.manifest.Ledger, m.bindConfig(cfg))
+	return slot.startWithOwners(m.manifest.Ledger, m.bindConfig(cfg), m.manifest.TrustedOwners)
 }
 
 func manifestConfigValid(cfg grants.Config) bool {

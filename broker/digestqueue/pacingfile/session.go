@@ -38,10 +38,19 @@ func OpenSession(path string, cfg grants.Config) (*Session, error) {
 }
 
 func openSession(path string, cfg grants.Config, startupRetired *atomic.Bool) (*Session, error) {
+	return openSessionWithOwners(path, cfg, startupRetired, nil)
+}
+func openSessionWithOwners(path string, cfg grants.Config, startupRetired *atomic.Bool, owners []uint32) (*Session, error) {
 	if !sessionConfigValid(cfg) {
 		return nil, ErrSessionConfig
 	}
-	lease, err := OpenExclusive(path)
+	var lease *ExclusiveStore
+	var err error
+	if owners == nil {
+		lease, err = OpenExclusive(path)
+	} else {
+		lease, err = OpenExclusiveProtected(path, owners)
+	}
 	if err != nil {
 		return nil, err
 	}
