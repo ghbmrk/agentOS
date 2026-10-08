@@ -982,15 +982,20 @@ func (g *Gate) evaluateFollow(in journal.Intent) verdict {
 	if in.Origin != originLocal {
 		return verdict{kind: deny, why: "only the owner, on the box's Wi-Fi page, changes where updates come from"}
 	}
-	name, ok1 := in.Params[ParamFollowName].(string)
-	digest, ok2 := in.Params[ParamFollowDigest].(string)
-	if !ok1 || !ok2 || len(in.Params) != 2 || in.Executor != FollowExecutor || !hexDigest(digest) || !followName(name) {
+	digest, name, ok := FollowOf(in.ID)
+	if !ok || len(in.Params) != 0 || in.Executor != FollowExecutor || !hexDigest(digest) || (name != "" && !followName(name)) {
 		return verdict{kind: deny, why: "malformed request to change where updates come from"}
+	}
+	object := "get updates from " + name
+	if name == "" {
+		// Switching back: the updater admits it only for the project's
+		// own root keys (WF1).
+		object = "get updates from the AgentOS project again"
 	}
 	if !g.cfg.LocalUI {
 		return verdict{kind: deny, why: NoPageFollow}
 	}
-	return verdict{kind: ask, local: true, item: owner.Item{Ref: in.ID, Object: "get updates from " + name,
+	return verdict{kind: ask, local: true, item: owner.Item{Ref: in.ID, Object: object,
 		Facts: owner.Facts{Kind: owner.GrantChange, Verb: "follow", NoRecipient: true}}}
 }
 

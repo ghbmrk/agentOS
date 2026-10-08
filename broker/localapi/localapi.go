@@ -36,10 +36,17 @@ const (
 	OpRequests = "page_requests"
 	OpAnswer   = "page_answer"
 	OpWaiting  = "page_waiting"
+	// OpFollowRoot shows what following a root the owner brought would
+	// mean; agentosd holds the root under the summary's digest.
+	OpFollowRoot = "page_follow_root"
+	// OpFollow asks to follow a shown root under the owner's name for it
+	// (OSS-10, WF3); the owner then approves it with a code like any
+	// tier-4 request.
+	OpFollow = "page_follow"
 )
 
 // Ops lists every op, for the disjointness test.
-var Ops = []string{OpStatus, OpStop, OpGridCell, OpSignIn, OpSignOut, OpSession, OpLines, OpResume, OpRequests, OpAnswer, OpWaiting}
+var Ops = []string{OpStatus, OpStop, OpGridCell, OpSignIn, OpSignOut, OpSession, OpLines, OpResume, OpRequests, OpAnswer, OpWaiting, OpFollowRoot, OpFollow}
 
 // Fixed refusals, sent as sockets codes.
 const (
@@ -56,6 +63,12 @@ const (
 	MaxCode    = 64
 	MaxID      = 16
 	MaxSum     = 128
+	// MaxRoot bounds a root brought to follow; MaxFollowName bounds the
+	// owner's name for it in bytes (40 characters of up to 4 bytes).
+	MaxRoot       = 64 << 10
+	MaxFollowName = 160
+	// DigestLen is a shown root's digest: SHA-256, lowercase hex.
+	DigestLen = 64
 )
 
 // Status is the box's state as the page shows it before sign-in: fixed
@@ -150,4 +163,35 @@ const (
 // Requests are the open requests, as the owner channel lists them.
 type Requests struct {
 	Requests []owner.LocalRequest `json:"requests"`
+}
+
+// FollowRoot is a root the owner brought to follow, exactly as published.
+type FollowRoot struct {
+	Token string `json:"token"`
+	Root  []byte `json:"root"`
+}
+
+// RootSummary is what following a root means, as the page shows it before
+// the owner asks (update.RootSummary). Refusal, when set, is
+// RefusedRoot and nothing else is.
+type RootSummary struct {
+	Version    int64               `json:"version,omitempty"`
+	Keys       map[string][]string `json:"keys,omitempty"`
+	Thresholds map[string]int      `json:"thresholds,omitempty"`
+	Expires    time.Time           `json:"expires,omitempty"`
+	Digest     string              `json:"digest,omitempty"`
+	Refusal    string              `json:"refusal,omitempty"`
+}
+
+// RefusedRoot: the root does not verify (signatures, thresholds, expiry by
+// the box's clock guard) or is not one to follow.
+const RefusedRoot = "not a root to follow"
+
+// Follow asks to follow the shown root with this digest. An empty Name
+// switches back to the project, which agentosd admits only for the
+// project's own root keys (WF1).
+type Follow struct {
+	Token  string `json:"token"`
+	Name   string `json:"name"`
+	Digest string `json:"digest"`
 }

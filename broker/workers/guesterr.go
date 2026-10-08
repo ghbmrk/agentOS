@@ -1,15 +1,13 @@
 package workers
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"log"
 	"runtime/debug"
 	"strings"
 
 	"github.com/ghbmrk/agentos/broker/admission"
+	"github.com/ghbmrk/agentos/broker/guesterr"
 	"github.com/ghbmrk/agentos/broker/vm"
 	"github.com/ghbmrk/agentos/broker/vm/overlay"
 )
@@ -21,6 +19,10 @@ import (
 type said struct{ s string }
 
 func (e said) Error() string { return e.s }
+
+// GuestText lets said through the guest plane's filter (SR2-3g): the
+// workers family's entry on guesterr's allowlist.
+func (e said) GuestText() string { return e.s }
 
 // sayArg is a value say may put in a guest's error text. Only these types
 // implement it, and TestWorkerErrorsAreBuiltOnlyFromSafeText checks that
@@ -65,21 +67,9 @@ func guestErr(machine, tool string, err error) error {
 }
 
 // logged writes err to the broker's log under a fresh ref and says only
-// the ref.
+// the ref (guesterr.Logged, shared with the guest plane's filter).
 func logged(machine, tool string, err error) said {
-	ref := newRef()
-	log.Printf("workers: %s: %s: ref %s: %v", machine, tool, ref, err)
-	return said{"failed (ref " + ref + "); the broker's log has the detail"}
-}
-
-// newRef is a fresh 8-hex reference, used for nothing but tying a guest's
-// error to its log line.
-func newRef() string {
-	b := make([]byte, 4)
-	if _, err := rand.Read(b); err != nil {
-		return "00000000"
-	}
-	return hex.EncodeToString(b)
+	return said{guesterr.Logged("workers", machine, tool, err)}
 }
 
 // panicked is a recovered tool panic; guestErr answers it as a ref

@@ -118,6 +118,19 @@ func DescribeRoot(b []byte, o Options) (RootSummary, error) {
 	return describe(b, m)
 }
 
+// RootDigest is the summary Digest of a root the box already trusts
+// (TrustedRoot), for telling whether it is the root an owner approved. It
+// verifies nothing and so decides no trust: a recovering executor compares
+// it with an approval it journalled.
+func RootDigest(b []byte) (string, error) {
+	m, err := metadata.Root().FromBytes(b)
+	if err != nil {
+		return "", classify(err)
+	}
+	s, err := describe(b, m)
+	return s.Digest, err
+}
+
 func describe(b []byte, m *metadata.Metadata[metadata.RootType]) (RootSummary, error) {
 	s := RootSummary{Version: m.Signed.Version, Keys: map[string][]string{}, Thresholds: map[string]int{},
 		Expires: m.Signed.Expires.UTC(), RootSHA256: Digest(b)}
@@ -185,6 +198,21 @@ func (s *Store) Following() (Followed, error) {
 		return src, err
 	}
 	return src, json.Unmarshal(b, &src)
+}
+
+// TrustedRoot returns the root the box trusts now, after completing or
+// forgetting any switch a crash interrupted, so a caller can tell whether
+// a switch took effect.
+func (s *Store) TrustedRoot() ([]byte, error) {
+	unlock, err := s.lock()
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	if err := s.settle(); err != nil {
+		return nil, err
+	}
+	return os.ReadFile(s.p("root.json"))
 }
 
 // followFault, set only by tests, fails the switch before a step, as a
