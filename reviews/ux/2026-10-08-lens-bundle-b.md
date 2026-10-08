@@ -78,3 +78,23 @@
 Proposal: the next package that touches owner texts adds a table test over its problem texts. Each problem text maps to the step it names (or "nothing needed"), and the test checks that the step is open on the failing path, or for the origin.
 
 Cross-lens results for the fixes above are in the Potency file's arbitration table.
+
+---
+
+## Re-check 2026-10-08 at a579274 (#322 P2-2w d)
+Verdict: accept
+
+Read: `git diff 11fa1f2 a579274` (8a2e3d0, 9def31c, and the main merge, which adds only BOARD/LATER rows); `evidence.go`, `evidence_test.go`. [Fact] = in the diff.
+- **Blocker 1 resolved as asked.** [Fact] `settings` now runs the address block (`e.mail.Owns`, the `alias` form → `"", false`) before the `!e.page` check. The test "Email replies to bob@corp.example" with the page off returns `ok=false` and submits no intent.
+- **Blocker 2 resolved as asked.** [Fact] `evidenceNoPage` is now "…which this box isn't serving. Private replies still come by text." (my suggested wording; "isn't running" is gone and the test forbids it). 9def31c adds `evidenceNoPageSet` for when replies already go to an address ("Private replies still go to o***@…"), so the text isn't false on that path; it is masked and tested. A non-owned address in the EVIDENCE form gets the no-page refusal, not a step that then fails (CH-12).
+- **New owner text:** [Fact] only `evidenceNoPageSet`. It is first person, names the Wi-Fi page, and says what is true. Scope intact; no new flow.
+- **later (one LATER.md line):** [Inference] neither text names an owner step for turning the page on. That is a deployment setting (`-localui-uid`), not an owner step, so "nothing needed" is acceptable under CH-12; revisit if setup gains a page toggle.
+- **Potency:** no new cap (see the potency record).
+
+## Re-check 2026-10-08 at 8a02c52 (#329 P2-2a f1)
+Verdict: accept
+
+Read: `git diff 3a79399 8a02c52` (f982c0c, 6449b3b, 8a02c52): `gate.go`, `pageresult_test.go`.
+- **Blocker (CH-12) resolved via the neutral step I allowed.** [Fact] The text is now "<request> did not run: it changed after my Wi-Fi page showed it. Make the request again if still needed." No origin is named, and no step it names fails for evidence, follow or sharing. A test per origin asserts the exact text, no "agent", and ≤160 characters. The comment states why agent/guest origins never get a page-confirmed item (`evaluateBroker` denies them every broker action), and the test submits agent evidence/follow/grant-change intents and expects `Denied`.
+- **later (one LATER.md line):** [Fact] the per-origin test covers agent, evidence and follow, not sharing. The neutral text holds for it by construction, so no blocker. The empty-`d.Request` fallback from the first pass stays a `later`.
+- No new owner flow; scope intact. **Potency:** neutral (text only).

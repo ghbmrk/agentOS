@@ -49,3 +49,6 @@
 | #320 UX release (c2): one seed per page session, or say to rescan; show the pause time | neutral (the seed is still handed out only before sealing, and wrong codes stay counted) | neutral | improves | passes; folds into the P2-2w c2 row |
 
 No proposal costs any lens, and no hard constraint (Invariant C, REV-2) is touched, so nothing goes to Mark.
+
+## Delta note 2026-10-08 (re-check)
+Potency accept for #322 at a579274 and #329 at 8a02c52: the deltas are wording and an ordering fix that returns owner tasks to the agent; no capability is capped, and no hard constraint is touched. Nothing goes to Mark.
