@@ -1,6 +1,6 @@
 # Arbitrator loop
 
-Reconciles the three lens loops so their proposals compound instead of trading off:
+Reconciles the three lenses so their proposals compound instead of trading off:
 
 | Lens | Asks | Home |
 |---|---|---|
@@ -8,11 +8,11 @@ Reconciles the three lens loops so their proposals compound instead of trading o
 | Potency | Does the spec limit capability without need? | `reviews/potency/` |
 | UX | Is onboarding and everyday use low-effort for the owner? | `reviews/ux/` |
 
-**Cadence:** weekly, Mondays after the lens loops (they run ~08:52 Eastern; this runs 10:41 Eastern). Each run reads what the lenses proposed or merged since the last arbitrated commit. It stays quiet when nothing conflicts.
+**When:** inside each batched lens screen, for the PRs in that bundle (docs/OPERATING.md §4, step 4). It stays quiet when nothing conflicts. Until 2026-10-07 it ran weekly after the lens loops; those runs are listed below.
 
 ## Method
 
-1. **Collect.** Every open lens proposal (PR or review file), plus merged spec changes since the last run.
+1. **Collect.** The lens verdicts the screen just wrote for the bundle, plus any open spec-wide lens proposal.
 2. **Cross-check.** Score each proposal on the other two lenses: improves, neutral, or costs. A proposal that is neutral or better on all three passes through untouched.
 3. **Redesign, don't split.** For each cost, look for a design that removes it rather than a midpoint. The usual levers:
    - move the check from the owner to the broker (a deterministic predicate over verified data costs the owner nothing; precedent: ADP-9 pre-allowances gave silence, safety and power at once);
@@ -28,11 +28,11 @@ Reconciles the three lens loops so their proposals compound instead of trading o
 
 Everything else, including defaults, tiers, and timeouts, is tradable when the trade makes all three lenses better off.
 
-## Output per run
+## Output
 
-`YYYY-MM-DD-arbitration.md`: a cross-lens matrix, each conflict with its resolution and why it dominates, forks escalated, and steering notes for each lens. Spec changes go in an L1 spec-diff PR that Mark merges.
+Per PR with a conflict, `YYYY-MM-DD-pr<N>.md`: the conflict, its resolution and why it dominates, and any fork escalated. A spec-wide run writes `YYYY-MM-DD-arbitration.md`: a cross-lens matrix, each conflict with its resolution and why it dominates, forks escalated, and steering notes for each lens. Spec changes go in an L1 spec-diff PR that Mark merges.
 
-## Last arbitrated
+## Spec-wide runs
 
 | Run | main at | Inputs | Arbitration |
 |---|---|---|---|
