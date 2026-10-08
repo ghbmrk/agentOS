@@ -8,7 +8,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/bridgeproto"
 )
 
-// REQ: ARC-2, CH-10
+// REQ: ARC-2, CH-10, ONB-3
 
 // Security L3 on the P2-2w plan: no page op can be an op of another
 // socket, so a page that reached another socket could call nothing there
@@ -16,7 +16,7 @@ import (
 func TestPageOpsAreDisjointFromOtherSockets(t *testing.T) {
 	others := []string{"message", "whoami", bridgeproto.OpInbound, bridgeproto.OpOutbox, bridgeproto.OpSent, bridgeproto.OpState}
 	seen := map[string]bool{}
-	for _, op := range Ops {
+	for _, op := range append(append([]string{}, Ops...), SetupOps...) {
 		if !strings.HasPrefix(op, "page_") || seen[op] {
 			t.Errorf("op %q", op)
 		}
@@ -27,7 +27,7 @@ func TestPageOpsAreDisjointFromOtherSockets(t *testing.T) {
 			}
 		}
 	}
-	if len(seen) != 13 {
+	if len(seen) != 20 {
 		t.Fatalf("%d ops", len(seen))
 	}
 }

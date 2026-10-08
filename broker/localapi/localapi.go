@@ -32,6 +32,7 @@ const (
 	OpSignOut  = "page_sign_out"
 	OpSession  = "page_session" // a token's session: is it live, until when
 	OpLines    = "page_lines"   // STATUS's full lines
+	OpLine     = "page_line"    // the owner line's last outage and counts
 	OpResume   = "page_resume"
 	OpRequests = "page_requests"
 	OpAnswer   = "page_answer"
@@ -43,10 +44,15 @@ const (
 	// (OSS-10, WF3); the owner then approves it with a code like any
 	// tier-4 request.
 	OpFollow = "page_follow"
+	// OpPaused lists the paused grants; OpAskResume asks to resume one
+	// from the pause the page showed, and the owner then approves it with
+	// a code like any grant (W5a-resume).
+	OpPaused    = "page_paused"
+	OpAskResume = "page_ask_resume"
 )
 
 // Ops lists every op, for the disjointness test.
-var Ops = []string{OpStatus, OpStop, OpGridCell, OpSignIn, OpSignOut, OpSession, OpLines, OpResume, OpRequests, OpAnswer, OpWaiting, OpFollowRoot, OpFollow}
+var Ops = []string{OpStatus, OpStop, OpGridCell, OpSignIn, OpSignOut, OpSession, OpLines, OpLine, OpResume, OpRequests, OpAnswer, OpWaiting, OpFollowRoot, OpFollow, OpPaused, OpAskResume}
 
 // Fixed refusals, sent as sockets codes.
 const (
@@ -69,6 +75,8 @@ const (
 	MaxFollowName = 160
 	// DigestLen is a shown root's digest: SHA-256, lowercase hex.
 	DigestLen = 64
+	// MaxPause bounds a pause's intent ID (grants.Grant.Pause).
+	MaxPause = 128
 )
 
 // Status is the box's state as the page shows it before sign-in: fixed
@@ -111,6 +119,33 @@ type Auth struct {
 // Lines are STATUS's own lines, OP-9 causes included (Potency R3).
 type Lines struct {
 	Status string `json:"status"`
+}
+
+// Line is the owner line as the signed-in home page shows it (UX U-B1):
+// its note, the last outage it recovered from with what did not reach the
+// owner, and the bridge's counts since agentosd started. The counts go
+// only over the tokened OpLine (Security D1); Status keeps the note alone.
+type Line struct {
+	Note string `json:"note,omitempty"`
+	// Outage is nil until an outage has ended.
+	Outage *Outage `json:"outage,omitempty"`
+	// Others counts texts on the owner line from anyone but the owner, set
+	// aside unread; TimedOut, texts to the owner the bridge never
+	// confirmed; Dropped, that inbound texts were dropped past the rate
+	// limit.
+	Others   int  `json:"others,omitempty"`
+	TimedOut int  `json:"timed_out,omitempty"`
+	Dropped  bool `json:"dropped,omitempty"`
+}
+
+// Outage is a stretch when the owner line could not be used: Missed
+// counts the texts to the owner that could not go, Requests the approval
+// requests among them (modemlink.Outage).
+type Outage struct {
+	From     time.Time `json:"from"`
+	To       time.Time `json:"to"`
+	Missed   int       `json:"missed,omitempty"`
+	Requests int       `json:"requests,omitempty"`
 }
 
 // Resume is RESUME from a signed-in page. Within FreshFor of the
@@ -181,11 +216,24 @@ type RootSummary struct {
 	Expires    time.Time           `json:"expires,omitempty"`
 	Digest     string              `json:"digest,omitempty"`
 	Refusal    string              `json:"refusal,omitempty"`
+	Reason     string              `json:"reason,omitempty"`
+	// Project: the root has the project's own root keys, as the image
+	// ships them, so the page may offer switching back (WF1).
+	Project bool `json:"project,omitempty"`
 }
 
 // RefusedRoot: the root does not verify (signatures, thresholds, expiry by
 // the box's clock guard) or is not one to follow.
 const RefusedRoot = "not a root to follow"
+
+// The coarse causes of a RefusedRoot (OSS-10w L3). Each reveals only what
+// the owner's own root file and the box's clock already say; anything else
+// carries no reason.
+const (
+	RootExpired    = "expired"    // past its expiry by the box's clock
+	RootSignatures = "signatures" // too few valid signatures for its threshold
+	RootThreshold  = "threshold"  // a threshold below the box's floor
+)
 
 // Follow asks to follow the shown root with this digest. An empty Name
 // switches back to the project, which agentosd admits only for the
@@ -194,4 +242,26 @@ type Follow struct {
 	Token  string `json:"token"`
 	Name   string `json:"name"`
 	Digest string `json:"digest"`
+}
+
+// PausedGrant is a paused grant as the page shows it (grants.PausedGrant):
+// what resuming lets run again, who paused it, and the pause a resume
+// names.
+type PausedGrant struct {
+	ID    string `json:"id"`
+	What  string `json:"what"`
+	By    string `json:"by"`
+	Pause string `json:"pause"`
+}
+
+// Paused are the paused grants, by ID.
+type Paused struct {
+	Grants []PausedGrant `json:"grants"`
+}
+
+// AskResume asks to resume Grant from Pause, as the page showed it.
+type AskResume struct {
+	Token string `json:"token"`
+	Grant string `json:"grant"`
+	Pause string `json:"pause"`
 }

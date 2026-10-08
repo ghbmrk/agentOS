@@ -260,6 +260,8 @@ type Gate struct {
 	eng    *journal.Engine
 	own    Owner
 	grants map[string]*Grant
+	// resumes is the page's latest resume ask per grant (AskResume).
+	resumes map[string]resumeAsk
 	// evidence is the owner's evidence destination, if set (CH-20).
 	evidence destination
 	waiting  map[string]*wait
@@ -913,13 +915,26 @@ func (g *Gate) evaluateBroker(ctx context.Context, phase journal.Phase, in journ
 		if !g.cfg.LocalUI {
 			return verdict{kind: deny, why: NoPageGrant}
 		}
+		if s.Resume != "" && (in.Origin != originLocal || s.Pause == "") {
+			// W5a-resume: only the page resumes, naming the pause it
+			// showed (Security R2 on #169).
+			return verdict{kind: deny, why: "a paused grant is resumed only on the box's Wi-Fi page"}
+		}
 		g.mu.Lock()
 		err = g.validateLocked(s)
+		detail := ""
+		if err == nil && s.Resume != "" {
+			// The page shows what resuming lets run and which pause it
+			// ends; the item's sum covers both, so the page code is bound
+			// to this grant and this pause (owner.ItemSum).
+			gr := g.grants[s.Resume]
+			detail = fmt.Sprintf("%s Paused by %s (%s).", Describe(gr.Spec), pausedBy(gr.PausedBy), gr.Pause)
+		}
 		g.mu.Unlock()
 		if err != nil {
 			return verdict{kind: deny, why: "the grant change is not valid", cause: err}
 		}
-		return verdict{kind: ask, local: true, item: owner.Item{Ref: in.ID, Object: short(s),
+		return verdict{kind: ask, local: true, item: owner.Item{Ref: in.ID, Object: short(s), Detail: detail,
 			Facts: owner.Facts{Kind: owner.GrantChange, Verb: "grant", NoRecipient: true}}}
 	case journal.ActionRecallRollback:
 		// Recall's deletion reach asks before taking back agent work
@@ -1018,7 +1033,8 @@ func (g *Gate) evaluateEvidence(in journal.Intent) verdict {
 // changes who decides what software the box installs, so it is a tier-4
 // act: the owner's code-generator code plus confirmation on the local
 // page, and it comes only from that page (Security C6). The request names
-// only the owner's own name for the source; the page shows the keys,
+// the owner's own name for the source, and the card the root's short
+// fingerprint; the page shows the keys,
 // thresholds and expiry the digest binds. One intent runs once, so one
 // approval buys one switch.
 func (g *Gate) evaluateFollow(in journal.Intent) verdict {
@@ -1033,13 +1049,27 @@ func (g *Gate) evaluateFollow(in journal.Intent) verdict {
 	if name == "" {
 		// Switching back: the updater admits it only for the project's
 		// own root keys (WF1).
-		object = "get updates from the AgentOS project again"
+		object = "get updates from " + ReservedFollowName + " again"
 	}
 	if !g.cfg.LocalUI {
 		return verdict{kind: deny, why: NoPageFollow}
 	}
+	// The card names the root as the page showed it, so two roots never
+	// make the same card (security 323-1).
 	return verdict{kind: ask, local: true, item: owner.Item{Ref: in.ID, Object: object,
-		Facts: owner.Facts{Kind: owner.GrantChange, Verb: "follow", NoRecipient: true}}}
+		Detail: "root fingerprint " + FollowPrint(digest),
+		Facts:  owner.Facts{Kind: owner.GrantChange, Verb: "follow", NoRecipient: true}}}
+}
+
+// FollowPrint is the root's short fingerprint as the card and the page
+// show it: the digest's first 8 hex characters in two groups of 4, so
+// the card never carries a run of digits that reads as a code, however
+// the digest falls (security R1 on #180; codes are 6 digits).
+func FollowPrint(digest string) string {
+	if len(digest) < 8 {
+		return ""
+	}
+	return digest[:4] + "-" + digest[4:8]
 }
 
 // hexDigest is 64 lower-case hex characters.
@@ -1055,13 +1085,25 @@ func hexDigest(s string) bool {
 	return true
 }
 
+// FollowNameOK reports whether the gate admits name for a follow request,
+// so the page can say why one was not asked.
+func FollowNameOK(name string) bool { return followName(name) }
+
+// ReservedFollowName starts the switch-back's line; no name may.
+const ReservedFollowName = "the AgentOS project"
+
 // followName is the owner's name for a source: 1 to MaxFollowName
 // printable characters on one line (no control or bidi formatting
 // characters), with no leading or trailing space, and at most
 // MaxFollowDigits digits in all. The name reaches the owner in
 // broker-voiced texts, so it must never carry a code, even spaced out
-// (security R1 on #180; codes are 6 digits).
+// (security R1 on #180; codes are 6 digits). Nor may it start like the
+// project's own line (ReservedFollowName, any case), so a named follow
+// never reads as switching back (security 323-1).
 func followName(s string) bool {
+	if strings.HasPrefix(strings.ToLower(s), strings.ToLower(ReservedFollowName)) {
+		return false
+	}
 	n, digits := 0, 0
 	for _, c := range s {
 		if !unicode.IsPrint(c) {
@@ -1974,7 +2016,7 @@ func (g *Gate) Decide(d owner.Decision) {
 	g.decided[d.Ref] = decision{approved: d.Approved, why: why, guest: guest, asked: w != nil, implicit: implicit, late: late,
 		req: d.Request, at: g.cfg.Now(), item: item, local: local, hold: hold, attempt: attempt, tries: tries}
 	wait := d.Approved && local && !g.confirmed[d.Ref]
-	own := g.own
+	own, eng := g.own, g.eng
 	g.mu.Unlock()
 	if unstaged && hold != "" && own != nil {
 		_ = own.Inform(fmt.Sprintf("%s was not sent: its draft or staged copy could not be made. Ask your agent again if still needed.", clip(hold)))
@@ -1986,7 +2028,20 @@ func (g *Gate) Decide(d owner.Decision) {
 		// broker action (UX lens and L3 on #329). Their other actions can
 		// still be asked on the page (onPage), but are not page-confirmed,
 		// so the step names no agent.
-		_ = own.Inform(fmt.Sprintf("%s did not run: it changed after my Wi-Fi page showed it. Make the request again if still needed.", clip(d.Request)))
+		//
+		// A release adoption the pipeline proposed (Origin change, the
+		// pipeline's own origin) is page-confirmed too, but the owner made
+		// no request. The change is no decline (Decided is told so) and the
+		// proposal drops, but the update check does not offer that version
+		// again until a restart or a newer release, so the notice promises
+		// no new offer: nothing is needed (P2-2a f2; L3 on #363). The
+		// literal "change" is change.OriginPipeline, pinned by
+		// TestAPageChangeNoticeForAReleaseAdoptionSaysNothingIsNeeded.
+		step := "Make the request again if still needed."
+		if st, err := eng.Get(d.Ref); err == nil && changeAction(st.Intent.Action) && st.Intent.Origin == "change" {
+			step = "Nothing is needed."
+		}
+		_ = own.Inform(fmt.Sprintf("%s did not run: it changed after my Wi-Fi page showed it. %s", clip(d.Request), step))
 	}
 	if !wait {
 		g.settle(d.Ref)
@@ -2359,7 +2414,11 @@ func (g *Gate) settle(id string) {
 		}
 		if st.State == journal.Succeeded && st.Intent.Executor == ExecutorName && own != nil && len(st.Attempts) > 0 {
 			if gid := st.Attempts[len(st.Attempts)-1].Evidence; gid != "" {
-				_ = own.Inform(fmt.Sprintf("Added %s. Text PAUSE %s or REVOKE %s to stop it.", gid, gid, gid))
+				done := "Added"
+				if sp, err := parseSpec(st.Intent); err == nil && sp.Resume != "" {
+					done = "Resumed"
+				}
+				_ = own.Inform(fmt.Sprintf("%s %s. Text PAUSE %s or REVOKE %s to stop it.", done, gid, gid, gid))
 			}
 		}
 	}()
@@ -2704,7 +2763,8 @@ func (g *Gate) applyLocked(in journal.Intent) (string, error) {
 			return "", err
 		}
 		if s.Resume != "" {
-			g.grants[s.Resume].Paused = false
+			gr := g.grants[s.Resume]
+			gr.Paused, gr.Pause, gr.PausedBy = false, "", ""
 			return s.Resume, nil
 		}
 		id := g.grantIDLocked(in.ID)
@@ -2716,7 +2776,9 @@ func (g *Gate) applyLocked(in journal.Intent) (string, error) {
 			return "", errors.New("no grant " + clip(in.GrantRef))
 		}
 		if in.Action == journal.ActionGrantPause {
-			gr.Paused = true
+			// A second pause replaces the first: a resume asked before
+			// it no longer applies (W5a-resume).
+			gr.Paused, gr.Pause, gr.PausedBy = true, in.ID, in.Origin
 			return gr.ID, nil
 		}
 		delete(g.grants, gr.ID)

@@ -38,3 +38,4 @@ Per PR with a conflict, `YYYY-MM-DD-pr<N>.md`: the conflict, its resolution and 
 |---|---|---|---|
 | 0 | e841b78 | loop set up | — |
 | 1 | e841b78 | PRs #8, #9, #11, #12 | [2026-10-04](2026-10-04-arbitration.md) |
+| Lens 2026-10-08e | 22e4b5f | PRs #378, #379 | [2026-10-08 #379](2026-10-08-pr379.md) |
