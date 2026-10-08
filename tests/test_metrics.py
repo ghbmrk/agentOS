@@ -204,7 +204,6 @@ class RenderTest(unittest.TestCase):
         self.assertIn("1/3", row)
         self.assertTrue(row.endswith("| — |"))
 
-
     def test_rows_recorded_with_fewer_columns_keep_their_frozen_cells(self):
         # METRICS.md on main predates the last three columns.
         raw = raw_fixture()
@@ -214,6 +213,7 @@ class RenderTest(unittest.TestCase):
         later = metrics.render(metrics.compute(raw), raw, old)
         row = next(l for l in later.splitlines() if l.startswith("| 2026-10-04 |"))
         self.assertIn("1/3", row)
+
 
 class FreezeTest(unittest.TestCase):
     def test_closed_week_keeps_recorded_api_cells_but_to_date_rows_recompute(self):
