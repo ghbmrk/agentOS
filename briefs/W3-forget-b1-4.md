@@ -12,7 +12,11 @@ Board section: Integration: wiring merged packages into the box. Part of W3-forg
 
 Order of the list as shown to the owner: all dates first, in chronological order (the real date and the decoys together); then "later than all of these"; then "never", last. The last two keep those fixed places and are not sorted among the dates. (Source: this ordering restates the chronological-order sentence below and the option list above; it adds no new ruling from #317 or #409.)
 
-**Open question (for Mark):** are "later than all of these" and "never" always offered, or only when they can be the correct answer or a plausible decoy? The brief does not say. Also #409 UX U5: say whether this confirmation covers `forget-log-missing` (pre-release backups) as well as unanchored restores.
+**Ruling (Mark, decision queue 2026-10-08; D-071):** "later than all of these" and "never" are always offered, whether or not they could be the correct answer or a plausible decoy. The confirmation covers `forget-log-missing` restores (pre-release backups) as well as unanchored restores (#409 UX U5). Each case names itself in its own header, so the owner can tell which case this restore is. Requirements the builder must test:
+- unanchored restore: the text carries a header that names the unanchored case;
+- `forget-log-missing` restore: the text carries a different header that names the forget-log-missing case;
+- the two headers are distinct;
+- in both cases the picker always shows "later than all of these" then "never" as the last two choices, in that order, even when neither could be the correct answer (e.g. the restored log's last forget is the latest date shown, or the log has forgets so "never" is wrong): one test per option per case.
 
 Every date uses the same format and precision as the real date, so the correct option can't be picked out by how it looks. The correct answer is the restored log's last-forget date, or "never" if the restored log has no forgets (an empty log has no date). The decoy dates fall both before and after the real date, so the real date is not always the latest shown, and the dates are listed in chronological order (then "later than all of these" and "never", in that fixed order), so position does not give the answer away (L3 on #317). The text shows only dates, never forgotten content. Any answer other than the restored log's own date keeps the restore pending: the owner is told the backup predates the last forget and is offered a newer backup if one exists. A same-machine restore with a TPM anchor needs no text.
 
