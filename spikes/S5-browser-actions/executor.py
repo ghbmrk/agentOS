@@ -266,6 +266,13 @@ class Executor:
             self._confine()
         except Exception:
             pass
+        try:
+            # Every reply names the page it ended on, so the broker gate can check
+            # confinement after actions too (CRED-10 G4); it stops the executor on
+            # an ok reply without one.
+            res["url"] = P.redact_text(self.page.url)[0]
+        except Exception:
+            res.pop("url", None)
         if self.refused:
             res["refused_navigations"] = list(dict.fromkeys(self.refused))
             self.refused = []
