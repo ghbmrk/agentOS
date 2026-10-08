@@ -3,6 +3,7 @@ package apply
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -74,24 +75,47 @@ func (a *activator) Booted(context.Context) (Boot, error) {
 	return a.boot, nil
 }
 
-// pipeline is the change pipeline's staged-adoption hooks.
+// pipeline is the change pipeline's staged-adoption hooks, with their
+// contract (SR3-4): settling an adoption again the same way is a success
+// that changes nothing, the other way is refused. confirmErr and failErr
+// fail the next call with no effect.
 type pipeline struct {
-	mu        sync.Mutex
-	confirmed []string
-	failed    []string
+	mu         sync.Mutex
+	confirmed  []string
+	failed     []string
+	confirmErr error
+	failErr    error
 }
 
 func (p *pipeline) ConfirmStaged(ref string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.confirmed = append(p.confirmed, ref)
+	if err := p.confirmErr; err != nil {
+		p.confirmErr = nil
+		return err
+	}
+	if slices.Contains(p.failed, ref) {
+		return errors.New("fell back")
+	}
+	if !slices.Contains(p.confirmed, ref) {
+		p.confirmed = append(p.confirmed, ref)
+	}
 	return nil
 }
 
 func (p *pipeline) StageFailed(_ context.Context, ref string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.failed = append(p.failed, ref)
+	if err := p.failErr; err != nil {
+		p.failErr = nil
+		return err
+	}
+	if slices.Contains(p.confirmed, ref) {
+		return errors.New("confirmed")
+	}
+	if !slices.Contains(p.failed, ref) {
+		p.failed = append(p.failed, ref)
+	}
 	return nil
 }
 

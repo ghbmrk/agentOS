@@ -272,6 +272,9 @@ type Adoption struct {
 	// Staged marks an image change written to the inactive slot and not
 	// yet confirmed by the update code after boot (UPD-1).
 	Staged bool `json:"staged,omitempty"`
+	// Confirmed marks a staged image the update code confirmed booted;
+	// it stays set if the adoption is later undone (SR3-4).
+	Confirmed bool `json:"confirmed,omitempty"`
 	// Reverted names why the adoption was undone ("owner", "regression",
 	// "security", "fallback"), empty while it is active.
 	Reverted string `json:"reverted,omitempty"`

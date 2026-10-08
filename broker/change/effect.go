@@ -385,22 +385,60 @@ func (p *Pipeline) revert(ctx context.Context, ref, origin, why string) error {
 }
 
 // ConfirmStaged records that a staged image booted and passed its health
-// check (UPD-1); the update code calls it.
-func (p *Pipeline) ConfirmStaged(ref string) error {
+// check (UPD-1); the update code calls it with the adoption's exact ID,
+// since an owner-facing ID can be reused. Confirming it again is a
+// success that changes nothing, so the update code can retry until it
+// has recorded the answer (SR3-4). A failed save changes nothing either.
+func (p *Pipeline) ConfirmStaged(id string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	a := p.adoptionLocked(ref)
-	if a == nil || !a.Staged || a.Reverted != "" {
-		return fmt.Errorf("change: %s is not a staged adoption", ref)
+	a := p.adoptionByIDLocked(id)
+	switch {
+	case a != nil && a.Confirmed:
+		return nil
+	case a == nil || !a.Staged || a.Reverted != "":
+		return fmt.Errorf("change: %s is not a staged adoption", id)
 	}
-	a.Staged = false
+	listed := a.Listed
+	a.Staged, a.Confirmed = false, true
 	a.Listed = false // the digest says it is now installed
-	return p.saveLocked()
+	if err := p.saveLocked(); err != nil {
+		a.Staged, a.Confirmed, a.Listed = true, false, listed
+		return err
+	}
+	return nil
 }
 
-// StageFailed reverts a staged image that fell back by boot counting.
-func (p *Pipeline) StageFailed(ctx context.Context, ref string) error {
-	return p.revert(ctx, ref, OriginPipeline, WhyFallback)
+// StageFailed reverts a staged image that fell back by boot counting, by
+// the adoption's exact ID. One already undone, by a fallback or by the
+// owner, is a success that changes nothing, so the update code can retry
+// (SR3-4); a confirmed image never fell back.
+func (p *Pipeline) StageFailed(ctx context.Context, id string) error {
+	p.mu.Lock()
+	a := p.adoptionByIDLocked(id)
+	var err error
+	switch {
+	case a == nil || a.Confirmed || (!a.Staged && a.Reverted == ""):
+		err = fmt.Errorf("change: %s is not a staged adoption", id)
+	case a.Reverted != "":
+		p.mu.Unlock()
+		return nil
+	}
+	p.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	return p.revert(ctx, id, OriginPipeline, WhyFallback)
+}
+
+// adoptionByIDLocked finds an adoption by its exact ID only.
+func (p *Pipeline) adoptionByIDLocked(id string) *Adoption {
+	for _, a := range p.st.Adoptions {
+		if a.ID == id {
+			return a
+		}
+	}
+	return nil
 }
 
 // SetAutoAdopt turns the CHG-6 standing grant off (the owner's text is
