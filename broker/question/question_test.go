@@ -537,7 +537,7 @@ func TestAnswersCannotCarryCodes(t *testing.T) {
 		// Whatever the channel would withhold as secret-shaped (C1).
 		"Q100 sk-live-abc"} {
 		reply, ok := r.answer(a)
-		if !ok || !strings.Contains(reply, "only for the box") {
+		if !ok || !strings.Contains(reply, "only for me") {
 			t.Fatalf("%q: reply %q %v", a, reply, ok)
 		}
 	}
@@ -553,7 +553,7 @@ func TestAnswersCannotCarryCodes(t *testing.T) {
 		"Q100 great sweet happy dance", "Q100 between 9:30, 10:00",
 		"Q100 05/10/2026", "Q100 12/31/2026", "Q100 the 2026/27 season", "Q100 2026-10-05 at 14:30", "Q100 9:30-10:00",
 		"Q100 1250 pounds", "Q100 +44 7700 900123", "Q100 from 1990-2026", "Q100 9:30, 9:45, 10:00"} {
-		if reply, _ := r.answer(a); strings.Contains(reply, "only for the box") {
+		if reply, _ := r.answer(a); strings.Contains(reply, "only for me") {
 			t.Fatalf("%q refused: %q", a, reply)
 		}
 	}

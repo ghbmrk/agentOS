@@ -30,7 +30,7 @@ func TestLoopsAreOnByDefaultAndSaidInOneLine(t *testing.T) {
 		t.Fatalf("spare meter cap %+v, want the default budget", limit)
 	}
 	line := DefaultsLine(set.SpareCalls)
-	if strings.Count(line, ".") != 1 || !strings.Contains(line, "LOOPS OFF") || !strings.Contains(line, "100 AI calls a day") {
+	if strings.Count(line, ".") != 1 || !strings.Contains(line, "LOOPS OFF") || !strings.Contains(line, "100 AI calls a day") || !strings.Contains(line, "and check for updates") {
 		t.Fatalf("defaults line %q", line)
 	}
 }
