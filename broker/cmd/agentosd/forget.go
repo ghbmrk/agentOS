@@ -540,7 +540,7 @@ type forgetLogger interface {
 	Append(goal string, at, since time.Time, agent bool) error
 }
 
-// logForget appends a done forget to the forget log, reporting whether it
+// logForget appends an approved forget to the forget log, reporting whether it
 // holds; a failure leaves the done text's caveat.
 func (f *ownerForget) logForget(goal string, since time.Time, agent bool) bool {
 	if f.forgetLog == nil {
@@ -603,8 +603,12 @@ func (f *ownerForget) executeAgent(ctx context.Context, in journal.Intent) journ
 // agentBack takes the agent back for an approved item 2 (id) and tells
 // the owner how it went. One it cannot take back now is owed
 // (W3-forget-b2c): it succeeds, so the journal holds it, and resumeAgent
-// takes it back at a later open of recall once it can.
+// takes it back at a later open of recall once it can. Each is in the
+// forget log before the owner is told, so a restore takes the agent back
+// too, done or owed (security 4a on #427); one logged twice is taken back
+// once (resumeRestored).
 func (f *ownerForget) agentBack(ctx context.Context, id string, since time.Time) journal.Outcome {
+	f.logForget(grants.ForgetAgentGoal(id), since, true)
 	a := f.agent.Load()
 	if a == nil {
 		f.inform(forgetAgentNoAgent)
@@ -613,12 +617,10 @@ func (f *ownerForget) agentBack(ctx context.Context, id string, since time.Time)
 	err := a.takeBack(ctx, since, true)
 	switch {
 	case err == nil:
-		f.logForget(grants.ForgetAgentGoal(id), since, true)
 		f.inform(forgetAgentDone)
 		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "taken back"}
 	case errors.Is(err, recalltool.ErrCarried):
 		log.Printf("forget: agent take-back: %v", err)
-		f.logForget(grants.ForgetAgentGoal(id), since, true) // recall owes it
 		f.inform(forgetAgentNotYet)
 		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "taking back; recall retries"}
 	case errors.Is(err, recalltool.ErrNotOpen) && f.whenOpen != nil:
@@ -677,12 +679,10 @@ func (f *ownerForget) carryAgent(ctx context.Context, id string, since time.Time
 		err := a.takeBack(ctx, since, true)
 		switch {
 		case err == nil:
-			f.logForget(grants.ForgetAgentGoal(id), since, true)
 			f.inform(forgetAgentDone)
 			return
 		case errors.Is(err, recalltool.ErrCarried):
 			log.Printf("forget: agent take-back: %v", err)
-			f.logForget(grants.ForgetAgentGoal(id), since, true) // recall owes it
 			return
 		}
 		log.Printf("forget: agent take-back not saved yet: %v", err)

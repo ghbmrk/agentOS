@@ -155,3 +155,47 @@ func TestForgetItem2OwedTextsSayWhatRemains(t *testing.T) {
 		t.Fatalf("steps: %q, %q", forgetAgentNoAgent, forgetAgentNotOpen)
 	}
 }
+
+// Security 4a on #427 (CAP-3): an owed take-back is in the forget log
+// once the owner is told it will be done, so a backup restored before it
+// was done still takes the agent back, once.
+func TestForgetItem2OwedSurvivesARestore(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		setup func(*forgetRig, *fakeWork)
+	}{
+		{"no agent machine", func(r *forgetRig, _ *fakeWork) { r.f.agent.Store(nil) }},
+		{"recall off", func(_ *forgetRig, w *fakeWork) { w.err = recalltool.ErrNotOpen }},
+		{"recall not open yet", func(r *forgetRig, w *fakeWork) { w.err = recalltool.ErrNotOpen; r.f.whenOpen = func() {} }},
+		{"not saved", func(r *forgetRig, w *fakeWork) {
+			w.err = errors.New("disk full")
+			r.f.sleep = func(context.Context, time.Duration) bool { return false }
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			w := &fakeWork{worked: true, ok: true}
+			r, in := owedRig(t, w)
+			fl := &fakeForgetLog{}
+			r.f.forgetLog = fl
+			c.setup(r, w)
+			since, _ := forgetSince(in.ID)
+			if out := r.f.Execute(context.Background(), in, 1); out.Result != journal.ResultSucceeded {
+				t.Fatalf("%+v", out)
+			}
+			if len(fl.back) != 1 || !fl.back[0].Equal(since) {
+				t.Fatalf("logged %v %v", fl.got, fl.back)
+			}
+			// The restore: the journal is the backup's, without item 2;
+			// the forget log's take-back is replayed once recall opens.
+			after := newForgetRig(t)
+			w2 := &fakeWork{worked: true, ok: true}
+			after.withAgent(w2)
+			after.f.restored = fl.back
+			after.f.resumeAgent(context.Background())
+			after.f.resumeAgent(context.Background())
+			if len(w2.backs) != 1 || !w2.backs[0].Equal(since) || !w2.asked[0] {
+				t.Fatalf("after the restore: took back %v %v", w2.backs, w2.asked)
+			}
+		})
+	}
+}
