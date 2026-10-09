@@ -418,8 +418,8 @@ func (p stepProgress) moved() bool { return p.baseline >= 0 && p.execs > p.basel
 const hangFile = "hang.json"
 
 // readHangs reads t's hang record: detail to producing binary digest. A
-// missing record is empty; one that is not a regular file owned by this
-// process's user is refused, never trusted.
+// missing record is empty; one that is not a regular file (a link) is
+// refused, never trusted.
 func readHangs(t Target) (map[string]string, error) {
 	p := filepath.Join(t.Dir, hangFile)
 	fi, err := os.Lstat(p)
@@ -428,8 +428,8 @@ func readHangs(t Target) (map[string]string, error) {
 	} else if err != nil {
 		return nil, err
 	}
-	if st, ok := fi.Sys().(*syscall.Stat_t); !fi.Mode().IsRegular() || !ok || int(st.Uid) != os.Geteuid() {
-		return nil, fmt.Errorf("loop7: %s is not a file of mine", p)
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("loop7: %s is not a regular file", p)
 	}
 	b, err := os.ReadFile(p)
 	if err != nil {
