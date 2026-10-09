@@ -24,14 +24,18 @@ var _ journal.Executor = (*Adapter)(nil)
 // the message, its state before, and what the agent set (ADP-2: the
 // broker journals the prior state with each one). Undo reads it back.
 type Change struct {
-	Op      string   `json:"op"`
-	Record  string   `json:"record"`
-	Sender  string   `json:"sender,omitempty"`
-	From    string   `json:"from"`         // folder before
-	To      string   `json:"to,omitempty"` // folder after, if moved
-	Before  []string `json:"before,omitempty"`
-	Added   []string `json:"added,omitempty"`
-	Removed []string `json:"removed,omitempty"`
+	Op     string `json:"op"`
+	Record string `json:"record"`
+	Sender string `json:"sender,omitempty"`
+	From   string `json:"from"` // folder before
+	// Validity and UID identify the message in From as the effect found
+	// it (SR3-5): with From, its remote identity.
+	Validity uint32   `json:"validity,omitempty"`
+	UID      uint32   `json:"uid,omitempty"`
+	To       string   `json:"to,omitempty"` // folder after, if moved
+	Before   []string `json:"before,omitempty"`
+	Added    []string `json:"added,omitempty"`
+	Removed  []string `json:"removed,omitempty"`
 	// Alert marks an effect on a message the alert guard caught that ran
 	// all the same (a label or star), for the digest's guard hits.
 	Alert bool `json:"alert,omitempty"`
@@ -69,7 +73,13 @@ func (a *Adapter) Execute(ctx context.Context, in journal.Intent, attempt int) j
 		return notApplied(err)
 	}
 	ch := Change{Op: o.Name, Record: pl.msg.MessageID, Sender: pl.msg.From, From: pl.msg.Folder,
-		Before: sorted(pl.msg.Flags), Alert: pl.alert && !pl.hides}
+		Validity: pl.msg.Validity, UID: pl.msg.UID, Before: sorted(pl.msg.Flags), Alert: pl.alert && !pl.hides}
+	// Each mutation acts on the message planOrganize read and guarded,
+	// by its full identity: if the folder was rebuilt since, the store
+	// refuses (ErrValidity) before acting, and nothing is retried by the
+	// old UID. Refused before any change, the effect did not happen; a
+	// later attempt resolves the record again through the gate.
+	changed := false
 	for _, f := range pl.add {
 		if !has(pl.msg.Flags, f) {
 			ch.Added = append(ch.Added, f)
@@ -81,9 +91,10 @@ func (a *Adapter) Execute(ctx context.Context, in journal.Intent, attempt int) j
 		}
 	}
 	if len(ch.Added)+len(ch.Removed) > 0 {
-		if err := a.cfg.Store.SetFlags(ctx, pl.msg.Folder, pl.msg.UID, ch.Added, ch.Removed); err != nil {
-			return unknown(err)
+		if err := a.cfg.Store.SetFlags(ctx, pl.msg.Ref(), ch.Added, ch.Removed); err != nil {
+			return unknownUnless(err, changed)
 		}
+		changed = true
 	}
 	if pl.to != "" {
 		if strings.HasPrefix(pl.to, Namespace) {
@@ -91,8 +102,8 @@ func (a *Adapter) Execute(ctx context.Context, in journal.Intent, attempt int) j
 				return unknown(err)
 			}
 		}
-		if err := a.cfg.Store.Move(ctx, pl.msg.Folder, pl.msg.UID, pl.to); err != nil {
-			return unknown(err)
+		if err := a.cfg.Store.Move(ctx, pl.msg.Ref(), pl.to); err != nil {
+			return unknownUnless(err, changed)
 		}
 		ch.To = pl.to
 	}
@@ -143,7 +154,8 @@ func (a *Adapter) Reconcile(ctx context.Context, in journal.Intent, attempt int)
 		done = done && !has(pl.msg.Flags, f)
 	}
 	if done {
-		return succeeded(Change{Op: o.Name, Record: pl.msg.MessageID, Sender: pl.msg.From, From: pl.msg.Folder, Reconciled: true})
+		return succeeded(Change{Op: o.Name, Record: pl.msg.MessageID, Sender: pl.msg.From, From: pl.msg.Folder,
+			Validity: pl.msg.Validity, UID: pl.msg.UID, Reconciled: true})
 	}
 	return notApplied(errors.New("mail: the message is not in the state the effect sets"))
 }
@@ -373,12 +385,28 @@ func notApplied(err error) journal.Outcome {
 	return journal.Outcome{Result: journal.ResultNotApplied, Evidence: reason(err)}
 }
 
+// unknownUnless is a mutation's failure: not applied when the store
+// refused a stale identity before anything changed, else unknown. A
+// refusal after flags changed says so, since ErrValidity's own wording
+// claims nothing changed.
+func unknownUnless(err error, changed bool) journal.Outcome {
+	switch {
+	case errors.Is(err, ErrValidity) && !changed:
+		return notApplied(err)
+	case errors.Is(err, ErrValidity):
+		return journal.Outcome{Result: journal.ResultUnknown, Evidence: errValidityAfterFlags}
+	}
+	return unknown(err)
+}
+
+const errValidityAfterFlags = "mail: the folder was rebuilt after the labels were changed; the move did not happen"
+
 func unknown(err error) journal.Outcome {
 	return journal.Outcome{Result: journal.ResultUnknown, Evidence: reason(err)}
 }
 
 func reason(err error) string {
-	for _, e := range []error{ErrNotFound, ErrTarget, ErrAccount, ErrOp} {
+	for _, e := range []error{ErrNotFound, ErrTarget, ErrAccount, ErrOp, ErrValidity} {
 		if errors.Is(err, e) {
 			return e.Error()
 		}
