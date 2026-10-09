@@ -106,12 +106,13 @@ Started before spec v0.12 on parts unlikely to change; each package lists its sp
 | P3-1a | [Replay evaluator](briefs/P3-1a.md) | P3-1, P1-7 | merged (30d601c; broker/replay) |
 | P3-2 | [Loop scheduler and Loop 1](briefs/P3-2.md) | P3-1, P3-1a | merged (0302131; #189; broker/loops) |
 | P3-4 | [Loop 2, self-securing, defensive part, as a scheduler Source](briefs/P3-4.md) | P3-2 | merged (c5feca1; broker/loops Guard) |
-| P3-4b-1 | [Loop 2 repairs an injected finding: contain, minimized regression, fix qualified against linked cases; LOOP-10 rejections; LOOP-3 unmeasured](briefs/P3-4b.md#p3-4b-1-product-side) | P3-4 | queued (tier A; rebriefed against D-070) |
+| P3-4b-1 | [Loop 2 repairs an injected finding: contain, minimized regression, fix qualified against linked cases; LOOP-10 rejections; LOOP-3 unmeasured](briefs/P3-4b.md#p3-4b-1-product-side) | P3-4 | merged (1d4446b; #464) |
+| P3-4b-1b | [Loop 2 loop-side follow-ups to #464: close reported findings the tree comes to pass, finding-ID collision, crash resume, wording scan, config-probe fixes](briefs/P3-4b.md#p3-4b-1b-loop-side-follow-ups-to-464) | P3-4b-1 | queued (tier A) |
 | P3-4b-2 | [A11 loop 2 qualification harness: seed catalog, held-back variants, harness-chosen seed](briefs/P3-4b.md#p3-4b-2-a11-qualification-harness) | P3-4b-1 | queued (tier A) |
 | P3-4b-5 | [Model-backed loop 2 fixer: answers the §11 fix-candidate request through Loop 1's builder, wired in the daemon](briefs/P3-4b.md#p3-4b-5-model-backed-loop-2-fixer) | P3-4b-1, W3-builder-ship | queued (tier A) |
 | OP9-status | [OP-9: STATUS names every capability that is off or can't run (brief to be written)](briefs/P3-4b.md#op9-status-owner-row-for-op-9-not-yet-briefed) | P3-2, P3-4 | queued (needs its own brief) |
-| P3-4b-3 | [LOOP-7 off-the-shelf: socket and action-protocol fuzz targets, in-guest socket probe](briefs/P3-4b.md#p3-4b-3-loop-7-fuzzing-and-socket-probes) | P3-4b-1 | queued (tier A declared) |
-| P3-4b-4 | [LOOP-7 off-the-shelf: continuous canary rounds, published injection corpora, tamper and exhaustion probes](briefs/P3-4b.md#p3-4b-4-loop-7-canary-rounds-corpora-tamper-and-exhaustion-probes) | P3-4b-1 | queued (tier A declared) |
+| P3-4b-3 | [LOOP-7 off-the-shelf: socket and action-protocol fuzz targets, in-guest socket probe](briefs/P3-4b.md#p3-4b-3-loop-7-fuzzing-and-socket-probes) | P3-4b-1b | queued (tier A declared) |
+| P3-4b-4 | [LOOP-7 off-the-shelf: continuous canary rounds, published injection corpora, tamper and exhaustion probes](briefs/P3-4b.md#p3-4b-4-loop-7-canary-rounds-corpora-tamper-and-exhaustion-probes) | P3-4b-1b | queued (tier A declared) |
 | P3-5 | [Loop 3, maintenance, as a scheduler Source](briefs/P3-5.md) | P3-2, P4-3 | merged (4672fe8; broker/maintain) |
 | P3-3 | [Recall index and event bus](briefs/P3-3.md) | P1-1, P1-2 | merged (5980098; broker/recall) |
 | P3-7 | [Goal IDs on guest intents](briefs/P3-7.md) | P1-7 | merged (847ea23; broker/guest goal.go) |
