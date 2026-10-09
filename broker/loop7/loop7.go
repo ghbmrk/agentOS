@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -708,17 +709,50 @@ func runName() (string, error) {
 const killWait = 5 * time.Second
 
 // empty kills every process left in the jail's leaf and waits until the
-// kernel reports it empty (cgroup.kill). With no jail or no leaf (tests,
-// dev builds) there is nothing to empty: agentosd always sets the leaf
-// (L7-6), and without one a child that leaves its process group outlives
-// its run.
+// kernel reports it empty. It freezes the leaf, so nothing in it can fork,
+// SIGKILLs each process cgroup.procs lists (a fatal signal reaches a
+// frozen task), thaws it and waits for populated 0. It does not write
+// cgroup.kill: on CI's kernel a child started into a group by
+// CLONE_INTO_CGROUP after a cgroup.kill there is killed at once (on #588
+// every jailed child then died with "signal: killed"). With no jail or no
+// leaf (tests, dev builds) there is nothing to empty: agentosd always sets
+// the leaf (L7-6), and without one a child that leaves its process group
+// outlives its run.
 func (j *Jail) empty() error {
 	if j == nil || j.Leaf == "" {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), killWait)
 	defer cancel()
-	return (&cgroup.Group{Path: j.Leaf}).Kill(ctx)
+	g := &cgroup.Group{Path: j.Leaf}
+	if err := g.Freeze(ctx); err != nil {
+		g.Thaw()
+		return err
+	}
+	b, err := os.ReadFile(filepath.Join(j.Leaf, "cgroup.procs"))
+	for _, f := range strings.Fields(string(b)) {
+		if pid, perr := strconv.Atoi(f); perr == nil && pid > 0 {
+			syscall.Kill(pid, syscall.SIGKILL)
+		}
+	}
+	if terr := g.Thaw(); err == nil {
+		err = terr
+	}
+	if err != nil {
+		return err
+	}
+	t := time.NewTicker(time.Millisecond)
+	defer t.Stop()
+	for {
+		if p, err := g.Populated(); err != nil || !p {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("loop7: fuzz leaf %s did not empty: %w", j.Leaf, ctx.Err())
+		case <-t.C:
+		}
+	}
 }
 
 // Jail confines fuzz children (P3-4b-3r-confine; F2, F7): a decoder bug
