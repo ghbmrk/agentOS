@@ -28,7 +28,7 @@ Read SPEC.md for what to build and PLAN.md for how. This file is the working con
 - The only hard limit is the subscription (usage credits off). Target: ~100% of the weekly limit used by each reset, paced evenly at ~14% a day so it never runs out early (Mark, 2026-10-04); these are targets: spend where the next unit of work has clear value, don't idle to stay on pace, and don't spend just because budget remains.
 - Near a session-window limit, finish the current step cleanly; start heavy new work after the reset.
 - Keep contexts small: brief + touched files. Summarize CI logs instead of pasting them.
-- `.claude/settings.json` compacts at 120k tokens (above a 20k brief plus touched files, below the 150k package ceiling); don't raise it.
+- `.claude/settings.json` compacts at 150k tokens (above a 20k brief plus touched files, at or below the 150k package ceiling); don't raise it.
 - Size each package so its brief is 20k tokens or less and it finishes under 150k; split it before starting otherwise.
 - One package or one review per session. Start a fresh session with a hand-off packet of 20k tokens or less (OPERATING §5) rather than reviving a session over ~150k that sat idle more than an hour.
 - Mechanical subagent work (search, log triage, wording sweeps, test scaffolding) passes `model: "haiku"` and stays under 100k tokens, above which Haiku costs 5x; use `"sonnet"` when it needs judgment. Reviews of security-critical paths keep the session's model.

@@ -1,6 +1,6 @@
 {
-  "autoCompactWindow": 120000,
+  "autoCompactWindow": 150000,
   "env": {
-    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "120000"
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "150000"
   }
 }
