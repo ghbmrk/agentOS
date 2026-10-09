@@ -38,7 +38,7 @@ var fuzzNames = map[string]string{
 const probePrefix = "socket."
 
 // probeName is what the socket probe tests.
-const probeName = "the agent's connection to me"
+const probeName = "an agent machine's connection to me"
 
 // canaryNames maps a canary registry target to where its planted secret
 // must never be.

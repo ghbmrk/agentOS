@@ -144,7 +144,7 @@ func lowCanary() Finding {
 func TestLoop7TextsAreInPlainWords(t *testing.T) {
 	want := map[Check]string{
 		CheckFuzz:   "My self-test found a crash in the check that reads agent requests. The fix comes with an update.",
-		CheckProbe:  "My self-test of the agent's connection to me failed. The fix comes with an update.",
+		CheckProbe:  "My self-test of an agent machine's connection to me failed. The fix comes with an update.",
 		CheckCanary: "My leak self-test found a planted test secret in what an agent machine can send out.",
 		CheckCorpus: "My self-test of the code filter failed: it missed a test code hidden inside a known attack text. Nothing real was exposed.",
 	}
