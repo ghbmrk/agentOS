@@ -503,16 +503,21 @@ func (f *ownerForget) Execute(ctx context.Context, in journal.Intent, _ int) jou
 		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "not saved"}
 	}
 	// The tombstone holds: the replay at start finishes it if this
-	// process does not.
-	go f.retry(context.WithoutCancel(ctx), goal, since, undone, owedErr == nil)
+	// process does not. It is in the forget log before the owner hears
+	// anything of it and before retry starts, so a backup restored while
+	// it retries forgets the task again (CAP-3; L3 release 3 on #427).
+	logged := f.logForget(goal, time.Time{}, false)
+	go f.retry(context.WithoutCancel(ctx), goal, since, undone, owedErr == nil, logged)
 	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "forgetting; retrying"}
 }
 
 // retry forgets goal again with backoff until every save holds, saying
 // once that it is not done yet when that takes forgetNotYet. Until the
 // owed done text is saved (owedSaved), each pass saves it first, so it is
-// on disk before the forget can finish (security S2 on #425).
-func (f *ownerForget) retry(ctx context.Context, goal string, since time.Time, undone int, owedSaved bool) {
+// on disk before the forget can finish (security S2 on #425); until its
+// forget log entry holds (logged), each pass appends it again, so the
+// goal is appended once.
+func (f *ownerForget) retry(ctx context.Context, goal string, since time.Time, undone int, owedSaved, logged bool) {
 	if f.retried != nil {
 		defer f.retried()
 	}
@@ -530,9 +535,11 @@ func (f *ownerForget) retry(ctx context.Context, goal string, since time.Time, u
 				owedSaved = true
 			}
 		}
+		if !logged {
+			logged = f.logForget(goal, time.Time{}, false)
+		}
 		err := f.forget(goal)
 		if err == nil {
-			logged := f.logForget(goal, time.Time{}, false)
 			f.done(ctx, goal, forgetDone(undone, false, logged), owedForget{Since: since, Undone: undone, Logged: logged})
 			return
 		}

@@ -18,7 +18,7 @@ var banned = regexp.MustCompile(`(?i)\b(find|finds|hunt|hunts|detect|detects|det
 
 // ownerTables are the files holding loop 2's and onboarding's owner text:
 // notices, digest and STATUS lines, and the LOOP-0 defaults line.
-var ownerTables = []string{"secure.go", "report.go", "settings.go", "scheduler.go", daemonLoop2, daemonLearn}
+var ownerTables = []string{"secure.go", "report.go", "plainname.go", "settings.go", "scheduler.go", daemonLoop2, daemonLearn}
 
 // daemonLoop2 holds the daemon's loop 2 owner text, loop2NotRun among it;
 // daemonLearn wires loop 2 into the daemon and adds owner text of its own.

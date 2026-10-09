@@ -31,7 +31,7 @@ func TestARuleLessFuzzFindingIsReportedAndResolved(t *testing.T) {
 	if e := r.evidenceFor(t, id); e.Finding.Detail != fuzzFinding().Detail {
 		t.Fatalf("evidence %+v", e)
 	}
-	if len(r.texts) != 1 || !strings.Contains(r.texts[0], "Fuzz test sockets.FuzzRequest") {
+	if len(r.texts) != 1 || !strings.Contains(r.texts[0], "a crash in the check that reads agent requests") {
 		t.Fatalf("texts %q", r.texts)
 	}
 	if s := r.g.Status(); !strings.Contains(s, waitUpdate) || strings.Contains(s, waitNoTest) {

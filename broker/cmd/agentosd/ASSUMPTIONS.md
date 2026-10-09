@@ -93,6 +93,17 @@ Built for W3-forget-b2c-2 ("Item 2's texts are owed until they send") against UX
 | F15 | **On restart `finishOwed` tells each `Agent` entry once**, through `done`, without reading `f.agent`, `Handled` or recall; `resumeAgent` skips the goal because recall reports it handled. A crash between the send and the drop repeats the text (as F4). A tampered or replayed entry can only cause a repeated or spurious "taken back" text, and writing one needs the daemon's uid. | brief Work 3; threat check | Check recall's record before telling, at the cost of reading recall state. |
 | F16 | **Promises are not owed.** `forgetAgentNotYet`, `NoAgent`, `NotTaken`, `NotOpen` and `WhenOpen` go through `say` once and a failed send is logged, as `inform` did; the done text that follows them is owed. | brief Work 1 | Owe each promise as well. |
 
+## Item 1's forget log entry while it retries (W3-forget-b2c-f3)
+
+Built for W3-forget-b2c-f3 against CAP-3 and CH-12. Covers `Execute`, `retry` and `logForget` in `forget.go`.
+
+| ID | Assumption | Source | If wrong |
+|---|---|---|---|
+| R1 | **The entry is appended only after the tombstone holds**, before any text and before `retry` starts. A forget whose tombstone failed (`errNotTombstoned`, told "Not forgotten") has no entry, so a restore never forgets a task the owner was told was not forgotten; if a later save writes its tombstone (SHOULD 4 on #182), `finishOwed` appends it at the next start. What is still open: a crash between the tombstone save and the append, followed by a restore of an older backup before the box starts again, loses the forget; a start in between replays the live tombstone and `finishOwed` appends it. The done path has had the same window since W3-forget-b1. | brief design constraints (builder's choice of the two) | Append before `f.forget` and record the over-forget of an untombstoned task instead. |
+| R2 | **One append per goal per `Execute` and its `retry`.** `retry` appends again on each pass only while no append has held; the done text's `Logged` reports the one that held, so a forget finished by `retry` whose early append held says a restore won't bring it back. The retry entry keeps zero `since` and `agent` false, as before; the done path's entry is unchanged (its `since`, `agent` = taken back without asking). | F3-2; CH-12 | `TestForgetAppendsOncePerForget` fails. |
+| R3 | **The owed entry keeps `Logged` false after the early append**, so a crash during `retry` makes `finishOwed` append the goal again at the next start. The replay is idempotent (`forgotten.has`); the cost is a duplicate log entry. | LATER `W3-forget-b2c-f3 l1` | Save `Logged` into the owed entry after the append (`finishOwed` is outside this package). |
+| R4 | **A restore that replays a still-retrying forget finishes it silently.** The restored owed file lacks the goal, so the owner, who may hold `forgetNotSaved` ("will text you when it's done"), gets no done text. The task is forgotten; the promise is not kept. | brief "Not in this package"; release, folded into BOARD W3-forget-b2c-f1 (L3 point 2 on #559) | Owe the done text from the forget log's entry on restore, as f1 does for item 2. |
+
 ## LOOP-7 fuzz rounds (P3-4b-3a)
 
 Built for P3-4b-3a against LOOP-7, LOOP-9, LOOP-1 and ARC-2. Covers `fuzzTargets`, the `loop7.Source` built in `openLearning` (`learn.go`) and the `-loop7` flag (`main.go`).
