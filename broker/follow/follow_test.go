@@ -397,16 +397,16 @@ func TestOSS10wReconcileAfterARestart(t *testing.T) {
 	}
 }
 
-// failingStore fails FollowRoot after (written) or instead of the real
+// failingStore fails FollowFork after (written) or instead of the real
 // switch, and can fail reading the trusted root.
 type failingStore struct {
 	*update.Store
 	written, unreadable bool
 }
 
-func (s failingStore) FollowRoot(root []byte, approved, name string, o update.Options) error {
+func (s failingStore) FollowFork(root []byte, links [][]byte, shipped []byte, approved, name string, o update.Options) error {
 	if s.written {
-		if err := s.Store.FollowRoot(root, approved, name, o); err != nil {
+		if err := s.Store.FollowFork(root, links, shipped, approved, name, o); err != nil {
 			return err
 		}
 	}

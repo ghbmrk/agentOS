@@ -374,7 +374,7 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | OSS-6e | [Floor across restarts](briefs/OSS-6e.md) | OSS-6c | in review (A) |
 | OSS-10w | [Follow-fork executor wiring](briefs/OSS-10w.md) | OSS-9, HOST-1b, P2-2w | merged (#323) (A) |
 | OSS-10w2 | [Follow-fork wiring part 2](briefs/OSS-10w2.md) | OSS-10w, P2-2w b, P2-2w d | in review (A) |
-| OSS-10w-r2 | Switch-back size bound: the owner socket's 64 KiB `sockets.MaxRequest` line, not `MaxRootChain` x `MaxRoot`, limits the root files, so a long chain fails at transport with a generic error; align the bounds (page, `localui` total check) and give a specific message (L3 2 and Security F2 on #476) | OSS-10w-r | queued (needs brief) |
+| OSS-10w-r2 | Switch-back size bound: the owner socket's 64 KiB `sockets.MaxRequest` line, not `MaxRootChain` x `MaxRoot`, limits the root files, so a long chain fails at transport with a generic error; align the bounds (page, `localui` total check) and give a specific message (L3 2 and Security F2 on #476); and `update.Store.FollowRoot` with an empty name skips admission: refuse it and move `update`/`maintain` follow tests to `FollowProject`/`FollowFork` (Security 2 on #667) | OSS-10w-r | queued (needs brief) |
 | OSS-10w2u | Follow page wording: UX lens picks between the page's text and `maintain.FollowPrompt`/`FollowCheckHeading`, and the page names the current source (L3 R3 on #370) | OSS-10w2 | queued (needs brief) |
 | OSS-10w-r | [Switching back after a project root-key rotation](briefs/OSS-10w-r.md) (LATER row started at the coordinator's request; Mark confirmed it as a D-048 exception, 2026-10-09) | OSS-10w, OSS-10w2 | in review (A) |
 | IMG-1 | [Image checks for P2-1](briefs/IMG-1.md) | P2-1 (#41) | queued (P2-1 merged) |

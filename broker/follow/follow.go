@@ -38,10 +38,12 @@ const MaxHeld = 4
 
 // Store is the part of update.Store the executor uses.
 type Store interface {
-	FollowRoot(root []byte, approved, name string, o update.Options) error
 	// FollowProject switches back, checking under the store's lock that
 	// root is the project's (update.Store.FollowProject).
 	FollowProject(root []byte, links [][]byte, shipped []byte, approved string, o update.Options) error
+	// FollowFork follows a fork by name, refusing under the store's lock
+	// a root that is the project's own (update.Store.FollowFork).
+	FollowFork(root []byte, links [][]byte, shipped []byte, approved, name string, o update.Options) error
 	Following() (update.Followed, error)
 	TrustedRoot() ([]byte, error)
 	// ProjectRoot is the newest project root the box trusted: the one it
@@ -312,7 +314,11 @@ func (x *Executor) Execute(ctx context.Context, in journal.Intent, _ int) journa
 				Evidence: "switching back needs the project's own root: its root keys, or the root files that rotate to it from the last project root I trusted (" + err.Error() + ")"}
 		}
 	} else {
-		err = x.cfg.Store.FollowRoot(root, digest, name, x.options(now))
+		err = x.cfg.Store.FollowFork(root, h.chain, x.cfg.Shipped, digest, name, x.options(now))
+		if errors.Is(err, update.ErrIsProject) {
+			return journal.Outcome{Result: journal.ResultNotApplied,
+				Evidence: "this is the project's own root: switch back to the project instead of following it under a name"}
+		}
 	}
 	if err != nil {
 		if cur, rerr := x.cfg.Store.TrustedRoot(); rerr != nil || bytes.Equal(cur, root) {

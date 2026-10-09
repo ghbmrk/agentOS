@@ -165,6 +165,10 @@ func describe(b []byte, m *metadata.Metadata[metadata.RootType]) (RootSummary, e
 // (ProjectRoot). It wraps the cause where there is one.
 var ErrNotProject = errors.New("update: this root is not the project's own")
 
+// ErrIsProject: a root the anchor admits as the project's own, which is
+// switched back to, never followed under a name (FollowFork).
+var ErrIsProject = errors.New("update: this root is the project's own")
+
 // projectFile is the project's root as this box last trusted it, saved
 // when a follow leaves the project chain: the anchor a switch back walks
 // from (OSS-10w-r).
@@ -431,6 +435,32 @@ func (s *Store) FollowProject(root []byte, links [][]byte, shipped []byte, appro
 			anchor = shipped
 		}
 		return projectRoots(anchor, root, links, o)
+	})
+}
+
+// FollowFork follows root under the owner's name for it: FollowRoot with
+// a name, refused under the store's lock, after settle, when the anchor
+// (as FollowProject takes it) admits root, by itself or through links, as
+// the project's own. Followed under a name, the project's chain would
+// rotate under Check while the anchor stayed behind, so a later switch
+// back could re-trust a root the box had seen rotated out (security 4a on
+// #667).
+func (s *Store) FollowFork(root []byte, links [][]byte, shipped []byte, approved, name string, o Options) error {
+	if name == "" {
+		return errors.New("update: following a fork needs its name")
+	}
+	return s.follow(root, approved, name, o, func() ([]*metadata.Metadata[metadata.RootType], error) {
+		anchor, err := s.projectAnchor()
+		if err != nil {
+			return nil, err
+		}
+		if anchor == nil {
+			anchor = shipped
+		}
+		if _, err := projectRoot(anchor, root, links, o); err == nil {
+			return nil, ErrIsProject
+		}
+		return nil, nil
 	})
 }
 

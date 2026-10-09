@@ -5,6 +5,7 @@ package follow
 import (
 	"context"
 	"crypto/ed25519"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -283,4 +284,27 @@ func TestOSS10wrRotationDuringASwitchBackIsRefused(t *testing.T) {
 			t.Fatalf("anchor lowered: %v", err)
 		}
 	})
+}
+
+// Threat (rollback, security 4a on e14f6ad): a project root followed under
+// a name would leave the anchor behind while Check rotates that chain, so
+// a later switch back could re-trust a root the box saw revoked. A named
+// follow of a root the anchor admits as the project's is refused, checked
+// under the store's lock; switching back takes it.
+func TestOSS10wrProjectRootIsNeverFollowedByName(t *testing.T) {
+	r := newRig(t)
+	v2, k2 := rotated(t, r.shipped, r.pk)
+	v3, _ := rotated(t, v2, k2)
+	for i, d := range []string{r.describe(r.shipped), r.describe(v2), r.describeChain(v3, v2)} {
+		if out := r.run(grants.FollowIntent(fmt.Sprintf("a%d", i), "AgentOS", d)); out.Result != journal.ResultNotApplied ||
+			!strings.Contains(out.Evidence, "switch back") || !r.trusts(r.shipped) {
+			t.Fatalf("followed the project's root under a name: %+v", out)
+		}
+	}
+	if src, _ := r.store.Following(); src != (update.Followed{}) {
+		t.Fatalf("recorded a fork: %+v", src)
+	}
+	if out := r.run(grants.FollowIntent("b", "", r.describeChain(v3, v2))); out.Result != journal.ResultSucceeded || !r.trusts(v3) {
+		t.Fatalf("switching back instead: %+v", out)
+	}
 }
