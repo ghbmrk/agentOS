@@ -543,41 +543,91 @@ func TestQuiesceHoldsTheBrokersWritersForTheRound(t *testing.T) {
 	}
 }
 
-// exhaustRig is an exhaustion probe over a fake cgroup directory with all
-// limits set; press, ping and preempt are instant.
+// REQ: LOOP-7, RES-1
+//
+// What the exhaustion round covers: limits set at or under the configured
+// budget, the guest pressed, the broker answered, the machine was
+// preempted in time. Pressure stays under the limits (S36), so it does
+// not show that pressure cannot starve the broker, nor that the sandbox
+// enforces a limit once it is reached.
+
+// testBudget is the per-machine budget the exhaustion rig's broker wrote.
+var testBudget = MachineBudget{MemoryBytes: 256 << 20, Pids: 4096, DiskBytes: 64 << 20}
+
+// exhaustRig is an exhaustion probe over a fake cgroup directory whose
+// limits sit at the configured budget. Each round runs in a new machine,
+// and its guest's pressure raises every counter but those named in flat;
+// ping, preempt and the disk read are instant.
 type exhaustRig struct {
-	cg      string
-	probe   *ExhaustProbe
-	pressed []string
-	stopped bool
+	t        *testing.T
+	cg       string
+	probe    *ExhaustProbe
+	pressed  []string
+	stopped  []string
+	machines int
+	disk     int64
+	flat     map[string]bool
 }
 
 func newExhaustRig(t *testing.T) *exhaustRig {
 	t.Helper()
-	x := &exhaustRig{cg: t.TempDir()}
+	x := &exhaustRig{t: t, cg: t.TempDir(), flat: map[string]bool{}}
 	for f, v := range map[string]string{"memory.max": "268435456\n", "pids.max": "4096\n", "cpu.weight": "1\n"} {
-		if err := os.WriteFile(filepath.Join(x.cg, f), []byte(v), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		x.write(f, v)
 	}
+	x.bump(map[string]int64{"cpu": 1000, "memory": 1 << 20, "processes": 2, "disk": 4096})
 	x.probe = &ExhaustProbe{
 		Interval:       time.Hour,
 		Hold:           30 * time.Millisecond,
 		ResponseTarget: 200 * time.Millisecond,
 		PreemptTarget:  time.Second,
 		BrokerWeight:   1000,
-		Press: func(_ context.Context, kinds []string) (PressedMachine, error) {
+		Budget:         testBudget,
+		Machine: func(context.Context) (PressedMachine, error) {
+			x.machines++
+			return PressedMachine{ID: fmt.Sprintf("probe-%d", x.machines), Cgroup: x.cg, DiskBytes: 64 << 20,
+				DiskUsed: func() (int64, error) { return x.disk, nil }}, nil
+		},
+		Press: func(_ context.Context, id string, kinds []string) error {
 			x.pressed = kinds
-			return PressedMachine{ID: "probe-1", Cgroup: x.cg, DiskBytes: 64 << 20}, nil
+			up := map[string]int64{}
+			for _, k := range kinds {
+				if !x.flat[k] {
+					up[k] = map[string]int64{"cpu": 900000, "memory": 40 << 20, "processes": 16, "disk": 32 << 20}[k]
+				}
+			}
+			x.bump(up)
+			return nil
 		},
 		Ping:    func(context.Context) error { return nil },
-		Preempt: func(string) error { x.stopped = true; return nil },
+		Preempt: func(id string) error { x.stopped = append(x.stopped, id); return nil },
 	}
 	return x
 }
 
+func (x *exhaustRig) write(file, v string) {
+	x.t.Helper()
+	if err := os.WriteFile(filepath.Join(x.cg, file), []byte(v), 0o600); err != nil {
+		x.t.Fatal(err)
+	}
+}
+
+// bump raises the machine's counters by up, per pressure kind.
+func (x *exhaustRig) bump(up map[string]int64) {
+	read := func(file string) int64 {
+		n, _ := cgroupCounter(x.cg, file, "")
+		return n
+	}
+	cpu, _ := cgroupCounter(x.cg, "cpu.stat", "usage_usec")
+	x.write("cpu.stat", fmt.Sprintf("usage_usec %d\nuser_usec 0\nsystem_usec 0\n", cpu+up["cpu"]))
+	x.write("memory.current", fmt.Sprintf("%d\n", read("memory.current")+up["memory"]))
+	x.write("pids.current", fmt.Sprintf("%d\n", read("pids.current")+up["processes"]))
+	x.disk += up["disk"]
+}
+
 // LOOP-7 (exhaustion), clean run: CPU, memory, disk and process pressure
-// in a machine whose cgroup and disk are limited, the broker answering
+// that raises the machine's counters, in a machine whose cgroup and disk
+// are limited at or under the configured budget, the broker answering
 // within its response target and the machine preempted within its
 // target, reports nothing and checks every subject.
 func TestAnExhaustionRoundWithinTargetsReportsNothing(t *testing.T) {
@@ -592,22 +642,23 @@ func TestAnExhaustionRoundWithinTargetsReportsNothing(t *testing.T) {
 	if got := strings.Join(res.Checked, ","); got != "cpu,memory,disk,processes,response,preemption" {
 		t.Fatalf("checked %q", got)
 	}
-	if !x.stopped {
-		t.Fatal("the pressed machine was not preempted")
+	if !slices.Equal(x.stopped, []string{"probe-1"}) {
+		t.Fatalf("preempted %v", x.stopped)
 	}
 }
 
 // LOOP-7 control (a cgroup with no limit): memory.max and pids.max at
 // "max", a machine that weighs as much as the broker and no disk budget
-// each report a High finding through Report, named by the resource.
+// each report a High "above budget" finding through Report, named by the
+// resource.
 func TestACgroupWithNoLimitReportsExhaustionFindings(t *testing.T) {
 	x := newExhaustRig(t)
 	for f, v := range map[string]string{"memory.max": "max\n", "pids.max": "max\n", "cpu.weight": "1000\n"} {
-		os.WriteFile(filepath.Join(x.cg, f), []byte(v), 0o600)
+		x.write(f, v)
 	}
-	press := x.probe.Press
-	x.probe.Press = func(ctx context.Context, k []string) (PressedMachine, error) {
-		m, err := press(ctx, k)
+	machine := x.probe.Machine
+	x.probe.Machine = func(ctx context.Context) (PressedMachine, error) {
+		m, err := machine(ctx)
 		m.DiskBytes = 0
 		return m, err
 	}
@@ -621,21 +672,81 @@ func TestACgroupWithNoLimitReportsExhaustionFindings(t *testing.T) {
 		t.Fatalf("job %q: %+v", name, res)
 	}
 	for _, k := range []string{"cpu", "memory", "disk", "processes"} {
-		if rec, open := r.open(findingID(CheckExhaust, k, "no limit")); !open || rec.Finding.Severity != High {
+		if rec, open := r.open(findingID(CheckExhaust, k, "above budget")); !open || rec.Finding.Severity != High {
 			t.Fatalf("%s: %+v", k, rec)
 		}
 	}
-	if !x.stopped {
+	if len(x.stopped) != 1 {
 		t.Fatal("the pressed machine was not preempted")
 	}
-	// No cgroup at all is no limit on any cgroup resource.
+	// No cgroup at all is no limit on any cgroup resource, and no
+	// counters to show the guest pressed: the findings stand and the
+	// round fails.
 	x = newExhaustRig(t)
-	x.probe.Press = func(context.Context, []string) (PressedMachine, error) {
-		return PressedMachine{ID: "probe-1", DiskBytes: 1 << 20}, nil
+	x.probe.Machine = func(context.Context) (PressedMachine, error) {
+		return PressedMachine{ID: "probe-1", DiskBytes: 1 << 20, DiskUsed: func() (int64, error) { return 1, nil }}, nil
 	}
 	res2, err := x.probe.Run(ctx)
-	if err != nil || len(res2.Found) != 3 {
+	if err == nil || len(res2.Found) != 3 || len(res2.Checked) != 0 {
 		t.Fatalf("%+v %v", res2, err)
+	}
+}
+
+// LOOP-7, RES-1 (P3-4b-4c-limits; #548 Potency 2, L3 4): a limit holds
+// only when it is set and at most the configured per-machine budget. A
+// memory, process or disk limit above it is a finding, as is "max" or a
+// missing file; at or under it passes. A probe without a budget fails
+// the run closed.
+func TestLimitsAreJudgedAgainstTheConfiguredBudget(t *testing.T) {
+	ctx := context.Background()
+	for _, c := range []struct {
+		file, value, subject string
+		disk                 int64
+		found                bool
+	}{
+		{"memory.max", "17179869184\n", "memory", 64 << 20, true}, // 16 GiB against 256 MiB
+		{"memory.max", "268435457\n", "memory", 64 << 20, true},
+		{"memory.max", "268435456\n", "memory", 64 << 20, false},
+		{"memory.max", "134217728\n", "memory", 64 << 20, false},
+		{"memory.max", "max\n", "memory", 64 << 20, true},
+		{"memory.max", "", "memory", 64 << 20, true}, // missing
+		{"pids.max", "4097\n", "processes", 64 << 20, true},
+		{"pids.max", "4096\n", "processes", 64 << 20, false},
+		{"pids.max", "64\n", "processes", 64 << 20, false},
+		{"pids.max", "max\n", "processes", 64 << 20, true},
+		{"cpu.weight", "1\n", "disk", 64<<20 + 1, true},
+		{"cpu.weight", "1\n", "disk", 1 << 20, false},
+	} {
+		x := newExhaustRig(t)
+		if c.value == "" {
+			os.Remove(filepath.Join(x.cg, c.file))
+		} else {
+			x.write(c.file, c.value)
+		}
+		machine := x.probe.Machine
+		x.probe.Machine = func(ctx context.Context) (PressedMachine, error) {
+			m, err := machine(ctx)
+			m.DiskBytes = c.disk
+			return m, err
+		}
+		res, err := x.probe.Run(ctx)
+		if err != nil {
+			t.Fatalf("%s=%q disk %d: %v", c.file, c.value, c.disk, err)
+		}
+		want := 0
+		if c.found {
+			want = 1
+		}
+		if len(res.Found) != want || c.found && !(res.Found[0].Subject == c.subject && res.Found[0].Detail == "above budget" && res.Found[0].Severity == High) {
+			t.Fatalf("%s=%q disk %d: found %+v", c.file, c.value, c.disk, res.Found)
+		}
+	}
+	for _, b := range []MachineBudget{{}, {Pids: 1, DiskBytes: 1}, {MemoryBytes: 1, DiskBytes: 1}, {MemoryBytes: 1, Pids: 1}} {
+		x := newExhaustRig(t)
+		x.probe.Budget = b
+		if _, err := x.probe.Run(ctx); err == nil || x.machines != 0 {
+			t.Fatalf("budget %+v: ran (%d machines), %v", b, x.machines, err)
+		}
 	}
 }
 
@@ -655,12 +766,12 @@ func TestSlowResponseOrPreemptionUnderPressureIsAFinding(t *testing.T) {
 	}
 }
 
-// LOOP-7: a round whose pressure, ping or preemption fails is an error
-// that closes nothing; the machine is still preempted.
+// LOOP-7: a round whose machine, pressure, ping or preemption fails is an
+// error that closes nothing; a machine is still preempted.
 func TestAnExhaustionRoundFailsClosed(t *testing.T) {
 	x := newExhaustRig(t)
 	x.probe.Ping = func(context.Context) error { return errors.New("broker gone") }
-	if _, err := x.probe.Run(context.Background()); err == nil || !x.stopped {
+	if _, err := x.probe.Run(context.Background()); err == nil || len(x.stopped) != 1 {
 		t.Fatalf("err %v, stopped %v", err, x.stopped)
 	}
 	x = newExhaustRig(t)
@@ -669,10 +780,123 @@ func TestAnExhaustionRoundFailsClosed(t *testing.T) {
 		t.Fatal("a failed preemption passed the round")
 	}
 	x = newExhaustRig(t)
-	x.probe.Press = func(context.Context, []string) (PressedMachine, error) {
-		return PressedMachine{}, errors.New("no room")
+	x.probe.Press = func(context.Context, string, []string) error { return errors.New("no room") }
+	if _, err := x.probe.Run(context.Background()); err == nil || len(x.stopped) != 1 {
+		t.Fatalf("a round with no pressure: %v, stopped %v", err, x.stopped)
 	}
-	if _, err := x.probe.Run(context.Background()); err == nil {
-		t.Fatal("a round with no pressure passed")
+	x = newExhaustRig(t)
+	x.probe.Machine = func(context.Context) (PressedMachine, error) {
+		return PressedMachine{ID: "half-made"}, errors.New("no room")
+	}
+	if _, err := x.probe.Run(context.Background()); err == nil || !slices.Equal(x.stopped, []string{"half-made"}) {
+		t.Fatalf("a round with no machine: %v, stopped %v", err, x.stopped)
+	}
+}
+
+// LOOP-7 positive control (P3-4b-4c-fresh, exhaustion half; Security #548
+// 4a 2): a guest that does not press, so a counter (memory.current,
+// pids.current, cpu.stat usage_usec, the disk quota's usage) stays flat
+// over the hold, fails the round; its machine is preempted and an open
+// "slow" finding stays open, where on main such a round closed it.
+func TestAGuestThatDoesNotPressFailsTheRoundAndClosesNothing(t *testing.T) {
+	x := newExhaustRig(t)
+	x.probe.ResponseTarget = time.Millisecond
+	x.probe.Ping = func(context.Context) error { time.Sleep(5 * time.Millisecond); return nil }
+	r := newReportRig(t, nil)
+	r.probes = []Probe{x.probe}
+	r.reopen(t)
+	ctx := context.Background()
+	runJob(t, r.g, ctx) // the passive pass
+	if name, res := runJob(t, r.g, ctx); name != "probe:exhaustion" || res.Err != nil || res.Value != 1 {
+		t.Fatalf("job %q: %+v", name, res)
+	}
+	id := findingID(CheckExhaust, "response", "slow")
+	if _, open := r.open(id); !open {
+		t.Fatal("rig: no open finding")
+	}
+	// The guest idles, and the broker answers at once.
+	x.probe.ResponseTarget = 200 * time.Millisecond
+	x.probe.Ping = func(context.Context) error { return nil }
+	for _, k := range pressureKinds {
+		x.flat[k] = true
+	}
+	r.now = r.now.Add(time.Hour)
+	if name, res := runJob(t, r.g, ctx); name != "probe:exhaustion" || res.Err == nil {
+		t.Fatalf("an idle guest passed the round: %q %+v", name, res)
+	}
+	if _, open := r.open(id); !open {
+		t.Fatal("an idle guest closed an open slow finding")
+	}
+	if len(x.stopped) != 2 {
+		t.Fatalf("preempted %v", x.stopped)
+	}
+	// Each counter on its own: one that stays flat fails the round.
+	for _, k := range pressureKinds {
+		x := newExhaustRig(t)
+		x.flat[k] = true
+		res, err := x.probe.Run(ctx)
+		if err == nil || !strings.Contains(err.Error(), k) || len(res.Checked) != 0 || len(x.stopped) != 1 {
+			t.Fatalf("%s flat: %+v %v, stopped %v", k, res, err, x.stopped)
+		}
+	}
+	// A counter that cannot be read fails it too.
+	x = newExhaustRig(t)
+	machine := x.probe.Machine
+	x.probe.Machine = func(ctx context.Context) (PressedMachine, error) {
+		m, err := machine(ctx)
+		m.DiskUsed = nil
+		return m, err
+	}
+	if res, err := x.probe.Run(ctx); err == nil || len(res.Checked) != 0 {
+		t.Fatalf("no disk usage: %+v %v", res, err)
+	}
+	os.Remove(filepath.Join(x.cg, "cpu.stat"))
+	x.probe.Machine = machine
+	if res, err := x.probe.Run(ctx); err == nil || len(res.Checked) != 0 {
+		t.Fatalf("no cpu.stat: %+v %v", res, err)
+	}
+}
+
+// LOOP-7 fresh machine (P3-4b-4c-fresh, exhaustion half): a round whose
+// machine is the last round's fails through the tamper probe's check; the
+// machine is still preempted and nothing closes. Distinct machines pass.
+func TestAnExhaustionRoundInTheLastRoundsMachineFails(t *testing.T) {
+	x := newExhaustRig(t)
+	x.probe.ResponseTarget = time.Millisecond
+	x.probe.Ping = func(context.Context) error { time.Sleep(5 * time.Millisecond); return nil }
+	machine := x.probe.Machine
+	x.probe.Machine = func(ctx context.Context) (PressedMachine, error) {
+		m, err := machine(ctx)
+		m.ID = "probe-same"
+		return m, err
+	}
+	r := newReportRig(t, nil)
+	r.probes = []Probe{x.probe}
+	r.reopen(t)
+	ctx := context.Background()
+	runJob(t, r.g, ctx) // the passive pass
+	if name, res := runJob(t, r.g, ctx); name != "probe:exhaustion" || res.Err != nil || res.Value != 1 {
+		t.Fatalf("job %q: %+v", name, res)
+	}
+	id := findingID(CheckExhaust, "response", "slow")
+	x.probe.ResponseTarget = 200 * time.Millisecond
+	x.probe.Ping = func(context.Context) error { return nil }
+	r.now = r.now.Add(time.Hour)
+	name, res := runJob(t, r.g, ctx)
+	if name != "probe:exhaustion" || res.Err == nil || !strings.Contains(res.Err.Error(), "same machine") {
+		t.Fatalf("a round in the last round's machine passed: %q %+v", name, res)
+	}
+	if _, open := r.open(id); !open {
+		t.Fatal("a reused machine closed an open slow finding")
+	}
+	if !slices.Equal(x.stopped, []string{"probe-same", "probe-same"}) {
+		t.Fatalf("preempted %v", x.stopped)
+	}
+	// Distinct machines pass, round after round.
+	x = newExhaustRig(t)
+	for range 3 {
+		if _, err := x.probe.Run(ctx); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

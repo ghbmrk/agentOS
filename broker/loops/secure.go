@@ -1439,6 +1439,15 @@ func capFirst(s string) string {
 	return strings.ToUpper(s[:1]) + s[1:]
 }
 
+// aboveBudget says what an exhaustion round's "above budget" finding lets
+// an agent machine do, by resource.
+var aboveBudget = map[string]string{
+	"memory":    "use more memory than its budget",
+	"processes": "start more processes than its budget",
+	"disk":      "use more disk space than its budget",
+	"cpu":       "take as much processor time as I can",
+}
+
 // findingText is one finding in plain words, with the next step.
 func findingText(f Finding) string {
 	sub := safeName(f.Subject)
@@ -1494,7 +1503,10 @@ func findingText(f Finding) string {
 	case CheckExhaust:
 		switch {
 		case f.Detail != "slow":
-			return "A load test found no " + sub + " limit on an agent machine."
+			if over, ok := aboveBudget[f.Subject]; ok {
+				return "A load test found an agent machine can " + over + "."
+			}
+			return "A load test found an agent machine over its budget for " + sub + "."
 		case f.Subject == "preemption":
 			return "Under a load test I stopped an agent machine slower than my target."
 		}
