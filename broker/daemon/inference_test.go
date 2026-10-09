@@ -640,6 +640,8 @@ var launcherPkgs = map[string]string{"os/exec": "exec", "os": "os", "syscall": "
 //     paths; a nil Env set on a value not held as a command (a copy, a
 //     parameter, a promoted field); and a command copied by dereference
 //     (d := *c);
+//   - a command constructed by a generic with an inferred type argument
+//     (var z T or new(T) where T is inferred as *exec.Cmd);
 //   - a command whose Env is set in another function (except for a
 //     package-level declaration), or reached through a pointer the check
 //     does not follow;
@@ -655,7 +657,8 @@ var launcherPkgs = map[string]string{"os/exec": "exec", "os": "os", "syscall": "
 //     exec.Cmd as a type anywhere else (an alias or defined type, a struct
 //     field, an element of a slice, array or map, a parameter) is flagged.
 //     Deny by default: exec.Cmd or *exec.Cmd anywhere inside a slice,
-//     array, map (key or value) or channel type, at any depth, or as the
+//     array, map (key or value) or channel type, a generic's type
+//     argument or a type-parameter constraint, at any depth, or as the
 //     definition of a named type or alias, is flagged as a holder the
 //     check cannot follow; so is an Env reached through its address
 //     (&c.Env). A ProcAttr passed to os.StartProcess, syscall.ForkExec or
@@ -1085,7 +1088,8 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 	// cmdType: exec.Cmd itself, as a type.
 	cmdType := func(e ast.Expr) bool { return is(ast.Unparen(e), "os/exec", "Cmd") }
 	// holdsCmd: a type that is, or holds at any depth through pointers,
-	// slices, arrays, maps and channels, an exec.Cmd.
+	// slices, arrays, maps, channels, type arguments and constraint
+	// terms, an exec.Cmd.
 	var holdsCmd func(e ast.Expr) bool
 	holdsCmd = func(e ast.Expr) bool {
 		switch t := ast.Unparen(e).(type) {
@@ -1097,8 +1101,40 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 			return holdsCmd(t.Key) || holdsCmd(t.Value)
 		case *ast.ChanType:
 			return holdsCmd(t.Value)
+		case *ast.IndexExpr:
+			return holdsCmd(t.Index)
+		case *ast.IndexListExpr:
+			for _, x := range t.Indices {
+				if holdsCmd(x) {
+					return true
+				}
+			}
+			return false
+		case *ast.UnaryExpr: // ~T in a constraint
+			return t.Op == token.TILDE && holdsCmd(t.X)
+		case *ast.BinaryExpr: // A | B in a constraint
+			return t.Op == token.OR && (holdsCmd(t.X) || holdsCmd(t.Y))
+		case *ast.InterfaceType:
+			for _, m := range t.Methods.List {
+				if len(m.Names) == 0 && holdsCmd(m.Type) {
+					return true
+				}
+			}
+			return false
 		}
 		return cmdType(e)
+	}
+	// typeParams: a type-parameter list whose constraint holds one.
+	typeParams := func(fl *ast.FieldList) bool {
+		if fl == nil {
+			return false
+		}
+		for _, f := range fl.List {
+			if holdsCmd(f.Type) {
+				return true
+			}
+		}
+		return false
 	}
 	type unit struct {
 		name                 string
@@ -1147,8 +1183,24 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 				// Deny by default (#621 delta Security 4a, 6085258468): a
 				// command type in a container or a type's definition is a
 				// holder the check cannot follow.
-				if holdsCmd(n.Type) {
+				if holdsCmd(n.Type) || typeParams(n.TypeParams) {
 					u.starts, u.bad = true, true
+				}
+			case *ast.FuncType:
+				if typeParams(n.TypeParams) {
+					u.starts, u.bad = true, true
+				}
+			case *ast.IndexExpr:
+				// A command type as a generic's type argument
+				// (#621 delta Security 4a, 6085443650).
+				if holdsCmd(n.Index) {
+					u.starts, u.bad = true, true
+				}
+			case *ast.IndexListExpr:
+				for _, x := range n.Indices {
+					if holdsCmd(x) {
+						u.starts, u.bad = true, true
+					}
 				}
 			case *ast.ArrayType:
 				if holdsCmd(n.Elt) {
@@ -1678,6 +1730,14 @@ func TestEnvCheckCatchesTheShapesItPassed(t *testing.T) {
 		{src(`"os/exec"`, `func f(ch chan *exec.Cmd) { (<-ch).Run() }`)},
 		{src(`"os/exec"`, `func f() { c := exec.Command("x"); c.Env = []string{}; *(&c.Env) = nil; c.Run() }`)},
 		{src(`"os/exec"`, `func f() { c := exec.Command("x"); c.Env = []string{}; p := &c.Env; *p = nil; c.Run() }`)},
+		// #621 delta Security 4a (6085443650): a command type as a generic
+		// type argument or in a type-parameter constraint.
+		{src(`"os/exec"`, `type S[T any] []T; func f() { s := S[*exec.Cmd]{{Path: "/x"}}; s[0].Run() }`)},
+		{src(`"os/exec"`, `func mk[E any]() E { return *new(E) }; func f() { c := mk[*exec.Cmd](); c.Run() }`)},
+		{src(`"os/exec"`, `type B[T any] struct{ v T }; func f() { b := B[*exec.Cmd]{v: &exec.Cmd{Path: "/x", Env: []string{}}}; b.v.Env = nil; b.v.Run() }`)},
+		{src(`"os/exec"`, `type M[K comparable, V any] map[K]V; func f() { m := M[string, *exec.Cmd]{}; m["a"].Run() }`)},
+		{src(`"os/exec"`, `func g[T interface{ ~*exec.Cmd | *int }](t T) {}`)},
+		{src(`"os/exec"`, `type W[T interface{ *exec.Cmd }] struct{ t T }`)},
 	} {
 		if noEnv, _ := check(c...); len(noEnv) == 0 {
 			t.Errorf("missed:\n%s", strings.Join(c, "\n"))
