@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -234,6 +235,61 @@ func (l *Link) send(to, text string, request bool) error {
 	if to != l.cfg.Owner {
 		return ErrRecipient
 	}
+	return l.deliver(text, request).err()
+}
+
+// ReceiptOutcome is what a Receipt proves about one text.
+type ReceiptOutcome string
+
+const (
+	// ReceiptAccepted: the bridge reported CodeOK for this item.
+	ReceiptAccepted ReceiptOutcome = "accepted"
+	// ReceiptNotSent: provably never given to the modem (W5-Db DB-3).
+	ReceiptNotSent ReceiptOutcome = "not-sent"
+	// ReceiptUnknown: the text may have gone; nothing proves either way.
+	ReceiptUnknown ReceiptOutcome = "unknown"
+)
+
+// Receipt is SendReceipt's account of one text. Evidence is the item ID,
+// or for a text never queued a fixed tag; Code is the bridge's result
+// code when one arrived.
+type Receipt struct {
+	Outcome  ReceiptOutcome
+	Evidence string
+	Code     string
+}
+
+func (r Receipt) err() error {
+	if r.Outcome == ReceiptAccepted {
+		return nil
+	}
+	return modem.ErrDown
+}
+
+// SendReceipt is Send for a caller that must tell "not sent" from "maybe
+// sent" (the digest queue). NotSent only when the text was refused before
+// queuing, timed out still queued (never handed to the bridge), or the
+// bridge answered CodeRecipient, which it emits only before any modem call.
+// Everything else that is not CodeOK is Unknown. The error is as Send's.
+func (l *Link) SendReceipt(to, text string) (Receipt, error) {
+	if to != l.cfg.Owner {
+		return Receipt{Outcome: ReceiptNotSent, Evidence: "wrong-recipient"}, ErrRecipient
+	}
+	r := l.deliver(text, false)
+	return r, r.err()
+}
+
+func receiptOf(id, code string) Receipt {
+	switch code {
+	case bridgeproto.CodeOK:
+		return Receipt{Outcome: ReceiptAccepted, Evidence: id, Code: code}
+	case bridgeproto.CodeRecipient:
+		return Receipt{Outcome: ReceiptNotSent, Evidence: "recipient:" + id, Code: code}
+	}
+	return Receipt{Outcome: ReceiptUnknown, Evidence: id, Code: code}
+}
+
+func (l *Link) deliver(text string, request bool) Receipt {
 	now := l.cfg.Now()
 	l.mu.Lock()
 	if !l.usableLocked(now) || len(l.queue)+len(l.out) >= MaxQueued {
@@ -244,7 +300,7 @@ func (l *Link) send(to, text string, request bool) error {
 			}
 		}
 		l.mu.Unlock()
-		return modem.ErrDown
+		return Receipt{Outcome: ReceiptNotSent, Evidence: "not-queued"}
 	}
 	it := &item{Item: bridgeproto.Item{ID: newID(), Line: bridgeproto.LineOwner, To: l.cfg.Owner, Text: text},
 		result: make(chan string, 1), handed: make(chan struct{})}
@@ -262,23 +318,25 @@ func (l *Link) send(to, text string, request bool) error {
 		t.Reset(l.cfg.SendWait)
 	case <-t.C:
 		l.mu.Lock()
+		// Still queued under mu: the outbox can no longer hand it out.
+		queued := slices.Contains(l.queue, it)
 		l.dropLocked(it)
 		l.timedOut++
 		l.mu.Unlock()
-		return modem.ErrDown
+		if queued {
+			return Receipt{Outcome: ReceiptNotSent, Evidence: "not-handed:" + it.ID}
+		}
+		return Receipt{Outcome: ReceiptUnknown, Evidence: it.ID}
 	}
 	select {
 	case code := <-it.result:
-		if code == bridgeproto.CodeOK {
-			return nil
-		}
-		return modem.ErrDown
+		return receiptOf(it.ID, code)
 	case <-t.C:
 		l.mu.Lock()
 		l.dropLocked(it)
 		l.timedOut++
 		l.mu.Unlock()
-		return modem.ErrDown
+		return Receipt{Outcome: ReceiptUnknown, Evidence: it.ID}
 	}
 }
 
