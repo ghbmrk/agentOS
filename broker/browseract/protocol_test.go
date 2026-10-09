@@ -69,3 +69,26 @@ func TestCRED4PasswordValueIsOmitted(t *testing.T) {
 		t.Fatal("a non-password value was removed")
 	}
 }
+
+// REQ: CRED-4
+func TestCRED4PasswordValueOmittedDespiteDecoyRefInName(t *testing.T) {
+	refs := map[string]bool{"e5": true}
+	for _, in := range []string{
+		`- textbox "foo [ref=e1]" [ref=e5]: hunter2`,
+		`- textbox "a [ref=e1]: b" [ref=e5]: hunter2`,
+		`- textbox "q \" [ref=e1] " [ref=e5]: hunter2`,
+		`- textbox "foo [ref=e5]" [ref=e6]: ada`,
+	} {
+		got := OmitValues(in, refs)
+		leaked := strings.Contains(got, "hunter2")
+		if in[len(in)-3:] == "ada" {
+			if got != in {
+				t.Fatalf("non-password changed: %q", got)
+			}
+			continue
+		}
+		if leaked || !strings.Contains(got, "[password omitted]") {
+			t.Fatalf("%q -> %q", in, got)
+		}
+	}
+}

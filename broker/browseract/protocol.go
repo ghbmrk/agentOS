@@ -178,8 +178,33 @@ func OnDeclaredOrigin(raw string, declared []string) bool {
 
 var (
 	refToken = regexp.MustCompile(`\[ref=((?:f\d+)?e\d+)\]`)
+	roleRE   = regexp.MustCompile(`^- '?[A-Za-z][A-Za-z-]* ?`)
 	attrsRE  = regexp.MustCompile(`^(?: \[[^\]]*\])*`)
 )
+
+// nameEnd returns the index just past the quoted accessible name of a
+// snapshot line, or the end of the role when there is no name. The name
+// is page-controlled, so a [ref=...] token inside it is not the
+// element's ref and the search starts after it (CRED-4).
+func nameEnd(line string) int {
+	m := roleRE.FindStringIndex(line)
+	if m == nil {
+		return 0
+	}
+	i := m[1]
+	if i >= len(line) || line[i] != '"' {
+		return i
+	}
+	for i++; i < len(line); i++ {
+		switch line[i] {
+		case '\\':
+			i++
+		case '"':
+			return i + 1
+		}
+	}
+	return len(line)
+}
 
 // OmitValues removes the value text of snapshot lines whose ref is in
 // refs. The line stays, so a login form is still visible. refs are
@@ -187,8 +212,15 @@ var (
 func OmitValues(snapshot string, refs map[string]bool) string {
 	lines := strings.Split(snapshot, "\n")
 	for i, line := range lines {
-		m := refToken.FindStringSubmatchIndex(line)
-		if m == nil || !refs[line[m[2]:m[3]]] {
+		start := nameEnd(line)
+		m := refToken.FindStringSubmatchIndex(line[start:])
+		if m == nil {
+			continue
+		}
+		for j := range m {
+			m[j] += start
+		}
+		if !refs[line[m[2]:m[3]]] {
 			continue
 		}
 		rest := line[m[1]:]
