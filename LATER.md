@@ -323,6 +323,15 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | P3-4b-3 l4 | Security 6 on #523 (LOOP-7): the broker-side probe check is per code, not per frame; give each fixed frame a distinct code or a broker-known frame token in the refusal note when LOOP-7 next touches `sockprobe` |
 | P3-4b-3 l5 | Potency 5 on #523: `Resolve`'s replay gate is tautological for probes (the source builds `Replay` from the open finding); add a probe digest or round ID to the evidence if another caller appears |
 | P3-4b-3 l6 | Potency 6 on #523: a probe finding for a machine never probed again (retired, renamed) stays open; add a staleness line to the digest when the source is wired |
+| H6 | #561: `KeyError`/`AttributeError` raised instead of `ValueError`; column naming; `trace.py` A10 regex; the PR's Findings line said "None" |
+| CI-SOAK-f1 | #563: no exactly-at-cap test |
+| H8 | #564: the `devA != devB` check can't fail; only the 12-case fixture is guarded; replace before-variance with a 20k-env measurement |
+| P3-4b-3a l1 | #560: stale `run-*` dirs; `FuzzMCP` 108-byte path test; 17 vs 16 binaries |
+| P3-4b-3a l2 | #560: `eachInput`'s total time is outside the 1 m cap (about 3 min); exit 0 when `-test.run` matched nothing counts as pass; `eachInput` exit 0 without PASS |
+| P3-4b-3a l3 | #560: a hang behind a FAIL goes unnamed; a slow corpus gives a sticky `noInput` false positive; a fuzz exit without "Failing input written to" only reaches `Logf` |
+| P3-4b-3c l1 | #558: canary-clear after STOP; 3 UX nits; the once-per-name dedupe (`said` map) is untested |
+| P3-4b-3c l2 | #558: a `runProbe` batch with a same-key clear and a paused finding can drop "stays paused"; weak pins (untexted open findings, key without `Check`); 3 surviving filter mutations |
+| P3-4b-3c l3 | #558: S38 wording (STOP is also appended when paused; the Spec-basis column says only LOOP-9); S38's "owner can redefine" has no setting yet; pin the S39 wording |
 | P3-4b-3 l7 | Potency 7 on #523 (P3-4b-4): the probe sends four fixed frames per socket and tests no connection limits, rapid reconnects or half-open frames; promoting good fuzz inputs to seeds is a later choice |
 | P3-4b-3 l8 | UX 4 on #523: a fuzz finding whose corpus file is removed can never resolve, yet STATUS says it is rechecked; add a line to `broker/loop7/ASSUMPTIONS.md` when the source is wired |
 | P3-4b-3 l9 | UX 5 on #523: a probe finding's ID derives from its `Detail`, so a different failure set next round is a second High text for one machine; cap or fold per subject when the probe text is reworded |
