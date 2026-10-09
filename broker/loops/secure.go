@@ -124,6 +124,11 @@ type Finding struct {
 	// Rule is the regression fixture's input, empty when the finding is
 	// not something a change could reintroduce (expiry, drift).
 	Rule []byte `json:"rule,omitempty"`
+	// Producer is the SHA-256 of the binary that produced a fuzz hang
+	// finding, and is set on nothing else (P3-4b-3h-r2). Report moves it
+	// to the record's Producer, so it is never part of the finding's
+	// digest.
+	Producer string `json:"producer,omitempty"`
 }
 
 // Containment pauses a grant or executor. Pausing only narrows authority
@@ -351,6 +356,11 @@ type Record struct {
 	// Closure is the good fuzz step that closed a hang finding
 	// (CloseTarget), which replayed no stored input.
 	Closure *Closure `json:"closure,omitempty"`
+	// Producer is the SHA-256 of the binary that last produced an open
+	// fuzz hang finding: set by Report, replaced when the finding is
+	// reported again, and the only producer CloseTarget compares against
+	// (P3-4b-3h-r2).
+	Producer string `json:"producer,omitempty"`
 	// Told marks a reported finding's owner text as sent, so a resume
 	// after a crash sends a text not yet sent, and only that (P3-4b-1b
 	// item 3).
@@ -749,7 +759,9 @@ func sortedKeys[V any](m map[string]V) []string {
 // fixture, and mark a fix pending. It decides whether the owner is texted;
 // Pass sends the text, then proposes the fix.
 func (s *Guard) handle(ctx context.Context, f Finding, pause, reported bool) (Record, error) {
-	rec := Record{Finding: f, At: s.cfg.Now(), Contained: "none", Digest: digestOf(f), Reported: reported}
+	producer := f.Producer
+	f.Producer = ""
+	rec := Record{Finding: f, At: s.cfg.Now(), Contained: "none", Digest: digestOf(f), Reported: reported, Producer: producer}
 	if reported && f.Rule != nil {
 		// Minimized now and saved with the first save, so a resume adds
 		// the same test even if the tree has moved on since.
@@ -1115,6 +1127,9 @@ func (s *Guard) evidenceLocked(rec Record) int {
 		if e := &s.st.Evidence[i]; e.Digest == rec.Digest {
 			e.Seen++
 			e.Last = rec.At
+			if rec.Producer != "" {
+				e.Producer = rec.Producer
+			}
 			return i
 		}
 	}
