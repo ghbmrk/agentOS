@@ -92,3 +92,64 @@ func TestThePlainNameMapCoversEveryLoop7Subject(t *testing.T) {
 		}
 	}
 }
+
+// canaryGaps reads a canary registry and returns its targets that have no
+// plain name, and its note.
+func canaryGaps(t *testing.T, path string) ([]string, string) {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reg struct {
+		Note    string `json:"note"`
+		Targets []struct {
+			Name string `json:"name"`
+		} `json:"targets"`
+	}
+	if err := json.Unmarshal(b, &reg); err != nil || len(reg.Targets) == 0 {
+		t.Fatalf("registry %s: %v", path, err)
+	}
+	var gaps []string
+	for _, x := range reg.Targets {
+		if _, ok := loops.PlainName(loops.Finding{Check: loops.CheckCanary, Subject: x.Name}); !ok {
+			gaps = append(gaps, x.Name)
+		}
+	}
+	return gaps, reg.Note
+}
+
+// P3-4b-4c-canary requirement 3 (#515 UX 3): every registered canary
+// target has owner words in plainname.go (S41: no label in the registry),
+// a target added without them fails, and the registry says what an owner
+// reads for a target without contain: the STOP step S38 always offers.
+func TestEveryCanaryTargetHasAPlainNameAndTheRegistrySaysTheStep(t *testing.T) {
+	const shipped = "../../assurance/canary-targets.json"
+	gaps, note := canaryGaps(t, shipped)
+	if len(gaps) != 0 {
+		t.Errorf("canary targets with no plain name in plainname.go: %q", gaps)
+	}
+	for _, want := range []string{"plainname.go", "Reply STOP to pause everything.", "My leak self-test found a planted test secret in"} {
+		if !strings.Contains(note, want) {
+			t.Errorf("registry note does not say %q", want)
+		}
+	}
+	b, err := os.ReadFile(shipped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Control: the same registry with one unnamed target added.
+	var reg map[string]any
+	if err := json.Unmarshal(b, &reg); err != nil {
+		t.Fatal(err)
+	}
+	reg["targets"] = append(reg["targets"].([]any), map[string]any{"name": "new-target-without-a-name", "cmd": []string{"true"}})
+	tmp := filepath.Join(t.TempDir(), "targets.json")
+	out, _ := json.Marshal(reg)
+	if err := os.WriteFile(tmp, out, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if gaps, _ := canaryGaps(t, tmp); strings.Join(gaps, ",") != "new-target-without-a-name" {
+		t.Errorf("control: an unnamed target was not caught: %q", gaps)
+	}
+}
