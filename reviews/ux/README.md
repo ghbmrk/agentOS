@@ -33,4 +33,4 @@ Per-PR and per-bundle records are the files `YYYY-MM-DD-*.md` in this directory 
 
 ## Recurring kinds (to become checks)
 
-- **A problem text names a step that cannot work** (CH-12): UX run 2 (#124, #126, #132, #133) and #327. The next package touching owner texts adds a test that flags it ([2026-10-08](2026-10-08-lens-bundle-a.md#recurring-kind)).
+- **A problem text names a step that cannot work** (CH-12): UX run 2 (#124, #126, #132, #133), #327 and #423 (STATUS says a release waits for approval when no request is open, [2026-10-09](2026-10-09-pr423.md)). The next package touching owner texts adds a test that flags it ([2026-10-08](2026-10-08-lens-bundle-a.md#recurring-kind)).

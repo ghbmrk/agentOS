@@ -41,14 +41,14 @@ func (f *fakeOwner) LocalStatus() owner.LocalStatus {
 	return st
 }
 func (f *fakeOwner) LocalGridCell() string { return "B4" }
-func (f *fakeOwner) LocalSignIn(code string) (time.Time, error) {
+func (f *fakeOwner) LocalSignIn(code string) (time.Time, uint64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.signIns++
 	if code != good {
-		return time.Time{}, owner.ErrWrongCode
+		return time.Time{}, 0, owner.ErrWrongCode
 	}
-	return f.now.Add(time.Hour), nil
+	return f.now.Add(time.Hour), f.locks, nil
 }
 func (f *fakeOwner) LocalStop(context.Context) error {
 	f.mu.Lock()
@@ -56,10 +56,13 @@ func (f *fakeOwner) LocalStop(context.Context) error {
 	f.mu.Unlock()
 	return nil
 }
-func (f *fakeOwner) LocalResume() (string, error) {
+func (f *fakeOwner) LocalResume(locks uint64) (string, error) {
 	f.mu.Lock()
+	defer f.mu.Unlock()
+	if locks != f.locks {
+		return "", owner.ErrLocked
+	}
 	f.resumes++
-	f.mu.Unlock()
 	return "Resumed.", nil
 }
 func (f *fakeOwner) LocalRequests() []owner.LocalRequest {
@@ -319,7 +322,9 @@ func TestAWrongSignInIsRefusedWithAFixedCode(t *testing.T) {
 
 type fakeTooMany struct{ *fakeOwner }
 
-func (f *fakeTooMany) LocalSignIn(string) (time.Time, error) { return time.Time{}, owner.ErrTooMany }
+func (f *fakeTooMany) LocalSignIn(string) (time.Time, uint64, error) {
+	return time.Time{}, 0, owner.ErrTooMany
+}
 
 // Security L2: wrong codes are counted in agentosd for the socket, so a
 // compromised page cannot spray codes faster than the page's own bound.
@@ -497,10 +502,10 @@ func TestChannelFailuresAreFixedCodes(t *testing.T) {
 
 type failing struct{ *fakeOwner }
 
-func (f *failing) LocalStop(context.Context) error { return errors.New("journal: /var/lib/x") }
-func (f *failing) LocalResume() (string, error)    { return "", errors.New("journal: /var/lib/x") }
-func (f *failing) LocalSignIn(string) (time.Time, error) {
-	return time.Time{}, errors.New("state: /var/lib/x")
+func (f *failing) LocalStop(context.Context) error    { return errors.New("journal: /var/lib/x") }
+func (f *failing) LocalResume(uint64) (string, error) { return "", errors.New("journal: /var/lib/x") }
+func (f *failing) LocalSignIn(string) (time.Time, uint64, error) {
+	return time.Time{}, 0, errors.New("state: /var/lib/x")
 }
 
 // Security D1 on the P2-2w plan: status before sign-in carries fixed
