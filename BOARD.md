@@ -88,7 +88,9 @@ Started before spec v0.12 on parts unlikely to change; each package lists its sp
 | P1-2 | [Broker skeleton](briefs/P1-2.md) | P1-1 | merged (7ff7417; broker/daemon) |
 | P1-3 | [Vault and credentialed egress proxy](briefs/P1-3.md) | P1-2 | merged |
 | P1-4 | [Agent-machine lifecycle](briefs/P1-4.md) | P1-2 | merged (f19f97c; broker/vm) |
-| P1-4-flake | `broker/vm/gvisor` `TestRunscPanicAtTheDeadlineAnswersNoOutput` is flaky: at the 100ms deadline `Exec` returns an error but `res` still carries the guest's stdout ("guest out\n"), `panic_test.go:67`. Seen on #503 CI at a1fc72a (comment 6074344893); it passed on one re-run. A deadline race: fix it in code or test, do not skip the test (brief to be written) | P1-4 | queued |
+| P1-4-flake | [`TestRunscPanicAtTheDeadlineAnswersNoOutput` raced runsc's exit at its deadline; a trace written before a kill answered output](briefs/P1-4-flake.md) | P1-4 | in review |
+| P1-4-flake-fuzz | [CI's time-bounded fuzz step failed at its deadline (#537): Go 1.26's fuzz coordinator race; bound by count](briefs/P1-4-flake.md) | P3-4b-3 | in review (with P1-4-flake) |
+| P1-4-flake-soak | `soak.yml` fuzzes for a duration (`-fuzztime "$FUZZTIME"`), so it can hit the same Go 1.26 coordinator race at its deadline (P1-4-flake-fuzz); fix by a toolchain carrying the upstream fix or a count bound sized to the soak (brief to be written) | P1-4-flake-fuzz | queued |
 | P1-6 | [Canary harness](briefs/P1-6.md) | Cloud only | merged |
 | P1-5 | [Owner channel on a modem simulator](briefs/P1-5.md) | P1-2 | merged |
 | P1-7 | [OpenClaw as first guest](briefs/P1-7.md) | P1-3, P1-4, P1-5, P1-6 | merged (847ea23; broker/guest) |

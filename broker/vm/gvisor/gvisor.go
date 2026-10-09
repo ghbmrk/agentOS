@@ -306,8 +306,12 @@ func (r *Runtime) Exec(ctx context.Context, id string, c vm.Command) (vm.ExecRes
 	// naming no path (SR2-3j): with no pid, it is the one runsc's --log
 	// line shows (notRun, SR2-3q, SR2-3p); otherwise, a crash after the
 	// start included, ErrExecFailed, since the command may have run.
+	// A trace written before the context ended, with runsc killed before
+	// it exited 2, is the same failure: runsc's stderr carries only its
+	// own text (SR2-3n), so any of it at the context's end withholds the
+	// output too (P1-4-flake).
 	var exit *exec.ExitError
-	crashed := errors.As(err, &exit) && exit.ExitCode() == 2 && len(runscErr.bytes()) > 0
+	crashed := errors.As(err, &exit) && len(runscErr.bytes()) > 0 && (exit.ExitCode() == 2 || ctx.Err() != nil)
 	pid, _ := os.ReadFile(pidFile)
 	if started := len(bytes.TrimSpace(pid)) > 0; !started || size(logs[0]) > 0 || crashed {
 		r.logExec(id, err, logs, runscErr.bytes())
