@@ -16,6 +16,8 @@ import (
 	"regexp"
 	"runtime"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/childproc"
 )
 
 // Marker starts what a tamper write puts in a path; the round's nonce
@@ -120,7 +122,7 @@ func Press(ctx context.Context, kind string, d time.Duration, o Options) error {
 		if o.Procs <= 0 {
 			return errors.New("machprobe: no process count")
 		}
-		var ps []*os.Process
+		var ps []*childproc.Cmd
 		defer func() {
 			for _, p := range ps {
 				p.Kill()
@@ -130,8 +132,8 @@ func Press(ctx context.Context, kind string, d time.Duration, o Options) error {
 		for range o.Procs {
 			// An empty environment: the child only idles, and the
 			// caller's would otherwise pass to it (P3-4b-3r-env).
-			p, err := os.StartProcess(o.Child[0], o.Child, &os.ProcAttr{Env: []string{}})
-			if err != nil {
+			p := childproc.Command(context.Background(), childproc.NewEnv(), childproc.Options{}, o.Child[0], o.Child[1:]...)
+			if err := p.Start(); err != nil {
 				break // the process limit stopped it: pressure reached
 			}
 			ps = append(ps, p)

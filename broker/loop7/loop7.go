@@ -25,7 +25,6 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -36,6 +35,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/childproc"
 	"golang.org/x/sys/unix"
 
 	"github.com/ghbmrk/agentos/broker/cgroup"
@@ -376,9 +376,9 @@ func (s *Source) Urgent() bool {
 
 // Digest is Inner's digest lines (loops.Digester), which the scheduler
 // reads for STATUS, then one line when fuzzing is configured but no fuzz
-// step has completed for longer than Recheck, and one when a target
-// failed to run on each of its turns for a full cycle. Neither names a
-// target (P3-4b-3r-pass).
+// step has completed for longer than Recheck, or one when a target
+// failed to run on each of its turns for a full cycle, each with what
+// happens next. Neither names a target (P3-4b-3r-pass, P3-4b-3r-text).
 func (s *Source) Digest() []string {
 	var out []string
 	if d, ok := s.cfg.Inner.(loops.Digester); ok {
@@ -394,11 +394,13 @@ func (s *Source) Digest() []string {
 		broken = broken || n >= 2
 	}
 	s.mu.Unlock()
-	if since > s.Recheck() {
-		out = append(out, "Loop 2: my fuzz self-tests have not run for "+span(since)+".")
-	}
-	if broken {
-		out = append(out, "Loop 2: one of my fuzz self-tests cannot run.")
+	// Both lines describe one stall; the cannot-run line carries the more
+	// useful step, so the not-run line waits while it shows (F14).
+	switch {
+	case broken:
+		out = append(out, "Loop 2: one of my fuzz self-tests cannot run. The fix comes with an update.")
+	case since > s.Recheck():
+		out = append(out, "Loop 2: my fuzz self-tests have not run for "+span(since)+". I keep trying.")
 	}
 	return out
 }
@@ -891,7 +893,7 @@ func capped(r io.Reader) ([]byte, error) {
 // failure of the target. Anything else (refused before exec, could not
 // start) is the runner's error, never a finding.
 func exited(err error) bool {
-	var ee *exec.ExitError
+	var ee *childproc.ExitError
 	return errors.As(err, &ee)
 }
 
@@ -912,7 +914,8 @@ func crashDetail(data []byte) string {
 const waitDelay = 200 * time.Millisecond
 
 // run runs t's binary with args and returns its combined output. This is
-// loop7's one exec (ARC-2, daemon escapeOK): the binary must be a regular
+// loop7's one child, started through childproc (ARC-2; P3-4b-3r-env-r8),
+// which checks its environment at the start: the binary must be a regular
 // file the release lists, not a link, checked before exec; the child gets
 // a minimal environment and a scratch directory of its own, never the
 // daemon's environment (#515 Security 2), and runs in its own process
@@ -968,17 +971,13 @@ func (s *Source) run(ctx context.Context, t Target, args ...string) ([]byte, err
 			defer leaf.Close()
 		}
 	}
-	cmd := exec.CommandContext(ctx, t.Binary, args...)
-	cmd.Dir = t.Dir
-	cmd.Env = childEnv(scratch)
-	cmd.SysProcAttr = attr
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
-	cmd.WaitDelay = waitDelay
 	// The broker keeps at most outputCap of the output, which the leaf's
 	// memory.max does not bound; the pipe is drained to its end.
 	buf := &capBuffer{}
-	cmd.Stdout, cmd.Stderr = buf, buf
-	err = startNoNewPrivs(cmd)
+	cmd := childproc.Command(ctx, childproc.NewEnv(childEnv(scratch)...), childproc.Options{
+		Dir: t.Dir, SysProcAttr: attr, KillGroup: true, WaitDelay: waitDelay, Stdout: buf, Stderr: buf,
+	}, t.Binary, args...)
+	err = startNoNewPrivs(cmd.Start)
 	if err == nil {
 		err = cmd.Wait()
 	}
@@ -995,7 +994,7 @@ func (s *Source) run(ctx context.Context, t Target, args ...string) ([]byte, err
 	return out, err
 }
 
-// startNoNewPrivs starts cmd with no_new_privs set, so neither the child
+// startNoNewPrivs calls start with no_new_privs set, so neither the child
 // nor anything it execs gains privileges through a setuid or
 // file-capability binary (F2; #588 Security R1). The flag is per thread
 // and is inherited across clone and kept across execve (prctl(2)). Go's
@@ -1009,7 +1008,7 @@ func (s *Source) run(ctx context.Context, t Target, args ...string) ([]byte, err
 // it for good with no goroutine on it (runtime.mexit), so the flag never
 // reaches a thread that starts another child
 // (TestNoNewPrivsStaysOffTheDaemonsOtherThreads).
-func startNoNewPrivs(cmd *exec.Cmd) error {
+func startNoNewPrivs(start func() error) error {
 	done := make(chan error, 1)
 	go func() {
 		runtime.LockOSThread()
@@ -1018,7 +1017,7 @@ func startNoNewPrivs(cmd *exec.Cmd) error {
 			done <- fmt.Errorf("loop7: setting no_new_privs: %w", err)
 			return
 		}
-		done <- cmd.Start()
+		done <- start()
 	}()
 	return <-done
 }

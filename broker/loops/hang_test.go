@@ -209,7 +209,8 @@ func TestAHangFindingSaysHangNotCrash(t *testing.T) {
 
 // A hang that returns within ReText after its texted "responds to test
 // inputs again" is texted again, not left as a digest-only Again (delta
-// L3 on #586): CloseTarget marks the told close as Pass does.
+// L3 on #586): CloseTarget marks the told close as Pass does, through
+// the one close routine (P3-4b-3r-told).
 func TestAHangBackSoonAfterItsClearedTextIsTextedAgain(t *testing.T) {
 	for _, d := range []string{FuzzOverrunDetail, FuzzStallDetail} {
 		r := newReportRig(t, nil)
@@ -220,16 +221,23 @@ func TestAHangBackSoonAfterItsClearedTextIsTextedAgain(t *testing.T) {
 		before := len(r.texts)
 		r.now = r.now.Add(time.Hour)
 		again := r.report(t, hangFinding(d))
-		if !again.Again || !again.Texted || len(r.texts) != before+1 || strings.Contains(r.texts[before], "Cleared") {
+		if !again.Again || !again.Back || len(r.texts) != before+1 || !strings.HasPrefix(r.texts[before], "Security checks: It is back: ") {
 			t.Fatalf("%s: back soon: %+v texts %q", d, again, r.texts[before:])
 		}
-		// As Again, its own close is digest-only: a flap ends on "it is back".
+		// As Back, its own close is texted once and not marked, so a flap
+		// never ends on "it is back" after it closed (P3-4b-3r-text) and
+		// the next return within ReText is digest-only.
 		before = len(r.texts)
 		if err := r.g.CloseTarget(id, goodStep()); err != nil {
 			t.Fatalf("%s: %v", d, err)
 		}
-		if got := r.texts[before:]; len(got) != 0 {
-			t.Fatalf("%s: an Again close was texted: %q", d, got)
+		if got := r.texts[before:]; len(got) != 1 || !strings.Contains(got[0], "Cleared: ") {
+			t.Fatalf("%s: a Back close: %q", d, got)
+		}
+		before = len(r.texts)
+		r.now = r.now.Add(time.Hour)
+		if third := r.report(t, hangFinding(d)); third.Texted || len(r.texts) != before {
+			t.Fatalf("%s: third return: %+v texts %q", d, third, r.texts[before:])
 		}
 	}
 }
@@ -366,5 +374,36 @@ func TestAHangRecordWithNoProducerStaysOpenUntilReportedAgain(t *testing.T) {
 	r.report(t, f)
 	if err := r.g.CloseTarget(id, stepOf(binB)); err != nil {
 		t.Fatalf("after a re-report: %v", err)
+	}
+}
+
+// P3-4b-3r-told requirement 1 (#586 L3 point 4): with an overrun and a
+// stall of one target both open and texted, the stall's close says no
+// "Cleared" (the overrun holds the line) and so is not marked; its return
+// within ReText is digest-only, not a "back" the owner never heard
+// cleared. Once the overrun's own "Cleared" is said, it is marked.
+func TestAStallBackAfterAHeldClearIsNotTexted(t *testing.T) {
+	r := newReportRig(t, nil)
+	over := r.report(t, hangFinding(FuzzOverrunDetail)).Finding.ID
+	stall := r.report(t, hangFinding(FuzzStallDetail)).Finding.ID
+	before := len(r.texts)
+	if err := r.g.CloseTarget(stall, goodStep()); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.texts[before:]; len(got) != 0 || r.g.st.ToldCleared[stall] {
+		t.Fatalf("held close: texts %q, marked %v", got, r.g.st.ToldCleared[stall])
+	}
+	r.now = r.now.Add(time.Hour)
+	if back := r.report(t, hangFinding(FuzzStallDetail)); back.Texted || back.Back || len(r.texts) != before {
+		t.Fatalf("return after a held clear: %+v texts %q", back, r.texts[before:])
+	}
+	if err := r.g.CloseTarget(stall, goodStep()); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.g.CloseTarget(over, goodStep()); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.texts[before:]; len(got) != 1 || !strings.Contains(got[0], "Cleared: ") || !r.g.st.ToldCleared[over] {
+		t.Fatalf("the overrun's close: texts %q, marked %v", got, r.g.st.ToldCleared[over])
 	}
 }
