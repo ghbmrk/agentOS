@@ -58,7 +58,7 @@ Built for P3-4b-1 against LOOP-3, LOOP-9, LOOP-10 and A11, in `report.go` (`Guar
 | S15 | **Fixture grading.** `FixturesLiveFor` turns fixtures live per check; the daemon sets it for `seeded` only, so passive fixtures keep S7. A fix that turns grading off is rejected by change's `loopKeys` (C28). | LOOP-10 (c), (e) | — |
 | S16 | **Seed namespace.** `routing` holds one file (`routing/rule.json`), so a seed's defect and fix live under `config` (A-2). | A-2, CHG-2 | — |
 | S17 | **Unmeasured (LOOP-3, A-5).** Until Loop 2 has contained a finding since start, the scheduler treats it as unmeasured: excluded from best, share 1, shown "unmeasured" by `Shares`. Memory only: it resets on restart. No owner line shows shares yet (release finding). | LOOP-3, A-5 | If L1 wants it persisted or cost-normalized, spec-diff. |
-| S18 | **Owner wording.** Owner-facing strings in loops, and the daemon's `loop2NotRun` table (`cmd/agentosd/loop2.go`), never use find/finds/hunt/hunts/detect/detects/detector as whole words; `wording_test.go` scans string literals. | LOOP-3 (brief wording row) | Extend the file list when a new owner-facing file appears. |
+| S18 | **Owner wording.** Owner-facing strings in loops, and the daemon's `loop2NotRun` table (`cmd/agentosd/loop2.go`) and loop 2 owner text in `cmd/agentosd/learn.go`, never use find/finds/hunt/hunts/detect/detects/detector as whole words; `wording_test.go` scans string literals. | LOOP-3 (brief wording row) | Extend the file list when a new owner-facing file appears. |
 
 ## Loop 2 follow-ups (P3-4b-1b)
 
