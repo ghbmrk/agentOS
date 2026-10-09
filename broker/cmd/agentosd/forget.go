@@ -96,6 +96,16 @@ func carryNote(n int) string {
 	return "Forget: " + strconv.Itoa(n) + " take-backs not done yet; your agent still holds those tasks. I keep trying."
 }
 
+// retryNote is STATUS's line while n item 1 forgets are still retrying
+// (W3-forget-b2c-f1-r1 R1C), in forgetNotSaved's words: a count, never a
+// task.
+func retryNote(n int) string {
+	if n == 1 {
+		return "Forget: 1 task not forgotten yet; I couldn't save it. I keep trying."
+	}
+	return "Forget: " + strconv.Itoa(n) + " tasks not forgotten yet; I couldn't save them. I keep trying."
+}
+
 // errNoLineage: the agent machine's lineage did not read, so there is no
 // machine to take back; retrying alone does not fix it, and the owner is
 // told at once (F1-1; ASSUMPTIONS.md).
@@ -208,6 +218,10 @@ type ownerForget struct {
 	// finishOwed texts once the start-up replay has finished them.
 	owed        *forgetOwed
 	owedAtStart []string
+	// restoredGoals are the goals a restored forget log holds, which
+	// finishOwed asks the digest queue to forget again at each boot
+	// (W3-forget-b2c-f1-r1 R1D; Security 1 on #602).
+	restoredGoals []string
 	// tell, if set, sends an owner text and reports whether it went
 	// (loop2Notify.try); a done text is owed until it does (L3 B1 on
 	// #425). Unset, inform sends and is taken as sent.
@@ -225,6 +239,9 @@ type ownerForget struct {
 	// carrying: approved item 2s not saved, by ID, that carryAgent is
 	// trying again; resumeAgent leaves them to it.
 	carrying map[string]bool
+	// retrying: item 1 forgets retry or purgeLater is still finishing, by
+	// goal, which RetryNote counts (R1C).
+	retrying map[string]bool
 	// stillTold: take-backs told forgetAgentStillHeld in this boot, by
 	// ID, so each is told it once (F1-1).
 	stillTold map[string]bool
@@ -589,6 +606,7 @@ func (f *ownerForget) retry(ctx context.Context, goal string, since time.Time, u
 	if f.retried != nil {
 		defer f.retried()
 	}
+	defer f.markRetrying(goal)()
 	start, wait, said := f.now(), 2*time.Second, false
 	for {
 		if !f.sleep(ctx, wait) {
@@ -897,6 +915,33 @@ func (f *ownerForget) Note() string {
 		return ""
 	}
 	return carryNote(len(held))
+}
+
+// markRetrying counts goal on RetryNote until the returned func runs.
+func (f *ownerForget) markRetrying(goal string) func() {
+	f.mu.Lock()
+	if f.retrying == nil {
+		f.retrying = map[string]bool{}
+	}
+	f.retrying[goal] = true
+	f.mu.Unlock()
+	return func() {
+		f.mu.Lock()
+		delete(f.retrying, goal)
+		f.mu.Unlock()
+	}
+}
+
+// RetryNote is STATUS's line while any item 1 forget is still retrying
+// (R1C), as Note is for item 2's take-backs.
+func (f *ownerForget) RetryNote() string {
+	f.mu.Lock()
+	n := len(f.retrying)
+	f.mu.Unlock()
+	if n == 0 {
+		return ""
+	}
+	return retryNote(n)
 }
 
 // agentDone tells the owner an approved item 2 (id) is taken back when
@@ -1362,6 +1407,16 @@ func (f *ownerForget) paid(goal string) {
 // text stays owed until it sends (done). It runs once the owner channel is
 // attached.
 func (f *ownerForget) finishOwed(ctx context.Context) {
+	// A restore may bring back a digest queue that holds a restored goal,
+	// so each is asked again; a refusal is held by the digest box's own
+	// kept forgets (R1D).
+	if f.digest != nil {
+		for _, g := range f.restoredGoals {
+			if err := f.digest(g); err != nil {
+				log.Printf("forget: restored forget not purged from the digest yet: %v", err)
+			}
+		}
+	}
 	goals := f.owedAtStart
 	f.owedAtStart = nil
 	for _, g := range goals {
@@ -1404,6 +1459,7 @@ func (f *ownerForget) purgeLater(ctx context.Context, goal string, e owedForget)
 	if f.retried != nil {
 		defer f.retried()
 	}
+	defer f.markRetrying(goal)()
 	for wait := 2 * time.Second; ; wait = min(2*wait, forgetRetryMax) {
 		if !f.sleep(ctx, wait) {
 			return
