@@ -235,8 +235,9 @@ func validate(st state, limits Limits) error {
 		if b.State == Ready && b.Attempts >= limits.MaxAttempts {
 			return ErrInvalid
 		}
+		// Forget redacts an unknown batch whole and keeps its state (W5-Dc-r7).
 		if b.Redacted {
-			if !terminal || len(b.Snapshots) != 0 || len(b.Acknowledged) != 0 {
+			if (!terminal && b.State != Unknown) || len(b.Snapshots) != 0 || len(b.Acknowledged) != 0 {
 				return ErrInvalid
 			}
 			continue
@@ -493,7 +494,8 @@ func (q *Queue) finish(id uint64, attempt int, outcome Outcome, evidence string)
 	if err != nil {
 		return err
 	}
-	if (b.State != Sending && b.State != Unknown) || attempt != b.Attempts {
+	// A redacted batch has no text to resend or account for: it stays as it is.
+	if (b.State != Sending && b.State != Unknown) || b.Redacted || attempt != b.Attempts {
 		return ErrState
 	}
 	if evidence != "" && !name.MatchString(evidence) {
@@ -601,8 +603,10 @@ func (q *Queue) Late(id uint64, now, expires time.Time) error {
 // batch it removes only the snapshots that carry the reference, with their
 // acknowledgment bits; if none remain, a ready batch is cancelled and an expired
 // one stays expired, both redacted. Accepted, failed and cancelled batches are
-// redacted whole. Any matching sending or unknown batch refuses the whole call
-// before any mutation: the caller must contain/reconcile that send first.
+// redacted whole, and so is an unknown batch, which keeps its state, attempts
+// and evidence: it is never resent, and the owner may have its text already
+// (W5-Dc-r7). Any matching sending batch refuses the whole call before any
+// mutation: Send finishes it or a reopen makes it unknown, then ask again.
 // The source keeps a duty too: drop the reference and never re-offer it; a
 // forgotten generation re-offered is refused with ErrConflict.
 // Association hashes remain in bounded private dedupe state until an explicitly
@@ -621,7 +625,7 @@ func (q *Queue) Forget(reference string) error {
 	changed := false
 	for _, b := range next.Batches {
 		if slices.ContainsFunc(b.Snapshots, matches) {
-			if b.State == Sending || b.State == Unknown {
+			if b.State == Sending {
 				return ErrInFlight
 			}
 			changed = true
