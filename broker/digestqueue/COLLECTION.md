@@ -46,7 +46,8 @@ recovery of the older one must preserve it. New collection follows recovery so
 an already queued snapshot cannot receive new times and become another batch.
 
 A missing source blocks recovery. An expired batch with incomplete acknowledgments
-also blocks, preserving pending source state. The caller must render a fixed
+also blocks, preserving pending source state; a ready batch past expiry with a
+consumed source is reported by `Queue.Held` and is never expired or compacted. The caller must render a fixed
 owner-facing status for unavailable/expired/storage-full states under OP-9 and
 provide an explicit repair/migration path, not discard the association or declare
 the source consumed. Raw returned errors are diagnostics, not owner wording.

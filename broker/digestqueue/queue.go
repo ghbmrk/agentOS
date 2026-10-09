@@ -503,8 +503,11 @@ func (q *Queue) Finish(id uint64, attempt int, outcome Outcome, evidence string)
 	return q.commit(next)
 }
 
-// Expire affects only unsent ready batches. Unknown/in-flight deliveries remain
-// unresolved regardless of expiry and never become eligible for automatic retry.
+// Expire affects only unsent ready batches whose sources are all unacknowledged.
+// A batch with any consumed source stays Ready and is reported by Held, so a
+// digest whose lines the sources already gave up is never dropped silently.
+// Unknown/in-flight deliveries remain unresolved regardless of expiry and never
+// become eligible for automatic retry.
 func (q *Queue) Expire(now time.Time) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -518,7 +521,7 @@ func (q *Queue) Expire(now time.Time) error {
 	changed := false
 	for i := range next.Batches {
 		b := &next.Batches[i]
-		if b.State == Ready && !now.Before(b.Expires) {
+		if b.State == Ready && !now.Before(b.Expires) && !slices.Contains(b.Acknowledged, true) {
 			b.State = Expired
 			changed = true
 		}
@@ -527,6 +530,24 @@ func (q *Queue) Expire(now time.Time) error {
 		return nil
 	}
 	return q.commit(next)
+}
+
+// Held lists unsent batches that are past expiry but whose sources were already
+// acknowledged. Begin refuses them, so they need an owner-visible resolution
+// from the caller; the queue never discards or resends them on its own.
+func (q *Queue) Held(now time.Time) ([]Batch, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.broken {
+		return nil, ErrRecovery
+	}
+	var out []Batch
+	for _, b := range q.st.Batches {
+		if b.State == Ready && !b.Redacted && !now.Before(b.Expires) && slices.Contains(b.Acknowledged, true) {
+			out = append(out, clone(b))
+		}
+	}
+	return out, nil
 }
 
 // Forget purges payload/reference text and cancels unsent matching batches. It
@@ -573,7 +594,9 @@ func (q *Queue) Forget(reference string) error {
 }
 
 // Compact removes terminal payloads but retains per-source high-water identity
-// and the monotonically increasing batch sequence. No unresolved send is removed.
+// and the monotonically increasing batch sequence. No unresolved send is removed,
+// nor any batch holding a snapshot its source has not acknowledged: that durable
+// association is the only way to recollect or visibly block on the source.
 func (q *Queue) Compact() error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -582,7 +605,7 @@ func (q *Queue) Compact() error {
 	}
 	next := clone(q.st)
 	next.Batches = slices.DeleteFunc(next.Batches, func(b Batch) bool {
-		return b.State == Accepted || b.State == Expired || b.State == Cancelled || b.State == Failed
+		return (b.State == Accepted || b.State == Expired || b.State == Cancelled || b.State == Failed) && !slices.Contains(b.Acknowledged, false)
 	})
 	if len(next.Batches) == len(q.st.Batches) {
 		return nil

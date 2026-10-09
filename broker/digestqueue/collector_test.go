@@ -385,3 +385,57 @@ func TestDistinctFileStoresRecoverAcrossBothReopens(t *testing.T) {
 		t.Fatal("duplicate after persisted recovery", next, err)
 	}
 }
+
+// REQ: OP-1
+func TestCompactedExpiredBatchStillBlocksRatherThanWedgingSource(t *testing.T) {
+	st := &change.MemStore{}
+	q, err := New(st, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := source(snapshot(t, "change", 1, "Fixed broker notice."))
+	c := collect(t, q, map[string]Source{"change": src})
+	b, err := q.Enqueue([]Snapshot{*src.pending}, at, at.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = q.Expire(at.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err = q.Compact(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = q.Get(b.ID); err != nil {
+		t.Fatal("association discarded:", err)
+	}
+	if err = c.Recover(context.Background()); !errors.Is(err, ErrExpired) {
+		t.Fatal(err)
+	}
+	if _, err = c.Collect(context.Background(), at, at.Add(time.Hour)); !errors.Is(err, ErrExpired) {
+		t.Fatal(err)
+	}
+	if src.calls != 0 || src.pending == nil {
+		t.Fatal("source acknowledged for an expired batch", src.calls)
+	}
+}
+
+// REQ: OP-2
+func TestFullQueueLeavesSourcePendingUnacknowledged(t *testing.T) {
+	small := limits
+	small.MaxBatches = 1
+	q, err := New(&change.MemStore{}, small)
+	if err != nil {
+		t.Fatal(err)
+	}
+	full := enqueue(t, q, "owner", 1)
+	ack(t, q, full)
+	src := source(snapshot(t, "change", 1, "Fixed broker notice."))
+	c := collect(t, q, map[string]Source{"change": src})
+	if _, err = c.Collect(context.Background(), at, at.Add(time.Hour)); !errors.Is(err, ErrFull) {
+		t.Fatal(err)
+	}
+	batches, _ := q.List()
+	if src.calls != 0 || src.pending == nil || src.pending.Generation != 1 || len(batches) != 1 {
+		t.Fatal(src.calls, src.pending, len(batches))
+	}
+}

@@ -317,6 +317,10 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | P1-4-flake l2 | L3 2 on #547: the fuzz deadline race is not specific to Go 1.26 (`stop` against `fuzzCtx.Err()` is long-standing); reword "Go 1.26's coordinator" in ci.yml and the brief. The "toolchain with the coordinator fixed" condition stays right |
 | P1-4-flake l3 | L3 3 on #547: a count-bound fuzz run is capped only by `go test`'s default 10 m `-timeout`; an explicit per-step `-timeout` is the fix, and P1-4-flake-counts covers it, so this line closes with that row |
 | P1-4-flake l4 | L3 4 and Security 4a 3 on #547 (pre-existing, since #391): a runsc crash at the deadline reaches callers as `TimedOut` with no output, not `ErrExecFailed`; the failure is visible only in `exec.log` |
+| W5-Da l1 | M11 on #555: `Finish` accepts `TransportAccepted` without an evidence reference; require one when the sender exists |
+| W5-Da l2 | M3 on #555: the `Attempts >=` check in `Begin` repeats the `MaxAttempts` bound enforced in `Finish`; keep one |
+| W5-Da l3 | #555: `Evidence` is an unauthenticated opaque string, and Forget keeps association hashes in the dedupe state; settle both in the retention policy |
+| W5-Da l4 | #555: `change.FileStore.Load` treats a missing file as empty state, which resets Seq and the Latest ledger; a deleted queue file restarts the sequence |
 
 ## Reuse candidates
 | ID | Component | Why |

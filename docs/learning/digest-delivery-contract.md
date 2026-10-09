@@ -1,103 +1,56 @@
-# W5-D1: durable digest notification contract (design before implementation)
+# Digest delivery contract
 
-W5-D1 — source snapshots and digest delivery, frozen design questions
+Normative for `broker/digestqueue` (W5-Da). Requirements: OP-1, OP-2. Wiring a sender is W5-Db/W5-Dc; nothing here sends a message.
 
-Correction to the initial proposal
+## Why a separate queue
 
-modemlink.Link currently has an in-memory queue/out map and no persistent store.
-Its outage behavior deliberately drops missed texts and reports a fixed recovery
-summary; it does not replay those missed messages. Reusing its wire protocol does
-not make a digest durable. A durable digest outbox must be a separate narrow
-notification class with a reviewed persistence boundary. Do not automatically
-replay approval codes, stale decisions or third-party effects through it.
+`modemlink.Link` keeps an in-memory queue and no persistent store, and its outage behaviour deliberately drops missed texts. Reusing its wire protocol does not make a digest durable. Digests therefore use a separate narrow notification class with a persisted boundary. Approval codes, stale decisions and third-party effects are never replayed through it.
 
-change.Pipeline.Digest consumes Listed/RevertSeen/notice state, while owner.Channel
-TakeDigestNotes clears counters/notes. Those sources need nonconsuming snapshots
-and explicit acknowledgment, or an equivalent transactional integration. A
-save-after-read reorder is insufficient. The current owner auto-reply on-time
-semantics already use owner Queued.Late and grants/loops provenance. Digest queue
-admission must not replace or fabricate that visibility evidence, and this package
-must not weaken the existing implicit-acceptance caps or explicit-anchor rules.
+Sources (`change.Pipeline.Digest`, `owner.Channel` notes) must offer a non-consuming `Peek` and an explicit `Ack` of one generation. A save-after-read reorder is insufficient.
 
-Proposed records (broker-owned, private state)
+## Guarantee
 
-SourceSnapshot {source_id, generation, watermark, snapshot_hash, fixed_lines,
-                referenced_ids, created_at}. Repeated peeks return the same
-pending generation; new notices get a later generation. Acknowledgment of G must
-never erase events appended after G. Rendering is deterministic broker wording.
+**The owner never loses a digest silently.** Every batch that admission accepted ends in exactly one of two kinds of state:
 
-DigestBatch {batch_id, source_snapshots, rendered_hash, destination_reference,
-             created_at, expiry, policy_version, state, attempt_ids,
-             bridge_item_ids, last_receipt, visibility_status}.
+- `transport-accepted`: the transport reported acceptance.
+- a state that is surfaced rather than dropped: `delivery-unknown`, `not-sent-exhausted`, `expired`, or a `Ready` batch past expiry whose sources were already consumed (reported by `Held`).
 
-State: ready -> queued-durable -> sending -> transport-accepted | delivery-unknown
-| retryable | expired. Source consumption occurs only after queued-durable.
-A source ack retry is idempotent for source+generation+snapshot_hash. A duplicate
-batch insertion with different rendering/source digest is rejected, like OP-1.
-Do not confuse transport acceptance, carrier delivery and actual owner visibility.
+A source generation is acknowledged only after the batch that carries it is durable. A full or failing queue leaves the source pending and unacknowledged.
 
-Persistence sequence
+## Not guaranteed
 
-1. Read snapshots without mutation, select paced lines and validate shared IDs.
-2. Persist batch and exact source associations with atomic replace/fsync under
-   existing state-storage conventions; storage failure leaves sources pending.
-3. Ack only included source generations. Crash here retries idempotently using
-   persisted associations. Sources never clear newer notes during an older ack.
-4. Attempt send through existing priority/quiet-hours policy and bridge protocol.
-5. Persist observed transport outcome. If acknowledgment is lost, mark delivery
-   unknown and follow a bounded, reviewed retry policy. A fresh notification ID
-   cannot prove the old text was not delivered. No exactly-once SMS promise.
-6. Preserve unresolved/expired notice state for fixed STATUS/digest recovery
-   wording. Do not imply an owner saw a line merely because it was queued.
+- `delivery-unknown` means the text may have been delivered or not. Recovery never re-dispatches it. A later retry needs explicit not-sent evidence, so a duplicate or absent text is possible.
+- `transport-accepted` is neither carrier delivery nor owner visibility. There is no exactly-once SMS promise.
+- `Evidence` is an opaque, unauthenticated string recorded with the outcome.
+- Status wording and the resolution path for surfaced states ship with the first sender (W5-Db/W5-Dc).
 
-Batch ID should be derived from a persistent scheduler sequence plus source
-snapshot associations (not text alone, since identical notices can recur).
-Separately deduplicate by associations. Compaction retains enough ack/dedupe
-state to prevent resurrecting already-consumed source generations. Encryption,
-retention/forget and recovery inventories include the new private state.
+## State machine
 
-Concurrency and capacity
+`ready -> sending -> transport-accepted | delivery-unknown | not-sent-exhausted`; `ready -> expired` (only when no source was consumed); `ready -> cancelled` (Forget). A restart converts `sending` to `delivery-unknown` and persists that before use.
 
-One broker-owned collection/send coordinator, with source generation locks and a
-bounded persistent queue. No blocking send under the pipeline/channel source
-lock. STOP/STATUS and approvals keep their current priority. Full queue preserves
-pending sources and emits a fixed failure status; it never silently drops a new
-notice. A tick that runs after restart or clock restriction must not shift the
-release of a disclosure hint to an agent-chosen time. IDs stay in the shared
-allocator while their referenced commands remain live; expiry wording matches
-actual UNDO/MORE validity. Pending forgotten-source snapshots must be removed or
-re-rendered before send; do not leak erased task text in a queued digest.
+Crash-safe order: persist batch, then source `Ack`, then the batch's per-source acknowledgment bit, then `Begin`, which requires every bit set. A source ack retry is idempotent per source, generation and hash. `Acknowledge` is accepted only on a `Ready` batch and otherwise returns `ErrState` without touching the source. Compaction removes only terminal batches with all sources acknowledged, so an expired batch with an unconsumed source stays and blocks recovery rather than wedging the source silently. It keeps the dedupe ledger and sequence.
 
-Proposed crash-test oracles
+Bounds: `MaxBatches`, `MaxSources`, `MaxAttempts`, `MaxBytes`. Reaching one fails closed with `ErrFull` and loses nothing.
 
-D01 kill before batch persist -> source unchanged; no batch.
-D02 partial write/save/fsync error -> source unchanged; restart sees old valid state.
-D03 kill after batch persist, before ack -> one batch; ack on replay, no second batch.
-D04 new source event between peek and ack -> older consumed, newer stays pending.
-D05 two concurrent collectors -> one association per source generation; no lost line.
-D06 bridge outage/lost receipt -> unresolved delivery recorded; no implicit owner
-    acceptance manufactured; retry bound and potential duplicate text documented.
-D07 queue full/expiry -> source recovery visible; no stale approval/code replay.
-D08 shared-ID collision/UNDO expiry -> commands bind only their current source item.
-D09 forget before send -> affected private text is never sent after forget completes.
-D10 clock restricted/quiet hours/approval backlog -> fixed pacing; control priority.
-D11 crash during compaction -> valid queue+dedupe associations survive together.
-D12 old persisted format -> migration is explicit, reversible before enabling sender.
+## Clause-to-test map
 
-Review decisions required
+Package `broker/digestqueue`. Oracle IDs D01-D12 are the original crash oracles.
 
-Storage boundary and fsync guarantees; per-source generation semantics; whether a
-carrier receipt supports any visibility claim; retry/expiry/queue-size numeric
-policy; shared-ID lifetime; migration/forget/recovery behavior. No runtime sender,
-source mutation API or optimizer has been implemented. W5-D2 and W7-A remain
-subsequent small packages with the earlier design's authority constraints.
+| Clause | Behaviour | Test |
+|---|---|---|
+| D01 | Failure before batch persist: source unchanged, no batch | `TestAdmissionFailureNeverCallsSourceAck`, `TestSaveFailureNeverReturnsQueueAdmission` |
+| D02 | Save/fsync error: restart sees old valid state | `TestPostCommitErrorQuarantinesUntilDurableReopen`, `TestRestartRecoverySaveFailureRefusesOpen`, `TestMalformedAndOldStateFailClosed` |
+| D03 | Crash after persist, before ack: one batch, ack on replay | `TestRestartAfterSourceAckBeforeQueueBitmapSave`, `TestPartialAcknowledgmentRecoveredBeforeNewPeek`, `TestCollectionDurablyQueuesBeforeAcknowledging` |
+| D03 | Duplicate acknowledgment is idempotent | `TestDuplicateAcknowledgmentIsIdempotent` |
+| D03 | Acknowledge outside `Ready` refused, source untouched | `TestAcknowledgeRefusedOutsideReadyLeavesSourceUntouched` |
+| D04 | Newer generation survives an older ack | `TestNewerGenerationSurvivesOlderRecoveryAck`, `TestNewGenerationDoesNotChangeOlderAcknowledgment` |
+| D05 | Concurrent collectors: one batch per generation | `TestConcurrentCollectorsOnOneCoordinatorDoNotDuplicate`, `TestConcurrentCollectionCreatesOneBatch` |
+| D06 | Crash while sending: unknown, never re-dispatched | `TestRestartOfSendingIsUnknownAndNeverRedispatched`, `TestUnknownRequiresExplicitNotSentEvidenceBeforeRetry` |
+| D06 | Accepted is terminal and claims no visibility | `TestAcceptedIsTerminalAndDoesNotClaimVisibility`, `TestRetryLimitPersists` |
+| D07 | Bound reached: new source stays unacknowledged | `TestCapacityLeavesNewSourcesUnacknowledged`, `TestFullQueueLeavesSourcePendingUnacknowledged`, `TestByteLimit`, `TestSourceLedgerBound` |
+| D07 | Expiry: unacked batch never sent | `TestExpiryPreventsSending`, `TestExpiredUnacknowledgedBatchDoesNotConsumeSource` |
+| D07 | Expiry with a consumed source is held, not dropped | `TestExpiredBatchWithConsumedSourceIsHeldNotDropped`, `TestCompactedExpiredBatchStillBlocksRatherThanWedgingSource` |
+| D09 | Forget purges pending text, refuses in-flight | `TestForgetPurgesPendingPayload`, `TestForgetFailsBeforeMutatingAnyInFlightReference` |
+| D11 | Compaction keeps dedupe and sequence; two stores reopen | `TestCompactionKeepsDedupeAndSequence`, `TestDistinctFileStoresRecoverAcrossBothReopens` |
 
-A10 experiment readiness
-
-The dependent H6 measurement harness in tools/measure_trials.py validates locally supplied
-trial records and hashed evidence without launching a model or account action.
-It keeps API dollars, tokens, runs and quota units separate, rejects incomplete
-three-arm comparisons, and includes rejected trials in owner effort per accepted
-task. Self-test fixtures do not measure product benefit. A10 product baselines
-remain unavailable until an assembled image, unmodified OpenClaw/direct CLI,
-qualified routes and owner-reviewed workload/goal judgments are supplied.
+Out of this slice (no owner, grants or sender wiring yet): D08 shared-ID collision and UNDO expiry, D10 clock restriction, quiet hours and approval priority, D12 migration from an old persisted format (the format is new here; old or malformed state fails closed, see `TestMalformedAndOldStateFailClosed`).

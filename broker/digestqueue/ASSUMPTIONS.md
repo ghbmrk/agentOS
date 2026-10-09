@@ -55,9 +55,11 @@ not proof. Transport acceptance is distinct from carrier delivery and owner
 visibility. None feeds owner outcome or implicit-acceptance accounting.
 
 Expiry affects ready notices only. In-flight and unknown sends remain unresolved.
-Expired batches with incomplete source acknowledgments preserve their source
-pending state; callers must surface that hold, not acknowledge an expired batch
-or invent a successful send. Capacity includes unresolved/history records until
+Expire moves only ready batches with no consumed source to expired. A ready batch
+past expiry with any consumed source stays ready and is reported by Held; callers
+must surface that hold, not acknowledge an expired batch or invent a successful
+send. Compact keeps an expired, cancelled or failed batch while any source is
+unacknowledged, so recovery keeps blocking instead of wedging the source. Capacity includes unresolved/history records until
 explicit compaction. Source ledger capacity remains bounded and is never silently
 evicted; exhaustion requires visible recovery and an explicit migration policy.
 

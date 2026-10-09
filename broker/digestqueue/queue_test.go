@@ -273,7 +273,6 @@ func TestSourceLedgerBound(t *testing.T) {
 func TestExpiryPreventsSending(t *testing.T) {
 	q, _ := queue(t)
 	b := enqueue(t, q, "change", 1)
-	ack(t, q, b)
 	if _, err := q.Begin(b.ID, at.Add(time.Hour)); !errors.Is(err, ErrExpired) {
 		t.Fatal(err)
 	}
@@ -285,6 +284,101 @@ func TestExpiryPreventsSending(t *testing.T) {
 		t.Fatal(got.State)
 	}
 }
+
+// REQ: OP-2
+func TestExpiredBatchWithConsumedSourceIsHeldNotDropped(t *testing.T) {
+	q, _ := queue(t)
+	b := enqueue(t, q, "change", 1)
+	ack(t, q, b)
+	if h, _ := q.Held(at); len(h) != 0 {
+		t.Fatal("held before expiry", h)
+	}
+	if err := q.Expire(at.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := q.Get(b.ID)
+	if got.State != Ready {
+		t.Fatal("consumed batch discarded:", got.State)
+	}
+	h, err := q.Held(at.Add(time.Hour))
+	if err != nil || len(h) != 1 || h[0].ID != b.ID {
+		t.Fatal(h, err)
+	}
+	if _, err = q.Begin(b.ID, at.Add(time.Hour)); !errors.Is(err, ErrExpired) {
+		t.Fatal(err)
+	}
+	if err = q.Compact(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = q.Get(b.ID); err != nil {
+		t.Fatal("compact removed held batch", err)
+	}
+}
+
+// REQ: OP-2
+func TestAcknowledgeRefusedOutsideReadyLeavesSourceUntouched(t *testing.T) {
+	q, st := queue(t)
+	expired := enqueue(t, q, "change", 1)
+	if err := q.Expire(at.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	s := expired.Snapshots[0]
+	before, _ := st.Load()
+	if err := q.Acknowledge(expired.ID, s.Source, s.Generation, s.Hash); !errors.Is(err, ErrState) {
+		t.Fatal("expired:", err)
+	}
+	if after, _ := st.Load(); string(after) != string(before) {
+		t.Fatal("refused acknowledgment changed state")
+	}
+	cancelled := enqueue(t, q, "owner", 1)
+	if err := q.Forget("task-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Acknowledge(cancelled.ID, "owner", 1, cancelled.Snapshots[0].Hash); !errors.Is(err, ErrState) {
+		t.Fatal("cancelled:", err)
+	}
+}
+
+type countStore struct {
+	change.MemStore
+	saves int
+}
+
+func (c *countStore) Save(b []byte) error { c.saves++; return c.MemStore.Save(b) }
+
+// REQ: OP-1
+func TestDuplicateAcknowledgmentIsIdempotent(t *testing.T) {
+	st := &countStore{}
+	q, err := New(st, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := enqueue(t, q, "change", 1)
+	ack(t, q, b)
+	started, err := q.Begin(b.ID, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range []string{"sending", "unknown", "accepted"} {
+		switch state {
+		case "unknown":
+			if err = q.Finish(b.ID, started.Attempts, OutcomeUnknown, ""); err != nil {
+				t.Fatal(err)
+			}
+		case "accepted":
+			if err = q.Finish(b.ID, started.Attempts, TransportAccepted, "receipt-1"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		saves := st.saves
+		raw, _ := st.Load()
+		ack(t, q, b)
+		if after, _ := st.Load(); string(after) != string(raw) || st.saves != saves {
+			t.Fatal("duplicate acknowledgment changed state in", state)
+		}
+	}
+}
+
 func TestForgetPurgesPendingPayload(t *testing.T) {
 	q, st := queue(t)
 	b := enqueue(t, q, "change", 1)
