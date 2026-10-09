@@ -245,6 +245,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | W3-forget-b1-7 b | A held release from the inbox whose confirmation Send fails is only logged before the hold is released; retry with bounded backoff first (#487 L3 point 2) |
 | W3-forget-b1-6 l6 | L3 on #519, point 6: under B6-R2, tampering at a destination is silent. agentos-restore's output should also name a copy it cut to its verified prefix, as B6-W does for skipped copies |
 | W3-forget-b1-6 l7 | L3 on #519, point 7: if b1-6b runs over its 120k estimate, split off the agentosd side (B6-b's lock and B6-F4) after the 40k counter checkpoint |
+| W3-forget-b1-6 l8 | L3 delta on #519, point C: B6-D's new `PendingNotice(PendingUnanchored)` wording should state the CH-12 bound (GSM-7, at most three segments), or `heldNotice` silently falls back to `heldFallback` |
 | W3-forget-b1-7 c | opening() builds the question text under the lock but sends it outside, so a stale question can follow a released reply on "message" (#487 L3 point 3) |
 | P3-4b-2 l1 | #490: the invalid-seed control assumes seed 0's first clause is padding; derive the padding from the seed when the catalog changes |
 | P3-4b-2 l2 | #490: the assurance/loop2 assumptions sit in the README, not ASSUMPTIONS.md (OPERATING §5); move them when the README is next touched |

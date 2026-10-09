@@ -95,15 +95,18 @@ It runs on the PC as root while the box's services are stopped.
   - `Layout.ForgetLog` is derived from it.
   - The tie must be one a change to either side alone breaks. For example, put the file name and the default learn dir in a leaf package that both binaries import. agentosd must not import `recovery` (ARC-2 list), so the shared package must not be `recovery`.
   - Test: an end-to-end restore whose check holds writes the marker at the path `restoreHold` reads, so `restoreHold(<learn dir>)` refuses.
-- **B6-b: agentosd is stopped before the restored tree is renamed into the live state dir (R5 (b)).**
-  - agentosd takes an exclusive `flock` on a lock file in its state root at start, and holds it while running (held mode included).
-  - The command takes the same lock without blocking before it moves anything into place, and holds it through the rename. It refuses, changing nothing, if the lock is held.
+- **B6-b: agentosd and the vault process are stopped before the restored tree is renamed into the live state dir (R5 (b); L3 on #519, points 3 and B).**
+  - One lock file in the state root, with two modes:
+    - agentosd and agentos-egress each take a **shared** `flock` (`LOCK_SH`) at start and hold it while running (held mode included). They run together (agentosd's `-egress`, `-owner-verify` and `-routing` name agentos-egress sockets), so neither may exclude the other.
+    - The command takes it **exclusive and non-blocking** (`LOCK_EX|LOCK_NB`) before it moves anything into place, and holds it through the rename. It refuses, changing nothing, while either service holds it.
+  - Why one file and two modes, not a lock per service: one rule covers both services and any later one, and the command takes a single lock.
+  - The vault process is included because the restored tree includes its root (`Layout.Vault`/`Keys`). An agentos-egress left running would keep the old vault open and could write it after the swap.
+  - "A second agentosd refuses" is not part of R5 (b) and is dropped here: a shared lock does not give it.
   - The restore itself extracts to a fresh path beside the target (`Restore` already requires dst not to exist). Only the final swap is under the lock.
   - Tests:
-    - With the lock held by another process, the command exits non-zero and the live tree is byte-for-byte unchanged.
-    - agentosd's start takes the lock, and a second agentosd refuses.
-  - The vault process takes the same lock too (L3 on #519, point 3, release). The restored tree includes its root (`Layout.Vault`/`Keys`), so an agentos-egress left running would keep the old vault open and could write it after the swap.
-    - Test: with agentos-egress holding the lock, the command refuses and changes nothing.
+    - With the lock held shared by agentosd, and separately by agentos-egress, the command exits non-zero and the live tree is byte-for-byte unchanged.
+    - agentosd starts while agentos-egress holds its shared lock, and the reverse.
+    - A service's start fails while the command holds the lock exclusive, so neither service starts mid-swap.
 - **B6-c: the `State.Pending` cross-check is a b1-5 condition, not built here (R5 (c)).**
   - R5 (c) applies "once agentosd can reach the vault", and b1-5 is the package that gives agentosd the vault.
   - It also needs a release record: `answerHeld` releases without the vault, so `State.Pending` stays set after a correct answer (recovery ASSUMPTIONS Q-follow-ups). A cross-check built now would hold every released box again.
@@ -131,12 +134,16 @@ It runs on the PC as root while the box's services are stopped.
   - The command ends by printing the restore's result. For a hold, the output is:
     - the reason;
     - `PendingNotice`;
-    - one line that is true in every agentosd configuration (L3 on #519, point 2). Held mode texts only with `-modem-bridge` (`heldMode.Link` is nil otherwise) and an owner number (`heldOwner` errors when there is no `-owner` and setup never finished). The command cannot see either, so it does not promise a text. The fixed line:
-      > "The agent stays on hold until the owner answers. It asks by text when it runs with its texting link and knows the owner's number; check both are set up."
+    - one line, chosen by `recovery.Confirmable(reason)` (L3 on #519, points 2 and A). Neither version depends on agentosd's configuration.
+      - Held mode texts only with `-modem-bridge` (`heldMode.Link` is nil otherwise) and an owner number (`heldOwner` errors when there is no `-owner` and setup never finished). The command cannot see either, so neither line promises a text.
+      - Confirmable (`unanchored`, `missing`), where held mode asks a question:
+        > "The agent stays on hold until the owner answers. It asks by text when it runs with its texting link and knows the owner's number; check both are set up."
+      - Not confirmable (`forged`, `rolled_back`): `settleForgetLog` writes no question, and held mode's opening text is the notice (`opening()`), so no answer releases it:
+        > "The agent stays on hold. It texts the owner this notice when it runs with its texting link and knows the owner's number."
     - Recommended over printing the line only when the box will text: that needs the command to read agentosd's flags and setup record, which is more coupling for one line.
   - LATER `W3-forget-b1-7 a` stays later. If the UX lens still wants the page, it is a new release row, not a blocker on this package.
   - Tests:
-    - For each pending reason, the output carries the notice and the fixed line exactly.
+    - For each of the four pending reasons, the output carries the notice and that reason's line exactly. `forged` and `rolled_back` never print the "until the owner answers" line.
     - The line takes no input from agentosd's configuration, so it reads the same with no bridge and no owner. Check that the command's source reads no agentosd flag or setup record.
     - A checked restore prints no hold.
 
