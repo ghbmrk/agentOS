@@ -13,24 +13,34 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"time"
 )
 
-// Marker is what a tamper write puts in a path.
-const Marker = "agentos-tamper-probe\n"
+// Marker starts what a tamper write puts in a path; the round's nonce
+// follows it.
+const Marker = "agentos-tamper-probe "
 
-// Tamper tries to change each path: a directory gets a new file, anything
-// else is overwritten. It returns how many writes the guest's own view
-// accepted.
-func Tamper(paths []string) int {
+// nonce is the broker's per-round marker: lowercase hex, so it is safe in
+// a file name.
+var nonce = regexp.MustCompile(`^[0-9a-f]{1,64}$`)
+
+// Tamper tries to change each path with the round's nonce: a directory
+// gets a new file named by it, anything else is overwritten with it. It
+// returns how many writes the guest's own view accepted; a malformed
+// nonce writes nothing.
+func Tamper(round string, paths []string) int {
+	if !nonce.MatchString(round) {
+		return 0
+	}
 	n := 0
 	for _, p := range paths {
 		target := p
 		if fi, err := os.Stat(p); err == nil && fi.IsDir() {
-			target = filepath.Join(p, ".agentos-tamper")
+			target = filepath.Join(p, ".agentos-tamper-"+round)
 		}
-		if os.WriteFile(target, []byte(Marker), 0o644) == nil {
+		if os.WriteFile(target, []byte(Marker+round+"\n"), 0o644) == nil {
 			n++
 		}
 	}

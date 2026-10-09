@@ -25,9 +25,9 @@ import sys
 TIER_A_BROKER = {
     "apply", "attest", "bridgeclient", "bridgeproto", "browser", "card", "cgroup", "change",
     "cleanroom", "clock", "cmd", "control", "corpus", "daemon", "egress", "grants", "guest",
-    "hint", "hostchange", "hostdisk", "journal", "localapi", "localsrv", "localui", "loops",
-    "machprobe", "mail", "modelroute", "modem", "modemlink", "owner", "probecmd", "pubid",
-    "recovery", "replay", "reversible", "sendrules", "sipsign", "smsapi", "sockets",
+    "hint", "hostchange", "hostdisk", "journal", "localapi", "localsrv", "localui", "loop7",
+    "loops", "machprobe", "mail", "modelroute", "modem", "modemlink", "owner", "probecmd",
+    "pubid", "recovery", "replay", "reversible", "sendrules", "sipsign", "smsapi", "sockets",
     "sockprobe", "tpmseal", "update", "vault", "vendor", "verb", "vm", "workers",
 }
 TIER_A_FILES = {"broker/go.mod", "broker/go.sum"}

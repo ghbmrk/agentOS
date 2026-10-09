@@ -22,13 +22,14 @@ type noted struct{ machine, target string }
 // tamperRig is a probe over three broker-held targets in a temporary
 // directory; attempt stands in for the guest's scripted writes.
 type tamperRig struct {
-	dir   string
-	probe *TamperProbe
-	notes []noted
-	paths [][]string
+	dir    string
+	probe  *TamperProbe
+	notes  []noted
+	paths  [][]string
+	nonces []string
 }
 
-func newTamperRig(t *testing.T, attempt func(paths []string) error) *tamperRig {
+func newTamperRig(t *testing.T, attempt func(nonce string, paths []string) error) *tamperRig {
 	t.Helper()
 	x := &tamperRig{dir: t.TempDir()}
 	snap := filepath.Join(x.dir, "snapshots", "m1-1")
@@ -54,9 +55,10 @@ func newTamperRig(t *testing.T, attempt func(paths []string) error) *tamperRig {
 			{Name: "evaluator", Path: filepath.Join(x.dir, "suite")},
 			{Name: "grader", Path: filepath.Join(x.dir, "grader.json"), Guest: []string{"/run/agentos/grader.json"}},
 		},
-		Attempt: func(_ context.Context, paths []string) (string, error) {
+		Attempt: func(_ context.Context, nonce string, paths []string) (string, error) {
 			x.paths = append(x.paths, paths)
-			return "probe-1", attempt(paths)
+			x.nonces = append(x.nonces, nonce)
+			return "probe-1", attempt(nonce, paths)
 		},
 		Journal: func(machine, target string) error {
 			x.notes = append(x.notes, noted{machine, target})
@@ -70,7 +72,7 @@ func newTamperRig(t *testing.T, attempt func(paths []string) error) *tamperRig {
 // target, so nothing is reported, each refusal is journaled once per
 // target, and every target counts as checked.
 func TestATamperRoundThatChangesNothingReportsNothingAndJournalsEachRefusal(t *testing.T) {
-	x := newTamperRig(t, func([]string) error { return nil })
+	x := newTamperRig(t, func(string, []string) error { return nil })
 	res, err := x.probe.Run(context.Background())
 	if err != nil || len(res.Found) != 0 {
 		t.Fatalf("%+v %v", res, err)
@@ -107,13 +109,38 @@ func TestATamperRoundThatChangesNothingReportsNothingAndJournalsEachRefusal(t *t
 	}
 }
 
+// LOOP-7 (tamper), a target that stays writable: the guest writes the
+// round's marker the way the fixed script does, so a write that lands
+// again with the script's own bytes still changes the target. Each round
+// reports it and none journals a refusal (L3 #548 point 1).
+func TestATargetThatStaysWritableIsReportedEveryRound(t *testing.T) {
+	var x *tamperRig
+	x = newTamperRig(t, func(nonce string, _ []string) error {
+		return os.WriteFile(filepath.Join(x.dir, "grader.json"), []byte("agentos-tamper-probe "+nonce+"\n"), 0o600)
+	})
+	for round := 1; round <= 2; round++ {
+		res, err := x.probe.Run(context.Background())
+		if err != nil || len(res.Found) != 1 || res.Found[0].Subject != "grader" {
+			t.Fatalf("round %d: %+v %v", round, res, err)
+		}
+	}
+	for _, n := range x.notes {
+		if n.target == "grader" {
+			t.Fatalf("a refusal was journaled for a writable target: %v", x.notes)
+		}
+	}
+	if len(x.nonces) != 2 || x.nonces[0] == x.nonces[1] || !tamperNonce.MatchString(x.nonces[0]) {
+		t.Fatalf("round nonces %q", x.nonces)
+	}
+}
+
 // LOOP-7 control (a writable snapshot in a test rig): a write that lands
 // in a broker-held target is a High finding through Report, named by the
 // target's owner word; the evidence, text and notes carry neither the
 // planted canary nor the host path, and no refusal is journaled for it.
 func TestAWritableSnapshotReportsATamperFindingThroughReport(t *testing.T) {
 	var x *tamperRig
-	x = newTamperRig(t, func([]string) error {
+	x = newTamperRig(t, func(string, []string) error {
 		return os.WriteFile(filepath.Join(x.dir, "snapshots", "m1-1", "meta.json"), []byte("tampered"), 0o600)
 	})
 	r := newReportRig(t, nil)
@@ -147,8 +174,9 @@ func TestAWritableSnapshotReportsATamperFindingThroughReport(t *testing.T) {
 			t.Fatalf("report carries %q: %s", bad, all)
 		}
 	}
-	// The next round that finds the target unchanged closes the finding.
-	x.probe.Attempt = func(context.Context, []string) (string, error) { return "probe-2", nil }
+	// The next round that finds the target unchanged (no longer reachable)
+	// closes the finding.
+	x.probe.Attempt = func(context.Context, string, []string) (string, error) { return "probe-2", nil }
 	r.now = r.now.Add(time.Hour)
 	if name, res := runJob(t, r.g, ctx); name != "probe:tamper" || res.Err != nil {
 		t.Fatalf("job %q: %+v", name, res)
@@ -161,26 +189,26 @@ func TestAWritableSnapshotReportsATamperFindingThroughReport(t *testing.T) {
 // LOOP-7: a missing target, a failed attempt or a refusal the journal does
 // not take fails the round; it closes nothing.
 func TestATamperRoundFailsClosed(t *testing.T) {
-	x := newTamperRig(t, func([]string) error { return errors.New("guest did not start") })
+	x := newTamperRig(t, func(string, []string) error { return errors.New("guest did not start") })
 	if _, err := x.probe.Run(context.Background()); err == nil {
 		t.Fatal("a failed attempt passed the round")
 	}
-	x = newTamperRig(t, func([]string) error { return nil })
+	x = newTamperRig(t, func(string, []string) error { return nil })
 	x.probe.Journal = func(string, string) error { return errors.New("journal broken") }
 	if _, err := x.probe.Run(context.Background()); err == nil {
 		t.Fatal("an unjournaled refusal passed the round")
 	}
-	x = newTamperRig(t, func([]string) error { return nil })
+	x = newTamperRig(t, func(string, []string) error { return nil })
 	os.Remove(x.probe.Targets[2].Path)
 	if _, err := x.probe.Run(context.Background()); err == nil {
 		t.Fatal("a missing target passed the round")
 	}
-	x = newTamperRig(t, func([]string) error { return nil })
+	x = newTamperRig(t, func(string, []string) error { return nil })
 	x.probe.Targets[0].Name = "Snap shots/x"
 	if _, err := x.probe.Run(context.Background()); err == nil {
 		t.Fatal("a target name that is not an owner word passed")
 	}
-	x = newTamperRig(t, func([]string) error { return nil })
+	x = newTamperRig(t, func(string, []string) error { return nil })
 	x.probe.Targets[1].Guest = []string{"relative/x"}
 	if _, err := x.probe.Run(context.Background()); err == nil {
 		t.Fatal("a relative guest path passed")

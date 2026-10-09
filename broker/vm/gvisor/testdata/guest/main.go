@@ -53,8 +53,8 @@ func main() {
 	if len(os.Args) == 2 && os.Args[1] == "linger" {
 		linger()
 	}
-	if len(os.Args) > 2 && os.Args[1] == "tamper" {
-		fmt.Println(machprobe.Tamper(os.Args[2:]))
+	if len(os.Args) > 3 && os.Args[1] == "tamper" {
+		fmt.Println(machprobe.Tamper(os.Args[2], os.Args[3:]))
 		return
 	}
 	if len(os.Args) == 4 && os.Args[1] == "press" {

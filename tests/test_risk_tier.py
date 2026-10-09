@@ -30,7 +30,7 @@ class RiskTierTest(unittest.TestCase):
             "broker/probecmd/probecmd.go": "A",
             "broker/corpus/checks.go": "A",
             "broker/machprobe/machprobe.go": "A",
-            "broker/loop7/loop7.go": "B",
+            "broker/loop7/loop7.go": "A",
             "broker/recall/index.go": "B",
             "broker/newpkg/x.go": "B",
             "guest/openclaw/Dockerfile": "B",

@@ -26,9 +26,9 @@ import (
 // guest authority, the verdict taken broker-side.
 
 // tamperIn is an Attempt that runs the tamper script in machine id.
-func (r *rig) tamperIn(id string) func(context.Context, []string) (string, error) {
-	return func(ctx context.Context, paths []string) (string, error) {
-		out, err := r.rt.cmd(ctx, append([]string{"exec", cid(id), "/guest", "tamper"}, paths...)...).Output()
+func (r *rig) tamperIn(id string) func(context.Context, string, []string) (string, error) {
+	return func(ctx context.Context, nonce string, paths []string) (string, error) {
+		out, err := r.rt.cmd(ctx, append([]string{"exec", cid(id), "/guest", "tamper", nonce}, paths...)...).Output()
 		if err != nil {
 			return "", fmt.Errorf("tamper script: %v", err)
 		}
@@ -91,9 +91,13 @@ func TestIntegrationTamperProbeInAGuest(t *testing.T) {
 	}
 	p.Targets = []loops.TamperTarget{{Name: "snapshots", Path: upper, Guest: []string{"/work/snap"}}}
 	// Guard hands each found to Report (loops' probe tests).
-	res, err = p.Run(ctx)
-	if err != nil || len(res.Found) != 1 || !same(res.Found[0], loops.CheckTamper, "snapshots", "writable") {
-		t.Fatalf("control round: %+v %v", res, err)
+	// A target that stays writable is reported on every round, not just
+	// the first (each round's nonce changes it again).
+	for round := 1; round <= 2; round++ {
+		res, err = p.Run(ctx)
+		if err != nil || len(res.Found) != 1 || !same(res.Found[0], loops.CheckTamper, "snapshots", "writable") {
+			t.Fatalf("control round %d: %+v %v", round, res, err)
+		}
 	}
 }
 

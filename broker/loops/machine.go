@@ -2,7 +2,9 @@ package loops
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -39,12 +41,13 @@ type TamperTarget struct {
 
 // TamperProbe has a guest try to write each target where it might reach
 // it, then checks broker-side that no target changed. Attempt runs the
-// guest's scripted writes and returns the machine that ran them; Journal
-// records one refusal per unchanged target.
+// guest's scripted writes with the round's nonce as their marker and
+// returns the machine that ran them; Journal records one refusal per
+// unchanged target.
 type TamperProbe struct {
 	Interval time.Duration
 	Targets  []TamperTarget
-	Attempt  func(ctx context.Context, paths []string) (machine string, err error)
+	Attempt  func(ctx context.Context, nonce string, paths []string) (machine string, err error)
 	Journal  func(machine, target string) error
 }
 
@@ -54,6 +57,19 @@ func (p *TamperProbe) Every() time.Duration { return p.Interval }
 // tamperRoots are where a guest might reach a host path: as named, and
 // through a process root link that escapes a chroot.
 var tamperRoots = []string{"", "/proc/self/root", "/proc/1/root"}
+
+// tamperNonce is a round's marker: fresh from the broker each round, so a
+// write that lands always changes its target, even one that landed the
+// same way last round (L3 #548 point 1), and the guest cannot predict it.
+var tamperNonce = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
+func newTamperNonce() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
 
 // Run digests every target, has the guest try them, and digests again. A
 // changed target is a High finding; an unchanged one is a journaled
@@ -84,7 +100,11 @@ func (p *TamperProbe) Run(ctx context.Context) (ProbeResult, error) {
 			paths = append(paths, filepath.Clean(g))
 		}
 	}
-	machine, err := p.Attempt(ctx, paths)
+	nonce, err := newTamperNonce()
+	if err != nil {
+		return ProbeResult{}, fmt.Errorf("tamper probe: nonce: %w", err)
+	}
+	machine, err := p.Attempt(ctx, nonce, paths)
 	if err != nil {
 		return ProbeResult{}, fmt.Errorf("tamper probe: attempt: %w", err)
 	}

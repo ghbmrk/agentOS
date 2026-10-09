@@ -10,9 +10,11 @@ import (
 	"time"
 )
 
-// LOOP-7 (tamper script): a writable file is overwritten, a writable
-// directory gains a file, and a read-only or missing path is refused
-// without stopping the round.
+// LOOP-7 (tamper script): a writable file is overwritten with the round's
+// marker, a writable directory gains a file named by it, and a read-only
+// or missing path is refused without stopping the round. Another round's
+// nonce writes different bytes; a nonce that is not lowercase hex writes
+// nothing.
 func TestTamperWritesWhatItCanAndCarriesOn(t *testing.T) {
 	dir := t.TempDir()
 	f := filepath.Join(dir, "grader.json")
@@ -24,14 +26,25 @@ func TestTamperWritesWhatItCanAndCarriesOn(t *testing.T) {
 	if os.Geteuid() == 0 {
 		want = 3 // root writes through mode bits
 	}
-	if n := Tamper(paths); n != want {
+	const n1, n2 = "0123456789abcdef0123456789abcdef", "fedcba9876543210fedcba9876543210"
+	if n := Tamper(n1, paths); n != want {
 		t.Fatalf("accepted %d writes, want %d", n, want)
 	}
-	if b, _ := os.ReadFile(f); string(b) != Marker {
-		t.Fatalf("file holds %q", b)
+	first, _ := os.ReadFile(f)
+	if string(first) != Marker+n1+"\n" {
+		t.Fatalf("file holds %q", first)
 	}
-	if _, err := os.Stat(filepath.Join(dir, ".agentos-tamper")); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, ".agentos-tamper-"+n1)); err != nil {
 		t.Fatal(err)
+	}
+	Tamper(n2, paths)
+	if b, _ := os.ReadFile(f); string(b) == string(first) {
+		t.Fatal("a new round's nonce wrote the same bytes")
+	}
+	for _, bad := range []string{"", "../x", "ABC", "0123/56789abcdef"} {
+		if n := Tamper(bad, []string{dir}); n != 0 {
+			t.Fatalf("nonce %q accepted %d writes", bad, n)
+		}
 	}
 }
 
