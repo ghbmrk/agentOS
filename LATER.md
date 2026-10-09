@@ -324,6 +324,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | W5-Da l2 | M3 on #555: the `Attempts >=` check in `Begin` repeats the `MaxAttempts` bound enforced in `Finish`; keep one |
 | W5-Da l3 | #555: `Evidence` is an unauthenticated opaque string, and Forget keeps association hashes in the dedupe state; settle both in the retention policy |
 | W5-Da l4 | #555: `change.FileStore.Load` treats a missing file as empty state, which resets Seq and the Latest ledger; a deleted queue file restarts the sequence |
+| W5-Db l1 | L3 9 on #565: W5-Da-r1 to r4 stay `queued (folded into …)`; a `folded` board state, or removing folded rows, would keep BOARD queries from double-counting them |
 | W3-forget-b2c-f3 l1 | L3 point 3 on #553: with f3's early append the owed entry still has `Logged` false, so a crash during `retry` makes `finishOwed` append the same goal again at restart; the replay is idempotent (`forgotten.has`), the cost is a duplicate log entry; the f3 builder records it in ASSUMPTIONS.md |
 | P3-4b-4b l1 | Security 4a 5 on #548: M3 ("only the test guest runs these scripts") is not enforced; add a test that fails when non-`testdata` broker code imports `machprobe` |
 | P3-4b-4b l2 | Security 4a 6 and L3 threat check on #548: `TamperProbe` passes host paths (the broker's state layout) to the guest as argv; send only the `Guest` paths and `/proc/*/root` forms once 4c picks the real targets |
