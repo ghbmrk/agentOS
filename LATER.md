@@ -318,6 +318,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | P1-4-flake l3 | L3 3 on #547: a count-bound fuzz run is capped only by `go test`'s default 10 m `-timeout`; an explicit per-step `-timeout` is the fix, and P1-4-flake-counts covers it, so this line closes with that row |
 | P1-4-flake l4 | L3 4 and Security 4a 3 on #547 (pre-existing, since #391): a runsc crash at the deadline reaches callers as `TimedOut` with no output, not `ErrExecFailed`; the failure is visible only in `exec.log` |
 | W3-forget-b2c-f3 l1 | L3 point 3 on #553: with f3's early append the owed entry still has `Logged` false, so a crash during `retry` makes `finishOwed` append the same goal again at restart; the replay is idempotent (`forgotten.has`), the cost is a duplicate log entry; the f3 builder records it in ASSUMPTIONS.md |
+| W3-forget-b2c-f3 l2 | f3 builder: a restore that replays an item 1 forget still retrying finishes it silently (the restored owed file lacks the goal), so an owner told `forgetNotSaved` never gets the promised done text; the task is forgotten. Same kind as F7; owe the done text from the restored log entry when f1's restore-path work lands (agentosd ASSUMPTIONS R4) |
 | W3-forget-b2c-f1 l1 | L3 delta on #553: the f1 brief still calls its lint "CH-12-lint" (F1-5, Sources); it should say UX-182-3-lint; reword when f1 next touches its brief |
 
 ## Reuse candidates
