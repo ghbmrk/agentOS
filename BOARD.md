@@ -284,6 +284,8 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | W3-forget-b3 | [Promised done text survives a restart](briefs/W3-forget-b3.md) | W3-forget-b1 | Next build item B | queued |
 | W3-forget-b2c | [Owed take-backs for W3-forget-b2b](briefs/W3-forget-b2c.md) | W3-forget-b2b | Next build item B | in review (#427) |
 | W3-implicit | [Report accepted-implicitly guest effects](briefs/W3-implicit.md) | W3 PW3 | — | queued |
+| W3-forget-b2c-2 | Item 2's texts (`forgetAgentDone`, `forgetAgentNotYet` and the rest) are owed until they send, as W3-forget-b3 does for item 1; add a check that no done text in `ownerForget` reaches `inform` directly (release, UX-182-3 / CH-12; Defect: W3-forget-b2c; L3 on #425, second PR with this kind of finding; brief to write) | W3-forget-b2c, W3-forget-b3 | Next build item B | queued (needs brief) |
+| W3-forget-b3r | The local Wi-Fi page lists older tasks and can forget one (potency R2, carried by W3-forget-b3; needs a page, socket route and forget path in `broker/localui`; release, L3 on #425; brief to write) | W3-forget-b3 | Next build item B | queued (needs brief) |
 | W5 | [Owner channel](briefs/W5.md) | W3 | loops thread | queued |
 | W5a | [Loop 2 passive checks](briefs/W5a.md) | #54 merged, W3 | builder B (lenses) | merged (3d2daab; #169) |
 | W5a-resume | [Per-grant resume on the local page](briefs/W5a-resume.md) | W5a, local page | builder (session_014jQE43g7uFA46BsQJD3VGh) | in review (tier A) |
