@@ -266,6 +266,32 @@ func TestCAP3InMachineWorkIsAskedAbout(t *testing.T) {
 	}
 }
 
+// A reset that fails must not put the host path from the error into the
+// journal evidence the owner can later be shown.
+func TestCAP3AFailedResetRecordsNoHostPath(t *testing.T) {
+	x, _ := newReachRig(t)
+	x.vm.plan.Changes = 4
+	canary := "/var/lib/agentos/machines/root/upper"
+	x.vm.fail = errors.New("rename " + canary + ": permission denied")
+	x.del(t, x.mail)
+	if len(x.ask.asked) != 1 {
+		t.Fatalf("asked %v", x.ask.asked)
+	}
+	x.ask.answer("yes")
+	ev := ""
+	if st := x.ask.st[x.ask.asked[0]]; len(st.Attempts) > 0 {
+		ev = st.Attempts[0].Evidence
+	}
+	if strings.Contains(ev, canary) || strings.Contains(ev, "/var/") || ev == "" || ev == "rolled back" {
+		t.Fatalf("evidence %q", ev)
+	}
+	for _, told := range x.told {
+		if strings.Contains(told, canary) {
+			t.Fatalf("told %q", told)
+		}
+	}
+}
+
 // W10: a lineage that has worked since the read is asked about first,
 // naming the item by kind, the real restore point and the actions so far.
 // The item is gone from recall at once; nothing of the lineage is undone

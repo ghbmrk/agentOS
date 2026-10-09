@@ -36,6 +36,17 @@ var allowedKeys = map[string]string{
 	"TMPDIR":  "fuzz and probe children (loop7, probecmd): their scratch directory",
 	"GOCACHE": "Go fuzz and probe binaries (loop7, probecmd): off, so no cache outside scratch",
 	"GOFLAGS": "Go fuzz and probe binaries (loop7, probecmd): empty, so no flags from outside",
+	"LANG":    "the browser driver (browser): C.UTF-8, so page text decodes the same everywhere",
+	// The guest runtime the guest bridge starts (agentos-guest-bridge).
+	// Both run in the guest, where no AGENTOS_* variable exists; the
+	// values are the guest's own (guest/openclaw/launch.json).
+	"OPENCLAW_GATEWAY_TOKEN":   "guest runtime: the bridge's fresh guest-local gateway token, valid in that guest only",
+	"OPENCLAW_CONFIG_PATH":     "guest runtime: its read-only configuration file",
+	"OPENCLAW_CONFIG_READONLY": "guest runtime: S4 defence in depth (ARC-7), configuration not writable",
+	"OPENCLAW_NO_AUTO_UPDATE":  "guest runtime: S4 defence in depth (ARC-7), no self-update",
+	"OPENCLAW_DISABLE_BONJOUR": "guest runtime: S4 defence in depth (ARC-7), no mDNS",
+	"OPENCLAW_CLAWHUB_URL":     "guest runtime: ClawHub pointed at a closed port (S4 finding 7)",
+	"DO_NOT_TRACK":             "guest runtime: no telemetry",
 }
 
 // deniedPrefix names agentosd's own configuration, the owner's number
@@ -146,6 +157,8 @@ type Options struct {
 	// KillGroup makes a cancelled context SIGKILL the child's whole
 	// process group, not only the child; SysProcAttr must set Setpgid.
 	KillGroup bool
+	// OnCancel, if set, runs when the context ends, before the kill.
+	OnCancel func()
 }
 
 // Cmd is a child process to start. It is opaque: its exec.Cmd never
@@ -170,8 +183,14 @@ func Command(ctx context.Context, env Env, o Options, name string, args ...strin
 	c.SysProcAttr = o.SysProcAttr
 	c.ExtraFiles = o.ExtraFiles
 	c.WaitDelay = o.WaitDelay
-	if o.KillGroup {
-		c.Cancel = func() error { return syscall.Kill(-c.Process.Pid, syscall.SIGKILL) }
+	c.Cancel = func() error {
+		if o.OnCancel != nil {
+			o.OnCancel()
+		}
+		if o.KillGroup {
+			return syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
+		}
+		return c.Process.Kill()
 	}
 	return &Cmd{c: c, env: env}
 }
@@ -225,6 +244,10 @@ func (c *Cmd) CombinedOutput() ([]byte, error) {
 
 // StdinPipe returns a pipe to the child's standard input.
 func (c *Cmd) StdinPipe() (io.WriteCloser, error) {
+	// Checked here too: a refused start would leave the pipe open.
+	if err := c.env.check(); err != nil {
+		return nil, err
+	}
 	w, err := c.c.StdinPipe()
 	if err != nil {
 		return nil, scrub(err)
@@ -234,6 +257,10 @@ func (c *Cmd) StdinPipe() (io.WriteCloser, error) {
 
 // StdoutPipe returns a pipe from the child's standard output.
 func (c *Cmd) StdoutPipe() (io.ReadCloser, error) {
+	// Checked here too: a refused start would leave the pipe open.
+	if err := c.env.check(); err != nil {
+		return nil, err
+	}
 	r, err := c.c.StdoutPipe()
 	if err != nil {
 		return nil, scrub(err)

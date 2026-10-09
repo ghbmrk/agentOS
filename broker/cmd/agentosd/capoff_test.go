@@ -199,7 +199,7 @@ func capCases() []capCase {
 		{row: "C1_guest_plane_fails", name: "Agent and worker tools:", induce: func(t *testing.T, b *capBox) {
 			b.caps.agentOff(agentNoMachines)
 		}},
-		{row: "C1_image_missing", name: "Agent:", induce: func(t *testing.T, b *capBox) {
+		{row: "C1_image_missing", name: "Agent software:", induce: func(t *testing.T, b *capBox) {
 			_, err := agentSpec(images{}, "openclaw", filepath.Join(b.dir, "launch.json"), defaultAgentMemMB)
 			if err == nil {
 				t.Fatal("an unregistered agent image gave a spec")
@@ -459,12 +459,12 @@ func TestCapabilityLinesAreOwnerWorded(t *testing.T) {
 		}
 	}
 	for _, bad := range []string{
-		"Model: -egress is empty; restart the box.",
-		"Agent: off, /var/lib/agentos/machines is missing; restart the box.",
-		"Model: model.sock refused; restart the box.",
-		"Agent: off, vm open: permission denied; restart the box.",
-		"Worker tools: off, image %q; restart the box.",
-		"Model: can't be reached; restart the box.",
+		"Model: -egress is empty; restart me.",
+		"Agent: off, /var/lib/agentos/machines is missing; restart me.",
+		"Model: model.sock refused; restart me.",
+		"Agent: off, vm open: permission denied; restart me.",
+		"Worker tools: off, image %q; restart me.",
+		"Model: can't be reached; restart me.",
 		"Worker tools: not set up on this box.",
 		"Worker tools: not set up on this box; " + strings.Repeat("an update will add them ", 4) + ".",
 	} {
@@ -477,7 +477,7 @@ func TestCapabilityLinesAreOwnerWorded(t *testing.T) {
 	caps.model = reachableModel(t)
 	caps.updateChecks(stubUpdates{})
 	reg := newCapLines(caps)
-	reg.add("planted", capConfig, func() string { return "Model: -egress is empty; restart the box." })
+	reg.add("planted", capConfig, func() string { return "Model: -egress is empty; restart me." })
 	if reg.check() == nil {
 		t.Error("a registry holding a flag name passed")
 	}

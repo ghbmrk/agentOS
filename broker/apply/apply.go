@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"maps"
 	"slices"
 	"strconv"
@@ -915,7 +916,7 @@ func (a *Applier) Execute(ctx context.Context, in journal.Intent, _ int) journal
 	}
 	if err != nil {
 		a.mu.Unlock()
-		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "rollback point not saved: " + err.Error()}
+		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "rollback point not saved: " + noted(err)}
 	}
 	a.executing = true
 	a.mu.Unlock()
@@ -936,7 +937,7 @@ func (a *Applier) Execute(ctx context.Context, in journal.Intent, _ int) journal
 			retire(&a.st, p.Adoption)
 		}
 		a.abandonLocked(ctx, key, false)
-		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: err.Error()}
+		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: noted(err)}
 	}
 	next := a.st
 	pt2 := *a.st.Applying
@@ -952,7 +953,7 @@ func (a *Applier) Execute(ctx context.Context, in journal.Intent, _ int) journal
 		// Unrecorded, the handover is undone, so the activation is never
 		// called done while a restart in this boot would abandon it.
 		a.abandonLocked(ctx, key, true)
-		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "handover not saved: " + err.Error()}
+		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "handover not saved: " + noted(err)}
 	}
 	a.st, a.handed = next, rel
 	if a.st.Pending == nil {
@@ -987,6 +988,17 @@ func unrecordedLast(st state, version int64, key string, l *last) *last {
 		return &last{Version: version, Kind: doneUnrecorded}
 	}
 	return l
+}
+
+// noted is err's text for the journal. A path stays in the log, not the
+// evidence, because a later owner text can be built from the evidence.
+func noted(err error) string {
+	msg := err.Error()
+	if strings.Contains(msg, "/") || strings.Contains(msg, `\`) {
+		log.Printf("apply: %v", err)
+		return "not applied"
+	}
+	return msg
 }
 
 // pointLocked is the rollback point for handing rel over now.

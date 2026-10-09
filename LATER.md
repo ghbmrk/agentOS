@@ -3,7 +3,7 @@ Generated 2026-10-07 by the COST thread's audit; the coordinator updates it. Row
 
 ## Summary
 Non-merged rows audited: 129; the 67 stale rows it found were reconciled into BOARD.md on 2026-10-08 (DOC-3), and rows since merged were removed from the tables below. Row counts are not kept here, because every PR that touches a table made them stale; count the table rows (a line starting `| ` under each heading) when a number is needed.
-No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41) has no board row but blocks IMG-1, HOST-1a/1b/1c part 2 and W3-builder-ship.
+No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged as #41 on 2026-10-09; IMG-1, HOST-1a/1b/1c part 2 and W3-builder-ship are no longer blocked on it.
 
 ## Release (needed for A1–A15 or an invariant)
 | ID | Needed for | Note |
@@ -87,7 +87,6 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | CRED-5f-mr-wording | UX 5 on #566 (comment 6078058414): the no-grant fix clause says "a later box version adds this" without "nothing to do"; use the `fixUpdate` constant (S7: "nothing to do; a later box version adds it") when the line is next touched, for example under CRED-5f-mr-page |
 | A5-reask | `broker/apply` A5 (SR3-4f-2b): until the owner calls `Retry`, each Loop 3 check re-adopts and drops a refused release, so the owner is asked again daily; A5 should name that daily re-ask as well as the re-adoption cost (L3 on #572, comment 6079384349). Text only. SR3-4f-2-r1 makes the daily re-adoption real and A5 now names it; left open for the owner-facing wording of the re-ask |
 | APPLY-dup | `broker/apply/ASSUMPTIONS.md` repeats rows A3–A7 (found on UPD-b); text only, no behaviour |
-| FIRSTBOOT-text | `broker/firstboot` wording (L3 on #379, points 3–5): an unexpected `ScheduleFirstBoot` error still reads "updating to version N"; with several mirrors failing, STATUS names only the last mirror's failure; `Hold()` in `fell_back` says "when the update finishes" where `Status()` says it waits for a newer release. Text only; the gate stays held in each case |
 | CR-dup-built | `broker/cleanroom` (L3 on #432, point 3): a crash between logging `built` and removing the queue entry logs `built` twice for one job; one artifact, no duplicate publication, may double-count the weekly hint summary |
 | CR-quarantine-prune | `broker/cleanroom` (L3 on #432, point 4): quarantined artifact copies are never pruned; bounded at `maxRepairs`+1 copies (8 MiB each at most) per artifact ID |
 | CR-power-cut | `broker/cleanroom` (L3 on #432, point 5): hardware power-cut qualification of the artifact store; no SPEC §15 acceptance test needs it, and simulated faults are recorded as no substitute (C14) |
@@ -246,6 +245,9 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | W3-forget-reach l5 | L3 L2 on #569: mutant N12 (`judgeAgent` keeps None entries) leaves only a stale owed entry; the test is carried by W3-forget-reach-r3 |
 | W3-forget-reach l6 | L3 L3 on #569: `broker/recalltool/service.go` was outside the brief's scope but needed for the pass-throughs; brief-gap: a brief that adds a `Reach` hook lists `service.go` |
 | SR3-2 l1 | UX/Potency on #428 (L3 later point): an authorized intent that never dispatches (held, no executor, fenced) holds its bound place with no age-out; note it in GR31 and let STATUS show it |
+| CH-21b l1 | Builder on CH-21b: `boxname.Check` allows any Unicode letter, so a mixed-script look-alike (Cyrillic а in "Аgent OS") passes the reserved-word check; fold look-alikes as CH-10 does (same gap as OSS-10w2 f4) |
+| CH-21b l2 | Builder on CH-21b: a name with non-GSM-7 letters or U+2019 forces UCS-2 on every owner text that quotes it, halving the CH-12 length budget; count it when CH-12 budgets are next touched |
+| CH-21b l3 | Builder on CH-21b: renames are not journaled; the owner sees only the reply. Journal `name changed` when the journal next gains owner-channel events |
 | SR3-2 l2 | Security on #428, point 2: GR7 ("under a bound of 1 the second is asked") overstates, since concurrent `Authorize` calls are not seq-checked and both can be authorized, the second being refused at the dispatch recheck. Safe. Next time GR7 changes, add "or, if both are authorized at once, refused at the recheck" |
 | P2-2a f3 l1 | UX on #423, point 2: an owner who never answers is asked again at every check; after a few lapses the ask could move to the daily digest only (UPD-5) |
 | P2-2a f3 l2 | Potency on #423, point 1: the lapse record is in memory only; persist it with proposals (C9, potency PM4). No release is stranded meanwhile, since Loop 3 re-asks after a restart |
@@ -574,6 +576,10 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | P3-4b-3r-env-r1 l3 | Potency 4 on #621 (comment 6083931290): the per-assignment and per-key `holds(..., 3)` calls in `childEnvCheck` repeat the unit-wide pass for units that start a child; keep one direct `Environ` check for the others |
 | P3-4b-3r-env-r8 l1 | Brief P3-4b-3r-env-r8 (#621 delta Security 4a): reflection plus `unsafe` can reach `childproc.Cmd`'s unexported `*exec.Cmd` and change its `Env` after the check; the daemon gates `unsafe` (`escapes`, `escapeOK`) for agentosd's graph only: extend that to the module, or seal the checked copy inside `Start` |
 | P3-4b-3r-env-r8 l2 | Brief P3-4b-3r-env-r8 (#621 delta Security 4a): a raw `SYS_EXECVE`/`SYS_EXECVEAT` (or `clone` then exec) through `syscall.Syscall`/`RawSyscall` or `unix.Syscall` starts a child outside `childproc`; the gate does not follow syscall numbers, and the daemon's `rawOK` covers agentosd's graph only: extend it to the module |
+| P3-4b-3r-env-r8b l1 | Builder on P3-4b-3r-env-r8b: `childproc`'s key allowlist is one list for every child, so the guest runtime's `OPENCLAW_*` and `DO_NOT_TRACK` keys are also allowed for any broker child (values still checked against agentosd's secrets; CP-6). Give each caller its own allowlist if a second caller-specific key arrives. |
+| P3-4b-3r-env-r8b l2 | Builder on P3-4b-3r-env-r8b: the gate follows an ignored (not linux/amd64) file's imports through packages `go list` can list under GOOS=linux; a package that lists only under another GOOS is not followed (CP-2). Run `go list` per shipped GOOS if a non-Linux build ever ships. |
+| P3-4b-3r-env-r8b l3 | L3 on #659 point 3 (comment 6089925620): the guest bridge refuses to start the runtime when an `OPENCLAW_*` value in the guest equals one of its own credential values. It fails closed; revisit if a real config trips it. |
+| P3-4b-3r-env-r8b l4 | Security 4a on #659 point 3 (comment 6089927614): if `check()` passes in `StdinPipe`/`StdoutPipe` and then fails in `Start` (`os.Environ` changed between the calls), the pipes stay open; browser `Start` also leaks the stdin pipe when `StdoutPipe` errors (predates r8b). Close any pipes already made when `Start` refuses. |
 | SR3-5-f1 l1 | Delta L3 on #571 (comment 6078264771): a pin is never cleared for an intent that is denied or never dispatched; pins live in memory, so a restart drops them |
 | SR3-5-f1 l2 | L3 on #579 point 3: `Reconcile` drops the judged pin when it returns `Unknown`, so a later `Reconcile` of the same attempt judges without it and stays `Unknown` (fails closed) |
 | SR3-5-f1 l3 | L3 on #579 point 4: the `movedFrom` mutant (always pass) survives the suite; the agreement fix (B1) does not kill it; add a `Reconcile` test where the pinned message is not at the pinned destination |
