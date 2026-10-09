@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,6 +42,7 @@ import (
 type Reporter interface {
 	Report(ctx context.Context, f loops.Finding) (loops.Record, error)
 	Resolve(id string, r loops.Replay) error
+	CloseTarget(id string, c loops.Closure) error
 	OpenReported(c loops.Check) []loops.Finding
 }
 
@@ -403,11 +405,20 @@ func (s *Source) Fuzz(ctx context.Context, t Target) (int, error) {
 		return 0, nil
 	case overran && (err == nil || exited(err)):
 		// The engine's own -test.fuzztime did not stop it. A clean step
-		// later never replays what kept it running, so this finding is
-		// not resolved here (delta L3 on #560): it stays open for
-		// P3-4b-3c's rules.
-		return 1, s.report(ctx, t, overrunDetail)
+		// later never replays what kept it running, so it never resolves
+		// this finding (delta L3 on #560); only a good step of another
+		// release binary closes it (closeHangs).
+		return 1, s.hang(ctx, t, loops.FuzzOverrunDetail)
 	case err == nil:
+		p := progressOf(out)
+		if p.stalled() {
+			// A fuzzed input hung the worker: the engine stopped at its
+			// deadline, passed and stored no input (P3-4b-3r-fuzz).
+			return 1, s.hang(ctx, t, loops.FuzzStallDetail)
+		}
+		if p.moved() {
+			return 0, s.closeHangs(t, p)
+		}
 		return 0, nil
 	case !bytes.Contains(out, []byte("Failing input written to")):
 		return 0, fmt.Errorf("loop7: fuzzing %s did not run: %v", t.subject(), err)
@@ -415,11 +426,182 @@ func (s *Source) Fuzz(ctx context.Context, t Target) (int, error) {
 	return s.replay(ctx, t)
 }
 
-// Target findings: a failure no stored input can be named for.
-const (
-	noInputDetail = "the target failed before any stored input could be named (a seed added in code, or a crash at start)"
-	overrunDetail = "the fuzz engine did not stop within its bound"
+// Target findings, a failure no stored input can be named for, have the
+// details loops words and closes: loops.FuzzNoInputDetail, and the hangs
+// loops.FuzzOverrunDetail and loops.FuzzStallDetail.
+
+// Go's own progress lines for a fuzz step (internal/fuzz's logStats,
+// written by the coordinator): the baseline, "K/K completed" once it is
+// gathered, then the exec count, which counts the baseline's runs.
+var (
+	baselineLine = regexp.MustCompile(`^fuzz: elapsed: \S+, (?:gathering baseline coverage|testing seed corpus): (\d+)/(\d+) completed`)
+	execsLine    = regexp.MustCompile(`^fuzz: elapsed: \S+, execs: (\d+) \(`)
 )
+
+// stepProgress is what a fuzz step's output says of its progress: the
+// baseline input count and the last exec count, -1 where no such line
+// was printed.
+type stepProgress struct{ baseline, execs int }
+
+// progressOf reads a fuzz step's output. Only the last exec count counts:
+// the coordinator prints it as it stops, after its workers, so no line
+// from the target itself comes after it.
+func progressOf(out []byte) stepProgress {
+	p := stepProgress{-1, -1}
+	sc := bufio.NewScanner(bytes.NewReader(out))
+	for sc.Scan() {
+		if m := baselineLine.FindStringSubmatch(sc.Text()); m != nil && m[1] == m[2] {
+			p.baseline, _ = strconv.Atoi(m[1])
+		} else if m := execsLine.FindStringSubmatch(sc.Text()); m != nil {
+			p.execs, _ = strconv.Atoi(m[1])
+		}
+	}
+	return p
+}
+
+// stalled: the step printed its baseline and an exec count, and the count
+// never moved past the baseline. A step too short to print either is no
+// stall, and no good step either.
+func (p stepProgress) stalled() bool { return p.baseline >= 0 && p.execs >= 0 && p.execs <= p.baseline }
+
+// moved: the step's exec count moved past its baseline.
+func (p stepProgress) moved() bool { return p.baseline >= 0 && p.execs > p.baseline }
+
+// hangFile, in a target's Dir, records for each open hang finding the
+// SHA-256 of the binary that last produced it, so a restart keeps it.
+const hangFile = "hang.json"
+
+// readHangs reads t's hang record: detail to producing binary digest. A
+// missing record is empty; one that is not a regular file (a link) is
+// refused, never trusted.
+func readHangs(t Target) (map[string]string, error) {
+	p := filepath.Join(t.Dir, hangFile)
+	fi, err := os.Lstat(p)
+	if errors.Is(err, os.ErrNotExist) {
+		return map[string]string{}, nil
+	} else if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("loop7: %s is not a regular file", p)
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return nil, err
+	}
+	m := map[string]string{}
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, fmt.Errorf("loop7: %s: %w", p, err)
+	}
+	return m, nil
+}
+
+// writeHangs replaces t's hang record, or removes it when empty.
+func writeHangs(t Target, m map[string]string) error {
+	p := filepath.Join(t.Dir, hangFile)
+	if len(m) == 0 {
+		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(t.Dir, 0o700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(t.Dir, hangFile+".*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(b); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), p)
+}
+
+// binaryDigest is the SHA-256 of the file at path.
+func binaryDigest(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// hang records the binary that produced a hang of t, then reports it. The
+// record comes first, so a crash in between leaves a record and no
+// finding, never a finding no step can close. A hang seen again records
+// the newer binary: a lucky good step of a build that hung closes nothing.
+func (s *Source) hang(ctx context.Context, t Target, detail string) error {
+	d, err := binaryDigest(t.Binary)
+	if err != nil {
+		return err
+	}
+	m, err := readHangs(t)
+	if err != nil {
+		return errors.Join(err, s.report(ctx, t, detail))
+	}
+	m[detail] = d
+	if err := writeHangs(t, m); err != nil {
+		return errors.Join(err, s.report(ctx, t, detail))
+	}
+	return s.report(ctx, t, detail)
+}
+
+// closeHangs closes t's open hang findings after good step p, each only
+// when this binary differs from the one that produced it (CloseTarget,
+// S30). A finding with no trusted record of its producer stays open.
+func (s *Source) closeHangs(t Target, p stepProgress) error {
+	var open []loops.Finding
+	for _, f := range s.cfg.Report.OpenReported(loops.CheckFuzz) {
+		if f.Subject == t.subject() && (f.Detail == loops.FuzzOverrunDetail || f.Detail == loops.FuzzStallDetail) {
+			open = append(open, f)
+		}
+	}
+	if len(open) == 0 {
+		return nil
+	}
+	m, err := readHangs(t)
+	if err != nil {
+		return err
+	}
+	d, err := binaryDigest(t.Binary)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	closed := false
+	for _, f := range open {
+		produced := m[f.Detail]
+		if produced == "" || produced == d {
+			continue
+		}
+		c := loops.Closure{Kind: loops.ClosureStep, Binary: d, Produced: produced, Execs: p.execs, Baseline: p.baseline, At: s.cfg.Now()}
+		if err := s.cfg.Report.CloseTarget(f.ID, c); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		delete(m, f.Detail)
+		closed = true
+	}
+	if closed {
+		errs = append(errs, writeHangs(t, m))
+	}
+	return errors.Join(errs...)
+}
 
 // failLine and passLine are a seed subtest failing or passing under
 // -test.v.
@@ -483,9 +665,9 @@ func (s *Source) replay(ctx context.Context, t Target) (int, error) {
 		errs = append(errs, s.report(ctx, t, crashDetail(data)))
 	}
 	if noInput {
-		errs = append(errs, s.report(ctx, t, noInputDetail))
+		errs = append(errs, s.report(ctx, t, loops.FuzzNoInputDetail))
 	} else if runErr == nil {
-		passed[noInputDetail] = true // the whole replay passed
+		passed[loops.FuzzNoInputDetail] = true // the whole replay passed
 	}
 	for _, f := range s.cfg.Report.OpenReported(loops.CheckFuzz) {
 		if f.Subject == t.subject() && passed[f.Detail] {

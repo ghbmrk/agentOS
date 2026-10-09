@@ -435,6 +435,9 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | SR3-2-f-started-wording | With 1 queued and 1 started under `PerDay: 2` the owner sees `1 earlier send still queued`, not the bound; consider a form such as `1 of 2 today still queued` (UX lens on #581, comment 6078894198) |
 | SR3-2-f-max-rule | The queued count is the maximum over the failed rules, not the rule the owner would widen; differs only with several bound rules on one action (UX lens on #581, comment 6078894198) |
 | SR3-2-f-maxnoted | No test pins the `maxNoted` (1000) boundary where a restart closes the ask as changed; add one with 1001 queued or a lowered constant. A second shown-only fact goes into a separate `owner.Item` field (GR33), not `Detail` (Potency lens on #581, comment 6078894198) |
+| SR3-6f-1 l1 | `TestOwnerNarrowingSurvivesTheNextCheck`'s `r.p.proposed()[1:]` loop may check nothing, because version 2 was already proposed; the `old.Security()` assertion carries the test. Tighten it when the file is next touched (L3 on #595, comment 6080096018, point 3) |
+| SR3-6f-1 l2 | The `attestors` failure line gives the owner no step or time, and it sits above the pending-approval lines in `statusLocked`, so a security fix waiting for approval is not shown while the read fails; unlike a mirror failure it can persist. Revisit when W5b adds the settings page (UX and Potency lens on #595, comment 6080136904, point 3) |
+| SR3-6f-1 l3 | Make "trusted testers" (the `attestors` failure line) and "attestor" (`forkAsks`) match the label the settings page uses once W5b names it; `ownertext_test.go` covers only the finding texts (UX and Potency lens on #595, comment 6080136904, point 4) |
 
 ## Reuse candidates
 | ID | Component | Why |
