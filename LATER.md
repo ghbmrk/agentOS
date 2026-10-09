@@ -112,11 +112,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | ADP-16-acct2 | A second account signed in inside a suite executor's app; ADP-16 kiosk already limits to one account's adapters |
 | W3-forget-b2b q | A queued item 2 run long after its YES also takes back work done since; the notice names only the count at the ask (#327 L3 L1) |
 | W3-forget-b2b w | A failed owed `MarkTakeBack` write in one `resumeAgent` run lets a later run in the same open try again and text the owner again; fold into the not-saved release row (#327 L3 r5 #2) |
-| W3-forget-b2b e | `Reach.TakeBack` returns early on an unfinished reset from the same time without a take-back mark, so a later boot could take back again; no known producer (#327 L3 r5 #3) |
 | OSS-6e f1 | Security 319-1 (L3 asked for this line; lands before #319 merges): a missing or unreadable `boot_id` fails open, so each restart can count one day of the 20h floor again |
-| W3-forget-b2 f1 | L3 on #321: a forget after a proposal reached the owner requeues the rebuild, which may ask again; rare, owner can decline |
-| W3-forget-b2 f2 | L3 on #321: a self-cancelled job still calls propose/Build with a cancelled ctx |
-| W3-forget-b2 f3 | L3 on #321: no mutation test covers the post-build disjunct |
 | P2-2w d f3 | L3 F3 on #322: LocalUI tracks localui.sock, not the page process; a readiness signal would stop page-asked changes waiting while the page is down; liveness only, nothing approves |
 | P2-2w d f3b | L3 F3 on #322 delta: gate.go `NoPage*` reasons say "which is not running"; agent-facing, never texted to the owner (the journal redacts them) |
 | P2-2w d f4 | L3 N1 on #322: OSS-10 is missing from the REQ marker in `pagewording_test.go` |
@@ -140,7 +136,6 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | SR2-3j f1 | `annotate`'s `GuestReason = Reason` fallback takes a plain string; typing it `guesterr.Literal` would let the compiler hold the rule GR30 states (lens on #396) |
 | OSS-10w f1 | UX on #323: the alert wording "Switch back there" reads oddly after a switch back to the project |
 | OSS-10w-r | WF1 after a project root-key rotation: switching back compares against the image's shipped root keys and so fails closed once the project rotates them; a chain walk from the shipped root would admit it. Meanwhile the owner's only route back is a named follow (beside U13 limit (b)). No release has rotated root keys; a new image ships the new root |
-| W3-forget-b2b f1 | Security 327-1: race between `worked()` and `takeBack(approved=false)` in `agentBackWithoutAsking`; re-check under `r.run` |
 | W3-forget-b2c l1 | UX: the recall-off owed take-back text names no owner step, because STATUS has no line when recall is Off (`LateExecutor.Status`); a config only a dev box has; since #602 recall Off shows "I keep trying" on STATUS for the whole boot (an approved item 2 is owed `Taking` on the `forgetAgentNotOpen` path and nothing retries until recall opens; dev box only; delta UX 2 and delta L3 2 on #602, comments 6082130531 and 6082183740) |
 | W3-forget-b2c-f1 l1 | L3 1 on #602: `carryAgent`'s `a == nil` bound branch is untested and unreachable today (the agent is never unset after it is stored); delete it or test it |
 | W3-forget-b2c-f1 l2 | L3 2 on #602: `resumeRestored`'s `ErrNotOpen` re-queue is untested |
@@ -219,16 +214,14 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | SR2-3n f1 | L3 point 2 on #466: no test bounds a guest that holds its stderr pipe open after runsc exits 0; only the context-deadline path is exercised. Add a fake-runsc mode that leaves `sleep 30 >&4 &` behind and assert Exec returns within `ExecWaitDelay` with the guest's output |
 | W3-forget-b1 f1 | L3 on #409: a forget log long enough to need 100+ copies or segments has no tested path; F4's notices assume one log file per destination (broker/recovery/ASSUMPTIONS.md F4) |
 | W3-forget-b1 f2 | L3 on #409: forgets made before the counter's anchor (a box with no TPM, or provisioned without Box.Counter) are only as fresh as the newest copy found (broker/recovery/ASSUMPTIONS.md F3) |
-| OSS-6s-a f1 | L3 on #411: `pubsend.New` reads the ledger with an unbounded `os.ReadFile` before `validate`; the directory is owner-only, so this is hardening; cap the read at about `MaxWaiting`×2×`FrameSize` |
-| OSS-6s-a f2 | Potency on #411: P10 lowers `MaxPayload` to 261,116 bytes (m = 4) and nothing records that the planned producers fit (clean-room artifacts C13 K2, OSS-8 attestations); add one line to P10 or OSS-6m with their expected sizes |
 | OSS-6s-a f3 | UX on #411: in Release, a signed item over `SignerOverhead` is counted in the "could not be signed" error; harmless while the caller is a broker timer, so give it its own reason when W6 lands |
+| OSS-6s-a-f f1 | Raised on OSS-6s-a-f: a clean-room result (up to 8 MiB, files up to 1 MiB) does not fit `MaxPayload` (261,116) or one daily batch; the clean-room publisher package (none on BOARD yet) chooses what it queues, per pubid P10 *Producers* |
 | OSS-6s-a f4 | Security on #411 (re-sign): a PR's Findings line should name the LATER rows its delta removes (the `OSS-6s-a age bound` row was struck outside the brief's scope) |
 | W5a-resume f3 | UX on #381: a gate refusal other than "pause changed" shows the "isn't answering" text, which names the wrong cause; reload still works as the next step |
 | W5a-resume f4 | UX on #381: the paused-grant card heading is the bare grant ID; lead with what the grant does (the `What` line) and keep the ID second |
 | W5a-resume f5 | Security record on #381 (point 1 in its record, unlabeled in the comment): `localsrv.askResume` checks the token inline instead of through `s.authed`; equivalent today, but a later check added to `authed` would miss it; fold it in when the file is next touched |
 | W3-forget-b1 f3 | Security on #409 L1: destination forget-log copies are plaintext (goal IDs, forget times, take-back flags readable by the destination); consider AEAD under its own HKDF label |
 | W3-forget-b1 f4 | Security on #409 L2: `readRestoredForgets` trusts `forget-log.json` without authentication at every start; low risk, only agentosd's uid can write it |
-| W3-forget-b1 f5 | Security on #409 L3: the test "copy holds its key" looks for the key's hex but JSON stores `[]byte` as base64, and the copy has no key field, so the assertion is vacuous |
 | W3-forget-b1 f6 | UX on #409 U4 and P4: the taken-back text reaches 161 chars at 100+ things undone; and the BOARD row should say "not live until b1-5/6/7" |
 | CRED-5f l1 | Combined lens on #420: a withdrawn route's decline says "not granted" (403 `no_route`); CAP-9 wants the reason. The owner already learns it from the withdrawal notice, so only the agent-facing text is vague |
 | CRED-5f l2 | Combined lens on #420 (L3 later point): `CredentialRejected`'s 24 h re-notice compares wall-clock times, so a clock step back can delay it; the new withdrawal notice is once per withdrawal and is unaffected |

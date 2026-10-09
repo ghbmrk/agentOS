@@ -360,6 +360,7 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | OSS-6 | [Publication identity](briefs/OSS-6.md) | P4-1, P4-4 | merged (#163, 8a67351) |
 | OSS-6s | [Publication sender](briefs/OSS-6s.md) | OSS-6 | dropped (split into OSS-6s-a and OSS-6s-b on #325) |
 | OSS-6s-a | [Constant daily batch, idempotent ledger, cover send](briefs/OSS-6s-a.md) | OSS-6 | merged (6790cf4; #411) |
+| OSS-6s-a-f | [pubsend ledger read cap, producer sizes against MaxPayload](briefs/OSS-6s-a-f.md) | OSS-6s-a | building (LATER rows f1, f2; D-048 exception at the coordinator's request, awaits Mark) |
 | OSS-6s-b | [Tor transport to Nostr relays, and the pull job](briefs/OSS-6s-b.md) | OSS-6s-a, OSS-6p, OSS-6i, OSS-6j | queued |
 | OSS-6m | [Measure the daily publication batch constant](briefs/OSS-6m.md) | OSS-6s-a | queued (optional, non-blocking) |
 | OSS-6j | [Spec: what the repository's pull job is](briefs/OSS-6j.md) | #330 | queued (L1 spec diff) |
@@ -496,6 +497,7 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | W3-forget-b2b | [Agent machine's work taken back as item 2](briefs/W3-forget-b2b.md) | W3-forget-b2 | Next build item B | merged (#327) |
 | W3-forget-b3 | [Promised done text survives a restart](briefs/W3-forget-b3.md) | W3-forget-b1 | Next build item B | merged (4b60dc2; #425) |
 | W3-forget-b2c | [Owed take-backs for W3-forget-b2b](briefs/W3-forget-b2c.md) | W3-forget-b2b | Next build item B | merged (#427) |
+| W3-forget-f | [LATER follow-ups to the forget packages](briefs/W3-forget-f.md) | W3-forget-b2b | coordinator thread | in review (#473) |
 | W3-implicit | [Report accepted-implicitly guest effects](briefs/W3-implicit.md) | W3 PW3 | — | queued |
 | W3-forget-b2c-2 | [Item 2's texts (`forgetAgentDone`, `forgetAgentNotYet` and the rest) are owed until they send](briefs/W3-forget-b2c-2.md), as W3-forget-b3 does for item 1; add a check that no done text in `ownerForget` reaches `inform` directly (release, UX-182-3 / CH-12; Defect: W3-forget-b2c; L3 on #425, second PR with this kind of finding) | W3-forget-b2c, W3-forget-b3 | Next build item B | merged (d63322a; #541) |
 | W3-forget-b2c-f1 | [The in-boot retry of an owed item 2 take-back is unbounded and gives the owner no signal on a permanent error: bound it, add a STATUS line while a take-back is owed, send its done text on the restore path, and bound the silence on retries (folds the UX point f4)](briefs/W3-forget-b2c-f1.md) (release, tier A, L3 on #427; also Security #541 P1, the CH-12-lint; folds f2; builds after W3-forget-reach) | W3-forget-b2c | Next build item B | merged d575ff6 (#602; item 1 restore text split to W3-forget-b2c-f1-r1) |
