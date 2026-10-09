@@ -8,11 +8,14 @@ package loop7
 
 import (
 	"context"
+	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -828,4 +831,149 @@ func TestAPlantedLateHangIsReported(t *testing.T) {
 		t.Fatalf("n=%d err=%v reported %+v", n, err, g.reported)
 	}
 	t.Logf("reported after %v", time.Since(start))
+}
+
+// P3-4b-3r-confine-r5: nothing the fuzz user can grow lands unbounded in
+// broker memory.
+// REQ: LOOP-1, LOOP-7
+
+// LOOP-1, F16 (r5 point 4): a stored input past the cap is refused before
+// any read and reported as a target finding, never silently skipped; an
+// input at the cap is read. Once the input is gone and a whole replay
+// passes, the finding resolves.
+func TestAnOversizeInputIsReportedNotRead(t *testing.T) {
+	release := t.TempDir()
+	g := newFake()
+	tg := fakeTarget(t, release, `case "$1" in -test.run=^FuzzFake\$)
+		echo "    --- FAIL: FuzzFake/big (0.00s)"; echo "    --- FAIL: FuzzFake/cap (0.00s)"; exit 1;; esac; exit 0`)
+	dir := filepath.Join(tg.Dir, "testdata", "fuzz", tg.Name)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Sparse: a read of it would fill broker memory, not the disk.
+	if err := os.WriteFile(filepath.Join(dir, "big"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(filepath.Join(dir, "big"), 1<<40); err != nil {
+		t.Fatal(err)
+	}
+	atCap := make([]byte, inputCap)
+	if err := os.WriteFile(filepath.Join(dir, "cap"), atCap, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := newSource(t, g, Config{Targets: []Target{tg}, Release: release})
+	n, err := s.Fuzz(context.Background(), tg)
+	if err != nil || n != 2 || len(g.reported) != 2 {
+		t.Fatalf("n=%d err=%v reported %+v", n, err, g.reported)
+	}
+	want := map[string]bool{loops.FuzzOversizeDetail: true, crashDetail(atCap): true}
+	for _, f := range g.reported {
+		if !want[f.Detail] || f.Subject != tg.subject() || f.Severity != loops.High {
+			t.Errorf("finding %+v", f)
+		}
+	}
+
+	// The input goes; the next whole replay passes and resolves it.
+	if err := os.Remove(filepath.Join(dir, "big")); err != nil {
+		t.Fatal(err)
+	}
+	fakeBin(t, release, "fake.test", `case "$1" in -test.run=^FuzzFake\$) echo "    --- PASS: FuzzFake/cap (0.00s)"; exit 0;; esac; exit 0`)
+	if _, err := s.Fuzz(context.Background(), tg); err != nil {
+		t.Fatal(err)
+	}
+	if _, open := g.open["fuzz:"+tg.subject()+":"+loops.FuzzOversizeDetail]; open {
+		t.Fatalf("the oversize finding stayed open: %v", g.open)
+	}
+}
+
+// LOOP-1, F16: a stored input that is not a regular file (a FIFO, whose
+// open would block the broker) is refused before it is opened for a read,
+// as the runner's error.
+func TestAStoredFIFOIsNotRead(t *testing.T) {
+	release := t.TempDir()
+	g := newFake()
+	tg := fakeTarget(t, release, `case "$1" in -test.run=^FuzzFake\$) echo "    --- FAIL: FuzzFake/pipe (0.00s)"; exit 1;; esac; exit 0`)
+	dir := filepath.Join(tg.Dir, "testdata", "fuzz", tg.Name)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(filepath.Join(dir, "pipe"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := newSource(t, g, Config{Targets: []Target{tg}, Release: release})
+	done := make(chan error, 1)
+	go func() { _, err := s.Fuzz(context.Background(), tg); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil || len(g.reported) != 0 {
+			t.Fatalf("err=%v reported %+v, want the runner's error", err, g.reported)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the broker blocked reading a FIFO in the corpus")
+	}
+}
+
+// LOOP-1, F16: the read itself stops at the cap, so a file that grows
+// between its stat and its read is refused too.
+func TestAnInputReadStopsAtTheCap(t *testing.T) {
+	if b, err := capped(strings.NewReader(strings.Repeat("a", inputCap))); err != nil || len(b) != inputCap {
+		t.Fatalf("at the cap: %d %v", len(b), err)
+	}
+	r := &countingReader{r: strings.NewReader(strings.Repeat("a", 3*inputCap))}
+	if _, err := capped(r); !errors.Is(err, errTooLarge) || r.n > inputCap+1 {
+		t.Fatalf("past the cap: read %d, err %v", r.n, err)
+	}
+}
+
+type countingReader struct {
+	r io.Reader
+	n int
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += n
+	return n, err
+}
+
+// LOOP-1, F12 (r5 point 5): a child's output past the cap leaves the
+// broker holding at most the cap, the pipe still drains so the child
+// finishes, and the stall rule still reads the baseline at the head and
+// the last exec count at the tail.
+func TestAFloodOfOutputIsCappedAndTheStepStillReports(t *testing.T) {
+	release := t.TempDir()
+	g := newFake()
+	flood := `yes "noise from the target" | head -c 3145728
+`
+	body := strings.Replace(progress(2, 2), `echo "fuzz: elapsed: 3s`, flood+`echo "fuzz: elapsed: 3s`, 1)
+	tg := fakeTarget(t, release, stepBin(body, "1"))
+	s := newSource(t, g, Config{Targets: []Target{tg}, Release: release})
+	n, err := s.Fuzz(context.Background(), tg)
+	if err != nil || n != 1 || len(g.reported) != 1 || g.reported[0].Detail != loops.FuzzStallDetail {
+		t.Fatalf("n=%d err=%v reported %+v", n, err, g.reported)
+	}
+
+	tg = fakeTarget(t, release, `echo first; `+flood+`echo; echo last`)
+	out, err := s.run(context.Background(), tg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) > outputCap {
+		t.Fatalf("the broker kept %d bytes of output, past the cap %d", len(out), outputCap)
+	}
+	if !strings.HasPrefix(string(out), "first\n") || !strings.HasSuffix(string(out), "\nlast\n") {
+		t.Fatalf("output lost its head or tail: %q ... %q", out[:20], out[len(out)-20:])
+	}
+}
+
+// F12: a normal step's output reaches the runner whole, stdout and stderr
+// in order.
+func TestANormalStepsOutputIsUnchanged(t *testing.T) {
+	release := t.TempDir()
+	tg := fakeTarget(t, release, `echo one; echo two >&2; echo three`)
+	s := newSource(t, newFake(), Config{Targets: []Target{tg}, Release: release})
+	out, err := s.run(context.Background(), tg)
+	if err != nil || string(out) != "one\ntwo\nthree\n" {
+		t.Fatalf("out %q err %v", out, err)
+	}
 }
