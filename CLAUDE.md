@@ -31,7 +31,7 @@ Read SPEC.md for what to build and PLAN.md for how. This file is the working con
 - Cold starts cost most: on 5.5 models a cache write costs 40x a cache read. Per merged PR, minimise sessions started, wakes after >1h idle, model switches and compactions (OPERATING §1, §5).
 - Pick the model at spawn; never switch models mid-session. A second opinion is a fresh session.
 - A session past 150k that will idle over an hour writes a hand-off packet and stops watching. The coordinator routes, and merges in its own turn; investigation goes to a thread.
-- `.claude/settings.json` compacts at 200k tokens; don't raise it.
+- `.claude/settings.json` compacts at 120k tokens (above a 20k brief plus touched files, below the 150k package ceiling); don't raise it.
 - Size each package so its brief is 20k tokens or less and it finishes under 150k; split it before starting otherwise.
 - One package or one review per session. Start a fresh session with a hand-off packet of 20k tokens or less (OPERATING §5) rather than reviving a session over ~150k that sat idle more than an hour.
 - Mechanical subagent work (search, log triage, wording sweeps, test scaffolding) passes `model: "haiku"` and stays under 100k tokens, above which Haiku costs 5x; use `"sonnet"` when it needs judgment. Reviews of security-critical paths keep the session's model.
