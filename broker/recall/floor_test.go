@@ -147,7 +147,7 @@ func TestCredentialPredicateRemovesObject(t *testing.T) {
 		{"api_key", "api_key,apiKey,APIKey,API-Key,access_key,secret_key,private_key,client_secret,access_token,refreshToken,token"},
 		{"seed", "seed,totp_seed,2fa seed,seed phrase,seedPhrase,mnemonic,totp,otp_secret"},
 		// Acronym plurals and trailing digits (Security 4a point 1).
-		{"spelling", "PINs,OTPs,TOTPs,PINsReset,password1,pin2,PIN2,backupCodes2,PWs,PWDs,2FA,2FA_code,2FACodes,2FA seed,TOTP2FA,oauth2Token,OAuth2Token,aes256Key,ssh2Key,v2Password,user1Password,account2Pin,sha256Secret,md5Token,x509Key,ed25519Key"},
+		{"spelling", "PINs,OTPs,TOTPs,PINsReset,password1,pin2,PIN2,backupCodes2,PWs,PWDs,2FA,2FA_code,2FACodes,2FA seed,TOTP2FA,oauth2Token,OAuth2Token,aes256Key,ssh2Key,v2Password,user1Password,account2Pin,sha256Secret,md5Token,x509Key,ed25519Key,2FaCode,v2PIN,user1PWD,v2OTP,app2TOTP"},
 		// Any predicate ending in key(s), and other names (Security 4a point 2).
 		{"key", "ssh_key,sshKey,SSH key,encryption_key,master_key,license_key,keys,passkey,pw,security_answer,securityAnswers,key2,keyV2,master_key2,ssh_key_1,ssh_key_2,encryptionKeyV2,ssh_keys_old,sshKeyBackup,master_key_hex,license_key_value,gpgKeyId,walletKeys1"},
 	} {
@@ -171,6 +171,61 @@ func TestCredentialPredicateRemovesObject(t *testing.T) {
 				t.Fatal("object stored")
 			}
 		})
+	}
+}
+
+// Every spelling of a credential word with a digit or version beside it
+// removes the object: each word in lower, Title and UPPER case, with each
+// affix before or after it, joined by nothing, '_' or a case change
+// (Security and L3 round 4 on #642). Skipped: spellings with no word
+// boundary where the parts meet (v2password is split, v22fa, passwordv2
+// and PASSWORDV2 are not; RECALL-canary-6), and a leading key with a
+// lettered qualifier after it (key_user1; LATER RECALL-canary-2 l5).
+func TestCredentialWordAffixes(t *testing.T) {
+	sc := NewScrubber(nil)
+	words := []string{"password", "passwd", "passcode", "passphrase", "pwd", "pw", "pin", "secret", "credential", "token", "recovery", "seed", "mnemonic", "otp", "totp", "2fa", "mfa", "cookie", "passkey", "key"}
+	affixes := []string{"v2", "user1", "x509", "256"}
+	digit := func(c byte) bool { return c >= '0' && c <= '9' }
+	upper := func(c byte) bool { return c >= 'A' && c <= 'Z' }
+	capital := func(s string) string { return strings.ToUpper(s[:1]) + s[1:] }
+	n := 0
+	for _, w := range words {
+		for _, cased := range []string{w, capital(w), strings.ToUpper(w)} {
+			for _, a := range affixes {
+				for _, j := range []string{"", "_", "camel"} {
+					right := a
+					if j == "camel" {
+						right = capital(a)
+					}
+					for i, lr := range [][2]string{{a, cased}, {cased, right}} {
+						if i == 0 && j == "camel" {
+							lr[1] = capital(cased)
+						}
+						left, right := lr[0], lr[1]
+						p := left + right
+						if j == "_" {
+							p = left + "_" + right
+						}
+						// The words meet at a boundary: '_', letter against
+						// digit, or a capital after a non-capital or opening
+						// a capitalised word. Without one the split is ambiguous.
+						l, r := left[len(left)-1], right[0]
+						split := j == "_" || digit(l) != digit(r) ||
+							upper(r) && (!upper(l) || len(right) > 1 && right[1] >= 'a' && right[1] <= 'z')
+						if !split || w == "key" && i == 1 && !digit(a[0]) && a != "v2" {
+							continue // ambiguous, or a lettered qualifier after a leading key (l5)
+						}
+						n++
+						if got := sc.ScrubFact(Fact{"account", p, "Sunflower Tuesday"}); got.Object != Removed {
+							t.Errorf("%q (%s) kept its object", p, credWords(p))
+						}
+					}
+				}
+			}
+		}
+	}
+	if n < 300 {
+		t.Fatalf("only %d spellings checked", n)
 	}
 }
 

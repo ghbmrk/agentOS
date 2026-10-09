@@ -39,10 +39,10 @@ var (
 	// Grouped codes such as XXXXX-XXXXX-XXXXX (recovery and backup codes).
 	groupedCode = regexp.MustCompile(`\b[A-Za-z0-9]{4,8}(?:-[A-Za-z0-9]{4,8}){2,}\b`)
 	// Fact predicates naming credential material, matched on whole words of
-	// the predicate as credWords spells it (api_key, recovery_codes, 2fa_seed),
+	// the predicate as credWords spells it (api_key, recovery_codes, 2_fa_seed),
 	// or with key(s) as any word but the first, or as the whole name before a
 	// version or number (ssh_key_backup, key_v_2; key_points is kept).
-	credPredicate = regexp.MustCompile(`(?:^|_)(?:pass(?:word|wd|code|phrase)?s?|pwds?|pins?|secrets?|credentials?|(?:api|access|private|secret|signing)_?keys?|tokens?|recovery|backup_?codes?|seeds?|mnemonic|totps?|otps?|2fa|mfa|cookies?|passkeys?|pws?|security_answers?)(?:_|$)|_keys?(?:_|$)|^keys?(?:_v)?(?:_\d+)?$`)
+	credPredicate = regexp.MustCompile(`(?:^|_)(?:pass(?:word|wd|code|phrase)?s?|pwds?|pins?|secrets?|credentials?|(?:api|access|private|secret|signing)_?keys?|tokens?|recovery|backup_?codes?|seeds?|mnemonic|totps?|otps?|2_?fa|mfa|cookies?|passkeys?|pws?|security_answers?)(?:_|$)|_keys?(?:_|$)|^keys?(?:_v)?(?:_\d+)?$`)
 )
 
 // ScrubFact scrubs a fact. When its predicate names credential material the
@@ -56,10 +56,10 @@ func (sc *Scrubber) ScrubFact(f Fact) Fact {
 }
 
 // credWords spells a predicate as lower-case words joined by '_', splitting
-// at case boundaries, after letters followed by a digit, and at anything but
-// letters and digits: "recoveryCodes", "API-Key", "2FA seed", "PINs",
-// "password1" and "oauth2Token" become recovery_codes, api_key, 2fa_seed,
-// pins, password_1 and oauth_2_token.
+// at case boundaries, between letters and digits either way, and at anything
+// but letters and digits: "recoveryCodes", "API-Key", "2FA seed", "PINs",
+// "password1" and "v2password" become recovery_codes, api_key, 2_fa_seed,
+// pins, password_1 and v_2_password.
 func credWords(p string) string {
 	var b []byte
 	sep := func() {
@@ -73,14 +73,14 @@ func credWords(p string) string {
 		case c >= 'A' && c <= 'Z':
 			// An acronym's plural s ("OTPs") stays on the acronym.
 			plural := i > 0 && p[i-1] >= 'A' && p[i-1] <= 'Z' && p[i+1:] != "" && p[i+1] == 's' && !lower(i+2)
-			// A digit joins an acronym after it ("2FA"), so 2fa stays one word;
-			// a capitalised word after it ("oauth2Token") does not.
-			digit := i > 0 && p[i-1] >= '0' && p[i-1] <= '9' && !lower(i+1)
-			if i > 0 && caseBoundary(p, i) && !plural && !digit {
+			if i > 0 && caseBoundary(p, i) && !plural {
 				sep()
 			}
 			b = append(b, c|0x20)
 		case c >= 'a' && c <= 'z':
+			if len(b) > 0 && b[len(b)-1] >= '0' && b[len(b)-1] <= '9' {
+				sep()
+			}
 			b = append(b, c)
 		case c >= '0' && c <= '9':
 			if len(b) > 0 && b[len(b)-1] >= 'a' && b[len(b)-1] <= 'z' {
