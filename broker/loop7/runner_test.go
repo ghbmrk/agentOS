@@ -587,6 +587,45 @@ func TestAFuzzStepBoundsMinimizing(t *testing.T) {
 	}
 }
 
+// P3-4b-3r-confine l9 (#588, #615): Go's coordinator can stop at its own
+// -test.fuzztime yet exit 1 with "context deadline exceeded" (its done
+// channel closes before the workers' context is cancelled, a race load
+// widens). A step that ran its whole FuzzTime and failed only so is
+// judged by its progress, as a clean stop is; the same text before
+// FuzzTime has passed, or beside another failure, is still a step that
+// did not run.
+func TestAFuzzStepStoppedByItsOwnDeadlineIsJudgedByItsProgress(t *testing.T) {
+	deadline := "echo '--- FAIL: FuzzFake (0.30s)'\necho '    context deadline exceeded'\necho FAIL\nexit 1"
+	for name, c := range map[string]struct {
+		body   string
+		report int // findings; -1: the runner's error
+	}{
+		"stalled at its deadline":         {"sleep 0.3\n" + progress(1, 1) + "\n" + deadline, 1},
+		"good step at its deadline":       {"sleep 0.3\n" + progress(2, 5000) + "\n" + deadline, 0},
+		"deadline text before FuzzTime":   {progress(1, 1) + "\n" + deadline, -1},
+		"another failure":                 {"sleep 0.3\n" + progress(1, 1) + "\necho '--- FAIL: FuzzFake (0.30s)'\necho '    fuzzing process hung or terminated unexpectedly: exit status 2'\nexit 1", -1},
+		"deadline text and another error": {"sleep 0.3\n" + progress(1, 1) + "\necho '--- FAIL: FuzzFake (0.30s)'\necho '    context deadline exceeded'\necho '    exit status 2'\nexit 1", -1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			release := t.TempDir()
+			g := newFake()
+			tg := fakeTarget(t, release, stepBin(c.body, "1"))
+			s := newSource(t, g, Config{Targets: []Target{tg}, Release: release, FuzzTime: 200 * time.Millisecond})
+			n, err := s.Fuzz(context.Background(), tg)
+			switch {
+			case c.report < 0:
+				if err == nil || !strings.Contains(err.Error(), "did not run") || len(g.reported) != 0 {
+					t.Fatalf("n=%d err=%v reported %+v", n, err, g.reported)
+				}
+			case err != nil || n != c.report || len(g.reported) != c.report:
+				t.Fatalf("n=%d err=%v reported %+v", n, err, g.reported)
+			case c.report == 1 && g.reported[0].Detail != loops.FuzzStallDetail:
+				t.Fatalf("reported %+v", g.reported)
+			}
+		})
+	}
+}
+
 // 3h-r1: a step judged a stall is never a good step, so it closes no
 // open hang finding, even from a new binary.
 func TestALateStallClosesNothing(t *testing.T) {
@@ -731,7 +770,10 @@ func TestAForgedHangRecordClosesNothing(t *testing.T) {
 
 // 3h, the real engine's control: a planted target that loops forever on
 // inputs longer than three bytes stops at -test.fuzztime with PASS, exit
-// 0 and no stored input; the runner reports it as a stall.
+// 0 and no stored input; the runner reports it as a stall. FuzzTime
+// leaves a loaded host (the -race suite) time to finish the baseline
+// and print an exec count before it stops (P3-4b-3r-confine l9: at 2 s a
+// step under load printed none, and was no stall and no good step).
 func TestAPlantedHangIsReported(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds a test binary")
@@ -749,7 +791,7 @@ func TestAPlantedHangIsReported(t *testing.T) {
 	}
 	tg := Target{Pkg: "hangtarget", Name: "FuzzHang", Binary: bin, Dir: t.TempDir()}
 	g := newFake()
-	s := newSource(t, g, Config{Targets: []Target{tg}, FuzzTime: 2 * time.Second})
+	s := newSource(t, g, Config{Targets: []Target{tg}, FuzzTime: 6 * time.Second})
 	start := time.Now()
 	n, err := s.Fuzz(context.Background(), tg)
 	if err != nil || n != 1 || len(g.reported) != 1 || g.reported[0].Detail != loops.FuzzStallDetail {

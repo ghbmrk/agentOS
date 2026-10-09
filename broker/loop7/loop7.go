@@ -485,6 +485,7 @@ func (s *Source) Fuzz(ctx context.Context, t Target) (int, error) {
 		return 0, fmt.Errorf("loop7: pruning the fuzz cache: %w", err)
 	}
 	fctx, cancel := context.WithTimeout(ctx, s.cfg.FuzzTime+s.cfg.ReplayTime)
+	start := time.Now()
 	out, err := s.run(fctx, t, "-test.run=^$", "-test.fuzz=^"+t.Name+"$",
 		"-test.fuzztime="+s.cfg.FuzzTime.String(), "-test.parallel=1",
 		// An honest worker call then returns within a progress period,
@@ -493,6 +494,13 @@ func (s *Source) Fuzz(ctx context.Context, t Target) (int, error) {
 		"-test.fuzzcachedir="+filepath.Join(s.cfg.CacheDir, "fuzz", filepath.FromSlash(t.Pkg)))
 	overran := fctx.Err() != nil
 	cancel()
+	if err != nil && exited(err) && !overran && time.Since(start) >= s.cfg.FuzzTime && stoppedAtDeadline(out, t.Name) {
+		// The engine stopped at its own -test.fuzztime but lost a race
+		// with its own cancellation and failed with "context deadline
+		// exceeded" (P3-4b-3r-confine l9): judged as the clean stop it
+		// is, by its progress (F12).
+		err = nil
+	}
 	switch {
 	case ctx.Err() != nil:
 		return 0, nil
@@ -646,6 +654,35 @@ func (s *Source) closeHangs(t Target, p stepProgress) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// stoppedAtDeadline reports output whose one failure is fuzz target
+// name's "context deadline exceeded" and nothing after it but FAIL: what
+// Go's coordinator prints when its done channel closes before its
+// workers' context is cancelled, so its own -test.fuzztime reads as an
+// error. A step that stored an input or failed otherwise is not one.
+func stoppedAtDeadline(out []byte, name string) bool {
+	if bytes.Contains(out, []byte("Failing input written to")) {
+		return false
+	}
+	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	at := -1
+	for i, l := range lines {
+		if strings.HasPrefix(strings.TrimSpace(l), "--- FAIL: ") {
+			if at >= 0 || !strings.HasPrefix(l, "--- FAIL: "+name+" (") {
+				return false
+			}
+			at = i
+		}
+	}
+	if at < 0 {
+		return false
+	}
+	rest := lines[at+1:]
+	if n := len(rest); n > 0 && strings.TrimSpace(rest[n-1]) == "FAIL" {
+		rest = rest[:n-1]
+	}
+	return len(rest) == 1 && strings.TrimSpace(rest[0]) == context.DeadlineExceeded.Error()
 }
 
 // failLine and passLine are a seed subtest failing or passing under
