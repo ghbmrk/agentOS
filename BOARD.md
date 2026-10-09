@@ -210,7 +210,7 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | SR2-3j | [Effect denial reasons reach the guest only as fixed text](briefs/SR2-3j.md) | SR2-3g | building (recall thread) |
 | SR2-3m | [A runsc panic after the guest starts reaches no guest output](briefs/SR2-3m.md) | RES-4, CAP-8, SR2-3h | building (release finding 362-1, Security on #362) |
 | SR2-3k | [guesterr.Guest values checked at run time](briefs/SR2-3k.md) | SR2-3g | building (recall thread) |
-| SR2-3n | [No runsc crash trace reaches the guest, and the guest cannot pick the logged part](briefs/SR2-3n.md) | SR2-3m | queued (release findings S2, S3, S4, Security on #391) |
+| SR2-3n | [No runsc crash trace reaches the guest, and the guest cannot pick the logged part](briefs/SR2-3n.md) | SR2-3m | in review |
 | SR2-3o | [Malformed-request refusals keep a field-level hint for the guest](briefs/SR2-3o.md) | SR2-3j | queued (release item 2, lens on #396) |
 | SR2-3p | [A command that cannot start is not told to retry](briefs/SR2-3p.md) | SR2-3j | queued (release item 3, lens on #396) |
 | SR2-3q | [A runsc failure after the command may have started is not told it did not start](briefs/SR2-3q.md) | SR2-3j | queued (release, Security on #396 delta) |
