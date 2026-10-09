@@ -1,6 +1,6 @@
 package corpus
 
-// REQ: LOOP-7
+// REQ: LOOP-7, ADP-11
 
 import (
 	"context"
@@ -38,11 +38,16 @@ func (f fakeRelay) Archive(_ context.Context, s string) (bool, error) {
 	return f.open[AlertPatterns] || !f.a.AlertWording(s), f.err
 }
 
+func (f fakeRelay) AutoReply(_ context.Context, s string) (bool, error) {
+	return f.open[CommitmentFilter] || owner.Commitments{}.Match(s) == "", f.err
+}
+
 // LOOP-7 (P3-4b-4d): the checks taken through a guest keep Checks' names
 // and payloads, and a guest path that holds reports nothing.
 func TestPlaneChecksHoldOverThePublishedCorpus(t *testing.T) {
 	checks := PlaneChecks(fakeRelay{a: adapter(t)})
-	want := map[string]string{CodeFilter: CodePayload, AlertPatterns: AlertPayload, LabelCheck: LabelPayload}
+	want := map[string]string{CodeFilter: CodePayload, AlertPatterns: AlertPayload, LabelCheck: LabelPayload,
+		CommitmentFilter: CommitmentPayload}
 	if len(checks) != len(want) {
 		t.Fatalf("%d checks", len(checks))
 	}
@@ -63,7 +68,7 @@ func TestPlaneChecksHoldOverThePublishedCorpus(t *testing.T) {
 // text.
 func TestAnOpenGuestPathIsFound(t *testing.T) {
 	a := adapter(t)
-	for _, name := range []string{CodeFilter, AlertPatterns, LabelCheck} {
+	for _, name := range []string{CodeFilter, AlertPatterns, LabelCheck, CommitmentFilter} {
 		if _, err := probe(t, PlaneChecks(fakeRelay{a: a, open: map[string]bool{name: true}})).Run(context.Background()); err == nil {
 			t.Fatalf("%s: an open path passed its bare payload", name)
 		}
@@ -128,4 +133,45 @@ type askedRelay struct {
 func (r askedRelay) Reply(ctx context.Context, s string) (string, error) {
 	*r.asked = true
 	return r.fakeRelay.Reply(ctx, s)
+}
+
+// LOOP-7, ADP-11 (P3-4b-4e): the commitment filter's plane entry takes
+// its verdict from what the broker did with the auto-reply: queued means
+// the filter missed, a normal approval request means it caught the text,
+// and a route error is no verdict either way.
+func TestTheCommitmentFilterMapsTheBrokersVerdict(t *testing.T) {
+	for _, tc := range []struct {
+		queued, caught bool
+		err            error
+	}{{true, false, nil}, {false, true, nil}, {false, false, errors.New("the gate refused it")}} {
+		c := planeCheck(t, verdictRelay{queued: tc.queued, err: tc.err}, CommitmentFilter)
+		if c.Payload != CommitmentPayload {
+			t.Fatalf("payload %q", c.Payload)
+		}
+		caught, err := c.Deliver(context.Background(), CommitmentPayload)
+		if (err != nil) != (tc.err != nil) || tc.err == nil && caught != tc.caught {
+			t.Fatalf("queued %v, err %v: caught %v, %v", tc.queued, tc.err, caught, err)
+		}
+	}
+}
+
+// verdictRelay answers every auto-reply with a fixed broker verdict.
+type verdictRelay struct {
+	fakeRelay
+	queued bool
+	err    error
+}
+
+func (r verdictRelay) AutoReply(context.Context, string) (bool, error) { return r.queued, r.err }
+
+// planeCheck is PlaneChecks(r)'s check named name.
+func planeCheck(t *testing.T, r Relay, name string) loops.ClosedCheck {
+	t.Helper()
+	for _, c := range PlaneChecks(r) {
+		if c.Name == name {
+			return c
+		}
+	}
+	t.Fatalf("no plane check %q", name)
+	return loops.ClosedCheck{}
 }

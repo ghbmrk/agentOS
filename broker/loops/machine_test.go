@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -872,7 +873,10 @@ func TestQuiesceHoldsTheBrokersWritersForTheRound(t *testing.T) {
 // budget, the guest pressed, the broker answered, the machine was
 // preempted in time. Pressure stays under the limits (S36), so it does
 // not show that pressure cannot starve the broker, nor that the sandbox
-// enforces a limit once it is reached.
+// enforces a limit once it is reached. Guest processes are pressed but
+// not checked yet: pids.max bounds the sandbox's host threads, checked as
+// "sandbox threads", and no guest process limit exists to read (S35;
+// P3-4b-4c-pids-r1).
 
 // testBudget is the per-machine budget the exhaustion rig's broker wrote.
 var testBudget = MachineBudget{MemoryBytes: 256 << 20, Pids: 4096, DiskBytes: 64 << 20}
@@ -974,7 +978,9 @@ func TestAnExhaustionRoundWithinTargetsReportsNothing(t *testing.T) {
 	if got := strings.Join(x.pressed, ","); got != "cpu,memory,disk,processes" {
 		t.Fatalf("pressed %q", got)
 	}
-	if got := strings.Join(res.Checked, ","); got != "cpu,memory,disk,processes,response,preemption" {
+	// Guest processes are pressed but not claimed: pids.max bounds the
+	// sandbox's host threads (RES-2; P3-4b-4c-pids).
+	if got := strings.Join(res.Checked, ","); got != "cpu,memory,disk,sandbox threads,response,preemption" {
 		t.Fatalf("checked %q", got)
 	}
 	if !slices.Equal(x.stopped, []string{"probe-1"}) {
@@ -985,7 +991,7 @@ func TestAnExhaustionRoundWithinTargetsReportsNothing(t *testing.T) {
 // LOOP-7 control (a cgroup with no limit): memory.max and pids.max at
 // "max", a machine that weighs as much as the broker and no disk budget
 // each report a High "above budget" finding through Report, named by the
-// resource.
+// resource; pids.max's is the sandbox's host threads (RES-2).
 func TestACgroupWithNoLimitReportsExhaustionFindings(t *testing.T) {
 	x := newExhaustRig(t)
 	for f, v := range map[string]string{"memory.max": "max\n", "pids.max": "max\n", "cpu.weight": "1000\n"} {
@@ -1006,7 +1012,7 @@ func TestACgroupWithNoLimitReportsExhaustionFindings(t *testing.T) {
 	if name != "probe:exhaustion" || res.Err != nil || res.Value != 4 {
 		t.Fatalf("job %q: %+v", name, res)
 	}
-	for _, k := range []string{"cpu", "memory", "disk", "processes"} {
+	for _, k := range []string{"cpu", "memory", "disk", "sandbox threads"} {
 		if rec, open := r.open(findingID(CheckExhaust, k, "above budget")); !open || rec.Finding.Severity != High {
 			t.Fatalf("%s: %+v", k, rec)
 		}
@@ -1045,11 +1051,11 @@ func TestLimitsAreJudgedAgainstTheConfiguredBudget(t *testing.T) {
 		{"memory.max", "268435456\n", "memory", 64 << 20, false},
 		{"memory.max", "134217728\n", "memory", 64 << 20, false},
 		{"memory.max", "max\n", "memory", 64 << 20, true},
-		{"memory.max", "", "memory", 64 << 20, true}, // missing
-		{"pids.max", "4097\n", "processes", 64 << 20, true},
-		{"pids.max", "4096\n", "processes", 64 << 20, false},
-		{"pids.max", "64\n", "processes", 64 << 20, false},
-		{"pids.max", "max\n", "processes", 64 << 20, true},
+		{"memory.max", "", "memory", 64 << 20, true},              // missing
+		{"pids.max", "4097\n", "sandbox threads", 64 << 20, true}, // RES-2: the sandbox's host threads
+		{"pids.max", "4096\n", "sandbox threads", 64 << 20, false},
+		{"pids.max", "64\n", "sandbox threads", 64 << 20, false},
+		{"pids.max", "max\n", "sandbox threads", 64 << 20, true},
 		{"cpu.weight", "1\n", "disk", 64<<20 + 1, true},
 		{"cpu.weight", "1\n", "disk", 1 << 20, false},
 	} {
@@ -1109,7 +1115,7 @@ func TestLimitsAreJudgedAgainstTheConfiguredBudget(t *testing.T) {
 		hold    time.Duration
 		presses bool
 	}{{"", 30 * time.Millisecond, true}, {"x", 30 * time.Millisecond, true}, {"3-1", 30 * time.Millisecond, true},
-		{"0", time.Second + time.Second/2, false}, {"0-65", 30 * time.Millisecond, false}, {"0-1048575", time.Microsecond, false}} {
+		{"0", time.Second + time.Second/2, false}, {"0-65", 30 * time.Millisecond, false}, {"0-65535", time.Microsecond, false}} {
 		x := newExhaustRig(t)
 		if c.cpus == "" {
 			os.Remove(filepath.Join(x.cg, "cpuset.cpus.effective"))
@@ -1308,4 +1314,333 @@ func TestAnExhaustionRoundInTheLastRoundsMachineFails(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+}
+
+// REQ: LOOP-7, RES-2
+//
+// P3-4b-4c-pids (#599 builder finding, Security R2): under gVisor a guest
+// process is a task inside the sentry, not a host task, so the machine
+// cgroup's pids.max bounds the sandbox's host threads, not the guest's
+// processes. A clean round still has its guest press processes, but it
+// claims only what it checks: "processes" is never in Checked, so an open
+// "processes" finding stays open (P3-4b-4c-pids-r1 owns a real bound),
+// while pids.max is checked, and closed, as "sandbox threads".
+func TestACleanRoundDoesNotClaimGuestProcesses(t *testing.T) {
+	x := newExhaustRig(t)
+	r := newReportRig(t, nil)
+	r.probes = []Probe{x.probe}
+	r.reopen(t)
+	procs := r.report(t, Finding{Check: CheckExhaust, Subject: "processes", Detail: "above budget", Severity: High}).Finding.ID
+	threads := r.report(t, Finding{Check: CheckExhaust, Subject: "sandbox threads", Detail: "above budget", Severity: High}).Finding.ID
+	name, res := runExhaustJob(t, r)
+	if name != "probe:exhaustion" || res.Err != nil || res.Value != 0 {
+		t.Fatalf("job %q: %+v", name, res)
+	}
+	if _, open := r.open(procs); !open {
+		t.Fatal("a round that cannot see guest processes closed a processes finding")
+	}
+	if _, open := r.open(threads); open {
+		t.Fatal("a clean round left its sandbox threads finding open")
+	}
+	if !slices.Contains(x.pressed, "processes") {
+		t.Fatalf("the guest no longer presses processes: %v", x.pressed)
+	}
+}
+
+// runExhaustJob runs r's jobs until its probe job has run.
+func runExhaustJob(t *testing.T, r *reportRig) (string, Result) {
+	t.Helper()
+	for range 3 {
+		if name, res := runJob(t, r.g, context.Background()); strings.HasPrefix(name, "probe:") {
+			return name, res
+		}
+	}
+	t.Fatal("no probe job offered")
+	return "", Result{}
+}
+
+// failsClosed says a round on a rig set by set fails closed: run directly
+// it is an error with nothing in Checked, and run through Report, on a
+// second rig set the same way, it closes no open finding (here a slow
+// response and a slow preemption, which it would not find). It returns
+// the first rig.
+func failsClosed(t *testing.T, name string, set func(x *exhaustRig)) *exhaustRig {
+	t.Helper()
+	x := newExhaustRig(t)
+	set(x)
+	if res, err := x.probe.Run(context.Background()); err == nil || len(res.Checked) != 0 {
+		t.Fatalf("%s: passed: %+v %v", name, res, err)
+	}
+	y := newExhaustRig(t)
+	set(y)
+	r := newReportRig(t, nil)
+	r.probes = []Probe{y.probe}
+	r.reopen(t)
+	var ids []string
+	for _, s := range []string{"response", "preemption"} {
+		ids = append(ids, r.report(t, Finding{Check: CheckExhaust, Subject: s, Detail: "slow", Severity: High}).Finding.ID)
+	}
+	if _, res := runExhaustJob(t, r); res.Err == nil {
+		t.Fatalf("%s: passed through Report: %+v", name, res)
+	}
+	for _, id := range ids {
+		if _, open := r.open(id); !open {
+			t.Fatalf("%s: closed %s", name, id)
+		}
+	}
+	return x
+}
+
+// REQ: LOOP-7, RES-1, RES-2
+//
+// P3-4b-4c-bounds (#599 Security L1): the CPU count sets the round's CPU
+// minimum, so a count that wraps would let a guest that barely pressed
+// meet it. Four 0-4611686018427387903 ranges plus 0-99 sum to 2^64 + 100,
+// which wrapped to 100 on main: the count is capped at 1<<16 CPUs while
+// summing, and a count over it fails the round as an unreadable one does.
+// At the cap the round runs. A hold so long that Hold × CPUs would
+// overflow fails it before the press.
+func TestACPUCountThatWouldWrapFailsTheRound(t *testing.T) {
+	for _, list := range []string{
+		strings.Repeat("0-4611686018427387903,", 4) + "0-99",
+		"0-9223372036854775806",
+		"0-65536",
+		"0-65535,65536",
+	} {
+		failsClosed(t, list, func(x *exhaustRig) { x.write("cpuset.cpus.effective", list+"\n") })
+	}
+	x := newExhaustRig(t)
+	x.write("cpuset.cpus.effective", "0-65535\n")
+	x.press["cpu"] = (30 * time.Millisecond * 65536 / 2).Microseconds()
+	if res, err := x.probe.Run(context.Background()); err != nil || len(res.Found) != 0 {
+		t.Fatalf("at the cap: %+v %v", res, err)
+	}
+	// 2^48 + 2^40 ns on 2^16 CPUs is 2^64 + 2^56: it wrapped to 2^56 ns,
+	// over the floor, so on main the round pressed and then pinged for
+	// three days.
+	x = newExhaustRig(t)
+	x.write("cpuset.cpus.effective", "0-65535\n")
+	x.probe.Hold = 1<<48 + 1<<40
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if res, err := x.probe.Run(ctx); err == nil || len(res.Checked) != 0 || x.pressed != nil || len(x.stopped) != 1 {
+		t.Fatalf("an overflowing CPU minimum: pressed %v, stopped %v, %+v %v", x.pressed, x.stopped, res, err)
+	}
+}
+
+// REQ: LOOP-7, RES-1, RES-2
+//
+// P3-4b-4c-bounds (#599 Security L2): a counter the kernel never writes
+// negative fails the round. On main a negative baseline inflated the
+// rise, so a guest that pressed nothing (each counter read 0 after the
+// hold) met every minimum.
+func TestANegativeCounterFailsTheRound(t *testing.T) {
+	for _, k := range []string{"cpu", "memory", "disk"} {
+		failsClosed(t, k, func(x *exhaustRig) { negativeBaseline(x, k) })
+	}
+	if _, err := cgroupCounter(newExhaustRig(t).cg, "cpu.stat", "usage_usec"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// negativeBaseline has counter k read negative before the press and 0
+// after it, the others rising by their minimums: the guest pressed
+// nothing on k, but on main the rise met k's minimum.
+func negativeBaseline(x *exhaustRig, k string) {
+	switch k {
+	case "cpu":
+		x.write("cpu.stat", "usage_usec -2000000\n")
+	case "memory":
+		x.write("memory.stat", fmt.Sprintf("anon 4096\nshmem %d\n", -(40<<20)))
+	case "disk":
+		x.disk = -(32 << 20)
+	}
+	x.probe.Press = func(_ context.Context, _ string, kinds []string) error {
+		x.pressed = kinds
+		x.write("cpu.stat", "usage_usec 2000000\n")
+		x.write("memory.stat", fmt.Sprintf("anon 4096\nshmem %d\n", 41<<20))
+		x.disk = 33 << 20
+		switch k { // the counter under test reads 0: nothing pressed
+		case "cpu":
+			x.write("cpu.stat", "usage_usec 0\n")
+		case "memory":
+			x.write("memory.stat", "anon 4096\nshmem 0\n")
+		case "disk":
+			x.disk = 0
+		}
+		return nil
+	}
+}
+
+// REQ: LOOP-7, RES-1, RES-2
+//
+// P3-4b-4c-bounds requirement 3 (Security README, "a guard fails open on
+// a missing, invalid or out-of-range value"): beside each parser and
+// guard of the exhaustion round, a table of nil, missing, negative,
+// wrapping or overflowing, non-numeric and under-minimum inputs, each of
+// which fails the round closed (failsClosed: an error, Checked empty,
+// nothing closed). Rows that already held on main stay as pins; those
+// open on main are the CPU count's cap and Hold × CPUs (wrap), a negative
+// counter or disk usage, and a Script under scriptFloor.
+func TestEachExhaustionParserAndGuardFailsClosed(t *testing.T) {
+	type row struct {
+		name string
+		set  func(x *exhaustRig)
+	}
+	run := func(t *testing.T, rows []row) {
+		for _, c := range rows {
+			failsClosed(t, c.name, c.set)
+		}
+	}
+	machine := func(x *exhaustRig, f func(m *PressedMachine)) {
+		next := x.probe.Machine
+		x.probe.Machine = func(ctx context.Context) (PressedMachine, error) {
+			m, err := next(ctx)
+			f(&m)
+			return m, err
+		}
+	}
+	// The configuration guard: nothing starts.
+	t.Run("config", func(t *testing.T) {
+		var rows []row
+		for _, c := range []struct {
+			name string
+			set  func(p *ExhaustProbe)
+		}{
+			{"no Machine", func(p *ExhaustProbe) { p.Machine = nil }},
+			{"no Press", func(p *ExhaustProbe) { p.Press = nil }},
+			{"no Ping", func(p *ExhaustProbe) { p.Ping = nil }},
+			{"no Preempt", func(p *ExhaustProbe) { p.Preempt = nil }},
+			{"zero Hold", func(p *ExhaustProbe) { p.Hold = 0 }},
+			{"negative Hold", func(p *ExhaustProbe) { p.Hold = -time.Second }},
+			{"zero ResponseTarget", func(p *ExhaustProbe) { p.ResponseTarget = 0 }},
+			{"negative PreemptTarget", func(p *ExhaustProbe) { p.PreemptTarget = -1 }},
+			{"zero BrokerWeight", func(p *ExhaustProbe) { p.BrokerWeight = 0 }},
+			{"unset Budget", func(p *ExhaustProbe) { p.Budget = MachineBudget{} }},
+			{"negative memory budget", func(p *ExhaustProbe) { p.Budget.MemoryBytes = -1 }},
+			{"zero pids budget", func(p *ExhaustProbe) { p.Budget.Pids = 0 }},
+			{"negative disk budget", func(p *ExhaustProbe) { p.Budget.DiskBytes = -1 }},
+			{"unset Script", func(p *ExhaustProbe) { p.Script = PressScript{} }},
+			{"1-byte minimums", func(p *ExhaustProbe) { p.Script = PressScript{MemoryBytes: 2, DiskBytes: 2} }},
+			{"memory under its floor", func(p *ExhaustProbe) { p.Script.MemoryBytes = 24<<20 - 1 }},
+			{"disk under its floor", func(p *ExhaustProbe) { p.Script.DiskBytes = 1<<20 - 1 }},
+			{"negative memory script", func(p *ExhaustProbe) { p.Script.MemoryBytes = -(40 << 20) }},
+			{"memory over its budget", func(p *ExhaustProbe) { p.Script.MemoryBytes = 256<<20 + 1 }},
+			{"disk over its budget", func(p *ExhaustProbe) { p.Script.DiskBytes = 64<<20 + 1 }},
+		} {
+			rows = append(rows, row{c.name, func(x *exhaustRig) { c.set(x.probe) }})
+		}
+		for _, c := range rows {
+			if x := failsClosed(t, c.name, c.set); x.machines != 0 {
+				t.Fatalf("%s: started a machine", c.name)
+			}
+		}
+		// At the floor the round runs.
+		x := newExhaustRig(t)
+		x.probe.Script = scriptFloor
+		if _, err := x.probe.Run(context.Background()); err != nil {
+			t.Fatalf("a script at the floor: %v", err)
+		}
+	})
+	// cpusEffective and cpuCount, and the CPU minimum they set.
+	t.Run("cpus", func(t *testing.T) {
+		rows := []row{
+			{"no cgroup", func(x *exhaustRig) { machine(x, func(m *PressedMachine) { m.Cgroup = "" }) }},
+			{"missing", func(x *exhaustRig) { os.Remove(filepath.Join(x.cg, "cpuset.cpus.effective")) }},
+		}
+		for _, v := range []string{"", " ", "x", "-1", "0--1", "3-1", "0-", "-3", "0,,1", "0-1-2", "1.5", "0x1",
+			"9223372036854775808", "0-9223372036854775807", "0-65536", "0-32767,32768-65536",
+			strings.Repeat("0-4611686018427387903,", 4) + "0-99"} {
+			rows = append(rows, row{"cpuset " + v, func(x *exhaustRig) { x.write("cpuset.cpus.effective", v+"\n") }})
+		}
+		// Under the floor, and so long a hold that Hold × CPUs overflows.
+		rows = append(rows,
+			row{"under the CPU floor", func(x *exhaustRig) { x.probe.Hold = 19 * time.Millisecond }},
+			row{"Hold × CPUs overflows", func(x *exhaustRig) {
+				x.write("cpuset.cpus.effective", "0-65535\n")
+				x.probe.Hold = math.MaxInt64 / 65535
+			}})
+		run(t, rows)
+		for _, c := range []struct {
+			list string
+			n    int
+		}{{"0", 1}, {"0-3,6", 5}, {"0-65535", 1 << 16}, {"0-32767,32768-65535", 1 << 16}} {
+			if n, err := cpuCount(c.list); err != nil || n != c.n {
+				t.Fatalf("%q: %d %v", c.list, n, err)
+			}
+		}
+	})
+	// cgroupCounter, through cpu.stat and memory.stat.
+	t.Run("counters", func(t *testing.T) {
+		var rows []row
+		for _, f := range []struct{ file, key, other string }{{"cpu.stat", "usage_usec", "user_usec 0\n"}, {"memory.stat", "shmem", "anon 4096\n"}} {
+			rows = append(rows,
+				row{f.file + " missing", func(x *exhaustRig) { os.Remove(filepath.Join(x.cg, f.file)) }},
+				row{f.file + " without its key", func(x *exhaustRig) { x.write(f.file, f.other) }},
+				row{f.file + " empty", func(x *exhaustRig) { x.write(f.file, "") }})
+			for _, v := range []string{"", "x", "-1", "-9223372036854775808", "9223372036854775808", "1.5", "0x10", "1 2"} {
+				rows = append(rows, row{f.file + " " + v, func(x *exhaustRig) { x.write(f.file, f.other+f.key+" "+v+"\n") }})
+			}
+		}
+		run(t, rows)
+		dir := t.TempDir()
+		for _, v := range []string{"", "-1", "x"} {
+			os.WriteFile(filepath.Join(dir, "c"), []byte(v+"\n"), 0o600)
+			if n, err := cgroupCounter(dir, "c", ""); err == nil {
+				t.Fatalf("%q read %d", v, n)
+			}
+		}
+		if _, err := cgroupCounter("", "c", ""); err == nil {
+			t.Fatal("no cgroup read")
+		}
+	})
+	// usage: the disk quota's counter.
+	t.Run("disk usage", func(t *testing.T) {
+		run(t, []row{
+			{"nil DiskUsed", func(x *exhaustRig) { machine(x, func(m *PressedMachine) { m.DiskUsed = nil }) }},
+			{"DiskUsed fails", func(x *exhaustRig) {
+				machine(x, func(m *PressedMachine) { m.DiskUsed = func() (int64, error) { return 0, errors.New("gone") } })
+			}},
+			{"negative DiskUsed", func(x *exhaustRig) { x.disk = -1 }},
+		})
+	})
+	// cgroupInt and limited: a limit that is missing, "max", zero,
+	// negative, non-numeric or overflowing, or above the budget, is a
+	// High "above budget" finding on its subject, which no round then
+	// closes; the run itself passes.
+	t.Run("limits", func(t *testing.T) {
+		for _, f := range []struct{ file, subject, over string }{
+			{"memory.max", "memory", "268435457"}, {"pids.max", sandboxThreads, "4097"}, {"cpu.weight", "cpu", "1000"},
+		} {
+			for _, v := range []string{"missing", "", "max", "0", "-1", "x", "1.5", "9223372036854775808", f.over} {
+				x := newExhaustRig(t)
+				if v == "missing" {
+					os.Remove(filepath.Join(x.cg, f.file))
+				} else {
+					x.write(f.file, v+"\n")
+				}
+				res, err := x.probe.Run(context.Background())
+				if err != nil || len(res.Found) != 1 || res.Found[0].Subject != f.subject || res.Found[0].Detail != "above budget" || res.Found[0].Severity != High {
+					t.Fatalf("%s=%q: %+v %v", f.file, v, res, err)
+				}
+			}
+		}
+		for _, d := range []int64{0, -1, 64<<20 + 1, math.MaxInt64} {
+			x := newExhaustRig(t)
+			machine(x, func(m *PressedMachine) { m.DiskBytes = d })
+			if res, err := x.probe.Run(context.Background()); err != nil || len(res.Found) != 1 || res.Found[0].Subject != "disk" {
+				t.Fatalf("disk budget %d: %+v %v", d, res, err)
+			}
+		}
+		x := newExhaustRig(t)
+		m := PressedMachine{Cgroup: x.cg, DiskBytes: 1}
+		for _, k := range []string{"processes", "", "network"} {
+			if x.probe.limited(m, k) {
+				t.Fatalf("%q counts as limited", k)
+			}
+		}
+		if _, ok := cgroupInt("", "pids.max"); ok {
+			t.Fatal("no cgroup read")
+		}
+	})
 }

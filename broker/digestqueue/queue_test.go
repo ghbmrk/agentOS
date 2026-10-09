@@ -625,6 +625,39 @@ func TestInvalidPersistedStatesRejected(t *testing.T) {
 		"sequence rollback": func(s *state) { s.Seq = 0 },
 		"attempt limit":     func(s *state) { s.Batches[0].Attempts = limits.MaxAttempts + 1 },
 	}
+	// A redacted unknown or terminal batch keeps no snapshot and no ack
+	// bit (Security 6083353716 on #612); valid below keeps each bare form.
+	// REQ: CAP-3 (W5-Dc-r12 VR-1)
+	redacted := map[string]func(*state){
+		"unknown":   func(s *state) { s.Batches[0].State = Unknown; s.Batches[0].Attempts = 1 },
+		"cancelled": func(s *state) { s.Batches[0].State = Cancelled },
+	}
+	keep := map[string]func(*state, Batch){
+		"a snapshot": func(s *state, was Batch) { s.Batches[0].Snapshots = was.Snapshots[:1] },
+		"an ack":     func(s *state, was Batch) { s.Batches[0].Acknowledged = was.Acknowledged[:1] },
+	}
+	for st, as := range redacted {
+		for kept, k := range keep {
+			mutations["redacted "+st+" keeping "+kept] = func(s *state) {
+				was := s.Batches[0]
+				as(s)
+				s.Batches[0].Redacted, s.Batches[0].Snapshots, s.Batches[0].Acknowledged = true, nil, nil
+				k(s, was)
+			}
+		}
+		t.Run("redacted "+st+" bare is valid", func(t *testing.T) {
+			var s state
+			_ = json.Unmarshal(raw, &s)
+			as(&s)
+			s.Batches[0].Redacted, s.Batches[0].Snapshots, s.Batches[0].Acknowledged = true, nil, nil
+			b, _ := json.Marshal(s)
+			ok := &change.MemStore{}
+			_ = ok.Save(b)
+			if _, err := New(ok, limits); err != nil {
+				t.Fatalf("bare redacted %s refused: %v", st, err)
+			}
+		})
+	}
 	for label, mutate := range mutations {
 		t.Run(label, func(t *testing.T) {
 			var s state
