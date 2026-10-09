@@ -483,7 +483,27 @@ func (s *Store) FollowFork(root []byte, links [][]byte, shipped []byte, approved
 		if _, err := projectRoot(anchor, anchor, nil, o); err != nil {
 			return nil, fmt.Errorf("update: the project's root on this box: %w", err)
 		}
-		if _, err := projectRoot(anchor, root, links, o); err == nil {
+		// Only the files that could chain to root are walked: one newer
+		// than root, or one that is no root at all, would end the walk
+		// short of it and pass the project's root off as a fork's
+		// (security 4a on f2cc2f9).
+		if err := noNull(root); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrBadRepository, err)
+		}
+		t, err := metadata.Root().FromBytes(root)
+		if err != nil {
+			return nil, classify(err)
+		}
+		var below [][]byte
+		for _, b := range links {
+			if len(b) > maxMetadata || noNull(b) != nil {
+				continue
+			}
+			if m, err := metadata.Root().FromBytes(b); err == nil && m.Signed.Version <= t.Signed.Version {
+				below = append(below, b)
+			}
+		}
+		if _, err := projectRoot(anchor, root, below, o); err == nil {
 			return nil, ErrIsProject
 		}
 		return nil, nil

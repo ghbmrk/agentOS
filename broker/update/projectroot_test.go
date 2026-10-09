@@ -328,7 +328,10 @@ func TestOSS10wrStrayLinkNeitherHidesNorBlocksTheChain(t *testing.T) {
 	for _, c := range []struct {
 		root  []byte
 		links [][]byte
-	}{{v2, [][]byte{stray}}, {v3, [][]byte{stray, v2}}, {v3, [][]byte{v2, stray}}} {
+	}{{v2, [][]byte{stray}}, {v3, [][]byte{stray, v2}}, {v3, [][]byte{v2, stray}},
+		// A file newer than the root, or one that is no root at all, ends
+		// no walk short of it (security 4a on f2cc2f9).
+		{v2, [][]byte{v3}}, {v2, [][]byte{[]byte("not a root")}}, {v3, [][]byte{v2, []byte("{}")}}} {
 		sum := mustV(DescribeRoot(c.root, o))
 		if err := f.store.FollowFork(c.root, c.links, v1, sum.Digest, "AgentOS", o); !errors.Is(err, ErrIsProject) {
 			t.Fatalf("named follow of project v%d with a stray link: %v, want ErrIsProject", sum.Version, err)
