@@ -72,11 +72,14 @@ type Config struct {
 	// list attested, or by the owner with a code-generator code and local
 	// confirmation. Empty: no attestor yet, so security fixes go to the
 	// owner (CH-3) and ordinary releases rest on their soak.
-	Attestors []ed25519.PublicKey
-	// InterimAttestors are the project's own test box keys pinned in the
-	// image (D6 interim, Mark 2026-10-05), passed to update as
+	// interim are the project's own test box keys pinned in the image (D6
+	// interim, Mark 2026-10-05), passed to update as
 	// Options.InterimAttestors; update decides when they count.
-	InterimAttestors []ed25519.PublicKey
+	// It is the one source of both lists (SR3-6f-1): read once at the
+	// start of each check, which uses that read throughout, and by
+	// AttestorsChanged. A read error fails the check closed. Nil: no
+	// attestor, which only narrows.
+	Attestors func() (allow, interim []ed25519.PublicKey, err error)
 	// AttestWait is how long a security fix waits for a listed attestor
 	// before it goes to the owner instead. Default 24 hours.
 	AttestWait time.Duration
@@ -128,6 +131,7 @@ const (
 	failNoMirrors = "no-mirrors"
 	failState     = "state"
 	failRelease   = "release"
+	failAttestors = "attestors"
 )
 
 type pending struct {
@@ -196,6 +200,12 @@ type Loop3 struct {
 
 	mu sync.Mutex
 	st state
+
+	// policy serializes a check's attestor read and its Store.Check calls
+	// with AttestorsChanged, so a check never writes back a list the
+	// owner narrowed after it was read (SR3-6f-1). Taken before the
+	// store's lock, never with mu held.
+	policy sync.Mutex
 }
 
 var (
@@ -216,6 +226,9 @@ func New(cfg Config) (*Loop3, error) {
 	}
 	if cfg.Settings == nil {
 		cfg.Settings = func() loops.Settings { return loops.Settings{} }
+	}
+	if cfg.Attestors == nil {
+		cfg.Attestors = func() ([]ed25519.PublicKey, []ed25519.PublicKey, error) { return nil, nil, nil }
 	}
 	if cfg.Interval <= 0 {
 		cfg.Interval = 24 * time.Hour
@@ -333,12 +346,27 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 	}
 	set := l.cfg.Settings().Updates
 	channel := set.ChannelName()
-	opts := update.Options{Channel: channel, Now: l.cfg.Now, Attestors: l.cfg.Attestors, InterimAttestors: l.cfg.InterimAttestors}
+	// The one read of the attestor lists for this check (SR3-6f-1): Check
+	// rewrites the store's attestor policy from them, so a stale list
+	// would undo the owner's narrowing. Unreadable: no Check runs, and
+	// the store keeps the policy it has.
+	l.policy.Lock()
+	allow, interim, err := l.cfg.Attestors()
+	var (
+		res     update.Result
+		failure string
+	)
+	if err != nil {
+		failure, err = failAttestors, fmt.Errorf("maintain: attestor list: %w", err)
+	}
+	opts := update.Options{Channel: channel, Now: l.cfg.Now, Attestors: allow, InterimAttestors: interim}
 	if channel == ChannelPinned {
 		// Checked as stable, for security notices only (UPD-4).
 		opts.Channel = update.ChannelStable
 	}
-	res, failure, err := l.checkMirrors(opts)
+	if failure == "" {
+		res, failure, err = l.checkMirrors(opts)
+	}
 	var sighted string
 	if failure == "" && opts.Channel == update.ChannelStable {
 		// Note when an image first reaches fast, without taking it, so a
@@ -349,6 +377,7 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 			sighted, _ = imageKey(fres.Release)
 		}
 	}
+	l.policy.Unlock()
 	if cerr := ctx.Err(); cerr != nil {
 		// Preempted: nothing is recorded, and the check is offered again.
 		return loops.Result{Err: cerr}
@@ -455,7 +484,7 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 		return loops.Result{Err: serr}
 	}
 
-	o := l.decide(ctx, rel, m, security, set, seen, now)
+	o := l.decide(ctx, rel, m, security, set, seen, now, len(allow) > 0)
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -589,7 +618,8 @@ type outcome struct {
 
 // decide applies UPD-8 and UPD-5 to a verified release newer than the
 // installed one and proposes it when they allow.
-func (l *Loop3) decide(ctx context.Context, rel *update.Verified, m update.Manifest, security bool, set loops.UpdateSettings, seen, now time.Time) outcome {
+// listed is whether this check's attestor list names any attestor.
+func (l *Loop3) decide(ctx context.Context, rel *update.Verified, m update.Manifest, security bool, set loops.UpdateSettings, seen, now time.Time, listed bool) outcome {
 	mf, err := rel.ManifestFile()
 	if err != nil {
 		return outcome{wait: &pending{Version: m.Version, Security: security, Why: waitPropose}, err: err}
@@ -609,7 +639,7 @@ func (l *Loop3) decide(ctx context.Context, rel *update.Verified, m update.Manif
 		// cannot auto-stage (update judges the newest), so it goes to the
 		// owner at once.
 		if err := rel.SecurityAutoStage(atts, l.cfg.OwnKey); err != nil && m.Security &&
-			len(l.cfg.Attestors) > 0 && now.Before(seen.Add(l.cfg.AttestWait)) {
+			listed && now.Before(seen.Add(l.cfg.AttestWait)) {
 			return outcome{wait: &pending{Version: m.Version, Security: true, Why: waitAttestation}, err: aerr}
 		}
 	} else if set.ChannelName() != update.ChannelFast {
@@ -617,7 +647,7 @@ func (l *Loop3) decide(ctx context.Context, rel *update.Verified, m update.Manif
 		// reports from listed attestors when any exist, before it is
 		// offered.
 		until := seen.Add(time.Duration(set.Soak()) * 24 * time.Hour)
-		if now.Before(until) || (len(l.cfg.Attestors) > 0 && rel.IndependentPasses(atts, l.cfg.OwnKey) < l.cfg.MinPasses) {
+		if now.Before(until) || (listed && rel.IndependentPasses(atts, l.cfg.OwnKey) < l.cfg.MinPasses) {
 			return outcome{wait: &pending{Version: m.Version, Why: waitSoak, Until: until}, err: aerr}
 		}
 	}
@@ -677,28 +707,51 @@ var failText = map[string]string{
 	failNoMirrors: "no update source is set up",
 	failState:     "my update record could not be read",
 	failRelease:   "the newest release could not be read",
+	failAttestors: "my list of trusted testers could not be read",
+}
+
+// AttestorsChanged notes the owner's current attestor lists in the store
+// (update.Store.NoteAttestors), so a narrowing retires the authority of
+// releases checked before it at once, not at the next check. The wiring
+// calls it on every change to the owner's setting (W5b). A read error
+// notes no attestor at all, which only narrows, and is returned.
+func (l *Loop3) AttestorsChanged() error {
+	l.policy.Lock()
+	defer l.policy.Unlock()
+	allow, interim, err := l.cfg.Attestors()
+	if err != nil {
+		return errors.Join(fmt.Errorf("maintain: attestor list: %w", err), l.cfg.Store.NoteAttestors(nil, nil))
+	}
+	return l.cfg.Store.NoteAttestors(allow, interim)
+}
+
+// listed reports whether the owner's attestor list names any attestor,
+// for the status line; an unreadable list names none.
+func (l *Loop3) listed() bool {
+	allow, _, err := l.cfg.Attestors()
+	return err == nil && len(allow) > 0
 }
 
 // Status reports whether the box is up to date, and says why not.
 func (l *Loop3) Status() Status {
-	online, set := l.cfg.Online(), l.cfg.Settings()
+	online, set, listed := l.cfg.Online(), l.cfg.Settings(), l.listed()
 	installed, ierr := l.cfg.Store.Installed()
 	src, serr := l.cfg.Store.Following()
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.statusLocked(online, set, installed, src, errors.Join(ierr, serr))
+	return l.statusLocked(online, set, listed, installed, src, errors.Join(ierr, serr))
 }
 
 // statusLocked is the status line; on a fork it also names the fork
 // (Security C7) and, with no attestor listed, says each security fix is
-// the owner's to approve (potency C1).
-func (l *Loop3) statusLocked(online bool, set loops.Settings, in update.Installed, src update.Followed, ierr error) Status {
+// the owner's to approve (potency C1). listed is from the attestor source.
+func (l *Loop3) statusLocked(online bool, set loops.Settings, listed bool, in update.Installed, src update.Followed, ierr error) Status {
 	st := l.baseStatusLocked(online, set, in, src, ierr)
 	if src.Name == "" {
 		return st
 	}
 	st.Line += fmt.Sprintf(" Following: %s (%s).", src.Name, src.Fingerprint[:min(8, len(src.Fingerprint))])
-	if len(l.cfg.Attestors) == 0 {
+	if !listed {
 		st.Line += " " + forkAsks
 	}
 	return st
@@ -808,12 +861,12 @@ func pendingLine(p *pending) string {
 // except while the box stays up to date (said once when it becomes so),
 // and once, that a drive install has been confirmed online.
 func (l *Loop3) Digest() []string {
-	online, set := l.cfg.Online(), l.cfg.Settings()
+	online, set, listed := l.cfg.Online(), l.cfg.Settings(), l.listed()
 	installed, ierr := l.cfg.Store.Installed()
 	src, serr := l.cfg.Store.Following()
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	st := l.statusLocked(online, set, installed, src, errors.Join(ierr, serr))
+	st := l.statusLocked(online, set, listed, installed, src, errors.Join(ierr, serr))
 	var out []string
 	if serr == nil && src.RootSHA256 != l.st.SaidSource {
 		// Once per switch (Security C7, UX Q-C).
