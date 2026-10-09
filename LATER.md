@@ -717,6 +717,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | TOOLS-risk-tier l2 | #211 (recheck): once `OmitValues` moves into `broker/browser` (already tier A), the earlier idea of adding `browseract` to `TIER_A_BROKER` in `tools/risk_tier.py` and OPERATING §3 may be moot; if any CRED-4 redaction code stays under `broker/browseract`, it still tiers as B with no Security stage. |
 | CRED-4 l-211b | #211 combined lens (comment 6090839728): `Origin` does not lowercase the host or strip a trailing dot (fails closed); normalise the host case and trailing dot. |
 | CRED-4 l-211c | #211 combined lens (comment 6090839728): the PR title lacks the package ID and no brief row is linked; the decoy test picks its assertion with `in[len(in)-3:] == "ada"`, which is brittle (use an explicit expected value per case). |
+| P3-8 l-202 | #202 (merged a6ff0fd): a question store that keeps failing gives the guest an unbounded retry loop. Not a leak. |
 
 ## Reuse candidates
 | ID | Component | Why |
