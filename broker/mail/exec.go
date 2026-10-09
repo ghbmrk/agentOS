@@ -263,7 +263,7 @@ func (a *Adapter) deliver(ctx context.Context, in journal.Intent, attempt int, p
 		body = AgentFirstLine + "\n\n" + body
 	case FromBox:
 	default:
-		return notApplied(errors.New("mail: a delivery is from the agent or the box"))
+		return notApplied(errors.New("mail: a delivery is neither agent-written nor a broker notice"))
 	}
 	body += "\n\n-- \n" + DeliverFooter
 	id := a.messageID(in.ID, attempt)

@@ -204,7 +204,7 @@ var (
 	ErrCodesLimited     = errors.New("code-generator enrollment paused")
 )
 
-var errElsewhere = errors.New("Setup is continuing on the phone that texted the box.")
+var errElsewhere = errors.New("Setup is continuing on the phone that texted me.")
 
 // setup is the §8.1 step 5 and 6 sequence. Until the owner's number is
 // known any phone on the box's Wi-Fi may set up; from then on only the
@@ -685,7 +685,7 @@ func (u *setup) number(r *http.Request, key string) error {
 	u.numTo, u.numDevice, u.numCode, u.numExpires, u.numTries = n, key, code, now.Add(numberCodeTTL), 0
 	u.mu.Unlock()
 	if err := u.s.cfg.Hooks.Send(n, "AgentOS setup code: "+code+". Type it on the setup page."); err != nil {
-		return errors.New("The box could not send a text. Check the SIM, or use Text my box.")
+		return errors.New("I could not send a text. Check the SIM, or use Text my box.")
 	}
 	return nil
 }
@@ -748,7 +748,7 @@ func (u *setup) claim(r *http.Request, key string) error {
 	u.claimTries++
 	if u.claimCode != "" && now.Before(u.claimExpires) && u.claimTries < numberCodeTries {
 		u.mu.Unlock()
-		return errors.New("That code did not match. Use the page code the box texted you.")
+		return errors.New("That code did not match. Use the page code I texted you.")
 	}
 	u.texts = recentTimes(u.texts, now, time.Hour)
 	if len(u.texts) >= NumberTextsPerHour {
@@ -766,9 +766,9 @@ func (u *setup) claim(r *http.Request, key string) error {
 	to := u.st.Owner
 	u.mu.Unlock()
 	if err := u.s.cfg.Hooks.Send(to, "AgentOS page code: "+code+". Type it on the setup page."); err != nil {
-		return errors.New("The box could not send a text. Check the SIM.")
+		return errors.New("I could not send a text. Check the SIM.")
 	}
-	return errors.New("That code did not match. The box texted you a new page code.")
+	return errors.New("That code did not match. I texted you a new page code.")
 }
 
 // ResetTriesPerHour caps wrong reset secrets typed on the setup page.
@@ -866,7 +866,7 @@ func (u *setup) codes(r *http.Request, _ string) error {
 
 func (u *setup) recovery(r *http.Request, _ string) error {
 	if r.PostFormValue("stored") == "" {
-		return errors.New("Tear off the recovery sheet, store it, then tick the box.")
+		return errors.New("Tear off the recovery sheet, store it, then tick the checkbox.")
 	}
 	u.mu.Lock()
 	defer u.mu.Unlock()
@@ -903,9 +903,9 @@ func (u *setup) aiReady() error {
 	}
 	if p := u.s.cfg.Hooks.Progress(); !p.Updated {
 		if p.Phase == "offline" {
-			return errors.New("The box is offline and has not updated yet. AI can be connected once it is online and updated.")
+			return errors.New("I am offline and have not updated yet. AI can be connected once I am online and updated.")
 		}
-		return errors.New("The box is still updating. AI can be connected when it finishes.")
+		return errors.New("I am still updating. AI can be connected when I finish.")
 	}
 	return nil
 }

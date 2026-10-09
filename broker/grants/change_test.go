@@ -287,7 +287,7 @@ func TestReleaseNeedsTheLocalPage(t *testing.T) {
 	if noUI.own.count() != n {
 		t.Fatal("texted a code that cannot complete without the local page")
 	}
-	if notes := noUI.own.notes; len(notes) != 1 || notes[0] != "Waiting for your confirmation on the box's Wi-Fi page, or your recovery key." {
+	if notes := noUI.own.notes; len(notes) != 1 || notes[0] != "Waiting for your confirmation on my Wi-Fi page, or your recovery key." {
 		t.Fatalf("%q", notes)
 	}
 	if st := noUI.state("chg:" + rep.ID + ":adopt"); st.State != journal.Pending || !strings.Contains(st.Permission.Reason, "Wi-Fi page") {

@@ -210,8 +210,8 @@ func (p *Pipeline) Digest() []string {
 				WhyOwner:      " as you asked.",
 				WhyRegression: ": it did worse on newer tasks.",
 				WhySecurity:   ": it failed a security check.",
-				WhyFallback:   ": the update did not start cleanly, so the box kept the previous one.",
-				WhyForgotten:  ": it was learned from a task you asked the box to forget.",
+				WhyFallback:   ": the update did not start cleanly, so I kept the previous one.",
+				WhyForgotten:  ": it was learned from a task you asked me to forget.",
 			}[a.Reverted]
 			out = append(out, "Undid "+a.Short+why)
 			a.RevertSeen = true
@@ -221,7 +221,7 @@ func (p *Pipeline) Digest() []string {
 	for _, d := range p.st.Declined {
 		if !seen[d.Version] {
 			seen[d.Version] = true
-			out = append(out, "You declined security update "+safe(d.Version)+"; the box is still on the previous version until a newer update is installed.")
+			out = append(out, "You declined security update "+safe(d.Version)+"; I am still on the previous version until a newer update is installed.")
 		}
 	}
 	for _, a := range p.st.Adoptions {
@@ -236,7 +236,7 @@ func (p *Pipeline) Digest() []string {
 			if p.undoableLocked(a) {
 				line += ". Reply UNDO " + a.Short + " to go back to the previous version, or nothing to keep it."
 			} else {
-				line += ". It is the only version on the box, so it stays until a newer update is installed."
+				line += ". It is the only version I have, so it stays until a newer update is installed."
 			}
 			out = append(out, line)
 			a.ConcernSeen = true
@@ -249,7 +249,7 @@ func (p *Pipeline) Digest() []string {
 		}
 	}
 	if p.st.Outages >= OutageAlert && !p.st.OutageSeen {
-		out = append(out, fmt.Sprintf("The box could not re-test its learned changes the last %d times it tried; they stay as they are until it can.", p.st.Outages))
+		out = append(out, fmt.Sprintf("I could not re-test my learned changes the last %d times I tried; they stay as they are until I can.", p.st.Outages))
 		p.st.OutageSeen = true
 	}
 	if len(out) > 0 {
@@ -433,7 +433,7 @@ func (p *Pipeline) Line(in journal.Intent) (owner.Item, error) {
 	tested := ""
 	switch {
 	case s.HeldOut == 0 && s.NotEvaluated > 0:
-		tested = "not testable on this box"
+		tested = "not testable here"
 	case s.HeldOut == 0:
 		tested = "not tested on past tasks yet"
 	case s.Regressions > 0:
@@ -495,11 +495,11 @@ func (p *Pipeline) Line(in journal.Intent) (owner.Item, error) {
 func testedText(s Score) string {
 	switch {
 	case s.HeldOut == 0 && s.NotEvaluated > 0:
-		return " Not tested on this box."
+		return " Not tested here."
 	case s.HeldOut == 0:
 		return " No past tasks to test it on yet."
 	case s.NotEvaluated > 0:
-		return fmt.Sprintf(" Tested on %d of your past tasks, none worse; %d could not be tested on this box.", s.HeldOut, s.NotEvaluated)
+		return fmt.Sprintf(" Tested on %d of your past tasks, none worse; %d could not be tested here.", s.HeldOut, s.NotEvaluated)
 	}
 	return fmt.Sprintf(" Tested on %d of your past tasks, none worse.", s.HeldOut)
 }

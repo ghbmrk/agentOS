@@ -223,7 +223,7 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | CH-21 | [Name and first-person voice](briefs/CH-21.md) | CH-12 strings; P2-3 | queued (split into CH-21a to CH-21e) |
 | CH-21a | [First-person voice: lint test and tier-B sweep](briefs/CH-21a.md) | CH-12s | building (primary lane) |
 | CH-21b | [Box name: setup suggestion and `NAME`](briefs/CH-21b.md) | CH-21a | queued (tier A) |
-| CH-21c | [First-person voice: owner-page and recovery texts](briefs/CH-21c.md) | CH-21a | queued (tier A) |
+| CH-21c | [First-person voice: owner-page and recovery texts](briefs/CH-21c.md) | CH-21a | in review (all 13 packages swept; `owner` stays pending for CH-21e's `Agent: ` prefix) |
 | CH-21d | [First-person voice: daemon and egress texts](briefs/CH-21d.md) | CH-21a | queued (tier A) |
 | CH-21e | [Agent text asking for a code is withheld; welcome-text code line](briefs/CH-21e.md) | CH-21b | queued (tier A; security first) |
 | CH-12s | ["Local page" rename in owner texts](briefs/CH-12s.md) | CH-12 | merged (a390f03; #185) |

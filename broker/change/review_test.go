@@ -92,7 +92,7 @@ func TestStagedImages(t *testing.T) {
 	if got := string(e.p.Files("host-image")["host-image/release"]); got != update.Digest([]byte("a")) {
 		t.Fatal("fallback did not restore the previous release")
 	}
-	if d := e.p.Digest(); len(d) != 1 || d[0] != "Undid "+r2.Short+": the update did not start cleanly, so the box kept the previous one." {
+	if d := e.p.Digest(); len(d) != 1 || d[0] != "Undid "+r2.Short+": the update did not start cleanly, so I kept the previous one." {
 		t.Fatalf("fallback digest: %q", d)
 	}
 }
@@ -277,7 +277,7 @@ func TestNotEvaluatedImage(t *testing.T) {
 	if r.State != StateAwaitingOwner || r.NotEvaluated == 0 || r.HeldOut != 0 {
 		t.Fatalf("image: %+v", r)
 	}
-	if ask, _ := e.p.Ask(r.ID); !strings.Contains(ask, "Not tested on this box.") {
+	if ask, _ := e.p.Ask(r.ID); !strings.Contains(ask, "Not tested here.") {
 		t.Fatalf("ask: %q", ask)
 	}
 }
@@ -427,7 +427,7 @@ func TestRecheckContinuesPastFailedRevert(t *testing.T) {
 		}
 	}
 	d := e.p.Digest()
-	if len(d) == 0 || !strings.HasPrefix(d[len(d)-1], "The box could not re-test its learned changes") {
+	if len(d) == 0 || !strings.HasPrefix(d[len(d)-1], "I could not re-test my learned changes") {
 		t.Fatalf("outages not surfaced: %q", d)
 	}
 }

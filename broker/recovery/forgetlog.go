@@ -62,7 +62,7 @@ const PendingSuffix = ".pending"
 
 // ErrNoForgetLog is an append to a vault that has no log yet: one made
 // before this release, until its recovery key is next stored.
-var ErrNoForgetLog = errors.New("recovery: this box has no forget log yet")
+var ErrNoForgetLog = errors.New("recovery: no forget log yet")
 
 var (
 	errForeignLog = errors.New("recovery: forget log copy is not under this recovery key")

@@ -510,7 +510,7 @@ func (g *Gate) reissueDue() {
 		if v.kind != ask || owner.ItemSum(v.item) != c.Sum {
 			// OP-3 at re-issue: what the owner was asked no longer
 			// holds, so it is not re-sent.
-			g.closeIntent(c.Ref, "the details changed while the box restarted; ask again with a new request_id")
+			g.closeIntent(c.Ref, "the details changed while AgentOS restarted; ask again with a new request_id")
 			continue
 		}
 		it := v.item
@@ -535,7 +535,7 @@ const RecipientsNotTextable = "can't be approved by text: each recipient must be
 // WaitingOnThePage is the reason an agent sees while an action waits for
 // the owner on the Wi-Fi page; it says how to ask by text instead
 // (Potency R1 on P2-2a).
-const WaitingOnThePage = "waiting for the owner's approval on the box's Wi-Fi page; to ask by text instead, each recipient must be a plain email address, a full +country number or acct ...1234, at most 100 characters in all, in a new request_id"
+const WaitingOnThePage = "waiting for the owner's approval on the local Wi-Fi page; to ask by text instead, each recipient must be a plain email address, a full +country number or acct ...1234, at most 100 characters in all, in a new request_id"
 
 // NoPage* are the gate's reasons for a change that needs the owner's
 // confirmation on the box's Wi-Fi page while agentosd does not serve it
@@ -543,10 +543,10 @@ const WaitingOnThePage = "waiting for the owner's approval on the box's Wi-Fi pa
 // page as the owner does (CH-12). No caller matches them: the journal
 // redacts reasons, so a caller decides from its own page flag (P2-2w d).
 const (
-	NoPageGrant    = "a new or wider grant needs confirmation on the box's Wi-Fi page, which is not running (CH-3)"
-	NoPageEvidence = "changing where private replies go needs confirmation on the box's Wi-Fi page, which is not running (CH-20)"
-	NoPageFollow   = "changing where updates come from needs confirmation on the box's Wi-Fi page, which is not running (OSS-10)"
-	NoPageSharing  = "turning sharing on needs confirmation on the box's Wi-Fi page, which is not running (CHG-4)"
+	NoPageGrant    = "a new or wider grant needs confirmation on the local Wi-Fi page, which is not running (CH-3)"
+	NoPageEvidence = "changing where private replies go needs confirmation on the local Wi-Fi page, which is not running (CH-20)"
+	NoPageFollow   = "changing where updates come from needs confirmation on the local Wi-Fi page, which is not running (OSS-10)"
+	NoPageSharing  = "turning sharing on needs confirmation on the local Wi-Fi page, which is not running (CHG-4)"
 )
 
 // onPage reports whether a waiting intent is asked on the local page:
@@ -933,7 +933,7 @@ func (g *Gate) evaluateBroker(ctx context.Context, phase journal.Phase, in journ
 		if s.Resume != "" && (in.Origin != originLocal || s.Pause == "") {
 			// W5a-resume: only the page resumes, naming the pause it
 			// showed (Security R2 on #169).
-			return verdict{kind: deny, why: "a paused grant is resumed only on the box's Wi-Fi page"}
+			return verdict{kind: deny, why: "a paused grant is resumed only on the local Wi-Fi page"}
 		}
 		g.mu.Lock()
 		err = g.validateLocked(s)
@@ -1054,7 +1054,7 @@ func (g *Gate) evaluateEvidence(in journal.Intent) verdict {
 // approval buys one switch.
 func (g *Gate) evaluateFollow(in journal.Intent) verdict {
 	if in.Origin != originLocal {
-		return verdict{kind: deny, why: "only the owner, on the box's Wi-Fi page, changes where updates come from"}
+		return verdict{kind: deny, why: "only the owner, on the local Wi-Fi page, changes where updates come from"}
 	}
 	digest, name, ok := FollowOf(in.ID)
 	if !ok || len(in.Params) != 0 || in.Executor != FollowExecutor || !hexDigest(digest) || (name != "" && !followName(name)) {
@@ -1346,7 +1346,7 @@ func (g *Gate) check(ctx context.Context, phase journal.Phase, in journal.Intent
 		return refuse("needs the owner's approval")
 	}
 	if v.local && !g.isConfirmed(in.ID) {
-		return refuse("needs confirmation on the box's Wi-Fi page")
+		return refuse("needs confirmation on the local Wi-Fi page")
 	}
 	if !sameItem(d.item, v.item) {
 		return refuse("the details changed after the owner approved; ask again")
@@ -1558,7 +1558,7 @@ func (g *Gate) Authorize(ctx context.Context, id string) (journal.Status, error)
 		g.mu.Unlock()
 		if fresh && v.hold && own != nil {
 			// Arbitrator Q1 on #48: one fixed line, no code.
-			_ = own.Inform("Waiting for your confirmation on the box's Wi-Fi page, or your recovery key.")
+			_ = own.Inform("Waiting for your confirmation on my Wi-Fi page, or your recovery key.")
 		}
 	case autoReply:
 		g.queueReply(id, v)
@@ -1587,17 +1587,17 @@ func (g *Gate) annotate(st *journal.Status) {
 	defer g.mu.Unlock()
 	id := st.Intent.ID
 	if g.carried[id] || g.reissuing(id) {
-		st.Permission.Reason = "the box restarted; the owner will be asked again"
+		st.Permission.Reason = "AgentOS restarted; the owner will be asked again"
 	} else if d, ok := g.decided[id]; ok && d.approved && d.local && !g.confirmed[id] {
-		st.Permission.Reason = "approved by code; waiting for the owner to confirm on the box's Wi-Fi page"
+		st.Permission.Reason = "approved by code; waiting for the owner to confirm on the local Wi-Fi page"
 	} else if w := g.waiting[id]; w != nil && w.onlyUI {
-		st.Permission.Reason = "waiting for the owner's approval on the box's Wi-Fi page"
+		st.Permission.Reason = "waiting for the owner's approval on the local Wi-Fi page"
 	} else if w != nil && w.held {
 		st.Permission.Reason = "approved; held for the owner's undo window until " + w.sendAt.UTC().Format("15:04") + " UTC"
 	} else if w != nil && w.reply != "" {
 		st.Permission.Reason = "auto-reply queued; it sends at " + w.sendAt.UTC().Format("15:04") + " UTC unless the owner cancels it"
 	} else if w != nil && g.cfg.LocalUI && w.local {
-		st.Permission.Reason = "waiting for the owner's approval on the box's Wi-Fi page"
+		st.Permission.Reason = "waiting for the owner's approval on the local Wi-Fi page"
 	} else if w != nil && g.cfg.LocalUI && !owner.SMSApprovable(w.item) {
 		// After held and reply: an approved page item is held, not
 		// waiting (L3 S1 on #165).

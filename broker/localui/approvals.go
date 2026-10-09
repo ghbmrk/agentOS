@@ -141,7 +141,7 @@ func (s *Server) answer(ctx context.Context, tok, sess string, f map[string][]st
 	case "":
 		return a.Text, ""
 	case localapi.RefusedTooMany:
-		return "", "Too many tries on the box's Wi-Fi in the last day, so approving here is paused for up to 24 hours. Deny still works here, and NO by text."
+		return "", "Too many tries on my Wi-Fi in the last day, so approving here is paused for up to 24 hours. Deny still works here, and NO by text."
 	case localapi.RefusedWrongCode:
 		wrong = true
 		if a.Text != "" {
@@ -164,7 +164,7 @@ func (s *Server) answer(ctx context.Context, tok, sess string, f map[string][]st
 }
 
 // unreachableText: agentosd did not answer, so nothing was decided (UX-2wb-1).
-const unreachableText = "The box isn't answering right now. Nothing was approved or denied. Reload to try again."
+const unreachableText = "I can't answer right now. Nothing was approved or denied. Reload to try again."
 
 const stalePage = "This page is out of date. Check the request below and answer again."
 

@@ -838,7 +838,7 @@ func (x *extractor) verify(v *vault.Vault, drive bool) error {
 	}
 	defer wipe(mk)
 	if !hmac.Equal(x.mac, backupMAC(mk, x.h.Sum(nil))) {
-		return errors.New("recovery: the backup's contents were not written by this box")
+		return errors.New("recovery: the backup's contents were not written by this device")
 	}
 	return nil
 }
