@@ -39,6 +39,26 @@ type proposer struct {
 	got   []*update.Verified
 	state change.State
 	err   error
+	// lapsed holds proposal IDs the pipeline dropped unanswered; Lapsed
+	// reports each once, as change.Pipeline does.
+	lapsed map[string]bool
+}
+
+func (p *proposer) Lapsed(id string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	ok := p.lapsed[id]
+	delete(p.lapsed, id)
+	return ok
+}
+
+func (p *proposer) lapse(id string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.lapsed == nil {
+		p.lapsed = map[string]bool{}
+	}
+	p.lapsed[id] = true
 }
 
 func (p *proposer) ProposeRelease(_ context.Context, v *update.Verified) (change.Report, error) {

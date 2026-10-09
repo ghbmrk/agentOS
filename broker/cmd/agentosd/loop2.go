@@ -22,8 +22,14 @@ import (
 // drift check is not wired to the live tree copy either: both are this
 // process's own copies of the pipeline's tree, so comparing them sees no
 // outside change and could race an adoption into a false finding.
-// FixturesLive stays off until replay answers fixtures (K-S1); the
-// pipeline's PS1 grading is in place (change C24).
+// FixturesLive stays off for the passive checks' fixtures until replay
+// answers them (K-S1); the pipeline's PS1 grading is in place (change
+// C24). Seeded findings' tree rules are answered by replay itself, so
+// their fixtures are live (loop2Live, P3-4b). Guard.Report is called in
+// process only; no socket reaches it.
+
+// loop2Live are the checks whose regression fixtures go live now.
+var loop2Live = map[loops.Check]bool{loops.CheckSeeded: true}
 
 // loop2NotRun is why each check does not run on this box yet, for STATUS
 // and the digest (potency C2 on W5a).
@@ -89,14 +95,18 @@ type loop2Notify struct {
 }
 
 func (n *loop2Notify) send(text string, _ bool) {
-	ch := n.ch.Load()
-	if ch == nil {
-		log.Printf("loop2: owner notice not sent: owner channel not attached")
-		return
-	}
-	if err := ch.Inform(text); err != nil {
+	if err := n.try(text); err != nil {
 		log.Printf("loop2: owner notice not sent: %v", err)
 	}
+}
+
+// try sends text to the owner, reporting whether it went.
+func (n *loop2Notify) try(text string) error {
+	ch := n.ch.Load()
+	if ch == nil {
+		return errors.New("owner channel not attached")
+	}
+	return ch.Inform(text)
 }
 
 // loop2Held reports the targets the gate still holds paused: a grant that

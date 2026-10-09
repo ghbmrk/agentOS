@@ -146,7 +146,7 @@ type recordingChanges struct {
 	decided int
 }
 
-func (r *recordingChanges) Decided(context.Context, journal.Intent, bool) { r.decided++ }
+func (r *recordingChanges) Decided(context.Context, journal.Intent, string) { r.decided++ }
 
 // #48 C7/Q3 regression (L3 on #57): a lapsed loop setting never reaches
 // the change pipeline's Decided.

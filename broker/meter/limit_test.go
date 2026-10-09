@@ -20,8 +20,10 @@ import (
 // TestOP8ForwardedOutputLimitIsTheReservation: the body the provider gets
 // carries an output limit no larger than what the meter reserved, so a
 // provider honoring it cannot be charged past the reservation. A present
-// limit is clamped, an absent one is inserted, duplicate keys collapse to
-// the clamped one, and a body that is not a JSON object is refused.
+// limit is clamped, an absent one is inserted under the key the path's
+// API reads (also when only another API's key is present), and a body
+// that is not one JSON object with distinct, canonically spelled keys is
+// refused (SR3-7).
 func TestOP8ForwardedOutputLimitIsTheReservation(t *testing.T) {
 	m, _, _ := open(t, Config{MachineCap: Limits{Calls: 100, Tokens: 1 << 30}, OverallCap: big, DefaultReserve: 2000, MaxReserve: 6000})
 	var got []byte
@@ -35,7 +37,8 @@ func TestOP8ForwardedOutputLimitIsTheReservation(t *testing.T) {
 		{"/v1/chat/completions", `{"messages":[]}`, map[string]float64{"max_completion_tokens": 2000}},
 		{"/anthropic/v1/messages", `{"messages":[]}`, map[string]float64{"max_tokens": 2000}},
 		{"/openai/v1/responses", `{"input":"x","max_output_tokens":-5}`, map[string]float64{"max_output_tokens": 6000}},
-		{"/openai/v1/chat/completions", `{"max_tokens":1,"max_tokens":1000000}`, map[string]float64{"max_tokens": 6000}},
+		{"/openai/v1/chat/completions", `{"max_output_tokens":100}`, map[string]float64{"max_output_tokens": 100, "max_completion_tokens": 2000}},
+		{"/anthropic/v1/messages", `{"max_completion_tokens":100}`, map[string]float64{"max_completion_tokens": 100, "max_tokens": 2000}},
 		{"/openai/v1/chat/completions", `{"max_tokens":"lots"}`, map[string]float64{"max_tokens": 6000}},
 		{"/openai/v1/chat/completions", `{"max_tokens":12.5}`, map[string]float64{"max_tokens": 6000}},
 	} {
@@ -57,7 +60,11 @@ func TestOP8ForwardedOutputLimitIsTheReservation(t *testing.T) {
 	}
 	// More than one choice per call would multiply output past the
 	// reservation (n=128 is 128 times the limit): refused.
-	for _, body := range []string{"not json", `["max_tokens"]`, `{"a":1} {"max_tokens":1e9}`, `{"n":128}`, `{"n":2,"max_tokens":10}`, `{"n":"2"}`, `{"n":0}`} {
+	for _, body := range []string{"not json", `["max_tokens"]`, `{"a":1} {"max_tokens":1e9}`, `{"n":128}`, `{"n":2,"max_tokens":10}`, `{"n":"2"}`, `{"n":0}`,
+		// Duplicate and case-colliding keys: a case-insensitive decoder
+		// downstream could read a value other than the one checked.
+		`{"max_tokens":1,"max_tokens":1000000}`, `{"n":1,"n":1}`, `{"N":2}`, `{"n":1,"N":2}`,
+		`{"MAX_TOKENS":1000000}`, `{"max_to\u212Aens":1000000}`, `{"model":"a","MODEL":"b"}`} {
 		got = nil
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, httptest.NewRequest("POST", "/openai/v1/chat/completions", strings.NewReader(body)))
