@@ -62,9 +62,15 @@ func TestOwnerNarrowingSurvivesTheNextCheck(t *testing.T) {
 	if old.Security() {
 		t.Fatal("the next Loop 3 check restored the authority the owner's narrowing retired")
 	}
-	for _, v := range r.p.proposed()[1:] {
-		if v.Security() {
-			t.Fatal("Loop 3 scheduled a release as security under the old list")
+	// The narrowing retired the claim (SR3-6-f4b), so the check decided
+	// the fix again: b's report may stage it, a's never counts.
+	again := r.p.proposed()[1:]
+	if len(again) == 0 {
+		t.Fatal("the retired claim was not decided again")
+	}
+	for _, v := range again {
+		if n := v.IndependentPasses(r.atts[:1], r.l.cfg.OwnKey); n != 0 {
+			t.Fatalf("Loop 3 counted the removed attestor's report after the narrowing: %d", n)
 		}
 	}
 }
@@ -258,5 +264,45 @@ func TestAttestorSourceErrorStatusReadsAsNoneListed(t *testing.T) {
 	}
 	if d := r.digest(); !strings.Contains(d, forkAsks) {
 		t.Fatalf("digest: %q", d)
+	}
+}
+
+// SR3-6-f4b: a narrowing that lands after a check read the list, before
+// it records anything, leaves the next check due, so what that check
+// decides under the old list is judged again under the narrowed one.
+func TestNarrowingAfterTheReadKeepsTheRecheckDue(t *testing.T) {
+	r := newRig(t)
+	r.release(2, func(m *update.Manifest) { m.Security = true })
+	r.attest()
+	job, ok := r.l.Next(context.Background(), true)
+	if !ok {
+		t.Fatal("no check offered")
+	}
+	// Block the check at its first clock read outside the policy lock:
+	// after its attestor read and Store.Check calls, before it records.
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once atomic.Bool
+	r.l.cfg.Now = func() time.Time {
+		if r.l.policy.TryLock() {
+			r.l.policy.Unlock()
+			if once.CompareAndSwap(false, true) {
+				close(entered)
+				<-release
+			}
+		}
+		return r.clk.now()
+	}
+	checked := make(chan struct{})
+	go func() { job.Run(context.Background()); close(checked) }()
+	<-entered
+	r.allow = nil
+	r.must(r.l.AttestorsChanged())
+	close(release)
+	<-checked
+	if !r.l.Urgent() {
+		t.Fatal("a check that read the list before a narrowing cleared the recheck it asked for")
+	}
+	if _, ok := r.l.Next(context.Background(), true); !ok {
+		t.Fatal("no check due after a narrowing during a check")
 	}
 }
