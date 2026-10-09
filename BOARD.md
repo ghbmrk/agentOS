@@ -283,7 +283,7 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | W3-forget-b2b | [Agent machine's work taken back as item 2](briefs/W3-forget-b2b.md) | W3-forget-b2 | Next build item B | merged (#327) |
 | W3-forget-b3 | [Promised done text survives a restart](briefs/W3-forget-b3.md) | W3-forget-b1 | Next build item B | queued |
 | W3-forget-b2c | [Owed take-backs for W3-forget-b2b](briefs/W3-forget-b2c.md) | W3-forget-b2b | Next build item B | in review (#427) |
-| W3-forget-f | [LATER follow-ups to the forget packages](briefs/W3-forget-f.md) | W3-forget-b2b | coordinator thread | in review |
+| W3-forget-f | [LATER follow-ups to the forget packages](briefs/W3-forget-f.md) | W3-forget-b2b | coordinator thread | in review (#473) |
 | W3-implicit | [Report accepted-implicitly guest effects](briefs/W3-implicit.md) | W3 PW3 | — | queued |
 | W3-forget-b2c-2 | Item 2's texts (`forgetAgentDone`, `forgetAgentNotYet` and the rest) are owed until they send, as W3-forget-b3 does for item 1; add a check that no done text in `ownerForget` reaches `inform` directly (release, UX-182-3 / CH-12; Defect: W3-forget-b2c; L3 on #425, second PR with this kind of finding; brief to write) | W3-forget-b2c, W3-forget-b3 | Next build item B | queued (needs brief) |
 | W3-forget-b3r | The local Wi-Fi page lists older tasks and can forget one (potency R2, carried by W3-forget-b3; needs a page, socket route and forget path in `broker/localui`; release, L3 on #425; brief to write) | W3-forget-b3 | Next build item B | queued (needs brief) |
