@@ -130,8 +130,8 @@ func (p *Plane) mcp(m *machine, w http.ResponseWriter, r *http.Request) {
 		if p.cfg.Tools != nil {
 			list = append([]map[string]any(nil), tools...)
 			for _, t := range p.cfg.Tools.List() {
-				// The effect tools' names are the broker's own.
-				if n := t["name"]; n != "effect_request" && n != "effect_status" {
+				// The effect tools' and result_read's names are the broker's own.
+				if n := t["name"]; n != "effect_request" && n != "effect_status" && n != "result_read" {
 					list = append(list, t)
 				}
 			}

@@ -695,6 +695,10 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | W5-Dc-r1b l5 | #652 L3 3 (6087271656): grants reads `allowance(now)` before taking `g.mu`, so a grants flush racing an owner `Post` can go one text over the hour's budget (bounded, nothing lost) |
 | W5-Dc-r1b l6 | #652 L3 delta (6087655573): `main()` still passes `attach` its arguments untested (`nil` for `dg` would build and pass); testing `main()` itself is out of scope |
 | SR3-mail-w1 l8 | #654 UX, L3 1, Security 1 (6087870595, 6087872442, 6087873796): `TestNoMailAccountByDefault` counts the `not_connected` frames but does not assert that nothing else crossed the socket (its doc comment says "the socket says nothing more"); compare each connection's full reply after it closes to exactly `{"error":"not_connected"}\n` |
+| ARC-6-fold l1 | #670 L3 4 (6090864635), Security 4 (6090880853): if `crypto/rand` fails, `newID` returns `""` and `fold.Store.Hand` still returns a stand-in `Read` can never satisfy; return the body unchanged. Not reachable on Go 1.24+ |
+| ARC-6-fold l2 | #670 Potency 3 (6090861948), `recheck`: `result_read` has no offset/length, so reading a fold back re-spends the context the stand-in saved |
+| ARC-6-fold l3 | #670 UX (6090861948): the stand-in names no next step (call `result_read` with its `id`), and `no such result` does not say the original is gone for good |
+| ARC-6-fold l4 | #670 L3 5 (6090864635), `recheck`: error results (`isErr`) are never folded, so a large error passes inline at full size; a result over the per-machine bound (4 MiB) now also passes inline whole rather than as an unreadable stand-in |
 
 ## Reuse candidates
 | ID | Component | Why |

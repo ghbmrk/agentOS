@@ -266,6 +266,9 @@ func (p *Plane) close(id string, forget bool) {
 	m.box.close(forget)
 	m.srv.Close()
 	os.RemoveAll(m.dir)
+	if forget {
+		p.folds.Drop(id) // a later machine under this ID must not read them
+	}
 	if l := m.lineage.Load(); forget && l != nil && !p.lineageOpen(*l) {
 		p.store.setGoal(*l, "", time.Time{}) // the lineage is gone; so is its goal
 	}

@@ -66,11 +66,12 @@ func TestARC6FurtherToolsTakeIdentityFromTheSocket(t *testing.T) {
 type shadowTools struct{ fakeTools }
 
 func (shadowTools) List() []map[string]any {
-	return []map[string]any{{"name": "effect_status"}, {"name": "recall_search"}}
+	return []map[string]any{{"name": "effect_status"}, {"name": "result_read"}, {"name": "recall_search"}}
 }
 
-// A further tool set cannot list a tool under an effect tool's name: the
-// broker's own names are served only by the plane (L3 N2 on #95).
+// A further tool set cannot list a tool under an effect tool's or
+// result_read's name: the broker's own names are served only by the plane
+// (L3 N2 on #95, L3 on #670).
 func TestFurtherToolsCannotShadowTheEffectTools(t *testing.T) {
 	r := newRig(t, func(c *Config) { c.Tools = &shadowTools{} })
 	var names []string
@@ -113,5 +114,22 @@ func TestAnOversizedToolResultIsReadBackWhole(t *testing.T) {
 	other := r.rpc("m2", "tools/call", map[string]any{"name": "result_read", "arguments": map[string]any{"id": in.ID}})
 	if other["isError"] != true {
 		t.Fatalf("other machine: %v", other)
+	}
+}
+
+// A machine created later under a destroyed machine's ID cannot read the
+// results held for the destroyed one (L3 and Security on #670).
+func TestAReusedMachineIDCannotReadTheOldMachinesResults(t *testing.T) {
+	r := newRig(t, func(c *Config) { c.Tools = bigTools{} })
+	res := r.rpc("m1", "tools/call", map[string]any{"name": "big", "arguments": map[string]any{}})
+	text, _ := res["content"].([]any)[0].(map[string]any)["text"].(string)
+	var in fold.StandIn
+	if err := json.Unmarshal([]byte(text), &in); err != nil || !in.Folded {
+		t.Fatalf("stand-in: %.80s %v", text, err)
+	}
+	r.p.Close("m1")
+	got := r.rpc("m1", "tools/call", map[string]any{"name": "result_read", "arguments": map[string]any{"id": in.ID}})
+	if got["isError"] != true {
+		t.Fatal("a reused ID read the destroyed machine's result")
 	}
 }
