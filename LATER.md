@@ -27,7 +27,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | S1 | A1 (G1) | Test kit ready; waits on Mark's hardware |
 | S2 | A1, A3 | Modem SMS and voice; waits on Mark's modems |
 | P2-4-hw | A8 | Real-TPM trusted-host run; risk 14 |
-| P3-4b-1 | A11 (LOOP-9, LOOP-10, LOOP-3) | Loop 2, given a seeded failing security test as a finding, contains it, adds a minimized regression and qualifies a fix; weakening fixes rejected (D-070) |
+| P3-4b-1b | LOOP-9, LOOP-10 | Loop-side follow-ups to #464 before -3/-4 wire `Report`: close findings the tree comes to pass, finding-ID collision, crash resume, wording-scan coverage, config-probe fixes |
 | P3-4b-2 | A11 | Qualification harness for A11's loop 2 clause: harness-chosen seed, held-back variants, scripted rejected fixes |
 | P3-4b-5 | LOOP-9 | Model-backed loop 2 fixer answering the §11 fix-candidate request through Loop 1's builder; needs W3-builder-ship |
 | OP9-status | A11 (OP-9) | STATUS names every capability that is off or can't run; owner row, brief to be written |
@@ -221,6 +221,13 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | W3-forget-b1-4 l7 | Potency on #436 (considered, not proposed): an accept-and-re-forget flow |
 | OP9-status l1 | L3 on #416: move the OP9-status anchor once its brief exists |
 | OP9-status l2 | L3 on #416: give held-back fields values distinct from the finding's free text |
+| P3-4b-1 l1 | L3 on #464 (agreed with builder): LOOP-3's "unmeasured" state resets on every daemon restart; the brief keeps restart behavior unchanged (scheduler.go:153) |
+| P3-4b-1 l3 | Security 5 on #464: `loopKeys` lists exact paths no tree file or reader uses yet; when a reader of `config/loops.json` or `config/loop2.json` lands it must read exactly those keys, with a test tying the list to the reader |
+| P3-4b-1 l5 | UX on #464: text the owner when a reported finding's fix is adopted, as a passive finding's clearing is texted (secure.go:409-410), so the owner who was texted "Paused grant Y" learns it is safe to resume; P3-4b-1b item 1 texts the cleared close once, and this line is the same text for an adopted fix, so use one wording for both |
+| P3-4b-1 l6 | UX on #464: "I cannot build one yet" does not say whether anything will ever fix the finding; say "no repair is set up on this box yet; an update may bring one" when OP9-status writes its owner lines |
+| P3-4b-1 l7 | UX on #464: LOOP-0 line "check myself against known problems and repair what I can, and check for updates" says "check" twice and "repair" is true only once a fixer is wired; reword when P3-4b-5 lands ("check myself against known problems, repair what I can, and look for updates") |
+| P3-4b-1 l8 | UX on #464: a partial line followed by a wait line repeats the prefix ("Loop 2: partial (…). Loop 2: 1 finding waits…"); join them under one "Loop 2:" when STATUS wording is next touched |
+| W3-forget-b1-4 l8 | L3 on #460 (nit): the appended "Also (#436 …)" clauses in the W3-forget-b1-5, -6 and -7 BOARD cells run on with no separating punctuation; add it when those rows are next edited |
 | SR3-1 f1 | Builder on SR3-1: page deny (`LocalAnswer`), follow and ask-resume check the lock count at the token check only, not where they commit; deny only narrows and the other two only open a request that needs a code, so the race gains no authority |
 | SR3-1 f2 | Builder on SR3-1: a sign-in overlapped by a lock still returns a token, dead on first use; answering with a refusal instead would save the page one round trip |
 
