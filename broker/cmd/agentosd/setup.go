@@ -105,6 +105,8 @@ func enrollErr(err error) error {
 		return nil
 	case errors.Is(err, modelroute.ErrEnrolled):
 		return localsrv.EnrollClosed
+	case errors.Is(err, modelroute.ErrEnrollNotOpen):
+		return localsrv.EnrollNotOpen
 	case errors.Is(err, modelroute.ErrNoEnrollment):
 		return localsrv.EnrollNone
 	case errors.As(err, &ve) && ve.Kind == modelroute.VerifyPaused:

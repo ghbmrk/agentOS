@@ -25,6 +25,15 @@
 # and "PC=", no marker. fillerpanic is a guest that writes "panic: " and
 # 16 KiB of filler before runsc's trace. guestpanic is a guest that writes
 # a whole Go panic trace to its stderr and exits 2.
+#
+# The rest fail before the pid is written, as runsc's exec does
+# (runsc/cmd/exec.go, runsc/sandbox/sandbox.go, pkg/urpc/urpc.go,
+# pkg/sentry/fsimpl/user/path.go, pkg/sentry/loader/loader.go at that
+# tag): pidfail after the start, at the pid write (SR2-3q); lostcall when
+# the sandbox's answer to ExecuteAsync is lost, so the command may have
+# started; noconn before the call; nope* (a bare name) and /nope* and
+# /denied (paths) when the program is not found or cannot be loaded
+# (SR2-3p). The executing-command messages quote the argv as %q does.
 log= dlog= pid= cmd= gfd=2
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -32,18 +41,25 @@ while [ $# -gt 0 ]; do
 	--debug-log=*) dlog=${1#--debug-log=} ;;
 	--internal-pid-file) shift; pid=$1 ;;
 	--pass-fd) shift; case "$1" in *:2) gfd=${1%:2} ;; esac ;;
-	*_) cmd=$2; break ;; # the container ID; the guest's argv follows
+	*_) cmd=$2; shift; break ;; # the container ID; the guest's argv follows
 	esac
 	shift
 done
 c=$FAKE_RUNSC_CANARY
 eval "exec 4>&$gfd"
 [ -n "$dlog" ] && echo "I runsc exec, root $c" >>"$dlog"
+esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 fail() {
-	[ -n "$log" ] && printf '{"msg":"%s","level":"error"}' "$1" >>"$log"
+	[ -n "$log" ] && printf '{"msg":"%s","level":"error"}' "$(esc "$1")" >>"$log"
 	echo "$1" >&2
 	exit "$2"
 }
+# insandbox fails as the sandbox call does, with $1 as its cause.
+insandbox() {
+	fail "executing processes for container: executing command &{\"\" [$qargv] [\"PATH=/usr/bin:/bin\"] \"/\"} in sandbox: $1" 1
+}
+qargv=
+for a in "$@"; do qargv="$qargv${qargv:+ }\"$(esc "$a")\""; done
 case "$cmd" in
 prestart) fail "loading container failed: $c: no such file" 128 ;;
 panic) echo "panic: open $c" >&2; exit 2 ;;
@@ -103,6 +119,12 @@ guestpanic)
 	exit 2
 	;;
 exit2) echo 7 >"$pid"; echo "guest out"; echo "goroutine 1 [running]:" >&4; exit 2 ;;
+pidfail) fail "writing internal pid file: open $c: no space left on device" 1 ;;
+lostcall) insandbox 'urpc method "containerManager.ExecuteAsync" failed: EOF' ;;
+noconn) insandbox "connecting to control server at PID 9: dial unix $c: connect: no such file or directory" ;;
+nope*) insandbox "error finding executable \"$(esc "$cmd")\" in PATH [/usr/bin /bin]: no such file or directory" ;;
+/nope*) insandbox "failed to load $cmd: no such file or directory" ;;
+/denied) insandbox "failed to load $cmd: permission denied" ;;
 wait) echo 7 >"$pid"; echo "guest out"; echo "guest err" >&4; fail "waiting on pid 7: $c" 1 ;;
 *) echo 7 >"$pid"; echo "guest out"; echo "guest err" >&4; exit 3 ;;
 esac

@@ -1,4 +1,4 @@
-# Assurance gates: canary (A5) and dependency audit (A9)
+# Assurance gates: canary (A5), dependency audit (A9) and loop 2 qualification (A11)
 
 Two permanent CI jobs in `.github/workflows/assurance.yml`, run on every PR, on
 `main`, and daily with fresh canaries. Both are stdlib-only Python, so they add
@@ -86,6 +86,71 @@ Register a scenario (it must expect `pass`; no other keys are accepted):
 ```json
 {"name": "broker-offline", "cmd": ["broker/test/a9-scenario.sh"]}
 ```
+
+## Loop 2 qualification (`loop2/`, catalog `loop2-seeds/`)
+
+A11's loop 2 clause (P3-4b-2): a seeded defect is found, contained and fixed
+through Loop 2's real chain, and no candidate that games the check is adopted.
+`python3 assurance/loop2/run.py --catalog assurance/loop2-seeds (--all | --pick)
+[--random-seed N] --report FILE` builds the Go program in `loop2/` against the
+broker module (an overlay, so `broker/` holds none of it) and exits 0 only on a
+pass. CI runs `--all` and `--pick` in the canary job and uploads both reports.
+
+**Catalog.** `base.json` is the owner's tree, its cross-module `receives` map and
+its base security cases. Each seed directory holds `seed.json` (target to pause,
+subject, detail), `test.json` (the visible tree rule: the finding's `Rule`, with at
+least two padding clauses that already hold on the defect), `defect.json` and
+`fix.json` (file edits), and `held/*.json` (held-back variants). The layout is
+closed: an unknown file fails the load. The report's `catalog_sha256` is SHA-256
+over `path NUL sha256(file) LF` for every file in sorted path order.
+
+**One run, per seed.**
+1. Validate the seed (any failure is `invalid seed: …` and fails the run): defect
+   and fix only in candidate namespaces; the test fails on the defect and holds on
+   the fix; ≥ 2 padding clauses; each held variant fails on the defect and holds
+   on the fix, and at least one fails the gamed fix (g); every held clause the
+   test does not share whole has a field (`path`, `pointer` or `value`) the test
+   lacks, so the field audit in step 6 can tell it from the test.
+2. Build `change.Pipeline` with the defective tree as its initial tree, attach a
+   journal, add the base security cases.
+3. `loops.Guard.Report` the finding (`CheckSeeded`, rule = `test.json`): the target
+   must be paused, and the `loop2/<id>` case must be a 1-minimal subset of the test
+   on the defective tree.
+4. Link every held variant as `held/<id>/<name>` with `Finding: <id>` before any
+   fix is asked for.
+5. Eight passes: the scripted fixer returns (a)–(g) of P3-4b-1 §6, built from the
+   reference fix, the visible test and the target, then the reference fix. Each
+   bad one must be rejected for its class's exact reason; the reference fix must
+   be adopted, and the Guard's evidence must hold exactly one record for the
+   finding, with the fix adopted. The suite may never shrink.
+6. Fix-input audit: the fixer sits behind an adapter that records every byte of
+   every `Finding` it hands over. A held-back clause the visible test does not
+   share, as any JSON object in the record that decodes to it (whatever its
+   whitespace or key order), or any of its `path`, `pointer` or `value` (canonical
+   JSON, and a string's bare text) that the visible test lacks, fails the run.
+
+**Controls, every invocation.** `invalid-seed` reruns the first seed with its held
+variant replaced by the test's first (padding) clause and must be refused as an
+invalid seed; `leaking-adapter` reruns every valid seed with the adapter appending
+its held files' bytes to `Detail`, and each must fail the audit. A missed control
+fails the invocation, as in `canary_controls.py`. `run.py --go-test` runs the
+harness's own unit tests (`harness_test.go`); `tests/test_loop2_harness.py` runs
+them in CI.
+
+### Assumptions (P3-4b-2)
+
+| # | Assumption | Spec basis | If it changes |
+|---|---|---|---|
+| A-1 | The scripted fixer is the test double that answers Loop 2's fix request; the product's model-backed fixer is P3-4b-5. No `loops.Fixer` is wired in the daemon yet. | A11, LOOP-9 | P3-4b-5 runs this harness with its fixer behind the same adapter. |
+| A-2 | Seed defects lie only in candidate namespaces (the seeds use config, context and procedures); validation refuses any other. | LOOP-10, CHG-2 | Escalate: A11 would need a defect only an owner intent can fix. |
+| A-3 | Held variants are linked by the harness through `AddSecurityCase` with the finding's ID, and the pipeline rejects a candidate that fails a linked case (`ReasonLinked`); that is what makes (g) a rejection rather than a failed run. | LOOP-10, CHG-1, CHG-2 | If links from outside Loop 2 are refused, grade held cases after adoption and count (g) adopted as a failed run. |
+| A-4 – A-6 | Brief rows on P3-4b-3/-4, LOOP-3 and probe pauses do not bear on this harness. | — | — |
+| H-1 | The pipeline's evaluator answers tree rules only, as `replay.Evaluator`'s first step does; every case in the run is a tree rule. It also fails the run if any evaluated tree holds an `assurance/` or `loop2-seeds` path. | CHG-2 | If a seed needs a non-tree probe, the harness must wire the replay evaluator. |
+| H-2 | The defect is installed as the pipeline's initial tree: the owner-equivalent path, outside any candidate. | A11 | If the owner path gains checks (e.g. an intent per install), apply the defect through that intent instead. |
+| H-3 | The journal policy approves what the pipeline sends to the owner (`ErrNeedsOwner`), standing in for the owner; every other check still runs. Rejections come from `Propose`, before the journal. | CHG-1, CHG-2 | If a class is ever rejected only by the owner, the harness must model the owner's refusal. |
+| H-4 | The audit matches tokens in the recorded bytes: whole clauses as any JSON object that decodes to one, fields' JSON forms by substring, bare scalars only where no letter, digit, `.`, `-` or `+` touches them. It catches verbatim, canonical and re-laid-out JSON leaks, not paraphrase or encoding. | CHG-2 | A model-backed fixer (P3-4b-5) needs the audit on its prompt bytes, with the same rules. |
+| H-5 | Each pass asks the fixer once (`fixPending`), so eight passes give eight proposals; a pass that proposes other than one candidate fails the run. | LOOP-9 | If Loop 2 batches or retries within a pass, count proposals per finding instead. |
+| H-6 | A held clause whose every field the visible test has, in another combination, is refused at validation (P3-4b-2b): a prose leak of such a clause could not be told from the visible test field by field. No committed seed has one. | CHG-2 | If a property can only be held back that way, the audit must match field combinations, and P3-4b-5's prose audit with it. |
 
 ## Known limits
 

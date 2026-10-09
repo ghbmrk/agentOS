@@ -21,7 +21,10 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -300,8 +303,9 @@ func (r *Runtime) Exec(ctx context.Context, id string, c vm.Command) (vm.ExecRes
 	// exits 2 (SR2-3m, SR2-3n), whether or not the context has since
 	// ended (Security S1 on #391); so an exit 2 with anything on runsc's
 	// own stderr is runsc's failure. The error is a bare vm sentinel,
-	// naming no path (SR2-3j): a failure after the command started is
-	// ErrExecFailed, since the command may have run.
+	// naming no path (SR2-3j): with no pid, it is the one runsc's --log
+	// line shows (notRun, SR2-3q, SR2-3p); otherwise, a crash after the
+	// start included, ErrExecFailed, since the command may have run.
 	var exit *exec.ExitError
 	crashed := errors.As(err, &exit) && exit.ExitCode() == 2 && len(runscErr.bytes()) > 0
 	pid, _ := os.ReadFile(pidFile)
@@ -311,7 +315,7 @@ func (r *Runtime) Exec(ctx context.Context, id string, c vm.Command) (vm.ExecRes
 			return vm.ExecResult{}, err
 		}
 		if !started {
-			return vm.ExecResult{}, vm.ErrExecNotStarted
+			return vm.ExecResult{}, notRun(logs[0], c.Argv)
 		}
 		return vm.ExecResult{}, vm.ErrExecFailed
 	}
@@ -321,6 +325,94 @@ func (r *Runtime) Exec(ctx context.Context, id string, c vm.Command) (vm.ExecRes
 		return res, nil
 	}
 	return res, err
+}
+
+// runscExecPrestart are the messages runsc's exec writes to --log for a
+// failure before the command starts (runsc/cmd/exec.go at the pinned
+// tag, V32); runscExecCall is the one of them for the sandbox's call,
+// which sandbox.go follows with " in sandbox: " and the call's error.
+var runscExecPrestart = []string{"loading container failed: ", "parsing process spec: ", runscExecCall}
+
+const runscExecCall = "executing processes for container: "
+
+// runscMsgLineMax bounds what notRun reads of runsc's --log: past the
+// argv cap with every byte escaped by %q and then by JSON.
+const runscMsgLineMax = 1 << 20
+
+// notRun is the error for an exec whose pid runsc never wrote (SR2-3q):
+// ErrExecNotStarted only when runsc's first --log line is one it writes
+// before the command starts, ErrExecNoProgram when that line says the
+// program was not found or cannot be loaded (SR2-3p), and otherwise
+// ErrExecFailed, since the command may have run: a failed pid write, a
+// lost answer from the sandbox (urpc's "urpc method" error, the call was
+// sent), runsc killed or panicking with no line, or a line too long to
+// read. The line's prefix is runsc's own text, and a guest's argv appears
+// only after it; a guest argv that reads as a lost answer only makes the
+// error the safer ErrExecFailed.
+func notRun(errLog string, argv []string) error {
+	f, err := os.Open(errLog)
+	if err != nil {
+		return vm.ErrExecFailed
+	}
+	defer f.Close()
+	var line struct{ Msg string }
+	if json.NewDecoder(io.LimitReader(f, runscMsgLineMax)).Decode(&line) != nil {
+		return vm.ErrExecFailed
+	}
+	msg := line.Msg
+	if !slices.ContainsFunc(runscExecPrestart, func(p string) bool { return strings.HasPrefix(msg, p) }) {
+		return vm.ErrExecFailed
+	}
+	if !strings.HasPrefix(msg, runscExecCall) {
+		return vm.ErrExecNotStarted
+	}
+	if strings.Contains(msg, ` in sandbox: urpc method "`) {
+		return vm.ErrExecFailed
+	}
+	if len(argv) > 0 && noProgram(msg, argv[0]) {
+		return vm.ErrExecNoProgram
+	}
+	return vm.ErrExecNotStarted
+}
+
+// cannotLoad are the errno texts with which the sentry fails a program it
+// cannot find or load; a retry fails the same way.
+var cannotLoad = []string{"no such file or directory", "permission denied", "exec format error", "not a directory"}
+
+// noProgram reports whether msg, runsc's failed sandbox call for argv[0]
+// name, ends with the sentry's error for that program: the loader's
+// "failed to load <path>: <errno>" (pkg/sentry/loader), for name, the
+// path runsc resolves it to, or, for a bare name, a PATH directory's
+// entry; or the PATH lookup's "error finding executable <%q name> in PATH
+// [<dirs>]: <errno>" (pkg/sentry/fsimpl/user/path.go). The match is
+// anchored at the end, where the sentry's error is, and %q has escaped
+// every quote of the argv before it; the PATH directories come from the
+// worker image, not the guest, so they hold no space, quote or colon.
+func noProgram(msg, name string) bool {
+	const at = " in sandbox: "
+	for _, e := range cannotLoad {
+		m, ok := strings.CutSuffix(msg, ": "+e)
+		if !ok {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(name, "/"):
+			return strings.HasSuffix(m, at+"failed to load "+name)
+		case strings.Contains(name, "/"):
+			return strings.HasSuffix(m, at+"failed to load "+path.Join("/", name))
+		}
+		lookup := at + "error finding executable " + strconv.Quote(name) + " in PATH ["
+		if i := strings.LastIndex(m, lookup); i >= 0 {
+			dirs, ok := strings.CutSuffix(m[i+len(lookup):], "]")
+			return ok && !strings.ContainsAny(dirs, `]":`)
+		}
+		if i := strings.LastIndex(m, at+"failed to load /"); i >= 0 {
+			dir, ok := strings.CutSuffix(m[i+len(at+"failed to load "):], "/"+name)
+			return ok && !strings.ContainsAny(dir, ` ":`)
+		}
+		return false
+	}
+	return false
 }
 
 // execLogMax is the size at which the broker's exec log is rotated: it and
