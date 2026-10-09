@@ -42,6 +42,11 @@ type Case struct {
 	// count toward evidence in a shared package (CHG-4).
 	Public   bool `json:"public,omitempty"`
 	Security bool `json:"security,omitempty"`
+	// Finding links a security case to the finding it covers (P3-4b): a
+	// fix proposed for that finding qualifies only if every case linked
+	// to it passes (Candidate.Finding). Whoever adds the case links it,
+	// Loop 2 or the A11 harness; no candidate can (CHG-2).
+	Finding string `json:"finding,omitempty"`
 	// Implicit marks a case from an implicit acceptance (loops L6): it
 	// counts half, never anchors an auto-adoption, and is never shown to
 	// the owner as an example (security B1, potency C3 on #90).
@@ -134,8 +139,25 @@ func (p *Pipeline) AddSecurityCase(c Case) error {
 	if c.ID == "" {
 		return errors.New("change: a security case needs an id")
 	}
+	if _, ok, err := ParseTreeRule(c.Input); ok && err != nil {
+		return err
+	}
 	c.Security, c.Task, c.Outcome, c.Goal = true, "", "", ""
 	return p.addCase(c)
+}
+
+// SecurityCount is how many security cases the suite holds. It only grows
+// (LOOP-10).
+func (p *Pipeline) SecurityCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := 0
+	for _, c := range p.st.Cases {
+		if c.Security {
+			n++
+		}
+	}
+	return n
 }
 
 // ForgetGoal removes every task case harvested from goal and saves the
