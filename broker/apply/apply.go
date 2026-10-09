@@ -349,14 +349,14 @@ const (
 	busyCall     = "a call is in progress"
 	busyWork     = "accepted work is in progress"
 	busyExcluded = "the owner excluded these hours from updates"
-	busyTalk     = "the owner and the agent are talking"
+	busyTalk     = "a conversation with the owner is in progress"
 )
 
 // waitLines say why an update waits (UX-133-3).
 var waitLines = map[string]string{
 	busyStop:     "Update %d is on hold while actions are stopped; it installs after RESUME.",
 	busyCall:     "Update %d will install after the current call.",
-	busyWork:     "Update %d will install once the agent's current task is done.",
+	busyWork:     "Update %d will install once my current task is done.",
 	busyExcluded: "Update %d will install after your update-free hours.",
 	busyTalk:     "Update %d will install once your conversation pauses.",
 	"":           "Update %d will install soon. Nothing is needed from you.",
@@ -748,7 +748,7 @@ func (a *Applier) Status() string {
 	defer a.mu.Unlock()
 	switch {
 	case a.st.Applying != nil && a.st.Applying.Installed:
-		return fmt.Sprintf("Update %d is installing; the box will restart and check it.", a.st.Applying.To)
+		return fmt.Sprintf("Update %d is installing; I will restart and check it.", a.st.Applying.To)
 	case a.st.Pending != nil && a.rel != nil:
 		why := ""
 		if now := a.cfg.Now(); !now.Before(a.st.Pending.NotBefore) {
@@ -760,7 +760,7 @@ func (a *Applier) Status() string {
 	case a.st.Last.Kind == doneFellBack:
 		return fellBackLine(a.st.Last.Version)
 	}
-	return fmt.Sprintf("Update %d was not installed; the box will try again.", a.st.Last.Version)
+	return fmt.Sprintf("Update %d was not installed; I will try again.", a.st.Last.Version)
 }
 
 // Digest returns the lines the next digest carries once: an update that
@@ -783,7 +783,7 @@ func (a *Applier) Digest() []string {
 // fellBackLine: Loop 3 never proposes a release again once it was adopted
 // (security C3 on #133), so it is not tried again.
 func fellBackLine(v int64) string {
-	return fmt.Sprintf("Update %d did not start cleanly, so the box went back to the version it had. "+
+	return fmt.Sprintf("Update %d did not start cleanly, so I went back to the version I had. "+
 		"Nothing is needed from you. It won't be tried again; a later update will replace it.", v)
 }
 

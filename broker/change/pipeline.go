@@ -1259,7 +1259,7 @@ func (s Score) outage() bool {
 // cannot exercise a tree on this box, for example a changed image or
 // config that replay does not boot. Such a case is neither a pass nor a
 // fail: it is counted as not evaluated.
-var ErrNotEvaluated = errors.New("change: not evaluated on this box")
+var ErrNotEvaluated = errors.New("change: not evaluated here")
 
 // pass reports whether the case passed on t, and whether it was evaluated
 // at all. Any other evaluator error is a fail.

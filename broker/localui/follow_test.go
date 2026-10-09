@@ -136,7 +136,7 @@ func TestOSS10w2FollowPage(t *testing.T) {
 		}
 	}
 	p = f.upload([]byte(`{"signed":"synthetic"}`))
-	for _, want := range []string{"version 3", "1 March 2027", followDigest, "abab-abab", "2 of 3 keys", "can change any software on this box", `name="name"`} {
+	for _, want := range []string{"version 3", "1 March 2027", followDigest, "abab-abab", "2 of 3 keys", "can change any of my software", `name="name"`} {
 		if !strings.Contains(p, want) {
 			t.Fatalf("no %q in %s", want, p)
 		}

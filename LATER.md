@@ -176,7 +176,10 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | DOC-4 f6 | Lens screen on #400: OPERATING §4 step 1 could give the run index in one command, `grep -H -e '^Record:' -e '^Verdict' reviews/<lens>/*.md` |
 | DOC-4 f7 | Lens screen on #400: `RECORD_DIRS` is hard-coded, so a new lens directory goes unchecked, and `records()` globs the disk, so an untracked scratch record fails a local run |
 | DOC-4 f8 | Lens screen on #400: the `head` regex in the Record check accepts lowercase hex only, while its message says "hex"; say "lowercase hex" or match case-insensitively |
-| CH-21c f1 | L3 on #402: `localui/vault.go:598` "The box refused that. Try again." is third person; localui is on the CH-21c `pending` list, so its sweep takes it |
+| CH-21c f2 | CH-21c: recovery owner texts still open with "AgentOS: " (`recovery/owner.go`), a signature CH-21 says owner texts do not carry; drop it with CH-21e, which owns how broker text is told from agent text |
+| CH-21c f3 | CH-21c: third person the voice regex cannot see stays in swept packages ("your box" in `recovery/choice.go`, "AgentOS project" is fine); a wording sweep with the UX lens, no new check; includes mixed voice such as the card recovery sheet ("restores your box … I cannot print this again", L3 on #462) |
+| CH-21c f4 | L3 on #462: `grants/resume.go` `pausedBy` shows the owner "Paused by Loop 2", naming an internal part (CH-12); predates #462 |
+| CH-21c f5 | UX lens on #462: the vault fallback "I refused that. Try again." (`localui/vault.go`) gives no reason; the reason was missing before #462 too |
 | OSS-10w2 f6 | UX on #402: the follow-refused text "Not asked: I refused this request." gives no next step (CH-12); it predates #402 |
 | W5a-resume f1 | L3 on #381: no committed test covers restart; a legacy pause-less resume replaying and `Pause`/`PausedBy` rebuilt from the journal were shown only by a scratch test. The next package that touches grants adds it |
 | W5a-resume f2 | UX on #381: the Approvals line shows the raw pause intent ID (e.g. `loop2/pause/3fa9…`); keep it in Detail for the binding, but show the pause time or put the ID on a muted line |
@@ -194,8 +197,6 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | W3-forget-b1 f4 | Security on #409 L2: `readRestoredForgets` trusts `forget-log.json` without authentication at every start; low risk, only agentosd's uid can write it |
 | W3-forget-b1 f5 | Security on #409 L3: the test "copy holds its key" looks for the key's hex but JSON stores `[]byte` as base64, and the copy has no key field, so the assertion is vacuous |
 | W3-forget-b1 f6 | UX on #409 U4 and P4: the taken-back text reaches 161 chars at 100+ things undone; and the BOARD row should say "not live until b1-5/6/7" |
-| SR3-5 f1 | Builder on SR3-5: between the gate's recheck and Execute, Execute re-resolves by Message-ID and reruns only target guards, not alert escalation; reaching an alert needs the alert to carry the recorded message's Message-ID after a reset. Also: SetFlags+Move in one checked session, and CONDSTORE for the M9 flag race |
-| SR3-5 l2 | L3 on #424 point 2: undo skips the identity check when `Change.Validity` is 0 (evidence written before SR3-5); none exists while mail is unwired, so refuse instead once it is wired |
 | CRED-5f l1 | Combined lens on #420: a withdrawn route's decline says "not granted" (403 `no_route`); CAP-9 wants the reason. The owner already learns it from the withdrawal notice, so only the agent-facing text is vague |
 | CRED-5f l2 | Combined lens on #420 (L3 later point): `CredentialRejected`'s 24 h re-notice compares wall-clock times, so a clock step back can delay it; the new withdrawal notice is once per withdrawal and is unaffected |
 | CRED-5f l3 | Combined lens on #420: if CRED-5w's owner pause reuses `Config.Withdrawn`, the owner gets a withdrawal notice for their own pause; give the pause its own reason |
@@ -255,6 +256,20 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | P3-1-envkey | `broker/change/env_test.go`: `newEnv`'s pinned key is a single `bytes.Reader`, so a second fresh-state pipeline opened with the same cfg would hit EOF. No test does this today (Potency on #491) |
 | P3-4b-2b-held | Fix-input audit (Security #500 1): a held array/object value leaked alone in non-canonical layout passes the audit; H-4's wording needs updating |
 | P3-4b-2b-ctrl | A11 leaking-adapter control (Security #500 2): accepts any audit hit, not only a `held/` hit |
+| SR2-3q f1 | Security 4a on #463 (fail-open drift): `notRun` reads urpc's `urpc method %q failed` text to tell a lost ExecuteAsync reply from a pre-start error; if a runsc upgrade rewords it, that reply reads as NotStarted ("retry it") and CI stays green because the fixture copies the text. When the runsc pin next changes, add a check against the format string at the pinned tag |
+| SR2-3q f2 | L3 on #463 point 1 (V33 gaps; UX lens, same item): a non-UTF-8 `argv[0]` or an unusual PATH dir still reads as a failure that advises a retry, though the command can never run; classify it as NoProgram when the text is next touched |
+| SR2-3q f3 | L3 on #463 point 1: re-read the runsc error prefixes (`loading container failed:`, `parsing process spec:`, `executing processes for container:`) against the new tag on the next pin bump (V33/V20) |
+| SR2-3q f4 | L3 on #463 point 2: `fakerunsc.sh` has no case for the raw (unwrapped) urpc send failure, which classifies as NotStarted; add one so a later runsc that wraps send errors fails a test |
+| SR2-3q f5 | UX lens on #463: `ErrExecFailed`'s text says "after the command started" where the start is unknown; the advice is right, only the claim overstates, so reword it the next time the text is touched |
+| W3-forget-b1-7 d | L3 re-review of #487, point 1: a request `sockets.serve` reads just as the server stops can lose the race for the connection mutex; `handle` still runs the handler with a cancelled ctx, so its effect happens with no reply. Skip the request when `ctx.Err() != nil` |
+| W3-forget-b1-7 e | UX 2 and Potency 1 on #487 (CH-12, C3): the held box texts once per start and then only answers; send a reminder after a day |
+| W3-forget-b1-7 f | UX 3 on #487 (CH-2, CH-11): STOP and STATUS get the held question back, which does not say the agent is stopped; prefix "Your agent is stopped." |
+| W3-forget-b1-7 g | UX 4 on #487 (wording): "restore this backup again to answer again" says "again" twice |
+| W3-forget-b1-7 h | UX 5 on #487 (lens README): the CH-12 held-text check only matches phrasings in `heldSteps`; say so in the reviews/ux/README.md row |
+| SR2-3n f2 | UX 1 on #466 (CAP-8): when the guest's stderr is still held open past `ExecWaitDelay`, the read deadline cuts it and the result says `truncated: false`; set the flag when the copy ends on the deadline (reads best with SR2-3n f1, which is on #466's branch only; this line stands alone) |
+| SR2-3n f3 | Security 4a on #466: on a normal result, anything runsc wrote to its own stderr is discarded rather than logged; nothing leaks, only diagnostics are lost |
+| W3-forget-b3r l2 | L3 accept on #481, point 1: the `forget.go` comment at :224 cites CH-21 for the unlock rule; the cite is CH-3 (CH-21 is "Name and voice"). Fix it when a build touches that file |
+| W3-forget-b3r l3 | L3 accept on #481, point 2: the BOARD `W3-forget-b3` row says "in review (#425)" although #425 is merged; the coordinator corrects it |
 | P2-1 watchdog | L3 on #41 (UPD-1): a boot that hangs with no kernel panic and no failed unit never reaches a reboot; a hardware watchdog (`RuntimeWatchdogSec=` on the N95's iTCO timer) closes it. Panics, failed units and emergency or rescue mode already reboot |
 | P2-1 unblessed | Fourth L3 on #41 (UPD-1): two unblessed `+0` entries make the fallback reboot between them forever, since each counts the other as an earlier release. Fix in the update package (refuse to stage on an unblessed boot) or count only blessed or tries-left entries. An initrd failure on a blessed or single-release `+0` entry also reboot-loops (image/ASSUMPTIONS.md I4) |
 
