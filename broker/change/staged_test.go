@@ -228,6 +228,8 @@ type withdrawer struct {
 	// then runs after a withdrawal, under held, as the applier's next
 	// Tick settles the drop.
 	then func(id string)
+	// refused runs when Withdraw returns err, under held.
+	refused func(id string)
 }
 
 func (w *withdrawer) Withdraw(id string) error {
@@ -235,10 +237,13 @@ func (w *withdrawer) Withdraw(id string) error {
 	defer w.held.Unlock()
 	w.mu.Lock()
 	w.calls = append(w.calls, id)
-	err, then := w.err, w.then
+	err, then, refused := w.err, w.then, w.refused
 	w.mu.Unlock()
 	if err == nil && then != nil {
 		then(id)
+	}
+	if err != nil && refused != nil {
+		refused(id)
 	}
 	return err
 }

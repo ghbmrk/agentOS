@@ -51,22 +51,103 @@ func TestOwnerUndoCutShortByARestartIsNotADrop(t *testing.T) {
 	}
 }
 
-// A withdrawal the applier refused withdrew nothing: a later drop of the
-// release (a newer one, a narrowing) is a drop, offered again.
+// A withdrawal refused in the handover window withdrew nothing: a later
+// drop of the release (a newer one, a narrowing) is a drop, offered again.
 func TestRefusedWithdrawalLeavesADrop(t *testing.T) {
-	for name, err := range map[string]error{"handover": installing{}, "save": errors.New("disk full")} {
+	e, r, w := pendingStaged(t)
+	w.err = installing{}
+	if e.p.Revert(bg, r.Short, OriginOwner) == nil {
+		t.Fatal("undo succeeded")
+	}
+	e.reopen()
+	if err := e.p.StageDropped(bg, r.ID); err != nil {
+		t.Fatal(err)
+	}
+	if a := e.adoption(r.ID); a.Reverted != WhyDropped {
+		t.Fatalf("adoption %+v", a)
+	}
+}
+
+// Any other Withdraw error may come after the applier saved the
+// withdrawal (a store that fails after its rename): the why stays, so
+// the drop Resume settles is the owner's undo, not a drop (r1f, C31).
+func TestWithdrawalFailingAfterItsCommitIsNotADrop(t *testing.T) {
+	e, r, w := pendingStaged(t)
+	w.err = errors.New("apply: sync state dir: input/output error")
+	if e.p.Revert(bg, r.Short, OriginOwner) == nil {
+		t.Fatal("undo succeeded")
+	}
+	e.reopen()
+	if err := e.p.StageDropped(bg, r.ID); err != nil {
+		t.Fatal(err)
+	}
+	if a := e.adoption(r.ID); a.Reverted != WhyOwner {
+		t.Fatalf("adoption %+v", a)
+	}
+}
+
+// A revert retried after a restart asks the applier again; its refusal
+// leaves the why the first, successful withdrawal saved, so the drop
+// that settles it is never offered again (Security re-sign point 1).
+func TestRetriedRevertKeepsTheFirstWithdrawnWhy(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		first    string // why of the revert cut short after Withdraw
+		retry    string
+		retryErr error
+		want     string
+	}{
+		{"security, handover", WhySecurity, WhySecurity, installing{}, WhySecurity},
+		{"security, failed", WhySecurity, WhySecurity, errors.New("disk full"), WhySecurity},
+		{"owner, handover", WhyOwner, WhyOwner, installing{}, WhyOwner},
+		{"owner, failed", WhyOwner, WhyOwner, errors.New("disk full"), WhyOwner},
+		{"owner, then security refused", WhyOwner, WhySecurity, installing{}, WhyOwner},
+	} {
 		e, r, w := pendingStaged(t)
-		w.err = err
-		if e.p.Revert(bg, r.Short, OriginOwner) == nil {
-			t.Fatalf("%s: undo succeeded", name)
+		w.then = func(string) { e.store.Fail = errors.New("disk full") }
+		if e.p.revert(bg, r.ID, origin(c.first), c.first) == nil {
+			t.Fatalf("%s: first revert ran without saving", c.name)
+		}
+		e.store.Fail = nil
+		e.reopen()
+		w2 := &withdrawer{err: c.retryErr}
+		e.p.SetWithdrawer(w2)
+		if e.p.revert(bg, r.ID, origin(c.retry), c.retry) == nil || len(w2.called()) != 1 {
+			t.Fatalf("%s: retry not refused by the applier", c.name)
 		}
 		e.reopen()
 		if err := e.p.StageDropped(bg, r.ID); err != nil {
-			t.Fatal(name, err)
+			t.Fatal(c.name, err)
 		}
-		if a := e.adoption(r.ID); a.Reverted != WhyDropped {
-			t.Fatalf("%s: adoption %+v", name, a)
+		if a := e.adoption(r.ID); a.Reverted != c.want {
+			t.Fatalf("%s: reverted %q, want %q", c.name, a.Reverted, c.want)
 		}
+	}
+}
+
+func origin(why string) string {
+	if why == WhyOwner {
+		return OriginOwner
+	}
+	return OriginPipeline
+}
+
+// If the restored why cannot be saved, the one saved before the applier
+// was asked stays: a later drop is the owner's undo, erring toward the
+// revert asked (C31).
+func TestUnsavedRestoreKeepsTheWhy(t *testing.T) {
+	e, r, w := pendingStaged(t)
+	w.err = installing{}
+	w.refused = func(string) { e.store.Fail = errors.New("disk full") }
+	if e.p.Revert(bg, r.Short, OriginOwner) == nil {
+		t.Fatal("undo succeeded")
+	}
+	e.store.Fail = nil
+	if err := e.p.StageDropped(bg, r.ID); err != nil {
+		t.Fatal(err)
+	}
+	if a := e.adoption(r.ID); a.Reverted != WhyOwner {
+		t.Fatalf("adoption %+v", a)
 	}
 }
 
