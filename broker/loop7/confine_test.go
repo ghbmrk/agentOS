@@ -481,6 +481,14 @@ func TestLoadNeverWritesThroughAPlantedLink(t *testing.T) {
 	}
 	Load(release, state) // refusing is fine; writing outside is not
 	untouched(t, outside)
+
+	// The whole targets directory swapped for a link (Security B2).
+	state2 := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(state2, "targets")); err != nil {
+		t.Fatal(err)
+	}
+	Load(release, state2)
+	untouched(t, outside)
 }
 
 // LOOP-1, ARC-2 (L3 1b on #588): a cache directory swapped for a link
@@ -566,5 +574,27 @@ func TestAJailedPathOutsideItsStateIsRefused(t *testing.T) {
 		if _, err := New(c); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+}
+
+// LOOP-7 (Security B3 on #588): on a fresh state the cache does not yet
+// exist; root creates it for the run, and the jailed fuzz step can still
+// write its -test.fuzzcachedir and its $TMPDIR.
+func TestAJailedFuzzStepUsesItsCacheOnFirstBoot(t *testing.T) {
+	needRoot(t)
+	s, tg := jailed(t, newFake(), "", func(release string) string {
+		return fakeBin(t, release, "fake.test", `c=
+			for a; do case "$a" in -test.fuzzcachedir=*) c=${a#*=};; esac; done
+			if [ -n "$c" ]; then mkdir -p "$c/FuzzFake" && touch "$c/FuzzFake/x" "$TMPDIR/y" || exit 3; fi
+			exit 0`)
+	})
+	if _, err := os.Lstat(s.cfg.CacheDir); err == nil {
+		t.Fatal("the cache exists before the first run")
+	}
+	if n, err := s.Fuzz(context.Background(), tg); n != 0 || err != nil {
+		t.Fatalf("a first-boot fuzz step: n=%d err=%v", n, err)
+	}
+	if _, err := os.Stat(filepath.Join(s.cfg.CacheDir, "fuzz", "fake", "FuzzFake", "x")); err != nil {
+		t.Fatalf("the step wrote no cache: %v", err)
 	}
 }

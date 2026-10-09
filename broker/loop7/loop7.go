@@ -650,7 +650,9 @@ func (s *Source) run(ctx context.Context, t Target, args ...string) ([]byte, err
 	scratch := filepath.Join(s.cfg.CacheDir, name)
 	attr := &syscall.SysProcAttr{Setpgid: true}
 	if j := s.cfg.Jail; j != nil {
-		if err := r.Lchown(rel, int(j.UID), int(j.GID)); err != nil {
+		// rel and the cache above it, which root may just have made on a
+		// fresh state, are the user's (Security B3 on #588).
+		if err := j.ownPath(r, rel); err != nil {
 			r.RemoveAll(rel)
 			return nil, err
 		}
@@ -680,6 +682,17 @@ func (s *Source) run(ctx context.Context, t Target, args ...string) ([]byte, err
 		err = rerr
 	}
 	return out, err
+}
+
+// ownPath gives rel and each directory above it in the tree, up to the
+// tree itself, to the jail's user, through r: none follows a link.
+func (j *Jail) ownPath(r *os.Root, rel string) error {
+	for p := rel; p != "." && p != "/"; p = filepath.Dir(p) {
+		if err := r.Lchown(p, int(j.UID), int(j.GID)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // runName is a fresh scratch directory's name.
