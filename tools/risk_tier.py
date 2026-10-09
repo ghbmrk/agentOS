@@ -27,7 +27,7 @@ TIER_A_BROKER = {
     "cleanroom", "clock", "cmd", "control", "daemon", "egress", "grants", "guest", "hint",
     "hostchange", "hostdisk", "journal", "localapi", "localsrv", "localui",
     "mail", "modelroute", "modem", "modemlink", "owner", "pubid", "recovery", "replay",
-    "reversible", "sendrules", "sipsign", "smsapi", "sockets", "tpmseal",
+    "reversible", "sendrules", "sipsign", "smsapi", "sockets", "sockprobe", "tpmseal",
     "update", "vault", "vendor", "verb", "vm", "workers",
 }
 TIER_A_FILES = {"broker/go.mod", "broker/go.sum"}

@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"effect_request\",\"arguments\":{\"request_id\":\"r2\",\"account\":\"zther\",\"action\":\"message.send\"}}}")

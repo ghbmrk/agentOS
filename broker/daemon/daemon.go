@@ -40,6 +40,21 @@ var ownerIdle = 60 * time.Second
 // GuestSocket is the socket file handed to agent machine id.
 func GuestSocket(id string) string { return "guest-" + id + ".sock" }
 
+// journalRefusals journals each protocol refusal on machine id's socket,
+// coalesced per machine and code as egress denials are, so a guest
+// looping on bad frames cannot fill the journal. The code rides in
+// Operation as a token ("unknown-op"), since the journal may redact the
+// reason. A failed write is dropped: the refusal already stopped the
+// frame.
+func journalRefusals(eng *journal.Engine, gate *journal.EgressGate, id string) func(sockets.Peer, sockets.Code) {
+	return func(_ sockets.Peer, c sockets.Code) {
+		n := journal.EgressNote{Machine: id, Adapter: sockets.RefusalNote, Operation: c.Token(), Reason: sockets.RefusalNote + ": " + string(c)}
+		if gate.Admit(&n) {
+			eng.RecordEgress(n)
+		}
+	}
+}
+
 // Config configures Run.
 type Config struct {
 	JournalPath string
@@ -352,8 +367,10 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 			eps[0].HangupOps[op] = true
 		}
 	}
+	refusals := &journal.EgressGate{}
 	for _, id := range cfg.Machines {
 		eps = append(eps, sockets.Endpoint{
+			Refused:     journalRefusals(eng, refusals, id),
 			Name:        GuestSocket(id),
 			Peer:        sockets.Peer{Kind: "guest", ID: id},
 			MaxConns:    4,
