@@ -437,14 +437,14 @@ func TestKeptResultsNeedTheSameBase(t *testing.T) {
 	e.p.mu.Unlock()
 	total := len(set.heldOut) + len(set.security)
 	st := strictFor(Local, []Class{ClassSkill})
-	if _, err := e.p.evaluate(pe.arm(2*total-1), base1, next, set, st); !errors.Is(err, ErrInterrupted) {
+	if _, err := e.p.evaluate(pe.arm(2*total-1), base1, next, set, st, ""); !errors.Is(err, ErrInterrupted) {
 		t.Fatal(err)
 	}
 	if e.p.keptSides() == 0 {
 		t.Fatal("nothing kept")
 	}
 	pe.arm(0)
-	if _, err := e.p.evaluate(context.Background(), base2, next, set, st); err != nil {
+	if _, err := e.p.evaluate(context.Background(), base2, next, set, st, ""); err != nil {
 		t.Fatal(err)
 	}
 	if pe.runs() != 2*total {
@@ -515,7 +515,7 @@ func TestAnErroringBaselineIsNotKept(t *testing.T) {
 	next := Tree{"procedures/file": []byte("v1"), "skills/greet": []byte("hello")}
 	total := len(set.heldOut) + len(set.security)
 	st := strictFor(Local, []Class{ClassSkill})
-	if _, err := e.p.evaluate(pe.arm(2*total-1), base, next, set, st); !errors.Is(err, ErrInterrupted) {
+	if _, err := e.p.evaluate(pe.arm(2*total-1), base, next, set, st, ""); !errors.Is(err, ErrInterrupted) {
 		t.Fatal(err)
 	}
 	e.p.mu.Lock()

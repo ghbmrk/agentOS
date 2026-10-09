@@ -151,25 +151,25 @@ If the Wi-Fi never appears, the PC did not start from the drive. For this one st
 <div class="row">
 {{.PassQR}}
 <div><p class="mono big">{{.VaultPassphrase}}</p>
-<p class="note">Only for starting the box on a PC it does not know: type it on the box page, or scan this code with your phone's camera, tap Copy, and paste it there. Never send it by text or say it on a call.
+<p class="note">Only for starting me on a PC I do not know: type it on my Wi-Fi page, or scan this code with your phone's camera, tap Copy, and paste it there. Never send it by text or say it on a call.
 If this drive was out of your hands, unlock it only on your trusted PC.
-The box cannot print this again; keep the card.</p></div>
+I cannot print this again; keep the card.</p></div>
 </div>
 </div>
 </section>
 
 <section class="sheet">
 <h1>Approval code grid</h1>
-<p class="note">Tear off and keep apart from the box and from this card. Use it when your phone's code generator is not at hand: the box asks for one cell, such as C7. Each cell works once.</p>
+<p class="note">Tear off and keep apart from me and from this card. Use it when your phone's code generator is not at hand: I ask for one cell, such as C7. Each cell works once.</p>
 <table class="grid"><tr><th></th>{{range .GridCols}}<th>{{.}}</th>{{end}}</tr>
 {{range .Grid}}<tr><th>{{.Row}}</th>{{range .Cells}}<td>{{.}}</td>{{end}}</tr>
 {{end}}</table>
-<p class="note">Grid check code: <span class="mono">{{.GridCheck}}</span> (the box may ask for it after a new grid).</p>
+<p class="note">Grid check code: <span class="mono">{{.GridCheck}}</span> (I may ask for it after a new grid).</p>
 </section>
 
 <section class="sheet">
 <h1>Recovery key</h1>
-<p class="note">Tear off and store somewhere safe, apart from the drive and the grid. It restores your box onto new hardware and replaces a lost phone or number. You will rarely need it. The box cannot print this again, so keep this sheet.</p>
+<p class="note">Tear off and store somewhere safe, apart from the drive and the grid. It restores your box onto new hardware and replaces a lost phone or number. You will rarely need it. I cannot print this again, so keep this sheet.</p>
 <p class="mono big">{{.RecoveryKey}}</p>
 <h2>Reset secret</h2>
 <p class="note">Only for re-running setup after a reset.</p>

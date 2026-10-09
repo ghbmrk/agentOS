@@ -20,16 +20,6 @@ import (
 
 const runscCanary = "/canary-host/agentos/state/runsc/wk-c4n4ry_"
 
-func fakeRunsc(t *testing.T) *Runtime {
-	t.Helper()
-	bin, err := filepath.Abs("testdata/fakerunsc.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("FAKE_RUNSC_CANARY", runscCanary)
-	return &Runtime{Bin: bin, StateDir: filepath.Join(t.TempDir(), "runsc")}
-}
-
 func TestRunscFailureAnswersNoOutputAndNoRunscText(t *testing.T) {
 	r := fakeRunsc(t)
 	for _, mode := range []string{"prestart", "panic", "wait"} {
@@ -42,9 +32,10 @@ func TestRunscFailureAnswersNoOutputAndNoRunscText(t *testing.T) {
 		}
 		// The error is a bare vm sentinel: no host path, not even the
 		// exec log's (SR2-3j, release finding 362-2).
-		want := vm.ErrExecNotStarted
-		if mode == "wait" {
-			want = vm.ErrExecFailed
+		// A panic with no --log line may follow the start (SR2-3q).
+		want := vm.ErrExecFailed
+		if mode == "prestart" {
+			want = vm.ErrExecNotStarted
 		}
 		if err != want {
 			t.Fatalf("%s: error %v, want %v", mode, err, want)

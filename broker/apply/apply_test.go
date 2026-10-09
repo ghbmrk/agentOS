@@ -89,7 +89,7 @@ func TestNeverAppliesDuringACallWorkOrExcludedHours(t *testing.T) {
 		line string
 	}{
 		{func(b bool) { r.inCall = b }, "Update 1 will install after the current call."},
-		{func(b bool) { r.working = b }, "Update 1 will install once the agent's current task is done."},
+		{func(b bool) { r.working = b }, "Update 1 will install once my current task is done."},
 		{func(b bool) { r.excluded = func(time.Time) bool { return b } }, "Update 1 will install after your update-free hours."},
 		{func(b bool) {
 			if b {
@@ -210,7 +210,7 @@ func TestFallbackRevertsTheAdoptionAndRewindsNothing(t *testing.T) {
 	}
 	// UX-133-2: in STATUS until the next update installs, and once in
 	// the digest.
-	want := "Update 1 did not start cleanly, so the box went back to the version it had. Nothing is needed from you. It won't be tried again; a later update will replace it."
+	want := "Update 1 did not start cleanly, so I went back to the version I had. Nothing is needed from you. It won't be tried again; a later update will replace it."
 	if got := r.a.Status(); got != want {
 		t.Fatalf("status: %q", got)
 	}
@@ -378,10 +378,12 @@ func TestRestartWaitsForTheBoxToBeFreeAfterTheSlotWrite(t *testing.T) {
 	}
 }
 
+// An ordinary release: a security fix fails closed after a process
+// restart instead (SR3-4f-2c).
 func TestBrokerStoppedBeforeTheRestartRestartsLater(t *testing.T) {
 	r := newRig(t)
 	ctx := context.Background()
-	r.must(r.a.Schedule(r.release(1, true), "a1"))
+	r.must(r.a.Schedule(r.release(1, false), "a1"))
 	id := r.a.nextID(1)
 	in, err := r.a.intent(ctx, id)
 	r.must(err)
@@ -446,10 +448,11 @@ func TestTalkHoldsASecurityFixForAtMostTwoHours(t *testing.T) {
 func TestStopHoldsTheRestart(t *testing.T) {
 	r := newRig(t)
 	ctx := context.Background()
-	rel := r.release(1, true)
+	rel := r.release(1, false) // a security fix fails closed after a process restart (SR3-4f-2c)
 	r.act0 = slowActivator{r.act, func() { r.stopped = true }}
 	r.restart()
 	r.must(r.a.Schedule(rel, "a1"))
+	r.clk.add(7 * time.Hour) // past the jitter
 	if ok, _ := r.a.Tick(ctx); ok || r.act.restarts != 0 || len(r.act.installed) != 1 {
 		t.Fatal("restarted after STOP during the slot write")
 	}

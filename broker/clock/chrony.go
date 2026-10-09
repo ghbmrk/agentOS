@@ -19,7 +19,17 @@ const chronycTimeout = 3 * time.Second
 func runChronyc(ctx context.Context, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, chronycTimeout)
 	defer cancel()
-	return exec.CommandContext(ctx, chronyc, chronycArgv(args)...).Output()
+	return chronycCmd(ctx, args...).Output()
+}
+
+// chronycCmd is chronyc with a fixed PATH and no other variable: it finds
+// chronyd by its built-in socket path and, with no locale set, prints -c
+// output in the C locale. It needs nothing from agentosd's environment,
+// which carries the owner's number (AGENTOS_OWNER; P3-4b-3r-env).
+func chronycCmd(ctx context.Context, args ...string) *exec.Cmd {
+	c := exec.CommandContext(ctx, chronyc, chronycArgv(args)...)
+	c.Env = []string{"PATH=/usr/bin:/bin"}
+	return c
 }
 
 // chronycArgv: CSV output (-c), no name lookups (-n), then the query.

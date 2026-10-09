@@ -146,7 +146,7 @@ const (
 )
 
 // AgreeText tells the owner a restriction or hold has ended.
-const AgreeText = "The box clock agrees with the phone network again. Time checks are back to normal."
+const AgreeText = "My clock agrees with the phone network again. Time checks are back to normal."
 
 // AgreeLastText is the all-clear once the day's alerts are used up, so a
 // later disagreement the box does not text about is not a surprise.
@@ -155,7 +155,7 @@ const AgreeLastText = AgreeText + LastSuffix
 // DisagreeText is the owner text for a disagreement of skew (at most two
 // text segments). It names what the wiring does while restricted (K7).
 func DisagreeText(skew time.Duration) string {
-	t := fmt.Sprintf("The box clock and the phone network's time differ by %s, so the box is playing safe: pre-allowances with an end date ask you first, requests won't expire, and updates wait. Codes and STOP work as usual.", about(skew))
+	t := fmt.Sprintf("My clock and the phone network's time differ by %s, so I am playing safe: pre-allowances with an end date ask you first, requests won't expire, and updates wait. Codes and STOP work as usual.", about(skew))
 	if zoneLike(skew) {
 		t += " A whole-hour difference is often a time-zone error on one side."
 	}
@@ -164,19 +164,19 @@ func DisagreeText(skew time.Duration) string {
 
 // HoldEndText ends a hold that no carrier time confirmed either way: the
 // box clock is back in line with the box's own count.
-const HoldEndText = "The box clock is back in line with the box's own count of time. Time checks are back to normal."
+const HoldEndText = "My clock is back in line with my own count of time. Time checks are back to normal."
 
 // LastSuffix ends the all-clear that uses up the day's alerts.
-const LastSuffix = " If it happens again today the box won't text; send STATUS to check."
+const LastSuffix = " If it happens again today I won't text; send STATUS to check."
 
 // StateLostText is the alert when the saved clock check could not be read
 // at start, so a restriction it may have held is kept.
-const StateLostText = "The box couldn't read its saved clock check, so it is playing safe until the phone network's time confirms the clock: pre-allowances with an end date ask you first, requests won't expire, and updates wait. Codes and STOP work as usual."
+const StateLostText = "I couldn't read my saved clock check, so I am playing safe until the phone network's time confirms the clock: pre-allowances with an end date ask you first, requests won't expire, and updates wait. Codes and STOP work as usual."
 
 // HeldText is the owner text when the box clock jumps with no phone-network
 // time to confirm it.
 func HeldText(jump time.Duration) string {
-	return fmt.Sprintf("The box clock jumped by %s and no phone-network time confirms it, so the box keeps its own count of time until it can check. Nothing to do.", about(jump))
+	return fmt.Sprintf("My clock jumped by %s and no phone-network time confirms it, so I keep my own count of time until I can check. Nothing to do.", about(jump))
 }
 
 // zoneLike reports a skew within a minute of a whole number of quarter

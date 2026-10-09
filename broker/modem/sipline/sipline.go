@@ -116,29 +116,29 @@ func OwnerText(err error) string {
 	case errors.Is(err, ErrBusy):
 		return "The second line is already on a call. Try again when it ends."
 	case errors.Is(err, ErrConfig):
-		return "The second line isn't set up. Set it up on the box's Wi-Fi page."
+		return "The second line isn't set up. Set it up on my Wi-Fi page."
 	case errors.Is(err, ErrInsecure):
-		return "The second line couldn't connect securely to its provider. Check the server name on the box's Wi-Fi page."
+		return "The second line couldn't connect securely to its provider. Check the server name on my Wi-Fi page."
 	case errors.Is(err, ErrClosed):
 		return "The second line isn't connected right now."
 	case errors.Is(err, ErrNoSRTP):
-		return "The box ended the call before it connected: the provider didn't offer an encrypted call. Turn on encrypted calls (SRTP) in the provider's settings."
+		return "I ended the call before it connected: the provider didn't offer an encrypted call. Turn on encrypted calls (SRTP) in the provider's settings."
 	case errors.Is(err, ErrMediaAddress):
-		return "The box ended the call before it connected: the provider's call audio isn't on a safe address. Check the provider's settings."
+		return "I ended the call before it connected: the provider's call audio isn't on a safe address. Check the provider's settings."
 	case errors.Is(err, ErrCallFailed):
-		return "The call didn't connect: it was busy, refused or not answered. The box doesn't call again on its own."
+		return "The call didn't connect: it was busy, refused or not answered. I don't call again on my own."
 	case errors.Is(err, ErrTextRefused):
 		return "The second line's provider didn't accept that text. Check the number, or try again later."
 	case errors.Is(err, sipsign.ErrLocked):
-		return "The second line can't sign in while the box is locked. Unlock it on the box's Wi-Fi page."
+		return "The second line can't sign in while I am locked. Unlock me on my Wi-Fi page."
 	case errors.Is(err, sipsign.ErrNoAccount):
-		return "The second line's calling account isn't set up. Set it up on the box's Wi-Fi page."
+		return "The second line's calling account isn't set up. Set it up on my Wi-Fi page."
 	case errors.Is(err, sipsign.ErrRefused):
-		return "The second line's sign-in needs confirming. Check the provider name on the box's Wi-Fi page."
+		return "The second line's sign-in needs confirming. Check the provider name on my Wi-Fi page."
 	case errors.Is(err, smsapi.ErrLocked):
-		return "The second line can't text while the box is locked. Unlock it on the box's Wi-Fi page."
+		return "The second line can't text while I am locked. Unlock me on my Wi-Fi page."
 	case errors.Is(err, smsapi.ErrNoAccount):
-		return "The second line's texting account isn't set up. Set it up on the box's Wi-Fi page."
+		return "The second line's texting account isn't set up. Set it up on my Wi-Fi page."
 	case errors.Is(err, smsapi.ErrTooLong):
 		return "That text is too long for the second line. Shorten it and send it again."
 	case errors.Is(err, smsapi.ErrRefused):
