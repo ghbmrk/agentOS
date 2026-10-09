@@ -1,6 +1,6 @@
 """Vendored injection corpora (LOOP-7, D-067): published, licensed, pinned by
 digest, and extracted without running their code."""
-# REQ: LOOP-7
+# REQ: LOOP-7, LOOP-9
 
 import json
 import pathlib
@@ -13,6 +13,13 @@ sys.path.insert(0, str(ROOT / "tools"))
 import corpus  # noqa: E402
 
 CORPORA = ROOT / "assurance" / "corpora"
+# The broker embeds this copy (go:embed cannot reach assurance/), so the
+# signed binary carries the corpus and reads no drive file (#515 Security 3).
+EMBEDDED = ROOT / "broker" / "corpus" / "promptinject.json"
+
+
+def same_bytes(a: pathlib.Path, b: pathlib.Path) -> bool:
+    return a.read_bytes() == b.read_bytes()
 
 
 class VendoredCorpusTest(unittest.TestCase):
@@ -49,6 +56,19 @@ class VendoredCorpusTest(unittest.TestCase):
             got = corpus.extract(d)
             self.assertFalse((d / "ran").exists())
             self.assertEqual(got["items"], [{"id": "t/x/a", "text": "hi"}])
+
+
+class EmbeddedCorpusTest(unittest.TestCase):
+    def test_the_embedded_copy_is_the_vendored_items(self):
+        self.assertTrue(same_bytes(EMBEDDED, CORPORA / "promptinject" / "items.json"))
+
+    def test_a_changed_byte_in_the_copy_fails(self):
+        with tempfile.TemporaryDirectory() as t:
+            copy = pathlib.Path(t) / "promptinject.json"
+            b = bytearray(EMBEDDED.read_bytes())
+            b[len(b) // 2] ^= 0x01
+            copy.write_bytes(bytes(b))
+            self.assertFalse(same_bytes(copy, CORPORA / "promptinject" / "items.json"))
 
 
 if __name__ == "__main__":
