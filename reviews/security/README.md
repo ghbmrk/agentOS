@@ -37,5 +37,5 @@ Per-PR and per-bundle records are the files `YYYY-MM-DD-*.md` in this directory 
 
 | Kind | Seen on | Check to add | Owner package |
 |---|---|---|---|
-| A broker child process inherits the daemon's whole environment | #523 (f3), #515 (f2) | A broker test beside the ARC-2 AST walk (`daemon/inference_test.go`) failing when non-test code builds an `exec.Cmd` without assigning `Env` | P3-4b-4c |
+| A broker child process inherits the daemon's whole environment | #523 (f3), #515 (f2) | `daemon` `TestEveryChildGetsAnExplicitEnvironment` (beside the ARC-2 AST walk, `daemon/inference_test.go`): non-test broker code fails when it starts a child without an explicit environment through `exec.Cmd`, `os.StartProcess` (a nil `ProcAttr` or one without `Env`), `syscall.ForkExec` or `syscall.StartProcess`, under any import name, or puts `os.Environ()` / `syscall.Environ()` anywhere in an `Env` value (no exemption); `envExempt` holds only test fixtures that no `cmd/` binary links | P3-4b-3r-env |
 | Code that decides finding closure or containment is not tier A | #523 (f5), #515 (f4) | `loops`, `probecmd`, `corpus`, `loop7` in `TIER_A_BROKER`, pinned in `tests/test_risk_tier.py` | P3-4b-4b (done: enforced by `tools/risk_tier.py` since #548; loop7 tier A added at the Security 4a blocker) |
