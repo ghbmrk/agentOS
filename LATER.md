@@ -74,6 +74,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | W6 | A8 (REC-1–3) | Recovery into vault process and local UI |
 | W7 | A10, A15 (CAP-4–6) | Compiled skills live; attention optimizer; blocked |
 | P3-4b-4c-dedupe | A1 (owner texts; UX on #589 classed it release under §2's stricter rule, for Mark to demote to later if no acceptance test needs it) | `Guard.batch` and the digest repeat one identical line per corpus item, so a weakened check gives the owner ten identical lines |
+| P3-4b-4c-dedupe-probe | A1 (owner texts; the probe half of P3-4b-4c-dedupe's Goal, release like its parent) | `runProbe` texts each new finding on its own through `tell`, so a weakened corpus check sends ten identical texts |
 
 ## Later (backlog; do not start before first release)
 | ID | Why it can wait |
@@ -597,6 +598,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | SR3-6f4 l3 | #620 L3 6083942942 pt 3: the `l.held[v] == held[v]` guard in `retireClaims` has no test; it stops a claim re-proposed between the snapshot and the delete from being retired, and dropping it would only retire too much (fails closed). The restart-path test is in BOARD SR3-6-f6 (c) |
 | SR3-6f4 l4 | #620 lens 6083863804 pt 1 (UPD-5, CH-12 kind): between `AttestorsChanged` and the next check the line reads "Update 2 is waiting for your approval.", which drops "Security", and it was not verified that an approval request is open at that moment. The window is short because the check is now urgent; if it recurs, give that gap a line of its own |
 | SR3-6f4 l5 | #620 lens 6083863804 pt 2 (SR3-6-f4b): the f4b test asserts only that the independent-pass sentence is gone and `TestedBy` is empty, not the replacement sentence the owner reads; a later test could assert the "needs your approval: no trusted independent test report yet" wording |
+| P3-4b-4c-advisory-high | In `Digest`'s advisory-package group, `high = high || r.Finding.Severity == High` is not pinned by any test: assigning `= r.Finding.Severity == High` passes all of `./loops` (Potency delta on #634, point 2). Pin it with two advisories on one package, the High one not last. Not part of LOOP-9 dedupe. |
 
 ## Reuse candidates
 | ID | Component | Why |
