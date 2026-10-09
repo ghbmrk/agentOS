@@ -67,7 +67,9 @@ type rig struct {
 func (r *rig) startAgentosd() {
 	r.t.Helper()
 	r.link = modemlink.New(modemlink.Config{Owner: ownerNum, SendWait: 5 * time.Second, PollWait: 200 * time.Millisecond,
-		Now: func() time.Time { return time.Now().Add(time.Duration(r.skew.Load())) }})
+		Now: func() time.Time { return time.Now().Add(time.Duration(r.skew.Load())) },
+		// agentosd's roles file, as the bridge reads it at each open.
+		Record: func(iccid string) error { r.mu.Lock(); defer r.mu.Unlock(); r.iccid = iccid; return nil }})
 	ctx, cancel := context.WithCancel(context.Background())
 	r.srv, r.srvStop = &sockets.Server{Dir: r.dir}, cancel
 	if err := r.srv.Start(ctx, sockets.Endpoint{Name: "owner.sock", Peer: sockets.Peer{Kind: "owner"}, Ops: r.link.Ops(), MaxConns: 8, HangupOps: map[string]bool{bridgeproto.OpOutbox: true}}); err != nil {
@@ -258,7 +260,7 @@ func TestASwappedOrUnboundSIMStopsTheOwnerLine(t *testing.T) {
 	r.iccid = ""
 	r.mu.Unlock()
 	r.waitNote(func(n string) bool {
-		return strings.HasPrefix(n, "My phone modem has no SIM, or its number isn't set up.")
+		return strings.HasPrefix(n, "My phone modem's SIM isn't set up as my number yet.")
 	})
 	r.mu.Lock()
 	r.iccid = r.devs[0].ICCID()
@@ -613,4 +615,45 @@ func TestAnOwnersTextPastTheHeldLimitIsStillDelivered(t *testing.T) {
 	if left != 0 {
 		t.Fatalf("t33 was refused only %d times", 6-left)
 	}
+}
+
+// P2-2w d2b, CH-19: a SIM the owner confirms on the page (agentosd checks
+// the code) is recorded by agentosd, and the bridge takes it at its next
+// open: the owner line works again, without a restart. A swapped SIM is
+// offered by its last four digits.
+func TestTheOwnerAdoptsANewSIM(t *testing.T) {
+	r := newRig(t, func(*atsim.Device) string { return "89010000000000000000" })
+	r.waitNote(func(n string) bool { return strings.HasSuffix(n, "until you confirm it below.") })
+	r.mu.Lock()
+	real := r.devs[0].ICCID()
+	r.mu.Unlock()
+	tag, ends := r.link.SIM()
+	if tag == "" || !strings.HasSuffix(strings.TrimRight(real, "Ff"), ends) || len(ends) != 4 {
+		t.Fatalf("SIM() = %q, %q for %q", tag, ends, real)
+	}
+	if err := r.link.Adopt(tag); err != nil {
+		t.Fatal(err)
+	}
+	r.waitNote(func(n string) bool { return n == "" })
+	// The simulator's earlier ports still drain the carrier line, so the
+	// line is shown working by a text out.
+	if err := r.link.Send(ownerNum, "Box: back."); err != nil {
+		t.Fatalf("send on the adopted SIM: %v", err)
+	}
+	if got := r.phoneGets(); got != "Box: back." {
+		t.Fatalf("phone got %q", got)
+	}
+	// Unbound (nothing recorded) is set up the same way; the modem
+	// restarts to read the cleared record.
+	r.mu.Lock()
+	r.iccid = ""
+	dev := r.devs[len(r.devs)-1]
+	r.mu.Unlock()
+	dev.Unplug()
+	r.waitNote(func(n string) bool { return strings.HasSuffix(n, "Set it up below.") })
+	tag, _ = r.link.SIM()
+	if err := r.link.Adopt(tag); err != nil {
+		t.Fatal(err)
+	}
+	r.waitNote(func(n string) bool { return n == "" })
 }

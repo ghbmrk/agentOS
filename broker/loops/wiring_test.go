@@ -250,7 +250,7 @@ func TestAFailedSettingSaysWhy(t *testing.T) {
 		t.Fatalf("%q", got)
 	}
 	r.s.cfg.Journal = nil
-	if got, _ := r.s.Text(ctx, "LOOPS OFF", true); got != "The box could not save that setting. Try again later." {
+	if got, _ := r.s.Text(ctx, "LOOPS OFF", true); got != "I could not save that setting. Try again later." {
 		t.Fatalf("%q", got)
 	}
 }

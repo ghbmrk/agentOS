@@ -1,6 +1,6 @@
 package main
 
-// REQ: CH-20, CH-19, CH-10, CAP-3
+// REQ: CH-20, CH-19, CH-10, CAP-3, CH-3
 
 import (
 	"context"
@@ -91,7 +91,7 @@ func (f *fakeEvidenceGate) deliveries() []journal.Intent {
 	defer f.mu.Unlock()
 	var out []journal.Intent
 	for _, in := range f.subs {
-		if in.Action == opDeliver {
+		if in.Action == mail.OpDeliver {
 			out = append(out, in)
 		}
 	}
@@ -128,6 +128,7 @@ func newEvRig(t *testing.T, addr string) *evRig {
 		now:    func() time.Time { return r.now },
 		sleep:  func(d time.Duration) { r.slept = append(r.slept, d) },
 		logf:   t.Logf,
+		page:   true,
 	}
 	r.ev.gate.Store(&evidenceGateBox{r.gate})
 	return r
@@ -155,9 +156,6 @@ func TestPrivateRepliesGoToTheDestination(t *testing.T) {
 	d := r.gate.deliveries()
 	if len(d) != 1 {
 		t.Fatalf("submitted %d", len(d))
-	}
-	if opDeliver != mail.OpDeliver || mailExecutor != mail.Tool {
-		t.Fatal("the mail adapter's names changed")
 	}
 	in := d[0]
 	if in.Origin != grants.OriginEvidence || in.Action != mail.OpDeliver || in.Account != "mail" || in.Executor != "mail" ||
@@ -392,9 +390,39 @@ func TestEvidenceSetting(t *testing.T) {
 	if got, ok := r.ev.settings(ctx, "Email replies to bob@corp.example", true); ok || len(r.gate.subs) != 2 {
 		t.Fatalf("taken from the agent: %q", got)
 	}
+	// Without the Wi-Fi page, ON is refused before it reaches the gate
+	// (P2-2w d): the journal redacts the gate's reasons, so none is
+	// matched here; OFF needs no page.
+	r.ev.page = false
+	before := len(r.gate.subs)
+	if got, _ := r.ev.settings(ctx, "EVIDENCE ON", true); got != evidenceNoPage || len(r.gate.subs) != before {
+		t.Fatalf("no page: %q, %d intents", got, len(r.gate.subs)-before)
+	}
+	// With the page off, another address in the EMAIL REPLIES form still
+	// goes to the agent (UX B1 on #322).
+	if got, ok := r.ev.settings(ctx, "Email replies to bob@corp.example", true); ok || len(r.gate.subs) != before {
+		t.Fatalf("no page, taken from the agent: %q", got)
+	}
+	// Another address in the EVIDENCE form gets the no-page refusal, not a
+	// step that would then fail on it (L3 F2 on #322, CH-12).
+	if got, _ := r.ev.settings(ctx, "evidence to eve@example.net", true); got != evidenceNoPage || len(r.gate.subs) != before {
+		t.Fatalf("no page, other address: %q", got)
+	}
+	// Set earlier, replies still go by email (Attach replays it without
+	// the page), so the refusal says so (L3 F1 on #322, CH-12).
+	r.gate.addr, r.gate.acct = "owner@example.test", "main"
+	if got, _ := r.ev.settings(ctx, "EVIDENCE ON", true); !strings.Contains(got, "my Wi-Fi page") || !strings.Contains(got, "o***@example.test") || strings.Contains(got, "by text") || len(r.gate.subs) != before {
+		t.Fatalf("no page, set earlier: %q", got)
+	}
+	r.gate.addr, r.gate.acct = "", ""
+	// The refusal names a step that works, not a restart (UX B2, CH-12).
+	if strings.Contains(evidenceNoPage, "isn't running") || !strings.Contains(evidenceNoPage, "my Wi-Fi page") || !strings.Contains(evidenceNoPage, "come by text") {
+		t.Fatalf("wording: %q", evidenceNoPage)
+	}
+	r.ev.page = true
 	// Gate reasons are not texted verbatim.
-	r.gate.state, r.gate.reason = journal.Denied, "needs confirmation on the box's local page, which this build does not have yet (CH-20)"
-	if got, _ := r.ev.settings(ctx, "EVIDENCE ON", true); got != evidenceNoPage {
+	r.gate.state, r.gate.reason = journal.Denied, grants.NoPageEvidence
+	if got, _ := r.ev.settings(ctx, "EVIDENCE ON", true); got != evidenceFailed {
 		t.Fatalf("denied: %q", got)
 	}
 	r.gate.reason = "the destination must be the connected mail account's own address (CH-20)"
@@ -412,7 +440,7 @@ func TestEvidenceSetting(t *testing.T) {
 		t.Fatalf("off: %q", got)
 	}
 	subs := o.gate.subs[n:]
-	if len(subs) != 2 || subs[0].Action != opDeliver || subs[0].Params[grants.ParamFrom] != grants.DeliverFromBox ||
+	if len(subs) != 2 || subs[0].Action != mail.OpDeliver || subs[0].Params[grants.ParamFrom] != grants.DeliverFromBox ||
 		subs[0].Recipients[0] != destAddr || !strings.HasPrefix(subs[0].Params[grants.ParamBody].(string), "Emailing private replies was turned off by text at 09:00") ||
 		subs[1].Action != journal.ActionEvidence || subs[1].Params[grants.ParamEvidenceAddress] != "" {
 		t.Fatalf("off submitted %+v", subs)
