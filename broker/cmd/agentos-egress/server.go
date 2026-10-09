@@ -523,6 +523,7 @@ func unlockHandler(c *custody) http.Handler {
 	})
 	secondLineRoutes(mux, c, read, reply, fail)
 	smsRoutes(mux, c, read, reply, fail)
+	mailRoutes(mux, c, read, reply, fail)
 	return mux
 }
 
@@ -536,6 +537,32 @@ func unlockHandler(c *custody) http.Handler {
 // second line waits on the owner (egress K13), and GET /second-line/texts
 // whether its texting account's polls are failing (K16), and nothing
 // else.
+// updateAnchorHandler serves the update store's anchor (SR3-6f-2c): GET
+// reads it, POST raises it to 1. Nothing lowers it. {"anchored":false} is
+// a vault that never had a counter, on a PC with no TPM; a recorded
+// counter that is gone, or on a TPM this PC lacks, is 409.
+func updateAnchorHandler(c *custody, w http.ResponseWriter, r *http.Request) {
+	read := c.updateAnchorRead
+	if r.Method == http.MethodPost {
+		read = c.updateAnchorRaise
+	}
+	anchored, n, err := read()
+	switch {
+	case err == errLocked:
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+	case err == errUpdateAnchorMissing, err == errUpdateAnchorElsewhere:
+		http.Error(w, err.Error(), http.StatusConflict)
+	case err != nil:
+		http.Error(w, errInternal.Error(), http.StatusInternalServerError)
+	default:
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(struct {
+			Anchored bool   `json:"anchored"`
+			Count    uint64 `json:"count,omitempty"`
+		}{anchored, n})
+	}
+}
+
 func verifyHandler(c *custody) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == "/recall-key" {
@@ -577,12 +604,16 @@ func verifyHandler(c *custody) http.Handler {
 			}
 			return
 		}
+		if (r.Method == http.MethodGet && r.URL.Path == "/update-anchor") || (r.Method == http.MethodPost && r.URL.Path == "/update-anchor/raise") {
+			updateAnchorHandler(c, w, r)
+			return
+		}
 		if r.Method == http.MethodPost && (r.URL.Path == "/enroll" || r.URL.Path == "/enroll/confirm" || r.URL.Path == "/enroll/seal") {
 			enrollHandler(c, w, r)
 			return
 		}
 		if r.Method != http.MethodPost || r.URL.Path != "/verify" {
-			http.Error(w, "POST /verify, /recall-key, /enroll, /enroll/confirm or /enroll/seal, or GET /second-line or /second-line/texts, only", http.StatusMethodNotAllowed)
+			http.Error(w, "POST /verify, /recall-key, /enroll, /enroll/confirm, /enroll/seal or /update-anchor/raise, or GET /second-line, /second-line/texts or /update-anchor, only", http.StatusMethodNotAllowed)
 			return
 		}
 		var req modelroute.VerifyRequest

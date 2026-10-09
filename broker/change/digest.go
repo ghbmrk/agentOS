@@ -86,7 +86,10 @@ func (p *Pipeline) what(a *Adoption) string {
 	switch {
 	case has[ClassGuestImage] || has[ClassHostImage]:
 		v := safe(strings.TrimPrefix(a.Origin, "update:"))
-		if a.Staged {
+		switch {
+		case a.Staged && a.Reverted != "":
+			return "Staged update " + v // undone before it was installed
+		case a.Staged:
 			return "Staged update " + v + "; I will install it when I am free" // C27
 		}
 		return "Installed update " + v
@@ -233,7 +236,17 @@ func (p *Pipeline) Digest() []string {
 		}
 	}
 	for _, a := range p.st.Adoptions {
-		if a.Concern != "" && !a.ConcernSeen && a.Reverted == "" {
+		if a.Concern == WhySecurity && !a.ConcernSeen && a.Reverted == "" && !a.protected() {
+			// Recheck's revert was refused while it was being installed
+			// (SR3-4f-3b): the applier does not start it, or it may start
+			// first and the pipeline undoes it once it settles (B5).
+			line := " failed a security check while it was being installed; I will not start it. Nothing is needed from you."
+			if a.ConcernStarts {
+				line = " failed a security check while it was being installed; it may start before I can undo it. Nothing is needed from you."
+			}
+			out = append(out, "Update "+safe(strings.TrimPrefix(a.Origin, "update:"))+line)
+			a.ConcernSeen = true
+		} else if a.Concern != "" && !a.ConcernSeen && a.Reverted == "" {
 			s := a.ConcernScore
 			line := p.what(&Adoption{Classes: a.Classes, Origin: a.Origin}) + " now"
 			if a.Concern == WhySecurity {

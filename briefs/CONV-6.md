@@ -1,6 +1,6 @@
 # CONV-6: Turn recurring finding kinds into checks
 
-Board section: Harness and operating model. Decision: D-085; CLAUDE.md reviewer rule ("a kind of finding seen on a second PR becomes a lint rule, test or CI check"). Tier: per check (`tools/risk_tier.py`; a check in `tools/depaudit*` or `tools/canary*` is tier A and hands off). Builder: Sonnet (PILOT-S) for B/C. Usage estimate: 120k tokens; one check per PR.
+Board section: Harness and operating model. Decision: D-086; CLAUDE.md reviewer rule ("a kind of finding seen on a second PR becomes a lint rule, test or CI check"). Tier: per check (`tools/risk_tier.py`; a check in `tools/depaudit*` or `tools/canary*` is tier A and hands off). Builder: Sonnet (PILOT-S) for B/C. Usage estimate: 120k tokens; one check per PR.
 
 **Why.** The lens READMEs list five recurring kinds with no check yet; each recurs as review findings and follow-up rows.
 

@@ -1,7 +1,7 @@
 # CONV-3: open PR triage
 
 Snapshot 2026-10-09T15:20Z, base `main`. Query: `list_pull_requests state=open` (GitHub MCP), 195 PRs, each listed once.
-Classes follow `briefs/CONV-3.md`. Nothing is closed by this package (Q3 answered, D-089).
+Classes follow `briefs/CONV-3.md`. Nothing is closed by this package (Q3 answered, D-090).
 
 ## Counts
 
@@ -16,7 +16,7 @@ Classes follow `briefs/CONV-3.md`. Nothing is closed by this package (Q3 answere
 
 ## Method
 
-- **Idle** is age of the last commit on the PR head (committer date), not `updated_at`, which bot activity resets. Stale needs idle of at least 48h (D-085). The number of PRs past the line rises every hour; `crosses 48h in Nh` marks those within 6h.
+- **Idle** is age of the last commit on the PR head (committer date), not `updated_at`, which bot activity resets. Stale needs idle of at least 48h (D-086). The number of PRs past the line rises every hour; `crosses 48h in Nh` marks those within 6h.
 - **parts bin**: any draft CODEX-1 lists as accepted-source or held, plus the W5-D stack. Never stale or superseded.
 - **superseded**: the same row or change is merged on main under another PR (named). Checked by row ID against main history, by BOARD row, and by the identifiers the PR adds. Main's history was rewritten, so a reverse apply of the diff does not show it.
 - **merge-ready**: non-draft, CI green, merges clean into main, L3 `accept` at the current head. Green without a verdict at head is `finish` (L3 owed).
@@ -28,13 +28,13 @@ Classes follow `briefs/CONV-3.md`. Nothing is closed by this package (Q3 answere
 | PR | Title | Class | Owning row | Reason |
 |---|---|---|---|---|
 | #175 | P2-1: device image (supersedes #41): per-drive IDs, host clock untouched, closed device po | stale | P2-1 | idle 48h or more (last commit 2026-10-05). Not superseded: its initrd per-drive ID check (power off on refusal) and `DevicePolicy=closed` on every service (HW-8, D-044, I12) are not under `image/` on main; #41 is the older image it rebuilds. Branch kept as the only copy |
-| #191 | H2 Point agents at uncovered IDs and queued packages | stale | — | idle 48h (D-085 limit 48h by last commit); conflicts with main |
-| #192 | H3 Reject a trace table that cites an unmarked requirement | stale | — | idle 48h (D-085 limit 48h by last commit); conflicts with main |
+| #191 | H2 Point agents at uncovered IDs and queued packages | stale | — | idle 48h (D-086 limit 48h by last commit); conflicts with main |
+| #192 | H3 Reject a trace table that cites an unmarked requirement | stale | — | idle 48h (D-086 limit 48h by last commit); conflicts with main |
 | #193 | P2-2a f1 Tell the owner when a page approval changed underneath it | superseded | P2-2a f1, P2-2a | P2-2a f1 is on main (f2 #363 and f3 #423 followed) |
-| #194 | P3-6d Say when a skill replaces a step-by-step procedure | stale | P3-6d | idle 48h (D-085 limit 48h by last commit) |
+| #194 | P3-6d Say when a skill replaces a step-by-step procedure | stale | P3-6d | idle 48h (D-086 limit 48h by last commit) |
 | #195 | OSS-6s Publish each day as one constant-size body | superseded | OSS-6s | OSS-6s-a merged as #411 (OSS-6s split, #325) |
 | #196 | Hand back an oversized tool result as a stand-in the machine can read | finish | — | CI unknown, no L3 verdict, conflicts with main, crosses 48h in 0h |
-| #197 | P2-8b Removing a trusted PC owes Refresh until the card is scanned | stale | P2-8b | idle 48h (D-085 limit 48h by last commit) |
+| #197 | P2-8b Removing a trusted PC owes Refresh until the card is scanned | stale | P2-8b | idle 48h (D-086 limit 48h by last commit) |
 | #198 | SR2-3h Keep runsc diagnostics out of the guest | superseded | SR2-3h | SR2-3h merged as #362 |
 | #199 | Shorten JSON tool results without dropping a field | finish | — | CI green, no L3 verdict, crosses 48h in 0h |
 | #200 | Measure the code-word check without withholding any text | finish | — | CI unknown, no L3 verdict, conflicts with main, crosses 48h in 0h |
@@ -221,4 +221,4 @@ Classes follow `briefs/CONV-3.md`. Nothing is closed by this package (Q3 answere
 | #624 | RECALL-canary-1: remove evenly grouped recovery codes of any alphabet (CRED-1) | finish | — | CI pending, no L3 verdict |
 | #625 | P3-4b-3h-r2 (+3h-r1): a hang closes on a producer loops holds; a late hang is a stall | finish | P3-4b-3h-r2, P3-4b-3h | CI pending, no L3 verdict |
 | #626 | P3-4b-3r-confine-r6: emptying the fuzz leaf kills on a failed freeze, within 1.5 s | finish | P3-4b-3r-confine | CI pending, no L3 verdict |
-| #627 | CONV-1: convergence rules (D-085), Mark queue, CONV-0..6 briefs | finish | CONV-1, CONV-0 | CI unknown, no L3 verdict |
+| #627 | CONV-1: convergence rules (D-086), Mark queue, CONV-0..6 briefs | finish | CONV-1, CONV-0 | CI unknown, no L3 verdict |

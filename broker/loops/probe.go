@@ -109,7 +109,7 @@ func (s *Guard) runProbe(ctx context.Context, p Probe) Result {
 			closed = append(closed, rec)
 		}
 	}
-	lines := s.clearedLinesLocked(closed)
+	lines := s.closeTextLocked(closed)
 	if s.st.ProbeLast == nil {
 		s.st.ProbeLast = map[Check]time.Time{}
 	}

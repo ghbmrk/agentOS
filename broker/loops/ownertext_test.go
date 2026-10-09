@@ -5,7 +5,7 @@ package loops
 import (
 	"context"
 	"errors"
-	"regexp"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -258,45 +258,27 @@ func TestTheWaitLineSaysTheRealCadence(t *testing.T) {
 	}
 }
 
-var (
-	// innerCap is a word with a capital after a lower-case letter, as in
-	// FuzzRequest or vmName.
-	innerCap   = regexp.MustCompile(`[a-z][A-Z]`)
-	goPrefix   = regexp.MustCompile(`\b(Fuzz|Test)[A-Z0-9_]`)
-	hexRun     = regexp.MustCompile(`[0-9a-fA-F]{8,}`)
-	stepPhrase = regexp.MustCompile(`\bPaused \S|\bReply (STOP|PAUSE)\b|\bSTOP pauses everything\b`)
-)
+// The lens rule's checkers are exported (secure.go) so loop7's digest
+// lines are held to the same rule (P3-4b-3r-text).
+func namesAStep(line string) bool { return NamesAStep(line) }
 
-func namesAStep(line string) bool { return stepPhrase.MatchString(line) }
+func identifierIn(s string) string { return IdentifierIn(s) }
 
-// identifierIn is the first Go identifier, path or digest in s, or "".
-func identifierIn(s string) string {
-	for _, re := range []*regexp.Regexp{innerCap, goPrefix, hexRun} {
-		if m := re.FindString(s); m != "" {
-			return m
-		}
-	}
-	if strings.Contains(s, "/") {
-		return "/"
-	}
-	if strings.Contains(s, ".go") {
-		return ".go"
-	}
-	return ""
-}
-
-// REQ: LOOP-7, RES-1
+// REQ: LOOP-7, RES-1, RES-2
 //
 // P3-4b-4c-step (#548 UX 1): a limit above the configured budget says
 // which resource and that the machine is over its budget, not that no
 // limit exists; with no containment (S37) its line says nothing is
-// paused and nothing is needed.
+// paused and nothing is needed. P3-4b-4c-pids (RES-2): pids.max's
+// finding names the sandbox's threads, which is what it bounds, in plain
+// words.
 func TestAnAboveBudgetLimitSaysSoAndThatNothingIsNeeded(t *testing.T) {
 	for subject, want := range map[string]string{
-		"memory":    "A load test found an agent machine can use more memory than its budget.",
-		"processes": "A load test found an agent machine can start more processes than its budget.",
-		"disk":      "A load test found an agent machine can use more disk space than its budget.",
-		"cpu":       "A load test found an agent machine can take as large a share of processor time as I get.",
+		"sandbox threads": "A load test found an agent machine can run more sandbox threads than its budget.",
+		"memory":          "A load test found an agent machine can use more memory than its budget.",
+		"processes":       "A load test found an agent machine can start more processes than its budget.",
+		"disk":            "A load test found an agent machine can use more disk space than its budget.",
+		"cpu":             "A load test found an agent machine can take as large a share of processor time as I get.",
 	} {
 		f := Finding{Check: CheckExhaust, Subject: subject, Detail: "above budget", Severity: High}
 		if got := ownerLine(Record{Finding: f}); got != want+" "+nothingNeeded {
@@ -318,6 +300,7 @@ func TestFindingTextsNameNoIdentifiersAndNeverAlarmWithoutAStep(t *testing.T) {
 		{Check: CheckTamper, Subject: "evaluator", Detail: "writable"},
 		{Check: CheckExhaust, Subject: "memory", Detail: "above budget"},
 		{Check: CheckExhaust, Subject: "processes", Detail: "above budget"},
+		{Check: CheckExhaust, Subject: "sandbox threads", Detail: "above budget"},
 		{Check: CheckExhaust, Subject: "disk", Detail: "above budget"},
 		{Check: CheckExhaust, Subject: "cpu", Detail: "above budget"},
 		{Check: CheckExhaust, Subject: "preemption", Detail: "slow"},
@@ -328,6 +311,7 @@ func TestFindingTextsNameNoIdentifiersAndNeverAlarmWithoutAStep(t *testing.T) {
 		{Check: CheckSeeded, Subject: "private-route", Detail: "x"},
 		{Check: CheckFuzz, Subject: "sockets.FuzzRequest", Detail: FuzzOverrunDetail},
 		{Check: CheckFuzz, Subject: "sockets.FuzzRequest", Detail: FuzzStallDetail},
+		{Check: CheckFuzz, Subject: "sockets.FuzzRequest", Detail: FuzzOversizeDetail},
 	}
 	// The scan catches what it must.
 	for _, s := range []string{"sockets.FuzzRequest", "a/b", "x.go", "00112233aa", "vmName", "TestX"} {
@@ -338,6 +322,7 @@ func TestFindingTextsNameNoIdentifiersAndNeverAlarmWithoutAStep(t *testing.T) {
 	if identifierIn("Reply PAUSE G7 to pause it, or STOP. My Wi-Fi page.") != "" {
 		t.Fatal("the scan flags plain words")
 	}
+	g := newReportRig(t, nil).g
 	for _, f := range findings {
 		f.Severity = High
 		for _, state := range []string{"none", "paused", "failed", "capped"} {
@@ -348,11 +333,22 @@ func TestFindingTextsNameNoIdentifiersAndNeverAlarmWithoutAStep(t *testing.T) {
 				}
 				line := ownerLine(rec)
 				cleared := clearedLine(rec)
+				// A return after "Cleared" leads "It is back: " and keeps
+				// every rule (P3-4b-3r-text requirement 4).
+				backRec := rec
+				backRec.Back = true
+				back := alertLine(backRec)
+				if back != itIsBack+line || alertLine(rec) != line {
+					t.Errorf("%s/%s: back %q, first %q", f.Check, state, back, alertLine(rec))
+				}
+				if urgentText(rec) != namesAStep(back) {
+					t.Errorf("%s/%s: the led text breaks the step rule: %q", f.Check, state, back)
+				}
 				// A hang is not a crash (P3-4b-3r-fuzz).
 				if hangDetail(f.Detail) && strings.Contains(strings.ToLower(line), "crash") {
 					t.Errorf("%s/%s: a hang reads as a crash: %q", f.Check, state, line)
 				}
-				for _, s := range []string{line, cleared} {
+				for _, s := range []string{line, cleared, back} {
 					loop7 := f.Check == CheckFuzz || f.Check == CheckProbe || f.Check == CheckCanary || f.Check == CheckCorpus
 					if bad := identifierIn(s); bad != "" && loop7 {
 						t.Errorf("%s/%s: %q shows %q", f.Check, state, s, bad)
@@ -367,8 +363,42 @@ func TestFindingTextsNameNoIdentifiersAndNeverAlarmWithoutAStep(t *testing.T) {
 				if !urgentText(rec) && namesAStep(line) {
 					t.Errorf("%s/%s: names a step but is not urgent: %q", f.Check, state, line)
 				}
+				// P3-4b-4c-dedupe 3: the counted form batch sends keeps
+				// the step and adds no identifier.
+				text := g.batch([]string{line, line, line})
+				loop7 := f.Check == CheckFuzz || f.Check == CheckProbe || f.Check == CheckCanary || f.Check == CheckCorpus
+				if bad := identifierIn(text); bad != "" && loop7 {
+					t.Errorf("%s/%s: counted %q shows %q", f.Check, state, text, bad)
+				}
+				if !strings.Contains(text, " (3 times)") || namesAStep(text) != urgentText(rec) {
+					t.Errorf("%s/%s: counted %q lost its count or its step", f.Check, state, text)
+				}
 			}
 		}
+	}
+	// The digest's counted form: hostile corpus misses on many items and a
+	// paused leak, the owner's step kept and no item named.
+	r := newReportRig(t, nil)
+	for i := range 4 {
+		f := hostile(CheckCorpus)
+		f.Subject += fmt.Sprintf("-%d", i)
+		r.report(t, f)
+	}
+	r.report(t, leak("guest-socket-vault-egress", "G7"))
+	counted := 0
+	for _, l := range r.g.Digest() {
+		if bad := identifierIn(l); bad != "" {
+			t.Errorf("digest %q shows %q", l, bad)
+		}
+		if strings.Contains(l, " (4 times)") {
+			counted++
+		}
+		if strings.Contains(l, "Paused") && !namesAStep(l) {
+			t.Errorf("digest %q lost its step", l)
+		}
+	}
+	if counted != 1 {
+		t.Errorf("%d counted digest lines, want 1: %q", counted, r.g.Digest())
 	}
 }
 

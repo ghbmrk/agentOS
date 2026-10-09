@@ -291,7 +291,7 @@ func (s *Store) FollowRoot(root []byte, approved, name string, o Options) error 
 	if err := step("interim_flag"); err != nil {
 		return err
 	}
-	if err := writeAtomic(s.p(outsideFile), []byte("1\n"), 0o600); err != nil {
+	if err := s.recordOutside(); err != nil {
 		return err
 	}
 	if err := step("marker"); err != nil {

@@ -16,6 +16,8 @@ import (
 	"regexp"
 	"runtime"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/childproc"
 )
 
 // Marker starts what a tamper write puts in a path; the round's nonce
@@ -78,8 +80,12 @@ type Options struct {
 }
 
 // Press applies one kind of pressure until d passes or ctx ends, then
-// releases it.
+// releases it. A duration, or the kind's options, unset, zero or negative
+// is an error before anything is pressed.
 func Press(ctx context.Context, kind string, d time.Duration, o Options) error {
+	if d <= 0 {
+		return errors.New("machprobe: no duration")
+	}
 	ctx, cancel := context.WithTimeout(ctx, d)
 	defer cancel()
 	switch kind {
@@ -88,6 +94,9 @@ func Press(ctx context.Context, kind string, d time.Duration, o Options) error {
 			go spin(ctx)
 		}
 	case "memory":
+		if o.MemMB <= 0 {
+			return errors.New("machprobe: no memory size")
+		}
 		held := make([][]byte, 0, o.MemMB)
 		for range o.MemMB {
 			b := make([]byte, 1<<20)
@@ -98,16 +107,22 @@ func Press(ctx context.Context, kind string, d time.Duration, o Options) error {
 		}
 		defer runtime.KeepAlive(held)
 	case "disk":
+		if o.Dir == "" {
+			return errors.New("machprobe: no disk directory")
+		}
 		p := filepath.Join(o.Dir, "agentos-pressure")
 		defer os.Remove(p)
 		if err := fill(p, o.DiskMB); err != nil {
 			return err
 		}
 	case "processes":
-		if len(o.Child) == 0 {
+		if len(o.Child) == 0 || o.Child[0] == "" {
 			return errors.New("machprobe: no child command")
 		}
-		var ps []*os.Process
+		if o.Procs <= 0 {
+			return errors.New("machprobe: no process count")
+		}
+		var ps []*childproc.Cmd
 		defer func() {
 			for _, p := range ps {
 				p.Kill()
@@ -117,8 +132,8 @@ func Press(ctx context.Context, kind string, d time.Duration, o Options) error {
 		for range o.Procs {
 			// An empty environment: the child only idles, and the
 			// caller's would otherwise pass to it (P3-4b-3r-env).
-			p, err := os.StartProcess(o.Child[0], o.Child, &os.ProcAttr{Env: []string{}})
-			if err != nil {
+			p := childproc.Command(context.Background(), childproc.NewEnv(), childproc.Options{}, o.Child[0], o.Child[1:]...)
+			if err := p.Start(); err != nil {
 				break // the process limit stopped it: pressure reached
 			}
 			ps = append(ps, p)
@@ -139,8 +154,11 @@ func spin(ctx context.Context) {
 }
 
 // fill writes up to mb MiB; a full disk or quota ends it early, which is
-// the pressure the round wants.
+// the pressure the round wants. A size that is not positive is an error.
 func fill(path string, mb int) error {
+	if mb <= 0 {
+		return errors.New("machprobe: no disk size")
+	}
 	f, err := os.Create(path)
 	if err != nil {
 		return err

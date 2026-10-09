@@ -66,7 +66,7 @@ func (sc *Scrubber) Scrub(s string) string {
 	s = secretKV.ReplaceAllString(s, "${1}"+Removed)
 	s = urlRe.ReplaceAllStringFunc(s, scrubURL)
 	s = groupedCode.ReplaceAllStringFunc(s, func(m string) string {
-		if hasDigit(m) && hasLetter(m) {
+		if (hasDigit(m) && hasLetter(m)) || evenGroups(m) {
 			return Removed
 		}
 		return m
@@ -155,6 +155,20 @@ func scrubRandom(s string) string {
 		i = j
 	}
 	return b.String()
+}
+
+// evenGroups reports whether every dash-separated group of m has the same
+// length. Generated codes are cut evenly (XXXXX-XXXXX-...) whatever their
+// alphabet, so a code of letters only or digits only is still removed, at
+// any entropy; hyphenated words and dates have parts of differing length.
+func evenGroups(m string) bool {
+	gs := strings.Split(m, "-")
+	for _, g := range gs[1:] {
+		if len(g) != len(gs[0]) {
+			return false
+		}
+	}
+	return true
 }
 
 func isSpace(c byte) bool { return c == ' ' || c == '\t' || c == '\n' || c == '\r' }
