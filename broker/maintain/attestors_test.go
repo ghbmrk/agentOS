@@ -1,6 +1,6 @@
 package maintain
 
-// REQ: UPD-8, SR3-6f-1a, SR3-6f-1b
+// REQ: UPD-8, SR3-6f-1a, SR3-6f-1b, SR3-6-f4b, SR3-6-f4c
 // SR3-6f-1 (Security 4a S1 on #430): one attestor source, read once at the
 // start of each check and by AttestorsChanged, so an owner's narrowing is
 // not undone by the next check.
@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/update"
 )
 
@@ -61,9 +62,15 @@ func TestOwnerNarrowingSurvivesTheNextCheck(t *testing.T) {
 	if old.Security() {
 		t.Fatal("the next Loop 3 check restored the authority the owner's narrowing retired")
 	}
-	for _, v := range r.p.proposed()[1:] {
-		if v.Security() {
-			t.Fatal("Loop 3 scheduled a release as security under the old list")
+	// The narrowing retired the claim (SR3-6-f4b), so the check decided
+	// the fix again: b's report may stage it, a's never counts.
+	again := r.p.proposed()[1:]
+	if len(again) == 0 {
+		t.Fatal("the retired claim was not decided again")
+	}
+	for _, v := range again {
+		if n := v.IndependentPasses(r.atts[:1], r.l.cfg.OwnKey); n != 0 {
+			t.Fatalf("Loop 3 counted the removed attestor's report after the narrowing: %d", n)
 		}
 	}
 }
@@ -206,5 +213,96 @@ func TestNarrowingDuringACheckIsNotUndone(t *testing.T) {
 	r.must(<-changed)
 	if old.Security() {
 		t.Fatal("a check that read the list before the owner's narrowing undid it")
+	}
+}
+
+// SR3-6-f4b (UX and Potency lens on #595, point 1): a narrowing makes the
+// next check due at once and retires the adopted claim that rested on the
+// removed attestor, so STATUS stops saying an independent tester passed.
+func TestNarrowingRetiresTheAdoptedClaim(t *testing.T) {
+	r := newRig(t)
+	r.p.state = change.StateAdopted
+	r.release(2, func(m *update.Manifest) { m.Security = true })
+	r.attest()
+	r.tick()
+	const passed = "An independent tester's report passed."
+	if line := r.l.Status().Line; line != "Security update 2 is ready and installs at the next quiet time. "+passed {
+		t.Fatalf("status before the narrowing: %q", line)
+	}
+
+	r.p.state = ""
+	r.allow = nil
+	r.must(r.l.AttestorsChanged())
+	if !r.l.Urgent() {
+		t.Fatal("a narrowing did not make a check urgent")
+	}
+	if _, ok := r.l.Next(context.Background(), true); !ok {
+		t.Fatal("a narrowing did not make a check due")
+	}
+	r.tick()
+	if line := r.l.Status().Line; strings.Contains(line, passed) {
+		t.Fatalf("status after the narrowing still claims the removed tester's pass: %q", line)
+	}
+	if _, ok := r.l.st.TestedBy[2]; ok {
+		t.Fatalf("TestedBy kept the retired claim: %v", r.l.st.TestedBy)
+	}
+	if r.l.Urgent() {
+		t.Fatal("still urgent after the check that followed the narrowing")
+	}
+}
+
+// SR3-6-f4c (Security point 3 and L3 point 1 on #595): an unreadable list
+// reads as none listed in STATUS, so on a fork the owner is told each
+// security fix is theirs to approve. Kills listed()'s fail-open mutant.
+func TestAttestorSourceErrorStatusReadsAsNoneListed(t *testing.T) {
+	r := newRig(t)
+	r.followAs("Acme")
+	r.attErr = errors.New("settings unreadable")
+	r.tick()
+	if line := r.l.Status().Line; !strings.Contains(line, forkAsks) {
+		t.Fatalf("an unreadable attestor list read as listed: %q", line)
+	}
+	if d := r.digest(); !strings.Contains(d, forkAsks) {
+		t.Fatalf("digest: %q", d)
+	}
+}
+
+// SR3-6-f4b: a narrowing that lands after a check read the list, before
+// it records anything, leaves the next check due, so what that check
+// decides under the old list is judged again under the narrowed one.
+func TestNarrowingAfterTheReadKeepsTheRecheckDue(t *testing.T) {
+	r := newRig(t)
+	r.release(2, func(m *update.Manifest) { m.Security = true })
+	r.attest()
+	job, ok := r.l.Next(context.Background(), true)
+	if !ok {
+		t.Fatal("no check offered")
+	}
+	// Block the check at its first clock read outside the policy lock:
+	// after its attestor read and Store.Check calls, before it records.
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once atomic.Bool
+	r.l.cfg.Now = func() time.Time {
+		if r.l.policy.TryLock() {
+			r.l.policy.Unlock()
+			if once.CompareAndSwap(false, true) {
+				close(entered)
+				<-release
+			}
+		}
+		return r.clk.now()
+	}
+	checked := make(chan struct{})
+	go func() { job.Run(context.Background()); close(checked) }()
+	<-entered
+	r.allow = nil
+	r.must(r.l.AttestorsChanged())
+	close(release)
+	<-checked
+	if !r.l.Urgent() {
+		t.Fatal("a check that read the list before a narrowing cleared the recheck it asked for")
+	}
+	if _, ok := r.l.Next(context.Background(), true); !ok {
+		t.Fatal("no check due after a narrowing during a check")
 	}
 }
