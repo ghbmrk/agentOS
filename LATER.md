@@ -713,6 +713,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | SPEC-D088 l2 | #669 L3 (comment 6090762892): OSS-7 says the box offers the switch "when it has real candidates to send"; under option (b) logged candidates are never sent, so "real candidates to illustrate" reads truer. |
 | SPEC-D088 l3 | #669 L3 (comment 6090762892) (recheck): the text does not say whether items created while the switch was on but still queued (batched or time-delayed, OSS-6) are dropped or sent after a later on when the owner turns it off. |
 | SPEC-s14 l4 | #669 L3 (comment 6090762892) (recheck): §14 says "a new release requirement needs Mark's explicit promotion; review findings cannot add one", while CLAUDE.md says a release finding makes a BOARD row; say in §14 that "release requirement" means a SPEC requirement. |
+| UPD-1 l-216b | #216 combined lens (comment 6090523873): `brokerRefused` is a text denylist (`/` or `\`), so a host name or bare file name would pass; replace it with a fixed reason per error class if a second leak kind appears. The other #216 later item, `EOF/timeout` losing its reason, is the `UPD-1 l-216` line above. |
 
 ## Reuse candidates
 | ID | Component | Why |
