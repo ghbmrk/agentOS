@@ -16,7 +16,11 @@ fail() { echo "agentos-drive-id: FAIL $*"; exit 1; }
 
 v=$R/sys/firmware/efi/efivars/LoaderDevicePartUUID-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
 [ -r "$v" ] || fail "the boot loader did not name the partition it started from"
-esp=$(tail -c +5 "$v" | tr -d '\000' | tr A-F a-f)
+# 4 attribute bytes, then the GUID in UTF-16. Through cat, which reads to the end whatever the
+# efivarfs file reports as its size or lets seek; od on a pipe skips the attributes by reading.
+esp=$(cat "$v" | od -An -v -c -j4 | tr -s ' ' '\n' | grep -vx '\\0' | tr -d '\n' | tr A-F a-f)
+printf '%s\n' "$esp" | grep -qxE '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' ||
+	fail "the boot loader's partition GUID is unreadable ($(cat "$v" | wc -c) bytes: $(cat "$v" | od -An -v -tx1 -N40 | tr -s ' \n' ' '))"
 parts=$(lsblk -rno NAME,PKNAME,PARTUUID)
 hits=$(printf '%s\n' "$parts" | awk -v u="$esp" '$3 == u { print $1 " " $2 }' | sort -u)
 n=$(printf '%s' "$hits" | grep -c . || true)

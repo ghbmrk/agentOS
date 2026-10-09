@@ -363,6 +363,13 @@ class DriveIdTest(unittest.TestCase):
         next((self.root / "sys/firmware/efi/efivars").iterdir()).unlink()
         self.assertEqual(self.run_id("check").returncode, 1)
 
+    def test_check_fails_on_an_unreadable_loader_variable(self):
+        # An empty GUID must not match the rows lsblk prints with no PARTUUID (disks, dm devices).
+        next((self.root / "sys/firmware/efi/efivars").iterdir()).write_bytes(b"\x06\x00\x00\x00")
+        r = self.run_id("check")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("unreadable", r.stdout)
+
     def test_assign_gives_the_drive_its_own_guids(self):
         r = self.run_id("assign")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
