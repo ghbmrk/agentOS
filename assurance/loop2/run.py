@@ -5,6 +5,7 @@ The harness's Go sources live in assurance/loop2/ so the broker tree never
 holds them; this script overlays them into the broker module as package
 zz_a11harness for the build, so they compile against the real loops and
 change packages. Arguments pass through to the harness; see main.go.
+`run.py --go-test` runs the harness's own unit tests instead.
 """
 import json
 import os
@@ -32,8 +33,18 @@ def main(argv):
         ovl.write_text(json.dumps(overlay))
         env = dict(os.environ)
         env.setdefault("GOTOOLCHAIN", "local")
-        return subprocess.run(["go", "run", "-overlay", str(ovl), "./" + PKG, *args],
-                              cwd=BROKER, env=env).returncode
+        if args != ["--go-test"]:
+            return subprocess.run(["go", "run", "-overlay", str(ovl), "./" + PKG, *args],
+                                  cwd=BROKER, env=env).returncode
+        # The package directory exists only in the overlay, so `go test`
+        # cannot run the binary there: build it, then run it from here.
+        exe = pathlib.Path(d) / "harness.test"
+        rc = subprocess.run(["go", "test", "-vet=off", "-c", "-o", str(exe), "-overlay", str(ovl), "./" + PKG],
+                            cwd=BROKER, env=env).returncode
+        if rc != 0:
+            return rc
+        env["A11_CATALOG"] = str(ROOT / "assurance" / "loop2-seeds")
+        return subprocess.run([str(exe), "-test.v", "-test.count=1"], cwd=d, env=env).returncode
 
 
 if __name__ == "__main__":
