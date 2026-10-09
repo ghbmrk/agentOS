@@ -1,0 +1,172 @@
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"github.com/ghbmrk/agentos/broker/localui"
+	"net/http"
+	"net/http/httptest"
+	"net/netip"
+	"net/url"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"time"
+)
+
+type hooks struct {
+	online, joinFails, trustFails bool
+	box                           string
+	sent                          []string
+	joins                         []string
+	trust                         []bool
+	private                       []bool
+}
+
+func (h *hooks) Progress() localui.Progress {
+	return localui.Progress{Phase: "ready", Online: h.online, Updated: true}
+}
+func (h *hooks) Networks() []string { return []string{"Neighbor", "Synthetic Home"} }
+func (h *hooks) JoinNetwork(ssid, pw string) error {
+	h.joins = append(h.joins, ssid)
+	if h.joinFails {
+		return errors.New("synthetic join failure")
+	}
+	h.online = true
+	return nil
+}
+func (h *hooks) BoxNumber() string          { return h.box }
+func (h *hooks) HostInfo() string           { return "Synthetic Host, 8 GB" }
+func (h *hooks) Send(to, text string) error { h.sent = append(h.sent, text); return nil }
+func (h *hooks) EnrollCode() (string, error) {
+	return "otpauth://totp/AgentOS:AgentOS?secret=JBSWY3DPEHPK3PXP&issuer=AgentOS&digits=6&period=30", nil
+}
+func (h *hooks) ConfirmCode(c string) (bool, error) { return c == "123456", nil }
+func (h *hooks) TrustHost(t bool) error {
+	h.trust = append(h.trust, t)
+	if h.trustFails {
+		return errors.New("synthetic trust failure")
+	}
+	return nil
+}
+func (h *hooks) Providers() []localui.Provider {
+	return []localui.Provider{{ID: "synthetic", Name: "Synthetic Provider", APIKey: true}}
+}
+func (h *hooks) ConnectAPIKey(string, string) error { return errors.New("synthetic rejection") }
+func (h *hooks) StartDeviceCode(string) (string, string, error) {
+	return "https://provider.example.test/", "SYNTHETIC", nil
+}
+func (h *hooks) SetPrivateOK(id string, b bool) error { h.private = append(h.private, b); return nil }
+func (h *hooks) AlreadySetUp() bool                   { return false }
+func (h *hooks) Finish(string) error                  { return nil }
+
+type rig struct {
+	s      *localui.Server
+	h      *hooks
+	cookie string
+	store  *localui.MemStore
+	now    time.Time
+}
+
+func newRig() *rig {
+	r := &rig{h: &hooks{box: "+15550000100"}, cookie: strings.Repeat("a", 64), store: &localui.MemStore{}, now: time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)}
+	r.restart()
+	return r
+}
+func (r *rig) restart() {
+	var err error
+	r.s, err = localui.New(localui.Config{AP: localui.APConfig{Iface: "wlan0", Uplink: "eth0", Addr: netip.MustParsePrefix("10.42.0.1/24"), SSID: "Synthetic-UX", Password: "SYNTHETIC-TEST-WIFI"}, Hooks: r.h, Store: r.store, SetupSecret: "SYNTHETIC-RESET-SECRET", Defaults: "synthetic defaults", Now: func() time.Time { return r.now }})
+	if err != nil {
+		panic(err)
+	}
+}
+func (r *rig) req(method, path string, v url.Values) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, "http://10.42.0.1"+path, strings.NewReader(v.Encode()))
+	req.RemoteAddr = "10.42.0.23:51000"
+	req.AddCookie(&http.Cookie{Name: "agentos_setup", Value: r.cookie})
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	r.s.ServeHTTP(w, req)
+	return w
+}
+func (r *rig) post(path string, v url.Values) {
+	w := r.req("POST", path, v)
+	if w.Code != 303 {
+		panic(fmt.Sprintf("post %s: %d", path, w.Code))
+	}
+}
+func save(r *rig, dir, name string) string {
+	w := r.req("GET", "/setup", nil)
+	if w.Code != 200 {
+		panic(fmt.Sprintf("get %s: %d", name, w.Code))
+	}
+	os.WriteFile(filepath.Join(dir, name+".html"), w.Body.Bytes(), 0644)
+	return w.Body.String()
+}
+func main() {
+	dir := os.Args[1]
+	r := newRig()
+	results := map[string]any{}
+	save(r, dir, "network-initial")
+	r.h.joinFails = true
+	r.post("/setup/network", url.Values{"ssid": {"Synthetic Home"}, "password": {"SYNTHETIC-PASSWORD"}})
+	network := save(r, dir, "network-error")
+	results["network_retry"] = map[string]any{"submitted_ssid": r.h.joins[0], "selected_attribute": strings.Contains(network, "selected"), "first_option_neighbor": strings.Contains(network, "<option>Neighbor</option><option>Synthetic Home</option>"), "error": strings.Contains(network, "Check the password and try again.")}
+	r.h.joinFails = false
+	r.post("/setup/network", url.Values{"ssid": {"Synthetic Home"}, "password": {"SYNTHETIC-PASSWORD"}})
+	save(r, dir, "number-initial")
+	r.post("/setup/number", url.Values{"number": {"+1 555 000 0001"}})
+	sent := save(r, dir, "number-code-sent")
+	results["number_fallback"] = map[string]any{"code_form": strings.Contains(sent, "action=\"/setup/number-code\""), "details_open": strings.Contains(sent, "<details open"), "number_retained_in_input": strings.Contains(sent, "value=\"+15550000001\""), "sent_text_count": len(r.h.sent)}
+	r.post("/setup/number-code", url.Values{"code": {"WRONG"}})
+	save(r, dir, "number-code-wrong")
+	code := regexp.MustCompile(`code: ([0-9]+)`).FindStringSubmatch(r.h.sent[0])[1]
+	r.post("/setup/number-code", url.Values{"code": {code}})
+	save(r, dir, "codes-first")
+	save(r, dir, "codes-revisit")
+	r.post("/setup/codes", url.Values{"code": {"000000"}})
+	save(r, dir, "codes-wrong")
+	r.cookie = strings.Repeat("b", 64)
+	other := save(r, dir, "same-phone-other-browser")
+	results["context_change"] = map[string]any{"same_remote_address": true, "elsewhere": strings.Contains(other, "Setup is continuing on the phone"), "reset_secret_required": strings.Contains(other, "Reset secret, from your card"), "resume_action": strings.Contains(other, "/setup/claim")}
+	r.cookie = strings.Repeat("a", 64)
+	r.post("/setup/codes", url.Values{"code": {"123456"}})
+	save(r, dir, "recovery")
+	r.post("/setup/recovery", url.Values{"stored": {"1"}})
+	save(r, dir, "host")
+	r.h.trustFails = true
+	r.post("/setup/host", url.Values{"not_mine": {"1"}})
+	hostErr := save(r, dir, "host-error")
+	results["host_retry"] = map[string]any{"requested_trust": r.h.trust[0], "not_mine_checked": strings.Contains(hostErr, "name=\"not_mine\" value=\"1\" checked"), "error_visible": strings.Contains(hostErr, "Could not save. Try again.")}
+	r.h.trustFails = false
+	r.post("/setup/host", url.Values{})
+	results["host_retry"].(map[string]any)["retry_with_rendered_defaults_trust"] = r.h.trust[1]
+	save(r, dir, "ai")
+	r.post("/setup/ai-key", url.Values{"provider": {"synthetic"}, "key": {"SYNTHETIC-INVALID-KEY"}})
+	apiError := save(r, dir, "api-error")
+	r.post("/setup/ai-key", url.Values{"provider": {"synthetic"}, "key": {"SYNTHETIC-INVALID-KEY"}, "private": {"1"}})
+	results["private_retry"] = map[string]any{"calls": r.h.private, "private_checked_after_optout": strings.Contains(apiError, "name=\"private\" value=\"1\" checked"), "key_echoed": strings.Contains(apiError, "SYNTHETIC-INVALID-KEY")}
+	save(r, dir, "api-error-retry")
+	r2 := newRig()
+	r2.h.online = true
+	r2.h.box = ""
+	save(r2, dir, "number-no-box-number")
+	for i := 0; i < 4; i++ {
+		r2.post("/setup/number", url.Values{"number": {"+15550000001"}})
+	}
+	noNumber := save(r2, dir, "number-no-box-number-limited")
+	results["missing_box_number"] = map[string]any{"has_sms_link": strings.Contains(noNumber, "sms:"), "rate_limit_tells_use_text_my_box": strings.Contains(noNumber, "Use Text my box")}
+	r3 := newRig()
+	r3.h.online = true
+	first := save(r3, dir, "pairing-before-process-restart")
+	pair := regexp.MustCompile(`PAIR ([A-Z0-9]+)`).FindStringSubmatch(first)[1]
+	r3.restart()
+	reply, handled := r3.s.OfferText("+15550000001", "PAIR "+pair)
+	results["process_restart_during_sms_handoff"] = map[string]any{"handled": handled, "reply": reply}
+	save(r3, dir, "pairing-after-process-restart")
+	b, _ := json.MarshalIndent(results, "", "  ")
+	os.WriteFile(filepath.Join(dir, "results.json"), b, 0644)
+	fmt.Println(string(b))
+}
