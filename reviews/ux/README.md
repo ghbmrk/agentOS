@@ -10,13 +10,15 @@ A recurring review of the owner-facing experience (onboarding and everyday use) 
 
 Tier A PRs get a UX pass in the lens screen; tier B PRs get UX as part of the combined pass. Each run applies the scope below to the PR's diff. Verdicts go to `reviews/ux/YYYY-MM-DD-pr<N>.md` (combined passes to `reviews/combined/`), in the L3 format of docs/OPERATING.md §4.
 
+Before raising a finding on text shown to the guest, check that a guest can reach it: trace the path from a guest tool call to the text, through the MCP guard and the gate. #461 (SR2-3o) was built for refusals that no guest could reach.
+
 ## Checks that replaced findings
 
 Finding kinds CI now catches; the screen no longer looks for them by hand (OPERATING §4).
 
 | Finding kind | Check | Since |
 |---|---|---|
-| — | none recorded yet | — |
+| CH-12 "a problem text names a step that cannot work" (UX run 2, #327, #423; #409 U6), for the held-restore texts only | `TestHeldOwnerTextsNameOnlyStepsThatWork` (broker/cmd/agentosd/held_test.go): each text a held box can send names only steps that work in its state, is GSM-7 within three segments, and lists exactly the replies taken. Other owner texts are still screened by hand. | W3-forget-b1-7 |
 
 ## Spec-wide runs
 
