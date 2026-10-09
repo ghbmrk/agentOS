@@ -857,10 +857,24 @@ class IdMapTest(unittest.TestCase):
         self.defs("SUB_UID_MIN abc\n")
         self.refused(self.mine(200000), None, depaudit.LOGIN_DEFS, "SUB_UID_MIN")
 
+    def test_8a_an_unreadable_login_defs_is_a_reason(self):
+        os.mkdir(depaudit.LOGIN_DEFS)
+        self.refused(self.mine(200000), None, depaudit.LOGIN_DEFS, "cannot be read")
+
+    def test_8a_a_runner_line_with_count_0_is_refused(self):
+        self.refused(self.mine(200000, 0), None, "count 0 grants no id")
+
     def test_8b_an_enumerated_account_in_the_range_is_refused(self):
-        alice = pwd.struct_passwd(("alice", "x", 150000, 150000, "", "/", "/bin/sh"))
-        with mock.patch("pwd.getpwall", return_value=[alice]):
-            self.refused(self.mine(100000), None, "uid 150000 (alice)")
+        for ident in (100000, 150000, 165535):  # start, inside, end-1
+            alice = pwd.struct_passwd(("alice", "x", ident, ident, "", "/", "/bin/sh"))
+            with self.subTest(ident=ident), mock.patch("pwd.getpwall", return_value=[alice]):
+                self.refused(self.mine(100000), None, "uid %d (alice)" % ident)
+
+    def test_8b_a_failing_enumeration_is_refused_never_free(self):
+        with mock.patch("pwd.getpwall", side_effect=OSError(errno.EIO, "synthetic")):
+            self.refused(self.mine(100000), None, "getpwall() failed")
+        with mock.patch("grp.getgrall", side_effect=OSError(errno.EIO, "synthetic")):
+            self.refused_gid_side(self.mine(100000), "getgrall() failed")
 
     def test_8b_an_account_outside_the_range_does_not_block(self):
         far = pwd.struct_passwd(("far", "x", 4294967294, 4294967294, "", "/", "/bin/sh"))
@@ -868,12 +882,14 @@ class IdMapTest(unittest.TestCase):
             self.assertEqual(self.maps(self.mine(100000))[0][1], (depaudit.SCENARIO_ID, 100000, 1))
 
     def test_8b_the_runners_own_euid_is_refused_with_no_entry(self):
-        with mock.patch("os.geteuid", return_value=120000):
-            self.refused(self.mine(100000), None, "uid 120000 (the runner)")
+        for own in (100000, 120000, 165535):  # the mapped id, inside, end-1
+            with self.subTest(own=own), mock.patch("os.geteuid", return_value=own):
+                self.refused(self.mine(100000), None, "uid %d (the runner)" % own)
 
     def test_8b_the_runners_own_egid_is_refused_with_no_entry(self):
-        with mock.patch("os.getegid", return_value=120000):
-            self.refused_gid_side(self.mine(100000), "gid 120000 (the runner)")
+        for own in (100000, 120000, 165535):
+            with self.subTest(own=own), mock.patch("os.getegid", return_value=own):
+                self.refused_gid_side(self.mine(100000), "gid %d (the runner)" % own)
 
     def test_8b_an_enumerated_group_in_the_range_is_refused(self):
         staff = grp.struct_group(("staff", "x", 150000, []))
@@ -941,6 +957,14 @@ class IdMapTest(unittest.TestCase):
             with self.subTest(bad):
                 self.refused(bad + "\n" + self.mine(100000), None, self.uid_path, repr(bad), "does not parse")
 
+    def test_8c_a_number_too_long_for_an_id_is_refused_as_unparsable(self):
+        # int() raises ValueError past 4300 digits (Python 3.11+); it must be a reason, not a crash.
+        huge = "9" * 5000
+        for bad in ("alice:%s:1" % huge, "alice:150000:%s" % huge, "alice:99999999999:1"):
+            with self.subTest(bad=bad[:20]):
+                self.refused(bad + "\n" + self.mine(100000), None, self.uid_path, "does not parse")
+        self.refused("%d:%s:65536\n" % (os.geteuid(), huge), None, "does not parse")
+
     def test_8d_a_bad_first_line_is_the_result(self):
         self.refused(self.mine(0) + self.mine(300000), None, "range 0:65536 for %d" % os.geteuid())
 
@@ -954,6 +978,19 @@ class IdMapTest(unittest.TestCase):
             os.geteuid(), self.uid_path), why)
         self.assert_remedy(why, "replace it")
         self.assertNotIn("add one", why)
+
+    def test_8e_an_unparsable_line_says_correct_or_remove_it(self):
+        for name, text in (("no runner range", "alice:0x186a0:65536\n"),
+                           ("with a runner range", "alice:0x186a0:65536\n" + self.mine(300000))):
+            with self.subTest(name), self.ranges(text), \
+                    mock.patch.object(depaudit, "_has_mount_setattr", return_value=True), \
+                    mock.patch.object(depaudit.shutil, "which", return_value="/bin/x"):
+                self.assertFalse(self.available())
+                why = depaudit.SANDBOX_WHY
+                self.assertIn("'alice:0x186a0:65536'", why)
+                self.assertIn("correct or remove that line", why)
+                for wrong in ("replace it", "add one", "--add-subuids", "--del-subuids"):
+                    self.assertNotIn(wrong, why)
 
     def test_8e_a_missing_range_says_add_one_with_the_same_rules(self):
         self.defs("SUB_UID_MIN 524288\nSUB_GID_MIN 300000\n")

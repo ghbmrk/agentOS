@@ -324,12 +324,17 @@ SUB_FLOOR = 100000
 _ID_LAST = 4294967294  # 4294967295 is (uid_t)-1
 _NSS_BUF_MAX = 1 << 20
 # shadow reads START and COUNT with base 0 (lib/subordinateio.c): ASCII decimal with no sign,
-# space, base prefix or leading 0 reads the same in base 0 and base 10 (DEP-8c).
-_SUBID_LINE = re.compile(r"([^:\s]+):(0|[1-9][0-9]*):(0|[1-9][0-9]*)")
+# space, base prefix or leading 0 reads the same in base 0 and base 10 (DEP-8c). No id has more
+# than 10 digits, and the bound keeps int() below its 4300-digit limit.
+_SUBID_LINE = re.compile(r"([^:\s]+):(0|[1-9][0-9]{0,9}):(0|[1-9][0-9]{0,9})")
 
 
 class UnusableRange(OSError):
     """The runner has a subordinate range, but it breaks a DEP-8 rule."""
+
+
+class UnparsableLine(UnusableRange):
+    """A line of /etc/subuid or /etc/subgid does not parse strictly, so no range is checked (DEP-8c)."""
 
 
 def _sub_floor(kind):
@@ -388,9 +393,9 @@ def _subordinate(path):
             continue
         m = _SUBID_LINE.fullmatch(line)
         if not m:
-            raise UnusableRange("line %d of %s, %r, does not parse as NAME:START:COUNT in ASCII decimal "
-                                "(no sign, space, base prefix or leading 0), so the overlap check cannot "
-                                "read it" % (n, path, line))
+            raise UnparsableLine("line %d of %s, %r, does not parse as NAME:START:COUNT in ASCII decimal "
+                                 "(no sign, space, base prefix or leading 0; at most 10 digits), so the "
+                                 "overlap check cannot read it" % (n, path, line))
         owner, start, count = m.group(1), int(m.group(2)), int(m.group(3))
         if owner not in me:
             others.append((line, start, count))
@@ -496,6 +501,10 @@ def _sandbox_missing():
             user = pwd.getpwuid(os.geteuid()).pw_name
         except KeyError:
             user = str(os.geteuid())
+        if isinstance(e, UnparsableLine):
+            # The line is the fault, whoever owns it: no range of the runner's fixes it (DEP-8e).
+            return ("%s; correct or remove that line, so every line reads NAME:START:COUNT in ASCII decimal "
+                    "(tools/ASSUMPTIONS.md D13)" % e)
         # No fixed range: one that overlaps another user's would share their ids. The rules are
         # the ones _range_problem checks, and only those (DEP-8e, D13).
         floors = []
