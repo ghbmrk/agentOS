@@ -50,13 +50,13 @@ type Config struct {
 	Line func() localapi.Line
 	Now  func() time.Time
 	Rand io.Reader
-	// DescribeRoot verifies a root to follow and holds it for approval
-	// (follow.Executor.Describe); on an error, only the summary's Reason
+	// DescribeRoot verifies a root to follow and holds it, with the root
+	// files brought with it, for approval (follow.Executor.Describe); on an error, only the summary's Reason
 	// is kept, and only if it is a coarse cause the page words. Follow
 	// submits the owner's request to follow a held root
 	// (grants.FollowIntent) and returns the channel's reply. Either nil
 	// refuses its op.
-	DescribeRoot func(ctx context.Context, root []byte) (localapi.RootSummary, error)
+	DescribeRoot func(ctx context.Context, root []byte, chain [][]byte) (localapi.RootSummary, error)
 	Follow       func(ctx context.Context, name, digest string) (string, error)
 	// Paused lists the paused grants (grants.Gate.Paused); AskResume asks
 	// the owner, on the page, to resume one from the pause the page
@@ -337,13 +337,18 @@ func (s *Server) followRoot(ctx context.Context, _ sockets.Peer, args json.RawMe
 	if !s.valid(in.Token) {
 		return nil, errUnauthorized
 	}
-	if err != nil || len(in.Root) == 0 || len(in.Root) > localapi.MaxRoot {
+	if err != nil || len(in.Root) == 0 || len(in.Root) > localapi.MaxRoot || len(in.Chain) > localapi.MaxRootChain {
 		return nil, errBadArgs
+	}
+	for _, c := range in.Chain {
+		if len(c) == 0 || len(c) > localapi.MaxRoot {
+			return nil, errBadArgs
+		}
 	}
 	if s.cfg.DescribeRoot == nil {
 		return nil, errFailed
 	}
-	sum, err := s.cfg.DescribeRoot(ctx, in.Root)
+	sum, err := s.cfg.DescribeRoot(ctx, in.Root, in.Chain)
 	if err != nil {
 		return localapi.RootSummary{Refusal: localapi.RefusedRoot, Reason: rootReason(sum.Reason)}, nil
 	}

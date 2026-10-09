@@ -120,7 +120,6 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | SR2-3k f2 | An unknown tool named by a non-ID value reads `no tool "(not shown)"`, which looks like a tool's name; unquoted wording would read better (later 3, L3 on #398) |
 | SR2-3j f1 | `annotate`'s `GuestReason = Reason` fallback takes a plain string; typing it `guesterr.Literal` would let the compiler hold the rule GR30 states (lens on #396) |
 | OSS-10w f1 | UX on #323: the alert wording "Switch back there" reads oddly after a switch back to the project |
-| OSS-10w-r | WF1 after a project root-key rotation: switching back compares against the image's shipped root keys and so fails closed once the project rotates them; a chain walk from the shipped root would admit it. Meanwhile the owner's only route back is a named follow (beside U13 limit (b)). No release has rotated root keys; a new image ships the new root |
 | W3-forget-b2b f1 | Security 327-1: race between `worked()` and `takeBack(approved=false)` in `agentBackWithoutAsking`; re-check under `r.run` |
 | W3-forget-b2c l1 | UX: the recall-off owed take-back text names no owner step, because STATUS has no line when recall is Off (`LateExecutor.Status`); a config only a dev box has |
 | DOC-3 f1 | L3 on #356: the SHAs on rows inferred as merged name the last commit touching the package, not its merge; relabel as "last touched" or cite the PR |

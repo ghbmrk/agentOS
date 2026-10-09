@@ -152,7 +152,7 @@ type PageSocket struct {
 	// the page (OSS-10, follow.Executor.Describe): the page's request is
 	// then submitted to the gate as a follow intent, which the broker
 	// executor named grants.FollowExecutor must run. Nil refuses both ops.
-	DescribeRoot func(ctx context.Context, root []byte) (localapi.RootSummary, error)
+	DescribeRoot func(ctx context.Context, root []byte, chain [][]byte) (localapi.RootSummary, error)
 }
 
 // The page's fixed replies to a follow request: the gate's reason is not

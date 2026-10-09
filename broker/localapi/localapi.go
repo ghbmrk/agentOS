@@ -73,6 +73,9 @@ const (
 	// owner's name for it in bytes (40 characters of up to 4 bytes).
 	MaxRoot       = 64 << 10
 	MaxFollowName = 160
+	// MaxRootChain bounds the other root files brought with one, the
+	// rotation chain a switch back walks (update.MaxRootRotations).
+	MaxRootChain = 64
 	// DigestLen is a shown root's digest: SHA-256, lowercase hex.
 	DigestLen = 64
 	// MaxPause bounds a pause's intent ID (grants.Grant.Pause).
@@ -201,9 +204,13 @@ type Requests struct {
 }
 
 // FollowRoot is a root the owner brought to follow, exactly as published.
+// Chain is the other root files brought with it: the project's rotations
+// a switch back walks to Root (OSS-10w-r), each at most MaxRoot, at most
+// MaxRootChain of them.
 type FollowRoot struct {
-	Token string `json:"token"`
-	Root  []byte `json:"root"`
+	Token string   `json:"token"`
+	Root  []byte   `json:"root"`
+	Chain [][]byte `json:"chain,omitempty"`
 }
 
 // RootSummary is what following a root means, as the page shows it before

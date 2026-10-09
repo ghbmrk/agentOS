@@ -99,7 +99,7 @@ func newRig(t *testing.T) *rig {
 	r := &rig{t: t, now: time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)}
 	r.own = &fakeOwner{now: &r.now, left: 24}
 	r.srv = New(Config{Owner: r.own, Line: func() localapi.Line { return testLine }, Now: func() time.Time { return r.now },
-		DescribeRoot: func(_ context.Context, root []byte) (localapi.RootSummary, error) {
+		DescribeRoot: func(_ context.Context, root []byte, _ [][]byte) (localapi.RootSummary, error) {
 			if string(root) != "root" {
 				return localapi.RootSummary{}, errors.New("bad root")
 			}

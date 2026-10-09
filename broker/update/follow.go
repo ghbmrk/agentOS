@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/theupdateframework/go-tuf/v2/metadata"
+	"github.com/theupdateframework/go-tuf/v2/metadata/trustedmetadata"
 )
 
 // Following a fork (OSS-10, OSS-9): the box trusts whichever root of trust
@@ -160,6 +161,144 @@ func describe(b []byte, m *metadata.Metadata[metadata.RootType]) (RootSummary, e
 	return s, nil
 }
 
+// ErrNotProject: a root is not the project's own, judged from the anchor
+// (ProjectRoot). It wraps the cause where there is one.
+var ErrNotProject = errors.New("update: this root is not the project's own")
+
+// projectFile is the project's root as this box last trusted it, saved
+// when a follow leaves the project chain: the anchor a switch back walks
+// from (OSS-10w-r).
+const projectFile = "project_root.json"
+
+// ProjectRoot reports whether target is the project's own root, judged
+// from anchor, the newest project root the box trusted (Store.ProjectRoot,
+// else the root the image ships). It is when target's root-role keys, by
+// key material, are anchor's and it is no older; or when the owner's links
+// (any order, target among them or not) carry the anchor to exactly target
+// by TUF root rotation (UPD-8): each root signed by its predecessor's root
+// threshold and its own, versions one apart, every root meeting the box's
+// floor, as Check walks a rotation. Expiry is DescribeRoot's.
+func ProjectRoot(anchor, target []byte, links [][]byte, o Options) error {
+	if err := projectRoot(anchor, target, links, o); err != nil {
+		return fmt.Errorf("%w: %w", ErrNotProject, err)
+	}
+	return nil
+}
+
+func projectRoot(anchor, target []byte, links [][]byte, o Options) error {
+	if len(links) > MaxRootRotations {
+		return fmt.Errorf("more than %d root files", MaxRootRotations)
+	}
+	if o.MinThreshold < 2 {
+		o.MinThreshold = 2
+	}
+	tm, err := trustedmetadata.New(anchor)
+	if err != nil {
+		return classify(err)
+	}
+	if err := floor(tm.Root, o.MinThreshold); err != nil {
+		return err
+	}
+	if bytes.Equal(anchor, target) {
+		return nil
+	}
+	t, err := verifyRoot(target, o)
+	if err != nil {
+		return err
+	}
+	if sameRootKeys(t, tm.Root) {
+		if t.Signed.Version < tm.Root.Signed.Version {
+			return fmt.Errorf("%w: root v%d is older than v%d", ErrRollback, t.Signed.Version, tm.Root.Signed.Version)
+		}
+		return nil
+	}
+	if t.Signed.Version <= tm.Root.Signed.Version {
+		return fmt.Errorf("%w: root v%d is not newer than v%d, whose keys differ", ErrRollback, t.Signed.Version, tm.Root.Signed.Version)
+	}
+	type link struct {
+		b []byte
+		v int64
+	}
+	chain := []link{}
+	hasTarget := false
+	for _, b := range append(links, target) {
+		if bytes.Equal(b, target) {
+			if hasTarget {
+				continue
+			}
+			hasTarget = true
+		}
+		if len(b) > maxMetadata {
+			return fmt.Errorf("%w: root is larger than %d bytes", ErrBadRepository, maxMetadata)
+		}
+		if err := noNull(b); err != nil {
+			return fmt.Errorf("%w: %v", ErrBadRepository, err)
+		}
+		m, err := metadata.Root().FromBytes(b)
+		if err != nil {
+			return classify(err)
+		}
+		// Root files at or below the anchor are history the box passed:
+		// skipped, so the owner may bring them all, and never walked.
+		if m.Signed.Version <= tm.Root.Signed.Version {
+			continue
+		}
+		chain = append(chain, link{b, m.Signed.Version})
+	}
+	sort.SliceStable(chain, func(i, j int) bool { return chain[i].v < chain[j].v })
+	last := anchor
+	for _, l := range chain {
+		if _, err := tm.UpdateRoot(l.b); err != nil {
+			return classify(err)
+		}
+		if err := floor(tm.Root, o.MinThreshold); err != nil {
+			return err
+		}
+		last = l.b
+	}
+	if !bytes.Equal(last, target) {
+		return errors.New("the root files do not end at this root")
+	}
+	return nil
+}
+
+// sameRootKeys reports whether a and b list the same root-role keys, by
+// key material, never by the key IDs they claim.
+func sameRootKeys(a, b *metadata.Metadata[metadata.RootType]) bool {
+	ka, kb := rootKeyMaterial(a), rootKeyMaterial(b)
+	if ka == nil || kb == nil || len(ka) != len(kb) {
+		return false
+	}
+	for k := range ka {
+		if !kb[k] {
+			return false
+		}
+	}
+	return true
+}
+
+func rootKeyMaterial(m *metadata.Metadata[metadata.RootType]) map[string]bool {
+	out := map[string]bool{}
+	for _, id := range m.Signed.Roles[metadata.ROOT].KeyIDs {
+		k, ok := m.Signed.Keys[id]
+		if !ok {
+			return nil
+		}
+		out[k.Type+"\x00"+k.Scheme+"\x00"+k.Value.PublicKey] = true
+	}
+	return out
+}
+
+// ProjectRoot is the project root saved when the box last left the
+// project chain, or nil if it never has.
+func (s *Store) ProjectRoot() ([]byte, error) {
+	b, err := os.ReadFile(s.p(projectFile))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	return b, err
+}
+
 // followFile marks a switch in progress: it holds the Followed being
 // switched to, written before the root. The next store operation finishes
 // the switch if the root was written, or forgets it if not (settle).
@@ -170,7 +309,7 @@ const followFile = "following"
 const sourceFile = "source.json"
 
 // followSteps are the switch's writes, in order, under the store lock.
-var followSteps = []string{"seen_keys", "interim_flag", "marker", "root", "timestamp", "snapshot", "staged", "source", "done"}
+var followSteps = []string{"seen_keys", "interim_flag", "project_root", "marker", "root", "timestamp", "snapshot", "staged", "source", "done"}
 
 // Followed is the fork the box takes updates from, for STATUS, the digest
 // and the audit (Security C7). The zero Followed is the project's own chain.
@@ -293,6 +432,21 @@ func (s *Store) FollowRoot(root []byte, approved, name string, o Options) error 
 	}
 	if err := writeAtomic(s.p(outsideFile), []byte("1\n"), 0o600); err != nil {
 		return err
+	}
+	if err := step("project_root"); err != nil {
+		return err
+	}
+	// Leaving the project chain: the root being left is the anchor a
+	// later switch back walks from (OSS-10w-r). It only raises the floor
+	// a switch back must meet, so a crash after it narrows.
+	if name != "" {
+		if _, err := os.Stat(s.p(sourceFile)); errors.Is(err, os.ErrNotExist) {
+			if err := writeAtomic(s.p(projectFile), cur, 0o600); err != nil {
+				return err
+			}
+		} else if err != nil {
+			return err
+		}
 	}
 	if err := step("marker"); err != nil {
 		return err

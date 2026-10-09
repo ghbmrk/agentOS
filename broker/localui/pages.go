@@ -202,8 +202,8 @@ form { margin: .6em 0 1.2em; }
 <form method="post" action="/follow/"><input type="hidden" name="digest" value="{{.Digest}}"><input type="hidden" name="tok" value="{{$.Tok}}">
 <label>Your name for this source<input type="text" name="name" maxlength="{{$.MaxName}}" autocomplete="off" spellcheck="false" required></label>
 <button name="step" value="ask">Ask to follow it</button></form></section>{{end}}
-{{else}}{{if not $.Msg}}<p>This box gets its software updates from the AgentOS project. To get them from another source you trust, such as a fork, choose that source's root file (root.json). Nothing changes until you approve it with a code.</p>
-<form method="post" action="/follow/" enctype="multipart/form-data"><label>Root file<br><input type="file" name="root" accept=".json,application/json" required></label><br>
+{{else}}{{if not $.Msg}}<p>This box gets its software updates from the AgentOS project. To get them from another source you trust, such as a fork, choose that source's root file (root.json). To switch back after the project changed its keys, choose its root files from the one this box last trusted to the newest. Nothing changes until you approve it with a code.</p>
+<form method="post" action="/follow/" enctype="multipart/form-data"><label>Root file<br><input type="file" name="root" accept=".json,application/json" multiple required></label><br>
 <button name="step" value="show">Show what it means</button></form>{{end}}{{end}}
 <p><a href="/home">More</a> · <a href="/approvals/">Approvals</a> · <a href="/status">Status</a></p>
 {{template "foot"}}{{end}}

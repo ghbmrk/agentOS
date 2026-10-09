@@ -7,8 +7,10 @@
 // the owner's name for the fork (grants.FollowIntent), so the executor
 // follows exactly the bytes the owner saw. Expiry is judged by the clock
 // guard's Latest, never the wall clock (WF2). An empty name, switching
-// back, is admitted only for a root whose root-role keys are the ones the
-// image ships (WF1).
+// back, is admitted only for the project's own root (WF1'): one with the
+// root keys of the newest project root the box trusted (the image's, until
+// the box leaves the project), or one the owner's root files chain to from
+// it through TUF root rotations (update.ProjectRoot, OSS-10w-r).
 package follow
 
 import (
@@ -26,7 +28,6 @@ import (
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/maintain"
 	"github.com/ghbmrk/agentos/broker/update"
-	"github.com/theupdateframework/go-tuf/v2/metadata"
 )
 
 // ProjectName is how the alert names the project's own chain.
@@ -40,6 +41,9 @@ type Store interface {
 	FollowRoot(root []byte, approved, name string, o update.Options) error
 	Following() (update.Followed, error)
 	TrustedRoot() ([]byte, error)
+	// ProjectRoot is the project root the box trusted when it last left
+	// the project's chain, nil if it never did.
+	ProjectRoot() ([]byte, error)
 }
 
 // Clock is the HOST-1b clock guard's latest trustworthy time.
@@ -50,7 +54,8 @@ type Clock interface {
 // Config is what the executor needs; New refuses a Config missing any part.
 type Config struct {
 	Store Store
-	// Shipped is the root the image ships: the project's own root keys.
+	// Shipped is the root the image ships: the project's own root, until
+	// the box records a newer one (Store.ProjectRoot).
 	Shipped []byte
 	Clock   Clock
 	// Options are the update options; Now is always replaced by Latest.
@@ -64,15 +69,21 @@ type Config struct {
 
 // Executor follows held roots. It is safe for concurrent use.
 type Executor struct {
-	cfg  Config
-	keys map[string]bool
+	cfg Config
 
 	mu    sync.Mutex
-	held  map[string][]byte
+	held  map[string]held
 	order []string
 	// unsent is the last alert not yet sent, until it is (RetryAlert); a
 	// later switch's alert replaces it. Config.Pending mirrors it.
 	unsent string
+}
+
+// held is a root the page showed and the root files brought with it, the
+// rotation chain a switch back may walk (OSS-10w-r).
+type held struct {
+	root  []byte
+	chain [][]byte
 }
 
 // UnsentPrefix starts STATUS's line for an alert not yet sent (Note).
@@ -83,8 +94,7 @@ func New(c Config) (*Executor, error) {
 	if c.Store == nil || c.Clock == nil || c.Alert == nil || len(c.Shipped) == 0 || c.Pending == "" {
 		return nil, errors.New("follow: store, shipped root, clock guard, alert and pending file are all required")
 	}
-	keys, err := rootKeys(c.Shipped)
-	if err != nil {
+	if _, err := update.RootDigest(c.Shipped); err != nil {
 		return nil, fmt.Errorf("follow: shipped root: %v", err)
 	}
 	// An alert a previous run could not send is still owed.
@@ -92,7 +102,7 @@ func New(c Config) (*Executor, error) {
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("follow: pending alert: %v", err)
 	}
-	return &Executor{cfg: c, keys: keys, held: map[string][]byte{}, unsent: string(b)}, nil
+	return &Executor{cfg: c, held: map[string]held{}, unsent: string(b)}, nil
 }
 
 // setUnsent records text as the alert owed, on disk first; "" clears it.
@@ -138,40 +148,6 @@ func writeAtomic(path string, b []byte) error {
 	return d.Sync()
 }
 
-// rootKeys is the set of a root's root-role public keys, by key material
-// (type, scheme, value), never by the key IDs the root claims.
-func rootKeys(b []byte) (map[string]bool, error) {
-	m, err := metadata.Root().FromBytes(b)
-	if err != nil {
-		return nil, err
-	}
-	role := m.Signed.Roles[metadata.ROOT]
-	if role == nil || len(role.KeyIDs) == 0 {
-		return nil, errors.New("no root keys")
-	}
-	out := map[string]bool{}
-	for _, id := range role.KeyIDs {
-		k, ok := m.Signed.Keys[id]
-		if !ok {
-			return nil, fmt.Errorf("root key %s is not listed", id)
-		}
-		out[k.Type+"\x00"+k.Scheme+"\x00"+k.Value.PublicKey] = true
-	}
-	return out, nil
-}
-
-func sameKeys(a, b map[string]bool) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k := range a {
-		if !b[k] {
-			return false
-		}
-	}
-	return true
-}
-
 func (x *Executor) options(now time.Time) update.Options {
 	o := x.cfg.Options
 	o.Now = func() time.Time { return now }
@@ -185,8 +161,13 @@ func (x *Executor) latest(ctx context.Context) time.Time {
 
 // Describe verifies a root as the switch will, at Latest, and holds its
 // bytes under the summary's digest for the owner's approval. The oldest
-// held root goes once MaxHeld are held.
-func (x *Executor) Describe(ctx context.Context, root []byte) (update.RootSummary, error) {
+// held root goes once MaxHeld are held. chain is the other root files the
+// owner brought with it, for a switch back across a rotation; describing
+// the same root again replaces them.
+func (x *Executor) Describe(ctx context.Context, root []byte, chain ...[]byte) (update.RootSummary, error) {
+	if len(chain) > update.MaxRootRotations {
+		return update.RootSummary{}, fmt.Errorf("%w: more than %d root files", update.ErrNotProject, update.MaxRootRotations)
+	}
 	sum, err := update.DescribeRoot(root, x.options(x.latest(ctx)))
 	if err != nil {
 		return update.RootSummary{}, err
@@ -200,24 +181,37 @@ func (x *Executor) Describe(ctx context.Context, root []byte) (update.RootSummar
 			x.order = x.order[1:]
 		}
 	}
-	x.held[sum.Digest] = bytes.Clone(root)
+	h := held{root: bytes.Clone(root)}
+	for _, c := range chain {
+		h.chain = append(h.chain, bytes.Clone(c))
+	}
+	x.held[sum.Digest] = h
 	return sum, nil
 }
 
-// Project reports whether the held root with this digest has the
-// project's own root keys, as this image ships them: the only root a
-// switch back (an empty name) is admitted for (WF1). The page asks it at
-// describe time so it never offers a switch back Execute would refuse.
-// A root no longer held is not the project's.
-func (x *Executor) Project(digest string) bool {
+// Project reports whether the held root with this digest is the
+// project's own at Latest (WF1'): the only root a switch back (an empty
+// name) is admitted for. The page asks it at describe time so it never
+// offers a switch back Execute would refuse. A root no longer held is not
+// the project's.
+func (x *Executor) Project(ctx context.Context, digest string) bool {
 	x.mu.Lock()
-	root := x.held[digest]
+	h, ok := x.held[digest]
 	x.mu.Unlock()
-	if root == nil {
-		return false
+	return ok && x.project(h, x.latest(ctx)) == nil
+}
+
+// project walks from the newest project root the box trusted, or the
+// shipped one, to h's root through h's chain (update.ProjectRoot).
+func (x *Executor) project(h held, now time.Time) error {
+	anchor, err := x.cfg.Store.ProjectRoot()
+	if err != nil {
+		return err
 	}
-	keys, err := rootKeys(root)
-	return err == nil && sameKeys(keys, x.keys)
+	if anchor == nil {
+		anchor = x.cfg.Shipped
+	}
+	return update.ProjectRoot(anchor, h.root, h.chain, x.options(now))
 }
 
 // parse reads what an intent asks for: the digest and the name. why is set
@@ -296,18 +290,19 @@ func (x *Executor) Execute(ctx context.Context, in journal.Intent, _ int) journa
 		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: why}
 	}
 	x.mu.Lock()
-	root := x.held[digest]
+	h, ok := x.held[digest]
 	x.mu.Unlock()
-	if root == nil {
+	if !ok {
 		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "the page no longer holds the root that was approved; show it again"}
 	}
+	root := h.root
+	now := x.latest(ctx)
 	if name == "" {
-		if !x.Project(digest) {
+		if err := x.project(h, now); err != nil {
 			return journal.Outcome{Result: journal.ResultNotApplied,
-				Evidence: "switching back needs the project's own root keys, as this image ships them; this root's differ"}
+				Evidence: "switching back needs the project's own root: its root keys, or the root files that rotate to it from the last project root I trusted (" + err.Error() + ")"}
 		}
 	}
-	now := x.latest(ctx)
 	if err := x.cfg.Store.FollowRoot(root, digest, name, x.options(now)); err != nil {
 		if cur, rerr := x.cfg.Store.TrustedRoot(); rerr != nil || bytes.Equal(cur, root) {
 			// The root may be in place with the switch unfinished:
