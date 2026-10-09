@@ -256,10 +256,12 @@ func (s *capState) routingLine() string {
 // modelProbeEvery is how long a model-route probe is believed.
 const modelProbeEvery = time.Minute
 
-// modelProbe says whether the model route is up: the vault process's
-// model socket exists, checked at most once a minute. It looks without
-// dialing, since agentosd links no network client (ARC2), and cannot
-// tell "no model grant" from "unreachable" (ASSUMPTIONS S8).
+// modelProbe says whether the vault process's model socket exists,
+// checked at most once a minute. It looks without dialing, since agentosd
+// links no network client (ARC2). agentos-egress opens the socket at serve
+// start, before unlock and whatever the grants, so C2 shows only when the
+// vault process is not serving; no grant, a locked vault, or a socket
+// that stopped answering all read as up (ASSUMPTIONS S8, S12).
 type modelProbe struct {
 	socket string
 	now    func() time.Time

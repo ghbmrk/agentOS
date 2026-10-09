@@ -478,7 +478,8 @@ func TestOwnerChoicesAreDigestOnly(t *testing.T) {
 
 // REQ: A11, OP-9
 // A11: with learning on but unable to run, STATUS names the cause: the
-// memory too small, no builder, or no model route, each alone.
+// memory too small, no builder, or no model socket, each alone. A11's
+// no-grant cause is not met here (ASSUMPTIONS S8).
 func TestLearningUnableToRunNamesTheCause(t *testing.T) {
 	for _, c := range []struct {
 		name   string
@@ -487,7 +488,7 @@ func TestLearningUnableToRunNamesTheCause(t *testing.T) {
 	}{
 		{"memory_too_small", func(b *capBox, lp *learning) { lp.noRoom.Store(true) }, noRoomNote},
 		{"no_builder", func(b *capBox, lp *learning) { lp.builderOff.Store(true) }, builderOffNote},
-		{"no_model_route", func(b *capBox, lp *learning) {
+		{"no_model_socket", func(b *capBox, lp *learning) {
 			b.caps.model = newModelProbe(filepath.Join(shortDir(t), "gone.sock"))
 		}, modelUnreachable},
 	} {
