@@ -28,12 +28,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/ghbmrk/agentos/broker/cgroup"
 	"github.com/ghbmrk/agentos/broker/journal"
@@ -977,7 +980,10 @@ func (s *Source) run(ctx context.Context, t Target, args ...string) ([]byte, err
 	// memory.max does not bound; the pipe is drained to its end.
 	buf := &capBuffer{}
 	cmd.Stdout, cmd.Stderr = buf, buf
-	err = cmd.Run()
+	err = startNoNewPrivs(cmd)
+	if err == nil {
+		err = cmd.Wait()
+	}
 	out := buf.Bytes()
 	// Whatever left the process group (setsid) dies with the run, before
 	// root removes the scratch directory or prunes the cache. A failure
@@ -989,6 +995,34 @@ func (s *Source) run(ctx context.Context, t Target, args ...string) ([]byte, err
 		err = rerr
 	}
 	return out, err
+}
+
+// startNoNewPrivs starts cmd with no_new_privs set, so neither the child
+// nor anything it execs gains privileges through a setuid or
+// file-capability binary (F2; #588 Security R1). The flag is per thread
+// and is inherited across clone and kept across execve (prctl(2)). Go's
+// forkExec clones the child from the calling thread: syscall's
+// forkAndExecInChild issues clone or clone3 inline, without switching
+// threads, which is why SysProcAttr.Pdeathsig ties the child to "the
+// creating thread" and asks for runtime.LockOSThread. So the start runs
+// on a goroutine locked to its thread, which sets the flag first, and
+// that goroutine exits still locked: the runtime then ends the thread
+// (runtime.LockOSThread), or, if it is the process's main thread, wedges
+// it for good with no goroutine on it (runtime.mexit), so the flag never
+// reaches a thread that starts another child
+// (TestNoNewPrivsStaysOffTheDaemonsOtherThreads).
+func startNoNewPrivs(cmd *exec.Cmd) error {
+	done := make(chan error, 1)
+	go func() {
+		runtime.LockOSThread()
+		// No UnlockOSThread: the thread must die with this goroutine.
+		if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
+			done <- fmt.Errorf("loop7: setting no_new_privs: %w", err)
+			return
+		}
+		done <- cmd.Start()
+	}()
+	return <-done
 }
 
 // outputCap bounds the output the broker keeps of one child (F12): its
