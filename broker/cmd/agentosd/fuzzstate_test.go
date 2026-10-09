@@ -110,23 +110,67 @@ func TestFuzzRunsNothingWhoseDiskItCannotBound(t *testing.T) {
 	}
 }
 
-// LOOP-7 (F16): fuzzJail refuses a state the fuzz user could swap for a
-// link: one whose parent it can write, or a link itself.
+// LOOP-7 (F16): unswappable refuses a state the fuzz user could swap for
+// a link: a link itself, a parent the user owns, a parent writable by
+// others, or one writable by the user's group; it accepts a state under
+// a parent the user cannot write. Ids are the test process's own, so the
+// cases run without root.
+func TestUnswappableRefusesEachWayTheUserCouldSwapTheState(t *testing.T) {
+	me, myGroup := uint32(os.Getuid()), uint32(os.Getgid())
+	other := uint32(65534)
+	if me == other || myGroup == other {
+		other = 65533
+	}
+	for _, c := range []struct {
+		name     string
+		mode     os.FileMode // the parent's
+		link     bool        // the state is a link to a directory
+		uid, gid uint32      // the fuzz user's
+		refused  bool
+	}{
+		{"a parent the user cannot write", 0o755, false, other, other, false},
+		{"a link", 0o755, true, other, other, true},
+		{"a parent the user owns", 0o755, false, me, other, true},
+		{"a parent writable by others", 0o757, false, other, other, true},
+		{"a parent writable by the user's group", 0o775, false, other, myGroup, true},
+		{"a parent writable by another group", 0o775, false, other, other, false},
+	} {
+		parent := filepath.Join(t.TempDir(), "lib")
+		state := filepath.Join(parent, "agentos-fuzz")
+		if err := os.Mkdir(parent, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if c.link {
+			if err := os.Symlink(t.TempDir(), state); err != nil {
+				t.Fatal(err)
+			}
+		} else if err := os.Mkdir(state, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(parent, c.mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := unswappable(state, c.uid, c.gid); (err != nil) != c.refused {
+			t.Errorf("%s: err %v, want refused %v", c.name, err, c.refused)
+		}
+	}
+}
+
+// LOOP-7 (F16): fuzzJail checks the state before anything else it needs,
+// so a swappable state is refused for that reason even where quotas are
+// off.
 func TestFuzzJailRefusesAStateTheUserCouldSwap(t *testing.T) {
 	open := t.TempDir()
 	if err := os.Chmod(open, 0o777); err != nil {
 		t.Fatal(err)
 	}
-	link := filepath.Join(t.TempDir(), "loop7")
-	if err := os.Symlink(t.TempDir(), link); err != nil {
+	state := filepath.Join(open, "loop7")
+	if err := os.Mkdir(state, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for name, state := range map[string]string{"parent writable": filepath.Join(open, "loop7"), "a link": link} {
-		os.Mkdir(state, 0o700)
-		j, err := fuzzJail(learnPaths{Loop7: state, FuzzUser: "nobody", Cgroup: t.TempDir(), DiskQuota: "on"})
-		if j != nil || err == nil {
-			t.Errorf("%s: jail %v, err %v", name, j, err)
-		}
+	j, err := fuzzJail(learnPaths{Loop7: state, FuzzUser: "nobody", Cgroup: t.TempDir(), DiskQuota: "off"})
+	if j != nil || err == nil || !strings.Contains(err.Error(), "writable by the fuzz user") {
+		t.Fatalf("jail %v, err %v, want the state refused", j, err)
 	}
 }
 
