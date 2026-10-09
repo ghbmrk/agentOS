@@ -763,6 +763,9 @@ func TestCAP8OverTheCapSaysRollBackOrDestroy(t *testing.T) {
 	r.must("agent", toolCreate, m{"name": "w"}, nil)
 	var snap struct{ Snapshot string }
 	r.must("agent", toolCkpt, m{"name": "w"}, &snap)
+	// Exactly 1 MiB is allowed on tmpfs, whose directories use no blocks.
+	// Explicit file data must put the fixture above its 1 MiB cap.
+	r.must("agent", toolWrite, m{"name": "w", "path": "/padding", "content": "x"}, nil)
 	big := strings.Repeat("x", MaxStdin)
 	for i := range 2 { // the second starts under the cap and ends over it
 		r.must("agent", toolWrite, m{"name": "w", "path": fmt.Sprintf("/big%d", i), "content": big}, nil)
