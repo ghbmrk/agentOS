@@ -218,3 +218,20 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | HOST-1d | cryptsetup / LUKS2 | Vault-keyed disk encryption without custom crypto |
 | SR2-4i | systemd resource control (IOWeight=, CPUWeight=) | Sets io.weight and cpu.weight per slice; add iocost QoS on the image |
 | UPD-b | systemd-sysupdate (S7 stack) | First-boot update-before-trust already fits the chosen image stack |
+
+
+## Holistic architecture intake (2026-10-08)
+
+Separate advisory intake, excluded from earlier audit totals. Existing findings/owners retain their scopes; this does not impose new release requirements for stronger policies not adopted by L1. [Review](reviews/combined/2026-10-08-holistic-architecture.md).
+
+| ID | Class | Acceptance / disposition |
+|---|---|---|
+| ARCH1 | release intake | Register review and scoped extensions; no runtime completion claim |
+| ARCH1-1 | release | A5/A12/A14 claim/qualification contract; L1 resolves trust and disclosure wording; no silent policy change |
+| ARCH1-2 | release | A4/A13 conformance extension to existing adapters/journal, not a new transaction framework |
+| ARCH1-3 | release | A1/A2/A4/A5/A7/A8/A9/A10/A14 composed-profile evidence; extend existing integration/trial owners |
+| ARCH1-4 | release | [Simple text/call outcomes](briefs/ARCH1-4.md): extend existing owner/task/call/output and UX3/UX4 acceptance. Hide coordination and technical choices, preserve consequential decisions/proof, qualify owner effort and truthful results. No new authority framework, relaxed authentication or reclassification of later CH-20 conveniences. |
+| ARCH1-L1 | later | Owner-selected source/task/project boundaries and explicit combination permissions within a broadly usable private space. Preserve cross-silo reasoning; no default per-project silos or pairwise approval ritual. L1 must adopt any stronger policy/qualification contract before promotion; reuse POT-P2/ADP-11 and measure lost context, gain and owner friction. |
+| ARCH1-L2 | release | Classification corrected by cross-silo re-review: CAP-3 already requires affected adopted skills/procedures to be rebuilt/requalified, with owner-visible impact; P3-3b carries the integration. Tracked by ARCH1-1/3 and existing learning/FORGET owners, not a new runtime package or later policy prerequisite. No promise of retracting external disclosures or erasing arbitrary historical influence. |
+| ARCH1-L3 | later | [Cross-service/device delegation](briefs/ARCH1-L3.md): optional aggregate workflow bounds and qualified physical output/feedback semantics. L1 must define the intended promise and one device/operation; extend current tasks/grants/events/journal without another authority ledger or extra approval for ordinary permitted sequences. |
+| ARCH1-L4 | later | [Broader hardware jobs](briefs/ARCH1-L4.md): raw CPU/GPU/remote-worker capability beyond CAP-13 inference endpoints. L1 chooses one bounded job and data/runtime threat model before promotion; reuse task/artifact/admission and measure net accepted-work gain. Existing CAP-13 work proceeds independently. |

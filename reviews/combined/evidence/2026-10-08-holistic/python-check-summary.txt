@@ -1,0 +1,15 @@
+Platform: Darwin arm64 (Python 3.9)
+Command: python3 -m unittest discover -s tests
+Exit: 1
+FAIL: test_decoded_only_leak_is_caught (test_canary.RunnerTest)
+FAIL: test_memory_leak_is_caught_through_the_sweeper (test_canary.RunnerTest)
+FAIL: test_report_never_contains_a_canary_value (test_canary.RunnerTest)
+FAIL: test_shipped_registry_passes (test_canary.RunnerTest)
+FAIL: test_environment_and_files_are_surfaced (test_canary.SweepTest)
+FAIL: test_memory_only_secret_is_surfaced (test_canary.SweepTest)
+Ran 214 tests in 21.270s
+FAILED (failures=6, skipped=33)
+
+Linux /proc sweeper controls do not surface their planted canaries on macOS.
+The two product canary targets also cannot build on Darwin: Linux-only sockets, overlay, and recovery syscall APIs.
+These checks require Linux CI; this local suite is not a pass.

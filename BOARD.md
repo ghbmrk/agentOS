@@ -297,3 +297,16 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | W9 | [Questions in the guest plane](briefs/W9.md) | P3-8 merged, #68 merged | — | merged (f38aeed8) |
 | W9a | [Questions follow-ups (#95)](briefs/W9a.md) | W9 | Next build item A (part 2) | merged (#125 (part 2; part 1 #98)) |
 | CH-20w | [Evidence delivery](briefs/CH-20w.md) | CH-20 merged; P2-6m wired into the vault process | — | queued (blocked on mail wiring) |
+
+
+## Holistic architecture review (2026-10-08)
+
+User-requested synthesis of credential/data guarantees and functional leverage. [Initial review](reviews/combined/2026-10-08-holistic-architecture.md), [cross-silo follow-up](reviews/combined/2026-10-08-cross-silo-architecture.md) and [simple text/call review](reviews/combined/2026-10-08-simple-interface-review.md). The goal is broad useful composition under owner authority; selective boundaries must preserve it. Existing SR3, potency, UX and integration owners remain unchanged; these are scoped design/acceptance extensions, not a new implementation lane. Later policy proposals stay in LATER. ARCH1-L2's deletion classification is corrected to existing CAP-3/P3-3b release work within ARCH1-1/3; no duplicate implementation owner is created.
+
+| ID | Package | Needs | Owner | State |
+|---|---|---|---|---|
+| ARCH1 | [Holistic review and evidence intake](briefs/ARCH1.md) | existing reviews | Codex advisory proposal to primary | in review (C; documentation only) |
+| ARCH1-1 | [Precise credential/data guarantees and qualification](briefs/ARCH1-1.md) | CRED-4b/S8/publication/CH-20; L1 | primary routes; unclaimed | queued (release design/acceptance) |
+| ARCH1-2 | [Approval-to-receipt adapter conformance](briefs/ARCH1-2.md) | existing journal/adapters; SR3; POT-P2/P3 | primary routes; unclaimed | queued (release acceptance extension) |
+| ARCH1-3 | [Composed profile and cross-silo benefit evidence](briefs/ARCH1-3.md) | P2-1/c4; INT-A/H6/W7-A/POT-P1 | primary routes; unclaimed | queued (release acceptance extension) |
+| ARCH1-4 | [Simple text/call outcomes and owner effort](briefs/ARCH1-4.md) | ARCH1-2/3; W5/CH-21e; POT-P1; P2-3/S2; CH-20w; UX3/UX4 | primary routes; unclaimed | queued (release acceptance extension) |
