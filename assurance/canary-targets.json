@@ -1,16 +1,24 @@
 {
-  "note": "Product targets only; each must expect clean. Deliberate-leak controls are built into tools/canary.py and always run.",
+  "note": "Product targets only; each must expect clean. Deliberate-leak controls are built into tools/canary.py and always run. A target runs with PATH, a scratch HOME and TMPDIR, the CANARY_* variables, and the parent's value of each variable it names under env (names only, from tools/canary.py TARGET_ENV_ALLOWED). Owner names: each target's plain name is in broker/loops/plainname.go (loops S41), never here; a target without one fails TestThePlainNameMapCoversEveryLoop7Subject. Containment: contain is optional. A leak from a target without contain pauses nothing by itself, but a canary finding always offers STOP (loops S38), so the owner reads: \"My leak self-test found a planted test secret in <plain name>. Reply STOP to pause everything.\"",
   "targets": [
     {
       "name": "guest-socket-vault-egress",
       "cmd": [
         "broker/test/canary-target.sh"
+      ],
+      "env": [
+        "GOCACHE",
+        "GOTOOLCHAIN"
       ]
     },
     {
       "name": "drive-at-rest-a8",
       "cmd": [
         "broker/test/a8-canary-target.sh"
+      ],
+      "env": [
+        "GOCACHE",
+        "GOTOOLCHAIN"
       ]
     }
   ]

@@ -272,6 +272,81 @@ class RunnerTest(unittest.TestCase):
                                       "--rounds", "1"]), 0)
 
 
+# REQ: LOOP-7, LOOP-9
+class TargetEnvTest(unittest.TestCase):
+    """P3-4b-4c-canary requirement 1 (#515 Security 2): a target gets PATH,
+    a scratch HOME and TMPDIR, the CANARY_* variables, and only the parent
+    variables its registry entry names from a fixed allow-list."""
+
+    SECRET = "AGENTOS_TEST_PARENT_SECRET"
+
+    def seen_env(self, target_env=None, parent=None):
+        with tempfile.TemporaryDirectory() as d:
+            dumped = pathlib.Path(d, "env.json")
+            target = {"name": "env-dump", "cmd": CONTROLS + ["env-dump", str(dumped)]}
+            if target_env is not None:
+                target["env"] = target_env
+            synthetic = canary.mint("api_key").value
+            extra = {self.SECRET: synthetic, "GOCACHE": "/synthetic/gocache"}
+            extra.update(parent or {})
+            with unittest.mock.patch.dict(os.environ, extra):
+                res = canary.run_target(target, rounds=1)
+            self.assertEqual(res["outcome"], "clean", res["rounds"][0]["errors"])
+            return json.loads(dumped.read_text()), synthetic
+
+    def test_a_parent_secret_never_reaches_a_target(self):
+        env, synthetic = self.seen_env()
+        self.assertNotIn(self.SECRET, env)
+        self.assertNotIn(synthetic, json.dumps(env))
+
+    def test_a_target_sees_only_the_minimal_environment(self):
+        env, _ = self.seen_env()
+        # A Python target may add LC_CTYPE itself when it starts in the C
+        # locale (PEP 538); the harness never passes it.
+        env.pop("LC_CTYPE", None)
+        self.assertEqual(set(env), {"PATH", "HOME", "TMPDIR", "CANARY_PLANT", "CANARY_ACK", "CANARY_SURFACE_DIR"})
+        self.assertEqual(env["PATH"], os.environ["PATH"])
+        self.assertEqual(env["HOME"], env["TMPDIR"])
+        self.assertNotEqual(env["HOME"], os.environ.get("HOME"))
+        self.assertTrue(pathlib.Path(env["HOME"]).name.startswith("canary-home-"))
+        self.assertFalse(pathlib.Path(env["HOME"]).exists(), "scratch home outlives the round")
+
+    def test_each_round_gets_a_fresh_scratch_home(self):
+        homes = []
+        with tempfile.TemporaryDirectory() as d:
+            for i in range(2):
+                dumped = pathlib.Path(d, "env%d.json" % i)
+                canary.run_target({"name": "env-dump", "cmd": CONTROLS + ["env-dump", str(dumped)]}, rounds=1)
+                homes.append(json.loads(dumped.read_text())["HOME"])
+        self.assertNotEqual(homes[0], homes[1])
+
+    def test_a_named_variable_comes_from_the_parent(self):
+        with unittest.mock.patch.dict(os.environ):
+            os.environ.pop("GOTOOLCHAIN", None)
+            env, _ = self.seen_env(target_env=["GOCACHE", "GOTOOLCHAIN"])
+        self.assertEqual(env["GOCACHE"], "/synthetic/gocache")
+        self.assertNotIn("GOTOOLCHAIN", env, "a name the parent does not set stays unset")
+        self.assertNotIn(self.SECRET, env)
+
+    def test_a_name_outside_the_allow_list_is_refused_at_load(self):
+        with tempfile.TemporaryDirectory() as d:
+            reg = pathlib.Path(d, "targets.json")
+            for env in ([self.SECRET], ["HOME"], ["PATH"], ["CANARY_PLANT"], ["LD_PRELOAD"],
+                        "GOCACHE", [["GOCACHE"]], [{"GOCACHE": "/x"}], ["GOCACHE=/x"]):
+                reg.write_text(json.dumps({"targets": [{"name": "t", "cmd": CONTROLS + ["clean"], "env": env}]}))
+                with self.assertRaises(ValueError, msg=env):
+                    canary.load_registry(reg)
+                self.assertEqual(canary.main(["run", "--targets", str(reg), "--rounds", "1"]), 2, env)
+
+    def test_the_shipped_registry_names_only_allowed_variables(self):
+        for t in canary.load_registry(ROOT / "assurance" / "canary-targets.json"):
+            self.assertLessEqual(set(t.get("env", [])), canary.TARGET_ENV_ALLOWED)
+
+    def test_controls_get_the_minimal_environment_too(self):
+        with unittest.mock.patch.dict(os.environ, {self.SECRET: canary.mint("api_key").value}):
+            self.assertEqual(canary.run_target(canary.control_targets()[0], rounds=1)["outcome"], "clean")
+
+
 # REQ: LOOP-7
 class RoundTest(unittest.TestCase):
     """P3-4b-4a: the scheduled round Loop 2's canary probe runs. One round
@@ -324,6 +399,26 @@ class RoundTest(unittest.TestCase):
         self.assertEqual(out["findings"], [])
         self.assertEqual(len(out["errors"]), 1)
         self.assertTrue(out["errors"][0].startswith("broken: "))
+
+    def test_a_leak_from_a_target_that_also_errored_is_kept(self):
+        # P3-4b-4c-canary requirement 2 (#515 Security 5): a crash after a
+        # leak does not hide it; the round still closes nothing for it.
+        contain = {"kind": "executor", "name": "browser", "label": "the browser"}
+        rc, out = self.round([{"name": "leak-then-crash", "cmd": CONTROLS + ["leaky-crash"], "contain": contain},
+                              {"name": "quiet", "cmd": CONTROLS + ["clean"]}])
+        self.assertEqual(rc, 1)
+        self.assertEqual(out["checked"], ["quiet"])
+        [f] = out["findings"]
+        self.assertEqual((f["check"], f["subject"], f["severity"], f["contain"]),
+                         ("canary", "leak-then-crash", "high", contain))
+        self.assertEqual(f["detail"], "kinds: " + ", ".join(sorted(canary.KINDS)))
+        [e] = out["errors"]
+        self.assertTrue(e.startswith("leak-then-crash: "), e)
+        self.assertIn("exit 3", e)
+
+    def test_an_errored_target_without_hits_has_no_finding(self):
+        rc, out = self.round([{"name": "broken", "cmd": CONTROLS + ["crash"]}])
+        self.assertEqual((rc, out["findings"], out["checked"]), (1, [], []))
 
     def test_a_failed_control_makes_the_round_an_error(self):
         blind = [{"name": "control-blind", "cmd": CONTROLS + ["clean"], "expect": "leak",
