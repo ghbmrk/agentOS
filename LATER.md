@@ -695,6 +695,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | W5-Dc-r1b l5 | #652 L3 3 (6087271656): grants reads `allowance(now)` before taking `g.mu`, so a grants flush racing an owner `Post` can go one text over the hour's budget (bounded, nothing lost) |
 | W5-Dc-r1b l6 | #652 L3 delta (6087655573): `main()` still passes `attach` its arguments untested (`nil` for `dg` would build and pass); testing `main()` itself is out of scope |
 | SR3-mail-w1 l8 | #654 UX, L3 1, Security 1 (6087870595, 6087872442, 6087873796): `TestNoMailAccountByDefault` counts the `not_connected` frames but does not assert that nothing else crossed the socket (its doc comment says "the socket says nothing more"); compare each connection's full reply after it closes to exactly `{"error":"not_connected"}\n` |
+| P2-2w c3 r2 l1 | L3 on #453, point 3: ARC-1 names hostapd, the supplicant and NetworkManager, which is implementation detail beyond D-073's "host network stack". Drop the names when ARC-1 is next touched |
 
 ## Reuse candidates
 | ID | Component | Why |
