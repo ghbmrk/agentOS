@@ -84,7 +84,7 @@ func TestWithoutSetupHooksEverySetupRouteIsRefused(t *testing.T) {
 	for _, path := range []string{"/setup", "/setup/", "/setup/network", "/setup/number", "/setup/number-code", "/setup/claim",
 		"/setup/codes", "/setup/recovery", "/setup/host", "/setup/ai-key", "/setup/ai-device", "/setup/restart", "/setup/anything"} {
 		for _, m := range []string{"GET", "POST"} {
-			if w := get(m, path); w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "isn't ready yet. This page reloads by itself. If it stays like this for more than a few minutes, turn the PC off and on again.") {
+			if w := get(m, path); w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "not ready yet. This page reloads by itself. If it stays like this for more than a few minutes, turn the PC off and on again.") {
 				t.Errorf("%s %s: %d", m, path, w.Code)
 			}
 		}
