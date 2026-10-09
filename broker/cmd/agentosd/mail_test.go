@@ -379,9 +379,9 @@ func TestMailWrapperRechecksAtDispatch(t *testing.T) {
 // TestMailUnboundRefuses (W2-a off, W2-b early): before the vault reports
 // an account, the wrapper registered under the account denies at
 // authorize (no adapter exists, so no guard and no hook ran), executes
-// nothing and verifies nothing; CH-20's private replies go by text. A
-// wrapper cannot bind without the journal. Once bound, the hook is the
-// journal's and is asked.
+// nothing, reconciles to Unknown and verifies nothing; CH-20's private
+// replies go by text. A wrapper cannot bind without the journal. Once
+// bound, the hook is the journal's and is asked.
 func TestMailUnboundRefuses(t *testing.T) {
 	r := newMailRig(t, identity)
 	id := r.news(1, "shop.example")
@@ -391,6 +391,9 @@ func TestMailUnboundRefuses(t *testing.T) {
 	}
 	if out := r.l.Execute(context.Background(), in, 1); out.Result != journal.ResultNotApplied {
 		t.Fatalf("execute: %+v", out)
+	}
+	if out := r.l.Reconcile(context.Background(), in, 1); out.Result != journal.ResultUnknown {
+		t.Fatalf("reconcile: %+v", out)
 	}
 	if _, err := r.l.Verify(context.Background(), in); err == nil {
 		t.Fatal("verified while unbound")
