@@ -26,14 +26,31 @@ const (
 	tokenCanary = "canary-tok-6f1d0c2a9b"
 )
 
-// surface is childproc's whole exported API. A new entry point (a
-// ProcAttr-taking start, an accessor) is a reviewed change to this list
-// (brief D1, D2).
+// surface is childproc's whole exported API, each name with its type or
+// signature: a changed result is as much a reviewed change as a new
+// entry point (brief D1, D2; #651 L3 1).
 var surface = []string{
-	"Cmd", "Cmd.CombinedOutput", "Cmd.Kill", "Cmd.Output", "Cmd.Pid", "Cmd.Run", "Cmd.Signal",
-	"Cmd.Start", "Cmd.StdinPipe", "Cmd.StdoutPipe", "Cmd.Wait",
-	"Command", "Env", "ErrNoEnv", "ErrWaitDelay", "ExitError", "ExitError.Error", "ExitError.ExitCode",
-	"LookPath", "NewEnv", "Options",
+	"Cmd.CombinedOutput: func() ([]byte, error)",
+	"Cmd.Kill: func() error",
+	"Cmd.Output: func() ([]byte, error)",
+	"Cmd.Pid: func() int",
+	"Cmd.Run: func() error",
+	"Cmd.Signal: func(sig os.Signal) error",
+	"Cmd.Start: func() error",
+	"Cmd.StdinPipe: func() (io.WriteCloser, error)",
+	"Cmd.StdoutPipe: func() (io.ReadCloser, error)",
+	"Cmd.Wait: func() error",
+	"Cmd: struct{c *os/exec.Cmd; env Env}",
+	"Command: func(ctx context.Context, env Env, o Options, name string, args ...string) *Cmd",
+	"Env: struct{pairs []string; built bool}",
+	"ErrNoEnv: error",
+	"ErrWaitDelay: error",
+	"ExitError.Error: func() string",
+	"ExitError.ExitCode: func() int",
+	"ExitError: struct{msg string; code int}",
+	"LookPath: func(file string) (string, error)",
+	"NewEnv: func(kv ...string) Env",
+	"Options: struct{Dir string; Stdin io.Reader; Stdout io.Writer; Stderr io.Writer; SysProcAttr *syscall.SysProcAttr; ExtraFiles []*os.File; WaitDelay time.Duration; KillGroup bool}",
 }
 
 // checkPkg type-checks the non-test Go files of dir, or src when given,
@@ -83,7 +100,7 @@ func TestTheHandleIsOpaque(t *testing.T) {
 
 func TestOpaqueCheckCatchesALeak(t *testing.T) {
 	pkg := checkPkg(t, "", map[string]string{"x.go": `package childproc
-import ("os/exec"; "reflect"; "unsafe")
+import ("fmt"; "io"; "os/exec"; "reflect"; "unsafe")
 type A struct{ exec.Cmd }
 type B struct{ C *exec.Cmd }
 type D struct{ c *exec.Cmd }
@@ -98,9 +115,24 @@ type e struct{ *exec.Cmd }
 type F struct{ e }
 type G struct{ d *D }
 func (G) ok() *exec.Cmd { return nil }
+type Starter interface{ Start() error; Run() error }
+func (d *D) Raw() Starter { return d.c }
+func (d *D) Str() fmt.Stringer { return d.c }
+func (d *D) Unwrapper() interface{ Error() string; Unwrap() error } { return nil }
+func (d *D) Each(f func(any)) {}
+func (d *D) Out(f func() any) {}
+func (d *D) W() io.Writer { return nil }
+func (d *D) Err() error { return nil }
+type K struct{ X fmt.Stringer }
+func Z() K { return K{} }
 `})
 	got := leaks(pkg)
-	for _, want := range []string{"A: embeds", "B.C", "D.Cmd", "D.Any", "D.V", "D.P", "D.M", "I.Get", "New", "F: embeds"} {
+	for _, want := range []string{"A: embeds", "B.C", "D.Cmd", "D.Any", "D.V", "D.P", "D.M", "I.Get", "New", "F: embeds",
+		// D1's interface clause (#651 L3 1, Security 4a 2): an interface
+		// an os/exec type satisfies, and any handed to a callback.
+		"D.Raw", "D.Str", "D.Unwrapper", "D.Each",
+		// A type walked first as a declaration, then as a result.
+		"Z.X"} {
 		if !slices.ContainsFunc(got, func(s string) bool { return strings.HasPrefix(s, want) }) {
 			t.Errorf("no leak reported for %s; got %q", want, got)
 		}
@@ -109,17 +141,67 @@ func (G) ok() *exec.Cmd { return nil }
 		if strings.HasPrefix(s, "G") {
 			t.Errorf("an unexported method or field was reported: %s", s)
 		}
+		// error is exempt: TestErrorsCarryNoExecType holds it at run time.
+		// An any the caller's callback returns flows in, not out.
+		for _, ok := range []string{"D.W", "D.Err", "D.Out"} {
+			if strings.HasPrefix(s, ok+":") {
+				t.Errorf("reported, but yields no os/exec value: %s", s)
+			}
+		}
+	}
+}
+
+// A changed result type changes the pin, not only a new name (#651 L3 1).
+func TestTheSurfacePinsSignatures(t *testing.T) {
+	pkg := checkPkg(t, "", map[string]string{"x.go": `package childproc
+import "fmt"
+type C struct{ X int }
+func (C) Raw() fmt.Stringer { return nil }
+`})
+	want := []string{"C.Raw: func() fmt.Stringer", "C: struct{X int}"}
+	if got := exported(pkg); !slices.Equal(got, want) {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }
 
 // leaks walks every exported identifier's type and reports an os/exec
 // type, an embedded one, or an accessor that could yield one (any or an
-// empty interface, reflect.Value, unsafe.Pointer).
+// empty interface, an interface an os/exec type satisfies, reflect.Value,
+// unsafe.Pointer). result marks a value that flows out of the package: a
+// result, or an argument the package passes to a caller's callback.
 func leaks(pkg *types.Package) []string {
 	var bad []string
-	seen := map[types.Type]bool{}
+	// A type is walked once per direction: as a declaration its fields
+	// flow in, as a result they flow out.
+	type visit struct {
+		t      types.Type
+		result bool
+	}
+	seen := map[visit]bool{}
+	execTypes := execTypes(pkg)
+	// satisfied reports the os/exec type an interface result could hold.
+	// error is exempt: every start returns one, and scrub maps each
+	// os/exec error to childproc's (TestErrorsCarryNoExecType).
+	satisfied := func(t types.Type) string {
+		it, ok := t.Underlying().(*types.Interface)
+		if !ok || it.Empty() || types.Identical(t, types.Universe.Lookup("error").Type()) {
+			return ""
+		}
+		for _, x := range execTypes {
+			if types.Implements(x, it) {
+				return x.String()
+			}
+		}
+		return ""
+	}
 	var walk func(where string, t types.Type, result bool)
 	walk = func(where string, t types.Type, result bool) {
+		if result {
+			if x := satisfied(types.Unalias(t)); x != "" {
+				bad = append(bad, where+": an interface "+x+" satisfies")
+				return
+			}
+		}
 		switch t := types.Unalias(t).(type) {
 		case *types.Basic:
 			if t.Kind() == types.UnsafePointer {
@@ -137,11 +219,13 @@ func leaks(pkg *types.Package) []string {
 			walk(where, t.Key(), result)
 			walk(where, t.Elem(), result)
 		case *types.Signature:
+			// A parameter flows the other way from its signature: a
+			// callback's arguments flow out.
 			for v := range t.Params().Variables() {
-				walk(where, v.Type(), false)
+				walk(where, v.Type(), !result)
 			}
 			for v := range t.Results().Variables() {
-				walk(where, v.Type(), true)
+				walk(where, v.Type(), result)
 			}
 		case *types.Interface:
 			if t.Empty() && result {
@@ -170,10 +254,10 @@ func leaks(pkg *types.Package) []string {
 				bad = append(bad, where+": reflect.Value")
 				return
 			}
-			if t.Obj().Pkg() != pkg || seen[t] {
+			if t.Obj().Pkg() != pkg || seen[visit{t, result}] {
 				return
 			}
-			seen[t] = true
+			seen[visit{t, result}] = true
 			walk(where, t.Underlying(), result)
 			for m := range t.Methods() {
 				if m.Exported() {
@@ -202,6 +286,23 @@ func leaks(pkg *types.Package) []string {
 	return bad
 }
 
+// execTypes are the exported os/exec named types and pointers to them,
+// as pkg imports them; none if it does not import os/exec.
+func execTypes(pkg *types.Package) []types.Type {
+	var out []types.Type
+	for _, im := range pkg.Imports() {
+		if im.Path() != "os/exec" {
+			continue
+		}
+		for _, n := range im.Scope().Names() {
+			if tn, ok := im.Scope().Lookup(n).(*types.TypeName); ok && tn.Exported() {
+				out = append(out, tn.Type(), types.NewPointer(tn.Type()))
+			}
+		}
+	}
+	return out
+}
+
 // execTyped reports a type that is, or points to, an os/exec type.
 func execTyped(t types.Type) bool {
 	if p, ok := t.(*types.Pointer); ok {
@@ -211,24 +312,28 @@ func execTyped(t types.Type) bool {
 	return ok && n.Obj().Pkg() != nil && n.Obj().Pkg().Path() == "os/exec"
 }
 
-// exported lists the package's exported names and exported methods.
+// exported lists the package's exported names and exported methods, each
+// with its type: a type's underlying type, a func's or method's signature.
 func exported(pkg *types.Package) []string {
 	var out []string
+	q := types.RelativeTo(pkg)
 	scope := pkg.Scope()
 	for _, n := range scope.Names() {
 		o := scope.Lookup(n)
 		if !o.Exported() {
 			continue
 		}
-		out = append(out, n)
 		if tn, ok := o.(*types.TypeName); ok {
+			out = append(out, n+": "+types.TypeString(tn.Type().Underlying(), q))
 			ms := types.NewMethodSet(types.NewPointer(tn.Type()))
 			for s := range ms.Methods() {
 				if s.Obj().Exported() && s.Obj().Pkg() == pkg {
-					out = append(out, n+"."+s.Obj().Name())
+					out = append(out, n+"."+s.Obj().Name()+": "+types.TypeString(s.Type(), q))
 				}
 			}
+			continue
 		}
+		out = append(out, n+": "+types.TypeString(o.Type(), q))
 	}
 	sort.Strings(out)
 	return out
