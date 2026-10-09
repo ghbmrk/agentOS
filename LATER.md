@@ -383,6 +383,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | P3-4b-4b l7 | L3 delta on #548: `loops.tamperNonce` (regexp) in `machine.go` is used only by tests; move it to the test file or use it to check `newTamperNonce`'s output |
 | P3-4b-4b l8 | Security 4a delta 1 on #548 (predates the fix; covered by release row P3-4b-4c-fresh): a probe guest that skips its scripted writes still closes an open tamper finding; if the probe image is ever shared with agent code, closing must need a broker-side write check (a canary the broker plants and verifies through the same mount) |
 | SR3-5-f1 l1 | Delta L3 on #571 (comment 6078264771): a pin is never cleared for an intent that is denied or never dispatched; pins live in memory, so a restart drops them |
+| P3-4b-3r-pass l1 | Builder finding on P3-4b-3r-pass: a High finding that flaps is texted once and now told once that it cleared (S39); a return within `ReText` is `Again`, untexted, and shows only in the digest, so the owner's last text says "Cleared" while it is back; fix by texting an `Again` finding whose last closure was texted (later) |
 
 ## Reuse candidates
 | ID | Component | Why |

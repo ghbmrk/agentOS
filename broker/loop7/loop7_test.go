@@ -372,3 +372,94 @@ func TestAProbeFailureIsReportedAndAPassResolvesIt(t *testing.T) {
 		t.Fatalf("clean round n=%d err=%v open %v", n, err, g.open)
 	}
 }
+
+// runTurn runs the LOOP-7 job Next offers now, under ctx.
+func runTurn(t *testing.T, s *Source, ctx context.Context) {
+	t.Helper()
+	j, ok := s.Next(ctx, true)
+	if !ok {
+		t.Fatal("no LOOP-7 job offered")
+	}
+	j.Run(ctx)
+}
+
+// P3-4b-3r-pass requirement 3 (3a-r5; #560 Potency, L3 point 3): STATUS
+// says when fuzzing is configured but no fuzz step has completed for
+// longer than Recheck, and when a target fails on every turn for a full
+// cycle, in plain words that name no target. A step offered but preempted
+// is not progress.
+func TestStatusSaysWhenFuzzingMakesNoProgress(t *testing.T) {
+	const stalled = "Loop 2: my fuzz self-tests have not run for "
+	const broken = "Loop 2: one of my fuzz self-tests cannot run."
+	start := time.Unix(1_800_000_000, 0)
+	setup := func(t *testing.T, body string) (*Source, *time.Time) {
+		release := t.TempDir()
+		tg := fakeTarget(t, release, body)
+		clock := start
+		s := newSource(t, newFake(), Config{Targets: []Target{tg}, Release: release, Every: 12 * time.Hour,
+			Now: func() time.Time { return clock }})
+		return s, &clock
+	}
+
+	t.Run("completing steps", func(t *testing.T) {
+		s, clock := setup(t, "exit 0")
+		for i := 0; i < 6; i++ {
+			runTurn(t, s, context.Background())
+			*clock = clock.Add(12 * time.Hour)
+		}
+		if d := s.Digest(); len(d) != 0 {
+			t.Fatalf("digest %q for a source whose steps complete", d)
+		}
+	})
+
+	t.Run("preempted", func(t *testing.T) {
+		s, clock := setup(t, "exit 0")
+		runTurn(t, s, context.Background())
+		gone, cancel := context.WithCancel(context.Background())
+		cancel()
+		for i := 0; i < 4; i++ {
+			*clock = clock.Add(12 * time.Hour)
+			runTurn(t, s, gone) // offered, preempted at once
+		}
+		if d := strings.Join(s.Digest(), "\n"); d != stalled+"2 days." {
+			t.Fatalf("digest %q, want %q", d, stalled+"2 days.")
+		}
+		// A completed step clears it.
+		runTurn(t, s, context.Background())
+		if d := s.Digest(); len(d) != 0 {
+			t.Fatalf("digest %q after a completed step", d)
+		}
+	})
+
+	t.Run("a target that cannot run", func(t *testing.T) {
+		s, clock := setup(t, "exit 0")
+		if err := os.Remove(s.cfg.Targets[0].Binary); err != nil {
+			t.Fatal(err)
+		}
+		runTurn(t, s, context.Background())
+		if d := s.Digest(); len(d) != 0 {
+			t.Fatalf("digest %q after one failed turn", d)
+		}
+		*clock = clock.Add(24 * time.Hour) // its next turn: a full cycle
+		runTurn(t, s, context.Background())
+		d := strings.Join(s.Digest(), "\n")
+		// Exactly Recheck since the start: not yet longer than it.
+		if d != broken {
+			t.Fatalf("digest %q", d)
+		}
+		for _, id := range []string{"Fuzz", "fake", "/", ".test"} {
+			if strings.Contains(d, id) {
+				t.Fatalf("digest names %q: %q", id, d)
+			}
+		}
+	})
+
+	t.Run("no targets", func(t *testing.T) {
+		clock := start
+		s := newSource(t, newFake(), Config{Every: time.Hour, Now: func() time.Time { return clock }})
+		clock = clock.Add(30 * 24 * time.Hour)
+		if d := s.Digest(); len(d) != 0 {
+			t.Fatalf("digest %q with no fuzzing configured", d)
+		}
+	})
+}

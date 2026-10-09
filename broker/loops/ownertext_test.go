@@ -4,6 +4,7 @@ package loops
 
 import (
 	"context"
+	"errors"
 	"regexp"
 	"strings"
 	"testing"
@@ -387,6 +388,171 @@ func TestClearedWaitsForEveryFindingSharingItsPlainName(t *testing.T) {
 		runProbeJob(t, r.g)
 		if got := r.texts[before:]; len(got) != 1 || got[0] != "Security checks: Cleared: the code filter. Nothing more is needed from you." {
 			t.Fatalf("texts %q", got)
+		}
+	})
+}
+
+// clearedTexts is the texts since before that say a finding cleared.
+func clearedTexts(texts []string, before int) []string {
+	var out []string
+	for _, t := range texts[before:] {
+		if strings.Contains(t, "Cleared:") {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// P3-4b-3r-pass requirement 1 (#558 Security 4a point 2, L3 point 3): a
+// check that failed to run closes none of its open findings, seen or
+// not, so no "Cleared" is sent for a finding nothing looked at; the next
+// clean run closes it and says so once.
+func TestAFailedCheckClosesNothing(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		break_ func(*box)
+		fail   func(*box, error)
+		fix    func(*box)
+		want   string
+	}{
+		{"paused hash, Signed errors",
+			func(b *box) { b.measured["guest-image/openclaw"] = "tampered" },
+			func(b *box, err error) { b.signedErr = err },
+			func(b *box) { b.measured["guest-image/openclaw"] = "aa" },
+			"Cleared: guest-image/openclaw. The agent machine stays paused until you resume it on my Wi-Fi page."},
+		{"unpaused drift, Live errors",
+			func(b *box) { b.live["config/quiet.json"] = "edited" },
+			func(b *box, err error) { b.liveErr = err },
+			func(b *box) { b.live["config/quiet.json"] = "c1" },
+			"Cleared: config/quiet.json. Nothing more is needed from you."},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			b := cleanBox()
+			c.break_(b)
+			r := newGuardRig(t, b)
+			if n := r.pass(t); n != 1 || len(r.texts) != 1 {
+				t.Fatalf("findings %d, texts %q", n, r.texts)
+			}
+			c.fix(b) // repaired, but the check cannot look
+			c.fail(b, errors.New("unreadable"))
+			before := len(r.texts)
+			r.now = r.now.Add(6 * time.Hour)
+			r.pass(t)
+			if got := clearedTexts(r.texts, before); len(got) != 0 {
+				t.Fatalf("cleared while its check failed: %q", got)
+			}
+			if len(r.g.Evidence()) != 1 || len(r.g.st.Open) != 1 {
+				t.Fatalf("finding closed while its check failed: %+v", r.g.st.Open)
+			}
+			c.fail(b, nil)
+			r.now = r.now.Add(6 * time.Hour)
+			r.pass(t)
+			if got := clearedTexts(r.texts, before); len(got) != 1 || !strings.Contains(got[0], c.want) {
+				t.Fatalf("cleared texts %q, want one with %q", got, c.want)
+			}
+			if len(r.g.st.Open) != 0 {
+				t.Fatalf("still open: %+v", r.g.st.Open)
+			}
+			r.now = r.now.Add(6 * time.Hour)
+			r.pass(t)
+			if got := clearedTexts(r.texts, before); len(got) != 1 {
+				t.Fatalf("cleared said again: %q", got)
+			}
+		})
+	}
+}
+
+// P3-4b-3r-pass requirement 2 (#558 Potency; S39): Pass texts "Cleared"
+// for every texted finding, paused or not, through the dedupe Resolve
+// and runProbe use, and never urgently; an untexted one clears only in
+// STATUS and the digest.
+func TestPassTellsEveryTextedFindingItCleared(t *testing.T) {
+	cases := []struct {
+		name   string
+		break_ func(*box)
+		fix    func(*box)
+		want   string // "" means no text
+	}{
+		{"texted unpaused",
+			func(b *box) { b.live["config/quiet.json"] = "edited" },
+			func(b *box) { b.live["config/quiet.json"] = "c1" },
+			"Cleared: config/quiet.json. Nothing more is needed from you."},
+		{"texted paused",
+			func(b *box) { b.measured["guest-image/openclaw"] = "tampered" },
+			func(b *box) { b.measured["guest-image/openclaw"] = "aa" },
+			"Cleared: guest-image/openclaw. The agent machine stays paused until you resume it on my Wi-Fi page."},
+		{"untexted",
+			func(b *box) {
+				b.expiries = append(b.expiries, Expiry{Name: "cal-cert", NotAfter: t0.Add(3 * 24 * time.Hour)})
+			},
+			func(b *box) { b.expiries = b.expiries[:1] },
+			""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			b := cleanBox()
+			c.break_(b)
+			r := newGuardRig(t, b)
+			if n := r.pass(t); n != 1 {
+				t.Fatalf("findings %d: %+v", n, r.g.Evidence())
+			}
+			c.fix(b)
+			before := len(r.texts)
+			r.now = r.now.Add(6 * time.Hour)
+			r.pass(t)
+			got := r.texts[before:]
+			if c.want == "" {
+				if len(got) != 0 {
+					t.Fatalf("untexted finding texted on clearing: %q", got)
+				}
+				return
+			}
+			if len(got) != 1 || !strings.Contains(got[0], c.want) || strings.Count(got[0], "Cleared:") != 1 {
+				t.Fatalf("texts %q, want one with %q", got, c.want)
+			}
+			if r.urgent[len(r.urgent)-1] {
+				t.Fatalf("cleared text sent urgent: %q", got[0])
+			}
+		})
+	}
+
+	// Two texted findings whose plain names join ("config/a!" and
+	// "config/a" both read config/a) send one line, once both cleared.
+	t.Run("shared plain name", func(t *testing.T) {
+		b := cleanBox()
+		b.live["config/a!"], b.live["config/a"] = "x", "y"
+		r := newGuardRig(t, b)
+		if n := r.pass(t); n != 2 {
+			t.Fatalf("findings %d", n)
+		}
+		before := len(r.texts)
+		delete(b.live, "config/a!")
+		r.now = r.now.Add(6 * time.Hour)
+		r.pass(t)
+		if got := clearedTexts(r.texts, before); len(got) != 0 {
+			t.Fatalf("cleared while another config/a is open: %q", got)
+		}
+		delete(b.live, "config/a")
+		r.now = r.now.Add(6 * time.Hour)
+		r.pass(t)
+		if got := clearedTexts(r.texts, before); len(got) != 1 || strings.Count(got[0], "Cleared: config/a.") != 1 {
+			t.Fatalf("cleared texts %q", got)
+		}
+	})
+	// One clears in the pass where another with its plain name is found:
+	// the new alert goes out, and no "Cleared" for the same name with it.
+	t.Run("shared plain name, found as one clears", func(t *testing.T) {
+		b := cleanBox()
+		b.live["config/a!"] = "x"
+		r := newGuardRig(t, b)
+		r.pass(t)
+		before := len(r.texts)
+		delete(b.live, "config/a!")
+		b.live["config/a"] = "y"
+		r.now = r.now.Add(6 * time.Hour)
+		r.pass(t)
+		if got := clearedTexts(r.texts, before); len(got) != 0 {
+			t.Fatalf("cleared sent with a new config/a: %q", got)
 		}
 	})
 }

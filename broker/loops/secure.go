@@ -433,19 +433,24 @@ func (s *Guard) Pass(ctx context.Context) (int, error) {
 	// findings in the text so a new alert is never pushed into MORE.
 	var lines, later []string
 	urgent := false
+	// A check that failed this pass looked at nothing, so none of its
+	// open findings closes, seen or not (P3-4b-3r-pass; #558 Security 4a).
+	broke := map[Check]bool{}
+	for _, c := range failed {
+		broke[Check(c)] = true
+	}
+	var closed []Record
 	for _, id := range sortedKeys(s.st.Open) {
 		rec := s.st.Open[id]
-		if seen[id] || rec.Reported && !clear[id] {
+		if seen[id] || rec.Reported && !clear[id] || broke[rec.Finding.Check] {
 			continue
 		}
 		// No longer observed; its evidence stays. A pause it caused stays
-		// too, and the owner hears it cleared where they heard of it.
+		// too.
 		delete(s.st.Open, id)
 		delete(s.held, id)
 		s.st.Cleared[id] = now
-		if rec.Contained == "paused" && rec.Texted {
-			later = append(later, clearedLine(rec))
-		}
+		closed = append(closed, rec)
 	}
 	// A version (installed or fixed) that stays uncomparable for
 	// UncomparedAlert is texted once
@@ -498,6 +503,11 @@ func (s *Guard) Pass(ctx context.Context) (int, error) {
 			urgent = urgent || urgentText(rec)
 		}
 	}
+	// Every texted finding is told it cleared, paused or not, once no
+	// open texted finding shares its plain name, new ones included (S39).
+	s.mu.Lock()
+	later = append(later, s.clearedLinesLocked(closed)...)
+	s.mu.Unlock()
 	text := s.batch(append(lines, later...))
 	s.mu.Lock()
 	err := s.saveLocked()
