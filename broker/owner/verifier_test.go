@@ -367,7 +367,7 @@ func TestUnlockProofOnlySignsIn(t *testing.T) {
 	if f.calls() != 0 {
 		t.Fatalf("the vault process was asked %d times", f.calls())
 	}
-	if _, err := r.ch.LocalSignIn(proof); err != nil {
+	if _, _, err := r.ch.LocalSignIn(proof); err != nil {
 		t.Fatalf("sign-in with the proof: %v", err)
 	}
 }
@@ -377,7 +377,7 @@ func TestUnlockProofOnlySignsIn(t *testing.T) {
 // (#65 L3 follow-up 1).
 func TestRefusedUnlockProofIsNotCounted(t *testing.T) {
 	r, f := newVerifierRig(t)
-	if _, err := r.ch.LocalSignIn(UnlockProofPrefix + "0123456789abcdef0123456789abcdef"); err != ErrWrongCode {
+	if _, _, err := r.ch.LocalSignIn(UnlockProofPrefix + "0123456789abcdef0123456789abcdef"); err != ErrWrongCode {
 		t.Fatalf("refused proof: %v", err)
 	}
 	r.ch.mu.Lock()

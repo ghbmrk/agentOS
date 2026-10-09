@@ -21,14 +21,14 @@ Primary lane; remediation is unclaimed. [Review record](reviews/security/2026-10
 
 | ID | Package | Needs | State |
 |---|---|---|---|
-| SR3-1 | [Bind local sign-in to the authenticated lock generation](briefs/SR3-1.md) | P2-2w a, P2-2w b | queued (P1; release) |
+| SR3-1 | [Bind local sign-in to the authenticated lock generation](briefs/SR3-1.md) | P2-2w a, P2-2w b | in review (#431) |
 | SR3-2 | [Enforce pre-allowance rate limits at dispatch](briefs/SR3-2.md) | P2-grants, P2-gr8 | in review (#428) |
 | SR3-3 | [Show and bind the complete pre-allowance rule at approval](briefs/SR3-3.md) | P2-grants, P2-2a | queued (P2; release) |
-| SR3-4 | [Make update finalization durable and idempotent](briefs/SR3-4.md) | UPD-a, P4-3, P3-1 | queued (P2; release) |
+| SR3-4 | [Make update finalization durable and idempotent](briefs/SR3-4.md) | UPD-a, P4-3, P3-1 | in review (#434) |
 | SR3-5 | [Preserve IMAP message identity through mutations and undo](briefs/SR3-5.md) | P2-6m | queued (P2; release) |
-| SR3-6 | [Invalidate verified updates when attestation policy narrows](briefs/SR3-6.md) | P4-3, P3-1 | queued (P2; release) |
-| SR3-7 | [Use one validated request for model reservation and routing](briefs/SR3-7.md) | P2-7, P1-7 | queued (P2; release) |
-| SR3-8 | [Commit clean-room output durably before recording completion](briefs/SR3-8.md) | P4-2 | queued (P2; release) |
+| SR3-6 | [Invalidate verified updates when attestation policy narrows](briefs/SR3-6.md) | P4-3, P3-1 | in review (#430) |
+| SR3-7 | [Use one validated request for model reservation and routing](briefs/SR3-7.md) | P2-7, P1-7 | in review (#429) |
+| SR3-8 | [Commit clean-room output durably before recording completion](briefs/SR3-8.md) | P4-2 | in review (#432) |
 
 ## Phase 0: harness and risk spikes
 
@@ -183,7 +183,7 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | P2-2w | [Local UI process and owner socket](briefs/P2-2w.md) | P2-2a | building (in sub-rows a, b, d, c (P3-2 thread)) |
 | P2-2a f1 | [Page result after a changed item](briefs/P2-2a-f1.md) | P2-2a | merged (#329) |
 | P2-2a f2 | [Page result for a changed release adoption](briefs/P2-2a-f2.md) | P2-2a f1 | in review (#363) |
-| P2-2a f3 | [Re-offer an awaiting-owner release the pipeline dropped](briefs/P2-2a-f3.md) | P2-2a f2 | queued (after #363; release finding from L3 on #363) |
+| P2-2a f3 | [Re-offer an awaiting-owner release the pipeline dropped](briefs/P2-2a-f3.md) | P2-2a f2 | in review (#423) |
 | P2-2w a | [`localui.sock` in agentosd](briefs/P2-2w-a.md) | P2-2a | merged (b00db30; #184) |
 | P2-2w b | [`agentos-localui` command under its own uid](briefs/P2-2w-b.md) | P2-2w a | merged (0302131; #189) |
 | P2-2w d | [LocalUI on (part 1)](briefs/P2-2w-d.md) | P2-2w b | merged (#322; split 2026-10-08; part 2 is d2) |
@@ -276,15 +276,17 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | W3-forget-a | [FORGET by text in an unlocked session](briefs/W3-forget-a.md) | W3-forget | Next build item B | merged (05913d0; #182) |
 | W3-forget-b | [Authenticated forget log replayed over backups](briefs/W3-forget-b.md) | W3-forget-a | Next build item B | building (split into sub-rows) |
 | W3-forget-b1 | [Authenticated forget log checked on restore](briefs/W3-forget-b1.md) | W3-forget-a | Next build item B | merged (01c8515; #409; items 1–3 ruled by Mark on #317, 2026-10-08) |
-| W3-forget-b1-4 | [Owner confirms a restore with no anchor](briefs/W3-forget-b1-4.md) | W3-forget-b1, D-065 (#406) | Next build item B | queued, ruled (D-071), ready to build (stale-backup option ruled, D-065; must land before A8/G3) |
-| W3-forget-b1-5 | Vault serves AppendForget/ExportForgetLog and agentosd wires its forgetLog after the restore check is wired; forgetLog stays nil until then (#409 R1; brief to write) | W3-forget-b1, W3-forget-b1-6 | Next build item B | queued (needs brief) |
-| W3-forget-b1-6 | Wire the restore command: ForgetLogs from every destination, the PC's Counter, Layout.ForgetLog always set, and Box.Counter set by the vault process (#409; brief to write). Release conditions from #409 Security R5 and L3, each with a test: (a) Layout.ForgetLog and the marker path are `<learn dir>/forget-log.json`, matching agentosd's restoreHold; (b) agentosd is stopped before the restore; (c) a start without the marker cross-checks State.Pending; (d) decide whether a failed TPM anchor (Define/Read at storeBackupKey) fails storing the recovery key or falls back to anchoring at the first forget. A held restore must not be silent toward the owner (UX), hence b1-7. Also (#409, release): Security R2, a corrupted destination copy must not make the restore `forged` when a good copy exists (proposal: use the copy's verified prefix); Security R3, cap `decodeForgetLog` and each `Options.ForgetLogs` copy (for example 4 MiB) at decode and in the restore command's reader | W3-forget-b1, W3-forget-b1-7 | Next build item B | queued (needs brief) |
-| W3-forget-b1-7 | Text the owner the held restore's PendingNotice (CH-12) from the marker agentosd refuses to start on (#409 U2; brief to write). Also (#409 UX U6, release): add the CH-12 recurring-kind check ("a step that cannot work") for owner texts, per reviews/ux/README.md | W3-forget-b1, W3-forget-b1-4 | Next build item B | queued (needs brief) |
+| W3-forget-b1-4 | [Owner confirms a restore with no anchor](briefs/W3-forget-b1-4.md) | W3-forget-b1, D-065 (#406) | Next build item B | merged (c422039; #436) |
+| W3-forget-b1-5 | Vault serves AppendForget/ExportForgetLog and agentosd wires its forgetLog after the restore check is wired; forgetLog stays nil until then (#409 R1; brief to write) Also (#436 Potency, release): reword ASSUMPTIONS Q5's "on average anywhere" claim; when the last forget falls within 45 days of the backup, the real date is always the latest one shown | W3-forget-b1, W3-forget-b1-6 | Next build item B | queued (needs brief) |
+| W3-forget-b1-6 | Wire the restore command: ForgetLogs from every destination, the PC's Counter, Layout.ForgetLog always set, and Box.Counter set by the vault process (#409; brief to write). Release conditions from #409 Security R5 and L3, each with a test: (a) Layout.ForgetLog and the marker path are `<learn dir>/forget-log.json`, matching agentosd's restoreHold; (b) agentosd is stopped before the restore; (c) a start without the marker cross-checks State.Pending; (d) decide whether a failed TPM anchor (Define/Read at storeBackupKey) fails storing the recovery key or falls back to anchoring at the first forget. A held restore must not be silent toward the owner (UX), hence b1-7. Also (#409, release): Security R2, a corrupted destination copy must not make the restore `forged` when a good copy exists (proposal: use the copy's verified prefix); Security R3, cap `decodeForgetLog` and each `Options.ForgetLogs` copy (for example 4 MiB) at decode and in the restore command's reader Also (#436 Security point 2, release): a forget-log-missing restore never opens the authentic copies, so "Never" releases with no log even when a copy holds forgets; carry the longest authentic copy, or hold the restore | W3-forget-b1, W3-forget-b1-7 | Next build item B | queued (needs brief) |
+| W3-forget-b1-7 | Text the owner the held restore's PendingNotice (CH-12) from the marker agentosd refuses to start on (#409 U2; brief to write). Also (#409 UX U6, release): add the CH-12 recurring-kind check ("a step that cannot work") for owner texts, per reviews/ux/README.md Also (#436, release): L3 — route only authenticated owner-channel replies into answerHeld, and serialize replies; UX — the unanchored header says "this PC", not "new PC", and when there is no newer backup the wrong-answer text needs a named way to retry | W3-forget-b1, W3-forget-b1-4 | Next build item B | queued (needs brief) |
 | W3-forget-b2 | [Builder-lineage rollback with A/B](briefs/W3-forget-b2.md) | W3-forget-a | Next build item B | merged (#321) |
 | W3-forget-b2b | [Agent machine's work taken back as item 2](briefs/W3-forget-b2b.md) | W3-forget-b2 | Next build item B | merged (#327) |
-| W3-forget-b3 | [Promised done text survives a restart](briefs/W3-forget-b3.md) | W3-forget-b1 | Next build item B | queued |
+| W3-forget-b3 | [Promised done text survives a restart](briefs/W3-forget-b3.md) | W3-forget-b1 | Next build item B | in review (#425) |
 | W3-forget-b2c | [Owed take-backs for W3-forget-b2b](briefs/W3-forget-b2c.md) | W3-forget-b2b | Next build item B | in review (#427) |
 | W3-implicit | [Report accepted-implicitly guest effects](briefs/W3-implicit.md) | W3 PW3 | — | queued |
+| W3-forget-b2c-2 | Item 2's texts (`forgetAgentDone`, `forgetAgentNotYet` and the rest) are owed until they send, as W3-forget-b3 does for item 1; add a check that no done text in `ownerForget` reaches `inform` directly (release, UX-182-3 / CH-12; Defect: W3-forget-b2c; L3 on #425, second PR with this kind of finding; brief to write) | W3-forget-b2c, W3-forget-b3 | Next build item B | queued (needs brief) |
+| W3-forget-b3r | The local Wi-Fi page lists older tasks and can forget one (potency R2, carried by W3-forget-b3; needs a page, socket route and forget path in `broker/localui`; release, L3 on #425; brief to write) | W3-forget-b3 | Next build item B | queued (needs brief) |
 | W5 | [Owner channel](briefs/W5.md) | W3 | loops thread | queued |
 | W5a | [Loop 2 passive checks](briefs/W5a.md) | #54 merged, W3 | builder B (lenses) | merged (3d2daab; #169) |
 | W5a-resume | [Per-grant resume on the local page](briefs/W5a-resume.md) | W5a, local page | builder (session_014jQE43g7uFA46BsQJD3VGh) | in review (tier A) |

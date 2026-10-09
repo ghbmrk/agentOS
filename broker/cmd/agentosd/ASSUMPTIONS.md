@@ -1,5 +1,7 @@
 # agentosd wiring: assumptions
 
+## Owed take-backs (W3-forget-b2c)
+
 Started by W3-forget-b2c (owed take-backs for FORGET's item 2, the UX
 release finding R-1/R-2 on #327). Each row is a reading of the spec, or a
 gap left for a later package, that a reviewer may want to change.
@@ -11,3 +13,20 @@ gap left for a later package, that a reviewer may want to change.
 | 3 | STATUS's agent line says why the agent is not running, so "Send STATUS to see why." is a real step for the no-agent text. Recall off (no recall directory or vault verifier) has no STATUS line and no step the owner can reach, so that text names none and says what remains. | CH-12 (a problem text says what the owner can do; never a step that cannot fix the cause) | If STATUS gains a recall-off line, that text can name it. |
 | 4 | A not-saved take-back is tried again in this boot with the forget's backoff (2 s doubling to `forgetRetryMax`) until it is saved or the box shuts down; the owner is told once at the start and once when done, matching item 1's not-saved promise. | CH-12, UX-182-3 (a promised text comes) | If retries should be bounded, the text must stop saying "I keep trying". |
 | 5 | Every approved take-back is in the forget log before the owner is told, owed or done, so a restore replays it (`resumeRestored`); one logged twice is taken back once, as recall reports it handled. | W3-forget-b1 (forget log), security 4a on #427 | `TestForgetItem2OwedSurvivesARestore` fails. |
+
+## Owed done texts (W3-forget-b3)
+
+Built for W3-forget-b3 ("Promised done text survives a restart") against CAP-3, UX-182-3 and SHOULD 4 of L3 on #182. Covers the owed done texts in `broker/cmd/agentosd` (`forget.go`, `learn.go`). Each row is a reading of the spec or the brief that a reviewer may want to change.
+
+| # | Assumption | Spec basis | If it changes |
+|---|---|---|---|
+| F1 | **Owed done texts are their own store, not the forget log.** `forget-owed.json` in the learn dir maps goal ID to the task's time and the undone count. It is written before the tombstone and cleared once the owner is told. The forget log (W3-forget-b1) is an authenticated append-only record of what was forgotten, not of what the owner was told, and it is nil until W3-forget-b1-5. "Rides the forget log" is read as: the done text after a restart appends to the forget log like any other done forget, and its tail follows that append. | CAP-3; SHOULD 4 on #182 | Move the owed state into the forget log once it carries an entry per told text. |
+| F2 | **Told after the replay, at attach.** The start-up replay (`replayForgotten`) runs in `openLearning`. If it fails, learning does not open and nothing is told. The owner channel exists only from `attach`, so the owed goals are snapshotted after a successful replay and texted at attach. | UX-182-3; CAP-3 (told only after the save) | Send them from the replay itself if the owner channel opens earlier. |
+| F3 | **No tombstone, no text.** An owed goal whose tombstone did not hold at start was not forgotten, so it is dropped untold. This covers a crash before the tombstone saved, and a "Not forgotten" no later save wrote. | CAP-3 | Text "not forgotten" at start for these too. |
+| F4 | **A repeated text over a missing one.** If clearing a told text fails to save, the next start tells it again. | CAP-3 | Clear before telling, accepting a lost text. Class: later (L3 on #425). |
+| F5 | **Named by its time, never its text.** The text says "Your task from <date> is forgotten now." because the owner may have texted since. Without the ID's time it says "A task you asked me to forget". The store holds goal IDs, times and counts only. | security C2 on W3-forget | None expected. |
+| F6 | **Uncapped.** One entry per forget not yet told. Entries exist only between a YES and its done text, so the store stays small. | — | Cap it if forgets can be owed in bulk. Class: later (L3 on #425). |
+| F7 | **A restored backup's owed file is replayed like the live one.** Its goals that the restored tombstone or forget log hold are told again, as "forgotten now". | REC-2 | Drop the owed file on restore. Class: later (L3 on #425). |
+| F8 | **The local Wi-Fi page's task list (potency R2) is not built here.** `broker/localui` has no task page. Listing older tasks needs a new page, a socket route and a forget path, all outside this brief's files. It is classed release (agreed with L3 on #425; the coordinator adds the BOARD row). | brief W3-forget-b3 (carried) | — |
+| F9 | **A done text is owed until it sends.** The owner channel's send reports failure (`loop2Notify.try`), for example modemlink's ErrDown just after boot. A text that does not send stays in the owed file, with whether it was logged and the agent taken back, and is sent again with backoff (2s doubling to a minute). At a shutdown it is left to the next start. | CAP-3; L3 B1 on #425 | None expected. |
+| F10 | **An unreadable owed file fails safe.** It is renamed to `forget-owed.json.bad`, a fresh file starts, and the owner is owed one fixed notice: "After a restart I couldn't read which forget texts I still owed you. Send FORGET to see your recent tasks." Entries that read but no forget wrote are sanitized: a goal with no tombstone gets no text, a negative count reads as none, and a future time reads as "A task you asked me to forget". No text repeats words from the file. | security C2; L3 B2 on #425 | Text each recoverable goal from the `.bad` file instead. |

@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 	"sync"
@@ -63,10 +64,12 @@ type Boot struct {
 	Blessed     bool
 }
 
-// Stager is the change pipeline's hook for a staged image adoption.
+// Stager is the change pipeline's hook for a staged image adoption. Both
+// take the adoption's exact ID and return nil when the adoption already
+// settled the same way, so Resume can call them again (SR3-4).
 type Stager interface {
-	ConfirmStaged(ref string) error
-	StageFailed(ctx context.Context, ref string) error
+	ConfirmStaged(id string) error
+	StageFailed(ctx context.Context, id string) error
 }
 
 // Journal is the part of the intent engine the applier uses.
@@ -133,13 +136,16 @@ type pending struct {
 // point is the rollback point of an apply in flight: what ran before, what
 // was handed to the activator, and the boot it was handed over in.
 type point struct {
-	ID       string `json:"id"`
-	From     int64  `json:"from"`
-	FromUsr  string `json:"from_usr"`
-	To       int64  `json:"to"`
-	ToUsr    string `json:"to_usr"`
-	Adoption string `json:"adoption"`
-	BootID   string `json:"boot_id"`
+	ID      string `json:"id"`
+	From    int64  `json:"from"`
+	FromUsr string `json:"from_usr"`
+	To      int64  `json:"to"`
+	ToUsr   string `json:"to_usr"`
+	// ToManifest: the digest of the handed-over release's signed
+	// manifest; with To and ToUsr it names the release exactly (SR3-4).
+	ToManifest string `json:"to_manifest,omitempty"`
+	Adoption   string `json:"adoption"`
+	BootID     string `json:"boot_id"`
 	// TalkUntil: after it, talk no longer holds the restart (zero: no
 	// bound).
 	TalkUntil time.Time `json:"talk_until,omitzero"`
@@ -237,7 +243,8 @@ func New(cfg Config) (*Applier, error) {
 }
 
 // Schedule queues a verified release the change pipeline adopted as
-// staged (adoption is the pipeline's reference). A security fix is due at
+// staged. adoption is the adoption's exact ID (change.Report.ID, never
+// its short ID), the only form that settles it (SR3-4). A security fix is due at
 // once; an ordinary release after a random jitter (UPD-5). A newer
 // schedule replaces an older one.
 func (a *Applier) Schedule(v *update.Verified, adoption string) error {
@@ -365,12 +372,30 @@ func (a *Applier) Tick(ctx context.Context) (ok bool, err error) {
 	if ok, err := a.restartIfHandedOver(ctx); ok || err != nil {
 		return ok, err
 	}
+	a.mu.Lock()
+	unhanded := a.st.Applying != nil && !a.st.Applying.Installed && !a.executing
+	a.mu.Unlock()
+	if unhanded {
+		// A handover Execute could not undo; Resume abandons it.
+		if err := a.Resume(ctx); err != nil {
+			return false, err
+		}
+	}
 	now := a.cfg.Now()
 	a.mu.Lock()
 	p := a.st.Pending
 	if p == nil || a.rel == nil || a.st.Applying != nil || now.Before(p.NotBefore) {
 		a.mu.Unlock()
 		return false, nil
+	}
+	if p.Security && !a.rel.Security() {
+		// The attestor policy narrowed since it was scheduled (SR3-6):
+		// drop the automatic authorization; Loop 3's next check schedules
+		// the release again under the current policy.
+		a.st.Pending, a.rel = nil, nil
+		err := a.saveLocked()
+		a.mu.Unlock()
+		return false, err
 	}
 	until := a.talkUntil(p)
 	a.mu.Unlock()
@@ -501,8 +526,9 @@ func (a *Applier) Check(_ context.Context, _ journal.Phase, in journal.Intent) e
 // Execute hands the release to the activator. The rollback point is saved
 // first, then the release is staged in the update store and installed in
 // the inactive slot, without holding the lock, so STATUS answers during
-// the slot write. A failed install is abandoned and drops the stage, and
-// the release stays pending.
+// the slot write. A failed install, or a handover whose record could not
+// be saved, is abandoned and drops the stage, and the release stays
+// pending: Execute succeeds only once the handover is durable (SR3-4).
 func (a *Applier) Execute(ctx context.Context, in journal.Intent, _ int) journal.Outcome {
 	v, ok := parseID(in.ID)
 	if !ok {
@@ -542,23 +568,42 @@ func (a *Applier) Execute(ctx context.Context, in journal.Intent, _ int) journal
 	defer a.mu.Unlock()
 	a.executing = false
 	if err != nil {
-		_ = a.cfg.Activator.Abandon(ctx)
-		_ = a.cfg.Store.DropStaged()
-		a.st.Applying = nil
-		_ = a.saveLocked()
+		if errors.Is(err, update.ErrPolicyMoved) && a.st.Pending == p {
+			a.st.Pending, a.rel = nil, nil // as in Tick (SR3-6)
+		}
+		a.abandonLocked(ctx)
 		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: err.Error()}
 	}
-	a.st.Applying.Installed = true
-	if a.st.Pending == p {
-		a.st.Pending, a.rel = nil, nil
+	next := a.st
+	pt2 := *a.st.Applying
+	pt2.Installed = true
+	next.Applying = &pt2
+	if next.Pending == p {
+		next.Pending = nil
 	}
-	a.st.Applied = map[string]bool{in.ID: true} // only the latest is ever reconciled
-	if err := a.saveLocked(); err != nil {
-		// The slot holds the release; Resume judges it by the boot that
-		// follows, whatever the saved state says.
-		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "state not saved"}
+	next.Applied = map[string]bool{in.ID: true} // only the latest is ever reconciled
+	if err := a.save(next); err != nil {
+		// Unrecorded, the handover is undone, so the activation is never
+		// called done while a restart in this boot would abandon it.
+		a.abandonLocked(ctx)
+		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "handover not saved: " + err.Error()}
+	}
+	a.st = next
+	if a.st.Pending == nil {
+		a.rel = nil
 	}
 	return journal.Outcome{Result: journal.ResultSucceeded}
+}
+
+// abandonLocked undoes a handover that did not complete; the release
+// stays pending. If the activator or the update store fails, the rollback
+// point stays, unrecorded as installed, for Resume to abandon (SR3-4).
+func (a *Applier) abandonLocked(ctx context.Context) {
+	if a.cfg.Activator.Abandon(ctx) != nil || a.cfg.Store.DropStaged() != nil {
+		return
+	}
+	a.st.Applying = nil
+	_ = a.saveLocked()
 }
 
 // pointLocked is the rollback point for handing rel over now.
@@ -576,7 +621,7 @@ func (a *Applier) pointLocked(ctx context.Context, id string, rel *update.Verifi
 		return nil, err
 	}
 	return &point{ID: id, From: installed.Version, FromUsr: boot.UsrRootHash, To: m.Version,
-		ToUsr: m.UsrRootHash, Adoption: adoption, BootID: boot.ID}, nil
+		ToUsr: m.UsrRootHash, ToManifest: rel.Ref().ManifestSHA256, Adoption: adoption, BootID: boot.ID}, nil
 }
 
 // Reconcile answers from saved state: an activation is applied only once
@@ -596,8 +641,24 @@ func (a *Applier) Reconcile(_ context.Context, in journal.Intent, _ int) journal
 // adoption); any other release means boot counting fell back, so the
 // stage is dropped and the adoption reverted with no owner action
 // (UPD-1). A boot of the new release whose health check has not passed
-// yet waits. In the same boot, an apply the activator never took (the
-// broker stopped mid-handover) is abandoned.
+// yet waits. An apply whose handover was never recorded (the broker
+// stopped or a save failed mid-handover) is abandoned, in the same boot
+// or after a reboot that kept the old root: with nothing recorded, the
+// old root does not prove the release fell back, so it is not marked as
+// one and can be tried again (SR3-4). Booting the new root, it is judged
+// like any other apply.
+//
+// Settling spans three stores, written in this order (SR3-4):
+//
+//	outcome     update store                 pipeline          applier
+//	installed   CommitRelease(exact release)  ConfirmStaged(id)  Applying cleared
+//	fell back   DropStaged                    StageFailed(id)    FellBack set, Applying cleared
+//	not handed  Abandon, DropStaged           -                  Applying cleared
+//
+// Each step is idempotent for the exact release and adoption, and the
+// in-flight record goes last, from memory only once it is saved, so a cut
+// or an error anywhere leaves Applying set and a later Resume redoes the
+// steps already done as no-ops. Nothing is installed again.
 func (a *Applier) Resume(ctx context.Context) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -609,21 +670,27 @@ func (a *Applier) Resume(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	next := a.st
+	next.Applying = nil
 	switch {
 	case b.ID == pt.BootID && pt.Installed:
 		return nil // not restarted yet
-	case b.ID == pt.BootID:
+	case !pt.Installed && (b.ID == pt.BootID || b.UsrRootHash != pt.ToUsr):
 		if err := a.cfg.Activator.Abandon(ctx); err != nil {
 			return err
 		}
 		if err := a.cfg.Store.DropStaged(); err != nil {
 			return err
 		}
-		a.st.Last = &last{Version: pt.To, Kind: doneNotHanded}
+		next.Last = &last{Version: pt.To, Kind: doneNotHanded}
 	case b.UsrRootHash == pt.ToUsr && !b.Blessed:
 		return nil // the health check has not passed yet
 	case b.UsrRootHash == pt.ToUsr:
-		if err := a.cfg.Store.CommitStaged(pt.To); err != nil {
+		ref, err := a.refLocked(pt)
+		if err != nil {
+			return err
+		}
+		if err := a.cfg.Store.CommitRelease(ref); err != nil {
 			return err
 		}
 		if pt.Adoption != "" {
@@ -631,7 +698,7 @@ func (a *Applier) Resume(ctx context.Context) error {
 				return err
 			}
 		}
-		a.st.Last = &last{Version: pt.To, Kind: doneInstalled}
+		next.Last = &last{Version: pt.To, Kind: doneInstalled}
 	default:
 		if err := a.cfg.Store.DropStaged(); err != nil {
 			return err
@@ -641,14 +708,36 @@ func (a *Applier) Resume(ctx context.Context) error {
 				return err
 			}
 		}
-		if a.st.FellBack == nil {
-			a.st.FellBack = map[string]bool{}
+		next.FellBack = maps.Clone(a.st.FellBack)
+		if next.FellBack == nil {
+			next.FellBack = map[string]bool{}
 		}
-		a.st.FellBack[strconv.FormatInt(pt.To, 10)] = true
-		a.st.Last = &last{Version: pt.To, Kind: doneFellBack}
+		next.FellBack[strconv.FormatInt(pt.To, 10)] = true
+		next.Last = &last{Version: pt.To, Kind: doneFellBack}
 	}
-	a.st.Applying = nil
-	return a.saveLocked()
+	if err := a.save(next); err != nil {
+		return err
+	}
+	a.st = next
+	return nil
+}
+
+// refLocked names the handed-over release exactly. A point saved before
+// it carried the manifest digest takes it from the staged record of the
+// same version and root.
+func (a *Applier) refLocked(pt *point) (update.Ref, error) {
+	ref := update.Ref{Version: pt.To, UsrRootHash: pt.ToUsr, ManifestSHA256: pt.ToManifest}
+	if ref.ManifestSHA256 != "" {
+		return ref, nil
+	}
+	st, ok, err := a.cfg.Store.Staged()
+	if err != nil {
+		return ref, err
+	}
+	if ok && st.Version == pt.To && st.UsrRootHash == pt.ToUsr {
+		ref.ManifestSHA256 = st.ManifestSHA256
+	}
+	return ref, nil
 }
 
 // Status is the applier's STATUS line, or "": an update installing or
@@ -698,8 +787,10 @@ func fellBackLine(v int64) string {
 		"Nothing is needed from you. It won't be tried again; a later update will replace it.", v)
 }
 
-func (a *Applier) saveLocked() error {
-	b, err := json.Marshal(a.st)
+func (a *Applier) saveLocked() error { return a.save(a.st) }
+
+func (a *Applier) save(st state) error {
+	b, err := json.Marshal(st)
 	if err != nil {
 		return err
 	}

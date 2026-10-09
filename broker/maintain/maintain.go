@@ -46,6 +46,10 @@ const ChannelPinned = loops.ChannelPinned
 // Proposer is the part of the change pipeline Loop 3 uses.
 type Proposer interface {
 	ProposeRelease(ctx context.Context, v *update.Verified) (change.Report, error)
+	// Lapsed reports, once, that proposal id was dropped because the
+	// owner's request closed unanswered (change.Pipeline.Lapsed). It must
+	// not call into Loop 3: it is called under Loop 3's lock.
+	Lapsed(id string) bool
 }
 
 // Config configures New.
@@ -155,6 +159,9 @@ type state struct {
 	Seen       map[string]time.Time   `json:"seen,omitempty"`
 	Proposed   map[int64]change.State `json:"proposed,omitempty"`
 	ProposedAt map[int64]time.Time    `json:"proposed_at,omitempty"`
+	// ProposalID is the pipeline's proposal ID per proposed version, so a
+	// check can ask whether one awaiting the owner lapsed (M8).
+	ProposalID map[int64]string `json:"proposal_id,omitempty"`
 	// DigestCurrent: the last digest already said the box is up to date,
 	// so the next stays quiet while it still is.
 	DigestCurrent bool `json:"digest_current,omitempty"`
@@ -237,9 +244,7 @@ func New(cfg Config) (*Loop3, error) {
 	}
 	for v, s := range l.st.Proposed {
 		if s == change.StateAwaitingOwner {
-			delete(l.st.Proposed, v)
-			delete(l.st.ProposedAt, v)
-			delete(l.st.TestedBy, v)
+			l.unproposeLocked(v)
 			l.st.Next = time.Time{}
 		}
 	}
@@ -292,6 +297,16 @@ func (l *Loop3) Next(_ context.Context, _ bool) (loops.Job, bool) {
 		return loops.Job{}, false
 	}
 	return loops.Job{Name: "update-check", Run: l.check}, true
+}
+
+// unproposeLocked forgets what Loop 3 recorded for proposed version v, so
+// a check proposes it again.
+func (l *Loop3) unproposeLocked(v int64) {
+	delete(l.st.Proposed, v)
+	delete(l.st.ProposedAt, v)
+	delete(l.st.ProposalID, v)
+	delete(l.st.TestedBy, v)
+	delete(l.st.Evidence, v)
 }
 
 func (l *Loop3) noteOfflineLocked() {
@@ -380,7 +395,7 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 		// A request the old chain left with the owner cannot stage: the
 		// store refuses a release checked under another root.
 		l.st.Source = src.RootSHA256
-		l.st.Proposed, l.st.ProposedAt, l.st.TestedBy, l.st.Evidence = nil, nil, nil, nil
+		l.st.Proposed, l.st.ProposedAt, l.st.TestedBy, l.st.Evidence, l.st.ProposalID = nil, nil, nil, nil, nil
 	}
 	l.st.FreshFailed = res.FreshnessFailed
 	if res.RootRotatedTo > 0 {
@@ -404,10 +419,7 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 	}
 	for v := range l.st.Proposed {
 		if v <= installed.Version {
-			delete(l.st.Proposed, v)
-			delete(l.st.ProposedAt, v)
-			delete(l.st.TestedBy, v)
-			delete(l.st.Evidence, v)
+			l.unproposeLocked(v)
 		}
 	}
 	l.st.Newest, l.st.NewestSecurity, l.st.Pending = 0, false, nil
@@ -426,6 +438,11 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 		l.st.Seen[key] = now
 	}
 	seen := l.st.Seen[key]
+	if l.st.Proposed[v] == change.StateAwaitingOwner && l.st.ProposalID[v] != "" && l.cfg.Pipeline.Lapsed(l.st.ProposalID[v]) {
+		// The owner's request closed unanswered and the pipeline dropped
+		// the proposal (change.Decided): offer it again now.
+		l.unproposeLocked(v)
+	}
 	_, proposed := l.st.Proposed[v]
 	if channel == ChannelPinned {
 		l.st.Pending = &pending{Version: v, Security: security, Why: waitPinned}
@@ -455,6 +472,10 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 			l.st.ProposedAt = map[int64]time.Time{}
 		}
 		l.st.ProposedAt[v] = now
+		if l.st.ProposalID == nil {
+			l.st.ProposalID = map[int64]string{}
+		}
+		l.st.ProposalID[v] = o.id
 		if l.st.Evidence == nil {
 			l.st.Evidence = map[int64][2]int{}
 		}
@@ -558,6 +579,7 @@ const (
 // pipeline's state), is waiting (wait), or was preempted (neither).
 type outcome struct {
 	proposed change.State
+	id       string // the pipeline's proposal ID
 	tested   string
 	evidence [2]int // listed independent and maintainer-operated passes
 	wait     *pending
@@ -610,7 +632,7 @@ func (l *Loop3) decide(ctx context.Context, rel *update.Verified, m update.Manif
 		return outcome{wait: &pending{Version: m.Version, Security: security, Why: waitPropose}, err: err}
 	}
 	ev := rel.Evidence(atts, l.cfg.OwnKey)
-	o := outcome{proposed: rep.State, evidence: [2]int{ev.Independent, ev.Maintainer}}
+	o := outcome{proposed: rep.State, id: rep.ID, evidence: [2]int{ev.Independent, ev.Maintainer}}
 	if security && rel.SecurityAutoStage(atts, l.cfg.OwnKey) == nil {
 		o.tested = testedIndependent
 		if rel.InterimAttestation() {
