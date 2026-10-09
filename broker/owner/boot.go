@@ -111,10 +111,11 @@ func (c *Channel) Boot() {
 	}
 	c.mu.Unlock()
 	if c.cfg.Modem != nil {
-		// Paced as an approval: it re-sends approval requests with new
-		// codes (CH-15).
-		// A broker template, so not through Disclose (CH-19).
-		_ = c.postTemplate(ClassApproval, text)
+		// Never paced: it carries the new codes, which a held copy could
+		// outlive, and explains them, so it goes now (CH-12, CH-15). It
+		// still counts toward the hour. A broker template, so not through
+		// Disclose (CH-19).
+		_ = c.sendTemplate(text)
 	}
 	c.decide(decided)
 	if c.cfg.Reissue != nil {

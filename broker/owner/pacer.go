@@ -103,8 +103,10 @@ func (p Pacing) urgent(class Class) bool {
 
 // HeldText is one text waiting in the hold, already disclosed and fitted.
 type HeldText struct {
-	Text  string    `json:"text"`
-	Class Class     `json:"class,omitempty"`
+	Text  string `json:"text"`
+	Class Class  `json:"class,omitempty"`
+	// Agent marks agent-derived text (Notify, NotifyAs).
+	Agent bool      `json:"agent,omitempty"`
 	At    time.Time `json:"at"`
 }
 
@@ -126,17 +128,24 @@ func (c *Channel) Post(class Class, text string) error {
 	if c.cfg.Modem == nil {
 		return errors.New("owner: no modem")
 	}
-	return c.post(class, control.Fit(Disclose(text)))
+	return c.post(class, control.Fit(Disclose(text)), false)
 }
 
 // postTemplate is Post for a broker template, such as an alert carrying
 // the broker's own codes, which does not pass through Disclose (CH-19).
 func (c *Channel) postTemplate(class Class, text string) error {
-	return c.post(class, control.Fit(text))
+	return c.post(class, control.Fit(text), false)
 }
 
-// post is Post for text already disclosed and fitted.
-func (c *Channel) post(class Class, text string) error {
+// sendTemplate sends a broker template at once, never held, and counts
+// it.
+func (c *Channel) sendTemplate(text string) error {
+	return c.sendCounted(control.Fit(text))
+}
+
+// post is Post for text already disclosed and fitted. agent marks
+// agent-derived text, which a release never packs with another text.
+func (c *Channel) post(class Class, text string, agent bool) error {
 	if c.Urgent(class) {
 		return c.sendCounted(text)
 	}
@@ -150,7 +159,7 @@ func (c *Channel) post(class Class, text string) error {
 	st := &c.codes.st
 	if len(st.Held) > 0 || st.HeldDropped > 0 || c.quietLocked(now) || c.allowanceLocked(now) == 0 {
 		err := c.codes.commit(func(s *State) {
-			s.Held = append(s.Held, HeldText{Text: text, Class: class, At: now})
+			s.Held = append(s.Held, HeldText{Text: text, Class: class, Agent: agent, At: now})
 			if n := len(s.Held) - MaxHeld; n > 0 {
 				s.Held = append([]HeldText(nil), s.Held[n:]...)
 				s.HeldDropped += n
@@ -172,7 +181,7 @@ func (c *Channel) NotifyAs(class Class, text string) error {
 	if text = Disclose(text); text != Hidden {
 		text = AgentPrefix + text
 	}
-	return c.post(class, control.Fit(text))
+	return c.post(class, control.Fit(text), true)
 }
 
 // sendCounted sends text to the owner and, if it went, counts it.
@@ -206,11 +215,13 @@ func (c *Channel) saveLocked(f func(*State)) error {
 	return err
 }
 
-// recentSends keeps the sends from the hour before now.
+// recentSends keeps the sends from the hour before now. A send dated
+// after now (the clock stepped back) is dropped, as Boot refuses a future
+// Asked, so it cannot hold the allowance spent until the clock catches up.
 func recentSends(sent []time.Time, now time.Time) []time.Time {
 	var out []time.Time
 	for _, t := range sent {
-		if now.Sub(t) < time.Hour {
+		if !t.After(now) && now.Sub(t) < time.Hour {
 			out = append(out, t)
 		}
 	}
@@ -261,8 +272,10 @@ func (c *Channel) releasePaced() error {
 }
 
 // packHeld joins the dropped-texts line and the oldest held texts into
-// one text of at most control.MaxText. It returns the text, how many held
-// texts it carries, and the drops it reports.
+// one text of at most control.MaxText. Agent text always goes alone, so a
+// " / " inside it cannot pass for the start of a broker text (CH-19). It
+// returns the text, how many held texts it carries, and the drops it
+// reports.
 func packHeld(dropped int, held []HeldText) (string, int, int) {
 	var parts []string
 	size := 0
@@ -283,10 +296,16 @@ func packHeld(dropped int, held []HeldText) (string, int, int) {
 	}
 	n := 0
 	for _, h := range held {
+		if h.Agent && len(parts) > 0 {
+			break
+		}
 		if !add(h.Text) {
 			break
 		}
 		n++
+		if h.Agent {
+			break
+		}
 	}
 	return control.Fit(strings.Join(parts, heldSep)), n, dropped
 }

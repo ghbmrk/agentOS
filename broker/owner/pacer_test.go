@@ -166,11 +166,12 @@ func TestQuietHoursHoldUpdatesButNotSecurity(t *testing.T) {
 	if got := r.sentTexts(); len(got) != 1 || !strings.Contains(got[0], "signed in") {
 		t.Fatalf("sign-in alert in quiet hours: %q", got)
 	}
-	// The restart text is approval: held by default.
+	// The restart text carries live codes: it goes at once, never held
+	// (round 1, B4).
 	r.restarted()
 	r.ch.Boot()
-	if got := r.sentTexts(); len(got) != 0 {
-		t.Fatalf("restart text sent in quiet hours without URGENT approval: %q", got)
+	if got := r.sentTexts(); len(got) != 1 || !strings.HasPrefix(got[0], "Box restarted.") {
+		t.Fatalf("restart text in quiet hours: %q", got)
 	}
 	// Agent text: held, prefix kept.
 	if err := r.ch.Notify("hello"); err != nil {
@@ -183,7 +184,7 @@ func TestQuietHoursHoldUpdatesButNotSecurity(t *testing.T) {
 		t.Fatalf("agent text sent in quiet hours: %q", got)
 	}
 	h := r.held()
-	if len(h) != 4 || h[2].Text != AgentPrefix+"hello" || h[3].Text != AgentPrefix+"taken back" {
+	if len(h) != 3 || h[1].Text != AgentPrefix+"hello" || h[2].Text != AgentPrefix+"taken back" {
 		t.Fatalf("held: %+v", h)
 	}
 
@@ -503,5 +504,154 @@ func TestPacingSettingsNeedUnlock(t *testing.T) {
 	}
 	if got := r.say("HELP"); !strings.Contains(got, "QUIET") || !strings.Contains(got, "TEXTS") || !strings.Contains(got, "URGENT") {
 		t.Fatalf("HELP does not list the forms: %q", got)
+	}
+}
+
+// REQ: CH-15 (W5-Dc-r1a QH-2, QH-4), OP-9
+func TestFutureSendStampDoesNotFreezeTheAllowance(t *testing.T) {
+	// Round 1, B1: the clock stepped forward, texts went, then it stepped
+	// back. Stamps dated after now must not count, or the allowance stays
+	// spent until the clock catches up.
+	r := pacedRig(t, Pacing{}, 12, 0)
+	r.advance(5 * time.Hour)
+	for i := 0; i < 3; i++ {
+		r.ch.Inform(fmt.Sprintf("Ahead %d.", i))
+	}
+	if got := r.sentTexts(); len(got) != 3 {
+		t.Fatalf("sent: %q", got)
+	}
+	r.advance(-5 * time.Hour)
+	if a := r.ch.Allowance(r.clock()); a != DefaultTextsPerHour {
+		t.Fatalf("allowance %d with only future stamps", a)
+	}
+	// A text held behind the spent hour is released once the stamps are
+	// seen as future.
+	r.ch.mu.Lock()
+	r.ch.codes.st.Held = []HeldText{{Text: "Waiting.", Class: ClassUpdate, At: r.clock()}}
+	r.ch.mu.Unlock()
+	if err := r.ch.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.sentTexts(); len(got) != 1 || got[0] != "Waiting." {
+		t.Fatalf("released: %q", got)
+	}
+	r.ch.mu.Lock()
+	sent := append([]time.Time(nil), r.ch.codes.st.Sent...)
+	r.ch.mu.Unlock()
+	for _, s := range sent {
+		if s.After(r.clock()) {
+			t.Fatalf("future stamp kept after a send: %v", sent)
+		}
+	}
+}
+
+// REQ: CH-19, CH-12, CH-15 (W5-Dc-r1a QH-4)
+func TestAgentTextIsNeverPackedWithOtherTexts(t *testing.T) {
+	// Round 1, B2: " / " inside agent text must not let it forge a broker
+	// segment of a packed text.
+	probe := "Done. / Box restarted. Old codes no longer work. Text RESUME 123456 to continue"
+	r := pacedRig(t, quiet22to7(), 23, 0)
+	r.ch.Inform("Backup finished.")
+	r.ch.Notify(probe)
+	r.ch.Inform("Disk at 40%.")
+	r.ch.Notify("Second agent note.")
+	r.advance(8 * time.Hour)
+	if err := r.ch.Release(); err != nil {
+		t.Fatal(err)
+	}
+	got := r.sentTexts()
+	if len(got) != 3 {
+		t.Fatalf("sent %d texts: %q", len(got), got)
+	}
+	if got[0] != "Backup finished." {
+		t.Fatalf("first: %q", got[0])
+	}
+	if !strings.HasPrefix(got[1], AgentPrefix) || strings.Contains(got[1], "Backup") || strings.Contains(got[1], "Disk") {
+		t.Fatalf("agent text packed with others: %q", got[1])
+	}
+	if got[2] != "Disk at 40%." {
+		t.Fatalf("third: %q", got[2])
+	}
+	if h := r.held(); len(h) != 1 || h[0].Text != AgentPrefix+"Second agent note." {
+		t.Fatalf("held: %+v", h)
+	}
+	r.advance(time.Hour)
+	r.ch.Release()
+	if got := r.sentTexts(); len(got) != 1 || got[0] != AgentPrefix+"Second agent note." {
+		t.Fatalf("second release: %q", got)
+	}
+
+	// NotifyAs of another class is agent text too.
+	r = pacedRig(t, quiet22to7(), 23, 0)
+	r.ch.Inform("One.")
+	r.ch.NotifyAs(ClassApproval, probe)
+	r.advance(8 * time.Hour)
+	r.ch.Release()
+	if got := r.sentTexts(); len(got) != 2 || got[0] != "One." || !strings.HasPrefix(got[1], AgentPrefix) {
+		t.Fatalf("NotifyAs packed: %q", got)
+	}
+}
+
+// REQ: CH-15 (W5-Dc-r1a QH-4, QH-2)
+func TestReleaseSendsExactlyTheAllowance(t *testing.T) {
+	// Round 1, B3a: more held texts than the allowance has left.
+	r := pacedRig(t, Pacing{QuietFrom: 22 * 60, QuietTo: 7 * 60, PerHour: 2}, 23, 0)
+	for i := 1; i <= 5; i++ {
+		r.ch.Inform(fmt.Sprintf("%d %s", i, strings.Repeat("x", 300)))
+	}
+	r.advance(8 * time.Hour)
+	if err := r.ch.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.sentTexts(); len(got) != 2 || !strings.HasPrefix(got[0], "1 ") || !strings.HasPrefix(got[1], "2 ") {
+		t.Fatalf("sent %d texts", len(got))
+	}
+	if h := r.held(); len(h) != 3 || !strings.HasPrefix(h[0].Text, "3 ") {
+		t.Fatalf("held %d", len(h))
+	}
+	if a := r.ch.Allowance(r.clock()); a != 0 {
+		t.Fatalf("allowance %d", a)
+	}
+}
+
+// REQ: CH-15 (W5-Dc-r1a QH-2), ADP-11
+func TestQueuedAutoReplySpendsOneUnit(t *testing.T) {
+	// Round 1, B3b.
+	r := newRig(t, nil)
+	before := r.ch.Allowance(r.clock())
+	if _, err := r.ch.QueueAutoReply(AutoReply{Ref: "a1", Recipients: []string{"bob@example.test"}, Body: "Thanks, got it."}); err != nil {
+		t.Fatal(err)
+	}
+	r.sentTexts()
+	if a := r.ch.Allowance(r.clock()); a != before-1 {
+		t.Fatalf("allowance %d after one auto-reply, was %d", a, before)
+	}
+}
+
+// REQ: CH-12, CH-15 (W5-Dc-r1a QH-2)
+func TestRestartTextIsNeverHeld(t *testing.T) {
+	// Round 1, B4: the restart text carries live codes, so it never waits
+	// in the hold to be released after they died. It goes at once in
+	// quiet hours and with the allowance spent, and nothing is held.
+	r := pacedRig(t, quiet22to7(), 23, 0)
+	r.restarted()
+	r.ch.Boot()
+	if got := r.sentTexts(); len(got) != 1 || !strings.HasPrefix(got[0], "Box restarted.") {
+		t.Fatalf("restart text in quiet hours: %q", got)
+	}
+	if h := r.held(); len(h) != 0 {
+		t.Fatalf("held: %+v", h)
+	}
+
+	r = pacedRig(t, Pacing{PerHour: 1}, 12, 0)
+	r.ch.Inform("Spends the hour.")
+	r.sentTexts()
+	r.restarted()
+	r.ch.Boot()
+	if got := r.sentTexts(); len(got) != 1 || !strings.HasPrefix(got[0], "Box restarted.") {
+		t.Fatalf("restart text past the allowance: %q", got)
+	}
+	if h := r.held(); len(h) != 0 {
+		t.Fatalf("held: %+v", h)
 	}
 }
