@@ -668,7 +668,7 @@ func (g *Gate) evaluateEffect(ctx context.Context, phase journal.Phase, in journ
 		return g.evaluateBroker(ctx, phase, in)
 	}
 	if op, ok := g.cfg.Delivery[in.Executor]; (ok && in.Action == op) || in.Origin == OriginEvidence {
-		return g.evaluateDelivery(in)
+		return g.evaluateDelivery(phase, in)
 	}
 	// Reasons are fixed wording: a guest reads them back through
 	// effect_status, so they never echo what a guest wrote (REV-5).
@@ -755,7 +755,7 @@ func (g *Gate) evaluateEffect(ctx context.Context, phase journal.Phase, in journ
 	if cls == verb.Irreversible && verified && !g.contained(in.Origin) {
 		sort.Slice(rules, func(i, j int) bool { return rules[i].ID < rules[j].ID })
 		for _, r := range rules {
-			if g.matches(*r.Spec.Rule, in, ver) != nil {
+			if g.matches(phase, *r.Spec.Rule, in, ver) != nil {
 				continue
 			}
 			if r.Spec.Rule.Reply {
@@ -799,7 +799,7 @@ func approvalItem(in journal.Intent, v string, cls verb.Class, ver Verified, ver
 }
 
 // matches tests one pre-allowance (ADP-9) and returns why it fails.
-func (g *Gate) matches(r Rule, in journal.Intent, v Verified) error {
+func (g *Gate) matches(phase journal.Phase, r Rule, in journal.Intent, v Verified) error {
 	want := len(r.Params) + 1
 	if r.Reply {
 		want++
@@ -841,10 +841,7 @@ func (g *Gate) matches(r Rule, in journal.Intent, v Verified) error {
 		}
 	}
 	day, perRec := 0, 0
-	for _, x := range g.eng.AuthorizedSince(in.Account, in.Action, now.Add(-window)) {
-		if x.ID == in.ID {
-			continue
-		}
+	for _, x := range g.inUse(phase, in, now) {
 		day++
 		if s, _ := x.Params[ParamRecord].(string); s == rec {
 			perRec++
@@ -854,6 +851,24 @@ func (g *Gate) matches(r Rule, in journal.Intent, v Verified) error {
 		return errors.New("scope bound reached")
 	}
 	return nil
+}
+
+// inUse returns the other intents that hold a place under in's scope
+// bounds now (SR3-2). Authorizing counts queued intents too, so a queue
+// held by STOP cannot grow past the bound. The recheck before dispatch
+// counts only effects that started in the window or are unresolved: in
+// is one of the queued, and the engine commits its dispatch only if
+// nothing was journaled since this count, so two dispatches cannot both
+// take the last place (OP-3).
+func (g *Gate) inUse(phase journal.Phase, in journal.Intent, now time.Time) []journal.Intent {
+	var out []journal.Intent
+	for _, u := range g.eng.InUse(in.Account, in.Action, now.Add(-window)) {
+		if u.Intent.ID == in.ID || (phase == journal.PhaseDispatch && !u.Started) {
+			continue
+		}
+		out = append(out, u.Intent)
+	}
+	return out
 }
 
 // evaluateDerived decides a stage or inverse intent (REV-3). It is
@@ -1120,7 +1135,7 @@ func followName(s string) bool {
 // evaluateDelivery decides a delivery to the evidence destination: a
 // pre-allowed share to the owner only (CH-20). Every part of it is fixed
 // by the broker, so anything else is denied, never asked.
-func (g *Gate) evaluateDelivery(in journal.Intent) verdict {
+func (g *Gate) evaluateDelivery(phase journal.Phase, in journal.Intent) verdict {
 	if in.Origin != OriginEvidence {
 		return verdict{kind: deny, why: "only the broker delivers to the owner's destination (CH-20)"}
 	}
@@ -1144,8 +1159,8 @@ func (g *Gate) evaluateDelivery(in journal.Intent) verdict {
 		return verdict{kind: deny, why: "a delivery carries only its body and author"}
 	}
 	n := 0
-	for _, x := range g.eng.AuthorizedSince(in.Account, in.Action, g.cfg.Now().Add(-24*time.Hour)) {
-		if x.Origin == OriginEvidence && x.ID != in.ID {
+	for _, x := range g.inUse(phase, in, g.cfg.Now()) {
+		if x.Origin == OriginEvidence {
 			n++
 		}
 	}
