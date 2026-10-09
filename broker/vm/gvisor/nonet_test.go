@@ -27,7 +27,7 @@ func TestAGuestCannotDial(t *testing.T) {
 	}
 	var spec struct {
 		Linux struct {
-			Namespaces []struct{ Type string }
+			Namespaces []struct{ Type, Path string }
 		}
 	}
 	if err := json.Unmarshal(b, &spec); err != nil {
@@ -36,19 +36,30 @@ func TestAGuestCannotDial(t *testing.T) {
 	netns := false
 	for _, ns := range spec.Linux.Namespaces {
 		if ns.Type == "network" {
+			if ns.Path != "" {
+				t.Fatalf("bundle joins an existing network namespace %q", ns.Path)
+			}
 			netns = true
 		}
 	}
 	if !netns {
 		t.Fatal("bundle has no private network namespace")
 	}
-	args := (&Runtime{Bin: "runsc", StateDir: dir}).cmd(t.Context(), "run").Args
-	if !strings.Contains(strings.Join(args, " "), "--network=none") {
-		t.Fatalf("runsc is not started with --network=none: %q", args)
-	}
-	for _, a := range args {
-		if a == "--network=host" || strings.HasPrefix(a, "--network=sandbox") {
-			t.Fatalf("runsc would give the guest a network: %q", a)
+	// runsc parses flags with Go's flag package: the last --network wins,
+	// in either the --network=x or the --network x form.
+	args := (&Runtime{Bin: "runsc", StateDir: dir}).argv("run")
+	network := ""
+	for i, a := range args {
+		switch {
+		case a == "--network" || a == "-network":
+			if i+1 < len(args) {
+				network = args[i+1]
+			}
+		case strings.HasPrefix(a, "--network=") || strings.HasPrefix(a, "-network="):
+			network = a[strings.Index(a, "=")+1:]
 		}
+	}
+	if network != "none" {
+		t.Fatalf("runsc is not started with --network=none (got %q): %q", network, args)
 	}
 }
