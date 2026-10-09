@@ -18,8 +18,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/ghbmrk/agentos/broker/machprobe"
 )
 
 // LOOP-7 machine probes (P3-4b-4b): fixed scripts run with guest
@@ -261,6 +259,11 @@ func targetDigest(path string) ([]byte, error) {
 	return h.Sum(nil), nil
 }
 
+// tamperSibling is the file the guest's fixed script creates for a round
+// (machprobe.Sibling; a test holds the two equal). loops does not import
+// machprobe: the control path links no process-starting code (ARC-2).
+func tamperSibling(nonce string) string { return ".agentos-tamper-" + nonce }
+
 // removeSiblings removes the files the round's guest writes may have left
 // beside or inside each target and the control. A target the guest
 // reached may still need restoring from a broker copy if something other
@@ -271,7 +274,7 @@ func (p *TamperProbe) removeSiblings(nonce string) {
 		if fi, err := os.Stat(t.Path); err == nil && fi.IsDir() {
 			dir = t.Path
 		}
-		os.Remove(filepath.Join(dir, machprobe.Sibling(nonce)))
+		os.Remove(filepath.Join(dir, tamperSibling(nonce)))
 	}
 }
 

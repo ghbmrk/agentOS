@@ -161,6 +161,9 @@ func TestATargetThatStaysWritableIsReportedEveryRound(t *testing.T) {
 	if len(x.nonces) != 2 || x.nonces[0] == x.nonces[1] || !tamperNonce.MatchString(x.nonces[0]) {
 		t.Fatalf("round nonces %q", x.nonces)
 	}
+	if tamperSibling(x.nonces[0]) != machprobe.Sibling(x.nonces[0]) {
+		t.Fatal("the broker removes a different name from the one the script creates")
+	}
 }
 
 // LOOP-7 control (a writable snapshot in a test rig): a write that lands
