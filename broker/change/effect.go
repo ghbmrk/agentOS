@@ -337,6 +337,9 @@ func (p *Pipeline) revertLocked(id, why string) error {
 	if p.unsettledLocked(a, why) {
 		return unsettledErr(a)
 	}
+	if why == WhyDropped && a.WithdrawnFor != "" {
+		why = a.WithdrawnFor // the revert that withdrew it, cut short
+	}
 	next, err := p.undoTreeLocked(a)
 	if err != nil {
 		return err
@@ -386,6 +389,15 @@ func (p *Pipeline) revert(ctx context.Context, ref, origin, why string) error {
 			err = fmt.Errorf("undoing %s would leave %s with nothing to boot; install another version instead", a.Short, ns)
 		}
 	}
+	if err == nil && withdraw && a.WithdrawnFor != why {
+		// Saved before the applier is asked: if this revert is cut short
+		// after the withdrawal, the drop that settles it keeps its why.
+		prev := a.WithdrawnFor
+		a.WithdrawnFor = why
+		if err = p.saveLocked(); err != nil {
+			a.WithdrawnFor = prev
+		}
+	}
 	v := safe(strings.TrimPrefix(a.Origin, "update:"))
 	p.mu.Unlock()
 	if err != nil {
@@ -395,9 +407,11 @@ func (p *Pipeline) revert(ctx context.Context, ref, origin, why string) error {
 		// Never under p.mu: the applier holds its lock while it calls
 		// StageFailed and StageDropped (lock order applier, then
 		// pipeline).
-		if err := w.Withdraw(id); handover(err) {
-			return errors.New("Update " + v + " is being installed; undo it after it starts.")
-		} else if err != nil {
+		if err := w.Withdraw(id); err != nil {
+			p.unwithdraw(id) // not withdrawn: a later drop is a drop
+			if handover(err) {
+				return errors.New("Update " + v + " is being installed; undo it after it starts.")
+			}
 			return fmt.Errorf("change: withdrawing update %s: %w", v, err)
 		}
 		p.mu.Lock()
@@ -424,6 +438,21 @@ func (p *Pipeline) revert(ctx context.Context, ref, origin, why string) error {
 		return nil
 	}
 	return err
+}
+
+// unwithdraw clears the why saved for a withdrawal the applier refused.
+// If the save fails it stays: the release is then not offered again
+// after a drop, which errs toward the revert the owner or Recheck asked.
+func (p *Pipeline) unwithdraw(id string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if a := p.adoptionByIDLocked(id); a != nil && a.Reverted == "" && a.WithdrawnFor != "" {
+		prev := a.WithdrawnFor
+		a.WithdrawnFor = ""
+		if p.saveLocked() != nil {
+			a.WithdrawnFor = prev
+		}
+	}
 }
 
 // revertedByID: adoption id exists and is reverted.

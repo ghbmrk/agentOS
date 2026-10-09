@@ -367,7 +367,9 @@ func TestUndoAndSettleDoNotDeadlock(t *testing.T) {
 
 // L3-1: a withdrawal is also a drop. When the revert that follows it
 // fails (STOP holds the pipeline's own), the applier's StageDropped still
-// reverts the adoption, so the digest stops promising to install it.
+// reverts the adoption, so the digest stops promising to install it. It
+// is recorded as the Recheck revert it was, never as a drop Loop 3 offers
+// again (SR3-4f-2-r1b).
 func TestWithdrawnThenRevertFailsIsSettledByTheDrop(t *testing.T) {
 	e, r, w := pendingStaged(t)
 	if _, err := e.eng.Stop(bg); err != nil {
@@ -385,16 +387,18 @@ func TestWithdrawnThenRevertFailsIsSettledByTheDrop(t *testing.T) {
 	if err := e.p.StageDropped(bg, r.ID); err != nil { // the applier's next Tick
 		t.Fatal(err)
 	}
-	if a := e.adoption(r.ID); a.Reverted != WhyDropped || e.image() != update.Digest([]byte("a")) {
+	if a := e.adoption(r.ID); a.Reverted != WhySecurity || e.image() != update.Digest([]byte("a")) {
 		t.Fatalf("adoption %+v", a)
 	}
-	if d := e.p.Digest(); slices.ContainsFunc(d, func(l string) bool { return strings.HasPrefix(l, "Staged update 41") }) {
+	if d := e.p.Digest(); slices.ContainsFunc(d, func(l string) bool { return strings.Contains(l, "I will install it") }) ||
+		!slices.Contains(d, "Undid "+r.Short+": it failed a security check.") {
 		t.Fatalf("digest still promises the withdrawn release: %q", d)
 	}
 }
 
 // L3-1: the applier settles the drop before the owner's own revert runs;
 // that revert then finds no active adoption, and the undo still succeeds.
+// The drop is recorded as the owner's undo (SR3-4f-2-r1b).
 func TestOwnerUndoLosesToTheDrop(t *testing.T) {
 	e, r, w := pendingStaged(t)
 	w.then = func(id string) {
@@ -406,7 +410,7 @@ func TestOwnerUndoLosesToTheDrop(t *testing.T) {
 		t.Fatal("owner undo that lost to the drop:", err)
 	}
 	// Both reverts are journaled; the owner's found nothing to undo.
-	if a := e.adoption(r.ID); a.Reverted != WhyDropped || e.image() != update.Digest([]byte("a")) {
+	if a := e.adoption(r.ID); a.Reverted != WhyOwner || e.image() != update.Digest([]byte("a")) {
 		t.Fatalf("adoption %+v", a)
 	}
 }
