@@ -644,7 +644,7 @@ func (s *Server) adoptSIM(w http.ResponseWriter, r *http.Request) {
 const (
 	simCodeText   = "To use this SIM, enter a code from your code generator (not the one I texted)."
 	simStaleText  = "My phone modem's SIM changed since this page loaded. Check the SIM below and try again."
-	simFailedText = "The box isn't answering right now. Nothing changed. Reload to try again."
+	simFailedText = "I can't answer right now. Nothing changed. Reload to try again."
 )
 
 // contact serves the box's number as a contact card (§8.1 step 5).
