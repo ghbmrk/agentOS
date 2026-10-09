@@ -1,12 +1,14 @@
 package update
 
-// REQ: UPD-8
+// REQ: UPD-8, SR3-6f-1c
 // SR3-6: a Verified's attestation authority is bound to the attestor
 // policy it was checked under; a later narrowing retires it.
 
 import (
 	"crypto/ed25519"
 	"errors"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -196,5 +198,25 @@ func TestSR36CurrentReleasesStillProceed(t *testing.T) {
 	}
 	if err := f.store.Stage(owner); !errors.Is(err, ErrTrustMoved) {
 		t.Fatalf("Stage after a targets move = %v, want ErrTrustMoved", err)
+	}
+}
+
+// SR3-6f-1c (Security 4a point 2 on #430): an attestor policy the store
+// cannot read fails closed. With attestor_policy replaced by a directory, a
+// release checked before reports no authority and Stage refuses it.
+func TestUnreadablePolicyFailsClosed(t *testing.T) {
+	f, _, _, old := interimFix(t)
+	path := filepath.Join(f.store.Dir, allowListFile)
+	f.must(os.Remove(path))
+	f.must(os.Mkdir(path, 0o700))
+
+	if old.Security() || old.InterimAttestation() {
+		t.Fatal("an unreadable attestor policy left the old release its authority")
+	}
+	if err := f.store.Stage(old); !errors.Is(err, ErrPolicyMoved) {
+		t.Fatalf("Stage with an unreadable policy = %v, want ErrPolicyMoved", err)
+	}
+	if _, ok, _ := f.store.Staged(); ok {
+		t.Fatal("the old release was staged")
 	}
 }
