@@ -31,12 +31,14 @@ The only hard limit is the weekly subscription allowance. Baseline, measured ove
 
 By role, builders were 51.5%, one long-lived reviewer session 26.6%, lens sessions 13% and coordinators 6%. The first-pass L3 accept rate was 12% (METRICS.md), so most packages were built more than once.
 
+**Price weights.** On Opus 5.5 and Sonnet 5.5 a cache write with the one-hour lifetime costs 2x base input and a cache read 0.05x, so a written token costs 40x a read one (Haiku 5.5 reads at 0.1x, so 20x there); source: the prompt-caching pricing docs. A cold start (a new session, a wake after more than an hour idle, a model switch, a compaction) writes the whole context and so costs about as much as 40 warm calls over it.
+
 Cost per merged package = (calls × context per call × read price + writes + output) ÷ first-pass rate.
 
 Levers in order of effect:
 
 1. **Cut rework.** Raise the first-pass rate and build only what the first release needs (§2, §4). L3 cause codes (§4) say which part of the pipeline the rework comes from.
-2. **Shrink context per call.** Small briefs, a short BOARD index, compaction at 200k, fresh sessions instead of revived ones (§5).
+2. **Fewer cold starts, then smaller context.** Count cold starts per merged PR and cut them: pick the model at spawn, don't wake idle sessions, hand off before a long idle (§5). Then small briefs, a short BOARD index and compaction at 200k keep each call's context small.
 3. **Fewer calls per package.** One package per session; batch reviews (§4).
 4. **Route by model price.** Use the cheapest model that keeps quality, and check with tests rather than with a more expensive model (§5).
 5. **Fill capped time with free CI.** Fuzzing, race soak and mutation run on Actions while the allowance resets.
@@ -115,6 +117,11 @@ The rules are in CLAUDE.md §Budget; the reasons and procedures are here.
 
 - **Why one package or one review per session:** every call rereads the whole context (§1), so a session that carries a finished package into the next one pays for it on every later call. A brief of 20k tokens or less, done under 150k, keeps the reread small; a package that cannot fit is split before it starts.
 - **Why fresh sessions instead of revived ones:** a session idle more than an hour has dropped out of cache, and waking it rewrites its whole context to cache (the 29% of §1).
+- **Why cold starts count most:** at the §1 price weights one cold start costs about as much as 40 warm calls over the same context. The weekly cost routine counts them per merged PR: sessions started, wakes after more than an hour idle, model switches, compactions.
+- **Pick the model at spawn.** A model switch mid-session rewrites the whole context to the new model's cache (inferred from session counters; the caching docs don't state it). A second opinion from another model is a fresh review session from the diff, which L3 needs anyway.
+- **Before a long idle.** A session past 150k that will wait more than an hour on CI or review writes a hand-off packet and stops watching; the coordinator starts a fresh session when the PR next needs work. Below 150k, waking it is usually no dearer than a fresh start, whose fixed prefix (system prompt, tools, CLAUDE.md) plus packet is rewritten anyway (inferred).
+- **Coordinator.** It routes, and merges (§4 stage 5) in its own turn, batching merge-ready PRs; investigation goes to a thread, so its context stays flat. A separate merge session would add a cold start. Its replacement is up to the harness, so there is no recycle rule.
+- **Chat posts.** Per thread: one acknowledgement, one result, one blocker reply; progress goes in the status checklist. Each post is another call at full context, and a thread reply probably also wakes the coordinator (inferred).
 - **Hand-off packet** when a session must continue elsewhere (20k tokens or less): the task and its BOARD ID; the failing check and its output, trimmed; the files that matter, with paths; what was tried and why it failed; the next step. Never a transcript.
 - **Models.** Tier-A authoring and tier-A reviews use the strongest model. Mechanical subagent work uses Haiku under 100k tokens (it costs 5x above). Judgement subagent work uses Sonnet. Where PLAN.md §4's initial routing table differs, this line wins.
 - **Pilots** of a cheaper route run as a BOARD row with the measures that judge them, and the result goes to DECISIONS.md.
@@ -127,7 +134,7 @@ The rules are in CLAUDE.md §Budget; the reasons and procedures are here.
 
 ## 6. Weekly measures
 
-METRICS.md (generated weekly by `.github/workflows/metrics.yml`) carries first-pass L3 accept, L3 rounds and causes per merged PR, usage per merged PR, defects after merge and CI flakes. Usage comes from the manual readings in LEDGER.md, the only hand-kept input. Session-level spend (cache-write share, spend by role) is measured by the weekly cost routine outside the repository; any figure from it that drives a decision is copied into LEDGER.md with its date before anyone relies on it. Targets: first-pass accept rising toward 50%; L3 rounds per merged PR falling toward 1.5; cache-write share under 20%.
+METRICS.md (generated weekly by `.github/workflows/metrics.yml`) carries first-pass L3 accept, L3 rounds and causes per merged PR, usage per merged PR, defects after merge and CI flakes. Usage comes from the manual readings in LEDGER.md, the only hand-kept input. Session-level spend (cache-write share, cold starts per merged PR, spend by role) is measured by the weekly cost routine outside the repository; any figure from it that drives a decision is copied into LEDGER.md with its date before anyone relies on it. Targets: first-pass accept rising toward 50%; L3 rounds per merged PR falling toward 1.5; cold starts per merged PR falling. The earlier target of a cache-write share under 20% assumed reads at 0.1x; at 0.05x a session must reread its context about 160 times before writes fall to a fifth of input cost, so it was dropped (D-086).
 
 ## 7. Working in parallel: a second subscription or another coding agent
 
