@@ -275,7 +275,7 @@ var ErrCarried = errors.New("recall: take-back owed; Retry carries it")
 
 // ErrWorked refuses a take-back not approved: the agent worked since,
 // so on the ask-first rule it is not taken back without asking (CAP-3).
-var ErrWorked = errors.New("recall: the agent worked since; not taken back without asking")
+var ErrWorked = errors.New("recall: work done since; not taken back without asking")
 
 // errUnrecorded: the machines went back but the reset was not recorded.
 var errUnrecorded = errors.New("reset not recorded")
