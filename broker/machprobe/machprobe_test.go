@@ -125,3 +125,68 @@ func TestPressChildrenInheritNoEnvironment(t *testing.T) {
 		t.Fatalf("child inherits the caller's environment:\n%s", got)
 	}
 }
+
+// REQ: LOOP-7, RES-2
+//
+// P3-4b-4c-bounds requirement 3 (Security README, "a guard fails open on
+// a missing, invalid or out-of-range value"): Press refuses, at once and
+// leaving nothing behind, a pressure it cannot apply: an unknown kind, a
+// duration that is not positive, and for each kind an option that is
+// unset, zero or negative (memory's MiB, which panicked when negative;
+// disk's MiB and directory; processes' count and child command). On main
+// all but the unknown kind and the missing child returned nil, so a
+// guest log said it pressed when it did not (M1: logs only). fill
+// refuses a size that is not positive.
+func TestPressRefusesWhatItCannotPress(t *testing.T) {
+	dir := t.TempDir()
+	ok := Options{MemMB: 1, DiskMB: 1, Dir: dir, Procs: 1, Child: []string{"/bin/sleep", "30"}}
+	for _, c := range []struct {
+		name, kind string
+		d          time.Duration
+		set        func(o *Options)
+	}{
+		{"unknown kind", "network", time.Millisecond, nil},
+		{"no kind", "", time.Millisecond, nil},
+		{"zero duration", "cpu", 0, nil},
+		{"negative duration", "memory", -time.Second, nil},
+		{"zero memory", "memory", time.Millisecond, func(o *Options) { o.MemMB = 0 }},
+		{"negative memory", "memory", time.Millisecond, func(o *Options) { o.MemMB = -1 }},
+		{"zero disk", "disk", time.Millisecond, func(o *Options) { o.DiskMB = 0 }},
+		{"negative disk", "disk", time.Millisecond, func(o *Options) { o.DiskMB = -1 }},
+		{"no disk directory", "disk", time.Millisecond, func(o *Options) { o.Dir = "" }},
+		{"zero processes", "processes", time.Millisecond, func(o *Options) { o.Procs = 0 }},
+		{"negative processes", "processes", time.Millisecond, func(o *Options) { o.Procs = -1 }},
+		{"no child", "processes", time.Millisecond, func(o *Options) { o.Child = nil }},
+		{"empty child", "processes", time.Millisecond, func(o *Options) { o.Child = []string{""} }},
+	} {
+		o := ok
+		if c.set != nil {
+			c.set(&o)
+		}
+		var err error
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					err = nil
+					t.Errorf("%s: panicked: %v", c.name, r)
+				}
+			}()
+			err = Press(context.Background(), c.kind, c.d, o)
+		}()
+		if err == nil {
+			t.Errorf("%s: pressed", c.name)
+		}
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 0 {
+		t.Fatalf("a refused press left %v", ents)
+	}
+	for _, mb := range []int{0, -1} {
+		p := filepath.Join(dir, "fill")
+		if err := fill(p, mb); err == nil {
+			t.Errorf("fill %d MiB passed", mb)
+		}
+		if _, err := os.Stat(p); err == nil {
+			t.Errorf("fill %d MiB created its file", mb)
+		}
+	}
+}
