@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -471,5 +472,64 @@ func TestBothOwedForgetTextsComeAfterARestart(t *testing.T) {
 	defer r.mu.Unlock()
 	if len(r.texts) != 1 || r.texts[0] != forgetAgentDone {
 		t.Fatalf("item 2 told %q", r.texts)
+	}
+}
+
+// L3 B1 on #425, as wired: openLearning gives the forget owner a send
+// that reports failure (loop2Notify.try), so a text owed at start whose
+// send fails (here the owner channel is not attached) stays owed.
+func TestAnOwedTextNotSentStaysOwedAsWired(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "forget-owed.json"), []byte(`{"`+owedLostKey+`":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lp, err := openLearning(learnPaths{Dir: dir, Spare: filepath.Join(dir, "spare.json")}, false, &daemon.Config{
+		JournalPath: filepath.Join(dir, "journal.log"), SocketDir: filepath.Join(dir, "run"), OwnerNumber: ownerNum})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ended := make(chan struct{})
+	lp.forgetOwner.sleep = func(context.Context, time.Duration) bool { return false } // shutdown
+	lp.forgetOwner.toldLater = func() { close(ended) }
+	lp.forgetOwner.finishOwed(context.Background())
+	if g := lp.forgetOwner.owed.goals(); len(g) != 1 || g[0] != owedLostKey {
+		t.Fatalf("owed after a failed send: %v", g)
+	}
+	select {
+	case <-ended:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no resend after a failed send")
+	}
+}
+
+// L3 B1 on #425: a retried forget whose save then holds but whose done
+// text does not send stays owed, and the next start tells it.
+func TestARetriedForgetWhoseTextDoesNotSendStaysOwed(t *testing.T) {
+	store := &change.MemStore{}
+	r := restartRig(t, store)
+	r.learned["owner:a"] = 2
+	r.fail = 1 // the first save fails; the retry's holds
+	r.f.tell = (&downTell{}).tell
+	var sleeps atomic.Int32
+	r.f.sleep = func(context.Context, time.Duration) bool { return sleeps.Add(1) == 1 } // then shutdown
+	retried, ended := make(chan struct{}), make(chan struct{})
+	r.f.retried = func() { close(retried) }
+	r.f.toldLater = func() { close(ended) }
+	since := time.Date(2026, 10, 5, 13, 2, 0, 0, time.UTC)
+	r.f.Execute(context.Background(), forgetIntent(fmt.Sprintf("1.1.%d", since.UnixNano()), "owner:a"), 1)
+	<-retried
+	if g := r.f.owed.goals(); len(g) != 1 || g[0] != "owner:a" {
+		t.Fatalf("owed after a failed send: %v", g)
+	}
+	select {
+	case <-ended:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no resend after a failed send")
+	}
+	again := restart(t, store, map[string]bool{"owner:a": true})
+	again.f.finishOwed(context.Background())
+	want := "Your task from Mon 5 Oct 13:02 is forgotten now. I also undid 2 things I learned from it; I'll relearn what I can without it." + forgetBackups
+	if strings.Join(again.texts, "|") != want {
+		t.Fatalf("texts %q", again.texts)
 	}
 }
