@@ -114,11 +114,17 @@ func (p *CorpusProbe) Run(ctx context.Context) (ProbeResult, error) {
 			if !caught {
 				res.Found = append(res.Found, Finding{Check: CheckCorpus, Subject: it.ID, Detail: c.Name, Severity: High})
 			}
+			res.Checked = append(res.Checked, CorpusKey(it.ID, c.Name))
 		}
-		res.Checked = append(res.Checked, it.ID)
 	}
 	return res, nil
 }
+
+// CorpusKey is what a corpus run lists in Checked for one item taken
+// through one check (#515 L3): a corpus finding closes only on a run that
+// took its own check over its own item, so a check dropped from Checks
+// never closes what it found.
+func CorpusKey(item, check string) string { return item + "\x00" + check }
 
 func replay(text, payload string) string {
 	if strings.Contains(text, corpusSlot) {

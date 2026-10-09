@@ -82,8 +82,8 @@ func TestACleanProbeRunTellsEveryTextedFindingItCleared(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := &fakeProbe{check: tc.f.Check, every: time.Hour, results: []ProbeResult{
-				{Found: []Finding{tc.f}, Checked: []string{tc.f.Subject}},
-				{Checked: []string{tc.f.Subject}},
+				{Found: []Finding{tc.f}, Checked: []string{checkedKey(tc.f)}},
+				{Checked: []string{checkedKey(tc.f)}},
 			}}
 			r := newReportRig(t, nil)
 			r.probes = []Probe{p}
@@ -369,9 +369,9 @@ func TestClearedWaitsForEveryFindingSharingItsPlainName(t *testing.T) {
 		pa, pb := hostile(CheckCorpus), hostile(CheckCorpus)
 		pb.Subject = "other/item"
 		p := &fakeProbe{check: CheckCorpus, every: time.Hour, results: []ProbeResult{
-			{Found: []Finding{pa, pb}, Checked: []string{pa.Subject, pb.Subject}},
-			{Found: []Finding{pb}, Checked: []string{pa.Subject, pb.Subject}},
-			{Checked: []string{pa.Subject, pb.Subject}},
+			{Found: []Finding{pa, pb}, Checked: []string{checkedKey(pa), checkedKey(pb)}},
+			{Found: []Finding{pb}, Checked: []string{checkedKey(pa), checkedKey(pb)}},
+			{Checked: []string{checkedKey(pa), checkedKey(pb)}},
 		}}
 		r := newReportRig(t, nil)
 		r.probes = []Probe{p}
