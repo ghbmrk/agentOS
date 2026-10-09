@@ -19,7 +19,14 @@ Each ID below is a condition. Each needs at least one test with a `REQ:` marker.
     - Two copies whose authentic entries diverge (valid MACs, different entries) still hold the restore as `forged`.
     - The vault's own copy still holds as `forged` on any bad entry, because the vault authenticates it.
     - The counter still catches a rollback.
+  - A copy cut below its anchor is unusable (L3 on #519, point 1).
+    - The gap: the header MAC covers `Host`, `Base` and `AnchorSeq`, but not the number of entries. `head()` returns `Base` whenever the last entry's `Seq <= AnchorSeq`.
+    - So a copy cut to k < `AnchorSeq` entries reads as anchored at `Base`. It is cut either by deleting its tail (possible today) or by a flipped entry under this change.
+    - If the vault's log is a prefix of the cut copy, the cut copy wins and the restore reads as checked. Forgets k+1..`AnchorSeq` are lost.
+    - Rule: any destination copy whose verified prefix holds fewer than its header's `AnchorSeq` entries is treated as absent. `checkForgetLog` reports it to the caller, so b1-6b names it in its output. This rule does not apply to the vault's own copy.
   - Tests:
+    - The reviewer's case: a log anchored on this PC at `AnchorSeq = A` with no forget since, and a backup from before the move (another `Host`). One destination copy is cut to k < A entries by deleting its tail, and another by a flipped entry. In each case the cut copy is ignored and reported, the restore is not checked, and the result matches the cut copy being absent.
+    - A copy cut at exactly `AnchorSeq` entries is still usable.
     - One good copy plus one copy with a flipped entry restores as the good copy would. Today `TestRestoreHoldsAForgedOrReplayedEntry/changed` asserts `forged`; update that case to the new result and say so in the PR.
     - The corrupted copy alone is treated as its prefix.
     - Divergent authentic copies still give `forged`.
@@ -46,6 +53,7 @@ Each ID below is a condition. Each needs at least one test with a `REQ:` marker.
     - Failing would leave a half-stored rotation over a TPM fault the owner can't fix from the card.
     - The fallback costs only a question on a same-PC restore before the first forget, the same as a box with no TPM.
   - Record the decision in ASSUMPTIONS F3.
+  - Reword `PendingNotice(PendingUnanchored)` (L3 on #519, point 5, release). After the fallback, "Restoring on your original PC still works" is false on the original PC, and it is already false on a box with no TPM. Use a line that is true in both cases.
   - Tests:
     - A counter whose Define fails: `storeBackupKey` succeeds and the log is unanchored.
     - A later `AppendForget` with a working counter anchors the log.
@@ -94,6 +102,8 @@ It runs on the PC as root while the box's services are stopped.
   - Tests:
     - With the lock held by another process, the command exits non-zero and the live tree is byte-for-byte unchanged.
     - agentosd's start takes the lock, and a second agentosd refuses.
+  - The vault process takes the same lock too (L3 on #519, point 3, release). The restored tree includes its root (`Layout.Vault`/`Keys`), so an agentos-egress left running would keep the old vault open and could write it after the swap.
+    - Test: with agentos-egress holding the lock, the command refuses and changes nothing.
 - **B6-c: the `State.Pending` cross-check is a b1-5 condition, not built here (R5 (c)).**
   - R5 (c) applies "once agentosd can reach the vault", and b1-5 is the package that gives agentosd the vault.
   - It also needs a release record: `answerHeld` releases without the vault, so `State.Pending` stays set after a correct answer (recovery ASSUMPTIONS Q-follow-ups). A cross-check built now would hold every released box again.
@@ -121,16 +131,19 @@ It runs on the PC as root while the box's services are stopped.
   - The command ends by printing the restore's result. For a hold, the output is:
     - the reason;
     - `PendingNotice`;
-    - one line saying the agent will text the owner about it when it starts.
+    - one line that is true in every agentosd configuration (L3 on #519, point 2). Held mode texts only with `-modem-bridge` (`heldMode.Link` is nil otherwise) and an owner number (`heldOwner` errors when there is no `-owner` and setup never finished). The command cannot see either, so it does not promise a text. The fixed line:
+      > "The agent stays on hold until the owner answers. It asks by text when it runs with its texting link and knows the owner's number; check both are set up."
+    - Recommended over printing the line only when the box will text: that needs the command to read agentosd's flags and setup record, which is more coupling for one line.
   - LATER `W3-forget-b1-7 a` stays later. If the UX lens still wants the page, it is a new release row, not a blocker on this package.
   - Tests:
-    - For each pending reason, the output carries the notice and the text line.
+    - For each pending reason, the output carries the notice and the fixed line exactly.
+    - The line takes no input from agentosd's configuration, so it reads the same with no bridge and no owner. Check that the command's source reads no agentosd flag or setup record.
     - A checked restore prints no hold.
 
 **Scope:**
 - `broker/cmd/agentos-restore/` (new: main.go, tests, ASSUMPTIONS.md).
 - `broker/tpmseal/` (the counter type and its tests).
-- `broker/cmd/agentos-egress/trusted.go` (use the moved type; no behaviour change).
+- `broker/cmd/agentos-egress/trusted.go` (use the moved type; no behaviour change), and its `main.go` for the lock (B6-b).
 - `broker/cmd/agentosd/` (`learn.go` for B6-F4, `main.go` for the lock and the held start, their tests, ASSUMPTIONS.md).
 - The leaf package for B6-a.
 - `broker/daemon/arc2_test.go`, if the import lists need the new binary.
@@ -145,7 +158,7 @@ It runs on the PC as root while the box's services are stopped.
 - **Box.Counter set by the vault process.** The vault process builds no `recovery.Box` today. b1-5 builds one to serve `AppendForget` and `ExportForgetLog`, so it sets `Counter` to the moved tpmseal type, with a test that it is set. W6 must keep it set.
 - **R5 (c),** the `State.Pending` cross-check with a release record (B6-c).
 - **Replacing the learn dir file with the vault's log** as the replay's source (B6-F4).
-- **f3: AEAD destination copies** (#409 Security L1: destination copies are plaintext, so goal IDs, times and take-back flags are readable at the destination). b1-5 makes the backup side's copies, so it chooses the format. b1-6b's reader must then accept it, and b1-5 updates `ReadForgetLogCopy`.
+- **f3: AEAD destination copies** (#409 Security L1: destination copies are plaintext, so goal IDs, times and take-back flags are readable at the destination). b1-5 makes the backup side's copies, so it chooses the format. b1-6b's reader must then accept it, and b1-5 updates `ReadForgetLogCopy`. The format change must land in every writer of destination copies: the vault process, through `AppendForget`'s return, and W6's backup command, through `DestForgetLog` (L3 on #519, point 4).
 - **The forgetLog-nil test:** that production's `ownerForget.forgetLog` stays nil until the restore check is wired, and is set non-nil only together with it (#409 L3 point 3 ordering).
 
 ## Gate
