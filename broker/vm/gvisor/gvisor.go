@@ -299,19 +299,20 @@ func (r *Runtime) Exec(ctx context.Context, id string, c vm.Command) (vm.ExecRes
 	// not known to be its own: Exec answers no output, and runsc's
 	// messages go only to the broker's exec log (SR2-3h). A Go runtime
 	// panic, fatal error or fatal signal in runsc after the command
-	// started writes no --log line, only its trace to runsc's stderr, and
-	// exits 2 (SR2-3m, SR2-3n), whether or not the context has since
-	// ended (Security S1 on #391); so an exit 2 with anything on runsc's
-	// own stderr is runsc's failure. The error is a bare vm sentinel,
-	// naming no path (SR2-3j): with no pid, it is the one runsc's --log
-	// line shows (notRun, SR2-3q, SR2-3p); otherwise, a crash after the
-	// start included, ErrExecFailed, since the command may have run.
-	// A trace written before the context ended, with runsc killed before
-	// it exited 2, is the same failure: runsc's stderr carries only its
-	// own text (SR2-3n), so any of it at the context's end withholds the
-	// output too (P1-4-flake).
+	// started writes no --log line, only its trace to runsc's stderr
+	// (SR2-3m). runsc's stderr is only runsc's; the guest's is a pipe
+	// apart (SR2-3n). So any failed exec with text on it is runsc's
+	// failure, whatever the exit (2, a kill at the deadline or from
+	// outside, any other) or ErrWaitDelay (P1-4-flake-crashed). An exit 0
+	// with text is left a result: the same exit and text read as a
+	// failure only when something held the pipes past ExecWaitDelay;
+	// change neither case without the other. The error is a bare vm
+	// sentinel, naming no path (SR2-3j): with no pid, it is the one
+	// runsc's --log line shows (notRun, SR2-3q, SR2-3p); otherwise, a
+	// crash after the start included, ErrExecFailed, since the command
+	// may have run.
 	var exit *exec.ExitError
-	crashed := errors.As(err, &exit) && len(runscErr.bytes()) > 0 && (exit.ExitCode() == 2 || ctx.Err() != nil)
+	crashed := err != nil && len(runscErr.bytes()) > 0
 	pid, _ := os.ReadFile(pidFile)
 	if started := len(bytes.TrimSpace(pid)) > 0; !started || size(logs[0]) > 0 || crashed {
 		r.logExec(id, err, logs, runscErr.bytes())
