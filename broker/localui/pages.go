@@ -260,7 +260,7 @@ form { margin: .6em 0 1.2em; }
 <p class="muted">Your messages app opens with my number and a code filled in. Press Send, then come back here.</p>
 <p class="muted">Or text <span class="mono">PAIR {{.PairCode}}</span> to <span class="mono">{{.BoxNumber}}</span>. The setup code on your card works too.</p>
 <p><a href="/box.vcf">Save my number as a contact</a></p>{{end}}
-<details><summary>Enter my number instead</summary>
+<details><summary>Enter your number instead</summary>
 <form method="post" action="/setup/number"><label>Your mobile number<input type="tel" name="number" placeholder="+1 555 010 0000" autocomplete="tel"></label><button>Text me a code</button></form>
 {{if .NumTo}}<form method="post" action="/setup/number-code"><label>Code texted to {{.NumTo}}<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code"></label><button>Confirm</button></form>{{end}}
 </details>

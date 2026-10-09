@@ -162,6 +162,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | CH-21c f2 | CH-21c: recovery owner texts still open with "AgentOS: " (`recovery/owner.go`), a signature CH-21 says owner texts do not carry; drop it with CH-21e, which owns how broker text is told from agent text |
 | CH-21c f3 | CH-21c: third person the voice regex cannot see stays in swept packages ("your box" in `recovery/choice.go`, "AgentOS project" is fine); a wording sweep with the UX lens, no new check; includes mixed voice such as the card recovery sheet ("restores your box … I cannot print this again", L3 on #462) |
 | CH-21c f4 | L3 on #462: `grants/resume.go` `pausedBy` shows the owner "Paused by Loop 2", naming an internal part (CH-12); predates #462 |
+| CH-21c f5 | UX lens on #462: the vault fallback "I refused that. Try again." (`localui/vault.go`) gives no reason; the reason was missing before #462 too |
 | OSS-10w2 f6 | UX on #402: the follow-refused text "Not asked: I refused this request." gives no next step (CH-12); it predates #402 |
 | W5a-resume f1 | L3 on #381: no committed test covers restart; a legacy pause-less resume replaying and `Pause`/`PausedBy` rebuilt from the journal were shown only by a scratch test. The next package that touches grants adds it |
 | W5a-resume f2 | UX on #381: the Approvals line shows the raw pause intent ID (e.g. `loop2/pause/3fa9…`); keep it in Detail for the binding, but show the pause time or put the ID on a muted line |

@@ -407,8 +407,8 @@ const (
 	stepNoteOther   = "The rollback point after your last effect request was not saved. The broker tries again after your next effect request; until then your steps since then can't be rolled back."
 	// The owner's STATUS lines take the time of the last saved rollback
 	// point, in the box's local time (UX-SR23s-1, CH-12): rollback, not UNDO, which still works.
-	statusNoRoom  = "Rollback: my files since %s can't be rolled back yet; they're full. I'm freeing space. UNDO still works. Nothing to do unless this lasts."
-	statusTooDeep = "Rollback: my files since %s can't be rolled back yet; my folders nest too deep to save. I'm flattening them. UNDO still works. Nothing to do unless this lasts."
+	statusNoRoom  = "Rollback: my files since %s can't be rolled back yet; they're full. I've asked for space to be freed. UNDO still works. Nothing to do unless this lasts."
+	statusTooDeep = "Rollback: my files since %s can't be rolled back yet; my folders nest too deep to save. I've asked for them to be flattened. UNDO still works. Nothing to do unless this lasts."
 	statusOther   = "Rollback: my files since %s can't be rolled back yet; I couldn't save them. I'll try again after my next action. UNDO still works. Nothing to do unless this lasts."
 )
 
