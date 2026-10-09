@@ -31,7 +31,8 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | P3-4b-2b | A11, CHG-2 | Harness follow-ups to #490: evidence check passes with no evidence record; raw held clause whose fields the visible test shares escapes the audit; leaking-adapter control runs on every valid seed |
 | P3-4b-2 | A11 | Qualification harness for A11's loop 2 clause: harness-chosen seed, held-back variants, scripted rejected fixes |
 | P3-4b-5 | LOOP-9 | Model-backed loop 2 fixer answering the §11 fix-candidate request through Loop 1's builder; needs W3-builder-ship |
-| OP9-status | A11 (OP-9) | STATUS names every capability that is off or can't run; owner row, brief to be written |
+| OP9-status | A11 (OP-9) | STATUS names every capability that is off or can't run; briefs/OP9-status.md, split into -a and -b |
+| DIG-1 | A3 (CH-15), OP-9 | Daily digest sender reading every `Digest()` source; nothing sends a digest today; brief to be written |
 | P3-4b-3 | LOOP-7 (D-067) | Off-the-shelf fuzz targets and in-guest socket probe; no longer in A11 (D-070), release because D-067 still governs LOOP-7 (D-070 supersedes it on A11 only) |
 | P3-4b-4 | LOOP-7 (D-067) | Continuous canary rounds, published corpora, scripted tamper and exhaustion probes; same basis as P3-4b-3 |
 | UPD-b | A1, A14 (UPD-3) | Update before accounts connect |
@@ -212,6 +213,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | SR3-8 l5 | UX on #432: repeated "lost its output N times; not built again" points at failing storage; if a box-health line ever reads disk faults, this log is one input |
 | W3-forget-b3 rr8 | UX on #425, point 1 (CAP-3, F3): a crash after the owner's YES and before the tombstone saves ends silently; reconcile marks the intent not applied and the owed entry is dropped untold. The owed file holds the date, so "Your task from <date> was not forgotten. Send FORGET to try again." would close it. Pre-existing, narrow window |
 | W3-forget-b3 rr9 | UX on #425, point 2: several owed texts after one restart go as separate texts; if forgets are ever owed in bulk, send one text listing the dates |
+| W3-forget-b3r l1 | L3 on #481: repeated POSTs for one goal submit repeated forget requests, as repeated texted `FORGET n` do; consider one open request per goal |
 | SEC-record-format | Security records: #443 puts `Verdict` on line 1 above the title while other security records put the title first; pick one and add a doclint rule |
 | SR3-8 l1 | L3 re-review on #432, point 1: once `CR-quarantine-prune` is on main, add to it that any pruning of `.quarantine` must keep the per-artifact loss count (e.g. a count file), since C14's `maxRepairs` bound is counted from the copies; fold this line into that row |
 | SR3-8 l2 | L3 re-review on #432, point 2: a job stopped by the repair bound is logged `failed: no result within the allowed attempts`; only the log line says its output was lost repeatedly. Text only |
@@ -223,7 +225,6 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | W3-forget-b1-4 l5 | #436 (ASSUMPTIONS Q1): leftover decoy variance across different stale backups |
 | W3-forget-b1-4 l6 | UX on #436: a shorter "replies" line in the confirmation text |
 | W3-forget-b1-4 l7 | Potency on #436 (considered, not proposed): an accept-and-re-forget flow |
-| OP9-status l1 | L3 on #416: move the OP9-status anchor once its brief exists |
 | OP9-status l2 | L3 on #416: give held-back fields values distinct from the finding's free text |
 | P3-4b-1 l1 | L3 on #464 (agreed with builder): LOOP-3's "unmeasured" state resets on every daemon restart; the brief keeps restart behavior unchanged (scheduler.go:153) |
 | P3-4b-1 l3 | Security 5 on #464: `loopKeys` lists exact paths no tree file or reader uses yet; when a reader of `config/loops.json` or `config/loop2.json` lands it must read exactly those keys, with a test tying the list to the reader |
@@ -266,6 +267,8 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | SR2-3n f3 | Security 4a on #466: on a normal result, anything runsc wrote to its own stderr is discarded rather than logged; nothing leaks, only diagnostics are lost |
 | W3-forget-b3r l2 | L3 accept on #481, point 1: the `forget.go` comment at :224 cites CH-21 for the unlock rule; the cite is CH-3 (CH-21 is "Name and voice"). Fix it when a build touches that file |
 | W3-forget-b3r l3 | L3 accept on #481, point 2: the BOARD `W3-forget-b3` row says "in review (#425)" although #425 is merged; the coordinator corrects it |
+| P2-1 watchdog | L3 on #41 (UPD-1): a boot that hangs with no kernel panic and no failed unit never reaches a reboot; a hardware watchdog (`RuntimeWatchdogSec=` on the N95's iTCO timer) closes it. Panics, failed units and emergency or rescue mode already reboot |
+| P2-1 unblessed | Fourth L3 on #41 (UPD-1): two unblessed `+0` entries make the fallback reboot between them forever, since each counts the other as an earlier release. Fix in the update package (refuse to stage on an unblessed boot) or count only blessed or tries-left entries. An initrd failure on a blessed or single-release `+0` entry also reboot-loops (image/ASSUMPTIONS.md I4) |
 
 ## Reuse candidates
 | ID | Component | Why |
