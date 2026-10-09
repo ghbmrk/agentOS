@@ -291,3 +291,42 @@ func TestGuestNonZeroExitWithoutRunscTextIsAResult(t *testing.T) {
 		t.Fatalf("a guest's exit was logged:\n%s", b)
 	}
 }
+
+// runsc's util.Fatalf exits 128 with a --log line and its message on
+// stderr (P1-4-flake-exit128): runsc's failure, not the guest's exit 128.
+// runsc's exec calls Fatalf only before the pid write, so Exec answers
+// ErrExecNotStarted (notRun), not ErrExecFailed. Pinning: true at main
+// through Exec; the corpus replay's raw exec is what lost the message.
+func TestRunscFatalExit128AnswersNoOutput(t *testing.T) {
+	r := fakeRunsc(t)
+	res, err := r.Exec(context.Background(), "wk-1", vm.Command{Argv: []string{"fatal128"}, MaxOutput: 4096})
+	if err != vm.ErrExecNotStarted {
+		t.Fatalf("error %v, want %v; result %+v", err, vm.ErrExecNotStarted, res)
+	}
+	if len(res.Stdout) > 0 || len(res.Stderr) > 0 || res.ExitCode != 0 {
+		t.Fatalf("runsc's fatal answered output: %+v", res)
+	}
+	b, err := os.ReadFile(filepath.Join(r.StateDir, "exec.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "loading container failed: "+runscCanary) {
+		t.Errorf("exec log lacks runsc's fatal:\n%s", b)
+	}
+}
+
+// The control: a guest's own exit 128, with runsc silent, stays a result,
+// so not every 128 is withheld.
+func TestGuestExit128WithoutRunscTextIsAResult(t *testing.T) {
+	r := fakeRunsc(t)
+	res, err := r.Exec(context.Background(), "wk-1", vm.Command{Argv: []string{"exit128"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ExitCode != 128 || string(res.Stdout) != "guest out\n" {
+		t.Fatalf("guest's own exit 128: %+v", res)
+	}
+	if b, _ := os.ReadFile(filepath.Join(r.StateDir, "exec.log")); len(b) > 0 {
+		t.Fatalf("a guest's exit was logged:\n%s", b)
+	}
+}

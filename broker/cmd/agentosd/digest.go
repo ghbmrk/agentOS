@@ -561,10 +561,11 @@ func (d *digestBox) render(b digestqueue.Batch) (string, error) {
 	return text, nil
 }
 
-// forget purges ref from the queue (CAP-3). A batch in flight refuses it
-// (digestqueue.ErrInFlight), as does a queue that is not open, so the
-// forget stays owed and its retry asks again; meanwhile ref is kept in
-// forgets, so open purges it first and no batch holding it is sent.
+// forget purges ref from the queue (CAP-3); an unknown batch holding it is
+// redacted whole and stays unknown (W5-Dc-r7). A sending batch refuses it
+// (digestqueue.ErrInFlight), as do a queue that is not open and a store
+// refusal, so the forget stays owed and its retry asks again; meanwhile ref
+// is kept in forgets, so open purges it first and no batch holding it is sent.
 func (d *digestBox) forget(ref string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()

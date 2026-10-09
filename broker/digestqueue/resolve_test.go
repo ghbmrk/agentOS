@@ -276,14 +276,12 @@ func TestForgottenGenerationNeverReadmitted(t *testing.T) {
 	}
 }
 
-// REQ: OP-2 (W5-Db DB-5)
+// REQ: OP-2 (W5-Db DB-5), CAP-3 (W5-Dc-r7 UF-1)
+// The in-flight batch is Sending: an Unknown one is now redacted (W5-Dc-r7).
 func TestForgetInFlightRefusesBeforeMutation(t *testing.T) {
 	q, st := queue(t)
 	pending, _ := q.Enqueue([]Snapshot{snap(t, "change", 1, "Change line.", "task-1"), snap(t, "owner", 1, "Owner line.", "note-1")}, at, at.Add(time.Hour))
-	unknown := start(t, q, enqueue(t, q, "mail", 1))
-	if err := q.finish(unknown.ID, unknown.Attempts, OutcomeUnknown, ""); err != nil {
-		t.Fatal(err)
-	}
+	start(t, q, enqueue(t, q, "mail", 1))
 	before, _ := st.Load()
 	if err := q.Forget("task-1"); !errors.Is(err, ErrInFlight) {
 		t.Fatal(err)
@@ -295,7 +293,7 @@ func TestForgetInFlightRefusesBeforeMutation(t *testing.T) {
 	}
 }
 
-// REQ: OP-1 (W5-Db DB-6), OP-1
+// REQ: OP-1 (W5-Db DB-6)
 func TestCompactDropsSupersededExpired(t *testing.T) {
 	q, st := queue(t)
 	s := snapshot(t, "change", 1, "Fixed broker notice.")
