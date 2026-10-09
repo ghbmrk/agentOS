@@ -113,9 +113,12 @@ var netOK = map[string]allowance{
 	// also start as an unprivileged user in an empty network namespace,
 	// and Jail.Own reads owners and link counts (P3-4b-3r-confine); each
 	// starts from a thread with no_new_privs set (P3-4b-3r-confine-r3).
-	"loop7": {"process-group kill of its fuzz children; their jail's user and empty network namespace; no_new_privs on the starting thread; owner and link-count checks",
+	// Their IPC namespace is their own, and a user namespace mapping only
+	// their ids stops them retagging their tree out of its quota
+	// (P3-4b-3r-confine-r2).
+	"loop7": {"process-group kill of its fuzz children; their jail's user, empty network namespace, own IPC namespace and identity-mapped user namespace; no_new_privs on the starting thread; owner and link-count checks",
 		[]string{"golang.org/x/sys/unix.PR_SET_NO_NEW_PRIVS", "golang.org/x/sys/unix.Prctl",
-			"syscall.CLONE_NEWNET", "syscall.Credential", "syscall.Kill", "syscall.SIGKILL", "syscall.Stat_t", "syscall.SysProcAttr"}},
+			"syscall.CLONE_NEWIPC", "syscall.CLONE_NEWNET", "syscall.CLONE_NEWUSER", "syscall.Credential", "syscall.Kill", "syscall.SIGKILL", "syscall.Stat_t", "syscall.SysProcAttr", "syscall.SysProcIDMap"}},
 	"probecmd": {"its probe children's own process group", []string{"syscall.SysProcAttr"}},
 	// The one package that starts a process (P3-4b-3r-env-r8).
 	"childproc": {"a child's SysProcAttr, and the process-group kill on cancel", []string{"syscall.Kill", "syscall.SIGKILL", "syscall.SysProcAttr"}},

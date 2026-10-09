@@ -240,12 +240,18 @@ type Config struct {
 	// Coalesce, CoalesceIdle, and RequestsPerHour pace approval requests
 	// (CH-15); zero takes the defaults. Urgent marks owner-defined urgent
 	// items, sent at once and in quiet hours. Quiet reports the owner's
-	// quiet hours: non-urgent requests wait for them to end.
+	// quiet hours: non-urgent requests wait for them to end. Allowance,
+	// when set, is the owner's unsolicited texts left in the hour before
+	// now (W5-Dc-r1b QH-8): it replaces grants' own count and
+	// RequestsPerHour, so approval requests and questions spend the
+	// owner's one budget, once. It takes the owner's lock, so the gate
+	// calls it without g.mu.
 	Coalesce        time.Duration
 	CoalesceIdle    time.Duration
 	RequestsPerHour int
 	Urgent          func(owner.Item) bool
 	Quiet           func(time.Time) bool
+	Allowance       func(time.Time) int
 	Fresh           time.Duration
 	Now             func() time.Time
 	Logf            func(format string, args ...any)
@@ -1758,6 +1764,7 @@ func (g *Gate) queueReply(id string, v verdict) {
 // restart.
 func (g *Gate) flushDue() {
 	now := g.cfg.Now()
+	allowance := g.allowance(now)
 	g.mu.Lock()
 	if len(g.batch) == 0 {
 		g.mu.Unlock()
@@ -1777,7 +1784,7 @@ func (g *Gate) flushDue() {
 		}
 	}
 	own := g.own
-	budget := g.textsLocked(now) < g.cfg.RequestsPerHour
+	budget := g.roomLocked(now, allowance) > 0
 	ripe := now.Sub(g.first) >= g.cfg.Coalesce || now.Sub(g.last) >= g.cfg.CoalesceIdle
 	g.mu.Unlock()
 	active := own != nil && own.Active(activeFor)
@@ -1790,6 +1797,26 @@ func (g *Gate) flushDue() {
 		// even past the budget (security R3 on #95); the rest stay paced.
 		g.flush(true)
 	}
+}
+
+// allowance is the owner's allowance at now, or -1 when Config.Allowance
+// is unset. Call it without g.mu.
+func (g *Gate) allowance(now time.Time) int {
+	if g.cfg.Allowance == nil {
+		return -1
+	}
+	return g.cfg.Allowance(now)
+}
+
+// roomLocked is the CH-15 budget left at now: the owner's allowance (from
+// g.allowance) when set, else RequestsPerHour less grants' own count.
+// Grants' count is still taken, so its record is pruned to the hour.
+func (g *Gate) roomLocked(now time.Time, allowance int) int {
+	own := g.cfg.RequestsPerHour - g.textsLocked(now)
+	if allowance >= 0 {
+		return allowance
+	}
+	return own
 }
 
 // textsLocked is the unsolicited texts on the CH-15 budget in the hour
@@ -1819,9 +1846,10 @@ func (g *Gate) textsLocked(now time.Time) int {
 // one step. Time is the gate's own clock, as for request texts.
 func (g *Gate) Reserve(aged bool) bool {
 	now := g.cfg.Now()
+	allowance := g.allowance(now)
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.textsLocked(now) >= g.cfg.RequestsPerHour {
+	if g.roomLocked(now, allowance) <= 0 {
 		return false
 	}
 	if len(g.batch) > 0 {
@@ -1840,10 +1868,11 @@ func (g *Gate) Reserve(aged bool) bool {
 // so no question is reserved in between.
 func (g *Gate) take(paced bool, n int) int {
 	now := g.cfg.Now()
+	allowance := g.allowance(now)
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if paced {
-		n = max(0, min(n, g.cfg.RequestsPerHour-g.textsLocked(now)))
+		n = max(0, min(n, g.roomLocked(now, allowance)))
 	}
 	for range n {
 		g.sent = append(g.sent, now)

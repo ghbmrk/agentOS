@@ -1200,6 +1200,10 @@ type Jail struct {
 	// os.Root opened there (Source.tree, Load), with no process of the
 	// user alive (empty). Its parent must not be writable by the user.
 	State string
+	// Disk, if set, bounds State's disk use (RES-4): Own calls it on State
+	// once the leaf is empty, before giving the tree to the user.
+	// agentosd always sets it (L7-6).
+	Disk func(state string) error
 }
 
 // attr sets the jail on a child's attributes; the returned leaf, if any,
@@ -1207,7 +1211,19 @@ type Jail struct {
 func (j *Jail) attr(a *syscall.SysProcAttr) (*os.File, error) {
 	a.Credential = &syscall.Credential{Uid: j.UID, Gid: j.GID, Groups: []uint32{}}
 	// An empty network namespace: only a loopback device, which is down.
-	a.Cloneflags = syscall.CLONE_NEWNET
+	// An IPC namespace of its own, whose SysV segments and POSIX queues
+	// die with its last process, so none stays charged to the leaf after
+	// empty. A user namespace mapping only the jail's user and group to
+	// themselves: the child keeps its ids and gains no capability across
+	// exec, and the kernel refuses a project ID change from outside the
+	// initial namespace, so the child cannot retag its tree out of its
+	// quota (RES-4), which an owner otherwise may.
+	a.Cloneflags = syscall.CLONE_NEWNET | syscall.CLONE_NEWIPC | syscall.CLONE_NEWUSER
+	a.UidMappings = []syscall.SysProcIDMap{{ContainerID: int(j.UID), HostID: int(j.UID), Size: 1}}
+	a.GidMappings = []syscall.SysProcIDMap{{ContainerID: int(j.GID), HostID: int(j.GID), Size: 1}}
+	// Setgroups stays allowed, so the child's group list is emptied
+	// rather than kept from the daemon.
+	a.GidMappingsEnableSetgroups = true
 	if j.Leaf == "" {
 		return nil, nil
 	}
@@ -1228,6 +1244,11 @@ func (j *Jail) attr(a *syscall.SysProcAttr) (*os.File, error) {
 func (j *Jail) Own() error {
 	if err := j.empty(); err != nil {
 		return err
+	}
+	if j.Disk != nil {
+		if err := j.Disk(j.State); err != nil {
+			return err
+		}
 	}
 	r, err := os.OpenRoot(j.State)
 	if err != nil {
