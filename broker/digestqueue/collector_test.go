@@ -211,7 +211,10 @@ func TestMissingSourceBlocksRecoveryBeforeNewCollection(t *testing.T) {
 		t.Fatal("new source bypassed missing recovery source")
 	}
 }
-func TestExpiredUnacknowledgedBatchDoesNotConsumeSource(t *testing.T) {
+
+// REQ: DB-6
+// W5-Da expected ErrExpired here; recover now skips expired batches.
+func TestRecoverSkipsExpired(t *testing.T) {
 	q, _ := queue(t)
 	b := enqueue(t, q, "change", 1)
 	if err := q.Expire(at.Add(2 * time.Hour)); err != nil {
@@ -219,8 +222,8 @@ func TestExpiredUnacknowledgedBatchDoesNotConsumeSource(t *testing.T) {
 	}
 	src := source(b.Snapshots[0])
 	c := collect(t, q, map[string]Source{"change": src})
-	if err := c.Recover(context.Background()); !errors.Is(err, ErrExpired) {
-		t.Fatal(err)
+	if err := c.Recover(context.Background()); err != nil {
+		t.Fatal("recover blocked on an expired batch:", err)
 	}
 	if src.calls != 0 || src.pending == nil {
 		t.Fatal("expired notice consumed source")
@@ -386,8 +389,10 @@ func TestDistinctFileStoresRecoverAcrossBothReopens(t *testing.T) {
 	}
 }
 
-// REQ: OP-1
-func TestCompactedExpiredBatchStillBlocksRatherThanWedgingSource(t *testing.T) {
+// REQ: OP-1, DB-6
+// Replaces W5-Da's TestCompactedExpiredBatchStillBlocksRatherThanWedgingSource:
+// an expired batch no longer blocks its source; its lines are re-offered.
+func TestExpiredGenerationReofferedInNewBatch(t *testing.T) {
 	st := &change.MemStore{}
 	q, err := New(st, limits)
 	if err != nil {
@@ -395,27 +400,35 @@ func TestCompactedExpiredBatchStillBlocksRatherThanWedgingSource(t *testing.T) {
 	}
 	src := source(snapshot(t, "change", 1, "Fixed broker notice."))
 	c := collect(t, q, map[string]Source{"change": src})
-	b, err := q.Enqueue([]Snapshot{*src.pending}, at, at.Add(time.Hour))
-	if err != nil {
-		t.Fatal(err)
+	src.fail = errors.New("source down")
+	if _, err = c.Collect(context.Background(), at, at.Add(time.Hour)); err == nil {
+		t.Fatal("collect with a failing source ack")
 	}
+	src.fail = nil
 	if err = q.Expire(at.Add(time.Hour)); err != nil {
 		t.Fatal(err)
+	}
+	if old, _ := q.Get(1); old.State != Expired {
+		t.Fatal(old.State)
 	}
 	if err = q.Compact(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = q.Get(b.ID); err != nil {
-		t.Fatal("association discarded:", err)
+	if _, err = q.Get(1); err != nil {
+		t.Fatal("expired batch the ledger points to was compacted:", err)
 	}
-	if err = c.Recover(context.Background()); !errors.Is(err, ErrExpired) {
-		t.Fatal(err)
+	b, err := c.Collect(context.Background(), at.Add(time.Hour), at.Add(2*time.Hour))
+	if err != nil || b == nil || b.ID == 1 || b.State != Ready || !b.Acknowledged[0] || b.Snapshots[0].Lines[0] != "Fixed broker notice." {
+		t.Fatal(b, err)
 	}
-	if _, err = c.Collect(context.Background(), at, at.Add(time.Hour)); !errors.Is(err, ErrExpired) {
-		t.Fatal(err)
+	if src.pending != nil {
+		t.Fatal("re-offered generation not consumed")
 	}
-	if src.calls != 0 || src.pending == nil {
-		t.Fatal("source acknowledged for an expired batch", src.calls)
+	if _, err = New(st, limits); err != nil {
+		t.Fatal("re-offer left an invalid state:", err)
+	}
+	if again, err := c.Collect(context.Background(), at.Add(time.Hour), at.Add(2*time.Hour)); err != nil || again != nil {
+		t.Fatal("duplicate after re-offer", again, err)
 	}
 }
 
