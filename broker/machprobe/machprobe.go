@@ -99,7 +99,9 @@ func Press(ctx context.Context, kind string, d time.Duration, o Options) error {
 			}
 		}()
 		for range o.Procs {
-			p, err := os.StartProcess(o.Child[0], o.Child, &os.ProcAttr{})
+			// An empty environment: the child only idles, and the
+			// caller's would otherwise pass to it (P3-4b-3r-env).
+			p, err := os.StartProcess(o.Child[0], o.Child, &os.ProcAttr{Env: []string{}})
 			if err != nil {
 				break // the process limit stopped it: pressure reached
 			}

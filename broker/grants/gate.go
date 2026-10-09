@@ -326,11 +326,12 @@ type heldImplicit struct {
 
 // wait is an intent waiting on the owner.
 type wait struct {
-	item    owner.Item
-	local   bool   // also needs local confirmation
-	onlyUI  bool   // waits for the local page (a hold); never texted
-	request string // owner request ID, "" while batched
-	reply   string // queued auto-reply ID
+	item    owner.Item // as the owner was asked it
+	base    owner.Item // without the queued note: what an approval covers
+	local   bool       // also needs local confirmation
+	onlyUI  bool       // waits for the local page (a hold); never texted
+	request string     // owner request ID, "" while batched
+	reply   string     // queued auto-reply ID
 	sendAt  time.Time
 	held    bool      // approved, and held under reply until sendAt (REV-3)
 	attempt int       // which hold of the intent this is, from 1
@@ -508,17 +509,17 @@ func (g *Gate) reissueDue() {
 			continue
 		}
 		v := g.evaluate(ctx, journal.PhaseAuthorize, st.Intent)
-		if v.kind != ask || owner.ItemSum(v.item) != c.Sum {
+		it, ok := v.reissued(c.Sum, st.Intent.Action)
+		if v.kind != ask || !ok {
 			// OP-3 at re-issue: what the owner was asked no longer
 			// holds, so it is not re-sent.
 			g.closeIntent(c.Ref, "the details changed while AgentOS restarted; ask again with a new request_id")
 			continue
 		}
-		it := v.item
 		it.Asked = c.Asked
 		g.mu.Lock()
 		if g.waiting[c.Ref] == nil {
-			g.waiting[c.Ref] = &wait{item: it, local: v.local, expires: c.Expires}
+			g.waiting[c.Ref] = &wait{item: it, base: v.item, local: v.local, expires: c.Expires}
 			if len(g.batch) == 0 {
 				g.first = now
 			}
@@ -627,9 +628,36 @@ type verdict struct {
 	why   guesterr.Literal
 	cause error
 	item  owner.Item
+	// note is shown with item's Detail but is not part of what the owner
+	// approves: the queued count it names may change before the effect
+	// runs (SR3-2-f2).
+	note  string
 	local bool
 	hold  bool // waits for the local page without texting the owner
 	reply *owner.AutoReply
+}
+
+// shown is the item as the owner is asked it.
+func (v verdict) shown() owner.Item { return withNote(v.item, v.note) }
+
+// reissued is the item a restart re-sends for an ask whose shown item had
+// digest sum: v's item with the queued note the owner was sent, which may
+// name a count other than today's (SR3-2-f2). ok is false when no such
+// item matches sum: what the owner was asked no longer holds.
+func (v verdict) reissued(sum, action string) (owner.Item, bool) {
+	if it := v.shown(); owner.ItemSum(it) == sum {
+		return it, true
+	}
+	for n := 0; n <= maxNoted; n++ {
+		note := ""
+		if n > 0 {
+			note = queuedNote(n, action)
+		}
+		if it := withNote(v.item, note); owner.ItemSum(it) == sum {
+			return it, true
+		}
+	}
+	return owner.Item{}, false
 }
 
 // refusal is the gate's answer to an intent it refuses (SR2-3j): Error is
@@ -755,8 +783,13 @@ func (g *Gate) evaluateEffect(ctx context.Context, phase journal.Phase, in journ
 	}
 	if cls == verb.Irreversible && verified && !g.contained(in.Origin) {
 		sort.Slice(rules, func(i, j int) bool { return rules[i].ID < rules[j].ID })
+		queued := 0
 		for _, r := range rules {
-			if g.matches(phase, *r.Spec.Rule, in, ver) != nil {
+			if err := g.matches(phase, *r.Spec.Rule, in, ver); err != nil {
+				var b boundReached
+				if errors.As(err, &b) && b.queued > queued {
+					queued = b.queued
+				}
 				continue
 			}
 			if r.Spec.Rule.Reply {
@@ -766,9 +799,54 @@ func (g *Gate) evaluateEffect(ctx context.Context, phase journal.Phase, in journ
 			}
 			return verdict{kind: allow}
 		}
+		if queued > 0 {
+			return verdict{kind: ask, item: item, note: queuedNote(queued, in.Action)}
+		}
 	}
 	return verdict{kind: ask, item: item}
 }
+
+// detailMax is the owner line's Detail width (owner.Item.line).
+const detailMax = 40
+
+// maxNoted bounds the queued counts a restart tries when matching a
+// re-issued ask to what the owner was sent (reissued).
+const maxNoted = 1000
+
+// queuedNote says how many of the places a scope bound counted are
+// intents still queued (SR3-2-f2): a count and a fixed verb only, never a
+// queued intent's parameters.
+func queuedNote(n int, action string) string {
+	noun := "action"
+	if _, op, _ := strings.Cut(action, "."); op == "send" || action == "send" {
+		noun = "send"
+	}
+	if n != 1 {
+		noun += "s"
+	}
+	return fmt.Sprintf("%d earlier %s still queued", n, noun)
+}
+
+// withNote adds note to an ask's Detail. A Detail already set, such as an
+// adapter guard's reason, is kept, and the note is added only if both fit
+// the field.
+func withNote(it owner.Item, note string) owner.Item {
+	switch {
+	case note == "":
+	case it.Detail == "":
+		it.Detail = note
+	case len(it.Detail)+len("; ")+len(note) <= detailMax:
+		it.Detail += "; " + note
+	}
+	return it
+}
+
+// boundReached is matches' error for a rule that fails only on its scope
+// bound; queued is how many of the places counted under the reached bound
+// are intents not yet started.
+type boundReached struct{ queued int }
+
+func (boundReached) Error() string { return "scope bound reached" }
 
 // contained reports a guest lineage that still holds a record the owner
 // deleted (recalltool W10): no pre-allowance acts for it, so each of its
@@ -841,15 +919,26 @@ func (g *Gate) matches(phase journal.Phase, r Rule, in journal.Intent, v Verifie
 			return errors.New("not a context-scoped reply (ADP-11)")
 		}
 	}
-	day, perRec := 0, 0
+	day, perRec, dayQ, recQ := 0, 0, 0, 0
 	for _, x := range g.inUse(phase, in, now) {
 		day++
-		if s, _ := x.Params[ParamRecord].(string); s == rec {
+		if !x.Started {
+			dayQ++
+		}
+		// An erased use no longer names its record (CAP-3), so it counts
+		// against every record (SR3-2-f3).
+		if s, _ := x.Intent.Params[ParamRecord].(string); s == rec || x.Erased {
 			perRec++
+			if !x.Started {
+				recQ++
+			}
 		}
 	}
-	if day >= r.PerDay || perRec >= r.PerRecord {
-		return errors.New("scope bound reached")
+	switch {
+	case day >= r.PerDay:
+		return boundReached{queued: dayQ}
+	case perRec >= r.PerRecord:
+		return boundReached{queued: recQ}
 	}
 	return nil
 }
@@ -861,13 +950,13 @@ func (g *Gate) matches(phase journal.Phase, r Rule, in journal.Intent, v Verifie
 // is one of the queued, and the engine commits its dispatch only if
 // nothing was journaled since this count, so two dispatches cannot both
 // take the last place (OP-3).
-func (g *Gate) inUse(phase journal.Phase, in journal.Intent, now time.Time) []journal.Intent {
-	var out []journal.Intent
+func (g *Gate) inUse(phase journal.Phase, in journal.Intent, now time.Time) []journal.Use {
+	var out []journal.Use
 	for _, u := range g.eng.InUse(in.Account, in.Action, now.Add(-window)) {
 		if u.Intent.ID == in.ID || (phase == journal.PhaseDispatch && !u.Started) {
 			continue
 		}
-		out = append(out, u.Intent)
+		out = append(out, u)
 	}
 	return out
 }
@@ -1161,7 +1250,7 @@ func (g *Gate) evaluateDelivery(phase journal.Phase, in journal.Intent) verdict 
 	}
 	n := 0
 	for _, x := range g.inUse(phase, in, g.cfg.Now()) {
-		if x.Origin == OriginEvidence {
+		if x.Intent.Origin == OriginEvidence {
 			n++
 		}
 	}
@@ -1543,7 +1632,7 @@ func (g *Gate) Authorize(ctx context.Context, id string) (journal.Status, error)
 		g.mu.Lock()
 		fresh := g.waiting[id] == nil
 		if fresh {
-			g.waiting[id] = &wait{item: v.item, local: v.local, onlyUI: onlyUI}
+			g.waiting[id] = &wait{item: v.shown(), base: v.item, local: v.local, onlyUI: onlyUI}
 			if !onlyUI {
 				now := g.cfg.Now()
 				if len(g.batch) == 0 {
@@ -1639,7 +1728,7 @@ func (g *Gate) queueReply(id string, v verdict) {
 		g.mu.Unlock()
 		return
 	}
-	g.waiting[id] = &wait{item: v.item}
+	g.waiting[id] = &wait{item: v.item, base: v.item}
 	g.mu.Unlock()
 	var res owner.QueueResult
 	err := errors.New("no owner channel")
@@ -1978,7 +2067,7 @@ func (g *Gate) Decide(d owner.Decision) {
 	var item owner.Item
 	local := false
 	if w != nil {
-		item, local = w.item, w.local
+		item, local = w.base, w.local
 	}
 	delete(g.waiting, d.Ref)
 	delete(g.carried, d.Ref)
