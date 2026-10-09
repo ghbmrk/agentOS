@@ -233,12 +233,15 @@ func (p *policy) Check(ctx context.Context, ph journal.Phase, in journal.Intent)
 }
 
 type rig struct {
-	t        *testing.T
-	clk      *clock
-	act      *activator
-	act0     Activator // the activator the applier uses; nil: act
-	pipe     *pipeline
-	store    *update.Store
+	t     *testing.T
+	clk   *clock
+	act   *activator
+	act0  Activator // the activator the applier uses; nil: act
+	pipe  *pipeline
+	store *update.Store
+	// mirror: when set, store checks every release the rig makes from it,
+	// so a next release stages too.
+	mirror   *updatetest.Mirror
 	state    *change.MemStore
 	eng      *journal.Engine
 	pol      *policy
@@ -281,6 +284,14 @@ func newRig(t *testing.T) *rig {
 // checked it.
 func (r *rig) release(v int64, security bool) *update.Verified {
 	r.t.Helper()
+	if r.mirror != nil {
+		r.mirror.Add(v, update.ChannelStable, security)
+		res, err := r.store.Check(r.mirror.Source(), update.Options{})
+		if err != nil || res.Release == nil {
+			r.t.Fatalf("check %d: %v %v", v, res.Release, err)
+		}
+		return res.Release
+	}
 	rel, st := updatetest.Box(r.t, v, security, map[string][]byte{"host-image/entry.conf": []byte("entry"), "host-image/usr.img": []byte("usr")})
 	if r.store == nil {
 		r.store = st
