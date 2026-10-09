@@ -57,6 +57,10 @@ type Brief struct {
 	Steps  []BriefStep `json:"steps"`
 	Cases  []BriefCase `json:"cases"`
 	Limits BriefLimits `json:"limits"`
+	// Subject and Detail are a Loop 2 finding's, in a fix brief only
+	// (FixSignal); its one case is the finding's minimized regression.
+	Subject string `json:"subject,omitempty"`
+	Detail  string `json:"detail,omitempty"`
 }
 
 // BriefStep is one journal intent behind the hypothesis, as the journal

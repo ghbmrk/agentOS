@@ -462,7 +462,8 @@ func TestACaseLinkedAfterReportGradesTheFix(t *testing.T) {
 }
 
 // CHG-2, item 5: the fixer is handed the finding and nothing else: no
-// suite content, no other case's bytes.
+// suite content, no other case's bytes. Its rule is the minimized
+// regression (P3-4b-5).
 func TestTheFixerGetsOnlyTheFinding(t *testing.T) {
 	fx := &scriptFixer{cands: []change.Candidate{fixCand(reference)}}
 	r := newReportRig(t, fx)
@@ -472,7 +473,9 @@ func TestTheFixerGetsOnlyTheFinding(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.pass(t)
-	if len(fx.got) != 1 || !reflect.DeepEqual(fx.got[0], rec.Finding) {
+	want := rec.Finding
+	want.Rule = rec.Regression
+	if len(fx.got) != 1 || !reflect.DeepEqual(fx.got[0], want) {
 		t.Fatalf("fixer input %+v, reported %+v", fx.got, rec.Finding)
 	}
 	b, _ := json.Marshal(fx.got[0])
