@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -143,6 +144,39 @@ type Options struct {
 //	root.json, timestamp.json, snapshot.json, seen_keys.json, installed.json
 type Store struct {
 	Dir string
+	// Anchor, when set, is a monotonic counter outside the store that
+	// also records the first outside listing (SR3-6f-2a): the vault
+	// process's TPM NV counter on this PC. nil behaves as before.
+	Anchor Anchor
+}
+
+// Anchor is a monotonic counter kept off the store's files. Read returns
+// its value; Raise brings it to 1 or more and leaves it there, so a
+// second Raise changes nothing. Neither ever lowers it.
+type Anchor interface {
+	Read() (uint64, error)
+	Raise() error
+}
+
+// ErrNoAnchor is an anchor's answer on a PC that has no counter to give
+// (no TPM): the store then behaves as with no anchor, and Anchored says
+// so for STATUS.
+var ErrNoAnchor = errors.New("update: no anchor on this PC")
+
+// Anchored reports whether the outside record is anchored off the store.
+// A nil anchor, or one answering ErrNoAnchor, is not; an anchor that
+// cannot be read returns its error.
+func (s *Store) Anchored() (bool, error) {
+	if s.Anchor == nil {
+		return false, nil
+	}
+	if _, err := s.Anchor.Read(); err != nil {
+		if errors.Is(err, ErrNoAnchor) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 // Installed is the box's current release.
@@ -242,6 +276,7 @@ type Verified struct {
 	// The store that checked it, and the root and targets versions it
 	// trusted then: Stage refuses it once either moved (L3 on #133).
 	storeDir       string
+	storeAnchor    Anchor
 	rootVersion    int64
 	targetsVersion int64
 	// rootSHA256 is the trusted root's digest: after a switch to a fork
@@ -313,7 +348,7 @@ func (v *Verified) Security() bool { return v.ok() && v.security && v.policyCurr
 // attestor policy is still the one v was checked under. A store that
 // cannot be read fails closed.
 func (v *Verified) policyCurrent() error {
-	cur, err := (&Store{Dir: v.storeDir}).policy()
+	cur, err := (&Store{Dir: v.storeDir, Anchor: v.storeAnchor}).policy()
 	if err != nil || cur != v.policy {
 		return ErrPolicyMoved
 	}
@@ -638,7 +673,7 @@ func (s *Store) check(src Source, o Options) (Result, error) {
 	proto.maintainers, proto.operated = seen, attestors
 
 	var versions []int64
-	proto.storeDir, proto.rootVersion, proto.targetsVersion = s.Dir, tm.Root.Signed.Version, targets.Signed.Version
+	proto.storeDir, proto.storeAnchor, proto.rootVersion, proto.targetsVersion = s.Dir, s.Anchor, tm.Root.Signed.Version, targets.Signed.Version
 	proto.rootSHA256 = Digest(rootBytes)
 	for p := range targets.Signed.Targets {
 		if n, ok := releaseVersion(p); ok && n > installed.Version {
@@ -753,7 +788,7 @@ func (s *Store) noteAttestors(allow, interim []ed25519.PublicKey, v *Verified) (
 		}
 	}
 	if outside {
-		if err := writeAtomic(s.p(outsideFile), []byte("1\n"), 0o600); err != nil {
+		if err := s.recordOutside(); err != nil {
 			return false, err
 		}
 	}
@@ -791,16 +826,51 @@ func (s *Store) writeAllowList(allowed, pinned map[string]bool) error {
 	return writeAtomic(s.p(allowListFile), []byte(d), 0o600)
 }
 
+// recordOutside raises the anchor, then writes outsideFile. A failed
+// Raise still writes the file, so the store is never weaker than without
+// an anchor, and returns the Raise error (SR3-6f-2a). The caller holds the
+// lock.
+func (s *Store) recordOutside() error {
+	var raised error
+	if s.Anchor != nil {
+		if err := s.Anchor.Raise(); err != nil && !errors.Is(err, ErrNoAnchor) {
+			raised = fmt.Errorf("update: raise the outside-attestor anchor: %w", err)
+		}
+	}
+	if err := writeAtomic(s.p(outsideFile), []byte("1\n"), 0o600); err != nil {
+		return err
+	}
+	return raised
+}
+
+// outsideListed reports whether an outside attestor was ever listed: the
+// file exists or the anchor reads 1 or more. The anchor is read even when
+// the file exists, so one that cannot be read is always an error and every
+// caller fails closed; ErrNoAnchor (a PC with no TPM) leaves the file
+// alone deciding, and is logged once.
 func (s *Store) outsideListed() (bool, error) {
 	_, err := os.Stat(s.p(outsideFile))
-	if err == nil {
-		return true, nil
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
 	}
-	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
+	listed := err == nil
+	if s.Anchor == nil {
+		return listed, nil
 	}
-	return false, err
+	n, err := s.Anchor.Read()
+	switch {
+	case errors.Is(err, ErrNoAnchor):
+		if !noAnchorLogged.Swap(true) {
+			log.Print("update: interim attestation is not anchored on this PC (no TPM)")
+		}
+		return listed, nil
+	case err != nil:
+		return false, fmt.Errorf("update: read the outside-attestor anchor: %w", err)
+	}
+	return listed || n >= 1, nil
 }
+
+var noAnchorLogged atomic.Bool
 
 // policy is the store's attestor policy digest: the noted allow-list and
 // whether an outside attestor was ever listed (or a fork followed). The
