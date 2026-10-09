@@ -201,8 +201,9 @@ func (x *Executor) Project(ctx context.Context, digest string) bool {
 	return ok && x.project(h, x.latest(ctx)) == nil
 }
 
-// project walks from the newest project root the box trusted, or the
-// shipped one, to h's root through h's chain (update.ProjectRoot).
+// project walks from the newest project root the box trusted (the one it
+// trusts now while on the project chain), or the shipped one, to h's root
+// through h's chain (update.ProjectRoot).
 func (x *Executor) project(h held, now time.Time) error {
 	anchor, err := x.cfg.Store.ProjectRoot()
 	if err != nil {

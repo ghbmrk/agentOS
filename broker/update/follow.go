@@ -293,9 +293,25 @@ func rootKeyMaterial(m *metadata.Metadata[metadata.RootType]) map[string]bool {
 	return out
 }
 
-// ProjectRoot is the project root saved when the box last left the
-// project chain, or nil if it never has.
+// ProjectRoot is the newest project root the box trusted, the anchor a
+// switch back walks from: the root it trusts now while it is on the
+// project chain (after a switch back, or a rotation Check verified), else
+// the root saved when it last left the chain, or nil if it never saved
+// one (security F1 on #476).
 func (s *Store) ProjectRoot() ([]byte, error) {
+	unlock, err := s.lock()
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	if err := s.settle(); err != nil {
+		return nil, err
+	}
+	if _, err := os.Stat(s.p(sourceFile)); errors.Is(err, os.ErrNotExist) {
+		return os.ReadFile(s.p("root.json"))
+	} else if err != nil {
+		return nil, err
+	}
 	b, err := os.ReadFile(s.p(projectFile))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil

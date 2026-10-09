@@ -5,6 +5,8 @@ package follow
 import (
 	"context"
 	"crypto/ed25519"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -150,5 +152,58 @@ func TestOSS10wrSwitchBackNeverRollsBack(t *testing.T) {
 	}
 	if !r.x.Project(context.Background(), r.describe(v3)) || !r.x.Project(context.Background(), r.describeChain(v4)) {
 		t.Fatal("v3, or v4 chained from it, is not the project's")
+	}
+}
+
+// Security F1 on #476 (rollback): a box back on the project chain walks
+// from the root it trusts now, not from the one it trusted when it left.
+// After switching back to v3 through v2, v2 and the shipped root are
+// refused, and v3's next is admitted.
+func TestOSS10wrBackOnTheProjectNeverRollsBack(t *testing.T) {
+	r := newRig(t)
+	v2, k2 := rotated(t, r.shipped, r.pk)
+	v3, k3 := rotated(t, v2, k2)
+	v4, _ := rotated(t, v3, k3)
+	if out := r.run(grants.FollowIntent("a1", "Acme", r.describe(r.fork))); out.Result != journal.ResultSucceeded {
+		t.Fatalf("%+v", out)
+	}
+	if out := r.run(grants.FollowIntent("a2", "", r.describeChain(v3, v2))); out.Result != journal.ResultSucceeded || !r.trusts(v3) {
+		t.Fatalf("%+v", out)
+	}
+	r.refusesRollback(map[string]string{"v2": r.describeChain(v2), "shipped": r.describe(r.shipped)}, v3)
+	if !r.x.Project(context.Background(), r.describeChain(v4)) {
+		t.Fatal("v4, chained from the trusted v3, is not the project's")
+	}
+}
+
+// Security F1 on #476 (rollback): a box that never left the project and
+// rotated to v3 through Check walks from v3, not from the shipped root.
+func TestOSS10wrCheckRotatedBoxNeverRollsBack(t *testing.T) {
+	r := newRig(t)
+	v2, k2 := rotated(t, r.shipped, r.pk)
+	v3, k3 := rotated(t, v2, k2)
+	v4, _ := rotated(t, v3, k3)
+	// What Check leaves after verifying v2 and v3 from the project's
+	// repository: root.json is v3, and the box never followed anything.
+	if err := os.WriteFile(filepath.Join(r.store.Dir, "root.json"), v3, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r.refusesRollback(map[string]string{"v2": r.describeChain(v2), "shipped": r.describe(r.shipped)}, v3)
+	if !r.x.Project(context.Background(), r.describe(v3)) || !r.x.Project(context.Background(), r.describeChain(v4)) {
+		t.Fatal("v3, or v4 chained from it, is not the project's")
+	}
+}
+
+// refusesRollback checks each digest is not the project's and a switch to
+// it is not applied, leaving the box on trusted.
+func (r *rig) refusesRollback(older map[string]string, trusted []byte) {
+	r.t.Helper()
+	for name, d := range older {
+		if r.x.Project(context.Background(), d) {
+			r.t.Fatalf("%s read as the project's after the box trusted a newer root", name)
+		}
+		if out := r.run(grants.FollowIntent("b-"+name, "", d)); out.Result != journal.ResultNotApplied || !r.trusts(trusted) {
+			r.t.Fatalf("switched back to %s: %+v", name, out)
+		}
 	}
 }

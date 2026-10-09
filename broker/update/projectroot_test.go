@@ -251,18 +251,23 @@ func TestOSS10wrChainIsBounded(t *testing.T) {
 	}
 }
 
-// The anchor: leaving the project chain records the root being left;
-// leaving one fork for another does not overwrite it.
+// The anchor: on the project chain it is the root the box trusts, after
+// any rotation Check verified (security F1 on #476); leaving the chain
+// records the root being left; leaving one fork for another does not
+// overwrite it.
 func TestOSS10wrLeavingTheProjectRecordsItsRoot(t *testing.T) {
 	f := newFixture(t)
-	if b, err := f.store.ProjectRoot(); err != nil || b != nil {
-		t.Fatalf("before any follow: %q %v", b, err)
+	if b, err := f.store.ProjectRoot(); err != nil || string(b) != string(f.rootFile(1)) {
+		t.Fatalf("before any follow: %v", err)
 	}
 	v2 := f.rotateRoot()
 	f.release(2, nil)
 	f.publish(0, 1)
 	if _, err := f.check(Options{}); err != nil {
 		t.Fatal(err)
+	}
+	if b, err := f.store.ProjectRoot(); err != nil || string(b) != string(v2) {
+		t.Fatalf("after Check rotated to v2: %v", err)
 	}
 	fork := forkOf(t)
 	f.must(f.follow(fork.rootFile(1), Options{}))
