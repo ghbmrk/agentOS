@@ -22,7 +22,7 @@ Primary lane; remediation is unclaimed. [Review record](reviews/security/2026-10
 | ID | Package | Needs | State |
 |---|---|---|---|
 | SR3-1 | [Bind local sign-in to the authenticated lock generation](briefs/SR3-1.md) | P2-2w a, P2-2w b | queued (P1; release) |
-| SR3-2 | [Enforce pre-allowance rate limits at dispatch](briefs/SR3-2.md) | P2-grants, P2-gr8 | queued (P2; release) |
+| SR3-2 | [Enforce pre-allowance rate limits at dispatch](briefs/SR3-2.md) | P2-grants, P2-gr8 | in review (#428) |
 | SR3-3 | [Show and bind the complete pre-allowance rule at approval](briefs/SR3-3.md) | P2-grants, P2-2a | queued (P2; release) |
 | SR3-4 | [Make update finalization durable and idempotent](briefs/SR3-4.md) | UPD-a, P4-3, P3-1 | queued (P2; release) |
 | SR3-5 | [Preserve IMAP message identity through mutations and undo](briefs/SR3-5.md) | P2-6m | queued (P2; release) |
@@ -282,7 +282,7 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | W3-forget-b2 | [Builder-lineage rollback with A/B](briefs/W3-forget-b2.md) | W3-forget-a | Next build item B | merged (#321) |
 | W3-forget-b2b | [Agent machine's work taken back as item 2](briefs/W3-forget-b2b.md) | W3-forget-b2 | Next build item B | merged (#327) |
 | W3-forget-b3 | [Promised done text survives a restart](briefs/W3-forget-b3.md) | W3-forget-b1 | Next build item B | queued |
-| W3-forget-b2c | [Owed take-backs for W3-forget-b2b](briefs/W3-forget-b2c.md) | W3-forget-b2b | Next build item B | queued |
+| W3-forget-b2c | [Owed take-backs for W3-forget-b2b](briefs/W3-forget-b2c.md) | W3-forget-b2b | Next build item B | in review (#427) |
 | W3-implicit | [Report accepted-implicitly guest effects](briefs/W3-implicit.md) | W3 PW3 | — | queued |
 | W5 | [Owner channel](briefs/W5.md) | W3 | loops thread | queued |
 | W5a | [Loop 2 passive checks](briefs/W5a.md) | #54 merged, W3 | builder B (lenses) | merged (3d2daab; #169) |
@@ -299,11 +299,11 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 
 ## Holistic architecture review (2026-10-08)
 
-User-requested synthesis of credential/data guarantees and functional leverage. [Review](reviews/combined/2026-10-08-holistic-architecture.md). Existing SR3, potency, UX and integration owners remain unchanged; these are scoped design/acceptance extensions, not a new implementation lane. Later policy proposals stay in LATER.
+User-requested synthesis of credential/data guarantees and functional leverage. [Initial review](reviews/combined/2026-10-08-holistic-architecture.md) and [cross-silo follow-up](reviews/combined/2026-10-08-cross-silo-architecture.md). The goal is broad useful composition under owner authority; selective boundaries must preserve it. Existing SR3, potency, UX and integration owners remain unchanged; these are scoped design/acceptance extensions, not a new implementation lane. Later policy proposals stay in LATER. ARCH1-L2's deletion classification is corrected to existing CAP-3/P3-3b release work within ARCH1-1/3; no duplicate implementation owner is created.
 
 | ID | Package | Needs | Owner | State |
 |---|---|---|---|---|
 | ARCH1 | [Holistic review and evidence intake](briefs/ARCH1.md) | existing reviews | Codex advisory proposal to primary | in review (C; documentation only) |
 | ARCH1-1 | [Precise credential/data guarantees and qualification](briefs/ARCH1-1.md) | CRED-4b/S8/publication/CH-20; L1 | primary routes; unclaimed | queued (release design/acceptance) |
 | ARCH1-2 | [Approval-to-receipt adapter conformance](briefs/ARCH1-2.md) | existing journal/adapters; SR3; POT-P2/P3 | primary routes; unclaimed | queued (release acceptance extension) |
-| ARCH1-3 | [Composed profile and useful workflow evidence](briefs/ARCH1-3.md) | P2-1/c4; INT-A/H6/W7-A/POT-P1 | primary routes; unclaimed | queued (release acceptance extension) |
+| ARCH1-3 | [Composed profile and cross-silo benefit evidence](briefs/ARCH1-3.md) | P2-1/c4; INT-A/H6/W7-A/POT-P1 | primary routes; unclaimed | queued (release acceptance extension) |

@@ -122,6 +122,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | OSS-10w f1 | UX on #323: the alert wording "Switch back there" reads oddly after a switch back to the project |
 | OSS-10w-r | WF1 after a project root-key rotation: switching back compares against the image's shipped root keys and so fails closed once the project rotates them; a chain walk from the shipped root would admit it. Meanwhile the owner's only route back is a named follow (beside U13 limit (b)). No release has rotated root keys; a new image ships the new root |
 | W3-forget-b2b f1 | Security 327-1: race between `worked()` and `takeBack(approved=false)` in `agentBackWithoutAsking`; re-check under `r.run` |
+| W3-forget-b2c l1 | UX: the recall-off owed take-back text names no owner step, because STATUS has no line when recall is Off (`LateExecutor.Status`); a config only a dev box has |
 | DOC-3 f1 | L3 on #356: the SHAs on rows inferred as merged name the last commit touching the package, not its merge; relabel as "last touched" or cite the PR |
 | DOC-3 f2 | L3 on #356: D-041 (license) has date `Pending`, not ISO; set it when the license is chosen |
 | DOC-2 f1 | L3 on #357: doclint does not check DECISIONS cells ≤300 characters or that `decisions/D-NNN.md` links resolve (D-056) |
@@ -176,6 +177,15 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | W3-forget-b1 f4 | Security on #409 L2: `readRestoredForgets` trusts `forget-log.json` without authentication at every start; low risk, only agentosd's uid can write it |
 | W3-forget-b1 f5 | Security on #409 L3: the test "copy holds its key" looks for the key's hex but JSON stores `[]byte` as base64, and the copy has no key field, so the assertion is vacuous |
 | W3-forget-b1 f6 | UX on #409 U4 and P4: the taken-back text reaches 161 chars at 100+ things undone; and the BOARD row should say "not live until b1-5/6/7" |
+| CRED-5f l1 | Combined lens on #420: a withdrawn route's decline says "not granted" (403 `no_route`); CAP-9 wants the reason. The owner already learns it from the withdrawal notice, so only the agent-facing text is vague |
+| CRED-5f l2 | Combined lens on #420 (L3 later point): `CredentialRejected`'s 24 h re-notice compares wall-clock times, so a clock step back can delay it; the new withdrawal notice is once per withdrawal and is unaffected |
+| CRED-5f l3 | Combined lens on #420: if CRED-5w's owner pause reuses `Config.Withdrawn`, the owner gets a withdrawal notice for their own pause; give the pause its own reason |
+| W3-forget-b2c l1 | UX on #427: with no agent, "when it runs again" means the next boot (the agent machine opens only at boot); STATUS's agent line should name that step |
+| W3-forget-b2c l2 | UX on #427: an owed take-back is journaled `succeeded` with evidence `owed: …`; once the digest renders journal outcomes it must not read as done |
+| SR3-2 l1 | UX/Potency on #428 (L3 later point): an authorized intent that never dispatches (held, no executor, fenced) holds its bound place with no age-out; note it in GR31 and let STATUS show it |
+| SR3-8 l1 | L3 re-review on #432, point 1: once `CR-quarantine-prune` is on main, add to it that any pruning of `.quarantine` must keep the per-artifact loss count (e.g. a count file), since C14's `maxRepairs` bound is counted from the copies; fold this line into that row |
+| SR3-8 l2 | L3 re-review on #432, point 2: a job stopped by the repair bound is logged `failed: no result within the allowed attempts`; only the log line says its output was lost repeatedly. Text only |
+| SR3-8 l3 | L3 re-review on #432, point 3: no test pins the `<id>-<12 hex>` name check in `Store.losses`; a bare prefix match passes every test. Unreachable today (fixed-length broker-written IDs) |
 
 ## Reuse candidates
 | ID | Component | Why |
@@ -197,5 +207,7 @@ Separate advisory intake, excluded from earlier audit totals. Existing findings/
 | ARCH1-1 | release | A5/A12/A14 claim/qualification contract; L1 resolves trust and disclosure wording; no silent policy change |
 | ARCH1-2 | release | A4/A13 conformance extension to existing adapters/journal, not a new transaction framework |
 | ARCH1-3 | release | A1/A2/A4/A5/A7/A8/A9/A10/A14 composed-profile evidence; extend existing integration/trial owners |
-| ARCH1-L1 | later | Source/task/project-scoped data authority beyond current broad owner-private domain. L1 must adopt the stronger contract and qualification criterion before promotion; reuse POT-P2 and ADP-11, measure lost context and owner friction. |
-| ARCH1-L2 | later | Source provenance through active/history learning artifacts and their consumers for transitive source deletion. Today's limits are clarified by ARCH1-1; stronger erasure/requalification semantics need L1 before promotion. Preserve existing whole-task FORGET work. |
+| ARCH1-L1 | later | Owner-selected source/task/project boundaries and explicit combination permissions within a broadly usable private space. Preserve cross-silo reasoning; no default per-project silos or pairwise approval ritual. L1 must adopt any stronger policy/qualification contract before promotion; reuse POT-P2/ADP-11 and measure lost context, gain and owner friction. |
+| ARCH1-L2 | release | Classification corrected by cross-silo re-review: CAP-3 already requires affected adopted skills/procedures to be rebuilt/requalified, with owner-visible impact; P3-3b carries the integration. Tracked by ARCH1-1/3 and existing learning/FORGET owners, not a new runtime package or later policy prerequisite. No promise of retracting external disclosures or erasing arbitrary historical influence. |
+| ARCH1-L3 | later | [Cross-service/device delegation](briefs/ARCH1-L3.md): optional aggregate workflow bounds and qualified physical output/feedback semantics. L1 must define the intended promise and one device/operation; extend current tasks/grants/events/journal without another authority ledger or extra approval for ordinary permitted sequences. |
+| ARCH1-L4 | later | [Broader hardware jobs](briefs/ARCH1-L4.md): raw CPU/GPU/remote-worker capability beyond CAP-13 inference endpoints. L1 chooses one bounded job and data/runtime threat model before promotion; reuse task/artifact/admission and measure net accepted-work gain. Existing CAP-13 work proceeds independently. |

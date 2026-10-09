@@ -1,7 +1,7 @@
 # ARCH1-2: Qualify one effect contract from approval to remote receipt
 
 **Owner:** primary coordinator routes to existing owners; unclaimed advisory extension.
-**Class:** release design/acceptance extension. **Requirements / gates:** REV-2/3, OP-1–7, ADP-8/9/14, CRED-6; A4/A13.
+**Class:** release design/acceptance extension. **Requirements / gates:** REV-2/3, OP-1–7, ADP-8/9/14, CRED-6/11; A4/A13.
 **Needs:** Existing journal/grants/adapter owners; SR3-2/3/5/7; POT-P2/P3 result/task contracts.
 **Record:** [Holistic architecture review](../reviews/combined/2026-10-08-holistic-architecture.md), source `3c9f9e711be3d394537cb9e6aedc5b4ee394e2c0`.
 
@@ -16,7 +16,9 @@ The generic journal Intent/Executor and grants.Verified interfaces delegate mate
 3. Use a synthetic service that records actual received effects. Change recipient, payload, amount, source version, method, encoding and operation after preparation; no mismatch reaches that service. Race STOP/revocation at the final boundary.
 4. Inject crash/lost acknowledgment across durable transitions. Reconcile or preserve unknown/fenced state without unintended duplicate effects. Test concurrent owner edits during compensation; do not call an inverse fully undoable if service semantics cannot support that claim.
 5. Apply the same conformance contract to a second qualified route before extracting shared types. Avoid a universal transaction rewrite, a second ledger or a false exactly-once remote guarantee.
-6. Demonstrate one bounded standing rule across qualified routes with unchanged effects and fewer or equal routine prompts. Reuse structured receipts for POT-P3 rather than accepting agent prose as the execution oracle.
+6. Qualify the existing CRED-11 cross-account artifact path: source/task provenance, reviewed bytes/version, receiving label, destination and attempt stay bound; hand-off never silently submits. Include ordinary useful document cases alongside secret canaries.
+7. For the selected workflow, require observed predecessor outcomes before dependent effects and preserve partial completion through STOP/revocation/restart. Test source-writer laundering (an agent-written field read back via another connector), swapped artifacts and duplicates attempted through another route. Reuse existing verified-field rules, reservations and journal. New aggregate cross-account constraints or physical control semantics are ARCH1-L3, not assumed current requirements.
+8. Demonstrate one bounded standing rule across qualified routes with unchanged effects and fewer or equal routine prompts. Reuse structured receipts for POT-P3 rather than accepting agent prose as the execution oracle.
 
 ## Delivery, potency and safety
 
