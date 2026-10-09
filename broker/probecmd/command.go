@@ -1,7 +1,10 @@
 // Package probecmd runs an off-the-shelf harness as a LOOP-7 probe. It is
 // apart from loops because it starts a child process, which the learning
-// plane may not (ARC-2, daemon TestARC2ControlPathCannotReachInference);
-// whatever wires it into a process takes that up by review (P3-4b-4c).
+// plane may not (ARC-2, daemon TestARC2ControlPathCannotReachInference).
+// Its one exec is reviewed (daemon escapeOK, P3-4b-3a): only a file
+// directly in the release directory, with a minimal environment, in a
+// process group a timeout kills whole. Wiring it into agentosd is
+// P3-4b-4c.
 package probecmd
 
 import (
@@ -15,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/loops"
@@ -33,10 +37,18 @@ const maxProbeOutput = 1 << 20
 type CommandProbe struct {
 	For      loops.Check
 	Interval time.Duration
-	// Timeout bounds one run; the command is killed past it.
+	// Timeout bounds one run; the command's process group is killed past
+	// it.
 	Timeout time.Duration
+	// Release is the directory of release-listed harnesses: Cmd[0] must be
+	// a regular file directly in it, never a link (ARC-2). The wiring sets
+	// it from a constant, never from configuration or state.
+	Release string
 	Cmd     []string
 }
+
+// waitDelay bounds the wait for a killed command's pipes.
+const waitDelay = time.Second
 
 func (p *CommandProbe) Check() loops.Check   { return p.For }
 func (p *CommandProbe) Every() time.Duration { return p.Interval }
@@ -60,6 +72,9 @@ func (p *CommandProbe) Run(ctx context.Context) (loops.ProbeResult, error) {
 	if len(p.Cmd) == 0 || p.Timeout <= 0 {
 		return loops.ProbeResult{}, errors.New("command probe: no command or timeout")
 	}
+	if err := p.released(); err != nil {
+		return loops.ProbeResult{}, err
+	}
 	dir, err := os.MkdirTemp("", "agentos-probe-")
 	if err != nil {
 		return loops.ProbeResult{}, err
@@ -70,7 +85,13 @@ func (p *CommandProbe) Run(ctx context.Context) (loops.ProbeResult, error) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, p.Cmd[0], append(append([]string{}, p.Cmd[1:]...), "--out", out)...)
 	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
-	cmd.WaitDelay = time.Second
+	// Never the daemon's environment (#515 Security 2): HOME and TMPDIR
+	// are the run's own directory.
+	cmd.Env = []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=" + dir, "TMPDIR=" + dir, "GOCACHE=off", "GOFLAGS="}
+	// The whole group dies on timeout, grandchildren too (#515 Security 1).
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.WaitDelay = waitDelay
 	runErr := cmd.Run()
 	if ctx.Err() != nil {
 		return loops.ProbeResult{}, fmt.Errorf("command probe %s: %w", p.For, ctx.Err())
@@ -80,6 +101,26 @@ func (p *CommandProbe) Run(ctx context.Context) (loops.ProbeResult, error) {
 		err = errors.Join(err, fmt.Errorf("command probe %s: %w", p.For, runErr))
 	}
 	return res, err
+}
+
+// released checks Cmd[0] is a regular file directly in Release, which
+// must be absolute and clean.
+func (p *CommandProbe) released() error {
+	r, bin := p.Release, p.Cmd[0]
+	if r == "" || !filepath.IsAbs(r) || filepath.Clean(r) != r {
+		return fmt.Errorf("command probe %s: release directory %q is not an absolute clean path", p.For, r)
+	}
+	if !filepath.IsAbs(bin) || filepath.Dir(bin) != r || filepath.Join(r, filepath.Base(bin)) != bin {
+		return fmt.Errorf("command probe %s: %q is not a harness the release lists", p.For, bin)
+	}
+	fi, err := os.Lstat(bin)
+	if err != nil {
+		return fmt.Errorf("command probe %s: %w", p.For, err)
+	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("command probe %s: %s is not a regular file", p.For, bin)
+	}
+	return nil
 }
 
 func (p *CommandProbe) read(path string) (loops.ProbeResult, error) {
