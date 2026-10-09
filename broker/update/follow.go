@@ -173,7 +173,8 @@ const projectFile = "project_root.json"
 // ProjectRoot reports whether target is the project's own root, judged
 // from anchor, the newest project root the box trusted (Store.ProjectRoot,
 // else the root the image ships). It is when target's root-role keys, by
-// key material, are anchor's and it is no older; or when the owner's links
+// key material, are anchor's, it is no older and a threshold of them, by
+// anchor's root role, signed it; or when the owner's links
 // (any order, target among them or not) carry the anchor to exactly target
 // by TUF root rotation (UPD-8): each root signed by its predecessor's root
 // threshold and its own, versions one apart, every root meeting the box's
@@ -206,10 +207,13 @@ func projectRoot(anchor, target []byte, links [][]byte, o Options) error {
 	if err != nil {
 		return err
 	}
-	if sameRootKeys(t, tm.Root) {
-		if t.Signed.Version < tm.Root.Signed.Version {
-			return fmt.Errorf("%w: root v%d is older than v%d", ErrRollback, t.Signed.Version, tm.Root.Signed.Version)
-		}
+	same := sameRootKeys(t, tm.Root)
+	if same && t.Signed.Version < tm.Root.Signed.Version {
+		return fmt.Errorf("%w: root v%d is older than v%d", ErrRollback, t.Signed.Version, tm.Root.Signed.Version)
+	}
+	// Same keys need no chain only when the anchor's own threshold of them
+	// signed the target, TUF's old-threshold rule; else the walk decides.
+	if same && tm.Root.VerifyDelegate(metadata.ROOT, t) == nil {
 		return nil
 	}
 	if t.Signed.Version <= tm.Root.Signed.Version {

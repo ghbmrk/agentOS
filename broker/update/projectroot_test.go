@@ -84,6 +84,48 @@ func TestOSS10wrSameKeysNeedNoChain(t *testing.T) {
 	}
 }
 
+// Threat: the anchor's keys at a lowered threshold, signed by fewer of
+// them than the anchor's threshold (L3 on #476). Same keys is no shortcut
+// past TUF's old-threshold rule; a real lowering is admitted by its chain.
+func TestOSS10wrSameKeysNeedTheAnchorsThreshold(t *testing.T) {
+	f := newFixture(t)
+	f.must(f.repo.Rotate("root", nil, nil, 3))
+	for _, k := range f.root {
+		f.must(f.repo.Sign("root", k))
+	}
+	f.must(f.repo.Publish(f.snap, f.ts))
+	v2 := f.rootFile(2) // 3 root keys, threshold 3
+	o := f.opts(Options{})
+	forged := resign(t, v2, func(m *metadata.Metadata[metadata.RootType]) {
+		m.Signed.Version = 3
+		m.Signed.Roles[metadata.ROOT].Threshold = 2
+	}, f.root[0], f.root[1])
+	if err := ProjectRoot(v2, forged, nil, o); !errors.Is(err, ErrNotProject) {
+		t.Fatalf("same keys, two of the anchor's three: %v", err)
+	}
+	// The project lowers its threshold with all three, then signs with two.
+	f.must(f.repo.Rotate("root", nil, nil, 2))
+	for _, k := range f.root {
+		f.must(f.repo.Sign("root", k))
+	}
+	f.must(f.repo.Publish(f.snap, f.ts))
+	v3 := f.rootFile(3)
+	f.must(f.repo.Rotate("root", nil, nil, 0))
+	f.must(f.repo.Sign("root", f.root[0]))
+	f.must(f.repo.Sign("root", f.root[1]))
+	f.must(f.repo.Publish(f.snap, f.ts))
+	v4 := f.rootFile(4)
+	if err := ProjectRoot(v2, v4, nil, o); !errors.Is(err, ErrNotProject) {
+		t.Fatalf("v4 by two keys, no chain from threshold 3: %v", err)
+	}
+	if err := ProjectRoot(v2, v4, [][]byte{v3}, o); err != nil {
+		t.Fatalf("v2 -> v3 (lowered by all three) -> v4: %v", err)
+	}
+	if err := ProjectRoot(v2, v3, nil, o); err != nil {
+		t.Fatalf("v3, signed by the anchor's threshold: %v", err)
+	}
+}
+
 // Threat: a forged link, signed by its own new keys but not by a
 // threshold of the previous root's; or by other material filed under the
 // previous root's key IDs.
