@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -23,6 +24,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/smsapi"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 	"github.com/ghbmrk/agentos/broker/vault"
+	"github.com/google/go-tpm/tpm2"
 )
 
 // SeedName is the vault entry holding the owner's code-generator seed.
@@ -201,6 +203,10 @@ type custody struct {
 	// smsHTTP is the texting provider's client; nil is
 	// smsapi.NewHTTPClient(). Only tests set it.
 	smsHTTP *http.Client
+	// mailPlain lets the mail account reach the loopback test server
+	// without TLS (imapsmtp.Plain refuses any other host). Only tests set
+	// it.
+	mailPlain bool
 	// budget is the second line's sending budget, shared by SIP MESSAGE
 	// and the HTTP account (security Q2).
 	budget smsapi.Budget
@@ -712,6 +718,274 @@ func (c *custody) recallKey() ([]byte, error) {
 	return key, nil
 }
 
+// UpdateAnchorName is the vault entry recording the TPM counter that
+// anchors the update store's outside-attestor record (SR3-6f-2b): once it
+// exists, a counter this PC cannot find is "anchor missing", never 0.
+const UpdateAnchorName = "update-policy-anchor"
+
+// KindUpdateAnchor marks that entry.
+const KindUpdateAnchor = "update_anchor"
+
+// updateAnchorID names the first update counter on every PC. Once
+// defined it stays, so a PC that ever had one never looks fresh. Only the
+// vault process picks counter ids; agentosd cannot.
+var updateAnchorID = func() []byte { h := sha256.Sum256([]byte("agentos update policy")); return h[:] }()
+
+// updateAnchorRecord is the entry's value. A new counter starts at the
+// TPM's highest count so far, so the store sees the count less Base.
+type updateAnchorRecord struct {
+	Host string `json:"host"`
+	// ID is the counter's id when it is not updateAnchorID: a re-anchor
+	// beside a counter whose auth no vault holds (reanchorUpdate).
+	ID   []byte `json:"id,omitempty"`
+	Ref  []byte `json:"ref"`
+	Auth []byte `json:"auth"`
+	Base uint64 `json:"base"`
+}
+
+func (r updateAnchorRecord) counterID() []byte {
+	if len(r.ID) > 0 {
+		return r.ID
+	}
+	return updateAnchorID
+}
+
+// errUpdateAnchorMissing: the counter was defined on this PC and is gone
+// (the TPM cleared, or the vault moved to another PC). The store fails
+// closed on it until the owner trusts this PC again.
+var errUpdateAnchorMissing = uerr(http.StatusConflict, "this PC's update counter is gone; unlock with your card to trust this PC again")
+
+// errUpdateAnchorElsewhere: the vault records an update counter and this
+// PC has no TPM (the vault moved here, or the TPM was not found at start).
+// The store fails closed on it; "no anchor" is only for a vault that never
+// had one.
+var errUpdateAnchorElsewhere = uerr(http.StatusConflict, "this box's update check is kept in a security chip this PC doesn't have")
+
+// updateAnchorRead returns the update counter, defining it at the first
+// read on a PC with a TPM. anchored is false only on a PC with no TPM.
+func (c *custody) updateAnchorRead() (anchored bool, n uint64, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.updateAnchorLocked(false)
+}
+
+// updateAnchorRaise raises the update counter to 1; it never lowers it.
+func (c *custody) updateAnchorRaise() (anchored bool, n uint64, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.updateAnchorLocked(true)
+}
+
+// updateAnchorLocked reads (and with raise, raises) the update counter.
+// Caller holds mu.
+func (c *custody) updateAnchorLocked(raise bool) (bool, uint64, error) {
+	if c.ph != open {
+		return false, 0, errLocked
+	}
+	if hasOtherKind(c.v, UpdateAnchorName, KindUpdateAnchor) {
+		return false, 0, errInternal
+	}
+	sec, ok := c.v.Secret(UpdateAnchorName)
+	if c.host == nil {
+		if ok {
+			c.noteCounterResetLocked()
+			return false, 0, errUpdateAnchorElsewhere
+		}
+		return false, 0, nil
+	}
+	pc, err := c.host.updateCounter()
+	if err != nil {
+		return false, 0, errInternal
+	}
+	if !ok {
+		_, found, err := pc.Find(updateAnchorID)
+		if err != nil {
+			return false, 0, errInternal
+		}
+		if found {
+			// A counter no vault record holds the auth of: a crash
+			// between Define and the vault's Put, or a vault restored
+			// onto this PC. Its count is unknown, so it is missing
+			// until the owner trusts this PC again.
+			c.noteCounterResetLocked()
+			return false, 0, errUpdateAnchorMissing
+		}
+		rec, err := defineUpdateAnchor(c.v, pc, updateAnchorID)
+		if err != nil {
+			return false, 0, err
+		}
+		if raise {
+			if err := pc.Increment(rec.Ref, rec.Auth); err != nil {
+				return false, 0, errInternal
+			}
+			return true, 1, nil
+		}
+		return true, 0, nil
+	}
+	var rec updateAnchorRecord
+	if err := json.Unmarshal([]byte(sec.Reveal()), &rec); err != nil {
+		return false, 0, errInternal
+	}
+	if rec.Host != pc.Host() {
+		c.noteCounterResetLocked()
+		return false, 0, errUpdateAnchorMissing
+	}
+	_, found, err := pc.Find(rec.counterID())
+	if err != nil {
+		return false, 0, errInternal
+	}
+	if !found {
+		c.noteCounterResetLocked()
+		return false, 0, errUpdateAnchorMissing
+	}
+	n, err := pc.Read(rec.Ref, rec.Auth)
+	if counterReplaced(err) {
+		c.noteCounterResetLocked()
+		return false, 0, errUpdateAnchorMissing
+	}
+	if err != nil {
+		return false, 0, errInternal
+	}
+	if n < rec.Base {
+		c.noteCounterResetLocked()
+		return false, 0, errUpdateAnchorMissing
+	}
+	if raise && n == rec.Base {
+		if err := pc.Increment(rec.Ref, rec.Auth); err != nil {
+			return false, 0, errInternal
+		}
+		n++
+	}
+	return true, n - rec.Base, nil
+}
+
+// counterReplaced reports a read error showing the recorded counter is no
+// longer the one at its ref: an index there under another auth, or none
+// at that handle while Find sees ours elsewhere. Other errors (a busy or
+// silent TPM) stay internal.
+func counterReplaced(err error) bool {
+	return errors.Is(err, tpm2.TPMRCAuthFail) || errors.Is(err, tpm2.TPMRCBadAuth) || errors.Is(err, tpm2.TPMRCHandle)
+}
+
+// defineUpdateAnchor makes update counter id on this PC and records it in
+// v, at count 0.
+func defineUpdateAnchor(v *vault.Vault, pc vault.Counter, id []byte) (updateAnchorRecord, error) {
+	rec, err := newUpdateAnchor(pc, id)
+	if err != nil {
+		return updateAnchorRecord{}, err
+	}
+	return rec, recordUpdateAnchor(v, rec)
+}
+
+// newUpdateAnchor makes update counter id on this PC, with its count now
+// as the base, without recording it.
+func newUpdateAnchor(pc vault.Counter, id []byte) (updateAnchorRecord, error) {
+	// 16 random bytes as hex: no zero byte, which go-tpm would cut the
+	// auth value at (tpmseal T7), as the vault's own counter does.
+	a := make([]byte, 16)
+	if _, err := rand.Read(a); err != nil {
+		return updateAnchorRecord{}, errInternal
+	}
+	auth := []byte(hex.EncodeToString(a))
+	ref, err := pc.Define(id, auth)
+	if err != nil {
+		return updateAnchorRecord{}, errInternal
+	}
+	base, err := pc.Read(ref, auth)
+	if err != nil {
+		return updateAnchorRecord{}, errInternal
+	}
+	rec := updateAnchorRecord{Host: pc.Host(), Ref: ref, Auth: auth, Base: base}
+	if !bytes.Equal(id, updateAnchorID) {
+		rec.ID = id
+	}
+	return rec, nil
+}
+
+// recordUpdateAnchor keeps rec in v.
+func recordUpdateAnchor(v *vault.Vault, rec updateAnchorRecord) error {
+	b, err := json.Marshal(rec)
+	if err != nil {
+		return errInternal
+	}
+	if err := v.Put(UpdateAnchorName, KindUpdateAnchor, b); err != nil {
+		if errors.Is(err, vault.ErrRolledBack) {
+			return errRolledBack
+		}
+		return errInternal
+	}
+	return nil
+}
+
+// reanchorUpdate gives this PC a new update counter, raised to 1, when the
+// vault recorded one this PC no longer has, or this PC has one no vault
+// record holds the auth of (a crash before the record, or a restored
+// vault). Nothing then shows whether an outside attestor was listed, so
+// the interim rule ends there; it only narrows (SR3-6f-2b). A fresh PC,
+// or a healthy counter, is left as it is.
+func (c *custody) reanchorUpdate(v *vault.Vault) error {
+	pc, err := c.host.updateCounter()
+	if err != nil {
+		return err
+	}
+	_, first, err := pc.Find(updateAnchorID)
+	if err != nil {
+		return err
+	}
+	sec, ok := v.Secret(UpdateAnchorName)
+	if !ok && !first {
+		return nil
+	}
+	if ok {
+		var rec updateAnchorRecord
+		if err := json.Unmarshal([]byte(sec.Reveal()), &rec); err != nil {
+			return err
+		}
+		if rec.Host == pc.Host() {
+			_, found, err := pc.Find(rec.counterID())
+			if err != nil {
+				return err
+			}
+			if found {
+				if n, err := pc.Read(rec.Ref, rec.Auth); err == nil && n >= rec.Base {
+					return nil
+				}
+			}
+		}
+	}
+	// Define would hand back the first counter without its auth, so a
+	// PC that still has it gets a new counter id beside it.
+	id := updateAnchorID
+	if first {
+		nonce := make([]byte, 16)
+		if _, err := rand.Read(nonce); err != nil {
+			return err
+		}
+		h := sha256.Sum256(append([]byte("agentos update policy "), nonce...))
+		id = h[:]
+	}
+	// Raise before recording: a crash between the two leaves the vault
+	// as it was, still "anchor missing", never a record of a counter at its
+	// base, which would read 0 (SR3-6f-2b).
+	rec, err := newUpdateAnchor(pc, id)
+	if err != nil {
+		return err
+	}
+	if err := pc.Increment(rec.Ref, rec.Auth); err != nil {
+		return err
+	}
+	if reanchorCrash != nil {
+		if err := reanchorCrash(); err != nil {
+			return err
+		}
+	}
+	return recordUpdateAnchor(v, rec)
+}
+
+// reanchorCrash, set only by tests, stops reanchorUpdate between its two
+// writes, as a crash there would.
+var reanchorCrash func() error
+
 // since keeps the times after cut, in place.
 func since(ts []time.Time, cut time.Time) []time.Time {
 	kept := ts[:0]
@@ -1111,6 +1385,9 @@ func (c *custody) trust(code, pin string) (string, error) {
 		if errors.Is(err, vault.ErrRolledBack) {
 			return "", errRolledBack
 		}
+		return "", errHostNotSaved
+	}
+	if err := c.reanchorUpdate(v); err != nil {
 		return "", errHostNotSaved
 	}
 	c.mu.Lock()

@@ -388,6 +388,14 @@ func serveCmd(args []string) error {
 	if err != nil {
 		return err
 	}
+	mailLn, err := serveMail(*run, c, *brokerUID)
+	if err != nil {
+		for _, s := range srvs {
+			s.Close()
+		}
+		return err
+	}
+	defer mailLn.Close()
 	if *modemUID >= 0 {
 		sign, err := serveSign(*run, c, *modemUID)
 		if err != nil {

@@ -288,13 +288,22 @@ type Adoption struct {
 	// Reverted names why the adoption was undone ("owner", "regression",
 	// "security", "fallback"), empty while it is active.
 	Reverted string `json:"reverted,omitempty"`
+	// WithdrawnFor names the revert that asked the update applier to
+	// withdraw this staged image, saved before the applier is asked. The
+	// applier's withdrawal is also a drop, so a revert cut short after it
+	// is settled by StageDropped; it is recorded with this why, never as
+	// a drop Loop 3 offers again (SR3-4f-2-r1).
+	WithdrawnFor string `json:"withdrawn_for,omitempty"`
 	// Concern is a regression Recheck found on a protected adoption, which
 	// the owner decides (arbitrator R2); ConcernScore its counts.
 	Concern      string `json:"concern,omitempty"`
 	ConcernScore Score  `json:"concern_score,omitempty"`
 	ConcernSeen  bool   `json:"concern_seen,omitempty"`
-	Listed       bool   `json:"listed,omitempty"`
-	RevertSeen   bool   `json:"revert_seen,omitempty"`
+	// ConcernStarts: a security Concern on an unprotected adoption whose
+	// image may start before it is undone (SR3-4f-3 B5).
+	ConcernStarts bool `json:"concern_starts,omitempty"`
+	Listed        bool `json:"listed,omitempty"`
+	RevertSeen    bool `json:"revert_seen,omitempty"`
 	// Goals are the candidate's Goals, IDs only (C23).
 	Goals []string `json:"goals,omitempty"`
 }

@@ -88,11 +88,19 @@ type digestConfig struct {
 	// Sources are DIG-1's, beside the box's day and digest-status ones.
 	Sources   map[string]digestqueue.Source
 	Transport digestqueue.Transport
-	// Inform sends the outage line; nothing else (sendOutage).
+	// Inform sends the outage line; nothing else (sendOutage). The owner
+	// channel paces it as an update (W5-Dc-r1b QH-7).
 	Inform func(string) error
-	Now    func() time.Time
-	Loc    *time.Location
-	Logf   func(string, ...any)
+	// Quiet reports the owner's quiet hours: a digest due in them waits,
+	// Ready, for the first step after they end (W5-Dc-r1b QH-7). The
+	// digest never reads the hourly allowance (SG-r1-6). Nil: never quiet.
+	Quiet func(time.Time) bool
+	Now   func() time.Time
+	Loc   *time.Location
+	Logf  func(string, ...any)
+	// Forgotten lists the tombstoned goals; every open asks the queue to
+	// forget each before any send (W5-Dc-r12).
+	Forgotten func() []string
 }
 
 // digestState is the box's own sources' persisted state.
@@ -127,6 +135,9 @@ type digestBox struct {
 	day       uint64
 	outageDay uint64
 	lastTry   time.Time
+	// quietWait: the last sendReady found quiet hours, so the first step
+	// after they end sends (W5-Dc-r1b QH-7).
+	quietWait bool
 	// forgets are the references whose forget the queue has not done
 	// (not open, or refused in flight): open purges them before anything
 	// is sent, and no batch holding one is sent (CAP-3, security B2 on
@@ -194,6 +205,20 @@ func (d *digestBox) openLocked(ctx context.Context) error {
 	if purged {
 		if err = d.keepForgets(); err != nil {
 			d.cfg.Logf("digest: forgets not saved: %v", err)
+		}
+	}
+	// The tombstone names every forgotten goal, so a stop between it and
+	// forget, with the owed save failed too, still leaves no batch to send:
+	// until each forget holds the box stays down (W5-Dc-r12). Forget writes
+	// only when a batch holds the goal.
+	if d.cfg.Forgotten != nil {
+		for _, g := range d.cfg.Forgotten() {
+			if !digestRef(g) {
+				continue
+			}
+			if err = q.Forget(g); err != nil {
+				return fmt.Errorf("tombstone replay: %w", err)
+			}
 		}
 	}
 	sources := maps.Clone(d.cfg.Sources)
@@ -267,6 +292,10 @@ func (d *digestBox) save() error {
 	return d.cfg.State.Save(raw)
 }
 
+// skewed reports whether a saved last day is later than tomorrow. It is
+// written without today+1 so it cannot wrap.
+func skewed(last, today uint64) bool { return last > 0 && last-1 > today }
+
 // dayOf is t's box-local date as days since 1970-01-01.
 func (d *digestBox) dayOf(t time.Time) uint64 {
 	y, m, dd := t.In(d.cfg.Loc).Date()
@@ -300,11 +329,17 @@ func (d *digestBox) step(ctx context.Context, now time.Time) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	today := d.dayOf(now)
+	if skewed(d.st.LastDay, today) {
+		// Clock skew (set back, or a skewed save): the day it names is
+		// not coming, so the digest is due as if yesterday had run.
+		d.cfg.Logf("digest: saved day %d is ahead of day %d; treated as clock skew and reset", d.st.LastDay, today)
+		d.st.LastDay = max(today, 1) - 1
+	}
 	switch {
 	case today > d.st.LastDay && !now.Before(d.digestAt(today)) && (!d.owing.Load() || now.Sub(d.lastTry) >= digestRetry):
 		d.lastTry = now
 		d.daily(ctx, now, today)
-	case now.Sub(d.lastTry) >= digestRetry:
+	case now.Sub(d.lastTry) >= digestRetry || d.quietWait && !d.quiet(now):
 		d.lastTry = now
 		if d.q == nil {
 			if err := d.openLocked(ctx); err != nil {
@@ -408,8 +443,18 @@ func (d *digestBox) sendOutage() {
 	}
 }
 
-// sendReady sends each batch the queue would begin, oldest first.
+// quiet reports whether now is in the owner's quiet hours.
+func (d *digestBox) quiet(now time.Time) bool {
+	return d.cfg.Quiet != nil && d.cfg.Quiet(now)
+}
+
+// sendReady sends each batch the queue would begin, oldest first. In
+// quiet hours it sends none; they stay Ready and the first step after
+// quiet hours sends them.
 func (d *digestBox) sendReady(ctx context.Context, now time.Time) {
+	if d.quietWait = d.quiet(now); d.quietWait {
+		return
+	}
 	bs, err := d.q.List()
 	if err != nil {
 		d.broken(err)
@@ -561,10 +606,11 @@ func (d *digestBox) render(b digestqueue.Batch) (string, error) {
 	return text, nil
 }
 
-// forget purges ref from the queue (CAP-3). A batch in flight refuses it
-// (digestqueue.ErrInFlight), as does a queue that is not open, so the
-// forget stays owed and its retry asks again; meanwhile ref is kept in
-// forgets, so open purges it first and no batch holding it is sent.
+// forget purges ref from the queue (CAP-3); an unknown batch holding it is
+// redacted whole and stays unknown (W5-Dc-r7). A sending batch refuses it
+// (digestqueue.ErrInFlight), as do a queue that is not open and a store
+// refusal, so the forget stays owed and its retry asks again; meanwhile ref
+// is kept in forgets, so open purges it first and no batch holding it is sent.
 func (d *digestBox) forget(ref string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()

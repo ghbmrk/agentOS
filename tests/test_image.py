@@ -594,6 +594,12 @@ class ConfigTest(unittest.TestCase):
         preset = (MK / "mkosi.extra/usr/lib/systemd/system-preset/50-agentos.preset").read_text()
         self.assertIn("enable agentosd.path", preset)
 
+    def test_broker_and_its_children_cannot_gain_privileges(self):
+        # P3-4b-3r-confine-r3 (LOOP-7, #588 Security R1): no child agentosd starts gains privileges
+        # through a setuid or file-capability binary; the audit is agentosd ASSUMPTIONS L7-6.
+        u = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")
+        self.assertEqual(u["Service"]["NoNewPrivileges"], "yes")
+
     def test_broker_waits_for_onboarding(self):
         u = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")
         self.assertEqual(u["Unit"]["ConditionPathExists"], "/etc/agentos/agentosd.env")
@@ -654,6 +660,7 @@ class FuzzConfineTest(unittest.TestCase):
     # P3-4b-3r-confine requirement 2: fuzz children run as an unprivileged system user the image
     # creates; it owns LOOP-7's state and reaches it through the broker's 0700 state directory by an
     # ACL entry granting search only. The user is the one agentosd looks up.
+    # P3-4b-3r-confine-r2 moved the state out of the broker's directory and took the ACL away.
 
     def test_the_image_creates_the_fuzz_user(self):
         lines = (MK / "mkosi.extra/usr/lib/sysusers.d/agentos-fuzz.conf").read_text().splitlines()
@@ -662,18 +669,46 @@ class FuzzConfineTest(unittest.TestCase):
         learn = (ROOT / "broker/cmd/agentosd/learn.go").read_text()
         self.assertRegex(learn, r'fuzzUser\s*=\s*"agentos-fuzz"')
 
-    def test_the_fuzz_user_owns_its_state_and_only_traverses_the_broker_s(self):
-        lines = [l.split() for l in (MK / "mkosi.extra/usr/lib/tmpfiles.d/agentos.conf").read_text().splitlines()
-                 if l.strip() and not l.startswith("#")]
+    def tmpfiles(self):
+        return [l.split() for l in (MK / "mkosi.extra/usr/lib/tmpfiles.d/agentos.conf").read_text().splitlines()
+                if l.strip() and not l.startswith("#")]
+
+    # REQ: LOOP-7, RES-4
+    # P3-4b-3r-confine-r2 requirement 1: the fuzz user's tree is its own, beside the broker's 0700 state
+    # directory rather than in it, and the user is granted nothing there: a search entry would open every
+    # file below it whose own mode lets others read it (#588 L3 3, Security R3).
+    def test_the_fuzz_user_is_granted_nothing_in_the_broker_s_state(self):
+        lines = self.tmpfiles()
         self.assertIn(["d", "/var/lib/agentos", "0700", "root", "root", "-"], lines)
-        # agentosd creates loop7 (loop7.Load) and gives it to the user (Jail.Own): a tmpfiles line would
-        # also run at image build and ship it, and the image's /var/lib/agentos must stay empty.
         self.assertFalse([l for l in lines if l[1].startswith("/var/lib/agentos/")])
-        acl = [l for l in lines if l[0].startswith("a") and l[1] == "/var/lib/agentos"]
-        self.assertEqual(acl, [["a+", "/var/lib/agentos", "-", "-", "-", "-", "u:agentos-fuzz:--x"]])
-        # Nothing else in the broker's state is given to the fuzz user.
-        others = [l for l in lines if "agentos-fuzz" in " ".join(l) and l[1] not in ("/var/lib/agentos", "/var/lib/agentos/loop7")]
+        for l in lines:
+            if l[1] == "/var/lib/agentos" or l[1].startswith("/var/lib/agentos/"):
+                for e in (l[6].split(",") if l[0].startswith("a") and len(l) > 6 else []):
+                    if e.startswith(("u:agentos-fuzz:", "user:agentos-fuzz:", "g:agentos-fuzz:", "group:agentos-fuzz:")):
+                        self.assertEqual(e.rsplit(":", 1)[1], "---", "the fuzz user is granted %s on %s" % (e, l[1]))
+        # agentosd creates the fuzz state (loop7.Load) and gives it to the user (Jail.Own): a tmpfiles line
+        # would also run at image build and ship it.
+        self.assertFalse([l for l in lines if l[1] == "/var/lib/agentos-fuzz" or l[1].startswith("/var/lib/agentos-fuzz/")])
+        learn = (ROOT / "broker/cmd/agentosd/learn.go").read_text()
+        self.assertRegex(learn, r'fuzzState\s*=\s*"/var/lib/agentos-fuzz"')
+        # Nothing else on the box is given to the fuzz user.
+        shared = ("/var/lib/agentos", "/tmp", "/var/tmp", "/dev/shm")
+        others = [l for l in lines if "agentos-fuzz" in " ".join(l) and l[1] not in shared]
         self.assertEqual(others, [])
+
+    def test_the_image_does_not_ship_the_fuzz_state(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(check.violations(d), [])
+            os.makedirs(os.path.join(d, "var/lib/agentos-fuzz"))
+            self.assertEqual(check.violations(d), ["var/lib/agentos-fuzz: fuzz state; created on the box, never shipped"])
+
+    # REQ: LOOP-1, RES-4
+    # P3-4b-3r-confine-r4 requirement 3: the fuzz user cannot write the shared world-writable directories,
+    # which its quota does not cover; the entry names that user only, so no other user loses them.
+    def test_the_fuzz_user_cannot_write_the_shared_temp_dirs(self):
+        lines = self.tmpfiles()
+        for d in ("/tmp", "/var/tmp", "/dev/shm"):
+            self.assertEqual([l for l in lines if l[1] == d], [["a+", d, "-", "-", "-", "-", "u:agentos-fuzz:---"]])
 
 
 if __name__ == "__main__":

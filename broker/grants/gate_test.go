@@ -728,3 +728,67 @@ func TestPageRequestsInOneFlushAreAskedTogether(t *testing.T) {
 		t.Fatalf("unasked: %s %q", st.State, st.Permission.Reason)
 	}
 }
+
+// REQ: CH-15 (W5-Dc-r1b QH-8)
+
+// TestGrantsUseOwnerQuietAndAllowance: wired as agentosd wires it, the
+// gate reads the owner's quiet hours, the owner's URGENT APPROVAL, and the
+// owner's one hourly allowance in place of its own count. A request in
+// quiet hours waits until they end; with the allowance spent by updates a
+// request waits for the next hour, though grants' own count has room;
+// with room in the allowance a request goes, though grants' own count is
+// past RequestsPerHour; URGENT APPROVAL ON sends at once.
+func TestGrantsUseOwnerQuietAndAllowance(t *testing.T) {
+	quiet, urgent, allow := true, false, 3
+	r := newRig(t, func(c *Config) {
+		c.Quiet = func(time.Time) bool { return quiet }
+		c.Urgent = func(owner.Item) bool { return urgent }
+		c.Allowance = func(time.Time) int { return allow }
+		c.RequestsPerHour = 1 // grants' own count: spent by the grant's request
+	})
+	r.grant(mailGrant())
+	base := r.own.count()
+	sent := func() int { return r.own.count() - base }
+	ask := func(id string) {
+		t.Helper()
+		x := sam()
+		x.Record = id
+		r.ver.set(id, x)
+		r.effect("agent/"+id, "invoice.send", map[string]any{"record": id}, "sam@example.com")
+		r.advance(5 * time.Minute)
+		r.g.Tick()
+	}
+
+	ask("a")
+	if sent() != 0 {
+		t.Fatal("sent in quiet hours")
+	}
+	quiet = false
+	r.g.Tick()
+	if sent() != 1 {
+		t.Fatalf("after quiet hours: %d requests, want 1 on the owner's allowance", sent())
+	}
+
+	allow = 0 // updates spent the hour
+	ask("b")
+	if sent() != 1 {
+		t.Fatal("sent past the owner's allowance")
+	}
+	if r.g.Reserve(false) {
+		t.Fatal("question reserved past the owner's allowance")
+	}
+	allow = 3 // the next hour
+	r.g.Tick()
+	if sent() != 2 {
+		t.Fatal("not sent once the allowance had room")
+	}
+	if !r.g.Reserve(false) {
+		t.Fatal("question refused with the owner's allowance left")
+	}
+
+	allow, quiet, urgent = 0, true, true
+	ask("c")
+	if sent() != 3 {
+		t.Fatal("URGENT APPROVAL ON: not sent at once")
+	}
+}
