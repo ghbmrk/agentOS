@@ -1,0 +1,18 @@
+{
+  "files": {
+    "config/privacy.json": {"name": "default", "version": 1, "private_routes": ["local"]},
+    "config/vault.json": {"export": false},
+    "context/web.json": {"select": ["pages"]},
+    "context/browse.json": {"select": ["pages", "search"]},
+    "procedures/payments.json": {"name": "payments", "max_amount_eur": 50, "confirm_over_eur": 20},
+    "procedures/refunds.json": {"name": "refunds", "max_amount_eur": 50},
+    "suites/security.json": {"note": "security fixtures live in the change pipeline; this file names the suite"}
+  },
+  "receives": {
+    "web": ["pages", "mail-bodies"],
+    "browse": ["pages", "search", "mail-bodies"]
+  },
+  "security": [
+    {"id": "vault-no-export", "rule": {"tree_rule": [{"path": "config/vault.json", "pointer": "/export", "op": "eq", "value": false}]}}
+  ]
+}

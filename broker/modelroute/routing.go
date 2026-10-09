@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/routerule"
@@ -106,4 +107,51 @@ func (r *Routing) Set(ctx context.Context, rule routerule.Rule) error {
 		return fmt.Errorf("%w: %s", ErrRoutingRefused, strings.TrimSpace(string(msg)))
 	}
 	return fmt.Errorf("routing: vault process answered %d", resp.StatusCode)
+}
+
+// Spare is the most attempts past the first a call can spend under the
+// owner's rule (SR3-7-f2): the router fails over at most len(routes)-1
+// times in a class, and the class is not known before the vault process
+// reads the call, so it is the largest of those over the owner's classes.
+// An adoption only reorders the owner's routes, so the owner's rule alone
+// sets it. Run keeps it current off the request path; Retries is
+// Config.Retries. The zero Spare is unknown.
+type Spare struct{ n atomic.Int64 } // the count plus one; 0 is unknown
+
+// Retries is the count, or -1 if unknown: nothing read yet, the last read
+// failed, or the owner's rule has no class.
+func (s *Spare) Retries() int { return int(s.n.Load()) - 1 }
+
+// Observe sets the count from the owner's rule.
+func (s *Spare) Observe(owner routerule.Rule) {
+	n := -1
+	for _, rs := range owner {
+		n = max(n, len(rs)-1)
+	}
+	s.n.Store(int64(n) + 1)
+}
+
+func (s *Spare) refresh(ctx context.Context, state func(context.Context) (RoutingState, error)) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	st, err := state(ctx)
+	if err != nil {
+		s.n.Store(0)
+		return
+	}
+	s.Observe(st.Owner)
+}
+
+// Run reads the owner's rule from state (Routing.State) now and then every
+// period until ctx ends. A read that fails or times out leaves the count
+// unknown until the next one succeeds.
+func (s *Spare) Run(ctx context.Context, state func(context.Context) (RoutingState, error), every time.Duration) {
+	for {
+		s.refresh(ctx, state)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(every):
+		}
+	}
 }

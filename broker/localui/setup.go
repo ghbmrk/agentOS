@@ -202,9 +202,16 @@ var (
 	ErrCodesEnrolled    = errors.New("code generator already set up")
 	ErrNoCodeEnrollment = errors.New("no code-generator enrollment waiting")
 	ErrCodesLimited     = errors.New("code-generator enrollment paused")
+	// ErrCodesUnavailable: the vault cannot finish setup's enrollment (it
+	// was never opened for setup, or it is sealed with no confirmation
+	// recorded), so no step on this page can.
+	ErrCodesUnavailable = errors.New("code-generator enrollment unavailable")
 )
 
-var errElsewhere = errors.New("Setup is continuing on the phone that texted the box.")
+// cannotFinish is what the page says on ErrCodesUnavailable.
+const cannotFinish = "I cannot finish setup: I cannot add approval codes. Ask whoever installed my software to prepare me for setup again."
+
+var errElsewhere = errors.New("Setup is continuing on the phone that texted me.")
 
 // setup is the §8.1 step 5 and 6 sequence. Until the owner's number is
 // known any phone on the box's Wi-Fi may set up; from then on only the
@@ -395,6 +402,9 @@ type setupView struct {
 	// CodesEnrolled: the vault already holds a sealed seed, so the codes
 	// step shows none and only continues.
 	CodesEnrolled bool
+	// CodesUnavailable: the vault cannot finish setup's enrollment, so the
+	// codes step offers nothing to do (ErrCodesUnavailable).
+	CodesUnavailable bool
 	// CodesShown: the link was shown already; the step asks for its code
 	// and offers a new one.
 	CodesShown bool
@@ -486,6 +496,8 @@ func (u *setup) page(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, ErrCodesEnrolled):
 			v.CodesEnrolled = true
+		case errors.Is(err, ErrCodesUnavailable):
+			v.CodesUnavailable, v.Err = true, cannotFinish
 		case errors.Is(err, ErrCodesLimited):
 			v.Err = "Too many new codes in a minute. Wait a minute, then reload this page."
 		case err != nil:
@@ -685,7 +697,7 @@ func (u *setup) number(r *http.Request, key string) error {
 	u.numTo, u.numDevice, u.numCode, u.numExpires, u.numTries = n, key, code, now.Add(numberCodeTTL), 0
 	u.mu.Unlock()
 	if err := u.s.cfg.Hooks.Send(n, "AgentOS setup code: "+code+". Type it on the setup page."); err != nil {
-		return errors.New("The box could not send a text. Check the SIM, or use Text my box.")
+		return errors.New("I could not send a text. Check the SIM, or use Text my box.")
 	}
 	return nil
 }
@@ -748,7 +760,7 @@ func (u *setup) claim(r *http.Request, key string) error {
 	u.claimTries++
 	if u.claimCode != "" && now.Before(u.claimExpires) && u.claimTries < numberCodeTries {
 		u.mu.Unlock()
-		return errors.New("That code did not match. Use the page code the box texted you.")
+		return errors.New("That code did not match. Use the page code I texted you.")
 	}
 	u.texts = recentTimes(u.texts, now, time.Hour)
 	if len(u.texts) >= NumberTextsPerHour {
@@ -766,9 +778,9 @@ func (u *setup) claim(r *http.Request, key string) error {
 	to := u.st.Owner
 	u.mu.Unlock()
 	if err := u.s.cfg.Hooks.Send(to, "AgentOS page code: "+code+". Type it on the setup page."); err != nil {
-		return errors.New("The box could not send a text. Check the SIM.")
+		return errors.New("I could not send a text. Check the SIM.")
 	}
-	return errors.New("That code did not match. The box texted you a new page code.")
+	return errors.New("That code did not match. I texted you a new page code.")
 }
 
 // ResetTriesPerHour caps wrong reset secrets typed on the setup page.
@@ -843,6 +855,8 @@ func (u *setup) codes(r *http.Request, _ string) error {
 	}
 	switch {
 	case errors.Is(err, ErrCodesEnrolled):
+	case errors.Is(err, ErrCodesUnavailable):
+		return errors.New(cannotFinish)
 	case errors.Is(err, ErrNoCodeEnrollment):
 		u.mu.Lock()
 		u.shown = false
@@ -866,7 +880,7 @@ func (u *setup) codes(r *http.Request, _ string) error {
 
 func (u *setup) recovery(r *http.Request, _ string) error {
 	if r.PostFormValue("stored") == "" {
-		return errors.New("Tear off the recovery sheet, store it, then tick the box.")
+		return errors.New("Tear off the recovery sheet, store it, then tick the checkbox.")
 	}
 	u.mu.Lock()
 	defer u.mu.Unlock()
@@ -903,9 +917,9 @@ func (u *setup) aiReady() error {
 	}
 	if p := u.s.cfg.Hooks.Progress(); !p.Updated {
 		if p.Phase == "offline" {
-			return errors.New("The box is offline and has not updated yet. AI can be connected once it is online and updated.")
+			return errors.New("I am offline and have not updated yet. AI can be connected once I am online and updated.")
 		}
-		return errors.New("The box is still updating. AI can be connected when it finishes.")
+		return errors.New("I am still updating. AI can be connected when I finish.")
 	}
 	return nil
 }
@@ -993,8 +1007,12 @@ func (u *setup) maybeFinish() {
 		return
 	}
 	if err := u.s.cfg.Hooks.Finish(who); err != nil && !u.s.cfg.Hooks.AlreadySetUp() {
+		msg := "Could not finish setup. Try again."
+		if errors.Is(err, ErrCodesUnavailable) {
+			msg = cannotFinish
+		}
 		u.mu.Lock()
-		u.err[u.st.Device] = "Could not finish setup. Try again."
+		u.err[u.st.Device] = msg
 		u.mu.Unlock()
 		return
 	}

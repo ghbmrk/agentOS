@@ -7,9 +7,12 @@ import (
 	"log"
 	"sync/atomic"
 
+	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/loopbuild"
 	"github.com/ghbmrk/agentos/broker/loops"
+	"github.com/ghbmrk/agentos/broker/meter"
 	ownerch "github.com/ghbmrk/agentos/broker/owner"
 )
 
@@ -22,8 +25,14 @@ import (
 // drift check is not wired to the live tree copy either: both are this
 // process's own copies of the pipeline's tree, so comparing them sees no
 // outside change and could race an adoption into a false finding.
-// FixturesLive stays off until replay answers fixtures (K-S1); the
-// pipeline's PS1 grading is in place (change C24).
+// FixturesLive stays off for the passive checks' fixtures until replay
+// answers them (K-S1); the pipeline's PS1 grading is in place (change
+// C24). Seeded findings' tree rules are answered by replay itself, so
+// their fixtures are live (loop2Live, P3-4b). Guard.Report is called in
+// process only; no socket reaches it.
+
+// loop2Live are the checks whose regression fixtures go live now.
+var loop2Live = map[loops.Check]bool{loops.CheckSeeded: true}
 
 // loop2NotRun is why each check does not run on this box yet, for STATUS
 // and the digest (potency C2 on W5a).
@@ -32,6 +41,51 @@ var loop2NotRun = map[loops.Check]string{
 	loops.CheckAdvisory: "needs a signed advisory feed",
 	loops.CheckDrift:    "needs a check of what the machines hold",
 	loops.CheckExpiry:   "needs the vault's expiry list",
+}
+
+// loop2FixShareMax is the most of the spare budget Loop 2's fix jobs may
+// use (LOOP-2): a share of their own, apart from Loop 1's builder share,
+// so fixes never spend Loop 1's budget nor Loop 1 theirs. It reserves
+// nothing; the retry bound (loops, Potency 1 on #464) keeps it small.
+const loop2FixShareMax = 0.15
+
+// loop2FixShare is the fix machines' share of the spare meter.
+func loop2FixShare() meter.Share {
+	return meter.Share{Prefix: loopbuild.FixPrefix, Max: loop2FixShareMax}
+}
+
+// loop2NoBuilder is why Loop 2 cannot build a fix on a box without
+// builder machines, in owner words for STATUS ("I cannot build one yet,
+// because ..."). The owner has no step to take: the box image ships the
+// builder (W3-builder-ship).
+const loop2NoBuilder = "I am not set up to build repairs"
+
+// lateFix answers Loop 2's fix-candidate requests on Loop 1's builder
+// machines (P3-4b-5, LOOP-9) once the machine plane attaches the builder.
+// Until then, or while the builder has no model route, it is unready:
+// Loop 2 asks it nothing and STATUS says why. Loop 2 stamps what it
+// returns, and the change pipeline decides (§11).
+type lateFix struct{ b *lateBuild }
+
+var (
+	_ loops.Fixer   = lateFix{}
+	_ loops.Unready = lateFix{}
+)
+
+func (l lateFix) Fix(ctx context.Context, f loops.Finding) (change.Candidate, error) {
+	b := l.b.b.Load()
+	if b == nil {
+		return change.Candidate{}, errNoBuilder
+	}
+	return b.Fix(ctx, f)
+}
+
+func (l lateFix) Unready() string {
+	b := l.b.b.Load()
+	if b == nil {
+		return loop2NoBuilder
+	}
+	return b.Unready()
 }
 
 // errNotPaused: the gate refused Loop 2's pause.
@@ -82,21 +136,40 @@ func (c *loop2Contain) Contain(ctx context.Context, t loops.Target, finding stri
 }
 
 // loop2Notify texts the owner Loop 2's fixed-wording notices once the
-// owner channel is attached. Urgency waits for CH-15's quiet-hours
-// classes in the owner channel: until then every notice goes at once.
+// owner channel is attached, through its pacer (CH-15).
 type loop2Notify struct {
 	ch atomic.Pointer[ownerch.Channel]
 }
 
-func (n *loop2Notify) send(text string, _ bool) {
-	ch := n.ch.Load()
-	if ch == nil {
-		log.Printf("loop2: owner notice not sent: owner channel not attached")
-		return
+// send texts the owner a loops text: security class when urgent, so it
+// goes at once even in quiet hours; else an update (W5-Dc-r1b QH-9).
+func (n *loop2Notify) send(text string, urgent bool) {
+	class := ownerch.ClassUpdate
+	if urgent {
+		class = ownerch.ClassSecurity
 	}
-	if err := ch.Inform(text); err != nil {
+	if err := n.post(class, text); err != nil {
 		log.Printf("loop2: owner notice not sent: %v", err)
 	}
+}
+
+// post sends text to the owner in class.
+func (n *loop2Notify) post(class ownerch.Class, text string) error {
+	ch := n.ch.Load()
+	if ch == nil {
+		return errors.New("owner channel not attached")
+	}
+	return ch.Post(class, text)
+}
+
+// try sends text to the owner as an update, reporting whether it went or
+// was held: the hold keeps it (CH-15).
+func (n *loop2Notify) try(text string) error {
+	ch := n.ch.Load()
+	if ch == nil {
+		return errors.New("owner channel not attached")
+	}
+	return ch.Inform(text)
 }
 
 // loop2Held reports the targets the gate still holds paused: a grant that

@@ -391,7 +391,7 @@ func TestVaultUnlockByPhotoThenCode(t *testing.T) {
 		t.Fatalf("right code: %d\n%s", w.Code, w.Body)
 	}
 	page = r.get("/unlock/vault")
-	if !strings.Contains(page, "The box is unlocked.") || !strings.Contains(page, `href="/unlock"`) {
+	if !strings.Contains(page, "I am unlocked.") || !strings.Contains(page, `href="/unlock"`) {
 		t.Fatalf("open page:\n%s", page)
 	}
 	for _, b := range r.seen {
@@ -430,8 +430,8 @@ func TestVaultUnlockRefusals(t *testing.T) {
 		{nil, "", "Take a photo of the passphrase code, or type the words."},
 		{cardPhoto(t, wifi), "", "That is the Wi-Fi code."},
 		{cardPhoto(t), "", "No QR code found in that photo."},
-		{[]byte("GIF89a not really"), "", "The box cannot read that file."},
-		{nil, "wrong words entirely here now please", "Those words do not open this box."},
+		{[]byte("GIF89a not really"), "", "I cannot read that file."},
+		{nil, "wrong words entirely here now please", "Those words do not unlock me."},
 	}
 	for _, c := range cases {
 		res := r.upload(c.photo, c.typed)
@@ -496,7 +496,7 @@ func TestVaultBootPIN(t *testing.T) {
 	}
 	r.advance(VaultTryGap)
 	w = r.post("/unlock/vault", url.Values{"step": {"pin"}, "pin": {"4711"}})
-	if w.Code != http.StatusSeeOther || !strings.Contains(r.get("/unlock/vault"), "The box is unlocked.") {
+	if w.Code != http.StatusSeeOther || !strings.Contains(r.get("/unlock/vault"), "I am unlocked.") {
 		t.Fatalf("PIN: %d %v", w.Code, fv.pins)
 	}
 	// Without a PIN awaited, no PIN form.
@@ -538,7 +538,7 @@ func TestVaultChangedBootPath(t *testing.T) {
 	}{
 		{"updated", "Box updated. Unlock once with your passphrase and a code; this PC stays trusted after that.", true},
 		{"secure_boot", "Secure Boot settings on this PC changed. If you updated firmware, unlock with your card to keep this PC trusted.", false},
-		{"other", "This PC started the box in a way it hasn&#39;t before. If you didn&#39;t change anything, the drive may have been tampered with. Unlock only if you&#39;re sure.", false},
+		{"other", "This PC started me in a way it hasn&#39;t before. If you didn&#39;t change anything, the drive may have been tampered with. Unlock only if you&#39;re sure.", false},
 	}
 	for _, c := range cases {
 		r, fv := vaultRig(t)
@@ -604,7 +604,7 @@ func TestVaultAttemptBudget(t *testing.T) {
 	for i := 0; len(fv.unlocks) < VaultTriesAllPerHour; i++ {
 		post("10.42.0." + strconv.Itoa(40+i) + ":1000")
 	}
-	if body := post("10.42.0.200:1000"); !strings.Contains(body, "Too many tries on the box&#39;s Wi-Fi.") || len(fv.unlocks) != VaultTriesAllPerHour {
+	if body := post("10.42.0.200:1000"); !strings.Contains(body, "Too many tries on my Wi-Fi.") || len(fv.unlocks) != VaultTriesAllPerHour {
 		t.Fatalf("Wi-Fi bound: %d\n%s", len(fv.unlocks), body)
 	}
 	// An hour on, the owner's phone is admitted again.
@@ -898,7 +898,7 @@ func TestVaultBudgetExemptsThePendingPhone(t *testing.T) {
 	}
 	o := &rig{t: t, srv: r.srv, ip: "10.42.0.250:5000"}
 	o.jar, _ = cookiejar.New(nil)
-	if b := o.post("/unlock/vault", url.Values{"step": {"pin"}, "pin": {"0000"}}).Body.String(); !strings.Contains(b, "Too many tries on the box") {
+	if b := o.post("/unlock/vault", url.Values{"step": {"pin"}, "pin": {"0000"}}).Body.String(); !strings.Contains(b, "Too many tries on my Wi-Fi") {
 		t.Fatalf("budget not spent:\n%s", b)
 	}
 	// The owner's phone, holding the cookie, still gets a try.
@@ -950,14 +950,14 @@ func TestVaultInterruptedPassphraseChange(t *testing.T) {
 	if w := r.post("/unlock/vault", url.Values{"step": {"code"}, "code": {"123456"}}); w.Code != http.StatusSeeOther {
 		t.Fatalf("code: %d\n%s", w.Code, w.Body)
 	}
-	if page := r.get("/unlock/vault"); !strings.Contains(page, line) || !strings.Contains(page, "The box is unlocked.") {
+	if page := r.get("/unlock/vault"); !strings.Contains(page, line) || !strings.Contains(page, "I am unlocked.") {
 		t.Fatalf("open page:\n%s", page)
 	}
 	// Another phone on the Wi-Fi learns nothing: the line would tell it
 	// the old passphrase still opens the box (M1, security R1 on #93).
 	other := &rig{t: t, srv: r.srv, ip: "10.42.0.77:40000"}
 	other.jar, _ = cookiejar.New(nil)
-	if page := other.get("/unlock/vault"); strings.Contains(page, line) || !strings.Contains(page, "The box is unlocked.") {
+	if page := other.get("/unlock/vault"); strings.Contains(page, line) || !strings.Contains(page, "I am unlocked.") {
 		t.Fatalf("other phone:\n%s", page)
 	}
 }

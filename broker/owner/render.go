@@ -3,6 +3,7 @@ package owner
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -157,11 +158,48 @@ type Item struct {
 	// be undone later", "LEARN OFF any time"); it replaces "cannot be
 	// undone".
 	UndoBy string
-	Facts  Facts
+	// Terms, for a grant or pre-allowance, is the broker's complete
+	// summary of the authority it gives, one consequential field per
+	// term (ADP-9, SR3-3). The local page shows every term; the text
+	// keeps the one-line Object (CH-12).
+	Terms TermList `json:",omitempty"`
+	Facts Facts
 	// Asked, when set, marks an item re-issued after a restart: its line
 	// ends "asked 14:02, re-sent after restart" with the time it was
 	// first asked. It is not part of ItemSum.
 	Asked time.Time
+}
+
+// Term is one field of a broker-rendered summary: a fixed label and the
+// value the broker read, shown as is.
+type Term struct {
+	Label, Value string
+}
+
+// TermList is a list of terms in one comparable value, so Item stays
+// comparable: their canonical JSON encoding. Make it with NewTerms.
+type TermList string
+
+// NewTerms encodes ts.
+func NewTerms(ts []Term) TermList {
+	if len(ts) == 0 {
+		return ""
+	}
+	b, _ := json.Marshal(ts) // strings only: cannot fail
+	return TermList(b)
+}
+
+// List decodes l; ok is false if l is not a list NewTerms made.
+func (l TermList) List() (ts []Term, ok bool) {
+	if l == "" {
+		return nil, true
+	}
+	d := json.NewDecoder(strings.NewReader(string(l)))
+	d.DisallowUnknownFields()
+	if err := d.Decode(&ts); err != nil || d.More() || len(ts) == 0 {
+		return nil, false
+	}
+	return ts, true
 }
 
 // ItemSum is a digest of everything an item shows the owner or is
@@ -181,6 +219,11 @@ func ItemSum(it Item) string {
 		// Appended only when set, so items without them keep the digests
 		// earlier builds saved for a re-issue.
 		s += fmt.Sprintf("|%q|%q", it.Detail, it.UndoBy)
+	}
+	if it.Terms != "" {
+		// Likewise; "T" cannot start a quoted field, so the two
+		// appendices never read as each other.
+		s += fmt.Sprintf("|T%q", it.Terms)
 	}
 	h := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(h[:])

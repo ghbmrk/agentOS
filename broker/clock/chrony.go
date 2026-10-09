@@ -3,15 +3,18 @@ package clock
 import (
 	"context"
 	"errors"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/childproc"
 )
 
 // chronyc is the chrony client the box ships (P2-1). The broker reaches
-// chronyd's command socket as root; authdata is refused elsewhere.
-const chronyc = "/usr/bin/chronyc"
+// chronyd's command socket as root; authdata is refused elsewhere. A var
+// only so a test can point it at a fake; TestOnlyChronycIsExecuted pins
+// its value.
+var chronyc = "/usr/bin/chronyc"
 
 // chronycTimeout bounds one chronyc call.
 const chronycTimeout = 3 * time.Second
@@ -19,7 +22,15 @@ const chronycTimeout = 3 * time.Second
 func runChronyc(ctx context.Context, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, chronycTimeout)
 	defer cancel()
-	return exec.CommandContext(ctx, chronyc, chronycArgv(args)...).Output()
+	return chronycCmd(ctx, args...).Output()
+}
+
+// chronycCmd is chronyc with a fixed PATH and no other variable: it finds
+// chronyd by its built-in socket path and, with no locale set, prints -c
+// output in the C locale. It needs nothing from agentosd's environment,
+// which carries the owner's number (AGENTOS_OWNER; P3-4b-3r-env).
+func chronycCmd(ctx context.Context, args ...string) *childproc.Cmd {
+	return childproc.Command(ctx, childproc.NewEnv("PATH=/usr/bin:/bin"), childproc.Options{}, chronyc, chronycArgv(args)...)
 }
 
 // chronycArgv: CSV output (-c), no name lookups (-n), then the query.
