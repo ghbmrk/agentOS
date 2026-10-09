@@ -78,6 +78,12 @@ func (s *uacStream) Close() error {
 // on plughw:<card>. Nothing from a call reaches their argument lists.
 type ALSA struct{}
 
+// alsaEnv is all of arecord's and aplay's environment: a fixed PATH.
+// plughw:<card> names the device, so they need no ALSA_* variable, HOME
+// (~/.asoundrc) or locale, and nothing in agentos-modem's environment
+// reaches them (P3-4b-3r-env).
+var alsaEnv = []string{"PATH=/usr/bin:/bin"}
+
 func alsaArgs(card string) []string {
 	return []string{"-q", "-D", "plughw:" + card, "-f", "S16_LE", "-r", "8000", "-c", "1", "-t", "raw"}
 }
@@ -88,6 +94,7 @@ func (ALSA) Record(ctx context.Context, card string) (io.ReadCloser, error) {
 		return nil, errors.New("at: bad sound card")
 	}
 	cmd := exec.CommandContext(ctx, "arecord", alsaArgs(card)...)
+	cmd.Env = alsaEnv
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -104,6 +111,7 @@ func (ALSA) Play(ctx context.Context, card string) (io.WriteCloser, error) {
 		return nil, errors.New("at: bad sound card")
 	}
 	cmd := exec.CommandContext(ctx, "aplay", alsaArgs(card)...)
+	cmd.Env = alsaEnv
 	in, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err

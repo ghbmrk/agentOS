@@ -187,6 +187,10 @@ const (
 	waitForAFixOf = "waits for a fix: "
 	waitNoTest    = "its test could not be added to my security checks, so no fix can qualify yet"
 	waitUpdate    = "one comes with an update; I check it again at least twice a day"
+	waitLater     = "building one failed twice; I try again in a day"
+	waitUnchanged = "the last fix I built did not pass my security checks; I try again when those checks change"
+	waitStopped   = "I stopped trying after 8 fixes that did not work; anything I paused for it stays paused until you resume it, and an update may bring a fix"
+	waitUnfixable = "it is not something I can repair myself; an update may bring a fix"
 )
 
 // waitingLocked is why an open reported record waits, "" if it does not.
@@ -203,9 +207,20 @@ func (s *Guard) waitingLocked(r Record) string {
 	if !r.Reported || r.Fix == string(change.StateAdopted) {
 		return ""
 	}
+	u, _ := s.cfg.Fixer.(Unready)
 	switch {
 	case s.cfg.Fixer == nil:
 		return waitNoFixer
+	case u != nil && u.Unready() != "":
+		return waitNoFixer + ", because " + u.Unready()
+	case r.FixHold == holdUnfixable:
+		return waitUnfixable
+	case r.FixHold == holdStopped:
+		return waitStopped
+	case r.FixHold == holdUnchanged:
+		return waitUnchanged
+	case r.FixHold == holdLater:
+		return waitLater
 	case r.Fix == FixFailed:
 		return waitFailed
 	case r.Fix == string(change.StateRejected):
@@ -368,9 +383,12 @@ func (s *Guard) clearedLinesLocked(closed []Record) []string {
 		}
 		return k
 	}
+	// An open Again record is one the owner was told of before it came
+	// back too soon, so it holds the line too: a finding that moves
+	// between two details is never told "Cleared" (Security 4a on #585).
 	open := map[string]bool{}
 	for _, r := range s.st.Open {
-		if r.Texted {
+		if r.Texted || r.Again {
 			open[key(r)] = true
 		}
 	}

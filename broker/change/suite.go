@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -149,6 +152,22 @@ func (p *Pipeline) AddSecurityCase(c Case) error {
 	}
 	c.Security, c.Task, c.Outcome, c.Goal = true, "", "", ""
 	return p.addCase(c)
+}
+
+// Digests are digests of the active tree and of the whole suite (every
+// case, as stored). Equal digests mean a candidate would be graded the
+// same, so Loop 2 holds a fix request a deterministic rejection answered
+// until one of them changes (P3-4b-5, S22).
+func (p *Pipeline) Digests() (tree, suite string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	h := sha256.New()
+	for _, id := range slices.Sorted(maps.Keys(p.st.Cases)) {
+		b, _ := json.Marshal(p.st.Cases[id])
+		fmt.Fprintf(h, "%d:%s%d:", len(id), id, len(b))
+		h.Write(b)
+	}
+	return p.st.Active.Hash(), hex.EncodeToString(h.Sum(nil))
 }
 
 // SecurityCount is how many security cases the suite holds. It only grows

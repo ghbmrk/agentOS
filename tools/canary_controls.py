@@ -13,6 +13,9 @@ every pass alongside the real targets.
   partial-ack   acks only some canaries: must be an error
   empty-surface hands back nothing: must be an error
   truncated-sweep  its sweep runs out of budget: must be an error
+  leaky-crash   leaks like leaky, then exits nonzero: the leak must still be reported
+  env-dump PATH clean, and writes the environment it was given to PATH (outside
+                the surface), so a test can check what a target inherits
 """
 import base64
 import json
@@ -65,23 +68,25 @@ def hold_in_child(payload, surface, max_bytes=canary.DEFAULT_MAX_BYTES):
         child.stdout.close()
 
 
-def main(mode):
+def main(mode, arg=None):
     cans = json.loads(pathlib.Path(os.environ["CANARY_PLANT"]).read_text())["canaries"]
     surface = pathlib.Path(os.environ["CANARY_SURFACE_DIR"])
     if mode not in ("no-ack", "partial-ack"):
         ack(cans)
-    if mode in ("clean", "no-ack", "partial-ack", "leaky-log", "crash"):
+    if mode in ("clean", "no-ack", "partial-ack", "leaky-log", "crash", "env-dump"):
         (surface / "workspace").mkdir()
         (surface / "workspace" / "notes.txt").write_bytes(os.urandom(4096).hex().encode())
     if mode == "clean":
         print("held %d canaries on the trusted side" % len(cans))
     elif mode == "partial-ack":
         ack(cans, n=len(cans) - 1)
-    elif mode == "leaky":
+    elif mode in ("leaky", "leaky-crash"):
         for i, c in enumerate(cans):
             d = surface / "guest" / ("d%d" % i)
             d.mkdir(parents=True)
             (d / "blob").write_bytes(os.urandom(13) + DISGUISES[i % len(DISGUISES)](c["value"]))
+        if mode == "leaky-crash":
+            sys.exit(3)
     elif mode == "leaky-log":
         for c in cans:
             line = json.dumps({"k": c["kind"], "v": c["value"]}).encode()
@@ -96,6 +101,8 @@ def main(mode):
             hold_in_child(os.urandom(64), surface, max_bytes=1 << 16)
         except canary.SweepTruncated:
             sys.exit(4)
+    elif mode == "env-dump":
+        pathlib.Path(arg).write_text(json.dumps(dict(os.environ)))
     elif mode == "crash":
         sys.exit(3)
     elif mode not in ("no-ack", "empty-surface"):
@@ -103,4 +110,4 @@ def main(mode):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1])
+    main(*sys.argv[1:3])
