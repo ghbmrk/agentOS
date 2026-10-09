@@ -74,8 +74,6 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | W6 | A8 (REC-1–3) | Recovery into vault process and local UI |
 | W7 | A10, A15 (CAP-4–6) | Compiled skills live; attention optimizer; blocked |
 | DEP-3 | A9 (DEP-2a evidence integrity) | Every tracee shares `_inner`'s uid and can drain the evidence pipes via `/proc/1/fd` or ptrace `_inner`, or break the next trace line by writing a partial line through `/proc/1/fd/<trace_w>` (L3 and Security on #437, ASSUMPTIONS D9) |
-| DEP-4 | A9 (DEP-2b) | Writable rbind submounts under kept paths; tier-A security, so not later (L3 on #437, ASSUMPTIONS D10) |
-| DEP-5 | A9 | An strace lacking a `?`-prefixed `TRACED` name skips it silently, so that syscall goes unseen; tier-A security, so not later (Security on #437 point 2); built in DEP-4 as DEP-4b |
 
 ## Later (backlog; do not start before first release)
 | ID | Why it can wait |
@@ -274,7 +272,6 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | P3-1-envkey | `broker/change/env_test.go`: `newEnv`'s pinned key is a single `bytes.Reader`, so a second fresh-state pipeline opened with the same cfg would hit EOF. No test does this today (Potency on #491) |
 | P3-4b-2b-held | Fix-input audit (Security #500 1): a held array/object value leaked alone in non-canonical layout passes the audit; H-4's wording needs updating |
 | P3-4b-2b-ctrl | A11 leaking-adapter control (Security #500 2): accepts any audit hit, not only a `held/` hit |
-| DEP-2-sum | depaudit: tools/ASSUMPTIONS.md D11 says attempts/faults/cleanup retries are summed on the `depaudit run` line; they are printed per target only. Fix the wording or add the total in DEP-3/DEP-4 (Potency on #437) |
 | P3-4b-4a corpora | Only PromptInject (10 items) is vendored: the larger published injection sets on Hugging Face are unreachable from the build environment (403); vendor one when a session can fetch it |
 | P3-4b-4a shape | Vendor the next injection set for shape (obfuscated, multilingual, long indirect), not size; the 10 PromptInject items are near-equivalent English wrappers (Potency 1 on #515) |
 | P3-4b-4a rule-less | Open question: rule-less probe findings get no §11 fix request (S23); the pause plus the probe's next clean run is the exit (UX 4, Potency 5 on #515) |
