@@ -60,6 +60,33 @@ func TestACleanCanaryRoundReportsNothing(t *testing.T) {
 	}
 }
 
+// P3-4b-4c-canary requirement 2 (#515 Security 5): a target that leaks
+// and then exits nonzero gives the round one finding and one error line;
+// the probe run is an error that still reports the finding, and the
+// target is not checked, so the run closes nothing for it.
+func TestALeakFromATargetThatAlsoErroredIsReported(t *testing.T) {
+	if testing.Short() {
+		t.Skip("runs the canary harness")
+	}
+	p := canaryRound(t, []map[string]any{
+		{"name": "leak-then-crash", "cmd": controlCmd(t, "leaky-crash")},
+		{"name": "quiet", "cmd": controlCmd(t, "clean")},
+	})
+	res, err := p.Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "leak-then-crash: exit 3") {
+		t.Fatalf("want the target's error, got %v", err)
+	}
+	if len(res.Found) != 1 {
+		t.Fatalf("want one finding, got %+v", res.Found)
+	}
+	if f := res.Found[0]; f.ID != loops.FindingID(loops.CheckCanary, "leak-then-crash", "") || f.Severity != loops.High {
+		t.Errorf("finding %+v", f)
+	}
+	if strings.Join(res.Checked, ",") != "quiet" {
+		t.Errorf("checked %q: an errored target must not be checked", res.Checked)
+	}
+}
+
 // script writes body as a probe command into a release directory and
 // returns a probe that runs it.
 func script(t *testing.T, timeout time.Duration, body string) *CommandProbe {
