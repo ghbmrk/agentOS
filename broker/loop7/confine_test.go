@@ -13,6 +13,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -231,7 +232,7 @@ func TestJailedChildHelper(t *testing.T) {
 	}
 	st, _ := os.ReadFile("/proc/self/status")
 	for _, l := range strings.Split(string(st), "\n") {
-		for _, k := range []string{"Uid:", "Gid:", "Groups:", "CapInh:", "CapPrm:", "CapEff:", "CapAmb:"} {
+		for _, k := range []string{"Uid:", "Gid:", "Groups:", "CapInh:", "CapPrm:", "CapEff:", "CapAmb:", "NoNewPrivs:"} {
 			if strings.HasPrefix(l, k) {
 				fmt.Println(strings.Join(strings.Fields(l), " "))
 			}
@@ -320,6 +321,111 @@ func TestAJailedChildIsUnprivilegedAndOffline(t *testing.T) {
 	for _, n := range []string{"tcp", "udp"} {
 		if !strings.HasPrefix(said[n], "failed") {
 			t.Errorf("a jailed child dialed the host over %s: %q", n, said[n])
+		}
+	}
+}
+
+// LOOP-7: a jailed child runs with no_new_privs, so no setuid or
+// file-capability binary in the image (su, mount, passwd) can raise it
+// back to root across exec (P3-4b-3r-confine-r3; #588 Security R1).
+func TestAJailedChildCannotGainPrivileges(t *testing.T) {
+	needRoot(t)
+	s, tg := jailed(t, newFake(), "", helperBin(t))
+	if got := childSays(t, s, tg)["NoNewPrivs:"]; got != "1" {
+		t.Fatalf("jailed child NoNewPrivs %q, want 1", got)
+	}
+}
+
+// helperSource is an unjailed source whose one target is this test
+// binary, as TestJailedChildHelper.
+func helperSource(t *testing.T) (*Source, Target) {
+	t.Helper()
+	release := t.TempDir()
+	tg := Target{Pkg: "fake", Name: "FuzzFake", Binary: helperBin(t)(release), Dir: t.TempDir()}
+	return newSource(t, newFake(), Config{Targets: []Target{tg}}), tg
+}
+
+// noNewPrivs reads the NoNewPrivs field of a /proc status file.
+func noNewPrivs(t *testing.T, status string) string {
+	t.Helper()
+	b, err := os.ReadFile(status)
+	if err != nil {
+		return "gone"
+	}
+	for _, l := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(l, "NoNewPrivs:"); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	t.Fatalf("%s has no NoNewPrivs line", status)
+	return ""
+}
+
+// LOOP-7: the flag is set in loop7's start path, not only by the unit,
+// so every fuzz child carries it whoever starts agentosd; here as a
+// user, with no jail.
+func TestEveryFuzzChildHasNoNewPrivs(t *testing.T) {
+	s, tg := helperSource(t)
+	if got := childSays(t, s, tg)["NoNewPrivs:"]; got != "1" {
+		t.Fatalf("fuzz child NoNewPrivs %q, want 1", got)
+	}
+}
+
+// LOOP-7: the flag is per thread. The one loop7 sets it on is locked to
+// the starting goroutine and ends with it, so no thread that runs Go
+// code afterwards carries it, and children the daemon starts afterwards
+// from other goroutines, outside loop7, do not. The process's main
+// thread is the one exception the runtime makes: a locked goroutine that
+// exits there wedges it for good (runtime.mexit), and no goroutine runs
+// on it again, so it starts no child; it is left out of the scan. With
+// the unit's NoNewPrivileges=yes every child carries the flag and this is
+// moot.
+func TestNoNewPrivsStaysOffTheDaemonsOtherThreads(t *testing.T) {
+	if noNewPrivs(t, fmt.Sprintf("/proc/%d/status", os.Getppid())) != "0" {
+		t.Skip("the test process was started with no_new_privs")
+	}
+	s, tg := helperSource(t)
+	for range 5 {
+		childSays(t, s, tg)
+	}
+	main := fmt.Sprintf("/proc/self/task/%d/status", os.Getpid())
+	// A flagged thread may still be exiting: wait for it to go.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		tasks, err := filepath.Glob("/proc/self/task/*/status")
+		if err != nil || len(tasks) == 0 {
+			t.Fatalf("no threads listed: %v", err)
+		}
+		var flagged []string
+		for _, st := range tasks {
+			if st != main && noNewPrivs(t, st) == "1" {
+				flagged = append(flagged, st)
+			}
+		}
+		if len(flagged) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("daemon threads still carry no_new_privs: %v", flagged)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// Children from many goroutines, so they start on many threads.
+	const n = 20
+	out := make(chan string, n)
+	for range n {
+		go func() {
+			b, err := exec.Command(tg.Binary, "-test.run=^TestJailedChildHelper$", "-test.v").CombinedOutput()
+			if err != nil {
+				out <- "error: " + err.Error()
+				return
+			}
+			out <- string(b)
+		}()
+	}
+	for range n {
+		if said := <-out; !strings.Contains(said, "NoNewPrivs: 0") {
+			t.Fatalf("a child started outside loop7 says:\n%s\nwant NoNewPrivs: 0", said)
 		}
 	}
 }
@@ -609,5 +715,256 @@ func TestAFuzzStepThatDidNotRunSaysWhy(t *testing.T) {
 	_, err := s.Fuzz(context.Background(), tg)
 	if err == nil || !strings.Contains(err.Error(), "engine refused the cache directory") {
 		t.Fatalf("error %v, want the engine's reason", err)
+	}
+}
+
+// P3-4b-3r-confine-r5: each of F16's defences fails a test when reverted.
+// REQ: LOOP-7, LOOP-1
+
+// machine skips unless the test runs as root in CI's machines job, which
+// sets AGENTOS_CGROUP_PARENT.
+func machine(t *testing.T) {
+	t.Helper()
+	needRoot(t)
+	if os.Getenv("AGENTOS_CGROUP_PARENT") == "" {
+		t.Skip("set AGENTOS_CGROUP_PARENT to run the machines job's root tests")
+	}
+}
+
+// snapshot is every file under d with its mode, owner and contents.
+func snapshot(t *testing.T, d string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	err := filepath.Walk(d, func(p string, fi os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		st := fi.Sys().(*syscall.Stat_t)
+		v := fmt.Sprintf("%v %d:%d", fi.Mode(), st.Uid, st.Gid)
+		if fi.Mode().IsRegular() {
+			b, err := os.ReadFile(p)
+			if err != nil {
+				return err
+			}
+			v += " " + string(b)
+		}
+		out[p] = v
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func sameTree(t *testing.T, before, after map[string]string) {
+	t.Helper()
+	if len(before) != len(after) {
+		t.Fatalf("files outside the state changed: before %v, after %v", before, after)
+	}
+	for p, v := range before {
+		if after[p] != v {
+			t.Fatalf("%s outside the state changed: %q, now %q", p, v, after[p])
+		}
+	}
+}
+
+// linkedOut is a jailed source whose target directory (state/targets/fake)
+// is a link the fuzz user planted to a root-owned directory outside the
+// state, holding a corpus file x and a file named as a release seed, s1.
+// The child, built from body, can enter it; only root's work is checked.
+func linkedOut(t *testing.T, g *fakeGuard, body string) (*Source, Target, string, map[string]string) {
+	t.Helper()
+	base := jailDir(t)
+	release, state, outside := filepath.Join(base, "release"), filepath.Join(base, "state"), filepath.Join(base, "outside")
+	corpus := filepath.Join(outside, "testdata", "fuzz", "FuzzFake")
+	if err := os.MkdirAll(corpus, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{outside, filepath.Join(outside, "testdata"), filepath.Join(outside, "testdata", "fuzz"), corpus} {
+		if err := os.Chmod(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, data := range map[string]string{"x": "go test fuzz v1\n[]byte(\"outside\")\n", "s1": "outside seed name"} {
+		if err := os.WriteFile(filepath.Join(corpus, name), []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seeds := filepath.Join(release, "corpus", "fake", "FuzzFake")
+	if err := os.MkdirAll(seeds, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cacheFile(t, seeds, "s1", 3, 0)
+	cacheFile(t, seeds, "s2", 3, 0)
+	if err := os.WriteFile(filepath.Join(release, "manifest.json"), []byte(`{"targets":[{"pkg":"fake","name":"FuzzFake","binary":"fake.test"}]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(state, "targets"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(state, "targets", "fake")); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshot(t, outside)
+	if _, err := Load(release, state); err == nil {
+		t.Error("Load seeded through a link out of the state")
+	}
+	sameTree(t, before, snapshot(t, outside))
+	j := &Jail{UID: nobody, GID: nobody, State: state}
+	if err := j.Own(); err != nil {
+		t.Fatal(err)
+	}
+	tg := Target{Pkg: "fake", Name: "FuzzFake", Binary: fakeBin(t, release, "fake.test", body), Dir: filepath.Join(state, "targets", "fake")}
+	s := newSource(t, g, Config{Targets: []Target{tg}, CacheDir: filepath.Join(state, "cache"), Jail: j})
+	return s, tg, outside, before
+}
+
+// LOOP-7, F16 (r5 point 1): root never reads, replaces or creates a file
+// through a link out of the state: not in Load's seeding, not in a
+// replay's read of a failing or passing input, not after a fuzz step. The
+// round fails as the runner's error, never as a finding or a resolution.
+func TestALinkOutOfTheStateIsNeverFollowed(t *testing.T) {
+	machine(t)
+	marks := jailDir(t)
+	if err := os.Chmod(marks, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"replay fails":  `case "$1" in -test.run=^FuzzFake\$) echo "    --- FAIL: FuzzFake/x (0.00s)"; exit 1;; esac; exit 0`,
+		"replay passes": `case "$1" in -test.run=^FuzzFake\$) echo "    --- PASS: FuzzFake/x (0.00s)"; exit 0;; esac; exit 0`,
+		"fuzz step": `m=` + marks + `/stepped
+			case "$1" in
+			-test.run=^FuzzFake\$) [ -e $m ] && { echo "    --- FAIL: FuzzFake/x (0.00s)"; exit 1; }; exit 0;;
+			-test.run=^\$) : > $m; echo "Failing input written to testdata/fuzz/FuzzFake/x"; exit 1;;
+			esac; exit 0`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			os.Remove(filepath.Join(marks, "stepped"))
+			g := newFake()
+			s, tg, outside, before := linkedOut(t, g, body)
+			// An open finding a read of the outside x would resolve.
+			x, err := os.ReadFile(filepath.Join(outside, "testdata", "fuzz", "FuzzFake", "x"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := g.Report(context.Background(), loops.Finding{Check: loops.CheckFuzz, Subject: tg.subject(), Severity: loops.High, Detail: crashDetail(x)}); err != nil {
+				t.Fatal(err)
+			}
+			g.reported = nil
+			n, err := s.Fuzz(context.Background(), tg)
+			if err == nil || n != 0 {
+				t.Errorf("n=%d err=%v, want the runner's error", n, err)
+			}
+			if len(g.reported) != 0 || len(g.resolved) != 0 {
+				t.Errorf("a read through the link became a finding or a resolution: reported %+v resolved %v", g.reported, g.resolved)
+			}
+			sameTree(t, before, snapshot(t, outside))
+		})
+	}
+}
+
+// LOOP-7, F16 (r5 point 2): ownPath chowns neither the target of a link
+// at rel nor anything reached through a link above it.
+func TestOwnPathNeverChownsThroughALink(t *testing.T) {
+	machine(t)
+	for name, plant := range map[string]func(state, outside string) error{
+		"link at rel": func(state, outside string) error {
+			if err := os.Mkdir(filepath.Join(state, "cache"), 0o700); err != nil {
+				return err
+			}
+			return os.Symlink(filepath.Join(outside, "keep"), filepath.Join(state, "cache", "run-1"))
+		},
+		"link above rel": func(state, outside string) error {
+			if err := os.Mkdir(filepath.Join(outside, "run-1"), 0o700); err != nil {
+				return err
+			}
+			return os.Symlink(outside, filepath.Join(state, "cache"))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			state, outside := jailDir(t), outsideDir(t)
+			if err := plant(state, outside); err != nil {
+				t.Fatal(err)
+			}
+			before := snapshot(t, outside)
+			r, err := os.OpenRoot(state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer r.Close()
+			(&Jail{UID: nobody, GID: nobody, State: state}).ownPath(r, filepath.Join("cache", "run-1"))
+			sameTree(t, before, snapshot(t, outside))
+		})
+	}
+}
+
+// LOOP-1, F16 (r5 point 2; L3 3 on #588): a package's cache directory
+// swapped for a link after the prune's walk and before its removals
+// takes no removal out of the state.
+func TestThePruneRemovesNothingThroughALinkSwappedAfterItsWalk(t *testing.T) {
+	state, outside := t.TempDir(), outsideDir(t)
+	cache := filepath.Join(state, "cache")
+	for _, d := range []string{cache, outside} {
+		cacheFile(t, d, "fuzz/fake/FuzzFake/old", 400, 3*time.Hour)
+		cacheFile(t, d, "fuzz/fake/FuzzFake/new", 400, time.Hour)
+	}
+	pkg := filepath.Join(cache, "fuzz", "fake")
+	pruneWalked = func() {
+		if err := os.Rename(pkg, pkg+".moved"); err != nil {
+			t.Error(err)
+		}
+		if err := os.Symlink(filepath.Join(outside, "fuzz", "fake"), pkg); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { pruneWalked = nil })
+	release := t.TempDir()
+	tg := fakeTarget(t, release, "exit 0")
+	tg.Dir = filepath.Join(state, "targets", "fake")
+	s := newSource(t, newFake(), Config{Targets: []Target{tg}, CacheDir: cache, CacheCap: 1, CacheTotal: 1,
+		Jail: &Jail{UID: nobody, GID: nobody, State: state}})
+	before := snapshot(t, outside)
+	s.prune("fake") // refusing is fine; removing outside is not
+	sameTree(t, before, snapshot(t, outside))
+}
+
+// LOOP-7 (r5 point 3): a hang seen again on a newer build records that
+// build when the child runs jailed in the leaf, as agentosd runs it.
+func TestAJailedRepeatedHangRecordsTheNewerBuild(t *testing.T) {
+	leaf := testLeaf(t, "loop7-hang", 256<<20)
+	g := newFake()
+	var release string
+	s, tg := jailed(t, g, leaf.Path, func(r string) string {
+		release = r
+		return fakeBin(t, r, "fake.test", stepBin(progress(2, 2), "1"))
+	})
+	if n, err := s.Fuzz(context.Background(), tg); err != nil || n != 1 || len(g.reported) != 1 || g.reported[0].Detail != loops.FuzzStallDetail {
+		t.Fatalf("n=%d err=%v reported %+v", n, err, g.reported)
+	}
+	fakeBin(t, release, "fake.test", stepBin(progress(2, 2), "2"))
+	if n, err := s.Fuzz(context.Background(), tg); err != nil || n != 1 {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+	// The producer is reported to loops, which holds it (P3-4b-3h-r2).
+	if len(g.reported) != 2 || g.reported[1].Producer != fileDigest(t, tg.Binary) {
+		t.Fatalf("reported %+v", g.reported)
+	}
+}
+
+// LOOP-1 (r5 point 3, F16): a jailed child still starts in the leaf after
+// it has been emptied twice in a row. A cgroup.kill in empty would kill
+// every child started there afterwards (the regression F16 records).
+func TestAJailedChildStartsAfterTheLeafIsEmptiedTwice(t *testing.T) {
+	leaf := testLeaf(t, "loop7-twice", 256<<20)
+	s, tg := jailed(t, newFake(), leaf.Path, helperBin(t))
+	for i := 0; i < 2; i++ {
+		if err := s.cfg.Jail.empty(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	said := childSays(t, s, tg)
+	if rel := strings.TrimPrefix(leaf.Path, "/sys/fs/cgroup"); said["cgroup"] != "0::"+rel {
+		t.Fatalf("child in %q, want 0::%s", said["cgroup"], rel)
 	}
 }

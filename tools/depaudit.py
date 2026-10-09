@@ -294,8 +294,10 @@ def static_scan(root, manifest, dirs=SHIPPING_DIRS):
 
 # ---- offline sandbox ----------------------------------------------------------------
 
-def _unshare_flags():
-    """Raises OSError without a subordinate uid and gid range (DEP-3a)."""
+def _unshare_flags(own_network=True):
+    """Raises OSError without a subordinate uid and gid range (DEP-3a). Shared with
+    tools/canary.py, which runs its targets as SCENARIO_ID through these flags,
+    AS_SCENARIO and _hand_back, in the host's network (own_network=False; D13)."""
     # A PID namespace: when its first process exits or is killed, the kernel kills every
     # process in it, including one that left the process group (setsid) or strace let go of.
     pid = ["--pid", "--fork", "--kill-child", "--mount-proc"]
@@ -308,7 +310,7 @@ def _unshare_flags():
     uid_map, gid_map = _id_maps()
     users = ["--map-user=0", "--map-group=0", "--map-users=%d:%d:%d" % uid_map[1],
              "--map-groups=%d:%d:%d" % gid_map[1]]
-    return users + ["-n", "-m"] + pid
+    return users + (["-n"] if own_network else []) + ["-m"] + pid
 
 
 # The scenario runs as this uid and gid inside the sandbox's user namespace, mapped to the

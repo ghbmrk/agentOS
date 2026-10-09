@@ -124,6 +124,11 @@ type Finding struct {
 	// Rule is the regression fixture's input, empty when the finding is
 	// not something a change could reintroduce (expiry, drift).
 	Rule []byte `json:"rule,omitempty"`
+	// Producer is the SHA-256 of the binary that produced a fuzz hang
+	// finding, and is set on nothing else (P3-4b-3h-r2). Report moves it
+	// to the record's Producer, so it is never part of the finding's
+	// digest.
+	Producer string `json:"producer,omitempty"`
 }
 
 // Containment pauses a grant or executor. Pausing only narrows authority
@@ -351,6 +356,11 @@ type Record struct {
 	// Closure is the good fuzz step that closed a hang finding
 	// (CloseTarget), which replayed no stored input.
 	Closure *Closure `json:"closure,omitempty"`
+	// Producer is the SHA-256 of the binary that last produced an open
+	// fuzz hang finding: set by Report, replaced when the finding is
+	// reported again, and the only producer CloseTarget compares against
+	// (P3-4b-3h-r2).
+	Producer string `json:"producer,omitempty"`
 	// Told marks a reported finding's owner text as sent, so a resume
 	// after a crash sends a text not yet sent, and only that (P3-4b-1b
 	// item 3).
@@ -780,7 +790,9 @@ func sortedKeys[V any](m map[string]V) []string {
 // fixture, and mark a fix pending. It decides whether the owner is texted;
 // Pass sends the text, then proposes the fix.
 func (s *Guard) handle(ctx context.Context, f Finding, pause, reported bool) (Record, error) {
-	rec := Record{Finding: f, At: s.cfg.Now(), Contained: "none", Digest: digestOf(f), Reported: reported}
+	producer := f.Producer
+	f.Producer = ""
+	rec := Record{Finding: f, At: s.cfg.Now(), Contained: "none", Digest: digestOf(f), Reported: reported, Producer: producer}
 	if reported && f.Rule != nil {
 		// Minimized now and saved with the first save, so a resume adds
 		// the same test even if the tree has moved on since.
@@ -1146,6 +1158,9 @@ func (s *Guard) evidenceLocked(rec Record) int {
 		if e := &s.st.Evidence[i]; e.Digest == rec.Digest {
 			e.Seen++
 			e.Last = rec.At
+			if rec.Producer != "" {
+				e.Producer = rec.Producer
+			}
 			return i
 		}
 	}
@@ -1476,10 +1491,15 @@ func capFirst(s string) string {
 // aboveBudget says what an exhaustion round's "above budget" finding lets
 // an agent machine do, by resource.
 var aboveBudget = map[string]string{
-	"memory":    "use more memory than its budget",
+	"memory": "use more memory than its budget",
+	// No round reports "processes" now (S35), but an open record
+	// still reads this way.
 	"processes": "start more processes than its budget",
-	"disk":      "use more disk space than its budget",
-	"cpu":       "take as large a share of processor time as I get",
+	// pids.max bounds the sandbox's host threads, not guest processes
+	// (RES-2, loops S35).
+	sandboxThreads: "run more sandbox threads than its budget",
+	"disk":         "use more disk space than its budget",
+	"cpu":          "take as large a share of processor time as I get",
 }
 
 // findingText is one finding in plain words, with the next step.
@@ -1523,6 +1543,9 @@ func findingText(f Finding) string {
 	case CheckFuzz:
 		if hangDetail(f.Detail) {
 			return "My self-test of " + plainSubject(f) + " stopped responding to a test input. The fix comes with an update."
+		}
+		if f.Detail == FuzzOversizeDetail {
+			return "My self-test of " + plainSubject(f) + " has a stored test input too large to replay, so it is not tested."
 		}
 		return "My self-test found a crash in " + plainSubject(f) + ". The fix comes with an update."
 	case CheckProbe:
@@ -1631,11 +1654,19 @@ func clearedWhat(f Finding) string {
 	switch {
 	case f.Check == CheckFuzz && hangDetail(f.Detail):
 		return plainSubject(f) + " responds to test inputs again"
+	case f.Check == CheckFuzz && f.Detail == FuzzOversizeDetail:
+		return plainSubject(f) + " is tested again"
 	case f.Check == CheckFuzz:
 		return "the crash in " + plainSubject(f)
 	}
 	return plainSubject(f)
 }
+
+// FuzzOversizeDetail is the target finding for a stored input loop7
+// refuses to read, being past its cap (P3-4b-3r-confine-r5). The target
+// is not fuzzed while it stands; a whole replay that reads every input it
+// names resolves it.
+const FuzzOversizeDetail = "a stored test input is too large to replay"
 
 // digestCap is how many open-finding lines the digest shows.
 const digestCap = 3

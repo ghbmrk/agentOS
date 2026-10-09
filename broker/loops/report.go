@@ -83,12 +83,26 @@ func (s *Guard) Report(ctx context.Context, f Finding) (Record, error) {
 	now := s.cfg.Now()
 	s.mu.Lock()
 	if rec, open := s.st.Open[f.ID]; open {
+		var err error
+		if rec.Reported && f.Producer != "" && rec.Producer != f.Producer {
+			// A hang seen again names the newer binary, so a lucky good
+			// step of a build that hung closes nothing (F13).
+			rec.Producer = f.Producer
+			s.st.Open[f.ID] = rec
+			for i := range s.st.Evidence {
+				if e := &s.st.Evidence[i]; e.Digest == rec.Digest {
+					e.Producer = rec.Producer
+				}
+			}
+			err = s.saveLocked()
+		}
 		s.mu.Unlock()
 		if !rec.Reported || !unfinished(rec) {
-			return rec, nil
+			return rec, err
 		}
 		// Left part done by a crash or a store error (P3-4b-1b item 3).
-		return s.resumeLocked(ctx, f.ID)
+		rec, rerr := s.resumeLocked(ctx, f.ID)
+		return rec, errors.Join(err, rerr)
 	}
 	s.rollDayLocked(now)
 	pause := f.Contain != nil && s.st.Pauses < s.cfg.MaxPausesPerDay
@@ -124,6 +138,13 @@ func (s *Guard) reportable(f Finding) (change.TreeRule, error) {
 	}
 	if f.Contain != nil && f.Contain.Kind != "grant" && f.Contain.Kind != "executor" {
 		return change.TreeRule{}, fmt.Errorf("%w: containment kind %q", ErrFinding, f.Contain.Kind)
+	}
+	hang := f.Check == CheckFuzz && hangDetail(f.Detail)
+	switch {
+	case hang && !sha256Hex(f.Producer):
+		return change.TreeRule{}, fmt.Errorf("%w: a hang finding needs the SHA-256 of the binary that produced it", ErrFinding)
+	case !hang && f.Producer != "":
+		return change.TreeRule{}, fmt.Errorf("%w: only a fuzz hang finding names a producing binary", ErrFinding)
 	}
 	if ruleLess(f.Check) {
 		switch {
@@ -307,9 +328,10 @@ const ClosureStep = "step"
 
 // Closure is a source's record of a fuzz step that closes a hang finding
 // (P3-4b-3r-fuzz): the step stopped within its bound and moved its exec
-// count past the baseline, run from Binary (its SHA-256), which differs
-// from Produced, the binary that last produced the finding. Replayed is
-// always false: no stored input was replayed.
+// count past the baseline, run from Binary (its SHA-256). Produced is
+// the binary that last produced the finding: CloseTarget sets it from
+// the finding's own record and ignores a caller's value (P3-4b-3h-r2).
+// Replayed is always false: no stored input was replayed.
 type Closure struct {
 	Kind     string    `json:"kind"`
 	Binary   string    `json:"binary"`
@@ -332,11 +354,13 @@ func sha256Hex(s string) bool {
 // CloseTarget closes open reported hang finding id (a fuzz finding whose
 // Detail is a hang detail, never an input digest) as cleared, only on a
 // good step of a different binary: c is a step, from a binary other than
-// the one that produced the finding, whose exec count moved past its
-// baseline. The closure is saved on the finding's evidence, marked as not
-// a replay, and the owner hears it cleared through Resolve's path (S39).
-// Like Resolve, it trusts its in-process caller to build c honestly
-// (S32).
+// the producer on the finding's record, whose exec count moved past its
+// baseline. A record with no producer is never closed: it waits for the
+// hang to be reported again. The closure is saved on the finding's
+// evidence with the record's producer, marked as not a replay, and the
+// owner hears it cleared through Resolve's path (S39). Like Resolve, it
+// trusts its in-process caller for the step's binary and counts (S32);
+// the producer it takes from no one.
 func (s *Guard) CloseTarget(id string, c Closure) error {
 	s.reportMu.Lock()
 	defer s.reportMu.Unlock()
@@ -346,10 +370,15 @@ func (s *Guard) CloseTarget(id string, c Closure) error {
 		s.mu.Unlock()
 		return fmt.Errorf("%w: %q is not an open fuzz hang finding", ErrFinding, id)
 	}
-	if c.Kind != ClosureStep || c.Replayed || !sha256Hex(c.Binary) || !sha256Hex(c.Produced) || c.Binary == c.Produced || c.Execs <= c.Baseline {
+	if !sha256Hex(rec.Producer) {
+		s.mu.Unlock()
+		return fmt.Errorf("%w: %q has no producing binary on record", ErrFinding, id)
+	}
+	if c.Kind != ClosureStep || c.Replayed || !sha256Hex(c.Binary) || c.Binary == rec.Producer || c.Execs <= c.Baseline {
 		s.mu.Unlock()
 		return fmt.Errorf("%w: no good step of a new binary for %q", ErrFinding, id)
 	}
+	c.Produced = rec.Producer
 	for i := range s.st.Evidence {
 		if e := &s.st.Evidence[i]; e.Digest == rec.Digest {
 			e.Closure = &c
