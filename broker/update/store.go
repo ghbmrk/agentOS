@@ -247,6 +247,11 @@ type Verified struct {
 	// rootSHA256 is the trusted root's digest: after a switch to a fork
 	// whose versions match, the version alone would not tell them apart.
 	rootSHA256 string
+	// policy is the store's attestor policy digest at the check: the
+	// allow-list, the interim keys and the sticky outside record. Its
+	// attestation authority holds only while the store's is the same
+	// (SR3-6).
+	policy string
 }
 
 // ErrNotChecked: a Verified that Store.Check did not make.
@@ -300,7 +305,20 @@ func (v *Verified) Images() map[string]string {
 // Security is true only for a security fix whose independent attestation
 // WithAttestations has checked (UPD-8, D6). It is never the manifest flag
 // alone.
-func (v *Verified) Security() bool { return v.ok() && v.security }
+// It is also false once the box's attestor policy changed since the check
+// (SR3-6): a narrower allow-list, or the interim rule's end, retires it.
+func (v *Verified) Security() bool { return v.ok() && v.security && v.policyCurrent() == nil }
+
+// policyCurrent reports ErrPolicyMoved unless the checking store's
+// attestor policy is still the one v was checked under. A store that
+// cannot be read fails closed.
+func (v *Verified) policyCurrent() error {
+	cur, err := (&Store{Dir: v.storeDir}).policy()
+	if err != nil || cur != v.policy {
+		return ErrPolicyMoved
+	}
+	return nil
+}
 
 // WithAttestations returns a copy whose Security reflects
 // SecurityAutoStage(atts, own). An unsealed v gives nil.
@@ -738,16 +756,66 @@ func (s *Store) noteAttestors(allow, interim []ed25519.PublicKey, v *Verified) (
 		if err := writeAtomic(s.p(outsideFile), []byte("1\n"), 0o600); err != nil {
 			return false, err
 		}
-		return false, nil
 	}
-	_, err = os.Stat(s.p(outsideFile))
-	if err == nil {
-		return false, nil
-	}
-	if !errors.Is(err, os.ErrNotExist) {
+	if err := s.writeAllowList(v.allowed, v.pinned); err != nil {
 		return false, err
 	}
-	return len(v.allowed) > 0, nil
+	listed, err := s.outsideListed()
+	if err != nil {
+		return false, err
+	}
+	if v.policy, err = s.policy(); err != nil {
+		return false, err
+	}
+	return !listed && len(v.allowed) > 0, nil
+}
+
+// allowListFile holds the digest of the allow-list and interim keys last
+// noted, so a release checked under another list is told apart (SR3-6).
+const allowListFile = "attestor_policy"
+
+func (s *Store) writeAllowList(allowed, pinned map[string]bool) error {
+	h := sha256.New()
+	for _, set := range []map[string]bool{allowed, pinned} {
+		list := make([]string, 0, len(set))
+		for k := range set {
+			list = append(list, k)
+		}
+		sort.Strings(list)
+		fmt.Fprintf(h, "%d:%s\n", len(list), strings.Join(list, ","))
+	}
+	d := hex.EncodeToString(h.Sum(nil)) + "\n"
+	if b, err := os.ReadFile(s.p(allowListFile)); err == nil && string(b) == d {
+		return nil
+	}
+	return writeAtomic(s.p(allowListFile), []byte(d), 0o600)
+}
+
+func (s *Store) outsideListed() (bool, error) {
+	_, err := os.Stat(s.p(outsideFile))
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return false, err
+}
+
+// policy is the store's attestor policy digest: the noted allow-list and
+// whether an outside attestor was ever listed (or a fork followed). The
+// sticky record is part of it, so no later list brings back a policy the
+// interim rule held under.
+func (s *Store) policy() (string, error) {
+	b, err := os.ReadFile(s.p(allowListFile))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	listed, err := s.outsideListed()
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s|outside=%t", strings.TrimSpace(string(b)), listed), nil
 }
 
 func keySet(keys []ed25519.PublicKey) (map[string]bool, error) {
@@ -924,6 +992,13 @@ func (s *Store) Stage(v *Verified) error {
 	if err := s.trustUnchanged(v); err != nil {
 		return err
 	}
+	// The commit point for attestation authority: under the lock that
+	// NoteAttestors takes, so a narrowing it returned from is seen here.
+	if v.security {
+		if err := v.policyCurrent(); err != nil {
+			return err
+		}
+	}
 	in, err := s.Installed()
 	if err != nil {
 		return err
@@ -1057,6 +1132,12 @@ var ErrForeignStore = errors.New("update: release was checked by another store")
 // ErrTrustMoved: the store's trusted root or targets changed since the
 // release was checked; check again before staging it.
 var ErrTrustMoved = errors.New("update: trusted metadata changed since the release was checked")
+
+// ErrPolicyMoved: the box's attestor policy (allow-list, interim keys or
+// the sticky outside-attestor record) changed since the release was
+// checked, so the attestation authority it carried no longer holds; check
+// again (SR3-6).
+var ErrPolicyMoved = errors.New("update: attestor policy changed since the release was checked")
 
 // trustUnchanged refuses v when the store's root or targets version moved
 // since its check: a key rotation or revocation, or newer targets, may no

@@ -388,6 +388,15 @@ func (a *Applier) Tick(ctx context.Context) (ok bool, err error) {
 		a.mu.Unlock()
 		return false, nil
 	}
+	if p.Security && !a.rel.Security() {
+		// The attestor policy narrowed since it was scheduled (SR3-6):
+		// drop the automatic authorization; Loop 3's next check schedules
+		// the release again under the current policy.
+		a.st.Pending, a.rel = nil, nil
+		err := a.saveLocked()
+		a.mu.Unlock()
+		return false, err
+	}
 	until := a.talkUntil(p)
 	a.mu.Unlock()
 	if a.busy(now, until) != "" {
@@ -559,6 +568,9 @@ func (a *Applier) Execute(ctx context.Context, in journal.Intent, _ int) journal
 	defer a.mu.Unlock()
 	a.executing = false
 	if err != nil {
+		if errors.Is(err, update.ErrPolicyMoved) && a.st.Pending == p {
+			a.st.Pending, a.rel = nil, nil // as in Tick (SR3-6)
+		}
 		a.abandonLocked(ctx)
 		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: err.Error()}
 	}

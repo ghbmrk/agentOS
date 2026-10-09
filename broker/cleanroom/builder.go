@@ -75,6 +75,8 @@ type Config struct {
 	MaxQueue int           // jobs waiting; 0 means 64
 	Logf     func(format string, args ...any)
 	Now      func() time.Time
+
+	fault faultFn // tests only: the store's file-operation hook
 }
 
 // Builder runs clean rooms. It implements hint.Outbox.
@@ -141,11 +143,76 @@ func New(cfg Config) (*Builder, error) {
 			os.RemoveAll(d)
 		}
 	}
-	st, err := openStore(filepath.Join(cfg.Dir, "artifacts"))
+	st, damaged, err := openStore(filepath.Join(cfg.Dir, "artifacts"))
 	if err != nil {
 		return nil, err
 	}
-	return &Builder{cfg: cfg, store: st, wake: make(chan struct{}, 1), sessions: map[string]*session{}}, nil
+	st.fault = cfg.fault
+	b := &Builder{cfg: cfg, store: st, wake: make(chan struct{}, 1), sessions: map[string]*session{}}
+	// The job is queued again before its artifact is quarantined, so a
+	// crash between the two leaves the job queued (SR3-8).
+	for _, m := range damaged {
+		if err := b.rebuild(m); err != nil {
+			return nil, err
+		}
+		if err := st.quarantine(m.ID); err != nil {
+			return nil, err
+		}
+		cfg.Logf("cleanroom: %s lost output; quarantined and its job queued again", m.ID)
+	}
+	return b, nil
+}
+
+// maxRepairs bounds how often one artifact is built again after its output
+// was lost, counted by its quarantined copies so the bound holds across
+// restarts: storage that keeps losing it cannot run clean rooms without end.
+const maxRepairs = 2
+
+// rebuild queues again the job of a damaged artifact found at open, before
+// it is quarantined: its queue entry if a crash left it, else a new entry
+// with the same job ID, so it rebuilds the same artifact ID and its hint
+// coalesces into the job. A manifest that names no valid job (or could not
+// be read) has nothing to queue.
+func (b *Builder) rebuild(m Manifest) error {
+	if !segment.MatchString(m.Job) || m.ID != "a-"+m.Job {
+		return nil
+	}
+	jobs, err := b.queued()
+	if err != nil {
+		return err
+	}
+	for _, j := range jobs {
+		if j.ID == m.Job {
+			return b.renew(j)
+		}
+	}
+	dir := filepath.Join(b.queueDir(), "repair-"+m.Job)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	j := &job{ID: m.Job, Hint: string(m.Hint), Day: m.Day, path: filepath.Join(dir, "0000-"+m.Job+".json")}
+	if err := b.renew(j); err != nil {
+		return err
+	}
+	return syncDir(b.queueDir())
+}
+
+// renew stores the queue entry of a job whose output was lost, before the
+// artifact is quarantined: with fresh attempts while it has been lost fewer
+// than maxRepairs times, else with its attempts spent, so it is logged
+// failed rather than built again.
+func (b *Builder) renew(j *job) error {
+	n, err := b.store.losses(artifactID(j))
+	if err != nil {
+		return err
+	}
+	if n < maxRepairs {
+		j.Attempts = 0
+	} else {
+		j.Attempts = b.cfg.Attempts
+		b.cfg.Logf("cleanroom: %s lost its output %d times; not built again", artifactID(j), n+1)
+	}
+	return writeJSON(j.path, j)
 }
 
 // Store is where artifacts are kept.
@@ -258,7 +325,8 @@ func (b *Builder) runJob(ctx context.Context, j *job) error {
 		return b.finish(j, "", Outcome{Result: "failed", Reason: "hint no longer matches the schema"})
 	}
 	if _, err := b.store.Get(artifactID(j)); err == nil {
-		// Stored before a crash took the queue entry with it.
+		// Stored before a crash took the queue entry with it. finish
+		// checks its output first; damaged output is built again.
 		return b.finish(j, h.Kind, Outcome{Result: "built", Artifact: artifactID(j)})
 	}
 	if j.Attempts >= b.cfg.Attempts {
@@ -375,8 +443,24 @@ func (b *Builder) destroy(id string) {
 	}
 }
 
-// finish logs a job's outcome and takes it off the queue.
+// finish logs a job's outcome and takes it off the queue. A built job's
+// artifact must first be durable and match its manifest: until then the
+// job stays queued, and Run retries it (SR3-8).
 func (b *Builder) finish(j *job, kind string, o Outcome) error {
+	if o.Result == "built" {
+		if err := b.store.settle(o.Artifact); err != nil {
+			if errors.Is(err, errDamaged) {
+				// Queued again first, so a crash cannot lose the job.
+				if rerr := b.renew(j); rerr != nil {
+					return rerr
+				}
+				if qerr := b.store.quarantine(o.Artifact); qerr != nil {
+					return qerr
+				}
+			}
+			return err
+		}
+	}
 	o.Job, o.Day, o.Kind = j.ID, j.Day, kind
 	if err := b.logOutcome(o); err != nil {
 		return err

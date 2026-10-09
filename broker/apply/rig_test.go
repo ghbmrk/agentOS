@@ -137,11 +137,20 @@ func (c *clock) add(d time.Duration) { c.mu.Lock(); defer c.mu.Unlock(); c.t = c
 
 // policy is the journal policy: the applier's Check for its intents, as
 // the grants gate will delegate meta.release to it.
-type policy struct{ a *Applier }
+// atDispatch, if set, runs once after the dispatch check passed.
+type policy struct {
+	a          *Applier
+	atDispatch func()
+}
 
 func (p *policy) Check(ctx context.Context, ph journal.Phase, in journal.Intent) error {
 	if in.Executor == Executor {
-		return p.a.Check(ctx, ph, in)
+		err := p.a.Check(ctx, ph, in)
+		if f := p.atDispatch; err == nil && ph == journal.PhaseDispatch && f != nil {
+			p.atDispatch = nil
+			f()
+		}
+		return err
 	}
 	return nil
 }
