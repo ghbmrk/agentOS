@@ -599,3 +599,122 @@ func TestRestartDropsPendingEvenAfterAFailedAbandon(t *testing.T) {
 		t.Fatalf("pending %+v, installed %v", r.saved().Pending, r.act.installed)
 	}
 }
+
+// SR3-4f-1a: an update store that cannot be read on the old root is not
+// a fallback. Resume returns the error with the apply still in flight,
+// and settles once the read recovers (Security 4a 1, L3 1 on #597).
+func oldRootReadFails(t *testing.T, breakStore func(path string)) {
+	t.Helper()
+	r, rel := handedOver(t, false)
+	ctx := context.Background()
+	r.restart()
+	r.pipe.confirmErr = errIO // the cut is between CommitRelease and ConfirmStaged
+	if err := r.a.Resume(ctx); !errors.Is(err, errIO) {
+		t.Fatalf("resume: %v", err)
+	}
+	path := filepath.Join(r.store.Dir, "installed.json")
+	good, err := os.ReadFile(path)
+	r.must(err)
+	breakStore(path)
+	r.bootOldRoot()
+	for i := 0; i < 2; i++ {
+		if err := r.a.Resume(ctx); err == nil {
+			t.Fatal("settled without reading the update store")
+		}
+	}
+	if r.a.FellBack(1) || len(r.pipe.failed) != 0 || r.saved().Applying == nil {
+		t.Fatalf("judged a fallback: %q, applying %v", r.pipe.calls, r.saved().Applying)
+	}
+	r.must(os.RemoveAll(path))
+	r.must(os.WriteFile(path, good, 0o600))
+	r.settledOnOldRoot(rel)
+}
+
+func TestUnreadableInstalledOnOldRootIsRetried(t *testing.T) {
+	oldRootReadFails(t, func(path string) {
+		if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestInstalledAsDirectoryOnOldRootIsRetried(t *testing.T) {
+	oldRootReadFails(t, func(path string) {
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+// SR3-4f-1a: on the old root, the update store naming another build of
+// the same version is not the handed-over release: the apply fell back,
+// and nothing is confirmed (Security 4a 2, L3 2 on #597).
+func TestAnotherBuildInstalledOnOldRootFellBack(t *testing.T) {
+	for name, other := range map[string]struct{ root, manifest bool }{
+		"another root":     {root: true},
+		"another manifest": {manifest: true},
+		"version only":     {root: true, manifest: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, rel := handedOver(t, false)
+			root, manifest := strings.Repeat("0f", 32), rel.Ref().ManifestSHA256
+			if other.root {
+				root = strings.Repeat("1e", 32)
+			}
+			if other.manifest {
+				manifest = strings.Repeat("ee", 32)
+			}
+			r.must(os.WriteFile(filepath.Join(r.store.Dir, "installed.json"),
+				[]byte(`{"version":1,"manifest_sha256":"`+manifest+`","usr_root_hash":"`+root+`"}`), 0o600))
+			r.bootOldRoot()
+			r.must(r.a.Resume(context.Background()))
+			st := r.saved()
+			if st.Applying != nil || st.Last == nil || st.Last.Kind != "fell_back" || !r.a.FellBack(1) {
+				t.Fatalf("settled as %+v", st.Last)
+			}
+			for _, c := range r.pipe.calls {
+				if strings.HasPrefix(c, "confirm ") {
+					t.Fatalf("confirmed: %q", r.pipe.calls)
+				}
+			}
+		})
+	}
+}
+
+// SR3-4f-1b: within one boot, with Abandon working, a release whose
+// handover cannot be recorded is installed twice, then refused with its
+// line; Retry is refused while an install is in flight (Security 4a 3
+// and 5, L3 3 on #597).
+func TestUnrecordedBoundHoldsWithinOneBoot(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	r.must(r.a.Schedule(r.release(1, true), "a1"))
+	var retryErr error
+	r.act.onInstall = func() {
+		r.state.Fail = errIO
+		if len(r.act.installed) == 1 {
+			retryErr = r.a.Retry(r.release(1, true).Ref())
+		}
+	}
+	for i := 0; i < 5; i++ {
+		if ok, err := r.a.Tick(ctx); ok || err != nil {
+			t.Fatalf("tick %d: %v %v", i, ok, err)
+		}
+		r.state.Fail = nil
+	}
+	if !errors.Is(retryErr, ErrApplying) {
+		t.Fatalf("retry while installing: %v", retryErr)
+	}
+	if len(r.act.installed) != 2 || r.act.restarts != 0 {
+		t.Fatalf("installs %d, restarts %d", len(r.act.installed), r.act.restarts)
+	}
+	if st := r.saved(); st.Last == nil || st.Last.Kind != "unrecorded" || st.Applying != nil {
+		t.Fatalf("settled as %+v", st.Last)
+	}
+	if got := r.a.Status(); got != unrecordedLine {
+		t.Fatalf("status: %q", got)
+	}
+}

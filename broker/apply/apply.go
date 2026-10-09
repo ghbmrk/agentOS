@@ -784,18 +784,23 @@ func (a *Applier) Resume(ctx context.Context) error {
 			}
 		}
 		next.Last = &last{Version: pt.To, Kind: doneInstalled}
-	case a.committedLocked(pt):
-		ref, _ := a.refLocked(pt)
-		if err := a.cfg.Store.CommitRelease(ref); err != nil {
-			return err // removes a staged record left behind
-		}
-		if pt.Adoption != "" {
-			if err := a.cfg.Pipeline.ConfirmStaged(pt.Adoption); err != nil {
-				return err
-			}
-		}
-		next.Last = &last{Version: pt.To, Kind: doneInstalledOtherRoot, Boot: b.ID}
 	default:
+		ref, committed, err := a.committedLocked(pt)
+		if err != nil {
+			return err // never taken for a fallback (SR3-4f-1a)
+		}
+		if committed {
+			if err := a.cfg.Store.CommitRelease(ref); err != nil {
+				return err // removes a staged record left behind
+			}
+			if pt.Adoption != "" {
+				if err := a.cfg.Pipeline.ConfirmStaged(pt.Adoption); err != nil {
+					return err
+				}
+			}
+			next.Last = &last{Version: pt.To, Kind: doneInstalledOtherRoot, Boot: b.ID}
+			break
+		}
 		if err := a.cfg.Store.DropStaged(); err != nil {
 			return err
 		}
@@ -819,18 +824,24 @@ func (a *Applier) Resume(ctx context.Context) error {
 }
 
 // committedLocked: the handover was recorded and the update store holds
-// its exact release as installed (SR3-4f-1a).
-func (a *Applier) committedLocked(pt *point) bool {
+// its exact release as installed (SR3-4f-1a). A read error is returned,
+// never taken for "not installed", so Resume retries it. Only a legacy
+// point whose digest is gone with its staged record cannot be matched,
+// and is judged as a fallback.
+func (a *Applier) committedLocked(pt *point) (update.Ref, bool, error) {
 	if !pt.Installed {
-		return false
+		return update.Ref{}, false, nil
 	}
 	ref, err := a.refLocked(pt)
 	if err != nil || ref.ManifestSHA256 == "" {
-		return false
+		return ref, false, err
 	}
 	in, err := a.cfg.Store.Installed()
-	return err == nil && in.Version == ref.Version && in.UsrRootHash == ref.UsrRootHash &&
-		in.ManifestSHA256 == ref.ManifestSHA256
+	if err != nil {
+		return ref, false, err
+	}
+	return ref, in.Version == ref.Version && in.UsrRootHash == ref.UsrRootHash &&
+		in.ManifestSHA256 == ref.ManifestSHA256, nil
 }
 
 // Retry admits again a release refused after maxUnrecorded unrecorded

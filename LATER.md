@@ -231,6 +231,9 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | SR3-4 l4 | Delta L3 on #434, A: update the Revisit column of `broker/apply/ASSUMPTIONS.md` A9, and fix `abandonLocked`'s doc comment ("stays pending" is false on the `ErrPolicyMoved` path: Pending is cleared in memory, and only Tick's Resume or New's reset on load persists it) |
 | SR3-4 l5 | Delta L3 on #434, B: pin the Pending reset in `New()` (`apply.go` near line 241) with a restart test; a mutation that removes it survives |
 | SR3-4 l6 | UX on #434: name the ID the owner sent (`UNDO <short ID>`), or both, in the refusal text instead of only the release version. The signed UX and Potency records for #434 keep IDs A9, C25 and U16 (head 215deae); they were renumbered A10, C27 and U17 on merge |
+| SR3-4f-1 l1 | L3 on #597, point 5 (6080061267): `CommitRelease` on `Resume`'s other-root branch is unpinned; no test cut leaves a staged record behind for it to remove |
+| SR3-4f-1 l2 | L3 on #597, point 5 (6080061267): the `Unrecorded` count is not cleared after a blessed boot of the new root; clear the key on every settle that records an outcome |
+| SR3-4f-1 l3 | L3 on #597, point 5 (6080061267): a legacy rollback point with empty `ToManifest` is keyed differently in `Resume`'s `unrecordedLast`, so at the bound it shows the not-handed line while `Schedule` refuses it |
 | SR3-6 l1 | Potency on #430, W5b wiring: a pending security fix dropped by a policy change and scheduled again by Loop 3 should keep its first-scheduled time for A7's 24-hour "no free moment" ask, so a policy change does not reset the clock |
 | SR3-7 l1 | L3 on #429: nested keys still last-win; an `n` check in `anthropic.go` is unreachable |
 | SR3-8 l5 | UX on #432: repeated "lost its output N times; not built again" points at failing storage; if a box-health line ever reads disk faults, this log is one input |
